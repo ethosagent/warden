@@ -39,6 +39,16 @@ type Policy struct {
 	LogFormat string `json:"-"`
 }
 
+// DeepCopy returns a deep copy of the policy, with all slices independently
+// allocated so mutations to the copy cannot affect the original.
+func (p Policy) DeepCopy() Policy {
+	cp := p
+	cp.Allowlist = append([]AllowlistEntry(nil), p.Allowlist...)
+	cp.Denylist = append([]DenylistEntry(nil), p.Denylist...)
+	cp.Secrets = append([]SecretMapping(nil), p.Secrets...)
+	return cp
+}
+
 // AllowlistEntry is a single permitted destination. Port is optional; when
 // zero the policy engine infers 443 (HTTPS) or 80 (HTTP). RateLimit and
 // TimeWindow are reserved for milestone 2: they parse from config but are

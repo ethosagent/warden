@@ -10,6 +10,7 @@ package analytics
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go SQLite driver (no CGo)
@@ -190,4 +191,55 @@ func (s *SQLiteStore) count() (int, error) {
 		return 0, err
 	}
 	return n, nil
+}
+
+// GetOldestEventIDs returns the IDs and events of the oldest N events.
+func (s *SQLiteStore) GetOldestEventIDs(limit int) ([]int64, []Event, error) {
+	const q = `SELECT id, ts, domain, port, protocol, method, url, decision, response_status, secret_ref
+	            FROM events ORDER BY id ASC LIMIT ?`
+	rows, err := s.db.Query(q, limit)
+	if err != nil {
+		return nil, nil, fmt.Errorf("analytics: oldest event IDs: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var ids []int64
+	var out []Event
+	for rows.Next() {
+		var (
+			id int64
+			e  Event
+			ts int64
+		)
+		if err := rows.Scan(&id, &ts, &e.Domain, &e.Port, &e.Protocol, &e.Method,
+			&e.URL, &e.Decision, &e.ResponseStatus, &e.SecretRef); err != nil {
+			return nil, nil, fmt.Errorf("analytics: scan oldest IDs: %w", err)
+		}
+		e.Timestamp = time.Unix(0, ts).UTC()
+		ids = append(ids, id)
+		out = append(out, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("analytics: rows oldest IDs: %w", err)
+	}
+	return ids, out, nil
+}
+
+// DeleteEventsByID removes events with the given IDs.
+func (s *SQLiteStore) DeleteEventsByID(ids []int64) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	// Build placeholders: (?, ?, ?)
+	placeholders := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	query := "DELETE FROM events WHERE id IN (" + strings.Join(placeholders, ", ") + ")"
+	if _, err := s.db.Exec(query, args...); err != nil {
+		return fmt.Errorf("analytics: delete events by ID: %w", err)
+	}
+	return nil
 }
