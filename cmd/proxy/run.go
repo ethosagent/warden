@@ -2,6 +2,9 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -13,9 +16,8 @@ import (
 	"github.com/ethosagent/warden/internal/secrets"
 )
 
-// newRunCmd builds the `run` subcommand. Its RunE loads config and wires the
-// concrete phase-1 implementations behind their interfaces — wiring only, no
-// business logic. Serving lands in M1.
+// newRunCmd builds the `run` subcommand. Its RunE loads config, wires the
+// concrete implementations behind their interfaces, and starts the proxy.
 func newRunCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "run",
@@ -43,8 +45,8 @@ func newRunCmd() *cobra.Command {
 	return cmd
 }
 
-// runProxy loads config, wires dependencies behind their interfaces, and
-// constructs the proxy. Serving is added in M1.
+// runProxy loads config, wires dependencies behind their interfaces,
+// constructs the proxy, and starts serving.
 func runProxy(cmd *cobra.Command, configPath, listenAddr, dbPath string) error {
 	cfgProvider, err := config.NewLocalYAMLProvider(configPath)
 	if err != nil {
@@ -84,6 +86,10 @@ func runProxy(cmd *cobra.Command, configPath, listenAddr, dbPath string) error {
 		return err
 	}
 
-	fmt.Fprintf(cmd.OutOrStdout(), "warden configured; listen=%s (serving lands in M1)\n", p.ListenAddr())
-	return nil
+	fmt.Fprintf(cmd.OutOrStdout(), "warden listening on %s\n", listenAddr)
+
+	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	return p.Serve(ctx)
 }

@@ -1,0 +1,21 @@
+# Override for testing with OpenRouter.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.openrouter.yml up --build
+
+services:
+  proxy:
+    environment:
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+    volumes:
+      - ../../configs/config.openrouter.yaml:/etc/warden/config.yaml:ro
+    command: ["run", "--config", "/etc/warden/config.yaml", "--listen", "0.0.0.0:8080"]
+
+  agent:
+    image: alpine:3.20
+    depends_on:
+      - proxy
+    networks:
+      - agent-internal
+    environment:
+      - HTTPS_PROXY=http://proxy:8080
+      - HTTP_PROXY=http://proxy:8080
+    command: ["sh", "-c", "apk add --no-cache curl && echo 'Agent ready. Exec into this container to test.' && sleep infinity"]

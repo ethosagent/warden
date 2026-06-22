@@ -27,7 +27,7 @@ services:
     volumes:
       - ../../configs/config.example.yaml:/etc/warden/config.yaml:ro
       - ./certs:/etc/warden/certs:ro   # bake-once CA (see scripts/gen-certs.sh)
-    command: ["-config", "/etc/warden/config.yaml", "-listen", "0.0.0.0:8080"]
+    command: ["run", "--config", "/etc/warden/config.yaml", "--listen", "0.0.0.0:8080"]
 
   agent:
     image: alpine:3.20               # stand-in for the real agent runtime

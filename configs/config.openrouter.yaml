@@ -1,0 +1,14 @@
+policy:
+  allowlist:
+    - domain: openrouter.ai
+
+secrets:
+  - placeholder: openrouter_secret_001
+    envVar: OPENROUTER_API_KEY
+
+cache:
+  ttl: 3600
+
+logging:
+  level: info
+  format: json
