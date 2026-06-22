@@ -39,7 +39,9 @@ fi
 
 openssl req -x509 -newkey rsa:4096 -nodes \
 	-keyout "$KEY" -out "$CERT" \
-	-days "$DAYS" -subj "$SUBJECT"
+	-days "$DAYS" -subj "$SUBJECT" \
+	-addext "basicConstraints=critical,CA:TRUE" \
+	-addext "keyUsage=critical,keyCertSign,cRLSign"
 
 chmod 600 "$KEY"
 
