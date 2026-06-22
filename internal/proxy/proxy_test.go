@@ -1,7 +1,17 @@
 package proxy
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/config"
@@ -66,5 +76,111 @@ func TestSplitHostPort(t *testing.T) {
 	}
 	if _, _, err := SplitHostPort("host:notaport"); err == nil {
 		t.Error("expected error for non-numeric port")
+	}
+}
+
+func TestNew_NonCACert(t *testing.T) {
+	// Generate an RSA key and create a non-CA certificate.
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "Not A CA"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+		IsCA:                  false,
+	}
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
+
+	dir := t.TempDir()
+	certFile := filepath.Join(dir, "ca.crt")
+	keyFile := filepath.Join(dir, "ca.key")
+	if err := os.WriteFile(certFile, certPEM, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyFile, keyPEM, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := goodConfig(t)
+	cfg.CACertPath = certFile
+	cfg.CAKeyPath = keyFile
+
+	_, err = New(cfg)
+	if err == nil {
+		t.Fatal("expected error for non-CA cert")
+	}
+	if !strings.Contains(err.Error(), "not a certificate authority") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestNew_KeyMismatch(t *testing.T) {
+	// Generate two separate RSA key pairs.
+	key1, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key2, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a CA cert signed with key1.
+	template := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "Test CA"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &key1.PublicKey, key1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+
+	// Write key2's PEM (the WRONG key) to the key file.
+	key2DER, err := x509.MarshalPKCS8PrivateKey(key2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: key2DER})
+
+	dir := t.TempDir()
+	certFile := filepath.Join(dir, "ca.crt")
+	keyFile := filepath.Join(dir, "ca.key")
+	if err := os.WriteFile(certFile, certPEM, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyFile, keyPEM, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := goodConfig(t)
+	cfg.CACertPath = certFile
+	cfg.CAKeyPath = keyFile
+
+	_, err = New(cfg)
+	if err == nil {
+		t.Fatal("expected error for mismatched key")
+	}
+	if !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
