@@ -1,0 +1,63 @@
+# Warden — Kubernetes sidecar deployment.
+#
+# The proxy runs as a sidecar container in the agent's pod. Combined with the
+# default-deny egress NetworkPolicy (networkpolicy.yaml), the agent container
+# can only reach the proxy over loopback — it has no other egress route. This is
+# the structural isolation guarantee in the K8s shape.
+#
+# NOTE: image and serving wiring are placeholders for milestone 0; the topology
+# and NetworkPolicy are the real contract.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-with-warden
+  labels:
+    app: agent-with-warden
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agent-with-warden
+  template:
+    metadata:
+      labels:
+        app: agent-with-warden
+    spec:
+      containers:
+        # The untrusted agent. It egresses ONLY through the proxy on loopback.
+        - name: agent
+          image: alpine:3.20 # stand-in for the real agent runtime
+          env:
+            - name: HTTPS_PROXY
+              value: "http://127.0.0.1:8080"
+            - name: HTTP_PROXY
+              value: "http://127.0.0.1:8080"
+            # Placeholders only — never the real secret values.
+            - name: OPENAI_API_KEY
+              value: "openai_secret_001"
+          command: ["sh", "-c", "sleep infinity"]
+
+        # The Warden sidecar — the only container with real internet access.
+        - name: warden-proxy
+          image: warden-proxy:dev # built in M1
+          args: ["-config", "/etc/warden/config.yaml", "-listen", "127.0.0.1:8080"]
+          ports:
+            - containerPort: 8080
+              name: proxy
+          env:
+            # Real secrets live with the proxy, injected from a K8s Secret.
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: warden-secrets
+                  key: OPENAI_API_KEY
+                  optional: true
+          volumeMounts:
+            - name: config
+              mountPath: /etc/warden
+              readOnly: true
+
+      volumes:
+        - name: config
+          configMap:
+            name: warden-config

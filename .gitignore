@@ -1,0 +1,32 @@
+# Built binaries — `make build` emits ./warden in the repo root
+/warden
+/proxy
+cmd/proxy/proxy
+
+# Coverage / test output
+coverage.out
+*.out
+
+# Generated proxy certs/keys (gen-certs.sh) — NEVER commit private keys
+/certs/
+*.crt
+*.key
+*.pem
+
+# Local SQLite analytics databases
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+
+# Local secrets / env
+.env
+
+# Claude Code local-only settings (keep .claude/skills symlink + shared config tracked)
+.claude/settings.local.json
+
+# OS / editor cruft
+.DS_Store
+
+# Internal design material — not shipped
+plan/

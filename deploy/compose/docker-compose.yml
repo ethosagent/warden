@@ -1,0 +1,53 @@
+# Warden — local dev harness (Docker Compose).
+#
+# Encodes the core isolation: the agent runs on an INTERNAL-ONLY network with no
+# route to the internet. Its only egress path is the Warden proxy, which sits on
+# both the internal network (to receive agent traffic) and an external network
+# (the only service with real internet access).
+#
+# This is the structural guarantee — the agent cannot reach the internet even if
+# it is fully compromised, because Docker's network namespaces deny it a route.
+#
+# NOTE: image names/build contexts are placeholders for milestone 0; the proxy
+# serving path lands in M1. The network topology, however, is the real contract.
+
+services:
+  proxy:
+    build:
+      context: ../..
+      dockerfile: Dockerfile        # added in M1
+    image: warden-proxy:dev
+    networks:
+      - agent-internal              # receives agent traffic
+      - egress                      # the ONLY service with internet access
+    environment:
+      # Real secrets live with the proxy, never the agent.
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+    volumes:
+      - ../../configs/config.example.yaml:/etc/warden/config.yaml:ro
+      - ./certs:/etc/warden/certs:ro   # bake-once CA (see scripts/gen-certs.sh)
+    command: ["-config", "/etc/warden/config.yaml", "-listen", "0.0.0.0:8080"]
+
+  agent:
+    image: alpine:3.20               # stand-in for the real agent runtime
+    depends_on:
+      - proxy
+    networks:
+      - agent-internal               # internal ONLY — no egress network attached
+    environment:
+      # The agent holds placeholders only, and is pointed at the proxy for egress.
+      - HTTPS_PROXY=http://proxy:8080
+      - HTTP_PROXY=http://proxy:8080
+      - OPENAI_API_KEY=openai_secret_001       # placeholder, NOT the real key
+      - ANTHROPIC_API_KEY=anthropic_secret_001 # placeholder, NOT the real key
+    command: ["sh", "-c", "echo 'agent placeholder — no internet route except via proxy'; sleep infinity"]
+
+networks:
+  # internal: true means containers on this network get NO route to the host /
+  # internet. The agent is attached only here.
+  agent-internal:
+    internal: true
+  # egress carries real internet access and is attached ONLY to the proxy.
+  egress:
+    driver: bridge

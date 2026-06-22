@@ -1,0 +1,43 @@
+# Warden — example configuration
+#
+# This is the phase-1 (local) config shape. The same schema is reused when
+# config later comes from a control-plane pull, so nothing here is throwaway.
+#
+# Core invariant: the allowlist is DEFAULT-DENY. Any destination not listed
+# below is blocked. Secrets are referenced by placeholder only — the agent
+# holds the placeholder, never the real value; the real value is injected at
+# the proxy edge from the mapped environment variable.
+
+policy:
+  # Default-deny allowlist. A destination is permitted only if it matches an
+  # entry here. Port is optional: when omitted, Warden infers 443 (HTTPS) or
+  # 80 (HTTP) from the request scheme.
+  allowlist:
+    - domain: api.openai.com            # port omitted -> inferred 443 (HTTPS)
+    - domain: api.anthropic.com
+    - domain: "*.internal.company.com"  # wildcard matches subdomains (not the apex)
+      port: 8443                        # explicit port overrides inference
+      # --- Reserved for milestone 2 (parsed but NOT enforced in phase 1) ---
+      # rateLimit: "100/hour"           # per-rule rate limit
+      # timeWindow: "9-17"              # allowed hours (local time)
+
+# Placeholder -> environment variable mapping for the phase-1 ENV secret
+# provider. The agent only ever holds the placeholder (e.g. openai_secret_001);
+# Warden swaps it for the real value of OPENAI_API_KEY at the edge.
+secrets:
+  - placeholder: openai_secret_001
+    envVar: OPENAI_API_KEY
+  - placeholder: anthropic_secret_001
+    envVar: ANTHROPIC_API_KEY
+
+# In-memory secret cache. Never persisted to disk.
+cache:
+  ttl: 3600                             # seconds; on expiry Warden refreshes
+                                        # silently and keeps the stale value if
+                                        # a silent refresh fails.
+
+# Observability output. Logs reference secrets by hash/last-4/version only and
+# never contain full request/response bodies.
+logging:
+  level: info                           # debug | info | warn | error
+  format: json                          # json | text

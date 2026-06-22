@@ -1,0 +1,32 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          # Install the binary so scripts/check.sh can invoke it; the action's
+          # own run is skipped — check.sh is the single source of truth.
+          install-mode: binary
+          args: --version
+
+      # The same script developers run locally and the pre-push hook runs. This
+      # is what guarantees CI parity — do NOT inline the individual steps.
+      - name: Run check.sh
+        run: scripts/check.sh

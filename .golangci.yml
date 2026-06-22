@@ -1,0 +1,20 @@
+# golangci-lint configuration for Warden.
+# A modern, security-tool-appropriate set: vet + staticcheck + the usual
+# correctness/hygiene linters. Run via `make lint` or as part of scripts/check.sh.
+version: "2"
+
+linters:
+  enable:
+    - errcheck      # unchecked errors
+    - govet         # go vet
+    - ineffassign   # ineffectual assignments
+    - misspell      # common misspellings
+    - staticcheck   # broad static analysis (subsumes gosimple/stylecheck)
+    - unused        # unused code
+
+formatters:
+  enable:
+    - gofmt
+
+issues:
+  max-same-issues: 0

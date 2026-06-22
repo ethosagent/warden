@@ -1,0 +1,30 @@
+# Warden — default-deny egress NetworkPolicy.
+#
+# This is the structural enforcement for the Kubernetes shape: the agent pod is
+# denied ALL egress except to the proxy (loopback within the same pod is not
+# subject to NetworkPolicy, so the agent→sidecar path works) and DNS. Without
+# this policy the sidecar pattern is advisory; with it, the agent has no route
+# to the internet that bypasses Warden.
+#
+# Requires a CNI that enforces NetworkPolicy (Calico, Cilium, etc.).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agent-default-deny-egress
+spec:
+  podSelector:
+    matchLabels:
+      app: agent-with-warden
+  policyTypes:
+    - Egress
+  egress:
+    # Allow DNS resolution only (the proxy resolves real destinations itself).
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Everything else is denied by omission: no rule permits general internet
+    # egress, so the agent's only working egress is the in-pod proxy sidecar.
