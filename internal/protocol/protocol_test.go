@@ -10,6 +10,7 @@ func TestDetect(t *testing.T) {
 		"\x16\x03\x01raw-tls-bytes":   Unknown,
 		"":                            Unknown,
 		"random garbage":              Unknown,
+		"PRI * HTTP/2.0\r\n\r\n":      HTTP2,
 	}
 	for input, want := range cases {
 		if got := Detect([]byte(input)); got != want {
@@ -24,6 +25,9 @@ func TestProtocolString(t *testing.T) {
 	}
 	if Unknown.String() != "unknown" {
 		t.Errorf("Unknown.String() = %q", Unknown.String())
+	}
+	if HTTP2.String() != "http2" {
+		t.Errorf("HTTP2.String() = %q", HTTP2.String())
 	}
 }
 

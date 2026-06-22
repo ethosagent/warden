@@ -16,6 +16,8 @@ const (
 	Unknown Protocol = iota
 	// HTTP is HTTP/1.x detected from the request line.
 	HTTP
+	// HTTP2 is HTTP/2, detected from the connection preface. gRPC runs over HTTP/2 but is distinguished at the handler level (content-type), not here.
+	HTTP2
 )
 
 // String renders the protocol for logging.
@@ -23,6 +25,8 @@ func (p Protocol) String() string {
 	switch p {
 	case HTTP:
 		return "http"
+	case HTTP2:
+		return "http2"
 	default:
 		return "unknown"
 	}
@@ -39,6 +43,9 @@ var httpMethods = []string{
 // protocol. It only needs the leading bytes; callers should peek, not consume.
 func Detect(peek []byte) Protocol {
 	s := string(peek)
+	if strings.HasPrefix(s, "PRI ") {
+		return HTTP2
+	}
 	for _, m := range httpMethods {
 		if strings.HasPrefix(s, m) {
 			return HTTP

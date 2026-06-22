@@ -78,9 +78,13 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 		return
 	}
 
-	if protocol.Detect(peekBytes) == protocol.HTTP {
+	detected := protocol.Detect(peekBytes)
+	switch detected {
+	case protocol.HTTP:
 		p.handleHTTP(tlsConn, plainReader, domain, port)
 		return
+	case protocol.HTTP2:
+		// M2: HTTP/2 detected; raw-forward until HTTP/2 handler is added.
 	}
 
 	// Unrecognized protocol inside TLS: raw forwarding.
@@ -89,6 +93,17 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 		return
 	}
 	defer remote.Close()
+	proto := detected.String()
+	if detected == protocol.Unknown {
+		proto = "raw"
+	}
+	_ = p.cfg.Analytics.StoreEvent(analytics.Event{
+		Timestamp: time.Now(),
+		Domain:    domain,
+		Port:      port,
+		Protocol:  proto,
+		Decision:  "allow",
+	})
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {

@@ -723,3 +723,289 @@ func TestTLS_BackwardCompat(t *testing.T) {
 		t.Fatalf("echo mismatch: got %q, want %q", got, payload)
 	}
 }
+
+func TestTLS_UnknownProtocolForwarding(t *testing.T) {
+	caCertPEM, caKeyPEM, _, _ := generateTestCA(t)
+
+	// Self-signed TLS echo backend.
+	backendKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backendTemplate := &x509.Certificate{
+		SerialNumber: big.NewInt(200),
+		Subject:      pkix.Name{CommonName: "backend.test"},
+		DNSNames:     []string{"backend.test"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+	}
+	backendCertDER, err := x509.CreateCertificate(rand.Reader, backendTemplate, backendTemplate, &backendKey.PublicKey, backendKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backendTLSCert := tls.Certificate{Certificate: [][]byte{backendCertDER}, PrivateKey: backendKey}
+
+	backendLn, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{backendTLSCert}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer backendLn.Close()
+	go func() {
+		for {
+			c, err := backendLn.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				io.Copy(c, c)
+			}()
+		}
+	}()
+
+	// Build proxy manually (like TestTLS_NonTLSFallback).
+	certFile := filepath.Join(t.TempDir(), "ca.crt")
+	keyFile := filepath.Join(t.TempDir(), "ca.key")
+	if err := os.WriteFile(certFile, caCertPEM, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyFile, caKeyPEM, 0600); err != nil {
+		t.Fatal(err)
+	}
+	store := &syncStore{}
+	p, err := New(Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     policy.NewEvaluator(config.Policy{Allowlist: []config.AllowlistEntry{{Domain: "rawproto.test", Port: 443}}}),
+		Secrets:    &fakes.FakeSecretProvider{Values: map[string]string{}},
+		Analytics:  store,
+		CACertPath: certFile,
+		CAKeyPath:  keyFile,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = p.Serve(ctx) }()
+	for i := 0; i < 100; i++ {
+		if p.Addr() != nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if p.Addr() == nil {
+		t.Fatal("proxy did not start")
+	}
+
+	p.dialTLS = func(network, addr string, cfg *tls.Config) (*tls.Conn, error) {
+		return tls.Dial("tcp", backendLn.Addr().String(), &tls.Config{InsecureSkipVerify: true})
+	}
+
+	conn, err := net.Dial("tcp", p.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	fmt.Fprintf(conn, "CONNECT rawproto.test:443 HTTP/1.1\r\nHost: rawproto.test:443\r\n\r\n")
+	br := bufio.NewReader(conn)
+	resp, err := br.ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(resp, "200") {
+		t.Fatalf("expected 200, got %q", resp)
+	}
+	for {
+		line, err := br.ReadString('\n')
+		if err != nil || line == "\r\n" || line == "\n" {
+			break
+		}
+	}
+
+	// TLS handshake with proxy's generated cert.
+	caPool := x509.NewCertPool()
+	caPool.AppendCertsFromPEM(caCertPEM)
+	tlsClient := tls.Client(conn, &tls.Config{
+		ServerName: "rawproto.test",
+		RootCAs:    caPool,
+	})
+	if err := tlsClient.Handshake(); err != nil {
+		t.Fatalf("client TLS handshake: %v", err)
+	}
+	defer tlsClient.Close()
+
+	// Send non-HTTP binary bytes.
+	payload := []byte{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08}
+	if _, err := tlsClient.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+
+	buf := make([]byte, len(payload))
+	if _, err := io.ReadFull(tlsClient, buf); err != nil {
+		t.Fatalf("reading echo: %v", err)
+	}
+	for i := range payload {
+		if buf[i] != payload[i] {
+			t.Fatalf("echo mismatch at byte %d: got %02x, want %02x", i, buf[i], payload[i])
+		}
+	}
+
+	tlsClient.Close()
+	conn.Close()
+	time.Sleep(50 * time.Millisecond)
+
+	events := store.snapshot()
+	found := false
+	for _, e := range events {
+		if e.Protocol == "raw" && e.Decision == "allow" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected raw/allow analytics event, got %v", events)
+	}
+}
+
+func TestTLS_HTTP2ProtocolForwarding(t *testing.T) {
+	caCertPEM, caKeyPEM, _, _ := generateTestCA(t)
+
+	// Self-signed TLS echo backend.
+	backendKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backendTemplate := &x509.Certificate{
+		SerialNumber: big.NewInt(201),
+		Subject:      pkix.Name{CommonName: "backend.test"},
+		DNSNames:     []string{"backend.test"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+	}
+	backendCertDER, err := x509.CreateCertificate(rand.Reader, backendTemplate, backendTemplate, &backendKey.PublicKey, backendKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backendTLSCert := tls.Certificate{Certificate: [][]byte{backendCertDER}, PrivateKey: backendKey}
+
+	backendLn, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{backendTLSCert}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer backendLn.Close()
+	go func() {
+		for {
+			c, err := backendLn.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				io.Copy(c, c)
+			}()
+		}
+	}()
+
+	// Build proxy manually (like TestTLS_NonTLSFallback).
+	certFile := filepath.Join(t.TempDir(), "ca.crt")
+	keyFile := filepath.Join(t.TempDir(), "ca.key")
+	if err := os.WriteFile(certFile, caCertPEM, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyFile, caKeyPEM, 0600); err != nil {
+		t.Fatal(err)
+	}
+	store := &syncStore{}
+	p, err := New(Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     policy.NewEvaluator(config.Policy{Allowlist: []config.AllowlistEntry{{Domain: "grpc.test", Port: 443}}}),
+		Secrets:    &fakes.FakeSecretProvider{Values: map[string]string{}},
+		Analytics:  store,
+		CACertPath: certFile,
+		CAKeyPath:  keyFile,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = p.Serve(ctx) }()
+	for i := 0; i < 100; i++ {
+		if p.Addr() != nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if p.Addr() == nil {
+		t.Fatal("proxy did not start")
+	}
+
+	p.dialTLS = func(network, addr string, cfg *tls.Config) (*tls.Conn, error) {
+		return tls.Dial("tcp", backendLn.Addr().String(), &tls.Config{InsecureSkipVerify: true})
+	}
+
+	conn, err := net.Dial("tcp", p.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	fmt.Fprintf(conn, "CONNECT grpc.test:443 HTTP/1.1\r\nHost: grpc.test:443\r\n\r\n")
+	br := bufio.NewReader(conn)
+	resp, err := br.ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(resp, "200") {
+		t.Fatalf("expected 200, got %q", resp)
+	}
+	for {
+		line, err := br.ReadString('\n')
+		if err != nil || line == "\r\n" || line == "\n" {
+			break
+		}
+	}
+
+	// TLS handshake with proxy's generated cert.
+	caPool := x509.NewCertPool()
+	caPool.AppendCertsFromPEM(caCertPEM)
+	tlsClient := tls.Client(conn, &tls.Config{
+		ServerName: "grpc.test",
+		RootCAs:    caPool,
+	})
+	if err := tlsClient.Handshake(); err != nil {
+		t.Fatalf("client TLS handshake: %v", err)
+	}
+	defer tlsClient.Close()
+
+	// Send HTTP/2 connection preface.
+	payload := []byte("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+	if _, err := tlsClient.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+
+	buf := make([]byte, len(payload))
+	if _, err := io.ReadFull(tlsClient, buf); err != nil {
+		t.Fatalf("reading echo: %v", err)
+	}
+	if string(buf) != string(payload) {
+		t.Fatalf("echo mismatch: got %q, want %q", buf, payload)
+	}
+
+	tlsClient.Close()
+	conn.Close()
+	time.Sleep(50 * time.Millisecond)
+
+	events := store.snapshot()
+	found := false
+	for _, e := range events {
+		if e.Protocol == "http2" && e.Decision == "allow" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected http2/allow analytics event, got %v", events)
+	}
+}
