@@ -27,16 +27,16 @@ type ConfigProvider interface {
 type Policy struct {
 	// Allowlist is the set of permitted destinations. Anything not present is
 	// denied (default-deny).
-	Allowlist []AllowlistEntry
+	Allowlist []AllowlistEntry `json:"allowlist"`
 	// Denylist is checked before the allowlist; deny wins on conflict.
-	Denylist []DenylistEntry
+	Denylist []DenylistEntry `json:"denylist"`
 	// Secrets maps placeholder tokens to their source env var (phase 1).
-	Secrets []SecretMapping
+	Secrets []SecretMapping `json:"-"`
 	// CacheTTLSeconds is the secret cache time-to-live in seconds.
-	CacheTTLSeconds int
+	CacheTTLSeconds int `json:"-"`
 	// LogLevel and LogFormat configure observability output.
-	LogLevel  string
-	LogFormat string
+	LogLevel  string `json:"-"`
+	LogFormat string `json:"-"`
 }
 
 // AllowlistEntry is a single permitted destination. Port is optional; when
@@ -44,12 +44,12 @@ type Policy struct {
 // TimeWindow are reserved for milestone 2: they parse from config but are
 // unused in phase 1.
 type AllowlistEntry struct {
-	Domain string `yaml:"domain"`
-	Port   int    `yaml:"port,omitempty"`
+	Domain string `yaml:"domain" json:"domain"`
+	Port   int    `yaml:"port,omitempty" json:"port"`
 
 	// Reserved (M2): parsed but not enforced in phase 1.
-	RateLimit  string `yaml:"rateLimit,omitempty"`
-	TimeWindow string `yaml:"timeWindow,omitempty"`
+	RateLimit  string `yaml:"rateLimit,omitempty" json:"rateLimit,omitempty"`
+	TimeWindow string `yaml:"timeWindow,omitempty" json:"timeWindow,omitempty"`
 }
 
 // SecretMapping ties a placeholder the agent holds to the env var that carries
@@ -62,8 +62,8 @@ type SecretMapping struct {
 // DenylistEntry is a single explicitly-blocked destination. The denylist is
 // checked before the allowlist — deny wins on conflict.
 type DenylistEntry struct {
-	Domain string `yaml:"domain"`
-	Port   int    `yaml:"port,omitempty"`
+	Domain string `yaml:"domain" json:"domain"`
+	Port   int    `yaml:"port,omitempty" json:"port"`
 }
 
 // rawConfig mirrors the on-disk YAML shape (see configs/config.example.yaml).

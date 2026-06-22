@@ -5,7 +5,10 @@
 // TLS layers — gated, not blocked.
 package protocol
 
-import "strings"
+import (
+	"encoding/json"
+	"strings"
+)
 
 // Protocol identifies a detected wire protocol.
 type Protocol int
@@ -18,6 +21,9 @@ const (
 	HTTP
 	// HTTP2 is HTTP/2, detected from the connection preface. gRPC runs over HTTP/2 but is distinguished at the handler level (content-type), not here.
 	HTTP2
+	// MCP is the Model Context Protocol, detected post-HTTP from Content-Type
+	// and JSON-RPC method inspection (see IsMCP).
+	MCP
 )
 
 // String renders the protocol for logging.
@@ -27,6 +33,8 @@ func (p Protocol) String() string {
 		return "http"
 	case HTTP2:
 		return "http2"
+	case MCP:
+		return "mcp"
 	default:
 		return "unknown"
 	}
@@ -68,3 +76,48 @@ func NewHTTPHandler() *HTTPHandler { return &HTTPHandler{} }
 
 // Protocol reports HTTP.
 func (h *HTTPHandler) Protocol() Protocol { return HTTP }
+
+// mcpMethods are the JSON-RPC method names defined by the Model Context
+// Protocol. A request whose Content-Type is application/json and whose body
+// contains one of these methods is classified as MCP-over-HTTP.
+var mcpMethods = []string{
+	"tools/call",
+	"tools/list",
+	"resources/read",
+	"resources/list",
+	"prompts/get",
+	"prompts/list",
+	"completion/complete",
+	"initialize",
+	"ping",
+	"notifications/",
+	"logging/",
+}
+
+// IsMCP checks HTTP headers for MCP indicators. MCP-over-HTTP uses
+// Content-Type: application/json with specific JSON-RPC method patterns.
+// Call this after HTTP detection, not from Detect().
+func IsMCP(contentType string, body []byte) bool {
+	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(contentType)), "application/json") {
+		return false
+	}
+	if len(body) == 0 {
+		return false
+	}
+	var msg struct {
+		JSONRPC string `json:"jsonrpc"`
+		Method  string `json:"method"`
+	}
+	if err := json.Unmarshal(body, &msg); err != nil {
+		return false
+	}
+	if msg.JSONRPC != "2.0" || msg.Method == "" {
+		return false
+	}
+	for _, m := range mcpMethods {
+		if strings.HasPrefix(msg.Method, m) {
+			return true
+		}
+	}
+	return false
+}

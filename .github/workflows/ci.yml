@@ -19,12 +19,7 @@ jobs:
           cache: true
 
       - name: Install golangci-lint
-        uses: golangci/golangci-lint-action@v6
-        with:
-          # Install the binary so scripts/check.sh can invoke it; the action's
-          # own run is skipped — check.sh is the single source of truth.
-          install-mode: binary
-          args: --version
+        run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8
 
       # The same script developers run locally and the pre-push hook runs. This
       # is what guarantees CI parity — do NOT inline the individual steps.
