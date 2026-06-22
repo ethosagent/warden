@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo/warden-logo-dark.svg">
+    <img src="assets/logo/warden-logo.svg" alt="Warden — egress guardrail for AI agents" width="440">
+  </picture>
+</p>
+
 # Warden
 
 **An agent egress guardrail proxy that makes it structurally impossible for an LLM agent to bypass security controls.**

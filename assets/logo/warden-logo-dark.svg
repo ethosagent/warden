@@ -1,0 +1,28 @@
+<svg width="680" height="200" viewBox="0 0 680 200" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Warden — egress guardrail for AI agents">
+  <defs>
+    <linearGradient id="shieldD" x1="128" y1="42" x2="128" y2="220" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#334155"/>
+      <stop offset="1" stop-color="#1E293B"/>
+    </linearGradient>
+    <linearGradient id="swapD" x1="96" y1="118" x2="192" y2="118" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F59E0B"/>
+      <stop offset="0.48" stop-color="#F59E0B"/>
+      <stop offset="0.60" stop-color="#2DD4BF"/>
+      <stop offset="1" stop-color="#2DD4BF"/>
+    </linearGradient>
+  </defs>
+
+  <!-- mark (lighter shield + brighter outline for dark backgrounds) -->
+  <g transform="translate(20,28) scale(0.56)">
+    <path d="M128 42 C156 42 188 48 204 52 C208 53 210 56 210 60 C210 96 208 150 170 188 C156 202 142 212 128 220 C114 212 100 202 86 188 C48 150 46 96 46 60 C46 56 48 53 52 52 C68 48 100 42 128 42 Z"
+          fill="url(#shieldD)" stroke="#2DD4BF" stroke-opacity="0.45" stroke-width="2.5"/>
+    <circle cx="96" cy="118" r="13" fill="#F59E0B"/>
+    <rect x="144" y="92" width="12" height="18" rx="3" fill="#2DD4BF"/>
+    <rect x="144" y="126" width="12" height="18" rx="3" fill="#2DD4BF"/>
+    <path d="M108 112 L156 112 L156 100 L192 118 L156 136 L156 124 L108 124 Z" fill="url(#swapD)"/>
+  </g>
+
+  <!-- wordmark (light, for dark backgrounds) -->
+  <text x="188" y="108" font-family="'Inter','Segoe UI',Helvetica,Arial,sans-serif" font-size="76" font-weight="800" letter-spacing="2" fill="#F1F5F9">WARDEN</text>
+  <text x="190" y="146" font-family="'Inter','Segoe UI',Helvetica,Arial,sans-serif" font-size="21" font-weight="500" letter-spacing="3.5" fill="#94A3B8">EGRESS GUARDRAIL FOR AI AGENTS</text>
+</svg>
