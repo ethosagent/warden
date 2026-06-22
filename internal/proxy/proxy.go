@@ -28,12 +28,13 @@ import (
 type Config struct {
 	// ListenAddr is the loopback / pod-internal address the agent connects to
 	// (e.g. "127.0.0.1:8080").
-	ListenAddr string
-	Policy     *policy.Evaluator
-	Secrets    secrets.SecretProvider
-	Analytics  analytics.AnalyticsStore
-	CACertPath string
-	CAKeyPath  string
+	ListenAddr       string
+	Policy           *policy.Evaluator
+	Secrets          secrets.SecretProvider
+	Analytics        analytics.AnalyticsStore
+	CACertPath       string
+	CAKeyPath        string
+	PlaceholderNames []string
 }
 
 // Proxy is the egress guardrail front door. M1 adds Serve()/accept loops; the

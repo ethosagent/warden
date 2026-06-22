@@ -11,11 +11,11 @@ import (
 	"io"
 	"math/big"
 	"net"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/ethosagent/warden/internal/analytics"
+	"github.com/ethosagent/warden/internal/protocol"
 )
 
 type bufferedConn struct {
@@ -73,77 +73,32 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 	defer tlsConn.Close()
 
 	plainReader := bufio.NewReader(tlsConn)
-	requestLine, err := plainReader.ReadString('\n')
+	peekBytes, err := plainReader.Peek(8)
 	if err != nil {
 		return
 	}
 
-	var reqBuf strings.Builder
-	reqBuf.WriteString(requestLine)
-
-	parts := strings.Fields(requestLine)
-	method := ""
-	path := ""
-	if len(parts) >= 2 {
-		method = parts[0]
-		path = parts[1]
-	}
-
-	var hostHeader string
-	for {
-		hdr, err := plainReader.ReadString('\n')
-		if err != nil {
-			return
-		}
-		reqBuf.WriteString(hdr)
-		if hdr == "\r\n" || hdr == "\n" {
-			break
-		}
-		if strings.HasPrefix(strings.ToLower(hdr), "host:") {
-			hostHeader = strings.TrimSpace(hdr[len("host:"):])
-		}
-	}
-
-	hostOnly := hostHeader
-	if h, _, err := net.SplitHostPort(hostHeader); err == nil {
-		hostOnly = h
-	}
-	if !strings.EqualFold(hostOnly, domain) {
+	if protocol.Detect(peekBytes) == protocol.HTTP {
+		p.handleHTTP(tlsConn, plainReader, domain, port)
 		return
 	}
 
-	upstream, err := p.dialTLS("tcp", net.JoinHostPort(domain, fmt.Sprintf("%d", port)), &tls.Config{ServerName: domain})
-	if err != nil {
+	// Unrecognized protocol inside TLS: raw forwarding.
+	remote, dialErr := p.dialTLS("tcp", net.JoinHostPort(domain, fmt.Sprintf("%d", port)), &tls.Config{ServerName: domain})
+	if dialErr != nil {
 		return
 	}
-	defer upstream.Close()
-
-	_, err = fmt.Fprint(upstream, reqBuf.String())
-	if err != nil {
-		return
-	}
-
-	url := "https://" + domain + path
-	_ = p.cfg.Analytics.StoreEvent(analytics.Event{
-		Timestamp: time.Now(),
-		Domain:    domain,
-		Port:      port,
-		Protocol:  "https",
-		Method:    method,
-		URL:       url,
-		Decision:  "allow",
-	})
-
+	defer remote.Close()
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(upstream, plainReader)
-		_ = upstream.CloseWrite()
+		_, _ = io.Copy(remote, plainReader)
+		_ = remote.CloseWrite()
 	}()
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(tlsConn, upstream)
+		_, _ = io.Copy(tlsConn, remote)
 		_ = tlsConn.CloseWrite()
 	}()
 	wg.Wait()

@@ -74,10 +74,11 @@ func runProxy(cmd *cobra.Command, configPath, listenAddr, dbPath string) error {
 	defer func() { _ = store.Close() }()
 
 	p, err := proxy.New(proxy.Config{
-		ListenAddr: listenAddr,
-		Policy:     policy.NewEvaluator(pol),
-		Secrets:    secretProvider,
-		Analytics:  store,
+		ListenAddr:       listenAddr,
+		Policy:           policy.NewEvaluator(pol),
+		Secrets:          secretProvider,
+		Analytics:        store,
+		PlaceholderNames: placeholders,
 	})
 	if err != nil {
 		return err
