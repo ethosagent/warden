@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -107,6 +108,17 @@ func parse(data []byte) (*LocalYAMLProvider, error) {
 		LogLevel:        raw.Logging.Level,
 		LogFormat:       raw.Logging.Format,
 	}
+	policy.LogLevel = strings.ToLower(policy.LogLevel)
+	if policy.LogLevel == "" {
+		policy.LogLevel = "info"
+	}
+	policy.LogFormat = strings.ToLower(policy.LogFormat)
+	if policy.LogFormat == "" {
+		policy.LogFormat = "json"
+	}
+	for i := range policy.Allowlist {
+		policy.Allowlist[i].Domain = strings.ToLower(policy.Allowlist[i].Domain)
+	}
 	if policy.CacheTTLSeconds == 0 {
 		policy.CacheTTLSeconds = defaultCacheTTLSeconds
 	}
@@ -123,11 +135,23 @@ func validate(p Policy) error {
 		return fmt.Errorf("config: policy.allowlist must have at least one entry")
 	}
 	for i, e := range p.Allowlist {
-		if e.Domain == "" {
+		if strings.TrimSpace(e.Domain) == "" {
 			return fmt.Errorf("config: policy.allowlist[%d]: domain is required", i)
+		}
+		if strings.ContainsRune(e.Domain, ' ') {
+			return fmt.Errorf("config: policy.allowlist[%d]: domain %q contains spaces", i, e.Domain)
 		}
 		if e.Port < 0 || e.Port > 65535 {
 			return fmt.Errorf("config: policy.allowlist[%d]: port %d out of range", i, e.Port)
+		}
+		if strings.Contains(e.Domain, "*") {
+			if !strings.HasPrefix(e.Domain, "*.") || strings.Count(e.Domain, "*") != 1 {
+				return fmt.Errorf("config: policy.allowlist[%d]: domain %q has invalid wildcard; only \"*.suffix\" form is supported", i, e.Domain)
+			}
+			suffix := e.Domain[2:]
+			if suffix == "" || strings.HasPrefix(suffix, ".") {
+				return fmt.Errorf("config: policy.allowlist[%d]: domain %q has invalid wildcard; only \"*.suffix\" form is supported", i, e.Domain)
+			}
 		}
 	}
 	for i, s := range p.Secrets {
@@ -138,8 +162,25 @@ func validate(p Policy) error {
 			return fmt.Errorf("config: secrets[%d]: envVar is required", i)
 		}
 	}
+	seen := make(map[string]struct{}, len(p.Secrets))
+	for _, s := range p.Secrets {
+		if _, dup := seen[s.Placeholder]; dup {
+			return fmt.Errorf("config: secrets: duplicate placeholder %q", s.Placeholder)
+		}
+		seen[s.Placeholder] = struct{}{}
+	}
 	if p.CacheTTLSeconds < 0 {
 		return fmt.Errorf("config: cache.ttl must not be negative")
+	}
+	switch p.LogLevel {
+	case "debug", "info", "warn", "error":
+	default:
+		return fmt.Errorf("config: logging.level %q is invalid; must be one of: debug, info, warn, error", p.LogLevel)
+	}
+	switch p.LogFormat {
+	case "json", "text":
+	default:
+		return fmt.Errorf("config: logging.format %q is invalid; must be one of: json, text", p.LogFormat)
 	}
 	return nil
 }

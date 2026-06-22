@@ -118,13 +118,23 @@ bogusTopLevel: true
 
 func TestValidate_Errors(t *testing.T) {
 	cases := map[string]Policy{
-		"empty allowlist":  {Allowlist: nil, CacheTTLSeconds: 1},
-		"missing domain":   {Allowlist: []AllowlistEntry{{Domain: ""}}, CacheTTLSeconds: 1},
-		"port too high":    {Allowlist: []AllowlistEntry{{Domain: "x", Port: 70000}}, CacheTTLSeconds: 1},
-		"port negative":    {Allowlist: []AllowlistEntry{{Domain: "x", Port: -1}}, CacheTTLSeconds: 1},
-		"secret no holder": {Allowlist: []AllowlistEntry{{Domain: "x"}}, Secrets: []SecretMapping{{EnvVar: "E"}}, CacheTTLSeconds: 1},
-		"secret no env":    {Allowlist: []AllowlistEntry{{Domain: "x"}}, Secrets: []SecretMapping{{Placeholder: "p"}}, CacheTTLSeconds: 1},
-		"negative ttl":     {Allowlist: []AllowlistEntry{{Domain: "x"}}, CacheTTLSeconds: -5},
+		"empty allowlist":         {Allowlist: nil, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
+		"missing domain":          {Allowlist: []AllowlistEntry{{Domain: ""}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
+		"port too high":           {Allowlist: []AllowlistEntry{{Domain: "x", Port: 70000}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
+		"port negative":           {Allowlist: []AllowlistEntry{{Domain: "x", Port: -1}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
+		"secret no holder":        {Allowlist: []AllowlistEntry{{Domain: "x"}}, Secrets: []SecretMapping{{EnvVar: "E"}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
+		"secret no env":           {Allowlist: []AllowlistEntry{{Domain: "x"}}, Secrets: []SecretMapping{{Placeholder: "p"}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
+		"negative ttl":            {Allowlist: []AllowlistEntry{{Domain: "x"}}, CacheTTLSeconds: -5, LogLevel: "info", LogFormat: "json"},
+		"domain with spaces":      {Allowlist: []AllowlistEntry{{Domain: "foo bar.com"}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
+		"domain empty after trim": {Allowlist: []AllowlistEntry{{Domain: "  "}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
+		"wildcard no dot prefix":  {Allowlist: []AllowlistEntry{{Domain: "*foo.com"}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
+		"wildcard mid domain":     {Allowlist: []AllowlistEntry{{Domain: "foo*.com"}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
+		"wildcard bare star":      {Allowlist: []AllowlistEntry{{Domain: "*"}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
+		"wildcard double star":    {Allowlist: []AllowlistEntry{{Domain: "**"}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
+		"wildcard dot only":       {Allowlist: []AllowlistEntry{{Domain: "*."}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
+		"bad log level":           {Allowlist: []AllowlistEntry{{Domain: "x"}}, CacheTTLSeconds: 1, LogLevel: "verbose", LogFormat: "json"},
+		"bad log format":          {Allowlist: []AllowlistEntry{{Domain: "x"}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "yaml"},
+		"duplicate placeholder":   {Allowlist: []AllowlistEntry{{Domain: "x"}}, Secrets: []SecretMapping{{Placeholder: "p", EnvVar: "A"}, {Placeholder: "p", EnvVar: "B"}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
 	}
 	for name, p := range cases {
 		if err := validate(p); err == nil {
@@ -142,5 +152,49 @@ func TestExampleConfigLoads(t *testing.T) {
 	pol, _ := p.GetPolicy()
 	if len(pol.Allowlist) == 0 {
 		t.Fatal("example config has empty allowlist")
+	}
+}
+
+func TestParse_Defaults(t *testing.T) {
+	const y = `
+policy:
+  allowlist:
+    - domain: api.openai.com
+`
+	p, err := parse([]byte(y))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	pol, _ := p.GetPolicy()
+	if pol.LogLevel != "info" {
+		t.Errorf("default log level = %q, want %q", pol.LogLevel, "info")
+	}
+	if pol.LogFormat != "json" {
+		t.Errorf("default log format = %q, want %q", pol.LogFormat, "json")
+	}
+}
+
+func TestParse_NormalizesCase(t *testing.T) {
+	const y = `
+policy:
+  allowlist:
+    - domain: API.OpenAI.COM
+logging:
+  level: WARN
+  format: TEXT
+`
+	p, err := parse([]byte(y))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	pol, _ := p.GetPolicy()
+	if pol.Allowlist[0].Domain != "api.openai.com" {
+		t.Errorf("domain = %q, want lowercase", pol.Allowlist[0].Domain)
+	}
+	if pol.LogLevel != "warn" {
+		t.Errorf("log level = %q, want %q", pol.LogLevel, "warn")
+	}
+	if pol.LogFormat != "text" {
+		t.Errorf("log format = %q, want %q", pol.LogFormat, "text")
 	}
 }
