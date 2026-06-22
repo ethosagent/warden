@@ -206,18 +206,6 @@ make fmt                # gofmt -w .
 make lint               # golangci-lint run
 ```
 
-## Roadmap
-
-See the [`plan/`](plan/) directory for detailed feature docs. Key upcoming work:
-
-- **Auth transforms** — OAuth2, AWS SigV4, GCP JWT, HMAC, mTLS ([plan](plan/Feat-Auth-Transforms.md))
-- **SSRF protection** — private IP blocking + DNS pinning ([plan](plan/Feat-SSRF-Protection.md))
-- **Deep MCP** — tool poisoning detection, call chain analysis, bidirectional scanning ([plan](plan/Feat-Deep-MCP.md))
-- **LLM policy judge** — inline fallback for ambiguous requests ([plan](plan/Feat-LLM-Policy.md))
-- **Policy builder** — auto-draft allowlist from observed traffic ([plan](plan/Feat-Policy-Builder.md))
-- **Policy eval** — replay history to measure policy accuracy ([plan](plan/Feat-Policy-Eval.md))
-- **Extension dimensions** — full product surface map ([plan](plan/Extension-Dimensions.md))
-
 ## License
 
 [Apache-2.0](LICENSE)
