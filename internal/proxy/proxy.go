@@ -36,7 +36,7 @@ type Config struct {
 	CACertPath       string
 	CAKeyPath        string
 	PlaceholderNames []string
-	Transformers     []auth.RequestTransformer
+	Transformers     []*auth.MatchedTransformer
 }
 
 // Proxy is the egress guardrail front door. M1 adds Serve()/accept loops; the

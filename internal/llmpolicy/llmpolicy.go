@@ -129,7 +129,7 @@ func (j *Judge) Evaluate(agentID, method, url, host, contentType string, hasAuth
 	)
 
 	// Call LLM.
-	resp, err := j.client.Evaluate(prompt)
+	resp, err := j.callLLM(prompt)
 	if err != nil {
 		j.recordFailure()
 		return Verdict{Decision: "deny", Reason: fmt.Sprintf("LLM error: %v", err)}
@@ -159,6 +159,25 @@ func (j *Judge) Evaluate(agentID, method, url, host, contentType string, hasAuth
 	j.mu.Unlock()
 
 	return v
+}
+
+type llmResult struct {
+	response string
+	err      error
+}
+
+func (j *Judge) callLLM(prompt string) (string, error) {
+	ch := make(chan llmResult, 1)
+	go func() {
+		resp, err := j.client.Evaluate(prompt)
+		ch <- llmResult{resp, err}
+	}()
+	select {
+	case res := <-ch:
+		return res.response, res.err
+	case <-time.After(j.timeout):
+		return "", fmt.Errorf("llmpolicy: LLM call timed out after %s", j.timeout)
+	}
 }
 
 // recordFailure increments the failure counter and trips the circuit breaker if needed.

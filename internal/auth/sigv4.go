@@ -139,10 +139,10 @@ func (s *AWSSigV4) buildSignedHeaders(req *http.Request) []string {
 	if s.sessionToken != "" {
 		headers["x-amz-security-token"] = true
 	}
-	// Include any x-amz- headers
+	// Include host, content-type (if present), and all x-amz-* headers
 	for key := range req.Header {
 		lower := strings.ToLower(key)
-		if strings.HasPrefix(lower, "x-amz-") {
+		if lower == "content-type" || strings.HasPrefix(lower, "x-amz-") {
 			headers[lower] = true
 		}
 	}

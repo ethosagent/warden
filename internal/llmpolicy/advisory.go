@@ -87,16 +87,32 @@ func (a *Advisor) summarizeEvents(events []analytics.Event, _ config.Policy) str
 	fmt.Fprintf(&b, "Total events: %d\n", len(events))
 	for domain, s := range stats {
 		fmt.Fprintf(&b, "- %s: %d total (%d allowed, %d denied)\n",
-			domain, s.total, s.allowed, s.denied)
+			sanitizeDomain(domain), s.total, s.allowed, s.denied)
 	}
 	return b.String()
+}
+
+// sanitizeDomain strips control characters and other characters that could
+// be used for prompt injection, and truncates to the DNS max name length.
+func sanitizeDomain(d string) string {
+	var buf strings.Builder
+	for _, r := range d {
+		if r >= 32 && r < 127 && r != ';' && r != '{' && r != '}' {
+			buf.WriteRune(r)
+		}
+	}
+	s := buf.String()
+	if len(s) > 253 {
+		s = s[:253]
+	}
+	return s
 }
 
 // formatAllowlist renders the current allowlist domains for the prompt.
 func formatAllowlist(p config.Policy) string {
 	domains := make([]string, len(p.Allowlist))
 	for i, e := range p.Allowlist {
-		domains[i] = e.Domain
+		domains[i] = sanitizeDomain(e.Domain)
 	}
 	if len(domains) == 0 {
 		return "(none)"

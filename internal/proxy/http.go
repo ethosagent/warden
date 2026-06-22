@@ -117,11 +117,13 @@ func (p *Proxy) handleHTTP(tlsConn *tls.Conn, br *bufio.Reader, domain string, p
 		}
 
 		// Apply auth transforms
-		for _, t := range p.cfg.Transformers {
-			if err := t.Transform(req); err != nil {
-				writeErrorResponse(tlsConn, 502, "Bad Gateway")
-				_ = req.Body.Close()
-				return
+		for _, mt := range p.cfg.Transformers {
+			if mt.Matches(domain) {
+				if err := mt.Transformer.Transform(req); err != nil {
+					writeErrorResponse(tlsConn, 502, "Bad Gateway")
+					_ = req.Body.Close()
+					return
+				}
 			}
 		}
 

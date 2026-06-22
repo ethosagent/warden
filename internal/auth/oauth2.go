@@ -88,7 +88,11 @@ func (o *OAuth2ClientCredentials) Transform(req *http.Request) error {
 	}
 
 	o.token = tr.AccessToken
-	o.expiry = time.Now().Add(time.Duration(tr.ExpiresIn)*time.Second - 30*time.Second)
+	expiry := time.Now().Add(time.Duration(tr.ExpiresIn) * time.Second).Add(-30 * time.Second)
+	if expiry.Before(time.Now()) {
+		expiry = time.Now() // don't go into the past; will refresh next call
+	}
+	o.expiry = expiry
 
 	req.Header.Set("Authorization", "Bearer "+o.token)
 	return nil

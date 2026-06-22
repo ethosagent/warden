@@ -116,7 +116,7 @@ func FormatYAML(suggestions []Suggestion) string {
 		if s.Port != 0 && s.Port != 443 {
 			portSuffix = fmt.Sprintf("\n      port: %d", s.Port)
 		}
-		b.WriteString(fmt.Sprintf("    - domain: %s%s       # %d requests, %.0f%% success [%s]\n",
+		b.WriteString(fmt.Sprintf("    - domain: \"%s\"%s       # %d requests, %.0f%% success [%s]\n",
 			s.Domain, portSuffix, s.Count, s.SuccessRate, s.Confidence))
 	}
 

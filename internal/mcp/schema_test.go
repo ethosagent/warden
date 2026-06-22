@@ -121,6 +121,11 @@ func TestSchemaStore_PinnedModeDrift(t *testing.T) {
 	if len(drifts) == 0 {
 		t.Error("expected drift detected even in pinned mode")
 	}
+	for _, d := range drifts {
+		if !d.Blocked {
+			t.Errorf("expected Blocked=true in pinned mode for drift %q, got false", d.ToolName)
+		}
+	}
 }
 
 func TestParseToolList_Valid(t *testing.T) {

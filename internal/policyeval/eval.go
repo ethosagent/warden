@@ -25,7 +25,13 @@ type EvalDiff struct {
 
 // Evaluate replays events against a candidate policy and diffs outcomes.
 func Evaluate(events []analytics.Event, candidate config.Policy) *EvalResult {
-	eval := policy.NewEvaluator(candidate)
+	// Strip rate limits and time windows for stateless replay
+	replayPolicy := candidate.DeepCopy()
+	for i := range replayPolicy.Allowlist {
+		replayPolicy.Allowlist[i].RateLimit = ""
+		replayPolicy.Allowlist[i].TimeWindow = ""
+	}
+	eval := policy.NewEvaluator(replayPolicy)
 	result := &EvalResult{TotalEvents: len(events)}
 
 	// Track diffs grouped by (domain, port, method, type).

@@ -44,6 +44,7 @@ type SchemaDrift struct {
 	ToolName string
 	Type     string // "added", "removed", "description_changed", "schema_changed"
 	Detail   string
+	Blocked  bool // true if schema is pinned and this drift should block
 }
 
 // DetectDrift compares a new tool list against the baseline and returns changes.
@@ -93,7 +94,17 @@ func (s *SchemaStore) DetectDrift(tools []ToolSchema) []SchemaDrift {
 		}
 	}
 
+	for i := range drifts {
+		drifts[i].Blocked = s.pinned
+	}
 	return drifts
+}
+
+// IsPinned reports whether this store's schema is pinned.
+func (s *SchemaStore) IsPinned() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.pinned
 }
 
 // ParseToolList parses a tools/list JSON-RPC response and returns the tool schemas.

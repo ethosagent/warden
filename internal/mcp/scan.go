@@ -7,8 +7,13 @@ import (
 	"github.com/ethosagent/warden/internal/scan"
 )
 
+const maxJSONDepth = 100
+
 // extractStrings recursively walks a JSON value and collects all string values.
-func extractStrings(raw json.RawMessage) []string {
+func extractStrings(raw json.RawMessage, depth int) []string {
+	if depth > maxJSONDepth {
+		return nil
+	}
 	if len(raw) == 0 {
 		return nil
 	}
@@ -24,7 +29,7 @@ func extractStrings(raw json.RawMessage) []string {
 	var arr []json.RawMessage
 	if err := json.Unmarshal(raw, &arr); err == nil {
 		for _, item := range arr {
-			result = append(result, extractStrings(item)...)
+			result = append(result, extractStrings(item, depth+1)...)
 		}
 		return result
 	}
@@ -33,7 +38,7 @@ func extractStrings(raw json.RawMessage) []string {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err == nil {
 		for _, v := range obj {
-			result = append(result, extractStrings(v)...)
+			result = append(result, extractStrings(v, depth+1)...)
 		}
 		return result
 	}
@@ -47,7 +52,7 @@ func ScanToolArgs(args json.RawMessage, scanner *scan.Scanner) []scan.Detection 
 	if len(args) == 0 {
 		return nil
 	}
-	strs := extractStrings(args)
+	strs := extractStrings(args, 0)
 	if len(strs) == 0 {
 		return nil
 	}
@@ -61,7 +66,7 @@ func ScanToolResult(result json.RawMessage, scanner *scan.Scanner) []scan.Detect
 	if len(result) == 0 {
 		return nil
 	}
-	strs := extractStrings(result)
+	strs := extractStrings(result, 0)
 	if len(strs) == 0 {
 		return nil
 	}
