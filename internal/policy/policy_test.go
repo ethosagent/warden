@@ -2,12 +2,17 @@ package policy
 
 import (
 	"testing"
+	"time"
 
 	"github.com/ethosagent/warden/internal/config"
 )
 
 func evalFor(entries ...config.AllowlistEntry) *Evaluator {
 	return NewEvaluator(config.Policy{Allowlist: entries})
+}
+
+func evalWithDenylist(allow []config.AllowlistEntry, deny []config.DenylistEntry) *Evaluator {
+	return NewEvaluator(config.Policy{Allowlist: allow, Denylist: deny})
 }
 
 // Invariant: default-deny — a non-allowlisted destination is blocked.
@@ -79,5 +84,123 @@ func TestEvaluate_CaseInsensitiveAndTrailingDot(t *testing.T) {
 func TestDecisionString(t *testing.T) {
 	if Allow.String() != "allow" || Deny.String() != "deny" {
 		t.Errorf("decision strings: %q / %q", Allow.String(), Deny.String())
+	}
+}
+
+func TestEvaluate_RegexDomain(t *testing.T) {
+	e := evalFor(config.AllowlistEntry{Domain: "~^api\\.(openai|anthropic)\\.com$"})
+	if d := e.Evaluate("api.openai.com", 443, SchemeHTTPS); d != Allow {
+		t.Errorf("regex match openai = %v, want Allow", d)
+	}
+	if d := e.Evaluate("api.anthropic.com", 443, SchemeHTTPS); d != Allow {
+		t.Errorf("regex match anthropic = %v, want Allow", d)
+	}
+	if d := e.Evaluate("api.evil.com", 443, SchemeHTTPS); d != Deny {
+		t.Errorf("regex no match = %v, want Deny", d)
+	}
+}
+
+func TestEvaluate_RateLimit_UnderLimit(t *testing.T) {
+	e := evalFor(config.AllowlistEntry{Domain: "api.example.com", RateLimit: "2/minute"})
+	if d := e.Evaluate("api.example.com", 443, SchemeHTTPS); d != Allow {
+		t.Errorf("request 1 = %v, want Allow", d)
+	}
+	if d := e.Evaluate("api.example.com", 443, SchemeHTTPS); d != Allow {
+		t.Errorf("request 2 = %v, want Allow", d)
+	}
+}
+
+func TestEvaluate_RateLimit_OverLimit(t *testing.T) {
+	e := evalFor(config.AllowlistEntry{Domain: "api.example.com", RateLimit: "2/minute"})
+	e.Evaluate("api.example.com", 443, SchemeHTTPS)
+	e.Evaluate("api.example.com", 443, SchemeHTTPS)
+	if d := e.Evaluate("api.example.com", 443, SchemeHTTPS); d != Deny {
+		t.Errorf("request 3 over limit = %v, want Deny", d)
+	}
+}
+
+func TestEvaluate_RateLimit_WindowReset(t *testing.T) {
+	e := evalFor(config.AllowlistEntry{Domain: "api.example.com", RateLimit: "1/minute"})
+	baseTime := time.Date(2024, 1, 1, 10, 0, 0, 0, time.UTC)
+	e.now = func() time.Time { return baseTime }
+
+	if d := e.Evaluate("api.example.com", 443, SchemeHTTPS); d != Allow {
+		t.Errorf("request 1 = %v, want Allow", d)
+	}
+	if d := e.Evaluate("api.example.com", 443, SchemeHTTPS); d != Deny {
+		t.Errorf("request 2 within window = %v, want Deny", d)
+	}
+
+	// Advance past the 1-minute window.
+	e.now = func() time.Time { return baseTime.Add(2 * time.Minute) }
+	if d := e.Evaluate("api.example.com", 443, SchemeHTTPS); d != Allow {
+		t.Errorf("request after window reset = %v, want Allow", d)
+	}
+}
+
+func TestEvaluate_TimeWindow_Inside(t *testing.T) {
+	e := evalFor(config.AllowlistEntry{Domain: "api.example.com", TimeWindow: "9-17"})
+	e.now = func() time.Time { return time.Date(2024, 1, 1, 10, 0, 0, 0, time.UTC) }
+	if d := e.Evaluate("api.example.com", 443, SchemeHTTPS); d != Allow {
+		t.Errorf("inside window (hour 10) = %v, want Allow", d)
+	}
+}
+
+func TestEvaluate_TimeWindow_Outside(t *testing.T) {
+	e := evalFor(config.AllowlistEntry{Domain: "api.example.com", TimeWindow: "9-17"})
+	e.now = func() time.Time { return time.Date(2024, 1, 1, 20, 0, 0, 0, time.UTC) }
+	if d := e.Evaluate("api.example.com", 443, SchemeHTTPS); d != Deny {
+		t.Errorf("outside window (hour 20) = %v, want Deny", d)
+	}
+}
+
+func TestEvaluate_Denylist_BlocksEvenIfAllowlisted(t *testing.T) {
+	e := evalWithDenylist(
+		[]config.AllowlistEntry{{Domain: "evil.example.com"}},
+		[]config.DenylistEntry{{Domain: "evil.example.com"}},
+	)
+	if d := e.Evaluate("evil.example.com", 443, SchemeHTTPS); d != Deny {
+		t.Errorf("denylist precedence = %v, want Deny", d)
+	}
+}
+
+func TestEvaluate_Denylist_Wildcard(t *testing.T) {
+	e := evalWithDenylist(
+		[]config.AllowlistEntry{{Domain: "*.malware.net"}},
+		[]config.DenylistEntry{{Domain: "*.malware.net"}},
+	)
+	if d := e.Evaluate("x.malware.net", 443, SchemeHTTPS); d != Deny {
+		t.Errorf("wildcard denylist = %v, want Deny", d)
+	}
+}
+
+func TestEvaluate_Denylist_Regex(t *testing.T) {
+	e := evalWithDenylist(
+		[]config.AllowlistEntry{{Domain: "~^.*\\.example\\.com$"}},
+		[]config.DenylistEntry{{Domain: "~^evil\\.example\\.com$"}},
+	)
+	if d := e.Evaluate("evil.example.com", 443, SchemeHTTPS); d != Deny {
+		t.Errorf("regex denylist = %v, want Deny", d)
+	}
+	if d := e.Evaluate("good.example.com", 443, SchemeHTTPS); d != Allow {
+		t.Errorf("regex allowlist = %v, want Allow", d)
+	}
+}
+
+func TestEvaluate_Combined_AllowRateLimitTimeWindow(t *testing.T) {
+	e := evalFor(config.AllowlistEntry{
+		Domain:     "api.example.com",
+		RateLimit:  "1/hour",
+		TimeWindow: "9-17",
+	})
+	e.now = func() time.Time { return time.Date(2024, 1, 1, 10, 0, 0, 0, time.UTC) }
+
+	// Inside window, under rate limit.
+	if d := e.Evaluate("api.example.com", 443, SchemeHTTPS); d != Allow {
+		t.Errorf("inside window + under limit = %v, want Allow", d)
+	}
+	// Inside window, over rate limit.
+	if d := e.Evaluate("api.example.com", 443, SchemeHTTPS); d != Deny {
+		t.Errorf("inside window + over limit = %v, want Deny", d)
 	}
 }

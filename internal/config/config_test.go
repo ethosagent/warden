@@ -27,6 +27,20 @@ logging:
   format: json
 `
 
+const denylistYAML = `
+policy:
+  allowlist:
+    - domain: api.openai.com
+  denylist:
+    - domain: evil.example.com
+    - domain: "*.malware.net"
+      port: 443
+
+logging:
+  level: info
+  format: json
+`
+
 func writeTemp(t *testing.T, content string) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -118,23 +132,30 @@ bogusTopLevel: true
 
 func TestValidate_Errors(t *testing.T) {
 	cases := map[string]Policy{
-		"empty allowlist":         {Allowlist: nil, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
-		"missing domain":          {Allowlist: []AllowlistEntry{{Domain: ""}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
-		"port too high":           {Allowlist: []AllowlistEntry{{Domain: "x", Port: 70000}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
-		"port negative":           {Allowlist: []AllowlistEntry{{Domain: "x", Port: -1}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
-		"secret no holder":        {Allowlist: []AllowlistEntry{{Domain: "x"}}, Secrets: []SecretMapping{{EnvVar: "E"}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
-		"secret no env":           {Allowlist: []AllowlistEntry{{Domain: "x"}}, Secrets: []SecretMapping{{Placeholder: "p"}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
-		"negative ttl":            {Allowlist: []AllowlistEntry{{Domain: "x"}}, CacheTTLSeconds: -5, LogLevel: "info", LogFormat: "json"},
-		"domain with spaces":      {Allowlist: []AllowlistEntry{{Domain: "foo bar.com"}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
-		"domain empty after trim": {Allowlist: []AllowlistEntry{{Domain: "  "}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
-		"wildcard no dot prefix":  {Allowlist: []AllowlistEntry{{Domain: "*foo.com"}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
-		"wildcard mid domain":     {Allowlist: []AllowlistEntry{{Domain: "foo*.com"}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
-		"wildcard bare star":      {Allowlist: []AllowlistEntry{{Domain: "*"}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
-		"wildcard double star":    {Allowlist: []AllowlistEntry{{Domain: "**"}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
-		"wildcard dot only":       {Allowlist: []AllowlistEntry{{Domain: "*."}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
-		"bad log level":           {Allowlist: []AllowlistEntry{{Domain: "x"}}, CacheTTLSeconds: 1, LogLevel: "verbose", LogFormat: "json"},
-		"bad log format":          {Allowlist: []AllowlistEntry{{Domain: "x"}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "yaml"},
-		"duplicate placeholder":   {Allowlist: []AllowlistEntry{{Domain: "x"}}, Secrets: []SecretMapping{{Placeholder: "p", EnvVar: "A"}, {Placeholder: "p", EnvVar: "B"}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
+		"empty allowlist":           {Allowlist: nil, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
+		"missing domain":            {Allowlist: []AllowlistEntry{{Domain: ""}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
+		"port too high":             {Allowlist: []AllowlistEntry{{Domain: "x", Port: 70000}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
+		"port negative":             {Allowlist: []AllowlistEntry{{Domain: "x", Port: -1}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
+		"secret no holder":          {Allowlist: []AllowlistEntry{{Domain: "x"}}, Secrets: []SecretMapping{{EnvVar: "E"}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
+		"secret no env":             {Allowlist: []AllowlistEntry{{Domain: "x"}}, Secrets: []SecretMapping{{Placeholder: "p"}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
+		"negative ttl":              {Allowlist: []AllowlistEntry{{Domain: "x"}}, CacheTTLSeconds: -5, LogLevel: "info", LogFormat: "json"},
+		"domain with spaces":        {Allowlist: []AllowlistEntry{{Domain: "foo bar.com"}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
+		"domain empty after trim":   {Allowlist: []AllowlistEntry{{Domain: "  "}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
+		"wildcard no dot prefix":    {Allowlist: []AllowlistEntry{{Domain: "*foo.com"}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
+		"wildcard mid domain":       {Allowlist: []AllowlistEntry{{Domain: "foo*.com"}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
+		"wildcard bare star":        {Allowlist: []AllowlistEntry{{Domain: "*"}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
+		"wildcard double star":      {Allowlist: []AllowlistEntry{{Domain: "**"}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
+		"wildcard dot only":         {Allowlist: []AllowlistEntry{{Domain: "*."}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
+		"bad log level":             {Allowlist: []AllowlistEntry{{Domain: "x"}}, CacheTTLSeconds: 1, LogLevel: "verbose", LogFormat: "json"},
+		"bad log format":            {Allowlist: []AllowlistEntry{{Domain: "x"}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "yaml"},
+		"duplicate placeholder":     {Allowlist: []AllowlistEntry{{Domain: "x"}}, Secrets: []SecretMapping{{Placeholder: "p", EnvVar: "A"}, {Placeholder: "p", EnvVar: "B"}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
+		"denylist empty domain":     {Allowlist: []AllowlistEntry{{Domain: "x"}}, Denylist: []DenylistEntry{{Domain: ""}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
+		"denylist bad port":         {Allowlist: []AllowlistEntry{{Domain: "x"}}, Denylist: []DenylistEntry{{Domain: "evil.com", Port: 70000}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
+		"denylist invalid wildcard": {Allowlist: []AllowlistEntry{{Domain: "x"}}, Denylist: []DenylistEntry{{Domain: "*foo.com"}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
+		"allowlist invalid regex":   {Allowlist: []AllowlistEntry{{Domain: "~([invalid"}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
+		"denylist invalid regex":    {Allowlist: []AllowlistEntry{{Domain: "x"}}, Denylist: []DenylistEntry{{Domain: "~([invalid"}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
+		"bad rate limit":            {Allowlist: []AllowlistEntry{{Domain: "x", RateLimit: "notvalid"}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
+		"bad time window":           {Allowlist: []AllowlistEntry{{Domain: "x", TimeWindow: "notvalid"}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"},
 	}
 	for name, p := range cases {
 		if err := validate(p); err == nil {
@@ -196,5 +217,25 @@ logging:
 	}
 	if pol.LogFormat != "text" {
 		t.Errorf("log format = %q, want %q", pol.LogFormat, "text")
+	}
+}
+
+func TestParse_Denylist(t *testing.T) {
+	p, err := parse([]byte(denylistYAML))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	pol, _ := p.GetPolicy()
+	if len(pol.Denylist) != 2 {
+		t.Fatalf("denylist len = %d, want 2", len(pol.Denylist))
+	}
+	if pol.Denylist[0].Domain != "evil.example.com" {
+		t.Errorf("denylist[0] domain = %q", pol.Denylist[0].Domain)
+	}
+	if pol.Denylist[1].Domain != "*.malware.net" {
+		t.Errorf("denylist[1] domain = %q", pol.Denylist[1].Domain)
+	}
+	if pol.Denylist[1].Port != 443 {
+		t.Errorf("denylist[1] port = %d, want 443", pol.Denylist[1].Port)
 	}
 }

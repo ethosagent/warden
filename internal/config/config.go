@@ -8,6 +8,8 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -26,6 +28,8 @@ type Policy struct {
 	// Allowlist is the set of permitted destinations. Anything not present is
 	// denied (default-deny).
 	Allowlist []AllowlistEntry
+	// Denylist is checked before the allowlist; deny wins on conflict.
+	Denylist []DenylistEntry
 	// Secrets maps placeholder tokens to their source env var (phase 1).
 	Secrets []SecretMapping
 	// CacheTTLSeconds is the secret cache time-to-live in seconds.
@@ -55,10 +59,18 @@ type SecretMapping struct {
 	EnvVar      string `yaml:"envVar"`
 }
 
+// DenylistEntry is a single explicitly-blocked destination. The denylist is
+// checked before the allowlist — deny wins on conflict.
+type DenylistEntry struct {
+	Domain string `yaml:"domain"`
+	Port   int    `yaml:"port,omitempty"`
+}
+
 // rawConfig mirrors the on-disk YAML shape (see configs/config.example.yaml).
 type rawConfig struct {
 	Policy struct {
 		Allowlist []AllowlistEntry `yaml:"allowlist"`
+		Denylist  []DenylistEntry  `yaml:"denylist"`
 	} `yaml:"policy"`
 	Secrets []SecretMapping `yaml:"secrets"`
 	Cache   struct {
@@ -103,6 +115,7 @@ func parse(data []byte) (*LocalYAMLProvider, error) {
 
 	policy := Policy{
 		Allowlist:       raw.Policy.Allowlist,
+		Denylist:        raw.Policy.Denylist,
 		Secrets:         raw.Secrets,
 		CacheTTLSeconds: raw.Cache.TTL,
 		LogLevel:        raw.Logging.Level,
@@ -118,6 +131,9 @@ func parse(data []byte) (*LocalYAMLProvider, error) {
 	}
 	for i := range policy.Allowlist {
 		policy.Allowlist[i].Domain = strings.ToLower(policy.Allowlist[i].Domain)
+	}
+	for i := range policy.Denylist {
+		policy.Denylist[i].Domain = strings.ToLower(policy.Denylist[i].Domain)
 	}
 	if policy.CacheTTLSeconds == 0 {
 		policy.CacheTTLSeconds = defaultCacheTTLSeconds
@@ -144,6 +160,40 @@ func validate(p Policy) error {
 		if e.Port < 0 || e.Port > 65535 {
 			return fmt.Errorf("config: policy.allowlist[%d]: port %d out of range", i, e.Port)
 		}
+		if e.RateLimit != "" {
+			parts := strings.SplitN(e.RateLimit, "/", 2)
+			if len(parts) != 2 {
+				return fmt.Errorf("config: policy.allowlist[%d]: invalid rateLimit format %q", i, e.RateLimit)
+			}
+			n, err := strconv.Atoi(parts[0])
+			if err != nil || n <= 0 {
+				return fmt.Errorf("config: policy.allowlist[%d]: invalid rateLimit count %q", i, e.RateLimit)
+			}
+			switch parts[1] {
+			case "second", "minute", "hour":
+			default:
+				return fmt.Errorf("config: policy.allowlist[%d]: invalid rateLimit period %q; must be second, minute, or hour", i, e.RateLimit)
+			}
+		}
+		if e.TimeWindow != "" {
+			parts := strings.SplitN(e.TimeWindow, "-", 2)
+			if len(parts) != 2 {
+				return fmt.Errorf("config: policy.allowlist[%d]: invalid timeWindow format %q", i, e.TimeWindow)
+			}
+			for _, p := range parts {
+				h, err := strconv.Atoi(p)
+				if err != nil || h < 0 || h > 23 {
+					return fmt.Errorf("config: policy.allowlist[%d]: invalid timeWindow hour %q", i, e.TimeWindow)
+				}
+			}
+		}
+		// Regex domain: ~<pattern>
+		if strings.HasPrefix(e.Domain, "~") {
+			if _, err := regexp.Compile(e.Domain[1:]); err != nil {
+				return fmt.Errorf("config: policy.allowlist[%d]: domain %q has invalid regex: %v", i, e.Domain, err)
+			}
+			continue
+		}
 		if strings.Contains(e.Domain, "*") {
 			if !strings.HasPrefix(e.Domain, "*.") || strings.Count(e.Domain, "*") != 1 {
 				return fmt.Errorf("config: policy.allowlist[%d]: domain %q has invalid wildcard; only \"*.suffix\" form is supported", i, e.Domain)
@@ -151,6 +201,33 @@ func validate(p Policy) error {
 			suffix := e.Domain[2:]
 			if suffix == "" || strings.HasPrefix(suffix, ".") {
 				return fmt.Errorf("config: policy.allowlist[%d]: domain %q has invalid wildcard; only \"*.suffix\" form is supported", i, e.Domain)
+			}
+		}
+	}
+	for i, e := range p.Denylist {
+		if strings.TrimSpace(e.Domain) == "" {
+			return fmt.Errorf("config: policy.denylist[%d]: domain is required", i)
+		}
+		if strings.ContainsRune(e.Domain, ' ') {
+			return fmt.Errorf("config: policy.denylist[%d]: domain %q contains spaces", i, e.Domain)
+		}
+		if e.Port < 0 || e.Port > 65535 {
+			return fmt.Errorf("config: policy.denylist[%d]: port %d out of range", i, e.Port)
+		}
+		// Regex domain: ~<pattern>
+		if strings.HasPrefix(e.Domain, "~") {
+			if _, err := regexp.Compile(e.Domain[1:]); err != nil {
+				return fmt.Errorf("config: policy.denylist[%d]: domain %q has invalid regex: %v", i, e.Domain, err)
+			}
+			continue
+		}
+		if strings.Contains(e.Domain, "*") {
+			if !strings.HasPrefix(e.Domain, "*.") || strings.Count(e.Domain, "*") != 1 {
+				return fmt.Errorf("config: policy.denylist[%d]: domain %q has invalid wildcard; only \"*.suffix\" form is supported", i, e.Domain)
+			}
+			suffix := e.Domain[2:]
+			if suffix == "" || strings.HasPrefix(suffix, ".") {
+				return fmt.Errorf("config: policy.denylist[%d]: domain %q has invalid wildcard; only \"*.suffix\" form is supported", i, e.Domain)
 			}
 		}
 	}

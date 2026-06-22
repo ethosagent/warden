@@ -17,9 +17,11 @@ policy:
     - domain: api.anthropic.com
     - domain: "*.internal.company.com"  # wildcard matches subdomains (not the apex)
       port: 8443                        # explicit port overrides inference
-      # --- Reserved for milestone 2 (parsed but NOT enforced in phase 1) ---
-      # rateLimit: "100/hour"           # per-rule rate limit
-      # timeWindow: "9-17"              # allowed hours (local time)
+      rateLimit: "100/hour"             # per-rule rate limit
+      timeWindow: "9-17"               # allowed hours (local time)
+  denylist:
+    - domain: evil.example.com
+    - domain: "*.malware.net"
 
 # Placeholder -> environment variable mapping for the phase-1 ENV secret
 # provider. The agent only ever holds the placeholder (e.g. openai_secret_001);
