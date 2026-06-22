@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -9,8 +10,10 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/ethosagent/warden/internal/admin"
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/config"
+	"github.com/ethosagent/warden/internal/dashboard"
 	"github.com/ethosagent/warden/internal/policy"
 	"github.com/ethosagent/warden/internal/proxy"
 	"github.com/ethosagent/warden/internal/secrets"
@@ -43,7 +46,11 @@ func newRunCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return runProxy(cmd, configPath, listenAddr, dbPath, caCert, caKey)
+			adminAddr, err := cmd.Flags().GetString("admin-listen")
+			if err != nil {
+				return err
+			}
+			return runProxy(cmd, configPath, listenAddr, dbPath, caCert, caKey, adminAddr)
 		},
 	}
 
@@ -51,13 +58,14 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().String("db", "warden.db", "SQLite analytics database path")
 	cmd.Flags().String("ca-cert", "", "path to proxy CA certificate for TLS termination")
 	cmd.Flags().String("ca-key", "", "path to proxy CA private key for TLS termination")
+	cmd.Flags().String("admin-listen", "127.0.0.1:9090", "admin + dashboard HTTP listen address")
 
 	return cmd
 }
 
 // runProxy loads config, wires dependencies behind their interfaces,
 // constructs the proxy, and starts serving.
-func runProxy(cmd *cobra.Command, configPath, listenAddr, dbPath, caCert, caKey string) error {
+func runProxy(cmd *cobra.Command, configPath, listenAddr, dbPath, caCert, caKey, adminAddr string) error {
 	cfgProvider, err := config.NewLocalYAMLProvider(configPath)
 	if err != nil {
 		return err
@@ -98,7 +106,22 @@ func runProxy(cmd *cobra.Command, configPath, listenAddr, dbPath, caCert, caKey 
 		return err
 	}
 
-	fmt.Fprintf(cmd.OutOrStdout(), "warden listening on %s\n", listenAddr)
+	// Start admin + dashboard HTTP server.
+	adminMux := http.NewServeMux()
+	adminSrv := admin.NewServer(secretProvider)
+	dashSrv := dashboard.NewServer(store, pol, secretProvider)
+	adminMux.Handle("/healthz", adminSrv.Handler())
+	adminMux.Handle("/admin/", adminSrv.Handler())
+	adminMux.Handle("/dashboard/", dashSrv.Handler())
+
+	go func() {
+		fmt.Fprintf(cmd.OutOrStdout(), "warden admin+dashboard on http://%s/dashboard/\n", adminAddr)
+		if err := http.ListenAndServe(adminAddr, adminMux); err != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "admin server: %v\n", err)
+		}
+	}()
+
+	fmt.Fprintf(cmd.OutOrStdout(), "warden proxy listening on %s\n", listenAddr)
 
 	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
