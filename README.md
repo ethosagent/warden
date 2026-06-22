@@ -1,73 +1,227 @@
 # Warden
 
-**An agent egress guardrail proxy.** Warden wraps an untrusted LLM agent runtime
-so it is *structurally incapable* of reaching the internet except through a
-mediating proxy that enforces allow/deny policy on every call and swaps
-placeholder tokens for real secrets at the network edge.
+**An agent egress guardrail proxy that makes it structurally impossible for an LLM agent to bypass security controls.**
 
-## The core invariant
+Warden sits between your AI agent and the internet as a MITM proxy. The agent has no direct network route — every outbound request passes through Warden, which enforces default-deny policy, swaps placeholder tokens for real secrets at the network edge, scans responses for threats, and logs every decision. The agent never holds a real credential and cannot reach a destination you haven't explicitly allowed.
 
-The wrapped agent has **no direct network route out**. The only path to the
-internet is through Warden, enforced by the container/orchestration runtime —
-not by asking the agent to behave. As a result the agent:
+Built for teams running LLM agents (coding assistants, support bots, autonomous workflows) who need a security boundary that doesn't rely on the agent behaving correctly.
 
-- **cannot exfiltrate data** — every destination is checked against a
-  default-deny allowlist;
-- **cannot make rogue calls** — anything off the allowlist is blocked at the TCP
-  floor;
-- **never holds a real secret** — it holds placeholders (e.g.
-  `openai_secret_001`); the real credential is injected at the edge and never
-  returns to the agent.
-
-## Positioning
-
-We are **agent-specific**, not a general egress firewall
-
-If you run normal applications, a general-purpose egress proxy is a simpler fit.
-If you run **agents**, Warden understands the protocols and threats agents
-generate.
+<p align="center">
+  <img src="docs/architecture.svg" alt="Warden Architecture" width="800"/>
+</p>
 
 ## Quickstart
 
 ```sh
-# Build the single binary.
-make build
+# Build
+go build -o warden ./cmd/proxy
 
-# Run the full check gate (format, vet, lint, build, test+race, coverage).
-scripts/check.sh
-
-# Install git hooks once (pre-commit = fast, pre-push = full gate).
-scripts/install-hooks.sh
-
-# Generate the bake-once proxy CA the agent will trust (TLS termination).
+# Generate the proxy CA cert (agent trusts this for TLS termination)
 scripts/gen-certs.sh
 
-# Run the proxy against the example config (serving lands in M1).
-go run ./cmd/proxy -config configs/config.example.yaml
+# Set a real API key (the agent never sees this)
+export OPENROUTER_API_KEY="sk-or-v1-..."
+
+# Start the proxy + dashboard
+./warden run \
+  --config configs/config.openrouter.yaml \
+  --listen 127.0.0.1:8080 \
+  --ca-cert certs/proxy-ca.crt \
+  --ca-key certs/proxy-ca.key \
+  --admin-listen 127.0.0.1:9090
 ```
 
-Configuration shape is documented in
-[`configs/config.example.yaml`](configs/config.example.yaml): a default-deny
-`policy.allowlist` (domain + optional port), placeholder↔envVar `secrets`, cache
-`ttl`, and `logging`.
+```sh
+# In another terminal — request through the proxy (agent sends placeholder, real key injected)
+curl -x http://127.0.0.1:8080 --cacert certs/proxy-ca.crt \
+  https://openrouter.ai/api/v1/models \
+  -H "Authorization: Bearer openrouter_secret_001"
 
-## Deployment templates
+# Blocked destination (default-deny)
+curl -x http://127.0.0.1:8080 --cacert certs/proxy-ca.crt \
+  https://evil.example.com/
 
-Warden requires a container runtime so the isolation is structural — there is no
-bare local-process mode. Templates encode the isolation:
+# Open the dashboard
+open http://127.0.0.1:9090/dashboard/
+```
 
-- **Local dev** — `deploy/compose/` — agent + proxy sidecar on an internal-only
-  network; the agent has no external route.
-- **Kubernetes** — `deploy/k8s/` — sidecar manifest + default-deny egress
-  `NetworkPolicy` (egress allowed only to the proxy).
-- **EC2 / VM** — `deploy/vm/` — proxy as a systemd service or container on the
-  instance; agent container with egress routed to the proxy.
+### Docker Compose (full isolation proof)
 
-## Layout
+```sh
+cd deploy/compose
+export OPENROUTER_API_KEY="sk-or-v1-..."
+docker compose -f docker-compose.yml -f docker-compose.openrouter.yml up --build
 
-See [`AGENTS.md`](AGENTS.md) for the package map, build/test commands, and
-conventions.
+# Exec into the agent container
+docker compose exec agent sh
+
+# Inside agent: works (via proxy)
+curl -x http://proxy:8080 https://openrouter.ai/api/v1/models \
+  -H "Authorization: Bearer openrouter_secret_001"
+
+# Inside agent: fails (no internet route — proves isolation)
+curl --connect-timeout 5 https://openrouter.ai/api/v1/models
+```
+
+## How It Works
+
+1. **Agent sends request** — the agent connects to Warden via `HTTPS_PROXY` and sends a `CONNECT` request. It holds only placeholder tokens (`openrouter_secret_001`), never real API keys.
+
+2. **TCP default-deny** — Warden checks the destination against the policy. If the domain/port isn't on the allowlist, the connection is dropped immediately. Denylist entries take absolute precedence.
+
+3. **TLS termination** — Warden presents a dynamically-generated certificate (signed by a CA the agent trusts), decrypts the traffic to plaintext, and verifies the domain.
+
+4. **Secret swap + forward** — Warden replaces placeholder tokens with real secrets in headers, query params, and body. It then forwards the request to the real destination with proper TLS. The real secret is injected at the edge and never returns to the agent.
+
+5. **Response scan + log** — Warden scans the response for prompt-injection patterns and credential leakage, logs the decision (method, URL, status, secret-by-reference — never bodies or raw secrets), and returns the response to the agent.
+
+## Features
+
+### Security
+
+- **Default-deny egress** — anything not on the allowlist is blocked at the TCP floor, including unknown protocols
+- **Secret isolation** — agent holds placeholders; proxy holds and injects real secrets; the agent is structurally incapable of seeing the real value
+- **TLS MITM** — dynamic per-domain leaf certs, CA validation at startup (IsCA + key match), PKCS#1/PKCS#8 support
+- **Response scanning** — prompt-injection detection (4 pattern families) and credential-leakage detection (7 pattern families) with base64/URL encoding awareness
+- **Denylist** — explicit deny rules with deny-wins-on-conflict precedence
+- **Secret-by-reference logging** — secrets are referenced by SHA-256 hash / last-4 / length in logs and analytics; raw values are never persisted
+
+### Policy
+
+- **Domain matching** — exact, `*.wildcard`, `~regex` patterns
+- **Rate limiting** — per-rule fixed-window (`100/hour`, `10/minute`, `5/second`)
+- **Time windows** — per-rule hour ranges (`9-17`)
+- **Port inference** — 443 for HTTPS, 80 for HTTP when omitted
+- **Any-match-wins evaluation** — a request matching multiple allowlist entries is allowed if any entry passes its constraints
+
+### Protocol Awareness
+
+- **HTTP/1.1** — full handler with keep-alive, streaming, secret swap in headers/query/body, content-length correction
+- **HTTP/2** — connection preface detection, routed to raw forwarding (gRPC handler planned)
+- **MCP** — JSON-RPC detection, tool-call parsing, default-deny `ToolPolicy`
+- **Unsupported protocols** — gated pass-through (still policy-checked at TCP/TLS, just not inspected)
+
+### Secret Providers
+
+- **ENV** — environment variable mapping (phase 1)
+- **Vault** — HashiCorp Vault KV v1/v2 via HTTP API (no SDK dependency)
+- **AWS Secrets Manager** — interface-only (wire in your AWS SDK client)
+- **GCP Secret Manager** — interface-only (wire in your GCP SDK client)
+
+### Observability
+
+- **SQLite analytics** — every decision logged locally (domain, port, method, URL, decision, status, secret-ref — no bodies)
+- **Dashboard** — built-in HTML UI at `/dashboard/` with auto-refresh, traffic table, policy view, secret references, blocked list, stats
+- **JSON APIs** — `/dashboard/api/traffic`, `/dashboard/api/policy`, `/dashboard/api/secrets`, `/dashboard/api/blocked`, `/dashboard/api/stats`
+- **Cost tracking** — estimated spend per LLM provider (OpenAI, Anthropic, Google, Cohere)
+- **Admin** — `GET /healthz` (liveness), `POST /admin/refresh-secrets` (drop cache + refetch)
+
+### Governance
+
+- **Signed audit receipts** — Ed25519 signed, verified against trusted external key
+- **Compliance mappings** — MITRE ATT&CK (T1048, T1071, T1552, T1059) + OWASP LLM Top 10 (LLM01, LLM02, LLM06, LLM07)
+- **Central aggregation** — sync worker batches local events to a central store with buffer-cap resilience
+- **Remote config** — HTTPS-only control-plane polling with last-known-good fallback
+
+### Deployment
+
+- **Docker Compose** — agent on internal-only network, proxy on internal + egress network; structural isolation via Docker network namespaces
+- **Kubernetes** — sidecar container + default-deny egress `NetworkPolicy`; agent can only reach the proxy
+- **VM / EC2** — systemd unit or container; agent container with egress routed to proxy
+- **Single binary** — `CGO_ENABLED=0`, pure-Go SQLite, multi-stage Dockerfile, non-root container
+
+## What Warden Does NOT Do
+
+- **Not a content moderation layer** — we sit at the network boundary outside the agent, not inside it. For in-process guardrails, look at NeMo Guardrails.
+- **No bare local-process mode** — agents can spawn containers and redirect traffic; host-process isolation is unwinnable. A container runtime is required.
+- **No full body logging** — by design, analytics store headers and metadata only. Bodies are never persisted.
+- **No automatic policy weakening** — the enforcing proxy is deterministic. LLM-assisted features (planned) are advisory only and cannot modify live policy.
+
+## Configuration
+
+```yaml
+policy:
+  allowlist:
+    - domain: api.openai.com             # port omitted → inferred 443
+    - domain: "*.internal.company.com"
+      port: 8443
+      rateLimit: "100/hour"
+      timeWindow: "9-17"
+  denylist:
+    - domain: evil.example.com
+    - domain: "*.malware.net"
+
+secrets:
+  - placeholder: openai_secret_001
+    envVar: OPENAI_API_KEY
+
+cache:
+  ttl: 3600
+
+logging:
+  level: info
+  format: json
+```
+
+See [`configs/config.example.yaml`](configs/config.example.yaml) for the full documented config.
+
+## Project Structure
+
+```
+cmd/proxy/              Entry point — wire deps + start (no business logic)
+internal/
+  config/               ConfigProvider interface + YAML + remote HTTPS provider
+  secrets/              SecretProvider interface + cache + ENV/Vault/AWS/GCP fetchers
+  policy/               Default-deny evaluator + denylist + regex + rate limit + time window
+  proxy/                TCP listener, TLS termination, HTTP handler, secret swap
+  protocol/             Protocol detection (HTTP/1.1, HTTP/2, MCP)
+  mcp/                  MCP tool-call parsing + ToolPolicy
+  analytics/            AnalyticsStore + SQLite + central aggregation + sync worker
+  scan/                 Injection + credential-leakage scanning
+  dashboard/            HTML dashboard + JSON APIs
+  audit/                Ed25519 signed receipts + compliance mappings
+  cost/                 LLM provider cost estimation
+  admin/                /healthz + /admin/refresh-secrets
+  agentid/              Agent identification
+deploy/
+  compose/              Docker Compose (local dev + e2e harness)
+  k8s/                  Kubernetes sidecar + NetworkPolicy
+  vm/                   VM/systemd documentation
+configs/                Example YAML configs
+scripts/                check.sh (CI gate), gen-certs.sh, install-hooks.sh
+test/
+  integration/          E2E tests (behind integration build tag)
+  fakes/                Hand-written test doubles for core interfaces
+```
+
+## Development
+
+```sh
+make build              # go build ./...
+make test               # go test -race ./...
+make check              # scripts/check.sh — the full CI gate
+make integration        # scripts/check.sh --integration
+make hooks              # install pre-commit + pre-push hooks
+make fmt                # gofmt -w .
+make lint               # golangci-lint run
+```
+
+## Roadmap
+
+See the [`plan/`](plan/) directory for detailed feature docs. Key upcoming work:
+
+- **Auth transforms** — OAuth2, AWS SigV4, GCP JWT, HMAC, mTLS ([plan](plan/Feat-Auth-Transforms.md))
+- **SSRF protection** — private IP blocking + DNS pinning ([plan](plan/Feat-SSRF-Protection.md))
+- **Deep MCP** — tool poisoning detection, call chain analysis, bidirectional scanning ([plan](plan/Feat-Deep-MCP.md))
+- **LLM policy judge** — inline fallback for ambiguous requests ([plan](plan/Feat-LLM-Policy.md))
+- **Policy builder** — auto-draft allowlist from observed traffic ([plan](plan/Feat-Policy-Builder.md))
+- **Policy eval** — replay history to measure policy accuracy ([plan](plan/Feat-Policy-Eval.md))
+- **Extension dimensions** — full product surface map ([plan](plan/Extension-Dimensions.md))
 
 ## License
 
-[Apache-2.0](LICENSE).
+[Apache-2.0](LICENSE)
+
+## Contributing
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md). Run `scripts/check.sh` before pushing — it's the same gate CI runs.

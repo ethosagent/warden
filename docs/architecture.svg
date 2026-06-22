@@ -1,0 +1,125 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 520" font-family="system-ui, -apple-system, sans-serif" font-size="13">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#6366f1"/>
+    </marker>
+    <marker id="arrow-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#ef4444"/>
+    </marker>
+    <marker id="arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#22c55e"/>
+    </marker>
+    <linearGradient id="agent-bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#fef3c7"/>
+      <stop offset="100%" stop-color="#fde68a"/>
+    </linearGradient>
+    <linearGradient id="warden-bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#e0e7ff"/>
+      <stop offset="100%" stop-color="#c7d2fe"/>
+    </linearGradient>
+    <linearGradient id="internet-bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#dcfce7"/>
+      <stop offset="100%" stop-color="#bbf7d0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="900" height="520" rx="12" fill="#0f172a"/>
+
+  <!-- Title -->
+  <text x="450" y="36" text-anchor="middle" fill="#e2e8f0" font-size="18" font-weight="700">Warden — Request Lifecycle</text>
+
+  <!-- Agent Box -->
+  <rect x="30" y="60" width="160" height="400" rx="10" fill="url(#agent-bg)" stroke="#f59e0b" stroke-width="2"/>
+  <text x="110" y="88" text-anchor="middle" fill="#92400e" font-weight="700" font-size="15">Agent</text>
+  <text x="110" y="108" text-anchor="middle" fill="#92400e" font-size="11">No internet route</text>
+  <text x="110" y="126" text-anchor="middle" fill="#92400e" font-size="11">Holds placeholders only</text>
+
+  <rect x="50" y="145" width="120" height="36" rx="6" fill="#fff" stroke="#d97706" stroke-width="1.5"/>
+  <text x="110" y="168" text-anchor="middle" fill="#92400e" font-size="12" font-weight="600">CONNECT</text>
+
+  <rect x="50" y="200" width="120" height="36" rx="6" fill="#fff" stroke="#d97706" stroke-width="1.5"/>
+  <text x="110" y="218" text-anchor="middle" fill="#92400e" font-size="11">Authorization:</text>
+  <text x="110" y="231" text-anchor="middle" fill="#d97706" font-size="10" font-weight="600">Bearer placeholder_001</text>
+
+  <!-- Warden Box -->
+  <rect x="240" y="60" width="420" height="400" rx="10" fill="url(#warden-bg)" stroke="#6366f1" stroke-width="2"/>
+  <text x="450" y="88" text-anchor="middle" fill="#3730a3" font-weight="700" font-size="15">Warden Proxy</text>
+  <text x="450" y="108" text-anchor="middle" fill="#3730a3" font-size="11">The only path to the internet</text>
+
+  <!-- TCP Layer -->
+  <rect x="260" y="130" width="380" height="46" rx="8" fill="#312e81" stroke="#4f46e5" stroke-width="1.5"/>
+  <text x="280" y="149" fill="#c7d2fe" font-size="12" font-weight="700">1. TCP Floor</text>
+  <text x="280" y="166" fill="#a5b4fc" font-size="11">Default-deny by destination IP/port + SSRF protection</text>
+
+  <!-- TLS Layer -->
+  <rect x="260" y="186" width="380" height="46" rx="8" fill="#312e81" stroke="#4f46e5" stroke-width="1.5"/>
+  <text x="280" y="205" fill="#c7d2fe" font-size="12" font-weight="700">2. TLS Termination</text>
+  <text x="280" y="222" fill="#a5b4fc" font-size="11">Dynamic leaf certs · Decrypt to plaintext · Domain check</text>
+
+  <!-- Protocol Detection -->
+  <rect x="260" y="242" width="380" height="46" rx="8" fill="#312e81" stroke="#4f46e5" stroke-width="1.5"/>
+  <text x="280" y="261" fill="#c7d2fe" font-size="12" font-weight="700">3. Protocol Detection</text>
+  <text x="280" y="278" fill="#a5b4fc" font-size="11">HTTP/1.1 · HTTP/2 · MCP · WebSocket · Raw passthrough</text>
+
+  <!-- Secret Swap -->
+  <rect x="260" y="298" width="180" height="46" rx="8" fill="#1e1b4b" stroke="#7c3aed" stroke-width="1.5"/>
+  <text x="280" y="317" fill="#ddd6fe" font-size="12" font-weight="700">4. Secret Swap</text>
+  <text x="280" y="334" fill="#c4b5fd" font-size="11">placeholder → real key</text>
+
+  <!-- Scan -->
+  <rect x="460" y="298" width="180" height="46" rx="8" fill="#1e1b4b" stroke="#7c3aed" stroke-width="1.5"/>
+  <text x="480" y="317" fill="#ddd6fe" font-size="12" font-weight="700">5. Response Scan</text>
+  <text x="480" y="334" fill="#c4b5fd" font-size="11">Injection · Credential leak</text>
+
+  <!-- Analytics -->
+  <rect x="260" y="354" width="180" height="46" rx="8" fill="#172554" stroke="#3b82f6" stroke-width="1.5"/>
+  <text x="280" y="373" fill="#bfdbfe" font-size="12" font-weight="700">6. Log Decision</text>
+  <text x="280" y="390" fill="#93c5fd" font-size="11">SQLite · Secret-by-ref only</text>
+
+  <!-- Dashboard -->
+  <rect x="460" y="354" width="180" height="46" rx="8" fill="#172554" stroke="#3b82f6" stroke-width="1.5"/>
+  <text x="480" y="373" fill="#bfdbfe" font-size="12" font-weight="700">Dashboard</text>
+  <text x="480" y="390" fill="#93c5fd" font-size="11">Traffic · Policy · Stats</text>
+
+  <!-- Policy Badge -->
+  <rect x="260" y="410" width="380" height="36" rx="8" fill="#7f1d1d" stroke="#ef4444" stroke-width="1.5"/>
+  <text x="450" y="433" text-anchor="middle" fill="#fecaca" font-size="12" font-weight="700">Default-Deny Policy · Denylist · Rate Limits · Time Windows · Regex</text>
+
+  <!-- Internet Box -->
+  <rect x="710" y="60" width="160" height="400" rx="10" fill="url(#internet-bg)" stroke="#22c55e" stroke-width="2"/>
+  <text x="790" y="88" text-anchor="middle" fill="#166534" font-weight="700" font-size="15">Internet</text>
+  <text x="790" y="108" text-anchor="middle" fill="#166534" font-size="11">Real APIs</text>
+
+  <rect x="730" y="145" width="120" height="36" rx="6" fill="#fff" stroke="#16a34a" stroke-width="1.5"/>
+  <text x="790" y="163" text-anchor="middle" fill="#166534" font-size="11">Authorization:</text>
+  <text x="790" y="176" text-anchor="middle" fill="#16a34a" font-size="10" font-weight="600">Bearer sk-real-key...</text>
+
+  <rect x="730" y="200" width="120" height="36" rx="6" fill="#fff" stroke="#16a34a" stroke-width="1.5"/>
+  <text x="790" y="223" text-anchor="middle" fill="#166534" font-size="12" font-weight="600">200 OK</text>
+
+  <!-- Arrows -->
+  <!-- Agent → Warden -->
+  <line x1="190" y1="163" x2="255" y2="153" stroke="#6366f1" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <line x1="190" y1="218" x2="255" y2="320" stroke="#6366f1" stroke-width="2" stroke-dasharray="6,4" marker-end="url(#arrow)"/>
+
+  <!-- Warden → Internet (allowed) -->
+  <line x1="645" y1="163" x2="725" y2="163" stroke="#22c55e" stroke-width="2.5" marker-end="url(#arrow-green)"/>
+
+  <!-- Internet → Warden (response) -->
+  <line x1="725" y1="218" x2="645" y2="320" stroke="#22c55e" stroke-width="2" stroke-dasharray="6,4" marker-end="url(#arrow-green)"/>
+
+  <!-- Blocked indicator -->
+  <rect x="50" y="300" width="120" height="32" rx="6" fill="#7f1d1d" stroke="#ef4444" stroke-width="1.5"/>
+  <text x="110" y="320" text-anchor="middle" fill="#fecaca" font-size="12" font-weight="700">403 Blocked</text>
+  <line x1="255" y1="153" x2="170" y2="310" stroke="#ef4444" stroke-width="1.5" stroke-dasharray="4,4" marker-end="url(#arrow-red)"/>
+
+  <!-- Legend -->
+  <text x="40" y="495" fill="#94a3b8" font-size="11">Allowed flow</text>
+  <line x1="120" y1="491" x2="160" y2="491" stroke="#22c55e" stroke-width="2.5"/>
+  <text x="180" y="495" fill="#94a3b8" font-size="11">Denied flow</text>
+  <line x1="252" y1="491" x2="292" y2="491" stroke="#ef4444" stroke-width="2" stroke-dasharray="4,4"/>
+  <text x="310" y="495" fill="#94a3b8" font-size="11">Secret swap</text>
+  <line x1="385" y1="491" x2="425" y2="491" stroke="#6366f1" stroke-width="2" stroke-dasharray="6,4"/>
+  <text x="450" y="495" fill="#64748b" font-size="11">Agent never holds real secrets · Logs never contain secret values or full bodies</text>
+</svg>
