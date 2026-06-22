@@ -1,0 +1,13 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Warden" style="color:#0F172A">
+  <!-- Single-color mark. Inherits `currentColor`: set CSS `color` (e.g. #0F172A on light, #F1F5F9 on dark). -->
+  <!-- shield boundary -->
+  <path d="M128 42 C156 42 188 48 204 52 C208 53 210 56 210 60 C210 96 208 150 170 188 C156 202 142 212 128 220 C114 212 100 202 86 188 C48 150 46 96 46 60 C46 56 48 53 52 52 C68 48 100 42 128 42 Z"
+        fill="none" stroke="currentColor" stroke-width="11" stroke-linejoin="round"/>
+  <!-- contained agent -->
+  <circle cx="96" cy="118" r="12" fill="currentColor"/>
+  <!-- gate / checkpoint -->
+  <rect x="145" y="93" width="11" height="17" rx="3" fill="currentColor"/>
+  <rect x="145" y="126" width="11" height="17" rx="3" fill="currentColor"/>
+  <!-- single egress arrow -->
+  <path d="M108 112 L156 112 L156 100 L192 118 L156 136 L156 124 L108 124 Z" fill="currentColor"/>
+</svg>

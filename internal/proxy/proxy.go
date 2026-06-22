@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/ethosagent/warden/internal/analytics"
+	"github.com/ethosagent/warden/internal/auth"
 	"github.com/ethosagent/warden/internal/policy"
 	"github.com/ethosagent/warden/internal/secrets"
 )
@@ -35,6 +36,7 @@ type Config struct {
 	CACertPath       string
 	CAKeyPath        string
 	PlaceholderNames []string
+	Transformers     []auth.RequestTransformer
 }
 
 // Proxy is the egress guardrail front door. M1 adds Serve()/accept loops; the
@@ -125,12 +127,12 @@ func New(cfg Config) (*Proxy, error) {
 		}
 	}
 
-	dialer := &net.Dialer{Timeout: 10 * time.Second}
-	p.dialFunc = dialer.Dial
-	p.dialTLS = func(network, addr string, cfg *tls.Config) (*tls.Conn, error) {
-		dialer := &net.Dialer{Timeout: 10 * time.Second}
-		return tls.DialWithDialer(dialer, network, addr, cfg)
+	safeDial, err := NewSafeDialer(10*time.Second, nil)
+	if err != nil {
+		return nil, fmt.Errorf("proxy: safe dialer: %w", err)
 	}
+	p.dialFunc = safeDial.Dial
+	p.dialTLS = safeDial.DialTLS
 
 	return p, nil
 }

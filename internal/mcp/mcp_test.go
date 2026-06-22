@@ -1,6 +1,9 @@
 package mcp
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestParseToolCall_Valid(t *testing.T) {
 	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"web_search","arguments":{"query":"hello"}}}`)
@@ -56,7 +59,7 @@ func TestParseToolCall_InvalidJSON(t *testing.T) {
 }
 
 func TestToolPolicy_AllowedTool(t *testing.T) {
-	p := NewToolPolicy([]string{"web_search", "read_file"}, nil)
+	p := NewToolPolicy([]string{"web_search", "read_file"}, nil, nil)
 	if !p.Evaluate("web_search") {
 		t.Error("expected web_search to be allowed")
 	}
@@ -66,7 +69,7 @@ func TestToolPolicy_AllowedTool(t *testing.T) {
 }
 
 func TestToolPolicy_DeniedPrecedence(t *testing.T) {
-	p := NewToolPolicy([]string{"web_search", "exec_command"}, []string{"exec_command"})
+	p := NewToolPolicy([]string{"web_search", "exec_command"}, []string{"exec_command"}, nil)
 	if !p.Evaluate("web_search") {
 		t.Error("expected web_search to be allowed")
 	}
@@ -76,7 +79,7 @@ func TestToolPolicy_DeniedPrecedence(t *testing.T) {
 }
 
 func TestToolPolicy_DefaultDeny(t *testing.T) {
-	p := NewToolPolicy(nil, nil)
+	p := NewToolPolicy(nil, nil, nil)
 	if p.Evaluate("anything") {
 		t.Error("expected all tools denied when both lists empty (default-deny)")
 	}
@@ -86,7 +89,7 @@ func TestToolPolicy_DefaultDeny(t *testing.T) {
 }
 
 func TestToolPolicy_DeniedOnly(t *testing.T) {
-	p := NewToolPolicy(nil, []string{"dangerous_tool"})
+	p := NewToolPolicy(nil, []string{"dangerous_tool"}, nil)
 	// No allowlist configured, so default-deny applies to all tools.
 	if p.Evaluate("safe_tool") {
 		t.Error("expected safe_tool to be denied (no allowlist, default-deny)")
@@ -109,5 +112,46 @@ func TestParseToolCall_MissingJSONRPCVersion(t *testing.T) {
 	_, err := ParseToolCall(body)
 	if err == nil {
 		t.Error("expected error for missing jsonrpc version")
+	}
+}
+
+func TestToolPolicy_RateLimitExceeded(t *testing.T) {
+	limits := map[string]int{"web_search": 3}
+	p := NewToolPolicy([]string{"web_search"}, nil, limits)
+	for i := 0; i < 3; i++ {
+		if !p.Evaluate("web_search") {
+			t.Errorf("call %d should be allowed", i+1)
+		}
+	}
+	if p.Evaluate("web_search") {
+		t.Error("4th call should be denied (rate limit exceeded)")
+	}
+}
+
+func TestToolPolicy_RateLimitWithinLimit(t *testing.T) {
+	limits := map[string]int{"web_search": 5}
+	p := NewToolPolicy([]string{"web_search"}, nil, limits)
+	for i := 0; i < 5; i++ {
+		if !p.Evaluate("web_search") {
+			t.Errorf("call %d should be allowed", i+1)
+		}
+	}
+}
+
+func TestToolPolicy_RateLimitWindowResets(t *testing.T) {
+	limits := map[string]int{"web_search": 2}
+	p := NewToolPolicy([]string{"web_search"}, nil, limits)
+	// Use up the limit
+	p.Evaluate("web_search")
+	p.Evaluate("web_search")
+	if p.Evaluate("web_search") {
+		t.Error("3rd call should be denied")
+	}
+	// Manually reset the window to simulate time passing
+	p.mu.Lock()
+	p.counters["web_search"].windowEnd = time.Now().Add(-time.Second)
+	p.mu.Unlock()
+	if !p.Evaluate("web_search") {
+		t.Error("call after window reset should be allowed")
 	}
 }

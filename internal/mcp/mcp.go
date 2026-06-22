@@ -6,6 +6,8 @@ package mcp
 import (
 	"encoding/json"
 	"fmt"
+	"sync"
+	"time"
 )
 
 // ToolCall represents a parsed MCP tool invocation.
@@ -60,16 +62,28 @@ func ParseToolCall(body []byte) (*ToolCall, error) {
 
 // ToolPolicy evaluates whether a tool call is allowed.
 type ToolPolicy struct {
-	allowed map[string]struct{} // tool names explicitly allowed
-	denied  map[string]struct{} // tool names denied; takes precedence over allowed
+	allowed    map[string]struct{}
+	denied     map[string]struct{}
+	rateLimits map[string]int // tool name -> max calls per minute
+
+	mu       sync.Mutex
+	counters map[string]*toolRateState
+}
+
+type toolRateState struct {
+	count     int
+	windowEnd time.Time
 }
 
 // NewToolPolicy creates a ToolPolicy. Empty allowed list means deny all
-// (default-deny). Denied list takes precedence over allowed.
-func NewToolPolicy(allowed, denied []string) *ToolPolicy {
+// (default-deny). Denied list takes precedence over allowed. rateLimits
+// maps tool names to their maximum allowed calls per minute.
+func NewToolPolicy(allowed, denied []string, rateLimits map[string]int) *ToolPolicy {
 	p := &ToolPolicy{
-		allowed: make(map[string]struct{}, len(allowed)),
-		denied:  make(map[string]struct{}, len(denied)),
+		allowed:    make(map[string]struct{}, len(allowed)),
+		denied:     make(map[string]struct{}, len(denied)),
+		rateLimits: rateLimits,
+		counters:   make(map[string]*toolRateState),
 	}
 	for _, name := range allowed {
 		p.allowed[name] = struct{}{}
@@ -82,7 +96,7 @@ func NewToolPolicy(allowed, denied []string) *ToolPolicy {
 
 // Evaluate returns true if the tool name is allowed by this policy.
 // Denied takes precedence over allowed. If no allowlist is configured,
-// all tools are denied (default-deny).
+// all tools are denied (default-deny). Rate limits are enforced per-tool.
 func (p *ToolPolicy) Evaluate(toolName string) bool {
 	// Denylist takes precedence.
 	if _, ok := p.denied[toolName]; ok {
@@ -92,7 +106,25 @@ func (p *ToolPolicy) Evaluate(toolName string) bool {
 	if len(p.allowed) == 0 {
 		return false
 	}
-	// Otherwise, must be in the allowed list.
-	_, ok := p.allowed[toolName]
-	return ok
+	// Must be in the allowed list.
+	if _, ok := p.allowed[toolName]; !ok {
+		return false
+	}
+	// Check rate limit.
+	if limit, ok := p.rateLimits[toolName]; ok {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		now := time.Now()
+		state, exists := p.counters[toolName]
+		if !exists || now.After(state.windowEnd) {
+			p.counters[toolName] = &toolRateState{count: 1, windowEnd: now.Add(time.Minute)}
+			return true
+		}
+		state.count++
+		if state.count > limit {
+			return false
+		}
+		return true
+	}
+	return true
 }

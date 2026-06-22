@@ -116,6 +116,15 @@ func (p *Proxy) handleHTTP(tlsConn *tls.Conn, br *bufio.Reader, domain string, p
 			}
 		}
 
+		// Apply auth transforms
+		for _, t := range p.cfg.Transformers {
+			if err := t.Transform(req); err != nil {
+				writeErrorResponse(tlsConn, 502, "Bad Gateway")
+				_ = req.Body.Close()
+				return
+			}
+		}
+
 		// Forward to upstream
 		upstream, err := p.dialTLS("tcp", net.JoinHostPort(domain, fmt.Sprintf("%d", port)), &tls.Config{ServerName: domain})
 		if err != nil {

@@ -1,0 +1,29 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Warden">
+  <defs>
+    <linearGradient id="shield" x1="128" y1="42" x2="128" y2="220" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1E293B"/>
+      <stop offset="1" stop-color="#0B1220"/>
+    </linearGradient>
+    <!-- swap-at-the-edge: amber placeholder -> teal real secret, transition at the gate -->
+    <linearGradient id="swap" x1="96" y1="118" x2="192" y2="118" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F59E0B"/>
+      <stop offset="0.48" stop-color="#F59E0B"/>
+      <stop offset="0.60" stop-color="#2DD4BF"/>
+      <stop offset="1" stop-color="#2DD4BF"/>
+    </linearGradient>
+  </defs>
+
+  <!-- shield: the sealed boundary / default-deny -->
+  <path d="M128 42 C156 42 188 48 204 52 C208 53 210 56 210 60 C210 96 208 150 170 188 C156 202 142 212 128 220 C114 212 100 202 86 188 C48 150 46 96 46 60 C46 56 48 53 52 52 C68 48 100 42 128 42 Z"
+        fill="url(#shield)" stroke="#2DD4BF" stroke-opacity="0.18" stroke-width="2"/>
+
+  <!-- the contained agent (untrusted) -->
+  <circle cx="96" cy="118" r="13" fill="#F59E0B"/>
+
+  <!-- the gate / checkpoint: the single controlled opening -->
+  <rect x="144" y="92" width="12" height="18" rx="3" fill="#2DD4BF"/>
+  <rect x="144" y="126" width="12" height="18" rx="3" fill="#2DD4BF"/>
+
+  <!-- the one egress: arrow threading the gate, swapped amber->teal at the edge -->
+  <path d="M108 112 L156 112 L156 100 L192 118 L156 136 L156 124 L108 124 Z" fill="url(#swap)"/>
+</svg>
