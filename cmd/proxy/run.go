@@ -35,19 +35,29 @@ func newRunCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return runProxy(cmd, configPath, listenAddr, dbPath)
+			caCert, err := cmd.Flags().GetString("ca-cert")
+			if err != nil {
+				return err
+			}
+			caKey, err := cmd.Flags().GetString("ca-key")
+			if err != nil {
+				return err
+			}
+			return runProxy(cmd, configPath, listenAddr, dbPath, caCert, caKey)
 		},
 	}
 
 	cmd.Flags().String("listen", "127.0.0.1:8080", "loopback/pod-internal listen address")
 	cmd.Flags().String("db", "warden.db", "SQLite analytics database path")
+	cmd.Flags().String("ca-cert", "", "path to proxy CA certificate for TLS termination")
+	cmd.Flags().String("ca-key", "", "path to proxy CA private key for TLS termination")
 
 	return cmd
 }
 
 // runProxy loads config, wires dependencies behind their interfaces,
 // constructs the proxy, and starts serving.
-func runProxy(cmd *cobra.Command, configPath, listenAddr, dbPath string) error {
+func runProxy(cmd *cobra.Command, configPath, listenAddr, dbPath, caCert, caKey string) error {
 	cfgProvider, err := config.NewLocalYAMLProvider(configPath)
 	if err != nil {
 		return err
@@ -81,6 +91,8 @@ func runProxy(cmd *cobra.Command, configPath, listenAddr, dbPath string) error {
 		Secrets:          secretProvider,
 		Analytics:        store,
 		PlaceholderNames: placeholders,
+		CACertPath:       caCert,
+		CAKeyPath:        caKey,
 	})
 	if err != nil {
 		return err
