@@ -160,9 +160,9 @@ func TestServe_DenyUnknownDomain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
-	fmt.Fprintf(conn, "CONNECT evil.example.com:443 HTTP/1.1\r\nHost: evil.example.com:443\r\n\r\n")
+	_, _ = fmt.Fprintf(conn, "CONNECT evil.example.com:443 HTTP/1.1\r\nHost: evil.example.com:443\r\n\r\n")
 	br := bufio.NewReader(conn)
 	resp, err := br.ReadString('\n')
 	if err != nil {
@@ -173,7 +173,7 @@ func TestServe_DenyUnknownDomain(t *testing.T) {
 	}
 
 	// Wait for connection to close to ensure handleConn has completed.
-	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	_, _ = io.ReadAll(br)
 
 	events := store.snapshot()
@@ -190,7 +190,7 @@ func TestServe_AllowAndTunnel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer echoLn.Close()
+	defer func() { _ = echoLn.Close() }()
 	go func() {
 		for {
 			c, err := echoLn.Accept()
@@ -563,7 +563,7 @@ func TestTLS_NonTLSFallback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer echoLn.Close()
+	defer func() { _ = echoLn.Close() }()
 	go func() {
 		for {
 			c, err := echoLn.Accept()
@@ -671,7 +671,7 @@ func TestTLS_BackwardCompat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer echoLn.Close()
+	defer func() { _ = echoLn.Close() }()
 	go func() {
 		for {
 			c, err := echoLn.Accept()

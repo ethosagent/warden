@@ -29,7 +29,7 @@ func (p *Proxy) handleHTTP(tlsConn *tls.Conn, br *bufio.Reader, domain string, p
 			hostOnly = h
 		}
 		if !strings.EqualFold(hostOnly, domain) {
-			req.Body.Close()
+			_ = req.Body.Close()
 			return
 		}
 
@@ -44,12 +44,12 @@ func (p *Proxy) handleHTTP(tlsConn *tls.Conn, br *bufio.Reader, domain string, p
 				bodyBytes, readErr := io.ReadAll(io.LimitReader(req.Body, maxBodySwapSize+1))
 				if readErr != nil {
 					writeErrorResponse(tlsConn, 502, "Bad Gateway")
-					req.Body.Close()
+					_ = req.Body.Close()
 					return
 				}
 				if int64(len(bodyBytes)) > maxBodySwapSize {
 					writeErrorResponse(tlsConn, 413, "Request body too large for secret substitution")
-					req.Body.Close()
+					_ = req.Body.Close()
 					return
 				}
 				bodyStr = string(bodyBytes)
@@ -60,7 +60,7 @@ func (p *Proxy) handleHTTP(tlsConn *tls.Conn, br *bufio.Reader, domain string, p
 				realValue, err := p.cfg.Secrets.GetSecret(placeholder)
 				if err != nil {
 					writeErrorResponse(tlsConn, 503, "Service Unavailable")
-					req.Body.Close()
+					_ = req.Body.Close()
 					return
 				}
 				swapped := false
@@ -120,22 +120,22 @@ func (p *Proxy) handleHTTP(tlsConn *tls.Conn, br *bufio.Reader, domain string, p
 		upstream, err := p.dialTLS("tcp", net.JoinHostPort(domain, fmt.Sprintf("%d", port)), &tls.Config{ServerName: domain})
 		if err != nil {
 			writeErrorResponse(tlsConn, 502, "Bad Gateway")
-			req.Body.Close()
+			_ = req.Body.Close()
 			return
 		}
 
 		if err := req.Write(upstream); err != nil {
-			upstream.Close()
+			_ = upstream.Close()
 			writeErrorResponse(tlsConn, 502, "Bad Gateway")
-			req.Body.Close()
+			_ = req.Body.Close()
 			return
 		}
 
 		resp, err := http.ReadResponse(bufio.NewReader(upstream), req)
 		if err != nil {
-			upstream.Close()
+			_ = upstream.Close()
 			writeErrorResponse(tlsConn, 502, "Bad Gateway")
-			req.Body.Close()
+			_ = req.Body.Close()
 			return
 		}
 
@@ -161,9 +161,9 @@ func (p *Proxy) handleHTTP(tlsConn *tls.Conn, br *bufio.Reader, domain string, p
 		})
 
 		// Cleanup
-		req.Body.Close()
-		resp.Body.Close()
-		upstream.Close()
+		_ = req.Body.Close()
+		_ = resp.Body.Close()
+		_ = upstream.Close()
 
 		if writeErr != nil || closeAfter {
 			return

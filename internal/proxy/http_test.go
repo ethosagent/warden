@@ -70,7 +70,7 @@ func startBackend(t *testing.T, caCert *x509.Certificate, caKey interface{}) (ne
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { ln.Close() })
+	t.Cleanup(func() { _ = ln.Close() })
 
 	rb := &recordingBackend{
 		statusCode: 200,
@@ -84,12 +84,12 @@ func startBackend(t *testing.T, caCert *x509.Certificate, caKey interface{}) (ne
 				return
 			}
 			go func() {
-				defer raw.Close()
+				defer func() { _ = raw.Close() }()
 				tlsSrv := tls.Server(raw, &tls.Config{Certificates: []tls.Certificate{backendTLSCert}})
 				if err := tlsSrv.Handshake(); err != nil {
 					return
 				}
-				defer tlsSrv.Close()
+				defer func() { _ = tlsSrv.Close() }()
 
 				backendBR := bufio.NewReader(tlsSrv)
 				for {
@@ -104,7 +104,7 @@ func startBackend(t *testing.T, caCert *x509.Certificate, caKey interface{}) (ne
 					rb.headers = req.Header.Clone()
 					bodyBytes, _ := io.ReadAll(req.Body)
 					rb.body = string(bodyBytes)
-					req.Body.Close()
+					_ = req.Body.Close()
 					sc := rb.statusCode
 					body := rb.respBody
 					rb.mu.Unlock()
@@ -184,15 +184,15 @@ func dialProxyAndConnect(t *testing.T, proxyAddr string, domain string, caCertPE
 		t.Fatal(err)
 	}
 
-	fmt.Fprintf(conn, "CONNECT %s:443 HTTP/1.1\r\nHost: %s:443\r\n\r\n", domain, domain)
+	_, _ = fmt.Fprintf(conn, "CONNECT %s:443 HTTP/1.1\r\nHost: %s:443\r\n\r\n", domain, domain)
 	br := bufio.NewReader(conn)
 	resp, err := br.ReadString('\n')
 	if err != nil {
-		conn.Close()
+		_ = conn.Close()
 		t.Fatal(err)
 	}
 	if !strings.Contains(resp, "200") {
-		conn.Close()
+		_ = conn.Close()
 		t.Fatalf("expected 200 from CONNECT, got %q", resp)
 	}
 	// Consume rest of CONNECT response headers
@@ -210,10 +210,10 @@ func dialProxyAndConnect(t *testing.T, proxyAddr string, domain string, caCertPE
 		RootCAs:    caPool,
 	})
 	if err := tlsClient.Handshake(); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		t.Fatalf("client TLS handshake: %v", err)
 	}
-	t.Cleanup(func() { tlsClient.Close() })
+	t.Cleanup(func() { _ = tlsClient.Close() })
 	return tlsClient
 }
 
@@ -248,7 +248,7 @@ func TestHTTP_SecretSwapInHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 200 {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
@@ -300,7 +300,7 @@ func TestHTTP_SecretSwapInQuery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 200 {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
@@ -336,7 +336,7 @@ func TestHTTP_SecretSwapInQuery_SpecialChars(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 200 {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
@@ -382,7 +382,7 @@ func TestHTTP_SecretSwapInBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 200 {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
@@ -421,7 +421,7 @@ func TestHTTP_NoSwapWithoutPlaceholders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 200 {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
@@ -457,7 +457,7 @@ func TestHTTP_502OnUpstreamFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 502 {
 		t.Fatalf("expected 502, got %d", resp.StatusCode)
@@ -486,7 +486,7 @@ func TestHTTP_DecisionLogging(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 200 {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
@@ -547,8 +547,8 @@ func TestHTTP_KeepAlive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("response 1: %v", err)
 	}
-	io.ReadAll(resp1.Body)
-	resp1.Body.Close()
+	_, _ = io.ReadAll(resp1.Body)
+	_ = resp1.Body.Close()
 	if resp1.StatusCode != 200 {
 		t.Fatalf("req1: expected 200, got %d", resp1.StatusCode)
 	}
@@ -564,8 +564,8 @@ func TestHTTP_KeepAlive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("response 2: %v", err)
 	}
-	io.ReadAll(resp2.Body)
-	resp2.Body.Close()
+	_, _ = io.ReadAll(resp2.Body)
+	_ = resp2.Body.Close()
 	if resp2.StatusCode != 200 {
 		t.Fatalf("req2: expected 200, got %d", resp2.StatusCode)
 	}
@@ -606,15 +606,15 @@ func TestHTTP_ConnectionClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	io.ReadAll(resp.Body)
-	resp.Body.Close()
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 
 	// The proxy should close the connection after this response.
 	// A subsequent read should fail.
-	tlsClient.SetReadDeadline(time.Now().Add(time.Second))
+	_ = tlsClient.SetReadDeadline(time.Now().Add(time.Second))
 	buf := make([]byte, 1)
 	_, err = tlsClient.Read(buf)
 	if err == nil {
@@ -647,7 +647,7 @@ func TestHTTP_OversizeBody413(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 413 {
 		t.Fatalf("expected 413, got %d", resp.StatusCode)

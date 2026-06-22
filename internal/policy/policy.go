@@ -231,10 +231,7 @@ func (e *Evaluator) checkRateLimit(key string, rl parsedRateLimit) bool {
 		return true
 	}
 	state.count++
-	if state.count > rl.limit {
-		return false
-	}
-	return true
+	return state.count <= rl.limit
 }
 
 func parseRateLimit(s string) (parsedRateLimit, error) {

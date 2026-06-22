@@ -43,7 +43,7 @@ func (p *Proxy) Serve(ctx context.Context) error {
 }
 
 func (p *Proxy) handleConn(conn net.Conn) {
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	br := bufio.NewReader(conn)
 	line, err := br.ReadString('\n')

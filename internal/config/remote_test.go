@@ -14,7 +14,7 @@ import (
 func TestRemoteProvider_SuccessfulPull(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"allowlist": [{"domain": "api.example.com"}]}`))
+		_, _ = w.Write([]byte(`{"allowlist": [{"domain": "api.example.com"}]}`))
 	}))
 	defer srv.Close()
 
@@ -51,7 +51,7 @@ func TestRemoteProvider_SuccessfulPull(t *testing.T) {
 func TestRemoteProvider_Unreachable(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"allowlist": [{"domain": "api.example.com"}]}`))
+		_, _ = w.Write([]byte(`{"allowlist": [{"domain": "api.example.com"}]}`))
 	}))
 
 	rp, err := NewRemoteProvider(srv.URL, "test-token")
@@ -83,7 +83,7 @@ func TestRemoteProvider_Unreachable(t *testing.T) {
 
 func TestRemoteProvider_InvalidJSON(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`not json at all`))
+		_, _ = w.Write([]byte(`not json at all`))
 	}))
 	defer srv.Close()
 
@@ -107,7 +107,7 @@ func TestRemoteProvider_AuthToken(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"allowlist": [{"domain": "api.example.com"}]}`))
+		_, _ = w.Write([]byte(`{"allowlist": [{"domain": "api.example.com"}]}`))
 	}))
 	defer srv.Close()
 
@@ -144,7 +144,7 @@ func TestRemoteProvider_PollingUpdates(t *testing.T) {
 			resp = `{"allowlist": [{"domain": "second.example.com"}]}`
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(resp))
+		_, _ = w.Write([]byte(resp))
 	}))
 	defer srv.Close()
 
