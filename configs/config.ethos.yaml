@@ -1,0 +1,24 @@
+# Warden config for running Ethos behind Warden — ALLOW-ALL, full visibility.
+#
+# Goal: route every Ethos egress call through Warden and SEE it — domain, method,
+# URL, status — without blocking anything yet. Tighten the allowlist later.
+#
+# `~.*` is a regex catch-all: it allows every host. Warden's front door is
+# CONNECT-only, so this covers all HTTPS (:443) traffic. TLS is terminated so the
+# method/URL/headers are visible (logged headers-only, secret-by-reference).
+
+policy:
+  allowlist:
+    - domain: "~.*"            # allow every host (HTTPS/443). Visibility-first.
+
+cache:
+  ttl: 3600
+
+logging:
+  level: info
+  format: json                 # structured JSON decision logs (one per call)
+
+observability:
+  enabled: true
+  metrics:
+    enabled: true              # Prometheus /metrics on the admin listener
