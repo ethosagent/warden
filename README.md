@@ -78,6 +78,40 @@ curl --noproxy '*' --connect-timeout 5 https://openrouter.ai/api/v1/models
 
 Dashboard: **http://localhost:9090/dashboard/**.
 
+### Run a real agent behind Warden (Ethos example)
+
+[`deploy/compose/docker-compose.ethos.yml`](deploy/compose/docker-compose.ethos.yml) wraps the
+[Ethos](https://github.com/ethosagent/ethos) agent runtime so **all of its egress flows through
+Warden** with full visibility. Ethos runs on an internal-only network (no direct internet); Warden
+is its sole route out. The policy is **allow-all** (`~.*`) for now, so nothing is blocked — you just
+*see* every call on the dashboard.
+
+```sh
+# 1. Generate the proxy CA (once)
+OUT_DIR=deploy/compose/certs ./scripts/gen-certs.sh
+
+# 2. Bring up Ethos + Warden
+docker compose -f deploy/compose/docker-compose.ethos.yml up --build
+```
+
+- **Ethos UI:** http://localhost:3000
+- **Warden egress dashboard:** http://localhost:9090/dashboard/ — every call Ethos makes, live.
+
+The compose encodes everything needed to route and observe a real agent:
+
+| Concern | How it's handled |
+|---|---|
+| **No bypass** | Ethos is on an `internal: true` network — its only egress is Warden; a direct call simply fails. |
+| **Proxy routing** | `HTTP(S)_PROXY=http://warden:8080`, plus **`NODE_USE_ENV_PROXY=1`** — Node's built-in `fetch` ignores `HTTPS_PROXY` without it, so agent calls would otherwise go direct and fail (`fetch failed`). |
+| **TLS trust** | The proxy CA is mounted and trusted via `NODE_EXTRA_CA_CERTS` / `SSL_CERT_FILE` / `REQUESTS_CA_BUNDLE`, so Warden can terminate TLS and see URLs/methods/status. |
+| **UI access** | An internal network blocks host port-publishing, so a tiny `socat` sidecar forwards the Ethos UI to the host **without** giving Ethos an internet route. |
+| **Persistent audit** | A `warden-data` volume holds the analytics db so it survives restarts/redeploys. |
+
+To put **your own** service behind Warden, copy the `ethos` service block: attach it to
+`ethos-internal` only, set the proxy env (incl. `NODE_USE_ENV_PROXY=1` for Node runtimes), trust the
+CA, and add its destinations to the allowlist. Full walkthrough:
+[docs/docker-end-to-end.md](docs/docker-end-to-end.md).
+
 ## How It Works
 
 1. **Agent sends request** — the agent connects to Warden via `HTTPS_PROXY` and sends a `CONNECT` request. It holds only placeholder tokens (`openrouter_secret_001`), never real API keys.
