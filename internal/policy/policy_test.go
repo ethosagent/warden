@@ -15,11 +15,12 @@ func evalWithDenylist(allow []config.AllowlistEntry, deny []config.DenylistEntry
 	return NewEvaluator(config.Policy{Allowlist: allow, Denylist: deny})
 }
 
-// Invariant: default-deny — a non-allowlisted destination is blocked.
+// Invariant: default-deny — a non-allowlisted destination does not match. It
+// returns NoMatch (not Allow), so callers comparing against Allow still block.
 func TestEvaluate_DefaultDeny(t *testing.T) {
 	e := evalFor(config.AllowlistEntry{Domain: "api.openai.com"})
-	if d := e.Evaluate("evil.example.com", 443, SchemeHTTPS); d != Deny {
-		t.Fatalf("non-allowlisted host = %v, want Deny", d)
+	if d := e.Evaluate("evil.example.com", 443, SchemeHTTPS); d != NoMatch {
+		t.Fatalf("non-allowlisted host = %v, want NoMatch", d)
 	}
 }
 
@@ -35,8 +36,8 @@ func TestEvaluate_PortInferenceHTTPS(t *testing.T) {
 	if d := e.Evaluate("api.openai.com", 443, SchemeHTTPS); d != Allow {
 		t.Errorf("inferred 443 = %v, want Allow", d)
 	}
-	if d := e.Evaluate("api.openai.com", 8443, SchemeHTTPS); d != Deny {
-		t.Errorf("port 8443 against inferred-443 entry = %v, want Deny", d)
+	if d := e.Evaluate("api.openai.com", 8443, SchemeHTTPS); d != NoMatch {
+		t.Errorf("port 8443 against inferred-443 entry = %v, want NoMatch", d)
 	}
 }
 
@@ -45,8 +46,8 @@ func TestEvaluate_PortInferenceHTTP(t *testing.T) {
 	if d := e.Evaluate("plain.example.com", 80, SchemeHTTP); d != Allow {
 		t.Errorf("inferred 80 = %v, want Allow", d)
 	}
-	if d := e.Evaluate("plain.example.com", 443, SchemeHTTP); d != Deny {
-		t.Errorf("443 against inferred-80 entry = %v, want Deny", d)
+	if d := e.Evaluate("plain.example.com", 443, SchemeHTTP); d != NoMatch {
+		t.Errorf("443 against inferred-80 entry = %v, want NoMatch", d)
 	}
 }
 
@@ -55,8 +56,8 @@ func TestEvaluate_ExplicitPort(t *testing.T) {
 	if d := e.Evaluate("svc.internal", 8443, SchemeHTTPS); d != Allow {
 		t.Errorf("explicit port match = %v, want Allow", d)
 	}
-	if d := e.Evaluate("svc.internal", 443, SchemeHTTPS); d != Deny {
-		t.Errorf("wrong port = %v, want Deny", d)
+	if d := e.Evaluate("svc.internal", 443, SchemeHTTPS); d != NoMatch {
+		t.Errorf("wrong port = %v, want NoMatch", d)
 	}
 }
 
@@ -69,8 +70,8 @@ func TestEvaluate_Wildcard(t *testing.T) {
 		t.Errorf("wildcard nested subdomain = %v, want Allow", d)
 	}
 	// Apex must not match a "*." wildcard.
-	if d := e.Evaluate("internal.company.com", 443, SchemeHTTPS); d != Deny {
-		t.Errorf("apex against wildcard = %v, want Deny", d)
+	if d := e.Evaluate("internal.company.com", 443, SchemeHTTPS); d != NoMatch {
+		t.Errorf("apex against wildcard = %v, want NoMatch", d)
 	}
 }
 
@@ -82,8 +83,8 @@ func TestEvaluate_CaseInsensitiveAndTrailingDot(t *testing.T) {
 }
 
 func TestDecisionString(t *testing.T) {
-	if Allow.String() != "allow" || Deny.String() != "deny" {
-		t.Errorf("decision strings: %q / %q", Allow.String(), Deny.String())
+	if Allow.String() != "allow" || Deny.String() != "deny" || NoMatch.String() != "no-match" {
+		t.Errorf("decision strings: %q / %q / %q", Allow.String(), Deny.String(), NoMatch.String())
 	}
 }
 
@@ -95,8 +96,8 @@ func TestEvaluate_RegexDomain(t *testing.T) {
 	if d := e.Evaluate("api.anthropic.com", 443, SchemeHTTPS); d != Allow {
 		t.Errorf("regex match anthropic = %v, want Allow", d)
 	}
-	if d := e.Evaluate("api.evil.com", 443, SchemeHTTPS); d != Deny {
-		t.Errorf("regex no match = %v, want Deny", d)
+	if d := e.Evaluate("api.evil.com", 443, SchemeHTTPS); d != NoMatch {
+		t.Errorf("regex no match = %v, want NoMatch", d)
 	}
 }
 

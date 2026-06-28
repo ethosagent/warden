@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -37,6 +38,69 @@ type Policy struct {
 	// LogLevel and LogFormat configure observability output.
 	LogLevel  string `json:"-"`
 	LogFormat string `json:"-"`
+
+	// Judge configures the optional inline LLM judge. Disabled by default; when
+	// disabled every field is zero-valued and harmless.
+	Judge JudgeConfig `json:"-"`
+	// Agents holds per-agent natural-language policies consulted by the judge.
+	Agents []AgentPolicy `json:"-"`
+	// Advisory configures the optional offline advisory mode (CLI-only).
+	Advisory AdvisoryConfig `json:"-"`
+	// Observability configures OTel metrics + structured logging. Off by default.
+	Observability ObservabilityConfig `json:"-"`
+}
+
+// ObservabilityConfig configures the OTel emission seam (Phase 1: metrics +
+// structured logging). Everything is off by default; a zero value is harmless.
+// Traces (Phase 2) and collector recipes (Phase 3) are deferred.
+type ObservabilityConfig struct {
+	// Enabled gates the entire subsystem.
+	Enabled bool
+	// ServiceName populates the OTel resource (defaults to "warden").
+	ServiceName string
+	// MetricsEnabled gates the Prometheus /metrics exporter on the admin
+	// listener. Defaults to true when the block is present.
+	MetricsEnabled bool
+	// OTLPEndpoint, when non-empty, enables an outbound OTLP/grpc metric push to
+	// a collector (e.g. "otel-collector:4317").
+	OTLPEndpoint string
+	// ResourceAttributes are extra bounded resource key/value pairs. Never put
+	// secrets here.
+	ResourceAttributes map[string]string
+}
+
+// JudgeConfig configures the inline LLM judge. The LLM is never authoritative:
+// it is consulted only for requests that match neither the allowlist nor the
+// denylist, and it fails closed (deny) on any error.
+type JudgeConfig struct {
+	Enabled        bool
+	Provider       string
+	Model          string
+	BaseURL        string
+	APIKeyEnv      string
+	Timeout        time.Duration
+	CircuitBreaker CircuitBreakerConfig
+	CacheTTL       time.Duration
+	// RateLimit caps judge invocations, e.g. "100/minute".
+	RateLimit string
+}
+
+// CircuitBreakerConfig bounds consecutive LLM failures before the judge trips
+// open and fails closed for the cooldown.
+type CircuitBreakerConfig struct {
+	MaxFailures int
+	Cooldown    time.Duration
+}
+
+// AgentPolicy is one agent's natural-language policy text.
+type AgentPolicy struct {
+	ID     string
+	Policy string
+}
+
+// AdvisoryConfig configures offline advisory mode.
+type AdvisoryConfig struct {
+	Enabled bool
 }
 
 // DeepCopy returns a deep copy of the policy, with all slices independently
@@ -46,6 +110,14 @@ func (p Policy) DeepCopy() Policy {
 	cp.Allowlist = append([]AllowlistEntry(nil), p.Allowlist...)
 	cp.Denylist = append([]DenylistEntry(nil), p.Denylist...)
 	cp.Secrets = append([]SecretMapping(nil), p.Secrets...)
+	cp.Agents = append([]AgentPolicy(nil), p.Agents...)
+	if p.Observability.ResourceAttributes != nil {
+		ra := make(map[string]string, len(p.Observability.ResourceAttributes))
+		for k, v := range p.Observability.ResourceAttributes {
+			ra[k] = v
+		}
+		cp.Observability.ResourceAttributes = ra
+	}
 	return cp
 }
 
@@ -90,6 +162,51 @@ type rawConfig struct {
 		Level  string `yaml:"level"`
 		Format string `yaml:"format"`
 	} `yaml:"logging"`
+	Judge         *rawJudge         `yaml:"judge"`
+	Agents        []rawAgent        `yaml:"agents"`
+	Advisory      *rawAdvisory      `yaml:"advisory"`
+	Observability *rawObservability `yaml:"observability"`
+}
+
+// rawObservability mirrors the on-disk `observability:` block. Pointer so an
+// absent block is distinct from an explicit (disabled) block. KnownFields(true)
+// is strict, so this MUST be registered or configs with the block fail to parse.
+type rawObservability struct {
+	Enabled     bool   `yaml:"enabled"`
+	ServiceName string `yaml:"serviceName"`
+	Metrics     *struct {
+		Enabled      *bool  `yaml:"enabled"`
+		OTLPEndpoint string `yaml:"otlpEndpoint"`
+	} `yaml:"metrics"`
+	ResourceAttributes map[string]string `yaml:"resourceAttributes"`
+}
+
+// rawJudge mirrors the on-disk `judge:` block. Pointer so absence is distinct
+// from an all-zero (disabled) block.
+type rawJudge struct {
+	Enabled        bool   `yaml:"enabled"`
+	Provider       string `yaml:"provider"`
+	Model          string `yaml:"model"`
+	BaseURL        string `yaml:"baseURL"`
+	APIKeyEnv      string `yaml:"apiKeyEnv"`
+	Timeout        string `yaml:"timeout"`
+	CircuitBreaker struct {
+		MaxFailures int    `yaml:"maxFailures"`
+		Cooldown    string `yaml:"cooldown"`
+	} `yaml:"circuitBreaker"`
+	Cache struct {
+		TTL string `yaml:"ttl"`
+	} `yaml:"cache"`
+	RateLimit string `yaml:"rateLimit"`
+}
+
+type rawAgent struct {
+	ID     string `yaml:"id"`
+	Policy string `yaml:"policy"`
+}
+
+type rawAdvisory struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 // defaultCacheTTLSeconds is used when the config omits cache.ttl.
@@ -149,10 +266,116 @@ func parse(data []byte) (*LocalYAMLProvider, error) {
 		policy.CacheTTLSeconds = defaultCacheTTLSeconds
 	}
 
+	for _, a := range raw.Agents {
+		policy.Agents = append(policy.Agents, AgentPolicy{ID: a.ID, Policy: a.Policy})
+	}
+	if raw.Advisory != nil {
+		policy.Advisory.Enabled = raw.Advisory.Enabled
+	}
+	if raw.Judge != nil {
+		jc, err := parseJudge(raw.Judge)
+		if err != nil {
+			return nil, err
+		}
+		policy.Judge = jc
+	}
+	policy.Observability = parseObservability(raw.Observability)
+
 	if err := validate(policy); err != nil {
 		return nil, err
 	}
 	return &LocalYAMLProvider{policy: policy}, nil
+}
+
+// judge defaults applied when the corresponding field is omitted.
+const (
+	defaultJudgeTimeout     = 5 * time.Second
+	defaultJudgeMaxFailures = 5
+	defaultJudgeCooldown    = 30 * time.Second
+	defaultJudgeCacheTTL    = 5 * time.Minute
+)
+
+// parseJudge converts the raw judge block into a typed JudgeConfig, parsing
+// durations and applying defaults. Validation of cross-field requirements (e.g.
+// model + apiKeyEnv when enabled) happens in validate.
+func parseJudge(r *rawJudge) (JudgeConfig, error) {
+	jc := JudgeConfig{
+		Enabled:   r.Enabled,
+		Provider:  r.Provider,
+		Model:     r.Model,
+		BaseURL:   r.BaseURL,
+		APIKeyEnv: r.APIKeyEnv,
+		RateLimit: r.RateLimit,
+		Timeout:   defaultJudgeTimeout,
+		CacheTTL:  defaultJudgeCacheTTL,
+		CircuitBreaker: CircuitBreakerConfig{
+			MaxFailures: defaultJudgeMaxFailures,
+			Cooldown:    defaultJudgeCooldown,
+		},
+	}
+	if r.Provider == "" {
+		jc.Provider = "openai"
+	}
+	if err := parseDurationField("judge.timeout", r.Timeout, &jc.Timeout); err != nil {
+		return JudgeConfig{}, err
+	}
+	if err := parseDurationField("judge.cache.ttl", r.Cache.TTL, &jc.CacheTTL); err != nil {
+		return JudgeConfig{}, err
+	}
+	if err := parseDurationField("judge.circuitBreaker.cooldown", r.CircuitBreaker.Cooldown, &jc.CircuitBreaker.Cooldown); err != nil {
+		return JudgeConfig{}, err
+	}
+	if r.CircuitBreaker.MaxFailures != 0 {
+		jc.CircuitBreaker.MaxFailures = r.CircuitBreaker.MaxFailures
+	}
+	return jc, nil
+}
+
+// parseObservability converts the raw observability block into a typed config,
+// applying defaults and honoring standard OTEL_* env vars (which override the
+// file). An absent block yields a disabled, harmless zero value.
+func parseObservability(r *rawObservability) ObservabilityConfig {
+	var oc ObservabilityConfig
+	if r != nil {
+		oc.Enabled = r.Enabled
+		oc.ServiceName = r.ServiceName
+		// Metrics default ON when the block is present (served at /metrics).
+		oc.MetricsEnabled = true
+		if r.Metrics != nil {
+			if r.Metrics.Enabled != nil {
+				oc.MetricsEnabled = *r.Metrics.Enabled
+			}
+			oc.OTLPEndpoint = r.Metrics.OTLPEndpoint
+		}
+		oc.ResourceAttributes = r.ResourceAttributes
+	}
+	if oc.ServiceName == "" {
+		oc.ServiceName = "warden"
+	}
+	// Env wins over config (standard OTel precedence).
+	if v := strings.TrimSpace(os.Getenv("OTEL_SERVICE_NAME")); v != "" {
+		oc.ServiceName = v
+	}
+	if v := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")); v != "" {
+		oc.OTLPEndpoint = v
+	}
+	return oc
+}
+
+// parseDurationField parses a Go duration string into *dst when non-empty.
+func parseDurationField(name, raw string, dst *time.Duration) error {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return fmt.Errorf("config: %s %q is not a valid duration: %w", name, raw, err)
+	}
+	if d < 0 {
+		return fmt.Errorf("config: %s must not be negative", name)
+	}
+	*dst = d
+	return nil
 }
 
 // validate enforces the invariants the proxy relies on at runtime.
@@ -268,6 +491,64 @@ func validate(p Policy) error {
 	case "json", "text":
 	default:
 		return fmt.Errorf("config: logging.format %q is invalid; must be one of: json, text", p.LogFormat)
+	}
+	if err := validateAgents(p.Agents); err != nil {
+		return err
+	}
+	if err := validateJudge(p.Judge, p.Agents); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateAgents enforces that agent ids are present and unique. Agent policies
+// may be configured even when the judge is disabled (they are simply unused).
+func validateAgents(agents []AgentPolicy) error {
+	seen := make(map[string]struct{}, len(agents))
+	for i, a := range agents {
+		if strings.TrimSpace(a.ID) == "" {
+			return fmt.Errorf("config: agents[%d]: id is required", i)
+		}
+		if _, dup := seen[a.ID]; dup {
+			return fmt.Errorf("config: agents: duplicate id %q", a.ID)
+		}
+		seen[a.ID] = struct{}{}
+	}
+	return nil
+}
+
+// validateJudge enforces the judge's runtime requirements only when it is
+// enabled, so a disabled judge with zero-valued config is always valid.
+func validateJudge(j JudgeConfig, agents []AgentPolicy) error {
+	if !j.Enabled {
+		return nil
+	}
+	if strings.TrimSpace(j.Model) == "" {
+		return fmt.Errorf("config: judge.model is required when judge.enabled")
+	}
+	if strings.TrimSpace(j.APIKeyEnv) == "" {
+		return fmt.Errorf("config: judge.apiKeyEnv is required when judge.enabled")
+	}
+	if strings.TrimSpace(j.BaseURL) == "" {
+		return fmt.Errorf("config: judge.baseURL is required when judge.enabled")
+	}
+	if len(agents) == 0 {
+		return fmt.Errorf("config: at least one agents[] policy is required when judge.enabled")
+	}
+	if j.RateLimit != "" {
+		parts := strings.SplitN(j.RateLimit, "/", 2)
+		if len(parts) != 2 {
+			return fmt.Errorf("config: judge.rateLimit %q is invalid; want N/period", j.RateLimit)
+		}
+		n, err := strconv.Atoi(parts[0])
+		if err != nil || n <= 0 {
+			return fmt.Errorf("config: judge.rateLimit count %q is invalid", j.RateLimit)
+		}
+		switch parts[1] {
+		case "second", "minute", "hour":
+		default:
+			return fmt.Errorf("config: judge.rateLimit period %q is invalid; must be second, minute, or hour", j.RateLimit)
+		}
 	}
 	return nil
 }

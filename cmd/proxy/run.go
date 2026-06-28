@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"os"
@@ -11,9 +12,13 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/ethosagent/warden/internal/admin"
+	"github.com/ethosagent/warden/internal/agentid"
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/dashboard"
+	"github.com/ethosagent/warden/internal/llm"
+	"github.com/ethosagent/warden/internal/llmpolicy"
+	"github.com/ethosagent/warden/internal/observability"
 	"github.com/ethosagent/warden/internal/policy"
 	"github.com/ethosagent/warden/internal/proxy"
 	"github.com/ethosagent/warden/internal/secrets"
@@ -87,13 +92,43 @@ func runProxy(cmd *cobra.Command, configPath, listenAddr, dbPath, caCert, caKey,
 		return err
 	}
 
+	// Structured logger from logging.{level,format}. Built once and threaded into
+	// the proxy; lifecycle logs below also use it.
+	logger := observability.NewLogger(cmd.OutOrStdout(), pol.LogLevel, pol.LogFormat)
+
+	// OTel metrics emitter (off by default). New returns a nil *Metrics + nil
+	// handler when disabled, and record calls are nil-safe no-ops.
+	metrics, metricsHandler, shutdownObs, err := observability.New(observability.Config{
+		Enabled:            pol.Observability.Enabled,
+		ServiceName:        pol.Observability.ServiceName,
+		ServiceVersion:     version,
+		MetricsEnabled:     pol.Observability.MetricsEnabled,
+		OTLPEndpoint:       pol.Observability.OTLPEndpoint,
+		ResourceAttributes: pol.Observability.ResourceAttributes,
+	})
+	if err != nil {
+		return err
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdownObs(ctx)
+	}()
+
 	store, err := analytics.NewSQLiteStore(dbPath, 0)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = store.Close() }()
 
-	p, err := proxy.New(proxy.Config{
+	// Optional inline judge. When judge.enabled is false, judge is nil and the
+	// proxy behaves exactly as before (NoMatch default-denies).
+	judge, agentID, err := buildJudge(pol, listenAddr)
+	if err != nil {
+		return err
+	}
+
+	cfg := proxy.Config{
 		ListenAddr:       listenAddr,
 		Policy:           policy.NewEvaluator(pol),
 		Secrets:          secretProvider,
@@ -101,7 +136,16 @@ func runProxy(cmd *cobra.Command, configPath, listenAddr, dbPath, caCert, caKey,
 		PlaceholderNames: placeholders,
 		CACertPath:       caCert,
 		CAKeyPath:        caKey,
-	})
+		AgentID:          agentID,
+		Metrics:          metrics,
+		Logger:           logger,
+	}
+	if judge != nil {
+		cfg.Judge = judge
+		logger.Info("inline LLM judge enabled", "agent", agentID, "model", pol.Judge.Model)
+	}
+
+	p, err := proxy.New(cfg)
 	if err != nil {
 		return err
 	}
@@ -113,18 +157,89 @@ func runProxy(cmd *cobra.Command, configPath, listenAddr, dbPath, caCert, caKey,
 	adminMux.Handle("/healthz", adminSrv.Handler())
 	adminMux.Handle("/admin/", adminSrv.Handler())
 	adminMux.Handle("/dashboard/", dashSrv.Handler())
+	// Prometheus /metrics lives ONLY on the admin (loopback/private) listener,
+	// never the agent-facing proxy port. Registered only when metrics are on.
+	if metricsHandler != nil {
+		adminMux.Handle("/metrics", metricsHandler)
+		logger.Info("metrics endpoint enabled", "path", "/metrics", "addr", adminAddr)
+	}
 
 	go func() {
-		fmt.Fprintf(cmd.OutOrStdout(), "warden admin+dashboard on http://%s/dashboard/\n", adminAddr)
+		logger.Info("admin+dashboard listening", "url", fmt.Sprintf("http://%s/dashboard/", adminAddr))
 		if err := http.ListenAndServe(adminAddr, adminMux); err != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "admin server: %v\n", err)
+			logger.Error("admin server stopped", "error", err)
 		}
 	}()
 
-	fmt.Fprintf(cmd.OutOrStdout(), "warden proxy listening on %s\n", listenAddr)
+	logger.Info("proxy listening", "addr", listenAddr)
 
 	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	return p.Serve(ctx)
+}
+
+// buildJudge constructs the inline judge when judge.enabled, returning the
+// judge and the agent id derived from the listen port. When the judge is
+// disabled it returns (nil, "", nil) and the proxy default-denies NoMatch as
+// before. Config has already validated cross-field requirements; here we only
+// resolve the API key from its env var.
+func buildJudge(pol config.Policy, listenAddr string) (proxy.Judge, string, error) {
+	// Resolve the agent id from the listen port (one proxy per agent).
+	agentID := defaultAgentID(pol, listenAddr)
+	if !pol.Judge.Enabled {
+		return nil, agentID, nil
+	}
+
+	apiKey := os.Getenv(pol.Judge.APIKeyEnv)
+	if apiKey == "" {
+		return nil, "", fmt.Errorf("judge.enabled but env var %s is empty (it holds the LLM API key)", pol.Judge.APIKeyEnv)
+	}
+	client, err := llm.NewClient(llm.Config{
+		BaseURL: pol.Judge.BaseURL,
+		Model:   pol.Judge.Model,
+		APIKey:  apiKey,
+		Timeout: pol.Judge.Timeout,
+	})
+	if err != nil {
+		return nil, "", fmt.Errorf("build LLM client: %w", err)
+	}
+
+	policies := make(map[string]string, len(pol.Agents))
+	for _, a := range pol.Agents {
+		policies[a.ID] = a.Policy
+	}
+
+	judge := llmpolicy.NewJudge(client, policies, llmpolicy.JudgeOptions{
+		CacheTTL:    pol.Judge.CacheTTL,
+		Timeout:     pol.Judge.Timeout,
+		MaxFailures: pol.Judge.CircuitBreaker.MaxFailures,
+		Cooldown:    pol.Judge.CircuitBreaker.Cooldown,
+	})
+	return judgeAdapter{judge}, agentID, nil
+}
+
+// judgeAdapter bridges *llmpolicy.Judge to the proxy.Judge interface. The proxy
+// deliberately does not import llmpolicy (its Judge/Verdict are consumer-side);
+// this thin wiring adapter lives in cmd/, where both packages are already in
+// scope.
+type judgeAdapter struct{ j *llmpolicy.Judge }
+
+func (a judgeAdapter) Evaluate(agentID, method, url, host, contentType string, hasAuth bool) proxy.Verdict {
+	v := a.j.Evaluate(agentID, method, url, host, contentType, hasAuth)
+	return proxy.Verdict{Decision: v.Decision, Reason: v.Reason}
+}
+
+// defaultAgentID derives the agent identity. When exactly one agent policy is
+// configured, its id is used directly so it matches the configured policy key;
+// otherwise the port-binding identifier labels the agent by listen port.
+func defaultAgentID(pol config.Policy, listenAddr string) string {
+	if len(pol.Agents) == 1 {
+		return pol.Agents[0].ID
+	}
+	port := 0
+	if _, p, err := proxy.SplitHostPort(listenAddr); err == nil {
+		port = p
+	}
+	return agentid.NewPortBindingIdentifier("agent").Identify(port)
 }

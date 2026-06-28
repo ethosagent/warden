@@ -60,7 +60,13 @@ func Evaluate(events []analytics.Event, candidate config.Policy) *EvalResult {
 		}
 
 		candidateDecision := eval.Evaluate(e.Domain, port, scheme)
+		// Replay scores the STATIC policy outcome only (no judge in offline
+		// replay): a NoMatch would be default-denied, so collapse it to "deny"
+		// to compare against the historically recorded allow/deny decision.
 		candidateStr := candidateDecision.String()
+		if candidateDecision == policy.NoMatch {
+			candidateStr = "deny"
+		}
 
 		if candidateStr == e.Decision {
 			result.Agreed++

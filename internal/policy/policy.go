@@ -48,18 +48,30 @@ func inferredPort(entryPort int, scheme Scheme) int {
 type Decision int
 
 const (
-	// Deny is the default outcome for any destination not on the allowlist.
+	// Deny is an explicit deny — the destination matched a denylist entry.
+	// It is the zero value so existing callers that treat "!= Allow" as deny
+	// keep their default-deny posture unchanged.
 	Deny Decision = iota
 	// Allow means the destination matched an allowlist entry.
 	Allow
+	// NoMatch means the destination matched neither the denylist nor the
+	// allowlist. It is distinct from Deny so the pipeline can route ambiguous
+	// requests to the LLM judge when enabled. Callers that compare against
+	// Allow still default-deny on NoMatch (NoMatch != Allow), so behaviour is
+	// unchanged when the judge is disabled.
+	NoMatch
 )
 
 // String renders a decision for logging.
 func (d Decision) String() string {
-	if d == Allow {
+	switch d {
+	case Allow:
 		return "allow"
+	case NoMatch:
+		return "no-match"
+	default:
+		return "deny"
 	}
-	return "deny"
 }
 
 // Evaluator decides whether a destination is allowed under a policy. It is
@@ -147,9 +159,12 @@ func NewEvaluator(p config.Policy) *Evaluator {
 	return e
 }
 
-// Evaluate returns Allow only if (domain, port) matches an allowlist entry
-// under the given scheme and passes rate-limit / time-window checks; otherwise
-// Deny (default-deny). The denylist is checked first — deny wins on conflict.
+// Evaluate returns Allow if (domain, port) matches an allowlist entry under the
+// given scheme and passes rate-limit / time-window checks; Deny if it matches a
+// denylist entry; and NoMatch if it matches neither. The denylist is checked
+// first — deny wins on conflict. Callers that compare against Allow still
+// default-deny on NoMatch, preserving the default-deny invariant; NoMatch
+// exists only so the pipeline can optionally consult the LLM judge.
 func (e *Evaluator) Evaluate(domain string, port int, scheme Scheme) Decision {
 	domain = strings.ToLower(strings.TrimSuffix(domain, "."))
 
@@ -160,7 +175,11 @@ func (e *Evaluator) Evaluate(domain string, port int, scheme Scheme) Decision {
 		}
 	}
 
-	// Then check allowlist.
+	// Then check allowlist. matchedEntry tracks whether the destination matched
+	// an allowlist entry by domain+port even if a rate-limit / time-window guard
+	// later rejected it: such a request is an explicit Deny (the destination IS
+	// allowlisted, just throttled), never NoMatch — it must not reach the judge.
+	matchedEntry := false
 	for i, entry := range e.allowlist {
 		if inferredPort(entry.Port, scheme) != port {
 			continue
@@ -168,6 +187,7 @@ func (e *Evaluator) Evaluate(domain string, port int, scheme Scheme) Decision {
 		if !e.domainMatches(entry.Domain, domain) {
 			continue
 		}
+		matchedEntry = true
 
 		// Time window check (hours in server local time).
 		// If this entry fails, try next entry.
@@ -195,7 +215,12 @@ func (e *Evaluator) Evaluate(domain string, port int, scheme Scheme) Decision {
 
 		return Allow
 	}
-	return Deny
+	if matchedEntry {
+		// Destination is allowlisted but every matching entry rejected it via a
+		// rate-limit / time-window guard: explicit Deny, not judge-eligible.
+		return Deny
+	}
+	return NoMatch
 }
 
 // domainMatches reports whether host matches pattern. Supports:

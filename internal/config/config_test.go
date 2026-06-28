@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 const goodYAML = `
@@ -237,5 +238,171 @@ func TestParse_Denylist(t *testing.T) {
 	}
 	if pol.Denylist[1].Port != 443 {
 		t.Errorf("denylist[1] port = %d, want 443", pol.Denylist[1].Port)
+	}
+}
+
+const judgeYAML = `
+policy:
+  allowlist:
+    - domain: api.openai.com
+
+judge:
+  enabled: true
+  provider: openai
+  model: gpt-4o-mini
+  baseURL: https://api.openai.com/v1
+  apiKeyEnv: OPENAI_API_KEY
+  timeout: 7s
+  circuitBreaker:
+    maxFailures: 3
+    cooldown: 45s
+  cache:
+    ttl: 2m
+  rateLimit: 50/minute
+
+agents:
+  - id: default
+    policy: |
+      Allow reads from approved APIs only.
+
+advisory:
+  enabled: true
+
+logging:
+  level: info
+  format: json
+`
+
+func TestNewLocalYAMLProvider_JudgeParsed(t *testing.T) {
+	p, err := NewLocalYAMLProvider(writeTemp(t, judgeYAML))
+	if err != nil {
+		t.Fatalf("parse judge config: %v", err)
+	}
+	pol, _ := p.GetPolicy()
+	j := pol.Judge
+	if !j.Enabled {
+		t.Fatal("judge should be enabled")
+	}
+	if j.Model != "gpt-4o-mini" || j.BaseURL != "https://api.openai.com/v1" || j.APIKeyEnv != "OPENAI_API_KEY" {
+		t.Fatalf("judge fields mis-parsed: %+v", j)
+	}
+	if j.Timeout != 7*time.Second {
+		t.Errorf("timeout = %v, want 7s", j.Timeout)
+	}
+	if j.CircuitBreaker.MaxFailures != 3 || j.CircuitBreaker.Cooldown != 45*time.Second {
+		t.Errorf("circuit breaker = %+v", j.CircuitBreaker)
+	}
+	if j.CacheTTL != 2*time.Minute {
+		t.Errorf("cache ttl = %v, want 2m", j.CacheTTL)
+	}
+	if j.RateLimit != "50/minute" {
+		t.Errorf("rateLimit = %q", j.RateLimit)
+	}
+	if len(pol.Agents) != 1 || pol.Agents[0].ID != "default" {
+		t.Fatalf("agents mis-parsed: %+v", pol.Agents)
+	}
+	if !pol.Advisory.Enabled {
+		t.Error("advisory should be enabled")
+	}
+}
+
+func TestNewLocalYAMLProvider_JudgeDisabledDefaults(t *testing.T) {
+	// No judge block at all: zero-valued and harmless, config still valid.
+	p, err := NewLocalYAMLProvider(writeTemp(t, goodYAML))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	pol, _ := p.GetPolicy()
+	if pol.Judge.Enabled {
+		t.Fatal("judge should default to disabled")
+	}
+}
+
+func TestNewLocalYAMLProvider_JudgeAppliesDefaults(t *testing.T) {
+	const y = `
+policy:
+  allowlist:
+    - domain: api.openai.com
+judge:
+  enabled: true
+  model: gpt-4o-mini
+  baseURL: https://api.openai.com/v1
+  apiKeyEnv: OPENAI_API_KEY
+agents:
+  - id: default
+    policy: "allow reads"
+`
+	p, err := NewLocalYAMLProvider(writeTemp(t, y))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	pol, _ := p.GetPolicy()
+	j := pol.Judge
+	if j.Provider != "openai" {
+		t.Errorf("provider default = %q, want openai", j.Provider)
+	}
+	if j.Timeout != 5*time.Second || j.CacheTTL != 5*time.Minute {
+		t.Errorf("defaults not applied: %+v", j)
+	}
+	if j.CircuitBreaker.MaxFailures != 5 || j.CircuitBreaker.Cooldown != 30*time.Second {
+		t.Errorf("breaker defaults not applied: %+v", j.CircuitBreaker)
+	}
+}
+
+func TestValidate_JudgeRequiresFields(t *testing.T) {
+	cases := map[string]string{
+		"missing model": `
+policy: {allowlist: [{domain: a.com}]}
+judge: {enabled: true, baseURL: https://x/v1, apiKeyEnv: K}
+agents: [{id: default, policy: x}]
+`,
+		"missing apiKeyEnv": `
+policy: {allowlist: [{domain: a.com}]}
+judge: {enabled: true, model: m, baseURL: https://x/v1}
+agents: [{id: default, policy: x}]
+`,
+		"missing baseURL": `
+policy: {allowlist: [{domain: a.com}]}
+judge: {enabled: true, model: m, apiKeyEnv: K}
+agents: [{id: default, policy: x}]
+`,
+		"no agents": `
+policy: {allowlist: [{domain: a.com}]}
+judge: {enabled: true, model: m, baseURL: https://x/v1, apiKeyEnv: K}
+`,
+		"bad rateLimit": `
+policy: {allowlist: [{domain: a.com}]}
+judge: {enabled: true, model: m, baseURL: https://x/v1, apiKeyEnv: K, rateLimit: "abc"}
+agents: [{id: default, policy: x}]
+`,
+	}
+	for name, y := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := NewLocalYAMLProvider(writeTemp(t, y)); err == nil {
+				t.Fatalf("expected validation error for %s", name)
+			}
+		})
+	}
+}
+
+func TestValidate_DuplicateAgentID(t *testing.T) {
+	const y = `
+policy: {allowlist: [{domain: a.com}]}
+agents:
+  - {id: dup, policy: x}
+  - {id: dup, policy: y}
+`
+	if _, err := NewLocalYAMLProvider(writeTemp(t, y)); err == nil {
+		t.Fatal("expected duplicate agent id error")
+	}
+}
+
+func TestValidate_BadJudgeDuration(t *testing.T) {
+	const y = `
+policy: {allowlist: [{domain: a.com}]}
+judge: {enabled: false, timeout: "notaduration"}
+`
+	if _, err := NewLocalYAMLProvider(writeTemp(t, y)); err == nil {
+		t.Fatal("expected duration parse error")
 	}
 }

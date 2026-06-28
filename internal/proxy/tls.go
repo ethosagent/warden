@@ -25,9 +25,21 @@ type bufferedConn struct {
 
 func (c bufferedConn) Read(b []byte) (int, error) { return c.Reader.Read(b) }
 
-func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, port int) {
+// handleTLS terminates TLS and dispatches by protocol. needsJudge is true when
+// the destination matched no static rule (policy.NoMatch) and the judge is
+// enabled: such requests are only allowed to proceed via the HTTP path, where
+// the judge can inspect method/URL/headers. Every other path (opaque TLS
+// passthrough, raw/HTTP2 forwarding) cannot be judged, so a needsJudge request
+// there fails closed — preserving the default-deny invariant.
+func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, port int, needsJudge bool) {
 	firstByte, err := br.Peek(1)
 	if err != nil || firstByte[0] != 0x16 {
+		if needsJudge {
+			// Not a TLS ClientHello: cannot terminate and inspect, so the judge
+			// cannot run. Fail closed.
+			p.storeDeny(domain, port, "tcp", "no_tls")
+			return
+		}
 		remote, dialErr := p.dialFunc("tcp", net.JoinHostPort(domain, fmt.Sprintf("%d", port)))
 		if dialErr != nil {
 			return
@@ -39,6 +51,8 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 			Protocol:  "tcp",
 			Decision:  "allow",
 		})
+		p.cfg.Metrics.RecordRequest("allow", "tcp")
+		p.logDecision(decisionLog{Domain: domain, Port: port, Protocol: "tcp", Decision: "allow"})
 		var wg sync.WaitGroup
 		wg.Add(2)
 		go func() {
@@ -81,10 +95,17 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 	detected := protocol.Detect(peekBytes)
 	switch detected {
 	case protocol.HTTP:
-		p.handleHTTP(tlsConn, plainReader, domain, port)
+		p.handleHTTP(tlsConn, plainReader, domain, port, needsJudge)
 		return
 	case protocol.HTTP2:
 		// M2: HTTP/2 detected; raw-forward until HTTP/2 handler is added.
+	}
+
+	// Non-HTTP traffic inside TLS cannot be judged (no request to inspect):
+	// fail closed when the judge was required.
+	if needsJudge {
+		p.storeDeny(domain, port, "tcp", "no_tls")
+		return
 	}
 
 	// Unrecognized protocol inside TLS: raw forwarding.
@@ -104,6 +125,8 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 		Protocol:  proto,
 		Decision:  "allow",
 	})
+	p.cfg.Metrics.RecordRequest("allow", proto)
+	p.logDecision(decisionLog{Domain: domain, Port: port, Protocol: proto, Decision: "allow"})
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {

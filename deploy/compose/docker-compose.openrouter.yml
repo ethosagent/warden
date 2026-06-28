@@ -7,7 +7,15 @@ services:
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
     volumes:
       - ../../configs/config.openrouter.yaml:/etc/warden/config.yaml:ro
-    command: ["run", "--config", "/etc/warden/config.yaml", "--listen", "0.0.0.0:8080"]
+    # command REPLACES the base command — keep the CA/admin flags here too.
+    command:
+      - "run"
+      - "--config=/etc/warden/config.yaml"
+      - "--listen=0.0.0.0:8080"
+      - "--ca-cert=/etc/warden/certs/proxy-ca.crt"
+      - "--ca-key=/etc/warden/certs/proxy-ca.key"
+      - "--admin-listen=0.0.0.0:9090"
+      - "--db=/tmp/warden.db"
 
   agent:
     image: alpine:3.20
@@ -18,4 +26,5 @@ services:
     environment:
       - HTTPS_PROXY=http://proxy:8080
       - HTTP_PROXY=http://proxy:8080
+    # CA mount (./certs/proxy-ca.crt) is inherited from the base file so the agent trusts the proxy.
     command: ["sh", "-c", "apk add --no-cache curl && echo 'Agent ready. Exec into this container to test.' && sleep infinity"]

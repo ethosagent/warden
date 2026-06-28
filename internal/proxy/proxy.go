@@ -12,6 +12,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"strconv"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/auth"
+	"github.com/ethosagent/warden/internal/observability"
 	"github.com/ethosagent/warden/internal/policy"
 	"github.com/ethosagent/warden/internal/secrets"
 )
@@ -37,6 +39,37 @@ type Config struct {
 	CAKeyPath        string
 	PlaceholderNames []string
 	Transformers     []*auth.MatchedTransformer
+
+	// Judge is the optional inline LLM judge. When nil the proxy behaves exactly
+	// as before: a NoMatch destination is default-denied. When set, NoMatch
+	// requests are forwarded to TLS termination so the judge can inspect the full
+	// request. The judge is never authoritative over static rules.
+	Judge Judge
+	// AgentID identifies the single configured agent for judge lookups. The
+	// port-binding model is one proxy per agent, so a single id suffices.
+	AgentID string
+
+	// Metrics is the optional OTel metric emitter. Nil-safe: when nil every
+	// record call is a no-op, so observability never alters a decision or adds
+	// latency to the hot path.
+	Metrics *observability.Metrics
+	// Logger is the optional structured logger for decision/lifecycle records.
+	// When nil, proxy.New substitutes a discard logger so behavior and log volume
+	// are unchanged.
+	Logger *slog.Logger
+}
+
+// Judge renders an allow/deny verdict for a request that matched no static
+// rule. It is defined here (consumer-side) so the proxy does not depend on the
+// llmpolicy package directly. Implementations must fail closed (deny on error).
+type Judge interface {
+	Evaluate(agentID, method, url, host, contentType string, hasAuth bool) Verdict
+}
+
+// Verdict is the judge's decision. Decision is "allow" or "deny".
+type Verdict struct {
+	Decision string
+	Reason   string
 }
 
 // Proxy is the egress guardrail front door. M1 adds Serve()/accept loops; the
@@ -66,6 +99,9 @@ func New(cfg Config) (*Proxy, error) {
 	}
 	if cfg.Analytics == nil {
 		return nil, fmt.Errorf("proxy: Analytics store is required")
+	}
+	if cfg.Logger == nil {
+		cfg.Logger = observability.DiscardLogger()
 	}
 	p := &Proxy{cfg: cfg}
 

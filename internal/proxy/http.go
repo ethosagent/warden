@@ -16,7 +16,7 @@ import (
 
 const maxBodySwapSize = 10 << 20 // 10 MB
 
-func (p *Proxy) handleHTTP(tlsConn *tls.Conn, br *bufio.Reader, domain string, port int) {
+func (p *Proxy) handleHTTP(tlsConn *tls.Conn, br *bufio.Reader, domain string, port int, needsJudge bool) {
 	for {
 		req, err := http.ReadRequest(br)
 		if err != nil {
@@ -33,7 +33,51 @@ func (p *Proxy) handleHTTP(tlsConn *tls.Conn, br *bufio.Reader, domain string, p
 			return
 		}
 
+		// Inline judge: only for requests that matched no static rule. The judge
+		// is never consulted for statically allowed/denied requests (static rules
+		// always win). It receives auth *presence* only, never the auth value,
+		// and fails closed (deny) on any error. A judge "allow" is still subject
+		// to every remaining check (secret swap, transforms, forwarding). On
+		// allow, the reason is carried onto the single forwarding event below so
+		// there is exactly one audit event per request (no double-counting); on
+		// deny the request terminates here, so it logs its own event.
+		var judgeReason string
+		if needsJudge {
+			fullURL := "https://" + domain + req.URL.RequestURI()
+			_, hasAuth := req.Header["Authorization"]
+			verdict := p.cfg.Judge.Evaluate(
+				p.cfg.AgentID, req.Method, fullURL, domain,
+				req.Header.Get("Content-Type"), hasAuth,
+			)
+			if verdict.Decision != "allow" {
+				_ = p.cfg.Analytics.StoreEvent(analytics.Event{
+					Timestamp:   time.Now(),
+					Domain:      domain,
+					Port:        port,
+					Protocol:    "https",
+					Method:      req.Method,
+					URL:         fullURL,
+					Decision:    "deny",
+					JudgeReason: verdict.Reason,
+				})
+				p.cfg.Metrics.RecordRequest("deny", "https")
+				p.cfg.Metrics.RecordBlocked("judge")
+				p.cfg.Metrics.RecordJudge("deny")
+				p.logDecision(decisionLog{
+					Domain: domain, Port: port, Protocol: "https",
+					Method: req.Method, URL: fullURL, Decision: "deny",
+					JudgeReason: verdict.Reason,
+				})
+				writeErrorResponse(tlsConn, 403, "Forbidden")
+				_ = req.Body.Close()
+				return
+			}
+			judgeReason = verdict.Reason
+			p.cfg.Metrics.RecordJudge("allow")
+		}
+
 		var refs []secrets.Reference
+		var swappedNames []string
 		needBodySwap := len(p.cfg.PlaceholderNames) > 0 &&
 			req.Body != nil && req.Body != http.NoBody && req.ContentLength != 0
 
@@ -106,6 +150,9 @@ func (p *Proxy) handleHTTP(tlsConn *tls.Conn, br *bufio.Reader, domain string, p
 
 				if swapped {
 					refs = append(refs, secrets.Ref(realValue))
+					// placeholder is the configured NAME (bounded, log-safe),
+					// never the secret value.
+					swappedNames = append(swappedNames, placeholder)
 				}
 			}
 
@@ -159,16 +206,29 @@ func (p *Proxy) handleHTTP(tlsConn *tls.Conn, br *bufio.Reader, domain string, p
 		for _, r := range refs {
 			refStrs = append(refStrs, r.String())
 		}
+		fullURL := "https://" + domain + req.URL.RequestURI()
+		secretRef := strings.Join(refStrs, ",")
 		_ = p.cfg.Analytics.StoreEvent(analytics.Event{
 			Timestamp:      time.Now(),
 			Domain:         domain,
 			Port:           port,
 			Protocol:       "https",
 			Method:         req.Method,
-			URL:            "https://" + domain + req.URL.RequestURI(),
+			URL:            fullURL,
 			Decision:       "allow",
 			ResponseStatus: resp.StatusCode,
-			SecretRef:      strings.Join(refStrs, ","),
+			SecretRef:      secretRef,
+			JudgeReason:    judgeReason, // empty unless a judge allowed this request
+		})
+		p.cfg.Metrics.RecordRequest("allow", "https")
+		for _, name := range swappedNames {
+			p.cfg.Metrics.RecordSecretSwap(name)
+		}
+		p.logDecision(decisionLog{
+			Domain: domain, Port: port, Protocol: "https",
+			Method: req.Method, URL: fullURL, Decision: "allow",
+			ResponseStatus: resp.StatusCode, SecretRef: secretRef,
+			JudgeReason: judgeReason,
 		})
 
 		// Cleanup

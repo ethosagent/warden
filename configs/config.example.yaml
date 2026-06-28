@@ -43,3 +43,49 @@ cache:
 logging:
   level: info                           # debug | info | warn | error
   format: json                          # json | text
+
+# OpenTelemetry observability (Phase 1: metrics + structured logging). OFF by
+# default; when disabled there is zero behavior change and no added latency.
+# Metric labels are bounded enums/configured names only — never a raw domain,
+# never a secret value, never a body. Traces (Phase 2) and collector recipes
+# (Phase 3) are deferred. Standard OTEL_* env vars override this block:
+# OTEL_SERVICE_NAME -> serviceName, OTEL_EXPORTER_OTLP_ENDPOINT -> otlpEndpoint.
+observability:
+  enabled: false                        # master switch for the OTel emission seam
+  serviceName: warden                   # OTel resource service.name
+  metrics:
+    enabled: true                       # serve Prometheus /metrics on the ADMIN listener (not the proxy port)
+    otlpEndpoint: ""                    # optional OTLP/grpc push, e.g. otel-collector:4317
+  resourceAttributes: {}                # extra bounded resource attrs (e.g. warden.proxy.id); never secrets
+
+# Optional inline LLM judge. OFF by default. The judge is NEVER authoritative:
+# static allow/deny rules always win, and it is consulted ONLY for requests that
+# match neither list (a "no-match"). It fails closed (deny) on any error and
+# never sees secret values — only auth presence. Static rules are untouched.
+judge:
+  enabled: false                        # inline judge off by default
+  provider: openai                      # OpenAI-compatible chat-completions API
+  model: gpt-4o-mini
+  baseURL: https://api.openai.com/v1
+  apiKeyEnv: OPENAI_API_KEY             # env var holding the API key (never logged)
+  timeout: 5s                           # hard per-call timeout
+  circuitBreaker:
+    maxFailures: 5                      # trip after N consecutive failures
+    cooldown: 30s                       # deny-all window while tripped
+  cache:
+    ttl: 5m                             # verdict cache TTL
+  rateLimit: 100/minute                 # cap on judge invocations
+
+# Per-agent natural-language policies, interpreted by the inline judge. With one
+# proxy per agent, the single agent id below is used for judge lookups.
+agents:
+  - id: default
+    policy: |
+      This agent may read from approved APIs. It must NOT post to social media,
+      access internal admin endpoints, or make requests outside business hours.
+
+# Offline advisory mode (CLI: `warden advise`). OFF by default. It only flags
+# recommendations to humans and can never alter policy. Hard deterministic
+# auto-rules are configured independently of the LLM (not yet implemented).
+advisory:
+  enabled: false

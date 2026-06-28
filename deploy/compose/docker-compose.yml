@@ -8,18 +8,21 @@
 # This is the structural guarantee — the agent cannot reach the internet even if
 # it is fully compromised, because Docker's network namespaces deny it a route.
 #
-# NOTE: image names/build contexts are placeholders for milestone 0; the proxy
-# serving path lands in M1. The network topology, however, is the real contract.
+# Prereq: generate the bake-once CA into ./certs (this directory) first:
+#   OUT_DIR=deploy/compose/certs ./scripts/gen-certs.sh   # run from the repo root
+# See docs/docker-end-to-end.md for the full walkthrough.
 
 services:
   proxy:
     build:
       context: ../..
-      dockerfile: Dockerfile        # added in M1
+      dockerfile: Dockerfile
     image: warden-proxy:dev
     networks:
       - agent-internal              # receives agent traffic
       - egress                      # the ONLY service with internet access
+    ports:
+      - "9090:9090"                 # dashboard + admin (host -> proxy); NOT reachable by the agent
     environment:
       # Real secrets live with the proxy, never the agent.
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
@@ -27,7 +30,14 @@ services:
     volumes:
       - ../../configs/config.example.yaml:/etc/warden/config.yaml:ro
       - ./certs:/etc/warden/certs:ro   # bake-once CA (see scripts/gen-certs.sh)
-    command: ["run", "--config", "/etc/warden/config.yaml", "--listen", "0.0.0.0:8080"]
+    command:
+      - "run"
+      - "--config=/etc/warden/config.yaml"
+      - "--listen=0.0.0.0:8080"
+      - "--ca-cert=/etc/warden/certs/proxy-ca.crt"   # terminate TLS (swap + inspect); omit for blind tunnel
+      - "--ca-key=/etc/warden/certs/proxy-ca.key"
+      - "--admin-listen=0.0.0.0:9090"                 # dashboard + /healthz + /admin/refresh-secrets
+      - "--db=/tmp/warden.db"
 
   agent:
     image: alpine:3.20               # stand-in for the real agent runtime
@@ -41,6 +51,9 @@ services:
       - HTTP_PROXY=http://proxy:8080
       - OPENAI_API_KEY=openai_secret_001       # placeholder, NOT the real key
       - ANTHROPIC_API_KEY=anthropic_secret_001 # placeholder, NOT the real key
+    volumes:
+      # The agent must TRUST the proxy CA (Warden presents leaf certs signed by it).
+      - ./certs/proxy-ca.crt:/etc/warden/certs/proxy-ca.crt:ro
     command: ["sh", "-c", "echo 'agent placeholder — no internet route except via proxy'; sleep infinity"]
 
 networks:

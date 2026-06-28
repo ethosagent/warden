@@ -14,7 +14,7 @@ Warden sits between your AI agent and the internet as a MITM proxy. The agent ha
 Built for teams running LLM agents (coding assistants, support bots, autonomous workflows) who need a security boundary that doesn't rely on the agent behaving correctly.
 
 <p align="center">
-  <img src="docs/architecture.svg" alt="Warden Architecture" width="800"/>
+  <img src="assets/architecture.svg" alt="Warden Architecture" width="800"/>
 </p>
 
 ## Quickstart
@@ -54,21 +54,29 @@ open http://127.0.0.1:9090/dashboard/
 
 ### Docker Compose (full isolation proof)
 
+Full walkthrough — including how the agent trusts the proxy cert and how to drop in your own
+service — is in **[docs/docker-end-to-end.md](docs/docker-end-to-end.md)**. The short version:
+
 ```sh
-cd deploy/compose
-export OPENROUTER_API_KEY="sk-or-v1-..."
-docker compose -f docker-compose.yml -f docker-compose.openrouter.yml up --build
+# 1. Generate the bake-once proxy CA into the dir the compose files mount
+OUT_DIR=deploy/compose/certs ./scripts/gen-certs.sh
 
-# Exec into the agent container
-docker compose exec agent sh
+# 2. Bring up the proxy + an isolated demo agent
+export OPENROUTER_API_KEY="sk-or-v1-..."   # real key — lives with the proxy, never the agent
+docker compose -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.openrouter.yml up --build
 
-# Inside agent: works (via proxy)
-curl -x http://proxy:8080 https://openrouter.ai/api/v1/models \
+# 3. Exec into the agent container
+docker compose -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.openrouter.yml exec agent sh
+
+# Inside agent — works (via proxy; placeholder swapped for the real key at the edge):
+curl --cacert /etc/warden/certs/proxy-ca.crt https://openrouter.ai/api/v1/models \
   -H "Authorization: Bearer openrouter_secret_001"
 
-# Inside agent: fails (no internet route — proves isolation)
-curl --connect-timeout 5 https://openrouter.ai/api/v1/models
+# Inside agent — fails (no internet route — proves isolation):
+curl --noproxy '*' --connect-timeout 5 https://openrouter.ai/api/v1/models
 ```
+
+Dashboard: **http://localhost:9090/dashboard/**.
 
 ## How It Works
 

@@ -36,6 +36,10 @@ type Event struct {
 	// SecretRef references the secret used by hash/last-4/version — never the
 	// raw value.
 	SecretRef string
+	// JudgeReason is the LLM judge's natural-language rationale for an allow/deny
+	// verdict, recorded for audit. It is metadata only — never a request body or
+	// secret value. Empty for statically decided events.
+	JudgeReason string
 }
 
 // EventFilter narrows a GetEvents query. Zero-valued fields are ignored.
@@ -95,10 +99,19 @@ CREATE TABLE IF NOT EXISTS events (
     url             TEXT    NOT NULL,
     decision        TEXT    NOT NULL,
     response_status INTEGER NOT NULL,
-    secret_ref      TEXT    NOT NULL
+    secret_ref      TEXT    NOT NULL,
+    judge_reason    TEXT    NOT NULL DEFAULT ''
 );`
 	if _, err := s.db.Exec(ddl); err != nil {
 		return fmt.Errorf("analytics: migrate: %w", err)
+	}
+	// Additive migration for databases created before judge_reason existed.
+	// SQLite has no "ADD COLUMN IF NOT EXISTS"; ignore the duplicate-column
+	// error so re-running migrate is idempotent.
+	if _, err := s.db.Exec(`ALTER TABLE events ADD COLUMN judge_reason TEXT NOT NULL DEFAULT ''`); err != nil {
+		if !strings.Contains(err.Error(), "duplicate column name") {
+			return fmt.Errorf("analytics: migrate add judge_reason: %w", err)
+		}
 	}
 	return nil
 }
@@ -113,11 +126,11 @@ func (s *SQLiteStore) StoreEvent(e Event) error {
 		e.Timestamp = time.Now()
 	}
 	const ins = `INSERT INTO events
-        (ts, domain, port, protocol, method, url, decision, response_status, secret_ref)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        (ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	_, err := s.db.Exec(ins,
 		e.Timestamp.UnixNano(), e.Domain, e.Port, e.Protocol, e.Method,
-		e.URL, e.Decision, e.ResponseStatus, e.SecretRef)
+		e.URL, e.Decision, e.ResponseStatus, e.SecretRef, e.JudgeReason)
 	if err != nil {
 		return fmt.Errorf("analytics: insert event: %w", err)
 	}
@@ -138,7 +151,7 @@ func (s *SQLiteStore) prune() error {
 
 // GetEvents returns events matching filter, newest first.
 func (s *SQLiteStore) GetEvents(filter EventFilter) ([]Event, error) {
-	q := `SELECT ts, domain, port, protocol, method, url, decision, response_status, secret_ref
+	q := `SELECT ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason
           FROM events WHERE 1=1`
 	var args []any
 	if filter.Domain != "" {
@@ -172,7 +185,7 @@ func (s *SQLiteStore) GetEvents(filter EventFilter) ([]Event, error) {
 			ts int64
 		)
 		if err := rows.Scan(&ts, &e.Domain, &e.Port, &e.Protocol, &e.Method,
-			&e.URL, &e.Decision, &e.ResponseStatus, &e.SecretRef); err != nil {
+			&e.URL, &e.Decision, &e.ResponseStatus, &e.SecretRef, &e.JudgeReason); err != nil {
 			return nil, fmt.Errorf("analytics: scan: %w", err)
 		}
 		e.Timestamp = time.Unix(0, ts).UTC()
