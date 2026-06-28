@@ -11,6 +11,10 @@ RUN CGO_ENABLED=0 go build -o /warden ./cmd/proxy
 FROM alpine:3.20
 RUN apk add --no-cache ca-certificates
 RUN addgroup -S warden && adduser -S warden -G warden
+# Writable data dir for the analytics db when a volume is mounted at /data.
+# A fresh named volume mounted here inherits this ownership, so the non-root
+# warden user can create/open the SQLite file.
+RUN mkdir -p /data && chown warden:warden /data
 COPY --from=builder /warden /usr/local/bin/warden
 USER warden
 ENTRYPOINT ["warden"]

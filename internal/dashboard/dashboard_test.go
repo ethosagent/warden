@@ -302,6 +302,143 @@ func TestBlockedEndpoint(t *testing.T) {
 	}
 }
 
+func TestEndpointsEndpoint(t *testing.T) {
+	now := time.Date(2025, 6, 15, 10, 0, 0, 0, time.UTC)
+	ds := &fakeDataSource{
+		events: []analytics.Event{
+			// foo: hit 3 times; latest at now+2m is a deny/403.
+			{Timestamp: now, Domain: "api.example.com", Method: "POST", URL: "https://api.example.com/foo", Decision: "allow", ResponseStatus: 200},
+			{Timestamp: now.Add(time.Minute), Domain: "api.example.com", Method: "POST", URL: "https://api.example.com/foo", Decision: "allow", ResponseStatus: 200},
+			{Timestamp: now.Add(2 * time.Minute), Domain: "api.example.com", Method: "POST", URL: "https://api.example.com/foo", Decision: "deny", ResponseStatus: 403},
+			// bar: hit once, but most recently (now+1h) -> sorts first by lastSeen.
+			{Timestamp: now.Add(time.Hour), Domain: "api.example.com", Method: "GET", URL: "https://api.example.com/bar", Decision: "allow", ResponseStatus: 200},
+			// Same URL as foo but different method -> distinct group.
+			{Timestamp: now, Domain: "api.example.com", Method: "GET", URL: "https://api.example.com/foo", Decision: "allow", ResponseStatus: 200},
+		},
+	}
+	handler := newTestServer(ds, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
+
+	t.Run("aggregation and sort", func(t *testing.T) {
+		rr := doGet(t, handler, "/dashboard/api/endpoints")
+		if rr.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", rr.Code)
+		}
+		var resp endpointsResponse
+		if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		// 3 distinct (method,url) groups: POST /foo, GET /bar, GET /foo.
+		if resp.Total != 3 {
+			t.Fatalf("expected total 3, got %d", resp.Total)
+		}
+		if resp.Page != 1 || resp.PageSize != 50 || resp.TotalPages != 1 {
+			t.Fatalf("unexpected pagination: %+v", resp)
+		}
+		if len(resp.Items) != 3 {
+			t.Fatalf("expected 3 items, got %d", len(resp.Items))
+		}
+		// GET /bar has the latest lastSeen -> first.
+		first := resp.Items[0]
+		if first.Method != "GET" || first.URL != "https://api.example.com/bar" {
+			t.Fatalf("expected GET /bar first, got %s %s", first.Method, first.URL)
+		}
+		// Find POST /foo and verify aggregation.
+		var foo *endpointGroup
+		for i := range resp.Items {
+			if resp.Items[i].Method == "POST" && resp.Items[i].URL == "https://api.example.com/foo" {
+				foo = &resp.Items[i]
+			}
+		}
+		if foo == nil {
+			t.Fatal("POST /foo group not found")
+		}
+		if foo.Count != 3 {
+			t.Fatalf("expected count 3 for POST /foo, got %d", foo.Count)
+		}
+		if foo.FirstSeen != now.Format(time.RFC3339) {
+			t.Fatalf("expected firstSeen %s, got %s", now.Format(time.RFC3339), foo.FirstSeen)
+		}
+		if foo.LastSeen != now.Add(2*time.Minute).Format(time.RFC3339) {
+			t.Fatalf("expected lastSeen %s, got %s", now.Add(2*time.Minute).Format(time.RFC3339), foo.LastSeen)
+		}
+		if foo.LastDecision != "deny" {
+			t.Fatalf("expected lastDecision deny, got %s", foo.LastDecision)
+		}
+		if foo.LastStatus != 403 {
+			t.Fatalf("expected lastStatus 403, got %d", foo.LastStatus)
+		}
+	})
+
+	t.Run("pagination slicing", func(t *testing.T) {
+		rr := doGet(t, handler, "/dashboard/api/endpoints?page=2&pageSize=2")
+		var resp endpointsResponse
+		if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if resp.Total != 3 || resp.TotalPages != 2 {
+			t.Fatalf("expected total 3 / totalPages 2, got %d / %d", resp.Total, resp.TotalPages)
+		}
+		if resp.Page != 2 || resp.PageSize != 2 {
+			t.Fatalf("expected page 2 size 2, got %d / %d", resp.Page, resp.PageSize)
+		}
+		// Page 2 of size 2 over 3 items -> 1 item.
+		if len(resp.Items) != 1 {
+			t.Fatalf("expected 1 item on page 2, got %d", len(resp.Items))
+		}
+	})
+
+	t.Run("page out of range yields empty slice", func(t *testing.T) {
+		rr := doGet(t, handler, "/dashboard/api/endpoints?page=99&pageSize=50")
+		var resp endpointsResponse
+		if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if len(resp.Items) != 0 {
+			t.Fatalf("expected 0 items for out-of-range page, got %d", len(resp.Items))
+		}
+	})
+
+	t.Run("bad params fall back to defaults", func(t *testing.T) {
+		rr := doGet(t, handler, "/dashboard/api/endpoints?page=abc&pageSize=-5")
+		var resp endpointsResponse
+		if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if resp.Page != 1 {
+			t.Fatalf("expected default page 1, got %d", resp.Page)
+		}
+		if resp.PageSize != 50 {
+			t.Fatalf("expected default pageSize 50, got %d", resp.PageSize)
+		}
+	})
+
+	t.Run("pageSize clamps to 200", func(t *testing.T) {
+		rr := doGet(t, handler, "/dashboard/api/endpoints?pageSize=9999")
+		var resp endpointsResponse
+		if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if resp.PageSize != 200 {
+			t.Fatalf("expected pageSize clamped to 200, got %d", resp.PageSize)
+		}
+	})
+
+	t.Run("empty data", func(t *testing.T) {
+		emptyHandler := newTestServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
+		rr := doGet(t, emptyHandler, "/dashboard/api/endpoints")
+		var resp endpointsResponse
+		if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if resp.Total != 0 || resp.TotalPages != 0 {
+			t.Fatalf("expected total 0 / totalPages 0, got %d / %d", resp.Total, resp.TotalPages)
+		}
+		if len(resp.Items) != 0 {
+			t.Fatalf("expected 0 items, got %d", len(resp.Items))
+		}
+	})
+}
+
 func TestStatsEndpoint(t *testing.T) {
 	ds := &fakeDataSource{
 		events: []analytics.Event{
@@ -360,6 +497,379 @@ func TestHTMLServes(t *testing.T) {
 	}
 }
 
+func TestEndpointsDomainFilter(t *testing.T) {
+	now := time.Date(2025, 6, 15, 10, 0, 0, 0, time.UTC)
+	ds := &fakeDataSource{
+		events: []analytics.Event{
+			{Timestamp: now, Domain: "a.com", Method: "GET", URL: "https://a.com/x", Decision: "allow", ResponseStatus: 200},
+			{Timestamp: now.Add(time.Minute), Domain: "a.com", Method: "POST", URL: "https://a.com/y", Decision: "allow", ResponseStatus: 201},
+			{Timestamp: now.Add(2 * time.Minute), Domain: "b.com", Method: "GET", URL: "https://b.com/z", Decision: "deny", ResponseStatus: 403},
+		},
+	}
+	handler := newTestServer(ds, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
+
+	rr := doGet(t, handler, "/dashboard/api/endpoints?domain=a.com")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	var resp endpointsResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.Total != 2 {
+		t.Fatalf("expected 2 endpoints for a.com, got %d", resp.Total)
+	}
+	for _, it := range resp.Items {
+		if it.Domain != "a.com" {
+			t.Fatalf("expected only a.com endpoints, got %s", it.Domain)
+		}
+	}
+
+	// Without the filter, all 3 distinct endpoints appear.
+	rr = doGet(t, handler, "/dashboard/api/endpoints")
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.Total != 3 {
+		t.Fatalf("expected 3 endpoints unfiltered, got %d", resp.Total)
+	}
+}
+
+func TestAnalyticsEndpoint(t *testing.T) {
+	now := time.Date(2025, 6, 15, 10, 0, 0, 0, time.UTC)
+	ds := &fakeDataSource{
+		events: []analytics.Event{
+			{Timestamp: now, Domain: "api.example.com", Port: 443, Protocol: "https", Method: "GET", URL: "https://api.example.com/v1", Decision: "allow", ResponseStatus: 200},
+			{Timestamp: now.Add(time.Second), Domain: "api.example.com", Port: 443, Protocol: "https", Method: "GET", URL: "https://api.example.com/v1", Decision: "allow", ResponseStatus: 304},
+			{Timestamp: now.Add(2 * time.Second), Domain: "api.example.com", Port: 443, Protocol: "https", Method: "POST", URL: "https://api.example.com/write", Decision: "allow", ResponseStatus: 201, SecretRef: "openai_secret_001"},
+			{Timestamp: now.Add(3 * time.Second), Domain: "evil.com", Port: 443, Protocol: "https", Method: "POST", URL: "https://evil.com/exfil", Decision: "deny", ResponseStatus: 403, JudgeReason: "blocked: exfiltration attempt"},
+			{Timestamp: now.Add(4 * time.Second), Domain: "broken.io", Port: 80, Protocol: "http", Method: "GET", URL: "http://broken.io/x", Decision: "allow", ResponseStatus: 503},
+			{Timestamp: now.Add(5 * time.Second), Domain: "evil.com", Port: 443, Protocol: "https", Method: "GET", URL: "https://evil.com/probe", Decision: "deny", ResponseStatus: 0, JudgeReason: "blocked: known-bad domain"},
+		},
+	}
+	handler := newTestServer(ds, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
+
+	rr := doGet(t, handler, "/dashboard/api/analytics")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	var resp analyticsResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if resp.GeneratedAt == "" {
+		t.Fatal("expected generatedAt to be set")
+	}
+	// Totals.
+	if resp.Totals.Requests != 6 {
+		t.Fatalf("expected 6 requests, got %d", resp.Totals.Requests)
+	}
+	if resp.Totals.Allowed != 4 || resp.Totals.Denied != 2 {
+		t.Fatalf("expected allowed 4 / denied 2, got %d / %d", resp.Totals.Allowed, resp.Totals.Denied)
+	}
+	if resp.Totals.UniqueDomains != 3 {
+		t.Fatalf("expected 3 unique domains, got %d", resp.Totals.UniqueDomains)
+	}
+	// 5 distinct (method,url) endpoints.
+	if resp.Totals.UniqueEndpoints != 5 {
+		t.Fatalf("expected 5 unique endpoints, got %d", resp.Totals.UniqueEndpoints)
+	}
+	// Writes = distinct non-GET endpoints: POST /write and POST /exfil = 2.
+	if resp.Totals.Writes != 2 {
+		t.Fatalf("expected 2 write endpoints, got %d", resp.Totals.Writes)
+	}
+
+	// Status classes: 200 -> 2xx, 304 -> 3xx, 201 -> 2xx, 403 -> 4xx, 503 -> 5xx, 0 -> other.
+	if resp.StatusClasses.C2xx != 2 {
+		t.Fatalf("expected 2 2xx, got %d", resp.StatusClasses.C2xx)
+	}
+	if resp.StatusClasses.C3xx != 1 {
+		t.Fatalf("expected 1 3xx, got %d", resp.StatusClasses.C3xx)
+	}
+	if resp.StatusClasses.C4xx != 1 {
+		t.Fatalf("expected 1 4xx, got %d", resp.StatusClasses.C4xx)
+	}
+	if resp.StatusClasses.C5xx != 1 {
+		t.Fatalf("expected 1 5xx, got %d", resp.StatusClasses.C5xx)
+	}
+	if resp.StatusClasses.Other != 1 {
+		t.Fatalf("expected 1 other, got %d", resp.StatusClasses.Other)
+	}
+
+	// Methods sorted by count desc: GET(4) before POST(2).
+	if len(resp.Methods) != 2 || resp.Methods[0].Method != "GET" || resp.Methods[0].Count != 4 {
+		t.Fatalf("unexpected methods: %+v", resp.Methods)
+	}
+	if resp.Methods[1].Method != "POST" || resp.Methods[1].Count != 2 {
+		t.Fatalf("unexpected POST method entry: %+v", resp.Methods)
+	}
+
+	// Protocols sorted: https(5) before http(1).
+	if len(resp.Protocols) != 2 || resp.Protocols[0].Protocol != "https" || resp.Protocols[0].Count != 5 {
+		t.Fatalf("unexpected protocols: %+v", resp.Protocols)
+	}
+
+	// Timeline: events span 5s -> single bucket fallback OR 30 buckets; tally must equal totals.
+	var tlAllow, tlDeny int
+	for _, b := range resp.Timeline {
+		tlAllow += b.Allow
+		tlDeny += b.Deny
+	}
+	if tlAllow != 4 || tlDeny != 2 {
+		t.Fatalf("timeline tally mismatch: allow %d deny %d", tlAllow, tlDeny)
+	}
+	if len(resp.Timeline) == 0 {
+		t.Fatal("expected at least one timeline bucket")
+	}
+
+	// Hourly is 24 entries with correct hour indices.
+	if len(resp.Hourly) != 24 {
+		t.Fatalf("expected 24 hourly entries, got %d", len(resp.Hourly))
+	}
+	for i, h := range resp.Hourly {
+		if h.Hour != i {
+			t.Fatalf("hourly[%d].Hour = %d, want %d", i, h.Hour, i)
+		}
+	}
+	var hourlyTotal int
+	for _, h := range resp.Hourly {
+		hourlyTotal += h.Count
+	}
+	if hourlyTotal != 6 {
+		t.Fatalf("expected hourly total 6, got %d", hourlyTotal)
+	}
+
+	// Top domains: api.example.com has 3 events, 2 endpoints, 3 allowed.
+	var apiDom *topDomain
+	for i := range resp.TopDomains {
+		if resp.TopDomains[i].Domain == "api.example.com" {
+			apiDom = &resp.TopDomains[i]
+		}
+	}
+	if apiDom == nil {
+		t.Fatal("api.example.com missing from topDomains")
+	}
+	if apiDom.Count != 3 || apiDom.Endpoints != 2 || apiDom.Allowed != 3 || apiDom.Denied != 0 {
+		t.Fatalf("unexpected api.example.com agg: %+v", *apiDom)
+	}
+
+	// Secrets: one ref injected once, to api.example.com only; no raw value present.
+	if len(resp.Secrets) != 1 {
+		t.Fatalf("expected 1 secret usage, got %d", len(resp.Secrets))
+	}
+	if resp.Secrets[0].Ref != "openai_secret_001" || resp.Secrets[0].Count != 1 {
+		t.Fatalf("unexpected secret usage: %+v", resp.Secrets[0])
+	}
+	if len(resp.Secrets[0].Domains) != 1 || resp.Secrets[0].Domains[0] != "api.example.com" {
+		t.Fatalf("unexpected secret domains: %+v", resp.Secrets[0].Domains)
+	}
+
+	// Judge: only the two non-empty reasons, most-recent first.
+	if len(resp.Judge) != 2 {
+		t.Fatalf("expected 2 judge entries, got %d", len(resp.Judge))
+	}
+	if resp.Judge[0].Time < resp.Judge[1].Time {
+		t.Fatalf("judge entries not most-recent-first: %+v", resp.Judge)
+	}
+	for _, j := range resp.Judge {
+		if j.Reason == "" {
+			t.Fatal("judge entry with empty reason leaked in")
+		}
+	}
+
+	// Writes: non-GET endpoints only.
+	if len(resp.Writes) != 2 {
+		t.Fatalf("expected 2 writes, got %d", len(resp.Writes))
+	}
+	for _, wEntry := range resp.Writes {
+		if wEntry.Method == "GET" || wEntry.Method == "HEAD" {
+			t.Fatalf("write entry has read method: %+v", wEntry)
+		}
+	}
+
+	// Blocked grouped by domain: only evil.com (2 denies).
+	if len(resp.Blocked) != 1 || resp.Blocked[0].Domain != "evil.com" || resp.Blocked[0].Count != 2 {
+		t.Fatalf("unexpected blocked: %+v", resp.Blocked)
+	}
+}
+
+func TestAnalyticsJudgeCap(t *testing.T) {
+	base := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	var evs []analytics.Event
+	for i := 0; i < 25; i++ {
+		evs = append(evs, analytics.Event{
+			Timestamp: base.Add(time.Duration(i) * time.Minute),
+			Domain:    "x.com", Method: "GET", URL: "https://x.com/p", Decision: "deny",
+			JudgeReason: fmt.Sprintf("reason %d", i),
+		})
+	}
+	ds := &fakeDataSource{events: evs}
+	handler := newTestServer(ds, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
+
+	rr := doGet(t, handler, "/dashboard/api/analytics")
+	var resp analyticsResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Judge) != 20 {
+		t.Fatalf("expected judge capped at 20, got %d", len(resp.Judge))
+	}
+	// Most recent (reason 24) must be first.
+	if resp.Judge[0].Reason != "reason 24" {
+		t.Fatalf("expected newest judge first, got %q", resp.Judge[0].Reason)
+	}
+}
+
+func TestAnalyticsEmpty(t *testing.T) {
+	handler := newTestServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
+	rr := doGet(t, handler, "/dashboard/api/analytics")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	// Arrays must be [] not null in the raw JSON.
+	body := rr.Body.String()
+	for _, field := range []string{`"methods":[]`, `"protocols":[]`, `"timeline":[]`, `"topDomains":[]`,
+		`"topEndpoints":[]`, `"blocked":[]`, `"secrets":[]`, `"judge":[]`, `"writes":[]`} {
+		if !strings.Contains(body, field) {
+			t.Fatalf("expected %s in empty response, body: %s", field, body)
+		}
+	}
+	var resp analyticsResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.Totals.Requests != 0 {
+		t.Fatalf("expected 0 requests, got %d", resp.Totals.Requests)
+	}
+	if len(resp.Hourly) != 24 {
+		t.Fatalf("expected 24 hourly entries even when empty, got %d", len(resp.Hourly))
+	}
+}
+
+func TestAnalyticsMethodNotAllowed(t *testing.T) {
+	handler := newTestServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
+	req := httptest.NewRequest(http.MethodPost, "/dashboard/api/analytics", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", rr.Code)
+	}
+}
+
+func TestAnalyticsRangeFilter(t *testing.T) {
+	now := time.Now()
+	ds := &fakeDataSource{
+		events: []analytics.Event{
+			// Old events (~48h ago): excluded by any finite window we test.
+			{Timestamp: now.Add(-48 * time.Hour), Domain: "old.example.com", Protocol: "https", Method: "GET", URL: "https://old.example.com/a", Decision: "allow", ResponseStatus: 200},
+			{Timestamp: now.Add(-47 * time.Hour), Domain: "old.example.com", Protocol: "https", Method: "POST", URL: "https://old.example.com/b", Decision: "deny", ResponseStatus: 403},
+			// Recent events (~1m ago): inside a 1h window.
+			{Timestamp: now.Add(-1 * time.Minute), Domain: "recent.example.com", Protocol: "https", Method: "GET", URL: "https://recent.example.com/x", Decision: "allow", ResponseStatus: 200},
+			{Timestamp: now.Add(-2 * time.Minute), Domain: "recent.example.com", Protocol: "https", Method: "GET", URL: "https://recent.example.com/y", Decision: "deny", ResponseStatus: 403},
+		},
+	}
+	handler := newTestServer(ds, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
+
+	get := func(t *testing.T, path string) analyticsResponse {
+		t.Helper()
+		rr := doGet(t, handler, path)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", rr.Code)
+		}
+		var resp analyticsResponse
+		if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		return resp
+	}
+
+	t.Run("finite range excludes old events", func(t *testing.T) {
+		resp := get(t, "/dashboard/api/analytics?range=1h")
+		if resp.Totals.Requests != 2 {
+			t.Fatalf("expected 2 in-window requests, got %d", resp.Totals.Requests)
+		}
+		for _, d := range resp.TopDomains {
+			if d.Domain == "old.example.com" {
+				t.Fatalf("old.example.com should be filtered out of topDomains: %+v", resp.TopDomains)
+			}
+		}
+		// Timeline buckets across the fixed window: up to 30, tally == in-window count.
+		if len(resp.Timeline) > 30 {
+			t.Fatalf("expected at most 30 timeline buckets, got %d", len(resp.Timeline))
+		}
+		var allow, deny int
+		for _, b := range resp.Timeline {
+			allow += b.Allow
+			deny += b.Deny
+		}
+		if allow+deny != resp.Totals.Requests {
+			t.Fatalf("timeline tally %d != in-window requests %d", allow+deny, resp.Totals.Requests)
+		}
+	})
+
+	t.Run("range=all includes everything", func(t *testing.T) {
+		resp := get(t, "/dashboard/api/analytics?range=all")
+		if resp.Totals.Requests != 4 {
+			t.Fatalf("expected 4 requests for range=all, got %d", resp.Totals.Requests)
+		}
+	})
+
+	t.Run("missing range includes everything", func(t *testing.T) {
+		resp := get(t, "/dashboard/api/analytics")
+		if resp.Totals.Requests != 4 {
+			t.Fatalf("expected 4 requests with no range, got %d", resp.Totals.Requests)
+		}
+	})
+
+	t.Run("bogus range behaves like all", func(t *testing.T) {
+		resp := get(t, "/dashboard/api/analytics?range=bogus")
+		if resp.Totals.Requests != 4 {
+			t.Fatalf("expected 4 requests for bogus range, got %d", resp.Totals.Requests)
+		}
+	})
+}
+
+func TestEndpointsRangeFilter(t *testing.T) {
+	now := time.Now()
+	ds := &fakeDataSource{
+		events: []analytics.Event{
+			// Old endpoint group (~48h ago).
+			{Timestamp: now.Add(-48 * time.Hour), Domain: "a.com", Method: "GET", URL: "https://a.com/old", Decision: "allow", ResponseStatus: 200},
+			// Recent endpoint group (~1m ago).
+			{Timestamp: now.Add(-1 * time.Minute), Domain: "a.com", Method: "GET", URL: "https://a.com/new", Decision: "allow", ResponseStatus: 200},
+		},
+	}
+	handler := newTestServer(ds, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
+
+	t.Run("finite range excludes old endpoint", func(t *testing.T) {
+		rr := doGet(t, handler, "/dashboard/api/endpoints?range=1h")
+		var resp endpointsResponse
+		if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if resp.Total != 1 {
+			t.Fatalf("expected 1 endpoint group in 1h window, got %d", resp.Total)
+		}
+		for _, it := range resp.Items {
+			if it.URL == "https://a.com/old" {
+				t.Fatalf("old endpoint should be filtered out: %+v", resp.Items)
+			}
+		}
+	})
+
+	t.Run("range=all includes both", func(t *testing.T) {
+		rr := doGet(t, handler, "/dashboard/api/endpoints?range=all")
+		var resp endpointsResponse
+		if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if resp.Total != 2 {
+			t.Fatalf("expected 2 endpoint groups for range=all, got %d", resp.Total)
+		}
+	})
+}
+
 func TestMethodNotAllowed(t *testing.T) {
 	handler := newTestServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
 
@@ -368,7 +878,9 @@ func TestMethodNotAllowed(t *testing.T) {
 		"/dashboard/api/policy",
 		"/dashboard/api/secrets",
 		"/dashboard/api/blocked",
+		"/dashboard/api/endpoints",
 		"/dashboard/api/stats",
+		"/dashboard/api/analytics",
 		"/dashboard/",
 	}
 	for _, ep := range endpoints {

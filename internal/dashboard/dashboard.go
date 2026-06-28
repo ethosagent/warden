@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ethosagent/warden/internal/analytics"
@@ -64,6 +65,27 @@ type blockedGroup struct {
 	LastSeen  string `json:"last_seen"`
 }
 
+// endpointGroup is one aggregated (method, url) row in the endpoints response.
+type endpointGroup struct {
+	URL          string `json:"url"`
+	Method       string `json:"method"`
+	Domain       string `json:"domain"`
+	Count        int    `json:"count"`
+	FirstSeen    string `json:"firstSeen"`
+	LastSeen     string `json:"lastSeen"`
+	LastDecision string `json:"lastDecision"`
+	LastStatus   int    `json:"lastStatus"`
+}
+
+// endpointsResponse is the paginated payload for /dashboard/api/endpoints.
+type endpointsResponse struct {
+	Items      []endpointGroup `json:"items"`
+	Page       int             `json:"page"`
+	PageSize   int             `json:"pageSize"`
+	Total      int             `json:"total"`
+	TotalPages int             `json:"totalPages"`
+}
+
 type statsResponse struct {
 	Total           int         `json:"total"`
 	AllowCount      int         `json:"allow_count"`
@@ -88,9 +110,31 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/dashboard/api/policy", s.handlePolicy)
 	mux.HandleFunc("/dashboard/api/secrets", s.handleSecrets)
 	mux.HandleFunc("/dashboard/api/blocked", s.handleBlocked)
+	mux.HandleFunc("/dashboard/api/endpoints", s.handleEndpoints)
 	mux.HandleFunc("/dashboard/api/stats", s.handleStats)
+	mux.HandleFunc("/dashboard/api/analytics", s.handleAnalytics)
 	mux.HandleFunc("/dashboard/", s.handleIndex)
 	return mux
+}
+
+// rangeWindows maps a ?range= token to a finite lookback duration. Only these
+// tokens are honored; "all", empty, or anything else means no time filter.
+var rangeWindows = map[string]time.Duration{
+	"15m": 15 * time.Minute,
+	"1h":  time.Hour,
+	"6h":  6 * time.Hour,
+	"24h": 24 * time.Hour,
+	"7d":  7 * 24 * time.Hour,
+}
+
+// rangeCutoff maps a ?range= token to a cutoff time relative to now.
+// It returns (cutoff, true) for a known finite range, or (zero, false)
+// for "all", missing, or any unrecognized value (meaning: no time filter).
+func rangeCutoff(rangeParam string, now time.Time) (time.Time, bool) {
+	if d, ok := rangeWindows[rangeParam]; ok {
+		return now.Add(-d), true
+	}
+	return time.Time{}, false
 }
 
 // writeError writes a JSON error response.
@@ -254,6 +298,141 @@ func (s *Server) handleBlocked(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, result)
 }
 
+// handleEndpoints serves GET /dashboard/api/endpoints. It collapses repeated
+// hits to the same (method, url) into a single aggregated, paginated row so a
+// polling agent that hammers one endpoint shows up as one informative entry
+// rather than flooding the traffic view.
+//
+// Aggregation runs in-Go over all events, mirroring handleBlocked; this is fine
+// for a single-node local dashboard. A SQL GROUP BY in the analytics store
+// would be the future optimization at large scale.
+func (s *Server) handleEndpoints(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	q := r.URL.Query()
+	page := 1
+	if n, err := strconv.Atoi(q.Get("page")); err == nil && n > 0 {
+		page = n
+	}
+	pageSize := 50
+	if n, err := strconv.Atoi(q.Get("pageSize")); err == nil && n > 0 {
+		pageSize = n
+	}
+	if pageSize < 1 {
+		pageSize = 1
+	}
+	if pageSize > 200 {
+		pageSize = 200
+	}
+
+	// Optional domain filter for the domain→endpoints drill-down.
+	domainFilter := q.Get("domain")
+
+	// Optional time-window filter, mirroring handleAnalytics.
+	cutoff, finite := rangeCutoff(q.Get("range"), time.Now())
+
+	// Limit 0 means no cap — aggregate over every recorded event.
+	f := analytics.EventFilter{Domain: domainFilter, Limit: 0}
+	if finite {
+		f.Since = cutoff
+	}
+	events, err := s.data.GetEvents(f)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	type groupInfo struct {
+		domain       string
+		method       string
+		url          string
+		count        int
+		firstSeen    time.Time
+		lastSeen     time.Time
+		lastDecision string
+		lastStatus   int
+	}
+	grouped := make(map[string]*groupInfo)
+	for _, e := range events {
+		key := e.Method + " " + e.URL
+		info, ok := grouped[key]
+		if !ok {
+			grouped[key] = &groupInfo{
+				domain:       e.Domain,
+				method:       e.Method,
+				url:          e.URL,
+				count:        1,
+				firstSeen:    e.Timestamp,
+				lastSeen:     e.Timestamp,
+				lastDecision: e.Decision,
+				lastStatus:   e.ResponseStatus,
+			}
+			continue
+		}
+		info.count++
+		if e.Timestamp.Before(info.firstSeen) {
+			info.firstSeen = e.Timestamp
+		}
+		if !e.Timestamp.Before(info.lastSeen) {
+			// On ties keep the latest-iterated event as "most recent".
+			info.lastSeen = e.Timestamp
+			info.lastDecision = e.Decision
+			info.lastStatus = e.ResponseStatus
+		}
+	}
+
+	groups := make([]*groupInfo, 0, len(grouped))
+	for _, info := range grouped {
+		groups = append(groups, info)
+	}
+	sort.Slice(groups, func(i, j int) bool {
+		if !groups[i].lastSeen.Equal(groups[j].lastSeen) {
+			return groups[i].lastSeen.After(groups[j].lastSeen)
+		}
+		return groups[i].count > groups[j].count
+	})
+
+	all := make([]endpointGroup, 0, len(groups))
+	for _, info := range groups {
+		all = append(all, endpointGroup{
+			URL:          info.url,
+			Method:       info.method,
+			Domain:       info.domain,
+			Count:        info.count,
+			FirstSeen:    info.firstSeen.Format(time.RFC3339),
+			LastSeen:     info.lastSeen.Format(time.RFC3339),
+			LastDecision: info.lastDecision,
+			LastStatus:   info.lastStatus,
+		})
+	}
+
+	total := len(all)
+	totalPages := (total + pageSize - 1) / pageSize
+	start := (page - 1) * pageSize
+	if start > total {
+		start = total
+	}
+	end := start + pageSize
+	if end > total {
+		end = total
+	}
+	items := all[start:end]
+	if items == nil {
+		items = []endpointGroup{}
+	}
+
+	writeJSON(w, endpointsResponse{
+		Items:      items,
+		Page:       page,
+		PageSize:   pageSize,
+		Total:      total,
+		TotalPages: totalPages,
+	})
+}
+
 // handleStats serves GET /dashboard/api/stats.
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -299,6 +478,591 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		DenyCount:       denyCount,
 		TopDestinations: dests,
 	})
+}
+
+// --- analytics aggregate types ---
+
+type analyticsTotals struct {
+	Requests        int `json:"requests"`
+	Allowed         int `json:"allowed"`
+	Denied          int `json:"denied"`
+	UniqueDomains   int `json:"uniqueDomains"`
+	UniqueEndpoints int `json:"uniqueEndpoints"`
+	Writes          int `json:"writes"`
+	NewDomainsToday int `json:"newDomainsToday"`
+	NewDenials      int `json:"newDenials"`
+}
+
+type statusClasses struct {
+	C2xx  int `json:"2xx"`
+	C3xx  int `json:"3xx"`
+	C4xx  int `json:"4xx"`
+	C5xx  int `json:"5xx"`
+	Other int `json:"other"`
+}
+
+type methodCount struct {
+	Method string `json:"method"`
+	Count  int    `json:"count"`
+}
+
+type protocolCount struct {
+	Protocol string `json:"protocol"`
+	Count    int    `json:"count"`
+}
+
+type timelineBucket struct {
+	Bucket string `json:"bucket"`
+	Allow  int    `json:"allow"`
+	Deny   int    `json:"deny"`
+}
+
+type hourlyBucket struct {
+	Hour  int `json:"hour"`
+	Count int `json:"count"`
+}
+
+type topDomain struct {
+	Domain    string `json:"domain"`
+	Count     int    `json:"count"`
+	Endpoints int    `json:"endpoints"`
+	Allowed   int    `json:"allowed"`
+	Denied    int    `json:"denied"`
+	LastSeen  string `json:"lastSeen"`
+}
+
+type topEndpoint struct {
+	Method     string `json:"method"`
+	URL        string `json:"url"`
+	Domain     string `json:"domain"`
+	Count      int    `json:"count"`
+	LastStatus int    `json:"lastStatus"`
+	LastSeen   string `json:"lastSeen"`
+}
+
+type secretUsage struct {
+	Ref     string   `json:"ref"`
+	Count   int      `json:"count"`
+	Domains []string `json:"domains"`
+}
+
+type judgeEntry struct {
+	Time     string `json:"time"`
+	Method   string `json:"method"`
+	URL      string `json:"url"`
+	Decision string `json:"decision"`
+	Reason   string `json:"reason"`
+}
+
+type writeEntry struct {
+	Method     string `json:"method"`
+	Domain     string `json:"domain"`
+	URL        string `json:"url"`
+	Count      int    `json:"count"`
+	LastStatus int    `json:"lastStatus"`
+}
+
+type analyticsResponse struct {
+	GeneratedAt   string           `json:"generatedAt"`
+	Totals        analyticsTotals  `json:"totals"`
+	StatusClasses statusClasses    `json:"statusClasses"`
+	Methods       []methodCount    `json:"methods"`
+	Protocols     []protocolCount  `json:"protocols"`
+	Timeline      []timelineBucket `json:"timeline"`
+	Hourly        []hourlyBucket   `json:"hourly"`
+	TopDomains    []topDomain      `json:"topDomains"`
+	TopEndpoints  []topEndpoint    `json:"topEndpoints"`
+	Blocked       []blockedGroup   `json:"blocked"`
+	Secrets       []secretUsage    `json:"secrets"`
+	Judge         []judgeEntry     `json:"judge"`
+	Writes        []writeEntry     `json:"writes"`
+}
+
+// isWriteMethod reports whether an HTTP method mutates remote state (non-GET,
+// non-HEAD). These are the data-modification / exfil-risk egress calls.
+func isWriteMethod(method string) bool {
+	switch strings.ToUpper(method) {
+	case "GET", "HEAD", "":
+		return false
+	default:
+		return true
+	}
+}
+
+// timelineBuckets distributes events across ~30 even buckets spanning the
+// min..max timestamp, tallying allow/deny per bucket. It handles the 0-event
+// and single-instant cases gracefully (returns one bucket when the span is
+// zero or there is only one event).
+func timelineBuckets(events []analytics.Event) []timelineBucket {
+	out := []timelineBucket{}
+	if len(events) == 0 {
+		return out
+	}
+	minT, maxT := events[0].Timestamp, events[0].Timestamp
+	for _, e := range events {
+		if e.Timestamp.Before(minT) {
+			minT = e.Timestamp
+		}
+		if e.Timestamp.After(maxT) {
+			maxT = e.Timestamp
+		}
+	}
+	const nBuckets = 30
+	span := maxT.Sub(minT)
+	if span <= 0 {
+		// All events share ~one instant: a single bucket.
+		b := timelineBucket{Bucket: minT.Format(time.RFC3339)}
+		for _, e := range events {
+			if e.Decision == "deny" {
+				b.Deny++
+			} else {
+				b.Allow++
+			}
+		}
+		return append(out, b)
+	}
+	step := span / nBuckets
+	if step <= 0 {
+		step = 1
+	}
+	buckets := make([]timelineBucket, nBuckets)
+	for i := range buckets {
+		buckets[i].Bucket = minT.Add(time.Duration(i) * step).Format(time.RFC3339)
+	}
+	for _, e := range events {
+		idx := int(e.Timestamp.Sub(minT) / step)
+		if idx < 0 {
+			idx = 0
+		}
+		if idx >= nBuckets {
+			idx = nBuckets - 1
+		}
+		if e.Decision == "deny" {
+			buckets[idx].Deny++
+		} else {
+			buckets[idx].Allow++
+		}
+	}
+	return append(out, buckets...)
+}
+
+// timelineBucketsWindow distributes events across ~30 even buckets spanning the
+// FIXED window [start, end], tallying allow/deny per bucket. Unlike
+// timelineBuckets it does not derive the span from the events, so the x-axis
+// covers the whole selected range and sparse periods render as gaps. Events
+// outside [start, end] are clamped into the first/last bucket.
+func timelineBucketsWindow(events []analytics.Event, start, end time.Time) []timelineBucket {
+	out := []timelineBucket{}
+	const nBuckets = 30
+	span := end.Sub(start)
+	if span <= 0 {
+		// Degenerate window: a single bucket holding every event.
+		b := timelineBucket{Bucket: start.Format(time.RFC3339)}
+		for _, e := range events {
+			if e.Decision == "deny" {
+				b.Deny++
+			} else {
+				b.Allow++
+			}
+		}
+		return append(out, b)
+	}
+	step := span / nBuckets
+	if step <= 0 {
+		step = 1
+	}
+	buckets := make([]timelineBucket, nBuckets)
+	for i := range buckets {
+		buckets[i].Bucket = start.Add(time.Duration(i) * step).Format(time.RFC3339)
+	}
+	for _, e := range events {
+		idx := int(e.Timestamp.Sub(start) / step)
+		if idx < 0 {
+			idx = 0
+		}
+		if idx >= nBuckets {
+			idx = nBuckets - 1
+		}
+		if e.Decision == "deny" {
+			buckets[idx].Deny++
+		} else {
+			buckets[idx].Allow++
+		}
+	}
+	return append(out, buckets...)
+}
+
+// handleAnalytics serves GET /dashboard/api/analytics: a single aggregate
+// payload computed in one pass over all recorded events. Empty DB yields zeroed
+// totals and empty (non-nil) arrays.
+func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	now := time.Now()
+	q := r.URL.Query()
+	cutoff, finite := rangeCutoff(q.Get("range"), now)
+
+	f := analytics.EventFilter{Limit: 0}
+	if finite {
+		f.Since = cutoff
+	}
+	events, err := s.data.GetEvents(f)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	dayAgo := now.Add(-24 * time.Hour)
+
+	resp := analyticsResponse{
+		GeneratedAt:  now.Format(time.RFC3339),
+		Methods:      []methodCount{},
+		Protocols:    []protocolCount{},
+		Timeline:     []timelineBucket{},
+		Hourly:       make([]hourlyBucket, 24),
+		TopDomains:   []topDomain{},
+		TopEndpoints: []topEndpoint{},
+		Blocked:      []blockedGroup{},
+		Secrets:      []secretUsage{},
+		Judge:        []judgeEntry{},
+		Writes:       []writeEntry{},
+	}
+	for h := 0; h < 24; h++ {
+		resp.Hourly[h].Hour = h
+	}
+
+	methodCounts := make(map[string]int)
+	protocolCounts := make(map[string]int)
+
+	type domAgg struct {
+		count      int
+		allowed    int
+		denied     int
+		firstSeen  time.Time
+		lastSeen   time.Time
+		endpoints  map[string]struct{}
+		firstIsDen bool // decision of the chronologically-first event
+	}
+	domains := make(map[string]*domAgg)
+
+	type endpAgg struct {
+		method     string
+		url        string
+		domain     string
+		count      int
+		lastSeen   time.Time
+		lastStatus int
+	}
+	endpoints := make(map[string]*endpAgg)
+
+	type blockedAgg struct {
+		count     int
+		firstSeen time.Time
+		lastSeen  time.Time
+	}
+	blocked := make(map[string]*blockedAgg)
+
+	type secretAgg struct {
+		count   int
+		domains map[string]struct{}
+	}
+	secretMap := make(map[string]*secretAgg)
+
+	type writeAgg struct {
+		method     string
+		domain     string
+		url        string
+		count      int
+		lastSeen   time.Time
+		lastStatus int
+	}
+	writeMap := make(map[string]*writeAgg)
+
+	var judges []judgeEntry
+
+	for _, e := range events {
+		resp.Totals.Requests++
+		switch e.Decision {
+		case "allow":
+			resp.Totals.Allowed++
+		case "deny":
+			resp.Totals.Denied++
+		}
+
+		// Status classes.
+		switch {
+		case e.ResponseStatus >= 200 && e.ResponseStatus < 300:
+			resp.StatusClasses.C2xx++
+		case e.ResponseStatus >= 300 && e.ResponseStatus < 400:
+			resp.StatusClasses.C3xx++
+		case e.ResponseStatus >= 400 && e.ResponseStatus < 500:
+			resp.StatusClasses.C4xx++
+		case e.ResponseStatus >= 500 && e.ResponseStatus < 600:
+			resp.StatusClasses.C5xx++
+		default:
+			resp.StatusClasses.Other++
+		}
+
+		methodCounts[strings.ToUpper(e.Method)]++
+		protocolCounts[e.Protocol]++
+
+		resp.Hourly[e.Timestamp.Local().Hour()].Count++
+
+		// Domains.
+		d, ok := domains[e.Domain]
+		if !ok {
+			d = &domAgg{firstSeen: e.Timestamp, lastSeen: e.Timestamp, endpoints: map[string]struct{}{}, firstIsDen: e.Decision == "deny"}
+			domains[e.Domain] = d
+		}
+		d.count++
+		if e.Decision == "allow" {
+			d.allowed++
+		} else if e.Decision == "deny" {
+			d.denied++
+		}
+		if e.Timestamp.Before(d.firstSeen) {
+			d.firstSeen = e.Timestamp
+			d.firstIsDen = e.Decision == "deny"
+		}
+		if e.Timestamp.After(d.lastSeen) {
+			d.lastSeen = e.Timestamp
+		}
+		d.endpoints[e.Method+" "+e.URL] = struct{}{}
+
+		// Endpoints.
+		ekey := e.Method + " " + e.URL
+		ep, ok := endpoints[ekey]
+		if !ok {
+			ep = &endpAgg{method: e.Method, url: e.URL, domain: e.Domain, lastSeen: e.Timestamp, lastStatus: e.ResponseStatus}
+			endpoints[ekey] = ep
+		}
+		ep.count++
+		if !e.Timestamp.Before(ep.lastSeen) {
+			ep.lastSeen = e.Timestamp
+			ep.lastStatus = e.ResponseStatus
+		}
+
+		// Blocked (denied) grouped by domain.
+		if e.Decision == "deny" {
+			b, ok := blocked[e.Domain]
+			if !ok {
+				b = &blockedAgg{firstSeen: e.Timestamp, lastSeen: e.Timestamp}
+				blocked[e.Domain] = b
+			}
+			b.count++
+			if e.Timestamp.Before(b.firstSeen) {
+				b.firstSeen = e.Timestamp
+			}
+			if e.Timestamp.After(b.lastSeen) {
+				b.lastSeen = e.Timestamp
+			}
+		}
+
+		// Secrets by reference.
+		if e.SecretRef != "" {
+			sa, ok := secretMap[e.SecretRef]
+			if !ok {
+				sa = &secretAgg{domains: map[string]struct{}{}}
+				secretMap[e.SecretRef] = sa
+			}
+			sa.count++
+			sa.domains[e.Domain] = struct{}{}
+		}
+
+		// Judge log.
+		if e.JudgeReason != "" {
+			judges = append(judges, judgeEntry{
+				Time:     e.Timestamp.Format(time.RFC3339),
+				Method:   e.Method,
+				URL:      e.URL,
+				Decision: e.Decision,
+				Reason:   e.JudgeReason,
+			})
+		}
+
+		// Writes (non-GET/HEAD egress).
+		if isWriteMethod(e.Method) {
+			wkey := e.Method + " " + e.URL
+			wa, ok := writeMap[wkey]
+			if !ok {
+				wa = &writeAgg{method: e.Method, domain: e.Domain, url: e.URL, lastSeen: e.Timestamp, lastStatus: e.ResponseStatus}
+				writeMap[wkey] = wa
+			}
+			wa.count++
+			if !e.Timestamp.Before(wa.lastSeen) {
+				wa.lastSeen = e.Timestamp
+				wa.lastStatus = e.ResponseStatus
+			}
+		}
+	}
+
+	resp.Totals.UniqueDomains = len(domains)
+	resp.Totals.UniqueEndpoints = len(endpoints)
+	resp.Totals.Writes = len(writeMap)
+
+	// New domains today / new denials in last 24h.
+	for _, d := range domains {
+		if d.firstSeen.After(dayAgo) {
+			resp.Totals.NewDomainsToday++
+			if d.firstIsDen {
+				resp.Totals.NewDenials++
+			}
+		}
+	}
+
+	// Status timeline. For a finite range, bucket across the fixed [cutoff, now]
+	// window so the x-axis spans the whole selection; otherwise bucket across
+	// the events' own min..max span.
+	if finite {
+		resp.Timeline = timelineBucketsWindow(events, cutoff, now)
+	} else {
+		resp.Timeline = timelineBuckets(events)
+	}
+
+	// Methods sorted by count desc, then name.
+	for m, c := range methodCounts {
+		resp.Methods = append(resp.Methods, methodCount{Method: m, Count: c})
+	}
+	sort.Slice(resp.Methods, func(i, j int) bool {
+		if resp.Methods[i].Count != resp.Methods[j].Count {
+			return resp.Methods[i].Count > resp.Methods[j].Count
+		}
+		return resp.Methods[i].Method < resp.Methods[j].Method
+	})
+
+	// Protocols sorted by count desc, then name.
+	for p, c := range protocolCounts {
+		resp.Protocols = append(resp.Protocols, protocolCount{Protocol: p, Count: c})
+	}
+	sort.Slice(resp.Protocols, func(i, j int) bool {
+		if resp.Protocols[i].Count != resp.Protocols[j].Count {
+			return resp.Protocols[i].Count > resp.Protocols[j].Count
+		}
+		return resp.Protocols[i].Protocol < resp.Protocols[j].Protocol
+	})
+
+	// Top domains (top 12 by count).
+	allDomains := make([]topDomain, 0, len(domains))
+	for name, d := range domains {
+		allDomains = append(allDomains, topDomain{
+			Domain:    name,
+			Count:     d.count,
+			Endpoints: len(d.endpoints),
+			Allowed:   d.allowed,
+			Denied:    d.denied,
+			LastSeen:  d.lastSeen.Format(time.RFC3339),
+		})
+	}
+	sort.Slice(allDomains, func(i, j int) bool {
+		if allDomains[i].Count != allDomains[j].Count {
+			return allDomains[i].Count > allDomains[j].Count
+		}
+		return allDomains[i].Domain < allDomains[j].Domain
+	})
+	if len(allDomains) > 12 {
+		allDomains = allDomains[:12]
+	}
+	resp.TopDomains = allDomains
+
+	// Top endpoints (top 12 by count).
+	allEndpoints := make([]topEndpoint, 0, len(endpoints))
+	for _, ep := range endpoints {
+		allEndpoints = append(allEndpoints, topEndpoint{
+			Method:     ep.method,
+			URL:        ep.url,
+			Domain:     ep.domain,
+			Count:      ep.count,
+			LastStatus: ep.lastStatus,
+			LastSeen:   ep.lastSeen.Format(time.RFC3339),
+		})
+	}
+	sort.Slice(allEndpoints, func(i, j int) bool {
+		if allEndpoints[i].Count != allEndpoints[j].Count {
+			return allEndpoints[i].Count > allEndpoints[j].Count
+		}
+		if allEndpoints[i].URL != allEndpoints[j].URL {
+			return allEndpoints[i].URL < allEndpoints[j].URL
+		}
+		return allEndpoints[i].Method < allEndpoints[j].Method
+	})
+	if len(allEndpoints) > 12 {
+		allEndpoints = allEndpoints[:12]
+	}
+	resp.TopEndpoints = allEndpoints
+
+	// Blocked groups sorted by count desc, then domain.
+	for name, b := range blocked {
+		resp.Blocked = append(resp.Blocked, blockedGroup{
+			Domain:    name,
+			Count:     b.count,
+			FirstSeen: b.firstSeen.Format(time.RFC3339),
+			LastSeen:  b.lastSeen.Format(time.RFC3339),
+		})
+	}
+	sort.Slice(resp.Blocked, func(i, j int) bool {
+		if resp.Blocked[i].Count != resp.Blocked[j].Count {
+			return resp.Blocked[i].Count > resp.Blocked[j].Count
+		}
+		return resp.Blocked[i].Domain < resp.Blocked[j].Domain
+	})
+
+	// Secrets grouped by ref, each with distinct destination domains (sorted).
+	for ref, sa := range secretMap {
+		doms := make([]string, 0, len(sa.domains))
+		for d := range sa.domains {
+			doms = append(doms, d)
+		}
+		sort.Strings(doms)
+		resp.Secrets = append(resp.Secrets, secretUsage{Ref: ref, Count: sa.count, Domains: doms})
+	}
+	sort.Slice(resp.Secrets, func(i, j int) bool {
+		if resp.Secrets[i].Count != resp.Secrets[j].Count {
+			return resp.Secrets[i].Count > resp.Secrets[j].Count
+		}
+		return resp.Secrets[i].Ref < resp.Secrets[j].Ref
+	})
+
+	// Judge log: most-recent first, capped at 20. events arrive newest-first
+	// from GetEvents, but we sort defensively to guarantee ordering.
+	sort.SliceStable(judges, func(i, j int) bool {
+		return judges[i].Time > judges[j].Time
+	})
+	if len(judges) > 20 {
+		judges = judges[:20]
+	}
+	if judges != nil {
+		resp.Judge = judges
+	}
+
+	// Writes (top 12 by count).
+	allWrites := make([]writeEntry, 0, len(writeMap))
+	for _, wa := range writeMap {
+		allWrites = append(allWrites, writeEntry{
+			Method:     wa.method,
+			Domain:     wa.domain,
+			URL:        wa.url,
+			Count:      wa.count,
+			LastStatus: wa.lastStatus,
+		})
+	}
+	sort.Slice(allWrites, func(i, j int) bool {
+		if allWrites[i].Count != allWrites[j].Count {
+			return allWrites[i].Count > allWrites[j].Count
+		}
+		if allWrites[i].URL != allWrites[j].URL {
+			return allWrites[i].URL < allWrites[j].URL
+		}
+		return allWrites[i].Method < allWrites[j].Method
+	})
+	if len(allWrites) > 12 {
+		allWrites = allWrites[:12]
+	}
+	resp.Writes = allWrites
+
+	writeJSON(w, resp)
 }
 
 // handleIndex serves the embedded HTML dashboard page.
