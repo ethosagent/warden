@@ -7,7 +7,7 @@ Warden ships as a **single static Go binary** and a **multi-arch container image
 The **git tag is the version.** `scripts/build.sh` stamps the binary's `warden version` output from `git describe` at build time, so the tag a release is cut from *is* the version — nothing else to keep in sync.
 
 ```
-tag v1.2.3  ->  binary reports "warden 1.2.3"  ->  image ghcr.io/ethosagent/warden:1.2.3
+tag v1.2.3  ->  binary reports "warden 1.2.3"  ->  image ethosagent/warden:1.2.3
 ```
 
 Tags are `vX.Y.Z` (semver, `v`-prefixed). Pushing a `v*` tag is what triggers the release workflow.
@@ -22,17 +22,19 @@ Pushing a `v*` tag runs [`.github/workflows/release.yml`](.github/workflows/rele
 - `warden-sbom.cyclonedx.json` — a **CycloneDX SBOM** (syft); its hash is inside the signed `checksums.txt`
 - **SLSA build-provenance** attestations for every artifact
 
-**A multi-arch container image** at `ghcr.io/ethosagent/warden:<version>` and `:latest`:
+**A multi-arch container image** at `ethosagent/warden:<version>` and `:latest` (Docker Hub):
 - `linux/amd64` + `linux/arm64`
 - SBOM + SLSA provenance attached to the image digest
 - the digest **signed by keyless cosign** (one signature covers both arches)
 
-All signing is **keyless Sigstore** (GitHub OIDC) — there are **no signing keys or registry passwords to manage**: the image push uses the built-in `GITHUB_TOKEN`, and cosign + attestations use the workflow's OIDC identity.
+All signing is **keyless Sigstore** (GitHub OIDC) — no signing keys to manage; cosign + attestations use the workflow's OIDC identity. The only registry credential is a Docker Hub access token (`DOCKERHUB_TOKEN`) for the image push.
 
 ## Prerequisites — first time only
 
-- **GHCR package visibility.** The first tag push creates `ghcr.io/ethosagent/warden` as a **private** package. To make releases public: the package page -> *Package settings* -> *Change visibility* -> Public (once; it stays public).
-- **Nothing else.** No secrets to add — keyless signing + `GITHUB_TOKEN` cover everything. (Adding Docker Hub later would need `DOCKERHUB_*` secrets.)
+- **Docker Hub credentials.** Add two GitHub repo secrets (Settings -> Secrets and variables -> Actions):
+  - `DOCKERHUB_USERNAME` — a Docker Hub account with **write** access to `ethosagent/warden`.
+  - `DOCKERHUB_TOKEN` — a Docker Hub **Access Token** (Account Settings -> Security -> New Access Token, scope **Read & Write**). Not the account password.
+- **Docker Hub repo.** Ensure `ethosagent/warden` exists on Docker Hub and is public if releases should be publicly pullable.
 
 ## Cutting a release
 
@@ -73,7 +75,7 @@ git push origin v1.2.3
 | Job | Steps | Produces |
 |---|---|---|
 | **release** | build cross-platform binaries -> SBOM (syft) -> SLSA provenance -> checksums -> cosign sign-blob -> `gh release create` | the signed GitHub Release + SBOM + provenance |
-| **image** | buildx multi-arch build + push to GHCR (SBOM + provenance on the digest) -> cosign sign the digest | the signed multi-arch image |
+| **image** | buildx multi-arch build + push to Docker Hub (SBOM + provenance on the digest) -> cosign sign the digest | the signed multi-arch image |
 
 Release notes are auto-generated from Conventional-Commit PR titles since the previous tag (`--generate-notes`) — that is the de-facto changelog; there is no `CHANGELOG.md`.
 
@@ -93,10 +95,10 @@ gh attestation verify warden-linux-amd64 --repo ethosagent/warden
 
 **Image:**
 ```bash
-cosign verify ghcr.io/ethosagent/warden:1.2.3 \
+cosign verify ethosagent/warden:1.2.3 \
   --certificate-identity-regexp 'https://github.com/ethosagent/warden/.*' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
-docker buildx imagetools inspect ghcr.io/ethosagent/warden:1.2.3   # shows both arches
+docker buildx imagetools inspect ethosagent/warden:1.2.3   # shows both arches
 ```
 
 > **Always pass `--certificate-identity*` and `--certificate-oidc-issuer`.** A bare `cosign verify` only checks that *some* valid Sigstore signature exists — pinning the identity + issuer is what proves it is *this* repo's release workflow.
