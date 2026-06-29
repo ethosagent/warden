@@ -1,0 +1,77 @@
+name: release
+
+# On a version tag, build cross-platform binaries, publish a GitHub Release, and
+# sign the checksums with KEYLESS cosign (Sigstore via GitHub OIDC) — no
+# long-lived signing keys; the signing identity is this workflow.
+#
+# Verify a downloaded release:
+#   cosign verify-blob \
+#     --certificate checksums.txt.pem \
+#     --signature checksums.txt.sig \
+#     --certificate-identity-regexp 'https://github.com/ethosagent/warden/.*' \
+#     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+#     checksums.txt
+#   # then confirm your binary's line in the now-trusted checksums.txt:
+#   sha256sum --check --ignore-missing checksums.txt
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write      # create the release + upload assets
+  id-token: write      # keyless cosign signing via OIDC
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history + tags for version stamping
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build release binaries
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          mkdir -p dist
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            os="${target%/*}"
+            arch="${target#*/}"
+            out="dist/warden-${os}-${arch}"
+            echo "building ${out}"
+            GOOS="${os}" GOARCH="${arch}" scripts/build.sh "${out}"
+          done
+
+      - name: Generate checksums
+        working-directory: dist
+        run: sha256sum warden-* > checksums.txt
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign checksums (keyless)
+        working-directory: dist
+        run: |
+          cosign sign-blob --yes \
+            --output-signature checksums.txt.sig \
+            --output-certificate checksums.txt.pem \
+            checksums.txt
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}" \
+            --title "${{ github.ref_name }}" \
+            --generate-notes \
+            dist/warden-* dist/checksums.txt dist/checksums.txt.sig dist/checksums.txt.pem
