@@ -482,6 +482,15 @@ func (g *Gateway) OnResponse(sessionKey string, status int, hdr http.Header, bod
 	}
 }
 
+// MaxResponseScanBytes is the inline response-buffer cap. Defaults to 1 MiB when
+// unset so the proxy never buffers an unbounded body.
+func (g *Gateway) MaxResponseScanBytes() int {
+	if g.cfg.MaxResponseScanBytes <= 0 {
+		return 1 << 20
+	}
+	return g.cfg.MaxResponseScanBytes
+}
+
 // SchemaSnapshot returns the observed per-tool schema profiles for the
 // dashboard. Returns nil when profiling is disabled.
 func (g *Gateway) SchemaSnapshot() map[string]mcp.ToolProfileView {
