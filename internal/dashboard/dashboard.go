@@ -818,9 +818,10 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 			domains[e.Domain] = d
 		}
 		d.count++
-		if e.Decision == "allow" {
+		switch e.Decision {
+		case "allow":
 			d.allowed++
-		} else if e.Decision == "deny" {
+		case "deny":
 			d.denied++
 		}
 		if e.Timestamp.Before(d.firstSeen) {

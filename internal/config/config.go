@@ -267,7 +267,7 @@ func parse(data []byte) (*LocalYAMLProvider, error) {
 	}
 
 	for _, a := range raw.Agents {
-		policy.Agents = append(policy.Agents, AgentPolicy{ID: a.ID, Policy: a.Policy})
+		policy.Agents = append(policy.Agents, AgentPolicy(a))
 	}
 	if raw.Advisory != nil {
 		policy.Advisory.Enabled = raw.Advisory.Enabled

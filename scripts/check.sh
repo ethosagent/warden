@@ -11,12 +11,14 @@
 # Env:
 #   COVERAGE_MIN          minimum total coverage percent (default: 70)
 #   GOVULNCHECK_VERSION   pinned govulncheck version to run (default: v1.5.0)
+#   GOLANGCI_VERSION      pinned golangci-lint version to run (default: v2.12.2)
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
 COVERAGE_MIN="${COVERAGE_MIN:-70}"
 GOVULNCHECK_VERSION="${GOVULNCHECK_VERSION:-v1.5.0}"
+GOLANGCI_VERSION="${GOLANGCI_VERSION:-v2.12.2}"
 RUN_INTEGRATION=0
 for arg in "$@"; do
 	case "$arg" in
@@ -46,14 +48,15 @@ banner "vet (go vet ./...)"
 go vet ./...
 echo "ok"
 
-# 3. lint
-banner "lint (golangci-lint)"
-if command -v golangci-lint >/dev/null 2>&1; then
-	golangci-lint run
-	echo "ok"
-else
-	echo "golangci-lint not installed — skipping (CI installs it)."
-fi
+# 3. lint (golangci-lint, pinned + always-run)
+#
+# Run via `go run` at a pinned version so local dev, the pre-push hook, and CI
+# all run the SAME linter version (no `@latest` drift) and lint never silently
+# skips when the tool isn't on PATH — that skip is what let CI catch issues a
+# local run didn't.
+banner "lint (golangci-lint ${GOLANGCI_VERSION})"
+go run "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI_VERSION}" run
+echo "ok"
 
 # 4. build
 banner "build (go build ./...)"

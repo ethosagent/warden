@@ -11,6 +11,18 @@ linters:
     - misspell      # common misspellings
     - staticcheck   # broad static analysis (subsumes gosimple/stylecheck)
     - unused        # unused code
+  exclusions:
+    generated: lax
+    presets:
+      # Idiomatic unchecked-error patterns: fmt.Fprint*/Print*, *.Close, *.Flush,
+      # os.Setenv/Remove, etc. — conventionally not error-checked.
+      - std-error-handling
+    rules:
+      # Test fixtures legitimately ignore I/O errors (httptest handlers writing
+      # responses, echo servers, raw conn read/write in the proxy tests).
+      - path: _test\.go
+        linters:
+          - errcheck
 
 formatters:
   enable:
