@@ -1,0 +1,121 @@
+# Run Hermes Agent behind Warden — full egress visibility, allow-all policy.
+#
+# Hermes is isolated on an INTERNAL-ONLY network: its sole route to the internet
+# is Warden. Warden terminates TLS, allows everything (for now), and logs every
+# call to the dashboard at http://localhost:9090/dashboard/ (+/metrics).
+#
+# Hermes is Node-based (and bundles an OpenAI-compatible API layer); Node's
+# built-in fetch (undici) IGNORES HTTP(S)_PROXY unless NODE_USE_ENV_PROXY=1 is
+# set — without it, egress goes direct, fails on the isolated network, and never
+# reaches Warden.
+#
+# Prereq (run from the repo root): generate the bake-once CA into ./certs:
+#   OUT_DIR=deploy/compose/certs ./scripts/gen-certs.sh
+#
+# Run (from the repo root):
+#   docker compose -f deploy/compose/docker-compose.hermes.yml up --build
+#
+# Hermes API: http://localhost:8642   ·   Hermes dashboard: http://localhost:9119 (login: admin / warden)
+#   ·   Warden dashboard: http://localhost:9090/dashboard/
+
+services:
+  warden:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: warden-proxy:dev
+    networks: [hermes-internal, egress]
+    ports:
+      - "9090:9090"                 # dashboard + /metrics (host-only; NOT reachable by Hermes)
+    volumes:
+      - ../../configs/config.recipe.yaml:/etc/warden/config.yaml:ro
+      - ./certs:/etc/warden/certs:ro
+      - warden-data:/data            # persist the analytics db across restarts/redeploys
+    command:
+      - "run"
+      - "--config=/etc/warden/config.yaml"
+      - "--listen=0.0.0.0:8080"
+      - "--ca-cert=/etc/warden/certs/proxy-ca.crt"   # TLS terminate for full visibility; omit both for blind tunnel (domain-only)
+      - "--ca-key=/etc/warden/certs/proxy-ca.key"
+      - "--admin-listen=0.0.0.0:9090"
+      - "--db=/data/warden.db"
+
+  hermes:
+    image: nousresearch/hermes-agent:latest
+    command: ["gateway", "run"]
+    depends_on: [warden]
+    networks: [hermes-internal]       # internal ONLY — no internet except via Warden
+    environment:
+      - HERMES_DASHBOARD=1            # expose the Hermes web dashboard on 9119
+      # Dashboard login (REQUIRED to expose 9119). Hermes refuses a non-loopback
+      # dashboard bind with no auth provider; the socat forwarder reaches it over
+      # the bridge (non-loopback), so without this the dashboard falls back to
+      # binding 127.0.0.1 inside the container and host port 9119 is unreachable.
+      # These env vars register Hermes's built-in username/password provider
+      # (env wins over config.yaml — no edit inside the volume needed).
+      - HERMES_DASHBOARD_BASIC_AUTH_USERNAME=admin
+      - HERMES_DASHBOARD_BASIC_AUTH_PASSWORD=warden   # CHANGE ME — plaintext, hashed in-memory at boot. For real use precompute HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH instead.
+      # Optional: a stable 32+ byte secret so login sessions survive restarts.
+      # Without it Hermes generates a random per-process key and you re-login after
+      # every restart. Generate one with: openssl rand -base64 32
+      # - HERMES_DASHBOARD_BASIC_AUTH_SECRET=replace-with-openssl-rand-base64-32
+      # Route ALL egress through Warden (both cases for tools that read lowercase)
+      - HTTP_PROXY=http://warden:8080
+      - HTTPS_PROXY=http://warden:8080
+      - http_proxy=http://warden:8080
+      - https_proxy=http://warden:8080
+      - NO_PROXY=localhost,127.0.0.1,::1,warden
+      - no_proxy=localhost,127.0.0.1,::1,warden
+      # CRITICAL: Node's built-in fetch (undici) IGNORES HTTP(S)_PROXY unless this
+      # is set (Node >= ~v20). Without it, Hermes's fetch() calls go direct and
+      # fail on the isolated network ("fetch failed") — they never reach Warden.
+      - NODE_USE_ENV_PROXY=1
+      # Trust Warden's CA so its terminated-TLS leaf certs are accepted.
+      - NODE_EXTRA_CA_CERTS=/etc/warden/certs/proxy-ca.crt
+      - SSL_CERT_FILE=/etc/warden/certs/proxy-ca.crt
+      - REQUESTS_CA_BUNDLE=/etc/warden/certs/proxy-ca.crt
+      - CURL_CA_BUNDLE=/etc/warden/certs/proxy-ca.crt
+      # Hand Hermes PLACEHOLDER tokens (e.g. openai_secret_001), never real keys.
+      # Real keys live with Warden — map placeholder->envVar in config.recipe.yaml.
+    volumes:
+      - hermes-data:/opt/data
+      - ./certs/proxy-ca.crt:/etc/warden/certs/proxy-ca.crt:ro
+
+  # UI forwarder: an `internal: true` network blocks host port-publishing, so the
+  # Hermes gateway API (8642) and dashboard (9119) are exposed via these socat
+  # hops instead — WITHOUT giving Hermes an internet route. Only this dumb
+  # forwarder touches the frontend bridge; Hermes stays internal-only.
+  ui:
+    image: alpine/socat
+    depends_on: [hermes]
+    networks: [hermes-internal, frontend]
+    ports:
+      - "8642:8642"
+    command: ["TCP-LISTEN:8642,fork,reuseaddr", "TCP:hermes:8642"]
+
+  # Second forwarder for the optional Hermes dashboard (HERMES_DASHBOARD=1).
+  ui-dashboard:
+    image: alpine/socat
+    depends_on: [hermes]
+    networks: [hermes-internal, frontend]
+    ports:
+      - "9119:9119"
+    command: ["TCP-LISTEN:9119,fork,reuseaddr", "TCP:hermes:9119"]
+
+networks:
+  # internal: true → containers here get NO route to the internet. Hermes is here only.
+  hermes-internal:
+    internal: true
+  # egress carries real internet and is attached ONLY to Warden.
+  egress:
+    driver: bridge
+  # frontend carries ONLY the inbound UI forwarders + their host-published ports.
+  # Hermes is never attached here, so it gains no internet route.
+  frontend:
+    driver: bridge
+
+volumes:
+  # persistent Warden analytics db — survives `up --build` / container recreate.
+  warden-data:
+  # Hermes config / .env / sessions / memories / skills / logs (all under /opt/data).
+  hermes-data:

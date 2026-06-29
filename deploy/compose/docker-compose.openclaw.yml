@@ -1,0 +1,108 @@
+# Run OpenClaw behind Warden — full egress visibility, allow-all policy.
+#
+# OpenClaw is isolated on an INTERNAL-ONLY network: its sole route to the
+# internet is Warden. Warden terminates TLS, allows everything (for now), and
+# logs every call to the dashboard at http://localhost:9090/dashboard/ (+/metrics).
+#
+# OpenClaw is Node-based; Node's built-in fetch (undici) IGNORES HTTP(S)_PROXY
+# unless NODE_USE_ENV_PROXY=1 is set — without it, egress goes direct, fails on
+# the isolated network, and never reaches Warden.
+#
+# Prereq (run from the repo root): generate the bake-once CA into ./certs:
+#   OUT_DIR=deploy/compose/certs ./scripts/gen-certs.sh
+#
+# Run (from the repo root):
+#   docker compose -f deploy/compose/docker-compose.openclaw.yml up --build
+#
+# OpenClaw UI: http://localhost:18789/#token=warden-dev-token   ·   Warden dashboard: http://localhost:9090/dashboard/
+
+services:
+  warden:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: warden-proxy:dev
+    networks: [openclaw-internal, egress]
+    ports:
+      - "9090:9090"                 # dashboard + /metrics (host-only; NOT reachable by OpenClaw)
+    volumes:
+      - ../../configs/config.recipe.yaml:/etc/warden/config.yaml:ro
+      - ./certs:/etc/warden/certs:ro
+      - warden-data:/data            # persist the analytics db across restarts/redeploys
+    command:
+      - "run"
+      - "--config=/etc/warden/config.yaml"
+      - "--listen=0.0.0.0:8080"
+      - "--ca-cert=/etc/warden/certs/proxy-ca.crt"   # TLS terminate for full visibility; omit both for blind tunnel (domain-only)
+      - "--ca-key=/etc/warden/certs/proxy-ca.key"
+      - "--admin-listen=0.0.0.0:9090"
+      - "--db=/data/warden.db"
+
+  openclaw:
+    image: ghcr.io/openclaw/openclaw:latest   # Docker Hub mirror: openclaw/openclaw:latest
+    # --allow-unconfigured: start the gateway before a completed `openclaw setup`
+    # (configure providers/channels later via the Control UI). Without it the
+    # container exits 78 ("Missing config"). The image's default CMD is
+    # `node openclaw.mjs gateway`; we re-state it to append the flag (entrypoint
+    # stays tini).
+    command: ["node", "openclaw.mjs", "gateway", "--allow-unconfigured"]
+    depends_on: [warden]
+    networks: [openclaw-internal]     # internal ONLY — no internet except via Warden
+    environment:
+      # Control UI / gateway auth. In a container OpenClaw auto-binds 0.0.0.0 (so
+      # the socat forwarder can reach it) but REFUSES a non-loopback bind without
+      # auth. This token unlocks the bind; open the UI with it as a URL *fragment*:
+      #   http://localhost:18789/#token=warden-dev-token
+      - OPENCLAW_GATEWAY_TOKEN=warden-dev-token   # CHANGE ME — use OPENCLAW_GATEWAY_PASSWORD for password auth instead
+      # Route ALL egress through Warden (both cases for tools that read lowercase)
+      - HTTP_PROXY=http://warden:8080
+      - HTTPS_PROXY=http://warden:8080
+      - http_proxy=http://warden:8080
+      - https_proxy=http://warden:8080
+      - NO_PROXY=localhost,127.0.0.1,::1,warden
+      - no_proxy=localhost,127.0.0.1,::1,warden
+      # CRITICAL: Node's built-in fetch (undici) IGNORES HTTP(S)_PROXY unless this
+      # is set (Node >= ~v20). Without it, OpenClaw's fetch() calls go direct and
+      # fail on the isolated network ("fetch failed") — they never reach Warden.
+      - NODE_USE_ENV_PROXY=1
+      # Trust Warden's CA so its terminated-TLS leaf certs are accepted.
+      - NODE_EXTRA_CA_CERTS=/etc/warden/certs/proxy-ca.crt
+      - SSL_CERT_FILE=/etc/warden/certs/proxy-ca.crt
+      - REQUESTS_CA_BUNDLE=/etc/warden/certs/proxy-ca.crt
+      - CURL_CA_BUNDLE=/etc/warden/certs/proxy-ca.crt
+      # Hand OpenClaw PLACEHOLDER tokens (e.g. openai_secret_001), never real keys.
+      # Real keys live with Warden — map placeholder->envVar in config.recipe.yaml.
+    volumes:
+      - openclaw-config:/home/node/.openclaw
+      - ./certs/proxy-ca.crt:/etc/warden/certs/proxy-ca.crt:ro
+
+  # UI forwarder: an `internal: true` network blocks host port-publishing, so the
+  # OpenClaw Control UI is exposed via this tiny socat hop instead. It forwards
+  # host:18789 -> openclaw:18789 WITHOUT giving OpenClaw an internet route.
+  # OpenClaw auto-binds 0.0.0.0 inside a container (bind=auto) once gateway auth
+  # is set (OPENCLAW_GATEWAY_TOKEN above), so this socat hop reaches it fine.
+  ui:
+    image: alpine/socat
+    depends_on: [openclaw]
+    networks: [openclaw-internal, frontend]
+    ports:
+      - "18789:18789"
+    command: ["TCP-LISTEN:18789,fork,reuseaddr", "TCP:openclaw:18789"]
+
+networks:
+  # internal: true → containers here get NO route to the internet. OpenClaw is here only.
+  openclaw-internal:
+    internal: true
+  # egress carries real internet and is attached ONLY to Warden.
+  egress:
+    driver: bridge
+  # frontend carries ONLY the inbound UI forwarder + its host-published port.
+  # OpenClaw is never attached here, so it gains no internet route.
+  frontend:
+    driver: bridge
+
+volumes:
+  # persistent Warden analytics db — survives `up --build` / container recreate.
+  warden-data:
+  # OpenClaw config / auth profiles / workspace.
+  openclaw-config:

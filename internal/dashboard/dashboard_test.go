@@ -497,6 +497,22 @@ func TestHTMLServes(t *testing.T) {
 	}
 }
 
+func TestHTMLHasFavicon(t *testing.T) {
+	handler := newTestServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
+
+	rr := doGet(t, handler, "/dashboard/")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, `rel="icon"`) {
+		t.Fatal("expected dashboard HTML to declare a favicon (rel=\"icon\")")
+	}
+	if !strings.Contains(body, "image/svg+xml") {
+		t.Fatal("expected favicon to be an inline SVG (image/svg+xml data URI)")
+	}
+}
+
 func TestEndpointsDomainFilter(t *testing.T) {
 	now := time.Date(2025, 6, 15, 10, 0, 0, 0, time.UTC)
 	ds := &fakeDataSource{
