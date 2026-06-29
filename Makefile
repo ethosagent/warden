@@ -1,10 +1,10 @@
 # Warden — thin wrappers over scripts/. The real logic lives in scripts/check.sh
 # so CI, git hooks, and `make` all run the identical gate.
 
-.PHONY: build test check integration hooks fmt lint
+.PHONY: build test check integration hooks fmt lint repro
 
 build:
-	go build -o warden ./cmd/proxy
+	scripts/build.sh warden
 
 test:
 	go test -race ./...
@@ -23,3 +23,6 @@ fmt:
 
 lint:
 	golangci-lint run
+
+repro:
+	scripts/repro-verify.sh
