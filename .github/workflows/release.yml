@@ -5,6 +5,8 @@ name: release
 # long-lived signing keys; the signing identity is this workflow.
 # A CycloneDX SBOM (syft) is also attached; its hash is in the signed
 # checksums.txt, so the signature covers the SBOM too.
+# Each artifact also gets a SLSA build-provenance attestation; verify with:
+#   gh attestation verify warden-linux-amd64 --repo ethosagent/warden
 #
 # Verify a downloaded release:
 #   cosign verify-blob \
@@ -23,7 +25,8 @@ on:
 
 permissions:
   contents: write      # create the release + upload assets
-  id-token: write      # keyless cosign signing via OIDC
+  id-token: write      # keyless cosign signing + provenance via OIDC
+  attestations: write  # SLSA build-provenance attestations
 
 jobs:
   release:
@@ -59,6 +62,11 @@ jobs:
           path: .
           format: cyclonedx-json
           output-file: dist/warden-sbom.cyclonedx.json
+
+      - name: Attest build provenance (SLSA)
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: 'dist/warden-*'
 
       - name: Generate checksums
         working-directory: dist
