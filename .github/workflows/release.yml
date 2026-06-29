@@ -77,7 +77,7 @@ jobs:
 
       - name: Generate checksums
         working-directory: dist
-        run: sha256sum warden-* warden-sbom.cyclonedx.json > checksums.txt
+        run: sha256sum warden-* > checksums.txt
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
@@ -98,7 +98,7 @@ jobs:
             --repo "${{ github.repository }}" \
             --title "${{ github.ref_name }}" \
             --generate-notes \
-            dist/warden-* dist/warden-sbom.cyclonedx.json dist/checksums.txt dist/checksums.txt.sig dist/checksums.txt.pem
+            dist/warden-* dist/checksums.txt dist/checksums.txt.sig dist/checksums.txt.pem
 
   image:
     runs-on: ubuntu-latest
