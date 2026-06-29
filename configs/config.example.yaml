@@ -111,6 +111,13 @@ mcp:
     allow: []                     # permitted tool names; empty + enforce = deny all tools/call
     deny: []                      # blocked tool names; wins over allow
     rateLimit: {}                 # tool name -> "N/second|minute|hour"
+    constraints: {}               # per-tool argument constraints (checked after allow/deny);
+                                  # values are inspected transiently, never stored. Example:
+                                  #   read_file:
+                                  #     maxArgsBytes: 65536            # cap on raw arguments size (0 = unlimited)
+                                  #     fields:
+                                  #       path:      { match: "^/workspace/.*", maxLen: 4096, required: true }
+                                  #       recursive: { forbidden: true }
   schema:
     pin: false                    # block on any tools/list drift (enforce mode)
   scan:

@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -42,8 +43,9 @@ const (
 type Finding struct {
 	// Kind is the bounded finding category. One of: "mcp_tool_denied",
 	// "mcp_poisoning", "mcp_schema_drift", "mcp_args_injection", "mcp_args_leak",
-	// "mcp_args_pii", "mcp_chain_<pattern>", "mcp_result_injection",
-	// "mcp_result_leak", "mcp_result_pii".
+	// "mcp_args_pii", "mcp_args_constraint", "mcp_args_too_large",
+	// "mcp_chain_<pattern>", "mcp_result_injection", "mcp_result_leak",
+	// "mcp_result_pii".
 	Kind     string
 	Severity string // "high"|"medium"|"low"
 	Tool     string
@@ -102,6 +104,21 @@ type session struct {
 	lastSeen    time.Time
 }
 
+// compiledFieldConstraint is a per-field constraint with its Match regexp
+// precompiled once at New (never per request). re is nil when no match is set.
+type compiledFieldConstraint struct {
+	re        *regexp.Regexp
+	maxLen    int
+	required  bool
+	forbidden bool
+}
+
+// compiledToolConstraints is one tool's precompiled argument constraints.
+type compiledToolConstraints struct {
+	maxArgsBytes int
+	fields       map[string]compiledFieldConstraint
+}
+
 // Gateway is the MCP verdict engine. It is safe for concurrent use.
 type Gateway struct {
 	cfg      config.MCPConfig
@@ -109,6 +126,10 @@ type Gateway struct {
 	policy   *mcp.ToolPolicy
 	profiler *mcp.SchemaProfiler
 	log      *slog.Logger
+
+	// constraints holds the per-tool argument constraints precompiled at New,
+	// keyed by tool name. Read-only after construction; no lock needed.
+	constraints map[string]compiledToolConstraints
 
 	mu       sync.Mutex
 	sessions map[string]*session
@@ -133,15 +154,50 @@ func New(cfg config.MCPConfig, scanner *scan.Scanner, log *slog.Logger) *Gateway
 		profiler = mcp.NewSchemaProfiler(0)
 	}
 	return &Gateway{
-		cfg:       cfg,
-		scanner:   scanner,
-		policy:    policy,
-		profiler:  profiler,
-		log:       log,
-		sessions:  make(map[string]*session),
-		inventory: make(map[string]*InventoryItem),
-		now:       time.Now,
+		cfg:         cfg,
+		scanner:     scanner,
+		policy:      policy,
+		profiler:    profiler,
+		log:         log,
+		constraints: compileConstraints(cfg.Tools.Constraints),
+		sessions:    make(map[string]*session),
+		inventory:   make(map[string]*InventoryItem),
+		now:         time.Now,
 	}
+}
+
+// compileConstraints precompiles each per-tool argument constraint once. Match
+// regexps are compiled here (config validation already proved they compile, so
+// a compile error here is unexpected and that field is skipped rather than
+// taking down construction). Returns nil when no constraints are configured.
+func compileConstraints(cs map[string]config.MCPToolConstraints) map[string]compiledToolConstraints {
+	if len(cs) == 0 {
+		return nil
+	}
+	out := make(map[string]compiledToolConstraints, len(cs))
+	for tool, tc := range cs {
+		ctc := compiledToolConstraints{maxArgsBytes: tc.MaxArgsBytes}
+		if len(tc.Fields) > 0 {
+			ctc.fields = make(map[string]compiledFieldConstraint, len(tc.Fields))
+			for field, fc := range tc.Fields {
+				cfc := compiledFieldConstraint{
+					maxLen:    fc.MaxLen,
+					required:  fc.Required,
+					forbidden: fc.Forbidden,
+				}
+				if fc.Match != "" {
+					re, err := regexp.Compile(fc.Match)
+					if err != nil {
+						continue
+					}
+					cfc.re = re
+				}
+				ctc.fields[field] = cfc
+			}
+		}
+		out[tool] = ctc
+	}
+	return out
 }
 
 // toPerMinute converts the config "N/period" rate strings into the per-minute
@@ -336,6 +392,63 @@ func (g *Gateway) OnRequest(sessionKey, method, url string, hdr http.Header, bod
 				blocking = true
 				if dominant == "" {
 					dominant = kind
+				}
+			}
+		}
+	}
+
+	// Per-tool argument constraints (precompiled at New). Evaluated against the
+	// parsed params after the policy/scan checks. Values are inspected
+	// transiently (size, presence, regexp match, length) and never stored; a
+	// Finding's Detail never contains the value.
+	if ctc, ok := g.constraints[tool]; ok {
+		args := rawField(rawField(body, "params"), "arguments")
+		if ctc.maxArgsBytes > 0 && len(args) > ctc.maxArgsBytes {
+			findings = append(findings, Finding{
+				Kind:     "mcp_args_too_large",
+				Severity: "high",
+				Tool:     tool,
+				Detail:   "params exceed maxArgsBytes",
+			})
+			blocking = true
+			if dominant == "" {
+				dominant = "mcp_args_too_large"
+			}
+		}
+		for field, fc := range ctc.fields {
+			val, present, isString := topLevelField(args, field)
+			if fc.required && !present {
+				findings = append(findings, constraintFinding(tool, field, "required field missing"))
+				blocking = true
+				if dominant == "" {
+					dominant = "mcp_args_constraint"
+				}
+				continue
+			}
+			if fc.forbidden && present {
+				findings = append(findings, constraintFinding(tool, field, "forbidden field present"))
+				blocking = true
+				if dominant == "" {
+					dominant = "mcp_args_constraint"
+				}
+				continue
+			}
+			if !present || !isString {
+				continue
+			}
+			if fc.re != nil && !fc.re.MatchString(val) {
+				findings = append(findings, constraintFinding(tool, field, "value violates constraint"))
+				blocking = true
+				if dominant == "" {
+					dominant = "mcp_args_constraint"
+				}
+				continue
+			}
+			if fc.maxLen > 0 && len(val) > fc.maxLen {
+				findings = append(findings, constraintFinding(tool, field, "value exceeds maxLen"))
+				blocking = true
+				if dominant == "" {
+					dominant = "mcp_args_constraint"
 				}
 			}
 		}
@@ -592,6 +705,42 @@ func hashSchema(raw json.RawMessage) string {
 	}
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:])
+}
+
+// constraintFinding builds a value-free mcp_args_constraint Finding. detail is
+// one of a small fixed set of phrases and never contains a field value.
+func constraintFinding(tool, field, detail string) Finding {
+	return Finding{
+		Kind:     "mcp_args_constraint",
+		Severity: "high",
+		Tool:     tool,
+		Path:     field,
+		Detail:   detail,
+	}
+}
+
+// topLevelField reports the presence, string value, and string-ness of a
+// top-level field in a JSON object. The value is returned transiently for an
+// immediate regexp/length check by the caller and is never stored. present is
+// true whenever the key exists (even for a non-string value); isString is true
+// only when the value decodes as a JSON string (val holds it then).
+func topLevelField(obj json.RawMessage, field string) (val string, present, isString bool) {
+	if len(obj) == 0 {
+		return "", false, false
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(obj, &m); err != nil {
+		return "", false, false
+	}
+	raw, ok := m[field]
+	if !ok {
+		return "", false, false
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s, true, true
+	}
+	return "", true, false
 }
 
 // rawField pulls a top-level raw JSON field out of a JSON-RPC envelope without

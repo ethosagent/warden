@@ -89,6 +89,34 @@ type MCPToolsConfig struct {
 	// RateLimit maps a tool name to a rate string ("N/second|minute|hour"),
 	// validated by the shared rate-limit validator.
 	RateLimit map[string]string
+	// Constraints holds optional per-tool argument constraints, keyed by tool
+	// name. Additive over the allow/deny policy: a tool may be permitted yet
+	// still fail a per-field constraint. Absent = no extra constraint.
+	Constraints map[string]MCPToolConstraints
+}
+
+// MCPToolConstraints bounds one tool's call arguments: an overall size cap on
+// the raw params plus per-top-level-field constraints. A zero value imposes no
+// constraint.
+type MCPToolConstraints struct {
+	// MaxArgsBytes caps the raw params JSON size in bytes (0 = unlimited).
+	MaxArgsBytes int
+	// Fields holds per-top-level-param-field constraints, keyed by field name.
+	Fields map[string]MCPFieldConstraint
+}
+
+// MCPFieldConstraint constrains one top-level param field. All checks are
+// transient: the field value is matched against Match/MaxLen but never stored.
+type MCPFieldConstraint struct {
+	// Match is an optional Go regexp the field's string value must match
+	// (empty = no match check).
+	Match string
+	// MaxLen caps the field's string length (0 = unlimited).
+	MaxLen int
+	// Required means the field must be present.
+	Required bool
+	// Forbidden means the field must NOT be present.
+	Forbidden bool
 }
 
 // MCPSchemaConfig configures declared-schema drift handling.
@@ -204,6 +232,21 @@ func (p Policy) DeepCopy() Policy {
 		}
 		cp.MCP.Tools.RateLimit = rl
 	}
+	if p.MCP.Tools.Constraints != nil {
+		cs := make(map[string]MCPToolConstraints, len(p.MCP.Tools.Constraints))
+		for tool, tc := range p.MCP.Tools.Constraints {
+			ctc := MCPToolConstraints{MaxArgsBytes: tc.MaxArgsBytes}
+			if tc.Fields != nil {
+				fields := make(map[string]MCPFieldConstraint, len(tc.Fields))
+				for field, fc := range tc.Fields {
+					fields[field] = fc
+				}
+				ctc.Fields = fields
+			}
+			cs[tool] = ctc
+		}
+		cp.MCP.Tools.Constraints = cs
+	}
 	cp.MCP.Chain.Patterns = append([]string(nil), p.MCP.Chain.Patterns...)
 	return cp
 }
@@ -273,9 +316,22 @@ type rawMCP struct {
 }
 
 type rawMCPTools struct {
-	Allow     []string          `yaml:"allow"`
-	Deny      []string          `yaml:"deny"`
-	RateLimit map[string]string `yaml:"rateLimit"`
+	Allow       []string                        `yaml:"allow"`
+	Deny        []string                        `yaml:"deny"`
+	RateLimit   map[string]string               `yaml:"rateLimit"`
+	Constraints map[string]rawMCPToolConstraint `yaml:"constraints"`
+}
+
+type rawMCPToolConstraint struct {
+	MaxArgsBytes int                              `yaml:"maxArgsBytes"`
+	Fields       map[string]rawMCPFieldConstraint `yaml:"fields"`
+}
+
+type rawMCPFieldConstraint struct {
+	Match     string `yaml:"match"`
+	MaxLen    int    `yaml:"maxLen"`
+	Required  bool   `yaml:"required"`
+	Forbidden bool   `yaml:"forbidden"`
 }
 
 type rawMCPSchema struct {
@@ -544,6 +600,19 @@ func parseMCP(r *rawMCP) MCPConfig {
 				mc.Tools.RateLimit[k] = v
 			}
 		}
+		if r.Tools.Constraints != nil {
+			mc.Tools.Constraints = make(map[string]MCPToolConstraints, len(r.Tools.Constraints))
+			for tool, rc := range r.Tools.Constraints {
+				tc := MCPToolConstraints{MaxArgsBytes: rc.MaxArgsBytes}
+				if rc.Fields != nil {
+					tc.Fields = make(map[string]MCPFieldConstraint, len(rc.Fields))
+					for field, rf := range rc.Fields {
+						tc.Fields[field] = MCPFieldConstraint(rf)
+					}
+				}
+				mc.Tools.Constraints[tool] = tc
+			}
+		}
 	}
 	if r.Schema != nil {
 		mc.Schema.Pin = r.Schema.Pin
@@ -779,6 +848,30 @@ func validateMCP(m MCPConfig) error {
 	for i, t := range m.Tools.Deny {
 		if strings.TrimSpace(t) == "" {
 			return fmt.Errorf("config: mcp.tools.deny[%d]: tool name must not be empty", i)
+		}
+	}
+	for tool, tc := range m.Tools.Constraints {
+		if strings.TrimSpace(tool) == "" {
+			return fmt.Errorf("config: mcp.tools.constraints: tool name is required")
+		}
+		if tc.MaxArgsBytes < 0 {
+			return fmt.Errorf("config: mcp.tools.constraints[%q].maxArgsBytes must not be negative", tool)
+		}
+		for field, fc := range tc.Fields {
+			if strings.TrimSpace(field) == "" {
+				return fmt.Errorf("config: mcp.tools.constraints[%q].fields: field name is required", tool)
+			}
+			if fc.MaxLen < 0 {
+				return fmt.Errorf("config: mcp.tools.constraints[%q].fields[%q].maxLen must not be negative", tool, field)
+			}
+			if fc.Required && fc.Forbidden {
+				return fmt.Errorf("config: mcp.tools.constraints[%q].fields[%q]: cannot be both required and forbidden", tool, field)
+			}
+			if fc.Match != "" {
+				if _, err := regexp.Compile(fc.Match); err != nil {
+					return fmt.Errorf("config: mcp.tools.constraints[%q].fields[%q].match has invalid regex: %v", tool, field, err)
+				}
+			}
 		}
 	}
 	return nil

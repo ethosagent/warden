@@ -4,6 +4,7 @@ import (
 	"io"
 	"log/slog"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -369,6 +370,158 @@ func twoToolListResp(id, secondName string) []byte {
 		`{"name":"read_file","description":"reads a file","inputSchema":{"type":"object","properties":{"x":{"type":"string"}}}},` +
 		`{"name":"` + secondName + `","inputSchema":{"type":"object"}}` +
 		`]}}`)
+}
+
+// constraintCfg returns a baseCfg with a read_file constraint: path is
+// required and must match ^/workspace/, capped at maxLen 16; a forbidden field
+// "recursive"; and an overall maxArgsBytes cap.
+func constraintCfg(mode string) config.MCPConfig {
+	cfg := baseCfg(mode)
+	cfg.Tools.Constraints = map[string]config.MCPToolConstraints{
+		"read_file": {
+			MaxArgsBytes: 64,
+			Fields: map[string]config.MCPFieldConstraint{
+				"path":      {Match: "^/workspace/", MaxLen: 16, Required: true},
+				"recursive": {Forbidden: true},
+			},
+		},
+	}
+	return cfg
+}
+
+// assertNoValueLeak fails if any finding's Detail or Path contains the given
+// secret value (constraint checks must never echo a field value).
+func assertNoValueLeak(t *testing.T, findings []Finding, value string) {
+	t.Helper()
+	for _, f := range findings {
+		if strings.Contains(f.Detail, value) {
+			t.Fatalf("value leaked into Finding.Detail %q (value=%q)", f.Detail, value)
+		}
+		if strings.Contains(f.Path, value) {
+			t.Fatalf("value leaked into Finding.Path %q (value=%q)", f.Path, value)
+		}
+	}
+}
+
+func TestArgConstraintPass(t *testing.T) {
+	gw := newGW(t, constraintCfg(modeEnforce))
+	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "read_file", `{"path":"/workspace/a"}`))
+	if v.Action != Pass {
+		t.Fatalf("conforming args should Pass, got %v findings=%v", v.Action, v.Findings)
+	}
+	if _, ok := hasFinding(v.Findings, "mcp_args_constraint"); ok {
+		t.Fatalf("unexpected constraint finding: %v", v.Findings)
+	}
+}
+
+func TestArgConstraintMatchViolation(t *testing.T) {
+	const badPath = "/etc/passwd"
+	// enforce: blocking Deny.
+	gw := newGW(t, constraintCfg(modeEnforce))
+	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "read_file", `{"path":"`+badPath+`"}`))
+	f, ok := hasFinding(v.Findings, "mcp_args_constraint")
+	if !ok {
+		t.Fatalf("missing mcp_args_constraint finding: %v", v.Findings)
+	}
+	if f.Path != "path" {
+		t.Fatalf("want Path=path, got %q", f.Path)
+	}
+	if f.Detail != "value violates constraint" {
+		t.Fatalf("want detail 'value violates constraint', got %q", f.Detail)
+	}
+	if v.Action != Deny || v.Reason != "mcp_args_constraint" {
+		t.Fatalf("want Deny/mcp_args_constraint, got action=%v reason=%q", v.Action, v.Reason)
+	}
+	// No value leakage: the rejected path must never appear in a finding.
+	assertNoValueLeak(t, v.Findings, badPath)
+
+	// monitor: Pass but finding present.
+	gw2 := newGW(t, constraintCfg(modeMonitor))
+	v2 := gw2.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "read_file", `{"path":"`+badPath+`"}`))
+	if v2.Action != Pass {
+		t.Fatalf("monitor must Pass, got %v", v2.Action)
+	}
+	if _, ok := hasFinding(v2.Findings, "mcp_args_constraint"); !ok {
+		t.Fatalf("monitor: missing mcp_args_constraint finding")
+	}
+	assertNoValueLeak(t, v2.Findings, badPath)
+}
+
+func TestArgConstraintRequiredMissing(t *testing.T) {
+	gw := newGW(t, constraintCfg(modeEnforce))
+	// path required but absent.
+	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "read_file", `{"other":"x"}`))
+	f, ok := hasFinding(v.Findings, "mcp_args_constraint")
+	if !ok {
+		t.Fatalf("missing mcp_args_constraint finding: %v", v.Findings)
+	}
+	if f.Path != "path" || f.Detail != "required field missing" {
+		t.Fatalf("want path/required field missing, got path=%q detail=%q", f.Path, f.Detail)
+	}
+	if v.Action != Deny {
+		t.Fatalf("required violation should Deny in enforce, got %v", v.Action)
+	}
+}
+
+func TestArgConstraintForbiddenPresent(t *testing.T) {
+	gw := newGW(t, constraintCfg(modeEnforce))
+	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "read_file", `{"path":"/workspace/a","recursive":true}`))
+	var found bool
+	for _, f := range v.Findings {
+		if f.Kind == "mcp_args_constraint" && f.Path == "recursive" && f.Detail == "forbidden field present" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("missing forbidden-field constraint finding: %v", v.Findings)
+	}
+	if v.Action != Deny {
+		t.Fatalf("forbidden violation should Deny in enforce, got %v", v.Action)
+	}
+}
+
+func TestArgConstraintMaxLen(t *testing.T) {
+	gw := newGW(t, constraintCfg(modeEnforce))
+	// matches ^/workspace/ but exceeds maxLen 16.
+	const longPath = "/workspace/aaaaaaaaaaaaaaaaaaaa"
+	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "read_file", `{"path":"`+longPath+`"}`))
+	f, ok := hasFinding(v.Findings, "mcp_args_constraint")
+	if !ok {
+		t.Fatalf("missing mcp_args_constraint finding: %v", v.Findings)
+	}
+	if f.Detail != "value exceeds maxLen" {
+		t.Fatalf("want detail 'value exceeds maxLen', got %q", f.Detail)
+	}
+	if v.Action != Deny {
+		t.Fatalf("maxLen violation should Deny in enforce, got %v", v.Action)
+	}
+	assertNoValueLeak(t, v.Findings, longPath)
+}
+
+func TestArgConstraintMaxArgsBytes(t *testing.T) {
+	gw := newGW(t, constraintCfg(modeEnforce))
+	// arguments object well over the 64-byte cap (and path conforms).
+	big := strings.Repeat("a", 200)
+	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "read_file", `{"path":"/workspace/a","pad":"`+big+`"}`))
+	if _, ok := hasFinding(v.Findings, "mcp_args_too_large"); !ok {
+		t.Fatalf("missing mcp_args_too_large finding: %v", v.Findings)
+	}
+	if v.Action != Deny {
+		t.Fatalf("oversized args should Deny in enforce, got %v", v.Action)
+	}
+	assertNoValueLeak(t, v.Findings, big)
+}
+
+func TestArgConstraintUnconstrainedToolUnaffected(t *testing.T) {
+	gw := newGW(t, constraintCfg(modeEnforce))
+	// search has no constraints; arbitrary args pass.
+	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "search", `{"q":"/etc/passwd"}`))
+	if _, ok := hasFinding(v.Findings, "mcp_args_constraint"); ok {
+		t.Fatalf("unconstrained tool should have no constraint finding: %v", v.Findings)
+	}
+	if v.Action != Pass {
+		t.Fatalf("unconstrained tool should Pass, got %v", v.Action)
+	}
 }
 
 func TestInventoryRetention(t *testing.T) {

@@ -422,6 +422,12 @@ mcp:
     deny: [delete_file]
     rateLimit:
       read_file: "10/minute"
+    constraints:
+      read_file:
+        maxArgsBytes: 65536
+        fields:
+          path: { match: "^/workspace/.*", maxLen: 4096, required: true }
+          recursive: { forbidden: true }
   schema:
     pin: true
   scan:
@@ -467,6 +473,27 @@ func TestNewLocalYAMLProvider_MCPParsed(t *testing.T) {
 	}
 	if m.Tools.RateLimit["read_file"] != "10/minute" {
 		t.Errorf("tools.rateLimit = %v", m.Tools.RateLimit)
+	}
+	rfc, ok := m.Tools.Constraints["read_file"]
+	if !ok {
+		t.Fatalf("tools.constraints missing read_file: %v", m.Tools.Constraints)
+	}
+	if rfc.MaxArgsBytes != 65536 {
+		t.Errorf("constraints.read_file.maxArgsBytes = %d, want 65536", rfc.MaxArgsBytes)
+	}
+	pathC, ok := rfc.Fields["path"]
+	if !ok {
+		t.Fatalf("constraints.read_file.fields missing path: %v", rfc.Fields)
+	}
+	if pathC.Match != "^/workspace/.*" || pathC.MaxLen != 4096 || !pathC.Required || pathC.Forbidden {
+		t.Errorf("constraints path = %+v", pathC)
+	}
+	recC, ok := rfc.Fields["recursive"]
+	if !ok {
+		t.Fatalf("constraints.read_file.fields missing recursive: %v", rfc.Fields)
+	}
+	if !recC.Forbidden || recC.Required {
+		t.Errorf("constraints recursive = %+v", recC)
 	}
 	if !m.Schema.Pin {
 		t.Error("schema.pin should be true")
@@ -586,6 +613,37 @@ func TestValidate_MCPErrors(t *testing.T) {
   tools:
     deny: ["  "]
 `),
+		"bad constraint regex": base(`mcp:
+  enabled: true
+  tools:
+    constraints:
+      read_file:
+        fields:
+          path: { match: "[unclosed" }
+`),
+		"negative maxArgsBytes": base(`mcp:
+  enabled: true
+  tools:
+    constraints:
+      read_file:
+        maxArgsBytes: -1
+`),
+		"negative field maxLen": base(`mcp:
+  enabled: true
+  tools:
+    constraints:
+      read_file:
+        fields:
+          path: { maxLen: -1 }
+`),
+		"required and forbidden": base(`mcp:
+  enabled: true
+  tools:
+    constraints:
+      read_file:
+        fields:
+          path: { required: true, forbidden: true }
+`),
 	}
 	for name, y := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -623,6 +681,14 @@ func TestDeepCopy_MCPIndependence(t *testing.T) {
 				Allow:     []string{"read_file"},
 				Deny:      []string{"delete_file"},
 				RateLimit: map[string]string{"read_file": "10/minute"},
+				Constraints: map[string]MCPToolConstraints{
+					"read_file": {
+						MaxArgsBytes: 100,
+						Fields: map[string]MCPFieldConstraint{
+							"path": {Match: "^/workspace/", Required: true},
+						},
+					},
+				},
 			},
 			Chain: MCPChainConfig{Patterns: []string{"rapid_repeat"}},
 		},
@@ -633,6 +699,8 @@ func TestDeepCopy_MCPIndependence(t *testing.T) {
 	cp.MCP.Tools.RateLimit["read_file"] = "999/hour"
 	cp.MCP.Tools.RateLimit["new"] = "1/second"
 	cp.MCP.Chain.Patterns[0] = "MUTATED"
+	cp.MCP.Tools.Constraints["read_file"].Fields["path"] = MCPFieldConstraint{Match: "MUTATED"}
+	cp.MCP.Tools.Constraints["new_tool"] = MCPToolConstraints{}
 
 	if orig.MCP.Tools.Allow[0] != "read_file" {
 		t.Errorf("orig allow mutated: %v", orig.MCP.Tools.Allow)
@@ -648,5 +716,11 @@ func TestDeepCopy_MCPIndependence(t *testing.T) {
 	}
 	if orig.MCP.Chain.Patterns[0] != "rapid_repeat" {
 		t.Errorf("orig chain.patterns mutated: %v", orig.MCP.Chain.Patterns)
+	}
+	if origPath := orig.MCP.Tools.Constraints["read_file"].Fields["path"]; origPath.Match != "^/workspace/" || !origPath.Required {
+		t.Errorf("orig constraints field mutated: %+v", origPath)
+	}
+	if _, exists := orig.MCP.Tools.Constraints["new_tool"]; exists {
+		t.Errorf("orig constraints gained key from copy: %v", orig.MCP.Tools.Constraints)
 	}
 }
