@@ -2,7 +2,7 @@
 # Base images are pinned by digest for reproducible, tamper-evident builds —
 # bump the digest deliberately when upgrading. Match GO_VERSION to go.mod.
 ARG GO_VERSION=1.26
-FROM golang:${GO_VERSION}-alpine@sha256:3ad57304ad93bbec8548a0437ad9e06a455660655d9af011d58b993f6f615648 AS builder
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine@sha256:3ad57304ad93bbec8548a0437ad9e06a455660655d9af011d58b993f6f615648 AS builder
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -11,7 +11,12 @@ COPY . .
 # default suits local builds). The build flags live in scripts/build.sh so the
 # image and host builds stay identical.
 ARG VERSION=0.0.0-dev
-RUN VERSION="${VERSION}" sh scripts/build.sh /warden
+# Cross-compile to the target platform from a native builder (fast, no QEMU for
+# the compile): scripts/build.sh honors GOOS/GOARCH, which buildx populates via
+# TARGETOS/TARGETARCH. A plain single-platform build sets them to the host.
+ARG TARGETOS
+ARG TARGETARCH
+RUN VERSION="${VERSION}" GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" sh scripts/build.sh /warden
 
 FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
 RUN apk add --no-cache ca-certificates
