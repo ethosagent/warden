@@ -257,7 +257,8 @@ func (p *Proxy) handleHTTP(tlsConn *tls.Conn, br *bufio.Reader, domain string, p
 			return
 		}
 
-		resp, err := http.ReadResponse(bufio.NewReader(upstream), req)
+		upstreamBR := bufio.NewReader(upstream)
+		resp, err := http.ReadResponse(upstreamBR, req)
 		if err != nil {
 			_ = upstream.Close()
 			writeErrorResponse(tlsConn, 502, "Bad Gateway")
@@ -266,6 +267,19 @@ func (p *Proxy) handleHTTP(tlsConn *tls.Conn, br *bufio.Reader, domain string, p
 		}
 
 		closeAfter := req.Close || resp.Close
+
+		// WebSocket upgrade: an MCP server may speak JSON-RPC over a WebSocket.
+		// On a 101 the connection is consumed for the lifetime of the socket, so
+		// this branch is terminal — it writes the 101 verbatim, switches to the
+		// frame pump (scanning each JSON-RPC text message bidirectionally), then
+		// returns. When the MCP gateway is disabled we leave today's behavior
+		// untouched (a 101 was never special-cased before).
+		if p.cfg.MCP != nil && resp.StatusCode == 101 &&
+			strings.EqualFold(req.Header.Get("Upgrade"), "websocket") {
+			p.handleWSUpgrade(tlsConn, br, upstream, upstreamBR, resp, req, domain, port, mcpSessKey)
+			_ = req.Body.Close()
+			return
+		}
 
 		if p.cfg.MCP != nil && wasMCP {
 			ct := resp.Header.Get("Content-Type")
