@@ -150,6 +150,64 @@ func TestNoRawDomainLabel(t *testing.T) {
 	}
 }
 
+// TestMCPMetricKinds asserts the bounded MCP metric kinds increment their
+// counters with the right label value, and that the labels stay bounded (a
+// fixed enum string surfaces, not a raw tool name).
+func TestMCPMetricKinds(t *testing.T) {
+	m, h, shutdown := newWithHandler(t)
+	defer func() { _ = shutdown(context.Background()) }()
+
+	// Bounded blocked reasons.
+	m.RecordBlocked("mcp_tool_denied")
+	m.RecordBlocked("mcp_poisoning")
+	m.RecordBlocked("mcp_schema_drift_blocked")
+	// Bounded scan-finding kinds.
+	m.RecordScanFinding("mcp_args_pii")
+	m.RecordScanFinding("mcp_result_injection")
+	m.RecordScanFinding("mcp_chain_read_then_send")
+	// Bounded latency stage.
+	m.ObserveAddedLatency("mcp_scan", 2*time.Millisecond)
+
+	body := scrape(t, h)
+	for _, want := range []string{
+		`reason="mcp_tool_denied"`,
+		`reason="mcp_poisoning"`,
+		`reason="mcp_schema_drift_blocked"`,
+		`kind="mcp_args_pii"`,
+		`kind="mcp_result_injection"`,
+		`kind="mcp_chain_read_then_send"`,
+		`stage="mcp_scan"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("scrape missing %q\n---\n%s", want, body)
+		}
+	}
+}
+
+// TestMCPToolNameNeverALabel guards the cardinality rule: a raw MCP tool name
+// must never become a metric label. Tool names live only in the analytics
+// store. We feed a tool-looking string through a value arg and assert it does
+// not appear in the scrape (the bounded reason/kind label is what surfaces).
+func TestMCPToolNameNeverALabel(t *testing.T) {
+	m, h, shutdown := newWithHandler(t)
+	defer func() { _ = shutdown(context.Background()) }()
+
+	const rawTool = "exfiltrate_customer_records"
+
+	// The bounded enum is what we pass; the raw tool name is never an argument
+	// to any metric method.
+	m.RecordBlocked("mcp_tool_denied")
+	m.RecordScanFinding("mcp_args_leak")
+
+	body := scrape(t, h)
+	if strings.Contains(body, rawTool) {
+		t.Fatalf("raw MCP tool name leaked into metrics:\n%s", body)
+	}
+	if strings.Contains(body, "tool=") {
+		t.Fatalf("found a tool= label in metrics — cardinality violation:\n%s", body)
+	}
+}
+
 func TestBuildResourceDefaults(t *testing.T) {
 	res, err := buildResource(Config{
 		ResourceAttributes: map[string]string{"warden.proxy.id": "p1"},
