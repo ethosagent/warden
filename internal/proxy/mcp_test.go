@@ -525,59 +525,160 @@ func TestMCP_NonMCPUntouched(t *testing.T) {
 	}
 }
 
-// Test 7: streamed (chunked / event-stream) response is passed through intact
-// and recorded as unscanned, not buffered or blocked.
-func TestMCP_StreamedResponseNotBuffered(t *testing.T) {
-	caCertPEM, caKeyPEM, caCert, caKey := generateTestCA(t)
-	// A large-ish event-stream body that would otherwise be a tools/list result.
-	streamBody := "data: " + strings.Repeat("x", 4096) + "\n\n"
-	rb := &mcpBackend{respStatus: 200, respCT: "text/event-stream", respBody: streamBody, chunked: true}
-	backendLn := startMCPBackend(t, caCert, caKey, rb)
+// sseEvent wraps a JSON-RPC payload as a single SSE event.
+func sseEvent(jsonRPC string) string {
+	return "data: " + jsonRPC + "\n\n"
+}
 
-	metrics, handler, shutdown, err := observability.New(observability.Config{
-		Enabled:        true,
-		ServiceName:    "warden-test",
-		MetricsEnabled: true,
+// Test 7: an SSE (text/event-stream) MCP response is now SCANNED per event, not
+// passed through unscanned. A poisoned tools/list carried in an SSE event is
+// detected: in monitor mode the body still reaches the client byte-intact and a
+// finding is recorded; in enforce mode the stream is terminated with a deny.
+func TestMCP_SSEScanned(t *testing.T) {
+	t.Run("monitor_byte_intact_and_scanned", func(t *testing.T) {
+		caCertPEM, caKeyPEM, caCert, caKey := generateTestCA(t)
+		// A benign event followed by a poisoned tools/list event.
+		streamBody := sseEvent(`{"jsonrpc":"2.0","id":"0","result":{}}`) + sseEvent(mcpPoisonedList)
+		rb := &mcpBackend{respStatus: 200, respCT: "text/event-stream", respBody: streamBody, chunked: true}
+		backendLn := startMCPBackend(t, caCert, caKey, rb)
+
+		metrics, handler, shutdown, err := observability.New(observability.Config{
+			Enabled:        true,
+			ServiceName:    "warden-test",
+			MetricsEnabled: true,
+		})
+		if err != nil {
+			t.Fatalf("observability.New: %v", err)
+		}
+		t.Cleanup(func() { _ = shutdown(context.Background()) })
+
+		cfg := enforceMCPConfig()
+		cfg.Mode = "monitor"
+		p, ss := startTestProxyWithMCP(t, []string{"backend.test"}, caCertPEM, caKeyPEM, cfg, metrics)
+		p.dialTLS = dialBackend(backendLn)
+
+		tlsClient := dialProxyAndConnect(t, p.Addr().String(), "backend.test", caCertPEM)
+		req, _ := http.NewRequest("POST", "https://backend.test/mcp", strings.NewReader(mcpToolsList))
+		req.Header.Set("Content-Type", "application/json")
+		req.ContentLength = int64(len(mcpToolsList))
+		if err := req.Write(tlsClient); err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.ReadResponse(bufio.NewReader(tlsClient), req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != 200 {
+			t.Fatalf("monitor SSE must pass through; expected 200, got %d", resp.StatusCode)
+		}
+		if string(got) != streamBody {
+			t.Fatalf("SSE body not byte-intact: got %d bytes, want %d", len(got), len(streamBody))
+		}
+
+		time.Sleep(50 * time.Millisecond)
+		if findEvent(ss.snapshot(), "mcp", "deny") != nil {
+			t.Fatalf("monitor must not block SSE, got deny: %+v", ss.snapshot())
+		}
+		if findEvent(ss.snapshot(), "mcp", "allow") == nil {
+			t.Fatalf("expected mcp allow event for scanned SSE, got %+v", ss.snapshot())
+		}
+
+		body := scrapeMetrics(t, handler)
+		// Now scanned: a poisoning finding is recorded and the stream is NOT
+		// recorded as unscanned.
+		if !strings.Contains(body, `kind="mcp_poisoning"`) {
+			t.Fatalf("expected mcp_poisoning finding from scanned SSE event:\n%s", body)
+		}
+		if strings.Contains(body, `kind="mcp_response_unscanned_stream"`) {
+			t.Fatalf("SSE response must no longer be recorded as unscanned:\n%s", body)
+		}
 	})
-	if err != nil {
-		t.Fatalf("observability.New: %v", err)
-	}
-	t.Cleanup(func() { _ = shutdown(context.Background()) })
 
-	p, ss := startTestProxyWithMCP(t, []string{"backend.test"}, caCertPEM, caKeyPEM, enforceMCPConfig(), metrics)
-	p.dialTLS = dialBackend(backendLn)
+	t.Run("enforce_blocks_and_terminates", func(t *testing.T) {
+		caCertPEM, caKeyPEM, caCert, caKey := generateTestCA(t)
+		// Benign first event, then a poisoned tools/list, then a trailing event
+		// that must NOT be forwarded once the stream is blocked.
+		benign := sseEvent(`{"jsonrpc":"2.0","id":"0","result":{}}`)
+		streamBody := benign + sseEvent(mcpPoisonedList) + sseEvent(`{"jsonrpc":"2.0","id":"9","result":{"after":"block"}}`)
+		rb := &mcpBackend{respStatus: 200, respCT: "text/event-stream", respBody: streamBody, chunked: true}
+		backendLn := startMCPBackend(t, caCert, caKey, rb)
 
-	tlsClient := dialProxyAndConnect(t, p.Addr().String(), "backend.test", caCertPEM)
-	req, _ := http.NewRequest("POST", "https://backend.test/mcp", strings.NewReader(mcpToolsList))
-	req.Header.Set("Content-Type", "application/json")
-	req.ContentLength = int64(len(mcpToolsList))
-	if err := req.Write(tlsClient); err != nil {
-		t.Fatal(err)
-	}
-	resp, err := http.ReadResponse(bufio.NewReader(tlsClient), req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Fatalf("streamed response must pass through; expected 200, got %d", resp.StatusCode)
-	}
-	if string(got) != streamBody {
-		t.Fatalf("streamed body not intact: got %d bytes, want %d", len(got), len(streamBody))
-	}
+		p, ss := startTestProxyWithMCP(t, []string{"backend.test"}, caCertPEM, caKeyPEM, enforceMCPConfig(), nil)
+		p.dialTLS = dialBackend(backendLn)
 
-	time.Sleep(50 * time.Millisecond)
-	if findEvent(ss.snapshot(), "mcp", "deny") != nil {
-		t.Fatalf("streamed response must not be blocked, got deny: %+v", ss.snapshot())
-	}
+		tlsClient := dialProxyAndConnect(t, p.Addr().String(), "backend.test", caCertPEM)
+		req, _ := http.NewRequest("POST", "https://backend.test/mcp", strings.NewReader(mcpToolsList))
+		req.Header.Set("Content-Type", "application/json")
+		req.ContentLength = int64(len(mcpToolsList))
+		if err := req.Write(tlsClient); err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.ReadResponse(bufio.NewReader(tlsClient), req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		// The stream is terminated at the poisoned event: the trailing "after
+		// block" event must not reach the client.
+		if strings.Contains(string(got), "after") {
+			t.Fatalf("enforce must terminate the stream at the blocking event; got trailing data: %q", got)
+		}
 
-	body := scrapeMetrics(t, handler)
-	if !strings.Contains(body, "warden_scan_findings_total") ||
-		!strings.Contains(body, `kind="mcp_response_unscanned_stream"`) {
-		t.Fatalf("expected mcp_response_unscanned_stream scan-finding metric:\n%s", body)
-	}
+		time.Sleep(50 * time.Millisecond)
+		ev := findEvent(ss.snapshot(), "mcp", "deny")
+		if ev == nil {
+			t.Fatalf("expected mcp deny event for poisoned SSE, got %+v", ss.snapshot())
+		}
+		if ev.Reason != "mcp_poisoning" {
+			t.Fatalf("expected Reason=mcp_poisoning, got %q", ev.Reason)
+		}
+	})
+
+	t.Run("benign_passes_byte_intact", func(t *testing.T) {
+		caCertPEM, caKeyPEM, caCert, caKey := generateTestCA(t)
+		streamBody := sseEvent(`{"jsonrpc":"2.0","id":"1","result":{"ok":true}}`) +
+			sseEvent(`{"jsonrpc":"2.0","id":"2","result":{"ok":true}}`)
+		rb := &mcpBackend{respStatus: 200, respCT: "text/event-stream", respBody: streamBody, chunked: true}
+		backendLn := startMCPBackend(t, caCert, caKey, rb)
+
+		p, ss := startTestProxyWithMCP(t, []string{"backend.test"}, caCertPEM, caKeyPEM, enforceMCPConfig(), nil)
+		p.dialTLS = dialBackend(backendLn)
+
+		tlsClient := dialProxyAndConnect(t, p.Addr().String(), "backend.test", caCertPEM)
+		req, _ := http.NewRequest("POST", "https://backend.test/mcp", strings.NewReader(mcpToolsList))
+		req.Header.Set("Content-Type", "application/json")
+		req.ContentLength = int64(len(mcpToolsList))
+		if err := req.Write(tlsClient); err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.ReadResponse(bufio.NewReader(tlsClient), req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != 200 {
+			t.Fatalf("benign SSE must pass; expected 200, got %d", resp.StatusCode)
+		}
+		if string(got) != streamBody {
+			t.Fatalf("benign SSE not byte-intact: got %q want %q", got, streamBody)
+		}
+
+		time.Sleep(50 * time.Millisecond)
+		if findEvent(ss.snapshot(), "mcp", "deny") != nil {
+			t.Fatalf("benign SSE must not be blocked, got deny: %+v", ss.snapshot())
+		}
+		if findEvent(ss.snapshot(), "mcp", "allow") == nil {
+			t.Fatalf("expected mcp allow event for benign SSE, got %+v", ss.snapshot())
+		}
+	})
 }

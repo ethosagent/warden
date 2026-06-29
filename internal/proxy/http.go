@@ -13,6 +13,7 @@ import (
 
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/mcp/gateway"
+	"github.com/ethosagent/warden/internal/mcp/sse"
 	"github.com/ethosagent/warden/internal/protocol"
 	"github.com/ethosagent/warden/internal/secrets"
 )
@@ -309,9 +310,104 @@ func (p *Proxy) handleHTTP(tlsConn *tls.Conn, br *bufio.Reader, domain string, p
 					}
 					resp.Body = io.NopCloser(bytes.NewReader(body))
 				}
+			} else if strings.HasPrefix(ct, "text/event-stream") {
+				// MCP Streamable-HTTP / SSE: scan each event's JSON-RPC payload
+				// while forwarding the stream verbatim with bounded per-event
+				// memory. An SSE response is terminal for the connection, so this
+				// branch fully handles the request and returns from the handler.
+				fullURL := "https://" + domain + req.URL.RequestURI()
+
+				// Write the status line + headers manually: resp.Write cannot be
+				// used because we tee the body through the SSE scanner. This
+				// preserves Content-Type, Transfer-Encoding, Cache-Control, etc.
+				statusLine := fmt.Sprintf("HTTP/%d.%d %03d %s\r\n",
+					resp.ProtoMajor, resp.ProtoMinor, resp.StatusCode,
+					http.StatusText(resp.StatusCode))
+				if _, werr := io.WriteString(tlsConn, statusLine); werr != nil {
+					_ = req.Body.Close()
+					_ = resp.Body.Close()
+					_ = upstream.Close()
+					return
+				}
+				if werr := resp.Header.Write(tlsConn); werr != nil {
+					_ = req.Body.Close()
+					_ = resp.Body.Close()
+					_ = upstream.Close()
+					return
+				}
+				if _, werr := io.WriteString(tlsConn, "\r\n"); werr != nil {
+					_ = req.Body.Close()
+					_ = resp.Body.Close()
+					_ = upstream.Close()
+					return
+				}
+
+				blocked := false
+				scanErr := sse.Scan(resp.Body, tlsConn, func(data []byte) bool {
+					start := time.Now()
+					v := p.cfg.MCP.OnResponse(mcpSessKey, resp.StatusCode, resp.Header, data)
+					p.cfg.Metrics.ObserveAddedLatency("mcp_scan", time.Since(start))
+					p.recordMCPFindings(v)
+					if v.Reason != "" {
+						mcpReason = v.Reason
+					}
+					if v.Action == gateway.Deny {
+						blocked = true
+						return true
+					}
+					return false
+				})
+
+				if blocked {
+					_ = p.cfg.Analytics.StoreEvent(analytics.Event{
+						Timestamp:      time.Now(),
+						Domain:         domain,
+						Port:           port,
+						Protocol:       "mcp",
+						Method:         req.Method,
+						URL:            fullURL,
+						Decision:       "deny",
+						ResponseStatus: resp.StatusCode,
+						Tool:           mcpTool,
+						Reason:         mcpReason,
+					})
+					p.cfg.Metrics.RecordRequest("deny", "mcp")
+					p.cfg.Metrics.RecordBlocked(mcpReason)
+					p.logDecision(decisionLog{
+						Domain: domain, Port: port, Protocol: "mcp",
+						Method: req.Method, URL: fullURL, Decision: "deny",
+						ResponseStatus: resp.StatusCode,
+					})
+				} else {
+					_ = p.cfg.Analytics.StoreEvent(analytics.Event{
+						Timestamp:      time.Now(),
+						Domain:         domain,
+						Port:           port,
+						Protocol:       "mcp",
+						Method:         req.Method,
+						URL:            fullURL,
+						Decision:       "allow",
+						ResponseStatus: resp.StatusCode,
+						Tool:           mcpTool,
+						Reason:         mcpReason,
+					})
+					p.cfg.Metrics.RecordRequest("allow", "mcp")
+					p.logDecision(decisionLog{
+						Domain: domain, Port: port, Protocol: "mcp",
+						Method: req.Method, URL: fullURL, Decision: "allow",
+						ResponseStatus: resp.StatusCode,
+					})
+				}
+
+				_ = scanErr // ErrBlocked already handled via blocked; other errors
+				// mean the stream ended early — nothing more to forward.
+				_ = req.Body.Close()
+				_ = resp.Body.Close()
+				_ = upstream.Close()
+				return
 			} else {
-				// event-stream / chunked / unknown or over-cap length: stream
-				// unchanged, record that it was not scanned.
+				// chunked / unknown or over-cap length: stream unchanged, record
+				// that it was not scanned.
 				p.cfg.Metrics.RecordScanFinding("mcp_response_unscanned_stream")
 			}
 		}
