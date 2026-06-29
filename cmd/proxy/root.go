@@ -23,6 +23,7 @@ func newRootCmd() *cobra.Command {
 	rootCmd.AddCommand(newRunCmd())
 	rootCmd.AddCommand(newVersionCmd())
 	rootCmd.AddCommand(newAdviseCmd())
+	rootCmd.AddCommand(newMCPCmd())
 
 	policyCmd := newPolicyCmd()
 	policyCmd.AddCommand(newSuggestCmd())
