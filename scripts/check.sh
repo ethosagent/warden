@@ -9,12 +9,16 @@
 #   scripts/check.sh [--integration]
 #
 # Env:
-#   COVERAGE_MIN   minimum total coverage percent (default: 70)
+#   COVERAGE_MIN          minimum total coverage percent (default: 70)
+#   GOVULNCHECK_VERSION   pinned govulncheck version to run (default: v1.5.0)
+#   GOLANGCI_VERSION      pinned golangci-lint version to run (default: v2.12.2)
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
 COVERAGE_MIN="${COVERAGE_MIN:-70}"
+GOVULNCHECK_VERSION="${GOVULNCHECK_VERSION:-v1.5.0}"
+GOLANGCI_VERSION="${GOLANGCI_VERSION:-v2.12.2}"
 RUN_INTEGRATION=0
 for arg in "$@"; do
 	case "$arg" in
@@ -44,26 +48,37 @@ banner "vet (go vet ./...)"
 go vet ./...
 echo "ok"
 
-# 3. lint
-banner "lint (golangci-lint)"
-if command -v golangci-lint >/dev/null 2>&1; then
-	golangci-lint run
-	echo "ok"
-else
-	echo "golangci-lint not installed — skipping (CI installs it)."
-fi
+# 3. lint (golangci-lint, pinned + always-run)
+#
+# Run via `go run` at a pinned version so local dev, the pre-push hook, and CI
+# all run the SAME linter version (no `@latest` drift) and lint never silently
+# skips when the tool isn't on PATH — that skip is what let CI catch issues a
+# local run didn't.
+banner "lint (golangci-lint ${GOLANGCI_VERSION})"
+go run "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI_VERSION}" run
+echo "ok"
 
 # 4. build
 banner "build (go build ./...)"
 go build ./...
 echo "ok"
 
-# 5. test + race + coverage profile
+# 5. vulnerability scan (govulncheck, pinned + always-run)
+#
+# A security gate must not silently skip when the tool is absent (unlike the
+# lint stage above), so run it via `go run` at a pinned version: always present,
+# reproducible, and no separate install step. CI inherits this by calling
+# check.sh — no workflow change needed.
+banner "vulncheck (govulncheck ${GOVULNCHECK_VERSION})"
+go run "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}" ./...
+echo "ok"
+
+# 6. test + race + coverage profile
 banner "test (go test -race -coverprofile)"
 go test -race -coverprofile=coverage.out ./...
 echo "ok"
 
-# 6. coverage gate
+# 7. coverage gate
 banner "coverage gate (min ${COVERAGE_MIN}%)"
 total="$(go tool cover -func=coverage.out | awk '/^total:/ {gsub("%","",$3); print $3}')"
 echo "total coverage: ${total}%"
@@ -73,7 +88,7 @@ if awk "BEGIN { exit !(${total} < ${COVERAGE_MIN}) }"; then
 fi
 echo "ok"
 
-# 7. integration (opt-in)
+# 8. integration (opt-in)
 if [ "$RUN_INTEGRATION" -eq 1 ]; then
 	banner "integration (go test -tags=integration)"
 	go test -tags=integration ./test/integration/...

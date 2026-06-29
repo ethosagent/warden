@@ -121,10 +121,7 @@ func (p *ToolPolicy) Evaluate(toolName string) bool {
 			return true
 		}
 		state.count++
-		if state.count > limit {
-			return false
-		}
-		return true
+		return state.count <= limit
 	}
 	return true
 }
