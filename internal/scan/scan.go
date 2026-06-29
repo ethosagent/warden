@@ -10,29 +10,56 @@ import (
 // Detection represents a single finding from scanning response content.
 // It intentionally omits matched content to avoid leaking sensitive data.
 type Detection struct {
-	Category string // "injection" or "credential_leak"
+	Category string // "injection", "credential_leak", or "pii"
 	Pattern  string // pattern name
 	Severity string // "high", "medium", "low"
 }
 
 const maxScanSize = 1 << 20 // 1 MB
 
-// Scanner holds compiled regex patterns for injection and credential detection.
-// It is safe for concurrent use after construction.
+// Scanner holds compiled regex patterns for injection, credential, and PII
+// detection. It is safe for concurrent use after construction.
 type Scanner struct {
 	injectionPatterns  []compiledPattern
 	credentialPatterns []compiledPattern
+	piiPatterns        []compiledPattern
 }
 
+// compiledPattern is a single detection rule. An optional validator may further
+// vet a regex match before a Detection is emitted (e.g. Luhn check, structural
+// SSN validity); regex alone is too noisy for some PII categories. When
+// validate is nil the regex match alone is sufficient.
 type compiledPattern struct {
 	name     string
 	re       *regexp.Regexp
 	severity string
 	category string
+	validate func(match string) bool
+}
+
+// options holds Scanner construction settings configured via Option values.
+type options struct {
+	phonePII bool
+}
+
+// Option configures a Scanner at construction time.
+type Option func(*options)
+
+// WithPhonePII enables (or disables) the opt-in PII phone-number detector.
+// Phone detection is off by default because bare digit runs over-match.
+func WithPhonePII(enabled bool) Option {
+	return func(o *options) { o.phonePII = enabled }
 }
 
 // NewScanner compiles all detection patterns and returns a ready-to-use Scanner.
-func NewScanner() *Scanner {
+// By default it runs injection, credential, and PII (email/card/SSN) detectors;
+// the noisy phone detector is opt-in via WithPhonePII(true).
+func NewScanner(opts ...Option) *Scanner {
+	var cfg options
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
 	s := &Scanner{}
 
 	// Injection patterns
@@ -109,7 +136,91 @@ func NewScanner() *Scanner {
 		},
 	}
 
+	// PII patterns. Some carry a post-match validator because the regex alone
+	// over-matches (random 16-digit numbers, structurally invalid SSNs).
+	s.piiPatterns = []compiledPattern{
+		{
+			name:     "email",
+			re:       regexp.MustCompile(`[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}`),
+			severity: "medium",
+			category: "pii",
+		},
+		{
+			name:     "card",
+			re:       regexp.MustCompile(`\b\d(?:[ -]?\d){12,18}\b`),
+			severity: "medium",
+			category: "pii",
+			validate: validLuhn,
+		},
+		{
+			name:     "ssn",
+			re:       regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`),
+			severity: "medium",
+			category: "pii",
+			validate: validSSN,
+		},
+	}
+
+	if cfg.phonePII {
+		s.piiPatterns = append(s.piiPatterns, compiledPattern{
+			name:     "phone",
+			re:       regexp.MustCompile(`\+[1-9]\d{7,14}\b|\(\d{3}\)\s*\d{3}[ .-]\d{4}\b|\b\d{3}[ .-]\d{3}[ .-]\d{4}\b`),
+			severity: "low",
+			category: "pii",
+		})
+	}
+
 	return s
+}
+
+// validLuhn reports whether the digits in match (separators stripped) pass the
+// Luhn checksum. The match must contain 13–19 digits.
+func validLuhn(match string) bool {
+	digits := make([]int, 0, len(match))
+	for _, r := range match {
+		if r >= '0' && r <= '9' {
+			digits = append(digits, int(r-'0'))
+		}
+	}
+	if len(digits) < 13 || len(digits) > 19 {
+		return false
+	}
+	sum := 0
+	double := false
+	for i := len(digits) - 1; i >= 0; i-- {
+		d := digits[i]
+		if double {
+			d *= 2
+			if d > 9 {
+				d -= 9
+			}
+		}
+		sum += d
+		double = !double
+	}
+	return sum%10 == 0
+}
+
+// validSSN reports whether match is a structurally valid US SSN of the form
+// AAA-GG-SSSS. It rejects area 000, 666, and 900–999; group 00; and serial 0000.
+func validSSN(match string) bool {
+	// Format is guaranteed by the regex: \d{3}-\d{2}-\d{4}.
+	if len(match) != 11 {
+		return false
+	}
+	area := match[0:3]
+	group := match[4:6]
+	serial := match[7:11]
+	if area == "000" || area == "666" || area[0] == '9' {
+		return false
+	}
+	if group == "00" {
+		return false
+	}
+	if serial == "0000" {
+		return false
+	}
+	return true
 }
 
 // ScanResponse scans the response body for injection and credential patterns.
@@ -131,13 +242,16 @@ func (s *Scanner) ScanResponse(body []byte) []Detection {
 		}
 	}
 
-	allPatterns := make([]compiledPattern, 0, len(s.injectionPatterns)+len(s.credentialPatterns))
+	allPatterns := make([]compiledPattern, 0, len(s.injectionPatterns)+len(s.credentialPatterns)+len(s.piiPatterns))
 	allPatterns = append(allPatterns, s.injectionPatterns...)
 	allPatterns = append(allPatterns, s.credentialPatterns...)
+	allPatterns = append(allPatterns, s.piiPatterns...)
 
-	// 1. Scan raw body
-	for _, p := range allPatterns {
-		if p.re.Match(body) {
+	scanLayer := func(data []byte) {
+		for _, p := range allPatterns {
+			if !matches(p, data) {
+				continue
+			}
 			addDetection(Detection{
 				Category: p.category,
 				Pattern:  p.name,
@@ -146,35 +260,35 @@ func (s *Scanner) ScanResponse(body []byte) []Detection {
 		}
 	}
 
+	// 1. Scan raw body
+	scanLayer(body)
+
 	// 2. Decode base64 blocks and scan each
-	decoded := decodeBase64Blocks(body)
-	for _, block := range decoded {
-		for _, p := range allPatterns {
-			if p.re.Match(block) {
-				addDetection(Detection{
-					Category: p.category,
-					Pattern:  p.name,
-					Severity: p.severity,
-				})
-			}
-		}
+	for _, block := range decodeBase64Blocks(body) {
+		scanLayer(block)
 	}
 
 	// 3. URL-decode and scan
-	urlDecoded := decodeURLEncoded(body)
-	if urlDecoded != nil {
-		for _, p := range allPatterns {
-			if p.re.Match(urlDecoded) {
-				addDetection(Detection{
-					Category: p.category,
-					Pattern:  p.name,
-					Severity: p.severity,
-				})
-			}
-		}
+	if urlDecoded := decodeURLEncoded(body); urlDecoded != nil {
+		scanLayer(urlDecoded)
 	}
 
 	return detections
+}
+
+// matches reports whether pattern p fires against data. When p has a validator,
+// at least one regex match must additionally satisfy it (e.g. Luhn, SSN
+// structure); otherwise a regex match alone suffices.
+func matches(p compiledPattern, data []byte) bool {
+	if p.validate == nil {
+		return p.re.Match(data)
+	}
+	for _, m := range p.re.FindAll(data, -1) {
+		if p.validate(string(m)) {
+			return true
+		}
+	}
+	return false
 }
 
 // base64BlockRe matches contiguous runs of 64+ base64 characters.

@@ -40,13 +40,28 @@ type Event struct {
 	// verdict, recorded for audit. It is metadata only — never a request body or
 	// secret value. Empty for statically decided events.
 	JudgeReason string
+	// Tool is the MCP tool name (from ParseToolCall); "" for non-MCP events.
+	// It powers per-tool call counts in the dashboard. A tool name is an
+	// operator/server-defined identifier — metadata, not a body or secret — so it
+	// is allowed in the store. It is deliberately NOT used as a metric label
+	// (unbounded cardinality lives only here).
+	Tool string
+	// Reason is a short, bounded decision reason for the MCP path
+	// (e.g. "mcp_tool_denied", "mcp_poisoning", "mcp_schema_drift"). It is a
+	// separate field from JudgeReason: bounded enum metadata, never content.
+	Reason string
 }
 
 // EventFilter narrows a GetEvents query. Zero-valued fields are ignored.
 type EventFilter struct {
 	Domain   string
 	Decision string
-	Since    time.Time
+	// Protocol filters by transport/protocol (e.g. "mcp", "https") so the
+	// dashboard can scope to MCP-only events.
+	Protocol string
+	// Tool filters by MCP tool name for per-tool drill-down.
+	Tool  string
+	Since time.Time
 	// Limit caps the number of rows returned (0 = no cap).
 	Limit int
 }
@@ -100,18 +115,67 @@ CREATE TABLE IF NOT EXISTS events (
     decision        TEXT    NOT NULL,
     response_status INTEGER NOT NULL,
     secret_ref      TEXT    NOT NULL,
-    judge_reason    TEXT    NOT NULL DEFAULT ''
+    judge_reason    TEXT    NOT NULL DEFAULT '',
+    tool            TEXT    NOT NULL DEFAULT '',
+    reason          TEXT    NOT NULL DEFAULT ''
 );`
 	if _, err := s.db.Exec(ddl); err != nil {
 		return fmt.Errorf("analytics: migrate: %w", err)
 	}
-	// Additive migration for databases created before judge_reason existed.
-	// SQLite has no "ADD COLUMN IF NOT EXISTS"; ignore the duplicate-column
-	// error so re-running migrate is idempotent.
-	if _, err := s.db.Exec(`ALTER TABLE events ADD COLUMN judge_reason TEXT NOT NULL DEFAULT ''`); err != nil {
-		if !strings.Contains(err.Error(), "duplicate column name") {
-			return fmt.Errorf("analytics: migrate add judge_reason: %w", err)
+	// Additive, forward-only migrations for databases created before a column
+	// existed. The recipes persist warden.db across restarts, so these ALTERs
+	// must never drop data — they only add absent columns. addColumnIfAbsent is
+	// guarded by PRAGMA table_info so re-running migrate is idempotent.
+	for _, c := range []struct{ name, ddl string }{
+		{"judge_reason", `ALTER TABLE events ADD COLUMN judge_reason TEXT NOT NULL DEFAULT ''`},
+		{"tool", `ALTER TABLE events ADD COLUMN tool TEXT NOT NULL DEFAULT ''`},
+		{"reason", `ALTER TABLE events ADD COLUMN reason TEXT NOT NULL DEFAULT ''`},
+	} {
+		if err := s.addColumnIfAbsent(c.name, c.ddl); err != nil {
+			return err
 		}
+	}
+	return nil
+}
+
+// addColumnIfAbsent runs an ALTER TABLE ADD COLUMN only when the column is not
+// already present, checked via PRAGMA table_info(events). This keeps migration
+// idempotent and forward-only without dropping data on persisted databases.
+func (s *SQLiteStore) addColumnIfAbsent(name, ddl string) error {
+	rows, err := s.db.Query(`PRAGMA table_info(events)`)
+	if err != nil {
+		return fmt.Errorf("analytics: migrate table_info: %w", err)
+	}
+	present := false
+	for rows.Next() {
+		var (
+			cid        int
+			colName    string
+			colType    string
+			notNull    int
+			dflt       sql.NullString
+			primaryKey int
+		)
+		if err := rows.Scan(&cid, &colName, &colType, &notNull, &dflt, &primaryKey); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("analytics: migrate scan table_info: %w", err)
+		}
+		if colName == name {
+			present = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("analytics: migrate table_info rows: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("analytics: migrate table_info close: %w", err)
+	}
+	if present {
+		return nil
+	}
+	if _, err := s.db.Exec(ddl); err != nil {
+		return fmt.Errorf("analytics: migrate add %s: %w", name, err)
 	}
 	return nil
 }
@@ -126,11 +190,11 @@ func (s *SQLiteStore) StoreEvent(e Event) error {
 		e.Timestamp = time.Now()
 	}
 	const ins = `INSERT INTO events
-        (ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        (ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason, tool, reason)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	_, err := s.db.Exec(ins,
 		e.Timestamp.UnixNano(), e.Domain, e.Port, e.Protocol, e.Method,
-		e.URL, e.Decision, e.ResponseStatus, e.SecretRef, e.JudgeReason)
+		e.URL, e.Decision, e.ResponseStatus, e.SecretRef, e.JudgeReason, e.Tool, e.Reason)
 	if err != nil {
 		return fmt.Errorf("analytics: insert event: %w", err)
 	}
@@ -151,7 +215,7 @@ func (s *SQLiteStore) prune() error {
 
 // GetEvents returns events matching filter, newest first.
 func (s *SQLiteStore) GetEvents(filter EventFilter) ([]Event, error) {
-	q := `SELECT ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason
+	q := `SELECT ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason, tool, reason
           FROM events WHERE 1=1`
 	var args []any
 	if filter.Domain != "" {
@@ -161,6 +225,14 @@ func (s *SQLiteStore) GetEvents(filter EventFilter) ([]Event, error) {
 	if filter.Decision != "" {
 		q += " AND decision = ?"
 		args = append(args, filter.Decision)
+	}
+	if filter.Protocol != "" {
+		q += " AND protocol = ?"
+		args = append(args, filter.Protocol)
+	}
+	if filter.Tool != "" {
+		q += " AND tool = ?"
+		args = append(args, filter.Tool)
 	}
 	if !filter.Since.IsZero() {
 		q += " AND ts >= ?"
@@ -185,7 +257,7 @@ func (s *SQLiteStore) GetEvents(filter EventFilter) ([]Event, error) {
 			ts int64
 		)
 		if err := rows.Scan(&ts, &e.Domain, &e.Port, &e.Protocol, &e.Method,
-			&e.URL, &e.Decision, &e.ResponseStatus, &e.SecretRef, &e.JudgeReason); err != nil {
+			&e.URL, &e.Decision, &e.ResponseStatus, &e.SecretRef, &e.JudgeReason, &e.Tool, &e.Reason); err != nil {
 			return nil, fmt.Errorf("analytics: scan: %w", err)
 		}
 		e.Timestamp = time.Unix(0, ts).UTC()

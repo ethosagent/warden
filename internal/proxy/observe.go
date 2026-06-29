@@ -1,6 +1,10 @@
 package proxy
 
-import "log/slog"
+import (
+	"log/slog"
+
+	"github.com/ethosagent/warden/internal/mcp/gateway"
+)
 
 // decisionLog carries the bounded, log-safe fields for one decision record.
 // It NEVER carries a raw secret value or a request/response body — SecretRef is
@@ -47,4 +51,19 @@ func (p *Proxy) logDecision(d decisionLog) {
 		return
 	}
 	p.cfg.Logger.Info("egress decision", attrs...)
+}
+
+// recordMCPFindings records each gateway finding as a bounded scan-finding
+// metric and a debug log line. It NEVER logs any value/content — only the
+// bounded kind/severity/tool/path. Metrics methods are nil-safe.
+func (p *Proxy) recordMCPFindings(v gateway.Verdict) {
+	for _, f := range v.Findings {
+		p.cfg.Metrics.RecordScanFinding(f.Kind)
+		p.cfg.Logger.Debug("mcp finding",
+			slog.String("kind", f.Kind),
+			slog.String("severity", f.Severity),
+			slog.String("tool", f.Tool),
+			slog.String("path", f.Path),
+		)
+	}
 }

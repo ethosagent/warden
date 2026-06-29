@@ -89,3 +89,37 @@ agents:
 # auto-rules are configured independently of the LLM (not yet implemented).
 advisory:
   enabled: false
+
+# MCP egress wedge. OFF by default: when mcp.enabled is false there is zero new
+# code on the hot path and byte-identical behavior to a Warden without it. When
+# enabled, live MCP-over-HTTP traffic (already decrypted by TLS termination) is
+# routed through the deep MCP analyzers — tool policy, schema-drift, poisoning,
+# call-chain, and content scan. Three modes:
+#   off      - no MCP processing.
+#   monitor  - detect + analyze + log + metric, NEVER block (the adoption wedge).
+#   enforce  - monitor PLUS block (deny non-allowlisted tools, high-severity
+#              findings, pinned-schema drift).
+# MCP analysis only ever makes a decision MORE restrictive; it never re-allows a
+# request the domain/port default-deny already blocked. Never persists tool
+# arguments, results, or matched content — only bounded enums and counts.
+mcp:
+  enabled: false                  # master switch (default false)
+  mode: monitor                   # off | monitor | enforce (default monitor when enabled)
+  failClosedOnError: false        # analysis error -> deny? default false (fail-open)
+  maxResponseScanBytes: 1048576   # cap on buffered response scanning (1 MiB)
+  tools:                          # default-deny tool policy (deny wins over allow)
+    allow: []                     # permitted tool names; empty + enforce = deny all tools/call
+    deny: []                      # blocked tool names; wins over allow
+    rateLimit: {}                 # tool name -> "N/second|minute|hour"
+  schema:
+    pin: false                    # block on any tools/list drift (enforce mode)
+  scan:
+    toolArgs: true                # scan outbound tool arguments
+    toolResults: true             # scan inbound tool results
+    profileSchema: true           # learn + merge observed in/out schema per tool
+    pii:
+      phone: false                # email/card(Luhn)/SSN always on; phone opt-in (noisy)
+  chain:
+    enabled: true                 # per-session call-chain analysis
+    windowSize: 50                # sliding-window size (must be > 0)
+    patterns: [read_then_send, permission_probing, rapid_repeat]

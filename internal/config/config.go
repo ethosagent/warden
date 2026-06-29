@@ -48,6 +48,83 @@ type Policy struct {
 	Advisory AdvisoryConfig `json:"-"`
 	// Observability configures OTel metrics + structured logging. Off by default.
 	Observability ObservabilityConfig `json:"-"`
+	// MCP configures the optional MCP egress wedge (deep MCP analysis). Disabled
+	// by default; when disabled every field is zero-valued and harmless.
+	MCP MCPConfig `json:"-"`
+}
+
+// MCPConfig configures the MCP wedge: routing live MCP traffic through the deep
+// MCP analyzers (tool policy, schema drift, poisoning, chain, scan). Everything
+// is off by default; a zero value means "no MCP processing" and is harmless.
+type MCPConfig struct {
+	// Enabled gates the entire MCP subsystem. Default false.
+	Enabled bool
+	// Mode is one of off|monitor|enforce. monitor detects+logs but never blocks;
+	// enforce additionally blocks. Empty normalizes to monitor.
+	Mode string
+	// FailClosedOnError flips analysis errors from fail-open (allow) to
+	// fail-closed (deny). Default false (fail-open: an analyzer bug never takes
+	// down egress).
+	FailClosedOnError bool
+	// MaxResponseScanBytes caps the buffered response body scanned inline.
+	// Default 1 MiB (1048576).
+	MaxResponseScanBytes int
+	// Tools is the default-deny tool policy (name allow/deny + per-tool rate).
+	Tools MCPToolsConfig
+	// Schema configures declared-schema (tools/list) drift handling.
+	Schema MCPSchemaConfig
+	// Scan configures which payloads are scanned and which PII detectors run.
+	Scan MCPScanConfig
+	// Chain configures the per-session call-chain analyzer.
+	Chain MCPChainConfig
+}
+
+// MCPToolsConfig is the Phase-1 tool policy: name allow/deny plus per-tool rate
+// limits. Deny wins over allow; an empty allow under enforce denies all tools.
+type MCPToolsConfig struct {
+	// Allow lists permitted tool names.
+	Allow []string
+	// Deny lists blocked tool names; deny wins over allow.
+	Deny []string
+	// RateLimit maps a tool name to a rate string ("N/second|minute|hour"),
+	// validated by the shared rate-limit validator.
+	RateLimit map[string]string
+}
+
+// MCPSchemaConfig configures declared-schema drift handling.
+type MCPSchemaConfig struct {
+	// Pin blocks on any tools/list drift (enforce mode). Default false.
+	Pin bool
+}
+
+// MCPScanConfig configures which payloads are scanned and PII opt-ins.
+type MCPScanConfig struct {
+	// ToolArgs scans outbound tool arguments. Default true.
+	ToolArgs bool
+	// ToolResults scans inbound tool results. Default true.
+	ToolResults bool
+	// ProfileSchema learns + merges observed in/out schema per tool. Default true.
+	ProfileSchema bool
+	// PII configures the minimal PII detectors.
+	PII MCPPIIConfig
+}
+
+// MCPPIIConfig opts in to the noisier PII detectors. email/card/SSN are always
+// on; phone is opt-in because bare digit runs over-match.
+type MCPPIIConfig struct {
+	// Phone enables the opt-in phone-number detector. Default false.
+	Phone bool
+}
+
+// MCPChainConfig configures the per-session call-chain analyzer.
+type MCPChainConfig struct {
+	// Enabled gates chain analysis. Default true.
+	Enabled bool
+	// WindowSize bounds the per-session sliding window. Default 50; must be > 0.
+	WindowSize int
+	// Patterns selects which built-in chain patterns are active. Default = all
+	// three (read_then_send, permission_probing, rapid_repeat).
+	Patterns []string
 }
 
 // ObservabilityConfig configures the OTel emission seam (Phase 1: metrics +
@@ -118,6 +195,16 @@ func (p Policy) DeepCopy() Policy {
 		}
 		cp.Observability.ResourceAttributes = ra
 	}
+	cp.MCP.Tools.Allow = append([]string(nil), p.MCP.Tools.Allow...)
+	cp.MCP.Tools.Deny = append([]string(nil), p.MCP.Tools.Deny...)
+	if p.MCP.Tools.RateLimit != nil {
+		rl := make(map[string]string, len(p.MCP.Tools.RateLimit))
+		for k, v := range p.MCP.Tools.RateLimit {
+			rl[k] = v
+		}
+		cp.MCP.Tools.RateLimit = rl
+	}
+	cp.MCP.Chain.Patterns = append([]string(nil), p.MCP.Chain.Patterns...)
 	return cp
 }
 
@@ -166,6 +253,50 @@ type rawConfig struct {
 	Agents        []rawAgent        `yaml:"agents"`
 	Advisory      *rawAdvisory      `yaml:"advisory"`
 	Observability *rawObservability `yaml:"observability"`
+	MCP           *rawMCP           `yaml:"mcp"`
+}
+
+// rawMCP mirrors the on-disk `mcp:` block. Pointer so an absent block is
+// distinct from an explicit (disabled) one. Sub-blocks are pointers where
+// "absent vs zero" matters for default application (mirrors rawJudge/rawObservability).
+// KnownFields(true) is strict, so this MUST be registered or configs with the
+// block fail to parse.
+type rawMCP struct {
+	Enabled              bool          `yaml:"enabled"`
+	Mode                 string        `yaml:"mode"`
+	FailClosedOnError    bool          `yaml:"failClosedOnError"`
+	MaxResponseScanBytes *int          `yaml:"maxResponseScanBytes"`
+	Tools                *rawMCPTools  `yaml:"tools"`
+	Schema               *rawMCPSchema `yaml:"schema"`
+	Scan                 *rawMCPScan   `yaml:"scan"`
+	Chain                *rawMCPChain  `yaml:"chain"`
+}
+
+type rawMCPTools struct {
+	Allow     []string          `yaml:"allow"`
+	Deny      []string          `yaml:"deny"`
+	RateLimit map[string]string `yaml:"rateLimit"`
+}
+
+type rawMCPSchema struct {
+	Pin bool `yaml:"pin"`
+}
+
+type rawMCPScan struct {
+	ToolArgs      *bool          `yaml:"toolArgs"`
+	ToolResults   *bool          `yaml:"toolResults"`
+	ProfileSchema *bool          `yaml:"profileSchema"`
+	PII           *rawMCPScanPII `yaml:"pii"`
+}
+
+type rawMCPScanPII struct {
+	Phone bool `yaml:"phone"`
+}
+
+type rawMCPChain struct {
+	Enabled    *bool    `yaml:"enabled"`
+	WindowSize *int     `yaml:"windowSize"`
+	Patterns   []string `yaml:"patterns"`
 }
 
 // rawObservability mirrors the on-disk `observability:` block. Pointer so an
@@ -280,6 +411,7 @@ func parse(data []byte) (*LocalYAMLProvider, error) {
 		policy.Judge = jc
 	}
 	policy.Observability = parseObservability(raw.Observability)
+	policy.MCP = parseMCP(raw.MCP)
 
 	if err := validate(policy); err != nil {
 		return nil, err
@@ -360,6 +492,88 @@ func parseObservability(r *rawObservability) ObservabilityConfig {
 		oc.OTLPEndpoint = v
 	}
 	return oc
+}
+
+// MCP defaults applied when the corresponding field is omitted.
+const (
+	defaultMCPMode                 = "monitor"
+	defaultMCPMaxResponseScanBytes = 1048576 // 1 MiB
+	defaultMCPChainWindowSize      = 50
+)
+
+// mcpChainPatterns is the default (and only valid) set of built-in chain
+// patterns. The default config enables all three.
+var mcpChainPatterns = []string{"read_then_send", "permission_probing", "rapid_repeat"}
+
+// parseMCP converts the raw mcp block into a typed MCPConfig, applying the
+// documented defaults. An absent block yields a disabled, harmless value with
+// the documented zero-ish defaults. Cross-field validation (mode enum, window
+// size, patterns, per-tool rate limits) happens in validate, only when enabled.
+func parseMCP(r *rawMCP) MCPConfig {
+	mc := MCPConfig{
+		Mode:                 defaultMCPMode,
+		MaxResponseScanBytes: defaultMCPMaxResponseScanBytes,
+		Scan: MCPScanConfig{
+			ToolArgs:      true,
+			ToolResults:   true,
+			ProfileSchema: true,
+		},
+		Chain: MCPChainConfig{
+			Enabled:    true,
+			WindowSize: defaultMCPChainWindowSize,
+			Patterns:   append([]string(nil), mcpChainPatterns...),
+		},
+	}
+	if r == nil {
+		return mc
+	}
+	mc.Enabled = r.Enabled
+	mc.FailClosedOnError = r.FailClosedOnError
+	if strings.TrimSpace(r.Mode) != "" {
+		mc.Mode = strings.ToLower(strings.TrimSpace(r.Mode))
+	}
+	if r.MaxResponseScanBytes != nil {
+		mc.MaxResponseScanBytes = *r.MaxResponseScanBytes
+	}
+	if r.Tools != nil {
+		mc.Tools.Allow = append([]string(nil), r.Tools.Allow...)
+		mc.Tools.Deny = append([]string(nil), r.Tools.Deny...)
+		if r.Tools.RateLimit != nil {
+			mc.Tools.RateLimit = make(map[string]string, len(r.Tools.RateLimit))
+			for k, v := range r.Tools.RateLimit {
+				mc.Tools.RateLimit[k] = v
+			}
+		}
+	}
+	if r.Schema != nil {
+		mc.Schema.Pin = r.Schema.Pin
+	}
+	if r.Scan != nil {
+		if r.Scan.ToolArgs != nil {
+			mc.Scan.ToolArgs = *r.Scan.ToolArgs
+		}
+		if r.Scan.ToolResults != nil {
+			mc.Scan.ToolResults = *r.Scan.ToolResults
+		}
+		if r.Scan.ProfileSchema != nil {
+			mc.Scan.ProfileSchema = *r.Scan.ProfileSchema
+		}
+		if r.Scan.PII != nil {
+			mc.Scan.PII.Phone = r.Scan.PII.Phone
+		}
+	}
+	if r.Chain != nil {
+		if r.Chain.Enabled != nil {
+			mc.Chain.Enabled = *r.Chain.Enabled
+		}
+		if r.Chain.WindowSize != nil {
+			mc.Chain.WindowSize = *r.Chain.WindowSize
+		}
+		if r.Chain.Patterns != nil {
+			mc.Chain.Patterns = append([]string(nil), r.Chain.Patterns...)
+		}
+	}
+	return mc
 }
 
 // parseDurationField parses a Go duration string into *dst when non-empty.
@@ -498,6 +712,75 @@ func validate(p Policy) error {
 	if err := validateJudge(p.Judge, p.Agents); err != nil {
 		return err
 	}
+	if err := validateMCP(p.MCP); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateRateLimit checks the shared "N/second|minute|hour" rate-limit format,
+// returning a descriptive error keyed by name. Reused by the allowlist, judge,
+// and MCP tool policies so the format stays in one place.
+func validateRateLimit(name, raw string) error {
+	parts := strings.SplitN(raw, "/", 2)
+	if len(parts) != 2 {
+		return fmt.Errorf("config: %s %q is invalid; want N/period", name, raw)
+	}
+	n, err := strconv.Atoi(parts[0])
+	if err != nil || n <= 0 {
+		return fmt.Errorf("config: %s count %q is invalid", name, raw)
+	}
+	switch parts[1] {
+	case "second", "minute", "hour":
+	default:
+		return fmt.Errorf("config: %s period %q is invalid; must be second, minute, or hour", name, raw)
+	}
+	return nil
+}
+
+// validateMCP enforces the MCP block's requirements only when it is enabled, so
+// a disabled block with default-valued config is always valid (back-compat:
+// configs that omit mcp never fail here).
+func validateMCP(m MCPConfig) error {
+	if !m.Enabled {
+		return nil
+	}
+	switch m.Mode {
+	case "off", "monitor", "enforce":
+	default:
+		return fmt.Errorf("config: mcp.mode %q is invalid; must be one of: off, monitor, enforce", m.Mode)
+	}
+	if m.MaxResponseScanBytes < 0 {
+		return fmt.Errorf("config: mcp.maxResponseScanBytes must not be negative")
+	}
+	if m.Chain.WindowSize <= 0 {
+		return fmt.Errorf("config: mcp.chain.windowSize must be greater than 0")
+	}
+	for _, p := range m.Chain.Patterns {
+		switch p {
+		case "read_then_send", "permission_probing", "rapid_repeat":
+		default:
+			return fmt.Errorf("config: mcp.chain.patterns: unknown pattern %q; must be one of: read_then_send, permission_probing, rapid_repeat", p)
+		}
+	}
+	for name, rl := range m.Tools.RateLimit {
+		if strings.TrimSpace(name) == "" {
+			return fmt.Errorf("config: mcp.tools.rateLimit: tool name is required")
+		}
+		if err := validateRateLimit(fmt.Sprintf("mcp.tools.rateLimit[%q]", name), rl); err != nil {
+			return err
+		}
+	}
+	for i, t := range m.Tools.Allow {
+		if strings.TrimSpace(t) == "" {
+			return fmt.Errorf("config: mcp.tools.allow[%d]: tool name must not be empty", i)
+		}
+	}
+	for i, t := range m.Tools.Deny {
+		if strings.TrimSpace(t) == "" {
+			return fmt.Errorf("config: mcp.tools.deny[%d]: tool name must not be empty", i)
+		}
+	}
 	return nil
 }
 
@@ -536,18 +819,8 @@ func validateJudge(j JudgeConfig, agents []AgentPolicy) error {
 		return fmt.Errorf("config: at least one agents[] policy is required when judge.enabled")
 	}
 	if j.RateLimit != "" {
-		parts := strings.SplitN(j.RateLimit, "/", 2)
-		if len(parts) != 2 {
-			return fmt.Errorf("config: judge.rateLimit %q is invalid; want N/period", j.RateLimit)
-		}
-		n, err := strconv.Atoi(parts[0])
-		if err != nil || n <= 0 {
-			return fmt.Errorf("config: judge.rateLimit count %q is invalid", j.RateLimit)
-		}
-		switch parts[1] {
-		case "second", "minute", "hour":
-		default:
-			return fmt.Errorf("config: judge.rateLimit period %q is invalid; must be second, minute, or hour", j.RateLimit)
+		if err := validateRateLimit("judge.rateLimit", j.RateLimit); err != nil {
+			return err
 		}
 	}
 	return nil

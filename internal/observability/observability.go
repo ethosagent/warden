@@ -10,6 +10,18 @@
 // enums or configured names (decision, protocol, reason, kind, outcome, stage,
 // placeholder ref) — never a raw domain, which is unbounded.
 //
+// Bounded MCP enum values (the fixed sets the MCP gateway emits; documented here
+// so the bounded-label contract is explicit — an MCP tool name is NEVER a label,
+// it is unbounded and lives only in the analytics store):
+//
+//	RecordBlocked(reason):       mcp_tool_denied, mcp_poisoning, mcp_schema_drift_blocked
+//	RecordScanFinding(kind):      mcp_args_injection, mcp_args_leak, mcp_args_pii,
+//	                              mcp_result_injection, mcp_result_leak, mcp_result_pii,
+//	                              mcp_poisoning_description_injection, mcp_schema_drift_added,
+//	                              mcp_chain_read_then_send, mcp_chain_permission_probing,
+//	                              mcp_chain_rapid_repeat
+//	ObserveAddedLatency(stage):  mcp_scan
+//
 // Disabled mode is free: when Config.Enabled is false (or the *Metrics is nil)
 // New returns a nil *Metrics and a nil http.Handler, and every record method is
 // a nil-receiver no-op with no allocation and no latency on the hot path.
@@ -255,7 +267,9 @@ func (m *Metrics) RecordRequest(decision, protocol string) {
 }
 
 // RecordBlocked increments warden.blocked.total{reason}. reason is a bounded
-// enum ("policy"/"judge"/"no_tls"/"host_mismatch").
+// enum ("policy"/"judge"/"no_tls"/"host_mismatch", plus the MCP reasons
+// "mcp_tool_denied"/"mcp_poisoning"/"mcp_schema_drift_blocked"). See the package
+// doc for the full bounded set; never pass an unbounded value (e.g. a tool name).
 func (m *Metrics) RecordBlocked(reason string) {
 	if m == nil {
 		return
@@ -277,7 +291,9 @@ func (m *Metrics) RecordSecretSwap(placeholderRef string) {
 }
 
 // RecordScanFinding increments warden.scan.findings.total{kind}. kind is a
-// bounded enum (injection/leakage/mcp-poisoning).
+// bounded enum (injection/leakage/mcp-poisoning, plus the MCP scan kinds listed
+// in the package doc, e.g. mcp_args_pii/mcp_result_injection/
+// mcp_chain_read_then_send). Never pass an unbounded value (e.g. a tool name).
 func (m *Metrics) RecordScanFinding(kind string) {
 	if m == nil {
 		return
@@ -299,7 +315,8 @@ func (m *Metrics) RecordJudge(outcome string) {
 }
 
 // ObserveAddedLatency records warden.request.added_latency{stage} in seconds.
-// stage is a bounded enum (tls/policy/swap/forward).
+// stage is a bounded enum (tls/policy/swap/forward, plus "mcp_scan" for the MCP
+// gateway scan stage).
 func (m *Metrics) ObserveAddedLatency(stage string, d time.Duration) {
 	if m == nil {
 		return

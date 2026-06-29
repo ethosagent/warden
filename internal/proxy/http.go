@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/tls"
 	"fmt"
 	"io"
@@ -11,6 +12,8 @@ import (
 	"time"
 
 	"github.com/ethosagent/warden/internal/analytics"
+	"github.com/ethosagent/warden/internal/mcp/gateway"
+	"github.com/ethosagent/warden/internal/protocol"
 	"github.com/ethosagent/warden/internal/secrets"
 )
 
@@ -74,6 +77,70 @@ func (p *Proxy) handleHTTP(tlsConn *tls.Conn, br *bufio.Reader, domain string, p
 			}
 			judgeReason = verdict.Reason
 			p.cfg.Metrics.RecordJudge("allow")
+		}
+
+		// MCP analysis (optional). When the gateway is nil this whole block is
+		// skipped: no body read, no behavior change — byte-identical to before.
+		var (
+			wasMCP     bool
+			mcpTool    string
+			mcpReason  string
+			mcpSessKey string
+		)
+		if p.cfg.MCP != nil {
+			var mcpReqBody []byte
+			if req.Body != nil && req.Body != http.NoBody {
+				b, readErr := io.ReadAll(io.LimitReader(req.Body, maxBodySwapSize+1))
+				if readErr != nil {
+					writeErrorResponse(tlsConn, 502, "Bad Gateway")
+					_ = req.Body.Close()
+					return
+				}
+				if int64(len(b)) > maxBodySwapSize {
+					writeErrorResponse(tlsConn, 413, "Request body too large for secret substitution")
+					_ = req.Body.Close()
+					return
+				}
+				mcpReqBody = b
+				// Restore the body so the downstream secret-swap re-read and
+				// req.Write(upstream) still see the full payload.
+				req.Body = io.NopCloser(bytes.NewReader(mcpReqBody))
+			}
+
+			ct := req.Header.Get("Content-Type")
+			if protocol.IsMCP(ct, mcpReqBody) {
+				wasMCP = true
+				fullURL := "https://" + domain + req.URL.RequestURI()
+				mcpSessKey = p.cfg.AgentID + ":" + domain
+				start := time.Now()
+				v := p.cfg.MCP.OnRequest(mcpSessKey, req.Method, fullURL, req.Header, mcpReqBody)
+				p.cfg.Metrics.ObserveAddedLatency("mcp_scan", time.Since(start))
+				p.recordMCPFindings(v)
+				mcpTool = v.Tool
+				mcpReason = v.Reason
+				if v.Action == gateway.Deny {
+					_ = p.cfg.Analytics.StoreEvent(analytics.Event{
+						Timestamp: time.Now(),
+						Domain:    domain,
+						Port:      port,
+						Protocol:  "mcp",
+						Method:    req.Method,
+						URL:       fullURL,
+						Decision:  "deny",
+						Tool:      v.Tool,
+						Reason:    v.Reason,
+					})
+					p.cfg.Metrics.RecordRequest("deny", "mcp")
+					p.cfg.Metrics.RecordBlocked(v.Reason)
+					p.logDecision(decisionLog{
+						Domain: domain, Port: port, Protocol: "mcp",
+						Method: req.Method, URL: fullURL, Decision: "deny",
+					})
+					writeErrorResponse(tlsConn, 403, "Forbidden")
+					_ = req.Body.Close()
+					return
+				}
+			}
 		}
 
 		var refs []secrets.Reference
@@ -199,6 +266,56 @@ func (p *Proxy) handleHTTP(tlsConn *tls.Conn, br *bufio.Reader, domain string, p
 
 		closeAfter := req.Close || resp.Close
 
+		if p.cfg.MCP != nil && wasMCP {
+			ct := resp.Header.Get("Content-Type")
+			scanCap := int64(p.cfg.MCP.MaxResponseScanBytes())
+			bufferable := strings.HasPrefix(ct, "application/json") &&
+				resp.ContentLength >= 0 && resp.ContentLength <= scanCap
+			if bufferable {
+				body, readErr := io.ReadAll(resp.Body)
+				if readErr == nil {
+					start := time.Now()
+					v := p.cfg.MCP.OnResponse(mcpSessKey, resp.StatusCode, resp.Header, body)
+					p.cfg.Metrics.ObserveAddedLatency("mcp_scan", time.Since(start))
+					p.recordMCPFindings(v)
+					if v.Reason != "" {
+						mcpReason = v.Reason
+					}
+					if v.Action == gateway.Deny {
+						fullURL := "https://" + domain + req.URL.RequestURI()
+						_ = p.cfg.Analytics.StoreEvent(analytics.Event{
+							Timestamp: time.Now(),
+							Domain:    domain,
+							Port:      port,
+							Protocol:  "mcp",
+							Method:    req.Method,
+							URL:       fullURL,
+							Decision:  "deny",
+							Tool:      mcpTool,
+							Reason:    v.Reason,
+						})
+						p.cfg.Metrics.RecordRequest("deny", "mcp")
+						p.cfg.Metrics.RecordBlocked(v.Reason)
+						p.logDecision(decisionLog{
+							Domain: domain, Port: port, Protocol: "mcp",
+							Method: req.Method, URL: fullURL, Decision: "deny",
+							ResponseStatus: resp.StatusCode,
+						})
+						writeErrorResponse(tlsConn, 502, "Bad Gateway")
+						_ = req.Body.Close()
+						_ = resp.Body.Close()
+						_ = upstream.Close()
+						return
+					}
+					resp.Body = io.NopCloser(bytes.NewReader(body))
+				}
+			} else {
+				// event-stream / chunked / unknown or over-cap length: stream
+				// unchanged, record that it was not scanned.
+				p.cfg.Metrics.RecordScanFinding("mcp_response_unscanned_stream")
+			}
+		}
+
 		writeErr := resp.Write(tlsConn)
 
 		// Log the decision
@@ -208,24 +325,30 @@ func (p *Proxy) handleHTTP(tlsConn *tls.Conn, br *bufio.Reader, domain string, p
 		}
 		fullURL := "https://" + domain + req.URL.RequestURI()
 		secretRef := strings.Join(refStrs, ",")
+		proto := "https"
+		if wasMCP {
+			proto = "mcp"
+		}
 		_ = p.cfg.Analytics.StoreEvent(analytics.Event{
 			Timestamp:      time.Now(),
 			Domain:         domain,
 			Port:           port,
-			Protocol:       "https",
+			Protocol:       proto,
 			Method:         req.Method,
 			URL:            fullURL,
 			Decision:       "allow",
 			ResponseStatus: resp.StatusCode,
 			SecretRef:      secretRef,
 			JudgeReason:    judgeReason, // empty unless a judge allowed this request
+			Tool:           mcpTool,     // "" unless wasMCP
+			Reason:         mcpReason,   // "" unless wasMCP
 		})
-		p.cfg.Metrics.RecordRequest("allow", "https")
+		p.cfg.Metrics.RecordRequest("allow", proto)
 		for _, name := range swappedNames {
 			p.cfg.Metrics.RecordSecretSwap(name)
 		}
 		p.logDecision(decisionLog{
-			Domain: domain, Port: port, Protocol: "https",
+			Domain: domain, Port: port, Protocol: proto,
 			Method: req.Method, URL: fullURL, Decision: "allow",
 			ResponseStatus: resp.StatusCode, SecretRef: secretRef,
 			JudgeReason: judgeReason,

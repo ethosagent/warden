@@ -1,0 +1,95 @@
+# MCP wedge demo — a poisoned MCP server, Warden in enforce mode in front of it,
+# and the dashboard lighting up. Modeled on deploy/compose/docker-compose.hermes.yml.
+#
+# Topology (same shape as the hermes recipe):
+#   - `internal` network: NO route to the internet. The poisoned MCP server and
+#     the client both live here; their only egress is Warden.
+#   - `egress`   network: real internet, attached ONLY to Warden.
+#   - Warden TLS-terminates, allows every host (visibility-first), and applies
+#     the MCP gate from configs/config.mcp.yaml (enforce mode, default-deny tools).
+#   - Dashboard + /metrics on host port 9090 (host-only; not reachable by the agent).
+#
+# Prereq (run from the repo root): bake the proxy CA into ./certs:
+#   OUT_DIR=examples/mcp-wedge/certs ./scripts/gen-certs.sh
+#
+# Then, from the repo root:
+#   docker compose -f examples/mcp-wedge/docker-compose.yml up --build
+#
+# See examples/mcp-wedge/README.md for the exact client commands and what you
+# will see (poisoned description flagged, run_shell call blocked 403, dashboard).
+#
+# NOTE ON REACHABILITY: Warden's SafeDialer blocks RFC1918 / private upstream IPs
+# as SSRF protection, and verifies the upstream TLS cert against the system trust
+# store. Both are documented in the README with the remediation the live
+# through-Warden path needs; this compose stands up every piece so the demo is
+# reproducible end to end.
+
+services:
+  warden:
+    # Built from the repo Dockerfile so the demo is self-contained. To use the
+    # published image instead, replace `build` with:
+    #   image: ethosagent/warden:${WARDEN_VERSION:-0.1.0}
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: warden-mcp-wedge:local
+    networks: [mcp-internal, egress]
+    ports:
+      - "9090:9090"                 # dashboard + /metrics (host-only)
+    volumes:
+      - ../../configs/config.mcp.yaml:/etc/warden/config.yaml:ro
+      - ./certs:/etc/warden/certs:ro
+      - warden-data:/data
+    command:
+      - "run"
+      - "--config=/etc/warden/config.yaml"
+      - "--listen=0.0.0.0:8080"
+      - "--ca-cert=/etc/warden/certs/proxy-ca.crt"   # TLS terminate for full MCP visibility
+      - "--ca-key=/etc/warden/certs/proxy-ca.key"
+      - "--admin-listen=0.0.0.0:9090"
+      - "--db=/data/warden.db"
+
+  # The deliberately malicious upstream: tools/list advertises a tool whose
+  # description smuggles a prompt-injection payload (read more in
+  # poisoned-mcp-server/main.go). Serves TLS on :8443 under the hostname
+  # "poisoned-mcp-server" so Warden can TLS-terminate the upstream leg.
+  poisoned-mcp-server:
+    build:
+      context: ../..
+      dockerfile: examples/mcp-wedge/poisoned-mcp-server/Dockerfile
+    image: poisoned-mcp-server:local
+    networks: [mcp-internal]        # internal ONLY — no internet except via Warden
+    environment:
+      - MCP_HOST=poisoned-mcp-server
+      - MCP_ADDR=:8443
+
+  # The MCP client: a long-lived shell whose egress is pinned to Warden and which
+  # trusts the proxy CA. It runs nothing on its own — `docker compose exec client
+  # ...` issues the demo curls (see README). Modeled on how the hermes recipe
+  # routes an agent's egress through Warden.
+  client:
+    image: curlimages/curl:8.10.1
+    depends_on: [warden, poisoned-mcp-server]
+    networks: [mcp-internal]        # internal ONLY — egress is Warden
+    environment:
+      - HTTPS_PROXY=http://warden:8080
+      - https_proxy=http://warden:8080
+      - NO_PROXY=localhost,127.0.0.1,warden
+      - no_proxy=localhost,127.0.0.1,warden
+    volumes:
+      # Trust Warden's CA so its terminated-TLS leaf certs are accepted.
+      - ./certs/proxy-ca.crt:/etc/warden/certs/proxy-ca.crt:ro
+    # Keep the container alive so `docker compose exec client ...` works.
+    entrypoint: ["sleep", "infinity"]
+
+networks:
+  # internal: true -> no internet. The MCP server + client live here only.
+  mcp-internal:
+    internal: true
+  # egress carries real internet and is attached ONLY to Warden.
+  egress:
+    driver: bridge
+
+volumes:
+  # persistent Warden analytics db — survives `up` / container recreate.
+  warden-data:

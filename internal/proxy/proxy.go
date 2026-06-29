@@ -21,6 +21,7 @@ import (
 
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/auth"
+	"github.com/ethosagent/warden/internal/mcp/gateway"
 	"github.com/ethosagent/warden/internal/observability"
 	"github.com/ethosagent/warden/internal/policy"
 	"github.com/ethosagent/warden/internal/secrets"
@@ -57,6 +58,10 @@ type Config struct {
 	// When nil, proxy.New substitutes a discard logger so behavior and log volume
 	// are unchanged.
 	Logger *slog.Logger
+
+	// MCP is the optional MCP egress gateway. Nil = MCP disabled: handleHTTP is
+	// byte-identical to before. Non-nil = analyze MCP JSON-RPC traffic.
+	MCP *gateway.Gateway
 }
 
 // Judge renders an allow/deny verdict for a request that matched no static

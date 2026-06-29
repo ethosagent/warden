@@ -1,0 +1,59 @@
+# Warden config for the MCP wedge demo (examples/mcp-wedge/).
+#
+# Visibility-first egress policy (allow every host, like config.recipe.yaml)
+# PLUS an `mcp:` block in ENFORCE mode that turns Warden into the egress
+# guardrail for MCP. Drop this in front of one agent + one MCP server and watch:
+#
+#   - tools/list with a poisoned tool description  -> FLAGGED (poisoning finding)
+#   - tools/call to a non-allowlisted tool         -> BLOCKED (403, default-deny)
+#
+# See examples/mcp-wedge/README.md for the full recording script.
+
+policy:
+  allowlist:
+    - domain: "~.*"            # allow every host (HTTPS/443). Egress stays open;
+                               # the MCP gate below is layered AFTER this and can
+                               # only ever be MORE restrictive, never less.
+
+cache:
+  ttl: 3600
+
+logging:
+  level: info
+  format: json                # structured JSON decision logs (one per call)
+
+observability:
+  enabled: true
+  metrics:
+    enabled: true             # Prometheus /metrics on the admin listener
+
+# The MCP wedge: enforce mode with a default-deny tool allowlist.
+mcp:
+  enabled: true               # master switch
+  mode: enforce               # off | monitor | enforce. enforce = detect + BLOCK.
+  failClosedOnError: false    # analyzer error -> allow+log (egress never drops on a bug)
+  maxResponseScanBytes: 1048576
+
+  tools:
+    # Default-deny: ONLY list_files is allowed. run_shell (the tool the poisoned
+    # description tries to trick the agent into calling) is NOT listed, so a
+    # tools/call to it is denied with 403.
+    allow:
+      - list_files
+    deny: []                  # (deny wins over allow; nothing extra to deny here)
+    rateLimit: {}
+
+  schema:
+    pin: false                # leave drift advisory for the demo (poisoning is the star)
+
+  scan:
+    toolArgs: true            # scan outbound tool-call arguments
+    toolResults: true         # scan inbound tool results
+    profileSchema: true       # learn observed in/out schema per tool (dashboard detail)
+    pii:
+      phone: false            # email/card/SSN always on; phone opt-in (noisy)
+
+  chain:
+    enabled: true
+    windowSize: 50
+    patterns: [read_then_send, permission_probing, rapid_repeat]

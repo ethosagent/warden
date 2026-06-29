@@ -1,6 +1,7 @@
 package analytics
 
 import (
+	"database/sql"
 	"reflect"
 	"strings"
 	"testing"
@@ -132,5 +133,141 @@ func TestNewSQLiteStore_BadDSN(t *testing.T) {
 	// A path under a nonexistent directory cannot be opened/migrated.
 	if _, err := NewSQLiteStore("/nonexistent-dir-xyz/warden.db", 0); err == nil {
 		t.Fatal("expected error for unopenable DSN")
+	}
+}
+
+// MCP metadata fields (Tool, Reason) round-trip through the store. Both are
+// bounded, content-free identifiers — not bodies, not secrets.
+func TestStoreAndGet_MCPFields_RoundTrip(t *testing.T) {
+	s := newStore(t, 0)
+	e := Event{
+		Timestamp: time.Unix(4000, 0).UTC(),
+		Domain:    "mcp.internal",
+		Port:      8080,
+		Protocol:  "mcp",
+		Method:    "tools/call",
+		URL:       "mcp://mcp.internal/tools/call",
+		Decision:  "deny",
+		Tool:      "read_file",
+		Reason:    "mcp_tool_denied",
+	}
+	if err := s.StoreEvent(e); err != nil {
+		t.Fatalf("StoreEvent: %v", err)
+	}
+	got, err := s.GetEvents(EventFilter{})
+	if err != nil {
+		t.Fatalf("GetEvents: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len = %d, want 1", len(got))
+	}
+	if got[0].Tool != "read_file" {
+		t.Errorf("Tool = %q, want %q", got[0].Tool, "read_file")
+	}
+	if got[0].Reason != "mcp_tool_denied" {
+		t.Errorf("Reason = %q, want %q", got[0].Reason, "mcp_tool_denied")
+	}
+	if !reflect.DeepEqual(got[0], e) {
+		t.Errorf("round-trip mismatch:\n got %+v\nwant %+v", got[0], e)
+	}
+}
+
+// The dashboard aggregates MCP events by protocol and per-tool; the filter must
+// support both protocol="mcp" and an optional tool filter.
+func TestGetEvents_ProtocolAndToolFilters(t *testing.T) {
+	s := newStore(t, 0)
+	base := time.Unix(5000, 0).UTC()
+	_ = s.StoreEvent(Event{Timestamp: base, Protocol: "mcp", Tool: "read_file", Decision: "allow"})
+	_ = s.StoreEvent(Event{Timestamp: base.Add(time.Second), Protocol: "mcp", Tool: "exec_cmd", Decision: "deny"})
+	_ = s.StoreEvent(Event{Timestamp: base.Add(2 * time.Second), Protocol: "https", Decision: "allow"})
+
+	byProto, _ := s.GetEvents(EventFilter{Protocol: "mcp"})
+	if len(byProto) != 2 {
+		t.Errorf("protocol filter len = %d, want 2", len(byProto))
+	}
+	byTool, _ := s.GetEvents(EventFilter{Protocol: "mcp", Tool: "read_file"})
+	if len(byTool) != 1 {
+		t.Errorf("tool filter len = %d, want 1", len(byTool))
+	}
+	if len(byTool) == 1 && byTool[0].Tool != "read_file" {
+		t.Errorf("tool filter returned %q, want read_file", byTool[0].Tool)
+	}
+}
+
+// Migration path: a DB created with the pre-MCP-columns schema must gain the
+// tool/reason columns via additive ALTER TABLE without error and without
+// dropping existing rows. Re-running migrate must stay idempotent.
+func TestMigrate_AddsMCPColumns_PreservesData(t *testing.T) {
+	// Open a raw DB and create the OLD schema (no tool/reason columns), then
+	// insert a row the way an older Warden would have.
+	dsn := "file:" + t.TempDir() + "/warden.db"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	const oldDDL = `
+CREATE TABLE events (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts              INTEGER NOT NULL,
+    domain          TEXT    NOT NULL,
+    port            INTEGER NOT NULL,
+    protocol        TEXT    NOT NULL,
+    method          TEXT    NOT NULL,
+    url             TEXT    NOT NULL,
+    decision        TEXT    NOT NULL,
+    response_status INTEGER NOT NULL,
+    secret_ref      TEXT    NOT NULL,
+    judge_reason    TEXT    NOT NULL DEFAULT ''
+);`
+	if _, err := db.Exec(oldDDL); err != nil {
+		t.Fatalf("old ddl: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO events
+        (ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		time.Unix(6000, 0).UnixNano(), "old.example", 443, "https", "GET",
+		"https://old.example/", "allow", 200, "", ""); err != nil {
+		t.Fatalf("insert old row: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close raw db: %v", err)
+	}
+
+	// Now open through NewSQLiteStore, which runs migrate() and must ADD the
+	// new columns to the existing table without wiping the old row.
+	s, err := NewSQLiteStore(dsn, 0)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore (migrate existing): %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	// Existing row survived and the new columns default to "".
+	got, err := s.GetEvents(EventFilter{})
+	if err != nil {
+		t.Fatalf("GetEvents: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len = %d, want 1 (existing row must survive migration)", len(got))
+	}
+	if got[0].Domain != "old.example" {
+		t.Errorf("Domain = %q, want old.example", got[0].Domain)
+	}
+	if got[0].Tool != "" || got[0].Reason != "" {
+		t.Errorf("migrated row Tool/Reason = %q/%q, want empty defaults", got[0].Tool, got[0].Reason)
+	}
+
+	// New writes carry the new columns.
+	if err := s.StoreEvent(Event{Protocol: "mcp", Tool: "list_dir", Reason: "mcp_poisoning", Decision: "deny"}); err != nil {
+		t.Fatalf("StoreEvent after migrate: %v", err)
+	}
+	mcp, _ := s.GetEvents(EventFilter{Protocol: "mcp"})
+	if len(mcp) != 1 || mcp[0].Tool != "list_dir" || mcp[0].Reason != "mcp_poisoning" {
+		t.Fatalf("post-migrate mcp row = %+v, want tool=list_dir reason=mcp_poisoning", mcp)
+	}
+
+	// Idempotent: running migrate again (re-open) must not error.
+	if err := s.migrate(); err != nil {
+		t.Fatalf("re-running migrate must be idempotent: %v", err)
 	}
 }

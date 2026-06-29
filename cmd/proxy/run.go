@@ -18,9 +18,11 @@ import (
 	"github.com/ethosagent/warden/internal/dashboard"
 	"github.com/ethosagent/warden/internal/llm"
 	"github.com/ethosagent/warden/internal/llmpolicy"
+	"github.com/ethosagent/warden/internal/mcp/gateway"
 	"github.com/ethosagent/warden/internal/observability"
 	"github.com/ethosagent/warden/internal/policy"
 	"github.com/ethosagent/warden/internal/proxy"
+	"github.com/ethosagent/warden/internal/scan"
 	"github.com/ethosagent/warden/internal/secrets"
 )
 
@@ -128,6 +130,15 @@ func runProxy(cmd *cobra.Command, configPath, listenAddr, dbPath, caCert, caKey,
 		return err
 	}
 
+	// Optional MCP egress gateway. When mcp.enabled is false, mcpGW stays nil and
+	// handleHTTP is byte-identical to before.
+	var mcpGW *gateway.Gateway
+	if pol.MCP.Enabled {
+		scanner := scan.NewScanner(scan.WithPhonePII(pol.MCP.Scan.PII.Phone))
+		mcpGW = gateway.New(pol.MCP, scanner, logger)
+		logger.Info("MCP egress gateway enabled", "mode", pol.MCP.Mode)
+	}
+
 	cfg := proxy.Config{
 		ListenAddr:       listenAddr,
 		Policy:           policy.NewEvaluator(pol),
@@ -139,6 +150,7 @@ func runProxy(cmd *cobra.Command, configPath, listenAddr, dbPath, caCert, caKey,
 		AgentID:          agentID,
 		Metrics:          metrics,
 		Logger:           logger,
+		MCP:              mcpGW,
 	}
 	if judge != nil {
 		cfg.Judge = judge
@@ -154,6 +166,9 @@ func runProxy(cmd *cobra.Command, configPath, listenAddr, dbPath, caCert, caKey,
 	adminMux := http.NewServeMux()
 	adminSrv := admin.NewServer(secretProvider)
 	dashSrv := dashboard.NewServer(store, pol, secretProvider)
+	if mcpGW != nil {
+		dashSrv.SetMCPProvider(mcpGW)
+	}
 	adminMux.Handle("/healthz", adminSrv.Handler())
 	adminMux.Handle("/admin/", adminSrv.Handler())
 	adminMux.Handle("/dashboard/", dashSrv.Handler())

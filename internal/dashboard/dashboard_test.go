@@ -11,6 +11,8 @@ import (
 
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/config"
+	"github.com/ethosagent/warden/internal/mcp"
+	"github.com/ethosagent/warden/internal/mcp/gateway"
 	"github.com/ethosagent/warden/internal/secrets"
 )
 
@@ -28,6 +30,12 @@ func (f *fakeDataSource) GetEvents(filter analytics.EventFilter) ([]analytics.Ev
 			continue
 		}
 		if filter.Decision != "" && e.Decision != filter.Decision {
+			continue
+		}
+		if filter.Protocol != "" && e.Protocol != filter.Protocol {
+			continue
+		}
+		if filter.Tool != "" && e.Tool != filter.Tool {
 			continue
 		}
 		if !filter.Since.IsZero() && e.Timestamp.Before(filter.Since) {
@@ -909,4 +917,139 @@ func TestMethodNotAllowed(t *testing.T) {
 			}
 		})
 	}
+}
+
+// fakeMCPProvider is a content-free stand-in for the MCP gateway view.
+type fakeMCPProvider struct {
+	inv  []gateway.InventoryItem
+	snap map[string]mcp.ToolProfileView
+}
+
+func (f *fakeMCPProvider) Inventory() []gateway.InventoryItem             { return f.inv }
+func (f *fakeMCPProvider) SchemaSnapshot() map[string]mcp.ToolProfileView { return f.snap }
+
+func mcpKey(tool string, dir mcp.Direction) string {
+	return tool + "\x00" + string(dir)
+}
+
+func TestMCPEndpoint(t *testing.T) {
+	now := time.Date(2026, 6, 29, 9, 0, 0, 0, time.UTC)
+	ds := &fakeDataSource{events: []analytics.Event{
+		{Timestamp: now, Protocol: "mcp", Tool: "read_file", Decision: "allow"},
+		{Timestamp: now.Add(time.Second), Protocol: "mcp", Tool: "read_file", Decision: "allow"},
+		{Timestamp: now.Add(2 * time.Second), Protocol: "mcp", Tool: "read_file", Decision: "allow"},
+		{Timestamp: now.Add(3 * time.Second), Protocol: "mcp", Tool: "exec_cmd", Decision: "deny", Reason: "mcp_tool_denied"},
+		{Timestamp: now.Add(4 * time.Second), Protocol: "mcp", Tool: "exec_cmd", Decision: "deny", Reason: "mcp_tool_denied"},
+		// A non-mcp event must be ignored by the mcp view.
+		{Timestamp: now, Protocol: "https", Method: "GET", Decision: "allow"},
+	}}
+
+	prov := &fakeMCPProvider{
+		inv: []gateway.InventoryItem{
+			{Name: "read_file", HasDescription: true, InputSchemaHash: "h1", FirstSeen: now, LastSeen: now},
+			{Name: "exec_cmd", HasDescription: true, InputSchemaHash: "h2", FirstSeen: now, LastSeen: now},
+			{Name: "upload", HasDescription: false, InputSchemaHash: "h3", FirstSeen: now, LastSeen: now},
+		},
+		snap: map[string]mcp.ToolProfileView{
+			mcpKey("read_file", mcp.DirRequest): {Fields: map[string]mcp.FieldProfileView{
+				"params.path": {Types: []string{"string"}, SeenCount: 3},
+			}},
+			mcpKey("read_file", mcp.DirResponse): {Fields: map[string]mcp.FieldProfileView{
+				"result.email": {Types: []string{"string"}, SeenCount: 3, Sensitivity: []string{"pii"}},
+			}},
+		},
+	}
+
+	srv := NewServer(ds, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
+	srv.SetMCPProvider(prov)
+	handler := srv.Handler()
+
+	rr := doGet(t, handler, "/dashboard/api/mcp")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	var resp mcpResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !resp.Enabled {
+		t.Fatalf("expected enabled=true")
+	}
+
+	byTool := map[string]mcpToolView{}
+	for _, v := range resp.Tools {
+		byTool[v.Tool] = v
+	}
+
+	rf, ok := byTool["read_file"]
+	if !ok {
+		t.Fatalf("read_file missing")
+	}
+	if rf.Calls != 3 || rf.Allowed != 3 || rf.Denied != 0 {
+		t.Fatalf("read_file want calls=3 allowed=3 denied=0, got %d/%d/%d", rf.Calls, rf.Allowed, rf.Denied)
+	}
+	if !rf.Present {
+		t.Fatalf("read_file should be present in inventory")
+	}
+	resField, ok := rf.ResponseSchema["result.email"]
+	if !ok {
+		t.Fatalf("read_file responseSchema missing result.email: %+v", rf.ResponseSchema)
+	}
+	if len(resField.Sensitivity) != 1 || resField.Sensitivity[0] != "pii" {
+		t.Fatalf("result.email sensitivity want [pii], got %v", resField.Sensitivity)
+	}
+	if !containsStr(rf.Sensitive, "pii") {
+		t.Fatalf("read_file tool-level sensitive should include pii, got %v", rf.Sensitive)
+	}
+	if _, ok := rf.RequestSchema["params.path"]; !ok {
+		t.Fatalf("read_file requestSchema missing params.path: %+v", rf.RequestSchema)
+	}
+
+	ec, ok := byTool["exec_cmd"]
+	if !ok {
+		t.Fatalf("exec_cmd missing")
+	}
+	if ec.Denied != 2 {
+		t.Fatalf("exec_cmd want denied=2, got %d", ec.Denied)
+	}
+	if !containsStr(ec.Findings, "mcp_tool_denied") {
+		t.Fatalf("exec_cmd findings want mcp_tool_denied, got %v", ec.Findings)
+	}
+
+	up, ok := byTool["upload"]
+	if !ok {
+		t.Fatalf("upload (present-but-uncalled) missing")
+	}
+	if up.Calls != 0 || !up.Present {
+		t.Fatalf("upload want present, calls=0; got present=%v calls=%d", up.Present, up.Calls)
+	}
+}
+
+func TestMCPEndpointNilProvider(t *testing.T) {
+	ds := &fakeDataSource{}
+	handler := newTestServer(ds, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
+
+	rr := doGet(t, handler, "/dashboard/api/mcp")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	var resp mcpResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Enabled {
+		t.Fatalf("expected enabled=false with nil provider")
+	}
+	if len(resp.Tools) != 0 {
+		t.Fatalf("expected 0 tools with nil provider and no events, got %d", len(resp.Tools))
+	}
+}
+
+func containsStr(ss []string, want string) bool {
+	for _, s := range ss {
+		if s == want {
+			return true
+		}
+	}
+	return false
 }
