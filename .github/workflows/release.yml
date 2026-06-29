@@ -3,6 +3,8 @@ name: release
 # On a version tag, build cross-platform binaries, publish a GitHub Release, and
 # sign the checksums with KEYLESS cosign (Sigstore via GitHub OIDC) — no
 # long-lived signing keys; the signing identity is this workflow.
+# A CycloneDX SBOM (syft) is also attached; its hash is in the signed
+# checksums.txt, so the signature covers the SBOM too.
 #
 # Verify a downloaded release:
 #   cosign verify-blob \
@@ -51,9 +53,16 @@ jobs:
             GOOS="${os}" GOARCH="${arch}" scripts/build.sh "${out}"
           done
 
+      - name: Generate SBOM (syft → CycloneDX)
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: cyclonedx-json
+          output-file: dist/warden-sbom.cyclonedx.json
+
       - name: Generate checksums
         working-directory: dist
-        run: sha256sum warden-* > checksums.txt
+        run: sha256sum warden-* warden-sbom.cyclonedx.json > checksums.txt
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
@@ -74,4 +83,4 @@ jobs:
             --repo "${{ github.repository }}" \
             --title "${{ github.ref_name }}" \
             --generate-notes \
-            dist/warden-* dist/checksums.txt dist/checksums.txt.sig dist/checksums.txt.pem
+            dist/warden-* dist/warden-sbom.cyclonedx.json dist/checksums.txt dist/checksums.txt.sig dist/checksums.txt.pem
