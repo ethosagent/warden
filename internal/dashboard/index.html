@@ -111,6 +111,13 @@ tbody tr.click:hover{background:rgba(148,163,184,.06)}
 .pill.deny{background:rgba(248,113,113,.16); color:var(--red)}
 .pill.method{background:rgba(148,163,184,.12); color:#e2e8f0; font-family:ui-monospace,monospace}
 .pill.write{background:rgba(245,158,11,.16); color:var(--amber); font-family:ui-monospace,monospace}
+.pill.sens{background:rgba(248,113,113,.16); color:var(--red); text-transform:uppercase; letter-spacing:.03em}
+tr.mcp-head{cursor:pointer}
+tr.mcp-head:hover>td{background:rgba(148,163,184,.06)}
+.mcp-detail td{background:rgba(15,23,42,.35)}
+.mcp-schema{font-size:12px; margin:4px 0}
+.mcp-schema .pth{font-family:ui-monospace,monospace; color:#cbd5e1}
+.mcp-schema .typ{color:#94a3b8}
 
 /* split bar (allow/deny) */
 .split{display:inline-flex; height:6px; width:74px; border-radius:3px; overflow:hidden; background:rgba(148,163,184,.12)}
@@ -306,6 +313,11 @@ tbody tr.click:hover{background:rgba(148,163,184,.06)}
     <div class="card col-2">
       <div class="ttl"><h3>Writes leaving the boundary</h3></div>
       <div id="panel-writes"></div>
+    </div>
+
+    <div class="card col-full">
+      <div class="ttl"><h3>MCP tools</h3></div>
+      <div id="panel-mcp"></div>
     </div>
   </section>
 </main>
@@ -755,6 +767,49 @@ function renderWrites(data){
   el.innerHTML=h+"</tbody></table>";
 }
 
+/* ---- MCP tools ---- */
+const mcpOpen={};
+function schemaBlock(title,schema){
+  const paths=Object.keys(schema||{}).sort();
+  if(!paths.length) return `<div class="mcp-schema"><b>${esc(title)}</b>: <span class="typ">no observed fields</span></div>`;
+  let h=`<div class="mcp-schema"><b>${esc(title)}</b><ul style="margin:2px 0 0 14px;padding:0">`;
+  paths.forEach(p=>{
+    const f=schema[p]||{};
+    const types=(f.types||[]).join(", ");
+    const sens=(f.sensitivity||[]).map(c=>`<span class="pill sens">${esc(c)}</span>`).join(" ");
+    h+=`<li><span class="pth">${esc(p)}</span> <span class="typ">: ${esc(types)} ·${f.seenCount||0}×</span> ${sens}</li>`;
+  });
+  return h+"</ul></div>";
+}
+function renderMCP(data){
+  const el=$("#panel-mcp");
+  if(!data || !data.enabled){el.innerHTML=emptyState("MCP gateway disabled");return;}
+  const rows=data.tools||[];
+  if(!rows.length){el.innerHTML=emptyState("No MCP tools observed yet");return;}
+  let h=`<table><thead><tr><th>Tool</th><th class="num">Calls</th><th class="num">Allowed</th><th class="num">Denied</th><th>Sensitive</th><th>Findings</th></tr></thead><tbody>`;
+  rows.forEach((r,i)=>{
+    const sens=(r.sensitive||[]).map(c=>`<span class="pill sens">${esc(c)}</span>`).join(" ")||'<span class="typ">—</span>';
+    const find=(r.findings||[]).map(f=>`<span class="pill t4">${esc(f)}</span>`).join(" ")||'<span class="typ">—</span>';
+    const name=esc(r.tool)+(r.present?"":' <span class="pill t3">unseen</span>');
+    h+=`<tr class="mcp-head" data-mcp="${i}"><td class="mono">${name}</td>
+      <td class="num">${fmtNum(r.calls||0)}</td>
+      <td class="num">${fmtNum(r.allowed||0)}</td>
+      <td class="num">${fmtNum(r.denied||0)}</td>
+      <td>${sens}</td><td>${find}</td></tr>`;
+    if(mcpOpen[r.tool]){
+      h+=`<tr class="mcp-detail"><td colspan="6">${schemaBlock("Request",r.requestSchema)}${schemaBlock("Response",r.responseSchema)}</td></tr>`;
+    }
+  });
+  el.innerHTML=h+"</tbody></table>";
+  el.querySelectorAll("tr.mcp-head").forEach(tr=>{
+    tr.addEventListener("click",()=>{
+      const r=rows[+tr.getAttribute("data-mcp")];
+      mcpOpen[r.tool]=!mcpOpen[r.tool];
+      renderMCP(window.__lastMCP);
+    });
+  });
+}
+
 /* ---- master render ---- */
 function render(data){
   window.__lastData=data;
@@ -795,6 +850,18 @@ function render(data){
   $("#updated").textContent="updated "+(data.generatedAt? relTime(data.generatedAt):"just now");
 }
 
+async function loadMCP(){
+  try{
+    const r=await fetch("/dashboard/api/mcp");
+    if(!r.ok) throw new Error("status "+r.status);
+    const d=await r.json();
+    window.__lastMCP=d;
+    renderMCP(d);
+  }catch(e){
+    $("#panel-mcp").innerHTML=emptyState("MCP view unavailable");
+  }
+}
+
 async function load(){
   try{
     const r=await fetch("/dashboard/api/analytics?range="+encodeURIComponent(state.range));
@@ -803,6 +870,7 @@ async function load(){
   }catch(e){
     $("#updated").textContent="offline";
   }
+  loadMCP();
 }
 
 // keep "updated …" relative label fresh

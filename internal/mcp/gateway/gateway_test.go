@@ -362,3 +362,64 @@ func TestIDToToolBounded(t *testing.T) {
 		t.Fatalf("idToTool not bounded: %d > %d", n, maxIDToToolSize)
 	}
 }
+
+// twoToolListResp builds a tools/list response with read_file and a second tool.
+func twoToolListResp(id, secondName string) []byte {
+	return []byte(`{"jsonrpc":"2.0","id":` + id + `,"result":{"tools":[` +
+		`{"name":"read_file","description":"reads a file","inputSchema":{"type":"object","properties":{"x":{"type":"string"}}}},` +
+		`{"name":"` + secondName + `","inputSchema":{"type":"object"}}` +
+		`]}}`)
+}
+
+func TestInventoryRetention(t *testing.T) {
+	gw := newGW(t, baseCfg(modeMonitor))
+
+	t0 := time.Date(2026, 6, 29, 12, 0, 0, 0, time.UTC)
+	gw.now = func() time.Time { return t0 }
+	gw.OnResponse("s1", 200, nil, toolListResp(`"1"`, "reads a file", ""))
+
+	inv := gw.Inventory()
+	if len(inv) != 1 {
+		t.Fatalf("want 1 inventory item, got %d", len(inv))
+	}
+	rf := inv[0]
+	if rf.Name != "read_file" {
+		t.Fatalf("want read_file, got %q", rf.Name)
+	}
+	if !rf.HasDescription {
+		t.Fatalf("read_file should have a description")
+	}
+	if rf.InputSchemaHash == "" {
+		t.Fatalf("read_file InputSchemaHash empty")
+	}
+	if !rf.FirstSeen.Equal(t0) || !rf.LastSeen.Equal(t0) {
+		t.Fatalf("want FirstSeen==LastSeen==%v, got first=%v last=%v", t0, rf.FirstSeen, rf.LastSeen)
+	}
+
+	// A later list adds a new tool and refreshes LastSeen on read_file while
+	// keeping its FirstSeen.
+	t1 := t0.Add(5 * time.Minute)
+	gw.now = func() time.Time { return t1 }
+	gw.OnResponse("s2", 200, nil, twoToolListResp(`"2"`, "write_file"))
+
+	inv = gw.Inventory()
+	if len(inv) != 2 {
+		t.Fatalf("want 2 inventory items, got %d: %+v", len(inv), inv)
+	}
+	// Sorted by Name: read_file before write_file.
+	if inv[0].Name != "read_file" || inv[1].Name != "write_file" {
+		t.Fatalf("inventory not sorted by name: %q, %q", inv[0].Name, inv[1].Name)
+	}
+	if !inv[0].FirstSeen.Equal(t0) {
+		t.Fatalf("read_file FirstSeen should stay %v, got %v", t0, inv[0].FirstSeen)
+	}
+	if !inv[0].LastSeen.Equal(t1) {
+		t.Fatalf("read_file LastSeen should update to %v, got %v", t1, inv[0].LastSeen)
+	}
+	if inv[1].HasDescription {
+		t.Fatalf("write_file has no description; HasDescription should be false")
+	}
+	if !inv[1].FirstSeen.Equal(t1) || !inv[1].LastSeen.Equal(t1) {
+		t.Fatalf("write_file timestamps want %v, got first=%v last=%v", t1, inv[1].FirstSeen, inv[1].LastSeen)
+	}
+}

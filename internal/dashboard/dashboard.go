@@ -15,6 +15,8 @@ import (
 
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/config"
+	"github.com/ethosagent/warden/internal/mcp"
+	"github.com/ethosagent/warden/internal/mcp/gateway"
 	"github.com/ethosagent/warden/internal/secrets"
 )
 
@@ -28,11 +30,22 @@ type DataSource interface {
 	GetEvents(filter analytics.EventFilter) ([]analytics.Event, error)
 }
 
+// MCPProvider is the read-only view of the MCP gateway the dashboard needs to
+// render the MCP Tools view. The gateway satisfies it directly. It is optional:
+// when nil, the dashboard reports MCP as disabled. Both methods return
+// content-free metadata only — a tool catalog and the observed field schema with
+// sensitivity classes, never any argument or result value.
+type MCPProvider interface {
+	Inventory() []gateway.InventoryItem
+	SchemaSnapshot() map[string]mcp.ToolProfileView
+}
+
 // Server holds the dependencies needed by the dashboard HTTP handlers.
 type Server struct {
 	data    DataSource
 	policy  config.Policy
 	secrets secrets.SecretProvider
+	mcp     MCPProvider // nil when the MCP gateway is disabled
 }
 
 // NewServer constructs a dashboard Server.
@@ -42,6 +55,12 @@ func NewServer(data DataSource, policy config.Policy, sec secrets.SecretProvider
 		policy:  policy,
 		secrets: sec,
 	}
+}
+
+// SetMCPProvider attaches the MCP gateway view to the dashboard. Passing nil (or
+// never calling it) leaves the MCP view in its disabled state.
+func (s *Server) SetMCPProvider(p MCPProvider) {
+	s.mcp = p
 }
 
 // --- JSON response types ---
@@ -113,6 +132,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/dashboard/api/endpoints", s.handleEndpoints)
 	mux.HandleFunc("/dashboard/api/stats", s.handleStats)
 	mux.HandleFunc("/dashboard/api/analytics", s.handleAnalytics)
+	mux.HandleFunc("/dashboard/api/mcp", s.handleMCP)
 	mux.HandleFunc("/dashboard/", s.handleIndex)
 	return mux
 }
@@ -1064,6 +1084,210 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 	resp.Writes = allWrites
 
 	writeJSON(w, resp)
+}
+
+// --- MCP view types ---
+
+// mcpFieldView is one observed field path in a tool's request or response
+// schema: its structural types, how many times it was seen, and the sensitivity
+// classes it has ever carried. Value-free — paths and class tags only.
+type mcpFieldView struct {
+	Types       []string `json:"types"`
+	SeenCount   int      `json:"seenCount"`
+	Sensitivity []string `json:"sensitivity"`
+}
+
+// mcpToolView is one tool's combined row: identity from the inventory, call
+// counts from mcp-tagged events, and the observed request/response schema with
+// per-field sensitivity from the SchemaProfiler.
+type mcpToolView struct {
+	Tool           string                  `json:"tool"`
+	Present        bool                    `json:"present"`
+	HasDescription bool                    `json:"hasDescription"`
+	SchemaHash     string                  `json:"schemaHash"`
+	FirstSeen      string                  `json:"firstSeen"`
+	LastSeen       string                  `json:"lastSeen"`
+	Calls          int                     `json:"calls"`
+	Allowed        int                     `json:"allowed"`
+	Denied         int                     `json:"denied"`
+	Sensitive      []string                `json:"sensitive"`
+	Findings       []string                `json:"findings"`
+	RequestSchema  map[string]mcpFieldView `json:"requestSchema"`
+	ResponseSchema map[string]mcpFieldView `json:"responseSchema"`
+}
+
+// mcpResponse is the payload for /dashboard/api/mcp.
+type mcpResponse struct {
+	Enabled bool          `json:"enabled"`
+	Tools   []mcpToolView `json:"tools"`
+}
+
+// mcpAgg accumulates one tool's call counts and findings from mcp-tagged events.
+type mcpAgg struct {
+	calls    int
+	allowed  int
+	denied   int
+	lastSeen time.Time
+	findings map[string]struct{}
+}
+
+// handleMCP serves GET /dashboard/api/mcp: a per-tool view joining call counts
+// (from mcp-tagged events), the gateway tool inventory, and the observed
+// request/response schema with per-field sensitivity. It is metadata-only —
+// every source is value-free, so nothing here can leak a tool argument or
+// result. When no MCP provider is attached the schema/inventory sources are
+// empty, but event-derived counts (if any) are still reported.
+func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	// Counts + findings from mcp-tagged events, aggregated in-Go by tool.
+	events, err := s.data.GetEvents(analytics.EventFilter{Protocol: "mcp", Limit: 0})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	aggs := make(map[string]*mcpAgg)
+	for _, e := range events {
+		if e.Tool == "" {
+			continue
+		}
+		a, ok := aggs[e.Tool]
+		if !ok {
+			a = &mcpAgg{findings: map[string]struct{}{}}
+			aggs[e.Tool] = a
+		}
+		a.calls++
+		switch e.Decision {
+		case "allow":
+			a.allowed++
+		case "deny":
+			a.denied++
+		}
+		if e.Timestamp.After(a.lastSeen) {
+			a.lastSeen = e.Timestamp
+		}
+		if e.Reason != "" {
+			a.findings[e.Reason] = struct{}{}
+		}
+	}
+
+	// Build the per-tool rows, keyed by tool name across all three sources.
+	rows := make(map[string]*mcpToolView)
+	row := func(tool string) *mcpToolView {
+		v, ok := rows[tool]
+		if !ok {
+			v = &mcpToolView{
+				Tool:           tool,
+				Sensitive:      []string{},
+				Findings:       []string{},
+				RequestSchema:  map[string]mcpFieldView{},
+				ResponseSchema: map[string]mcpFieldView{},
+			}
+			rows[tool] = v
+		}
+		return v
+	}
+
+	// Inventory (present-but-uncalled tools appear here with 0 calls).
+	if s.mcp != nil {
+		for _, it := range s.mcp.Inventory() {
+			v := row(it.Name)
+			v.Present = true
+			v.HasDescription = it.HasDescription
+			v.SchemaHash = it.InputSchemaHash
+			if !it.FirstSeen.IsZero() {
+				v.FirstSeen = it.FirstSeen.Format(time.RFC3339)
+			}
+			if !it.LastSeen.IsZero() {
+				v.LastSeen = it.LastSeen.Format(time.RFC3339)
+			}
+		}
+	}
+
+	// Counts + findings.
+	for tool, a := range aggs {
+		v := row(tool)
+		v.Calls = a.calls
+		v.Allowed = a.allowed
+		v.Denied = a.denied
+		if !a.lastSeen.IsZero() {
+			ls := a.lastSeen.Format(time.RFC3339)
+			// Prefer the most recent of inventory vs event last-seen.
+			if v.LastSeen == "" || ls > v.LastSeen {
+				v.LastSeen = ls
+			}
+		}
+		findings := make([]string, 0, len(a.findings))
+		for f := range a.findings {
+			findings = append(findings, f)
+		}
+		sort.Strings(findings)
+		v.Findings = findings
+	}
+
+	// Observed schema + per-field sensitivity. Keys are "tool\x00direction".
+	if s.mcp != nil {
+		for key, prof := range s.mcp.SchemaSnapshot() {
+			tool, dir, ok := splitProfileKey(key)
+			if !ok {
+				continue
+			}
+			v := row(tool)
+			dst := v.RequestSchema
+			if dir == string(mcp.DirResponse) {
+				dst = v.ResponseSchema
+			}
+			sensitive := map[string]struct{}{}
+			for path, fp := range prof.Fields {
+				dst[path] = mcpFieldView{
+					Types:       fp.Types,
+					SeenCount:   fp.SeenCount,
+					Sensitivity: fp.Sensitivity,
+				}
+				for _, c := range fp.Sensitivity {
+					sensitive[c] = struct{}{}
+				}
+			}
+			// Union the tool-level sensitive classes across request + response.
+			merged := map[string]struct{}{}
+			for _, c := range v.Sensitive {
+				merged[c] = struct{}{}
+			}
+			for c := range sensitive {
+				merged[c] = struct{}{}
+			}
+			classes := make([]string, 0, len(merged))
+			for c := range merged {
+				classes = append(classes, c)
+			}
+			sort.Strings(classes)
+			v.Sensitive = classes
+		}
+	}
+
+	tools := make([]mcpToolView, 0, len(rows))
+	for _, v := range rows {
+		tools = append(tools, *v)
+	}
+	sort.Slice(tools, func(i, j int) bool { return tools[i].Tool < tools[j].Tool })
+
+	writeJSON(w, mcpResponse{
+		Enabled: s.mcp != nil,
+		Tools:   tools,
+	})
+}
+
+// splitProfileKey splits a SchemaSnapshot key of the form "tool\x00direction"
+// into its parts. It returns ok=false for a malformed key.
+func splitProfileKey(key string) (tool, direction string, ok bool) {
+	i := strings.IndexByte(key, '\x00')
+	if i < 0 {
+		return "", "", false
+	}
+	return key[:i], key[i+1:], true
 }
 
 // handleIndex serves the embedded HTML dashboard page.

@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -55,6 +56,18 @@ type ToolInfo struct {
 	Name            string
 	HasDescription  bool
 	InputSchemaHash string // sha256 hex of InputSchema
+}
+
+// InventoryItem is one tool retained across tools/list responses, with the
+// first/last time the gateway observed it. It is content-free metadata: a tool
+// name, a description-present flag, and a schema hash — never a description, an
+// argument, or a result value.
+type InventoryItem struct {
+	Name            string
+	HasDescription  bool
+	InputSchemaHash string
+	FirstSeen       time.Time
+	LastSeen        time.Time
 }
 
 // Verdict is the gateway's full response for one message. Findings is always
@@ -100,6 +113,10 @@ type Gateway struct {
 	mu       sync.Mutex
 	sessions map[string]*session
 
+	// inventory is the gateway-wide, cross-session tool catalog accumulated from
+	// every tools/list response, keyed by tool name. Guarded by g.mu.
+	inventory map[string]*InventoryItem
+
 	now func() time.Time // injectable clock for tests; default time.Now
 }
 
@@ -116,13 +133,14 @@ func New(cfg config.MCPConfig, scanner *scan.Scanner, log *slog.Logger) *Gateway
 		profiler = mcp.NewSchemaProfiler(0)
 	}
 	return &Gateway{
-		cfg:      cfg,
-		scanner:  scanner,
-		policy:   policy,
-		profiler: profiler,
-		log:      log,
-		sessions: make(map[string]*session),
-		now:      time.Now,
+		cfg:       cfg,
+		scanner:   scanner,
+		policy:    policy,
+		profiler:  profiler,
+		log:       log,
+		sessions:  make(map[string]*session),
+		inventory: make(map[string]*InventoryItem),
+		now:       time.Now,
 	}
 }
 
@@ -390,6 +408,7 @@ func (g *Gateway) OnResponse(sessionKey string, status int, hdr http.Header, bod
 			s.schema.CaptureBaseline(tools)
 			s.baselineSet = true
 		}
+		g.recordInventoryLocked(inventory, now)
 		g.mu.Unlock()
 
 		// Declared-schema integrity: baseline-or-drift.
@@ -489,6 +508,44 @@ func (g *Gateway) MaxResponseScanBytes() int {
 		return 1 << 20
 	}
 	return g.cfg.MaxResponseScanBytes
+}
+
+// recordInventoryLocked merges a tools/list inventory into the gateway-wide
+// catalog, stamping FirstSeen on first observation and refreshing LastSeen +
+// the description/schema metadata on every subsequent list. Caller must hold
+// g.mu.
+func (g *Gateway) recordInventoryLocked(items []ToolInfo, now time.Time) {
+	for _, it := range items {
+		cur, ok := g.inventory[it.Name]
+		if !ok {
+			g.inventory[it.Name] = &InventoryItem{
+				Name:            it.Name,
+				HasDescription:  it.HasDescription,
+				InputSchemaHash: it.InputSchemaHash,
+				FirstSeen:       now,
+				LastSeen:        now,
+			}
+			continue
+		}
+		cur.HasDescription = it.HasDescription
+		cur.InputSchemaHash = it.InputSchemaHash
+		cur.LastSeen = now
+	}
+}
+
+// Inventory returns the gateway-wide tool catalog accumulated from every
+// tools/list response, sorted by Name. The returned slice is a deep copy and
+// shares no state with the gateway.
+func (g *Gateway) Inventory() []InventoryItem {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	out := make([]InventoryItem, 0, len(g.inventory))
+	for _, it := range g.inventory {
+		out = append(out, *it)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }
 
 // SchemaSnapshot returns the observed per-tool schema profiles for the

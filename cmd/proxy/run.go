@@ -166,6 +166,9 @@ func runProxy(cmd *cobra.Command, configPath, listenAddr, dbPath, caCert, caKey,
 	adminMux := http.NewServeMux()
 	adminSrv := admin.NewServer(secretProvider)
 	dashSrv := dashboard.NewServer(store, pol, secretProvider)
+	if mcpGW != nil {
+		dashSrv.SetMCPProvider(mcpGW)
+	}
 	adminMux.Handle("/healthz", adminSrv.Handler())
 	adminMux.Handle("/admin/", adminSrv.Handler())
 	adminMux.Handle("/dashboard/", dashSrv.Handler())
