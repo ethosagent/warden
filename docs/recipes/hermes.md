@@ -16,8 +16,12 @@ OUT_DIR=deploy/compose/certs ./scripts/gen-certs.sh
 ## 2. Bring it up
 
 ```sh
-docker compose -f deploy/compose/docker-compose.hermes.yml up --build
+docker compose -f deploy/compose/docker-compose.hermes.yml up
 ```
+
+> Warden is pulled from Docker Hub (`ethosagent/warden`) — no local build. Override
+> the version with `WARDEN_VERSION` (default `0.1.0`):
+> `WARDEN_VERSION=0.2.0 docker compose -f deploy/compose/docker-compose.hermes.yml up`
 
 - **Hermes API (OpenAI-compatible):** http://localhost:8642
 - **Hermes dashboard:** http://localhost:9119 (enabled via `HERMES_DASHBOARD=1`; **login: `admin` / `warden`** — see [Dashboard login](#dashboard-login))

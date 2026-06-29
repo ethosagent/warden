@@ -8,16 +8,15 @@
 #   OUT_DIR=deploy/compose/certs ./scripts/gen-certs.sh
 #
 # Run (from the repo root):
-#   docker compose -f deploy/compose/docker-compose.ethos.yml up --build
+#   docker compose -f deploy/compose/docker-compose.ethos.yml up
 #
 # Ethos web UI: http://localhost:3000   ·   Ethos API: http://localhost:3001   ·   Warden dashboard: http://localhost:9090/dashboard/
 
 services:
   warden:
-    build:
-      context: ../..
-      dockerfile: Dockerfile
-    image: warden-proxy:dev
+    # Pulled from Docker Hub — no local build. Override the tag with WARDEN_VERSION
+    # (default 0.1.0), e.g. `WARDEN_VERSION=0.2.0 docker compose ... up`.
+    image: ethosagent/warden:${WARDEN_VERSION:-0.1.0}
     networks: [ethos-internal, egress]
     ports:
       - "9090:9090"                 # dashboard + /metrics (host-only; NOT reachable by Ethos)
@@ -110,7 +109,7 @@ networks:
     driver: bridge
 
 volumes:
-  # persistent Warden analytics db — survives `up --build` / container recreate.
+  # persistent Warden analytics db — survives `up` / container recreate.
   warden-data:
   # Ethos state (config, market-data cache, sessions) under /home/ethos/.ethos.
   ethos-data:

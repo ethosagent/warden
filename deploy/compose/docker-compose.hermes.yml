@@ -13,17 +13,16 @@
 #   OUT_DIR=deploy/compose/certs ./scripts/gen-certs.sh
 #
 # Run (from the repo root):
-#   docker compose -f deploy/compose/docker-compose.hermes.yml up --build
+#   docker compose -f deploy/compose/docker-compose.hermes.yml up
 #
 # Hermes API: http://localhost:8642   ·   Hermes dashboard: http://localhost:9119 (login: admin / warden)
 #   ·   Warden dashboard: http://localhost:9090/dashboard/
 
 services:
   warden:
-    build:
-      context: ../..
-      dockerfile: Dockerfile
-    image: warden-proxy:dev
+    # Pulled from Docker Hub — no local build. Override the tag with WARDEN_VERSION
+    # (default 0.1.0), e.g. `WARDEN_VERSION=0.2.0 docker compose ... up`.
+    image: ethosagent/warden:${WARDEN_VERSION:-0.1.0}
     networks: [hermes-internal, egress]
     ports:
       - "9090:9090"                 # dashboard + /metrics (host-only; NOT reachable by Hermes)
@@ -115,7 +114,7 @@ networks:
     driver: bridge
 
 volumes:
-  # persistent Warden analytics db — survives `up --build` / container recreate.
+  # persistent Warden analytics db — survives `up` / container recreate.
   warden-data:
   # Hermes config / .env / sessions / memories / skills / logs (all under /opt/data).
   hermes-data:

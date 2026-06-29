@@ -15,8 +15,12 @@ OUT_DIR=deploy/compose/certs ./scripts/gen-certs.sh
 ## 2. Bring it up
 
 ```sh
-docker compose -f deploy/compose/docker-compose.zeroclaw.yml up --build
+docker compose -f deploy/compose/docker-compose.zeroclaw.yml up
 ```
+
+> Warden is pulled from Docker Hub (`ethosagent/warden`) — no local build. Override
+> the version with `WARDEN_VERSION` (default `0.1.0`):
+> `WARDEN_VERSION=0.2.0 docker compose -f deploy/compose/docker-compose.zeroclaw.yml up`
 
 - **ZeroClaw gateway:** http://localhost:42617
 - **Warden dashboard:** http://localhost:9090/dashboard/ (+ `/metrics`)

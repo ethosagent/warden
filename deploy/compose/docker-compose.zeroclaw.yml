@@ -11,16 +11,15 @@
 #   OUT_DIR=deploy/compose/certs ./scripts/gen-certs.sh
 #
 # Run (from the repo root):
-#   docker compose -f deploy/compose/docker-compose.zeroclaw.yml up --build
+#   docker compose -f deploy/compose/docker-compose.zeroclaw.yml up
 #
 # ZeroClaw API: http://localhost:42617   ·   Warden dashboard: http://localhost:9090/dashboard/
 
 services:
   warden:
-    build:
-      context: ../..
-      dockerfile: Dockerfile
-    image: warden-proxy:dev
+    # Pulled from Docker Hub — no local build. Override the tag with WARDEN_VERSION
+    # (default 0.1.0), e.g. `WARDEN_VERSION=0.2.0 docker compose ... up`.
+    image: ethosagent/warden:${WARDEN_VERSION:-0.1.0}
     networks: [zeroclaw-internal, egress]
     ports:
       - "9090:9090"                 # dashboard + /metrics (host-only; NOT reachable by ZeroClaw)
@@ -92,7 +91,7 @@ networks:
     driver: bridge
 
 volumes:
-  # persistent Warden analytics db — survives `up --build` / container recreate.
+  # persistent Warden analytics db — survives `up` / container recreate.
   warden-data:
   # ZeroClaw workspace + config.
   zeroclaw-data:
