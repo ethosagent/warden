@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -826,5 +827,134 @@ func TestDeepCopy_MCPIndependence(t *testing.T) {
 	}
 	if _, exists := orig.MCP.Tools.Constraints["new_tool"]; exists {
 		t.Errorf("orig constraints gained key from copy: %v", orig.MCP.Tools.Constraints)
+	}
+}
+
+func TestNewLocalYAMLProvider_MCPServersParsed(t *testing.T) {
+	y := `
+policy:
+  allowlist:
+    - domain: a.com
+mcp:
+  enabled: true
+  servers:
+    - command: /usr/local/bin/mcp-filesystem
+      sha256: "` + strings.Repeat("ab", 32) + `"
+      ed25519Sig: "` + strings.Repeat("cd", 64) + `"
+      ed25519Key: "` + strings.Repeat("ef", 32) + `"
+    - command: /usr/local/bin/mcp-git
+`
+	p, err := NewLocalYAMLProvider(writeTemp(t, y))
+	if err != nil {
+		t.Fatalf("parse servers config: %v", err)
+	}
+	pol, _ := p.GetPolicy()
+	srvs := pol.MCP.Servers
+	if len(srvs) != 2 {
+		t.Fatalf("servers len = %d, want 2", len(srvs))
+	}
+	if srvs[0].Command != "/usr/local/bin/mcp-filesystem" {
+		t.Errorf("servers[0].command = %q", srvs[0].Command)
+	}
+	if srvs[0].SHA256 != strings.Repeat("ab", 32) {
+		t.Errorf("servers[0].sha256 = %q", srvs[0].SHA256)
+	}
+	if srvs[0].Ed25519Sig != strings.Repeat("cd", 64) {
+		t.Errorf("servers[0].ed25519Sig = %q", srvs[0].Ed25519Sig)
+	}
+	if srvs[0].Ed25519Key != strings.Repeat("ef", 32) {
+		t.Errorf("servers[0].ed25519Key = %q", srvs[0].Ed25519Key)
+	}
+	if srvs[1].Command != "/usr/local/bin/mcp-git" || srvs[1].SHA256 != "" || srvs[1].Ed25519Sig != "" {
+		t.Errorf("servers[1] = %+v", srvs[1])
+	}
+}
+
+func TestValidate_MCPServersErrors(t *testing.T) {
+	base := func(block string) string {
+		return "policy:\n  allowlist:\n    - domain: a.com\n" + block
+	}
+	cases := map[string]string{
+		"empty command": base(`mcp:
+  enabled: true
+  servers:
+    - command: "  "
+`),
+		"bad sha256": base(`mcp:
+  enabled: true
+  servers:
+    - command: /bin/srv
+      sha256: "abc"
+`),
+		"bad sig hex len": base(`mcp:
+  enabled: true
+  servers:
+    - command: /bin/srv
+      ed25519Sig: "` + strings.Repeat("cd", 10) + `"
+      ed25519Key: "` + strings.Repeat("ef", 32) + `"
+`),
+		"bad key hex len": base(`mcp:
+  enabled: true
+  servers:
+    - command: /bin/srv
+      ed25519Sig: "` + strings.Repeat("cd", 64) + `"
+      ed25519Key: "abcd"
+`),
+		"sig without key": base(`mcp:
+  enabled: true
+  servers:
+    - command: /bin/srv
+      ed25519Sig: "` + strings.Repeat("cd", 64) + `"
+`),
+		"key without sig": base(`mcp:
+  enabled: true
+  servers:
+    - command: /bin/srv
+      ed25519Key: "` + strings.Repeat("ef", 32) + `"
+`),
+	}
+	for name, y := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := NewLocalYAMLProvider(writeTemp(t, y)); err == nil {
+				t.Fatalf("expected validation error for %s", name)
+			}
+		})
+	}
+}
+
+func TestValidate_MCPServersDisabledSkipsValidation(t *testing.T) {
+	// Bad server hashes are tolerated when mcp is disabled (validation is
+	// enabled-only).
+	const y = `
+policy:
+  allowlist:
+    - domain: a.com
+mcp:
+  enabled: false
+  servers:
+    - command: "  "
+      sha256: "abc"
+`
+	if _, err := NewLocalYAMLProvider(writeTemp(t, y)); err != nil {
+		t.Fatalf("disabled mcp should skip server validation: %v", err)
+	}
+}
+
+func TestDeepCopy_MCPServersIndependence(t *testing.T) {
+	orig := Policy{
+		Allowlist: []AllowlistEntry{{Domain: "a.com"}},
+		MCP: MCPConfig{
+			Enabled: true,
+			Servers: []MCPServerConfig{{Command: "/bin/srv", SHA256: "deadbeef"}},
+		},
+	}
+	cp := orig.DeepCopy()
+	cp.MCP.Servers[0].Command = "MUTATED"
+	cp.MCP.Servers = append(cp.MCP.Servers, MCPServerConfig{Command: "extra"})
+	if orig.MCP.Servers[0].Command != "/bin/srv" {
+		t.Errorf("orig servers mutated: %v", orig.MCP.Servers)
+	}
+	if len(orig.MCP.Servers) != 1 {
+		t.Errorf("orig servers gained entry from copy: %v", orig.MCP.Servers)
 	}
 }

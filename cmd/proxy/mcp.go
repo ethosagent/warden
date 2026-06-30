@@ -90,10 +90,10 @@ func runMCP(cmd *cobra.Command, args []string) error {
 	if lookErr != nil {
 		return fmt.Errorf("resolve server command %q: %w", serverCmd, lookErr)
 	}
-	if verifySHA != "" {
-		if verr := stdio.VerifyBinary(resolved, verifySHA); verr != nil {
-			return verr
-		}
+	if verr := verifyServerBinary(resolved, serverCmd, mcpCfg.Servers, verifySHA); verr != nil {
+		return verr
+	}
+	if verifySHA != "" || matchServer(serverCmd, mcpCfg.Servers) != nil {
 		logger.Info("server binary integrity verified", "path", resolved)
 	}
 
@@ -133,6 +133,43 @@ func runMCP(cmd *cobra.Command, args []string) error {
 	}
 	if waitErr != nil && ctx.Err() == nil {
 		return fmt.Errorf("mcp server exited: %w", waitErr)
+	}
+	return nil
+}
+
+// matchServer returns the first servers entry whose Command equals the raw
+// command the operator passed after `--`, or nil if none matches.
+func matchServer(serverCmd string, servers []config.MCPServerConfig) *config.MCPServerConfig {
+	for i := range servers {
+		if servers[i].Command == serverCmd {
+			return &servers[i]
+		}
+	}
+	return nil
+}
+
+// verifyServerBinary enforces server-binary integrity before launch. It always
+// applies the --verify-sha256 flag when set (existing behavior), then, if a
+// servers entry matches the launched command, additionally verifies that
+// entry's sha256 and/or detached ed25519 signature against the resolved binary.
+// When both the flag and a matching config supply hashes, both must pass. Any
+// failure returns a non-nil error and the caller aborts the launch. An unmatched
+// command with no flag is a no-op (nil).
+func verifyServerBinary(resolvedPath, serverCmd string, servers []config.MCPServerConfig, flagSHA256 string) error {
+	if flagSHA256 != "" {
+		if err := stdio.VerifyBinary(resolvedPath, flagSHA256); err != nil {
+			return err
+		}
+	}
+	srv := matchServer(serverCmd, servers)
+	if srv == nil {
+		return nil
+	}
+	if err := stdio.VerifyBinary(resolvedPath, srv.SHA256); err != nil {
+		return err
+	}
+	if err := stdio.VerifyEd25519(resolvedPath, srv.Ed25519Sig, srv.Ed25519Key); err != nil {
+		return err
 	}
 	return nil
 }

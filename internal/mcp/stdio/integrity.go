@@ -6,6 +6,7 @@
 package stdio
 
 import (
+	"crypto/ed25519"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
@@ -44,6 +45,47 @@ func VerifyBinary(path, wantSHA256Hex string) error {
 
 	if subtle.ConstantTimeCompare(got, wantBytes) != 1 {
 		return fmt.Errorf("verify %s: sha256 mismatch (want %s, got %s)", path, strings.ToLower(want), hex.EncodeToString(got))
+	}
+	return nil
+}
+
+// VerifyEd25519 verifies a detached ed25519 signature (hex) over the file's
+// bytes using the hex public key. The signer signs the raw binary bytes of the
+// file (no hashing or framing) — `ed25519.Sign(priv, fileBytes)`. Both sigHex
+// and pubKeyHex are case-insensitive hex. An empty signature AND key skips the
+// check (returns nil) so the caller can pass them through unconditionally. It
+// returns a clear error when either is malformed hex, when the key is not the
+// 32-byte ed25519 public-key length, when the file cannot be read, or when the
+// signature does not verify against the file bytes.
+func VerifyEd25519(path, sigHex, pubKeyHex string) error {
+	sigStr := strings.TrimSpace(sigHex)
+	keyStr := strings.TrimSpace(pubKeyHex)
+	if sigStr == "" && keyStr == "" {
+		return nil
+	}
+	if sigStr == "" || keyStr == "" {
+		return fmt.Errorf("verify %s: ed25519 signature and public key must both be set", path)
+	}
+
+	sig, err := hex.DecodeString(strings.ToLower(sigStr))
+	if err != nil {
+		return fmt.Errorf("verify %s: invalid ed25519 signature hex: %w", path, err)
+	}
+	pubBytes, err := hex.DecodeString(strings.ToLower(keyStr))
+	if err != nil {
+		return fmt.Errorf("verify %s: invalid ed25519 public key hex: %w", path, err)
+	}
+	if len(pubBytes) != ed25519.PublicKeySize {
+		return fmt.Errorf("verify %s: ed25519 public key must be %d bytes, got %d", path, ed25519.PublicKeySize, len(pubBytes))
+	}
+
+	fileBytes, err := os.ReadFile(path) //nolint:gosec // path is an operator-provided server binary
+	if err != nil {
+		return fmt.Errorf("verify %s: %w", path, err)
+	}
+
+	if !ed25519.Verify(ed25519.PublicKey(pubBytes), fileBytes, sig) {
+		return fmt.Errorf("verify %s: ed25519 signature mismatch", path)
 	}
 	return nil
 }

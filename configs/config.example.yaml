@@ -134,6 +134,14 @@ mcp:
     enabled: true                 # per-session call-chain analysis
     windowSize: 50                # sliding-window size (must be > 0)
     patterns: [read_then_send, permission_probing, rapid_repeat]
+  servers: []                     # optional per-server-binary integrity, checked by
+                                  # `warden mcp` before launching a matched command
+                                  # (in addition to the --verify-sha256 flag). Example:
+                                  #   - command: /usr/local/bin/mcp-filesystem
+                                  #     sha256: "<64 hex>"        # sha256 of the binary
+                                  #     ed25519Sig: "<128 hex>"   # detached signature over the binary bytes
+                                  #     ed25519Key: "<64 hex>"    # ed25519 public key
+                                  # ed25519Sig and ed25519Key must be set together.
 
 # Per-destination request-authentication transforms. The agent sends a request
 # with a placeholder or no auth at all; Warden injects real, request-scoped

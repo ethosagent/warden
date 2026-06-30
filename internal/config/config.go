@@ -183,6 +183,28 @@ type MCPConfig struct {
 	Scan MCPScanConfig
 	// Chain configures the per-session call-chain analyzer.
 	Chain MCPChainConfig
+	// Servers lists optional per-server-binary integrity checks consulted by
+	// `warden mcp` before launching a configured server command.
+	Servers []MCPServerConfig
+}
+
+// MCPServerConfig pins the integrity of one MCP server binary. Command is
+// matched against the server command `warden mcp -- <command>` launches; when it
+// matches, the configured hash and/or detached ed25519 signature must verify
+// against the resolved binary before launch. Hashes/signatures are optional and
+// additive — both, either, or neither may be set.
+type MCPServerConfig struct {
+	// Command is the server command this entry pins (matched against the raw
+	// command the operator passes after `--`).
+	Command string
+	// SHA256 is the optional hex sha256 of the server binary (64 hex chars).
+	SHA256 string
+	// Ed25519Sig is the optional hex detached ed25519 signature over the binary
+	// bytes (128 hex chars). Must be set together with Ed25519Key.
+	Ed25519Sig string
+	// Ed25519Key is the optional hex ed25519 public key (64 hex chars). Must be
+	// set together with Ed25519Sig.
+	Ed25519Key string
 }
 
 // MCPToolsConfig is the Phase-1 tool policy: name allow/deny plus per-tool rate
@@ -371,6 +393,7 @@ func (p Policy) DeepCopy() Policy {
 		cp.MCP.Tools.Constraints = cs
 	}
 	cp.MCP.Chain.Patterns = append([]string(nil), p.MCP.Chain.Patterns...)
+	cp.MCP.Servers = append([]MCPServerConfig(nil), p.MCP.Servers...)
 	cp.Auth = append([]AuthEntry(nil), p.Auth...)
 	for i := range cp.Auth {
 		cp.Auth[i].Scopes = append([]string(nil), p.Auth[i].Scopes...)
@@ -489,14 +512,23 @@ type rawAudit struct {
 // KnownFields(true) is strict, so this MUST be registered or configs with the
 // block fail to parse.
 type rawMCP struct {
-	Enabled              bool          `yaml:"enabled"`
-	Mode                 string        `yaml:"mode"`
-	FailClosedOnError    bool          `yaml:"failClosedOnError"`
-	MaxResponseScanBytes *int          `yaml:"maxResponseScanBytes"`
-	Tools                *rawMCPTools  `yaml:"tools"`
-	Schema               *rawMCPSchema `yaml:"schema"`
-	Scan                 *rawMCPScan   `yaml:"scan"`
-	Chain                *rawMCPChain  `yaml:"chain"`
+	Enabled              bool           `yaml:"enabled"`
+	Mode                 string         `yaml:"mode"`
+	FailClosedOnError    bool           `yaml:"failClosedOnError"`
+	MaxResponseScanBytes *int           `yaml:"maxResponseScanBytes"`
+	Tools                *rawMCPTools   `yaml:"tools"`
+	Schema               *rawMCPSchema  `yaml:"schema"`
+	Scan                 *rawMCPScan    `yaml:"scan"`
+	Chain                *rawMCPChain   `yaml:"chain"`
+	Servers              []rawMCPServer `yaml:"servers"`
+}
+
+// rawMCPServer mirrors one on-disk `mcp.servers:` list item.
+type rawMCPServer struct {
+	Command    string `yaml:"command"`
+	SHA256     string `yaml:"sha256"`
+	Ed25519Sig string `yaml:"ed25519Sig"`
+	Ed25519Key string `yaml:"ed25519Key"`
 }
 
 type rawMCPTools struct {
@@ -954,7 +986,33 @@ func parseMCP(r *rawMCP) MCPConfig {
 			mc.Chain.Patterns = append([]string(nil), r.Chain.Patterns...)
 		}
 	}
+	if len(r.Servers) > 0 {
+		mc.Servers = make([]MCPServerConfig, 0, len(r.Servers))
+		for _, s := range r.Servers {
+			mc.Servers = append(mc.Servers, MCPServerConfig{
+				Command:    strings.TrimSpace(s.Command),
+				SHA256:     strings.TrimSpace(s.SHA256),
+				Ed25519Sig: strings.TrimSpace(s.Ed25519Sig),
+				Ed25519Key: strings.TrimSpace(s.Ed25519Key),
+			})
+		}
+	}
 	return mc
+}
+
+// isHex reports whether s is exactly n lowercase/uppercase hex characters.
+func isHex(s string, n int) bool {
+	if len(s) != n {
+		return false
+	}
+	for _, c := range s {
+		switch {
+		case c >= '0' && c <= '9', c >= 'a' && c <= 'f', c >= 'A' && c <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // parseDurationField parses a Go duration string into *dst when non-empty.
@@ -1318,6 +1376,23 @@ func validateMCP(m MCPConfig) error {
 					return fmt.Errorf("config: mcp.tools.constraints[%q].fields[%q].match has invalid regex: %v", tool, field, err)
 				}
 			}
+		}
+	}
+	for i, s := range m.Servers {
+		if strings.TrimSpace(s.Command) == "" {
+			return fmt.Errorf("config: mcp.servers[%d]: command is required", i)
+		}
+		if s.SHA256 != "" && !isHex(s.SHA256, 64) {
+			return fmt.Errorf("config: mcp.servers[%d]: sha256 must be 64 hex chars", i)
+		}
+		if (s.Ed25519Sig == "") != (s.Ed25519Key == "") {
+			return fmt.Errorf("config: mcp.servers[%d]: ed25519Sig and ed25519Key must be set together", i)
+		}
+		if s.Ed25519Sig != "" && !isHex(s.Ed25519Sig, 128) {
+			return fmt.Errorf("config: mcp.servers[%d]: ed25519Sig must be 128 hex chars", i)
+		}
+		if s.Ed25519Key != "" && !isHex(s.Ed25519Key, 64) {
+			return fmt.Errorf("config: mcp.servers[%d]: ed25519Key must be 64 hex chars", i)
 		}
 	}
 	return nil
