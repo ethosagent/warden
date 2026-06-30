@@ -262,7 +262,7 @@ func TestSettingsWire_SecretFree(t *testing.T) {
 // that holds a credential value trips this test.
 func assertNoSecretValueFields(t *testing.T, typ reflect.Type, seen map[reflect.Type]bool) {
 	t.Helper()
-	for typ.Kind() == reflect.Ptr || typ.Kind() == reflect.Slice || typ.Kind() == reflect.Map {
+	for typ.Kind() == reflect.Pointer || typ.Kind() == reflect.Slice || typ.Kind() == reflect.Map {
 		typ = typ.Elem()
 	}
 	if typ.Kind() != reflect.Struct || seen[typ] {

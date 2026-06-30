@@ -148,7 +148,7 @@ func SettingsWireFromPolicy(p Policy) *SettingsWire {
 	if len(p.Agents) > 0 {
 		s.Agents = make([]AgentSettings, 0, len(p.Agents))
 		for _, a := range p.Agents {
-			s.Agents = append(s.Agents, AgentSettings{ID: a.ID, Policy: a.Policy})
+			s.Agents = append(s.Agents, AgentSettings(a))
 		}
 		any = true
 	}
@@ -309,7 +309,7 @@ func AgentsFromSettings(in []AgentSettings) []AgentPolicy {
 	}
 	out := make([]AgentPolicy, 0, len(in))
 	for _, a := range in {
-		out = append(out, AgentPolicy{ID: a.ID, Policy: a.Policy})
+		out = append(out, AgentPolicy(a))
 	}
 	return out
 }
