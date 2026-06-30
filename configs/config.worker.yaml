@@ -25,6 +25,11 @@ logging:
 mcp:
   enabled: true
   mode: monitor
+  scan:
+    evidence: true   # keep a MASKED sample (•••• + last-4 + length, never the raw value) per
+                     # finding, so the dashboard can show what tripped a credential_leak/pii flag.
+                     # LOCAL config — the masked sample never leaves the worker except inside the
+                     # value-free MCP schema it already forwards to the control plane.
 
 # Long-poll allow/deny policy from the control plane; trust its (privately-signed)
 # cert via the same proxy CA this worker already uses.

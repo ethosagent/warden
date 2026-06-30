@@ -1423,9 +1423,20 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 // schema: its structural types, how many times it was seen, and the sensitivity
 // classes it has ever carried. Value-free — paths and class tags only.
 type mcpFieldView struct {
-	Types       []string `json:"types"`
-	SeenCount   int      `json:"seenCount"`
-	Sensitivity []string `json:"sensitivity"`
+	Types       []string       `json:"types"`
+	SeenCount   int            `json:"seenCount"`
+	Sensitivity []string       `json:"sensitivity"`
+	Detectors   []detectorView `json:"detectors,omitempty"`
+}
+
+// detectorView is one specific detector that fired at a field path: the pattern
+// (e.g. "github_token"), its category + severity, and an optional MASKED evidence
+// sample (never the raw value).
+type detectorView struct {
+	Category string `json:"category"`
+	Pattern  string `json:"pattern"`
+	Severity string `json:"severity"`
+	Evidence string `json:"evidence,omitempty"`
 }
 
 // mcpToolView is one tool's combined row: identity from the inventory, call
@@ -1607,10 +1618,17 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 		}
 		sensitive := map[string]struct{}{}
 		for path, fp := range prof.Fields {
+			var dets []detectorView
+			for _, d := range fp.Detectors {
+				dets = append(dets, detectorView{
+					Category: d.Category, Pattern: d.Pattern, Severity: d.Severity, Evidence: d.Evidence,
+				})
+			}
 			dst[path] = mcpFieldView{
 				Types:       fp.Types,
 				SeenCount:   fp.SeenCount,
 				Sensitivity: fp.Sensitivity,
+				Detectors:   dets,
 			}
 			for _, c := range fp.Sensitivity {
 				sensitive[c] = struct{}{}

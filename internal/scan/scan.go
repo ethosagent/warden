@@ -4,15 +4,18 @@ import (
 	"encoding/base64"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
 // Detection represents a single finding from scanning response content.
-// It intentionally omits matched content to avoid leaking sensitive data.
+// It omits matched content by default; Evidence is populated (with a MASKED
+// sample — never the raw value) only when the Scanner is built WithEvidence.
 type Detection struct {
 	Category string // "injection", "credential_leak", or "pii"
 	Pattern  string // pattern name
 	Severity string // "high", "medium", "low"
+	Evidence string // masked sample (opt-in): "•••• + last-4 (len N)" — never raw
 }
 
 const maxScanSize = 1 << 20 // 1 MB
@@ -23,6 +26,7 @@ type Scanner struct {
 	injectionPatterns  []compiledPattern
 	credentialPatterns []compiledPattern
 	piiPatterns        []compiledPattern
+	evidence           bool // capture a MASKED evidence sample per detection
 }
 
 // compiledPattern is a single detection rule. An optional validator may further
@@ -40,6 +44,7 @@ type compiledPattern struct {
 // options holds Scanner construction settings configured via Option values.
 type options struct {
 	phonePII bool
+	evidence bool
 }
 
 // Option configures a Scanner at construction time.
@@ -51,6 +56,13 @@ func WithPhonePII(enabled bool) Option {
 	return func(o *options) { o.phonePII = enabled }
 }
 
+// WithEvidence enables capturing a MASKED sample per detection (last-4 + length;
+// never the raw value), so an operator can judge a real leak from a false
+// positive. Off by default.
+func WithEvidence(enabled bool) Option {
+	return func(o *options) { o.evidence = enabled }
+}
+
 // NewScanner compiles all detection patterns and returns a ready-to-use Scanner.
 // By default it runs injection, credential, and PII (email/card/SSN) detectors;
 // the noisy phone detector is opt-in via WithPhonePII(true).
@@ -60,7 +72,7 @@ func NewScanner(opts ...Option) *Scanner {
 		opt(&cfg)
 	}
 
-	s := &Scanner{}
+	s := &Scanner{evidence: cfg.evidence}
 
 	// Injection patterns
 	s.injectionPatterns = []compiledPattern{
@@ -249,14 +261,15 @@ func (s *Scanner) ScanResponse(body []byte) []Detection {
 
 	scanLayer := func(data []byte) {
 		for _, p := range allPatterns {
-			if !matches(p, data) {
+			m, ok := firstMatch(p, data)
+			if !ok {
 				continue
 			}
-			addDetection(Detection{
-				Category: p.category,
-				Pattern:  p.name,
-				Severity: p.severity,
-			})
+			det := Detection{Category: p.category, Pattern: p.name, Severity: p.severity}
+			if s.evidence {
+				det.Evidence = maskMatch(m)
+			}
+			addDetection(det)
 		}
 	}
 
@@ -276,19 +289,40 @@ func (s *Scanner) ScanResponse(body []byte) []Detection {
 	return detections
 }
 
-// matches reports whether pattern p fires against data. When p has a validator,
-// at least one regex match must additionally satisfy it (e.g. Luhn, SSN
-// structure); otherwise a regex match alone suffices.
-func matches(p compiledPattern, data []byte) bool {
+// firstMatch returns the first matching substring for p — the first that also
+// satisfies p.validate when present (Luhn, SSN structure) — and whether one was
+// found. A regex match alone suffices when p has no validator.
+func firstMatch(p compiledPattern, data []byte) (string, bool) {
 	if p.validate == nil {
-		return p.re.Match(data)
+		m := p.re.Find(data)
+		if m == nil {
+			return "", false
+		}
+		return string(m), true
 	}
 	for _, m := range p.re.FindAll(data, -1) {
 		if p.validate(string(m)) {
-			return true
+			return string(m), true
 		}
 	}
-	return false
+	return "", false
+}
+
+// maskMatch returns a value-free, MASKED form of a matched secret/PII string:
+// the last 4 characters plus the length, everything else replaced with •. Short
+// matches are fully masked. The raw value is never revealed — this mirrors the
+// secret-by-reference model (last-4 + length) applied to scan findings.
+func maskMatch(s string) string {
+	r := []rune(s)
+	n := len(r)
+	if n == 0 {
+		return ""
+	}
+	const reveal = 4
+	if n <= reveal*2 {
+		return strings.Repeat("•", min(n, 8)) + " (len " + strconv.Itoa(n) + ")"
+	}
+	return strings.Repeat("•", 8) + string(r[n-reveal:]) + " (len " + strconv.Itoa(n) + ")"
 }
 
 // base64BlockRe matches contiguous runs of 64+ base64 characters.

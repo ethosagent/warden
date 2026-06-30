@@ -1461,10 +1461,19 @@ function schemaBlock(title,schema){
   const paths=Object.keys(schema||{}).sort();
   if(!paths.length) return `<div class="mcp-schema"><b>${esc(title)}</b>: <span class="typ">no observed fields</span></div>`;
   let h=`<div class="mcp-schema"><b>${esc(title)}</b><ul style="margin:2px 0 0 14px;padding:0">`;
+  const sevCls=s=>s==='high'?'t5':(s==='medium'?'t4':'t3'); // high=red, medium=amber, low=grey
   paths.forEach(p=>{
     const f=schema[p]||{};
     const types=(f.types||[]).join(", ");
-    const sens=(f.sensitivity||[]).map(c=>`<span class="pill sens">${esc(c)}</span>`).join(" ");
+    const dets=f.detectors||[];
+    // Prefer the specific detectors (pattern + severity + masked evidence) over
+    // the coarse category tags so HIGH credential leaks are obvious + actionable.
+    const sens=dets.length
+      ? dets.map(d=>{
+          const ev=d.evidence?` <span class="mono dim" title="masked sample — no raw value">${esc(d.evidence)}</span>`:"";
+          return `<span class="pill ${sevCls(d.severity)}" title="${esc(d.category)}">${esc(d.pattern)} · ${esc(String(d.severity||"").toUpperCase())}</span>${ev}`;
+        }).join(" ")
+      : (f.sensitivity||[]).map(c=>`<span class="pill sens">${esc(c)}</span>`).join(" ");
     h+=`<li><span class="pth">${esc(p)}</span> <span class="typ">: ${esc(types)} ·${f.seenCount||0}×</span> ${sens}</li>`;
   });
   return h+"</ul></div>";
@@ -1486,7 +1495,7 @@ function renderMCP(data){
       <td class="num">${fmtNum(r.denied||0)}</td>
       <td>${sens}</td><td>${find}</td></tr>`;
     if(mcpOpen[r.tool]){
-      h+=`<tr class="mcp-detail"><td colspan="7">${schemaBlock("Request",r.requestSchema)}${schemaBlock("Response",r.responseSchema)}</td></tr>`;
+      h+=`<tr class="mcp-detail"><td colspan="7">${schemaBlock("Request",r.requestSchema)}${schemaBlock("Response",r.responseSchema)}${remediationBlock(r)}</td></tr>`;
     }
   });
   el.innerHTML=h+"</tbody></table>";
@@ -1497,6 +1506,54 @@ function renderMCP(data){
       renderMCP(window.__lastMCP);
     });
   });
+  // One-click remediation (control plane only). Stop propagation so the button
+  // does not toggle the row it lives under.
+  el.querySelectorAll("[data-deny-tool]").forEach(b=>{
+    b.addEventListener("click",ev=>{ ev.stopPropagation(); denyMCPTool(b.getAttribute("data-deny-tool")); });
+  });
+}
+
+// remediationBlock renders debug guidance + a one-click "deny tool" action for a
+// tool that has any flagged field (findings or sensitive detectors). The deny
+// action only appears when settings are editable (i.e. on the control plane).
+function remediationBlock(r){
+  const flagged=(r.findings&&r.findings.length)||(r.sensitive&&r.sensitive.length);
+  if(!flagged) return "";
+  const tool=esc(r.tool||"");
+  const guide=`<div class="mcp-remediate dim">
+    <b>Debug this finding:</b> expand a field above to see the specific detector + severity
+    (and a masked <code>•••• + last-4</code> sample when <code>mcp.scan.evidence</code> is enabled on the worker).
+    A real leak → rotate the credential at its source and deny the tool; a false positive → no action.</div>`;
+  if(!settingsEditable) return guide;
+  return guide+`<button class="pbtn" type="button" data-deny-tool="${tool}" style="margin-top:8px">Deny "${tool}" fleet-wide</button>`;
+}
+
+// denyMCPTool adds a tool to mcp.tools.deny and saves via the SAME validated
+// settings writer the Config view uses, so every worker blocks it on the next
+// long-poll. Reads settings fresh (does not rely on a loaded Config view) and is
+// a no-op when the dashboard is not editable (worker dashboards).
+async function denyMCPTool(name){
+  if(!name) return;
+  if(!confirm(`Deny MCP tool "${name}" across the whole fleet?\n\nWorkers will block every call to it on their next poll. You can remove it later in Config → MCP.`)) return;
+  try{
+    const gr=await fetch("/dashboard/api/settings");
+    if(!gr.ok) throw new Error("settings unavailable");
+    const gd=await gr.json();
+    if(!(gd&&gd.editable)){ alert("Tool deny is managed by the control plane — open the control-plane dashboard to change it."); return; }
+    const cur=(gd&&gd.settings)||{};
+    const mcp=Object.assign({}, cur.mcp||{});
+    const tools=Object.assign({}, mcp.tools||{});
+    const deny=(tools.deny||[]).slice();
+    if(deny.includes(name)){ alert(`"${name}" is already denied.`); return; }
+    deny.push(name); tools.deny=deny; mcp.tools=tools;
+    const body=Object.assign({}, cur, {mcp});
+    const pr=await fetch("/dashboard/api/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    if(!pr.ok){ const e=await pr.json().catch(()=>({error:"status "+pr.status})); throw new Error(e.error||("status "+pr.status)); }
+    const pd=await pr.json();
+    lastSettings=(pd&&pd.settings)||body; settingsEditable=!!(pd&&pd.editable);
+    if(typeof loadMCP==="function") loadMCP();
+    alert(`Denied "${name}". Workers will block it on the next poll.`);
+  }catch(err){ alert("Failed to deny tool: "+(err&&err.message||err)); }
 }
 
 /* ---- master render ---- */

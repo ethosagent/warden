@@ -279,6 +279,10 @@ type MCPScanConfig struct {
 	ProfileSchema bool
 	// PII configures the minimal PII detectors.
 	PII MCPPIIConfig
+	// Evidence captures a MASKED sample (last-4 + length, never the raw value)
+	// per sensitivity detection, so an operator can judge a real leak from a
+	// false positive. Default false. This is LOCAL config (not distributed).
+	Evidence bool
 }
 
 // MCPPIIConfig opts in to the noisier PII detectors. email/card/SSN are always
@@ -565,6 +569,7 @@ type rawMCPScan struct {
 	ToolResults   *bool          `yaml:"toolResults"`
 	ProfileSchema *bool          `yaml:"profileSchema"`
 	PII           *rawMCPScanPII `yaml:"pii"`
+	Evidence      bool           `yaml:"evidence"`
 }
 
 type rawMCPScanPII struct {
@@ -995,6 +1000,7 @@ func parseMCP(r *rawMCP) MCPConfig {
 		if r.Scan.PII != nil {
 			mc.Scan.PII.Phone = r.Scan.PII.Phone
 		}
+		mc.Scan.Evidence = r.Scan.Evidence
 	}
 	if r.Chain != nil {
 		if r.Chain.Enabled != nil {

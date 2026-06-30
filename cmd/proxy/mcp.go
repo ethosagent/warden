@@ -81,7 +81,7 @@ func runMCP(cmd *cobra.Command, args []string) error {
 	// Logger to STDERR — stdout is the JSON-RPC data channel and must stay clean.
 	logger := slog.New(slog.NewTextHandler(cmd.ErrOrStderr(), &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	scanner := scan.NewScanner(scan.WithPhonePII(mcpCfg.Scan.PII.Phone))
+	scanner := scan.NewScanner(scan.WithPhonePII(mcpCfg.Scan.PII.Phone), scan.WithEvidence(mcpCfg.Scan.Evidence))
 	gw := gateway.New(mcpCfg, scanner, logger)
 
 	// Verify the server binary before launch, if requested. Resolve the command

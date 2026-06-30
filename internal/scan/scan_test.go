@@ -7,6 +7,38 @@ import (
 	"testing"
 )
 
+// TestEvidenceMaskedOptIn verifies WithEvidence yields a MASKED sample (last-4 +
+// length, never the raw value), and that evidence is empty without the opt-in.
+func TestEvidenceMaskedOptIn(t *testing.T) {
+	raw := []byte(`{"text":"token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab here"}`)
+
+	for _, d := range NewScanner().ScanResponse(raw) {
+		if d.Evidence != "" {
+			t.Fatalf("evidence must be empty without WithEvidence, got %q", d.Evidence)
+		}
+	}
+
+	dets := NewScanner(WithEvidence(true)).ScanResponse(raw)
+	var gh *Detection
+	for i := range dets {
+		if dets[i].Pattern == "github_token" {
+			gh = &dets[i]
+		}
+	}
+	if gh == nil {
+		t.Fatal("github_token not detected")
+	}
+	if gh.Evidence == "" {
+		t.Fatal("expected masked evidence with WithEvidence")
+	}
+	if !strings.Contains(gh.Evidence, "•") || !strings.Contains(gh.Evidence, "(len ") {
+		t.Errorf("evidence not in masked form: %q", gh.Evidence)
+	}
+	if strings.Contains(gh.Evidence, "ABCDEFGHIJKLMNOPQRST") {
+		t.Fatalf("evidence LEAKED the raw value: %q", gh.Evidence)
+	}
+}
+
 func TestNewScanner(t *testing.T) {
 	s := NewScanner()
 	if s == nil {

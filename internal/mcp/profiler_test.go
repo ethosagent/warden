@@ -10,6 +10,53 @@ import (
 	"github.com/ethosagent/warden/internal/scan"
 )
 
+// TestProfilerDetectorsAndEvidence verifies the profiler retains the specific
+// detector (pattern + severity) per field path, and the opt-in masked evidence —
+// and that the raw value is never stored.
+func TestProfilerDetectorsAndEvidence(t *testing.T) {
+	p := NewSchemaProfiler(0)
+	scanner := scan.NewScanner(scan.WithEvidence(true))
+	const ghToken = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab"
+	raw := json.RawMessage(`{"content":[{"text":"reach me a@b.com and ` + ghToken + `"}]}`)
+
+	p.Observe("list_projects", DirResponse, raw, scanner)
+
+	prof, ok := p.Snapshot()["list_projects\x00response"]
+	if !ok {
+		t.Fatal("no response profile recorded")
+	}
+	var dets []FieldDetector
+	for path, fv := range prof.Fields {
+		if len(fv.Detectors) > 0 {
+			if !strings.Contains(path, "content[].text") {
+				t.Errorf("detectors on unexpected path %q", path)
+			}
+			dets = fv.Detectors
+		}
+	}
+	if len(dets) == 0 {
+		t.Fatal("no detectors recorded on the flagged field")
+	}
+	byPattern := map[string]FieldDetector{}
+	for _, d := range dets {
+		byPattern[d.Pattern] = d
+	}
+	email, ok := byPattern["email"]
+	if !ok || email.Category != "pii" || email.Severity != "medium" {
+		t.Errorf("email detector wrong: %+v", email)
+	}
+	gh, ok := byPattern["github_token"]
+	if !ok || gh.Category != "credential_leak" || gh.Severity != "high" {
+		t.Errorf("github_token detector wrong: %+v", gh)
+	}
+	if gh.Evidence == "" || !strings.Contains(gh.Evidence, "•") {
+		t.Errorf("expected masked evidence, got %q", gh.Evidence)
+	}
+	if strings.Contains(gh.Evidence, "ABCDEFGHIJKLMNOPQRST") {
+		t.Fatalf("profiler stored the RAW value in evidence: %q", gh.Evidence)
+	}
+}
+
 // fieldView fetches the view for a (tool, dir) profile and a single path.
 func fieldView(t *testing.T, p *SchemaProfiler, tool string, dir Direction, path string) (FieldProfileView, bool) {
 	t.Helper()

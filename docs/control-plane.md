@@ -134,9 +134,17 @@ worker requires HTTPS for the policy pull.
   dashboard shows a per-worker breakdown and lets you filter the whole view to one
   worker.
 - **MCP per worker** — each worker forwards its MCP inventory + observed
-  request/response schema (value-free: paths · types · sensitivity) over the
-  ingest channel, so the control-plane MCP panel shows it per worker (follows the
-  worker selector). Requires `mcp.enabled` on the worker.
+  request/response schema (value-free: paths · types · the specific detector that
+  fired — e.g. `github_token · HIGH`, `email · MEDIUM`) over the ingest channel,
+  so the control-plane MCP panel shows it per worker (follows the worker
+  selector). Requires `mcp.enabled` on the worker.
+- **Debug a finding** — expand a flagged field to see the exact detector +
+  severity (not just the coarse `credential_leak`/`pii` class). Set
+  `mcp.scan.evidence: true` on a worker to also keep a **masked** sample
+  (`•••• + last-4 (len N)`, never the raw value) so you can tell a real leak from
+  a false positive. From a flagged tool you can **Deny it fleet-wide** in one
+  click — that writes `settings.mcp.tools.deny` via the same validated settings
+  writer, so every worker blocks the tool on its next poll.
 - **Live policy** — the policy panel reflects the policy currently being served
   (control plane) or enforced (worker, including hot-reloads), not a startup snapshot.
 

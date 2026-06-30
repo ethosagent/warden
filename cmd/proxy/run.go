@@ -212,7 +212,10 @@ func runProxy(cmd *cobra.Command, configPath, listenAddr, dbPath, caCert, caKey,
 	// Reusable scanner for the MCP gateway. Constructed once from local config and
 	// reused on every control-plane-driven gateway rebuild (the scanner, store,
 	// and agentID are LOCAL — never distributed).
-	mcpScanner := scan.NewScanner(scan.WithPhonePII(pol.MCP.Scan.PII.Phone))
+	mcpScanner := scan.NewScanner(
+		scan.WithPhonePII(pol.MCP.Scan.PII.Phone),
+		scan.WithEvidence(pol.MCP.Scan.Evidence),
+	)
 
 	// Optional MCP egress gateway. When mcp.enabled is false, mcpGW stays nil and
 	// handleHTTP is byte-identical to before. A managed worker may later receive an

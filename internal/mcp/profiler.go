@@ -21,12 +21,26 @@ const (
 
 const defaultMaxFields = 200
 
+// FieldDetector is one detector that has fired at a field path — the specific
+// pattern (e.g. "github_token", "email"), its category, and severity. It carries
+// NO matched value; Evidence (when present) is a MASKED form only (Phase 3,
+// opt-in). Detectors are far more actionable than the coarse category alone.
+type FieldDetector struct {
+	Category string `json:"category"` // credential_leak | pii | injection
+	Pattern  string `json:"pattern"`  // github_token | email | ssn | aws_access_key | ...
+	Severity string `json:"severity"` // high | medium | low
+	Evidence string `json:"evidence,omitempty"`
+}
+
 // FieldProfile is the learned profile of one field path. It stores structural
 // shape and sensitivity flags only — never the field's value.
 type FieldProfile struct {
 	Types       []string // structural classes seen: "string","number","bool","object","array","null" (sorted, deduped)
 	SeenCount   int      // how many observations touched this path
 	Sensitivity []string // scan categories ever seen at this path (sorted, deduped)
+	// Detectors is the specific detectors that fired here (pattern + severity),
+	// deduped by (category, pattern). It refines the coarse Sensitivity list.
+	Detectors []FieldDetector
 }
 
 // ToolProfile is the merged, observed schema of one (tool, direction).
@@ -42,6 +56,7 @@ type FieldDetection struct {
 	Category string // from scan.Detection.Category
 	Pattern  string
 	Severity string
+	Evidence string // masked sample (Phase 3, opt-in); empty otherwise
 }
 
 // FieldProfileView is a value copy of a FieldProfile, safe to expose.
@@ -49,6 +64,7 @@ type FieldProfileView struct {
 	Types       []string
 	SeenCount   int
 	Sensitivity []string
+	Detectors   []FieldDetector
 }
 
 // ToolProfileView is a value copy of a ToolProfile, safe to expose.
@@ -142,17 +158,24 @@ func (p *SchemaProfiler) Observe(tool string, dir Direction, raw json.RawMessage
 					Category: d.Category,
 					Pattern:  d.Pattern,
 					Severity: d.Severity,
+					Evidence: d.Evidence,
 				})
 			}
 			results = append(results, sc)
 		}
 	}
 
-	// Index sensitivity by path for the merge step.
+	// Index sensitivity + specific detectors by path for the merge step.
 	sensByPath := make(map[string][]string, len(results))
+	detByPath := make(map[string][]FieldDetector, len(results))
 	var fieldDets []FieldDetection
 	for _, r := range results {
 		sensByPath[r.path] = append(sensByPath[r.path], r.sensitivity...)
+		for _, d := range r.dets {
+			detByPath[r.path] = append(detByPath[r.path], FieldDetector{
+				Category: d.Category, Pattern: d.Pattern, Severity: d.Severity, Evidence: d.Evidence,
+			})
+		}
 		fieldDets = append(fieldDets, r.dets...)
 	}
 
@@ -180,6 +203,9 @@ func (p *SchemaProfiler) Observe(tool string, dir Direction, raw json.RawMessage
 		fp.SeenCount++
 		if sens := sensByPath[o.path]; len(sens) > 0 {
 			fp.Sensitivity = addSorted(fp.Sensitivity, sens...)
+		}
+		if dets := detByPath[o.path]; len(dets) > 0 {
+			fp.Detectors = addDetectors(fp.Detectors, dets...)
 		}
 	}
 
@@ -260,6 +286,7 @@ func (p *SchemaProfiler) Snapshot() map[string]ToolProfileView {
 				Types:       cloneStrings(fp.Types),
 				SeenCount:   fp.SeenCount,
 				Sensitivity: cloneStrings(fp.Sensitivity),
+				Detectors:   cloneDetectors(fp.Detectors),
 			}
 		}
 		out[key] = view
@@ -283,6 +310,7 @@ func (p *SchemaProfiler) Restore(snap map[string]ToolProfileView) {
 				Types:       cloneStrings(fv.Types),
 				SeenCount:   fv.SeenCount,
 				Sensitivity: cloneStrings(fv.Sensitivity),
+				Detectors:   cloneDetectors(fv.Detectors),
 			}
 		}
 		rebuilt[key] = prof
@@ -306,6 +334,44 @@ func addSorted(dst []string, vals ...string) []string {
 		dst[i] = v
 	}
 	return dst
+}
+
+// addDetectors merges vals into dst, deduped by (Category, Pattern) and kept
+// sorted for stable output. A later observation's masked Evidence refreshes the
+// stored one (single bounded sample per detector, never appended).
+func addDetectors(dst []FieldDetector, vals ...FieldDetector) []FieldDetector {
+	for _, v := range vals {
+		found := false
+		for i := range dst {
+			if dst[i].Category == v.Category && dst[i].Pattern == v.Pattern {
+				if v.Evidence != "" {
+					dst[i].Evidence = v.Evidence
+				}
+				found = true
+				break
+			}
+		}
+		if !found {
+			dst = append(dst, v)
+		}
+	}
+	sort.Slice(dst, func(i, j int) bool {
+		if dst[i].Category != dst[j].Category {
+			return dst[i].Category < dst[j].Category
+		}
+		return dst[i].Pattern < dst[j].Pattern
+	})
+	return dst
+}
+
+// cloneDetectors returns a copy of s (nil for empty).
+func cloneDetectors(s []FieldDetector) []FieldDetector {
+	if len(s) == 0 {
+		return nil
+	}
+	out := make([]FieldDetector, len(s))
+	copy(out, s)
+	return out
 }
 
 // cloneStrings returns a copy of s (nil for empty) so callers can't mutate

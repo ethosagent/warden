@@ -128,6 +128,9 @@ mcp:
     toolArgs: true                # scan outbound tool arguments
     toolResults: true             # scan inbound tool results
     profileSchema: true           # learn + merge observed in/out schema per tool
+    evidence: false               # opt-in: keep a MASKED sample per finding (•••• + last-4 + length,
+                                  #         NEVER the raw value) so you can tell a real leak from a
+                                  #         false positive in the dashboard. Local config (not distributed).
     pii:
       phone: false                # email/card(Luhn)/SSN always on; phone opt-in (noisy)
   chain:
