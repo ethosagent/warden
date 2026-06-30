@@ -576,3 +576,127 @@ func TestInventoryRetention(t *testing.T) {
 		t.Fatalf("write_file timestamps want %v, got first=%v last=%v", t1, inv[1].FirstSeen, inv[1].LastSeen)
 	}
 }
+
+// noProfilerCfg enables arg/result scanning but disables schema profiling, so
+// g.profiler is nil. Scanning must still happen via the whole-body pass.
+func noProfilerCfg(mode string) config.MCPConfig {
+	cfg := baseCfg(mode)
+	cfg.Scan.ProfileSchema = false
+	return cfg
+}
+
+// TestArgsScanWithoutProfiler proves the whole-body pass scans tool arguments
+// even when the schema profiler is off (the historical detection gap).
+func TestArgsScanWithoutProfiler(t *testing.T) {
+	const awsKey = "AKIAIOSFODNN7EXAMPLE"
+	gw := newGW(t, noProfilerCfg(modeEnforce))
+	if gw.profiler != nil {
+		t.Fatal("precondition: profiler should be nil")
+	}
+	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "read_file", `{"key":"`+awsKey+`"}`))
+	f, ok := hasFinding(v.Findings, "mcp_args_leak")
+	if !ok {
+		t.Fatalf("missing mcp_args_leak finding with profiler off: %v", v.Findings)
+	}
+	// Cross-field whole-body detections carry no field path.
+	if f.Path != "" {
+		t.Fatalf("whole-body finding should have empty Path, got %q", f.Path)
+	}
+	if v.Action != Deny || v.Reason != "mcp_args_leak" {
+		t.Fatalf("high-severity leak should block in enforce, got action=%v reason=%q", v.Action, v.Reason)
+	}
+	assertNoValueLeak(t, v.Findings, awsKey)
+
+	// monitor never blocks but still reports.
+	gw2 := newGW(t, noProfilerCfg(modeMonitor))
+	v2 := gw2.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "read_file", `{"key":"`+awsKey+`"}`))
+	if v2.Action != Pass {
+		t.Fatalf("monitor must Pass, got %v", v2.Action)
+	}
+	if _, ok := hasFinding(v2.Findings, "mcp_args_leak"); !ok {
+		t.Fatalf("monitor: missing mcp_args_leak finding with profiler off")
+	}
+	assertNoValueLeak(t, v2.Findings, awsKey)
+}
+
+// TestResultScanWithoutProfiler proves the whole-body pass scans tool results
+// even when the schema profiler is off.
+func TestResultScanWithoutProfiler(t *testing.T) {
+	const awsKey = "AKIAIOSFODNN7EXAMPLE"
+	gw := newGW(t, noProfilerCfg(modeEnforce))
+	// Establish id -> tool.
+	gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"7"`, "get_user", `{"id":"u1"}`))
+	resp := []byte(`{"jsonrpc":"2.0","id":"7","result":{"token":"` + awsKey + `"}}`)
+	v := gw.OnResponse("s1", 200, nil, resp)
+	f, ok := hasFinding(v.Findings, "mcp_result_leak")
+	if !ok {
+		t.Fatalf("missing mcp_result_leak finding with profiler off: %v", v.Findings)
+	}
+	if f.Path != "" {
+		t.Fatalf("whole-body result finding should have empty Path, got %q", f.Path)
+	}
+	if f.Tool != "get_user" {
+		t.Fatalf("result finding should attribute to get_user, got %q", f.Tool)
+	}
+	if v.Action != Deny || v.Reason != "mcp_result_leak" {
+		t.Fatalf("high-severity result leak should block in enforce, got action=%v reason=%q", v.Action, v.Reason)
+	}
+	assertNoValueLeak(t, v.Findings, awsKey)
+}
+
+// TestArgsScanProfilerNoDoubleCount proves that with the profiler on, a
+// single-field hit yields exactly one finding (the per-field one, with a Path)
+// and is not double-counted by the whole-body pass.
+func TestArgsScanProfilerNoDoubleCount(t *testing.T) {
+	const awsKey = "AKIAIOSFODNN7EXAMPLE"
+	gw := newGW(t, baseCfg(modeEnforce)) // profiler on
+	if gw.profiler == nil {
+		t.Fatal("precondition: profiler should be on")
+	}
+	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "read_file", `{"key":"`+awsKey+`"}`))
+	var leaks []Finding
+	for _, f := range v.Findings {
+		if f.Kind == "mcp_args_leak" {
+			leaks = append(leaks, f)
+		}
+	}
+	if len(leaks) != 1 {
+		t.Fatalf("want exactly one mcp_args_leak finding (no double-count), got %d: %v", len(leaks), leaks)
+	}
+	// The single finding is the per-field one and carries a Path.
+	if leaks[0].Path == "" {
+		t.Fatalf("per-field leak finding should carry a Path, got empty")
+	}
+	assertNoValueLeak(t, v.Findings, awsKey)
+}
+
+// TestArgsCrossFieldOnlyDetection constructs args where no single field triggers
+// the scanner but the concatenated whole-body view does: field "a" is "token="
+// and field "b" is a 32-char blob. Neither alone matches generic_api_key, but
+// joined with "\n" they form "token=\n<blob>" which does. With the profiler on,
+// the resulting finding comes only from the whole-body pass and has empty Path.
+func TestArgsCrossFieldOnlyDetection(t *testing.T) {
+	const blob = "abcdefghijklmnopqrstuvwxyz012345" // 32 chars
+	gw := newGW(t, baseCfg(modeMonitor))            // profiler on
+	if gw.profiler == nil {
+		t.Fatal("precondition: profiler should be on")
+	}
+	v := gw.OnRequest("s1", "tools/call", "", nil,
+		toolCall(`"1"`, "read_file", `{"a":"token=","b":"`+blob+`"}`))
+	var leaks []Finding
+	for _, f := range v.Findings {
+		if f.Kind == "mcp_args_leak" {
+			leaks = append(leaks, f)
+		}
+	}
+	if len(leaks) != 1 {
+		t.Fatalf("want exactly one cross-field mcp_args_leak, got %d: %v", len(leaks), leaks)
+	}
+	if leaks[0].Path != "" {
+		t.Fatalf("cross-field finding must have empty Path, got %q", leaks[0].Path)
+	}
+	if leaks[0].Detail != "cross-field" {
+		t.Fatalf("cross-field finding Detail should be 'cross-field', got %q", leaks[0].Detail)
+	}
+	assertNoValueLeak(t, v.Findings, blob)
+}

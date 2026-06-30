@@ -373,27 +373,54 @@ func (g *Gateway) OnRequest(sessionKey, method, url string, hdr http.Header, bod
 		dominant = "mcp_tool_denied"
 	}
 
-	// Per-field argument scanning + schema profiling.
-	if g.cfg.Scan.ToolArgs && g.profiler != nil {
+	// Argument scanning. Two passes that are deduped by (category|pattern):
+	//
+	//  1. Per-field pass (only when the profiler is on): attributes each
+	//     detection to its field Path and feeds schema learning. We always call
+	//     Observe when the profiler exists because it also profiles shapes and
+	//     learns the inventory-independent schema, not just scans.
+	//  2. Whole-body pass (always when ToolArgs is on): scans the concatenated
+	//     value set. This runs even with the profiler off — closing the gap where
+	//     scan.toolArgs did nothing without profileSchema — and catches
+	//     concatenation/base64 cases a strict per-field pass misses. Detections
+	//     already attributed to a field are skipped so a single-field hit is not
+	//     double-counted; genuinely cross-field detections carry an empty Path.
+	if g.cfg.Scan.ToolArgs {
 		params := rawField(body, "params")
-		for _, fd := range g.profiler.Observe(tool, mcp.DirRequest, params, g.scanner) {
-			kind := argKind(fd.Category)
+		seen := map[string]bool{}
+		if g.profiler != nil {
+			for _, fd := range g.profiler.Observe(tool, mcp.DirRequest, params, g.scanner) {
+				kind := argKind(fd.Category)
+				if kind == "" {
+					continue
+				}
+				findings = append(findings, Finding{
+					Kind:     kind,
+					Severity: fd.Severity,
+					Tool:     tool,
+					Path:     fd.Path,
+					Detail:   "pattern " + fd.Pattern + " in tool argument",
+				})
+				seen[fd.Category+"|"+fd.Pattern] = true
+				applyScanSeverity(fd.Severity, kind, &blocking, &dominant)
+			}
+		}
+		for _, d := range mcp.ScanToolArgs(params, g.scanner) {
+			if seen[d.Category+"|"+d.Pattern] {
+				continue
+			}
+			kind := argKind(d.Category)
 			if kind == "" {
 				continue
 			}
 			findings = append(findings, Finding{
 				Kind:     kind,
-				Severity: fd.Severity,
+				Severity: d.Severity,
 				Tool:     tool,
-				Path:     fd.Path,
-				Detail:   "pattern " + fd.Pattern + " in tool argument",
+				Path:     "",
+				Detail:   "cross-field",
 			})
-			if fd.Severity == "high" {
-				blocking = true
-				if dominant == "" {
-					dominant = kind
-				}
-			}
+			applyScanSeverity(d.Severity, kind, &blocking, &dominant)
 		}
 	}
 
@@ -578,26 +605,46 @@ func (g *Gateway) OnResponse(sessionKey string, status int, hdr http.Header, bod
 		tool = s.idToTool[id]
 		g.mu.Unlock()
 	}
-	if tool != "" && g.cfg.Scan.ToolResults && g.profiler != nil {
+	// Result scanning. Mirrors the request-side two-pass logic: a per-field pass
+	// (profiler on) for Path attribution + schema learning, plus a whole-body
+	// pass that always runs when ToolResults is on (so scanning works without the
+	// profiler and catches cross-field/base64 cases), deduped by (category|pattern).
+	if tool != "" && g.cfg.Scan.ToolResults {
 		result := rawField(body, "result")
-		for _, fd := range g.profiler.Observe(tool, mcp.DirResponse, result, g.scanner) {
-			kind := resultKind(fd.Category)
+		seen := map[string]bool{}
+		if g.profiler != nil {
+			for _, fd := range g.profiler.Observe(tool, mcp.DirResponse, result, g.scanner) {
+				kind := resultKind(fd.Category)
+				if kind == "" {
+					continue
+				}
+				findings = append(findings, Finding{
+					Kind:     kind,
+					Severity: fd.Severity,
+					Tool:     tool,
+					Path:     fd.Path,
+					Detail:   "pattern " + fd.Pattern + " in tool result",
+				})
+				seen[fd.Category+"|"+fd.Pattern] = true
+				applyScanSeverity(fd.Severity, kind, &blocking, &dominant)
+			}
+		}
+		for _, d := range mcp.ScanToolResult(result, g.scanner) {
+			if seen[d.Category+"|"+d.Pattern] {
+				continue
+			}
+			kind := resultKind(d.Category)
 			if kind == "" {
 				continue
 			}
 			findings = append(findings, Finding{
 				Kind:     kind,
-				Severity: fd.Severity,
+				Severity: d.Severity,
 				Tool:     tool,
-				Path:     fd.Path,
-				Detail:   "pattern " + fd.Pattern + " in tool result",
+				Path:     "",
+				Detail:   "cross-field",
 			})
-			if fd.Severity == "high" {
-				blocking = true
-				if dominant == "" {
-					dominant = kind
-				}
-			}
+			applyScanSeverity(d.Severity, kind, &blocking, &dominant)
 		}
 	}
 
@@ -668,6 +715,19 @@ func (g *Gateway) SchemaSnapshot() map[string]mcp.ToolProfileView {
 		return nil
 	}
 	return g.profiler.Snapshot()
+}
+
+// applyScanSeverity applies the uniform blocking rule for a scan finding: a
+// high-severity detection flips blocking on and, if no dominant kind is set yet,
+// becomes the dominant reason. Shared by the per-field and whole-body passes so
+// both sides enforce identically.
+func applyScanSeverity(severity, kind string, blocking *bool, dominant *string) {
+	if severity == "high" {
+		*blocking = true
+		if *dominant == "" {
+			*dominant = kind
+		}
+	}
 }
 
 // argKind maps a scan category to a request-side Finding kind.
