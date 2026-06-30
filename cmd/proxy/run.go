@@ -135,7 +135,7 @@ func runProxy(cmd *cobra.Command, configPath, listenAddr, dbPath, caCert, caKey,
 	var mcpGW *gateway.Gateway
 	if pol.MCP.Enabled {
 		scanner := scan.NewScanner(scan.WithPhonePII(pol.MCP.Scan.PII.Phone))
-		mcpGW = gateway.New(pol.MCP, scanner, logger, gateway.WithStore(store))
+		mcpGW = gateway.New(pol.MCP, scanner, logger, gateway.WithStore(store), gateway.WithAgentID(agentID))
 		logger.Info("MCP egress gateway enabled", "mode", pol.MCP.Mode)
 	}
 	// Close the gateway before the store: deferred LIFO runs this first, so the

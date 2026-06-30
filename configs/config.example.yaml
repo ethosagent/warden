@@ -118,6 +118,10 @@ mcp:
                                   #     fields:
                                   #       path:      { match: "^/workspace/.*", maxLen: 4096, required: true }
                                   #       recursive: { forbidden: true }
+                                  #   deploy:
+                                  #     allowWhen:                     # further gate an ALLOWED tool (never re-allows)
+                                  #       agentId: "ci-agent"          # permit only for this agent id
+                                  #       timeWindow: "09-17"          # permit only within HH-HH (server local, 0-23)
   schema:
     pin: false                    # block on any tools/list drift (enforce mode)
   scan:

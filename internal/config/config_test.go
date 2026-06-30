@@ -515,6 +515,110 @@ func TestNewLocalYAMLProvider_MCPParsed(t *testing.T) {
 	}
 }
 
+func TestNewLocalYAMLProvider_MCPAllowWhenParsed(t *testing.T) {
+	const y = `
+policy:
+  allowlist:
+    - domain: a.com
+mcp:
+  enabled: true
+  mode: enforce
+  tools:
+    allow: [deploy]
+    constraints:
+      deploy:
+        allowWhen:
+          agentId: "ci-agent"
+          timeWindow: "09-17"
+`
+	p, err := NewLocalYAMLProvider(writeTemp(t, y))
+	if err != nil {
+		t.Fatalf("parse allowWhen config: %v", err)
+	}
+	pol, _ := p.GetPolicy()
+	tc, ok := pol.MCP.Tools.Constraints["deploy"]
+	if !ok {
+		t.Fatalf("constraints missing deploy: %v", pol.MCP.Tools.Constraints)
+	}
+	if tc.AllowWhen == nil {
+		t.Fatal("deploy.allowWhen should be non-nil")
+	}
+	if tc.AllowWhen.AgentID != "ci-agent" {
+		t.Errorf("allowWhen.agentId = %q, want ci-agent", tc.AllowWhen.AgentID)
+	}
+	if tc.AllowWhen.TimeWindow != "09-17" {
+		t.Errorf("allowWhen.timeWindow = %q, want 09-17", tc.AllowWhen.TimeWindow)
+	}
+}
+
+func TestValidate_MCPAllowWhenBadWindow(t *testing.T) {
+	const y = `
+policy:
+  allowlist:
+    - domain: a.com
+mcp:
+  enabled: true
+  tools:
+    constraints:
+      deploy:
+        allowWhen:
+          timeWindow: "9-99"
+`
+	if _, err := NewLocalYAMLProvider(writeTemp(t, y)); err == nil {
+		t.Fatal("expected validation error for bad allowWhen timeWindow")
+	}
+}
+
+func TestValidate_MCPAllowWhenBadWindowDisabledOK(t *testing.T) {
+	// Bad window is tolerated when mcp is disabled (validation is enabled-only).
+	const y = `
+policy:
+  allowlist:
+    - domain: a.com
+mcp:
+  enabled: false
+  tools:
+    constraints:
+      deploy:
+        allowWhen:
+          timeWindow: "9-99"
+`
+	if _, err := NewLocalYAMLProvider(writeTemp(t, y)); err != nil {
+		t.Fatalf("disabled mcp should skip allowWhen validation: %v", err)
+	}
+}
+
+func TestDeepCopy_MCPAllowWhenIndependence(t *testing.T) {
+	orig := Policy{
+		Allowlist: []AllowlistEntry{{Domain: "a.com"}},
+		MCP: MCPConfig{
+			Enabled: true,
+			Tools: MCPToolsConfig{
+				Constraints: map[string]MCPToolConstraints{
+					"deploy": {
+						AllowWhen: &MCPToolCondition{AgentID: "ci-agent", TimeWindow: "09-17"},
+					},
+				},
+			},
+		},
+	}
+	cp := orig.DeepCopy()
+	// Mutating the copy's pointed-to condition must not touch the original.
+	cp.MCP.Tools.Constraints["deploy"].AllowWhen.AgentID = "MUTATED"
+	cp.MCP.Tools.Constraints["deploy"].AllowWhen.TimeWindow = "00-01"
+
+	origAW := orig.MCP.Tools.Constraints["deploy"].AllowWhen
+	if origAW == nil {
+		t.Fatal("orig allowWhen became nil")
+	}
+	if origAW.AgentID != "ci-agent" || origAW.TimeWindow != "09-17" {
+		t.Errorf("orig allowWhen mutated via copy: %+v", origAW)
+	}
+	if origAW == cp.MCP.Tools.Constraints["deploy"].AllowWhen {
+		t.Error("orig and copy share the same allowWhen pointer")
+	}
+}
+
 func TestNewLocalYAMLProvider_MCPOmittedDisabled(t *testing.T) {
 	// No mcp block at all: disabled, harmless, config still valid (back-compat).
 	p, err := NewLocalYAMLProvider(writeTemp(t, goodYAML))

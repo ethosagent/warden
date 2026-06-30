@@ -43,10 +43,10 @@ const (
 // bounded description and never carries a tool argument or result value.
 type Finding struct {
 	// Kind is the bounded finding category. One of: "mcp_tool_denied",
-	// "mcp_poisoning", "mcp_schema_drift", "mcp_args_injection", "mcp_args_leak",
-	// "mcp_args_pii", "mcp_args_constraint", "mcp_args_too_large",
-	// "mcp_chain_<pattern>", "mcp_result_injection", "mcp_result_leak",
-	// "mcp_result_pii".
+	// "mcp_tool_condition", "mcp_poisoning", "mcp_schema_drift",
+	// "mcp_args_injection", "mcp_args_leak", "mcp_args_pii",
+	// "mcp_args_constraint", "mcp_args_too_large", "mcp_chain_<pattern>",
+	// "mcp_result_injection", "mcp_result_leak", "mcp_result_pii".
 	Kind     string
 	Severity string // "high"|"medium"|"low"
 	Tool     string
@@ -120,6 +120,16 @@ type compiledToolConstraints struct {
 	fields       map[string]compiledFieldConstraint
 }
 
+// compiledCondition is one tool's precompiled AllowWhen condition: the agent id
+// gate and the time window parsed once into [startHour, endHour) (server local).
+// A zero value (hasWindow false, agentID "") imposes no extra restriction.
+type compiledCondition struct {
+	agentID   string
+	hasWindow bool
+	startHour int
+	endHour   int
+}
+
 // Store persists the gateway's tool inventory and observed schema profiles so
 // they survive a proxy restart. It is defined here (not in the analytics
 // package) so the gateway never imports analytics — the analytics package
@@ -146,6 +156,13 @@ func WithStore(s Store) Option {
 	return func(g *Gateway) { g.store = s }
 }
 
+// WithAgentID sets the agent id this gateway fronts. Per-tool AllowWhen
+// conditions whose agentId is set are matched against it; with no WithAgentID
+// the id is empty and any agent-scoped condition denies.
+func WithAgentID(id string) Option {
+	return func(g *Gateway) { g.agentID = id }
+}
+
 // flushInterval is how often the background flusher writes dirty state back to
 // the store.
 const flushInterval = 15 * time.Second
@@ -161,6 +178,14 @@ type Gateway struct {
 	// constraints holds the per-tool argument constraints precompiled at New,
 	// keyed by tool name. Read-only after construction; no lock needed.
 	constraints map[string]compiledToolConstraints
+
+	// conditions holds the per-tool AllowWhen conditions precompiled at New,
+	// keyed by tool name. Read-only after construction; no lock needed.
+	conditions map[string]compiledCondition
+
+	// agentID identifies the agent this gateway fronts; set via WithAgentID and
+	// matched against a tool condition's agent id. Read-only after construction.
+	agentID string
 
 	mu       sync.Mutex
 	sessions map[string]*session
@@ -205,6 +230,7 @@ func New(cfg config.MCPConfig, scanner *scan.Scanner, log *slog.Logger, opts ...
 		profiler:    profiler,
 		log:         log,
 		constraints: compileConstraints(cfg.Tools.Constraints),
+		conditions:  compileConditions(cfg.Tools.Constraints),
 		sessions:    make(map[string]*session),
 		inventory:   make(map[string]*InventoryItem),
 		now:         time.Now,
@@ -332,6 +358,65 @@ func compileConstraints(cs map[string]config.MCPToolConstraints) map[string]comp
 		out[tool] = ctc
 	}
 	return out
+}
+
+// compileConditions precompiles each tool's AllowWhen condition once at New:
+// the agent id is stored verbatim and the time window is parsed into start/end
+// hours. Tools without an AllowWhen are omitted. Config validation already
+// proved any time window is well-formed, so a parse failure here is unexpected
+// and that window is dropped (treated as no window) rather than failing
+// construction. Returns nil when no conditions are configured.
+func compileConditions(cs map[string]config.MCPToolConstraints) map[string]compiledCondition {
+	if len(cs) == 0 {
+		return nil
+	}
+	out := make(map[string]compiledCondition)
+	for tool, tc := range cs {
+		if tc.AllowWhen == nil {
+			continue
+		}
+		cc := compiledCondition{agentID: tc.AllowWhen.AgentID}
+		if tc.AllowWhen.TimeWindow != "" {
+			if start, end, ok := parseConditionWindow(tc.AllowWhen.TimeWindow); ok {
+				cc.hasWindow = true
+				cc.startHour = start
+				cc.endHour = end
+			}
+		}
+		out[tool] = cc
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// parseConditionWindow parses a "HH-HH" window into start/end hours. ok is false
+// for a malformed window (config validation prevents this on the enforced path).
+func parseConditionWindow(s string) (start, end int, ok bool) {
+	parts := strings.SplitN(s, "-", 2)
+	if len(parts) != 2 {
+		return 0, 0, false
+	}
+	start, err := strconv.Atoi(parts[0])
+	if err != nil || start < 0 || start > 23 {
+		return 0, 0, false
+	}
+	end, err = strconv.Atoi(parts[1])
+	if err != nil || end < 0 || end > 23 {
+		return 0, 0, false
+	}
+	return start, end, true
+}
+
+// hourInWindow reports whether hour falls in [start, end) (server local time),
+// handling wrap-around (e.g. 22-06) the same way the domain policy does.
+func hourInWindow(hour, start, end int) bool {
+	if start <= end {
+		return hour >= start && hour < end
+	}
+	// Wrap-around (e.g. 22-06 means 22:00-06:00).
+	return hour >= start || hour < end
 }
 
 // toPerMinute converts the config "N/period" rate strings into the per-minute
@@ -505,6 +590,29 @@ func (g *Gateway) OnRequest(sessionKey, method, url string, hdr http.Header, bod
 		})
 		blocking = true
 		dominant = "mcp_tool_denied"
+	}
+
+	// Conditional rule (AllowWhen): a tool the policy ALLOWED may be further
+	// gated to a specific agent id and/or a server-local time window. It only
+	// narrows — a tool the policy already denied is untouched. On failure the
+	// tool is treated as denied for the downstream chain so the call-chain
+	// analyzer sees the request the same way the policy decision did.
+	if allowed {
+		if cc, ok := g.conditions[tool]; ok {
+			if detail, deny := g.conditionDenies(cc, now); deny {
+				findings = append(findings, Finding{
+					Kind:     "mcp_tool_condition",
+					Severity: "high",
+					Tool:     tool,
+					Detail:   detail,
+				})
+				blocking = true
+				if dominant == "" {
+					dominant = "mcp_tool_condition"
+				}
+				allowed = false
+			}
+		}
 	}
 
 	// Argument scanning. Two passes that are deduped by (category|pattern):
@@ -904,6 +1012,19 @@ func hashSchema(raw json.RawMessage) string {
 	}
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:])
+}
+
+// conditionDenies reports whether an allowed tool's AllowWhen condition fails
+// for the current agent / time. detail is a short, value-free phrase suitable
+// for a Finding.Detail. now is server local time (the injectable clock).
+func (g *Gateway) conditionDenies(cc compiledCondition, now time.Time) (detail string, deny bool) {
+	if cc.agentID != "" && g.agentID != cc.agentID {
+		return "agent not permitted", true
+	}
+	if cc.hasWindow && !hourInWindow(now.Hour(), cc.startHour, cc.endHour) {
+		return "outside allowed time window", true
+	}
+	return "", false
 }
 
 // constraintFinding builds a value-free mcp_args_constraint Finding. detail is

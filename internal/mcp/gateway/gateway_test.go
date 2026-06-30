@@ -700,3 +700,163 @@ func TestArgsCrossFieldOnlyDetection(t *testing.T) {
 	}
 	assertNoValueLeak(t, v.Findings, blob)
 }
+
+// conditionCfg returns an enforce-mode config that allowlists "deploy" with the
+// given AllowWhen condition.
+func conditionCfg(mode string, cond *config.MCPToolCondition) config.MCPConfig {
+	cfg := baseCfg(mode)
+	cfg.Tools.Allow = append(cfg.Tools.Allow, "deploy")
+	cfg.Tools.Constraints = map[string]config.MCPToolConstraints{
+		"deploy": {AllowWhen: cond},
+	}
+	return cfg
+}
+
+// newGWAgent builds a gateway with the given agent id.
+func newGWAgent(t *testing.T, cfg config.MCPConfig, agentID string) *Gateway {
+	t.Helper()
+	sc := scan.NewScanner(scan.WithPhonePII(cfg.Scan.PII.Phone))
+	return New(cfg, sc, testLogger(), WithAgentID(agentID))
+}
+
+func TestConditionAgentIDMatchAllows(t *testing.T) {
+	cfg := conditionCfg(modeEnforce, &config.MCPToolCondition{AgentID: "ci-agent"})
+	gw := newGWAgent(t, cfg, "ci-agent")
+	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "deploy", `{}`))
+	if v.Action != Pass {
+		t.Fatalf("matching agent should Pass, got %v findings=%v", v.Action, v.Findings)
+	}
+	if _, ok := hasFinding(v.Findings, "mcp_tool_condition"); ok {
+		t.Fatalf("unexpected condition finding: %v", v.Findings)
+	}
+}
+
+func TestConditionAgentIDMismatchDenies(t *testing.T) {
+	cfg := conditionCfg(modeEnforce, &config.MCPToolCondition{AgentID: "ci-agent"})
+	gw := newGWAgent(t, cfg, "other")
+	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "deploy", `{}`))
+	f, ok := hasFinding(v.Findings, "mcp_tool_condition")
+	if !ok {
+		t.Fatalf("missing mcp_tool_condition finding: %v", v.Findings)
+	}
+	if f.Severity != "high" || f.Tool != "deploy" || f.Detail != "agent not permitted" {
+		t.Fatalf("unexpected condition finding: %+v", f)
+	}
+	if v.Action != Deny || v.Reason != "mcp_tool_condition" {
+		t.Fatalf("want Deny/mcp_tool_condition, got action=%v reason=%q", v.Action, v.Reason)
+	}
+	// monitor records the finding but never blocks.
+	gw2 := newGWAgent(t, conditionCfg(modeMonitor, &config.MCPToolCondition{AgentID: "ci-agent"}), "other")
+	v2 := gw2.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "deploy", `{}`))
+	if v2.Action != Pass {
+		t.Fatalf("monitor must Pass, got %v", v2.Action)
+	}
+	if _, ok := hasFinding(v2.Findings, "mcp_tool_condition"); !ok {
+		t.Fatalf("monitor: missing mcp_tool_condition finding")
+	}
+}
+
+func TestConditionTimeWindow(t *testing.T) {
+	cfg := conditionCfg(modeEnforce, &config.MCPToolCondition{TimeWindow: "09-17"})
+
+	// 10:00 is inside [09,17) -> allowed.
+	gw := newGWAgent(t, cfg, "ci-agent")
+	gw.now = func() time.Time { return time.Date(2026, 6, 30, 10, 0, 0, 0, time.Local) }
+	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "deploy", `{}`))
+	if v.Action != Pass {
+		t.Fatalf("10:00 inside window should Pass, got %v findings=%v", v.Action, v.Findings)
+	}
+	if _, ok := hasFinding(v.Findings, "mcp_tool_condition"); ok {
+		t.Fatalf("unexpected condition finding at 10:00: %v", v.Findings)
+	}
+
+	// 20:00 is outside [09,17) -> denied.
+	gw2 := newGWAgent(t, cfg, "ci-agent")
+	gw2.now = func() time.Time { return time.Date(2026, 6, 30, 20, 0, 0, 0, time.Local) }
+	v2 := gw2.OnRequest("s2", "tools/call", "", nil, toolCall(`"1"`, "deploy", `{}`))
+	f, ok := hasFinding(v2.Findings, "mcp_tool_condition")
+	if !ok {
+		t.Fatalf("20:00: missing mcp_tool_condition finding: %v", v2.Findings)
+	}
+	if f.Detail != "outside allowed time window" {
+		t.Fatalf("want detail 'outside allowed time window', got %q", f.Detail)
+	}
+	if v2.Action != Deny || v2.Reason != "mcp_tool_condition" {
+		t.Fatalf("20:00: want Deny/mcp_tool_condition, got action=%v reason=%q", v2.Action, v2.Reason)
+	}
+}
+
+func TestConditionWrapAroundWindow(t *testing.T) {
+	cfg := conditionCfg(modeEnforce, &config.MCPToolCondition{TimeWindow: "22-06"})
+
+	// 23:00 falls inside 22-06 -> allowed.
+	gw := newGWAgent(t, cfg, "ci-agent")
+	gw.now = func() time.Time { return time.Date(2026, 6, 30, 23, 0, 0, 0, time.Local) }
+	if v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "deploy", `{}`)); v.Action != Pass {
+		t.Fatalf("23:00 inside wrap window should Pass, got %v findings=%v", v.Action, v.Findings)
+	}
+
+	// 12:00 is outside 22-06 -> denied.
+	gw2 := newGWAgent(t, cfg, "ci-agent")
+	gw2.now = func() time.Time { return time.Date(2026, 6, 30, 12, 0, 0, 0, time.Local) }
+	if v := gw2.OnRequest("s2", "tools/call", "", nil, toolCall(`"1"`, "deploy", `{}`)); v.Action != Deny {
+		t.Fatalf("12:00 outside wrap window should Deny, got %v", v.Action)
+	}
+}
+
+func TestConditionAgentAndWindowCombined(t *testing.T) {
+	cond := &config.MCPToolCondition{AgentID: "ci-agent", TimeWindow: "09-17"}
+	cfg := conditionCfg(modeEnforce, cond)
+
+	// Right agent + in window -> Pass.
+	gw := newGWAgent(t, cfg, "ci-agent")
+	gw.now = func() time.Time { return time.Date(2026, 6, 30, 10, 0, 0, 0, time.Local) }
+	if v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "deploy", `{}`)); v.Action != Pass {
+		t.Fatalf("right agent + in window should Pass, got %v findings=%v", v.Action, v.Findings)
+	}
+
+	// Right agent but outside window -> Deny.
+	gw2 := newGWAgent(t, cfg, "ci-agent")
+	gw2.now = func() time.Time { return time.Date(2026, 6, 30, 20, 0, 0, 0, time.Local) }
+	if v := gw2.OnRequest("s2", "tools/call", "", nil, toolCall(`"1"`, "deploy", `{}`)); v.Action != Deny {
+		t.Fatalf("right agent outside window should Deny, got %v", v.Action)
+	}
+
+	// Wrong agent (agent checked first) -> Deny even if in window.
+	gw3 := newGWAgent(t, cfg, "other")
+	gw3.now = func() time.Time { return time.Date(2026, 6, 30, 10, 0, 0, 0, time.Local) }
+	v3 := gw3.OnRequest("s3", "tools/call", "", nil, toolCall(`"1"`, "deploy", `{}`))
+	if v3.Action != Deny {
+		t.Fatalf("wrong agent should Deny, got %v", v3.Action)
+	}
+	if f, _ := hasFinding(v3.Findings, "mcp_tool_condition"); f.Detail != "agent not permitted" {
+		t.Fatalf("want 'agent not permitted' detail, got %q", f.Detail)
+	}
+}
+
+func TestConditionUnconditionalToolUnaffected(t *testing.T) {
+	// read_file is allowlisted with no AllowWhen: condition never fires.
+	cfg := conditionCfg(modeEnforce, &config.MCPToolCondition{AgentID: "ci-agent"})
+	gw := newGWAgent(t, cfg, "other") // mismatching agent
+	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "read_file", `{"path":"/tmp/x"}`))
+	if v.Action != Pass {
+		t.Fatalf("unconditional tool should Pass, got %v findings=%v", v.Action, v.Findings)
+	}
+	if _, ok := hasFinding(v.Findings, "mcp_tool_condition"); ok {
+		t.Fatalf("unexpected condition finding on unconditional tool: %v", v.Findings)
+	}
+}
+
+func TestConditionDoesNotOverrideDeniedTool(t *testing.T) {
+	// A non-allowlisted tool stays mcp_tool_denied; a condition on it (it isn't
+	// allowed, so the condition is never consulted) does not change the reason.
+	cfg := conditionCfg(modeEnforce, &config.MCPToolCondition{AgentID: "ci-agent"})
+	gw := newGWAgent(t, cfg, "ci-agent")
+	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "delete_everything", `{}`))
+	if v.Action != Deny || v.Reason != "mcp_tool_denied" {
+		t.Fatalf("non-allowlisted tool should Deny with mcp_tool_denied, got action=%v reason=%q", v.Action, v.Reason)
+	}
+	if _, ok := hasFinding(v.Findings, "mcp_tool_condition"); ok {
+		t.Fatalf("denied tool should not get a condition finding: %v", v.Findings)
+	}
+}

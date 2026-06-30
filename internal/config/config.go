@@ -103,6 +103,19 @@ type MCPToolConstraints struct {
 	MaxArgsBytes int
 	// Fields holds per-top-level-param-field constraints, keyed by field name.
 	Fields map[string]MCPFieldConstraint
+	// AllowWhen, when non-nil, further gates an already-allowed tool to a
+	// specific agent id and/or server-local time window. nil = no extra condition.
+	AllowWhen *MCPToolCondition
+}
+
+// MCPToolCondition further restricts an allowed tool. It only narrows: a tool
+// must already pass the allow/deny policy before the condition is consulted.
+type MCPToolCondition struct {
+	// AgentID, if set, permits the tool only for this agent id.
+	AgentID string
+	// TimeWindow, if set ("HH-HH", server local, 0-23), permits the tool only
+	// within the window.
+	TimeWindow string
 }
 
 // MCPFieldConstraint constrains one top-level param field. All checks are
@@ -243,6 +256,10 @@ func (p Policy) DeepCopy() Policy {
 				}
 				ctc.Fields = fields
 			}
+			if tc.AllowWhen != nil {
+				aw := *tc.AllowWhen
+				ctc.AllowWhen = &aw
+			}
 			cs[tool] = ctc
 		}
 		cp.MCP.Tools.Constraints = cs
@@ -325,6 +342,12 @@ type rawMCPTools struct {
 type rawMCPToolConstraint struct {
 	MaxArgsBytes int                              `yaml:"maxArgsBytes"`
 	Fields       map[string]rawMCPFieldConstraint `yaml:"fields"`
+	AllowWhen    *rawMCPToolCondition             `yaml:"allowWhen"`
+}
+
+type rawMCPToolCondition struct {
+	AgentID    string `yaml:"agentId"`
+	TimeWindow string `yaml:"timeWindow"`
 }
 
 type rawMCPFieldConstraint struct {
@@ -610,6 +633,12 @@ func parseMCP(r *rawMCP) MCPConfig {
 						tc.Fields[field] = MCPFieldConstraint(rf)
 					}
 				}
+				if rc.AllowWhen != nil {
+					tc.AllowWhen = &MCPToolCondition{
+						AgentID:    rc.AllowWhen.AgentID,
+						TimeWindow: rc.AllowWhen.TimeWindow,
+					}
+				}
 				mc.Tools.Constraints[tool] = tc
 			}
 		}
@@ -692,15 +721,8 @@ func validate(p Policy) error {
 			}
 		}
 		if e.TimeWindow != "" {
-			parts := strings.SplitN(e.TimeWindow, "-", 2)
-			if len(parts) != 2 {
-				return fmt.Errorf("config: policy.allowlist[%d]: invalid timeWindow format %q", i, e.TimeWindow)
-			}
-			for _, p := range parts {
-				h, err := strconv.Atoi(p)
-				if err != nil || h < 0 || h > 23 {
-					return fmt.Errorf("config: policy.allowlist[%d]: invalid timeWindow hour %q", i, e.TimeWindow)
-				}
+			if err := validateTimeWindow(fmt.Sprintf("policy.allowlist[%d].timeWindow", i), e.TimeWindow); err != nil {
+				return err
 			}
 		}
 		// Regex domain: ~<pattern>
@@ -807,6 +829,24 @@ func validateRateLimit(name, raw string) error {
 	return nil
 }
 
+// validateTimeWindow checks the shared "HH-HH" time-window format (two hours in
+// 0-23, server local time), returning a descriptive error keyed by name. Reused
+// by the allowlist and the MCP per-tool conditions so the format stays in one
+// place.
+func validateTimeWindow(name, raw string) error {
+	parts := strings.SplitN(raw, "-", 2)
+	if len(parts) != 2 {
+		return fmt.Errorf("config: %s: invalid timeWindow format %q", name, raw)
+	}
+	for _, p := range parts {
+		h, err := strconv.Atoi(p)
+		if err != nil || h < 0 || h > 23 {
+			return fmt.Errorf("config: %s: invalid timeWindow hour %q", name, raw)
+		}
+	}
+	return nil
+}
+
 // validateMCP enforces the MCP block's requirements only when it is enabled, so
 // a disabled block with default-valued config is always valid (back-compat:
 // configs that omit mcp never fail here).
@@ -856,6 +896,11 @@ func validateMCP(m MCPConfig) error {
 		}
 		if tc.MaxArgsBytes < 0 {
 			return fmt.Errorf("config: mcp.tools.constraints[%q].maxArgsBytes must not be negative", tool)
+		}
+		if tc.AllowWhen != nil && tc.AllowWhen.TimeWindow != "" {
+			if err := validateTimeWindow(fmt.Sprintf("mcp.tools.constraints[%q].allowWhen", tool), tc.AllowWhen.TimeWindow); err != nil {
+				return err
+			}
 		}
 		for field, fc := range tc.Fields {
 			if strings.TrimSpace(field) == "" {

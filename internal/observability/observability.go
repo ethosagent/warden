@@ -14,8 +14,8 @@
 // so the bounded-label contract is explicit — an MCP tool name is NEVER a label,
 // it is unbounded and lives only in the analytics store):
 //
-//	RecordBlocked(reason):       mcp_tool_denied, mcp_poisoning, mcp_schema_drift_blocked,
-//	                              mcp_args_constraint, mcp_args_too_large
+//	RecordBlocked(reason):       mcp_tool_denied, mcp_tool_condition, mcp_poisoning,
+//	                              mcp_schema_drift_blocked, mcp_args_constraint, mcp_args_too_large
 //	RecordScanFinding(kind):      mcp_args_injection, mcp_args_leak, mcp_args_pii,
 //	                              mcp_args_constraint, mcp_args_too_large,
 //	                              mcp_result_injection, mcp_result_leak, mcp_result_pii,
