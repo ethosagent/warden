@@ -115,6 +115,18 @@ worker requires HTTPS for the policy pull.
   preserved) and written back to the served policy file, so every worker pulls it
   on its next poll. The editor only appears on the control plane; worker
   dashboards show policy read-only and expose no write path.
+
+  > **Writable served config required.** Saving an edit writes a temp file next
+  > to the served config and atomic-renames it into place, so the served config
+  > must live on a writable, container-user-owned location. Pass
+  > `--state-dir=<writable dir>` (the compose uses `/data`): the control plane
+  > seeds it once from `--config` and then serves+edits that writable copy, so
+  > edits persist across restarts. Without `--state-dir` the control plane edits
+  > `--config` in place — fine for a writable file, but with a read-only
+  > single-file `--config` mount (see [Standalone](#standalone-no-docker), the
+  > `:ro` mount) the dashboard surfaces a `permission denied` error and editing
+  > is effectively disabled. The control plane logs a clear warning at startup
+  > when its served-config directory is not writable.
 - **Connected workers** — a live list of every worker the control plane has heard
   from (via policy pulls and analytics ingest): online/offline status, last-seen,
   last policy pull, and events forwarded. Hidden on a single-node dashboard.

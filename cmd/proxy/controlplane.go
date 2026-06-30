@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -42,8 +43,9 @@ func newControlPlaneCmd() *cobra.Command {
 			caCert, _ := cmd.Flags().GetString("ca-cert")
 			caKey, _ := cmd.Flags().GetString("ca-key")
 			tlsHost, _ := cmd.Flags().GetString("tls-host")
+			stateDir, _ := cmd.Flags().GetString("state-dir")
 			maxEvents, _ := cmd.Flags().GetInt("central-max-events")
-			return runControlPlane(cmd, configPath, listenAddr, tokenEnv, caCert, caKey, tlsHost, maxEvents)
+			return runControlPlane(cmd, configPath, listenAddr, tokenEnv, caCert, caKey, tlsHost, stateDir, maxEvents)
 		},
 	}
 	cmd.Flags().String("listen", "0.0.0.0:7070", "control-plane HTTP(S) listen address")
@@ -51,14 +53,31 @@ func newControlPlaneCmd() *cobra.Command {
 	cmd.Flags().String("ca-cert", "", "CA cert to mint the server TLS cert from (enables HTTPS)")
 	cmd.Flags().String("ca-key", "", "CA key to mint the server TLS cert from")
 	cmd.Flags().String("tls-host", "localhost,127.0.0.1", "comma-separated SANs for the minted server cert")
+	cmd.Flags().String("state-dir", "", "writable directory for the served/editable config (enables dashboard editing; seeded once from --config). Empty = edit --config in place")
 	cmd.Flags().Int("central-max-events", 0, "central analytics store retention cap (0 = default)")
 	return cmd
 }
 
-func runControlPlane(cmd *cobra.Command, configPath, listenAddr, tokenEnv, caCert, caKey, tlsHost string, maxEvents int) error {
-	// Validate the policy file up front so the control plane fails loudly on a
-	// bad config rather than only when a worker first polls.
-	prov, err := config.NewLocalYAMLProvider(configPath)
+func runControlPlane(cmd *cobra.Command, configPath, listenAddr, tokenEnv, caCert, caKey, tlsHost, stateDir string, maxEvents int) error {
+	// Resolve the SERVED path. With no --state-dir we serve+edit --config in place
+	// (unchanged behavior). With --state-dir we serve+edit a writable copy seeded
+	// once from --config, so the dashboard can persist edits even when --config is
+	// a read-only mount and the container runs as a non-root user.
+	servedPath := configPath
+	seeded := false
+	if stateDir != "" {
+		servedPath = filepath.Join(stateDir, "config.yaml")
+		var serr error
+		seeded, serr = seedServedConfig(servedPath, configPath)
+		if serr != nil {
+			return fmt.Errorf("control-plane: %w", serr)
+		}
+	}
+
+	// Validate the SERVED file up front so the control plane fails loudly on a
+	// bad/corrupt config (incl. a corrupt persisted copy) rather than only when a
+	// worker first polls.
+	prov, err := config.NewLocalYAMLProvider(servedPath)
 	if err != nil {
 		return fmt.Errorf("control-plane: %w", err)
 	}
@@ -67,6 +86,25 @@ func runControlPlane(cmd *cobra.Command, configPath, listenAddr, tokenEnv, caCer
 		return err
 	}
 	logger, _ := observability.NewLogger(cmd.OutOrStdout(), pol.LogLevel, pol.LogFormat)
+
+	if stateDir != "" {
+		if seeded {
+			logger.Info("control plane serving writable config", "served", servedPath, "seededFrom", configPath)
+		} else {
+			logger.Info("control plane serving writable config", "served", servedPath, "reused", true)
+		}
+	} else {
+		logger.Info("control plane serving config in place", "served", servedPath)
+	}
+
+	// Dashboard policy/settings editing writes a temp file next to the served file
+	// then atomic-renames it into place. If that directory is not writable the edit
+	// fails at runtime; warn now (actionably) but keep serving — read/serve is fine.
+	if dir := filepath.Dir(servedPath); !dirWritable(dir) {
+		logger.Warn("control-plane: served-config directory is not writable; dashboard policy/settings editing will FAIL",
+			"dir", dir,
+			"hint", "pass --state-dir pointing at a writable, container-user-owned volume (e.g. /data) so the control plane can seed and edit a writable copy")
+	}
 
 	var token string
 	if tokenEnv != "" {
@@ -79,7 +117,7 @@ func runControlPlane(cmd *cobra.Command, configPath, listenAddr, tokenEnv, caCer
 	}
 
 	srv := controlplane.New(controlplane.Config{
-		PolicyPath: configPath,
+		PolicyPath: servedPath,
 		Token:      token,
 		MaxEvents:  maxEvents,
 		Logger:     logger,
@@ -144,4 +182,45 @@ func runControlPlane(cmd *cobra.Command, configPath, listenAddr, tokenEnv, caCer
 		}
 		return err
 	}
+}
+
+// seedServedConfig ensures servedPath exists, seeding it once from seedPath when
+// absent. It returns (true, nil) when it created servedPath from the seed, and
+// (false, nil) when servedPath already existed (so dashboard edits persist across
+// restarts — that is the point of the writable volume). The seed copy is written
+// 0600 in a 0700 directory: only the container user can read or edit the served
+// config.
+func seedServedConfig(servedPath, seedPath string) (bool, error) {
+	if _, err := os.Stat(servedPath); err == nil {
+		return false, nil // already present — keep persisted edits
+	} else if !os.IsNotExist(err) {
+		return false, fmt.Errorf("stat served config %s: %w", servedPath, err)
+	}
+	if err := os.MkdirAll(filepath.Dir(servedPath), 0o700); err != nil {
+		return false, fmt.Errorf("create state dir %s: %w", filepath.Dir(servedPath), err)
+	}
+	seed, err := os.ReadFile(seedPath)
+	if err != nil {
+		return false, fmt.Errorf("read seed config %s: %w", seedPath, err)
+	}
+	if err := os.WriteFile(servedPath, seed, 0o600); err != nil {
+		return false, fmt.Errorf("write served config %s: %w", servedPath, err)
+	}
+	return true, nil
+}
+
+// dirWritable reports whether dir is writable by creating and removing a temp
+// file in it. A non-existent dir or one the process cannot write to returns
+// false. It is used to warn early when dashboard policy/settings editing (which
+// writes a temp file next to the served config, then atomic-renames it) would
+// fail at runtime.
+func dirWritable(dir string) bool {
+	f, err := os.CreateTemp(dir, ".warden-writecheck-*")
+	if err != nil {
+		return false
+	}
+	name := f.Name()
+	_ = f.Close()
+	_ = os.Remove(name)
+	return true
 }

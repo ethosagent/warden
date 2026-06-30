@@ -1072,9 +1072,50 @@ let settingsEditable=false;
 function mcpToolRow(name){ return `<div class="prow">
   <input class="pin" data-k="tool" placeholder="server.tool · *" value="${esc(name||'')}" style="flex:2;min-width:200px">
   <button class="prm" type="button" data-rm="1" title="remove">×</button></div>`; }
-function chk(id,label,on,dis){ return `<label class="prow" style="gap:8px;margin:0">
-  <input type="checkbox" id="${id}" ${on?"checked":""} ${dis?"disabled":""}>
-  <span style="font-size:13px">${esc(label)}</span></label>`; }
+/* ---- per-field info button + click popover ----
+   One reusable #infopop element, one delegated document click handler (reads the
+   clicked .infobtn's data-help), and an Escape handler. Only one popover open. */
+const infopop=$("#infopop");
+let infoBtnOpen=null;
+function hideInfoPop(){ infopop.classList.remove("open"); infoBtnOpen=null; }
+function showInfoPop(btn){
+  const help=btn.getAttribute("data-help")||"";
+  infopop.textContent=help;
+  infopop.classList.add("open");          // make it measurable before positioning
+  infoBtnOpen=btn;
+  const r=btn.getBoundingClientRect();
+  const sx=window.scrollX, sy=window.scrollY;
+  let left=r.left+sx;
+  const maxLeft=sx+document.documentElement.clientWidth-infopop.offsetWidth-12;
+  if(left>maxLeft) left=Math.max(sx+8,maxLeft);
+  infopop.style.left=left+"px";
+  infopop.style.top=(r.bottom+sy+6)+"px";
+}
+document.addEventListener("click",ev=>{
+  const btn=ev.target.closest&&ev.target.closest(".infobtn");
+  if(btn){
+    ev.stopPropagation();
+    if(infoBtnOpen===btn){ hideInfoPop(); } else { showInfoPop(btn); }
+    return;
+  }
+  if(infopop.classList.contains("open") && !infopop.contains(ev.target)) hideInfoPop();
+});
+document.addEventListener("keydown",ev=>{ if(ev.key==="Escape") hideInfoPop(); });
+
+/* fieldRow(labelText, helpText, controlHTML) → uniform .fld markup with the ⓘ
+   wired via data-help (no per-field listener — the delegated handler above reads it).
+   helpText "" omits the ⓘ. controlHTML is the input/select/checkbox markup. */
+function fieldRow(labelText,helpText,controlHTML){
+  const info=helpText? ` <button type="button" class="infobtn" aria-label="field info" data-help="${esc(helpText)}">i</button>`:"";
+  return `<div class="fld"><span class="fld-label">${esc(labelText)}${info}</span>${controlHTML||""}</div>`;
+}
+/* Checkbox variant: the ⓘ sits after the checkbox+label (control is the box itself). */
+function fieldCheck(id,labelText,helpText,on,dis){
+  const info=helpText? ` <button type="button" class="infobtn" aria-label="field info" data-help="${esc(helpText)}">i</button>`:"";
+  return `<label class="fld" style="cursor:pointer">
+    <input type="checkbox" id="${id}" ${on?"checked":""} ${dis?"disabled":""}>
+    <span class="fld-label">${esc(labelText)}${info}</span></label>`;
+}
 function renderMCPSettings(){
   const el=$("#panel-mcp-cfg");
   const mcp=(lastSettings&&lastSettings.mcp)||{};
@@ -1083,44 +1124,32 @@ function renderMCPSettings(){
   const dis=settingsEditable?"":"disabled";
   const modeOpt=(v,l)=>`<option value="${v}" ${mcp.mode===v?"selected":""}>${l}</option>`;
   el.innerHTML=`
-    <div class="prow" style="gap:18px">
-      ${chk("mcp-enabled","Gateway enabled",mcp.enabled,!settingsEditable)}
-      <label class="prow" style="gap:8px;margin:0">
-        <span style="font-size:13px">Mode</span>
-        <select id="mcp-mode" class="pin" ${dis}>${modeOpt("monitor","monitor")}${modeOpt("enforce","enforce")}</select>
-      </label>
-      ${chk("mcp-failclosed","Fail closed on error",mcp.failClosedOnError,!settingsEditable)}
-    </div>
-    <div class="prow" style="gap:8px;align-items:center">
-      <span style="font-size:13px">Max response scan bytes</span>
-      <input class="pin" type="number" id="mcp-maxbytes" value="${mcp.maxResponseScanBytes?mcp.maxResponseScanBytes:''}" placeholder="0 = unlimited" style="width:140px" ${dis}>
-    </div>
+    ${fieldCheck("mcp-enabled","Gateway enabled","Turn the MCP egress gateway on or off for this fleet.",mcp.enabled,!settingsEditable)}
+    ${fieldRow("Mode","monitor = observe and log tool calls only; enforce = block tool calls that violate policy.",
+      `<select id="mcp-mode" class="pin" ${dis}>${modeOpt("monitor","monitor")}${modeOpt("enforce","enforce")}</select>`)}
+    ${fieldCheck("mcp-failclosed","Fail closed on error","When the gateway errors, deny the call instead of letting it through.",mcp.failClosedOnError,!settingsEditable)}
+    ${fieldRow("Max response scan bytes","Max bytes of a tool response to scan for sensitive data (0 = unlimited).",
+      `<input class="pin" type="number" id="mcp-maxbytes" value="${mcp.maxResponseScanBytes?mcp.maxResponseScanBytes:''}" placeholder="0 = unlimited" style="width:140px" ${dis}>`)}
     <div class="psub">Scanning</div>
-    <div class="prow" style="gap:18px">
-      ${chk("mcp-scan-args","Scan tool args",scan.toolArgs,!settingsEditable)}
-      ${chk("mcp-scan-results","Scan tool results",scan.toolResults,!settingsEditable)}
-      ${chk("mcp-scan-profile","Profile schema",scan.profileSchema,!settingsEditable)}
-      ${chk("mcp-scan-pii","PII: phone",scan.piiPhone,!settingsEditable)}
-      ${chk("mcp-schema-pin","Pin schema",schema.pin,!settingsEditable)}
-    </div>
-    <div class="psub">Tool allowlist <span class="dim" style="text-transform:none">— empty = all permitted</span></div>
+    ${fieldCheck("mcp-scan-args","Scan tool args","Scan tool-call arguments for secrets/PII.",scan.toolArgs,!settingsEditable)}
+    ${fieldCheck("mcp-scan-results","Scan tool results","Scan tool-call responses for secrets/PII.",scan.toolResults,!settingsEditable)}
+    ${fieldCheck("mcp-scan-profile","Profile schema","Learn and record each tool's observed argument/response schema.",scan.profileSchema,!settingsEditable)}
+    ${fieldCheck("mcp-scan-pii","PII: phone","Also flag phone-number PII during scanning.",scan.piiPhone,!settingsEditable)}
+    ${fieldCheck("mcp-schema-pin","Pin schema","Pin each tool's observed input schema and reject drift from it.",schema.pin,!settingsEditable)}
+    <div class="psub">Tool allowlist <span class="dim" style="text-transform:none">— empty = all permitted</span>
+      <button type="button" class="infobtn" aria-label="field info" data-help="Tool-name allow/deny lists; deny wins. Empty allow = all tools permitted unless denied.">i</button></div>
     <div id="mcp-allow-rows">${allow.map(mcpToolRow).join("")}</div>
     ${settingsEditable?'<button class="pbtn" type="button" id="mcp-add-allow">+ Add allow tool</button>':''}
-    <div class="psub">Tool denylist <span class="dim" style="text-transform:none">— checked first; deny wins</span></div>
+    <div class="psub">Tool denylist <span class="dim" style="text-transform:none">— checked first; deny wins</span>
+      <button type="button" class="infobtn" aria-label="field info" data-help="Tool-name allow/deny lists; deny wins. Empty allow = all tools permitted unless denied.">i</button></div>
     <div id="mcp-deny-rows">${deny.map(mcpToolRow).join("")}</div>
     ${settingsEditable?'<button class="pbtn" type="button" id="mcp-add-deny">+ Add deny tool</button>':''}
     <div class="psub">Tool-call chain</div>
-    <div class="prow" style="gap:18px;align-items:center">
-      ${chk("mcp-chain-enabled","Chain detection enabled",chain.enabled,!settingsEditable)}
-      <label class="prow" style="gap:8px;margin:0">
-        <span style="font-size:13px">Window size</span>
-        <input class="pin" type="number" id="mcp-chain-window" value="${chain.windowSize?chain.windowSize:''}" placeholder="0" style="width:90px" ${dis}>
-      </label>
-    </div>
-    <div class="prow" style="gap:8px;align-items:center">
-      <span style="font-size:13px">Patterns</span>
-      <input class="pin" id="mcp-chain-patterns" value="${esc((chain.patterns||[]).join(', '))}" placeholder="comma-separated" style="flex:1;min-width:200px" ${dis}>
-    </div>
+    ${fieldCheck("mcp-chain-enabled","Chain detection enabled","Detect suspicious sequences of tool calls within a sliding window.",chain.enabled,!settingsEditable)}
+    ${fieldRow("Window size","How many recent tool calls the chain detector inspects.",
+      `<input class="pin" type="number" id="mcp-chain-window" value="${chain.windowSize?chain.windowSize:''}" placeholder="0" style="width:90px" ${dis}>`)}
+    ${fieldRow("Patterns","Comma-separated tool-name sequences to flag as suspicious chains.",
+      `<input class="pin" id="mcp-chain-patterns" value="${esc((chain.patterns||[]).join(', '))}" placeholder="comma-separated" style="flex:1;min-width:200px" ${dis}>`)}
     ${settingsEditable?`<div style="margin-top:14px;display:flex;gap:8px;align-items:center">
       <button class="pbtn primary" type="button" id="mcp-save">Save MCP settings</button>
       <button class="pbtn" type="button" id="mcp-reload">Reset</button>
@@ -1183,12 +1212,10 @@ async function saveMCPSettings(){
 }
 
 /* ---- Judge & agents settings editor (shares lastSettings + settingsEditable) ---- */
-function judgeNumRow(id,label,val,placeholder){ const dis=settingsEditable?"":"disabled"; return `<label class="prow" style="gap:8px;margin:0">
-  <span style="font-size:13px">${esc(label)}</span>
-  <input class="pin" type="number" id="${id}" value="${val||val===0?val:''}" placeholder="${esc(placeholder||'')}" style="width:120px" ${dis}></label>`; }
-function judgeTextRow(id,label,val,placeholder){ const dis=settingsEditable?"":"disabled"; return `<label class="prow" style="gap:8px;margin:0">
-  <span style="font-size:13px">${esc(label)}</span>
-  <input class="pin" type="text" id="${id}" value="${esc(val||'')}" placeholder="${esc(placeholder||'')}" style="flex:1;min-width:160px" ${dis}></label>`; }
+function judgeNumRow(id,label,help,val,placeholder){ const dis=settingsEditable?"":"disabled";
+  return fieldRow(label,help,`<input class="pin" type="number" id="${id}" value="${val||val===0?val:''}" placeholder="${esc(placeholder||'')}" style="width:120px" ${dis}>`); }
+function judgeTextRow(id,label,help,val,placeholder){ const dis=settingsEditable?"":"disabled";
+  return fieldRow(label,help,`<input class="pin" type="text" id="${id}" value="${esc(val||'')}" placeholder="${esc(placeholder||'')}" style="flex:1;min-width:160px" ${dis}>`); }
 function agentRow(id,policy){ return `<div class="prow" style="align-items:flex-start">
   <input class="pin" data-k="id" placeholder="agent-id" value="${esc(id||'')}" style="flex:1;min-width:120px">
   <input class="pin" data-k="policy" placeholder="natural-language policy for this agent" value="${esc(policy||'')}" style="flex:3;min-width:240px">
@@ -1199,29 +1226,18 @@ function renderJudgeSettings(){
   const cb=judge.circuitBreaker||{};
   const agents=(lastSettings&&Array.isArray(lastSettings.agents))?lastSettings.agents:[];
   el.innerHTML=`
-    <div class="prow" style="gap:18px">
-      ${chk("judge-enabled","Judge enabled",judge.enabled,!settingsEditable)}
-      ${judgeTextRow("judge-provider","Provider",judge.provider,"openai")}
-      ${judgeTextRow("judge-model","Model",judge.model,"gpt-4o-mini")}
-    </div>
-    <div class="prow" style="gap:18px">
-      ${judgeTextRow("judge-baseurl","Base URL",judge.baseURL,"https://api.openai.com/v1")}
-    </div>
-    <div class="prow" style="gap:8px;align-items:flex-start;flex-direction:column">
-      ${judgeTextRow("judge-apikeyenv","API key env var",judge.apiKeyEnv,"OPENAI_API_KEY")}
-      <span class="dim" style="font-size:11.5px">Environment variable <b>name</b> resolved on the worker — never the key itself.</span>
-    </div>
+    ${fieldCheck("judge-enabled","Judge enabled","Use an LLM judge to allow/deny domains that match neither the allowlist nor the denylist.",judge.enabled,!settingsEditable)}
+    ${judgeTextRow("judge-provider","Provider","Which LLM the judge calls (provider, model id, and API base URL).",judge.provider,"openai")}
+    ${judgeTextRow("judge-model","Model","Which LLM the judge calls (provider, model id, and API base URL).",judge.model,"gpt-4o-mini")}
+    ${judgeTextRow("judge-baseurl","Base URL","Which LLM the judge calls (provider, model id, and API base URL).",judge.baseURL,"https://api.openai.com/v1")}
+    ${judgeTextRow("judge-apikeyenv","API key env var","Name of the environment variable on each WORKER that holds the API key — never the key value itself.",judge.apiKeyEnv,"OPENAI_API_KEY")}
     <div class="psub">Limits</div>
-    <div class="prow" style="gap:18px">
-      ${judgeNumRow("judge-timeout","Timeout (s)",judge.timeoutSeconds,"30")}
-      ${judgeNumRow("judge-cachettl","Cache TTL (s)",judge.cacheTTLSeconds,"300")}
-      ${judgeTextRow("judge-ratelimit","Rate limit",judge.rateLimit,"100/hour")}
-    </div>
+    ${judgeNumRow("judge-timeout","Timeout (s)","Per-call timeout for a judge verdict.",judge.timeoutSeconds,"30")}
+    ${judgeNumRow("judge-cachettl","Cache TTL (s)","How long a judge verdict is cached before re-asking.",judge.cacheTTLSeconds,"300")}
+    ${judgeTextRow("judge-ratelimit","Rate limit","Rate limit for judge calls (e.g. 100/hour).",judge.rateLimit,"100/hour")}
     <div class="psub">Circuit breaker</div>
-    <div class="prow" style="gap:18px">
-      ${judgeNumRow("judge-cb-maxfailures","Max failures",cb.maxFailures,"5")}
-      ${judgeNumRow("judge-cb-cooldown","Cooldown (s)",cb.cooldownSeconds,"60")}
-    </div>
+    ${judgeNumRow("judge-cb-maxfailures","Max failures","Trip the circuit breaker after this many consecutive judge failures.",cb.maxFailures,"5")}
+    ${judgeNumRow("judge-cb-cooldown","Cooldown (s)","How long the breaker stays open before retrying the judge.",cb.cooldownSeconds,"60")}
     <div class="psub">Agents <span class="dim" style="text-transform:none">— per-agent natural-language policy</span></div>
     <div id="judge-agent-rows">${agents.map(a=>agentRow(a&&a.id,a&&a.policy)).join("")}</div>
     ${settingsEditable?'<button class="pbtn" type="button" id="judge-add-agent">+ Add agent</button>':''}
@@ -1298,27 +1314,15 @@ function renderRuntimeSettings(){
   const fmtOpt=(v)=>`<option value="${v}" ${format===v?"selected":""}>${v}</option>`;
   el.innerHTML=`
     <div class="psub">Logging</div>
-    <div class="prow" style="gap:18px;align-items:center">
-      <label class="prow" style="gap:8px;margin:0">
-        <span style="font-size:13px">Level</span>
-        <select id="rt-log-level" class="pin" ${dis}>${lvlOpt("debug")}${lvlOpt("info")}${lvlOpt("warn")}${lvlOpt("error")}</select>
-      </label>
-      <label class="prow" style="gap:8px;margin:0">
-        <span style="font-size:13px">Format</span>
-        <select id="rt-log-format" class="pin" ${dis}>${fmtOpt("json")}${fmtOpt("text")}</select>
-      </label>
-    </div>
-    <span class="dim" style="font-size:11.5px">Level applies live on the worker; <b>format</b> changes take effect on worker restart.</span>
+    ${fieldRow("Level","Worker log verbosity (debug/info/warn/error). Applies live on the next poll.",
+      `<select id="rt-log-level" class="pin" ${dis}>${lvlOpt("debug")}${lvlOpt("info")}${lvlOpt("warn")}${lvlOpt("error")}</select>`)}
+    ${fieldRow("Format","Log output format (json/text). Applies on worker restart, not live.",
+      `<select id="rt-log-format" class="pin" ${dis}>${fmtOpt("json")}${fmtOpt("text")}</select>`)}
     <div class="psub">Compliance</div>
-    <div class="prow" style="gap:8px;align-items:flex-start;flex-direction:column">
-      ${chk("rt-compliance-enabled","Compliance tagging enabled",compliance.enabled,!settingsEditable)}
-      <span class="dim" style="font-size:11.5px">Tags events with OWASP / MITRE ATT&amp;CK mappings.</span>
-    </div>
+    ${fieldCheck("rt-compliance-enabled","Compliance tagging enabled","Tag analytics events with OWASP/MITRE control IDs for compliance reporting.",compliance.enabled,!settingsEditable)}
     <div class="psub">Secret cache</div>
-    <div class="prow" style="gap:8px;align-items:center">
-      <span style="font-size:13px">Cache TTL (s)</span>
-      <input class="pin" type="number" id="rt-cache-ttl" value="${ttl||ttl===0?ttl:''}" placeholder="3600" style="width:120px" ${dis}>
-    </div>
+    ${fieldRow("Cache TTL (s)","Time-to-live for the worker's resolved-secret cache, in seconds.",
+      `<input class="pin" type="number" id="rt-cache-ttl" value="${ttl||ttl===0?ttl:''}" placeholder="3600" style="width:120px" ${dis}>`)}
     ${settingsEditable?`<div style="margin-top:14px;display:flex;gap:8px;align-items:center">
       <button class="pbtn primary" type="button" id="runtime-save">Save runtime settings</button>
       <button class="pbtn" type="button" id="runtime-reload">Reset</button>
@@ -1372,19 +1376,15 @@ function renderObservabilitySettings(){
   const attrRows=Object.keys(attrs).map(k=>obsAttrRow(k,attrs[k])).join("");
   el.innerHTML=`
     <span class="dim" style="font-size:11.5px">Observability changes apply on <b>worker restart</b> (not live like the settings above).</span>
-    <div class="prow" style="gap:18px;align-items:center;margin-top:8px">
-      ${chk("obs-enabled","Tracing enabled",obs.enabled,!settingsEditable)}
-      ${chk("obs-metrics-enabled","Metrics enabled",metricsEnabled,!settingsEditable)}
-    </div>
-    <div class="prow" style="gap:8px;align-items:center">
-      <span style="font-size:13px">Service name</span>
-      <input class="pin" type="text" id="obs-service-name" value="${esc(obs.serviceName||'')}" placeholder="warden" style="flex:1;min-width:160px" ${dis}>
-    </div>
-    <div class="prow" style="gap:8px;align-items:center">
-      <span style="font-size:13px">OTLP endpoint</span>
-      <input class="pin" type="text" id="obs-otlp-endpoint" value="${esc(obs.otlpEndpoint||'')}" placeholder="http://otel-collector:4317" style="flex:1;min-width:200px" ${dis}>
-    </div>
-    <div class="psub">Resource attributes <span class="dim" style="text-transform:none">— key/value labels on every span</span></div>
+    <div style="margin-top:8px"></div>
+    ${fieldCheck("obs-enabled","Tracing enabled","Emit OpenTelemetry metrics from workers. Applies on worker restart.",obs.enabled,!settingsEditable)}
+    ${fieldCheck("obs-metrics-enabled","Metrics enabled","Whether metrics are exported (vs. observability wiring only).",metricsEnabled,!settingsEditable)}
+    ${fieldRow("Service name","OTel service.name reported by workers.",
+      `<input class="pin" type="text" id="obs-service-name" value="${esc(obs.serviceName||'')}" placeholder="warden" style="flex:1;min-width:160px" ${dis}>`)}
+    ${fieldRow("OTLP endpoint","OTLP collector endpoint URL workers export to.",
+      `<input class="pin" type="text" id="obs-otlp-endpoint" value="${esc(obs.otlpEndpoint||'')}" placeholder="http://otel-collector:4317" style="flex:1;min-width:200px" ${dis}>`)}
+    <div class="psub">Resource attributes <span class="dim" style="text-transform:none">— key/value labels on every span</span>
+      <button type="button" class="infobtn" aria-label="field info" data-help="Extra OTel resource labels (key/value) attached to all telemetry.">i</button></div>
     <div id="obs-attr-rows">${attrRows}</div>
     ${settingsEditable?'<button class="pbtn" type="button" id="obs-add-attr">+ Add attribute</button>':''}
     ${settingsEditable?`<div style="margin-top:14px;display:flex;gap:8px;align-items:center">
@@ -1439,7 +1439,7 @@ async function saveObservabilitySettings(){
 }
 
 /* Render all editor cards from the single shared lastSettings. */
-function renderAllSettings(){ renderMCPSettings(); renderJudgeSettings(); renderRuntimeSettings(); renderObservabilitySettings(); }
+function renderAllSettings(){ hideInfoPop(); renderMCPSettings(); renderJudgeSettings(); renderRuntimeSettings(); renderObservabilitySettings(); }
 async function loadSettings(){
   try{
     const r=await fetch("/dashboard/api/settings"); if(!r.ok) throw 0;
