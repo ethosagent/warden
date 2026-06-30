@@ -3,8 +3,11 @@ package main
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -14,9 +17,11 @@ import (
 	"os"
 	"time"
 
+	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/audit"
 	"github.com/ethosagent/warden/internal/auth"
 	"github.com/ethosagent/warden/internal/config"
+	"github.com/ethosagent/warden/internal/mcp/gateway"
 	"github.com/ethosagent/warden/internal/policy"
 	"github.com/ethosagent/warden/internal/proxy"
 )
@@ -64,6 +69,32 @@ func newSafeHTTPClient(timeout time.Duration, caCertPath string) (*http.Client, 
 	return &http.Client{Timeout: timeout, Transport: tr}, nil
 }
 
+// newControlPlaneHTTPClient builds an *http.Client for the worker's own trusted,
+// operator-configured control-plane connection (policy is pulled by a separate
+// client; this is for central analytics forwarding). It deliberately does NOT use
+// the SafeDialer: SSRF protection guards AGENT-driven egress, but the control
+// plane is the worker's own infrastructure and is commonly on a PRIVATE network
+// (e.g. a Docker/Kubernetes service), which the SafeDialer would block. caCertPath
+// (optional) adds a private CA to this client's pool only.
+func newControlPlaneHTTPClient(timeout time.Duration, caCertPath string) (*http.Client, error) {
+	tr := &http.Transport{ForceAttemptHTTP2: true}
+	if caCertPath != "" {
+		pool, pErr := x509.SystemCertPool()
+		if pErr != nil || pool == nil {
+			pool = x509.NewCertPool()
+		}
+		pem, rErr := os.ReadFile(caCertPath)
+		if rErr != nil {
+			return nil, fmt.Errorf("control-plane client: read ca cert %q: %w", caCertPath, rErr)
+		}
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("control-plane client: no certificates found in %q", caCertPath)
+		}
+		tr.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+	}
+	return &http.Client{Timeout: timeout, Transport: tr}, nil
+}
+
 // buildTransformers constructs the per-destination auth transformers from config.
 // Credential fields are ${ENV}-expanded here so the agent never holds them and
 // they never appear in the parsed config struct that backs the dashboard.
@@ -103,28 +134,112 @@ func buildTransformers(entries []config.AuthEntry, client *http.Client) ([]*auth
 	return out, nil
 }
 
-// pollControlPlane periodically re-pulls policy from the control plane and
-// hot-swaps the live evaluator on success. A failed pull is logged and the
-// last-known-good policy is kept, so a worker keeps running through a
-// control-plane outage. It returns when ctx is cancelled.
-func pollControlPlane(ctx context.Context, rp *config.RemoteProvider, ev *policy.Evaluator, interval time.Duration, logger *slog.Logger) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+// longPollControlPlane holds a long-poll against the control plane: the CP
+// returns immediately when policy changes (hot-swapping the evaluator) or after
+// `wait` with no change, and the worker re-polls at once. A failed poll is logged
+// and the last-known-good policy is kept (capped backoff), so a worker rides out
+// a control-plane outage. It returns when ctx is cancelled.
+//
+// onApply, when non-nil, runs after each applied policy change (same long-poll
+// round-trip) so the worker can apply the distributed behavioral settings —
+// notably rebuilding + atomically swapping the MCP gateway — in lock-step with
+// the allow/deny reload. It is passed as a closure (built in run.go) so wiring
+// stays free of the proxy/scanner/store internals the rebuild needs.
+func longPollControlPlane(ctx context.Context, rp *config.RemoteProvider, ev *policy.Evaluator, wait time.Duration, logger *slog.Logger, onApply func()) {
+	const maxBackoff = 15 * time.Second
+	backoff := time.Second
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		changed, err := rp.PollLong(ctx, wait)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			logger.Warn("control plane long-poll failed; keeping last-known policy", "error", err)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+			}
+			if backoff *= 2; backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+			continue
+		}
+		backoff = time.Second
+		if changed {
+			if remote, gErr := rp.GetPolicy(); gErr == nil {
+				ev.Replace(remote)
+				logger.Info("control plane policy reloaded")
+				// Apply behavioral settings (e.g. MCP gateway rebuild) in the same
+				// round-trip, so a single long-poll lands both policy and settings.
+				if onApply != nil {
+					onApply()
+				}
+			}
+		}
+		// 304 (no change): re-poll immediately.
+	}
+}
+
+// pushMCPSnapshots forwards this worker's MCP inventory + observed schema to the
+// control plane over the analytics ingest channel. It pushes whenever the
+// snapshot changes (hash-gated) and unconditionally every few ticks as a safety
+// net (so a restarted control plane re-learns the snapshot). It returns when ctx
+// is cancelled. The snapshot is value-free — only paths, types, and sensitivity.
+func pushMCPSnapshots(ctx context.Context, gw *gateway.Gateway, remote *analytics.HTTPRemoteStore, interval time.Duration, logger *slog.Logger) {
+	const forceEveryN = 5
+	var lastHash string
+	ticks := 0
+	push := func(force bool) {
+		snap := analytics.MCPSnapshot{Inventory: gw.Inventory(), Schema: gw.SchemaSnapshot()}
+		h := hashMCPSnapshot(snap)
+		if h == lastHash && !force {
+			return
+		}
+		if err := remote.SendMCP(snap); err != nil {
+			if ctx.Err() == nil {
+				logger.Debug("mcp snapshot push failed; will retry", "error", err)
+			}
+			return
+		}
+		lastHash = h
+	}
+	push(true) // initial full push
+	t := time.NewTicker(interval)
+	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			if err := rp.Pull(); err != nil {
-				logger.Warn("control plane pull failed; keeping last-known policy", "error", err)
-				continue
+		case <-t.C:
+			ticks++
+			push(ticks%forceEveryN == 0)
+		}
+	}
+}
+
+func hashMCPSnapshot(snap analytics.MCPSnapshot) string {
+	b, _ := json.Marshal(snap)
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// heartbeatControlPlane pings the control plane every interval so it lists this
+// worker as online even when idle (no traffic, long-poll held open).
+func heartbeatControlPlane(ctx context.Context, rp *config.RemoteProvider, interval time.Duration, logger *slog.Logger) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if err := rp.Heartbeat(ctx); err != nil && ctx.Err() == nil {
+				logger.Debug("control plane heartbeat failed", "error", err)
 			}
-			remote, err := rp.GetPolicy()
-			if err != nil {
-				continue
-			}
-			ev.Replace(remote)
-			logger.Debug("control plane policy reloaded")
 		}
 	}
 }

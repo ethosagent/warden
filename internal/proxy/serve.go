@@ -83,9 +83,9 @@ func (p *Proxy) handleConn(conn net.Conn) {
 	//   NoMatch -> if the judge is enabled, let CONNECT proceed to TLS
 	//              termination so the judge can inspect the full request;
 	//              otherwise default-deny exactly as before (403).
-	judgeEnabled := p.cfg.Judge != nil
+	judgeEnabled := p.judge() != nil
 	if decision == policy.Deny || (decision == policy.NoMatch && !judgeEnabled) {
-		_ = p.cfg.Analytics.StoreEvent(analytics.Event{
+		_ = p.analyticsStore().StoreEvent(analytics.Event{
 			Timestamp: time.Now(),
 			Domain:    domain,
 			Port:      port,
@@ -109,7 +109,7 @@ func (p *Proxy) handleConn(conn net.Conn) {
 	// NoMatch request must fail closed here — only statically Allowed
 	// destinations may be raw-tunneled.
 	if decision == policy.NoMatch {
-		_ = p.cfg.Analytics.StoreEvent(analytics.Event{
+		_ = p.analyticsStore().StoreEvent(analytics.Event{
 			Timestamp: time.Now(),
 			Domain:    domain,
 			Port:      port,
@@ -124,7 +124,7 @@ func (p *Proxy) handleConn(conn net.Conn) {
 	}
 
 	_, _ = fmt.Fprint(conn, "HTTP/1.1 200 Connection Established\r\n\r\n")
-	_ = p.cfg.Analytics.StoreEvent(analytics.Event{
+	_ = p.analyticsStore().StoreEvent(analytics.Event{
 		Timestamp: time.Now(),
 		Domain:    domain,
 		Port:      port,
@@ -139,7 +139,7 @@ func (p *Proxy) handleConn(conn net.Conn) {
 // storeDeny records a deny decision (headers/metadata only — never bodies). The
 // reason is a bounded enum used for the warden.blocked.total{reason} metric.
 func (p *Proxy) storeDeny(domain string, port int, protocol, reason string) {
-	_ = p.cfg.Analytics.StoreEvent(analytics.Event{
+	_ = p.analyticsStore().StoreEvent(analytics.Event{
 		Timestamp: time.Now(),
 		Domain:    domain,
 		Port:      port,

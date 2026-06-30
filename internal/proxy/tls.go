@@ -44,7 +44,7 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 		if dialErr != nil {
 			return
 		}
-		_ = p.cfg.Analytics.StoreEvent(analytics.Event{
+		_ = p.analyticsStore().StoreEvent(analytics.Event{
 			Timestamp: time.Now(),
 			Domain:    domain,
 			Port:      port,
@@ -118,7 +118,7 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 	if detected == protocol.Unknown {
 		proto = "raw"
 	}
-	_ = p.cfg.Analytics.StoreEvent(analytics.Event{
+	_ = p.analyticsStore().StoreEvent(analytics.Event{
 		Timestamp: time.Now(),
 		Domain:    domain,
 		Port:      port,

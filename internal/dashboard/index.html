@@ -54,6 +54,11 @@ header h1 .sub{color:var(--muted); font-weight:450}
 .dot{width:8px; height:8px; border-radius:50%; background:var(--teal); box-shadow:0 0 0 0 rgba(45,212,191,.6); animation:pulse 2.2s infinite}
 @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(45,212,191,.55)}70%{box-shadow:0 0 0 8px rgba(45,212,191,0)}100%{box-shadow:0 0 0 0 rgba(45,212,191,0)}}
 
+/* view hide/show + config view intro */
+.viewhide{display:none}
+.config-intro{color:var(--muted); font-size:13px; margin:0 0 18px}
+.config-intro b{color:var(--text); font-weight:600}
+
 main{max-width:1400px; margin:0 auto; padding:24px 28px 64px}
 
 /* cards */
@@ -186,6 +191,43 @@ tr.mcp-head:hover>td{background:rgba(148,163,184,.06)}
   main{padding:18px 16px 48px}
   header{padding:12px 16px}
 }
+/* policy editor + workers */
+.prow{display:flex; gap:6px; margin-bottom:6px; align-items:center; flex-wrap:wrap}
+.pin{background:#0b1220; border:1px solid var(--border); color:var(--text); border-radius:6px; padding:5px 8px; font-size:13px; font-family:inherit}
+.pin:focus{outline:none; border-color:var(--teal)}
+.prm{appearance:none; border:none; background:rgba(245,158,11,.16); color:var(--amber); border-radius:6px; width:26px; height:26px; cursor:pointer; font-size:15px; line-height:1}
+.pbtn{appearance:none; border:1px solid var(--border); background:transparent; color:var(--text); border-radius:7px; padding:6px 12px; cursor:pointer; font-size:13px; font-weight:600}
+.pbtn.primary{background:rgba(45,212,191,.16); color:var(--teal); border-color:transparent}
+.pbtn:hover{border-color:var(--teal)}
+.psub{font-size:12px; color:var(--dim, #94a3b8); text-transform:uppercase; letter-spacing:.04em; margin:10px 0 6px}
+.wdot{display:inline-block; width:8px; height:8px; border-radius:50%; vertical-align:middle}
+.wdot.on{background:#34d399; box-shadow:0 0 6px rgba(52,211,153,.6)}
+.wdot.off{background:#64748b}
+
+/* config editor field rhythm — uniform vertical spacing + label→control alignment.
+   Every field row in the MCP/Judge/Runtime/Observability cards uses .fld so the
+   spacing is identical; .prow add/remove lists sit in the same rhythm. */
+.fld{display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin:0 0 12px}
+.fld:last-child{margin-bottom:0}
+.fld-label{display:inline-flex; align-items:center; gap:5px; font-size:13px; color:var(--text)}
+.fld .pin,.fld select.pin{margin:0}
+#view-config .prow{margin:0 0 12px}
+#view-config .prow:last-child{margin-bottom:0}
+#view-config #allow-rows,#view-config #deny-rows,
+#view-config #mcp-allow-rows,#view-config #mcp-deny-rows,
+#view-config #judge-agent-rows,#view-config #obs-attr-rows{margin:0 0 12px}
+
+/* per-field info button + click popover */
+.infobtn{appearance:none; border:1px solid var(--border2); background:rgba(148,163,184,.08);
+  color:var(--muted); width:16px; height:16px; border-radius:50%; padding:0; cursor:pointer;
+  font-size:11px; line-height:1; font-style:normal; font-weight:600; display:inline-flex;
+  align-items:center; justify-content:center; flex:0 0 auto; transition:color .15s,background .15s,border-color .15s}
+.infobtn:hover{color:var(--teal); border-color:var(--teal); background:rgba(45,212,191,.12)}
+.infobtn:focus-visible{outline:1px solid var(--teal); outline-offset:1px}
+.infopop{position:absolute; z-index:200; max-width:280px; background:var(--panel);
+  border:1px solid var(--border2); border-radius:8px; padding:8px 10px; color:var(--text);
+  font-size:12px; line-height:1.45; box-shadow:var(--shadow); display:none}
+.infopop.open{display:block}
 </style>
 </head>
 <body>
@@ -210,6 +252,10 @@ tr.mcp-head:hover>td{background:rgba(148,163,184,.06)}
     </svg>
     <h1>Warden <span class="sub">— Egress Analytics</span></h1>
   </div>
+  <div class="rangectl" id="viewctl" role="group" aria-label="View">
+    <button type="button" data-view="analytics" class="active" aria-pressed="true">Analytics</button>
+    <button type="button" data-view="config" aria-pressed="false">Config</button>
+  </div>
   <div class="spacer"></div>
   <div class="rangectl" id="proxyctl" role="group" aria-label="Worker" style="display:none"></div>
   <div class="rangectl" id="rangectl" role="group" aria-label="Time window"></div>
@@ -220,6 +266,8 @@ tr.mcp-head:hover>td{background:rgba(148,163,184,.06)}
 <span hidden>Warden Dashboard</span>
 
 <main>
+  <!-- ANALYTICS VIEW (default) -->
+  <div id="view-analytics">
   <!-- HERO -->
   <section class="hero">
     <div class="card" id="hero-volume">
@@ -256,6 +304,11 @@ tr.mcp-head:hover>td{background:rgba(148,163,184,.06)}
 
   <!-- GRID -->
   <section class="grid">
+    <div class="card col-full" id="card-workers" style="display:none">
+      <div class="ttl"><h3>Connected workers</h3></div>
+      <div id="panel-workers"></div>
+    </div>
+
     <div class="card col-full">
       <div class="ttl"><h3 id="dom-heading">Top destinations</h3></div>
       <div id="panel-domains"></div>
@@ -331,9 +384,53 @@ tr.mcp-head:hover>td{background:rgba(148,163,184,.06)}
       <div id="panel-mcp"></div>
     </div>
   </section>
+  </div><!-- /#view-analytics -->
+
+  <!-- CONFIG VIEW (fleet-mutating controls) -->
+  <div id="view-config" class="viewhide">
+    <p class="config-intro">Fleet configuration — changes here apply to <b>every connected worker</b> on its next policy poll. More editors (MCP, judge, observability, …) land here in later phases.</p>
+    <section class="grid">
+      <div class="card col-full" id="card-policy">
+        <div class="ttl" style="display:flex;align-items:center;justify-content:space-between">
+          <h3>Policy</h3>
+          <span id="policy-status" class="dim" style="font-size:12px"></span>
+        </div>
+        <div id="panel-policy"></div>
+      </div>
+      <div class="card col-full" id="card-mcp">
+        <div class="ttl" style="display:flex;align-items:center;justify-content:space-between">
+          <h3>MCP gateway</h3>
+          <span id="mcp-status" class="dim" style="font-size:12px"></span>
+        </div>
+        <div id="panel-mcp-cfg"></div>
+      </div>
+      <div class="card col-full" id="card-judge">
+        <div class="ttl" style="display:flex;align-items:center;justify-content:space-between">
+          <h3>Judge &amp; agents</h3>
+          <span id="judge-status" class="dim" style="font-size:12px"></span>
+        </div>
+        <div id="panel-judge-cfg"></div>
+      </div>
+      <div class="card col-full" id="card-runtime">
+        <div class="ttl" style="display:flex;align-items:center;justify-content:space-between">
+          <h3>Runtime settings</h3>
+          <span id="runtime-status" class="dim" style="font-size:12px"></span>
+        </div>
+        <div id="panel-runtime-cfg"></div>
+      </div>
+      <div class="card col-full" id="card-observability">
+        <div class="ttl" style="display:flex;align-items:center;justify-content:space-between">
+          <h3>Observability</h3>
+          <span id="observability-status" class="dim" style="font-size:12px"></span>
+        </div>
+        <div id="panel-observability-cfg"></div>
+      </div>
+    </section>
+  </div><!-- /#view-config -->
 </main>
 
 <div class="tip" id="tip"></div>
+<div class="infopop" id="infopop" role="tooltip"></div>
 
 <script>
 "use strict";
@@ -364,6 +461,24 @@ function buildRangeControl(){
       load();
     });
     ctl.appendChild(b);
+  });
+}
+
+/* ---- top-level view toggle (Analytics / Config) ---- */
+// Pure show/hide between #view-analytics and #view-config. Analytics keeps
+// auto-refreshing in the background regardless of which view is active.
+function buildViewControl(){
+  const ctl=$("#viewctl"); if(!ctl) return;
+  ctl.addEventListener("click",ev=>{
+    const b=ev.target.closest("button[data-view]"); if(!b) return;
+    const view=b.dataset.view;
+    ctl.querySelectorAll("button").forEach(btn=>{
+      const on=btn.dataset.view===view;
+      btn.classList.toggle("active",on);
+      btn.setAttribute("aria-pressed",on?"true":"false");
+    });
+    $("#view-analytics").classList.toggle("viewhide",view!=="analytics");
+    $("#view-config").classList.toggle("viewhide",view!=="config");
   });
 }
 
@@ -842,6 +957,504 @@ function renderCompliance(data){
   el.innerHTML=h;
 }
 
+/* ---- connected workers (control-plane fleet view) ---- */
+function renderWorkers(rows){
+  const card=$("#card-workers"), el=$("#panel-workers");
+  rows=rows||[];
+  if(!rows.length){ card.style.display="none"; return; }
+  card.style.display="";
+  let h=`<table><thead><tr><th>Status</th><th>Worker</th><th>Policy</th><th class="num">Events fwd</th><th>Last seen</th><th>Last policy pull</th></tr></thead><tbody>`;
+  rows.forEach(r=>{
+    const etag=r.policyETag?String(r.policyETag).slice(0,8):"—";
+    const policyCell=r.behind
+      ? `<span class="mono dim">${esc(etag)}</span> <span class="pill t4">behind</span>`
+      : `<span class="mono dim">${esc(etag)}</span>`;
+    h+=`<tr>
+      <td style="white-space:nowrap"><span class="wdot ${r.online?'on':'off'}"></span> <span class="dim">${r.online?'online':'offline'}</span></td>
+      <td class="mono">${esc(r.proxyID)}</td>
+      <td style="white-space:nowrap">${policyCell}</td>
+      <td class="num">${fmtNum(r.eventsForwarded||0)}</td>
+      <td class="dim" style="white-space:nowrap">${esc(relTime(r.lastSeen))}</td>
+      <td class="dim" style="white-space:nowrap">${r.lastPolicyPull?esc(relTime(r.lastPolicyPull)):'—'}</td></tr>`;
+  });
+  el.innerHTML=h+"</tbody></table>";
+}
+async function loadWorkers(){
+  try{ const r=await fetch("/dashboard/api/workers"); if(!r.ok) throw 0; renderWorkers(await r.json()); }
+  catch(e){ /* keep last view */ }
+}
+
+/* ---- policy editor (control plane; read-only on workers) ---- */
+let policyEditable=false;
+function allowRow(e){ e=e||{}; return `<div class="prow">
+  <input class="pin" data-k="domain" placeholder="domain · *.suffix · ~regex" value="${esc(e.domain||'')}" style="flex:2;min-width:200px">
+  <input class="pin" data-k="port" type="number" placeholder="port" value="${e.port?e.port:''}" style="width:78px">
+  <input class="pin" data-k="rateLimit" placeholder="100/hour" value="${esc(e.rateLimit||'')}" style="width:104px">
+  <input class="pin" data-k="timeWindow" placeholder="9-17" value="${esc(e.timeWindow||'')}" style="width:74px">
+  <button class="prm" type="button" data-rm="1" title="remove">×</button></div>`; }
+function denyRow(e){ e=e||{}; return `<div class="prow">
+  <input class="pin" data-k="domain" placeholder="domain · *.suffix · ~regex" value="${esc(e.domain||'')}" style="flex:2;min-width:200px">
+  <input class="pin" data-k="port" type="number" placeholder="port" value="${e.port?e.port:''}" style="width:78px">
+  <button class="prm" type="button" data-rm="1" title="remove">×</button></div>`; }
+
+function renderPolicy(data){
+  const el=$("#panel-policy");
+  policyEditable=!!(data&&data.editable);
+  const allow=(data&&data.allowlist)||[], deny=(data&&data.denylist)||[];
+  if(!policyEditable){
+    const chips=l=>l.length? l.map(e=>`<span class="chip mono">${esc(e.domain)}${e.port?(":"+e.port):""}</span>`).join(" ") : '<span class="dim">none</span>';
+    el.innerHTML=`<div class="psub">Allowlist</div><div>${chips(allow)}</div>
+      <div class="psub">Denylist</div><div>${chips(deny)}</div>
+      <div class="dim" style="font-size:12px;margin-top:10px">Read-only — policy is managed by the control plane.</div>`;
+    el.onclick=null;
+    return;
+  }
+  el.innerHTML=`
+    <div class="psub">Allowlist <span class="dim" style="text-transform:none">— default-deny: only these are permitted</span></div>
+    <div id="allow-rows">${allow.map(allowRow).join("")}</div>
+    <button class="pbtn" type="button" id="add-allow">+ Add allow rule</button>
+    <div class="psub">Denylist <span class="dim" style="text-transform:none">— checked first; deny wins</span></div>
+    <div id="deny-rows">${deny.map(denyRow).join("")}</div>
+    <button class="pbtn" type="button" id="add-deny">+ Add deny rule</button>
+    <div style="margin-top:14px;display:flex;gap:8px;align-items:center">
+      <button class="pbtn primary" type="button" id="save-policy">Save policy</button>
+      <button class="pbtn" type="button" id="reload-policy">Reset</button>
+    </div>`;
+  // One delegated handler (property assignment, so it never accumulates across renders).
+  el.onclick=(ev)=>{
+    const t=ev.target; if(!t) return;
+    if(t.classList&&t.classList.contains("prm")){ const row=t.closest(".prow"); if(row) row.remove(); return; }
+    if(t.id==="add-allow"){ $("#allow-rows").insertAdjacentHTML("beforeend",allowRow()); return; }
+    if(t.id==="add-deny"){ $("#deny-rows").insertAdjacentHTML("beforeend",denyRow()); return; }
+    if(t.id==="save-policy"){ savePolicy(); return; }
+    if(t.id==="reload-policy"){ loadPolicy(); return; }
+  };
+}
+function collectRows(containerId){
+  const out=[];
+  document.querySelectorAll("#"+containerId+" .prow").forEach(row=>{
+    const o={};
+    row.querySelectorAll(".pin").forEach(inp=>{
+      const k=inp.getAttribute("data-k"); const v=inp.value.trim();
+      if(v==="") return;
+      if(k==="port"){ const n=parseInt(v,10); if(!isNaN(n)) o.port=n; }
+      else o[k]=v;
+    });
+    if(o.domain) out.push(o);
+  });
+  return out;
+}
+async function savePolicy(){
+  const body={allowlist:collectRows("allow-rows"), denylist:collectRows("deny-rows")};
+  const st=$("#policy-status");
+  st.textContent="saving…"; st.style.color="";
+  try{
+    const r=await fetch("/dashboard/api/policy",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    if(!r.ok){ const e=await r.json().catch(()=>({error:"status "+r.status})); throw new Error(e.error||("status "+r.status)); }
+    renderPolicy(await r.json());
+    st.textContent="saved ✓ — workers pick it up on next poll"; st.style.color="var(--teal)";
+    setTimeout(()=>{ st.textContent=""; },3000);
+  }catch(err){
+    st.textContent="✕ "+err.message; st.style.color="var(--amber)";
+  }
+}
+async function loadPolicy(){
+  try{ const r=await fetch("/dashboard/api/policy"); if(!r.ok) throw 0; renderPolicy(await r.json()); $("#policy-status").textContent=""; }
+  catch(e){ $("#panel-policy").innerHTML=emptyState("Policy unavailable"); }
+}
+
+/* ---- Shared settings editors (control plane; read-only on workers) ----
+   ONE fetch (/dashboard/api/settings) → ONE lastSettings doc → ONE editable
+   flag. Both the MCP card and the Judge card render from this single source
+   and merge their slice back into the full doc on save. ---- */
+let lastSettings=null;       // full last-fetched SettingsWire doc — preserved on save
+let settingsEditable=false;
+function mcpToolRow(name){ return `<div class="prow">
+  <input class="pin" data-k="tool" placeholder="server.tool · *" value="${esc(name||'')}" style="flex:2;min-width:200px">
+  <button class="prm" type="button" data-rm="1" title="remove">×</button></div>`; }
+function chk(id,label,on,dis){ return `<label class="prow" style="gap:8px;margin:0">
+  <input type="checkbox" id="${id}" ${on?"checked":""} ${dis?"disabled":""}>
+  <span style="font-size:13px">${esc(label)}</span></label>`; }
+function renderMCPSettings(){
+  const el=$("#panel-mcp-cfg");
+  const mcp=(lastSettings&&lastSettings.mcp)||{};
+  const tools=mcp.tools||{}, scan=mcp.scan||{}, schema=mcp.schema||{}, chain=mcp.chain||{};
+  const allow=tools.allow||[], deny=tools.deny||[];
+  const dis=settingsEditable?"":"disabled";
+  const modeOpt=(v,l)=>`<option value="${v}" ${mcp.mode===v?"selected":""}>${l}</option>`;
+  el.innerHTML=`
+    <div class="prow" style="gap:18px">
+      ${chk("mcp-enabled","Gateway enabled",mcp.enabled,!settingsEditable)}
+      <label class="prow" style="gap:8px;margin:0">
+        <span style="font-size:13px">Mode</span>
+        <select id="mcp-mode" class="pin" ${dis}>${modeOpt("monitor","monitor")}${modeOpt("enforce","enforce")}</select>
+      </label>
+      ${chk("mcp-failclosed","Fail closed on error",mcp.failClosedOnError,!settingsEditable)}
+    </div>
+    <div class="prow" style="gap:8px;align-items:center">
+      <span style="font-size:13px">Max response scan bytes</span>
+      <input class="pin" type="number" id="mcp-maxbytes" value="${mcp.maxResponseScanBytes?mcp.maxResponseScanBytes:''}" placeholder="0 = unlimited" style="width:140px" ${dis}>
+    </div>
+    <div class="psub">Scanning</div>
+    <div class="prow" style="gap:18px">
+      ${chk("mcp-scan-args","Scan tool args",scan.toolArgs,!settingsEditable)}
+      ${chk("mcp-scan-results","Scan tool results",scan.toolResults,!settingsEditable)}
+      ${chk("mcp-scan-profile","Profile schema",scan.profileSchema,!settingsEditable)}
+      ${chk("mcp-scan-pii","PII: phone",scan.piiPhone,!settingsEditable)}
+      ${chk("mcp-schema-pin","Pin schema",schema.pin,!settingsEditable)}
+    </div>
+    <div class="psub">Tool allowlist <span class="dim" style="text-transform:none">— empty = all permitted</span></div>
+    <div id="mcp-allow-rows">${allow.map(mcpToolRow).join("")}</div>
+    ${settingsEditable?'<button class="pbtn" type="button" id="mcp-add-allow">+ Add allow tool</button>':''}
+    <div class="psub">Tool denylist <span class="dim" style="text-transform:none">— checked first; deny wins</span></div>
+    <div id="mcp-deny-rows">${deny.map(mcpToolRow).join("")}</div>
+    ${settingsEditable?'<button class="pbtn" type="button" id="mcp-add-deny">+ Add deny tool</button>':''}
+    <div class="psub">Tool-call chain</div>
+    <div class="prow" style="gap:18px;align-items:center">
+      ${chk("mcp-chain-enabled","Chain detection enabled",chain.enabled,!settingsEditable)}
+      <label class="prow" style="gap:8px;margin:0">
+        <span style="font-size:13px">Window size</span>
+        <input class="pin" type="number" id="mcp-chain-window" value="${chain.windowSize?chain.windowSize:''}" placeholder="0" style="width:90px" ${dis}>
+      </label>
+    </div>
+    <div class="prow" style="gap:8px;align-items:center">
+      <span style="font-size:13px">Patterns</span>
+      <input class="pin" id="mcp-chain-patterns" value="${esc((chain.patterns||[]).join(', '))}" placeholder="comma-separated" style="flex:1;min-width:200px" ${dis}>
+    </div>
+    ${settingsEditable?`<div style="margin-top:14px;display:flex;gap:8px;align-items:center">
+      <button class="pbtn primary" type="button" id="mcp-save">Save MCP settings</button>
+      <button class="pbtn" type="button" id="mcp-reload">Reset</button>
+    </div>`:'<div class="dim" style="font-size:12px;margin-top:10px">Read-only — MCP settings are managed by the control plane.</div>'}`;
+  el.onclick=(ev)=>{
+    const t=ev.target; if(!t) return;
+    if(t.classList&&t.classList.contains("prm")){ const row=t.closest(".prow"); if(row) row.remove(); return; }
+    if(t.id==="mcp-add-allow"){ $("#mcp-allow-rows").insertAdjacentHTML("beforeend",mcpToolRow()); return; }
+    if(t.id==="mcp-add-deny"){ $("#mcp-deny-rows").insertAdjacentHTML("beforeend",mcpToolRow()); return; }
+    if(t.id==="mcp-save"){ saveMCPSettings(); return; }
+    if(t.id==="mcp-reload"){ loadSettings(); return; }
+  };
+}
+function collectMCPTools(containerId){
+  const out=[];
+  document.querySelectorAll("#"+containerId+" .prow .pin").forEach(inp=>{
+    const v=inp.value.trim(); if(v!=="") out.push(v);
+  });
+  return out;
+}
+function collectMCP(){
+  const num=id=>{ const n=parseInt(($(id).value||"").trim(),10); return isNaN(n)?0:n; };
+  return {
+    enabled:$("#mcp-enabled").checked,
+    mode:$("#mcp-mode").value,
+    failClosedOnError:$("#mcp-failclosed").checked,
+    maxResponseScanBytes:num("#mcp-maxbytes"),
+    tools:{allow:collectMCPTools("mcp-allow-rows"), deny:collectMCPTools("mcp-deny-rows")},
+    schema:{pin:$("#mcp-schema-pin").checked},
+    scan:{
+      toolArgs:$("#mcp-scan-args").checked,
+      toolResults:$("#mcp-scan-results").checked,
+      profileSchema:$("#mcp-scan-profile").checked,
+      piiPhone:$("#mcp-scan-pii").checked,
+    },
+    chain:{
+      enabled:$("#mcp-chain-enabled").checked,
+      windowSize:num("#mcp-chain-window"),
+      patterns:($("#mcp-chain-patterns").value||"").split(",").map(s=>s.trim()).filter(Boolean),
+    },
+  };
+}
+async function saveMCPSettings(){
+  const mcp=collectMCP();
+  const body=Object.assign({}, lastSettings||{}, {mcp});
+  const st=$("#mcp-status");
+  st.textContent="saving…"; st.style.color="";
+  try{
+    const r=await fetch("/dashboard/api/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    if(!r.ok){ const e=await r.json().catch(()=>({error:"status "+r.status})); throw new Error(e.error||("status "+r.status)); }
+    const d=await r.json();
+    lastSettings=(d&&d.settings)||body;
+    settingsEditable=!!(d&&d.editable);
+    renderAllSettings();
+    st.textContent="saved ✓ — workers apply on next poll"; st.style.color="var(--teal)";
+    setTimeout(()=>{ st.textContent=""; },3000);
+  }catch(err){
+    st.textContent="✕ "+err.message; st.style.color="var(--amber)";
+  }
+}
+
+/* ---- Judge & agents settings editor (shares lastSettings + settingsEditable) ---- */
+function judgeNumRow(id,label,val,placeholder){ const dis=settingsEditable?"":"disabled"; return `<label class="prow" style="gap:8px;margin:0">
+  <span style="font-size:13px">${esc(label)}</span>
+  <input class="pin" type="number" id="${id}" value="${val||val===0?val:''}" placeholder="${esc(placeholder||'')}" style="width:120px" ${dis}></label>`; }
+function judgeTextRow(id,label,val,placeholder){ const dis=settingsEditable?"":"disabled"; return `<label class="prow" style="gap:8px;margin:0">
+  <span style="font-size:13px">${esc(label)}</span>
+  <input class="pin" type="text" id="${id}" value="${esc(val||'')}" placeholder="${esc(placeholder||'')}" style="flex:1;min-width:160px" ${dis}></label>`; }
+function agentRow(id,policy){ return `<div class="prow" style="align-items:flex-start">
+  <input class="pin" data-k="id" placeholder="agent-id" value="${esc(id||'')}" style="flex:1;min-width:120px">
+  <input class="pin" data-k="policy" placeholder="natural-language policy for this agent" value="${esc(policy||'')}" style="flex:3;min-width:240px">
+  <button class="prm" type="button" data-rm="1" title="remove">×</button></div>`; }
+function renderJudgeSettings(){
+  const el=$("#panel-judge-cfg");
+  const judge=(lastSettings&&lastSettings.judge)||{};
+  const cb=judge.circuitBreaker||{};
+  const agents=(lastSettings&&Array.isArray(lastSettings.agents))?lastSettings.agents:[];
+  el.innerHTML=`
+    <div class="prow" style="gap:18px">
+      ${chk("judge-enabled","Judge enabled",judge.enabled,!settingsEditable)}
+      ${judgeTextRow("judge-provider","Provider",judge.provider,"openai")}
+      ${judgeTextRow("judge-model","Model",judge.model,"gpt-4o-mini")}
+    </div>
+    <div class="prow" style="gap:18px">
+      ${judgeTextRow("judge-baseurl","Base URL",judge.baseURL,"https://api.openai.com/v1")}
+    </div>
+    <div class="prow" style="gap:8px;align-items:flex-start;flex-direction:column">
+      ${judgeTextRow("judge-apikeyenv","API key env var",judge.apiKeyEnv,"OPENAI_API_KEY")}
+      <span class="dim" style="font-size:11.5px">Environment variable <b>name</b> resolved on the worker — never the key itself.</span>
+    </div>
+    <div class="psub">Limits</div>
+    <div class="prow" style="gap:18px">
+      ${judgeNumRow("judge-timeout","Timeout (s)",judge.timeoutSeconds,"30")}
+      ${judgeNumRow("judge-cachettl","Cache TTL (s)",judge.cacheTTLSeconds,"300")}
+      ${judgeTextRow("judge-ratelimit","Rate limit",judge.rateLimit,"100/hour")}
+    </div>
+    <div class="psub">Circuit breaker</div>
+    <div class="prow" style="gap:18px">
+      ${judgeNumRow("judge-cb-maxfailures","Max failures",cb.maxFailures,"5")}
+      ${judgeNumRow("judge-cb-cooldown","Cooldown (s)",cb.cooldownSeconds,"60")}
+    </div>
+    <div class="psub">Agents <span class="dim" style="text-transform:none">— per-agent natural-language policy</span></div>
+    <div id="judge-agent-rows">${agents.map(a=>agentRow(a&&a.id,a&&a.policy)).join("")}</div>
+    ${settingsEditable?'<button class="pbtn" type="button" id="judge-add-agent">+ Add agent</button>':''}
+    ${settingsEditable?`<div style="margin-top:14px;display:flex;gap:8px;align-items:center">
+      <button class="pbtn primary" type="button" id="judge-save">Save judge settings</button>
+      <button class="pbtn" type="button" id="judge-reload">Reset</button>
+    </div>`:'<div class="dim" style="font-size:12px;margin-top:10px">Read-only — judge &amp; agent settings are managed by the control plane.</div>'}`;
+  el.onclick=(ev)=>{
+    const t=ev.target; if(!t) return;
+    if(t.classList&&t.classList.contains("prm")){ const row=t.closest(".prow"); if(row) row.remove(); return; }
+    if(t.id==="judge-add-agent"){ $("#judge-agent-rows").insertAdjacentHTML("beforeend",agentRow()); return; }
+    if(t.id==="judge-save"){ saveJudgeSettings(); return; }
+    if(t.id==="judge-reload"){ loadSettings(); return; }
+  };
+}
+function collectJudge(){
+  const num=id=>{ const n=parseInt(($(id).value||"").trim(),10); return isNaN(n)?0:n; };
+  return {
+    enabled:$("#judge-enabled").checked,
+    provider:($("#judge-provider").value||"").trim(),
+    model:($("#judge-model").value||"").trim(),
+    baseURL:($("#judge-baseurl").value||"").trim(),
+    apiKeyEnv:($("#judge-apikeyenv").value||"").trim(),
+    timeoutSeconds:num("#judge-timeout"),
+    cacheTTLSeconds:num("#judge-cachettl"),
+    rateLimit:($("#judge-ratelimit").value||"").trim(),
+    circuitBreaker:{
+      maxFailures:num("#judge-cb-maxfailures"),
+      cooldownSeconds:num("#judge-cb-cooldown"),
+    },
+  };
+}
+function collectAgents(){
+  const out=[];
+  document.querySelectorAll("#judge-agent-rows .prow").forEach(row=>{
+    const idInp=row.querySelector('.pin[data-k="id"]');
+    const polInp=row.querySelector('.pin[data-k="policy"]');
+    const id=idInp?idInp.value.trim():"";
+    const policy=polInp?polInp.value.trim():"";
+    if(id==="" && policy==="") return;
+    out.push({id,policy});
+  });
+  return out;
+}
+async function saveJudgeSettings(){
+  const judge=collectJudge(), agents=collectAgents();
+  const body=Object.assign({}, lastSettings||{}, {judge, agents});
+  const st=$("#judge-status");
+  st.textContent="saving…"; st.style.color="";
+  try{
+    const r=await fetch("/dashboard/api/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    if(!r.ok){ const e=await r.json().catch(()=>({error:"status "+r.status})); throw new Error(e.error||("status "+r.status)); }
+    const d=await r.json();
+    lastSettings=(d&&d.settings)||body;
+    settingsEditable=!!(d&&d.editable);
+    renderAllSettings();
+    st.textContent="saved ✓ — workers apply on next poll"; st.style.color="var(--teal)";
+    setTimeout(()=>{ st.textContent=""; },3000);
+  }catch(err){
+    st.textContent="✕ "+err.message; st.style.color="var(--amber)";
+  }
+}
+
+/* ---- Runtime settings editor: logging + compliance + cache TTL
+   (shares lastSettings + settingsEditable; one combined card to avoid clutter) ---- */
+function renderRuntimeSettings(){
+  const el=$("#panel-runtime-cfg");
+  const logging=(lastSettings&&lastSettings.logging)||{};
+  const compliance=(lastSettings&&lastSettings.compliance)||{};
+  const ttl=(lastSettings&&typeof lastSettings.cacheTTLSeconds==="number")?lastSettings.cacheTTLSeconds:null;
+  const dis=settingsEditable?"":"disabled";
+  const level=logging.level||"info", format=logging.format||"json";
+  const lvlOpt=(v)=>`<option value="${v}" ${level===v?"selected":""}>${v}</option>`;
+  const fmtOpt=(v)=>`<option value="${v}" ${format===v?"selected":""}>${v}</option>`;
+  el.innerHTML=`
+    <div class="psub">Logging</div>
+    <div class="prow" style="gap:18px;align-items:center">
+      <label class="prow" style="gap:8px;margin:0">
+        <span style="font-size:13px">Level</span>
+        <select id="rt-log-level" class="pin" ${dis}>${lvlOpt("debug")}${lvlOpt("info")}${lvlOpt("warn")}${lvlOpt("error")}</select>
+      </label>
+      <label class="prow" style="gap:8px;margin:0">
+        <span style="font-size:13px">Format</span>
+        <select id="rt-log-format" class="pin" ${dis}>${fmtOpt("json")}${fmtOpt("text")}</select>
+      </label>
+    </div>
+    <span class="dim" style="font-size:11.5px">Level applies live on the worker; <b>format</b> changes take effect on worker restart.</span>
+    <div class="psub">Compliance</div>
+    <div class="prow" style="gap:8px;align-items:flex-start;flex-direction:column">
+      ${chk("rt-compliance-enabled","Compliance tagging enabled",compliance.enabled,!settingsEditable)}
+      <span class="dim" style="font-size:11.5px">Tags events with OWASP / MITRE ATT&amp;CK mappings.</span>
+    </div>
+    <div class="psub">Secret cache</div>
+    <div class="prow" style="gap:8px;align-items:center">
+      <span style="font-size:13px">Cache TTL (s)</span>
+      <input class="pin" type="number" id="rt-cache-ttl" value="${ttl||ttl===0?ttl:''}" placeholder="3600" style="width:120px" ${dis}>
+    </div>
+    ${settingsEditable?`<div style="margin-top:14px;display:flex;gap:8px;align-items:center">
+      <button class="pbtn primary" type="button" id="runtime-save">Save runtime settings</button>
+      <button class="pbtn" type="button" id="runtime-reload">Reset</button>
+    </div>`:'<div class="dim" style="font-size:12px;margin-top:10px">Read-only — runtime settings are managed by the control plane.</div>'}`;
+  el.onclick=(ev)=>{
+    const t=ev.target; if(!t) return;
+    if(t.id==="runtime-save"){ saveRuntimeSettings(); return; }
+    if(t.id==="runtime-reload"){ loadSettings(); return; }
+  };
+}
+function collectRuntime(){
+  const ttlRaw=($("#rt-cache-ttl").value||"").trim();
+  const ttl=parseInt(ttlRaw,10);
+  return {
+    logging:{ level:$("#rt-log-level").value, format:$("#rt-log-format").value },
+    compliance:{ enabled:$("#rt-compliance-enabled").checked },
+    cacheTTLSeconds:(ttlRaw===""||isNaN(ttl))?0:ttl,
+  };
+}
+async function saveRuntimeSettings(){
+  const {logging,compliance,cacheTTLSeconds}=collectRuntime();
+  const body=Object.assign({}, lastSettings||{}, {logging, compliance, cacheTTLSeconds});
+  const st=$("#runtime-status");
+  st.textContent="saving…"; st.style.color="";
+  try{
+    const r=await fetch("/dashboard/api/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    if(!r.ok){ const e=await r.json().catch(()=>({error:"status "+r.status})); throw new Error(e.error||("status "+r.status)); }
+    const d=await r.json();
+    lastSettings=(d&&d.settings)||body;
+    settingsEditable=!!(d&&d.editable);
+    renderAllSettings();
+    st.textContent="saved ✓ — workers apply on next poll"; st.style.color="var(--teal)";
+    setTimeout(()=>{ st.textContent=""; },3000);
+  }catch(err){
+    st.textContent="✕ "+err.message; st.style.color="var(--amber)";
+  }
+}
+
+/* ---- Observability settings editor (shares lastSettings + settingsEditable).
+   Unlike the live settings above, these apply on worker restart. ---- */
+function obsAttrRow(key,val){ return `<div class="prow" style="align-items:center">
+  <input class="pin" data-k="key" placeholder="attribute" value="${esc(key||'')}" style="flex:1;min-width:120px">
+  <input class="pin" data-k="val" placeholder="value" value="${esc(val||'')}" style="flex:2;min-width:160px">
+  <button class="prm" type="button" title="remove">×</button></div>`; }
+function renderObservabilitySettings(){
+  const el=$("#panel-observability-cfg");
+  const obs=(lastSettings&&lastSettings.observability)||{};
+  const attrs=(obs.resourceAttributes&&typeof obs.resourceAttributes==="object")?obs.resourceAttributes:{};
+  const metricsEnabled=(typeof obs.metricsEnabled==="boolean")?obs.metricsEnabled:true;
+  const dis=settingsEditable?"":"disabled";
+  const attrRows=Object.keys(attrs).map(k=>obsAttrRow(k,attrs[k])).join("");
+  el.innerHTML=`
+    <span class="dim" style="font-size:11.5px">Observability changes apply on <b>worker restart</b> (not live like the settings above).</span>
+    <div class="prow" style="gap:18px;align-items:center;margin-top:8px">
+      ${chk("obs-enabled","Tracing enabled",obs.enabled,!settingsEditable)}
+      ${chk("obs-metrics-enabled","Metrics enabled",metricsEnabled,!settingsEditable)}
+    </div>
+    <div class="prow" style="gap:8px;align-items:center">
+      <span style="font-size:13px">Service name</span>
+      <input class="pin" type="text" id="obs-service-name" value="${esc(obs.serviceName||'')}" placeholder="warden" style="flex:1;min-width:160px" ${dis}>
+    </div>
+    <div class="prow" style="gap:8px;align-items:center">
+      <span style="font-size:13px">OTLP endpoint</span>
+      <input class="pin" type="text" id="obs-otlp-endpoint" value="${esc(obs.otlpEndpoint||'')}" placeholder="http://otel-collector:4317" style="flex:1;min-width:200px" ${dis}>
+    </div>
+    <div class="psub">Resource attributes <span class="dim" style="text-transform:none">— key/value labels on every span</span></div>
+    <div id="obs-attr-rows">${attrRows}</div>
+    ${settingsEditable?'<button class="pbtn" type="button" id="obs-add-attr">+ Add attribute</button>':''}
+    ${settingsEditable?`<div style="margin-top:14px;display:flex;gap:8px;align-items:center">
+      <button class="pbtn primary" type="button" id="observability-save">Save observability settings</button>
+      <button class="pbtn" type="button" id="observability-reload">Reset</button>
+    </div>`:'<div class="dim" style="font-size:12px;margin-top:10px">Read-only — observability settings are managed by the control plane.</div>'}`;
+  el.onclick=(ev)=>{
+    const t=ev.target; if(!t) return;
+    if(t.classList&&t.classList.contains("prm")){ const row=t.closest(".prow"); if(row) row.remove(); return; }
+    if(t.id==="obs-add-attr"){ $("#obs-attr-rows").insertAdjacentHTML("beforeend",obsAttrRow()); return; }
+    if(t.id==="observability-save"){ saveObservabilitySettings(); return; }
+    if(t.id==="observability-reload"){ loadSettings(); return; }
+  };
+}
+function collectObservabilityAttrs(){
+  const out={};
+  document.querySelectorAll("#obs-attr-rows .prow").forEach(row=>{
+    const kInp=row.querySelector('.pin[data-k="key"]');
+    const vInp=row.querySelector('.pin[data-k="val"]');
+    const key=kInp?kInp.value.trim():"";
+    if(key==="") return;
+    out[key]=vInp?vInp.value.trim():"";
+  });
+  return out;
+}
+function collectObservability(){
+  return {
+    enabled:$("#obs-enabled").checked,
+    serviceName:($("#obs-service-name").value||"").trim(),
+    metricsEnabled:$("#obs-metrics-enabled").checked,
+    otlpEndpoint:($("#obs-otlp-endpoint").value||"").trim(),
+    resourceAttributes:collectObservabilityAttrs(),
+  };
+}
+async function saveObservabilitySettings(){
+  const observability=collectObservability();
+  const body=Object.assign({}, lastSettings||{}, {observability});
+  const st=$("#observability-status");
+  st.textContent="saving…"; st.style.color="";
+  try{
+    const r=await fetch("/dashboard/api/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    if(!r.ok){ const e=await r.json().catch(()=>({error:"status "+r.status})); throw new Error(e.error||("status "+r.status)); }
+    const d=await r.json();
+    lastSettings=(d&&d.settings)||body;
+    settingsEditable=!!(d&&d.editable);
+    renderAllSettings();
+    st.textContent="saved ✓ — applies on worker restart"; st.style.color="var(--teal)";
+    setTimeout(()=>{ st.textContent=""; },3000);
+  }catch(err){
+    st.textContent="✕ "+err.message; st.style.color="var(--amber)";
+  }
+}
+
+/* Render all editor cards from the single shared lastSettings. */
+function renderAllSettings(){ renderMCPSettings(); renderJudgeSettings(); renderRuntimeSettings(); renderObservabilitySettings(); }
+async function loadSettings(){
+  try{
+    const r=await fetch("/dashboard/api/settings"); if(!r.ok) throw 0;
+    const d=await r.json();
+    lastSettings=(d&&d.settings)||null;
+    settingsEditable=!!(d&&d.editable);
+    renderAllSettings(); $("#mcp-status").textContent=""; $("#judge-status").textContent=""; $("#runtime-status").textContent=""; $("#observability-status").textContent="";
+  }catch(e){
+    $("#panel-mcp-cfg").innerHTML=emptyState("MCP settings unavailable");
+    $("#panel-judge-cfg").innerHTML=emptyState("Judge settings unavailable");
+    $("#panel-runtime-cfg").innerHTML=emptyState("Runtime settings unavailable");
+    $("#panel-observability-cfg").innerHTML=emptyState("Observability settings unavailable");
+  }
+}
+
 /* ---- MCP tools ---- */
 const mcpOpen={};
 function schemaBlock(title,schema){
@@ -859,20 +1472,21 @@ function schemaBlock(title,schema){
 function renderMCP(data){
   const el=$("#panel-mcp");
   if(!data || !data.enabled){el.innerHTML=emptyState("MCP gateway disabled");return;}
-  const rows=data.tools||[];
+  const rows=(data.tools||[]).slice().sort((a,b)=>(b.calls||0)-(a.calls||0)||String(a.tool||"").localeCompare(String(b.tool||"")));
   if(!rows.length){el.innerHTML=emptyState("No MCP tools observed yet");return;}
-  let h=`<table><thead><tr><th>Tool</th><th class="num">Calls</th><th class="num">Allowed</th><th class="num">Denied</th><th>Sensitive</th><th>Findings</th></tr></thead><tbody>`;
+  let h=`<table><thead><tr><th>MCP server</th><th>Tool</th><th class="num">Calls</th><th class="num">Allowed</th><th class="num">Denied</th><th>Sensitive</th><th>Findings</th></tr></thead><tbody>`;
   rows.forEach((r,i)=>{
     const sens=(r.sensitive||[]).map(c=>`<span class="pill sens">${esc(c)}</span>`).join(" ")||'<span class="typ">—</span>';
     const find=(r.findings||[]).map(f=>`<span class="pill t4">${esc(f)}</span>`).join(" ")||'<span class="typ">—</span>';
     const name=esc(r.tool)+(r.present?"":' <span class="pill t3">unseen</span>');
-    h+=`<tr class="mcp-head" data-mcp="${i}"><td class="mono">${name}</td>
+    const server=r.server?`<span class="mono dim">${esc(r.server)}</span>`:'<span class="typ">—</span>';
+    h+=`<tr class="mcp-head" data-mcp="${i}"><td>${server}</td><td class="mono">${name}</td>
       <td class="num">${fmtNum(r.calls||0)}</td>
       <td class="num">${fmtNum(r.allowed||0)}</td>
       <td class="num">${fmtNum(r.denied||0)}</td>
       <td>${sens}</td><td>${find}</td></tr>`;
     if(mcpOpen[r.tool]){
-      h+=`<tr class="mcp-detail"><td colspan="6">${schemaBlock("Request",r.requestSchema)}${schemaBlock("Response",r.responseSchema)}</td></tr>`;
+      h+=`<tr class="mcp-detail"><td colspan="7">${schemaBlock("Request",r.requestSchema)}${schemaBlock("Response",r.responseSchema)}</td></tr>`;
     }
   });
   el.innerHTML=h+"</tbody></table>";
@@ -930,7 +1544,7 @@ function render(data){
 
 async function loadMCP(){
   try{
-    const r=await fetch("/dashboard/api/mcp");
+    const r=await fetch("/dashboard/api/mcp"+(state.proxy?"?proxy="+encodeURIComponent(state.proxy):""));
     if(!r.ok) throw new Error("status "+r.status);
     const d=await r.json();
     window.__lastMCP=d;
@@ -949,12 +1563,16 @@ async function load(){
     $("#updated").textContent="offline";
   }
   loadMCP();
+  loadWorkers();
 }
 
 // keep "updated …" relative label fresh
 setInterval(()=>{const d=window.__lastData; if(d&&d.generatedAt)$("#updated").textContent="updated "+relTime(d.generatedAt);},1000);
 // auto-refresh, state-preserving (renderers reuse drill/page state)
 buildRangeControl();
+buildViewControl();
+loadPolicy();          // once at startup + after each save, so live edits aren't clobbered by auto-refresh
+loadSettings();        // once at startup; control-plane editors (MCP + judge), read-only on workers
 load();
 setInterval(load,5000);
 window.addEventListener("resize",()=>{const d=window.__lastData; if(d)render(d);});

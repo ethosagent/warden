@@ -42,11 +42,38 @@ type MCPProvider interface {
 
 // Server holds the dependencies needed by the dashboard HTTP handlers.
 type Server struct {
-	data       DataSource
-	policy     config.Policy
-	secrets    secrets.SecretProvider
-	mcp        MCPProvider          // nil when the MCP gateway is disabled
-	livePolicy func() config.Policy // nil = serve the static startup policy
+	data         DataSource
+	policy       config.Policy
+	secrets      secrets.SecretProvider
+	mcp          MCPProvider               // nil when the MCP gateway is disabled
+	livePolicy   func() config.Policy      // nil = serve the static startup policy
+	policyWriter func(config.Policy) error // nil = read-only (worker / no editor)
+	// liveSettings returns the behavioral settings currently in force (nil = none);
+	// settingsWriter applies an edited settings document. Both are control-plane-
+	// only: a worker leaves settingsWriter nil so its settings panel is read-only.
+	liveSettings   func() *config.SettingsWire
+	settingsWriter func(config.SettingsWire) error
+	workersFn      func() []WorkerView // nil = no fleet worker registry
+	// mcpFleet, when set (control plane), returns the inventory + observed schema
+	// for a given worker (empty proxyID = most-recent worker). It takes precedence
+	// over the single-node mcp gateway.
+	mcpFleet func(proxyID string) ([]gateway.InventoryItem, map[string]mcp.ToolProfileView)
+}
+
+// WorkerView is one connected data-plane worker in the control plane's fleet
+// view: its id, when it was first/last heard from, when it last pulled policy,
+// how many analytics events it has forwarded, and whether it is currently online.
+type WorkerView struct {
+	ProxyID         string `json:"proxyID"`
+	FirstSeen       string `json:"firstSeen"`
+	LastSeen        string `json:"lastSeen"`
+	LastPolicyPull  string `json:"lastPolicyPull,omitempty"`
+	EventsForwarded int64  `json:"eventsForwarded"`
+	// PolicyETag is the worker's current policy version; Behind is true when it
+	// differs from the policy the control plane is currently serving.
+	PolicyETag string `json:"policyETag,omitempty"`
+	Behind     bool   `json:"behind"`
+	Online     bool   `json:"online"`
 }
 
 // NewServer constructs a dashboard Server. The policy argument is the static
@@ -71,6 +98,46 @@ func (s *Server) SetMCPProvider(p MCPProvider) {
 // startup snapshot. The function must return allow/deny only (no secrets).
 func (s *Server) SetLivePolicy(fn func() config.Policy) {
 	s.livePolicy = fn
+}
+
+// SetPolicyWriter enables editing allow/deny policy from the dashboard. It is a
+// control-plane-only capability: when set, POST /dashboard/api/policy validates
+// and applies the new policy via fn (which persists it so workers pull it on
+// their next poll). Workers never set this, so they expose no policy-write path.
+func (s *Server) SetPolicyWriter(fn func(config.Policy) error) {
+	s.policyWriter = fn
+}
+
+// SetLiveSettings supplies a function returning the behavioral worker-config
+// settings currently in force, so the settings panel reflects control-plane
+// hot-reloads. Returning nil means "no settings distributed". The returned value
+// is secret-free (config.SettingsWire carries env-name references only).
+func (s *Server) SetLiveSettings(fn func() *config.SettingsWire) {
+	s.liveSettings = fn
+}
+
+// SetSettingsWriter enables editing behavioral settings from the dashboard. Like
+// SetPolicyWriter it is a control-plane-only capability: when set,
+// POST /dashboard/api/settings validates and applies the new settings via fn
+// (which persists them so workers pull them on their next poll). Workers never
+// set this, so they expose no settings-write path.
+func (s *Server) SetSettingsWriter(fn func(config.SettingsWire) error) {
+	s.settingsWriter = fn
+}
+
+// SetWorkers supplies the "connected workers" rows for the fleet view. Set only
+// on the control plane; when unset, the workers endpoint returns an empty list
+// and the UI hides the panel.
+func (s *Server) SetWorkers(fn func() []WorkerView) {
+	s.workersFn = fn
+}
+
+// SetMCPFleet supplies a per-worker MCP source for the control-plane fleet view:
+// fn(proxyID) returns that worker's inventory + observed schema (empty proxyID =
+// most-recent worker). When set it supersedes the single-node MCP gateway, so the
+// MCP panel follows the dashboard's worker selector.
+func (s *Server) SetMCPFleet(fn func(proxyID string) ([]gateway.InventoryItem, map[string]mcp.ToolProfileView)) {
+	s.mcpFleet = fn
 }
 
 // --- JSON response types ---
@@ -130,6 +197,24 @@ type destCount struct {
 type policyResponse struct {
 	Allowlist []config.AllowlistEntry `json:"allowlist"`
 	Denylist  []config.DenylistEntry  `json:"denylist"`
+	// Editable reports whether this dashboard can save policy changes (true only
+	// on the control plane, where a policy writer is configured).
+	Editable bool `json:"editable"`
+}
+
+// policyEditRequest is the body accepted by POST /dashboard/api/policy.
+type policyEditRequest struct {
+	Allowlist []config.AllowlistEntry `json:"allowlist"`
+	Denylist  []config.DenylistEntry  `json:"denylist"`
+}
+
+// settingsResponse is the payload for GET /dashboard/api/settings. Settings is
+// nil when no behavioral settings are distributed. Editable reports whether this
+// dashboard can save settings changes (true only on the control plane, where a
+// settings writer is configured).
+type settingsResponse struct {
+	Settings *config.SettingsWire `json:"settings"`
+	Editable bool                 `json:"editable"`
 }
 
 // Handler returns an http.Handler that serves the dashboard routes.
@@ -137,12 +222,14 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/dashboard/api/traffic", s.handleTraffic)
 	mux.HandleFunc("/dashboard/api/policy", s.handlePolicy)
+	mux.HandleFunc("/dashboard/api/settings", s.handleSettings)
 	mux.HandleFunc("/dashboard/api/secrets", s.handleSecrets)
 	mux.HandleFunc("/dashboard/api/blocked", s.handleBlocked)
 	mux.HandleFunc("/dashboard/api/endpoints", s.handleEndpoints)
 	mux.HandleFunc("/dashboard/api/stats", s.handleStats)
 	mux.HandleFunc("/dashboard/api/analytics", s.handleAnalytics)
 	mux.HandleFunc("/dashboard/api/mcp", s.handleMCP)
+	mux.HandleFunc("/dashboard/api/workers", s.handleWorkers)
 	mux.HandleFunc("/dashboard/", s.handleIndex)
 	return mux
 }
@@ -228,11 +315,17 @@ func (s *Server) handleTraffic(w http.ResponseWriter, r *http.Request) {
 
 // handlePolicy serves GET /dashboard/api/policy.
 func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	switch r.Method {
+	case http.MethodGet:
+		s.getPolicy(w, r)
+	case http.MethodPost, http.MethodPut:
+		s.putPolicy(w, r)
+	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
 	}
+}
 
+func (s *Server) getPolicy(w http.ResponseWriter, _ *http.Request) {
 	// Prefer the live (hot-reloadable) policy so the panel matches what is
 	// actually being enforced; fall back to the startup snapshot.
 	pol := s.policy
@@ -242,6 +335,7 @@ func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {
 	resp := policyResponse{
 		Allowlist: pol.Allowlist,
 		Denylist:  pol.Denylist,
+		Editable:  s.policyWriter != nil,
 	}
 	if resp.Allowlist == nil {
 		resp.Allowlist = []config.AllowlistEntry{}
@@ -250,6 +344,92 @@ func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {
 		resp.Denylist = []config.DenylistEntry{}
 	}
 	writeJSON(w, resp)
+}
+
+// putPolicy applies an edited allow/deny policy. It exists only where a policy
+// writer is configured (the control plane); on a worker it returns 405 so policy
+// is never mutable from the data plane. The writer validates and persists, so an
+// invalid edit is rejected here with the validation error.
+func (s *Server) putPolicy(w http.ResponseWriter, r *http.Request) {
+	if s.policyWriter == nil {
+		writeError(w, http.StatusMethodNotAllowed, "policy editing is not available on this dashboard")
+		return
+	}
+	var req policyEditRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	pol := config.Policy{Allowlist: req.Allowlist, Denylist: req.Denylist}
+	if err := s.policyWriter(pol); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// Echo back the now-current policy so the UI can refresh from the response.
+	s.getPolicy(w, r)
+}
+
+// handleSettings serves GET/POST/PUT /dashboard/api/settings: the behavioral
+// worker-config (mcp/judge/observability/…) editor. GET returns the live
+// settings plus an editable flag; POST/PUT applies a full settings document. The
+// POST carries the WHOLE document (the UI does read-modify-write) so later phases
+// add blocks to the same endpoint without a new route.
+func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.getSettings(w, r)
+	case http.MethodPost, http.MethodPut:
+		s.putSettings(w, r)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (s *Server) getSettings(w http.ResponseWriter, _ *http.Request) {
+	var settings *config.SettingsWire
+	if s.liveSettings != nil {
+		settings = s.liveSettings()
+	}
+	writeJSON(w, settingsResponse{
+		Settings: settings,
+		Editable: s.settingsWriter != nil,
+	})
+}
+
+// putSettings applies an edited settings document. Like putPolicy it exists only
+// where a writer is configured (the control plane); on a worker it returns 405 so
+// settings are never mutable from the data plane. The writer validates and
+// persists, so an invalid edit is rejected here with the validation error.
+func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
+	if s.settingsWriter == nil {
+		writeError(w, http.StatusMethodNotAllowed, "settings editing is not available on this dashboard")
+		return
+	}
+	var settings config.SettingsWire
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&settings); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if err := s.settingsWriter(settings); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// Echo back the now-current settings so the UI can refresh from the response.
+	s.getSettings(w, r)
+}
+
+// handleWorkers serves GET /dashboard/api/workers: the connected-workers list
+// for the fleet view. Empty (non-nil) on a worker dashboard, which hides the panel.
+func (s *Server) handleWorkers(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	workers := []WorkerView{}
+	if s.workersFn != nil {
+		workers = s.workersFn()
+	}
+	writeJSON(w, workers)
 }
 
 // handleSecrets serves GET /dashboard/api/secrets.
@@ -1253,6 +1433,7 @@ type mcpFieldView struct {
 // per-field sensitivity from the SchemaProfiler.
 type mcpToolView struct {
 	Tool           string                  `json:"tool"`
+	Server         string                  `json:"server"` // MCP server domain(s) the tool was called on
 	Present        bool                    `json:"present"`
 	HasDescription bool                    `json:"hasDescription"`
 	SchemaHash     string                  `json:"schemaHash"`
@@ -1280,6 +1461,7 @@ type mcpAgg struct {
 	denied   int
 	lastSeen time.Time
 	findings map[string]struct{}
+	servers  map[string]struct{} // MCP server domain(s) this tool was seen on
 }
 
 // handleMCP serves GET /dashboard/api/mcp: a per-tool view joining call counts
@@ -1294,8 +1476,26 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Counts + findings from mcp-tagged events, aggregated in-Go by tool.
-	events, err := s.data.GetEvents(analytics.EventFilter{Protocol: "mcp", Limit: 0})
+	// Inventory + observed schema source: a worker's own gateway, or — on the
+	// control plane — the per-worker fleet store selected by ?proxy=.
+	proxyID := r.URL.Query().Get("proxy")
+	var (
+		inv     []gateway.InventoryItem
+		schema  map[string]mcp.ToolProfileView
+		enabled bool
+	)
+	switch {
+	case s.mcpFleet != nil:
+		inv, schema = s.mcpFleet(proxyID)
+		enabled = true
+	case s.mcp != nil:
+		inv, schema = s.mcp.Inventory(), s.mcp.SchemaSnapshot()
+		enabled = true
+	}
+
+	// Counts + findings from mcp-tagged events, aggregated in-Go by tool. On the
+	// control plane the proxy filter scopes counts to the selected worker.
+	events, err := s.data.GetEvents(analytics.EventFilter{Protocol: "mcp", ProxyID: proxyID, Limit: 0})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1307,8 +1507,11 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 		}
 		a, ok := aggs[e.Tool]
 		if !ok {
-			a = &mcpAgg{findings: map[string]struct{}{}}
+			a = &mcpAgg{findings: map[string]struct{}{}, servers: map[string]struct{}{}}
 			aggs[e.Tool] = a
+		}
+		if e.Domain != "" {
+			a.servers[e.Domain] = struct{}{}
 		}
 		a.calls++
 		switch e.Decision {
@@ -1343,18 +1546,19 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Inventory (present-but-uncalled tools appear here with 0 calls).
-	if s.mcp != nil {
-		for _, it := range s.mcp.Inventory() {
-			v := row(it.Name)
-			v.Present = true
-			v.HasDescription = it.HasDescription
-			v.SchemaHash = it.InputSchemaHash
-			if !it.FirstSeen.IsZero() {
-				v.FirstSeen = it.FirstSeen.Format(time.RFC3339)
-			}
-			if !it.LastSeen.IsZero() {
-				v.LastSeen = it.LastSeen.Format(time.RFC3339)
-			}
+	for _, it := range inv {
+		v := row(it.Name)
+		v.Present = true
+		v.HasDescription = it.HasDescription
+		v.SchemaHash = it.InputSchemaHash
+		if it.Server != "" {
+			v.Server = it.Server // the MCP server that declared this tool
+		}
+		if !it.FirstSeen.IsZero() {
+			v.FirstSeen = it.FirstSeen.Format(time.RFC3339)
+		}
+		if !it.LastSeen.IsZero() {
+			v.LastSeen = it.LastSeen.Format(time.RFC3339)
 		}
 	}
 
@@ -1377,46 +1581,55 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 		}
 		sort.Strings(findings)
 		v.Findings = findings
+
+		// Fall back to the server(s) seen on this tool's events when the gateway
+		// inventory didn't supply one (e.g. a tools/call with no prior tools/list).
+		if v.Server == "" {
+			servers := make([]string, 0, len(a.servers))
+			for s := range a.servers {
+				servers = append(servers, s)
+			}
+			sort.Strings(servers)
+			v.Server = strings.Join(servers, ", ")
+		}
 	}
 
 	// Observed schema + per-field sensitivity. Keys are "tool\x00direction".
-	if s.mcp != nil {
-		for key, prof := range s.mcp.SchemaSnapshot() {
-			tool, dir, ok := splitProfileKey(key)
-			if !ok {
-				continue
-			}
-			v := row(tool)
-			dst := v.RequestSchema
-			if dir == string(mcp.DirResponse) {
-				dst = v.ResponseSchema
-			}
-			sensitive := map[string]struct{}{}
-			for path, fp := range prof.Fields {
-				dst[path] = mcpFieldView{
-					Types:       fp.Types,
-					SeenCount:   fp.SeenCount,
-					Sensitivity: fp.Sensitivity,
-				}
-				for _, c := range fp.Sensitivity {
-					sensitive[c] = struct{}{}
-				}
-			}
-			// Union the tool-level sensitive classes across request + response.
-			merged := map[string]struct{}{}
-			for _, c := range v.Sensitive {
-				merged[c] = struct{}{}
-			}
-			for c := range sensitive {
-				merged[c] = struct{}{}
-			}
-			classes := make([]string, 0, len(merged))
-			for c := range merged {
-				classes = append(classes, c)
-			}
-			sort.Strings(classes)
-			v.Sensitive = classes
+	for key, prof := range schema {
+		tool, dir, ok := splitProfileKey(key)
+		if !ok {
+			continue
 		}
+		v := row(tool)
+		dst := v.RequestSchema
+		if dir == string(mcp.DirResponse) {
+			dst = v.ResponseSchema
+		}
+		sensitive := map[string]struct{}{}
+		for path, fp := range prof.Fields {
+			dst[path] = mcpFieldView{
+				Types:       fp.Types,
+				SeenCount:   fp.SeenCount,
+				Sensitivity: fp.Sensitivity,
+			}
+			for _, c := range fp.Sensitivity {
+				sensitive[c] = struct{}{}
+			}
+		}
+		// Union the tool-level sensitive classes across request + response.
+		merged := map[string]struct{}{}
+		for _, c := range v.Sensitive {
+			merged[c] = struct{}{}
+		}
+		for c := range sensitive {
+			merged[c] = struct{}{}
+		}
+		classes := make([]string, 0, len(merged))
+		for c := range merged {
+			classes = append(classes, c)
+		}
+		sort.Strings(classes)
+		v.Sensitive = classes
 	}
 
 	tools := make([]mcpToolView, 0, len(rows))
@@ -1426,7 +1639,7 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	sort.Slice(tools, func(i, j int) bool { return tools[i].Tool < tools[j].Tool })
 
 	writeJSON(w, mcpResponse{
-		Enabled: s.mcp != nil,
+		Enabled: enabled,
 		Tools:   tools,
 	})
 }

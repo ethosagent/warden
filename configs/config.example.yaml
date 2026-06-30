@@ -174,7 +174,13 @@ auth: []
 controlPlane:
   endpoint: ""                    # https URL of the policy endpoint ("" disables)
   tokenEnv: ""                    # env var holding the bearer token
-  pollInterval: 30s               # re-pull cadence
+  caCert: ""                      # CA (PEM) to trust the CP's cert, per-connection only
+  longPollWait: 30s               # how long the CP holds /policy open before 304
+  heartbeatInterval: 10s          # liveness ping cadence
+  localOnly: false                # true = ignore the CP, enforce local policy (standalone)
+  # When endpoint is set and localOnly is false, the worker is CP-MANAGED: policy
+  # comes only from the control plane and the worker boots fail-closed (deny all)
+  # until its first pull. Secrets always stay local.
 
 # Fleet analytics aggregation.
 #   off        - single node (default).
@@ -190,6 +196,10 @@ central:
   batchSize: 100                  # worker: events per forward batch
   bufferCap: 10000                # worker: local buffer cap before dropping oldest
   interval: 10s                   # worker: forward cadence
+  mcpPushInterval: 30s            # worker: how often to forward the MCP inventory + schema
+                                  #   (push-on-change is automatic; needs mcp.enabled)
+  forwardSecretInventory: false   # worker: forward configured secrets BY REFERENCE
+                                  #   (sha256/last4/length, NEVER values) to the CP
 
 # Audit features. Signed receipts emit an Ed25519-signed, independently
 # verifiable record per mediated event (tamper-evident evidence). Compliance

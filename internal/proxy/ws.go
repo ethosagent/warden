@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ethosagent/warden/internal/analytics"
+	"github.com/ethosagent/warden/internal/mcp/gateway"
 	"github.com/ethosagent/warden/internal/mcp/ws"
 )
 
@@ -61,6 +62,7 @@ func (p *Proxy) handleWSUpgrade(
 	domain string,
 	port int,
 	sessionKey string,
+	gw *gateway.Gateway,
 ) {
 	defer func() { _ = upstream.Close() }()
 
@@ -80,7 +82,7 @@ func (p *Proxy) handleWSUpgrade(
 		return
 	}
 
-	pump := &ws.Pump{GW: p.cfg.MCP, SessionKey: sessionKey, Log: p.cfg.Logger}
+	pump := &ws.Pump{GW: gw, SessionKey: sessionKey, Log: p.cfg.Logger}
 	client := rwc{br: clientBR, conn: tlsConn}
 	server := connRWC{r: upstreamBR, conn: upstream}
 
@@ -94,7 +96,7 @@ func (p *Proxy) handleWSUpgrade(
 		decision = "deny"
 		p.cfg.Metrics.RecordBlocked("mcp_ws")
 	}
-	_ = p.cfg.Analytics.StoreEvent(analytics.Event{
+	_ = p.analyticsStore().StoreEvent(analytics.Event{
 		Timestamp:      time.Now(),
 		Domain:         domain,
 		Port:           port,

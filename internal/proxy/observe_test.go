@@ -56,7 +56,7 @@ func TestObservabilityWiring_DenyEmitsMetricAndLog(t *testing.T) {
 	t.Cleanup(func() { _ = shutdown(context.Background()) })
 
 	logs := &syncBuf{}
-	logger := observability.NewLogger(logs, "info", "json")
+	logger, _ := observability.NewLogger(logs, "info", "json")
 
 	entries := []config.AllowlistEntry{{Domain: "allowed.example.com", Port: 443}}
 	p, err := New(Config{

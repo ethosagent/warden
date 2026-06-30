@@ -61,6 +61,51 @@ audit:
 	}
 }
 
+func TestManagedModeAllowlistRules(t *testing.T) {
+	// Managed (controlPlane set, not local-only): empty local allowlist is OK —
+	// the worker gets policy from the control plane and boots fail-closed.
+	managed := `
+controlPlane:
+  endpoint: https://cp.example.com/policy
+  tokenEnv: WARDEN_CP_TOKEN
+`
+	if _, err := parse([]byte(managed)); err != nil {
+		t.Errorf("managed mode with empty allowlist should be valid: %v", err)
+	}
+
+	// No control plane + empty allowlist -> invalid (must declare local policy).
+	if _, err := parse([]byte("logging:\n  level: info\n")); err == nil {
+		t.Error("empty allowlist without a control plane should be rejected")
+	}
+
+	// local-only + empty allowlist -> invalid (local-only enforces local policy).
+	localOnly := `
+controlPlane:
+  endpoint: https://cp.example.com/policy
+  localOnly: true
+`
+	if _, err := parse([]byte(localOnly)); err == nil {
+		t.Error("local-only with empty allowlist should be rejected")
+	}
+}
+
+func TestControlPlaneLongPollDefaults(t *testing.T) {
+	p, err := parse([]byte(baseAllow + `
+controlPlane:
+  endpoint: https://cp.example.com/policy
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cp := p.policy.ControlPlane
+	if cp.LongPollWait != defaultLongPollWait || cp.HeartbeatInterval != defaultHeartbeatInterval {
+		t.Errorf("defaults not applied: longPollWait=%v heartbeat=%v", cp.LongPollWait, cp.HeartbeatInterval)
+	}
+	if cp.LocalOnly {
+		t.Error("localOnly should default false")
+	}
+}
+
 func TestWiringValidationErrors(t *testing.T) {
 	cases := map[string]string{
 		"hmac bad algorithm": baseAllow + `

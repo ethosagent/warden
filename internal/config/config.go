@@ -114,11 +114,21 @@ type AuthEntry struct {
 type ControlPlaneConfig struct {
 	Endpoint     string        // https control-plane URL ("" disables)
 	TokenEnv     string        // env var holding the bearer token
-	PollInterval time.Duration // re-pull interval (default 30s)
+	PollInterval time.Duration // re-pull interval (default 30s) — legacy/fallback
 	// CACert is an optional CA certificate (PEM) added to this worker's trust
 	// pool ONLY for the control-plane connection, so a control plane serving a
 	// privately-signed cert is trusted without altering upstream TLS trust.
 	CACert string
+	// LongPollWait is how long the worker asks the CP to hold a /policy request
+	// open before returning 304 (default 30s).
+	LongPollWait time.Duration
+	// HeartbeatInterval is how often the worker pings /control/heartbeat so the CP
+	// lists it as online even when idle (default 10s).
+	HeartbeatInterval time.Duration
+	// LocalOnly, when true, makes the worker ignore the control plane and enforce
+	// its LOCAL policy (standalone). Default false = CP-managed: policy comes only
+	// from the control plane and the worker fails closed until the first pull.
+	LocalOnly bool
 }
 
 // CentralConfig configures fleet analytics aggregation.
@@ -143,6 +153,13 @@ type CentralConfig struct {
 	// trust pool ONLY for the aggregator connection (same rationale as
 	// ControlPlaneConfig.CACert).
 	CACert string
+	// MCPPushInterval is how often a worker forwards its MCP inventory + observed
+	// schema to the aggregator (push-on-change is automatic; default 30s).
+	MCPPushInterval time.Duration
+	// ForwardSecretInventory, when true, forwards the worker's configured secrets
+	// BY REFERENCE (sha256/last4/length, never values) so the CP can show them.
+	// Default false.
+	ForwardSecretInventory bool
 }
 
 // AuditConfig groups the signed-receipt and compliance-tagging features.
@@ -462,23 +479,28 @@ type rawAuthEntry struct {
 
 // rawControlPlane mirrors the on-disk `controlPlane:` block.
 type rawControlPlane struct {
-	Endpoint     string `yaml:"endpoint"`
-	TokenEnv     string `yaml:"tokenEnv"`
-	PollInterval string `yaml:"pollInterval"`
-	CACert       string `yaml:"caCert"`
+	Endpoint          string `yaml:"endpoint"`
+	TokenEnv          string `yaml:"tokenEnv"`
+	PollInterval      string `yaml:"pollInterval"`
+	CACert            string `yaml:"caCert"`
+	LongPollWait      string `yaml:"longPollWait"`
+	HeartbeatInterval string `yaml:"heartbeatInterval"`
+	LocalOnly         bool   `yaml:"localOnly"`
 }
 
 // rawCentral mirrors the on-disk `central:` block.
 type rawCentral struct {
-	Mode      string `yaml:"mode"`
-	TokenEnv  string `yaml:"tokenEnv"`
-	MaxEvents int    `yaml:"maxEvents"`
-	Endpoint  string `yaml:"endpoint"`
-	ProxyID   string `yaml:"proxyID"`
-	BatchSize int    `yaml:"batchSize"`
-	BufferCap int    `yaml:"bufferCap"`
-	Interval  string `yaml:"interval"`
-	CACert    string `yaml:"caCert"`
+	Mode                   string `yaml:"mode"`
+	TokenEnv               string `yaml:"tokenEnv"`
+	MaxEvents              int    `yaml:"maxEvents"`
+	Endpoint               string `yaml:"endpoint"`
+	ProxyID                string `yaml:"proxyID"`
+	BatchSize              int    `yaml:"batchSize"`
+	BufferCap              int    `yaml:"bufferCap"`
+	Interval               string `yaml:"interval"`
+	CACert                 string `yaml:"caCert"`
+	MCPPushInterval        string `yaml:"mcpPushInterval"`
+	ForwardSecretInventory bool   `yaml:"forwardSecretInventory"`
 }
 
 // rawAudit mirrors the on-disk `audit:` block.
@@ -718,11 +740,15 @@ func parseAuth(raw []rawAuthEntry) []AuthEntry {
 	return out
 }
 
-// defaultControlPlanePollInterval is used when controlPlane.pollInterval is omitted.
-const defaultControlPlanePollInterval = 30 * time.Second
+// control-plane defaults applied when the corresponding field is omitted.
+const (
+	defaultControlPlanePollInterval = 30 * time.Second
+	defaultLongPollWait             = 30 * time.Second
+	defaultHeartbeatInterval        = 10 * time.Second
+)
 
 // parseControlPlane converts the raw controlPlane block into typed config,
-// applying the default poll interval. An absent block yields a disabled value.
+// applying defaults. An absent block yields a disabled value.
 func parseControlPlane(r *rawControlPlane) (ControlPlaneConfig, error) {
 	var c ControlPlaneConfig
 	if r == nil {
@@ -731,8 +757,17 @@ func parseControlPlane(r *rawControlPlane) (ControlPlaneConfig, error) {
 	c.Endpoint = strings.TrimSpace(r.Endpoint)
 	c.TokenEnv = r.TokenEnv
 	c.CACert = strings.TrimSpace(r.CACert)
+	c.LocalOnly = r.LocalOnly
 	c.PollInterval = defaultControlPlanePollInterval
+	c.LongPollWait = defaultLongPollWait
+	c.HeartbeatInterval = defaultHeartbeatInterval
 	if err := parseDurationField("controlPlane.pollInterval", r.PollInterval, &c.PollInterval); err != nil {
+		return ControlPlaneConfig{}, err
+	}
+	if err := parseDurationField("controlPlane.longPollWait", r.LongPollWait, &c.LongPollWait); err != nil {
+		return ControlPlaneConfig{}, err
+	}
+	if err := parseDurationField("controlPlane.heartbeatInterval", r.HeartbeatInterval, &c.HeartbeatInterval); err != nil {
 		return ControlPlaneConfig{}, err
 	}
 	return c, nil
@@ -740,9 +775,10 @@ func parseControlPlane(r *rawControlPlane) (ControlPlaneConfig, error) {
 
 // central defaults applied when the corresponding field is omitted (worker mode).
 const (
-	defaultCentralBatchSize = 100
-	defaultCentralBufferCap = 10000
-	defaultCentralInterval  = 10 * time.Second
+	defaultCentralBatchSize       = 100
+	defaultCentralBufferCap       = 10000
+	defaultCentralInterval        = 10 * time.Second
+	defaultCentralMCPPushInterval = 30 * time.Second
 )
 
 // parseCentral converts the raw central block into typed config, normalizing the
@@ -772,6 +808,11 @@ func parseCentral(r *rawCentral) (CentralConfig, error) {
 	if err := parseDurationField("central.interval", r.Interval, &c.Interval); err != nil {
 		return CentralConfig{}, err
 	}
+	c.MCPPushInterval = defaultCentralMCPPushInterval
+	if err := parseDurationField("central.mcpPushInterval", r.MCPPushInterval, &c.MCPPushInterval); err != nil {
+		return CentralConfig{}, err
+	}
+	c.ForwardSecretInventory = r.ForwardSecretInventory
 	return c, nil
 }
 
@@ -987,8 +1028,12 @@ func parseDurationField(name, raw string, dst *time.Duration) error {
 
 // validate enforces the invariants the proxy relies on at runtime.
 func validate(p Policy) error {
-	if len(p.Allowlist) == 0 {
-		return fmt.Errorf("config: policy.allowlist must have at least one entry")
+	// A control-plane-managed worker (controlPlane configured, not local-only)
+	// gets its policy from the CP and boots fail-closed, so it needs no local
+	// allowlist. Every other mode must declare at least one allow entry.
+	managed := p.ControlPlane.Endpoint != "" && !p.ControlPlane.LocalOnly
+	if len(p.Allowlist) == 0 && !managed {
+		return fmt.Errorf("config: policy.allowlist must have at least one entry (or set controlPlane.endpoint for CP-managed mode)")
 	}
 	for i, e := range p.Allowlist {
 		if strings.TrimSpace(e.Domain) == "" {

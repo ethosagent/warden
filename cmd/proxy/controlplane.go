@@ -66,7 +66,7 @@ func runControlPlane(cmd *cobra.Command, configPath, listenAddr, tokenEnv, caCer
 	if err != nil {
 		return err
 	}
-	logger := observability.NewLogger(cmd.OutOrStdout(), pol.LogLevel, pol.LogFormat)
+	logger, _ := observability.NewLogger(cmd.OutOrStdout(), pol.LogLevel, pol.LogFormat)
 
 	var token string
 	if tokenEnv != "" {
@@ -86,9 +86,12 @@ func runControlPlane(cmd *cobra.Command, configPath, listenAddr, tokenEnv, caCer
 	})
 
 	httpSrv := &http.Server{
-		Addr:              listenAddr,
-		Handler:           srv.Handler(),
+		Addr:    listenAddr,
+		Handler: srv.Handler(),
+		// ReadHeaderTimeout bounds request-header reads; WriteTimeout is left 0 so
+		// long-poll responses (held up to ~60s) are never cut off mid-flight.
 		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       2 * time.Minute,
 	}
 
 	// TLS: mint a server cert from the provided CA so workers trust it via their
@@ -109,6 +112,9 @@ func runControlPlane(cmd *cobra.Command, configPath, listenAddr, tokenEnv, caCer
 
 	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// Periodic re-read so external edits to the policy file propagate to workers.
+	srv.Start(ctx)
 
 	errCh := make(chan error, 1)
 	go func() {

@@ -1,83 +1,119 @@
-# Run Ethos behind Warden — full egress visibility, allow-all policy.
+# Run Ethos behind a Warden WORKER, driven by a Warden CONTROL PLANE.
 #
-# Ethos is isolated on an INTERNAL-ONLY network: its sole route to the internet
-# is Warden. Warden terminates TLS, allows everything (for now), and logs every
-# call to the dashboard at http://localhost:9090/dashboard/ (+ /metrics).
+# Topology (the real control-plane / data-plane split):
+#   control-plane  — serves allow/deny policy (here: allow-all) and aggregates the
+#                    worker's analytics into a fleet dashboard. Holds NO secrets.
+#   worker         — the data plane Ethos's egress flows through: pulls policy from
+#                    the control plane (managed; boots fail-closed until first pull),
+#                    terminates TLS, logs every call, forwards analytics to the CP.
+#   ethos          — isolated on an INTERNAL-ONLY network; its sole route out is the
+#                    worker. All egress is proxied through worker:8080.
 #
-# Prereq (run from the repo root): generate the bake-once CA into ./certs:
+# This demo uses a LOCALLY BUILT image (the control-plane role is newer than the
+# published tag), so run with `--build`.
+#
+# Prereq (from repo root): generate the bake-once proxy CA into ./certs. The
+# control plane mints its server cert from it; the worker + Ethos trust it.
 #   OUT_DIR=deploy/compose/certs ./scripts/gen-certs.sh
 #
-# Run (from the repo root):
-#   docker compose -f deploy/compose/docker-compose.ethos.yml up
+# Run (from repo root):
+#   WARDEN_CP_TOKEN=dev-token \
+#   docker compose -f deploy/compose/docker-compose.ethos.yml up --build
 #
-# Ethos web UI: http://localhost:3000   ·   Ethos API: http://localhost:3001   ·   Warden dashboard: http://localhost:9090/dashboard/
+# Ethos UI + login: http://localhost:3000   (it prints an /auth/exchange?t=… link on startup)
+# Fleet dashboard (control plane): https://localhost:7070/dashboard/  (proxy-CA cert — trust it)
+# Worker-local dashboard:          http://localhost:9091/dashboard/
 
 services:
-  warden:
-    # Pulled from Docker Hub — no local build. Override the tag with WARDEN_VERSION
-    # (default 0.1.0), e.g. `WARDEN_VERSION=0.2.0 docker compose ... up`.
-    image: ethosagent/warden:${WARDEN_VERSION:-0.1.0}
-    networks: [ethos-internal, egress]
+  control-plane:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: warden-proxy:dev        # locally built from this repo's Dockerfile
+    pull_policy: never             # never fetch from a registry — use the local build
+    networks: [cp-net]
     ports:
-      - "9090:9090"                 # dashboard + /metrics (host-only; NOT reachable by Ethos)
+      - "7070:7070"                  # fleet dashboard + /policy + /central/ingest
+    environment:
+      - WARDEN_CP_TOKEN=${WARDEN_CP_TOKEN:-dev-token}
     volumes:
-      - ../../configs/config.ethos.yaml:/etc/warden/config.yaml:ro
+      - ../../configs/config.ethos.yaml:/etc/warden/config.yaml:ro   # served policy: allow-all
       - ./certs:/etc/warden/certs:ro
-      - warden-data:/data            # persist the analytics db across restarts/redeploys
     command:
-      - "run"
+      - control-plane
+      - "--config=/etc/warden/config.yaml"
+      - "--listen=0.0.0.0:7070"
+      - "--token-env=WARDEN_CP_TOKEN"
+      - "--ca-cert=/etc/warden/certs/proxy-ca.crt"   # mint the CP server cert from the proxy CA
+      - "--ca-key=/etc/warden/certs/proxy-ca.key"
+      - "--tls-host=control-plane,localhost,127.0.0.1"
+
+  worker:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: warden-proxy:dev        # same locally-built image as the control plane
+    pull_policy: never             # never fetch from a registry — use the local build
+    depends_on:
+      control-plane:
+        condition: service_started
+    networks: [ethos-internal, egress, cp-net]
+    ports:
+      - "9091:9090"                  # this worker's own (local) dashboard
+    environment:
+      - WARDEN_CP_TOKEN=${WARDEN_CP_TOKEN:-dev-token}
+      - WARDEN_PROXY_ID=ethos-worker # labels this worker in the fleet view
+      # config.worker.yaml carries a demo secret mapping; this satisfies it. The
+      # real value stays on the worker and never reaches the control plane.
+      - EXAMPLE_SECRET=demo-local-secret-not-a-real-key
+    volumes:
+      - ../../configs/config.worker.yaml:/etc/warden/config.yaml:ro  # managed: policy from the CP
+      - ./certs:/etc/warden/certs:ro
+      - worker-data:/data
+    command:
+      - run
       - "--config=/etc/warden/config.yaml"
       - "--listen=0.0.0.0:8080"
-      - "--ca-cert=/etc/warden/certs/proxy-ca.crt"   # TLS terminate for full visibility; omit both for blind tunnel (domain-only)
+      - "--ca-cert=/etc/warden/certs/proxy-ca.crt"   # TLS terminate for full visibility
       - "--ca-key=/etc/warden/certs/proxy-ca.key"
       - "--admin-listen=0.0.0.0:9090"
       - "--db=/data/warden.db"
 
-  # Named volumes are created root-owned, but Ethos runs as uid 1000 and must
-  # write its db + state under /home/ethos/.ethos. This one-shot fixes ownership
-  # before Ethos starts — without it a fresh volume fails with "unable to open
-  # database file" and the container exits.
-  ethos-init:
-    image: alpine
-    volumes:
-      - ethos-data:/data
-    command: ["chown", "-R", "1000:1000", "/data"]
-
   ethos:
     image: ethosagent/ethos:0.5.1
     depends_on:
-      warden:
+      worker:
         condition: service_started
-      ethos-init:
-        condition: service_completed_successfully
-    networks: [ethos-internal]        # internal ONLY — no internet except via Warden
+    networks: [ethos-internal]        # internal ONLY — no internet except via the worker
     environment:
       - ETHOS_MODE=ui
       - ETHOS_WEB_HOST=0.0.0.0
-      # Route ALL egress through Warden (both cases for tools that read lowercase)
-      - HTTP_PROXY=http://warden:8080
-      - HTTPS_PROXY=http://warden:8080
-      - http_proxy=http://warden:8080
-      - https_proxy=http://warden:8080
-      - NO_PROXY=localhost,127.0.0.1,::1,warden
-      - no_proxy=localhost,127.0.0.1,::1,warden
+      # Route ALL egress through the WORKER (both cases for tools that read lowercase)
+      - HTTP_PROXY=http://worker:8080
+      - HTTPS_PROXY=http://worker:8080
+      - http_proxy=http://worker:8080
+      - https_proxy=http://worker:8080
+      - NO_PROXY=localhost,127.0.0.1,::1,worker
+      - no_proxy=localhost,127.0.0.1,::1,worker
       # CRITICAL: Node's built-in fetch (undici) IGNORES HTTP(S)_PROXY unless this
       # is set (Node >= ~v20). Without it, Ethos's fetch() calls go direct and
-      # fail on the isolated network ("fetch failed") — they never reach Warden.
+      # fail on the isolated network ("fetch failed") — they never reach the worker.
       - NODE_USE_ENV_PROXY=1
-      # Trust Warden's CA so TLS termination is accepted by every common runtime
+      # Trust the worker's CA so TLS termination is accepted by every common runtime
       - NODE_EXTRA_CA_CERTS=/etc/warden/certs/proxy-ca.crt
       - SSL_CERT_FILE=/etc/warden/certs/proxy-ca.crt
       - REQUESTS_CA_BUNDLE=/etc/warden/certs/proxy-ca.crt
       - CURL_CA_BUNDLE=/etc/warden/certs/proxy-ca.crt
     volumes:
-      - ethos-data:/home/ethos/.ethos
+      # Ethos state persists in ~/.ethos on the host (inspectable, survives `down`).
+      - ${HOME}/.ethos:/home/ethos/.ethos
       - ./certs/proxy-ca.crt:/etc/warden/certs/proxy-ca.crt:ro
 
-  # UI forwarders: an `internal: true` network blocks host port-publishing, so the
-  # Ethos web UI (3000) and the JSON API it calls (3001) are exposed via these
-  # tiny socat hops instead — WITHOUT giving Ethos an internet route. Ethos stays
-  # internal-only; only these dumb forwarders touch the frontend bridge.
+  # UI forwarder: an `internal: true` network blocks host port-publishing, so the
+  # Ethos web UI (port 3000 — UI, /auth/exchange login, /admin) is exposed via this
+  # tiny socat hop WITHOUT giving Ethos an internet route. Ethos stays internal-only.
+  # (Ethos's ACP API on :3001 binds container-localhost and isn't reachable across
+  # containers; everything the browser needs is served from :3000.)
   ui:
     image: alpine/socat
     depends_on: [ethos]
@@ -86,30 +122,19 @@ services:
       - "3000:3000"
     command: ["TCP-LISTEN:3000,fork,reuseaddr", "TCP:ethos:3000"]
 
-  # Second forwarder for the Ethos API (3001) — the browser SPA served from 3000
-  # calls this authenticated JSON API directly.
-  ui-api:
-    image: alpine/socat
-    depends_on: [ethos]
-    networks: [ethos-internal, frontend]
-    ports:
-      - "3001:3001"
-    command: ["TCP-LISTEN:3001,fork,reuseaddr", "TCP:ethos:3001"]
-
 networks:
-  # internal: true → containers here get NO route to the internet. Ethos is here only.
+  # internal: true → no internet. Ethos + worker + the UI forwarders sit here.
   ethos-internal:
     internal: true
-  # egress carries real internet and is attached ONLY to Warden.
+  # The worker's route to the internet (attached to the worker only).
   egress:
     driver: bridge
-  # frontend carries ONLY the inbound UI forwarder + its host-published port.
-  # Ethos is never attached here, so it gains no internet route.
+  # Control-plane bus: worker ↔ control plane, plus the host-published dashboard.
+  cp-net:
+    driver: bridge
+  # Inbound UI forwarders + their host-published ports (no internet for Ethos).
   frontend:
     driver: bridge
 
 volumes:
-  # persistent Warden analytics db — survives `up` / container recreate.
-  warden-data:
-  # Ethos state (config, market-data cache, sessions) under /home/ethos/.ethos.
-  ethos-data:
+  worker-data:   # the worker's local analytics db (a forwarding buffer in managed mode)

@@ -69,8 +69,11 @@ type InventoryItem struct {
 	Name            string
 	HasDescription  bool
 	InputSchemaHash string
-	FirstSeen       time.Time
-	LastSeen        time.Time
+	// Server is the MCP server host (e.g. "mcp.linear.app") that advertised this
+	// tool, so the dashboard can attribute a tool to its MCP server.
+	Server    string
+	FirstSeen time.Time
+	LastSeen  time.Time
 }
 
 // Verdict is the gateway's full response for one message. Findings is always
@@ -791,7 +794,7 @@ func (g *Gateway) OnResponse(sessionKey string, status int, hdr http.Header, bod
 			s.schema.CaptureBaseline(tools)
 			s.baselineSet = true
 		}
-		g.recordInventoryLocked(inventory, now)
+		g.recordInventoryLocked(inventory, serverFromSessionKey(sessionKey), now)
 		g.mu.Unlock()
 
 		// Declared-schema integrity: baseline-or-drift.
@@ -918,7 +921,17 @@ func (g *Gateway) MaxResponseScanBytes() int {
 // catalog, stamping FirstSeen on first observation and refreshing LastSeen +
 // the description/schema metadata on every subsequent list. Caller must hold
 // g.mu.
-func (g *Gateway) recordInventoryLocked(items []ToolInfo, now time.Time) {
+// serverFromSessionKey extracts the MCP server host from a session key of the
+// form "agentID:domain". A hostname never contains a colon, so the substring
+// after the LAST colon is the server host. Returns "" if there is no colon.
+func serverFromSessionKey(key string) string {
+	if i := strings.LastIndexByte(key, ':'); i >= 0 {
+		return key[i+1:]
+	}
+	return ""
+}
+
+func (g *Gateway) recordInventoryLocked(items []ToolInfo, server string, now time.Time) {
 	for _, it := range items {
 		cur, ok := g.inventory[it.Name]
 		if !ok {
@@ -926,6 +939,7 @@ func (g *Gateway) recordInventoryLocked(items []ToolInfo, now time.Time) {
 				Name:            it.Name,
 				HasDescription:  it.HasDescription,
 				InputSchemaHash: it.InputSchemaHash,
+				Server:          server,
 				FirstSeen:       now,
 				LastSeen:        now,
 			}
@@ -933,6 +947,9 @@ func (g *Gateway) recordInventoryLocked(items []ToolInfo, now time.Time) {
 		}
 		cur.HasDescription = it.HasDescription
 		cur.InputSchemaHash = it.InputSchemaHash
+		if server != "" {
+			cur.Server = server
+		}
 		cur.LastSeen = now
 	}
 	if len(items) > 0 {

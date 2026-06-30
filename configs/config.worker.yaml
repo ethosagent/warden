@@ -1,14 +1,13 @@
 # Warden worker (data plane), driven by a control plane.
 #
-# The worker PULLS its allow/deny policy from the control plane and FORWARDS its
-# analytics there for the fleet dashboard. Secrets stay LOCAL to this worker and
-# never cross to the control plane.
+# This worker is CP-MANAGED: its allow/deny policy comes ONLY from the control
+# plane (no local allowlist needed). It boots fail-closed (denies all egress)
+# until its first pull, then enforces CP policy and hot-reloads on every change.
+# Secrets stay LOCAL to this worker and never cross to the control plane.
 
-policy:
-  # Bootstrap allowlist: used only until the first control-plane pull succeeds.
-  # The control plane's policy then replaces it and hot-reloads on every poll.
-  allowlist:
-    - domain: api.github.com
+# No `policy.allowlist` here — a managed worker gets it from the control plane.
+# (Set controlPlane.localOnly: true, or run with --local-only, to enforce a local
+#  policy standalone; that mode DOES require an allowlist.)
 
 # Secrets live here, on the worker — never on the control plane. (Demo mapping;
 # the synthetic agent doesn't use it, but it shows where secrets belong.)
@@ -20,13 +19,22 @@ logging:
   level: info
   format: json
 
-# Pull allow/deny policy from the control plane; trust its (privately-signed)
+# Deep MCP analysis. monitor = detect + analyze + log, never block. With this on,
+# MCP-over-HTTP traffic (e.g. mcp.linear.app) is parsed: tool inventory + observed
+# request/response schema, surfaced in the dashboard and forwarded to the CP.
+mcp:
+  enabled: true
+  mode: monitor
+
+# Long-poll allow/deny policy from the control plane; trust its (privately-signed)
 # cert via the same proxy CA this worker already uses.
 controlPlane:
   endpoint: https://control-plane:7070/policy
   tokenEnv: WARDEN_CP_TOKEN
-  pollInterval: 15s
   caCert: /etc/warden/certs/proxy-ca.crt
+  longPollWait: 30s         # how long the CP holds /policy open before returning 304
+  heartbeatInterval: 10s    # liveness ping cadence
+  localOnly: false          # true = ignore the CP and enforce local policy (standalone)
 
 # Forward this worker's analytics to the control plane's aggregator.
 central:
@@ -35,3 +43,5 @@ central:
   tokenEnv: WARDEN_CP_TOKEN
   proxyID: ${WARDEN_PROXY_ID}   # set per worker so the fleet view can slice by proxy
   caCert: /etc/warden/certs/proxy-ca.crt
+  mcpPushInterval: 30s          # forward MCP inventory + observed schema (when mcp.enabled)
+                                # so the control-plane dashboard shows MCP per worker

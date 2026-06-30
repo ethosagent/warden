@@ -27,6 +27,16 @@ func (p *Proxy) handleHTTP(tlsConn *tls.Conn, br *bufio.Reader, domain string, p
 			return
 		}
 
+		// Snapshot the live MCP gateway once per request through the atomic
+		// pointer, so a concurrent control-plane swap can't change it mid-request.
+		// A nil gw means MCP is disabled — identical to a nil cfg.MCP before.
+		gw := p.mcpGateway()
+
+		// Snapshot the live judge once per request through the atomic pointer, same
+		// rationale: a concurrent control-plane swap can't change it mid-request. A
+		// nil judge means the judge is disabled — identical to a nil cfg.Judge before.
+		liveJudge := p.judge()
+
 		// Host header recheck (defense in depth)
 		hostOnly := req.Host
 		if h, _, err := net.SplitHostPort(req.Host); err == nil {
@@ -49,12 +59,22 @@ func (p *Proxy) handleHTTP(tlsConn *tls.Conn, br *bufio.Reader, domain string, p
 		if needsJudge {
 			fullURL := "https://" + domain + req.URL.RequestURI()
 			_, hasAuth := req.Header["Authorization"]
-			verdict := p.cfg.Judge.Evaluate(
-				p.cfg.AgentID, req.Method, fullURL, domain,
-				req.Header.Get("Content-Type"), hasAuth,
-			)
+			// needsJudge was decided at CONNECT time. If a concurrent control-plane
+			// swap disabled the judge between then and now, liveJudge is nil: this
+			// request matched no static rule and there is no judge to allow it, so it
+			// must fail closed (deny) — the exact default-deny semantics a NoMatch
+			// request gets when no judge is configured.
+			var verdict Verdict
+			if liveJudge != nil {
+				verdict = liveJudge.Evaluate(
+					p.cfg.AgentID, req.Method, fullURL, domain,
+					req.Header.Get("Content-Type"), hasAuth,
+				)
+			} else {
+				verdict = Verdict{Decision: "deny", Reason: "judge disabled"}
+			}
 			if verdict.Decision != "allow" {
-				_ = p.cfg.Analytics.StoreEvent(analytics.Event{
+				_ = p.analyticsStore().StoreEvent(analytics.Event{
 					Timestamp:   time.Now(),
 					Domain:      domain,
 					Port:        port,
@@ -88,7 +108,7 @@ func (p *Proxy) handleHTTP(tlsConn *tls.Conn, br *bufio.Reader, domain string, p
 			mcpReason  string
 			mcpSessKey string
 		)
-		if p.cfg.MCP != nil {
+		if gw != nil {
 			var mcpReqBody []byte
 			if req.Body != nil && req.Body != http.NoBody {
 				b, readErr := io.ReadAll(io.LimitReader(req.Body, maxBodySwapSize+1))
@@ -114,13 +134,13 @@ func (p *Proxy) handleHTTP(tlsConn *tls.Conn, br *bufio.Reader, domain string, p
 				fullURL := "https://" + domain + req.URL.RequestURI()
 				mcpSessKey = p.cfg.AgentID + ":" + domain
 				start := time.Now()
-				v := p.cfg.MCP.OnRequest(mcpSessKey, req.Method, fullURL, req.Header, mcpReqBody)
+				v := gw.OnRequest(mcpSessKey, req.Method, fullURL, req.Header, mcpReqBody)
 				p.cfg.Metrics.ObserveAddedLatency("mcp_scan", time.Since(start))
 				p.recordMCPFindings(v)
 				mcpTool = v.Tool
 				mcpReason = v.Reason
 				if v.Action == gateway.Deny {
-					_ = p.cfg.Analytics.StoreEvent(analytics.Event{
+					_ = p.analyticsStore().StoreEvent(analytics.Event{
 						Timestamp: time.Now(),
 						Domain:    domain,
 						Port:      port,
@@ -150,6 +170,9 @@ func (p *Proxy) handleHTTP(tlsConn *tls.Conn, br *bufio.Reader, domain string, p
 			req.Body != nil && req.Body != http.NoBody && req.ContentLength != 0
 
 		if len(p.cfg.PlaceholderNames) > 0 {
+			// Snapshot the live secret provider once for this request so a
+			// concurrent cache.ttl swap can't change it mid-substitution.
+			secretsProvider := p.secrets()
 			// Read body if needed
 			var bodyStr string
 			if needBodySwap {
@@ -169,7 +192,7 @@ func (p *Proxy) handleHTTP(tlsConn *tls.Conn, br *bufio.Reader, domain string, p
 
 			// Swap in headers, query, and body
 			for _, placeholder := range p.cfg.PlaceholderNames {
-				realValue, err := p.cfg.Secrets.GetSecret(placeholder)
+				realValue, err := secretsProvider.GetSecret(placeholder)
 				if err != nil {
 					writeErrorResponse(tlsConn, 503, "Service Unavailable")
 					_ = req.Body.Close()
@@ -274,23 +297,23 @@ func (p *Proxy) handleHTTP(tlsConn *tls.Conn, br *bufio.Reader, domain string, p
 		// frame pump (scanning each JSON-RPC text message bidirectionally), then
 		// returns. When the MCP gateway is disabled we leave today's behavior
 		// untouched (a 101 was never special-cased before).
-		if p.cfg.MCP != nil && resp.StatusCode == 101 &&
+		if gw != nil && resp.StatusCode == 101 &&
 			strings.EqualFold(req.Header.Get("Upgrade"), "websocket") {
-			p.handleWSUpgrade(tlsConn, br, upstream, upstreamBR, resp, req, domain, port, mcpSessKey)
+			p.handleWSUpgrade(tlsConn, br, upstream, upstreamBR, resp, req, domain, port, mcpSessKey, gw)
 			_ = req.Body.Close()
 			return
 		}
 
-		if p.cfg.MCP != nil && wasMCP {
+		if gw != nil && wasMCP {
 			ct := resp.Header.Get("Content-Type")
-			scanCap := int64(p.cfg.MCP.MaxResponseScanBytes())
+			scanCap := int64(gw.MaxResponseScanBytes())
 			bufferable := strings.HasPrefix(ct, "application/json") &&
 				resp.ContentLength >= 0 && resp.ContentLength <= scanCap
 			if bufferable {
 				body, readErr := io.ReadAll(resp.Body)
 				if readErr == nil {
 					start := time.Now()
-					v := p.cfg.MCP.OnResponse(mcpSessKey, resp.StatusCode, resp.Header, body)
+					v := gw.OnResponse(mcpSessKey, resp.StatusCode, resp.Header, body)
 					p.cfg.Metrics.ObserveAddedLatency("mcp_scan", time.Since(start))
 					p.recordMCPFindings(v)
 					if v.Reason != "" {
@@ -298,7 +321,7 @@ func (p *Proxy) handleHTTP(tlsConn *tls.Conn, br *bufio.Reader, domain string, p
 					}
 					if v.Action == gateway.Deny {
 						fullURL := "https://" + domain + req.URL.RequestURI()
-						_ = p.cfg.Analytics.StoreEvent(analytics.Event{
+						_ = p.analyticsStore().StoreEvent(analytics.Event{
 							Timestamp: time.Now(),
 							Domain:    domain,
 							Port:      port,
@@ -359,7 +382,7 @@ func (p *Proxy) handleHTTP(tlsConn *tls.Conn, br *bufio.Reader, domain string, p
 				blocked := false
 				scanErr := sse.Scan(resp.Body, tlsConn, func(data []byte) bool {
 					start := time.Now()
-					v := p.cfg.MCP.OnResponse(mcpSessKey, resp.StatusCode, resp.Header, data)
+					v := gw.OnResponse(mcpSessKey, resp.StatusCode, resp.Header, data)
 					p.cfg.Metrics.ObserveAddedLatency("mcp_scan", time.Since(start))
 					p.recordMCPFindings(v)
 					if v.Reason != "" {
@@ -373,7 +396,7 @@ func (p *Proxy) handleHTTP(tlsConn *tls.Conn, br *bufio.Reader, domain string, p
 				})
 
 				if blocked {
-					_ = p.cfg.Analytics.StoreEvent(analytics.Event{
+					_ = p.analyticsStore().StoreEvent(analytics.Event{
 						Timestamp:      time.Now(),
 						Domain:         domain,
 						Port:           port,
@@ -393,7 +416,7 @@ func (p *Proxy) handleHTTP(tlsConn *tls.Conn, br *bufio.Reader, domain string, p
 						ResponseStatus: resp.StatusCode,
 					})
 				} else {
-					_ = p.cfg.Analytics.StoreEvent(analytics.Event{
+					_ = p.analyticsStore().StoreEvent(analytics.Event{
 						Timestamp:      time.Now(),
 						Domain:         domain,
 						Port:           port,
@@ -458,7 +481,7 @@ func (p *Proxy) handleHTTP(tlsConn *tls.Conn, br *bufio.Reader, domain string, p
 				provider = est.Provider
 			}
 		}
-		_ = p.cfg.Analytics.StoreEvent(analytics.Event{
+		_ = p.analyticsStore().StoreEvent(analytics.Event{
 			Timestamp:      time.Now(),
 			Domain:         domain,
 			Port:           port,

@@ -57,6 +57,9 @@ services:
     environment:
       - WARDEN_CP_TOKEN=${WARDEN_CP_TOKEN:-dev-token}
       - WARDEN_PROXY_ID=worker-1
+      # The worker holds its own secret locally (never sent to the control plane).
+      # This demo value satisfies the secrets mapping in config.worker.yaml.
+      - EXAMPLE_SECRET=demo-local-secret-not-a-real-key
     volumes:
       - ../../configs/config.worker.yaml:/etc/warden/config.yaml:ro
       - ./certs:/etc/warden/certs:ro
@@ -79,6 +82,7 @@ services:
     environment:
       - WARDEN_CP_TOKEN=${WARDEN_CP_TOKEN:-dev-token}
       - WARDEN_PROXY_ID=worker-2
+      - EXAMPLE_SECRET=demo-local-secret-not-a-real-key
     volumes:
       - ../../configs/config.worker.yaml:/etc/warden/config.yaml:ro
       - ./certs:/etc/warden/certs:ro

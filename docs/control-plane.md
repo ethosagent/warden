@@ -41,6 +41,37 @@ same proxy CA the workers already use. Each worker trusts it via
 `controlPlane.caCert` / `central.caCert`, which adds that CA to a
 **per-connection** pool only — the worker's upstream TLS trust is unchanged.
 
+## Worker ↔ control plane: the only interactions
+
+Every connection is **worker-initiated** (the worker always dials out, so no
+inbound port is opened on the worker), and the control plane **never** calls into
+a worker. There are exactly three calls:
+
+1. **Long-poll config** — `GET /policy?wait=30s` with an `If-None-Match` ETag. The
+   CP holds the request open and returns **200 + new policy the instant it
+   changes**, or **304** at the timeout; the worker re-polls immediately. Policy
+   edits reach workers in ~one round-trip, not after a fixed interval.
+2. **Heartbeat** — `POST /control/heartbeat` (~every 10s) so the CP lists the
+   worker as online even when idle, and knows its current policy version.
+3. **Analytics** — `POST /central/ingest` (worker → CP).
+
+The dashboard shows only what the CP already has (pushed analytics + the
+registry); it never reaches into a worker.
+
+## Managed vs local-only
+
+By default a worker with `controlPlane.endpoint` set is **CP-managed**: its
+allow/deny policy comes **only** from the control plane. It boots **fail-closed
+(denies all egress)** until its first successful pull, then enforces CP policy and
+keeps the last-known-good across CP outages — it never falls back to a local
+allowlist the operator didn't intend. (Secrets always stay local; "managed" is
+about allow/deny policy only.)
+
+Set `controlPlane.localOnly: true` (or run `warden run --local-only`) to ignore
+the control plane and enforce the worker's **local** policy standalone — the
+escape hatch for offline/debug. A managed worker needs no local `allowlist`; a
+local-only/standalone worker still requires one.
+
 ## Run it
 
 ```sh
@@ -77,19 +108,35 @@ WARDEN_PROXY_ID=worker-1 warden run --config configs/config.worker.yaml ...
 Omit `--ca-cert`/`--ca-key` to serve plain HTTP for local poking, but a real
 worker requires HTTPS for the policy pull.
 
-## What the fleet dashboard does
+## What the control-plane dashboard does
 
-- **Per-worker slicing** — events are tagged with their originating worker, so
-  the dashboard shows a per-worker breakdown and lets you filter the whole view
-  to one worker.
+- **Edit policy** — add/remove allow and deny rules from the dashboard and Save.
+  The edit is validated (an empty allowlist is rejected — default-deny is
+  preserved) and written back to the served policy file, so every worker pulls it
+  on its next poll. The editor only appears on the control plane; worker
+  dashboards show policy read-only and expose no write path.
+- **Connected workers** — a live list of every worker the control plane has heard
+  from (via policy pulls and analytics ingest): online/offline status, last-seen,
+  last policy pull, and events forwarded. Hidden on a single-node dashboard.
+- **Per-worker slicing** — events are tagged with their originating worker, so the
+  dashboard shows a per-worker breakdown and lets you filter the whole view to one
+  worker.
+- **MCP per worker** — each worker forwards its MCP inventory + observed
+  request/response schema (value-free: paths · types · sensitivity) over the
+  ingest channel, so the control-plane MCP panel shows it per worker (follows the
+  worker selector). Requires `mcp.enabled` on the worker.
 - **Live policy** — the policy panel reflects the policy currently being served
-  (control plane) or enforced (worker, including control-plane hot-reloads), not
-  a startup snapshot.
+  (control plane) or enforced (worker, including hot-reloads), not a startup snapshot.
+
+> **Security note:** policy editing is **unauthenticated** — anyone who can reach
+> the dashboard can change policy. Restrict the control plane's port (`:7070`) to
+> operators (firewall / private network / VPN). Viewing and editing share the same
+> open access today.
 
 ## What's deliberately not here (yet)
 
 The control plane's policy source is a YAML file it re-reads per request, and the
-fleet analytics store is in-memory. A database (persistent fleet analytics), a
-policy-authoring UI, and per-agent (not just per-worker) slicing are future work
-— and because the worker↔control-plane contract is just HTTP, adding them
-doesn't change the workers.
+fleet analytics store is in-memory (lost on restart). A database (persistent fleet
+analytics), authenticated/RBAC policy editing, and per-agent (not just per-worker)
+slicing are future work — and because the worker↔control-plane contract is just
+HTTP, adding them doesn't change the workers.

@@ -183,6 +183,53 @@ func TestBuildJudge_EnabledConstructs(t *testing.T) {
 	}
 }
 
+// TestBuildJudgeFrom_DisabledReturnsNil verifies the shared builder returns a nil
+// judge (no error) when the config is disabled, so a control-plane apply with the
+// judge off disables it cleanly.
+func TestBuildJudgeFrom_DisabledReturnsNil(t *testing.T) {
+	j, err := buildJudgeFrom(config.JudgeConfig{Enabled: false}, nil, "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if j != nil {
+		t.Error("disabled judge must be nil")
+	}
+}
+
+// TestBuildJudgeFrom_ResolvesAPIKeyFromLocalEnv verifies the API key is read from
+// the worker's LOCAL environment via the env NAME — the value never travels in
+// settings. It builds from a JudgeConfig produced by JudgeConfigFromSettings (the
+// distribution path), confirming the rebuilt judge succeeds only because the key
+// is present in the local env under the distributed env NAME.
+func TestBuildJudgeFrom_ResolvesAPIKeyFromLocalEnv(t *testing.T) {
+	const envName = "WARDEN_JUDGE_LOCAL_KEY"
+
+	// The wire settings carry only the env NAME, never a key value.
+	wire := &config.JudgeSettings{
+		Enabled:   true,
+		Model:     "gpt-4o-mini",
+		BaseURL:   "https://api.openai.com/v1",
+		APIKeyEnv: envName,
+	}
+	jc := config.JudgeConfigFromSettings(wire)
+	agents := config.AgentsFromSettings([]config.AgentSettings{{ID: "default", Policy: "allow reads"}})
+
+	// With the env var UNSET locally, the build must fail (no key resolved).
+	if _, err := buildJudgeFrom(jc, agents, "default"); err == nil {
+		t.Fatal("expected error when local env key is unset")
+	}
+
+	// Set the key in the LOCAL env under the distributed name; build now succeeds.
+	t.Setenv(envName, "sk-local-value")
+	j, err := buildJudgeFrom(jc, agents, "default")
+	if err != nil {
+		t.Fatalf("unexpected error after setting local env key: %v", err)
+	}
+	if j == nil {
+		t.Fatal("expected a judge once the local key resolves")
+	}
+}
+
 func TestDefaultAgentID_PortBindingWhenMultiple(t *testing.T) {
 	pol := config.Policy{Agents: []config.AgentPolicy{
 		{ID: "a", Policy: "x"},

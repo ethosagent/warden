@@ -1,8 +1,13 @@
 package analytics
 
 import (
+	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"github.com/ethosagent/warden/internal/mcp"
+	"github.com/ethosagent/warden/internal/mcp/gateway"
 )
 
 // TestCentralIngestRoundTrip sends a batch from the worker-side HTTPRemoteStore
@@ -43,6 +48,66 @@ func TestCentralIngestRoundTrip(t *testing.T) {
 	}
 	if len(e.Compliance) != 2 || e.Compliance[0] != "mitre:T1071" {
 		t.Errorf("compliance lost: %v", e.Compliance)
+	}
+}
+
+// TestIngestMCPSnapshot round-trips an MCP snapshot worker→CP and verifies it
+// routes to the onMCP callback with the sender's proxy id (value-free schema).
+func TestIngestMCPSnapshot(t *testing.T) {
+	cs := NewCentralStore(0)
+	h := NewIngestHandler(cs, "")
+	var gotProxy string
+	var gotSnap MCPSnapshot
+	h.SetOnMCP(func(p string, s MCPSnapshot) { gotProxy, gotSnap = p, s })
+
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	rs, err := NewHTTPRemoteStore(srv.URL, "", "worker-1", srv.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap := MCPSnapshot{
+		Inventory: []gateway.InventoryItem{{Name: "read_file", HasDescription: true}},
+		Schema: map[string]mcp.ToolProfileView{
+			"read_file\x00request": {Fields: map[string]mcp.FieldProfileView{
+				"path": {Types: []string{"string"}, SeenCount: 3},
+			}},
+		},
+	}
+	if err := rs.SendMCP(snap); err != nil {
+		t.Fatal(err)
+	}
+	if gotProxy != "worker-1" {
+		t.Errorf("proxy = %q, want worker-1", gotProxy)
+	}
+	if len(gotSnap.Inventory) != 1 || gotSnap.Inventory[0].Name != "read_file" {
+		t.Errorf("inventory not forwarded: %+v", gotSnap.Inventory)
+	}
+	if _, ok := gotSnap.Schema["read_file\x00request"]; !ok {
+		t.Errorf("schema not forwarded: %+v", gotSnap.Schema)
+	}
+}
+
+// TestIngestBareArrayBackCompat verifies the ingest endpoint still accepts a bare
+// JSON array of events (pre-envelope wire format).
+func TestIngestBareArrayBackCompat(t *testing.T) {
+	cs := NewCentralStore(0)
+	srv := httptest.NewServer(NewIngestHandler(cs, ""))
+	defer srv.Close()
+	req, _ := http.NewRequest(http.MethodPost, srv.URL,
+		strings.NewReader(`[{"Domain":"a.com","Decision":"allow"}]`))
+	req.Header.Set(ProxyIDHeader, "legacy")
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("bare array status = %d, want 204", resp.StatusCode)
+	}
+	got, _ := cs.GetEvents(EventFilter{})
+	if len(got) != 1 || got[0].Domain != "a.com" {
+		t.Fatalf("bare array not ingested: %+v", got)
 	}
 }
 
@@ -91,6 +156,29 @@ func TestCentralIngestRejectsBadToken(t *testing.T) {
 	}
 	if got, _ := cs.GetEvents(EventFilter{}); len(got) != 0 {
 		t.Fatalf("rejected batch should not be stored, got %d", len(got))
+	}
+}
+
+// TestIngestOnIngestHook verifies the aggregator's per-batch callback fires with
+// the sender's proxy id and batch size (the control plane uses it to track workers).
+func TestIngestOnIngestHook(t *testing.T) {
+	cs := NewCentralStore(0)
+	h := NewIngestHandler(cs, "")
+	var gotProxy string
+	var gotN int
+	h.SetOnIngest(func(p string, n int) { gotProxy, gotN = p, n })
+
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	rs, err := NewHTTPRemoteStore(srv.URL, "", "worker-x", srv.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rs.SendBatch([]Event{{Domain: "a.com"}, {Domain: "b.com"}}); err != nil {
+		t.Fatal(err)
+	}
+	if gotProxy != "worker-x" || gotN != 2 {
+		t.Fatalf("onIngest got (%q, %d), want (worker-x, 2)", gotProxy, gotN)
 	}
 }
 

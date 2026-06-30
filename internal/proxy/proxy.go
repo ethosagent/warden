@@ -17,6 +17,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethosagent/warden/internal/analytics"
@@ -95,7 +96,111 @@ type Proxy struct {
 	certCache  sync.Map
 	dialFunc   func(network, addr string) (net.Conn, error)
 	dialTLS    func(network, addr string, cfg *tls.Config) (*tls.Conn, error)
+
+	// mcp holds the live MCP gateway, swappable atomically while the hot path
+	// reads it (control-plane settings can rebuild + replace it at runtime). A
+	// nil pointer means MCP is disabled, exactly as a nil cfg.MCP did before. It
+	// is seeded from cfg.MCP in New so an unmanaged worker's behavior is unchanged.
+	mcp atomic.Pointer[gateway.Gateway]
+
+	// judge holds the live inline judge, swappable atomically while the hot path
+	// reads it (control-plane settings can rebuild + replace it at runtime). The
+	// judge is an interface, so it is wrapped in judgeHolder to give the atomic
+	// pointer a concrete type and to allow a nil judge (disabled). A nil pointer
+	// — or a holder wrapping a nil interface — means the judge is disabled,
+	// exactly as a nil cfg.Judge did before. It is seeded from cfg.Judge in New so
+	// an unmanaged worker's behavior is unchanged.
+	judgeP atomic.Pointer[judgeHolder]
+
+	// secretsP holds the live secret provider, swappable atomically while the hot
+	// path reads it (a control-plane cache.ttl change rebuilds the cache and
+	// replaces it at runtime). SecretProvider is an interface, so it is wrapped in
+	// secretsHolder to give the atomic pointer a concrete element type. It is
+	// seeded from cfg.Secrets in New (which New validates as non-nil), so an
+	// unmanaged worker's behavior is unchanged.
+	secretsP atomic.Pointer[secretsHolder]
+
+	// analyticsP holds the live analytics store, swappable atomically while the
+	// hot path reads it (a control-plane compliance toggle rebuilds only the
+	// tagging layer and replaces it at runtime). AnalyticsStore is an interface,
+	// so it is wrapped in analyticsHolder. It is seeded from cfg.Analytics in New
+	// (validated non-nil), so an unmanaged worker's behavior is unchanged.
+	analyticsP atomic.Pointer[analyticsHolder]
 }
+
+// judgeHolder wraps the Judge interface so it can live behind an
+// atomic.Pointer[judgeHolder] (which needs a concrete element type). A nil holder
+// pointer, or a holder whose j is nil, both mean "judge disabled".
+type judgeHolder struct{ j Judge }
+
+// secretsHolder wraps the SecretProvider interface so it can live behind an
+// atomic.Pointer[secretsHolder] (which needs a concrete element type). It is
+// always non-nil after New (cfg.Secrets is required), so the hot-path reader
+// never returns a nil provider.
+type secretsHolder struct{ s secrets.SecretProvider }
+
+// analyticsHolder wraps the AnalyticsStore interface so it can live behind an
+// atomic.Pointer[analyticsHolder]. It is always non-nil after New (cfg.Analytics
+// is required), so the hot-path reader never returns a nil store.
+type analyticsHolder struct{ a analytics.AnalyticsStore }
+
+// mcpGateway loads the current MCP gateway through the atomic pointer. A nil
+// return means MCP is disabled (the hot path's `if gw != nil` guard then skips
+// all MCP work, byte-identical to a worker that never configured MCP).
+func (p *Proxy) mcpGateway() *gateway.Gateway { return p.mcp.Load() }
+
+// SetMCPGateway atomically swaps in a new MCP gateway (or nil to disable). It is
+// race-free against concurrent hot-path reads via the atomic pointer; the caller
+// owns the lifecycle of the OLD gateway (the long-poll apply loop in cmd/proxy
+// rebuilds and replaces on each control-plane change).
+func (p *Proxy) SetMCPGateway(gw *gateway.Gateway) { p.mcp.Store(gw) }
+
+// judge loads the current inline judge through the atomic pointer. A nil return
+// means the judge is disabled (the hot path's `if j != nil` guard then skips the
+// judge, byte-identical to a worker that never configured a judge). It mirrors
+// mcpGateway: a single snapshot per request keeps a concurrent swap from
+// changing the judge mid-request.
+func (p *Proxy) judge() Judge {
+	if h := p.judgeP.Load(); h != nil {
+		return h.j
+	}
+	return nil
+}
+
+// SetJudge atomically swaps in a new inline judge (or nil to disable). It is
+// race-free against concurrent hot-path reads via the atomic pointer. The judge
+// is fail-safe advisory state, not a lifecycle-owning handle, so there is nothing
+// to close on the OLD judge (unlike the MCP gateway). The long-poll apply loop in
+// cmd/proxy rebuilds and replaces on each control-plane change.
+func (p *Proxy) SetJudge(j Judge) { p.judgeP.Store(&judgeHolder{j: j}) }
+
+// secrets loads the current secret provider through the atomic pointer. It is
+// always non-nil after New (cfg.Secrets is required and seeded), matching the
+// pre-swap behavior where p.cfg.Secrets was read directly. A single snapshot per
+// request keeps a concurrent cache.ttl swap from changing the provider
+// mid-request.
+func (p *Proxy) secrets() secrets.SecretProvider { return p.secretsP.Load().s }
+
+// SetSecrets atomically swaps in a new secret provider. It is race-free against
+// concurrent hot-path reads via the atomic pointer. The control-plane apply loop
+// rebuilds the cache (with a new TTL) and replaces it on a cache.ttl change;
+// dropping the old cache's entries is acceptable, they simply re-fetch. The OLD
+// provider has no lifecycle to close (the env-backed cache holds no handles).
+func (p *Proxy) SetSecrets(s secrets.SecretProvider) { p.secretsP.Store(&secretsHolder{s: s}) }
+
+// analyticsStore loads the current analytics store through the atomic pointer. It
+// is always non-nil after New (cfg.Analytics is required and seeded), matching the
+// pre-swap behavior where p.cfg.Analytics was read directly. A single snapshot per
+// request keeps a concurrent compliance toggle from changing the store
+// mid-request.
+func (p *Proxy) analyticsStore() analytics.AnalyticsStore { return p.analyticsP.Load().a }
+
+// SetAnalytics atomically swaps in a new analytics store. It is race-free against
+// concurrent hot-path reads via the atomic pointer. The control-plane apply loop
+// rebuilds ONLY the tagging layer around the shared base/signing store on a
+// compliance toggle and replaces it here; the dashboard and central-forwarding
+// consumers hold the base store directly and are unaffected by this swap.
+func (p *Proxy) SetAnalytics(a analytics.AnalyticsStore) { p.analyticsP.Store(&analyticsHolder{a: a}) }
 
 // New constructs a Proxy, validating that the required collaborators are
 // present. It does not bind a socket; Serve (M1) does.
@@ -116,6 +221,17 @@ func New(cfg Config) (*Proxy, error) {
 		cfg.Logger = observability.DiscardLogger()
 	}
 	p := &Proxy{cfg: cfg}
+	// Seed the swappable gateway from the configured one so an unmanaged worker's
+	// behavior is unchanged; a managed worker's long-poll apply loop replaces it.
+	p.mcp.Store(cfg.MCP)
+	// Seed the swappable judge from cfg.Judge (may be nil = disabled), same
+	// rationale as the gateway above.
+	p.judgeP.Store(&judgeHolder{j: cfg.Judge})
+	// Seed the swappable secret provider and analytics store from the (required,
+	// non-nil) cfg values so an unmanaged worker reads exactly what it did before;
+	// a managed worker's apply loop replaces them on cache.ttl / compliance changes.
+	p.secretsP.Store(&secretsHolder{s: cfg.Secrets})
+	p.analyticsP.Store(&analyticsHolder{a: cfg.Analytics})
 
 	haveCert := cfg.CACertPath != ""
 	haveKey := cfg.CAKeyPath != ""
