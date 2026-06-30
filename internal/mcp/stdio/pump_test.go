@@ -171,6 +171,70 @@ func TestBlockErrorNullIDWhenAbsent(t *testing.T) {
 	}
 }
 
+// onEventRecord is one OnEvent invocation captured by a test.
+type onEventRecord struct {
+	tool     string
+	decision string
+	reason   string
+}
+
+func TestPumpOnEventAllowedCall(t *testing.T) {
+	p := &Pump{GW: newGW(t, "enforce", "safe_tool"), SessionKey: "stdio"}
+	var got []onEventRecord
+	p.OnEvent = func(tool, decision, reason string) {
+		got = append(got, onEventRecord{tool, decision, reason})
+	}
+	line := callLine(t, 1, "safe_tool")
+
+	var serverIn, clientOut bytes.Buffer
+	if err := p.PumpRequests(bytes.NewReader(append(line, '\n')), &serverIn, &clientOut); err != nil {
+		t.Fatalf("PumpRequests: %v", err)
+	}
+
+	if len(got) != 1 {
+		t.Fatalf("OnEvent called %d times, want 1: %+v", len(got), got)
+	}
+	if got[0] != (onEventRecord{tool: "safe_tool", decision: "allow", reason: ""}) {
+		t.Fatalf("OnEvent got %+v, want {safe_tool allow \"\"}", got[0])
+	}
+}
+
+func TestPumpOnEventDeniedCall(t *testing.T) {
+	// enforce + allow only safe_tool => bad_tool is denied.
+	p := &Pump{GW: newGW(t, "enforce", "safe_tool"), SessionKey: "stdio"}
+	var got []onEventRecord
+	p.OnEvent = func(tool, decision, reason string) {
+		got = append(got, onEventRecord{tool, decision, reason})
+	}
+	line := callLine(t, 2, "bad_tool")
+
+	var serverIn, clientOut bytes.Buffer
+	if err := p.PumpRequests(bytes.NewReader(append(line, '\n')), &serverIn, &clientOut); err != nil {
+		t.Fatalf("PumpRequests: %v", err)
+	}
+
+	if len(got) != 1 {
+		t.Fatalf("OnEvent called %d times, want 1: %+v", len(got), got)
+	}
+	if got[0] != (onEventRecord{tool: "bad_tool", decision: "deny", reason: "mcp_tool_denied"}) {
+		t.Fatalf("OnEvent got %+v, want {bad_tool deny mcp_tool_denied}", got[0])
+	}
+}
+
+func TestPumpOnEventNilIsNoOp(t *testing.T) {
+	// nil OnEvent must not panic and must not change pumping behavior.
+	p := &Pump{GW: newGW(t, "enforce", "safe_tool"), SessionKey: "stdio"}
+	line := callLine(t, 1, "safe_tool")
+
+	var serverIn, clientOut bytes.Buffer
+	if err := p.PumpRequests(bytes.NewReader(append(line, '\n')), &serverIn, &clientOut); err != nil {
+		t.Fatalf("PumpRequests: %v", err)
+	}
+	if strings.TrimRight(serverIn.String(), "\n") != string(line) {
+		t.Fatalf("nil OnEvent changed forwarding: %q", serverIn.String())
+	}
+}
+
 func TestPumpResponsesBenignForwards(t *testing.T) {
 	p := &Pump{GW: newGW(t, "enforce", "safe_tool"), SessionKey: "stdio"}
 	resp := []byte(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"hello"}]}}`)

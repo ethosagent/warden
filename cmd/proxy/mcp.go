@@ -1,17 +1,23 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/config"
+	"github.com/ethosagent/warden/internal/dashboard"
 	"github.com/ethosagent/warden/internal/mcp/gateway"
 	"github.com/ethosagent/warden/internal/mcp/stdio"
 	"github.com/ethosagent/warden/internal/scan"
@@ -43,6 +49,8 @@ func newMCPCmd() *cobra.Command {
 
 	cmd.Flags().String("mode", "", "override the MCP mode: monitor|enforce (default: config or built-in monitor)")
 	cmd.Flags().String("verify-sha256", "", "verify the server binary's SHA-256 (hex) before launch")
+	cmd.Flags().String("dashboard", "", "serve the live MCP dashboard at this addr (e.g. 127.0.0.1:9090); empty = off")
+	cmd.Flags().String("db", ":memory:", "SQLite path backing the dashboard's per-tool call counts (default in-memory)")
 	// --config is inherited from the root persistent flag.
 
 	return cmd
@@ -66,6 +74,14 @@ func runMCP(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	verifySHA, err := cmd.Flags().GetString("verify-sha256")
+	if err != nil {
+		return err
+	}
+	dashboardAddr, err := cmd.Flags().GetString("dashboard")
+	if err != nil {
+		return err
+	}
+	dbPath, err := cmd.Flags().GetString("db")
 	if err != nil {
 		return err
 	}
@@ -106,6 +122,34 @@ func runMCP(cmd *cobra.Command, args []string) error {
 		"verify", verifySHA != "",
 	)
 
+	pump := &stdio.Pump{GW: gw, SessionKey: "stdio", Log: logger}
+
+	// Optional dashboard. When --dashboard is set it serves the live MCP view
+	// (tool inventory + observed schema + sensitivity from the gateway, per-tool
+	// call counts from recorded events) and wires pump.OnEvent to record those
+	// counts. Off by default: no store, no server, no OnEvent (unchanged behavior).
+	if dashboardAddr != "" {
+		store, derr := analytics.NewSQLiteStore(dbPath, 0)
+		if derr != nil {
+			return fmt.Errorf("mcp dashboard: open store: %w", derr)
+		}
+		defer func() { _ = store.Close() }()
+
+		pump.OnEvent = func(tool, decision, reason string) {
+			_ = store.StoreEvent(analytics.Event{
+				Timestamp: time.Now(),
+				Protocol:  "mcp",
+				Tool:      tool,
+				Decision:  decision,
+				Reason:    reason,
+			})
+		}
+
+		shutdownDash := startMCPDashboard(ctx, dashboardAddr, mcpCfg, gw, store, logger)
+		defer shutdownDash()
+		fmt.Fprintf(cmd.ErrOrStderr(), "MCP dashboard: http://%s/dashboard/\n", dashboardAddr)
+	}
+
 	srv := exec.CommandContext(ctx, resolved, serverArgs...) //nolint:gosec // operator-provided server command
 	srv.Stderr = cmd.ErrOrStderr()                           // server diagnostics share warden's stderr
 	serverStdin, err := srv.StdinPipe()
@@ -121,7 +165,6 @@ func runMCP(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("start server %q: %w", resolved, err)
 	}
 
-	pump := &stdio.Pump{GW: gw, SessionKey: "stdio", Log: logger}
 	pumpErr := pump.Run(ctx, cmd.InOrStdin(), serverStdin, serverStdout, cmd.OutOrStdout())
 
 	// Wait for the server to exit and surface its exit error. The pump returns
@@ -136,6 +179,46 @@ func runMCP(cmd *cobra.Command, args []string) error {
 	}
 	return nil
 }
+
+// startMCPDashboard builds the dashboard server (MCP view backed by the gateway
+// + per-tool counts from store) and serves it on addr in a background goroutine.
+// It returns a shutdown func the caller defers; the server also stops when ctx is
+// cancelled. The wedge has no secrets to surface, so an empty secret provider is
+// used and the policy carries only the active MCP config.
+func startMCPDashboard(ctx context.Context, addr string, mcpCfg config.MCPConfig, gw *gateway.Gateway, store dashboard.DataSource, logger *slog.Logger) func() {
+	dashSrv := dashboard.NewServer(store, config.Policy{MCP: mcpCfg}, emptySecretProvider{})
+	dashSrv.SetMCPProvider(gw)
+
+	httpSrv := &http.Server{
+		Addr:              addr,
+		Handler:           dashSrv.Handler(),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	go func() {
+		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("mcp dashboard stopped", "error", err)
+		}
+	}()
+	// Stop the server when the command's context is cancelled (signal/EOF).
+	go func() {
+		<-ctx.Done()
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = httpSrv.Shutdown(shutCtx)
+	}()
+	return func() {
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = httpSrv.Shutdown(shutCtx)
+	}
+}
+
+// emptySecretProvider is a no-op secrets.SecretProvider for the stdio wedge,
+// which manages no secrets. The dashboard's /secrets endpoint is unused here.
+type emptySecretProvider struct{}
+
+func (emptySecretProvider) GetSecret(string) (string, error) { return "", nil }
+func (emptySecretProvider) RefreshSecrets() error            { return nil }
 
 // matchServer returns the first servers entry whose Command equals the raw
 // command the operator passed after `--`, or nil if none matches.

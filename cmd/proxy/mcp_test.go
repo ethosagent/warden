@@ -9,13 +9,20 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/config"
+	"github.com/ethosagent/warden/internal/dashboard"
+	"github.com/ethosagent/warden/internal/mcp/gateway"
+	"github.com/ethosagent/warden/internal/scan"
 )
 
 // syncWriter serializes concurrent writes for tests that point both the slog
@@ -99,6 +106,73 @@ func TestVerifyServerBinary(t *testing.T) {
 			t.Fatal("wrong flag sha256 should fail, got nil")
 		}
 	})
+}
+
+// TestMCPDashboardRecordsTool verifies the dashboard-wiring path: an in-memory
+// store + dashboard server with the gateway attached, an mcp event recorded the
+// same way runMCP's pump.OnEvent records it, surfaces the tool (with its call
+// count) at /dashboard/api/mcp.
+func TestMCPDashboardRecordsTool(t *testing.T) {
+	store, err := analytics.NewSQLiteStore(":memory:", 0)
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	cfg := defaultMCPConfig()
+	gw := gateway.New(cfg, scan.NewScanner(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	dashSrv := dashboard.NewServer(store, config.Policy{MCP: cfg}, emptySecretProvider{})
+	dashSrv.SetMCPProvider(gw)
+	handler := dashSrv.Handler()
+
+	// Record an mcp event exactly as pump.OnEvent would.
+	if err := store.StoreEvent(analytics.Event{Protocol: "mcp", Tool: "list_files", Decision: "allow"}); err != nil {
+		t.Fatalf("store event: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/dashboard/api/mcp", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Enabled bool `json:"enabled"`
+		Tools   []struct {
+			Tool  string `json:"tool"`
+			Calls int    `json:"calls"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v (%s)", err, rec.Body.String())
+	}
+	if !resp.Enabled {
+		t.Fatal("mcp dashboard should report enabled when a provider is attached")
+	}
+	var found bool
+	for _, tv := range resp.Tools {
+		if tv.Tool == "list_files" {
+			found = true
+			if tv.Calls != 1 {
+				t.Fatalf("calls = %d, want 1", tv.Calls)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("list_files not in mcp view: %s", rec.Body.String())
+	}
+}
+
+func TestMCPDashboardFlagWired(t *testing.T) {
+	cmd := newMCPCmd()
+	if cmd.Flags().Lookup("dashboard") == nil {
+		t.Fatal("--dashboard flag not registered")
+	}
+	if f := cmd.Flags().Lookup("db"); f == nil || f.DefValue != ":memory:" {
+		t.Fatalf("--db flag missing or wrong default: %+v", f)
+	}
 }
 
 func TestMCPMissingServerCommand(t *testing.T) {

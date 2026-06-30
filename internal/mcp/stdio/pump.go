@@ -28,6 +28,13 @@ type Pump struct {
 	SessionKey string // gateway session key for this connection (e.g. "stdio")
 	Log        *slog.Logger
 
+	// OnEvent, if set, is called once per analyzed MCP message with the tool name
+	// (may be ""), decision ("allow"/"deny"), and bounded reason. Used to record
+	// call counts for the dashboard. nil = no-op (current behavior). It is the
+	// callback's responsibility to be safe for concurrent use: PumpRequests and
+	// PumpResponses may invoke it from their respective goroutines.
+	OnEvent func(tool, decision, reason string)
+
 	// outMu guards clientOut: both PumpResponses (forwarding server output) and
 	// PumpRequests (injecting block errors) may write it concurrently under Run.
 	outMu sync.Mutex
@@ -53,6 +60,7 @@ func (p *Pump) PumpRequests(clientIn io.Reader, serverIn io.Writer, clientOut io
 		if len(line) > 0 {
 			v := p.GW.OnRequest(p.SessionKey, "", "stdio", nil, line)
 			p.logFindings("request", v)
+			p.emitEvent(v)
 			if v.Action == gateway.Deny {
 				p.writeClient(clientOut, blockError(line, v.Reason))
 			} else if werr := writeLine(serverIn, line); werr != nil {
@@ -79,6 +87,7 @@ func (p *Pump) PumpResponses(serverOut io.Reader, clientOut io.Writer) error {
 		if len(line) > 0 {
 			v := p.GW.OnResponse(p.SessionKey, 200, nil, line)
 			p.logFindings("response", v)
+			p.emitEvent(v)
 			if v.Action == gateway.Deny {
 				p.writeClient(clientOut, blockError(line, v.Reason))
 			} else {
@@ -129,6 +138,22 @@ func (p *Pump) writeClient(clientOut io.Writer, b []byte) {
 	if _, err := clientOut.Write(b); err != nil {
 		p.log().Warn("mcp client write failed", "error", err)
 	}
+}
+
+// emitEvent reports one analyzed message to OnEvent (if set) with the tool name,
+// the binary allow/deny decision derived from the verdict's Action, and the
+// bounded reason. It carries only the gateway's value-free Verdict fields — never
+// a tool argument or result — so the dashboard can tally per-tool call counts
+// without the stdio package depending on analytics. nil OnEvent is a no-op.
+func (p *Pump) emitEvent(v gateway.Verdict) {
+	if p.OnEvent == nil {
+		return
+	}
+	decision := "allow"
+	if v.Action == gateway.Deny {
+		decision = "deny"
+	}
+	p.OnEvent(v.Tool, decision, v.Reason)
 }
 
 // logFindings emits one bounded log line per finding. It never logs a tool
