@@ -42,13 +42,16 @@ type MCPProvider interface {
 
 // Server holds the dependencies needed by the dashboard HTTP handlers.
 type Server struct {
-	data    DataSource
-	policy  config.Policy
-	secrets secrets.SecretProvider
-	mcp     MCPProvider // nil when the MCP gateway is disabled
+	data       DataSource
+	policy     config.Policy
+	secrets    secrets.SecretProvider
+	mcp        MCPProvider          // nil when the MCP gateway is disabled
+	livePolicy func() config.Policy // nil = serve the static startup policy
 }
 
-// NewServer constructs a dashboard Server.
+// NewServer constructs a dashboard Server. The policy argument is the static
+// startup policy used for the secret-usage view; for the allow/deny policy
+// panel prefer SetLivePolicy so the dashboard reflects hot-reloaded policy.
 func NewServer(data DataSource, policy config.Policy, sec secrets.SecretProvider) *Server {
 	return &Server{
 		data:    data,
@@ -61,6 +64,13 @@ func NewServer(data DataSource, policy config.Policy, sec secrets.SecretProvider
 // never calling it) leaves the MCP view in its disabled state.
 func (s *Server) SetMCPProvider(p MCPProvider) {
 	s.mcp = p
+}
+
+// SetLivePolicy supplies a function returning the allow/deny policy currently in
+// force, so the policy panel reflects control-plane hot-reloads instead of the
+// startup snapshot. The function must return allow/deny only (no secrets).
+func (s *Server) SetLivePolicy(fn func() config.Policy) {
+	s.livePolicy = fn
 }
 
 // --- JSON response types ---
@@ -223,9 +233,15 @@ func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Prefer the live (hot-reloadable) policy so the panel matches what is
+	// actually being enforced; fall back to the startup snapshot.
+	pol := s.policy
+	if s.livePolicy != nil {
+		pol = s.livePolicy()
+	}
 	resp := policyResponse{
-		Allowlist: s.policy.Allowlist,
-		Denylist:  s.policy.Denylist,
+		Allowlist: pol.Allowlist,
+		Denylist:  pol.Denylist,
 	}
 	if resp.Allowlist == nil {
 		resp.Allowlist = []config.AllowlistEntry{}
@@ -355,7 +371,7 @@ func (s *Server) handleEndpoints(w http.ResponseWriter, r *http.Request) {
 	cutoff, finite := rangeCutoff(q.Get("range"), time.Now())
 
 	// Limit 0 means no cap — aggregate over every recorded event.
-	f := analytics.EventFilter{Domain: domainFilter, Limit: 0}
+	f := analytics.EventFilter{Domain: domainFilter, ProxyID: q.Get("proxy"), Limit: 0}
 	if finite {
 		f.Since = cutoff
 	}
@@ -598,6 +614,18 @@ type analyticsResponse struct {
 	Writes        []writeEntry     `json:"writes"`
 	Cost          costSummary      `json:"cost"`
 	Compliance    []complianceTag  `json:"compliance"`
+	// Proxies is the per-worker breakdown for a fleet (aggregator) view. Empty on
+	// a single-node dashboard. SelectedProxy echoes the active ?proxy= filter.
+	Proxies       []proxyCount `json:"proxies"`
+	SelectedProxy string       `json:"selectedProxy"`
+}
+
+// proxyCount is one worker's contribution to the fleet, for the proxy selector.
+type proxyCount struct {
+	ProxyID string `json:"proxyID"`
+	Count   int    `json:"count"`
+	Allowed int    `json:"allowed"`
+	Denied  int    `json:"denied"`
 }
 
 // costSummary aggregates estimated LLM spend over the selected window. Figures
@@ -737,6 +765,52 @@ func timelineBucketsWindow(events []analytics.Event, start, end time.Time) []tim
 // handleAnalytics serves GET /dashboard/api/analytics: a single aggregate
 // payload computed in one pass over all recorded events. Empty DB yields zeroed
 // totals and empty (non-nil) arrays.
+// proxyBreakdown tallies events per originating worker for the fleet selector,
+// sorted by count desc then id. Events with no proxy id (single node) are
+// ignored, so the result is empty for a non-fleet dashboard.
+func proxyBreakdown(events []analytics.Event) []proxyCount {
+	byProxy := make(map[string]*proxyCount)
+	for _, e := range events {
+		if e.ProxyID == "" {
+			continue
+		}
+		pc, ok := byProxy[e.ProxyID]
+		if !ok {
+			pc = &proxyCount{ProxyID: e.ProxyID}
+			byProxy[e.ProxyID] = pc
+		}
+		pc.Count++
+		switch e.Decision {
+		case "allow":
+			pc.Allowed++
+		case "deny":
+			pc.Denied++
+		}
+	}
+	out := make([]proxyCount, 0, len(byProxy))
+	for _, pc := range byProxy {
+		out = append(out, *pc)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Count != out[j].Count {
+			return out[i].Count > out[j].Count
+		}
+		return out[i].ProxyID < out[j].ProxyID
+	})
+	return out
+}
+
+// filterByProxy returns only the events from the named worker.
+func filterByProxy(events []analytics.Event, proxyID string) []analytics.Event {
+	out := make([]analytics.Event, 0, len(events))
+	for _, e := range events {
+		if e.ProxyID == proxyID {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -757,22 +831,34 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Fleet per-proxy breakdown is computed across ALL in-range events so the
+	// selector always lists every worker; the rest of the view then reflects the
+	// selected proxy (empty = whole fleet). On a single-node dashboard no event
+	// carries a proxy id, so proxies is empty and the UI hides the selector.
+	selectedProxy := q.Get("proxy")
+	proxies := proxyBreakdown(events)
+	if selectedProxy != "" {
+		events = filterByProxy(events, selectedProxy)
+	}
+
 	dayAgo := now.Add(-24 * time.Hour)
 
 	resp := analyticsResponse{
-		GeneratedAt:  now.Format(time.RFC3339),
-		Methods:      []methodCount{},
-		Protocols:    []protocolCount{},
-		Timeline:     []timelineBucket{},
-		Hourly:       make([]hourlyBucket, 24),
-		TopDomains:   []topDomain{},
-		TopEndpoints: []topEndpoint{},
-		Blocked:      []blockedGroup{},
-		Secrets:      []secretUsage{},
-		Judge:        []judgeEntry{},
-		Writes:       []writeEntry{},
-		Cost:         costSummary{ByProvider: []providerCost{}},
-		Compliance:   []complianceTag{},
+		GeneratedAt:   now.Format(time.RFC3339),
+		Methods:       []methodCount{},
+		Protocols:     []protocolCount{},
+		Timeline:      []timelineBucket{},
+		Hourly:        make([]hourlyBucket, 24),
+		TopDomains:    []topDomain{},
+		TopEndpoints:  []topEndpoint{},
+		Blocked:       []blockedGroup{},
+		Secrets:       []secretUsage{},
+		Judge:         []judgeEntry{},
+		Writes:        []writeEntry{},
+		Cost:          costSummary{ByProvider: []providerCost{}},
+		Compliance:    []complianceTag{},
+		Proxies:       proxies,
+		SelectedProxy: selectedProxy,
 	}
 	providerCosts := make(map[string]*providerCost)
 	complianceCounts := make(map[string]int)

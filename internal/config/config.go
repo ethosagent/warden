@@ -115,6 +115,10 @@ type ControlPlaneConfig struct {
 	Endpoint     string        // https control-plane URL ("" disables)
 	TokenEnv     string        // env var holding the bearer token
 	PollInterval time.Duration // re-pull interval (default 30s)
+	// CACert is an optional CA certificate (PEM) added to this worker's trust
+	// pool ONLY for the control-plane connection, so a control plane serving a
+	// privately-signed cert is trusted without altering upstream TLS trust.
+	CACert string
 }
 
 // CentralConfig configures fleet analytics aggregation.
@@ -135,6 +139,10 @@ type CentralConfig struct {
 	BatchSize int           // events per forward batch (default 100)
 	BufferCap int           // local buffer cap before dropping oldest (default 10000)
 	Interval  time.Duration // forward interval (default 10s)
+	// CACert is an optional CA certificate (PEM) added to the forwarding client's
+	// trust pool ONLY for the aggregator connection (same rationale as
+	// ControlPlaneConfig.CACert).
+	CACert string
 }
 
 // AuditConfig groups the signed-receipt and compliance-tagging features.
@@ -457,6 +465,7 @@ type rawControlPlane struct {
 	Endpoint     string `yaml:"endpoint"`
 	TokenEnv     string `yaml:"tokenEnv"`
 	PollInterval string `yaml:"pollInterval"`
+	CACert       string `yaml:"caCert"`
 }
 
 // rawCentral mirrors the on-disk `central:` block.
@@ -469,6 +478,7 @@ type rawCentral struct {
 	BatchSize int    `yaml:"batchSize"`
 	BufferCap int    `yaml:"bufferCap"`
 	Interval  string `yaml:"interval"`
+	CACert    string `yaml:"caCert"`
 }
 
 // rawAudit mirrors the on-disk `audit:` block.
@@ -720,6 +730,7 @@ func parseControlPlane(r *rawControlPlane) (ControlPlaneConfig, error) {
 	}
 	c.Endpoint = strings.TrimSpace(r.Endpoint)
 	c.TokenEnv = r.TokenEnv
+	c.CACert = strings.TrimSpace(r.CACert)
 	c.PollInterval = defaultControlPlanePollInterval
 	if err := parseDurationField("controlPlane.pollInterval", r.PollInterval, &c.PollInterval); err != nil {
 		return ControlPlaneConfig{}, err
@@ -748,6 +759,7 @@ func parseCentral(r *rawCentral) (CentralConfig, error) {
 	c.MaxEvents = r.MaxEvents
 	c.Endpoint = strings.TrimSpace(r.Endpoint)
 	c.ProxyID = r.ProxyID
+	c.CACert = strings.TrimSpace(r.CACert)
 	c.BatchSize = defaultCentralBatchSize
 	if r.BatchSize > 0 {
 		c.BatchSize = r.BatchSize

@@ -1,0 +1,17 @@
+# Warden control-plane policy.
+#
+# This is the policy every data-plane worker pulls and enforces. It is
+# ALLOW/DENY ONLY: the control plane never holds or serves secrets — those stay
+# on each worker. Edit this file and workers pick up the change on their next
+# poll (no restart). The control plane re-reads it on each request.
+
+policy:
+  allowlist:
+    - domain: api.github.com
+    - domain: "~.*\\.githubusercontent\\.com$"
+  denylist:
+    - domain: evil.example.com
+
+logging:
+  level: info
+  format: json

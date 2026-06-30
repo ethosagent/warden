@@ -132,6 +132,20 @@ func (e *Evaluator) Replace(p config.Policy) {
 	e.load(p)
 }
 
+// CurrentPolicy returns a snapshot of the evaluator's live allow/deny lists.
+// It reflects the most recent Replace (control-plane hot-reload), so callers
+// such as the dashboard can display the policy actually being enforced rather
+// than a startup snapshot. Only allow/deny are returned — the evaluator never
+// holds secrets.
+func (e *Evaluator) CurrentPolicy() config.Policy {
+	e.swapMu.RLock()
+	defer e.swapMu.RUnlock()
+	return config.Policy{
+		Allowlist: append([]config.AllowlistEntry(nil), e.allowlist...),
+		Denylist:  append([]config.DenylistEntry(nil), e.denylist...),
+	}
+}
+
 // load (re)builds the policy-derived state from p. NewEvaluator calls it before
 // the evaluator is shared (no lock needed); Replace calls it under swapMu.
 func (e *Evaluator) load(p config.Policy) {

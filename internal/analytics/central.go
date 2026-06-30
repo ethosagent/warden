@@ -61,13 +61,16 @@ func (c *CentralStore) StoreAggregatedEvent(e AggregatedEvent) error {
 // GetEvents satisfies the AnalyticsStore interface. Returns unwrapped Events,
 // newest first.
 func (c *CentralStore) GetEvents(filter EventFilter) ([]Event, error) {
-	agg, err := c.GetAggregatedEvents(AggregatedFilter{EventFilter: filter})
+	agg, err := c.GetAggregatedEvents(AggregatedFilter{EventFilter: filter, ProxyID: filter.ProxyID})
 	if err != nil {
 		return nil, err
 	}
 	out := make([]Event, len(agg))
 	for i, a := range agg {
 		out[i] = a.Event
+		// Surface the originating proxy so the fleet dashboard can group/slice by
+		// worker (the embedded Event carries no proxy id of its own).
+		out[i].ProxyID = a.ProxyID
 	}
 	return out, nil
 }

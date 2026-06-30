@@ -36,6 +36,28 @@ func TestEvaluatorReplace(t *testing.T) {
 	}
 }
 
+// TestEvaluatorCurrentPolicy verifies CurrentPolicy reflects the live policy
+// after a Replace (so the dashboard can show what is actually enforced).
+func TestEvaluatorCurrentPolicy(t *testing.T) {
+	ev := NewEvaluator(config.Policy{Allowlist: []config.AllowlistEntry{{Domain: "a.com"}}})
+	cur := ev.CurrentPolicy()
+	if len(cur.Allowlist) != 1 || cur.Allowlist[0].Domain != "a.com" {
+		t.Fatalf("initial CurrentPolicy = %+v", cur.Allowlist)
+	}
+
+	ev.Replace(config.Policy{
+		Allowlist: []config.AllowlistEntry{{Domain: "b.com"}},
+		Denylist:  []config.DenylistEntry{{Domain: "c.com"}},
+	})
+	cur = ev.CurrentPolicy()
+	if len(cur.Allowlist) != 1 || cur.Allowlist[0].Domain != "b.com" {
+		t.Fatalf("post-replace allowlist = %+v", cur.Allowlist)
+	}
+	if len(cur.Denylist) != 1 || cur.Denylist[0].Domain != "c.com" {
+		t.Fatalf("post-replace denylist = %+v", cur.Denylist)
+	}
+}
+
 // TestEvaluatorReplaceConcurrent ensures Replace is safe to call while Evaluate
 // runs concurrently (race detector catches data races here).
 func TestEvaluatorReplaceConcurrent(t *testing.T) {

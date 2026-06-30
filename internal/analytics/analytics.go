@@ -66,6 +66,10 @@ type Event struct {
 	// Bounded framework identifiers only — never content. Nil when compliance
 	// tagging is disabled or no control applies.
 	Compliance []string
+	// ProxyID identifies the worker that produced this event in a fleet view. It
+	// is populated only by an aggregating store (CentralStore) at read time; the
+	// local SQLite store leaves it empty (single node) and never persists it.
+	ProxyID string
 }
 
 // encodeCompliance joins compliance control IDs into a single comma-separated
@@ -94,6 +98,9 @@ type EventFilter struct {
 	// Tool filters by MCP tool name for per-tool drill-down.
 	Tool  string
 	Since time.Time
+	// ProxyID filters to events from one worker in a fleet view. Honored by the
+	// aggregating CentralStore; ignored by the local SQLite store (single node).
+	ProxyID string
 	// Limit caps the number of rows returned (0 = no cap).
 	Limit int
 }

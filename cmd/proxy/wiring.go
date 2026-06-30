@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
@@ -30,7 +31,12 @@ func expandEnv(s string) string {
 // newSafeHTTPClient builds an *http.Client whose dials go through the proxy's
 // SafeDialer, so outbound auth-token fetches and central forwarding obey the
 // same SSRF protection as proxied traffic (no dialing link-local/private ranges).
-func newSafeHTTPClient(timeout time.Duration) (*http.Client, error) {
+//
+// When caCertPath is non-empty, that PEM CA is added to this client's trust
+// pool (system roots PLUS the CA), so a privately-signed central aggregator is
+// trusted without changing the process-wide trust store. Public-CA endpoints
+// (e.g. OAuth token URLs) keep working because the system roots are retained.
+func newSafeHTTPClient(timeout time.Duration, caCertPath string) (*http.Client, error) {
 	sd, err := proxy.NewSafeDialer(timeout, nil)
 	if err != nil {
 		return nil, fmt.Errorf("safe http client: %w", err)
@@ -40,6 +46,20 @@ func newSafeHTTPClient(timeout time.Duration) (*http.Client, error) {
 			return sd.Dial(network, addr)
 		},
 		ForceAttemptHTTP2: true,
+	}
+	if caCertPath != "" {
+		pool, pErr := x509.SystemCertPool()
+		if pErr != nil || pool == nil {
+			pool = x509.NewCertPool()
+		}
+		pem, rErr := os.ReadFile(caCertPath)
+		if rErr != nil {
+			return nil, fmt.Errorf("safe http client: read ca cert %q: %w", caCertPath, rErr)
+		}
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("safe http client: no certificates found in %q", caCertPath)
+		}
+		tr.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
 	}
 	return &http.Client{Timeout: timeout, Transport: tr}, nil
 }

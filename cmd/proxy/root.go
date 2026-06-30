@@ -21,6 +21,7 @@ func newRootCmd() *cobra.Command {
 	)
 
 	rootCmd.AddCommand(newRunCmd())
+	rootCmd.AddCommand(newControlPlaneCmd())
 	rootCmd.AddCommand(newVersionCmd())
 	rootCmd.AddCommand(newAdviseCmd())
 	rootCmd.AddCommand(newMCPCmd())

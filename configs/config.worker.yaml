@@ -1,0 +1,37 @@
+# Warden worker (data plane), driven by a control plane.
+#
+# The worker PULLS its allow/deny policy from the control plane and FORWARDS its
+# analytics there for the fleet dashboard. Secrets stay LOCAL to this worker and
+# never cross to the control plane.
+
+policy:
+  # Bootstrap allowlist: used only until the first control-plane pull succeeds.
+  # The control plane's policy then replaces it and hot-reloads on every poll.
+  allowlist:
+    - domain: api.github.com
+
+# Secrets live here, on the worker — never on the control plane. (Demo mapping;
+# the synthetic agent doesn't use it, but it shows where secrets belong.)
+secrets:
+  - placeholder: example_secret_001
+    envVar: EXAMPLE_SECRET
+
+logging:
+  level: info
+  format: json
+
+# Pull allow/deny policy from the control plane; trust its (privately-signed)
+# cert via the same proxy CA this worker already uses.
+controlPlane:
+  endpoint: https://control-plane:7070/policy
+  tokenEnv: WARDEN_CP_TOKEN
+  pollInterval: 15s
+  caCert: /etc/warden/certs/proxy-ca.crt
+
+# Forward this worker's analytics to the control plane's aggregator.
+central:
+  mode: worker
+  endpoint: https://control-plane:7070/central/ingest
+  tokenEnv: WARDEN_CP_TOKEN
+  proxyID: ${WARDEN_PROXY_ID}   # set per worker so the fleet view can slice by proxy
+  caCert: /etc/warden/certs/proxy-ca.crt

@@ -152,21 +152,6 @@ func runProxy(cmd *cobra.Command, configPath, listenAddr, dbPath, caCert, caKey,
 	// control-plane outage falls back to the local allowlist.
 	evaluator := policy.NewEvaluator(pol)
 
-	// A SafeDialer-backed HTTP client shared by auth-token fetches, central
-	// forwarding, etc. Built lazily only when a feature needs it.
-	var safeClient *http.Client
-	ensureSafeClient := func() error {
-		if safeClient != nil {
-			return nil
-		}
-		c, cErr := newSafeHTTPClient(10 * time.Second)
-		if cErr != nil {
-			return cErr
-		}
-		safeClient = c
-		return nil
-	}
-
 	// Optional control plane: pull allow/deny policy from a remote endpoint and
 	// apply it now (poll-based hot-reload starts after the proxy is built). Local
 	// secrets/judge/observability stay from the local config.
@@ -176,6 +161,13 @@ func runProxy(cmd *cobra.Command, configPath, listenAddr, dbPath, caCert, caKey,
 		rp, cpErr := config.NewRemoteProvider(pol.ControlPlane.Endpoint, token)
 		if cpErr != nil {
 			return cpErr
+		}
+		// Trust a privately-signed control plane via a per-connection CA, without
+		// altering this worker's upstream TLS trust.
+		if pol.ControlPlane.CACert != "" {
+			if caErr := rp.SetCACert(pol.ControlPlane.CACert); caErr != nil {
+				return caErr
+			}
 		}
 		if pullErr := rp.Pull(); pullErr != nil {
 			logger.Warn("control plane initial pull failed; using local policy", "error", pullErr)
@@ -193,10 +185,11 @@ func runProxy(cmd *cobra.Command, configPath, listenAddr, dbPath, caCert, caKey,
 	// Optional auth transforms (OAuth2 / SigV4 / HMAC / API-key) per destination.
 	var transformers []*auth.MatchedTransformer
 	if len(pol.Auth) > 0 {
-		if err := ensureSafeClient(); err != nil {
-			return err
+		authClient, acErr := newSafeHTTPClient(10*time.Second, "")
+		if acErr != nil {
+			return acErr
 		}
-		transformers, err = buildTransformers(pol.Auth, safeClient)
+		transformers, err = buildTransformers(pol.Auth, authClient)
 		if err != nil {
 			return err
 		}
@@ -241,10 +234,11 @@ func runProxy(cmd *cobra.Command, configPath, listenAddr, dbPath, caCert, caKey,
 		ingestHandler = analytics.NewIngestHandler(centralStore, os.Getenv(pol.Central.TokenEnv))
 		logger.Info("central aggregator enabled", "ingest", "/central/ingest")
 	case "worker":
-		if err := ensureSafeClient(); err != nil {
-			return err
+		centralClient, ccErr := newSafeHTTPClient(10*time.Second, pol.Central.CACert)
+		if ccErr != nil {
+			return ccErr
 		}
-		remote, rErr := analytics.NewHTTPRemoteStore(pol.Central.Endpoint, os.Getenv(pol.Central.TokenEnv), pol.Central.ProxyID, safeClient)
+		remote, rErr := analytics.NewHTTPRemoteStore(pol.Central.Endpoint, os.Getenv(pol.Central.TokenEnv), expandEnv(pol.Central.ProxyID), centralClient)
 		if rErr != nil {
 			return rErr
 		}
@@ -286,6 +280,9 @@ func runProxy(cmd *cobra.Command, configPath, listenAddr, dbPath, caCert, caKey,
 	adminMux := http.NewServeMux()
 	adminSrv := admin.NewServer(secretProvider)
 	dashSrv := dashboard.NewServer(dashData, pol, secretProvider)
+	// Policy panel reflects the live (hot-reloadable) allow/deny, not the startup
+	// snapshot, so a control-plane reload is visible in the dashboard.
+	dashSrv.SetLivePolicy(evaluator.CurrentPolicy)
 	if mcpGW != nil {
 		dashSrv.SetMCPProvider(mcpGW)
 	}

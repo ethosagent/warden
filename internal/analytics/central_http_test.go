@@ -46,6 +46,35 @@ func TestCentralIngestRoundTrip(t *testing.T) {
 	}
 }
 
+// TestCentralStoreProxyFilter verifies GetEvents populates ProxyID on read and
+// honors the ProxyID filter (the per-worker slicing the fleet dashboard needs).
+func TestCentralStoreProxyFilter(t *testing.T) {
+	cs := NewCentralStore(0)
+	_ = cs.StoreAggregatedEvent(AggregatedEvent{Event: Event{Domain: "a.com", Decision: "allow"}, ProxyID: "w1"})
+	_ = cs.StoreAggregatedEvent(AggregatedEvent{Event: Event{Domain: "b.com", Decision: "allow"}, ProxyID: "w2"})
+
+	all, err := cs.GetEvents(EventFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("all = %d, want 2", len(all))
+	}
+	for _, e := range all {
+		if e.ProxyID == "" {
+			t.Error("GetEvents did not surface ProxyID on read")
+		}
+	}
+
+	w1, err := cs.GetEvents(EventFilter{ProxyID: "w1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(w1) != 1 || w1[0].Domain != "a.com" || w1[0].ProxyID != "w1" {
+		t.Fatalf("proxy filter failed: %+v", w1)
+	}
+}
+
 // TestCentralIngestRejectsBadToken verifies the ingest endpoint enforces its
 // bearer token (SendBatch surfaces the non-2xx as an error so the worker retries).
 func TestCentralIngestRejectsBadToken(t *testing.T) {

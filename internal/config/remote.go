@@ -2,11 +2,14 @@ package config
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -40,6 +43,32 @@ func NewRemoteProvider(endpoint, token string) (*RemoteProvider, error) {
 		token:    token,
 		client:   &http.Client{Timeout: 10 * time.Second},
 	}, nil
+}
+
+// SetCACert adds the PEM-encoded CA certificate at path to this provider's
+// trust pool (in addition to the system roots) and rebuilds the HTTP client to
+// use it. This lets a worker trust a control plane that serves a privately
+// signed certificate WITHOUT changing the process-wide trust store — upstream
+// proxy TLS is unaffected because only this client carries the extra root.
+func (r *RemoteProvider) SetCACert(path string) error {
+	pem, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("config: remote: read ca cert %q: %w", path, err)
+	}
+	pool, err := x509.SystemCertPool()
+	if err != nil || pool == nil {
+		pool = x509.NewCertPool()
+	}
+	if !pool.AppendCertsFromPEM(pem) {
+		return fmt.Errorf("config: remote: no certificates found in %q", path)
+	}
+	r.client = &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
+		},
+	}
+	return nil
 }
 
 // Pull fetches the current policy from the control plane. On success, the

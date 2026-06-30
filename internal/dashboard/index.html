@@ -211,6 +211,7 @@ tr.mcp-head:hover>td{background:rgba(148,163,184,.06)}
     <h1>Warden <span class="sub">— Egress Analytics</span></h1>
   </div>
   <div class="spacer"></div>
+  <div class="rangectl" id="proxyctl" role="group" aria-label="Worker" style="display:none"></div>
   <div class="rangectl" id="rangectl" role="group" aria-label="Time window"></div>
   <div class="live"><span class="dot"></span><span>live</span><span class="dim" id="updated">connecting…</span></div>
 </header>
@@ -341,7 +342,7 @@ const $ = s => document.querySelector(s);
 const C = {teal:"#2DD4BF",cyan:"#22D3EE",amber:"#F59E0B",red:"#F87171",slate:"#64748B",muted:"#94A3B8"};
 
 /* ---- time-window selection (default "all" so nothing is hidden) ---- */
-const state = {range:"all"};
+const state = {range:"all", proxy:""};
 const RANGES = [["15m","15m"],["1h","1h"],["6h","6h"],["24h","24h"],["7d","7d"],["All","all"]];
 function buildRangeControl(){
   const ctl=$("#rangectl"); if(!ctl) return;
@@ -360,6 +361,31 @@ function buildRangeControl(){
         btn.classList.toggle("active",on);
         btn.setAttribute("aria-pressed",on?"true":"false");
       });
+      load();
+    });
+    ctl.appendChild(b);
+  });
+}
+
+// Fleet worker selector. Rebuilt each render from data.proxies; hidden entirely
+// on a single-node dashboard (no proxies reported). Selecting a worker filters
+// the whole view to that worker; "All workers" clears the filter.
+function buildProxyControl(data){
+  const ctl=$("#proxyctl"); if(!ctl) return;
+  const proxies=(data&&data.proxies)||[];
+  if(!proxies.length){ ctl.style.display="none"; ctl.innerHTML=""; return; }
+  ctl.style.display="";
+  ctl.innerHTML="";
+  const opts=[["All workers",""]].concat(proxies.map(p=>[`${p.proxyID} · ${fmtNum(p.count)}`,p.proxyID]));
+  opts.forEach(([label,token])=>{
+    const b=document.createElement("button");
+    b.type="button"; b.textContent=label; b.dataset.proxy=token;
+    const active=token===state.proxy;
+    b.classList.toggle("active",active);
+    b.setAttribute("aria-pressed",active?"true":"false");
+    b.addEventListener("click",()=>{
+      if(state.proxy===token) return;
+      state.proxy=token;
       load();
     });
     ctl.appendChild(b);
@@ -661,7 +687,7 @@ async function renderDrill(el){
     <div id="drill-body" class="dim">loading…</div>`;
   el.querySelector("#drill-back").addEventListener("click",()=>{drill.domain=null;drill.page=1;renderDomains(window.__lastData||{});});
   try{
-    const r=await fetch(`/dashboard/api/endpoints?domain=${encodeURIComponent(drill.domain)}&page=${drill.page}&pageSize=8&range=${encodeURIComponent(state.range)}`);
+    const r=await fetch(`/dashboard/api/endpoints?domain=${encodeURIComponent(drill.domain)}&page=${drill.page}&pageSize=8&range=${encodeURIComponent(state.range)}${state.proxy?`&proxy=${encodeURIComponent(state.proxy)}`:""}`);
     const d=await r.json();
     const body=el.querySelector("#drill-body"); if(!body) return;
     if(!d.items||!d.items.length){body.innerHTML=emptyState("No endpoints for this domain");return;}
@@ -862,6 +888,7 @@ function renderMCP(data){
 /* ---- master render ---- */
 function render(data){
   window.__lastData=data;
+  buildProxyControl(data);
   const t=data.totals||{};
   tweenNum($("#m-requests"),t.requests);
   tweenNum($("#m-allowed"),t.allowed);
@@ -915,7 +942,7 @@ async function loadMCP(){
 
 async function load(){
   try{
-    const r=await fetch("/dashboard/api/analytics?range="+encodeURIComponent(state.range));
+    const r=await fetch("/dashboard/api/analytics?range="+encodeURIComponent(state.range)+(state.proxy?"&proxy="+encodeURIComponent(state.proxy):""));
     if(!r.ok) throw new Error("status "+r.status);
     render(await r.json());
   }catch(e){

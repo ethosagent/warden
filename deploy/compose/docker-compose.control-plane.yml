@@ -1,0 +1,135 @@
+# Warden control plane + two data-plane workers (one binary, two roles).
+#
+# Topology:
+#   control-plane  — serves ALLOW/DENY policy to workers and aggregates their
+#                    analytics into a fleet dashboard. Holds NO secrets.
+#   worker-1/2     — pull policy from the control plane, enforce it on their
+#                    agent's egress, and forward analytics back. Secrets stay local.
+#   agent-1/2      — synthetic load (curl loop) routed through its worker, so the
+#                    fleet dashboard shows real per-worker traffic.
+#
+# Today these run together (one compose / one host). Because the two roles are
+# separate processes that only talk over HTTPS, deploying the control plane on
+# its own host later is just moving a service — no code change.
+#
+# Prereq (from repo root): generate the bake-once proxy CA into the mounted dir.
+# The control plane mints its server cert from this same CA; workers trust it via
+# controlPlane.caCert / central.caCert (see configs/config.worker.yaml).
+#   OUT_DIR=deploy/compose/certs ./scripts/gen-certs.sh
+#
+# Run (from repo root):
+#   WARDEN_CP_TOKEN=dev-token \
+#   docker compose -f deploy/compose/docker-compose.control-plane.yml up --build
+#
+# Fleet dashboard: https://localhost:7070/dashboard/  (cert signed by the proxy
+#   CA — your browser will warn; trust it or curl with --cacert deploy/compose/certs/proxy-ca.crt)
+# Per-worker dashboards: http://localhost:9091/dashboard/ and :9092
+
+services:
+  control-plane:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: warden-proxy:dev
+    networks: [cp-net]
+    ports:
+      - "7070:7070"
+    environment:
+      - WARDEN_CP_TOKEN=${WARDEN_CP_TOKEN:-dev-token}
+    volumes:
+      - ../../configs/config.control-plane.yaml:/etc/warden/config.yaml:ro
+      - ./certs:/etc/warden/certs:ro
+    command:
+      - control-plane
+      - "--config=/etc/warden/config.yaml"
+      - "--listen=0.0.0.0:7070"
+      - "--token-env=WARDEN_CP_TOKEN"
+      - "--ca-cert=/etc/warden/certs/proxy-ca.crt"   # mint the CP server cert from the proxy CA
+      - "--ca-key=/etc/warden/certs/proxy-ca.key"
+      - "--tls-host=control-plane,localhost,127.0.0.1"
+
+  worker-1:
+    image: warden-proxy:dev
+    depends_on: [control-plane]
+    networks: [cp-net, egress, w1-internal]
+    ports:
+      - "9091:9090"
+    environment:
+      - WARDEN_CP_TOKEN=${WARDEN_CP_TOKEN:-dev-token}
+      - WARDEN_PROXY_ID=worker-1
+    volumes:
+      - ../../configs/config.worker.yaml:/etc/warden/config.yaml:ro
+      - ./certs:/etc/warden/certs:ro
+      - worker1-data:/data
+    command:
+      - run
+      - "--config=/etc/warden/config.yaml"
+      - "--listen=0.0.0.0:8080"
+      - "--ca-cert=/etc/warden/certs/proxy-ca.crt"
+      - "--ca-key=/etc/warden/certs/proxy-ca.key"
+      - "--admin-listen=0.0.0.0:9090"
+      - "--db=/data/warden.db"
+
+  worker-2:
+    image: warden-proxy:dev
+    depends_on: [control-plane]
+    networks: [cp-net, egress, w2-internal]
+    ports:
+      - "9092:9090"
+    environment:
+      - WARDEN_CP_TOKEN=${WARDEN_CP_TOKEN:-dev-token}
+      - WARDEN_PROXY_ID=worker-2
+    volumes:
+      - ../../configs/config.worker.yaml:/etc/warden/config.yaml:ro
+      - ./certs:/etc/warden/certs:ro
+      - worker2-data:/data
+    command:
+      - run
+      - "--config=/etc/warden/config.yaml"
+      - "--listen=0.0.0.0:8080"
+      - "--ca-cert=/etc/warden/certs/proxy-ca.crt"
+      - "--ca-key=/etc/warden/certs/proxy-ca.key"
+      - "--admin-listen=0.0.0.0:9090"
+      - "--db=/data/warden.db"
+
+  agent-1:
+    image: curlimages/curl:latest
+    depends_on: [worker-1]
+    networks: [w1-internal]            # internal only — sole route out is worker-1
+    environment:
+      - HTTP_PROXY=http://worker-1:8080
+      - HTTPS_PROXY=http://worker-1:8080
+      - CURL_CA_BUNDLE=/etc/warden/certs/proxy-ca.crt   # trust worker-1's TLS termination
+    volumes:
+      - ./certs/proxy-ca.crt:/etc/warden/certs/proxy-ca.crt:ro
+    entrypoint: ["sh", "-c", "while true; do curl -s -o /dev/null -w 'agent-1 -> %{http_code}\\n' https://api.github.com/zen; sleep 5; done"]
+
+  agent-2:
+    image: curlimages/curl:latest
+    depends_on: [worker-2]
+    networks: [w2-internal]
+    environment:
+      - HTTP_PROXY=http://worker-2:8080
+      - HTTPS_PROXY=http://worker-2:8080
+      - CURL_CA_BUNDLE=/etc/warden/certs/proxy-ca.crt
+    volumes:
+      - ./certs/proxy-ca.crt:/etc/warden/certs/proxy-ca.crt:ro
+    entrypoint: ["sh", "-c", "while true; do curl -s -o /dev/null -w 'agent-2 -> %{http_code}\\n' https://api.github.com/zen; sleep 7; done"]
+
+networks:
+  # Control-plane bus: workers reach the control plane here; the host reaches the
+  # fleet dashboard via the published port. The control plane needs no internet.
+  cp-net:
+    driver: bridge
+  # Worker route to the internet (attached to workers only, never agents).
+  egress:
+    driver: bridge
+  # Per-worker agent isolation: each agent's only route out is its worker.
+  w1-internal:
+    internal: true
+  w2-internal:
+    internal: true
+
+volumes:
+  worker1-data:
+  worker2-data:
