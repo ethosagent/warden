@@ -21,6 +21,7 @@ import (
 
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/auth"
+	"github.com/ethosagent/warden/internal/cost"
 	"github.com/ethosagent/warden/internal/mcp/gateway"
 	"github.com/ethosagent/warden/internal/observability"
 	"github.com/ethosagent/warden/internal/policy"
@@ -62,6 +63,12 @@ type Config struct {
 	// MCP is the optional MCP egress gateway. Nil = MCP disabled: handleHTTP is
 	// byte-identical to before. Non-nil = analyze MCP JSON-RPC traffic.
 	MCP *gateway.Gateway
+
+	// Cost is the optional LLM cost estimator. Nil-safe: when nil no cost is
+	// attributed. When set, an allowed request to a known provider domain is
+	// tagged with a heuristic dollar estimate from observed request/response
+	// byte sizes — order-of-magnitude visibility, never billing-grade.
+	Cost *cost.Estimator
 }
 
 // Judge renders an allow/deny verdict for a request that matched no static

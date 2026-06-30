@@ -315,6 +315,16 @@ tr.mcp-head:hover>td{background:rgba(148,163,184,.06)}
       <div id="panel-writes"></div>
     </div>
 
+    <div class="card">
+      <div class="ttl"><h3>Estimated spend</h3></div>
+      <div id="panel-cost"></div>
+    </div>
+
+    <div class="card">
+      <div class="ttl"><h3>Compliance mappings</h3></div>
+      <div id="panel-compliance"></div>
+    </div>
+
     <div class="card col-full">
       <div class="ttl"><h3>MCP tools</h3></div>
       <div id="panel-mcp"></div>
@@ -767,6 +777,45 @@ function renderWrites(data){
   el.innerHTML=h+"</tbody></table>";
 }
 
+/* ---- estimated spend ---- */
+function renderCost(data){
+  const el=$("#panel-cost");
+  const c=data.cost||{};
+  const rows=c.byProvider||[];
+  if(!rows.length){el.innerHTML=emptyState("No LLM-provider traffic to estimate");return;}
+  const max=Math.max(1,...rows.map(r=>r.costUSD));
+  let h=`<div style="margin-bottom:10px"><span class="dim" style="font-size:12px">estimated total</span>
+    <span class="mono" style="color:var(--teal);font-size:20px;margin-left:8px">$${(c.totalUSD||0).toFixed(4)}</span></div>`;
+  h+=`<table><thead><tr><th>Provider</th><th class="num">Requests</th><th>Est. cost</th></tr></thead><tbody>`;
+  rows.forEach(r=>{
+    const pct=Math.max(4,(r.costUSD/max)*100);
+    h+=`<tr><td class="mono">${esc(r.provider)}</td>
+      <td class="num">${fmtNum(r.requests)}</td>
+      <td><div style="display:flex;align-items:center;gap:8px">
+        <div class="mag amber"><span style="width:${pct}%"></span></div>
+        <span class="mono" style="min-width:64px">$${r.costUSD.toFixed(4)}</span></div></td></tr>`;
+  });
+  el.innerHTML=h+"</tbody></table><div class='dim' style='font-size:11px;margin-top:8px'>Heuristic estimate (bytes/4 ≈ tokens × provider pricing), not billing-grade.</div>";
+}
+
+/* ---- compliance mappings ---- */
+function renderCompliance(data){
+  const el=$("#panel-compliance");
+  const rows=data.compliance||[];
+  if(!rows.length){el.innerHTML=emptyState("No compliance mappings (enable audit.compliance)");return;}
+  let h="";
+  rows.forEach(r=>{
+    const parts=String(r.controlID).split(":");
+    const fw=parts.length>1?parts[0]:"";
+    const id=parts.length>1?parts[1]:r.controlID;
+    h+=`<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border)">
+      <span><span class="pill ${fw==='owasp'?'t3':'t4'}">${esc(fw||'ctrl')}</span>
+        <span class="mono" style="margin-left:6px">${esc(id)}</span></span>
+      <span class="dim" style="font-size:12px">${fmtNum(r.count)} events</span></div>`;
+  });
+  el.innerHTML=h;
+}
+
 /* ---- MCP tools ---- */
 const mcpOpen={};
 function schemaBlock(title,schema){
@@ -846,6 +895,8 @@ function render(data){
   renderSecrets(data);
   renderJudge(data);
   renderWrites(data);
+  renderCost(data);
+  renderCompliance(data);
 
   $("#updated").textContent="updated "+(data.generatedAt? relTime(data.generatedAt):"just now");
 }

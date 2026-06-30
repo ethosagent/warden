@@ -77,6 +77,11 @@ func (d Decision) String() string {
 // Evaluator decides whether a destination is allowed under a policy. It is
 // constructed once from a Policy and is safe for concurrent use.
 type Evaluator struct {
+	// swapMu guards the policy-derived state below so a control-plane poll can
+	// atomically Replace it while requests are being evaluated. Evaluate takes a
+	// read lock; Replace takes the write lock. This never weakens default-deny:
+	// a swap only exchanges one validated allow/deny set for another.
+	swapMu     sync.RWMutex
 	allowlist  []config.AllowlistEntry
 	denylist   []config.DenylistEntry
 	regexCache map[string]*regexp.Regexp
@@ -110,53 +115,71 @@ type parsedTimeWindow struct {
 
 // NewEvaluator builds an Evaluator from a policy.
 func NewEvaluator(p config.Policy) *Evaluator {
-	e := &Evaluator{
-		allowlist:   append([]config.AllowlistEntry(nil), p.Allowlist...),
-		denylist:    append([]config.DenylistEntry(nil), p.Denylist...),
-		regexCache:  make(map[string]*regexp.Regexp),
-		rateLimits:  make(map[int]parsedRateLimit),
-		counters:    make(map[string]*rateState),
-		timeWindows: make(map[int]parsedTimeWindow),
-		now:         time.Now,
-	}
+	e := &Evaluator{now: time.Now}
+	e.load(p)
+	return e
+}
+
+// Replace atomically swaps the evaluator's allow/deny policy with p, so a
+// control-plane poll can apply updated policy without restarting the proxy.
+// In-flight Evaluate calls either see the old policy fully or the new policy
+// fully — never a mix. This preserves the default-deny invariant: p is a
+// validated policy and a swap only exchanges one allow/deny set for another.
+// Rate-limit counters are reset, so a policy change starts fresh windows.
+func (e *Evaluator) Replace(p config.Policy) {
+	e.swapMu.Lock()
+	defer e.swapMu.Unlock()
+	e.load(p)
+}
+
+// load (re)builds the policy-derived state from p. NewEvaluator calls it before
+// the evaluator is shared (no lock needed); Replace calls it under swapMu.
+func (e *Evaluator) load(p config.Policy) {
+	allowlist := append([]config.AllowlistEntry(nil), p.Allowlist...)
+	denylist := append([]config.DenylistEntry(nil), p.Denylist...)
+	regexCache := make(map[string]*regexp.Regexp)
+	rateLimits := make(map[int]parsedRateLimit)
+	timeWindows := make(map[int]parsedTimeWindow)
 
 	// Pre-compile regexes from allowlist and denylist.
-	for _, entry := range e.allowlist {
+	for _, entry := range allowlist {
 		if strings.HasPrefix(entry.Domain, "~") {
-			re, err := regexp.Compile(entry.Domain[1:])
-			if err == nil {
-				e.regexCache[entry.Domain] = re
+			if re, err := regexp.Compile(entry.Domain[1:]); err == nil {
+				regexCache[entry.Domain] = re
 			}
 		}
 	}
-	for _, entry := range e.denylist {
+	for _, entry := range denylist {
 		if strings.HasPrefix(entry.Domain, "~") {
-			re, err := regexp.Compile(entry.Domain[1:])
-			if err == nil {
-				e.regexCache[entry.Domain] = re
+			if re, err := regexp.Compile(entry.Domain[1:]); err == nil {
+				regexCache[entry.Domain] = re
 			}
 		}
 	}
 
-	// Parse rate limits.
-	for i, entry := range e.allowlist {
+	// Parse rate limits and time windows (indexed into allowlist).
+	for i, entry := range allowlist {
 		if entry.RateLimit != "" {
 			if rl, err := parseRateLimit(entry.RateLimit); err == nil {
-				e.rateLimits[i] = rl
+				rateLimits[i] = rl
 			}
 		}
-	}
-
-	// Parse time windows.
-	for i, entry := range e.allowlist {
 		if entry.TimeWindow != "" {
 			if tw, err := parseTimeWindow(entry.TimeWindow); err == nil {
-				e.timeWindows[i] = tw
+				timeWindows[i] = tw
 			}
 		}
 	}
 
-	return e
+	e.allowlist = allowlist
+	e.denylist = denylist
+	e.regexCache = regexCache
+	e.rateLimits = rateLimits
+	e.timeWindows = timeWindows
+	// Reset rate-limit counters: a policy swap starts fresh fixed windows.
+	e.mu.Lock()
+	e.counters = make(map[string]*rateState)
+	e.mu.Unlock()
 }
 
 // Evaluate returns Allow if (domain, port) matches an allowlist entry under the
@@ -166,6 +189,12 @@ func NewEvaluator(p config.Policy) *Evaluator {
 // default-deny on NoMatch, preserving the default-deny invariant; NoMatch
 // exists only so the pipeline can optionally consult the LLM judge.
 func (e *Evaluator) Evaluate(domain string, port int, scheme Scheme) Decision {
+	// Read-lock the policy-derived state so a concurrent Replace can't swap it
+	// mid-evaluation. This is a read lock: concurrent Evaluate calls do not
+	// contend with each other, only with a (rare) Replace.
+	e.swapMu.RLock()
+	defer e.swapMu.RUnlock()
+
 	domain = strings.ToLower(strings.TrimSuffix(domain, "."))
 
 	// Denylist checked first — deny wins on conflict.

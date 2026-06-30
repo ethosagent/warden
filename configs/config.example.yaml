@@ -134,3 +134,70 @@ mcp:
     enabled: true                 # per-session call-chain analysis
     windowSize: 50                # sliding-window size (must be > 0)
     patterns: [read_then_send, permission_probing, rapid_repeat]
+
+# Per-destination request-authentication transforms. The agent sends a request
+# with a placeholder or no auth at all; Warden injects real, request-scoped
+# credentials at the edge. Credentials are read from the environment via ${VAR}
+# and held by the proxy only — never seen by the agent, never logged.
+# `match` uses the policy syntax: exact host, "*.suffix", or "~regex".
+# Types: oauth2_client_credentials | aws_sigv4 | hmac | api_key.
+auth: []
+  # - match: api.salesforce.com
+  #   type: oauth2_client_credentials
+  #   tokenURL: https://login.salesforce.com/services/oauth2/token
+  #   clientID: ${SALESFORCE_CLIENT_ID}
+  #   clientSecret: ${SALESFORCE_CLIENT_SECRET}
+  #   scopes: [api]
+  # - match: "~\\.amazonaws\\.com$"
+  #   type: aws_sigv4
+  #   region: us-east-1
+  #   service: bedrock                 # optional; many APIs need it explicit
+  #   accessKeyID: ${AWS_ACCESS_KEY_ID}
+  #   secretAccessKey: ${AWS_SECRET_ACCESS_KEY}
+  #   sessionToken: ${AWS_SESSION_TOKEN}   # optional (assumed roles / IRSA)
+  # - match: api.stripe.com
+  #   type: hmac
+  #   algorithm: sha256                # sha256 | sha512 | sha1
+  #   secret: ${STRIPE_WEBHOOK_SECRET}
+  #   header: Stripe-Signature
+  # - match: api.sendgrid.com
+  #   type: api_key
+  #   location: header                 # header | basic_auth
+  #   name: Authorization
+  #   value: "Bearer ${SENDGRID_API_KEY}"
+
+# Control plane (remote policy). When endpoint is set, Warden pulls its
+# allow/deny policy from the control plane at startup and re-pulls every
+# pollInterval, hot-swapping the live evaluator with NO restart. A failed pull
+# keeps the last-known-good policy, so a worker survives a control-plane outage.
+# Secrets/judge/observability stay from this local file.
+controlPlane:
+  endpoint: ""                    # https URL of the policy endpoint ("" disables)
+  tokenEnv: ""                    # env var holding the bearer token
+  pollInterval: 30s               # re-pull cadence
+
+# Fleet analytics aggregation.
+#   off        - single node (default).
+#   aggregator - host POST /central/ingest on the admin listener; the dashboard
+#                shows the fleet-wide central store instead of this node's db.
+#   worker     - forward this proxy's local events to a remote aggregator.
+central:
+  mode: off                       # off | aggregator | worker
+  tokenEnv: ""                    # bearer token env (ingest auth, both sides)
+  maxEvents: 0                    # aggregator: central retention cap (0 = default)
+  endpoint: ""                    # worker: aggregator ingest URL
+  proxyID: ""                     # worker: label this proxy's events
+  batchSize: 100                  # worker: events per forward batch
+  bufferCap: 10000                # worker: local buffer cap before dropping oldest
+  interval: 10s                   # worker: forward cadence
+
+# Audit features. Signed receipts emit an Ed25519-signed, independently
+# verifiable record per mediated event (tamper-evident evidence). Compliance
+# tags each event with OWASP/MITRE control IDs for governance reporting.
+audit:
+  signedReceipts:
+    enabled: false                # off by default
+    keyFile: ""                   # Ed25519 PKCS#8 PEM; generated+persisted if absent
+    log: ""                       # JSONL receipts path (required when enabled)
+  compliance:
+    enabled: false                # tag events with OWASP/MITRE control IDs

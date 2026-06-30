@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"os"
@@ -14,7 +15,10 @@ import (
 	"github.com/ethosagent/warden/internal/admin"
 	"github.com/ethosagent/warden/internal/agentid"
 	"github.com/ethosagent/warden/internal/analytics"
+	"github.com/ethosagent/warden/internal/audit"
+	"github.com/ethosagent/warden/internal/auth"
 	"github.com/ethosagent/warden/internal/config"
+	"github.com/ethosagent/warden/internal/cost"
 	"github.com/ethosagent/warden/internal/dashboard"
 	"github.com/ethosagent/warden/internal/llm"
 	"github.com/ethosagent/warden/internal/llmpolicy"
@@ -144,11 +148,115 @@ func runProxy(cmd *cobra.Command, configPath, listenAddr, dbPath, caCert, caKey,
 		defer func() { _ = mcpGW.Close() }()
 	}
 
+	// Hot-swappable policy evaluator. Built from local policy first so a
+	// control-plane outage falls back to the local allowlist.
+	evaluator := policy.NewEvaluator(pol)
+
+	// A SafeDialer-backed HTTP client shared by auth-token fetches, central
+	// forwarding, etc. Built lazily only when a feature needs it.
+	var safeClient *http.Client
+	ensureSafeClient := func() error {
+		if safeClient != nil {
+			return nil
+		}
+		c, cErr := newSafeHTTPClient(10 * time.Second)
+		if cErr != nil {
+			return cErr
+		}
+		safeClient = c
+		return nil
+	}
+
+	// Optional control plane: pull allow/deny policy from a remote endpoint and
+	// apply it now (poll-based hot-reload starts after the proxy is built). Local
+	// secrets/judge/observability stay from the local config.
+	var controlPlane *config.RemoteProvider
+	if pol.ControlPlane.Endpoint != "" {
+		token := os.Getenv(pol.ControlPlane.TokenEnv)
+		rp, cpErr := config.NewRemoteProvider(pol.ControlPlane.Endpoint, token)
+		if cpErr != nil {
+			return cpErr
+		}
+		if pullErr := rp.Pull(); pullErr != nil {
+			logger.Warn("control plane initial pull failed; using local policy", "error", pullErr)
+		} else if remote, gErr := rp.GetPolicy(); gErr == nil {
+			evaluator.Replace(remote)
+			logger.Info("control plane policy applied", "endpoint", pol.ControlPlane.Endpoint)
+		}
+		controlPlane = rp
+	}
+
+	// Cost estimator: always on. It only attributes a heuristic dollar figure to
+	// traffic that matches a known provider domain; everything else is untouched.
+	costEstimator := cost.NewEstimator()
+
+	// Optional auth transforms (OAuth2 / SigV4 / HMAC / API-key) per destination.
+	var transformers []*auth.MatchedTransformer
+	if len(pol.Auth) > 0 {
+		if err := ensureSafeClient(); err != nil {
+			return err
+		}
+		transformers, err = buildTransformers(pol.Auth, safeClient)
+		if err != nil {
+			return err
+		}
+		logger.Info("auth transforms enabled", "count", len(transformers))
+	}
+
+	// Audit decorators wrap the analytics store. Order matters: tagging is the
+	// OUTER wrapper so each event is tagged with compliance control IDs BEFORE
+	// the inner signer signs it — the receipt then covers the tags too.
+	var analyticsStore analytics.AnalyticsStore = store
+	if pol.Audit.SignedReceipts.Enabled {
+		signer, sErr := loadOrCreateSigner(pol.Audit.SignedReceipts.KeyFile)
+		if sErr != nil {
+			return sErr
+		}
+		receiptLog, oErr := os.OpenFile(pol.Audit.SignedReceipts.Log, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		if oErr != nil {
+			return fmt.Errorf("audit: open receipts log: %w", oErr)
+		}
+		defer func() { _ = receiptLog.Close() }()
+		analyticsStore = audit.NewSigningStore(analyticsStore, signer, receiptLog)
+		logger.Info("signed audit receipts enabled",
+			"log", pol.Audit.SignedReceipts.Log,
+			"pubkey", hex.EncodeToString(signer.PubKey()))
+	}
+	if pol.Audit.Compliance.Enabled {
+		analyticsStore = audit.NewTaggingStore(analyticsStore, audit.NewMapper())
+		logger.Info("compliance mapping enabled")
+	}
+
+	// Optional central aggregation. aggregator: host an ingest endpoint into an
+	// in-memory central store the dashboard reads from. worker: forward local
+	// events to a remote aggregator. off: single-node (default).
+	var (
+		centralStore  *analytics.CentralStore
+		ingestHandler http.Handler
+		syncWorker    *analytics.SyncWorker
+	)
+	switch pol.Central.Mode {
+	case "aggregator":
+		centralStore = analytics.NewCentralStore(pol.Central.MaxEvents)
+		ingestHandler = analytics.NewIngestHandler(centralStore, os.Getenv(pol.Central.TokenEnv))
+		logger.Info("central aggregator enabled", "ingest", "/central/ingest")
+	case "worker":
+		if err := ensureSafeClient(); err != nil {
+			return err
+		}
+		remote, rErr := analytics.NewHTTPRemoteStore(pol.Central.Endpoint, os.Getenv(pol.Central.TokenEnv), pol.Central.ProxyID, safeClient)
+		if rErr != nil {
+			return rErr
+		}
+		syncWorker = analytics.NewSyncWorker(store, remote, pol.Central.BatchSize, pol.Central.BufferCap, pol.Central.Interval)
+		logger.Info("central worker enabled", "endpoint", pol.Central.Endpoint, "proxyID", pol.Central.ProxyID)
+	}
+
 	cfg := proxy.Config{
 		ListenAddr:       listenAddr,
-		Policy:           policy.NewEvaluator(pol),
+		Policy:           evaluator,
 		Secrets:          secretProvider,
-		Analytics:        store,
+		Analytics:        analyticsStore,
 		PlaceholderNames: placeholders,
 		CACertPath:       caCert,
 		CAKeyPath:        caKey,
@@ -156,6 +264,8 @@ func runProxy(cmd *cobra.Command, configPath, listenAddr, dbPath, caCert, caKey,
 		Metrics:          metrics,
 		Logger:           logger,
 		MCP:              mcpGW,
+		Transformers:     transformers,
+		Cost:             costEstimator,
 	}
 	if judge != nil {
 		cfg.Judge = judge
@@ -167,16 +277,27 @@ func runProxy(cmd *cobra.Command, configPath, listenAddr, dbPath, caCert, caKey,
 		return err
 	}
 
-	// Start admin + dashboard HTTP server.
+	// Start admin + dashboard HTTP server. In aggregator mode the dashboard reads
+	// the fleet-wide central store instead of this node's local SQLite store.
+	var dashData dashboard.DataSource = store
+	if centralStore != nil {
+		dashData = centralStore
+	}
 	adminMux := http.NewServeMux()
 	adminSrv := admin.NewServer(secretProvider)
-	dashSrv := dashboard.NewServer(store, pol, secretProvider)
+	dashSrv := dashboard.NewServer(dashData, pol, secretProvider)
 	if mcpGW != nil {
 		dashSrv.SetMCPProvider(mcpGW)
 	}
 	adminMux.Handle("/healthz", adminSrv.Handler())
 	adminMux.Handle("/admin/", adminSrv.Handler())
 	adminMux.Handle("/dashboard/", dashSrv.Handler())
+	// Central ingest endpoint (aggregator mode only): workers POST event batches
+	// here. It lives on the admin (private) listener, never the agent-facing port.
+	if ingestHandler != nil {
+		adminMux.Handle("/central/ingest", ingestHandler)
+		logger.Info("central ingest endpoint enabled", "path", "/central/ingest", "addr", adminAddr)
+	}
 	// Prometheus /metrics lives ONLY on the admin (loopback/private) listener,
 	// never the agent-facing proxy port. Registered only when metrics are on.
 	if metricsHandler != nil {
@@ -195,6 +316,15 @@ func runProxy(cmd *cobra.Command, configPath, listenAddr, dbPath, caCert, caKey,
 
 	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// Background workers tied to the proxy lifetime: control-plane policy polling
+	// and central event forwarding. Both stop when ctx is cancelled.
+	if controlPlane != nil {
+		go pollControlPlane(ctx, controlPlane, evaluator, pol.ControlPlane.PollInterval, logger)
+	}
+	if syncWorker != nil {
+		syncWorker.Start(ctx)
+	}
 
 	return p.Serve(ctx)
 }

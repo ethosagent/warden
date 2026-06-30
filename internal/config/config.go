@@ -51,6 +51,112 @@ type Policy struct {
 	// MCP configures the optional MCP egress wedge (deep MCP analysis). Disabled
 	// by default; when disabled every field is zero-valued and harmless.
 	MCP MCPConfig `json:"-"`
+	// Auth holds per-destination request-authentication transforms (OAuth2,
+	// SigV4, HMAC, API-key). Empty by default. Credentials are referenced from
+	// env (${VAR}) and held by the proxy only — never seen by the agent.
+	Auth []AuthEntry `json:"-"`
+	// ControlPlane configures pulling allow/deny policy from a remote control
+	// plane. Disabled when Endpoint is empty.
+	ControlPlane ControlPlaneConfig `json:"-"`
+	// Central configures fleet analytics aggregation (worker forward / aggregator
+	// ingest). Disabled when Mode is "" or "off".
+	Central CentralConfig `json:"-"`
+	// Audit configures signed receipts and compliance tagging of events. Both
+	// off by default.
+	Audit AuditConfig `json:"-"`
+}
+
+// Auth transform type identifiers. Each corresponds to a concrete
+// auth.RequestTransformer implementation.
+const (
+	AuthOAuth2ClientCredentials = "oauth2_client_credentials"
+	AuthAWSSigV4                = "aws_sigv4"
+	AuthHMAC                    = "hmac"
+	AuthAPIKey                  = "api_key"
+)
+
+// AuthEntry maps a destination pattern to a request-authentication transform.
+// Match uses the same syntax as the policy engine (exact / *.wildcard / ~regex).
+// Credential-bearing fields support ${ENV_VAR} expansion, resolved at build time
+// so secrets live in the environment, never in the config file or in logs.
+type AuthEntry struct {
+	Match string
+	Type  string
+
+	// oauth2_client_credentials
+	TokenURL     string
+	ClientID     string
+	ClientSecret string
+	Scopes       []string
+
+	// aws_sigv4
+	Region          string
+	Service         string
+	AccessKeyID     string
+	SecretAccessKey string
+	SessionToken    string
+
+	// hmac
+	Algorithm string // sha256 | sha512 | sha1
+	Secret    string
+	Header    string
+
+	// api_key
+	Location string // header | basic_auth
+	Name     string
+	Value    string
+}
+
+// ControlPlaneConfig configures the remote ConfigProvider. When Endpoint is set,
+// the proxy pulls allow/deny policy from it at startup and re-pulls every
+// PollInterval, hot-swapping the live evaluator. A pull failure preserves the
+// last-known-good policy so a worker keeps running if the control plane is down.
+type ControlPlaneConfig struct {
+	Endpoint     string        // https control-plane URL ("" disables)
+	TokenEnv     string        // env var holding the bearer token
+	PollInterval time.Duration // re-pull interval (default 30s)
+}
+
+// CentralConfig configures fleet analytics aggregation.
+//   - mode: aggregator — run an ingest endpoint that receives event batches into
+//     an in-memory central store the dashboard reads from.
+//   - mode: worker — forward this proxy's local events to a remote aggregator.
+//   - mode: off (default) — single-node, no aggregation.
+type CentralConfig struct {
+	Mode string // off | aggregator | worker
+
+	// aggregator
+	TokenEnv  string // env var holding the bearer token ingest requests must present
+	MaxEvents int    // central store retention cap (0 = default)
+
+	// worker
+	Endpoint  string        // aggregator ingest URL
+	ProxyID   string        // label this worker's events with
+	BatchSize int           // events per forward batch (default 100)
+	BufferCap int           // local buffer cap before dropping oldest (default 10000)
+	Interval  time.Duration // forward interval (default 10s)
+}
+
+// AuditConfig groups the signed-receipt and compliance-tagging features.
+type AuditConfig struct {
+	SignedReceipts SignedReceiptsConfig
+	Compliance     ComplianceConfig
+}
+
+// SignedReceiptsConfig configures Ed25519-signed, independently-verifiable
+// receipts for every mediated event.
+type SignedReceiptsConfig struct {
+	Enabled bool
+	// KeyFile is the Ed25519 private-key path (PKCS#8 PEM). It is generated and
+	// persisted on first run if absent, and its public key is logged at startup.
+	KeyFile string
+	// Log is the JSONL receipts output path (one signed receipt per line).
+	Log string
+}
+
+// ComplianceConfig toggles tagging events with OWASP/MITRE control IDs.
+type ComplianceConfig struct {
+	Enabled bool
 }
 
 // MCPConfig configures the MCP wedge: routing live MCP traffic through the deep
@@ -265,6 +371,10 @@ func (p Policy) DeepCopy() Policy {
 		cp.MCP.Tools.Constraints = cs
 	}
 	cp.MCP.Chain.Patterns = append([]string(nil), p.MCP.Chain.Patterns...)
+	cp.Auth = append([]AuthEntry(nil), p.Auth...)
+	for i := range cp.Auth {
+		cp.Auth[i].Scopes = append([]string(nil), p.Auth[i].Scopes...)
+	}
 	return cp
 }
 
@@ -314,6 +424,63 @@ type rawConfig struct {
 	Advisory      *rawAdvisory      `yaml:"advisory"`
 	Observability *rawObservability `yaml:"observability"`
 	MCP           *rawMCP           `yaml:"mcp"`
+	Auth          []rawAuthEntry    `yaml:"auth"`
+	ControlPlane  *rawControlPlane  `yaml:"controlPlane"`
+	Central       *rawCentral       `yaml:"central"`
+	Audit         *rawAudit         `yaml:"audit"`
+}
+
+// rawAuthEntry mirrors one on-disk `auth:` list item. All credential fields are
+// strings so ${ENV} placeholders survive parsing and are expanded at build time.
+type rawAuthEntry struct {
+	Match           string   `yaml:"match"`
+	Type            string   `yaml:"type"`
+	TokenURL        string   `yaml:"tokenURL"`
+	ClientID        string   `yaml:"clientID"`
+	ClientSecret    string   `yaml:"clientSecret"`
+	Scopes          []string `yaml:"scopes"`
+	Region          string   `yaml:"region"`
+	Service         string   `yaml:"service"`
+	AccessKeyID     string   `yaml:"accessKeyID"`
+	SecretAccessKey string   `yaml:"secretAccessKey"`
+	SessionToken    string   `yaml:"sessionToken"`
+	Algorithm       string   `yaml:"algorithm"`
+	Secret          string   `yaml:"secret"`
+	Header          string   `yaml:"header"`
+	Location        string   `yaml:"location"`
+	Name            string   `yaml:"name"`
+	Value           string   `yaml:"value"`
+}
+
+// rawControlPlane mirrors the on-disk `controlPlane:` block.
+type rawControlPlane struct {
+	Endpoint     string `yaml:"endpoint"`
+	TokenEnv     string `yaml:"tokenEnv"`
+	PollInterval string `yaml:"pollInterval"`
+}
+
+// rawCentral mirrors the on-disk `central:` block.
+type rawCentral struct {
+	Mode      string `yaml:"mode"`
+	TokenEnv  string `yaml:"tokenEnv"`
+	MaxEvents int    `yaml:"maxEvents"`
+	Endpoint  string `yaml:"endpoint"`
+	ProxyID   string `yaml:"proxyID"`
+	BatchSize int    `yaml:"batchSize"`
+	BufferCap int    `yaml:"bufferCap"`
+	Interval  string `yaml:"interval"`
+}
+
+// rawAudit mirrors the on-disk `audit:` block.
+type rawAudit struct {
+	SignedReceipts *struct {
+		Enabled bool   `yaml:"enabled"`
+		KeyFile string `yaml:"keyFile"`
+		Log     string `yaml:"log"`
+	} `yaml:"signedReceipts"`
+	Compliance *struct {
+		Enabled bool `yaml:"enabled"`
+	} `yaml:"compliance"`
 }
 
 // rawMCP mirrors the on-disk `mcp:` block. Pointer so an absent block is
@@ -491,11 +658,127 @@ func parse(data []byte) (*LocalYAMLProvider, error) {
 	}
 	policy.Observability = parseObservability(raw.Observability)
 	policy.MCP = parseMCP(raw.MCP)
+	policy.Auth = parseAuth(raw.Auth)
+	cp, err := parseControlPlane(raw.ControlPlane)
+	if err != nil {
+		return nil, err
+	}
+	policy.ControlPlane = cp
+	central, err := parseCentral(raw.Central)
+	if err != nil {
+		return nil, err
+	}
+	policy.Central = central
+	policy.Audit = parseAudit(raw.Audit)
 
 	if err := validate(policy); err != nil {
 		return nil, err
 	}
 	return &LocalYAMLProvider{policy: policy}, nil
+}
+
+// parseAuth converts the raw auth list into typed AuthEntry values. Defaults are
+// applied at build time (run.go); here we only normalize the type string.
+func parseAuth(raw []rawAuthEntry) []AuthEntry {
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make([]AuthEntry, 0, len(raw))
+	for _, r := range raw {
+		out = append(out, AuthEntry{
+			Match:           r.Match,
+			Type:            strings.ToLower(strings.TrimSpace(r.Type)),
+			TokenURL:        r.TokenURL,
+			ClientID:        r.ClientID,
+			ClientSecret:    r.ClientSecret,
+			Scopes:          append([]string(nil), r.Scopes...),
+			Region:          r.Region,
+			Service:         r.Service,
+			AccessKeyID:     r.AccessKeyID,
+			SecretAccessKey: r.SecretAccessKey,
+			SessionToken:    r.SessionToken,
+			Algorithm:       strings.ToLower(strings.TrimSpace(r.Algorithm)),
+			Secret:          r.Secret,
+			Header:          r.Header,
+			Location:        strings.ToLower(strings.TrimSpace(r.Location)),
+			Name:            r.Name,
+			Value:           r.Value,
+		})
+	}
+	return out
+}
+
+// defaultControlPlanePollInterval is used when controlPlane.pollInterval is omitted.
+const defaultControlPlanePollInterval = 30 * time.Second
+
+// parseControlPlane converts the raw controlPlane block into typed config,
+// applying the default poll interval. An absent block yields a disabled value.
+func parseControlPlane(r *rawControlPlane) (ControlPlaneConfig, error) {
+	var c ControlPlaneConfig
+	if r == nil {
+		return c, nil
+	}
+	c.Endpoint = strings.TrimSpace(r.Endpoint)
+	c.TokenEnv = r.TokenEnv
+	c.PollInterval = defaultControlPlanePollInterval
+	if err := parseDurationField("controlPlane.pollInterval", r.PollInterval, &c.PollInterval); err != nil {
+		return ControlPlaneConfig{}, err
+	}
+	return c, nil
+}
+
+// central defaults applied when the corresponding field is omitted (worker mode).
+const (
+	defaultCentralBatchSize = 100
+	defaultCentralBufferCap = 10000
+	defaultCentralInterval  = 10 * time.Second
+)
+
+// parseCentral converts the raw central block into typed config, normalizing the
+// mode and applying worker-side defaults. An absent block yields mode "off".
+func parseCentral(r *rawCentral) (CentralConfig, error) {
+	c := CentralConfig{Mode: "off"}
+	if r == nil {
+		return c, nil
+	}
+	if m := strings.ToLower(strings.TrimSpace(r.Mode)); m != "" {
+		c.Mode = m
+	}
+	c.TokenEnv = r.TokenEnv
+	c.MaxEvents = r.MaxEvents
+	c.Endpoint = strings.TrimSpace(r.Endpoint)
+	c.ProxyID = r.ProxyID
+	c.BatchSize = defaultCentralBatchSize
+	if r.BatchSize > 0 {
+		c.BatchSize = r.BatchSize
+	}
+	c.BufferCap = defaultCentralBufferCap
+	if r.BufferCap > 0 {
+		c.BufferCap = r.BufferCap
+	}
+	c.Interval = defaultCentralInterval
+	if err := parseDurationField("central.interval", r.Interval, &c.Interval); err != nil {
+		return CentralConfig{}, err
+	}
+	return c, nil
+}
+
+// parseAudit converts the raw audit block into typed config. An absent block
+// yields both features disabled.
+func parseAudit(r *rawAudit) AuditConfig {
+	var a AuditConfig
+	if r == nil {
+		return a
+	}
+	if r.SignedReceipts != nil {
+		a.SignedReceipts.Enabled = r.SignedReceipts.Enabled
+		a.SignedReceipts.KeyFile = strings.TrimSpace(r.SignedReceipts.KeyFile)
+		a.SignedReceipts.Log = strings.TrimSpace(r.SignedReceipts.Log)
+	}
+	if r.Compliance != nil {
+		a.Compliance.Enabled = r.Compliance.Enabled
+	}
+	return a
 }
 
 // judge defaults applied when the corresponding field is omitted.
@@ -805,6 +1088,124 @@ func validate(p Policy) error {
 	}
 	if err := validateMCP(p.MCP); err != nil {
 		return err
+	}
+	if err := validateAuth(p.Auth); err != nil {
+		return err
+	}
+	if err := validateControlPlane(p.ControlPlane); err != nil {
+		return err
+	}
+	if err := validateCentral(p.Central); err != nil {
+		return err
+	}
+	if err := validateAudit(p.Audit); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateMatchPattern checks an auth `match` uses the same syntax the policy
+// engine accepts: exact host, "*.suffix" wildcard, or "~regex".
+func validateMatchPattern(ctx, pattern string) error {
+	if strings.TrimSpace(pattern) == "" {
+		return fmt.Errorf("config: %s: match is required", ctx)
+	}
+	if strings.HasPrefix(pattern, "~") {
+		if _, err := regexp.Compile(pattern[1:]); err != nil {
+			return fmt.Errorf("config: %s: match %q has invalid regex: %v", ctx, pattern, err)
+		}
+		return nil
+	}
+	if strings.Contains(pattern, "*") {
+		if !strings.HasPrefix(pattern, "*.") || strings.Count(pattern, "*") != 1 {
+			return fmt.Errorf("config: %s: match %q has invalid wildcard; only \"*.suffix\" is supported", ctx, pattern)
+		}
+	}
+	return nil
+}
+
+// validateAuth enforces structural requirements per transform type. Credential
+// values may be ${ENV} placeholders (resolved at build time), so presence — not
+// the resolved secret — is what is checked here.
+func validateAuth(entries []AuthEntry) error {
+	for i, e := range entries {
+		ctx := fmt.Sprintf("auth[%d]", i)
+		if err := validateMatchPattern(ctx, e.Match); err != nil {
+			return err
+		}
+		switch e.Type {
+		case AuthOAuth2ClientCredentials:
+			if e.TokenURL == "" || e.ClientID == "" || e.ClientSecret == "" {
+				return fmt.Errorf("config: %s: type %s requires tokenURL, clientID, and clientSecret", ctx, e.Type)
+			}
+		case AuthAWSSigV4:
+			if e.Region == "" || e.AccessKeyID == "" || e.SecretAccessKey == "" {
+				return fmt.Errorf("config: %s: type %s requires region, accessKeyID, and secretAccessKey", ctx, e.Type)
+			}
+		case AuthHMAC:
+			switch e.Algorithm {
+			case "sha256", "sha512", "sha1":
+			default:
+				return fmt.Errorf("config: %s: hmac algorithm %q is invalid; must be sha256, sha512, or sha1", ctx, e.Algorithm)
+			}
+			if e.Secret == "" || e.Header == "" {
+				return fmt.Errorf("config: %s: type %s requires secret and header", ctx, e.Type)
+			}
+		case AuthAPIKey:
+			switch e.Location {
+			case "header", "basic_auth":
+			default:
+				return fmt.Errorf("config: %s: api_key location %q is invalid; must be header or basic_auth", ctx, e.Location)
+			}
+			if e.Name == "" || e.Value == "" {
+				return fmt.Errorf("config: %s: type %s requires name and value", ctx, e.Type)
+			}
+		case "":
+			return fmt.Errorf("config: %s: type is required", ctx)
+		default:
+			return fmt.Errorf("config: %s: unknown type %q; must be one of: %s, %s, %s, %s", ctx, e.Type,
+				AuthOAuth2ClientCredentials, AuthAWSSigV4, AuthHMAC, AuthAPIKey)
+		}
+	}
+	return nil
+}
+
+// validateControlPlane enforces the control-plane block's requirements only when
+// it is enabled (Endpoint set), so an absent/empty block is always valid.
+func validateControlPlane(c ControlPlaneConfig) error {
+	if c.Endpoint == "" {
+		return nil
+	}
+	if !strings.HasPrefix(c.Endpoint, "https://") {
+		return fmt.Errorf("config: controlPlane.endpoint must use https, got %q", c.Endpoint)
+	}
+	if c.PollInterval <= 0 {
+		return fmt.Errorf("config: controlPlane.pollInterval must be greater than 0")
+	}
+	return nil
+}
+
+// validateCentral enforces the central block's requirements per mode.
+func validateCentral(c CentralConfig) error {
+	switch c.Mode {
+	case "", "off":
+		return nil
+	case "aggregator":
+		return nil
+	case "worker":
+		if c.Endpoint == "" {
+			return fmt.Errorf("config: central.endpoint is required when central.mode is worker")
+		}
+		return nil
+	default:
+		return fmt.Errorf("config: central.mode %q is invalid; must be one of: off, aggregator, worker", c.Mode)
+	}
+}
+
+// validateAudit enforces the audit block's requirements only for enabled features.
+func validateAudit(a AuditConfig) error {
+	if a.SignedReceipts.Enabled && a.SignedReceipts.Log == "" {
+		return fmt.Errorf("config: audit.signedReceipts.log is required when signed receipts are enabled")
 	}
 	return nil
 }

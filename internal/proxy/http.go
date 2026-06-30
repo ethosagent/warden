@@ -439,6 +439,25 @@ func (p *Proxy) handleHTTP(tlsConn *tls.Conn, br *bufio.Reader, domain string, p
 		if wasMCP {
 			proto = "mcp"
 		}
+		// Cost estimate (optional). Heuristic dollar figure from observed
+		// request/response Content-Length and the destination provider's pricing;
+		// zero when cost tracking is off or the domain is not a known provider.
+		var costUSD float64
+		var provider string
+		if p.cfg.Cost != nil {
+			reqBytes := req.ContentLength
+			if reqBytes < 0 {
+				reqBytes = 0
+			}
+			respBytes := resp.ContentLength
+			if respBytes < 0 {
+				respBytes = 0
+			}
+			if est := p.cfg.Cost.Estimate(domain, reqBytes, respBytes); est != nil {
+				costUSD = est.TotalCost
+				provider = est.Provider
+			}
+		}
 		_ = p.cfg.Analytics.StoreEvent(analytics.Event{
 			Timestamp:      time.Now(),
 			Domain:         domain,
@@ -452,6 +471,8 @@ func (p *Proxy) handleHTTP(tlsConn *tls.Conn, br *bufio.Reader, domain string, p
 			JudgeReason:    judgeReason, // empty unless a judge allowed this request
 			Tool:           mcpTool,     // "" unless wasMCP
 			Reason:         mcpReason,   // "" unless wasMCP
+			CostUSD:        costUSD,
+			Provider:       provider,
 		})
 		p.cfg.Metrics.RecordRequest("allow", proto)
 		for _, name := range swappedNames {

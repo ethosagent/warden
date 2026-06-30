@@ -53,6 +53,35 @@ type Event struct {
 	// (e.g. "mcp_tool_denied", "mcp_poisoning", "mcp_schema_drift"). It is a
 	// separate field from JudgeReason: bounded enum metadata, never content.
 	Reason string
+	// CostUSD is the estimated cost of this call in US dollars, derived
+	// heuristically from observed request/response byte sizes and a known
+	// provider's pricing (see internal/cost). Zero for non-LLM-provider traffic
+	// or when cost tracking is disabled. It is an estimate, never billing-grade.
+	CostUSD float64
+	// Provider is the LLM provider this call was attributed to for cost
+	// estimation (e.g. "openai", "anthropic"); "" when no provider matched.
+	Provider string
+	// Compliance holds the framework control IDs this event maps to
+	// (e.g. "mitre:T1048", "owasp:LLM01"), tagged by internal/audit's Mapper.
+	// Bounded framework identifiers only — never content. Nil when compliance
+	// tagging is disabled or no control applies.
+	Compliance []string
+}
+
+// encodeCompliance joins compliance control IDs into a single comma-separated
+// column value. Control IDs are bounded framework identifiers (e.g.
+// "mitre:T1048") that never contain commas, so a comma join round-trips safely.
+func encodeCompliance(ids []string) string {
+	return strings.Join(ids, ",")
+}
+
+// decodeCompliance splits a stored compliance column back into control IDs.
+// An empty column yields a nil slice (no mappings), not a one-element slice.
+func decodeCompliance(s string) []string {
+	if s == "" {
+		return nil
+	}
+	return strings.Split(s, ",")
 }
 
 // EventFilter narrows a GetEvents query. Zero-valued fields are ignored.
@@ -124,7 +153,10 @@ CREATE TABLE IF NOT EXISTS events (
     secret_ref      TEXT    NOT NULL,
     judge_reason    TEXT    NOT NULL DEFAULT '',
     tool            TEXT    NOT NULL DEFAULT '',
-    reason          TEXT    NOT NULL DEFAULT ''
+    reason          TEXT    NOT NULL DEFAULT '',
+    cost_usd        REAL    NOT NULL DEFAULT 0,
+    provider        TEXT    NOT NULL DEFAULT '',
+    compliance      TEXT    NOT NULL DEFAULT ''
 );`
 	if _, err := s.db.Exec(ddl); err != nil {
 		return fmt.Errorf("analytics: migrate: %w", err)
@@ -137,6 +169,9 @@ CREATE TABLE IF NOT EXISTS events (
 		{"judge_reason", `ALTER TABLE events ADD COLUMN judge_reason TEXT NOT NULL DEFAULT ''`},
 		{"tool", `ALTER TABLE events ADD COLUMN tool TEXT NOT NULL DEFAULT ''`},
 		{"reason", `ALTER TABLE events ADD COLUMN reason TEXT NOT NULL DEFAULT ''`},
+		{"cost_usd", `ALTER TABLE events ADD COLUMN cost_usd REAL NOT NULL DEFAULT 0`},
+		{"provider", `ALTER TABLE events ADD COLUMN provider TEXT NOT NULL DEFAULT ''`},
+		{"compliance", `ALTER TABLE events ADD COLUMN compliance TEXT NOT NULL DEFAULT ''`},
 	} {
 		if err := s.addColumnIfAbsent(c.name, c.ddl); err != nil {
 			return err
@@ -216,11 +251,12 @@ func (s *SQLiteStore) StoreEvent(e Event) error {
 		e.Timestamp = time.Now()
 	}
 	const ins = `INSERT INTO events
-        (ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason, tool, reason)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        (ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason, tool, reason, cost_usd, provider, compliance)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	_, err := s.db.Exec(ins,
 		e.Timestamp.UnixNano(), e.Domain, e.Port, e.Protocol, e.Method,
-		e.URL, e.Decision, e.ResponseStatus, e.SecretRef, e.JudgeReason, e.Tool, e.Reason)
+		e.URL, e.Decision, e.ResponseStatus, e.SecretRef, e.JudgeReason, e.Tool, e.Reason,
+		e.CostUSD, e.Provider, encodeCompliance(e.Compliance))
 	if err != nil {
 		return fmt.Errorf("analytics: insert event: %w", err)
 	}
@@ -241,7 +277,7 @@ func (s *SQLiteStore) prune() error {
 
 // GetEvents returns events matching filter, newest first.
 func (s *SQLiteStore) GetEvents(filter EventFilter) ([]Event, error) {
-	q := `SELECT ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason, tool, reason
+	q := `SELECT ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason, tool, reason, cost_usd, provider, compliance
           FROM events WHERE 1=1`
 	var args []any
 	if filter.Domain != "" {
@@ -279,13 +315,16 @@ func (s *SQLiteStore) GetEvents(filter EventFilter) ([]Event, error) {
 	var out []Event
 	for rows.Next() {
 		var (
-			e  Event
-			ts int64
+			e          Event
+			ts         int64
+			compliance string
 		)
 		if err := rows.Scan(&ts, &e.Domain, &e.Port, &e.Protocol, &e.Method,
-			&e.URL, &e.Decision, &e.ResponseStatus, &e.SecretRef, &e.JudgeReason, &e.Tool, &e.Reason); err != nil {
+			&e.URL, &e.Decision, &e.ResponseStatus, &e.SecretRef, &e.JudgeReason, &e.Tool, &e.Reason,
+			&e.CostUSD, &e.Provider, &compliance); err != nil {
 			return nil, fmt.Errorf("analytics: scan: %w", err)
 		}
+		e.Compliance = decodeCompliance(compliance)
 		e.Timestamp = time.Unix(0, ts).UTC()
 		out = append(out, e)
 	}
@@ -306,7 +345,7 @@ func (s *SQLiteStore) count() (int, error) {
 
 // GetOldestEventIDs returns the IDs and events of the oldest N events.
 func (s *SQLiteStore) GetOldestEventIDs(limit int) ([]int64, []Event, error) {
-	const q = `SELECT id, ts, domain, port, protocol, method, url, decision, response_status, secret_ref
+	const q = `SELECT id, ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason, tool, reason, cost_usd, provider, compliance
 	            FROM events ORDER BY id ASC LIMIT ?`
 	rows, err := s.db.Query(q, limit)
 	if err != nil {
@@ -318,14 +357,17 @@ func (s *SQLiteStore) GetOldestEventIDs(limit int) ([]int64, []Event, error) {
 	var out []Event
 	for rows.Next() {
 		var (
-			id int64
-			e  Event
-			ts int64
+			id         int64
+			e          Event
+			ts         int64
+			compliance string
 		)
 		if err := rows.Scan(&id, &ts, &e.Domain, &e.Port, &e.Protocol, &e.Method,
-			&e.URL, &e.Decision, &e.ResponseStatus, &e.SecretRef); err != nil {
+			&e.URL, &e.Decision, &e.ResponseStatus, &e.SecretRef, &e.JudgeReason, &e.Tool, &e.Reason,
+			&e.CostUSD, &e.Provider, &compliance); err != nil {
 			return nil, nil, fmt.Errorf("analytics: scan oldest IDs: %w", err)
 		}
+		e.Compliance = decodeCompliance(compliance)
 		e.Timestamp = time.Unix(0, ts).UTC()
 		ids = append(ids, id)
 		out = append(out, e)

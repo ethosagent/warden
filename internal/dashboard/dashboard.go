@@ -596,6 +596,28 @@ type analyticsResponse struct {
 	Secrets       []secretUsage    `json:"secrets"`
 	Judge         []judgeEntry     `json:"judge"`
 	Writes        []writeEntry     `json:"writes"`
+	Cost          costSummary      `json:"cost"`
+	Compliance    []complianceTag  `json:"compliance"`
+}
+
+// costSummary aggregates estimated LLM spend over the selected window. Figures
+// are heuristic (bytes/4 ≈ tokens × provider pricing), never billing-grade.
+type costSummary struct {
+	TotalUSD   float64        `json:"totalUSD"`
+	ByProvider []providerCost `json:"byProvider"`
+}
+
+// providerCost is the estimated spend attributed to one LLM provider.
+type providerCost struct {
+	Provider string  `json:"provider"`
+	CostUSD  float64 `json:"costUSD"`
+	Requests int     `json:"requests"`
+}
+
+// complianceTag is one OWASP/MITRE control ID and how many events mapped to it.
+type complianceTag struct {
+	ControlID string `json:"controlID"`
+	Count     int    `json:"count"`
 }
 
 // isWriteMethod reports whether an HTTP method mutates remote state (non-GET,
@@ -749,7 +771,11 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 		Secrets:      []secretUsage{},
 		Judge:        []judgeEntry{},
 		Writes:       []writeEntry{},
+		Cost:         costSummary{ByProvider: []providerCost{}},
+		Compliance:   []complianceTag{},
 	}
+	providerCosts := make(map[string]*providerCost)
+	complianceCounts := make(map[string]int)
 	for h := 0; h < 24; h++ {
 		resp.Hourly[h].Hour = h
 	}
@@ -918,6 +944,23 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 				wa.lastStatus = e.ResponseStatus
 			}
 		}
+
+		// Estimated cost by provider.
+		if e.Provider != "" {
+			resp.Cost.TotalUSD += e.CostUSD
+			pc, ok := providerCosts[e.Provider]
+			if !ok {
+				pc = &providerCost{Provider: e.Provider}
+				providerCosts[e.Provider] = pc
+			}
+			pc.CostUSD += e.CostUSD
+			pc.Requests++
+		}
+
+		// Compliance control-ID tally.
+		for _, id := range e.Compliance {
+			complianceCounts[id]++
+		}
 	}
 
 	resp.Totals.UniqueDomains = len(domains)
@@ -1082,6 +1125,28 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 		allWrites = allWrites[:12]
 	}
 	resp.Writes = allWrites
+
+	// Estimated cost by provider, sorted by spend desc then name.
+	for _, pc := range providerCosts {
+		resp.Cost.ByProvider = append(resp.Cost.ByProvider, *pc)
+	}
+	sort.Slice(resp.Cost.ByProvider, func(i, j int) bool {
+		if resp.Cost.ByProvider[i].CostUSD != resp.Cost.ByProvider[j].CostUSD {
+			return resp.Cost.ByProvider[i].CostUSD > resp.Cost.ByProvider[j].CostUSD
+		}
+		return resp.Cost.ByProvider[i].Provider < resp.Cost.ByProvider[j].Provider
+	})
+
+	// Compliance control IDs, sorted by count desc then ID.
+	for id, c := range complianceCounts {
+		resp.Compliance = append(resp.Compliance, complianceTag{ControlID: id, Count: c})
+	}
+	sort.Slice(resp.Compliance, func(i, j int) bool {
+		if resp.Compliance[i].Count != resp.Compliance[j].Count {
+			return resp.Compliance[i].Count > resp.Compliance[j].Count
+		}
+		return resp.Compliance[i].ControlID < resp.Compliance[j].ControlID
+	})
 
 	writeJSON(w, resp)
 }
