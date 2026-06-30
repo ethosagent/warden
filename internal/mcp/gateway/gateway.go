@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethosagent/warden/internal/config"
@@ -119,6 +120,36 @@ type compiledToolConstraints struct {
 	fields       map[string]compiledFieldConstraint
 }
 
+// Store persists the gateway's tool inventory and observed schema profiles so
+// they survive a proxy restart. It is defined here (not in the analytics
+// package) so the gateway never imports analytics — the analytics package
+// implements this interface, keeping the dependency one-directional.
+//
+// The schema map is keyed by "tool\x00direction" (the same key Snapshot/Restore
+// on the profiler use).
+type Store interface {
+	LoadMCPInventory() ([]InventoryItem, error)
+	SaveMCPInventory([]InventoryItem) error
+	LoadMCPSchemas() (map[string]mcp.ToolProfileView, error) // key = "tool\x00direction"
+	SaveMCPSchemas(map[string]mcp.ToolProfileView) error
+}
+
+// Option configures a Gateway at construction. Options are applied after the
+// core fields are set so they can read cfg-derived state (e.g. the profiler).
+type Option func(*Gateway)
+
+// WithStore attaches a persistence Store. On New the gateway loads any
+// persisted inventory and schema profiles (best-effort; load errors are logged
+// and never fail startup) and starts a background flusher that writes back
+// changes periodically and on Close.
+func WithStore(s Store) Option {
+	return func(g *Gateway) { g.store = s }
+}
+
+// flushInterval is how often the background flusher writes dirty state back to
+// the store.
+const flushInterval = 15 * time.Second
+
 // Gateway is the MCP verdict engine. It is safe for concurrent use.
 type Gateway struct {
 	cfg      config.MCPConfig
@@ -138,13 +169,27 @@ type Gateway struct {
 	// every tools/list response, keyed by tool name. Guarded by g.mu.
 	inventory map[string]*InventoryItem
 
+	// store, when non-nil, persists inventory + schema across restarts. dirty is
+	// set whenever inventory or schema state changes; the flusher goroutine
+	// (started only when store != nil) writes back when dirty. done stops it, and
+	// closeOnce makes Close idempotent.
+	store     Store
+	dirty     atomic.Bool
+	done      chan struct{}
+	closeOnce sync.Once
+
 	now func() time.Time // injectable clock for tests; default time.Now
 }
 
 // New builds a Gateway from cfg. The scanner is owned by the caller (the proxy);
 // in tests construct one via scan.NewScanner honoring cfg.Scan.PII.Phone. The
 // shared tool policy and (optional) schema profiler are built here.
-func New(cfg config.MCPConfig, scanner *scan.Scanner, log *slog.Logger) *Gateway {
+//
+// Optional opts (e.g. WithStore) enable persistence: when a Store is attached
+// the gateway loads any persisted inventory + schema on start and runs a
+// background flusher. New stays backward-compatible — with no opts it behaves
+// exactly as before and starts no goroutines.
+func New(cfg config.MCPConfig, scanner *scan.Scanner, log *slog.Logger, opts ...Option) *Gateway {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -153,7 +198,7 @@ func New(cfg config.MCPConfig, scanner *scan.Scanner, log *slog.Logger) *Gateway
 	if cfg.Scan.ProfileSchema {
 		profiler = mcp.NewSchemaProfiler(0)
 	}
-	return &Gateway{
+	g := &Gateway{
 		cfg:         cfg,
 		scanner:     scanner,
 		policy:      policy,
@@ -164,6 +209,95 @@ func New(cfg config.MCPConfig, scanner *scan.Scanner, log *slog.Logger) *Gateway
 		inventory:   make(map[string]*InventoryItem),
 		now:         time.Now,
 	}
+	for _, opt := range opts {
+		opt(g)
+	}
+	if g.store != nil {
+		g.loadFromStore()
+		g.done = make(chan struct{})
+		go g.flushLoop()
+	}
+	return g
+}
+
+// loadFromStore hydrates the inventory and profiler from the persisted store.
+// It is best-effort: a load error is logged and skipped so a corrupt or empty
+// store never blocks startup. Called once from New, before the flusher starts,
+// so no lock is needed for the inventory map.
+func (g *Gateway) loadFromStore() {
+	if items, err := g.store.LoadMCPInventory(); err != nil {
+		g.log.Warn("mcp gateway: load inventory failed; starting empty", "error", err)
+	} else {
+		for i := range items {
+			it := items[i]
+			g.inventory[it.Name] = &it
+		}
+	}
+	if g.profiler != nil {
+		if snap, err := g.store.LoadMCPSchemas(); err != nil {
+			g.log.Warn("mcp gateway: load schemas failed; starting empty", "error", err)
+		} else if len(snap) > 0 {
+			g.profiler.Restore(snap)
+		}
+	}
+}
+
+// markDirty flags that persisted state has diverged from the store. Cheap and
+// lock-free so hot paths (OnRequest/OnResponse) can call it freely. No-op when
+// no store is attached.
+func (g *Gateway) markDirty() {
+	if g.store != nil {
+		g.dirty.Store(true)
+	}
+}
+
+// flushLoop writes dirty state back to the store on a fixed interval until Close
+// signals done. Started only when a store is attached.
+func (g *Gateway) flushLoop() {
+	t := time.NewTicker(flushInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-g.done:
+			return
+		case <-t.C:
+			g.flush()
+		}
+	}
+}
+
+// flush persists the current inventory + schema snapshot when dirty, clearing
+// the dirty flag first so a concurrent change after the snapshot re-marks it for
+// the next cycle rather than being lost. No-op when no store is attached or
+// nothing changed.
+func (g *Gateway) flush() {
+	if g.store == nil || !g.dirty.Swap(false) {
+		return
+	}
+	if err := g.store.SaveMCPInventory(g.Inventory()); err != nil {
+		g.log.Warn("mcp gateway: save inventory failed", "error", err)
+		g.dirty.Store(true)
+	}
+	if g.profiler != nil {
+		if err := g.store.SaveMCPSchemas(g.profiler.Snapshot()); err != nil {
+			g.log.Warn("mcp gateway: save schemas failed", "error", err)
+			g.dirty.Store(true)
+		}
+	}
+}
+
+// Close stops the background flusher and performs a final flush of any pending
+// changes. It is safe to call multiple times and is a no-op when no store is
+// attached (no goroutine was started). Always returns nil; flush errors are
+// logged, not surfaced, so shutdown never fails on a persistence hiccup.
+func (g *Gateway) Close() error {
+	g.closeOnce.Do(func() {
+		if g.done != nil {
+			close(g.done)
+		}
+		g.flush()
+	})
+	return nil
 }
 
 // compileConstraints precompiles each per-tool argument constraint once. Match
@@ -389,6 +523,7 @@ func (g *Gateway) OnRequest(sessionKey, method, url string, hdr http.Header, bod
 		params := rawField(body, "params")
 		seen := map[string]bool{}
 		if g.profiler != nil {
+			g.markDirty()
 			for _, fd := range g.profiler.Observe(tool, mcp.DirRequest, params, g.scanner) {
 				kind := argKind(fd.Category)
 				if kind == "" {
@@ -613,6 +748,7 @@ func (g *Gateway) OnResponse(sessionKey string, status int, hdr http.Header, bod
 		result := rawField(body, "result")
 		seen := map[string]bool{}
 		if g.profiler != nil {
+			g.markDirty()
 			for _, fd := range g.profiler.Observe(tool, mcp.DirResponse, result, g.scanner) {
 				kind := resultKind(fd.Category)
 				if kind == "" {
@@ -690,6 +826,9 @@ func (g *Gateway) recordInventoryLocked(items []ToolInfo, now time.Time) {
 		cur.HasDescription = it.HasDescription
 		cur.InputSchemaHash = it.InputSchemaHash
 		cur.LastSeen = now
+	}
+	if len(items) > 0 {
+		g.markDirty()
 	}
 }
 

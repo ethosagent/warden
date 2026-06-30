@@ -267,6 +267,32 @@ func (p *SchemaProfiler) Snapshot() map[string]ToolProfileView {
 	return out
 }
 
+// Restore overwrites the profiler's state from a snapshot (as returned by
+// Snapshot), keyed by "tool\x00direction". It deep-copies every view in so the
+// caller's map shares no state with the profiler, and is safe to call
+// concurrently with Observe/Snapshot. A nil snap is ignored.
+func (p *SchemaProfiler) Restore(snap map[string]ToolProfileView) {
+	if snap == nil {
+		return
+	}
+	rebuilt := make(map[string]*ToolProfile, len(snap))
+	for key, view := range snap {
+		prof := &ToolProfile{Fields: make(map[string]*FieldProfile, len(view.Fields))}
+		for path, fv := range view.Fields {
+			prof.Fields[path] = &FieldProfile{
+				Types:       cloneStrings(fv.Types),
+				SeenCount:   fv.SeenCount,
+				Sensitivity: cloneStrings(fv.Sensitivity),
+			}
+		}
+		rebuilt[key] = prof
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.profiles = rebuilt
+}
+
 // addSorted returns dst with each value inserted if absent, kept sorted and
 // deduped. It mutates and returns dst.
 func addSorted(dst []string, vals ...string) []string {

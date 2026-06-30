@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -246,6 +247,48 @@ func TestObserve_EmptyAndNil(t *testing.T) {
 	}
 	if len(p.Snapshot()) != 0 {
 		t.Error("no profiles should exist after empty observes")
+	}
+}
+
+func TestRestore_RoundTripsSnapshot(t *testing.T) {
+	p := NewSchemaProfiler(0)
+	scanner := scan.NewScanner()
+	p.Observe("get", DirRequest, json.RawMessage(`{"id":1,"name":"y"}`), scanner)
+	p.Observe("get", DirRequest, json.RawMessage(`{"id":"x"}`), scanner)
+	p.Observe("send", DirResponse, json.RawMessage(`{"ok":true}`), scanner)
+
+	snap := p.Snapshot()
+
+	restored := NewSchemaProfiler(0)
+	restored.Restore(snap)
+
+	got := restored.Snapshot()
+	if !reflect.DeepEqual(got, snap) {
+		t.Fatalf("Restore(Snapshot()) mismatch:\n got=%#v\nwant=%#v", got, snap)
+	}
+
+	// Restored profiler must own independent state: mutating the source snapshot
+	// after Restore must not affect the restored profiler.
+	for _, view := range snap {
+		for _, fv := range view.Fields {
+			if len(fv.Types) > 0 {
+				fv.Types[0] = "MUTATED"
+			}
+		}
+	}
+	if !reflect.DeepEqual(restored.Snapshot(), got) {
+		t.Error("Restore did not deep-copy: mutating source snapshot changed restored state")
+	}
+}
+
+func TestRestore_NilIsIgnored(t *testing.T) {
+	p := NewSchemaProfiler(0)
+	scanner := scan.NewScanner()
+	p.Observe("get", DirRequest, json.RawMessage(`{"id":1}`), scanner)
+	before := p.Snapshot()
+	p.Restore(nil)
+	if !reflect.DeepEqual(p.Snapshot(), before) {
+		t.Error("Restore(nil) should be a no-op")
 	}
 }
 
