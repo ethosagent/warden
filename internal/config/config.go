@@ -208,6 +208,47 @@ type MCPConfig struct {
 	Scan MCPScanConfig
 	// Chain configures the per-session call-chain analyzer.
 	Chain MCPChainConfig
+	// Scopes, when non-nil, layers purpose-bound (task-scoped) authorization on top
+	// of the Tools policy: an active scope narrows the permitted tool-set + bundles
+	// per-tool arg constraints. nil = no scoping (unchanged behavior). LOCAL config.
+	Scopes *MCPScopesConfig
+}
+
+// MCPScopesConfig configures task-scoped authorization: approve a purpose once,
+// then the gateway enforces its allowed tool-set (and bundled constraints) on
+// every tools/call with no re-prompting. Scopes only NARROW the Tools policy —
+// a tool must already be allowed before its scope membership is consulted, and
+// scoping can never re-permit a tool the base policy or a restriction denied.
+type MCPScopesConfig struct {
+	// ActiveScope is the scope id enforced fleet-wide unless a PerAgent entry
+	// overrides it. Empty = no global scope (only PerAgent-selected agents scoped).
+	ActiveScope string
+	// OutOfScope is the fallback for a call whose tool is not in the active scope:
+	// "deny" (default, fail-closed) or "escalate". Escalate routes to a human
+	// approval channel — DEFERRED; with none configured it degrades to deny, so the
+	// absence of an approval mechanism can never widen access.
+	OutOfScope string
+	// PerAgent optionally selects the active scope id per agent id, overriding
+	// ActiveScope for that agent. Keyed by agent id.
+	PerAgent map[string]string
+	// List holds every defined scope. Referenced by ActiveScope / PerAgent by id.
+	List []MCPScope
+}
+
+// MCPScope is one approve-once purpose: a natural-language intent bound to an
+// allowed tool-set and (optionally) per-tool argument constraints reusing the
+// exact Phase-3a constraint shape.
+type MCPScope struct {
+	// ID is the unique scope identifier referenced by ActiveScope / PerAgent.
+	ID string
+	// Purpose is the human-readable intent this scope authorizes (documentation +
+	// future LLM intent verification; not evaluated by the deterministic tiers).
+	Purpose string
+	// Tools is the set of tool names permitted while this scope is active.
+	Tools []string
+	// Constraints optionally bounds in-scope tool arguments, keyed by tool name,
+	// reusing the Tools.Constraints shape (fed to the same evaluator).
+	Constraints map[string]MCPToolConstraints
 }
 
 // MCPToolsConfig is the Phase-1 tool policy: name allow/deny plus per-tool rate
@@ -380,26 +421,29 @@ func (p Policy) DeepCopy() Policy {
 		}
 		cp.MCP.Tools.RateLimit = rl
 	}
-	if p.MCP.Tools.Constraints != nil {
-		cs := make(map[string]MCPToolConstraints, len(p.MCP.Tools.Constraints))
-		for tool, tc := range p.MCP.Tools.Constraints {
-			ctc := MCPToolConstraints{MaxArgsBytes: tc.MaxArgsBytes}
-			if tc.Fields != nil {
-				fields := make(map[string]MCPFieldConstraint, len(tc.Fields))
-				for field, fc := range tc.Fields {
-					fields[field] = fc
-				}
-				ctc.Fields = fields
-			}
-			if tc.AllowWhen != nil {
-				aw := *tc.AllowWhen
-				ctc.AllowWhen = &aw
-			}
-			cs[tool] = ctc
-		}
-		cp.MCP.Tools.Constraints = cs
-	}
+	cp.MCP.Tools.Constraints = cloneToolConstraints(p.MCP.Tools.Constraints)
 	cp.MCP.Chain.Patterns = append([]string(nil), p.MCP.Chain.Patterns...)
+	if p.MCP.Scopes != nil {
+		sc := &MCPScopesConfig{
+			ActiveScope: p.MCP.Scopes.ActiveScope,
+			OutOfScope:  p.MCP.Scopes.OutOfScope,
+		}
+		if p.MCP.Scopes.PerAgent != nil {
+			sc.PerAgent = make(map[string]string, len(p.MCP.Scopes.PerAgent))
+			for k, v := range p.MCP.Scopes.PerAgent {
+				sc.PerAgent[k] = v
+			}
+		}
+		for _, s := range p.MCP.Scopes.List {
+			sc.List = append(sc.List, MCPScope{
+				ID:          s.ID,
+				Purpose:     s.Purpose,
+				Tools:       append([]string(nil), s.Tools...),
+				Constraints: cloneToolConstraints(s.Constraints),
+			})
+		}
+		cp.MCP.Scopes = sc
+	}
 	cp.Auth = append([]AuthEntry(nil), p.Auth...)
 	for i := range cp.Auth {
 		cp.Auth[i].Scopes = append([]string(nil), p.Auth[i].Scopes...)
@@ -533,12 +577,27 @@ type rawMCP struct {
 	Schema               *rawMCPSchema `yaml:"schema"`
 	Scan                 *rawMCPScan   `yaml:"scan"`
 	Chain                *rawMCPChain  `yaml:"chain"`
+	Scopes               *rawMCPScopes `yaml:"scopes"`
 }
 
 type rawMCPTools struct {
 	Allow       []string                        `yaml:"allow"`
 	Deny        []string                        `yaml:"deny"`
 	RateLimit   map[string]string               `yaml:"rateLimit"`
+	Constraints map[string]rawMCPToolConstraint `yaml:"constraints"`
+}
+
+type rawMCPScopes struct {
+	ActiveScope string            `yaml:"activeScope"`
+	OutOfScope  string            `yaml:"outOfScope"`
+	PerAgent    map[string]string `yaml:"perAgent"`
+	List        []rawMCPScope     `yaml:"list"`
+}
+
+type rawMCPScope struct {
+	ID          string                          `yaml:"id"`
+	Purpose     string                          `yaml:"purpose"`
+	Tools       []string                        `yaml:"tools"`
 	Constraints map[string]rawMCPToolConstraint `yaml:"constraints"`
 }
 
@@ -964,25 +1023,28 @@ func parseMCP(r *rawMCP) MCPConfig {
 				mc.Tools.RateLimit[k] = v
 			}
 		}
-		if r.Tools.Constraints != nil {
-			mc.Tools.Constraints = make(map[string]MCPToolConstraints, len(r.Tools.Constraints))
-			for tool, rc := range r.Tools.Constraints {
-				tc := MCPToolConstraints{MaxArgsBytes: rc.MaxArgsBytes}
-				if rc.Fields != nil {
-					tc.Fields = make(map[string]MCPFieldConstraint, len(rc.Fields))
-					for field, rf := range rc.Fields {
-						tc.Fields[field] = MCPFieldConstraint(rf)
-					}
-				}
-				if rc.AllowWhen != nil {
-					tc.AllowWhen = &MCPToolCondition{
-						AgentID:    rc.AllowWhen.AgentID,
-						TimeWindow: rc.AllowWhen.TimeWindow,
-					}
-				}
-				mc.Tools.Constraints[tool] = tc
+		mc.Tools.Constraints = parseToolConstraints(r.Tools.Constraints)
+	}
+	if r.Scopes != nil {
+		sc := &MCPScopesConfig{
+			ActiveScope: r.Scopes.ActiveScope,
+			OutOfScope:  strings.ToLower(strings.TrimSpace(r.Scopes.OutOfScope)),
+		}
+		if r.Scopes.PerAgent != nil {
+			sc.PerAgent = make(map[string]string, len(r.Scopes.PerAgent))
+			for k, v := range r.Scopes.PerAgent {
+				sc.PerAgent[k] = v
 			}
 		}
+		for _, rs := range r.Scopes.List {
+			sc.List = append(sc.List, MCPScope{
+				ID:          rs.ID,
+				Purpose:     rs.Purpose,
+				Tools:       append([]string(nil), rs.Tools...),
+				Constraints: parseToolConstraints(rs.Constraints),
+			})
+		}
+		mc.Scopes = sc
 	}
 	if r.Schema != nil {
 		mc.Schema.Pin = r.Schema.Pin
@@ -1014,6 +1076,59 @@ func parseMCP(r *rawMCP) MCPConfig {
 		}
 	}
 	return mc
+}
+
+// parseToolConstraints converts the raw per-tool constraint map into the typed
+// form. Shared by the Tools policy and each task scope so the constraint shape is
+// parsed identically in both places. Returns nil for an empty/absent map.
+func parseToolConstraints(raw map[string]rawMCPToolConstraint) map[string]MCPToolConstraints {
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make(map[string]MCPToolConstraints, len(raw))
+	for tool, rc := range raw {
+		tc := MCPToolConstraints{MaxArgsBytes: rc.MaxArgsBytes}
+		if rc.Fields != nil {
+			tc.Fields = make(map[string]MCPFieldConstraint, len(rc.Fields))
+			for field, rf := range rc.Fields {
+				tc.Fields[field] = MCPFieldConstraint(rf)
+			}
+		}
+		if rc.AllowWhen != nil {
+			tc.AllowWhen = &MCPToolCondition{
+				AgentID:    rc.AllowWhen.AgentID,
+				TimeWindow: rc.AllowWhen.TimeWindow,
+			}
+		}
+		out[tool] = tc
+	}
+	return out
+}
+
+// cloneToolConstraints deep-copies a per-tool constraint map (maps + the
+// AllowWhen pointer). Shared by Policy.Clone for the Tools policy and each task
+// scope. Returns nil for an empty/absent map.
+func cloneToolConstraints(in map[string]MCPToolConstraints) map[string]MCPToolConstraints {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]MCPToolConstraints, len(in))
+	for tool, tc := range in {
+		ctc := MCPToolConstraints{MaxArgsBytes: tc.MaxArgsBytes}
+		if tc.Fields != nil {
+			fields := make(map[string]MCPFieldConstraint, len(tc.Fields))
+			for field, fc := range tc.Fields {
+				fields[field] = fc
+			}
+			ctc.Fields = fields
+		}
+		if tc.AllowWhen != nil {
+			aw := *tc.AllowWhen
+			ctc.AllowWhen = &aw
+		}
+		out[tool] = ctc
+	}
+	return out
 }
 
 // parseDurationField parses a Go duration string into *dst when non-empty.
@@ -1354,33 +1469,96 @@ func validateMCP(m MCPConfig) error {
 			return fmt.Errorf("config: mcp.tools.deny[%d]: tool name must not be empty", i)
 		}
 	}
-	for tool, tc := range m.Tools.Constraints {
+	if err := validateToolConstraints("mcp.tools.constraints", m.Tools.Constraints); err != nil {
+		return err
+	}
+	if err := validateScopes(m.Scopes); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateToolConstraints validates a per-tool constraint map (size caps,
+// field constraints, AllowWhen windows, regexp compilation). Shared by the Tools
+// policy and every task scope so the rules are identical. prefix names the config
+// path for error messages (e.g. "mcp.tools.constraints" or
+// "mcp.scopes.list[\"triage\"].constraints").
+func validateToolConstraints(prefix string, cs map[string]MCPToolConstraints) error {
+	for tool, tc := range cs {
 		if strings.TrimSpace(tool) == "" {
-			return fmt.Errorf("config: mcp.tools.constraints: tool name is required")
+			return fmt.Errorf("config: %s: tool name is required", prefix)
 		}
 		if tc.MaxArgsBytes < 0 {
-			return fmt.Errorf("config: mcp.tools.constraints[%q].maxArgsBytes must not be negative", tool)
+			return fmt.Errorf("config: %s[%q].maxArgsBytes must not be negative", prefix, tool)
 		}
 		if tc.AllowWhen != nil && tc.AllowWhen.TimeWindow != "" {
-			if err := validateTimeWindow(fmt.Sprintf("mcp.tools.constraints[%q].allowWhen", tool), tc.AllowWhen.TimeWindow); err != nil {
+			if err := validateTimeWindow(fmt.Sprintf("%s[%q].allowWhen", prefix, tool), tc.AllowWhen.TimeWindow); err != nil {
 				return err
 			}
 		}
 		for field, fc := range tc.Fields {
 			if strings.TrimSpace(field) == "" {
-				return fmt.Errorf("config: mcp.tools.constraints[%q].fields: field name is required", tool)
+				return fmt.Errorf("config: %s[%q].fields: field name is required", prefix, tool)
 			}
 			if fc.MaxLen < 0 {
-				return fmt.Errorf("config: mcp.tools.constraints[%q].fields[%q].maxLen must not be negative", tool, field)
+				return fmt.Errorf("config: %s[%q].fields[%q].maxLen must not be negative", prefix, tool, field)
 			}
 			if fc.Required && fc.Forbidden {
-				return fmt.Errorf("config: mcp.tools.constraints[%q].fields[%q]: cannot be both required and forbidden", tool, field)
+				return fmt.Errorf("config: %s[%q].fields[%q]: cannot be both required and forbidden", prefix, tool, field)
 			}
 			if fc.Match != "" {
 				if _, err := regexp.Compile(fc.Match); err != nil {
-					return fmt.Errorf("config: mcp.tools.constraints[%q].fields[%q].match has invalid regex: %v", tool, field, err)
+					return fmt.Errorf("config: %s[%q].fields[%q].match has invalid regex: %v", prefix, tool, field, err)
 				}
 			}
+		}
+	}
+	return nil
+}
+
+// validateScopes validates the task-scope block: unique non-empty ids, a valid
+// outOfScope mode, non-empty tool sets, that ActiveScope / PerAgent reference a
+// defined scope, and that each scope's constraints are well-formed. A scope may
+// only reference tools by name (membership is checked against the base policy at
+// runtime); it does not need to list them in mcp.tools.allow here.
+func validateScopes(s *MCPScopesConfig) error {
+	if s == nil {
+		return nil
+	}
+	switch s.OutOfScope {
+	case "", "deny", "escalate":
+	default:
+		return fmt.Errorf("config: mcp.scopes.outOfScope %q is invalid; must be one of: deny, escalate", s.OutOfScope)
+	}
+	ids := make(map[string]struct{}, len(s.List))
+	for i, sc := range s.List {
+		if strings.TrimSpace(sc.ID) == "" {
+			return fmt.Errorf("config: mcp.scopes.list[%d]: id is required", i)
+		}
+		if _, dup := ids[sc.ID]; dup {
+			return fmt.Errorf("config: mcp.scopes.list: duplicate scope id %q", sc.ID)
+		}
+		ids[sc.ID] = struct{}{}
+		if len(sc.Tools) == 0 {
+			return fmt.Errorf("config: mcp.scopes.list[%q]: at least one tool is required", sc.ID)
+		}
+		for j, t := range sc.Tools {
+			if strings.TrimSpace(t) == "" {
+				return fmt.Errorf("config: mcp.scopes.list[%q].tools[%d]: tool name must not be empty", sc.ID, j)
+			}
+		}
+		if err := validateToolConstraints(fmt.Sprintf("mcp.scopes.list[%q].constraints", sc.ID), sc.Constraints); err != nil {
+			return err
+		}
+	}
+	if s.ActiveScope != "" {
+		if _, ok := ids[s.ActiveScope]; !ok {
+			return fmt.Errorf("config: mcp.scopes.activeScope %q references an undefined scope", s.ActiveScope)
+		}
+	}
+	for agent, id := range s.PerAgent {
+		if _, ok := ids[id]; !ok {
+			return fmt.Errorf("config: mcp.scopes.perAgent[%q] references an undefined scope %q", agent, id)
 		}
 	}
 	return nil

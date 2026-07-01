@@ -264,6 +264,57 @@ func TestServe_InvalidCONNECT(t *testing.T) {
 	}
 }
 
+// TestServe_NonConnectLoggedDeny asserts the TCP default-deny floor AUDITS a
+// dropped non-CONNECT connection (rather than closing silently), so an agent
+// cannot bypass policy by not speaking HTTP CONNECT without leaving a trace.
+func TestServe_NonConnectLoggedDeny(t *testing.T) {
+	store := &syncStore{}
+	entries := []config.AllowlistEntry{{Domain: "allowed.example.com", Port: 443}}
+	p, err := New(Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     policy.NewEvaluator(config.Policy{Allowlist: entries}),
+		Secrets:    &fakes.FakeSecretProvider{Values: map[string]string{}},
+		Analytics:  store,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = p.Serve(ctx) }()
+	for i := 0; i < 100; i++ {
+		if p.Addr() != nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if p.Addr() == nil {
+		t.Fatal("proxy did not start")
+	}
+
+	conn, err := net.Dial("tcp", p.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	// A raw / non-CONNECT request (here a plain GET) is dropped at the floor.
+	_, _ = fmt.Fprintf(conn, "GET / HTTP/1.1\r\nHost: allowed.example.com\r\n\r\n")
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, _ = io.ReadAll(conn) // block until the handler closes the connection
+
+	events := store.snapshot()
+	if len(events) == 0 {
+		t.Fatal("expected an audited deny for the non-CONNECT connection")
+	}
+	if events[0].Decision != "deny" {
+		t.Fatalf("expected deny, got %q", events[0].Decision)
+	}
+	if events[0].Protocol != "tcp" {
+		t.Fatalf("expected protocol tcp, got %q", events[0].Protocol)
+	}
+}
+
 func TestServe_GracefulShutdown(t *testing.T) {
 	p, _ := startTestProxy(t, []string{"allowed.example.com"}, nil, nil)
 	_ = p // proxy is running

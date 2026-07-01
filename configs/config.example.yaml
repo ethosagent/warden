@@ -137,6 +137,25 @@ mcp:
     enabled: true                 # per-session call-chain analysis
     windowSize: 50                # sliding-window size (must be > 0)
     patterns: [read_then_send, permission_probing, rapid_repeat]
+  scopes: {}                      # task-scoped authorization: approve a PURPOSE once, then the
+                                  # gateway holds the agent to that purpose's tool-set on every
+                                  # call. Scopes only NARROW the tools.allow policy (a tool must be
+                                  # base-allowed first) and never re-permit a denied/restricted tool.
+                                  # Absent = no scoping. LOCAL config. Example:
+                                  #   activeScope: triage-readonly   # global active scope id
+                                  #   outOfScope: deny               # deny (default) | escalate
+                                  #   perAgent:                      # optional per-agent override
+                                  #     reporting-bot: triage-readonly
+                                  #   list:
+                                  #     - id: triage-readonly
+                                  #       purpose: "Read-only triage; never send."
+                                  #       tools: [get_customer, read_ticket]   # in-scope tool-set
+                                  #       constraints:                          # reuses tools.constraints shape
+                                  #         get_customer:
+                                  #           fields: { id: { match: "^[0-9]+$", required: true } }
+                                  # An out-of-scope call is denied+logged (mcp_out_of_scope) in enforce;
+                                  # monitor logs without blocking. outOfScope: escalate is DEFERRED —
+                                  # with no approval channel it degrades to deny (never widens access).
 
 # Per-destination request-authentication transforms. The agent sends a request
 # with a placeholder or no auth at all; Warden injects real, request-scoped

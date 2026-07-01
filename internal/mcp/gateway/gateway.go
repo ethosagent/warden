@@ -133,6 +133,43 @@ type compiledCondition struct {
 	endHour   int
 }
 
+// compiledScope is one task scope precompiled at New: the allowed tool-set as a
+// membership set plus the per-tool argument constraints (reusing the same
+// compiled constraint shape as the base Tools policy).
+type compiledScope struct {
+	id          string
+	tools       map[string]struct{}
+	constraints map[string]compiledToolConstraints
+}
+
+// compiledScopes holds the whole task-scope block precompiled at New. A nil
+// *compiledScopes means no scoping is configured (unchanged behavior).
+type compiledScopes struct {
+	active     string            // global active scope id ("" = none)
+	perAgent   map[string]string // agent id -> scope id override
+	outOfScope string            // "deny" | "escalate" (escalate degrades to deny)
+	byID       map[string]compiledScope
+}
+
+// activeFor resolves the scope enforced for agentID: the PerAgent override wins,
+// else the global active scope. ok is false when no scope applies (no scoping,
+// no selection, or a dangling reference — validation rejects the latter, so at
+// runtime a miss simply means "unscoped").
+func (cs *compiledScopes) activeFor(agentID string) (compiledScope, bool) {
+	if cs == nil {
+		return compiledScope{}, false
+	}
+	id := cs.perAgent[agentID]
+	if id == "" {
+		id = cs.active
+	}
+	if id == "" {
+		return compiledScope{}, false
+	}
+	sc, ok := cs.byID[id]
+	return sc, ok
+}
+
 // Store persists the gateway's tool inventory and observed schema profiles so
 // they survive a proxy restart. It is defined here (not in the analytics
 // package) so the gateway never imports analytics — the analytics package
@@ -186,6 +223,10 @@ type Gateway struct {
 	// keyed by tool name. Read-only after construction; no lock needed.
 	conditions map[string]compiledCondition
 
+	// scopes holds the precompiled task-scope block (nil = no scoping). Read-only
+	// after construction; no lock needed.
+	scopes *compiledScopes
+
 	// agentID identifies the agent this gateway fronts; set via WithAgentID and
 	// matched against a tool condition's agent id. Read-only after construction.
 	agentID string
@@ -234,6 +275,7 @@ func New(cfg config.MCPConfig, scanner *scan.Scanner, log *slog.Logger, opts ...
 		log:         log,
 		constraints: compileConstraints(cfg.Tools.Constraints),
 		conditions:  compileConditions(cfg.Tools.Constraints),
+		scopes:      compileScopes(cfg.Scopes),
 		sessions:    make(map[string]*session),
 		inventory:   make(map[string]*InventoryItem),
 		now:         time.Now,
@@ -359,6 +401,42 @@ func compileConstraints(cs map[string]config.MCPToolConstraints) map[string]comp
 			}
 		}
 		out[tool] = ctc
+	}
+	return out
+}
+
+// compileScopes precompiles the task-scope block once at New: each scope's tool
+// list becomes a membership set and its per-tool constraints are compiled with
+// the same compileConstraints used for the base Tools policy. Returns nil when no
+// scoping is configured (scopes stays nil → unchanged behavior).
+func compileScopes(sc *config.MCPScopesConfig) *compiledScopes {
+	if sc == nil || len(sc.List) == 0 {
+		return nil
+	}
+	out := &compiledScopes{
+		active:     sc.ActiveScope,
+		outOfScope: sc.OutOfScope,
+		byID:       make(map[string]compiledScope, len(sc.List)),
+	}
+	if out.outOfScope == "" {
+		out.outOfScope = "deny"
+	}
+	if len(sc.PerAgent) > 0 {
+		out.perAgent = make(map[string]string, len(sc.PerAgent))
+		for k, v := range sc.PerAgent {
+			out.perAgent[k] = v
+		}
+	}
+	for _, s := range sc.List {
+		cs := compiledScope{
+			id:          s.ID,
+			tools:       make(map[string]struct{}, len(s.Tools)),
+			constraints: compileConstraints(s.Constraints),
+		}
+		for _, t := range s.Tools {
+			cs.tools[t] = struct{}{}
+		}
+		out.byID[s.ID] = cs
 	}
 	return out
 }
@@ -618,6 +696,46 @@ func (g *Gateway) OnRequest(sessionKey, method, url string, hdr http.Header, bod
 		}
 	}
 
+	// Task-scoped authorization (approve-once, enforce-continuously). When a scope
+	// is active for this agent, a tool the base policy already ALLOWED must also be
+	// in the scope's tool-set; otherwise it is out-of-scope. Scopes only NARROW: an
+	// out-of-scope tool is denied (never re-permitted), and a tool the base policy
+	// or a restriction already denied is untouched. outOfScope: escalate is
+	// deferred (no approval channel) and degrades to deny, so the absence of an
+	// approval mechanism can never widen access. An in-scope tool additionally
+	// satisfies the scope's bundled arg constraints via the SAME evaluator as the
+	// base policy. In monitor mode this only logs (applyMode never blocks).
+	if allowed {
+		if sc, ok := g.scopes.activeFor(g.agentID); ok {
+			if _, in := sc.tools[tool]; !in {
+				detail := "tool not in active scope " + sc.id
+				if g.scopes.outOfScope == "escalate" {
+					detail += " (escalate: no approval channel — denied)"
+				}
+				findings = append(findings, Finding{
+					Kind:     "mcp_out_of_scope",
+					Severity: "high",
+					Tool:     tool,
+					Detail:   detail,
+				})
+				blocking = true
+				if dominant == "" {
+					dominant = "mcp_out_of_scope"
+				}
+				allowed = false
+			} else if ctc, ok := sc.constraints[tool]; ok {
+				args := rawField(rawField(body, "params"), "arguments")
+				if fs, fk := evalToolConstraints(ctc, tool, args); len(fs) > 0 {
+					findings = append(findings, fs...)
+					blocking = true
+					if dominant == "" {
+						dominant = fk
+					}
+				}
+			}
+		}
+	}
+
 	// Argument scanning. Two passes that are deduped by (category|pattern):
 	//
 	//  1. Per-field pass (only when the profiler is on): attributes each
@@ -676,53 +794,11 @@ func (g *Gateway) OnRequest(sessionKey, method, url string, hdr http.Header, bod
 	// Finding's Detail never contains the value.
 	if ctc, ok := g.constraints[tool]; ok {
 		args := rawField(rawField(body, "params"), "arguments")
-		if ctc.maxArgsBytes > 0 && len(args) > ctc.maxArgsBytes {
-			findings = append(findings, Finding{
-				Kind:     "mcp_args_too_large",
-				Severity: "high",
-				Tool:     tool,
-				Detail:   "params exceed maxArgsBytes",
-			})
+		if fs, fk := evalToolConstraints(ctc, tool, args); len(fs) > 0 {
+			findings = append(findings, fs...)
 			blocking = true
 			if dominant == "" {
-				dominant = "mcp_args_too_large"
-			}
-		}
-		for field, fc := range ctc.fields {
-			val, present, isString := topLevelField(args, field)
-			if fc.required && !present {
-				findings = append(findings, constraintFinding(tool, field, "required field missing"))
-				blocking = true
-				if dominant == "" {
-					dominant = "mcp_args_constraint"
-				}
-				continue
-			}
-			if fc.forbidden && present {
-				findings = append(findings, constraintFinding(tool, field, "forbidden field present"))
-				blocking = true
-				if dominant == "" {
-					dominant = "mcp_args_constraint"
-				}
-				continue
-			}
-			if !present || !isString {
-				continue
-			}
-			if fc.re != nil && !fc.re.MatchString(val) {
-				findings = append(findings, constraintFinding(tool, field, "value violates constraint"))
-				blocking = true
-				if dominant == "" {
-					dominant = "mcp_args_constraint"
-				}
-				continue
-			}
-			if fc.maxLen > 0 && len(val) > fc.maxLen {
-				findings = append(findings, constraintFinding(tool, field, "value exceeds maxLen"))
-				blocking = true
-				if dominant == "" {
-					dominant = "mcp_args_constraint"
-				}
+				dominant = fk
 			}
 		}
 	}
@@ -1046,6 +1122,59 @@ func (g *Gateway) conditionDenies(cc compiledCondition, now time.Time) (detail s
 
 // constraintFinding builds a value-free mcp_args_constraint Finding. detail is
 // one of a small fixed set of phrases and never contains a field value.
+// evalToolConstraints checks one tool's precompiled argument constraints against
+// the raw arguments, returning any findings plus the kind of the FIRST blocking
+// finding ("" when nothing blocked). Every constraint finding is high-severity
+// (blocking). Values are inspected transiently (size, presence, regexp, length)
+// and never stored — a Finding's Detail never carries the value. Shared verbatim
+// by the base Tools policy and an active task scope so there is one constraint
+// engine, not two.
+func evalToolConstraints(ctc compiledToolConstraints, tool string, args json.RawMessage) (findings []Finding, firstKind string) {
+	if ctc.maxArgsBytes > 0 && len(args) > ctc.maxArgsBytes {
+		findings = append(findings, Finding{
+			Kind:     "mcp_args_too_large",
+			Severity: "high",
+			Tool:     tool,
+			Detail:   "params exceed maxArgsBytes",
+		})
+		firstKind = "mcp_args_too_large"
+	}
+	for field, fc := range ctc.fields {
+		val, present, isString := topLevelField(args, field)
+		if fc.required && !present {
+			findings = append(findings, constraintFinding(tool, field, "required field missing"))
+			if firstKind == "" {
+				firstKind = "mcp_args_constraint"
+			}
+			continue
+		}
+		if fc.forbidden && present {
+			findings = append(findings, constraintFinding(tool, field, "forbidden field present"))
+			if firstKind == "" {
+				firstKind = "mcp_args_constraint"
+			}
+			continue
+		}
+		if !present || !isString {
+			continue
+		}
+		if fc.re != nil && !fc.re.MatchString(val) {
+			findings = append(findings, constraintFinding(tool, field, "value violates constraint"))
+			if firstKind == "" {
+				firstKind = "mcp_args_constraint"
+			}
+			continue
+		}
+		if fc.maxLen > 0 && len(val) > fc.maxLen {
+			findings = append(findings, constraintFinding(tool, field, "value exceeds maxLen"))
+			if firstKind == "" {
+				firstKind = "mcp_args_constraint"
+			}
+		}
+	}
+	return findings, firstKind
+}
+
 func constraintFinding(tool, field, detail string) Finding {
 	return Finding{
 		Kind:     "mcp_args_constraint",

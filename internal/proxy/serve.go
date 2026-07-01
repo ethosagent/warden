@@ -48,21 +48,33 @@ func (p *Proxy) handleConn(conn net.Conn) {
 	br := bufio.NewReader(conn)
 	line, err := br.ReadString('\n')
 	if err != nil {
+		// The client closed (or errored) before sending a request line — no egress
+		// was attempted, so there is nothing to gate or audit. Drop silently.
 		return
 	}
 
+	// TCP default-deny floor. This proxy speaks only HTTP CONNECT; every egress
+	// path an agent has (including tunnels for non-HTTP protocols) arrives as a
+	// CONNECT request and is gated on host:port below. Anything that is NOT a
+	// well-formed CONNECT is dropped AND audited here, so an agent cannot bypass
+	// policy simply by not speaking HTTP CONNECT ("cannot bypass by not being
+	// HTTP"). No domain is known at this pre-protocol stage, so the deny is
+	// recorded without one.
 	if !strings.HasPrefix(line, "CONNECT ") || !strings.Contains(line, "HTTP/") {
+		p.storeDeny("", 0, "tcp", "unsupported_protocol")
 		return
 	}
 
 	fields := strings.Fields(line)
 	if len(fields) < 2 {
+		p.storeDeny("", 0, "tcp", "malformed_connect")
 		return
 	}
 	target := fields[1]
 
 	domain, port, err := SplitHostPort(target)
 	if err != nil {
+		p.storeDeny("", 0, "tcp", "malformed_connect")
 		return
 	}
 

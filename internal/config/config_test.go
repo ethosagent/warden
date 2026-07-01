@@ -551,6 +551,181 @@ mcp:
 	}
 }
 
+func TestNewLocalYAMLProvider_MCPScopesParsed(t *testing.T) {
+	const y = `
+policy:
+  allowlist:
+    - domain: a.com
+mcp:
+  enabled: true
+  mode: enforce
+  tools:
+    allow: [get_user, read_ticket, send_email]
+  scopes:
+    activeScope: triage-readonly
+    outOfScope: deny
+    perAgent:
+      reporting-bot: triage-readonly
+    list:
+      - id: triage-readonly
+        purpose: Read-only triage.
+        tools: [get_user, read_ticket]
+        constraints:
+          get_user:
+            fields:
+              id: { match: '^[0-9]+$', required: true }
+`
+	p, err := NewLocalYAMLProvider(writeTemp(t, y))
+	if err != nil {
+		t.Fatalf("parse scopes config: %v", err)
+	}
+	pol, _ := p.GetPolicy()
+	sc := pol.MCP.Scopes
+	if sc == nil {
+		t.Fatal("mcp.scopes should be non-nil")
+	}
+	if sc.ActiveScope != "triage-readonly" || sc.OutOfScope != "deny" {
+		t.Fatalf("unexpected scope header: %+v", sc)
+	}
+	if sc.PerAgent["reporting-bot"] != "triage-readonly" {
+		t.Fatalf("perAgent not parsed: %v", sc.PerAgent)
+	}
+	if len(sc.List) != 1 || sc.List[0].ID != "triage-readonly" {
+		t.Fatalf("scope list not parsed: %+v", sc.List)
+	}
+	if got := sc.List[0].Tools; len(got) != 2 || got[0] != "get_user" {
+		t.Fatalf("scope tools not parsed: %v", got)
+	}
+	if _, ok := sc.List[0].Constraints["get_user"]; !ok {
+		t.Fatalf("scope constraints not parsed: %v", sc.List[0].Constraints)
+	}
+}
+
+func TestValidate_MCPScopesErrors(t *testing.T) {
+	cases := map[string]string{
+		"unknown activeScope": `
+policy: { allowlist: [ { domain: a.com } ] }
+mcp:
+  enabled: true
+  scopes:
+    activeScope: nope
+    list:
+      - id: real
+        tools: [x]
+`,
+		"duplicate id": `
+policy: { allowlist: [ { domain: a.com } ] }
+mcp:
+  enabled: true
+  scopes:
+    list:
+      - id: dup
+        tools: [x]
+      - id: dup
+        tools: [y]
+`,
+		"empty tools": `
+policy: { allowlist: [ { domain: a.com } ] }
+mcp:
+  enabled: true
+  scopes:
+    list:
+      - id: s
+        tools: []
+`,
+		"bad outOfScope": `
+policy: { allowlist: [ { domain: a.com } ] }
+mcp:
+  enabled: true
+  scopes:
+    outOfScope: maybe
+    list:
+      - id: s
+        tools: [x]
+`,
+		"unknown perAgent scope": `
+policy: { allowlist: [ { domain: a.com } ] }
+mcp:
+  enabled: true
+  scopes:
+    perAgent: { bot: ghost }
+    list:
+      - id: s
+        tools: [x]
+`,
+		"bad scope constraint regex": `
+policy: { allowlist: [ { domain: a.com } ] }
+mcp:
+  enabled: true
+  scopes:
+    list:
+      - id: s
+        tools: [x]
+        constraints:
+          x:
+            fields:
+              f: { match: '([' }
+`,
+	}
+	for name, y := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := NewLocalYAMLProvider(writeTemp(t, y)); err == nil {
+				t.Fatalf("expected validation error for %q", name)
+			}
+		})
+	}
+}
+
+func TestValidate_MCPScopesDisabledSkips(t *testing.T) {
+	// An invalid scope block is tolerated when mcp is disabled (enabled-only validation).
+	const y = `
+policy: { allowlist: [ { domain: a.com } ] }
+mcp:
+  enabled: false
+  scopes:
+    activeScope: nope
+    list:
+      - id: real
+        tools: [x]
+`
+	if _, err := NewLocalYAMLProvider(writeTemp(t, y)); err != nil {
+		t.Fatalf("disabled mcp should skip scope validation: %v", err)
+	}
+}
+
+func TestDeepCopy_MCPScopesIndependence(t *testing.T) {
+	orig := Policy{
+		MCP: MCPConfig{
+			Enabled: true,
+			Scopes: &MCPScopesConfig{
+				ActiveScope: "s",
+				PerAgent:    map[string]string{"a": "s"},
+				List: []MCPScope{{
+					ID:    "s",
+					Tools: []string{"t1"},
+					Constraints: map[string]MCPToolConstraints{
+						"t1": {Fields: map[string]MCPFieldConstraint{"f": {Match: "x"}}},
+					},
+				}},
+			},
+		},
+	}
+	cp := orig.DeepCopy()
+	// Mutate the copy; the original must not change.
+	cp.MCP.Scopes.PerAgent["a"] = "other"
+	cp.MCP.Scopes.List[0].Tools[0] = "mutated"
+	cp.MCP.Scopes.List[0].Constraints["t1"] = MCPToolConstraints{}
+	if orig.MCP.Scopes.PerAgent["a"] != "s" {
+		t.Fatal("perAgent map is shared, not deep-copied")
+	}
+	if orig.MCP.Scopes.List[0].Tools[0] != "t1" {
+		t.Fatal("scope tools slice is shared, not deep-copied")
+	}
+	if f := orig.MCP.Scopes.List[0].Constraints["t1"].Fields; f == nil || f["f"].Match != "x" {
+		t.Fatal("scope constraints map is shared, not deep-copied")
+	}
+}
+
 func TestValidate_MCPAllowWhenBadWindow(t *testing.T) {
 	const y = `
 policy:
