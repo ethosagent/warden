@@ -601,6 +601,106 @@ mcp:
 	}
 }
 
+func TestNewLocalYAMLProvider_MCPServersParsed(t *testing.T) {
+	const y = `
+policy:
+  allowlist:
+    - domain: a.com
+mcp:
+  enabled: true
+  mode: enforce
+  servers:
+    - name: github-mcp
+      sha256: 3b1f
+      ed25519PublicKey: 9a0c
+      ed25519Signature: 4d2e
+    - name: fs-mcp
+      sha256: deadbeef
+`
+	p, err := NewLocalYAMLProvider(writeTemp(t, y))
+	if err != nil {
+		t.Fatalf("parse servers config: %v", err)
+	}
+	pol, _ := p.GetPolicy()
+	if len(pol.MCP.Servers) != 2 {
+		t.Fatalf("want 2 servers, got %+v", pol.MCP.Servers)
+	}
+	s0 := pol.MCP.Servers[0]
+	if s0.Name != "github-mcp" || s0.SHA256 != "3b1f" || s0.Ed25519PublicKey != "9a0c" || s0.Ed25519Signature != "4d2e" {
+		t.Fatalf("server[0] not parsed: %+v", s0)
+	}
+	if pol.MCP.Servers[1].Name != "fs-mcp" || pol.MCP.Servers[1].SHA256 != "deadbeef" {
+		t.Fatalf("server[1] not parsed: %+v", pol.MCP.Servers[1])
+	}
+}
+
+func TestValidate_MCPServersErrors(t *testing.T) {
+	cases := map[string]string{
+		"empty name": `
+policy: { allowlist: [ { domain: a.com } ] }
+mcp:
+  enabled: true
+  servers:
+    - name: ""
+      sha256: ab
+`,
+		"duplicate name": `
+policy: { allowlist: [ { domain: a.com } ] }
+mcp:
+  enabled: true
+  servers:
+    - name: dup
+      sha256: ab
+    - name: dup
+      sha256: cd
+`,
+		"signature without pubkey": `
+policy: { allowlist: [ { domain: a.com } ] }
+mcp:
+  enabled: true
+  servers:
+    - name: s
+      ed25519Signature: 4d2e
+`,
+	}
+	for name, y := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := NewLocalYAMLProvider(writeTemp(t, y)); err == nil {
+				t.Fatalf("expected validation error for %q", name)
+			}
+		})
+	}
+}
+
+func TestValidate_MCPServersDisabledSkips(t *testing.T) {
+	// A malformed servers block is tolerated when mcp is disabled (enabled-only validation).
+	const y = `
+policy: { allowlist: [ { domain: a.com } ] }
+mcp:
+  enabled: false
+  servers:
+    - name: ""
+      ed25519Signature: 4d2e
+`
+	if _, err := NewLocalYAMLProvider(writeTemp(t, y)); err != nil {
+		t.Fatalf("disabled mcp should skip servers validation, got %v", err)
+	}
+}
+
+func TestDeepCopy_MCPServersIndependence(t *testing.T) {
+	orig := Policy{
+		MCP: MCPConfig{
+			Enabled: true,
+			Servers: []MCPServerConfig{{Name: "s", SHA256: "ab"}},
+		},
+	}
+	cp := orig.DeepCopy()
+	cp.MCP.Servers[0].SHA256 = "cd"
+	if orig.MCP.Servers[0].SHA256 != "ab" {
+		t.Fatal("servers slice is shared, not deep-copied")
+	}
+}
+
 func TestValidate_MCPScopesErrors(t *testing.T) {
 	cases := map[string]string{
 		"unknown activeScope": `

@@ -3,11 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/ethosagent/warden/internal/config"
 )
 
 // syncWriter serializes concurrent writes for tests that point both the slog
@@ -74,4 +77,72 @@ func TestMCPEnforceBlocksDeniedCall(t *testing.T) {
 	if resp.Error.Code != -32600 || string(resp.ID) != "1" {
 		t.Fatalf("unexpected block error: %q", out.String())
 	}
+}
+
+func TestMCPBadEd25519SignatureRefusesLaunch(t *testing.T) {
+	// A bogus (but well-formed) Ed25519 public key + signature must fail closed:
+	// the wedge refuses to launch `cat` and returns an error. If the check were
+	// skipped, cat would run and Execute would succeed.
+	cmd := newMCPCmd()
+	cmd.Flags().String("config", "/nonexistent/warden-config.yaml", "")
+	pubHex := hex.EncodeToString(make([]byte, 32)) // 32-byte zero key (valid length)
+	sigHex := hex.EncodeToString(make([]byte, 64)) // 64-byte zero sig (valid length)
+	cmd.SetArgs([]string{"--verify-ed25519-pubkey", pubHex, "--verify-ed25519-sig", sigHex, "--", "cat"})
+	cmd.SetIn(strings.NewReader(""))
+	var out, errBuf bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&syncWriter{w: &errBuf})
+	cmd.SetContext(context.Background())
+
+	if err := cmd.Execute(); err == nil {
+		t.Fatalf("expected launch refusal on invalid ed25519 signature, got nil.\nstderr: %s", errBuf.String())
+	}
+}
+
+func TestMCPUnknownServerNameRefusesLaunch(t *testing.T) {
+	cmd := newMCPCmd()
+	cmd.Flags().String("config", "/nonexistent/warden-config.yaml", "")
+	cmd.SetArgs([]string{"--server", "does-not-exist", "--", "cat"})
+	cmd.SetIn(strings.NewReader(""))
+	var out, errBuf bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&syncWriter{w: &errBuf})
+	cmd.SetContext(context.Background())
+
+	if err := cmd.Execute(); err == nil {
+		t.Fatalf("expected launch refusal for unknown --server name, got nil.\nstderr: %s", errBuf.String())
+	}
+}
+
+func TestResolveServerIntegrity(t *testing.T) {
+	servers := []config.MCPServerConfig{
+		{Name: "a", SHA256: "aa"},
+		{Name: "b", Ed25519PublicKey: "bb", Ed25519Signature: "cc"},
+	}
+
+	t.Run("empty name yields zero value", func(t *testing.T) {
+		got, err := resolveServerIntegrity(servers, "")
+		if err != nil {
+			t.Fatalf("want nil error, got %v", err)
+		}
+		if got != (config.MCPServerConfig{}) {
+			t.Fatalf("want zero value, got %+v", got)
+		}
+	})
+
+	t.Run("match returns entry", func(t *testing.T) {
+		got, err := resolveServerIntegrity(servers, "b")
+		if err != nil {
+			t.Fatalf("want nil error, got %v", err)
+		}
+		if got.Ed25519PublicKey != "bb" || got.Ed25519Signature != "cc" {
+			t.Fatalf("wrong entry: %+v", got)
+		}
+	})
+
+	t.Run("unknown name errors", func(t *testing.T) {
+		if _, err := resolveServerIntegrity(servers, "nope"); err == nil {
+			t.Fatal("want error for unknown server name, got nil")
+		}
+	})
 }

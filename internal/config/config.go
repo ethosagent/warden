@@ -212,6 +212,29 @@ type MCPConfig struct {
 	// of the Tools policy: an active scope narrows the permitted tool-set + bundles
 	// per-tool arg constraints. nil = no scoping (unchanged behavior). LOCAL config.
 	Scopes *MCPScopesConfig
+	// Servers declares per-server binary-integrity material for the `warden mcp`
+	// wedge: an operator pins the expected SHA-256 and/or Ed25519 signature of each
+	// MCP server binary, and the wedge refuses to launch a mismatched binary.
+	// Empty = no server-integrity pinning (unchanged behavior). LOCAL config.
+	Servers []MCPServerConfig
+}
+
+// MCPServerConfig pins the integrity of one named MCP server binary for the
+// `warden mcp` wedge. Name identifies the server (matched against the resolved
+// server command / --server flag). The integrity fields are all hex-encoded and
+// optional; when set the wedge verifies them before launch and refuses to start
+// on any mismatch. A signature requires a public key (checked in validation).
+type MCPServerConfig struct {
+	// Name is the server identifier, matched against the wedge's --server flag.
+	Name string
+	// SHA256 pins the server binary's SHA-256 (hex, case-insensitive). Empty skips.
+	SHA256 string
+	// Ed25519PublicKey is the 32-byte Ed25519 public key (hex) used to verify the
+	// binary's signature. Empty skips the signature check.
+	Ed25519PublicKey string
+	// Ed25519Signature is the 64-byte detached signature (hex) over the binary's
+	// raw bytes. Requires Ed25519PublicKey. Empty skips the signature check.
+	Ed25519Signature string
 }
 
 // MCPScopesConfig configures task-scoped authorization: approve a purpose once,
@@ -444,6 +467,7 @@ func (p Policy) DeepCopy() Policy {
 		}
 		cp.MCP.Scopes = sc
 	}
+	cp.MCP.Servers = append([]MCPServerConfig(nil), p.MCP.Servers...)
 	cp.Auth = append([]AuthEntry(nil), p.Auth...)
 	for i := range cp.Auth {
 		cp.Auth[i].Scopes = append([]string(nil), p.Auth[i].Scopes...)
@@ -569,15 +593,23 @@ type rawAudit struct {
 // KnownFields(true) is strict, so this MUST be registered or configs with the
 // block fail to parse.
 type rawMCP struct {
-	Enabled              bool          `yaml:"enabled"`
-	Mode                 string        `yaml:"mode"`
-	FailClosedOnError    bool          `yaml:"failClosedOnError"`
-	MaxResponseScanBytes *int          `yaml:"maxResponseScanBytes"`
-	Tools                *rawMCPTools  `yaml:"tools"`
-	Schema               *rawMCPSchema `yaml:"schema"`
-	Scan                 *rawMCPScan   `yaml:"scan"`
-	Chain                *rawMCPChain  `yaml:"chain"`
-	Scopes               *rawMCPScopes `yaml:"scopes"`
+	Enabled              bool           `yaml:"enabled"`
+	Mode                 string         `yaml:"mode"`
+	FailClosedOnError    bool           `yaml:"failClosedOnError"`
+	MaxResponseScanBytes *int           `yaml:"maxResponseScanBytes"`
+	Tools                *rawMCPTools   `yaml:"tools"`
+	Schema               *rawMCPSchema  `yaml:"schema"`
+	Scan                 *rawMCPScan    `yaml:"scan"`
+	Chain                *rawMCPChain   `yaml:"chain"`
+	Scopes               *rawMCPScopes  `yaml:"scopes"`
+	Servers              []rawMCPServer `yaml:"servers"`
+}
+
+type rawMCPServer struct {
+	Name             string `yaml:"name"`
+	SHA256           string `yaml:"sha256"`
+	Ed25519PublicKey string `yaml:"ed25519PublicKey"`
+	Ed25519Signature string `yaml:"ed25519Signature"`
 }
 
 type rawMCPTools struct {
@@ -1075,6 +1107,14 @@ func parseMCP(r *rawMCP) MCPConfig {
 			mc.Chain.Patterns = append([]string(nil), r.Chain.Patterns...)
 		}
 	}
+	for _, rs := range r.Servers {
+		mc.Servers = append(mc.Servers, MCPServerConfig{
+			Name:             strings.TrimSpace(rs.Name),
+			SHA256:           strings.TrimSpace(rs.SHA256),
+			Ed25519PublicKey: strings.TrimSpace(rs.Ed25519PublicKey),
+			Ed25519Signature: strings.TrimSpace(rs.Ed25519Signature),
+		})
+	}
 	return mc
 }
 
@@ -1474,6 +1514,30 @@ func validateMCP(m MCPConfig) error {
 	}
 	if err := validateScopes(m.Scopes); err != nil {
 		return err
+	}
+	if err := validateMCPServers(m.Servers); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateMCPServers checks the per-server integrity block: each entry needs a
+// unique non-empty name, and an Ed25519 signature requires a matching public key
+// (a signature without a key can never verify, so it is rejected up front rather
+// than failing closed only at launch).
+func validateMCPServers(servers []MCPServerConfig) error {
+	seen := make(map[string]struct{}, len(servers))
+	for i, s := range servers {
+		if strings.TrimSpace(s.Name) == "" {
+			return fmt.Errorf("config: mcp.servers[%d]: name must not be empty", i)
+		}
+		if _, dup := seen[s.Name]; dup {
+			return fmt.Errorf("config: mcp.servers[%d]: duplicate server name %q", i, s.Name)
+		}
+		seen[s.Name] = struct{}{}
+		if s.Ed25519Signature != "" && s.Ed25519PublicKey == "" {
+			return fmt.Errorf("config: mcp.servers[%q]: ed25519Signature is set but ed25519PublicKey is missing", s.Name)
+		}
 	}
 	return nil
 }
