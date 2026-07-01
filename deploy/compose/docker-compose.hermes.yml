@@ -1,33 +1,79 @@
-# Run Hermes Agent behind Warden — full egress visibility, allow-all policy.
+# Run Hermes Agent behind a Warden WORKER, driven by a Warden CONTROL PLANE.
 #
-# Hermes is isolated on an INTERNAL-ONLY network: its sole route to the internet
-# is Warden. Warden terminates TLS, allows everything (for now), and logs every
-# call to the dashboard at http://localhost:9090/dashboard/ (+/metrics).
+# Topology (the real control-plane / data-plane split):
+#   control-plane  — serves allow/deny policy and aggregates the worker's
+#                    analytics into a fleet dashboard. Holds NO secrets.
+#   warden (worker)— the data plane Hermes's egress flows through: pulls policy
+#                    from the control plane (managed; boots fail-closed until
+#                    first pull), terminates TLS, logs every call, forwards
+#                    analytics to the control plane.
+#   hermes         — isolated on an INTERNAL-ONLY network; its sole route out is
+#                    the worker.
 #
 # Hermes is Node-based (and bundles an OpenAI-compatible API layer); Node's
 # built-in fetch (undici) IGNORES HTTP(S)_PROXY unless NODE_USE_ENV_PROXY=1 is
 # set — without it, egress goes direct, fails on the isolated network, and never
 # reaches Warden.
 #
+# The control-plane role is NEWER than the published tag, so both services use a
+# LOCALLY BUILT image — run with `--build`.
+#
 # Prereq (run from the repo root): generate the bake-once CA into ./certs:
 #   OUT_DIR=deploy/compose/certs ./scripts/gen-certs.sh
 #
 # Run (from the repo root):
-#   docker compose -f deploy/compose/docker-compose.hermes.yml up
+#   WARDEN_CP_TOKEN=dev-token \
+#   docker compose -f deploy/compose/docker-compose.hermes.yml up --build
 #
 # Hermes API: http://localhost:8642   ·   Hermes dashboard: http://localhost:9119 (login: admin / warden)
-#   ·   Warden dashboard: http://localhost:9090/dashboard/
+# Fleet dashboard (control plane): https://localhost:7070/dashboard/  (proxy-CA cert — trust it)
+# Worker-local dashboard:          http://localhost:9090/dashboard/
 
 services:
+  control-plane:
+    # The control-plane role is newer than the published tag → local build.
+    # Run with `--build`.
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: warden-proxy:dev        # locally built from this repo's Dockerfile
+    pull_policy: never             # never fetch from a registry — use the local build
+    networks: [cp-net]
+    ports:
+      - "7070:7070"                  # fleet dashboard + /policy + /central/ingest
+    environment:
+      - WARDEN_CP_TOKEN=${WARDEN_CP_TOKEN:-dev-token}
+    volumes:
+      - ../../configs/config.cp-served.yaml:/etc/warden/config.yaml:ro   # served policy
+      - ./certs:/etc/warden/certs:ro
+      - hermes-cp-data:/data         # writable state: fleet analytics DB + editable served config
+    command:
+      - control-plane
+      - "--config=/etc/warden/config.yaml"
+      - "--state-dir=/data"
+      - "--listen=0.0.0.0:7070"
+      - "--token-env=WARDEN_CP_TOKEN"
+      - "--ca-cert=/etc/warden/certs/proxy-ca.crt"   # mint the CP server cert from the proxy CA
+      - "--ca-key=/etc/warden/certs/proxy-ca.key"
+      - "--tls-host=control-plane,localhost,127.0.0.1"
+
   warden:
-    # Pulled from Docker Hub — no local build. Override the tag with WARDEN_VERSION
-    # (default 0.2.0), e.g. `WARDEN_VERSION=0.2.1 docker compose ... up`.
-    image: ethosagent/warden:${WARDEN_VERSION:-0.2.0}
-    networks: [hermes-internal, egress]
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: warden-proxy:dev        # same locally-built image as the control plane
+    pull_policy: never             # never fetch from a registry — use the local build
+    depends_on:
+      control-plane:
+        condition: service_started
+    networks: [hermes-internal, egress, cp-net]
     ports:
       - "9090:9090"                 # dashboard + /metrics (host-only; NOT reachable by Hermes)
+    environment:
+      - WARDEN_CP_TOKEN=${WARDEN_CP_TOKEN:-dev-token}
+      - WARDEN_PROXY_ID=hermes-worker   # labels this worker in the fleet view
     volumes:
-      - ../../configs/config.recipe.yaml:/etc/warden/config.yaml:ro
+      - ../../configs/config.recipe-worker.yaml:/etc/warden/config.yaml:ro   # managed: policy from the CP
       - ./certs:/etc/warden/certs:ro
       - warden-data:/data            # persist the analytics db across restarts/redeploys
     command:
@@ -108,6 +154,9 @@ networks:
   # egress carries real internet and is attached ONLY to Warden.
   egress:
     driver: bridge
+  # Control-plane bus: worker ↔ control plane, plus the host-published dashboard.
+  cp-net:
+    driver: bridge
   # frontend carries ONLY the inbound UI forwarders + their host-published ports.
   # Hermes is never attached here, so it gains no internet route.
   frontend:
@@ -116,5 +165,7 @@ networks:
 volumes:
   # persistent Warden analytics db — survives `up` / container recreate.
   warden-data:
+  # the control plane's writable state: fleet analytics db + editable served config.
+  hermes-cp-data:
   # Hermes config / .env / sessions / memories / skills / logs (all under /opt/data).
   hermes-data:

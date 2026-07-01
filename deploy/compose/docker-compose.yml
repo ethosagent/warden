@@ -1,34 +1,87 @@
-# Warden — local dev harness (Docker Compose).
+# Warden — local dev harness (Docker Compose), control-plane topology.
 #
 # Encodes the core isolation: the agent runs on an INTERNAL-ONLY network with no
-# route to the internet. Its only egress path is the Warden proxy, which sits on
-# both the internal network (to receive agent traffic) and an external network
-# (the only service with real internet access).
+# route to the internet. Its only egress path is the Warden proxy (data plane),
+# which sits on both the internal network (to receive agent traffic) and an
+# external network (the only service with real internet access).
+#
+# Topology (the real control-plane / data-plane split):
+#   control-plane  — serves allow/deny policy and aggregates the worker's
+#                    analytics into a fleet dashboard. Holds NO secrets.
+#   proxy (worker) — the data plane the agent's egress flows through: pulls
+#                    policy from the control plane (managed; boots fail-closed
+#                    until first pull), terminates TLS, logs every call, forwards
+#                    analytics to the control plane. Holds the real secrets.
+#   agent          — isolated on an INTERNAL-ONLY network; its sole route out is
+#                    the proxy.
 #
 # This is the structural guarantee — the agent cannot reach the internet even if
 # it is fully compromised, because Docker's network namespaces deny it a route.
 #
+# The control-plane role is NEWER than the published tag, so both services use a
+# LOCALLY BUILT image — run with `--build`.
+#
 # Prereq: generate the bake-once CA into ./certs (this directory) first:
 #   OUT_DIR=deploy/compose/certs ./scripts/gen-certs.sh   # run from the repo root
+#
+# Run (from the repo root):
+#   WARDEN_CP_TOKEN=dev-token \
+#   docker compose -f deploy/compose/docker-compose.yml up --build
+#
+# Fleet dashboard (control plane): https://localhost:7070/dashboard/  (proxy-CA cert — trust it)
+# Worker-local dashboard:          http://localhost:9090/dashboard/
 # See docs/docker-end-to-end.md for the full walkthrough.
 
 services:
+  control-plane:
+    # The control-plane role is newer than the published tag → local build.
+    # Reuses the same image the proxy builds; run with `--build`.
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: warden-proxy:dev
+    pull_policy: never             # never fetch from a registry — use the local build
+    networks: [cp-net]
+    ports:
+      - "7070:7070"                  # fleet dashboard + /policy + /central/ingest
+    environment:
+      - WARDEN_CP_TOKEN=${WARDEN_CP_TOKEN:-dev-token}
+    volumes:
+      - ../../configs/config.cp-served.yaml:/etc/warden/config.yaml:ro   # served policy
+      - ./certs:/etc/warden/certs:ro
+      - warden-cp-data:/data         # writable state: fleet analytics DB + editable served config
+    command:
+      - control-plane
+      - "--config=/etc/warden/config.yaml"
+      - "--state-dir=/data"
+      - "--listen=0.0.0.0:7070"
+      - "--token-env=WARDEN_CP_TOKEN"
+      - "--ca-cert=/etc/warden/certs/proxy-ca.crt"   # mint the CP server cert from the proxy CA
+      - "--ca-key=/etc/warden/certs/proxy-ca.key"
+      - "--tls-host=control-plane,localhost,127.0.0.1"
+
   proxy:
     build:
       context: ../..
       dockerfile: Dockerfile
     image: warden-proxy:dev
+    depends_on:
+      control-plane:
+        condition: service_started
     networks:
       - agent-internal              # receives agent traffic
       - egress                      # the ONLY service with internet access
+      - cp-net                      # pulls policy + forwards analytics to the control plane
     ports:
       - "9090:9090"                 # dashboard + admin (host -> proxy); NOT reachable by the agent
     environment:
       # Real secrets live with the proxy, never the agent.
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - WARDEN_CP_TOKEN=${WARDEN_CP_TOKEN:-dev-token}
+      - WARDEN_PROXY_ID=warden-worker   # labels this worker in the fleet view
     volumes:
-      - ../../configs/config.example.yaml:/etc/warden/config.yaml:ro
+      - ../../configs/config.example-worker.yaml:/etc/warden/config.yaml:ro   # managed: policy from the CP
       - ./certs:/etc/warden/certs:ro   # bake-once CA (see scripts/gen-certs.sh)
     command:
       - "run"
@@ -64,3 +117,10 @@ networks:
   # egress carries real internet access and is attached ONLY to the proxy.
   egress:
     driver: bridge
+  # Control-plane bus: worker ↔ control plane, plus the host-published dashboard.
+  cp-net:
+    driver: bridge
+
+volumes:
+  # the control plane's writable state: fleet analytics db + editable served config.
+  warden-cp-data:

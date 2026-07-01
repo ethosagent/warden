@@ -1,12 +1,16 @@
 # Override for testing with OpenRouter.
-# Usage: docker compose -f docker-compose.yml -f docker-compose.openrouter.yml up --build
+# The base file provides the control-plane + proxy (worker) topology; this
+# override only re-points the proxy at the OpenRouter worker config + key.
+# Usage:
+#   WARDEN_CP_TOKEN=dev-token \
+#   docker compose -f docker-compose.yml -f docker-compose.openrouter.yml up --build
 
 services:
   proxy:
     environment:
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
     volumes:
-      - ../../configs/config.openrouter.yaml:/etc/warden/config.yaml:ro
+      - ../../configs/config.openrouter-worker.yaml:/etc/warden/config.yaml:ro   # managed worker: policy from the CP
     # command REPLACES the base command — keep the CA/admin flags here too.
     command:
       - "run"
