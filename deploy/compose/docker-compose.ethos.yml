@@ -39,9 +39,11 @@ services:
     volumes:
       - ../../configs/config.ethos.yaml:/etc/warden/config.yaml:ro   # served policy: allow-all
       - ./certs:/etc/warden/certs:ro
+      - cp-data:/data                # writable state: fleet analytics DB + editable served config
     command:
       - control-plane
       - "--config=/etc/warden/config.yaml"
+      - "--state-dir=/data"          # writable dir → fleet DB (<state-dir>/warden-fleet.db) + editable config
       - "--listen=0.0.0.0:7070"
       - "--token-env=WARDEN_CP_TOKEN"
       - "--ca-cert=/etc/warden/certs/proxy-ca.crt"   # mint the CP server cert from the proxy CA
@@ -138,3 +140,4 @@ networks:
 
 volumes:
   worker-data:   # the worker's local analytics db (a forwarding buffer in managed mode)
+  cp-data:       # the control plane's writable state: fleet analytics db + editable served config
