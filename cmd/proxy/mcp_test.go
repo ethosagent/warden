@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
 	"io"
@@ -80,23 +81,44 @@ func TestMCPEnforceBlocksDeniedCall(t *testing.T) {
 }
 
 func TestMCPBadEd25519SignatureRefusesLaunch(t *testing.T) {
-	// A bogus (but well-formed) Ed25519 public key + signature must fail closed:
-	// the wedge refuses to launch `cat` and returns an error. If the check were
-	// skipped, cat would run and Execute would succeed.
-	cmd := newMCPCmd()
-	cmd.Flags().String("config", "/nonexistent/warden-config.yaml", "")
-	pubHex := hex.EncodeToString(make([]byte, 32)) // 32-byte zero key (valid length)
-	sigHex := hex.EncodeToString(make([]byte, 64)) // 64-byte zero sig (valid length)
-	cmd.SetArgs([]string{"--verify-ed25519-pubkey", pubHex, "--verify-ed25519-sig", sigHex, "--", "cat"})
-	cmd.SetIn(strings.NewReader(""))
-	var out, errBuf bytes.Buffer
-	cmd.SetOut(&out)
-	cmd.SetErr(&syncWriter{w: &errBuf})
-	cmd.SetContext(context.Background())
+	// A bogus Ed25519 public key + signature must fail closed: the wedge refuses
+	// to launch `cat` and returns an error. If the check were skipped, cat would
+	// run and Execute would succeed. Two deterministic cases are covered: an
+	// all-zero (low-order) key, which Go's ed25519.Verify would otherwise let
+	// spuriously verify on some platforms, and a real key whose signature was made
+	// over unrelated bytes so verification against the cat binary always fails.
+	assertRefuses := func(t *testing.T, pubHex, sigHex string) {
+		t.Helper()
+		cmd := newMCPCmd()
+		cmd.Flags().String("config", "/nonexistent/warden-config.yaml", "")
+		cmd.SetArgs([]string{"--verify-ed25519-pubkey", pubHex, "--verify-ed25519-sig", sigHex, "--", "cat"})
+		cmd.SetIn(strings.NewReader(""))
+		var out, errBuf bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&syncWriter{w: &errBuf})
+		cmd.SetContext(context.Background())
 
-	if err := cmd.Execute(); err == nil {
-		t.Fatalf("expected launch refusal on invalid ed25519 signature, got nil.\nstderr: %s", errBuf.String())
+		if err := cmd.Execute(); err == nil {
+			t.Fatalf("expected launch refusal on invalid ed25519 signature, got nil.\nstderr: %s", errBuf.String())
+		}
 	}
+
+	t.Run("all-zero key rejected", func(t *testing.T) {
+		pubHex := hex.EncodeToString(make([]byte, 32)) // 32-byte zero key (valid length)
+		sigHex := hex.EncodeToString(make([]byte, 64)) // 64-byte zero sig (valid length)
+		assertRefuses(t, pubHex, sigHex)
+	})
+
+	t.Run("valid key wrong signature rejected", func(t *testing.T) {
+		// Real keypair from a fixed seed, signing bytes that are not the server
+		// binary — so verification against `cat` deterministically fails everywhere.
+		priv := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x01}, ed25519.SeedSize))
+		pub := priv.Public().(ed25519.PublicKey)
+		wrongSig := ed25519.Sign(priv, []byte("unrelated content, not the server binary"))
+		pubHex := hex.EncodeToString(pub)
+		sigHex := hex.EncodeToString(wrongSig)
+		assertRefuses(t, pubHex, sigHex)
+	})
 }
 
 func TestMCPUnknownServerNameRefusesLaunch(t *testing.T) {

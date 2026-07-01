@@ -56,10 +56,11 @@ func VerifyBinary(path, wantSHA256Hex string) error {
 // can pass them through unconditionally, mirroring VerifyBinary's empty-skip.
 //
 // This is fail-closed: a public key or signature that is present but incomplete,
-// malformed, wrong-length, or does not verify returns an error (which the caller
-// must treat as a refusal to launch). It returns a clear error when the file
-// cannot be read, when either value is not valid hex, when the key/signature
-// length is wrong, or when the signature does not verify against the file bytes.
+// malformed, wrong-length, all-zero/low-order, or does not verify returns an
+// error (which the caller must treat as a refusal to launch). It returns a clear
+// error when the file cannot be read, when either value is not valid hex, when
+// the key/signature length is wrong, when the public key is all-zero, or when the
+// signature does not verify against the file bytes.
 func VerifyEd25519(path, publicKeyHex, signatureHex string) error {
 	pubHex := strings.TrimSpace(publicKeyHex)
 	sigHex := strings.TrimSpace(signatureHex)
@@ -81,6 +82,14 @@ func VerifyEd25519(path, publicKeyHex, signatureHex string) error {
 	}
 	if len(pub) != ed25519.PublicKeySize {
 		return fmt.Errorf("verify %s: ed25519 public key must be %d bytes, got %d", path, ed25519.PublicKeySize, len(pub))
+	}
+	// Reject an all-zero (low-order) public key. Go's ed25519.Verify does not
+	// reject small-order public keys, and against the all-zero key a zero
+	// signature spuriously verifies for some messages — a fail-open. A zero key
+	// is never a legitimate signer, so refuse it explicitly to stay fail-closed.
+	var zeroPub [ed25519.PublicKeySize]byte
+	if subtle.ConstantTimeCompare(pub, zeroPub[:]) == 1 {
+		return fmt.Errorf("verify %s: ed25519 public key is all-zero (rejected)", path)
 	}
 	sig, err := hex.DecodeString(strings.ToLower(sigHex))
 	if err != nil {
