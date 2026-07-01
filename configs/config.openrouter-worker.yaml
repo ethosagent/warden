@@ -1,0 +1,38 @@
+# Managed WORKER for the OpenRouter recipe (override on docker-compose.yml).
+#
+# Allow/deny policy comes ONLY from the control plane (config.cp-served.yaml).
+# Boots fail-closed until the first policy pull. Secrets + response scanning stay
+# LOCAL to this worker.
+
+logging:
+  level: info
+  format: json
+
+# Non-MCP HTTP response DLP scanning (detect + log, never block).
+responseScan:
+  enabled: true
+  mode: monitor
+  maxBodyBytes: 1048576
+  evidence: true
+  pii:
+    phone: false
+
+secrets:
+  - placeholder: openrouter_secret_001
+    envVar: OPENROUTER_API_KEY
+
+controlPlane:
+  endpoint: https://control-plane:7070/policy
+  tokenEnv: WARDEN_CP_TOKEN
+  caCert: /etc/warden/certs/proxy-ca.crt
+  longPollWait: 30s
+  heartbeatInterval: 10s
+  localOnly: false
+
+central:
+  mode: worker
+  endpoint: https://control-plane:7070/central/ingest
+  tokenEnv: WARDEN_CP_TOKEN
+  proxyID: ${WARDEN_PROXY_ID}
+  caCert: /etc/warden/certs/proxy-ca.crt
+  mcpPushInterval: 30s

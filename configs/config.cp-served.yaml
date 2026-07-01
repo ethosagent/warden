@@ -1,0 +1,23 @@
+# Shared control-plane SERVED policy for EVERY converted recipe control-plane —
+# ALLOW-ALL, visibility-first. Each recipe's control-plane serves this identical
+# policy so the whole fleet is on the same page; tighten per deployment later.
+#
+# `~.*` is a regex catch-all: it allows every host. Warden's front door is
+# CONNECT-only, so this covers all HTTPS (:443) traffic. TLS is terminated, so
+# the method/URL/headers are visible (logged headers-only, secret-by-reference).
+
+policy:
+  allowlist:
+    - domain: "~.*"            # allow every host (HTTPS/443). Visibility-first; tighten later.
+
+cache:
+  ttl: 3600
+
+logging:
+  level: info
+  format: json                 # structured JSON decision logs (one per call)
+
+observability:
+  enabled: true
+  metrics:
+    enabled: true              # Prometheus /metrics on the admin listener
