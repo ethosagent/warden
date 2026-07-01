@@ -63,7 +63,10 @@ func TestProxy_SetMCPGateway_RaceFree(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		gws := []*gateway.Gateway{gwA, gwB, nil}
+		// MCPGateway (not *gateway.Gateway) so the nil element is an untyped-nil
+		// interface — exercising the disabled path — not a typed-nil *gateway.Gateway
+		// that would read back as a non-nil interface wrapping a nil pointer.
+		gws := []MCPGateway{gwA, gwB, nil}
 		i := 0
 		for {
 			select {

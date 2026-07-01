@@ -11,16 +11,13 @@ package controlplane
 
 import (
 	"context"
-	"crypto/sha256"
 	"crypto/subtle"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -40,8 +37,13 @@ type Config struct {
 	// Token is the bearer token workers must present on /policy and
 	// /central/ingest. Empty disables auth (development only).
 	Token string
-	// MaxEvents caps the in-memory central analytics store (0 = default).
+	// MaxEvents caps the central analytics store (0 = default).
 	MaxEvents int
+	// Store is the fleet analytics backend (persistent SQLite or in-memory). When
+	// nil, New defaults to an in-memory CentralStore(MaxEvents) — unchanged
+	// behavior. A SQLite-backed store additionally powers the dashboard's read-only
+	// Query Builder (it implements analytics.AnalyticsQuery).
+	Store analytics.FleetStore
 	// Logger receives lifecycle and policy-load logs. Defaults to slog.Default().
 	Logger *slog.Logger
 }
@@ -63,36 +65,67 @@ const (
 	minLongPollWait      = 1 * time.Second
 	maxLongPollWait      = 60 * time.Second
 	policyReloadInterval = 3 * time.Second
+	// retentionPruneInterval is how often the persistent fleet store prunes events
+	// past its retention window. Retention is coarse, so an hourly sweep is ample.
+	retentionPruneInterval = 1 * time.Hour
 )
 
-// Server is the control plane. It is safe for concurrent use.
+// Server is the control plane. It is safe for concurrent use. Its
+// responsibilities are named by role interfaces its parts satisfy: policy is
+// served by the composed PolicyServer (policy); config editing is the
+// ConfigEditor seam (writePolicy/writeSettings); the fleet is tracked by the
+// WorkerTracker seam; and central ingest lands in the IngestSink seam.
 type Server struct {
 	cfg      Config
-	central  *analytics.CentralStore
+	central  analytics.FleetStore
 	registry *WorkerRegistry
 	mcp      *mcpStore
-	watch    *policyWatch
+	policy   *policyServer
 	writeMu  sync.Mutex // serializes policy edits
 }
 
-// New constructs a control-plane Server backed by an in-memory central store.
+// Compile-time assertions that the concrete types satisfy their role interfaces.
+var (
+	_ PolicyServer  = (*policyServer)(nil)
+	_ ConfigEditor  = (*Server)(nil)
+	_ WorkerTracker = (*WorkerRegistry)(nil)
+	_ IngestSink    = (*ingestSink)(nil)
+)
+
+// pruner is the optional retention capability a persistent store exposes: delete
+// events past the configured retention window. The in-memory store does not
+// implement it (it is size-capped on write), so retention pruning is skipped.
+type pruner interface {
+	PruneExpired() error
+}
+
+// New constructs a control-plane Server. It uses cfg.Store when set (e.g. a
+// persistent SQLite fleet store); otherwise it defaults to an in-memory
+// CentralStore(MaxEvents) — unchanged behavior.
 func New(cfg Config) *Server {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
+	store := cfg.Store
+	if store == nil {
+		store = analytics.NewCentralStore(cfg.MaxEvents)
+	}
+	registry := NewWorkerRegistry()
 	s := &Server{
 		cfg:      cfg,
-		central:  analytics.NewCentralStore(cfg.MaxEvents),
-		registry: NewWorkerRegistry(),
+		central:  store,
+		registry: registry,
 		mcp:      newMCPStore(),
-		watch:    newPolicyWatch(),
+		// The policy-serving component owns the watch and performs the initial load
+		// so /policy and the dashboard have policy immediately (unchanged behavior).
+		policy: newPolicyServer(cfg.PolicyPath, cfg.Token, cfg.Logger, registry),
 	}
-	s.refresh() // initial load so /policy and the dashboard have policy immediately
 	return s
 }
 
 // Start launches the periodic re-read that catches EXTERNAL edits to the served
-// policy file (editor edits refresh synchronously). It returns when ctx is done.
+// policy file (editor edits refresh synchronously). It also starts the retention
+// prune loop when the store supports it. It returns when ctx is done.
 func (s *Server) Start(ctx context.Context) {
 	go func() {
 		t := time.NewTicker(policyReloadInterval)
@@ -102,72 +135,45 @@ func (s *Server) Start(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				s.refresh()
+				s.policy.Refresh()
 			}
 		}
 	}()
-}
 
-// policyWatch holds the current served policy + its ETag and broadcasts to
-// blocked long-poll waiters when it changes. The broadcast is a close-and-replace
-// channel: waiters grab the current channel, and a change closes it.
-type policyWatch struct {
-	mu   sync.Mutex
-	wire policyWire
-	etag string
-	ok   bool // a good policy has been loaded at least once
-	ch   chan struct{}
-}
-
-func newPolicyWatch() *policyWatch { return &policyWatch{ch: make(chan struct{})} }
-
-// set updates the watched policy and wakes waiters only when the ETag changes.
-func (w *policyWatch) set(wire policyWire, etag string) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.ok && etag == w.etag {
-		return
+	// Retention: a persistent store prunes events past its retention window on a
+	// slow cadence. The in-memory store does not implement pruner (it is
+	// size-capped on write), so this loop simply never starts for it.
+	if p, ok := s.central.(pruner); ok {
+		go func() {
+			if err := p.PruneExpired(); err != nil { // once at startup
+				s.cfg.Logger.Warn("control plane: analytics retention prune failed", "error", err)
+			}
+			t := time.NewTicker(retentionPruneInterval)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					if err := p.PruneExpired(); err != nil {
+						s.cfg.Logger.Warn("control plane: analytics retention prune failed", "error", err)
+					}
+				}
+			}
+		}()
 	}
-	w.wire, w.etag, w.ok = wire, etag, true
-	close(w.ch)
-	w.ch = make(chan struct{})
 }
 
-// snapshot returns the current policy, ETag, whether one has loaded, and a
-// channel that closes when the policy next changes.
-func (w *policyWatch) snapshot() (policyWire, string, bool, <-chan struct{}) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.wire, w.etag, w.ok, w.ch
-}
+// refresh reloads the served policy and wakes long-poll waiters. It delegates to
+// the composed PolicyServer; the writePolicy/writeSettings editors call it after
+// an atomic write so waiters serve the new policy immediately. Kept as a thin
+// Server method so config-editing stays cohesive with the edit that triggers it.
+func (s *Server) refresh() { s.policy.Refresh() }
 
-// refresh re-reads the policy file and updates the watch. On a read/parse error
-// it logs and keeps the last good policy, so a mid-edit malformed file never
-// breaks workers.
-func (s *Server) refresh() {
-	wire, err := s.loadPolicy()
-	if err != nil {
-		s.cfg.Logger.Warn("control plane: policy reload failed; keeping last-known-good", "error", err)
-		return
-	}
-	s.watch.set(wire, etagFor(wire))
-}
-
-// etagFor is a short, stable content hash of the served policy. Because Settings
-// is part of policyWire, the ETag automatically covers behavioral settings too:
-// any settings change alters the marshaled bytes → a new ETag → long-poll wake.
-func etagFor(wire policyWire) string {
-	b, _ := json.Marshal(wire)
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:8]) // 16 hex chars
-}
-
-// currentETag returns the ETag of the policy currently served (for the dashboard
-// "version behind" hint). Empty until the first successful load.
-func (s *Server) currentETag() string {
-	_, etag, _, _ := s.watch.snapshot()
-	return etag
-}
+// writePolicy / writeSettings are unexported forwarders to the exported
+// ConfigEditor methods, kept so internal call sites (and tests) read naturally.
+func (s *Server) writePolicy(p config.Policy) error          { return s.WritePolicy(p) }
+func (s *Server) writeSettings(in config.SettingsWire) error { return s.WriteSettings(in) }
 
 // Handler returns the control plane's HTTP routes:
 //
@@ -181,44 +187,57 @@ func (s *Server) Handler() http.Handler {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok\n"))
 	})
-	mux.HandleFunc("/policy", s.handlePolicy)
+	// /policy is served by the composed PolicyServer seam (serve + ETag long-poll).
+	var policyServe PolicyServer = s.policy
+	mux.HandleFunc("/policy", policyServe.ServePolicy)
 	mux.HandleFunc("/control/heartbeat", s.handleHeartbeat)
 	ingest := analytics.NewIngestHandler(s.central, s.cfg.Token)
-	ingest.SetOnIngest(s.registry.SeenIngest) // track which workers are forwarding
-	ingest.SetOnMCP(s.mcp.Update)             // store each worker's MCP snapshot
+	// Central ingest lands in the IngestSink seam: tag worker activity in the
+	// registry and store each worker's MCP snapshot. Wiring the seam's methods (vs
+	// reaching into fields) documents the ingest surface; behavior is unchanged.
+	var sink IngestSink = &ingestSink{registry: s.registry, mcp: s.mcp}
+	ingest.SetOnIngest(sink.SeenIngest) // track which workers are forwarding
+	ingest.SetOnMCP(sink.UpdateMCP)     // store each worker's MCP snapshot
 	mux.Handle("/central/ingest", ingest)
 
 	// The fleet dashboard reads the aggregated central store. The control plane
 	// holds no secrets, so it is given an empty secret provider and a
 	// secret-free policy view; the dashboard's secrets panel is naturally empty.
 	emptySecrets, _ := secrets.NewCache(secrets.NewEnvFetcher(map[string]string{}), 0, nil)
-	wire, _, _, _ := s.watch.snapshot()
+	wire, _, _, _ := s.policy.snapshot()
 	dashPolicy := config.Policy{Allowlist: wire.Allowlist, Denylist: wire.Denylist}
 	dash := dashboard.NewServer(s.central, dashPolicy, emptySecrets)
 	// Policy panel reflects the live served policy (the watch), so edits show
 	// immediately rather than a startup snapshot.
 	dash.SetLivePolicy(func() config.Policy {
-		w, _, _, _ := s.watch.snapshot()
+		w, _, _, _ := s.policy.snapshot()
 		return config.Policy{Allowlist: w.Allowlist, Denylist: w.Denylist}
 	})
-	// Editing is enabled on the control plane only: persist edits to the served
-	// policy file so workers pull them on their next poll.
-	dash.SetPolicyWriter(s.writePolicy)
-	// Behavioral settings editing (Phase 2b: the mcp block) is likewise a
-	// control-plane-only capability: persist edits to the served file so workers
-	// pull them on their next poll. The read side reflects the live watch.
-	dash.SetSettingsWriter(s.writeSettings)
+	// Editing is a control-plane-only capability, sourced from the ConfigEditor
+	// seam: persist edits to the served config file so workers pull them on their
+	// next poll. The read side reflects the live watch.
+	var editor ConfigEditor = s
+	dash.SetPolicyWriter(editor.WritePolicy)
+	dash.SetSettingsWriter(editor.WriteSettings)
 	dash.SetLiveSettings(func() *config.SettingsWire {
-		w, _, _, _ := s.watch.snapshot()
+		w, _, _, _ := s.policy.snapshot()
 		return w.Settings
 	})
+	// Read-only Query Builder: when the fleet store is SQL-backed (implements
+	// AnalyticsQuery), expose its sandboxed query surface to the dashboard. The
+	// in-memory store does not implement it, so the Query Builder reports
+	// unavailable in that case.
+	if q, ok := s.central.(analytics.AnalyticsQuery); ok {
+		dash.SetQueryEngine(q)
+	}
 	// Per-worker MCP view (inventory + observed schema), selected by ?proxy=.
 	dash.SetMCPFleet(s.mcp.For)
 	// Connected-workers list for the fleet view, with a "behind" flag for any
 	// worker whose policy version differs from what the CP currently serves.
+	var tracker WorkerTracker = s.registry
 	dash.SetWorkers(func() []dashboard.WorkerView {
-		cur := s.currentETag()
-		views := s.registry.Views()
+		cur := s.policy.currentETag()
+		views := tracker.Views()
 		for i := range views {
 			views[i].Behind = views[i].PolicyETag != "" && views[i].PolicyETag != cur
 		}
@@ -227,65 +246,6 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/dashboard/", dash.Handler())
 
 	return mux
-}
-
-// handlePolicy serves the current allow/deny policy with ETag-based long-poll.
-// A worker sends its current ETag in If-None-Match and an optional ?wait=:
-//   - ETag differs   -> 200 with the new policy + ETag (immediate).
-//   - ETag matches    -> block up to ?wait for a change, then 200 (changed) or
-//     304 Not Modified (timeout). wait==0/absent returns immediately (plain poll).
-//
-// This is one of the ONLY three worker→CP interactions; the CP never calls the
-// worker. A bad mid-edit file never breaks workers: the watch keeps last-good.
-func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if s.cfg.Token != "" {
-		want := "Bearer " + s.cfg.Token
-		if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte(want)) != 1 {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-	}
-	// Register the worker as connected (it announces its id on the pull).
-	s.registry.SeenPolicyPull(r.Header.Get(analytics.ProxyIDHeader))
-
-	inm := trimETag(r.Header.Get("If-None-Match"))
-	wait := parseWait(r.URL.Query().Get("wait"))
-
-	for {
-		wire, etag, ok, ch := s.watch.snapshot()
-		if !ok {
-			// No good policy has ever loaded (e.g. unreadable file at startup).
-			http.Error(w, "policy unavailable", http.StatusInternalServerError)
-			return
-		}
-		if etag != inm {
-			w.Header().Set("ETag", `"`+etag+`"`)
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(wire)
-			return
-		}
-		if wait <= 0 {
-			w.Header().Set("ETag", `"`+etag+`"`)
-			w.WriteHeader(http.StatusNotModified)
-			return
-		}
-		timer := time.NewTimer(wait)
-		select {
-		case <-ch:
-			timer.Stop() // policy changed — loop re-evaluates and serves it
-		case <-timer.C:
-			w.Header().Set("ETag", `"`+etag+`"`)
-			w.WriteHeader(http.StatusNotModified)
-			return
-		case <-r.Context().Done():
-			timer.Stop()
-			return
-		}
-	}
 }
 
 // handleHeartbeat records a worker liveness ping. Body: {"policyETag": "..."}.
@@ -311,32 +271,6 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// parseWait parses the ?wait= long-poll duration, clamped to [min,max]; an
-// absent/zero/invalid value means "respond immediately" (plain poll).
-func parseWait(s string) time.Duration {
-	if s == "" {
-		return 0
-	}
-	d, err := time.ParseDuration(s)
-	if err != nil || d <= 0 {
-		return 0
-	}
-	if d < minLongPollWait {
-		d = minLongPollWait
-	}
-	if d > maxLongPollWait {
-		d = maxLongPollWait
-	}
-	return d
-}
-
-// trimETag normalizes an If-None-Match value to the bare tag (no quotes / weak prefix).
-func trimETag(s string) string {
-	s = strings.TrimSpace(s)
-	s = strings.TrimPrefix(s, "W/")
-	return strings.Trim(s, `"`)
-}
-
 // policyYAML is the policy sub-block written back when policy is edited from the
 // dashboard: allow/deny only — never secrets, which the control plane does not
 // hold.
@@ -355,7 +289,10 @@ type policyYAML struct {
 // config, writePolicy round-trips the file through a top-level YAML map and
 // rewrites ONLY the `policy` (and `logging`, when present) blocks, leaving every
 // other block byte-for-byte intact.
-func (s *Server) writePolicy(p config.Policy) error {
+//
+// WritePolicy is the ConfigEditor seam's policy-write method; the lowercase
+// writePolicy forwarder preserves the internal call sites.
+func (s *Server) WritePolicy(p config.Policy) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
@@ -433,27 +370,6 @@ func (s *Server) atomicWriteConfig(root map[string]yaml.Node) error {
 	return nil
 }
 
-// loadPolicy re-reads and validates the policy file, returning the allow/deny
-// wire view. Re-reading per call keeps served policy fresh without a watcher.
-func (s *Server) loadPolicy() (policyWire, error) {
-	prov, err := config.NewLocalYAMLProvider(s.cfg.PolicyPath)
-	if err != nil {
-		return policyWire{}, err
-	}
-	p, err := prov.GetPolicy()
-	if err != nil {
-		return policyWire{}, err
-	}
-	// SettingsWireFromPolicy projects only the secret-free behavioral blocks and
-	// returns nil when the config is pure allow/deny, so the "settings" key stays
-	// absent in that case (back-compat).
-	return policyWire{
-		Allowlist: p.Allowlist,
-		Denylist:  p.Denylist,
-		Settings:  config.SettingsWireFromPolicy(p),
-	}, nil
-}
-
 // writeSettings validates and atomically persists an edited behavioral settings
 // document to the served config file, so workers pull the new settings on their
 // next poll. It is the settings analogue of writePolicy: it round-trips the file
@@ -471,7 +387,10 @@ func (s *Server) loadPolicy() (policyWire, error) {
 // A nil in.Logging/in.CacheTTLSeconds/in.Compliance leaves the existing block
 // untouched (logging is co-owned by writePolicy's default, so writeSettings must
 // not delete it).
-func (s *Server) writeSettings(in config.SettingsWire) error {
+//
+// WriteSettings is the ConfigEditor seam's settings-write method; the lowercase
+// writeSettings forwarder preserves the internal call sites.
+func (s *Server) WriteSettings(in config.SettingsWire) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 

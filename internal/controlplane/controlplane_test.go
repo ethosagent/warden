@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/config"
 )
 
@@ -1306,5 +1307,31 @@ func TestWriteSettingsObservabilityPreservesCore(t *testing.T) {
 	}
 	if !p.Observability.Enabled {
 		t.Errorf("observability not applied: %+v", p.Observability)
+	}
+}
+
+// TestControlPlane_QueryEngineWiring asserts the CP exposes the read-only Query
+// Builder endpoint only when its store is SQL-backed: a SQLite fleet store wires
+// the query engine (schema 200), while the in-memory store does not (404).
+func TestControlPlane_QueryEngineWiring(t *testing.T) {
+	path := writePolicyFile(t, "api.openai.com")
+
+	store, err := analytics.NewFleetSQLiteStore(":memory:", 0, 0)
+	if err != nil {
+		t.Fatalf("new fleet store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	sqliteCP := New(Config{PolicyPath: path, Store: store}).Handler()
+	rr := httptest.NewRecorder()
+	sqliteCP.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/dashboard/api/query/schema", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("sqlite CP: want 200 query schema, got %d (%s)", rr.Code, rr.Body.String())
+	}
+
+	memCP := New(Config{PolicyPath: path, Store: analytics.NewCentralStore(0)}).Handler()
+	rr2 := httptest.NewRecorder()
+	memCP.ServeHTTP(rr2, httptest.NewRequest(http.MethodGet, "/dashboard/api/query/schema", nil))
+	if rr2.Code != http.StatusNotFound {
+		t.Fatalf("memory CP: want 404 query schema (no SQL engine), got %d", rr2.Code)
 	}
 }

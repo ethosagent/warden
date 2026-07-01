@@ -210,7 +210,7 @@ const flushInterval = 15 * time.Second
 // Gateway is the MCP verdict engine. It is safe for concurrent use.
 type Gateway struct {
 	cfg      config.MCPConfig
-	scanner  *scan.Scanner
+	scanner  scan.Scanner
 	policy   *mcp.ToolPolicy
 	profiler *mcp.SchemaProfiler
 	log      *slog.Logger
@@ -258,7 +258,7 @@ type Gateway struct {
 // the gateway loads any persisted inventory + schema on start and runs a
 // background flusher. New stays backward-compatible — with no opts it behaves
 // exactly as before and starts no goroutines.
-func New(cfg config.MCPConfig, scanner *scan.Scanner, log *slog.Logger, opts ...Option) *Gateway {
+func New(cfg config.MCPConfig, scanner scan.Scanner, log *slog.Logger, opts ...Option) *Gateway {
 	if log == nil {
 		log = slog.Default()
 	}

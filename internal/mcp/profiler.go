@@ -122,7 +122,7 @@ type observation struct {
 // profile, and scans each leaf string individually to attribute scan categories
 // to the field path. It returns the detections found (with their field path) so
 // the caller can reuse them for a verdict without re-scanning.
-func (p *SchemaProfiler) Observe(tool string, dir Direction, raw json.RawMessage, scanner *scan.Scanner) []FieldDetection {
+func (p *SchemaProfiler) Observe(tool string, dir Direction, raw json.RawMessage, scanner scan.Scanner) []FieldDetection {
 	if len(raw) == 0 {
 		return nil
 	}

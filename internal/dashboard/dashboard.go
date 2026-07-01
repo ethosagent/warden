@@ -58,6 +58,9 @@ type Server struct {
 	// for a given worker (empty proxyID = most-recent worker). It takes precedence
 	// over the single-node mcp gateway.
 	mcpFleet func(proxyID string) ([]gateway.InventoryItem, map[string]mcp.ToolProfileView)
+	// queryEngine, when set (control plane with a SQL-backed store), powers the
+	// read-only Query Builder. nil = the Query Builder reports "unavailable".
+	queryEngine analytics.AnalyticsQuery
 }
 
 // WorkerView is one connected data-plane worker in the control plane's fleet
@@ -138,6 +141,13 @@ func (s *Server) SetWorkers(fn func() []WorkerView) {
 // MCP panel follows the dashboard's worker selector.
 func (s *Server) SetMCPFleet(fn func(proxyID string) ([]gateway.InventoryItem, map[string]mcp.ToolProfileView)) {
 	s.mcpFleet = fn
+}
+
+// SetQueryEngine attaches the read-only analytics query surface that powers the
+// Query Builder. It is control-plane-only (a SQL-backed fleet store); leaving it
+// nil keeps the Query Builder disabled (the endpoints report "unavailable").
+func (s *Server) SetQueryEngine(q analytics.AnalyticsQuery) {
+	s.queryEngine = q
 }
 
 // --- JSON response types ---
@@ -230,6 +240,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/dashboard/api/analytics", s.handleAnalytics)
 	mux.HandleFunc("/dashboard/api/mcp", s.handleMCP)
 	mux.HandleFunc("/dashboard/api/workers", s.handleWorkers)
+	mux.HandleFunc("/dashboard/api/query", s.handleQuery)
+	mux.HandleFunc("/dashboard/api/query/schema", s.handleQuerySchema)
 	mux.HandleFunc("/dashboard/", s.handleIndex)
 	return mux
 }
@@ -430,6 +442,55 @@ func (s *Server) handleWorkers(w http.ResponseWriter, r *http.Request) {
 		workers = s.workersFn()
 	}
 	writeJSON(w, workers)
+}
+
+// queryRequest is the body of POST /dashboard/api/query.
+type queryRequest struct {
+	SQL     string `json:"sql"`
+	MaxRows int    `json:"maxRows,omitempty"`
+}
+
+// handleQuerySchema serves GET /dashboard/api/query/schema: the queryable table
+// schema + SQL dialect that the Query Builder uses to build queries. Returns 404
+// when no query engine is configured (non-SQL store / worker dashboard).
+func (s *Server) handleQuerySchema(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if s.queryEngine == nil {
+		writeError(w, http.StatusNotFound, "query builder unavailable: the analytics store is not SQL-backed")
+		return
+	}
+	writeJSON(w, s.queryEngine.Schema())
+}
+
+// handleQuery serves POST /dashboard/api/query: run a READ-ONLY SQL query against
+// the fleet store and return a bounded result set. The store enforces read-only
+// (SELECT/WITH-only guard + read-only connection), a row cap, and a timeout — the
+// dashboard just forwards the request. Returns 404 when no query engine exists.
+func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if s.queryEngine == nil {
+		writeError(w, http.StatusNotFound, "query builder unavailable: the analytics store is not SQL-backed")
+		return
+	}
+	var req queryRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	res, err := s.queryEngine.Query(r.Context(), req.SQL, req.MaxRows)
+	if err != nil {
+		// A rejected/failed read-only query is a client error (bad SQL / not a
+		// SELECT), not a server fault.
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, res)
 }
 
 // handleSecrets serves GET /dashboard/api/secrets.

@@ -1,4 +1,4 @@
-package main
+package worker
 
 import (
 	"context"
@@ -11,7 +11,6 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -21,8 +20,6 @@ import (
 	"github.com/ethosagent/warden/internal/audit"
 	"github.com/ethosagent/warden/internal/auth"
 	"github.com/ethosagent/warden/internal/config"
-	"github.com/ethosagent/warden/internal/mcp/gateway"
-	"github.com/ethosagent/warden/internal/policy"
 	"github.com/ethosagent/warden/internal/proxy"
 )
 
@@ -134,116 +131,6 @@ func buildTransformers(entries []config.AuthEntry, client *http.Client) ([]*auth
 	return out, nil
 }
 
-// longPollControlPlane holds a long-poll against the control plane: the CP
-// returns immediately when policy changes (hot-swapping the evaluator) or after
-// `wait` with no change, and the worker re-polls at once. A failed poll is logged
-// and the last-known-good policy is kept (capped backoff), so a worker rides out
-// a control-plane outage. It returns when ctx is cancelled.
-//
-// onApply, when non-nil, runs after each applied policy change (same long-poll
-// round-trip) so the worker can apply the distributed behavioral settings —
-// notably rebuilding + atomically swapping the MCP gateway — in lock-step with
-// the allow/deny reload. It is passed as a closure (built in run.go) so wiring
-// stays free of the proxy/scanner/store internals the rebuild needs.
-func longPollControlPlane(ctx context.Context, rp *config.RemoteProvider, ev *policy.Evaluator, wait time.Duration, logger *slog.Logger, onApply func()) {
-	const maxBackoff = 15 * time.Second
-	backoff := time.Second
-	for {
-		if ctx.Err() != nil {
-			return
-		}
-		changed, err := rp.PollLong(ctx, wait)
-		if err != nil {
-			if ctx.Err() != nil {
-				return
-			}
-			logger.Warn("control plane long-poll failed; keeping last-known policy", "error", err)
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(backoff):
-			}
-			if backoff *= 2; backoff > maxBackoff {
-				backoff = maxBackoff
-			}
-			continue
-		}
-		backoff = time.Second
-		if changed {
-			if remote, gErr := rp.GetPolicy(); gErr == nil {
-				ev.Replace(remote)
-				logger.Info("control plane policy reloaded")
-				// Apply behavioral settings (e.g. MCP gateway rebuild) in the same
-				// round-trip, so a single long-poll lands both policy and settings.
-				if onApply != nil {
-					onApply()
-				}
-			}
-		}
-		// 304 (no change): re-poll immediately.
-	}
-}
-
-// pushMCPSnapshots forwards this worker's MCP inventory + observed schema to the
-// control plane over the analytics ingest channel. It pushes whenever the
-// snapshot changes (hash-gated) and unconditionally every few ticks as a safety
-// net (so a restarted control plane re-learns the snapshot). It returns when ctx
-// is cancelled. The snapshot is value-free — only paths, types, and sensitivity.
-func pushMCPSnapshots(ctx context.Context, gw *gateway.Gateway, remote *analytics.HTTPRemoteStore, interval time.Duration, logger *slog.Logger) {
-	const forceEveryN = 5
-	var lastHash string
-	ticks := 0
-	push := func(force bool) {
-		snap := analytics.MCPSnapshot{Inventory: gw.Inventory(), Schema: gw.SchemaSnapshot()}
-		h := hashMCPSnapshot(snap)
-		if h == lastHash && !force {
-			return
-		}
-		if err := remote.SendMCP(snap); err != nil {
-			if ctx.Err() == nil {
-				logger.Debug("mcp snapshot push failed; will retry", "error", err)
-			}
-			return
-		}
-		lastHash = h
-	}
-	push(true) // initial full push
-	t := time.NewTicker(interval)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			ticks++
-			push(ticks%forceEveryN == 0)
-		}
-	}
-}
-
-func hashMCPSnapshot(snap analytics.MCPSnapshot) string {
-	b, _ := json.Marshal(snap)
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:])
-}
-
-// heartbeatControlPlane pings the control plane every interval so it lists this
-// worker as online even when idle (no traffic, long-poll held open).
-func heartbeatControlPlane(ctx context.Context, rp *config.RemoteProvider, interval time.Duration, logger *slog.Logger) {
-	t := time.NewTicker(interval)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			if err := rp.Heartbeat(ctx); err != nil && ctx.Err() == nil {
-				logger.Debug("control plane heartbeat failed", "error", err)
-			}
-		}
-	}
-}
-
 // loadOrCreateSigner returns an Ed25519 receipt signer. With no keyFile it
 // generates an ephemeral key (the public key is logged at startup each run).
 // With a keyFile it loads an existing PKCS#8 PEM key, or generates and persists
@@ -285,4 +172,12 @@ func loadOrCreateSigner(keyFile string) (*audit.Signer, error) {
 	default:
 		return nil, fmt.Errorf("audit: read key file %q: %w", keyFile, err)
 	}
+}
+
+// hashMCPSnapshot returns a stable content hash of an MCP snapshot, used by the
+// push loop to skip re-sending an unchanged inventory/schema.
+func hashMCPSnapshot(snap analytics.MCPSnapshot) string {
+	b, _ := json.Marshal(snap)
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }

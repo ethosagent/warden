@@ -22,7 +22,7 @@ type PoisoningDetection struct {
 var crossToolRe = regexp.MustCompile(`(?i)(always|must|should)\s+(call|use|invoke|run)\s+\w+`)
 
 // DetectPoisoning analyzes tool schemas for signs of tool poisoning attacks.
-func DetectPoisoning(tools []ToolSchema, scanner *scan.Scanner) []PoisoningDetection {
+func DetectPoisoning(tools []ToolSchema, scanner scan.Scanner) []PoisoningDetection {
 	var detections []PoisoningDetection
 	for _, tool := range tools {
 		// 1. description_injection - run description through scanner's injection detection

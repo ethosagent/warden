@@ -48,7 +48,7 @@ func extractStrings(raw json.RawMessage, depth int) []string {
 
 // ScanToolArgs scans outbound tool call arguments for credential leakage
 // and injection patterns using the provided scanner.
-func ScanToolArgs(args json.RawMessage, scanner *scan.Scanner) []scan.Detection {
+func ScanToolArgs(args json.RawMessage, scanner scan.Scanner) []scan.Detection {
 	if len(args) == 0 {
 		return nil
 	}
@@ -62,7 +62,7 @@ func ScanToolArgs(args json.RawMessage, scanner *scan.Scanner) []scan.Detection 
 
 // ScanToolResult scans inbound tool result content for injection patterns
 // and credential leakage.
-func ScanToolResult(result json.RawMessage, scanner *scan.Scanner) []scan.Detection {
+func ScanToolResult(result json.RawMessage, scanner scan.Scanner) []scan.Detection {
 	if len(result) == 0 {
 		return nil
 	}

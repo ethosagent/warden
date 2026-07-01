@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"strconv"
 	"sync"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/auth"
+	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/cost"
 	"github.com/ethosagent/warden/internal/mcp/gateway"
 	"github.com/ethosagent/warden/internal/observability"
@@ -35,7 +37,7 @@ type Config struct {
 	// ListenAddr is the loopback / pod-internal address the agent connects to
 	// (e.g. "127.0.0.1:8080").
 	ListenAddr       string
-	Policy           *policy.Evaluator
+	Policy           PolicyEvaluator
 	Secrets          secrets.SecretProvider
 	Analytics        analytics.AnalyticsStore
 	CACertPath       string
@@ -52,10 +54,10 @@ type Config struct {
 	// port-binding model is one proxy per agent, so a single id suffices.
 	AgentID string
 
-	// Metrics is the optional OTel metric emitter. Nil-safe: when nil every
-	// record call is a no-op, so observability never alters a decision or adds
-	// latency to the hot path.
-	Metrics *observability.Metrics
+	// Metrics is the optional OTel metric emitter. Nil-safe: when nil, proxy.New
+	// substitutes a no-op recorder, so observability never alters a decision or
+	// adds latency to the hot path.
+	Metrics MetricsRecorder
 	// Logger is the optional structured logger for decision/lifecycle records.
 	// When nil, proxy.New substitutes a discard logger so behavior and log volume
 	// are unchanged.
@@ -63,14 +65,67 @@ type Config struct {
 
 	// MCP is the optional MCP egress gateway. Nil = MCP disabled: handleHTTP is
 	// byte-identical to before. Non-nil = analyze MCP JSON-RPC traffic.
-	MCP *gateway.Gateway
+	MCP MCPGateway
 
 	// Cost is the optional LLM cost estimator. Nil-safe: when nil no cost is
 	// attributed. When set, an allowed request to a known provider domain is
 	// tagged with a heuristic dollar estimate from observed request/response
 	// byte sizes — order-of-magnitude visibility, never billing-grade.
-	Cost *cost.Estimator
+	Cost CostEstimator
 }
+
+// MCPGateway is the consumer-side seam for the MCP egress gateway (defined here,
+// like Judge, so the proxy owns its contract and does not depend on the concrete
+// *gateway.Gateway on the hot path). *gateway.Gateway satisfies it. The Verdict
+// on OnRequest/OnResponse is the gateway's own type — the proxy inspects
+// v.Action/v.Tool/v.Reason/v.Findings — so the interface deliberately reuses
+// gateway.Verdict rather than introducing a second verdict type.
+type MCPGateway interface {
+	OnRequest(sessionKey, method, url string, hdr http.Header, body []byte) gateway.Verdict
+	OnResponse(sessionKey string, status int, hdr http.Header, body []byte) gateway.Verdict
+	MaxResponseScanBytes() int
+	Close() error
+}
+
+// PolicyEvaluator is the consumer-side seam for the static allow/deny decision.
+// *policy.Evaluator satisfies it. Replace is used by the control-plane apply loop
+// to hot-swap the running policy; it is kept on the interface so the proxy's
+// dependency is fully expressed by one seam.
+type PolicyEvaluator interface {
+	Evaluate(domain string, port int, scheme policy.Scheme) policy.Decision
+	Replace(p config.Policy)
+}
+
+// MetricsRecorder is the consumer-side seam for the nil-safe OTel metric emitter.
+// It enumerates exactly the methods the proxy's hot path records.
+// *observability.Metrics satisfies it (its methods are nil-receiver-safe).
+type MetricsRecorder interface {
+	RecordRequest(decision, protocol string)
+	RecordBlocked(reason string)
+	RecordSecretSwap(placeholderRef string)
+	RecordScanFinding(kind string)
+	RecordJudge(outcome string)
+	ObserveAddedLatency(stage string, d time.Duration)
+}
+
+// CostEstimator is the consumer-side seam for the optional LLM cost estimator.
+// *cost.Estimator satisfies it. A nil interface means cost tracking is off (the
+// hot path guards with `if p.cfg.Cost != nil`).
+type CostEstimator interface {
+	Estimate(domain string, requestBytes, responseBytes int64) *cost.CostEstimate
+}
+
+// nopMetrics is the no-op MetricsRecorder substituted by New when cfg.Metrics is
+// nil. It keeps the hot path free of a nil guard while adding no behavior — every
+// record is discarded, exactly as a nil-receiver *observability.Metrics would do.
+type nopMetrics struct{}
+
+func (nopMetrics) RecordRequest(decision, protocol string)           {}
+func (nopMetrics) RecordBlocked(reason string)                       {}
+func (nopMetrics) RecordSecretSwap(placeholderRef string)            {}
+func (nopMetrics) RecordScanFinding(kind string)                     {}
+func (nopMetrics) RecordJudge(outcome string)                        {}
+func (nopMetrics) ObserveAddedLatency(stage string, d time.Duration) {}
 
 // Judge renders an allow/deny verdict for a request that matched no static
 // rule. It is defined here (consumer-side) so the proxy does not depend on the
@@ -98,10 +153,13 @@ type Proxy struct {
 	dialTLS    func(network, addr string, cfg *tls.Config) (*tls.Conn, error)
 
 	// mcp holds the live MCP gateway, swappable atomically while the hot path
-	// reads it (control-plane settings can rebuild + replace it at runtime). A
-	// nil pointer means MCP is disabled, exactly as a nil cfg.MCP did before. It
-	// is seeded from cfg.MCP in New so an unmanaged worker's behavior is unchanged.
-	mcp atomic.Pointer[gateway.Gateway]
+	// reads it (control-plane settings can rebuild + replace it at runtime). MCPGateway
+	// is an interface, so it is wrapped in mcpHolder to give the atomic pointer a
+	// concrete element type and to allow a nil gateway (disabled). A nil holder
+	// pointer — or a holder wrapping a nil interface — means MCP is disabled,
+	// exactly as a nil cfg.MCP did before. It is seeded from cfg.MCP in New so an
+	// unmanaged worker's behavior is unchanged.
+	mcp atomic.Pointer[mcpHolder]
 
 	// judge holds the live inline judge, swappable atomically while the hot path
 	// reads it (control-plane settings can rebuild + replace it at runtime). The
@@ -128,6 +186,11 @@ type Proxy struct {
 	analyticsP atomic.Pointer[analyticsHolder]
 }
 
+// mcpHolder wraps the MCPGateway interface so it can live behind an
+// atomic.Pointer[mcpHolder] (which needs a concrete element type). A nil holder
+// pointer, or a holder whose gw is nil, both mean "MCP disabled".
+type mcpHolder struct{ gw MCPGateway }
+
 // judgeHolder wraps the Judge interface so it can live behind an
 // atomic.Pointer[judgeHolder] (which needs a concrete element type). A nil holder
 // pointer, or a holder whose j is nil, both mean "judge disabled".
@@ -146,14 +209,25 @@ type analyticsHolder struct{ a analytics.AnalyticsStore }
 
 // mcpGateway loads the current MCP gateway through the atomic pointer. A nil
 // return means MCP is disabled (the hot path's `if gw != nil` guard then skips
-// all MCP work, byte-identical to a worker that never configured MCP).
-func (p *Proxy) mcpGateway() *gateway.Gateway { return p.mcp.Load() }
+// all MCP work, byte-identical to a worker that never configured MCP). It guards
+// both a nil holder pointer AND a holder wrapping a nil interface, so a swap to a
+// disabled (untyped-nil) gateway yields a real nil to the hot path — never a
+// non-nil interface wrapping a nil value.
+func (p *Proxy) mcpGateway() MCPGateway {
+	if h := p.mcp.Load(); h != nil {
+		return h.gw
+	}
+	return nil
+}
 
 // SetMCPGateway atomically swaps in a new MCP gateway (or nil to disable). It is
 // race-free against concurrent hot-path reads via the atomic pointer; the caller
 // owns the lifecycle of the OLD gateway (the long-poll apply loop in cmd/proxy
-// rebuilds and replaces on each control-plane change).
-func (p *Proxy) SetMCPGateway(gw *gateway.Gateway) { p.mcp.Store(gw) }
+// rebuilds and replaces on each control-plane change). To disable MCP, pass an
+// untyped-nil interface — NOT a typed-nil *gateway.Gateway, which would make
+// mcpGateway() return a non-nil interface wrapping a nil pointer and panic on the
+// hot path.
+func (p *Proxy) SetMCPGateway(gw MCPGateway) { p.mcp.Store(&mcpHolder{gw: gw}) }
 
 // judge loads the current inline judge through the atomic pointer. A nil return
 // means the judge is disabled (the hot path's `if j != nil` guard then skips the
@@ -220,10 +294,18 @@ func New(cfg Config) (*Proxy, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = observability.DiscardLogger()
 	}
+	if cfg.Metrics == nil {
+		// Substitute a no-op recorder (mirrors the discard Logger above) so the hot
+		// path never guards Metrics. An untyped-nil MetricsRecorder interface would
+		// panic on a method call; nopMetrics keeps every record a no-op.
+		cfg.Metrics = nopMetrics{}
+	}
 	p := &Proxy{cfg: cfg}
 	// Seed the swappable gateway from the configured one so an unmanaged worker's
 	// behavior is unchanged; a managed worker's long-poll apply loop replaces it.
-	p.mcp.Store(cfg.MCP)
+	// cfg.MCP may be an untyped-nil interface (MCP disabled) — wrapped in the
+	// holder it still reads back as nil via mcpGateway().
+	p.mcp.Store(&mcpHolder{gw: cfg.MCP})
 	// Seed the swappable judge from cfg.Judge (may be nil = disabled), same
 	// rationale as the gateway above.
 	p.judgeP.Store(&judgeHolder{j: cfg.Judge})

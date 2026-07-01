@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/controlplane"
 	"github.com/ethosagent/warden/internal/observability"
@@ -45,7 +46,15 @@ func newControlPlaneCmd() *cobra.Command {
 			tlsHost, _ := cmd.Flags().GetString("tls-host")
 			stateDir, _ := cmd.Flags().GetString("state-dir")
 			maxEvents, _ := cmd.Flags().GetInt("central-max-events")
-			return runControlPlane(cmd, configPath, listenAddr, tokenEnv, caCert, caKey, tlsHost, stateDir, maxEvents)
+			aProvider, _ := cmd.Flags().GetString("analytics-provider")
+			aDB, _ := cmd.Flags().GetString("analytics-db")
+			aRetention, _ := cmd.Flags().GetInt("analytics-retention-days")
+			return runControlPlane(cmd, cpOptions{
+				configPath: configPath, listenAddr: listenAddr, tokenEnv: tokenEnv,
+				caCert: caCert, caKey: caKey, tlsHost: tlsHost, stateDir: stateDir,
+				maxEvents: maxEvents, analyticsProvider: aProvider, analyticsDB: aDB,
+				retentionDays: aRetention,
+			})
 		},
 	}
 	cmd.Flags().String("listen", "0.0.0.0:7070", "control-plane HTTP(S) listen address")
@@ -55,10 +64,26 @@ func newControlPlaneCmd() *cobra.Command {
 	cmd.Flags().String("tls-host", "localhost,127.0.0.1", "comma-separated SANs for the minted server cert")
 	cmd.Flags().String("state-dir", "", "writable directory for the served/editable config (enables dashboard editing; seeded once from --config). Empty = edit --config in place")
 	cmd.Flags().Int("central-max-events", 0, "central analytics store retention cap (0 = default)")
+	cmd.Flags().String("analytics-provider", "sqlite", "fleet analytics store: sqlite (default, persistent + Query Builder) | memory (ephemeral)")
+	cmd.Flags().String("analytics-db", "", "sqlite fleet analytics DB path (default: <state-dir>/warden-fleet.db, else ./warden-fleet.db)")
+	cmd.Flags().Int("analytics-retention-days", 30, "prune fleet analytics events older than N days (0 = keep forever)")
 	return cmd
 }
 
-func runControlPlane(cmd *cobra.Command, configPath, listenAddr, tokenEnv, caCert, caKey, tlsHost, stateDir string, maxEvents int) error {
+// cpOptions carries the resolved control-plane flags so runControlPlane keeps a
+// readable signature as the option set grows.
+type cpOptions struct {
+	configPath, listenAddr, tokenEnv string
+	caCert, caKey, tlsHost, stateDir string
+	maxEvents                        int
+	analyticsProvider, analyticsDB   string
+	retentionDays                    int
+}
+
+func runControlPlane(cmd *cobra.Command, opts cpOptions) error {
+	configPath, listenAddr, tokenEnv := opts.configPath, opts.listenAddr, opts.tokenEnv
+	caCert, caKey, tlsHost, stateDir := opts.caCert, opts.caKey, opts.tlsHost, opts.stateDir
+	maxEvents := opts.maxEvents
 	// Resolve the SERVED path. With no --state-dir we serve+edit --config in place
 	// (unchanged behavior). With --state-dir we serve+edit a writable copy seeded
 	// once from --config, so the dashboard can persist edits even when --config is
@@ -116,10 +141,38 @@ func runControlPlane(cmd *cobra.Command, configPath, listenAddr, tokenEnv, caCer
 		logger.Warn("control-plane: no token configured; serving WITHOUT auth (set --token-env for production)")
 	}
 
+	// Build the fleet analytics store. sqlite (default) persists events and powers
+	// the read-only Query Builder; memory is ephemeral. The DB path defaults under
+	// --state-dir (a writable volume) when set, else the working directory.
+	dbPath := opts.analyticsDB
+	if dbPath == "" {
+		if stateDir != "" {
+			dbPath = filepath.Join(stateDir, "warden-fleet.db")
+		} else {
+			dbPath = "warden-fleet.db"
+		}
+	}
+	store, err := analytics.NewFleetStore(analytics.FleetConfig{
+		Provider:      opts.analyticsProvider,
+		SQLitePath:    dbPath,
+		RetentionDays: opts.retentionDays,
+		MaxEvents:     maxEvents,
+	})
+	if err != nil {
+		return fmt.Errorf("control-plane: analytics store: %w", err)
+	}
+	defer func() { _ = store.Close() }()
+	if opts.analyticsProvider == "memory" {
+		logger.Info("control plane analytics store", "provider", "memory", "persistent", false)
+	} else {
+		logger.Info("control plane analytics store", "provider", "sqlite", "db", dbPath, "retentionDays", opts.retentionDays)
+	}
+
 	srv := controlplane.New(controlplane.Config{
 		PolicyPath: servedPath,
 		Token:      token,
 		MaxEvents:  maxEvents,
+		Store:      store,
 		Logger:     logger,
 	})
 

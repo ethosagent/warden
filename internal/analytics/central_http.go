@@ -131,10 +131,12 @@ func (h *HTTPRemoteStore) post(env ingestEnvelope) error {
 }
 
 // IngestHandler is the aggregator side of central aggregation: an HTTP handler
-// that accepts batches of events from workers and stores them in a CentralStore,
-// tagging each with the originating proxy id from the request header.
+// that accepts batches of events from workers and stores them in a FleetStore,
+// tagging each with the originating proxy id from the request header. The store
+// is the FleetStore interface so the control plane can back it with either the
+// in-memory CentralStore or a persistent FleetSQLiteStore.
 type IngestHandler struct {
-	store     *CentralStore
+	store     FleetStore
 	token     string
 	onIngest  func(proxyID string, n int)                // optional; see SetOnIngest
 	onMCP     func(proxyID string, snap MCPSnapshot)     // optional; see SetOnMCP
@@ -143,7 +145,7 @@ type IngestHandler struct {
 
 // NewIngestHandler returns a handler that ingests event batches into store.
 // When token is non-empty, requests must present it as a bearer credential.
-func NewIngestHandler(store *CentralStore, token string) *IngestHandler {
+func NewIngestHandler(store FleetStore, token string) *IngestHandler {
 	return &IngestHandler{store: store, token: token}
 }
 

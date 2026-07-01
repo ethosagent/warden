@@ -20,9 +20,18 @@ type Detection struct {
 
 const maxScanSize = 1 << 20 // 1 MB
 
-// Scanner holds compiled regex patterns for injection, credential, and PII
-// detection. It is safe for concurrent use after construction.
-type Scanner struct {
+// Scanner is the content-scanning seam consumed by the MCP subsystem. The
+// concrete implementation is patternScanner (regex-based); consumers depend on
+// this interface so scanning can be faked/swapped in tests.
+type Scanner interface {
+	// ScanResponse scans body and returns any detections (deduplicated).
+	ScanResponse(body []byte) []Detection
+}
+
+// patternScanner holds compiled regex patterns for injection, credential, and
+// PII detection. It is safe for concurrent use after construction and satisfies
+// the Scanner interface.
+type patternScanner struct {
 	injectionPatterns  []compiledPattern
 	credentialPatterns []compiledPattern
 	piiPatterns        []compiledPattern
@@ -65,14 +74,15 @@ func WithEvidence(enabled bool) Option {
 
 // NewScanner compiles all detection patterns and returns a ready-to-use Scanner.
 // By default it runs injection, credential, and PII (email/card/SSN) detectors;
-// the noisy phone detector is opt-in via WithPhonePII(true).
-func NewScanner(opts ...Option) *Scanner {
+// the noisy phone detector is opt-in via WithPhonePII(true). It returns the
+// Scanner interface so callers depend on the seam, not the concrete type.
+func NewScanner(opts ...Option) Scanner {
 	var cfg options
 	for _, opt := range opts {
 		opt(&cfg)
 	}
 
-	s := &Scanner{evidence: cfg.evidence}
+	s := &patternScanner{evidence: cfg.evidence}
 
 	// Injection patterns
 	s.injectionPatterns = []compiledPattern{
@@ -238,7 +248,7 @@ func validSSN(match string) bool {
 // ScanResponse scans the response body for injection and credential patterns.
 // It also decodes base64 blocks and URL-encoded content for deeper inspection.
 // Detections are deduplicated before returning.
-func (s *Scanner) ScanResponse(body []byte) []Detection {
+func (s *patternScanner) ScanResponse(body []byte) []Detection {
 	if len(body) > maxScanSize {
 		body = body[:maxScanSize]
 	}

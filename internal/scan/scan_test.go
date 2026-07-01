@@ -44,10 +44,14 @@ func TestNewScanner(t *testing.T) {
 	if s == nil {
 		t.Fatal("NewScanner returned nil")
 	}
-	if len(s.injectionPatterns) == 0 {
+	ps, ok := s.(*patternScanner)
+	if !ok {
+		t.Fatalf("NewScanner returned %T, want *patternScanner", s)
+	}
+	if len(ps.injectionPatterns) == 0 {
 		t.Error("expected injection patterns to be compiled")
 	}
-	if len(s.credentialPatterns) == 0 {
+	if len(ps.credentialPatterns) == 0 {
 		t.Error("expected credential patterns to be compiled")
 	}
 }

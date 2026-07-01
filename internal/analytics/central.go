@@ -27,7 +27,11 @@ type CentralStore struct {
 	maxEvents int
 }
 
-var _ AnalyticsStore = (*CentralStore)(nil)
+var (
+	_ AnalyticsStore = (*CentralStore)(nil)
+	// CentralStore is the in-memory FleetStore: NewFleetStore("memory") returns it.
+	_ FleetStore = (*CentralStore)(nil)
+)
 
 // NewCentralStore returns a new CentralStore. maxEvents <= 0 uses defaultMaxEvents.
 func NewCentralStore(maxEvents int) *CentralStore {

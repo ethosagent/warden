@@ -78,3 +78,36 @@ func TestScanToolResult_EmptyInput(t *testing.T) {
 		t.Errorf("expected nil for empty input, got %v", detections)
 	}
 }
+
+// fakeScanner implements scan.Scanner and returns a canned detection for any
+// non-empty body. It exists only to prove the MCP scan helpers depend on the
+// scan.Scanner interface, not the concrete pattern scanner.
+type fakeScanner struct {
+	det scan.Detection
+}
+
+func (f fakeScanner) ScanResponse(body []byte) []scan.Detection {
+	if len(body) == 0 {
+		return nil
+	}
+	return []scan.Detection{f.det}
+}
+
+// TestScanToolArgs_SeamFakeScanner proves the seam: a fake scan.Scanner (never
+// the concrete pattern scanner) flows its finding through ScanToolArgs, so the
+// consumer depends only on the interface.
+func TestScanToolArgs_SeamFakeScanner(t *testing.T) {
+	var scanner scan.Scanner = fakeScanner{det: scan.Detection{
+		Category: "credential_leak",
+		Pattern:  "fake_pattern",
+		Severity: "high",
+	}}
+	args := json.RawMessage(`{"query":"anything"}`)
+	detections := ScanToolArgs(args, scanner)
+	if len(detections) != 1 {
+		t.Fatalf("expected 1 detection from fake scanner, got %d", len(detections))
+	}
+	if detections[0].Pattern != "fake_pattern" || detections[0].Category != "credential_leak" {
+		t.Errorf("fake detection did not flow through: got %+v", detections[0])
+	}
+}

@@ -62,7 +62,7 @@ func (p *Proxy) handleWSUpgrade(
 	domain string,
 	port int,
 	sessionKey string,
-	gw *gateway.Gateway,
+	gw MCPGateway,
 ) {
 	defer func() { _ = upstream.Close() }()
 
@@ -82,7 +82,13 @@ func (p *Proxy) handleWSUpgrade(
 		return
 	}
 
-	pump := &ws.Pump{GW: gw, SessionKey: sessionKey, Log: p.cfg.Logger}
+	// The WS frame pump scans through the concrete *gateway.Gateway. gw is always
+	// a *gateway.Gateway in production (built by gateway.New); the type assertion
+	// recovers it. A non-gateway MCPGateway (e.g. a test fake) leaves the pump's GW
+	// nil, so frames forward verbatim without WS scanning — the request/response
+	// HTTP paths still went through the interface.
+	concreteGW, _ := gw.(*gateway.Gateway)
+	pump := &ws.Pump{GW: concreteGW, SessionKey: sessionKey, Log: p.cfg.Logger}
 	client := rwc{br: clientBR, conn: tlsConn}
 	server := connRWC{r: upstreamBR, conn: upstream}
 
