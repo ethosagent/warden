@@ -671,9 +671,17 @@ func mcpSettingsNode(s *config.MCPSettings) (*yaml.Node, error) {
 	}
 	if s.Chain != nil {
 		raw.Chain = &mcpChainYAML{
-			Enabled:    boolPtr(s.Chain.Enabled),
-			WindowSize: intPtr(s.Chain.WindowSize),
-			Patterns:   s.Chain.Patterns,
+			Enabled:  boolPtr(s.Chain.Enabled),
+			Patterns: s.Chain.Patterns,
+		}
+		// windowSize is a *int with omitempty, but omitempty on a pointer only
+		// skips nil — a pointer-to-zero still marshals as "windowSize: 0", which
+		// the loader re-reads and validateMCP rejects. So write it ONLY when the
+		// wire carries a positive value (mirroring the judge encoder's
+		// positive-only fields); leaving it nil keeps the field absent so the
+		// loader applies its default (defaultMCPChainWindowSize=50) on re-parse.
+		if s.Chain.WindowSize > 0 {
+			raw.Chain.WindowSize = intPtr(s.Chain.WindowSize)
 		}
 	}
 	if s.Tools != nil &&

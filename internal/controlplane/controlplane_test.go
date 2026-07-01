@@ -592,6 +592,43 @@ func TestWriteSettingsPersistsMCP(t *testing.T) {
 	}
 }
 
+// TestWriteSettings_MCPChainWindowSizeDefault verifies that persisting an MCP
+// settings block whose chain is enabled but carries no explicit windowSize (0)
+// produces a served config file that RE-LOADS and VALIDATES without the
+// "mcp.chain.windowSize must be greater than 0" error. The encoder must omit the
+// windowSize field so the loader applies its default (50) on re-parse, rather
+// than writing a concrete 0 that validation rejects (the dashboard-save bug).
+func TestWriteSettings_MCPChainWindowSizeDefault(t *testing.T) {
+	path := writePolicyFile(t, "api.openai.com") // plain allow/deny, no mcp block
+	srv := New(Config{PolicyPath: path})
+
+	if err := srv.writeSettings(config.SettingsWire{
+		MCP: &config.MCPSettings{
+			Enabled: true,
+			Mode:    "enforce",
+			Chain:   &config.MCPChainSettings{Enabled: true, WindowSize: 0},
+		},
+	}); err != nil {
+		t.Fatalf("writeSettings (mcp chain, no windowSize): %v", err)
+	}
+
+	// The on-disk file must re-load and validate; the loader default must apply.
+	prov, err := config.NewLocalYAMLProvider(path)
+	if err != nil {
+		t.Fatalf("reload after settings edit: %v", err)
+	}
+	p, err := prov.GetPolicy()
+	if err != nil {
+		t.Fatalf("re-loaded config failed validation: %v", err)
+	}
+	if !p.MCP.Chain.Enabled {
+		t.Fatalf("mcp.chain not enabled after round-trip: %+v", p.MCP.Chain)
+	}
+	if p.MCP.Chain.WindowSize != 50 {
+		t.Errorf("windowSize default not applied on re-parse: got %d, want 50", p.MCP.Chain.WindowSize)
+	}
+}
+
 // TestWriteSettingsPreservesPolicyBlock verifies a settings edit does NOT clobber
 // the existing allow/deny policy block in the CP config file.
 func TestWriteSettingsPreservesPolicyBlock(t *testing.T) {

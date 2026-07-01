@@ -250,9 +250,16 @@ func MCPConfigFromSettings(s *MCPSettings) MCPConfig {
 		}
 	}
 	if s.Chain != nil {
+		// A wire windowSize of <=0 means "not set" (omitempty drops it), so apply
+		// the loader's default rather than rebuild a gateway with windowSize==0,
+		// which validateMCP rejects.
+		windowSize := s.Chain.WindowSize
+		if windowSize <= 0 {
+			windowSize = defaultMCPChainWindowSize
+		}
 		out.Chain = MCPChainConfig{
 			Enabled:    s.Chain.Enabled,
-			WindowSize: s.Chain.WindowSize,
+			WindowSize: windowSize,
 			Patterns:   append([]string(nil), s.Chain.Patterns...),
 		}
 	}

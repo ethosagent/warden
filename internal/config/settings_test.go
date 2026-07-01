@@ -115,6 +115,32 @@ func TestMCPConfigFromSettings_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestMCPConfigFromSettings_WindowSizeDefault verifies that rebuilding an
+// MCPConfig from wire settings applies the loader's chain windowSize default
+// when the wire carries no explicit (positive) value, so a worker never rebuilds
+// a gateway with windowSize==0 (which fails validateMCP). An explicit positive
+// value is preserved as-is.
+func TestMCPConfigFromSettings_WindowSizeDefault(t *testing.T) {
+	// windowSize absent (0) → default 50.
+	got := MCPConfigFromSettings(&MCPSettings{
+		Enabled: true,
+		Chain:   &MCPChainSettings{Enabled: true, WindowSize: 0},
+	})
+	if got.Chain.WindowSize != defaultMCPChainWindowSize {
+		t.Errorf("windowSize default not applied: got %d, want %d",
+			got.Chain.WindowSize, defaultMCPChainWindowSize)
+	}
+
+	// Explicit positive windowSize preserved.
+	got = MCPConfigFromSettings(&MCPSettings{
+		Enabled: true,
+		Chain:   &MCPChainSettings{Enabled: true, WindowSize: 20},
+	})
+	if got.Chain.WindowSize != 20 {
+		t.Errorf("explicit windowSize not preserved: got %d, want 20", got.Chain.WindowSize)
+	}
+}
+
 // TestMCPConfigFromSettings_NilDisabled verifies a nil wire block maps to a zero
 // (disabled) MCPConfig, matching the "no MCP distributed" case.
 func TestMCPConfigFromSettings_NilDisabled(t *testing.T) {
