@@ -31,6 +31,18 @@ mcp:
                      # LOCAL config — the masked sample never leaves the worker except inside the
                      # value-free MCP schema it already forwards to the control plane.
 
+# Scan ORDINARY (non-MCP) HTTP/HTTPS response bodies for credential leakage and
+# prompt injection. monitor = detect + log + surface in the dashboard, never block
+# (mirrors mcp.mode above; blocking a real Ethos response on a false positive would
+# break the agent — flip to `enforce` to 502 high-severity leaks/injections).
+responseScan:
+  enabled: true
+  mode: monitor              # off | monitor | enforce
+  maxBodyBytes: 1048576      # 1 MiB cap; streaming/over-cap/binary bodies are skipped + logged
+  evidence: true             # keep a MASKED sample (••••+last-4+len, never raw) per finding, like mcp.scan
+  pii:
+    phone: false             # email/card(Luhn)/SSN always on; phone opt-in (noisy)
+
 # Long-poll allow/deny policy from the control plane; trust its (privately-signed)
 # cert via the same proxy CA this worker already uses.
 controlPlane:
