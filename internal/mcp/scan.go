@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"encoding/json"
+	"sort"
 	"strings"
 
 	"github.com/ethosagent/warden/internal/scan"
@@ -34,11 +35,19 @@ func extractStrings(raw json.RawMessage, depth int) []string {
 		return result
 	}
 
-	// Try as object
+	// Try as object. Iterate keys in sorted order so the extracted-string
+	// sequence (and thus the concatenated whole-body scan) is deterministic —
+	// Go map iteration is randomized, which otherwise makes cross-field
+	// detection (and its test) flaky.
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err == nil {
-		for _, v := range obj {
-			result = append(result, extractStrings(v, depth+1)...)
+		keys := make([]string, 0, len(obj))
+		for k := range obj {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			result = append(result, extractStrings(obj[k], depth+1)...)
 		}
 		return result
 	}
