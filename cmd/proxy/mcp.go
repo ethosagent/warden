@@ -43,6 +43,9 @@ func newMCPCmd() *cobra.Command {
 
 	cmd.Flags().String("mode", "", "override the MCP mode: monitor|enforce (default: config or built-in monitor)")
 	cmd.Flags().String("verify-sha256", "", "verify the server binary's SHA-256 (hex) before launch")
+	cmd.Flags().String("verify-ed25519-pubkey", "", "Ed25519 public key (hex) to verify the server binary's signature before launch")
+	cmd.Flags().String("verify-ed25519-sig", "", "Ed25519 detached signature (hex) over the server binary; requires --verify-ed25519-pubkey")
+	cmd.Flags().String("server", "", "name of the mcp.servers config entry whose integrity material to apply")
 	// --config is inherited from the root persistent flag.
 
 	return cmd
@@ -69,6 +72,18 @@ func runMCP(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	verifyPubKey, err := cmd.Flags().GetString("verify-ed25519-pubkey")
+	if err != nil {
+		return err
+	}
+	verifySig, err := cmd.Flags().GetString("verify-ed25519-sig")
+	if err != nil {
+		return err
+	}
+	serverName, err := cmd.Flags().GetString("server")
+	if err != nil {
+		return err
+	}
 
 	mcpCfg, err := loadMCPConfig(cmd, configPath)
 	if err != nil {
@@ -76,6 +91,23 @@ func runMCP(cmd *cobra.Command, args []string) error {
 	}
 	if m := strings.ToLower(strings.TrimSpace(modeOverride)); m != "" {
 		mcpCfg.Mode = m
+	}
+
+	// Resolve the integrity material: start from the named mcp.servers entry (if
+	// any), then let CLI flags override each field. CLI flags win so an operator
+	// can pin a binary ad hoc without editing config.
+	integ, err := resolveServerIntegrity(mcpCfg.Servers, serverName)
+	if err != nil {
+		return err
+	}
+	if verifySHA != "" {
+		integ.SHA256 = verifySHA
+	}
+	if verifyPubKey != "" {
+		integ.Ed25519PublicKey = verifyPubKey
+	}
+	if verifySig != "" {
+		integ.Ed25519Signature = verifySig
 	}
 
 	// Logger to STDERR — stdout is the JSON-RPC data channel and must stay clean.
@@ -90,11 +122,22 @@ func runMCP(cmd *cobra.Command, args []string) error {
 	if lookErr != nil {
 		return fmt.Errorf("resolve server command %q: %w", serverCmd, lookErr)
 	}
-	if verifySHA != "" {
-		if verr := stdio.VerifyBinary(resolved, verifySHA); verr != nil {
+	// Fail-closed: any configured integrity material must verify before launch. A
+	// SHA-256 and an Ed25519 signature compose — when both are set, both must pass.
+	if integ.SHA256 != "" {
+		if verr := stdio.VerifyBinary(resolved, integ.SHA256); verr != nil {
 			return verr
 		}
-		logger.Info("server binary integrity verified", "path", resolved)
+	}
+	if err := stdio.VerifyEd25519(resolved, integ.Ed25519PublicKey, integ.Ed25519Signature); err != nil {
+		return err
+	}
+	if integ.SHA256 != "" || integ.Ed25519PublicKey != "" {
+		logger.Info("server binary integrity verified",
+			"path", resolved,
+			"sha256", integ.SHA256 != "",
+			"ed25519", integ.Ed25519PublicKey != "",
+		)
 	}
 
 	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
@@ -103,7 +146,7 @@ func runMCP(cmd *cobra.Command, args []string) error {
 	logger.Info("warden mcp wedge starting",
 		"mode", mcpCfg.Mode,
 		"server", resolved,
-		"verify", verifySHA != "",
+		"verify", integ.SHA256 != "" || integ.Ed25519PublicKey != "",
 	)
 
 	srv := exec.CommandContext(ctx, resolved, serverArgs...) //nolint:gosec // operator-provided server command
@@ -135,6 +178,23 @@ func runMCP(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("mcp server exited: %w", waitErr)
 	}
 	return nil
+}
+
+// resolveServerIntegrity returns the integrity material for the named server. An
+// empty name yields a zero value (no config-sourced material; CLI flags may still
+// supply it). A non-empty name that matches no mcp.servers entry is an error, so
+// a typo can never silently disable an intended integrity check (fail-closed).
+func resolveServerIntegrity(servers []config.MCPServerConfig, name string) (config.MCPServerConfig, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return config.MCPServerConfig{}, nil
+	}
+	for _, s := range servers {
+		if s.Name == name {
+			return s, nil
+		}
+	}
+	return config.MCPServerConfig{}, fmt.Errorf("--server %q: no matching entry in mcp.servers config", name)
 }
 
 // loadMCPConfig returns the MCP policy for the wedge. When configPath points to

@@ -156,6 +156,19 @@ mcp:
                                   # An out-of-scope call is denied+logged (mcp_out_of_scope) in enforce;
                                   # monitor logs without blocking. outOfScope: escalate is DEFERRED —
                                   # with no approval channel it degrades to deny (never widens access).
+  servers: []                     # per-server binary-integrity pinning for the `warden mcp` wedge.
+                                  # Select an entry at launch with `--server <name>`; the wedge then
+                                  # verifies the resolved server binary before starting and REFUSES to
+                                  # launch on any mismatch (fail-closed). All fields are hex. sha256 and
+                                  # the ed25519 signature compose: when both are set, both must pass.
+                                  # CLI flags (--verify-sha256, --verify-ed25519-pubkey,
+                                  # --verify-ed25519-sig) override the matching config field. LOCAL config.
+                                  # Example:
+                                  #   - name: github-mcp              # matched by `warden mcp --server github-mcp`
+                                  #     sha256: 3b1f...                # expected SHA-256 of the binary (hex)
+                                  #     ed25519PublicKey: 9a0c...      # 32-byte signing public key (hex)
+                                  #     ed25519Signature: 4d2e...      # 64-byte detached signature over the binary (hex)
+                                  # A signature requires a public key; a signature without one is rejected.
 
 # Per-destination request-authentication transforms. The agent sends a request
 # with a placeholder or no auth at all; Warden injects real, request-scoped
