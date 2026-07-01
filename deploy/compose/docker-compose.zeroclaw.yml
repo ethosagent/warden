@@ -18,8 +18,8 @@
 services:
   warden:
     # Pulled from Docker Hub — no local build. Override the tag with WARDEN_VERSION
-    # (default 0.1.0), e.g. `WARDEN_VERSION=0.2.0 docker compose ... up`.
-    image: ethosagent/warden:${WARDEN_VERSION:-0.1.0}
+    # (default 0.2.0), e.g. `WARDEN_VERSION=0.2.1 docker compose ... up`.
+    image: ethosagent/warden:${WARDEN_VERSION:-0.2.0}
     networks: [zeroclaw-internal, egress]
     ports:
       - "9090:9090"                 # dashboard + /metrics (host-only; NOT reachable by ZeroClaw)
@@ -37,7 +37,9 @@ services:
       - "--db=/data/warden.db"
 
   zeroclaw:
-    image: ghcr.io/zeroclaw-labs/zeroclaw:latest
+    # Pinned by digest — this repo has no semver tags (only main/latest/sha-*);
+    # the digest is the only immutable identifier. Resolved from :latest 2026-07-01.
+    image: ghcr.io/zeroclaw-labs/zeroclaw@sha256:eae321dac2d314bc282bdfb28b5378c9d527998f7e2fe0dee8315bfdcdf13a0c
     # ARM64 note: if the distroless image exits immediately, switch to the Debian
     # variant: image: ghcr.io/zeroclaw-labs/zeroclaw:debian
     depends_on: [warden]
@@ -71,7 +73,7 @@ services:
   # host:42617 -> zeroclaw:42617 WITHOUT giving ZeroClaw an internet route —
   # ZeroClaw stays internal-only; only this dumb forwarder touches the frontend.
   ui:
-    image: alpine/socat
+    image: alpine/socat:1.8.1.3
     depends_on: [zeroclaw]
     networks: [zeroclaw-internal, frontend]
     ports:

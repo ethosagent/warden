@@ -103,7 +103,7 @@ services:
       - "--db=/data/warden.db"
 
   agent-1:
-    image: curlimages/curl:latest
+    image: curlimages/curl:8.21.0
     depends_on: [worker-1]
     networks: [w1-internal]            # internal only — sole route out is worker-1
     environment:
@@ -115,7 +115,7 @@ services:
     entrypoint: ["sh", "-c", "while true; do curl -s -o /dev/null -w 'agent-1 -> %{http_code}\\n' https://api.github.com/zen; sleep 5; done"]
 
   agent-2:
-    image: curlimages/curl:latest
+    image: curlimages/curl:8.21.0
     depends_on: [worker-2]
     networks: [w2-internal]
     environment:

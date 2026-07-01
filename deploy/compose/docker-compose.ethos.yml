@@ -115,7 +115,7 @@ services:
   # (Ethos's ACP API on :3001 binds container-localhost and isn't reachable across
   # containers; everything the browser needs is served from :3000.)
   ui:
-    image: alpine/socat
+    image: alpine/socat:1.8.1.3
     depends_on: [ethos]
     networks: [ethos-internal, frontend]
     ports:
