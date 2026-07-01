@@ -210,6 +210,20 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// runtime swap replaces p's live gateway; the apply loop owns closing the old
 	// one, so this defer only handles the gateway live at shutdown.
 
+	// Optional non-MCP HTTP response scanner. Off unless responseScan.enabled; when
+	// off, respScanner stays nil and handleHTTP forwards non-MCP responses
+	// byte-identically. LOCAL config (scanner + evidence never distributed).
+	var respScanner *proxy.ResponseScanner
+	if pol.ResponseScan.Enabled && pol.ResponseScan.Mode != "off" {
+		respScanner = proxy.NewResponseScanner(
+			pol.ResponseScan.Mode,
+			pol.ResponseScan.MaxBodyBytes,
+			pol.ResponseScan.PII.Phone,
+			pol.ResponseScan.Evidence,
+		)
+		logger.Info("HTTP response scanning enabled", "mode", pol.ResponseScan.Mode)
+	}
+
 	// Hot-swappable policy evaluator. In managed mode it starts EMPTY (deny all)
 	// and is filled by the control plane; otherwise it enforces local policy. The
 	// control-plane provider + first pull happened above (before OTel init); if
@@ -323,6 +337,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		Metrics:          metrics,
 		Logger:           logger,
 		MCP:              bootGW,
+		ResponseScan:     respScanner,
 		Transformers:     transformers,
 		Cost:             costEstimator,
 	}

@@ -67,6 +67,13 @@ type Config struct {
 	// byte-identical to before. Non-nil = analyze MCP JSON-RPC traffic.
 	MCP MCPGateway
 
+	// ResponseScan is the optional non-MCP HTTP response scanner. Nil = disabled:
+	// handleHTTP forwards non-MCP responses byte-identically, exactly as before. When
+	// non-nil, a non-MCP response body is buffered (up to MaxBodyBytes) and scanned;
+	// monitor logs findings and forwards unchanged, enforce replaces a flagged body.
+	// MCP responses are handled by MCP above and never reach this scanner.
+	ResponseScan *ResponseScanner
+
 	// Cost is the optional LLM cost estimator. Nil-safe: when nil no cost is
 	// attributed. When set, an allowed request to a known provider domain is
 	// tagged with a heuristic dollar estimate from observed request/response

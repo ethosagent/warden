@@ -170,6 +170,28 @@ mcp:
                                   #     ed25519Signature: 4d2e...      # 64-byte detached signature over the binary (hex)
                                   # A signature requires a public key; a signature without one is rejected.
 
+# Response scanning for ORDINARY (non-MCP) HTTP/HTTPS responses. OFF by default:
+# when responseScan.enabled is false there is zero new work on the hot path and
+# byte-identical behavior. When enabled, Warden buffers each non-MCP response body
+# (up to maxBodyBytes) and runs the SAME detectors the MCP wedge uses — credential
+# leakage, prompt injection, and PII. MCP responses are scanned by the mcp block
+# above and are never double-scanned here. Modes:
+#   off      - no response scanning.
+#   monitor  - detect + log (masked evidence only) + metric, NEVER block.
+#   enforce  - monitor PLUS replace a flagged response body with a 502 error.
+# Streaming responses (text/event-stream), chunked/unknown-length bodies, and any
+# body larger than maxBodyBytes are forwarded UNCHANGED and logged as skipped —
+# never buffered unbounded, never silently truncated. Scan analysis is fail-open:
+# a scanner error logs and forwards (it never breaks egress). Never logs full
+# bodies or raw secrets — masked evidence + bounded finding kinds only.
+responseScan:
+  enabled: false                  # master switch (default false)
+  mode: monitor                   # off | monitor | enforce (default monitor when enabled)
+  maxBodyBytes: 1048576           # cap on buffered response scanning (1 MiB); over-cap/streaming = skipped+logged
+  evidence: false                 # opt-in: keep a MASKED sample per finding (never the raw value)
+  pii:
+    phone: false                  # email/card(Luhn)/SSN always on; phone opt-in (noisy)
+
 # Per-destination request-authentication transforms. The agent sends a request
 # with a placeholder or no auth at all; Warden injects real, request-scoped
 # credentials at the edge. Credentials are read from the environment via ${VAR}

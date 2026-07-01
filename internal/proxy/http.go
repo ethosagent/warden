@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -446,6 +447,84 @@ func (p *Proxy) handleHTTP(tlsConn *tls.Conn, br *bufio.Reader, domain string, p
 				// chunked / unknown or over-cap length: stream unchanged, record
 				// that it was not scanned.
 				p.cfg.Metrics.RecordScanFinding("mcp_response_unscanned_stream")
+			}
+		}
+
+		// Optional non-MCP HTTP response scanning. Runs ONLY for non-MCP responses
+		// (both wasMCP branches and the 101 upgrade already returned above) and only
+		// when a scanner is configured in a non-off mode. When the guard is false the
+		// behavior below is byte-identical to before: resp.Write forwards untouched.
+		if p.cfg.ResponseScan != nil && p.cfg.ResponseScan.mode != responseScanOff &&
+			!wasMCP && resp.StatusCode != 101 {
+			rs := p.cfg.ResponseScan
+			ct := resp.Header.Get("Content-Type")
+			if !rs.scannable(ct, resp.ContentLength) {
+				// Streaming/SSE, unknown/negative length, over-cap, or non-textual:
+				// forward unchanged and record a skip (never truncate, never block).
+				p.cfg.Metrics.RecordScanFinding("http_response_unscanned_stream")
+				p.cfg.Logger.Debug("http response not scanned (unscannable)",
+					slog.String("domain", domain),
+					slog.String("content_type", ct),
+					slog.Int64("content_length", resp.ContentLength),
+				)
+			} else {
+				// Buffer up to the cap + 1 so we can detect an upstream that lied
+				// about (or grew past) its Content-Length and skip rather than block.
+				body, readErr := io.ReadAll(io.LimitReader(resp.Body, int64(rs.MaxBytes())+1))
+				if readErr != nil {
+					// FAIL-OPEN: a read error never breaks egress. Forward what we
+					// have and skip scanning. No body is logged.
+					p.cfg.Logger.Warn("http response scan read error; forwarding unscanned",
+						slog.String("domain", domain),
+						slog.String("error", readErr.Error()),
+					)
+					resp.Body = io.NopCloser(bytes.NewReader(body))
+				} else if int64(len(body)) > int64(rs.MaxBytes()) {
+					// Over cap (upstream under-reported Content-Length): skip + log.
+					resp.Body = io.NopCloser(bytes.NewReader(body))
+					p.cfg.Metrics.RecordScanFinding("http_response_unscanned_stream")
+					p.cfg.Logger.Debug("http response not scanned (over cap)",
+						slog.String("domain", domain),
+						slog.Int("buffered_bytes", len(body)),
+					)
+				} else {
+					start := time.Now()
+					dets, block, reason := rs.Scan(body)
+					p.cfg.Metrics.ObserveAddedLatency("http_response_scan", time.Since(start))
+					p.recordResponseFindings(dets)
+					if block {
+						// enforce + high leak/injection: replace the body with an
+						// error, record a deny, and return (terminal, mirrors the MCP
+						// enforce-deny branch including the closes).
+						fullURL := "https://" + domain + req.URL.RequestURI()
+						_ = p.analyticsStore().StoreEvent(analytics.Event{
+							Timestamp:      time.Now(),
+							Domain:         domain,
+							Port:           port,
+							Protocol:       "https",
+							Method:         req.Method,
+							URL:            fullURL,
+							Decision:       "deny",
+							ResponseStatus: resp.StatusCode,
+							Reason:         reason,
+						})
+						p.cfg.Metrics.RecordRequest("deny", "https")
+						p.cfg.Metrics.RecordBlocked(reason)
+						p.logDecision(decisionLog{
+							Domain: domain, Port: port, Protocol: "https",
+							Method: req.Method, URL: fullURL, Decision: "deny",
+							ResponseStatus: resp.StatusCode,
+						})
+						writeErrorResponse(tlsConn, 502, "Bad Gateway")
+						_ = req.Body.Close()
+						_ = resp.Body.Close()
+						_ = upstream.Close()
+						return
+					}
+					// monitor, or enforce with no high finding: restore the buffered
+					// body so the normal write below forwards it intact.
+					resp.Body = io.NopCloser(bytes.NewReader(body))
+				}
 			}
 		}
 

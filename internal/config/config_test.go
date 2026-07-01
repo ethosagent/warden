@@ -1103,3 +1103,104 @@ func TestDeepCopy_MCPIndependence(t *testing.T) {
 		t.Errorf("orig constraints gained key from copy: %v", orig.MCP.Tools.Constraints)
 	}
 }
+
+// --- responseScan (non-MCP HTTP response scanning) ---
+
+func TestNewLocalYAMLProvider_ResponseScanOmittedDisabled(t *testing.T) {
+	// No responseScan block at all: disabled + documented defaults, config valid
+	// (back-compat: existing configs never fail on this new block).
+	p, err := NewLocalYAMLProvider(writeTemp(t, goodYAML))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	pol, _ := p.GetPolicy()
+	rs := pol.ResponseScan
+	if rs.Enabled {
+		t.Fatal("responseScan should default to disabled when omitted")
+	}
+	if rs.Mode != "monitor" {
+		t.Errorf("mode default = %q, want monitor", rs.Mode)
+	}
+	if rs.MaxBodyBytes != 1048576 {
+		t.Errorf("maxBodyBytes default = %d, want 1048576", rs.MaxBodyBytes)
+	}
+}
+
+func TestNewLocalYAMLProvider_ResponseScanParsed(t *testing.T) {
+	const y = `
+policy:
+  allowlist:
+    - domain: api.openai.com
+responseScan:
+  enabled: true
+  mode: enforce
+  maxBodyBytes: 2048
+  evidence: true
+  pii:
+    phone: true
+`
+	p, err := NewLocalYAMLProvider(writeTemp(t, y))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	pol, _ := p.GetPolicy()
+	rs := pol.ResponseScan
+	if !rs.Enabled {
+		t.Error("enabled should be true")
+	}
+	if rs.Mode != "enforce" {
+		t.Errorf("mode = %q, want enforce", rs.Mode)
+	}
+	if rs.MaxBodyBytes != 2048 {
+		t.Errorf("maxBodyBytes = %d, want 2048", rs.MaxBodyBytes)
+	}
+	if !rs.Evidence {
+		t.Error("evidence should be true")
+	}
+	if !rs.PII.Phone {
+		t.Error("pii.phone should be true")
+	}
+}
+
+func TestValidate_ResponseScanBadMode(t *testing.T) {
+	const y = `
+policy:
+  allowlist:
+    - domain: api.openai.com
+responseScan:
+  enabled: true
+  mode: bogus
+`
+	if _, err := parse([]byte(y)); err == nil {
+		t.Fatal("expected error for invalid responseScan.mode")
+	}
+}
+
+func TestValidate_ResponseScanNegativeMaxBody(t *testing.T) {
+	const y = `
+policy:
+  allowlist:
+    - domain: api.openai.com
+responseScan:
+  enabled: true
+  maxBodyBytes: -1
+`
+	if _, err := parse([]byte(y)); err == nil {
+		t.Fatal("expected error for negative responseScan.maxBodyBytes")
+	}
+}
+
+func TestParse_ResponseScanUnknownFieldStrict(t *testing.T) {
+	// KnownFields(true) is strict: an unknown field under responseScan must fail.
+	const y = `
+policy:
+  allowlist:
+    - domain: api.openai.com
+responseScan:
+  enabled: true
+  bogusField: 1
+`
+	if _, err := parse([]byte(y)); err == nil {
+		t.Fatal("expected parse error for unknown field under responseScan")
+	}
+}

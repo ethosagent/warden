@@ -4,6 +4,7 @@ import (
 	"log/slog"
 
 	"github.com/ethosagent/warden/internal/mcp/gateway"
+	"github.com/ethosagent/warden/internal/scan"
 )
 
 // decisionLog carries the bounded, log-safe fields for one decision record.
@@ -64,6 +65,24 @@ func (p *Proxy) recordMCPFindings(v gateway.Verdict) {
 			slog.String("severity", f.Severity),
 			slog.String("tool", f.Tool),
 			slog.String("path", f.Path),
+		)
+	}
+}
+
+// recordResponseFindings records each non-MCP HTTP response-scan detection as a
+// bounded scan-finding metric and a debug log line. It logs the MASKED evidence
+// (last-4 + length, never the raw value) when present — never the body or a raw
+// secret. Metrics methods are nil-safe. The metric kind is namespaced
+// "http_response_<category>" so it never collides with the MCP finding kinds.
+func (p *Proxy) recordResponseFindings(dets []scan.Detection) {
+	for _, d := range dets {
+		kind := "http_response_" + d.Category
+		p.cfg.Metrics.RecordScanFinding(kind)
+		p.cfg.Logger.Debug("http response finding",
+			slog.String("kind", kind),
+			slog.String("pattern", d.Pattern),
+			slog.String("severity", d.Severity),
+			slog.String("evidence", d.Evidence), // MASKED (opt-in); "" unless Evidence enabled
 		)
 	}
 }
