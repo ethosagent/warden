@@ -78,7 +78,10 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 		return
 	}
 
-	tlsCfg := &tls.Config{Certificates: []tls.Certificate{*leaf}}
+	tlsCfg := &tls.Config{
+		Certificates: []tls.Certificate{*leaf},
+		NextProtos:   []string{"h2", "http/1.1"},
+	}
 	bc := bufferedConn{Reader: br, Conn: clientConn}
 	tlsConn := tls.Server(bc, tlsCfg)
 	if err := tlsConn.Handshake(); err != nil {
@@ -87,6 +90,24 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 	defer tlsConn.Close()
 
 	plainReader := bufio.NewReader(tlsConn)
+
+	// ALPN fast-path: a real gRPC client over TLS requires ALPN "h2", so when the
+	// handshake negotiated h2 we terminate HTTP/2 directly rather than peeking for
+	// a preface (the h2 preface would be sent inside the negotiated protocol
+	// anyway). Existing tests build client conns with no NextProtos, so
+	// NegotiatedProtocol stays "" and this branch is skipped — the peek path below
+	// is unchanged for them.
+	if tlsConn.ConnectionState().NegotiatedProtocol == "h2" {
+		if needsJudge {
+			// HTTP/2 cannot be judged (no HTTP/1 request to inspect); fail closed,
+			// preserving the default-deny invariant for NoMatch destinations.
+			p.storeDeny(domain, port, "tcp", "no_tls")
+			return
+		}
+		p.handleGRPC(bufferedConn{Reader: plainReader, Conn: tlsConn}, domain, port)
+		return
+	}
+
 	peekBytes, err := plainReader.Peek(8)
 	if err != nil {
 		return
@@ -98,7 +119,14 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 		p.handleHTTP(tlsConn, plainReader, domain, port, needsJudge)
 		return
 	case protocol.HTTP2:
-		// M2: HTTP/2 detected; raw-forward until HTTP/2 handler is added.
+		if !needsJudge {
+			// Prior-knowledge h2 client (no ALPN): the peek saw the HTTP/2
+			// connection preface. Terminate HTTP/2 directly.
+			p.handleGRPC(bufferedConn{Reader: plainReader, Conn: tlsConn}, domain, port)
+			return
+		}
+		// needsJudge: HTTP/2 is unjudgeable — fall through to the fail-closed
+		// `if needsJudge { ... }` block below (unchanged).
 	}
 
 	// Non-HTTP traffic inside TLS cannot be judged (no request to inspect):
