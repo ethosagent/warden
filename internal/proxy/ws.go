@@ -6,12 +6,12 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"time"
 
 	"github.com/ethosagent/warden/internal/analytics"
-	"github.com/ethosagent/warden/internal/mcp/gateway"
 	"github.com/ethosagent/warden/internal/mcp/ws"
 )
 
@@ -66,6 +66,28 @@ func (p *Proxy) handleWSUpgrade(
 ) {
 	defer func() { _ = upstream.Close() }()
 
+	// Resolve the WS-scan capability through the interface — never a concrete
+	// type — so any MCPGateway (including a wrapper/decorator over the real
+	// gateway) drives frame scanning. When the live gateway does NOT provide WS
+	// scanning we fail closed in enforce mode and log-once + pass through in
+	// monitor/off, instead of silently forwarding unscanned frames.
+	scanner, canScan := gw.(WSScanner)
+	if !canScan {
+		if p.wsEnforcing(gw) {
+			// Fail closed: refuse the 101, record the block, and let the deferred
+			// upstream.Close() run. The pump never starts, so nothing else owns or
+			// closes the upstream — no leak, no double close.
+			p.refuseWSEnforce(tlsConn, req, domain, port)
+			return
+		}
+		// monitor/off: preserve today's pass-through (nil scanner => pump forwards
+		// frames unscanned) but log the degraded control exactly once.
+		p.wsDowngradeOnce.Do(func() {
+			p.cfg.Logger.Warn("mcp ws scanning unavailable; forwarding frames unscanned (monitor/off)",
+				slog.String("domain", domain), slog.Int("port", port))
+		})
+	}
+
 	// Write the 101 status line + headers verbatim (mirrors the SSE manual
 	// write). resp.Write cannot be used: there is no body and the connection is
 	// then handed to the raw frame pump.
@@ -82,13 +104,9 @@ func (p *Proxy) handleWSUpgrade(
 		return
 	}
 
-	// The WS frame pump scans through the concrete *gateway.Gateway. gw is always
-	// a *gateway.Gateway in production (built by gateway.New); the type assertion
-	// recovers it. A non-gateway MCPGateway (e.g. a test fake) leaves the pump's GW
-	// nil, so frames forward verbatim without WS scanning — the request/response
-	// HTTP paths still went through the interface.
-	concreteGW, _ := gw.(*gateway.Gateway)
-	pump := &ws.Pump{GW: concreteGW, SessionKey: sessionKey, Log: p.cfg.Logger}
+	// scanner is a nil ws.Scanner when the capability was absent (monitor/off
+	// downgrade): the pump then forwards every frame verbatim without scanning.
+	pump := &ws.Pump{GW: scanner, SessionKey: sessionKey, Log: p.cfg.Logger}
 	client := rwc{br: clientBR, conn: tlsConn}
 	server := connRWC{r: upstreamBR, conn: upstream}
 
@@ -118,4 +136,45 @@ func (p *Proxy) handleWSUpgrade(
 		Method: req.Method, URL: fullURL, Decision: decision,
 		ResponseStatus: resp.StatusCode,
 	})
+}
+
+// wsEnforcing reads the CURRENT gateway's enforce state live (hot-swap safe: gw
+// is the per-request snapshot). A gateway that does not expose mcpModeReader is
+// treated as non-enforcing, so the WS path falls through to the pass-through
+// downgrade rather than fabricating a refusal.
+func (p *Proxy) wsEnforcing(gw MCPGateway) bool {
+	mr, ok := gw.(mcpModeReader)
+	return ok && mr.Enforcing()
+}
+
+// refuseWSEnforce fails a WebSocket upgrade closed: the live gateway cannot scan
+// WS frames and MCP mode is enforce, so Warden refuses the 101 rather than
+// forwarding frames unscanned. It writes a 502 (consistent with other MCP enforce
+// denials), records a blocked decision (analytics event + metric + decisionLog)
+// with the bounded reason mcp_ws_unscannable, and logs why at WARN. The caller's
+// deferred upstream.Close() closes the upstream; the pump is never started.
+func (p *Proxy) refuseWSEnforce(tlsConn *tls.Conn, req *http.Request, domain string, port int) {
+	const reason = "mcp_ws_unscannable"
+	fullURL := "https://" + domain + req.URL.RequestURI()
+	writeErrorResponse(tlsConn, 502, "Bad Gateway")
+	_ = p.analyticsStore().StoreEvent(analytics.Event{
+		Timestamp:      time.Now(),
+		Domain:         domain,
+		Port:           port,
+		Protocol:       "mcp",
+		Method:         req.Method,
+		URL:            fullURL,
+		Decision:       "deny",
+		Reason:         reason,
+		ResponseStatus: 502,
+	})
+	p.cfg.Metrics.RecordRequest("deny", "mcp")
+	p.cfg.Metrics.RecordBlocked(reason)
+	p.logDecision(decisionLog{
+		Domain: domain, Port: port, Protocol: "mcp",
+		Method: req.Method, URL: fullURL, Decision: "deny",
+		ResponseStatus: 502,
+	})
+	p.cfg.Logger.Warn("mcp ws scanning unavailable in enforce mode; refusing upgrade",
+		slog.String("domain", domain), slog.Int("port", port), slog.String("reason", reason))
 }

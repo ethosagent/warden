@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"net/http"
 	"sync"
 
 	"github.com/ethosagent/warden/internal/mcp/gateway"
@@ -19,10 +20,21 @@ const maxReassembledMessage = 8 << 20 // 8 MiB
 // gateway Deny tears down the connection (RFC 6455 §7.4.1, code 1008).
 const ClosePolicyViolation uint16 = 1008
 
+// Scanner is the narrow frame-scan capability the pump consumes. It is exactly
+// the two directional scan hooks the pump calls — never a concrete type — so any
+// MCPGateway implementation (including a wrapper/decorator over the concrete
+// gateway) drives WS frame scanning. *gateway.Gateway satisfies it, as does the
+// proxy's WSScanner capability (a structural superset of this interface).
+type Scanner interface {
+	OnRequest(sessionKey, method, url string, hdr http.Header, body []byte) gateway.Verdict
+	OnResponse(sessionKey string, status int, hdr http.Header, body []byte) gateway.Verdict
+}
+
 // Pump scans MCP JSON-RPC text messages flowing over a WebSocket while
-// forwarding every frame transparently in both directions.
+// forwarding every frame transparently in both directions. A nil GW forwards
+// frames verbatim without scanning (the monitor/off downgrade path).
 type Pump struct {
-	GW         *gateway.Gateway
+	GW         Scanner
 	SessionKey string
 	Log        *slog.Logger
 }

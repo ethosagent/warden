@@ -96,6 +96,31 @@ type MCPGateway interface {
 	Close() error
 }
 
+// WSScanner is the WebSocket-frame-scan capability the WS path requires of the
+// live MCP gateway. Its two directional scan methods are exactly the shape
+// ws.Pump consumes (ws.Scanner), so a WSScanner value drives the pump directly
+// (structural superset). The extra nil-op marker ScansWSFrames distinguishes a
+// gateway that genuinely performs WS frame scanning from an arbitrary MCPGateway
+// that merely satisfies OnRequest/OnResponse structurally — a future decorator
+// that wants frame scanning opts in by promoting the marker (embedding
+// *gateway.Gateway). *gateway.Gateway satisfies it. A gateway that does NOT
+// satisfy WSScanner triggers handleWSUpgrade's fail-closed (enforce) or
+// logged-downgrade (monitor/off) branch instead of silently passing frames
+// through unscanned. This is the ONE WS-scanning seam the plan permits.
+type WSScanner interface {
+	OnRequest(sessionKey, method, url string, hdr http.Header, body []byte) gateway.Verdict
+	OnResponse(sessionKey string, status int, hdr http.Header, body []byte) gateway.Verdict
+	ScansWSFrames()
+}
+
+// mcpModeReader is the minimal live-mode signal the WS path reads when a gateway
+// does NOT provide WSScanner, so the fail-closed decision reflects the current
+// (hot-swapped) gateway's mode rather than a static config snapshot.
+// *gateway.Gateway implements it. It is deliberately separate from WSScanner: the
+// fail-closed branch must be able to read "is this gateway enforcing?" precisely
+// when the scan capability is absent.
+type mcpModeReader interface{ Enforcing() bool }
+
 // PolicyEvaluator is the consumer-side seam for the static allow/deny decision.
 // *policy.Evaluator satisfies it. Replace is used by the control-plane apply loop
 // to hot-swap the running policy; it is kept on the interface so the proxy's
@@ -202,6 +227,12 @@ type Proxy struct {
 	// so it is wrapped in analyticsHolder. It is seeded from cfg.Analytics in New
 	// (validated non-nil), so an unmanaged worker's behavior is unchanged.
 	analyticsP atomic.Pointer[analyticsHolder]
+
+	// wsDowngradeOnce guards a single WARN when a WS upgrade is forwarded
+	// unscanned because the live gateway lacks WSScanner in monitor/off mode. It
+	// is process-wide (not per-connection) so a degraded control is visible
+	// without log spam.
+	wsDowngradeOnce sync.Once
 }
 
 // mcpHolder wraps the MCPGateway interface so it can live behind an

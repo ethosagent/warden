@@ -538,6 +538,21 @@ func (g *Gateway) disabled() bool {
 	return !g.cfg.Enabled || g.cfg.Mode == modeOff
 }
 
+// ScansWSFrames marks *gateway.Gateway as a live WebSocket frame scanner: it
+// forwards reassembled JSON-RPC WS messages through the same OnRequest/OnResponse
+// scan chain as HTTP. It is a nil-op marker — its presence in the method set is
+// the capability signal the proxy's WS path asserts for (proxy.WSScanner). A
+// gateway or decorator that does NOT provide this marker is treated as unable to
+// scan WS frames, triggering the WS path's fail-closed / logged-downgrade branch.
+func (g *Gateway) ScansWSFrames() {}
+
+// Enforcing reports whether the gateway is in enforce mode right now (enabled and
+// mode == enforce). The proxy WS path reads it live off the current (hot-swapped)
+// gateway to decide whether to fail closed when WS scanning is unavailable.
+func (g *Gateway) Enforcing() bool {
+	return g.cfg.Enabled && g.cfg.Mode == modeEnforce
+}
+
 // failVerdict builds the fail-open / fail-closed verdict used on parse errors
 // and recovered panics. method may be "".
 func (g *Gateway) failVerdict(method, tool string) Verdict {
