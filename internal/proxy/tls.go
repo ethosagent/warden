@@ -2,8 +2,9 @@ package proxy
 
 import (
 	"bufio"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -17,6 +18,26 @@ import (
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/protocol"
 )
+
+// defaultLeafTTL is the validity window minted for MITM leaf certificates. It is
+// a field default (p.leafTTL) rather than a hard constant so expiry tests can
+// shrink it via a white-box override.
+const defaultLeafTTL = 24 * time.Hour
+
+// leafRenewSkew is how long before a cached leaf's NotAfter getOrCreateCert
+// re-mints it. Re-minting early absorbs clock skew and avoids handing out a cert
+// that expires mid-handshake. Kept a const because tests exercise expiry by
+// using a short leafTTL and advancing the injected clock past NotAfter-skew.
+const leafRenewSkew = time.Hour
+
+// cachedCert is the certCache value. It carries the leaf's NotAfter alongside
+// the certificate so the hot cache-hit path is a cheap time comparison instead
+// of re-parsing the DER on every connection. notAfter is set at mint time from
+// the signing template.
+type cachedCert struct {
+	cert     *tls.Certificate
+	notAfter time.Time
+}
 
 type bufferedConn struct {
 	io.Reader
@@ -170,12 +191,43 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 	wg.Wait()
 }
 
+// getOrCreateCert returns a MITM leaf certificate for domain, minting one on a
+// cache miss and re-minting one that is within leafRenewSkew of expiry. Control
+// flow: cache hit still inside its window → return it; otherwise a per-domain
+// singleflight collapses concurrent misses so exactly one goroutine mints. The
+// flight re-checks the cache first (a sibling flight may have just filled it),
+// then generates an ECDSA P-256 leaf, signs it with the CA, and stores it.
 func (p *Proxy) getOrCreateCert(domain string) (*tls.Certificate, error) {
 	if cached, ok := p.certCache.Load(domain); ok {
-		return cached.(*tls.Certificate), nil
+		cc := cached.(*cachedCert)
+		if p.clock().Before(cc.notAfter.Add(-leafRenewSkew)) {
+			return cc.cert, nil
+		}
 	}
 
-	leafKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	result, err, _ := p.certFlight.Do(domain, func() (any, error) {
+		// Another flight for this domain may have already minted a fresh cert
+		// while we waited to enter; re-check before spending a keygen.
+		if cached, ok := p.certCache.Load(domain); ok {
+			cc := cached.(*cachedCert)
+			if p.clock().Before(cc.notAfter.Add(-leafRenewSkew)) {
+				return cc.cert, nil
+			}
+		}
+		return p.mintLeaf(domain)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result.(*tls.Certificate), nil
+}
+
+// mintLeaf generates an ECDSA P-256 leaf key, signs a short-lived certificate
+// for domain with the CA, and stores it (with its NotAfter) in the cache. The CA
+// key/cert are untouched: x509.CreateCertificate signs an ECDSA leaf public key
+// with the existing (RSA) CA key regardless of the CA key type.
+func (p *Proxy) mintLeaf(domain string) (*tls.Certificate, error) {
+	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, fmt.Errorf("proxy: generate leaf key: %w", err)
 	}
@@ -186,12 +238,14 @@ func (p *Proxy) getOrCreateCert(domain string) (*tls.Certificate, error) {
 	}
 	serial := new(big.Int).SetBytes(serialBytes)
 
+	now := p.clock()
+	notAfter := now.Add(p.leafValidity())
 	template := x509.Certificate{
 		SerialNumber: serial,
 		Subject:      pkix.Name{CommonName: domain},
 		DNSNames:     []string{domain},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(24 * time.Hour),
+		NotBefore:    now.Add(-time.Hour),
+		NotAfter:     notAfter,
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}
@@ -201,11 +255,31 @@ func (p *Proxy) getOrCreateCert(domain string) (*tls.Certificate, error) {
 		return nil, fmt.Errorf("proxy: sign leaf cert: %w", err)
 	}
 
-	cert := tls.Certificate{
+	cert := &tls.Certificate{
 		Certificate: [][]byte{certDER},
 		PrivateKey:  leafKey,
 	}
 
-	actual, _ := p.certCache.LoadOrStore(domain, &cert)
-	return actual.(*tls.Certificate), nil
+	p.certCache.Store(domain, &cachedCert{cert: cert, notAfter: notAfter})
+	return cert, nil
+}
+
+// clock returns the proxy's time source, defaulting to time.Now when the
+// injectable now field is unset (production). Tests set p.now to a controllable
+// clock to exercise leaf expiry deterministically.
+func (p *Proxy) clock() time.Time {
+	if p.now != nil {
+		return p.now()
+	}
+	return time.Now()
+}
+
+// leafValidity returns the leaf-cert TTL, defaulting to defaultLeafTTL when the
+// injectable leafTTL field is unset (production). Tests shrink it to force
+// expiry within the test's lifetime.
+func (p *Proxy) leafValidity() time.Duration {
+	if p.leafTTL > 0 {
+		return p.leafTTL
+	}
+	return defaultLeafTTL
 }

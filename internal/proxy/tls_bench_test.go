@@ -10,8 +10,9 @@ import (
 //	hit  — the domain is already cached, so getOrCreateCert returns the stored
 //	       *tls.Certificate with no crypto work. This is the common warm path.
 //	miss — a fresh domain each iteration, so every call mints a new leaf:
-//	       RSA-2048 keygen + x509 sign. This is the cost D2 (ECDSA P-256 +
-//	       expiry-aware re-mint) reduces.
+//	       ECDSA P-256 keygen + x509 sign (per D2; was RSA-2048). A distinct
+//	       domain per iteration keeps this a true miss so singleflight and the
+//	       expiry re-mint check never short-circuit it.
 //
 // White-box (package proxy) because getOrCreateCert and certCache are
 // unexported. The CA is loaded via the existing generateTestCA/startTestProxy
@@ -40,7 +41,7 @@ func BenchmarkGetOrCreateCert(b *testing.B) {
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			// A distinct domain each iteration forces a fresh keygen+sign. The
-			// small strconv allocation is negligible against RSA-2048 keygen.
+			// small strconv allocation is negligible against ECDSA P-256 keygen.
 			if _, err := p.getOrCreateCert("miss-" + strconv.Itoa(i) + ".example.com"); err != nil {
 				b.Fatalf("getOrCreateCert: %v", err)
 			}

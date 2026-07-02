@@ -21,6 +21,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/sync/singleflight"
+
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/auth"
 	"github.com/ethosagent/warden/internal/config"
@@ -156,8 +158,17 @@ type Proxy struct {
 	caCert     *x509.Certificate
 	caKey      crypto.PrivateKey
 	certCache  sync.Map
-	dialFunc   func(network, addr string) (net.Conn, error)
-	dialTLS    func(network, addr string, cfg *tls.Config) (*tls.Conn, error)
+	// certFlight collapses concurrent cache misses for the same domain so a hot
+	// new domain mints exactly one leaf instead of stampeding N keygens.
+	certFlight singleflight.Group
+	// now is the injectable clock for leaf-cert minting/expiry (nil = time.Now).
+	// leafTTL is the injectable leaf validity window (0 = defaultLeafTTL). Both
+	// exist only so white-box tests can drive cert expiry deterministically;
+	// production leaves them zero-valued.
+	now      func() time.Time
+	leafTTL  time.Duration
+	dialFunc func(network, addr string) (net.Conn, error)
+	dialTLS  func(network, addr string, cfg *tls.Config) (*tls.Conn, error)
 
 	// mcp holds the live MCP gateway, swappable atomically while the hot path
 	// reads it (control-plane settings can rebuild + replace it at runtime). MCPGateway
