@@ -292,6 +292,7 @@
   .verify-result { display:none; align-items:center; gap:9px; padding:10px 14px; border-radius:9px;
     background:rgba(16,185,129,.12); border:1px solid rgba(16,185,129,.4); color:#3ee0a8; font-size:13px; font-weight:600; }
   .verify-result.show { display:flex; }
+  .verify-result.bad { background:rgba(244,63,94,.12); border-color:rgba(244,63,94,.4); color:#ff8098; }
   .cov-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:11px; }
   .cov { padding:12px 14px; border-radius:10px; border:1px solid var(--border); background:var(--surface-2); }
   .cov .id { font-family:var(--mono); font-size:13px; font-weight:600; }
@@ -672,7 +673,7 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
           <div class="hero-metrics">
             <div class="m"><span class="n" id="hv-dlp">—</span><span class="l">DLP data-class hits in outbound bodies</span></div>
             <div class="m"><span class="n" id="hv-dlpev">—</span><span class="l">bodies carrying sensitive data classes</span></div>
-            <div class="m"><span class="n" id="hv-mcp">—</span><span class="l">MCP threats — wiring in progress (4b)</span></div>
+            <div class="m"><span class="n" id="hv-mcp">—</span><span class="l">MCP tool calls blocked</span></div>
           </div>
         </div>
         <div class="hero-block prove">
@@ -682,7 +683,7 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
             <span class="verb">Ed25519</span>
           </div>
           <div class="hero-metrics">
-            <div class="m"><span class="n" id="hv-receipts">—</span><span class="l">signed receipts — wiring in progress (4b)</span></div>
+            <div class="m"><span class="n" id="hv-receipts">—</span><span class="l">signed receipts issued</span></div>
             <div class="m"><span class="n" id="hv-controls">—</span><span class="l">MITRE ATT&amp;CK &amp; OWASP LLM controls covered</span></div>
             <div class="m"><span class="n" id="hv-writes">—</span><span class="l">state-changing writes mediated</span></div>
           </div>
@@ -773,42 +774,44 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
           <div class="desc">Set a secret here → stored in the secret store → workers fetch it directly. Warden injects the real value at the edge; the agent only ever sees the placeholder.</div>
         </div>
         <div class="actions">
-          <span class="wip-note">preview · live wiring in 4b</span>
-          <button class="btn primary" onclick="toggleSecretForm()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>Add secret</button>
+          <button class="btn primary" id="secretAddBtn" onclick="toggleSecretForm()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>Add secret</button>
         </div>
       </div>
+
+      <div class="inline-form" id="secretForm">
+        <div class="form-row" style="grid-template-columns:1fr 1fr 150px">
+          <div class="field"><label>Key (placeholder)</label><input id="secretKeyInput" type="text" placeholder="{{NEW_SECRET}}"/></div>
+          <div class="field"><label>Value (write-only)</label><input id="secretValueInput" type="password" placeholder="paste secret value" autocomplete="new-password"/></div>
+          <div class="field" style="justify-content:flex-end"><button class="btn primary sm" onclick="saveSecret()">Save secret</button></div>
+        </div>
+        <div style="display:flex; gap:9px; margin-top:6px; align-items:center">
+          <button class="btn sm" onclick="toggleSecretForm()">Cancel</button>
+          <span id="secretFormMsg" class="note"></span>
+          <span class="side-note" style="margin-left:auto">Write-only — never returned after save. Re-save the same key to rotate.</span>
+        </div>
+      </div>
+
+      <div id="secretsReadonly" class="cp-note" style="display:none"></div>
 
       <div class="empty-only" id="es-secrets"></div>
 
       <div class="demo-only">
-      <div class="callout" style="margin-bottom:16px">
-        <div><span class="muted" style="font-size:12px">Agent sees</span><br><span class="tag" style="font-size:13px">{{OPENAI_API_KEY}}</span></div>
+      <div class="callout" id="secretsCallout" style="margin-bottom:16px">
+        <div><span class="muted" style="font-size:12px">Agent sees</span><br><span class="tag" style="font-size:13px">{{PLACEHOLDER}}</span></div>
         <div class="arrow">→</div>
-        <div><span class="muted" style="font-size:12px">Warden sends at the edge</span><br><span class="mask" style="font-size:14px">••••••••••••7f9a <span style="color:var(--teal)">(real key, len 51)</span></span></div>
+        <div><span class="muted" style="font-size:12px">Warden injects at the edge</span><br><span class="mask" style="font-size:14px">•••••••• <span style="color:var(--teal)">(real value, never shown)</span></span></div>
         <div style="margin-left:auto"><span class="pill p-allow"><span class="d" style="background:var(--teal)"></span>agent never holds a real credential</span></div>
       </div>
 
-      <div class="inline-form" id="secretForm">
-        <div class="form-row">
-          <div class="field"><label>Key (placeholder)</label><input type="text" placeholder="{{NEW_SECRET}}" value="{{DATADOG_API_KEY}}"/></div>
-          <div class="field"><label>Value (stored encrypted)</label><input type="password" placeholder="paste secret value" value="notreal-demo-value"/></div>
-          <div class="field"><label>Backend</label><select><option>SQLite (default)</option><option>Vault</option><option>AWS Secrets</option><option>GCP Secret Manager</option></select></div>
-        </div>
-        <div style="display:flex; gap:9px; margin-top:6px">
-          <button class="btn primary sm">Save secret</button>
-          <button class="btn sm" onclick="toggleSecretForm()">Cancel</button>
-          <span class="side-note" style="margin-left:auto">Value is write-only — never returned to the console after save.</span>
-        </div>
-      </div>
-
-      <div class="card">
+      <div class="card" id="secretsCard">
         <table id="secretsTable">
           <thead><tr>
-            <th>Key (placeholder — inert)</th><th>Value</th><th>Backend</th><th>Used by</th><th>Last used</th><th style="width:170px">Actions</th>
+            <th>Key (placeholder — inert)</th><th>Value</th><th>Backend</th><th>Version</th><th>Updated</th><th style="width:150px">Actions</th>
           </tr></thead>
           <tbody id="secretsBody"></tbody>
         </table>
       </div>
+      <div class="note" style="margin-top:10px">Values are write-only — Warden injects them at the edge. The console never fetches or displays a secret value.</div>
       </div><!-- /demo-only -->
     </section>
 
@@ -816,7 +819,7 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
     <section class="page" id="page-guardrails">
       <div class="page-head">
         <div><h1>Guardrails</h1><div class="desc">Policy control center — what may leave, what gets scrubbed, and how tools are trusted</div></div>
-        <div class="actions"><span class="wip-note">preview · live wiring in 4b</span></div>
+        <div class="actions"><span class="note" id="grEditNote"></span></div>
       </div>
 
       <div class="empty-only" id="es-guardrails"></div>
@@ -833,33 +836,26 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
       <div class="subpage active" id="sub-egress">
         <div class="grid g2">
           <div class="card">
-            <div class="card-head"><h3><span class="pill p-allow" style="margin-right:6px">allow</span>Allowlist</h3><button class="btn sm">+ Add domain</button></div>
+            <div class="card-head"><h3><span class="pill p-allow" style="margin-right:6px">allow</span>Allowlist</h3><button class="btn sm" id="allowAddBtn" onclick="addPolicyEntry('allow')">+ Add domain</button></div>
             <table><tbody id="allowList"></tbody></table>
           </div>
           <div class="card">
-            <div class="card-head"><h3><span class="pill p-deny" style="margin-right:6px">deny</span>Denylist</h3><button class="btn sm">+ Add domain</button></div>
+            <div class="card-head"><h3><span class="pill p-deny" style="margin-right:6px">deny</span>Denylist</h3><button class="btn sm" id="denyAddBtn" onclick="addPolicyEntry('deny')">+ Add domain</button></div>
             <table><tbody id="denyList"></tbody></table>
           </div>
         </div>
-        <div class="card" style="margin-top:16px">
-          <div class="card-head"><h3>Rate &amp; time windows</h3><span class="sub">per-worker egress budgets</span></div>
-          <div class="card-pad" style="display:flex; gap:22px; flex-wrap:wrap">
-            <div><div class="muted" style="font-size:12px">Global rate cap</div><b style="font-size:16px">240 req/min</b> <span class="pill p-monitor">soft</span></div>
-            <div><div class="muted" style="font-size:12px">Off-hours (22:00–06:00)</div><b style="font-size:16px">deny by default</b> <span class="pill p-deny">enforced</span></div>
-            <div><div class="muted" style="font-size:12px">Cost budget</div><b style="font-size:16px">$50 / hour</b> <span class="pill p-redact">alert @ 80%</span></div>
-            <div><div class="muted" style="font-size:12px">Max body size scanned</div><b style="font-size:16px">2 MiB</b></div>
-          </div>
-        </div>
+        <div class="note" id="egressReadonly" style="margin-top:12px; display:none">Egress policy is read-only on this node — it is managed by the control plane.</div>
       </div>
 
-      <!-- DLP matrix -->
+      <!-- DLP matrix + rules -->
       <div class="subpage" id="sub-dlp">
         <div class="card">
           <div class="card-head">
             <h3>Data class × destination matrix</h3>
-            <span class="sub">click a cell to cycle action · counts = 24h hits</span>
+            <span class="sub">observed · click a cell to seed a rule · counts = window hits</span>
           </div>
           <div class="card-pad" style="overflow-x:auto">
+            <div id="dlpMatrixEmpty" class="loading-note" style="display:none">No sensitive data classes observed leaving in this window yet.</div>
             <table class="matrix" id="dlpMatrix"></table>
             <div class="legend" style="margin-top:14px">
               <span class="li"><span class="sw" style="background:rgba(45,212,191,.6)"></span>allow — leaves untouched</span>
@@ -869,40 +865,43 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
             </div>
           </div>
         </div>
+
+        <div class="card" id="dlpRulesCard" style="margin-top:16px">
+          <div class="card-head">
+            <h3>DLP rules</h3>
+            <div style="display:flex; gap:10px; align-items:center">
+              <label class="note" style="display:flex; gap:6px; align-items:center">Mode
+                <select id="dlpMode" class="btn sm"><option value="off">off</option><option value="monitor">monitor</option><option value="enforce">enforce</option></select></label>
+              <button class="btn sm" id="dlpAddRuleBtn" onclick="addDlpRule()">+ Add rule</button>
+              <button class="btn primary sm" id="dlpSaveBtn" onclick="saveDLP()">Save DLP</button>
+            </div>
+          </div>
+          <div class="card-pad">
+            <div id="dlpEmpty" class="note" style="display:none"></div>
+            <div class="note" style="margin-bottom:8px">Per-class-per-destination rules — <b>class</b> (e.g. <span class="mono">pii.financial</span> or <span class="mono">*</span>), destinations (comma-separated globs, blank = any), and the action.</div>
+            <div id="dlpRules"></div>
+            <div class="divider" id="dlpClassDiv" style="display:none"></div>
+            <div id="dlpClassDefaults"></div>
+            <div id="dlpMsg" class="note" style="margin-top:8px"></div>
+          </div>
+        </div>
       </div>
 
       <!-- MCP -->
       <div class="subpage" id="sub-mcp">
         <div class="grid g2">
           <div class="card">
-            <div class="card-head"><h3>Tool allow / deny</h3><span class="sub">across connected MCP servers</span></div>
-            <table><thead><tr><th>Tool</th><th>Server</th><th>Policy</th></tr></thead><tbody id="mcpTools"></tbody></table>
+            <div class="card-head"><h3>MCP policy</h3><button class="btn primary sm" id="mcpSaveBtn" onclick="saveMCP()">Save MCP</button></div>
+            <div class="card-pad" id="mcpConfig"></div>
           </div>
           <div class="card">
-            <div class="card-head"><h3>Schema pinning &amp; mode</h3></div>
-            <div class="card-pad">
-              <div style="display:flex; align-items:center; justify-content:space-between; padding:9px 0; border-bottom:1px solid var(--border)">
-                <div><b>Pin tool schemas</b><div class="note">Reject tool-definition drift (poisoning) at handshake</div></div>
-                <label class="switch"><input type="checkbox" checked><span class="sl"></span></label>
-              </div>
-              <div style="display:flex; align-items:center; justify-content:space-between; padding:9px 0; border-bottom:1px solid var(--border)">
-                <div><b>Block cross-tool exfil chains</b><div class="note">Flag read-then-send sequences to new destinations</div></div>
-                <label class="switch"><input type="checkbox" checked><span class="sl"></span></label>
-              </div>
-              <div style="display:flex; align-items:center; justify-content:space-between; padding:9px 0; border-bottom:1px solid var(--border)">
-                <div><b>Quarantine unknown tools</b><div class="note">New tools require operator approval before use</div></div>
-                <label class="switch"><input type="checkbox"><span class="sl"></span></label>
-              </div>
-              <div style="display:flex; align-items:center; justify-content:space-between; padding:9px 0">
-                <div><b>MCP mode</b><div class="note">Enforce blocks; Monitor logs only</div></div>
-                <span class="pill p-deny">ENFORCE</span>
-              </div>
-            </div>
+            <div class="card-head"><h3>Tool allow / deny</h3><span class="sub">exact tool names</span></div>
+            <div class="card-pad" id="mcpToolPolicy"></div>
           </div>
         </div>
         <div class="card" style="margin-top:16px">
-          <div class="card-head"><h3>Recent MCP findings</h3></div>
-          <table><thead><tr><th>Time</th><th>Finding</th><th>Tool</th><th>Severity</th><th>Action</th></tr></thead><tbody id="mcpFindings"></tbody></table>
+          <div class="card-head"><h3>Tool inventory</h3><span class="sub" id="mcpInvSub">observed MCP tools</span></div>
+          <table><thead><tr><th>Tool</th><th>Server</th><th class="num">Calls</th><th class="num">Allowed</th><th class="num">Denied</th><th>Schema</th><th>Findings</th></tr></thead><tbody id="mcpInventory"></tbody></table>
         </div>
       </div>
 
@@ -910,25 +909,12 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
       <div class="subpage" id="sub-judge">
         <div class="grid g2">
           <div class="card">
-            <div class="card-head"><h3>LLM judge configuration</h3></div>
-            <div class="card-pad">
-              <div class="field"><label>Provider</label><select><option>Anthropic</option><option>OpenAI</option><option>Local (Ollama)</option></select></div>
-              <div class="field"><label>Model</label><select><option>claude-haiku-4.5</option><option>claude-sonnet-4.5</option><option>gpt-4o-mini</option></select></div>
-              <div class="field"><label>Mode</label><select><option>Advisory (score + log)</option><option>Enforce (can block)</option><option>Off</option></select></div>
-              <div class="field"><label>API key</label><input type="text" value="{{JUDGE_API_KEY}}" readonly/><span class="note">Resolved from secret store at runtime — value never shown.</span></div>
-            </div>
+            <div class="card-head"><h3>LLM judge configuration</h3><button class="btn primary sm" id="judgeSaveBtn" onclick="saveJudge()">Save judge</button></div>
+            <div class="card-pad" id="judgeConfig"></div>
           </div>
           <div class="card">
-            <div class="card-head"><h3>Judge activity</h3><span class="sub">last 24h</span></div>
-            <div class="card-pad">
-              <div class="kpi-row" style="grid-template-columns:1fr 1fr">
-                <div class="card stat"><div class="k">Bodies scored</div><div class="v">1,204</div><div class="delta up">▲ 8% vs prior</div></div>
-                <div class="card stat"><div class="k">Flagged &amp; escalated</div><div class="v">31</div><div class="delta down">2 blocked</div></div>
-              </div>
-              <div class="divider"></div>
-              <div class="note" style="margin-bottom:8px">Recent verdicts</div>
-              <div class="feed" id="judgeFeed"></div>
-            </div>
+            <div class="card-head"><h3>Judge status</h3></div>
+            <div class="card-pad" id="judgeStatus"></div>
           </div>
         </div>
       </div>
@@ -938,39 +924,34 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
     <!-- ============ ALERTS ============ -->
     <section class="page" id="page-alerts">
       <div class="page-head">
-        <div><h1>Alerts</h1><div class="desc">Rules route findings to sinks · triggered alerts are deduplicated in the alert store</div></div>
-        <div class="actions"><span class="wip-note">preview · live wiring in 4b</span><button class="btn primary" onclick="toggleAlertForm()">+ Add rule</button></div>
+        <div><h1>Alerts</h1><div class="desc">Triggered alerts are deduplicated in the alert store · routing is configured in the control-plane integrations block</div></div>
       </div>
 
       <div class="empty-only" id="es-alerts"></div>
 
       <div class="demo-only">
-      <!-- CONFIGURE -->
+      <!-- CONFIGURE (informational — no rule-config API yet) -->
       <div class="card" style="margin-bottom:18px">
-        <div class="card-head">
-          <h3>Configure — routing rules</h3>
-          <div class="legend">
-            <span class="li"><span class="health-dot" style="background:var(--green)"></span>Slack ✓</span>
-            <span class="li"><span class="health-dot" style="background:var(--green)"></span>PagerDuty ✓</span>
-            <span class="li"><span class="health-dot" style="background:var(--amber)"></span>webhook ⚠ integration_down</span>
+        <div class="card-head"><h3>Routing &amp; sinks</h3><span class="sub">configured in control-plane config</span></div>
+        <div class="card-pad">
+          <div class="callout" style="margin-bottom:14px">
+            <div class="arrow">ℹ</div>
+            <div class="note">Alert <b>routing and sinks</b> (Slack, PagerDuty, webhook, email) are configured in the control plane's <span class="mono">integrations</span> config block — not from this console. <b>Threshold rules</b> that fire alerts require the detection engine, a later milestone. The list below is emitted by configured integrations as detections trigger.</div>
+          </div>
+          <div class="cov-grid">
+            <div class="cov"><div class="id">Slack</div><div class="nm">chat sink</div><span class="chip">integrations.slack</span></div>
+            <div class="cov"><div class="id">PagerDuty</div><div class="nm">on-call sink</div><span class="chip">integrations.pagerduty</span></div>
+            <div class="cov"><div class="id">Webhook</div><div class="nm">generic HTTP sink</div><span class="chip">integrations.webhook</span></div>
+            <div class="cov"><div class="id">Email</div><div class="nm">SMTP sink</div><span class="chip">integrations.email</span></div>
           </div>
         </div>
-        <div class="inline-form" id="alertForm" style="margin:14px 18px 0">
-          <div class="form-row" style="grid-template-columns:1fr 160px 1fr">
-            <div class="field"><label>Trigger</label><input type="text" placeholder="e.g. DLP block on pii.financial"/></div>
-            <div class="field"><label>Severity</label><select><option>critical</option><option>high</option><option>medium</option><option>low</option></select></div>
-            <div class="field"><label>Route to</label><select><option>Slack #sec</option><option>PagerDuty</option><option>webhook</option><option>email</option></select></div>
-          </div>
-          <div style="display:flex; gap:9px; margin-top:4px"><button class="btn primary sm">Save rule</button><button class="btn sm" onclick="toggleAlertForm()">Cancel</button></div>
-        </div>
-        <table style="margin-top:6px"><thead><tr><th>Trigger</th><th>Severity</th><th>Route to</th><th>Sink health</th><th>State</th></tr></thead><tbody id="alertRules"></tbody></table>
       </div>
 
-      <!-- TRIGGERED -->
+      <!-- TRIGGERED (real) -->
       <div class="card">
-        <div class="card-head"><h3>Triggered — from the alert store</h3><span class="sub">7 firing · 2 acked · deduped</span></div>
+        <div class="card-head"><h3>Triggered — from the alert store</h3><span class="sub" id="alertsSub">—</span></div>
         <table id="triggeredTable"><thead><tr>
-          <th style="width:90px">Severity</th><th>Title</th><th>Subject</th><th class="num">Count</th><th>Status</th><th>First seen</th><th>Last seen</th><th>Route</th>
+          <th style="width:90px">Severity</th><th>Title</th><th>Subject</th><th class="num">Count</th><th>Status</th><th>First seen</th><th>Last seen</th>
         </tr></thead><tbody id="triggeredBody"></tbody></table>
       </div>
       </div><!-- /demo-only -->
@@ -980,7 +961,6 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
     <section class="page" id="page-audit">
       <div class="page-head">
         <div><h1>Audit</h1><div class="desc">Prove it — Ed25519-signed receipts and compliance coverage</div></div>
-        <div class="actions"><span class="wip-note">preview · live wiring in 4b</span></div>
       </div>
 
       <div class="empty-only" id="es-audit"></div>
@@ -990,10 +970,10 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
         <div class="card-head"><h3>Verify receipt</h3><span class="sub">paste a receipt JSON — checks the detached Ed25519 signature</span></div>
         <div class="card-pad">
           <div class="verify-box">
-            <textarea id="receiptInput" style="flex:1; min-height:74px; background:var(--surface-2); border:1px solid var(--border); color:var(--text); border-radius:9px; padding:10px 12px; font-family:var(--mono); font-size:12px;">{"receipt_id":"rcpt_8f21ac","event":"egress.redact","worker":"worker-ethos-1","ts":"2026-07-02T14:03:11Z","sig":"ed25519:3a9f…c1d0"}</textarea>
+            <textarea id="receiptInput" placeholder='Paste a signed receipt JSON here…' style="flex:1; min-height:74px; background:var(--surface-2); border:1px solid var(--border); color:var(--text); border-radius:9px; padding:10px 12px; font-family:var(--mono); font-size:12px;"></textarea>
             <div style="display:flex; flex-direction:column; gap:9px; min-width:180px">
               <button class="btn primary" onclick="verifyReceipt()" style="justify-content:center">Verify signature</button>
-              <div class="verify-result" id="verifyResult"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="width:18px;height:18px"><path d="M20 6L9 17l-5-5"/></svg>Signature valid — Ed25519 · key fp <span class="mono">a1:9f:…:c0</span></div>
+              <div class="verify-result" id="verifyResult"></div>
             </div>
           </div>
         </div>
@@ -1001,12 +981,13 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
 
       <div class="card" style="margin-bottom:16px">
         <div class="card-head"><h3>Compliance coverage</h3><span class="sub">MITRE ATT&amp;CK · OWASP LLM Top-10</span></div>
-        <div class="card-pad"><div class="cov-grid" id="covGrid"></div></div>
+        <div class="card-pad"><div id="covEmpty" class="note" style="display:none">No compliance-tagged events yet — enable compliance tagging in Settings to map events to MITRE/OWASP controls.</div><div class="cov-grid" id="covGrid"></div></div>
       </div>
 
       <div class="card">
-        <div class="card-head"><h3>Signed receipts</h3><span class="sub">12,904 total · newest first</span></div>
-        <table id="receiptsTable"><thead><tr><th>Receipt ID</th><th>Event</th><th>Worker</th><th>Signed at</th><th>Verified</th></tr></thead><tbody id="receiptsBody"></tbody></table>
+        <div class="card-head"><h3>Signed receipts</h3><span class="sub" id="receiptsSub">—</span></div>
+        <div id="receiptsEmpty" class="card-pad note" style="display:none">Signed receipts are not enabled on this node — enable receipt signing to get verifiable, tamper-evident evidence for every mediation.</div>
+        <table id="receiptsTable"><thead><tr><th>Receipt ID</th><th>Decision</th><th>Destination</th><th>Method</th><th>Signed at</th><th>Verified</th></tr></thead><tbody id="receiptsBody"></tbody></table>
       </div>
       </div><!-- /demo-only -->
     </section>
@@ -1148,11 +1129,10 @@ LIMIT 8;</textarea>
    under /dashboard/api. Empty vs populated is driven entirely by
    real data (per tab), never a manual toggle.
 
-   Phase 4a wires: Overview, Activity, Fleet, Explore, Settings,
-   and the Get Started / Onboarding flow. Secrets, Guardrails,
-   Alerts and Audit still render the mock's preview markup with
-   placeholder data (Phase 4b wires them) — they switch and render
-   without JS errors.
+   All tabs are wired to live endpoints: Overview, Activity, Fleet,
+   Explore, Settings, Get Started / Onboarding (4a) and Secrets,
+   Guardrails (Egress/DLP/MCP/Judge), Alerts and Audit (4b). Only the
+   Settings integrations + RBAC panels remain preview (renderPreview4b).
    ============================================================ */
 
 /* ---------- tiny helpers ---------- */
@@ -1211,6 +1191,10 @@ function loadTab(page){
     case 'fleet':       loadFleet(); break;
     case 'explore':     loadExplore(); break;
     case 'settings':    loadSettings(); break;
+    case 'secrets':     loadSecrets(); break;
+    case 'guardrails':  loadGuardrails(); break;
+    case 'alerts':      loadAlerts(); break;
+    case 'audit':       loadAudit(); break;
     case 'get-started': refreshOnboarding(); break;
   }
 }
@@ -1296,6 +1280,9 @@ async function loadOverview(){
   const rl=document.getElementById('rangeLabel'); if(rl) rl.textContent=rangeLabel();
   // recent activity feed shares the traffic endpoint
   loadTraffic().then(evs=>renderOverviewFeed(evs)).catch(()=>{ renderOverviewFeed([]); });
+  // Prove/Detect hero counters come from the audit + mcp endpoints (best-effort).
+  jget('/dashboard/api/audit').then(a=>{ setText('hv-receipts', (a&&a.receipts&&a.receipts.count)||0); }).catch(()=>{});
+  jget('/dashboard/api/mcp').then(m=>{ const blocked=((m&&m.tools)||[]).reduce((s,t)=>s+(t.denied||0),0); setText('hv-mcp', blocked); }).catch(()=>{});
 }
 function renderOverview(d){
   const t=d.totals||{}, dlp=d.dlp||{}, act=dlp.actions||{};
@@ -1668,14 +1655,13 @@ document.querySelectorAll('#startChooser button').forEach(b=>{
 /* ---------- empty-state CTAs ---------- */
 function enableAndShow(page){ go(page); }
 function addSecretFlow(){ go('secrets'); const f=document.getElementById('secretForm'); if(f) f.classList.add('open'); }
-function addAlertFlow(){ go('alerts'); const f=document.getElementById('alertForm'); if(f) f.classList.add('open'); }
 function goStep(n){
   go('get-started');
   setTimeout(()=>{ const el=document.getElementById('step'+n);
     if(el){ el.scrollIntoView({behavior:'smooth',block:'center'}); el.classList.add('flash'); setTimeout(()=>el.classList.remove('flash'),1200); } }, 60);
 }
 
-/* ---------- Guardrails sub-tabs (preview) ---------- */
+/* ---------- Guardrails sub-tabs ---------- */
 document.querySelectorAll('#grSubtabs button').forEach(b=>{
   b.addEventListener('click', ()=>{
     document.querySelectorAll('#grSubtabs button').forEach(x=>x.classList.remove('active'));
@@ -1685,10 +1671,8 @@ document.querySelectorAll('#grSubtabs button').forEach(b=>{
   });
 });
 
-/* ---------- inline form toggles (preview) ---------- */
+/* ---------- Secrets add-form toggle ---------- */
 function toggleSecretForm(){ const f=document.getElementById('secretForm'); if(f) f.classList.toggle('open'); }
-function toggleAlertForm(){ const f=document.getElementById('alertForm'); if(f) f.classList.toggle('open'); }
-function verifyReceipt(){ const r=document.getElementById('verifyResult'); if(r) r.classList.add('show'); }
 
 /* ---------- reusable empty state ---------- */
 function emptyState(icon,title,body,ctaLabel,ctaAttr){
@@ -1707,9 +1691,9 @@ function renderEmptyStates(){
   set('es-guardrails', emptyState('🛡️',"You're in Monitor mode — nothing is blocked yet.",
     'Watch what your agent reaches, then add allow/deny + DLP class rules and switch to Enforce.',
     'Learn about Monitor → Enforce','onclick="goStep(5)"'));
-  set('es-alerts', emptyState('🔔','No alerts configured.',
-    'Connect a Slack or webhook sink and add a rule to get notified on blocks, redactions, and MCP threats.',
-    'Add alert rule','onclick="addAlertFlow()"'));
+  set('es-alerts', emptyState('🔔','No alerts yet.',
+    'Alerts fire from configured integrations once detections trigger. Routing is configured in the control-plane integrations block.',
+    'Open Alerts','onclick="enableAndShow(\'alerts\')"'));
   set('es-audit', emptyState('🧾','No receipts yet.',
     'Enable signed receipts to get verifiable, tamper-evident evidence for every mediation.',
     'Enable signed receipts',"onclick=\"enableAndShow('audit')\""));
@@ -1722,128 +1706,580 @@ function renderEmptyStates(){
 }
 
 /* ============================================================
-   PREVIEW DATA for tabs wired in Phase 4b
-   (Secrets, Guardrails, Alerts, Audit + Settings integrations/RBAC).
-   Kept so those tabs render without JS errors; replaced with live
-   data in 4b.
+   Secrets (/dashboard/api/secretstore)
+   VALUE HYGIENE: the console NEVER requests or displays a secret value.
+   The list is metadata-only; the Value column is a fixed masked chip.
+   ============================================================ */
+async function loadSecrets(){
+  let d;
+  try{ d=await jget('/dashboard/api/secretstore'); }
+  catch(e){ d={backend:'none',entries:[]}; }
+  renderSecrets(d);
+}
+function backendBadge(b){
+  const m={none:'p-monitor',env:'p-monitor',echo:'p-detect',aws:'p-redact',sqlite:'p-monitor',vault:'p-detect'};
+  return '<span class="pill '+(m[String(b).toLowerCase()]||'p-monitor')+'">'+esc(b)+'</span>';
+}
+function renderSecrets(d){
+  const backend=(d&&d.backend)||'none';
+  const entries=(d&&Array.isArray(d.entries))?d.entries:[];
+  const readonly = backend==='none';
+  const pg=document.getElementById('page-secrets');
+  const empty = !readonly && entries.length===0;
+  if(pg) pg.classList.toggle('is-empty', empty);
+  const addBtn=document.getElementById('secretAddBtn'); if(addBtn) addBtn.style.display=readonly?'none':'';
+  const ro=document.getElementById('secretsReadonly');
+  const card=document.getElementById('secretsCard');
+  const callout=document.getElementById('secretsCallout');
+  const form=document.getElementById('secretForm');
+  if(readonly){
+    if(ro){ ro.style.display=''; ro.innerHTML='<b>No managed secret store configured on this node.</b> Secrets resolve from the worker environment — add / rotate / delete is unavailable here (writes would return 405).'; }
+    if(card) card.style.display='none';
+    if(callout) callout.style.display='none';
+    if(form) form.classList.remove('open');
+    return;
+  }
+  if(ro) ro.style.display='none';
+  if(card) card.style.display='';
+  if(callout) callout.style.display='';
+  const body=document.getElementById('secretsBody'); if(!body) return;
+  body.innerHTML=entries.map(e=>{
+    const key=e.key||'';
+    return '<tr><td><span class="tag" style="font-size:12.5px">'+esc(key)+'</span></td>'
+      +'<td><span class="mask">••••••••</span></td>'
+      +'<td>'+backendBadge(backend)+'</td>'
+      +'<td class="mono" style="font-size:12px">'+esc(e.version||'—')+'</td>'
+      +'<td class="muted">'+(e.updatedAt?relTime(e.updatedAt):'—')+'</td>'
+      +'<td><button class="btn sm sec-rotate" data-key="'+esc(key)+'">Rotate</button> '
+      +'<button class="btn sm sec-del" data-key="'+esc(key)+'" style="color:#ff8098">Delete</button></td></tr>';
+  }).join('');
+  body.querySelectorAll('.sec-rotate').forEach(b=>b.addEventListener('click',()=>rotateSecret(b.dataset.key)));
+  body.querySelectorAll('.sec-del').forEach(b=>b.addEventListener('click',()=>deleteSecretRow(b.dataset.key)));
+}
+function rotateSecret(key){
+  const f=document.getElementById('secretForm'); if(f) f.classList.add('open');
+  setVal('secretKeyInput', key);
+  const v=document.getElementById('secretValueInput'); if(v){ v.value=''; v.focus(); }
+  const msg=document.getElementById('secretFormMsg'); if(msg){ msg.textContent='Rotating '+key+' — enter the new value.'; msg.style.color=''; }
+}
+async function saveSecret(){
+  const key=(val('secretKeyInput')||'').trim();
+  const value=val('secretValueInput')||'';
+  const msg=document.getElementById('secretFormMsg');
+  if(!key||!value){ if(msg){ msg.textContent='Key and value are required.'; msg.style.color='var(--amber)'; } return; }
+  if(msg){ msg.textContent='saving…'; msg.style.color=''; }
+  try{
+    const r=await fetch('/dashboard/api/secretstore',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:key,value:value})});
+    if(!r.ok && r.status!==204){ let m='status '+r.status; try{ const e=await r.json(); if(e&&e.error) m=e.error; }catch(_e){} throw new Error(m); }
+    setVal('secretKeyInput',''); setVal('secretValueInput','');
+    if(msg) msg.textContent='';
+    const f=document.getElementById('secretForm'); if(f) f.classList.remove('open');
+    loadSecrets();
+  }catch(err){ if(msg){ msg.textContent='✕ '+err.message; msg.style.color='var(--amber)'; } }
+}
+async function deleteSecretRow(key){
+  if(!window.confirm('Delete secret '+key+'? Warden will stop injecting it at the edge.')) return;
+  try{
+    const r=await fetch('/dashboard/api/secretstore?key='+encodeURIComponent(key),{method:'DELETE'});
+    if(!r.ok && r.status!==204){ throw new Error('status '+r.status); }
+    loadSecrets();
+  }catch(err){ window.alert('Delete failed: '+err.message); }
+}
+
+/* ============================================================
+   Guardrails (Egress /policy · DLP+MCP+Judge /settings · matrix /analytics · inventory /mcp)
+   Writes are read-modify-write of the full policy / settings document and are
+   gated on the endpoint's editable flag (true only on the control plane).
+   ============================================================ */
+const gr={ policy:null, policyEditable:false, settings:{}, settingsEditable:false, analytics:{dlp:{}}, mcpInv:{tools:[]}, dlp:null, mcp:null, judge:null };
+const DLP_ACTIONS=['allow','block','redact','monitor'];
+
+async function loadGuardrails(){
+  const [pol,setres,an,mc]=await Promise.all([
+    jget('/dashboard/api/policy').catch(()=>null),
+    jget('/dashboard/api/settings').catch(()=>null),
+    jget('/dashboard/api/analytics?range='+encodeURIComponent(state.range)).catch(()=>null),
+    jget('/dashboard/api/mcp').catch(()=>null),
+  ]);
+  gr.policy = pol || {allowlist:[],denylist:[],editable:false};
+  gr.policy.allowlist = gr.policy.allowlist||[];
+  gr.policy.denylist = gr.policy.denylist||[];
+  gr.policyEditable = !!(pol&&pol.editable);
+  gr.settings = (setres&&setres.settings) || {};
+  gr.settingsEditable = !!(setres&&setres.editable);
+  gr.analytics = an || {dlp:{}};
+  gr.mcpInv = mc || {tools:[]};
+  const note=document.getElementById('grEditNote');
+  if(note) note.textContent = gr.settingsEditable ? '' : 'read-only (managed by control plane)';
+  renderEgress();
+  renderDLP();
+  renderMCP();
+  renderJudge();
+}
+function flashBtn(id,txt){
+  const b=document.getElementById(id); if(!b) return;
+  const old=b.textContent; b.textContent=txt; b.disabled=true;
+  setTimeout(()=>{ b.textContent=old; b.disabled=false; }, 1800);
+}
+async function putSettings(merged){
+  const r=await fetch('/dashboard/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(merged)});
+  if(!r.ok){ let m='status '+r.status; try{ const e=await r.json(); if(e&&e.error) m=e.error; }catch(_e){} throw new Error(m); }
+  const d=await r.json().catch(()=>({}));
+  gr.settings=(d&&d.settings)||merged; gr.settingsEditable=!!(d&&d.editable);
+  return d;
+}
+
+/* ---------- Egress (/policy) ---------- */
+function renderEgress(){
+  const ed=gr.policyEditable;
+  renderPolicyList('allowList','allow',gr.policy.allowlist,'#bcd',ed);
+  renderPolicyList('denyList','deny',gr.policy.denylist,'#ff8098',ed);
+  ['allowAddBtn','denyAddBtn'].forEach(id=>{ const b=document.getElementById(id); if(b) b.style.display=ed?'':'none'; });
+  const ro=document.getElementById('egressReadonly'); if(ro) ro.style.display=ed?'none':'';
+}
+function renderPolicyList(id,list,entries,color,ed){
+  const el=document.getElementById(id); if(!el) return;
+  if(!entries.length){ el.innerHTML='<tr><td class="muted" style="padding:12px 14px">none configured</td></tr>'; return; }
+  el.innerHTML=entries.map((e,i)=>{
+    const dom=(e.domain||'')+(e.port?(':'+e.port):'');
+    const rm= ed? '<button class="btn sm pol-rm" data-list="'+list+'" data-idx="'+i+'" style="color:#ff8098">Remove</button>':'';
+    return '<tr><td class="mono" style="color:'+color+'">'+esc(dom)+'</td><td style="text-align:right">'+rm+'</td></tr>';
+  }).join('');
+  el.querySelectorAll('.pol-rm').forEach(b=>b.addEventListener('click',()=>removePolicyEntry(b.dataset.list,+b.dataset.idx)));
+}
+async function addPolicyEntry(list){
+  if(!gr.policyEditable) return;
+  const dom=(window.prompt('Add '+list+' domain (e.g. api.example.com or *.example.com)')||'').trim();
+  if(!dom) return;
+  if(list==='allow') gr.policy.allowlist.push({domain:dom}); else gr.policy.denylist.push({domain:dom});
+  await savePolicy();
+}
+async function removePolicyEntry(list,idx){
+  if(!gr.policyEditable) return;
+  const arr = list==='allow'? gr.policy.allowlist : gr.policy.denylist;
+  if(idx<0||idx>=arr.length) return;
+  arr.splice(idx,1);
+  await savePolicy();
+}
+async function savePolicy(){
+  try{
+    const r=await fetch('/dashboard/api/policy',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({allowlist:gr.policy.allowlist,denylist:gr.policy.denylist})});
+    if(!r.ok){ let m='status '+r.status; try{ const e=await r.json(); if(e&&e.error) m=e.error; }catch(_e){} throw new Error(m); }
+    const p=await r.json();
+    gr.policy=p; gr.policy.allowlist=p.allowlist||[]; gr.policy.denylist=p.denylist||[]; gr.policyEditable=!!p.editable;
+    renderEgress();
+  }catch(err){ window.alert('Policy save failed: '+err.message); loadGuardrails(); }
+}
+
+/* ---------- DLP (observed matrix /analytics · rules /settings.dlp) ---------- */
+function dlpCellClass(a){ return (a==='block'||a==='redact'||a==='monitor'||a==='allow')?a:'monitor'; }
+function actionOptions(sel){ return DLP_ACTIONS.map(a=>'<option value="'+a+'"'+(a===sel?' selected':'')+'>'+a+'</option>').join(''); }
+function renderDLP(){
+  const dlp=(gr.analytics&&gr.analytics.dlp)||{};
+  const dests=dlp.destinations||[];
+  const cells=dlp.matrix||[];
+  const mx=document.getElementById('dlpMatrix');
+  const mEmpty=document.getElementById('dlpMatrixEmpty');
+  if(mx){
+    if(!cells.length || !dests.length){
+      mx.innerHTML=''; if(mEmpty) mEmpty.style.display='';
+    } else {
+      if(mEmpty) mEmpty.style.display='none';
+      const classes=[], seen={};
+      cells.forEach(c=>{ if(!seen[c.class]){ seen[c.class]=1; classes.push(c.class); } });
+      const idx={}; cells.forEach(c=>{ idx[c.class+'\u0000'+c.destination]=c; });
+      let html='<tr><th class="cls"></th>'+dests.map(d=>'<th class="dest">'+esc(d)+'</th>').join('')+'</tr>';
+      classes.forEach(cls=>{
+        html+='<tr><th class="cls">'+esc(cls)+'</th>';
+        dests.forEach(d=>{
+          const c=idx[cls+'\u0000'+d];
+          if(c){
+            html+='<td><div class="cell '+dlpCellClass(c.action)+' dlp-cell" data-class="'+esc(cls)+'" data-dest="'+esc(d)+'" data-action="'+esc(c.action)+'"><span class="act">'+esc(c.action)+'</span><span class="cnt">'+fmtNum(c.count||0)+' hits</span></div></td>';
+          } else {
+            html+='<td><div class="cell" style="opacity:.22;cursor:default"></div></td>';
+          }
+        });
+        html+='</tr>';
+      });
+      mx.innerHTML=html;
+      mx.querySelectorAll('.dlp-cell').forEach(el=>el.addEventListener('click',()=>dlpSeedRule(el.dataset.class,el.dataset.dest,el.dataset.action)));
+    }
+  }
+  const d = gr.settings.dlp || null;
+  gr.dlp = d
+    ? { mode:d.mode||'off', classes:Object.assign({}, d.classes||{}), rules:(d.rules||[]).map(r=>({class:r.class||'',to:(r.to||[]).slice(),action:r.action||'monitor'})), custom:(d.custom||[]).slice() }
+    : { mode:'off', classes:{}, rules:[], custom:[] };
+  const active = !!d && (d.mode==='monitor'||d.mode==='enforce');
+  const ed=gr.settingsEditable;
+  const emptyEl=document.getElementById('dlpEmpty');
+  if(emptyEl){
+    if(!active && !gr.dlp.rules.length){
+      emptyEl.style.display='';
+      emptyEl.innerHTML = ed
+        ? 'DLP is <b>off</b>. Set mode to <b>monitor</b> to observe data classes leaving, or <b>enforce</b> to act — then add rules and Save DLP.'
+        : 'DLP is <b>off</b> and read-only on this node (managed by the control plane).';
+    } else emptyEl.style.display='none';
+  }
+  setVal('dlpMode', gr.dlp.mode||'off');
+  const modeSel=document.getElementById('dlpMode'); if(modeSel) modeSel.disabled=!ed;
+  ['dlpAddRuleBtn','dlpSaveBtn'].forEach(id=>{ const b=document.getElementById(id); if(b) b.style.display=ed?'':'none'; });
+  renderDlpRules();
+  renderDlpClassDefaults();
+  const msg=document.getElementById('dlpMsg'); if(msg){ msg.textContent=''; msg.style.color=''; }
+}
+function renderDlpRules(){
+  const el=document.getElementById('dlpRules'); if(!el) return;
+  const ed=gr.settingsEditable;
+  if(!gr.dlp.rules.length){ el.innerHTML='<div class="note" style="padding:4px 0">No rules — class defaults apply.</div>'; return; }
+  const inputStyle='background:var(--surface-2);border:1px solid var(--border);color:var(--text);padding:7px 10px;border-radius:8px;font:inherit;font-size:12.5px';
+  el.innerHTML=gr.dlp.rules.map((r,i)=>{
+    const rm= ed? '<button class="btn sm dlp-rm" data-idx="'+i+'" style="color:#ff8098">✕</button>':'';
+    return '<div class="form-row dlp-rule" style="grid-template-columns:1fr 1.4fr 130px 44px; margin-bottom:8px; align-items:center">'
+      +'<input class="dlp-class" data-idx="'+i+'" type="text" value="'+esc(r.class)+'" placeholder="class or *" '+(ed?'':'disabled')+' style="'+inputStyle+'"/>'
+      +'<input class="dlp-to" data-idx="'+i+'" type="text" value="'+esc((r.to||[]).join(', '))+'" placeholder="destinations (blank = any)" '+(ed?'':'disabled')+' style="'+inputStyle+'"/>'
+      +'<select class="dlp-action btn sm" data-idx="'+i+'" '+(ed?'':'disabled')+'>'+actionOptions(r.action)+'</select>'
+      +'<div style="text-align:right">'+rm+'</div></div>';
+  }).join('');
+  el.querySelectorAll('.dlp-rm').forEach(b=>b.addEventListener('click',()=>{ syncDlpFromDom(); gr.dlp.rules.splice(+b.dataset.idx,1); renderDlpRules(); }));
+}
+function renderDlpClassDefaults(){
+  const el=document.getElementById('dlpClassDefaults'); const div=document.getElementById('dlpClassDiv');
+  if(!el) return;
+  const keys=Object.keys(gr.dlp.classes||{});
+  if(!keys.length){ el.innerHTML=''; if(div) div.style.display='none'; return; }
+  if(div) div.style.display='';
+  const ed=gr.settingsEditable;
+  el.innerHTML='<div class="note" style="margin-bottom:8px">Per-class default actions</div>'+keys.map(k=>
+    '<div class="form-row" style="grid-template-columns:1fr 130px; margin-bottom:6px; max-width:420px; align-items:center">'
+    +'<div class="mono" style="font-size:12.5px">'+esc(k)+'</div>'
+    +'<select class="dlp-cd btn sm" data-class="'+esc(k)+'" '+(ed?'':'disabled')+'>'+actionOptions(gr.dlp.classes[k]&&gr.dlp.classes[k].action)+'</select>'
+    +'</div>').join('');
+}
+function syncDlpFromDom(){
+  gr.dlp.mode = val('dlpMode')||'off';
+  const el=document.getElementById('dlpRules');
+  if(el){
+    el.querySelectorAll('.dlp-rule').forEach(row=>{
+      const c=row.querySelector('.dlp-class'); if(!c) return;
+      const i=+c.dataset.idx; if(!gr.dlp.rules[i]) return;
+      gr.dlp.rules[i].class=c.value.trim();
+      gr.dlp.rules[i].to=row.querySelector('.dlp-to').value.split(',').map(s=>s.trim()).filter(Boolean);
+      gr.dlp.rules[i].action=row.querySelector('.dlp-action').value;
+    });
+  }
+  const cd=document.getElementById('dlpClassDefaults');
+  if(cd){ cd.querySelectorAll('.dlp-cd').forEach(sel=>{ gr.dlp.classes[sel.dataset.class]={action:sel.value}; }); }
+}
+function addDlpRule(){
+  if(!gr.settingsEditable) return;
+  syncDlpFromDom();
+  gr.dlp.rules.push({class:'',to:[],action:'monitor'});
+  renderDlpRules();
+}
+function dlpSeedRule(cls,dest,action){
+  if(!gr.settingsEditable){ window.alert('DLP rules are read-only on this node (managed by the control plane).'); return; }
+  syncDlpFromDom();
+  gr.dlp.rules.push({class:cls||'',to:dest?[dest]:[],action:action||'monitor'});
+  renderDlpRules();
+  const card=document.getElementById('dlpRulesCard'); if(card) card.scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+async function saveDLP(){
+  if(!gr.settingsEditable) return;
+  syncDlpFromDom();
+  const rules=gr.dlp.rules.filter(r=>r.class).map(r=>({class:r.class,to:r.to,action:r.action}));
+  const dlpBlock={ mode:gr.dlp.mode };
+  if(Object.keys(gr.dlp.classes||{}).length) dlpBlock.classes=gr.dlp.classes;
+  if(rules.length) dlpBlock.rules=rules;
+  if((gr.dlp.custom||[]).length) dlpBlock.custom=gr.dlp.custom;
+  const merged=Object.assign({}, gr.settings, {dlp:dlpBlock});
+  const msg=document.getElementById('dlpMsg'); if(msg){ msg.textContent='saving…'; msg.style.color=''; }
+  try{
+    await putSettings(merged);
+    renderDLP();
+    flashBtn('dlpSaveBtn','Saved ✓');
+    const m2=document.getElementById('dlpMsg'); if(m2){ m2.textContent='saved ✓ — workers apply on next poll'; m2.style.color='var(--teal)'; }
+  }catch(err){ if(msg){ msg.textContent='✕ '+err.message; msg.style.color='var(--amber)'; } }
+}
+
+/* ---------- MCP (config /settings.mcp · inventory /mcp) ---------- */
+function toggleRow(id,checked,title,desc,ed,last){
+  return '<div style="display:flex;align-items:center;justify-content:space-between;padding:9px 0'+(last?'':';border-bottom:1px solid var(--border)')+'">'
+    +'<div><b>'+esc(title)+'</b><div class="note">'+esc(desc)+'</div></div>'
+    +'<label class="switch"><input type="checkbox" id="'+id+'" '+(checked?'checked':'')+' '+(ed?'':'disabled')+'><span class="sl"></span></label></div>';
+}
+function chk(id){ const el=document.getElementById(id); return !!el&&el.checked; }
+function renderMCP(){
+  const m = gr.settings.mcp || null;
+  gr.mcp = m ? {
+    enabled:!!m.enabled, mode:m.mode||'monitor', failClosedOnError:!!m.failClosedOnError,
+    schema:{ pin:!!(m.schema&&m.schema.pin) },
+    scan:{ toolArgs:!!(m.scan&&m.scan.toolArgs), toolResults:!!(m.scan&&m.scan.toolResults) },
+    chain:{ enabled:!!(m.chain&&m.chain.enabled) },
+    tools:{ allow:((m.tools&&m.tools.allow)||[]).slice(), deny:((m.tools&&m.tools.deny)||[]).slice() }
+  } : null;
+  renderMCPConfig();
+  renderMCPToolPolicy();
+  renderMCPInventory();
+}
+function renderMCPConfig(){
+  const el=document.getElementById('mcpConfig'); if(!el) return;
+  const ed=gr.settingsEditable;
+  const saveBtn=document.getElementById('mcpSaveBtn'); if(saveBtn) saveBtn.style.display=ed?'':'none';
+  if(!gr.mcp){
+    el.innerHTML = ed
+      ? '<div class="note" style="margin-bottom:10px">MCP inspection is <b>disabled</b>. Enable it and Save MCP to start guarding tool calls.</div>'
+        + toggleRow('mcpEnabled', false, 'Enable MCP inspection', 'Parse and guard MCP tool calls on egress', ed, true)
+      : '<div class="note">MCP inspection is <b>disabled</b> and read-only on this node (managed by the control plane).</div>';
+    return;
+  }
+  const modeSel='<div style="display:flex;align-items:center;justify-content:space-between;padding:9px 0;border-bottom:1px solid var(--border)"><div><b>Mode</b><div class="note">Enforce blocks; Monitor logs only</div></div>'
+    +'<select id="mcpMode" class="btn sm" '+(ed?'':'disabled')+'><option value="monitor"'+(gr.mcp.mode==='monitor'?' selected':'')+'>monitor</option><option value="enforce"'+(gr.mcp.mode==='enforce'?' selected':'')+'>enforce</option></select></div>';
+  el.innerHTML =
+    toggleRow('mcpEnabled', gr.mcp.enabled, 'Enable MCP inspection', 'Parse and guard MCP tool calls on egress', ed)
+    + modeSel
+    + toggleRow('mcpPin', gr.mcp.schema.pin, 'Pin tool schemas', 'Reject tool-definition drift (poisoning) at handshake', ed)
+    + toggleRow('mcpChain', gr.mcp.chain.enabled, 'Detect cross-tool exfil chains', 'Flag read-then-send sequences to new destinations', ed)
+    + toggleRow('mcpScanArgs', gr.mcp.scan.toolArgs, 'Scan tool arguments', 'Run DLP over outbound tool arguments', ed)
+    + toggleRow('mcpScanResults', gr.mcp.scan.toolResults, 'Scan tool results', 'Run DLP over tool results returned to the model', ed)
+    + toggleRow('mcpFailClosed', gr.mcp.failClosedOnError, 'Fail closed on error', 'Block when the MCP guard errors instead of allowing', ed, true);
+}
+function renderMCPToolPolicy(){
+  const el=document.getElementById('mcpToolPolicy'); if(!el) return;
+  const ed=gr.settingsEditable;
+  if(!gr.mcp){ el.innerHTML='<div class="note">Enable MCP inspection to manage tool allow / deny.</div>'; return; }
+  el.innerHTML = mcpListBlock('allow', gr.mcp.tools.allow, ed) + '<div class="divider"></div>' + mcpListBlock('deny', gr.mcp.tools.deny, ed);
+  el.querySelectorAll('.mcp-tool-rm').forEach(b=>b.addEventListener('click',()=>removeMcpTool(b.dataset.list,+b.dataset.idx)));
+}
+function mcpListBlock(list,arr,ed){
+  const pill = list==='allow'?'<span class="pill p-allow">allow</span>':'<span class="pill p-deny">deny</span>';
+  const add = ed? '<button class="btn sm" onclick="addMcpTool(\''+list+'\')">+ Add</button>':'';
+  let h='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">'+pill+add+'</div>';
+  if(!arr.length){ h+='<div class="note" style="padding:2px 0">none</div>'; return h; }
+  h+=arr.map((t,i)=>'<div style="display:flex;align-items:center;justify-content:space-between;padding:4px 0"><span class="mono" style="font-size:12.5px">'+esc(t)+'</span>'+(ed?'<button class="btn sm mcp-tool-rm" data-list="'+list+'" data-idx="'+i+'" style="color:#ff8098">✕</button>':'')+'</div>').join('');
+  return h;
+}
+function addMcpTool(list){
+  if(!gr.settingsEditable||!gr.mcp) return;
+  const t=(window.prompt('Add '+list+' tool name (exact match)')||'').trim();
+  if(!t) return;
+  (list==='allow'?gr.mcp.tools.allow:gr.mcp.tools.deny).push(t);
+  renderMCPToolPolicy();
+}
+function removeMcpTool(list,idx){
+  if(!gr.mcp) return;
+  const arr = list==='allow'?gr.mcp.tools.allow:gr.mcp.tools.deny;
+  if(idx>=0&&idx<arr.length) arr.splice(idx,1);
+  renderMCPToolPolicy();
+}
+function renderMCPInventory(){
+  const body=document.getElementById('mcpInventory'); if(!body) return;
+  const mc=gr.mcpInv||{}; const tools=(mc&&mc.tools)||[];
+  const sub=document.getElementById('mcpInvSub');
+  if(sub) sub.textContent = (mc&&mc.enabled)? (tools.length+' tool'+(tools.length===1?'':'s')+' observed') : 'MCP inspection not attached on this node';
+  if(!tools.length){ body.innerHTML='<tr><td colspan="7" class="muted" style="padding:14px">No MCP tools observed yet.</td></tr>'; return; }
+  body.innerHTML=tools.map(t=>{
+    const schema = t.present? '<span class="pill p-allow">present</span>' : '<span class="pill p-high">unknown</span>';
+    const nf=(t.findings||[]).length;
+    const findings= nf? '<span class="pill p-high">'+nf+'</span>' : '<span class="muted">—</span>';
+    return '<tr><td class="mono">'+esc(t.tool||'')+'</td><td class="muted">'+esc(t.server||'—')+'</td>'
+      +'<td class="num">'+fmtNum(t.calls||0)+'</td><td class="num">'+fmtNum(t.allowed||0)+'</td><td class="num">'+fmtNum(t.denied||0)+'</td>'
+      +'<td>'+schema+'</td><td>'+findings+'</td></tr>';
+  }).join('');
+}
+async function saveMCP(){
+  if(!gr.settingsEditable) return;
+  const base=gr.settings.mcp||{};
+  const modeEl=document.getElementById('mcpMode');
+  const mcpBlock=Object.assign({}, base, {
+    enabled: chk('mcpEnabled'),
+    mode: modeEl? modeEl.value : (base.mode||'monitor'),
+    failClosedOnError: chk('mcpFailClosed'),
+    schema: Object.assign({}, base.schema||{}, {pin: chk('mcpPin')}),
+    scan: Object.assign({}, base.scan||{}, {toolArgs: chk('mcpScanArgs'), toolResults: chk('mcpScanResults')}),
+    chain: Object.assign({}, base.chain||{}, {enabled: chk('mcpChain')}),
+  });
+  if(gr.mcp){ mcpBlock.tools=Object.assign({}, base.tools||{}, {allow:gr.mcp.tools.allow, deny:gr.mcp.tools.deny}); }
+  const merged=Object.assign({}, gr.settings, {mcp:mcpBlock});
+  try{ await putSettings(merged); renderMCP(); flashBtn('mcpSaveBtn','Saved ✓'); }
+  catch(err){ window.alert('MCP save failed: '+err.message); }
+}
+
+/* ---------- Judge (/settings.judge + /settings.advisory for mode) ---------- */
+function judgeField(id,label,value,ph,ed){
+  return '<div class="field"><label>'+esc(label)+'</label><input id="'+id+'" type="text" value="'+esc(value||'')+'" placeholder="'+esc(ph)+'" '+(ed?'':'disabled')+'/></div>';
+}
+function renderJudge(){
+  const j=gr.settings.judge||null;
+  gr.judge = j ? { enabled:!!j.enabled, provider:j.provider||'', model:j.model||'', apiKeyEnv:j.apiKeyEnv||'', baseURL:j.baseURL||'' }
+              : { enabled:false, provider:'', model:'', apiKeyEnv:'', baseURL:'' };
+  const advisory = !!(gr.settings.advisory && gr.settings.advisory.enabled);
+  const ed=gr.settingsEditable;
+  const cfg=document.getElementById('judgeConfig');
+  const saveBtn=document.getElementById('judgeSaveBtn'); if(saveBtn) saveBtn.style.display=ed?'':'none';
+  if(cfg){
+    if(!j && !ed){
+      cfg.innerHTML='<div class="note">The LLM judge is <b>disabled</b> and read-only on this node (managed by the control plane).</div>';
+    } else {
+      cfg.innerHTML =
+        toggleRow('judgeEnabled', gr.judge.enabled, 'Enable LLM judge', 'Score outbound bodies with an LLM for prompt-injection / exfil', ed)
+        + judgeField('judgeProvider','Provider', gr.judge.provider, 'anthropic / openai / ollama', ed)
+        + judgeField('judgeModel','Model', gr.judge.model, 'e.g. claude-haiku-4-5', ed)
+        + judgeField('judgeBaseURL','Base URL (optional)', gr.judge.baseURL, 'https://…', ed)
+        + judgeField('judgeApiKeyEnv','API key env var (name only)', gr.judge.apiKeyEnv, 'OPENAI_API_KEY', ed)
+        + '<div class="note" style="margin:-4px 0 12px">Env NAME only — the worker resolves the actual key from its own environment. The value is never entered or shown here.</div>'
+        + toggleRow('judgeAdvisory', advisory, 'Advisory mode', 'Score and log only — never block (uncheck to let the judge enforce)', ed, true);
+    }
+  }
+  const st=document.getElementById('judgeStatus');
+  if(st){
+    const mode = !gr.judge.enabled? 'off' : (advisory? 'advisory (log only)':'enforce');
+    st.innerHTML =
+      '<div class="kv"><span class="k">Status</span>'+(gr.judge.enabled?'<span class="pill p-allow">enabled</span>':'<span class="pill p-monitor">disabled</span>')+'</div>'
+      +'<div class="kv"><span class="k">Mode</span><span>'+esc(mode)+'</span></div>'
+      +'<div class="kv"><span class="k">Provider</span><span>'+esc(gr.judge.provider||'—')+'</span></div>'
+      +'<div class="kv"><span class="k">Model</span><span class="mono">'+esc(gr.judge.model||'—')+'</span></div>'
+      +'<div class="kv"><span class="k">API key</span><span class="mono">'+(gr.judge.apiKeyEnv?('$'+esc(gr.judge.apiKeyEnv)):'—')+'</span></div>'
+      +'<div class="divider"></div>'
+      +'<div class="note">Judge verdicts appear inline on the <a href="#" onclick="go(\'activity\');return false;">Activity</a> log as they occur.</div>';
+  }
+}
+async function saveJudge(){
+  if(!gr.settingsEditable) return;
+  const base=gr.settings.judge||{};
+  const judgeBlock=Object.assign({}, base, {
+    enabled: chk('judgeEnabled'),
+    provider:(val('judgeProvider')||'').trim(),
+    model:(val('judgeModel')||'').trim(),
+    baseURL:(val('judgeBaseURL')||'').trim(),
+    apiKeyEnv:(val('judgeApiKeyEnv')||'').trim(),
+  });
+  const merged=Object.assign({}, gr.settings, {judge:judgeBlock, advisory:{enabled: chk('judgeAdvisory')}});
+  try{ await putSettings(merged); renderJudge(); flashBtn('judgeSaveBtn','Saved ✓'); }
+  catch(err){ window.alert('Judge save failed: '+err.message); }
+}
+
+/* ============================================================
+   Alerts (/dashboard/api/alerts) — Triggered is real; Configure is
+   informational (there is no alert-rule config API yet).
+   ============================================================ */
+async function loadAlerts(){
+  let alerts;
+  try{ alerts=await jget('/dashboard/api/alerts'); }catch(e){ alerts=[]; }
+  renderAlerts(Array.isArray(alerts)?alerts:[]);
+}
+function alertStatusPill(s){
+  s=String(s||'').toLowerCase();
+  if(s==='firing') return '<span class="pill p-deny">firing</span>';
+  if(s==='acked'||s==='acknowledged') return '<span class="pill p-redact">acked</span>';
+  if(s==='resolved') return '<span class="pill p-allow">resolved</span>';
+  return '<span class="chip">'+esc(s||'—')+'</span>';
+}
+function renderAlerts(alerts){
+  const body=document.getElementById('triggeredBody'); if(!body) return;
+  const sub=document.getElementById('alertsSub');
+  const firing=alerts.filter(a=>String(a.status).toLowerCase()==='firing').length;
+  if(sub) sub.textContent = alerts.length? (fmtNum(alerts.length)+' alert'+(alerts.length===1?'':'s')+' · '+firing+' firing') : 'no alerts';
+  if(!alerts.length){
+    body.innerHTML='<tr><td colspan="7"><div class="empty-state" style="padding:34px 20px"><div class="es-ic">🔔</div><h2>No alerts yet</h2><p>Alerts fire from configured integrations once detections trigger. Threshold detectors are a later milestone.</p></div></td></tr>';
+    return;
+  }
+  body.innerHTML='';
+  alerts.forEach((a,i)=>{
+    const s=a.subject||{};
+    const subject = s.domain||s.tool||s.agent||s.worker||'—';
+    const tr=document.createElement('tr'); tr.className='clickable';
+    tr.innerHTML='<td>'+sevPill(a.severity)+'</td><td>'+esc(a.summary||'—')+'</td>'
+      +'<td class="mono" style="font-size:12px">'+esc(subject)+'</td><td class="num">'+fmtNum(a.count||0)+'</td>'
+      +'<td>'+alertStatusPill(a.status)+'</td><td class="muted">'+relTime(a.firstSeen)+'</td><td class="muted">'+relTime(a.lastSeen)+'</td>';
+    body.appendChild(tr);
+    const dr=document.createElement('tr'); dr.className='detail-row';
+    dr.innerHTML='<td colspan="7"><div class="detail-inner" id="aldet'+i+'">'+alertDetail(a)+'</div></td>';
+    tr.addEventListener('click',()=>{ const d=document.getElementById('aldet'+i); if(d) d.classList.toggle('open'); });
+    body.appendChild(dr);
+  });
+}
+function alertDetail(a){
+  const s=a.subject||{};
+  const subj=[['domain',s.domain],['tool',s.tool],['agent',s.agent],['worker',s.worker]].filter(x=>x[1]).map(x=>'<div class="kv"><span class="k">'+x[0]+'</span><span class="mono">'+esc(x[1])+'</span></div>').join('')||'<div class="kv"><span class="muted">—</span></div>';
+  return '<div class="detail-grid">'
+    +'<div class="detail-sec"><h5>Alert</h5>'
+      +'<div class="kv"><span class="k">Category</span><span>'+esc(a.category||'—')+'</span></div>'
+      +'<div class="kv"><span class="k">Severity</span>'+sevPill(a.severity)+'</div>'
+      +'<div class="kv"><span class="k">Status</span>'+alertStatusPill(a.status)+'</div>'
+      +'<div class="kv"><span class="k">Dedup key</span><span class="mono" style="font-size:11px">'+esc(a.dedupKey||'—')+'</span></div>'
+    +'</div>'
+    +'<div class="detail-sec"><h5>Subject</h5>'+subj+'</div>'
+    +'<div class="detail-sec" style="grid-column:1 / -1"><h5>Evidence</h5><div class="mask" style="white-space:pre-wrap; font-size:12px">'+esc(a.evidence||'—')+'</div></div>'
+  +'</div>';
+}
+
+/* ============================================================
+   Audit (/dashboard/api/audit + POST /audit/verify)
+   ============================================================ */
+async function loadAudit(){
+  let d;
+  try{ d=await jget('/dashboard/api/audit'); }
+  catch(e){ d={receipts:{count:0,verifiedCount:0,recent:[]},compliance:[]}; }
+  renderAudit(d);
+}
+function renderAudit(d){
+  const rec=(d&&d.receipts)||{count:0,verifiedCount:0,recent:[]};
+  const comp=(d&&d.compliance)||[];
+  const grid=document.getElementById('covGrid'); const cEmpty=document.getElementById('covEmpty');
+  if(grid){
+    if(!comp.length){ grid.innerHTML=''; if(cEmpty) cEmpty.style.display=''; }
+    else {
+      if(cEmpty) cEmpty.style.display='none';
+      grid.innerHTML=comp.map(c=>{
+        const fw=(c.framework||'').toUpperCase()||'—';
+        const n=c.count||0;
+        return '<div class="cov covered"><div class="id">'+esc(c.control||'—')+'</div><div class="nm">'+esc(fw)+'</div>'
+          +'<span class="pill p-prove"><span class="d" style="background:var(--blue)"></span>'+fmtNum(n)+' event'+(n===1?'':'s')+'</span></div>';
+      }).join('');
+    }
+  }
+  const sub=document.getElementById('receiptsSub');
+  const empty=document.getElementById('receiptsEmpty');
+  const table=document.getElementById('receiptsTable');
+  const body=document.getElementById('receiptsBody');
+  if((rec.count||0)===0){
+    if(sub) sub.textContent='signing not enabled';
+    if(empty) empty.style.display='';
+    if(table) table.style.display='none';
+  } else {
+    if(sub) sub.textContent=fmtNum(rec.count)+' total · '+fmtNum(rec.verifiedCount||0)+' verified · newest first';
+    if(empty) empty.style.display='none';
+    if(table) table.style.display='';
+    if(body){
+      body.innerHTML=(rec.recent||[]).map(r=>{
+        const v = r.verified? '<span class="pill p-prove"><span class="d" style="background:var(--blue)"></span>Ed25519 ✓</span>' : '<span class="pill p-deny">✗ invalid</span>';
+        return '<tr><td class="mono">'+esc(r.id||'—')+'</td><td>'+decPill(r.decision)+'</td>'
+          +'<td class="mono" style="color:#bcd">'+esc(r.domain||'—')+'</td><td class="mono">'+esc(r.method||'—')+'</td>'
+          +'<td class="mono">'+(r.signedAt?hhmmss(r.signedAt):'—')+'</td><td>'+v+'</td></tr>';
+      }).join('');
+    }
+  }
+}
+async function verifyReceipt(){
+  const ta=document.getElementById('receiptInput'); const res=document.getElementById('verifyResult');
+  if(!ta||!res) return;
+  const raw=(ta.value||'').trim();
+  res.classList.add('show'); res.classList.remove('bad');
+  if(!raw){ res.classList.add('bad'); res.innerHTML='Paste a receipt JSON first.'; return; }
+  res.innerHTML='Verifying…';
+  try{
+    const r=await fetch('/dashboard/api/audit/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:raw});
+    const d=await r.json().catch(()=>({valid:false}));
+    if(d&&d.valid){ res.classList.remove('bad'); res.innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="width:18px;height:18px"><path d="M20 6L9 17l-5-5"/></svg>Signature valid — Ed25519 verified'; }
+    else { res.classList.add('bad'); res.innerHTML='✗ Signature invalid — does not verify against the trusted key'; }
+  }catch(e){ res.classList.add('bad'); res.innerHTML='✗ Verify failed: '+esc((e&&e.message)||'request error'); }
+}
+
+/* ============================================================
+   Settings integrations + RBAC (preview — control-plane wiring later)
    ============================================================ */
 function renderPreview4b(){
   const setHTML=(sel,html)=>{ const el=document.querySelector(sel); if(el) el.innerHTML=html; };
-
-  /* Secrets table */
-  const secrets=[
-    ['{{OPENAI_API_KEY}}','••••••••7f9a (len 51)','SQLite','judge · worker-ethos-1','2m ago'],
-    ['{{ANTHROPIC_API_KEY}}','••••••••2c19 (len 108)','Vault','worker-ethos-1','5m ago'],
-    ['{{STRIPE_SECRET}}','••••••••a4e0 (len 107)','AWS Secrets','billing-rule · atlas-3','18m ago'],
-    ['{{GITHUB_TOKEN}}','••••••••b731 (len 40)','SQLite','worker-hermes-2','1h ago']
-  ];
-  const backendPill=b=>{ const m={'SQLite':'p-monitor','Vault':'p-detect','AWS Secrets':'p-redact','GCP Secret Manager':'p-prove'}; return '<span class="pill '+(m[b]||'p-monitor')+'">'+esc(b)+'</span>'; };
-  setHTML('#secretsBody', secrets.map(s=>
-    '<tr><td><span class="tag" style="font-size:12.5px">'+esc(s[0])+'</span></td>'
-    +'<td><span class="mask">'+esc(s[1])+'</span></td>'
-    +'<td>'+backendPill(s[2])+'</td>'
-    +'<td class="mono" style="font-size:12px">'+esc(s[3])+'</td>'
-    +'<td class="muted">'+esc(s[4])+'</td>'
-    +'<td><button class="btn sm">Edit</button> <button class="btn sm">Rotate</button> <button class="btn sm" style="color:#ff8098">Delete</button></td></tr>'
-  ).join(''));
-
-  /* Guardrails: egress lists */
-  const allowD=[['api.openai.com','—'],['api.anthropic.com','—'],['github.com','—'],['*.zendesk.com','redact pii'],['hooks.slack.com','—']];
-  const denyD=[['pastebin.com','exfil'],['unknown-c2.ru','threat intel'],['data-exfil.io','exfil'],['*.onion','policy']];
-  setHTML('#allowList', allowD.map(d=>'<tr><td class="mono" style="color:#bcd">'+esc(d[0])+'</td><td>'+(d[1]!=='—'?'<span class="pill p-redact">'+esc(d[1])+'</span>':'<span class="muted">—</span>')+'</td></tr>').join(''));
-  setHTML('#denyList', denyD.map(d=>'<tr><td class="mono" style="color:#ff8098">'+esc(d[0])+'</td><td><span class="chip">'+esc(d[1])+'</span></td></tr>').join(''));
-
-  /* Guardrails: DLP matrix */
-  const dlpClasses=['credentials','pii.contact','pii.identity','pii.financial','source_code','infrastructure'];
-  const dlpDests=['api.openai.com','api.anthropic.com','*.zendesk.com','github.com','hooks.slack.com','internal-svc'];
-  const dlpGrid=[
-    [['allow',412],['allow',388],['block',22],['redact',14],['block',31],['allow',96]],
-    [['redact',120],['redact',110],['allow',204],['redact',44],['redact',88],['allow',52]],
-    [['redact',66],['redact',58],['redact',40],['block',12],['redact',18],['monitor',9]],
-    [['block',34],['block',30],['redact',24],['block',12],['block',40],['monitor',6]],
-    [['redact',190],['redact',172],['block',8],['allow',311],['block',14],['allow',44]],
-    [['monitor',124],['monitor',110],['block',4],['block',2],['block',26],['allow',88]]
-  ];
-  const mx=document.getElementById('dlpMatrix');
-  if(mx){
-    let html='<tr><th class="cls"></th>'+dlpDests.map(d=>'<th class="dest">'+esc(d)+'</th>').join('')+'</tr>';
-    dlpClasses.forEach((cls,ri)=>{
-      html+='<tr><th class="cls">'+esc(cls)+'</th>';
-      dlpDests.forEach((d,ci)=>{ const cell=dlpGrid[ri][ci];
-        html+='<td><div class="cell '+cell[0]+'"><span class="act">'+cell[0]+'</span><span class="cnt">'+cell[1]+' hits</span></div></td>'; });
-      html+='</tr>';
-    });
-    mx.innerHTML=html;
-  }
-
-  /* Guardrails: MCP tables */
-  const mcpToolsD=[['read_file','filesystem','allow'],['write_file','filesystem','deny'],['search_tickets','zendesk','allow'],['run_shell','system','deny'],['fetch_url','web','redact'],['get_repo','github','allow']];
-  const mcpPolPill=p=> p==='allow'?'<span class="pill p-allow">allow</span>': p==='deny'?'<span class="pill p-deny">deny</span>':'<span class="pill p-redact">redact</span>';
-  setHTML('#mcpTools', mcpToolsD.map(t=>'<tr><td class="mono">'+esc(t[0])+'</td><td class="muted">'+esc(t[1])+'</td><td>'+mcpPolPill(t[2])+'</td></tr>').join(''));
-  const mcpFindingsD=[
-    ['14:01','Tool schema drift — description changed post-handshake','fetch_url','high','blocked'],
-    ['13:47','Tool-poisoning: hidden instruction in tool result','search_tickets','critical','quarantined'],
-    ['13:12','Exfil chain: read_file → send_email to new domain','send_email','critical','blocked']
-  ];
-  setHTML('#mcpFindings', mcpFindingsD.map(f=>'<tr><td class="mono">'+esc(f[0])+'</td><td>'+esc(f[1])+'</td><td class="mono">'+esc(f[2])+'</td><td>'+sevPill(f[3])+'</td><td><span class="chip">'+esc(f[4])+'</span></td></tr>').join(''));
-
-  /* Guardrails: judge feed */
-  const judgeFeedD=[
-    ['worker-ethos-1','clean · summarization','allow','#2dd4bf','8s'],
-    ['worker-atlas-3','suspected prompt-injection in tool output','deny','#f43f5e','40s'],
-    ['worker-hermes-2','PII in draft — recommend redact','redact','#f59e0b','2m']
-  ];
-  setHTML('#judgeFeed', judgeFeedD.map(f=>
-    '<div class="fr"><span class="dot" style="background:'+f[3]+'"></span><span class="who">'+esc(f[0])+'</span>'
-    +'<span class="meta">'+decPill(f[2])+'<span class="note">'+esc(f[1])+'</span><span class="time">'+esc(f[4])+'</span></span></div>'
-  ).join(''));
-
-  /* Alerts */
-  const alertRulesD=[
-    ['DLP block on pii.financial','high','Slack #sec','green','on'],
-    ['MCP tool-poisoning detected','critical','PagerDuty','green','on'],
-    ['New destination (first contact)','medium','webhook','amber','on'],
-    ['Cost anomaly > $50/h','medium','email','green','on']
-  ];
-  const sinkHealth=h=>'<span class="health-dot" style="background:var(--'+(h==='green'?'green':'amber')+')"></span>'+(h==='green'?'healthy':'integration_down');
-  setHTML('#alertRules', alertRulesD.map(r=>
-    '<tr><td>'+esc(r[0])+'</td><td>'+sevPill(r[1])+'</td><td class="mono">'+esc(r[2])+'</td><td class="muted" style="font-size:12px">'+sinkHealth(r[3])+'</td>'
-    +'<td><label class="switch"><input type="checkbox" '+(r[4]==='on'?'checked':'')+'><span class="sl"></span></label></td></tr>'
-  ).join(''));
-  const triggeredD=[
-    ['critical','MCP tool-poisoning','search_tickets @ zendesk',3,'firing','13:47','14:01','PagerDuty'],
-    ['high','DLP block: pii.financial','data-exfil.io',6,'firing','12:20','14:00','Slack #sec'],
-    ['medium','New destination','unknown-c2.ru',1,'firing','10:44','10:44','webhook'],
-    ['low','Worker stale','worker-atlas-3',1,'firing','14:00','14:04','webhook']
-  ];
-  const alStatusPill=s=> s==='firing'?'<span class="pill p-deny">firing</span>': s==='acked'?'<span class="pill p-redact">acked</span>':'<span class="pill p-allow">resolved</span>';
-  setHTML('#triggeredBody', triggeredD.map(a=>
-    '<tr><td>'+sevPill(a[0])+'</td><td>'+esc(a[1])+'</td><td class="mono" style="font-size:12px">'+esc(a[2])+'</td>'
-    +'<td class="num">'+a[3]+'</td><td>'+alStatusPill(a[4])+'</td><td class="mono">'+esc(a[5])+'</td><td class="mono">'+esc(a[6])+'</td><td class="muted">'+esc(a[7])+'</td></tr>'
-  ).join(''));
-
-  /* Audit: coverage + receipts */
-  const cov=[
-    ['T1048','Exfiltration Over Alt Protocol','covered'],['T1071','App Layer Protocol','covered'],
-    ['T1552','Unsecured Credentials','covered'],['T1059','Command &amp; Scripting','partial'],
-    ['LLM01','Prompt Injection','covered'],['LLM02','Insecure Output','covered'],
-    ['LLM06','Sensitive Info Disclosure','covered'],['LLM07','Insecure Plugin Design','partial']
-  ];
-  setHTML('#covGrid', cov.map(c=>
-    '<div class="cov '+c[2]+'"><div class="id">'+c[0]+'</div><div class="nm">'+c[1]+'</div>'
-    +(c[2]==='covered'?'<span class="pill p-prove"><span class="d" style="background:var(--blue)"></span>covered</span>':'<span class="pill p-redact">partial</span>')+'</div>'
-  ).join(''));
-  const receiptsD=[
-    ['rcpt_8f21ac','egress.allow','worker-ethos-1','14:03:11'],
-    ['rcpt_8f219e','egress.redact','worker-hermes-2','14:02:58'],
-    ['rcpt_8f2187','egress.deny','worker-atlas-3','14:02:41'],
-    ['rcpt_8f2170','secret.swap','worker-ethos-1','14:02:20']
-  ];
-  setHTML('#receiptsBody', receiptsD.map(r=>
-    '<tr><td class="mono">'+esc(r[0])+'</td><td><span class="chip">'+esc(r[1])+'</span></td><td>'+esc(r[2])+'</td><td class="mono">'+esc(r[3])+'</td>'
-    +'<td><span class="pill p-prove"><span class="d" style="background:var(--blue)"></span>Ed25519 ✓</span></td></tr>'
-  ).join(''));
-
   /* Settings: integrations + RBAC (preview) */
   const integrations=[
     ['Slack','#sec-alerts · workspace ethos','{{SLACK_BOT_TOKEN}}','green'],
