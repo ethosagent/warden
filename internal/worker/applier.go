@@ -17,9 +17,10 @@ import (
 )
 
 // SettingsApplier is the named hot-reload seam: it rebuilds + atomically swaps the
-// proxy's MCP gateway, inline judge, log level, compliance tagging layer, and
-// secret cache TTL from the control-plane-distributed settings. It runs only for
-// MANAGED workers, so a local-only worker's seeded gateway/judge are never touched.
+// proxy's MCP gateway, inline judge, DLP scanner, log level, compliance tagging
+// layer, and secret cache TTL from the control-plane-distributed settings. It runs
+// only for MANAGED workers, so a local-only worker's seeded gateway/judge/DLP
+// scanner are never touched.
 //
 // It replaces the anonymous `applySettings` closure that previously lived in
 // cmd/proxy: the captured locals become fields set at construction, and Apply
@@ -123,6 +124,28 @@ func (a *SettingsApplier) Apply() {
 		// No judge distributed (or explicitly disabled): disable it.
 		a.p.SetJudge(nil)
 		a.logger.Debug("control-plane settings applied; judge disabled")
+	}
+
+	// --- DLP scanner swap ---
+	// Rebuild the outbound request-body DLP scanner from the distributed settings
+	// and atomic-swap it in. Like the judge, the DLP scanner holds no lifecycle
+	// resource (nothing to Close), so a swap needs no old-handle cleanup: a nil
+	// scanner disables the stage (byte-identical to a worker that never configured
+	// DLP). Build only when the distributed DLP block resolves to an ACTIVE mode
+	// (monitor/enforce); an absent block, mode off, or an inactive config all leave
+	// DLP disabled. phonePII/evidence are LOCAL wiring knobs and stay false here
+	// (never distributed), matching the boot wiring in Run.
+	var newDLP *proxy.DLPScanner
+	if settings != nil && settings.DLP != nil {
+		if dcfg := config.DLPConfigFromSettings(settings.DLP); dcfg.Active() {
+			newDLP = proxy.NewDLPScanner(dcfg, false, false)
+		}
+	}
+	a.p.SetDLP(newDLP)
+	if newDLP != nil {
+		a.logger.Info("DLP scanner swapped from control-plane settings", "mode", settings.DLP.Mode)
+	} else {
+		a.logger.Debug("control-plane settings applied; DLP remains disabled")
 	}
 
 	// --- Logging level (live) + format (restart-only) ---

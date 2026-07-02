@@ -105,6 +105,9 @@ func TestApplier_NilSettings(t *testing.T) {
 	if a.liveCompliance {
 		t.Error("nil settings must not enable compliance")
 	}
+	if a.p.DLPMode() != "" {
+		t.Error("nil settings must not enable DLP")
+	}
 }
 
 // TestApplier_MCPEnableThenDisable drives the MCP gateway swap in both directions:
@@ -124,6 +127,49 @@ func TestApplier_MCPEnableThenDisable(t *testing.T) {
 	a.Apply()
 	if *a.liveMCPGW != nil {
 		t.Error("mcp disabled settings should clear the live gateway")
+	}
+}
+
+// TestApplier_DLPEnableThenDisable drives the DLP scanner swap in both directions
+// over the applier: a distributed dlp block with an active mode + rules rebuilds
+// and swaps in a live scanner (observed via the proxy's live DLPMode), a later
+// apply with mode:off disables it, and a nil block leaves it disabled — the
+// fleet-wide hot-apply this phase adds.
+func TestApplier_DLPEnableThenDisable(t *testing.T) {
+	a, fake, _ := newTestApplier(t)
+
+	// Enforce + a rule: the scanner is built and swapped onto the live proxy.
+	fake.settings = &config.SettingsWire{DLP: &config.DLPSettings{
+		Mode: config.DLPModeEnforce,
+		Rules: []config.DLPRuleSettings{
+			{Class: "pii.*", To: []string{"api.openai.com"}, Action: config.DLPActionBlock},
+		},
+		Custom: []config.DLPCustomClassSettings{
+			{Name: "codename", Regex: `PROJECT-[A-Z]{4}`, Severity: "high"},
+		},
+	}}
+	a.Apply()
+	if got := a.p.DLPMode(); got != config.DLPModeEnforce {
+		t.Fatalf("dlp enforce settings should install an enforce scanner, got mode=%q", got)
+	}
+
+	// mode:off → an inactive config → DLP disabled (scanner nil-ed).
+	fake.settings = &config.SettingsWire{DLP: &config.DLPSettings{Mode: config.DLPModeOff}}
+	a.Apply()
+	if got := a.p.DLPMode(); got != "" {
+		t.Errorf("dlp off settings should disable DLP, got mode=%q", got)
+	}
+
+	// Re-enable in monitor mode, then drop the block entirely: nil DLP disables.
+	fake.settings = &config.SettingsWire{DLP: &config.DLPSettings{Mode: config.DLPModeMonitor}}
+	a.Apply()
+	if got := a.p.DLPMode(); got != config.DLPModeMonitor {
+		t.Fatalf("dlp monitor settings should install a monitor scanner, got mode=%q", got)
+	}
+	fake.settings = &config.SettingsWire{}
+	a.Apply()
+	if got := a.p.DLPMode(); got != "" {
+		t.Errorf("absent dlp block should leave DLP disabled, got mode=%q", got)
 	}
 }
 

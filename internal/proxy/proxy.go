@@ -237,6 +237,17 @@ type Proxy struct {
 	// (validated non-nil), so an unmanaged worker's behavior is unchanged.
 	analyticsP atomic.Pointer[analyticsHolder]
 
+	// dlpP holds the live DLP scanner, swappable atomically while the hot path
+	// reads it (control-plane settings can rebuild + replace it at runtime).
+	// *DLPScanner is a CONCRETE pointer type (unlike the interface-valued gateway/
+	// judge above), so it lives directly behind the atomic pointer with no holder
+	// wrapper: a nil *DLPScanner stores and loads back as a true nil, so there is
+	// no typed-nil-interface hazard to guard. A nil scanner means DLP is disabled
+	// (the dlpScan stage's `if d == nil` guard skips all DLP work — no body read,
+	// byte-identical to a worker that never configured DLP). It is seeded from
+	// cfg.DLP in New so an unmanaged worker's behavior is unchanged.
+	dlpP atomic.Pointer[DLPScanner]
+
 	// wsDowngradeOnce guards a single WARN when a WS upgrade is forwarded
 	// unscanned because the live gateway lacks WSScanner in monitor/off mode. It
 	// is process-wide (not per-connection) so a degraded control is visible
@@ -278,13 +289,31 @@ func (p *Proxy) mcpGateway() MCPGateway {
 	return nil
 }
 
-// dlp loads the current DLP scanner. A nil return means DLP is disabled (the
-// dlpScan stage's `if d == nil` guard then skips all DLP work — no body read,
-// byte-identical to a worker that never configured DLP). Phase 1 wires it once
-// at boot from cfg.DLP; it is a method (not a direct field read) and mirrors
-// mcpGateway() so a later phase can back it with an atomic pointer for hot-swap
-// without changing any hot-path call site.
-func (p *Proxy) dlp() *DLPScanner { return p.cfg.DLP }
+// dlp loads the current DLP scanner through the atomic pointer. A nil return
+// means DLP is disabled (the dlpScan stage's `if d == nil` guard then skips all
+// DLP work — no body read, byte-identical to a worker that never configured
+// DLP). It is seeded from cfg.DLP in New and hot-swapped by SetDLP on a
+// control-plane settings change; a single snapshot per request keeps a
+// concurrent swap from changing the scanner mid-request.
+func (p *Proxy) dlp() *DLPScanner { return p.dlpP.Load() }
+
+// SetDLP atomically swaps in a new DLP scanner (or nil to disable). It is
+// race-free against concurrent hot-path reads via the atomic pointer. The DLP
+// scanner holds no lifecycle resource (nothing to Close), like the judge, so
+// there is nothing to release on the OLD scanner; the long-poll apply loop
+// rebuilds and replaces it on each control-plane change.
+func (p *Proxy) SetDLP(d *DLPScanner) { p.dlpP.Store(d) }
+
+// DLPMode reports the live DLP scanner's mode ("monitor"/"enforce"), or "" when
+// DLP is disabled (no scanner). It reads through the same atomic pointer as the
+// hot path, so it observes the current post-swap state — used by the control-plane
+// apply tests to confirm a hot-swap landed, and safe for operator introspection.
+func (p *Proxy) DLPMode() string {
+	if d := p.dlp(); d != nil {
+		return d.mode
+	}
+	return ""
+}
 
 // SetMCPGateway atomically swaps in a new MCP gateway (or nil to disable). It is
 // race-free against concurrent hot-path reads via the atomic pointer; the caller
@@ -380,6 +409,11 @@ func New(cfg Config) (*Proxy, error) {
 	// a managed worker's apply loop replaces them on cache.ttl / compliance changes.
 	p.secretsP.Store(&secretsHolder{s: cfg.Secrets})
 	p.analyticsP.Store(&analyticsHolder{a: cfg.Analytics})
+	// Seed the swappable DLP scanner from cfg.DLP (may be nil = disabled). A nil
+	// *DLPScanner stores and loads back as nil, so dlp() reads exactly what a
+	// direct cfg.DLP field read did before; a managed worker's apply loop replaces
+	// it on a control-plane DLP settings change.
+	p.dlpP.Store(cfg.DLP)
 
 	haveCert := cfg.CACertPath != ""
 	haveKey := cfg.CAKeyPath != ""

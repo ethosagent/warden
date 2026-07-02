@@ -85,11 +85,10 @@ func benchHandleHTTPDLP(b *testing.B, dlp *DLPScanner) {
 	backendLn, _ := startBackend(b, caCert, caKey)
 
 	p, _ := startTestProxyWithSecrets(b, []string{"backend.test"}, caCertPEM, caKeyPEM, nil, nil)
-	// Set the DLP scanner directly on the running proxy. Benchmarks do not run
-	// under -race (the gate runs `go test -bench` without it), and it is set once
-	// before any request is issued below, so no concurrent hot-path read observes
-	// a torn write.
-	p.cfg.DLP = dlp
+	// Set the DLP scanner on the running proxy via the atomic swap seam. It is set
+	// once before any request is issued below, so no concurrent hot-path read
+	// observes a stale scanner.
+	p.SetDLP(dlp)
 	p.dialTLS = func(network, addr string, cfg *tls.Config) (*tls.Conn, error) {
 		return tls.Dial("tcp", backendLn.Addr().String(), &tls.Config{InsecureSkipVerify: true})
 	}

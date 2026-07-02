@@ -226,6 +226,93 @@ func TestAgentsFromSettings_RoundTrip(t *testing.T) {
 	}
 }
 
+// dlpRoundTripConfig is a fully-populated DLPConfig exercising every wire field
+// (mode, class defaults, rules with destinations, custom classes) so the
+// projection round-trip covers each one.
+func dlpRoundTripConfig() DLPConfig {
+	return DLPConfig{
+		Mode: DLPModeEnforce,
+		Classes: map[string]DLPClassDefault{
+			"pii.contact": {Action: DLPActionRedact},
+			"pii.*":       {Action: DLPActionMonitor},
+		},
+		Rules: []DLPRule{
+			{Class: "pii.*", To: []string{"*.zendesk.com"}, Action: DLPActionAllow},
+			{Class: "pii.*", To: []string{"api.openai.com", "api.anthropic.com"}, Action: DLPActionBlock},
+			{Class: "source_code", Action: DLPActionBlock},
+			{Class: "custom.codename", To: []string{"~^internal\\."}, Action: DLPActionBlock},
+		},
+		Custom: []DLPCustomClass{
+			{Name: "codename", Regex: `PROJECT-[A-Z]{4}`, Severity: "high"},
+		},
+	}
+}
+
+// TestDLPConfigFromSettings_RoundTrip verifies the reverse converter is
+// field-for-field symmetric with dlpSettingsFromPolicy: projecting a DLPConfig to
+// the wire and back preserves mode, class defaults, rules (with destinations), and
+// custom classes, so a managed worker can faithfully rebuild its DLP scanner from
+// distributed settings.
+func TestDLPConfigFromSettings_RoundTrip(t *testing.T) {
+	cfg := dlpRoundTripConfig()
+	got := DLPConfigFromSettings(dlpSettingsFromPolicy(cfg))
+	if !reflect.DeepEqual(got, cfg) {
+		t.Errorf("round-trip mismatch:\n got: %+v\nwant: %+v", got, cfg)
+	}
+}
+
+// TestDLPConfigFromSettings_NilDisabled verifies a nil wire block maps to a zero
+// (inactive) DLPConfig, matching the "no DLP distributed" back-compat case: a CP
+// that serves settings with no dlp block leaves the worker's DLP off.
+func TestDLPConfigFromSettings_NilDisabled(t *testing.T) {
+	got := DLPConfigFromSettings(nil)
+	if got.Active() {
+		t.Errorf("expected inactive DLPConfig for nil input, got %+v", got)
+	}
+}
+
+// TestDLPSettingsFromPolicy_NilWhenInactive verifies DLP projects to nil when the
+// mode is off / the zero value, so a worker that never configured DLP emits no
+// dlp block (and SettingsWireFromPolicy stays nil for a pure allow/deny policy).
+func TestDLPSettingsFromPolicy_NilWhenInactive(t *testing.T) {
+	if got := dlpSettingsFromPolicy(DLPConfig{}); got != nil {
+		t.Errorf("zero DLPConfig should project to nil, got %+v", got)
+	}
+	if got := dlpSettingsFromPolicy(DLPConfig{Mode: DLPModeOff}); got != nil {
+		t.Errorf("off DLPConfig should project to nil, got %+v", got)
+	}
+}
+
+// TestDLPSettings_OmittedMarshalsWithoutField verifies back-compat on the wire: a
+// SettingsWire with no DLP block marshals without a "dlp" key, so a control plane
+// that never configured DLP stays byte-compatible.
+func TestDLPSettings_OmittedMarshalsWithoutField(t *testing.T) {
+	b, err := json.Marshal(&SettingsWire{MCP: &MCPSettings{Enabled: true, Mode: "monitor"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "dlp") {
+		t.Errorf("omitted DLP block should not marshal a dlp key: %s", b)
+	}
+}
+
+// TestSettingsWireFromPolicy_ProjectsDLP verifies an active Policy.DLP projects
+// onto SettingsWire.DLP (Policy.DLP -> SettingsWire.DLP), so the control plane
+// distributes DLP fleet-wide alongside MCP/judge.
+func TestSettingsWireFromPolicy_ProjectsDLP(t *testing.T) {
+	s := SettingsWireFromPolicy(Policy{DLP: dlpRoundTripConfig()})
+	if s == nil || s.DLP == nil {
+		t.Fatal("expected DLP projected onto the wire")
+	}
+	if s.DLP.Mode != DLPModeEnforce || len(s.DLP.Rules) != 4 || len(s.DLP.Custom) != 1 {
+		t.Errorf("DLP not fully projected: %+v", s.DLP)
+	}
+	// Reverse must round-trip back to the original typed config.
+	if got := DLPConfigFromSettings(s.DLP); !reflect.DeepEqual(got, dlpRoundTripConfig()) {
+		t.Errorf("Policy->wire->config mismatch:\n got: %+v\nwant: %+v", got, dlpRoundTripConfig())
+	}
+}
+
 // TestSettingsWire_SecretFree is the core boundary guarantee: a SettingsWire
 // built from a Policy that has secret VALUES set locally (judge config, auth
 // transforms, secret mappings) must contain NONE of those values in its JSON —
@@ -257,6 +344,9 @@ func TestSettingsWire_SecretFree(t *testing.T) {
 		Secrets:       []SecretMapping{{Placeholder: "tok", EnvVar: "SECRET_TOKEN"}},
 		MCP:           MCPConfig{Enabled: true, Mode: "monitor"},
 		Observability: ObservabilityConfig{Enabled: true, MetricsEnabled: true},
+		// DLP carries only value-free behavioral config (modes, class names,
+		// destination patterns, operator regexes) — never a secret VALUE.
+		DLP: dlpRoundTripConfig(),
 	}
 	s := SettingsWireFromPolicy(p)
 	if s == nil {
@@ -322,10 +412,29 @@ func TestSettingsWire_DeepCopy(t *testing.T) {
 	orig := &SettingsWire{
 		MCP:   &MCPSettings{Enabled: true, Tools: &MCPToolsSettings{Allow: []string{"a"}}},
 		Judge: &JudgeSettings{Enabled: true, APIKeyEnv: "K"},
+		DLP: &DLPSettings{
+			Mode:    DLPModeEnforce,
+			Classes: map[string]DLPClassDefaultSettings{"pii.contact": {Action: DLPActionRedact}},
+			Rules:   []DLPRuleSettings{{Class: "pii.*", To: []string{"*.zendesk.com"}, Action: DLPActionAllow}},
+			Custom:  []DLPCustomClassSettings{{Name: "codename", Regex: "X", Severity: "high"}},
+		},
 	}
 	cp := orig.DeepCopy()
 	cp.MCP.Tools.Allow[0] = "mutated"
 	if orig.MCP.Tools.Allow[0] != "a" {
 		t.Fatal("deep copy aliased the original slice")
+	}
+	// DLP nested maps/slices must be independent copies, not aliases.
+	cp.DLP.Classes["pii.contact"] = DLPClassDefaultSettings{Action: DLPActionBlock}
+	cp.DLP.Rules[0].To[0] = "mutated"
+	cp.DLP.Custom[0].Name = "mutated"
+	if orig.DLP.Classes["pii.contact"].Action != DLPActionRedact {
+		t.Error("deep copy aliased the DLP classes map")
+	}
+	if orig.DLP.Rules[0].To[0] != "*.zendesk.com" {
+		t.Error("deep copy aliased the DLP rule destination slice")
+	}
+	if orig.DLP.Custom[0].Name != "codename" {
+		t.Error("deep copy aliased the DLP custom slice")
 	}
 }

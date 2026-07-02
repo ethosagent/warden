@@ -31,6 +31,7 @@ type SettingsWire struct {
 	// distinct from an explicit 0.
 	CacheTTLSeconds *int             `json:"cacheTTLSeconds,omitempty"`
 	Logging         *LoggingSettings `json:"logging,omitempty"`
+	DLP             *DLPSettings     `json:"dlp,omitempty"`
 }
 
 // ToggleSetting is a simple on/off block (advisory, compliance).
@@ -81,6 +82,52 @@ type ObservabilitySettings struct {
 	MetricsEnabled     bool              `json:"metricsEnabled"`
 	OTLPEndpoint       string            `json:"otlpEndpoint,omitempty"`
 	ResourceAttributes map[string]string `json:"resourceAttributes,omitempty"`
+}
+
+// DLPSettings carries the distributable outbound request-body DLP config. It
+// mirrors the operator-relevant parts of DLPConfig: the mode floor, the per-class
+// default actions, the per-class per-destination egress rules, and the custom
+// class declarations (name + regex + severity).
+//
+// SECRET-FREE: every field is value-free behavioral config — a mode string, class
+// names, destination patterns, actions, and operator-supplied regexes — never a
+// credential. DLP scans the PRE-swap body (see plan D2), so Warden-managed secret
+// VALUES never enter the scanner and never appear in this block. A compromised
+// control plane can change what DLP flags/blocks/redacts but cannot leak a secret,
+// consistent with the SettingsWire invariant above (DLP has no secret to carry).
+type DLPSettings struct {
+	// Mode is one of off|monitor|enforce (mirrors DLPConfig.Mode). omitempty so an
+	// off/default block marshals minimally.
+	Mode string `json:"mode,omitempty"`
+	// Classes is the per-class DEFAULT action, keyed by class spec (exact class,
+	// class glob, or custom.<name>) — mirrors DLPConfig.Classes.
+	Classes map[string]DLPClassDefaultSettings `json:"classes,omitempty"`
+	// Rules is the per-class per-destination egress rule set — mirrors DLPConfig.Rules.
+	Rules []DLPRuleSettings `json:"rules,omitempty"`
+	// Custom declares operator data classes (name + regex + severity) — mirrors
+	// DLPConfig.Custom. The regex is behavioral config, not a secret.
+	Custom []DLPCustomClassSettings `json:"custom,omitempty"`
+}
+
+// DLPClassDefaultSettings mirrors DLPClassDefault (the dlp.classes map value).
+type DLPClassDefaultSettings struct {
+	Action string `json:"action,omitempty"`
+}
+
+// DLPRuleSettings mirrors DLPRule: a class spec bound to an action, optionally
+// scoped to a destination allow-set.
+type DLPRuleSettings struct {
+	Class  string   `json:"class,omitempty"`
+	To     []string `json:"to,omitempty"`
+	Action string   `json:"action,omitempty"`
+}
+
+// DLPCustomClassSettings mirrors DLPCustomClass: an operator-declared class name,
+// its regex, and severity. None of these are secrets.
+type DLPCustomClassSettings struct {
+	Name     string `json:"name,omitempty"`
+	Regex    string `json:"regex,omitempty"`
+	Severity string `json:"severity,omitempty"`
 }
 
 // MCPSettings carries the distributable MCP wedge config. It mirrors the
@@ -176,11 +223,77 @@ func SettingsWireFromPolicy(p Policy) *SettingsWire {
 		s.Logging = log
 		any = true
 	}
+	if d := dlpSettingsFromPolicy(p.DLP); d != nil {
+		s.DLP = d
+		any = true
+	}
 
 	if !any {
 		return nil
 	}
 	return &s
+}
+
+// dlpSettingsFromPolicy projects DLPConfig onto DLPSettings, or nil if DLP is
+// disabled (mode off / the zero value), so a worker that never configured DLP
+// emits nothing for it — same nil-gating discipline as mcpSettingsFromPolicy.
+// Only value-free operator config is copied (mode, class defaults, rules, custom
+// regexes); DLPConfig carries no secret VALUES.
+func dlpSettingsFromPolicy(d DLPConfig) *DLPSettings {
+	if !d.Active() {
+		return nil
+	}
+	out := &DLPSettings{Mode: d.Mode}
+	if len(d.Classes) > 0 {
+		out.Classes = make(map[string]DLPClassDefaultSettings, len(d.Classes))
+		for k, v := range d.Classes {
+			out.Classes[k] = DLPClassDefaultSettings(v)
+		}
+	}
+	for _, r := range d.Rules {
+		out.Rules = append(out.Rules, DLPRuleSettings{
+			Class:  r.Class,
+			To:     append([]string(nil), r.To...),
+			Action: r.Action,
+		})
+	}
+	for _, c := range d.Custom {
+		out.Custom = append(out.Custom, DLPCustomClassSettings(c))
+	}
+	return out
+}
+
+// DLPConfigFromSettings is the reverse of dlpSettingsFromPolicy: it maps the
+// secret-free wire DLP block back to a full DLPConfig so a managed worker can
+// REBUILD its DLP scanner from control-plane-distributed settings. It is
+// field-for-field symmetric with dlpSettingsFromPolicy (Mode, Classes{Action},
+// Rules{Class,To,Action}, Custom{Name,Regex,Severity}). A nil input returns a
+// zero DLPConfig (Mode="" → Active()==false → DLP disabled), matching the "no DLP
+// distributed" case. Custom regexes round-trip as strings and are (re)compiled by
+// the worker's scanner; an invalid regex was already rejected by CP-side
+// validateDLP, so the wire only ever carries compilable patterns.
+func DLPConfigFromSettings(s *DLPSettings) DLPConfig {
+	if s == nil {
+		return DLPConfig{}
+	}
+	out := DLPConfig{Mode: s.Mode}
+	if len(s.Classes) > 0 {
+		out.Classes = make(map[string]DLPClassDefault, len(s.Classes))
+		for k, v := range s.Classes {
+			out.Classes[k] = DLPClassDefault(v)
+		}
+	}
+	for _, r := range s.Rules {
+		out.Rules = append(out.Rules, DLPRule{
+			Class:  r.Class,
+			To:     append([]string(nil), r.To...),
+			Action: r.Action,
+		})
+	}
+	for _, c := range s.Custom {
+		out.Custom = append(out.Custom, DLPCustomClass(c))
+	}
+	return out
 }
 
 // mcpSettingsFromPolicy projects MCPConfig onto MCPSettings, or nil if the MCP
@@ -494,6 +607,28 @@ func (s *SettingsWire) DeepCopy() *SettingsWire {
 	if s.Logging != nil {
 		l := *s.Logging
 		cp.Logging = &l
+	}
+	if s.DLP != nil {
+		d := *s.DLP
+		if s.DLP.Classes != nil {
+			m := make(map[string]DLPClassDefaultSettings, len(s.DLP.Classes))
+			for k, v := range s.DLP.Classes {
+				m[k] = v
+			}
+			d.Classes = m
+		}
+		if s.DLP.Rules != nil {
+			rules := make([]DLPRuleSettings, len(s.DLP.Rules))
+			for i, r := range s.DLP.Rules {
+				r.To = append([]string(nil), r.To...)
+				rules[i] = r
+			}
+			d.Rules = rules
+		}
+		if s.DLP.Custom != nil {
+			d.Custom = append([]DLPCustomClassSettings(nil), s.DLP.Custom...)
+		}
+		cp.DLP = &d
 	}
 	return &cp
 }
