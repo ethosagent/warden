@@ -1,3 +1,8 @@
+// Package audit provides tamper-evident audit trails over analytics events: an
+// Ed25519 signing store that emits a verifiable Receipt per mediation, and a
+// tagging store that stamps each event with the compliance-framework control IDs
+// it maps to. Both are AnalyticsStore decorators, so they compose in the write
+// chain without the base store knowing.
 package audit
 
 import (

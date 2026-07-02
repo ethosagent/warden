@@ -1,3 +1,7 @@
+// Package auth injects real, request-scoped credentials into outbound requests at
+// the proxy edge (OAuth2 client-credentials, AWS SigV4, HMAC, and API-key), matched
+// to destinations by host, suffix, or regex. Credentials are resolved from the
+// environment and held by the proxy only — the agent never sees them.
 package auth
 
 import (

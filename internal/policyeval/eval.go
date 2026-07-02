@@ -1,3 +1,6 @@
+// Package policyeval replays recorded analytics events against a candidate policy
+// and diffs the outcomes, surfacing security regressions (was denied, now allowed)
+// and availability regressions (was allowed, now denied) before the policy ships.
 package policyeval
 
 import (

@@ -1,3 +1,7 @@
+// Package scan detects sensitive content — credential leakage, prompt injection,
+// and PII — in request and response bodies. Findings omit the matched content by
+// default; a MASKED sample (last-4 + length, never the raw value) is captured only
+// when the Scanner is built WithEvidence.
 package scan
 
 import (

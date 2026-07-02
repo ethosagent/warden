@@ -1,3 +1,8 @@
+// Package llmpolicy renders LLM-backed policy judgments: an inline Judge that
+// allows or denies a no-match request against a per-agent natural-language policy
+// (fail-closed, cached, circuit-broken), and an offline Advisor that recommends
+// policy changes from observed traffic for human review. The LLM is never
+// authoritative over the static allow/deny rules.
 package llmpolicy
 
 import (

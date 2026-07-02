@@ -1,3 +1,6 @@
+// Package policybuilder turns observed analytics events into suggested default-deny
+// allowlist entries, so an operator can bootstrap or tighten policy from real
+// traffic. It is advisory only — it emits YAML suggestions and never mutates policy.
 package policybuilder
 
 import (
