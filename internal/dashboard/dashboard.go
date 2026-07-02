@@ -962,6 +962,10 @@ type analyticsResponse struct {
 	Writes        []writeEntry     `json:"writes"`
 	Cost          costSummary      `json:"cost"`
 	Compliance    []complianceTag  `json:"compliance"`
+	// DLP is the outbound-request data-loss-prevention aggregate: by-class,
+	// by-action, and the class×destination matrix. Zero-valued (empty slices,
+	// zero counts) when no event carries a data class.
+	DLP dlpSummary `json:"dlp"`
 	// Proxies is the per-worker breakdown for a fleet (aggregator) view. Empty on
 	// a single-node dashboard. SelectedProxy echoes the active ?proxy= filter.
 	Proxies       []proxyCount `json:"proxies"`
@@ -994,6 +998,80 @@ type providerCost struct {
 type complianceTag struct {
 	ControlID string `json:"controlID"`
 	Count     int    `json:"count"`
+}
+
+// dlpMaxDestinations caps the class×destination matrix to the TOP-N destination
+// columns by DLP-event volume. Overflow is surfaced via dlpSummary.MoreDests
+// (never a silent drop), matching the dashboard's no-silent-caps ethos.
+const dlpMaxDestinations = 20
+
+// dlpSummary is the outbound-request DLP aggregate over the selected window: the
+// per-class tally, the per-action breakdown, and the flagship class×destination
+// matrix ("what kinds of data are my agents sending where"). Every field is
+// bounded metadata — class names, actions, destination domains, counts — and
+// never carries matched content or offsets. Only events that detected at least
+// one data class contribute (DLP-relevant events only).
+type dlpSummary struct {
+	// Events is the number of DLP-relevant events (those carrying >=1 data class).
+	Events int `json:"events"`
+	// Detections is the total per-class detections; a multi-class event counts
+	// once per class, so this is >= Events when events carry multiple classes.
+	Detections int             `json:"detections"`
+	Actions    dlpActionCounts `json:"actions"`
+	ByClass    []dlpClassCount `json:"byClass"`
+	// Destinations are the TOP-N destination domains (matrix columns), ordered by
+	// DLP-event volume desc then name. MoreDests counts destinations dropped past
+	// the cap.
+	Destinations []string `json:"destinations"`
+	MoreDests    int      `json:"moreDests"`
+	// Matrix holds one cell per (class, destination) pair for destinations within
+	// the cap: the (most-restrictive) action taken and the event count.
+	Matrix []dlpMatrixCell `json:"matrix"`
+}
+
+// dlpActionCounts tallies DLP-relevant events by the action taken (or, in
+// monitor mode, the would-be action). A small closed set — safe as-is.
+type dlpActionCounts struct {
+	Allow   int `json:"allow"`
+	Block   int `json:"block"`
+	Redact  int `json:"redact"`
+	Monitor int `json:"monitor"`
+}
+
+// dlpClassCount is one data class and how many DLP events detected it.
+type dlpClassCount struct {
+	Class string `json:"class"`
+	Count int    `json:"count"`
+}
+
+// dlpMatrixCell is one (class, destination) pair: the action taken and how many
+// DLP events hit that pair. Destination is the event's domain (metadata, bounded
+// by the top-N cap — never a metric label).
+type dlpMatrixCell struct {
+	Class       string `json:"class"`
+	Destination string `json:"destination"`
+	Action      string `json:"action"`
+	Count       int    `json:"count"`
+}
+
+// dlpActionRank orders DLP actions from most to least restrictive so a
+// (class, destination) matrix cell that saw mixed actions across events reports
+// the worst-case ("deny wins") — block > redact > monitor > allow. An empty or
+// unknown action ranks below all real actions, so the first real action always
+// wins the initial assignment.
+func dlpActionRank(a string) int {
+	switch a {
+	case config.DLPActionBlock:
+		return 4
+	case config.DLPActionRedact:
+		return 3
+	case config.DLPActionMonitor:
+		return 2
+	case config.DLPActionAllow:
+		return 1
+	default:
+		return 0
+	}
 }
 
 // isWriteMethod reports whether an HTTP method mutates remote state (non-GET,
@@ -1212,24 +1290,38 @@ func (s *Server) computeAnalytics(rangeParam, selectedProxy string, now time.Tim
 	dayAgo := now.Add(-24 * time.Hour)
 
 	resp := analyticsResponse{
-		GeneratedAt:   now.Format(time.RFC3339),
-		Methods:       []methodCount{},
-		Protocols:     []protocolCount{},
-		Timeline:      []timelineBucket{},
-		Hourly:        make([]hourlyBucket, 24),
-		TopDomains:    []topDomain{},
-		TopEndpoints:  []topEndpoint{},
-		Blocked:       []blockedGroup{},
-		Secrets:       []secretUsage{},
-		Judge:         []judgeEntry{},
-		Writes:        []writeEntry{},
-		Cost:          costSummary{ByProvider: []providerCost{}},
-		Compliance:    []complianceTag{},
+		GeneratedAt:  now.Format(time.RFC3339),
+		Methods:      []methodCount{},
+		Protocols:    []protocolCount{},
+		Timeline:     []timelineBucket{},
+		Hourly:       make([]hourlyBucket, 24),
+		TopDomains:   []topDomain{},
+		TopEndpoints: []topEndpoint{},
+		Blocked:      []blockedGroup{},
+		Secrets:      []secretUsage{},
+		Judge:        []judgeEntry{},
+		Writes:       []writeEntry{},
+		Cost:         costSummary{ByProvider: []providerCost{}},
+		Compliance:   []complianceTag{},
+		DLP: dlpSummary{
+			ByClass:      []dlpClassCount{},
+			Destinations: []string{},
+			Matrix:       []dlpMatrixCell{},
+		},
 		Proxies:       proxies,
 		SelectedProxy: selectedProxy,
 	}
 	providerCosts := make(map[string]*providerCost)
 	complianceCounts := make(map[string]int)
+
+	// DLP aggregation state (populated only by events carrying >=1 data class).
+	dlpClassCounts := make(map[string]int) // class -> DLP-event count
+	dlpDestVolume := make(map[string]int)  // destination domain -> DLP-event count
+	type dlpCellAgg struct {
+		action string // most-restrictive action seen for this (class,dest) pair
+		count  int
+	}
+	dlpCells := make(map[string]*dlpCellAgg) // "class\x00dest" -> cell
 	for h := 0; h < 24; h++ {
 		resp.Hourly[h].Hour = h
 	}
@@ -1414,6 +1506,38 @@ func (s *Server) computeAnalytics(rangeParam, selectedProxy string, now time.Tim
 		// Compliance control-ID tally.
 		for _, id := range e.Compliance {
 			complianceCounts[id]++
+		}
+
+		// DLP aggregation — only events that detected at least one data class are
+		// DLP-relevant. All bounded metadata: class names, action, destination.
+		if len(e.DataClasses) > 0 {
+			resp.DLP.Events++
+			switch e.DLPAction {
+			case config.DLPActionAllow:
+				resp.DLP.Actions.Allow++
+			case config.DLPActionBlock:
+				resp.DLP.Actions.Block++
+			case config.DLPActionRedact:
+				resp.DLP.Actions.Redact++
+			case config.DLPActionMonitor:
+				resp.DLP.Actions.Monitor++
+			}
+			// The destination gets one increment per DLP event (not per class), so
+			// the top-N column ranking reflects traffic volume, not class breadth.
+			dlpDestVolume[e.Domain]++
+			for _, cls := range e.DataClasses {
+				dlpClassCounts[cls]++
+				ckey := cls + "\x00" + e.Domain
+				cell, ok := dlpCells[ckey]
+				if !ok {
+					cell = &dlpCellAgg{}
+					dlpCells[ckey] = cell
+				}
+				cell.count++
+				if dlpActionRank(e.DLPAction) > dlpActionRank(cell.action) {
+					cell.action = e.DLPAction
+				}
+			}
 		}
 	}
 
@@ -1600,6 +1724,66 @@ func (s *Server) computeAnalytics(rangeParam, selectedProxy string, now time.Tim
 			return resp.Compliance[i].Count > resp.Compliance[j].Count
 		}
 		return resp.Compliance[i].ControlID < resp.Compliance[j].ControlID
+	})
+
+	// DLP by-class, sorted by count desc then class name; Detections is the sum.
+	for cls, c := range dlpClassCounts {
+		resp.DLP.ByClass = append(resp.DLP.ByClass, dlpClassCount{Class: cls, Count: c})
+		resp.DLP.Detections += c
+	}
+	sort.Slice(resp.DLP.ByClass, func(i, j int) bool {
+		if resp.DLP.ByClass[i].Count != resp.DLP.ByClass[j].Count {
+			return resp.DLP.ByClass[i].Count > resp.DLP.ByClass[j].Count
+		}
+		return resp.DLP.ByClass[i].Class < resp.DLP.ByClass[j].Class
+	})
+
+	// DLP destination columns: rank every destination by DLP-event volume, keep
+	// the top-N, and surface the overflow count (no silent drop).
+	type destVol struct {
+		dest string
+		vol  int
+	}
+	allDests := make([]destVol, 0, len(dlpDestVolume))
+	for d, v := range dlpDestVolume {
+		allDests = append(allDests, destVol{dest: d, vol: v})
+	}
+	sort.Slice(allDests, func(i, j int) bool {
+		if allDests[i].vol != allDests[j].vol {
+			return allDests[i].vol > allDests[j].vol
+		}
+		return allDests[i].dest < allDests[j].dest
+	})
+	if len(allDests) > dlpMaxDestinations {
+		resp.DLP.MoreDests = len(allDests) - dlpMaxDestinations
+		allDests = allDests[:dlpMaxDestinations]
+	}
+	keptDests := make(map[string]struct{}, len(allDests))
+	for _, dv := range allDests {
+		resp.DLP.Destinations = append(resp.DLP.Destinations, dv.dest)
+		keptDests[dv.dest] = struct{}{}
+	}
+
+	// DLP matrix cells — only for kept (in-cap) destinations. Sorted by class then
+	// destination for a stable, testable payload.
+	for ckey, cell := range dlpCells {
+		sep := strings.IndexByte(ckey, 0)
+		cls, dest := ckey[:sep], ckey[sep+1:]
+		if _, ok := keptDests[dest]; !ok {
+			continue
+		}
+		resp.DLP.Matrix = append(resp.DLP.Matrix, dlpMatrixCell{
+			Class:       cls,
+			Destination: dest,
+			Action:      cell.action,
+			Count:       cell.count,
+		})
+	}
+	sort.Slice(resp.DLP.Matrix, func(i, j int) bool {
+		if resp.DLP.Matrix[i].Class != resp.DLP.Matrix[j].Class {
+			return resp.DLP.Matrix[i].Class < resp.DLP.Matrix[j].Class
+		}
+		return resp.DLP.Matrix[i].Destination < resp.DLP.Matrix[j].Destination
 	})
 
 	return marshalJSONLine(resp)

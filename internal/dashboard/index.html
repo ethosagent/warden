@@ -150,6 +150,28 @@ tr.mcp-head:hover>td{background:rgba(148,163,184,.06)}
 /* chips */
 .chip{display:inline-block; padding:2px 8px; margin:2px 4px 2px 0; border-radius:8px; background:rgba(34,211,238,.10); color:var(--cyan); font-size:11.5px; border:1px solid rgba(34,211,238,.18)}
 
+/* DLP — semantic action colors (allow=teal/green, block=red, redact=amber, monitor=slate/neutral) */
+.pill.dlp-allow,.dlp-lg .dlp-allow{background:rgba(45,212,191,.14); color:var(--teal)}
+.pill.dlp-block,.dlp-lg .dlp-block{background:rgba(248,113,113,.16); color:var(--red)}
+.pill.dlp-redact,.dlp-lg .dlp-redact{background:rgba(245,158,11,.16); color:var(--amber)}
+.pill.dlp-monitor,.dlp-lg .dlp-monitor{background:rgba(100,116,139,.18); color:#cbd5e1}
+.dlp-summary{display:flex; flex-wrap:wrap; align-items:baseline; gap:14px; margin-bottom:12px}
+.dlp-summary .dlp-events{font-size:20px; font-weight:700; color:var(--text)}
+.dlp-lg{display:inline-flex; gap:6px; flex-wrap:wrap}
+.dlp-lg span{padding:2px 8px; border-radius:999px; font-size:11px; font-weight:600}
+.dlp-classlist{display:flex; flex-wrap:wrap; gap:6px 8px; margin-bottom:14px}
+.dlp-mx-wrap{overflow-x:auto; margin-top:4px}
+.dlp-matrix{border-collapse:collapse; font-size:12px}
+.dlp-matrix th,.dlp-matrix td{padding:6px 9px; border:1px solid var(--border); text-align:center; white-space:nowrap}
+.dlp-matrix th.rowh,.dlp-matrix td.rowh{text-align:left; font-family:ui-monospace,monospace; color:#e2e8f0; background:rgba(148,163,184,.05)}
+.dlp-matrix thead th{color:var(--muted); font-weight:600; font-family:ui-monospace,monospace}
+.dlp-matrix td.cell{color:var(--muted)}
+.dlp-matrix td.dlp-allow{background:rgba(45,212,191,.12); color:var(--teal)}
+.dlp-matrix td.dlp-block{background:rgba(248,113,113,.14); color:var(--red)}
+.dlp-matrix td.dlp-redact{background:rgba(245,158,11,.14); color:var(--amber)}
+.dlp-matrix td.dlp-monitor{background:rgba(100,116,139,.16); color:#cbd5e1}
+.dlp-matrix td .dlp-ct{color:var(--muted); font-size:10.5px; margin-left:4px}
+
 /* heatmap */
 .heat{display:grid; grid-template-columns:repeat(24,1fr); gap:4px}
 .heat .cell{aspect-ratio:1/1; border-radius:5px; background:rgba(45,212,191,.05); border:1px solid var(--border); transition:transform .12s}
@@ -423,6 +445,11 @@ tr.mcp-head:hover>td{background:rgba(148,163,184,.06)}
     <div class="card">
       <div class="ttl"><h3>Compliance mappings</h3></div>
       <div id="panel-compliance"></div>
+    </div>
+
+    <div class="card col-full">
+      <div class="ttl"><h3>DLP — outbound data classes</h3></div>
+      <div id="panel-dlp"></div>
     </div>
 
     <div class="card col-full">
@@ -1022,6 +1049,60 @@ function renderCompliance(data){
         <span class="mono" style="margin-left:6px">${esc(id)}</span></span>
       <span class="dim" style="font-size:12px">${fmtNum(r.count)} events</span></div>`;
   });
+  el.innerHTML=h;
+}
+
+/* ---- DLP: outbound data classes + class×destination matrix ---- */
+const DLP_ACTIONS=["allow","block","redact","monitor"];
+function dlpActionOf(a){ return DLP_ACTIONS.indexOf(a)>=0 ? a : "monitor"; }
+function renderDLP(data){
+  const el=$("#panel-dlp");
+  const d=data.dlp||{};
+  const classes=d.byClass||[];
+  const matrix=d.matrix||[];
+  const dests=d.destinations||[];
+  if(!(d.events>0) && !classes.length){
+    el.innerHTML=emptyState("No DLP activity yet — enable dlp in monitor mode to see outbound data classes here");
+    return;
+  }
+  const a=d.actions||{};
+  // Summary row: total DLP events + by-action breakdown as colored counts + legend.
+  let h=`<div class="dlp-summary">
+    <span class="dlp-events">${fmtNum(d.events)}</span>
+    <span class="dim">DLP events · ${fmtNum(d.detections)} detections across ${fmtNum(classes.length)} classes</span>
+    <span class="dlp-lg">
+      <span class="dlp-allow">allow ${fmtNum(a.allow)}</span>
+      <span class="dlp-block">block ${fmtNum(a.block)}</span>
+      <span class="dlp-redact">redact ${fmtNum(a.redact)}</span>
+      <span class="dlp-monitor">monitor ${fmtNum(a.monitor)}</span>
+    </span></div>`;
+  // By-class list.
+  h+=`<div class="dlp-classlist">`;
+  classes.forEach(c=>{ h+=`<span class="chip mono">${esc(c.class)} <span class="dim">${fmtNum(c.count)}</span></span>`; });
+  h+=`</div>`;
+  // Class×destination matrix.
+  if(dests.length && matrix.length){
+    const cellByKey={};
+    matrix.forEach(c=>{ cellByKey[c.class+" "+c.destination]=c; });
+    h+=`<div class="dlp-mx-wrap"><table class="dlp-matrix"><thead><tr><th class="rowh">class \\ destination</th>`;
+    dests.forEach(dst=>{ h+=`<th title="${esc(dst)}">${esc(dst)}</th>`; });
+    h+=`</tr></thead><tbody>`;
+    classes.forEach(c=>{
+      h+=`<tr><td class="rowh">${esc(c.class)}</td>`;
+      dests.forEach(dst=>{
+        const cell=cellByKey[c.class+" "+dst];
+        if(cell){
+          const act=dlpActionOf(cell.action);
+          h+=`<td class="cell dlp-${act}" title="${esc(c.class)} → ${esc(dst)}: ${esc(cell.action)}">${esc(cell.action)}<span class="dlp-ct">${fmtNum(cell.count)}</span></td>`;
+        }else{
+          h+=`<td class="cell">·</td>`;
+        }
+      });
+      h+=`</tr>`;
+    });
+    h+=`</tbody></table></div>`;
+    if(d.moreDests>0){ h+=`<div class="dim" style="font-size:11px;margin-top:8px">…and ${fmtNum(d.moreDests)} more destination${d.moreDests===1?"":"s"} (top ${dests.length} by volume shown)</div>`; }
+  }
   el.innerHTML=h;
 }
 
@@ -1907,6 +1988,7 @@ function render(data){
   renderWrites(data);
   renderCost(data);
   renderCompliance(data);
+  renderDLP(data);
 
   $("#updated").textContent="updated "+(data.generatedAt? relTime(data.generatedAt):"just now");
 }

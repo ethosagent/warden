@@ -757,7 +757,8 @@ func TestAnalyticsEmpty(t *testing.T) {
 	// Arrays must be [] not null in the raw JSON.
 	body := rr.Body.String()
 	for _, field := range []string{`"methods":[]`, `"protocols":[]`, `"timeline":[]`, `"topDomains":[]`,
-		`"topEndpoints":[]`, `"blocked":[]`, `"secrets":[]`, `"judge":[]`, `"writes":[]`} {
+		`"topEndpoints":[]`, `"blocked":[]`, `"secrets":[]`, `"judge":[]`, `"writes":[]`,
+		`"byClass":[]`, `"destinations":[]`, `"matrix":[]`} {
 		if !strings.Contains(body, field) {
 			t.Fatalf("expected %s in empty response, body: %s", field, body)
 		}
@@ -771,6 +772,172 @@ func TestAnalyticsEmpty(t *testing.T) {
 	}
 	if len(resp.Hourly) != 24 {
 		t.Fatalf("expected 24 hourly entries even when empty, got %d", len(resp.Hourly))
+	}
+	// Empty DLP section: no events, no panic, empty (non-nil) slices.
+	if resp.DLP.Events != 0 || resp.DLP.Detections != 0 || resp.DLP.MoreDests != 0 {
+		t.Fatalf("expected zero DLP aggregate on empty store, got %+v", resp.DLP)
+	}
+	if resp.DLP.ByClass == nil || resp.DLP.Matrix == nil || resp.DLP.Destinations == nil {
+		t.Fatalf("expected empty (non-nil) DLP slices, got %+v", resp.DLP)
+	}
+}
+
+// dlpMatrixLookup indexes a response's matrix by (class,destination) for assertions.
+func dlpMatrixLookup(cells []dlpMatrixCell) map[string]dlpMatrixCell {
+	m := make(map[string]dlpMatrixCell, len(cells))
+	for _, c := range cells {
+		m[c.Class+"|"+c.Destination] = c
+	}
+	return m
+}
+
+func TestAnalyticsDLP(t *testing.T) {
+	now := time.Date(2025, 6, 15, 10, 0, 0, 0, time.UTC)
+	ds := &fakeDataSource{
+		events: []analytics.Event{
+			// Customer record blocked to an LLM provider (multi-class event).
+			{Timestamp: now, Domain: "api.openai.com", Port: 443, Protocol: "https", Method: "POST",
+				URL: "https://api.openai.com/v1/chat/completions", Decision: "deny", ResponseStatus: 403,
+				DataClasses: []string{"pii.contact", "pii.financial"}, DLPAction: "block", DLPRule: "rule[1]"},
+			// Same record allowed to the sanctioned destination.
+			{Timestamp: now.Add(time.Second), Domain: "acme.zendesk.com", Port: 443, Protocol: "https", Method: "POST",
+				URL: "https://acme.zendesk.com/tickets", Decision: "allow", ResponseStatus: 200,
+				DataClasses: []string{"pii.contact", "pii.financial"}, DLPAction: "allow", DLPRule: "rule[0]"},
+			// Credentials redacted to an allowlisted webhook.
+			{Timestamp: now.Add(2 * time.Second), Domain: "hooks.example.com", Port: 443, Protocol: "https", Method: "POST",
+				URL: "https://hooks.example.com/in", Decision: "allow", ResponseStatus: 200,
+				DataClasses: []string{"credentials"}, DLPAction: "redact", DLPRule: "classes[credentials]"},
+			// A SECOND pii.contact -> openai event, this one only monitored: the matrix
+			// cell must report the most-restrictive action seen (block), count 2.
+			{Timestamp: now.Add(3 * time.Second), Domain: "api.openai.com", Port: 443, Protocol: "https", Method: "POST",
+				URL: "https://api.openai.com/v1/embeddings", Decision: "allow", ResponseStatus: 200,
+				DataClasses: []string{"pii.contact"}, DLPAction: "monitor", DLPRule: "default"},
+			// A non-DLP event (no DataClasses) — must be excluded from every DLP tally.
+			{Timestamp: now.Add(4 * time.Second), Domain: "api.example.com", Port: 443, Protocol: "https", Method: "GET",
+				URL: "https://api.example.com/health", Decision: "allow", ResponseStatus: 200},
+		},
+	}
+	handler := newTestServer(ds, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
+
+	rr := doGet(t, handler, "/dashboard/api/analytics")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	var resp analyticsResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	// 4 DLP-relevant events (the GET with no classes is excluded).
+	if resp.DLP.Events != 4 {
+		t.Fatalf("expected 4 DLP events, got %d", resp.DLP.Events)
+	}
+	// Actions: allow 1, block 1, redact 1, monitor 1.
+	if resp.DLP.Actions != (dlpActionCounts{Allow: 1, Block: 1, Redact: 1, Monitor: 1}) {
+		t.Fatalf("unexpected action counts: %+v", resp.DLP.Actions)
+	}
+
+	// By class: pii.contact 3 (openai block + zendesk allow + openai monitor),
+	// pii.financial 2, credentials 1. Detections = 3+2+1 = 6.
+	byClass := map[string]int{}
+	for _, c := range resp.DLP.ByClass {
+		byClass[c.Class] = c.Count
+	}
+	if byClass["pii.contact"] != 3 || byClass["pii.financial"] != 2 || byClass["credentials"] != 1 {
+		t.Fatalf("unexpected byClass: %+v", resp.DLP.ByClass)
+	}
+	if resp.DLP.Detections != 6 {
+		t.Fatalf("expected 6 detections, got %d", resp.DLP.Detections)
+	}
+	// ByClass sorted by count desc: pii.contact (3) first.
+	if resp.DLP.ByClass[0].Class != "pii.contact" {
+		t.Fatalf("expected pii.contact first in byClass, got %+v", resp.DLP.ByClass)
+	}
+
+	// Destinations: 3 within cap, no overflow.
+	if len(resp.DLP.Destinations) != 3 || resp.DLP.MoreDests != 0 {
+		t.Fatalf("unexpected destinations: %v more=%d", resp.DLP.Destinations, resp.DLP.MoreDests)
+	}
+
+	// Matrix cells: verify each (class,dest) pair's action + count.
+	mx := dlpMatrixLookup(resp.DLP.Matrix)
+	want := []struct {
+		class, dest, action string
+		count               int
+	}{
+		{"pii.contact", "api.openai.com", "block", 2}, // block + monitor -> block wins, count 2
+		{"pii.financial", "api.openai.com", "block", 1},
+		{"pii.contact", "acme.zendesk.com", "allow", 1},
+		{"pii.financial", "acme.zendesk.com", "allow", 1},
+		{"credentials", "hooks.example.com", "redact", 1},
+	}
+	if len(resp.DLP.Matrix) != len(want) {
+		t.Fatalf("expected %d matrix cells, got %d: %+v", len(want), len(resp.DLP.Matrix), resp.DLP.Matrix)
+	}
+	for _, w := range want {
+		got, ok := mx[w.class+"|"+w.dest]
+		if !ok {
+			t.Fatalf("missing matrix cell %s -> %s", w.class, w.dest)
+		}
+		if got.Action != w.action || got.Count != w.count {
+			t.Fatalf("cell %s->%s: got action=%s count=%d, want action=%s count=%d",
+				w.class, w.dest, got.Action, got.Count, w.action, w.count)
+		}
+	}
+}
+
+func TestAnalyticsDLPDestinationCap(t *testing.T) {
+	now := time.Date(2025, 6, 15, 10, 0, 0, 0, time.UTC)
+	var evs []analytics.Event
+	// 25 distinct destinations, each with one DLP event. Give them descending
+	// volume so the top-N ranking is deterministic: dest i gets (25-i) events.
+	for i := 0; i < 25; i++ {
+		dom := fmt.Sprintf("dest%02d.example.com", i)
+		for j := 0; j < 25-i; j++ {
+			evs = append(evs, analytics.Event{
+				Timestamp: now.Add(time.Duration(i*100+j) * time.Millisecond),
+				Domain:    dom, Port: 443, Protocol: "https", Method: "POST",
+				URL: "https://" + dom + "/x", Decision: "allow", ResponseStatus: 200,
+				DataClasses: []string{"pii.contact"}, DLPAction: "monitor",
+			})
+		}
+	}
+	ds := &fakeDataSource{events: evs}
+	handler := newTestServer(ds, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
+
+	rr := doGet(t, handler, "/dashboard/api/analytics")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	var resp analyticsResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	// Capped at dlpMaxDestinations (20), with the 5 overflow surfaced.
+	if len(resp.DLP.Destinations) != dlpMaxDestinations {
+		t.Fatalf("expected %d destination columns, got %d", dlpMaxDestinations, len(resp.DLP.Destinations))
+	}
+	if resp.DLP.MoreDests != 5 {
+		t.Fatalf("expected 5 overflow destinations, got %d", resp.DLP.MoreDests)
+	}
+	// The highest-volume destination (dest00, 25 events) must be kept; the
+	// lowest (dest24, 1 event) must be dropped.
+	kept := map[string]struct{}{}
+	for _, d := range resp.DLP.Destinations {
+		kept[d] = struct{}{}
+	}
+	if _, ok := kept["dest00.example.com"]; !ok {
+		t.Fatal("expected highest-volume destination dest00 to be kept")
+	}
+	if _, ok := kept["dest24.example.com"]; ok {
+		t.Fatal("expected lowest-volume destination dest24 to be dropped")
+	}
+	// Matrix cells only reference kept destinations.
+	for _, c := range resp.DLP.Matrix {
+		if _, ok := kept[c.Destination]; !ok {
+			t.Fatalf("matrix cell references dropped destination %s", c.Destination)
+		}
 	}
 }
 
