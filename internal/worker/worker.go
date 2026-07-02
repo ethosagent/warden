@@ -74,8 +74,15 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	}
 	// Keep the fetcher + placeholders so the managed apply loop can rebuild the
 	// cache with a new TTL on a control-plane cache.ttl change. liveCacheTTL tracks
-	// the running TTL so the loop only rebuilds when it actually differs.
-	secretFetcher := secrets.NewEnvFetcher(mapping)
+	// the running TTL so the loop only rebuilds when it actually differs. The
+	// fetcher is selected by secretStore.backend: env (or omitted) is byte-identical
+	// to the original EnvFetcher path; echo wraps the NON-PRODUCTION echo store; aws
+	// is deferred to Phase 5. Everything downstream treats it as a plain
+	// secrets.Fetcher, so the Cache + applier rebuild + proxy swap are unchanged.
+	secretFetcher, err := newSecretFetcher(pol, mapping)
+	if err != nil {
+		return err
+	}
 	liveCacheTTL := time.Duration(pol.CacheTTLSeconds) * time.Second
 	secretProvider, err := secrets.NewCache(secretFetcher, liveCacheTTL, placeholders)
 	if err != nil {
@@ -87,6 +94,13 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// managed apply loop uses to change the level at runtime WITHOUT swapping the
 	// (widely-captured) logger instance. Format is restart-only (see LogControl).
 	logger, logCtrl := observability.NewLogger(out, pol.LogLevel, pol.LogFormat)
+
+	// The echo secret backend is NON-PRODUCTION: the "secret" it resolves is the
+	// placeholder key itself, so the edge swap is observable and harmless. Warn
+	// loudly at startup so an operator never mistakes it for a real value store.
+	if pol.SecretStore.ResolvedBackend() == config.SecretBackendEcho {
+		logger.Warn("ECHO secret backend active — NON-PRODUCTION: the resolved value is the placeholder key itself; never use it to protect a real secret")
+	}
 
 	// Managed vs local-only. Managed = a control plane is configured and
 	// --local-only is not set: the worker's allow/deny policy comes ONLY from the
@@ -509,4 +523,30 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	}
 
 	return pxy.Serve(ctx)
+}
+
+// newSecretFetcher selects the worker's secret-resolution backend from
+// pol.SecretStore. The result is a plain secrets.Fetcher, so the Cache, the
+// applier's TTL rebuild, and the proxy swap all treat it identically regardless
+// of backend:
+//
+//   - env (or omitted) → secrets.NewEnvFetcher(mapping): byte-identical to the
+//     original path (the placeholder→envVar map resolves values from the
+//     environment).
+//   - echo → secrets.NewStoreFetcher(secrets.NewEchoStore()): the NON-PRODUCTION
+//     echo store, where a placeholder resolves to itself. mapping is unused (the
+//     placeholder IS the store key).
+//   - aws → deferred to Phase 5; returns a clear not-yet error rather than
+//     half-wiring a store that does not exist.
+func newSecretFetcher(pol config.Policy, mapping map[string]string) (secrets.Fetcher, error) {
+	switch pol.SecretStore.ResolvedBackend() {
+	case config.SecretBackendEnv:
+		return secrets.NewEnvFetcher(mapping), nil
+	case config.SecretBackendEcho:
+		return secrets.NewStoreFetcher(secrets.NewEchoStore()), nil
+	case config.SecretBackendAWS:
+		return nil, fmt.Errorf("secretStore.backend=aws not yet available (Phase 5)")
+	default:
+		return nil, fmt.Errorf("secretStore.backend %q is not supported", pol.SecretStore.Backend)
+	}
 }

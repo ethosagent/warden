@@ -32,6 +32,31 @@ secrets:
   - placeholder: anthropic_secret_001
     envVar: ANTHROPIC_API_KEY
 
+# Secret backend selector (OPTIONAL). Omit this block for the default `env`
+# behavior above — that is byte-identical to today. `secretStore` is a sibling
+# of `secrets` (the placeholder set above stays a list); it only chooses HOW a
+# placeholder resolves to a value.
+#
+# secretStore:
+#   backend: env        # env | echo | aws  (default: env when omitted)
+#
+#   # backend: env  — resolve each placeholder from its mapped envVar above.
+#   #                 envVar is REQUIRED for every secrets[] entry.
+#
+#   # backend: echo — NON-PRODUCTION. The resolved "value" is the placeholder
+#   #                 KEY itself (e.g. openai_secret_001 -> "openai_secret_001").
+#   #                 It proves the resolve->swap wiring with zero cloud deps and
+#   #                 powers local dev/demos. envVar is optional/ignored here.
+#   #                 NEVER use echo to protect a real secret value.
+#
+#   # backend: aws  — AWS Secrets Manager. Parsed + validated now; the store
+#   #                 itself lands in Phase 5. Credentials are NEVER in config —
+#   #                 they resolve from the process environment / IAM.
+#   aws:
+#     region: us-east-1
+#     namePrefix: warden/   # key -> secret name convention: warden/<key>
+#                           # (default warden/ when omitted)
+
 # In-memory secret cache. Never persisted to disk.
 cache:
   ttl: 3600                             # seconds; on expiry Warden refreshes

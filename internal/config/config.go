@@ -40,6 +40,10 @@ type Policy struct {
 	Denylist []DenylistEntry `json:"denylist"`
 	// Secrets maps placeholder tokens to their source env var (phase 1).
 	Secrets []SecretMapping `json:"-"`
+	// SecretStore selects the backend the worker resolves placeholders through
+	// (env|echo|aws). Optional sibling of Secrets; omitted => env (byte-identical
+	// to today). LOCAL only this phase (never on the wire).
+	SecretStore SecretStoreConfig `json:"-"`
 	// CacheTTLSeconds is the secret cache time-to-live in seconds.
 	CacheTTLSeconds int `json:"-"`
 	// LogLevel and LogFormat configure observability output.
@@ -92,6 +96,10 @@ func (p Policy) DeepCopy() Policy {
 	cp.Allowlist = append([]AllowlistEntry(nil), p.Allowlist...)
 	cp.Denylist = append([]DenylistEntry(nil), p.Denylist...)
 	cp.Secrets = append([]SecretMapping(nil), p.Secrets...)
+	if p.SecretStore.AWS != nil {
+		aws := *p.SecretStore.AWS
+		cp.SecretStore.AWS = &aws
+	}
 	cp.Agents = append([]AgentPolicy(nil), p.Agents...)
 	if p.Observability.ResourceAttributes != nil {
 		ra := make(map[string]string, len(p.Observability.ResourceAttributes))
@@ -185,8 +193,9 @@ type rawConfig struct {
 		Allowlist []AllowlistEntry `yaml:"allowlist"`
 		Denylist  []DenylistEntry  `yaml:"denylist"`
 	} `yaml:"policy"`
-	Secrets []SecretMapping `yaml:"secrets"`
-	Cache   struct {
+	Secrets     []SecretMapping `yaml:"secrets"`
+	SecretStore *rawSecretStore `yaml:"secretStore"`
+	Cache       struct {
 		TTL int `yaml:"ttl"`
 	} `yaml:"cache"`
 	Logging struct {
@@ -242,6 +251,7 @@ func parse(data []byte) (*LocalYAMLProvider, error) {
 		Allowlist:       raw.Policy.Allowlist,
 		Denylist:        raw.Policy.Denylist,
 		Secrets:         raw.Secrets,
+		SecretStore:     parseSecretStore(raw.SecretStore),
 		CacheTTLSeconds: raw.Cache.TTL,
 		LogLevel:        raw.Logging.Level,
 		LogFormat:       raw.Logging.Format,
@@ -409,12 +419,20 @@ func validate(p Policy) error {
 			}
 		}
 	}
+	if err := validateSecretStore(p.SecretStore); err != nil {
+		return err
+	}
+	// envVar is REQUIRED only for the env backend (the placeholder→envVar mapping
+	// is how env resolves a value — today's implicit rule, made explicit here).
+	// For echo/aws the placeholder IS the store key, so envVar is optional and
+	// ignored. Placeholders stay required + unique for every backend.
+	envBackend := p.SecretStore.ResolvedBackend() == SecretBackendEnv
 	for i, s := range p.Secrets {
 		if s.Placeholder == "" {
 			return fmt.Errorf("config: secrets[%d]: placeholder is required", i)
 		}
-		if s.EnvVar == "" {
-			return fmt.Errorf("config: secrets[%d]: envVar is required", i)
+		if envBackend && s.EnvVar == "" {
+			return fmt.Errorf("config: secrets[%d]: envVar is required for the env secret backend", i)
 		}
 	}
 	seen := make(map[string]struct{}, len(p.Secrets))
