@@ -76,6 +76,15 @@ type Config struct {
 	// MCP responses are handled by MCP above and never reach this scanner.
 	ResponseScan *ResponseScanner
 
+	// DLP is the optional outbound REQUEST-body DLP scanner. Nil = disabled: the
+	// dlpScan stage returns immediately with no body read, byte-identical to
+	// before. Non-nil = the pre-swap request body is scanned in monitor mode
+	// (Phase 1), with findings recorded on the single allow event + bounded
+	// metrics. It is read through the p.dlp() accessor, structured like
+	// p.mcpGateway() so a later phase can make it hot-swappable without touching
+	// the hot path.
+	DLP *DLPScanner
+
 	// Cost is the optional LLM cost estimator. Nil-safe: when nil no cost is
 	// attributed. When set, an allowed request to a known provider domain is
 	// tagged with a heuristic dollar estimate from observed request/response
@@ -268,6 +277,14 @@ func (p *Proxy) mcpGateway() MCPGateway {
 	}
 	return nil
 }
+
+// dlp loads the current DLP scanner. A nil return means DLP is disabled (the
+// dlpScan stage's `if d == nil` guard then skips all DLP work — no body read,
+// byte-identical to a worker that never configured DLP). Phase 1 wires it once
+// at boot from cfg.DLP; it is a method (not a direct field read) and mirrors
+// mcpGateway() so a later phase can back it with an atomic pointer for hot-swap
+// without changing any hot-path call site.
+func (p *Proxy) dlp() *DLPScanner { return p.cfg.DLP }
 
 // SetMCPGateway atomically swaps in a new MCP gateway (or nil to disable). It is
 // race-free against concurrent hot-path reads via the atomic pointer; the caller

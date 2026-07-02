@@ -49,15 +49,27 @@ func (r *ResponseScanner) enforcing() bool { return r.mode == responseScanEnforc
 // can be safely buffered and scanned. Streaming (text/event-stream), unknown or
 // negative length, and over-cap bodies are NOT scannable — the caller forwards
 // them unchanged and logs a skip. Only textual/JSON-ish bodies are worth scanning.
+// The content-type decision is delegated to scannableContentType so the request
+// (DLP) and response scan paths share ONE definition, not two dialects.
 func (r *ResponseScanner) scannable(contentType string, contentLength int64) bool {
 	if contentLength < 0 || contentLength > int64(r.maxBytes) {
 		return false
 	}
+	return scannableContentType(contentType)
+}
+
+// scannableContentType reports whether a body with this content-type is textual
+// enough to be worth scanning: text/*, JSON, XML, form-encoded, and JavaScript.
+// Streaming (text/event-stream) is excluded; an empty content-type errs toward
+// scanning (a small buffered body). Binary bodies (images, octet-stream, etc.)
+// are not scannable. This is the SINGLE content-type gate shared by the non-MCP
+// response scanner (ResponseScanner.scannable) and the outbound request-body DLP
+// scan (Proxy.dlpScan) so the two paths never fork into divergent rules.
+func scannableContentType(contentType string) bool {
 	ct := strings.ToLower(strings.TrimSpace(contentType))
 	if strings.HasPrefix(ct, "text/event-stream") {
 		return false
 	}
-	// scan textual and JSON/form/xml bodies; skip binary (images, octet-stream, etc.)
 	if ct == "" {
 		return true // no content-type: err toward scanning a small buffered body
 	}

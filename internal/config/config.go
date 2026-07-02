@@ -61,6 +61,10 @@ type Policy struct {
 	// ResponseScan configures scanning of ordinary (non-MCP) HTTP/HTTPS response
 	// bodies. Off by default; when disabled every field is zero-valued and harmless.
 	ResponseScan ResponseScanConfig `json:"-"`
+	// DLP configures outbound REQUEST-body data-loss-prevention scanning. Off by
+	// default; when off the dlpScan stage is a no-op (no body read) and behavior
+	// is byte-identical to before.
+	DLP DLPConfig `json:"-"`
 	// Auth holds per-destination request-authentication transforms (OAuth2,
 	// SigV4, HMAC, API-key). Empty by default. Credentials are referenced from
 	// env (${VAR}) and held by the proxy only — never seen by the agent.
@@ -195,6 +199,7 @@ type rawConfig struct {
 	Observability *rawObservability `yaml:"observability"`
 	MCP           *rawMCP           `yaml:"mcp"`
 	ResponseScan  *rawResponseScan  `yaml:"responseScan"`
+	DLP           *rawDLP           `yaml:"dlp"`
 	Auth          []rawAuthEntry    `yaml:"auth"`
 	ControlPlane  *rawControlPlane  `yaml:"controlPlane"`
 	Central       *rawCentral       `yaml:"central"`
@@ -275,6 +280,7 @@ func parse(data []byte) (*LocalYAMLProvider, error) {
 	policy.Observability = parseObservability(raw.Observability)
 	policy.MCP = parseMCP(raw.MCP)
 	policy.ResponseScan = parseResponseScan(raw.ResponseScan)
+	policy.DLP = parseDLP(raw.DLP)
 	policy.Auth = parseAuth(raw.Auth)
 	cp, err := parseControlPlane(raw.ControlPlane)
 	if err != nil {
@@ -441,6 +447,9 @@ func validate(p Policy) error {
 		return err
 	}
 	if err := validateResponseScan(p.ResponseScan); err != nil {
+		return err
+	}
+	if err := validateDLP(p.DLP); err != nil {
 		return err
 	}
 	if err := validateAuth(p.Auth); err != nil {

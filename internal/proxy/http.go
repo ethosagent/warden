@@ -79,6 +79,17 @@ type requestScope struct {
 	// Secret-swap results, carried onto the single forwarding audit event.
 	refs         []secrets.Reference
 	swappedNames []string
+
+	// DLP results, carried onto the single forwarding audit event. All zero when
+	// DLP is off, so the off-case event is identical to today. dlpClasses is the
+	// deduplicated set of detection categories seen in the PRE-SWAP body;
+	// dlpAction is "monitor" when DLP inspected the request (Phase 1 never blocks);
+	// dlpPartial flags honest under-coverage (over-cap body or non-scannable type);
+	// dlpEncoded is reserved for decoded-layer-only findings (unused in Phase 1).
+	dlpClasses []string
+	dlpAction  string
+	dlpPartial bool
+	dlpEncoded bool
 }
 
 // cleanup releases the REQUEST's closables exactly once, on whatever exit path
@@ -225,6 +236,9 @@ func (p *Proxy) runRequestStages(s *requestScope) (endSession bool) {
 	if p.mcpRequestScan(s) {
 		return true
 	}
+	if p.dlpScan(s) {
+		return true
+	}
 	if p.swapSecrets(s) {
 		return true
 	}
@@ -347,6 +361,106 @@ func (p *Proxy) mcpRequestScan(s *requestScope) (endSession bool) {
 		})
 		writeErrorResponse(s.tlsConn, 403, "Forbidden")
 		return true
+	}
+	return false
+}
+
+// dlpScan runs the outbound REQUEST-body DLP scan as a named stage placed
+// BETWEEN mcpRequestScan and swapSecrets. The ordering is load-bearing: it scans
+// the PRE-SWAP body, so a Warden-managed secret VALUE (injected only later, in
+// swapSecrets) never reaches the scanner, and a configured placeholder NAME in
+// the body is an inert token — never classified as a credential, never mutated
+// here, and still swapped normally downstream.
+//
+// Phase 1 is monitor-only: it records findings on the scope (which ride the
+// single allow event) + bounded metrics, but NEVER mutates the body. enforce
+// config behaves as monitor this phase (block/redact land in Phase 3/4).
+//
+// DLP is FAIL-OPEN and never blocks or 413s. It only performs the shared
+// buffered read when that read provably cannot 413 (a known Content-Length that
+// fits maxBodySwapSize, or a body an earlier stage already buffered). An
+// over-cap body (Content-Length > cap) or an unknown-length/chunked body
+// (Content-Length < 0) is flagged dlp_partial and FORWARDED WITHOUT reading —
+// the same honest coverage gap as an unscannable response stream; Phase 1 does
+// not stream-scan chunked bodies (a later phase can). This guarantees dlpScan
+// never writes a 413 and never consumes a body it cannot restore, so the
+// swap/MCP 413 contract is theirs alone: when a swap IS configured and the body
+// is over-cap, swapSecrets still 413s later exactly as it does today — DLP just
+// does not pre-empt it.
+//
+// mode: off (p.dlp() == nil) returns immediately with NO body read, NO event
+// fields, and NO metric — byte-identical to before.
+func (p *Proxy) dlpScan(s *requestScope) (endSession bool) {
+	d := p.dlp()
+	if d == nil {
+		return false
+	}
+	// DLP inspected this request. Phase 1's only action is "monitor" regardless of
+	// configured mode (enforce is not yet active). TODO(phase3): enforce → block.
+	s.dlpAction = dlpMonitor
+
+	ct := s.req.Header.Get("Content-Type")
+	if !scannableContentType(ct) {
+		// Binary/octet-stream/SSE/multipart or otherwise non-textual: don't read
+		// the body, flag honest under-coverage, and forward (monitor never blocks).
+		s.dlpPartial = true
+		return false
+	}
+
+	// Body acquisition — the fail-open gate. Read only when it is SAFE (the body
+	// provably fits the buffer); otherwise flag partial and forward WITHOUT
+	// reading, so dlpScan can never 413 and never strand an unrestorable body.
+	var body []byte
+	switch {
+	case s.bodyRead:
+		// An earlier stage (MCP scan / swap) already buffered the body; it is
+		// ≤ maxBodySwapSize by construction (ensureBody 413s before caching an
+		// over-cap body). Reuse it.
+		body = s.reqBody
+	case s.req.ContentLength >= 0 && s.req.ContentLength <= maxBodySwapSize:
+		// Known length that fits the buffer (includes 0): ensureBody cannot 413.
+		b, ok := s.ensureBody()
+		if !ok {
+			// A read error (502) — never a 413, since the length is ≤ cap — the
+			// same terminal the MCP/swap sites produce on a broken body.
+			return true
+		}
+		body = b
+	default:
+		// ContentLength > maxBodySwapSize (known too large) or < 0 (unknown /
+		// chunked): don't read, flag the honest coverage gap, FORWARD (fail-open).
+		s.dlpPartial = true
+		return false
+	}
+	if len(body) == 0 {
+		return false
+	}
+
+	scanBody := body
+	if len(scanBody) > maxDLPScanSize {
+		// Over cap: scan the first 1 MB only and flag the coverage gap.
+		scanBody = scanBody[:maxDLPScanSize]
+		s.dlpPartial = true
+	}
+
+	start := time.Now()
+	dets := d.scan(scanBody)
+	p.cfg.Metrics.ObserveAddedLatency("dlp_scan", time.Since(start))
+	p.recordDLPFindings(dets)
+
+	if len(dets) > 0 {
+		// Phase 1 maps each Detection.Category directly to a data class (dedup).
+		// Phase 2 replaces this flat mapping with the real DataClass taxonomy.
+		seen := make(map[string]struct{}, len(dets))
+		classes := make([]string, 0, len(dets))
+		for _, det := range dets {
+			if _, dup := seen[det.Category]; dup {
+				continue
+			}
+			seen[det.Category] = struct{}{}
+			classes = append(classes, det.Category)
+		}
+		s.dlpClasses = classes
 	}
 	return false
 }
@@ -872,6 +986,13 @@ func (p *Proxy) recordAllowEvent(s *requestScope) {
 		Reason:         s.mcpReason,   // "" unless wasMCP
 		CostUSD:        costUSD,
 		Provider:       provider,
+		// DLP fields ride this single allow event (no second event is emitted).
+		// All zero/empty when DLP is off, so the off-case event is identical to
+		// today. DLPRule stays "" in Phase 1 (no rules yet).
+		DataClasses: s.dlpClasses,
+		DLPAction:   s.dlpAction,
+		DLPPartial:  s.dlpPartial,
+		DLPEncoded:  s.dlpEncoded,
 	})
 	p.cfg.Metrics.RecordRequest("allow", proto)
 	for _, name := range s.swappedNames {

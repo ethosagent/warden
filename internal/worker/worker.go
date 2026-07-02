@@ -238,6 +238,20 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		logger.Info("HTTP response scanning enabled", "mode", pol.ResponseScan.Mode)
 	}
 
+	// Optional outbound REQUEST-body DLP scanner (Phase 1: monitor only). Off
+	// unless dlp.mode != "off"; when off, dlpScanner stays nil and the dlpScan
+	// stage is a no-op (no body read) — byte-identical to before. LOCAL config
+	// (scanner never distributed). enforce is accepted as config but not yet
+	// active in Phase 1 (treated as monitor); log that once at boot.
+	var dlpScanner *proxy.DLPScanner
+	if pol.DLP.Active() {
+		dlpScanner = proxy.NewDLPScanner(pol.DLP.Mode, false, false)
+		if pol.DLP.Mode == "enforce" {
+			logger.Warn("DLP enforce mode is not yet active; Phase 1 treats it as monitor (no blocking/redaction)")
+		}
+		logger.Info("outbound request-body DLP scanning enabled", "mode", pol.DLP.Mode)
+	}
+
 	// Hot-swappable policy evaluator. In managed mode it starts EMPTY (deny all)
 	// and is filled by the control plane; otherwise it enforces local policy. The
 	// control-plane provider + first pull happened above (before OTel init); if
@@ -381,6 +395,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		Logger:           logger,
 		MCP:              bootGW,
 		ResponseScan:     respScanner,
+		DLP:              dlpScanner,
 		Transformers:     transformers,
 		Cost:             costEstimator,
 	}

@@ -86,3 +86,24 @@ func (p *Proxy) recordResponseFindings(dets []scan.Detection) {
 		)
 	}
 }
+
+// recordDLPFindings records each outbound REQUEST-body DLP detection as a bounded
+// scan-finding metric and a debug log line. The metric kind is namespaced
+// "dlp_<category>" so it never collides with the MCP or response-scan finding
+// kinds; category is a small closed set (safe as a metric label). The DESTINATION
+// is deliberately NOT a label here (unbounded cardinality — it lives only on the
+// event, same rule as Tool). It NEVER logs the body or a raw value — only the
+// bounded kind/pattern/severity and the opt-in MASKED evidence (empty in Phase 1,
+// which builds the scanner WithEvidence(false)). Metrics methods are nil-safe.
+func (p *Proxy) recordDLPFindings(dets []scan.Detection) {
+	for _, d := range dets {
+		kind := "dlp_" + d.Category
+		p.cfg.Metrics.RecordScanFinding(kind)
+		p.cfg.Logger.Debug("dlp finding",
+			slog.String("kind", kind),
+			slog.String("pattern", d.Pattern),
+			slog.String("severity", d.Severity),
+			slog.String("evidence", d.Evidence), // MASKED (opt-in); "" unless Evidence enabled
+		)
+	}
+}

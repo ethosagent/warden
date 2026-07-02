@@ -67,6 +67,28 @@ type Event struct {
 	// is populated only by an aggregating store (CentralStore) at read time; the
 	// local SQLite store leaves it empty (single node) and never persists it.
 	ProxyID string
+
+	// DataClasses holds the outbound-request DLP data classes detected in the
+	// PRE-SWAP request body (Phase 1: the scanner's flat detection categories,
+	// e.g. "credential_leak", "pii", "injection"). Bounded class names only —
+	// never matched content, never offsets. Nil when DLP is off or found nothing.
+	DataClasses []string
+	// DLPAction is the DLP action taken on this request: "monitor" when DLP
+	// inspected it (Phase 1 never blocks/redacts). "" when DLP is off. A small
+	// closed set — bounded metadata, never content.
+	DLPAction string
+	// DLPRule is the bounded identifier of the DLP rule that decided this request.
+	// Always "" in Phase 1 (no rules yet); populated once per-class egress rules
+	// land (Phase 3).
+	DLPRule string
+	// DLPPartial flags that the request body was only partially scanned — an
+	// over-cap body (first 1 MB scanned) or a non-scannable/binary content-type.
+	// Honest coverage accounting: the bypass is recorded, never silent.
+	DLPPartial bool
+	// DLPEncoded flags a finding that appeared only in a decoded layer
+	// (base64/URL) of the request body. Reserved for later phases; always false
+	// in Phase 1.
+	DLPEncoded bool
 }
 
 // encodeCompliance joins compliance control IDs into a single comma-separated
@@ -83,6 +105,34 @@ func decodeCompliance(s string) []string {
 		return nil
 	}
 	return strings.Split(s, ",")
+}
+
+// encodeDataClasses joins DLP data-class names into a single comma-separated
+// column value. Class names are a small closed set (e.g. "credential_leak",
+// "pii", "injection") that never contains a comma, so a comma join round-trips
+// safely — the same convention encodeCompliance uses for control IDs.
+func encodeDataClasses(classes []string) string {
+	return strings.Join(classes, ",")
+}
+
+// decodeDataClasses splits a stored data_classes column back into class names.
+// An empty column yields a nil slice (no classes), not a one-element slice.
+func decodeDataClasses(s string) []string {
+	if s == "" {
+		return nil
+	}
+	return strings.Split(s, ",")
+}
+
+// boolToInt maps a bool to the 0/1 INTEGER SQLite stores. modernc.org/sqlite
+// (and database/sql) does not convert an INTEGER column into a *bool on scan, so
+// bool event fields (DLPPartial/DLPEncoded) are persisted and read back through
+// an int intermediate — never scanned directly into a bool.
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // EventFilter narrows a GetEvents query. Zero-valued fields are ignored.
@@ -156,7 +206,12 @@ CREATE TABLE IF NOT EXISTS events (
     reason          TEXT    NOT NULL DEFAULT '',
     cost_usd        REAL    NOT NULL DEFAULT 0,
     provider        TEXT    NOT NULL DEFAULT '',
-    compliance      TEXT    NOT NULL DEFAULT ''
+    compliance      TEXT    NOT NULL DEFAULT '',
+    data_classes    TEXT    NOT NULL DEFAULT '',
+    dlp_action      TEXT    NOT NULL DEFAULT '',
+    dlp_rule        TEXT    NOT NULL DEFAULT '',
+    dlp_partial     INTEGER NOT NULL DEFAULT 0,
+    dlp_encoded     INTEGER NOT NULL DEFAULT 0
 );`
 	if _, err := s.db.Exec(ddl); err != nil {
 		return fmt.Errorf("analytics: migrate: %w", err)
@@ -172,6 +227,11 @@ CREATE TABLE IF NOT EXISTS events (
 		{"cost_usd", `ALTER TABLE events ADD COLUMN cost_usd REAL NOT NULL DEFAULT 0`},
 		{"provider", `ALTER TABLE events ADD COLUMN provider TEXT NOT NULL DEFAULT ''`},
 		{"compliance", `ALTER TABLE events ADD COLUMN compliance TEXT NOT NULL DEFAULT ''`},
+		{"data_classes", `ALTER TABLE events ADD COLUMN data_classes TEXT NOT NULL DEFAULT ''`},
+		{"dlp_action", `ALTER TABLE events ADD COLUMN dlp_action TEXT NOT NULL DEFAULT ''`},
+		{"dlp_rule", `ALTER TABLE events ADD COLUMN dlp_rule TEXT NOT NULL DEFAULT ''`},
+		{"dlp_partial", `ALTER TABLE events ADD COLUMN dlp_partial INTEGER NOT NULL DEFAULT 0`},
+		{"dlp_encoded", `ALTER TABLE events ADD COLUMN dlp_encoded INTEGER NOT NULL DEFAULT 0`},
 	} {
 		if err := s.addColumnIfAbsent(c.name, c.ddl); err != nil {
 			return err
@@ -234,7 +294,9 @@ func (s *SQLiteStore) StoreEvent(e Event) error {
 	_, err := s.db.Exec(`INSERT INTO events `+insertColumns,
 		e.Timestamp.UnixNano(), e.Domain, e.Port, e.Protocol, e.Method,
 		e.URL, e.Decision, e.ResponseStatus, e.SecretRef, e.JudgeReason, e.Tool, e.Reason,
-		e.CostUSD, e.Provider, encodeCompliance(e.Compliance))
+		e.CostUSD, e.Provider, encodeCompliance(e.Compliance),
+		encodeDataClasses(e.DataClasses), e.DLPAction, e.DLPRule,
+		boolToInt(e.DLPPartial), boolToInt(e.DLPEncoded))
 	if err != nil {
 		return fmt.Errorf("analytics: insert event: %w", err)
 	}
@@ -244,8 +306,8 @@ func (s *SQLiteStore) StoreEvent(e Event) error {
 // insertColumns is the shared column list + placeholder tuple for an events
 // INSERT, used by both StoreEvent and StoreEventsBatch so the two paths can
 // never drift.
-const insertColumns = `(ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason, tool, reason, cost_usd, provider, compliance)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+const insertColumns = `(ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason, tool, reason, cost_usd, provider, compliance, data_classes, dlp_action, dlp_rule, dlp_partial, dlp_encoded)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 // StoreEventsBatch inserts every event in a single transaction — one fsync for
 // the whole batch instead of one per event — setting any zero timestamp to now,
@@ -278,7 +340,9 @@ func (s *SQLiteStore) StoreEventsBatch(evs []Event) error {
 		if _, err := stmt.Exec(
 			ts.UnixNano(), e.Domain, e.Port, e.Protocol, e.Method,
 			e.URL, e.Decision, e.ResponseStatus, e.SecretRef, e.JudgeReason, e.Tool, e.Reason,
-			e.CostUSD, e.Provider, encodeCompliance(e.Compliance)); err != nil {
+			e.CostUSD, e.Provider, encodeCompliance(e.Compliance),
+			encodeDataClasses(e.DataClasses), e.DLPAction, e.DLPRule,
+			boolToInt(e.DLPPartial), boolToInt(e.DLPEncoded)); err != nil {
 			_ = tx.Rollback()
 			return fmt.Errorf("analytics: insert batch event: %w", err)
 		}
@@ -306,7 +370,7 @@ func (s *SQLiteStore) Prune() error {
 
 // GetEvents returns events matching filter, newest first.
 func (s *SQLiteStore) GetEvents(filter EventFilter) ([]Event, error) {
-	q := `SELECT ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason, tool, reason, cost_usd, provider, compliance
+	q := `SELECT ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason, tool, reason, cost_usd, provider, compliance, data_classes, dlp_action, dlp_rule, dlp_partial, dlp_encoded
           FROM events WHERE 1=1`
 	var args []any
 	if filter.Domain != "" {
@@ -344,16 +408,23 @@ func (s *SQLiteStore) GetEvents(filter EventFilter) ([]Event, error) {
 	var out []Event
 	for rows.Next() {
 		var (
-			e          Event
-			ts         int64
-			compliance string
+			e           Event
+			ts          int64
+			compliance  string
+			dataClasses string
+			dlpPartial  int
+			dlpEncoded  int
 		)
 		if err := rows.Scan(&ts, &e.Domain, &e.Port, &e.Protocol, &e.Method,
 			&e.URL, &e.Decision, &e.ResponseStatus, &e.SecretRef, &e.JudgeReason, &e.Tool, &e.Reason,
-			&e.CostUSD, &e.Provider, &compliance); err != nil {
+			&e.CostUSD, &e.Provider, &compliance,
+			&dataClasses, &e.DLPAction, &e.DLPRule, &dlpPartial, &dlpEncoded); err != nil {
 			return nil, fmt.Errorf("analytics: scan: %w", err)
 		}
 		e.Compliance = decodeCompliance(compliance)
+		e.DataClasses = decodeDataClasses(dataClasses)
+		e.DLPPartial = dlpPartial != 0
+		e.DLPEncoded = dlpEncoded != 0
 		e.Timestamp = time.Unix(0, ts).UTC()
 		out = append(out, e)
 	}
@@ -374,7 +445,7 @@ func (s *SQLiteStore) count() (int, error) {
 
 // GetOldestEventIDs returns the IDs and events of the oldest N events.
 func (s *SQLiteStore) GetOldestEventIDs(limit int) ([]int64, []Event, error) {
-	const q = `SELECT id, ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason, tool, reason, cost_usd, provider, compliance
+	const q = `SELECT id, ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason, tool, reason, cost_usd, provider, compliance, data_classes, dlp_action, dlp_rule, dlp_partial, dlp_encoded
 	            FROM events ORDER BY id ASC LIMIT ?`
 	rows, err := s.db.Query(q, limit)
 	if err != nil {
@@ -386,17 +457,24 @@ func (s *SQLiteStore) GetOldestEventIDs(limit int) ([]int64, []Event, error) {
 	var out []Event
 	for rows.Next() {
 		var (
-			id         int64
-			e          Event
-			ts         int64
-			compliance string
+			id          int64
+			e           Event
+			ts          int64
+			compliance  string
+			dataClasses string
+			dlpPartial  int
+			dlpEncoded  int
 		)
 		if err := rows.Scan(&id, &ts, &e.Domain, &e.Port, &e.Protocol, &e.Method,
 			&e.URL, &e.Decision, &e.ResponseStatus, &e.SecretRef, &e.JudgeReason, &e.Tool, &e.Reason,
-			&e.CostUSD, &e.Provider, &compliance); err != nil {
+			&e.CostUSD, &e.Provider, &compliance,
+			&dataClasses, &e.DLPAction, &e.DLPRule, &dlpPartial, &dlpEncoded); err != nil {
 			return nil, nil, fmt.Errorf("analytics: scan oldest IDs: %w", err)
 		}
 		e.Compliance = decodeCompliance(compliance)
+		e.DataClasses = decodeDataClasses(dataClasses)
+		e.DLPPartial = dlpPartial != 0
+		e.DLPEncoded = dlpEncoded != 0
 		e.Timestamp = time.Unix(0, ts).UTC()
 		ids = append(ids, id)
 		out = append(out, e)
