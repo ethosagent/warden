@@ -63,7 +63,7 @@ OUT_DIR=deploy/compose/certs ./scripts/gen-certs.sh
 
 # 2. Bring up the proxy + an isolated demo agent
 export OPENROUTER_API_KEY="sk-or-v1-..."   # real key — lives with the proxy, never the agent
-docker compose -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.openrouter.yml up --build
+docker compose -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.openrouter.yml up
 
 # 3. Exec into the agent container
 docker compose -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.openrouter.yml exec agent sh
@@ -91,7 +91,7 @@ is its sole route out. The policy is **allow-all** (`~.*`) for now, so nothing i
 OUT_DIR=deploy/compose/certs ./scripts/gen-certs.sh
 
 # 2. Bring up Ethos + Warden
-docker compose -f deploy/compose/docker-compose.ethos.yml up --build
+docker compose -f deploy/compose/docker-compose.ethos.yml up
 ```
 
 - **Ethos UI:** http://localhost:3000

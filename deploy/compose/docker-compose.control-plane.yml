@@ -19,7 +19,7 @@
 #
 # Run (from repo root):
 #   WARDEN_CP_TOKEN=dev-token \
-#   docker compose -f deploy/compose/docker-compose.control-plane.yml up --build
+#   docker compose -f deploy/compose/docker-compose.control-plane.yml up
 #
 # Fleet dashboard: https://localhost:7070/dashboard/  (cert signed by the proxy
 #   CA — your browser will warn; trust it or curl with --cacert deploy/compose/certs/proxy-ca.crt)
@@ -27,10 +27,7 @@
 
 services:
   control-plane:
-    build:
-      context: ../..
-      dockerfile: Dockerfile
-    image: warden-proxy:dev
+    image: ethosagent/warden:${WARDEN_VERSION:-0.2.1}
     networks: [cp-net]
     ports:
       - "7070:7070"
@@ -55,7 +52,7 @@ services:
       - "--tls-host=control-plane,localhost,127.0.0.1"
 
   worker-1:
-    image: warden-proxy:dev
+    image: ethosagent/warden:${WARDEN_VERSION:-0.2.1}
     depends_on: [control-plane]
     networks: [cp-net, egress, w1-internal]
     ports:
@@ -80,7 +77,7 @@ services:
       - "--db=/data/warden.db"
 
   worker-2:
-    image: warden-proxy:dev
+    image: ethosagent/warden:${WARDEN_VERSION:-0.2.1}
     depends_on: [control-plane]
     networks: [cp-net, egress, w2-internal]
     ports:

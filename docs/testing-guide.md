@@ -187,7 +187,7 @@ export OPENAI_API_KEY="sk-..."
 ### Start the stack
 
 ```sh
-docker compose up --build
+docker compose up
 ```
 
 This starts two containers:
@@ -234,7 +234,7 @@ If you have an OpenRouter key instead of OpenAI:
 
 ```sh
 export OPENROUTER_API_KEY="sk-or-v1-..."
-docker compose -f docker-compose.yml -f docker-compose.openrouter.yml up --build
+docker compose -f docker-compose.yml -f docker-compose.openrouter.yml up
 ```
 
 Then inside the agent:

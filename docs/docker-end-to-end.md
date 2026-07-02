@@ -94,7 +94,7 @@ export OPENROUTER_API_KEY="sk-or-v1-..."   # the REAL key — lives with the pro
 docker compose \
   -f deploy/compose/docker-compose.yml \
   -f deploy/compose/docker-compose.openrouter.yml \
-  up --build
+  up
 ```
 
 The proxy logs:

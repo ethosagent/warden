@@ -20,7 +20,7 @@ docker compose -f deploy/compose/docker-compose.hermes.yml up
 ```
 
 > Warden is pulled from Docker Hub (`ethosagent/warden`) — no local build. Override
-> the version with `WARDEN_VERSION` (default `0.1.0`):
+> the version with `WARDEN_VERSION` (default `0.2.1`):
 > `WARDEN_VERSION=0.2.0 docker compose -f deploy/compose/docker-compose.hermes.yml up`
 
 - **Hermes API (OpenAI-compatible):** http://localhost:8642

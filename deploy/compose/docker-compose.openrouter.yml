@@ -3,7 +3,7 @@
 # override only re-points the proxy at the OpenRouter worker config + key.
 # Usage:
 #   WARDEN_CP_TOKEN=dev-token \
-#   docker compose -f docker-compose.yml -f docker-compose.openrouter.yml up --build
+#   docker compose -f docker-compose.yml -f docker-compose.openrouter.yml up
 
 services:
   proxy:

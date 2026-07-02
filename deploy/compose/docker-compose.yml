@@ -18,15 +18,14 @@
 # This is the structural guarantee — the agent cannot reach the internet even if
 # it is fully compromised, because Docker's network namespaces deny it a route.
 #
-# The control-plane role is NEWER than the published tag, so both services use a
-# LOCALLY BUILT image — run with `--build`.
+# Warden is pulled from Docker Hub (ethosagent/warden) — no local build.
 #
 # Prereq: generate the bake-once CA into ./certs (this directory) first:
 #   OUT_DIR=deploy/compose/certs ./scripts/gen-certs.sh   # run from the repo root
 #
 # Run (from the repo root):
 #   WARDEN_CP_TOKEN=dev-token \
-#   docker compose -f deploy/compose/docker-compose.yml up --build
+#   docker compose -f deploy/compose/docker-compose.yml up
 #
 # Fleet dashboard (control plane): https://localhost:7070/dashboard/  (proxy-CA cert — trust it)
 # Worker-local dashboard:          http://localhost:9090/dashboard/
@@ -34,13 +33,7 @@
 
 services:
   control-plane:
-    # The control-plane role is newer than the published tag → local build.
-    # Reuses the same image the proxy builds; run with `--build`.
-    build:
-      context: ../..
-      dockerfile: Dockerfile
-    image: warden-proxy:dev
-    pull_policy: never             # never fetch from a registry — use the local build
+    image: ethosagent/warden:${WARDEN_VERSION:-0.2.1}
     networks: [cp-net]
     ports:
       - "7070:7070"                  # fleet dashboard + /policy + /central/ingest
@@ -61,10 +54,7 @@ services:
       - "--tls-host=control-plane,localhost,127.0.0.1"
 
   proxy:
-    build:
-      context: ../..
-      dockerfile: Dockerfile
-    image: warden-proxy:dev
+    image: ethosagent/warden:${WARDEN_VERSION:-0.2.1}
     depends_on:
       control-plane:
         condition: service_started

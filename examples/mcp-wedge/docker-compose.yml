@@ -26,13 +26,7 @@
 
 services:
   warden:
-    # Built from the repo Dockerfile so the demo is self-contained. To use the
-    # published image instead, replace `build` with:
-    #   image: ethosagent/warden:${WARDEN_VERSION:-0.1.0}
-    build:
-      context: ../..
-      dockerfile: Dockerfile
-    image: warden-mcp-wedge:local
+    image: ethosagent/warden:${WARDEN_VERSION:-0.2.1}
     networks: [mcp-internal, egress]
     ports:
       - "9090:9090"                 # dashboard + /metrics (host-only)

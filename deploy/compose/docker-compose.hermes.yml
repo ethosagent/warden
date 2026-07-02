@@ -15,15 +15,14 @@
 # set — without it, egress goes direct, fails on the isolated network, and never
 # reaches Warden.
 #
-# The control-plane role is NEWER than the published tag, so both services use a
-# LOCALLY BUILT image — run with `--build`.
+# Warden is pulled from Docker Hub (ethosagent/warden) — no local build.
 #
 # Prereq (run from the repo root): generate the bake-once CA into ./certs:
 #   OUT_DIR=deploy/compose/certs ./scripts/gen-certs.sh
 #
 # Run (from the repo root):
 #   WARDEN_CP_TOKEN=dev-token \
-#   docker compose -f deploy/compose/docker-compose.hermes.yml up --build
+#   docker compose -f deploy/compose/docker-compose.hermes.yml up
 #
 # Hermes API: http://localhost:8642   ·   Hermes dashboard: http://localhost:9119 (login: admin / warden)
 # Fleet dashboard (control plane): https://localhost:7070/dashboard/  (proxy-CA cert — trust it)
@@ -31,13 +30,7 @@
 
 services:
   control-plane:
-    # The control-plane role is newer than the published tag → local build.
-    # Run with `--build`.
-    build:
-      context: ../..
-      dockerfile: Dockerfile
-    image: warden-proxy:dev        # locally built from this repo's Dockerfile
-    pull_policy: never             # never fetch from a registry — use the local build
+    image: ethosagent/warden:${WARDEN_VERSION:-0.2.1}
     networks: [cp-net]
     ports:
       - "7070:7070"                  # fleet dashboard + /policy + /central/ingest
@@ -58,11 +51,7 @@ services:
       - "--tls-host=control-plane,localhost,127.0.0.1"
 
   warden:
-    build:
-      context: ../..
-      dockerfile: Dockerfile
-    image: warden-proxy:dev        # same locally-built image as the control plane
-    pull_policy: never             # never fetch from a registry — use the local build
+    image: ethosagent/warden:${WARDEN_VERSION:-0.2.1}
     depends_on:
       control-plane:
         condition: service_started

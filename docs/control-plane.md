@@ -80,7 +80,7 @@ OUT_DIR=deploy/compose/certs ./scripts/gen-certs.sh
 
 # 2. Bring up the control plane + two workers + two synthetic agents.
 WARDEN_CP_TOKEN=dev-token \
-  docker compose -f deploy/compose/docker-compose.control-plane.yml up --build
+  docker compose -f deploy/compose/docker-compose.control-plane.yml up
 ```
 
 - Fleet dashboard: **https://localhost:7070/dashboard/** (cert signed by the

@@ -9,8 +9,7 @@
 #   ethos          — isolated on an INTERNAL-ONLY network; its sole route out is the
 #                    worker. All egress is proxied through worker:8080.
 #
-# This demo uses a LOCALLY BUILT image (the control-plane role is newer than the
-# published tag), so run with `--build`.
+# Warden is pulled from Docker Hub (ethosagent/warden) — no local build.
 #
 # Prereq (from repo root): generate the bake-once proxy CA into ./certs. The
 # control plane mints its server cert from it; the worker + Ethos trust it.
@@ -18,7 +17,7 @@
 #
 # Run (from repo root):
 #   WARDEN_CP_TOKEN=dev-token \
-#   docker compose -f deploy/compose/docker-compose.ethos.yml up --build
+#   docker compose -f deploy/compose/docker-compose.ethos.yml up
 #
 # Ethos UI + login: http://localhost:3000   (it prints an /auth/exchange?t=… link on startup)
 # Fleet dashboard (control plane): https://localhost:7070/dashboard/  (proxy-CA cert — trust it)
@@ -26,11 +25,7 @@
 
 services:
   control-plane:
-    build:
-      context: ../..
-      dockerfile: Dockerfile
-    image: warden-proxy:dev        # locally built from this repo's Dockerfile
-    pull_policy: never             # never fetch from a registry — use the local build
+    image: ethosagent/warden:${WARDEN_VERSION:-0.2.1}
     networks: [cp-net]
     ports:
       - "7070:7070"                  # fleet dashboard + /policy + /central/ingest
@@ -51,11 +46,7 @@ services:
       - "--tls-host=control-plane,localhost,127.0.0.1"
 
   worker:
-    build:
-      context: ../..
-      dockerfile: Dockerfile
-    image: warden-proxy:dev        # same locally-built image as the control plane
-    pull_policy: never             # never fetch from a registry — use the local build
+    image: ethosagent/warden:${WARDEN_VERSION:-0.2.1}
     depends_on:
       control-plane:
         condition: service_started
