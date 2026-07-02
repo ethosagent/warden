@@ -503,8 +503,8 @@ func TestHTMLServes(t *testing.T) {
 	if !strings.HasPrefix(ct, "text/html") {
 		t.Fatalf("expected text/html content type, got %s", ct)
 	}
-	if !strings.Contains(rr.Body.String(), "Warden Dashboard") {
-		t.Fatal("expected body to contain 'Warden Dashboard'")
+	if !strings.Contains(rr.Body.String(), "Egress Guardrail Console") {
+		t.Fatal("expected body to contain 'Egress Guardrail Console'")
 	}
 }
 
