@@ -55,7 +55,7 @@ func (s *syncStore) snapshot() []analytics.Event {
 	return out
 }
 
-func generateTestCA(t *testing.T) (certPEM, keyPEM []byte, cert *x509.Certificate, key crypto.PrivateKey) {
+func generateTestCA(t testing.TB) (certPEM, keyPEM []byte, cert *x509.Certificate, key crypto.PrivateKey) {
 	t.Helper()
 	caKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {

@@ -41,7 +41,7 @@ type recordingBackend struct {
 // startBackend creates a TLS backend server that records the first HTTP request
 // and responds with the configured status/body. It generates a self-signed cert
 // signed by the provided CA.
-func startBackend(t *testing.T, caCert *x509.Certificate, caKey interface{}) (net.Listener, *recordingBackend) {
+func startBackend(t testing.TB, caCert *x509.Certificate, caKey interface{}) (net.Listener, *recordingBackend) {
 	t.Helper()
 
 	backendKey, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -129,7 +129,7 @@ func startBackend(t *testing.T, caCert *x509.Certificate, caKey interface{}) (ne
 }
 
 // startTestProxyWithSecrets creates a test proxy with secret provider and placeholder names.
-func startTestProxyWithSecrets(t *testing.T, allowedDomains []string, caCertPEM, caKeyPEM []byte, secretValues map[string]string, placeholderNames []string) (*Proxy, *syncStore) {
+func startTestProxyWithSecrets(t testing.TB, allowedDomains []string, caCertPEM, caKeyPEM []byte, secretValues map[string]string, placeholderNames []string) (*Proxy, *syncStore) {
 	t.Helper()
 	var entries []config.AllowlistEntry
 	for _, d := range allowedDomains {
@@ -176,7 +176,7 @@ func startTestProxyWithSecrets(t *testing.T, allowedDomains []string, caCertPEM,
 
 // dialProxyAndConnect dials the proxy, sends CONNECT, performs TLS handshake,
 // and returns the TLS connection ready for HTTP requests.
-func dialProxyAndConnect(t *testing.T, proxyAddr string, domain string, caCertPEM []byte) *tls.Conn {
+func dialProxyAndConnect(t testing.TB, proxyAddr string, domain string, caCertPEM []byte) *tls.Conn {
 	t.Helper()
 
 	conn, err := net.Dial("tcp", proxyAddr)

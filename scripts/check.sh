@@ -78,7 +78,17 @@ banner "test (go test -race -coverprofile)"
 go test -race -coverprofile=coverage.out ./...
 echo "ok"
 
-# 7. coverage gate
+# 7. benchmark smoke (compile + run once; NOT gated on ns/op)
+#
+# The hot-path benchmarks are the regression tripwire for the scalability work.
+# Run them at -benchtime=1x (one iteration each) so they are guaranteed to
+# compile and not panic on every gate, without measurably slowing it. This step
+# fails ONLY on a build error or a panic — never on performance numbers.
+banner "benchmark smoke (go test -bench . -benchtime=1x)"
+go test -run '^$' -bench . -benchtime=1x ./... >/dev/null
+echo "ok"
+
+# 8. coverage gate
 banner "coverage gate (min ${COVERAGE_MIN}%)"
 total="$(go tool cover -func=coverage.out | awk '/^total:/ {gsub("%","",$3); print $3}')"
 echo "total coverage: ${total}%"
@@ -88,7 +98,7 @@ if awk "BEGIN { exit !(${total} < ${COVERAGE_MIN}) }"; then
 fi
 echo "ok"
 
-# 8. integration (opt-in)
+# 9. integration (opt-in)
 if [ "$RUN_INTEGRATION" -eq 1 ]; then
 	banner "integration (go test -tags=integration)"
 	go test -tags=integration ./test/integration/...
