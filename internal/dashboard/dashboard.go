@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ethosagent/warden/internal/analytics"
@@ -61,6 +62,91 @@ type Server struct {
 	// queryEngine, when set (control plane with a SQL-backed store), powers the
 	// read-only Query Builder. nil = the Query Builder reports "unavailable".
 	queryEngine analytics.AnalyticsQuery
+	// now is the clock used by the response caches; it defaults to time.Now and
+	// is overridable in tests so cache expiry can be asserted without real sleeps.
+	now func() time.Time
+	// analyticsCache and mcpCache memoize the two heavy, unbounded, 5s-auto-
+	// refreshed aggregate payloads (handleAnalytics, handleMCP) keyed on the
+	// request inputs that determine their output, so a refresh burst collapses to
+	// one aggregation pass per distinct key per TTL.
+	analyticsCache *respCache
+	mcpCache       *respCache
+}
+
+// analyticsCacheTTL is how long a computed analytics/MCP payload is reused
+// before recomputation. The dashboard auto-refreshes every 5s, so a matching
+// window collapses each refresh burst (across all concurrent viewers sharing a
+// key) into a single aggregation pass while keeping the data at most one refresh
+// interval stale.
+const analyticsCacheTTL = 5 * time.Second
+
+// maxRespCacheEntries caps each response cache so a fleet browsed across many
+// distinct proxy selectors cannot grow the map without bound. Entries expire
+// within analyticsCacheTTL, so the realistic live set is tiny (range tokens ×
+// selected proxies); this is a generous hard ceiling, not the expected size.
+const maxRespCacheEntries = 64
+
+// cachedResponse is one memoized, already-serialized JSON body plus its expiry.
+type cachedResponse struct {
+	body    []byte
+	expires time.Time
+}
+
+// respCache is a small, mutex-guarded, filter-keyed TTL cache of serialized
+// response bodies. It is intentionally private to the dashboard: no exported
+// surface, one lock, lazy eviction.
+type respCache struct {
+	mu      sync.Mutex
+	entries map[string]cachedResponse
+}
+
+func newRespCache() *respCache {
+	return &respCache{entries: make(map[string]cachedResponse)}
+}
+
+// getOrCompute returns the cached body for key when it is still fresh at now,
+// otherwise it computes a new body via fn, stores it for ttl, and returns it.
+// The whole compute runs under the lock: for the short TTL window this collapses
+// a concurrent burst of identical requests to a single fn call (a cheap
+// stand-in for singleflight) and keeps the cache race-free. fn errors are never
+// cached. Expired and surplus entries are evicted lazily on every miss so the
+// map stays bounded.
+func (c *respCache) getOrCompute(key string, now time.Time, ttl time.Duration, fn func() ([]byte, error)) ([]byte, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if e, ok := c.entries[key]; ok && now.Before(e.expires) {
+		return e.body, nil
+	}
+	body, err := fn()
+	if err != nil {
+		return nil, err
+	}
+	c.evict(now)
+	c.entries[key] = cachedResponse{body: body, expires: now.Add(ttl)}
+	return body, nil
+}
+
+// evict drops every expired entry, then — if the map is still at the hard cap —
+// discards the entry expiring soonest to make room for the incoming one. Because
+// all entries expire within the TTL, eviction only ever discards near-dead
+// payloads. Callers hold c.mu.
+func (c *respCache) evict(now time.Time) {
+	for k, e := range c.entries {
+		if !now.Before(e.expires) {
+			delete(c.entries, k)
+		}
+	}
+	for len(c.entries) >= maxRespCacheEntries {
+		var oldestKey string
+		var oldestExp time.Time
+		first := true
+		for k, e := range c.entries {
+			if first || e.expires.Before(oldestExp) {
+				oldestKey, oldestExp, first = k, e.expires, false
+			}
+		}
+		delete(c.entries, oldestKey)
+	}
 }
 
 // WorkerView is one connected data-plane worker in the control plane's fleet
@@ -84,9 +170,12 @@ type WorkerView struct {
 // panel prefer SetLivePolicy so the dashboard reflects hot-reloaded policy.
 func NewServer(data DataSource, policy config.Policy, sec secrets.SecretProvider) *Server {
 	return &Server{
-		data:    data,
-		policy:  policy,
-		secrets: sec,
+		data:           data,
+		policy:         policy,
+		secrets:        sec,
+		now:            time.Now,
+		analyticsCache: newRespCache(),
+		mcpCache:       newRespCache(),
 	}
 }
 
@@ -280,6 +369,24 @@ func writeJSON(w http.ResponseWriter, v any) {
 		// Header already sent; nothing useful we can do.
 		_ = err
 	}
+}
+
+// marshalJSONLine serializes v exactly as writeJSON's json.Encoder would —
+// HTML-escaped with a trailing newline — so a cached body written by
+// writeJSONBytes is byte-identical to a freshly-encoded one.
+func marshalJSONLine(v any) ([]byte, error) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	return append(b, '\n'), nil
+}
+
+// writeJSONBytes writes an already-serialized JSON body (from marshalJSONLine,
+// possibly cached) with the same headers writeJSON sets.
+func writeJSONBytes(w http.ResponseWriter, body []byte) {
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(body)
 }
 
 // handleTraffic serves GET /dashboard/api/traffic.
@@ -1058,9 +1165,31 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	now := time.Now()
+	// The payload is a pure function of the time window and the proxy selector —
+	// the only two query params computeAnalytics reads — plus the event store and
+	// the wall clock. Key on exactly those two params (NUL-separated so no pair of
+	// distinct values can alias) and serve a cached body within the TTL; a
+	// different range or proxy is a different key, so one filter never returns
+	// another's data.
 	q := r.URL.Query()
-	cutoff, finite := rangeCutoff(q.Get("range"), now)
+	key := q.Get("range") + "\x00" + q.Get("proxy")
+	now := s.now()
+	body, err := s.analyticsCache.getOrCompute(key, now, analyticsCacheTTL, func() ([]byte, error) {
+		return s.computeAnalytics(q.Get("range"), q.Get("proxy"), now)
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSONBytes(w, body)
+}
+
+// computeAnalytics builds the full analytics aggregate payload for the given
+// time-range token and proxy selector, evaluated at now, and returns it
+// serialized. It is the cache-miss path for handleAnalytics: byte-for-byte the
+// payload the dashboard has always returned for a given (range, proxy) filter.
+func (s *Server) computeAnalytics(rangeParam, selectedProxy string, now time.Time) ([]byte, error) {
+	cutoff, finite := rangeCutoff(rangeParam, now)
 
 	f := analytics.EventFilter{Limit: 0}
 	if finite {
@@ -1068,15 +1197,13 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 	}
 	events, err := s.data.GetEvents(f)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
+		return nil, err
 	}
 
 	// Fleet per-proxy breakdown is computed across ALL in-range events so the
 	// selector always lists every worker; the rest of the view then reflects the
 	// selected proxy (empty = whole fleet). On a single-node dashboard no event
 	// carries a proxy id, so proxies is empty and the UI hides the selector.
-	selectedProxy := q.Get("proxy")
 	proxies := proxyBreakdown(events)
 	if selectedProxy != "" {
 		events = filterByProxy(events, selectedProxy)
@@ -1475,7 +1602,7 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 		return resp.Compliance[i].ControlID < resp.Compliance[j].ControlID
 	})
 
-	writeJSON(w, resp)
+	return marshalJSONLine(resp)
 }
 
 // --- MCP view types ---
@@ -1548,9 +1675,28 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The only request input to the MCP payload is the ?proxy= selector, so it is
+	// the whole cache key; a different worker selection is a different key and can
+	// never be served another worker's data. Like handleAnalytics this is one of
+	// the two heavy, unbounded, 5s-auto-refreshed endpoints, so a matching TTL
+	// collapses the refresh burst to a single aggregation pass.
+	proxyID := r.URL.Query().Get("proxy")
+	body, err := s.mcpCache.getOrCompute(proxyID, s.now(), analyticsCacheTTL, func() ([]byte, error) {
+		return s.computeMCP(proxyID)
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSONBytes(w, body)
+}
+
+// computeMCP builds the per-tool MCP view for the given proxy selector and
+// returns it serialized. It is the cache-miss path for handleMCP: byte-for-byte
+// the payload the dashboard has always returned for a given ?proxy= value.
+func (s *Server) computeMCP(proxyID string) ([]byte, error) {
 	// Inventory + observed schema source: a worker's own gateway, or — on the
 	// control plane — the per-worker fleet store selected by ?proxy=.
-	proxyID := r.URL.Query().Get("proxy")
 	var (
 		inv     []gateway.InventoryItem
 		schema  map[string]mcp.ToolProfileView
@@ -1569,8 +1715,7 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	// control plane the proxy filter scopes counts to the selected worker.
 	events, err := s.data.GetEvents(analytics.EventFilter{Protocol: "mcp", ProxyID: proxyID, Limit: 0})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
+		return nil, err
 	}
 	aggs := make(map[string]*mcpAgg)
 	for _, e := range events {
@@ -1717,7 +1862,7 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.Slice(tools, func(i, j int) bool { return tools[i].Tool < tools[j].Tool })
 
-	writeJSON(w, mcpResponse{
+	return marshalJSONLine(mcpResponse{
 		Enabled: enabled,
 		Tools:   tools,
 	})
