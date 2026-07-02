@@ -9,13 +9,10 @@ package analytics
 
 import (
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
 
-	"github.com/ethosagent/warden/internal/mcp"
-	"github.com/ethosagent/warden/internal/mcp/gateway"
 	_ "modernc.org/sqlite" // pure-Go SQLite driver (no CGo)
 )
 
@@ -116,11 +113,7 @@ type SQLiteStore struct {
 	maxEvents int
 }
 
-var (
-	_ AnalyticsStore = (*SQLiteStore)(nil)
-	// SQLiteStore also persists the MCP gateway's inventory + observed schema.
-	_ gateway.Store = (*SQLiteStore)(nil)
-)
+var _ AnalyticsStore = (*SQLiteStore)(nil)
 
 // NewSQLiteStore opens (or creates) a SQLite database at dsn and ensures the
 // schema. Use ":memory:" for tests. maxEvents <= 0 uses the default cap.
@@ -183,25 +176,6 @@ CREATE TABLE IF NOT EXISTS events (
 		if err := s.addColumnIfAbsent(c.name, c.ddl); err != nil {
 			return err
 		}
-	}
-	// MCP persistence tables: the gateway's tool inventory and observed schema
-	// profiles. CREATE TABLE IF NOT EXISTS keeps this additive and idempotent on a
-	// pre-existing warden.db (the recipes persist it across restarts).
-	const mcpDDL = `
-CREATE TABLE IF NOT EXISTS mcp_tools (
-    name            TEXT PRIMARY KEY,
-    has_description INTEGER NOT NULL DEFAULT 0,
-    schema_hash     TEXT    NOT NULL DEFAULT '',
-    first_seen      INTEGER NOT NULL DEFAULT 0,
-    last_seen       INTEGER NOT NULL DEFAULT 0
-);
-CREATE TABLE IF NOT EXISTS mcp_tool_schema (
-    key          TEXT PRIMARY KEY,
-    profile_json TEXT    NOT NULL,
-    updated_at   INTEGER NOT NULL DEFAULT 0
-);`
-	if _, err := s.db.Exec(mcpDDL); err != nil {
-		return fmt.Errorf("analytics: migrate mcp tables: %w", err)
 	}
 	return nil
 }
@@ -452,115 +426,14 @@ func (s *SQLiteStore) DeleteEventsByID(ids []int64) error {
 	return nil
 }
 
-// LoadMCPInventory returns the persisted MCP tool inventory. An empty store
-// yields a nil slice and no error.
-func (s *SQLiteStore) LoadMCPInventory() ([]gateway.InventoryItem, error) {
-	const q = `SELECT name, has_description, schema_hash, first_seen, last_seen FROM mcp_tools`
-	rows, err := s.db.Query(q)
-	if err != nil {
-		return nil, fmt.Errorf("analytics: load mcp inventory: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	var out []gateway.InventoryItem
-	for rows.Next() {
-		var (
-			it        gateway.InventoryItem
-			hasDesc   int
-			firstSeen int64
-			lastSeen  int64
-		)
-		if err := rows.Scan(&it.Name, &hasDesc, &it.InputSchemaHash, &firstSeen, &lastSeen); err != nil {
-			return nil, fmt.Errorf("analytics: scan mcp inventory: %w", err)
-		}
-		it.HasDescription = hasDesc != 0
-		it.FirstSeen = time.Unix(0, firstSeen).UTC()
-		it.LastSeen = time.Unix(0, lastSeen).UTC()
-		out = append(out, it)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("analytics: rows mcp inventory: %w", err)
-	}
-	return out, nil
-}
-
-// SaveMCPInventory upserts the given inventory items by tool name. Existing rows
-// are updated in place so the table converges on the gateway's live catalog.
-func (s *SQLiteStore) SaveMCPInventory(items []gateway.InventoryItem) error {
-	if len(items) == 0 {
-		return nil
-	}
-	const up = `INSERT INTO mcp_tools (name, has_description, schema_hash, first_seen, last_seen)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(name) DO UPDATE SET
-            has_description = excluded.has_description,
-            schema_hash     = excluded.schema_hash,
-            first_seen      = excluded.first_seen,
-            last_seen       = excluded.last_seen`
-	for _, it := range items {
-		hasDesc := 0
-		if it.HasDescription {
-			hasDesc = 1
-		}
-		if _, err := s.db.Exec(up, it.Name, hasDesc, it.InputSchemaHash,
-			it.FirstSeen.UnixNano(), it.LastSeen.UnixNano()); err != nil {
-			return fmt.Errorf("analytics: save mcp inventory: %w", err)
-		}
-	}
-	return nil
-}
-
-// LoadMCPSchemas returns the persisted observed-schema profiles keyed by
-// "tool\x00direction". An empty store yields an empty (non-nil) map.
-func (s *SQLiteStore) LoadMCPSchemas() (map[string]mcp.ToolProfileView, error) {
-	const q = `SELECT key, profile_json FROM mcp_tool_schema`
-	rows, err := s.db.Query(q)
-	if err != nil {
-		return nil, fmt.Errorf("analytics: load mcp schemas: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	out := make(map[string]mcp.ToolProfileView)
-	for rows.Next() {
-		var (
-			key     string
-			profile string
-		)
-		if err := rows.Scan(&key, &profile); err != nil {
-			return nil, fmt.Errorf("analytics: scan mcp schema: %w", err)
-		}
-		var view mcp.ToolProfileView
-		if err := json.Unmarshal([]byte(profile), &view); err != nil {
-			return nil, fmt.Errorf("analytics: unmarshal mcp schema %q: %w", key, err)
-		}
-		out[key] = view
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("analytics: rows mcp schemas: %w", err)
-	}
-	return out, nil
-}
-
-// SaveMCPSchemas upserts each observed-schema profile by its key. The profile is
-// stored as JSON; the structural view carries no field values.
-func (s *SQLiteStore) SaveMCPSchemas(schemas map[string]mcp.ToolProfileView) error {
-	if len(schemas) == 0 {
-		return nil
-	}
-	const up = `INSERT INTO mcp_tool_schema (key, profile_json, updated_at)
-        VALUES (?, ?, ?)
-        ON CONFLICT(key) DO UPDATE SET
-            profile_json = excluded.profile_json,
-            updated_at   = excluded.updated_at`
-	now := time.Now().UnixNano()
-	for key, view := range schemas {
-		blob, err := json.Marshal(view)
-		if err != nil {
-			return fmt.Errorf("analytics: marshal mcp schema %q: %w", key, err)
-		}
-		if _, err := s.db.Exec(up, key, string(blob), now); err != nil {
-			return fmt.Errorf("analytics: save mcp schema %q: %w", key, err)
-		}
-	}
-	return nil
-}
+// DB exposes the underlying SQLite handle so a sibling store can share the same
+// single connection (SetMaxOpenConns(1)) instead of opening a competing second
+// read-write handle to the same file. This is the "small provider" the
+// hot-path-scalability plan sanctions for the analytics/MCP layering split:
+// internal/mcp/gateway.NewSQLiteStore takes this handle to own MCP persistence,
+// so internal/analytics stays events-only and imports nothing under
+// internal/mcp. The caller must build the analytics (events) store first — its
+// tables exist before the gateway store migrates its MCP tables on the shared
+// handle — and must not Close the DB out from under the borrower (the analytics
+// store owns the handle's lifecycle).
+func (s *SQLiteStore) DB() *sql.DB { return s.db }

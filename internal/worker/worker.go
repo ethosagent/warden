@@ -175,6 +175,20 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	}
 	defer func() { _ = store.Close() }()
 
+	// MCP persistence lives in the gateway layer now (not analytics), but shares
+	// the analytics store's single SQLite connection: the events store is built
+	// above (its tables exist), and gateway.NewSQLiteStore migrates the MCP tables
+	// on that SAME handle. Built unconditionally — as analytics.migrate used to
+	// create the MCP tables regardless of MCP mode — so a later control-plane
+	// enable finds them. Sharing the one connection is load-bearing:
+	// SetMaxOpenConns(1) means a second read-write handle to the same file would
+	// contend with it. store.Close() (deferred above) owns the handle's lifecycle;
+	// the gateway store must not close it.
+	mcpStore, err := gateway.NewSQLiteStore(store.DB())
+	if err != nil {
+		return err
+	}
+
 	// Optional inline judge. When judge.enabled is false, judge is nil and the
 	// proxy behaves exactly as before (NoMatch default-denies).
 	judge, agentID, err := buildJudge(pol, listenAddr)
@@ -201,7 +215,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	var mcpGW *gateway.Gateway
 	var bootGW proxy.MCPGateway
 	if pol.MCP.Enabled {
-		mcpGW = gateway.New(pol.MCP, mcpScanner, logger, gateway.WithStore(store), gateway.WithAgentID(agentID))
+		mcpGW = gateway.New(pol.MCP, mcpScanner, logger, gateway.WithStore(mcpStore), gateway.WithAgentID(agentID))
 		bootGW = mcpGW
 		logger.Info("MCP egress gateway enabled", "mode", pol.MCP.Mode)
 	}
@@ -452,7 +466,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 			cp:               controlPlane,
 			p:                pxy,
 			mcpScanner:       mcpScanner,
-			store:            store,
+			mcpStore:         mcpStore,
 			agentID:          agentID,
 			logger:           logger,
 			logCtrl:          logCtrl,

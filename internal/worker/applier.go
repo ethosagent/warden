@@ -28,11 +28,13 @@ type SettingsApplier struct {
 	// cp supplies the currently-distributed behavioral settings.
 	cp ControlPlaneClient
 
-	// Data-plane target and its live-rebuild inputs. mcpScanner, store, and agentID
-	// are LOCAL — never distributed — and are reused on every gateway/judge rebuild.
+	// Data-plane target and its live-rebuild inputs. mcpScanner, mcpStore, and
+	// agentID are LOCAL — never distributed — and are reused on every gateway/judge
+	// rebuild. mcpStore is the gateway-owned MCP persistence store, sharing the
+	// analytics events store's single SQLite handle (see worker assembly).
 	p          *proxy.Proxy
 	mcpScanner scan.Scanner
-	store      *analytics.SQLiteStore
+	mcpStore   *gateway.SQLiteStore
 	agentID    string
 	logger     *slog.Logger
 	logCtrl    *observability.LogControl
@@ -77,7 +79,7 @@ func (a *SettingsApplier) Apply() {
 	var swapGW proxy.MCPGateway
 	if settings != nil && settings.MCP != nil && settings.MCP.Enabled {
 		newGW = gateway.New(config.MCPConfigFromSettings(settings.MCP), a.mcpScanner, a.logger,
-			gateway.WithStore(a.store), gateway.WithAgentID(a.agentID))
+			gateway.WithStore(a.mcpStore), gateway.WithAgentID(a.agentID))
 		swapGW = newGW
 	}
 	a.p.SetMCPGateway(swapGW)
