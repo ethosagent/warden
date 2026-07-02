@@ -268,3 +268,20 @@ audit:
     log: ""                       # JSONL receipts path (required when enabled)
   compliance:
     enabled: false                # tag events with OWASP/MITRE control IDs
+
+# Outbound alert integrations (control-plane-only; NEVER served to workers).
+# Security-relevant findings are deduped into Alerts, persisted to the alert
+# store (always on, system-of-record), then PUSHED to the integrations whose
+# `match` predicate selects them. Routing is default-deny: an omitted or empty
+# `match` means match-NONE, so a sink receives nothing until it opts in.
+#   match: AND across a clause's keys, OR across the list. Keys are
+#          {severity, category, domain, rule}.
+#   Secrets (webhook URLs, tokens) are referenced via ${ENV}, never inline.
+# integrations:
+#   - type: webhook                 # registered sink type
+#     name: sec-alerts              # instance name (unique)
+#     config:
+#       url: "${WARDEN_WEBHOOK_URL}" # resolved from the env at Start; never logged
+#     match:
+#       - severity: high            # any high-severity alert, OR…
+#       - category: security        # …any security-category alert

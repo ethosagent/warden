@@ -141,6 +141,7 @@ type IngestHandler struct {
 	onIngest  func(proxyID string, n int)                // optional; see SetOnIngest
 	onMCP     func(proxyID string, snap MCPSnapshot)     // optional; see SetOnMCP
 	onSecrets func(proxyID string, refs []SecretRefView) // optional; see SetOnSecrets
+	onEvents  func(proxyID string, events []Event)       // optional; see SetOnEvents
 }
 
 // NewIngestHandler returns a handler that ingests event batches into store.
@@ -154,6 +155,14 @@ func NewIngestHandler(store FleetStore, token string) *IngestHandler {
 // track which workers are connected and how much they forward.
 func (i *IngestHandler) SetOnIngest(fn func(proxyID string, n int)) {
 	i.onIngest = fn
+}
+
+// SetOnEvents registers an optional callback invoked after a batch is stored,
+// with the sender's proxy id and the batch of events. The control plane uses it
+// to bridge security-relevant events into the integrations alert pipeline. It is
+// independent of onIngest (which only carries the batch count).
+func (i *IngestHandler) SetOnEvents(fn func(proxyID string, events []Event)) {
+	i.onEvents = fn
 }
 
 // SetOnMCP registers an optional callback invoked when a worker forwards its MCP
@@ -211,6 +220,9 @@ func (i *IngestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(env.Events) > 0 && i.onIngest != nil {
 		i.onIngest(proxyID, len(env.Events))
+	}
+	if len(env.Events) > 0 && i.onEvents != nil {
+		i.onEvents(proxyID, env.Events)
 	}
 	if env.MCP != nil && i.onMCP != nil {
 		i.onMCP(proxyID, *env.MCP)

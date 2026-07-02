@@ -51,6 +51,53 @@ func TestCentralIngestRoundTrip(t *testing.T) {
 	}
 }
 
+// TestIngestOnEvents verifies SetOnEvents receives the posted events + proxy id,
+// and that ServeHTTP is nil-safe when no onEvents callback is registered.
+func TestIngestOnEvents(t *testing.T) {
+	cs := NewCentralStore(0)
+	h := NewIngestHandler(cs, "")
+	var gotProxy string
+	var gotEvents []Event
+	h.SetOnEvents(func(proxyID string, events []Event) {
+		gotProxy = proxyID
+		gotEvents = events
+	})
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	rs, err := NewHTTPRemoteStore(srv.URL, "", "proxy-9", srv.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := []Event{
+		{Domain: "evil.example.com", Decision: "block", Method: "POST"},
+		{Domain: "api.openai.com", Decision: "allow"},
+	}
+	if err := rs.SendBatch(in); err != nil {
+		t.Fatalf("SendBatch: %v", err)
+	}
+	if gotProxy != "proxy-9" {
+		t.Errorf("onEvents proxyID = %q, want proxy-9", gotProxy)
+	}
+	if len(gotEvents) != 2 || gotEvents[0].Domain != "evil.example.com" {
+		t.Fatalf("onEvents events = %+v, want the 2 posted events", gotEvents)
+	}
+}
+
+func TestIngestOnEventsNilSafe(t *testing.T) {
+	// No SetOnEvents call: a POST must still succeed (204), not panic on a nil fn.
+	cs := NewCentralStore(0)
+	srv := httptest.NewServer(NewIngestHandler(cs, ""))
+	defer srv.Close()
+	rs, err := NewHTTPRemoteStore(srv.URL, "", "p", srv.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rs.SendBatch([]Event{{Domain: "x.com", Decision: "allow"}}); err != nil {
+		t.Fatalf("SendBatch with no onEvents should succeed: %v", err)
+	}
+}
+
 // TestIngestMCPSnapshot round-trips an MCP snapshot worker→CP and verifies it
 // routes to the onMCP callback with the sender's proxy id (value-free schema).
 func TestIngestMCPSnapshot(t *testing.T) {

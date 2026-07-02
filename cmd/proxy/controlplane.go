@@ -17,6 +17,8 @@ import (
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/controlplane"
+	"github.com/ethosagent/warden/internal/integration"
+	_ "github.com/ethosagent/warden/internal/integration/webhook" // register the webhook sink
 	"github.com/ethosagent/warden/internal/observability"
 )
 
@@ -49,11 +51,12 @@ func newControlPlaneCmd() *cobra.Command {
 			aProvider, _ := cmd.Flags().GetString("analytics-provider")
 			aDB, _ := cmd.Flags().GetString("analytics-db")
 			aRetention, _ := cmd.Flags().GetInt("analytics-retention-days")
+			alertsDB, _ := cmd.Flags().GetString("alerts-db")
 			return runControlPlane(cmd, cpOptions{
 				configPath: configPath, listenAddr: listenAddr, tokenEnv: tokenEnv,
 				caCert: caCert, caKey: caKey, tlsHost: tlsHost, stateDir: stateDir,
 				maxEvents: maxEvents, analyticsProvider: aProvider, analyticsDB: aDB,
-				retentionDays: aRetention,
+				retentionDays: aRetention, alertsDB: alertsDB,
 			})
 		},
 	}
@@ -67,6 +70,7 @@ func newControlPlaneCmd() *cobra.Command {
 	cmd.Flags().String("analytics-provider", "sqlite", "fleet analytics store: sqlite (default, persistent + Query Builder) | memory (ephemeral)")
 	cmd.Flags().String("analytics-db", "", "sqlite fleet analytics DB path (default: <state-dir>/warden-fleet.db, else ./warden-fleet.db)")
 	cmd.Flags().Int("analytics-retention-days", 30, "prune fleet analytics events older than N days (0 = keep forever)")
+	cmd.Flags().String("alerts-db", "", "sqlite alert store DB path (default: sibling of the analytics DB, named warden-alerts.db)")
 	return cmd
 }
 
@@ -78,6 +82,7 @@ type cpOptions struct {
 	maxEvents                        int
 	analyticsProvider, analyticsDB   string
 	retentionDays                    int
+	alertsDB                         string
 }
 
 func runControlPlane(cmd *cobra.Command, opts cpOptions) error {
@@ -168,12 +173,27 @@ func runControlPlane(cmd *cobra.Command, opts cpOptions) error {
 		logger.Info("control plane analytics store", "provider", "sqlite", "db", dbPath, "retentionDays", opts.retentionDays)
 	}
 
+	// Alert store path: an explicit --alerts-db wins; otherwise a sibling of the
+	// analytics DB (which already encodes --state-dir vs the working dir), named
+	// warden-alerts.db. The CP builds no manager when no integrations are
+	// configured, so this path is unused in that case.
+	alertDBPath := opts.alertsDB
+	if alertDBPath == "" {
+		alertDBPath = filepath.Join(filepath.Dir(dbPath), "warden-alerts.db")
+	}
+	integrations := toInstanceConfigs(pol.Integrations)
+	if len(integrations) > 0 {
+		logger.Info("control plane integrations", "count", len(integrations), "alertsDB", alertDBPath)
+	}
+
 	srv := controlplane.New(controlplane.Config{
-		PolicyPath: servedPath,
-		Token:      token,
-		MaxEvents:  maxEvents,
-		Store:      store,
-		Logger:     logger,
+		PolicyPath:   servedPath,
+		Token:        token,
+		MaxEvents:    maxEvents,
+		Store:        store,
+		Logger:       logger,
+		Integrations: integrations,
+		AlertDBPath:  alertDBPath,
 	})
 
 	httpSrv := &http.Server{
@@ -260,6 +280,28 @@ func seedServedConfig(servedPath, seedPath string) (bool, error) {
 		return false, fmt.Errorf("write served config %s: %w", servedPath, err)
 	}
 	return true, nil
+}
+
+// toInstanceConfigs maps the CP-local integrations config onto the integration
+// package's InstanceConfig, keeping internal/config free of an integration
+// import (the mapping is trivial glue that belongs in the thin cmd layer). The
+// opaque config map is passed through untouched; secrets inside it stay as
+// ${ENV} strings and are expanded later by the integration at Start.
+func toInstanceConfigs(insts []config.IntegrationInstance) []integration.InstanceConfig {
+	if len(insts) == 0 {
+		return nil
+	}
+	out := make([]integration.InstanceConfig, 0, len(insts))
+	for _, in := range insts {
+		ic := integration.InstanceConfig{Type: in.Type, Name: in.Name, Config: in.Config}
+		for _, m := range in.Match {
+			ic.Match = append(ic.Match, integration.MatchClause{
+				Severity: m.Severity, Category: m.Category, Domain: m.Domain, Rule: m.Rule,
+			})
+		}
+		out = append(out, ic)
+	}
+	return out
 }
 
 // dirWritable reports whether dir is writable by creating and removing a temp

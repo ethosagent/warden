@@ -67,6 +67,38 @@ type Policy struct {
 	// Audit configures signed receipts and compliance tagging of events. Both
 	// off by default.
 	Audit AuditConfig `json:"-"`
+	// Integrations holds CP-local outbound alert-delivery integrations (webhook,
+	// Slack, …). It is consumed by the control plane ONLY and is never projected
+	// onto the worker-served policyWire (which carries allow/deny + settings only).
+	// Empty by default.
+	Integrations []IntegrationInstance `json:"-"`
+}
+
+// IntegrationInstance is one configured outbound alert integration (webhook,
+// Slack, …). It is a PLAIN config type: internal/config deliberately does NOT
+// import internal/integration, so config stays free of that coupling — the cmd
+// layer maps these to the integration package's InstanceConfig/MatchClause at
+// wire-up. Config is opaque and passed through untouched; secrets inside it stay
+// as ${ENV} strings and are expanded later by the integration at Start.
+type IntegrationInstance struct {
+	// Type selects a factory from the integration registry (e.g. "webhook").
+	Type string
+	// Name identifies the instance (multiple instances of one Type are allowed).
+	Name string
+	// Config is the instance's own opaque settings, decoded by the integration.
+	Config map[string]any
+	// Match is the routing predicate. AND across a clause's non-empty keys, OR
+	// across the list. An EMPTY Match means match-NONE (explicit opt-in).
+	Match []IntegrationMatch
+}
+
+// IntegrationMatch is one alerts.match clause. Matchable keys are
+// {severity, category, domain, rule}; empty keys are ignored.
+type IntegrationMatch struct {
+	Severity string
+	Category string
+	Domain   string
+	Rule     string
 }
 
 // Auth transform type identifiers. Each corresponds to a concrete
@@ -507,6 +539,18 @@ func (p Policy) DeepCopy() Policy {
 	for i := range cp.Auth {
 		cp.Auth[i].Scopes = append([]string(nil), p.Auth[i].Scopes...)
 	}
+	if len(p.Integrations) > 0 {
+		ints := make([]IntegrationInstance, len(p.Integrations))
+		for i, in := range p.Integrations {
+			ints[i] = in
+			ints[i].Match = append([]IntegrationMatch(nil), in.Match...)
+			// Config is an opaque, read-only pass-through map (mapped to the
+			// integration package once at CP startup, never mutated after load), so
+			// it is shared by reference — consistent with how opaque config is
+			// treated elsewhere in the loader.
+		}
+		cp.Integrations = ints
+	}
 	return cp
 }
 
@@ -561,6 +605,25 @@ type rawConfig struct {
 	ControlPlane  *rawControlPlane  `yaml:"controlPlane"`
 	Central       *rawCentral       `yaml:"central"`
 	Audit         *rawAudit         `yaml:"audit"`
+	Integrations  []rawIntegration  `yaml:"integrations"`
+}
+
+// rawIntegration mirrors one on-disk `integrations:` list item. KnownFields(true)
+// is strict, so this MUST be registered or configs carrying the block fail to
+// parse. `config` is an opaque map passed through untouched — secrets inside it
+// stay as ${ENV} strings and are expanded later by the integration at Start.
+type rawIntegration struct {
+	Type   string                `yaml:"type"`
+	Name   string                `yaml:"name"`
+	Config map[string]any        `yaml:"config"`
+	Match  []rawIntegrationMatch `yaml:"match"`
+}
+
+type rawIntegrationMatch struct {
+	Severity string `yaml:"severity"`
+	Category string `yaml:"category"`
+	Domain   string `yaml:"domain"`
+	Rule     string `yaml:"rule"`
 }
 
 // rawAuthEntry mirrors one on-disk `auth:` list item. All credential fields are
@@ -852,6 +915,7 @@ func parse(data []byte) (*LocalYAMLProvider, error) {
 	}
 	policy.Central = central
 	policy.Audit = parseAudit(raw.Audit)
+	policy.Integrations = parseIntegrations(raw.Integrations)
 
 	if err := validate(policy); err != nil {
 		return nil, err
@@ -982,6 +1046,26 @@ func parseAudit(r *rawAudit) AuditConfig {
 		a.Compliance.Enabled = r.Compliance.Enabled
 	}
 	return a
+}
+
+// parseIntegrations converts the raw integrations list into typed config. The
+// `config` map is passed through untouched (opaque, secrets stay as ${ENV}); no
+// defaults are applied — structural validation happens in validateIntegrations.
+func parseIntegrations(raw []rawIntegration) []IntegrationInstance {
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make([]IntegrationInstance, 0, len(raw))
+	for _, r := range raw {
+		inst := IntegrationInstance{Type: r.Type, Name: r.Name, Config: r.Config}
+		for _, m := range r.Match {
+			// rawIntegrationMatch and IntegrationMatch are field-identical; a direct
+			// conversion keeps the two in lockstep (staticcheck S1016).
+			inst.Match = append(inst.Match, IntegrationMatch(m))
+		}
+		out = append(out, inst)
+	}
+	return out
 }
 
 // judge defaults applied when the corresponding field is omitted.
@@ -1407,6 +1491,41 @@ func validate(p Policy) error {
 	}
 	if err := validateAudit(p.Audit); err != nil {
 		return err
+	}
+	if err := validateIntegrations(p.Integrations); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateIntegrations checks each configured integration instance structurally:
+// non-empty type + name, names unique, and a valid severity in every match
+// clause that sets one. It deliberately does NOT require the type to be
+// registered — registration lives in the binary (a blank import), not in config —
+// so an unknown type is a wiring concern surfaced at manager Start, not here.
+func validateIntegrations(insts []IntegrationInstance) error {
+	seen := make(map[string]struct{}, len(insts))
+	for i, inst := range insts {
+		if strings.TrimSpace(inst.Type) == "" {
+			return fmt.Errorf("config: integrations[%d]: type is required", i)
+		}
+		if strings.TrimSpace(inst.Name) == "" {
+			return fmt.Errorf("config: integrations[%d]: name is required", i)
+		}
+		if _, dup := seen[inst.Name]; dup {
+			return fmt.Errorf("config: integrations[%d]: duplicate name %q", i, inst.Name)
+		}
+		seen[inst.Name] = struct{}{}
+		for j, m := range inst.Match {
+			if strings.TrimSpace(m.Severity) == "" {
+				continue
+			}
+			switch strings.ToLower(strings.TrimSpace(m.Severity)) {
+			case "info", "low", "medium", "high", "critical":
+			default:
+				return fmt.Errorf("config: integrations[%d].match[%d]: invalid severity %q; must be info, low, medium, high, or critical", i, j, m.Severity)
+			}
+		}
 	}
 	return nil
 }

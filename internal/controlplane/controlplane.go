@@ -26,6 +26,7 @@ import (
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/dashboard"
+	"github.com/ethosagent/warden/internal/integration"
 	"github.com/ethosagent/warden/internal/secrets"
 )
 
@@ -46,6 +47,14 @@ type Config struct {
 	Store analytics.FleetStore
 	// Logger receives lifecycle and policy-load logs. Defaults to slog.Default().
 	Logger *slog.Logger
+	// Integrations are the CP-hosted outbound alert integrations to run. Empty ⇒
+	// no manager is constructed (zero overhead; policy serving is unaffected).
+	Integrations []integration.InstanceConfig
+	// AlertDBPath is the SQLite file backing the alert system-of-record. It must
+	// be a real file path (not ":memory:", which is not shared across
+	// connections). Required (non-empty) for integrations to run; ignored when
+	// Integrations is empty.
+	AlertDBPath string
 }
 
 // policyWire is the shape sent to workers: allow/deny policy plus the optional
@@ -82,6 +91,10 @@ type Server struct {
 	mcp      *mcpStore
 	policy   *policyServer
 	writeMu  sync.Mutex // serializes policy edits
+	// integrations is the CP-hosted alert-delivery pipeline. Nil when no
+	// integrations are configured (or when its store/manager failed to build —
+	// fail-open: a broken integrations config never stops policy serving).
+	integrations *integration.Manager
 }
 
 // Compile-time assertions that the concrete types satisfy their role interfaces.
@@ -120,6 +133,20 @@ func New(cfg Config) *Server {
 		// so /policy and the dashboard have policy immediately (unchanged behavior).
 		policy: newPolicyServer(cfg.PolicyPath, cfg.Token, cfg.Logger, registry),
 	}
+	// Integrations pipeline (CP-hosted alert delivery). Constructed only when the
+	// operator configured at least one integration AND an alert DB path is set.
+	// FAIL-OPEN: a store-open or manager-build error is logged and skipped — a
+	// broken integrations config must NEVER stop the control plane serving policy.
+	if len(cfg.Integrations) > 0 && cfg.AlertDBPath != "" {
+		if store, err := integration.NewStore(cfg.AlertDBPath); err != nil {
+			cfg.Logger.Error("control plane: integrations disabled (alert store open failed)", "error", err)
+		} else if m, err := integration.NewManager(store, cfg.Integrations, cfg.Logger, integration.RouterOptions{}); err != nil {
+			cfg.Logger.Error("control plane: integrations disabled (manager build failed)", "error", err)
+			_ = store.Close()
+		} else {
+			s.integrations = m
+		}
+	}
 	return s
 }
 
@@ -127,6 +154,23 @@ func New(cfg Config) *Server {
 // policy file (editor edits refresh synchronously). It also starts the retention
 // prune loop when the store supports it. It returns when ctx is done.
 func (s *Server) Start(ctx context.Context) {
+	// Integrations: start the CP-hosted alert-delivery pipeline. A non-nil error
+	// from Start is a JOINED report (unknown types / failed instances) — the good
+	// instances still run, so we LOG it and continue. A ctx-watcher goroutine Stops
+	// the manager (which closes its store + instances) on shutdown, mirroring the
+	// ctx-scoped goroutine style below (there is no Server.Stop).
+	if s.integrations != nil {
+		if err := s.integrations.Start(ctx); err != nil {
+			s.cfg.Logger.Warn("control plane: some integrations failed to start", "error", err)
+		}
+		go func() {
+			<-ctx.Done()
+			if err := s.integrations.Stop(context.Background()); err != nil {
+				s.cfg.Logger.Warn("control plane: integrations shutdown error", "error", err)
+			}
+		}()
+	}
+
 	go func() {
 		t := time.NewTicker(policyReloadInterval)
 		defer t.Stop()
@@ -198,6 +242,20 @@ func (s *Server) Handler() http.Handler {
 	var sink IngestSink = &ingestSink{registry: s.registry, mcp: s.mcp}
 	ingest.SetOnIngest(sink.SeenIngest) // track which workers are forwarding
 	ingest.SetOnMCP(sink.UpdateMCP)     // store each worker's MCP snapshot
+	// Bridge security-relevant events into the integrations alert pipeline (the M1
+	// producer stand-in). Wired only when integrations are configured; each event
+	// runs through bridgeEvent and a produced Finding is published onto the bus
+	// (fail-open — PublishFinding never blocks or panics).
+	if s.integrations != nil {
+		bus := s.integrations.Bus()
+		ingest.SetOnEvents(func(proxyID string, events []analytics.Event) {
+			for _, e := range events {
+				if f, ok := bridgeEvent(proxyID, e); ok {
+					bus.PublishFinding(f)
+				}
+			}
+		})
+	}
 	mux.Handle("/central/ingest", ingest)
 
 	// The fleet dashboard reads the aggregated central store. The control plane
