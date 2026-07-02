@@ -3,6 +3,7 @@ package controlplane
 import (
 	"crypto/subtle"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -17,34 +18,47 @@ import (
 // oversize) rather than reusing its 16 MiB cap, which is sized for event batches.
 const maxSecretBodyBytes = 1 << 20 // 1 MiB
 
+// awsSecretsClientFactory builds the AWS Secrets Manager client for a region. It
+// defaults to the real ENV-credentialed net/http + SigV4 client and is a package
+// var so tests inject a fake without touching AWS or the network.
+var awsSecretsClientFactory = secrets.NewAWSSecretsClientFromEnv
+
 // NewSecretStore builds the control plane's WRITE-scoped SecretStore from the
-// operator's OWN secretStore.backend selection, or returns nil when no writable
-// store is configured — in which case the /central/secrets endpoints are simply
-// not mounted (a CP with backend env/none behaves exactly as before):
+// operator's OWN secretStore.backend selection, or returns a nil store when no
+// writable store is configured — in which case the /central/secrets endpoints
+// are simply not mounted (a CP with backend env/none behaves exactly as before):
 //
 //   - echo → a NON-PRODUCTION EchoStore (persists nothing; the "value" is the
 //     key itself), so the write→read→swap loop is provable with zero cloud deps.
-//   - aws  → not yet available (Phase 5): logs and returns nil, so the write
-//     endpoints stay unmounted until the aws store lands.
+//   - aws  → a write-scoped awsSecretStore over the real net/http + SigV4 client
+//     (built from region/namePrefix + ENV credentials). Missing creds return an
+//     error so the CP fails fast at startup rather than silently disabling writes.
 //   - env / empty → env is a LOCAL read-only placeholder→envVar map with no write
-//     surface, so there is nothing to expose (back-compat).
+//     surface, so there is nothing to expose (back-compat): nil store, no error.
 //
 // It mirrors how the fleet Store and Integrations are injected into Config: the
 // thin cmd layer constructs the backend and hands the interface to the server.
-func NewSecretStore(cfg config.SecretStoreConfig, logger *slog.Logger) secrets.SecretStore {
+func NewSecretStore(cfg config.SecretStoreConfig, logger *slog.Logger) (secrets.SecretStore, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	switch cfg.ResolvedBackend() {
 	case config.SecretBackendEcho:
 		logger.Warn("control plane ECHO secret store active — NON-PRODUCTION: it persists nothing and the resolved value is the key itself; never use it to protect a real secret")
-		return secrets.NewEchoStore()
+		return secrets.NewEchoStore(), nil
 	case config.SecretBackendAWS:
-		logger.Info("control plane secretStore.backend=aws not yet available (Phase 5); secret write endpoints disabled")
-		return nil
+		if cfg.AWS == nil {
+			return nil, fmt.Errorf("control plane secretStore.backend=aws requires an aws config block")
+		}
+		client, err := awsSecretsClientFactory(cfg.AWS.Region)
+		if err != nil {
+			return nil, fmt.Errorf("control plane secretStore.backend=aws: %w", err)
+		}
+		logger.Info("control plane AWS secret store active", "region", cfg.AWS.Region, "namePrefix", cfg.AWS.NamePrefix)
+		return secrets.NewAWSSecretStore(client, cfg.AWS.Region, cfg.AWS.NamePrefix), nil
 	default:
 		// env / empty: no writable store — endpoints not mounted.
-		return nil
+		return nil, nil
 	}
 }
 

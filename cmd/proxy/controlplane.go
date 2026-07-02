@@ -187,9 +187,13 @@ func runControlPlane(cmd *cobra.Command, opts cpOptions) error {
 	}
 
 	// Build the WRITE-scoped secret store from the CP's OWN secretStore.backend.
-	// echo mounts the /central/secrets endpoints; env/none (and aws pre-Phase-5)
-	// return nil so the endpoints stay unmounted — back-compatible.
-	secretStore := controlplane.NewSecretStore(pol.SecretStore, logger)
+	// echo/aws mount the /central/secrets endpoints; env/none return a nil store so
+	// the endpoints stay unmounted — back-compatible. An aws backend with missing
+	// ENV credentials fails fast here rather than silently disabling writes.
+	secretStore, err := controlplane.NewSecretStore(pol.SecretStore, logger)
+	if err != nil {
+		return fmt.Errorf("control-plane: secret store: %w", err)
+	}
 
 	srv := controlplane.New(controlplane.Config{
 		PolicyPath:   servedPath,

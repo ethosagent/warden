@@ -553,8 +553,9 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 //   - echo → secrets.NewStoreFetcher(secrets.NewEchoStore()): the NON-PRODUCTION
 //     echo store, where a placeholder resolves to itself. mapping is unused (the
 //     placeholder IS the store key).
-//   - aws → deferred to Phase 5; returns a clear not-yet error rather than
-//     half-wiring a store that does not exist.
+//   - aws → secrets.NewStoreFetcher over a read-scoped awsSecretStore backed by
+//     the real net/http + SigV4 client (built from the resolved region/namePrefix
+//     and ENV credentials). Missing creds fail fast here. mapping is unused.
 //
 // resolveSecretStore picks the secret-store backend a MANAGED worker reads
 // through. The control-plane-distributed settings.Secrets selector wins when
@@ -571,15 +572,29 @@ func resolveSecretStore(distributed *config.SettingsWire, local config.Policy) c
 	return local.SecretStore
 }
 
+// awsSecretsClientFactory builds the AWS Secrets Manager client for a region.
+// It defaults to the real ENV-credentialed net/http + SigV4 client and is a
+// package var so tests inject a fake without touching AWS or the network.
+var awsSecretsClientFactory = secrets.NewAWSSecretsClientFromEnv
+
 func newSecretFetcher(pol config.Policy, mapping map[string]string) (secrets.Fetcher, error) {
-	switch pol.SecretStore.ResolvedBackend() {
+	ss := pol.SecretStore
+	switch ss.ResolvedBackend() {
 	case config.SecretBackendEnv:
 		return secrets.NewEnvFetcher(mapping), nil
 	case config.SecretBackendEcho:
 		return secrets.NewStoreFetcher(secrets.NewEchoStore()), nil
 	case config.SecretBackendAWS:
-		return nil, fmt.Errorf("secretStore.backend=aws not yet available (Phase 5)")
+		if ss.AWS == nil {
+			return nil, fmt.Errorf("secretStore.backend=aws requires an aws config block")
+		}
+		client, err := awsSecretsClientFactory(ss.AWS.Region)
+		if err != nil {
+			return nil, fmt.Errorf("secretStore.backend=aws: %w", err)
+		}
+		store := secrets.NewAWSSecretStore(client, ss.AWS.Region, ss.AWS.NamePrefix)
+		return secrets.NewStoreFetcher(store), nil
 	default:
-		return nil, fmt.Errorf("secretStore.backend %q is not supported", pol.SecretStore.Backend)
+		return nil, fmt.Errorf("secretStore.backend %q is not supported", ss.Backend)
 	}
 }

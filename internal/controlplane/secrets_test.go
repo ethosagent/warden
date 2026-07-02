@@ -3,6 +3,7 @@ package controlplane
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -203,21 +204,122 @@ func TestSecrets_ValueHygiene(t *testing.T) {
 	}
 }
 
-// TestNewSecretStore covers the backend→store mapping: echo yields a writable
-// store; aws (pre-Phase-5) and env/none yield nil (endpoints unmounted).
+// fakeAWSClient is a minimal in-memory secrets.AWSSecretsClient for the CP's
+// aws-backend tests: it models upsert (Put→not-found→Create), delete, and list
+// with no AWS and no network.
+type fakeAWSClient struct {
+	store map[string]string
+}
+
+func newFakeAWSClient() *fakeAWSClient { return &fakeAWSClient{store: map[string]string{}} }
+
+func (c *fakeAWSClient) GetSecretValue(name string) (string, error) {
+	v, ok := c.store[name]
+	if !ok {
+		return "", secrets.ErrSecretNotFound
+	}
+	return v, nil
+}
+
+func (c *fakeAWSClient) PutSecretValue(name, value string) (string, error) {
+	if _, ok := c.store[name]; !ok {
+		return "", secrets.ErrSecretNotFound
+	}
+	c.store[name] = value
+	return "2", nil
+}
+
+func (c *fakeAWSClient) CreateSecret(name, value string) (string, error) {
+	c.store[name] = value
+	return "1", nil
+}
+
+func (c *fakeAWSClient) DeleteSecret(name string) error {
+	delete(c.store, name)
+	return nil
+}
+
+func (c *fakeAWSClient) ListSecrets(prefix string) ([]secrets.AWSSecretEntry, error) {
+	out := []secrets.AWSSecretEntry{}
+	for name := range c.store {
+		if strings.HasPrefix(name, prefix) {
+			out = append(out, secrets.AWSSecretEntry{Name: name, Version: "1", UpdatedAt: time.Now()})
+		}
+	}
+	return out, nil
+}
+
+// withFakeAWSClient swaps the CP's aws client factory for one returning client
+// (or err), restoring it on cleanup so no test touches AWS or the network.
+func withFakeAWSClient(t *testing.T, client secrets.AWSSecretsClient, err error) {
+	t.Helper()
+	prev := awsSecretsClientFactory
+	awsSecretsClientFactory = func(string) (secrets.AWSSecretsClient, error) {
+		return client, err
+	}
+	t.Cleanup(func() { awsSecretsClientFactory = prev })
+}
+
+// TestNewSecretStore covers the backend→store mapping: echo and aws yield a
+// writable store; env/none yield a nil store with no error (endpoints unmounted).
 func TestNewSecretStore(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	if st := NewSecretStore(config.SecretStoreConfig{Backend: config.SecretBackendEcho}, logger); st == nil {
-		t.Error("echo backend should yield a writable store")
+	if st, err := NewSecretStore(config.SecretStoreConfig{Backend: config.SecretBackendEcho}, logger); st == nil || err != nil {
+		t.Errorf("echo backend should yield a writable store, got st=%v err=%v", st, err)
 	}
-	if st := NewSecretStore(config.SecretStoreConfig{Backend: config.SecretBackendAWS}, logger); st != nil {
-		t.Error("aws backend should be nil pre-Phase-5 (endpoints unmounted)")
+
+	// aws with an injected fake client yields a writable store.
+	withFakeAWSClient(t, newFakeAWSClient(), nil)
+	awsCfg := config.SecretStoreConfig{Backend: config.SecretBackendAWS, AWS: &config.SecretStoreAWS{Region: "us-east-1", NamePrefix: "warden/"}}
+	if st, err := NewSecretStore(awsCfg, logger); st == nil || err != nil {
+		t.Errorf("aws backend should yield a writable store, got st=%v err=%v", st, err)
 	}
-	if st := NewSecretStore(config.SecretStoreConfig{Backend: config.SecretBackendEnv}, logger); st != nil {
-		t.Error("env backend should be nil (no write surface)")
+
+	if st, err := NewSecretStore(config.SecretStoreConfig{Backend: config.SecretBackendEnv}, logger); st != nil || err != nil {
+		t.Errorf("env backend should be nil (no write surface), got st=%v err=%v", st, err)
 	}
-	if st := NewSecretStore(config.SecretStoreConfig{}, logger); st != nil {
-		t.Error("empty/default backend should be nil (no write surface)")
+	if st, err := NewSecretStore(config.SecretStoreConfig{}, logger); st != nil || err != nil {
+		t.Errorf("empty/default backend should be nil (no write surface), got st=%v err=%v", st, err)
+	}
+}
+
+// TestNewSecretStore_AWSMissingCredsFailFast proves a factory error (e.g. missing
+// ENV credentials) surfaces from NewSecretStore rather than silently disabling
+// the write endpoints.
+func TestNewSecretStore_AWSMissingCredsFailFast(t *testing.T) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	withFakeAWSClient(t, nil, errors.New("aws credentials missing"))
+	awsCfg := config.SecretStoreConfig{Backend: config.SecretBackendAWS, AWS: &config.SecretStoreAWS{Region: "us-east-1", NamePrefix: "warden/"}}
+	if _, err := NewSecretStore(awsCfg, logger); err == nil {
+		t.Fatal("expected a fail-fast error when the aws client factory errors")
+	}
+}
+
+// TestSecrets_AWSBackendMountsAndWrites proves the CP on backend aws (fake client
+// injected) mounts /central/secrets: a POST upserts into the fake store and a GET
+// lists the key as metadata only.
+func TestSecrets_AWSBackendMountsAndWrites(t *testing.T) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	withFakeAWSClient(t, newFakeAWSClient(), nil)
+	awsCfg := config.SecretStoreConfig{Backend: config.SecretBackendAWS, AWS: &config.SecretStoreAWS{Region: "us-east-1", NamePrefix: "warden/"}}
+	store, err := NewSecretStore(awsCfg, logger)
+	if err != nil {
+		t.Fatalf("NewSecretStore(aws): %v", err)
+	}
+	srv := New(Config{
+		PolicyPath:  writePolicyFile(t, "api.openai.com"),
+		Logger:      logger,
+		SecretStore: store,
+	})
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	const key = "OPENAI_API_KEY"
+	if code, _ := do(t, http.MethodPost, ts.URL+"/central/secrets", "", `{"key":"`+key+`","value":"sk-aws-write"}`); code != http.StatusNoContent {
+		t.Fatalf("POST = %d, want 204", code)
+	}
+	if !hasKey(listSecretsMeta(t, ts.URL, ""), key) {
+		t.Fatalf("aws backend GET list missing key %q after POST", key)
 	}
 }
 

@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -10,6 +11,52 @@ import (
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/secrets"
 )
+
+// fakeAWSClient is a minimal in-memory secrets.AWSSecretsClient for the worker's
+// aws-backend tests: it lets a value be seeded and read back through the store,
+// with no AWS and no network. Only the verbs the worker read path exercises need
+// real behavior; the write verbs are enough to seed.
+type fakeAWSClient struct {
+	store map[string]string
+}
+
+func newFakeAWSClient() *fakeAWSClient { return &fakeAWSClient{store: map[string]string{}} }
+
+func (c *fakeAWSClient) GetSecretValue(name string) (string, error) {
+	v, ok := c.store[name]
+	if !ok {
+		return "", secrets.ErrSecretNotFound
+	}
+	return v, nil
+}
+
+func (c *fakeAWSClient) PutSecretValue(name, value string) (string, error) {
+	if _, ok := c.store[name]; !ok {
+		return "", secrets.ErrSecretNotFound
+	}
+	c.store[name] = value
+	return "1", nil
+}
+
+func (c *fakeAWSClient) CreateSecret(name, value string) (string, error) {
+	c.store[name] = value
+	return "1", nil
+}
+
+func (c *fakeAWSClient) DeleteSecret(name string) error {
+	delete(c.store, name)
+	return nil
+}
+
+func (c *fakeAWSClient) ListSecrets(prefix string) ([]secrets.AWSSecretEntry, error) {
+	var out []secrets.AWSSecretEntry
+	for name := range c.store {
+		if strings.HasPrefix(name, prefix) {
+			out = append(out, secrets.AWSSecretEntry{Name: name, Version: "1"})
+		}
+	}
+	return out, nil
+}
 
 // TestNewSecretFetcher_EnvIsDefault proves an omitted secretStore block resolves
 // to the original EnvFetcher path (byte-identical to today).
@@ -63,19 +110,60 @@ func TestSecretBackend_EchoResolvesKeyEndToEnd(t *testing.T) {
 	}
 }
 
-// TestNewSecretFetcher_AWSNotYet proves the aws backend returns a clear
-// not-yet-available error this phase rather than half-wiring a missing store.
-func TestNewSecretFetcher_AWSNotYet(t *testing.T) {
+// withFakeAWSClient swaps awsSecretsClientFactory for one returning client, and
+// restores it on cleanup, so aws-backend tests never touch AWS or the network.
+func withFakeAWSClient(t *testing.T, client secrets.AWSSecretsClient, err error) {
+	t.Helper()
+	prev := awsSecretsClientFactory
+	awsSecretsClientFactory = func(string) (secrets.AWSSecretsClient, error) {
+		return client, err
+	}
+	t.Cleanup(func() { awsSecretsClientFactory = prev })
+}
+
+// TestNewSecretFetcher_AWSResolvesThroughStore proves the aws backend now builds
+// a real store→cache→GetSecret path using an INJECTED fake client (no AWS, no
+// network): a value Put into the fake resolves through the worker's cache.
+func TestNewSecretFetcher_AWSResolvesThroughStore(t *testing.T) {
+	client := newFakeAWSClient()
+	// Seed a value under the warden/ name convention for key "openai_secret_001".
+	if _, err := client.CreateSecret("warden/openai_secret_001", "sk-from-aws"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	withFakeAWSClient(t, client, nil)
+
 	pol := config.Policy{SecretStore: config.SecretStoreConfig{
 		Backend: config.SecretBackendAWS,
 		AWS:     &config.SecretStoreAWS{Region: "us-east-1", NamePrefix: "warden/"},
 	}}
-	_, err := newSecretFetcher(pol, nil)
-	if err == nil {
-		t.Fatal("expected a not-yet-available error for backend aws")
+	fetcher, err := newSecretFetcher(pol, nil)
+	if err != nil {
+		t.Fatalf("newSecretFetcher(aws): %v", err)
 	}
-	if !strings.Contains(err.Error(), "Phase 5") {
-		t.Fatalf("error = %v, want a Phase 5 not-yet message", err)
+	cache, err := secrets.NewCache(fetcher, time.Hour, []string{"openai_secret_001"})
+	if err != nil {
+		t.Fatalf("NewCache(aws): %v", err)
+	}
+	got, err := cache.GetSecret("openai_secret_001")
+	if err != nil {
+		t.Fatalf("GetSecret: %v", err)
+	}
+	if got != "sk-from-aws" {
+		t.Fatalf("aws GetSecret = %q, want sk-from-aws", got)
+	}
+}
+
+// TestNewSecretFetcher_AWSMissingCredsFailFast proves a factory error (e.g.
+// missing ENV credentials) surfaces from newSecretFetcher rather than silently
+// mis-wiring the store.
+func TestNewSecretFetcher_AWSMissingCredsFailFast(t *testing.T) {
+	withFakeAWSClient(t, nil, errors.New("aws credentials missing"))
+	pol := config.Policy{SecretStore: config.SecretStoreConfig{
+		Backend: config.SecretBackendAWS,
+		AWS:     &config.SecretStoreAWS{Region: "us-east-1", NamePrefix: "warden/"},
+	}}
+	if _, err := newSecretFetcher(pol, nil); err == nil {
+		t.Fatal("expected a fail-fast error when the aws client factory errors")
 	}
 }
 
@@ -100,9 +188,13 @@ logging:
 	}
 }
 
-// TestRun_SecretStore_AWSNotYet proves the worker build fails fast with the clear
-// not-yet error when backend: aws is selected this phase (store lands in Phase 5).
-func TestRun_SecretStore_AWSNotYet(t *testing.T) {
+// TestRun_SecretStore_AWSMissingCredsFailsFast proves the worker build fails fast
+// when backend: aws is selected but no ENV credentials are present — a clear
+// startup error rather than a silently mis-wired store.
+func TestRun_SecretStore_AWSMissingCredsFailsFast(t *testing.T) {
+	// Ensure no AWS credentials leak in from the host environment.
+	t.Setenv("AWS_ACCESS_KEY_ID", "")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "")
 	cfg := `
 policy:
   allowlist:
@@ -117,10 +209,10 @@ logging:
 `
 	err := Run(context.Background(), io.Discard, runParams(t, writeConfig(t, cfg)))
 	if err == nil {
-		t.Fatal("expected Run to fail for backend aws (Phase 5)")
+		t.Fatal("expected Run to fail for backend aws with no credentials")
 	}
-	if !strings.Contains(err.Error(), "Phase 5") {
-		t.Fatalf("Run error = %v, want a Phase 5 not-yet message", err)
+	if !strings.Contains(err.Error(), "credentials") {
+		t.Fatalf("Run error = %v, want a missing-credentials fail-fast message", err)
 	}
 }
 
