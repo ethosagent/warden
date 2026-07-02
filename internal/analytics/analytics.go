@@ -257,21 +257,69 @@ func (s *SQLiteStore) StoreEvent(e Event) error {
 	if e.Timestamp.IsZero() {
 		e.Timestamp = time.Now()
 	}
-	const ins = `INSERT INTO events
-        (ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason, tool, reason, cost_usd, provider, compliance)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-	_, err := s.db.Exec(ins,
+	_, err := s.db.Exec(`INSERT INTO events `+insertColumns,
 		e.Timestamp.UnixNano(), e.Domain, e.Port, e.Protocol, e.Method,
 		e.URL, e.Decision, e.ResponseStatus, e.SecretRef, e.JudgeReason, e.Tool, e.Reason,
 		e.CostUSD, e.Provider, encodeCompliance(e.Compliance))
 	if err != nil {
 		return fmt.Errorf("analytics: insert event: %w", err)
 	}
-	return s.prune()
+	return s.Prune()
 }
 
-// prune deletes oldest events while the row count exceeds maxEvents.
-func (s *SQLiteStore) prune() error {
+// insertColumns is the shared column list + placeholder tuple for an events
+// INSERT, used by both StoreEvent and StoreEventsBatch so the two paths can
+// never drift.
+const insertColumns = `(ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason, tool, reason, cost_usd, provider, compliance)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+
+// StoreEventsBatch inserts every event in a single transaction — one fsync for
+// the whole batch instead of one per event — setting any zero timestamp to now,
+// identical per-event handling to StoreEvent. It deliberately does NOT prune:
+// the async writer amortizes retention off the write path via Prune, so a batch
+// insert pays one commit and no per-event SELECT COUNT/DELETE. An empty batch is
+// a no-op. On any error the transaction is rolled back so a batch is all-or-
+// nothing (no partial audit trail).
+func (s *SQLiteStore) StoreEventsBatch(evs []Event) error {
+	if len(evs) == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("analytics: begin batch: %w", err)
+	}
+	stmt, err := tx.Prepare(`INSERT INTO events ` + insertColumns)
+	if err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("analytics: prepare batch: %w", err)
+	}
+	defer func() { _ = stmt.Close() }()
+
+	now := time.Now()
+	for _, e := range evs {
+		ts := e.Timestamp
+		if ts.IsZero() {
+			ts = now
+		}
+		if _, err := stmt.Exec(
+			ts.UnixNano(), e.Domain, e.Port, e.Protocol, e.Method,
+			e.URL, e.Decision, e.ResponseStatus, e.SecretRef, e.JudgeReason, e.Tool, e.Reason,
+			e.CostUSD, e.Provider, encodeCompliance(e.Compliance)); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("analytics: insert batch event: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("analytics: commit batch: %w", err)
+	}
+	return nil
+}
+
+// Prune deletes oldest events while the row count exceeds maxEvents. The
+// synchronous StoreEvent runs it inline (INSERT+prune, back-compat); the async
+// writer calls it off the write path so per-insert cost drops to the INSERT
+// alone.
+func (s *SQLiteStore) Prune() error {
 	const del = `DELETE FROM events WHERE id IN (
         SELECT id FROM events ORDER BY id ASC
         LIMIT MAX(0, (SELECT COUNT(*) FROM events) - ?)

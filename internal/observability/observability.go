@@ -75,6 +75,7 @@ type Config struct {
 // receiver (the disabled case), so callers never need to nil-check.
 type Metrics struct {
 	provider *sdkmetric.MeterProvider
+	meter    metric.Meter
 
 	requests     metric.Int64Counter
 	blocked      metric.Int64Counter
@@ -186,7 +187,7 @@ func buildResource(cfg Config) (*resource.Resource, error) {
 // build-info once.
 func newMetrics(provider *sdkmetric.MeterProvider, serviceVersion string) (*Metrics, error) {
 	meter := provider.Meter("github.com/ethosagent/warden")
-	m := &Metrics{provider: provider}
+	m := &Metrics{provider: provider, meter: meter}
 
 	var err error
 	if m.requests, err = meter.Int64Counter(
@@ -341,6 +342,31 @@ func (m *Metrics) SetCircuitBreakerOpen(provider string, open bool) {
 	m.breakerOpen.Add(context.Background(), v, metric.WithAttributes(
 		attribute.String("provider", provider),
 	))
+}
+
+// RegisterAnalyticsQueueDepth wires an observable gauge
+// (warden.analytics.queue_depth) whose value is read from observe() on each
+// metric collection. observe() should return the async analytics writer's
+// current queue depth — a saturation/backpressure indicator (a persistently
+// high value means SQLite is the write bottleneck). Nil-safe no-op when metrics
+// are disabled; call once at assembly. No labels: queue depth is a single
+// process-wide gauge.
+func (m *Metrics) RegisterAnalyticsQueueDepth(observe func() int64) error {
+	if m == nil {
+		return nil
+	}
+	_, err := m.meter.Int64ObservableGauge(
+		"warden.analytics.queue_depth",
+		metric.WithDescription("Depth of the async analytics write queue (backpressure/saturation indicator)."),
+		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+			o.Observe(observe())
+			return nil
+		}),
+	)
+	if err != nil {
+		return fmt.Errorf("observability: analytics queue depth gauge: %w", err)
+	}
+	return nil
 }
 
 // SetSecretCacheStale sets warden.secret.cache.stale{placeholder_ref}.

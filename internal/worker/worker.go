@@ -257,17 +257,46 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		logger.Info("auth transforms enabled", "count", len(transformers))
 	}
 
-	// Audit decorators wrap the analytics store. Order matters: tagging is the
-	// OUTER wrapper so each event is tagged with compliance control IDs BEFORE
-	// the inner signer signs it — the receipt then covers the tags too.
+	// Async analytics write decorator (D1). The base SQLiteStore.StoreEvent does
+	// an INSERT + prune (SELECT COUNT/DELETE) on the request goroutine through a
+	// single connection (~420µs/event). asyncWriter enqueues onto a bounded
+	// channel and a single writer goroutine batch-inserts + prunes off the hot
+	// path, so the request goroutine pays only the sub-µs enqueue. Overflow is
+	// BACKPRESSURE, never drop — events are the audit trail. It closes on
+	// shutdown (drains + flushes) below.
+	asyncStore := analytics.NewAsyncWriter(store, analytics.WithLogger(logger))
+	// Drain + flush the async queue on shutdown BEFORE the store handle closes.
+	// Deferred LIFO: store.Close() was registered earlier, so this runs first and
+	// the final batch lands while the DB is still open. Close is idempotent, so
+	// this fires exactly once even if shutdown paths overlap.
+	defer func() { _ = asyncStore.Close() }()
+	// Expose queue depth as warden_analytics_queue_depth (observable gauge). Nil-
+	// safe when metrics are disabled. Read live from the writer on each scrape.
+	if rqErr := metrics.RegisterAnalyticsQueueDepth(func() int64 {
+		return int64(asyncStore.QueueDepth())
+	}); rqErr != nil {
+		logger.Warn("analytics queue depth metric not registered", "error", rqErr)
+	}
+
+	// Audit decorators wrap the analytics WRITE chain. Order matters and is load-
+	// bearing — the final chain (outer→inner) is:
 	//
-	// signedStore is the base store OR the signing layer over it. It is the stable
-	// inner store the (optional) compliance tagging layer wraps. The managed apply
-	// loop rebuilds ONLY the tagging layer around signedStore on a compliance
-	// toggle, so the signing layer and the base store (which the dashboard and
-	// central forwarding hold directly — see dashData/syncWorker below) are never
+	//	tagging → signing → async → sqlite
+	//
+	// tagging is OUTER so each event is stamped with compliance control IDs
+	// BEFORE the signer signs it (the receipt then covers the tags). async sits
+	// JUST ABOVE the base store so the signer signs, and the receipt covers, the
+	// exact event that is persisted — the async layer only defers the write, it
+	// never alters the event. Reads (dashboard, central forwarding) still hold
+	// the BASE store directly (see dashData/syncWorker below) and bypass the
+	// queue; only this WRITE chain gets the async decorator.
+	//
+	// signedStore is the async writer OR the signing layer over it. It is the
+	// stable inner store the (optional) compliance tagging layer wraps. The
+	// managed apply loop rebuilds ONLY the tagging layer around signedStore on a
+	// compliance toggle, so the signing/async layers and the base store are never
 	// disturbed by a live swap.
-	var signedStore analytics.AnalyticsStore = store
+	var signedStore analytics.AnalyticsStore = asyncStore
 	if pol.Audit.SignedReceipts.Enabled {
 		signer, sErr := loadOrCreateSigner(pol.Audit.SignedReceipts.KeyFile)
 		if sErr != nil {
