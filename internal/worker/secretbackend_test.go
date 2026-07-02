@@ -123,3 +123,33 @@ logging:
 		t.Fatalf("Run error = %v, want a Phase 5 not-yet message", err)
 	}
 }
+
+// TestResolveSecretStore_Precedence proves a managed worker prefers the
+// CP-distributed settings.Secrets backend selector, and falls back to local
+// pol.SecretStore when no secrets block is distributed (nil wire or nil block).
+func TestResolveSecretStore_Precedence(t *testing.T) {
+	local := config.Policy{SecretStore: config.SecretStoreConfig{Backend: config.SecretBackendEnv}}
+
+	// No distributed settings at all → local backend (env).
+	if got := resolveSecretStore(nil, local).ResolvedBackend(); got != config.SecretBackendEnv {
+		t.Fatalf("nil wire resolved %q, want local env", got)
+	}
+	// Distributed wire present but no secrets block → local backend.
+	if got := resolveSecretStore(&config.SettingsWire{}, local).ResolvedBackend(); got != config.SecretBackendEnv {
+		t.Fatalf("wire without secrets block resolved %q, want local env", got)
+	}
+	// Distributed secrets block wins: echo overrides the local env backend.
+	dist := &config.SettingsWire{Secrets: &config.SecretsSettings{Backend: config.SecretBackendEcho}}
+	if got := resolveSecretStore(dist, local).ResolvedBackend(); got != config.SecretBackendEcho {
+		t.Fatalf("distributed echo resolved %q, want echo", got)
+	}
+	// aws selector round-trips region/name-prefix into the resolved config.
+	awsDist := &config.SettingsWire{Secrets: &config.SecretsSettings{
+		Backend: config.SecretBackendAWS, Region: "us-east-1", NamePrefix: "warden/",
+	}}
+	got := resolveSecretStore(awsDist, local)
+	if got.Backend != config.SecretBackendAWS || got.AWS == nil ||
+		got.AWS.Region != "us-east-1" || got.AWS.NamePrefix != "warden/" {
+		t.Fatalf("distributed aws resolved %+v, want aws/us-east-1/warden/", got)
+	}
+}

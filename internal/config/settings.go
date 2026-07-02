@@ -32,6 +32,28 @@ type SettingsWire struct {
 	CacheTTLSeconds *int             `json:"cacheTTLSeconds,omitempty"`
 	Logging         *LoggingSettings `json:"logging,omitempty"`
 	DLP             *DLPSettings     `json:"dlp,omitempty"`
+	// Secrets distributes the VALUE-FREE secret-store backend SELECTOR (which
+	// backend + region/name-prefix a worker resolves placeholders through) — never
+	// a secret value or credential. It is the key→backend mapping the plan
+	// distributes over the wire; the actual values live only in the backend store.
+	Secrets *SecretsSettings `json:"secrets,omitempty"`
+}
+
+// SecretsSettings is the VALUE-FREE secret-store backend selector distributed to
+// workers. It carries ONLY the backend name and the (aws) region / name-prefix —
+// no secret value, no credential, no placeholder value. Credentials resolve from
+// each plane's OWN environment/IAM (same rule as Judge.APIKeyEnv), so a
+// compromised control plane can change which backend a worker reads but can never
+// leak a value. This preserves the SettingsWire secret-free invariant: none of
+// these fields can hold a value.
+type SecretsSettings struct {
+	// Backend is one of echo|aws (env is the LOCAL default and is never
+	// distributed — see secretsSettingsFromPolicy).
+	Backend string `json:"backend,omitempty"`
+	// Region is the AWS region (aws backend only).
+	Region string `json:"region,omitempty"`
+	// NamePrefix is the aws key→secret-name namespace (aws backend only).
+	NamePrefix string `json:"namePrefix,omitempty"`
 }
 
 // ToggleSetting is a simple on/off block (advisory, compliance).
@@ -227,11 +249,55 @@ func SettingsWireFromPolicy(p Policy) *SettingsWire {
 		s.DLP = d
 		any = true
 	}
+	if sec := secretsSettingsFromPolicy(p.SecretStore); sec != nil {
+		s.Secrets = sec
+		any = true
+	}
 
 	if !any {
 		return nil
 	}
 	return &s
+}
+
+// secretsSettingsFromPolicy projects a SecretStoreConfig onto the value-free wire
+// selector, or nil when the backend is env (the LOCAL default — the
+// placeholder→envVar map is local by necessity and nothing distributes), so a
+// worker on the env path emits no "secrets" block and stays back-compatible.
+// Only the backend name and (aws) region/name-prefix are copied — never a value.
+func secretsSettingsFromPolicy(c SecretStoreConfig) *SecretsSettings {
+	switch c.ResolvedBackend() {
+	case SecretBackendEcho:
+		return &SecretsSettings{Backend: SecretBackendEcho}
+	case SecretBackendAWS:
+		out := &SecretsSettings{Backend: SecretBackendAWS}
+		if c.AWS != nil {
+			out.Region = c.AWS.Region
+			out.NamePrefix = c.AWS.NamePrefix
+		}
+		return out
+	default:
+		// env / empty: local-only, nothing to distribute.
+		return nil
+	}
+}
+
+// SecretStoreConfigFromSettings is the reverse of secretsSettingsFromPolicy: it
+// maps the value-free wire selector back to a SecretStoreConfig so a MANAGED
+// worker can build its read-scoped store from control-plane-distributed settings.
+// A nil input returns a zero SecretStoreConfig (Backend="" → ResolvedBackend()==
+// env), matching the "no secrets block distributed" case. It carries only a
+// backend name and (aws) region/name-prefix — the worker resolves credentials
+// from its OWN environment/IAM, never from this block.
+func SecretStoreConfigFromSettings(s *SecretsSettings) SecretStoreConfig {
+	if s == nil {
+		return SecretStoreConfig{}
+	}
+	out := SecretStoreConfig{Backend: s.Backend}
+	if s.Region != "" || s.NamePrefix != "" {
+		out.AWS = &SecretStoreAWS{Region: s.Region, NamePrefix: s.NamePrefix}
+	}
+	return out
 }
 
 // dlpSettingsFromPolicy projects DLPConfig onto DLPSettings, or nil if DLP is
@@ -629,6 +695,10 @@ func (s *SettingsWire) DeepCopy() *SettingsWire {
 			d.Custom = append([]DLPCustomClassSettings(nil), s.DLP.Custom...)
 		}
 		cp.DLP = &d
+	}
+	if s.Secrets != nil {
+		sec := *s.Secrets
+		cp.Secrets = &sec
 	}
 	return &cp
 }

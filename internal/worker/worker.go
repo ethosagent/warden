@@ -72,35 +72,18 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		mapping[m.Placeholder] = m.EnvVar
 		placeholders = append(placeholders, m.Placeholder)
 	}
-	// Keep the fetcher + placeholders so the managed apply loop can rebuild the
-	// cache with a new TTL on a control-plane cache.ttl change. liveCacheTTL tracks
-	// the running TTL so the loop only rebuilds when it actually differs. The
-	// fetcher is selected by secretStore.backend: env (or omitted) is byte-identical
-	// to the original EnvFetcher path; echo wraps the NON-PRODUCTION echo store; aws
-	// is deferred to Phase 5. Everything downstream treats it as a plain
-	// secrets.Fetcher, so the Cache + applier rebuild + proxy swap are unchanged.
-	secretFetcher, err := newSecretFetcher(pol, mapping)
-	if err != nil {
-		return err
-	}
-	liveCacheTTL := time.Duration(pol.CacheTTLSeconds) * time.Second
-	secretProvider, err := secrets.NewCache(secretFetcher, liveCacheTTL, placeholders)
-	if err != nil {
-		return err
-	}
+	// The secret fetcher + cache are built AFTER the initial control-plane pull
+	// (below), so a MANAGED worker can resolve its secretStore backend from the
+	// distributed settings.Secrets selector before wiring the cache — mirroring how
+	// observability resolves from distributed settings at boot. The placeholders
+	// slice + resolved fetcher are held on the applier so a cache.ttl change can
+	// rebuild the cache; everything downstream treats it as a plain secrets.Fetcher.
 
 	// Structured logger from logging.{level,format}. Built once and threaded into
 	// the proxy; lifecycle logs below also use it. logCtrl is the live handle the
 	// managed apply loop uses to change the level at runtime WITHOUT swapping the
 	// (widely-captured) logger instance. Format is restart-only (see LogControl).
 	logger, logCtrl := observability.NewLogger(out, pol.LogLevel, pol.LogFormat)
-
-	// The echo secret backend is NON-PRODUCTION: the "secret" it resolves is the
-	// placeholder key itself, so the edge swap is observable and harmless. Warn
-	// loudly at startup so an operator never mistakes it for a real value store.
-	if pol.SecretStore.ResolvedBackend() == config.SecretBackendEcho {
-		logger.Warn("ECHO secret backend active — NON-PRODUCTION: the resolved value is the placeholder key itself; never use it to protect a real secret")
-	}
 
 	// Managed vs local-only. Managed = a control plane is configured and
 	// --local-only is not set: the worker's allow/deny policy comes ONLY from the
@@ -148,6 +131,14 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		logger.Info("control plane configured but --local-only set; enforcing LOCAL policy")
 	}
 
+	// Behavioral settings from the initial control-plane pull (nil when local-only
+	// or the CP was unreachable at boot). Both observability and the secret-store
+	// backend below resolve from it, preferring central config over local.
+	var distributed *config.SettingsWire
+	if managed && controlPlane != nil {
+		distributed = controlPlane.Settings()
+	}
+
 	// Resolve the observability config OTel boots from. A managed worker prefers
 	// the control-plane-distributed settings.Observability (so central config
 	// actually takes effect on restart), falling back to local pol.Observability
@@ -155,11 +146,37 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// local-only worker always uses its local config (unchanged behavior).
 	obsCfg := pol.Observability
 	if managed {
-		var distributed *config.SettingsWire
-		if controlPlane != nil {
-			distributed = controlPlane.Settings()
-		}
 		obsCfg = resolveObservability(distributed, pol)
+	}
+
+	// Resolve the secret-store backend the worker reads through. A MANAGED worker
+	// prefers the CP-distributed settings.Secrets selector (value-free:
+	// backend/region/namePrefix), falling back to local pol.SecretStore when absent
+	// or the CP was unreachable at boot. Apply-on-RESTART like observability: the
+	// fetcher is built ONCE here from the resolved backend; a live long-poll
+	// hot-swap of the fetcher is a follow-up (it is a plain secrets.Fetcher behind
+	// the unchanged Cache). The local-only path is untouched (secretStoreCfg ==
+	// pol.SecretStore), so backend env/none behaves exactly as before.
+	secretStoreCfg := pol.SecretStore
+	if managed {
+		secretStoreCfg = resolveSecretStore(distributed, pol)
+	}
+	if secretStoreCfg.ResolvedBackend() == config.SecretBackendEcho {
+		logger.Warn("ECHO secret backend active — NON-PRODUCTION: the resolved value is the placeholder key itself; never use it to protect a real secret")
+	}
+	// newSecretFetcher reads only SecretStore off the policy; feed it the RESOLVED
+	// backend via a shallow copy so a distributed selector takes effect without
+	// mutating the loaded policy.
+	effectivePol := pol
+	effectivePol.SecretStore = secretStoreCfg
+	secretFetcher, err := newSecretFetcher(effectivePol, mapping)
+	if err != nil {
+		return err
+	}
+	liveCacheTTL := time.Duration(pol.CacheTTLSeconds) * time.Second
+	secretProvider, err := secrets.NewCache(secretFetcher, liveCacheTTL, placeholders)
+	if err != nil {
+		return err
 	}
 
 	// OTel metrics emitter (off by default). New returns a nil *Metrics + nil
@@ -538,6 +555,22 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 //     placeholder IS the store key).
 //   - aws → deferred to Phase 5; returns a clear not-yet error rather than
 //     half-wiring a store that does not exist.
+//
+// resolveSecretStore picks the secret-store backend a MANAGED worker reads
+// through. The control-plane-distributed settings.Secrets selector wins when
+// present (value-free: backend/region/namePrefix), so central config takes
+// effect; otherwise it falls back to the worker's LOCAL pol.SecretStore (the CP
+// sent no secrets block, or was unreachable at boot so distributed is nil). It is
+// a pure function so the precedence is unit-testable, and mirrors
+// resolveObservability's apply-on-RESTART discipline: the resolved backend is
+// honored at the worker's next (re)start, not on a live long-poll.
+func resolveSecretStore(distributed *config.SettingsWire, local config.Policy) config.SecretStoreConfig {
+	if distributed != nil && distributed.Secrets != nil {
+		return config.SecretStoreConfigFromSettings(distributed.Secrets)
+	}
+	return local.SecretStore
+}
+
 func newSecretFetcher(pol config.Policy, mapping map[string]string) (secrets.Fetcher, error) {
 	switch pol.SecretStore.ResolvedBackend() {
 	case config.SecretBackendEnv:

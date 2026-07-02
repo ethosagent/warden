@@ -186,6 +186,11 @@ func runControlPlane(cmd *cobra.Command, opts cpOptions) error {
 		logger.Info("control plane integrations", "count", len(integrations), "alertsDB", alertDBPath)
 	}
 
+	// Build the WRITE-scoped secret store from the CP's OWN secretStore.backend.
+	// echo mounts the /central/secrets endpoints; env/none (and aws pre-Phase-5)
+	// return nil so the endpoints stay unmounted — back-compatible.
+	secretStore := controlplane.NewSecretStore(pol.SecretStore, logger)
+
 	srv := controlplane.New(controlplane.Config{
 		PolicyPath:   servedPath,
 		Token:        token,
@@ -194,6 +199,7 @@ func runControlPlane(cmd *cobra.Command, opts cpOptions) error {
 		Logger:       logger,
 		Integrations: integrations,
 		AlertDBPath:  alertDBPath,
+		SecretStore:  secretStore,
 	})
 
 	httpSrv := &http.Server{

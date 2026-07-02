@@ -11,7 +11,6 @@ package controlplane
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -55,6 +54,13 @@ type Config struct {
 	// connections). Required (non-empty) for integrations to run; ignored when
 	// Integrations is empty.
 	AlertDBPath string
+	// SecretStore is the WRITE-scoped secret store backing the /central/secrets
+	// endpoints. Nil (env/empty backend, or aws pre-Phase-5) ⇒ those endpoints are
+	// NOT mounted and the control plane behaves exactly as before. Built from the
+	// operator's OWN pol.SecretStore backend (see NewSecretStore), mirroring how
+	// Store / Integrations are injected. The control plane holds a value only in
+	// transit on Put and never persists one (see the secrets handlers).
+	SecretStore secrets.SecretStore
 }
 
 // policyWire is the shape sent to workers: allow/deny policy plus the optional
@@ -95,6 +101,9 @@ type Server struct {
 	// integrations are configured (or when its store/manager failed to build —
 	// fail-open: a broken integrations config never stops policy serving).
 	integrations *integration.Manager
+	// secretStore backs the /central/secrets write path. Nil ⇒ the endpoints are
+	// not mounted (env/empty backend, or aws pre-Phase-5).
+	secretStore secrets.SecretStore
 }
 
 // Compile-time assertions that the concrete types satisfy their role interfaces.
@@ -132,6 +141,8 @@ func New(cfg Config) *Server {
 		// The policy-serving component owns the watch and performs the initial load
 		// so /policy and the dashboard have policy immediately (unchanged behavior).
 		policy: newPolicyServer(cfg.PolicyPath, cfg.Token, cfg.Logger, registry),
+		// Write-scoped secret store (nil ⇒ /central/secrets not mounted).
+		secretStore: cfg.SecretStore,
 	}
 	// Integrations pipeline (CP-hosted alert delivery). Constructed only when the
 	// operator configured at least one integration AND an alert DB path is set.
@@ -258,6 +269,17 @@ func (s *Server) Handler() http.Handler {
 	}
 	mux.Handle("/central/ingest", ingest)
 
+	// Secret write path (/central/secrets), mounted ONLY when a writable store is
+	// configured (echo now; aws in Phase 5). A nil store means the routes are
+	// absent → 404, so a control plane on backend env/none behaves exactly as
+	// before. The handlers apply the SAME constant-time bearer gate as the other
+	// /central/* routes; GET returns metadata only, and a POST value is held in
+	// transit only and logged by-reference, never persisted in the CP.
+	if s.secretStore != nil {
+		mux.HandleFunc("/central/secrets", s.handleSecrets)
+		mux.HandleFunc("/central/secrets/", s.handleSecretByKey)
+	}
+
 	// The fleet dashboard reads the aggregated central store. The control plane
 	// holds no secrets, so it is given an empty secret provider and a
 	// secret-free policy view; the dashboard's secrets panel is naturally empty.
@@ -313,12 +335,9 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if s.cfg.Token != "" {
-		want := "Bearer " + s.cfg.Token
-		if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte(want)) != 1 {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
+	if !s.bearerOK(r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
 	}
 	var body struct {
 		PolicyETag string `json:"policyETag"`

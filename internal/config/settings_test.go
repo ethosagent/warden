@@ -347,6 +347,13 @@ func TestSettingsWire_SecretFree(t *testing.T) {
 		// DLP carries only value-free behavioral config (modes, class names,
 		// destination patterns, operator regexes) — never a secret VALUE.
 		DLP: dlpRoundTripConfig(),
+		// SecretStore distributes only the value-free backend SELECTOR
+		// (backend/region/namePrefix); the JSON-leak scan below covers the
+		// projected Secrets block, and the reflect walk confirms it holds no value.
+		SecretStore: SecretStoreConfig{
+			Backend: SecretBackendAWS,
+			AWS:     &SecretStoreAWS{Region: "us-east-1", NamePrefix: "warden/"},
+		},
 	}
 	s := SettingsWireFromPolicy(p)
 	if s == nil {
@@ -397,7 +404,18 @@ func assertNoSecretValueFields(t *testing.T, typ reflect.Type, seen map[reflect.
 			strings.Contains(lower, "accesskey") ||
 			(strings.Contains(lower, "apikey") && !isEnvRef) ||
 			lower == "token"
-		if looksSecret && !isEnvRef {
+		// Only a LEAF value field (string, []byte, …) can carry a secret. A
+		// container field (a struct, or a pointer/slice/map of structs) holds no
+		// value itself — the recursion below inspects its fields — so its NAME is
+		// not a value carrier. This lets a value-free block legitimately named
+		// "Secrets" (the backend selector: backend/region/namePrefix) pass while
+		// still catching a scalar credential field like ClientSecret.
+		leaf := f.Type
+		for leaf.Kind() == reflect.Pointer || leaf.Kind() == reflect.Slice || leaf.Kind() == reflect.Map {
+			leaf = leaf.Elem()
+		}
+		isContainer := leaf.Kind() == reflect.Struct
+		if looksSecret && !isEnvRef && !isContainer {
 			t.Errorf("SettingsWire field %q looks like a secret VALUE carrier (must reference by env name only)", name)
 		}
 		assertNoSecretValueFields(t, f.Type, seen)
@@ -436,5 +454,64 @@ func TestSettingsWire_DeepCopy(t *testing.T) {
 	}
 	if orig.DLP.Custom[0].Name != "codename" {
 		t.Error("deep copy aliased the DLP custom slice")
+	}
+}
+
+// TestSecretsSettingsFromPolicy_BackendSelector verifies the value-free selector
+// projection: env (the local default) emits nothing; echo emits the backend name
+// only; aws emits backend + region + name-prefix — never a value.
+func TestSecretsSettingsFromPolicy_BackendSelector(t *testing.T) {
+	// env / empty → nil (local-only, nothing distributes).
+	if got := secretsSettingsFromPolicy(SecretStoreConfig{}); got != nil {
+		t.Fatalf("env backend projected %+v, want nil", got)
+	}
+	if got := secretsSettingsFromPolicy(SecretStoreConfig{Backend: SecretBackendEnv}); got != nil {
+		t.Fatalf("explicit env backend projected %+v, want nil", got)
+	}
+	// echo → backend name only.
+	echo := secretsSettingsFromPolicy(SecretStoreConfig{Backend: SecretBackendEcho})
+	if echo == nil || echo.Backend != SecretBackendEcho || echo.Region != "" || echo.NamePrefix != "" {
+		t.Fatalf("echo projection = %+v, want {Backend:echo}", echo)
+	}
+	// aws → backend + region + name-prefix.
+	aws := secretsSettingsFromPolicy(SecretStoreConfig{
+		Backend: SecretBackendAWS,
+		AWS:     &SecretStoreAWS{Region: "us-east-1", NamePrefix: "warden/"},
+	})
+	if aws == nil || aws.Backend != SecretBackendAWS || aws.Region != "us-east-1" || aws.NamePrefix != "warden/" {
+		t.Fatalf("aws projection = %+v, want backend/region/prefix", aws)
+	}
+}
+
+// TestSecretsSettings_RoundTrip proves a populated secrets block round-trips
+// through JSON and back through SecretStoreConfigFromSettings without loss, and
+// that the reverse converter is symmetric with the projector.
+func TestSecretsSettings_RoundTrip(t *testing.T) {
+	in := &SettingsWire{Secrets: &SecretsSettings{
+		Backend: SecretBackendAWS, Region: "eu-west-2", NamePrefix: "warden/",
+	}}
+	b, err := json.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"secrets"`) {
+		t.Fatalf("marshaled wire missing secrets block: %s", b)
+	}
+	var out SettingsWire
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Secrets == nil || *out.Secrets != *in.Secrets {
+		t.Fatalf("secrets round-trip = %+v, want %+v", out.Secrets, in.Secrets)
+	}
+	// Reverse converter rebuilds an equivalent SecretStoreConfig.
+	cfg := SecretStoreConfigFromSettings(out.Secrets)
+	if cfg.Backend != SecretBackendAWS || cfg.AWS == nil ||
+		cfg.AWS.Region != "eu-west-2" || cfg.AWS.NamePrefix != "warden/" {
+		t.Fatalf("SecretStoreConfigFromSettings = %+v, want aws/eu-west-2/warden/", cfg)
+	}
+	// nil selector → zero config (resolves to env), matching "nothing distributed".
+	if zero := SecretStoreConfigFromSettings(nil); zero.ResolvedBackend() != SecretBackendEnv || zero.AWS != nil {
+		t.Fatalf("nil selector = %+v, want zero/env config", zero)
 	}
 }
