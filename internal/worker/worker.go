@@ -276,7 +276,9 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// action but never blocks; enforce blocks on a block/redact verdict.
 	var dlpScanner *proxy.DLPScanner
 	if pol.DLP.Active() {
-		dlpScanner = proxy.NewDLPScanner(pol.DLP, false, false)
+		// evidence=true captures the SAFE MASKED sample ("••••<last4> (len N)", never
+		// the raw match) so the dashboard Activity screen can show why a finding fired.
+		dlpScanner = proxy.NewDLPScanner(pol.DLP, false, true)
 		logger.Info("outbound request-body DLP scanning enabled",
 			"mode", pol.DLP.Mode,
 			"rules", len(pol.DLP.Rules),

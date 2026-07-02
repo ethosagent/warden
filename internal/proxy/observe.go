@@ -93,8 +93,9 @@ func (p *Proxy) recordResponseFindings(dets []scan.Detection) {
 // kinds; category is a small closed set (safe as a metric label). The DESTINATION
 // is deliberately NOT a label here (unbounded cardinality — it lives only on the
 // event, same rule as Tool). It NEVER logs the body or a raw value — only the
-// bounded kind/pattern/severity and the opt-in MASKED evidence (empty in Phase 1,
-// which builds the scanner WithEvidence(false)). Metrics methods are nil-safe.
+// bounded kind/pattern/severity and the opt-in MASKED evidence. The DLP wiring
+// builds the scanner WithEvidence(true), so d.Evidence is the value-free
+// "••••<last4> (len N)" sample (never the raw match). Metrics methods are nil-safe.
 func (p *Proxy) recordDLPFindings(dets []scan.Detection) {
 	for _, d := range dets {
 		kind := "dlp_" + d.Category

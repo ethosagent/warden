@@ -133,12 +133,13 @@ func (a *SettingsApplier) Apply() {
 	// scanner disables the stage (byte-identical to a worker that never configured
 	// DLP). Build only when the distributed DLP block resolves to an ACTIVE mode
 	// (monitor/enforce); an absent block, mode off, or an inactive config all leave
-	// DLP disabled. phonePII/evidence are LOCAL wiring knobs and stay false here
-	// (never distributed), matching the boot wiring in Run.
+	// DLP disabled. phonePII is a LOCAL wiring knob and stays false here (never
+	// distributed); evidence=true captures the SAFE MASKED sample only ("••••<last4>
+	// (len N)", never the raw match), matching the boot wiring in Run.
 	var newDLP *proxy.DLPScanner
 	if settings != nil && settings.DLP != nil {
 		if dcfg := config.DLPConfigFromSettings(settings.DLP); dcfg.Active() {
-			newDLP = proxy.NewDLPScanner(dcfg, false, false)
+			newDLP = proxy.NewDLPScanner(dcfg, false, true)
 		}
 	}
 	a.p.SetDLP(newDLP)

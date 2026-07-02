@@ -78,9 +78,24 @@ type requestScope struct {
 	mcpSessKey  string
 	closeAfter  bool
 
+	// reqStart is the wall-clock instant this request was read off the wire
+	// (captured in serveHTTPRequest right after http.ReadRequest). Every event the
+	// request produces records LatencyMs = time.Since(reqStart) at write time, so
+	// the whole mediation cost (request-read → response-relayed) is one number on
+	// each event — always safe, always populated.
+	reqStart time.Time
+
 	// Secret-swap results, carried onto the single forwarding audit event.
+	// swappedNames is the set of placeholder NAMES actually swapped (bounded,
+	// log-safe tokens the agent already holds — never secret values); it also feeds
+	// Event.SwappedRefs.
 	refs         []secrets.Reference
 	swappedNames []string
+
+	// evidence collects bounded, MASKED evidence samples (the value-free
+	// "••••<last4> (len N)" form) from scan/DLP findings on this request, capped at
+	// maxEvidenceSamples. It rides Event.Evidence — never raw matched content.
+	evidence []string
 
 	// DLP results, carried onto the single forwarding audit event. All zero when
 	// DLP is off, so the off-case event is identical to today. dlpClasses is the
@@ -154,6 +169,34 @@ func (s *requestScope) ensureBody() (body []byte, ok bool) {
 	return b, true
 }
 
+// maxEvidenceSamples caps how many masked evidence samples ride one event, so a
+// pathological body full of findings cannot bloat the record. Each sample is
+// already length-bounded by scan's masker.
+const maxEvidenceSamples = 8
+
+// latencyMs returns the mediation latency so far in whole milliseconds, from the
+// request-read instant (reqStart) to now. Cheap (one time.Now) and always safe —
+// it is a plain number recorded on every event the request produces.
+func (s *requestScope) latencyMs() int64 {
+	return time.Since(s.reqStart).Milliseconds()
+}
+
+// addEvidence appends the MASKED evidence samples carried by dets (the value-free
+// "••••<last4> (len N)" form; empty when a scanner was built without evidence) onto
+// the scope, skipping empties and stopping at maxEvidenceSamples. It never sees raw
+// matched content — only the masked sample the scanner already produced.
+func (s *requestScope) addEvidence(dets []scan.Detection) {
+	for _, d := range dets {
+		if d.Evidence == "" {
+			continue
+		}
+		if len(s.evidence) >= maxEvidenceSamples {
+			return
+		}
+		s.evidence = append(s.evidence, d.Evidence)
+	}
+}
+
 // handleHTTP serves the keep-alive loop for one MITM-terminated client conn.
 // The SESSION owns the upstream conn: one upstream (+ its bufio.Reader) is
 // carried across iterations so N keep-alive requests to this single fixed host
@@ -198,6 +241,10 @@ func (p *Proxy) serveHTTPRequest(tlsConn *tls.Conn, br *bufio.Reader, domain str
 		// close whatever upstream was carried in (nil if none was ever dialed).
 		return true, upstream, upstreamBR
 	}
+	// Mediation-latency clock starts at the request-read point and stops where each
+	// event is written (see requestScope.latencyMs). time.Now (not the injectable
+	// leaf-cert clock) so latency is real wall time on every event.
+	reqStart := time.Now()
 
 	// Snapshot the live MCP gateway and judge once per request through their
 	// atomic pointers, so a concurrent control-plane swap can't change them
@@ -210,6 +257,7 @@ func (p *Proxy) serveHTTPRequest(tlsConn *tls.Conn, br *bufio.Reader, domain str
 		port:       port,
 		needsJudge: needsJudge,
 		req:        req,
+		reqStart:   reqStart,
 		gw:         p.mcpGateway(),
 		liveJudge:  p.judge(),
 		upstream:   upstream,
@@ -302,6 +350,9 @@ func (p *Proxy) judgeGate(s *requestScope) (endSession bool) {
 			URL:         fullURL,
 			Decision:    "deny",
 			JudgeReason: verdict.Reason,
+			LatencyMs:   s.latencyMs(),
+			SwappedRefs: s.swappedNames,
+			Evidence:    s.evidence,
 		})
 		p.cfg.Metrics.RecordRequest("deny", "https")
 		p.cfg.Metrics.RecordBlocked("judge")
@@ -347,15 +398,18 @@ func (p *Proxy) mcpRequestScan(s *requestScope) (endSession bool) {
 	s.mcpReason = v.Reason
 	if v.Action == gateway.Deny {
 		_ = p.analyticsStore().StoreEvent(analytics.Event{
-			Timestamp: time.Now(),
-			Domain:    s.domain,
-			Port:      s.port,
-			Protocol:  "mcp",
-			Method:    s.req.Method,
-			URL:       fullURL,
-			Decision:  "deny",
-			Tool:      v.Tool,
-			Reason:    v.Reason,
+			Timestamp:   time.Now(),
+			Domain:      s.domain,
+			Port:        s.port,
+			Protocol:    "mcp",
+			Method:      s.req.Method,
+			URL:         fullURL,
+			Decision:    "deny",
+			Tool:        v.Tool,
+			Reason:      v.Reason,
+			LatencyMs:   s.latencyMs(),
+			SwappedRefs: s.swappedNames,
+			Evidence:    s.evidence,
 		})
 		p.cfg.Metrics.RecordRequest("deny", "mcp")
 		p.cfg.Metrics.RecordBlocked(v.Reason)
@@ -459,6 +513,9 @@ func (p *Proxy) dlpScan(s *requestScope) (endSession bool) {
 	dets := d.scan(scanBody)
 	p.cfg.Metrics.ObserveAddedLatency("dlp_scan", time.Since(start))
 	p.recordDLPFindings(dets)
+	// Carry the bounded MASKED evidence samples (opt-in "••••<last4> (len N)"; empty
+	// when evidence is disabled) onto the scope so they ride the event — never raw.
+	s.addEvidence(dets)
 
 	// Emit the real DataClass taxonomy: each detection carries zero or more dotted
 	// data classes; dedup the union across all detections (preserving first-seen
@@ -534,6 +591,9 @@ func (p *Proxy) dlpDeny(s *requestScope) (endSession bool) {
 		DLPRule:     s.dlpRule,
 		DLPPartial:  s.dlpPartial,
 		DLPEncoded:  s.dlpEncoded,
+		LatencyMs:   s.latencyMs(),
+		SwappedRefs: s.swappedNames,
+		Evidence:    s.evidence,
 	})
 	p.cfg.Metrics.RecordRequest("deny", "https")
 	p.cfg.Metrics.RecordBlocked("dlp")
@@ -805,15 +865,18 @@ func (p *Proxy) mcpResponseScan(s *requestScope) (terminal bool) {
 		if v.Action == gateway.Deny {
 			fullURL := "https://" + s.domain + s.req.URL.RequestURI()
 			_ = p.analyticsStore().StoreEvent(analytics.Event{
-				Timestamp: time.Now(),
-				Domain:    s.domain,
-				Port:      s.port,
-				Protocol:  "mcp",
-				Method:    s.req.Method,
-				URL:       fullURL,
-				Decision:  "deny",
-				Tool:      s.mcpTool,
-				Reason:    v.Reason,
+				Timestamp:   time.Now(),
+				Domain:      s.domain,
+				Port:        s.port,
+				Protocol:    "mcp",
+				Method:      s.req.Method,
+				URL:         fullURL,
+				Decision:    "deny",
+				Tool:        s.mcpTool,
+				Reason:      v.Reason,
+				LatencyMs:   s.latencyMs(),
+				SwappedRefs: s.swappedNames,
+				Evidence:    s.evidence,
 			})
 			p.cfg.Metrics.RecordRequest("deny", "mcp")
 			p.cfg.Metrics.RecordBlocked(v.Reason)
@@ -888,6 +951,9 @@ func (p *Proxy) relayMCPSSE(s *requestScope) (terminal bool) {
 			ResponseStatus: s.resp.StatusCode,
 			Tool:           s.mcpTool,
 			Reason:         s.mcpReason,
+			LatencyMs:      s.latencyMs(),
+			SwappedRefs:    s.swappedNames,
+			Evidence:       s.evidence,
 		})
 		p.cfg.Metrics.RecordRequest("deny", "mcp")
 		p.cfg.Metrics.RecordBlocked(s.mcpReason)
@@ -908,6 +974,9 @@ func (p *Proxy) relayMCPSSE(s *requestScope) (terminal bool) {
 			ResponseStatus: s.resp.StatusCode,
 			Tool:           s.mcpTool,
 			Reason:         s.mcpReason,
+			LatencyMs:      s.latencyMs(),
+			SwappedRefs:    s.swappedNames,
+			Evidence:       s.evidence,
 		})
 		p.cfg.Metrics.RecordRequest("allow", "mcp")
 		p.logDecision(decisionLog{
@@ -986,6 +1055,9 @@ func (p *Proxy) httpResponseScan(s *requestScope) (blocked bool) {
 	dets, block, reason := rs.Scan(body)
 	p.cfg.Metrics.ObserveAddedLatency("http_response_scan", time.Since(start))
 	p.recordResponseFindings(dets)
+	// Carry the bounded MASKED evidence samples onto the scope so they ride the
+	// event (allow or the deny below) — never raw response content.
+	s.addEvidence(dets)
 	if block {
 		// enforce + high leak/injection: replace the body with an error, record a
 		// deny, and return (terminal, mirrors the MCP enforce-deny branch).
@@ -1000,6 +1072,9 @@ func (p *Proxy) httpResponseScan(s *requestScope) (blocked bool) {
 			Decision:       "deny",
 			ResponseStatus: s.resp.StatusCode,
 			Reason:         reason,
+			LatencyMs:      s.latencyMs(),
+			SwappedRefs:    s.swappedNames,
+			Evidence:       s.evidence,
 		})
 		p.cfg.Metrics.RecordRequest("deny", "https")
 		p.cfg.Metrics.RecordBlocked(reason)
@@ -1074,6 +1149,13 @@ func (p *Proxy) recordAllowEvent(s *requestScope) {
 		DLPRule:     s.dlpRule,
 		DLPPartial:  s.dlpPartial,
 		DLPEncoded:  s.dlpEncoded,
+		// Dashboard "Activity" metadata: total mediation latency, the placeholder
+		// NAMES swapped on this request (never values), and bounded MASKED evidence
+		// samples (never raw). All safe; SwappedRefs/Evidence empty when nothing
+		// swapped / no findings.
+		LatencyMs:   s.latencyMs(),
+		SwappedRefs: s.swappedNames,
+		Evidence:    s.evidence,
 	})
 	p.cfg.Metrics.RecordRequest("allow", proto)
 	for _, name := range s.swappedNames {

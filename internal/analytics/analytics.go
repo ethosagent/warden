@@ -90,6 +90,22 @@ type Event struct {
 	// (base64/URL) of the request body. Reserved for later phases; always false
 	// in Phase 1.
 	DLPEncoded bool
+
+	// LatencyMs is the total mediation latency in milliseconds for this request,
+	// from request-read to response-relayed. It is a plain number — always-safe
+	// metadata — and is populated on every event a request produces (allow and
+	// deny alike), independent of whether DLP/swap were active.
+	LatencyMs int64
+	// SwappedRefs holds the PLACEHOLDER NAMES that were secret-swapped on this
+	// request (e.g. "{{OPENAI_API_KEY}}"). These are the inert placeholder tokens
+	// the agent already holds — NEVER secret values — so they are as safe to record
+	// as Tool. Nil when nothing was swapped.
+	SwappedRefs []string
+	// Evidence holds bounded, MASKED evidence samples from scan/DLP findings, each
+	// the value-free "••••<last4> (len N)" form scan's masker produces (opt-in via
+	// scan.WithEvidence). It is NEVER the raw matched content, and the count is
+	// capped upstream. Nil when evidence capture is off or nothing was found.
+	Evidence []string
 }
 
 // encodeCompliance joins compliance control IDs into a single comma-separated
@@ -119,6 +135,42 @@ func encodeDataClasses(classes []string) string {
 // decodeDataClasses splits a stored data_classes column back into class names.
 // An empty column yields a nil slice (no classes), not a one-element slice.
 func decodeDataClasses(s string) []string {
+	if s == "" {
+		return nil
+	}
+	return strings.Split(s, ",")
+}
+
+// encodeSwappedRefs joins swapped placeholder NAMES into a single comma-separated
+// column value. Placeholder names are operator-defined tokens that by convention
+// contain no comma (e.g. "{{OPENAI_API_KEY}}"), so a comma join round-trips safely —
+// the same convention encodeDataClasses/encodeCompliance use. They are inert
+// placeholder tokens the agent already holds, NEVER secret values.
+func encodeSwappedRefs(names []string) string {
+	return strings.Join(names, ",")
+}
+
+// decodeSwappedRefs splits a stored swapped_refs column back into placeholder
+// names. An empty column yields a nil slice (nothing swapped), not a one-element
+// slice.
+func decodeSwappedRefs(s string) []string {
+	if s == "" {
+		return nil
+	}
+	return strings.Split(s, ",")
+}
+
+// encodeEvidence joins bounded MASKED evidence samples into a single comma-
+// separated column value. Each sample is the value-free "••••<last4> (len N)" form
+// scan's masker produces — never raw matched content — and contains no comma, so a
+// comma join round-trips safely. The number of samples is capped upstream.
+func encodeEvidence(samples []string) string {
+	return strings.Join(samples, ",")
+}
+
+// decodeEvidence splits a stored evidence column back into masked samples. An
+// empty column yields a nil slice (no evidence), not a one-element slice.
+func decodeEvidence(s string) []string {
 	if s == "" {
 		return nil
 	}
@@ -212,7 +264,10 @@ CREATE TABLE IF NOT EXISTS events (
     dlp_action      TEXT    NOT NULL DEFAULT '',
     dlp_rule        TEXT    NOT NULL DEFAULT '',
     dlp_partial     INTEGER NOT NULL DEFAULT 0,
-    dlp_encoded     INTEGER NOT NULL DEFAULT 0
+    dlp_encoded     INTEGER NOT NULL DEFAULT 0,
+    latency_ms      INTEGER NOT NULL DEFAULT 0,
+    swapped_refs    TEXT    NOT NULL DEFAULT '',
+    evidence        TEXT    NOT NULL DEFAULT ''
 );`
 	if _, err := s.db.Exec(ddl); err != nil {
 		return fmt.Errorf("analytics: migrate: %w", err)
@@ -233,6 +288,9 @@ CREATE TABLE IF NOT EXISTS events (
 		{"dlp_rule", `ALTER TABLE events ADD COLUMN dlp_rule TEXT NOT NULL DEFAULT ''`},
 		{"dlp_partial", `ALTER TABLE events ADD COLUMN dlp_partial INTEGER NOT NULL DEFAULT 0`},
 		{"dlp_encoded", `ALTER TABLE events ADD COLUMN dlp_encoded INTEGER NOT NULL DEFAULT 0`},
+		{"latency_ms", `ALTER TABLE events ADD COLUMN latency_ms INTEGER NOT NULL DEFAULT 0`},
+		{"swapped_refs", `ALTER TABLE events ADD COLUMN swapped_refs TEXT NOT NULL DEFAULT ''`},
+		{"evidence", `ALTER TABLE events ADD COLUMN evidence TEXT NOT NULL DEFAULT ''`},
 	} {
 		if err := s.addColumnIfAbsent(c.name, c.ddl); err != nil {
 			return err
@@ -297,7 +355,8 @@ func (s *SQLiteStore) StoreEvent(e Event) error {
 		e.URL, e.Decision, e.ResponseStatus, e.SecretRef, e.JudgeReason, e.Tool, e.Reason,
 		e.CostUSD, e.Provider, encodeCompliance(e.Compliance),
 		encodeDataClasses(e.DataClasses), e.DLPAction, e.DLPRule,
-		boolToInt(e.DLPPartial), boolToInt(e.DLPEncoded))
+		boolToInt(e.DLPPartial), boolToInt(e.DLPEncoded),
+		e.LatencyMs, encodeSwappedRefs(e.SwappedRefs), encodeEvidence(e.Evidence))
 	if err != nil {
 		return fmt.Errorf("analytics: insert event: %w", err)
 	}
@@ -307,8 +366,8 @@ func (s *SQLiteStore) StoreEvent(e Event) error {
 // insertColumns is the shared column list + placeholder tuple for an events
 // INSERT, used by both StoreEvent and StoreEventsBatch so the two paths can
 // never drift.
-const insertColumns = `(ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason, tool, reason, cost_usd, provider, compliance, data_classes, dlp_action, dlp_rule, dlp_partial, dlp_encoded)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+const insertColumns = `(ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason, tool, reason, cost_usd, provider, compliance, data_classes, dlp_action, dlp_rule, dlp_partial, dlp_encoded, latency_ms, swapped_refs, evidence)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 // StoreEventsBatch inserts every event in a single transaction — one fsync for
 // the whole batch instead of one per event — setting any zero timestamp to now,
@@ -343,7 +402,8 @@ func (s *SQLiteStore) StoreEventsBatch(evs []Event) error {
 			e.URL, e.Decision, e.ResponseStatus, e.SecretRef, e.JudgeReason, e.Tool, e.Reason,
 			e.CostUSD, e.Provider, encodeCompliance(e.Compliance),
 			encodeDataClasses(e.DataClasses), e.DLPAction, e.DLPRule,
-			boolToInt(e.DLPPartial), boolToInt(e.DLPEncoded)); err != nil {
+			boolToInt(e.DLPPartial), boolToInt(e.DLPEncoded),
+			e.LatencyMs, encodeSwappedRefs(e.SwappedRefs), encodeEvidence(e.Evidence)); err != nil {
 			_ = tx.Rollback()
 			return fmt.Errorf("analytics: insert batch event: %w", err)
 		}
@@ -371,7 +431,7 @@ func (s *SQLiteStore) Prune() error {
 
 // GetEvents returns events matching filter, newest first.
 func (s *SQLiteStore) GetEvents(filter EventFilter) ([]Event, error) {
-	q := `SELECT ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason, tool, reason, cost_usd, provider, compliance, data_classes, dlp_action, dlp_rule, dlp_partial, dlp_encoded
+	q := `SELECT ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason, tool, reason, cost_usd, provider, compliance, data_classes, dlp_action, dlp_rule, dlp_partial, dlp_encoded, latency_ms, swapped_refs, evidence
           FROM events WHERE 1=1`
 	var args []any
 	if filter.Domain != "" {
@@ -415,17 +475,22 @@ func (s *SQLiteStore) GetEvents(filter EventFilter) ([]Event, error) {
 			dataClasses string
 			dlpPartial  int
 			dlpEncoded  int
+			swappedRefs string
+			evidence    string
 		)
 		if err := rows.Scan(&ts, &e.Domain, &e.Port, &e.Protocol, &e.Method,
 			&e.URL, &e.Decision, &e.ResponseStatus, &e.SecretRef, &e.JudgeReason, &e.Tool, &e.Reason,
 			&e.CostUSD, &e.Provider, &compliance,
-			&dataClasses, &e.DLPAction, &e.DLPRule, &dlpPartial, &dlpEncoded); err != nil {
+			&dataClasses, &e.DLPAction, &e.DLPRule, &dlpPartial, &dlpEncoded,
+			&e.LatencyMs, &swappedRefs, &evidence); err != nil {
 			return nil, fmt.Errorf("analytics: scan: %w", err)
 		}
 		e.Compliance = decodeCompliance(compliance)
 		e.DataClasses = decodeDataClasses(dataClasses)
 		e.DLPPartial = dlpPartial != 0
 		e.DLPEncoded = dlpEncoded != 0
+		e.SwappedRefs = decodeSwappedRefs(swappedRefs)
+		e.Evidence = decodeEvidence(evidence)
 		e.Timestamp = time.Unix(0, ts).UTC()
 		out = append(out, e)
 	}
@@ -446,7 +511,7 @@ func (s *SQLiteStore) count() (int, error) {
 
 // GetOldestEventIDs returns the IDs and events of the oldest N events.
 func (s *SQLiteStore) GetOldestEventIDs(limit int) ([]int64, []Event, error) {
-	const q = `SELECT id, ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason, tool, reason, cost_usd, provider, compliance, data_classes, dlp_action, dlp_rule, dlp_partial, dlp_encoded
+	const q = `SELECT id, ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason, tool, reason, cost_usd, provider, compliance, data_classes, dlp_action, dlp_rule, dlp_partial, dlp_encoded, latency_ms, swapped_refs, evidence
 	            FROM events ORDER BY id ASC LIMIT ?`
 	rows, err := s.db.Query(q, limit)
 	if err != nil {
@@ -465,17 +530,22 @@ func (s *SQLiteStore) GetOldestEventIDs(limit int) ([]int64, []Event, error) {
 			dataClasses string
 			dlpPartial  int
 			dlpEncoded  int
+			swappedRefs string
+			evidence    string
 		)
 		if err := rows.Scan(&id, &ts, &e.Domain, &e.Port, &e.Protocol, &e.Method,
 			&e.URL, &e.Decision, &e.ResponseStatus, &e.SecretRef, &e.JudgeReason, &e.Tool, &e.Reason,
 			&e.CostUSD, &e.Provider, &compliance,
-			&dataClasses, &e.DLPAction, &e.DLPRule, &dlpPartial, &dlpEncoded); err != nil {
+			&dataClasses, &e.DLPAction, &e.DLPRule, &dlpPartial, &dlpEncoded,
+			&e.LatencyMs, &swappedRefs, &evidence); err != nil {
 			return nil, nil, fmt.Errorf("analytics: scan oldest IDs: %w", err)
 		}
 		e.Compliance = decodeCompliance(compliance)
 		e.DataClasses = decodeDataClasses(dataClasses)
 		e.DLPPartial = dlpPartial != 0
 		e.DLPEncoded = dlpEncoded != 0
+		e.SwappedRefs = decodeSwappedRefs(swappedRefs)
+		e.Evidence = decodeEvidence(evidence)
 		e.Timestamp = time.Unix(0, ts).UTC()
 		ids = append(ids, id)
 		out = append(out, e)
