@@ -78,39 +78,43 @@ curl --noproxy '*' --connect-timeout 5 https://openrouter.ai/api/v1/models
 
 Dashboard: **http://localhost:9090/dashboard/**.
 
-### Run a real agent behind Warden (Ethos example)
+### Run Warden behind a real agent — out-of-the-box recipes
 
-[`deploy/compose/docker-compose.ethos.yml`](deploy/compose/docker-compose.ethos.yml) wraps the
-[Ethos](https://github.com/ethosagent/ethos) agent runtime so **all of its egress flows through
-Warden** with full visibility. Ethos runs on an internal-only network (no direct internet); Warden
-is its sole route out. The policy is **allow-all** (`~.*`) for now, so nothing is blocked — you just
-*see* every call on the dashboard.
+Warden ships drop-in Docker Compose recipes that put a popular agent runtime behind it with **zero local build** — the Warden image is pulled straight from Docker Hub (`ethosagent/warden`). The agent runs on an internal-only network with **no route to the internet**; Warden is its sole way out. Each recipe boots **allow-all**, so you immediately *see* every call on the dashboard — then you tighten the policy.
+
+| Agent | What it is | Bring it up | Agent UI | Warden dashboard |
+|---|---|---|---|---|
+| **[Ethos](docs/recipes/ethos.md)** | Node agent (web UI + API) | `docker compose -f deploy/compose/docker-compose.ethos.yml up` | http://localhost:3000 | http://localhost:9091/dashboard/ |
+| **[Hermes](docs/recipes/hermes.md)** | Node + OpenAI-compatible API | `docker compose -f deploy/compose/docker-compose.hermes.yml up` | http://localhost:8642 | http://localhost:9090/dashboard/ |
+| **[OpenClaw](docs/recipes/openclaw.md)** | Node self-hosted assistant | `docker compose -f deploy/compose/docker-compose.openclaw.yml up` | http://localhost:18789/ | http://localhost:9090/dashboard/ |
+| **[ZeroClaw](docs/recipes/zeroclaw.md)** | Rust single binary | `docker compose -f deploy/compose/docker-compose.zeroclaw.yml up` | http://localhost:42617 | http://localhost:9090/dashboard/ |
 
 ```sh
-# 1. Generate the proxy CA (once)
+# One-time: generate the proxy CA the compose files mount
 OUT_DIR=deploy/compose/certs ./scripts/gen-certs.sh
 
-# 2. Bring up Ethos + Warden
+# Bring up any recipe — the Warden image is pulled from Docker Hub (no build):
 docker compose -f deploy/compose/docker-compose.ethos.yml up
+
+# Pin a specific Warden version (defaults to the tested release, 0.2.1):
+WARDEN_VERSION=0.2.1 docker compose -f deploy/compose/docker-compose.ethos.yml up
 ```
 
-- **Ethos UI:** http://localhost:3000
-- **Warden egress dashboard:** http://localhost:9090/dashboard/ — every call Ethos makes, live.
+Every recipe also runs a **control-plane** that serves policy and aggregates the agent's traffic into a fleet dashboard at **https://localhost:7070/dashboard/** (served with the proxy CA — trust it). Full per-recipe details (ports, the Node `fetch` proxy workaround, and how to prove isolation) are in **[docs/recipes/](docs/recipes/)**.
 
-The compose encodes everything needed to route and observe a real agent:
+#### How a recipe works (Ethos, in detail)
+
+[`deploy/compose/docker-compose.ethos.yml`](deploy/compose/docker-compose.ethos.yml) wraps the [Ethos](https://github.com/ethosagent/ethos) agent runtime so **all of its egress flows through Warden** with full visibility. Ethos runs on an internal-only network (no direct internet); the Warden worker is its sole route out, and the policy is **allow-all** for now, so nothing is blocked — you just *see* every call. The compose encodes everything needed to route and observe a real agent:
 
 | Concern | How it's handled |
 |---|---|
-| **No bypass** | Ethos is on an `internal: true` network — its only egress is Warden; a direct call simply fails. |
-| **Proxy routing** | `HTTP(S)_PROXY=http://warden:8080`, plus **`NODE_USE_ENV_PROXY=1`** — Node's built-in `fetch` ignores `HTTPS_PROXY` without it, so agent calls would otherwise go direct and fail (`fetch failed`). |
+| **No bypass** | Ethos is on an `internal: true` network — its only egress is the Warden worker; a direct call simply fails. |
+| **Proxy routing** | `HTTP(S)_PROXY=http://worker:8080`, plus **`NODE_USE_ENV_PROXY=1`** — Node's built-in `fetch` ignores `HTTPS_PROXY` without it, so agent calls would otherwise go direct and fail (`fetch failed`). |
 | **TLS trust** | The proxy CA is mounted and trusted via `NODE_EXTRA_CA_CERTS` / `SSL_CERT_FILE` / `REQUESTS_CA_BUNDLE`, so Warden can terminate TLS and see URLs/methods/status. |
 | **UI access** | An internal network blocks host port-publishing, so a tiny `socat` sidecar forwards the Ethos UI to the host **without** giving Ethos an internet route. |
-| **Persistent audit** | A `warden-data` volume holds the analytics db so it survives restarts/redeploys. |
+| **Persistent audit** | Named data volumes hold the analytics DBs so they survive restarts/redeploys. |
 
-To put **your own** service behind Warden, copy the `ethos` service block: attach it to
-`ethos-internal` only, set the proxy env (incl. `NODE_USE_ENV_PROXY=1` for Node runtimes), trust the
-CA, and add its destinations to the allowlist. Full walkthrough:
-[docs/docker-end-to-end.md](docs/docker-end-to-end.md).
+To put **your own** service behind Warden, copy the `ethos` service block: attach it to `ethos-internal` only, set the proxy env (incl. `NODE_USE_ENV_PROXY=1` for Node runtimes), trust the CA, and add its destinations to the allowlist. Full walkthrough: [docs/docker-end-to-end.md](docs/docker-end-to-end.md).
 
 ## How It Works
 
