@@ -6,6 +6,7 @@ package worker
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -169,10 +170,13 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// mutating the loaded policy.
 	effectivePol := pol
 	effectivePol.SecretStore = secretStoreCfg
-	secretFetcher, err := newSecretFetcher(effectivePol, mapping)
+	secretFetcher, secretStore, err := newSecretFetcher(effectivePol, mapping)
 	if err != nil {
 		return err
 	}
+	// secretStoreBackend is the resolved backend name; secretStore is non-nil only
+	// for echo/aws. Both feed the dashboard's read-only secretstore tab below.
+	secretStoreBackend := secretStoreCfg.ResolvedBackend()
 	liveCacheTTL := time.Duration(pol.CacheTTLSeconds) * time.Second
 	secretProvider, err := secrets.NewCache(secretFetcher, liveCacheTTL, placeholders)
 	if err != nil {
@@ -357,6 +361,13 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// managed apply loop rebuilds ONLY the tagging layer around signedStore on a
 	// compliance toggle, so the signing/async layers and the base store are never
 	// disturbed by a live swap.
+	// auditPubKey / auditReceiptLog are captured for the dashboard's read-only
+	// audit tab (receipt verify + tail). Zero (nil key / "" path) when receipts are
+	// disabled, which leaves the tab's receipts block zeroed.
+	var (
+		auditPubKey     ed25519.PublicKey
+		auditReceiptLog string
+	)
 	var signedStore analytics.AnalyticsStore = asyncStore
 	if pol.Audit.SignedReceipts.Enabled {
 		signer, sErr := loadOrCreateSigner(pol.Audit.SignedReceipts.KeyFile)
@@ -369,6 +380,8 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		}
 		defer func() { _ = receiptLog.Close() }()
 		signedStore = audit.NewSigningStore(signedStore, signer, receiptLog)
+		auditPubKey = signer.PubKey()
+		auditReceiptLog = pol.Audit.SignedReceipts.Log
 		logger.Info("signed audit receipts enabled",
 			"log", pol.Audit.SignedReceipts.Log,
 			"pubkey", hex.EncodeToString(signer.PubKey()))
@@ -474,6 +487,16 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	if mcpGW != nil {
 		dashSrv.SetMCPProvider(mcpGW)
 	}
+	// Dashboard-V3 read tabs wired from what EXISTS on a worker:
+	//   - secretstore: the worker's read store lists KEY metadata (echo/aws). A nil
+	//     store (env backend) → the tab reports backend "none".
+	//   - audit: the worker signs receipts, so it can verify + tail its own log.
+	//     Compliance aggregation needs no wiring (the dashboard reads events). When
+	//     receipts are disabled, auditReceiptLog is "" → the receipts block zeroes.
+	//   - alerts: workers run no integrations, so no source is wired → the tab
+	//     returns [].
+	dashSrv.SetSecretStore(secretStore, secretStoreBackend)
+	dashSrv.SetAudit(auditReceiptLog, auditPubKey)
 	adminMux.Handle("/healthz", adminSrv.Handler())
 	adminMux.Handle("/admin/", adminSrv.Handler())
 	adminMux.Handle("/dashboard/", dashSrv.Handler())
@@ -579,24 +602,30 @@ func resolveSecretStore(distributed *config.SettingsWire, local config.Policy) c
 // package var so tests inject a fake without touching AWS or the network.
 var awsSecretsClientFactory = secrets.NewAWSSecretsClientFromEnv
 
-func newSecretFetcher(pol config.Policy, mapping map[string]string) (secrets.Fetcher, error) {
+// newSecretFetcher also returns the underlying SecretStore for the echo/aws
+// backends (nil for env, which has no store) so the dashboard's read-only
+// secretstore tab can list KEY metadata over the same store the Cache resolves
+// through — without building a second backend client. The returned store is
+// read-scoped in practice (the worker only ever calls Get/List through it).
+func newSecretFetcher(pol config.Policy, mapping map[string]string) (secrets.Fetcher, secrets.SecretStore, error) {
 	ss := pol.SecretStore
 	switch ss.ResolvedBackend() {
 	case config.SecretBackendEnv:
-		return secrets.NewEnvFetcher(mapping), nil
+		return secrets.NewEnvFetcher(mapping), nil, nil
 	case config.SecretBackendEcho:
-		return secrets.NewStoreFetcher(secrets.NewEchoStore()), nil
+		store := secrets.NewEchoStore()
+		return secrets.NewStoreFetcher(store), store, nil
 	case config.SecretBackendAWS:
 		if ss.AWS == nil {
-			return nil, fmt.Errorf("secretStore.backend=aws requires an aws config block")
+			return nil, nil, fmt.Errorf("secretStore.backend=aws requires an aws config block")
 		}
 		client, err := awsSecretsClientFactory(ss.AWS.Region)
 		if err != nil {
-			return nil, fmt.Errorf("secretStore.backend=aws: %w", err)
+			return nil, nil, fmt.Errorf("secretStore.backend=aws: %w", err)
 		}
 		store := secrets.NewAWSSecretStore(client, ss.AWS.Region, ss.AWS.NamePrefix)
-		return secrets.NewStoreFetcher(store), nil
+		return secrets.NewStoreFetcher(store), store, nil
 	default:
-		return nil, fmt.Errorf("secretStore.backend %q is not supported", ss.Backend)
+		return nil, nil, fmt.Errorf("secretStore.backend %q is not supported", ss.Backend)
 	}
 }

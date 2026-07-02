@@ -61,6 +61,10 @@ type Config struct {
 	// Store / Integrations are injected. The control plane holds a value only in
 	// transit on Put and never persists one (see the secrets handlers).
 	SecretStore secrets.SecretStore
+	// SecretStoreBackend names the SecretStore's backend (echo/aws) for the
+	// dashboard's read-only secretstore tab. Empty when no writable store is
+	// configured, in which case that tab reports backend "none".
+	SecretStoreBackend string
 }
 
 // policyWire is the shape sent to workers: allow/deny policy plus the optional
@@ -323,6 +327,18 @@ func (s *Server) Handler() http.Handler {
 		}
 		return views
 	})
+	// Dashboard-V3 read tabs. Each source EXISTS on the control plane:
+	//   - secretstore: the CP's WRITE store lists KEY metadata (never values). Nil
+	//     store (env/none backend) → the tab reports backend "none".
+	//   - alerts: the integrations manager's alert store. Nil manager → the tab
+	//     returns []. Wired only when integrations are configured.
+	//   - audit: compliance is aggregated from the aggregated event store by the
+	//     dashboard itself; the CP does not SIGN receipts (workers do), so no
+	//     receipts source is wired and the receipts block stays zeroed.
+	dash.SetSecretStore(s.secretStore, s.cfg.SecretStoreBackend)
+	if s.integrations != nil {
+		dash.SetAlerts(s.integrations.ListAlerts)
+	}
 	mux.Handle("/dashboard/", dash.Handler())
 
 	return mux

@@ -54,6 +54,19 @@ func NewManager(store *Store, instances []InstanceConfig, logger *slog.Logger, o
 // Bus returns the producer entrypoint. Detectors publish Findings here.
 func (m *Manager) Bus() *Bus { return m.bus }
 
+// ListAlerts returns the persisted alerts newest-first (by last_seen), limited to
+// limit rows (limit <= 0 returns all). It is the read accessor the dashboard uses
+// to render the alerts tab; a store error yields nil (the tab degrades to empty
+// rather than failing). Alerts are bounded, egress-safe metadata by construction.
+func (m *Manager) ListAlerts(limit int) []Alert {
+	alerts, err := m.store.ListAlerts(limit)
+	if err != nil {
+		m.logger.Error("integration: list alerts for dashboard failed", "error", err)
+		return nil
+	}
+	return alerts
+}
+
 // Start instantiates each configured instance from the registry, Starts it with
 // the reserved System handle and its decoded Config, binds it to the router, and
 // starts the router. It is resilient (fail-open): an unknown type or a failing

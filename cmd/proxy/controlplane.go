@@ -20,6 +20,7 @@ import (
 	"github.com/ethosagent/warden/internal/integration"
 	_ "github.com/ethosagent/warden/internal/integration/webhook" // register the webhook sink
 	"github.com/ethosagent/warden/internal/observability"
+	"github.com/ethosagent/warden/internal/secrets"
 )
 
 // newControlPlaneCmd builds the `control-plane` subcommand. The control plane
@@ -204,6 +205,9 @@ func runControlPlane(cmd *cobra.Command, opts cpOptions) error {
 		Integrations: integrations,
 		AlertDBPath:  alertDBPath,
 		SecretStore:  secretStore,
+		// Report the backend name to the dashboard only when a writable store was
+		// actually built (echo/aws); env/none leaves it empty → tab reports "none".
+		SecretStoreBackend: secretStoreBackendName(secretStore, pol.SecretStore),
 	})
 
 	httpSrv := &http.Server{
@@ -328,4 +332,15 @@ func dirWritable(dir string) bool {
 	_ = f.Close()
 	_ = os.Remove(name)
 	return true
+}
+
+// secretStoreBackendName returns the backend name to show on the dashboard's
+// secretstore tab: the resolved backend only when a writable store was actually
+// built (echo/aws), else "" so the tab reports "none". This keeps the tab's
+// backend label consistent with whether the /central/secrets endpoints exist.
+func secretStoreBackendName(store secrets.SecretStore, cfg config.SecretStoreConfig) string {
+	if store == nil {
+		return ""
+	}
+	return cfg.ResolvedBackend()
 }

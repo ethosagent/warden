@@ -5,6 +5,7 @@
 package dashboard
 
 import (
+	"crypto/ed25519"
 	"embed"
 	"encoding/json"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/config"
+	"github.com/ethosagent/warden/internal/integration"
 	"github.com/ethosagent/warden/internal/mcp"
 	"github.com/ethosagent/warden/internal/mcp/gateway"
 	"github.com/ethosagent/warden/internal/secrets"
@@ -71,6 +73,23 @@ type Server struct {
 	// one aggregation pass per distinct key per TTL.
 	analyticsCache *respCache
 	mcpCache       *respCache
+	// auditCache memoizes the audit payload (compliance event scan + receipts
+	// tail read) so the dashboard's 5s auto-refresh collapses to one pass per TTL.
+	auditCache *respCache
+	// secretStore lists managed secret KEY metadata (never values) for the
+	// secretstore endpoint; nil = no store (endpoint reports backend "none").
+	// secretBackend names the active backend (echo/aws/env) for display.
+	secretStore   secrets.SecretStore
+	secretBackend string
+	// alertsFn returns integration alerts (bounded, egress-safe metadata) for the
+	// alerts endpoint; nil (a worker with no integrations) = [].
+	alertsFn func(limit int) []integration.Alert
+	// auditReceiptLog is the signed-receipts JSONL path and auditTrustedKey the
+	// Ed25519 public key receipts are verified against. Empty path / nil key
+	// (receipts disabled, or the control plane which does not sign) leaves the
+	// audit receipts block zeroed; compliance aggregation is always available.
+	auditReceiptLog string
+	auditTrustedKey ed25519.PublicKey
 }
 
 // analyticsCacheTTL is how long a computed analytics/MCP payload is reused
@@ -176,6 +195,7 @@ func NewServer(data DataSource, policy config.Policy, sec secrets.SecretProvider
 		now:            time.Now,
 		analyticsCache: newRespCache(),
 		mcpCache:       newRespCache(),
+		auditCache:     newRespCache(),
 	}
 }
 
@@ -331,6 +351,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/dashboard/api/workers", s.handleWorkers)
 	mux.HandleFunc("/dashboard/api/query", s.handleQuery)
 	mux.HandleFunc("/dashboard/api/query/schema", s.handleQuerySchema)
+	mux.HandleFunc("/dashboard/api/secretstore", s.handleSecretStore)
+	mux.HandleFunc("/dashboard/api/alerts", s.handleAlerts)
+	mux.HandleFunc("/dashboard/api/audit", s.handleAudit)
+	mux.HandleFunc("/dashboard/api/audit/verify", s.handleAuditVerify)
+	mux.HandleFunc("/dashboard/api/setup", s.handleSetup)
 	mux.HandleFunc("/dashboard/", s.handleIndex)
 	return mux
 }

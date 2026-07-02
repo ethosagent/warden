@@ -62,24 +62,30 @@ func (c *fakeAWSClient) ListSecrets(prefix string) ([]secrets.AWSSecretEntry, er
 // to the original EnvFetcher path (byte-identical to today).
 func TestNewSecretFetcher_EnvIsDefault(t *testing.T) {
 	pol := config.Policy{} // SecretStore zero value => backend env
-	f, err := newSecretFetcher(pol, map[string]string{"openai_secret_001": "OPENAI_API_KEY"})
+	f, store, err := newSecretFetcher(pol, map[string]string{"openai_secret_001": "OPENAI_API_KEY"})
 	if err != nil {
 		t.Fatalf("newSecretFetcher(env): %v", err)
 	}
 	if _, ok := f.(*secrets.EnvFetcher); !ok {
 		t.Fatalf("omitted secretStore fetcher = %T, want *secrets.EnvFetcher", f)
 	}
+	if store != nil {
+		t.Fatal("env backend must return a nil SecretStore (there is no store to list)")
+	}
 }
 
 // TestNewSecretFetcher_ExplicitEnv covers backend: env explicitly.
 func TestNewSecretFetcher_ExplicitEnv(t *testing.T) {
 	pol := config.Policy{SecretStore: config.SecretStoreConfig{Backend: config.SecretBackendEnv}}
-	f, err := newSecretFetcher(pol, map[string]string{"k": "V"})
+	f, store, err := newSecretFetcher(pol, map[string]string{"k": "V"})
 	if err != nil {
 		t.Fatalf("newSecretFetcher(env): %v", err)
 	}
 	if _, ok := f.(*secrets.EnvFetcher); !ok {
 		t.Fatalf("fetcher = %T, want *secrets.EnvFetcher", f)
+	}
+	if store != nil {
+		t.Fatal("env backend must return a nil SecretStore (there is no store to list)")
 	}
 }
 
@@ -93,9 +99,12 @@ func TestSecretBackend_EchoResolvesKeyEndToEnd(t *testing.T) {
 		Secrets:     []config.SecretMapping{{Placeholder: "openai_secret_001"}},
 	}
 	// mapping is unused for echo (the placeholder IS the key); pass nil to prove it.
-	fetcher, err := newSecretFetcher(pol, nil)
+	fetcher, store, err := newSecretFetcher(pol, nil)
 	if err != nil {
 		t.Fatalf("newSecretFetcher(echo): %v", err)
+	}
+	if store == nil {
+		t.Fatal("echo backend must return a non-nil SecretStore for the dashboard tab")
 	}
 	cache, err := secrets.NewCache(fetcher, time.Hour, []string{"openai_secret_001"})
 	if err != nil {
@@ -136,9 +145,12 @@ func TestNewSecretFetcher_AWSResolvesThroughStore(t *testing.T) {
 		Backend: config.SecretBackendAWS,
 		AWS:     &config.SecretStoreAWS{Region: "us-east-1", NamePrefix: "warden/"},
 	}}
-	fetcher, err := newSecretFetcher(pol, nil)
+	fetcher, store, err := newSecretFetcher(pol, nil)
 	if err != nil {
 		t.Fatalf("newSecretFetcher(aws): %v", err)
+	}
+	if store == nil {
+		t.Fatal("aws backend must return a non-nil SecretStore for the dashboard tab")
 	}
 	cache, err := secrets.NewCache(fetcher, time.Hour, []string{"openai_secret_001"})
 	if err != nil {
@@ -162,7 +174,7 @@ func TestNewSecretFetcher_AWSMissingCredsFailFast(t *testing.T) {
 		Backend: config.SecretBackendAWS,
 		AWS:     &config.SecretStoreAWS{Region: "us-east-1", NamePrefix: "warden/"},
 	}}
-	if _, err := newSecretFetcher(pol, nil); err == nil {
+	if _, _, err := newSecretFetcher(pol, nil); err == nil {
 		t.Fatal("expected a fail-fast error when the aws client factory errors")
 	}
 }
