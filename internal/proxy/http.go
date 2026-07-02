@@ -41,14 +41,24 @@ type requestScope struct {
 	gw        MCPGateway
 	liveJudge Judge
 
-	// Closables owned by this request. cleanup closes each exactly once.
+	// req and resp are per-request closables cleanup closes exactly once. The
+	// upstream conn (upstream + its upstreamBR) is owned by the SESSION, not the
+	// request: handleHTTP carries it across keep-alive iterations for reuse and
+	// closes it exactly once when the session ends, so cleanup never touches it.
 	req        *http.Request
 	resp       *http.Response
 	upstream   net.Conn
 	upstreamBR *bufio.Reader
+	// reused is true when upstream was carried over from a prior keep-alive
+	// response (an already-connected conn), so forward writes to it and, on a
+	// stale half-closed conn, redials ONCE. A fresh (reused==false) dial never
+	// retries. The SAME upstreamBR is carried so buffered next-response bytes are
+	// preserved.
+	reused bool
 	// handoff is set when the connection lifecycle is handed to the WebSocket
 	// pump, which owns and closes the upstream (and the response) itself. cleanup
-	// must NOT touch upstream/resp in that case, to avoid a double close.
+	// must NOT touch resp in that case, and the session must NOT close the
+	// upstream (the pump does), to avoid a double close.
 	handoff bool
 
 	// reqBody is the request body read ONCE (bounded by maxBodySwapSize+1) and
@@ -71,16 +81,15 @@ type requestScope struct {
 	swappedNames []string
 }
 
-// cleanup releases the request's closables exactly once, on whatever exit path
-// serveHTTPRequest returns through. It reproduces the close semantics the old
-// six hand-rolled exits had, per path:
+// cleanup releases the REQUEST's closables exactly once, on whatever exit path
+// serveHTTPRequest returns through. The upstream conn is NOT a request closable —
+// the session (handleHTTP) owns and closes it — so cleanup only handles bodies:
 //   - req.Body is always closed (http.ReadRequest always leaves it non-nil).
-//   - resp/upstream are closed only when they were actually dialed/read (nil
-//     before forward, so guarded), matching paths that returned before dialing.
-//   - When handoff is set (WebSocket upgrade), upstream and resp are left alone:
-//     handleWSUpgrade already owns and closes the upstream, and the response has
-//     no separate body to close — so the generic cleanup skips both to avoid a
-//     double close of the conn that was handed to the frame pump.
+//   - resp.Body is closed on non-handoff paths (harmless — a fully relayed
+//     response was already drained by resp.Write; a terminal path may leave a
+//     partial body that Close releases).
+//   - When handoff is set (WebSocket upgrade) resp is left alone: the frame pump
+//     owns the raw conn and the 101 response has no separate body to close.
 func (s *requestScope) cleanup() {
 	if s.req != nil && s.req.Body != nil {
 		_ = s.req.Body.Close()
@@ -90,9 +99,6 @@ func (s *requestScope) cleanup() {
 	}
 	if s.resp != nil && s.resp.Body != nil {
 		_ = s.resp.Body.Close()
-	}
-	if s.upstream != nil {
-		_ = s.upstream.Close()
 	}
 }
 
@@ -134,25 +140,48 @@ func (s *requestScope) ensureBody() (body []byte, ok bool) {
 }
 
 // handleHTTP serves the keep-alive loop for one MITM-terminated client conn.
-// Each iteration is one request served by serveHTTPRequest, which owns a
-// requestScope and a single deferred cleanup; the loop ends when that request
-// signals the session is over (a read error, a terminal decision, a write
-// failure, or Connection: close).
+// The SESSION owns the upstream conn: one upstream (+ its bufio.Reader) is
+// carried across iterations so N keep-alive requests to this single fixed host
+// pay ONE upstream dial instead of N. A CONNECT tunnel targets exactly one
+// domain:port, so intra-session reuse never crosses hosts.
+//
+// serveHTTPRequest returns the upstream to carry (nil after a WebSocket handoff,
+// which hands ownership to the frame pump). The deferred close fires ONCE for
+// whatever upstream is current when the loop exits — for any reason: a clean
+// Connection: close, a deny/502 terminal, an SSE stream, a client EOF, or a
+// stale-conn redial's fresh conn. It is nil (nothing to close) before the first
+// forward and after a handoff, so there is no double close and no leak.
 func (p *Proxy) handleHTTP(tlsConn *tls.Conn, br *bufio.Reader, domain string, port int, needsJudge bool) {
+	var upstream net.Conn
+	var upstreamBR *bufio.Reader
+	defer func() {
+		if upstream != nil {
+			_ = upstream.Close()
+		}
+	}()
 	for {
-		if p.serveHTTPRequest(tlsConn, br, domain, port, needsJudge) {
+		end, up, upBR := p.serveHTTPRequest(tlsConn, br, domain, port, needsJudge, upstream, upstreamBR)
+		upstream, upstreamBR = up, upBR
+		if end {
 			return
 		}
 	}
 }
 
 // serveHTTPRequest reads and serves one request end-to-end as the named stage
-// sequence, with a single deferred cleanup releasing the request's closables on
-// every exit. It returns true when the keep-alive session should end.
-func (p *Proxy) serveHTTPRequest(tlsConn *tls.Conn, br *bufio.Reader, domain string, port int, needsJudge bool) (endSession bool) {
+// sequence, with a single deferred cleanup releasing the request's body closables
+// on every exit. The carried-in upstream (nil on the session's first request, or
+// the reusable conn from a prior clean keep-alive response) is threaded onto the
+// scope so forward reuses it. It returns whether the session should end plus the
+// upstream to carry forward: the scope's upstream on every non-handoff path (the
+// session closes it on exit or reuses it next iteration), or nil after a
+// WebSocket handoff so the session does not double-close the pump-owned conn.
+func (p *Proxy) serveHTTPRequest(tlsConn *tls.Conn, br *bufio.Reader, domain string, port int, needsJudge bool, upstream net.Conn, upstreamBR *bufio.Reader) (endSession bool, carryUpstream net.Conn, carryBR *bufio.Reader) {
 	req, err := http.ReadRequest(br)
 	if err != nil {
-		return true
+		// Client gone / EOF between keep-alive requests: end the session and let it
+		// close whatever upstream was carried in (nil if none was ever dialed).
+		return true, upstream, upstreamBR
 	}
 
 	// Snapshot the live MCP gateway and judge once per request through their
@@ -168,9 +197,25 @@ func (p *Proxy) serveHTTPRequest(tlsConn *tls.Conn, br *bufio.Reader, domain str
 		req:        req,
 		gw:         p.mcpGateway(),
 		liveJudge:  p.judge(),
+		upstream:   upstream,
+		upstreamBR: upstreamBR,
+		reused:     upstream != nil,
 	}
 	defer s.cleanup()
 
+	end := p.runRequestStages(s)
+	if s.handoff {
+		// The frame pump owns and closes s.upstream; the session must not.
+		return true, nil, nil
+	}
+	// The session owns s.upstream: it closes it on end==true and reuses it on the
+	// clean end==false path. On a stale-conn redial s.upstream is the fresh conn.
+	return end, s.upstream, s.upstreamBR
+}
+
+// runRequestStages runs the named stage chain for one request and returns whether
+// the keep-alive session should end.
+func (p *Proxy) runRequestStages(s *requestScope) (endSession bool) {
 	if p.readRequest(s) {
 		return true
 	}
@@ -429,33 +474,83 @@ func (p *Proxy) applyTransforms(s *requestScope) (endSession bool) {
 	return false
 }
 
-// forward dials a fresh TLS upstream, writes the request, and reads the response
-// onto the scope. Dial/write/read failures terminate with 502; cleanup then
-// closes exactly what was opened (upstream is nil before a successful dial, so a
-// dial failure leaks nothing). closeAfter is computed here from the request and
-// response Connection semantics.
+// forward sends s.req to the upstream and reads the response onto the scope,
+// computing closeAfter from the request/response Connection semantics. It has two
+// modes:
+//
+//   - Fresh (s.reused==false): the session's first request, or the leg after a
+//     stale close. Dial s.domain:s.port, stream the request straight through, read
+//     the response. Any dial/write/read failure is a real error → 502, NO retry.
+//   - Reused (s.reused==true): a conn carried over from a prior clean keep-alive
+//     response. The server may have closed it while idle, so serialize the request
+//     once (req.Write consumes the body) and, if the write or read fails, close the
+//     dead conn, REDIAL ONCE to the SAME host, and re-send the identical bytes. A
+//     second failure → 502. Never more than one retry.
+//
+// On success s.upstream/s.upstreamBR are the live conn the session carries. On a
+// stale redial they are the fresh conn; the dead one was already closed here.
 func (p *Proxy) forward(s *requestScope) (endSession bool) {
+	if !s.reused {
+		if err := p.dialUpstream(s); err != nil {
+			return p.badGateway(s)
+		}
+		if err := s.req.Write(s.upstream); err != nil || !p.readUpstreamResponse(s) {
+			return p.badGateway(s)
+		}
+		return false
+	}
+
+	// Reused conn: serialize once so a stale redial can re-send identical bytes.
+	var buf bytes.Buffer
+	if err := s.req.Write(&buf); err != nil {
+		return p.badGateway(s)
+	}
+	raw := buf.Bytes()
+	if _, err := s.upstream.Write(raw); err == nil && p.readUpstreamResponse(s) {
+		return false
+	}
+	// Stale half-closed keep-alive conn: drop it and redial exactly once.
+	_ = s.upstream.Close()
+	s.upstream, s.upstreamBR, s.reused = nil, nil, false
+	if err := p.dialUpstream(s); err != nil {
+		return p.badGateway(s)
+	}
+	if _, err := s.upstream.Write(raw); err != nil || !p.readUpstreamResponse(s) {
+		return p.badGateway(s)
+	}
+	return false
+}
+
+// dialUpstream dials a fresh TLS upstream for this session's fixed host and
+// installs it (plus a new buffered reader) on the scope. It always targets
+// s.domain:s.port — reuse never crosses hosts.
+func (p *Proxy) dialUpstream(s *requestScope) error {
 	upstream, err := p.dialTLS("tcp", net.JoinHostPort(s.domain, fmt.Sprintf("%d", s.port)), &tls.Config{ServerName: s.domain})
 	if err != nil {
-		writeErrorResponse(s.tlsConn, 502, "Bad Gateway")
-		return true
+		return err
 	}
 	s.upstream = upstream
-
-	if err := s.req.Write(upstream); err != nil {
-		writeErrorResponse(s.tlsConn, 502, "Bad Gateway")
-		return true
-	}
-
 	s.upstreamBR = bufio.NewReader(upstream)
+	return nil
+}
+
+// readUpstreamResponse reads the response off s.upstreamBR onto the scope and
+// computes closeAfter. It returns false on a read error so forward can treat a
+// reused conn as stale (or a fresh conn as a 502).
+func (p *Proxy) readUpstreamResponse(s *requestScope) (ok bool) {
 	resp, err := http.ReadResponse(s.upstreamBR, s.req)
 	if err != nil {
-		writeErrorResponse(s.tlsConn, 502, "Bad Gateway")
-		return true
+		return false
 	}
 	s.resp = resp
 	s.closeAfter = s.req.Close || resp.Close
-	return false
+	return true
+}
+
+// badGateway writes a 502 to the client and signals the session should end.
+func (p *Proxy) badGateway(s *requestScope) (endSession bool) {
+	writeErrorResponse(s.tlsConn, 502, "Bad Gateway")
+	return true
 }
 
 // relayResponse dispatches the upstream response to one of three terminal
