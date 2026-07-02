@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ethosagent/warden/internal/analytics"
+	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/mcp/gateway"
 	"github.com/ethosagent/warden/internal/mcp/sse"
 	"github.com/ethosagent/warden/internal/protocol"
@@ -86,7 +87,8 @@ type requestScope struct {
 	// deduplicated set of detection categories seen in the PRE-SWAP body;
 	// dlpAction is "monitor" when DLP inspected the request (Phase 1 never blocks);
 	// dlpPartial flags honest under-coverage (over-cap body or non-scannable type);
-	// dlpEncoded is reserved for decoded-layer-only findings (unused in Phase 1).
+	// dlpEncoded flags a redact/block finding that lived only in a decoded/classifier
+	// layer with no raw offset — set by dlpApplyRedact's fail-closed escalation.
 	dlpClasses []string
 	dlpAction  string
 	dlpRule    string
@@ -378,9 +380,10 @@ func (p *Proxy) mcpRequestScan(s *requestScope) (endSession bool) {
 // metrics. With NO policy configured (no rules/class-defaults) or no data class
 // detected it is pure observability: action="monitor", never blocks. When a policy
 // IS configured and a class is detected it evaluates the per-class egress rules;
-// in ENFORCE mode a block (or, until Phase 4, a redact) verdict terminates here
-// with a 403 + deny event. MONITOR mode records the would-be action but NEVER
-// blocks or mutates the body — the zero-risk wedge.
+// in ENFORCE mode a block verdict terminates here with a 403 + deny event and a
+// redact verdict scrubs the matched spans inline (dlpApplyRedact) before forwarding.
+// MONITOR mode records the would-be action but NEVER blocks or mutates the body —
+// the zero-risk wedge.
 //
 // DLP is FAIL-OPEN on unscannable bodies and never 413s. It only performs the
 // shared buffered read when that read provably cannot 413 (a known Content-Length
@@ -480,22 +483,28 @@ func (p *Proxy) dlpScan(s *requestScope) (endSession bool) {
 		s.dlpClasses = classes
 	}
 
-	// Phase 3: per-class egress rules. With NO policy configured (no rules, no class
-	// defaults) DLP is pure observability — the action stays "monitor" and nothing
-	// is ever blocked, byte-identical to the monitor-only phase. A body with no data
-	// class likewise has nothing to police. Otherwise evaluate the precedence rules;
-	// in enforce mode a block/redact verdict terminates here with a 403 + deny event.
-	// MONITOR MODE never blocks: decide() returns block=false, so the would-be action
-	// is recorded on the allow event and the request is forwarded unchanged.
+	// Per-class egress rules. With NO policy configured (no rules, no class defaults)
+	// DLP is pure observability — the action stays "monitor" and nothing is blocked or
+	// mutated, byte-identical to the monitor-only phase. A body with no data class
+	// likewise has nothing to police. Otherwise evaluate the precedence rules and map
+	// the whole-body verdict onto behavior:
+	//   - block  → ENFORCE terminates with a 403 + deny event; monitor records only.
+	//   - redact → ENFORCE scrubs the matched spans inline and forwards (dlpApplyRedact);
+	//              monitor records the would-be redact and forwards the ORIGINAL body.
+	//   - allow/monitor → forward, record the action.
+	// MONITOR MODE never blocks or mutates: the would-be action is recorded on the
+	// single allow event and the request is forwarded unchanged.
 	if d.hasPolicy() && len(detected) > 0 {
-		action, rule, block := d.decide(detected, s.domain)
+		action, rule := d.decide(detected, s.domain)
 		s.dlpAction = action
 		s.dlpRule = rule
-		if block {
-			// enforce + block (or redact, treated as block until Phase 4 implements
-			// span redaction — fail-closed, safer than forwarding unredacted).
-			// TODO(phase4): real inline redaction here instead of blocking redact.
-			return p.dlpDeny(s)
+		switch action {
+		case config.DLPActionBlock:
+			if d.mode == config.DLPModeEnforce {
+				return p.dlpDeny(s)
+			}
+		case config.DLPActionRedact:
+			return p.dlpApplyRedact(s, body)
 		}
 	}
 	return false
@@ -505,8 +514,9 @@ func (p *Proxy) dlpScan(s *requestScope) (endSession bool) {
 // agent plus a deny audit event carrying the bounded classes + action + rule, and a
 // bounded "dlp" blocked metric. It mirrors the judge/MCP enforce-deny shape and is
 // terminal (returns endSession=true so the deferred cleanup runs). The recorded
-// DLPAction preserves the verdict intent (e.g. "redact" even though redact blocks
-// this phase), so the event honestly reflects what policy asked for.
+// DLPAction preserves the verdict intent — for a decoded-layer redact that could not
+// be located it stays "redact" with DLPEncoded=true, so the event honestly reflects
+// that policy asked for redaction but the request was escalated to a fail-closed block.
 func (p *Proxy) dlpDeny(s *requestScope) (endSession bool) {
 	fullURL := "https://" + s.domain + s.req.URL.RequestURI()
 	reason := "dlp_" + s.dlpAction // dlp_block / dlp_redact — bounded, closed set

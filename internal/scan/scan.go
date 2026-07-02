@@ -345,12 +345,7 @@ func (s *patternScanner) ScanResponse(body []byte) []Detection {
 		}
 	}
 
-	allPatterns := make([]compiledPattern, 0, len(s.injectionPatterns)+len(s.credentialPatterns)+len(s.piiPatterns)+len(s.infrastructurePatterns)+len(s.customPatterns))
-	allPatterns = append(allPatterns, s.injectionPatterns...)
-	allPatterns = append(allPatterns, s.credentialPatterns...)
-	allPatterns = append(allPatterns, s.piiPatterns...)
-	allPatterns = append(allPatterns, s.infrastructurePatterns...)
-	allPatterns = append(allPatterns, s.customPatterns...)
+	allPatterns := s.allPatterns()
 
 	scanLayer := func(data []byte) {
 		for _, p := range allPatterns {
@@ -360,11 +355,7 @@ func (s *patternScanner) ScanResponse(body []byte) []Detection {
 			}
 			// Custom patterns carry their class directly (p.classes); built-ins
 			// derive it from the central table.
-			cls := p.classes
-			if cls == nil {
-				cls = classesFor(p.name, p.category)
-			}
-			det := Detection{Category: p.category, Pattern: p.name, Severity: p.severity, Classes: cls}
+			det := Detection{Category: p.category, Pattern: p.name, Severity: p.severity, Classes: classesForPattern(p)}
 			if s.evidence {
 				det.Evidence = maskMatch(m)
 			}

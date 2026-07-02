@@ -21,8 +21,9 @@ const maxDLPScanSize = 1 << 20 // 1 MB
 // DLPScanner scans OUTBOUND request bodies for credential leakage, PII, source
 // code, and operator custom classes, then applies the per-class per-destination
 // egress policy. In monitor mode it records the would-be action but never blocks
-// or mutates; in enforce mode a block (or, until Phase 4, a redact) terminates the
-// request with 403. mode=off never constructs one (nil scanner disables the stage).
+// or mutates; in enforce mode a block terminates the request with 403 and a redact
+// scrubs the matched spans inline. mode=off never constructs one (nil scanner
+// disables the stage).
 //
 // It is safe for concurrent use (scan.Scanner is immutable after construction and
 // the config is read-only). A nil *DLPScanner means DLP is disabled: the dlpScan
@@ -71,14 +72,35 @@ func (d *DLPScanner) hasPolicy() bool {
 	return len(d.cfg.Rules) > 0 || len(d.cfg.Classes) > 0
 }
 
-// decide evaluates the egress policy for the detected classes at dest and returns
-// the action, its bounded rule id, and whether ENFORCE should block. block is true
-// only in enforce mode for a block or redact verdict; monitor mode never blocks
-// (block is always false), so it merely records the would-be action. redact blocks
-// in enforce as a fail-closed interim until Phase 4 implements span redaction.
-func (d *DLPScanner) decide(classes []scan.DataClass, dest string) (action, rule string, block bool) {
+// decide evaluates the egress policy for the whole body's detected classes at dest
+// and returns the winning action + its bounded rule id. It is a pure lookup: the
+// caller (dlpScan) maps the action onto behavior — block/redact only ENFORCE, while
+// monitor records the would-be action and forwards. The verdict is the most
+// restrictive across all classes (deny-wins), so a body carrying one redact class
+// and one allow class resolves to redact.
+func (d *DLPScanner) decide(classes []scan.DataClass, dest string) (action, rule string) {
 	v := dlp.Evaluate(classes, dest, d.cfg)
-	block = d.mode == config.DLPModeEnforce &&
-		(v.Action == config.DLPActionBlock || v.Action == config.DLPActionRedact)
-	return v.Action, v.Rule, block
+	return v.Action, v.Rule
+}
+
+// classAction resolves the egress action for a SINGLE class at dest. The redactor
+// uses it for per-class decisions: only spans whose class resolves to redact are
+// scrubbed, and an unredactable (decoded/classifier) finding whose class resolves to
+// redact/block escalates the request to a fail-closed block.
+func (d *DLPScanner) classAction(c scan.DataClass, dest string) string {
+	return dlp.Evaluate([]scan.DataClass{c}, dest, d.cfg).Action
+}
+
+// scanSpans runs the span-carrying scan for the redactor. ok is false when the
+// scanner does not implement the in-process RequestScanner seam — a build-time
+// impossibility for the concrete pattern scanner NewDLPScanner constructs, but the
+// caller treats !ok as fail-closed (block in enforce) rather than forwarding
+// unredacted. The returned offsets are in-process only and never leave the proxy.
+func (d *DLPScanner) scanSpans(body []byte) (spans []scan.SpanDetection, encoded []scan.Detection, ok bool) {
+	rs, ok := d.scanner.(scan.RequestScanner)
+	if !ok {
+		return nil, nil, false
+	}
+	spans, encoded = rs.ScanRequestSpans(body)
+	return spans, encoded, true
 }

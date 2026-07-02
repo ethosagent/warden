@@ -228,9 +228,10 @@ func TestDLP_EnforceCustomClassBlocks(t *testing.T) {
 	}
 }
 
-// Redact → block interim: until Phase 4 implements span redaction, a redact
-// verdict fails closed (blocks) in enforce, and the event records the redact intent.
-func TestDLP_EnforceRedactBlocksInterim(t *testing.T) {
+// Redact inline (Phase 4): a redact verdict in enforce scrubs the matched span and
+// FORWARDS (200); upstream receives [REDACTED:<class>] in place of the value, never
+// the original bytes, and the allow event records DLPAction="redact".
+func TestDLP_EnforceRedactsInline(t *testing.T) {
 	caCertPEM, caKeyPEM, caCert, caKey := generateTestCA(t)
 	backendLn, rb := startBackend(t, caCert, caKey)
 
@@ -244,22 +245,27 @@ func TestDLP_EnforceRedactBlocksInterim(t *testing.T) {
 	p, ss := startTestProxyWithDLP(t, []string{"api.openai.com"}, caCertPEM, caKeyPEM, dlp, map[string]string{}, nil, nil)
 	p.dialTLS = dialBackend(backendLn)
 
-	if status := doPostTo(t, p, caCertPEM, "api.openai.com", "text/plain", piiBody); status != 403 {
-		t.Fatalf("redact must fail closed (block) in enforce Phase 3, got %d", status)
+	if status := doPostTo(t, p, caCertPEM, "api.openai.com", "text/plain", piiBody); status != 200 {
+		t.Fatalf("redact must scrub-and-forward (200) in enforce, got %d", status)
 	}
-	if got := backendBody(rb); got != "" {
-		t.Fatalf("redact-blocked request must not reach upstream, got %q", got)
+	got := backendBody(rb)
+	want := "contact: [REDACTED:pii.contact] please"
+	if got != want {
+		t.Fatalf("upstream body = %q, want %q", got, want)
+	}
+	if strings.Contains(got, "alice@example.com") {
+		t.Fatalf("upstream must NOT receive the original email, got %q", got)
 	}
 	time.Sleep(50 * time.Millisecond)
-	ev := findEvent(ss.snapshot(), "https", "deny")
+	ev := findEvent(ss.snapshot(), "https", "allow")
 	if ev == nil {
-		t.Fatalf("expected deny event, got %+v", ss.snapshot())
+		t.Fatalf("expected allow event (redact forwards), got %+v", ss.snapshot())
 	}
 	if ev.DLPAction != "redact" {
-		t.Fatalf("event must record the redact intent, got %q", ev.DLPAction)
+		t.Fatalf("event must record redact, got %q", ev.DLPAction)
 	}
-	if ev.Reason != "dlp_redact" {
-		t.Fatalf("deny reason = %q, want dlp_redact", ev.Reason)
+	if findEvent(ss.snapshot(), "https", "deny") != nil {
+		t.Fatalf("redact must not emit a deny event")
 	}
 }
 
