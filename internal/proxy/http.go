@@ -449,16 +449,21 @@ func (p *Proxy) dlpScan(s *requestScope) (endSession bool) {
 	p.recordDLPFindings(dets)
 
 	if len(dets) > 0 {
-		// Phase 1 maps each Detection.Category directly to a data class (dedup).
-		// Phase 2 replaces this flat mapping with the real DataClass taxonomy.
+		// Phase 2: emit the real DataClass taxonomy. Each detection carries zero or
+		// more dotted data classes (scan.classesFor); dedup the union across all
+		// detections into the event's bounded class list. Injection findings carry
+		// no data class, so they contribute nothing here.
 		seen := make(map[string]struct{}, len(dets))
 		classes := make([]string, 0, len(dets))
 		for _, det := range dets {
-			if _, dup := seen[det.Category]; dup {
-				continue
+			for _, c := range det.Classes {
+				name := string(c)
+				if _, dup := seen[name]; dup {
+					continue
+				}
+				seen[name] = struct{}{}
+				classes = append(classes, name)
 			}
-			seen[det.Category] = struct{}{}
-			classes = append(classes, det.Category)
 		}
 		s.dlpClasses = classes
 	}

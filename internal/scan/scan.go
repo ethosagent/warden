@@ -16,10 +16,15 @@ import (
 // It omits matched content by default; Evidence is populated (with a MASKED
 // sample — never the raw value) only when the Scanner is built WithEvidence.
 type Detection struct {
-	Category string // "injection", "credential_leak", or "pii"
+	Category string // "injection", "credential_leak", "pii", "infrastructure", "source_code"
 	Pattern  string // pattern name
 	Severity string // "high", "medium", "low"
 	Evidence string // masked sample (opt-in): "•••• + last-4 (len N)" — never raw
+	// Classes are the policy-facing DATA CLASSES this detection carries (dotted
+	// hierarchy, e.g. pii.financial). Additive: Category stays for back-compat.
+	// One detection may carry several (a PEM key is credentials + source_code);
+	// injection findings carry none (threat detection, not a data class).
+	Classes []DataClass
 }
 
 const maxScanSize = 1 << 20 // 1 MB
@@ -36,11 +41,21 @@ type Scanner interface {
 // PII detection. It is safe for concurrent use after construction and satisfies
 // the Scanner interface.
 type patternScanner struct {
-	injectionPatterns  []compiledPattern
-	credentialPatterns []compiledPattern
-	piiPatterns        []compiledPattern
-	evidence           bool // capture a MASKED evidence sample per detection
+	injectionPatterns      []compiledPattern
+	credentialPatterns     []compiledPattern
+	piiPatterns            []compiledPattern
+	infrastructurePatterns []compiledPattern
+	classifiers            []bodyClassifier // whole-body classifiers (source_code, k8s)
+	evidence               bool             // capture a MASKED evidence sample per detection
 }
+
+// bodyClassifier inspects a whole body (or decoded layer) and returns zero or
+// more detections. Classifiers back the source_code family and the k8s-manifest
+// marker — findings that are structural (co-occurrence, density) rather than a
+// single matched span, so they cannot be expressed as one compiledPattern. They
+// carry NO maskable match, so Evidence stays empty; Classes are assigned centrally
+// from the pattern name (classesFor), exactly like compiledPattern detections.
+type bodyClassifier func(data []byte) []Detection
 
 // compiledPattern is a single detection rule. An optional validator may further
 // vet a regex match before a Detection is emitted (e.g. Luhn check, structural
@@ -56,8 +71,9 @@ type compiledPattern struct {
 
 // options holds Scanner construction settings configured via Option values.
 type options struct {
-	phonePII bool
-	evidence bool
+	phonePII  bool
+	healthPII bool
+	evidence  bool
 }
 
 // Option configures a Scanner at construction time.
@@ -67,6 +83,14 @@ type Option func(*options)
 // Phone detection is off by default because bare digit runs over-match.
 func WithPhonePII(enabled bool) Option {
 	return func(o *options) { o.phonePII = enabled }
+}
+
+// WithHealthPII enables (or disables) the opt-in pii.health detectors
+// (diagnosis / medication / ICD-10 context). OFF by default because the
+// keyword-and-context heuristics over-match ordinary prose; enable only when the
+// destination is known to carry clinical data. Mirrors WithPhonePII.
+func WithHealthPII(enabled bool) Option {
+	return func(o *options) { o.healthPII = enabled }
 }
 
 // WithEvidence enables capturing a MASKED sample per detection (last-4 + length;
@@ -196,6 +220,22 @@ func NewScanner(opts ...Option) Scanner {
 		})
 	}
 
+	// International / structured PII families (pii.identity, pii.financial). Each
+	// carries a mandatory validator; they keep Category "pii" and derive their
+	// precise class from the pattern name (patternClasses).
+	s.piiPatterns = append(s.piiPatterns, buildIdentityPatterns()...)
+	s.piiPatterns = append(s.piiPatterns, buildFinancialPatterns()...)
+
+	// pii.health is DEFAULT OFF (high FP): only compiled when explicitly opted in.
+	if cfg.healthPII {
+		s.piiPatterns = append(s.piiPatterns, buildHealthPatterns()...)
+	}
+
+	// Infrastructure exact matchers + the k8s co-occurrence classifier and the
+	// source_code classifiers.
+	s.infrastructurePatterns = buildInfraPatterns()
+	s.classifiers = append(buildSourceCodeClassifiers(), k8sManifestClassifier)
+
 	return s
 }
 
@@ -268,10 +308,11 @@ func (s *patternScanner) ScanResponse(body []byte) []Detection {
 		}
 	}
 
-	allPatterns := make([]compiledPattern, 0, len(s.injectionPatterns)+len(s.credentialPatterns)+len(s.piiPatterns))
+	allPatterns := make([]compiledPattern, 0, len(s.injectionPatterns)+len(s.credentialPatterns)+len(s.piiPatterns)+len(s.infrastructurePatterns))
 	allPatterns = append(allPatterns, s.injectionPatterns...)
 	allPatterns = append(allPatterns, s.credentialPatterns...)
 	allPatterns = append(allPatterns, s.piiPatterns...)
+	allPatterns = append(allPatterns, s.infrastructurePatterns...)
 
 	scanLayer := func(data []byte) {
 		for _, p := range allPatterns {
@@ -279,11 +320,19 @@ func (s *patternScanner) ScanResponse(body []byte) []Detection {
 			if !ok {
 				continue
 			}
-			det := Detection{Category: p.category, Pattern: p.name, Severity: p.severity}
+			det := Detection{Category: p.category, Pattern: p.name, Severity: p.severity, Classes: classesFor(p.name, p.category)}
 			if s.evidence {
 				det.Evidence = maskMatch(m)
 			}
 			addDetection(det)
+		}
+		// Whole-body classifiers (source_code, k8s manifest). They carry no
+		// maskable span, so Evidence stays empty; Classes come from the same table.
+		for _, c := range s.classifiers {
+			for _, det := range c(data) {
+				det.Classes = classesFor(det.Pattern, det.Category)
+				addDetection(det)
+			}
 		}
 	}
 

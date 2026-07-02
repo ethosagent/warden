@@ -164,8 +164,8 @@ func TestDLP_MonitorDetectsAndForwards(t *testing.T) {
 	if ev.DLPAction != "monitor" {
 		t.Fatalf("expected DLPAction=monitor, got %q", ev.DLPAction)
 	}
-	if !containsStr(ev.DataClasses, "credential_leak") {
-		t.Fatalf("expected DataClasses to include credential_leak, got %v", ev.DataClasses)
+	if !containsStr(ev.DataClasses, "credentials") {
+		t.Fatalf("expected DataClasses to include credentials, got %v", ev.DataClasses)
 	}
 	if ev.DLPPartial {
 		t.Fatalf("scannable in-cap body must not be partial: %+v", ev)
@@ -214,8 +214,8 @@ func TestDLP_PreSwapOrdering(t *testing.T) {
 		t.Fatalf("expected https allow event, got %+v", ss.snapshot())
 	}
 	// The foreign key is detected (pre-swap body had it).
-	if !containsStr(ev.DataClasses, "credential_leak") {
-		t.Fatalf("expected credential_leak from foreign key, got %v", ev.DataClasses)
+	if !containsStr(ev.DataClasses, "credentials") {
+		t.Fatalf("expected credentials from foreign key, got %v", ev.DataClasses)
 	}
 	// The real swapped secret VALUE must never appear in the event.
 	if eventContains(t, *ev, realSecret) {
@@ -253,8 +253,8 @@ func TestDLP_OverCapPartial(t *testing.T) {
 	if !ev.DLPPartial {
 		t.Fatalf("over-cap body must flag DLPPartial, got %+v", ev)
 	}
-	if !containsStr(ev.DataClasses, "credential_leak") {
-		t.Fatalf("expected credential_leak from first 1 MB, got %v", ev.DataClasses)
+	if !containsStr(ev.DataClasses, "credentials") {
+		t.Fatalf("expected credentials from first 1 MB, got %v", ev.DataClasses)
 	}
 }
 
