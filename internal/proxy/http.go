@@ -16,6 +16,7 @@ import (
 	"github.com/ethosagent/warden/internal/mcp/gateway"
 	"github.com/ethosagent/warden/internal/mcp/sse"
 	"github.com/ethosagent/warden/internal/protocol"
+	"github.com/ethosagent/warden/internal/scan"
 	"github.com/ethosagent/warden/internal/secrets"
 )
 
@@ -88,6 +89,7 @@ type requestScope struct {
 	// dlpEncoded is reserved for decoded-layer-only findings (unused in Phase 1).
 	dlpClasses []string
 	dlpAction  string
+	dlpRule    string
 	dlpPartial bool
 	dlpEncoded bool
 }
@@ -372,21 +374,25 @@ func (p *Proxy) mcpRequestScan(s *requestScope) (endSession bool) {
 // the body is an inert token — never classified as a credential, never mutated
 // here, and still swapped normally downstream.
 //
-// Phase 1 is monitor-only: it records findings on the scope (which ride the
-// single allow event) + bounded metrics, but NEVER mutates the body. enforce
-// config behaves as monitor this phase (block/redact land in Phase 3/4).
+// It records findings on the scope (which ride the single audit event) + bounded
+// metrics. With NO policy configured (no rules/class-defaults) or no data class
+// detected it is pure observability: action="monitor", never blocks. When a policy
+// IS configured and a class is detected it evaluates the per-class egress rules;
+// in ENFORCE mode a block (or, until Phase 4, a redact) verdict terminates here
+// with a 403 + deny event. MONITOR mode records the would-be action but NEVER
+// blocks or mutates the body — the zero-risk wedge.
 //
-// DLP is FAIL-OPEN and never blocks or 413s. It only performs the shared
-// buffered read when that read provably cannot 413 (a known Content-Length that
-// fits maxBodySwapSize, or a body an earlier stage already buffered). An
+// DLP is FAIL-OPEN on unscannable bodies and never 413s. It only performs the
+// shared buffered read when that read provably cannot 413 (a known Content-Length
+// that fits maxBodySwapSize, or a body an earlier stage already buffered). An
 // over-cap body (Content-Length > cap) or an unknown-length/chunked body
-// (Content-Length < 0) is flagged dlp_partial and FORWARDED WITHOUT reading —
-// the same honest coverage gap as an unscannable response stream; Phase 1 does
-// not stream-scan chunked bodies (a later phase can). This guarantees dlpScan
-// never writes a 413 and never consumes a body it cannot restore, so the
-// swap/MCP 413 contract is theirs alone: when a swap IS configured and the body
-// is over-cap, swapSecrets still 413s later exactly as it does today — DLP just
-// does not pre-empt it.
+// (Content-Length < 0) is flagged dlp_partial and FORWARDED WITHOUT reading — the
+// same honest coverage gap as an unscannable response stream; DLP does not
+// stream-scan chunked bodies (a later phase can). This guarantees dlpScan never
+// writes a 413 and never consumes a body it cannot restore, so the swap/MCP 413
+// contract is theirs alone: when a swap IS configured and the body is over-cap,
+// swapSecrets still 413s later exactly as it does today — DLP just does not
+// pre-empt it. (Enforce blocking, above, is a 403 — distinct from the 413 caps.)
 //
 // mode: off (p.dlp() == nil) returns immediately with NO body read, NO event
 // fields, and NO metric — byte-identical to before.
@@ -395,8 +401,11 @@ func (p *Proxy) dlpScan(s *requestScope) (endSession bool) {
 	if d == nil {
 		return false
 	}
-	// DLP inspected this request. Phase 1's only action is "monitor" regardless of
-	// configured mode (enforce is not yet active). TODO(phase3): enforce → block.
+	// DLP inspected this request. Default the recorded action to "monitor" (DLP saw
+	// it, nothing to police); the policy evaluation below overrides it with the
+	// verdict when a policy is configured and a data class is detected. Every path
+	// that forwards without evaluating (non-scannable, over-cap, chunked, empty)
+	// keeps "monitor".
 	s.dlpAction = dlpMonitor
 
 	ct := s.req.Header.Get("Content-Type")
@@ -448,26 +457,82 @@ func (p *Proxy) dlpScan(s *requestScope) (endSession bool) {
 	p.cfg.Metrics.ObserveAddedLatency("dlp_scan", time.Since(start))
 	p.recordDLPFindings(dets)
 
-	if len(dets) > 0 {
-		// Phase 2: emit the real DataClass taxonomy. Each detection carries zero or
-		// more dotted data classes (scan.classesFor); dedup the union across all
-		// detections into the event's bounded class list. Injection findings carry
-		// no data class, so they contribute nothing here.
-		seen := make(map[string]struct{}, len(dets))
-		classes := make([]string, 0, len(dets))
-		for _, det := range dets {
-			for _, c := range det.Classes {
-				name := string(c)
-				if _, dup := seen[name]; dup {
-					continue
-				}
-				seen[name] = struct{}{}
-				classes = append(classes, name)
+	// Emit the real DataClass taxonomy: each detection carries zero or more dotted
+	// data classes; dedup the union across all detections (preserving first-seen
+	// order) into both the bounded event class list and the ordered class slice the
+	// evaluator consumes. Injection findings carry no data class, so they add nothing.
+	seen := make(map[scan.DataClass]struct{}, len(dets))
+	var detected []scan.DataClass
+	for _, det := range dets {
+		for _, c := range det.Classes {
+			if _, dup := seen[c]; dup {
+				continue
 			}
+			seen[c] = struct{}{}
+			detected = append(detected, c)
+		}
+	}
+	if len(detected) > 0 {
+		classes := make([]string, len(detected))
+		for i, c := range detected {
+			classes[i] = string(c)
 		}
 		s.dlpClasses = classes
 	}
+
+	// Phase 3: per-class egress rules. With NO policy configured (no rules, no class
+	// defaults) DLP is pure observability — the action stays "monitor" and nothing
+	// is ever blocked, byte-identical to the monitor-only phase. A body with no data
+	// class likewise has nothing to police. Otherwise evaluate the precedence rules;
+	// in enforce mode a block/redact verdict terminates here with a 403 + deny event.
+	// MONITOR MODE never blocks: decide() returns block=false, so the would-be action
+	// is recorded on the allow event and the request is forwarded unchanged.
+	if d.hasPolicy() && len(detected) > 0 {
+		action, rule, block := d.decide(detected, s.domain)
+		s.dlpAction = action
+		s.dlpRule = rule
+		if block {
+			// enforce + block (or redact, treated as block until Phase 4 implements
+			// span redaction — fail-closed, safer than forwarding unredacted).
+			// TODO(phase4): real inline redaction here instead of blocking redact.
+			return p.dlpDeny(s)
+		}
+	}
 	return false
+}
+
+// dlpDeny terminates a request the DLP policy blocked in enforce mode: a 403 to the
+// agent plus a deny audit event carrying the bounded classes + action + rule, and a
+// bounded "dlp" blocked metric. It mirrors the judge/MCP enforce-deny shape and is
+// terminal (returns endSession=true so the deferred cleanup runs). The recorded
+// DLPAction preserves the verdict intent (e.g. "redact" even though redact blocks
+// this phase), so the event honestly reflects what policy asked for.
+func (p *Proxy) dlpDeny(s *requestScope) (endSession bool) {
+	fullURL := "https://" + s.domain + s.req.URL.RequestURI()
+	reason := "dlp_" + s.dlpAction // dlp_block / dlp_redact — bounded, closed set
+	_ = p.analyticsStore().StoreEvent(analytics.Event{
+		Timestamp:   time.Now(),
+		Domain:      s.domain,
+		Port:        s.port,
+		Protocol:    "https",
+		Method:      s.req.Method,
+		URL:         fullURL,
+		Decision:    "deny",
+		Reason:      reason,
+		DataClasses: s.dlpClasses,
+		DLPAction:   s.dlpAction,
+		DLPRule:     s.dlpRule,
+		DLPPartial:  s.dlpPartial,
+		DLPEncoded:  s.dlpEncoded,
+	})
+	p.cfg.Metrics.RecordRequest("deny", "https")
+	p.cfg.Metrics.RecordBlocked("dlp")
+	p.logDecision(decisionLog{
+		Domain: s.domain, Port: s.port, Protocol: "https",
+		Method: s.req.Method, URL: fullURL, Decision: "deny",
+	})
+	writeErrorResponse(s.tlsConn, 403, "Forbidden")
+	return true
 }
 
 // swapSecrets substitutes each configured placeholder with its resolved secret
@@ -993,9 +1058,10 @@ func (p *Proxy) recordAllowEvent(s *requestScope) {
 		Provider:       provider,
 		// DLP fields ride this single allow event (no second event is emitted).
 		// All zero/empty when DLP is off, so the off-case event is identical to
-		// today. DLPRule stays "" in Phase 1 (no rules yet).
+		// today. DLPRule is the bounded id of the winning rule (empty with no policy).
 		DataClasses: s.dlpClasses,
 		DLPAction:   s.dlpAction,
+		DLPRule:     s.dlpRule,
 		DLPPartial:  s.dlpPartial,
 		DLPEncoded:  s.dlpEncoded,
 	})

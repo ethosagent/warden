@@ -114,3 +114,46 @@ func classesFor(pattern, category string) []DataClass {
 	}
 	return categoryClasses[category]
 }
+
+// knownClasses is the set of BUILT-IN data classes. custom.<name> is deliberately
+// absent — those are operator-declared in the dlp config block, not compile-time
+// constants. It backs IsKnownClass / KnownDataClasses so config validation can vet
+// a rule's class key without importing the taxonomy by hand.
+var knownClasses = map[DataClass]struct{}{
+	ClassCredentials:    {},
+	ClassPIIContact:     {},
+	ClassPIIIdentity:    {},
+	ClassPIIFinancial:   {},
+	ClassPIIHealth:      {},
+	ClassSourceCode:     {},
+	ClassInfrastructure: {},
+}
+
+// IsKnownClass reports whether c is a built-in data class (custom.<name> excluded).
+// Config validation uses it to accept an exact class key in a dlp rule.
+func IsKnownClass(c string) bool {
+	_, ok := knownClasses[DataClass(c)]
+	return ok
+}
+
+// KnownDataClasses returns the built-in data classes (custom.<name> excluded), so
+// config validation can derive the set of valid class keys and glob families
+// (e.g. "pii") without hardcoding the taxonomy a second time.
+func KnownDataClasses() []DataClass {
+	out := make([]DataClass, 0, len(knownClasses))
+	for c := range knownClasses {
+		out = append(out, c)
+	}
+	return out
+}
+
+// CustomClass is an operator-declared data class: a name (surfaced as the
+// DataClass custom.<Name>), a regex compiled at scanner build, and a severity.
+// It is supplied through WithCustomClasses and flows through the SAME detection →
+// class → rule evaluation path as the built-in classes. Custom regexes are
+// operator config (not secrets), so they are fine on the local scanner.
+type CustomClass struct {
+	Name     string // custom.<Name> becomes the emitted DataClass
+	Regex    string // operator-supplied pattern, compiled at NewScanner time
+	Severity string // "low" | "medium" | "high"; empty defaults to medium
+}

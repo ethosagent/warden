@@ -470,6 +470,36 @@ func validate(p Policy) error {
 	return nil
 }
 
+// validateDomainPattern validates a destination pattern in the ONE dialect the
+// policy evaluator matches (exact / "*.suffix" wildcard / "~regex"): non-empty,
+// space-free, compilable regex, and only the "*.suffix" wildcard form. It is the
+// shared check the dlp `to` lists reuse so DLP destinations never fork a second
+// dialect. context is the caller's field path for a precise error.
+func validateDomainPattern(context, domain string) error {
+	if strings.TrimSpace(domain) == "" {
+		return fmt.Errorf("config: %s: domain is required", context)
+	}
+	if strings.ContainsRune(domain, ' ') {
+		return fmt.Errorf("config: %s: domain %q contains spaces", context, domain)
+	}
+	if strings.HasPrefix(domain, "~") {
+		if _, err := regexp.Compile(domain[1:]); err != nil {
+			return fmt.Errorf("config: %s: domain %q has invalid regex: %v", context, domain, err)
+		}
+		return nil
+	}
+	if strings.Contains(domain, "*") {
+		if !strings.HasPrefix(domain, "*.") || strings.Count(domain, "*") != 1 {
+			return fmt.Errorf("config: %s: domain %q has invalid wildcard; only \"*.suffix\" form is supported", context, domain)
+		}
+		suffix := domain[2:]
+		if suffix == "" || strings.HasPrefix(suffix, ".") {
+			return fmt.Errorf("config: %s: domain %q has invalid wildcard; only \"*.suffix\" form is supported", context, domain)
+		}
+	}
+	return nil
+}
+
 // validateRateLimit checks the shared "N/second|minute|hour" rate-limit format,
 // returning a descriptive error keyed by name. Reused by the allowlist, judge,
 // and MCP tool policies so the format stays in one place.

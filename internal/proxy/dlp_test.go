@@ -145,7 +145,7 @@ func TestDLP_MonitorDetectsAndForwards(t *testing.T) {
 	backendLn, rb := startBackend(t, caCert, caKey)
 	metrics, handler := newMetrics(t)
 
-	dlp := NewDLPScanner("monitor", false, false)
+	dlp := NewDLPScanner(config.DLPConfig{Mode: "monitor"}, false, false)
 	p, ss := startTestProxyWithDLP(t, []string{"backend.test"}, caCertPEM, caKeyPEM, dlp, map[string]string{}, nil, metrics)
 	p.dialTLS = dialBackend(backendLn)
 
@@ -186,7 +186,7 @@ func TestDLP_PreSwapOrdering(t *testing.T) {
 
 	const placeholder = "PLACEHOLDER_SECRET"
 	const realSecret = "AKIAREALSECRET000000" // AKIA-form: would trip the detector IF scanned
-	dlp := NewDLPScanner("monitor", false, false)
+	dlp := NewDLPScanner(config.DLPConfig{Mode: "monitor"}, false, false)
 	p, ss := startTestProxyWithDLP(t, []string{"backend.test"}, caCertPEM, caKeyPEM, dlp,
 		map[string]string{placeholder: realSecret}, []string{placeholder}, nil)
 	p.dialTLS = dialBackend(backendLn)
@@ -232,7 +232,7 @@ func TestDLP_OverCapPartial(t *testing.T) {
 	caCertPEM, caKeyPEM, caCert, caKey := generateTestCA(t)
 	backendLn, rb := startBackend(t, caCert, caKey)
 
-	dlp := NewDLPScanner("monitor", false, false)
+	dlp := NewDLPScanner(config.DLPConfig{Mode: "monitor"}, false, false)
 	p, ss := startTestProxyWithDLP(t, []string{"backend.test"}, caCertPEM, caKeyPEM, dlp, map[string]string{}, nil, nil)
 	p.dialTLS = dialBackend(backendLn)
 
@@ -264,7 +264,7 @@ func TestDLP_NonScannableSkipped(t *testing.T) {
 	caCertPEM, caKeyPEM, caCert, caKey := generateTestCA(t)
 	backendLn, rb := startBackend(t, caCert, caKey)
 
-	dlp := NewDLPScanner("monitor", false, false)
+	dlp := NewDLPScanner(config.DLPConfig{Mode: "monitor"}, false, false)
 	p, ss := startTestProxyWithDLP(t, []string{"backend.test"}, caCertPEM, caKeyPEM, dlp, map[string]string{}, nil, nil)
 	p.dialTLS = dialBackend(backendLn)
 
@@ -304,7 +304,7 @@ func TestDLP_OverCapForwardsNot413(t *testing.T) {
 
 	// DLP monitor: must forward (fail-open), not 413.
 	backendLn, rb := startBackend(t, caCert, caKey)
-	dlp := NewDLPScanner("monitor", false, false)
+	dlp := NewDLPScanner(config.DLPConfig{Mode: "monitor"}, false, false)
 	p, ss := startTestProxyWithDLP(t, []string{"backend.test"}, caCertPEM, caKeyPEM, dlp, map[string]string{}, nil, nil)
 	p.dialTLS = dialBackend(backendLn)
 
@@ -346,7 +346,7 @@ func TestDLP_UnknownLengthForwards(t *testing.T) {
 	caCertPEM, caKeyPEM, caCert, caKey := generateTestCA(t)
 	backendLn, rb := startBackend(t, caCert, caKey)
 
-	dlp := NewDLPScanner("monitor", false, false)
+	dlp := NewDLPScanner(config.DLPConfig{Mode: "monitor"}, false, false)
 	p, ss := startTestProxyWithDLP(t, []string{"backend.test"}, caCertPEM, caKeyPEM, dlp, map[string]string{}, nil, nil)
 	p.dialTLS = dialBackend(backendLn)
 
@@ -394,7 +394,7 @@ func TestDLP_SwapContractStill413s(t *testing.T) {
 	caCertPEM, caKeyPEM, caCert, caKey := generateTestCA(t)
 	backendLn, rb := startBackend(t, caCert, caKey)
 
-	dlp := NewDLPScanner("monitor", false, false)
+	dlp := NewDLPScanner(config.DLPConfig{Mode: "monitor"}, false, false)
 	p, _ := startTestProxyWithDLP(t, []string{"backend.test"}, caCertPEM, caKeyPEM, dlp,
 		map[string]string{"PLACEHOLDER_001": "real-secret-value"}, []string{"PLACEHOLDER_001"}, nil)
 	p.dialTLS = dialBackend(backendLn)

@@ -1,15 +1,16 @@
 package proxy
 
 import (
+	"github.com/ethosagent/warden/internal/config"
+	"github.com/ethosagent/warden/internal/dlp"
 	"github.com/ethosagent/warden/internal/scan"
 )
 
-// dlpMonitor is the only action DLP takes in Phase 1. The config vocabulary is
-// off|monitor|enforce (validated in internal/config), but the proxy never
-// blocks or redacts this phase: off disables the stage (nil scanner), and both
-// monitor and enforce record findings as "monitor". Phase 3 adds the enforce
-// action; that is where a dlpEnforce/dlpBlock constant will earn its place.
-const dlpMonitor = "monitor"
+// dlpMonitor is the action recorded when DLP inspected a request but took no
+// allow/block/redact decision: mode=monitor with no policy (pure observability),
+// or a request with no data class to police. When a policy IS configured and a
+// class is detected, the recorded action is the evaluator's verdict instead.
+const dlpMonitor = config.DLPActionMonitor
 
 // maxDLPScanSize bounds how much of a request body the DLP stage inspects. It
 // mirrors the scanner's own internal cap (scan.maxScanSize, 1 MB): a body larger
@@ -17,33 +18,42 @@ const dlpMonitor = "monitor"
 // the coverage gap is honest, never silent.
 const maxDLPScanSize = 1 << 20 // 1 MB
 
-// DLPScanner scans OUTBOUND request bodies for credential leakage, prompt
-// injection, and PII using the SAME detectors the response scanner and MCP wedge
-// use. Phase 1 supports monitor only: it records findings on the audit event +
-// bounded metrics but never mutates the body and never blocks. enforce is
-// accepted as config (see NewDLPScanner) but behaves as monitor this phase.
+// DLPScanner scans OUTBOUND request bodies for credential leakage, PII, source
+// code, and operator custom classes, then applies the per-class per-destination
+// egress policy. In monitor mode it records the would-be action but never blocks
+// or mutates; in enforce mode a block (or, until Phase 4, a redact) terminates the
+// request with 403. mode=off never constructs one (nil scanner disables the stage).
 //
-// It is safe for concurrent use (scan.Scanner is immutable after construction).
-// A nil *DLPScanner means DLP is disabled: the dlpScan stage returns immediately
-// with no body read — byte-identical to before.
+// It is safe for concurrent use (scan.Scanner is immutable after construction and
+// the config is read-only). A nil *DLPScanner means DLP is disabled: the dlpScan
+// stage returns immediately with no body read — byte-identical to before.
 type DLPScanner struct {
 	scanner scan.Scanner
-	mode    string
+	mode    string           // monitor|enforce (off never builds a scanner)
+	cfg     config.DLPConfig // rules + class defaults for the evaluator
 }
 
-// NewDLPScanner builds a DLP scanner for the given mode. evidence is off in
-// Phase 1's wiring (findings carry only bounded class/pattern/severity, never a
-// content sample); the option is threaded so a later phase can opt in without a
-// signature change, mirroring NewResponseScanner. An empty mode normalizes to
-// monitor. enforce is accepted here but treated as monitor until Phase 3 wires
-// blocking; the worker logs once that enforce is not yet active.
-func NewDLPScanner(mode string, phonePII, evidence bool) *DLPScanner {
+// NewDLPScanner builds a DLP scanner from the dlp config block. Custom classes are
+// compiled into the scanner; the mode + rules + class defaults drive enforcement.
+// phonePII/evidence are threaded (evidence off in wiring: findings carry only
+// bounded class/pattern/severity). An empty mode normalizes to monitor.
+func NewDLPScanner(cfg config.DLPConfig, phonePII, evidence bool) *DLPScanner {
+	mode := cfg.Mode
 	if mode == "" {
-		mode = dlpMonitor
+		mode = config.DLPModeMonitor
+	}
+	var custom []scan.CustomClass
+	for _, c := range cfg.Custom {
+		custom = append(custom, scan.CustomClass{Name: c.Name, Regex: c.Regex, Severity: c.Severity})
 	}
 	return &DLPScanner{
-		scanner: scan.NewScanner(scan.WithPhonePII(phonePII), scan.WithEvidence(evidence)),
-		mode:    mode,
+		scanner: scan.NewScanner(
+			scan.WithPhonePII(phonePII),
+			scan.WithEvidence(evidence),
+			scan.WithCustomClasses(custom),
+		),
+		mode: mode,
+		cfg:  cfg,
 	}
 }
 
@@ -52,4 +62,23 @@ func NewDLPScanner(mode string, phonePII, evidence bool) *DLPScanner {
 // body despite the name (the scanner is direction-agnostic).
 func (d *DLPScanner) scan(body []byte) []scan.Detection {
 	return d.scanner.ScanResponse(body)
+}
+
+// hasPolicy reports whether any egress policy is configured (rules or class
+// defaults). With no policy, DLP is pure observability: the stage records classes
+// and action=monitor and never blocks — byte-identical to the monitor-only phase.
+func (d *DLPScanner) hasPolicy() bool {
+	return len(d.cfg.Rules) > 0 || len(d.cfg.Classes) > 0
+}
+
+// decide evaluates the egress policy for the detected classes at dest and returns
+// the action, its bounded rule id, and whether ENFORCE should block. block is true
+// only in enforce mode for a block or redact verdict; monitor mode never blocks
+// (block is always false), so it merely records the would-be action. redact blocks
+// in enforce as a fail-closed interim until Phase 4 implements span redaction.
+func (d *DLPScanner) decide(classes []scan.DataClass, dest string) (action, rule string, block bool) {
+	v := dlp.Evaluate(classes, dest, d.cfg)
+	block = d.mode == config.DLPModeEnforce &&
+		(v.Action == config.DLPActionBlock || v.Action == config.DLPActionRedact)
+	return v.Action, v.Rule, block
 }

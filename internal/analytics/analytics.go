@@ -69,17 +69,18 @@ type Event struct {
 	ProxyID string
 
 	// DataClasses holds the outbound-request DLP data classes detected in the
-	// PRE-SWAP request body (Phase 1: the scanner's flat detection categories,
-	// e.g. "credential_leak", "pii", "injection"). Bounded class names only —
-	// never matched content, never offsets. Nil when DLP is off or found nothing.
+	// PRE-SWAP request body (the dotted taxonomy, e.g. "credentials", "pii.contact",
+	// "source_code", "custom.<name>"). Bounded class names only — never matched
+	// content, never offsets. Nil when DLP is off or found nothing.
 	DataClasses []string
-	// DLPAction is the DLP action taken on this request: "monitor" when DLP
-	// inspected it (Phase 1 never blocks/redacts). "" when DLP is off. A small
-	// closed set — bounded metadata, never content.
+	// DLPAction is the DLP action for this request: allow/block/redact/monitor. In
+	// monitor mode it is the WOULD-BE action (recorded but not enforced); in enforce
+	// a block/redact rides the deny event. "monitor" also covers pure-observability
+	// (no policy configured). "" when DLP is off. A small closed set — bounded
+	// metadata, never content.
 	DLPAction string
-	// DLPRule is the bounded identifier of the DLP rule that decided this request.
-	// Always "" in Phase 1 (no rules yet); populated once per-class egress rules
-	// land (Phase 3).
+	// DLPRule is the bounded identifier of the DLP rule that decided this request
+	// (e.g. "rule[1]", "classes[pii.contact]", "default"). "" when no policy applied.
 	DLPRule string
 	// DLPPartial flags that the request body was only partially scanned — an
 	// over-cap body (first 1 MB scanned) or a non-scannable/binary content-type.

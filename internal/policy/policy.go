@@ -267,17 +267,41 @@ func (e *Evaluator) Evaluate(domain string, port int, scheme Scheme) Decision {
 }
 
 // domainMatches reports whether host matches pattern. Supports:
-//   - "~<regex>" — regex match
+//   - "~<regex>" — regex match (served from the evaluator's precompiled cache)
 //   - "*.example.com" — wildcard subdomain match
 //   - exact match (case-insensitive)
+//
+// The regex path uses the evaluator's precompiled cache (hot allow/deny path); the
+// wildcard/exact path delegates to MatchDomain so the two callers share ONE
+// dialect.
 func (e *Evaluator) domainMatches(pattern, host string) bool {
 	pattern = strings.ToLower(strings.TrimSuffix(pattern, "."))
-	// Regex match: ~<pattern>
+	// Regex match: ~<pattern> — served from the precompiled cache.
 	if strings.HasPrefix(pattern, "~") {
 		if re, ok := e.regexCache[pattern]; ok {
 			return re.MatchString(host)
 		}
 		return false
+	}
+	return MatchDomain(pattern, host)
+}
+
+// MatchDomain reports whether host matches pattern using the SAME destination
+// dialect the allow/deny evaluator uses: "~regex", "*.suffix" wildcard, or exact
+// (case-insensitive). It is exported so the DLP rule evaluator reuses this ONE
+// matcher instead of forking a second dialect. Regex patterns are compiled on each
+// call (DLP rule sets are small and destination-regex is rare); a malformed regex
+// never matches. The hot allow/deny path keeps its precompiled cache via
+// domainMatches.
+func MatchDomain(pattern, host string) bool {
+	pattern = strings.ToLower(strings.TrimSuffix(pattern, "."))
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	if rx, ok := strings.CutPrefix(pattern, "~"); ok {
+		re, err := regexp.Compile(rx)
+		if err != nil {
+			return false
+		}
+		return re.MatchString(host)
 	}
 	if suffix, ok := strings.CutPrefix(pattern, "*."); ok {
 		return host != suffix && strings.HasSuffix(host, "."+suffix)

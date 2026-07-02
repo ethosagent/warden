@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/observability"
 )
 
@@ -47,7 +48,7 @@ func BenchmarkDLPScan(b *testing.B) {
 			p := &Proxy{cfg: Config{
 				Metrics: nopMetrics{},
 				Logger:  observability.DiscardLogger(),
-				DLP:     NewDLPScanner("monitor", false, false),
+				DLP:     NewDLPScanner(config.DLPConfig{Mode: "monitor"}, false, false),
 			}}
 			b.ReportAllocs()
 			b.ResetTimer()
@@ -75,7 +76,7 @@ func BenchmarkHandleHTTP_DLPOff(b *testing.B) {
 }
 
 func BenchmarkHandleHTTP_DLPMonitor(b *testing.B) {
-	benchHandleHTTPDLP(b, NewDLPScanner("monitor", false, false))
+	benchHandleHTTPDLP(b, NewDLPScanner(config.DLPConfig{Mode: "monitor"}, false, false))
 }
 
 func benchHandleHTTPDLP(b *testing.B, dlp *DLPScanner) {

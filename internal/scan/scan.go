@@ -45,8 +45,9 @@ type patternScanner struct {
 	credentialPatterns     []compiledPattern
 	piiPatterns            []compiledPattern
 	infrastructurePatterns []compiledPattern
-	classifiers            []bodyClassifier // whole-body classifiers (source_code, k8s)
-	evidence               bool             // capture a MASKED evidence sample per detection
+	customPatterns         []compiledPattern // operator custom classes (custom.<name>)
+	classifiers            []bodyClassifier  // whole-body classifiers (source_code, k8s)
+	evidence               bool              // capture a MASKED evidence sample per detection
 }
 
 // bodyClassifier inspects a whole body (or decoded layer) and returns zero or
@@ -67,13 +68,19 @@ type compiledPattern struct {
 	severity string
 	category string
 	validate func(match string) bool
+	// classes, when non-nil, is the data class(es) this pattern emits directly,
+	// bypassing the central classesFor table. Used by operator custom classes
+	// (custom.<name>), whose class is not in the compile-time taxonomy. Built-in
+	// patterns leave it nil and inherit classes from classesFor(name, category).
+	classes []DataClass
 }
 
 // options holds Scanner construction settings configured via Option values.
 type options struct {
-	phonePII  bool
-	healthPII bool
-	evidence  bool
+	phonePII      bool
+	healthPII     bool
+	evidence      bool
+	customClasses []CustomClass
 }
 
 // Option configures a Scanner at construction time.
@@ -98,6 +105,15 @@ func WithHealthPII(enabled bool) Option {
 // positive. Off by default.
 func WithEvidence(enabled bool) Option {
 	return func(o *options) { o.evidence = enabled }
+}
+
+// WithCustomClasses registers operator-declared data classes. Each compiles its
+// regex at construction and emits detections carrying custom.<Name> as the
+// DataClass, so operator classes flow through the same class → rule evaluation as
+// the built-ins. An invalid regex is skipped here (config validation rejects it
+// upstream, so a built scanner never carries one).
+func WithCustomClasses(classes []CustomClass) Option {
+	return func(o *options) { o.customClasses = classes }
 }
 
 // NewScanner compiles all detection patterns and returns a ready-to-use Scanner.
@@ -236,6 +252,27 @@ func NewScanner(opts ...Option) Scanner {
 	s.infrastructurePatterns = buildInfraPatterns()
 	s.classifiers = append(buildSourceCodeClassifiers(), k8sManifestClassifier)
 
+	// Operator custom classes: compile each regex once, emitting custom.<name> as
+	// the data class. A malformed regex is skipped (config validation rejects it
+	// before a scanner is ever built with it).
+	for _, cc := range cfg.customClasses {
+		re, err := regexp.Compile(cc.Regex)
+		if err != nil {
+			continue
+		}
+		sev := cc.Severity
+		if sev == "" {
+			sev = "medium"
+		}
+		s.customPatterns = append(s.customPatterns, compiledPattern{
+			name:     cc.Name,
+			re:       re,
+			severity: sev,
+			category: "custom",
+			classes:  []DataClass{DataClass("custom." + cc.Name)},
+		})
+	}
+
 	return s
 }
 
@@ -308,11 +345,12 @@ func (s *patternScanner) ScanResponse(body []byte) []Detection {
 		}
 	}
 
-	allPatterns := make([]compiledPattern, 0, len(s.injectionPatterns)+len(s.credentialPatterns)+len(s.piiPatterns)+len(s.infrastructurePatterns))
+	allPatterns := make([]compiledPattern, 0, len(s.injectionPatterns)+len(s.credentialPatterns)+len(s.piiPatterns)+len(s.infrastructurePatterns)+len(s.customPatterns))
 	allPatterns = append(allPatterns, s.injectionPatterns...)
 	allPatterns = append(allPatterns, s.credentialPatterns...)
 	allPatterns = append(allPatterns, s.piiPatterns...)
 	allPatterns = append(allPatterns, s.infrastructurePatterns...)
+	allPatterns = append(allPatterns, s.customPatterns...)
 
 	scanLayer := func(data []byte) {
 		for _, p := range allPatterns {
@@ -320,7 +358,13 @@ func (s *patternScanner) ScanResponse(body []byte) []Detection {
 			if !ok {
 				continue
 			}
-			det := Detection{Category: p.category, Pattern: p.name, Severity: p.severity, Classes: classesFor(p.name, p.category)}
+			// Custom patterns carry their class directly (p.classes); built-ins
+			// derive it from the central table.
+			cls := p.classes
+			if cls == nil {
+				cls = classesFor(p.name, p.category)
+			}
+			det := Detection{Category: p.category, Pattern: p.name, Severity: p.severity, Classes: cls}
 			if s.evidence {
 				det.Evidence = maskMatch(m)
 			}

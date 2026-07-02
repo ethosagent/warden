@@ -238,18 +238,18 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		logger.Info("HTTP response scanning enabled", "mode", pol.ResponseScan.Mode)
 	}
 
-	// Optional outbound REQUEST-body DLP scanner (Phase 1: monitor only). Off
+	// Optional outbound REQUEST-body DLP scanner + per-class egress policy. Off
 	// unless dlp.mode != "off"; when off, dlpScanner stays nil and the dlpScan
 	// stage is a no-op (no body read) — byte-identical to before. LOCAL config
-	// (scanner never distributed). enforce is accepted as config but not yet
-	// active in Phase 1 (treated as monitor); log that once at boot.
+	// (scanner + rules never distributed this phase). monitor records the would-be
+	// action but never blocks; enforce blocks on a block/redact verdict.
 	var dlpScanner *proxy.DLPScanner
 	if pol.DLP.Active() {
-		dlpScanner = proxy.NewDLPScanner(pol.DLP.Mode, false, false)
-		if pol.DLP.Mode == "enforce" {
-			logger.Warn("DLP enforce mode is not yet active; Phase 1 treats it as monitor (no blocking/redaction)")
-		}
-		logger.Info("outbound request-body DLP scanning enabled", "mode", pol.DLP.Mode)
+		dlpScanner = proxy.NewDLPScanner(pol.DLP, false, false)
+		logger.Info("outbound request-body DLP scanning enabled",
+			"mode", pol.DLP.Mode,
+			"rules", len(pol.DLP.Rules),
+			"custom_classes", len(pol.DLP.Custom))
 	}
 
 	// Hot-swappable policy evaluator. In managed mode it starts EMPTY (deny all)
