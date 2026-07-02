@@ -15,6 +15,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"sort"
@@ -72,14 +73,42 @@ type secretStoreResponse struct {
 	Entries []secretStoreEntry `json:"entries"`
 }
 
-// handleSecretStore serves GET /dashboard/api/secretstore: the managed secret
-// KEY list (metadata only — key, version, updatedAt — NEVER values). A nil store
-// (or a List error) reports the backend name with an empty entries list.
+// secretPutRequest is the body accepted by POST /dashboard/api/secretstore. The
+// value flows through only for the request: it is handed to the store and then
+// logged BY REFERENCE (secrets.Ref) only — never persisted or logged raw in the
+// dashboard layer.
+type secretPutRequest struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
+// handleSecretStore serves /dashboard/api/secretstore behind the dashboard's
+// existing auth gate. It is method-routed:
+//   - GET    lists managed secret KEY metadata (never values).
+//   - POST   upserts a key→value into the store (204; value logged by reference).
+//   - DELETE removes a key (204, idempotent).
+//
+// There is deliberately NO "reveal value" path: List is metadata-only and the
+// store's Get(value) is never surfaced. Returning a stored value would reintroduce
+// the very leak surface Warden exists to close, so the write path is value-free on
+// the way out just as the read path always has been.
 func (s *Server) handleSecretStore(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	switch r.Method {
+	case http.MethodGet:
+		s.getSecretStore(w, r)
+	case http.MethodPost:
+		s.putSecret(w, r)
+	case http.MethodDelete:
+		s.deleteSecret(w, r)
+	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
 	}
+}
+
+// getSecretStore serves the GET half: the managed secret KEY list (metadata only
+// — key, version, updatedAt — NEVER values). A nil store (or a List error)
+// reports the backend name with an empty entries list.
+func (s *Server) getSecretStore(w http.ResponseWriter, r *http.Request) {
 	resp := secretStoreResponse{Backend: "none", Entries: []secretStoreEntry{}}
 	if s.secretStore == nil {
 		writeJSON(w, resp)
@@ -103,6 +132,59 @@ func (s *Server) handleSecretStore(w http.ResponseWriter, r *http.Request) {
 		resp.Entries = append(resp.Entries, e)
 	}
 	writeJSON(w, resp)
+}
+
+// putSecret serves POST /dashboard/api/secretstore: upsert a key→value into the
+// managed store. Like putSettings, it exists only where a writable store is
+// configured; a nil store (env backend, or a worker with no store) returns 405 so
+// secrets are never mutable where there is nothing to mutate. On success it
+// returns 204 with no body — the value is never echoed back. The raw value flows
+// through to the store for this request only and is logged BY REFERENCE
+// (secrets.Ref: sha256+last4+len), never raw, and never persisted in this layer.
+func (s *Server) putSecret(w http.ResponseWriter, r *http.Request) {
+	if s.secretStore == nil {
+		writeError(w, http.StatusMethodNotAllowed, "secret store not configured / not writable on this dashboard")
+		return
+	}
+	var req secretPutRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	key := strings.TrimSpace(req.Key)
+	if key == "" || req.Value == "" {
+		writeError(w, http.StatusBadRequest, "key and value are required")
+		return
+	}
+	if err := s.secretStore.Put(r.Context(), key, req.Value); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// Log by reference only — the raw value must never reach a log line.
+	slog.Info("dashboard secret store put", "key", key, "ref", secrets.Ref(req.Value).String())
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// deleteSecret serves DELETE /dashboard/api/secretstore?key=<key>: remove a key
+// from the managed store. Like putSecret it returns 405 when no writable store is
+// configured. It is idempotent (deleting an absent key still returns 204). No
+// value is ever in hand here, so only the key is logged.
+func (s *Server) deleteSecret(w http.ResponseWriter, r *http.Request) {
+	if s.secretStore == nil {
+		writeError(w, http.StatusMethodNotAllowed, "secret store not configured / not writable on this dashboard")
+		return
+	}
+	key := strings.TrimSpace(r.URL.Query().Get("key"))
+	if key == "" {
+		writeError(w, http.StatusBadRequest, "key is required")
+		return
+	}
+	if err := s.secretStore.Delete(r.Context(), key); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	slog.Info("dashboard secret store delete", "key", key)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // --- 2) alerts ---

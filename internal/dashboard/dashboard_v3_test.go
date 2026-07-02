@@ -1,13 +1,17 @@
 package dashboard
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -32,6 +36,46 @@ func (f *fakeSecretStore) Put(context.Context, string, string) error   { return 
 func (f *fakeSecretStore) Delete(context.Context, string) error        { return nil }
 func (f *fakeSecretStore) List(context.Context) ([]secrets.SecretMeta, error) {
 	return f.metas, f.err
+}
+
+// writableSecretStore is a stateful SecretStore double for the WRITE path: Put
+// upserts a key, Delete removes it, List reflects the current key set. It never
+// retains the raw value (mirroring a real backend), so the value-hygiene tests
+// prove the dashboard — not the store — is what keeps values out of logs/wire.
+type writableSecretStore struct {
+	mu   sync.Mutex
+	keys map[string]secrets.SecretMeta
+}
+
+func newWritableSecretStore() *writableSecretStore {
+	return &writableSecretStore{keys: map[string]secrets.SecretMeta{}}
+}
+
+func (s *writableSecretStore) Get(context.Context, string) (string, error) { return "", nil }
+
+func (s *writableSecretStore) Put(_ context.Context, key, _ string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.keys[key] = secrets.SecretMeta{Key: key, Version: "1"}
+	return nil
+}
+
+func (s *writableSecretStore) Delete(_ context.Context, key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.keys, key)
+	return nil
+}
+
+func (s *writableSecretStore) List(context.Context) ([]secrets.SecretMeta, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]secrets.SecretMeta, 0, len(s.keys))
+	for _, m := range s.keys {
+		out = append(out, m)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	return out, nil
 }
 
 func emptyProvider() *fakeSecretProvider { return &fakeSecretProvider{values: map[string]string{}} }
@@ -110,6 +154,137 @@ func TestSecretStore_ListErrorDegradesToBackendOnly(t *testing.T) {
 	_ = json.Unmarshal(rr.Body.Bytes(), &resp)
 	if resp.Backend != "aws" || len(resp.Entries) != 0 {
 		t.Fatalf("on List error want {aws, []}, got %+v", resp)
+	}
+}
+
+func TestSecretStore_PutUpsertsThenListsAndDeletes(t *testing.T) {
+	srv := NewServer(&fakeDataSource{}, config.Policy{}, emptyProvider())
+	srv.SetSecretStore(newWritableSecretStore(), config.SecretBackendEcho)
+	h := srv.Handler()
+
+	// POST upserts -> 204 with no body (the value is never echoed).
+	rr := doPost(t, h, "/dashboard/api/secretstore", `{"key":"OPENAI_API_KEY","value":"sk-live-XYZ"}`)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("POST status = %d, want 204", rr.Code)
+	}
+	if rr.Body.Len() != 0 {
+		t.Fatalf("POST body must be empty, got %q", rr.Body.String())
+	}
+
+	// GET now lists the key (metadata only, no value on the wire).
+	got := doGet(t, h, "/dashboard/api/secretstore")
+	var resp secretStoreResponse
+	if err := json.Unmarshal(got.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !hasSecretKey(resp.Entries, "OPENAI_API_KEY") {
+		t.Fatalf("GET should list the put key, got %+v", resp.Entries)
+	}
+	if strings.Contains(got.Body.String(), "sk-live-XYZ") {
+		t.Fatalf("GET must never carry a value: %s", got.Body.String())
+	}
+
+	// DELETE -> 204, then GET omits the key (idempotent removal).
+	rr = doDelete(t, h, "/dashboard/api/secretstore?key=OPENAI_API_KEY")
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("DELETE status = %d, want 204", rr.Code)
+	}
+	got = doGet(t, h, "/dashboard/api/secretstore")
+	_ = json.Unmarshal(got.Body.Bytes(), &resp)
+	if hasSecretKey(resp.Entries, "OPENAI_API_KEY") {
+		t.Fatalf("GET should omit the deleted key, got %+v", resp.Entries)
+	}
+
+	// DELETE again -> still 204 (idempotent, deleting an absent key is fine).
+	if rr := doDelete(t, h, "/dashboard/api/secretstore?key=OPENAI_API_KEY"); rr.Code != http.StatusNoContent {
+		t.Fatalf("idempotent DELETE = %d, want 204", rr.Code)
+	}
+}
+
+func TestSecretStore_WriteRejectsEmptyKeyOrValue(t *testing.T) {
+	srv := NewServer(&fakeDataSource{}, config.Policy{}, emptyProvider())
+	srv.SetSecretStore(newWritableSecretStore(), config.SecretBackendEcho)
+	h := srv.Handler()
+
+	for _, body := range []string{
+		`{"key":"","value":"v"}`,
+		`{"key":"K","value":""}`,
+		`{"key":"   ","value":"v"}`, // whitespace-only key is empty after trim
+	} {
+		if rr := doPost(t, h, "/dashboard/api/secretstore", body); rr.Code != http.StatusBadRequest {
+			t.Fatalf("POST %s = %d, want 400", body, rr.Code)
+		}
+	}
+	// Malformed JSON -> 400.
+	if rr := doPost(t, h, "/dashboard/api/secretstore", `{`); rr.Code != http.StatusBadRequest {
+		t.Fatalf("POST malformed = %d, want 400", rr.Code)
+	}
+	// DELETE without a key -> 400.
+	if rr := doDelete(t, h, "/dashboard/api/secretstore"); rr.Code != http.StatusBadRequest {
+		t.Fatalf("DELETE without key = %d, want 400", rr.Code)
+	}
+}
+
+func TestSecretStore_PutLogsByReferenceNeverRaw(t *testing.T) {
+	srv := NewServer(&fakeDataSource{}, config.Policy{}, emptyProvider())
+	srv.SetSecretStore(newWritableSecretStore(), config.SecretBackendEcho)
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(prev)
+
+	const rawValue = "sk-supersecret-payload-ABCD"
+	rr := doPost(t, srv.Handler(), "/dashboard/api/secretstore", `{"key":"K","value":"`+rawValue+`"}`)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("POST status = %d, want 204", rr.Code)
+	}
+	// The response body carries no value.
+	if strings.Contains(rr.Body.String(), rawValue) {
+		t.Fatalf("response leaked the raw value: %s", rr.Body.String())
+	}
+	logged := buf.String()
+	if strings.Contains(logged, rawValue) {
+		t.Fatalf("log leaked the raw value: %s", logged)
+	}
+	// The log DOES carry the key and a by-reference descriptor (sha256+last4).
+	if !strings.Contains(logged, "key=K") || !strings.Contains(logged, "sha256:") {
+		t.Fatalf("log should carry key + Ref, got: %s", logged)
+	}
+}
+
+func TestSecretStore_NilStoreRejectsWrites(t *testing.T) {
+	srv := NewServer(&fakeDataSource{}, config.Policy{}, emptyProvider())
+	h := srv.Handler()
+
+	if rr := doPost(t, h, "/dashboard/api/secretstore", `{"key":"K","value":"v"}`); rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST nil store = %d, want 405", rr.Code)
+	}
+	if rr := doDelete(t, h, "/dashboard/api/secretstore?key=K"); rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("DELETE nil store = %d, want 405", rr.Code)
+	}
+	// GET still degrades gracefully to {backend:"none", entries:[]}.
+	got := doGet(t, h, "/dashboard/api/secretstore")
+	if got.Code != http.StatusOK {
+		t.Fatalf("GET nil store = %d, want 200", got.Code)
+	}
+	var resp secretStoreResponse
+	if err := json.Unmarshal(got.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Backend != "none" || len(resp.Entries) != 0 {
+		t.Fatalf("nil-store GET want {none, []}, got %+v", resp)
+	}
+}
+
+func TestSecretStore_UnsupportedMethod(t *testing.T) {
+	srv := NewServer(&fakeDataSource{}, config.Policy{}, emptyProvider())
+	srv.SetSecretStore(newWritableSecretStore(), config.SecretBackendEcho)
+	req := httptest.NewRequest(http.MethodPut, "/dashboard/api/secretstore", nil)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("PUT = %d, want 405", rr.Code)
 	}
 }
 
@@ -457,6 +632,23 @@ func getSetup(t *testing.T, srv *Server) setupResponse {
 		t.Fatalf("decode setup: %v", err)
 	}
 	return resp
+}
+
+func doDelete(t *testing.T, h http.Handler, path string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodDelete, path, nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	return rr
+}
+
+func hasSecretKey(entries []secretStoreEntry, key string) bool {
+	for _, e := range entries {
+		if e.Key == key {
+			return true
+		}
+	}
+	return false
 }
 
 func bytesToStrings(bs [][]byte) []string {
