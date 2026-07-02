@@ -5,16 +5,15 @@ import (
 	"testing"
 )
 
-// BenchmarkSecretSwap measures the request-body secret-substitution cost.
+// BenchmarkSecretSwap measures the request-body secret-substitution cost, the
+// before/after comparand for Phase 3's one-pass swap.
 //
-// The production swap is inline inside handleHTTP (http.go:~195-249) and is not
-// exposed as a separately callable function, so this benchmarks a FAITHFUL
-// reconstruction using the SAME mechanism the hot path uses: one
-// strings.ReplaceAll pass over the body per configured placeholder. With N
-// placeholders that is N full scans of the body. Phase 3 collapses this into a
-// single strings.NewReplacer pass; this benchmark is that change's before/after
-// comparand. Sub-benchmarks cover a 1KB and a 1MB body so the scan-cost scaling
-// with body size is visible.
+// The "Old" sub-benchmarks reproduce the pre-Phase-3 mechanism: one
+// strings.ReplaceAll pass over the body per configured placeholder (N full scans
+// for N placeholders). The "New" sub-benchmarks call the real production swap,
+// swapBodySecrets, which collapses those into a single strings.NewReplacer pass.
+// Each runs over a 1KB and a 1MB body so the scan-cost scaling with body size is
+// visible.
 func BenchmarkSecretSwap(b *testing.B) {
 	placeholders := []string{
 		"WARDEN_PLACEHOLDER_001",
@@ -30,6 +29,12 @@ func BenchmarkSecretSwap(b *testing.B) {
 		"WARDEN_PLACEHOLDER_004": "sk-real-secret-value-0000000000000004",
 		"WARDEN_PLACEHOLDER_005": "sk-real-secret-value-0000000000000005",
 	}
+	// The flat [placeholder, value, ...] slice swapBodySecrets consumes, built in
+	// the same PlaceholderNames order the hot path uses.
+	pairs := make([]string, 0, len(placeholders)*2)
+	for _, ph := range placeholders {
+		pairs = append(pairs, ph, reals[ph])
+	}
 
 	cases := []struct {
 		name string
@@ -39,8 +44,9 @@ func BenchmarkSecretSwap(b *testing.B) {
 		{"1MB", 1 << 20},
 	}
 	for _, tc := range cases {
-		b.Run(tc.name, func(b *testing.B) {
-			body := makeSwapBody(tc.size, placeholders)
+		body := makeSwapBody(tc.size, placeholders)
+		// Old: per-placeholder ReplaceAll (N scans of the body).
+		b.Run("Old/"+tc.name, func(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
@@ -49,6 +55,14 @@ func BenchmarkSecretSwap(b *testing.B) {
 					s = strings.ReplaceAll(s, ph, reals[ph])
 				}
 				_ = s
+			}
+		})
+		// New: the real one-pass swap (single NewReplacer scan).
+		b.Run("New/"+tc.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_ = swapBodySecrets(body, pairs)
 			}
 		})
 	}
