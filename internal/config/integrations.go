@@ -3,6 +3,8 @@ package config
 import (
 	"fmt"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 // IntegrationInstance is one configured outbound alert integration (webhook,
@@ -68,6 +70,31 @@ func parseIntegrations(raw []rawIntegration) []IntegrationInstance {
 		out = append(out, inst)
 	}
 	return out
+}
+
+// EncodeIntegrationsNode encodes typed integration instances into a yaml.Node
+// matching the on-disk `integrations:` sequence shape. It is the write-direction
+// counterpart of parseIntegrations: it round-trips through rawIntegration so the
+// YAML tags stay in lockstep with the read path (a single source of tag truth).
+// The `config` map is passed through untouched (opaque; secrets stay as ${ENV}).
+// Callers decide whether an empty list deletes the key vs writes an empty
+// sequence — this only encodes the value.
+func EncodeIntegrationsNode(insts []IntegrationInstance) (yaml.Node, error) {
+	raw := make([]rawIntegration, 0, len(insts))
+	for _, in := range insts {
+		r := rawIntegration{Type: in.Type, Name: in.Name, Config: in.Config}
+		for _, m := range in.Match {
+			// IntegrationMatch and rawIntegrationMatch are field-identical; a direct
+			// conversion keeps the two in lockstep (mirrors parseIntegrations).
+			r.Match = append(r.Match, rawIntegrationMatch(m))
+		}
+		raw = append(raw, r)
+	}
+	var node yaml.Node
+	if err := node.Encode(raw); err != nil {
+		return yaml.Node{}, fmt.Errorf("config: encode integrations: %w", err)
+	}
+	return node, nil
 }
 
 // validateIntegrations checks each configured integration instance structurally:

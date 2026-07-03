@@ -736,7 +736,7 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
     <section class="page" id="page-activity">
       <div class="page-head">
         <div><h1>Activity</h1><div class="desc">Mediated egress requests — forensic request log · metadata only, bodies never stored</div></div>
-        <div class="actions"><button class="btn">Live tail</button><button class="btn">Export CSV</button></div>
+        <div class="actions"><button class="btn" id="liveTailBtn" onclick="toggleLiveTail()">Live tail</button><button class="btn" id="exportCsvBtn" onclick="exportActivityCSV()">Export CSV</button></div>
       </div>
 
       <div class="empty-only" id="es-activity"></div>
@@ -996,7 +996,6 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
     <section class="page" id="page-fleet">
       <div class="page-head">
         <div><h1>Fleet</h1><div class="desc">Connected workers, policy sync state, and heartbeats</div></div>
-        <div class="actions"><button class="btn">Push policy to all</button><button class="btn primary">Register worker</button></div>
       </div>
 
       <div class="empty-only" id="es-fleet"></div>
@@ -1039,11 +1038,11 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
         <div class="card-head"><h3>Query builder</h3><button class="btn sm" onclick="runQuery()">Run</button></div>
         <div class="card-pad">
           <div style="display:flex; gap:9px; margin-bottom:12px; flex-wrap:wrap; align-items:center">
-            <select class="btn"><option>domain</option><option>worker</option><option>data_class</option><option>decision</option></select>
-            <select class="btn"><option>=</option><option>!=</option><option>in</option><option>like</option></select>
-            <input type="text" value="deny" style="background:var(--surface-2); border:1px solid var(--border); color:var(--text); padding:7px 11px; border-radius:9px; font:inherit;"/>
+            <select class="btn" id="qbCol"><option>domain</option><option>worker</option><option>data_class</option><option>decision</option></select>
+            <select class="btn" id="qbOp"><option>=</option><option>!=</option><option>in</option><option>like</option></select>
+            <input type="text" id="qbVal" value="deny" style="background:var(--surface-2); border:1px solid var(--border); color:var(--text); padding:7px 11px; border-radius:9px; font:inherit;"/>
             <span class="muted">group by</span>
-            <select class="btn"><option>domain</option><option>worker</option></select>
+            <select class="btn" id="qbGroup"><option>domain</option><option>worker</option></select>
           </div>
           <textarea id="sqlBox" style="width:100%; min-height:88px; background:var(--surface-2); border:1px solid var(--border); color:#9fe; border-radius:9px; padding:11px 13px; font-family:var(--mono); font-size:12.5px;">SELECT domain, count(*) AS n
 FROM events
@@ -1064,8 +1063,7 @@ LIMIT 8;</textarea>
     <!-- ============ SETTINGS ============ -->
     <section class="page" id="page-settings">
       <div class="page-head">
-        <div><h1>Settings</h1><div class="desc">Runtime knobs, integrations, access control, and control-plane connection</div></div>
-        <div class="actions"><span class="wip-note" id="settings-scope">Integrations · Access · Control plane wiring in progress (4b)</span></div>
+        <div><h1>Settings</h1><div class="desc">Runtime knobs and alert integrations</div></div>
       </div>
 
       <div class="grid g2" style="margin-bottom:16px">
@@ -1096,24 +1094,12 @@ LIMIT 8;</textarea>
         </div>
 
         <div class="card">
-          <div class="card-head"><h3>Integrations</h3><span class="wip-note">wiring in progress</span></div>
-          <table id="integrationsTable"><tbody></tbody></table>
-        </div>
-      </div>
-
-      <div class="grid g2">
-        <div class="card">
-          <div class="card-head"><h3>Access control (RBAC)</h3><button class="btn sm">+ Invite</button></div>
-          <table id="rbacTable"><thead><tr><th>User</th><th>Role</th><th>Scope</th></tr></thead><tbody></tbody></table>
-        </div>
-        <div class="card">
-          <div class="card-head"><h3>Control plane</h3><span class="pill p-green"><span class="d" style="background:var(--green)"></span>connected</span></div>
+          <div class="card-head"><h3>Integrations</h3><span class="sub" id="integrations-status"></span></div>
           <div class="card-pad">
-            <div class="kv"><span class="k">Endpoint</span><span class="mono">cp.warden.internal:8443</span></div>
-            <div class="kv"><span class="k">mTLS</span><span class="pill p-prove">verified</span></div>
-            <div class="kv"><span class="k">Policy bundle</span><span class="mono">etag: 9f2a-c14 · synced 12s ago</span></div>
-            <div class="kv"><span class="k">Auth token</span><span class="mono">{{CONTROL_PLANE_TOKEN}}</span> <span class="note">(secret-ref)</span></div>
-            <div class="kv"><span class="k">Version</span><span class="mono">warden v0.1.0 · go1.26.4</span></div>
+            <div id="integrations-list"></div>
+            <button class="btn primary sm" id="integrations-addbtn" style="display:none; margin-top:12px">+ Add integration</button>
+            <div id="integrations-readonly" class="note" style="display:none; margin-top:10px">Managed by control plane — integrations are read-only on this node.</div>
+            <div id="integrations-form" style="display:none; margin-top:12px"></div>
           </div>
         </div>
       </div>
@@ -1130,9 +1116,8 @@ LIMIT 8;</textarea>
    real data (per tab), never a manual toggle.
 
    All tabs are wired to live endpoints: Overview, Activity, Fleet,
-   Explore, Settings, Get Started / Onboarding (4a) and Secrets,
-   Guardrails (Egress/DLP/MCP/Judge), Alerts and Audit (4b). Only the
-   Settings integrations + RBAC panels remain preview (renderPreview4b).
+   Explore, Settings (runtime + integrations), Get Started / Onboarding
+   (4a) and Secrets, Guardrails (Egress/DLP/MCP/Judge), Alerts and Audit.
    ============================================================ */
 
 /* ---------- tiny helpers ---------- */
@@ -1206,13 +1191,54 @@ const state = { range:"24h", proxy:"" };
 const RANGES=[["24h","Last 24h"],["7d","Last 7 days"],["1h","Last hour"],["15m","Last 15 min"],["all","All time"]];
 function rangeLabel(){ const f=RANGES.find(r=>r[0]===state.range); return f?f[1]:"Last 24h"; }
 
-/* mode toggle — visual reflection of enforcement posture (from /setup.mode) */
+/* mode toggle — clicking bulk-sets the mode of every currently-ACTIVE distributed
+   guard (DLP when its mode is not off, MCP when enabled) via the same
+   PUT /settings read-modify-write the Guardrails editors use. On a read-only node
+   it behaves as a static badge (no write). Never enables a disabled guard. */
+function postureFromSettings(s){
+  s=s||{}; const dlp=s.dlp||{}, mcp=s.mcp||{};
+  const dlpEnf=(dlp.mode&&dlp.mode!=='off'&&dlp.mode==='enforce');
+  const mcpEnf=(!!mcp.enabled&&mcp.mode==='enforce');
+  return (dlpEnf||mcpEnf)?'enforce':'monitor';
+}
+function activeGuards(s){
+  s=s||{}; const dlp=s.dlp||{}, mcp=s.mcp||{};
+  return { dlp: !!(dlp.mode&&dlp.mode!=='off'), mcp: !!mcp.enabled };
+}
+async function fetchSettingsDoc(){
+  try{ const d=await jget('/dashboard/api/settings'); return { settings:(d&&d.settings)||{}, editable:!!(d&&d.editable) }; }
+  catch(e){ return null; }
+}
+async function onModeToggleClick(mode){
+  const doc=await fetchSettingsDoc();
+  if(!doc){ return; }                      // unreachable: leave visual state as-is
+  if(!doc.editable){ applyMode(postureFromSettings(doc.settings)); return; } // static badge
+  const s=doc.settings, act=activeGuards(s);
+  const n=(act.dlp?1:0)+(act.mcp?1:0);
+  if(n===0){
+    window.alert('No active guards to switch. Enable DLP or MCP on the Guardrails page first.');
+    applyMode(postureFromSettings(s)); return;
+  }
+  if(!window.confirm('Switch '+n+' active guard(s) to '+mode+'?')){ applyMode(postureFromSettings(s)); return; }
+  const merged=Object.assign({}, s);
+  if(act.dlp) merged.dlp=Object.assign({}, s.dlp, {mode});
+  if(act.mcp) merged.mcp=Object.assign({}, s.mcp, {mode});
+  try{
+    const r=await fetch('/dashboard/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(merged)});
+    if(!r.ok){ let m='status '+r.status; try{ const e=await r.json(); if(e&&e.error) m=e.error; }catch(_e){} throw new Error(m); }
+    applyMode(mode);
+    if(currentTab()==='guardrails') loadGuardrails();
+  }catch(err){
+    window.alert('Mode switch failed: '+err.message);
+    const fresh=await fetchSettingsDoc();
+    applyMode(fresh?postureFromSettings(fresh.settings):mode);
+  }
+}
 document.querySelectorAll('#modeToggle button').forEach(b=>{
-  b.addEventListener('click', ()=>{
-    document.querySelectorAll('#modeToggle button').forEach(x=>x.classList.remove('active'));
-    b.classList.add('active');
-  });
+  b.addEventListener('click', ()=>{ onModeToggleClick(b.dataset.mode==='enforce'?'enforce':'monitor'); });
 });
+// Determine editability up front so the toggle reads as a static badge on read-only nodes.
+fetchSettingsDoc().then(doc=>{ const tog=document.getElementById('modeToggle'); if(doc&&!doc.editable&&tog) tog.title='Enforcement posture (read-only on this node)'; });
 function applyMode(mode){
   const enf = (mode==='enforce');
   document.querySelectorAll('#modeToggle button').forEach(x=>x.classList.toggle('active', x.dataset.mode===(enf?'enforce':'monitor')));
@@ -1398,6 +1424,36 @@ function renderActivity(evs){
     body.appendChild(dr);
   });
 }
+/* Export the current Activity table (window.__traffic) as a client-side CSV download. */
+function csvCell(v){ const s=String(v==null?'':v); return /[",\n]/.test(s)? '"'+s.replace(/"/g,'""')+'"' : s; }
+function exportActivityCSV(){
+  const evs=window.__traffic||[];
+  if(!evs.length){ window.alert('No activity to export yet.'); return; }
+  const header=['Timestamp','ProxyID','Method','Domain','Protocol','Decision','DataClasses','SwappedRefs','CostUSD','LatencyMs'];
+  const rows=evs.map(e=>[
+    e.Timestamp, e.ProxyID||'local', e.Method||'', e.Domain||'', e.Protocol||'',
+    eventDecision(e), (e.DataClasses||[]).join(';'), (e.SwappedRefs||[]).length,
+    e.CostUSD!=null?e.CostUSD:'', e.LatencyMs!=null?e.LatencyMs:''
+  ].map(csvCell).join(','));
+  const csv=[header.join(','), ...rows].join('\n');
+  const blob=new Blob([csv], {type:'text/csv'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a'); a.href=url; a.download='warden-activity.csv';
+  document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+}
+/* Live tail — a toggle that adds a faster (2s) refresh on top of the global 5s one.
+   The tick no-ops while another tab is showing; toggling off clears the timer. */
+let liveTailTimer=null;
+function toggleLiveTail(){
+  const btn=document.getElementById('liveTailBtn');
+  if(liveTailTimer){
+    clearInterval(liveTailTimer); liveTailTimer=null;
+    if(btn){ btn.classList.remove('active'); btn.textContent='Live tail'; }
+    return;
+  }
+  liveTailTimer=setInterval(()=>{ if(currentTab()==='activity') loadActivity(); }, 2000);
+  if(btn){ btn.classList.add('active'); btn.textContent='Live tail ●'; }
+}
 function activityDetail(e,dec){
   const reason=e.Reason||e.JudgeReason||'—';
   const classes=(e.DataClasses||[]), ev=(e.Evidence||[]), swaps=(e.SwappedRefs||[]);
@@ -1475,6 +1531,44 @@ async function loadExplore(){
   const pg=document.getElementById('page-explore'); if(pg) pg.classList.toggle('is-empty', empty);
   if(empty) return;
   window.__schema=schema;
+  // Wire the visual builder: regenerate SQL on any control change (not on keystroke),
+  // and seed #sqlBox once from the default control state. .onchange keeps it idempotent
+  // across repeat visits to the Explore tab.
+  ['qbCol','qbOp','qbVal','qbGroup'].forEach(id=>{ const el=document.getElementById(id); if(el) el.onchange=buildQuerySQL; });
+  buildQuerySQL();
+}
+function qbSchemaCols(){
+  const t=(window.__schema&&window.__schema.tables&&window.__schema.tables[0])||null;
+  return (t&&Array.isArray(t.columns))? t.columns.map(c=>c.name) : [];
+}
+// Builder column labels → real events columns. "worker" is stored as proxy_id; there
+// is no data_class column in the fleet events table (DataClasses aren't persisted to
+// SQL), so it maps to the closest real column, compliance. qbCol() only builds against
+// columns the live schema lists; unknown columns fall back to a real one.
+const QB_COLMAP={ domain:'domain', worker:'proxy_id', data_class:'compliance', decision:'decision' };
+function qbCol(label){
+  let c=QB_COLMAP[label]||label;
+  const cols=qbSchemaCols();
+  if(cols.length && cols.indexOf(c)<0) c=(cols.indexOf('domain')>=0)?'domain':cols[0];
+  return c;
+}
+function qbEscVal(v){ return String(v==null?'':v).replace(/'/g,"''"); } // double single-quotes
+function buildQuerySQL(){
+  const box=document.getElementById('sqlBox'); if(!box) return;
+  const col=qbCol(val('qbCol')||'domain');
+  const op=(val('qbOp')||'=').trim();
+  const raw=val('qbVal')||'';
+  const group=qbCol(val('qbGroup')||'domain');
+  let cond;
+  if(op==='in'){
+    const list=raw.split(',').map(s=>s.trim()).filter(Boolean).map(s=>"'"+qbEscVal(s)+"'");
+    cond=col+' IN ('+(list.length?list.join(', '):"''")+')';
+  }else if(op==='like'){
+    cond=col+" LIKE '%"+qbEscVal(raw)+"%'";
+  }else{
+    cond=col+' '+(op==='!='?'!=':'=')+" '"+qbEscVal(raw)+"'";
+  }
+  box.value='SELECT '+group+', count(*) AS n\nFROM events\nWHERE '+cond+'\nGROUP BY '+group+'\nORDER BY n DESC\nLIMIT 100';
 }
 async function runQuery(){
   const ta=document.getElementById('sqlBox'), out=document.getElementById('exploreOut'), meta=document.getElementById('qMeta');
@@ -1549,6 +1643,7 @@ async function loadSettings(){
   catch(e){ lastSettings=null; settingsEditable=false; }
   try{ const p=await jget('/dashboard/api/policy'); renderPolicyLine(p); }catch(e){ renderPolicyLine(null); }
   renderSettings();
+  loadIntegrations();
 }
 function renderPolicyLine(p){
   const el=document.getElementById('rt-policy'); if(!el) return;
@@ -2276,28 +2371,132 @@ async function verifyReceipt(){
 }
 
 /* ============================================================
-   Settings integrations + RBAC (preview — control-plane wiring later)
+   Settings → Integrations (LIVE — /dashboard/api/integrations)
    ============================================================ */
-function renderPreview4b(){
-  const setHTML=(sel,html)=>{ const el=document.querySelector(sel); if(el) el.innerHTML=html; };
-  /* Settings: integrations + RBAC (preview) */
-  const integrations=[
-    ['Slack','#sec-alerts · workspace ethos','{{SLACK_BOT_TOKEN}}','green'],
-    ['PagerDuty','service: warden-critical','{{PAGERDUTY_KEY}}','green'],
-    ['Generic webhook','https://ops.internal/hook','{{WEBHOOK_SECRET}}','amber'],
-    ['OTel collector','otel.internal:4317','—','green']
-  ];
-  setHTML('#integrationsTable tbody', integrations.map(i=>
-    '<tr><td><b>'+esc(i[0])+'</b><div class="note">'+esc(i[1])+'</div></td>'
-    +'<td class="mono" style="font-size:12px">'+(i[2]==='—'?'<span class="muted">no secret</span>':'<span class="tag">'+esc(i[2])+'</span>')+'</td>'
-    +'<td style="text-align:right">'+(i[3]==='green'?'<span class="pill p-green"><span class="d" style="background:var(--green)"></span>Connected</span>':'<span class="pill p-redact"><span class="d" style="background:var(--amber)"></span>Degraded</span>')+'</td></tr>'
-  ).join(''));
-  const rbac=[
-    ['owner@example.com','Owner','Fleet'],['sre@example.com','Admin','Fleet'],
-    ['analyst@example.com','Operator','worker-ethos-1'],['audit@example.com','Read-only','Fleet (audit)']
-  ];
-  const rolePill=r=>{ const m={Owner:'p-prove',Admin:'p-detect',Operator:'p-allow','Read-only':'p-monitor'}; return '<span class="pill '+(m[r]||'p-monitor')+'">'+esc(r)+'</span>'; };
-  setHTML('#rbacTable tbody', rbac.map(u=>'<tr><td class="mono" style="font-size:12px">'+esc(u[0])+'</td><td>'+rolePill(u[1])+'</td><td class="muted">'+esc(u[2])+'</td></tr>').join(''));
+let integrationsData = { definitions:[], instances:[], editable:false };
+let integrationsFormType = "";
+
+function intgStatusPill(st, reason){
+  if(st==='connected') return '<span class="pill p-green"><span class="d" style="background:var(--green)"></span>connected</span>';
+  if(st==='unavailable') return '<span class="pill p-redact" title="'+esc(reason||'runtime pending')+'"><span class="d" style="background:var(--amber)"></span>runtime pending</span>';
+  if(st==='error') return '<span class="pill p-deny" title="'+esc(reason||'error')+'"><span class="d" style="background:var(--red)"></span>error</span>';
+  return '<span class="pill p-monitor">'+esc(st||'unknown')+'</span>';
+}
+function intgConfigTags(cfg){
+  if(!cfg||!cfg.length) return '<span class="muted">no config</span>';
+  return cfg.map(f=>{
+    if(!f.set) return '';
+    if(f.secret) return '<span class="tag" title="env-var reference (never a value)">'+esc(f.name)+': '+esc(f.ref||'${…}')+'</span>';
+    return '<span class="tag">'+esc(f.name)+': '+esc(f.value||'')+'</span>';
+  }).filter(Boolean).join(' ') || '<span class="muted">no config</span>';
+}
+async function loadIntegrations(){
+  const statusEl=document.getElementById('integrations-status');
+  try{
+    integrationsData = await jget('/dashboard/api/integrations');
+  }catch(e){
+    integrationsData = { definitions:[], instances:[], editable:false };
+    if(statusEl){ statusEl.textContent='unavailable'; }
+  }
+  renderIntegrations();
+}
+function renderIntegrations(){
+  const listEl=document.getElementById('integrations-list');
+  const addBtn=document.getElementById('integrations-addbtn');
+  const ro=document.getElementById('integrations-readonly');
+  const statusEl=document.getElementById('integrations-status');
+  const editable=!!integrationsData.editable;
+  const instances=integrationsData.instances||[];
+  if(statusEl) statusEl.textContent = instances.length ? (instances.length+' configured') : '';
+  if(listEl){
+    if(!instances.length){
+      listEl.innerHTML='<div class="note" style="padding:8px 0">No integrations configured yet.'+(editable?' Add one to route alerts to Slack or a webhook.':'')+'</div>';
+    }else{
+      listEl.innerHTML='<table><thead><tr><th>Name</th><th>Type</th><th>Routing</th><th>Config</th><th style="text-align:right">Status</th></tr></thead><tbody>'+
+        instances.map(i=>
+          '<tr><td><b>'+esc(i.name)+'</b></td>'
+          +'<td class="mono" style="font-size:12px">'+esc(i.type)+'</td>'
+          +'<td class="note" style="font-size:12px">'+esc(i.match||'')+'</td>'
+          +'<td style="font-size:12px">'+intgConfigTags(i.config)+'</td>'
+          +'<td style="text-align:right; white-space:nowrap">'+intgStatusPill(i.status,i.statusReason)
+          +(editable?' <button class="btn sm" title="Delete integration" onclick="deleteIntegration(\''+esc(i.name).replace(/'/g,"\\'")+'\')">✕</button>':'')
+          +'</td></tr>'
+        ).join('')+'</tbody></table>';
+    }
+  }
+  if(addBtn) addBtn.style.display = editable ? '' : 'none';
+  if(ro) ro.style.display = editable ? 'none' : '';
+  const form=document.getElementById('integrations-form');
+  if(form && form.style.display!=='none' && integrationsFormType) renderIntegrationForm();
+}
+function toggleIntegrationForm(){
+  const form=document.getElementById('integrations-form');
+  if(!form) return;
+  if(form.style.display==='none'){
+    const defs=(integrationsData.definitions||[]);
+    integrationsFormType = integrationsFormType || (defs.find(d=>d.available)||defs[0]||{}).type || "";
+    form.style.display='';
+    renderIntegrationForm();
+  }else{
+    form.style.display='none';
+  }
+}
+function onIntegrationTypeChange(v){ integrationsFormType=v; renderIntegrationForm(); }
+function renderIntegrationForm(){
+  const form=document.getElementById('integrations-form');
+  if(!form) return;
+  const defs=integrationsData.definitions||[];
+  const def=defs.find(d=>d.type===integrationsFormType)||defs[0];
+  if(!def){ form.innerHTML='<div class="note">No integration types available.</div>'; return; }
+  const typeOpts=defs.map(d=>'<option value="'+esc(d.type)+'"'+(d.type===def.type?' selected':'')+'>'+esc(d.displayName)+(d.available?'':' (runtime not built)')+'</option>').join('');
+  const fields=(def.fields||[]).map(f=>{
+    const isEnv=(f.type==='env'||f.secret);
+    const note=isEnv?'<div class="note">env-var reference only — the value resolves from the control plane\'s environment; never paste a token</div>':'';
+    return '<div class="field"><label>'+esc(f.label)+(f.required?' *':'')+'</label>'
+      +'<input id="intg-f-'+esc(f.name)+'" placeholder="'+esc(f.placeholder||'')+'"/>'+note+'</div>';
+  }).join('');
+  const disabled=!def.available;
+  const unavailNote=disabled?'<div class="note" style="color:var(--amber)">'+esc(def.displayName)+' runtime not built yet — see roadmap. You can view the field schema but not save.</div>':'';
+  form.innerHTML=
+    '<div class="field"><label>Type</label><select id="intg-type" onchange="onIntegrationTypeChange(this.value)">'+typeOpts+'</select>'
+    +'<div class="note">'+esc(def.description||'')+'</div></div>'
+    +'<div class="field"><label>Name *</label><input id="intg-name" placeholder="e.g. sec-alerts"/></div>'
+    +fields
+    +'<div class="field"><label>Route which alerts? (match)</label>'
+    +'<div style="display:flex; gap:8px; flex-wrap:wrap">'
+    +'<select id="intg-m-sev"><option value="">any severity</option><option value="critical">critical</option><option value="high">high</option><option value="medium">medium</option><option value="low">low</option><option value="info">info</option></select>'
+    +'<input id="intg-m-cat" placeholder="category (e.g. security)" style="flex:1; min-width:140px"/>'
+    +'</div><div class="note" id="intg-match-warn">Leave both empty = match-none (this integration receives NO alerts).</div></div>'
+    +unavailNote
+    +'<div style="margin-top:8px"><button class="btn primary sm" id="intg-save"'+(disabled?' disabled':'')+'>Save integration</button> '
+    +'<button class="btn sm" id="intg-cancel">Cancel</button> <span id="intg-save-status" class="sub"></span></div>';
+  const save=document.getElementById('intg-save'); if(save && !disabled) save.addEventListener('click', ()=>saveIntegration(def));
+  const cancel=document.getElementById('intg-cancel'); if(cancel) cancel.addEventListener('click', toggleIntegrationForm);
+}
+async function saveIntegration(def){
+  const st=document.getElementById('intg-save-status'); if(st){ st.textContent='saving…'; st.style.color=''; }
+  const config={};
+  (def.fields||[]).forEach(f=>{ const el=document.getElementById('intg-f-'+f.name); if(el && el.value.trim()) config[f.name]=el.value.trim(); });
+  const match=[]; const sev=val('intg-m-sev'), cat=(val('intg-m-cat')||'').trim();
+  if(sev||cat) match.push({severity:sev,category:cat});
+  if(!match.length && st){ st.textContent='warning: empty match = no alerts'; st.style.color='var(--amber)'; }
+  const body={ type:def.type, name:(val('intg-name')||'').trim(), config:config, match:match };
+  try{
+    const r=await fetch('/dashboard/api/integrations',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    if(!r.ok){ const e=await r.json().catch(()=>({error:'status '+r.status})); throw new Error(e.error||('status '+r.status)); }
+    integrationsData=await r.json();
+    const form=document.getElementById('integrations-form'); if(form) form.style.display='none';
+    renderIntegrations();
+  }catch(err){ if(st){ st.textContent='✕ '+err.message; st.style.color='var(--amber)'; } }
+}
+async function deleteIntegration(name){
+  if(!window.confirm('Delete integration "'+name+'"?')) return;
+  try{
+    const r=await fetch('/dashboard/api/integrations?name='+encodeURIComponent(name),{method:'DELETE'});
+    if(!r.ok){ const e=await r.json().catch(()=>({error:'status '+r.status})); throw new Error(e.error||('status '+r.status)); }
+    integrationsData=await r.json();
+    renderIntegrations();
+  }catch(err){ alert('Delete failed: '+err.message); }
 }
 
 /* ============================================================
@@ -2305,13 +2504,13 @@ function renderPreview4b(){
    ============================================================ */
 document.querySelectorAll('.nav-item').forEach(n=> n.addEventListener('click', ()=>go(n.dataset.page)) );
 (function(){ const b=document.getElementById('rt-save'); if(b) b.addEventListener('click', saveSettings); const r=document.getElementById('rt-reset'); if(r) r.addEventListener('click', loadSettings); })();
+(function(){ const b=document.getElementById('integrations-addbtn'); if(b) b.addEventListener('click', toggleIntegrationForm); })();
 (function(){ const b=document.getElementById('rangeBtn'); if(b) b.addEventListener('click', ()=>{
   const i=RANGES.findIndex(r=>r[0]===state.range); state.range=RANGES[(i+1)%RANGES.length][0];
   const rl=document.getElementById('rangeLabel'); if(rl) rl.textContent=rangeLabel(); loadOverview();
 }); })();
 
 renderEmptyStates();
-renderPreview4b();
 
 // initial data
 loadSetup();

@@ -90,6 +90,12 @@ type Server struct {
 	// audit receipts block zeroed; compliance aggregation is always available.
 	auditReceiptLog string
 	auditTrustedKey ed25519.PublicKey
+	// integrationsSource lists the configured integration instances + their live
+	// runtime status for the integrations endpoint; nil (a worker) = no instances.
+	// integrationsWriter persists+reloads an edited instance list; nil = read-only
+	// (worker) so POST/DELETE return 405. Both are control-plane-only.
+	integrationsSource func() []IntegrationInstanceStatus
+	integrationsWriter func([]config.IntegrationInstance) error
 }
 
 // analyticsCacheTTL is how long a computed analytics/MCP payload is reused
@@ -353,6 +359,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/dashboard/api/query/schema", s.handleQuerySchema)
 	mux.HandleFunc("/dashboard/api/secretstore", s.handleSecretStore)
 	mux.HandleFunc("/dashboard/api/alerts", s.handleAlerts)
+	mux.HandleFunc("/dashboard/api/integrations", s.handleIntegrations)
 	mux.HandleFunc("/dashboard/api/audit", s.handleAudit)
 	mux.HandleFunc("/dashboard/api/audit/verify", s.handleAuditVerify)
 	mux.HandleFunc("/dashboard/api/setup", s.handleSetup)

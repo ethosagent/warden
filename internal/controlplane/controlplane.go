@@ -100,11 +100,23 @@ type Server struct {
 	registry *WorkerRegistry
 	mcp      *mcpStore
 	policy   *policyServer
-	writeMu  sync.Mutex // serializes policy edits
-	// integrations is the CP-hosted alert-delivery pipeline. Nil when no
-	// integrations are configured (or when its store/manager failed to build —
-	// fail-open: a broken integrations config never stops policy serving).
+	writeMu  sync.Mutex // serializes policy + integrations edits
+	// integrationsMu guards the integrations pointer and lifeCtx. The bridge and
+	// alerts read paths take it for read; a reload takes it for write to swap the
+	// manager pointer, so live wirings (ingest bridge, dashboard alerts) always
+	// observe the CURRENT manager rather than a captured-once one.
+	integrationsMu sync.RWMutex
+	// integrations is the CP-hosted alert-delivery pipeline. Nil when no alert DB
+	// path is configured (or when its store/manager failed to build — fail-open: a
+	// broken integrations config never stops policy serving). Re-pointed on reload.
 	integrations *integration.Manager
+	// integrationsStore is the alert system-of-record, owned by the Server (NOT the
+	// manager) so a live reload can build a new manager over the SAME store without
+	// closing it. Closed exactly once, at shutdown. Nil ⇒ integrations unavailable.
+	integrationsStore *integration.Store
+	// lifeCtx is the Server's lifecycle context, captured in Start so a reload can
+	// bind a rebuilt manager's router goroutines to the process lifetime.
+	lifeCtx context.Context
 	// secretStore backs the /central/secrets write path. Nil ⇒ the endpoints are
 	// not mounted (env/empty backend, or aws pre-Phase-5).
 	secretStore secrets.SecretStore
@@ -148,17 +160,21 @@ func New(cfg Config) *Server {
 		// Write-scoped secret store (nil ⇒ /central/secrets not mounted).
 		secretStore: cfg.SecretStore,
 	}
-	// Integrations pipeline (CP-hosted alert delivery). Constructed only when the
-	// operator configured at least one integration AND an alert DB path is set.
-	// FAIL-OPEN: a store-open or manager-build error is logged and skipped — a
-	// broken integrations config must NEVER stop the control plane serving policy.
-	if len(cfg.Integrations) > 0 && cfg.AlertDBPath != "" {
+	// Integrations pipeline (CP-hosted alert delivery). Constructed whenever an
+	// alert DB path is set — even with ZERO configured integrations — so the
+	// dashboard can ADD the first integration later: the reload rebuilds the
+	// manager over this same store. The Server (not the manager) owns the store so
+	// a reload can swap managers without closing it. FAIL-OPEN: a store-open or
+	// manager-build error is logged and skipped — a broken integrations config must
+	// NEVER stop the control plane serving policy.
+	if cfg.AlertDBPath != "" {
 		if store, err := integration.NewStore(cfg.AlertDBPath); err != nil {
 			cfg.Logger.Error("control plane: integrations disabled (alert store open failed)", "error", err)
 		} else if m, err := integration.NewManager(store, cfg.Integrations, cfg.Logger, integration.RouterOptions{}); err != nil {
 			cfg.Logger.Error("control plane: integrations disabled (manager build failed)", "error", err)
 			_ = store.Close()
 		} else {
+			s.integrationsStore = store
 			s.integrations = m
 		}
 	}
@@ -174,14 +190,28 @@ func (s *Server) Start(ctx context.Context) {
 	// instances still run, so we LOG it and continue. A ctx-watcher goroutine Stops
 	// the manager (which closes its store + instances) on shutdown, mirroring the
 	// ctx-scoped goroutine style below (there is no Server.Stop).
-	if s.integrations != nil {
-		if err := s.integrations.Start(ctx); err != nil {
-			s.cfg.Logger.Warn("control plane: some integrations failed to start", "error", err)
+	// Capture the lifecycle context so a live reload can bind a rebuilt manager's
+	// router goroutines to the process lifetime (not the short-lived HTTP request).
+	s.integrationsMu.Lock()
+	s.lifeCtx = ctx
+	s.integrationsMu.Unlock()
+	if s.integrationsStore != nil {
+		if m := s.currentManager(); m != nil {
+			if err := m.Start(ctx); err != nil {
+				s.cfg.Logger.Warn("control plane: some integrations failed to start", "error", err)
+			}
 		}
 		go func() {
 			<-ctx.Done()
-			if err := s.integrations.Stop(context.Background()); err != nil {
-				s.cfg.Logger.Warn("control plane: integrations shutdown error", "error", err)
+			// Stop the CURRENT manager's instances (a reload may have swapped it),
+			// then close the Server-owned store exactly once.
+			if m := s.currentManager(); m != nil {
+				if err := m.StopInstances(context.Background()); err != nil {
+					s.cfg.Logger.Warn("control plane: integrations shutdown error", "error", err)
+				}
+			}
+			if err := s.integrationsStore.Close(); err != nil {
+				s.cfg.Logger.Warn("control plane: integrations store close error", "error", err)
 			}
 		}()
 	}
@@ -261,9 +291,15 @@ func (s *Server) Handler() http.Handler {
 	// producer stand-in). Wired only when integrations are configured; each event
 	// runs through bridgeEvent and a produced Finding is published onto the bus
 	// (fail-open — PublishFinding never blocks or panics).
-	if s.integrations != nil {
-		bus := s.integrations.Bus()
+	if s.integrationsStore != nil {
 		ingest.SetOnEvents(func(proxyID string, events []analytics.Event) {
+			// Read the CURRENT manager at event time (a reload may have swapped it)
+			// so alerting keeps flowing to the live pipeline. Nil-safe.
+			m := s.currentManager()
+			if m == nil {
+				return
+			}
+			bus := m.Bus()
 			for _, e := range events {
 				if f, ok := bridgeEvent(proxyID, e); ok {
 					bus.PublishFinding(f)
@@ -336,8 +372,26 @@ func (s *Server) Handler() http.Handler {
 	//     dashboard itself; the CP does not SIGN receipts (workers do), so no
 	//     receipts source is wired and the receipts block stays zeroed.
 	dash.SetSecretStore(s.secretStore, s.cfg.SecretStoreBackend)
-	if s.integrations != nil {
-		dash.SetAlerts(s.integrations.ListAlerts)
+	if s.integrationsStore != nil {
+		// Alerts + integration status read from the CURRENT manager (re-pointed on
+		// reload), so a reload never silently breaks the alerts tab or the status view.
+		dash.SetAlerts(func(limit int) []integration.Alert {
+			m := s.currentManager()
+			if m == nil {
+				return nil
+			}
+			return m.ListAlerts(limit)
+		})
+		dash.SetIntegrationsSource(s.integrationStatuses)
+		// Editing integrations is a control-plane-only capability that persists to the
+		// served config file and reloads the live manager. Workers never set this, so
+		// they expose no integrations-write path (POST/DELETE → 405).
+		dash.SetIntegrationsWriter(func(insts []config.IntegrationInstance) error {
+			if err := s.WriteIntegrations(insts); err != nil {
+				return err
+			}
+			return s.reloadIntegrations(toManagerInstances(insts))
+		})
 	}
 	mux.Handle("/dashboard/", dash.Handler())
 

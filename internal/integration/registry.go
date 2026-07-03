@@ -41,6 +41,21 @@ func newInstance(typ string) (Integration, bool) {
 	return factory(), true
 }
 
+// IsRegistered reports whether a runtime factory is registered for typ. It is
+// the exported, cheap way for callers outside this package (e.g. the dashboard's
+// integration catalog) to ask whether a configured type can actually run, so
+// an "available" flag reflects the real registry rather than a hardcoded guess.
+func IsRegistered(typ string) bool {
+	registryMu.RLock()
+	_, ok := registry[typ]
+	registryMu.RUnlock()
+	return ok
+}
+
+// RegisteredTypes returns the sorted set of registered type keys. It is the
+// exported view of registeredTypes for callers outside this package.
+func RegisteredTypes() []string { return registeredTypes() }
+
 // registeredTypes returns the sorted set of registered type keys (validation /
 // tests / error messages).
 func registeredTypes() []string {

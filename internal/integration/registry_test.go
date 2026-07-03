@@ -56,6 +56,30 @@ func TestRegisterNilFactoryPanics(t *testing.T) {
 	Register("test_registry_nil", nil)
 }
 
+func TestIsRegisteredAndRegisteredTypes(t *testing.T) {
+	const typ = "test_registry_isreg"
+	if IsRegistered(typ) {
+		t.Fatalf("IsRegistered(%q) should be false before Register", typ)
+	}
+	Register(typ, func() Integration { return &stubIntegration{typ: typ} })
+	if !IsRegistered(typ) {
+		t.Errorf("IsRegistered(%q) should be true after Register", typ)
+	}
+	if IsRegistered("test_registry_isreg_missing") {
+		t.Error("IsRegistered for an unregistered type should be false")
+	}
+	// RegisteredTypes is the exported view of registeredTypes and must include it.
+	found := false
+	for _, tp := range RegisteredTypes() {
+		if tp == typ {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("RegisteredTypes() missing %q", typ)
+	}
+}
+
 func TestRegisteredTypes(t *testing.T) {
 	const typ = "test_registry_types_zzz"
 	Register(typ, func() Integration { return &stubIntegration{typ: typ} })

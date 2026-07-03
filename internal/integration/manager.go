@@ -20,10 +20,34 @@ type Manager struct {
 	router *Router
 	am     *AlertManager
 
-	mu      sync.Mutex
-	started bool
-	stopped bool
-	running []Integration // successfully started instances, for Stop
+	mu       sync.Mutex
+	started  bool
+	stopped  bool
+	running  []Integration    // successfully started instances, for Stop
+	statuses []InstanceStatus // per-configured-instance runtime status (set by Start)
+}
+
+// Instance status values reported to the dashboard. They describe whether a
+// CONFIGURED instance is actually running:
+//   - StatusConnected: a factory is registered AND the instance Started cleanly.
+//   - StatusUnavailable: no factory is registered for the type (runtime not built).
+//   - StatusError: a factory is registered but the instance's Start failed.
+const (
+	StatusConnected   = "connected"
+	StatusUnavailable = "unavailable"
+	StatusError       = "error"
+)
+
+// InstanceStatus is one configured instance's runtime status plus the metadata a
+// read-only view needs. Config/Match are the operator-declared values (secrets in
+// Config are ${ENV} references, never raw values), safe to surface as metadata.
+type InstanceStatus struct {
+	Name   string
+	Type   string
+	Status string // StatusConnected | StatusUnavailable | StatusError
+	Reason string // human reason for a non-connected status; never a secret value
+	Config map[string]any
+	Match  []MatchClause
 }
 
 // NewManager builds the pipeline over store. It does NOT start anything or touch
@@ -83,9 +107,14 @@ func (m *Manager) Start(ctx context.Context) error {
 
 	sys := newSystem()
 	var errs []error
+	m.statuses = make([]InstanceStatus, 0, len(m.instances))
 	for _, ic := range m.instances {
+		st := InstanceStatus{Name: ic.Name, Type: ic.Type, Config: ic.Config, Match: ic.Match}
 		inst, ok := newInstance(ic.Type)
 		if !ok {
+			st.Status = StatusUnavailable
+			st.Reason = "runtime not built yet — no factory registered for type " + ic.Type
+			m.statuses = append(m.statuses, st)
 			err := fmt.Errorf("integration: unknown type %q (name=%q); registered types: %v", ic.Type, ic.Name, registeredTypes())
 			m.logger.Error("integration: skipping unknown integration type", "type", ic.Type, "name", ic.Name)
 			errs = append(errs, err)
@@ -93,10 +122,19 @@ func (m *Manager) Start(ctx context.Context) error {
 		}
 		cfg := Config{Name: ic.Name, Raw: ic.Config}
 		if err := inst.Start(ctx, sys, cfg); err != nil {
+			st.Status = StatusError
+			// Reason is deliberately GENERIC and secret-free: an integration's Start
+			// error may quote interpolated config (e.g. a webhook URL that embeds a
+			// token), so we never surface it to the dashboard. The full error is
+			// logged server-side below for operators.
+			st.Reason = "failed to start; see control-plane logs"
+			m.statuses = append(m.statuses, st)
 			m.logger.Error("integration: instance Start failed; skipping", "type", ic.Type, "name", ic.Name, "err", err)
 			errs = append(errs, fmt.Errorf("integration: start %q/%q: %w", ic.Type, ic.Name, err))
 			continue
 		}
+		st.Status = StatusConnected
+		m.statuses = append(m.statuses, st)
 		m.router.Bind(ic.Name, ic.Match, inst)
 		m.running = append(m.running, inst)
 	}
@@ -106,9 +144,33 @@ func (m *Manager) Start(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
+// InstanceStatuses returns a snapshot of each configured instance's runtime
+// status (populated by Start). It is the read accessor the control plane wires
+// into the dashboard's integrations source. Before Start it returns an empty
+// slice. The returned slice is a copy; Config/Match still share the underlying
+// (read-only) values.
+func (m *Manager) InstanceStatuses() []InstanceStatus {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]InstanceStatus, len(m.statuses))
+	copy(out, m.statuses)
+	return out
+}
+
 // Stop stops the router, Stops every started instance, and closes the store. It
 // is idempotent: a second call is a no-op. Errors from each step are joined.
-func (m *Manager) Stop(ctx context.Context) error {
+func (m *Manager) Stop(ctx context.Context) error { return m.stop(ctx, true) }
+
+// StopInstances stops the router and every started instance but LEAVES THE STORE
+// OPEN. It exists for the control plane's live reload: a new manager is built
+// over the SAME store, so the outgoing manager must not close a store the
+// incoming one now owns. Store lifecycle then belongs to the reload owner (the
+// control-plane Server), which closes it once at shutdown. Idempotent.
+func (m *Manager) StopInstances(ctx context.Context) error { return m.stop(ctx, false) }
+
+// stop is the shared teardown for Stop / StopInstances. It stops the router and
+// each started instance, and — only when closeStore is set — closes the store.
+func (m *Manager) stop(ctx context.Context, closeStore bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.stopped {
@@ -126,8 +188,10 @@ func (m *Manager) Stop(ctx context.Context) error {
 		}
 	}
 	m.running = nil
-	if err := m.store.Close(); err != nil {
-		errs = append(errs, fmt.Errorf("integration: close store: %w", err))
+	if closeStore {
+		if err := m.store.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("integration: close store: %w", err))
+		}
 	}
 	return errors.Join(errs...)
 }
