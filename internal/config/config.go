@@ -91,6 +91,22 @@ type Policy struct {
 	// CP-local (never on the worker wire). An absent block = detection ON with
 	// engine defaults; see DetectionConfig.
 	Detection DetectionConfig `json:"-"`
+	// LLMProviders is the shared, named LLM-provider registry (name + baseURL +
+	// model + apiKeyEnv NAME + optional timeout). It carries no secret VALUE, so
+	// it RIDES the secret-free settings wire (unlike the CP-local blocks above):
+	// the judge runs on workers, so a managed worker must receive it. Projection
+	// is via llmProvidersSettingsFromPolicy → SettingsWire, exactly as Judge
+	// projects — so, like every behavioral block, this stays json:"-" (the wire
+	// carries it through SettingsWire, never through Policy's own JSON). Empty by
+	// default. No feature consumes it yet (M1 is pure plumbing).
+	LLMProviders []LLMProvider `json:"-"`
+	// Explore selects which named llmProviders entry the Explore / NL→SQL feature
+	// uses, independently of the judge. It is CP-LOCAL (json:"-", never on the
+	// worker wire): the query engine Explore runs against is CP-only, so
+	// distributing this to workers would be dead config — like Detection and
+	// Integrations above. Empty by default; then Explore reuses the judge's client
+	// exactly as before.
+	Explore ExploreConfig `json:"-"`
 }
 
 // DeepCopy returns a deep copy of the policy, with all slices independently
@@ -161,6 +177,9 @@ func (p Policy) DeepCopy() Policy {
 		}
 		cp.Integrations = ints
 	}
+	// LLMProvider is a flat value struct (no nested slices/maps), so an
+	// independent backing array is a full deep copy.
+	cp.LLMProviders = append([]LLMProvider(nil), p.LLMProviders...)
 	return cp
 }
 
@@ -219,6 +238,8 @@ type rawConfig struct {
 	Audit         *rawAudit         `yaml:"audit"`
 	Integrations  []rawIntegration  `yaml:"integrations"`
 	Detection     *rawDetection     `yaml:"detection"`
+	LLMProviders  []rawLLMProvider  `yaml:"llmProviders"`
+	Explore       *rawExplore       `yaml:"explore"`
 }
 
 // defaultCacheTTLSeconds is used when the config omits cache.ttl.
@@ -314,6 +335,12 @@ func parse(data []byte) (*LocalYAMLProvider, error) {
 		return nil, err
 	}
 	policy.Detection = detection
+	llmProviders, err := parseLLMProviders(raw.LLMProviders)
+	if err != nil {
+		return nil, err
+	}
+	policy.LLMProviders = llmProviders
+	policy.Explore = parseExplore(raw.Explore)
 
 	if err := validate(policy); err != nil {
 		return nil, err
@@ -496,6 +523,21 @@ func validate(p Policy) error {
 		return err
 	}
 	if err := validateDetection(p.Detection); err != nil {
+		return err
+	}
+	if err := validateLLMProviders(p.LLMProviders); err != nil {
+		return err
+	}
+	// Cross-block: a judge.llmProvider selection must name an existing registry
+	// entry. Checked here (not in validateJudge) because it needs BOTH the judge
+	// block and the llmProviders list, which are parsed independently above.
+	if err := validateJudgeProviderRef(p.Judge, p.LLMProviders); err != nil {
+		return err
+	}
+	// Cross-block twin of the judge check: an explore.llmProvider selection must
+	// name an existing registry entry. Placed here (not in an explore-only
+	// validator) because it needs BOTH the explore block and the llmProviders list.
+	if err := validateExploreProviderRef(p.Explore, p.LLMProviders); err != nil {
 		return err
 	}
 	return nil

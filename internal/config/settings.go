@@ -37,6 +37,43 @@ type SettingsWire struct {
 	// a secret value or credential. It is the key→backend mapping the plan
 	// distributes over the wire; the actual values live only in the backend store.
 	Secrets *SecretsSettings `json:"secrets,omitempty"`
+	// LLMProviders distributes the named LLM-provider registry. It carries ONLY
+	// provider names, baseURLs, models, apiKeyEnv NAMES, and timeouts — never a key
+	// value (the worker resolves the key from its OWN env). The judge runs on
+	// workers, so this MUST ride the wire (unlike CP-local blocks).
+	LLMProviders []LLMProviderSettings `json:"llmProviders,omitempty"`
+	// Explore distributes the Explore / NL→SQL provider SELECTION (a provider NAME
+	// only — never a key value). REVISION of the plan's "Explore is CP-local": the
+	// control plane retains only a policyWire (Allowlist/Denylist/Settings) from
+	// snapshot(), NOT the full config.Policy, so a json:"-" CP-local Explore block
+	// would be unreachable at dashboard-wiring time. Riding the settings wire (like
+	// judge + llmProviders) is the only way the CP can read explore.llmProvider at
+	// runtime; it is wire-safe (just a name) and harmless dead config on workers.
+	Explore *ExploreSettings `json:"explore,omitempty"`
+}
+
+// ExploreSettings is the secret-free wire mirror of config.ExploreConfig. It
+// carries ONLY the Explore / NL→SQL provider-selection NAME — never a key value —
+// so the control plane can read explore.llmProvider from the distributed settings
+// at dashboard-wiring time. Pointer so an unset Explore stays absent on the wire
+// (mirrors the MCP/Judge optional sub-blocks). The selected provider's apiKeyEnv
+// resolves from each plane's OWN env at client-build time.
+type ExploreSettings struct {
+	LLMProvider string `json:"llmProvider,omitempty"`
+}
+
+// LLMProviderSettings is the secret-free wire mirror of config.LLMProvider. It
+// carries the provider name, baseURL, model, and the apiKeyEnv NAME only — never
+// a key value — plus the timeout as a plain seconds int (mirroring JudgeSettings.
+// TimeoutSeconds). The worker resolves the actual credential from its OWN
+// environment, preserving the SettingsWire secret-free invariant.
+type LLMProviderSettings struct {
+	Name      string `json:"name,omitempty"`
+	BaseURL   string `json:"baseURL,omitempty"`
+	Model     string `json:"model,omitempty"`
+	APIKeyEnv string `json:"apiKeyEnv,omitempty"`
+	// TimeoutSeconds is the per-provider timeout as a plain number; 0 => default.
+	TimeoutSeconds int `json:"timeoutSeconds,omitempty"`
 }
 
 // SecretsSettings is the VALUE-FREE secret-store backend selector distributed to
@@ -71,11 +108,16 @@ type LoggingSettings struct {
 // NAME only — never an API key value (the worker resolves the key from its own
 // environment).
 type JudgeSettings struct {
-	Enabled   bool   `json:"enabled"`
-	Provider  string `json:"provider,omitempty"`
-	Model     string `json:"model,omitempty"`
-	BaseURL   string `json:"baseURL,omitempty"`
-	APIKeyEnv string `json:"apiKeyEnv,omitempty"`
+	Enabled  bool   `json:"enabled"`
+	Provider string `json:"provider,omitempty"`
+	// LLMProvider names an entry in the distributed llmProviders registry the judge
+	// should use; empty keeps the inline Model/BaseURL/APIKeyEnv path. It is a NAME
+	// only (wire-safe), so a managed worker resolves the judge's client from the
+	// wire-delivered registry against its OWN env.
+	LLMProvider string `json:"llmProvider,omitempty"`
+	Model       string `json:"model,omitempty"`
+	BaseURL     string `json:"baseURL,omitempty"`
+	APIKeyEnv   string `json:"apiKeyEnv,omitempty"`
 	// TimeoutSeconds / cache / circuit-breaker tuning travel as plain numbers.
 	TimeoutSeconds  int                          `json:"timeoutSeconds,omitempty"`
 	CacheTTLSeconds int                          `json:"cacheTTLSeconds,omitempty"`
@@ -253,11 +295,89 @@ func SettingsWireFromPolicy(p Policy) *SettingsWire {
 		s.Secrets = sec
 		any = true
 	}
+	if lp := llmProvidersSettingsFromPolicy(p.LLMProviders); lp != nil {
+		s.LLMProviders = lp
+		any = true
+	}
+	if ex := exploreSettingsFromPolicy(p.Explore); ex != nil {
+		s.Explore = ex
+		any = true
+	}
 
 	if !any {
 		return nil
 	}
 	return &s
+}
+
+// llmProvidersSettingsFromPolicy projects the named LLM-provider registry onto
+// the secret-free wire mirror, or nil when the registry is empty (so a config
+// with no providers emits no "llmProviders" key and stays back-compatible). Only
+// names + env NAMES + timeouts are copied — never a key value — and the timeout
+// is converted to whole seconds like judgeSettingsFromPolicy.
+func llmProvidersSettingsFromPolicy(ps []LLMProvider) []LLMProviderSettings {
+	if len(ps) == 0 {
+		return nil
+	}
+	out := make([]LLMProviderSettings, 0, len(ps))
+	for _, p := range ps {
+		out = append(out, LLMProviderSettings{
+			Name:           p.Name,
+			BaseURL:        p.BaseURL,
+			Model:          p.Model,
+			APIKeyEnv:      p.APIKeyEnv,
+			TimeoutSeconds: int(p.Timeout.Seconds()),
+		})
+	}
+	return out
+}
+
+// LLMProvidersFromSettings is the reverse of llmProvidersSettingsFromPolicy: it
+// maps the secret-free wire registry back to []LLMProvider so a managed worker
+// can reconstruct the provider registry from control-plane-distributed settings.
+// It is field-for-field symmetric with the projector (Name, BaseURL, Model,
+// APIKeyEnv, Timeout), converting the seconds-valued int back to a time.Duration.
+// A nil/empty input returns nil, matching the "no providers distributed" case.
+// APIKeyEnv carries only an env NAME; the worker resolves the actual key from its
+// OWN environment.
+func LLMProvidersFromSettings(in []LLMProviderSettings) []LLMProvider {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]LLMProvider, 0, len(in))
+	for _, s := range in {
+		out = append(out, LLMProvider{
+			Name:      s.Name,
+			BaseURL:   s.BaseURL,
+			Model:     s.Model,
+			APIKeyEnv: s.APIKeyEnv,
+			Timeout:   time.Duration(s.TimeoutSeconds) * time.Second,
+		})
+	}
+	return out
+}
+
+// exploreSettingsFromPolicy projects ExploreConfig onto the secret-free wire
+// mirror, or nil when no provider is selected (LLMProvider==""), so a policy that
+// never set an explore block emits no "explore" key and stays back-compatible.
+// Only the provider NAME is copied — never a key value.
+func exploreSettingsFromPolicy(e ExploreConfig) *ExploreSettings {
+	if e.LLMProvider == "" {
+		return nil
+	}
+	return &ExploreSettings{LLMProvider: e.LLMProvider}
+}
+
+// ExploreFromSettings is the reverse of exploreSettingsFromPolicy: it maps the
+// secret-free wire explore block back to an ExploreConfig. A nil input returns a
+// zero ExploreConfig (LLMProvider="" → Explore reuses the judge's client),
+// matching the "no explore distributed" case. It carries only a provider NAME; the
+// selected provider's key resolves from the reading plane's OWN environment.
+func ExploreFromSettings(in *ExploreSettings) ExploreConfig {
+	if in == nil {
+		return ExploreConfig{}
+	}
+	return ExploreConfig{LLMProvider: in.LLMProvider}
 }
 
 // secretsSettingsFromPolicy projects a SecretStoreConfig onto the value-free wire
@@ -467,14 +587,15 @@ func JudgeConfigFromSettings(s *JudgeSettings) JudgeConfig {
 		return JudgeConfig{}
 	}
 	out := JudgeConfig{
-		Enabled:   s.Enabled,
-		Provider:  s.Provider,
-		Model:     s.Model,
-		BaseURL:   s.BaseURL,
-		APIKeyEnv: s.APIKeyEnv,
-		Timeout:   time.Duration(s.TimeoutSeconds) * time.Second,
-		CacheTTL:  time.Duration(s.CacheTTLSeconds) * time.Second,
-		RateLimit: s.RateLimit,
+		Enabled:     s.Enabled,
+		Provider:    s.Provider,
+		LLMProvider: s.LLMProvider,
+		Model:       s.Model,
+		BaseURL:     s.BaseURL,
+		APIKeyEnv:   s.APIKeyEnv,
+		Timeout:     time.Duration(s.TimeoutSeconds) * time.Second,
+		CacheTTL:    time.Duration(s.CacheTTLSeconds) * time.Second,
+		RateLimit:   s.RateLimit,
 	}
 	if s.CircuitBreaker != nil {
 		out.CircuitBreaker = CircuitBreakerConfig{
@@ -509,6 +630,7 @@ func judgeSettingsFromPolicy(j JudgeConfig) *JudgeSettings {
 	out := &JudgeSettings{
 		Enabled:         j.Enabled,
 		Provider:        j.Provider,
+		LLMProvider:     j.LLMProvider,
 		Model:           j.Model,
 		BaseURL:         j.BaseURL,
 		APIKeyEnv:       j.APIKeyEnv,
@@ -699,6 +821,15 @@ func (s *SettingsWire) DeepCopy() *SettingsWire {
 	if s.Secrets != nil {
 		sec := *s.Secrets
 		cp.Secrets = &sec
+	}
+	if s.LLMProviders != nil {
+		// LLMProviderSettings is a flat value struct, so an independent backing
+		// array is a full deep copy.
+		cp.LLMProviders = append([]LLMProviderSettings(nil), s.LLMProviders...)
+	}
+	if s.Explore != nil {
+		ex := *s.Explore
+		cp.Explore = &ex
 	}
 	return &cp
 }

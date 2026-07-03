@@ -105,10 +105,18 @@ func (a *SettingsApplier) Apply() {
 	// settings carry only the env NAME). agentID is the worker's LOCAL
 	// identity and stays fixed across rebuilds.
 	if settings != nil && settings.Judge != nil && settings.Judge.Enabled {
+		// Reconstruct the named-provider registry from the wire-delivered settings
+		// (LLMProvidersFromSettings — the live consumer M1 deferred) and rebuild the
+		// client map from THIS worker's OWN env, so a managed worker resolves the
+		// judge's named client against its local credentials. Per-name build errors
+		// are logged (metadata only, never a key) and the provider is simply absent.
+		clients, errs := BuildLLMClients(config.LLMProvidersFromSettings(settings.LLMProviders))
+		logLLMClientErrs(a.logger, errs)
 		newJudge, jErr := buildJudgeFrom(
 			config.JudgeConfigFromSettings(settings.Judge),
 			config.AgentsFromSettings(settings.Agents),
 			a.agentID,
+			clients,
 		)
 		if jErr != nil {
 			// Fail-safe: the judge is advisory (NoMatch default-denies without
