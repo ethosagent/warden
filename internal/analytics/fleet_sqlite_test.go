@@ -32,6 +32,70 @@ func aggEvent(proxyID, agentID, domain, decision string, ts time.Time) Aggregate
 	}
 }
 
+// TestFleetSQLite_DedupByUID_RetryStoresOnce covers the lost-ack retry: the
+// SAME event (same UID) stored twice lands exactly once, and the duplicate is
+// a silent no-op, never an error that would fail the rest of the batch.
+func TestFleetSQLite_DedupByUID_RetryStoresOnce(t *testing.T) {
+	s := newFleetStore(t, 0, 0)
+	e := aggEvent("proxy-a", "agent-1", "same.example.com", "allow", time.Now())
+	e.UID = "aaaabbbbccccddddeeeeffff"
+	for i := 0; i < 2; i++ {
+		if err := s.StoreAggregatedEvent(e); err != nil {
+			t.Fatalf("store attempt %d: %v", i, err)
+		}
+	}
+	got, err := s.GetEvents(EventFilter{})
+	if err != nil {
+		t.Fatalf("GetEvents: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("rows = %d, want 1 (retry deduped)", len(got))
+	}
+}
+
+// TestFleetSQLite_DistinctUIDs_IdenticalFields_BothStored: two genuinely
+// distinct events with IDENTICAL semantic fields (ts/domain/method) must both
+// be stored — the dedup key is the UID, never the content.
+func TestFleetSQLite_DistinctUIDs_IdenticalFields_BothStored(t *testing.T) {
+	s := newFleetStore(t, 0, 0)
+	ts := time.Unix(5000, 0).UTC()
+	for _, uid := range []string{"uid-000000000000000000001", "uid-000000000000000000002"} {
+		e := aggEvent("proxy-a", "agent-1", "same.example.com", "allow", ts)
+		e.Method = "GET"
+		e.UID = uid
+		if err := s.StoreAggregatedEvent(e); err != nil {
+			t.Fatalf("store %s: %v", uid, err)
+		}
+	}
+	got, err := s.GetEvents(EventFilter{})
+	if err != nil {
+		t.Fatalf("GetEvents: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("rows = %d, want 2 (distinct UIDs never conflate)", len(got))
+	}
+}
+
+// TestFleetSQLite_EmptyUID_NeverDeduped: events without a UID (pre-UID workers,
+// no proxy id configured) are always stored — the partial unique index excludes
+// empty/NULL uids, so identical no-UID events never conflict.
+func TestFleetSQLite_EmptyUID_NeverDeduped(t *testing.T) {
+	s := newFleetStore(t, 0, 0)
+	e := aggEvent("proxy-a", "agent-1", "legacy.example.com", "allow", time.Unix(5000, 0).UTC())
+	for i := 0; i < 3; i++ {
+		if err := s.StoreAggregatedEvent(e); err != nil {
+			t.Fatalf("store attempt %d: %v", i, err)
+		}
+	}
+	got, err := s.GetEvents(EventFilter{})
+	if err != nil {
+		t.Fatalf("GetEvents: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("rows = %d, want 3 (empty uid is never a dedup key)", len(got))
+	}
+}
+
 func TestFleetSQLite_StoreAndGet_ProxyFilter(t *testing.T) {
 	s := newFleetStore(t, 0, 0)
 	now := time.Now()

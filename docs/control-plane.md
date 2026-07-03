@@ -147,6 +147,25 @@ worker requires HTTPS for the policy pull.
   writer, so every worker blocks the tool on its next poll.
 - **Live policy** — the policy panel reflects the policy currently being served
   (control plane) or enforced (worker, including hot-reloads), not a startup snapshot.
+- **Alert integrations** — configure outbound alert sinks (webhook today) from the
+  dashboard. Secrets are entered as `${ENV}` references only (raw values are
+  rejected) and resolved from the control plane's environment at start.
+
+### Verifying webhook signatures
+
+If a webhook integration has a **Signing secret** configured, every delivery is
+signed Slack/Stripe-style so your receiver can authenticate the payload and
+reject replays:
+
+- `X-Warden-Timestamp: <unix seconds>` — when the request was sent.
+- `X-Warden-Signature: v1=<hex>` — where `<hex>` is
+  `HMAC-SHA256(secret, "<timestamp>.<raw request body>")`.
+
+To verify: read the raw body bytes **before** JSON-parsing, recompute
+`hex(hmac_sha256(secret, timestamp + "." + body))`, compare against the value
+after `v1=` with a constant-time comparison, and reject requests whose
+timestamp is older than your replay window (e.g. 5 minutes). Without a
+configured secret the headers are absent and deliveries are unsigned.
 
 > **Security note:** policy editing is **unauthenticated** — anyone who can reach
 > the dashboard can change policy. Restrict the control plane's port (`:7070`) to

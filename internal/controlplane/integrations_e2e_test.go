@@ -94,7 +94,7 @@ func TestIntegrations_EndToEnd(t *testing.T) {
 	})
 	// A blocked egress: bridge ⇒ egress_blocked / security / medium ⇒ matches.
 	postIngest(t, cp.URL, "worker-1", []analytics.Event{
-		{Domain: "evil.example.com", Decision: "block", Method: "POST", Reason: "mcp_tool_denied"},
+		{Domain: "evil.example.com", Decision: "deny", Method: "POST"},
 	})
 
 	select {

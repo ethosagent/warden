@@ -39,8 +39,12 @@ func TestStoreUpsertInsertThenConflict(t *testing.T) {
 	t1 := time.UnixMilli(2_000)
 
 	first := sampleAlert("id1", "error_rate:api.foo.com", SevMedium, t0)
-	if err := s.UpsertAlert(first); err != nil {
+	ret, err := s.UpsertAlert(first)
+	if err != nil {
 		t.Fatalf("upsert insert: %v", err)
+	}
+	if ret.Count != 1 || ret.Severity != SevMedium {
+		t.Errorf("insert RETURNING: count=%d sev=%v, want 1/medium", ret.Count, ret.Severity)
 	}
 
 	got, ok, err := s.GetAlert("id1")
@@ -55,8 +59,19 @@ func TestStoreUpsertInsertThenConflict(t *testing.T) {
 	refire := sampleAlert("id1", "error_rate:api.foo.com", SevCritical, t1)
 	refire.Summary = "escalated"
 	refire.Evidence = "rate=20%"
-	if err := s.UpsertAlert(refire); err != nil {
+	ret, err = s.UpsertAlert(refire)
+	if err != nil {
 		t.Fatalf("upsert conflict: %v", err)
+	}
+	// RETURNING must expose the post-merge row, not echo the input.
+	if ret.Count != 2 {
+		t.Errorf("conflict RETURNING count = %d, want 2 (merged)", ret.Count)
+	}
+	if ret.Severity != SevCritical {
+		t.Errorf("conflict RETURNING severity = %v, want critical", ret.Severity)
+	}
+	if !ret.FirstSeen.Equal(t0.UTC()) {
+		t.Errorf("conflict RETURNING first_seen = %v, want preserved %v", ret.FirstSeen, t0.UTC())
 	}
 
 	got, ok, err = s.GetAlert("id1")
@@ -81,7 +96,7 @@ func TestStoreUpsertInsertThenConflict(t *testing.T) {
 
 	// Re-fire with LOWER severity must not de-escalate.
 	lower := sampleAlert("id1", "error_rate:api.foo.com", SevLow, time.UnixMilli(3_000))
-	if err := s.UpsertAlert(lower); err != nil {
+	if _, err := s.UpsertAlert(lower); err != nil {
 		t.Fatalf("upsert lower: %v", err)
 	}
 	got, _, _ = s.GetAlert("id1")
@@ -97,10 +112,10 @@ func TestStoreListAlertsOrdering(t *testing.T) {
 	s := newTestStore(t)
 	older := sampleAlert("a", "k:a", SevLow, time.UnixMilli(1_000))
 	newer := sampleAlert("b", "k:b", SevLow, time.UnixMilli(5_000))
-	if err := s.UpsertAlert(older); err != nil {
+	if _, err := s.UpsertAlert(older); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.UpsertAlert(newer); err != nil {
+	if _, err := s.UpsertAlert(newer); err != nil {
 		t.Fatal(err)
 	}
 
@@ -155,7 +170,7 @@ func TestStoreReopenPersistence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s1.UpsertAlert(sampleAlert("keep", "k:keep", SevHigh, time.UnixMilli(1_000))); err != nil {
+	if _, err := s1.UpsertAlert(sampleAlert("keep", "k:keep", SevHigh, time.UnixMilli(1_000))); err != nil {
 		t.Fatal(err)
 	}
 	if err := s1.Close(); err != nil {

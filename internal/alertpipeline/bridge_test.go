@@ -21,21 +21,22 @@ func containsAny(s string, subs ...string) string {
 	return ""
 }
 
-func TestBridgeEvent_Block(t *testing.T) {
+func TestBridgeEvent_ReasonlessDeny(t *testing.T) {
+	// The proxy writes Decision "deny" with no Reason for plain allowlist /
+	// default-deny blocks — the bridge must turn these into egress_blocked.
 	ts := time.Now()
 	e := analytics.Event{
 		Timestamp:   ts,
 		Domain:      "evil.example.com",
 		Method:      "POST",
-		Decision:    "block",
-		Reason:      "mcp_tool_denied",
+		Decision:    "deny",
 		Tool:        "shell",
 		URL:         "https://evil.example.com/exfil?token=SECRET123&q=body",
 		JudgeReason: "the model tried to leak the API key value abc123",
 	}
 	f, ok := bridgeEvent("worker-7", e)
 	if !ok {
-		t.Fatal("block event should produce a finding")
+		t.Fatal("deny event should produce a finding")
 	}
 	if f.RuleID != "egress_blocked" {
 		t.Errorf("RuleID = %q, want egress_blocked", f.RuleID)
@@ -62,6 +63,38 @@ func TestBridgeEvent_Block(t *testing.T) {
 	}
 	if hit := containsAny(string(f.Evidence), "SECRET123", "exfil", "abc123", "the model tried", "?"); hit != "" {
 		t.Fatalf("Evidence %q leaked %q; %s", f.Evidence, hit, leak)
+	}
+}
+
+func TestBridgeEvent_BlockCompat(t *testing.T) {
+	// "block" is not what the proxy writes, but the bridge accepts it for
+	// compatibility with external event producers.
+	e := analytics.Event{Domain: "evil.example.com", Decision: "block", Method: "GET"}
+	f, ok := bridgeEvent("w1", e)
+	if !ok {
+		t.Fatal("block event should produce a finding")
+	}
+	if f.RuleID != "egress_blocked" {
+		t.Errorf("RuleID = %q, want egress_blocked", f.RuleID)
+	}
+	if f.DedupKey != "egress_blocked:evil.example.com" {
+		t.Errorf("DedupKey = %q", f.DedupKey)
+	}
+}
+
+func TestBridgeEvent_ReasonCarryingDeny(t *testing.T) {
+	// A deny that carries a bounded reason (dlp_*, mcp_*, scan reasons) keeps its
+	// reason-based rule id so routing rules keyed on the reason still match.
+	e := analytics.Event{Domain: "api.foo.com", Decision: "deny", Reason: "dlp_credit_card", Tool: "shell"}
+	f, ok := bridgeEvent("w1", e)
+	if !ok {
+		t.Fatal("reason-carrying deny should produce a finding")
+	}
+	if f.RuleID != "dlp_credit_card" {
+		t.Errorf("RuleID = %q, want dlp_credit_card (reason wins over egress_blocked)", f.RuleID)
+	}
+	if f.DedupKey != "dlp_credit_card:api.foo.com" {
+		t.Errorf("DedupKey = %q", f.DedupKey)
 	}
 }
 

@@ -56,7 +56,7 @@ func integrationCatalog() []integrationDefinition {
 		{
 			Type:        "webhook",
 			DisplayName: "Webhook",
-			Description: "POST each routed alert as JSON to an HTTP(S) endpoint.",
+			Description: "POST each routed alert as JSON to an HTTP(S) endpoint. Optional signing secret: HMAC-SHA256, sent as X-Warden-Signature: v1=hex(hmac(secret, ts + '.' + body)) with X-Warden-Timestamp (unix seconds).",
 			Available:   integration.IsRegistered("webhook"),
 			Fields: []integrationField{
 				{Name: "url", Label: "URL", Type: "text", Required: true, Placeholder: "https://ops.example.com/hook or ${WEBHOOK_URL}"},

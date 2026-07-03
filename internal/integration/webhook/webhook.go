@@ -6,11 +6,15 @@ package webhook
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -27,17 +31,19 @@ type Webhook struct {
 	client *http.Client
 	url    string // full endpoint (may embed a token) — NEVER logged
 	host   string // host only, safe to log
+	secret []byte // optional HMAC signing key — NEVER logged
 }
 
 // Type is the stable registry key.
 func (w *Webhook) Type() string { return "webhook" }
 
 type webhookConfig struct {
-	URL string `json:"url"`
+	URL    string `json:"url"`
+	Secret string `json:"secret"`
 }
 
-// Start decodes the config, expands ${ENV} in the URL, validates it is a
-// non-empty http(s) URL, and prepares an HTTP client.
+// Start decodes the config, expands ${ENV} in the URL and signing secret,
+// validates the URL is a non-empty http(s) URL, and prepares an HTTP client.
 func (w *Webhook) Start(_ context.Context, _ integration.System, cfg integration.Config) error {
 	var c webhookConfig
 	if err := cfg.Decode(&c); err != nil {
@@ -60,9 +66,20 @@ func (w *Webhook) Start(_ context.Context, _ integration.System, cfg integration
 		return fmt.Errorf("webhook %q: url missing host", cfg.Name)
 	}
 
+	// The signing secret is optional (absent ⇒ unsigned delivery), but a
+	// configured secret that expands to empty is a hard error — mirroring the
+	// URL — so a missing env var can never silently downgrade to unsigned.
+	// The raw value is safe to echo here: it expanded to empty, so it is an
+	// unresolved ${ENV} reference, not secret material.
+	secret := expandEnv(c.Secret)
+	if secret == "" && c.Secret != "" {
+		return fmt.Errorf("webhook %q: secret %q expands to empty (is the env var set?)", cfg.Name, c.Secret)
+	}
+
 	w.mu.Lock()
 	w.url = raw
 	w.host = u.Host
+	w.secret = []byte(secret)
 	w.client = &http.Client{Timeout: defaultHTTPTimeout}
 	w.mu.Unlock()
 	return nil
@@ -84,6 +101,25 @@ type alertPayload struct {
 	LastSeen  time.Time           `json:"lastSeen"`
 }
 
+// Signature header names. When a signing secret is configured every delivery
+// carries X-Warden-Timestamp (unix seconds) and X-Warden-Signature computed as
+// v1=hex(hmac-sha256(secret, "<timestamp>.<raw body bytes>")) — the same shape
+// as Slack/Stripe webhook signing, so receivers can verify authenticity and
+// reject replays on a stale timestamp.
+const (
+	signatureHeader = "X-Warden-Signature"
+	timestampHeader = "X-Warden-Timestamp"
+)
+
+// sign returns the v1 signature value for body at ts (unix-seconds string).
+func sign(secret []byte, ts string, body []byte) string {
+	mac := hmac.New(sha256.New, secret)
+	mac.Write([]byte(ts))
+	mac.Write([]byte("."))
+	mac.Write(body)
+	return "v1=" + hex.EncodeToString(mac.Sum(nil))
+}
+
 // Alert POSTs a as JSON. A non-2xx response (or transport error) returns an
 // error so the router retries and eventually dead-letters. The URL is never
 // logged or included in errors — only its host (it may embed a token).
@@ -92,6 +128,7 @@ func (w *Webhook) Alert(ctx context.Context, a integration.Alert) error {
 	client := w.client
 	endpoint := w.url
 	host := w.host
+	secret := w.secret
 	w.mu.Unlock()
 	if client == nil {
 		return fmt.Errorf("webhook: Alert called before Start")
@@ -119,6 +156,12 @@ func (w *Webhook) Alert(ctx context.Context, a integration.Alert) error {
 		return fmt.Errorf("webhook: build request for host %s: %w", host, err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if len(secret) > 0 {
+		// Sign the exact bytes sent. No secret ⇒ no signature headers.
+		ts := strconv.FormatInt(time.Now().Unix(), 10)
+		req.Header.Set(timestampHeader, ts)
+		req.Header.Set(signatureHeader, sign(secret, ts, body))
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {

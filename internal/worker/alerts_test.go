@@ -63,8 +63,8 @@ func TestNewWorkerAlerts_BuildsAndBridgesBlock(t *testing.T) {
 	alerts.Start(ctx)
 
 	alerts.Observe([]analytics.Event{{
-		Timestamp: time.Now(), Domain: "evil.example.com", Decision: "block",
-		Method: "POST", Reason: "default_deny",
+		Timestamp: time.Now(), Domain: "evil.example.com", Decision: "deny",
+		Method: "POST",
 	}})
 
 	m := alerts.pipeline.CurrentManager()
@@ -104,7 +104,7 @@ func TestWorkerAlerts_TeesThroughAsyncWriter(t *testing.T) {
 
 	async := analytics.NewAsyncWriter(store, analytics.WithOnBatch(alerts.Observe))
 	if err := async.StoreEvent(analytics.Event{
-		Timestamp: time.Now(), Domain: "blocked.example.com", Decision: "block", Method: "GET",
+		Timestamp: time.Now(), Domain: "blocked.example.com", Decision: "deny", Method: "GET",
 	}); err != nil {
 		t.Fatalf("StoreEvent: %v", err)
 	}

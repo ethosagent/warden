@@ -4,8 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"regexp"
-	"strings"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go SQLite driver (no CGo)
@@ -33,21 +31,6 @@ var (
 	_ AnalyticsQuery = (*FleetSQLiteStore)(nil)
 )
 
-// maxQueryRows is the hard upper bound on rows returned by Query, regardless of
-// the caller-requested cap.
-const maxQueryRows = 5000
-
-// defaultQueryRows is the default row cap when Query is called with maxRows <= 0.
-const defaultQueryRows = 1000
-
-// isMemoryDSN reports whether path names an in-memory SQLite database. A
-// separate read-only connection cannot see another connection's in-memory DB,
-// so for these we alias the rw handle for reads.
-func isMemoryDSN(path string) bool {
-	return path == ":memory:" || strings.HasPrefix(path, "file::memory:") ||
-		strings.Contains(path, "mode=memory")
-}
-
 // NewFleetSQLiteStore opens (or creates) a SQLite database at path and ensures
 // the fleet schema. retentionDays <= 0 keeps events forever; maxEvents <= 0 uses
 // the default cap.
@@ -69,27 +52,15 @@ func NewFleetSQLiteStore(path string, retentionDays, maxEvents int) (*FleetSQLit
 		return nil, err
 	}
 
-	// Read-only query handle. For in-memory DSNs a separate ro handle would open
-	// a distinct, empty database, so we alias the rw handle instead. Even then,
-	// Query is guarded by isReadOnlySelect + PRAGMA query_only, so it cannot
-	// mutate the store.
-	if isMemoryDSN(path) {
-		s.ro = db
-		s.sharedRO = true
-	} else {
-		ro, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
-		if err != nil {
-			_ = db.Close()
-			return nil, fmt.Errorf("analytics: open fleet sqlite (ro): %w", err)
-		}
-		ro.SetMaxOpenConns(1)
-		if _, err := ro.Exec(`PRAGMA query_only = ON;`); err != nil {
-			_ = ro.Close()
-			_ = db.Close()
-			return nil, fmt.Errorf("analytics: fleet sqlite query_only: %w", err)
-		}
-		s.ro = ro
+	// Read-only query handle (shared opener; see query.go). For in-memory DSNs
+	// it aliases the rw handle (sharedRO=true).
+	ro, shared, err := openReadOnlyDB(path, db)
+	if err != nil {
+		_ = db.Close()
+		return nil, err
 	}
+	s.ro = ro
+	s.sharedRO = shared
 	return s, nil
 }
 
@@ -130,9 +101,11 @@ CREATE INDEX IF NOT EXISTS idx_events_tool ON events(tool);`
 }
 
 // StoreAggregatedEvent persists an aggregated event, then prunes by age and cap.
-// event_uid may be empty today; the partial unique index means empty uids never
-// conflict, so every event inserts. When a non-empty uid conflicts the insert is
-// a no-op (dedup for a future caller).
+// event_uid comes from the sending worker (Event.UID); the partial unique index
+// means empty uids (pre-UID workers, workers with no proxy id) never conflict,
+// so every such event inserts. When a non-empty uid conflicts — a worker
+// re-sending a batch whose ack was lost — the insert is a silent no-op, so a
+// retried batch never stores duplicates and never fails.
 func (s *FleetSQLiteStore) StoreAggregatedEvent(e AggregatedEvent) error {
 	if e.Timestamp.IsZero() {
 		e.Timestamp = time.Now()
@@ -152,10 +125,12 @@ func (s *FleetSQLiteStore) StoreAggregatedEvent(e AggregatedEvent) error {
 	return s.prune()
 }
 
-// EventUID is the dedup key for an aggregated event. There is no such field on
-// AggregatedEvent yet, so it is always empty today; it exists so a future caller
-// can supply a stable id without changing StoreAggregatedEvent's shape.
-func (e AggregatedEvent) EventUID() string { return "" }
+// EventUID is the dedup key for an aggregated event: the worker-assigned
+// Event.UID (a hash of proxy id + local rowid, stamped by the SyncWorker before
+// first send, so it is identical on every retry of the same event). Empty when
+// the sender predates UIDs or has no proxy id configured; empty keys fall
+// outside the partial unique index and are always stored.
+func (e AggregatedEvent) EventUID() string { return e.UID }
 
 // nullIfEmpty maps "" to a SQL NULL so empty event_uids stay outside the partial
 // unique index (which excludes NULL and ”).
@@ -341,141 +316,15 @@ func (s *FleetSQLiteStore) Close() error {
 	return errRO
 }
 
-// forbiddenKeyword matches any mutating/side-effecting SQL keyword on a word
-// boundary, case-insensitively. Query rejects statements containing any of these.
-var forbiddenKeyword = regexp.MustCompile(`(?i)\b(ATTACH|PRAGMA|INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE|VACUUM|REINDEX)\b`)
-
-// isReadOnlySelect validates that sqlText is a single read-only SELECT/WITH
-// statement. It strips leading line (--) and block (/* */) comments, rejects any
-// non-trailing ';' (single statement only), requires the first keyword to be
-// SELECT or WITH, and rejects any forbidden mutating keyword. It returns a clear
-// error describing the first rule violated.
-func isReadOnlySelect(sqlText string) error {
-	s := strings.TrimSpace(sqlText)
-	// Strip leading line and block comments (repeatedly, since they can stack).
-	for {
-		if strings.HasPrefix(s, "--") {
-			if i := strings.IndexByte(s, '\n'); i >= 0 {
-				s = strings.TrimSpace(s[i+1:])
-				continue
-			}
-			s = ""
-			break
-		}
-		if strings.HasPrefix(s, "/*") {
-			if i := strings.Index(s, "*/"); i >= 0 {
-				s = strings.TrimSpace(s[i+2:])
-				continue
-			}
-			return fmt.Errorf("analytics: query rejected: unterminated block comment")
-		}
-		break
-	}
-	if s == "" {
-		return fmt.Errorf("analytics: query rejected: empty statement")
-	}
-	// Single statement only: a ';' is allowed only as the trailing character.
-	if i := strings.IndexByte(s, ';'); i >= 0 && i != len(s)-1 {
-		return fmt.Errorf("analytics: query rejected: only a single statement is allowed")
-	}
-	// First keyword must be SELECT or WITH (case-insensitive).
-	upper := strings.ToUpper(s)
-	if !strings.HasPrefix(upper, "SELECT") && !strings.HasPrefix(upper, "WITH") {
-		return fmt.Errorf("analytics: query rejected: only SELECT/WITH queries are allowed")
-	}
-	// No mutating keywords anywhere in the statement.
-	if m := forbiddenKeyword.FindString(s); m != "" {
-		return fmt.Errorf("analytics: query rejected: forbidden keyword %q", strings.ToUpper(m))
-	}
-	return nil
-}
-
 // Query runs a validated, timeout-bounded, read-only SELECT against the ro
-// handle and returns a bounded, JSON-friendly result set.
+// handle and returns a bounded, JSON-friendly result set. The guard + runner
+// are shared with SQLiteStore (query.go).
 func (s *FleetSQLiteStore) Query(ctx context.Context, sqlText string, maxRows int) (QueryResult, error) {
-	start := time.Now()
-	if maxRows <= 0 {
-		maxRows = defaultQueryRows
-	}
-	if maxRows > maxQueryRows {
-		maxRows = maxQueryRows
-	}
-	if err := isReadOnlySelect(sqlText); err != nil {
-		return QueryResult{}, err
-	}
-
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	rows, err := s.ro.QueryContext(ctx, sqlText)
-	if err != nil {
-		return QueryResult{}, fmt.Errorf("analytics: query: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	cols, err := rows.Columns()
-	if err != nil {
-		return QueryResult{}, fmt.Errorf("analytics: query columns: %w", err)
-	}
-
-	res := QueryResult{Columns: cols, Rows: [][]any{}}
-	// Read up to maxRows+1 rows so a maxRows+1th row flags truncation.
-	for rows.Next() {
-		if len(res.Rows) >= maxRows {
-			res.Truncated = true
-			break
-		}
-		scan := make([]any, len(cols))
-		ptrs := make([]any, len(cols))
-		for i := range scan {
-			ptrs[i] = &scan[i]
-		}
-		if err := rows.Scan(ptrs...); err != nil {
-			return QueryResult{}, fmt.Errorf("analytics: query scan: %w", err)
-		}
-		for i, v := range scan {
-			// Convert []byte (RawBytes/text/blob) to string so JSON is readable.
-			if b, ok := v.([]byte); ok {
-				scan[i] = string(b)
-			}
-		}
-		res.Rows = append(res.Rows, scan)
-	}
-	if err := rows.Err(); err != nil {
-		return QueryResult{}, fmt.Errorf("analytics: query rows: %w", err)
-	}
-	res.ElapsedMs = time.Since(start).Milliseconds()
-	return res, nil
+	return runReadOnlyQuery(ctx, s.ro, sqlText, maxRows)
 }
 
 // Schema reports the queryable schema for the dashboard's query builder. It
 // covers only the events table, read via PRAGMA table_info(events).
 func (s *FleetSQLiteStore) Schema() SchemaInfo {
-	info := SchemaInfo{Dialect: "sqlite"}
-	rows, err := s.db.Query(`PRAGMA table_info(events)`)
-	if err != nil {
-		return info
-	}
-	defer func() { _ = rows.Close() }()
-
-	table := TableSchema{Name: "events"}
-	for rows.Next() {
-		var (
-			cid        int
-			name       string
-			colType    string
-			notNull    int
-			dflt       sql.NullString
-			primaryKey int
-		)
-		if err := rows.Scan(&cid, &name, &colType, &notNull, &dflt, &primaryKey); err != nil {
-			return info
-		}
-		table.Columns = append(table.Columns, ColumnSchema{Name: name, Type: colType})
-	}
-	if err := rows.Err(); err != nil {
-		return info
-	}
-	info.Tables = []TableSchema{table}
-	return info
+	return eventsTableSchema(s.db)
 }

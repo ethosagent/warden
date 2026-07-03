@@ -462,7 +462,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		if rErr != nil {
 			return rErr
 		}
-		syncWorker = analytics.NewSyncWorker(store, remote, pol.Central.BatchSize, pol.Central.BufferCap, pol.Central.Interval)
+		syncWorker = analytics.NewSyncWorker(store, remote, expandEnv(pol.Central.ProxyID), pol.Central.BatchSize, pol.Central.BufferCap, pol.Central.Interval)
 		logger.Info("central worker enabled", "endpoint", pol.Central.Endpoint, "proxyID", expandEnv(pol.Central.ProxyID))
 	}
 
@@ -536,6 +536,16 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	//     them. A fleet worker has no pipeline (alerts == nil) → the tab returns [].
 	dashSrv.SetSecretStore(secretStore, secretStoreBackend)
 	dashSrv.SetAudit(auditReceiptLog, auditPubKey)
+	// Read-only Explore/Query Builder: when the dashboard's data source is
+	// SQL-backed (implements AnalyticsQuery), expose its sandboxed query surface —
+	// the same wiring the control plane does. In local/fleet-worker mode dashData
+	// is the local SQLite store (a dedicated read-only handle, so ad-hoc queries
+	// never contend with the async writer's connection); in aggregator mode it is
+	// the in-memory central store, which does not implement it, so the Explore tab
+	// reports unavailable there.
+	if q, ok := dashData.(analytics.AnalyticsQuery); ok {
+		dashSrv.SetQueryEngine(q)
+	}
 	if alerts != nil {
 		alerts.wireDashboard(dashSrv)
 	}

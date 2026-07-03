@@ -10,7 +10,9 @@ import (
 // interface (satisfied by *Store) lets tests inject a fake to assert the
 // persist-before-deliver ordering without a real database.
 type alertStore interface {
-	UpsertAlert(a Alert) error
+	// UpsertAlert persists a and returns the post-merge row (real Count,
+	// preserved FirstSeen, escalated Severity) — see Store.UpsertAlert.
+	UpsertAlert(a Alert) (Alert, error)
 	ListAlerts(limit int) ([]Alert, error)
 }
 
@@ -77,10 +79,9 @@ func (am *AlertManager) Ingest(f Finding) {
 		// Bound Summary/Evidence at construction — the egress-hygiene guarantee.
 		Summary:  boundedSummary(f.Summary),
 		Evidence: boundEvidence(f.Evidence),
-		// TODO(M1-resolve): a resolve TTL that flips Status to StatusResolved
-		// after a quiet period since LastSeen is out of scope for this phase;
-		// Status stays firing. The type already carries the lifecycle fields so
-		// adding the TTL later needs no migration.
+		// Status starts firing; the tick-driven resolve sweep (ResolveStale)
+		// flips it to StatusResolved after resolveTTL of silence since
+		// LastSeen (DefaultResolveTTL 15m; negative TTL disables the sweep).
 		Status:    StatusFiring,
 		Count:     1,
 		FirstSeen: ts,
@@ -88,11 +89,17 @@ func (am *AlertManager) Ingest(f Finding) {
 	}
 
 	// Persist FIRST: the store is the system-of-record and its ON CONFLICT
-	// escalation gives Count/severity merge on re-fire. A persist error is
-	// logged but does NOT suppress delivery — delivery does not depend on the
-	// row existing, and a notification is more valuable than none (fail-open).
-	if err := am.store.UpsertAlert(a); err != nil {
+	// escalation gives Count/severity merge on re-fire. The upsert returns the
+	// post-merge row, which becomes the delivered alert — so sinks see the true
+	// rising Count, the preserved FirstSeen, and the escalated Severity rather
+	// than this pre-merge Count=1 snapshot. A persist error is logged but does
+	// NOT suppress delivery — the freshly constructed alert is delivered
+	// best-effort instead (fail-open), matching "a notification is more
+	// valuable than none".
+	if merged, err := am.store.UpsertAlert(a); err != nil {
 		am.logger.Error("integration: persist alert failed (delivering best-effort)", "id", a.ID, "err", err)
+	} else {
+		a = merged
 	}
 
 	// THEN hand to the router. Deliver enqueues and returns immediately.
@@ -144,7 +151,9 @@ func (am *AlertManager) ResolveStale(now time.Time) (resolved int) {
 			continue // still fresh — re-fired within the TTL
 		}
 		a.Status = StatusResolved
-		if err := am.store.UpsertAlert(a); err != nil {
+		// The merged return is deliberately ignored: the sweep only persists the
+		// resolve transition, it does not deliver.
+		if _, err := am.store.UpsertAlert(a); err != nil {
 			am.logger.Error("integration: resolve upsert failed", "id", a.ID, "err", err)
 			continue
 		}

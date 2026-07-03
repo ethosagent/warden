@@ -1040,7 +1040,7 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
 
       <div class="card">
         <table id="fleetTable"><thead><tr>
-          <th>Worker</th><th>Agent</th><th>Status</th><th>Policy ETag</th><th>Settings</th><th>Pending</th><th>Last heartbeat</th><th class="num">Events fwd</th>
+          <th>Worker</th><th>Status</th><th>Policy ETag</th><th>Pending</th><th>Last heartbeat</th><th>Last policy pull</th><th class="num">Events fwd</th>
         </tr></thead><tbody id="fleetBody"></tbody></table>
       </div>
       </div><!-- /demo-only -->
@@ -1639,9 +1639,10 @@ function renderFleet(ws){
     const etag=w.policyETag||'—';
     const etagPill=w.behind?'<span class="pill p-redact">behind</span>':'<span class="pill p-allow">up-to-date</span>';
     const pending=w.behind?'<span class="pill p-high">policy behind</span>':'<span class="muted">—</span>';
-    return '<tr><td class="mono">'+esc(w.proxyID||'—')+'</td><td class="muted">—</td><td>'+status+'</td>'
-      +'<td class="mono" style="font-size:12px">'+esc(etag)+' '+etagPill+'</td><td class="mono">—</td>'
-      +'<td>'+pending+'</td><td class="muted">'+relTime(w.lastSeen)+'</td><td class="num">'+fmtNum(w.eventsForwarded||0)+'</td></tr>';
+    return '<tr><td class="mono">'+esc(w.proxyID||'—')+'</td><td>'+status+'</td>'
+      +'<td class="mono" style="font-size:12px">'+esc(etag)+' '+etagPill+'</td>'
+      +'<td>'+pending+'</td><td class="muted">'+relTime(w.lastSeen)+'</td>'
+      +'<td class="muted">'+relTime(w.lastPolicyPull)+'</td><td class="num">'+fmtNum(w.eventsForwarded||0)+'</td></tr>';
   }).join('');
 }
 
@@ -1656,21 +1657,46 @@ async function loadExplore(){
   const pg=document.getElementById('page-explore'); if(pg) pg.classList.toggle('is-empty', empty);
   if(empty) return;
   window.__schema=schema;
+  // Hide builder options whose mapped column is absent from THIS node's live
+  // schema (e.g. "worker"/proxy_id exists only in the fleet events table, not in
+  // a worker's local store), so the builder only offers columns it can query.
+  qbSyncOptionsToSchema();
   // Wire the visual builder: regenerate SQL on any control change (not on keystroke),
   // and seed #sqlBox once from the default control state. .onchange keeps it idempotent
   // across repeat visits to the Explore tab.
   ['qbCol','qbOp','qbVal','qbGroup'].forEach(id=>{ const el=document.getElementById(id); if(el) el.onchange=buildQuerySQL; });
   buildQuerySQL();
 }
+function qbSyncOptionsToSchema(){
+  const cols=qbSchemaCols(); if(!cols.length) return;
+  ['qbCol','qbGroup'].forEach(id=>{
+    const sel=document.getElementById(id); if(!sel) return;
+    let firstVisible=-1;
+    Array.from(sel.options).forEach((o,i)=>{
+      const mapped=QB_COLMAP[o.value]||o.value;
+      const missing=cols.indexOf(mapped)<0;
+      o.hidden=missing; o.disabled=missing;
+      if(!missing&&firstVisible<0) firstVisible=i;
+    });
+    if(sel.selectedIndex>=0&&sel.options[sel.selectedIndex]&&sel.options[sel.selectedIndex].disabled&&firstVisible>=0){
+      sel.selectedIndex=firstVisible;
+    }
+  });
+}
 function qbSchemaCols(){
   const t=(window.__schema&&window.__schema.tables&&window.__schema.tables[0])||null;
   return (t&&Array.isArray(t.columns))? t.columns.map(c=>c.name) : [];
 }
-// Builder column labels → real events columns. "worker" is stored as proxy_id; there
-// is no data_class column in the fleet events table (DataClasses aren't persisted to
-// SQL), so it maps to the closest real column, compliance. qbCol() only builds against
-// columns the live schema lists; unknown columns fall back to a real one.
-const QB_COLMAP={ domain:'domain', worker:'proxy_id', data_class:'compliance', decision:'decision' };
+// Builder column labels → real events columns. "worker" is stored as proxy_id
+// (fleet events table only) and "data_class" as data_classes (worker-local events
+// table only); qbSyncOptionsToSchema() hides options whose mapped column the live
+// schema lacks. qbCol() only builds against columns the live schema lists; unknown
+// columns fall back to a real one.
+const QB_COLMAP={ domain:'domain', worker:'proxy_id', data_class:'data_classes', decision:'decision' };
+// Columns stored as comma-joined lists (see encodeDataClasses/encodeCompliance in
+// internal/analytics): equality must match one list member, not the whole cell.
+const QB_LIST_COLS=['data_classes','compliance'];
+function qbListCond(col,v){ return "(','||"+col+"||',') LIKE '%,"+qbEscVal(v)+",%'"; }
 function qbCol(label){
   let c=QB_COLMAP[label]||label;
   const cols=qbSchemaCols();
@@ -1684,12 +1710,16 @@ function buildQuerySQL(){
   const op=(val('qbOp')||'=').trim();
   const raw=val('qbVal')||'';
   const group=qbCol(val('qbGroup')||'domain');
+  const isList=QB_LIST_COLS.indexOf(col)>=0;
   let cond;
   if(op==='in'){
-    const list=raw.split(',').map(s=>s.trim()).filter(Boolean).map(s=>"'"+qbEscVal(s)+"'");
-    cond=col+' IN ('+(list.length?list.join(', '):"''")+')';
+    const items=raw.split(',').map(s=>s.trim()).filter(Boolean);
+    if(isList) cond='('+(items.length?items.map(v=>qbListCond(col,v)).join(' OR '):qbListCond(col,''))+')';
+    else{ const list=items.map(s=>"'"+qbEscVal(s)+"'"); cond=col+' IN ('+(list.length?list.join(', '):"''")+')'; }
   }else if(op==='like'){
     cond=col+" LIKE '%"+qbEscVal(raw)+"%'";
+  }else if(isList){
+    cond=(op==='!='?'NOT ':'')+qbListCond(col,raw);
   }else{
     cond=col+' '+(op==='!='?'!=':'=')+" '"+qbEscVal(raw)+"'";
   }
@@ -1922,7 +1952,11 @@ function stepDone(n){
     case 5: return !!s.firstEventSeen;
     case 6: return !!s.secretsConfigured;
     case 7: return !!s.policyConfigured;
-    default: return false; // step 8 (alerts) — optional, no signal yet
+    // step 8 (alerts): done once at least one alert has been recorded. The count
+    // is cached by refreshAlertBadge()/renderAlerts(), and refreshOnboarding()
+    // refreshes it before rendering the stepper.
+    case 8: return (window.__alertCount||0)>0;
+    default: return false;
   }
 }
 function renderStepper(){
@@ -1953,7 +1987,7 @@ function updateLiveRecv(){
   recv.innerHTML='<span>✅</span><span>First request received — <span class="mono">'+esc(dom)+'</span> · '+decPill(dec)+(lat?' · '+esc(lat):'')+'</span>';
 }
 async function refreshOnboarding(){
-  await Promise.all([ loadSetup(), loadTraffic().catch(()=>{}) ]);
+  await Promise.all([ loadSetup(), loadTraffic().catch(()=>{}), refreshAlertBadge() ]);
   renderStepper();
 }
 
@@ -2551,8 +2585,9 @@ function firingCount(alerts){
 /* Lightweight badge refresh used by the global loop while the Alerts tab is not
    open — bounded with ?limit= so it stays cheap. */
 function refreshAlertBadge(){
-  jget('/dashboard/api/alerts?limit=200').then(a=>{
+  return jget('/dashboard/api/alerts?limit=200').then(a=>{
     const arr=Array.isArray(a)?a:[];
+    window.__alertCount=arr.length; // cached signal for onboarding step 8
     updateAlertBadge(firingCount(arr));
   }).catch(()=>{});
 }
@@ -2567,6 +2602,7 @@ function renderAlerts(alerts){
   const body=document.getElementById('triggeredBody'); if(!body) return;
   const sub=document.getElementById('alertsSub');
   const firing=alerts.filter(a=>String(a.status).toLowerCase()==='firing').length;
+  window.__alertCount=alerts.length; // cached signal for onboarding step 8
   updateAlertBadge(firingCount(alerts));
   if(sub) sub.textContent = alerts.length? (fmtNum(alerts.length)+' alert'+(alerts.length===1?'':'s')+' · '+firing+' firing') : 'no alerts';
   if(!alerts.length){

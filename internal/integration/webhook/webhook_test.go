@@ -2,10 +2,14 @@ package webhook
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -16,6 +20,10 @@ import (
 
 func testConfig(name, rawURL string) integration.Config {
 	return integration.Config{Name: name, Raw: map[string]any{"url": rawURL}}
+}
+
+func testConfigWithSecret(name, rawURL, secret string) integration.Config {
+	return integration.Config{Name: name, Raw: map[string]any{"url": rawURL, "secret": secret}}
 }
 
 func sampleAlert() integration.Alert {
@@ -130,6 +138,122 @@ func TestWebhookEnvExpansion(t *testing.T) {
 	}
 	if err := w.Alert(context.Background(), sampleAlert()); err != nil {
 		t.Errorf("Alert after env expansion: %v", err)
+	}
+}
+
+func TestWebhookSigning(t *testing.T) {
+	const secret = "shh-shared-secret"
+	var gotBody []byte
+	var gotSig, gotTS string
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		gotBody, _ = io.ReadAll(req.Body)
+		gotSig = req.Header.Get("X-Warden-Signature")
+		gotTS = req.Header.Get("X-Warden-Timestamp")
+		rw.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	w := &Webhook{}
+	if err := w.Start(context.Background(), nil, testConfigWithSecret("hook", srv.URL, secret)); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	before := time.Now().Unix()
+	if err := w.Alert(context.Background(), sampleAlert()); err != nil {
+		t.Fatalf("Alert: %v", err)
+	}
+	after := time.Now().Unix()
+
+	if gotTS == "" {
+		t.Fatal("X-Warden-Timestamp header missing")
+	}
+	ts, err := strconv.ParseInt(gotTS, 10, 64)
+	if err != nil {
+		t.Fatalf("X-Warden-Timestamp %q is not unix seconds: %v", gotTS, err)
+	}
+	if ts < before || ts > after {
+		t.Errorf("timestamp %d outside send window [%d, %d]", ts, before, after)
+	}
+
+	// Signature must verify against the exact received body + timestamp:
+	// v1=hex(hmac-sha256(secret, "<ts>.<body>")).
+	if !strings.HasPrefix(gotSig, "v1=") {
+		t.Fatalf("X-Warden-Signature = %q, want v1=<hex> form", gotSig)
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(gotTS))
+	mac.Write([]byte("."))
+	mac.Write(gotBody)
+	want := "v1=" + hex.EncodeToString(mac.Sum(nil))
+	if !hmac.Equal([]byte(gotSig), []byte(want)) {
+		t.Errorf("signature does not verify: got %q, want %q", gotSig, want)
+	}
+}
+
+func TestWebhookNoSecretNoSignatureHeaders(t *testing.T) {
+	var gotSig, gotTS string
+	var sigPresent, tsPresent bool
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		gotSig, sigPresent = req.Header.Get("X-Warden-Signature"), len(req.Header.Values("X-Warden-Signature")) > 0
+		gotTS, tsPresent = req.Header.Get("X-Warden-Timestamp"), len(req.Header.Values("X-Warden-Timestamp")) > 0
+		rw.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	w := &Webhook{}
+	if err := w.Start(context.Background(), nil, testConfig("hook", srv.URL)); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := w.Alert(context.Background(), sampleAlert()); err != nil {
+		t.Fatalf("Alert: %v", err)
+	}
+	if sigPresent {
+		t.Errorf("X-Warden-Signature = %q, want header absent without a secret", gotSig)
+	}
+	if tsPresent {
+		t.Errorf("X-Warden-Timestamp = %q, want header absent without a secret", gotTS)
+	}
+}
+
+func TestWebhookSecretEnvExpansion(t *testing.T) {
+	const secret = "from-the-environment"
+	var gotBody []byte
+	var gotSig, gotTS string
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		gotBody, _ = io.ReadAll(req.Body)
+		gotSig = req.Header.Get("X-Warden-Signature")
+		gotTS = req.Header.Get("X-Warden-Timestamp")
+		rw.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	t.Setenv("WARDEN_WH_SECRET", secret)
+	w := &Webhook{}
+	if err := w.Start(context.Background(), nil, testConfigWithSecret("hook", srv.URL, "${WARDEN_WH_SECRET}")); err != nil {
+		t.Fatalf("Start with ${ENV} secret: %v", err)
+	}
+	if err := w.Alert(context.Background(), sampleAlert()); err != nil {
+		t.Fatalf("Alert: %v", err)
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(gotTS))
+	mac.Write([]byte("."))
+	mac.Write(gotBody)
+	want := "v1=" + hex.EncodeToString(mac.Sum(nil))
+	if !hmac.Equal([]byte(gotSig), []byte(want)) {
+		t.Errorf("signature must be computed with the env-expanded secret: got %q, want %q", gotSig, want)
+	}
+}
+
+func TestWebhookSecretUnsetEnvErrors(t *testing.T) {
+	// A configured-but-unexpandable secret must fail Start (mirrors the URL:
+	// unset env expands to empty ⇒ error), never silently deliver unsigned.
+	w := &Webhook{}
+	err := w.Start(context.Background(), nil, testConfigWithSecret("hook", "https://example.com/hook", "${WARDEN_UNSET_SECRET_XYZ}"))
+	if err == nil {
+		t.Fatal("secret referencing an unset env var should error at Start")
+	}
+	if strings.Contains(err.Error(), "WARDEN_UNSET_SECRET_XYZ") == false {
+		t.Errorf("error %q should name the unresolved reference for the operator", err.Error())
 	}
 }
 

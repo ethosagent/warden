@@ -57,9 +57,10 @@ func webhookSink(t *testing.T, name string) (*httptest.Server, chan deliveredAle
 }
 
 func blockEvent(domain string) analytics.Event {
+	// A reason-less "deny" is what the proxy writes for a plain allowlist block.
 	return analytics.Event{
-		Timestamp: time.Now(), Domain: domain, Decision: "block",
-		Method: "POST", Reason: "mcp_tool_denied",
+		Timestamp: time.Now(), Domain: domain, Decision: "deny",
+		Method: "POST",
 	}
 }
 

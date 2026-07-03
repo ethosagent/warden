@@ -5,10 +5,141 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ethosagent/warden/internal/mcp"
 	"github.com/ethosagent/warden/internal/mcp/gateway"
 )
+
+// TestCentralIngestRetryAfterLostAck_NoDuplicates reproduces the exact failure
+// the event UID exists for: the CP stores a batch but the worker never sees the
+// ack (the server 502s after storing), so the SyncWorker retries the SAME
+// batch. The fleet store's uid index must drop the duplicates: total rows equal
+// the batch size, not double it.
+func TestCentralIngestRetryAfterLostAck_NoDuplicates(t *testing.T) {
+	fleet := newFleetStore(t, 0, 0)
+	ingest := NewIngestHandler(fleet, "")
+
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		rec := httptest.NewRecorder()
+		ingest.ServeHTTP(rec, r) // the batch IS stored server-side
+		if calls == 1 {
+			// ...but the ack is "lost": the worker sees a failure and will retry.
+			http.Error(w, "bad gateway", http.StatusBadGateway)
+			return
+		}
+		w.WriteHeader(rec.Code)
+	}))
+	defer srv.Close()
+
+	local := newTestStore(t, 0)
+	storeIdenticalN(t, local, 3)
+
+	remote, err := NewHTTPRemoteStore(srv.URL, "", "proxy-1", srv.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := NewSyncWorker(local, remote, "proxy-1", 10, 100, time.Hour)
+
+	if err := w.SyncOnce(); err == nil {
+		t.Fatal("expected first SyncOnce to fail (lost ack)")
+	}
+	if err := w.SyncOnce(); err != nil {
+		t.Fatalf("retry SyncOnce: %v", err)
+	}
+
+	got, err := fleet.GetEvents(EventFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("fleet rows = %d, want 3 (retried batch deduped)", len(got))
+	}
+	// The worker pruned its local copy after the acked retry.
+	if n, err := local.count(); err != nil || n != 0 {
+		t.Fatalf("local events = %d (err %v), want 0", n, err)
+	}
+}
+
+// TestIngestEmptyUID_AlwaysStored: batches from pre-UID workers carry no
+// event_uid; re-posting the identical batch must store it again (no dedup),
+// never reject it.
+func TestIngestEmptyUID_AlwaysStored(t *testing.T) {
+	fleet := newFleetStore(t, 0, 0)
+	srv := httptest.NewServer(NewIngestHandler(fleet, ""))
+	defer srv.Close()
+
+	const body = `[{"Domain":"legacy.example.com","Decision":"allow"}]`
+	for i := 0; i < 2; i++ {
+		resp, err := http.Post(srv.URL, "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("post %d: %v", i, err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusNoContent {
+			t.Fatalf("post %d status = %d, want 204", i, resp.StatusCode)
+		}
+	}
+	got, err := fleet.GetEvents(EventFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("rows = %d, want 2 (empty uid never dedups)", len(got))
+	}
+}
+
+// TestCentralStore_DedupByUID: the in-memory FleetStore honors the same uid
+// contract as the SQLite one — duplicate uid skipped, empty uid always stored,
+// and uids of cap-evicted events are forgotten so seen stays bounded.
+func TestCentralStore_DedupByUID(t *testing.T) {
+	cs := NewCentralStore(0)
+	dup := AggregatedEvent{Event: Event{Domain: "d.com", UID: "u-1"}, ProxyID: "p"}
+	for i := 0; i < 2; i++ {
+		if err := cs.StoreAggregatedEvent(dup); err != nil {
+			t.Fatalf("store dup %d: %v", i, err)
+		}
+	}
+	noUID := AggregatedEvent{Event: Event{Domain: "d.com"}, ProxyID: "p"}
+	for i := 0; i < 2; i++ {
+		if err := cs.StoreAggregatedEvent(noUID); err != nil {
+			t.Fatalf("store noUID %d: %v", i, err)
+		}
+	}
+	got, err := cs.GetAggregatedEvents(AggregatedFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("events = %d, want 3 (1 deduped + 2 empty-uid)", len(got))
+	}
+}
+
+func TestCentralStore_DedupForgetsEvictedUIDs(t *testing.T) {
+	cs := NewCentralStore(2)
+	for _, uid := range []string{"u-1", "u-2", "u-3"} {
+		if err := cs.StoreAggregatedEvent(AggregatedEvent{Event: Event{Domain: "d.com", UID: uid}}); err != nil {
+			t.Fatalf("store %s: %v", uid, err)
+		}
+	}
+	// u-1 aged out of the cap; re-sending it must be accepted again (its uid
+	// was forgotten), evicting u-2 in turn.
+	if err := cs.StoreAggregatedEvent(AggregatedEvent{Event: Event{Domain: "d.com", UID: "u-1"}}); err != nil {
+		t.Fatalf("re-store u-1: %v", err)
+	}
+	got, err := cs.GetAggregatedEvents(AggregatedFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("events = %d, want 2 (cap)", len(got))
+	}
+	if got[0].UID != "u-1" || got[1].UID != "u-3" {
+		t.Fatalf("retained uids = %q, %q; want u-1 (newest), u-3", got[0].UID, got[1].UID)
+	}
+}
 
 // TestCentralIngestRoundTrip sends a batch from the worker-side HTTPRemoteStore
 // to the aggregator-side IngestHandler and verifies the full event (including

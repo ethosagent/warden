@@ -96,8 +96,9 @@ type Status string
 const (
 	// StatusFiring is an active alert.
 	StatusFiring Status = "firing"
-	// StatusResolved is a cleared alert. Not produced in this phase (no resolve
-	// TTL yet); reserved so there is no later type migration.
+	// StatusResolved is a cleared alert, produced by the AlertManager's
+	// tick-driven resolve sweep (ResolveStale) once a firing alert has been
+	// silent for the resolve TTL (DefaultResolveTTL 15m).
 	StatusResolved Status = "resolved"
 )
 

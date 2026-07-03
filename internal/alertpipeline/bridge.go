@@ -43,29 +43,16 @@ func reasonSeverity(reason string) integration.Severity {
 // which worker last saw it. Reason-based findings key on domain-or-tool for the
 // same fleet-wide dedup.
 func bridgeEvent(proxyID string, e analytics.Event) (integration.Finding, bool) {
+	// The proxy writes Decision "deny" (internal/proxy: http.go, ws.go, serve.go);
+	// "block" is accepted too for compatibility with external event producers.
+	denied := strings.EqualFold(e.Decision, "deny") || strings.EqualFold(e.Decision, "block")
 	switch {
-	case strings.EqualFold(e.Decision, "block"):
-		// A blocked egress: default-deny fired (or a rule denied). Bounded fields
-		// only — domain + method for the summary, decision + bounded reason enum for
-		// evidence.
-		summary := "blocked egress to " + e.Domain
-		if e.Method != "" {
-			summary = "blocked " + e.Method + " egress to " + e.Domain
-		}
-		return integration.Finding{
-			RuleID:   "egress_blocked",
-			Category: "security",
-			Severity: integration.SevMedium,
-			Subject:  integration.Subject{Domain: e.Domain, Tool: e.Tool, Worker: proxyID},
-			Summary:  summary,
-			Evidence: integration.Evidence("decision=block reason=" + e.Reason),
-			DedupKey: "egress_blocked:" + e.Domain,
-			Ts:       e.Timestamp,
-		}, true
 	case e.Reason != "":
-		// A bounded MCP/scan reason (e.g. "mcp_poisoning") on an allowed path. The
-		// reason enum IS the rule id; subject keys on domain, falling back to tool
-		// for MCP-only events that carry no domain.
+		// A bounded MCP/scan reason (e.g. "mcp_poisoning", "dlp_credit_card"). The
+		// reason enum IS the rule id — checked BEFORE the deny branch so
+		// reason-carrying denies keep their reason-based rule ids for routing.
+		// Subject keys on domain, falling back to tool for MCP-only events that
+		// carry no domain.
 		subject := e.Domain
 		if subject == "" {
 			subject = e.Tool
@@ -78,6 +65,24 @@ func bridgeEvent(proxyID string, e analytics.Event) (integration.Finding, bool) 
 			Summary:  "detected " + e.Reason + " on " + subject,
 			Evidence: integration.Evidence("reason=" + e.Reason),
 			DedupKey: e.Reason + ":" + subject,
+			Ts:       e.Timestamp,
+		}, true
+	case denied:
+		// A reason-less blocked egress: the plain allowlist/default-deny fired.
+		// Bounded fields only — domain + method for the summary, the decision enum
+		// for evidence.
+		summary := "blocked egress to " + e.Domain
+		if e.Method != "" {
+			summary = "blocked " + e.Method + " egress to " + e.Domain
+		}
+		return integration.Finding{
+			RuleID:   "egress_blocked",
+			Category: "security",
+			Severity: integration.SevMedium,
+			Subject:  integration.Subject{Domain: e.Domain, Tool: e.Tool, Worker: proxyID},
+			Summary:  summary,
+			Evidence: integration.Evidence("decision=" + strings.ToLower(e.Decision)),
+			DedupKey: "egress_blocked:" + e.Domain,
 			Ts:       e.Timestamp,
 		}, true
 	default:

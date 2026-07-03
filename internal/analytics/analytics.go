@@ -8,6 +8,7 @@
 package analytics
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -90,6 +91,20 @@ type Event struct {
 	// (base64/URL) of the request body. Reserved for later phases; always false
 	// in Phase 1.
 	DLPEncoded bool
+
+	// UID is a stable, content-free dedup identifier for central aggregation:
+	// a truncated SHA-256 of (proxyID, local rowid), assigned by the worker's
+	// SyncWorker just before a batch first leaves the node. Because it is
+	// derived from the immutable local row id, the SAME event re-sent after a
+	// lost ack carries the SAME UID, letting the control plane's fleet store
+	// drop the duplicate — while two genuinely distinct events (even with
+	// identical timestamp/domain/method) always get different UIDs. It is empty
+	// for events that never cross the wire, for workers without a configured
+	// proxy id, and for batches from pre-UID workers; empty UIDs are never
+	// deduplicated. It is not persisted locally (it is recomputable from the
+	// rowid) and is elided from JSON when empty, so signed receipts and
+	// single-node APIs are unchanged.
+	UID string `json:"event_uid,omitempty"`
 
 	// LatencyMs is the total mediation latency in milliseconds for this request,
 	// from request-read to response-relayed. It is a plain number — always-safe
@@ -211,12 +226,27 @@ const defaultMaxEvents = 100_000
 // SQLiteStore is a pure-Go SQLite-backed AnalyticsStore with size-capped
 // retention: when the row count exceeds maxEvents, the oldest events are
 // pruned first.
+//
+// Like FleetSQLiteStore it also exposes the read-only SQL query surface
+// (AnalyticsQuery) that powers the dashboard's Explore tab on a worker. It
+// holds two handles: the read/write handle for ingest/pruning (single
+// connection, shared with the MCP gateway store via DB()), and a separate
+// read-only handle (PRAGMA query_only = ON) used exclusively by Query — so
+// ad-hoc SQL can never mutate the store and never contends with the async
+// writer's single write connection on the request hot path.
 type SQLiteStore struct {
-	db        *sql.DB
+	db        *sql.DB // read/write
+	ro        *sql.DB // read-only query surface
 	maxEvents int
+	// sharedRO is true when ro aliases db (in-memory DSNs, where a separate ro
+	// handle cannot see the same in-memory database). Close then closes db once.
+	sharedRO bool
 }
 
-var _ AnalyticsStore = (*SQLiteStore)(nil)
+var (
+	_ AnalyticsStore = (*SQLiteStore)(nil)
+	_ AnalyticsQuery = (*SQLiteStore)(nil)
+)
 
 // NewSQLiteStore opens (or creates) a SQLite database at dsn and ensures the
 // schema. Use ":memory:" for tests. maxEvents <= 0 uses the default cap.
@@ -237,6 +267,16 @@ func NewSQLiteStore(dsn string, maxEvents int) (*SQLiteStore, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	// Read-only query handle (shared opener; see query.go), opened after migrate
+	// so the database file exists. For in-memory DSNs it aliases the rw handle
+	// (sharedRO=true).
+	ro, shared, err := openReadOnlyDB(dsn, db)
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	s.ro = ro
+	s.sharedRO = shared
 	return s, nil
 }
 
@@ -341,8 +381,34 @@ func (s *SQLiteStore) addColumnIfAbsent(name, ddl string) error {
 	return nil
 }
 
-// Close releases the database handle.
-func (s *SQLiteStore) Close() error { return s.db.Close() }
+// Close releases both database handles.
+func (s *SQLiteStore) Close() error {
+	if s.sharedRO {
+		return s.db.Close()
+	}
+	errRO := s.ro.Close()
+	errDB := s.db.Close()
+	if errDB != nil {
+		return errDB
+	}
+	return errRO
+}
+
+// Query runs a validated, timeout-bounded, read-only SELECT against the ro
+// handle and returns a bounded, JSON-friendly result set. The guard + runner
+// are shared with FleetSQLiteStore (query.go), so both stores enforce the same
+// safety properties: SELECT/WITH-only, single statement, no mutating keywords,
+// a dedicated read-only connection, a query timeout, and a row cap.
+func (s *SQLiteStore) Query(ctx context.Context, sqlText string, maxRows int) (QueryResult, error) {
+	return runReadOnlyQuery(ctx, s.ro, sqlText, maxRows)
+}
+
+// Schema reports the queryable schema for the dashboard's query builder. It
+// covers only the events table, read via PRAGMA table_info(events), so it
+// reflects the LOCAL events columns (which differ from the fleet table).
+func (s *SQLiteStore) Schema() SchemaInfo {
+	return eventsTableSchema(s.db)
+}
 
 // StoreEvent persists an event and enforces the retention cap, pruning the
 // oldest events first when over the cap.

@@ -129,6 +129,32 @@ func TestQueryGenerate_NoQueryEngine(t *testing.T) {
 	}
 }
 
+// (g) WORKER wiring: with the LOCAL SQLite store as the query engine (what
+// worker.go wires) plus a generator, generate reaches the LLM path and the
+// prompt is grounded on the LOCAL schema (data_classes present, proxy_id not).
+func TestQueryGenerate_LocalStoreEngine(t *testing.T) {
+	store, err := analytics.NewSQLiteStore(":memory:", 0)
+	if err != nil {
+		t.Fatalf("new local store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	srv := NewServer(store, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
+	srv.SetQueryEngine(store)
+	gen := &fakeSQLGen{out: "SELECT domain FROM events"}
+	srv.SetSQLGenerator(gen)
+
+	rr := doPost(t, srv.Handler(), "/dashboard/api/query/generate", `{"question":"which domains"}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d (%s)", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(gen.gotPrompt, "data_classes") {
+		t.Fatalf("prompt missing local column data_classes: %q", gen.gotPrompt)
+	}
+	if strings.Contains(gen.gotPrompt, "proxy_id") {
+		t.Fatalf("prompt contains fleet-only column proxy_id: %q", gen.gotPrompt)
+	}
+}
+
 // (f) blank question → 400.
 func TestQueryGenerate_BlankQuestion(t *testing.T) {
 	h := nl2sqlServer(t, &fakeSQLGen{out: "SELECT 1"}).Handler()

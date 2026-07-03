@@ -117,8 +117,8 @@ func TestDetection_EndToEnd(t *testing.T) {
 		})
 	}
 	events = append(events, analytics.Event{
-		Timestamp: now, Domain: "evil.example.com", Decision: "block",
-		Method: "POST", Reason: "mcp_tool_denied",
+		Timestamp: now, Domain: "evil.example.com", Decision: "deny",
+		Method: "POST",
 	})
 	postIngest(t, cp.URL, "worker-1", events)
 

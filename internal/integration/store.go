@@ -73,7 +73,12 @@ CREATE TABLE IF NOT EXISTS dead_letters (
 // UpsertAlert inserts a new alert or, on ID conflict, escalates it: severity
 // becomes max(existing, new), count increments, and last_seen/status/summary/
 // evidence take the new values. first_seen is preserved (set only on insert).
-func (s *Store) UpsertAlert(a Alert) error {
+//
+// It returns the POST-MERGE row via RETURNING (single atomic statement — no
+// read-after-write race with concurrent ingests), so callers deliver the true
+// merged state: the real rising Count, the preserved first_seen, and the
+// escalated severity — not the pre-merge input they constructed.
+func (s *Store) UpsertAlert(a Alert) (Alert, error) {
 	const q = `INSERT INTO alerts
         (id, dedup_key, category, severity, subject_domain, subject_tool, subject_agent, subject_worker, summary, evidence, status, count, first_seen, last_seen)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -83,15 +88,17 @@ func (s *Store) UpsertAlert(a Alert) error {
             last_seen = excluded.last_seen,
             status    = excluded.status,
             summary   = excluded.summary,
-            evidence  = excluded.evidence`
-	if _, err := s.db.Exec(q,
+            evidence  = excluded.evidence
+        RETURNING ` + alertColumns
+	merged, err := scanAlert(s.db.QueryRow(q,
 		a.ID, a.DedupKey, a.Category, int(a.Severity),
 		a.Subject.Domain, a.Subject.Tool, a.Subject.Agent, a.Subject.Worker,
 		a.Summary, string(a.Evidence), string(a.Status), a.Count,
-		a.FirstSeen.UnixMilli(), a.LastSeen.UnixMilli()); err != nil {
-		return fmt.Errorf("integration: upsert alert: %w", err)
+		a.FirstSeen.UnixMilli(), a.LastSeen.UnixMilli()))
+	if err != nil {
+		return Alert{}, fmt.Errorf("integration: upsert alert: %w", err)
 	}
-	return nil
+	return merged, nil
 }
 
 // alertColumns is the shared SELECT projection for the alerts table.

@@ -16,10 +16,10 @@ func TestResolveStaleFlipsStaleLeavesFresh(t *testing.T) {
 
 	stale := sampleAlert("stale", "error_rate:stale.example.com", SevHigh, now.Add(-20*time.Minute))
 	fresh := sampleAlert("fresh", "error_rate:fresh.example.com", SevHigh, now.Add(-1*time.Minute))
-	if err := s.UpsertAlert(stale); err != nil {
+	if _, err := s.UpsertAlert(stale); err != nil {
 		t.Fatalf("seed stale: %v", err)
 	}
-	if err := s.UpsertAlert(fresh); err != nil {
+	if _, err := s.UpsertAlert(fresh); err != nil {
 		t.Fatalf("seed fresh: %v", err)
 	}
 
@@ -59,7 +59,7 @@ func TestResolveStaleDisabledAndDefault(t *testing.T) {
 	s := newTestStore(t)
 	now := time.UnixMilli(10_000_000)
 	old := sampleAlert("old", "error_rate:old.example.com", SevHigh, now.Add(-24*time.Hour))
-	if err := s.UpsertAlert(old); err != nil {
+	if _, err := s.UpsertAlert(old); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
