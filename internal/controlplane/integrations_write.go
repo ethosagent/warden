@@ -9,7 +9,6 @@ package controlplane
 // fields stay as ${ENV} references and are expanded only at Integration.Start.
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -21,13 +20,15 @@ import (
 	"github.com/ethosagent/warden/internal/integration"
 )
 
-// currentManager returns the live integrations manager under the read lock. It
-// is nil-safe: a control plane with no alert DB path (or a failed build) has no
-// manager, and callers degrade to empty.
+// currentManager returns the live integrations manager from the embedded alert
+// pipeline (which owns the pointer + reload swap). It is nil-safe: a control
+// plane with no alert DB path (or a failed build) has no pipeline/manager, and
+// callers degrade to empty.
 func (s *Server) currentManager() *integration.Manager {
-	s.integrationsMu.RLock()
-	defer s.integrationsMu.RUnlock()
-	return s.integrations
+	if s.pipeline == nil {
+		return nil
+	}
+	return s.pipeline.CurrentManager()
 }
 
 // integrationStatuses adapts the live manager's per-instance runtime status into
@@ -117,46 +118,19 @@ func (s *Server) WriteIntegrations(instances []config.IntegrationInstance) error
 
 // reloadIntegrations hot-swaps the live alert-delivery manager to run
 // newInstances, reusing the SAME Server-owned alert store (never reopening the
-// DB). It builds a fresh manager, Starts it, atomically swaps the pointer, then
-// stops the OLD manager's instances WITHOUT closing the shared store.
+// DB). It delegates to the embedded pipeline's ReloadManager — which builds a
+// fresh manager, Starts it, atomically swaps the pointer under the pipeline's
+// lock, then stops the OLD manager's instances WITHOUT closing the shared store.
+// The Server keeps the swap logic in ONE place (the pipeline) so the tick, the
+// ingest bridge, and the dashboard alerts source all re-point to the new manager.
 //
 // Fail-safe: if the new manager cannot be BUILT, the old one keeps running and
 // the error is returned — a bad reload never kills live alerting. A per-instance
 // Start failure (e.g. a slack instance whose runtime is not built) is NOT fatal:
-// the manager's Start skips it and reports it as non-connected status, so we swap
-// to the new manager (the source of truth for status) and only log the skips.
+// the manager's Start skips it and reports it as non-connected status.
 func (s *Server) reloadIntegrations(newInstances []integration.InstanceConfig) error {
-	s.integrationsMu.RLock()
-	store := s.integrationsStore
-	ctx := s.lifeCtx
-	s.integrationsMu.RUnlock()
-	if store == nil {
+	if s.pipeline == nil {
 		return errors.New("controlplane: integrations runtime is not available on this control plane")
 	}
-	if ctx == nil {
-		// Reload before Start (not expected on the live HTTP path): bind to a
-		// non-cancelling context; StopInstances still tears the router down.
-		ctx = context.Background()
-	}
-
-	m, err := integration.NewManager(store, newInstances, s.cfg.Logger, integration.RouterOptions{})
-	if err != nil {
-		return fmt.Errorf("controlplane: rebuild integrations manager: %w", err)
-	}
-	startErr := m.Start(ctx)
-
-	s.integrationsMu.Lock()
-	old := s.integrations
-	s.integrations = m
-	s.integrationsMu.Unlock()
-
-	if old != nil {
-		if err := old.StopInstances(context.Background()); err != nil {
-			s.cfg.Logger.Warn("control plane: stop previous integrations manager after reload", "error", err)
-		}
-	}
-	if startErr != nil {
-		s.cfg.Logger.Warn("control plane: some integrations not running after reload", "error", startErr)
-	}
-	return nil
+	return s.pipeline.ReloadManager(newInstances)
 }

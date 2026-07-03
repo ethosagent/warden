@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 )
 
 // Manager is the lifecycle glue that owns the registry instantiation, router,
@@ -53,7 +54,9 @@ type InstanceStatus struct {
 // NewManager builds the pipeline over store. It does NOT start anything or touch
 // the registry yet — call Start for that. The Manager takes ownership of store
 // and closes it (idempotently) on Stop. A nil logger defaults to slog.Default().
-func NewManager(store *Store, instances []InstanceConfig, logger *slog.Logger, opts RouterOptions) (*Manager, error) {
+// resolveTTL configures the AlertManager's resolve sweep (see ResolveStale): 0
+// selects DefaultResolveTTL, a negative value disables auto-resolve.
+func NewManager(store *Store, instances []InstanceConfig, logger *slog.Logger, opts RouterOptions, resolveTTL time.Duration) (*Manager, error) {
 	if store == nil {
 		return nil, errors.New("integration: NewManager requires a non-nil store")
 	}
@@ -64,6 +67,7 @@ func NewManager(store *Store, instances []InstanceConfig, logger *slog.Logger, o
 	bus.logger = logger
 	router := NewRouter(store, bus, logger, opts)
 	am := NewAlertManager(store, router, logger)
+	am.resolveTTL = resolveTTL
 	bus.SetAlertManager(am)
 	return &Manager{
 		store:     store,
@@ -77,6 +81,12 @@ func NewManager(store *Store, instances []InstanceConfig, logger *slog.Logger, o
 
 // Bus returns the producer entrypoint. Detectors publish Findings here.
 func (m *Manager) Bus() *Bus { return m.bus }
+
+// ResolveStale runs the AlertManager's resolve sweep at now and returns how many
+// firing alerts it flipped to resolved. The pipeline tick calls it after Evaluate/
+// publish so the sweep runs wherever the pipeline runs. Fail-open (see
+// AlertManager.ResolveStale).
+func (m *Manager) ResolveStale(now time.Time) int { return m.am.ResolveStale(now) }
 
 // ListAlerts returns the persisted alerts newest-first (by last_seen), limited to
 // limit rows (limit <= 0 returns all). It is the read accessor the dashboard uses

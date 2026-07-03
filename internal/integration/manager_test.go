@@ -40,7 +40,7 @@ func TestManagerEndToEnd(t *testing.T) {
 	instances := []InstanceConfig{
 		{Type: "test_manager_sink", Name: "sink", Match: []MatchClause{{Severity: "high"}}},
 	}
-	m, err := NewManager(store, instances, quietLogger(), RouterOptions{QueueDepth: 8})
+	m, err := NewManager(store, instances, quietLogger(), RouterOptions{QueueDepth: 8}, 0)
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestManagerEndToEnd(t *testing.T) {
 
 func TestManagerUnknownTypeError(t *testing.T) {
 	store := newTestStore(t)
-	m, err := NewManager(store, []InstanceConfig{{Type: "no_such_type", Name: "x"}}, quietLogger(), RouterOptions{})
+	m, err := NewManager(store, []InstanceConfig{{Type: "no_such_type", Name: "x"}}, quietLogger(), RouterOptions{}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func TestManagerOneBadInstanceDoesNotSinkOthers(t *testing.T) {
 		{Type: "test_manager_failstart", Name: "bad"},
 		{Type: "test_manager_sink", Name: "good", Match: []MatchClause{{Severity: "high"}}},
 	}
-	m, err := NewManager(store, instances, quietLogger(), RouterOptions{QueueDepth: 8})
+	m, err := NewManager(store, instances, quietLogger(), RouterOptions{QueueDepth: 8}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +114,7 @@ func TestManagerOneBadInstanceDoesNotSinkOthers(t *testing.T) {
 
 func TestManagerStartIdempotent(t *testing.T) {
 	store := newTestStore(t)
-	m, err := NewManager(store, nil, quietLogger(), RouterOptions{})
+	m, err := NewManager(store, nil, quietLogger(), RouterOptions{}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +129,7 @@ func TestManagerStartIdempotent(t *testing.T) {
 }
 
 func TestNewManagerNilStore(t *testing.T) {
-	if _, err := NewManager(nil, nil, quietLogger(), RouterOptions{}); err == nil {
+	if _, err := NewManager(nil, nil, quietLogger(), RouterOptions{}, 0); err == nil {
 		t.Error("NewManager with nil store should error")
 	}
 }

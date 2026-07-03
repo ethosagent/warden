@@ -42,15 +42,20 @@ func newRunCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			alertsDB, err := cmd.Flags().GetString("alerts-db")
+			if err != nil {
+				return err
+			}
 			return worker.Run(cmd.Context(), cmd.OutOrStdout(), worker.Params{
-				ConfigPath: configPath,
-				ListenAddr: listenAddr,
-				DBPath:     dbPath,
-				CACert:     caCert,
-				CAKey:      caKey,
-				AdminAddr:  adminAddr,
-				Version:    version,
-				LocalOnly:  localOnly,
+				ConfigPath:   configPath,
+				ListenAddr:   listenAddr,
+				DBPath:       dbPath,
+				CACert:       caCert,
+				CAKey:        caKey,
+				AdminAddr:    adminAddr,
+				Version:      version,
+				LocalOnly:    localOnly,
+				AlertsDBPath: alertsDB,
 			})
 		},
 	}
@@ -61,6 +66,7 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().String("ca-key", "", "path to proxy CA private key for TLS termination")
 	cmd.Flags().String("admin-listen", "127.0.0.1:9090", "admin + dashboard HTTP listen address")
 	cmd.Flags().Bool("local-only", false, "ignore the control plane and enforce local policy (standalone)")
+	cmd.Flags().String("alerts-db", "", "sqlite alert-store DB path for --local-only (default: sibling of --db, named warden-alerts.db); ignored in managed/fleet mode")
 
 	return cmd
 }

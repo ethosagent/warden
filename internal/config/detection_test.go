@@ -4,7 +4,58 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
+
+// TestEncodeDetectionNode_RoundTrips encodes a DetectionConfig with overrides,
+// marshals it under a `detection:` key, and parses it back through the full loader —
+// asserting the write direction (EncodeDetectionNode) is the faithful inverse of
+// the read direction (parseDetection), including durations and per-detector toggles.
+func TestEncodeDetectionNode_RoundTrips(t *testing.T) {
+	tick := 30 * time.Second
+	win := 10 * time.Minute
+	minSamples := 42
+	orig := DetectionConfig{Enabled: true, MaxKeys: 256, TickInterval: &tick}
+	orig.ErrorRate.Enabled = boolp(false)
+	orig.ResponseTime.Window = &win
+	orig.ResponseTime.MinSamples = &minSamples
+
+	node, err := EncodeDetectionNode(orig)
+	if err != nil {
+		t.Fatalf("EncodeDetectionNode: %v", err)
+	}
+	blk, err := yaml.Marshal(map[string]yaml.Node{"detection": node})
+	if err != nil {
+		t.Fatalf("marshal node: %v", err)
+	}
+	p, err := parse([]byte(baseAllow + "\n" + string(blk)))
+	if err != nil {
+		t.Fatalf("parse round-tripped config: %v\n%s", err, blk)
+	}
+	got := p.policy.Detection
+	if !got.Enabled || got.MaxKeys != 256 {
+		t.Errorf("scalars lost: enabled=%v maxKeys=%d", got.Enabled, got.MaxKeys)
+	}
+	if got.TickInterval == nil || *got.TickInterval != tick {
+		t.Errorf("tickInterval lost: %v", got.TickInterval)
+	}
+	if got.ErrorRate.Enabled == nil || *got.ErrorRate.Enabled {
+		t.Errorf("errorRate.enabled override lost: %v", got.ErrorRate.Enabled)
+	}
+	if got.ResponseTime.Window == nil || *got.ResponseTime.Window != win {
+		t.Errorf("responseTime.window lost: %v", got.ResponseTime.Window)
+	}
+	if got.ResponseTime.MinSamples == nil || *got.ResponseTime.MinSamples != minSamples {
+		t.Errorf("responseTime.minSamples lost: %v", got.ResponseTime.MinSamples)
+	}
+	// A detector with NO overrides must be omitted from the encoded block (minimal).
+	if strings.Contains(string(blk), "costAnomaly") {
+		t.Errorf("unset costAnomaly should be omitted from encoded block:\n%s", blk)
+	}
+}
+
+func boolp(b bool) *bool { return &b }
 
 // TestParseDetection_DefaultsOn asserts that a config with NO detection block
 // leaves detection ON with all overrides unset (⇒ the engine keeps its own

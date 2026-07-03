@@ -1,4 +1,4 @@
-package controlplane
+package alertpipeline
 
 import (
 	"strings"
@@ -7,11 +7,13 @@ import (
 	"github.com/ethosagent/warden/internal/integration"
 )
 
-// bridge.go is the M1 event→Finding bridge: a small, isolated, deliberately
-// conservative stand-in for the future (M3) temporal-detection engine. Until the
-// detection engine ships, we bridge already-observed, security-relevant analytics
-// events into Findings so the alert pipeline (bus → alertmanager → store →
-// router → integrations) is live end to end. Keep it small and bounded.
+// bridge.go is the event→Finding bridge: a small, isolated, deliberately
+// conservative producer that runs alongside the temporal-detection engine. It
+// bridges already-observed, security-relevant analytics events into Findings so
+// the alert pipeline (bus → alertmanager → store → router → integrations) is live
+// for block/reason events immediately, without waiting for a detection window.
+// Keep it small and bounded. It is part of the pipeline assembly, so it lives
+// here with Observe rather than in any host package.
 //
 // EGRESS HYGIENE (invariant): a Finding crosses Warden's trust boundary when the
 // router pushes the derived Alert to a third-party webhook/Slack. So Summary and

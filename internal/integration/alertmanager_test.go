@@ -30,6 +30,10 @@ func (s *seqStore) UpsertAlert(a Alert) error {
 	return s.fail
 }
 
+// ListAlerts satisfies the alertStore interface; the Ingest tests never sweep, so
+// a no-op is sufficient (the resolve sweep is exercised against a real *Store).
+func (s *seqStore) ListAlerts(int) ([]Alert, error) { return nil, nil }
+
 // seqRouter records when Deliver is called relative to the shared sequence.
 type seqRouter struct {
 	mu        sync.Mutex

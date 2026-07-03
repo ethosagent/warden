@@ -934,20 +934,15 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
       <div class="empty-only" id="es-alerts"></div>
 
       <div class="demo-only">
-      <!-- CONFIGURE (informational — no rule-config API yet) -->
+      <!-- CONFIGURE — live detection editor (GET/PUT /dashboard/api/detection) -->
       <div class="card" style="margin-bottom:18px">
-        <div class="card-head"><h3>Routing &amp; sinks</h3><span class="sub">configured in control-plane config</span></div>
+        <div class="card-head"><h3>Detection</h3><span class="sub" id="detectionSub">temporal threshold detectors</span></div>
         <div class="card-pad">
           <div class="callout" style="margin-bottom:14px">
             <div class="arrow">ℹ</div>
-            <div class="note">Alert <b>routing and sinks</b> (Slack, PagerDuty, webhook, email) are configured in the control plane's <span class="mono">integrations</span> config block — not from this console. <b>Threshold rules</b> that fire alerts require the detection engine, a later milestone. The list below is emitted by configured integrations as detections trigger.</div>
+            <div class="note">The detectors below decide <b>when</b> an alert fires. Alert <b>routing and sinks</b> (which alerts reach which webhook/Slack) are configured in <a href="#" onclick="go('settings');return false;">Settings → Integrations</a> — not here.</div>
           </div>
-          <div class="cov-grid">
-            <div class="cov"><div class="id">Slack</div><div class="nm">chat sink</div><span class="chip">integrations.slack</span></div>
-            <div class="cov"><div class="id">PagerDuty</div><div class="nm">on-call sink</div><span class="chip">integrations.pagerduty</span></div>
-            <div class="cov"><div class="id">Webhook</div><div class="nm">generic HTTP sink</div><span class="chip">integrations.webhook</span></div>
-            <div class="cov"><div class="id">Email</div><div class="nm">SMTP sink</div><span class="chip">integrations.email</span></div>
-          </div>
+          <div id="detectionEditor"></div>
         </div>
       </div>
 
@@ -1182,7 +1177,7 @@ function loadTab(page){
     case 'settings':    loadSettings(); break;
     case 'secrets':     loadSecrets(); break;
     case 'guardrails':  loadGuardrails(); break;
-    case 'alerts':      loadAlerts(); break;
+    case 'alerts':      loadAlerts(); loadDetection(); break;
     case 'audit':       loadAudit(); break;
     case 'get-started': refreshOnboarding(); break;
   }
@@ -2365,6 +2360,146 @@ function alertDetail(a){
 }
 
 /* ============================================================
+   Detection editor (LIVE — GET/PUT /dashboard/api/detection)
+   The config document is read-modify-write: pointer/omitempty fields left blank
+   are OMITTED so the engine keeps its default; per-detector enable is an explicit
+   bool. Available where the alert pipeline is hosted (control plane in fleet mode,
+   the worker itself in local-only); read-only or absent elsewhere.
+   ============================================================ */
+let detectionData = { config:null, status:{detectors:[],evictions:0}, editable:false, missing:true };
+// [field, coercion] per detector — matches DetectionConfigView JSON exactly.
+const DET_SPECS = {
+  errorRate:     [['window','dur'],['minSamples','int'],['rateThreshold','num']],
+  authFailBurst: [['window','dur'],['countThreshold','int']],
+  costAnomaly:   [['window','dur'],['budgetUSD','num']],
+  responseTime:  [['window','dur'],['minSamples','int'],['floorMs','num'],['degradeFactor','num'],['baselineAlpha','num']],
+};
+async function loadDetection(){
+  try{
+    const d=await jget('/dashboard/api/detection');
+    detectionData=Object.assign({missing:false}, d);
+  }catch(e){
+    detectionData={ config:null, status:{detectors:[],evictions:0}, editable:false, missing:true };
+  }
+  renderDetection();
+}
+// detectionPresent: does THIS node host a detection pipeline? Editable ⇒ yes.
+// Otherwise infer from live status / a non-empty config; a read-only fleet worker
+// with nothing wired reports empty on all of these → show the "runs elsewhere" note.
+function detectionPresent(){
+  if(detectionData.editable) return true;
+  const c=detectionData.config||{}; const st=detectionData.status||{};
+  if((st.detectors||[]).length) return true;
+  if(c.enabled) return true;
+  if(c.tickInterval||c.maxKeys) return true;
+  return ['errorRate','authFailBurst','costAnomaly','responseTime'].some(k=>{ const d=c[k]; return d && Object.keys(d).length>0; });
+}
+function detStr(v){ return (v!==undefined&&v!==null)?String(v):''; }
+// per-detector enable defaults ON (engine default) when the override is unset.
+function detEnabled(d){ return (d && d.enabled!==undefined) ? !!d.enabled : true; }
+function detField(id,label,value,ph,ed,hint){
+  return '<div class="field"><label>'+esc(label)+'</label>'
+    +'<input id="'+id+'" type="text" value="'+esc(detStr(value))+'" placeholder="'+esc(ph||'')+'" '+(ed?'':'disabled')+'/>'
+    +(hint?'<div class="note" style="margin-top:2px">'+esc(hint)+'</div>':'')+'</div>';
+}
+function detCard(key,title,desc,enabled,fields,ed){
+  return '<div class="card" style="margin:0 0 12px;padding:12px">'
+    + toggleRow('det_'+key+'_en', enabled, title, desc, ed, true)
+    + '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;margin-top:8px">'+fields+'</div>'
+    + '</div>';
+}
+function renderDetection(){
+  const host=document.getElementById('detectionEditor'); if(!host) return;
+  const sub=document.getElementById('detectionSub');
+  if(detectionData.missing || !detectionPresent()){
+    if(sub) sub.textContent='not hosted here';
+    host.innerHTML='<div class="note">Temporal threshold detection runs on the <b>control plane</b> (fleet mode) or a <b>local-only</b> node. This dashboard node hosts no alert pipeline, so there is nothing to configure here.</div>';
+    return;
+  }
+  const c=detectionData.config||{};
+  const st=detectionData.status||{detectors:[],evictions:0};
+  const ed=!!detectionData.editable;
+  const master=!!c.enabled;
+  const active=st.detectors||[];
+  if(sub) sub.textContent = master ? (active.length+' detector'+(active.length===1?'':'s')+' active') : 'detection off';
+  const err=c.errorRate||{}, afb=c.authFailBurst||{}, cost=c.costAnomaly||{}, rt=c.responseTime||{};
+  const statusLine=
+    '<div class="kv"><span class="k">Status</span>'+(master?'<span class="pill p-allow">enabled</span>':'<span class="pill p-monitor">disabled</span>')+'</div>'
+    +'<div class="kv"><span class="k">Active detectors</span><span>'+(active.length?active.map(esc).join(', '):'—')+'</span></div>'
+    +'<div class="kv"><span class="k">Cardinality evictions</span><span>'+fmtNum(st.evictions||0)+'</span></div>';
+  let h='';
+  if(!ed){ h+='<div class="note" style="margin-bottom:10px">Detection is <b>read-only</b> on this node — it is managed by the control plane.</div>'; }
+  else if(!master){ h+='<div class="note" style="margin-bottom:10px">Detection is <b>disabled</b>. Enable it and Save to start firing threshold alerts.</div>'; }
+  h+='<div class="card" style="margin:0 0 12px;padding:12px">'
+    + toggleRow('det_master', master, 'Detection enabled', 'Master switch for temporal threshold detectors', ed)
+    + '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;margin-top:8px">'
+    +   detField('det_tickInterval','Evaluate interval', c.tickInterval, 'engine default', ed, 'cadence, e.g. 20s')
+    +   '<div class="field"><label>Max keys / detector</label><input type="text" value="'+esc(c.maxKeys?String(c.maxKeys):'')+'" placeholder="engine default" disabled/><div class="note" style="margin-top:2px">cardinality cap (read-only)</div></div>'
+    + '</div></div>';
+  h+=detCard('errorRate','Error rate','Fraction of failed requests over the window', detEnabled(err),
+        detField('det_errorRate_window','Window', err.window,'5m',ed,'e.g. 5m')
+      + detField('det_errorRate_minSamples','Min samples', err.minSamples,'20',ed,'≥ N requests')
+      + detField('det_errorRate_rateThreshold','Rate threshold', err.rateThreshold,'0.10',ed,'fraction 0–1 (0.10 = 10%)'), ed);
+  h+=detCard('authFailBurst','Auth-fail burst','Count of auth failures over the window', detEnabled(afb),
+        detField('det_authFailBurst_window','Window', afb.window,'5m',ed,'e.g. 5m')
+      + detField('det_authFailBurst_countThreshold','Count threshold', afb.countThreshold,'10',ed,'failures in window'), ed);
+  h+=detCard('costAnomaly','Cost anomaly','Spend over the window vs budget', detEnabled(cost),
+        detField('det_costAnomaly_window','Window', cost.window,'1h',ed,'e.g. 1h')
+      + detField('det_costAnomaly_budgetUSD','Budget (USD)', cost.budgetUSD,'25',ed,'$ per window'), ed);
+  h+=detCard('responseTime','Response time','Latency degradation vs rolling baseline', detEnabled(rt),
+        detField('det_responseTime_window','Window', rt.window,'5m',ed,'e.g. 5m')
+      + detField('det_responseTime_minSamples','Min samples', rt.minSamples,'10',ed,'≥ N requests')
+      + detField('det_responseTime_floorMs','Floor (ms)', rt.floorMs,'800',ed,'ignore below this latency')
+      + detField('det_responseTime_degradeFactor','Degrade factor', rt.degradeFactor,'3.0',ed,'× baseline to trip')
+      + detField('det_responseTime_baselineAlpha','Baseline alpha', rt.baselineAlpha,'0.3',ed,'EWMA smoothing 0–1'), ed);
+  const saveRow = ed
+    ? '<div style="margin-top:8px"><button class="btn primary sm" id="detectionSaveBtn" onclick="saveDetection()">Save detection</button> <span id="detectionMsg" class="sub"></span></div>'
+    : '';
+  host.innerHTML='<div style="margin-bottom:14px">'+statusLine+'</div>'+h+saveRow;
+}
+// buildDetectorDoc: read-modify-write one detector from the DOM. Start from the
+// fetched sub-config so unknown/future fields survive; a cleared input DELETES the
+// key (⇒ omitted ⇒ engine default). Enable is always an explicit bool.
+function buildDetectorDoc(key, base, errs){
+  const o=Object.assign({}, base||{});
+  o.enabled=chk('det_'+key+'_en');
+  DET_SPECS[key].forEach(function(spec){
+    const f=spec[0], typ=spec[1];
+    const raw=(val('det_'+key+'_'+f)||'').trim();
+    if(raw===''){ delete o[f]; return; }
+    if(typ==='dur'){ o[f]=raw; return; }
+    const n=Number(raw);
+    if(!isFinite(n)){ errs.push(key+'.'+f+' must be a number'); return; }
+    o[f]= typ==='int' ? Math.round(n) : n;
+  });
+  return o;
+}
+async function saveDetection(){
+  if(!detectionData.editable) return;
+  const c=detectionData.config||{};
+  const errs=[];
+  const doc=Object.assign({}, c);            // preserve unknown top-level + maxKeys
+  doc.enabled=chk('det_master');
+  const ti=(val('det_tickInterval')||'').trim();
+  if(ti){ doc.tickInterval=ti; } else { delete doc.tickInterval; }
+  doc.errorRate=buildDetectorDoc('errorRate', c.errorRate, errs);
+  doc.authFailBurst=buildDetectorDoc('authFailBurst', c.authFailBurst, errs);
+  doc.costAnomaly=buildDetectorDoc('costAnomaly', c.costAnomaly, errs);
+  doc.responseTime=buildDetectorDoc('responseTime', c.responseTime, errs);
+  const msg=document.getElementById('detectionMsg');
+  if(errs.length){ if(msg){ msg.textContent='✕ '+errs[0]; msg.style.color='var(--amber)'; } return; }
+  if(msg){ msg.textContent='saving…'; msg.style.color=''; }
+  try{
+    const r=await fetch('/dashboard/api/detection',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(doc)});
+    if(!r.ok){ let m='status '+r.status; try{ const e=await r.json(); if(e&&e.error) m=e.error; }catch(_e){} throw new Error(m); }
+    detectionData=Object.assign({missing:false}, await r.json());
+    renderDetection();
+    flashBtn('detectionSaveBtn','Saved ✓');
+    const m2=document.getElementById('detectionMsg'); if(m2){ m2.textContent='saved ✓ — engine reloads on next tick'; m2.style.color='var(--teal)'; }
+  }catch(err){ const m3=document.getElementById('detectionMsg'); if(m3){ m3.textContent='✕ '+err.message; m3.style.color='var(--amber)'; } }
+}
+
+/* ============================================================
    Audit (/dashboard/api/audit + POST /audit/verify)
    ============================================================ */
 async function loadAudit(){
@@ -2520,14 +2655,29 @@ function renderIntegrationForm(){
     +fields
     +'<div class="field"><label>Route which alerts? (match)</label>'
     +'<div style="display:flex; gap:8px; flex-wrap:wrap">'
-    +'<select id="intg-m-sev"><option value="">any severity</option><option value="critical">critical</option><option value="high">high</option><option value="medium">medium</option><option value="low">low</option><option value="info">info</option></select>'
-    +'<input id="intg-m-cat" placeholder="category (e.g. security)" style="flex:1; min-width:140px"/>'
-    +'</div><div class="note" id="intg-match-warn">Leave both empty = match-none (this integration receives NO alerts).</div></div>'
+    +'<select id="intg-m-sev" onchange="updateIntgMatchWarn()"><option value="">any severity</option><option value="critical">critical</option><option value="high" selected>high</option><option value="medium">medium</option><option value="low">low</option><option value="info">info</option></select>'
+    +'<input id="intg-m-cat" placeholder="category (e.g. security)" style="flex:1; min-width:140px" oninput="updateIntgMatchWarn()"/>'
+    +'</div><div class="note" id="intg-match-warn"></div></div>'
     +unavailNote
     +'<div style="margin-top:8px"><button class="btn primary sm" id="intg-save"'+(disabled?' disabled':'')+'>Save integration</button> '
     +'<button class="btn sm" id="intg-cancel">Cancel</button> <span id="intg-save-status" class="sub"></span></div>';
   const save=document.getElementById('intg-save'); if(save && !disabled) save.addEventListener('click', ()=>saveIntegration(def));
   const cancel=document.getElementById('intg-cancel'); if(cancel) cancel.addEventListener('click', toggleIntegrationForm);
+  updateIntgMatchWarn();
+}
+// P3 nudge: the match is pre-filled with severity=high so a new sink is not silent
+// by default. Clearing it back to match-none is still allowed (default-deny stays);
+// we just warn — honestly — that an empty match receives nothing.
+function updateIntgMatchWarn(){
+  const warn=document.getElementById('intg-match-warn'); if(!warn) return;
+  const empty=!val('intg-m-sev') && !(val('intg-m-cat')||'').trim();
+  if(empty){
+    warn.textContent='match-none: this integration will receive NO alerts. Pick a severity or category to route alerts to it.';
+    warn.style.color='var(--amber)';
+  }else{
+    warn.textContent='Routing alerts on this match. Choose “any severity” and clear category for match-none (receives nothing).';
+    warn.style.color='';
+  }
 }
 async function saveIntegration(def){
   const st=document.getElementById('intg-save-status'); if(st){ st.textContent='saving…'; st.style.color=''; }

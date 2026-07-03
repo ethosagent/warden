@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // DetectionConfig is the control-plane-local temporal-detection configuration.
@@ -71,43 +73,48 @@ type DetectResponseTimeConfig struct {
 // block is distinct from an explicit (disabled) block. KnownFields(true) is
 // strict, so this MUST be registered in rawConfig or configs carrying the block
 // fail to parse.
+//
+// The `omitempty` tags matter for the write direction (EncodeDetectionNode): a nil
+// override / empty duration / zero maxKeys is omitted so the persisted `detection:`
+// block stays minimal and unset fields keep their engine defaults. omitempty is a
+// marshal-only concern; the strict KnownFields(true) read path is unaffected.
 type rawDetection struct {
-	Enabled      *bool  `yaml:"enabled"`
-	TickInterval string `yaml:"tickInterval"`
-	MaxKeys      int    `yaml:"maxKeys"`
+	Enabled      *bool  `yaml:"enabled,omitempty"`
+	TickInterval string `yaml:"tickInterval,omitempty"`
+	MaxKeys      int    `yaml:"maxKeys,omitempty"`
 
-	ErrorRate     *rawDetectErrorRate     `yaml:"errorRate"`
-	AuthFailBurst *rawDetectAuthFailBurst `yaml:"authFailBurst"`
-	CostAnomaly   *rawDetectCostAnomaly   `yaml:"costAnomaly"`
-	ResponseTime  *rawDetectResponseTime  `yaml:"responseTime"`
+	ErrorRate     *rawDetectErrorRate     `yaml:"errorRate,omitempty"`
+	AuthFailBurst *rawDetectAuthFailBurst `yaml:"authFailBurst,omitempty"`
+	CostAnomaly   *rawDetectCostAnomaly   `yaml:"costAnomaly,omitempty"`
+	ResponseTime  *rawDetectResponseTime  `yaml:"responseTime,omitempty"`
 }
 
 type rawDetectErrorRate struct {
-	Enabled       *bool    `yaml:"enabled"`
-	Window        string   `yaml:"window"`
-	MinSamples    *int     `yaml:"minSamples"`
-	RateThreshold *float64 `yaml:"rateThreshold"`
+	Enabled       *bool    `yaml:"enabled,omitempty"`
+	Window        string   `yaml:"window,omitempty"`
+	MinSamples    *int     `yaml:"minSamples,omitempty"`
+	RateThreshold *float64 `yaml:"rateThreshold,omitempty"`
 }
 
 type rawDetectAuthFailBurst struct {
-	Enabled        *bool  `yaml:"enabled"`
-	Window         string `yaml:"window"`
-	CountThreshold *int   `yaml:"countThreshold"`
+	Enabled        *bool  `yaml:"enabled,omitempty"`
+	Window         string `yaml:"window,omitempty"`
+	CountThreshold *int   `yaml:"countThreshold,omitempty"`
 }
 
 type rawDetectCostAnomaly struct {
-	Enabled   *bool    `yaml:"enabled"`
-	Window    string   `yaml:"window"`
-	BudgetUSD *float64 `yaml:"budgetUSD"`
+	Enabled   *bool    `yaml:"enabled,omitempty"`
+	Window    string   `yaml:"window,omitempty"`
+	BudgetUSD *float64 `yaml:"budgetUSD,omitempty"`
 }
 
 type rawDetectResponseTime struct {
-	Enabled       *bool    `yaml:"enabled"`
-	Window        string   `yaml:"window"`
-	MinSamples    *int     `yaml:"minSamples"`
-	FloorMs       *float64 `yaml:"floorMs"`
-	DegradeFactor *float64 `yaml:"degradeFactor"`
-	BaselineAlpha *float64 `yaml:"baselineAlpha"`
+	Enabled       *bool    `yaml:"enabled,omitempty"`
+	Window        string   `yaml:"window,omitempty"`
+	MinSamples    *int     `yaml:"minSamples,omitempty"`
+	FloorMs       *float64 `yaml:"floorMs,omitempty"`
+	DegradeFactor *float64 `yaml:"degradeFactor,omitempty"`
+	BaselineAlpha *float64 `yaml:"baselineAlpha,omitempty"`
 }
 
 // parseDetection converts the raw detection block into a typed config. An absent
@@ -172,6 +179,69 @@ func parseOptionalDuration(name, raw string, dst **time.Duration) error {
 	}
 	*dst = &d
 	return nil
+}
+
+// EncodeDetectionNode encodes a typed DetectionConfig into a yaml.Node matching
+// the on-disk `detection:` block — the write-direction counterpart of
+// parseDetection and the detection analogue of EncodeIntegrationsNode. It
+// round-trips through rawDetection so the YAML tags stay in lockstep with the read
+// path (a single source of tag truth). Durations are rendered as Go-duration
+// strings; nil overrides are omitted (via the raw struct's omitempty) so the
+// persisted block stays minimal and unset fields keep their engine defaults. The
+// master `enabled` is ALWAYS written (false is meaningful — it disables detection).
+func EncodeDetectionNode(dc DetectionConfig) (yaml.Node, error) {
+	enabled := dc.Enabled
+	raw := rawDetection{
+		Enabled:      &enabled,
+		TickInterval: durOverride(dc.TickInterval),
+		MaxKeys:      dc.MaxKeys,
+	}
+	if er := dc.ErrorRate; er.Enabled != nil || er.Window != nil || er.MinSamples != nil || er.RateThreshold != nil {
+		raw.ErrorRate = &rawDetectErrorRate{
+			Enabled:       er.Enabled,
+			Window:        durOverride(er.Window),
+			MinSamples:    er.MinSamples,
+			RateThreshold: er.RateThreshold,
+		}
+	}
+	if afb := dc.AuthFailBurst; afb.Enabled != nil || afb.Window != nil || afb.CountThreshold != nil {
+		raw.AuthFailBurst = &rawDetectAuthFailBurst{
+			Enabled:        afb.Enabled,
+			Window:         durOverride(afb.Window),
+			CountThreshold: afb.CountThreshold,
+		}
+	}
+	if ca := dc.CostAnomaly; ca.Enabled != nil || ca.Window != nil || ca.BudgetUSD != nil {
+		raw.CostAnomaly = &rawDetectCostAnomaly{
+			Enabled:   ca.Enabled,
+			Window:    durOverride(ca.Window),
+			BudgetUSD: ca.BudgetUSD,
+		}
+	}
+	if rt := dc.ResponseTime; rt.Enabled != nil || rt.Window != nil || rt.MinSamples != nil || rt.FloorMs != nil || rt.DegradeFactor != nil || rt.BaselineAlpha != nil {
+		raw.ResponseTime = &rawDetectResponseTime{
+			Enabled:       rt.Enabled,
+			Window:        durOverride(rt.Window),
+			MinSamples:    rt.MinSamples,
+			FloorMs:       rt.FloorMs,
+			DegradeFactor: rt.DegradeFactor,
+			BaselineAlpha: rt.BaselineAlpha,
+		}
+	}
+	var node yaml.Node
+	if err := node.Encode(raw); err != nil {
+		return yaml.Node{}, fmt.Errorf("config: encode detection: %w", err)
+	}
+	return node, nil
+}
+
+// durOverride renders an optional duration override as a Go-duration string, or
+// "" when unset (⇒ omitted by omitempty / engine default).
+func durOverride(d *time.Duration) string {
+	if d == nil {
+		return ""
+	}
+	return d.String()
 }
 
 // validateDetection enforces the detection block's invariants: thresholds must

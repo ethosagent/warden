@@ -96,6 +96,13 @@ type Server struct {
 	// (worker) so POST/DELETE return 405. Both are control-plane-only.
 	integrationsSource func() []IntegrationInstanceStatus
 	integrationsWriter func([]config.IntegrationInstance) error
+	// detectionSource returns the current detection config + live engine status for
+	// the detection endpoint; nil (a node not hosting the alert pipeline) → the
+	// endpoint reports an empty, read-only config. detectionWriter persists+reloads
+	// an edited detection document; nil = read-only (PUT → 405). Both are set only
+	// where the pipeline is hosted (control plane in fleet, the worker in local-only).
+	detectionSource func() DetectionView
+	detectionWriter func(config.DetectionConfig) error
 }
 
 // analyticsCacheTTL is how long a computed analytics/MCP payload is reused
@@ -360,6 +367,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/dashboard/api/secretstore", s.handleSecretStore)
 	mux.HandleFunc("/dashboard/api/alerts", s.handleAlerts)
 	mux.HandleFunc("/dashboard/api/integrations", s.handleIntegrations)
+	mux.HandleFunc("/dashboard/api/detection", s.handleDetection)
 	mux.HandleFunc("/dashboard/api/audit", s.handleAudit)
 	mux.HandleFunc("/dashboard/api/audit/verify", s.handleAuditVerify)
 	mux.HandleFunc("/dashboard/api/setup", s.handleSetup)
