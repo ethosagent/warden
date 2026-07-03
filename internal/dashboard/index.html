@@ -743,14 +743,14 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
 
       <div class="demo-only">
       <div class="filterbar">
-        <input type="text" placeholder="Search domain, agent, receipt id…" />
-        <span class="fchip on">All decisions</span>
-        <span class="fchip">allow</span>
-        <span class="fchip">deny</span>
-        <span class="fchip">redact</span>
-        <span class="fchip" style="margin-left:8px">https</span>
-        <span class="fchip">mcp</span>
-        <span class="fchip">grpc</span>
+        <input type="text" id="actSearch" placeholder="Search domain, agent, receipt id…" oninput="setActSearch(this.value)" />
+        <span class="fchip dec on" onclick="setActDecision('', this)">All decisions</span>
+        <span class="fchip dec" onclick="setActDecision('allow', this)">allow</span>
+        <span class="fchip dec" onclick="setActDecision('deny', this)">deny</span>
+        <span class="fchip dec" onclick="setActDecision('redact', this)">redact</span>
+        <span class="fchip proto" style="margin-left:8px" onclick="setActProto('https', this)">https</span>
+        <span class="fchip proto" onclick="setActProto('mcp', this)">mcp</span>
+        <span class="fchip proto" onclick="setActProto('grpc', this)">grpc</span>
         <span class="fchip on" style="margin-left:8px">Fleet</span>
       </div>
 
@@ -1396,17 +1396,51 @@ async function loadTraffic(){
 /* ============================================================
    Activity
    ============================================================ */
+/* Client-side Activity filter state (search + decision + protocol).
+   Applied over the already-fetched window.__traffic — no refetch needed. */
+let activityFilters={ q:'', decision:'', proto:'' };
+function filteredActivity(){
+  const evs=window.__traffic||[]; const f=activityFilters;
+  return evs.filter(e=>{
+    if(f.decision && eventDecision(e)!==f.decision) return false;
+    if(f.proto && (e.Protocol||'')!==f.proto) return false;
+    if(f.q){
+      const hay=[e.Domain, e.ProxyID, e.Method, (e.SwappedRefs||[]).join(' ')].join(' ').toLowerCase();
+      if(hay.indexOf(f.q)===-1) return false;
+    }
+    return true;
+  });
+}
+function setActSearch(v){ activityFilters.q=String(v==null?'':v).trim().toLowerCase(); renderActivity(); }
+function setActDecision(val, el){
+  activityFilters.decision=val;
+  document.querySelectorAll('#page-activity .fchip.dec').forEach(c=>c.classList.remove('on'));
+  if(el) el.classList.add('on');
+  renderActivity();
+}
+function setActProto(val, el){
+  const cur=activityFilters.proto;
+  document.querySelectorAll('#page-activity .fchip.proto').forEach(c=>c.classList.remove('on'));
+  if(cur===val){ activityFilters.proto=''; }                 // click active again → back to all
+  else { activityFilters.proto=val; if(el) el.classList.add('on'); }
+  renderActivity();
+}
 async function loadActivity(){
   let evs;
   try{ evs=await loadTraffic(); }catch(e){ evs=[]; }
   const empty=!evs.length;
   const pg=document.getElementById('page-activity'); if(pg) pg.classList.toggle('is-empty', empty);
   if(empty) return;
-  renderActivity(evs);
+  renderActivity();   // re-applies current activityFilters over freshly-fetched window.__traffic
 }
-function renderActivity(evs){
+function renderActivity(){
   const body=document.getElementById('activityBody'); if(!body) return;
+  const evs=filteredActivity();
   body.innerHTML='';
+  if(!evs.length){
+    body.innerHTML='<tr><td colspan="10" class="muted" style="text-align:center;padding:18px">No requests match this filter.</td></tr>';
+    return;
+  }
   evs.forEach((e,i)=>{
     const dec=eventDecision(e);
     const tr=document.createElement('tr'); tr.className='clickable';
@@ -1427,7 +1461,7 @@ function renderActivity(evs){
 /* Export the current Activity table (window.__traffic) as a client-side CSV download. */
 function csvCell(v){ const s=String(v==null?'':v); return /[",\n]/.test(s)? '"'+s.replace(/"/g,'""')+'"' : s; }
 function exportActivityCSV(){
-  const evs=window.__traffic||[];
+  const evs=filteredActivity();   // export the currently-visible (filtered) rows, not the whole list
   if(!evs.length){ window.alert('No activity to export yet.'); return; }
   const header=['Timestamp','ProxyID','Method','Domain','Protocol','Decision','DataClasses','SwappedRefs','CostUSD','LatencyMs'];
   const rows=evs.map(e=>[
