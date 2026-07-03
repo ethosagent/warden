@@ -87,6 +87,10 @@ type Policy struct {
 	// onto the worker-served policyWire (which carries allow/deny + settings only).
 	// Empty by default.
 	Integrations []IntegrationInstance `json:"-"`
+	// Detection configures the control-plane temporal-detection engine. It is
+	// CP-local (never on the worker wire). An absent block = detection ON with
+	// engine defaults; see DetectionConfig.
+	Detection DetectionConfig `json:"-"`
 }
 
 // DeepCopy returns a deep copy of the policy, with all slices independently
@@ -214,6 +218,7 @@ type rawConfig struct {
 	Central       *rawCentral       `yaml:"central"`
 	Audit         *rawAudit         `yaml:"audit"`
 	Integrations  []rawIntegration  `yaml:"integrations"`
+	Detection     *rawDetection     `yaml:"detection"`
 }
 
 // defaultCacheTTLSeconds is used when the config omits cache.ttl.
@@ -304,6 +309,11 @@ func parse(data []byte) (*LocalYAMLProvider, error) {
 	policy.Central = central
 	policy.Audit = parseAudit(raw.Audit)
 	policy.Integrations = parseIntegrations(raw.Integrations)
+	detection, err := parseDetection(raw.Detection)
+	if err != nil {
+		return nil, err
+	}
+	policy.Detection = detection
 
 	if err := validate(policy); err != nil {
 		return nil, err
@@ -483,6 +493,9 @@ func validate(p Policy) error {
 		return err
 	}
 	if err := validateIntegrations(p.Integrations); err != nil {
+		return err
+	}
+	if err := validateDetection(p.Detection); err != nil {
 		return err
 	}
 	return nil
