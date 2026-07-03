@@ -539,6 +539,14 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	if alerts != nil {
 		alerts.wireDashboard(dashSrv)
 	}
+	// NL→SQL for the Explore tab reuses the SAME LLM the judge uses, built from the
+	// effective judge config via the shared BuildLLMClient helper (SECRET-LOCAL: the
+	// key is resolved from this node's own env). Fail-soft: judge off, an empty key
+	// env, or a malformed config all leave the generator unset (the Explore tab then
+	// reports "add an LLM provider"), and never block worker start.
+	if sqlGen, err := BuildLLMClient(pol.Judge); err == nil && sqlGen != nil {
+		dashSrv.SetSQLGenerator(sqlGen)
+	}
 	adminMux.Handle("/healthz", adminSrv.Handler())
 	adminMux.Handle("/admin/", adminSrv.Handler())
 	adminMux.Handle("/dashboard/", dashSrv.Handler())

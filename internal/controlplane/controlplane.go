@@ -29,6 +29,7 @@ import (
 	"github.com/ethosagent/warden/internal/detect"
 	"github.com/ethosagent/warden/internal/integration"
 	"github.com/ethosagent/warden/internal/secrets"
+	"github.com/ethosagent/warden/internal/worker"
 )
 
 // Config configures the control-plane server.
@@ -390,6 +391,19 @@ func (s *Server) Handler() http.Handler {
 	// unavailable in that case.
 	if q, ok := s.central.(analytics.AnalyticsQuery); ok {
 		dash.SetQueryEngine(q)
+	}
+	// NL→SQL for the Explore tab reuses the SAME LLM the judge uses, resolved from
+	// the CP's served judge settings via the shared worker.BuildLLMClient helper.
+	// The CP is secret-local-light: it gets a generator only if it has a judge
+	// block AND the key env resolves in the CP's OWN environment — often it does
+	// not, and then the fleet dashboard shows the "add an LLM provider" prompt. A CP
+	// operator who DOES set the key env gets NL→SQL. Fail-soft: any error/nil leaves
+	// it unset and never blocks control-plane start.
+	if wire.Settings != nil {
+		jc := config.JudgeConfigFromSettings(wire.Settings.Judge)
+		if sqlGen, err := worker.BuildLLMClient(jc); err == nil && sqlGen != nil {
+			dash.SetSQLGenerator(sqlGen)
+		}
 	}
 	// Per-worker MCP view (inventory + observed schema), selected by ?proxy=.
 	dash.SetMCPFleet(s.mcp.For)

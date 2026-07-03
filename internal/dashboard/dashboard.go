@@ -64,6 +64,12 @@ type Server struct {
 	// queryEngine, when set (control plane with a SQL-backed store), powers the
 	// read-only Query Builder. nil = the Query Builder reports "unavailable".
 	queryEngine analytics.AnalyticsQuery
+	// sqlGen, when set, is the LLM used to translate a plain-English question into
+	// a read-only SQL query for the Explore tab. It reuses the SAME provider the
+	// judge uses (wired from the effective judge config). nil (no LLM configured,
+	// or the node's key env is empty) makes /query/generate report
+	// "llm_not_configured" so the UI points the user at Settings → Judge.
+	sqlGen SQLGenerator
 	// now is the clock used by the response caches; it defaults to time.Now and
 	// is overridable in tests so cache expiry can be asserted without real sleeps.
 	now func() time.Time
@@ -350,6 +356,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/dashboard/api/workers", s.handleWorkers)
 	mux.HandleFunc("/dashboard/api/query", s.handleQuery)
 	mux.HandleFunc("/dashboard/api/query/schema", s.handleQuerySchema)
+	mux.HandleFunc("/dashboard/api/query/generate", s.handleQueryGenerate)
 	mux.HandleFunc("/dashboard/api/secretstore", s.handleSecretStore)
 	mux.HandleFunc("/dashboard/api/alerts", s.handleAlerts)
 	mux.HandleFunc("/dashboard/api/integrations", s.handleIntegrations)

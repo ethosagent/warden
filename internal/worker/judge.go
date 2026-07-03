@@ -41,18 +41,9 @@ func buildJudgeFrom(jc config.JudgeConfig, agents []config.AgentPolicy, agentID 
 		return nil, nil
 	}
 
-	apiKey := os.Getenv(jc.APIKeyEnv)
-	if apiKey == "" {
-		return nil, fmt.Errorf("judge.enabled but env var %s is empty (it holds the LLM API key)", jc.APIKeyEnv)
-	}
-	client, err := llm.NewClient(llm.Config{
-		BaseURL: jc.BaseURL,
-		Model:   jc.Model,
-		APIKey:  apiKey,
-		Timeout: jc.Timeout,
-	})
+	client, err := BuildLLMClient(jc)
 	if err != nil {
-		return nil, fmt.Errorf("build LLM client: %w", err)
+		return nil, err
 	}
 
 	policies := make(map[string]string, len(agents))
@@ -67,6 +58,39 @@ func buildJudgeFrom(jc config.JudgeConfig, agents []config.AgentPolicy, agentID 
 		Cooldown:    jc.CircuitBreaker.Cooldown,
 	})
 	return judgeAdapter{judge}, nil
+}
+
+// BuildLLMClient constructs the OpenAI-compatible LLM client from a judge config,
+// resolving the API key from this node's OWN environment (the SECRET-LOCAL
+// invariant: distributed settings carry only the env NAME, never a key value).
+// It is the single source of key-resolution + client construction, shared by the
+// inline judge (buildJudgeFrom) and the dashboard NL→SQL wiring so both use the
+// exact same provider/model/baseURL/key.
+//
+// Return contract:
+//   - jc.Enabled == false            → (nil, nil): the judge/feature is simply off.
+//   - enabled but APIKeyEnv is empty → (nil, error): a misconfiguration the judge
+//     boot path surfaces as before. The dashboard wiring treats any error as
+//     fail-soft "no generator" (it never blocks node start).
+//   - enabled + key present          → (client, nil).
+func BuildLLMClient(jc config.JudgeConfig) (*llm.Client, error) {
+	if !jc.Enabled {
+		return nil, nil
+	}
+	apiKey := os.Getenv(jc.APIKeyEnv)
+	if apiKey == "" {
+		return nil, fmt.Errorf("judge.enabled but env var %s is empty (it holds the LLM API key)", jc.APIKeyEnv)
+	}
+	client, err := llm.NewClient(llm.Config{
+		BaseURL: jc.BaseURL,
+		Model:   jc.Model,
+		APIKey:  apiKey,
+		Timeout: jc.Timeout,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("build LLM client: %w", err)
+	}
+	return client, nil
 }
 
 // judgeAdapter bridges *llmpolicy.Judge to the proxy.Judge interface. The proxy

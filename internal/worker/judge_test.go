@@ -115,6 +115,41 @@ func TestBuildJudgeFrom_ResolvesAPIKeyFromLocalEnv(t *testing.T) {
 	}
 }
 
+// TestBuildLLMClient_GatesOnEnabledAndKey verifies the shared helper the dashboard
+// NL→SQL wiring uses: it yields a client only when the judge is enabled AND the key
+// env resolves locally, mirroring "SetSQLGenerator is wired when the judge is
+// configured with a key in env, and NOT when the key env is empty".
+func TestBuildLLMClient_GatesOnEnabledAndKey(t *testing.T) {
+	const envName = "WARDEN_NL2SQL_KEY"
+	jc := config.JudgeConfig{
+		Enabled:   true,
+		Model:     "gpt-4o-mini",
+		BaseURL:   "https://api.openai.com/v1",
+		APIKeyEnv: envName,
+	}
+
+	// Disabled → (nil, nil): the feature is simply off, not an error.
+	if c, err := BuildLLMClient(config.JudgeConfig{Enabled: false}); err != nil || c != nil {
+		t.Fatalf("disabled: want (nil,nil), got (%v,%v)", c, err)
+	}
+
+	// Enabled but the key env is empty → (nil, error): the dashboard treats this as
+	// fail-soft "no generator", so no SetSQLGenerator call happens.
+	if c, err := BuildLLMClient(jc); err == nil || c != nil {
+		t.Fatalf("empty key: want (nil,error), got (%v,%v)", c, err)
+	}
+
+	// Enabled + key present in the local env → a usable client.
+	t.Setenv(envName, "sk-local")
+	c, err := BuildLLMClient(jc)
+	if err != nil {
+		t.Fatalf("unexpected error with key set: %v", err)
+	}
+	if c == nil {
+		t.Fatal("expected a client when enabled and key present")
+	}
+}
+
 func TestDefaultAgentID_PortBindingWhenMultiple(t *testing.T) {
 	pol := config.Policy{Agents: []config.AgentPolicy{
 		{ID: "a", Policy: "x"},

@@ -1062,13 +1062,14 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
 
       <div class="demo-only">
       <div class="card" style="margin-bottom:16px">
-        <div class="card-head"><h3>Ask in plain English</h3><span class="sub">keyword → SQL · no LLM</span></div>
+        <div class="card-head"><h3>Ask in plain English</h3><span class="sub">plain English → SQL · uses your configured LLM</span></div>
         <div class="card-pad">
           <div style="display:flex; gap:10px">
             <input type="text" id="nlInput" value="which domains had the most blocked egress this week?" style="flex:1; background:var(--surface-2); border:1px solid var(--border); color:var(--text); padding:9px 12px; border-radius:9px; font:inherit;"/>
             <button class="btn primary" id="nlGenBtn">Generate SQL →</button>
           </div>
-          <div class="note" style="margin-top:8px">Keyword-based heuristic — writes SQL into the editor below (no LLM). Review it, then Run.</div>
+          <div class="note" style="margin-top:8px">Your configured LLM writes SQL into the editor below — review it, then Run.</div>
+          <div class="note" id="nlMsg" style="margin-top:8px; display:none"></div>
         </div>
       </div>
 
@@ -1748,41 +1749,53 @@ function savedQuerySaveCurrent(){
   renderSavedQueriesMenu();
 }
 
-/* ---------- Generate SQL from plain English (client-side heuristic, no LLM) ----------
-   Uses the REAL events schema. Columns are resolved through qbCol() (domain,
-   worker→proxy_id, data_class→compliance) so only columns the live schema lists
-   are emitted; a time clause is added only when the real 'ts' column (nanoseconds
-   since epoch) is present, else it is omitted rather than inventing a column. */
-function generateSqlFromNL(){
+/* ---------- Generate SQL from plain English (real LLM translation) ----------
+   POSTs the question to /dashboard/api/query/generate, which reuses the SAME LLM
+   the judge uses (grounded on the real events schema) to return ONE read-only
+   SELECT. The SQL lands in #sqlBox for review — the user still presses Run to
+   execute it via the existing read-only /query engine; nothing auto-runs. When no
+   LLM is configured (409 llm_not_configured) the card shows a link to the Judge
+   settings editor instead of failing silently. */
+function setNlMsg(html){
+  const m=document.getElementById('nlMsg'); if(!m) return;
+  m.innerHTML=html||''; m.style.display=html?'':'none';
+}
+async function generateSqlFromNL(){
   const inEl=document.getElementById('nlInput'); const box=document.getElementById('sqlBox');
-  if(!box) return;
-  const q=(inEl?inEl.value:'').toLowerCase();
-  const cols=qbSchemaCols();
-  const hasCol=name=> !cols.length || cols.indexOf(name)>=0;
-  const where=[];
-  // decision filter
-  if(/\b(block|blocked|blocks|deny|denied|denies|denials)\b/.test(q)) where.push("decision = 'deny'");
-  else if(/\b(allow|allowed|allows)\b/.test(q)) where.push("decision = 'allow'");
-  // grouping dimension (default: domain)
-  let dim=qbCol('domain');
-  if(/\b(worker|workers|proxy|node|nodes)\b/.test(q)) dim=qbCol('worker');
-  else if(/\b(data ?class|data ?classes|pii|secret|secrets|credential|credentials|sensitive)\b/.test(q)) dim=qbCol('data_class');
-  else if(/\b(domain|domains|destination|destinations|host|hosts)\b/.test(q)) dim=qbCol('domain');
-  // time window — only when a real timestamp column exists
-  if(hasCol('ts')){
-    let secs=0;
-    if(/\b(today|last day|past day|24 ?h|24 ?hours)\b/.test(q)) secs=86400;
-    else if(/\b(hour|last hour|past hour|60 ?min)\b/.test(q)) secs=3600;
-    else if(/\b(week|last week|past week|7 ?d|7 ?days)\b/.test(q)) secs=604800;
-    else if(/\b(month|last month|past month|30 ?d|30 ?days)\b/.test(q)) secs=2592000;
-    if(secs>0) where.push("ts >= (strftime('%s','now') - "+secs+") * 1000000000");
+  const btn=document.getElementById('nlGenBtn');
+  if(!box||!inEl) return;
+  const question=inEl.value.trim();
+  setNlMsg('');
+  if(!question){ setNlMsg('<span style="color:#ff8098">Enter a question first.</span>'); return; }
+  const orig=btn?btn.textContent:'';
+  if(btn){ btn.disabled=true; btn.textContent='generating…'; }
+  try{
+    const r=await fetch('/dashboard/api/query/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question})});
+    const d=await r.json().catch(()=>({error:'status '+r.status}));
+    if(r.ok && d && d.sql){
+      box.value=d.sql;
+      box.focus();
+      box.scrollIntoView({behavior:'smooth',block:'nearest'});
+      return;
+    }
+    if(d && d.error==='llm_not_configured'){
+      setNlMsg('<span>'+esc(d.message||'Add an LLM provider in Settings → Judge to use plain-English queries.')
+        +'</span> <a href="#" id="nlJudgeLink">Open Judge settings →</a>');
+      const link=document.getElementById('nlJudgeLink');
+      if(link) link.addEventListener('click', e=>{
+        e.preventDefault();
+        go('guardrails');
+        const jb=document.querySelector('#grSubtabs button[data-sub="judge"]');
+        if(jb) jb.click();
+      });
+      return;
+    }
+    setNlMsg('<span style="color:#ff8098">✕ '+esc((d&&d.message)||(d&&d.error)||('status '+r.status))+'</span>');
+  }catch(e){
+    setNlMsg('<span style="color:#ff8098">✕ '+esc((e&&e.message)||'request failed')+'</span>');
+  }finally{
+    if(btn){ btn.disabled=false; btn.textContent=orig||'Generate SQL →'; }
   }
-  // limit — "top N" / "most N" / "N domains"
-  let n=10;
-  const m=q.match(/\b(?:top|most|first)\s+(\d+)/) || q.match(/\b(\d+)\s+(?:domains|workers|results|rows|endpoints)\b/);
-  if(m){ const v=parseInt(m[1],10); if(v>0 && v<=1000) n=v; }
-  const whereSql = where.length ? '\nWHERE '+where.join('\n  AND ') : '';
-  box.value='SELECT '+dim+', count(*) AS n\nFROM events'+whereSql+'\nGROUP BY '+dim+'\nORDER BY n DESC\nLIMIT '+n;
 }
 async function runQuery(){
   const ta=document.getElementById('sqlBox'), out=document.getElementById('exploreOut'), meta=document.getElementById('qMeta');
