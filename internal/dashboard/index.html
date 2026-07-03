@@ -2354,7 +2354,13 @@ function renderMCP(){
     scan:{ toolArgs:!!(m.scan&&m.scan.toolArgs), toolResults:!!(m.scan&&m.scan.toolResults) },
     chain:{ enabled:!!(m.chain&&m.chain.enabled) },
     tools:{ allow:((m.tools&&m.tools.allow)||[]).slice(), deny:((m.tools&&m.tools.deny)||[]).slice() }
-  } : null;
+  } : (gr.settingsEditable ? {
+    enabled:false, mode:'monitor', failClosedOnError:false,
+    schema:{ pin:false },
+    scan:{ toolArgs:false, toolResults:false },
+    chain:{ enabled:false },
+    tools:{ allow:[], deny:[] }
+  } : null);
   renderMCPConfig();
   renderMCPToolPolicy();
   renderMCPInventory();
@@ -2364,15 +2370,15 @@ function renderMCPConfig(){
   const ed=gr.settingsEditable;
   const saveBtn=document.getElementById('mcpSaveBtn'); if(saveBtn) saveBtn.style.display=ed?'':'none';
   if(!gr.mcp){
-    el.innerHTML = ed
-      ? '<div class="note" style="margin-bottom:10px">MCP inspection is <b>disabled</b>. Enable it and Save MCP to start guarding tool calls.</div>'
-        + toggleRow('mcpEnabled', false, 'Enable MCP inspection', 'Parse and guard MCP tool calls on egress', ed, true)
-      : '<div class="note">MCP inspection is <b>disabled</b> and read-only on this node (managed by the control plane).</div>';
+    el.innerHTML = '<div class="note">MCP inspection is <b>disabled</b> and read-only on this node (managed by the control plane).</div>';
     return;
   }
+  const disabledCue = !gr.mcp.enabled
+    ? '<div class="note" style="margin-bottom:10px">MCP inspection is <b>disabled</b>. Enable it and Save MCP to start guarding tool calls.</div>'
+    : '';
   const modeSel='<div style="display:flex;align-items:center;justify-content:space-between;padding:9px 0;border-bottom:1px solid var(--border)"><div><b>Mode</b><div class="note">Enforce blocks; Monitor logs only</div></div>'
     +'<select id="mcpMode" class="btn sm" '+(ed?'':'disabled')+'><option value="monitor"'+(gr.mcp.mode==='monitor'?' selected':'')+'>monitor</option><option value="enforce"'+(gr.mcp.mode==='enforce'?' selected':'')+'>enforce</option></select></div>';
-  el.innerHTML =
+  el.innerHTML = disabledCue +
     toggleRow('mcpEnabled', gr.mcp.enabled, 'Enable MCP inspection', 'Parse and guard MCP tool calls on egress', ed)
     + modeSel
     + toggleRow('mcpPin', gr.mcp.schema.pin, 'Pin tool schemas', 'Reject tool-definition drift (poisoning) at handshake', ed)
@@ -2384,13 +2390,22 @@ function renderMCPConfig(){
 function renderMCPToolPolicy(){
   const el=document.getElementById('mcpToolPolicy'); if(!el) return;
   const ed=gr.settingsEditable;
-  if(!gr.mcp){ el.innerHTML='<div class="note">Enable MCP inspection to manage tool allow / deny.</div>'; return; }
-  el.innerHTML = mcpListBlock('allow', gr.mcp.tools.allow, ed) + '<div class="divider"></div>' + mcpListBlock('deny', gr.mcp.tools.deny, ed);
+  if(!gr.mcp){ el.innerHTML='<div class="note">MCP tool policy is managed by the control plane.</div>'; return; }
+  const offNote = (ed && !gr.mcp.enabled)
+    ? '<div class="note" style="margin-bottom:8px">MCP inspection is <b>off</b> — add tools here, then enable it above and Save MCP for the policy to take effect.</div>'
+    : '';
+  el.innerHTML = offNote + mcpListBlock('allow', gr.mcp.tools.allow, ed) + '<div class="divider"></div>' + mcpListBlock('deny', gr.mcp.tools.deny, ed);
   el.querySelectorAll('.mcp-tool-rm').forEach(b=>b.addEventListener('click',()=>removeMcpTool(b.dataset.list,+b.dataset.idx)));
 }
 function mcpListBlock(list,arr,ed){
   const pill = list==='allow'?'<span class="pill p-allow">allow</span>':'<span class="pill p-deny">deny</span>';
-  const add = ed? '<button class="btn sm" onclick="addMcpTool(\''+list+'\')">+ Add</button>':'';
+  const add = ed
+    ? '<div style="display:flex;gap:6px;align-items:center">'
+      +'<input id="mcpAdd_'+list+'" type="text" placeholder="exact tool name" '
+      +'onkeydown="if(event.key===\'Enter\'){event.preventDefault();addMcpTool(\''+list+'\');}" '
+      +'style="background:var(--surface-2);border:1px solid var(--border);color:var(--text);padding:5px 9px;border-radius:7px;font:inherit;font-size:12px;width:150px"/>'
+      +'<button class="btn sm" onclick="addMcpTool(\''+list+'\')">+ Add</button></div>'
+    : '';
   let h='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">'+pill+add+'</div>';
   if(!arr.length){ h+='<div class="note" style="padding:2px 0">none</div>'; return h; }
   h+=arr.map((t,i)=>'<div style="display:flex;align-items:center;justify-content:space-between;padding:4px 0"><span class="mono" style="font-size:12.5px">'+esc(t)+'</span>'+(ed?'<button class="btn sm mcp-tool-rm" data-list="'+list+'" data-idx="'+i+'" style="color:#ff8098">✕</button>':'')+'</div>').join('');
@@ -2398,10 +2413,13 @@ function mcpListBlock(list,arr,ed){
 }
 function addMcpTool(list){
   if(!gr.settingsEditable||!gr.mcp) return;
-  const t=(window.prompt('Add '+list+' tool name (exact match)')||'').trim();
+  const inp=document.getElementById('mcpAdd_'+list);
+  const t=(inp?inp.value:'').trim();
   if(!t) return;
-  (list==='allow'?gr.mcp.tools.allow:gr.mcp.tools.deny).push(t);
+  const arr = list==='allow'?gr.mcp.tools.allow:gr.mcp.tools.deny;
+  if(arr.indexOf(t)===-1) arr.push(t);
   renderMCPToolPolicy();
+  const ni=document.getElementById('mcpAdd_'+list); if(ni) ni.focus();
 }
 function removeMcpTool(list,idx){
   if(!gr.mcp) return;
