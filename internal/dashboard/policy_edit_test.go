@@ -150,6 +150,100 @@ func TestSettingsWriteSurfacesWriterError(t *testing.T) {
 	}
 }
 
+// TestSettingsSurfacesSecretsSelector: GET /dashboard/api/settings surfaces the
+// value-free secret-backend selector (settings.secrets = {backend,region,
+// namePrefix}) so the Settings-page "Secret backend" card can populate — and on
+// a worker (no settings writer) it is served read-only (editable=false).
+func TestSettingsSurfacesSecretsSelector(t *testing.T) {
+	srv := NewServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
+	srv.SetLiveSettings(func() *config.SettingsWire {
+		return &config.SettingsWire{Secrets: &config.SecretsSettings{Backend: "aws", Region: "us-east-1", NamePrefix: "warden/"}}
+	})
+	var s settingsResponse
+	doGetJSON(t, srv.Handler(), "/dashboard/api/settings", &s)
+	if s.Editable {
+		t.Error("editable should be false without a settings writer (worker read-only)")
+	}
+	var sec *secretsSettingsView
+	if s.Settings != nil {
+		sec = s.Settings.Secrets
+	}
+	if sec == nil || sec.Backend != "aws" || sec.Region != "us-east-1" || sec.NamePrefix != "warden/" {
+		t.Fatalf("secrets selector not surfaced: %+v", sec)
+	}
+}
+
+// TestSettingsGETMasksSecretAccessKey proves the settings GET NEVER returns the
+// raw secretAccessKey: the response carries the accessKeyId and a value-free
+// masked indicator (configured + last-4), and the raw secret string appears
+// nowhere in the body.
+func TestSettingsGETMasksSecretAccessKey(t *testing.T) {
+	const rawSecret = "super-secret-access-key-abcd1234WXYZ"
+	srv := NewServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
+	srv.SetLiveSettings(func() *config.SettingsWire {
+		return &config.SettingsWire{Secrets: &config.SecretsSettings{
+			Backend: "aws", Region: "us-east-1", NamePrefix: "warden/",
+			AccessKeyID: "AKIADASH", SecretAccessKey: rawSecret,
+		}}
+	})
+
+	rec := getRaw(t, srv.Handler(), "/dashboard/api/settings")
+	if strings.Contains(rec, rawSecret) {
+		t.Fatalf("GET leaked the raw secretAccessKey:\n%s", rec)
+	}
+	if strings.Contains(rec, `"secretAccessKey"`) {
+		t.Fatalf("GET must not carry a secretAccessKey field:\n%s", rec)
+	}
+
+	var s settingsResponse
+	if err := json.Unmarshal([]byte(rec), &s); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	sec := s.Settings.Secrets
+	if sec == nil || sec.AccessKeyID != "AKIADASH" {
+		t.Fatalf("accessKeyId not surfaced: %+v", sec)
+	}
+	if !sec.SecretAccessKeyConfigured || sec.SecretAccessKeyLast4 != "WXYZ" {
+		t.Fatalf("masked indicator wrong: %+v", sec)
+	}
+}
+
+// TestSettingsWriteSecretsRoundTrips: POST with an aws secrets block reaches the
+// settingsWriter and echoes back; a follow-up save that OMITS the key (the UI's
+// env selection) hands the writer a nil Secrets block so the control plane
+// deletes the on-disk secretStore selector.
+func TestSettingsWriteSecretsRoundTrips(t *testing.T) {
+	var got config.SettingsWire
+	srv := NewServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
+	srv.SetSettingsWriter(func(s config.SettingsWire) error { got = s; return nil })
+	srv.SetLiveSettings(func() *config.SettingsWire { return &got }) // echo reflects the write
+
+	rec := postJSON(t, srv.Handler(), "/dashboard/api/settings",
+		`{"secrets":{"backend":"aws","region":"eu-west-1","namePrefix":"warden/"}}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if got.Secrets == nil || got.Secrets.Backend != "aws" || got.Secrets.Region != "eu-west-1" || got.Secrets.NamePrefix != "warden/" {
+		t.Fatalf("writer received secrets %+v", got.Secrets)
+	}
+	var echoed settingsResponse
+	if err := json.NewDecoder(rec.Body).Decode(&echoed); err != nil {
+		t.Fatalf("decode echo: %v", err)
+	}
+	if echoed.Settings == nil || echoed.Settings.Secrets == nil || echoed.Settings.Secrets.Region != "eu-west-1" {
+		t.Fatalf("echoed settings = %+v", echoed.Settings)
+	}
+
+	// env selection: the UI omits the secrets key entirely.
+	rec2 := postJSON(t, srv.Handler(), "/dashboard/api/settings", `{"logging":{"level":"info"}}`)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("env save: status %d, want 200; body=%s", rec2.Code, rec2.Body.String())
+	}
+	if got.Secrets != nil {
+		t.Fatalf("env selection must reach the writer with no secrets block, got %+v", got.Secrets)
+	}
+}
+
 func TestWorkersEndpoint(t *testing.T) {
 	srv := NewServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
 	srv.SetWorkers(func() []WorkerView {

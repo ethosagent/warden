@@ -590,12 +590,16 @@ func (s *Server) atomicWriteConfig(root map[string]yaml.Node) error {
 // document to the served config file, so workers pull the new settings on their
 // next poll. It is the settings analogue of writePolicy: it round-trips the file
 // through a top-level YAML map and rewrites ONLY the blocks this phase owns,
-// preserving every other block (policy, logging, central, controlPlane, secrets,
-// audit signing, …) byte-for-byte.
+// preserving every other block (policy, central, controlPlane, the `secrets`
+// placeholder list, audit signing, …) byte-for-byte.
 //
-// This phase owns the `mcp`, `judge`, `agents`, `logging`, `cache`, and (nested)
-// `audit.compliance` blocks. A nil/disabled in.MCP or in.Judge removes that block
-// (the worker disables the feature); an empty in.Agents removes the agents list.
+// This writer owns the `mcp`, `judge`, `agents`, `observability`, `explore`,
+// `secretStore`, `logging`, `cache`, and (nested) `audit.compliance` blocks. A
+// nil/disabled in.MCP or in.Judge removes that block (the worker disables the
+// feature); an empty in.Agents removes the agents list. in.Secrets (wire key
+// `secrets`) maps to the on-disk `secretStore` backend selector: echo/aws are
+// encoded, env/empty DELETES the key — the local `secrets:` placeholder list is
+// a different block and always survives untouched.
 //
 // logging/cache are top-level and ride the settingsBlocks table; compliance is
 // nested at audit.compliance.enabled and is merged into the existing audit node
@@ -606,6 +610,27 @@ func (s *Server) atomicWriteConfig(root map[string]yaml.Node) error {
 //
 // WriteSettings is the ConfigEditor seam's settings-write method; the lowercase
 // writeSettings forwarder preserves the internal call sites.
+// existingSecretAccessKey reads the on-disk secretStore.aws.secretAccessKey from
+// the round-tripped top-level config map, or "" when absent. It powers
+// WriteSettings' preserve-on-empty rule (keep a configured aws credential when the
+// dashboard re-saves without resubmitting the never-echoed secret). It decodes
+// into a local struct so the secrets package's unexported raw types stay private.
+func existingSecretAccessKey(root map[string]yaml.Node) string {
+	node, ok := root["secretStore"]
+	if !ok {
+		return ""
+	}
+	var existing struct {
+		AWS struct {
+			SecretAccessKey string `yaml:"secretAccessKey"`
+		} `yaml:"aws"`
+	}
+	if err := node.Decode(&existing); err != nil {
+		return ""
+	}
+	return existing.AWS.SecretAccessKey
+}
+
 func (s *Server) WriteSettings(in config.SettingsWire) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
@@ -691,6 +716,35 @@ func (s *Server) WriteSettings(in config.SettingsWire) error {
 		exploreEdit.node, exploreEdit.present = node, true
 	}
 	settingsBlocks = append(settingsBlocks, exploreEdit)
+
+	// secretStore: the value-free backend SELECTOR (env|echo|aws + aws region/
+	// namePrefix). Encode it for echo/aws; DELETE the key for env/empty so a worker
+	// falls back to its LOCAL placeholder→env map. Credentials never appear here —
+	// they resolve from each node's OWN environment/IAM. Note the deliberate key
+	// asymmetry: the wire/JSON key is `secrets` (SettingsWire.Secrets) while the
+	// on-disk key is `secretStore` (`secrets:` on disk is the placeholder list,
+	// which this edit must never touch).
+	secretsEdit := blockEdit{key: "secretStore"}
+	if cfg := config.SecretStoreConfigFromSettings(in.Secrets); cfg.ResolvedBackend() != config.SecretBackendEnv {
+		// PRESERVE-ON-EMPTY (explicit aws credentials). The dashboard GET never
+		// returns the raw secretAccessKey, so a form re-save cannot resubmit it. To
+		// avoid blanking a configured credential, the UI sends the accessKeyId with an
+		// EMPTY secretAccessKey to mean "keep the existing one". So: when the incoming
+		// aws block has a non-empty accessKeyId but an empty secretAccessKey, read the
+		// on-disk secretStore.aws.secretAccessKey (already round-tripped in `root`) and
+		// carry it forward. When BOTH are empty (user cleared them / switched to
+		// env/IMDS credentials), write neither key. When both are present, the incoming
+		// pair wins (a rotation).
+		if cfg.AWS != nil && cfg.AWS.AccessKeyID != "" && cfg.AWS.SecretAccessKey == "" {
+			cfg.AWS.SecretAccessKey = existingSecretAccessKey(root)
+		}
+		node, err := config.EncodeSecretStoreNode(cfg)
+		if err != nil {
+			return fmt.Errorf("controlplane: encode secretStore settings: %w", err)
+		}
+		secretsEdit.node, secretsEdit.present = &node, true
+	}
+	settingsBlocks = append(settingsBlocks, secretsEdit)
 
 	// logging: top-level `logging: {level, format}`. We OWN it only when the wire
 	// carries a logging block; when in.Logging is nil we LEAVE any existing logging

@@ -660,6 +660,182 @@ func TestWriteSettingsPreservesPolicyBlock(t *testing.T) {
 	}
 }
 
+// TestWriteSettingsPersistsSecretStore verifies an aws secrets selection persists
+// as the on-disk `secretStore` block (wire key `secrets` → disk key `secretStore`),
+// that other top-level blocks survive the edit, that no credential value appears
+// anywhere in the persisted file, and that a subsequent env selection REMOVES the
+// secretStore key so a worker falls back to its local placeholder→env map.
+func TestWriteSettingsPersistsSecretStore(t *testing.T) {
+	path := writePolicyFile(t, "api.openai.com") // allow/deny + secrets placeholder list
+	srv := New(Config{PolicyPath: path})
+
+	if err := srv.writeSettings(config.SettingsWire{
+		Secrets: &config.SecretsSettings{Backend: "aws", Region: "us-east-1", NamePrefix: "myco/"},
+	}); err != nil {
+		t.Fatalf("writeSettings (aws secret store): %v", err)
+	}
+
+	prov, err := config.NewLocalYAMLProvider(path)
+	if err != nil {
+		t.Fatalf("reload after settings edit: %v", err)
+	}
+	p, err := prov.GetPolicy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ss := p.SecretStore
+	if ss.ResolvedBackend() != config.SecretBackendAWS {
+		t.Fatalf("secretStore backend = %q, want aws", ss.Backend)
+	}
+	if ss.AWS == nil || ss.AWS.Region != "us-east-1" || ss.AWS.NamePrefix != "myco/" {
+		t.Fatalf("aws block not persisted: %+v", ss.AWS)
+	}
+	// Sibling blocks survive: allow/deny and the local secrets placeholder list.
+	if len(p.Allowlist) != 1 || p.Allowlist[0].Domain != "api.openai.com" {
+		t.Errorf("allowlist clobbered by secretStore edit: %+v", p.Allowlist)
+	}
+	if len(p.Denylist) != 1 || p.Denylist[0].Domain != "evil.example.com" {
+		t.Errorf("denylist clobbered by secretStore edit: %+v", p.Denylist)
+	}
+	if len(p.Secrets) != 1 || p.Secrets[0].Placeholder != "openai_secret_001" {
+		t.Errorf("secrets placeholder list clobbered by secretStore edit: %+v", p.Secrets)
+	}
+	// SECRET-FREE: the persisted file carries the backend selector + env NAMES
+	// only — never a credential value or a field that could hold one.
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, banned := range []string{"accessKey", "secretAccessKey", "sessionToken", "credential"} {
+		if strings.Contains(string(raw), banned) {
+			t.Fatalf("persisted file must not carry a credential field %q:\n%s", banned, raw)
+		}
+	}
+
+	// Selecting env DELETES the on-disk secretStore key entirely.
+	if err := srv.writeSettings(config.SettingsWire{
+		Secrets: &config.SecretsSettings{Backend: "env"},
+	}); err != nil {
+		t.Fatalf("writeSettings (env secret store): %v", err)
+	}
+	raw, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "secretStore") {
+		t.Fatalf("env selection must remove the secretStore key:\n%s", raw)
+	}
+	prov, err = config.NewLocalYAMLProvider(path)
+	if err != nil {
+		t.Fatalf("reload after env selection: %v", err)
+	}
+	p, err = prov.GetPolicy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := p.SecretStore.ResolvedBackend(); got != config.SecretBackendEnv {
+		t.Fatalf("backend after env selection = %q, want env", got)
+	}
+}
+
+// TestWriteSettingsSecretStorePreservesSecretOnEmpty exercises the preserve-on-
+// empty rule for explicit aws credentials: a first save persists both keys; a
+// re-save with the same accessKeyId but an EMPTY secretAccessKey (the dashboard
+// never echoes the secret back for resubmission) KEEPS the on-disk secret; a save
+// clearing BOTH keys removes them while leaving the backend aws.
+func TestWriteSettingsSecretStorePreservesSecretOnEmpty(t *testing.T) {
+	path := writePolicyFile(t, "api.openai.com")
+	srv := New(Config{PolicyPath: path})
+
+	readSecret := func() *config.SecretStoreAWS {
+		t.Helper()
+		prov, err := config.NewLocalYAMLProvider(path)
+		if err != nil {
+			t.Fatalf("reload: %v", err)
+		}
+		p, err := prov.GetPolicy()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p.SecretStore.AWS
+	}
+
+	// 1. Persist both explicit keys.
+	if err := srv.writeSettings(config.SettingsWire{
+		Secrets: &config.SecretsSettings{
+			Backend: "aws", Region: "us-east-1", NamePrefix: "warden/",
+			AccessKeyID: "AKIAFIRST", SecretAccessKey: "sk-first-secret",
+		},
+	}); err != nil {
+		t.Fatalf("writeSettings (keys): %v", err)
+	}
+	if aws := readSecret(); aws == nil || aws.AccessKeyID != "AKIAFIRST" || aws.SecretAccessKey != "sk-first-secret" {
+		t.Fatalf("keys not persisted: %+v", aws)
+	}
+
+	// 2. Re-save with the same accessKeyId but an EMPTY secret → preserve on-disk.
+	if err := srv.writeSettings(config.SettingsWire{
+		Secrets: &config.SecretsSettings{
+			Backend: "aws", Region: "us-east-1", NamePrefix: "warden/",
+			AccessKeyID: "AKIAFIRST", SecretAccessKey: "",
+		},
+	}); err != nil {
+		t.Fatalf("writeSettings (preserve): %v", err)
+	}
+	if aws := readSecret(); aws == nil || aws.AccessKeyID != "AKIAFIRST" || aws.SecretAccessKey != "sk-first-secret" {
+		t.Fatalf("preserve-on-empty dropped the secret: %+v", aws)
+	}
+
+	// 3. Clear BOTH keys → they are removed, backend stays aws.
+	if err := srv.writeSettings(config.SettingsWire{
+		Secrets: &config.SecretsSettings{
+			Backend: "aws", Region: "us-east-1", NamePrefix: "warden/",
+		},
+	}); err != nil {
+		t.Fatalf("writeSettings (clear): %v", err)
+	}
+	aws := readSecret()
+	if aws == nil || aws.Region != "us-east-1" {
+		t.Fatalf("backend/region lost on clear: %+v", aws)
+	}
+	if aws.AccessKeyID != "" || aws.SecretAccessKey != "" {
+		t.Fatalf("clear must remove both keys: %+v", aws)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "secretAccessKey") || strings.Contains(string(raw), "accessKeyId") {
+		t.Fatalf("cleared keys must not remain in the file:\n%s", raw)
+	}
+}
+
+// TestWriteSettingsSecretStoreInvalidAWS verifies an aws selection with no region
+// is rejected by the loader validation inside WriteSettings (the error putSettings
+// surfaces to the UI as a 400) and the served file is left without a secretStore
+// key — an invalid selection is never persisted.
+func TestWriteSettingsSecretStoreInvalidAWS(t *testing.T) {
+	path := writePolicyFile(t, "api.openai.com")
+	srv := New(Config{PolicyPath: path})
+
+	err := srv.writeSettings(config.SettingsWire{
+		Secrets: &config.SecretsSettings{Backend: "aws"}, // no region, no namePrefix
+	})
+	if err == nil {
+		t.Fatal("expected a validation error for aws with no region")
+	}
+	if !strings.Contains(err.Error(), "secretStore.aws.region") {
+		t.Fatalf("error = %v, want secretStore.aws.region required", err)
+	}
+	raw, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if strings.Contains(string(raw), "secretStore") {
+		t.Fatalf("invalid aws selection must not be persisted:\n%s", raw)
+	}
+}
+
 // TestWriteSettingsDisablesMCP verifies a nil MCP settings block removes the mcp
 // block so the served settings disable MCP.
 func TestWriteSettingsDisablesMCP(t *testing.T) {

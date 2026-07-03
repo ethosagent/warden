@@ -68,7 +68,7 @@ type Server struct {
 	// a read-only SQL query for the Explore tab. It reuses the SAME provider the
 	// judge uses (wired from the effective judge config). nil (no LLM configured,
 	// or the node's key env is empty) makes /query/generate report
-	// "llm_not_configured" so the UI points the user at Settings → Judge.
+	// "llm_not_configured" so the UI points the user at Settings → LLM Providers.
 	sqlGen SQLGenerator
 	// now is the clock used by the response caches; it defaults to time.Now and
 	// is overridable in tests so cache expiry can be asserted without real sleeps.
@@ -352,8 +352,63 @@ type policyEditRequest struct {
 // dashboard can save settings changes (true only on the control plane, where a
 // settings writer is configured).
 type settingsResponse struct {
-	Settings *config.SettingsWire `json:"settings"`
-	Editable bool                 `json:"editable"`
+	Settings *settingsView `json:"settings"`
+	Editable bool          `json:"editable"`
+}
+
+// settingsView is the dashboard-facing projection of a SettingsWire. It embeds
+// the wire document (so every non-secret block serializes unchanged) but SHADOWS
+// the secrets block with a masked view: the outer Secrets field is strictly
+// shallower than the embedded SettingsWire.Secrets, so encoding/json always emits
+// the outer one and NEVER the embedded raw secretAccessKey. That makes the
+// no-raw-secret guarantee structural — a future block cannot accidentally leak it.
+type settingsView struct {
+	*config.SettingsWire
+	Secrets *secretsSettingsView `json:"secrets,omitempty"`
+}
+
+// secretsSettingsView is the masked, dashboard-facing form of SecretsSettings. It
+// surfaces the backend selector, region/namePrefix, and the accessKeyId
+// IDENTIFIER as-is, but replaces the raw secretAccessKey with a value-free
+// indicator (configured + last-4) so the UI can show "a key is set" without the
+// secret ever crossing the GET response.
+type secretsSettingsView struct {
+	Backend                   string `json:"backend,omitempty"`
+	Region                    string `json:"region,omitempty"`
+	NamePrefix                string `json:"namePrefix,omitempty"`
+	AccessKeyID               string `json:"accessKeyId,omitempty"`
+	SecretAccessKeyConfigured bool   `json:"secretAccessKeyConfigured"`
+	SecretAccessKeyLast4      string `json:"secretAccessKeyLast4,omitempty"`
+}
+
+// maskSecretsSettings builds the masked view: it copies the value-free selector
+// fields and the accessKeyId, and derives the configured/last-4 indicator from the
+// secret WITHOUT copying the raw value.
+func maskSecretsSettings(s *config.SecretsSettings) *secretsSettingsView {
+	if s == nil {
+		return nil
+	}
+	v := &secretsSettingsView{
+		Backend:     s.Backend,
+		Region:      s.Region,
+		NamePrefix:  s.NamePrefix,
+		AccessKeyID: s.AccessKeyID,
+	}
+	if s.SecretAccessKey != "" {
+		v.SecretAccessKeyConfigured = true
+		v.SecretAccessKeyLast4 = lastN(s.SecretAccessKey, 4)
+	}
+	return v
+}
+
+// lastN returns the last n runes of s (fewer if shorter). Used only for a masked
+// credential indicator; the full value is never returned.
+func lastN(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return string(r)
+	}
+	return string(r[len(r)-n:])
 }
 
 // Handler returns an http.Handler that serves the dashboard routes.
@@ -556,8 +611,15 @@ func (s *Server) getSettings(w http.ResponseWriter, _ *http.Request) {
 	if s.liveSettings != nil {
 		settings = s.liveSettings()
 	}
+	var view *settingsView
+	if settings != nil {
+		// Wrap the live wire in the masking view. maskSecretsSettings ALWAYS runs
+		// when a secrets block is present, so the outer (masked) Secrets field is set
+		// and the embedded raw secretAccessKey can never be serialized.
+		view = &settingsView{SettingsWire: settings, Secrets: maskSecretsSettings(settings.Secrets)}
+	}
 	writeJSON(w, settingsResponse{
-		Settings: settings,
+		Settings: view,
 		Editable: s.settingsWriter != nil,
 	})
 }

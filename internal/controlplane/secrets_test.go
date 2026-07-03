@@ -254,7 +254,7 @@ func (c *fakeAWSClient) ListSecrets(prefix string) ([]secrets.AWSSecretEntry, er
 func withFakeAWSClient(t *testing.T, client secrets.AWSSecretsClient, err error) {
 	t.Helper()
 	prev := awsSecretsClientFactory
-	awsSecretsClientFactory = func(string) (secrets.AWSSecretsClient, error) {
+	awsSecretsClientFactory = func(string, string, string) (secrets.AWSSecretsClient, error) {
 		return client, err
 	}
 	t.Cleanup(func() { awsSecretsClientFactory = prev })

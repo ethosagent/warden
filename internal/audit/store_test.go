@@ -35,6 +35,58 @@ func TestTaggingStoreTagsCompliance(t *testing.T) {
 	}
 }
 
+// hasComplianceTag reports whether the encoded compliance IDs on an event
+// contain the given "framework:controlID" tag — the exact form aggregateCompliance
+// splits on the first ':' to build a coverage tile.
+func hasComplianceTag(ids []string, tag string) bool {
+	for _, id := range ids {
+		if id == tag {
+			return true
+		}
+	}
+	return false
+}
+
+// TestTaggingStoreTagsSecretBrokering verifies an event that swapped a real
+// secret at the edge (non-empty SwappedRefs) is tagged with the protective
+// M1041 control, encoded as the "mitre:M1041" tag the dashboard aggregation
+// consumes — without synthesizing the T1552/LLM02 leakage pair.
+func TestTaggingStoreTagsSecretBrokering(t *testing.T) {
+	rec := &recordStore{}
+	ts := NewTaggingStore(rec, NewMapper())
+	e := analytics.Event{
+		Decision:    "allow",
+		Protocol:    "https",
+		SwappedRefs: []string{"{{OPENAI_API_KEY}}"},
+	}
+	if err := ts.StoreEvent(e); err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.events) != 1 {
+		t.Fatalf("stored %d events, want 1", len(rec.events))
+	}
+	got := rec.events[0].Compliance
+	if !hasComplianceTag(got, "mitre:M1041") {
+		t.Errorf("expected mitre:M1041 tag on a secret-brokered event, got %v", got)
+	}
+	if hasComplianceTag(got, "mitre:T1552") || hasComplianceTag(got, "owasp:LLM02") {
+		t.Errorf("secret-brokered event must not carry the leakage pair, got %v", got)
+	}
+}
+
+// TestTaggingStoreNoSwapNoBrokeringTag verifies an event with no swap carries
+// no secrets-brokering tag.
+func TestTaggingStoreNoSwapNoBrokeringTag(t *testing.T) {
+	rec := &recordStore{}
+	ts := NewTaggingStore(rec, NewMapper())
+	if err := ts.StoreEvent(analytics.Event{Decision: "allow", Protocol: "https"}); err != nil {
+		t.Fatal(err)
+	}
+	if hasComplianceTag(rec.events[0].Compliance, "mitre:M1041") {
+		t.Errorf("expected no mitre:M1041 tag without a swap, got %v", rec.events[0].Compliance)
+	}
+}
+
 // TestSigningStoreWritesVerifiableReceipt verifies each stored event yields a
 // signed receipt that verifies against the signer's public key.
 func TestSigningStoreWritesVerifiableReceipt(t *testing.T) {

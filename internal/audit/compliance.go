@@ -38,6 +38,10 @@ func builtinMappings() []Mapping {
 		{Framework: FrameworkMITRE, ControlID: "T1071", Title: "Application Layer Protocol", Category: "protocol"},
 		{Framework: FrameworkMITRE, ControlID: "T1552", Title: "Unsecured Credentials", Category: "credential-leakage"},
 		{Framework: FrameworkMITRE, ControlID: "T1059", Title: "Command and Scripting Interpreter", Category: "prompt-injection"},
+		// MITRE ATT&CK Mitigation (protective) — Warden brokered a real secret at
+		// the edge so the agent never held it. Kept a distinct row from the
+		// T1552/LLM02 leakage pair so it reads as a defense, not a threat.
+		{Framework: FrameworkMITRE, ControlID: "M1041", Title: "Encrypt Sensitive Information", Category: "secrets-brokering"},
 		// OWASP Top 10 for LLM (2025)
 		{Framework: FrameworkOWASP, ControlID: "LLM01", Title: "Prompt Injection", Category: "prompt-injection"},
 		{Framework: FrameworkOWASP, ControlID: "LLM02", Title: "Insecure Output Handling", Category: "credential-leakage"},
@@ -48,7 +52,10 @@ func builtinMappings() []Mapping {
 
 // MapEvent returns the compliance mappings applicable to the given event
 // parameters. It checks the decision, protocol, and any detection labels.
-func (m *Mapper) MapEvent(decision, protocol string, detections []string) []Mapping {
+// secretsBrokered is an explicit protective signal (a real secret was swapped
+// in at the edge) fed straight from the caller — never inferred from a detection
+// label — so it stays distinct from the credential-leakage threat signal.
+func (m *Mapper) MapEvent(decision, protocol string, detections []string, secretsBrokered bool) []Mapping {
 	var result []Mapping
 	seen := make(map[string]bool) // ControlID dedup
 
@@ -89,6 +96,17 @@ func (m *Mapper) MapEvent(decision, protocol string, detections []string) []Mapp
 				if strings.Contains(detLower, "system") && strings.Contains(detLower, "prompt") {
 					add(mapping)
 				}
+			}
+		}
+	}
+
+	// Secret-brokering (protective): a real secret was swapped in at the edge so
+	// the agent never held it. Gated solely on the explicit flag — never on a
+	// detection label — so it never lights up the credential-leakage threat pair.
+	if secretsBrokered {
+		for _, mapping := range m.mappings {
+			if mapping.Category == "secrets-brokering" {
+				add(mapping)
 			}
 		}
 	}

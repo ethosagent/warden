@@ -101,8 +101,15 @@
   .card-head .sub { color:var(--muted); font-size:12px; }
   .card-head.clickable { cursor:pointer; user-select:none; }
   .card-head .caret { color:var(--muted); font-size:11px; }
-  #detectionBody { display:none; }
-  #detectionCard.open #detectionBody { display:block; }
+  /* Collapsible card bars — shared pattern (Detection editor, MCP editors, Egress lists).
+     Toggle via toggleCollapse()/syncCollapse(); body hidden unless the card has .open. */
+  .collapse-card .collapse-body { display:none; }
+  .collapse-card.open .collapse-body { display:block; }
+  /* Implicit-default pseudo-rule — DISPLAY-ONLY effective-policy row shown when a
+     tool allow/deny list is empty. Never a real config rule. */
+  .pseudo-rule { padding:8px 11px; border:1px dashed var(--border); border-radius:8px;
+    background:var(--surface-2); color:var(--muted); font-style:italic; margin:2px 0 4px; font-size:12.5px; }
+  .pseudo-rule .mono { font-style:normal; }
 
   .grid { display:grid; gap:16px; }
   .g2 { grid-template-columns:1fr 1fr; }
@@ -442,6 +449,9 @@
     <div class="nav-item" data-page="guardrails">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3l7 3v6c0 4-3 7-7 9-4-2-7-5-7-9V6l7-3z"/></svg>
       Guardrails</div>
+    <div class="nav-item" data-page="mcp">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+      MCP</div>
 
     <div class="nav-group-label">Respond &amp; Prove</div>
     <div class="nav-item" data-page="alerts">
@@ -579,8 +589,9 @@ REQUESTS_CA_BUNDLE=/certs/proxy-ca.crt</code><button class="copy" onclick="copyC
           <div class="dot"></div>
           <div class="st-body">
             <div class="st-title">6 · Add your secrets <span class="muted" style="font-weight:400">(optional)</span></div>
-            <div class="st-why">Store a placeholder → value so your agent never holds a real key. Warden injects the real value at the edge.</div>
+            <div class="st-why">Store a placeholder → value so your agent never holds a real key. Warden injects the real value at the edge. Pick where values live (env / echo / AWS Secrets Manager) under <b>Settings → Secret backend</b> — credentials never enter the UI.</div>
             <button class="btn" onclick="enableAndShow('secrets')">Open Secrets →</button>
+            <button class="btn" onclick="enableAndShow('settings')">Choose secret backend →</button>
           </div>
         </div>
 
@@ -847,7 +858,7 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
     <!-- ============ GUARDRAILS ============ -->
     <section class="page" id="page-guardrails">
       <div class="page-head">
-        <div><h1>Guardrails</h1><div class="desc">Policy control center — what may leave, what gets scrubbed, and how tools are trusted</div></div>
+        <div><h1>Guardrails</h1><div class="desc">Policy control center — what may leave, what gets scrubbed, and how the LLM judge scores egress</div></div>
         <div class="actions"><span class="note" id="grEditNote"></span></div>
       </div>
 
@@ -857,20 +868,25 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
       <div class="subtabs" id="grSubtabs">
         <button class="active" data-sub="egress">Egress</button>
         <button data-sub="dlp">Data (DLP)</button>
-        <button data-sub="mcp">MCP</button>
         <button data-sub="judge">Judge</button>
       </div>
 
       <!-- Egress -->
       <div class="subpage active" id="sub-egress">
-        <div class="grid g2">
-          <div class="card">
-            <div class="card-head"><h3><span class="pill p-allow" style="margin-right:6px">allow</span>Allowlist</h3><button class="btn sm" id="allowAddBtn" onclick="addPolicyEntry('allow')">+ Add domain</button></div>
-            <table><tbody id="allowList"></tbody></table>
+        <div class="grid g2" style="align-items:start">
+          <div class="card collapse-card open" id="egressAllowCard">
+            <div class="card-head clickable" onclick="toggleCollapse('egressAllowCard','warden.egAllowOpen')">
+              <h3><span class="pill p-allow" style="margin-right:6px">allow</span>Allowlist</h3>
+              <span style="display:flex;align-items:center;gap:8px"><button class="btn sm" id="allowAddBtn" onclick="event.stopPropagation();addPolicyEntry('allow')">+ Add domain</button><span class="caret">▾</span></span>
+            </div>
+            <div class="collapse-body"><table><tbody id="allowList"></tbody></table></div>
           </div>
-          <div class="card">
-            <div class="card-head"><h3><span class="pill p-deny" style="margin-right:6px">deny</span>Denylist</h3><button class="btn sm" id="denyAddBtn" onclick="addPolicyEntry('deny')">+ Add domain</button></div>
-            <table><tbody id="denyList"></tbody></table>
+          <div class="card collapse-card open" id="egressDenyCard">
+            <div class="card-head clickable" onclick="toggleCollapse('egressDenyCard','warden.egDenyOpen')">
+              <h3><span class="pill p-deny" style="margin-right:6px">deny</span>Denylist</h3>
+              <span style="display:flex;align-items:center;gap:8px"><button class="btn sm" id="denyAddBtn" onclick="event.stopPropagation();addPolicyEntry('deny')">+ Add domain</button><span class="caret">▾</span></span>
+            </div>
+            <div class="collapse-body"><table><tbody id="denyList"></tbody></table></div>
           </div>
         </div>
         <div class="note" id="egressReadonly" style="margin-top:12px; display:none">Egress policy is read-only on this node — it is managed by the control plane.</div>
@@ -916,35 +932,8 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
         </div>
       </div>
 
-      <!-- MCP -->
-      <div class="subpage" id="sub-mcp">
-        <div class="grid g2">
-          <div class="card">
-            <div class="card-head"><h3>MCP policy</h3><button class="btn primary sm" id="mcpSaveBtn" onclick="saveMCP()">Save MCP</button></div>
-            <div class="card-pad" id="mcpConfig"></div>
-          </div>
-          <div class="card">
-            <div class="card-head"><h3>Tool allow / deny</h3><span class="sub">exact tool names</span></div>
-            <div class="card-pad" id="mcpToolPolicy"></div>
-          </div>
-        </div>
-        <div class="card" style="margin-top:16px">
-          <div class="card-head"><h3>Tool inventory</h3><span class="sub" id="mcpInvSub">observed MCP tools</span></div>
-          <table><thead><tr><th>Tool</th><th>Server</th><th class="num">Calls</th><th class="num">Allowed</th><th class="num">Denied</th><th>Schema</th><th>Findings</th></tr></thead><tbody id="mcpInventory"></tbody></table>
-        </div>
-      </div>
-
       <!-- Judge -->
       <div class="subpage" id="sub-judge">
-        <div class="card" style="margin-bottom:16px">
-          <div class="card-head"><h3>LLM Providers</h3><span style="display:flex;align-items:center;gap:8px"><span class="sub" id="llmp-status"></span><button class="btn primary sm" id="llmp-addbtn" style="display:none" onclick="addLLMProvider()">+ Add provider</button><button class="btn primary sm" id="llmp-savebtn" style="display:none" onclick="saveLLMProviders()">Save providers</button></span></div>
-          <div class="card-pad">
-            <div class="note" style="margin-bottom:10px">A shared registry of LLM endpoints. The Judge and Explore each pick a provider <b>by name</b>. <b>apiKeyEnv</b> is the env-var NAME only — the value resolves from each node's own environment and is never entered or shown here.</div>
-            <div id="llmp-list"></div>
-            <div id="llmp-readonly" class="note" style="display:none; margin-top:10px">Managed by control plane — LLM providers are read-only on this node.</div>
-            <div id="llmp-msg" class="note" style="margin-top:8px; display:none"></div>
-          </div>
-        </div>
         <div class="grid g2">
           <div class="card">
             <div class="card-head"><h3>LLM judge configuration</h3><button class="btn primary sm" id="judgeSaveBtn" onclick="saveJudge()">Save judge</button></div>
@@ -959,6 +948,53 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
       </div><!-- /demo-only -->
     </section>
 
+    <!-- ============ MCP ============ -->
+    <section class="page" id="page-mcp">
+      <div class="page-head">
+        <div><h1>MCP</h1><div class="desc">Model Context Protocol guardrails — inspect tool calls, pin schemas, and allow / deny tools by name</div></div>
+        <div class="actions"><span class="note" id="mcpEditNote"></span></div>
+      </div>
+
+      <div class="card collapse-card" id="mcpPolicyCard" style="margin-bottom:16px">
+        <div class="card-head clickable" onclick="toggleCollapse('mcpPolicyCard','warden.mcpPolicyOpen')">
+          <h3>MCP policy</h3>
+          <span style="display:flex;align-items:center;gap:8px">
+            <button class="btn primary sm" id="mcpSaveBtn" onclick="event.stopPropagation();saveMCP()">Save MCP</button>
+            <span class="caret">▸</span>
+          </span>
+        </div>
+        <div class="card-pad collapse-body" id="mcpConfig"></div>
+      </div>
+
+      <div class="card collapse-card" id="mcpToolsCard" style="margin-bottom:16px">
+        <div class="card-head clickable" onclick="toggleCollapse('mcpToolsCard','warden.mcpToolsOpen')">
+          <h3>Tool allow / deny</h3>
+          <span style="display:flex;align-items:center;gap:8px"><span class="sub">exact tool names</span><span class="caret">▸</span></span>
+        </div>
+        <div class="card-pad collapse-body" id="mcpToolPolicy"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h3>Tool inventory</h3><span class="sub" id="mcpInvSub">observed MCP tools</span></div>
+        <div class="filterbar" id="mcpInvFilterbar" style="display:none; margin:0; padding:10px 14px 2px">
+          <select class="btn sm" id="mcpSrvFilter" onchange="setMcpInvFilters()" style="display:none"></select>
+          <select class="btn sm" id="mcpCallsFilter" onchange="setMcpInvFilters()">
+            <option value="all">all calls</option>
+            <option value="gt0">calls &gt; 0</option>
+            <option value="min">calls ≥ …</option>
+          </select>
+          <input type="number" id="mcpCallsMin" min="0" value="1" oninput="setMcpInvFilters()"
+            style="display:none; width:74px; background:var(--surface-2); border:1px solid var(--border); color:var(--text); padding:5px 9px; border-radius:7px; font:inherit; font-size:12px"/>
+          <select class="btn sm" id="mcpStatusFilter" onchange="setMcpInvFilters()">
+            <option value="">all decisions</option>
+            <option value="allowed">has allowed calls</option>
+            <option value="denied">has denied calls</option>
+          </select>
+        </div>
+        <table><thead><tr><th>Tool</th><th>Server</th><th class="num">Calls</th><th class="num">Allowed</th><th class="num">Denied</th><th>Schema</th><th>Findings</th></tr></thead><tbody id="mcpInventory"></tbody></table>
+      </div>
+    </section>
+
     <!-- ============ ALERTS ============ -->
     <section class="page" id="page-alerts">
       <div class="page-head">
@@ -969,15 +1005,15 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
 
       <div class="demo-only">
       <!-- CONFIGURE — live detection editor (GET/PUT /dashboard/api/detection) -->
-      <div class="card" id="detectionCard" style="margin-bottom:18px">
-        <div class="card-head clickable" onclick="toggleDetection()">
+      <div class="card collapse-card" id="detectionCard" style="margin-bottom:18px">
+        <div class="card-head clickable" onclick="toggleCollapse('detectionCard','warden.detOpen')">
           <h3>Detection</h3>
           <span style="display:flex;align-items:center;gap:8px">
             <span class="sub" id="detectionSub">temporal threshold detectors</span>
-            <span class="caret" id="detectionCaret">▸</span>
+            <span class="caret">▸</span>
           </span>
         </div>
-        <div class="card-pad" id="detectionBody">
+        <div class="card-pad collapse-body" id="detectionBody">
           <div class="callout" style="margin-bottom:14px">
             <div class="arrow">ℹ</div>
             <div class="note">The detectors below decide <b>when</b> an alert fires. Alert <b>routing and sinks</b> (which alerts reach which webhook/Slack) are configured in <a href="#" onclick="go('settings');return false;">Settings → Integrations</a> — not here.</div>
@@ -1116,7 +1152,7 @@ LIMIT 8;</textarea>
     <!-- ============ SETTINGS ============ -->
     <section class="page" id="page-settings">
       <div class="page-head">
-        <div><h1>Settings</h1><div class="desc">Runtime knobs and alert integrations</div></div>
+        <div><h1>Settings</h1><div class="desc">Runtime knobs, alert integrations, and the shared LLM provider registry</div></div>
       </div>
 
       <div class="grid g2" style="margin-bottom:16px">
@@ -1156,6 +1192,42 @@ LIMIT 8;</textarea>
           </div>
         </div>
       </div>
+
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-head"><h3>Secret backend</h3><span class="sub" id="sb-sub"></span></div>
+        <div class="card-pad">
+          <div class="form-row" style="grid-template-columns:170px 1fr 1fr; max-width:640px; align-items:start">
+            <div class="field"><label>Backend</label>
+              <select id="sb-backend" onchange="renderSecretBackendHelp()">
+                <option value="env">env</option>
+                <option value="echo">echo</option>
+                <option value="aws">aws</option>
+              </select></div>
+            <div class="field sb-aws" style="display:none"><label>AWS region</label><input id="sb-region" type="text" placeholder="us-east-1"/></div>
+            <div class="field sb-aws" style="display:none"><label>Name prefix</label><input id="sb-prefix" type="text" placeholder="warden/"/></div>
+            <div class="field sb-aws" style="display:none"><label>Access Key ID (optional)</label><input id="sb-akid" type="text" autocomplete="off" placeholder="AKIA…"/></div>
+            <div class="field sb-aws" style="display:none"><label>Secret Access Key (optional)</label><input id="sb-secret" type="password" autocomplete="off" placeholder="not set"/></div>
+          </div>
+          <div id="sb-cred-warn" class="note sb-aws" style="display:none; margin-top:8px; color:var(--amber)"><b>⚠ Not recommended.</b> Warden prefers AWS credentials from each node's environment (<span class="mono">AWS_ACCESS_KEY_ID</span> / <span class="mono">AWS_SECRET_ACCESS_KEY</span>) or its IAM role — leave these blank to use that. A key entered here is stored in the control plane's config and distributed to workers.</div>
+          <div id="sb-help" class="note"></div>
+          <div class="note" style="margin-top:8px">Workers adopt the selected backend on their next policy poll. The <b>control plane's own store</b> (backing the Secrets page) adopts a new backend on restart.</div>
+          <div id="sb-editcontrols" style="margin-top:12px; display:none">
+            <button class="btn primary sm" id="sb-save" onclick="saveSettings('sb-save','sb-status')">Save secret backend</button>
+            <span id="sb-status" class="sub" style="margin-left:8px"></span>
+          </div>
+          <div id="sb-readonly" class="note" style="margin-top:10px; display:none">Read-only — the secret backend is managed by the control plane.</div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-head"><h3>LLM Providers</h3><span style="display:flex;align-items:center;gap:8px"><span class="sub" id="llmp-status"></span><button class="btn primary sm" id="llmp-addbtn" style="display:none" onclick="addLLMProvider()">+ Add provider</button><button class="btn primary sm" id="llmp-savebtn" style="display:none" onclick="saveLLMProviders()">Save providers</button></span></div>
+        <div class="card-pad">
+          <div class="note" style="margin-bottom:10px">A shared registry of LLM endpoints. The Judge and Explore each pick a provider <b>by name</b>. <b>apiKeyEnv</b> is the env-var NAME only — the value resolves from each node's own environment and is never entered or shown here.</div>
+          <div id="llmp-list"></div>
+          <div id="llmp-readonly" class="note" style="display:none; margin-top:10px">Managed by control plane — LLM providers are read-only on this node.</div>
+          <div id="llmp-msg" class="note" style="margin-top:8px; display:none"></div>
+        </div>
+      </div>
     </section>
 
   </main>
@@ -1170,7 +1242,7 @@ LIMIT 8;</textarea>
 
    All tabs are wired to live endpoints: Overview, Activity, Fleet,
    Explore, Settings (runtime + integrations), Get Started / Onboarding
-   (4a) and Secrets, Guardrails (Egress/DLP/MCP/Judge), Alerts and Audit.
+   (4a) and Secrets, Guardrails (Egress/DLP/Judge), MCP, Alerts and Audit.
    ============================================================ */
 
 /* ---------- tiny helpers ---------- */
@@ -1231,6 +1303,7 @@ function loadTab(page){
     case 'settings':    loadSettings(); break;
     case 'secrets':     loadSecrets(); break;
     case 'guardrails':  loadGuardrails(); break;
+    case 'mcp':         loadMCPPage(); break;
     case 'alerts':      loadAlerts(); loadDetection(); break;
     case 'audit':       loadAudit(); break;
     case 'get-started': refreshOnboarding(); break;
@@ -1269,7 +1342,7 @@ async function onModeToggleClick(mode){
   const s=doc.settings, act=activeGuards(s);
   const n=(act.dlp?1:0)+(act.mcp?1:0);
   if(n===0){
-    window.alert('No active guards to switch. Enable DLP or MCP on the Guardrails page first.');
+    window.alert('No active guards to switch. Enable DLP on the Guardrails page or MCP on the MCP page first.');
     applyMode(postureFromSettings(s)); return;
   }
   if(!window.confirm('Switch '+n+' active guard(s) to '+mode+'?')){ applyMode(postureFromSettings(s)); return; }
@@ -1281,6 +1354,7 @@ async function onModeToggleClick(mode){
     if(!r.ok){ let m='status '+r.status; try{ const e=await r.json(); if(e&&e.error) m=e.error; }catch(_e){} throw new Error(m); }
     applyMode(mode);
     if(currentTab()==='guardrails') loadGuardrails();
+    else if(currentTab()==='mcp') loadMCPPage();
   }catch(err){
     window.alert('Mode switch failed: '+err.message);
     const fresh=await fetchSettingsDoc();
@@ -1317,6 +1391,7 @@ function buildScope(proxies){
       if(label) label.textContent = state.proxy===''?'Fleet':state.proxy;
       menu.classList.remove('open');
       loadOverview();
+      if(currentTab()==='mcp') loadMCPPage();   // MCP inventory is scoped per worker on the CP
     });
   });
 }
@@ -1702,7 +1777,7 @@ async function loadExploreProviders(){
   sel.style.display=editable?'':'none';
   sel.disabled=!editable;
   if(note) note.textContent = editable
-    ? (names.length?'':'No providers yet — add one in Guardrails → Judge → LLM Providers.')
+    ? (names.length?'':'No providers yet — add one in Settings → LLM Providers.')
     : (cur?('provider: '+cur+' (managed by control plane)'):'');
 }
 async function saveExploreProvider(){
@@ -1859,14 +1934,12 @@ async function generateSqlFromNL(){
       return;
     }
     if(d && d.error==='llm_not_configured'){
-      setNlMsg('<span>'+esc(d.message||'Add an LLM provider in Guardrails → Judge → LLM Providers to use plain-English queries.')
-        +'</span> <a href="#" id="nlJudgeLink">Open LLM Providers →</a>');
-      const link=document.getElementById('nlJudgeLink');
+      setNlMsg('<span>'+esc(d.message||'Add an LLM provider in Settings → LLM Providers to use plain-English queries.')
+        +'</span> <a href="#" id="nlProvidersLink">Open LLM Providers →</a>');
+      const link=document.getElementById('nlProvidersLink');
       if(link) link.addEventListener('click', e=>{
         e.preventDefault();
-        go('guardrails');
-        const jb=document.querySelector('#grSubtabs button[data-sub="judge"]');
-        if(jb) jb.click();
+        go('settings');
       });
       return;
     }
@@ -1951,6 +2024,7 @@ async function loadSettings(){
   try{ const p=await jget('/dashboard/api/policy'); renderPolicyLine(p); }catch(e){ renderPolicyLine(null); }
   renderSettings();
   loadIntegrations();
+  loadLLMProviders();
 }
 function renderPolicyLine(p){
   const el=document.getElementById('rt-policy'); if(!el) return;
@@ -1966,13 +2040,65 @@ function renderSettings(){
   setVal('rt-cache-ttl', ttl===0?'0':(ttl||''));
   setChecked('rt-otel', !!obs.enabled);
   setChecked('rt-compliance', !!compliance.enabled);
+  // Secret backend selector (settings.secrets is the VALUE-FREE {backend,region,
+  // namePrefix} wire block; absent ⇒ env, the local default that never distributes).
+  const sec=s.secrets||{};
+  setVal('sb-backend', sec.backend||'env');
+  setVal('sb-region', sec.region||'');
+  setVal('sb-prefix', sec.namePrefix||'warden/');
+  // Optional explicit AWS creds. accessKeyId round-trips as-is; the secret is
+  // NEVER returned — the backend sends secretAccessKeyConfigured + last4 only, so
+  // we show an empty password field with a masked placeholder ("leave blank to
+  // keep"). Blank + configured ⇒ preserve-on-empty; the raw value never lands here.
+  setVal('sb-akid', sec.accessKeyId||'');
+  const secEl=document.getElementById('sb-secret');
+  if(secEl){
+    secEl.value='';
+    secEl.placeholder = sec.secretAccessKeyConfigured
+      ? ('configured ••••'+(sec.secretAccessKeyLast4||'')+' — leave blank to keep')
+      : 'not set';
+  }
+  const sbSub=document.getElementById('sb-sub'); if(sbSub) sbSub.textContent='active: '+(sec.backend||'env');
+  renderSecretBackendHelp();
   const dis=!settingsEditable;
-  ['rt-log-level','rt-log-format','rt-cache-ttl','rt-otel','rt-compliance'].forEach(id=>{ const el=document.getElementById(id); if(el) el.disabled=dis; });
+  ['rt-log-level','rt-log-format','rt-cache-ttl','rt-otel','rt-compliance','sb-backend','sb-region','sb-prefix','sb-akid','sb-secret'].forEach(id=>{ const el=document.getElementById(id); if(el) el.disabled=dis; });
   const ec=document.getElementById('rt-editcontrols'); if(ec) ec.style.display=settingsEditable?'':'none';
   const ro=document.getElementById('rt-readonly'); if(ro) ro.style.display=settingsEditable?'none':'';
+  // Secret backend card has its own Save button + read-only note, gated the same way.
+  const sbec=document.getElementById('sb-editcontrols'); if(sbec) sbec.style.display=settingsEditable?'':'none';
+  const sbro=document.getElementById('sb-readonly'); if(sbro) sbro.style.display=settingsEditable?'none':'';
 }
-async function saveSettings(){
-  const st=document.getElementById('settings-status'); if(st){ st.textContent='saving…'; st.style.color=''; }
+/* Secret backend help — backend-aware copy. Credentials are NEVER entered here
+   and never cross the wire: aws resolves from each node's own env / IAM role
+   (same name-only discipline as judge.apiKeyEnv). */
+function renderSecretBackendHelp(){
+  const b=val('sb-backend')||'env';
+  document.querySelectorAll('#page-settings .sb-aws').forEach(el=>{ el.style.display = b==='aws' ? '' : 'none'; });
+  const help=document.getElementById('sb-help'); if(!help) return;
+  if(b==='aws'){
+    help.innerHTML='<b>AWS Secrets Manager.</b> Warden reads AWS credentials from the process environment or the instance’s IAM role — you do <b>not</b> enter keys here. Set one of:'
+      +'<ul style="margin:6px 0 6px 18px; padding:0">'
+      +'<li>an <b>IAM role</b> on the instance/pod (recommended — nothing to configure), <b>or</b></li>'
+      +'<li>env vars on each Warden node: <span class="mono">AWS_ACCESS_KEY_ID</span>, <span class="mono">AWS_SECRET_ACCESS_KEY</span> (and <span class="mono">AWS_SESSION_TOKEN</span> if using temporary credentials).</li>'
+      +'</ul>'
+      +'Only the region + name prefix are stored here; credentials never touch the dashboard, the config file, or the wire.';
+  } else if(b==='echo'){
+    help.innerHTML='<span style="color:var(--amber)">⚠ Non-production.</span> Echo returns each key as its own value — for local dev / demos only. Never protects a real secret.';
+  } else {
+    help.innerHTML='Secrets are resolved from this node’s own environment via the per-secret <span class="mono">envVar</span> map in config. Nothing is distributed.';
+  }
+}
+/* saveSettings persists the WHOLE settings document (read-modify-write onto
+   lastSettings) by reading every Settings-page card's inputs LIVE from the DOM —
+   so the Runtime and Secret-backend cards share one writer and clicking either
+   card's Save persists both cards' current state (it saves in-progress edits, it
+   never wipes them). btnId/statusId let each card flash its own button + status;
+   they default to the Runtime card. btnId may arrive as an Event (rt-save's bare
+   addEventListener) — guard for a string. */
+async function saveSettings(btnId, statusId){
+  if(typeof btnId!=='string') btnId=undefined;
+  const stId=(typeof statusId==='string'&&statusId)?statusId:'settings-status';
+  const st=document.getElementById(stId); if(st){ st.textContent='saving…'; st.style.color=''; }
   const ttlRaw=(val('rt-cache-ttl')||'').trim(); const ttl=parseInt(ttlRaw,10);
   const body=Object.assign({}, lastSettings||{}, {
     logging:{ level:val('rt-log-level'), format:val('rt-log-format') },
@@ -1980,11 +2106,28 @@ async function saveSettings(){
     observability:Object.assign({}, (lastSettings&&lastSettings.observability)||{}, { enabled:document.getElementById('rt-otel').checked }),
     cacheTTLSeconds:(ttlRaw===''||isNaN(ttl))?0:ttl,
   });
+  // Secret backend: aws sends {backend,region,namePrefix}, echo just the name.
+  // env OMITS the key entirely so the control plane deletes the on-disk
+  // secretStore block and workers fall back to their local placeholder→ENV map.
+  const sbb=val('sb-backend')||'env';
+  if(sbb==='aws'){
+    body.secrets={ backend:'aws', region:(val('sb-region')||'').trim(), namePrefix:(val('sb-prefix')||'').trim() };
+    // Optional explicit creds. accessKeyId is forwarded as-typed (may be empty ⇒
+    // no explicit key / fall back to env/IAM). secretAccessKey is sent ONLY when
+    // the user typed a new value; an empty field is OMITTED so the backend's
+    // preserve-on-empty keeps the existing secret (never re-sends a masked value).
+    body.secrets.accessKeyId=(val('sb-akid')||'').trim();
+    const newSecret=val('sb-secret')||'';
+    if(newSecret) body.secrets.secretAccessKey=newSecret;
+  }
+  else if(sbb==='echo'){ body.secrets={ backend:'echo' }; }
+  else { delete body.secrets; }
   try{
     const r=await fetch('/dashboard/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     if(!r.ok){ const e=await r.json().catch(()=>({error:'status '+r.status})); throw new Error(e.error||('status '+r.status)); }
     const d=await r.json(); lastSettings=(d&&d.settings)||body; settingsEditable=!!(d&&d.editable);
     renderSettings();
+    if(btnId) flashBtn(btnId,'Saved ✓');
     if(st){ st.textContent='saved ✓ — workers apply on next poll'; st.style.color='var(--teal)'; setTimeout(()=>{ st.textContent=''; },3000); }
   }catch(err){ if(st){ st.textContent='✕ '+err.message; st.style.color='var(--amber)'; } }
 }
@@ -2080,6 +2223,33 @@ document.querySelectorAll('#grSubtabs button').forEach(b=>{
 /* ---------- Secrets add-form toggle ---------- */
 function toggleSecretForm(){ const f=document.getElementById('secretForm'); if(f) f.classList.toggle('open'); }
 
+/* ---------- collapsible card bars (shared) ----------
+   One accordion mechanism for every collapsible section: a .collapse-card whose
+   .card-head toggles .open (CSS shows/hides .collapse-body). Expand/collapse only
+   shows/hides — no re-fetch, no lost input. Open/closed persists across reloads
+   via localStorage under storeKey, mirroring the 'warden.tab' idiom; defOpen is
+   the per-section default when nothing is stored. Buttons inside a clickable
+   header must event.stopPropagation() so a click doesn't also toggle. */
+function collapseOpen(storeKey, defOpen){
+  try{ const v=localStorage.getItem(storeKey); return v===null ? !!defOpen : v==='1'; }
+  catch(e){ return !!defOpen; }
+}
+function setCollapseUI(card, open){
+  card.classList.toggle('open', open);
+  const car=card.querySelector('.card-head .caret');
+  if(car) car.textContent = open ? '▾' : '▸';
+}
+function syncCollapse(cardId, storeKey, defOpen){
+  const card=document.getElementById(cardId); if(!card) return;
+  setCollapseUI(card, collapseOpen(storeKey, defOpen));
+}
+function toggleCollapse(cardId, storeKey){
+  const card=document.getElementById(cardId); if(!card) return;
+  const open=!card.classList.contains('open');
+  setCollapseUI(card, open);
+  try{ localStorage.setItem(storeKey, open?'1':'0'); }catch(e){}
+}
+
 /* ---------- reusable empty state ---------- */
 function emptyState(icon,title,body,ctaLabel,ctaAttr){
   return '<div class="empty-state"><div class="es-ic">'+icon+'</div>'
@@ -2168,7 +2338,7 @@ function renderSecrets(d){
   const callout=document.getElementById('secretsCallout');
   const form=document.getElementById('secretForm');
   if(readonly){
-    if(ro){ ro.style.display=''; ro.innerHTML='<b>No managed secret store configured on this node.</b> Secrets resolve from the worker environment — add / rotate / delete is unavailable here (writes would return 405).'; }
+    if(ro){ ro.style.display=''; ro.innerHTML='<b>No managed secret store configured on this node.</b> Secrets resolve from the worker environment — add / rotate / delete is unavailable here (writes would return 405). To use a managed backend (echo / AWS), pick one under <a href="#" onclick="go(\'settings\');return false;">Settings → Secret backend</a> on the control plane.'; }
     if(card) card.style.display='none';
     if(callout) callout.style.display='none';
     if(form) form.classList.remove('open');
@@ -2222,19 +2392,19 @@ async function deleteSecretRow(key){
 }
 
 /* ============================================================
-   Guardrails (Egress /policy · DLP+MCP+Judge /settings · matrix /analytics · inventory /mcp)
-   Writes are read-modify-write of the full policy / settings document and are
-   gated on the endpoint's editable flag (true only on the control plane).
+   Guardrails (Egress /policy · DLP+Judge /settings · matrix /analytics)
+   MCP has its own page (loadMCPPage below) but shares the gr state + the same
+   read-modify-write /settings document. Writes are gated on the endpoint's
+   editable flag (true only on the control plane).
    ============================================================ */
 const gr={ policy:null, policyEditable:false, settings:{}, settingsEditable:false, analytics:{dlp:{}}, mcpInv:{tools:[]}, dlp:null, mcp:null, judge:null, llmp:{providers:[],editable:false} };
 const DLP_ACTIONS=['allow','block','redact','monitor'];
 
 async function loadGuardrails(){
-  const [pol,setres,an,mc,lp]=await Promise.all([
+  const [pol,setres,an,lp]=await Promise.all([
     jget('/dashboard/api/policy').catch(()=>null),
     jget('/dashboard/api/settings').catch(()=>null),
     jget('/dashboard/api/analytics?range='+encodeURIComponent(state.range)).catch(()=>null),
-    jget('/dashboard/api/mcp').catch(()=>null),
     jget('/dashboard/api/llmproviders').catch(()=>null),
   ]);
   gr.policy = pol || {allowlist:[],denylist:[],editable:false};
@@ -2244,16 +2414,30 @@ async function loadGuardrails(){
   gr.settings = (setres&&setres.settings) || {};
   gr.settingsEditable = !!(setres&&setres.editable);
   gr.analytics = an || {dlp:{}};
-  gr.mcpInv = mc || {tools:[]};
   gr.llmp = lp || {providers:[],editable:false};
   gr.llmp.providers = gr.llmp.providers || [];
   const note=document.getElementById('grEditNote');
   if(note) note.textContent = gr.settingsEditable ? '' : 'read-only (managed by control plane)';
   renderEgress();
   renderDLP();
+  renderJudge();   // the /llmproviders fetch above feeds the judge selector's name list;
+                   // the registry CARD itself lives on Settings (renderLLMProviders there)
+}
+/* loadMCPPage: the MCP page's lazy loader — the same /settings + /mcp fetches the
+   Guardrails MCP sub-tab used to make, now only when the MCP page opens (no
+   double-fetch when Guardrails opens). The /mcp inventory honors the topbar
+   worker scope on the control plane (?proxy= selects a worker's fleet view). */
+async function loadMCPPage(){
+  const [setres,mc]=await Promise.all([
+    jget('/dashboard/api/settings').catch(()=>null),
+    jget('/dashboard/api/mcp'+(state.proxy?'?proxy='+encodeURIComponent(state.proxy):'')).catch(()=>null),
+  ]);
+  gr.settings = (setres&&setres.settings) || {};
+  gr.settingsEditable = !!(setres&&setres.editable);
+  gr.mcpInv = mc || {tools:[]};
+  const note=document.getElementById('mcpEditNote');
+  if(note) note.textContent = gr.settingsEditable ? '' : 'read-only (managed by control plane)';
   renderMCP();
-  renderLLMProviders();
-  renderJudge();
 }
 function flashBtn(id,txt){
   const b=document.getElementById(id); if(!b) return;
@@ -2440,7 +2624,7 @@ async function saveDLP(){
   }catch(err){ if(msg){ msg.textContent='✕ '+err.message; msg.style.color='var(--amber)'; } }
 }
 
-/* ---------- MCP (config /settings.mcp · inventory /mcp) ---------- */
+/* ---------- MCP page (config /settings.mcp · inventory /mcp) ---------- */
 function toggleRow(id,checked,title,desc,ed,last){
   return '<div style="display:flex;align-items:center;justify-content:space-between;padding:9px 0'+(last?'':';border-bottom:1px solid var(--border)')+'">'
     +'<div><b>'+esc(title)+'</b><div class="note">'+esc(desc)+'</div></div>'
@@ -2493,7 +2677,7 @@ function renderMCPToolPolicy(){
   const ed=gr.settingsEditable;
   if(!gr.mcp){ el.innerHTML='<div class="note">MCP tool policy is managed by the control plane.</div>'; return; }
   const offNote = (ed && !gr.mcp.enabled)
-    ? '<div class="note" style="margin-bottom:8px">MCP inspection is <b>off</b> — add tools here, then enable it above and Save MCP for the policy to take effect.</div>'
+    ? '<div class="note" style="margin-bottom:8px">MCP inspection is <b>off</b> — add tools here, then enable it in the MCP policy card above and Save MCP for the policy to take effect.</div>'
     : '';
   el.innerHTML = offNote + mcpListBlock('allow', gr.mcp.tools.allow, ed) + '<div class="divider"></div>' + mcpListBlock('deny', gr.mcp.tools.deny, ed);
   el.querySelectorAll('.mcp-tool-rm').forEach(b=>b.addEventListener('click',()=>removeMcpTool(b.dataset.list,+b.dataset.idx)));
@@ -2508,9 +2692,31 @@ function mcpListBlock(list,arr,ed){
       +'<button class="btn sm" onclick="addMcpTool(\''+list+'\')">+ Add</button></div>'
     : '';
   let h='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">'+pill+add+'</div>';
-  if(!arr.length){ h+='<div class="note" style="padding:2px 0">none</div>'; return h; }
+  if(!arr.length){ h+=mcpImplicitRule(list); return h; }
   h+=arr.map((t,i)=>'<div style="display:flex;align-items:center;justify-content:space-between;padding:4px 0"><span class="mono" style="font-size:12.5px">'+esc(t)+'</span>'+(ed?'<button class="btn sm mcp-tool-rm" data-list="'+list+'" data-idx="'+i+'" style="color:#ff8098">✕</button>':'')+'</div>').join('');
   return h;
+}
+/* mcpImplicitRule — DISPLAY-ONLY pseudo-rule shown when a tool list is empty, so
+   "no rules" reads as the EFFECTIVE default instead of "no policy". True
+   semantics (internal/mcp/mcp.go ToolPolicy.Evaluate + gateway applyMode): an
+   EMPTY allow list is DEFAULT-DENY for every tool and deny always wins — but
+   only ENFORCE mode turns that deny into a block; MONITOR mode logs the
+   mcp_tool_denied finding and lets the call proceed. Never written to config. */
+function mcpImplicitRule(list){
+  const m=gr.mcp||{};
+  let label;
+  if(list==='allow'){
+    if(!m.enabled){
+      label='implicit default — MCP inspection is <b>off</b>: tool calls pass through unguarded. Enable inspection to apply tool policy.';
+    } else if(m.mode==='enforce'){
+      label='implicit default — every tool <b>denied</b>: an empty allow list is default-deny, and enforce mode blocks. Add an allow rule to permit a tool.';
+    } else {
+      label='implicit default — nothing is blocked: the empty allow list is default-deny, but <b>monitor</b> mode only logs — every call is flagged <span class="mono">mcp_tool_denied</span> and proceeds. Switch to enforce (or add rules) to change this.';
+    }
+  } else {
+    label='implicit default — no tools explicitly denied. A deny entry always takes precedence over the allow list.';
+  }
+  return '<div class="pseudo-rule"><span class="mono" style="font-size:12px">*</span> <b style="font-style:normal">all tools</b> — '+label+'</div>';
 }
 function addMcpTool(list){
   if(!gr.settingsEditable||!gr.mcp) return;
@@ -2528,20 +2734,109 @@ function removeMcpTool(list,idx){
   if(idx>=0&&idx<arr.length) arr.splice(idx,1);
   renderMCPToolPolicy();
 }
+/* ---------- Tool inventory: filters + click-to-expand schema viewer ----------
+   Filters (server / calls / decision) compose over the fetched gr.mcpInv rows —
+   no refetch. The schema panel renders the /mcp payload's per-tool requestSchema/
+   responseSchema verbatim: observed field paths, structural types, sensitivity
+   classes and detector hits with MASKED evidence — the store is value-free by
+   construction (internal/mcp/profiler.go), so nothing here can show an argument
+   or result value. One panel open at a time. */
+let mcpInvFilters={ server:'', calls:'all', callsMin:1, status:'' };
+let mcpOpenTool='';
+function mcpToolServers(t){ return String(t.server||'').split(',').map(s=>s.trim()).filter(Boolean); }
+function setMcpInvFilters(){
+  mcpInvFilters.server=val('mcpSrvFilter')||'';
+  mcpInvFilters.calls=val('mcpCallsFilter')||'all';
+  const n=parseInt(val('mcpCallsMin'),10); mcpInvFilters.callsMin=isNaN(n)?0:n;
+  mcpInvFilters.status=val('mcpStatusFilter')||'';
+  const min=document.getElementById('mcpCallsMin'); if(min) min.style.display = mcpInvFilters.calls==='min' ? '' : 'none';
+  renderMCPInventory();
+}
+function mcpInvMatch(t){
+  const f=mcpInvFilters;
+  if(f.server && mcpToolServers(t).indexOf(f.server)===-1) return false;
+  if(f.calls==='gt0' && !((t.calls||0)>0)) return false;
+  if(f.calls==='min' && !((t.calls||0)>=f.callsMin)) return false;
+  if(f.status==='allowed' && !((t.allowed||0)>0)) return false;
+  if(f.status==='denied' && !((t.denied||0)>0)) return false;
+  return true;
+}
+function mcpSchemaPre(schema){
+  if(!schema || !Object.keys(schema).length) return '<div class="note">no fields observed yet</div>';
+  return '<div style="overflow-x:auto"><pre style="margin:0; max-height:260px; overflow:auto; background:var(--surface-2); border:1px solid var(--border); border-radius:8px; padding:10px 12px; font-family:var(--mono); font-size:11.5px; line-height:1.5; color:#9fd">'+esc(JSON.stringify(schema,null,2))+'</pre></div>';
+}
+function mcpToolDetail(t){
+  const pin = gr.mcp
+    ? ((gr.mcp.schema&&gr.mcp.schema.pin)?'on — declared-schema drift is rejected at handshake':'off (toggle in the MCP policy card)')
+    : 'managed by control plane';
+  const sens=(t.sensitive||[]).length? (t.sensitive||[]).map(classChip).join(' ') : '<span class="muted">none observed</span>';
+  const finds=(t.findings||[]).length
+    ? (t.findings||[]).map(f=>'<div class="kv"><span class="mono" style="font-size:12px">'+esc(f)+'</span></div>').join('')
+    : '<div class="kv"><span class="muted">none</span></div>';
+  return '<div class="detail-grid">'
+    +'<div class="detail-sec"><h5>Schema metadata</h5>'
+      +'<div class="kv"><span class="k">Schema hash</span><span class="mono" style="font-size:11px">'+esc(t.schemaHash||'—')+'</span></div>'
+      +'<div class="kv"><span class="k">Declared</span><span>'+(t.present?'in tools/list inventory':'not declared (seen via calls only)')+'</span></div>'
+      +'<div class="kv"><span class="k">First seen</span><span class="muted">'+(t.firstSeen?relTime(t.firstSeen):'—')+'</span></div>'
+      +'<div class="kv"><span class="k">Last seen</span><span class="muted">'+(t.lastSeen?relTime(t.lastSeen):'—')+'</span></div>'
+      +'<div class="kv"><span class="k">Schema pinning</span><span>'+esc(pin)+'</span></div>'
+    +'</div>'
+    +'<div class="detail-sec"><h5>Sensitivity &amp; findings</h5>'
+      +'<div class="kv"><span class="k">Classes</span><span>'+sens+'</span></div>'+finds
+    +'</div>'
+    +'<div class="detail-sec"><h5>Arguments schema (observed, value-free)</h5>'+mcpSchemaPre(t.requestSchema)+'</div>'
+    +'<div class="detail-sec"><h5>Response schema (observed, value-free)</h5>'+mcpSchemaPre(t.responseSchema)+'</div>'
+  +'</div>';
+}
 function renderMCPInventory(){
   const body=document.getElementById('mcpInventory'); if(!body) return;
   const mc=gr.mcpInv||{}; const tools=(mc&&mc.tools)||[];
   const sub=document.getElementById('mcpInvSub');
-  if(sub) sub.textContent = (mc&&mc.enabled)? (tools.length+' tool'+(tools.length===1?'':'s')+' observed') : 'MCP inspection not attached on this node';
-  if(!tools.length){ body.innerHTML='<tr><td colspan="7" class="muted" style="padding:14px">No MCP tools observed yet.</td></tr>'; return; }
-  body.innerHTML=tools.map(t=>{
+  const bar=document.getElementById('mcpInvFilterbar'); if(bar) bar.style.display = tools.length ? '' : 'none';
+  if(!tools.length){
+    if(sub) sub.textContent = (mc&&mc.enabled)? '0 tools observed' : 'MCP inspection not attached on this node';
+    body.innerHTML='<tr><td colspan="7" class="muted" style="padding:14px">No MCP tools observed yet.</td></tr>';
+    return;
+  }
+  // Server filter options: distinct servers across rows (a row may carry a
+  // comma-joined multi-server string); hidden until 2+ servers are observed.
+  const srvSet={}; tools.forEach(t=>mcpToolServers(t).forEach(s=>{ srvSet[s]=1; }));
+  const srvList=Object.keys(srvSet).sort();
+  const srvSel=document.getElementById('mcpSrvFilter');
+  if(srvSel){
+    if(mcpInvFilters.server && srvList.indexOf(mcpInvFilters.server)===-1) mcpInvFilters.server='';
+    srvSel.innerHTML='<option value="">all servers</option>'
+      +srvList.map(s=>'<option value="'+esc(s)+'"'+(s===mcpInvFilters.server?' selected':'')+'>'+esc(s)+'</option>').join('');
+    srvSel.style.display = srvList.length>1 ? '' : 'none';
+  }
+  const shown=tools.filter(mcpInvMatch);
+  const countTxt = shown.length===tools.length
+    ? (tools.length+' tool'+(tools.length===1?'':'s')+' observed')
+    : (shown.length+' of '+tools.length+' tools shown');
+  if(sub) sub.textContent = ((mc&&mc.enabled)? countTxt : 'inspection not attached · '+countTxt)+' · click a row for schemas';
+  if(!shown.length){
+    body.innerHTML='<tr><td colspan="7" class="muted" style="text-align:center;padding:14px">No tools match this filter.</td></tr>';
+    return;
+  }
+  body.innerHTML='';
+  shown.forEach((t,i)=>{
     const schema = t.present? '<span class="pill p-allow">present</span>' : '<span class="pill p-high">unknown</span>';
     const nf=(t.findings||[]).length;
     const findings= nf? '<span class="pill p-high">'+nf+'</span>' : '<span class="muted">—</span>';
-    return '<tr><td class="mono">'+esc(t.tool||'')+'</td><td class="muted">'+esc(t.server||'—')+'</td>'
+    const tr=document.createElement('tr'); tr.className='clickable';
+    tr.innerHTML='<td class="mono">'+esc(t.tool||'')+'</td><td class="muted">'+esc(t.server||'—')+'</td>'
       +'<td class="num">'+fmtNum(t.calls||0)+'</td><td class="num">'+fmtNum(t.allowed||0)+'</td><td class="num">'+fmtNum(t.denied||0)+'</td>'
-      +'<td>'+schema+'</td><td>'+findings+'</td></tr>';
-  }).join('');
+      +'<td>'+schema+'</td><td>'+findings+'</td>';
+    body.appendChild(tr);
+    const dr=document.createElement('tr'); dr.className='detail-row';
+    dr.innerHTML='<td colspan="7"><div class="detail-inner'+(t.tool===mcpOpenTool?' open':'')+'" id="mcpdet'+i+'">'+mcpToolDetail(t)+'</div></td>';
+    tr.addEventListener('click',()=>{
+      mcpOpenTool = (mcpOpenTool===t.tool)? '' : t.tool;
+      body.querySelectorAll('.detail-inner').forEach(p=>p.classList.remove('open'));   // one open at a time
+      if(mcpOpenTool){ const d=document.getElementById('mcpdet'+i); if(d) d.classList.add('open'); }
+    });
+    body.appendChild(dr);
+  });
 }
 async function saveMCP(){
   if(!gr.settingsEditable) return;
@@ -2561,7 +2856,19 @@ async function saveMCP(){
   catch(err){ window.alert('MCP save failed: '+err.message); }
 }
 
-/* ---------- LLM Providers (/dashboard/api/llmproviders) ---------- */
+/* ---------- LLM Providers (/dashboard/api/llmproviders) ----------
+   The registry card lives on the SETTINGS page — it is a shared registry consumed
+   by the Judge (Guardrails) and Explore NL→SQL, each of which picks a provider by
+   name. loadLLMProviders() is the Settings-page loader; loadGuardrails() also
+   fetches the registry (names only, for the judge selector) but never renders
+   the card. */
+async function loadLLMProviders(){
+  let lp=null;
+  try{ lp=await jget('/dashboard/api/llmproviders'); }catch(e){ lp=null; }
+  gr.llmp = lp || {providers:[],editable:false};
+  gr.llmp.providers = gr.llmp.providers || [];
+  renderLLMProviders();
+}
 function llmpResolvedPill(p){
   if(p&&p.resolved) return '<span class="pill p-allow" title="key env present on this node">key present</span>';
   const env=(p&&p.apiKeyEnv)||'';
@@ -2646,20 +2953,17 @@ async function saveLLMProviders(){
     if(!r.ok){ let m='status '+r.status; try{ const e=await r.json(); if(e&&e.error) m=e.error; }catch(_e){} throw new Error(m); }
     gr.llmp=await r.json(); gr.llmp.providers=gr.llmp.providers||[];
     renderLLMProviders();
-    renderJudge(); // refresh the judge provider dropdown with the new registry
+    // (the judge selector re-reads the registry when Guardrails next loads)
     llmpMsg('saved ✓',true); setTimeout(()=>{ const m=document.getElementById('llmp-msg'); if(m) m.style.display='none'; },2500);
   }catch(err){ llmpMsg('✕ '+err.message,false); }
 }
 function llmProviderNames(){ return ((gr.llmp&&gr.llmp.providers)||[]).map(p=>p.name).filter(Boolean); }
 
 /* ---------- Judge (/settings.judge + /settings.advisory for mode) ---------- */
-function judgeField(id,label,value,ph,ed){
-  return '<div class="field"><label>'+esc(label)+'</label><input id="'+id+'" type="text" value="'+esc(value||'')+'" placeholder="'+esc(ph)+'" '+(ed?'':'disabled')+'/></div>';
-}
-function onJudgeProviderChange(){
-  const sel=val('judgeLLMProvider');
-  const inl=document.getElementById('judgeInline'); if(inl) inl.style.display=sel?'none':'';
-}
+// onJudgeProviderChange: retained for the select's onchange hook, but the judge
+// now has no inline fields to toggle — the provider comes from the shared
+// registry only, so this is a no-op.
+function onJudgeProviderChange(){}
 function renderJudge(){
   const j=gr.settings.judge||null;
   gr.judge = j ? { enabled:!!j.enabled, provider:j.provider||'', llmProvider:j.llmProvider||'', model:j.model||'', apiKeyEnv:j.apiKeyEnv||'', baseURL:j.baseURL||'' }
@@ -2667,26 +2971,31 @@ function renderJudge(){
   const advisory = !!(gr.settings.advisory && gr.settings.advisory.enabled);
   const ed=gr.settingsEditable;
   const cfg=document.getElementById('judgeConfig');
-  const saveBtn=document.getElementById('judgeSaveBtn'); if(saveBtn) saveBtn.style.display=ed?'':'none';
+  const names=llmProviderNames();
+  const hasProviders=names.length>0;
+  // Save is available only when the node is editable AND (there is a provider to
+  // select, OR the judge is already disabled and staying disabled — i.e. nothing
+  // to enable). With no providers we hide Save so an empty-registry judge can't be
+  // enabled from here at all.
+  const saveBtn=document.getElementById('judgeSaveBtn'); if(saveBtn) saveBtn.style.display=(ed && hasProviders)?'':'none';
   if(cfg){
     if(!j && !ed){
       cfg.innerHTML='<div class="note">The LLM judge is <b>disabled</b> and read-only on this node (managed by the control plane).</div>';
+    } else if(ed && !hasProviders){
+      // Empty registry: the judge requires a named provider, so enabling is blocked
+      // until one exists. No toggle, no Save — just the CTA.
+      cfg.innerHTML='<div class="note">The LLM judge needs a provider from the shared registry. <b>Add an LLM provider in <a href="#" onclick="go(\'settings\');return false;">Settings → LLM Providers</a> to enable the judge.</b></div>';
     } else {
-      const sel=gr.judge.llmProvider;
-      const provOpts='<option value="">inline (advanced)</option>'+
-        llmProviderNames().map(n=>'<option value="'+esc(n)+'"'+(n===sel?' selected':'')+'>'+esc(n)+'</option>').join('');
-      const usingInline=!sel;
+      // The judge always uses a NAMED provider from the shared registry (no inline
+      // path). Preselect the first provider when none is set yet (display-only —
+      // nothing persists until Save).
+      let sel=gr.judge.llmProvider;
+      if(!sel && names.length) sel=names[0];
+      const provOpts=names.map(n=>'<option value="'+esc(n)+'"'+(n===sel?' selected':'')+'>'+esc(n)+'</option>').join('');
       cfg.innerHTML =
         toggleRow('judgeEnabled', gr.judge.enabled, 'Enable LLM judge', 'Score outbound bodies with an LLM for prompt-injection / exfil', ed)
         + '<div class="field"><label>LLM provider</label><select id="judgeLLMProvider" onchange="onJudgeProviderChange()" '+(ed?'':'disabled')+'>'+provOpts+'</select>'
-        + '<div class="note">Pick a named provider from the registry above, or “inline (advanced)” to set the connection here.</div></div>'
-        + '<div id="judgeInline" style="display:'+(usingInline?'':'none')+'">'
-        + judgeField('judgeProvider','Provider (label)', gr.judge.provider, 'anthropic / openai / ollama', ed)
-        + judgeField('judgeModel','Model', gr.judge.model, 'e.g. claude-haiku-4-5', ed)
-        + judgeField('judgeBaseURL','Base URL (optional)', gr.judge.baseURL, 'https://…', ed)
-        + judgeField('judgeApiKeyEnv','API key env var (name only)', gr.judge.apiKeyEnv, 'OPENAI_API_KEY', ed)
-        + '<div class="note" style="margin:-4px 0 12px">Env NAME only — the worker resolves the actual key from its own environment. The value is never entered or shown here.</div>'
-        + '</div>'
+        + '<div class="note">The judge uses a provider from the shared registry — manage providers in <a href="#" onclick="go(\'settings\');return false;">Settings → LLM Providers</a>.</div></div>'
         + toggleRow('judgeAdvisory', advisory, 'Advisory mode', 'Score and log only — never block (uncheck to let the judge enforce)', ed, true);
     }
   }
@@ -2708,14 +3017,14 @@ function renderJudge(){
 }
 async function saveJudge(){
   if(!gr.settingsEditable) return;
+  // The judge uses a NAMED provider only — there are no inline inputs to read.
+  // Preserve every base field (provider/model/baseURL/apiKeyEnv survive untouched
+  // for back-compat with any hand-authored inline config) and override ONLY the
+  // two the UI controls: enabled + llmProvider. Never blank base fields with ''.
   const base=gr.settings.judge||{};
   const judgeBlock=Object.assign({}, base, {
     enabled: chk('judgeEnabled'),
     llmProvider:(val('judgeLLMProvider')||'').trim(),
-    provider:(val('judgeProvider')||'').trim(),
-    model:(val('judgeModel')||'').trim(),
-    baseURL:(val('judgeBaseURL')||'').trim(),
-    apiKeyEnv:(val('judgeApiKeyEnv')||'').trim(),
   });
   const merged=Object.assign({}, gr.settings, {judge:judgeBlock, advisory:{enabled: chk('judgeAdvisory')}});
   try{ await putSettings(merged); renderJudge(); flashBtn('judgeSaveBtn','Saved ✓'); }
@@ -2855,7 +3164,6 @@ function renderDetection(){
   if(detectionData.missing || !detectionPresent()){
     if(sub) sub.textContent='not hosted here';
     host.innerHTML='<div class="note">Temporal threshold detection runs on the <b>control plane</b> (fleet mode) or a <b>local-only</b> node. This dashboard node hosts no alert pipeline, so there is nothing to configure here.</div>';
-    syncDetectionCollapse();
     return;
   }
   const c=detectionData.config||{};
@@ -2898,25 +3206,6 @@ function renderDetection(){
     ? '<div style="margin-top:8px"><button class="btn primary sm" id="detectionSaveBtn" onclick="saveDetection()">Save detection</button> <span id="detectionMsg" class="sub"></span></div>'
     : '';
   host.innerHTML='<div style="margin-bottom:14px">'+statusLine+'</div>'+h+saveRow;
-  syncDetectionCollapse();
-}
-// Detection card is collapsed by default; the header summary (#detectionSub) reflects
-// live state, expand/collapse just show/hide the body — no re-fetch, no lost input.
-// Open/closed persists across reloads via localStorage, mirroring the 'warden.tab' idiom.
-function detectionOpen(){ try{ return localStorage.getItem('warden.detOpen')==='1'; }catch(e){ return false; } }
-function syncDetectionCollapse(){
-  const card=document.getElementById('detectionCard'); if(!card) return;
-  const open=detectionOpen();
-  card.classList.toggle('open', open);
-  const car=document.getElementById('detectionCaret');
-  if(car) car.textContent = open ? '▾' : '▸';
-}
-function toggleDetection(){
-  const card=document.getElementById('detectionCard'); if(!card) return;
-  const open=card.classList.toggle('open');
-  const car=document.getElementById('detectionCaret');
-  if(car) car.textContent = open ? '▾' : '▸';
-  try{ localStorage.setItem('warden.detOpen', open?'1':'0'); }catch(e){}
 }
 // buildDetectorDoc: read-modify-write one detector from the DOM. Start from the
 // fetched sub-config so unknown/future fields survive; a cleared input DELETES the
@@ -3170,7 +3459,7 @@ async function deleteIntegration(name){
    Init
    ============================================================ */
 document.querySelectorAll('.nav-item').forEach(n=> n.addEventListener('click', ()=>go(n.dataset.page)) );
-(function(){ const b=document.getElementById('rt-save'); if(b) b.addEventListener('click', saveSettings); const r=document.getElementById('rt-reset'); if(r) r.addEventListener('click', loadSettings); })();
+(function(){ const b=document.getElementById('rt-save'); if(b) b.addEventListener('click', ()=>saveSettings('rt-save','settings-status')); const r=document.getElementById('rt-reset'); if(r) r.addEventListener('click', loadSettings); })();
 (function(){ const b=document.getElementById('integrations-addbtn'); if(b) b.addEventListener('click', toggleIntegrationForm); })();
 (function(){ const b=document.getElementById('rangeBtn'); if(b) b.addEventListener('click', ()=>{
   const i=RANGES.findIndex(r=>r[0]===state.range); state.range=RANGES[(i+1)%RANGES.length][0];
@@ -3192,6 +3481,14 @@ document.querySelectorAll('.nav-item').forEach(n=> n.addEventListener('click', (
 })();
 
 renderEmptyStates();
+
+// collapsible bars: restore persisted open/closed state.
+// Defaults: egress lists open (glanceable), MCP editors + Detection editor closed (editor-heavy).
+syncCollapse('detectionCard','warden.detOpen',false);
+syncCollapse('egressAllowCard','warden.egAllowOpen',true);
+syncCollapse('egressDenyCard','warden.egDenyOpen',true);
+syncCollapse('mcpPolicyCard','warden.mcpPolicyOpen',false);
+syncCollapse('mcpToolsCard','warden.mcpToolsOpen',false);
 
 // initial data
 loadSetup();

@@ -1121,6 +1121,76 @@ func TestMCPEndpointNilProvider(t *testing.T) {
 	}
 }
 
+// TestMCPEndpointSchemaViewValueFree pins the wire shape the dashboard's tool
+// schema viewer renders verbatim: a requestSchema/responseSchema field entry
+// carries ONLY structural keys (types/seenCount/sensitivity/detectors) and a
+// detector ONLY category/pattern/severity + MASKED evidence. A future field that
+// could carry a raw argument value cannot be added without failing this
+// whitelist.
+func TestMCPEndpointSchemaViewValueFree(t *testing.T) {
+	now := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	prov := &fakeMCPProvider{
+		inv: []gateway.InventoryItem{{Name: "send_email", HasDescription: true, InputSchemaHash: "h9", FirstSeen: now, LastSeen: now}},
+		snap: map[string]mcp.ToolProfileView{
+			mcpKey("send_email", mcp.DirRequest): {Fields: map[string]mcp.FieldProfileView{
+				"params.token": {
+					Types: []string{"string"}, SeenCount: 2, Sensitivity: []string{"credential_leak"},
+					Detectors: []mcp.FieldDetector{{
+						Category: "credential_leak", Pattern: "github_token", Severity: "high",
+						Evidence: "ghp_••••cdef", // masked-only by construction (profiler stores no raw values)
+					}},
+				},
+			}},
+		},
+	}
+	srv := NewServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
+	srv.SetMCPProvider(prov)
+
+	rr := doGet(t, srv.Handler(), "/dashboard/api/mcp")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+
+	// Decode generically so unexpected keys are visible, then whitelist them.
+	var generic struct {
+		Tools []struct {
+			Tool          string                                `json:"tool"`
+			RequestSchema map[string]map[string]json.RawMessage `json:"requestSchema"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &generic); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(generic.Tools) != 1 || generic.Tools[0].Tool != "send_email" {
+		t.Fatalf("tools = %+v", generic.Tools)
+	}
+	fld, ok := generic.Tools[0].RequestSchema["params.token"]
+	if !ok {
+		t.Fatalf("requestSchema missing params.token: %+v", generic.Tools[0].RequestSchema)
+	}
+	fieldKeys := map[string]bool{"types": true, "seenCount": true, "sensitivity": true, "detectors": true}
+	for k := range fld {
+		if !fieldKeys[k] {
+			t.Errorf("field entry carries non-whitelisted key %q — potential value leak surface", k)
+		}
+	}
+	var dets []map[string]json.RawMessage
+	if err := json.Unmarshal(fld["detectors"], &dets); err != nil || len(dets) != 1 {
+		t.Fatalf("decode detectors: %v (%d)", err, len(dets))
+	}
+	detKeys := map[string]bool{"category": true, "pattern": true, "severity": true, "evidence": true}
+	for k := range dets[0] {
+		if !detKeys[k] {
+			t.Errorf("detector carries non-whitelisted key %q", k)
+		}
+	}
+	// The masked evidence sample passes through intact (it is already
+	// wire-approved; the store never holds an unmasked value to leak).
+	if !strings.Contains(rr.Body.String(), "ghp_••••cdef") {
+		t.Errorf("masked detector evidence missing from payload: %s", rr.Body.String())
+	}
+}
+
 func containsStr(ss []string, want string) bool {
 	for _, s := range ss {
 		if s == want {

@@ -24,6 +24,19 @@ func doGetJSON(t *testing.T, h http.Handler, path string, into any) {
 	}
 }
 
+// getRaw returns the raw response body for a GET, so a test can assert on the
+// exact bytes (e.g. that a secret string appears nowhere in the JSON).
+func getRaw(t *testing.T, h http.Handler, path string) string {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("%s: status %d", path, rec.Code)
+	}
+	return rec.Body.String()
+}
+
 // TestAnalyticsProxyBreakdownAndFilter covers the fleet per-worker view: the
 // proxies breakdown lists every worker, and ?proxy= narrows the rest of the
 // dashboard to one worker while the selector still lists all of them.

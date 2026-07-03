@@ -91,6 +91,15 @@ type SecretsSettings struct {
 	Region string `json:"region,omitempty"`
 	// NamePrefix is the aws key→secret-name namespace (aws backend only).
 	NamePrefix string `json:"namePrefix,omitempty"`
+	// AccessKeyID and SecretAccessKey are OPTIONAL explicit AWS credentials.
+	// DELIBERATE, PRODUCT-OWNER-SANCTIONED EXCEPTION to this wire type's
+	// otherwise-structural secret-free invariant: SecretAccessKey is a real
+	// credential VALUE that DOES cross the wire to workers (so a fleet can be
+	// credentialed centrally). Both-or-neither; empty means the reading node falls
+	// back to its OWN env / IAM role (the original value-free behavior). The value
+	// is masked in the dashboard GET (never returned raw) and never logged raw.
+	AccessKeyID     string `json:"accessKeyId,omitempty"`
+	SecretAccessKey string `json:"secretAccessKey,omitempty"`
 }
 
 // ToggleSetting is a simple on/off block (advisory, compliance).
@@ -394,6 +403,11 @@ func secretsSettingsFromPolicy(c SecretStoreConfig) *SecretsSettings {
 		if c.AWS != nil {
 			out.Region = c.AWS.Region
 			out.NamePrefix = c.AWS.NamePrefix
+			// Explicit credentials (if configured) ride the wire so managed workers
+			// can build the client without their own env/IAM. Empty => value-free,
+			// worker resolves from its OWN env/IAM.
+			out.AccessKeyID = c.AWS.AccessKeyID
+			out.SecretAccessKey = c.AWS.SecretAccessKey
 		}
 		return out
 	default:
@@ -414,8 +428,13 @@ func SecretStoreConfigFromSettings(s *SecretsSettings) SecretStoreConfig {
 		return SecretStoreConfig{}
 	}
 	out := SecretStoreConfig{Backend: s.Backend}
-	if s.Region != "" || s.NamePrefix != "" {
-		out.AWS = &SecretStoreAWS{Region: s.Region, NamePrefix: s.NamePrefix}
+	if s.Region != "" || s.NamePrefix != "" || s.AccessKeyID != "" || s.SecretAccessKey != "" {
+		out.AWS = &SecretStoreAWS{
+			Region:          s.Region,
+			NamePrefix:      s.NamePrefix,
+			AccessKeyID:     s.AccessKeyID,
+			SecretAccessKey: s.SecretAccessKey,
+		}
 	}
 	return out
 }

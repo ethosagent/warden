@@ -157,6 +157,84 @@ func TestAWSHTTPClient_GetPutCreateDeleteList(t *testing.T) {
 	}
 }
 
+// TestAWSHTTPClient_ClientRequestToken proves PutSecretValue and CreateSecret
+// each include a fresh, UUID-shaped ClientRequestToken (32–64 chars) — the
+// idempotency token AWS requires of a raw SigV4 caller — and that two successive
+// calls of each verb produce DIFFERENT tokens.
+func TestAWSHTTPClient_ClientRequestToken(t *testing.T) {
+	var captured []smRequest
+	srv := newFakeSM(t, &captured)
+	c := newTestHTTPClient(srv.URL)
+
+	// Two Puts and two Creates, so we can assert freshness across successive calls.
+	for i := 0; i < 2; i++ {
+		if _, err := c.PutSecretValue("warden/K", "sk-new"); err != nil {
+			t.Fatalf("PutSecretValue #%d: %v", i, err)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := c.CreateSecret("warden/K", "sk-new"); err != nil {
+			t.Fatalf("CreateSecret #%d: %v", i, err)
+		}
+	}
+	if len(captured) != 4 {
+		t.Fatalf("captured %d requests, want 4", len(captured))
+	}
+
+	tokenOf := func(r smRequest) string {
+		tok, ok := r.body["ClientRequestToken"].(string)
+		if !ok {
+			t.Fatalf("%s: ClientRequestToken missing or not a string: %v", r.target, r.body["ClientRequestToken"])
+		}
+		if n := len(tok); n < 32 || n > 64 {
+			t.Errorf("%s: ClientRequestToken len = %d, want 32–64", r.target, n)
+		}
+		if !isUUIDv4(tok) {
+			t.Errorf("%s: ClientRequestToken %q is not a UUIDv4 (8-4-4-4-12 hex)", r.target, tok)
+		}
+		return tok
+	}
+
+	put1, put2 := tokenOf(captured[0]), tokenOf(captured[1])
+	create1, create2 := tokenOf(captured[2]), tokenOf(captured[3])
+	if put1 == put2 {
+		t.Errorf("successive PutSecretValue tokens equal (%q); want fresh per call", put1)
+	}
+	if create1 == create2 {
+		t.Errorf("successive CreateSecret tokens equal (%q); want fresh per call", create1)
+	}
+}
+
+// isUUIDv4 reports whether s is a canonical RFC 4122 version-4 UUID string:
+// 36 chars, 8-4-4-4-12 lowercase hex, version nibble 4 and variant nibble 8/9/a/b.
+func isUUIDv4(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i, r := range s {
+		switch i {
+		case 8, 13, 18, 23:
+			if r != '-' {
+				return false
+			}
+		case 14: // version nibble
+			if r != '4' {
+				return false
+			}
+		case 19: // variant nibble
+			if r != '8' && r != '9' && r != 'a' && r != 'b' {
+				return false
+			}
+		default:
+			isHex := (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')
+			if !isHex {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // TestAWSHTTPClient_ResourceNotFound proves both the header-typed and __type-typed
 // ResourceNotFoundException map onto ErrSecretNotFound.
 func TestAWSHTTPClient_ResourceNotFound(t *testing.T) {

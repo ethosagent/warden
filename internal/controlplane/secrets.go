@@ -18,10 +18,10 @@ import (
 // oversize) rather than reusing its 16 MiB cap, which is sized for event batches.
 const maxSecretBodyBytes = 1 << 20 // 1 MiB
 
-// awsSecretsClientFactory builds the AWS Secrets Manager client for a region. It
-// defaults to the real ENV-credentialed net/http + SigV4 client and is a package
-// var so tests inject a fake without touching AWS or the network.
-var awsSecretsClientFactory = secrets.NewAWSSecretsClientFromEnv
+// awsSecretsClientFactory builds the AWS Secrets Manager client for a region,
+// resolving credentials by precedence (explicit config keys → env → IMDS role).
+// It is a package var so tests inject a fake without touching AWS or the network.
+var awsSecretsClientFactory = secrets.NewAWSSecretsClient
 
 // NewSecretStore builds the control plane's WRITE-scoped SecretStore from the
 // operator's OWN secretStore.backend selection, or returns a nil store when no
@@ -50,11 +50,15 @@ func NewSecretStore(cfg config.SecretStoreConfig, logger *slog.Logger) (secrets.
 		if cfg.AWS == nil {
 			return nil, fmt.Errorf("control plane secretStore.backend=aws requires an aws config block")
 		}
-		client, err := awsSecretsClientFactory(cfg.AWS.Region)
+		client, err := awsSecretsClientFactory(cfg.AWS.Region, cfg.AWS.AccessKeyID, cfg.AWS.SecretAccessKey)
 		if err != nil {
 			return nil, fmt.Errorf("control plane secretStore.backend=aws: %w", err)
 		}
-		logger.Info("control plane AWS secret store active", "region", cfg.AWS.Region, "namePrefix", cfg.AWS.NamePrefix)
+		// By-reference only: log the region/prefix and WHETHER explicit creds were
+		// supplied — never the accessKeyId or secret value.
+		logger.Info("control plane AWS secret store active",
+			"region", cfg.AWS.Region, "namePrefix", cfg.AWS.NamePrefix,
+			"explicitCredentials", cfg.AWS.AccessKeyID != "" && cfg.AWS.SecretAccessKey != "")
 		return secrets.NewAWSSecretStore(client, cfg.AWS.Region, cfg.AWS.NamePrefix), nil
 	default:
 		// env / empty: no writable store — endpoints not mounted.

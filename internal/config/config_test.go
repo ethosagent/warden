@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -404,6 +405,75 @@ judge: {enabled: false, timeout: "notaduration"}
 `
 	if _, err := NewLocalYAMLProvider(writeTemp(t, y)); err == nil {
 		t.Fatal("expected duration parse error")
+	}
+}
+
+// TestValidate_JudgeNamedProviderSkipsInlineFields is the regression for the
+// dashboard flow: enabling the judge with a NAMED llmProvider (whose registry
+// entry supplies the connection) must be VALID even though the inline
+// model/baseURL/apiKeyEnv are empty. The dashboard hides those inputs when a
+// provider is selected, so they arrive empty by design.
+func TestValidate_JudgeNamedProviderSkipsInlineFields(t *testing.T) {
+	const y = `
+policy: {allowlist: [{domain: a.com}]}
+llmProviders:
+  - name: p
+    baseURL: https://x/v1
+    model: m
+    apiKeyEnv: KEY
+judge: {enabled: true, llmProvider: p}
+agents: [{id: default, policy: x}]
+`
+	if _, err := NewLocalYAMLProvider(writeTemp(t, y)); err != nil {
+		t.Fatalf("named-provider judge with empty inline fields should be valid, got: %v", err)
+	}
+}
+
+// TestValidate_JudgeInlinePathUnchanged confirms the inline path (no llmProvider)
+// still requires model/apiKeyEnv/baseURL exactly as before.
+func TestValidate_JudgeInlinePathUnchanged(t *testing.T) {
+	const y = `
+policy: {allowlist: [{domain: a.com}]}
+judge: {enabled: true, baseURL: https://x/v1, apiKeyEnv: K}
+agents: [{id: default, policy: x}]
+`
+	_, err := NewLocalYAMLProvider(writeTemp(t, y))
+	if err == nil {
+		t.Fatal("inline judge with empty model should error")
+	}
+	if !strings.Contains(err.Error(), "judge.model is required") {
+		t.Fatalf("expected judge.model required error, got: %v", err)
+	}
+}
+
+// TestValidate_JudgeDanglingProviderRef confirms a named llmProvider with NO
+// matching registry entry still fails via validateJudgeProviderRef, even though
+// validateJudge now skips the inline-field checks for named providers.
+func TestValidate_JudgeDanglingProviderRef(t *testing.T) {
+	const y = `
+policy: {allowlist: [{domain: a.com}]}
+judge: {enabled: true, llmProvider: p}
+agents: [{id: default, policy: x}]
+`
+	if _, err := NewLocalYAMLProvider(writeTemp(t, y)); err == nil {
+		t.Fatal("judge naming a non-existent llmProvider should error")
+	}
+}
+
+// TestValidate_JudgeNamedProviderStillRequiresAgents confirms the agents[]
+// requirement holds regardless of the provider path.
+func TestValidate_JudgeNamedProviderStillRequiresAgents(t *testing.T) {
+	const y = `
+policy: {allowlist: [{domain: a.com}]}
+llmProviders:
+  - name: p
+    baseURL: https://x/v1
+    model: m
+    apiKeyEnv: KEY
+judge: {enabled: true, llmProvider: p}
+`
+	if _, err := NewLocalYAMLProvider(writeTemp(t, y)); err == nil {
+		t.Fatal("named-provider judge with zero agents should error")
 	}
 }
 

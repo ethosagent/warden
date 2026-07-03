@@ -3,6 +3,8 @@ package config
 import (
 	"fmt"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Secret-store backend selectors. These name the WORKER read backend that
@@ -57,6 +59,17 @@ type SecretStoreAWS struct {
 	// NamePrefix is the key→secret-name namespace (default warden/): key K maps
 	// to the secret name `<NamePrefix>K`, scoping IAM to `<NamePrefix>*`.
 	NamePrefix string
+	// AccessKeyID and SecretAccessKey are OPTIONAL explicit AWS credentials for
+	// the Secrets Manager client. DELIBERATE INVARIANT RELAXATION (product-owner
+	// decision): unlike every other block, SecretAccessKey is a real credential
+	// VALUE that IS persisted to the served config and distributed to workers over
+	// SettingsWire. They are both-or-neither (validateSecretStore enforces it) and
+	// take precedence over env / IMDS credential resolution. When empty, the client
+	// falls back to the process env then the instance IAM role — the original,
+	// value-free behavior. The value is masked in the dashboard GET and never
+	// logged raw.
+	AccessKeyID     string
+	SecretAccessKey string
 }
 
 // ResolvedBackend returns the effective backend, normalizing the empty zero
@@ -72,14 +85,22 @@ func (c SecretStoreConfig) ResolvedBackend() string {
 // rawSecretStore mirrors the on-disk `secretStore:` block. Pointer so an absent
 // block is distinct from an explicit one. KnownFields(true) is strict, so every
 // field MUST be registered here or a config carrying it fails to parse.
+// The `omitempty` on aws matters for the write direction (EncodeSecretStoreNode):
+// a nil AWS (env/echo) must omit the child entirely, not emit `aws: null`.
 type rawSecretStore struct {
 	Backend string             `yaml:"backend"`
-	AWS     *rawSecretStoreAWS `yaml:"aws"`
+	AWS     *rawSecretStoreAWS `yaml:"aws,omitempty"`
 }
 
 type rawSecretStoreAWS struct {
 	Region     string `yaml:"region"`
 	NamePrefix string `yaml:"namePrefix"`
+	// accessKeyId/secretAccessKey are OPTIONAL explicit credentials (omitempty so a
+	// value-free aws block stays byte-identical to before). secretAccessKey is the
+	// one credential VALUE Warden persists on disk (product decision — see
+	// SecretStoreAWS).
+	AccessKeyID     string `yaml:"accessKeyId,omitempty"`
+	SecretAccessKey string `yaml:"secretAccessKey,omitempty"`
 }
 
 // parseSecretStore converts the raw secretStore block into a typed
@@ -98,6 +119,10 @@ func parseSecretStore(r *rawSecretStore) SecretStoreConfig {
 		aws := &SecretStoreAWS{
 			Region:     strings.TrimSpace(r.AWS.Region),
 			NamePrefix: strings.TrimSpace(r.AWS.NamePrefix),
+			// accessKeyId is an identifier (safe to trim); the secret VALUE is kept
+			// verbatim so parsing never mutates the credential.
+			AccessKeyID:     strings.TrimSpace(r.AWS.AccessKeyID),
+			SecretAccessKey: r.AWS.SecretAccessKey,
 		}
 		if aws.NamePrefix == "" {
 			aws.NamePrefix = defaultAWSNamePrefix
@@ -105,6 +130,42 @@ func parseSecretStore(r *rawSecretStore) SecretStoreConfig {
 		c.AWS = aws
 	}
 	return c
+}
+
+// EncodeSecretStoreNode encodes a typed SecretStoreConfig into a yaml.Node
+// matching the on-disk `secretStore:` block — the write-direction counterpart of
+// parseSecretStore and the analogue of EncodeDetectionNode/EncodeLLMProvidersNode.
+// It round-trips through rawSecretStore so the YAML tags stay in lockstep with
+// the read path (a single source of tag truth). Only the backend NAME and (aws)
+// region/namePrefix are encoded — the raw type has no credential field to carry,
+// so the secret-free invariant is structural. The aws child is emitted only when
+// AWS is set (echo encodes as the backend name alone); namePrefix defaults to
+// defaultAWSNamePrefix when the aws block is present but the prefix is empty,
+// matching parseSecretStore so a write→read round-trip is stable. Callers decide
+// what env/empty means (the settings writer DELETES the key so a worker falls
+// back to its local placeholder→env map).
+func EncodeSecretStoreNode(c SecretStoreConfig) (yaml.Node, error) {
+	raw := rawSecretStore{Backend: c.ResolvedBackend()}
+	if c.AWS != nil {
+		prefix := strings.TrimSpace(c.AWS.NamePrefix)
+		if prefix == "" {
+			prefix = defaultAWSNamePrefix
+		}
+		raw.AWS = &rawSecretStoreAWS{
+			Region:     strings.TrimSpace(c.AWS.Region),
+			NamePrefix: prefix,
+			// Explicit credentials are emitted only when present (omitempty). The
+			// secret VALUE is written verbatim; callers that want preserve-on-empty
+			// (the settings writer) must fill it in before encoding.
+			AccessKeyID:     strings.TrimSpace(c.AWS.AccessKeyID),
+			SecretAccessKey: c.AWS.SecretAccessKey,
+		}
+	}
+	var node yaml.Node
+	if err := node.Encode(raw); err != nil {
+		return yaml.Node{}, fmt.Errorf("config: encode secretStore: %w", err)
+	}
+	return node, nil
 }
 
 // validateSecretStore enforces the secretStore block's invariants. The empty
@@ -122,6 +183,14 @@ func validateSecretStore(c SecretStoreConfig) error {
 		}
 		if strings.TrimSpace(c.AWS.NamePrefix) == "" {
 			return fmt.Errorf("config: secretStore.aws.namePrefix is required when backend is aws")
+		}
+		// Explicit credentials are OPTIONAL, but both-or-neither: a lone accessKeyId
+		// or a lone secretAccessKey is a misconfiguration (SigV4 needs both). Empty
+		// means "fall back to env / IAM", so the pair is only validated together.
+		hasID := strings.TrimSpace(c.AWS.AccessKeyID) != ""
+		hasSecret := c.AWS.SecretAccessKey != ""
+		if hasID != hasSecret {
+			return fmt.Errorf("config: secretStore.aws.accessKeyId and secretAccessKey must be set together (both or neither)")
 		}
 	default:
 		return fmt.Errorf("config: secretStore.backend %q is invalid; must be one of: env, echo, aws", c.Backend)

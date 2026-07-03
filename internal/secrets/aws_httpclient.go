@@ -2,6 +2,8 @@ package secrets
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -30,8 +32,25 @@ import (
 // surface as the AWS __type + message (never a secret value).
 type awsHTTPClient struct {
 	endpoint string
-	signer   *auth.AWSSigV4
-	http     *http.Client
+	region   string
+	// creds resolves the CURRENT SigV4 credentials per request. For explicit/env
+	// credentials it returns a fixed value; for IMDS it refreshes near expiry (so a
+	// long-lived worker/CP keeps signing with valid temporary creds). A fresh signer
+	// is built per request from the resolved creds, so concurrent calls never share
+	// mutable signer state.
+	creds credentialsProvider
+	http  *http.Client
+}
+
+// credentialsProvider yields the current SigV4 credentials. Implementations must
+// be safe for concurrent use (the IMDS provider is mutex-guarded).
+type credentialsProvider func() (awsCredentials, error)
+
+// staticCredentials wraps a fixed credential set (explicit config keys or env
+// vars) as a provider that never changes — long-lived keys never expire and env
+// creds are read once at startup, matching the original behavior.
+func staticCredentials(c awsCredentials) credentialsProvider {
+	return func() (awsCredentials, error) { return c, nil }
 }
 
 // Compile-time assertion: the HTTP client satisfies the full mockable seam.
@@ -77,20 +96,26 @@ func NewAWSSecretsClientFromEnv(region string) (AWSSecretsClient, error) {
 	return newAWSHTTPClient(region, creds, nil), nil
 }
 
-// newAWSHTTPClient assembles an awsHTTPClient. endpoint is derived from region;
-// httpClient defaults to one with defaultAWSHTTPTimeout when nil. This is the
-// injectable seam the httptest-based test uses to point at a local mock.
+// newAWSHTTPClient assembles an awsHTTPClient over a FIXED credential set
+// (explicit config keys or env vars). endpoint is derived from region; httpClient
+// defaults to one with defaultAWSHTTPTimeout when nil. This is the injectable seam
+// the httptest-based test uses to point at a local mock.
 func newAWSHTTPClient(region string, creds awsCredentials, httpClient *http.Client) *awsHTTPClient {
+	return newAWSHTTPClientWithCreds(region, staticCredentials(creds), httpClient)
+}
+
+// newAWSHTTPClientWithCreds assembles an awsHTTPClient over a credentials
+// provider (the IMDS path uses this so creds refresh on expiry). httpClient
+// defaults to one with defaultAWSHTTPTimeout when nil.
+func newAWSHTTPClientWithCreds(region string, creds credentialsProvider, httpClient *http.Client) *awsHTTPClient {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: defaultAWSHTTPTimeout}
 	}
 	return &awsHTTPClient{
 		endpoint: fmt.Sprintf("https://secretsmanager.%s.amazonaws.com/", region),
-		signer: auth.NewAWSSigV4(
-			creds.AccessKeyID, creds.SecretAccessKey, creds.SessionToken,
-			region, "secretsmanager",
-		),
-		http: httpClient,
+		region:   region,
+		creds:    creds,
+		http:     httpClient,
 	}
 }
 
@@ -118,7 +143,18 @@ func (c *awsHTTPClient) call(action string, body any, out any) error {
 	}
 	req.Header.Set("Content-Type", "application/x-amz-json-1.1")
 	req.Header.Set("X-Amz-Target", "secretsmanager."+action)
-	if err := c.signer.Transform(req); err != nil {
+	creds, err := c.creds()
+	if err != nil {
+		// Never echo a credential; only the action + underlying resolution error.
+		return fmt.Errorf("secrets: aws credentials for %s: %w", action, err)
+	}
+	// A fresh signer per request keeps the CURRENT session token in the signature
+	// (IMDS creds rotate) and avoids sharing mutable signer state across goroutines.
+	signer := auth.NewAWSSigV4(
+		creds.AccessKeyID, creds.SecretAccessKey, creds.SessionToken,
+		c.region, "secretsmanager",
+	)
+	if err := signer.Transform(req); err != nil {
 		return fmt.Errorf("secrets: aws sign %s: %w", action, err)
 	}
 	resp, err := c.http.Do(req)
@@ -186,7 +222,15 @@ func (c *awsHTTPClient) PutSecretValue(name, value string) (string, error) {
 	var out struct {
 		VersionID string `json:"VersionId"`
 	}
-	req := map[string]string{"SecretId": name, "SecretString": value}
+	// A raw SigV4 caller must supply the idempotency token the AWS SDK would
+	// otherwise auto-generate; without it AWS rejects the write with
+	// InvalidRequestException. A fresh token per call is correct: each Put is a
+	// distinct intended write and we do not auto-retry at this layer.
+	token, err := newIdempotencyToken()
+	if err != nil {
+		return "", fmt.Errorf("secrets: aws PutSecretValue token: %w", err)
+	}
+	req := map[string]string{"SecretId": name, "SecretString": value, "ClientRequestToken": token}
 	if err := c.call("PutSecretValue", req, &out); err != nil {
 		return "", err
 	}
@@ -198,11 +242,35 @@ func (c *awsHTTPClient) CreateSecret(name, value string) (string, error) {
 	var out struct {
 		VersionID string `json:"VersionId"`
 	}
-	req := map[string]string{"Name": name, "SecretString": value}
+	// See PutSecretValue: CreateSecret likewise requires a caller-supplied
+	// ClientRequestToken since we are not using the AWS SDK.
+	token, err := newIdempotencyToken()
+	if err != nil {
+		return "", fmt.Errorf("secrets: aws CreateSecret token: %w", err)
+	}
+	req := map[string]string{"Name": name, "SecretString": value, "ClientRequestToken": token}
 	if err := c.call("CreateSecret", req, &out); err != nil {
 		return "", err
 	}
 	return out.VersionID, nil
+}
+
+// newIdempotencyToken returns a fresh RFC 4122 version-4 UUID string (36 chars,
+// 8-4-4-4-12 hex) for use as an AWS ClientRequestToken. Secrets Manager requires
+// this token on PutSecretValue/CreateSecret (32–64 chars); the AWS SDK generates
+// it automatically, but warden's dependency-free SigV4 client must supply its own.
+// It is not a secret. crypto/rand.Read failing is near-impossible, but the error
+// is propagated rather than swallowed: sending an empty token would just re-trigger
+// the same AWS InvalidRequestException.
+func newIdempotencyToken() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // variant 10
+	h := hex.EncodeToString(b[:])
+	return fmt.Sprintf("%s-%s-%s-%s-%s", h[0:8], h[8:12], h[12:16], h[16:20], h[20:32]), nil
 }
 
 // DeleteSecret implements AWSSecretsClient. ForceDeleteWithoutRecovery makes the

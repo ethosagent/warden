@@ -70,3 +70,15 @@ central:
   caCert: /etc/warden/certs/proxy-ca.crt
   mcpPushInterval: 30s          # forward MCP inventory + observed schema (when mcp.enabled)
                                 # so the control-plane dashboard shows MCP per worker
+
+# Tamper-evident audit trail. Every mediated event gets an Ed25519-signed
+# receipt; the signing key persists in /data (the worker's writable volume) so
+# receipts stay verifiable across restarts. Compliance tags (OWASP/MITRE
+# control IDs) are applied BEFORE signing, so the receipt covers them too.
+audit:
+  signedReceipts:
+    enabled: true
+    keyFile: /data/receipt-signing.key   # persisted Ed25519 key → receipts verify across restarts
+    log: /data/receipts.jsonl
+  compliance:
+    enabled: true                        # tag events with OWASP/MITRE control IDs (covered by the receipt signature)

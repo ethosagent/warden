@@ -684,10 +684,10 @@ func resolveSecretStore(distributed *config.SettingsWire, local config.Policy) c
 	return local.SecretStore
 }
 
-// awsSecretsClientFactory builds the AWS Secrets Manager client for a region.
-// It defaults to the real ENV-credentialed net/http + SigV4 client and is a
-// package var so tests inject a fake without touching AWS or the network.
-var awsSecretsClientFactory = secrets.NewAWSSecretsClientFromEnv
+// awsSecretsClientFactory builds the AWS Secrets Manager client for a region,
+// resolving credentials by precedence (explicit config keys → env → IMDS role).
+// It is a package var so tests inject a fake without touching AWS or the network.
+var awsSecretsClientFactory = secrets.NewAWSSecretsClient
 
 // newSecretFetcher also returns the underlying SecretStore for the echo/aws
 // backends (nil for env, which has no store) so the dashboard's read-only
@@ -706,7 +706,7 @@ func newSecretFetcher(pol config.Policy, mapping map[string]string) (secrets.Fet
 		if ss.AWS == nil {
 			return nil, nil, fmt.Errorf("secretStore.backend=aws requires an aws config block")
 		}
-		client, err := awsSecretsClientFactory(ss.AWS.Region)
+		client, err := awsSecretsClientFactory(ss.AWS.Region, ss.AWS.AccessKeyID, ss.AWS.SecretAccessKey)
 		if err != nil {
 			return nil, nil, fmt.Errorf("secretStore.backend=aws: %w", err)
 		}

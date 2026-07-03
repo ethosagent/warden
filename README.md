@@ -158,8 +158,9 @@ To put **your own** service behind Warden, copy the `ethos` service block: attac
 
 - **ENV** — environment variable mapping (phase 1)
 - **Vault** — HashiCorp Vault KV v1/v2 via HTTP API (no SDK dependency)
-- **AWS Secrets Manager** — interface-only (wire in your AWS SDK client)
+- **AWS Secrets Manager** — read/write store via a dependency-free SigV4 HTTP client; credentials resolve from each node's env or IAM role
 - **GCP Secret Manager** — interface-only (wire in your GCP SDK client)
+- **Backend selection** — choose env / echo / AWS from the dashboard (**Settings → Secret backend**) as well as the `secretStore:` config block; only the backend name + region/prefix are stored, never a credential
 
 ### Observability
 

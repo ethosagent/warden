@@ -416,7 +416,14 @@ func assertNoSecretValueFields(t *testing.T, typ reflect.Type, seen map[reflect.
 			leaf = leaf.Elem()
 		}
 		isContainer := leaf.Kind() == reflect.Struct
-		if looksSecret && !isEnvRef && !isContainer {
+		// DELIBERATE, PRODUCT-OWNER-SANCTIONED EXCEPTION: the aws secret backend MAY
+		// carry explicit AWS credentials on the wire (SecretsSettings.AccessKeyID /
+		// SecretAccessKey) so a fleet can be credentialed centrally. This is the ONE
+		// value-carrying pair allowed; every other secret-shaped scalar field is still
+		// rejected here.
+		sanctioned := typ == reflect.TypeOf(SecretsSettings{}) &&
+			(name == "AccessKeyID" || name == "SecretAccessKey")
+		if looksSecret && !isEnvRef && !isContainer && !sanctioned {
 			t.Errorf("SettingsWire field %q looks like a secret VALUE carrier (must reference by env name only)", name)
 		}
 		assertNoSecretValueFields(t, f.Type, seen)
@@ -481,6 +488,32 @@ func TestSecretsSettingsFromPolicy_BackendSelector(t *testing.T) {
 	})
 	if aws == nil || aws.Backend != SecretBackendAWS || aws.Region != "us-east-1" || aws.NamePrefix != "warden/" {
 		t.Fatalf("aws projection = %+v, want backend/region/prefix", aws)
+	}
+}
+
+// TestSecretsSettings_ExplicitCredentialsRoundTrip proves the OPTIONAL explicit
+// aws credentials project onto the wire and rebuild symmetrically, while env still
+// projects nil (no wire block, nothing to distribute).
+func TestSecretsSettings_ExplicitCredentialsRoundTrip(t *testing.T) {
+	// env still projects nil even though the reverse converter now knows about keys.
+	if got := secretsSettingsFromPolicy(SecretStoreConfig{Backend: SecretBackendEnv}); got != nil {
+		t.Fatalf("env backend projected %+v, want nil", got)
+	}
+	// aws with explicit keys → wire carries them.
+	aws := secretsSettingsFromPolicy(SecretStoreConfig{
+		Backend: SecretBackendAWS,
+		AWS: &SecretStoreAWS{
+			Region: "us-east-1", NamePrefix: "warden/",
+			AccessKeyID: "AKIAWIRE", SecretAccessKey: "sk-wire",
+		},
+	})
+	if aws == nil || aws.AccessKeyID != "AKIAWIRE" || aws.SecretAccessKey != "sk-wire" {
+		t.Fatalf("aws projection dropped explicit keys: %+v", aws)
+	}
+	// Reverse rebuilds an equivalent config carrying the keys.
+	cfg := SecretStoreConfigFromSettings(aws)
+	if cfg.AWS == nil || cfg.AWS.AccessKeyID != "AKIAWIRE" || cfg.AWS.SecretAccessKey != "sk-wire" {
+		t.Fatalf("SecretStoreConfigFromSettings dropped explicit keys: %+v", cfg.AWS)
 	}
 }
 

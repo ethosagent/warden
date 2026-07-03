@@ -88,7 +88,7 @@ func (s *Server) handleQueryGenerate(w http.ResponseWriter, r *http.Request) {
 	if gen == nil {
 		writeJSONStatus(w, http.StatusConflict, map[string]string{
 			"error":   "llm_not_configured",
-			"message": "Add an LLM provider in Settings → Guardrails → Judge to use plain-English queries.",
+			"message": "Add an LLM provider in Settings → LLM Providers to use plain-English queries.",
 		})
 		return
 	}

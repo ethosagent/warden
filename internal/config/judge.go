@@ -106,14 +106,21 @@ func validateJudge(j JudgeConfig, agents []AgentPolicy) error {
 	if !j.Enabled {
 		return nil
 	}
-	if strings.TrimSpace(j.Model) == "" {
-		return fmt.Errorf("config: judge.model is required when judge.enabled")
-	}
-	if strings.TrimSpace(j.APIKeyEnv) == "" {
-		return fmt.Errorf("config: judge.apiKeyEnv is required when judge.enabled")
-	}
-	if strings.TrimSpace(j.BaseURL) == "" {
-		return fmt.Errorf("config: judge.baseURL is required when judge.enabled")
+	// A named llmProvider supplies the LLM connection (its BaseURL/Model/APIKeyEnv
+	// build the client via BuildLLMClients; resolveJudgeLLM never reads the inline
+	// trio in that case), so the inline model/baseURL/apiKeyEnv are optional then.
+	// They are only required on the inline path (llmProvider empty). Existence of a
+	// named provider is enforced separately by validateJudgeProviderRef.
+	if strings.TrimSpace(j.LLMProvider) == "" {
+		if strings.TrimSpace(j.Model) == "" {
+			return fmt.Errorf("config: judge.model is required when judge.enabled")
+		}
+		if strings.TrimSpace(j.APIKeyEnv) == "" {
+			return fmt.Errorf("config: judge.apiKeyEnv is required when judge.enabled")
+		}
+		if strings.TrimSpace(j.BaseURL) == "" {
+			return fmt.Errorf("config: judge.baseURL is required when judge.enabled")
+		}
 	}
 	if len(agents) == 0 {
 		return fmt.Errorf("config: at least one agents[] policy is required when judge.enabled")

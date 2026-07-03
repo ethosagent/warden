@@ -31,6 +31,8 @@ services:
       - "7070:7070"                  # fleet dashboard + /policy + /central/ingest
     environment:
       - WARDEN_CP_TOKEN=${WARDEN_CP_TOKEN:-dev-token}
+      # API key env for the llmProviders registry (Explore NL→SQL / judge) — resolves node-locally, never rides the wire.
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
     volumes:
       - ../../configs/config.ethos.yaml:/etc/warden/config.yaml:ro   # served policy: allow-all
       - ./certs:/etc/warden/certs:ro
@@ -59,6 +61,8 @@ services:
       # config.worker.yaml carries a demo secret mapping; this satisfies it. The
       # real value stays on the worker and never reaches the control plane.
       - EXAMPLE_SECRET=demo-local-secret-not-a-real-key
+      # API key env for the llmProviders registry (Explore NL→SQL / judge) — resolves node-locally, never rides the wire.
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
     volumes:
       - ../../configs/config.worker.yaml:/etc/warden/config.yaml:ro  # managed: policy from the CP
       - ./certs:/etc/warden/certs:ro

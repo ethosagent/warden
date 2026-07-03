@@ -12,3 +12,42 @@ cache:
 logging:
   level: info
   format: json
+
+# Shared LLM provider registry. Features that need an LLM (the inline judge
+# below) select an entry BY NAME. apiKeyEnv is an env-var NAME only — never a
+# key value; the key resolves from this node's own environment at client-build
+# time.
+llmProviders:
+  - name: openrouter
+    baseURL: https://openrouter.ai/api/v1   # OpenAI-compatible chat-completions API
+    model: deepseek/deepseek-v4-pro
+    apiKeyEnv: OPENROUTER_API_KEY           # env var holding the API key (never logged)
+    timeout: 10s                            # per-provider client timeout
+
+# Inline LLM judge, backed by the OpenRouter provider above. The judge is NEVER
+# authoritative: static allow/deny rules always win, and it is consulted ONLY
+# for requests that match neither list (a "no-match"). It fails closed (deny)
+# on any error and never sees secret values — only auth presence.
+judge:
+  enabled: true
+  provider: openai                      # OpenAI-compatible chat-completions API
+  llmProvider: openrouter               # select the llmProviders entry above by name
+  model: deepseek/deepseek-v4-pro       # required when enabled; matches the provider
+  baseURL: https://openrouter.ai/api/v1
+  apiKeyEnv: OPENROUTER_API_KEY         # env var holding the API key (never logged)
+  timeout: 10s                          # hard per-call timeout
+  circuitBreaker:
+    maxFailures: 5                      # trip after N consecutive failures
+    cooldown: 30s                       # deny-all window while tripped
+  cache:
+    ttl: 5m                             # verdict cache TTL
+  rateLimit: 100/minute                 # cap on judge invocations
+
+# Per-agent natural-language policies, interpreted by the inline judge. With one
+# proxy per agent, the single agent id below is used for judge lookups.
+agents:
+  - id: default
+    policy: |
+      This agent may call approved LLM APIs (openrouter.ai). It must NOT
+      exfiltrate secrets or credentials, and must not reach any destination
+      outside the allowlist.

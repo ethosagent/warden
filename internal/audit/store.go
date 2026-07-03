@@ -29,7 +29,7 @@ func NewTaggingStore(inner analytics.AnalyticsStore, mapper *Mapper) *TaggingSto
 // StoreEvent tags the event with compliance control IDs, then stores it.
 func (t *TaggingStore) StoreEvent(e analytics.Event) error {
 	if t.mapper != nil {
-		mappings := t.mapper.MapEvent(e.Decision, e.Protocol, detectionsFor(e))
+		mappings := t.mapper.MapEvent(e.Decision, e.Protocol, detectionsFor(e), len(e.SwappedRefs) > 0)
 		if len(mappings) > 0 {
 			ids := make([]string, 0, len(mappings))
 			for _, m := range mappings {
