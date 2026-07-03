@@ -191,6 +191,10 @@
   .legend .li { display:flex; align-items:center; gap:6px; }
   .legend .sw { width:10px; height:10px; border-radius:3px; }
 
+  /* ---------- Chart x-axis ---------- */
+  .xaxis { position:relative; height:15px; margin-top:6px; }
+  .xaxis .xtick { position:absolute; top:0; font-size:11px; color:var(--muted); font-variant-numeric:tabular-nums; white-space:nowrap; }
+
   /* ---------- Bar list ---------- */
   .barlist .row { display:grid; grid-template-columns:150px 1fr 52px; align-items:center; gap:12px; padding:6px 0; }
   .barlist .lbl { font-size:12.5px; }
@@ -1355,11 +1359,29 @@ function renderEgressChart(timeline){
   const l1=allow.slice();
   const l2=allow.map((a,i)=>a+deny[i]);
   let grid=''; for(let g=0;g<=4;g++){ const yy=pad+g*(H-2*pad)/4; grid+='<line x1="'+pad+'" y1="'+yy+'" x2="'+(W-pad)+'" y2="'+yy+'" stroke="#1a2634" stroke-width="1"/>'; }
-  el.innerHTML='<svg viewBox="0 0 '+W+' '+H+'" width="100%" height="210" preserveAspectRatio="none">'
+  const svg='<svg viewBox="0 0 '+W+' '+H+'" width="100%" height="210" preserveAspectRatio="none">'
     +grid
     +'<path d="'+area(l2,l1)+'" fill="rgba(244,63,94,.28)" stroke="var(--red)" stroke-width="1.2"/>'
     +'<path d="'+area(l1,base0)+'" fill="rgba(45,212,191,.22)" stroke="var(--teal)" stroke-width="1.6"/>'
     +'</svg>';
+  // Time x-axis: ~5-6 evenly spaced tick labels aligned under their bucket x-position.
+  const parseAt=i=>{ const b=timeline[i]&&timeline[i].bucket; if(!b) return null; const d=new Date(b); return isNaN(d.getTime())?null:d; };
+  const MON=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const fmtTick=(d,multiDay)=>{ const hm=String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');
+    return multiDay? MON[d.getMonth()]+' '+d.getDate()+' '+hm : hm; };
+  let first=null,last=null;
+  for(let i=0;i<n;i++){ const d=parseAt(i); if(d){ if(!first) first=d; last=d; } }
+  const multiDay = first&&last && (last-first)>24*3600*1000;
+  let ticks='', seen={};
+  const count=Math.min(6,n);
+  for(let k=0;k<count;k++){
+    const idx = count<=1? 0 : Math.round(k*(n-1)/(count-1));
+    if(seen[idx]) continue; seen[idx]=1;
+    const d=parseAt(idx); if(!d) continue;
+    const tf = n<=1? 'translateX(-50%)' : idx===0? 'translateX(0)' : idx===n-1? 'translateX(-100%)' : 'translateX(-50%)';
+    ticks+='<span class="xtick" style="left:'+(x(idx)/W*100).toFixed(2)+'%;transform:'+tf+'">'+esc(fmtTick(d,multiDay))+'</span>';
+  }
+  el.innerHTML = svg + (ticks? '<div class="xaxis">'+ticks+'</div>' : '');
 }
 function renderClassBars(byClass){
   const el=document.getElementById('classBars'); if(!el) return;

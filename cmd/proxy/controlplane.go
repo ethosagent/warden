@@ -17,6 +17,7 @@ import (
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/controlplane"
+	"github.com/ethosagent/warden/internal/detect"
 	"github.com/ethosagent/warden/internal/integration"
 	_ "github.com/ethosagent/warden/internal/integration/webhook" // register the webhook sink
 	"github.com/ethosagent/warden/internal/observability"
@@ -187,6 +188,16 @@ func runControlPlane(cmd *cobra.Command, opts cpOptions) error {
 		logger.Info("control plane integrations", "count", len(integrations), "alertsDB", alertDBPath)
 	}
 
+	// Temporal detection: convert the CP-local detection config into the engine
+	// config (starting from detect.DefaultConfig() so unset fields keep the engine
+	// defaults — no default numbers are duplicated in internal/config). Detection is
+	// ON by default; when enabled it makes the Alert Store always-on so findings
+	// land even with zero integrations configured.
+	detectCfg, detectionEnabled, detectionTick := toDetectConfig(pol.Detection)
+	if detectionEnabled {
+		logger.Info("control plane detection", "enabled", true, "tick", detectionTick.String(), "alertsDB", alertDBPath)
+	}
+
 	// Build the WRITE-scoped secret store from the CP's OWN secretStore.backend.
 	// echo/aws mount the /central/secrets endpoints; env/none return a nil store so
 	// the endpoints stay unmounted — back-compatible. An aws backend with missing
@@ -208,6 +219,12 @@ func runControlPlane(cmd *cobra.Command, opts cpOptions) error {
 		// Report the backend name to the dashboard only when a writable store was
 		// actually built (echo/aws); env/none leaves it empty → tab reports "none".
 		SecretStoreBackend: secretStoreBackendName(secretStore, pol.SecretStore),
+		// Temporal detection: when enabled (the default) the control plane builds
+		// the engine AND the always-on Alert Store (Manager built even with zero
+		// integrations) so findings land without any sink configured.
+		DetectionEnabled: detectionEnabled,
+		Detection:        detectCfg,
+		DetectionTick:    detectionTick,
 	})
 
 	httpSrv := &http.Server{
@@ -316,6 +333,82 @@ func toInstanceConfigs(insts []config.IntegrationInstance) []integration.Instanc
 		out = append(out, ic)
 	}
 	return out
+}
+
+// toDetectConfig converts the CP-local detection config into the detect engine
+// config, the enabled flag, and the tick interval. It starts from
+// detect.DefaultConfig() and applies ONLY the operator's set overrides, so the
+// numeric defaults live in exactly one place (internal/detect) and internal/config
+// stays free of a detect import — mirroring how toInstanceConfigs keeps the
+// integration mapping in this thin cmd layer. Returns enabled=false (and a zero
+// config) when the operator disabled detection, so the control plane reverts to
+// its pre-detection behavior.
+func toDetectConfig(dc config.DetectionConfig) (detect.Config, bool, time.Duration) {
+	if !dc.Enabled {
+		return detect.Config{}, false, 0
+	}
+	cfg := detect.DefaultConfig()
+	if dc.MaxKeys > 0 {
+		cfg.MaxKeys = dc.MaxKeys
+	}
+
+	if v := dc.ErrorRate.Enabled; v != nil {
+		cfg.ErrorRate.Enabled = *v
+	}
+	if v := dc.ErrorRate.Window; v != nil {
+		cfg.ErrorRate.Window = *v
+	}
+	if v := dc.ErrorRate.MinSamples; v != nil {
+		cfg.ErrorRate.MinSamples = *v
+	}
+	if v := dc.ErrorRate.RateThreshold; v != nil {
+		cfg.ErrorRate.RateThreshold = *v
+	}
+
+	if v := dc.AuthFailBurst.Enabled; v != nil {
+		cfg.AuthFailBurst.Enabled = *v
+	}
+	if v := dc.AuthFailBurst.Window; v != nil {
+		cfg.AuthFailBurst.Window = *v
+	}
+	if v := dc.AuthFailBurst.CountThreshold; v != nil {
+		cfg.AuthFailBurst.CountThreshold = *v
+	}
+
+	if v := dc.CostAnomaly.Enabled; v != nil {
+		cfg.CostAnomaly.Enabled = *v
+	}
+	if v := dc.CostAnomaly.Window; v != nil {
+		cfg.CostAnomaly.Window = *v
+	}
+	if v := dc.CostAnomaly.BudgetUSD; v != nil {
+		cfg.CostAnomaly.BudgetUSD = *v
+	}
+
+	if v := dc.ResponseTime.Enabled; v != nil {
+		cfg.ResponseTime.Enabled = *v
+	}
+	if v := dc.ResponseTime.Window; v != nil {
+		cfg.ResponseTime.Window = *v
+	}
+	if v := dc.ResponseTime.MinSamples; v != nil {
+		cfg.ResponseTime.MinSamples = *v
+	}
+	if v := dc.ResponseTime.FloorMs; v != nil {
+		cfg.ResponseTime.FloorMs = *v
+	}
+	if v := dc.ResponseTime.DegradeFactor; v != nil {
+		cfg.ResponseTime.DegradeFactor = *v
+	}
+	if v := dc.ResponseTime.BaselineAlpha; v != nil {
+		cfg.ResponseTime.BaselineAlpha = *v
+	}
+
+	tick := controlplane.DefaultDetectionTick
+	if dc.TickInterval != nil {
+		tick = *dc.TickInterval
+	}
+	return cfg, true, tick
 }
 
 // dirWritable reports whether dir is writable by creating and removing a temp
