@@ -1508,7 +1508,7 @@ function toggleLiveTail(){
     return;
   }
   liveTailTimer=setInterval(()=>{ if(currentTab()==='activity') loadActivity(); }, 2000);
-  if(btn){ btn.classList.add('active'); btn.textContent='Live tail ●'; }
+  if(btn){ btn.classList.add('active'); btn.innerHTML='Live tail <span style="color:var(--green)">●</span>'; }
 }
 function activityDetail(e,dec){
   const reason=e.Reason||e.JudgeReason||'—';
@@ -2580,7 +2580,7 @@ setInterval(()=>{
   if(t==='overview') loadOverview();
   else if(t==='activity') loadActivity();
   else if(t==='fleet') loadFleet();
-}, 5000);
+}, 10000);
 // keep the "updated …" label fresh
 setInterval(()=>{ const d=window.__analytics; const u=document.getElementById('updatedLabel'); if(d&&d.generatedAt&&u) u.textContent='updated '+relTime(d.generatedAt); }, 1000);
 window.addEventListener('resize', ()=>{ const d=window.__analytics; if(d && currentTab()==='overview') renderOverview(d); });
