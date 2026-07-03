@@ -32,10 +32,10 @@ func detectionConfig(t *testing.T, allowDomain string) Config {
 // engine are built even with ZERO integration instances.
 func TestDetection_AlwaysOnStore(t *testing.T) {
 	srv := New(detectionConfig(t, "api.openai.com"))
-	if srv.integrations == nil {
+	if srv.currentManager() == nil {
 		t.Fatal("always-on Alert Store: Manager should be built with zero integrations when detection is ON")
 	}
-	if srv.detector == nil {
+	if len(srv.pipeline.Detectors()) == 0 {
 		t.Fatal("detection engine should be built when detection is ON")
 	}
 	// A zero-instance Manager must start and stop cleanly (Router binds nothing).
@@ -45,7 +45,7 @@ func TestDetection_AlwaysOnStore(t *testing.T) {
 }
 
 // TestDetection_OffIsBackCompat asserts detection OFF builds NO detection engine
-// (so no detector tick loop starts — the Start guard is `if s.detector != nil`),
+// (so the pipeline reports no active detectors and no tick loop starts),
 // regardless of whether an alert store exists. It also pins the genuine "no
 // Manager" case. NOTE: after the always-on merge, an AlertDBPath being SET ALWAYS
 // builds the alert pipeline (the always-on Alert Store design), so "no Manager" is
@@ -58,7 +58,7 @@ func TestDetection_OffIsBackCompat(t *testing.T) {
 		AlertDBPath:      filepath.Join(t.TempDir(), "warden-alerts.db"),
 		DetectionEnabled: false, // explicitly off
 	})
-	if withStore.detector != nil {
+	if len(withStore.pipeline.Detectors()) != 0 {
 		t.Fatal("detection OFF should build NO engine (and thus no detector tick)")
 	}
 
@@ -68,11 +68,11 @@ func TestDetection_OffIsBackCompat(t *testing.T) {
 		PolicyPath:       writePolicyFile(t, "api.openai.com"),
 		DetectionEnabled: false,
 	})
-	if bare.integrations != nil {
-		t.Fatal("no AlertDBPath + zero integrations should build NO Manager (back-compat)")
+	if bare.pipeline != nil {
+		t.Fatal("no AlertDBPath + zero integrations should build NO pipeline/Manager (back-compat)")
 	}
-	if bare.detector != nil {
-		t.Fatal("detection OFF should build NO engine")
+	if bare.currentManager() != nil {
+		t.Fatal("no AlertDBPath should yield a nil current manager (back-compat)")
 	}
 }
 
@@ -94,7 +94,7 @@ type alertRow struct {
 // fire the M1 bridge, proving the two producers run side by side.
 func TestDetection_EndToEnd(t *testing.T) {
 	srv := New(detectionConfig(t, "api.openai.com"))
-	if srv.integrations == nil || srv.detector == nil {
+	if srv.currentManager() == nil || len(srv.pipeline.Detectors()) == 0 {
 		t.Fatal("detection ON should build both the Manager and the engine")
 	}
 
@@ -124,9 +124,9 @@ func TestDetection_EndToEnd(t *testing.T) {
 
 	// Drive exactly one detection tick (Evaluate + publish). The Alert Store persist
 	// in AlertManager.Ingest is synchronous, so the alert is queryable immediately.
-	srv.runDetectionTick()
+	srv.pipeline.RunTick()
 
-	alerts := srv.integrations.ListAlerts(0)
+	alerts := srv.currentManager().ListAlerts(0)
 	var sawAuth, sawBridge bool
 	for _, a := range alerts {
 		switch a.DedupKey {
@@ -197,7 +197,7 @@ func TestDetection_TickLoopLifecycle(t *testing.T) {
 
 	// Poll briefly for the auto-ticker (50ms) to Evaluate and publish the alert.
 	deadline := time.Now().Add(3 * time.Second)
-	for len(srv.integrations.ListAlerts(0)) == 0 {
+	for len(srv.currentManager().ListAlerts(0)) == 0 {
 		if time.Now().After(deadline) {
 			t.Fatal("auto tick loop did not land the alert within the deadline")
 		}

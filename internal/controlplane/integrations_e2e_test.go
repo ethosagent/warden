@@ -77,7 +77,7 @@ func TestIntegrations_EndToEnd(t *testing.T) {
 			Match:  []integration.MatchClause{{Category: "security"}},
 		}},
 	})
-	if srv.integrations == nil {
+	if srv.currentManager() == nil {
 		t.Fatal("integrations manager should be constructed when configured")
 	}
 

@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -43,6 +44,10 @@ type Params struct {
 	AdminAddr  string
 	Version    string
 	LocalOnly  bool
+	// AlertsDBPath is the SQLite alert-store path for the LOCAL-ONLY embedded alert
+	// pipeline. Empty ⇒ default to a sibling of DBPath (warden-alerts.db). Ignored
+	// in managed/fleet mode (the control plane hosts the pipeline there).
+	AlertsDBPath string
 }
 
 // Run loads config, wires dependencies behind their interfaces, constructs the
@@ -231,6 +236,30 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		return err
 	}
 
+	// Embedded alert pipeline (LOCAL-ONLY only). In fleet mode the pipeline is
+	// CP-hosted and Findings ride central ingest; a standalone worker has no control
+	// plane, so it runs the SAME embeddable pipeline in-process and feeds it from its
+	// own analytics stream (teed off the async writer below). FAIL-OPEN: a store-open
+	// or manager-build failure logs and disables alerting — it NEVER blocks proxying.
+	// The alert DB is a sibling of the analytics DB unless --alerts-db overrides it.
+	// A fleet (managed) worker builds nothing here — behavior is byte-identical to
+	// before (no pipeline, no alert store, an empty Alerts tab).
+	var alerts *workerAlerts
+	if localOnly {
+		alertDBPath := p.AlertsDBPath
+		if alertDBPath == "" {
+			alertDBPath = filepath.Join(filepath.Dir(dbPath), "warden-alerts.db")
+		}
+		alerts = newWorkerAlerts(pol, configPath, alertDBPath, agentID, logger)
+	}
+	// Stop instances + close the worker-owned alert store on shutdown. Registered
+	// BEFORE the async writer's Close defer (below), so defer LIFO drains the async
+	// queue FIRST — the final teed batch's Observe still reaches a live store + router
+	// — and only then closes the alert store.
+	if alerts != nil {
+		defer alerts.Close()
+	}
+
 	// Reusable scanner for the MCP gateway. Constructed once from local config and
 	// reused on every control-plane-driven gateway rebuild (the scanner, store,
 	// and agentID are LOCAL — never distributed).
@@ -329,7 +358,16 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// path, so the request goroutine pays only the sub-µs enqueue. Overflow is
 	// BACKPRESSURE, never drop — events are the audit trail. It closes on
 	// shutdown (drains + flushes) below.
-	asyncStore := analytics.NewAsyncWriter(store, analytics.WithLogger(logger))
+	// In local-only, tee each stored batch into the embedded alert pipeline's Observe
+	// fan-in. The tee fires on the async writer's single writer goroutine (OFF the
+	// request hot path — the request goroutine only enqueues), so alert detection
+	// adds no latency to request handling. In fleet mode alerts is nil and no tee is
+	// installed (zero overhead; behavior unchanged).
+	asyncOpts := []analytics.AsyncOption{analytics.WithLogger(logger)}
+	if alerts != nil {
+		asyncOpts = append(asyncOpts, analytics.WithOnBatch(alerts.Observe))
+	}
+	asyncStore := analytics.NewAsyncWriter(store, asyncOpts...)
 	// Drain + flush the async queue on shutdown BEFORE the store handle closes.
 	// Deferred LIFO: store.Close() was registered earlier, so this runs first and
 	// the final batch lands while the DB is still open. Close is idempotent, so
@@ -493,10 +531,14 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	//   - audit: the worker signs receipts, so it can verify + tail its own log.
 	//     Compliance aggregation needs no wiring (the dashboard reads events). When
 	//     receipts are disabled, auditReceiptLog is "" → the receipts block zeroes.
-	//   - alerts: workers run no integrations, so no source is wired → the tab
-	//     returns [].
+	//   - alerts: a local-only worker runs the embedded pipeline, so the Alerts +
+	//     integrations surfaces are wired to it exactly as the control plane wires
+	//     them. A fleet worker has no pipeline (alerts == nil) → the tab returns [].
 	dashSrv.SetSecretStore(secretStore, secretStoreBackend)
 	dashSrv.SetAudit(auditReceiptLog, auditPubKey)
+	if alerts != nil {
+		alerts.wireDashboard(dashSrv)
+	}
 	adminMux.Handle("/healthz", adminSrv.Handler())
 	adminMux.Handle("/admin/", adminSrv.Handler())
 	adminMux.Handle("/dashboard/", dashSrv.Handler())
@@ -524,6 +566,14 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// Start the embedded alert pipeline under the run context (manager start +
+	// detection tick loop, both ctx-scoped). Nil in fleet mode. The store is closed
+	// by the deferred alerts.Close above, not on ctx.Done — the worker owns shutdown
+	// ordering (async drain → StopInstances → store close).
+	if alerts != nil {
+		alerts.Start(ctx)
+	}
 
 	// Background workers tied to the proxy lifetime: control-plane policy polling
 	// and central event forwarding. Both stop when ctx is cancelled.

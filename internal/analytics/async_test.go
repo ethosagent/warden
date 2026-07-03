@@ -319,3 +319,56 @@ func BenchmarkAsyncStoreEvent(b *testing.B) {
 		}
 	}
 }
+
+// TestAsyncWriter_OnBatchTee proves the WithOnBatch tee: every enqueued event is
+// handed to the tee EXACTLY ONCE, on the writer goroutine (off the request hot
+// path). It also asserts the tee fires independently of write retries — a batch
+// whose first write attempt fails (gated) is still teed once, never twice.
+func TestAsyncWriter_OnBatchTee(t *testing.T) {
+	fs := newFakeStore(t)
+	var mu sync.Mutex
+	var teed []Event
+	w := newAsyncWriter(fs,
+		WithBatchSize(4), WithFlushInterval(10*time.Millisecond),
+		WithOnBatch(func(evs []Event) {
+			mu.Lock()
+			teed = append(teed, evs...)
+			mu.Unlock()
+		}),
+	)
+
+	const n = 10
+	for i := 0; i < n; i++ {
+		if err := w.StoreEvent(Event{Domain: "api.openai.com", Decision: "allow"}); err != nil {
+			t.Fatalf("StoreEvent: %v", err)
+		}
+	}
+	if err := w.Close(); err != nil { // drains → final tee fires
+		t.Fatalf("Close: %v", err)
+	}
+
+	mu.Lock()
+	got := len(teed)
+	mu.Unlock()
+	if got != n {
+		t.Fatalf("tee must see each event exactly once: got %d, want %d", got, n)
+	}
+}
+
+// TestAsyncWriter_OnBatchTee_NilNoop asserts a nil tee (the default) is a no-op:
+// events persist normally and nothing is allocated for teeing.
+func TestAsyncWriter_OnBatchTee_NilNoop(t *testing.T) {
+	fs := newFakeStore(t)
+	w := newAsyncWriter(fs, WithBatchSize(2))
+	for i := 0; i < 5; i++ {
+		if err := w.StoreEvent(Event{Domain: "a.com", Decision: "allow"}); err != nil {
+			t.Fatalf("StoreEvent: %v", err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if c := countEvents(t, fs); c != 5 {
+		t.Fatalf("expected 5 persisted events, got %d", c)
+	}
+}

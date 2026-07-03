@@ -35,6 +35,7 @@ type asyncConfig struct {
 	pruneEvery    int
 	pruneInterval time.Duration
 	logger        *slog.Logger
+	onBatch       func([]Event)
 }
 
 // AsyncOption configures a NewAsyncWriter.
@@ -54,6 +55,17 @@ func WithFlushInterval(d time.Duration) AsyncOption {
 // WithLogger sets the logger for the (rare) batch-write error path. Defaults to
 // slog.Default().
 func WithLogger(l *slog.Logger) AsyncOption { return func(c *asyncConfig) { c.logger = l } }
+
+// WithOnBatch installs a TEE: fn is invoked with each batch of events as it is
+// pulled off the queue by the single writer goroutine — OFF the request hot path
+// (the request goroutine only enqueues). It runs regardless of whether the
+// subsequent SQLite write succeeds or is retried, so every event is teed exactly
+// ONCE. The local-only worker uses this to feed its own event stream into the
+// embedded alert pipeline's Observe fan-in without adding latency to request
+// handling. fn must not retain the slice past the call (the backing array is a
+// fresh allocation per batch, but the contract is copy-if-kept). A nil fn (the
+// default) disables the tee at zero cost.
+func WithOnBatch(fn func([]Event)) AsyncOption { return func(c *asyncConfig) { c.onBatch = fn } }
 
 // asyncWriter is an AnalyticsStore decorator that moves the local SQLite write
 // off the request goroutine: StoreEvent enqueues onto a bounded channel and a
@@ -217,6 +229,23 @@ func (w *asyncWriter) loop() {
 	buf := make([]Event, 0, w.cfg.batchSize)
 	flushes := 0
 
+	// tee accumulates the events observed since the last emit. It is kept SEPARATE
+	// from buf because buf is retained across a failed write (retry), while the tee
+	// must fire exactly once per event regardless of persistence retries. It stays
+	// nil (never allocated) when no onBatch tee is installed.
+	var tee []Event
+	// emitTee hands the accumulated batch to the tee (off the request hot path) and
+	// starts a FRESH backing array so the callee can never observe a slot reused by
+	// a later batch. It is decoupled from write success so an event is teed once,
+	// when its flush point is reached.
+	emitTee := func() {
+		if w.cfg.onBatch == nil || len(tee) == 0 {
+			return
+		}
+		w.cfg.onBatch(tee)
+		tee = nil
+	}
+
 	// flushBuf writes the accumulated batch and prunes every pruneEvery flushes.
 	// On a write error it retains buf (does not clear) so the events are retried
 	// on the next flush rather than dropped — backpressure will build if the
@@ -242,9 +271,10 @@ func (w *asyncWriter) loop() {
 		select {
 		case e, ok := <-w.ch:
 			if !ok {
-				// Close: channel drained of live events. Flush the tail and run a
-				// final prune, then exit.
+				// Close: channel drained of live events. Flush the tail, tee it, and
+				// run a final prune, then exit.
 				flushBuf()
+				emitTee()
 				if err := w.store.Prune(); err != nil {
 					w.logger.Warn("analytics: async final prune failed", "error", err)
 				}
@@ -252,11 +282,16 @@ func (w *asyncWriter) loop() {
 			}
 			w.depth.Add(-1)
 			buf = append(buf, e)
+			if w.cfg.onBatch != nil {
+				tee = append(tee, e)
+			}
 			if len(buf) >= w.cfg.batchSize {
 				flushBuf()
+				emitTee()
 			}
 		case <-flush.C:
 			flushBuf()
+			emitTee()
 		case <-prune.C:
 			if err := w.store.Prune(); err != nil {
 				w.logger.Warn("analytics: async prune failed", "error", err)

@@ -22,6 +22,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/ethosagent/warden/internal/alertpipeline"
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/dashboard"
@@ -79,6 +80,14 @@ type Config struct {
 	// DetectionTick is how often the engine is evaluated and its Findings
 	// published onto the alert bus. <= 0 falls back to DefaultDetectionTick.
 	DetectionTick time.Duration
+	// DetectionConfig is the CP-local typed detection config (operator overrides).
+	// It is the source the dashboard detection editor reads and the base the
+	// WriteDetection round-trip persists; the resolved Detection/DetectionEnabled/
+	// DetectionTick fields above still drive the initial engine build.
+	DetectionConfig config.DetectionConfig
+	// ResolveTTL is the silence window after which a firing alert auto-resolves
+	// (P4). 0 selects the AlertManager default; a negative value disables it.
+	ResolveTTL time.Duration
 }
 
 // policyWire is the shape sent to workers: allow/deny policy plus the optional
@@ -102,9 +111,10 @@ const (
 	// past its retention window. Retention is coarse, so an hourly sweep is ample.
 	retentionPruneInterval = 1 * time.Hour
 	// DefaultDetectionTick is the fallback evaluate cadence for the temporal
-	// detection engine when Config.DetectionTick is unset (<= 0). It is exported so
-	// the cmd converter and this package agree on one default value.
-	DefaultDetectionTick = 20 * time.Second
+	// detection engine when Config.DetectionTick is unset (<= 0). It is re-exported
+	// from alertpipeline so the cmd converter, this package, and the pipeline all
+	// agree on one default value.
+	DefaultDetectionTick = alertpipeline.DefaultDetectionTick
 )
 
 // Server is the control plane. It is safe for concurrent use. Its
@@ -119,33 +129,27 @@ type Server struct {
 	mcp      *mcpStore
 	policy   *policyServer
 	writeMu  sync.Mutex // serializes policy + integrations edits
-	// integrationsMu guards the integrations pointer and lifeCtx. The bridge and
-	// alerts read paths take it for read; a reload takes it for write to swap the
-	// manager pointer, so live wirings (ingest bridge, dashboard alerts) always
-	// observe the CURRENT manager rather than a captured-once one.
-	integrationsMu sync.RWMutex
-	// integrations is the CP-hosted alert-delivery pipeline. Nil when no alert DB
-	// path is configured (or when its store/manager failed to build — fail-open: a
-	// broken integrations config never stops policy serving). Re-pointed on reload.
-	integrations *integration.Manager
+	// pipeline is the embeddable alert-delivery assembly (manager + engine + tick +
+	// bridge). Nil when no alert DB path is configured (or when its store/manager
+	// failed to build — fail-open: a broken alert config never stops policy
+	// serving). It owns the live manager pointer and the reload swap; the CP
+	// delegates its integrations reload to pipeline.ReloadManager (design A), so
+	// there is a single source of truth for "the live manager".
+	pipeline *alertpipeline.Pipeline
 	// integrationsStore is the alert system-of-record, owned by the Server (NOT the
-	// manager) so a live reload can build a new manager over the SAME store without
-	// closing it. Closed exactly once, at shutdown. Nil ⇒ integrations unavailable.
+	// pipeline) so a live reload can build a new manager over the SAME store without
+	// closing it. The pipeline holds a non-owning reference for rebuilds; the Server
+	// closes it exactly once, at shutdown. Nil ⇒ integrations unavailable.
 	integrationsStore *integration.Store
-	// lifeCtx is the Server's lifecycle context, captured in Start so a reload can
-	// bind a rebuilt manager's router goroutines to the process lifetime.
-	lifeCtx context.Context
 	// secretStore backs the /central/secrets write path. Nil ⇒ the endpoints are
 	// not mounted (env/empty backend, or aws pre-Phase-5).
 	secretStore secrets.SecretStore
-	// detector is the temporal-detection engine. Nil when detection is disabled
-	// (or when no integrations Manager was built, so there is no bus to publish
-	// onto). When non-nil it is fed every ingested event batch (Observe) and
-	// evaluated on a ticker (see Start), publishing Findings onto integrations.Bus.
-	detector *detect.Engine
-	// detectionTick is the evaluate cadence for detector; set only when detector
-	// is non-nil.
-	detectionTick time.Duration
+	// detectionConfig is the live typed detection config the dashboard editor reads
+	// and WriteDetection updates. detectionMu guards it (a short read on GET, a write
+	// at the end of WriteDetection) independent of writeMu so a GET never blocks on a
+	// slow write's file IO.
+	detectionMu     sync.RWMutex
+	detectionConfig config.DetectionConfig
 }
 
 // Compile-time assertions that the concrete types satisfy their role interfaces.
@@ -185,6 +189,8 @@ func New(cfg Config) *Server {
 		policy: newPolicyServer(cfg.PolicyPath, cfg.Token, cfg.Logger, registry),
 		// Write-scoped secret store (nil ⇒ /central/secrets not mounted).
 		secretStore: cfg.SecretStore,
+		// Live typed detection config for the dashboard editor + WriteDetection base.
+		detectionConfig: cfg.DetectionConfig,
 	}
 	// Alert pipeline (CP-hosted alert delivery + always-on Alert Store). Constructed
 	// whenever an alert DB path is set — even with ZERO configured integrations —
@@ -199,31 +205,37 @@ func New(cfg Config) *Server {
 	// which now always exist when AlertDBPath is set. FAIL-OPEN: a store-open or
 	// manager-build error is logged and skipped — a broken alert config must NEVER
 	// stop the control plane serving policy.
+	//
+	// The Server OPENS the store (it owns the DB lifecycle and closes it once at
+	// shutdown) and hands it to the embeddable alertpipeline, which builds the
+	// manager + optional detection engine + tick + bridge. The pipeline never
+	// closes the store. Detection is built inside the pipeline only when enabled AND
+	// a manager came up (there must be a bus to publish onto) — the same gate as
+	// before. Fail-open: if the store fails to OPEN, or the pipeline fails to build
+	// a manager, alerting is disabled and the Server serves policy exactly as before.
 	if cfg.AlertDBPath != "" {
 		if store, err := integration.NewStore(cfg.AlertDBPath); err != nil {
 			cfg.Logger.Error("control plane: alert pipeline disabled (alert store open failed)", "error", err)
-		} else if m, err := integration.NewManager(store, cfg.Integrations, cfg.Logger, integration.RouterOptions{}); err != nil {
-			cfg.Logger.Error("control plane: alert pipeline disabled (manager build failed)", "error", err)
-			_ = store.Close()
 		} else {
-			s.integrationsStore = store
-			s.integrations = m
+			p := alertpipeline.New(alertpipeline.Config{
+				Store:      store,
+				Instances:  cfg.Integrations,
+				Detection:  cfg.Detection,
+				Detect:     cfg.DetectionEnabled,
+				Tick:       cfg.DetectionTick,
+				ResolveTTL: cfg.ResolveTTL,
+				Logger:     cfg.Logger,
+			})
+			if p.CurrentManager() == nil {
+				// Manager build failed (fail-open): close the store we opened; the
+				// pipeline built nothing runnable. Alerting stays disabled.
+				cfg.Logger.Error("control plane: alert pipeline disabled (manager build failed)")
+				_ = store.Close()
+			} else {
+				s.integrationsStore = store
+				s.pipeline = p
+			}
 		}
-	}
-
-	// Temporal-detection engine. Built only when detection is enabled AND the alert
-	// pipeline came up (there must be a bus to publish onto). detect.NewEngine
-	// constructs only the sub-detectors whose config is Enabled; a real clock (nil)
-	// is used in production, an injected clock in tests.
-	if cfg.DetectionEnabled && s.integrations != nil {
-		tick := cfg.DetectionTick
-		if tick <= 0 {
-			tick = DefaultDetectionTick
-		}
-		s.detector = detect.NewEngine(cfg.Detection, nil)
-		s.detectionTick = tick
-		cfg.Logger.Info("control plane detection engine",
-			"detectors", s.detector.Detectors(), "tick", tick.String())
 	}
 	return s
 }
@@ -232,60 +244,24 @@ func New(cfg Config) *Server {
 // policy file (editor edits refresh synchronously). It also starts the retention
 // prune loop when the store supports it. It returns when ctx is done.
 func (s *Server) Start(ctx context.Context) {
-	// Integrations: start the CP-hosted alert-delivery pipeline. A non-nil error
-	// from Start is a JOINED report (unknown types / failed instances) — the good
-	// instances still run, so we LOG it and continue. A ctx-watcher goroutine Stops
-	// the manager (which closes its store + instances) on shutdown, mirroring the
-	// ctx-scoped goroutine style below (there is no Server.Stop).
-	// Capture the lifecycle context so a live reload can bind a rebuilt manager's
-	// router goroutines to the process lifetime (not the short-lived HTTP request).
-	s.integrationsMu.Lock()
-	s.lifeCtx = ctx
-	s.integrationsMu.Unlock()
+	// Alert pipeline: start the embeddable assembly (manager start + the
+	// detection tick loop, both ctx-scoped). The pipeline captures ctx as its
+	// lifecycle context so a live reload can bind a rebuilt manager's router
+	// goroutines to the process lifetime. It does NOT close the store — the Server
+	// owns that. A separate ctx-watcher stops the CURRENT manager's instances (a
+	// reload may have swapped it) and then closes the Server-owned store exactly
+	// once, preserving the StopInstances→Close ordering.
+	if s.pipeline != nil {
+		s.pipeline.Start(ctx)
+	}
 	if s.integrationsStore != nil {
-		if m := s.currentManager(); m != nil {
-			if err := m.Start(ctx); err != nil {
-				s.cfg.Logger.Warn("control plane: some integrations failed to start", "error", err)
-			}
-		}
 		go func() {
 			<-ctx.Done()
-			// Stop the CURRENT manager's instances (a reload may have swapped it),
-			// then close the Server-owned store exactly once.
-			if m := s.currentManager(); m != nil {
-				if err := m.StopInstances(context.Background()); err != nil {
-					s.cfg.Logger.Warn("control plane: integrations shutdown error", "error", err)
-				}
+			if err := s.pipeline.StopInstances(context.Background()); err != nil {
+				s.cfg.Logger.Warn("control plane: integrations shutdown error", "error", err)
 			}
 			if err := s.integrationsStore.Close(); err != nil {
 				s.cfg.Logger.Warn("control plane: integrations store close error", "error", err)
-			}
-		}()
-	}
-
-	// Temporal-detection tick loop: on each tick Evaluate the engine and publish
-	// every Finding onto the CURRENT manager's alert bus (→ AlertManager → Alert
-	// Store → Router). It starts whenever the engine exists; the manager it publishes
-	// onto is read PER TICK (a reload may have swapped or added it), mirroring the
-	// reload-aware bridge and shutdown call sites above — so the loop keeps working
-	// across a live reload. The loop is ctx-scoped (exits cleanly on ctx.Done) and
-	// fail-open (a panic in Evaluate/publish is recovered per tick — see
-	// runDetectionTick — so it can never crash policy serving).
-	if s.detector != nil {
-		tick := s.detectionTick
-		if tick <= 0 {
-			tick = DefaultDetectionTick
-		}
-		go func() {
-			t := time.NewTicker(tick)
-			defer t.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-t.C:
-					s.runDetectionTick()
-				}
 			}
 		}()
 	}
@@ -327,35 +303,6 @@ func (s *Server) Start(ctx context.Context) {
 	}
 }
 
-// runDetectionTick evaluates the temporal detectors once and publishes each
-// resulting Finding onto the CURRENT manager's alert bus. The manager is read
-// here (not captured once) so the tick keeps publishing to the live pipeline
-// across a reload; when no manager exists yet the tick is a no-op. It is
-// FAIL-OPEN: a panic in a detector's Evaluate or in publish is recovered and
-// logged so one bad tick can never crash the tick loop (and thus never affects
-// policy serving). It logs only the COUNT of findings emitted — never their
-// content — preserving egress hygiene. It is a method (not an inline closure) so
-// tests can drive a single deterministic tick.
-func (s *Server) runDetectionTick() {
-	defer func() {
-		if r := recover(); r != nil {
-			s.cfg.Logger.Error("control plane: detection tick panic (recovered)", "recover", r)
-		}
-	}()
-	m := s.currentManager()
-	if m == nil {
-		return
-	}
-	bus := m.Bus()
-	findings := s.detector.Evaluate()
-	for _, f := range findings {
-		bus.PublishFinding(f)
-	}
-	if len(findings) > 0 {
-		s.cfg.Logger.Debug("control plane: detection tick emitted findings", "count", len(findings))
-	}
-}
-
 // refresh reloads the served policy and wakes long-poll waiters. It delegates to
 // the composed PolicyServer; the writePolicy/writeSettings editors call it after
 // an atomic write so waiters serve the new policy immediately. Kept as a thin
@@ -390,26 +337,15 @@ func (s *Server) Handler() http.Handler {
 	var sink IngestSink = &ingestSink{registry: s.registry, mcp: s.mcp}
 	ingest.SetOnIngest(sink.SeenIngest) // track which workers are forwarding
 	ingest.SetOnMCP(sink.UpdateMCP)     // store each worker's MCP snapshot
-	// Feed each ingested batch into the alert pipeline. Two consumers run over the
-	// same batch: (1) the temporal-detection engine folds it into windowed state
-	// (the Start tick loop later Evaluates + publishes), and (2) the M1 event→Finding
-	// bridge publishes immediate block/reason Findings onto the CURRENT manager's bus
-	// (a reload may have swapped the manager). Both nil-safe; fail-open.
+	// Feed each ingested batch into the alert pipeline's Observe fan-in. Inside the
+	// pipeline two consumers run over the same batch: (1) the temporal-detection
+	// engine folds it into windowed state (the Start tick loop later Evaluates +
+	// publishes), and (2) the event→Finding bridge publishes immediate block/reason
+	// Findings onto the CURRENT manager's bus (a reload may have swapped it). Both
+	// nil-safe; fail-open.
 	if s.integrationsStore != nil {
 		ingest.SetOnEvents(func(proxyID string, events []analytics.Event) {
-			if s.detector != nil {
-				s.detector.Observe(events)
-			}
-			m := s.currentManager()
-			if m == nil {
-				return
-			}
-			bus := m.Bus()
-			for _, e := range events {
-				if f, ok := bridgeEvent(proxyID, e); ok {
-					bus.PublishFinding(f)
-				}
-			}
+			s.pipeline.Observe(proxyID, events)
 		})
 	}
 	mux.Handle("/central/ingest", ingest)
@@ -497,6 +433,13 @@ func (s *Server) Handler() http.Handler {
 			}
 			return s.reloadIntegrations(toManagerInstances(insts))
 		})
+		// Detection editor (CP-only, mirrors integrations): the source is the live
+		// typed config plus the engine's active-detector names + eviction count; the
+		// writer persists the `detection:` block and hot-reloads the live engine.
+		dash.SetDetectionSource(func() dashboard.DetectionView {
+			return dashboard.NewDetectionView(s.currentDetectionConfig(), s.pipeline.Detectors(), s.pipeline.Evictions())
+		})
+		dash.SetDetectionWriter(s.WriteDetection)
 	}
 	mux.Handle("/dashboard/", dash.Handler())
 

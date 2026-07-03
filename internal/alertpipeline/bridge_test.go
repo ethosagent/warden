@@ -1,4 +1,4 @@
-package controlplane
+package alertpipeline
 
 import (
 	"strings"
