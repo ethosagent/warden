@@ -23,8 +23,25 @@ type SQLGenerator interface {
 // judge uses (wired from the effective judge config). Passing nil (or never
 // calling it — no LLM configured, or the node's key env is empty) makes
 // POST /dashboard/api/query/generate report "llm_not_configured", which the UI
-// turns into a prompt to add an LLM provider in Settings → Judge.
-func (s *Server) SetSQLGenerator(g SQLGenerator) { s.sqlGen = g }
+// turns into a prompt to add an LLM provider in Settings.
+//
+// It is safe to call at runtime: a provider/Explore selection edit RE-INJECTS the
+// generator (the control plane recomputes the Explore client and calls this again,
+// passing nil to clear it), so the write is guarded by sqlGenMu against a concurrent
+// handleQueryGenerate read.
+func (s *Server) SetSQLGenerator(g SQLGenerator) {
+	s.sqlGenMu.Lock()
+	s.sqlGen = g
+	s.sqlGenMu.Unlock()
+}
+
+// currentSQLGen returns the live NL→SQL generator under the read lock, so a request
+// reads a consistent generator even while a reload re-injects a new one.
+func (s *Server) currentSQLGen() SQLGenerator {
+	s.sqlGenMu.RLock()
+	defer s.sqlGenMu.RUnlock()
+	return s.sqlGen
+}
 
 // generateRequest is the body of POST /dashboard/api/query/generate.
 type generateRequest struct {
@@ -65,10 +82,13 @@ func (s *Server) handleQueryGenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The distinct, machine-checkable "LLM not set up" path: 409 + a stable key.
-	if s.sqlGen == nil {
+	// Read the generator once under the lock so a concurrent re-inject (a provider/
+	// Explore edit) can never flip it between the nil-check and Evaluate.
+	gen := s.currentSQLGen()
+	if gen == nil {
 		writeJSONStatus(w, http.StatusConflict, map[string]string{
 			"error":   "llm_not_configured",
-			"message": "Add an LLM provider in Settings → Judge to use plain-English queries.",
+			"message": "Add an LLM provider in Settings → Guardrails → Judge to use plain-English queries.",
 		})
 		return
 	}
@@ -85,7 +105,7 @@ func (s *Server) handleQueryGenerate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	prompt := buildNL2SQLPrompt(s.queryEngine.Schema(), question)
-	out, err := s.sqlGen.Evaluate(prompt)
+	out, err := gen.Evaluate(prompt)
 	if err != nil {
 		// The llm client keeps the API key and raw upstream body out of its errors;
 		// still, return a bounded, generic message rather than echoing err verbatim.

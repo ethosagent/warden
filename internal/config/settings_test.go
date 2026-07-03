@@ -158,6 +158,7 @@ func TestJudgeConfigFromSettings_RoundTrip(t *testing.T) {
 	cfg := JudgeConfig{
 		Enabled:        true,
 		Provider:       "openai",
+		LLMProvider:    "anthropic-judge", // named registry selection rides the wire (a NAME, secret-free)
 		Model:          "gpt-4o-mini",
 		BaseURL:        "https://api.openai.com/v1",
 		APIKeyEnv:      "OPENAI_API_KEY",

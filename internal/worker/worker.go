@@ -231,7 +231,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 
 	// Optional inline judge. When judge.enabled is false, judge is nil and the
 	// proxy behaves exactly as before (NoMatch default-denies).
-	judge, agentID, err := buildJudge(pol, listenAddr)
+	judge, agentID, err := buildJudge(pol, listenAddr, logger)
 	if err != nil {
 		return err
 	}
@@ -549,14 +549,33 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	if alerts != nil {
 		alerts.wireDashboard(dashSrv)
 	}
-	// NL→SQL for the Explore tab reuses the SAME LLM the judge uses, built from the
-	// effective judge config via the shared BuildLLMClient helper (SECRET-LOCAL: the
-	// key is resolved from this node's own env). Fail-soft: judge off, an empty key
-	// env, or a malformed config all leave the generator unset (the Explore tab then
-	// reports "add an LLM provider"), and never block worker start.
-	if sqlGen, err := BuildLLMClient(pol.Judge); err == nil && sqlGen != nil {
-		dashSrv.SetSQLGenerator(sqlGen)
+	// NL→SQL for the Explore tab honors explore.llmProvider — a named entry in the
+	// shared llmProviders registry — INDEPENDENT of the judge; an unset explore block
+	// reuses the judge's client exactly as before (back-compat). SECRET-LOCAL: every
+	// key is resolved from this node's OWN env. Fail-soft: judge off, an empty key
+	// env, a malformed config, or a named-but-unresolved provider all leave the
+	// generator unset (the Explore tab then reports "add an LLM provider") and never
+	// block worker start.
+	judgeClient, _ := BuildLLMClient(pol.Judge)
+	exploreClients, exploreErrs := BuildLLMClients(pol.LLMProviders)
+	logLLMClientErrs(logger, exploreErrs)
+	// Guard the typed-nil interface trap: only box a non-nil concrete client into
+	// the SQLGenerator interface (a boxed nil would break the 409 path).
+	if gen := PickExploreLLM(pol.Explore.LLMProvider, exploreClients, judgeClient); gen != nil {
+		dashSrv.SetSQLGenerator(gen)
 	}
+	// LLM Providers card — READ-ONLY on the worker. Surface the configured registry
+	// with per-provider resolved status against THIS worker's OWN env, so an operator
+	// can SEE which providers are usable. Editing the registry is a control-plane /
+	// local-only WRITER capability; a managed worker leaves the writer nil (PUT → 405)
+	// because a worker has no live judge/SQLGenerator reload seam (both are built once
+	// at Run) — persisting here without a rebuild would be a misleading half-feature.
+	// The registry is captured from startup config (correct for a local-only worker;
+	// a managed worker's edits land on the control-plane dashboard).
+	startupProviders := pol.LLMProviders
+	dashSrv.SetLLMProvidersSource(func() dashboard.LLMProvidersView {
+		return dashboard.LLMProvidersView{Providers: BuildLLMProviderViews(startupProviders)}
+	})
 	adminMux.Handle("/healthz", adminSrv.Handler())
 	adminMux.Handle("/admin/", adminSrv.Handler())
 	adminMux.Handle("/dashboard/", dashSrv.Handler())

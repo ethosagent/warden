@@ -936,6 +936,15 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
 
       <!-- Judge -->
       <div class="subpage" id="sub-judge">
+        <div class="card" style="margin-bottom:16px">
+          <div class="card-head"><h3>LLM Providers</h3><span style="display:flex;align-items:center;gap:8px"><span class="sub" id="llmp-status"></span><button class="btn primary sm" id="llmp-addbtn" style="display:none" onclick="addLLMProvider()">+ Add provider</button><button class="btn primary sm" id="llmp-savebtn" style="display:none" onclick="saveLLMProviders()">Save providers</button></span></div>
+          <div class="card-pad">
+            <div class="note" style="margin-bottom:10px">A shared registry of LLM endpoints. The Judge and Explore each pick a provider <b>by name</b>. <b>apiKeyEnv</b> is the env-var NAME only — the value resolves from each node's own environment and is never entered or shown here.</div>
+            <div id="llmp-list"></div>
+            <div id="llmp-readonly" class="note" style="display:none; margin-top:10px">Managed by control plane — LLM providers are read-only on this node.</div>
+            <div id="llmp-msg" class="note" style="margin-top:8px; display:none"></div>
+          </div>
+        </div>
         <div class="grid g2">
           <div class="card">
             <div class="card-head"><h3>LLM judge configuration</h3><button class="btn primary sm" id="judgeSaveBtn" onclick="saveJudge()">Save judge</button></div>
@@ -1067,6 +1076,11 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
           <div style="display:flex; gap:10px">
             <input type="text" id="nlInput" value="which domains had the most blocked egress this week?" style="flex:1; background:var(--surface-2); border:1px solid var(--border); color:var(--text); padding:9px 12px; border-radius:9px; font:inherit;"/>
             <button class="btn primary" id="nlGenBtn">Generate SQL →</button>
+          </div>
+          <div style="display:flex; align-items:center; gap:8px; margin-top:10px; flex-wrap:wrap">
+            <span class="muted" style="font-size:12px">Provider</span>
+            <select class="btn" id="exploreProvider" onchange="saveExploreProvider()" style="display:none"></select>
+            <span class="note" id="exploreProviderNote" style="font-size:12px"></span>
           </div>
           <div class="note" style="margin-top:8px">Your configured LLM writes SQL into the editor below — review it, then Run.</div>
           <div class="note" id="nlMsg" style="margin-top:8px; display:none"></div>
@@ -1666,6 +1680,42 @@ async function loadExplore(){
   // across repeat visits to the Explore tab.
   ['qbCol','qbOp','qbVal','qbGroup'].forEach(id=>{ const el=document.getElementById(id); if(el) el.onchange=buildQuerySQL; });
   buildQuerySQL();
+  loadExploreProviders();
+}
+// loadExploreProviders populates the Explore NL→SQL provider selector from the shared
+// registry + the current explore.llmProvider selection. It is editable only where the
+// settings writer exists (the control plane); a read-only node just shows the current
+// choice. "use the judge's provider" (value "") is the default → Explore reuses the
+// judge's resolved client (back-compat).
+async function loadExploreProviders(){
+  const sel=document.getElementById('exploreProvider');
+  const note=document.getElementById('exploreProviderNote');
+  if(!sel) return;
+  let lp=null,set=null;
+  try{ [lp,set]=await Promise.all([jget('/dashboard/api/llmproviders').catch(()=>null), jget('/dashboard/api/settings').catch(()=>null)]); }catch(e){}
+  const names=((lp&&lp.providers)||[]).map(p=>p.name).filter(Boolean);
+  const editable=!!(set&&set.editable);
+  const cur=(set&&set.settings&&set.settings.explore&&set.settings.explore.llmProvider)||'';
+  window.__exploreSettings=(set&&set.settings)||{};
+  sel.innerHTML='<option value="">use the judge’s provider</option>'+
+    names.map(n=>'<option value="'+esc(n)+'"'+(n===cur?' selected':'')+'>'+esc(n)+'</option>').join('');
+  sel.style.display=editable?'':'none';
+  sel.disabled=!editable;
+  if(note) note.textContent = editable
+    ? (names.length?'':'No providers yet — add one in Guardrails → Judge → LLM Providers.')
+    : (cur?('provider: '+cur+' (managed by control plane)'):'');
+}
+async function saveExploreProvider(){
+  const sel=document.getElementById('exploreProvider'); if(!sel) return;
+  const cur=window.__exploreSettings||{};
+  const merged=Object.assign({}, cur, {explore:{llmProvider:sel.value}});
+  const note=document.getElementById('exploreProviderNote');
+  try{
+    const r=await fetch('/dashboard/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(merged)});
+    if(!r.ok){ let m='status '+r.status; try{ const e=await r.json(); if(e&&e.error) m=e.error; }catch(_e){} throw new Error(m); }
+    const d=await r.json().catch(()=>({})); window.__exploreSettings=(d&&d.settings)||merged;
+    if(note){ note.textContent='saved ✓ — takes effect now'; note.style.color='var(--teal)'; setTimeout(()=>{ note.textContent=''; note.style.color=''; },2500); }
+  }catch(err){ if(note){ note.textContent='✕ '+err.message; note.style.color='var(--amber)'; } }
 }
 function qbSyncOptionsToSchema(){
   const cols=qbSchemaCols(); if(!cols.length) return;
@@ -1809,8 +1859,8 @@ async function generateSqlFromNL(){
       return;
     }
     if(d && d.error==='llm_not_configured'){
-      setNlMsg('<span>'+esc(d.message||'Add an LLM provider in Settings → Judge to use plain-English queries.')
-        +'</span> <a href="#" id="nlJudgeLink">Open Judge settings →</a>');
+      setNlMsg('<span>'+esc(d.message||'Add an LLM provider in Guardrails → Judge → LLM Providers to use plain-English queries.')
+        +'</span> <a href="#" id="nlJudgeLink">Open LLM Providers →</a>');
       const link=document.getElementById('nlJudgeLink');
       if(link) link.addEventListener('click', e=>{
         e.preventDefault();
@@ -2176,15 +2226,16 @@ async function deleteSecretRow(key){
    Writes are read-modify-write of the full policy / settings document and are
    gated on the endpoint's editable flag (true only on the control plane).
    ============================================================ */
-const gr={ policy:null, policyEditable:false, settings:{}, settingsEditable:false, analytics:{dlp:{}}, mcpInv:{tools:[]}, dlp:null, mcp:null, judge:null };
+const gr={ policy:null, policyEditable:false, settings:{}, settingsEditable:false, analytics:{dlp:{}}, mcpInv:{tools:[]}, dlp:null, mcp:null, judge:null, llmp:{providers:[],editable:false} };
 const DLP_ACTIONS=['allow','block','redact','monitor'];
 
 async function loadGuardrails(){
-  const [pol,setres,an,mc]=await Promise.all([
+  const [pol,setres,an,mc,lp]=await Promise.all([
     jget('/dashboard/api/policy').catch(()=>null),
     jget('/dashboard/api/settings').catch(()=>null),
     jget('/dashboard/api/analytics?range='+encodeURIComponent(state.range)).catch(()=>null),
     jget('/dashboard/api/mcp').catch(()=>null),
+    jget('/dashboard/api/llmproviders').catch(()=>null),
   ]);
   gr.policy = pol || {allowlist:[],denylist:[],editable:false};
   gr.policy.allowlist = gr.policy.allowlist||[];
@@ -2194,11 +2245,14 @@ async function loadGuardrails(){
   gr.settingsEditable = !!(setres&&setres.editable);
   gr.analytics = an || {dlp:{}};
   gr.mcpInv = mc || {tools:[]};
+  gr.llmp = lp || {providers:[],editable:false};
+  gr.llmp.providers = gr.llmp.providers || [];
   const note=document.getElementById('grEditNote');
   if(note) note.textContent = gr.settingsEditable ? '' : 'read-only (managed by control plane)';
   renderEgress();
   renderDLP();
   renderMCP();
+  renderLLMProviders();
   renderJudge();
 }
 function flashBtn(id,txt){
@@ -2507,14 +2561,109 @@ async function saveMCP(){
   catch(err){ window.alert('MCP save failed: '+err.message); }
 }
 
+/* ---------- LLM Providers (/dashboard/api/llmproviders) ---------- */
+function llmpResolvedPill(p){
+  if(p&&p.resolved) return '<span class="pill p-allow" title="key env present on this node">key present</span>';
+  const env=(p&&p.apiKeyEnv)||'';
+  return '<span class="pill p-monitor" title="'+esc((p&&p.reason)||('env var '+(env||'—')+' is not set on this node'))+'">env '+esc(env||'—')+' empty</span>';
+}
+function renderLLMProviders(){
+  const ed=!!gr.llmp.editable;
+  const provs=gr.llmp.providers||[];
+  const list=document.getElementById('llmp-list');
+  const st=document.getElementById('llmp-status'); if(st) st.textContent = provs.length ? (provs.length+' configured') : '';
+  const addb=document.getElementById('llmp-addbtn'); if(addb) addb.style.display = ed?'':'none';
+  const saveb=document.getElementById('llmp-savebtn'); if(saveb) saveb.style.display = ed?'':'none';
+  const ro=document.getElementById('llmp-readonly'); if(ro) ro.style.display = ed?'none':'';
+  if(!list) return;
+  if(!provs.length){
+    list.innerHTML='<div class="note" style="padding:8px 0">No LLM providers configured.'+(ed?' Add one so the Judge and Explore can select it by name.':'')+'</div>';
+    return;
+  }
+  if(!ed){
+    list.innerHTML='<table><thead><tr><th>Name</th><th>Model</th><th>Base URL</th><th>API key env</th><th>Timeout</th><th style="text-align:right">Status</th></tr></thead><tbody>'+
+      provs.map(p=>'<tr><td><b>'+esc(p.name)+'</b></td>'
+        +'<td class="mono" style="font-size:12px">'+esc(p.model||'—')+'</td>'
+        +'<td class="mono" style="font-size:12px">'+esc(p.baseURL||'—')+'</td>'
+        +'<td class="mono" style="font-size:12px">'+(p.apiKeyEnv?('$'+esc(p.apiKeyEnv)):'—')+'</td>'
+        +'<td style="font-size:12px">'+(p.timeoutSeconds?esc(p.timeoutSeconds)+'s':'default')+'</td>'
+        +'<td style="text-align:right">'+llmpResolvedPill(p)+'</td></tr>').join('')+'</tbody></table>';
+    return;
+  }
+  list.innerHTML='<table><thead><tr><th>Name *</th><th>Model *</th><th>Base URL *</th><th>API key env (name) *</th><th>Timeout (s)</th><th>Status</th><th></th></tr></thead><tbody>'+
+    provs.map((p,i)=>llmpRow(p,i)).join('')+'</tbody></table>';
+}
+function llmpRow(p,i){
+  const inp=(f,v,ph,w)=>'<input id="llmp-'+f+'-'+i+'" value="'+esc(v==null?'':v)+'" placeholder="'+esc(ph)+'" style="width:'+(w||120)+'px; max-width:100%; background:var(--surface-2); border:1px solid var(--border); color:var(--text); padding:6px 8px; border-radius:7px; font:inherit; font-size:12px"/>';
+  return '<tr>'
+    +'<td>'+inp('name',p.name,'openai-main',110)+'</td>'
+    +'<td>'+inp('model',p.model,'gpt-4o-mini',130)+'</td>'
+    +'<td>'+inp('baseURL',p.baseURL,'https://api.openai.com/v1',180)+'</td>'
+    +'<td>'+inp('apiKeyEnv',p.apiKeyEnv,'OPENAI_API_KEY',150)+'</td>'
+    +'<td>'+inp('timeout',p.timeoutSeconds||'','30',56)+'</td>'
+    +'<td>'+(p.name?llmpResolvedPill(p):'<span class="muted">new</span>')+'</td>'
+    +'<td><button class="btn sm" title="Remove provider" onclick="removeLLMProvider('+i+')">✕</button></td>'
+    +'</tr>';
+}
+// captureLLMPRows reads the editable input rows back into gr.llmp.providers so an
+// add/remove/save preserves in-progress edits. A row with no rendered input (defensive)
+// keeps its prior state.
+function captureLLMPRows(){
+  const provs=gr.llmp.providers||[];
+  const out=[];
+  for(let i=0;i<provs.length;i++){
+    if(!document.getElementById('llmp-name-'+i)){ out.push(provs[i]); continue; }
+    const g=f=>{ const el=document.getElementById('llmp-'+f+'-'+i); return el?el.value.trim():''; };
+    const ts=parseInt(g('timeout'),10);
+    out.push({ name:g('name'), model:g('model'), baseURL:g('baseURL'), apiKeyEnv:g('apiKeyEnv'),
+      timeoutSeconds:isNaN(ts)?0:ts,
+      resolved:!!(provs[i]&&provs[i].resolved), reason:provs[i]&&provs[i].reason });
+  }
+  gr.llmp.providers=out;
+}
+function addLLMProvider(){
+  if(!gr.llmp.editable) return;
+  captureLLMPRows();
+  gr.llmp.providers.push({ name:'', model:'', baseURL:'', apiKeyEnv:'', timeoutSeconds:0 });
+  renderLLMProviders();
+}
+function removeLLMProvider(i){
+  captureLLMPRows();
+  gr.llmp.providers.splice(i,1);
+  renderLLMProviders();
+}
+function llmpMsg(t,ok){
+  const m=document.getElementById('llmp-msg'); if(!m) return;
+  m.style.display=''; m.textContent=t; m.style.color=ok?'var(--teal)':'var(--amber)';
+}
+async function saveLLMProviders(){
+  if(!gr.llmp.editable) return;
+  captureLLMPRows();
+  const body=gr.llmp.providers.map(p=>({ name:p.name, baseURL:p.baseURL, model:p.model, apiKeyEnv:p.apiKeyEnv, timeoutSeconds:p.timeoutSeconds||0 }));
+  llmpMsg('saving…',true);
+  try{
+    const r=await fetch('/dashboard/api/llmproviders',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    if(!r.ok){ let m='status '+r.status; try{ const e=await r.json(); if(e&&e.error) m=e.error; }catch(_e){} throw new Error(m); }
+    gr.llmp=await r.json(); gr.llmp.providers=gr.llmp.providers||[];
+    renderLLMProviders();
+    renderJudge(); // refresh the judge provider dropdown with the new registry
+    llmpMsg('saved ✓',true); setTimeout(()=>{ const m=document.getElementById('llmp-msg'); if(m) m.style.display='none'; },2500);
+  }catch(err){ llmpMsg('✕ '+err.message,false); }
+}
+function llmProviderNames(){ return ((gr.llmp&&gr.llmp.providers)||[]).map(p=>p.name).filter(Boolean); }
+
 /* ---------- Judge (/settings.judge + /settings.advisory for mode) ---------- */
 function judgeField(id,label,value,ph,ed){
   return '<div class="field"><label>'+esc(label)+'</label><input id="'+id+'" type="text" value="'+esc(value||'')+'" placeholder="'+esc(ph)+'" '+(ed?'':'disabled')+'/></div>';
 }
+function onJudgeProviderChange(){
+  const sel=val('judgeLLMProvider');
+  const inl=document.getElementById('judgeInline'); if(inl) inl.style.display=sel?'none':'';
+}
 function renderJudge(){
   const j=gr.settings.judge||null;
-  gr.judge = j ? { enabled:!!j.enabled, provider:j.provider||'', model:j.model||'', apiKeyEnv:j.apiKeyEnv||'', baseURL:j.baseURL||'' }
-              : { enabled:false, provider:'', model:'', apiKeyEnv:'', baseURL:'' };
+  gr.judge = j ? { enabled:!!j.enabled, provider:j.provider||'', llmProvider:j.llmProvider||'', model:j.model||'', apiKeyEnv:j.apiKeyEnv||'', baseURL:j.baseURL||'' }
+              : { enabled:false, provider:'', llmProvider:'', model:'', apiKeyEnv:'', baseURL:'' };
   const advisory = !!(gr.settings.advisory && gr.settings.advisory.enabled);
   const ed=gr.settingsEditable;
   const cfg=document.getElementById('judgeConfig');
@@ -2523,25 +2672,36 @@ function renderJudge(){
     if(!j && !ed){
       cfg.innerHTML='<div class="note">The LLM judge is <b>disabled</b> and read-only on this node (managed by the control plane).</div>';
     } else {
+      const sel=gr.judge.llmProvider;
+      const provOpts='<option value="">inline (advanced)</option>'+
+        llmProviderNames().map(n=>'<option value="'+esc(n)+'"'+(n===sel?' selected':'')+'>'+esc(n)+'</option>').join('');
+      const usingInline=!sel;
       cfg.innerHTML =
         toggleRow('judgeEnabled', gr.judge.enabled, 'Enable LLM judge', 'Score outbound bodies with an LLM for prompt-injection / exfil', ed)
-        + judgeField('judgeProvider','Provider', gr.judge.provider, 'anthropic / openai / ollama', ed)
+        + '<div class="field"><label>LLM provider</label><select id="judgeLLMProvider" onchange="onJudgeProviderChange()" '+(ed?'':'disabled')+'>'+provOpts+'</select>'
+        + '<div class="note">Pick a named provider from the registry above, or “inline (advanced)” to set the connection here.</div></div>'
+        + '<div id="judgeInline" style="display:'+(usingInline?'':'none')+'">'
+        + judgeField('judgeProvider','Provider (label)', gr.judge.provider, 'anthropic / openai / ollama', ed)
         + judgeField('judgeModel','Model', gr.judge.model, 'e.g. claude-haiku-4-5', ed)
         + judgeField('judgeBaseURL','Base URL (optional)', gr.judge.baseURL, 'https://…', ed)
         + judgeField('judgeApiKeyEnv','API key env var (name only)', gr.judge.apiKeyEnv, 'OPENAI_API_KEY', ed)
         + '<div class="note" style="margin:-4px 0 12px">Env NAME only — the worker resolves the actual key from its own environment. The value is never entered or shown here.</div>'
+        + '</div>'
         + toggleRow('judgeAdvisory', advisory, 'Advisory mode', 'Score and log only — never block (uncheck to let the judge enforce)', ed, true);
     }
   }
   const st=document.getElementById('judgeStatus');
   if(st){
     const mode = !gr.judge.enabled? 'off' : (advisory? 'advisory (log only)':'enforce');
+    const provRow = gr.judge.llmProvider
+      ? '<div class="kv"><span class="k">Provider</span><span>'+esc(gr.judge.llmProvider)+' <span class="muted">(registry)</span></span></div>'
+      : '<div class="kv"><span class="k">Provider</span><span>'+esc(gr.judge.provider||'inline')+'</span></div>'
+        +'<div class="kv"><span class="k">Model</span><span class="mono">'+esc(gr.judge.model||'—')+'</span></div>'
+        +'<div class="kv"><span class="k">API key</span><span class="mono">'+(gr.judge.apiKeyEnv?('$'+esc(gr.judge.apiKeyEnv)):'—')+'</span></div>';
     st.innerHTML =
       '<div class="kv"><span class="k">Status</span>'+(gr.judge.enabled?'<span class="pill p-allow">enabled</span>':'<span class="pill p-monitor">disabled</span>')+'</div>'
       +'<div class="kv"><span class="k">Mode</span><span>'+esc(mode)+'</span></div>'
-      +'<div class="kv"><span class="k">Provider</span><span>'+esc(gr.judge.provider||'—')+'</span></div>'
-      +'<div class="kv"><span class="k">Model</span><span class="mono">'+esc(gr.judge.model||'—')+'</span></div>'
-      +'<div class="kv"><span class="k">API key</span><span class="mono">'+(gr.judge.apiKeyEnv?('$'+esc(gr.judge.apiKeyEnv)):'—')+'</span></div>'
+      +provRow
       +'<div class="divider"></div>'
       +'<div class="note">Judge verdicts appear inline on the <a href="#" onclick="go(\'activity\');return false;">Activity</a> log as they occur.</div>';
   }
@@ -2551,6 +2711,7 @@ async function saveJudge(){
   const base=gr.settings.judge||{};
   const judgeBlock=Object.assign({}, base, {
     enabled: chk('judgeEnabled'),
+    llmProvider:(val('judgeLLMProvider')||'').trim(),
     provider:(val('judgeProvider')||'').trim(),
     model:(val('judgeModel')||'').trim(),
     baseURL:(val('judgeBaseURL')||'').trim(),

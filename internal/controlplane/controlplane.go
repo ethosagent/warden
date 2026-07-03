@@ -29,7 +29,6 @@ import (
 	"github.com/ethosagent/warden/internal/detect"
 	"github.com/ethosagent/warden/internal/integration"
 	"github.com/ethosagent/warden/internal/secrets"
-	"github.com/ethosagent/warden/internal/worker"
 )
 
 // Config configures the control-plane server.
@@ -151,6 +150,11 @@ type Server struct {
 	// slow write's file IO.
 	detectionMu     sync.RWMutex
 	detectionConfig config.DetectionConfig
+	// dash is the fleet dashboard built in Handler, retained so a settings /
+	// llmProviders edit can RE-INJECT the Explore NL→SQL generator live (the CP's
+	// only in-process LLM consumer; the judge runs on workers). Set once in Handler
+	// before serving, then read under writeMu by WriteSettings/WriteLLMProviders.
+	dash *dashboard.Server
 }
 
 // Compile-time assertions that the concrete types satisfy their role interfaces.
@@ -369,6 +373,9 @@ func (s *Server) Handler() http.Handler {
 	wire, _, _, _ := s.policy.snapshot()
 	dashPolicy := config.Policy{Allowlist: wire.Allowlist, Denylist: wire.Denylist}
 	dash := dashboard.NewServer(s.central, dashPolicy, emptySecrets)
+	// Retain the dashboard so a settings / llmProviders edit can re-inject the
+	// Explore NL→SQL generator live (see injectExploreLLM). Set before serving.
+	s.dash = dash
 	// Policy panel reflects the live served policy (the watch), so edits show
 	// immediately rather than a startup snapshot.
 	dash.SetLivePolicy(func() config.Policy {
@@ -392,19 +399,19 @@ func (s *Server) Handler() http.Handler {
 	if q, ok := s.central.(analytics.AnalyticsQuery); ok {
 		dash.SetQueryEngine(q)
 	}
-	// NL→SQL for the Explore tab reuses the SAME LLM the judge uses, resolved from
-	// the CP's served judge settings via the shared worker.BuildLLMClient helper.
-	// The CP is secret-local-light: it gets a generator only if it has a judge
-	// block AND the key env resolves in the CP's OWN environment — often it does
-	// not, and then the fleet dashboard shows the "add an LLM provider" prompt. A CP
-	// operator who DOES set the key env gets NL→SQL. Fail-soft: any error/nil leaves
-	// it unset and never blocks control-plane start.
-	if wire.Settings != nil {
-		jc := config.JudgeConfigFromSettings(wire.Settings.Judge)
-		if sqlGen, err := worker.BuildLLMClient(jc); err == nil && sqlGen != nil {
-			dash.SetSQLGenerator(sqlGen)
-		}
-	}
+	// NL→SQL for the Explore tab honors explore.llmProvider (a named registry entry),
+	// falling back to the judge's client — resolved from the CP's OWN env. Factored
+	// into injectExploreLLM so a settings / llmProviders edit re-injects it live
+	// (WriteSettings / WriteLLMProviders). Fail-soft: an unresolved selection clears
+	// the generator (→ the Explore tab's "add an LLM provider" 409) and never blocks
+	// CP start.
+	s.injectExploreLLM(dash)
+	// LLM Providers card: the source lists the CP's effective registry (from the
+	// distributed settings) with per-provider resolved status against the CP's OWN
+	// env; the writer persists the `llmProviders` block and reloads the consumers.
+	// Editing is control-plane-only (workers get the source, not the writer → 405).
+	dash.SetLLMProvidersSource(s.llmProvidersView)
+	dash.SetLLMProvidersWriter(s.WriteLLMProviders)
 	// Per-worker MCP view (inventory + observed schema), selected by ?proxy=.
 	dash.SetMCPFleet(s.mcp.For)
 	// Connected-workers list for the fleet view, with a "behind" flag for any
@@ -671,6 +678,20 @@ func (s *Server) WriteSettings(in config.SettingsWire) error {
 	}
 	settingsBlocks = append(settingsBlocks, obsEdit)
 
+	// explore: the Explore / NL→SQL provider SELECTION (a provider NAME only, never a
+	// value). Encode it when a provider is named, else delete the key (Explore falls
+	// back to the judge's client). It rides the settings wire so the CP can read
+	// explore.llmProvider at dashboard-wiring/reinject time.
+	exploreEdit := blockEdit{key: "explore"}
+	if in.Explore != nil && in.Explore.LLMProvider != "" {
+		node, err := exploreSettingsNode(in.Explore)
+		if err != nil {
+			return fmt.Errorf("controlplane: encode explore settings: %w", err)
+		}
+		exploreEdit.node, exploreEdit.present = node, true
+	}
+	settingsBlocks = append(settingsBlocks, exploreEdit)
+
 	// logging: top-level `logging: {level, format}`. We OWN it only when the wire
 	// carries a logging block; when in.Logging is nil we LEAVE any existing logging
 	// block intact (do NOT delete it — writePolicy also maintains a default logging
@@ -721,6 +742,10 @@ func (s *Server) WriteSettings(in config.SettingsWire) error {
 	}
 	// Wake long-poll waiters with the new settings now, like writePolicy.
 	s.refresh()
+	// Re-inject the CP dashboard's Explore generator so a judge / explore provider
+	// selection change takes effect on the CP without a restart (the judge itself
+	// runs on workers, which rebuild it from the refreshed settings on next apply).
+	s.reinjectExploreLLM()
 	mode := "off"
 	if in.MCP != nil && in.MCP.Enabled {
 		mode = in.MCP.Mode
@@ -927,6 +952,7 @@ func intPtr(i int) *int    { return &i }
 type judgeYAML struct {
 	Enabled        bool              `yaml:"enabled"`
 	Provider       string            `yaml:"provider,omitempty"`
+	LLMProvider    string            `yaml:"llmProvider,omitempty"`
 	Model          string            `yaml:"model,omitempty"`
 	BaseURL        string            `yaml:"baseURL,omitempty"`
 	APIKeyEnv      string            `yaml:"apiKeyEnv,omitempty"`
@@ -968,13 +994,14 @@ func secondsToDuration(n int) string {
 // loader applies its documented defaults rather than zero values.
 func judgeSettingsNode(s *config.JudgeSettings) (*yaml.Node, error) {
 	raw := judgeYAML{
-		Enabled:   s.Enabled,
-		Provider:  s.Provider,
-		Model:     s.Model,
-		BaseURL:   s.BaseURL,
-		APIKeyEnv: s.APIKeyEnv,
-		RateLimit: s.RateLimit,
-		Timeout:   secondsToDuration(s.TimeoutSeconds),
+		Enabled:     s.Enabled,
+		Provider:    s.Provider,
+		LLMProvider: s.LLMProvider,
+		Model:       s.Model,
+		BaseURL:     s.BaseURL,
+		APIKeyEnv:   s.APIKeyEnv,
+		RateLimit:   s.RateLimit,
+		Timeout:     secondsToDuration(s.TimeoutSeconds),
 	}
 	if ttl := secondsToDuration(s.CacheTTLSeconds); ttl != "" {
 		raw.Cache = &judgeCacheYAML{TTL: ttl}
@@ -990,6 +1017,21 @@ func judgeSettingsNode(s *config.JudgeSettings) (*yaml.Node, error) {
 	}
 	var node yaml.Node
 	if err := node.Encode(raw); err != nil {
+		return nil, err
+	}
+	return &node, nil
+}
+
+// exploreSettingsNode encodes a wire Explore block into a YAML node matching the
+// on-disk `explore:` shape — just `llmProvider`, a provider NAME (never a value).
+// The caller only reaches here when a provider is selected, so the field is always
+// non-empty; omitempty keeps the encoding minimal.
+func exploreSettingsNode(s *config.ExploreSettings) (*yaml.Node, error) {
+	type exploreYAML struct {
+		LLMProvider string `yaml:"llmProvider,omitempty"`
+	}
+	var node yaml.Node
+	if err := node.Encode(exploreYAML{LLMProvider: s.LLMProvider}); err != nil {
 		return nil, err
 	}
 	return &node, nil

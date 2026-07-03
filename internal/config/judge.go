@@ -10,8 +10,14 @@ import (
 // it is consulted only for requests that match neither the allowlist nor the
 // denylist, and it fails closed (deny) on any error.
 type JudgeConfig struct {
-	Enabled        bool
-	Provider       string
+	Enabled  bool
+	Provider string
+	// LLMProvider optionally names an entry in the shared llmProviders registry
+	// the judge should use for its LLM client. Empty (the default) keeps today's
+	// INLINE behavior (Model/BaseURL/APIKeyEnv build the client directly). A NAME
+	// only — never a key value; the selected provider's apiKeyEnv still resolves
+	// from THIS node's own env at client-build time.
+	LLMProvider    string
 	Model          string
 	BaseURL        string
 	APIKeyEnv      string
@@ -34,6 +40,7 @@ type CircuitBreakerConfig struct {
 type rawJudge struct {
 	Enabled        bool   `yaml:"enabled"`
 	Provider       string `yaml:"provider"`
+	LLMProvider    string `yaml:"llmProvider"`
 	Model          string `yaml:"model"`
 	BaseURL        string `yaml:"baseURL"`
 	APIKeyEnv      string `yaml:"apiKeyEnv"`
@@ -61,14 +68,15 @@ const (
 // model + apiKeyEnv when enabled) happens in validate.
 func parseJudge(r *rawJudge) (JudgeConfig, error) {
 	jc := JudgeConfig{
-		Enabled:   r.Enabled,
-		Provider:  r.Provider,
-		Model:     r.Model,
-		BaseURL:   r.BaseURL,
-		APIKeyEnv: r.APIKeyEnv,
-		RateLimit: r.RateLimit,
-		Timeout:   defaultJudgeTimeout,
-		CacheTTL:  defaultJudgeCacheTTL,
+		Enabled:     r.Enabled,
+		Provider:    r.Provider,
+		LLMProvider: r.LLMProvider,
+		Model:       r.Model,
+		BaseURL:     r.BaseURL,
+		APIKeyEnv:   r.APIKeyEnv,
+		RateLimit:   r.RateLimit,
+		Timeout:     defaultJudgeTimeout,
+		CacheTTL:    defaultJudgeCacheTTL,
 		CircuitBreaker: CircuitBreakerConfig{
 			MaxFailures: defaultJudgeMaxFailures,
 			Cooldown:    defaultJudgeCooldown,
@@ -116,4 +124,26 @@ func validateJudge(j JudgeConfig, agents []AgentPolicy) error {
 		}
 	}
 	return nil
+}
+
+// validateJudgeProviderRef enforces that a judge.llmProvider selection names an
+// EXISTING entry in the shared llmProviders registry. A DANGLING name is an
+// operator typo worth surfacing strictly at config LOAD. It is deliberately
+// distinct from a provider that EXISTS yet has an empty key env on the hosting
+// node — that is an environment gap resolved fail-soft at runtime (resolveJudgeLLM
+// disables the judge, logged), never a load failure. This is a cross-block check,
+// so it runs from validate() after both the judge and llmProviders are parsed. It
+// applies regardless of judge.enabled: a typo in a currently-disabled block is
+// still worth catching before it is toggled on.
+func validateJudgeProviderRef(j JudgeConfig, providers []LLMProvider) error {
+	name := strings.TrimSpace(j.LLMProvider)
+	if name == "" {
+		return nil
+	}
+	for _, p := range providers {
+		if p.Name == name {
+			return nil
+		}
+	}
+	return fmt.Errorf("config: judge.llmProvider %q does not name any llmProviders entry", j.LLMProvider)
 }

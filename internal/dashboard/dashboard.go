@@ -109,6 +109,19 @@ type Server struct {
 	// where the pipeline is hosted (control plane in fleet, the worker in local-only).
 	detectionSource func() DetectionView
 	detectionWriter func(config.DetectionConfig) error
+	// llmProvidersSource lists the configured llmProviders registry + per-node
+	// resolution status (is each provider's key env present on the hosting node)
+	// for the llmproviders endpoint; nil → an empty, read-only list.
+	// llmProvidersWriter persists+reloads the FULL provider list; nil = read-only
+	// (PUT/POST → 405). The writer is control-plane/local-only; a managed worker
+	// gets only the source.
+	llmProvidersSource func() LLMProvidersView
+	llmProvidersWriter func([]config.LLMProvider) error
+	// sqlGenMu guards sqlGen, which — unlike the other set-once wiring — can be
+	// RE-INJECTED at runtime when a provider/Explore selection edit reloads the CP
+	// dashboard's generator. The read path (handleQueryGenerate) takes the read
+	// lock so a concurrent re-inject never races the 409 nil-check + Evaluate.
+	sqlGenMu sync.RWMutex
 }
 
 // analyticsCacheTTL is how long a computed analytics/MCP payload is reused
@@ -361,6 +374,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/dashboard/api/alerts", s.handleAlerts)
 	mux.HandleFunc("/dashboard/api/integrations", s.handleIntegrations)
 	mux.HandleFunc("/dashboard/api/detection", s.handleDetection)
+	mux.HandleFunc("/dashboard/api/llmproviders", s.handleLLMProviders)
 	mux.HandleFunc("/dashboard/api/audit", s.handleAudit)
 	mux.HandleFunc("/dashboard/api/audit/verify", s.handleAuditVerify)
 	mux.HandleFunc("/dashboard/api/setup", s.handleSetup)
