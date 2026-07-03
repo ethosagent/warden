@@ -15,6 +15,14 @@ secrets:
   - placeholder: example_secret_001
     envVar: EXAMPLE_SECRET
 
+# Managed (write-capable) secret store so the dashboard Secrets tab can
+# add / rotate / delete secrets. Without this block the backend is `env`
+# (default), where secrets come from environment variables and the tab is
+# read-only. NON-PRODUCTION: the echo store returns the KEY as its value and
+# protects nothing — use `backend: aws` (with an `aws:` block) for real secrets.
+secretStore:
+  backend: echo
+
 logging:
   level: info
   format: json
