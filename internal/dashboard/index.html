@@ -401,7 +401,7 @@
       Warden <span class="sub">console</span>
     </div>
 
-    <div class="mode-toggle" id="modeToggle" title="Enforcement mode (visual only)">
+    <div class="mode-toggle" id="modeToggle" title="Enforcement mode — writes on the control plane; read-only on workers">
       <button data-mode="enforce" class="active">ENFORCE</button>
       <button data-mode="monitor">MONITOR</button>
     </div>
@@ -442,7 +442,7 @@
     <div class="nav-group-label">Respond &amp; Prove</div>
     <div class="nav-item" data-page="alerts">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 8-3 8h18s-3-1-3-8"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>
-      Alerts <span class="badge-count">7</span></div>
+      Alerts <span class="badge-count" id="alertBadge" style="display:none">0</span></div>
     <div class="nav-item" data-page="audit">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 11l3 3 8-8"/><path d="M20 12v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9"/></svg>
       Audit</div>
@@ -746,6 +746,12 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
       <div class="empty-only" id="es-activity"></div>
 
       <div class="demo-only">
+      <div class="subtabs" id="actSubtabs">
+        <button class="active" data-actsub="events">Events</button>
+        <button data-actsub="endpoints">Endpoints</button>
+      </div>
+
+      <div class="subpage active" id="actsub-events">
       <div class="filterbar">
         <input type="text" id="actSearch" placeholder="Search domain, agent, receipt id…" oninput="setActSearch(this.value)" />
         <span class="fchip dec on" onclick="setActDecision('', this)">All decisions</span>
@@ -766,6 +772,16 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
           </tr></thead>
           <tbody id="activityBody"></tbody>
         </table>
+      </div>
+      </div><!-- /actsub-events -->
+
+      <div class="subpage" id="actsub-endpoints">
+        <div class="card">
+          <div class="card-head"><h3>Endpoints</h3><span class="sub" id="endpointsSub">aggregated by method + URL</span></div>
+          <table id="endpointsTable"><thead><tr>
+            <th>Method</th><th>Domain</th><th>URL</th><th class="num">Count</th><th>Last status</th><th>Last seen</th>
+          </tr></thead><tbody id="endpointsBody"></tbody></table>
+        </div>
       </div>
       </div><!-- /demo-only -->
     </section>
@@ -817,6 +833,11 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
       </div>
       <div class="note" style="margin-top:10px">Values are write-only — Warden injects them at the edge. The console never fetches or displays a secret value.</div>
       </div><!-- /demo-only -->
+
+      <div class="card" id="declaredSecretsCard" style="margin-top:16px">
+        <div class="card-head"><h3>Declared secret mappings</h3><span class="sub">config placeholders · resolves by reference only, never a value</span></div>
+        <div class="card-pad" id="declaredSecretsBody"><div class="loading-note">Loading…</div></div>
+      </div>
     </section>
 
     <!-- ============ GUARDRAILS ============ -->
@@ -1024,17 +1045,25 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
     <section class="page" id="page-explore">
       <div class="page-head">
         <div><h1>Explore</h1><div class="desc">Query the receipt &amp; event store — build visually, or write SQL</div></div>
-        <div class="actions"><button class="btn">Saved queries</button></div>
+        <div class="actions">
+          <div class="scope" id="savedQ">
+            <button class="btn" id="savedQBtn">Saved queries ▾</button>
+            <div class="scope-menu" id="savedQMenu" style="min-width:300px; padding:6px"></div>
+          </div>
+        </div>
       </div>
 
       <div class="empty-only" id="es-explore"></div>
 
       <div class="demo-only">
       <div class="card" style="margin-bottom:16px">
-        <div class="card-head"><h3>Ask in plain English</h3><span class="sub">NL → SQL (preview)</span></div>
-        <div class="card-pad" style="display:flex; gap:10px">
-          <input type="text" value="which domains had the most blocked egress this week?" style="flex:1; background:var(--surface-2); border:1px solid var(--border); color:var(--text); padding:9px 12px; border-radius:9px; font:inherit;"/>
-          <button class="btn primary">Generate SQL →</button>
+        <div class="card-head"><h3>Ask in plain English</h3><span class="sub">keyword → SQL · no LLM</span></div>
+        <div class="card-pad">
+          <div style="display:flex; gap:10px">
+            <input type="text" id="nlInput" value="which domains had the most blocked egress this week?" style="flex:1; background:var(--surface-2); border:1px solid var(--border); color:var(--text); padding:9px 12px; border-radius:9px; font:inherit;"/>
+            <button class="btn primary" id="nlGenBtn">Generate SQL →</button>
+          </div>
+          <div class="note" style="margin-top:8px">Keyword-based heuristic — writes SQL into the editor below (no LLM). Review it, then Run.</div>
         </div>
       </div>
 
@@ -1536,6 +1565,40 @@ function activityDetail(e,dec){
   +'</div>';
 }
 
+/* ---------- Activity → Endpoints aggregated sub-view (/dashboard/api/endpoints) ----------
+   Layout: a sub-tab toggle (Events | Endpoints) at the top of the Activity page.
+   Chosen over an always-on summary card so the live-tail poll, filters and CSV
+   export stay scoped to the Events table and the page stays uncluttered.
+   Fetched lazily when the Endpoints sub-tab is opened. */
+async function loadEndpoints(){
+  const body=document.getElementById('endpointsBody'); const sub=document.getElementById('endpointsSub');
+  if(!body) return;
+  body.innerHTML='<tr><td colspan="6" class="loading-note">Loading…</td></tr>';
+  let d;
+  try{ d=await jget('/dashboard/api/endpoints?pageSize=200'+(state.proxy?'&proxy='+encodeURIComponent(state.proxy):'')); }
+  catch(e){ body.innerHTML='<tr><td colspan="6" class="muted" style="text-align:center;padding:18px">Endpoints unavailable.</td></tr>'; if(sub) sub.textContent='—'; return; }
+  const items=(d&&Array.isArray(d.items))?d.items:[];
+  const total=(d&&typeof d.total==='number')?d.total:items.length;
+  if(!items.length){ body.innerHTML='<tr><td colspan="6" class="muted" style="text-align:center;padding:18px">No endpoints recorded yet.</td></tr>'; if(sub) sub.textContent='no endpoints'; return; }
+  const rows=items.slice().sort((a,b)=>(b.count||0)-(a.count||0)).slice(0,50);
+  if(sub) sub.textContent = total>rows.length ? (fmtNum(rows.length)+' of '+fmtNum(total)+' shown · top by count') : (fmtNum(rows.length)+' endpoint'+(rows.length===1?'':'s'));
+  body.innerHTML=rows.map(e=>{
+    const st=(e.lastStatus!=null&&e.lastStatus>0)? statusPill(e.lastStatus):'<span class="muted">—</span>';
+    return '<tr><td class="mono">'+esc(e.method||'')+'</td><td class="mono" style="color:#bcd">'+esc(e.domain||'')+'</td>'
+      +'<td class="mono" style="max-width:340px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap" title="'+esc(e.url||'')+'">'+esc(e.url||'')+'</td>'
+      +'<td class="num">'+fmtNum(e.count||0)+'</td><td>'+st+'</td><td class="muted">'+relTime(e.lastSeen)+'</td></tr>';
+  }).join('');
+}
+document.querySelectorAll('#actSubtabs button').forEach(b=>{
+  b.addEventListener('click', ()=>{
+    document.querySelectorAll('#actSubtabs button').forEach(x=>x.classList.remove('active'));
+    b.classList.add('active');
+    document.querySelectorAll('#page-activity .subpage').forEach(s=>s.classList.remove('active'));
+    const sp=document.getElementById('actsub-'+b.dataset.actsub); if(sp) sp.classList.add('active');
+    if(b.dataset.actsub==='endpoints') loadEndpoints();
+  });
+});
+
 /* ============================================================
    Fleet (/dashboard/api/workers)
    ============================================================ */
@@ -1625,6 +1688,96 @@ function buildQuerySQL(){
     cond=col+' '+(op==='!='?'!=':'=')+" '"+qbEscVal(raw)+"'";
   }
   box.value='SELECT '+group+', count(*) AS n\nFROM events\nWHERE '+cond+'\nGROUP BY '+group+'\nORDER BY n DESC\nLIMIT 100';
+}
+
+/* ---------- Saved queries (localStorage) ----------
+   Stored under 'warden.savedQueries' as [{name, sql}]. All storage/JSON is
+   wrapped in try/catch so the feature degrades to a no-op if unavailable. */
+const SAVED_Q_KEY='warden.savedQueries';
+function loadSavedQueries(){
+  try{ const raw=localStorage.getItem(SAVED_Q_KEY); if(!raw) return []; const a=JSON.parse(raw); return Array.isArray(a)?a:[]; }
+  catch(e){ return []; }
+}
+function persistSavedQueries(a){
+  try{ localStorage.setItem(SAVED_Q_KEY, JSON.stringify(a)); return true; }catch(e){ return false; }
+}
+function firstSqlLine(sql){
+  const s=String(sql||'').split('\n').map(x=>x.trim()).filter(Boolean)[0]||'';
+  return s.length>52 ? s.slice(0,52)+'…' : s;
+}
+function renderSavedQueriesMenu(){
+  const menu=document.getElementById('savedQMenu'); if(!menu) return;
+  const list=loadSavedQueries();
+  let h='';
+  if(!list.length){
+    h+='<div class="note" style="padding:7px 9px">No saved queries yet.</div>';
+  } else {
+    h+=list.map((q,i)=>'<div style="display:flex; align-items:center; gap:8px; padding:6px 8px">'
+      +'<div style="flex:1; min-width:0"><div style="color:var(--text); font-size:12.5px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis">'+esc(q.name)+'</div>'
+      +'<div class="mono" style="font-size:11px; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis">'+esc(firstSqlLine(q.sql))+'</div></div>'
+      +'<button class="btn sm savedq-load" data-idx="'+i+'">Load</button>'
+      +'<button class="btn sm savedq-del" data-idx="'+i+'" style="color:#ff8098">Delete</button></div>').join('');
+  }
+  h+='<div style="border-top:1px solid var(--border); margin-top:5px; padding-top:6px">'
+    +'<button class="btn sm" id="savedq-add" style="width:100%; justify-content:center">＋ Save current query…</button></div>';
+  menu.innerHTML=h;
+  menu.querySelectorAll('.savedq-load').forEach(b=>b.addEventListener('click', e=>{ e.stopPropagation(); savedQueryLoad(+b.dataset.idx); }));
+  menu.querySelectorAll('.savedq-del').forEach(b=>b.addEventListener('click', e=>{ e.stopPropagation(); savedQueryDelete(+b.dataset.idx); }));
+  const add=document.getElementById('savedq-add'); if(add) add.addEventListener('click', e=>{ e.stopPropagation(); savedQuerySaveCurrent(); });
+}
+function savedQueryLoad(i){
+  const list=loadSavedQueries(); const q=list[i]; if(!q) return;
+  const box=document.getElementById('sqlBox'); if(box) box.value=q.sql||'';
+  const menu=document.getElementById('savedQMenu'); if(menu) menu.classList.remove('open');
+}
+function savedQueryDelete(i){
+  const list=loadSavedQueries(); if(i<0||i>=list.length) return;
+  list.splice(i,1); persistSavedQueries(list); renderSavedQueriesMenu();
+}
+function savedQuerySaveCurrent(){
+  const box=document.getElementById('sqlBox'); const sql=box? box.value.trim():'';
+  if(!sql){ window.alert('Nothing to save — the SQL editor is empty.'); return; }
+  const name=(window.prompt('Name this query')||'').trim(); if(!name) return;
+  const list=loadSavedQueries(); list.push({name:name, sql:sql});
+  if(!persistSavedQueries(list)){ window.alert('Could not save — local storage is unavailable.'); return; }
+  renderSavedQueriesMenu();
+}
+
+/* ---------- Generate SQL from plain English (client-side heuristic, no LLM) ----------
+   Uses the REAL events schema. Columns are resolved through qbCol() (domain,
+   worker→proxy_id, data_class→compliance) so only columns the live schema lists
+   are emitted; a time clause is added only when the real 'ts' column (nanoseconds
+   since epoch) is present, else it is omitted rather than inventing a column. */
+function generateSqlFromNL(){
+  const inEl=document.getElementById('nlInput'); const box=document.getElementById('sqlBox');
+  if(!box) return;
+  const q=(inEl?inEl.value:'').toLowerCase();
+  const cols=qbSchemaCols();
+  const hasCol=name=> !cols.length || cols.indexOf(name)>=0;
+  const where=[];
+  // decision filter
+  if(/\b(block|blocked|blocks|deny|denied|denies|denials)\b/.test(q)) where.push("decision = 'deny'");
+  else if(/\b(allow|allowed|allows)\b/.test(q)) where.push("decision = 'allow'");
+  // grouping dimension (default: domain)
+  let dim=qbCol('domain');
+  if(/\b(worker|workers|proxy|node|nodes)\b/.test(q)) dim=qbCol('worker');
+  else if(/\b(data ?class|data ?classes|pii|secret|secrets|credential|credentials|sensitive)\b/.test(q)) dim=qbCol('data_class');
+  else if(/\b(domain|domains|destination|destinations|host|hosts)\b/.test(q)) dim=qbCol('domain');
+  // time window — only when a real timestamp column exists
+  if(hasCol('ts')){
+    let secs=0;
+    if(/\b(today|last day|past day|24 ?h|24 ?hours)\b/.test(q)) secs=86400;
+    else if(/\b(hour|last hour|past hour|60 ?min)\b/.test(q)) secs=3600;
+    else if(/\b(week|last week|past week|7 ?d|7 ?days)\b/.test(q)) secs=604800;
+    else if(/\b(month|last month|past month|30 ?d|30 ?days)\b/.test(q)) secs=2592000;
+    if(secs>0) where.push("ts >= (strftime('%s','now') - "+secs+") * 1000000000");
+  }
+  // limit — "top N" / "most N" / "N domains"
+  let n=10;
+  const m=q.match(/\b(?:top|most|first)\s+(\d+)/) || q.match(/\b(\d+)\s+(?:domains|workers|results|rows|endpoints)\b/);
+  if(m){ const v=parseInt(m[1],10); if(v>0 && v<=1000) n=v; }
+  const whereSql = where.length ? '\nWHERE '+where.join('\n  AND ') : '';
+  box.value='SELECT '+dim+', count(*) AS n\nFROM events'+whereSql+'\nGROUP BY '+dim+'\nORDER BY n DESC\nLIMIT '+n;
 }
 async function runQuery(){
   const ta=document.getElementById('sqlBox'), out=document.getElementById('exploreOut'), meta=document.getElementById('qMeta');
@@ -1866,6 +2019,35 @@ async function loadSecrets(){
   try{ d=await jget('/dashboard/api/secretstore'); }
   catch(e){ d={backend:'none',entries:[]}; }
   renderSecrets(d);
+  loadDeclaredSecrets();
+}
+/* Declared config placeholder→secret mappings + whether each RESOLVES (health).
+   Separate from the managed /secretstore above. BY-REFERENCE ONLY — the console
+   shows masked last4 + length or the resolve error, never a secret value. */
+async function loadDeclaredSecrets(){
+  let entries;
+  try{ entries=await jget('/dashboard/api/secrets'); }
+  catch(e){ entries=null; }
+  renderDeclaredSecrets(entries);
+}
+function renderDeclaredSecrets(entries){
+  const el=document.getElementById('declaredSecretsBody'); if(!el) return;
+  if(!Array.isArray(entries)){ el.innerHTML='<div class="note">Declared mappings unavailable on this node.</div>'; return; }
+  if(!entries.length){ el.innerHTML='<div class="note">No secret placeholders declared in config on this node.</div>'; return; }
+  el.innerHTML='<table><thead><tr><th>Placeholder</th><th style="width:120px">Health</th><th>Reference</th></tr></thead><tbody>'
+    +entries.map(e=>{
+      const ph=e.placeholder||'—';
+      let health, ref;
+      if(e.ref){
+        const last4=e.ref.last4? '••'+esc(e.ref.last4) : '••••';
+        health='<span class="pill p-green"><span class="d" style="background:var(--green)"></span>resolved</span>';
+        ref='<span class="mask">'+last4+'</span> <span class="muted">· len '+fmtNum(e.ref.length||0)+'</span>';
+      } else {
+        health='<span class="pill p-deny"><span class="d" style="background:var(--red)"></span>error</span>';
+        ref='<span class="note" style="color:#ff8098">'+esc(e.error||'does not resolve')+'</span>';
+      }
+      return '<tr><td><span class="tag" style="font-size:12.5px">'+esc(ph)+'</span></td><td>'+health+'</td><td>'+ref+'</td></tr>';
+    }).join('')+'</tbody></table>';
 }
 function backendBadge(b){
   const m={none:'p-monitor',env:'p-monitor',echo:'p-detect',aws:'p-redact',sqlite:'p-monitor',vault:'p-detect'};
@@ -2318,6 +2500,26 @@ async function loadAlerts(){
   try{ alerts=await jget('/dashboard/api/alerts'); }catch(e){ alerts=[]; }
   renderAlerts(Array.isArray(alerts)?alerts:[]);
 }
+/* Sidebar "Alerts" badge = count of FIRING alerts (falls back to total when no
+   alert carries a status). Hidden at 0. */
+function updateAlertBadge(n){
+  const el=document.getElementById('alertBadge'); if(!el) return;
+  n=Number(n)||0;
+  el.textContent=fmtNum(n);
+  el.style.display = n>0 ? '' : 'none';
+}
+function firingCount(alerts){
+  const anyStatus=alerts.some(a=>a && a.status!=null && String(a.status)!=='');
+  return anyStatus ? alerts.filter(a=>String(a.status).toLowerCase()==='firing').length : alerts.length;
+}
+/* Lightweight badge refresh used by the global loop while the Alerts tab is not
+   open — bounded with ?limit= so it stays cheap. */
+function refreshAlertBadge(){
+  jget('/dashboard/api/alerts?limit=200').then(a=>{
+    const arr=Array.isArray(a)?a:[];
+    updateAlertBadge(firingCount(arr));
+  }).catch(()=>{});
+}
 function alertStatusPill(s){
   s=String(s||'').toLowerCase();
   if(s==='firing') return '<span class="pill p-deny">firing</span>';
@@ -2329,6 +2531,7 @@ function renderAlerts(alerts){
   const body=document.getElementById('triggeredBody'); if(!body) return;
   const sub=document.getElementById('alertsSub');
   const firing=alerts.filter(a=>String(a.status).toLowerCase()==='firing').length;
+  updateAlertBadge(firingCount(alerts));
   if(sub) sub.textContent = alerts.length? (fmtNum(alerts.length)+' alert'+(alerts.length===1?'':'s')+' · '+firing+' firing') : 'no alerts';
   if(!alerts.length){
     body.innerHTML='<tr><td colspan="7"><div class="empty-state" style="padding:34px 20px"><div class="es-ic">🔔</div><h2>No alerts yet</h2><p>Alerts fire from configured integrations once detections trigger. Threshold detectors are a later milestone.</p></div></td></tr>';
@@ -2565,11 +2768,26 @@ document.querySelectorAll('.nav-item').forEach(n=> n.addEventListener('click', (
   const i=RANGES.findIndex(r=>r[0]===state.range); state.range=RANGES[(i+1)%RANGES.length][0];
   const rl=document.getElementById('rangeLabel'); if(rl) rl.textContent=rangeLabel(); loadOverview();
 }); })();
+// Explore: Saved-queries dropdown + Generate-SQL heuristic wiring.
+(function(){
+  const btn=document.getElementById('savedQBtn'), menu=document.getElementById('savedQMenu');
+  if(btn&&menu){
+    btn.addEventListener('click', e=>{ e.stopPropagation();
+      if(!menu.classList.contains('open')) renderSavedQueriesMenu();
+      menu.classList.toggle('open');
+    });
+    menu.addEventListener('click', e=>e.stopPropagation());
+    document.addEventListener('click', ()=>menu.classList.remove('open'));
+  }
+  const gen=document.getElementById('nlGenBtn'); if(gen) gen.addEventListener('click', generateSqlFromNL);
+  const nl=document.getElementById('nlInput'); if(nl) nl.addEventListener('keydown', e=>{ if(e.key==='Enter'){ e.preventDefault(); generateSqlFromNL(); } });
+})();
 
 renderEmptyStates();
 
 // initial data
 loadSetup();
+refreshAlertBadge();  // seed the sidebar Alerts badge without opening the tab
 const savedTab = (function(){ try{ return localStorage.getItem('warden.tab'); }catch(e){ return null; } })();
 const startTab = (savedTab && document.getElementById('page-'+savedTab)) ? savedTab : 'overview';
 go(startTab);
@@ -2580,6 +2798,9 @@ setInterval(()=>{
   if(t==='overview') loadOverview();
   else if(t==='activity') loadActivity();
   else if(t==='fleet') loadFleet();
+  // keep the sidebar Alerts badge current when the Alerts tab is not the one open
+  // (when it IS open, loadAlerts/renderAlerts already updates the badge).
+  if(t!=='alerts') refreshAlertBadge();
 }, 10000);
 // keep the "updated …" label fresh
 setInterval(()=>{ const d=window.__analytics; const u=document.getElementById('updatedLabel'); if(d&&d.generatedAt&&u) u.textContent='updated '+relTime(d.generatedAt); }, 1000);

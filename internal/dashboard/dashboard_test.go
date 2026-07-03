@@ -263,56 +263,6 @@ func TestSecretsEndpoint(t *testing.T) {
 	}
 }
 
-func TestBlockedEndpoint(t *testing.T) {
-	now := time.Date(2025, 6, 15, 10, 0, 0, 0, time.UTC)
-	ds := &fakeDataSource{
-		events: []analytics.Event{
-			{Timestamp: now, Domain: "evil.com", Decision: "deny"},
-			{Timestamp: now.Add(time.Minute), Domain: "evil.com", Decision: "deny"},
-			{Timestamp: now.Add(2 * time.Minute), Domain: "evil.com", Decision: "deny"},
-			{Timestamp: now, Domain: "bad.org", Decision: "deny"},
-			{Timestamp: now.Add(time.Hour), Domain: "bad.org", Decision: "deny"},
-			{Timestamp: now, Domain: "api.example.com", Decision: "allow"},
-		},
-	}
-	handler := newTestServer(ds, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
-
-	rr := doGet(t, handler, "/dashboard/api/blocked")
-	if rr.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", rr.Code)
-	}
-
-	var groups []blockedGroup
-	if err := json.Unmarshal(rr.Body.Bytes(), &groups); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if len(groups) != 2 {
-		t.Fatalf("expected 2 groups, got %d", len(groups))
-	}
-
-	// evil.com should be first (3 > 2)
-	if groups[0].Domain != "evil.com" {
-		t.Fatalf("expected first group to be evil.com, got %s", groups[0].Domain)
-	}
-	if groups[0].Count != 3 {
-		t.Fatalf("expected count 3 for evil.com, got %d", groups[0].Count)
-	}
-	if groups[1].Domain != "bad.org" {
-		t.Fatalf("expected second group to be bad.org, got %s", groups[1].Domain)
-	}
-	if groups[1].Count != 2 {
-		t.Fatalf("expected count 2 for bad.org, got %d", groups[1].Count)
-	}
-
-	// Verify first/last seen
-	if groups[0].FirstSeen != now.Format(time.RFC3339) {
-		t.Fatalf("expected first_seen %s, got %s", now.Format(time.RFC3339), groups[0].FirstSeen)
-	}
-	if groups[0].LastSeen != now.Add(2*time.Minute).Format(time.RFC3339) {
-		t.Fatalf("expected last_seen %s, got %s", now.Add(2*time.Minute).Format(time.RFC3339), groups[0].LastSeen)
-	}
-}
-
 func TestEndpointsEndpoint(t *testing.T) {
 	now := time.Date(2025, 6, 15, 10, 0, 0, 0, time.UTC)
 	ds := &fakeDataSource{
@@ -448,48 +398,6 @@ func TestEndpointsEndpoint(t *testing.T) {
 			t.Fatalf("expected 0 items, got %d", len(resp.Items))
 		}
 	})
-}
-
-func TestStatsEndpoint(t *testing.T) {
-	ds := &fakeDataSource{
-		events: []analytics.Event{
-			{Domain: "a.com", Decision: "allow"},
-			{Domain: "a.com", Decision: "allow"},
-			{Domain: "b.com", Decision: "deny"},
-			{Domain: "c.com", Decision: "allow"},
-			{Domain: "c.com", Decision: "deny"},
-		},
-	}
-	handler := newTestServer(ds, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
-
-	rr := doGet(t, handler, "/dashboard/api/stats")
-	if rr.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", rr.Code)
-	}
-
-	var stats statsResponse
-	if err := json.Unmarshal(rr.Body.Bytes(), &stats); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if stats.Total != 5 {
-		t.Fatalf("expected total 5, got %d", stats.Total)
-	}
-	if stats.AllowCount != 3 {
-		t.Fatalf("expected allow_count 3, got %d", stats.AllowCount)
-	}
-	if stats.DenyCount != 2 {
-		t.Fatalf("expected deny_count 2, got %d", stats.DenyCount)
-	}
-	if len(stats.TopDestinations) != 3 {
-		t.Fatalf("expected 3 top destinations, got %d", len(stats.TopDestinations))
-	}
-	// a.com and c.com both have 2, should sort alphabetically
-	if stats.TopDestinations[0].Domain != "a.com" {
-		t.Fatalf("expected first destination a.com, got %s", stats.TopDestinations[0].Domain)
-	}
-	if stats.TopDestinations[0].Count != 2 {
-		t.Fatalf("expected count 2, got %d", stats.TopDestinations[0].Count)
-	}
 }
 
 func TestHTMLServes(t *testing.T) {
@@ -1071,9 +979,7 @@ func TestMethodNotAllowed(t *testing.T) {
 		"/dashboard/api/traffic",
 		"/dashboard/api/policy",
 		"/dashboard/api/secrets",
-		"/dashboard/api/blocked",
 		"/dashboard/api/endpoints",
-		"/dashboard/api/stats",
 		"/dashboard/api/analytics",
 		"/dashboard/",
 	}

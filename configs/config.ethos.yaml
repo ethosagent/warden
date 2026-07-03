@@ -11,6 +11,10 @@ policy:
   allowlist:
     - domain: "~.*"            # allow every host (HTTPS/443). Visibility-first.
 
+secretStore:
+  # echo is non-production (persists nothing; value=key) — demo only; use `aws` for real secrets.
+  backend: echo
+
 cache:
   ttl: 3600
 

@@ -307,18 +307,6 @@ type endpointsResponse struct {
 	TotalPages int             `json:"totalPages"`
 }
 
-type statsResponse struct {
-	Total           int         `json:"total"`
-	AllowCount      int         `json:"allow_count"`
-	DenyCount       int         `json:"deny_count"`
-	TopDestinations []destCount `json:"top_destinations"`
-}
-
-type destCount struct {
-	Domain string `json:"domain"`
-	Count  int    `json:"count"`
-}
-
 type policyResponse struct {
 	Allowlist []config.AllowlistEntry `json:"allowlist"`
 	Denylist  []config.DenylistEntry  `json:"denylist"`
@@ -349,9 +337,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/dashboard/api/policy", s.handlePolicy)
 	mux.HandleFunc("/dashboard/api/settings", s.handleSettings)
 	mux.HandleFunc("/dashboard/api/secrets", s.handleSecrets)
-	mux.HandleFunc("/dashboard/api/blocked", s.handleBlocked)
 	mux.HandleFunc("/dashboard/api/endpoints", s.handleEndpoints)
-	mux.HandleFunc("/dashboard/api/stats", s.handleStats)
 	mux.HandleFunc("/dashboard/api/analytics", s.handleAnalytics)
 	mux.HandleFunc("/dashboard/api/mcp", s.handleMCP)
 	mux.HandleFunc("/dashboard/api/workers", s.handleWorkers)
@@ -658,70 +644,14 @@ func (s *Server) handleSecrets(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, entries)
 }
 
-// handleBlocked serves GET /dashboard/api/blocked.
-func (s *Server) handleBlocked(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
-	events, err := s.data.GetEvents(analytics.EventFilter{Decision: "deny", Limit: 10000})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	type domainInfo struct {
-		count     int
-		firstSeen time.Time
-		lastSeen  time.Time
-	}
-	grouped := make(map[string]*domainInfo)
-	for _, e := range events {
-		info, ok := grouped[e.Domain]
-		if !ok {
-			grouped[e.Domain] = &domainInfo{
-				count:     1,
-				firstSeen: e.Timestamp,
-				lastSeen:  e.Timestamp,
-			}
-			continue
-		}
-		info.count++
-		if e.Timestamp.Before(info.firstSeen) {
-			info.firstSeen = e.Timestamp
-		}
-		if e.Timestamp.After(info.lastSeen) {
-			info.lastSeen = e.Timestamp
-		}
-	}
-
-	result := make([]blockedGroup, 0, len(grouped))
-	for domain, info := range grouped {
-		result = append(result, blockedGroup{
-			Domain:    domain,
-			Count:     info.count,
-			FirstSeen: info.firstSeen.Format(time.RFC3339),
-			LastSeen:  info.lastSeen.Format(time.RFC3339),
-		})
-	}
-	sort.Slice(result, func(i, j int) bool {
-		if result[i].Count != result[j].Count {
-			return result[i].Count > result[j].Count
-		}
-		return result[i].Domain < result[j].Domain
-	})
-	writeJSON(w, result)
-}
-
 // handleEndpoints serves GET /dashboard/api/endpoints. It collapses repeated
 // hits to the same (method, url) into a single aggregated, paginated row so a
 // polling agent that hammers one endpoint shows up as one informative entry
 // rather than flooding the traffic view.
 //
-// Aggregation runs in-Go over all events, mirroring handleBlocked; this is fine
-// for a single-node local dashboard. A SQL GROUP BY in the analytics store
-// would be the future optimization at large scale.
+// Aggregation runs in-Go over all events; this is fine for a single-node local
+// dashboard. A SQL GROUP BY in the analytics store would be the future
+// optimization at large scale.
 func (s *Server) handleEndpoints(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -846,53 +776,6 @@ func (s *Server) handleEndpoints(w http.ResponseWriter, r *http.Request) {
 		PageSize:   pageSize,
 		Total:      total,
 		TotalPages: totalPages,
-	})
-}
-
-// handleStats serves GET /dashboard/api/stats.
-func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
-	events, err := s.data.GetEvents(analytics.EventFilter{Limit: 10000})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	var allowCount, denyCount int
-	domainCounts := make(map[string]int)
-	for _, e := range events {
-		switch e.Decision {
-		case "allow":
-			allowCount++
-		case "deny":
-			denyCount++
-		}
-		domainCounts[e.Domain]++
-	}
-
-	dests := make([]destCount, 0, len(domainCounts))
-	for d, c := range domainCounts {
-		dests = append(dests, destCount{Domain: d, Count: c})
-	}
-	sort.Slice(dests, func(i, j int) bool {
-		if dests[i].Count != dests[j].Count {
-			return dests[i].Count > dests[j].Count
-		}
-		return dests[i].Domain < dests[j].Domain
-	})
-	if len(dests) > 10 {
-		dests = dests[:10]
-	}
-
-	writeJSON(w, statsResponse{
-		Total:           len(events),
-		AllowCount:      allowCount,
-		DenyCount:       denyCount,
-		TopDestinations: dests,
 	})
 }
 
