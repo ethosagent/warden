@@ -99,6 +99,10 @@
   .card-head { display:flex; align-items:center; justify-content:space-between; padding:14px 18px; border-bottom:1px solid var(--border); }
   .card-head h3 { margin:0; font-size:14px; font-weight:600; letter-spacing:.1px; }
   .card-head .sub { color:var(--muted); font-size:12px; }
+  .card-head.clickable { cursor:pointer; user-select:none; }
+  .card-head .caret { color:var(--muted); font-size:11px; }
+  #detectionBody { display:none; }
+  #detectionCard.open #detectionBody { display:block; }
 
   .grid { display:grid; gap:16px; }
   .g2 { grid-template-columns:1fr 1fr; }
@@ -956,9 +960,15 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
 
       <div class="demo-only">
       <!-- CONFIGURE — live detection editor (GET/PUT /dashboard/api/detection) -->
-      <div class="card" style="margin-bottom:18px">
-        <div class="card-head"><h3>Detection</h3><span class="sub" id="detectionSub">temporal threshold detectors</span></div>
-        <div class="card-pad">
+      <div class="card" id="detectionCard" style="margin-bottom:18px">
+        <div class="card-head clickable" onclick="toggleDetection()">
+          <h3>Detection</h3>
+          <span style="display:flex;align-items:center;gap:8px">
+            <span class="sub" id="detectionSub">temporal threshold detectors</span>
+            <span class="caret" id="detectionCaret">▸</span>
+          </span>
+        </div>
+        <div class="card-pad" id="detectionBody">
           <div class="callout" style="margin-bottom:14px">
             <div class="arrow">ℹ</div>
             <div class="note">The detectors below decide <b>when</b> an alert fires. Alert <b>routing and sinks</b> (which alerts reach which webhook/Slack) are configured in <a href="#" onclick="go('settings');return false;">Settings → Integrations</a> — not here.</div>
@@ -2617,6 +2627,7 @@ function renderDetection(){
   if(detectionData.missing || !detectionPresent()){
     if(sub) sub.textContent='not hosted here';
     host.innerHTML='<div class="note">Temporal threshold detection runs on the <b>control plane</b> (fleet mode) or a <b>local-only</b> node. This dashboard node hosts no alert pipeline, so there is nothing to configure here.</div>';
+    syncDetectionCollapse();
     return;
   }
   const c=detectionData.config||{};
@@ -2624,7 +2635,7 @@ function renderDetection(){
   const ed=!!detectionData.editable;
   const master=!!c.enabled;
   const active=st.detectors||[];
-  if(sub) sub.textContent = master ? (active.length+' detector'+(active.length===1?'':'s')+' active') : 'detection off';
+  if(sub) sub.textContent = master ? ('enabled · '+active.length+' detector'+(active.length===1?'':'s')+' active') : 'disabled';
   const err=c.errorRate||{}, afb=c.authFailBurst||{}, cost=c.costAnomaly||{}, rt=c.responseTime||{};
   const statusLine=
     '<div class="kv"><span class="k">Status</span>'+(master?'<span class="pill p-allow">enabled</span>':'<span class="pill p-monitor">disabled</span>')+'</div>'
@@ -2659,6 +2670,25 @@ function renderDetection(){
     ? '<div style="margin-top:8px"><button class="btn primary sm" id="detectionSaveBtn" onclick="saveDetection()">Save detection</button> <span id="detectionMsg" class="sub"></span></div>'
     : '';
   host.innerHTML='<div style="margin-bottom:14px">'+statusLine+'</div>'+h+saveRow;
+  syncDetectionCollapse();
+}
+// Detection card is collapsed by default; the header summary (#detectionSub) reflects
+// live state, expand/collapse just show/hide the body — no re-fetch, no lost input.
+// Open/closed persists across reloads via localStorage, mirroring the 'warden.tab' idiom.
+function detectionOpen(){ try{ return localStorage.getItem('warden.detOpen')==='1'; }catch(e){ return false; } }
+function syncDetectionCollapse(){
+  const card=document.getElementById('detectionCard'); if(!card) return;
+  const open=detectionOpen();
+  card.classList.toggle('open', open);
+  const car=document.getElementById('detectionCaret');
+  if(car) car.textContent = open ? '▾' : '▸';
+}
+function toggleDetection(){
+  const card=document.getElementById('detectionCard'); if(!card) return;
+  const open=card.classList.toggle('open');
+  const car=document.getElementById('detectionCaret');
+  if(car) car.textContent = open ? '▾' : '▸';
+  try{ localStorage.setItem('warden.detOpen', open?'1':'0'); }catch(e){}
 }
 // buildDetectorDoc: read-modify-write one detector from the DOM. Start from the
 // fetched sub-config so unknown/future fields survive; a cleared input DELETES the
