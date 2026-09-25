@@ -9,7 +9,7 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -o /poisoned-mcp-server ./examples/mcp-wedge/poisoned-mcp-server/
 
-FROM alpine:3.20
+FROM alpine:3.24
 COPY --from=builder /poisoned-mcp-server /usr/local/bin/poisoned-mcp-server
 EXPOSE 8443
 ENTRYPOINT ["poisoned-mcp-server"]
