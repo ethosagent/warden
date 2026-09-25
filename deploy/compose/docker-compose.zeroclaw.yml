@@ -28,7 +28,7 @@
 
 services:
   control-plane:
-    image: ethosagent/warden:${WARDEN_VERSION:-0.2.1}
+    image: ethosagent/warden:${WARDEN_VERSION:-0.3.0}
     networks: [cp-net]
     ports:
       - "7070:7070"                  # fleet dashboard + /policy + /central/ingest
@@ -49,7 +49,7 @@ services:
       - "--tls-host=control-plane,localhost,127.0.0.1"
 
   warden:
-    image: ethosagent/warden:${WARDEN_VERSION:-0.2.1}
+    image: ethosagent/warden:${WARDEN_VERSION:-0.3.0}
     depends_on:
       control-plane:
         condition: service_started
@@ -73,11 +73,11 @@ services:
       - "--db=/data/warden.db"
 
   zeroclaw:
-    # Pinned by digest — this repo has no semver tags (only main/latest/sha-*);
-    # the digest is the only immutable identifier. Resolved from :latest 2026-07-01.
-    image: ghcr.io/zeroclaw-labs/zeroclaw@sha256:eae321dac2d314bc282bdfb28b5378c9d527998f7e2fe0dee8315bfdcdf13a0c
+    # Pinned by semver tag + digest — upstream now publishes semver release tags;
+    # the tag is for readability, the digest keeps the pin immutable.
+    image: ghcr.io/zeroclaw-labs/zeroclaw:v0.8.5@sha256:ba9c76b9287c125ec9cc9a8270654f2c0efbd610eef3e00eece3cd11f6c083e0
     # ARM64 note: if the distroless image exits immediately, switch to the Debian
-    # variant: image: ghcr.io/zeroclaw-labs/zeroclaw:debian
+    # variant: image: ghcr.io/zeroclaw-labs/zeroclaw:v0.8.5-debian
     depends_on: [warden]
     networks: [zeroclaw-internal]     # internal ONLY — no internet except via Warden
     environment:

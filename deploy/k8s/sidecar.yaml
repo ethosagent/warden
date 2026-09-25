@@ -26,7 +26,7 @@ spec:
       containers:
         # The untrusted agent. It egresses ONLY through the proxy on loopback.
         - name: agent
-          image: alpine:3.20 # stand-in for the real agent runtime
+          image: alpine:3.24 # stand-in for the real agent runtime
           env:
             - name: HTTPS_PROXY
               value: "http://127.0.0.1:8080"

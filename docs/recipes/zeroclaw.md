@@ -19,7 +19,7 @@ docker compose -f deploy/compose/docker-compose.zeroclaw.yml up
 ```
 
 > Warden is pulled from Docker Hub (`ethosagent/warden`) — no local build. Override
-> the version with `WARDEN_VERSION` (default `0.2.1`):
+> the version with `WARDEN_VERSION` (default `0.3.0`):
 > `WARDEN_VERSION=0.2.0 docker compose -f deploy/compose/docker-compose.zeroclaw.yml up`
 
 - **ZeroClaw gateway:** http://localhost:42617
@@ -29,7 +29,7 @@ ZeroClaw is on an `internal: true` network; its only route out is Warden. The
 gateway is reachable via a `socat` forwarder, not a direct port on ZeroClaw.
 
 > ARM64: if the distroless image exits immediately, switch the `zeroclaw` service
-> to `image: ghcr.io/zeroclaw-labs/zeroclaw:debian`.
+> to `image: ghcr.io/zeroclaw-labs/zeroclaw:v0.8.5-debian`.
 
 ## 3. Prove the isolation
 

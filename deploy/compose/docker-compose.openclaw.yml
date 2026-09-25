@@ -29,7 +29,7 @@
 
 services:
   control-plane:
-    image: ethosagent/warden:${WARDEN_VERSION:-0.2.1}
+    image: ethosagent/warden:${WARDEN_VERSION:-0.3.0}
     networks: [cp-net]
     ports:
       - "7070:7070"                  # fleet dashboard + /policy + /central/ingest
@@ -50,7 +50,7 @@ services:
       - "--tls-host=control-plane,localhost,127.0.0.1"
 
   warden:
-    image: ethosagent/warden:${WARDEN_VERSION:-0.2.1}
+    image: ethosagent/warden:${WARDEN_VERSION:-0.3.0}
     depends_on:
       control-plane:
         condition: service_started
@@ -74,7 +74,7 @@ services:
       - "--db=/data/warden.db"
 
   openclaw:
-    image: ghcr.io/openclaw/openclaw:2026.3.1   # Docker Hub mirror: openclaw/openclaw:2026.3.1
+    image: ghcr.io/openclaw/openclaw:2026.9.6   # Docker Hub mirror: openclaw/openclaw:2026.9.6
     # --allow-unconfigured: start the gateway before a completed `openclaw setup`
     # (configure providers/channels later via the Control UI). Without it the
     # container exits 78 ("Missing config"). The image's default CMD is

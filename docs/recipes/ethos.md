@@ -20,7 +20,7 @@ docker compose -f deploy/compose/docker-compose.ethos.yml up
 ```
 
 > Warden is pulled from Docker Hub (`ethosagent/warden`) — no local build. Override
-> the version with `WARDEN_VERSION` (default `0.2.1`):
+> the version with `WARDEN_VERSION` (default `0.3.0`):
 > `WARDEN_VERSION=0.2.0 docker compose -f deploy/compose/docker-compose.ethos.yml up`
 
 - **Ethos web UI:** http://localhost:3000
@@ -36,6 +36,10 @@ http://localhost:3000 to begin (the container logs also print a one-time
 `/auth/exchange?t=…` onboarding link). A one-shot `ethos-init` service in the
 compose chowns the named volume to Ethos's uid first, so first boot doesn't fail
 with "unable to open database file".
+
+> Ethos 0.8.0's boxed "SECURITY: … NON-LOOPBACK address" banner ("will not log in over plain http"; the auth cookie is now `Secure`) is expected here:
+> Ethos must bind `0.0.0.0` so the `ui` socat forwarder can reach it on the internal-only network, and browsers treat `http://localhost` as a secure origin, so login at http://localhost:3000 works.
+> Only if you expose port 3000 beyond localhost do you need a TLS-terminating reverse proxy plus Ethos `webBaseUrl`.
 
 ## 3. Prove the isolation
 

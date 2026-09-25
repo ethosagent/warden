@@ -22,7 +22,7 @@ services:
       - "--db=/tmp/warden.db"
 
   agent:
-    image: alpine:3.20
+    image: alpine:3.24
     depends_on:
       - proxy
     networks:

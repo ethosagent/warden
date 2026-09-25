@@ -96,8 +96,8 @@ OUT_DIR=deploy/compose/certs ./scripts/gen-certs.sh
 # Bring up any recipe — the Warden image is pulled from Docker Hub (no build):
 docker compose -f deploy/compose/docker-compose.ethos.yml up
 
-# Pin a specific Warden version (defaults to the tested release, 0.2.1):
-WARDEN_VERSION=0.2.1 docker compose -f deploy/compose/docker-compose.ethos.yml up
+# Pin a specific Warden version (defaults to the tested release, 0.3.0):
+WARDEN_VERSION=0.3.0 docker compose -f deploy/compose/docker-compose.ethos.yml up
 ```
 
 Every recipe also runs a **control-plane** that serves policy and aggregates the agent's traffic into a fleet dashboard at **https://localhost:7070/dashboard/** (served with the proxy CA — trust it). Full per-recipe details (ports, the Node `fetch` proxy workaround, and how to prove isolation) are in **[docs/recipes/](docs/recipes/)**.

@@ -27,7 +27,7 @@
 
 services:
   control-plane:
-    image: ethosagent/warden:${WARDEN_VERSION:-0.2.1}
+    image: ethosagent/warden:${WARDEN_VERSION:-0.3.0}
     networks: [cp-net]
     ports:
       - "7070:7070"
@@ -52,7 +52,7 @@ services:
       - "--tls-host=control-plane,localhost,127.0.0.1"
 
   worker-1:
-    image: ethosagent/warden:${WARDEN_VERSION:-0.2.1}
+    image: ethosagent/warden:${WARDEN_VERSION:-0.3.0}
     depends_on: [control-plane]
     networks: [cp-net, egress, w1-internal]
     ports:
@@ -77,7 +77,7 @@ services:
       - "--db=/data/warden.db"
 
   worker-2:
-    image: ethosagent/warden:${WARDEN_VERSION:-0.2.1}
+    image: ethosagent/warden:${WARDEN_VERSION:-0.3.0}
     depends_on: [control-plane]
     networks: [cp-net, egress, w2-internal]
     ports:
@@ -100,7 +100,7 @@ services:
       - "--db=/data/warden.db"
 
   agent-1:
-    image: curlimages/curl:8.21.0
+    image: curlimages/curl:8.22.0
     depends_on: [worker-1]
     networks: [w1-internal]            # internal only — sole route out is worker-1
     environment:
@@ -112,7 +112,7 @@ services:
     entrypoint: ["sh", "-c", "while true; do curl -s -o /dev/null -w 'agent-1 -> %{http_code}\\n' https://api.github.com/zen; sleep 5; done"]
 
   agent-2:
-    image: curlimages/curl:8.21.0
+    image: curlimages/curl:8.22.0
     depends_on: [worker-2]
     networks: [w2-internal]
     environment:

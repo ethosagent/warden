@@ -33,7 +33,7 @@
 
 services:
   control-plane:
-    image: ethosagent/warden:${WARDEN_VERSION:-0.2.1}
+    image: ethosagent/warden:${WARDEN_VERSION:-0.3.0}
     networks: [cp-net]
     ports:
       - "7070:7070"                  # fleet dashboard + /policy + /central/ingest
@@ -54,7 +54,7 @@ services:
       - "--tls-host=control-plane,localhost,127.0.0.1"
 
   proxy:
-    image: ethosagent/warden:${WARDEN_VERSION:-0.2.1}
+    image: ethosagent/warden:${WARDEN_VERSION:-0.3.0}
     depends_on:
       control-plane:
         condition: service_started
@@ -83,7 +83,7 @@ services:
       - "--db=/tmp/warden.db"
 
   agent:
-    image: alpine:3.20               # stand-in for the real agent runtime
+    image: alpine:3.24               # stand-in for the real agent runtime
     depends_on:
       - proxy
     networks:
