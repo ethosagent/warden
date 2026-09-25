@@ -9,11 +9,10 @@
 # (Set controlPlane.localOnly: true, or run with --local-only, to enforce a local
 #  policy standalone; that mode DOES require an allowlist.)
 
-# Secrets live here, on the worker — never on the control plane. (Demo mapping;
-# the synthetic agent doesn't use it, but it shows where secrets belong.)
-secrets:
-  - placeholder: example_secret_001
-    envVar: EXAMPLE_SECRET
+# No declared secret placeholders on this worker. (A demo `example_secret_001`
+# mapping lived here; it was removed because the worker eagerly resolves every
+# declared placeholder at startup, and under the aws backend a placeholder that
+# has no matching AWS Secrets Manager entry makes the worker fail to start.)
 
 # Managed (write-capable) secret store so the dashboard Secrets tab can
 # add / rotate / delete secrets. Without this block the backend is `env`
