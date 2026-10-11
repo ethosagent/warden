@@ -23,6 +23,13 @@ linters:
       - path: _test\.go
         linters:
           - errcheck
+      # x/net v0.60 deprecates http2.Transport, http2.ClientConn and
+      # http2.Server.ServeConn in favour of net/http's native HTTP/2. They still
+      # work; the gRPC pass-through keeps them until it moves to net/http.
+      - path: internal/proxy/grpc(_test)?\.go
+        linters:
+          - staticcheck
+        text: "SA1019"
 
 formatters:
   enable:
