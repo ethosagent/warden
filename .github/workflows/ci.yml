@@ -21,4 +21,4 @@ jobs:
       # The same script developers run locally and the pre-push hook runs. This
       # is what guarantees CI parity — do NOT inline the individual steps.
       - name: Run check.sh
-        run: scripts/check.sh
+        run: scripts/check.sh --integration
