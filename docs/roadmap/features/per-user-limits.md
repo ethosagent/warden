@@ -55,11 +55,11 @@ On a managed deployment with two CA-enabled workers that advertise userlimits/v1
 | 3/10 | [`W-P3-PUL-03`](#310--w-p3-pul-03) | Add per-user limit matching and counters to the policy evaluator | feature | M | W-P3-PUL-01, W-P1-GPOL-02 | [#153](https://github.com/ethosagent/warden/issues/153) |
 | 4/10 | [`W-P3-PUL-04`](#410--w-p3-pul-04) | Cap daily estimated cost per user in the worker | feature | M | W-P3-PUL-02, W-P3-PUL-03, W-P3-PUL-06, W-P3-PUL-09 | [#154](https://github.com/ethosagent/warden/issues/154) |
 | 5/10 | [`W-P3-PUL-05`](#510--w-p3-pul-05) | Add per-user usage and cost dashboard view | feature | M | W-P3-PUL-07, W-P3-PUL-08, W-P1-VRFY-04, W-P1-SSO-05, W-P2-APIK-02, W-P1-GPOL-07 | [#155](https://github.com/ethosagent/warden/issues/155) |
-| 6/10 | [`W-P3-PUL-06`](#610--w-p3-pul-06) | Count relayed bytes for cost estimates on streamed responses | feature | S | — | — |
-| 7/10 | [`W-P3-PUL-07`](#710--w-p3-pul-07) | Fill fleet agent_id and add the per-user daily usage rollup | feature | M | W-P3-PUL-02, W-P1-VRFY-06 | — |
-| 8/10 | [`W-P3-PUL-08`](#810--w-p3-pul-08) | Publish fleet cost blocks as costBlockedUsers from the control plane | feature | M | W-P3-PUL-01, W-P3-PUL-07, W-P1-PVER-05, W-P2-SBND-02 | — |
-| 9/10 | [`W-P3-PUL-09`](#910--w-p3-pul-09) | Enforce per-user rate limits per request in the proxy | feature | M | W-P3-PUL-02, W-P3-PUL-03, W-P1-GPOL-03, W-P1-BLOCK-02, W-P1-JAUD-06, W-P1-JAUD-02 | — |
-| 10/10 | [`W-P3-PUL-10`](#1010--w-p3-pul-10) | Add per-user limits end-to-end test and docs | test | S | W-P3-PUL-04, W-P3-PUL-05, W-P3-PUL-08, W-P3-PUL-09, W-P1-VRFY-05 | — |
+| 6/10 | [`W-P3-PUL-06`](#610--w-p3-pul-06) | Count relayed bytes for cost estimates on streamed responses | feature | S | — | [#290](https://github.com/ethosagent/warden/issues/290) |
+| 7/10 | [`W-P3-PUL-07`](#710--w-p3-pul-07) | Fill fleet agent_id and add the per-user daily usage rollup | feature | M | W-P3-PUL-02, W-P1-VRFY-06 | [#291](https://github.com/ethosagent/warden/issues/291) |
+| 8/10 | [`W-P3-PUL-08`](#810--w-p3-pul-08) | Publish fleet cost blocks as costBlockedUsers from the control plane | feature | M | W-P3-PUL-01, W-P3-PUL-07, W-P1-PVER-05, W-P2-SBND-02 | [#292](https://github.com/ethosagent/warden/issues/292) |
+| 9/10 | [`W-P3-PUL-09`](#910--w-p3-pul-09) | Enforce per-user rate limits per request in the proxy | feature | M | W-P3-PUL-02, W-P3-PUL-03, W-P1-GPOL-03, W-P1-BLOCK-02, W-P1-JAUD-06, W-P1-JAUD-02 | [#293](https://github.com/ethosagent/warden/issues/293) |
+| 10/10 | [`W-P3-PUL-10`](#1010--w-p3-pul-10) | Add per-user limits end-to-end test and docs | test | S | W-P3-PUL-04, W-P3-PUL-05, W-P3-PUL-08, W-P3-PUL-09, W-P1-VRFY-05 | [#294](https://github.com/ethosagent/warden/issues/294) |
 
 ### 1/10 · W-P3-PUL-01
 
@@ -260,7 +260,7 @@ Give operators one place to see who is using which providers and how much they a
 
 **Count relayed bytes for cost estimates on streamed responses**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#290](https://github.com/ethosagent/warden/issues/290)
 
 recordAllowEvent prices requests from `req.ContentLength` and `resp.ContentLength` and clamps -1 to 0, so chunked uploads and chunked or SSE LLM responses, the normal shape for LLM APIs, are recorded at $0 and a daily cost cap would never fire. Wrap the forwarded request body and the response copy in byte counters and use the counts whenever Content-Length is unknown. Worker only; no new config.
 
@@ -293,7 +293,7 @@ recordAllowEvent prices requests from `req.ContentLength` and `resp.ContentLengt
 
 **Fill fleet agent_id and add the per-user daily usage rollup**
 
-Type **feature** · Size **M** · Issue —
+Type **feature** · Size **M** · Issue [#291](https://github.com/ethosagent/warden/issues/291)
 
 Control-plane half of recording. Ingest stores only ProxyID today, so the existing fleet agent_id column is always empty; fill it from Event.AgentID and add the limit_rule column. Add a per-day per-user rollup updated in the same transaction as the event insert, so fleet cost totals and the dashboard survive events pruning and are never double counted when a worker retries a batch.
 
@@ -330,7 +330,7 @@ Control-plane half of recording. Ingest stores only ProxyID today, so the existi
 
 **Publish fleet cost blocks as costBlockedUsers from the control plane**
 
-Type **feature** · Size **M** · Issue —
+Type **feature** · Size **M** · Issue [#292](https://github.com/ethosagent/warden/issues/292)
 
 A per-worker ledger alone lets a user spend the cap once on every worker. The CP recomputes today's spend per (sub, rule) from the W-P3-PUL-07 rollup and serves over-cap users as costBlockedUsers on the policy wire, appending a publish_log row on every change so signed bundles move to a new seq instead of reading as equivocation. CP only; it runs only when the served policy has a dailyCostUSD rule.
 
@@ -368,7 +368,7 @@ A per-worker ledger alone lets a user spend the cap once on every worker. The CP
 
 **Enforce per-user rate limits per request in the proxy**
 
-Type **feature** · Size **M** · Issue —
+Type **feature** · Size **M** · Issue [#293](https://github.com/ethosagent/warden/issues/293)
 
 Wire the evaluator's user limits into the worker. Policy and rate limits are checked only at CONNECT today, so a per-user limit would count tunnels, and one keep-alive session can carry requests from several users. Charge each request, h2 stream and WebSocket upgrade in a new userLimitStage, answer 429 with Retry-After, advertise the capability in the heartbeat and lift the PUL-01 guard for rateLimit.
 
@@ -409,7 +409,7 @@ Wire the evaluator's user limits into the worker. Policy and rate limits are che
 
 **Add per-user limits end-to-end test and docs**
 
-Type **test** · Size **S** · Issue —
+Type **test** · Size **S** · Issue [#294](https://github.com/ethosagent/warden/issues/294)
 
 Prove the done-when end to end with two workers and one CP under the integration build tag, and document how per-user limits behave, including where they are approximate. Operators need the overshoot bounds, the anonymous and raw-tunnel rules and the UTC-day reset written down before relying on caps.
 

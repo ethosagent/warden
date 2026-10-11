@@ -59,9 +59,9 @@ On a CP with the consent block, --state-dir and a Vault or AWS consent.store, an
 | 2/7 | [`W-P3-PORT-02`](#27--w-p3-port-02) | Implement revoke with grant, secret, epoch and provider steps | feature | M | W-P3-PORT-01, W-P3-PORT-05, W-P3-BRKR-04, W-P3-BRKR-05, W-P3-PUS-03, W-P1-AAUD-02, W-P1-JAUD-03 | [#158](https://github.com/ethosagent/warden/issues/158) |
 | 3/7 | [`W-P3-PORT-03`](#37--w-p3-port-03) | Add the pending landing page and connect, continue and decline actions | feature | M | W-P3-PORT-01, W-P3-CSIG-02, W-P3-BRKR-03 | [#159](https://github.com/ethosagent/warden/issues/159) |
 | 4/7 | [`W-P3-PORT-04`](#47--w-p3-port-04) | Write the consent portal user and operator guide | docs | S | W-P3-PORT-02, W-P3-PORT-03, W-P3-PORT-06, W-P3-PORT-07 | [#160](https://github.com/ethosagent/warden/issues/160) |
-| 5/7 | [`W-P3-PORT-05`](#57--w-p3-port-05) | Bump grant epochs on revoke and report workers without usersecrets/v1 | feature | S | W-P3-PUS-08, W-P3-BRKR-02, W-P1-BLOCK-04 | — |
-| 6/7 | [`W-P3-PORT-06`](#67--w-p3-port-06) | Prove portal revoke end to end on usersecrets/v1 workers | feature | M | W-P3-PORT-02, W-P3-PORT-05, W-P3-PUS-04, W-P3-PUS-09 | — |
-| 7/7 | [`W-P3-PORT-07`](#77--w-p3-port-07) | Add provider revoke retries and the orphan token sweep | feature | S | W-P3-PORT-02 | — |
+| 5/7 | [`W-P3-PORT-05`](#57--w-p3-port-05) | Bump grant epochs on revoke and report workers without usersecrets/v1 | feature | S | W-P3-PUS-08, W-P3-BRKR-02, W-P1-BLOCK-04 | [#295](https://github.com/ethosagent/warden/issues/295) |
+| 6/7 | [`W-P3-PORT-06`](#67--w-p3-port-06) | Prove portal revoke end to end on usersecrets/v1 workers | feature | M | W-P3-PORT-02, W-P3-PORT-05, W-P3-PUS-04, W-P3-PUS-09 | [#296](https://github.com/ethosagent/warden/issues/296) |
+| 7/7 | [`W-P3-PORT-07`](#77--w-p3-port-07) | Add provider revoke retries and the orphan token sweep | feature | S | W-P3-PORT-02 | [#297](https://github.com/ethosagent/warden/issues/297) |
 
 ### 1/7 · W-P3-PORT-01
 
@@ -219,7 +219,7 @@ Add docs/consent-portal.md so operators can register provider apps, configure th
 
 **Bump grant epochs on revoke and report workers without usersecrets/v1**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#295](https://github.com/ethosagent/warden/issues/295)
 
 Revoke reaches workers through the userGrantEpochs signed-bundle section that W-P3-PUS-08 owns, not through a second channel. Add the CP adapter that lets oauthbroker.RevokeUserGrant bump a user's epoch without importing controlplane, and report which connected workers could still serve a cached token because they lack heartbeat cap usersecrets/v1. CP-only; without the consent block nothing is created and /policy is unchanged.
 
@@ -252,7 +252,7 @@ Revoke reaches workers through the userGrantEpochs signed-bundle section that W-
 
 **Prove portal revoke end to end on usersecrets/v1 workers**
 
-Type **feature** · Size **M** · Issue —
+Type **feature** · Size **M** · Issue [#296](https://github.com/ethosagent/warden/issues/296)
 
 Own the integration test for the feature's revoke promise: after a user revokes a provider in the portal, the next agent call through that mapping returns authorization_required on every usersecrets/v1 worker, including one that holds a cached token. Worker eviction is W-P3-PUS-09 and the 403 comes from W-P3-PUS-04 (later the W-P3-JIT-02 body), so this ticket changes no production code beyond test fakes.
 
@@ -283,7 +283,7 @@ Own the integration test for the feature's revoke promise: after a user revokes 
 
 **Add provider revoke retries and the orphan token sweep**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#297](https://github.com/ethosagent/warden/issues/297)
 
 Make a revoke finish even when the provider is down or a racing CP refresh writes a rotated token back after the delete. A retryable provider failure parks the token under the reserved revoking/ prefix of consent.store and a CP ticker retries it for up to 24h before alerting. An orphan sweep deletes any live per-user key that has no active grant row, using metadata-only List. CP-only.
 

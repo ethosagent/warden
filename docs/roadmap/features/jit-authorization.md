@@ -60,8 +60,8 @@ In a deployment with a CP running consent, the OAuth broker and the portal, an e
 | 3/7 | [`W-P3-JIT-03`](#37--w-p3-jit-03) | Return JSON-RPC results for MCP calls missing a grant | feature | M | W-P3-JIT-02 | [#147](https://github.com/ethosagent/warden/issues/147) |
 | 4/7 | [`W-P3-JIT-04`](#47--w-p3-jit-04) | Add /connect/{id}/status long-poll on the CP | feature | M | W-P3-JIT-01, W-P3-CSIG-04, W-P2-WCA-04, W-P1-SSO-05 | [#148](https://github.com/ethosagent/warden/issues/148) |
 | 5/7 | [`W-P3-JIT-05`](#57--w-p3-jit-05) | Document the authorization_required contract | docs | S | W-P3-JIT-03, W-P3-JIT-04, W-P3-JIT-06 | [#149](https://github.com/ethosagent/warden/issues/149) |
-| 6/7 | [`W-P3-JIT-06`](#67--w-p3-jit-06) | Return authorization_required on HTTP/2 and gRPC streams | feature | S | W-P3-JIT-02 | — |
-| 7/7 | [`W-P3-JIT-07`](#77--w-p3-jit-07) | Add end-to-end test for the JIT consent loop | test | M | W-P3-JIT-03, W-P3-JIT-04, W-P3-JIT-06, W-P3-BRKR-04, W-P3-PORT-03 | — |
+| 6/7 | [`W-P3-JIT-06`](#67--w-p3-jit-06) | Return authorization_required on HTTP/2 and gRPC streams | feature | S | W-P3-JIT-02 | [#301](https://github.com/ethosagent/warden/issues/301) |
+| 7/7 | [`W-P3-JIT-07`](#77--w-p3-jit-07) | Add end-to-end test for the JIT consent loop | test | M | W-P3-JIT-03, W-P3-JIT-04, W-P3-JIT-06, W-P3-BRKR-04, W-P3-PORT-03 | [#302](https://github.com/ethosagent/warden/issues/302) |
 
 ### 1/7 · W-P3-JIT-01
 
@@ -259,7 +259,7 @@ Add docs/jit-authorization.md so agent and client authors know what a missing gr
 
 **Return authorization_required on HTTP/2 and gRPC streams**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#301](https://github.com/ethosagent/warden/issues/301)
 
 ALPN h2 traffic goes through handleGRPC and serveGRPCStream in internal/proxy/grpc.go, which swap placeholders outside runRequestStages. Run the same JIT logic there so a per-user placeholder without a grant is answered on the stream and never forwarded. This is worker-only and reuses the W-P3-JIT-02 cache and CP client.
 
@@ -292,7 +292,7 @@ ALPN h2 traffic goes through handleGRPC and serveGRPCStream in internal/proxy/gr
 
 **Add end-to-end test for the JIT consent loop**
 
-Type **test** · Size **M** · Issue —
+Type **test** · Size **M** · Issue [#302](https://github.com/ethosagent/warden/issues/302)
 
 Prove the feature's done_when in one test: a request missing a grant is denied with a pending, the user consents through the portal, the status long-poll returns granted, and a retry reaches upstream with the user's token. The test runs an in-process CP, worker, fake OAuth provider and fake upstream under the integration build tag. It changes no production code.
 

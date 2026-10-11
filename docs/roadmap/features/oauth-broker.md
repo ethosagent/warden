@@ -53,10 +53,10 @@ With `consent.providers` and a persistent consent.store (aws, or vault) configur
 | 3/9 | [`W-P3-BRKR-03`](#39--w-p3-brkr-03) | Implement POST /connect/start with PKCE, CSRF and scope capping | feature | M | W-P3-BRKR-01, W-P3-BRKR-02, W-P3-CSIG-04, W-P1-BLOCK-03, W-P2-TOKX-04 | [#135](https://github.com/ethosagent/warden/issues/135) |
 | 4/9 | [`W-P3-BRKR-04`](#49--w-p3-brkr-04) | Implement /connect/callback and write tokens to the secret backend | feature | M | W-P3-BRKR-03, W-P1-AAUD-01 | [#136](https://github.com/ethosagent/warden/issues/136) |
 | 5/9 | [`W-P3-BRKR-05`](#59--w-p3-brkr-05) | Add provider revoke client for Google and GitHub | feature | S | W-P3-BRKR-01 | [#137](https://github.com/ethosagent/warden/issues/137) |
-| 6/9 | [`W-P3-BRKR-06`](#69--w-p3-brkr-06) | Guard reserved prefixes on the worker dashboard and load client secrets from consent.store | feature | S | W-P3-CSIG-06, W-P3-BRKR-01, W-P1-SSO-06 | — |
-| 7/9 | [`W-P3-BRKR-07`](#79--w-p3-brkr-07) | Add the provider refresh-token client for CP-side refresh | feature | S | W-P3-BRKR-01 | — |
-| 8/9 | [`W-P3-BRKR-08`](#89--w-p3-brkr-08) | Record the connected provider account and enforce account rules | feature | S | W-P3-BRKR-04, W-P3-BRKR-05 | — |
-| 9/9 | [`W-P3-BRKR-09`](#99--w-p3-brkr-09) | Add end-to-end OAuth broker test with fake Google and GitHub | test | M | W-P3-BRKR-06, W-P3-BRKR-07, W-P3-BRKR-08 | — |
+| 6/9 | [`W-P3-BRKR-06`](#69--w-p3-brkr-06) | Guard reserved prefixes on the worker dashboard and load client secrets from consent.store | feature | S | W-P3-CSIG-06, W-P3-BRKR-01, W-P1-SSO-06 | [#279](https://github.com/ethosagent/warden/issues/279) |
+| 7/9 | [`W-P3-BRKR-07`](#79--w-p3-brkr-07) | Add the provider refresh-token client for CP-side refresh | feature | S | W-P3-BRKR-01 | [#280](https://github.com/ethosagent/warden/issues/280) |
+| 8/9 | [`W-P3-BRKR-08`](#89--w-p3-brkr-08) | Record the connected provider account and enforce account rules | feature | S | W-P3-BRKR-04, W-P3-BRKR-05 | [#281](https://github.com/ethosagent/warden/issues/281) |
+| 9/9 | [`W-P3-BRKR-09`](#99--w-p3-brkr-09) | Add end-to-end OAuth broker test with fake Google and GitHub | test | M | W-P3-BRKR-06, W-P3-BRKR-07, W-P3-BRKR-08 | [#282](https://github.com/ethosagent/warden/issues/282) |
 
 ### 1/9 · W-P3-BRKR-01
 
@@ -250,7 +250,7 @@ Add `oauthbroker.Revoke(ctx, provider, rec TokenRecord)` for Google, GitHub, Git
 
 **Guard reserved prefixes on the worker dashboard and load client secrets from consent.store**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#279](https://github.com/ethosagent/warden/issues/279)
 
 W-P3-CSIG-06 owns the reserved prefixes (`users/`, `idp/`, `revoking/`, `oauth-clients/`) and enforces them in config validation, storeFetcher and /central/secrets. This ticket covers the remaining write surface, the dashboard secret-store tab (/dashboard/api/secretstore), and resolves provider client secrets from consent.store at `oauth-clients/<id>`, so a client secret never sits in the store whose credential the CP sends to workers. Operators load client secrets directly in the backend or use clientSecretEnv; no console path writes them.
 
@@ -282,7 +282,7 @@ W-P3-CSIG-06 owns the reserved prefixes (`users/`, `idp/`, `revoking/`, `oauth-c
 
 **Add the provider refresh-token client for CP-side refresh**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#280](https://github.com/ethosagent/warden/issues/280)
 
 The CP is the only refresh authority (W-P3-PUS-03): workers never receive provider metadata, client secrets or refresh tokens, so no provider projection goes on /policy. Add the provider HTTP client for the refresh_token grant next to the code exchange (W-P3-BRKR-04) and revoke (W-P3-BRKR-05) clients, so every call to a provider token endpoint lives in internal/oauthbroker with the same hardening. It is a pure library; the W-P3-PUS-03 engine calls it.
 
@@ -316,7 +316,7 @@ The CP is the only refresh authority (W-P3-PUS-03): workers never receive provid
 
 **Record the connected provider account and enforce account rules**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#281](https://github.com/ethosagent/warden/issues/281)
 
 Nothing records which external account was connected, so a user could connect a personal Gmail or another person's GitHub account and agents would act on it. After the code exchange, identify the account, store it on the grant, and enforce the optional allowedAccountDomains and requireEmailMatch rules before the token is written.
 
@@ -349,7 +349,7 @@ Nothing records which external account was connected, so a user could connect a 
 
 **Add end-to-end OAuth broker test with fake Google and GitHub**
 
-Type **test** · Size **M** · Issue —
+Type **test** · Size **M** · Issue [#282](https://github.com/ethosagent/warden/issues/282)
 
 Every other ticket tests one handler. This test runs a real CP with consent sign-in, the broker and the AWS secret store over a fake AWS client, plus fake Google and GitHub providers, and proves the done_when sentence including the refusal cases. It runs behind the existing integration build tag, so normal `go test ./...` is unaffected.
 

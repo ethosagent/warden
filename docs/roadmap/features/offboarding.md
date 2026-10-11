@@ -54,9 +54,9 @@ With consent.offboarding.mode enforce and revokeGrace 0, removing a user from an
 | 2/7 | [`W-P3-OFFB-02`](#27--w-p3-offb-02) | Add the IdP refresh job in observe mode with safe token write-back | feature | M | W-P3-CSIG-03, W-P1-OPS1-01 | [#163](https://github.com/ethosagent/warden/issues/163) |
 | 3/7 | [`W-P3-OFFB-03`](#37--w-p3-offb-03) | Add the console Users tab and manual offboard routes | feature | M | W-P3-OFFB-01, W-P1-SSO-05, W-P2-APIK-02 | [#164](https://github.com/ethosagent/warden/issues/164) |
 | 4/7 | [`W-P3-OFFB-04`](#47--w-p3-offb-04) | Add an E2E test for IdP-driven offboarding and its false-positive guards | test | M | W-P3-OFFB-05, W-P3-OFFB-03, W-P3-OFFB-06, W-P1-VRFY-05, W-P2-SECT-01, W-P1-BLOCK-02 | [#165](https://github.com/ethosagent/warden/issues/165) |
-| 5/7 | [`W-P3-OFFB-05`](#57--w-p3-offb-05) | Offboard on confirmed upstream refusal with a circuit breaker | feature | S | W-P3-OFFB-01, W-P3-OFFB-02 | — |
-| 6/7 | [`W-P3-OFFB-06`](#67--w-p3-offb-06) | Audit and test blocked-user refusals across portal and connect | feature | S | W-P3-CSIG-04, W-P3-BRKR-04, W-P1-BLOCK-07 | — |
-| 7/7 | [`W-P3-OFFB-07`](#77--w-p3-offb-07) | Flag agents owned by blocked or offboarded users | feature | S | W-P3-OFFB-03, W-P2-AREG-02 | — |
+| 5/7 | [`W-P3-OFFB-05`](#57--w-p3-offb-05) | Offboard on confirmed upstream refusal with a circuit breaker | feature | S | W-P3-OFFB-01, W-P3-OFFB-02 | [#298](https://github.com/ethosagent/warden/issues/298) |
+| 6/7 | [`W-P3-OFFB-06`](#67--w-p3-offb-06) | Audit and test blocked-user refusals across portal and connect | feature | S | W-P3-CSIG-04, W-P3-BRKR-04, W-P1-BLOCK-07 | [#299](https://github.com/ethosagent/warden/issues/299) |
+| 7/7 | [`W-P3-OFFB-07`](#77--w-p3-offb-07) | Flag agents owned by blocked or offboarded users | feature | S | W-P3-OFFB-03, W-P2-AREG-02 | [#300](https://github.com/ethosagent/warden/issues/300) |
 
 ### 1/7 · W-P3-OFFB-01
 
@@ -217,7 +217,7 @@ Prove the whole chain under the integration tag: a user disabled upstream is blo
 
 **Offboard on confirmed upstream refusal with a circuit breaker**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#298](https://github.com/ethosagent/warden/issues/298)
 
 Turn the observe-mode job into enforcement. A result counts as an upstream disable only when Dex reports a connector refresh failure that persists after confirmDelay while the issuer is otherwise healthy; expiry, lost chains, re-logins and outages never qualify. A per-run breaker stops automatic offboarding when too many users fail at once and leaves them for admin review. Enforcement runs only with consent.offboarding.mode enforce.
 
@@ -255,7 +255,7 @@ Turn the observe-mode job into enforcement. A result counts as an upstream disab
 
 **Audit and test blocked-user refusals across portal and connect**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#299](https://github.com/ethosagent/warden/issues/299)
 
 An offboarded user whose IdP account still works must not sign in to the consent portal again or reconnect a provider, which would recreate idp_links, grants and consent.store entries. The checks live in their owning tickets: the portal callback (W-P3-CSIG-02), the portal session middleware (W-P3-CSIG-04), and /connect/start and /connect/callback (W-P3-BRKR-03, W-P3-BRKR-04). This ticket gives them one shared BlockChecker over the in-memory BlockStore snapshot, adds the audit rows, and proves together that a blocked sub gets 403 and nothing is written.
 
@@ -287,7 +287,7 @@ An offboarded user whose IdP account still works must not sign in to the consent
 
 **Flag agents owned by blocked or offboarded users**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#300](https://github.com/ethosagent/warden/issues/300)
 
 Registered agents keep working when their owner leaves, because owner fields are informational in P2. Show admins which agents have a blocked or offboarded owner so they can decide what to do. Offboarding never changes an agent's status on its own.
 

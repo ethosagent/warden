@@ -62,13 +62,13 @@ In the compose deployment with the token service, worker CA, signed bundles and 
 | 3/12 | [`W-P3-PUS-03`](#312--w-p3-pus-03) | Implement the CP user-token refresh engine | feature | M | W-P3-PUS-02, W-P3-PUS-06, W-P3-BRKR-02, W-P3-BRKR-04, W-P3-BRKR-07 | [#141](https://github.com/ethosagent/warden/issues/141) |
 | 4/12 | [`W-P3-PUS-04`](#412--w-p3-pus-04) | Swap per-user placeholders only for bound identities on mapped domains | feature | M | W-P3-PUS-09, W-P3-PUS-10, W-P1-VRFY-02, W-P1-JAUD-06, W-P2-WBND-02 | [#142](https://github.com/ethosagent/warden/issues/142) |
 | 5/12 | [`W-P3-PUS-05`](#512--w-p3-pus-05) | Retry once on upstream 401 with a CP-refreshed token | feature | M | W-P3-PUS-04, W-P3-PUS-07 | [#143](https://github.com/ethosagent/warden/issues/143) |
-| 6/12 | [`W-P3-PUS-06`](#612--w-p3-pus-06) | Add guarded grant record read and write helpers | feature | S | W-P3-PUS-01, W-P3-BRKR-01, W-P3-CSIG-06 | — |
-| 7/12 | [`W-P3-PUS-07`](#712--w-p3-pus-07) | Add the worker-mTLS mint endpoint POST /control/user-token | feature | M | W-P3-PUS-03, W-P3-BRKR-03, W-P2-WCA-04, W-P2-WBND-01, W-P2-TOKX-07, W-P2-AREG-03, W-P1-BLOCK-03 | — |
-| 8/12 | [`W-P3-PUS-08`](#812--w-p3-pus-08) | Serve perUserSecrets and userGrantEpochs as signed-bundle sections | feature | M | W-P3-PUS-02, W-P2-SBND-02, W-P2-WBND-07 | — |
-| 9/12 | [`W-P3-PUS-09`](#912--w-p3-pus-09) | Add the worker UserTokenSource with memory cache and epoch invalidation | feature | M | W-P3-PUS-07, W-P3-PUS-08, W-P2-WCA-03, W-P2-SBND-04 | — |
-| 10/12 | [`W-P3-PUS-10`](#1012--w-p3-pus-10) | Record the per-user token provider on analytics events | feature | S | — | — |
-| 11/12 | [`W-P3-PUS-11`](#1112--w-p3-pus-11) | Add the per-user secrets end-to-end integration test | test | M | W-P3-PUS-05, W-P3-PUS-10, W-P3-BRKR-04 | — |
-| 12/12 | [`W-P3-PUS-12`](#1212--w-p3-pus-12) | Document per-user secrets for operators and agent authors | docs | S | W-P3-PUS-05, W-P3-PUS-08 | — |
+| 6/12 | [`W-P3-PUS-06`](#612--w-p3-pus-06) | Add guarded grant record read and write helpers | feature | S | W-P3-PUS-01, W-P3-BRKR-01, W-P3-CSIG-06 | [#283](https://github.com/ethosagent/warden/issues/283) |
+| 7/12 | [`W-P3-PUS-07`](#712--w-p3-pus-07) | Add the worker-mTLS mint endpoint POST /control/user-token | feature | M | W-P3-PUS-03, W-P3-BRKR-03, W-P2-WCA-04, W-P2-WBND-01, W-P2-TOKX-07, W-P2-AREG-03, W-P1-BLOCK-03 | [#284](https://github.com/ethosagent/warden/issues/284) |
+| 8/12 | [`W-P3-PUS-08`](#812--w-p3-pus-08) | Serve perUserSecrets and userGrantEpochs as signed-bundle sections | feature | M | W-P3-PUS-02, W-P2-SBND-02, W-P2-WBND-07 | [#285](https://github.com/ethosagent/warden/issues/285) |
+| 9/12 | [`W-P3-PUS-09`](#912--w-p3-pus-09) | Add the worker UserTokenSource with memory cache and epoch invalidation | feature | M | W-P3-PUS-07, W-P3-PUS-08, W-P2-WCA-03, W-P2-SBND-04 | [#286](https://github.com/ethosagent/warden/issues/286) |
+| 10/12 | [`W-P3-PUS-10`](#1012--w-p3-pus-10) | Record the per-user token provider on analytics events | feature | S | — | [#287](https://github.com/ethosagent/warden/issues/287) |
+| 11/12 | [`W-P3-PUS-11`](#1112--w-p3-pus-11) | Add the per-user secrets end-to-end integration test | test | M | W-P3-PUS-05, W-P3-PUS-10, W-P3-BRKR-04 | [#288](https://github.com/ethosagent/warden/issues/288) |
+| 12/12 | [`W-P3-PUS-12`](#1212--w-p3-pus-12) | Document per-user secrets for operators and agent authors | docs | S | W-P3-PUS-05, W-P3-PUS-08 | [#289](https://github.com/ethosagent/warden/issues/289) |
 
 ### 1/12 · W-P3-PUS-01
 
@@ -265,7 +265,7 @@ When an upstream rejects a swapped per-user token with 401, ask the CP for a fre
 
 **Add guarded grant record read and write helpers**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#283](https://github.com/ethosagent/warden/issues/283)
 
 The refresh engine must never overwrite a grant that changed under it: a reconnect writes a new grant_id, and a revoke deletes the key. Add one pair of helpers in internal/oauthbroker that read a TokenRecord with its store version and write a rotated record back only if the stored grant is still the one that was read, using Vault KV v2 compare-and-swap where available and a read-compare under oauthbroker.GrantLocks elsewhere. Keys come from the W-P3-CSIG-06 helpers and the record type from W-P3-BRKR-01, so this ticket adds no second key scheme or record format. Library only; W-P3-PUS-03 calls it.
 
@@ -295,7 +295,7 @@ The refresh engine must never overwrite a grant that changed under it: a reconne
 
 **Add the worker-mTLS mint endpoint POST /control/user-token**
 
-Type **feature** · Size **M** · Issue —
+Type **feature** · Size **M** · Issue [#284](https://github.com/ethosagent/warden/issues/284)
 
 Expose the refresh engine to workers through one CP route that accepts only a worker cert principal and the user's agent-bound Warden token. The CP re-verifies the token itself, so a compromised worker can mint only for users whose valid tokens pass through it, and only for its own agent. The response holds a short-lived access token and nothing else.
 
@@ -332,7 +332,7 @@ Expose the refresh engine to workers through one CP route that accepts only a wo
 
 **Serve perUserSecrets and userGrantEpochs as signed-bundle sections**
 
-Type **feature** · Size **M** · Issue —
+Type **feature** · Size **M** · Issue [#285](https://github.com/ethosagent/warden/issues/285)
 
 Ship the value-free mappings and the revocation epochs to workers as two signed-bundle sections, and guard against enabling a mapping for an agent served by workers that cannot enforce it. Epochs are what lets a portal revoke or offboarding drop cached tokens on every worker within one long-poll. This ticket is CP-only; the worker side is W-P3-PUS-09.
 
@@ -368,7 +368,7 @@ Ship the value-free mappings and the revocation epochs to workers as two signed-
 
 **Add the worker UserTokenSource with memory cache and epoch invalidation**
 
-Type **feature** · Size **M** · Issue —
+Type **feature** · Size **M** · Issue [#286](https://github.com/ethosagent/warden/issues/286)
 
 Add the worker-side token source that calls the CP mint endpoint over the shared cert client and caches access tokens in memory only. It applies the signed-bundle sections on every policy apply, so mapping changes take effect live and a revoke drops cached tokens within one long-poll. The worker never sees refresh tokens or client secrets.
 
@@ -405,7 +405,7 @@ Add the worker-side token source that calls the CP mint endpoint over the shared
 
 **Record the per-user token provider on analytics events**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#287](https://github.com/ethosagent/warden/issues/287)
 
 Add a separate event field for the OAuth provider whose user token was swapped, so the consent portal can show which agents used a grant. The existing analytics.Event.Provider holds the LLM cost provider and must not be reused. Events without a per-user swap stay byte-identical.
 
@@ -436,7 +436,7 @@ Add a separate event field for the OAuth provider whose user token was swapped, 
 
 **Add the per-user secrets end-to-end integration test**
 
-Type **test** · Size **M** · Issue —
+Type **test** · Size **M** · Issue [#288](https://github.com/ethosagent/warden/issues/288)
 
 Prove the done-when end to end under the integration build tag: a CP with the token service, worker CA, signed bundles and perUserSecrets, one enrolled worker bound to an agent, and two users with grants from a fake OAuth provider. The test covers isolation between users, domain binding, refresh, the 401 retry, revocation, outages and the trust split. It uses in-process fakes so CI needs no Docker.
 
@@ -469,7 +469,7 @@ Prove the done-when end to end under the integration build tag: a CP with the to
 
 **Document per-user secrets for operators and agent authors**
 
-Type **docs** · Size **S** · Issue —
+Type **docs** · Size **S** · Issue [#289](https://github.com/ethosagent/warden/issues/289)
 
 Write the guide for configuring per-user secrets safely: the grant store and its IAM or Vault policy, mappings and their domains, the identity requirement, and the failure modes. Operators need to know why the grant store must be separate from the distributed secretStore, and agent authors need the exact response codes.
 

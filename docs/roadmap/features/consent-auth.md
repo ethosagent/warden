@@ -58,9 +58,9 @@ Setup: a CP running with console.auth=oidc, `consent.enabled: true` in --config,
 | 2/7 | [`W-P3-CSIG-02`](#27--w-p3-csig-02) | Implement portal login, callback and session store | feature | M | W-P3-CSIG-01, W-P3-CSIG-05, W-P1-BLOCK-07, W-P1-AAUD-02 | [#129](https://github.com/ethosagent/warden/issues/129) |
 | 3/7 | [`W-P3-CSIG-03`](#37--w-p3-csig-03) | Store the IdP refresh token in a CP-only secret namespace on login | feature | M | W-P3-CSIG-02, W-P3-CSIG-06 | [#130](https://github.com/ethosagent/warden/issues/130) |
 | 4/7 | [`W-P3-CSIG-04`](#47--w-p3-csig-04) | Add the portal session middleware, CSRF, logout and console isolation | feature | M | W-P3-CSIG-02, W-P1-SSO-05, W-P1-SSO-08, W-P1-BLOCK-07 | [#131](https://github.com/ethosagent/warden/issues/131) |
-| 5/7 | [`W-P3-CSIG-05`](#57--w-p3-csig-05) | Extract the console OIDC flow and session store into internal/webauth | chore | M | W-P1-SSO-03, W-P1-SSO-04 | — |
-| 6/7 | [`W-P3-CSIG-06`](#67--w-p3-csig-06) | Add the CP-only user credential store, user key helpers and reserved secret prefixes | feature | M | W-P3-CSIG-01 | — |
-| 7/7 | [`W-P3-CSIG-07`](#77--w-p3-csig-07) | Add a Dex-backed portal sign-in end-to-end test | test | S | W-P3-CSIG-03, W-P3-CSIG-04, W-P1-DEX-02, W-P1-SSO-07 | — |
+| 5/7 | [`W-P3-CSIG-05`](#57--w-p3-csig-05) | Extract the console OIDC flow and session store into internal/webauth | chore | M | W-P1-SSO-03, W-P1-SSO-04 | [#276](https://github.com/ethosagent/warden/issues/276) |
+| 6/7 | [`W-P3-CSIG-06`](#67--w-p3-csig-06) | Add the CP-only user credential store, user key helpers and reserved secret prefixes | feature | M | W-P3-CSIG-01 | [#277](https://github.com/ethosagent/warden/issues/277) |
+| 7/7 | [`W-P3-CSIG-07`](#77--w-p3-csig-07) | Add a Dex-backed portal sign-in end-to-end test | test | S | W-P3-CSIG-03, W-P3-CSIG-04, W-P1-DEX-02, W-P1-SSO-07 | [#278](https://github.com/ethosagent/warden/issues/278) |
 
 ### 1/7 · W-P3-CSIG-01
 
@@ -226,7 +226,7 @@ Add the exported portal.RequireSession middleware and portal.PrincipalFrom, whic
 
 **Extract the console OIDC flow and session store into internal/webauth**
 
-Type **chore** · Size **M** · Issue —
+Type **chore** · Size **M** · Issue [#276](https://github.com/ethosagent/warden/issues/276)
 
 P1 puts the OIDC login flow, the oidc_pending store, SessionStore and the session middleware inside internal/controlplane. internal/portal and internal/oauthbroker are mounted by controlplane, so they cannot import that code without an import cycle. Move the reusable parts into a new package internal/webauth, with no change to console behaviour, and add a `purpose` column so console and portal login states can never be swapped. The console tests from W-P1-SSO-03 and W-P1-SSO-04 must pass unchanged.
 
@@ -262,7 +262,7 @@ P1 puts the OIDC login flow, the oidc_pending store, SessionStore and the sessio
 
 **Add the CP-only user credential store, user key helpers and reserved secret prefixes**
 
-Type **feature** · Size **M** · Issue —
+Type **feature** · Size **M** · Issue [#277](https://github.com/ethosagent/warden/issues/277)
 
 Every P3 feature stores per-user credentials: IdP refresh tokens (this feature), provider grants and parked revokes (p3-oauth-broker, p3-consent-portal) and OAuth client secrets. Today the CP sends its secretStore credential to workers over SettingsWire.Secrets (internal/config/settings.go), so anything written there is readable by every worker; storeFetcher also uses a placeholder name directly as a store key, and /central/secrets can write or delete any key. Add one CP-only store, `consent.store`, that no worker ever gets a credential for, one helper that turns (iss, sub) into a fixed-length user key, and reserved logical prefixes that no static mapping or console edit can touch. This is library and config work only; nothing writes to the store until W-P3-CSIG-03 and W-P3-BRKR-04.
 
@@ -300,7 +300,7 @@ Every P3 feature stores per-user credentials: IdP refresh tokens (this feature),
 
 **Add a Dex-backed portal sign-in end-to-end test**
 
-Type **test** · Size **S** · Issue —
+Type **test** · Size **S** · Issue [#278](https://github.com/ethosagent/warden/issues/278)
 
 Every other ticket here tests against the httptest fake IdP. This test proves the done-when sentence against the reference identity stack, using the seeded LDAP users from W-P1-DEX-02 and the warden-portal client, in the same way W-P1-SSO-07 does for the console. It runs behind the `integration` build tag and WARDEN_IT_DEX=1, so normal `go test ./...` is unaffected.
 
