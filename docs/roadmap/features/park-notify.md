@@ -47,8 +47,8 @@ In the in-process integration setup of W-P3-PUS-11/W-P3-JIT-07 (CP with consent,
 | 4/8 | [`W-P4-PARK-04`](#48--w-p4-park-04) | Park and resume HTTP/1.1 requests in the jitDeny stage | feature | M | W-P4-PARK-02, W-P4-PARK-03, W-P3-JIT-03, W-P3-PUS-05 | [#225](https://github.com/ethosagent/warden/issues/225) |
 | 5/8 | [`W-P4-PARK-05`](#58--w-p4-park-05) | Park MCP gateway tool calls with progress notifications | feature | M | W-P4-PARK-02, W-P4-PARK-03, W-P4-MGW-07, W-P3-JIT-03 | [#226](https://github.com/ethosagent/warden/issues/226) |
 | 6/8 | [`W-P4-PARK-06`](#68--w-p4-park-06) | Record park outcomes on events and metrics | feature | S | W-P4-PARK-04, W-P3-PUS-10 | [#227](https://github.com/ethosagent/warden/issues/227) |
-| 7/8 | [`W-P4-PARK-07`](#78--w-p4-park-07) | Add the park end-to-end integration test | test | S | W-P4-PARK-04, W-P4-PARK-06, W-P3-JIT-07, W-P4-NTFY-02 | — |
-| 8/8 | [`W-P4-PARK-08`](#88--w-p4-park-08) | Document park for operators and agent authors | docs | S | W-P4-PARK-04, W-P3-JIT-05 | — |
+| 7/8 | [`W-P4-PARK-07`](#78--w-p4-park-07) | Add the park end-to-end integration test | test | S | W-P4-PARK-04, W-P4-PARK-06, W-P3-JIT-07, W-P4-NTFY-02 | [#330](https://github.com/ethosagent/warden/issues/330) |
+| 8/8 | [`W-P4-PARK-08`](#88--w-p4-park-08) | Document park for operators and agent authors | docs | S | W-P4-PARK-04, W-P3-JIT-05 | [#331](https://github.com/ethosagent/warden/issues/331) |
 
 ### 1/8 · W-P4-PARK-01
 
@@ -283,7 +283,7 @@ Add OTel instruments and additive event fields for park outcomes, so operators c
 
 **Add the park end-to-end integration test**
 
-Type **test** · Size **S** · Issue —
+Type **test** · Size **S** · Issue [#330](https://github.com/ethosagent/warden/issues/330)
 
 Prove the feature's done_when in one integration test with in-process fakes, so CI needs no Docker. It reuses the W-P3-JIT-07 setup and adds a fake Slack integration and park config. It changes no production code.
 
@@ -315,7 +315,7 @@ Prove the feature's done_when in one integration test with in-process fakes, so 
 
 **Document park for operators and agent authors**
 
-Type **docs** · Size **S** · Issue —
+Type **docs** · Size **S** · Issue [#331](https://github.com/ethosagent/warden/issues/331)
 
 Extend the Phase 3 JIT documentation so operators know what park holds on a worker and agent authors know how to set client timeouts and the wait hint. The timeout answer is the Phase 3 contract unchanged, which the docs state plainly. A drift test keeps the documented config keys equal to the code.
 

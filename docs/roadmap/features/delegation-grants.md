@@ -69,9 +69,9 @@ On a deployment with tokenService, consent, `--bundles=require` and `grants.enab
 | 7/12 | [`W-P4-DGR-07`](#712--w-p4-dgr-07) | Add the grant expiry sweeper, console list, fleet column and CP metrics | feature | M | W-P4-DGR-01, W-P4-DGR-06 | [#173](https://github.com/ethosagent/warden/issues/173) |
 | 8/12 | [`W-P4-DGR-08`](#812--w-p4-dgr-08) | Add grant status long-poll, renew and cancel endpoints | feature | M | W-P4-DGR-02, W-P4-DGR-06, W-P3-JIT-04 | [#174](https://github.com/ethosagent/warden/issues/174) |
 | 9/12 | [`W-P4-DGR-09`](#912--w-p4-dgr-09) | Send grant approval, expiring and blocked notifications | feature | S | W-P4-DGR-02, W-P4-DGR-04, W-P4-NTFY-08 | [#175](https://github.com/ethosagent/warden/issues/175) |
-| 10/12 | [`W-P4-DGR-10`](#1012--w-p4-dgr-10) | Apply revokedGrants on workers and close revoked grant sessions | feature | S | W-P4-DGR-05, W-P4-DGR-06, W-P2-WBND-09, W-P2-SBND-04 | — |
-| 11/12 | [`W-P4-DGR-11`](#1112--w-p4-dgr-11) | Limit per-user secret swaps to the grant's providers | feature | S | W-P4-DGR-05, W-P3-PUS-09, W-P3-PUS-10 | — |
-| 12/12 | [`W-P4-DGR-12`](#1212--w-p4-dgr-12) | Document delegation grants and test the done-when end to end | test | M | W-P4-DGR-07, W-P4-DGR-08, W-P4-DGR-09, W-P4-DGR-10, W-P4-DGR-11 | — |
+| 10/12 | [`W-P4-DGR-10`](#1012--w-p4-dgr-10) | Apply revokedGrants on workers and close revoked grant sessions | feature | S | W-P4-DGR-05, W-P4-DGR-06, W-P2-WBND-09, W-P2-SBND-04 | [#313](https://github.com/ethosagent/warden/issues/313) |
+| 11/12 | [`W-P4-DGR-11`](#1112--w-p4-dgr-11) | Limit per-user secret swaps to the grant's providers | feature | S | W-P4-DGR-05, W-P3-PUS-09, W-P3-PUS-10 | [#314](https://github.com/ethosagent/warden/issues/314) |
+| 12/12 | [`W-P4-DGR-12`](#1212--w-p4-dgr-12) | Document delegation grants and test the done-when end to end | test | M | W-P4-DGR-07, W-P4-DGR-08, W-P4-DGR-09, W-P4-DGR-10, W-P4-DGR-11 | [#315](https://github.com/ethosagent/warden/issues/315) |
 
 ### 1/12 · W-P4-DGR-01
 
@@ -418,7 +418,7 @@ Wire the grants.Notifier seam to internal/notify so users hear about new grant r
 
 **Apply revokedGrants on workers and close revoked grant sessions**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#313](https://github.com/ethosagent/warden/issues/313)
 
 Make a revoked grant's live token stop working on every pinned worker within one bundle long-poll. The worker reads the `revokedGrants` section from the verified bundle, rejects tokens whose grant_id is listed, and closes sessions that were opened with them. Worker-only, split from W-P4-DGR-06.
 
@@ -452,7 +452,7 @@ Make a revoked grant's live token stop working on every pinned worker within one
 
 **Limit per-user secret swaps to the grant's providers**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#314](https://github.com/ethosagent/warden/issues/314)
 
 A grant names the per-user providers the agent may use, so a grant for 'read calendar' must not let the agent's traffic pick up the user's GitHub token. Under a grant token the worker's W-P3-PUS-09 UserTokenSource path swaps a per-user credential only for providers in the `providers` claim. Worker-only.
 
@@ -483,7 +483,7 @@ A grant names the per-user providers the agent may use, so a grant for 'read cal
 
 **Document delegation grants and test the done-when end to end**
 
-Type **test** · Size **M** · Issue —
+Type **test** · Size **M** · Issue [#315](https://github.com/ethosagent/warden/issues/315)
 
 Harness authors need the request, approve, poll, exchange and error contract, and operators need the rollout, require-mode caveat, revocation timing and restore runbook. Add docs/delegation-grants.md and one integration test that runs the feature's done_when against an in-process CP, OIDC issuer and worker. Test and docs only.
 

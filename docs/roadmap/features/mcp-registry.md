@@ -55,10 +55,10 @@ On a CP with console.auth=oidc, admin audit, --policy-store=versioned, --bundles
 | 4/10 | [`W-P4-MREG-04`](#410--w-p4-mreg-04) | Build console registry tab with import from observed inventory | feature | M | W-P4-MREG-02, W-P4-MREG-03, W-P4-MREG-09, W-P2-APPR-05 | [#180](https://github.com/ethosagent/warden/issues/180) |
 | 5/10 | [`W-P4-MREG-05`](#510--w-p4-mreg-05) | Publish the registry as a signed-bundle section | feature | S | W-P4-MREG-01, W-P4-MREG-02, W-P2-SBND-02, W-P2-SBND-05 | [#181](https://github.com/ethosagent/warden/issues/181) |
 | 6/10 | [`W-P4-MREG-06`](#610--w-p4-mreg-06) | Enforce registry servers, tools and pins in the MCP gateway | feature | M | W-P4-MREG-07, W-P4-MREG-09 | [#182](https://github.com/ethosagent/warden/issues/182) |
-| 7/10 | [`W-P4-MREG-07`](#710--w-p4-mreg-07) | Verify and compile the registry section on the worker | feature | S | W-P4-MREG-01, W-P4-MREG-05, W-P2-SBND-04, W-P2-SBND-05 | — |
-| 8/10 | [`W-P4-MREG-08`](#810--w-p4-mreg-08) | Make the warden mcp wedge enforce registry integrity | feature | M | W-P4-MREG-06, W-P2-SBND-06 | — |
-| 9/10 | [`W-P4-MREG-09`](#910--w-p4-mreg-09) | Add canonical tool pins and server-keyed MCP inventory | feature | M | — | — |
-| 10/10 | [`W-P4-MREG-10`](#1010--w-p4-mreg-10) | Add MCP registry end-to-end test and operator docs | test | M | W-P4-MREG-03, W-P4-MREG-04, W-P4-MREG-06, W-P4-MREG-08 | — |
+| 7/10 | [`W-P4-MREG-07`](#710--w-p4-mreg-07) | Verify and compile the registry section on the worker | feature | S | W-P4-MREG-01, W-P4-MREG-05, W-P2-SBND-04, W-P2-SBND-05 | [#305](https://github.com/ethosagent/warden/issues/305) |
+| 8/10 | [`W-P4-MREG-08`](#810--w-p4-mreg-08) | Make the warden mcp wedge enforce registry integrity | feature | M | W-P4-MREG-06, W-P2-SBND-06 | [#306](https://github.com/ethosagent/warden/issues/306) |
+| 9/10 | [`W-P4-MREG-09`](#910--w-p4-mreg-09) | Add canonical tool pins and server-keyed MCP inventory | feature | M | — | [#307](https://github.com/ethosagent/warden/issues/307) |
+| 10/10 | [`W-P4-MREG-10`](#1010--w-p4-mreg-10) | Add MCP registry end-to-end test and operator docs | test | M | W-P4-MREG-03, W-P4-MREG-04, W-P4-MREG-06, W-P4-MREG-08 | [#308](https://github.com/ethosagent/warden/issues/308) |
 
 ### 1/10 · W-P4-MREG-01
 
@@ -297,7 +297,7 @@ Add registry checks to the existing `Gateway.OnRequest` and `OnResponse` (keepin
 
 **Verify and compile the registry section on the worker**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#305](https://github.com/ethosagent/warden/issues/305)
 
 Split from W-P4-MREG-05 so the worker side is its own PR. After `bundle.Verify`, the worker parses the `mcpRegistry` section, compiles it once into an immutable `mcpregistry.Compiled`, stores it in the same snapshot as policy, and reports its revision. An invalid section rejects the whole bundle and keeps last-known-good, so a worker never applies new policy while dropping the registry. Nothing is enforced until W-P4-MREG-06.
 
@@ -333,7 +333,7 @@ Split from W-P4-MREG-05 so the worker side is its own PR. After `bundle.Verify`,
 
 **Make the warden mcp wedge enforce registry integrity**
 
-Type **feature** · Size **M** · Issue —
+Type **feature** · Size **M** · Issue [#306](https://github.com/ethosagent/warden/issues/306)
 
 Split from W-P4-MREG-06. The `warden mcp` wedge only reads local YAML today (cmd/proxy/mcp.go loadMCPConfig) and lets `--verify-*` flags override config, so it needs its own verified registry source and a rule that local flags can only add checks. A named registry entry fixes the command, args, per-platform integrity, approved tools and pins. With no registry source configured, the wedge behaves as today.
 
@@ -370,7 +370,7 @@ Split from W-P4-MREG-06. The `warden mcp` wedge only reads local YAML today (cmd
 
 **Add canonical tool pins and server-keyed MCP inventory**
 
-Type **feature** · Size **M** · Issue —
+Type **feature** · Size **M** · Issue [#307](https://github.com/ethosagent/warden/issues/307)
 
 Registry pins need a stable algorithm that also covers the tool description, because a changed description is how a tool is poisoned after approval, and raw-byte hashes break when a server re-serialises its schema. Add `mcp.ToolPin`, carry it through ToolInfo, InventoryItem and the CP snapshot, and key the gateway inventory by (server, tool) so two servers with the same tool name stop overwriting each other. Add `warden mcp inspect` so stdio servers can be pinned without traffic. Worker and CLI only; existing hashes and drift behaviour are unchanged.
 
@@ -404,7 +404,7 @@ Registry pins need a stable algorithm that also covers the tool description, bec
 
 **Add MCP registry end-to-end test and operator docs**
 
-Type **test** · Size **M** · Issue —
+Type **test** · Size **M** · Issue [#308](https://github.com/ethosagent/warden/issues/308)
 
 Prove the done_when across the CP, approvals, the signed bundle, a pinned worker and the wedge, and write the operator docs. The test covers registration with a second approver, per-tool denies, pin drift, an unregistered host, rollback in both directions and the audit chain. The docs cover the gate, rollout order, roles, pins and the limits of the wedge.
 

@@ -56,10 +56,10 @@ With a CP running consent, the OAuth broker, the portal and JIT, a `notification
 | 4/10 | [`W-P4-NTFY-04`](#410--w-p4-ntfy-04) | Add notify service with durable outbox, dispatcher, templates and dedup | feature | M | W-P4-NTFY-01, W-P4-NTFY-07, W-P1-SSO-01, W-P1-BLOCK-03 | [#218](https://github.com/ethosagent/warden/issues/218) |
 | 5/10 | [`W-P4-NTFY-05`](#510--w-p4-ntfy-05) | Send connect-link notifications from JIT pending creation | feature | S | W-P4-NTFY-08, W-P3-JIT-01, W-P3-PORT-03, W-P2-AREG-01 | [#219](https://github.com/ethosagent/warden/issues/219) |
 | 6/10 | [`W-P4-NTFY-06`](#610--w-p4-ntfy-06) | Add console notification settings, preview, test-send and delivery counters | feature | M | W-P4-NTFY-08, W-P1-SSO-05, W-P1-AAUD-02 | [#220](https://github.com/ethosagent/warden/issues/220) |
-| 7/10 | [`W-P4-NTFY-07`](#710--w-p4-ntfy-07) | Add verified user contacts table keyed by user_key | feature | S | W-P3-CSIG-02, W-P3-CSIG-06, W-P3-JIT-01, W-P1-SSO-03, W-P2-TOKX-02, W-P3-OFFB-01 | — |
-| 8/10 | [`W-P4-NTFY-08`](#810--w-p4-ntfy-08) | Add CP-local notifications config block and CP wiring | feature | S | W-P4-NTFY-04, W-P4-NTFY-07, W-P3-JIT-01 | — |
-| 9/10 | [`W-P4-NTFY-09`](#910--w-p4-ntfy-09) | Add per-user channel order preference in the portal | feature | S | W-P4-NTFY-08, W-P3-CSIG-04, W-P3-PORT-01 | — |
-| 10/10 | [`W-P4-NTFY-10`](#1010--w-p4-ntfy-10) | Add end-to-end test for connect-link notifications with fallback | test | S | W-P4-NTFY-02, W-P4-NTFY-03, W-P4-NTFY-05, W-P4-NTFY-06 | — |
+| 7/10 | [`W-P4-NTFY-07`](#710--w-p4-ntfy-07) | Add verified user contacts table keyed by user_key | feature | S | W-P3-CSIG-02, W-P3-CSIG-06, W-P3-JIT-01, W-P1-SSO-03, W-P2-TOKX-02, W-P3-OFFB-01 | [#309](https://github.com/ethosagent/warden/issues/309) |
+| 8/10 | [`W-P4-NTFY-08`](#810--w-p4-ntfy-08) | Add CP-local notifications config block and CP wiring | feature | S | W-P4-NTFY-04, W-P4-NTFY-07, W-P3-JIT-01 | [#310](https://github.com/ethosagent/warden/issues/310) |
+| 9/10 | [`W-P4-NTFY-09`](#910--w-p4-ntfy-09) | Add per-user channel order preference in the portal | feature | S | W-P4-NTFY-08, W-P3-CSIG-04, W-P3-PORT-01 | [#311](https://github.com/ethosagent/warden/issues/311) |
+| 10/10 | [`W-P4-NTFY-10`](#1010--w-p4-ntfy-10) | Add end-to-end test for connect-link notifications with fallback | test | S | W-P4-NTFY-02, W-P4-NTFY-03, W-P4-NTFY-05, W-P4-NTFY-06 | [#312](https://github.com/ethosagent/warden/issues/312) |
 
 ### 1/10 · W-P4-NTFY-01
 
@@ -290,7 +290,7 @@ Add an admin-only console page to read and write the notifications block, previe
 
 **Add verified user contacts table keyed by user_key**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#309](https://github.com/ethosagent/warden/issues/309)
 
 No earlier ticket stores a durable, verified email per user: idp_links exists only when IdP linking is on, portal sessions expire, and a user hit by a JIT miss may never have signed in to the portal. Add a cpstate user_contacts table keyed by secrets.UserKey(iss, sub), written only from verified identities, so notify can find a recipient. Writes are behind the notifications enabled flag and never fail a login or a pending.
 
@@ -325,7 +325,7 @@ No earlier ticket stores a durable, verified email per user: idp_links exists on
 
 **Add CP-local notifications config block and CP wiring**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#310](https://github.com/ethosagent/warden/issues/310)
 
 Add the default-off `notifications:` block next to `integrations:` and wire notify.Service, the dispatcher and the contacts recorder into the CP when it is enabled. Capability checks run at CP wiring through SupportsUserNotify because internal/config does not import internal/integration. The block is CP-local (json:"-") and every existing writer keeps it byte-identical. With the block absent nothing new starts.
 
@@ -359,7 +359,7 @@ Add the default-off `notifications:` block next to `integrations:` and wire noti
 
 **Add per-user channel order preference in the portal**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#311](https://github.com/ethosagent/warden/issues/311)
 
 Let a signed-in portal user choose whether Slack or email is tried first for their messages. The user can only reorder channel types the operator configured, never add a channel or turn off delivery. This was split out of the original console ticket because it is a separate portal surface with its own session and CSRF handling.
 
@@ -388,7 +388,7 @@ Let a signed-in portal user choose whether Slack or email is tried first for the
 
 **Add end-to-end test for connect-link notifications with fallback**
 
-Type **test** · Size **S** · Issue —
+Type **test** · Size **S** · Issue [#312](https://github.com/ethosagent/warden/issues/312)
 
 Prove the feature's done_when with an in-process CP, a fake Slack API and a fake SMTP server. The test covers DM delivery with a working portal link, email fallback, dedup, survival across a CP restart, suppression for blocked users, and the counters in the integrations status. It changes no production code.
 

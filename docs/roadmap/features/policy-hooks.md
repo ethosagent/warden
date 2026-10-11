@@ -50,11 +50,11 @@ On a managed deployment where every worker reports `hooks/v1`: a CEL, an embedde
 | 4/11 | [`W-P4-HOOK-04`](#411--w-p4-hook-04) | Add OPA REST hook type | feature | S | W-P4-HOOK-03 | [#211](https://github.com/ethosagent/warden/issues/211) |
 | 5/11 | [`W-P4-HOOK-05`](#511--w-p4-hook-05) | Add post-response hooks | feature | M | W-P4-HOOK-07 | [#212](https://github.com/ethosagent/warden/issues/212) |
 | 6/11 | [`W-P4-HOOK-06`](#611--w-p4-hook-06) | Write operator docs and the hook input schema | docs | S | W-P4-HOOK-02, W-P4-HOOK-03, W-P4-HOOK-04, W-P4-HOOK-05, W-P4-HOOK-08, W-P4-HOOK-11 | [#213](https://github.com/ethosagent/warden/issues/213) |
-| 7/11 | [`W-P4-HOOK-07`](#711--w-p4-hook-07) | Wire the pre-request hook stage into the HTTP/1.1 proxy path | feature | M | W-P4-HOOK-01, W-P1-JAUD-05, W-P1-JAUD-06, W-P1-GPOL-03, W-P1-BLOCK-02 | — |
-| 8/11 | [`W-P4-HOOK-08`](#811--w-p4-hook-08) | Run hooks at CONNECT, per h2 stream and on MCP over WebSocket and stdio | feature | M | W-P4-HOOK-07 | — |
-| 9/11 | [`W-P4-HOOK-09`](#911--w-p4-hook-09) | Run pre hooks in the MCP hub before routing tools/call | feature | S | W-P4-HOOK-07, W-P4-MGW-06 | — |
-| 10/11 | [`W-P4-HOOK-10`](#1011--w-p4-hook-10) | Guard hook settings on the CP with validation, roles, audit and capability checks | feature | M | W-P4-HOOK-07, W-P1-SSO-05, W-P1-AAUD-02, W-P2-WBND-07 | — |
-| 11/11 | [`W-P4-HOOK-11`](#1111--w-p4-hook-11) | Add embedded OPA hook mode with restricted builtins | feature | M | W-P4-HOOK-04 | — |
+| 7/11 | [`W-P4-HOOK-07`](#711--w-p4-hook-07) | Wire the pre-request hook stage into the HTTP/1.1 proxy path | feature | M | W-P4-HOOK-01, W-P1-JAUD-05, W-P1-JAUD-06, W-P1-GPOL-03, W-P1-BLOCK-02 | [#332](https://github.com/ethosagent/warden/issues/332) |
+| 8/11 | [`W-P4-HOOK-08`](#811--w-p4-hook-08) | Run hooks at CONNECT, per h2 stream and on MCP over WebSocket and stdio | feature | M | W-P4-HOOK-07 | [#333](https://github.com/ethosagent/warden/issues/333) |
+| 9/11 | [`W-P4-HOOK-09`](#911--w-p4-hook-09) | Run pre hooks in the MCP hub before routing tools/call | feature | S | W-P4-HOOK-07, W-P4-MGW-06 | [#334](https://github.com/ethosagent/warden/issues/334) |
+| 10/11 | [`W-P4-HOOK-10`](#1011--w-p4-hook-10) | Guard hook settings on the CP with validation, roles, audit and capability checks | feature | M | W-P4-HOOK-07, W-P1-SSO-05, W-P1-AAUD-02, W-P2-WBND-07 | [#335](https://github.com/ethosagent/warden/issues/335) |
+| 11/11 | [`W-P4-HOOK-11`](#1111--w-p4-hook-11) | Add embedded OPA hook mode with restricted builtins | feature | M | W-P4-HOOK-04 | [#336](https://github.com/ethosagent/warden/issues/336) |
 
 ### 1/11 · W-P4-HOOK-01
 
@@ -278,7 +278,7 @@ Write docs/hooks.md so operators can configure, test and roll out hooks safely, 
 
 **Wire the pre-request hook stage into the HTTP/1.1 proxy path**
 
-Type **feature** · Size **M** · Issue —
+Type **feature** · Size **M** · Issue [#332](https://github.com/ethosagent/warden/issues/332)
 
 Add the `hookGate` stage to runRequestStages after dlpScan and before swapSecrets, hold the Chain on Proxy, and rebuild it from settings and local YAML. Paths not yet wired (h2, WebSocket, raw tunnels, non-TLS) fail closed with hook_uninspectable when a pre hook matches, through a new `hooks` value in the deferred enum, so no protocol can skip a hook. The worker reports the `hooks/v1` capability.
 
@@ -320,7 +320,7 @@ Add the `hookGate` stage to runRequestStages after dlpScan and before swapSecret
 
 **Run hooks at CONNECT, per h2 stream and on MCP over WebSocket and stdio**
 
-Type **feature** · Size **M** · Issue —
+Type **feature** · Size **M** · Issue [#333](https://github.com/ethosagent/warden/issues/333)
 
 Close the coverage gaps that W-P4-HOOK-07 fails closed: run `connect` hooks in handleConn before any dial, run pre hooks per h2 stream in serveGRPCStream, and run tool-matching pre hooks for MCP over WebSocket and the local stdio wrapper through a gateway decorator. Raw tunnels and non-TLS traffic still fail closed when a request-level pre hook matches, because they cannot be inspected; connect hooks cover them instead.
 
@@ -356,7 +356,7 @@ Close the coverage gaps that W-P4-HOOK-07 fails closed: run `connect` hooks in h
 
 **Run pre hooks in the MCP hub before routing tools/call**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#334](https://github.com/ethosagent/warden/issues/334)
 
 The MCP hub at /mcp/{gateway} routes tools/call outside runRequestStages, so tool-matching hooks would never see those calls. Run the pre chain in the hub after its own verdict passes and before the call is routed, with the tool name, identity and grant id from the hub session.
 
@@ -387,7 +387,7 @@ The MCP hub at /mcp/{gateway} routes tools/call outside runRequestStages, so too
 
 **Guard hook settings on the CP with validation, roles, audit and capability checks**
 
-Type **feature** · Size **M** · Issue —
+Type **feature** · Size **M** · Issue [#335](https://github.com/ethosagent/warden/issues/335)
 
 A hook URL receives identity metadata and a failMode-closed hook can deny the whole fleet, so the CP must control who edits hooks and refuse configs that part of the fleet would silently ignore. The CP validates hooks with the shared validator at save, makes the field admin-only and audited, and refuses hook changes while a connected worker lacks `hooks/v1`.
 
@@ -422,7 +422,7 @@ A hook URL receives identity metadata and a failMode-closed hook can deny the wh
 
 **Add embedded OPA hook mode with restricted builtins**
 
-Type **feature** · Size **M** · Issue —
+Type **feature** · Size **M** · Issue [#336](https://github.com/ethosagent/warden/issues/336)
 
 Add `mode: embedded` to the OPA hook type so rego runs in-process without a separate service. Modules travel inline in settings so they are signed and go through approvals, and the query is prepared with capabilities that remove environment and network builtins, so a policy cannot read worker secrets or send tool args out. Split from W-P4-HOOK-04 because it adds a large dependency and its own sandboxing.
 

@@ -48,15 +48,15 @@ Done when this works on a CP started with --state-dir, `--policy-store=versioned
 | # | Key | Ticket | Type | Size | Depends on | Issue |
 |---|---|---|---|---|---|---|
 | 1/11 | [`W-P4-GOPS-01`](#111--w-p4-gops-01) | Add warden policy lint with a shared repo doc parser | feature | S | W-P1-PVER-06 | [#184](https://github.com/ethosagent/warden/issues/184) |
-| 2/11 | [`W-P4-GOPS-08`](#211--w-p4-gops-08) | Add warden policy replay against the CP for CI | feature | S | W-P4-GOPS-01, W-P4-AMCP-04, W-P2-APPR-03, W-P2-APIK-02 | — |
+| 2/11 | [`W-P4-GOPS-08`](#211--w-p4-gops-08) | Add warden policy replay against the CP for CI | feature | S | W-P4-GOPS-01, W-P4-AMCP-04, W-P2-APPR-03, W-P2-APIK-02 | [#326](https://github.com/ethosagent/warden/issues/326) |
 | 3/11 | [`W-P4-GOPS-02`](#311--w-p4-gops-02) | Add Git sync of policy into approval drafts | feature | M | W-P4-GOPS-01, W-P2-APPR-04, W-P2-APPR-06, W-P2-APIK-02, W-P1-AAUD-02 | [#185](https://github.com/ethosagent/warden/issues/185) |
 | 4/11 | [`W-P4-GOPS-03`](#411--w-p4-gops-03) | Add Git provenance, authoritative mode and git drift | feature | M | W-P4-GOPS-02, W-P2-APPR-05, W-P2-APPR-07 | [#186](https://github.com/ethosagent/warden/issues/186) |
 | 5/11 | [`W-P4-GOPS-04`](#511--w-p4-gops-04) | Add staged versions and the rollout model | feature | M | W-P2-APPR-06, W-P1-PVER-05, W-P2-APIK-02, W-P1-AAUD-02, W-P1-WTOK-04 | [#187](https://github.com/ethosagent/warden/issues/187) |
-| 6/11 | [`W-P4-GOPS-09`](#611--w-p4-gops-09) | Serve policy per rollout cohort with ordered bundle seqs | feature | M | W-P4-GOPS-04, W-P2-SBND-02, W-P2-SBND-05, W-P2-WCA-04, W-P1-WTOK-02, W-P4-AMCP-07 | — |
+| 6/11 | [`W-P4-GOPS-09`](#611--w-p4-gops-09) | Serve policy per rollout cohort with ordered bundle seqs | feature | M | W-P4-GOPS-04, W-P2-SBND-02, W-P2-SBND-05, W-P2-WCA-04, W-P1-WTOK-02, W-P4-AMCP-07 | [#327](https://github.com/ethosagent/warden/issues/327) |
 | 7/11 | [`W-P4-GOPS-05`](#711--w-p4-gops-05) | Add promote, rollback, supersede and rollout status | feature | M | W-P4-GOPS-09, W-P2-APPR-07, W-P1-AAUD-02 | [#188](https://github.com/ethosagent/warden/issues/188) |
-| 8/11 | [`W-P4-GOPS-10`](#811--w-p4-gops-10) | Add CP-side automatic rollout rollback | feature | S | W-P4-GOPS-05 | — |
+| 8/11 | [`W-P4-GOPS-10`](#811--w-p4-gops-10) | Add CP-side automatic rollout rollback | feature | S | W-P4-GOPS-05 | [#328](https://github.com/ethosagent/warden/issues/328) |
 | 9/11 | [`W-P4-GOPS-06`](#911--w-p4-gops-06) | Build the console Rollouts page | feature | M | W-P4-GOPS-05, W-P4-GOPS-10 | [#189](https://github.com/ethosagent/warden/issues/189) |
-| 10/11 | [`W-P4-GOPS-11`](#1011--w-p4-gops-11) | Add the policy-as-code end-to-end test | test | M | W-P4-GOPS-03, W-P4-GOPS-08, W-P4-GOPS-10 | — |
+| 10/11 | [`W-P4-GOPS-11`](#1011--w-p4-gops-11) | Add the policy-as-code end-to-end test | test | M | W-P4-GOPS-03, W-P4-GOPS-08, W-P4-GOPS-10 | [#329](https://github.com/ethosagent/warden/issues/329) |
 | 11/11 | [`W-P4-GOPS-07`](#1111--w-p4-gops-07) | Document policy as code with a GitHub Actions example | docs | S | W-P4-GOPS-06, W-P4-GOPS-08, W-P4-GOPS-11 | [#190](https://github.com/ethosagent/warden/issues/190) |
 
 ### 1/11 · W-P4-GOPS-01
@@ -100,7 +100,7 @@ Add `warden policy lint` under the existing `newPolicyCmd` so CI can reject a ba
 
 **Add warden policy replay against the CP for CI**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#326](https://github.com/ethosagent/warden/issues/326)
 
 Add `warden policy replay` so a CI job can replay a candidate policy against recent fleet events on the CP and fail the build on new allows or widening. It calls `POST /dashboard/api/policy/replay` (W-P4-AMCP-04) with an API key holding traffic:read and policy:read. The endpoint must use the P2 two-policy Comparer and approvals.Classify, not `policyeval.Evaluate`, so CI, admin-mcp and the Changes tab report the same differences and settings widening is caught.
 
@@ -256,7 +256,7 @@ Canary needs a version that is approved but not yet head, which P2 does not have
 
 **Serve policy per rollout cohort with ordered bundle seqs**
 
-Type **feature** · Size **M** · Issue —
+Type **feature** · Size **M** · Issue [#327](https://github.com/ethosagent/warden/issues/327)
 
 Make the policy server serve the canary version to the rollout's workers and head to everyone else, using only the authenticated worker identity. Each cohort gets its own signed envelope and publish_log seq, so a worker moving between cohorts always sees a higher seq and never rejects the bundle as rollback or equivocation (carry-forward from p2-signed-bundles). The hot path stays free of DB I/O.
 
@@ -337,7 +337,7 @@ Add the rollout transitions and the status API operators use to decide. Promote 
 
 **Add CP-side automatic rollout rollback**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#328](https://github.com/ethosagent/warden/issues/328)
 
 Add a default-off background evaluator on the CP that rolls a canary back when its error or deny rate pulls away from stable, or when a canary worker rejects a bundle. It runs on the Server.Start ticker so it works with no browser open, and it never promotes. It also computes `observed_new_allows` for display.
 
@@ -407,7 +407,7 @@ Add a Rollouts view to the console so admins can stage on approve, start a canar
 
 **Add the policy-as-code end-to-end test**
 
-Type **test** · Size **M** · Issue —
+Type **test** · Size **M** · Issue [#329](https://github.com/ethosagent/warden/issues/329)
 
 Add one test that proves the done_when flow in process: a commit becomes a git draft with a done replay, a second user approves it staged, a canary reaches one worker only, and promote and rollback move workers with ordered bundle seqs. It guards the seams between the Git, approvals, rollout and signed-bundle tickets.
 

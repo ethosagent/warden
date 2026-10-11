@@ -61,13 +61,13 @@ On a compose deployment with signed bundles, the token service, perUserSecrets a
 | 6/15 | [`W-P4-MGW-06`](#615--w-p4-mgw-06) | Aggregate tools/list and route tools/call with verdicts | feature | M | W-P4-MGW-04, W-P4-MGW-13 | [#197](https://github.com/ethosagent/warden/issues/197) |
 | 7/15 | [`W-P4-MGW-07`](#715--w-p4-mgw-07) | Use per-user credentials for gateway upstreams | feature | M | W-P4-MGW-06, W-P4-MGW-12, W-P3-PUS-04, W-P3-JIT-03 | [#198](https://github.com/ethosagent/warden/issues/198) |
 | 8/15 | [`W-P4-MGW-08`](#815--w-p4-mgw-08) | E2E test the MCP gateway with fake upstreams | test | M | W-P4-MGW-05, W-P4-MGW-07, W-P4-MGW-10 | [#199](https://github.com/ethosagent/warden/issues/199) |
-| 9/15 | [`W-P4-MGW-09`](#915--w-p4-mgw-09) | Serve gateway definitions as the mcpGateways signed-bundle section | feature | S | W-P4-MGW-02, W-P4-MREG-05, W-P2-SBND-02 | — |
-| 10/15 | [`W-P4-MGW-10`](#1015--w-p4-mgw-10) | Verify and apply the mcpGateways bundle section on the worker | feature | S | W-P4-MGW-09, W-P2-SBND-04, W-P2-AREG-05 | — |
-| 11/15 | [`W-P4-MGW-11`](#1115--w-p4-mgw-11) | Add Proxy.ServeInternal for in-process hub egress | feature | M | W-P2-WBND-02, W-P3-PUS-10 | — |
-| 12/15 | [`W-P4-MGW-12`](#1215--w-p4-mgw-12) | Add the upstream auth header field to registry versions | feature | S | W-P4-MREG-03, W-P4-MREG-05, W-P3-PUS-08 | — |
-| 13/15 | [`W-P4-MGW-13`](#1315--w-p4-mgw-13) | Key gateway verdicts by server and add a side-effect-free tool check | feature | M | W-P4-DGR-05, W-P4-MREG-06 | — |
-| 14/15 | [`W-P4-MGW-14`](#1415--w-p4-mgw-14) | Store MCP gateway and server fields in the CP fleet store | feature | S | W-P4-MGW-11 | — |
-| 15/15 | [`W-P4-MGW-15`](#1515--w-p4-mgw-15) | Document MCP gateway setup for operators and agents | docs | S | W-P4-MGW-05, W-P4-MGW-07 | — |
+| 9/15 | [`W-P4-MGW-09`](#915--w-p4-mgw-09) | Serve gateway definitions as the mcpGateways signed-bundle section | feature | S | W-P4-MGW-02, W-P4-MREG-05, W-P2-SBND-02 | [#316](https://github.com/ethosagent/warden/issues/316) |
+| 10/15 | [`W-P4-MGW-10`](#1015--w-p4-mgw-10) | Verify and apply the mcpGateways bundle section on the worker | feature | S | W-P4-MGW-09, W-P2-SBND-04, W-P2-AREG-05 | [#317](https://github.com/ethosagent/warden/issues/317) |
+| 11/15 | [`W-P4-MGW-11`](#1115--w-p4-mgw-11) | Add Proxy.ServeInternal for in-process hub egress | feature | M | W-P2-WBND-02, W-P3-PUS-10 | [#318](https://github.com/ethosagent/warden/issues/318) |
+| 12/15 | [`W-P4-MGW-12`](#1215--w-p4-mgw-12) | Add the upstream auth header field to registry versions | feature | S | W-P4-MREG-03, W-P4-MREG-05, W-P3-PUS-08 | [#319](https://github.com/ethosagent/warden/issues/319) |
+| 13/15 | [`W-P4-MGW-13`](#1315--w-p4-mgw-13) | Key gateway verdicts by server and add a side-effect-free tool check | feature | M | W-P4-DGR-05, W-P4-MREG-06 | [#320](https://github.com/ethosagent/warden/issues/320) |
+| 14/15 | [`W-P4-MGW-14`](#1415--w-p4-mgw-14) | Store MCP gateway and server fields in the CP fleet store | feature | S | W-P4-MGW-11 | [#321](https://github.com/ethosagent/warden/issues/321) |
+| 15/15 | [`W-P4-MGW-15`](#1515--w-p4-mgw-15) | Document MCP gateway setup for operators and agents | docs | S | W-P4-MGW-05, W-P4-MGW-07 | [#322](https://github.com/ethosagent/warden/issues/322) |
 
 ### 1/15 · W-P4-MGW-01
 
@@ -373,7 +373,7 @@ Add fake Streamable HTTP and stdio MCP servers and an integration test that runs
 
 **Serve gateway definitions as the mcpGateways signed-bundle section**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#316](https://github.com/ethosagent/warden/issues/316)
 
 Ship the gateway definitions from W-P4-MGW-02 to workers in the signed bundle. They go in `Bundle.Sections["mcpGateways"]` (W-P2-SBND-01), with a publish_log row so seq and ETag change and long-poll waiters wake. CP-only change.
 
@@ -404,7 +404,7 @@ Ship the gateway definitions from W-P4-MGW-02 to workers in the signed bundle. T
 
 **Verify and apply the mcpGateways bundle section on the worker**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#317](https://github.com/ethosagent/warden/issues/317)
 
 Parse and validate the `mcpGateways` section in the worker's bundle verifier and hand the gateways for the worker's bound agent to the hub through an atomic getter. A bad section rejects the bundle and keeps last-known-good. Worker-only change; it also advertises the `mcpgateway/v1` heartbeat capability.
 
@@ -438,7 +438,7 @@ Parse and validate the `mcpGateways` section in the worker's bundle verifier and
 
 **Add Proxy.ServeInternal for in-process hub egress**
 
-Type **feature** · Size **M** · Issue —
+Type **feature** · Size **M** · Issue [#318](https://github.com/ethosagent/warden/issues/318)
 
 Add an in-process entry point to the proxy so hub upstream traffic goes through the full egress pipeline without a network hop and without a second MCP verdict. Looping back over TCP would run mcpRequestScan again (session key `agent:host` in internal/proxy/http.go), double rate limits and events, and give no unforgeable way to mark hub traffic. The typed origin can only be set from Go code.
 
@@ -472,7 +472,7 @@ Add an in-process entry point to the proxy so hub upstream traffic goes through 
 
 **Add the upstream auth header field to registry versions**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#319](https://github.com/ethosagent/warden/issues/319)
 
 HTTP and SSE upstreams need a declared header that carries a credential placeholder, and per-user detection needs to come from data rather than a separate flag. Add `auth: {header, placeholder}` to registry versions and to the `mcpRegistry` bundle entry; it holds a placeholder name only, never a value. A server is per-user exactly when its placeholder is a perUserSecrets mapping placeholder.
 
@@ -506,7 +506,7 @@ HTTP and SSE upstreams need a declared header that carries a credential placehol
 
 **Key gateway verdicts by server and add a side-effect-free tool check**
 
-Type **feature** · Size **M** · Issue —
+Type **feature** · Size **M** · Issue [#320](https://github.com/ethosagent/warden/issues/320)
 
 The verdict engine keys inventory and schema profiles by bare tool name, so two upstreams that both offer `search` would merge inventory and flap drift findings, and ToolPolicy.Evaluate consumes rate budget, so it cannot filter tools/list. Add server-aware variants used only by the hub, leaving the proxied MCP path's keys and behaviour unchanged.
 
@@ -540,7 +540,7 @@ The verdict engine keys inventory and schema profiles by bare tool name, so two 
 
 **Store MCP gateway and server fields in the CP fleet store**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#321](https://github.com/ethosagent/warden/issues/321)
 
 Workers send events with the new mcp_gateway and mcp_server fields from W-P4-MGW-11, but the CP fleet store has no columns for them. Add the columns and ingest so fleet queries and the console can filter by gateway and server. CP-only change.
 
@@ -569,7 +569,7 @@ Workers send events with the new mcp_gateway and mcp_server fields from W-P4-MGW
 
 **Document MCP gateway setup for operators and agents**
 
-Type **docs** · Size **S** · Issue —
+Type **docs** · Size **S** · Issue [#322](https://github.com/ethosagent/warden/issues/322)
 
 Write the operator and agent-author guide for the MCP gateway, so teams can turn it on without reading the code. It covers agent configuration through the identity forwarder, the error contract, limits and the stdio residual risk.
 

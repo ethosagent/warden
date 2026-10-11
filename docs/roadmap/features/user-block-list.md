@@ -70,7 +70,7 @@ On a managed deployment where every connected worker advertises blocklist/v1, an
 | 5/8 | [`W-P1-BLOCK-05`](#58--w-p1-block-05) | Close open sessions of newly blocked users on policy change | feature | M | W-P1-BLOCK-02 | [#240](https://github.com/ethosagent/warden/issues/240) |
 | 6/8 | [`W-P1-BLOCK-06`](#68--w-p1-block-06) | Raise one user_blocked Finding per user without leaking email | feature | S | W-P1-VRFY-03 | [#241](https://github.com/ethosagent/warden/issues/241) |
 | 7/8 | [`W-P1-BLOCK-07`](#78--w-p1-block-07) | Deny console login and sessions for blocked principals | feature | S | W-P1-BLOCK-03, W-P1-SSO-04, W-P1-OPS1-01 | [#242](https://github.com/ethosagent/warden/issues/242) |
-| 8/8 | [`W-P1-BLOCK-08`](#88--w-p1-block-08) | Add offline block add, remove and list commands to the control-plane CLI | feature | S | W-P1-BLOCK-03, W-P1-AAUD-01 | — |
+| 8/8 | [`W-P1-BLOCK-08`](#88--w-p1-block-08) | Add offline block add, remove and list commands to the control-plane CLI | feature | S | W-P1-BLOCK-03, W-P1-AAUD-01 | [#304](https://github.com/ethosagent/warden/issues/304) |
 
 ### 1/8 · W-P1-BLOCK-01
 
@@ -326,7 +326,7 @@ A blocked admin can still sign in to the console or use an open session and remo
 
 **Add offline block add, remove and list commands to the control-plane CLI**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#304](https://github.com/ethosagent/warden/issues/304)
 
 Add `warden control-plane block add|remove|list`, which opens cpstate in --state-dir directly, so an operator can block or unblock a user while the console or the IdP is unavailable, and scripts and recipe checks can block a user without a browser session. It follows the W-P1-WTOK-05 offline CLI rules: the same BlockStore and validator as the admin API, one admin audit row per write with auth_method cli, and the existing audit key, never a new one. A running CP picks up CLI writes within 2s.
 

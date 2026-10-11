@@ -53,13 +53,13 @@ On a CP with --state-dir, console.auth=oidc, --policy-store=versioned and consol
 | # | Key | Ticket | Type | Size | Depends on | Issue |
 |---|---|---|---|---|---|---|
 | 1/9 | [`W-P4-AMCP-01`](#19--w-p4-amcp-01) | Add the CP traffic API with a sanitized record projection | feature | M | W-P2-APIK-02, W-P1-JAUD-01, W-P1-VRFY-04, W-P1-VRFY-06, W-P3-PUL-07 | [#201](https://github.com/ethosagent/warden/issues/201) |
-| 2/9 | [`W-P4-AMCP-07`](#29--w-p4-amcp-07) | Add the CP explain API with historical version resolution | feature | M | W-P4-AMCP-01, W-P1-PVER-01, W-P1-GPOL-02, W-P1-JAUD-06 | — |
+| 2/9 | [`W-P4-AMCP-07`](#29--w-p4-amcp-07) | Add the CP explain API with historical version resolution | feature | M | W-P4-AMCP-01, W-P1-PVER-01, W-P1-GPOL-02, W-P1-JAUD-06 | [#323](https://github.com/ethosagent/warden/issues/323) |
 | 3/9 | [`W-P4-AMCP-02`](#39--w-p4-amcp-02) | Add the admin-mcp command with stdio transport and scope-filtered tools | feature | M | W-P2-APIK-03, W-P4-MGW-01 | [#202](https://github.com/ethosagent/warden/issues/202) |
-| 4/9 | [`W-P4-AMCP-08`](#49--w-p4-amcp-08) | Add the admin-mcp Streamable HTTP transport with per-caller keys | feature | S | W-P4-AMCP-02 | — |
+| 4/9 | [`W-P4-AMCP-08`](#49--w-p4-amcp-08) | Add the admin-mcp Streamable HTTP transport with per-caller keys | feature | S | W-P4-AMCP-02 | [#324](https://github.com/ethosagent/warden/issues/324) |
 | 5/9 | [`W-P4-AMCP-03`](#59--w-p4-amcp-03) | Implement the explain_decision, query_traffic and list_agents tools | feature | M | W-P4-AMCP-01, W-P4-AMCP-07, W-P4-AMCP-02, W-P2-AREG-02, W-P2-AREG-05 | [#203](https://github.com/ethosagent/warden/issues/203) |
 | 6/9 | [`W-P4-AMCP-04`](#69--w-p4-amcp-04) | Add CP suggest and replay routes and the suggest_policy and replay_policy tools | feature | M | W-P4-AMCP-02, W-P4-AMCP-01, W-P2-APPR-03, W-P2-APPR-04 | [#204](https://github.com/ethosagent/warden/issues/204) |
 | 7/9 | [`W-P4-AMCP-05`](#79--w-p4-amcp-05) | Add the opt-in create_policy_draft write tool | feature | S | W-P4-AMCP-02, W-P4-AMCP-04, W-P2-APPR-04 | [#205](https://github.com/ethosagent/warden/issues/205) |
-| 8/9 | [`W-P4-AMCP-09`](#89--w-p4-amcp-09) | Test the admin-mcp done-when flow end to end | test | S | W-P4-AMCP-03, W-P4-AMCP-04, W-P4-AMCP-05 | — |
+| 8/9 | [`W-P4-AMCP-09`](#89--w-p4-amcp-09) | Test the admin-mcp done-when flow end to end | test | S | W-P4-AMCP-03, W-P4-AMCP-04, W-P4-AMCP-05 | [#325](https://github.com/ethosagent/warden/issues/325) |
 | 9/9 | [`W-P4-AMCP-06`](#99--w-p4-amcp-06) | Document admin-mcp setup for Claude Code and Codex | docs | S | W-P4-AMCP-03, W-P4-AMCP-04, W-P4-AMCP-05, W-P4-AMCP-08 | [#206](https://github.com/ethosagent/warden/issues/206) |
 
 ### 1/9 · W-P4-AMCP-01
@@ -103,7 +103,7 @@ Add `GET /dashboard/api/traffic/records` on the CP (a new path beside the raw `/
 
 **Add the CP explain API with historical version resolution**
 
-Type **feature** · Size **M** · Issue —
+Type **feature** · Size **M** · Issue [#323](https://github.com/ethosagent/warden/issues/323)
 
 Add `GET /dashboard/api/explain`, which loads one fleet event and shows both what was recorded and what the policy version the worker most likely enforced says about it. `Evaluator.Evaluate` returns only a Decision and no store can fetch an event by uid or resolve a timestamp to a version, so this ticket adds those pieces off the request path. Judge, DLP, block-list, rate-limit, hook and MCP outcomes are reported from recorded fields and never re-run. Split from W-P4-AMCP-01 to keep each PR at one M.
 
@@ -179,7 +179,7 @@ Add `warden admin-mcp` and new package internal/adminmcp: a JSON-RPC dispatcher,
 
 **Add the admin-mcp Streamable HTTP transport with per-caller keys**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#324](https://github.com/ethosagent/warden/issues/324)
 
 Add `--transport http`, serving Streamable HTTP at `/mcp` for assistants that cannot spawn a local process. The server holds no key: each caller's own `wak_` bearer is passed through to the CP, so scopes, rate limits and admin audit stay per person and the two-person rule still holds. It binds to loopback by default, requires TLS off loopback and rejects foreign Origins against DNS rebinding. Split from W-P4-AMCP-02.
 
@@ -325,7 +325,7 @@ Add the only write tool, `create_policy_draft`, which proposes allowlist and den
 
 **Test the admin-mcp done-when flow end to end**
 
-Type **test** · Size **S** · Issue —
+Type **test** · Size **S** · Issue [#325](https://github.com/ethosagent/warden/issues/325)
 
 Add one end-to-end test that proves the feature's done-when sentence against a real in-process CP rather than the fake. It runs `admin-mcp` over in-memory stdio with a read-only key, exercises explain, traffic and replay, and checks that nothing changed and nothing leaked. A second pass enables writes with a policy:draft key and checks the draft stays unapproved.
 

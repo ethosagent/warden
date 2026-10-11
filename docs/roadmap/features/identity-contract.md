@@ -45,7 +45,7 @@ From a clean state, `scripts/smoke-identity.sh` starts the control plane, Dex wi
 | 1/4 | [`W-P1-IDC-01`](#14--w-p1-idc-01) | Write the agent identity contract for harness builders | docs | S | W-P1-IDC-02, W-P1-IDC-03, W-P1-IDC-04 | [#27](https://github.com/ethosagent/warden/issues/27) |
 | 2/4 | [`W-P1-IDC-02`](#24--w-p1-idc-02) | Add `warden identity` CLI for login, token, status and proxy env | feature | M | W-P1-DEX-01 | [#28](https://github.com/ethosagent/warden/issues/28) |
 | 3/4 | [`W-P1-IDC-03`](#34--w-p1-idc-03) | Add generic identity smoke test with a curl agent | test | M | W-P1-IDC-02, W-P1-DEX-02, W-P1-VRFY-04 | [#29](https://github.com/ethosagent/warden/issues/29) |
-| 4/4 | [`W-P1-IDC-04`](#44--w-p1-idc-04) | Add `warden identity exec` with a loopback forwarder that refreshes the token | feature | S | W-P1-IDC-02 | — |
+| 4/4 | [`W-P1-IDC-04`](#44--w-p1-idc-04) | Add `warden identity exec` with a loopback forwarder that refreshes the token | feature | S | W-P1-IDC-02 | [#303](https://github.com/ethosagent/warden/issues/303) |
 
 ### 1/4 · W-P1-IDC-01
 
@@ -172,7 +172,7 @@ Add an opt-in smoke recipe and script that prove a plain curl container, with no
 
 **Add `warden identity exec` with a loopback forwarder that refreshes the token**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#303](https://github.com/ethosagent/warden/issues/303)
 
 Add `warden identity exec`, which starts a CONNECT-only forwarder on loopback and runs a child command with HTTPS_PROXY pointing at it. The forwarder holds the user's short-lived ID token only in memory, refreshes it before expiry through the W-P1-IDC-02 client and injects it on each CONNECT to the worker, so the token never appears in the parent's or the child's environment or argv and never goes stale while the child runs. This removes the P1 token-in-HTTPS_PROXY limitation for laptops and CI. P2 extends the same forwarder with agent tokens and `--run-as` (W-P2-RCP-02, W-P2-RCP-06).
 
