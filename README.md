@@ -269,3 +269,40 @@ make lint               # golangci-lint run
 ## Contributing
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md). Run `scripts/check.sh` before pushing — it's the same gate CI runs.
+
+## Future
+
+Today Warden controls **where** an agent's traffic goes and keeps real credentials out of the agent. The next step is to control **who** the agent is acting for, and **what** it may do for them.
+
+**The goal:** every action an AI agent takes on the network is tied to a real person, allowed by policy, done with that person's consent, and recorded. The agent still never holds a credential.
+
+```mermaid
+flowchart LR
+  T["<b>Today</b><br/>Default-deny egress<br/>Secrets swapped at the edge"]
+  P1["<b>Who did it</b><br/>Every request tied to a user<br/>Console SSO, roles, signed audit"]
+  P2["<b>Proven identity</b><br/>Short-lived agent-bound tokens<br/>mTLS workers, signed policy"]
+  P3["<b>Act as the user</b><br/>One-time consent, per-user OAuth<br/>Just-in-time approval, offboarding"]
+  P4["<b>Agents everywhere</b><br/>Central MCP gateway, delegation grants<br/>Policy as code with canary"]
+  T --> P1 --> P2 --> P3 --> P4
+```
+
+When the [roadmap](docs/roadmap/README.md) through Phase 4 ships, Warden becomes the **identity, authorization and audit layer for agent actions**: the one trusted path between any agent and the APIs, SaaS tools and MCP servers it works with.
+
+**What that gives you**
+
+| For | Value |
+|---|---|
+| Security teams | Know which person every agent request was for. Block a user across the whole fleet in seconds. Ship tamper-evident audit to your SIEM. |
+| Platform teams | One control plane for every agent, whatever harness it runs in. Policy history, rollback, two-person approval and canary rollouts. One MCP gateway with pinned, reviewed tools. |
+| Developers and end users | Agents can act as you in Google, GitHub and other tools after a single consent, without pasting tokens. Missing access becomes a "click to approve" link, not a failed run. |
+| Compliance | A signed answer to "which agent did what, for whom, approved by whom", and access that ends when the person leaves. |
+
+**Why Warden**
+
+- **It works below the agent.** Controls sit in the network path, so they hold even when the agent is prompt-injected, buggy or compromised.
+- **Credentials never reach the agent.** Tokens are injected at the edge per user and per request, and refreshed and revoked centrally.
+- **Agent-neutral.** Any harness that can use an HTTP proxy works, through a documented identity contract and the `warden identity` CLI.
+- **Useful at every step.** Each phase ships on its own and is production-usable. Start with egress control today and add identity when you need it.
+- **Self-hosted and open.** One deployment per company, your IdP, your secret store, Apache-2.0.
+
+Follow the work on the [Roadmap issue](https://github.com/ethosagent/warden/issues/15).
