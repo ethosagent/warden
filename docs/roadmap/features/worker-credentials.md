@@ -34,6 +34,7 @@ On a CP running with --state-dir and TLS, two workers use distinct per-worker to
 - [Break-glass + backups](ops-hardening.md) (P1 · Who did it)
 - [Worker CA (mTLS)](worker-mtls.md) (P2 · Proven identity)
 - [Scoped API keys](api-keys.md) (P2 · Proven identity)
+- [Policy as code + canary](policy-as-code.md) (P4 · Agents everywhere)
 - [Postgres + HA](postgres-ha.md) (P5 · Enterprise scale)
 - [JIT 403 + long-poll](jit-authorization.md) (P3 · Act as the user)
 
@@ -132,7 +133,7 @@ Add `WorkerAuthenticator` in internal/controlplane and apply it once to /policy,
 
 **Depends on:** [`W-P1-WTOK-01`](worker-credentials.md#16--w-p1-wtok-01) Add worker token store with hashed storage, revocation and in-memory index
 
-**Unblocks:** [`W-P1-WTOK-03`](worker-credentials.md#36--w-p1-wtok-03) Add worker token admin API, dashboard panel and fleet auth fields; [`W-P2-APIK-02`](api-keys.md#27--w-p2-apik-02) Authenticate API keys and enforce per-route scopes in the authz table; [`W-P3-JIT-01`](jit-authorization.md#17--w-p3-jit-01) Add CP endpoint to create or reuse pending authorizations
+**Unblocks:** [`W-P1-WTOK-03`](worker-credentials.md#36--w-p1-wtok-03) Add worker token admin API, dashboard panel and fleet auth fields; [`W-P2-APIK-02`](api-keys.md#27--w-p2-apik-02) Authenticate API keys and enforce per-route scopes in the authz table; [`W-P4-GOPS-09`](policy-as-code.md#611--w-p4-gops-09) Serve policy per rollout cohort with ordered bundle seqs; [`W-P3-JIT-01`](jit-authorization.md#17--w-p3-jit-01) Add CP endpoint to create or reuse pending authorizations
 
 ### 3/6 · W-P1-WTOK-03
 
@@ -207,7 +208,7 @@ Add the flags that move a CP from the shared token to per-worker tokens: `--lega
 
 **Depends on:** [`W-P1-WTOK-03`](worker-credentials.md#36--w-p1-wtok-03) Add worker token admin API, dashboard panel and fleet auth fields; [`W-P1-WTOK-05`](worker-credentials.md#56--w-p1-wtok-05) Add offline worker token bootstrap CLI
 
-**Unblocks:** [`W-P1-WTOK-06`](worker-credentials.md#66--w-p1-wtok-06) Move compose recipes and worker configs to per-worker tokens; [`W-P1-OPS1-03`](ops-hardening.md#34--w-p1-ops1-03) Write break-glass and backup runbooks and a production readiness guide; [`W-P2-WCA-04`](worker-mtls.md#48--w-p2-wca-04) Accept worker certs in WorkerAuthenticator and add /control/renew
+**Unblocks:** [`W-P1-WTOK-06`](worker-credentials.md#66--w-p1-wtok-06) Move compose recipes and worker configs to per-worker tokens; [`W-P1-OPS1-03`](ops-hardening.md#34--w-p1-ops1-03) Write break-glass and backup runbooks and a production readiness guide; [`W-P2-WCA-04`](worker-mtls.md#48--w-p2-wca-04) Accept worker certs in WorkerAuthenticator and add /control/renew; [`W-P4-GOPS-04`](policy-as-code.md#511--w-p4-gops-04) Add staged versions and the rollout model
 
 ### 5/6 · W-P1-WTOK-05
 

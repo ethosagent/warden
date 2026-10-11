@@ -40,7 +40,6 @@ Nothing. This feature can start now.
 - [Token service](token-exchange.md) (P2 · Proven identity)
 - [Offboarding revocation](offboarding.md) (P3 · Act as the user)
 - [Verify user token](identity-verification.md) (P1 · Who did it)
-- [Slack / email notify](user-notify.md) (P4 · Agents everywhere)
 
 ## Code it touches
 

@@ -38,11 +38,14 @@ On a CP with --state-dir, console.auth=oidc, console.adminAudit.enabled=true and
 
 - [Security test suite](security-tests.md) (P2 · Proven identity)
 - [Offboarding revocation](offboarding.md) (P3 · Act as the user)
+- [Delegation grants](delegation-grants.md) (P4 · Agents everywhere)
+- [MCP registry](mcp-registry.md) (P4 · Agents everywhere)
 - [Admin MCP server](admin-mcp.md) (P4 · Agents everywhere)
 - [Policy as code + canary](policy-as-code.md) (P4 · Agents everywhere)
 - [Postgres + HA](postgres-ha.md) (P5 · Enterprise scale)
 - [Retention + self-monitoring](retention-ops.md) (P5 · Enterprise scale)
 - [Per-user limits + cost](per-user-limits.md) (P3 · Act as the user)
+- [MCP gateway endpoint](mcp-gateway.md) (P4 · Agents everywhere)
 
 ## Code it touches
 
@@ -77,6 +80,7 @@ Create the new internal/apikeys package that generates and parses `wak_` keys, h
 - `Index.Authenticate(token string, now time.Time) (Key, Reason, error)`: Parse, map lookup by id, `subtle.ConstantTimeCompare` on sha256, then expiry and revocation against the injected clock. Every failure returns `ErrUnauthorized`; the Reason (malformed|unknown|bad_secret|expired|revoked) is for logs and the counter only.
 - Freshness: the Index is rebuilt synchronously after in-process Create, Revoke and RevokeByOwner, and `Run(ctx)` polls `PRAGMA data_version` every 2s and reloads on change. A reload error keeps the last good index. last_used_at and last_used_ip are recorded in memory and flushed in one transaction every 60s and on shutdown.
 - No exported method or String/LogValue returns or prints the secret, the plaintext or secret_hash.
+- Reserve `grants:read` (viewer) and `grants:write` (admin) alongside `mcp:read`/`mcp:write` for later features; W-P4-DGR-06 and W-P4-DGR-07 register them.
 
 **Implementation plan**
 
@@ -97,7 +101,7 @@ Create the new internal/apikeys package that generates and parses `wak_` keys, h
 
 **Depends on:** [`W-P1-SSO-01`](console-sso-rbac.md#18--w-p1-sso-01) Add internal/cpstate SQLite state store with migrations; [`W-P1-SSO-02`](console-sso-rbac.md#28--w-p1-sso-02) Parse and validate the CP-local console config block
 
-**Unblocks:** [`W-P2-APIK-02`](api-keys.md#27--w-p2-apik-02) Authenticate API keys and enforce per-route scopes in the authz table; [`W-P2-APIK-06`](api-keys.md#67--w-p2-apik-06) Detect Warden API keys and worker tokens in agent egress
+**Unblocks:** [`W-P2-APIK-02`](api-keys.md#27--w-p2-apik-02) Authenticate API keys and enforce per-route scopes in the authz table; [`W-P2-APIK-06`](api-keys.md#67--w-p2-apik-06) Detect Warden API keys and worker tokens in agent egress; [`W-P4-MREG-02`](mcp-registry.md#210--w-p4-mreg-02) Add registry REST API with versioning, diff and rollback
 
 ### 2/7 · W-P2-APIK-02
 
@@ -140,7 +144,7 @@ Wire `wak_` keys into the CP request chain behind `console.apiKeys.enabled` (def
 
 **Depends on:** [`W-P2-APIK-01`](api-keys.md#17--w-p2-apik-01) Add internal/apikeys format, scope registry, store and index; [`W-P1-SSO-04`](console-sso-rbac.md#48--w-p1-sso-04) Add server-side sessions, logout, /auth/me and CSRF; [`W-P1-SSO-05`](console-sso-rbac.md#58--w-p1-sso-05) Enforce role checks on every dashboard route; [`W-P1-SSO-06`](console-sso-rbac.md#68--w-p1-sso-06) Require an admin session on /central/secrets and flag open consoles; [`W-P1-AAUD-02`](admin-audit-log.md#24--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware; [`W-P1-WTOK-02`](worker-credentials.md#26--w-p1-wtok-02) Authenticate /policy, heartbeat and ingest with per-worker tokens
 
-**Unblocks:** [`W-P2-APIK-03`](api-keys.md#37--w-p2-apik-03) Add the API key management and self-introspection API; [`W-P2-SECT-06`](security-tests.md#67--w-p2-sect-06) Add CP route-boundary and enrollment attack cases; [`W-P3-OFFB-03`](offboarding.md#37--w-p3-offb-03) Add the console Users tab and manual offboard routes; [`W-P3-PUL-05`](per-user-limits.md#510--w-p3-pul-05) Add per-user usage and cost dashboard view
+**Unblocks:** [`W-P2-APIK-03`](api-keys.md#37--w-p2-apik-03) Add the API key management and self-introspection API; [`W-P2-SECT-06`](security-tests.md#67--w-p2-sect-06) Add CP route-boundary and enrollment attack cases; [`W-P3-OFFB-03`](offboarding.md#37--w-p3-offb-03) Add the console Users tab and manual offboard routes; [`W-P4-DGR-02`](delegation-grants.md#212--w-p4-dgr-02) Add the agent grant request API; [`W-P4-MREG-02`](mcp-registry.md#210--w-p4-mreg-02) Add registry REST API with versioning, diff and rollback; [`W-P4-AMCP-01`](admin-mcp.md#19--w-p4-amcp-01) Add the CP traffic API with a sanitized record projection; [`W-P4-GOPS-08`](policy-as-code.md#211--w-p4-gops-08) Add warden policy replay against the CP for CI; [`W-P4-GOPS-02`](policy-as-code.md#311--w-p4-gops-02) Add Git sync of policy into approval drafts; [`W-P4-GOPS-04`](policy-as-code.md#511--w-p4-gops-04) Add staged versions and the rollout model; [`W-P3-PUL-05`](per-user-limits.md#510--w-p3-pul-05) Add per-user usage and cost dashboard view; [`W-P4-MGW-02`](mcp-gateway.md#215--w-p4-mgw-02) Add the MCP gateway definitions store and /dashboard/api/mcp/gateways API
 
 ### 3/7 · W-P2-APIK-03
 
@@ -179,7 +183,7 @@ Add the CP routes that create, list and revoke API keys, plus `GET /dashboard/ap
 
 **Depends on:** [`W-P2-APIK-02`](api-keys.md#27--w-p2-apik-02) Authenticate API keys and enforce per-route scopes in the authz table; [`W-P1-SSO-08`](console-sso-rbac.md#88--w-p1-sso-08) Add admin session list and revoke API
 
-**Unblocks:** [`W-P2-APIK-04`](api-keys.md#47--w-p2-apik-04) Add the API Keys page to the console; [`W-P2-APIK-05`](api-keys.md#57--w-p2-apik-05) Add offline API key revoke, restore revocation and expiry warnings; [`W-P2-APIK-07`](api-keys.md#77--w-p2-apik-07) Document API keys and test the done-when flow end to end; [`W-P3-OFFB-01`](offboarding.md#17--w-p3-offb-01) Implement the resumable two-stage Offboarder
+**Unblocks:** [`W-P2-APIK-04`](api-keys.md#47--w-p2-apik-04) Add the API Keys page to the console; [`W-P2-APIK-05`](api-keys.md#57--w-p2-apik-05) Add offline API key revoke, restore revocation and expiry warnings; [`W-P2-APIK-07`](api-keys.md#77--w-p2-apik-07) Document API keys and test the done-when flow end to end; [`W-P3-OFFB-01`](offboarding.md#17--w-p3-offb-01) Implement the resumable two-stage Offboarder; [`W-P4-AMCP-02`](admin-mcp.md#39--w-p4-amcp-02) Add the admin-mcp command with stdio transport and scope-filtered tools
 
 ### 4/7 · W-P2-APIK-04
 

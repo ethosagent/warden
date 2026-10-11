@@ -42,6 +42,7 @@ Setup: a CP running with console.auth=oidc, `consent.enabled: true` in --config,
 - [OAuth broker](oauth-broker.md) (P3 · Act as the user)
 - [Consent portal](consent-portal.md) (P3 · Act as the user)
 - [Offboarding revocation](offboarding.md) (P3 · Act as the user)
+- [Delegation grants](delegation-grants.md) (P4 · Agents everywhere)
 - [Per-user secrets (refresh)](refresh-model.md) (P3 · Act as the user)
 - [JIT 403 + long-poll](jit-authorization.md) (P3 · Act as the user)
 - [Slack / email notify](user-notify.md) (P4 · Agents everywhere)
@@ -141,7 +142,7 @@ Add the new internal/portal package with GET /portal/login, GET /portal/callback
 
 **Depends on:** [`W-P3-CSIG-01`](consent-auth.md#17--w-p3-csig-01) Add the CP-local consent config block and the warden-portal Dex client; [`W-P3-CSIG-05`](consent-auth.md#57--w-p3-csig-05) Extract the console OIDC flow and session store into internal/webauth; [`W-P1-BLOCK-07`](user-block-list.md#78--w-p1-block-07) Deny console login and sessions for blocked principals; [`W-P1-AAUD-02`](admin-audit-log.md#24--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware
 
-**Unblocks:** [`W-P3-CSIG-03`](consent-auth.md#37--w-p3-csig-03) Store the IdP refresh token in a CP-only secret namespace on login; [`W-P3-CSIG-04`](consent-auth.md#47--w-p3-csig-04) Add the portal session middleware, CSRF, logout and console isolation; [`W-P3-PORT-03`](consent-portal.md#37--w-p3-port-03) Add the pending landing page and connect, continue and decline actions
+**Unblocks:** [`W-P3-CSIG-03`](consent-auth.md#37--w-p3-csig-03) Store the IdP refresh token in a CP-only secret namespace on login; [`W-P3-CSIG-04`](consent-auth.md#47--w-p3-csig-04) Add the portal session middleware, CSRF, logout and console isolation; [`W-P3-PORT-03`](consent-portal.md#37--w-p3-port-03) Add the pending landing page and connect, continue and decline actions; [`W-P4-NTFY-07`](user-notify.md#710--w-p4-ntfy-07) Add verified user contacts table keyed by user_key
 
 ### 3/7 · W-P3-CSIG-03
 
@@ -220,7 +221,7 @@ Add the exported portal.RequireSession middleware and portal.PrincipalFrom, whic
 
 **Depends on:** [`W-P3-CSIG-02`](consent-auth.md#27--w-p3-csig-02) Implement portal login, callback and session store; [`W-P1-SSO-05`](console-sso-rbac.md#58--w-p1-sso-05) Enforce role checks on every dashboard route; [`W-P1-SSO-08`](console-sso-rbac.md#88--w-p1-sso-08) Add admin session list and revoke API; [`W-P1-BLOCK-07`](user-block-list.md#78--w-p1-block-07) Deny console login and sessions for blocked principals
 
-**Unblocks:** [`W-P3-CSIG-07`](consent-auth.md#77--w-p3-csig-07) Add a Dex-backed portal sign-in end-to-end test; [`W-P3-BRKR-03`](oauth-broker.md#39--w-p3-brkr-03) Implement POST /connect/start with PKCE, CSRF and scope capping; [`W-P3-PORT-01`](consent-portal.md#17--w-p3-port-01) Serve the portal page and the connections list API; [`W-P3-OFFB-06`](offboarding.md#67--w-p3-offb-06) Audit and test blocked-user refusals across portal and connect; [`W-P3-JIT-04`](jit-authorization.md#47--w-p3-jit-04) Add /connect/{id}/status long-poll on the CP
+**Unblocks:** [`W-P3-CSIG-07`](consent-auth.md#77--w-p3-csig-07) Add a Dex-backed portal sign-in end-to-end test; [`W-P3-BRKR-03`](oauth-broker.md#39--w-p3-brkr-03) Implement POST /connect/start with PKCE, CSRF and scope capping; [`W-P3-PORT-01`](consent-portal.md#17--w-p3-port-01) Serve the portal page and the connections list API; [`W-P3-OFFB-06`](offboarding.md#67--w-p3-offb-06) Audit and test blocked-user refusals across portal and connect; [`W-P4-DGR-03`](delegation-grants.md#312--w-p4-dgr-03) Build the grant approval pages in the consent portal; [`W-P3-JIT-04`](jit-authorization.md#47--w-p3-jit-04) Add /connect/{id}/status long-poll on the CP; [`W-P4-NTFY-09`](user-notify.md#910--w-p4-ntfy-09) Add per-user channel order preference in the portal
 
 ### 5/7 · W-P3-CSIG-05
 
@@ -294,7 +295,7 @@ Every P3 feature stores per-user credentials: IdP refresh tokens (this feature),
 
 **Depends on:** [`W-P3-CSIG-01`](consent-auth.md#17--w-p3-csig-01) Add the CP-local consent config block and the warden-portal Dex client
 
-**Unblocks:** [`W-P3-CSIG-03`](consent-auth.md#37--w-p3-csig-03) Store the IdP refresh token in a CP-only secret namespace on login; [`W-P3-BRKR-01`](oauth-broker.md#19--w-p3-brkr-01) Add provider config model with Google and GitHub defaults; [`W-P3-BRKR-06`](oauth-broker.md#69--w-p3-brkr-06) Guard reserved prefixes on the worker dashboard and load client secrets from consent.store; [`W-P3-PUS-02`](refresh-model.md#212--w-p3-pus-02) Add the CP-local perUserSecrets config block and the Vault consent.store backend; [`W-P3-PUS-06`](refresh-model.md#612--w-p3-pus-06) Add guarded grant record read and write helpers
+**Unblocks:** [`W-P3-CSIG-03`](consent-auth.md#37--w-p3-csig-03) Store the IdP refresh token in a CP-only secret namespace on login; [`W-P3-BRKR-01`](oauth-broker.md#19--w-p3-brkr-01) Add provider config model with Google and GitHub defaults; [`W-P3-BRKR-06`](oauth-broker.md#69--w-p3-brkr-06) Guard reserved prefixes on the worker dashboard and load client secrets from consent.store; [`W-P3-PUS-02`](refresh-model.md#212--w-p3-pus-02) Add the CP-local perUserSecrets config block and the Vault consent.store backend; [`W-P3-PUS-06`](refresh-model.md#612--w-p3-pus-06) Add guarded grant record read and write helpers; [`W-P4-NTFY-07`](user-notify.md#710--w-p4-ntfy-07) Add verified user contacts table keyed by user_key
 
 ### 7/7 · W-P3-CSIG-07
 

@@ -42,6 +42,7 @@ On a managed deployment with two CA-enabled workers that advertise userlimits/v1
 ## Unblocks
 
 - [Consent portal](consent-portal.md) (P3 · Act as the user)
+- [Admin MCP server](admin-mcp.md) (P4 · Agents everywhere)
 
 ## Code it touches
 
@@ -327,7 +328,7 @@ Control-plane half of recording. Ingest stores only ProxyID today, so the existi
 
 **Depends on:** [`W-P3-PUL-02`](per-user-limits.md#210--w-p3-pul-02) Record agent id and limit rule on worker events; [`W-P1-VRFY-06`](identity-verification.md#67--w-p1-vrfy-06) Store user fields in the control-plane fleet store
 
-**Unblocks:** [`W-P3-PORT-01`](consent-portal.md#17--w-p3-port-01) Serve the portal page and the connections list API; [`W-P3-PUL-05`](per-user-limits.md#510--w-p3-pul-05) Add per-user usage and cost dashboard view; [`W-P3-PUL-08`](per-user-limits.md#810--w-p3-pul-08) Publish fleet cost blocks as costBlockedUsers from the control plane
+**Unblocks:** [`W-P3-PORT-01`](consent-portal.md#17--w-p3-port-01) Serve the portal page and the connections list API; [`W-P4-AMCP-01`](admin-mcp.md#19--w-p4-amcp-01) Add the CP traffic API with a sanitized record projection; [`W-P3-PUL-05`](per-user-limits.md#510--w-p3-pul-05) Add per-user usage and cost dashboard view; [`W-P3-PUL-08`](per-user-limits.md#810--w-p3-pul-08) Publish fleet cost blocks as costBlockedUsers from the control plane
 
 ### 8/10 · W-P3-PUL-08
 

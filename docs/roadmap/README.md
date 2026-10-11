@@ -26,7 +26,7 @@ Grey tags exist today; coloured tags show the phase that adds each part. The cor
 | [P1 · Who did it](#phase-1--who-did-it) | Console SSO via Dex with 3 roles, admin audit log, policy history and rollback, per-worker tokens, user token verified on the worker in attribute mode, group-aware policy, fleet-wide user block, JSON audit logs, identity contract and CLI. | 11 | 65 | 34 / 31 / 0 | 25–45 |
 | [P2 · Proven identity](#phase-2--proven-identity) | Agent registry, RFC 8693 token service (15-minute agent-bound tokens), key manager, worker CA and mTLS, signed bundles, two-person approval with replay, scoped API keys, require-identity mode, Claude Code and Codex recipes. | 10 | 75 | 32 / 43 / 0 | 32–56 |
 | [P3 · Act as the user](#phase-3--act-as-the-user) | Consent portal, OAuth broker for Google and GitHub, per-user secrets with refresh, JIT 403 with long-poll, offboarding revocation, per-user limits. | 7 | 59 | 22 / 37 / 0 | 27–46 |
-| [P4 · Agents everywhere](#phase-4--agents-everywhere) | Delegation grants, park and notify, MCP gateway and registry, external hooks, admin MCP server, policy as code with canary. | 8 | 54 | 16 / 38 / 0 | 26–44 |
+| [P4 · Agents everywhere](#phase-4--agents-everywhere) | Delegation grants, park and notify, MCP gateway and registry, external hooks, admin MCP server, policy as code with canary. | 8 | 86 | 31 / 55 / 0 | 39–67 |
 | [P5 · Enterprise scale](#phase-5--enterprise-scale) | Postgres and HA, Helm, OTel logs and traces, SIEM export, KMS, retention, direct IdP adapters. | 7 | 40 | 9 / 28 / 3 | 22–38 |
 
 Estimates assume S = 1–2, M = 3–5 and L = 6–10 working days for one engineer, summed over the tickets. If Phase 1 has to shrink, the agreed cuts are: defer JSON audit export and break-glass/backups, and ship only the admin and viewer roles.
@@ -201,58 +201,53 @@ Delegation grants, park and notify, MCP gateway and registry, external hooks, ad
 
 ```mermaid
 flowchart LR
-  subgraph ph1["P1 · Who did it"]
-    p1_identity_contract["Identity contract + CLI"]
-    p1_json_audit["JSON audit → SIEM"]
-  end
   subgraph ph2["P2 · Proven identity"]
-    p2_worker_ca["Worker CA (mTLS)"]
     p2_signed_bundles["Signed bundles"]
     p2_approvals["Approvals + replay"]
     p2_api_keys["Scoped API keys"]
+    p2_recipes["Identity client + recipes"]
   end
   subgraph ph3["P3 · Act as the user"]
-    p3_consent_portal["Consent portal"]
+    p3_oauth_broker["OAuth broker"]
+    p3_offboarding["Offboarding revocation"]
     p3_jit["JIT 403 + long-poll"]
   end
   subgraph ph4["P4 · Agents everywhere"]
-    p4_grants["Delegation grants"]
     p4_mcp_registry["MCP registry"]
-    p4_gitops["Policy as code + canary"]
+    p4_notify["Slack / email notify"]
+    p4_grants["Delegation grants"]
     p4_mcp_gateway["MCP gateway endpoint"]
     p4_admin_mcp["Admin MCP server"]
-    p4_hooks["External hooks"]
-    p4_notify["Slack / email notify"]
+    p4_gitops["Policy as code + canary"]
     p4_park["Park + notify"]
+    p4_hooks["External hooks"]
   end
-  p3_consent_portal --> p4_grants
   p2_signed_bundles --> p4_mcp_registry
   p2_approvals --> p4_mcp_registry
-  p2_approvals --> p4_gitops
-  p2_signed_bundles --> p4_gitops
-  p2_worker_ca --> p4_gitops
-  p2_api_keys --> p4_gitops
+  p2_api_keys --> p4_mcp_registry
+  p3_oauth_broker --> p4_mcp_registry
+  p3_jit --> p4_notify
+  p3_offboarding --> p4_notify
+  p4_notify --> p4_grants
   p4_mcp_registry --> p4_mcp_gateway
   p4_grants --> p4_mcp_gateway
-  p3_jit --> p4_mcp_gateway
+  p2_recipes --> p4_mcp_gateway
   p4_mcp_gateway --> p4_admin_mcp
-  p1_identity_contract --> p4_hooks
-  p1_json_audit --> p4_hooks
-  p3_jit --> p4_notify
-  p4_notify --> p4_park
-  p4_grants --> p4_park
+  p4_admin_mcp --> p4_gitops
+  p4_mcp_gateway --> p4_park
+  p4_mcp_gateway --> p4_hooks
 ```
 
 | # | Feature | Lane | Needs first | Tickets | Epic |
 |---|---|---|---|---|---|
-| 1 | [Delegation grants](features/delegation-grants.md) | Control plane | [Token service](features/token-exchange.md), [Agent registry](features/agent-registry.md), [Signed bundles](features/signed-bundles.md), [Consent portal](features/consent-portal.md), [Admin audit log](features/admin-audit-log.md), [JSON audit → SIEM](features/audit-log-export.md) | 9 (3S 6M) | [#166](https://github.com/ethosagent/warden/issues/166) |
-| 2 | [MCP registry](features/mcp-registry.md) | Control plane | [Signed bundles](features/signed-bundles.md), [Approvals + replay](features/policy-approvals.md), [SSO + 3 roles](features/console-sso-rbac.md), [Admin audit log](features/admin-audit-log.md) | 6 (1S 5M) | [#176](https://github.com/ethosagent/warden/issues/176) |
-| 3 | [Policy as code + canary](features/policy-as-code.md) | Control plane | [Policy history + rollback](features/policy-versioning.md), [Approvals + replay](features/policy-approvals.md), [Signed bundles](features/signed-bundles.md), [Worker CA (mTLS)](features/worker-mtls.md), [Scoped API keys](features/api-keys.md) | 7 (2S 5M) | [#183](https://github.com/ethosagent/warden/issues/183) |
-| 4 | [MCP gateway endpoint](features/mcp-gateway.md) | Worker | [MCP registry](features/mcp-registry.md), [Delegation grants](features/delegation-grants.md), [Per-user secrets (refresh)](features/refresh-model.md), [JIT 403 + long-poll](features/jit-authorization.md), [Signed bundles](features/signed-bundles.md), [Verify user token](features/identity-verification.md) | 8 (2S 6M) | [#191](https://github.com/ethosagent/warden/issues/191) |
-| 5 | [Admin MCP server](features/admin-mcp.md) | Control plane | [Scoped API keys](features/api-keys.md), [Policy history + rollback](features/policy-versioning.md), [Agent registry](features/agent-registry.md), [MCP gateway endpoint](features/mcp-gateway.md) | 6 (2S 4M) | [#200](https://github.com/ethosagent/warden/issues/200) |
-| 6 | [External hooks](features/policy-hooks.md) | Worker | [Identity contract + CLI](features/identity-contract.md), [JSON audit → SIEM](features/audit-log-export.md) | 6 (2S 4M) | [#207](https://github.com/ethosagent/warden/issues/207) |
-| 7 | [Slack / email notify](features/user-notify.md) | Integrations | [Dex (one IdP)](features/dex-oidc.md), [Consent sign-in](features/consent-auth.md), [JIT 403 + long-poll](features/jit-authorization.md) | 6 (2S 4M) | [#214](https://github.com/ethosagent/warden/issues/214) |
-| 8 | [Park + notify](features/park-notify.md) | Worker | [JIT 403 + long-poll](features/jit-authorization.md), [Per-user secrets (refresh)](features/refresh-model.md), [Slack / email notify](features/user-notify.md), [Delegation grants](features/delegation-grants.md) | 6 (2S 4M) | [#221](https://github.com/ethosagent/warden/issues/221) |
+| 1 | [MCP registry](features/mcp-registry.md) | Control plane | [SSO + 3 roles](features/console-sso-rbac.md), [Admin audit log](features/admin-audit-log.md), [Policy history + rollback](features/policy-versioning.md), [Signed bundles](features/signed-bundles.md), [Approvals + replay](features/policy-approvals.md), [Scoped API keys](features/api-keys.md), [OAuth broker](features/oauth-broker.md) | 10 (2S 8M) | [#176](https://github.com/ethosagent/warden/issues/176) |
+| 2 | [Slack / email notify](features/user-notify.md) | Integrations | [JIT 403 + long-poll](features/jit-authorization.md), [Consent sign-in](features/consent-auth.md), [Consent portal](features/consent-portal.md), [Offboarding revocation](features/offboarding.md), [Token service](features/token-exchange.md), [User block list](features/user-block-list.md), [Admin audit log](features/admin-audit-log.md), [SSO + 3 roles](features/console-sso-rbac.md), [Agent registry](features/agent-registry.md) | 10 (5S 5M) | [#214](https://github.com/ethosagent/warden/issues/214) |
+| 3 | [Delegation grants](features/delegation-grants.md) | Control plane | [Token service](features/token-exchange.md), [Agent registry](features/agent-registry.md), [Signed bundles](features/signed-bundles.md), [Agent-bound tokens + mTLS](features/identity-enforcement.md), [Scoped API keys](features/api-keys.md), [Consent portal](features/consent-portal.md), [Consent sign-in](features/consent-auth.md), [Offboarding revocation](features/offboarding.md), [JIT 403 + long-poll](features/jit-authorization.md), [Per-user secrets (refresh)](features/refresh-model.md), [Admin audit log](features/admin-audit-log.md), [JSON audit → SIEM](features/audit-log-export.md), [Group-aware policy](features/identity-policy.md), [Verify user token](features/identity-verification.md), [User block list](features/user-block-list.md), [Slack / email notify](features/user-notify.md) | 12 (3S 9M) | [#166](https://github.com/ethosagent/warden/issues/166) |
+| 4 | [MCP gateway endpoint](features/mcp-gateway.md) | Worker | [MCP registry](features/mcp-registry.md), [Delegation grants](features/delegation-grants.md), [Per-user secrets (refresh)](features/refresh-model.md), [JIT 403 + long-poll](features/jit-authorization.md), [Signed bundles](features/signed-bundles.md), [Agent-bound tokens + mTLS](features/identity-enforcement.md), [Identity client + recipes](features/identity-client.md), [Verify user token](features/identity-verification.md), [Admin audit log](features/admin-audit-log.md), [Scoped API keys](features/api-keys.md), [Agent registry](features/agent-registry.md) | 15 (6S 9M) | [#191](https://github.com/ethosagent/warden/issues/191) |
+| 5 | [Admin MCP server](features/admin-mcp.md) | Control plane | [Scoped API keys](features/api-keys.md), [Policy history + rollback](features/policy-versioning.md), [Agent registry](features/agent-registry.md), [Approvals + replay](features/policy-approvals.md), [JSON audit → SIEM](features/audit-log-export.md), [Group-aware policy](features/identity-policy.md), [Verify user token](features/identity-verification.md), [Per-user limits + cost](features/per-user-limits.md), [MCP gateway endpoint](features/mcp-gateway.md) | 9 (4S 5M) | [#200](https://github.com/ethosagent/warden/issues/200) |
+| 6 | [Policy as code + canary](features/policy-as-code.md) | Control plane | [Policy history + rollback](features/policy-versioning.md), [Admin audit log](features/admin-audit-log.md), [Per-worker tokens](features/worker-credentials.md), [Approvals + replay](features/policy-approvals.md), [Signed bundles](features/signed-bundles.md), [Worker CA (mTLS)](features/worker-mtls.md), [Scoped API keys](features/api-keys.md), [Admin MCP server](features/admin-mcp.md) | 11 (4S 7M) | [#183](https://github.com/ethosagent/warden/issues/183) |
+| 7 | [Park + notify](features/park-notify.md) | Worker | [JIT 403 + long-poll](features/jit-authorization.md), [Per-user secrets (refresh)](features/refresh-model.md), [Worker CA (mTLS)](features/worker-mtls.md), [Slack / email notify](features/user-notify.md), [MCP gateway endpoint](features/mcp-gateway.md) | 8 (4S 4M) | [#221](https://github.com/ethosagent/warden/issues/221) |
+| 8 | [External hooks](features/policy-hooks.md) | Worker | [Verify user token](features/identity-verification.md), [Group-aware policy](features/identity-policy.md), [JSON audit → SIEM](features/audit-log-export.md), [User block list](features/user-block-list.md), [SSO + 3 roles](features/console-sso-rbac.md), [Admin audit log](features/admin-audit-log.md), [MCP gateway endpoint](features/mcp-gateway.md), [Agent-bound tokens + mTLS](features/identity-enforcement.md) | 11 (3S 8M) | [#207](https://github.com/ethosagent/warden/issues/207) |
 
 ## Phase 5 · Enterprise scale
 
@@ -271,8 +266,8 @@ flowchart LR
     p2_signed_bundles["Signed bundles"]
   end
   subgraph ph4["P4 · Agents everywhere"]
-    p4_grants["Delegation grants"]
     p4_mcp_registry["MCP registry"]
+    p4_grants["Delegation grants"]
   end
   subgraph ph5["P5 · Enterprise scale"]
     p5_idp_adapters["Okta / Entra / Google direct"]

@@ -8,7 +8,7 @@ Each worker can write a separate JSON decision stream, one line per stored analy
 
 ## How we build it
 
-- Fix first (W-P1-JAUD-05): swapSecrets in internal/proxy/http.go rewrites s.req.URL.RawQuery with the real secret, and recordAllowEvent, relayMCPSSE and the post-forward event sites then build fullURL from s.req.URL.RequestURI(). The real value can reach SQLite, signed receipts, logDecision lines and central sync. requestScope gains a new auditURL field captured in readRequest before swapSecrets and applyTransforms; every StoreEvent and logDecision site in internal/proxy uses it.
+- Fix first (W-P1-JAUD-05): swapSecrets in internal/proxy/http.go rewrites s.req.URL.RawQuery with the real secret, and recordAllowEvent, relayMCPSSE and the post-forward event sites then build fullURL from s.req.URL.RequestURI(). The real value can reach SQLite, signed receipts, logDecision lines and central sync. requestScope gains a new auditURL field captured in readRequest before swapSecrets and applyTransforms; every StoreEvent and logDecision site in internal/proxy uses it. JAUD-05 and JAUD-06 are the first tickets of this feature, and JAUD-05 ships with no flag because it is a bug fix: it lands before the end of Phase 1 even if the JSON file sink is cut.
 - Deny reasons (W-P1-JAUD-06): every deny site sets Event.Reason from one bounded set shared with Metrics.RecordBlocked (policy, no_tls, judge, dlp, mcp_*; later tickets add headers_too_large (W-P1-VRFY-02), user_blocked (W-P1-BLOCK-02) and identity_required / group_not_allowed (W-P1-GPOL-03) to the same set; attribute-mode identity itself never denies). storeDeny in serve.go stops dropping its reason argument, and a test fails on any deny event with an empty Reason.
 - New package internal/auditlog. Record is a closed struct and FromEvent(analytics.Event, Meta) Record is the only mapping from Event. It never marshals Event, so SecretRef, Evidence, bodies, headers and future Event fields cannot leak. Each line is json.Marshal(Record) plus a newline, written in one Write; slog is not used, so no time/level/msg keys appear. p5-otlp should map this Record to OTel attributes instead of keeping a second allowlist.
 - Placement off the request path: analytics.WithOnBatch becomes additive (several tees; alerts.Observe uses it today). The auditlog Sink is a tee on the async writer's goroutine, so it sees each event once, after compliance tagging and signing, and is not affected by the managed apply loop rebuilding the TaggingStore. The tee hands each batch to the sink's own bounded channel without blocking; a separate goroutine writes through a bufio.Writer flushed once per batch. A full channel drops the batch and counts it, so a slow disk can never back-pressure the async writer or requests.
@@ -21,7 +21,7 @@ Each worker can write a separate JSON decision stream, one line per stored analy
 
 ## Done when
 
-With audit.jsonLog.enabled: true and output: file on a real worker, every stored analytics event (CONNECT/tcp, HTTPS, MCP over HTTP, SSE and WS, gRPC) produces exactly one line that matches warden.decision.v1, with proxy_id, boot_id and a gap-free seq under normal disk conditions. Every deny line has a non-empty reason from the documented set. User sub, email and groups appear only for valid tokens. A request with a secret placeholder in its query never shows the real value in the line, the SQLite row, the receipt or the operational log. A failing disk increments write or drop counters without failing requests. Files rotate at maxSizeMB and keep at most maxBackups. A CP policy save emits one warden.admin.v1 line, and the documented Vector config ships both streams from the compose recipe into a test sink.
+With audit.jsonLog.enabled: true and output: file on a real worker, every stored analytics event (CONNECT/tcp, HTTPS, MCP over HTTP, SSE and WS, gRPC) produces exactly one line that matches warden.decision.v1, with proxy_id, boot_id and a gap-free seq under normal disk conditions. Every deny line has a non-empty reason from the documented set. User sub, email and groups appear only for valid tokens. A request with a secret placeholder in its query never shows the real value in the line, the SQLite row, the receipt or the operational log. A failing disk increments write or drop counters without failing requests. Files rotate at maxSizeMB and keep at most maxBackups. A CP policy save emits one warden.admin.v1 line, and the documented Vector config ships both streams from the compose recipe into a test sink. W-P1-JAUD-05 ships without a flag as a bug fix, so the placeholder-only Event.URL holds whether or not audit.jsonLog is enabled.
 
 ## Needs first
 
@@ -34,6 +34,7 @@ With audit.jsonLog.enabled: true and output: file on a real worker, every stored
 - [Break-glass + backups](ops-hardening.md) (P1 · Who did it)
 - [Consent portal](consent-portal.md) (P3 · Act as the user)
 - [Delegation grants](delegation-grants.md) (P4 · Agents everywhere)
+- [Admin MCP server](admin-mcp.md) (P4 · Agents everywhere)
 - [OTLP logs + traces](otel-logs-traces.md) (P5 · Enterprise scale)
 - [Group-aware policy](identity-policy.md) (P1 · Who did it)
 - [Per-user secrets (refresh)](refresh-model.md) (P3 · Act as the user)
@@ -70,7 +71,7 @@ swapSecrets in internal/proxy/http.go writes the real secret into s.req.URL.RawQ
 - Every StoreEvent and logDecision call in internal/proxy (http.go, ws.go, grpc.go) that builds a URL uses auditURL instead of s.req.URL.RequestURI().
 - The forwarded upstream request is unchanged: the real secret is still swapped into the outgoing query.
 - No real secret value appears in Event.URL, the signed receipt, the operational decision log or central sync payloads.
-- No config flag: this is a leak fix with no new behaviour; events now carry the placeholder the agent sent.
+- No config flag: this is a bug fix (a secret leak) with no new behaviour, so it is exempt from the behind-a-flag rule; events now carry the placeholder the agent sent.
 - No new logging of secret values, headers or bodies is added.
 
 **Implementation plan**
@@ -88,7 +89,7 @@ swapSecrets in internal/proxy/http.go writes the real secret into s.req.URL.RawQ
 - [ ] The same holds for an MCP SSE request and an allowed request recorded by recordAllowEvent.
 - [ ] `go test -race ./internal/proxy -run TestSwappedQueryNotRecorded` passes, and `scripts/check.sh` passes.
 
-**Unblocks:** [`W-P3-JIT-02`](jit-authorization.md#27--w-p3-jit-02) Return structured 403 for HTTP when a grant is missing; [`W-P1-JAUD-01`](audit-log-export.md#36--w-p1-jaud-01) Add internal/auditlog decision stream on the async writer tee
+**Unblocks:** [`W-P3-JIT-02`](jit-authorization.md#27--w-p3-jit-02) Return structured 403 for HTTP when a grant is missing; [`W-P4-HOOK-07`](policy-hooks.md#711--w-p4-hook-07) Wire the pre-request hook stage into the HTTP/1.1 proxy path; [`W-P1-JAUD-01`](audit-log-export.md#36--w-p1-jaud-01) Add internal/auditlog decision stream on the async writer tee
 
 ### 2/6 · W-P1-JAUD-06
 
@@ -122,7 +123,7 @@ Most deny events have an empty Event.Reason today: storeDeny in internal/proxy/s
 - [ ] Every deny event produced in the test run has a Reason contained in Reasons().
 - [ ] `go test -race ./internal/proxy -run TestDenyReasons` passes.
 
-**Unblocks:** [`W-P1-BLOCK-02`](user-block-list.md#28--w-p1-block-02) Enforce the block list in the worker at CONNECT, per request and per h2 stream; [`W-P1-GPOL-03`](identity-policy.md#39--w-p1-gpol-03) Apply group-aware allow decisions at CONNECT and request time; [`W-P3-PUS-04`](refresh-model.md#412--w-p3-pus-04) Swap per-user placeholders only for bound identities on mapped domains; [`W-P3-JIT-02`](jit-authorization.md#27--w-p3-jit-02) Return structured 403 for HTTP when a grant is missing; [`W-P3-PUL-09`](per-user-limits.md#910--w-p3-pul-09) Enforce per-user rate limits per request in the proxy; [`W-P1-JAUD-02`](audit-log-export.md#46--w-p1-jaud-02) Publish decision v1 JSON Schema with closed-field and leak tests
+**Unblocks:** [`W-P1-BLOCK-02`](user-block-list.md#28--w-p1-block-02) Enforce the block list in the worker at CONNECT, per request and per h2 stream; [`W-P4-AMCP-07`](admin-mcp.md#29--w-p4-amcp-07) Add the CP explain API with historical version resolution; [`W-P1-GPOL-03`](identity-policy.md#39--w-p1-gpol-03) Apply group-aware allow decisions at CONNECT and request time; [`W-P3-PUS-04`](refresh-model.md#412--w-p3-pus-04) Swap per-user placeholders only for bound identities on mapped domains; [`W-P3-JIT-02`](jit-authorization.md#27--w-p3-jit-02) Return structured 403 for HTTP when a grant is missing; [`W-P3-PUL-09`](per-user-limits.md#910--w-p3-pul-09) Enforce per-user rate limits per request in the proxy; [`W-P4-HOOK-07`](policy-hooks.md#711--w-p4-hook-07) Wire the pre-request hook stage into the HTTP/1.1 proxy path; [`W-P1-JAUD-02`](audit-log-export.md#46--w-p1-jaud-02) Publish decision v1 JSON Schema with closed-field and leak tests
 
 ### 3/6 · W-P1-JAUD-01
 
@@ -165,7 +166,7 @@ Create new package internal/auditlog that writes one warden.decision.v1 JSON lin
 
 **Depends on:** [`W-P1-VRFY-03`](identity-verification.md#37--w-p1-vrfy-03) Record user fields on worker events, receipts, decision logs and sync; [`W-P1-JAUD-05`](audit-log-export.md#16--w-p1-jaud-05) Record the pre-swap URL on events and decision logs
 
-**Unblocks:** [`W-P1-JAUD-02`](audit-log-export.md#46--w-p1-jaud-02) Publish decision v1 JSON Schema with closed-field and leak tests; [`W-P1-JAUD-03`](audit-log-export.md#56--w-p1-jaud-03) Write CP admin audit lines as warden.admin.v1 JSON
+**Unblocks:** [`W-P4-AMCP-01`](admin-mcp.md#19--w-p4-amcp-01) Add the CP traffic API with a sanitized record projection; [`W-P1-JAUD-02`](audit-log-export.md#46--w-p1-jaud-02) Publish decision v1 JSON Schema with closed-field and leak tests; [`W-P1-JAUD-03`](audit-log-export.md#56--w-p1-jaud-03) Write CP admin audit lines as warden.admin.v1 JSON
 
 ### 4/6 · W-P1-JAUD-02
 
@@ -201,7 +202,7 @@ Add docs/schemas/warden.decision.v1.json and pin it to auditlog.Record with test
 
 **Depends on:** [`W-P1-JAUD-01`](audit-log-export.md#36--w-p1-jaud-01) Add internal/auditlog decision stream on the async writer tee; [`W-P1-JAUD-06`](audit-log-export.md#26--w-p1-jaud-06) Set a bounded Reason on every deny event
 
-**Unblocks:** [`W-P3-JIT-02`](jit-authorization.md#27--w-p3-jit-02) Return structured 403 for HTTP when a grant is missing; [`W-P3-PUL-02`](per-user-limits.md#210--w-p3-pul-02) Record agent id and limit rule on worker events; [`W-P3-PUL-09`](per-user-limits.md#910--w-p3-pul-09) Enforce per-user rate limits per request in the proxy; [`W-P1-JAUD-04`](audit-log-export.md#66--w-p1-jaud-04) Document SIEM shipping with Vector and Fluent Bit examples
+**Unblocks:** [`W-P4-DGR-05`](delegation-grants.md#512--w-p4-dgr-05) Enforce grant tools in worker MCP verdicts; [`W-P3-JIT-02`](jit-authorization.md#27--w-p3-jit-02) Return structured 403 for HTTP when a grant is missing; [`W-P3-PUL-02`](per-user-limits.md#210--w-p3-pul-02) Record agent id and limit rule on worker events; [`W-P3-PUL-09`](per-user-limits.md#910--w-p3-pul-09) Enforce per-user rate limits per request in the proxy; [`W-P1-JAUD-04`](audit-log-export.md#66--w-p1-jaud-04) Document SIEM shipping with Vector and Fluent Bit examples
 
 ### 5/6 · W-P1-JAUD-03
 

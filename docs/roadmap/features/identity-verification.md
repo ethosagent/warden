@@ -42,12 +42,15 @@ On a real deployment (CP plus at least one worker with TLS termination, Dex from
 - [Security test suite](security-tests.md) (P2 · Proven identity)
 - [Consent portal](consent-portal.md) (P3 · Act as the user)
 - [Offboarding revocation](offboarding.md) (P3 · Act as the user)
+- [Delegation grants](delegation-grants.md) (P4 · Agents everywhere)
+- [Admin MCP server](admin-mcp.md) (P4 · Agents everywhere)
 - [Group-aware policy](identity-policy.md) (P1 · Who did it)
 - [Agent-bound tokens + mTLS](identity-enforcement.md) (P2 · Proven identity)
 - [Per-user secrets (refresh)](refresh-model.md) (P3 · Act as the user)
 - [JIT 403 + long-poll](jit-authorization.md) (P3 · Act as the user)
 - [Per-user limits + cost](per-user-limits.md) (P3 · Act as the user)
 - [MCP gateway endpoint](mcp-gateway.md) (P4 · Agents everywhere)
+- [External hooks](policy-hooks.md) (P4 · Agents everywhere)
 - [JSON audit → SIEM](audit-log-export.md) (P1 · Who did it)
 
 ## Code it touches
@@ -186,7 +189,7 @@ Worker side of recording. Add identity fields to analytics.Event with snake_case
 
 **Depends on:** [`W-P1-VRFY-02`](identity-verification.md#27--w-p1-vrfy-02) Extract, verify and strip identity on CONNECT, HTTP/1.1 and HTTP/2
 
-**Unblocks:** [`W-P1-BLOCK-02`](user-block-list.md#28--w-p1-block-02) Enforce the block list in the worker at CONNECT, per request and per h2 stream; [`W-P1-BLOCK-06`](user-block-list.md#68--w-p1-block-06) Raise one user_blocked Finding per user without leaking email; [`W-P1-VRFY-04`](identity-verification.md#47--w-p1-vrfy-04) Add user filter and top-users breakdown to the dashboard; [`W-P1-VRFY-05`](identity-verification.md#57--w-p1-vrfy-05) Add identity attribution e2e test and a CI integration job; [`W-P1-VRFY-06`](identity-verification.md#67--w-p1-vrfy-06) Store user fields in the control-plane fleet store; [`W-P1-GPOL-03`](identity-policy.md#39--w-p1-gpol-03) Apply group-aware allow decisions at CONNECT and request time; [`W-P1-GPOL-05`](identity-policy.md#59--w-p1-gpol-05) Show affected users in policy eval replay; [`W-P2-WBND-02`](identity-enforcement.md#210--w-p2-wbnd-02) Bind Warden tokens to the worker's registered agent and key; [`W-P3-JIT-02`](jit-authorization.md#27--w-p3-jit-02) Return structured 403 for HTTP when a grant is missing; [`W-P3-PUL-02`](per-user-limits.md#210--w-p3-pul-02) Record agent id and limit rule on worker events; [`W-P1-JAUD-01`](audit-log-export.md#36--w-p1-jaud-01) Add internal/auditlog decision stream on the async writer tee
+**Unblocks:** [`W-P1-BLOCK-02`](user-block-list.md#28--w-p1-block-02) Enforce the block list in the worker at CONNECT, per request and per h2 stream; [`W-P1-BLOCK-06`](user-block-list.md#68--w-p1-block-06) Raise one user_blocked Finding per user without leaking email; [`W-P4-DGR-05`](delegation-grants.md#512--w-p4-dgr-05) Enforce grant tools in worker MCP verdicts; [`W-P1-VRFY-04`](identity-verification.md#47--w-p1-vrfy-04) Add user filter and top-users breakdown to the dashboard; [`W-P1-VRFY-05`](identity-verification.md#57--w-p1-vrfy-05) Add identity attribution e2e test and a CI integration job; [`W-P1-VRFY-06`](identity-verification.md#67--w-p1-vrfy-06) Store user fields in the control-plane fleet store; [`W-P1-GPOL-03`](identity-policy.md#39--w-p1-gpol-03) Apply group-aware allow decisions at CONNECT and request time; [`W-P1-GPOL-05`](identity-policy.md#59--w-p1-gpol-05) Show affected users in policy eval replay; [`W-P2-WBND-02`](identity-enforcement.md#210--w-p2-wbnd-02) Bind Warden tokens to the worker's registered agent and key; [`W-P3-JIT-02`](jit-authorization.md#27--w-p3-jit-02) Return structured 403 for HTTP when a grant is missing; [`W-P3-PUL-02`](per-user-limits.md#210--w-p3-pul-02) Record agent id and limit rule on worker events; [`W-P1-JAUD-01`](audit-log-export.md#36--w-p1-jaud-01) Add internal/auditlog decision stream on the async writer tee
 
 ### 4/7 · W-P1-VRFY-04
 
@@ -223,7 +226,7 @@ Let operators filter traffic and analytics by user on worker and CP dashboards. 
 
 **Depends on:** [`W-P1-VRFY-03`](identity-verification.md#37--w-p1-vrfy-03) Record user fields on worker events, receipts, decision logs and sync; [`W-P1-VRFY-06`](identity-verification.md#67--w-p1-vrfy-06) Store user fields in the control-plane fleet store
 
-**Unblocks:** [`W-P1-IDC-03`](identity-contract.md#34--w-p1-idc-03) Add generic identity smoke test with a curl agent; [`W-P1-BLOCK-04`](user-block-list.md#48--w-p1-block-04) Add the Blocked users console panel and worker enforcement indicator; [`W-P3-PUL-05`](per-user-limits.md#510--w-p3-pul-05) Add per-user usage and cost dashboard view
+**Unblocks:** [`W-P1-IDC-03`](identity-contract.md#34--w-p1-idc-03) Add generic identity smoke test with a curl agent; [`W-P1-BLOCK-04`](user-block-list.md#48--w-p1-block-04) Add the Blocked users console panel and worker enforcement indicator; [`W-P4-AMCP-01`](admin-mcp.md#19--w-p4-amcp-01) Add the CP traffic API with a sanitized record projection; [`W-P3-PUL-05`](per-user-limits.md#510--w-p3-pul-05) Add per-user usage and cost dashboard view
 
 ### 5/7 · W-P1-VRFY-05
 
@@ -295,7 +298,7 @@ Control-plane half of recording, split from W-P1-VRFY-03 because conventions req
 
 **Depends on:** [`W-P1-VRFY-03`](identity-verification.md#37--w-p1-vrfy-03) Record user fields on worker events, receipts, decision logs and sync
 
-**Unblocks:** [`W-P2-APPR-03`](policy-approvals.md#39--w-p2-appr-03) Replay fleet events against base and draft for each revision; [`W-P3-PORT-01`](consent-portal.md#17--w-p3-port-01) Serve the portal page and the connections list API; [`W-P1-VRFY-04`](identity-verification.md#47--w-p1-vrfy-04) Add user filter and top-users breakdown to the dashboard; [`W-P2-WBND-08`](identity-enforcement.md#810--w-p2-wbnd-08) Store agent and token type fields in the CP fleet store; [`W-P3-PUL-07`](per-user-limits.md#710--w-p3-pul-07) Fill fleet agent_id and add the per-user daily usage rollup
+**Unblocks:** [`W-P2-APPR-03`](policy-approvals.md#39--w-p2-appr-03) Replay fleet events against base and draft for each revision; [`W-P3-PORT-01`](consent-portal.md#17--w-p3-port-01) Serve the portal page and the connections list API; [`W-P4-AMCP-01`](admin-mcp.md#19--w-p4-amcp-01) Add the CP traffic API with a sanitized record projection; [`W-P1-VRFY-04`](identity-verification.md#47--w-p1-vrfy-04) Add user filter and top-users breakdown to the dashboard; [`W-P2-WBND-08`](identity-enforcement.md#810--w-p2-wbnd-08) Store agent and token type fields in the CP fleet store; [`W-P3-PUL-07`](per-user-limits.md#710--w-p3-pul-07) Fill fleet agent_id and add the per-user daily usage rollup
 
 ### 7/7 · W-P1-VRFY-07
 

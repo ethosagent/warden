@@ -35,7 +35,10 @@ On a CA-enabled worker in attribute mode with `{domain: api.github.com, groups: 
 - [Agent registry](agent-registry.md) (P2 · Proven identity)
 - [Token service](token-exchange.md) (P2 · Proven identity)
 - [Approvals + replay](policy-approvals.md) (P2 · Proven identity)
+- [Delegation grants](delegation-grants.md) (P4 · Agents everywhere)
+- [Admin MCP server](admin-mcp.md) (P4 · Agents everywhere)
 - [Per-user limits + cost](per-user-limits.md) (P3 · Act as the user)
+- [External hooks](policy-hooks.md) (P4 · Agents everywhere)
 
 ## Code it touches
 
@@ -130,7 +133,7 @@ Add `EvaluateFor(domain, port, scheme, *identity.Subject) Result` to `internal/p
 
 **Depends on:** [`W-P1-GPOL-01`](identity-policy.md#19--w-p1-gpol-01) Add groups/users to allow entries and MCP conditions schema; [`W-P1-VRFY-01`](identity-verification.md#17--w-p1-vrfy-01) Add internal/identity OIDC verifier with lazy JWKS, cache and config
 
-**Unblocks:** [`W-P1-GPOL-03`](identity-policy.md#39--w-p1-gpol-03) Apply group-aware allow decisions at CONNECT and request time; [`W-P1-GPOL-04`](identity-policy.md#49--w-p1-gpol-04) Support groups/users in MCP tool allowWhen conditions; [`W-P1-GPOL-05`](identity-policy.md#59--w-p1-gpol-05) Show affected users in policy eval replay; [`W-P3-PUL-03`](per-user-limits.md#310--w-p3-pul-03) Add per-user limit matching and counters to the policy evaluator
+**Unblocks:** [`W-P4-AMCP-07`](admin-mcp.md#29--w-p4-amcp-07) Add the CP explain API with historical version resolution; [`W-P1-GPOL-03`](identity-policy.md#39--w-p1-gpol-03) Apply group-aware allow decisions at CONNECT and request time; [`W-P1-GPOL-04`](identity-policy.md#49--w-p1-gpol-04) Support groups/users in MCP tool allowWhen conditions; [`W-P1-GPOL-05`](identity-policy.md#59--w-p1-gpol-05) Show affected users in policy eval replay; [`W-P3-PUL-03`](per-user-limits.md#310--w-p3-pul-03) Add per-user limit matching and counters to the policy evaluator
 
 ### 3/9 · W-P1-GPOL-03
 
@@ -170,7 +173,7 @@ Enforce scoped allow entries in the worker at CONNECT and on every request, then
 
 **Depends on:** [`W-P1-GPOL-02`](identity-policy.md#29--w-p1-gpol-02) Make the policy evaluator subject-aware with EvaluateFor; [`W-P1-GPOL-06`](identity-policy.md#69--w-p1-gpol-06) Project scoped rules into fail-closed policy wire fields; [`W-P1-VRFY-02`](identity-verification.md#27--w-p1-vrfy-02) Extract, verify and strip identity on CONNECT, HTTP/1.1 and HTTP/2; [`W-P1-VRFY-03`](identity-verification.md#37--w-p1-vrfy-03) Record user fields on worker events, receipts, decision logs and sync; [`W-P1-JAUD-06`](audit-log-export.md#26--w-p1-jaud-06) Set a bounded Reason on every deny event
 
-**Unblocks:** [`W-P1-GPOL-08`](identity-policy.md#89--w-p1-gpol-08) Edit groups/users in the dashboard policy editor; [`W-P1-GPOL-09`](identity-policy.md#99--w-p1-gpol-09) Add group policy e2e test and policy docs; [`W-P3-PUL-09`](per-user-limits.md#910--w-p3-pul-09) Enforce per-user rate limits per request in the proxy
+**Unblocks:** [`W-P1-GPOL-08`](identity-policy.md#89--w-p1-gpol-08) Edit groups/users in the dashboard policy editor; [`W-P1-GPOL-09`](identity-policy.md#99--w-p1-gpol-09) Add group policy e2e test and policy docs; [`W-P3-PUL-09`](per-user-limits.md#910--w-p3-pul-09) Enforce per-user rate limits per request in the proxy; [`W-P4-HOOK-07`](policy-hooks.md#711--w-p4-hook-07) Wire the pre-request hook stage into the HTTP/1.1 proxy path
 
 ### 4/9 · W-P1-GPOL-04
 
@@ -209,7 +212,7 @@ Let `allowWhen` on an MCP tool require a group or user, so a tool the policy all
 
 **Depends on:** [`W-P1-GPOL-02`](identity-policy.md#29--w-p1-gpol-02) Make the policy evaluator subject-aware with EvaluateFor; [`W-P1-GPOL-06`](identity-policy.md#69--w-p1-gpol-06) Project scoped rules into fail-closed policy wire fields; [`W-P1-VRFY-02`](identity-verification.md#27--w-p1-vrfy-02) Extract, verify and strip identity on CONNECT, HTTP/1.1 and HTTP/2
 
-**Unblocks:** [`W-P1-GPOL-08`](identity-policy.md#89--w-p1-gpol-08) Edit groups/users in the dashboard policy editor; [`W-P1-GPOL-09`](identity-policy.md#99--w-p1-gpol-09) Add group policy e2e test and policy docs
+**Unblocks:** [`W-P4-DGR-05`](delegation-grants.md#512--w-p4-dgr-05) Enforce grant tools in worker MCP verdicts; [`W-P1-GPOL-08`](identity-policy.md#89--w-p1-gpol-08) Edit groups/users in the dashboard policy editor; [`W-P1-GPOL-09`](identity-policy.md#99--w-p1-gpol-09) Add group policy e2e test and policy docs
 
 ### 5/9 · W-P1-GPOL-05
 

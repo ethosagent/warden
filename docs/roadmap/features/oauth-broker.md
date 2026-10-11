@@ -37,6 +37,7 @@ With `consent.providers` and a persistent consent.store (aws, or vault) configur
 
 - [Consent portal](consent-portal.md) (P3 · Act as the user)
 - [Offboarding revocation](offboarding.md) (P3 · Act as the user)
+- [MCP registry](mcp-registry.md) (P4 · Agents everywhere)
 - [Per-user secrets (refresh)](refresh-model.md) (P3 · Act as the user)
 - [JIT 403 + long-poll](jit-authorization.md) (P3 · Act as the user)
 
@@ -93,7 +94,7 @@ Add `consent.providers[]` and `consent.connect` to the CP-local consent block an
 
 **Depends on:** [`W-P3-CSIG-01`](consent-auth.md#17--w-p3-csig-01) Add the CP-local consent config block and the warden-portal Dex client; [`W-P3-CSIG-06`](consent-auth.md#67--w-p3-csig-06) Add the CP-only user credential store, user key helpers and reserved secret prefixes
 
-**Unblocks:** [`W-P3-BRKR-03`](oauth-broker.md#39--w-p3-brkr-03) Implement POST /connect/start with PKCE, CSRF and scope capping; [`W-P3-BRKR-05`](oauth-broker.md#59--w-p3-brkr-05) Add provider revoke client for Google and GitHub; [`W-P3-BRKR-06`](oauth-broker.md#69--w-p3-brkr-06) Guard reserved prefixes on the worker dashboard and load client secrets from consent.store; [`W-P3-BRKR-07`](oauth-broker.md#79--w-p3-brkr-07) Add the provider refresh-token client for CP-side refresh; [`W-P3-PUS-02`](refresh-model.md#212--w-p3-pus-02) Add the CP-local perUserSecrets config block and the Vault consent.store backend; [`W-P3-PUS-06`](refresh-model.md#612--w-p3-pus-06) Add guarded grant record read and write helpers
+**Unblocks:** [`W-P3-BRKR-03`](oauth-broker.md#39--w-p3-brkr-03) Implement POST /connect/start with PKCE, CSRF and scope capping; [`W-P3-BRKR-05`](oauth-broker.md#59--w-p3-brkr-05) Add provider revoke client for Google and GitHub; [`W-P3-BRKR-06`](oauth-broker.md#69--w-p3-brkr-06) Guard reserved prefixes on the worker dashboard and load client secrets from consent.store; [`W-P3-BRKR-07`](oauth-broker.md#79--w-p3-brkr-07) Add the provider refresh-token client for CP-side refresh; [`W-P4-MREG-02`](mcp-registry.md#210--w-p4-mreg-02) Add registry REST API with versioning, diff and rollback; [`W-P3-PUS-02`](refresh-model.md#212--w-p3-pus-02) Add the CP-local perUserSecrets config block and the Vault consent.store backend; [`W-P3-PUS-06`](refresh-model.md#612--w-p3-pus-06) Add guarded grant record read and write helpers
 
 ### 2/9 · W-P3-BRKR-02
 

@@ -43,6 +43,7 @@ In a deployment with a CP running consent, the OAuth broker and the portal, an e
 
 ## Unblocks
 
+- [Delegation grants](delegation-grants.md) (P4 · Agents everywhere)
 - [Park + notify](park-notify.md) (P4 · Agents everywhere)
 - [MCP gateway endpoint](mcp-gateway.md) (P4 · Agents everywhere)
 - [Slack / email notify](user-notify.md) (P4 · Agents everywhere)
@@ -102,7 +103,7 @@ Add POST /control/connect/pending on the CP so a worker can turn a missing grant
 
 **Depends on:** [`W-P3-BRKR-02`](oauth-broker.md#29--w-p3-brkr-02) Add pending authorization, attempt and grant metadata stores; [`W-P3-BRKR-03`](oauth-broker.md#39--w-p3-brkr-03) Implement POST /connect/start with PKCE, CSRF and scope capping; [`W-P3-PUS-02`](refresh-model.md#212--w-p3-pus-02) Add the CP-local perUserSecrets config block and the Vault consent.store backend; [`W-P3-PUS-07`](refresh-model.md#712--w-p3-pus-07) Add the worker-mTLS mint endpoint POST /control/user-token; [`W-P3-CSIG-01`](consent-auth.md#17--w-p3-csig-01) Add the CP-local consent config block and the warden-portal Dex client; [`W-P1-WTOK-02`](worker-credentials.md#26--w-p1-wtok-02) Authenticate /policy, heartbeat and ingest with per-worker tokens; [`W-P2-WCA-04`](worker-mtls.md#48--w-p2-wca-04) Accept worker certs in WorkerAuthenticator and add /control/renew; [`W-P2-AREG-03`](agent-registry.md#37--w-p2-areg-03) Add the Agents tab to the CP console; [`W-P1-SSO-05`](console-sso-rbac.md#58--w-p1-sso-05) Enforce role checks on every dashboard route
 
-**Unblocks:** [`W-P3-JIT-02`](jit-authorization.md#27--w-p3-jit-02) Return structured 403 for HTTP when a grant is missing; [`W-P3-JIT-04`](jit-authorization.md#47--w-p3-jit-04) Add /connect/{id}/status long-poll on the CP
+**Unblocks:** [`W-P3-JIT-02`](jit-authorization.md#27--w-p3-jit-02) Return structured 403 for HTTP when a grant is missing; [`W-P3-JIT-04`](jit-authorization.md#47--w-p3-jit-04) Add /connect/{id}/status long-poll on the CP; [`W-P4-PARK-02`](park-notify.md#28--w-p4-park-02) Notify the user once per pending when the agent can park; [`W-P4-NTFY-05`](user-notify.md#510--w-p4-ntfy-05) Send connect-link notifications from JIT pending creation; [`W-P4-NTFY-07`](user-notify.md#710--w-p4-ntfy-07) Add verified user contacts table keyed by user_key; [`W-P4-NTFY-08`](user-notify.md#810--w-p4-ntfy-08) Add CP-local notifications config block and CP wiring
 
 ### 2/7 · W-P3-JIT-02
 
@@ -144,7 +145,7 @@ Add a jitDeny stage in internal/proxy that runs when W-P3-PUS-04 reports a missi
 
 **Depends on:** [`W-P3-JIT-01`](jit-authorization.md#17--w-p3-jit-01) Add CP endpoint to create or reuse pending authorizations; [`W-P3-PUS-04`](refresh-model.md#412--w-p3-pus-04) Swap per-user placeholders only for bound identities on mapped domains; [`W-P2-WCA-03`](worker-mtls.md#38--w-p2-wca-03) Add worker enrollment, auto-renew and cert-based CP client; [`W-P1-JAUD-02`](audit-log-export.md#46--w-p1-jaud-02) Publish decision v1 JSON Schema with closed-field and leak tests; [`W-P1-JAUD-05`](audit-log-export.md#16--w-p1-jaud-05) Record the pre-swap URL on events and decision logs; [`W-P1-JAUD-06`](audit-log-export.md#26--w-p1-jaud-06) Set a bounded Reason on every deny event; [`W-P1-VRFY-03`](identity-verification.md#37--w-p1-vrfy-03) Record user fields on worker events, receipts, decision logs and sync
 
-**Unblocks:** [`W-P3-JIT-03`](jit-authorization.md#37--w-p3-jit-03) Return JSON-RPC results for MCP calls missing a grant; [`W-P3-JIT-06`](jit-authorization.md#67--w-p3-jit-06) Return authorization_required on HTTP/2 and gRPC streams
+**Unblocks:** [`W-P3-JIT-03`](jit-authorization.md#37--w-p3-jit-03) Return JSON-RPC results for MCP calls missing a grant; [`W-P3-JIT-06`](jit-authorization.md#67--w-p3-jit-06) Return authorization_required on HTTP/2 and gRPC streams; [`W-P4-PARK-03`](park-notify.md#38--w-p4-park-03) Add the park limiter and coalescing status waiter
 
 ### 3/7 · W-P3-JIT-03
 
@@ -183,7 +184,7 @@ MCP clients treat a plain 403 as a transport error, so the model never sees the 
 
 **Depends on:** [`W-P3-JIT-02`](jit-authorization.md#27--w-p3-jit-02) Return structured 403 for HTTP when a grant is missing
 
-**Unblocks:** [`W-P3-JIT-05`](jit-authorization.md#57--w-p3-jit-05) Document the authorization_required contract; [`W-P3-JIT-07`](jit-authorization.md#77--w-p3-jit-07) Add end-to-end test for the JIT consent loop
+**Unblocks:** [`W-P3-JIT-05`](jit-authorization.md#57--w-p3-jit-05) Document the authorization_required contract; [`W-P3-JIT-07`](jit-authorization.md#77--w-p3-jit-07) Add end-to-end test for the JIT consent loop; [`W-P4-PARK-04`](park-notify.md#48--w-p4-park-04) Park and resume HTTP/1.1 requests in the jitDeny stage; [`W-P4-PARK-05`](park-notify.md#58--w-p4-park-05) Park MCP gateway tool calls with progress notifications; [`W-P4-MGW-07`](mcp-gateway.md#715--w-p4-mgw-07) Use per-user credentials for gateway upstreams
 
 ### 4/7 · W-P3-JIT-04
 
@@ -202,6 +203,7 @@ Add GET /connect/{id}/status so the agent, the user's portal or a P4 park waiter
 - The handler re-reads the row on entry, on every wake, every 5s and on timeout, so a missed wake only delays the answer and multiple CP replicas stay correct.
 - Limits: 8 waiters per pending and 2,048 in total, else 429 with Retry-After: 1. Client disconnect frees a waiter at once and the map entry is removed when its last waiter leaves.
 - Gauge warden_cp_connect_status_waiters and counter warden_cp_connect_status_total{result=pending|granted|denied|expired|not_found|limited}. One info log per pending state change with pending_id, provider, agent, outcome and duration; no sub at info level, never the status_token.
+- Worker callers authenticate only with a worker cert (W-P2-WCA-04 mTLS) whose heartbeat agentID equals the pending's agent_id; a `wwt_` bearer is rejected with 401. Waiter limits stay 8 per pending and 2,048 in total.
 
 **Implementation plan**
 
@@ -222,7 +224,7 @@ Add GET /connect/{id}/status so the agent, the user's portal or a P4 park waiter
 
 **Depends on:** [`W-P3-JIT-01`](jit-authorization.md#17--w-p3-jit-01) Add CP endpoint to create or reuse pending authorizations; [`W-P3-CSIG-04`](consent-auth.md#47--w-p3-csig-04) Add the portal session middleware, CSRF, logout and console isolation; [`W-P2-WCA-04`](worker-mtls.md#48--w-p2-wca-04) Accept worker certs in WorkerAuthenticator and add /control/renew; [`W-P1-SSO-05`](console-sso-rbac.md#58--w-p1-sso-05) Enforce role checks on every dashboard route
 
-**Unblocks:** [`W-P3-JIT-05`](jit-authorization.md#57--w-p3-jit-05) Document the authorization_required contract; [`W-P3-JIT-07`](jit-authorization.md#77--w-p3-jit-07) Add end-to-end test for the JIT consent loop
+**Unblocks:** [`W-P4-DGR-08`](delegation-grants.md#812--w-p4-dgr-08) Add grant status long-poll, renew and cancel endpoints; [`W-P3-JIT-05`](jit-authorization.md#57--w-p3-jit-05) Document the authorization_required contract; [`W-P3-JIT-07`](jit-authorization.md#77--w-p3-jit-07) Add end-to-end test for the JIT consent loop; [`W-P4-PARK-03`](park-notify.md#38--w-p4-park-03) Add the park limiter and coalescing status waiter
 
 ### 5/7 · W-P3-JIT-05
 
@@ -254,6 +256,8 @@ Add docs/jit-authorization.md so agent and client authors know what a missing gr
 - [ ] `scripts/check.sh` passes.
 
 **Depends on:** [`W-P3-JIT-03`](jit-authorization.md#37--w-p3-jit-03) Return JSON-RPC results for MCP calls missing a grant; [`W-P3-JIT-04`](jit-authorization.md#47--w-p3-jit-04) Add /connect/{id}/status long-poll on the CP; [`W-P3-JIT-06`](jit-authorization.md#67--w-p3-jit-06) Return authorization_required on HTTP/2 and gRPC streams
+
+**Unblocks:** [`W-P4-PARK-08`](park-notify.md#88--w-p4-park-08) Document park for operators and agent authors
 
 ### 6/7 · W-P3-JIT-06
 
@@ -318,3 +322,5 @@ Prove the feature's done_when in one test: a request missing a grant is denied w
 - [ ] The test fails if the status long-poll takes more than 1s after the callback.
 
 **Depends on:** [`W-P3-JIT-03`](jit-authorization.md#37--w-p3-jit-03) Return JSON-RPC results for MCP calls missing a grant; [`W-P3-JIT-04`](jit-authorization.md#47--w-p3-jit-04) Add /connect/{id}/status long-poll on the CP; [`W-P3-JIT-06`](jit-authorization.md#67--w-p3-jit-06) Return authorization_required on HTTP/2 and gRPC streams; [`W-P3-BRKR-04`](oauth-broker.md#49--w-p3-brkr-04) Implement /connect/callback and write tokens to the secret backend; [`W-P3-PORT-03`](consent-portal.md#37--w-p3-port-03) Add the pending landing page and connect, continue and decline actions
+
+**Unblocks:** [`W-P4-PARK-07`](park-notify.md#78--w-p4-park-07) Add the park end-to-end integration test

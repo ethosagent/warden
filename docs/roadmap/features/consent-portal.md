@@ -46,6 +46,7 @@ On a CP with the consent block, --state-dir and a Vault or AWS consent.store, an
 - [Offboarding revocation](offboarding.md) (P3 · Act as the user)
 - [Delegation grants](delegation-grants.md) (P4 · Agents everywhere)
 - [JIT 403 + long-poll](jit-authorization.md) (P3 · Act as the user)
+- [Slack / email notify](user-notify.md) (P4 · Agents everywhere)
 
 ## Code it touches
 
@@ -101,7 +102,7 @@ Add the embedded portal page and GET /portal/api/connections so an employee can 
 
 **Depends on:** [`W-P3-CSIG-04`](consent-auth.md#47--w-p3-csig-04) Add the portal session middleware, CSRF, logout and console isolation; [`W-P3-BRKR-02`](oauth-broker.md#29--w-p3-brkr-02) Add pending authorization, attempt and grant metadata stores; [`W-P3-BRKR-08`](oauth-broker.md#89--w-p3-brkr-08) Record the connected provider account and enforce account rules; [`W-P3-PUS-02`](refresh-model.md#212--w-p3-pus-02) Add the CP-local perUserSecrets config block and the Vault consent.store backend; [`W-P3-PUS-10`](refresh-model.md#1012--w-p3-pus-10) Record the per-user token provider on analytics events; [`W-P3-PUL-07`](per-user-limits.md#710--w-p3-pul-07) Fill fleet agent_id and add the per-user daily usage rollup; [`W-P1-VRFY-06`](identity-verification.md#67--w-p1-vrfy-06) Store user fields in the control-plane fleet store; [`W-P2-AREG-04`](agent-registry.md#47--w-p2-areg-04) Serve registered agents in the policy wire
 
-**Unblocks:** [`W-P3-PORT-02`](consent-portal.md#27--w-p3-port-02) Implement revoke with grant, secret, epoch and provider steps; [`W-P3-PORT-03`](consent-portal.md#37--w-p3-port-03) Add the pending landing page and connect, continue and decline actions
+**Unblocks:** [`W-P3-PORT-02`](consent-portal.md#27--w-p3-port-02) Implement revoke with grant, secret, epoch and provider steps; [`W-P3-PORT-03`](consent-portal.md#37--w-p3-port-03) Add the pending landing page and connect, continue and decline actions; [`W-P4-DGR-03`](delegation-grants.md#312--w-p4-dgr-03) Build the grant approval pages in the consent portal; [`W-P4-NTFY-09`](user-notify.md#910--w-p4-ntfy-09) Add per-user channel order preference in the portal
 
 ### 2/7 · W-P3-PORT-02
 
@@ -179,7 +180,7 @@ Add GET /portal/connect/{pending_id}, the page an agent's authorize_url points t
 
 **Depends on:** [`W-P3-PORT-01`](consent-portal.md#17--w-p3-port-01) Serve the portal page and the connections list API; [`W-P3-CSIG-02`](consent-auth.md#27--w-p3-csig-02) Implement portal login, callback and session store; [`W-P3-BRKR-03`](oauth-broker.md#39--w-p3-brkr-03) Implement POST /connect/start with PKCE, CSRF and scope capping
 
-**Unblocks:** [`W-P3-PORT-04`](consent-portal.md#47--w-p3-port-04) Write the consent portal user and operator guide; [`W-P3-JIT-07`](jit-authorization.md#77--w-p3-jit-07) Add end-to-end test for the JIT consent loop
+**Unblocks:** [`W-P3-PORT-04`](consent-portal.md#47--w-p3-port-04) Write the consent portal user and operator guide; [`W-P3-JIT-07`](jit-authorization.md#77--w-p3-jit-07) Add end-to-end test for the JIT consent loop; [`W-P4-NTFY-05`](user-notify.md#510--w-p4-ntfy-05) Send connect-link notifications from JIT pending creation
 
 ### 4/7 · W-P3-PORT-04
 

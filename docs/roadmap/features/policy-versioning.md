@@ -40,6 +40,7 @@ On a CP started with `--state-dir` and `--policy-store=versioned`, an existing d
 - [Signed bundles](signed-bundles.md) (P2 · Proven identity)
 - [Approvals + replay](policy-approvals.md) (P2 · Proven identity)
 - [Consent portal](consent-portal.md) (P3 · Act as the user)
+- [MCP registry](mcp-registry.md) (P4 · Agents everywhere)
 - [Admin MCP server](admin-mcp.md) (P4 · Agents everywhere)
 - [Policy as code + canary](policy-as-code.md) (P4 · Agents everywhere)
 - [Postgres + HA](postgres-ha.md) (P5 · Enterprise scale)
@@ -79,6 +80,7 @@ Add the policy_versions, policy_head and policy_publish_log migrations and a Pol
 - Startup in versioned mode fails closed when the store is unreadable, head points at a missing version, or doc_sha256 does not match; a runtime read error keeps last-known-good.
 - The /policy hot path never reads the DB; the ETag stays etagFor(served wire); Create calls Refresh().
 - slog `policy version created` logs version, parent, source, author_sub and doc_sha256 only; doc content, settings values and the credential are never logged.
+- Workers are served the head version, except authenticated workers in an active p4-gitops rollout's canary cohort (W-P4-GOPS-09); the store API must allow serving a non-head version per worker later without a schema change.
 
 **Implementation plan**
 
@@ -100,7 +102,7 @@ Add the policy_versions, policy_head and policy_publish_log migrations and a Pol
 
 **Depends on:** [`W-P1-SSO-01`](console-sso-rbac.md#18--w-p1-sso-01) Add internal/cpstate SQLite state store with migrations
 
-**Unblocks:** [`W-P1-PVER-02`](policy-versioning.md#26--w-p1-pver-02) Route policy, settings and llmProviders writes through versioned publish; [`W-P1-OPS1-04`](ops-hardening.md#44--w-p1-ops1-04) Add CP state-dir lock and verified restore command
+**Unblocks:** [`W-P1-PVER-02`](policy-versioning.md#26--w-p1-pver-02) Route policy, settings and llmProviders writes through versioned publish; [`W-P1-OPS1-04`](ops-hardening.md#44--w-p1-ops1-04) Add CP state-dir lock and verified restore command; [`W-P4-AMCP-07`](admin-mcp.md#29--w-p4-amcp-07) Add the CP explain API with historical version resolution
 
 ### 2/6 · W-P1-PVER-02
 
@@ -257,7 +259,7 @@ After every head move in versioned mode, render head's policy and settings block
 
 **Depends on:** [`W-P1-PVER-02`](policy-versioning.md#26--w-p1-pver-02) Route policy, settings and llmProviders writes through versioned publish
 
-**Unblocks:** [`W-P2-AREG-04`](agent-registry.md#47--w-p2-areg-04) Serve registered agents in the policy wire; [`W-P2-SBND-02`](signed-bundles.md#27--w-p2-sbnd-02) Serve the signed bundle envelope on GET /policy behind --bundles; [`W-P3-PUL-08`](per-user-limits.md#810--w-p3-pul-08) Publish fleet cost blocks as costBlockedUsers from the control plane
+**Unblocks:** [`W-P2-AREG-04`](agent-registry.md#47--w-p2-areg-04) Serve registered agents in the policy wire; [`W-P2-SBND-02`](signed-bundles.md#27--w-p2-sbnd-02) Serve the signed bundle envelope on GET /policy behind --bundles; [`W-P4-GOPS-04`](policy-as-code.md#511--w-p4-gops-04) Add staged versions and the rollout model; [`W-P3-PUL-08`](per-user-limits.md#810--w-p3-pul-08) Publish fleet cost blocks as costBlockedUsers from the control plane
 
 ### 6/6 · W-P1-PVER-06
 
@@ -291,4 +293,4 @@ Add `warden policy import` and `warden policy export` under the existing `warden
 
 **Depends on:** [`W-P1-PVER-02`](policy-versioning.md#26--w-p1-pver-02) Route policy, settings and llmProviders writes through versioned publish; [`W-P1-AAUD-01`](admin-audit-log.md#14--w-p1-aaud-01) Add signed, hash-chained admin audit store on cpstate
 
-**Unblocks:** [`W-P2-APPR-06`](policy-approvals.md#69--w-p2-appr-06) Gate every versioned write path through one clearance check
+**Unblocks:** [`W-P2-APPR-06`](policy-approvals.md#69--w-p2-appr-06) Gate every versioned write path through one clearance check; [`W-P4-GOPS-01`](policy-as-code.md#111--w-p4-gops-01) Add warden policy lint with a shared repo doc parser

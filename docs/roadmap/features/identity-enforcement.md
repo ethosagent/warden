@@ -46,7 +46,10 @@ On a compose deployment with a CP (token service, signed bundles, worker CA, age
 
 - [Identity client + recipes](identity-client.md) (P2 · Proven identity)
 - [Security test suite](security-tests.md) (P2 · Proven identity)
+- [Delegation grants](delegation-grants.md) (P4 · Agents everywhere)
 - [Per-user secrets (refresh)](refresh-model.md) (P3 · Act as the user)
+- [MCP gateway endpoint](mcp-gateway.md) (P4 · Agents everywhere)
+- [External hooks](policy-hooks.md) (P4 · Agents everywhere)
 
 ## Code it touches
 
@@ -145,7 +148,7 @@ Using the worker agent id from W-P2-AREG-05, check that every Warden token was m
 
 **Depends on:** [`W-P2-WBND-01`](identity-enforcement.md#110--w-p2-wbnd-01) Verify CP-issued Warden tokens against verified bundle keys; [`W-P2-AREG-04`](agent-registry.md#47--w-p2-areg-04) Serve registered agents in the policy wire; [`W-P1-VRFY-03`](identity-verification.md#37--w-p1-vrfy-03) Record user fields on worker events, receipts, decision logs and sync; [`W-P2-AREG-05`](agent-registry.md#57--w-p2-areg-05) Bind workers to an agent id and enforce agent_disabled
 
-**Unblocks:** [`W-P2-WBND-03`](identity-enforcement.md#310--w-p2-wbnd-03) Enforce identity require mode on CONNECT and terminated traffic; [`W-P2-WBND-08`](identity-enforcement.md#810--w-p2-wbnd-08) Store agent and token type fields in the CP fleet store; [`W-P3-PUS-04`](refresh-model.md#412--w-p3-pus-04) Swap per-user placeholders only for bound identities on mapped domains
+**Unblocks:** [`W-P2-WBND-03`](identity-enforcement.md#310--w-p2-wbnd-03) Enforce identity require mode on CONNECT and terminated traffic; [`W-P2-WBND-08`](identity-enforcement.md#810--w-p2-wbnd-08) Store agent and token type fields in the CP fleet store; [`W-P3-PUS-04`](refresh-model.md#412--w-p3-pus-04) Swap per-user placeholders only for bound identities on mapped domains; [`W-P4-MGW-11`](mcp-gateway.md#1115--w-p4-mgw-11) Add Proxy.ServeInternal for in-process hub egress
 
 ### 3/10 · W-P2-WBND-03
 
@@ -185,7 +188,7 @@ Add the `require` mode for an agent whose served settings entry (agents[].identi
 
 **Depends on:** [`W-P2-WBND-02`](identity-enforcement.md#210--w-p2-wbnd-02) Bind Warden tokens to the worker's registered agent and key; [`W-P1-BLOCK-02`](user-block-list.md#28--w-p1-block-02) Enforce the block list in the worker at CONNECT, per request and per h2 stream; [`W-P1-IDC-01`](identity-contract.md#14--w-p1-idc-01) Write the agent identity contract for harness builders; [`W-P2-AREG-05`](agent-registry.md#57--w-p2-areg-05) Bind workers to an agent id and enforce agent_disabled
 
-**Unblocks:** [`W-P2-RCP-03`](identity-client.md#36--w-p2-rcp-03) Add the Claude Code compose recipe and docs; [`W-P2-WBND-09`](identity-enforcement.md#910--w-p2-wbnd-09) Close require-mode sessions at token expiry and document require mode; [`W-P2-WBND-10`](identity-enforcement.md#1010--w-p2-wbnd-10) Test require mode and worker mTLS end to end
+**Unblocks:** [`W-P2-RCP-03`](identity-client.md#36--w-p2-rcp-03) Add the Claude Code compose recipe and docs; [`W-P4-DGR-05`](delegation-grants.md#512--w-p4-dgr-05) Enforce grant tools in worker MCP verdicts; [`W-P2-WBND-09`](identity-enforcement.md#910--w-p2-wbnd-09) Close require-mode sessions at token expiry and document require mode; [`W-P2-WBND-10`](identity-enforcement.md#1010--w-p2-wbnd-10) Test require mode and worker mTLS end to end; [`W-P4-MGW-03`](mcp-gateway.md#315--w-p4-mgw-03) Serve /mcp/{gateway} on the reserved proxy host with sessions
 
 ### 4/10 · W-P2-WBND-04
 
@@ -321,7 +324,7 @@ CP rollout guard for require mode. An old worker keeps attribute mode when it re
 
 **Depends on:** [`W-P1-BLOCK-04`](user-block-list.md#48--w-p1-block-04) Add the Blocked users console panel and worker enforcement indicator; [`W-P2-AREG-02`](agent-registry.md#27--w-p2-areg-02) Expose the agent registry admin API with admin-only writes and audit; [`W-P2-AREG-03`](agent-registry.md#37--w-p2-areg-03) Add the Agents tab to the CP console; [`W-P1-SSO-05`](console-sso-rbac.md#58--w-p1-sso-05) Enforce role checks on every dashboard route
 
-**Unblocks:** [`W-P2-WBND-10`](identity-enforcement.md#1010--w-p2-wbnd-10) Test require mode and worker mTLS end to end; [`W-P3-PUS-08`](refresh-model.md#812--w-p3-pus-08) Serve perUserSecrets and userGrantEpochs as signed-bundle sections
+**Unblocks:** [`W-P4-DGR-04`](delegation-grants.md#412--w-p4-dgr-04) Add the grant subject resolver, delegation mode and rollout guard to the token service; [`W-P2-WBND-10`](identity-enforcement.md#1010--w-p2-wbnd-10) Test require mode and worker mTLS end to end; [`W-P3-PUS-08`](refresh-model.md#812--w-p3-pus-08) Serve perUserSecrets and userGrantEpochs as signed-bundle sections; [`W-P4-HOOK-10`](policy-hooks.md#1011--w-p4-hook-10) Guard hook settings on the CP with validation, roles, audit and capability checks
 
 ### 8/10 · W-P2-WBND-08
 
@@ -390,7 +393,7 @@ A CONNECT-bound Warden token lasts 15 minutes, but raw tunnels, keep-alives, h2 
 
 **Depends on:** [`W-P2-WBND-03`](identity-enforcement.md#310--w-p2-wbnd-03) Enforce identity require mode on CONNECT and terminated traffic; [`W-P1-BLOCK-05`](user-block-list.md#58--w-p1-block-05) Close open sessions of newly blocked users on policy change
 
-**Unblocks:** [`W-P2-WBND-10`](identity-enforcement.md#1010--w-p2-wbnd-10) Test require mode and worker mTLS end to end
+**Unblocks:** [`W-P4-DGR-10`](delegation-grants.md#1012--w-p4-dgr-10) Apply revokedGrants on workers and close revoked grant sessions; [`W-P2-WBND-10`](identity-enforcement.md#1010--w-p2-wbnd-10) Test require mode and worker mTLS end to end
 
 ### 10/10 · W-P2-WBND-10
 

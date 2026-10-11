@@ -38,6 +38,10 @@ From a clean clone, following only docs/recipes/claude-code.md and docs/recipes/
 - [Key manager](key-management.md) (P2 · Proven identity)
 - [Signed bundles](signed-bundles.md) (P2 · Proven identity)
 
+## Unblocks
+
+- [MCP gateway endpoint](mcp-gateway.md) (P4 · Agents everywhere)
+
 ## Code it touches
 
 `internal/identityclient` · `cmd/proxy` · `deploy/compose` · `deploy/compose/claude-code` · `deploy/compose/codex` · `configs` · `scripts` · `test/deploy` · `docs/recipes` · `docs/identity-contract.md` · `docs/testing-guide.md`

@@ -49,6 +49,7 @@ On a CP with --state-dir, `tokenService.enabled: true` and an https issuer, a to
 - [KMS keys](kms.md) (P5 · Enterprise scale)
 - [Agent-bound tokens + mTLS](identity-enforcement.md) (P2 · Proven identity)
 - [Per-user secrets (refresh)](refresh-model.md) (P3 · Act as the user)
+- [Slack / email notify](user-notify.md) (P4 · Agents everywhere)
 
 ## Code it touches
 
@@ -141,7 +142,7 @@ Add `Service.Exchange` in internal/tokensvc. It authenticates the agent (TOKX-01
 
 **Depends on:** [`W-P2-TOKX-01`](token-exchange.md#17--w-p2-tokx-01) Add private_key_jwt client assertion verification; [`W-P2-KEYS-02`](key-management.md#27--w-p2-keys-02) Add the keys config gate, file key store and signing_keys metadata; [`W-P1-VRFY-01`](identity-verification.md#17--w-p1-vrfy-01) Add internal/identity OIDC verifier with lazy JWKS, cache and config; [`W-P1-BLOCK-03`](user-block-list.md#38--w-p1-block-03) Add the CP block-list store, admin API and policy merge; [`W-P1-BLOCK-07`](user-block-list.md#78--w-p1-block-07) Deny console login and sessions for blocked principals
 
-**Unblocks:** [`W-P2-TOKX-03`](token-exchange.md#37--w-p2-tokx-03) Mount POST /oauth2/token with RFC 8693 request parsing and config; [`W-P2-WBND-06`](identity-enforcement.md#610--w-p2-wbnd-06) Add token issuer, agent key thumbprints and email claims to CP outputs
+**Unblocks:** [`W-P2-TOKX-03`](token-exchange.md#37--w-p2-tokx-03) Mount POST /oauth2/token with RFC 8693 request parsing and config; [`W-P2-WBND-06`](identity-enforcement.md#610--w-p2-wbnd-06) Add token issuer, agent key thumbprints and email claims to CP outputs; [`W-P4-NTFY-07`](user-notify.md#710--w-p4-ntfy-07) Add verified user contacts table keyed by user_key
 
 ### 3/7 · W-P2-TOKX-03
 
@@ -179,7 +180,7 @@ Add the CP-local `tokenService:` config block and the HTTP handler that exposes 
 
 **Depends on:** [`W-P2-TOKX-02`](token-exchange.md#27--w-p2-tokx-02) Implement token exchange policy checks and JWT minting; [`W-P1-SSO-02`](console-sso-rbac.md#28--w-p1-sso-02) Parse and validate the CP-local console config block; [`W-P1-SSO-05`](console-sso-rbac.md#58--w-p1-sso-05) Enforce role checks on every dashboard route; [`W-P2-KEYS-04`](key-management.md#47--w-p2-keys-04) Serve the token JWKS, readiness and admin key API from the control plane
 
-**Unblocks:** [`W-P2-RCP-01`](identity-client.md#16--w-p2-rcp-01) Extend internal/identityclient with agent keys and token exchange; [`W-P2-TOKX-04`](token-exchange.md#47--w-p2-tokx-04) Add rate limits, issuance records and metrics for token exchange; [`W-P2-TOKX-07`](token-exchange.md#77--w-p2-tokx-07) Add admin revocation for token sessions; [`W-P2-SECT-05`](security-tests.md#57--w-p2-sect-05) Add Go-only test seams for in-process CP and worker runs; [`W-P2-WBND-06`](identity-enforcement.md#610--w-p2-wbnd-06) Add token issuer, agent key thumbprints and email claims to CP outputs
+**Unblocks:** [`W-P2-RCP-01`](identity-client.md#16--w-p2-rcp-01) Extend internal/identityclient with agent keys and token exchange; [`W-P2-TOKX-04`](token-exchange.md#47--w-p2-tokx-04) Add rate limits, issuance records and metrics for token exchange; [`W-P2-TOKX-07`](token-exchange.md#77--w-p2-tokx-07) Add admin revocation for token sessions; [`W-P2-SECT-05`](security-tests.md#57--w-p2-sect-05) Add Go-only test seams for in-process CP and worker runs; [`W-P4-DGR-01`](delegation-grants.md#112--w-p4-dgr-01) Add grants config, model, SQLite store and transitions; [`W-P2-WBND-06`](identity-enforcement.md#610--w-p2-wbnd-06) Add token issuer, agent key thumbprints and email claims to CP outputs
 
 ### 4/7 · W-P2-TOKX-04
 
@@ -220,7 +221,7 @@ Add the three-stage rate limits, so an unauthenticated caller cannot drain a rea
 
 **Depends on:** [`W-P2-TOKX-03`](token-exchange.md#37--w-p2-tokx-03) Mount POST /oauth2/token with RFC 8693 request parsing and config; [`W-P1-AAUD-02`](admin-audit-log.md#24--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware
 
-**Unblocks:** [`W-P2-TOKX-05`](token-exchange.md#57--w-p2-tokx-05) Add token service end-to-end integration test; [`W-P2-TOKX-06`](token-exchange.md#67--w-p2-tokx-06) Document the token service for operators and harness authors; [`W-P2-SECT-01`](security-tests.md#17--w-p2-sect-01) Add security test harness with in-process CP, workers and shared fakes; [`W-P2-SECT-02`](security-tests.md#27--w-p2-sect-02) Add token forgery, confusion and replay cases; [`W-P3-BRKR-03`](oauth-broker.md#39--w-p3-brkr-03) Implement POST /connect/start with PKCE, CSRF and scope capping
+**Unblocks:** [`W-P2-TOKX-05`](token-exchange.md#57--w-p2-tokx-05) Add token service end-to-end integration test; [`W-P2-TOKX-06`](token-exchange.md#67--w-p2-tokx-06) Document the token service for operators and harness authors; [`W-P2-SECT-01`](security-tests.md#17--w-p2-sect-01) Add security test harness with in-process CP, workers and shared fakes; [`W-P2-SECT-02`](security-tests.md#27--w-p2-sect-02) Add token forgery, confusion and replay cases; [`W-P3-BRKR-03`](oauth-broker.md#39--w-p3-brkr-03) Implement POST /connect/start with PKCE, CSRF and scope capping; [`W-P4-DGR-02`](delegation-grants.md#212--w-p4-dgr-02) Add the agent grant request API; [`W-P4-DGR-04`](delegation-grants.md#412--w-p4-dgr-04) Add the grant subject resolver, delegation mode and rollout guard to the token service
 
 ### 5/7 · W-P2-TOKX-05
 

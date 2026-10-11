@@ -53,6 +53,8 @@ On a CP with --state-dir, console.auth=oidc and console.adminAudit.enabled=true,
 - [Per-user secrets (refresh)](refresh-model.md) (P3 · Act as the user)
 - [JIT 403 + long-poll](jit-authorization.md) (P3 · Act as the user)
 - [Per-user limits + cost](per-user-limits.md) (P3 · Act as the user)
+- [MCP gateway endpoint](mcp-gateway.md) (P4 · Agents everywhere)
+- [Slack / email notify](user-notify.md) (P4 · Agents everywhere)
 
 ## Code it touches
 
@@ -107,7 +109,7 @@ Create the new package internal/agentreg with the Agent type, the Store interfac
 
 **Depends on:** [`W-P1-SSO-01`](console-sso-rbac.md#18--w-p1-sso-01) Add internal/cpstate SQLite state store with migrations; [`W-P2-KEYS-01`](key-management.md#17--w-p2-keys-01) Add internal/keys Signer, JWK and RFC 7638 kid helpers
 
-**Unblocks:** [`W-P2-AREG-02`](agent-registry.md#27--w-p2-areg-02) Expose the agent registry admin API with admin-only writes and audit; [`W-P2-AREG-04`](agent-registry.md#47--w-p2-areg-04) Serve registered agents in the policy wire; [`W-P2-AREG-06`](agent-registry.md#67--w-p2-areg-06) Add an offline agent registry CLI; [`W-P2-TOKX-01`](token-exchange.md#17--w-p2-tokx-01) Add private_key_jwt client assertion verification
+**Unblocks:** [`W-P2-AREG-02`](agent-registry.md#27--w-p2-areg-02) Expose the agent registry admin API with admin-only writes and audit; [`W-P2-AREG-04`](agent-registry.md#47--w-p2-areg-04) Serve registered agents in the policy wire; [`W-P2-AREG-06`](agent-registry.md#67--w-p2-areg-06) Add an offline agent registry CLI; [`W-P2-TOKX-01`](token-exchange.md#17--w-p2-tokx-01) Add private_key_jwt client assertion verification; [`W-P4-DGR-02`](delegation-grants.md#212--w-p4-dgr-02) Add the agent grant request API; [`W-P4-NTFY-05`](user-notify.md#510--w-p4-ntfy-05) Send connect-link notifications from JIT pending creation
 
 ### 2/7 · W-P2-AREG-02
 
@@ -145,7 +147,7 @@ Add the agent registry handlers to internal/dashboard behind a new `SetAgentRegi
 
 **Depends on:** [`W-P2-AREG-01`](agent-registry.md#17--w-p2-areg-01) Add internal/agentreg store, schema and validation; [`W-P1-SSO-05`](console-sso-rbac.md#58--w-p1-sso-05) Enforce role checks on every dashboard route; [`W-P1-AAUD-02`](admin-audit-log.md#24--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware
 
-**Unblocks:** [`W-P2-AREG-03`](agent-registry.md#37--w-p2-areg-03) Add the Agents tab to the CP console; [`W-P2-AREG-04`](agent-registry.md#47--w-p2-areg-04) Serve registered agents in the policy wire; [`W-P2-APPR-08`](policy-approvals.md#89--w-p2-appr-08) Hold block-list removals and widening agent edits for approval; [`W-P3-OFFB-07`](offboarding.md#77--w-p3-offb-07) Flag agents owned by blocked or offboarded users; [`W-P2-WBND-07`](identity-enforcement.md#710--w-p2-wbnd-07) Refuse require mode for agents served by workers without the capability
+**Unblocks:** [`W-P2-AREG-03`](agent-registry.md#37--w-p2-areg-03) Add the Agents tab to the CP console; [`W-P2-AREG-04`](agent-registry.md#47--w-p2-areg-04) Serve registered agents in the policy wire; [`W-P2-APPR-08`](policy-approvals.md#89--w-p2-appr-08) Hold block-list removals and widening agent edits for approval; [`W-P3-OFFB-07`](offboarding.md#77--w-p3-offb-07) Flag agents owned by blocked or offboarded users; [`W-P4-AMCP-03`](admin-mcp.md#59--w-p4-amcp-03) Implement the explain_decision, query_traffic and list_agents tools; [`W-P2-WBND-07`](identity-enforcement.md#710--w-p2-wbnd-07) Refuse require mode for agents served by workers without the capability
 
 ### 3/7 · W-P2-AREG-03
 
@@ -257,7 +259,7 @@ Let an operator pin a worker to a registered agent id with `--agent-id` or `cent
 
 **Depends on:** [`W-P2-AREG-04`](agent-registry.md#47--w-p2-areg-04) Serve registered agents in the policy wire; [`W-P1-BLOCK-02`](user-block-list.md#28--w-p1-block-02) Enforce the block list in the worker at CONNECT, per request and per h2 stream; [`W-P1-BLOCK-05`](user-block-list.md#58--w-p1-block-05) Close open sessions of newly blocked users on policy change; [`W-P1-VRFY-02`](identity-verification.md#27--w-p1-vrfy-02) Extract, verify and strip identity on CONNECT, HTTP/1.1 and HTTP/2
 
-**Unblocks:** [`W-P2-RCP-03`](identity-client.md#36--w-p2-rcp-03) Add the Claude Code compose recipe and docs; [`W-P2-AREG-07`](agent-registry.md#77--w-p2-areg-07) Document the agent registry and add an end-to-end test; [`W-P2-SECT-01`](security-tests.md#17--w-p2-sect-01) Add security test harness with in-process CP, workers and shared fakes; [`W-P2-SECT-03`](security-tests.md#37--w-p2-sect-03) Add binding, cross-agent and issued-token lifetime cases; [`W-P2-WBND-02`](identity-enforcement.md#210--w-p2-wbnd-02) Bind Warden tokens to the worker's registered agent and key; [`W-P2-WBND-03`](identity-enforcement.md#310--w-p2-wbnd-03) Enforce identity require mode on CONNECT and terminated traffic
+**Unblocks:** [`W-P2-RCP-03`](identity-client.md#36--w-p2-rcp-03) Add the Claude Code compose recipe and docs; [`W-P2-AREG-07`](agent-registry.md#77--w-p2-areg-07) Document the agent registry and add an end-to-end test; [`W-P2-SECT-01`](security-tests.md#17--w-p2-sect-01) Add security test harness with in-process CP, workers and shared fakes; [`W-P2-SECT-03`](security-tests.md#37--w-p2-sect-03) Add binding, cross-agent and issued-token lifetime cases; [`W-P4-AMCP-03`](admin-mcp.md#59--w-p4-amcp-03) Implement the explain_decision, query_traffic and list_agents tools; [`W-P2-WBND-02`](identity-enforcement.md#210--w-p2-wbnd-02) Bind Warden tokens to the worker's registered agent and key; [`W-P2-WBND-03`](identity-enforcement.md#310--w-p2-wbnd-03) Enforce identity require mode on CONNECT and terminated traffic; [`W-P4-MGW-10`](mcp-gateway.md#1015--w-p4-mgw-10) Verify and apply the mcpGateways bundle section on the worker
 
 ### 6/7 · W-P2-AREG-06
 

@@ -47,10 +47,13 @@ On a managed deployment where every connected worker advertises blocklist/v1, an
 - [OAuth broker](oauth-broker.md) (P3 · Act as the user)
 - [Consent portal](consent-portal.md) (P3 · Act as the user)
 - [Offboarding revocation](offboarding.md) (P3 · Act as the user)
+- [Delegation grants](delegation-grants.md) (P4 · Agents everywhere)
 - [Postgres + HA](postgres-ha.md) (P5 · Enterprise scale)
 - [Agent-bound tokens + mTLS](identity-enforcement.md) (P2 · Proven identity)
 - [Per-user secrets (refresh)](refresh-model.md) (P3 · Act as the user)
 - [Per-user limits + cost](per-user-limits.md) (P3 · Act as the user)
+- [External hooks](policy-hooks.md) (P4 · Agents everywhere)
+- [Slack / email notify](user-notify.md) (P4 · Agents everywhere)
 
 ## Code it touches
 
@@ -144,7 +147,7 @@ Build the block set inside `policy.Evaluator` so it is swapped atomically with a
 
 **Depends on:** [`W-P1-BLOCK-01`](user-block-list.md#18--w-p1-block-01) Carry blockedUsers in config.Policy and the policy wire; [`W-P1-VRFY-03`](identity-verification.md#37--w-p1-vrfy-03) Record user fields on worker events, receipts, decision logs and sync; [`W-P1-JAUD-06`](audit-log-export.md#26--w-p1-jaud-06) Set a bounded Reason on every deny event
 
-**Unblocks:** [`W-P1-BLOCK-05`](user-block-list.md#58--w-p1-block-05) Close open sessions of newly blocked users on policy change; [`W-P2-AREG-05`](agent-registry.md#57--w-p2-areg-05) Bind workers to an agent id and enforce agent_disabled; [`W-P3-OFFB-04`](offboarding.md#47--w-p3-offb-04) Add an E2E test for IdP-driven offboarding and its false-positive guards; [`W-P2-WBND-03`](identity-enforcement.md#310--w-p2-wbnd-03) Enforce identity require mode on CONNECT and terminated traffic; [`W-P3-PUL-09`](per-user-limits.md#910--w-p3-pul-09) Enforce per-user rate limits per request in the proxy
+**Unblocks:** [`W-P1-BLOCK-05`](user-block-list.md#58--w-p1-block-05) Close open sessions of newly blocked users on policy change; [`W-P2-AREG-05`](agent-registry.md#57--w-p2-areg-05) Bind workers to an agent id and enforce agent_disabled; [`W-P3-OFFB-04`](offboarding.md#47--w-p3-offb-04) Add an E2E test for IdP-driven offboarding and its false-positive guards; [`W-P2-WBND-03`](identity-enforcement.md#310--w-p2-wbnd-03) Enforce identity require mode on CONNECT and terminated traffic; [`W-P3-PUL-09`](per-user-limits.md#910--w-p3-pul-09) Enforce per-user rate limits per request in the proxy; [`W-P4-HOOK-07`](policy-hooks.md#711--w-p4-hook-07) Wire the pre-request hook stage into the HTTP/1.1 proxy path
 
 ### 3/8 · W-P1-BLOCK-03
 
@@ -183,7 +186,7 @@ Add the `blocked_users` cpstate table, a `BlockStore` Go API, and admin-only end
 
 **Depends on:** [`W-P1-BLOCK-01`](user-block-list.md#18--w-p1-block-01) Carry blockedUsers in config.Policy and the policy wire; [`W-P1-SSO-01`](console-sso-rbac.md#18--w-p1-sso-01) Add internal/cpstate SQLite state store with migrations; [`W-P1-SSO-05`](console-sso-rbac.md#58--w-p1-sso-05) Enforce role checks on every dashboard route; [`W-P1-AAUD-02`](admin-audit-log.md#24--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware
 
-**Unblocks:** [`W-P1-BLOCK-04`](user-block-list.md#48--w-p1-block-04) Add the Blocked users console panel and worker enforcement indicator; [`W-P1-BLOCK-07`](user-block-list.md#78--w-p1-block-07) Deny console login and sessions for blocked principals; [`W-P1-BLOCK-08`](user-block-list.md#88--w-p1-block-08) Add offline block add, remove and list commands to the control-plane CLI; [`W-P2-AREG-04`](agent-registry.md#47--w-p2-areg-04) Serve registered agents in the policy wire; [`W-P2-TOKX-02`](token-exchange.md#27--w-p2-tokx-02) Implement token exchange policy checks and JWT minting; [`W-P2-APPR-08`](policy-approvals.md#89--w-p2-appr-08) Hold block-list removals and widening agent edits for approval; [`W-P3-BRKR-03`](oauth-broker.md#39--w-p3-brkr-03) Implement POST /connect/start with PKCE, CSRF and scope capping; [`W-P3-OFFB-01`](offboarding.md#17--w-p3-offb-01) Implement the resumable two-stage Offboarder; [`W-P3-PUS-07`](refresh-model.md#712--w-p3-pus-07) Add the worker-mTLS mint endpoint POST /control/user-token
+**Unblocks:** [`W-P1-BLOCK-04`](user-block-list.md#48--w-p1-block-04) Add the Blocked users console panel and worker enforcement indicator; [`W-P1-BLOCK-07`](user-block-list.md#78--w-p1-block-07) Deny console login and sessions for blocked principals; [`W-P1-BLOCK-08`](user-block-list.md#88--w-p1-block-08) Add offline block add, remove and list commands to the control-plane CLI; [`W-P2-AREG-04`](agent-registry.md#47--w-p2-areg-04) Serve registered agents in the policy wire; [`W-P2-TOKX-02`](token-exchange.md#27--w-p2-tokx-02) Implement token exchange policy checks and JWT minting; [`W-P2-APPR-08`](policy-approvals.md#89--w-p2-appr-08) Hold block-list removals and widening agent edits for approval; [`W-P3-BRKR-03`](oauth-broker.md#39--w-p3-brkr-03) Implement POST /connect/start with PKCE, CSRF and scope capping; [`W-P3-OFFB-01`](offboarding.md#17--w-p3-offb-01) Implement the resumable two-stage Offboarder; [`W-P3-PUS-07`](refresh-model.md#712--w-p3-pus-07) Add the worker-mTLS mint endpoint POST /control/user-token; [`W-P4-NTFY-04`](user-notify.md#410--w-p4-ntfy-04) Add notify service with durable outbox, dispatcher, templates and dedup
 
 ### 4/8 · W-P1-BLOCK-04
 

@@ -33,7 +33,6 @@ From a clean state, `scripts/smoke-identity.sh` starts the control plane, Dex wi
 - [Agent-bound tokens + mTLS](identity-enforcement.md) (P2 · Proven identity)
 - [Per-user secrets (refresh)](refresh-model.md) (P3 · Act as the user)
 - [Per-user limits + cost](per-user-limits.md) (P3 · Act as the user)
-- [External hooks](policy-hooks.md) (P4 · Agents everywhere)
 
 ## Code it touches
 

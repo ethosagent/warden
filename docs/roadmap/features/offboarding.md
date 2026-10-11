@@ -43,6 +43,11 @@ With consent.offboarding.mode enforce and revokeGrace 0, removing a user from an
 - [Security test suite](security-tests.md) (P2 · Proven identity)
 - [Verify user token](identity-verification.md) (P1 · Who did it)
 
+## Unblocks
+
+- [Delegation grants](delegation-grants.md) (P4 · Agents everywhere)
+- [Slack / email notify](user-notify.md) (P4 · Agents everywhere)
+
 ## Code it touches
 
 `internal/controlplane` · `new package internal/offboard` · `internal/oauthbroker` · `internal/portal` · `internal/dashboard` · `internal/config` · `internal/agentreg` · `test/fakes` · `test/integration` · `docs/control-plane.md`
@@ -98,7 +103,7 @@ Add the Offboarder in new package internal/offboard that removes every credentia
 
 **Depends on:** [`W-P3-PORT-02`](consent-portal.md#27--w-p3-port-02) Implement revoke with grant, secret, epoch and provider steps; [`W-P3-PORT-07`](consent-portal.md#77--w-p3-port-07) Add provider revoke retries and the orphan token sweep; [`W-P3-PUS-08`](refresh-model.md#812--w-p3-pus-08) Serve perUserSecrets and userGrantEpochs as signed-bundle sections; [`W-P3-CSIG-03`](consent-auth.md#37--w-p3-csig-03) Store the IdP refresh token in a CP-only secret namespace on login; [`W-P1-BLOCK-03`](user-block-list.md#38--w-p1-block-03) Add the CP block-list store, admin API and policy merge; [`W-P1-BLOCK-07`](user-block-list.md#78--w-p1-block-07) Deny console login and sessions for blocked principals; [`W-P1-AAUD-02`](admin-audit-log.md#24--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware; [`W-P1-OPS1-01`](ops-hardening.md#14--w-p1-ops1-01) Add break-glass local admin with alerting and audit; [`W-P2-APIK-03`](api-keys.md#37--w-p2-apik-03) Add the API key management and self-introspection API; [`W-P2-TOKX-07`](token-exchange.md#77--w-p2-tokx-07) Add admin revocation for token sessions
 
-**Unblocks:** [`W-P3-OFFB-03`](offboarding.md#37--w-p3-offb-03) Add the console Users tab and manual offboard routes; [`W-P3-OFFB-05`](offboarding.md#57--w-p3-offb-05) Offboard on confirmed upstream refusal with a circuit breaker
+**Unblocks:** [`W-P3-OFFB-03`](offboarding.md#37--w-p3-offb-03) Add the console Users tab and manual offboard routes; [`W-P3-OFFB-05`](offboarding.md#57--w-p3-offb-05) Offboard on confirmed upstream refusal with a circuit breaker; [`W-P4-DGR-06`](delegation-grants.md#612--w-p4-dgr-06) Add grant revocation routes, revokedGrants bundle section and offboard step; [`W-P4-NTFY-07`](user-notify.md#710--w-p4-ntfy-07) Add verified user contacts table keyed by user_key
 
 ### 2/7 · W-P3-OFFB-02
 
