@@ -50,6 +50,14 @@ CI".
   value. Headers only; no full request/response bodies.
 - **Default-deny is sacred.** A destination not on the allowlist is blocked.
 
+## Reviews
+
+Review rubrics live in [`.agents/reviews/`](.agents/reviews/README.md), one
+per lens: security invariants, architecture, hot path, acceptance and test
+quality. Each check has a stable ID (`SEC-4`, `HOT-1`, …). Use them when
+reviewing, or run `openai-review --lens <name>`. A check that keeps finding
+the same problem should become a rule in `scripts/check.sh`.
+
 ## Do NOT
 
 - Add `pkg/` speculatively (use `cmd/` + `internal/`).

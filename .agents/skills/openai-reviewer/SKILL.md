@@ -63,7 +63,14 @@ obscures intent, speculative generality. The script bakes this into every call.
 | `against-origin` | Unpushed commits vs. origin |
 
 Add `--focus <security|performance|correctness|style|test>` to narrow scope.
-For Warden, `--focus security` is the highest-value lens.
+
+Add `--lens <name>` to review against one of Warden's rubrics in
+[`.agents/reviews/`](../../reviews/README.md): `security-invariants`,
+`architecture`, `hot-path`, `acceptance`, `test-quality`. The rubric's checks go
+into the prompt, and findings carry the check ID in `rule` (for example `SEC-4`).
+For Warden, `--lens security-invariants` is the highest-value review. The README
+there says which lenses each kind of change needs. In Pass 1, read the same
+rubrics before calling Codex.
 
 ## Acting on findings
 
