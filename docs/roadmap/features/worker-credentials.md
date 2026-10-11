@@ -47,8 +47,8 @@ On a CP running with --state-dir and TLS, two workers use distinct per-worker to
 | 2/6 | [`W-P1-WTOK-02`](#26--w-p1-wtok-02) | Authenticate /policy, heartbeat and ingest with per-worker tokens | feature | M | W-P1-WTOK-01 | [#52](https://github.com/ethosagent/warden/issues/52) |
 | 3/6 | [`W-P1-WTOK-03`](#36--w-p1-wtok-03) | Add worker token admin API, dashboard panel and fleet auth fields | feature | M | W-P1-WTOK-02, W-P1-SSO-05, W-P1-AAUD-02 | [#53](https://github.com/ethosagent/warden/issues/53) |
 | 4/6 | [`W-P1-WTOK-04`](#46--w-p1-wtok-04) | Add strict worker auth mode and the WARDEN_CP_TOKEN migration guide | feature | S | W-P1-WTOK-03, W-P1-WTOK-05 | [#54](https://github.com/ethosagent/warden/issues/54) |
-| 5/6 | [`W-P1-WTOK-05`](#56--w-p1-wtok-05) | Add offline worker token bootstrap CLI | feature | S | W-P1-WTOK-01, W-P1-AAUD-01 | — |
-| 6/6 | [`W-P1-WTOK-06`](#66--w-p1-wtok-06) | Move compose recipes and worker configs to per-worker tokens | chore | S | W-P1-WTOK-04, W-P1-WTOK-05 | — |
+| 5/6 | [`W-P1-WTOK-05`](#56--w-p1-wtok-05) | Add offline worker token bootstrap CLI | feature | S | W-P1-WTOK-01, W-P1-AAUD-01 | [#235](https://github.com/ethosagent/warden/issues/235) |
+| 6/6 | [`W-P1-WTOK-06`](#66--w-p1-wtok-06) | Move compose recipes and worker configs to per-worker tokens | chore | S | W-P1-WTOK-04, W-P1-WTOK-05 | [#236](https://github.com/ethosagent/warden/issues/236) |
 
 ### 1/6 · W-P1-WTOK-01
 
@@ -210,7 +210,7 @@ Add the flags that move a CP from the shared token to per-worker tokens: `--lega
 
 **Add offline worker token bootstrap CLI**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#235](https://github.com/ethosagent/warden/issues/235)
 
 Add `warden control-plane token create|list|revoke` that opens cpstate in --state-dir directly, so the first worker tokens can be created before any admin can log in and while a CP is running. `create --from-env` and `--from-file` register an operator-generated value, which lets compose and Kubernetes Secrets supply tokens without a worker code change. Create and revoke are written to the admin audit log with actor `cli`.
 
@@ -246,7 +246,7 @@ Add `warden control-plane token create|list|revoke` that opens cpstate in --stat
 
 **Move compose recipes and worker configs to per-worker tokens**
 
-Type **chore** · Size **S** · Issue —
+Type **chore** · Size **S** · Issue [#236](https://github.com/ethosagent/warden/issues/236)
 
 Switch the compose recipes and sample worker configs from the shared WARDEN_CP_TOKEN to per-worker tokens. A one-shot bootstrap service registers each worker's token with `token create --from-env` against the shared state volume before workers start, and the CP runs in strict mode. Workers keep reading the token from env, so no worker code changes.
 

@@ -54,7 +54,7 @@ Break-glass, on the compose recipe: with Dex stopped, the CP is restarted and st
 | 1/4 | [`W-P1-OPS1-01`](#14--w-p1-ops1-01) | Add break-glass local admin with alerting and audit | feature | M | W-P1-SSO-04, W-P1-SSO-05, W-P1-AAUD-02 | [#56](https://github.com/ethosagent/warden/issues/56) |
 | 2/4 | [`W-P1-OPS1-02`](#24--w-p1-ops1-02) | Add scheduled SQLite backups with manifest and pruning | feature | M | W-P1-SSO-01, W-P1-AAUD-01 | [#57](https://github.com/ethosagent/warden/issues/57) |
 | 3/4 | [`W-P1-OPS1-03`](#34--w-p1-ops1-03) | Write break-glass and backup runbooks and a production readiness guide | docs | S | W-P1-OPS1-01, W-P1-OPS1-02, W-P1-OPS1-04, W-P1-SSO-06, W-P1-WTOK-04, W-P1-JAUD-03, W-P1-AAUD-03 | [#58](https://github.com/ethosagent/warden/issues/58) |
-| 4/4 | [`W-P1-OPS1-04`](#44--w-p1-ops1-04) | Add CP state-dir lock and verified restore command | feature | M | W-P1-OPS1-02, W-P1-AAUD-01, W-P1-PVER-01, W-P1-WTOK-01 | — |
+| 4/4 | [`W-P1-OPS1-04`](#44--w-p1-ops1-04) | Add CP state-dir lock and verified restore command | feature | M | W-P1-OPS1-02, W-P1-AAUD-01, W-P1-PVER-01, W-P1-WTOK-01 | [#243](https://github.com/ethosagent/warden/issues/243) |
 
 ### 1/4 · W-P1-OPS1-01
 
@@ -178,7 +178,7 @@ Write the operator docs for this feature and a production readiness checklist th
 
 **Add CP state-dir lock and verified restore command**
 
-Type **feature** · Size **M** · Issue —
+Type **feature** · Size **M** · Issue [#243](https://github.com/ethosagent/warden/issues/243)
 
 Add a lifetime lock on the CP state dir and a `warden control-plane restore` command that loads a backup set from W-P1-OPS1-02. SQLite holds no lock an idle CP keeps, so a flock file is the only reliable way to refuse a restore while a CP is running, and it also stops two CPs from sharing one state dir. Restore checks hashes, integrity, schema version and the audit key before touching anything, clears stale WAL files and sessions, and records itself in the admin audit chain. Restoring an old set can bring back revoked access, so the command warns that later revocations and blocks must be re-applied.
 

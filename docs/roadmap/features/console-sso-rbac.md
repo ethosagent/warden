@@ -59,8 +59,8 @@ On a CP started with `console.auth: oidc` in --config, an https redirectURL and 
 | 4/8 | [`W-P1-SSO-04`](#48--w-p1-sso-04) | Add server-side sessions, logout, /auth/me and CSRF | feature | M | W-P1-SSO-01, W-P1-SSO-02 | [#34](https://github.com/ethosagent/warden/issues/34) |
 | 5/8 | [`W-P1-SSO-05`](#58--w-p1-sso-05) | Enforce role checks on every dashboard route | feature | M | W-P1-SSO-03, W-P1-SSO-04 | [#35](https://github.com/ethosagent/warden/issues/35) |
 | 6/8 | [`W-P1-SSO-06`](#68--w-p1-sso-06) | Require an admin session on /central/secrets and flag open consoles | feature | S | W-P1-SSO-05 | [#36](https://github.com/ethosagent/warden/issues/36) |
-| 7/8 | [`W-P1-SSO-07`](#78--w-p1-sso-07) | Add Dex-backed console SSO end-to-end test | test | M | W-P1-SSO-06, W-P1-SSO-08, W-P1-DEX-02 | — |
-| 8/8 | [`W-P1-SSO-08`](#88--w-p1-sso-08) | Add admin session list and revoke API | feature | S | W-P1-SSO-05 | — |
+| 7/8 | [`W-P1-SSO-07`](#78--w-p1-sso-07) | Add Dex-backed console SSO end-to-end test | test | M | W-P1-SSO-06, W-P1-SSO-08, W-P1-DEX-02 | [#230](https://github.com/ethosagent/warden/issues/230) |
+| 8/8 | [`W-P1-SSO-08`](#88--w-p1-sso-08) | Add admin session list and revoke API | feature | S | W-P1-SSO-05 | [#231](https://github.com/ethosagent/warden/issues/231) |
 
 ### 1/8 · W-P1-SSO-01
 
@@ -306,7 +306,7 @@ The dashboard never accepted the shared token, so W-P1-SSO-05's session requirem
 
 **Add Dex-backed console SSO end-to-end test**
 
-Type **test** · Size **M** · Issue —
+Type **test** · Size **M** · Issue [#230](https://github.com/ethosagent/warden/issues/230)
 
 Every other ticket in this feature tests against an httptest fake IdP. This test proves the done-when sentence against the real reference stack: Dex with the seeded LDAP users from W-P1-DEX-02 and a CP in oidc mode. It runs behind the existing `integration` build tag in test/integration, so normal `go test ./...` is unaffected.
 
@@ -340,7 +340,7 @@ Every other ticket in this feature tests against an httptest fake IdP. This test
 
 **Add admin session list and revoke API**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#231](https://github.com/ethosagent/warden/issues/231)
 
 The role is recomputed from groups stored at login, so a user removed from an IdP group keeps access until the session ends. This ticket lets an admin list live console sessions and revoke one session or every session for a user, so offboarding does not wait for the 12h absolute expiry. It uses the SessionStore.List, Delete and DeleteBySub methods from W-P1-SSO-04 and the authz table from W-P1-SSO-05.
 

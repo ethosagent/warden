@@ -62,7 +62,7 @@ On a CP started with --state-dir, console.auth=oidc and console.adminAudit.enabl
 | 1/4 | [`W-P1-AAUD-01`](#14--w-p1-aaud-01) | Add signed, hash-chained admin audit store on cpstate | feature | M | W-P1-SSO-01 | [#38](https://github.com/ethosagent/warden/issues/38) |
 | 2/4 | [`W-P1-AAUD-02`](#24--w-p1-aaud-02) | Record CP admin mutations and logins through audit middleware | feature | M | W-P1-AAUD-01, W-P1-SSO-05 | [#39](https://github.com/ethosagent/warden/issues/39) |
 | 3/4 | [`W-P1-AAUD-03`](#34--w-p1-aaud-03) | Show admin audit log and chain verification in the dashboard | feature | S | W-P1-AAUD-01, W-P1-SSO-05 | [#40](https://github.com/ethosagent/warden/issues/40) |
-| 4/4 | [`W-P1-AAUD-04`](#44--w-p1-aaud-04) | Add offline admin audit verify and export CLI | feature | S | W-P1-AAUD-01 | — |
+| 4/4 | [`W-P1-AAUD-04`](#44--w-p1-aaud-04) | Add offline admin audit verify and export CLI | feature | S | W-P1-AAUD-01 | [#232](https://github.com/ethosagent/warden/issues/232) |
 
 ### 1/4 · W-P1-AAUD-01
 
@@ -189,7 +189,7 @@ Add admin-only API routes and an 'Admin log' tab so admins can browse, filter an
 
 **Add offline admin audit verify and export CLI**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#232](https://github.com/ethosagent/warden/issues/232)
 
 Add `warden control-plane admin-audit verify` and `admin-audit export` subcommands that open the cpstate DB read-only, so an operator can check the chain after a restore (p1-breakglass) or during an incident with the CP down, and an auditor can verify an export without CP access. Both use the same `adminaudit.Verify` as the dashboard. Also run a bounded verification at CP startup so tampering is flagged early.
 

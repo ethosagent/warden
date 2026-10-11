@@ -55,10 +55,10 @@ On a managed deployment where every connected worker advertises blocklist/v1, an
 | 1/7 | [`W-P1-BLOCK-01`](#17--w-p1-block-01) | Carry blockedUsers in config.Policy and the policy wire | feature | S | — | [#47](https://github.com/ethosagent/warden/issues/47) |
 | 2/7 | [`W-P1-BLOCK-02`](#27--w-p1-block-02) | Enforce the block list in the worker at CONNECT, per request and per h2 stream | feature | M | W-P1-BLOCK-01, W-P1-VRFY-03, W-P1-JAUD-06 | [#48](https://github.com/ethosagent/warden/issues/48) |
 | 3/7 | [`W-P1-BLOCK-03`](#37--w-p1-block-03) | Add the CP block-list store, admin API and policy merge | feature | M | W-P1-BLOCK-01, W-P1-SSO-01, W-P1-SSO-05, W-P1-AAUD-02 | [#49](https://github.com/ethosagent/warden/issues/49) |
-| 4/7 | [`W-P1-BLOCK-04`](#47--w-p1-block-04) | Add the Blocked users console panel and worker enforcement indicator | feature | S | W-P1-BLOCK-03, W-P1-VRFY-04 | — |
-| 5/7 | [`W-P1-BLOCK-05`](#57--w-p1-block-05) | Close open sessions of newly blocked users on policy change | feature | M | W-P1-BLOCK-02 | — |
-| 6/7 | [`W-P1-BLOCK-06`](#67--w-p1-block-06) | Raise one user_blocked Finding per user without leaking email | feature | S | W-P1-VRFY-03 | — |
-| 7/7 | [`W-P1-BLOCK-07`](#77--w-p1-block-07) | Deny console login and sessions for blocked principals | feature | S | W-P1-BLOCK-03, W-P1-SSO-04, W-P1-OPS1-01 | — |
+| 4/7 | [`W-P1-BLOCK-04`](#47--w-p1-block-04) | Add the Blocked users console panel and worker enforcement indicator | feature | S | W-P1-BLOCK-03, W-P1-VRFY-04 | [#239](https://github.com/ethosagent/warden/issues/239) |
+| 5/7 | [`W-P1-BLOCK-05`](#57--w-p1-block-05) | Close open sessions of newly blocked users on policy change | feature | M | W-P1-BLOCK-02 | [#240](https://github.com/ethosagent/warden/issues/240) |
+| 6/7 | [`W-P1-BLOCK-06`](#67--w-p1-block-06) | Raise one user_blocked Finding per user without leaking email | feature | S | W-P1-VRFY-03 | [#241](https://github.com/ethosagent/warden/issues/241) |
+| 7/7 | [`W-P1-BLOCK-07`](#77--w-p1-block-07) | Deny console login and sessions for blocked principals | feature | S | W-P1-BLOCK-03, W-P1-SSO-04, W-P1-OPS1-01 | [#242](https://github.com/ethosagent/warden/issues/242) |
 
 ### 1/7 · W-P1-BLOCK-01
 
@@ -180,7 +180,7 @@ Add the `blocked_users` cpstate table, a `BlockStore` Go API, and admin-only end
 
 **Add the Blocked users console panel and worker enforcement indicator**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#239](https://github.com/ethosagent/warden/issues/239)
 
 Add a 'Blocked users' panel to the console for listing, adding and removing entries, and a 'block this user' action on traffic user rows. Store the heartbeat `caps` in the worker registry and warn when connected workers do not advertise blocklist/v1, because old workers silently ignore the list while reporting a current ETag.
 
@@ -213,7 +213,7 @@ Add a 'Blocked users' panel to the console for listing, adding and removing entr
 
 **Close open sessions of newly blocked users on policy change**
 
-Type **feature** · Size **M** · Issue —
+Type **feature** · Size **M** · Issue [#240](https://github.com/ethosagent/warden/issues/240)
 
 Raw tunnels, idle HTTP/1 keep-alive connections, HTTP/2 connections and WebSocket frame pumps never pass through a per-request check, so a blocked user keeps them open indefinitely. Add a per-identity session registry in internal/proxy and close the matching sessions after each applied policy change. This makes the done_when claim about existing sessions hold for every connection type.
 
@@ -247,7 +247,7 @@ Raw tunnels, idle HTTP/1 keep-alive connections, HTTP/2 connections and WebSocke
 
 **Raise one user_blocked Finding per user without leaking email**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#241](https://github.com/ethosagent/warden/issues/241)
 
 Today `bridgeEvent` turns Reason=user_blocked into a Finding deduplicated per domain, so one blocked user hitting many domains raises many alerts and none say who it was. Give user_blocked its own case with a per-user dedup key and high severity, and carry the opaque sub only so no email reaches webhooks.
 
@@ -277,7 +277,7 @@ Today `bridgeEvent` turns Reason=user_blocked into a Finding deduplicated per do
 
 **Deny console login and sessions for blocked principals**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#242](https://github.com/ethosagent/warden/issues/242)
 
 A blocked admin can still sign in to the console or use an open session and remove their own block. Check the block list at OIDC callback and on every authenticated request, and revoke a principal's sessions when they are blocked. Break-glass is not affected, so the console stays recoverable.
 

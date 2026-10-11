@@ -55,8 +55,8 @@ On a real deployment (CP plus at least one worker with TLS termination, Dex from
 | 3/7 | [`W-P1-VRFY-03`](#37--w-p1-vrfy-03) | Record user fields on worker events, receipts, decision logs and sync | feature | M | W-P1-VRFY-02 | [#23](https://github.com/ethosagent/warden/issues/23) |
 | 4/7 | [`W-P1-VRFY-04`](#47--w-p1-vrfy-04) | Add user filter and top-users breakdown to the dashboard | feature | M | W-P1-VRFY-03, W-P1-VRFY-06 | [#24](https://github.com/ethosagent/warden/issues/24) |
 | 5/7 | [`W-P1-VRFY-05`](#57--w-p1-vrfy-05) | Add identity attribution e2e test and a CI integration job | test | M | W-P1-VRFY-03, W-P1-VRFY-07, W-P1-DEX-02 | [#25](https://github.com/ethosagent/warden/issues/25) |
-| 6/7 | [`W-P1-VRFY-06`](#67--w-p1-vrfy-06) | Store user fields in the control-plane fleet store | feature | S | W-P1-VRFY-03 | — |
-| 7/7 | [`W-P1-VRFY-07`](#77--w-p1-vrfy-07) | Wire the identity verifier into worker assembly, hot reload and deployment | feature | S | W-P1-VRFY-02 | — |
+| 6/7 | [`W-P1-VRFY-06`](#67--w-p1-vrfy-06) | Store user fields in the control-plane fleet store | feature | S | W-P1-VRFY-03 | [#228](https://github.com/ethosagent/warden/issues/228) |
+| 7/7 | [`W-P1-VRFY-07`](#77--w-p1-vrfy-07) | Wire the identity verifier into worker assembly, hot reload and deployment | feature | S | W-P1-VRFY-02 | [#229](https://github.com/ethosagent/warden/issues/229) |
 
 ### 1/7 · W-P1-VRFY-01
 
@@ -258,7 +258,7 @@ Prove attribution end to end under the integration build tag. The default issuer
 
 **Store user fields in the control-plane fleet store**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#228](https://github.com/ethosagent/warden/issues/228)
 
 Control-plane half of recording, split from W-P1-VRFY-03 because conventions require separate worker and CP tickets. FleetSQLiteStore.migrate is a bare CREATE TABLE today with no way to add columns, so this ticket adds an idempotent addColumnIfAbsent helper. It then adds the identity columns and index and carries them through ingest, StoreAggregatedEvent and GetEvents. Old fleet DBs upgrade in place.
 
@@ -293,7 +293,7 @@ Control-plane half of recording, split from W-P1-VRFY-03 because conventions req
 
 **Wire the identity verifier into worker assembly, hot reload and deployment**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#229](https://github.com/ethosagent/warden/issues/229)
 
 Connect the verifier to real workers. Build it from local config or the distributed SettingsWire, and resolve the per-agent mode with the agent ID that worker.defaultAgentID already computes. Swap it through SettingsApplier without a restart. Also open worker egress to the issuer in the deploy templates and document the identity block, the transport rules and the rollout order. Mode stays off unless configured.
 

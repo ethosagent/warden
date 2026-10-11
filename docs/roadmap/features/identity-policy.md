@@ -49,10 +49,10 @@ On a CA-enabled worker in attribute mode with `{domain: api.github.com, groups: 
 | 3/9 | [`W-P1-GPOL-03`](#39--w-p1-gpol-03) | Apply group-aware allow decisions at CONNECT and request time | feature | M | W-P1-GPOL-02, W-P1-GPOL-06, W-P1-VRFY-02, W-P1-VRFY-03, W-P1-JAUD-06 | [#62](https://github.com/ethosagent/warden/issues/62) |
 | 4/9 | [`W-P1-GPOL-04`](#49--w-p1-gpol-04) | Support groups/users in MCP tool allowWhen conditions | feature | M | W-P1-GPOL-02, W-P1-GPOL-06, W-P1-VRFY-02 | [#63](https://github.com/ethosagent/warden/issues/63) |
 | 5/9 | [`W-P1-GPOL-05`](#59--w-p1-gpol-05) | Show affected users in policy eval replay | feature | S | W-P1-GPOL-02, W-P1-VRFY-03 | [#64](https://github.com/ethosagent/warden/issues/64) |
-| 6/9 | [`W-P1-GPOL-06`](#69--w-p1-gpol-06) | Project scoped rules into fail-closed policy wire fields | feature | S | W-P1-GPOL-01 | — |
-| 7/9 | [`W-P1-GPOL-07`](#79--w-p1-gpol-07) | Report groupPolicy support in heartbeat and flag old workers | feature | S | W-P1-GPOL-06 | — |
-| 8/9 | [`W-P1-GPOL-08`](#89--w-p1-gpol-08) | Edit groups/users in the dashboard policy editor | feature | S | W-P1-GPOL-03, W-P1-GPOL-04, W-P1-GPOL-05 | — |
-| 9/9 | [`W-P1-GPOL-09`](#99--w-p1-gpol-09) | Add group policy e2e test and policy docs | test | S | W-P1-GPOL-03, W-P1-GPOL-04, W-P1-GPOL-05, W-P1-VRFY-05 | — |
+| 6/9 | [`W-P1-GPOL-06`](#69--w-p1-gpol-06) | Project scoped rules into fail-closed policy wire fields | feature | S | W-P1-GPOL-01 | [#244](https://github.com/ethosagent/warden/issues/244) |
+| 7/9 | [`W-P1-GPOL-07`](#79--w-p1-gpol-07) | Report groupPolicy support in heartbeat and flag old workers | feature | S | W-P1-GPOL-06 | [#245](https://github.com/ethosagent/warden/issues/245) |
+| 8/9 | [`W-P1-GPOL-08`](#89--w-p1-gpol-08) | Edit groups/users in the dashboard policy editor | feature | S | W-P1-GPOL-03, W-P1-GPOL-04, W-P1-GPOL-05 | [#246](https://github.com/ethosagent/warden/issues/246) |
+| 9/9 | [`W-P1-GPOL-09`](#99--w-p1-gpol-09) | Add group policy e2e test and policy docs | test | S | W-P1-GPOL-03, W-P1-GPOL-04, W-P1-GPOL-05, W-P1-VRFY-05 | [#247](https://github.com/ethosagent/warden/issues/247) |
 
 ### 1/9 · W-P1-GPOL-01
 
@@ -251,7 +251,7 @@ Make `policyeval.Evaluate` replay events with the recorded user so `warden polic
 
 **Project scoped rules into fail-closed policy wire fields**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#244](https://github.com/ethosagent/warden/issues/244)
 
 Old workers decode the CP policy with lenient JSON, so they would drop `groups` and treat a scoped entry as global. The CP keeps one shared ETag body but moves scoped allow entries into a new `scopedAllowlist` field and replaces scoped MCP allowWhen with a reserved sentinel, so old workers deny and new workers merge the real rules back. This must land before GPOL-03/04 lift the validation guard.
 
@@ -285,7 +285,7 @@ Old workers decode the CP policy with lenient JSON, so they would drop `groups` 
 
 **Report groupPolicy support in heartbeat and flag old workers**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#245](https://github.com/ethosagent/warden/issues/245)
 
 Operators need to see which workers do not understand scoped rules, because those workers deny scoped destinations. Workers add `features: ["groupPolicy"]` to the heartbeat body, and the fleet view flags workers without it while the served policy has scoped rules. This is visibility only; the wire fail-closed behaviour is W-P1-GPOL-06.
 
@@ -317,7 +317,7 @@ Operators need to see which workers do not understand scoped rules, because thos
 
 **Edit groups/users in the dashboard policy editor**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#246](https://github.com/ethosagent/warden/issues/246)
 
 Let admins add groups/users to allow entries and MCP allowWhen in the CP policy editor, and show which rules are scoped. The editor saves through the existing `/dashboard/api/policy` write path and `config.AllowlistEntry`, so validation and normalization come from the config loader. Lint warnings from `config.LintScoped` are shown next to the entries.
 
@@ -348,7 +348,7 @@ Let admins add groups/users to allow entries and MCP allowWhen in the CP policy 
 
 **Add group policy e2e test and policy docs**
 
-Type **test** · Size **S** · Issue —
+Type **test** · Size **S** · Issue [#247](https://github.com/ethosagent/warden/issues/247)
 
 Prove the done-when end to end against a real Dex token, and document group-scoped rules. The test reuses the Dex harness from W-P1-VRFY-05 behind the integration build tag. Docs cover the matching rules, fail-closed cases, stdio limits and the future `<issuer>:<group>` namespacing.
 

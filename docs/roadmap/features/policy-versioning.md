@@ -56,8 +56,8 @@ On a CP started with `--state-dir` and `--policy-store=versioned`, an existing d
 | 2/6 | [`W-P1-PVER-02`](#26--w-p1-pver-02) | Route policy, settings and llmProviders writes through versioned publish | feature | M | W-P1-PVER-01, W-P1-SSO-05, W-P1-AAUD-02 | [#43](https://github.com/ethosagent/warden/issues/43) |
 | 3/6 | [`W-P1-PVER-03`](#36--w-p1-pver-03) | Add policy history, structural diff and rollback APIs | feature | M | W-P1-PVER-02, W-P1-AAUD-02 | [#44](https://github.com/ethosagent/warden/issues/44) |
 | 4/6 | [`W-P1-PVER-04`](#46--w-p1-pver-04) | Add history panel with diff view and rollback to dashboard | feature | S | W-P1-PVER-03, W-P1-SSO-04 | [#45](https://github.com/ethosagent/warden/issues/45) |
-| 5/6 | [`W-P1-PVER-05`](#56--w-p1-pver-05) | Mirror head into the served YAML and detect external edits | feature | M | W-P1-PVER-02 | — |
-| 6/6 | [`W-P1-PVER-06`](#66--w-p1-pver-06) | Add warden policy import and export commands | feature | S | W-P1-PVER-02, W-P1-AAUD-01 | — |
+| 5/6 | [`W-P1-PVER-05`](#56--w-p1-pver-05) | Mirror head into the served YAML and detect external edits | feature | M | W-P1-PVER-02 | [#233](https://github.com/ethosagent/warden/issues/233) |
+| 6/6 | [`W-P1-PVER-06`](#66--w-p1-pver-06) | Add warden policy import and export commands | feature | S | W-P1-PVER-02, W-P1-AAUD-01 | [#234](https://github.com/ethosagent/warden/issues/234) |
 
 ### 1/6 · W-P1-PVER-01
 
@@ -218,7 +218,7 @@ In internal/dashboard/index.html, add a History panel to the policy tab that lis
 
 **Mirror head into the served YAML and detect external edits**
 
-Type **feature** · Size **M** · Issue —
+Type **feature** · Size **M** · Issue [#233](https://github.com/ethosagent/warden/issues/233)
 
 After every head move in versioned mode, render head's policy and settings blocks back into the served YAML with atomicWriteConfig, so switching to `--policy-store=file` or downgrading the binary serves the same policy. When the YAML blocks no longer match the mirrored hash, treat it as an external edit: warn once, show a dashboard banner and keep serving head. Also show each worker's version number in the fleet view and document the feature.
 
@@ -257,7 +257,7 @@ After every head move in versioned mode, render head's policy and settings block
 
 **Add warden policy import and export commands**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#234](https://github.com/ethosagent/warden/issues/234)
 
 Add `warden policy import` and `warden policy export` under the existing `warden policy` command so operators who manage policy as files can create versions and get a YAML out for downgrade, disaster recovery or GitOps hand-off. Import opens the cpstate DB directly and uses the same compare-and-swap Create as the CP, so a running CP picks the change up through head polling. CLI actions do not go through HTTP, so they append admin audit rows directly.
 

@@ -47,8 +47,8 @@ With audit.jsonLog.enabled: true and output: file on a real worker, every stored
 
 | # | Key | Ticket | Type | Size | Depends on | Issue |
 |---|---|---|---|---|---|---|
-| 1/6 | [`W-P1-JAUD-05`](#16--w-p1-jaud-05) | Record the pre-swap URL on events and decision logs | feature | S | — | — |
-| 2/6 | [`W-P1-JAUD-06`](#26--w-p1-jaud-06) | Set a bounded Reason on every deny event | feature | S | — | — |
+| 1/6 | [`W-P1-JAUD-05`](#16--w-p1-jaud-05) | Record the pre-swap URL on events and decision logs | feature | S | — | [#237](https://github.com/ethosagent/warden/issues/237) |
+| 2/6 | [`W-P1-JAUD-06`](#26--w-p1-jaud-06) | Set a bounded Reason on every deny event | feature | S | — | [#238](https://github.com/ethosagent/warden/issues/238) |
 | 3/6 | [`W-P1-JAUD-01`](#36--w-p1-jaud-01) | Add internal/auditlog decision stream on the async writer tee | feature | M | W-P1-VRFY-03, W-P1-JAUD-05 | [#66](https://github.com/ethosagent/warden/issues/66) |
 | 4/6 | [`W-P1-JAUD-02`](#46--w-p1-jaud-02) | Publish decision v1 JSON Schema with closed-field and leak tests | test | S | W-P1-JAUD-01, W-P1-JAUD-06 | [#67](https://github.com/ethosagent/warden/issues/67) |
 | 5/6 | [`W-P1-JAUD-03`](#56--w-p1-jaud-03) | Write CP admin audit lines as warden.admin.v1 JSON | feature | S | W-P1-JAUD-01, W-P1-AAUD-02 | [#68](https://github.com/ethosagent/warden/issues/68) |
@@ -58,7 +58,7 @@ With audit.jsonLog.enabled: true and output: file on a real worker, every stored
 
 **Record the pre-swap URL on events and decision logs**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#237](https://github.com/ethosagent/warden/issues/237)
 
 swapSecrets in internal/proxy/http.go writes the real secret into s.req.URL.RawQuery, and several event sites later build fullURL from s.req.URL.RequestURI(). A placeholder in a query string therefore puts the real value into Event.URL, which goes to SQLite, signed receipts, logDecision and central sync. Capture the URL in readRequest, before swapSecrets and applyTransforms, and use that copy at every StoreEvent and logDecision site. This must land before any export of Event.URL.
 
@@ -92,7 +92,7 @@ swapSecrets in internal/proxy/http.go writes the real secret into s.req.URL.RawQ
 
 **Set a bounded Reason on every deny event**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#238](https://github.com/ethosagent/warden/issues/238)
 
 Most deny events have an empty Event.Reason today: storeDeny in internal/proxy/serve.go takes a reason and drops it, and the CONNECT deny paths (policy, no_tls) never set it. A SIEM cannot tell a policy deny from a no_tls, judge or DLP deny without it. Fill Reason on every deny site from the same bounded set used by Metrics.RecordBlocked, and document the set.
 
