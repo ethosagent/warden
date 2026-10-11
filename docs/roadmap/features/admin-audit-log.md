@@ -39,6 +39,7 @@ On a CP started with --state-dir, console.auth=oidc and console.adminAudit.enabl
 - [Break-glass + backups](ops-hardening.md) (P1 · Who did it)
 - [Agent registry](agent-registry.md) (P2 · Proven identity)
 - [Token service](token-exchange.md) (P2 · Proven identity)
+- [Key manager](key-management.md) (P2 · Proven identity)
 - [Worker CA (mTLS)](worker-mtls.md) (P2 · Proven identity)
 - [Approvals + replay](policy-approvals.md) (P2 · Proven identity)
 - [Scoped API keys](api-keys.md) (P2 · Proven identity)
@@ -103,7 +104,7 @@ Add the new `internal/adminaudit` package with the canonical `Entry`, the SQLite
 
 **Depends on:** [`W-P1-SSO-01`](console-sso-rbac.md#18--w-p1-sso-01) Add internal/cpstate SQLite state store with migrations
 
-**Unblocks:** [`W-P1-AAUD-02`](admin-audit-log.md#24--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware; [`W-P1-AAUD-03`](admin-audit-log.md#34--w-p1-aaud-03) Show admin audit log and chain verification in the dashboard; [`W-P1-AAUD-04`](admin-audit-log.md#44--w-p1-aaud-04) Add offline admin audit verify and export CLI; [`W-P1-PVER-06`](policy-versioning.md#66--w-p1-pver-06) Add warden policy import and export commands; [`W-P1-WTOK-05`](worker-credentials.md#56--w-p1-wtok-05) Add offline worker token bootstrap CLI; [`W-P1-OPS1-02`](ops-hardening.md#24--w-p1-ops1-02) Add scheduled SQLite backups with manifest and pruning; [`W-P1-OPS1-04`](ops-hardening.md#44--w-p1-ops1-04) Add CP state-dir lock and verified restore command
+**Unblocks:** [`W-P1-AAUD-02`](admin-audit-log.md#24--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware; [`W-P1-AAUD-03`](admin-audit-log.md#34--w-p1-aaud-03) Show admin audit log and chain verification in the dashboard; [`W-P1-AAUD-04`](admin-audit-log.md#44--w-p1-aaud-04) Add offline admin audit verify and export CLI; [`W-P1-PVER-06`](policy-versioning.md#66--w-p1-pver-06) Add warden policy import and export commands; [`W-P1-WTOK-05`](worker-credentials.md#56--w-p1-wtok-05) Add offline worker token bootstrap CLI; [`W-P1-OPS1-02`](ops-hardening.md#24--w-p1-ops1-02) Add scheduled SQLite backups with manifest and pruning; [`W-P1-OPS1-04`](ops-hardening.md#44--w-p1-ops1-04) Add CP state-dir lock and verified restore command; [`W-P2-AREG-06`](agent-registry.md#67--w-p2-areg-06) Add an offline agent registry CLI; [`W-P2-KEYS-02`](key-management.md#27--w-p2-keys-02) Add the keys config gate, file key store and signing_keys metadata; [`W-P2-APPR-01`](policy-approvals.md#19--w-p2-appr-01) Add approvals config, draft store and state machine; [`W-P2-APIK-05`](api-keys.md#57--w-p2-apik-05) Add offline API key revoke, restore revocation and expiry warnings
 
 ### 2/4 · W-P1-AAUD-02
 
@@ -145,7 +146,7 @@ Add the admin audit middleware to the CP, driven by `Action`, `Target` and `Audi
 
 **Depends on:** [`W-P1-AAUD-01`](admin-audit-log.md#14--w-p1-aaud-01) Add signed, hash-chained admin audit store on cpstate; [`W-P1-SSO-05`](console-sso-rbac.md#58--w-p1-sso-05) Enforce role checks on every dashboard route
 
-**Unblocks:** [`W-P1-PVER-02`](policy-versioning.md#26--w-p1-pver-02) Route policy, settings and llmProviders writes through versioned publish; [`W-P1-PVER-03`](policy-versioning.md#36--w-p1-pver-03) Add policy history, structural diff and rollback APIs; [`W-P1-BLOCK-03`](user-block-list.md#37--w-p1-block-03) Add the CP block-list store, admin API and policy merge; [`W-P1-WTOK-03`](worker-credentials.md#36--w-p1-wtok-03) Add worker token admin API, dashboard panel and fleet auth fields; [`W-P1-OPS1-01`](ops-hardening.md#14--w-p1-ops1-01) Add break-glass local admin with alerting and audit; [`W-P1-JAUD-03`](audit-log-export.md#56--w-p1-jaud-03) Write CP admin audit lines as warden.admin.v1 JSON
+**Unblocks:** [`W-P1-PVER-02`](policy-versioning.md#26--w-p1-pver-02) Route policy, settings and llmProviders writes through versioned publish; [`W-P1-PVER-03`](policy-versioning.md#36--w-p1-pver-03) Add policy history, structural diff and rollback APIs; [`W-P1-BLOCK-03`](user-block-list.md#37--w-p1-block-03) Add the CP block-list store, admin API and policy merge; [`W-P1-WTOK-03`](worker-credentials.md#36--w-p1-wtok-03) Add worker token admin API, dashboard panel and fleet auth fields; [`W-P1-OPS1-01`](ops-hardening.md#14--w-p1-ops1-01) Add break-glass local admin with alerting and audit; [`W-P2-AREG-02`](agent-registry.md#27--w-p2-areg-02) Expose the agent registry admin API with admin-only writes and audit; [`W-P2-TOKX-04`](token-exchange.md#47--w-p2-tokx-04) Add rate limits, issuance records and metrics for token exchange; [`W-P2-TOKX-07`](token-exchange.md#77--w-p2-tokx-07) Add admin revocation for token sessions; [`W-P2-KEYS-04`](key-management.md#47--w-p2-keys-04) Serve the token JWKS, readiness and admin key API from the control plane; [`W-P2-WCA-02`](worker-mtls.md#28--w-p2-wca-02) Add enrollment token store, POST /control/enroll and enroll-token CLI; [`W-P2-APPR-04`](policy-approvals.md#49--w-p2-appr-04) Add the change draft API with the two-person rule; [`W-P2-APIK-02`](api-keys.md#27--w-p2-apik-02) Authenticate API keys and enforce per-route scopes in the authz table; [`W-P1-JAUD-03`](audit-log-export.md#56--w-p1-jaud-03) Write CP admin audit lines as warden.admin.v1 JSON
 
 ### 3/4 · W-P1-AAUD-03
 
@@ -217,3 +218,5 @@ Add `warden control-plane admin-audit verify` and `admin-audit export` subcomman
 - [ ] A CP started on a DB with a tampered row in the last 1000 publishes `admin_audit_verify_failed` and still serves GET /policy with 200.
 
 **Depends on:** [`W-P1-AAUD-01`](admin-audit-log.md#14--w-p1-aaud-01) Add signed, hash-chained admin audit store on cpstate
+
+**Unblocks:** [`W-P2-KEYS-06`](key-management.md#67--w-p2-keys-06) Add offline admin audit key rotation with a signed rotation entry; [`W-P2-APPR-09`](policy-approvals.md#99--w-p2-appr-09) Add approvals end-to-end test and operator docs

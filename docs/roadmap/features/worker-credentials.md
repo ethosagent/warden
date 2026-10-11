@@ -30,8 +30,10 @@ On a CP running with --state-dir and TLS, two workers use distinct per-worker to
 
 ## Unblocks
 
+- [Identity client + recipes](identity-client.md) (P2 · Proven identity)
 - [Break-glass + backups](ops-hardening.md) (P1 · Who did it)
 - [Worker CA (mTLS)](worker-mtls.md) (P2 · Proven identity)
+- [Scoped API keys](api-keys.md) (P2 · Proven identity)
 - [Postgres + HA](postgres-ha.md) (P5 · Enterprise scale)
 - [JIT 403 + long-poll](jit-authorization.md) (P3 · Act as the user)
 
@@ -129,7 +131,7 @@ Add `WorkerAuthenticator` in internal/controlplane and apply it once to /policy,
 
 **Depends on:** [`W-P1-WTOK-01`](worker-credentials.md#16--w-p1-wtok-01) Add worker token store with hashed storage, revocation and in-memory index
 
-**Unblocks:** [`W-P1-WTOK-03`](worker-credentials.md#36--w-p1-wtok-03) Add worker token admin API, dashboard panel and fleet auth fields
+**Unblocks:** [`W-P1-WTOK-03`](worker-credentials.md#36--w-p1-wtok-03) Add worker token admin API, dashboard panel and fleet auth fields; [`W-P2-APIK-02`](api-keys.md#27--w-p2-apik-02) Authenticate API keys and enforce per-route scopes in the authz table
 
 ### 3/6 · W-P1-WTOK-03
 
@@ -167,7 +169,7 @@ Add the admin API and a console panel to create, list and revoke worker tokens, 
 
 **Depends on:** [`W-P1-WTOK-02`](worker-credentials.md#26--w-p1-wtok-02) Authenticate /policy, heartbeat and ingest with per-worker tokens; [`W-P1-SSO-05`](console-sso-rbac.md#58--w-p1-sso-05) Enforce role checks on every dashboard route; [`W-P1-AAUD-02`](admin-audit-log.md#24--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware
 
-**Unblocks:** [`W-P1-WTOK-04`](worker-credentials.md#46--w-p1-wtok-04) Add strict worker auth mode and the WARDEN_CP_TOKEN migration guide
+**Unblocks:** [`W-P1-WTOK-04`](worker-credentials.md#46--w-p1-wtok-04) Add strict worker auth mode and the WARDEN_CP_TOKEN migration guide; [`W-P2-WCA-08`](worker-mtls.md#88--w-p2-wca-08) Add worker enrollment admin API and console panel
 
 ### 4/6 · W-P1-WTOK-04
 
@@ -204,7 +206,7 @@ Add the flags that move a CP from the shared token to per-worker tokens: `--lega
 
 **Depends on:** [`W-P1-WTOK-03`](worker-credentials.md#36--w-p1-wtok-03) Add worker token admin API, dashboard panel and fleet auth fields; [`W-P1-WTOK-05`](worker-credentials.md#56--w-p1-wtok-05) Add offline worker token bootstrap CLI
 
-**Unblocks:** [`W-P1-WTOK-06`](worker-credentials.md#66--w-p1-wtok-06) Move compose recipes and worker configs to per-worker tokens; [`W-P1-OPS1-03`](ops-hardening.md#34--w-p1-ops1-03) Write break-glass and backup runbooks and a production readiness guide
+**Unblocks:** [`W-P1-WTOK-06`](worker-credentials.md#66--w-p1-wtok-06) Move compose recipes and worker configs to per-worker tokens; [`W-P1-OPS1-03`](ops-hardening.md#34--w-p1-ops1-03) Write break-glass and backup runbooks and a production readiness guide; [`W-P2-WCA-04`](worker-mtls.md#48--w-p2-wca-04) Accept worker certs in WorkerAuthenticator and add /control/renew
 
 ### 5/6 · W-P1-WTOK-05
 
@@ -240,7 +242,7 @@ Add `warden control-plane token create|list|revoke` that opens cpstate in --stat
 
 **Depends on:** [`W-P1-WTOK-01`](worker-credentials.md#16--w-p1-wtok-01) Add worker token store with hashed storage, revocation and in-memory index; [`W-P1-AAUD-01`](admin-audit-log.md#14--w-p1-aaud-01) Add signed, hash-chained admin audit store on cpstate
 
-**Unblocks:** [`W-P1-WTOK-04`](worker-credentials.md#46--w-p1-wtok-04) Add strict worker auth mode and the WARDEN_CP_TOKEN migration guide; [`W-P1-WTOK-06`](worker-credentials.md#66--w-p1-wtok-06) Move compose recipes and worker configs to per-worker tokens
+**Unblocks:** [`W-P1-WTOK-04`](worker-credentials.md#46--w-p1-wtok-04) Add strict worker auth mode and the WARDEN_CP_TOKEN migration guide; [`W-P1-WTOK-06`](worker-credentials.md#66--w-p1-wtok-06) Move compose recipes and worker configs to per-worker tokens; [`W-P2-WCA-02`](worker-mtls.md#28--w-p2-wca-02) Add enrollment token store, POST /control/enroll and enroll-token CLI
 
 ### 6/6 · W-P1-WTOK-06
 
@@ -274,3 +276,5 @@ Switch the compose recipes and sample worker configs from the shared WARDEN_CP_T
 - [ ] `scripts/check.sh` passes, including `go run docs/roadmap/gen.go check`.
 
 **Depends on:** [`W-P1-WTOK-04`](worker-credentials.md#46--w-p1-wtok-04) Add strict worker auth mode and the WARDEN_CP_TOKEN migration guide; [`W-P1-WTOK-05`](worker-credentials.md#56--w-p1-wtok-05) Add offline worker token bootstrap CLI
+
+**Unblocks:** [`W-P2-RCP-03`](identity-client.md#36--w-p2-rcp-03) Add the Claude Code compose recipe and docs; [`W-P2-WCA-06`](worker-mtls.md#68--w-p2-wca-06) Move the compose recipe to worker certs and document the migration

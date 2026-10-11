@@ -27,8 +27,10 @@ From a clean state, `scripts/smoke-identity.sh` starts the control plane, Dex wi
 
 ## Unblocks
 
+- [Identity client + recipes](identity-client.md) (P2 · Proven identity)
 - [Okta / Entra / Google direct](idp-adapters.md) (P5 · Enterprise scale)
 - [OTLP logs + traces](otel-logs-traces.md) (P5 · Enterprise scale)
+- [Agent-bound tokens + mTLS](identity-enforcement.md) (P2 · Proven identity)
 - [Per-user secrets (refresh)](refresh-model.md) (P3 · Act as the user)
 - [Per-user limits + cost](per-user-limits.md) (P3 · Act as the user)
 - [External hooks](policy-hooks.md) (P4 · Agents everywhere)
@@ -82,6 +84,8 @@ Add docs/identity-contract.md (Contract v1), telling harness builders exactly wh
 
 **Depends on:** [`W-P1-IDC-02`](identity-contract.md#23--w-p1-idc-02) Add `warden identity` CLI for login, token, status and proxy env; [`W-P1-IDC-03`](identity-contract.md#33--w-p1-idc-03) Add generic identity smoke test with a curl agent
 
+**Unblocks:** [`W-P2-WBND-03`](identity-enforcement.md#310--w-p2-wbnd-03) Enforce identity require mode on CONNECT and terminated traffic
+
 ### 2/3 · W-P1-IDC-02
 
 **Add `warden identity` CLI for login, token, status and proxy env**
@@ -123,7 +127,7 @@ Create new package internal/identityclient (OIDC discovery, RFC 8628 device-code
 
 **Depends on:** [`W-P1-DEX-01`](dex-oidc.md#13--w-p1-dex-01) Add reference Dex config with console, data-plane, harness and CLI clients
 
-**Unblocks:** [`W-P1-IDC-01`](identity-contract.md#13--w-p1-idc-01) Write the agent identity contract for harness builders; [`W-P1-IDC-03`](identity-contract.md#33--w-p1-idc-03) Add generic identity smoke test with a curl agent; [`W-P2-RCP-01`](identity-client.md#15--w-p2-rcp-01) Extend internal/identityclient with agent keys and token exchange
+**Unblocks:** [`W-P1-IDC-01`](identity-contract.md#13--w-p1-idc-01) Write the agent identity contract for harness builders; [`W-P1-IDC-03`](identity-contract.md#33--w-p1-idc-03) Add generic identity smoke test with a curl agent; [`W-P2-RCP-01`](identity-client.md#16--w-p2-rcp-01) Extend internal/identityclient with agent keys and token exchange
 
 ### 3/3 · W-P1-IDC-03
 
@@ -162,4 +166,4 @@ Add an opt-in smoke recipe and script that prove a plain curl container, with no
 
 **Depends on:** [`W-P1-IDC-02`](identity-contract.md#23--w-p1-idc-02) Add `warden identity` CLI for login, token, status and proxy env; [`W-P1-DEX-02`](dex-oidc.md#23--w-p1-dex-02) Add identity compose recipe with pinned Dex and seeded LDAP; [`W-P1-VRFY-04`](identity-verification.md#47--w-p1-vrfy-04) Add user filter and top-users breakdown to the dashboard
 
-**Unblocks:** [`W-P1-IDC-01`](identity-contract.md#13--w-p1-idc-01) Write the agent identity contract for harness builders
+**Unblocks:** [`W-P1-IDC-01`](identity-contract.md#13--w-p1-idc-01) Write the agent identity contract for harness builders; [`W-P2-RCP-05`](identity-client.md#56--w-p2-rcp-05) Add the isolation proof script for the recipes

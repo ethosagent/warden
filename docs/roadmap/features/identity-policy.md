@@ -34,6 +34,7 @@ On a CA-enabled worker in attribute mode with `{domain: api.github.com, groups: 
 - [Okta / Entra / Google direct](idp-adapters.md) (P5 · Enterprise scale)
 - [Agent registry](agent-registry.md) (P2 · Proven identity)
 - [Token service](token-exchange.md) (P2 · Proven identity)
+- [Approvals + replay](policy-approvals.md) (P2 · Proven identity)
 - [Per-user limits + cost](per-user-limits.md) (P3 · Act as the user)
 
 ## Code it touches
@@ -89,7 +90,7 @@ Add `Groups`/`Users` to `config.AllowlistEntry` and `config.MCPToolCondition` wi
 - [ ] Given a DeepCopy of a policy with Groups, mutating the copy's Groups[0] leaves the original unchanged: `go test ./internal/config -run TestDeepCopy_GroupsNotAliased`.
 - [ ] Existing config tests pass unchanged: `go test ./internal/config`.
 
-**Unblocks:** [`W-P1-GPOL-02`](identity-policy.md#29--w-p1-gpol-02) Make the policy evaluator subject-aware with EvaluateFor; [`W-P1-GPOL-06`](identity-policy.md#69--w-p1-gpol-06) Project scoped rules into fail-closed policy wire fields
+**Unblocks:** [`W-P2-APPR-02`](policy-approvals.md#29--w-p2-appr-02) Implement widening-change classification; [`W-P1-GPOL-02`](identity-policy.md#29--w-p1-gpol-02) Make the policy evaluator subject-aware with EvaluateFor; [`W-P1-GPOL-06`](identity-policy.md#69--w-p1-gpol-06) Project scoped rules into fail-closed policy wire fields
 
 ### 2/9 · W-P1-GPOL-02
 
@@ -245,7 +246,7 @@ Make `policyeval.Evaluate` replay events with the recorded user so `warden polic
 
 **Depends on:** [`W-P1-GPOL-02`](identity-policy.md#29--w-p1-gpol-02) Make the policy evaluator subject-aware with EvaluateFor; [`W-P1-VRFY-03`](identity-verification.md#37--w-p1-vrfy-03) Record user fields on worker events, receipts, decision logs and sync
 
-**Unblocks:** [`W-P1-GPOL-08`](identity-policy.md#89--w-p1-gpol-08) Edit groups/users in the dashboard policy editor; [`W-P1-GPOL-09`](identity-policy.md#99--w-p1-gpol-09) Add group policy e2e test and policy docs
+**Unblocks:** [`W-P2-APPR-03`](policy-approvals.md#39--w-p2-appr-03) Replay fleet events against base and draft for each revision; [`W-P1-GPOL-08`](identity-policy.md#89--w-p1-gpol-08) Edit groups/users in the dashboard policy editor; [`W-P1-GPOL-09`](identity-policy.md#99--w-p1-gpol-09) Add group policy e2e test and policy docs
 
 ### 6/9 · W-P1-GPOL-06
 
@@ -287,29 +288,29 @@ Old workers decode the CP policy with lenient JSON, so they would drop `groups` 
 
 Type **feature** · Size **S** · Issue [#245](https://github.com/ethosagent/warden/issues/245)
 
-Operators need to see which workers do not understand scoped rules, because those workers deny scoped destinations. Workers add `features: ["groupPolicy"]` to the heartbeat body, and the fleet view flags workers without it while the served policy has scoped rules. This is visibility only; the wire fail-closed behaviour is W-P1-GPOL-06.
+Operators need to see which workers do not understand scoped rules, because those workers deny scoped destinations. Workers add `grouppolicy/v1` to the heartbeat `caps` list from W-P1-BLOCK-02 (one capability field for every feature), and the fleet view flags workers without it while the served policy has scoped rules. This is visibility only; the wire fail-closed behaviour is W-P1-GPOL-06.
 
 **Requirements**
 
-- `RemoteProvider.Heartbeat` sends `features` next to `policyETag`; the body stays under the CP's 4096-byte limit.
-- `handleHeartbeat` decodes `features` (bounded to 16 entries of 64 bytes) and `WorkerRegistry` stores them.
+- `RemoteProvider.Heartbeat` adds `grouppolicy/v1` to `caps` (the W-P1-BLOCK-02 body struct; whichever ticket lands first adds the struct); the body stays under the CP's 4096-byte limit.
+- `handleHeartbeat` decodes `caps` (shared with W-P1-BLOCK-04, bounded to 16 entries of 64 bytes) and `WorkerRegistry` stores them.
 - The fleet view shows a `no groupPolicy` badge for workers lacking it when the current policy has scoped rules.
 - The CP logs once per worker per ETag with proxy_id and scoped_entries count, never group names.
-- Heartbeats without `features` keep working.
+- Heartbeats without `caps` keep working.
 
 **Implementation plan**
 
-1. internal/config/remote.go `Heartbeat`: add the features field.
-2. internal/controlplane/controlplane.go `handleHeartbeat` and seams.go: pass features into a new registry method.
-3. internal/controlplane/registry.go: store features per worker and expose them in the fleet snapshot.
+1. internal/config/remote.go `Heartbeat`: add `grouppolicy/v1` to caps.
+2. internal/controlplane/controlplane.go `handleHeartbeat` and seams.go: pass caps into the registry (shared with W-P1-BLOCK-04).
+3. internal/controlplane/registry.go: store caps per worker and expose them in the fleet snapshot.
 4. internal/dashboard: render the badge in the fleet view.
 5. Tests in internal/controlplane and internal/config.
 
 **Acceptance criteria**
 
-- [ ] A heartbeat with `{"policyETag":"x","features":["groupPolicy"]}` stores the feature: `go test ./internal/controlplane -run TestHeartbeat_Features`.
+- [ ] A heartbeat with `{"policyETag":"x","caps":["grouppolicy/v1"]}` stores the cap: `go test ./internal/controlplane -run TestHeartbeat_Caps`.
 - [ ] A legacy heartbeat `{"policyETag":"x"}` is still accepted and the worker is flagged when scoped rules exist.
-- [ ] A heartbeat with 100 features stores at most 16.
+- [ ] A heartbeat with 100 caps stores at most 16.
 
 **Depends on:** [`W-P1-GPOL-06`](identity-policy.md#69--w-p1-gpol-06) Project scoped rules into fail-closed policy wire fields
 

@@ -36,6 +36,7 @@ On a CP started with `--state-dir` and `--policy-store=versioned`, an existing d
 ## Unblocks
 
 - [Break-glass + backups](ops-hardening.md) (P1 · Who did it)
+- [Agent registry](agent-registry.md) (P2 · Proven identity)
 - [Signed bundles](signed-bundles.md) (P2 · Proven identity)
 - [Approvals + replay](policy-approvals.md) (P2 · Proven identity)
 - [Offboarding revocation](offboarding.md) (P3 · Act as the user)
@@ -138,7 +139,7 @@ In versioned mode, import the served config as version 1 on first start, then ro
 
 **Depends on:** [`W-P1-PVER-01`](policy-versioning.md#16--w-p1-pver-01) Add versioned policy store and serve the head version; [`W-P1-SSO-05`](console-sso-rbac.md#58--w-p1-sso-05) Enforce role checks on every dashboard route; [`W-P1-AAUD-02`](admin-audit-log.md#24--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware
 
-**Unblocks:** [`W-P1-PVER-03`](policy-versioning.md#36--w-p1-pver-03) Add policy history, structural diff and rollback APIs; [`W-P1-PVER-05`](policy-versioning.md#56--w-p1-pver-05) Mirror head into the served YAML and detect external edits; [`W-P1-PVER-06`](policy-versioning.md#66--w-p1-pver-06) Add warden policy import and export commands
+**Unblocks:** [`W-P1-PVER-03`](policy-versioning.md#36--w-p1-pver-03) Add policy history, structural diff and rollback APIs; [`W-P1-PVER-05`](policy-versioning.md#56--w-p1-pver-05) Mirror head into the served YAML and detect external edits; [`W-P1-PVER-06`](policy-versioning.md#66--w-p1-pver-06) Add warden policy import and export commands; [`W-P2-APPR-01`](policy-approvals.md#19--w-p2-appr-01) Add approvals config, draft store and state machine
 
 ### 3/6 · W-P1-PVER-03
 
@@ -177,7 +178,7 @@ Add dashboard APIs to list versions, fetch one version, diff two versions and ro
 
 **Depends on:** [`W-P1-PVER-02`](policy-versioning.md#26--w-p1-pver-02) Route policy, settings and llmProviders writes through versioned publish; [`W-P1-AAUD-02`](admin-audit-log.md#24--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware
 
-**Unblocks:** [`W-P1-PVER-04`](policy-versioning.md#46--w-p1-pver-04) Add history panel with diff view and rollback to dashboard
+**Unblocks:** [`W-P1-PVER-04`](policy-versioning.md#46--w-p1-pver-04) Add history panel with diff view and rollback to dashboard; [`W-P2-APPR-02`](policy-approvals.md#29--w-p2-appr-02) Implement widening-change classification; [`W-P2-APPR-04`](policy-approvals.md#49--w-p2-appr-04) Add the change draft API with the two-person rule; [`W-P2-APPR-06`](policy-approvals.md#69--w-p2-appr-06) Gate every versioned write path through one clearance check
 
 ### 4/6 · W-P1-PVER-04
 
@@ -213,6 +214,8 @@ In internal/dashboard/index.html, add a History panel to the policy tab that lis
 - [ ] `go test ./internal/dashboard -run 'TestPolicyHistoryPanel|TestPolicyWriteConflict'` passes.
 
 **Depends on:** [`W-P1-PVER-03`](policy-versioning.md#36--w-p1-pver-03) Add policy history, structural diff and rollback APIs; [`W-P1-SSO-04`](console-sso-rbac.md#48--w-p1-sso-04) Add server-side sessions, logout, /auth/me and CSRF
+
+**Unblocks:** [`W-P2-APPR-05`](policy-approvals.md#59--w-p2-appr-05) Add the Changes tab with structural diff and replay view
 
 ### 5/6 · W-P1-PVER-05
 
@@ -253,6 +256,8 @@ After every head move in versioned mode, render head's policy and settings block
 
 **Depends on:** [`W-P1-PVER-02`](policy-versioning.md#26--w-p1-pver-02) Route policy, settings and llmProviders writes through versioned publish
 
+**Unblocks:** [`W-P2-AREG-04`](agent-registry.md#47--w-p2-areg-04) Serve registered agents in the policy wire; [`W-P2-SBND-02`](signed-bundles.md#27--w-p2-sbnd-02) Serve the signed bundle envelope on GET /policy behind --bundles
+
 ### 6/6 · W-P1-PVER-06
 
 **Add warden policy import and export commands**
@@ -284,3 +289,5 @@ Add `warden policy import` and `warden policy export` under the existing `warden
 - [ ] `go test ./cmd/proxy -run 'TestPolicyImport|TestPolicyExport'` passes.
 
 **Depends on:** [`W-P1-PVER-02`](policy-versioning.md#26--w-p1-pver-02) Route policy, settings and llmProviders writes through versioned publish; [`W-P1-AAUD-01`](admin-audit-log.md#14--w-p1-aaud-01) Add signed, hash-chained admin audit store on cpstate
+
+**Unblocks:** [`W-P2-APPR-06`](policy-approvals.md#69--w-p2-appr-06) Gate every versioned write path through one clearance check

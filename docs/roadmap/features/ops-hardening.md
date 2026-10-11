@@ -39,7 +39,9 @@ Break-glass, on the compose recipe: with Dex stopped, the CP is restarted and st
 
 ## Unblocks
 
+- [Key manager](key-management.md) (P2 · Proven identity)
 - [Approvals + replay](policy-approvals.md) (P2 · Proven identity)
+- [Scoped API keys](api-keys.md) (P2 · Proven identity)
 - [Helm chart](helm.md) (P5 · Enterprise scale)
 - [OTel collector → SIEM](siem-export.md) (P5 · Enterprise scale)
 
@@ -97,7 +99,7 @@ Add an emergency admin login at `POST /auth/breakglass` so operators can reach t
 
 **Depends on:** [`W-P1-SSO-04`](console-sso-rbac.md#48--w-p1-sso-04) Add server-side sessions, logout, /auth/me and CSRF; [`W-P1-SSO-05`](console-sso-rbac.md#58--w-p1-sso-05) Enforce role checks on every dashboard route; [`W-P1-AAUD-02`](admin-audit-log.md#24--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware
 
-**Unblocks:** [`W-P1-BLOCK-07`](user-block-list.md#77--w-p1-block-07) Deny console login and sessions for blocked principals; [`W-P1-OPS1-03`](ops-hardening.md#34--w-p1-ops1-03) Write break-glass and backup runbooks and a production readiness guide
+**Unblocks:** [`W-P1-BLOCK-07`](user-block-list.md#77--w-p1-block-07) Deny console login and sessions for blocked principals; [`W-P1-OPS1-03`](ops-hardening.md#34--w-p1-ops1-03) Write break-glass and backup runbooks and a production readiness guide; [`W-P2-APPR-04`](policy-approvals.md#49--w-p2-appr-04) Add the change draft API with the two-person rule; [`W-P2-APPR-07`](policy-approvals.md#79--w-p2-appr-07) Add audited break-glass emergency apply with post-hoc review; [`W-P2-APIK-05`](api-keys.md#57--w-p2-apik-05) Add offline API key revoke, restore revocation and expiry warnings
 
 ### 2/4 · W-P1-OPS1-02
 
@@ -209,4 +211,4 @@ Add a lifetime lock on the CP state dir and a `warden control-plane restore` com
 
 **Depends on:** [`W-P1-OPS1-02`](ops-hardening.md#24--w-p1-ops1-02) Add scheduled SQLite backups with manifest and pruning; [`W-P1-AAUD-01`](admin-audit-log.md#14--w-p1-aaud-01) Add signed, hash-chained admin audit store on cpstate; [`W-P1-PVER-01`](policy-versioning.md#16--w-p1-pver-01) Add versioned policy store and serve the head version; [`W-P1-WTOK-01`](worker-credentials.md#16--w-p1-wtok-01) Add worker token store with hashed storage, revocation and in-memory index
 
-**Unblocks:** [`W-P1-OPS1-03`](ops-hardening.md#34--w-p1-ops1-03) Write break-glass and backup runbooks and a production readiness guide
+**Unblocks:** [`W-P1-OPS1-03`](ops-hardening.md#34--w-p1-ops1-03) Write break-glass and backup runbooks and a production readiness guide; [`W-P2-KEYS-05`](key-management.md#57--w-p2-keys-05) Add the keys CLI, backup integration and key rotation runbook; [`W-P2-KEYS-06`](key-management.md#67--w-p2-keys-06) Add offline admin audit key rotation with a signed rotation entry; [`W-P2-APIK-05`](api-keys.md#57--w-p2-apik-05) Add offline API key revoke, restore revocation and expiry warnings

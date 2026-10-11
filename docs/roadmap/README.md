@@ -24,7 +24,7 @@ Grey tags exist today; coloured tags show the phase that adds each part. The cor
 | Phase | What works at the end | Features | Tickets | S / M / L | Eng-weeks |
 |---|---|---|---|---|---|
 | [P1 · Who did it](#phase-1--who-did-it) | Console SSO via Dex with 3 roles, admin audit log, policy history and rollback, per-worker tokens, user token verified on the worker in attribute mode, group-aware policy, fleet-wide user block, JSON audit logs, identity contract and CLI. | 11 | 63 | 32 / 31 / 0 | 25–44 |
-| [P2 · Proven identity](#phase-2--proven-identity) | Agent registry, RFC 8693 token service (15-minute agent-bound tokens), key manager, worker CA and mTLS, signed bundles, two-person approval with replay, scoped API keys, require-identity mode, Claude Code and Codex recipes. | 10 | 47 | 13 / 34 / 0 | 23–39 |
+| [P2 · Proven identity](#phase-2--proven-identity) | Agent registry, RFC 8693 token service (15-minute agent-bound tokens), key manager, worker CA and mTLS, signed bundles, two-person approval with replay, scoped API keys, require-identity mode, Claude Code and Codex recipes. | 10 | 75 | 32 / 43 / 0 | 32–56 |
 | [P3 · Act as the user](#phase-3--act-as-the-user) | Consent portal, OAuth broker for Google and GitHub, per-user secrets with refresh, JIT 403 with long-poll, offboarding revocation, per-user limits. | 7 | 32 | 14 / 17 / 1 | 14–25 |
 | [P4 · Agents everywhere](#phase-4--agents-everywhere) | Delegation grants, park and notify, MCP gateway and registry, external hooks, admin MCP server, policy as code with canary. | 8 | 54 | 16 / 38 / 0 | 26–44 |
 | [P5 · Enterprise scale](#phase-5--enterprise-scale) | Postgres and HA, Helm, OTel logs and traces, SIEM export, KMS, retention, direct IdP adapters. | 7 | 40 | 9 / 28 / 3 | 22–38 |
@@ -89,16 +89,14 @@ Agent registry, RFC 8693 token service (15-minute agent-bound tokens), key manag
 ```mermaid
 flowchart LR
   subgraph ph1["P1 · Who did it"]
-    p1_admin_audit["Admin audit log"]
-    p1_policy_history["Policy history + rollback"]
-    p1_worker_tokens["Per-worker tokens"]
+    p1_identity_contract["Identity contract + CLI"]
     p1_block_list["User block list"]
     p1_breakglass["Break-glass + backups"]
     p1_group_policy["Group-aware policy"]
   end
   subgraph ph2["P2 · Proven identity"]
-    p2_agent_registry["Agent registry"]
     p2_key_manager["Key manager"]
+    p2_agent_registry["Agent registry"]
     p2_token_service["Token service"]
     p2_worker_ca["Worker CA (mTLS)"]
     p2_signed_bundles["Signed bundles"]
@@ -108,37 +106,37 @@ flowchart LR
     p2_recipes["Identity client + recipes"]
     p2_security_tests["Security test suite"]
   end
+  p1_breakglass --> p2_key_manager
   p1_group_policy --> p2_agent_registry
-  p1_block_list --> p2_token_service
-  p2_key_manager --> p2_token_service
+  p1_block_list --> p2_agent_registry
+  p2_key_manager --> p2_agent_registry
   p2_agent_registry --> p2_token_service
-  p1_worker_tokens --> p2_worker_ca
   p2_key_manager --> p2_worker_ca
-  p1_policy_history --> p2_signed_bundles
   p1_block_list --> p2_signed_bundles
   p2_key_manager --> p2_signed_bundles
-  p1_breakglass --> p2_approvals
-  p1_block_list --> p2_approvals
-  p1_admin_audit --> p2_api_keys
+  p2_agent_registry --> p2_approvals
+  p1_breakglass --> p2_api_keys
+  p1_identity_contract --> p2_worker_bound
   p2_token_service --> p2_worker_bound
   p2_signed_bundles --> p2_worker_bound
   p2_worker_ca --> p2_worker_bound
   p2_worker_bound --> p2_recipes
   p2_worker_bound --> p2_security_tests
+  p2_api_keys --> p2_security_tests
 ```
 
 | # | Feature | Lane | Needs first | Tickets | Epic |
 |---|---|---|---|---|---|
-| 1 | [Agent registry](features/agent-registry.md) | Control plane | [SSO + 3 roles](features/console-sso-rbac.md), [Admin audit log](features/admin-audit-log.md), [Group-aware policy](features/identity-policy.md) | 4 (1S 3M) | [#70](https://github.com/ethosagent/warden/issues/70) |
-| 2 | [Key manager](features/key-management.md) | Control plane | — | 5 (2S 3M) | [#75](https://github.com/ethosagent/warden/issues/75) |
-| 3 | [Token service](features/token-exchange.md) | Control plane | [Verify user token](features/identity-verification.md), [User block list](features/user-block-list.md), [Admin audit log](features/admin-audit-log.md), [Group-aware policy](features/identity-policy.md), [Key manager](features/key-management.md), [Agent registry](features/agent-registry.md) | 5 (2S 3M) | [#81](https://github.com/ethosagent/warden/issues/81) |
-| 4 | [Worker CA (mTLS)](features/worker-mtls.md) | Control plane | [Per-worker tokens](features/worker-credentials.md), [SSO + 3 roles](features/console-sso-rbac.md), [Admin audit log](features/admin-audit-log.md), [Key manager](features/key-management.md) | 6 (2S 4M) | [#87](https://github.com/ethosagent/warden/issues/87) |
-| 5 | [Signed bundles](features/signed-bundles.md) | Control plane | [Policy history + rollback](features/policy-versioning.md), [User block list](features/user-block-list.md), [Key manager](features/key-management.md) | 5 (2S 3M) | [#94](https://github.com/ethosagent/warden/issues/94) |
-| 6 | [Approvals + replay](features/policy-approvals.md) | Control plane | [Policy history + rollback](features/policy-versioning.md), [SSO + 3 roles](features/console-sso-rbac.md), [Admin audit log](features/admin-audit-log.md), [Break-glass + backups](features/ops-hardening.md), [User block list](features/user-block-list.md) | 5 (5M) | [#100](https://github.com/ethosagent/warden/issues/100) |
-| 7 | [Scoped API keys](features/api-keys.md) | Control plane | [SSO + 3 roles](features/console-sso-rbac.md), [Admin audit log](features/admin-audit-log.md) | 3 (2S 1M) | [#106](https://github.com/ethosagent/warden/issues/106) |
-| 8 | [Agent-bound tokens + mTLS](features/identity-enforcement.md) | Worker | [Verify user token](features/identity-verification.md), [User block list](features/user-block-list.md), [Token service](features/token-exchange.md), [Signed bundles](features/signed-bundles.md), [Worker CA (mTLS)](features/worker-mtls.md), [Agent registry](features/agent-registry.md) | 5 (1S 4M) | [#110](https://github.com/ethosagent/warden/issues/110) |
-| 9 | [Identity client + recipes](features/identity-client.md) | Agent / harness | [Token service](features/token-exchange.md), [Agent-bound tokens + mTLS](features/identity-enforcement.md), [Agent registry](features/agent-registry.md) | 5 (1S 4M) | [#116](https://github.com/ethosagent/warden/issues/116) |
-| 10 | [Security test suite](features/security-tests.md) | Control plane | [Token service](features/token-exchange.md), [Agent-bound tokens + mTLS](features/identity-enforcement.md), [Worker CA (mTLS)](features/worker-mtls.md), [Signed bundles](features/signed-bundles.md) | 4 (4M) | [#122](https://github.com/ethosagent/warden/issues/122) |
+| 1 | [Key manager](features/key-management.md) | Control plane | [SSO + 3 roles](features/console-sso-rbac.md), [Admin audit log](features/admin-audit-log.md), [Break-glass + backups](features/ops-hardening.md) | 7 (3S 4M) | [#75](https://github.com/ethosagent/warden/issues/75) |
+| 2 | [Agent registry](features/agent-registry.md) | Control plane | [SSO + 3 roles](features/console-sso-rbac.md), [Admin audit log](features/admin-audit-log.md), [Group-aware policy](features/identity-policy.md), [Verify user token](features/identity-verification.md), [Policy history + rollback](features/policy-versioning.md), [User block list](features/user-block-list.md), [Key manager](features/key-management.md) | 7 (4S 3M) | [#70](https://github.com/ethosagent/warden/issues/70) |
+| 3 | [Token service](features/token-exchange.md) | Control plane | [Verify user token](features/identity-verification.md), [User block list](features/user-block-list.md), [Admin audit log](features/admin-audit-log.md), [Group-aware policy](features/identity-policy.md), [SSO + 3 roles](features/console-sso-rbac.md), [Dex (one IdP)](features/dex-oidc.md), [Key manager](features/key-management.md), [Agent registry](features/agent-registry.md) | 7 (2S 5M) | [#81](https://github.com/ethosagent/warden/issues/81) |
+| 4 | [Worker CA (mTLS)](features/worker-mtls.md) | Control plane | [Per-worker tokens](features/worker-credentials.md), [SSO + 3 roles](features/console-sso-rbac.md), [Admin audit log](features/admin-audit-log.md), [Key manager](features/key-management.md) | 8 (4S 4M) | [#87](https://github.com/ethosagent/warden/issues/87) |
+| 5 | [Signed bundles](features/signed-bundles.md) | Control plane | [Policy history + rollback](features/policy-versioning.md), [User block list](features/user-block-list.md), [Key manager](features/key-management.md) | 7 (4S 3M) | [#94](https://github.com/ethosagent/warden/issues/94) |
+| 6 | [Approvals + replay](features/policy-approvals.md) | Control plane | [Policy history + rollback](features/policy-versioning.md), [SSO + 3 roles](features/console-sso-rbac.md), [Admin audit log](features/admin-audit-log.md), [Break-glass + backups](features/ops-hardening.md), [User block list](features/user-block-list.md), [Group-aware policy](features/identity-policy.md), [Verify user token](features/identity-verification.md), [Agent registry](features/agent-registry.md) | 9 (2S 7M) | [#100](https://github.com/ethosagent/warden/issues/100) |
+| 7 | [Scoped API keys](features/api-keys.md) | Control plane | [SSO + 3 roles](features/console-sso-rbac.md), [Admin audit log](features/admin-audit-log.md), [Per-worker tokens](features/worker-credentials.md), [Break-glass + backups](features/ops-hardening.md) | 7 (5S 2M) | [#106](https://github.com/ethosagent/warden/issues/106) |
+| 8 | [Agent-bound tokens + mTLS](features/identity-enforcement.md) | Worker | [Verify user token](features/identity-verification.md), [User block list](features/user-block-list.md), [Identity contract + CLI](features/identity-contract.md), [Token service](features/token-exchange.md), [Signed bundles](features/signed-bundles.md), [Worker CA (mTLS)](features/worker-mtls.md), [Agent registry](features/agent-registry.md), [Key manager](features/key-management.md), [SSO + 3 roles](features/console-sso-rbac.md) | 10 (5S 5M) | [#110](https://github.com/ethosagent/warden/issues/110) |
+| 9 | [Identity client + recipes](features/identity-client.md) | Agent / harness | [Identity contract + CLI](features/identity-contract.md), [Dex (one IdP)](features/dex-oidc.md), [Per-worker tokens](features/worker-credentials.md), [Token service](features/token-exchange.md), [Agent-bound tokens + mTLS](features/identity-enforcement.md), [Agent registry](features/agent-registry.md), [Key manager](features/key-management.md), [Signed bundles](features/signed-bundles.md) | 6 (3S 3M) | [#116](https://github.com/ethosagent/warden/issues/116) |
+| 10 | [Security test suite](features/security-tests.md) | Control plane | [Token service](features/token-exchange.md), [Agent-bound tokens + mTLS](features/identity-enforcement.md), [Worker CA (mTLS)](features/worker-mtls.md), [Signed bundles](features/signed-bundles.md), [Agent registry](features/agent-registry.md), [Key manager](features/key-management.md), [Scoped API keys](features/api-keys.md), [Verify user token](features/identity-verification.md), [SSO + 3 roles](features/console-sso-rbac.md), [User block list](features/user-block-list.md) | 7 (7M) | [#122](https://github.com/ethosagent/warden/issues/122) |
 
 ## Phase 3 · Act as the user
 
@@ -152,7 +150,6 @@ flowchart LR
     p1_identity_contract["Identity contract + CLI"]
     p1_sso_roles["SSO + 3 roles"]
     p1_admin_audit["Admin audit log"]
-    p1_policy_history["Policy history + rollback"]
     p1_group_policy["Group-aware policy"]
   end
   subgraph ph2["P2 · Proven identity"]
@@ -181,7 +178,6 @@ flowchart LR
   p3_per_user_secrets --> p3_consent_portal
   p3_per_user_limits --> p3_consent_portal
   p3_consent_portal --> p3_offboarding
-  p1_policy_history --> p3_offboarding
 ```
 
 | # | Feature | Lane | Needs first | Tickets | Epic |
@@ -267,8 +263,6 @@ Postgres and HA, Helm, OTel logs and traces, SIEM export, KMS, retention, direct
 flowchart LR
   subgraph ph1["P1 · Who did it"]
     p1_identity_contract["Identity contract + CLI"]
-    p1_json_audit["JSON audit → SIEM"]
-    p1_breakglass["Break-glass + backups"]
   end
   subgraph ph2["P2 · Proven identity"]
     p2_token_service["Token service"]
@@ -294,11 +288,9 @@ flowchart LR
   p2_api_keys --> p5_postgres_ha
   p4_grants --> p5_postgres_ha
   p4_mcp_registry --> p5_postgres_ha
-  p1_json_audit --> p5_otlp
   p1_identity_contract --> p5_otlp
   p2_worker_ca --> p5_otlp
   p2_worker_ca --> p5_helm
-  p1_breakglass --> p5_helm
   p2_worker_ca --> p5_kms
   p2_signed_bundles --> p5_kms
   p2_token_service --> p5_kms

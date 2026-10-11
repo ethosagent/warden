@@ -39,11 +39,15 @@ On a CP started with `console.auth: oidc` in --config, an https redirectURL and 
 - [Per-worker tokens](worker-credentials.md) (P1 · Who did it)
 - [Break-glass + backups](ops-hardening.md) (P1 · Who did it)
 - [Agent registry](agent-registry.md) (P2 · Proven identity)
+- [Token service](token-exchange.md) (P2 · Proven identity)
+- [Key manager](key-management.md) (P2 · Proven identity)
 - [Worker CA (mTLS)](worker-mtls.md) (P2 · Proven identity)
 - [Approvals + replay](policy-approvals.md) (P2 · Proven identity)
 - [Scoped API keys](api-keys.md) (P2 · Proven identity)
+- [Security test suite](security-tests.md) (P2 · Proven identity)
 - [MCP registry](mcp-registry.md) (P4 · Agents everywhere)
 - [Helm chart](helm.md) (P5 · Enterprise scale)
+- [Agent-bound tokens + mTLS](identity-enforcement.md) (P2 · Proven identity)
 
 ## Code it touches
 
@@ -99,7 +103,7 @@ Create new package `internal/cpstate` that opens one SQLite DB at `<state-dir>/w
 - [ ] Without --state-dir, existing CP tests pass unchanged: `go test ./cmd/proxy ./internal/controlplane`
 - [ ] Given an existing DB, when OpenReadOnly is used and a write is attempted, then the write fails and the file's bytes and mtime are unchanged: `go test ./internal/cpstate -run TestOpenReadOnly`
 
-**Unblocks:** [`W-P1-SSO-04`](console-sso-rbac.md#48--w-p1-sso-04) Add server-side sessions, logout, /auth/me and CSRF; [`W-P1-AAUD-01`](admin-audit-log.md#14--w-p1-aaud-01) Add signed, hash-chained admin audit store on cpstate; [`W-P1-PVER-01`](policy-versioning.md#16--w-p1-pver-01) Add versioned policy store and serve the head version; [`W-P1-BLOCK-03`](user-block-list.md#37--w-p1-block-03) Add the CP block-list store, admin API and policy merge; [`W-P1-WTOK-01`](worker-credentials.md#16--w-p1-wtok-01) Add worker token store with hashed storage, revocation and in-memory index; [`W-P1-OPS1-02`](ops-hardening.md#24--w-p1-ops1-02) Add scheduled SQLite backups with manifest and pruning
+**Unblocks:** [`W-P1-SSO-04`](console-sso-rbac.md#48--w-p1-sso-04) Add server-side sessions, logout, /auth/me and CSRF; [`W-P1-AAUD-01`](admin-audit-log.md#14--w-p1-aaud-01) Add signed, hash-chained admin audit store on cpstate; [`W-P1-PVER-01`](policy-versioning.md#16--w-p1-pver-01) Add versioned policy store and serve the head version; [`W-P1-BLOCK-03`](user-block-list.md#37--w-p1-block-03) Add the CP block-list store, admin API and policy merge; [`W-P1-WTOK-01`](worker-credentials.md#16--w-p1-wtok-01) Add worker token store with hashed storage, revocation and in-memory index; [`W-P1-OPS1-02`](ops-hardening.md#24--w-p1-ops1-02) Add scheduled SQLite backups with manifest and pruning; [`W-P2-AREG-01`](agent-registry.md#17--w-p2-areg-01) Add internal/agentreg store, schema and validation; [`W-P2-TOKX-01`](token-exchange.md#17--w-p2-tokx-01) Add private_key_jwt client assertion verification; [`W-P2-KEYS-02`](key-management.md#27--w-p2-keys-02) Add the keys config gate, file key store and signing_keys metadata; [`W-P2-APPR-01`](policy-approvals.md#19--w-p2-appr-01) Add approvals config, draft store and state machine; [`W-P2-APIK-01`](api-keys.md#17--w-p2-apik-01) Add internal/apikeys format, scope registry, store and index
 
 ### 2/8 · W-P1-SSO-02
 
@@ -137,7 +141,7 @@ Add the CP-local `console:` config block with strict parsing, validation and a p
 - [ ] Given oidc mode with an empty client secret env var, when resolveConsole runs, then it fails naming the variable and captured logs hold no secret value
 - [ ] Given an existing config with no console block, when it is parsed, then Console.Auth is "none" and existing config tests pass: `go test ./internal/config`
 
-**Unblocks:** [`W-P1-DEX-03`](dex-oidc.md#33--w-p1-dex-03) Document Dex as Warden's IdP with connector, failure-mode and prod guidance; [`W-P1-SSO-04`](console-sso-rbac.md#48--w-p1-sso-04) Add server-side sessions, logout, /auth/me and CSRF
+**Unblocks:** [`W-P1-DEX-03`](dex-oidc.md#33--w-p1-dex-03) Document Dex as Warden's IdP with connector, failure-mode and prod guidance; [`W-P1-SSO-04`](console-sso-rbac.md#48--w-p1-sso-04) Add server-side sessions, logout, /auth/me and CSRF; [`W-P2-TOKX-03`](token-exchange.md#37--w-p2-tokx-03) Mount POST /oauth2/token with RFC 8693 request parsing and config; [`W-P2-APPR-01`](policy-approvals.md#19--w-p2-appr-01) Add approvals config, draft store and state machine; [`W-P2-APIK-01`](api-keys.md#17--w-p2-apik-01) Add internal/apikeys format, scope registry, store and index
 
 ### 3/8 · W-P1-SSO-03
 
@@ -221,7 +225,7 @@ Add the `sessions` store, the session middleware that puts a Principal into the 
 
 **Depends on:** [`W-P1-SSO-01`](console-sso-rbac.md#18--w-p1-sso-01) Add internal/cpstate SQLite state store with migrations; [`W-P1-SSO-02`](console-sso-rbac.md#28--w-p1-sso-02) Parse and validate the CP-local console config block
 
-**Unblocks:** [`W-P1-SSO-03`](console-sso-rbac.md#38--w-p1-sso-03) Implement OIDC login and callback with PKCE on the control plane; [`W-P1-SSO-05`](console-sso-rbac.md#58--w-p1-sso-05) Enforce role checks on every dashboard route; [`W-P1-PVER-04`](policy-versioning.md#46--w-p1-pver-04) Add history panel with diff view and rollback to dashboard; [`W-P1-BLOCK-07`](user-block-list.md#77--w-p1-block-07) Deny console login and sessions for blocked principals; [`W-P1-OPS1-01`](ops-hardening.md#14--w-p1-ops1-01) Add break-glass local admin with alerting and audit
+**Unblocks:** [`W-P1-SSO-03`](console-sso-rbac.md#38--w-p1-sso-03) Implement OIDC login and callback with PKCE on the control plane; [`W-P1-SSO-05`](console-sso-rbac.md#58--w-p1-sso-05) Enforce role checks on every dashboard route; [`W-P1-PVER-04`](policy-versioning.md#46--w-p1-pver-04) Add history panel with diff view and rollback to dashboard; [`W-P1-BLOCK-07`](user-block-list.md#77--w-p1-block-07) Deny console login and sessions for blocked principals; [`W-P1-OPS1-01`](ops-hardening.md#14--w-p1-ops1-01) Add break-glass local admin with alerting and audit; [`W-P2-AREG-03`](agent-registry.md#37--w-p2-areg-03) Add the Agents tab to the CP console; [`W-P2-APIK-02`](api-keys.md#27--w-p2-apik-02) Authenticate API keys and enforce per-route scopes in the authz table; [`W-P2-SECT-01`](security-tests.md#17--w-p2-sect-01) Add security test harness with in-process CP, workers and shared fakes
 
 ### 5/8 · W-P1-SSO-05
 
@@ -262,7 +266,7 @@ Add the authz table and middleware that make oidc mode real: every {method, path
 
 **Depends on:** [`W-P1-SSO-03`](console-sso-rbac.md#38--w-p1-sso-03) Implement OIDC login and callback with PKCE on the control plane; [`W-P1-SSO-04`](console-sso-rbac.md#48--w-p1-sso-04) Add server-side sessions, logout, /auth/me and CSRF
 
-**Unblocks:** [`W-P1-SSO-06`](console-sso-rbac.md#68--w-p1-sso-06) Require an admin session on /central/secrets and flag open consoles; [`W-P1-SSO-08`](console-sso-rbac.md#88--w-p1-sso-08) Add admin session list and revoke API; [`W-P1-AAUD-02`](admin-audit-log.md#24--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware; [`W-P1-AAUD-03`](admin-audit-log.md#34--w-p1-aaud-03) Show admin audit log and chain verification in the dashboard; [`W-P1-PVER-02`](policy-versioning.md#26--w-p1-pver-02) Route policy, settings and llmProviders writes through versioned publish; [`W-P1-BLOCK-03`](user-block-list.md#37--w-p1-block-03) Add the CP block-list store, admin API and policy merge; [`W-P1-WTOK-03`](worker-credentials.md#36--w-p1-wtok-03) Add worker token admin API, dashboard panel and fleet auth fields; [`W-P1-OPS1-01`](ops-hardening.md#14--w-p1-ops1-01) Add break-glass local admin with alerting and audit
+**Unblocks:** [`W-P1-SSO-06`](console-sso-rbac.md#68--w-p1-sso-06) Require an admin session on /central/secrets and flag open consoles; [`W-P1-SSO-08`](console-sso-rbac.md#88--w-p1-sso-08) Add admin session list and revoke API; [`W-P1-AAUD-02`](admin-audit-log.md#24--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware; [`W-P1-AAUD-03`](admin-audit-log.md#34--w-p1-aaud-03) Show admin audit log and chain verification in the dashboard; [`W-P1-PVER-02`](policy-versioning.md#26--w-p1-pver-02) Route policy, settings and llmProviders writes through versioned publish; [`W-P1-BLOCK-03`](user-block-list.md#37--w-p1-block-03) Add the CP block-list store, admin API and policy merge; [`W-P1-WTOK-03`](worker-credentials.md#36--w-p1-wtok-03) Add worker token admin API, dashboard panel and fleet auth fields; [`W-P1-OPS1-01`](ops-hardening.md#14--w-p1-ops1-01) Add break-glass local admin with alerting and audit; [`W-P2-AREG-02`](agent-registry.md#27--w-p2-areg-02) Expose the agent registry admin API with admin-only writes and audit; [`W-P2-TOKX-03`](token-exchange.md#37--w-p2-tokx-03) Mount POST /oauth2/token with RFC 8693 request parsing and config; [`W-P2-KEYS-04`](key-management.md#47--w-p2-keys-04) Serve the token JWKS, readiness and admin key API from the control plane; [`W-P2-APPR-02`](policy-approvals.md#29--w-p2-appr-02) Implement widening-change classification; [`W-P2-APPR-04`](policy-approvals.md#49--w-p2-appr-04) Add the change draft API with the two-person rule; [`W-P2-APIK-02`](api-keys.md#27--w-p2-apik-02) Authenticate API keys and enforce per-route scopes in the authz table; [`W-P2-WBND-07`](identity-enforcement.md#710--w-p2-wbnd-07) Refuse require mode for agents served by workers without the capability
 
 ### 6/8 · W-P1-SSO-06
 
@@ -300,7 +304,7 @@ The dashboard never accepted the shared token, so W-P1-SSO-05's session requirem
 
 **Depends on:** [`W-P1-SSO-05`](console-sso-rbac.md#58--w-p1-sso-05) Enforce role checks on every dashboard route
 
-**Unblocks:** [`W-P1-SSO-07`](console-sso-rbac.md#78--w-p1-sso-07) Add Dex-backed console SSO end-to-end test; [`W-P1-OPS1-03`](ops-hardening.md#34--w-p1-ops1-03) Write break-glass and backup runbooks and a production readiness guide
+**Unblocks:** [`W-P1-SSO-07`](console-sso-rbac.md#78--w-p1-sso-07) Add Dex-backed console SSO end-to-end test; [`W-P1-OPS1-03`](ops-hardening.md#34--w-p1-ops1-03) Write break-glass and backup runbooks and a production readiness guide; [`W-P2-APIK-02`](api-keys.md#27--w-p2-apik-02) Authenticate API keys and enforce per-route scopes in the authz table; [`W-P2-SECT-06`](security-tests.md#67--w-p2-sect-06) Add CP route-boundary and enrollment attack cases
 
 ### 7/8 · W-P1-SSO-07
 
@@ -370,4 +374,4 @@ The role is recomputed from groups stored at login, so a user removed from an Id
 
 **Depends on:** [`W-P1-SSO-05`](console-sso-rbac.md#58--w-p1-sso-05) Enforce role checks on every dashboard route
 
-**Unblocks:** [`W-P1-SSO-07`](console-sso-rbac.md#78--w-p1-sso-07) Add Dex-backed console SSO end-to-end test
+**Unblocks:** [`W-P1-SSO-07`](console-sso-rbac.md#78--w-p1-sso-07) Add Dex-backed console SSO end-to-end test; [`W-P2-APIK-03`](api-keys.md#37--w-p2-apik-03) Add the API key management and self-introspection API
