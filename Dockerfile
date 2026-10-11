@@ -1,8 +1,8 @@
 # Multi-stage build: compile in a Go builder, ship a single static binary.
 # Base images are pinned by digest for reproducible, tamper-evident builds —
 # bump the digest deliberately when upgrading. Match GO_VERSION to go.mod.
-ARG GO_VERSION=1.26
-FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine@sha256:3ad57304ad93bbec8548a0437ad9e06a455660655d9af011d58b993f6f615648 AS builder
+ARG GO_VERSION=1.26.9
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine@sha256:3082400e369fa24d5fc60bca20edab3f6d604e0c5a690ec66b295eff4dd87ade AS builder
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
