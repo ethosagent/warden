@@ -50,3 +50,33 @@ Estimates summed from tickets are large (P1 ≈ 20–35 eng-weeks). If P1 needs 
 
 ## Reference
 - Dex advisory GHSA-7qjx-gp9h-65qj (token exchange ignores AllowedConnectors; unreleased master only) — reason Warden runs its own token service instead of trusting Dex's exchange.
+
+## Decisions log (2026-10-11)
+Phase 1
+- W-P1-JAUD-05/06 ship first in p1-json-audit, and the JAUD-05 secret-in-URL leak fix ships with no flag, because it is a bug fix.
+- Policy history ships behind `--policy-store=versioned` in release N, becomes the default in N+1 and removes YAML as a policy source in N+2, so the migration is gradual and reversible.
+- Admin-audit key rotation is deferred to p2-key-manager (W-P2-KEYS-06). P1 ships one key plus a documented manual rotation that starts a new chain segment stamped with the new key_id (`--admin-audit-new-segment`), which keeps P1 small and still verifiable.
+- Console sessions are idle 1h and absolute 12h, and `query/generate` needs the editor role, because it spends LLM tokens.
+- Worker tokens bind only to an exact proxy_id in P1, with no prefix binding. Autoscaled per-pod identity waits for P2 mTLS enrollment.
+- `warden identity exec` moves to P1 as W-P1-IDC-04 (S). It runs a child behind a loopback forwarder that refreshes the short-lived token before expiry and never puts it in env or argv. This removes the stale token in HTTPS_PROXY.
+- Size caps are 16 KiB per token and 32 KiB, 100 lines and a 10s deadline for CONNECT headers everywhere, so the worker, contract and forwarders agree.
+- Hand edits of the served YAML are audited in file mode too, as `config.external_change` with the new hash, so the default mode has no silent policy changes.
+- W-P1-DEX-03 may depend on tickets in later P1 features. This is accepted because it is a docs ticket that only has to merge after the keys it cites.
+
+Phase 2
+- The per-agent identity mode stays in settings `agents[].identity`, not in a registry column, so it is versioned, can be rolled back and goes through approvals.
+- The API-key admin routes move to `/dashboard/api/api-keys`. `/api/` is reserved for a future public key-authenticated API, so all admin routes use one chain.
+- Token issuance is recorded in a separate `token_events` table plus a `warden.token.v1` line, not in the admin audit chain, so machine traffic does not flood the chain.
+- Workers use one `controlPlane.stateDir` with subdirectories (`cert/`, `bundle/`; no `bundleCacheDir`), so there is one directory to secure. Bundle verification flips to require by default at the Phase 2 gate.
+- With approvals on, removing a block-list entry needs a second admin, while adding a block stays single-admin. Break-glass can bypass only through the audited emergency apply, which keeps the kill switch fast and makes unblocking deliberate.
+- An offline `warden control-plane block add|remove|list` CLI is added as W-P1-BLOCK-08 (S). It follows the WTOK-05 audit and key rules, so P1 operators and recipe checks can block users without a console session.
+- W-P2-WBND-05 and W-P2-WBND-06 stay as small tickets, because each still proves a distinct behaviour.
+
+Phase 3
+- `consent.store` is CP-only, and workers never get stored per-user credentials, so a compromised worker cannot read refresh tokens.
+- `allowClientSecrets` is dropped. Client secrets come only from consent.store or clientSecretEnv.
+- Consent requires `console.auth=oidc`, with no dev bypass for the IdP link, so dev and prod share one code path.
+- Two new worker→CP calls are accepted: `/control/user-token` and `/control/connect/pending`. Both need the worker cert (mTLS), are rate-limited and have the CP re-verify the user token, and the docs no longer say "exactly three calls".
+- If saving a refresh token fails, the CP retries briefly in memory, then raises a metric and a Finding. There is no encrypted queue in P3. Buffered responses reuse the existing response scanner to redact swapped per-user tokens; the implementer checks coverage first and extends the scanner if needed.
+- Saving a `dailyCostUSD` rule returns 409 while workers without `usercost/v1` are connected, unless an admin sends an audited `force=true`, because old workers fail open on cost caps. The W-P3-PUL-06 cost fix ships with no flag.
+- Offboarding mode defaults to off, and token_lost users are only alerted. Blocks created by offboarding expire after a configurable 90 days with an audit record, so the 5000-entry block list does not fill up.

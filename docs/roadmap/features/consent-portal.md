@@ -244,7 +244,7 @@ Revoke reaches workers through the userGrantEpochs signed-bundle section that W-
 - [ ] Given a failing EpochStore, Then RevokeUserGrant returns status partial with epoch failed and the secret already deleted.
 - [ ] Given no consent block, Then the /policy body and ETag are unchanged.
 
-**Depends on:** [`W-P3-PUS-08`](refresh-model.md#812--w-p3-pus-08) Serve perUserSecrets and userGrantEpochs as signed-bundle sections; [`W-P3-BRKR-02`](oauth-broker.md#29--w-p3-brkr-02) Add pending authorization, attempt and grant metadata stores; [`W-P1-BLOCK-04`](user-block-list.md#47--w-p1-block-04) Add the Blocked users console panel and worker enforcement indicator
+**Depends on:** [`W-P3-PUS-08`](refresh-model.md#812--w-p3-pus-08) Serve perUserSecrets and userGrantEpochs as signed-bundle sections; [`W-P3-BRKR-02`](oauth-broker.md#29--w-p3-brkr-02) Add pending authorization, attempt and grant metadata stores; [`W-P1-BLOCK-04`](user-block-list.md#48--w-p1-block-04) Add the Blocked users console panel and worker enforcement indicator
 
 **Unblocks:** [`W-P3-PORT-02`](consent-portal.md#27--w-p3-port-02) Implement revoke with grant, secret, epoch and provider steps; [`W-P3-PORT-06`](consent-portal.md#67--w-p3-port-06) Prove portal revoke end to end on usersecrets/v1 workers
 

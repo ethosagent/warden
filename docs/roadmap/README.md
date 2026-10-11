@@ -23,7 +23,7 @@ Grey tags exist today; coloured tags show the phase that adds each part. The cor
 
 | Phase | What works at the end | Features | Tickets | S / M / L | Eng-weeks |
 |---|---|---|---|---|---|
-| [P1 · Who did it](#phase-1--who-did-it) | Console SSO via Dex with 3 roles, admin audit log, policy history and rollback, per-worker tokens, user token verified on the worker in attribute mode, group-aware policy, fleet-wide user block, JSON audit logs, identity contract and CLI. | 11 | 63 | 32 / 31 / 0 | 25–44 |
+| [P1 · Who did it](#phase-1--who-did-it) | Console SSO via Dex with 3 roles, admin audit log, policy history and rollback, per-worker tokens, user token verified on the worker in attribute mode, group-aware policy, fleet-wide user block, JSON audit logs, identity contract and CLI. | 11 | 65 | 34 / 31 / 0 | 25–45 |
 | [P2 · Proven identity](#phase-2--proven-identity) | Agent registry, RFC 8693 token service (15-minute agent-bound tokens), key manager, worker CA and mTLS, signed bundles, two-person approval with replay, scoped API keys, require-identity mode, Claude Code and Codex recipes. | 10 | 75 | 32 / 43 / 0 | 32–56 |
 | [P3 · Act as the user](#phase-3--act-as-the-user) | Consent portal, OAuth broker for Google and GitHub, per-user secrets with refresh, JIT 403 with long-poll, offboarding revocation, per-user limits. | 7 | 59 | 22 / 37 / 0 | 27–46 |
 | [P4 · Agents everywhere](#phase-4--agents-everywhere) | Delegation grants, park and notify, MCP gateway and registry, external hooks, admin MCP server, policy as code with canary. | 8 | 54 | 16 / 38 / 0 | 26–44 |
@@ -70,14 +70,14 @@ flowchart LR
 |---|---|---|---|---|---|
 | 1 | [Dex (one IdP)](features/dex-oidc.md) | Identity provider | — | 3 (2S 1M) | [#16](https://github.com/ethosagent/warden/issues/16) |
 | 2 | [Verify user token](features/identity-verification.md) | Worker | [Dex (one IdP)](features/dex-oidc.md) | 7 (2S 5M) | [#20](https://github.com/ethosagent/warden/issues/20) |
-| 3 | [Identity contract + CLI](features/identity-contract.md) | Agent / harness | [Dex (one IdP)](features/dex-oidc.md), [Verify user token](features/identity-verification.md) | 3 (1S 2M) | [#26](https://github.com/ethosagent/warden/issues/26) |
+| 3 | [Identity contract + CLI](features/identity-contract.md) | Agent / harness | [Dex (one IdP)](features/dex-oidc.md), [Verify user token](features/identity-verification.md) | 4 (2S 2M) | [#26](https://github.com/ethosagent/warden/issues/26) |
 | 4 | [SSO + 3 roles](features/console-sso-rbac.md) | Control plane | [Dex (one IdP)](features/dex-oidc.md), [Verify user token](features/identity-verification.md) | 8 (4S 4M) | [#30](https://github.com/ethosagent/warden/issues/30) |
 | 5 | [Admin audit log](features/admin-audit-log.md) | Control plane | [SSO + 3 roles](features/console-sso-rbac.md) | 4 (2S 2M) | [#37](https://github.com/ethosagent/warden/issues/37) |
 | 6 | [Policy history + rollback](features/policy-versioning.md) | Control plane | [SSO + 3 roles](features/console-sso-rbac.md), [Admin audit log](features/admin-audit-log.md) | 6 (2S 4M) | [#41](https://github.com/ethosagent/warden/issues/41) |
 | 7 | [Per-worker tokens](features/worker-credentials.md) | Control plane | [SSO + 3 roles](features/console-sso-rbac.md), [Admin audit log](features/admin-audit-log.md) | 6 (3S 3M) | [#50](https://github.com/ethosagent/warden/issues/50) |
 | 8 | [JSON audit → SIEM](features/audit-log-export.md) | Integrations | [Verify user token](features/identity-verification.md), [Admin audit log](features/admin-audit-log.md) | 6 (5S 1M) | [#65](https://github.com/ethosagent/warden/issues/65) |
 | 9 | [Break-glass + backups](features/ops-hardening.md) | Control plane | [SSO + 3 roles](features/console-sso-rbac.md), [Admin audit log](features/admin-audit-log.md), [Policy history + rollback](features/policy-versioning.md), [Per-worker tokens](features/worker-credentials.md), [JSON audit → SIEM](features/audit-log-export.md) | 4 (1S 3M) | [#55](https://github.com/ethosagent/warden/issues/55) |
-| 10 | [User block list](features/user-block-list.md) | Control plane | [Verify user token](features/identity-verification.md), [SSO + 3 roles](features/console-sso-rbac.md), [Admin audit log](features/admin-audit-log.md), [JSON audit → SIEM](features/audit-log-export.md), [Break-glass + backups](features/ops-hardening.md) | 7 (4S 3M) | [#46](https://github.com/ethosagent/warden/issues/46) |
+| 10 | [User block list](features/user-block-list.md) | Control plane | [Verify user token](features/identity-verification.md), [SSO + 3 roles](features/console-sso-rbac.md), [Admin audit log](features/admin-audit-log.md), [JSON audit → SIEM](features/audit-log-export.md), [Break-glass + backups](features/ops-hardening.md) | 8 (5S 3M) | [#46](https://github.com/ethosagent/warden/issues/46) |
 | 11 | [Group-aware policy](features/identity-policy.md) | Worker | [Verify user token](features/identity-verification.md), [JSON audit → SIEM](features/audit-log-export.md) | 9 (6S 3M) | [#59](https://github.com/ethosagent/warden/issues/59) |
 
 ## Phase 2 · Proven identity
