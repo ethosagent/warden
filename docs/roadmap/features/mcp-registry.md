@@ -60,7 +60,7 @@ On a CP with console.auth=oidc, admin audit, --policy-store=versioned, --bundles
 | 8/11 | [`W-P4-MREG-08`](#811--w-p4-mreg-08) | Make the warden mcp wedge enforce registry integrity | feature | M | W-P4-MREG-06, W-P2-SBND-06 | [#306](https://github.com/ethosagent/warden/issues/306) |
 | 9/11 | [`W-P4-MREG-09`](#911--w-p4-mreg-09) | Add canonical tool pins and server-keyed MCP inventory | feature | M | — | [#307](https://github.com/ethosagent/warden/issues/307) |
 | 10/11 | [`W-P4-MREG-10`](#1011--w-p4-mreg-10) | Add MCP registry end-to-end test and operator docs | test | M | W-P4-MREG-03, W-P4-MREG-04, W-P4-MREG-06, W-P4-MREG-08, W-P4-MREG-11 | [#308](https://github.com/ethosagent/warden/issues/308) |
-| 11/11 | [`W-P4-MREG-11`](#1111--w-p4-mreg-11) | Discover OAuth settings for remote MCP registry servers | feature | M | W-P4-MREG-03, W-P2-APPR-08, W-P3-BRKR-01, W-P3-BRKR-03, W-P3-BRKR-04, W-P3-BRKR-06 | — |
+| 11/11 | [`W-P4-MREG-11`](#1111--w-p4-mreg-11) | Discover OAuth settings for remote MCP registry servers | feature | M | W-P4-MREG-03, W-P2-APPR-08, W-P3-BRKR-01, W-P3-BRKR-03, W-P3-BRKR-04, W-P3-BRKR-06 | [#337](https://github.com/ethosagent/warden/issues/337) |
 
 ### 1/11 · W-P4-MREG-01
 
@@ -443,7 +443,7 @@ Prove the done_when across the CP, approvals, the signed bundle, a pinned worker
 
 **Discover OAuth settings for remote MCP registry servers**
 
-Type **feature** · Size **M** · Issue —
+Type **feature** · Size **M** · Issue [#337](https://github.com/ethosagent/warden/issues/337)
 
 Remote MCP servers that use OAuth publish their settings through RFC 9728 protected-resource metadata and RFC 8414 or OIDC authorization-server metadata. Let an admin turn a registered http/sse server into a draft per-user OAuth provider from that metadata instead of copying endpoints by hand. Discovery fetches untrusted URLs from the CP, so it uses a locked-down client, and its output is only a draft: activating it is a widening change that needs approval. Every grant stays per user through the existing broker and refresh engine; no shared service-level token is ever created.
 

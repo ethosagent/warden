@@ -69,8 +69,8 @@ On a compose deployment with signed bundles, the token service, perUserSecrets a
 | 13/17 | [`W-P4-MGW-13`](#1317--w-p4-mgw-13) | Key gateway verdicts by server and add a side-effect-free tool check | feature | M | W-P4-DGR-05, W-P4-MREG-06 | [#320](https://github.com/ethosagent/warden/issues/320) |
 | 14/17 | [`W-P4-MGW-14`](#1417--w-p4-mgw-14) | Store MCP gateway fields and upstream state in the CP fleet store | feature | M | W-P4-MGW-11, W-P4-MGW-02, W-P4-MGW-04, W-P4-MGW-05 | [#321](https://github.com/ethosagent/warden/issues/321) |
 | 15/17 | [`W-P4-MGW-15`](#1517--w-p4-mgw-15) | Document MCP gateway setup for operators and agents | docs | S | W-P4-MGW-05, W-P4-MGW-07 | [#322](https://github.com/ethosagent/warden/issues/322) |
-| 16/17 | [`W-P4-MGW-16`](#1617--w-p4-mgw-16) | Stream tools/list_changed to agents over GET SSE | feature | S | W-P4-MGW-03, W-P4-MGW-06 | — |
-| 17/17 | [`W-P4-MGW-17`](#1717--w-p4-mgw-17) | Generate agent MCP client config for a gateway | feature | S | W-P4-MGW-02, W-P4-MGW-03, W-P4-MGW-15, W-P2-APIK-02 | — |
+| 16/17 | [`W-P4-MGW-16`](#1617--w-p4-mgw-16) | Stream tools/list_changed to agents over GET SSE | feature | S | W-P4-MGW-03, W-P4-MGW-06 | [#338](https://github.com/ethosagent/warden/issues/338) |
+| 17/17 | [`W-P4-MGW-17`](#1717--w-p4-mgw-17) | Generate agent MCP client config for a gateway | feature | S | W-P4-MGW-02, W-P4-MGW-03, W-P4-MGW-15, W-P2-APIK-02 | [#339](https://github.com/ethosagent/warden/issues/339) |
 
 ### 1/17 · W-P4-MGW-01
 
@@ -626,7 +626,7 @@ Write the operator and agent-author guide for the MCP gateway, so teams can turn
 
 **Stream tools/list_changed to agents over GET SSE**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#338](https://github.com/ethosagent/warden/issues/338)
 
 In v1 GET on /mcp/{gateway} returns 405 and initialize advertises `tools.listChanged:false`, so agents only see new or removed tools when they list again. Add an opt-in server-to-client SSE stream on GET that sends `notifications/tools/list_changed` when a session's effective tool set changes, and advertise `listChanged:true` only while it is on. Default off; streams are bounded per agent.
 
@@ -659,7 +659,7 @@ In v1 GET on /mcp/{gateway} returns 405 and initialize advertises `tools.listCha
 
 **Generate agent MCP client config for a gateway**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#339](https://github.com/ethosagent/warden/issues/339)
 
 Give operators a correct, copy-ready MCP client config for a gateway instead of hand-writing URLs. A CP route and `warden mcp config <gateway>` render the gateway URL for Claude Code, Codex or a generic client, the identity forwarder setup note and optional tool docs. The output is safe to paste into a repo: it holds no token, key or query string, and the host comes from CP config, never from the request.
 
