@@ -34,17 +34,23 @@ On a managed deployment where every connected worker advertises blocklist/v1, an
 - [SSO + 3 roles](console-sso-rbac.md) (P1 · Who did it)
 - [Admin audit log](admin-audit-log.md) (P1 · Who did it)
 - [JSON audit → SIEM](audit-log-export.md) (P1 · Who did it)
+- [Break-glass + backups](ops-hardening.md) (P1 · Who did it)
 
 ## Unblocks
 
+- [Consent sign-in](consent-auth.md) (P3 · Act as the user)
 - [Agent registry](agent-registry.md) (P2 · Proven identity)
 - [Token service](token-exchange.md) (P2 · Proven identity)
 - [Signed bundles](signed-bundles.md) (P2 · Proven identity)
 - [Approvals + replay](policy-approvals.md) (P2 · Proven identity)
 - [Security test suite](security-tests.md) (P2 · Proven identity)
+- [OAuth broker](oauth-broker.md) (P3 · Act as the user)
+- [Consent portal](consent-portal.md) (P3 · Act as the user)
 - [Offboarding revocation](offboarding.md) (P3 · Act as the user)
 - [Postgres + HA](postgres-ha.md) (P5 · Enterprise scale)
 - [Agent-bound tokens + mTLS](identity-enforcement.md) (P2 · Proven identity)
+- [Per-user secrets (refresh)](refresh-model.md) (P3 · Act as the user)
+- [Per-user limits + cost](per-user-limits.md) (P3 · Act as the user)
 
 ## Code it touches
 
@@ -97,7 +103,7 @@ Add the `config.BlockedUser` type, `Policy.BlockedUsers`, a shared normalizer an
 - [ ] MaxBlockedUsers entries of maximum length marshal to under 512 KiB, half of the worker's 1 MiB `maxPolicyBytes`.
 - [ ] A dashboard policy edit through `Server.WritePolicy` keeps `policy.blockedUsers` in the file, and `scripts/check.sh` passes.
 
-**Unblocks:** [`W-P1-BLOCK-02`](user-block-list.md#27--w-p1-block-02) Enforce the block list in the worker at CONNECT, per request and per h2 stream; [`W-P1-BLOCK-03`](user-block-list.md#37--w-p1-block-03) Add the CP block-list store, admin API and policy merge
+**Unblocks:** [`W-P1-BLOCK-02`](user-block-list.md#27--w-p1-block-02) Enforce the block list in the worker at CONNECT, per request and per h2 stream; [`W-P1-BLOCK-03`](user-block-list.md#37--w-p1-block-03) Add the CP block-list store, admin API and policy merge; [`W-P3-PUL-01`](per-user-limits.md#110--w-p3-pul-01) Add userLimits config, costBlockedUsers wire type and validation
 
 ### 2/7 · W-P1-BLOCK-02
 
@@ -137,7 +143,7 @@ Build the block set inside `policy.Evaluator` so it is swapped atomically with a
 
 **Depends on:** [`W-P1-BLOCK-01`](user-block-list.md#17--w-p1-block-01) Carry blockedUsers in config.Policy and the policy wire; [`W-P1-VRFY-03`](identity-verification.md#37--w-p1-vrfy-03) Record user fields on worker events, receipts, decision logs and sync; [`W-P1-JAUD-06`](audit-log-export.md#26--w-p1-jaud-06) Set a bounded Reason on every deny event
 
-**Unblocks:** [`W-P1-BLOCK-05`](user-block-list.md#57--w-p1-block-05) Close open sessions of newly blocked users on policy change; [`W-P2-AREG-05`](agent-registry.md#57--w-p2-areg-05) Bind workers to an agent id and enforce agent_disabled; [`W-P2-WBND-03`](identity-enforcement.md#310--w-p2-wbnd-03) Enforce identity require mode on CONNECT and terminated traffic
+**Unblocks:** [`W-P1-BLOCK-05`](user-block-list.md#57--w-p1-block-05) Close open sessions of newly blocked users on policy change; [`W-P2-AREG-05`](agent-registry.md#57--w-p2-areg-05) Bind workers to an agent id and enforce agent_disabled; [`W-P3-OFFB-04`](offboarding.md#47--w-p3-offb-04) Add an E2E test for IdP-driven offboarding and its false-positive guards; [`W-P2-WBND-03`](identity-enforcement.md#310--w-p2-wbnd-03) Enforce identity require mode on CONNECT and terminated traffic; [`W-P3-PUL-09`](per-user-limits.md#910--w-p3-pul-09) Enforce per-user rate limits per request in the proxy
 
 ### 3/7 · W-P1-BLOCK-03
 
@@ -176,7 +182,7 @@ Add the `blocked_users` cpstate table, a `BlockStore` Go API, and admin-only end
 
 **Depends on:** [`W-P1-BLOCK-01`](user-block-list.md#17--w-p1-block-01) Carry blockedUsers in config.Policy and the policy wire; [`W-P1-SSO-01`](console-sso-rbac.md#18--w-p1-sso-01) Add internal/cpstate SQLite state store with migrations; [`W-P1-SSO-05`](console-sso-rbac.md#58--w-p1-sso-05) Enforce role checks on every dashboard route; [`W-P1-AAUD-02`](admin-audit-log.md#24--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware
 
-**Unblocks:** [`W-P1-BLOCK-04`](user-block-list.md#47--w-p1-block-04) Add the Blocked users console panel and worker enforcement indicator; [`W-P1-BLOCK-07`](user-block-list.md#77--w-p1-block-07) Deny console login and sessions for blocked principals; [`W-P2-AREG-04`](agent-registry.md#47--w-p2-areg-04) Serve registered agents in the policy wire; [`W-P2-TOKX-02`](token-exchange.md#27--w-p2-tokx-02) Implement token exchange policy checks and JWT minting; [`W-P2-APPR-08`](policy-approvals.md#89--w-p2-appr-08) Hold block-list removals and widening agent edits for approval
+**Unblocks:** [`W-P1-BLOCK-04`](user-block-list.md#47--w-p1-block-04) Add the Blocked users console panel and worker enforcement indicator; [`W-P1-BLOCK-07`](user-block-list.md#77--w-p1-block-07) Deny console login and sessions for blocked principals; [`W-P2-AREG-04`](agent-registry.md#47--w-p2-areg-04) Serve registered agents in the policy wire; [`W-P2-TOKX-02`](token-exchange.md#27--w-p2-tokx-02) Implement token exchange policy checks and JWT minting; [`W-P2-APPR-08`](policy-approvals.md#89--w-p2-appr-08) Hold block-list removals and widening agent edits for approval; [`W-P3-BRKR-03`](oauth-broker.md#39--w-p3-brkr-03) Implement POST /connect/start with PKCE, CSRF and scope capping; [`W-P3-OFFB-01`](offboarding.md#17--w-p3-offb-01) Implement the resumable two-stage Offboarder; [`W-P3-PUS-07`](refresh-model.md#712--w-p3-pus-07) Add the worker-mTLS mint endpoint POST /control/user-token
 
 ### 4/7 · W-P1-BLOCK-04
 
@@ -211,7 +217,7 @@ Add a 'Blocked users' panel to the console for listing, adding and removing entr
 
 **Depends on:** [`W-P1-BLOCK-03`](user-block-list.md#37--w-p1-block-03) Add the CP block-list store, admin API and policy merge; [`W-P1-VRFY-04`](identity-verification.md#47--w-p1-vrfy-04) Add user filter and top-users breakdown to the dashboard
 
-**Unblocks:** [`W-P2-AREG-03`](agent-registry.md#37--w-p2-areg-03) Add the Agents tab to the CP console; [`W-P2-SBND-05`](signed-bundles.md#57--w-p2-sbnd-05) Report bundle state through metrics, heartbeat and the fleet view; [`W-P2-WBND-07`](identity-enforcement.md#710--w-p2-wbnd-07) Refuse require mode for agents served by workers without the capability
+**Unblocks:** [`W-P2-AREG-03`](agent-registry.md#37--w-p2-areg-03) Add the Agents tab to the CP console; [`W-P2-SBND-05`](signed-bundles.md#57--w-p2-sbnd-05) Report bundle state through metrics, heartbeat and the fleet view; [`W-P3-PORT-05`](consent-portal.md#57--w-p3-port-05) Bump grant epochs on revoke and report workers without usersecrets/v1; [`W-P2-WBND-07`](identity-enforcement.md#710--w-p2-wbnd-07) Refuse require mode for agents served by workers without the capability
 
 ### 5/7 · W-P1-BLOCK-05
 
@@ -310,4 +316,4 @@ A blocked admin can still sign in to the console or use an open session and remo
 
 **Depends on:** [`W-P1-BLOCK-03`](user-block-list.md#37--w-p1-block-03) Add the CP block-list store, admin API and policy merge; [`W-P1-SSO-04`](console-sso-rbac.md#48--w-p1-sso-04) Add server-side sessions, logout, /auth/me and CSRF; [`W-P1-OPS1-01`](ops-hardening.md#14--w-p1-ops1-01) Add break-glass local admin with alerting and audit
 
-**Unblocks:** [`W-P2-TOKX-02`](token-exchange.md#27--w-p2-tokx-02) Implement token exchange policy checks and JWT minting
+**Unblocks:** [`W-P3-CSIG-02`](consent-auth.md#27--w-p3-csig-02) Implement portal login, callback and session store; [`W-P3-CSIG-04`](consent-auth.md#47--w-p3-csig-04) Add the portal session middleware, CSRF, logout and console isolation; [`W-P2-TOKX-02`](token-exchange.md#27--w-p2-tokx-02) Implement token exchange policy checks and JWT minting; [`W-P3-OFFB-01`](offboarding.md#17--w-p3-offb-01) Implement the resumable two-stage Offboarder; [`W-P3-OFFB-06`](offboarding.md#67--w-p3-offb-06) Audit and test blocked-user refusals across portal and connect

@@ -46,6 +46,7 @@ On a compose deployment with a CP (token service, signed bundles, worker CA, age
 
 - [Identity client + recipes](identity-client.md) (P2 · Proven identity)
 - [Security test suite](security-tests.md) (P2 · Proven identity)
+- [Per-user secrets (refresh)](refresh-model.md) (P3 · Act as the user)
 
 ## Code it touches
 
@@ -104,7 +105,7 @@ Add a Warden token verifier to the P1 internal/identity package that takes its k
 
 **Depends on:** [`W-P1-VRFY-07`](identity-verification.md#77--w-p1-vrfy-07) Wire the identity verifier into worker assembly, hot reload and deployment; [`W-P2-SBND-04`](signed-bundles.md#47--w-p2-sbnd-04) Verify signed bundles in RemoteProvider and keep last-known-good in memory; [`W-P2-KEYS-01`](key-management.md#17--w-p2-keys-01) Add internal/keys Signer, JWK and RFC 7638 kid helpers; [`W-P2-WBND-04`](identity-enforcement.md#410--w-p2-wbnd-04) Extend identity metrics with token type and binding reasons; [`W-P2-WBND-06`](identity-enforcement.md#610--w-p2-wbnd-06) Add token issuer, agent key thumbprints and email claims to CP outputs
 
-**Unblocks:** [`W-P2-WBND-02`](identity-enforcement.md#210--w-p2-wbnd-02) Bind Warden tokens to the worker's registered agent and key
+**Unblocks:** [`W-P2-WBND-02`](identity-enforcement.md#210--w-p2-wbnd-02) Bind Warden tokens to the worker's registered agent and key; [`W-P3-PUS-07`](refresh-model.md#712--w-p3-pus-07) Add the worker-mTLS mint endpoint POST /control/user-token
 
 ### 2/10 · W-P2-WBND-02
 
@@ -144,7 +145,7 @@ Using the worker agent id from W-P2-AREG-05, check that every Warden token was m
 
 **Depends on:** [`W-P2-WBND-01`](identity-enforcement.md#110--w-p2-wbnd-01) Verify CP-issued Warden tokens against verified bundle keys; [`W-P2-AREG-04`](agent-registry.md#47--w-p2-areg-04) Serve registered agents in the policy wire; [`W-P1-VRFY-03`](identity-verification.md#37--w-p1-vrfy-03) Record user fields on worker events, receipts, decision logs and sync; [`W-P2-AREG-05`](agent-registry.md#57--w-p2-areg-05) Bind workers to an agent id and enforce agent_disabled
 
-**Unblocks:** [`W-P2-WBND-03`](identity-enforcement.md#310--w-p2-wbnd-03) Enforce identity require mode on CONNECT and terminated traffic; [`W-P2-WBND-08`](identity-enforcement.md#810--w-p2-wbnd-08) Store agent and token type fields in the CP fleet store
+**Unblocks:** [`W-P2-WBND-03`](identity-enforcement.md#310--w-p2-wbnd-03) Enforce identity require mode on CONNECT and terminated traffic; [`W-P2-WBND-08`](identity-enforcement.md#810--w-p2-wbnd-08) Store agent and token type fields in the CP fleet store; [`W-P3-PUS-04`](refresh-model.md#412--w-p3-pus-04) Swap per-user placeholders only for bound identities on mapped domains
 
 ### 3/10 · W-P2-WBND-03
 
@@ -320,7 +321,7 @@ CP rollout guard for require mode. An old worker keeps attribute mode when it re
 
 **Depends on:** [`W-P1-BLOCK-04`](user-block-list.md#47--w-p1-block-04) Add the Blocked users console panel and worker enforcement indicator; [`W-P2-AREG-02`](agent-registry.md#27--w-p2-areg-02) Expose the agent registry admin API with admin-only writes and audit; [`W-P2-AREG-03`](agent-registry.md#37--w-p2-areg-03) Add the Agents tab to the CP console; [`W-P1-SSO-05`](console-sso-rbac.md#58--w-p1-sso-05) Enforce role checks on every dashboard route
 
-**Unblocks:** [`W-P2-WBND-10`](identity-enforcement.md#1010--w-p2-wbnd-10) Test require mode and worker mTLS end to end
+**Unblocks:** [`W-P2-WBND-10`](identity-enforcement.md#1010--w-p2-wbnd-10) Test require mode and worker mTLS end to end; [`W-P3-PUS-08`](refresh-model.md#812--w-p3-pus-08) Serve perUserSecrets and userGrantEpochs as signed-bundle sections
 
 ### 8/10 · W-P2-WBND-08
 

@@ -43,6 +43,7 @@ Done when a CP running with --state-dir, TLS and `workerCA.enabled` (intermediat
 - [Helm chart](helm.md) (P5 · Enterprise scale)
 - [KMS keys](kms.md) (P5 · Enterprise scale)
 - [Agent-bound tokens + mTLS](identity-enforcement.md) (P2 · Proven identity)
+- [Per-user secrets (refresh)](refresh-model.md) (P3 · Act as the user)
 - [JIT 403 + long-poll](jit-authorization.md) (P3 · Act as the user)
 
 ## Code it touches
@@ -180,7 +181,7 @@ Add the worker side: a state dir, enrollment with a `wet_` token, persisted key 
 
 **Depends on:** [`W-P2-WCA-04`](worker-mtls.md#48--w-p2-wca-04) Accept worker certs in WorkerAuthenticator and add /control/renew
 
-**Unblocks:** [`W-P2-WCA-06`](worker-mtls.md#68--w-p2-wca-06) Move the compose recipe to worker certs and document the migration; [`W-P2-SECT-01`](security-tests.md#17--w-p2-sect-01) Add security test harness with in-process CP, workers and shared fakes; [`W-P2-WBND-05`](identity-enforcement.md#510--w-p2-wbnd-05) Use the worker mTLS client cert for all CP calls
+**Unblocks:** [`W-P2-WCA-06`](worker-mtls.md#68--w-p2-wca-06) Move the compose recipe to worker certs and document the migration; [`W-P2-SECT-01`](security-tests.md#17--w-p2-sect-01) Add security test harness with in-process CP, workers and shared fakes; [`W-P2-WBND-05`](identity-enforcement.md#510--w-p2-wbnd-05) Use the worker mTLS client cert for all CP calls; [`W-P3-PUS-09`](refresh-model.md#912--w-p3-pus-09) Add the worker UserTokenSource with memory cache and epoch invalidation; [`W-P3-JIT-02`](jit-authorization.md#27--w-p3-jit-02) Return structured 403 for HTTP when a grant is missing
 
 ### 4/8 · W-P2-WCA-04
 
@@ -220,7 +221,7 @@ Extend the P1 WorkerAuthenticator with a cert principal on /policy, /control/hea
 
 **Depends on:** [`W-P2-WCA-02`](worker-mtls.md#28--w-p2-wca-02) Add enrollment token store, POST /control/enroll and enroll-token CLI; [`W-P1-WTOK-04`](worker-credentials.md#46--w-p1-wtok-04) Add strict worker auth mode and the WARDEN_CP_TOKEN migration guide
 
-**Unblocks:** [`W-P2-WCA-03`](worker-mtls.md#38--w-p2-wca-03) Add worker enrollment, auto-renew and cert-based CP client; [`W-P2-WCA-05`](worker-mtls.md#58--w-p2-wca-05) Implement worker cert revocation in the console and CLI; [`W-P2-SECT-05`](security-tests.md#57--w-p2-sect-05) Add Go-only test seams for in-process CP and worker runs
+**Unblocks:** [`W-P2-WCA-03`](worker-mtls.md#38--w-p2-wca-03) Add worker enrollment, auto-renew and cert-based CP client; [`W-P2-WCA-05`](worker-mtls.md#58--w-p2-wca-05) Implement worker cert revocation in the console and CLI; [`W-P2-SECT-05`](security-tests.md#57--w-p2-sect-05) Add Go-only test seams for in-process CP and worker runs; [`W-P3-PUS-07`](refresh-model.md#712--w-p3-pus-07) Add the worker-mTLS mint endpoint POST /control/user-token; [`W-P3-JIT-01`](jit-authorization.md#17--w-p3-jit-01) Add CP endpoint to create or reuse pending authorizations; [`W-P3-JIT-04`](jit-authorization.md#47--w-p3-jit-04) Add /connect/{id}/status long-poll on the CP
 
 ### 5/8 · W-P2-WCA-05
 

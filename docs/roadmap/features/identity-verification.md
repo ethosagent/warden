@@ -32,15 +32,19 @@ On a real deployment (CP plus at least one worker with TLS termination, Dex from
 ## Unblocks
 
 - [Identity contract + CLI](identity-contract.md) (P1 · Who did it)
+- [Consent sign-in](consent-auth.md) (P3 · Act as the user)
 - [SSO + 3 roles](console-sso-rbac.md) (P1 · Who did it)
 - [User block list](user-block-list.md) (P1 · Who did it)
 - [Agent registry](agent-registry.md) (P2 · Proven identity)
 - [Token service](token-exchange.md) (P2 · Proven identity)
 - [Approvals + replay](policy-approvals.md) (P2 · Proven identity)
 - [Security test suite](security-tests.md) (P2 · Proven identity)
+- [Consent portal](consent-portal.md) (P3 · Act as the user)
+- [Offboarding revocation](offboarding.md) (P3 · Act as the user)
 - [Group-aware policy](identity-policy.md) (P1 · Who did it)
 - [Agent-bound tokens + mTLS](identity-enforcement.md) (P2 · Proven identity)
 - [Per-user secrets (refresh)](refresh-model.md) (P3 · Act as the user)
+- [JIT 403 + long-poll](jit-authorization.md) (P3 · Act as the user)
 - [Per-user limits + cost](per-user-limits.md) (P3 · Act as the user)
 - [MCP gateway endpoint](mcp-gateway.md) (P4 · Agents everywhere)
 - [JSON audit → SIEM](audit-log-export.md) (P1 · Who did it)
@@ -101,7 +105,7 @@ Create the new package internal/identity with Claims, Status/Reason, the Verifie
 - [ ] `scripts/check.sh` passes, including govulncheck with the new dependency.
 - [ ] An expired token and a token signed by an unknown key return their sub in Claims with status expired and invalid respectively, and SubjectFrom returns nil for both; a valid token with email_verified absent keeps Email but has EmailVerified=false: `go test ./internal/identity -run 'TestUnverifiedClaims|TestSubjectFrom'`.
 
-**Unblocks:** [`W-P1-DEX-03`](dex-oidc.md#33--w-p1-dex-03) Document Dex as Warden's IdP with connector, failure-mode and prod guidance; [`W-P1-SSO-03`](console-sso-rbac.md#38--w-p1-sso-03) Implement OIDC login and callback with PKCE on the control plane; [`W-P2-TOKX-02`](token-exchange.md#27--w-p2-tokx-02) Implement token exchange policy checks and JWT minting; [`W-P1-VRFY-02`](identity-verification.md#27--w-p1-vrfy-02) Extract, verify and strip identity on CONNECT, HTTP/1.1 and HTTP/2; [`W-P1-GPOL-02`](identity-policy.md#29--w-p1-gpol-02) Make the policy evaluator subject-aware with EvaluateFor
+**Unblocks:** [`W-P1-DEX-03`](dex-oidc.md#33--w-p1-dex-03) Document Dex as Warden's IdP with connector, failure-mode and prod guidance; [`W-P3-CSIG-01`](consent-auth.md#17--w-p3-csig-01) Add the CP-local consent config block and the warden-portal Dex client; [`W-P1-SSO-03`](console-sso-rbac.md#38--w-p1-sso-03) Implement OIDC login and callback with PKCE on the control plane; [`W-P2-TOKX-02`](token-exchange.md#27--w-p2-tokx-02) Implement token exchange policy checks and JWT minting; [`W-P1-VRFY-02`](identity-verification.md#27--w-p1-vrfy-02) Extract, verify and strip identity on CONNECT, HTTP/1.1 and HTTP/2; [`W-P1-GPOL-02`](identity-policy.md#29--w-p1-gpol-02) Make the policy evaluator subject-aware with EvaluateFor
 
 ### 2/7 · W-P1-VRFY-02
 
@@ -143,7 +147,7 @@ Wire identity into the proxy. Capture Proxy-Authorization on CONNECT and X-Warde
 
 **Depends on:** [`W-P1-VRFY-01`](identity-verification.md#17--w-p1-vrfy-01) Add internal/identity OIDC verifier with lazy JWKS, cache and config
 
-**Unblocks:** [`W-P2-AREG-05`](agent-registry.md#57--w-p2-areg-05) Bind workers to an agent id and enforce agent_disabled; [`W-P1-VRFY-03`](identity-verification.md#37--w-p1-vrfy-03) Record user fields on worker events, receipts, decision logs and sync; [`W-P1-VRFY-07`](identity-verification.md#77--w-p1-vrfy-07) Wire the identity verifier into worker assembly, hot reload and deployment; [`W-P1-GPOL-03`](identity-policy.md#39--w-p1-gpol-03) Apply group-aware allow decisions at CONNECT and request time; [`W-P1-GPOL-04`](identity-policy.md#49--w-p1-gpol-04) Support groups/users in MCP tool allowWhen conditions; [`W-P2-WBND-04`](identity-enforcement.md#410--w-p2-wbnd-04) Extend identity metrics with token type and binding reasons
+**Unblocks:** [`W-P2-AREG-05`](agent-registry.md#57--w-p2-areg-05) Bind workers to an agent id and enforce agent_disabled; [`W-P1-VRFY-03`](identity-verification.md#37--w-p1-vrfy-03) Record user fields on worker events, receipts, decision logs and sync; [`W-P1-VRFY-07`](identity-verification.md#77--w-p1-vrfy-07) Wire the identity verifier into worker assembly, hot reload and deployment; [`W-P1-GPOL-03`](identity-policy.md#39--w-p1-gpol-03) Apply group-aware allow decisions at CONNECT and request time; [`W-P1-GPOL-04`](identity-policy.md#49--w-p1-gpol-04) Support groups/users in MCP tool allowWhen conditions; [`W-P2-WBND-04`](identity-enforcement.md#410--w-p2-wbnd-04) Extend identity metrics with token type and binding reasons; [`W-P3-PUS-04`](refresh-model.md#412--w-p3-pus-04) Swap per-user placeholders only for bound identities on mapped domains
 
 ### 3/7 · W-P1-VRFY-03
 
@@ -181,7 +185,7 @@ Worker side of recording. Add identity fields to analytics.Event with snake_case
 
 **Depends on:** [`W-P1-VRFY-02`](identity-verification.md#27--w-p1-vrfy-02) Extract, verify and strip identity on CONNECT, HTTP/1.1 and HTTP/2
 
-**Unblocks:** [`W-P1-BLOCK-02`](user-block-list.md#27--w-p1-block-02) Enforce the block list in the worker at CONNECT, per request and per h2 stream; [`W-P1-BLOCK-06`](user-block-list.md#67--w-p1-block-06) Raise one user_blocked Finding per user without leaking email; [`W-P1-VRFY-04`](identity-verification.md#47--w-p1-vrfy-04) Add user filter and top-users breakdown to the dashboard; [`W-P1-VRFY-05`](identity-verification.md#57--w-p1-vrfy-05) Add identity attribution e2e test and a CI integration job; [`W-P1-VRFY-06`](identity-verification.md#67--w-p1-vrfy-06) Store user fields in the control-plane fleet store; [`W-P1-GPOL-03`](identity-policy.md#39--w-p1-gpol-03) Apply group-aware allow decisions at CONNECT and request time; [`W-P1-GPOL-05`](identity-policy.md#59--w-p1-gpol-05) Show affected users in policy eval replay; [`W-P2-WBND-02`](identity-enforcement.md#210--w-p2-wbnd-02) Bind Warden tokens to the worker's registered agent and key; [`W-P1-JAUD-01`](audit-log-export.md#36--w-p1-jaud-01) Add internal/auditlog decision stream on the async writer tee
+**Unblocks:** [`W-P1-BLOCK-02`](user-block-list.md#27--w-p1-block-02) Enforce the block list in the worker at CONNECT, per request and per h2 stream; [`W-P1-BLOCK-06`](user-block-list.md#67--w-p1-block-06) Raise one user_blocked Finding per user without leaking email; [`W-P1-VRFY-04`](identity-verification.md#47--w-p1-vrfy-04) Add user filter and top-users breakdown to the dashboard; [`W-P1-VRFY-05`](identity-verification.md#57--w-p1-vrfy-05) Add identity attribution e2e test and a CI integration job; [`W-P1-VRFY-06`](identity-verification.md#67--w-p1-vrfy-06) Store user fields in the control-plane fleet store; [`W-P1-GPOL-03`](identity-policy.md#39--w-p1-gpol-03) Apply group-aware allow decisions at CONNECT and request time; [`W-P1-GPOL-05`](identity-policy.md#59--w-p1-gpol-05) Show affected users in policy eval replay; [`W-P2-WBND-02`](identity-enforcement.md#210--w-p2-wbnd-02) Bind Warden tokens to the worker's registered agent and key; [`W-P3-JIT-02`](jit-authorization.md#27--w-p3-jit-02) Return structured 403 for HTTP when a grant is missing; [`W-P3-PUL-02`](per-user-limits.md#210--w-p3-pul-02) Record agent id and limit rule on worker events; [`W-P1-JAUD-01`](audit-log-export.md#36--w-p1-jaud-01) Add internal/auditlog decision stream on the async writer tee
 
 ### 4/7 · W-P1-VRFY-04
 
@@ -218,7 +222,7 @@ Let operators filter traffic and analytics by user on worker and CP dashboards. 
 
 **Depends on:** [`W-P1-VRFY-03`](identity-verification.md#37--w-p1-vrfy-03) Record user fields on worker events, receipts, decision logs and sync; [`W-P1-VRFY-06`](identity-verification.md#67--w-p1-vrfy-06) Store user fields in the control-plane fleet store
 
-**Unblocks:** [`W-P1-IDC-03`](identity-contract.md#33--w-p1-idc-03) Add generic identity smoke test with a curl agent; [`W-P1-BLOCK-04`](user-block-list.md#47--w-p1-block-04) Add the Blocked users console panel and worker enforcement indicator
+**Unblocks:** [`W-P1-IDC-03`](identity-contract.md#33--w-p1-idc-03) Add generic identity smoke test with a curl agent; [`W-P1-BLOCK-04`](user-block-list.md#47--w-p1-block-04) Add the Blocked users console panel and worker enforcement indicator; [`W-P3-PUL-05`](per-user-limits.md#510--w-p3-pul-05) Add per-user usage and cost dashboard view
 
 ### 5/7 · W-P1-VRFY-05
 
@@ -255,7 +259,7 @@ Prove attribution end to end under the integration build tag. The default issuer
 
 **Depends on:** [`W-P1-VRFY-03`](identity-verification.md#37--w-p1-vrfy-03) Record user fields on worker events, receipts, decision logs and sync; [`W-P1-VRFY-07`](identity-verification.md#77--w-p1-vrfy-07) Wire the identity verifier into worker assembly, hot reload and deployment; [`W-P1-DEX-02`](dex-oidc.md#23--w-p1-dex-02) Add identity compose recipe with pinned Dex and seeded LDAP
 
-**Unblocks:** [`W-P2-TOKX-05`](token-exchange.md#57--w-p2-tokx-05) Add token service end-to-end integration test; [`W-P2-SECT-01`](security-tests.md#17--w-p2-sect-01) Add security test harness with in-process CP, workers and shared fakes; [`W-P1-GPOL-09`](identity-policy.md#99--w-p1-gpol-09) Add group policy e2e test and policy docs
+**Unblocks:** [`W-P2-TOKX-05`](token-exchange.md#57--w-p2-tokx-05) Add token service end-to-end integration test; [`W-P2-SECT-01`](security-tests.md#17--w-p2-sect-01) Add security test harness with in-process CP, workers and shared fakes; [`W-P3-OFFB-04`](offboarding.md#47--w-p3-offb-04) Add an E2E test for IdP-driven offboarding and its false-positive guards; [`W-P1-GPOL-09`](identity-policy.md#99--w-p1-gpol-09) Add group policy e2e test and policy docs; [`W-P3-PUL-10`](per-user-limits.md#1010--w-p3-pul-10) Add per-user limits end-to-end test and docs
 
 ### 6/7 · W-P1-VRFY-06
 
@@ -290,7 +294,7 @@ Control-plane half of recording, split from W-P1-VRFY-03 because conventions req
 
 **Depends on:** [`W-P1-VRFY-03`](identity-verification.md#37--w-p1-vrfy-03) Record user fields on worker events, receipts, decision logs and sync
 
-**Unblocks:** [`W-P2-APPR-03`](policy-approvals.md#39--w-p2-appr-03) Replay fleet events against base and draft for each revision; [`W-P1-VRFY-04`](identity-verification.md#47--w-p1-vrfy-04) Add user filter and top-users breakdown to the dashboard; [`W-P2-WBND-08`](identity-enforcement.md#810--w-p2-wbnd-08) Store agent and token type fields in the CP fleet store
+**Unblocks:** [`W-P2-APPR-03`](policy-approvals.md#39--w-p2-appr-03) Replay fleet events against base and draft for each revision; [`W-P3-PORT-01`](consent-portal.md#17--w-p3-port-01) Serve the portal page and the connections list API; [`W-P1-VRFY-04`](identity-verification.md#47--w-p1-vrfy-04) Add user filter and top-users breakdown to the dashboard; [`W-P2-WBND-08`](identity-enforcement.md#810--w-p2-wbnd-08) Store agent and token type fields in the CP fleet store; [`W-P3-PUL-07`](per-user-limits.md#710--w-p3-pul-07) Fill fleet agent_id and add the per-user daily usage rollup
 
 ### 7/7 · W-P1-VRFY-07
 

@@ -90,7 +90,7 @@ Add `Groups`/`Users` to `config.AllowlistEntry` and `config.MCPToolCondition` wi
 - [ ] Given a DeepCopy of a policy with Groups, mutating the copy's Groups[0] leaves the original unchanged: `go test ./internal/config -run TestDeepCopy_GroupsNotAliased`.
 - [ ] Existing config tests pass unchanged: `go test ./internal/config`.
 
-**Unblocks:** [`W-P2-APPR-02`](policy-approvals.md#29--w-p2-appr-02) Implement widening-change classification; [`W-P1-GPOL-02`](identity-policy.md#29--w-p1-gpol-02) Make the policy evaluator subject-aware with EvaluateFor; [`W-P1-GPOL-06`](identity-policy.md#69--w-p1-gpol-06) Project scoped rules into fail-closed policy wire fields
+**Unblocks:** [`W-P2-APPR-02`](policy-approvals.md#29--w-p2-appr-02) Implement widening-change classification; [`W-P1-GPOL-02`](identity-policy.md#29--w-p1-gpol-02) Make the policy evaluator subject-aware with EvaluateFor; [`W-P1-GPOL-06`](identity-policy.md#69--w-p1-gpol-06) Project scoped rules into fail-closed policy wire fields; [`W-P3-PUL-01`](per-user-limits.md#110--w-p3-pul-01) Add userLimits config, costBlockedUsers wire type and validation
 
 ### 2/9 · W-P1-GPOL-02
 
@@ -130,7 +130,7 @@ Add `EvaluateFor(domain, port, scheme, *identity.Subject) Result` to `internal/p
 
 **Depends on:** [`W-P1-GPOL-01`](identity-policy.md#19--w-p1-gpol-01) Add groups/users to allow entries and MCP conditions schema; [`W-P1-VRFY-01`](identity-verification.md#17--w-p1-vrfy-01) Add internal/identity OIDC verifier with lazy JWKS, cache and config
 
-**Unblocks:** [`W-P1-GPOL-03`](identity-policy.md#39--w-p1-gpol-03) Apply group-aware allow decisions at CONNECT and request time; [`W-P1-GPOL-04`](identity-policy.md#49--w-p1-gpol-04) Support groups/users in MCP tool allowWhen conditions; [`W-P1-GPOL-05`](identity-policy.md#59--w-p1-gpol-05) Show affected users in policy eval replay
+**Unblocks:** [`W-P1-GPOL-03`](identity-policy.md#39--w-p1-gpol-03) Apply group-aware allow decisions at CONNECT and request time; [`W-P1-GPOL-04`](identity-policy.md#49--w-p1-gpol-04) Support groups/users in MCP tool allowWhen conditions; [`W-P1-GPOL-05`](identity-policy.md#59--w-p1-gpol-05) Show affected users in policy eval replay; [`W-P3-PUL-03`](per-user-limits.md#310--w-p3-pul-03) Add per-user limit matching and counters to the policy evaluator
 
 ### 3/9 · W-P1-GPOL-03
 
@@ -170,7 +170,7 @@ Enforce scoped allow entries in the worker at CONNECT and on every request, then
 
 **Depends on:** [`W-P1-GPOL-02`](identity-policy.md#29--w-p1-gpol-02) Make the policy evaluator subject-aware with EvaluateFor; [`W-P1-GPOL-06`](identity-policy.md#69--w-p1-gpol-06) Project scoped rules into fail-closed policy wire fields; [`W-P1-VRFY-02`](identity-verification.md#27--w-p1-vrfy-02) Extract, verify and strip identity on CONNECT, HTTP/1.1 and HTTP/2; [`W-P1-VRFY-03`](identity-verification.md#37--w-p1-vrfy-03) Record user fields on worker events, receipts, decision logs and sync; [`W-P1-JAUD-06`](audit-log-export.md#26--w-p1-jaud-06) Set a bounded Reason on every deny event
 
-**Unblocks:** [`W-P1-GPOL-08`](identity-policy.md#89--w-p1-gpol-08) Edit groups/users in the dashboard policy editor; [`W-P1-GPOL-09`](identity-policy.md#99--w-p1-gpol-09) Add group policy e2e test and policy docs
+**Unblocks:** [`W-P1-GPOL-08`](identity-policy.md#89--w-p1-gpol-08) Edit groups/users in the dashboard policy editor; [`W-P1-GPOL-09`](identity-policy.md#99--w-p1-gpol-09) Add group policy e2e test and policy docs; [`W-P3-PUL-09`](per-user-limits.md#910--w-p3-pul-09) Enforce per-user rate limits per request in the proxy
 
 ### 4/9 · W-P1-GPOL-04
 
@@ -313,6 +313,8 @@ Operators need to see which workers do not understand scoped rules, because thos
 - [ ] A heartbeat with 100 caps stores at most 16.
 
 **Depends on:** [`W-P1-GPOL-06`](identity-policy.md#69--w-p1-gpol-06) Project scoped rules into fail-closed policy wire fields
+
+**Unblocks:** [`W-P3-PUL-05`](per-user-limits.md#510--w-p3-pul-05) Add per-user usage and cost dashboard view
 
 ### 8/9 · W-P1-GPOL-08
 

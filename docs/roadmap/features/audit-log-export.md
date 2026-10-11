@@ -36,6 +36,8 @@ With audit.jsonLog.enabled: true and output: file on a real worker, every stored
 - [Delegation grants](delegation-grants.md) (P4 · Agents everywhere)
 - [OTLP logs + traces](otel-logs-traces.md) (P5 · Enterprise scale)
 - [Group-aware policy](identity-policy.md) (P1 · Who did it)
+- [Per-user secrets (refresh)](refresh-model.md) (P3 · Act as the user)
+- [JIT 403 + long-poll](jit-authorization.md) (P3 · Act as the user)
 - [Per-user limits + cost](per-user-limits.md) (P3 · Act as the user)
 - [External hooks](policy-hooks.md) (P4 · Agents everywhere)
 
@@ -86,7 +88,7 @@ swapSecrets in internal/proxy/http.go writes the real secret into s.req.URL.RawQ
 - [ ] The same holds for an MCP SSE request and an allowed request recorded by recordAllowEvent.
 - [ ] `go test -race ./internal/proxy -run TestSwappedQueryNotRecorded` passes, and `scripts/check.sh` passes.
 
-**Unblocks:** [`W-P1-JAUD-01`](audit-log-export.md#36--w-p1-jaud-01) Add internal/auditlog decision stream on the async writer tee
+**Unblocks:** [`W-P3-JIT-02`](jit-authorization.md#27--w-p3-jit-02) Return structured 403 for HTTP when a grant is missing; [`W-P1-JAUD-01`](audit-log-export.md#36--w-p1-jaud-01) Add internal/auditlog decision stream on the async writer tee
 
 ### 2/6 · W-P1-JAUD-06
 
@@ -120,7 +122,7 @@ Most deny events have an empty Event.Reason today: storeDeny in internal/proxy/s
 - [ ] Every deny event produced in the test run has a Reason contained in Reasons().
 - [ ] `go test -race ./internal/proxy -run TestDenyReasons` passes.
 
-**Unblocks:** [`W-P1-BLOCK-02`](user-block-list.md#27--w-p1-block-02) Enforce the block list in the worker at CONNECT, per request and per h2 stream; [`W-P1-GPOL-03`](identity-policy.md#39--w-p1-gpol-03) Apply group-aware allow decisions at CONNECT and request time; [`W-P1-JAUD-02`](audit-log-export.md#46--w-p1-jaud-02) Publish decision v1 JSON Schema with closed-field and leak tests
+**Unblocks:** [`W-P1-BLOCK-02`](user-block-list.md#27--w-p1-block-02) Enforce the block list in the worker at CONNECT, per request and per h2 stream; [`W-P1-GPOL-03`](identity-policy.md#39--w-p1-gpol-03) Apply group-aware allow decisions at CONNECT and request time; [`W-P3-PUS-04`](refresh-model.md#412--w-p3-pus-04) Swap per-user placeholders only for bound identities on mapped domains; [`W-P3-JIT-02`](jit-authorization.md#27--w-p3-jit-02) Return structured 403 for HTTP when a grant is missing; [`W-P3-PUL-09`](per-user-limits.md#910--w-p3-pul-09) Enforce per-user rate limits per request in the proxy; [`W-P1-JAUD-02`](audit-log-export.md#46--w-p1-jaud-02) Publish decision v1 JSON Schema with closed-field and leak tests
 
 ### 3/6 · W-P1-JAUD-01
 
@@ -199,7 +201,7 @@ Add docs/schemas/warden.decision.v1.json and pin it to auditlog.Record with test
 
 **Depends on:** [`W-P1-JAUD-01`](audit-log-export.md#36--w-p1-jaud-01) Add internal/auditlog decision stream on the async writer tee; [`W-P1-JAUD-06`](audit-log-export.md#26--w-p1-jaud-06) Set a bounded Reason on every deny event
 
-**Unblocks:** [`W-P1-JAUD-04`](audit-log-export.md#66--w-p1-jaud-04) Document SIEM shipping with Vector and Fluent Bit examples
+**Unblocks:** [`W-P3-JIT-02`](jit-authorization.md#27--w-p3-jit-02) Return structured 403 for HTTP when a grant is missing; [`W-P3-PUL-02`](per-user-limits.md#210--w-p3-pul-02) Record agent id and limit rule on worker events; [`W-P3-PUL-09`](per-user-limits.md#910--w-p3-pul-09) Enforce per-user rate limits per request in the proxy; [`W-P1-JAUD-04`](audit-log-export.md#66--w-p1-jaud-04) Document SIEM shipping with Vector and Fluent Bit examples
 
 ### 5/6 · W-P1-JAUD-03
 
@@ -236,7 +238,7 @@ Let the control plane read the same audit.jsonLog block and pass an auditlog wri
 
 **Depends on:** [`W-P1-JAUD-01`](audit-log-export.md#36--w-p1-jaud-01) Add internal/auditlog decision stream on the async writer tee; [`W-P1-AAUD-02`](admin-audit-log.md#24--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware
 
-**Unblocks:** [`W-P1-OPS1-03`](ops-hardening.md#34--w-p1-ops1-03) Write break-glass and backup runbooks and a production readiness guide; [`W-P1-JAUD-04`](audit-log-export.md#66--w-p1-jaud-04) Document SIEM shipping with Vector and Fluent Bit examples
+**Unblocks:** [`W-P1-OPS1-03`](ops-hardening.md#34--w-p1-ops1-03) Write break-glass and backup runbooks and a production readiness guide; [`W-P3-PORT-02`](consent-portal.md#27--w-p3-port-02) Implement revoke with grant, secret, epoch and provider steps; [`W-P1-JAUD-04`](audit-log-export.md#66--w-p1-jaud-04) Document SIEM shipping with Vector and Fluent Bit examples
 
 ### 6/6 · W-P1-JAUD-04
 

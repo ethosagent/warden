@@ -38,6 +38,7 @@ Nothing. This feature can start now.
 - [Okta / Entra / Google direct](idp-adapters.md) (P5 · Enterprise scale)
 - [SSO + 3 roles](console-sso-rbac.md) (P1 · Who did it)
 - [Token service](token-exchange.md) (P2 · Proven identity)
+- [Offboarding revocation](offboarding.md) (P3 · Act as the user)
 - [Verify user token](identity-verification.md) (P1 · Who did it)
 - [Slack / email notify](user-notify.md) (P4 · Agents everywhere)
 
@@ -90,7 +91,7 @@ Add the Dex configuration files that every later identity ticket builds on: a pr
 - [ ] `scripts/check.sh` runs the new secrets stage and passes.
 - [ ] No existing file under deploy/compose/ or internal/ is modified (`git diff --stat main -- deploy/compose/*.yml internal/` is empty).
 
-**Unblocks:** [`W-P1-IDC-02`](identity-contract.md#23--w-p1-idc-02) Add `warden identity` CLI for login, token, status and proxy env; [`W-P1-DEX-02`](dex-oidc.md#23--w-p1-dex-02) Add identity compose recipe with pinned Dex and seeded LDAP
+**Unblocks:** [`W-P1-IDC-02`](identity-contract.md#23--w-p1-idc-02) Add `warden identity` CLI for login, token, status and proxy env; [`W-P1-DEX-02`](dex-oidc.md#23--w-p1-dex-02) Add identity compose recipe with pinned Dex and seeded LDAP; [`W-P3-CSIG-01`](consent-auth.md#17--w-p3-csig-01) Add the CP-local consent config block and the warden-portal Dex client
 
 ### 2/3 · W-P1-DEX-02
 
@@ -132,7 +133,7 @@ Add `deploy/compose/docker-compose.identity.yml`, which runs Dex with the dev co
 
 **Depends on:** [`W-P1-DEX-01`](dex-oidc.md#13--w-p1-dex-01) Add reference Dex config with console, data-plane, harness and CLI clients
 
-**Unblocks:** [`W-P1-IDC-03`](identity-contract.md#33--w-p1-idc-03) Add generic identity smoke test with a curl agent; [`W-P2-RCP-03`](identity-client.md#36--w-p2-rcp-03) Add the Claude Code compose recipe and docs; [`W-P1-DEX-03`](dex-oidc.md#33--w-p1-dex-03) Document Dex as Warden's IdP with connector, failure-mode and prod guidance; [`W-P1-SSO-07`](console-sso-rbac.md#78--w-p1-sso-07) Add Dex-backed console SSO end-to-end test; [`W-P2-TOKX-05`](token-exchange.md#57--w-p2-tokx-05) Add token service end-to-end integration test; [`W-P1-VRFY-05`](identity-verification.md#57--w-p1-vrfy-05) Add identity attribution e2e test and a CI integration job
+**Unblocks:** [`W-P1-IDC-03`](identity-contract.md#33--w-p1-idc-03) Add generic identity smoke test with a curl agent; [`W-P2-RCP-03`](identity-client.md#36--w-p2-rcp-03) Add the Claude Code compose recipe and docs; [`W-P1-DEX-03`](dex-oidc.md#33--w-p1-dex-03) Document Dex as Warden's IdP with connector, failure-mode and prod guidance; [`W-P3-CSIG-01`](consent-auth.md#17--w-p3-csig-01) Add the CP-local consent config block and the warden-portal Dex client; [`W-P3-CSIG-07`](consent-auth.md#77--w-p3-csig-07) Add a Dex-backed portal sign-in end-to-end test; [`W-P1-SSO-07`](console-sso-rbac.md#78--w-p1-sso-07) Add Dex-backed console SSO end-to-end test; [`W-P2-TOKX-05`](token-exchange.md#57--w-p2-tokx-05) Add token service end-to-end integration test; [`W-P1-VRFY-05`](identity-verification.md#57--w-p1-vrfy-05) Add identity attribution e2e test and a CI integration job
 
 ### 3/3 · W-P1-DEX-03
 

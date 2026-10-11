@@ -39,11 +39,12 @@ On a CP started with `--state-dir` and `--policy-store=versioned`, an existing d
 - [Agent registry](agent-registry.md) (P2 · Proven identity)
 - [Signed bundles](signed-bundles.md) (P2 · Proven identity)
 - [Approvals + replay](policy-approvals.md) (P2 · Proven identity)
-- [Offboarding revocation](offboarding.md) (P3 · Act as the user)
+- [Consent portal](consent-portal.md) (P3 · Act as the user)
 - [Admin MCP server](admin-mcp.md) (P4 · Agents everywhere)
 - [Policy as code + canary](policy-as-code.md) (P4 · Agents everywhere)
 - [Postgres + HA](postgres-ha.md) (P5 · Enterprise scale)
 - [Retention + self-monitoring](retention-ops.md) (P5 · Enterprise scale)
+- [Per-user limits + cost](per-user-limits.md) (P3 · Act as the user)
 
 ## Code it touches
 
@@ -256,7 +257,7 @@ After every head move in versioned mode, render head's policy and settings block
 
 **Depends on:** [`W-P1-PVER-02`](policy-versioning.md#26--w-p1-pver-02) Route policy, settings and llmProviders writes through versioned publish
 
-**Unblocks:** [`W-P2-AREG-04`](agent-registry.md#47--w-p2-areg-04) Serve registered agents in the policy wire; [`W-P2-SBND-02`](signed-bundles.md#27--w-p2-sbnd-02) Serve the signed bundle envelope on GET /policy behind --bundles
+**Unblocks:** [`W-P2-AREG-04`](agent-registry.md#47--w-p2-areg-04) Serve registered agents in the policy wire; [`W-P2-SBND-02`](signed-bundles.md#27--w-p2-sbnd-02) Serve the signed bundle envelope on GET /policy behind --bundles; [`W-P3-PUL-08`](per-user-limits.md#810--w-p3-pul-08) Publish fleet cost blocks as costBlockedUsers from the control plane
 
 ### 6/6 · W-P1-PVER-06
 

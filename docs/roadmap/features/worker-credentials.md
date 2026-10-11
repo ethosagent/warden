@@ -131,7 +131,7 @@ Add `WorkerAuthenticator` in internal/controlplane and apply it once to /policy,
 
 **Depends on:** [`W-P1-WTOK-01`](worker-credentials.md#16--w-p1-wtok-01) Add worker token store with hashed storage, revocation and in-memory index
 
-**Unblocks:** [`W-P1-WTOK-03`](worker-credentials.md#36--w-p1-wtok-03) Add worker token admin API, dashboard panel and fleet auth fields; [`W-P2-APIK-02`](api-keys.md#27--w-p2-apik-02) Authenticate API keys and enforce per-route scopes in the authz table
+**Unblocks:** [`W-P1-WTOK-03`](worker-credentials.md#36--w-p1-wtok-03) Add worker token admin API, dashboard panel and fleet auth fields; [`W-P2-APIK-02`](api-keys.md#27--w-p2-apik-02) Authenticate API keys and enforce per-route scopes in the authz table; [`W-P3-JIT-01`](jit-authorization.md#17--w-p3-jit-01) Add CP endpoint to create or reuse pending authorizations
 
 ### 3/6 · W-P1-WTOK-03
 

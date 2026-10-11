@@ -43,6 +43,8 @@ On a CP with --state-dir, `tokenService.enabled: true` and an https issuer, a to
 - [Identity client + recipes](identity-client.md) (P2 · Proven identity)
 - [Okta / Entra / Google direct](idp-adapters.md) (P5 · Enterprise scale)
 - [Security test suite](security-tests.md) (P2 · Proven identity)
+- [OAuth broker](oauth-broker.md) (P3 · Act as the user)
+- [Offboarding revocation](offboarding.md) (P3 · Act as the user)
 - [Delegation grants](delegation-grants.md) (P4 · Agents everywhere)
 - [KMS keys](kms.md) (P5 · Enterprise scale)
 - [Agent-bound tokens + mTLS](identity-enforcement.md) (P2 · Proven identity)
@@ -218,7 +220,7 @@ Add the three-stage rate limits, so an unauthenticated caller cannot drain a rea
 
 **Depends on:** [`W-P2-TOKX-03`](token-exchange.md#37--w-p2-tokx-03) Mount POST /oauth2/token with RFC 8693 request parsing and config; [`W-P1-AAUD-02`](admin-audit-log.md#24--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware
 
-**Unblocks:** [`W-P2-TOKX-05`](token-exchange.md#57--w-p2-tokx-05) Add token service end-to-end integration test; [`W-P2-TOKX-06`](token-exchange.md#67--w-p2-tokx-06) Document the token service for operators and harness authors; [`W-P2-SECT-01`](security-tests.md#17--w-p2-sect-01) Add security test harness with in-process CP, workers and shared fakes; [`W-P2-SECT-02`](security-tests.md#27--w-p2-sect-02) Add token forgery, confusion and replay cases
+**Unblocks:** [`W-P2-TOKX-05`](token-exchange.md#57--w-p2-tokx-05) Add token service end-to-end integration test; [`W-P2-TOKX-06`](token-exchange.md#67--w-p2-tokx-06) Document the token service for operators and harness authors; [`W-P2-SECT-01`](security-tests.md#17--w-p2-sect-01) Add security test harness with in-process CP, workers and shared fakes; [`W-P2-SECT-02`](security-tests.md#27--w-p2-sect-02) Add token forgery, confusion and replay cases; [`W-P3-BRKR-03`](oauth-broker.md#39--w-p3-brkr-03) Implement POST /connect/start with PKCE, CSRF and scope capping
 
 ### 5/7 · W-P2-TOKX-05
 
@@ -316,4 +318,4 @@ Add admin routes that revoke one token session, or all sessions for a user or an
 
 **Depends on:** [`W-P2-TOKX-03`](token-exchange.md#37--w-p2-tokx-03) Mount POST /oauth2/token with RFC 8693 request parsing and config; [`W-P1-AAUD-02`](admin-audit-log.md#24--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware
 
-**Unblocks:** [`W-P2-TOKX-05`](token-exchange.md#57--w-p2-tokx-05) Add token service end-to-end integration test; [`W-P2-TOKX-06`](token-exchange.md#67--w-p2-tokx-06) Document the token service for operators and harness authors
+**Unblocks:** [`W-P2-TOKX-05`](token-exchange.md#57--w-p2-tokx-05) Add token service end-to-end integration test; [`W-P2-TOKX-06`](token-exchange.md#67--w-p2-tokx-06) Document the token service for operators and harness authors; [`W-P3-OFFB-01`](offboarding.md#17--w-p3-offb-01) Implement the resumable two-stage Offboarder; [`W-P3-PUS-07`](refresh-model.md#712--w-p3-pus-07) Add the worker-mTLS mint endpoint POST /control/user-token

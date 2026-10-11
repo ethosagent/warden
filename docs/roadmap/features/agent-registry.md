@@ -44,10 +44,15 @@ On a CP with --state-dir, console.auth=oidc and console.adminAudit.enabled=true,
 - [Token service](token-exchange.md) (P2 · Proven identity)
 - [Approvals + replay](policy-approvals.md) (P2 · Proven identity)
 - [Security test suite](security-tests.md) (P2 · Proven identity)
+- [Consent portal](consent-portal.md) (P3 · Act as the user)
+- [Offboarding revocation](offboarding.md) (P3 · Act as the user)
 - [Delegation grants](delegation-grants.md) (P4 · Agents everywhere)
 - [Admin MCP server](admin-mcp.md) (P4 · Agents everywhere)
 - [Postgres + HA](postgres-ha.md) (P5 · Enterprise scale)
 - [Agent-bound tokens + mTLS](identity-enforcement.md) (P2 · Proven identity)
+- [Per-user secrets (refresh)](refresh-model.md) (P3 · Act as the user)
+- [JIT 403 + long-poll](jit-authorization.md) (P3 · Act as the user)
+- [Per-user limits + cost](per-user-limits.md) (P3 · Act as the user)
 
 ## Code it touches
 
@@ -140,7 +145,7 @@ Add the agent registry handlers to internal/dashboard behind a new `SetAgentRegi
 
 **Depends on:** [`W-P2-AREG-01`](agent-registry.md#17--w-p2-areg-01) Add internal/agentreg store, schema and validation; [`W-P1-SSO-05`](console-sso-rbac.md#58--w-p1-sso-05) Enforce role checks on every dashboard route; [`W-P1-AAUD-02`](admin-audit-log.md#24--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware
 
-**Unblocks:** [`W-P2-AREG-03`](agent-registry.md#37--w-p2-areg-03) Add the Agents tab to the CP console; [`W-P2-AREG-04`](agent-registry.md#47--w-p2-areg-04) Serve registered agents in the policy wire; [`W-P2-APPR-08`](policy-approvals.md#89--w-p2-appr-08) Hold block-list removals and widening agent edits for approval; [`W-P2-WBND-07`](identity-enforcement.md#710--w-p2-wbnd-07) Refuse require mode for agents served by workers without the capability
+**Unblocks:** [`W-P2-AREG-03`](agent-registry.md#37--w-p2-areg-03) Add the Agents tab to the CP console; [`W-P2-AREG-04`](agent-registry.md#47--w-p2-areg-04) Serve registered agents in the policy wire; [`W-P2-APPR-08`](policy-approvals.md#89--w-p2-appr-08) Hold block-list removals and widening agent edits for approval; [`W-P3-OFFB-07`](offboarding.md#77--w-p3-offb-07) Flag agents owned by blocked or offboarded users; [`W-P2-WBND-07`](identity-enforcement.md#710--w-p2-wbnd-07) Refuse require mode for agents served by workers without the capability
 
 ### 3/7 · W-P2-AREG-03
 
@@ -176,7 +181,7 @@ Add an Agents tab to internal/dashboard/index.html that calls the W-P2-AREG-02 e
 
 **Depends on:** [`W-P2-AREG-02`](agent-registry.md#27--w-p2-areg-02) Expose the agent registry admin API with admin-only writes and audit; [`W-P1-SSO-04`](console-sso-rbac.md#48--w-p1-sso-04) Add server-side sessions, logout, /auth/me and CSRF; [`W-P1-BLOCK-04`](user-block-list.md#47--w-p1-block-04) Add the Blocked users console panel and worker enforcement indicator
 
-**Unblocks:** [`W-P2-WBND-07`](identity-enforcement.md#710--w-p2-wbnd-07) Refuse require mode for agents served by workers without the capability
+**Unblocks:** [`W-P2-WBND-07`](identity-enforcement.md#710--w-p2-wbnd-07) Refuse require mode for agents served by workers without the capability; [`W-P3-PUS-07`](refresh-model.md#712--w-p3-pus-07) Add the worker-mTLS mint endpoint POST /control/user-token; [`W-P3-JIT-01`](jit-authorization.md#17--w-p3-jit-01) Add CP endpoint to create or reuse pending authorizations
 
 ### 4/7 · W-P2-AREG-04
 
@@ -213,7 +218,7 @@ Add `registeredAgents` (id, status and key thumbprints) to the /policy wire, mer
 
 **Depends on:** [`W-P2-AREG-01`](agent-registry.md#17--w-p2-areg-01) Add internal/agentreg store, schema and validation; [`W-P2-AREG-02`](agent-registry.md#27--w-p2-areg-02) Expose the agent registry admin API with admin-only writes and audit; [`W-P1-BLOCK-03`](user-block-list.md#37--w-p1-block-03) Add the CP block-list store, admin API and policy merge; [`W-P1-PVER-05`](policy-versioning.md#56--w-p1-pver-05) Mirror head into the served YAML and detect external edits
 
-**Unblocks:** [`W-P2-RCP-03`](identity-client.md#36--w-p2-rcp-03) Add the Claude Code compose recipe and docs; [`W-P2-AREG-05`](agent-registry.md#57--w-p2-areg-05) Bind workers to an agent id and enforce agent_disabled; [`W-P2-WBND-02`](identity-enforcement.md#210--w-p2-wbnd-02) Bind Warden tokens to the worker's registered agent and key; [`W-P2-WBND-06`](identity-enforcement.md#610--w-p2-wbnd-06) Add token issuer, agent key thumbprints and email claims to CP outputs
+**Unblocks:** [`W-P2-RCP-03`](identity-client.md#36--w-p2-rcp-03) Add the Claude Code compose recipe and docs; [`W-P2-AREG-05`](agent-registry.md#57--w-p2-areg-05) Bind workers to an agent id and enforce agent_disabled; [`W-P3-PORT-01`](consent-portal.md#17--w-p3-port-01) Serve the portal page and the connections list API; [`W-P2-WBND-02`](identity-enforcement.md#210--w-p2-wbnd-02) Bind Warden tokens to the worker's registered agent and key; [`W-P2-WBND-06`](identity-enforcement.md#610--w-p2-wbnd-06) Add token issuer, agent key thumbprints and email claims to CP outputs
 
 ### 5/7 · W-P2-AREG-05
 

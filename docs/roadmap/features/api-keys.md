@@ -37,10 +37,12 @@ On a CP with --state-dir, console.auth=oidc, console.adminAudit.enabled=true and
 ## Unblocks
 
 - [Security test suite](security-tests.md) (P2 · Proven identity)
+- [Offboarding revocation](offboarding.md) (P3 · Act as the user)
 - [Admin MCP server](admin-mcp.md) (P4 · Agents everywhere)
 - [Policy as code + canary](policy-as-code.md) (P4 · Agents everywhere)
 - [Postgres + HA](postgres-ha.md) (P5 · Enterprise scale)
 - [Retention + self-monitoring](retention-ops.md) (P5 · Enterprise scale)
+- [Per-user limits + cost](per-user-limits.md) (P3 · Act as the user)
 
 ## Code it touches
 
@@ -138,7 +140,7 @@ Wire `wak_` keys into the CP request chain behind `console.apiKeys.enabled` (def
 
 **Depends on:** [`W-P2-APIK-01`](api-keys.md#17--w-p2-apik-01) Add internal/apikeys format, scope registry, store and index; [`W-P1-SSO-04`](console-sso-rbac.md#48--w-p1-sso-04) Add server-side sessions, logout, /auth/me and CSRF; [`W-P1-SSO-05`](console-sso-rbac.md#58--w-p1-sso-05) Enforce role checks on every dashboard route; [`W-P1-SSO-06`](console-sso-rbac.md#68--w-p1-sso-06) Require an admin session on /central/secrets and flag open consoles; [`W-P1-AAUD-02`](admin-audit-log.md#24--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware; [`W-P1-WTOK-02`](worker-credentials.md#26--w-p1-wtok-02) Authenticate /policy, heartbeat and ingest with per-worker tokens
 
-**Unblocks:** [`W-P2-APIK-03`](api-keys.md#37--w-p2-apik-03) Add the API key management and self-introspection API; [`W-P2-SECT-06`](security-tests.md#67--w-p2-sect-06) Add CP route-boundary and enrollment attack cases
+**Unblocks:** [`W-P2-APIK-03`](api-keys.md#37--w-p2-apik-03) Add the API key management and self-introspection API; [`W-P2-SECT-06`](security-tests.md#67--w-p2-sect-06) Add CP route-boundary and enrollment attack cases; [`W-P3-OFFB-03`](offboarding.md#37--w-p3-offb-03) Add the console Users tab and manual offboard routes; [`W-P3-PUL-05`](per-user-limits.md#510--w-p3-pul-05) Add per-user usage and cost dashboard view
 
 ### 3/7 · W-P2-APIK-03
 
@@ -177,7 +179,7 @@ Add the CP routes that create, list and revoke API keys, plus `GET /api/api-keys
 
 **Depends on:** [`W-P2-APIK-02`](api-keys.md#27--w-p2-apik-02) Authenticate API keys and enforce per-route scopes in the authz table; [`W-P1-SSO-08`](console-sso-rbac.md#88--w-p1-sso-08) Add admin session list and revoke API
 
-**Unblocks:** [`W-P2-APIK-04`](api-keys.md#47--w-p2-apik-04) Add the API Keys page to the console; [`W-P2-APIK-05`](api-keys.md#57--w-p2-apik-05) Add offline API key revoke, restore revocation and expiry warnings; [`W-P2-APIK-07`](api-keys.md#77--w-p2-apik-07) Document API keys and test the done-when flow end to end
+**Unblocks:** [`W-P2-APIK-04`](api-keys.md#47--w-p2-apik-04) Add the API Keys page to the console; [`W-P2-APIK-05`](api-keys.md#57--w-p2-apik-05) Add offline API key revoke, restore revocation and expiry warnings; [`W-P2-APIK-07`](api-keys.md#77--w-p2-apik-07) Document API keys and test the done-when flow end to end; [`W-P3-OFFB-01`](offboarding.md#17--w-p3-offb-01) Implement the resumable two-stage Offboarder
 
 ### 4/7 · W-P2-APIK-04
 

@@ -40,6 +40,10 @@ Plain `scripts/check.sh` runs test/security with no flag and no build tag on eve
 - [SSO + 3 roles](console-sso-rbac.md) (P1 · Who did it)
 - [User block list](user-block-list.md) (P1 · Who did it)
 
+## Unblocks
+
+- [Offboarding revocation](offboarding.md) (P3 · Act as the user)
+
 ## Code it touches
 
 `new directory test/security` · `test/fakes` · `test/integration (switch to fakes.OIDCIssuer)` · `internal/worker (TestHooks on Params)` · `internal/proxy (upstream dial hook in proxy.Config)` · `internal/controlplane (new run.go extracted from cmd/proxy/controlplane.go)` · `cmd/proxy/controlplane.go`
@@ -94,7 +98,7 @@ Create test/security with a harness that boots the real CP through controlplane.
 
 **Depends on:** [`W-P2-SECT-05`](security-tests.md#57--w-p2-sect-05) Add Go-only test seams for in-process CP and worker runs; [`W-P2-WBND-04`](identity-enforcement.md#410--w-p2-wbnd-04) Extend identity metrics with token type and binding reasons; [`W-P2-WCA-03`](worker-mtls.md#38--w-p2-wca-03) Add worker enrollment, auto-renew and cert-based CP client; [`W-P2-TOKX-04`](token-exchange.md#47--w-p2-tokx-04) Add rate limits, issuance records and metrics for token exchange; [`W-P2-SBND-05`](signed-bundles.md#57--w-p2-sbnd-05) Report bundle state through metrics, heartbeat and the fleet view; [`W-P2-AREG-05`](agent-registry.md#57--w-p2-areg-05) Bind workers to an agent id and enforce agent_disabled; [`W-P2-WCA-08`](worker-mtls.md#88--w-p2-wca-08) Add worker enrollment admin API and console panel; [`W-P1-VRFY-05`](identity-verification.md#57--w-p1-vrfy-05) Add identity attribution e2e test and a CI integration job; [`W-P1-SSO-04`](console-sso-rbac.md#48--w-p1-sso-04) Add server-side sessions, logout, /auth/me and CSRF
 
-**Unblocks:** [`W-P2-SECT-02`](security-tests.md#27--w-p2-sect-02) Add token forgery, confusion and replay cases; [`W-P2-SECT-03`](security-tests.md#37--w-p2-sect-03) Add binding, cross-agent and issued-token lifetime cases; [`W-P2-SECT-04`](security-tests.md#47--w-p2-sect-04) Add worker cert and signed bundle attack cases; [`W-P2-SECT-06`](security-tests.md#67--w-p2-sect-06) Add CP route-boundary and enrollment attack cases
+**Unblocks:** [`W-P2-SECT-02`](security-tests.md#27--w-p2-sect-02) Add token forgery, confusion and replay cases; [`W-P2-SECT-03`](security-tests.md#37--w-p2-sect-03) Add binding, cross-agent and issued-token lifetime cases; [`W-P2-SECT-04`](security-tests.md#47--w-p2-sect-04) Add worker cert and signed bundle attack cases; [`W-P2-SECT-06`](security-tests.md#67--w-p2-sect-06) Add CP route-boundary and enrollment attack cases; [`W-P3-OFFB-04`](offboarding.md#47--w-p3-offb-04) Add an E2E test for IdP-driven offboarding and its false-positive guards
 
 ### 2/7 · W-P2-SECT-02
 

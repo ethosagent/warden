@@ -36,11 +36,14 @@ A CP runs with `--policy-store=versioned --bundles=require` and a worker pins th
 
 - [Identity client + recipes](identity-client.md) (P2 · Proven identity)
 - [Security test suite](security-tests.md) (P2 · Proven identity)
+- [Consent portal](consent-portal.md) (P3 · Act as the user)
 - [Delegation grants](delegation-grants.md) (P4 · Agents everywhere)
 - [MCP registry](mcp-registry.md) (P4 · Agents everywhere)
 - [Policy as code + canary](policy-as-code.md) (P4 · Agents everywhere)
 - [KMS keys](kms.md) (P5 · Enterprise scale)
 - [Agent-bound tokens + mTLS](identity-enforcement.md) (P2 · Proven identity)
+- [Per-user secrets (refresh)](refresh-model.md) (P3 · Act as the user)
+- [Per-user limits + cost](per-user-limits.md) (P3 · Act as the user)
 - [MCP gateway endpoint](mcp-gateway.md) (P4 · Agents everywhere)
 
 ## Code it touches
@@ -134,7 +137,7 @@ Add the CP flag `--bundles=off|offer|require` (default off) and, when it is on, 
 
 **Depends on:** [`W-P2-SBND-01`](signed-bundles.md#17--w-p2-sbnd-01) Add internal/bundle payload, envelope, sign and verify; [`W-P2-KEYS-04`](key-management.md#47--w-p2-keys-04) Serve the token JWKS, readiness and admin key API from the control plane; [`W-P1-PVER-05`](policy-versioning.md#56--w-p1-pver-05) Mirror head into the served YAML and detect external edits
 
-**Unblocks:** [`W-P2-SBND-04`](signed-bundles.md#47--w-p2-sbnd-04) Verify signed bundles in RemoteProvider and keep last-known-good in memory; [`W-P2-SBND-07`](signed-bundles.md#77--w-p2-sbnd-07) Add staged bundle key rotation, pin export and rollout docs; [`W-P2-SECT-05`](security-tests.md#57--w-p2-sect-05) Add Go-only test seams for in-process CP and worker runs; [`W-P2-WBND-06`](identity-enforcement.md#610--w-p2-wbnd-06) Add token issuer, agent key thumbprints and email claims to CP outputs
+**Unblocks:** [`W-P2-SBND-04`](signed-bundles.md#47--w-p2-sbnd-04) Verify signed bundles in RemoteProvider and keep last-known-good in memory; [`W-P2-SBND-07`](signed-bundles.md#77--w-p2-sbnd-07) Add staged bundle key rotation, pin export and rollout docs; [`W-P2-SECT-05`](security-tests.md#57--w-p2-sect-05) Add Go-only test seams for in-process CP and worker runs; [`W-P2-WBND-06`](identity-enforcement.md#610--w-p2-wbnd-06) Add token issuer, agent key thumbprints and email claims to CP outputs; [`W-P3-PUS-08`](refresh-model.md#812--w-p3-pus-08) Serve perUserSecrets and userGrantEpochs as signed-bundle sections; [`W-P3-PUL-08`](per-user-limits.md#810--w-p3-pul-08) Publish fleet cost blocks as costBlockedUsers from the control plane
 
 ### 3/7 · W-P2-SBND-03
 
@@ -208,7 +211,7 @@ When pins are configured, make RemoteProvider request the signed envelope, verif
 
 **Depends on:** [`W-P2-SBND-01`](signed-bundles.md#17--w-p2-sbnd-01) Add internal/bundle payload, envelope, sign and verify; [`W-P2-SBND-02`](signed-bundles.md#27--w-p2-sbnd-02) Serve the signed bundle envelope on GET /policy behind --bundles; [`W-P2-SBND-03`](signed-bundles.md#37--w-p2-sbnd-03) Add bundle key pinning and signed-bundle options to worker config
 
-**Unblocks:** [`W-P2-SBND-05`](signed-bundles.md#57--w-p2-sbnd-05) Report bundle state through metrics, heartbeat and the fleet view; [`W-P2-SBND-06`](signed-bundles.md#67--w-p2-sbnd-06) Add an opt-in last-known-good bundle cache for worker restarts; [`W-P2-WBND-01`](identity-enforcement.md#110--w-p2-wbnd-01) Verify CP-issued Warden tokens against verified bundle keys
+**Unblocks:** [`W-P2-SBND-05`](signed-bundles.md#57--w-p2-sbnd-05) Report bundle state through metrics, heartbeat and the fleet view; [`W-P2-SBND-06`](signed-bundles.md#67--w-p2-sbnd-06) Add an opt-in last-known-good bundle cache for worker restarts; [`W-P2-WBND-01`](identity-enforcement.md#110--w-p2-wbnd-01) Verify CP-issued Warden tokens against verified bundle keys; [`W-P3-PUS-09`](refresh-model.md#912--w-p3-pus-09) Add the worker UserTokenSource with memory cache and epoch invalidation
 
 ### 5/7 · W-P2-SBND-05
 
