@@ -1,0 +1,133 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Warden target architecture. Rendered into plan.html by gen.go; edit here. -->
+<svg viewBox="0 0 1040 812" role="img" aria-labelledby="arch-t arch-d" xmlns="http://www.w3.org/2000/svg">
+    <title id="arch-t">Warden target architecture</title>
+    <desc id="arch-d">An employee uses an agent platform with no internet route. The agent sends every request with a session token to a Warden worker, which runs nine stages from identity to logging and is the only path to upstream APIs, MCP servers, the secret backend and the SIEM. A control plane below manages SSO, policy, identity, keys and consent, and talks to workers over mTLS.</desc>
+    <style>
+    svg { --bg:#f4f6f4; --surface:#ffffff; --sunk:#eaeeeb; --ink:#18211e; --muted:#56645f; --line:#d5ddd9; --accent:#1d6b58; --accent-soft:#dcefe8;
+      --p1:#1d6b58; --p2:#2d5d8f; --p3:#7a4f9a; --p4:#a2552e; --p5:#5b6470;
+      --f-display:"IBM Plex Sans Condensed","Arial Narrow",system-ui,sans-serif; --f-body:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif; --f-mono:"IBM Plex Mono",ui-monospace,Menlo,monospace; font-family:var(--f-body); background:var(--bg); }
+    @media (prefers-color-scheme: dark) { svg { --bg:#111715; --surface:#18201d; --sunk:#0d1311; --ink:#e2e9e6; --muted:#93a29c; --line:#2a3531; --accent:#63c2a6; --accent-soft:#1b3a31;
+      --p1:#63c2a6; --p2:#79a9dc; --p3:#b993d6; --p4:#e09a72; --p5:#a7afba; } }
+    .s-box { fill: var(--surface); stroke: var(--line); stroke-width: 1; }
+    .s-agent { stroke: var(--muted); stroke-dasharray: 4 3; }
+    .s-worker { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.5; }
+    .s-cp { fill: var(--sunk); stroke: var(--p2); stroke-width: 1.5; }
+    .s-t { fill: var(--ink); font: 600 14px var(--f-display); }
+    .s-t2 { fill: var(--ink); font: 600 12.5px var(--f-body); }
+    .s-s { fill: var(--muted); font-size: 11px; }
+    .s-l { fill: var(--muted); font-size: 10px; }
+    .s-tag { font: 600 11px var(--f-mono); }
+    .s-line { fill: none; stroke: var(--muted); stroke-width: 1.3; }
+    .s-go { stroke: var(--accent); stroke-width: 1.8; }
+    .s-dash { stroke-dasharray: 5 4; }
+    .s-head { fill: var(--muted); }
+    .c0 { fill: var(--muted); } .c1 { fill: var(--p1); } .c2 { fill: var(--p2); } .c3 { fill: var(--p3); } .c4 { fill: var(--p4); } .c5 { fill: var(--p5); }
+  </style>
+    <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="s-head"/></marker></defs>
+
+    <!-- left column: people, agent, IdP -->
+    <rect x="20" y="40" width="180" height="56" rx="6" class="s-box"/>
+    <text x="34" y="63" class="s-t">Employee</text>
+    <text x="34" y="81" class="s-s">Signs in to their agent platform</text>
+
+    <rect x="20" y="140" width="180" height="150" rx="6" class="s-box s-agent"/>
+    <text x="34" y="164" class="s-t">Agent platform</text>
+    <text x="34" y="184" class="s-s">No internet route</text>
+    <text x="34" y="201" class="s-s">Placeholders only</text>
+    <text x="34" y="226" class="s-s">warden identity CLI</text><text x="186" y="226" class="s-tag c1" text-anchor="end">P1</text>
+    <text x="34" y="243" class="s-s">Agent key, bound token</text><text x="186" y="243" class="s-tag c2" text-anchor="end">P2</text>
+    <text x="34" y="260" class="s-s">Claude Code / Codex</text><text x="186" y="260" class="s-tag c2" text-anchor="end">P2</text>
+    <text x="34" y="277" class="s-s">recipes</text>
+
+    <rect x="20" y="330" width="180" height="90" rx="6" class="s-box"/>
+    <text x="34" y="354" class="s-t">Identity provider</text>
+    <text x="34" y="374" class="s-s">Dex, pinned stable</text><text x="186" y="374" class="s-tag c1" text-anchor="end">P1</text>
+    <text x="34" y="391" class="s-s">Okta / Entra / Google</text><text x="186" y="391" class="s-tag c5" text-anchor="end">P5</text>
+    <text x="34" y="408" class="s-s">Warden never sees passwords</text>
+
+    <path d="M110,96 V138" class="s-line" marker-end="url(#ah)"/>
+    <path d="M110,290 V328" class="s-line" marker-end="url(#ah)"/>
+    <text x="118" y="314" class="s-l">gets user token</text>
+    <path d="M110,420 V640 H268" class="s-line" marker-end="url(#ah)"/>
+    <text x="122" y="632" class="s-l">SSO for console and portal (OIDC)</text>
+    <path d="M20,68 H8 V720 H268" class="s-line s-dash" marker-end="url(#ah)"/>
+    <text x="20" y="712" class="s-l">Approves access in the consent portal (P3)</text>
+
+    <path d="M200,192 H268" class="s-line s-go" marker-end="url(#ah)"/>
+    <text x="206" y="172" class="s-l">CONNECT +</text><text x="206" y="184" class="s-l">session token</text>
+    <path d="M270,240 H202" class="s-line" marker-end="url(#ah)"/>
+    <text x="206" y="232" class="s-l">200 / 403</text>
+
+    <!-- worker -->
+    <rect x="270" y="30" width="400" height="500" rx="8" class="s-worker"/>
+    <text x="286" y="54" class="s-t">Warden worker</text>
+    <text x="656" y="54" class="s-s" text-anchor="end">the only path to the internet</text>
+    <g class="stages">
+      <rect x="284" y="70"  width="372" height="44" rx="4" class="s-box"/><text x="296" y="88"  class="s-t2">0  Identify the user</text><text x="296" y="105" class="s-s">Verify token on cached JWKS, strip identity headers</text><text x="644" y="88"  class="s-tag" text-anchor="end"><tspan class="c1">P1</tspan><tspan class="c0"> · </tspan><tspan class="c2">P2</tspan></text>
+      <rect x="284" y="120" width="372" height="44" rx="4" class="s-box"/><text x="296" y="138" class="s-t2">1  TCP floor</text><text x="296" y="155" class="s-s">Default-deny by destination IP and port, SSRF guard</text><text x="644" y="138" class="s-tag c0" text-anchor="end">today</text>
+      <rect x="284" y="170" width="372" height="44" rx="4" class="s-box"/><text x="296" y="188" class="s-t2">2  TLS termination + protocol</text><text x="296" y="205" class="s-s">Leaf certs · HTTP/1.1 · HTTP/2 · MCP · WebSocket</text><text x="644" y="188" class="s-tag c0" text-anchor="end">today</text>
+      <rect x="284" y="220" width="372" height="44" rx="4" class="s-box"/><text x="296" y="238" class="s-t2">3  MCP gateway</text><text x="296" y="255" class="s-s">One /mcp URL that bundles approved servers</text><text x="644" y="238" class="s-tag c4" text-anchor="end">P4</text>
+      <rect x="284" y="270" width="372" height="44" rx="4" class="s-box"/><text x="296" y="288" class="s-t2">4  Policy decision</text><text x="296" y="305" class="s-s">Allowlist + groups, user block list, grants, hooks</text><text x="644" y="288" class="s-tag" text-anchor="end"><tspan class="c1">P1</tspan><tspan class="c0"> · </tspan><tspan class="c4">P4</tspan></text>
+      <rect x="284" y="320" width="372" height="44" rx="4" class="s-box"/><text x="296" y="338" class="s-t2">5  Just-in-time authorization</text><text x="296" y="355" class="s-s">403 authorization_required, or park and notify</text><text x="644" y="338" class="s-tag" text-anchor="end"><tspan class="c3">P3</tspan><tspan class="c0"> · </tspan><tspan class="c4">P4</tspan></text>
+      <rect x="284" y="370" width="372" height="44" rx="4" class="s-box"/><text x="296" y="388" class="s-t2">6  Secret swap</text><text x="296" y="405" class="s-s">Shared keys + the user's own OAuth token</text><text x="644" y="388" class="s-tag" text-anchor="end"><tspan class="c0">today · </tspan><tspan class="c3">P3</tspan></text>
+      <rect x="284" y="420" width="372" height="44" rx="4" class="s-box"/><text x="296" y="438" class="s-t2">7  Limits + response scan</text><text x="296" y="455" class="s-s">Per-user limits and cost · injection · DLP</text><text x="644" y="438" class="s-tag" text-anchor="end"><tspan class="c0">today · </tspan><tspan class="c3">P3</tspan></text>
+      <rect x="284" y="470" width="372" height="44" rx="4" class="s-box"/><text x="296" y="488" class="s-t2">8  Log the decision</text><text x="296" y="505" class="s-s">User, agent, verdict · signed receipt · OTel</text><text x="644" y="488" class="s-tag" text-anchor="end"><tspan class="c1">P1</tspan><tspan class="c0"> · </tspan><tspan class="c5">P5</tspan></text>
+    </g>
+
+    <!-- right column: outside systems -->
+    <rect x="720" y="60" width="300" height="80" rx="6" class="s-box"/>
+    <text x="734" y="84" class="s-t">Upstream APIs</text>
+    <text x="734" y="104" class="s-s">Model APIs, Google, GitHub, internal services</text>
+    <text x="734" y="121" class="s-s">See the real credential, never the user token</text>
+    <path d="M670,100 H718" class="s-line s-go" marker-end="url(#ah)"/>
+
+    <rect x="720" y="215" width="300" height="55" rx="6" class="s-box"/>
+    <text x="734" y="238" class="s-t">MCP servers</text><text x="1006" y="238" class="s-tag c4" text-anchor="end">P4</text>
+    <text x="734" y="257" class="s-s">Approved and pinned in the MCP registry</text>
+    <path d="M656,242 H718" class="s-line s-go" marker-end="url(#ah)"/>
+
+    <rect x="720" y="282" width="300" height="52" rx="6" class="s-box"/>
+    <text x="734" y="304" class="s-t">Slack / email</text><text x="1006" y="304" class="s-tag c4" text-anchor="end">P4</text>
+    <text x="734" y="322" class="s-s">Control plane asks the user to approve</text>
+
+    <rect x="720" y="345" width="300" height="92" rx="6" class="s-box"/>
+    <text x="734" y="368" class="s-t">Secret backend</text>
+    <text x="734" y="388" class="s-s">Vault · AWS Secrets Manager · KMS (P5)</text>
+    <text x="734" y="405" class="s-s">Shared keys + warden/users/&lt;sub&gt;/&lt;provider&gt;</text>
+    <text x="734" y="422" class="s-s">OAuth broker writes user tokens here (P3)</text>
+    <path d="M656,392 H718" class="s-line" marker-end="url(#ah)"/>
+
+    <rect x="720" y="452" width="300" height="70" rx="6" class="s-box"/>
+    <text x="734" y="475" class="s-t">SIEM</text>
+    <text x="734" y="495" class="s-s">JSON audit logs (P1)</text>
+    <text x="734" y="512" class="s-s">OTel collector → Splunk, Datadog, Sentinel (P5)</text>
+    <path d="M656,492 H718" class="s-line" marker-end="url(#ah)"/>
+
+    <path d="M1020,640 H1032 V425 H1022" class="s-line s-dash" marker-end="url(#ah)"/>
+
+    <!-- worker <-> control plane -->
+    <path d="M330,578 V532" class="s-line" marker-end="url(#ah)"/>
+    <path d="M610,532 V578" class="s-line" marker-end="url(#ah)"/>
+    <text x="470" y="552" class="s-l" text-anchor="middle">signed policy bundle + block list + keys ↑</text>
+    <text x="470" y="566" class="s-l" text-anchor="middle">↓ events, heartbeat · worker mTLS (P2)</text>
+
+    <!-- control plane -->
+    <rect x="270" y="580" width="750" height="220" rx="8" class="s-cp"/>
+    <text x="286" y="604" class="s-t">Warden control plane</text>
+    <text x="1004" y="604" class="s-s" text-anchor="end">Fleet dashboard (today) · user block list (P1) · policy as code + canary (P4)</text>
+    <g class="mods">
+      <rect x="286" y="618" width="172" height="50" rx="4" class="s-box"/><text x="298" y="638" class="s-t2">SSO, roles, API keys</text><text x="298" y="656" class="s-tag"><tspan class="c1">P1</tspan><tspan class="c0"> · </tspan><tspan class="c2">P2</tspan></text>
+      <rect x="468" y="618" width="172" height="50" rx="4" class="s-box"/><text x="480" y="638" class="s-t2">Admin audit log</text><text x="480" y="656" class="s-tag c1">P1</text>
+      <rect x="650" y="618" width="172" height="50" rx="4" class="s-box"/><text x="662" y="638" class="s-t2">Policy history, rollback</text><text x="662" y="656" class="s-tag c1">P1</text>
+      <rect x="832" y="618" width="172" height="50" rx="4" class="s-box"/><text x="844" y="638" class="s-t2">Two-person approval</text><text x="844" y="656" class="s-tag c2">P2</text>
+      <rect x="286" y="676" width="172" height="50" rx="4" class="s-box"/><text x="298" y="696" class="s-t2">Agent registry</text><text x="298" y="714" class="s-tag c2">P2</text>
+      <rect x="468" y="676" width="172" height="50" rx="4" class="s-box"/><text x="480" y="696" class="s-t2">Token service (RFC 8693)</text><text x="480" y="714" class="s-tag c2">P2</text>
+      <rect x="650" y="676" width="172" height="50" rx="4" class="s-box"/><text x="662" y="696" class="s-t2">Key manager → KMS</text><text x="662" y="714" class="s-tag"><tspan class="c2">P2</tspan><tspan class="c0"> · </tspan><tspan class="c5">P5</tspan></text>
+      <rect x="832" y="676" width="172" height="50" rx="4" class="s-box"/><text x="844" y="696" class="s-t2">Worker CA (mTLS)</text><text x="844" y="714" class="s-tag c2">P2</text>
+      <rect x="286" y="734" width="172" height="50" rx="4" class="s-box"/><text x="298" y="754" class="s-t2">Consent portal, OAuth</text><text x="298" y="772" class="s-tag c3">P3</text>
+      <rect x="468" y="734" width="172" height="50" rx="4" class="s-box"/><text x="480" y="754" class="s-t2">Offboarding, grants</text><text x="480" y="772" class="s-tag"><tspan class="c3">P3</tspan><tspan class="c0"> · </tspan><tspan class="c4">P4</tspan></text>
+      <rect x="650" y="734" width="172" height="50" rx="4" class="s-box"/><text x="662" y="754" class="s-t2">MCP registry, admin MCP</text><text x="662" y="772" class="s-tag c4">P4</text>
+      <rect x="832" y="734" width="172" height="50" rx="4" class="s-box"/><text x="844" y="754" class="s-t2">Postgres HA, Helm</text><text x="844" y="772" class="s-tag c5">P5</text>
+    </g>
+  </svg>
