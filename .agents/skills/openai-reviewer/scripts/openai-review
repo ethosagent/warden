@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # openai-review — Run Codex CLI on a diff, return findings as JSON. (Warden)
 #
-# Usage: openai-review [<mode>] [--focus <area>]
+# Usage: openai-review [<mode>] [--focus <area>] [--lens <name>]
 #
 # Modes (default: uncommitted):
 #   uncommitted     - staged + unstaged changes
@@ -83,6 +83,7 @@ focus_clause() {
 # --- Args ---
 MODE="uncommitted"
 FOCUS="all"
+LENS=""
 
 if [[ $# -gt 0 && "$1" != --* ]]; then
     MODE="$1"
@@ -94,6 +95,9 @@ while [[ $# -gt 0 ]]; do
         --focus)
             [[ -z "${2:-}" ]] && die "--focus requires an argument"
             FOCUS="$2"; shift 2 ;;
+        --lens)
+            [[ -z "${2:-}" ]] && die "--lens requires an argument"
+            LENS="$2"; shift 2 ;;
         *) die "Unknown option: $1" ;;
     esac
 done
@@ -121,6 +125,22 @@ fi
 
 FOCUS_TEXT=$(focus_clause)
 
+# --- Optional review rubric (.agents/reviews/<lens>.md) ---
+RUBRIC_TEXT=""
+if [[ -n "$LENS" ]]; then
+    RUBRIC_DIR="$ROOT/.agents/reviews"
+    [[ "$LENS" =~ ^[a-z0-9-]+$ && "$LENS" != "README" ]] || die "invalid lens name: $LENS"
+    if [[ ! -f "$RUBRIC_DIR/$LENS.md" ]]; then
+        valid=$(find "$RUBRIC_DIR" -maxdepth 1 -name '*.md' ! -name README.md -exec basename {} .md \; 2>/dev/null | sort | tr '\n' ' ')
+        die "unknown lens: $LENS (valid: ${valid:-none found in .agents/reviews})"
+    fi
+    RUBRIC_TEXT="Apply this review rubric. Report each finding with the rubric's check ID in \"rule\" (use <PREFIX>-0 for a real issue the rubric does not list) and the supporting \"evidence\". Skip anything the rubric lists as covered by CI.
+
+---
+$(head -c 12288 "$RUBRIC_DIR/$LENS.md")
+---"
+fi
+
 # --- Build prompt ---
 PROMPT=$(cat <<EOF
 Review this diff as Linus Torvalds would — blunt, no hedging, focused on what will break in 5 years.
@@ -140,6 +160,8 @@ If the code is fine, say so. Do not invent issues for thoroughness.
 
 $FOCUS_TEXT
 
+$RUBRIC_TEXT
+
 The project follows these rules — RESPECT them. Do NOT flag things they explicitly permit (e.g. "no error handling for impossible scenarios", "no abstractions for single-use code", "no speculative flexibility"):
 
 ---
@@ -158,7 +180,9 @@ Output ONLY valid JSON in this exact shape — no markdown fences, no prose arou
       "file": "path/to/file",
       "line": <number or null>,
       "issue": "what is wrong",
-      "suggestion": "how to fix"
+      "suggestion": "how to fix",
+      "rule": "rubric check ID, only when a rubric was given (optional)",
+      "evidence": "code, test or output that shows the problem (optional)"
     }
   ]
 }
