@@ -58,6 +58,11 @@ banner "lint (golangci-lint ${GOLANGCI_VERSION})"
 go run "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI_VERSION}" run
 echo "ok"
 
+# 3b. roadmap docs are generated from docs/roadmap/tickets.json; fail if
+# the data is invalid or a generated file was hand-edited or not regenerated.
+banner "roadmap (go run docs/roadmap/gen.go check)"
+go run docs/roadmap/gen.go check
+
 # 4. build
 banner "build (go build ./...)"
 go build ./...

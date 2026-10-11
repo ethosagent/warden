@@ -17,6 +17,8 @@ Built for teams running LLM agents (coding assistants, support bots, autonomous 
   <img src="assets/architecture.svg" alt="Warden Architecture" width="800"/>
 </p>
 
+**Roadmap:** where Warden is going next (user identity, acting as the user with consent, and an enterprise control plane) lives in [`docs/roadmap/`](docs/roadmap/README.md), including the [final design](docs/roadmap/architecture.svg).
+
 ## Quickstart
 
 ```sh

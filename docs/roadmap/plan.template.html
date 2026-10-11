@@ -1,0 +1,446 @@
+<title>Warden Identity Roadmap</title>
+<!--__GENERATED__-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<style>
+/* Layout: one reading column (~880px) with full-width tables and diagrams; plan reads top to bottom, explorer is the working surface. */
+:root {
+  --bg: #f4f6f4;
+  --surface: #ffffff;
+  --sunk: #eaeeeb;
+  --ink: #18211e;
+  --muted: #56645f;
+  --line: #d5ddd9;
+  --accent: #1d6b58;
+  --accent-soft: #dcefe8;
+  --flag: #9a5a12;
+  --flag-soft: #f6ead8;
+  --p1: #1d6b58; --p2: #2d5d8f; --p3: #7a4f9a; --p4: #a2552e; --p5: #5b6470;
+  --f-display: "IBM Plex Sans Condensed", "Arial Narrow", system-ui, sans-serif;
+  --f-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #111715; --surface: #18201d; --sunk: #0d1311; --ink: #e2e9e6; --muted: #93a29c;
+    --line: #2a3531; --accent: #63c2a6; --accent-soft: #1b3a31; --flag: #e3a55a; --flag-soft: #3a2b17;
+    --p1: #63c2a6; --p2: #79a9dc; --p3: #b993d6; --p4: #e09a72; --p5: #a7afba;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #111715; --surface: #18201d; --sunk: #0d1311; --ink: #e2e9e6; --muted: #93a29c;
+  --line: #2a3531; --accent: #63c2a6; --accent-soft: #1b3a31; --flag: #e3a55a; --flag-soft: #3a2b17;
+  --p1: #63c2a6; --p2: #79a9dc; --p3: #b993d6; --p4: #e09a72; --p5: #a7afba;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font: 15px/1.6 var(--f-body); padding-inline: 16px; padding-block: 0 64px; }
+.wrap { max-width: 920px; margin: 0 auto; display: flex; flex-direction: column; gap: 56px; }
+h1, h2, h3 { font-family: var(--f-display); text-wrap: balance; margin: 0; letter-spacing: -0.005em; }
+h1 { font-size: clamp(2rem, 5vw, 2.9rem); line-height: 1.05; font-weight: 700; }
+h2 { font-size: 1.6rem; font-weight: 600; line-height: 1.2; }
+h3 { font-size: 1.15rem; font-weight: 600; }
+p { margin: 0; max-width: 68ch; }
+code, .mono { font-family: var(--f-mono); font-size: 0.86em; }
+code { background: var(--sunk); padding: 0.05em 0.35em; border-radius: 3px; overflow-wrap: anywhere; }
+a { color: var(--accent); }
+.eyebrow { font: 500 0.74rem/1 var(--f-mono); text-transform: uppercase; letter-spacing: 0.09em; color: var(--muted); }
+.muted { color: var(--muted); }
+section { display: flex; flex-direction: column; gap: 18px; }
+section > header { display: flex; flex-direction: column; gap: 8px; }
+
+/* top nav */
+nav.top { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; background: var(--bg); border-bottom: 1px solid var(--line); margin-inline: -16px; padding: 10px 16px; }
+nav.top .in { max-width: 920px; margin: 0 auto; display: flex; gap: 6px 18px; flex-wrap: wrap; font-size: 0.85rem; }
+nav.top a { color: var(--muted); text-decoration: none; }
+nav.top a:hover, nav.top a:focus-visible { color: var(--ink); }
+
+/* hero */
+.hero { padding-top: 40px; display: flex; flex-direction: column; gap: 16px; }
+.hero .lead { font-size: 1.08rem; color: var(--ink); }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 6px; overflow: hidden; margin-top: 8px; }
+.stat { background: var(--surface); padding: 14px 16px; display: flex; flex-direction: column; gap: 2px; }
+.stat b { font: 600 1.7rem/1.1 var(--f-display); font-variant-numeric: tabular-nums; }
+.stat span { font-size: 0.82rem; color: var(--muted); }
+.status { display: inline-flex; align-items: center; gap: 8px; align-self: flex-start; background: var(--flag-soft); color: var(--flag); font: 500 0.78rem/1 var(--f-mono); padding: 6px 10px; border-radius: 99px; }
+.status::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+
+/* decisions */
+.decisions { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px 28px; margin: 0; padding: 0; list-style: none; }
+.decisions li { border-top: 1px solid var(--line); padding-top: 10px; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.decisions b { font-weight: 600; }
+.decisions span { color: var(--muted); font-size: 0.92rem; }
+
+/* tables */
+.tbl { overflow-x: auto; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
+th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+tr:last-child td { border-bottom: 0; }
+th { font: 500 0.72rem/1.2 var(--f-mono); text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); background: var(--sunk); white-space: nowrap; }
+td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ph { display: inline-block; font: 600 0.78rem/1 var(--f-mono); color: var(--pc); border: 1px solid var(--pc); border-radius: 3px; padding: 3px 5px; white-space: nowrap; }
+.ph1 { --pc: var(--p1); } .ph2 { --pc: var(--p2); } .ph3 { --pc: var(--p3); } .ph4 { --pc: var(--p4); } .ph5 { --pc: var(--p5); }
+.lbl { display: inline-block; font: 0.76rem/1.3 var(--f-mono); background: var(--sunk); border: 1px solid var(--line); border-radius: 99px; padding: 1px 8px; white-space: nowrap; }
+.lbl.phase { background: var(--accent-soft); border-color: transparent; color: var(--accent); font-weight: 500; }
+.note { border-left: 3px solid var(--flag); background: var(--flag-soft); padding: 10px 14px; border-radius: 0 4px 4px 0; font-size: 0.92rem; }
+.note b { color: var(--flag); }
+
+/* diagrams */
+.diagram { overflow-x: auto; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); padding: 12px; }
+.diagram pre.mermaid { margin: 0; background: transparent; font-size: 13px; }
+
+/* explorer */
+.filters { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { font: 500 0.82rem/1 var(--f-body); border: 1px solid var(--line); background: var(--surface); color: var(--ink); border-radius: 99px; padding: 7px 12px; cursor: pointer; }
+.chip[aria-pressed="true"] { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+.chip:focus-visible, select:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+select, input[type="search"] { font: inherit; font-size: 0.88rem; padding: 7px 10px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); color: var(--ink); }
+input[type="search"] { flex: 1 1 200px; min-width: 0; }
+.count { font-size: 0.85rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+.phase-group { display: flex; flex-direction: column; gap: 8px; }
+.phase-group > h3 { display: flex; gap: 10px; align-items: baseline; padding-top: 10px; }
+details.feat { background: var(--surface); border: 1px solid var(--line); border-radius: 6px; }
+details.feat > summary { list-style: none; cursor: pointer; padding: 12px 14px; display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; align-items: baseline; }
+details.feat > summary::-webkit-details-marker, details.tk > summary::-webkit-details-marker { display: none; }
+.fname { font-weight: 600; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; min-width: 0; }
+.fname::before { content: "▸"; color: var(--muted); font-size: 0.8em; transition: transform .15s; display: inline-block; }
+details[open] > summary .fname::before { transform: rotate(90deg); }
+.fmeta { font: 0.78rem/1.3 var(--f-mono); color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.fsum { grid-column: 1 / -1; color: var(--muted); font-size: 0.9rem; padding-left: 18px; }
+.lane { font: 500 0.7rem/1 var(--f-mono); text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); border: 1px solid var(--line); border-radius: 3px; padding: 3px 5px; }
+.fbody { border-top: 1px solid var(--line); padding: 14px 16px 16px; display: flex; flex-direction: column; gap: 14px; }
+.fbody h4 { margin: 0; font: 500 0.72rem/1 var(--f-mono); text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+.fbody ul { margin: 0; padding-left: 1.2em; display: flex; flex-direction: column; gap: 6px; }
+.fbody li { max-width: 72ch; }
+.kv { display: flex; flex-direction: column; gap: 6px; }
+.tags { display: flex; flex-wrap: wrap; gap: 6px; }
+.tlist { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 4px; }
+details.tk { border-bottom: 1px solid var(--line); }
+details.tk:last-child { border-bottom: 0; }
+details.tk > summary { list-style: none; cursor: pointer; padding: 9px 12px; display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 2px 10px; }
+.tkey { font: 500 0.78rem/1.4 var(--f-mono); color: var(--accent); }
+.ttitle { font-size: 0.9rem; min-width: 0; overflow-wrap: anywhere; }
+.tsz { font: 0.75rem/1.4 var(--f-mono); color: var(--muted); white-space: nowrap; align-self: start; }
+.tbody { padding: 4px 14px 14px; display: flex; flex-direction: column; gap: 10px; font-size: 0.9rem; background: var(--sunk); }
+.tbody .tags { padding-top: 6px; }
+.empty { color: var(--muted); padding: 20px 0; }
+a.gh { color: var(--accent); font-family: var(--f-mono); }
+
+/* sample ticket */
+.ticket { background: var(--surface); border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.ticket .thead { padding: 14px 16px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 8px; }
+.ticket .crumb { font: 0.78rem/1.5 var(--f-mono); color: var(--muted); }
+.ticket .tsec { padding: 12px 16px; border-bottom: 1px solid var(--line); display: grid; grid-template-columns: 140px minmax(0,1fr); gap: 12px; font-size: 0.9rem; }
+.ticket .tsec:last-child { border-bottom: 0; }
+.ticket .tsec > b { font: 500 0.74rem/1.6 var(--f-mono); text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); }
+.ticket ul { margin: 0; padding-left: 1.1em; display: flex; flex-direction: column; gap: 4px; }
+.gwt span { font: 600 0.72rem var(--f-mono); color: var(--accent); }
+pre.cmd { margin: 0; background: var(--sunk); padding: 10px 12px; border-radius: 4px; overflow-x: auto; font: 0.82rem/1.5 var(--f-mono); }
+@media (max-width: 560px) { .ticket .tsec { grid-template-columns: 1fr; gap: 4px; } }
+
+/* tree + steps */
+pre.tree { margin: 0; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 14px 16px; overflow-x: auto; font: 0.84rem/1.6 var(--f-mono); }
+pre.tree i { color: var(--muted); font-style: normal; }
+ol.steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0; counter-reset: s -1; }
+ol.steps > li { counter-increment: s; display: grid; grid-template-columns: 44px minmax(0,1fr); gap: 4px 12px; padding: 16px 0; border-top: 1px solid var(--line); }
+ol.steps > li::before { content: counter(s); font: 600 1.5rem/1 var(--f-display); color: var(--accent); }
+ol.steps h3 { display: flex; gap: 10px; flex-wrap: wrap; align-items: baseline; }
+ol.steps .who { font: 500 0.72rem/1 var(--f-mono); padding: 4px 7px; border-radius: 3px; background: var(--sunk); color: var(--muted); }
+ol.steps .who.you { background: var(--flag-soft); color: var(--flag); }
+ol.steps ul { margin: 8px 0 0; padding-left: 1.1em; display: flex; flex-direction: column; gap: 4px; font-size: 0.92rem; }
+.twocol { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.card ul { margin: 0; padding-left: 1.1em; display: flex; flex-direction: column; gap: 6px; font-size: 0.92rem; }
+.ask { border: 1px solid var(--flag); background: var(--flag-soft); }
+.ask h3 { color: var(--flag); }
+/* architecture svg */
+.arch { padding: 8px; }
+.arch svg { display: block; width: 100%; min-width: 760px; height: auto; font-family: var(--f-body); }
+.s-box { fill: var(--surface); stroke: var(--line); stroke-width: 1; }
+.s-agent { stroke: var(--muted); stroke-dasharray: 4 3; }
+.s-worker { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.5; }
+.s-cp { fill: var(--sunk); stroke: var(--p2); stroke-width: 1.5; }
+.s-t { fill: var(--ink); font: 600 14px var(--f-display); }
+.s-t2 { fill: var(--ink); font: 600 12.5px var(--f-body); }
+.s-s { fill: var(--muted); font-size: 11px; }
+.s-l { fill: var(--muted); font-size: 10px; }
+.s-tag { font: 600 11px var(--f-mono); }
+.s-line { fill: none; stroke: var(--muted); stroke-width: 1.3; }
+.s-go { stroke: var(--accent); stroke-width: 1.8; }
+.s-dash { stroke-dasharray: 5 4; }
+.s-head { fill: var(--muted); }
+.c0 { fill: var(--muted); } .c1 { fill: var(--p1); } .c2 { fill: var(--p2); } .c3 { fill: var(--p3); } .c4 { fill: var(--p4); } .c5 { fill: var(--p5); }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 0.82rem; color: var(--muted); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend .sw { width: 10px; height: 10px; border-radius: 2px; background: var(--muted); }
+.legend .sw.c1 { background: var(--p1); } .legend .sw.c2 { background: var(--p2); } .legend .sw.c3 { background: var(--p3); } .legend .sw.c4 { background: var(--p4); } .legend .sw.c5 { background: var(--p5); }
+.legend .ln { width: 22px; border-top: 2px solid var(--accent); }
+.legend .ln.dash { border-top: 2px dashed var(--muted); }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<nav class="top" aria-label="Sections"><div class="in">
+  <a href="#design">Final design</a><a href="#phases">Phases</a><a href="#order">Build order</a><a href="#features">Features &amp; tickets</a>
+  <a href="#format">Ticket format</a><a href="#labels">Labels</a><a href="#layout">docs/roadmap</a><a href="#steps">Steps</a><a href="#risks">Risks</a>
+</div></nav>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="status">P1–P4 tracked in GitHub Issues · P5 planned</span>
+  <span class="eyebrow">github.com/ethosagent/warden · docs/roadmap<!--__ROADMAP_LINK__--></span>
+  <h1>Warden Identity Roadmap</h1>
+  <p class="lead">Every agent request already passes through Warden. This roadmap adds who the request is for, lets an agent act as that user with consent, and gives the company a control plane it can run. Five phases, each shippable. Phase 1 has to be usable in production on its own.</p>
+  <div class="stats" id="stats"></div>
+</header>
+
+<section>
+  <header><span class="eyebrow">Fixed before we start</span><h2>Decisions already made</h2></header>
+  <ul class="decisions">
+    <li><b>One deployment per company</b><span>Single-tenant. No tenant ids in the data model.</span></li>
+    <li><b>Warden is an OIDC client</b><span>Dex in front today, pinned to a stable release. Direct Okta, Entra and Google adapters come in Phase 5. Warden never stores user passwords.</span></li>
+    <li><b>Identity rides the proxy connection</b><span><code>Proxy-Authorization: Basic base64("session:"+token)</code> on CONNECT, fallback <code>X-Warden-Identity</code>. Both are stripped before forwarding.</span></li>
+    <li><b>The IdP is off the hot path</b><span>Workers verify tokens locally against a cached JWKS.</span></li>
+    <li><b>Platform-neutral</b><span>No Ethos-specific tickets. Agents integrate through a documented identity contract and the <code>warden identity</code> CLI.</span></li>
+    <li><b>Own token service</b><span>Warden issues 15-minute, agent-bound tokens itself (RFC 8693) instead of trusting Dex token exchange, because of GHSA-7qjx-gp9h-65qj.</span></li>
+    <li><b>JIT auth is a structured 403</b><span><code>authorization_required</code> with <code>authorize_url</code> and <code>status_url</code>. The agent retries, long-polls, or (Phase 4) parks and notifies.</span></li>
+    <li><b>One source of truth</b><span><code>docs/roadmap/tickets.json</code> generates both the docs and the GitHub issues. Neither side is edited by hand.</span></li>
+  </ul>
+</section>
+
+<section id="design">
+  <header><span class="eyebrow">Replaces assets/architecture.svg as the target</span><h2>Final design of Warden</h2>
+  <p>The README diagram shows one proxy with six stages. Today Warden already runs as a control plane plus workers. The final design keeps the core rule (the agent has no route out except a worker, and never holds a real credential) and adds identity at every step. Tags show which phase adds each part; grey means it exists today.</p></header>
+  <div class="diagram arch">
+  <!--__ARCH_SVG__-->
+  </div>
+  <div class="legend"><span><i class="sw c0"></i>today</span><span><i class="sw c1"></i>P1 Who did it</span><span><i class="sw c2"></i>P2 Proven identity</span><span><i class="sw c3"></i>P3 Act as the user</span><span><i class="sw c4"></i>P4 Agents everywhere</span><span><i class="sw c5"></i>P5 Enterprise scale</span><span><i class="ln"></i>request path</span><span><i class="ln dash"></i>out-of-band (people, broker)</span></div>
+  <div class="twocol">
+    <div class="card"><h3>What changes from the README diagram</h3><ul>
+      <li>Single proxy becomes <b>control plane + workers</b> (already true today; the image is out of date)</li>
+      <li>New first stage: <b>identify the user</b> from the session token, then strip it</li>
+      <li>Policy becomes <b>user- and group-aware</b>, with a fleet-wide block list</li>
+      <li>Secret swap can use <b>the user's own OAuth token</b>, fetched just in time with consent</li>
+      <li>Every log line names <b>the user and the agent</b>, and ships to the SIEM</li>
+    </ul></div>
+    <div class="card"><h3>What stays the same</h3><ul>
+      <li>The agent has no network route except a worker</li>
+      <li>Default-deny on every destination</li>
+      <li>Real credentials never reach the agent; the control plane holds grant metadata, never token values</li>
+      <li>Workers dial out to the control plane; nothing dials into a worker</li>
+      <li>The IdP is never on the request path</li>
+    </ul></div>
+  </div>
+</section>
+
+<section id="phases">
+  <header><span class="eyebrow">Five phases</span><h2>What works at the end of each phase</h2>
+  <p class="muted">Estimates use S = 1–2 days, M = 3–5 days, L = 6–10 days of one engineer, summed over the current tickets. Phase 0 is what Warden already does today.</p></header>
+  <div class="tbl"><table id="phase-table"><thead><tr><th>Phase</th><th>GitHub label</th><th>What works at the end</th><th>Features</th><th>Tickets</th><th>S / M / L</th><th>Eng-weeks</th></tr></thead><tbody></tbody></table></div>
+  <p class="note"><b>Size risk.</b> P1 alone sums to roughly <span id="p1-weeks"></span> eng-weeks. If it has to shrink, the agreed cuts are: defer JSON audit export and break-glass/backups, and ship only the admin and viewer roles. Each phase's gate is its "what works" column: a phase is closed when that sentence is true on a real deployment.</p>
+</section>
+
+<section id="order">
+  <header><span class="eyebrow">Feature dependencies</span><h2>Build order</h2>
+  <p class="muted">Arrows point from a feature to what it unblocks. Indirect edges are removed so only the direct order shows.</p></header>
+  <h3>Phase 1 · Who did it</h3>
+  <div class="diagram"><pre class="mermaid"><!--__MERMAID_P1__--></pre></div>
+  <h3>Phase 2 · Proven identity</h3>
+  <div class="diagram"><pre class="mermaid"><!--__MERMAID_P2__--></pre></div>
+</section>
+
+<section id="features">
+  <header><span class="eyebrow" id="feat-count"></span><h2>Features and the tickets they become</h2>
+  <p class="muted">Open a feature to see how it is built, then open a ticket for its scope and acceptance criteria. Titles are shown in the new <code>[Feature n/N]</code> format. Text is the current ticket data; step 1 rewrites P1 and P2 into the full format shown in the next section.</p></header>
+  <div class="filters">
+    <div class="chips" id="phase-chips" role="group" aria-label="Phase"></div>
+    <label class="muted" for="lane">Lane</label>
+    <select id="lane"><option value="">All lanes</option><option value="agent">Agent / harness</option><option value="idp">Identity provider</option><option value="cp">Control plane</option><option value="worker">Worker</option><option value="ext">Integrations</option></select>
+    <input type="search" id="q" placeholder="Search features, tickets, code paths" aria-label="Search">
+  </div>
+  <div class="count" id="count"></div>
+  <div id="explorer"></div>
+</section>
+
+<section id="format">
+  <header><span class="eyebrow">Next step · proposed</span><h2>How a ticket could read after the rewrite</h2>
+  <p class="muted">Issues today carry the current ticket text: what to build, acceptance criteria, dependencies and context. The next step is agreeing how to organise tickets so anyone can pick one up. This is one proposal, drafted for W-P1-VRFY-02: each ticket is one PR that merges on its own, behind a flag, with main green.</p></header>
+  <article class="ticket">
+    <div class="thead">
+      <div class="crumb">Verify user token · Ticket 2 of 5 · P1 Who did it · W-P1-VRFY-02 · Epic: [EPIC][P1] Verify user token</div>
+      <h3>[Verify user token 2/5] Extract, verify and strip identity on CONNECT and requests</h3>
+      <div class="tags"><span class="lbl phase">P1 · Who did it</span><span class="lbl">feature:identity-verification</span><span class="lbl">area:worker</span><span class="lbl">type:feature</span><span class="lbl">size:M</span></div>
+    </div>
+    <div class="tsec"><b>Why</b><div>Without this the verifier from ticket 1 never sees a token, and events stay anonymous. It is also where we guarantee the upstream never receives the user's token.</div></div>
+    <div class="tsec"><b>Context</b><div>The CONNECT header loop lives in <code>internal/proxy/serve.go</code> (<code>handleConn</code>). Request stages run in <code>runRequestStages</code>. Secrets already use an atomic holder (<code>secretsP</code>); identity follows the same pattern.</div></div>
+    <div class="tsec"><b>In scope</b><ul><li>Read <code>Proxy-Authorization</code> on CONNECT and <code>X-Warden-Identity</code> as a first request stage</li><li>Delete both headers on every path, in every mode</li><li>Resolve per-agent mode from <code>SettingsWire.Identity</code>; hot-reload the verifier</li><li>403 <code>identity_conflict</code> when the two sources disagree on <code>sub</code></li></ul></div>
+    <div class="tsec"><b>Out of scope</b><ul><li>Storing user fields on events (ticket 3)</li><li><code>require</code> mode, which blocks requests without a token (Phase 2)</li></ul></div>
+    <div class="tsec"><b>Acceptance</b><ul class="gwt">
+      <li><span>GIVEN</span> mode <code>attribute</code> and a valid token <span>WHEN</span> the agent sends CONNECT with it <span>THEN</span> the upstream sees neither identity header and the request scope carries the claims</li>
+      <li><span>GIVEN</span> mode <code>off</code> <span>WHEN</span> a token is sent <span>THEN</span> no verification runs and the headers are still stripped</li>
+      <li><span>GIVEN</span> CONNECT and header tokens with different <code>sub</code> <span>WHEN</span> the request arrives <span>THEN</span> the worker returns 403 <code>identity_conflict</code></li>
+    </ul></div>
+    <div class="tsec"><b>Flag</b><div><code>identity.mode: off</code> is the default, so merging changes nothing until an agent is switched to <code>attribute</code>.</div></div>
+    <div class="tsec"><b>How to verify</b><pre class="cmd">go test -race ./internal/proxy/... -run 'Identity'
+scripts/check.sh</pre></div>
+    <div class="tsec"><b>Definition of done</b><ul><li><code>scripts/check.sh</code> green, coverage at or above the gate</li><li>No token, or any part of one, in logs or test output</li><li>Config documented in <code>configs/config.example.yaml</code></li></ul></div>
+    <div class="tsec"><b>Depends on / Unblocks</b><div>Depends on W-P1-VRFY-01. Unblocks W-P1-VRFY-03, W-P1-GRP-*, W-P1-BLK-*.</div></div>
+  </article>
+  <div class="twocol">
+    <div class="card"><h3>Every feature also gets a story</h3><ul><li><b>Before / after</b>, in plain language an admin would recognise</li><li><b>Flow</b>: numbered steps from the user's action to the logged event</li><li><b>Out of scope</b> for the whole feature</li><li><b>Risks</b>, and what we do if one lands</li></ul></div>
+    <div class="card"><h3>Proposed split rules</h3><ul><li>Any L ticket is split (P1 and P2 currently have none)</li><li>An M ticket that changes both the worker and the control plane becomes two tickets, e.g. CP side and worker side of W-P2-WCA-04</li><li>Split tickets keep the key with a suffix (<code>-04a</code>, <code>-04b</code>) so existing references stay valid</li><li>Expect P1 and P2 to grow by a handful of tickets</li></ul></div>
+  </div>
+</section>
+
+<section id="labels">
+  <header><span class="eyebrow">GitHub</span><h2>Labels on every ticket</h2>
+  <p class="muted">The phase name is the main label, so filtering by phase in GitHub is one click. Each issue also gets a milestone named after its phase.</p></header>
+  <div class="tbl"><table><thead><tr><th>Label</th><th>Example</th><th>Purpose</th></tr></thead><tbody>
+    <tr><td>Phase name</td><td><span class="lbl phase">P1 · Who did it</span></td><td>One per phase, on every epic and ticket. Five labels: <span class="lbl phase">P1 · Who did it</span> <span class="lbl phase">P2 · Proven identity</span> <span class="lbl phase">P3 · Act as the user</span> <span class="lbl phase">P4 · Agents everywhere</span> <span class="lbl phase">P5 · Enterprise scale</span></td></tr>
+    <tr><td>Feature</td><td><span class="lbl">feature:identity-verification</span></td><td>Groups a feature's tickets with its epic. One per feature (43).</td></tr>
+    <tr><td>Area</td><td><span class="lbl">area:worker</span></td><td>Which component changes: harness, identity, control-plane, worker, integrations.</td></tr>
+    <tr><td>Type</td><td><span class="lbl">type:feature</span></td><td>feature, test, docs, chore, spike.</td></tr>
+    <tr><td>Size</td><td><span class="lbl">size:M</span></td><td>S, M or L, matching the estimate.</td></tr>
+    <tr><td>Epic</td><td><span class="lbl">epic</span></td><td>Only on the 43 parent issues. Tickets attach to them as sub-issues.</td></tr>
+  </tbody></table></div>
+</section>
+
+<section id="layout">
+  <header><span class="eyebrow">Everything in one folder</span><h2>What lands in docs/roadmap</h2>
+  <p class="muted">All roadmap material lives here: the data, the generator, the docs and this page. Nothing roadmap-related goes anywhere else except a one-line pointer in the repo README.</p></header>
+<pre class="tree">docs/roadmap/
+├── README.md               <i># start here: phases, build-order diagrams, gates, feature tables (generated)</i>
+├── plan.html               <i># this page (generated)</i>
+├── plan.template.html      <i># layout of this page; data is injected by gen.go</i>
+├── architecture.svg        <i># final design, standalone SVG; inlined into this page</i>
+├── conventions.md          <i># ticket keys, titles, labels, sizes, how to change the roadmap</i>
+├── tickets.json            <i># the single source of truth; the only data file edited by hand</i>
+├── github-issues.json      <i># which GitHub issue holds each epic and ticket (written by gen.go issues)</i>
+├── features/
+│   ├── identity-verification.md   <i># one per feature: design, done-when, full ticket text (generated)</i>
+│   └── …                   <i># 43 files</i>
+├── gen.go                  <i># //go:build ignore · go run docs/roadmap/gen.go docs | check | issues</i>
+└── _planning/
+    └── handoff.md          <i># the planning-session handoff, kept for history</i></pre>
+  <p class="muted"><code>gen.go check</code> runs in <code>scripts/check.sh</code> and fails when a generated file differs from what is committed, so CI catches hand edits. <code>//go:build ignore</code> keeps it out of <code>go build ./...</code>, lint and the coverage gate.</p>
+</section>
+
+<section id="steps">
+  <header><span class="eyebrow">Execution</span><h2>Steps, in order</h2></header>
+  <ol class="steps">
+    <li><div><h3>Set up docs/roadmap <span class="who">Done</span></h3>
+      <ul><li>Ticket data, handoff note, final design SVG and this page live in <code>docs/roadmap/</code></li><li>One generator, <code>gen.go</code>, writes the README, 43 feature pages and this page from <code>tickets.json</code></li><li><code>scripts/check.sh</code> fails if generated docs are stale; the repo README links here</li></ul></div></li>
+    <li><div><h3>Open P1–P4 on GitHub <span class="who">Done</span></h3>
+      <ul><li>Pinned Roadmap issue → <span id="gh-epics"></span> epics → <span id="gh-tickets"></span> tickets, linked as sub-issues</li><li>Every issue has its phase label and phase milestone, plus feature, area, type and size labels</li><li>Issue numbers follow build order; dependencies link to each other by number</li></ul></div></li>
+    <li><div><h3>Agree how tickets are organised <span class="who you">Next · with you</span></h3>
+      <ul><li>Decide the ticket format (the proposal above, or a lighter one), the board view, and how work is picked up</li><li>Then rewrite P1 and P2 tickets in that format in <code>tickets.json</code></li></ul></div></li>
+    <li><div><h3>Push the rewrite to GitHub <span class="who">After step 3</span></h3>
+      <ul><li><code>go run docs/roadmap/gen.go issues -repo ethosagent/warden -phases 1,2,3,4 -update</code> rewrites titles, bodies and labels in place; issue numbers stay the same</li></ul></div></li>
+    <li><div><h3>Open P5 <span class="who">Later</span></h3>
+      <ul><li>Add <code>5</code> to <code>-phases</code> when Phase 4 is under way</li></ul></div></li>
+  </ol>
+</section>
+
+<section id="risks">
+  <header><span class="eyebrow">Keep in view</span><h2>Risks and trade-offs</h2></header>
+  <div class="twocol">
+    <div class="card"><h3>Trade-offs</h3><ul>
+      <li><b>Generated issues.</b> Text edited directly on GitHub is overwritten by the next <code>-update</code>. Comments and status are kept; change the text in <code>tickets.json</code>.</li>
+      <li><b>Issues before the rewrite.</b> Tracking starts now with today's ticket text; the rewrite updates the same issues in place.</li>
+      <li><b>Go generator</b> matches the repo's only language. <code>//go:build ignore</code> keeps it out of the coverage gate.</li>
+    </ul></div>
+    <div class="card"><h3>Risks</h3><ul>
+      <li><b>P1 is large.</b> 43 tickets before splits. Cut list is agreed (above) if it needs trimming.</li>
+      <li><b>Ticket context goes stale</b> as code moves. The rewrite checks named symbols today; tickets cite files, not line numbers.</li>
+      <li><b>Dex dependency.</b> Pinned stable release only. Warden's own token service avoids the open Dex exchange advisory.</li>
+    </ul></div>
+  </div>
+  <div class="card ask"><h3>Open questions for the next step</h3><ul>
+    <li><b>Ticket format.</b> The full proposal above, or a lighter one (what, why, acceptance, how to verify)?</li>
+    <li><b>README image.</b> Redraw it to show today's control plane + workers, or swap in the final design marked as the target?</li>
+    <li><b>Board.</b> Add a GitHub Project with Phase, Feature, Status and Size fields for a kanban and roadmap view?</li>
+  </ul></div>
+</section>
+
+</div>
+
+<script>
+const DATA = /*__DATA__*/null;
+const esc = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const md = s => esc(s).replace(/`([^`]+)`/g, "<code>$1</code>");
+
+const real = DATA.phases.filter(p => p.p > 0);
+const totalT = real.reduce((a,p)=>a+p.tickets,0), totalF = real.reduce((a,p)=>a+p.features,0);
+const p1 = DATA.phases.find(p=>p.p===1);
+document.getElementById("stats").innerHTML = [
+  [real.length, "phases"], [totalF, "features"], [totalT, "tickets to create"],
+  [`${p1.weeks[0]}–${p1.weeks[1]}`, "eng-weeks for Phase 1"]
+].map(([b,s])=>`<div class="stat"><b>${b}</b><span>${s}</span></div>`).join("");
+
+document.getElementById("feat-count").textContent = `${totalF} features · ${totalT} tickets`;
+document.getElementById("p1-weeks").textContent = `${p1.weeks[0]}–${p1.weeks[1]}`;
+const tracked = DATA.features.filter(f => f.epic);
+document.getElementById("gh-epics").textContent = tracked.length;
+document.getElementById("gh-tickets").textContent = tracked.reduce((a,f)=>a+f.tickets.filter(t=>t.issue).length,0);
+document.querySelector("#phase-table tbody").innerHTML = DATA.phases.map(p => `<tr>
+  <td>${p.p ? `<span class="ph ph${p.p}">P${p.p}</span> ` : `<span class="muted">P0</span> `}<b>${esc(p.name)}</b></td>
+  <td>${p.label ? `<span class="lbl phase">${esc(p.label)}</span>` : `<span class="muted">none</span>`}</td>
+  <td>${esc(p.works)}</td>
+  <td class="num">${p.features}</td><td class="num">${p.tickets || "—"}</td>
+  <td class="num">${p.tickets ? p.mix.join(" / ") : "—"}</td>
+  <td class="num">${p.tickets ? `${p.weeks[0]}–${p.weeks[1]}` : "—"}</td></tr>`).join("");
+
+let state = {phase: 1, lane: "", q: ""};
+try { const s = JSON.parse(localStorage.getItem("roadmap-filter")||"null"); if (s) state = {...state, ...s, q: ""}; } catch(e) {}
+const chips = document.getElementById("phase-chips");
+chips.innerHTML = [["all","All"],...real.map(p=>[p.p,`P${p.p} ${p.name}`])].map(([v,l]) =>
+  `<button class="chip" data-v="${v}" aria-pressed="false">${esc(l)}</button>`).join("");
+chips.addEventListener("click", e => { const b = e.target.closest(".chip"); if (!b) return;
+  state.phase = b.dataset.v === "all" ? "all" : +b.dataset.v; saveFilter(); render(); });
+const lane = document.getElementById("lane"); lane.value = state.lane;
+lane.addEventListener("change", () => { state.lane = lane.value; saveFilter(); render(); });
+let qTimer;
+document.getElementById("q").addEventListener("input", e => { clearTimeout(qTimer); qTimer = setTimeout(() => { state.q = e.target.value.trim().toLowerCase(); render(); }, 150); });
+
+const gh = n => n && DATA.repo ? `<a class="gh" href="https://github.com/${DATA.repo}/issues/${n}">#${n}</a>` : "";
+function ticketHTML(t) {
+  return `<details class="tk"><summary><span class="ttitle"><span class="tkey">${esc(t.key)}</span> ${md(t.title)}</span><span class="tsz">${t.type} · ${t.size}${t.issue ? " · " + gh(t.issue) : ""}</span></summary>
+  <div class="tbody"><p>${md(t.body)}</p>
+  ${t.acceptance.length ? `<div class="kv"><h4>Acceptance</h4><ul>${t.acceptance.map(a=>`<li>${md(a)}</li>`).join("")}</ul></div>` : ""}
+  <div class="muted"><b>Depends on:</b> ${t.depends_on.length ? t.depends_on.map(esc).join(", ") : "nothing"} · <b>Unblocks:</b> ${t.unblocks.length ? t.unblocks.map(esc).join(", ") : "nothing yet"}</div>
+  <div class="tags">${t.labels.map((l,i)=>`<span class="lbl${i===0?" phase":""}">${esc(l)}</span>`).join("")}</div></div></details>`;
+}
+function featHTML(f) {
+  return `<details class="feat"${state.q ? " open" : ""}><summary>
+    <span class="fname">${esc(f.name)} <span class="lane">${esc(f.lane_name)}</span></span>
+    <span class="fmeta">${f.epic ? gh(f.epic) + " · " : ""}${f.tickets.length} tickets · ${f.mix}</span>
+    <span class="fsum">${md(f.summary)}</span></summary>
+    <div class="fbody">
+      ${f.design.length ? `<div class="kv"><h4>How we build it</h4><ul>${f.design.map(d=>`<li>${md(d)}</li>`).join("")}</ul></div>` : ""}
+      ${f.done_when ? `<div class="kv"><h4>Done when</h4><p>${md(f.done_when)}</p></div>` : ""}
+      <div class="kv"><h4>Needs first</h4><div class="tags">${f.depends.length ? f.depends.map(d=>`<span class="lbl">${esc(d)}</span>`).join("") : `<span class="muted">Nothing; can start now</span>`}</div></div>
+      <div class="kv"><h4>Code it touches</h4><div class="tags">${f.touches.map(t=>`<code>${esc(t)}</code>`).join("")}</div></div>
+      <div class="kv"><h4>Epic and labels</h4><div class="tags"><span class="lbl phase">${esc(DATA.phases[f.phase].label)}</span><span class="lbl">feature:${esc(f.slug)}</span><span class="lbl">epic</span></div></div>
+      <div class="kv"><h4>Tickets</h4><div class="tlist">${f.tickets.map(ticketHTML).join("")}</div></div>
+    </div></details>`;
+}
+for (const f of DATA.features) f.hay = [f.name, f.summary, f.slug, ...f.design, ...f.touches, ...f.tickets.flatMap(t=>[t.key,t.title,t.body])].join(" ").toLowerCase();
+const matches = f => !state.q || f.hay.includes(state.q);
+function saveFilter() { try { localStorage.setItem("roadmap-filter", JSON.stringify({phase: state.phase, lane: state.lane})); } catch(e) {} }
+function render() {
+  chips.querySelectorAll(".chip").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.v === String(state.phase))));
+  const list = DATA.features.filter(f => (state.phase==="all"||f.phase===state.phase) && (!state.lane||f.lane===state.lane) && matches(f));
+  const out = [];
+  for (const p of real) {
+    const fs = list.filter(f=>f.phase===p.p); if (!fs.length) continue;
+    out.push(`<div class="phase-group"><h3><span class="ph ph${p.p}">P${p.p}</span> ${esc(p.name)}</h3>${fs.map(featHTML).join("")}</div>`);
+  }
+  const nT = list.reduce((a,f)=>a+f.tickets.length,0);
+  document.getElementById("count").textContent = `${list.length} features · ${nT} tickets shown`;
+  document.getElementById("explorer").innerHTML = out.join("") || `<p class="empty">No feature matches. Clear the search or pick another phase.</p>`;
+}
+render();
+</script>
