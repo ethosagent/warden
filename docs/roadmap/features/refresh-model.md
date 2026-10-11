@@ -43,10 +43,10 @@ A request from user A through a perUser Google mapping carries A's access token 
 | # | Key | Ticket | Type | Size | Depends on | Issue |
 |---|---|---|---|---|---|---|
 | 1/5 | [`W-P3-PUS-01`](#15--w-p3-pus-01) | Add Vault KV v2 SecretStore with write support | feature | M | — | [#139](https://github.com/ethosagent/warden/issues/139) |
-| 2/5 | [`W-P3-PUS-02`](#25--w-p3-pus-02) | Extend SecretMapping with perUser, provider and scopes | feature | S | — | — |
-| 3/5 | [`W-P3-PUS-03`](#35--w-p3-pus-03) | Implement UserTokenSource with cache, refresh and write-back | feature | L | W-P3-PUS-01, W-P3-PUS-02 | — |
-| 4/5 | [`W-P3-PUS-04`](#45--w-p3-pus-04) | Swap per-user placeholders in the proxy using verified sub | feature | M | W-P3-PUS-03 | — |
-| 5/5 | [`W-P3-PUS-05`](#55--w-p3-pus-05) | Retry once on upstream 401 with a freshly minted token | feature | M | W-P3-PUS-04 | — |
+| 2/5 | [`W-P3-PUS-02`](#25--w-p3-pus-02) | Extend SecretMapping with perUser, provider and scopes | feature | S | — | [#140](https://github.com/ethosagent/warden/issues/140) |
+| 3/5 | [`W-P3-PUS-03`](#35--w-p3-pus-03) | Implement UserTokenSource with cache, refresh and write-back | feature | L | W-P3-PUS-01, W-P3-PUS-02 | [#141](https://github.com/ethosagent/warden/issues/141) |
+| 4/5 | [`W-P3-PUS-04`](#45--w-p3-pus-04) | Swap per-user placeholders in the proxy using verified sub | feature | M | W-P3-PUS-03 | [#142](https://github.com/ethosagent/warden/issues/142) |
+| 5/5 | [`W-P3-PUS-05`](#55--w-p3-pus-05) | Retry once on upstream 401 with a freshly minted token | feature | M | W-P3-PUS-04 | [#143](https://github.com/ethosagent/warden/issues/143) |
 
 ### 1/5 · W-P3-PUS-01
 
@@ -68,7 +68,7 @@ Add internal/secrets/vault_store.go implementing SecretStore over Vault KV v2 (G
 
 **Extend SecretMapping with perUser, provider and scopes**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#140](https://github.com/ethosagent/warden/issues/140)
 
 Add PerUser, Provider and Scopes to config.SecretMapping with validation (provider required when perUser; envVar forbidden), carry per-user mappings on the CP policy wire as perUserSecrets [{placeholder, provider, scopes, agent}] so the broker can cap scopes, and update configs/config.example.yaml. Static mappings stay local and off the wire as today.
 
@@ -84,7 +84,7 @@ Add PerUser, Provider and Scopes to config.SecretMapping with validation (provid
 
 **Implement UserTokenSource with cache, refresh and write-back**
 
-Type **feature** · Size **L** · Issue —
+Type **feature** · Size **L** · Issue [#141](https://github.com/ethosagent/warden/issues/141)
 
 Add internal/secrets/usertoken.go with UserTokenSource over SecretStore plus a provider token client (refresh_token grant against the provider tokenURL from the CP-distributed provider metadata, client secret resolved by ref). Cache tokens per (sub, provider) with singleflight, early expiry margin 60s, max entries bound (LRU), and an epoch map so a userGrantEpochs bump from policy invalidates entries. Rotated refresh tokens are Put back; ErrGrantMissing is returned for not-found or invalid_grant.
 
@@ -103,7 +103,7 @@ Add internal/secrets/usertoken.go with UserTokenSource over SecretStore plus a p
 
 **Swap per-user placeholders in the proxy using verified sub**
 
-Type **feature** · Size **M** · Issue —
+Type **feature** · Size **M** · Issue [#142](https://github.com/ethosagent/warden/issues/142)
 
 In internal/proxy/http.go swapSecrets, resolve per-user placeholders via Proxy.userTokens().AccessToken(ctx, s.identity.Sub, provider) and inject as the placeholder value; static placeholders keep the existing Cache path. No verified sub → 403 with reason identity_required; ErrGrantMissing → set s.authRequired and return to the JIT stage. Record the provider and a Reference in swappedNames/analytics; wire the source in internal/worker/wiring.go with hot reload through the applier.
 
@@ -121,7 +121,7 @@ In internal/proxy/http.go swapSecrets, resolve per-user placeholders via Proxy.u
 
 **Retry once on upstream 401 with a freshly minted token**
 
-Type **feature** · Size **M** · Issue —
+Type **feature** · Size **M** · Issue [#143](https://github.com/ethosagent/warden/issues/143)
 
 In readUpstreamResponse/relayResponse, when the response is 401, a per-user token was swapped and the request body is buffered (within maxBodySwapSize), drain the response, Invalidate (sub, provider), mint a new token and replay the request once on a fresh upstream connection. Streaming or over-cap bodies are not retried and the 401 is relayed. Count retries in a bounded metric warden_user_token_retry_total{provider,outcome}.
 
