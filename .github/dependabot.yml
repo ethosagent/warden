@@ -1,0 +1,53 @@
+# Weekly dependency updates, so new advisories arrive as reviewable PRs instead
+# of a red main (govulncheck runs in scripts/check.sh on every push).
+#
+# Dependabot security updates (enabled in repo settings) still open a PR as
+# soon as an advisory is published; these schedules cover routine updates.
+#
+# The Go toolchain itself (the `go` line in go.mod and the golang builder image
+# in the Dockerfile) is bumped by .github/workflows/go-version.yml, because the
+# two must move together.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    groups:
+      go-modules:
+        patterns: ["*"]
+        update-types: [minor, patch]
+    labels: [dependencies]
+    commit-message:
+      prefix: chore(deps)
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    groups:
+      github-actions:
+        patterns: ["*"]
+    labels: [dependencies, ci]
+    commit-message:
+      prefix: chore(ci)
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    ignore:
+      # Bumped with go.mod by .github/workflows/go-version.yml.
+      - dependency-name: golang
+    labels: [dependencies]
+    commit-message:
+      prefix: chore(docker)

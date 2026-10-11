@@ -1,0 +1,121 @@
+name: go-version
+
+# Weekly: if a newer Go patch release exists for the minor version in go.mod,
+# bump go.mod and the Dockerfile builder image together, run scripts/check.sh
+# on the new toolchain, and open a PR. New minor versions stay a manual change.
+#
+# Requires the repo setting "Allow GitHub Actions to create and approve pull
+# requests". PRs opened with GITHUB_TOKEN do not trigger other workflows, which
+# is why check.sh runs here before the PR is opened.
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: go-version
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Find latest Go patch release
+        id: ver
+        run: |
+          set -euo pipefail
+          current="$(awk '$1 == "go" { print $2 }' go.mod)"
+          minor="$(echo "$current" | cut -d. -f1,2)"
+          latest="$(curl -fsSL 'https://go.dev/dl/?mode=json' \
+            | jq -r --arg p "go${minor}." '[.[] | select(.stable) | .version | select(startswith($p))][0] // empty' \
+            | sed 's/^go//')"
+          echo "current=$current latest=${latest:-none}"
+          if [ -z "$latest" ] || [ "$latest" = "$current" ]; then
+            echo "Go $current is current."
+            echo "bump=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          branch="deps/go-${latest}"
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+            echo "Branch $branch already exists; nothing to do."
+            echo "bump=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          token="$(curl -fsSL 'https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/golang:pull' | jq -r .token)"
+          digest="$(curl -fsSI -H "Authorization: Bearer $token" \
+            -H 'Accept: application/vnd.oci.image.index.v1+json' \
+            -H 'Accept: application/vnd.docker.distribution.manifest.list.v2+json' \
+            "https://registry-1.docker.io/v2/library/golang/manifests/${latest}-alpine" \
+            | awk 'tolower($1) == "docker-content-digest:" { print $2 }' | tr -d '\r')"
+          if [ -z "$digest" ]; then
+            echo "golang:${latest}-alpine is not published yet; retry next run."
+            echo "bump=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          {
+            echo "bump=true"
+            echo "current=$current"
+            echo "latest=$latest"
+            echo "digest=$digest"
+            echo "branch=$branch"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Update go.mod and Dockerfile
+        if: steps.ver.outputs.bump == 'true'
+        env:
+          LATEST: ${{ steps.ver.outputs.latest }}
+          DIGEST: ${{ steps.ver.outputs.digest }}
+        run: |
+          set -euo pipefail
+          sed -i -E "s/^go [0-9][0-9.]*$/go ${LATEST}/" go.mod
+          sed -i -E \
+            -e "s/^ARG GO_VERSION=.*/ARG GO_VERSION=${LATEST}/" \
+            -e "s/(golang:\\$\\{GO_VERSION\\}-alpine@)sha256:[0-9a-f]+/\\1${DIGEST}/" \
+            Dockerfile
+          grep -q "^go ${LATEST}$" go.mod
+          grep -q "^ARG GO_VERSION=${LATEST}$" Dockerfile
+          grep -q "alpine@${DIGEST}" Dockerfile
+          git diff --stat
+
+      - name: Set up Go
+        if: steps.ver.outputs.bump == 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run check.sh
+        if: steps.ver.outputs.bump == 'true'
+        run: scripts/check.sh
+
+      - name: Open pull request
+        if: steps.ver.outputs.bump == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CURRENT: ${{ steps.ver.outputs.current }}
+          LATEST: ${{ steps.ver.outputs.latest }}
+          DIGEST: ${{ steps.ver.outputs.digest }}
+          BRANCH: ${{ steps.ver.outputs.branch }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$BRANCH"
+          git add go.mod Dockerfile
+          git commit -m "chore(deps): bump Go to ${LATEST}"
+          git push origin "$BRANCH"
+          gh pr create --base main --head "$BRANCH" --label dependencies \
+            --title "chore(deps): bump Go to ${LATEST}" \
+            --body "Bumps the Go toolchain from ${CURRENT} to ${LATEST}: the \`go\` line in \`go.mod\`, and the Dockerfile builder image \`golang:${LATEST}-alpine@${DIGEST}\`.
+
+          \`scripts/check.sh\` passed on Go ${LATEST} in the workflow run that opened this PR. PRs opened by GITHUB_TOKEN do not trigger CI, so close and reopen this PR to run the \`ci\` workflow before merging.
+
+          Opened by \`.github/workflows/go-version.yml\`."
