@@ -56,10 +56,10 @@ On a CP with console.auth=oidc, --policy-store=versioned, --state-dir, admin aud
 | 3/9 | [`W-P2-APPR-03`](#39--w-p2-appr-03) | Replay fleet events against base and draft for each revision | feature | M | W-P2-APPR-01, W-P1-GPOL-05, W-P1-VRFY-06 | [#103](https://github.com/ethosagent/warden/issues/103) |
 | 4/9 | [`W-P2-APPR-04`](#49--w-p2-appr-04) | Add the change draft API with the two-person rule | feature | M | W-P2-APPR-01, W-P2-APPR-02, W-P2-APPR-03, W-P1-SSO-05, W-P1-AAUD-02, W-P1-PVER-03, W-P1-OPS1-01 | [#104](https://github.com/ethosagent/warden/issues/104) |
 | 5/9 | [`W-P2-APPR-05`](#59--w-p2-appr-05) | Add the Changes tab with structural diff and replay view | feature | M | W-P2-APPR-04, W-P2-APPR-06, W-P1-PVER-04 | [#105](https://github.com/ethosagent/warden/issues/105) |
-| 6/9 | [`W-P2-APPR-06`](#69--w-p2-appr-06) | Gate every versioned write path through one clearance check | feature | M | W-P2-APPR-04, W-P1-PVER-03, W-P1-PVER-06 | — |
-| 7/9 | [`W-P2-APPR-07`](#79--w-p2-appr-07) | Add audited break-glass emergency apply with post-hoc review | feature | S | W-P2-APPR-06, W-P1-OPS1-01 | — |
-| 8/9 | [`W-P2-APPR-08`](#89--w-p2-appr-08) | Hold block-list removals and widening agent edits for approval | feature | M | W-P2-APPR-04, W-P1-BLOCK-03, W-P2-AREG-02 | — |
-| 9/9 | [`W-P2-APPR-09`](#99--w-p2-appr-09) | Add approvals end-to-end test and operator docs | test | S | W-P2-APPR-05, W-P2-APPR-06, W-P2-APPR-07, W-P1-AAUD-04 | — |
+| 6/9 | [`W-P2-APPR-06`](#69--w-p2-appr-06) | Gate every versioned write path through one clearance check | feature | M | W-P2-APPR-04, W-P1-PVER-03, W-P1-PVER-06 | [#259](https://github.com/ethosagent/warden/issues/259) |
+| 7/9 | [`W-P2-APPR-07`](#79--w-p2-appr-07) | Add audited break-glass emergency apply with post-hoc review | feature | S | W-P2-APPR-06, W-P1-OPS1-01 | [#260](https://github.com/ethosagent/warden/issues/260) |
+| 8/9 | [`W-P2-APPR-08`](#89--w-p2-appr-08) | Hold block-list removals and widening agent edits for approval | feature | M | W-P2-APPR-04, W-P1-BLOCK-03, W-P2-AREG-02 | [#261](https://github.com/ethosagent/warden/issues/261) |
+| 9/9 | [`W-P2-APPR-09`](#99--w-p2-appr-09) | Add approvals end-to-end test and operator docs | test | S | W-P2-APPR-05, W-P2-APPR-06, W-P2-APPR-07, W-P1-AAUD-04 | [#262](https://github.com/ethosagent/warden/issues/262) |
 
 ### 1/9 · W-P2-APPR-01
 
@@ -258,7 +258,7 @@ Add a Changes tab to the dashboard where reviewers see each draft's structural d
 
 **Gate every versioned write path through one clearance check**
 
-Type **feature** · Size **M** · Issue —
+Type **feature** · Size **M** · Issue [#259](https://github.com/ethosagent/warden/issues/259)
 
 Make `Server.publish` require an `approvals.Clearance` that only `approvals.Gate` can mint, so no write path can publish a widening change without a draft. With approvals enabled, WritePolicy, WriteSettings, WriteLLMProviders, the rollback route and `warden policy import` create drafts and return 202 when the change is widening, and apply at once when it is narrowing. This removes the temporary startup guard from W-P2-APPR-01.
 
@@ -297,7 +297,7 @@ Make `Server.publish` require an `approvals.Clearance` that only `approvals.Gate
 
 **Add audited break-glass emergency apply with post-hoc review**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#260](https://github.com/ethosagent/warden/issues/260)
 
 When Dex is down nobody can log in to approve, so add an opt-in emergency apply that only a break-glass session can use. It publishes a pending widening draft, raises a critical Finding and leaves the draft applied_unreviewed until an OIDC admin records a review. It is off unless `console.approvals.allowEmergencyApply` is true.
 
@@ -331,7 +331,7 @@ When Dex is down nobody can log in to approve, so add an opt-in emergency apply 
 
 **Hold block-list removals and widening agent edits for approval**
 
-Type **feature** · Size **M** · Issue —
+Type **feature** · Size **M** · Issue [#261](https://github.com/ethosagent/warden/issues/261)
 
 Unblocking a user and loosening an agent widen access without touching the policy doc, so register `blocked_users` and `agents` as draft targets with their own Classifier and Applier. Adding a block stays immediate because it is the incident kill switch. This also proves the target-generic design that p4-mcp-registry will reuse.
 
@@ -363,7 +363,7 @@ Unblocking a user and loosening an agent widen access without touching the polic
 
 **Add approvals end-to-end test and operator docs**
 
-Type **test** · Size **S** · Issue —
+Type **test** · Size **S** · Issue [#262](https://github.com/ethosagent/warden/issues/262)
 
 Prove the done_when end to end with an in-process CP, two editor sessions and a long-polling worker, and document the approvals flow for operators. The test covers the policy path, a held settings save, a rollback, and the admin audit chain.
 

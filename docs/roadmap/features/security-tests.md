@@ -52,9 +52,9 @@ Plain `scripts/check.sh` runs test/security with no flag and no build tag on eve
 | 2/7 | [`W-P2-SECT-02`](#27--w-p2-sect-02) | Add token forgery, confusion and replay cases | test | M | W-P2-SECT-01, W-P2-TOKX-04, W-P2-WBND-04 | [#124](https://github.com/ethosagent/warden/issues/124) |
 | 3/7 | [`W-P2-SECT-03`](#37--w-p2-sect-03) | Add binding, cross-agent and issued-token lifetime cases | test | M | W-P2-SECT-01, W-P2-AREG-05, W-P2-KEYS-04, W-P1-BLOCK-05 | [#125](https://github.com/ethosagent/warden/issues/125) |
 | 4/7 | [`W-P2-SECT-04`](#47--w-p2-sect-04) | Add worker cert and signed bundle attack cases | test | M | W-P2-SECT-01, W-P2-WCA-05, W-P2-SBND-05 | [#126](https://github.com/ethosagent/warden/issues/126) |
-| 5/7 | [`W-P2-SECT-05`](#57--w-p2-sect-05) | Add Go-only test seams for in-process CP and worker runs | chore | M | W-P2-WCA-04, W-P2-SBND-02, W-P2-TOKX-03, W-P2-KEYS-04 | — |
-| 6/7 | [`W-P2-SECT-06`](#67--w-p2-sect-06) | Add CP route-boundary and enrollment attack cases | test | M | W-P2-SECT-01, W-P2-WCA-05, W-P2-APIK-02, W-P1-SSO-06 | — |
-| 7/7 | [`W-P2-SECT-07`](#77--w-p2-sect-07) | Add degraded-mode and restart cases | test | M | W-P2-SECT-02, W-P2-SECT-03, W-P2-SECT-04, W-P2-SECT-06, W-P2-SBND-06 | — |
+| 5/7 | [`W-P2-SECT-05`](#57--w-p2-sect-05) | Add Go-only test seams for in-process CP and worker runs | chore | M | W-P2-WCA-04, W-P2-SBND-02, W-P2-TOKX-03, W-P2-KEYS-04 | [#273](https://github.com/ethosagent/warden/issues/273) |
+| 6/7 | [`W-P2-SECT-06`](#67--w-p2-sect-06) | Add CP route-boundary and enrollment attack cases | test | M | W-P2-SECT-01, W-P2-WCA-05, W-P2-APIK-02, W-P1-SSO-06 | [#274](https://github.com/ethosagent/warden/issues/274) |
+| 7/7 | [`W-P2-SECT-07`](#77--w-p2-sect-07) | Add degraded-mode and restart cases | test | M | W-P2-SECT-02, W-P2-SECT-03, W-P2-SECT-04, W-P2-SECT-06, W-P2-SBND-06 | [#275](https://github.com/ethosagent/warden/issues/275) |
 
 ### 1/7 · W-P2-SECT-01
 
@@ -219,7 +219,7 @@ Add cases proving only valid, unrevoked worker certs reach the worker-plane rout
 
 **Add Go-only test seams for in-process CP and worker runs**
 
-Type **chore** · Size **M** · Issue —
+Type **chore** · Size **M** · Issue [#273](https://github.com/ethosagent/warden/issues/273)
 
 The suite cannot prove anything today: proxy.New always installs NewSafeDialer, which blocks the loopback upstream fake, and the CP is assembled only inside runControlPlane in cmd/proxy, which tests cannot import. Add Go-only seams so test/security drives the same assembly as the shipped binary and can reach a loopback upstream, without any YAML key or flag that could weaken the SafeDialer in production.
 
@@ -255,7 +255,7 @@ The suite cannot prove anything today: proxy.New always installs NewSafeDialer, 
 
 **Add CP route-boundary and enrollment attack cases**
 
-Type **test** · Size **M** · Issue —
+Type **test** · Size **M** · Issue [#274](https://github.com/ethosagent/warden/issues/274)
 
 Add cases proving each credential works only on the CP routes meant for it, and that enrollment and renewal cannot mint certs for the wrong worker or revive a revoked one. Worker certs and `wwt_` tokens must never reach human-only routes, API keys must never act as worker or agent credentials, and a renewal must never change the worker id.
 
@@ -291,7 +291,7 @@ Add cases proving each credential works only on the CP routes meant for it, and 
 
 **Add degraded-mode and restart cases**
 
-Type **test** · Size **M** · Issue —
+Type **test** · Size **M** · Issue [#275](https://github.com/ethosagent/warden/issues/275)
 
 Add cases proving the security controls hold when parts of the system are down or restart: the CP, the OIDC issuer and the worker itself. Require mode must keep enforcing from last-known-good state, a tampered or stale bundle cache must make the worker fail closed, and replay protection must survive a CP restart.
 

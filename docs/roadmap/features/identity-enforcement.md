@@ -60,11 +60,11 @@ On a compose deployment with a CP (token service, signed bundles, worker CA, age
 | 3/10 | [`W-P2-WBND-03`](#310--w-p2-wbnd-03) | Enforce identity require mode on CONNECT and terminated traffic | feature | M | W-P2-WBND-02, W-P1-BLOCK-02, W-P1-IDC-01, W-P2-AREG-05 | [#113](https://github.com/ethosagent/warden/issues/113) |
 | 4/10 | [`W-P2-WBND-04`](#410--w-p2-wbnd-04) | Extend identity metrics with token type and binding reasons | feature | S | W-P1-VRFY-02 | [#114](https://github.com/ethosagent/warden/issues/114) |
 | 5/10 | [`W-P2-WBND-05`](#510--w-p2-wbnd-05) | Use the worker mTLS client cert for all CP calls | feature | S | W-P2-WCA-03 | [#115](https://github.com/ethosagent/warden/issues/115) |
-| 6/10 | [`W-P2-WBND-06`](#610--w-p2-wbnd-06) | Add token issuer, agent key thumbprints and email claims to CP outputs | feature | S | W-P2-SBND-02, W-P2-AREG-04, W-P2-TOKX-02, W-P2-TOKX-03 | — |
-| 7/10 | [`W-P2-WBND-07`](#710--w-p2-wbnd-07) | Refuse require mode for agents served by workers without the capability | feature | S | W-P1-BLOCK-04, W-P2-AREG-02, W-P2-AREG-03, W-P1-SSO-05 | — |
-| 8/10 | [`W-P2-WBND-08`](#810--w-p2-wbnd-08) | Store agent and token type fields in the CP fleet store | feature | S | W-P1-VRFY-06, W-P2-WBND-02 | — |
-| 9/10 | [`W-P2-WBND-09`](#910--w-p2-wbnd-09) | Close require-mode sessions at token expiry and document require mode | feature | M | W-P2-WBND-03, W-P1-BLOCK-05 | — |
-| 10/10 | [`W-P2-WBND-10`](#1010--w-p2-wbnd-10) | Test require mode and worker mTLS end to end | test | M | W-P2-WBND-03, W-P2-WBND-05, W-P2-WBND-06, W-P2-WBND-07, W-P2-WBND-08, W-P2-WBND-09 | — |
+| 6/10 | [`W-P2-WBND-06`](#610--w-p2-wbnd-06) | Add token issuer, agent key thumbprints and email claims to CP outputs | feature | S | W-P2-SBND-02, W-P2-AREG-04, W-P2-TOKX-02, W-P2-TOKX-03 | [#267](https://github.com/ethosagent/warden/issues/267) |
+| 7/10 | [`W-P2-WBND-07`](#710--w-p2-wbnd-07) | Refuse require mode for agents served by workers without the capability | feature | S | W-P1-BLOCK-04, W-P2-AREG-02, W-P2-AREG-03, W-P1-SSO-05 | [#268](https://github.com/ethosagent/warden/issues/268) |
+| 8/10 | [`W-P2-WBND-08`](#810--w-p2-wbnd-08) | Store agent and token type fields in the CP fleet store | feature | S | W-P1-VRFY-06, W-P2-WBND-02 | [#269](https://github.com/ethosagent/warden/issues/269) |
+| 9/10 | [`W-P2-WBND-09`](#910--w-p2-wbnd-09) | Close require-mode sessions at token expiry and document require mode | feature | M | W-P2-WBND-03, W-P1-BLOCK-05 | [#270](https://github.com/ethosagent/warden/issues/270) |
+| 10/10 | [`W-P2-WBND-10`](#1010--w-p2-wbnd-10) | Test require mode and worker mTLS end to end | test | M | W-P2-WBND-03, W-P2-WBND-05, W-P2-WBND-06, W-P2-WBND-07, W-P2-WBND-08, W-P2-WBND-09 | [#271](https://github.com/ethosagent/warden/issues/271) |
 
 ### 1/10 · W-P2-WBND-01
 
@@ -259,7 +259,7 @@ W-P2-WCA-03 already builds the one cert-presenting CP client (`controlPlane.enro
 
 **Add token issuer, agent key thumbprints and email claims to CP outputs**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#267](https://github.com/ethosagent/warden/issues/267)
 
 CP half of agent binding. Key thumbprints already reach workers as `registeredAgents[].jkt` (W-P2-AREG-04), and minted tokens already carry email, email_verified and typ wt+jwt (W-P2-TOKX-02). This ticket adds the one missing input, the token issuer inside the signed bundle, plus the issuer collision check, and checks the other two contracts end to end.
 
@@ -291,7 +291,7 @@ CP half of agent binding. Key thumbprints already reach workers as `registeredAg
 
 **Refuse require mode for agents served by workers without the capability**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#268](https://github.com/ethosagent/warden/issues/268)
 
 CP rollout guard for require mode. An old worker keeps attribute mode when it receives a mode it does not know (W-P1-VRFY-07), so switching an agent to require while such a worker serves it would fail open. The CP refuses that switch unless an admin forces it, and the console flags such workers.
 
@@ -326,7 +326,7 @@ CP rollout guard for require mode. An old worker keeps attribute mode when it re
 
 **Store agent and token type fields in the CP fleet store**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#269](https://github.com/ethosagent/warden/issues/269)
 
 CP half of recording the agent, split from W-P2-WBND-02 because the conventions keep worker and CP changes in separate tickets. Add user_act and identity_token_type columns to the fleet store with the additive migration helper from W-P1-VRFY-06 and carry them through ingest and reads.
 
@@ -358,7 +358,7 @@ CP half of recording the agent, split from W-P2-WBND-02 because the conventions 
 
 **Close require-mode sessions at token expiry and document require mode**
 
-Type **feature** · Size **M** · Issue —
+Type **feature** · Size **M** · Issue [#270](https://github.com/ethosagent/warden/issues/270)
 
 A CONNECT-bound Warden token lasts 15 minutes, but raw tunnels, keep-alives, h2 connections and WebSockets can stay open far longer. Close require-mode sessions at token expiry through the W-P1-BLOCK-05 session registry, and close sessions whose agent or key was revoked by a bundle change. Write the require-mode section of the identity contract.
 
@@ -395,7 +395,7 @@ A CONNECT-bound Warden token lasts 15 minutes, but raw tunnels, keep-alives, h2 
 
 **Test require mode and worker mTLS end to end**
 
-Type **test** · Size **M** · Issue —
+Type **test** · Size **M** · Issue [#271](https://github.com/ethosagent/warden/issues/271)
 
 Prove the feature's done_when on a real CP and worker. An integration test mints a Warden token through POST /oauth2/token with an agent assertion, drives a require-mode worker bound to that agent, and checks every reject case, recording, revocation, expiry and mTLS-only CP access.
 

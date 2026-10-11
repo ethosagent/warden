@@ -56,8 +56,8 @@ A CP runs with `--policy-store=versioned --bundles=require` and a worker pins th
 | 3/7 | [`W-P2-SBND-03`](#37--w-p2-sbnd-03) | Add bundle key pinning and signed-bundle options to worker config | feature | S | W-P2-SBND-01 | [#97](https://github.com/ethosagent/warden/issues/97) |
 | 4/7 | [`W-P2-SBND-04`](#47--w-p2-sbnd-04) | Verify signed bundles in RemoteProvider and keep last-known-good in memory | feature | M | W-P2-SBND-01, W-P2-SBND-02, W-P2-SBND-03 | [#98](https://github.com/ethosagent/warden/issues/98) |
 | 5/7 | [`W-P2-SBND-05`](#57--w-p2-sbnd-05) | Report bundle state through metrics, heartbeat and the fleet view | feature | S | W-P2-SBND-04, W-P1-BLOCK-04 | [#99](https://github.com/ethosagent/warden/issues/99) |
-| 6/7 | [`W-P2-SBND-06`](#67--w-p2-sbnd-06) | Add an opt-in last-known-good bundle cache for worker restarts | feature | S | W-P2-SBND-04 | — |
-| 7/7 | [`W-P2-SBND-07`](#77--w-p2-sbnd-07) | Add staged bundle key rotation, pin export and rollout docs | feature | M | W-P2-SBND-02, W-P2-SBND-05, W-P2-KEYS-05 | — |
+| 6/7 | [`W-P2-SBND-06`](#67--w-p2-sbnd-06) | Add an opt-in last-known-good bundle cache for worker restarts | feature | S | W-P2-SBND-04 | [#257](https://github.com/ethosagent/warden/issues/257) |
+| 7/7 | [`W-P2-SBND-07`](#77--w-p2-sbnd-07) | Add staged bundle key rotation, pin export and rollout docs | feature | M | W-P2-SBND-02, W-P2-SBND-05, W-P2-KEYS-05 | [#258](https://github.com/ethosagent/warden/issues/258) |
 
 ### 1/7 · W-P2-SBND-01
 
@@ -252,7 +252,7 @@ Add worker metrics for bundle rejections, seq, age and staleness, and extend the
 
 **Add an opt-in last-known-good bundle cache for worker restarts**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#257](https://github.com/ethosagent/warden/issues/257)
 
 Let a pinned worker persist its last verified bundle and use it at boot when the CP is unreachable. Today a CP-managed worker boots fail-closed until the first pull (internal/worker/worker.go), and that stays the default: the cache is off unless `controlPlane.bundleCacheDir` is set. The cache never holds the credential sidecar and is used only within `bundleCacheMaxAge`, so a restart cannot bring back a very old block list.
 
@@ -289,7 +289,7 @@ Let a pinned worker persist its last verified bundle and use it at boot when the
 
 **Add staged bundle key rotation, pin export and rollout docs**
 
-Type **feature** · Size **M** · Issue —
+Type **feature** · Size **M** · Issue [#258](https://github.com/ethosagent/warden/issues/258)
 
 Workers pin bundle keys in static config, so scheduled rotation from W-P2-KEYS-03 would make the whole fleet reject bundles after one interval. This ticket excludes purpose=bundle from scheduled rotation, adds a two-step staged rotation where the CP signs with both keys until every online worker has the new pin, and adds a command that exports the public JWKS to pin. It also writes the operator docs for the rollout order and for recovering after a CP restore.
 

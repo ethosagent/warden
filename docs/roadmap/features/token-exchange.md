@@ -61,8 +61,8 @@ On a CP with --state-dir, `tokenService.enabled: true` and an https issuer, a to
 | 3/7 | [`W-P2-TOKX-03`](#37--w-p2-tokx-03) | Mount POST /oauth2/token with RFC 8693 request parsing and config | feature | M | W-P2-TOKX-02, W-P1-SSO-02, W-P1-SSO-05, W-P2-KEYS-04 | [#84](https://github.com/ethosagent/warden/issues/84) |
 | 4/7 | [`W-P2-TOKX-04`](#47--w-p2-tokx-04) | Add rate limits, issuance records and metrics for token exchange | feature | M | W-P2-TOKX-03, W-P1-AAUD-02 | [#85](https://github.com/ethosagent/warden/issues/85) |
 | 5/7 | [`W-P2-TOKX-05`](#57--w-p2-tokx-05) | Add token service end-to-end integration test | test | M | W-P2-TOKX-04, W-P2-TOKX-07, W-P2-KEYS-04, W-P1-VRFY-05, W-P1-DEX-02 | [#86](https://github.com/ethosagent/warden/issues/86) |
-| 6/7 | [`W-P2-TOKX-06`](#67--w-p2-tokx-06) | Document the token service for operators and harness authors | docs | S | W-P2-TOKX-04, W-P2-TOKX-07 | — |
-| 7/7 | [`W-P2-TOKX-07`](#77--w-p2-tokx-07) | Add admin revocation for token sessions | feature | S | W-P2-TOKX-03, W-P1-AAUD-02 | — |
+| 6/7 | [`W-P2-TOKX-06`](#67--w-p2-tokx-06) | Document the token service for operators and harness authors | docs | S | W-P2-TOKX-04, W-P2-TOKX-07 | [#253](https://github.com/ethosagent/warden/issues/253) |
+| 7/7 | [`W-P2-TOKX-07`](#77--w-p2-tokx-07) | Add admin revocation for token sessions | feature | S | W-P2-TOKX-03, W-P1-AAUD-02 | [#254](https://github.com/ethosagent/warden/issues/254) |
 
 ### 1/7 · W-P2-TOKX-01
 
@@ -259,7 +259,7 @@ Prove the exchange end to end under the integration build tag. By default it use
 
 **Document the token service for operators and harness authors**
 
-Type **docs** · Size **S** · Issue —
+Type **docs** · Size **S** · Issue [#253](https://github.com/ethosagent/warden/issues/253)
 
 Write the operator and integrator guide for the token endpoint, and update the CP and identity docs. Harness authors (W-P2-RCP-01) need exact request and response examples, error codes and retry rules. Operators need the config block, the degraded modes and the bearer-token limits stated plainly.
 
@@ -289,7 +289,7 @@ Write the operator and integrator guide for the token endpoint, and update the C
 
 **Add admin revocation for token sessions**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#254](https://github.com/ethosagent/warden/issues/254)
 
 Add admin routes that revoke one token session, or all sessions for a user or an agent, so the key-rotation runbook (W-P2-KEYS-05) and incident response have a real 'revoke sessions' step. After a revoke the token service refuses further exchanges for that session; live tokens still expire within the TTL. The routes are admin-only and audited through the P1 admin audit middleware.
 

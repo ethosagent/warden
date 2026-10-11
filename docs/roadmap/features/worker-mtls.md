@@ -59,8 +59,8 @@ Done when a CP running with --state-dir, TLS and `workerCA.enabled` (intermediat
 | 4/8 | [`W-P2-WCA-04`](#48--w-p2-wca-04) | Accept worker certs in WorkerAuthenticator and add /control/renew | feature | M | W-P2-WCA-02, W-P1-WTOK-04 | [#91](https://github.com/ethosagent/warden/issues/91) |
 | 5/8 | [`W-P2-WCA-05`](#58--w-p2-wca-05) | Implement worker cert revocation in the console and CLI | feature | S | W-P2-WCA-04 | [#92](https://github.com/ethosagent/warden/issues/92) |
 | 6/8 | [`W-P2-WCA-06`](#68--w-p2-wca-06) | Move the compose recipe to worker certs and document the migration | chore | S | W-P2-WCA-03, W-P2-WCA-05, W-P2-WCA-08, W-P1-WTOK-06 | [#93](https://github.com/ethosagent/warden/issues/93) |
-| 7/8 | [`W-P2-WCA-07`](#78--w-p2-wca-07) | Reserve the cp/ secret namespace from workers and /central/secrets | feature | S | — | — |
-| 8/8 | [`W-P2-WCA-08`](#88--w-p2-wca-08) | Add worker enrollment admin API and console panel | feature | S | W-P2-WCA-02, W-P1-WTOK-03 | — |
+| 7/8 | [`W-P2-WCA-07`](#78--w-p2-wca-07) | Reserve the cp/ secret namespace from workers and /central/secrets | feature | S | — | [#255](https://github.com/ethosagent/warden/issues/255) |
+| 8/8 | [`W-P2-WCA-08`](#88--w-p2-wca-08) | Add worker enrollment admin API and console panel | feature | S | W-P2-WCA-02, W-P1-WTOK-03 | [#256](https://github.com/ethosagent/warden/issues/256) |
 
 ### 1/8 · W-P2-WCA-01
 
@@ -299,7 +299,7 @@ Switch the control-plane compose recipe from per-worker `wwt_` tokens to enrollm
 
 **Reserve the cp/ secret namespace from workers and /central/secrets**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#255](https://github.com/ethosagent/warden/issues/255)
 
 Reserve the `cp/` logical key namespace in the worker-facing secret store as defense in depth. Signing keys and the worker CA key live in the separate keys.PrivateKeyStore (W-P2-KEYS-02 and W-P2-KEYS-07), which no placeholder can reach, but no CP-only material may ever be added under the shared secretStore names. Today secrets.storeFetcher uses a policy placeholder directly as the store key, so a policy editor could add an auth entry whose placeholder names a CP key and have a worker inject it into an upstream request; /central/secrets could also list, overwrite or delete it. This guard is unconditional because it only rejects keys that no worker or human route should ever reach.
 
@@ -332,7 +332,7 @@ Reserve the `cp/` logical key namespace in the worker-facing secret store as def
 
 **Add worker enrollment admin API and console panel**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#256](https://github.com/ethosagent/warden/issues/256)
 
 Add the admin API and console panel to create, list and revoke `wet_` enrollment tokens, so admins can enroll workers without shell access to the state dir. It mirrors the W-P1-WTOK-03 worker-token panel: plaintext shown once, admin role only, audited by the W-P1-AAUD-02 middleware.
 

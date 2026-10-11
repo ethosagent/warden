@@ -51,7 +51,7 @@ From a clean clone, following only docs/recipes/claude-code.md and docs/recipes/
 | 3/6 | [`W-P2-RCP-03`](#36--w-p2-rcp-03) | Add the Claude Code compose recipe and docs | feature | M | W-P2-RCP-02, W-P2-WBND-03, W-P2-AREG-04, W-P1-DEX-02, W-P1-WTOK-06, W-P2-AREG-05, W-P2-AREG-06, W-P2-KEYS-05 | [#119](https://github.com/ethosagent/warden/issues/119) |
 | 4/6 | [`W-P2-RCP-04`](#46--w-p2-rcp-04) | Add the Codex CLI compose recipe and docs | feature | S | W-P2-RCP-03 | [#120](https://github.com/ethosagent/warden/issues/120) |
 | 5/6 | [`W-P2-RCP-05`](#56--w-p2-rcp-05) | Add the isolation proof script for the recipes | test | S | W-P2-RCP-03, W-P2-RCP-04, W-P1-IDC-03, W-P2-AREG-06 | [#121](https://github.com/ethosagent/warden/issues/121) |
-| 6/6 | [`W-P2-RCP-06`](#66--w-p2-rcp-06) | Add `warden identity exec` for laptops and CI | feature | S | W-P2-RCP-02 | — |
+| 6/6 | [`W-P2-RCP-06`](#66--w-p2-rcp-06) | Add `warden identity exec` for laptops and CI | feature | S | W-P2-RCP-02 | [#272](https://github.com/ethosagent/warden/issues/272) |
 
 ### 1/6 · W-P2-RCP-01
 
@@ -249,7 +249,7 @@ Add scripts/recipe-isolation.sh, which proves for each recipe that the agent has
 
 **Add `warden identity exec` for laptops and CI**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#272](https://github.com/ethosagent/warden/issues/272)
 
 Add `warden identity exec`, which runs the W-P2-RCP-02 forwarder on loopback and launches a child process with HTTPS_PROXY pointing at it, for single-user machines and CI where a sidecar container is not practical. It replaces the P1 pattern of putting the token in HTTPS_PROXY. Document that a same-uid child can still read the key and cache unless `--run-as` is used, and add the P2 addendum to docs/identity-contract.md.
 

@@ -61,9 +61,9 @@ On a CP with --state-dir, console.auth=oidc and console.adminAudit.enabled=true,
 | 2/7 | [`W-P2-AREG-02`](#27--w-p2-areg-02) | Expose the agent registry admin API with admin-only writes and audit | feature | M | W-P2-AREG-01, W-P1-SSO-05, W-P1-AAUD-02 | [#72](https://github.com/ethosagent/warden/issues/72) |
 | 3/7 | [`W-P2-AREG-03`](#37--w-p2-areg-03) | Add the Agents tab to the CP console | feature | S | W-P2-AREG-02, W-P1-SSO-04, W-P1-BLOCK-04 | [#73](https://github.com/ethosagent/warden/issues/73) |
 | 4/7 | [`W-P2-AREG-04`](#47--w-p2-areg-04) | Serve registered agents in the policy wire | feature | S | W-P2-AREG-01, W-P2-AREG-02, W-P1-BLOCK-03, W-P1-PVER-05 | [#74](https://github.com/ethosagent/warden/issues/74) |
-| 5/7 | [`W-P2-AREG-05`](#57--w-p2-areg-05) | Bind workers to an agent id and enforce agent_disabled | feature | M | W-P2-AREG-04, W-P1-BLOCK-02, W-P1-BLOCK-05, W-P1-VRFY-02 | — |
-| 6/7 | [`W-P2-AREG-06`](#67--w-p2-areg-06) | Add an offline agent registry CLI | feature | S | W-P2-AREG-01, W-P1-AAUD-01 | — |
-| 7/7 | [`W-P2-AREG-07`](#77--w-p2-areg-07) | Document the agent registry and add an end-to-end test | test | S | W-P2-AREG-05, W-P2-AREG-06 | — |
+| 5/7 | [`W-P2-AREG-05`](#57--w-p2-areg-05) | Bind workers to an agent id and enforce agent_disabled | feature | M | W-P2-AREG-04, W-P1-BLOCK-02, W-P1-BLOCK-05, W-P1-VRFY-02 | [#250](https://github.com/ethosagent/warden/issues/250) |
+| 6/7 | [`W-P2-AREG-06`](#67--w-p2-areg-06) | Add an offline agent registry CLI | feature | S | W-P2-AREG-01, W-P1-AAUD-01 | [#251](https://github.com/ethosagent/warden/issues/251) |
+| 7/7 | [`W-P2-AREG-07`](#77--w-p2-areg-07) | Document the agent registry and add an end-to-end test | test | S | W-P2-AREG-05, W-P2-AREG-06 | [#252](https://github.com/ethosagent/warden/issues/252) |
 
 ### 1/7 · W-P2-AREG-01
 
@@ -219,7 +219,7 @@ Add `registeredAgents` (id, status and key thumbprints) to the /policy wire, mer
 
 **Bind workers to an agent id and enforce agent_disabled**
 
-Type **feature** · Size **M** · Issue —
+Type **feature** · Size **M** · Issue [#250](https://github.com/ethosagent/warden/issues/250)
 
 Let an operator pin a worker to a registered agent id with `--agent-id` or `central.agentID`, and make a disabled agent a deny-only kill switch on that worker. The worker denies every CONNECT, request and h2 stream with 403 agent_disabled in every identity mode, and closes open sessions through the P1 session registry within one long-poll cycle. The heartbeat reports the resolved agent id, the effective identity mode and the `agentreg/v1` capability so the fleet view can flag workers that do not enforce it. This is worker-lane only; with no flag and an empty registry nothing changes.
 
@@ -258,7 +258,7 @@ Let an operator pin a worker to a registered agent id with `--agent-id` or `cent
 
 **Add an offline agent registry CLI**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#251](https://github.com/ethosagent/warden/issues/251)
 
 Add `warden control-plane agent register|update|list|disable|enable --state-dir` so agents can be registered without the console. Compose recipes, the token-service e2e test and `console.auth: none` deployments (where console writes return use_cli) need a scriptable path. The CLI uses the same Store and validator and records admin audit rows like the console.
 
@@ -291,7 +291,7 @@ Add `warden control-plane agent register|update|list|disable|enable --state-dir`
 
 **Document the agent registry and add an end-to-end test**
 
-Type **test** · Size **S** · Issue —
+Type **test** · Size **S** · Issue [#252](https://github.com/ethosagent/warden/issues/252)
 
 Write the operator docs for the agent registry and add an integration test that runs a CP and a bound worker, registers an agent, disables it and checks that the worker denies and then recovers. This proves the done-when sentence on a real process pair and records the identity-mode and binding rules in one place.
 

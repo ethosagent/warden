@@ -57,8 +57,8 @@ On a CP started with --state-dir and `keys.enabled: true` using the default file
 | 3/7 | [`W-P2-KEYS-03`](#37--w-p2-keys-03) | Implement per-purpose rotation with prepublish and overlap windows | feature | M | W-P2-KEYS-02 | [#78](https://github.com/ethosagent/warden/issues/78) |
 | 4/7 | [`W-P2-KEYS-04`](#47--w-p2-keys-04) | Serve the token JWKS, readiness and admin key API from the control plane | feature | S | W-P2-KEYS-03, W-P1-SSO-05, W-P1-AAUD-02 | [#79](https://github.com/ethosagent/warden/issues/79) |
 | 5/7 | [`W-P2-KEYS-05`](#57--w-p2-keys-05) | Add the keys CLI, backup integration and key rotation runbook | feature | M | W-P2-KEYS-04, W-P1-OPS1-04 | [#80](https://github.com/ethosagent/warden/issues/80) |
-| 6/7 | [`W-P2-KEYS-06`](#67--w-p2-keys-06) | Add offline admin audit key rotation with a signed rotation entry | feature | S | W-P1-AAUD-04, W-P1-OPS1-04 | — |
-| 7/7 | [`W-P2-KEYS-07`](#77--w-p2-keys-07) | Add an opt-in AWS Secrets Manager key store isolated from workers | feature | S | W-P2-KEYS-02 | — |
+| 6/7 | [`W-P2-KEYS-06`](#67--w-p2-keys-06) | Add offline admin audit key rotation with a signed rotation entry | feature | S | W-P1-AAUD-04, W-P1-OPS1-04 | [#248](https://github.com/ethosagent/warden/issues/248) |
+| 7/7 | [`W-P2-KEYS-07`](#77--w-p2-keys-07) | Add an opt-in AWS Secrets Manager key store isolated from workers | feature | S | W-P2-KEYS-02 | [#249](https://github.com/ethosagent/warden/issues/249) |
 
 ### 1/7 · W-P2-KEYS-01
 
@@ -258,7 +258,7 @@ Add `warden control-plane keys list|rotate|export|reset` that works on cpstate a
 
 **Add offline admin audit key rotation with a signed rotation entry**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#248](https://github.com/ethosagent/warden/issues/248)
 
 P1 has no supported way to rotate the admin audit Ed25519 key: W-P1-AAUD-01 fails startup on any key_id mismatch. Add `warden control-plane admin-audit rotate-key`, which appends an `audit.key_rotated` entry signed by the old key and then switches the key file, and teach Verify, the startup check and restore to accept a key change only at such an entry. A dedicated command is used instead of a startup flag so a restart can never rotate the key.
 
@@ -292,7 +292,7 @@ P1 has no supported way to rotate the admin audit Ed25519 key: W-P1-AAUD-01 fail
 
 **Add an opt-in AWS Secrets Manager key store isolated from workers**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#249](https://github.com/ethosagent/warden/issues/249)
 
 Add `keys.store.backend: aws` for CPs that should not keep key files on disk. It uses its own CP-local block and name prefix, separate from the `secretStore` block that is sent to workers, so worker IAM scoped to `warden/*` and placeholder swapping can never reach a signing key. It reuses secrets.NewAWSSecretStore and the PrivateKeyStore seam from W-P2-KEYS-02.
 

@@ -53,10 +53,10 @@ On a CP with --state-dir, console.auth=oidc, console.adminAudit.enabled=true and
 | 1/7 | [`W-P2-APIK-01`](#17--w-p2-apik-01) | Add internal/apikeys format, scope registry, store and index | feature | S | W-P1-SSO-01, W-P1-SSO-02 | [#107](https://github.com/ethosagent/warden/issues/107) |
 | 2/7 | [`W-P2-APIK-02`](#27--w-p2-apik-02) | Authenticate API keys and enforce per-route scopes in the authz table | feature | M | W-P2-APIK-01, W-P1-SSO-04, W-P1-SSO-05, W-P1-SSO-06, W-P1-AAUD-02, W-P1-WTOK-02 | [#108](https://github.com/ethosagent/warden/issues/108) |
 | 3/7 | [`W-P2-APIK-03`](#37--w-p2-apik-03) | Add the API key management and self-introspection API | feature | M | W-P2-APIK-02, W-P1-SSO-08 | [#109](https://github.com/ethosagent/warden/issues/109) |
-| 4/7 | [`W-P2-APIK-04`](#47--w-p2-apik-04) | Add the API Keys page to the console | feature | S | W-P2-APIK-03 | — |
-| 5/7 | [`W-P2-APIK-05`](#57--w-p2-apik-05) | Add offline API key revoke, restore revocation and expiry warnings | feature | S | W-P2-APIK-03, W-P1-OPS1-01, W-P1-OPS1-04, W-P1-AAUD-01 | — |
-| 6/7 | [`W-P2-APIK-06`](#67--w-p2-apik-06) | Detect Warden API keys and worker tokens in agent egress | feature | S | W-P2-APIK-01 | — |
-| 7/7 | [`W-P2-APIK-07`](#77--w-p2-apik-07) | Document API keys and test the done-when flow end to end | docs | S | W-P2-APIK-03, W-P2-APIK-05 | — |
+| 4/7 | [`W-P2-APIK-04`](#47--w-p2-apik-04) | Add the API Keys page to the console | feature | S | W-P2-APIK-03 | [#263](https://github.com/ethosagent/warden/issues/263) |
+| 5/7 | [`W-P2-APIK-05`](#57--w-p2-apik-05) | Add offline API key revoke, restore revocation and expiry warnings | feature | S | W-P2-APIK-03, W-P1-OPS1-01, W-P1-OPS1-04, W-P1-AAUD-01 | [#264](https://github.com/ethosagent/warden/issues/264) |
+| 6/7 | [`W-P2-APIK-06`](#67--w-p2-apik-06) | Detect Warden API keys and worker tokens in agent egress | feature | S | W-P2-APIK-01 | [#265](https://github.com/ethosagent/warden/issues/265) |
+| 7/7 | [`W-P2-APIK-07`](#77--w-p2-apik-07) | Document API keys and test the done-when flow end to end | docs | S | W-P2-APIK-03, W-P2-APIK-05 | [#266](https://github.com/ethosagent/warden/issues/266) |
 
 ### 1/7 · W-P2-APIK-01
 
@@ -183,7 +183,7 @@ Add the CP routes that create, list and revoke API keys, plus `GET /api/api-keys
 
 **Add the API Keys page to the console**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#263](https://github.com/ethosagent/warden/issues/263)
 
 Add an API Keys tab to the console so users can create, see and revoke their keys without curl. The plaintext is shown once in a copy dialog and never stored in the browser. The page talks to the W-P2-APIK-03 routes through a CP-only seam, so workers and CPs with keys disabled hide it.
 
@@ -215,7 +215,7 @@ Add an API Keys tab to the console so users can create, see and revoke their key
 
 **Add offline API key revoke, restore revocation and expiry warnings**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#264](https://github.com/ethosagent/warden/issues/264)
 
 Give operators a way to kill a leaked key when the console is unusable, and stop old keys from coming back after a restore. `warden control-plane api-key list|revoke` writes to cpstate directly and a running CP picks the change up within 2s. Restore gains a warning and `--revoke-api-keys`, and the CP warns owners 7 days before a key expires so CI does not fail silently.
 
@@ -249,7 +249,7 @@ Give operators a way to kill a leaked key when the console is unusable, and stop
 
 **Detect Warden API keys and worker tokens in agent egress**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#265](https://github.com/ethosagent/warden/issues/265)
 
 Add DLP credential patterns for `wak_` API keys and `wwt_` worker tokens so a Warden credential an agent sends upstream is flagged or blocked like any other credential. An admin key left in a CI environment where an agent also runs can otherwise leave through the proxy unnoticed. Worker lane only, behind a new default-off setting.
 
@@ -280,7 +280,7 @@ Add DLP credential patterns for `wak_` API keys and `wwt_` worker tokens so a Wa
 
 **Document API keys and test the done-when flow end to end**
 
-Type **docs** · Size **S** · Issue —
+Type **docs** · Size **S** · Issue [#266](https://github.com/ethosagent/warden/issues/266)
 
 Write the operator and CI docs for API keys and add one end-to-end test that proves the feature's done-when over HTTP. The docs are the contract later features (p4-gitops, p4-admin-mcp) point to for the `WARDEN_API_KEY` convention.
 
