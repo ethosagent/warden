@@ -171,7 +171,7 @@ Add `warden admin-mcp` and new package internal/adminmcp: a JSON-RPC dispatcher,
 - [ ] When the fake CP's /self drops traffic:read, the next refresh sends notifications/tools/list_changed and tools/list no longer contains query_traffic.
 - [ ] In stdio mode stdout holds only valid JSON-RPC lines across initialize, tools/list and an unknown method (which returns -32601), and a CP that is down at start gives zero tools and no exit.
 
-**Depends on:** [`W-P2-APIK-03`](api-keys.md#37--w-p2-apik-03) Add the API key management and self-introspection API; [`W-P4-MGW-01`](mcp-gateway.md#115--w-p4-mgw-01) Spike: choose the MCP transport layer and confirm agent clients honour HTTPS_PROXY
+**Depends on:** [`W-P2-APIK-03`](api-keys.md#37--w-p2-apik-03) Add the API key management and self-introspection API; [`W-P4-MGW-01`](mcp-gateway.md#117--w-p4-mgw-01) Spike: choose the MCP transport layer and confirm agent clients honour HTTPS_PROXY
 
 **Unblocks:** [`W-P4-AMCP-08`](admin-mcp.md#49--w-p4-amcp-08) Add the admin-mcp Streamable HTTP transport with per-caller keys; [`W-P4-AMCP-03`](admin-mcp.md#59--w-p4-amcp-03) Implement the explain_decision, query_traffic and list_agents tools; [`W-P4-AMCP-04`](admin-mcp.md#69--w-p4-amcp-04) Add CP suggest and replay routes and the suggest_policy and replay_policy tools; [`W-P4-AMCP-05`](admin-mcp.md#79--w-p4-amcp-05) Add the opt-in create_policy_draft write tool
 

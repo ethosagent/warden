@@ -227,7 +227,7 @@ Add the worker resolver that replaces a per-user placeholder with the calling us
 
 **Depends on:** [`W-P3-PUS-09`](refresh-model.md#912--w-p3-pus-09) Add the worker UserTokenSource with memory cache and epoch invalidation; [`W-P3-PUS-10`](refresh-model.md#1012--w-p3-pus-10) Record the per-user token provider on analytics events; [`W-P1-VRFY-02`](identity-verification.md#27--w-p1-vrfy-02) Extract, verify and strip identity on CONNECT, HTTP/1.1 and HTTP/2; [`W-P1-JAUD-06`](audit-log-export.md#26--w-p1-jaud-06) Set a bounded Reason on every deny event; [`W-P2-WBND-02`](identity-enforcement.md#210--w-p2-wbnd-02) Bind Warden tokens to the worker's registered agent and key
 
-**Unblocks:** [`W-P3-PORT-06`](consent-portal.md#67--w-p3-port-06) Prove portal revoke end to end on usersecrets/v1 workers; [`W-P3-PUS-05`](refresh-model.md#512--w-p3-pus-05) Retry once on upstream 401 with a CP-refreshed token; [`W-P3-JIT-02`](jit-authorization.md#27--w-p3-jit-02) Return structured 403 for HTTP when a grant is missing; [`W-P4-MGW-07`](mcp-gateway.md#715--w-p4-mgw-07) Use per-user credentials for gateway upstreams
+**Unblocks:** [`W-P3-PORT-06`](consent-portal.md#67--w-p3-port-06) Prove portal revoke end to end on usersecrets/v1 workers; [`W-P3-PUS-05`](refresh-model.md#512--w-p3-pus-05) Retry once on upstream 401 with a CP-refreshed token; [`W-P3-JIT-02`](jit-authorization.md#27--w-p3-jit-02) Return structured 403 for HTTP when a grant is missing; [`W-P4-MGW-07`](mcp-gateway.md#717--w-p4-mgw-07) Use per-user credentials for gateway upstreams
 
 ### 5/12 · W-P3-PUS-05
 
@@ -367,7 +367,7 @@ Ship the value-free mappings and the revocation epochs to workers as two signed-
 
 **Depends on:** [`W-P3-PUS-02`](refresh-model.md#212--w-p3-pus-02) Add the CP-local perUserSecrets config block and the Vault consent.store backend; [`W-P2-SBND-02`](signed-bundles.md#27--w-p2-sbnd-02) Serve the signed bundle envelope on GET /policy behind --bundles; [`W-P2-WBND-07`](identity-enforcement.md#710--w-p2-wbnd-07) Refuse require mode for agents served by workers without the capability
 
-**Unblocks:** [`W-P3-PORT-05`](consent-portal.md#57--w-p3-port-05) Bump grant epochs on revoke and report workers without usersecrets/v1; [`W-P3-OFFB-01`](offboarding.md#17--w-p3-offb-01) Implement the resumable two-stage Offboarder; [`W-P3-PUS-09`](refresh-model.md#912--w-p3-pus-09) Add the worker UserTokenSource with memory cache and epoch invalidation; [`W-P3-PUS-12`](refresh-model.md#1212--w-p3-pus-12) Document per-user secrets for operators and agent authors; [`W-P4-PARK-01`](park-notify.md#18--w-p4-park-01) Add perUserSecrets.park config and ship it in the signed bundle; [`W-P4-MGW-12`](mcp-gateway.md#1215--w-p4-mgw-12) Add the upstream auth header field to registry versions
+**Unblocks:** [`W-P3-PORT-05`](consent-portal.md#57--w-p3-port-05) Bump grant epochs on revoke and report workers without usersecrets/v1; [`W-P3-OFFB-01`](offboarding.md#17--w-p3-offb-01) Implement the resumable two-stage Offboarder; [`W-P3-PUS-09`](refresh-model.md#912--w-p3-pus-09) Add the worker UserTokenSource with memory cache and epoch invalidation; [`W-P3-PUS-12`](refresh-model.md#1212--w-p3-pus-12) Document per-user secrets for operators and agent authors; [`W-P4-PARK-01`](park-notify.md#18--w-p4-park-01) Add perUserSecrets.park config and ship it in the signed bundle; [`W-P4-MGW-12`](mcp-gateway.md#1217--w-p4-mgw-12) Add the upstream auth header field to registry versions
 
 ### 9/12 · W-P3-PUS-09
 
@@ -436,7 +436,7 @@ Add a separate event field for the OAuth provider whose user token was swapped, 
 - [ ] Opening a database created before the change adds the columns without data loss.
 - [ ] An event with no per-user swap marshals to the same JSON bytes as before the change, and Event.Provider is unchanged for LLM events.
 
-**Unblocks:** [`W-P3-PORT-01`](consent-portal.md#17--w-p3-port-01) Serve the portal page and the connections list API; [`W-P4-DGR-11`](delegation-grants.md#1112--w-p4-dgr-11) Limit per-user secret swaps to the grant's providers; [`W-P3-PUS-04`](refresh-model.md#412--w-p3-pus-04) Swap per-user placeholders only for bound identities on mapped domains; [`W-P3-PUS-11`](refresh-model.md#1112--w-p3-pus-11) Add the per-user secrets end-to-end integration test; [`W-P4-PARK-06`](park-notify.md#68--w-p4-park-06) Record park outcomes on events and metrics; [`W-P4-MGW-11`](mcp-gateway.md#1115--w-p4-mgw-11) Add Proxy.ServeInternal for in-process hub egress
+**Unblocks:** [`W-P3-PORT-01`](consent-portal.md#17--w-p3-port-01) Serve the portal page and the connections list API; [`W-P4-DGR-11`](delegation-grants.md#1112--w-p4-dgr-11) Limit per-user secret swaps to the grant's providers; [`W-P3-PUS-04`](refresh-model.md#412--w-p3-pus-04) Swap per-user placeholders only for bound identities on mapped domains; [`W-P3-PUS-11`](refresh-model.md#1112--w-p3-pus-11) Add the per-user secrets end-to-end integration test; [`W-P4-PARK-06`](park-notify.md#68--w-p4-park-06) Record park outcomes on events and metrics; [`W-P4-MGW-11`](mcp-gateway.md#1117--w-p4-mgw-11) Add Proxy.ServeInternal for in-process hub egress
 
 ### 11/12 · W-P3-PUS-11
 

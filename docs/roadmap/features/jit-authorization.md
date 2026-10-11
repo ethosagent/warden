@@ -184,7 +184,7 @@ MCP clients treat a plain 403 as a transport error, so the model never sees the 
 
 **Depends on:** [`W-P3-JIT-02`](jit-authorization.md#27--w-p3-jit-02) Return structured 403 for HTTP when a grant is missing
 
-**Unblocks:** [`W-P3-JIT-05`](jit-authorization.md#57--w-p3-jit-05) Document the authorization_required contract; [`W-P3-JIT-07`](jit-authorization.md#77--w-p3-jit-07) Add end-to-end test for the JIT consent loop; [`W-P4-PARK-04`](park-notify.md#48--w-p4-park-04) Park and resume HTTP/1.1 requests in the jitDeny stage; [`W-P4-PARK-05`](park-notify.md#58--w-p4-park-05) Park MCP gateway tool calls with progress notifications; [`W-P4-MGW-07`](mcp-gateway.md#715--w-p4-mgw-07) Use per-user credentials for gateway upstreams
+**Unblocks:** [`W-P3-JIT-05`](jit-authorization.md#57--w-p3-jit-05) Document the authorization_required contract; [`W-P3-JIT-07`](jit-authorization.md#77--w-p3-jit-07) Add end-to-end test for the JIT consent loop; [`W-P4-PARK-04`](park-notify.md#48--w-p4-park-04) Park and resume HTTP/1.1 requests in the jitDeny stage; [`W-P4-PARK-05`](park-notify.md#58--w-p4-park-05) Park MCP gateway tool calls with progress notifications; [`W-P4-MGW-07`](mcp-gateway.md#717--w-p4-mgw-07) Use per-user credentials for gateway upstreams
 
 ### 4/7 · W-P3-JIT-04
 

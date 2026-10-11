@@ -268,7 +268,7 @@ Teach the worker to verify grant tokens and narrow MCP tools/call to the grant's
 
 **Depends on:** [`W-P4-DGR-04`](delegation-grants.md#412--w-p4-dgr-04) Add the grant subject resolver, delegation mode and rollout guard to the token service; [`W-P1-GPOL-04`](identity-policy.md#49--w-p1-gpol-04) Support groups/users in MCP tool allowWhen conditions; [`W-P2-WBND-03`](identity-enforcement.md#310--w-p2-wbnd-03) Enforce identity require mode on CONNECT and terminated traffic; [`W-P1-JAUD-02`](audit-log-export.md#46--w-p1-jaud-02) Publish decision v1 JSON Schema with closed-field and leak tests; [`W-P1-VRFY-03`](identity-verification.md#37--w-p1-vrfy-03) Record user fields on worker events, receipts, decision logs and sync
 
-**Unblocks:** [`W-P4-DGR-10`](delegation-grants.md#1012--w-p4-dgr-10) Apply revokedGrants on workers and close revoked grant sessions; [`W-P4-DGR-11`](delegation-grants.md#1112--w-p4-dgr-11) Limit per-user secret swaps to the grant's providers; [`W-P4-MGW-13`](mcp-gateway.md#1315--w-p4-mgw-13) Key gateway verdicts by server and add a side-effect-free tool check
+**Unblocks:** [`W-P4-DGR-10`](delegation-grants.md#1012--w-p4-dgr-10) Apply revokedGrants on workers and close revoked grant sessions; [`W-P4-DGR-11`](delegation-grants.md#1112--w-p4-dgr-11) Limit per-user secret swaps to the grant's providers; [`W-P4-MGW-13`](mcp-gateway.md#1317--w-p4-mgw-13) Key gateway verdicts by server and add a side-effect-free tool check
 
 ### 6/12 · W-P4-DGR-06
 

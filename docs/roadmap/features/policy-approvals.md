@@ -253,7 +253,7 @@ Add a Changes tab to the dashboard where reviewers see each draft's structural d
 
 **Depends on:** [`W-P2-APPR-04`](policy-approvals.md#49--w-p2-appr-04) Add the change draft API with the two-person rule; [`W-P2-APPR-06`](policy-approvals.md#69--w-p2-appr-06) Gate every versioned write path through one clearance check; [`W-P1-PVER-04`](policy-versioning.md#46--w-p1-pver-04) Add history panel with diff view and rollback to dashboard
 
-**Unblocks:** [`W-P2-APPR-09`](policy-approvals.md#99--w-p2-appr-09) Add approvals end-to-end test and operator docs; [`W-P4-MREG-04`](mcp-registry.md#410--w-p4-mreg-04) Build console registry tab with import from observed inventory; [`W-P4-GOPS-03`](policy-as-code.md#411--w-p4-gops-03) Add Git provenance, authoritative mode and git drift
+**Unblocks:** [`W-P2-APPR-09`](policy-approvals.md#99--w-p2-appr-09) Add approvals end-to-end test and operator docs; [`W-P4-MREG-04`](mcp-registry.md#411--w-p4-mreg-04) Build console registry tab with import from observed inventory; [`W-P4-GOPS-03`](policy-as-code.md#411--w-p4-gops-03) Add Git provenance, authoritative mode and git drift
 
 ### 6/9 · W-P2-APPR-06
 
@@ -292,7 +292,7 @@ Make `Server.publish` require an `approvals.Clearance` that only `approvals.Gate
 
 **Depends on:** [`W-P2-APPR-04`](policy-approvals.md#49--w-p2-appr-04) Add the change draft API with the two-person rule; [`W-P1-PVER-03`](policy-versioning.md#36--w-p1-pver-03) Add policy history, structural diff and rollback APIs; [`W-P1-PVER-06`](policy-versioning.md#66--w-p1-pver-06) Add warden policy import and export commands
 
-**Unblocks:** [`W-P2-APPR-05`](policy-approvals.md#59--w-p2-appr-05) Add the Changes tab with structural diff and replay view; [`W-P2-APPR-07`](policy-approvals.md#79--w-p2-appr-07) Add audited break-glass emergency apply with post-hoc review; [`W-P2-APPR-09`](policy-approvals.md#99--w-p2-appr-09) Add approvals end-to-end test and operator docs; [`W-P4-MREG-03`](mcp-registry.md#310--w-p4-mreg-03) Route widening registry changes and rollbacks through approvals; [`W-P4-GOPS-02`](policy-as-code.md#311--w-p4-gops-02) Add Git sync of policy into approval drafts; [`W-P4-GOPS-04`](policy-as-code.md#511--w-p4-gops-04) Add staged versions and the rollout model
+**Unblocks:** [`W-P2-APPR-05`](policy-approvals.md#59--w-p2-appr-05) Add the Changes tab with structural diff and replay view; [`W-P2-APPR-07`](policy-approvals.md#79--w-p2-appr-07) Add audited break-glass emergency apply with post-hoc review; [`W-P2-APPR-09`](policy-approvals.md#99--w-p2-appr-09) Add approvals end-to-end test and operator docs; [`W-P4-MREG-03`](mcp-registry.md#311--w-p4-mreg-03) Route widening registry changes and rollbacks through approvals; [`W-P4-GOPS-02`](policy-as-code.md#311--w-p4-gops-02) Add Git sync of policy into approval drafts; [`W-P4-GOPS-04`](policy-as-code.md#511--w-p4-gops-04) Add staged versions and the rollout model
 
 ### 7/9 · W-P2-APPR-07
 
@@ -362,7 +362,7 @@ Unblocking a user and loosening an agent widen access without touching the polic
 
 **Depends on:** [`W-P2-APPR-04`](policy-approvals.md#49--w-p2-appr-04) Add the change draft API with the two-person rule; [`W-P1-BLOCK-03`](user-block-list.md#38--w-p1-block-03) Add the CP block-list store, admin API and policy merge; [`W-P2-AREG-02`](agent-registry.md#27--w-p2-areg-02) Expose the agent registry admin API with admin-only writes and audit; [`W-P2-APPR-07`](policy-approvals.md#79--w-p2-appr-07) Add audited break-glass emergency apply with post-hoc review; [`W-P1-BLOCK-08`](user-block-list.md#88--w-p1-block-08) Add offline block add, remove and list commands to the control-plane CLI
 
-**Unblocks:** [`W-P4-MREG-03`](mcp-registry.md#310--w-p4-mreg-03) Route widening registry changes and rollbacks through approvals
+**Unblocks:** [`W-P4-MREG-03`](mcp-registry.md#311--w-p4-mreg-03) Route widening registry changes and rollbacks through approvals; [`W-P4-MREG-11`](mcp-registry.md#1111--w-p4-mreg-11) Discover OAuth settings for remote MCP registry servers
 
 ### 9/9 · W-P2-APPR-09
 

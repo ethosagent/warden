@@ -381,7 +381,7 @@ The MCP hub at /mcp/{gateway} routes tools/call outside runRequestStages, so too
 - [ ] A stdio upstream behind the hub is covered the same way: `go test ./internal/mcp/... -run TestHubHook_Stdio`.
 - [ ] A tools/call already denied by the hub verdict never reaches the hook: `go test ./internal/mcp/... -run TestHubHook_NotReachedOnDeny`.
 
-**Depends on:** [`W-P4-HOOK-07`](policy-hooks.md#711--w-p4-hook-07) Wire the pre-request hook stage into the HTTP/1.1 proxy path; [`W-P4-MGW-06`](mcp-gateway.md#615--w-p4-mgw-06) Aggregate tools/list and route tools/call with verdicts
+**Depends on:** [`W-P4-HOOK-07`](policy-hooks.md#711--w-p4-hook-07) Wire the pre-request hook stage into the HTTP/1.1 proxy path; [`W-P4-MGW-06`](mcp-gateway.md#617--w-p4-mgw-06) Aggregate tools/list and route tools/call with verdicts
 
 ### 10/11 · W-P4-HOOK-10
 

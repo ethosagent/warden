@@ -242,7 +242,7 @@ Add parking to the MCP gateway hub, where the gateway owns the Streamable HTTP r
 - [ ] Given no grant within maxWait, the result fields equal the W-P3-JIT-03 builder output: `go test ./internal/mcp/hub -run TestParkTimeoutToolError`.
 - [ ] `git diff --stat main -- internal/mcp/stdio` is empty.
 
-**Depends on:** [`W-P4-PARK-02`](park-notify.md#28--w-p4-park-02) Notify the user once per pending when the agent can park; [`W-P4-PARK-03`](park-notify.md#38--w-p4-park-03) Add the park limiter and coalescing status waiter; [`W-P4-MGW-07`](mcp-gateway.md#715--w-p4-mgw-07) Use per-user credentials for gateway upstreams; [`W-P3-JIT-03`](jit-authorization.md#37--w-p3-jit-03) Return JSON-RPC results for MCP calls missing a grant
+**Depends on:** [`W-P4-PARK-02`](park-notify.md#28--w-p4-park-02) Notify the user once per pending when the agent can park; [`W-P4-PARK-03`](park-notify.md#38--w-p4-park-03) Add the park limiter and coalescing status waiter; [`W-P4-MGW-07`](mcp-gateway.md#717--w-p4-mgw-07) Use per-user credentials for gateway upstreams; [`W-P3-JIT-03`](jit-authorization.md#37--w-p3-jit-03) Return JSON-RPC results for MCP calls missing a grant
 
 ### 6/8 · W-P4-PARK-06
 

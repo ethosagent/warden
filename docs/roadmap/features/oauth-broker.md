@@ -94,7 +94,7 @@ Add `consent.providers[]` and `consent.connect` to the CP-local consent block an
 
 **Depends on:** [`W-P3-CSIG-01`](consent-auth.md#17--w-p3-csig-01) Add the CP-local consent config block and the warden-portal Dex client; [`W-P3-CSIG-06`](consent-auth.md#67--w-p3-csig-06) Add the CP-only user credential store, user key helpers and reserved secret prefixes
 
-**Unblocks:** [`W-P3-BRKR-03`](oauth-broker.md#39--w-p3-brkr-03) Implement POST /connect/start with PKCE, CSRF and scope capping; [`W-P3-BRKR-05`](oauth-broker.md#59--w-p3-brkr-05) Add provider revoke client for Google and GitHub; [`W-P3-BRKR-06`](oauth-broker.md#69--w-p3-brkr-06) Guard reserved prefixes on the worker dashboard and load client secrets from consent.store; [`W-P3-BRKR-07`](oauth-broker.md#79--w-p3-brkr-07) Add the provider refresh-token client for CP-side refresh; [`W-P4-MREG-02`](mcp-registry.md#210--w-p4-mreg-02) Add registry REST API with versioning, diff and rollback; [`W-P3-PUS-02`](refresh-model.md#212--w-p3-pus-02) Add the CP-local perUserSecrets config block and the Vault consent.store backend; [`W-P3-PUS-06`](refresh-model.md#612--w-p3-pus-06) Add guarded grant record read and write helpers
+**Unblocks:** [`W-P3-BRKR-03`](oauth-broker.md#39--w-p3-brkr-03) Implement POST /connect/start with PKCE, CSRF and scope capping; [`W-P3-BRKR-05`](oauth-broker.md#59--w-p3-brkr-05) Add provider revoke client for Google and GitHub; [`W-P3-BRKR-06`](oauth-broker.md#69--w-p3-brkr-06) Guard reserved prefixes on the worker dashboard and load client secrets from consent.store; [`W-P3-BRKR-07`](oauth-broker.md#79--w-p3-brkr-07) Add the provider refresh-token client for CP-side refresh; [`W-P4-MREG-02`](mcp-registry.md#211--w-p4-mreg-02) Add registry REST API with versioning, diff and rollback; [`W-P4-MREG-11`](mcp-registry.md#1111--w-p4-mreg-11) Discover OAuth settings for remote MCP registry servers; [`W-P3-PUS-02`](refresh-model.md#212--w-p3-pus-02) Add the CP-local perUserSecrets config block and the Vault consent.store backend; [`W-P3-PUS-06`](refresh-model.md#612--w-p3-pus-06) Add guarded grant record read and write helpers
 
 ### 2/9 · W-P3-BRKR-02
 
@@ -171,7 +171,7 @@ Add `POST /connect/start` on the CP behind the portal session middleware. It che
 
 **Depends on:** [`W-P3-BRKR-01`](oauth-broker.md#19--w-p3-brkr-01) Add provider config model with Google and GitHub defaults; [`W-P3-BRKR-02`](oauth-broker.md#29--w-p3-brkr-02) Add pending authorization, attempt and grant metadata stores; [`W-P3-CSIG-04`](consent-auth.md#47--w-p3-csig-04) Add the portal session middleware, CSRF, logout and console isolation; [`W-P1-BLOCK-03`](user-block-list.md#38--w-p1-block-03) Add the CP block-list store, admin API and policy merge; [`W-P2-TOKX-04`](token-exchange.md#47--w-p2-tokx-04) Add rate limits, issuance records and metrics for token exchange
 
-**Unblocks:** [`W-P3-BRKR-04`](oauth-broker.md#49--w-p3-brkr-04) Implement /connect/callback and write tokens to the secret backend; [`W-P3-PORT-03`](consent-portal.md#37--w-p3-port-03) Add the pending landing page and connect, continue and decline actions; [`W-P3-PUS-07`](refresh-model.md#712--w-p3-pus-07) Add the worker-mTLS mint endpoint POST /control/user-token; [`W-P3-JIT-01`](jit-authorization.md#17--w-p3-jit-01) Add CP endpoint to create or reuse pending authorizations
+**Unblocks:** [`W-P3-BRKR-04`](oauth-broker.md#49--w-p3-brkr-04) Implement /connect/callback and write tokens to the secret backend; [`W-P3-PORT-03`](consent-portal.md#37--w-p3-port-03) Add the pending landing page and connect, continue and decline actions; [`W-P4-MREG-11`](mcp-registry.md#1111--w-p4-mreg-11) Discover OAuth settings for remote MCP registry servers; [`W-P3-PUS-07`](refresh-model.md#712--w-p3-pus-07) Add the worker-mTLS mint endpoint POST /control/user-token; [`W-P3-JIT-01`](jit-authorization.md#17--w-p3-jit-01) Add CP endpoint to create or reuse pending authorizations
 
 ### 4/9 · W-P3-BRKR-04
 
@@ -211,7 +211,7 @@ Add `GET /connect/callback`: consume the attempt once, require the same browser 
 
 **Depends on:** [`W-P3-BRKR-03`](oauth-broker.md#39--w-p3-brkr-03) Implement POST /connect/start with PKCE, CSRF and scope capping; [`W-P1-AAUD-01`](admin-audit-log.md#14--w-p1-aaud-01) Add signed, hash-chained admin audit store on cpstate
 
-**Unblocks:** [`W-P3-BRKR-08`](oauth-broker.md#89--w-p3-brkr-08) Record the connected provider account and enforce account rules; [`W-P3-PORT-02`](consent-portal.md#27--w-p3-port-02) Implement revoke with grant, secret, epoch and provider steps; [`W-P3-OFFB-06`](offboarding.md#67--w-p3-offb-06) Audit and test blocked-user refusals across portal and connect; [`W-P3-PUS-03`](refresh-model.md#312--w-p3-pus-03) Implement the CP user-token refresh engine; [`W-P3-PUS-11`](refresh-model.md#1112--w-p3-pus-11) Add the per-user secrets end-to-end integration test; [`W-P3-JIT-07`](jit-authorization.md#77--w-p3-jit-07) Add end-to-end test for the JIT consent loop
+**Unblocks:** [`W-P3-BRKR-08`](oauth-broker.md#89--w-p3-brkr-08) Record the connected provider account and enforce account rules; [`W-P3-PORT-02`](consent-portal.md#27--w-p3-port-02) Implement revoke with grant, secret, epoch and provider steps; [`W-P3-OFFB-06`](offboarding.md#67--w-p3-offb-06) Audit and test blocked-user refusals across portal and connect; [`W-P4-MREG-11`](mcp-registry.md#1111--w-p4-mreg-11) Discover OAuth settings for remote MCP registry servers; [`W-P3-PUS-03`](refresh-model.md#312--w-p3-pus-03) Implement the CP user-token refresh engine; [`W-P3-PUS-11`](refresh-model.md#1112--w-p3-pus-11) Add the per-user secrets end-to-end integration test; [`W-P3-JIT-07`](jit-authorization.md#77--w-p3-jit-07) Add end-to-end test for the JIT consent loop
 
 ### 5/9 · W-P3-BRKR-05
 
@@ -277,7 +277,7 @@ W-P3-CSIG-06 owns the reserved prefixes (`users/`, `idp/`, `revoking/`, `oauth-c
 
 **Depends on:** [`W-P3-CSIG-06`](consent-auth.md#67--w-p3-csig-06) Add the CP-only user credential store, user key helpers and reserved secret prefixes; [`W-P3-BRKR-01`](oauth-broker.md#19--w-p3-brkr-01) Add provider config model with Google and GitHub defaults; [`W-P1-SSO-06`](console-sso-rbac.md#68--w-p1-sso-06) Require an admin session on /central/secrets and flag open consoles
 
-**Unblocks:** [`W-P3-BRKR-09`](oauth-broker.md#99--w-p3-brkr-09) Add end-to-end OAuth broker test with fake Google and GitHub
+**Unblocks:** [`W-P3-BRKR-09`](oauth-broker.md#99--w-p3-brkr-09) Add end-to-end OAuth broker test with fake Google and GitHub; [`W-P4-MREG-11`](mcp-registry.md#1111--w-p4-mreg-11) Discover OAuth settings for remote MCP registry servers
 
 ### 7/9 · W-P3-BRKR-07
 
