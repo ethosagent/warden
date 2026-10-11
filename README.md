@@ -297,6 +297,28 @@ When the [roadmap](docs/roadmap/README.md) through Phase 4 ships, Warden becomes
 | Developers and end users | Agents can act as you in Google, GitHub and other tools after a single consent, without pasting tokens. Missing access becomes a "click to approve" link, not a failed run. |
 | Compliance | A signed answer to "which agent did what, for whom, approved by whom", and access that ends when the person leaves. |
 
+**What using Warden will look like**
+
+The end goal is that safe agent access feels like nothing extra to the people using it.
+
+*End users* never copy an API key or paste a token:
+
+1. **Sign in once** with company SSO. In an agent platform this is the normal login. With a CLI agent it is `warden identity login`, then `warden identity exec -- <agent>`.
+2. **Approve each tool once**, such as Google or GitHub, in the consent portal.
+3. **Click approve when the agent needs more.** A Slack or email message arrives, and the agent's request waits and then continues instead of failing.
+4. **See and revoke** connected tools, grants and recent agent activity in the portal at any time.
+5. **When they leave, they do nothing.** Their tokens are revoked at each provider and access ends across the fleet.
+
+*Admins* set it up once:
+
+1. Deploy the control plane and workers, and connect the company IdP.
+2. Assign console roles: admin, editor, viewer.
+3. Register the OAuth apps and MCP servers your agents may use.
+4. Write policy for which agents, groups and users may reach which destinations and tools, with history, approval and rollback built in.
+5. Optionally, connect Slack or email for notifications, the SIEM export, and policy as code from git.
+
+*Agent builders* register the agent, route its traffic through a Warden worker (ready-made recipes exist for common harnesses), and optionally use the single Warden MCP gateway URL in place of many MCP servers.
+
 **Why Warden**
 
 - **It works below the agent.** Controls sit in the network path, so they hold even when the agent is prompt-injected, buggy or compromised.
