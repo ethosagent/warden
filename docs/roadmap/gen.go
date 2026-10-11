@@ -48,13 +48,15 @@ const (
 // ---- data model (mirrors tickets.json) ----
 
 type Ticket struct {
-	Key        string   `json:"key"`
-	Title      string   `json:"title"`
-	Type       string   `json:"type"`
-	Estimate   string   `json:"estimate"`
-	Body       string   `json:"body"`
-	Acceptance []string `json:"acceptance"`
-	DependsOn  []string `json:"depends_on"`
+	Key          string   `json:"key"`
+	Title        string   `json:"title"`
+	Type         string   `json:"type"`
+	Estimate     string   `json:"estimate"`
+	Body         string   `json:"body"`
+	Requirements []string `json:"requirements"`
+	Plan         []string `json:"plan"`
+	Acceptance   []string `json:"acceptance"`
+	DependsOn    []string `json:"depends_on"`
 }
 
 type Item struct {
@@ -398,28 +400,37 @@ func (rm *Roadmap) mermaid(phase int) string {
 // writeDesign writes the "How we build it" and "Done when" sections shared by
 // feature pages (h = "##") and epic issues (h = "###").
 func writeDesign(b *strings.Builder, it *Item, h string) {
-	if len(it.Design) > 0 {
-		fmt.Fprintf(b, "%s How we build it\n\n", h)
-		for _, d := range it.Design {
-			fmt.Fprintf(b, "- %s\n", d)
-		}
-		b.WriteString("\n")
-	}
+	writeList(b, it.Design, h+" How we build it", bullet)
 	if it.DoneWhen != "" {
 		fmt.Fprintf(b, "%s Done when\n\n%s\n\n", h, it.DoneWhen)
 	}
 }
 
-// writeAcceptance writes a ticket's acceptance checklist under heading.
-func writeAcceptance(b *strings.Builder, t Ticket, heading string) {
-	if len(t.Acceptance) == 0 {
+// Item markers for writeList.
+var (
+	bullet   = func(int) string { return "- " }
+	numbered = func(i int) string { return fmt.Sprintf("%d. ", i+1) }
+	checkbox = func(int) string { return "- [ ] " }
+)
+
+// writeList writes items under heading, each prefixed by marker(i).
+func writeList(b *strings.Builder, items []string, heading string, marker func(int) string) {
+	if len(items) == 0 {
 		return
 	}
 	fmt.Fprintf(b, "%s\n\n", heading)
-	for _, a := range t.Acceptance {
-		fmt.Fprintf(b, "- [ ] %s\n", a)
+	for i, s := range items {
+		fmt.Fprintf(b, "%s%s\n", marker(i), s)
 	}
 	b.WriteString("\n")
+}
+
+// writeTicketSections writes a ticket's requirements, plan and acceptance
+// lists; headingFmt styles each heading ("**%s**" or "### %s").
+func writeTicketSections(b *strings.Builder, t Ticket, headingFmt string) {
+	writeList(b, t.Requirements, fmt.Sprintf(headingFmt, "Requirements"), bullet)
+	writeList(b, t.Plan, fmt.Sprintf(headingFmt, "Implementation plan"), numbered)
+	writeList(b, t.Acceptance, fmt.Sprintf(headingFmt, "Acceptance criteria"), checkbox)
 }
 
 func mdCell(s string) string { return strings.ReplaceAll(s, "|", `\|`) }
@@ -572,7 +583,7 @@ func (rm *Roadmap) renderFeature(it *Item) string {
 	for _, t := range it.Tickets {
 		w("### %s\n\n**%s**\n\n", ticketHeading(it, t.Key), t.Title)
 		w("Type **%s** · Size **%s** · Issue %s\n\n%s\n\n", t.Type, t.Estimate, rm.issueLink(rm.Issues.Tickets[t.Key]), t.Body)
-		writeAcceptance(&b, t, "**Acceptance criteria**")
+		writeTicketSections(&b, t, "**%s**")
 		if len(t.DependsOn) > 0 {
 			var ds []string
 			for _, d := range t.DependsOn {
@@ -605,16 +616,18 @@ type pagePhase struct {
 }
 
 type pageTicket struct {
-	Key        string   `json:"key"`
-	Title      string   `json:"title"`
-	Type       string   `json:"type"`
-	Size       string   `json:"size"`
-	Body       string   `json:"body"`
-	Acceptance []string `json:"acceptance"`
-	DependsOn  []string `json:"depends_on"`
-	Unblocks   []string `json:"unblocks"`
-	Labels     []string `json:"labels"`
-	Issue      int      `json:"issue,omitempty"`
+	Key          string   `json:"key"`
+	Title        string   `json:"title"`
+	Type         string   `json:"type"`
+	Size         string   `json:"size"`
+	Body         string   `json:"body"`
+	Requirements []string `json:"requirements"`
+	Plan         []string `json:"plan"`
+	Acceptance   []string `json:"acceptance"`
+	DependsOn    []string `json:"depends_on"`
+	Unblocks     []string `json:"unblocks"`
+	Labels       []string `json:"labels"`
+	Issue        int      `json:"issue,omitempty"`
 }
 
 type pageFeature struct {
@@ -671,7 +684,7 @@ func (rm *Roadmap) renderPlan() (string, error) {
 			f.Depends = nonNil(f.Depends)
 			for i, t := range it.Tickets {
 				f.Tickets = append(f.Tickets, pageTicket{Key: t.Key, Title: ticketTitle(it, i+1, t), Type: t.Type, Size: t.Estimate,
-					Body: t.Body, Acceptance: nonNil(t.Acceptance), DependsOn: nonNil(t.DependsOn), Unblocks: nonNil(rm.unblocks[t.Key]),
+					Body: t.Body, Requirements: nonNil(t.Requirements), Plan: nonNil(t.Plan), Acceptance: nonNil(t.Acceptance), DependsOn: nonNil(t.DependsOn), Unblocks: nonNil(rm.unblocks[t.Key]),
 					Labels: ticketLabels(it, t), Issue: rm.Issues.Tickets[t.Key]})
 			}
 			data.Features = append(data.Features, f)
@@ -1270,7 +1283,7 @@ func (rm *Roadmap) ticketBody(it *Item, n int, t Ticket, open map[int]bool, num 
 	w("**%s** · Ticket %d of %d · %s · `%s` · Epic %s\n\n", it.Name, n, len(it.Tickets), phaseLabel(it.Phase), t.Key, ref(num["epic:"+it.ID]))
 	w("| Type | Size | Component |\n|---|---|---|\n| %s | %s (%d–%d days) | %s |\n\n", t.Type, t.Estimate, d[0], d[1], lanes[it.Lane].Name)
 	w("### What to build\n\n%s\n\n", t.Body)
-	writeAcceptance(&b, t, "### Acceptance criteria")
+	writeTicketSections(&b, t, "### %s")
 	line := func(k string) string {
 		o := rm.owner[k]
 		if open[o.Phase] {

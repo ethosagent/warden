@@ -406,10 +406,11 @@ let qTimer;
 document.getElementById("q").addEventListener("input", e => { clearTimeout(qTimer); qTimer = setTimeout(() => { state.q = e.target.value.trim().toLowerCase(); render(); }, 150); });
 
 const gh = n => n && DATA.repo ? `<a class="gh" href="https://github.com/${DATA.repo}/issues/${n}">#${n}</a>` : "";
+const kvList = (title, xs, tag = "ul") => xs.length ? `<div class="kv"><h4>${title}</h4><${tag}>${xs.map(a=>`<li>${md(a)}</li>`).join("")}</${tag}></div>` : "";
 function ticketHTML(t) {
   return `<details class="tk"><summary><span class="ttitle"><span class="tkey">${esc(t.key)}</span> ${md(t.title)}</span><span class="tsz">${t.type} · ${t.size}${t.issue ? " · " + gh(t.issue) : ""}</span></summary>
   <div class="tbody"><p>${md(t.body)}</p>
-  ${t.acceptance.length ? `<div class="kv"><h4>Acceptance</h4><ul>${t.acceptance.map(a=>`<li>${md(a)}</li>`).join("")}</ul></div>` : ""}
+  ${kvList("Requirements", t.requirements)}${kvList("Implementation plan", t.plan, "ol")}${kvList("Acceptance", t.acceptance)}
   <div class="muted"><b>Depends on:</b> ${t.depends_on.length ? t.depends_on.map(esc).join(", ") : "nothing"} · <b>Unblocks:</b> ${t.unblocks.length ? t.unblocks.map(esc).join(", ") : "nothing yet"}</div>
   <div class="tags">${t.labels.map((l,i)=>`<span class="lbl${i===0?" phase":""}">${esc(l)}</span>`).join("")}</div></div></details>`;
 }
@@ -419,7 +420,7 @@ function featHTML(f) {
     <span class="fmeta">${f.epic ? gh(f.epic) + " · " : ""}${f.tickets.length} tickets · ${f.mix}</span>
     <span class="fsum">${md(f.summary)}</span></summary>
     <div class="fbody">
-      ${f.design.length ? `<div class="kv"><h4>How we build it</h4><ul>${f.design.map(d=>`<li>${md(d)}</li>`).join("")}</ul></div>` : ""}
+      ${kvList("How we build it", f.design)}
       ${f.done_when ? `<div class="kv"><h4>Done when</h4><p>${md(f.done_when)}</p></div>` : ""}
       <div class="kv"><h4>Needs first</h4><div class="tags">${f.depends.length ? f.depends.map(d=>`<span class="lbl">${esc(d)}</span>`).join("") : `<span class="muted">Nothing; can start now</span>`}</div></div>
       <div class="kv"><h4>Code it touches</h4><div class="tags">${f.touches.map(t=>`<code>${esc(t)}</code>`).join("")}</div></div>
@@ -427,7 +428,7 @@ function featHTML(f) {
       <div class="kv"><h4>Tickets</h4><div class="tlist">${f.tickets.map(ticketHTML).join("")}</div></div>
     </div></details>`;
 }
-for (const f of DATA.features) f.hay = [f.name, f.summary, f.slug, ...f.design, ...f.touches, ...f.tickets.flatMap(t=>[t.key,t.title,t.body])].join(" ").toLowerCase();
+for (const f of DATA.features) f.hay = [f.name, f.summary, f.slug, ...f.design, ...f.touches, ...f.tickets.flatMap(t=>[t.key,t.title,t.body,...t.requirements,...t.plan,...t.acceptance])].join(" ").toLowerCase();
 const matches = f => !state.q || f.hay.includes(state.q);
 function saveFilter() { try { localStorage.setItem("roadmap-filter", JSON.stringify({phase: state.phase, lane: state.lane})); } catch(e) {} }
 function render() {

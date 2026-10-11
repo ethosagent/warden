@@ -7,7 +7,7 @@
 > was replaced by `go run docs/roadmap/gen.go issues`.
 
 ## Goal
-Make Warden cover what Arcade.dev (agent "actions runtime") does. Every agent request already goes through Warden; what's missing is user identity, delegated per-user auth, and an enterprise control plane.
+Let agents act for real users, safely, through Warden. Every agent request already goes through Warden; what's missing is user identity, delegated per-user auth, and an enterprise control plane.
 
 ## Decisions made
 - Single-tenant: one Warden deployment per company.

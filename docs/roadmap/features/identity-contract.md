@@ -4,19 +4,21 @@
 
 **Phase:** [P1 · Who did it](../README.md#phase-1--who-did-it) · **Lane:** Agent / harness · **Label:** `feature:identity-contract` · **Epic:** [#26](https://github.com/ethosagent/warden/issues/26) · **Tickets:** 3 (1S 2M)
 
-Defines how any agent platform sends a user's identity to Warden and ships a small `warden identity` CLI so any agent, script or harness can get a token and route through the worker. Warden stays platform-neutral: a harness only needs an OIDC token from the configured issuer and a proxy URL.
+Defines how any agent platform sends a user's identity to Warden, and ships a small `warden identity` CLI so any agent, script or harness can get a token and route through the worker. Warden stays platform-neutral: a harness only needs an OIDC ID token from the configured issuer and a proxy URL. Phase 1 is attribution only, so a missing or bad token never blocks a request and default-deny policy is unchanged.
 
 ## How we build it
 
-- Contract: an OIDC ID token from the configured issuer with `aud` containing `warden`, `exp` at most 1h out, and a `groups` claim. With Dex this is obtained through cross-client trust (`audience:server:client_id:warden` scope on the `agent-harness` client).
-- Transport: `Proxy-Authorization: Basic base64("session:"+token)` on CONNECT, which any client gets from a proxy URL `http://session:<token>@worker:8080`. Fallback header `X-Warden-Identity: Bearer <token>` on requests Warden terminates. Both are stripped before forwarding.
-- Harness duties: refresh before expiry, give each user's processes only that user's token, and never place the token in model context, prompts, logs or tool output.
-- `warden identity` CLI (new package internal/identityclient): `login` runs the OIDC device-code flow against the configured issuer and stores the refresh token in a 0600 file; `token` prints a valid ID token, refreshing at 2/3 lifetime; `env` prints HTTPS_PROXY/HTTP_PROXY with the session credentials for the given worker.
-- Phase 2 extends the same package with agent keys and RFC 8693 token exchange, so platforms that adopt the CLI or contract upgrade without rework.
+- Contract v1 (docs/identity-contract.md): an OIDC ID token from the worker's `identity.issuer` whose `aud` contains `identity.audience`, signed RS256 or ES256, with `sub` required and `email`, `groups` and `sid` expected. The doc separates what the worker enforces (iss, aud, exp/nbf with 60s skew, alg) from what is issuer configuration (1h ID-token lifetime, groups claim). Identity is keyed on (iss, sub); email is a display attribute. Later phases may add to v1 but never change a v1 header or claim.
+- Getting the token from Dex: cross-client trust, with scopes `openid email profile groups offline_access audience:server:client_id:<worker audience>` on the confidential `agent-harness` client (harness platforms) or the public device-code `warden-cli` client (user machines). `groups` and `offline_access` are required, or the token has no groups claim and cannot be refreshed. The reference Dex config (W-P1-DEX-01) keeps the data-plane audience `warden` separate from the console client `warden-console`: `warden` never logs anyone in, a console login token never carries aud `warden`, and the CP console accepts only aud `warden-console`, so a harness token is never a console token. Workers should set `identity.allowedAZP: [agent-harness, warden-cli]`.
+- Transport: `Proxy-Authorization: Basic base64("session:"+token)` on CONNECT (Bearer also accepted), which clients send from a proxy URL `http://session:<token>@<worker>:8080`. The fallback `X-Warden-Identity: Bearer <token>` only works on connections where the worker terminates TLS; on raw tunnels it cannot be read or stripped, so harnesses must prefer Proxy-Authorization. Attribution is bound per tunnel at CONNECT time. Only https through CONNECT is supported: the worker drops any other request line as unsupported_protocol (internal/proxy/serve.go handleConn).
+- Harness duties: keep the IdP login and refresh token out of the agent's reach (another uid or a sidecar), give each user's processes only that user's token, refresh before expiry, recycle connections after a refresh, and never put the token in prompts, model context, logs, argv or tool output. Phase 1 limit, stated plainly: a token placed in HTTPS_PROXY is readable by the agent's own tools and is a snapshot that goes stale after about 1h. That is tolerated while P1 is attribute-only; P2's `warden identity exec` loopback forwarder (W-P2-RCP-02) removes the token from the child and rotates it without a restart.
+- `warden identity` CLI: new package internal/identityclient plus a new cobra subtree in cmd/proxy that ignores the worker `--config`. Config comes from flags, `WARDEN_IDENTITY_*` env vars, or `<os.UserConfigDir()>/warden/identity.yaml`. Subcommands: `login` (OIDC discovery and RFC 8628 device-code grant via golang.org/x/oauth2, public client by default, optional secret only from `--client-secret-env NAME`), `token` (prints a valid ID token, refreshing at 2/3 of exp-iat, never prompts), `status` (prints iss, sub, email, groups and exp, never the token), `env --worker host:port` (HTTPS_PROXY and https_proxy with session credentials, NO_PROXY for loopback, optional CA variables, token from cache, `--token-stdin` or `--token-file`), and `logout`.
+- Cache safety: refresh and ID tokens live in a 0600 file inside a 0700 directory, written by temp file, fsync and rename. The CLI refuses a cache file readable by group or others. Refresh runs under an exclusive lock and re-reads the cache after taking it, because Dex rotates refresh tokens on use. If the issuer is unreachable, `token` serves the cached token while it is valid and warns on stderr. Exit code 2 means login is required; 3 means the issuer is unreachable and no valid cached token remains. Non-loopback http issuers are refused unless `--insecure-http-issuer` is passed. Tokens, device codes and IdP error bodies are never printed to stderr or logged; `--verbose` shows only an 8-hex sha256 fingerprint.
+- Back-compat and upgrades: everything is opt-in. With no `identity` block, workers behave exactly as today, and existing recipes and proxy URLs without credentials keep working. The new `identity` commands change no flag or behaviour of `run` or `control-plane`. P2 extends internal/identityclient with agent keys, RFC 8693 exchange and `identity exec`; the contract doc records that v1 Dex tokens must stay accepted on upgrade for workers that already set `identity.issuer` (see open question on W-P2-WBND-01).
 
 ## Done when
 
-A plain curl container with no agent framework gets a token with `warden identity`, sends requests through the worker, and every event in the CP dashboard carries that user's sub, email and groups.
+From a clean state, `scripts/smoke-identity.sh` starts the control plane, Dex with LDAP and an attribute-mode worker, then routes a plain curl container (internal-only network, no direct route out, no IdP access) through the worker using `warden identity env --token-stdin` with a seeded user's token. The CP traffic API filtered by that user returns events carrying their sub, email and groups with identity_status=valid. Requests with no token and with a bad token are still allowed and recorded as `none` and `invalid`. No token appears in the script, CLI or worker logs.
 
 ## Needs first
 
@@ -33,14 +35,14 @@ A plain curl container with no agent framework gets a token with `warden identit
 
 ## Code it touches
 
-`docs/identity-contract.md` · `new package internal/identityclient` · `cmd/proxy` · `deploy/compose` · `scripts`
+`docs/identity-contract.md` · `README.md` · `docs/recipes/README.md` · `new package internal/identityclient` · `internal/identity (contract drift test)` · `cmd/proxy` · `go.mod` · `configs` · `deploy/compose` · `scripts`
 
 ## Tickets
 
 | # | Key | Ticket | Type | Size | Depends on | Issue |
 |---|---|---|---|---|---|---|
-| 1/3 | [`W-P1-IDC-01`](#13--w-p1-idc-01) | Write the agent identity contract for harness builders | docs | S | W-P1-DEX-01 | [#27](https://github.com/ethosagent/warden/issues/27) |
-| 2/3 | [`W-P1-IDC-02`](#23--w-p1-idc-02) | Add `warden identity` CLI for login, token and proxy env | feature | M | W-P1-DEX-01 | [#28](https://github.com/ethosagent/warden/issues/28) |
+| 1/3 | [`W-P1-IDC-01`](#13--w-p1-idc-01) | Write the agent identity contract for harness builders | docs | S | W-P1-IDC-02, W-P1-IDC-03 | [#27](https://github.com/ethosagent/warden/issues/27) |
+| 2/3 | [`W-P1-IDC-02`](#23--w-p1-idc-02) | Add `warden identity` CLI for login, token, status and proxy env | feature | M | W-P1-DEX-01 | [#28](https://github.com/ethosagent/warden/issues/28) |
 | 3/3 | [`W-P1-IDC-03`](#33--w-p1-idc-03) | Add generic identity smoke test with a curl agent | test | M | W-P1-IDC-02, W-P1-DEX-02, W-P1-VRFY-04 | [#29](https://github.com/ethosagent/warden/issues/29) |
 
 ### 1/3 · W-P1-IDC-01
@@ -49,33 +51,79 @@ A plain curl container with no agent framework gets a token with `warden identit
 
 Type **docs** · Size **S** · Issue [#27](https://github.com/ethosagent/warden/issues/27)
 
-Add `docs/identity-contract.md` describing the token requirements (issuer, aud=warden, max 1h exp, groups claim), both transports (Proxy-Authorization on CONNECT via proxy URL credentials, X-Warden-Identity fallback), stripping guarantees, refresh expectations, per-agent identity modes (off, attribute) and the `identity_status` values recorded on failures. Include a do-not list: no tokens in model context, prompts, logs or tool output, no sharing a token across users. Link it from README and docs/recipes/README.md.
+Add docs/identity-contract.md (Contract v1), telling harness builders exactly what token to send, how to send it, what the worker does with it, and what the harness must never do. It documents behaviour from p1-verify-token, the `warden identity` CLI and the smoke recipe, so it merges last in this feature, after the code it describes exists. A small drift test keeps the header names and status values in the doc in line with internal/identity.
+
+**Requirements**
+
+- Version marker `Contract v1`, with a rule that later phases may add to v1 but never change a v1 header or claim. A short 'Upgrading to Phase 2' section says that v1 Dex tokens must stay accepted for workers that already set `identity.issuer`.
+- Token section: iss byte-identical to `identity.issuer`, aud contains `identity.audience`, RS256/ES256 only, exp/nbf with 60s skew, `sub` required, `email`/`groups`/`sid` expected. A table marks each rule as either enforced by the worker or issuer configuration (1h lifetime, groups claim). Lists the Dex scopes, including `groups` and `offline_access`. Identity is keyed on (iss, sub); email is display-only. Explains that the worker audience (`warden` in the reference config) is a data-plane-only client separate from the console client `warden-console`, and recommends `identity.allowedAZP` listing the harness and CLI clients.
+- Transport section, with exact strings: `Proxy-Authorization: Basic base64("session:"+token)` (username `session`, case-sensitive; Bearer also accepted) from the proxy URL `http://session:<token>@<worker>:8080`; fallback `X-Warden-Identity: Bearer <token>` only on TLS-terminated connections; both stripped before forwarding in every mode, including off; two valid identities with different sub give identity_status `conflict` and the request still proceeds in P1 (a 403 is reserved for P2 require mode); attribution bound per tunnel at CONNECT time; only https through CONNECT, plain HTTP_PROXY requests are denied.
+- Modes and statuses: per-agent `off|attribute` (`require` is rejected until Phase 2), identity_status `off|none|valid|invalid|expired|unverified|conflict` (W-P1-VRFY-01) and what the dashboard shows for each, the event fields user_sub, user_email, user_groups, user_groups_truncated, user_sid, identity_status, identity_reason, the metric `warden_identity_verify_total{result,reason}` (Prometheus name of `warden.identity.verify.total`), and the query `/dashboard/api/traffic?user=`. Recommends alerting on the share of non-valid results per agent.
+- Harness duties and a do-not list: IdP login and refresh token kept out of the agent's reach, one token per user, refresh before expiry, no tokens in prompts, model context, logs, argv, tool output or `curl -v` output. A 'Phase 1 limitation' callout covers the token in HTTPS_PROXY (readable by agent tools, stale after about 1h, plaintext agent-to-worker hop) and points to P2's `warden identity exec`.
+- Client compatibility table: preemptive Basic from proxy-URL credentials (curl, Go net/http, Python requests, Node with NODE_USE_ENV_PROXY=1) works; clients that send credentials only after a 407 challenge get no identity in P1 because the worker never challenges. Examples use the CA variables printed by `warden identity env --ca` and show tokens only as `eyJ...redacted`.
+- Linked from README.md, docs/recipes/README.md and docs/identity-dex.md, and the contract doc links back to docs/identity-dex.md.
+
+**Implementation plan**
+
+1. Write new docs/identity-contract.md with sections: Contract v1, Token, Getting a token (Dex), Transport, Lifetimes and limits, Modes and statuses, Observability, Harness duties, Phase 1 limitations, Client compatibility, Upgrading to Phase 2.
+2. Copy header names, status values and mode names from the exported constants in internal/identity and internal/proxy (added by W-P1-VRFY-01/02) rather than retyping them.
+3. Add runnable examples, marked as `run` blocks, for `warden identity login`, `status`, `token` and `eval "$(warden identity env --worker 127.0.0.1:8080 --ca certs/proxy-ca.crt)"`, then curl, Python requests and Node, all against the compose files from W-P1-IDC-03.
+4. Add links from README.md, docs/recipes/README.md (new 'Per-user identity' section) and docs/identity-dex.md.
+5. Add new internal/identity/contract_doc_test.go (TestContractDocMatchesConstants) that reads ../../docs/identity-contract.md and fails if any exported header, mode or status constant is missing from it.
 
 **Acceptance criteria**
 
-- [ ] Every example command in the doc runs against the identity compose recipe
-- [ ] Doc states the exact header names and token claims the worker verifies, matching internal/identity
-- [ ] Linked from README and the recipes index
+- [ ] `go test ./internal/identity -run TestContractDocMatchesConstants` passes, and fails when a constant such as the `conflict` status or `X-Warden-Identity` is renamed without updating the doc.
+- [ ] With the smoke compose stack from W-P1-IDC-03 running, every `run` block in docs/identity-contract.md exits 0 when pasted in order.
+- [ ] `grep -l 'identity-contract.md' README.md docs/recipes/README.md docs/identity-dex.md` lists all three files.
+- [ ] `grep -E 'eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}' docs/identity-contract.md` returns nothing.
+- [ ] The doc lists exactly the statuses off, none, valid, invalid, expired, unverified and conflict and the modes off and attribute, matching config validation in internal/config.
+- [ ] `scripts/check.sh` passes.
 
-**Depends on:** [`W-P1-DEX-01`](dex-oidc.md#13--w-p1-dex-01) Add reference Dex config with warden and agent-harness clients
+**Depends on:** [`W-P1-IDC-02`](identity-contract.md#23--w-p1-idc-02) Add `warden identity` CLI for login, token, status and proxy env; [`W-P1-IDC-03`](identity-contract.md#33--w-p1-idc-03) Add generic identity smoke test with a curl agent
 
 ### 2/3 · W-P1-IDC-02
 
-**Add `warden identity` CLI for login, token and proxy env**
+**Add `warden identity` CLI for login, token, status and proxy env**
 
 Type **feature** · Size **M** · Issue [#28](https://github.com/ethosagent/warden/issues/28)
 
-Create new package internal/identityclient with OIDC discovery, the device-code grant, refresh-token storage in a 0600 file under the user config dir, and refresh at 2/3 of token lifetime. Add a cobra `identity` command in cmd/proxy with `login`, `token` and `env --worker <host:port>` subcommands. Extra scopes come from `--scopes` / config so Dex's `audience:server:client_id:warden` is supported without hard-coding Dex.
+Create new package internal/identityclient (OIDC discovery, RFC 8628 device-code grant, refresh, a locked file cache and proxy env rendering) and a new `identity` cobra subtree in cmd/proxy with `login`, `token`, `status`, `env` and `logout`. It works with any standards OIDC issuer and never hard-codes Dex. Adding the subtree changes nothing about `run` or `control-plane`, and the worker and CP are untouched.
+
+**Requirements**
+
+- Configuration in precedence order: flags `--issuer`, `--client-id` (default `warden-cli`, the public device-code client from W-P1-DEX-01), `--audience` (default `warden`, used only for the aud warning below; the Dex cross-client scope `audience:server:client_id:warden` is passed with `--scopes` as documented, never hard-coded), `--client-secret-env NAME` (never a literal secret), `--scopes` (added to the defaults `openid email profile groups offline_access`), `--cache-dir`; then WARDEN_IDENTITY_ISSUER, WARDEN_IDENTITY_CLIENT_ID, WARDEN_IDENTITY_AUDIENCE, WARDEN_IDENTITY_SCOPES, WARDEN_IDENTITY_CACHE_DIR; then optional `<os.UserConfigDir()>/warden/identity.yaml`. The root `--config` is never loaded. Non-loopback http issuers are refused unless `--insecure-http-issuer` is passed, which prints a stderr warning.
+- `login` runs discovery (issuer must match byte for byte) and the device-code grant, honouring `interval`, `slow_down` and `expires_in`, and prints the verification URI and user code to stderr only.
+- Cache: `<cache-dir>/<sha256(issuer|client_id)[:16]>.json` holds the refresh token, ID token and the local receipt time. The file is 0600 in a 0700 directory, written by temp file, fsync and rename. A cache readable by group or others is refused with an error naming the path. Refresh holds an exclusive flock on `<cache>.lock` and re-reads the cache after taking it.
+- `token` prints the cached ID token while less than 2/3 of exp-iat has passed (measured from local receipt time), and refreshes otherwise, persisting any rotated refresh token. It never prompts. If the issuer is unreachable and the cached token is still valid, it prints it and warns on stderr. Exit 2 means login required (no, expired or revoked refresh token); exit 3 means the issuer is unreachable with no valid cached token.
+- `env --worker host:port [--token-stdin | --token-file PATH] [--ca PATH] [--shell sh|fish|powershell] [--format dotenv|json] [--include-http]` prints HTTPS_PROXY and https_proxy built with url.UserPassword("session", token), plus NO_PROXY=localhost,127.0.0.1. `--ca` adds SSL_CERT_FILE, CURL_CA_BUNDLE, REQUESTS_CA_BUNDLE and NODE_EXTRA_CA_CERTS. HTTP_PROXY is printed only with `--include-http`, with a note that the worker denies plain http. The token expiry and a warning that child processes can read the token go to stderr. The token is never accepted as an argv value.
+- `status` prints iss, sub, email, groups, exp and the cache path, never the token. `logout` deletes the cache entry. Before caching, claims are parsed (unverified; the worker verifies) and a missing groups claim or an aud without the configured audience prints a warning naming only the claim.
+- Only `token` and `env` write secrets, and only to stdout. By default nothing is logged except errors. `--verbose` logs issuer, client_id, scopes, expiry and an 8-hex sha256 fingerprint, never a raw token, device code or IdP error body (oauth2.RetrieveError is wrapped).
+- Add golang.org/x/oauth2 to go.mod, pinned to a release at least 2 weeks old, passing govulncheck. A cached `token` call does no network I/O.
+
+**Implementation plan**
+
+1. go.mod: add golang.org/x/oauth2 (DeviceAuth, DeviceAccessToken and the refresh grant). Use plain JSON discovery so the CLI does not need go-oidc.
+2. New internal/identityclient/config.go and discovery.go: Config{Issuer, ClientID, Audience, ClientSecretEnv, Scopes, CacheDir, AllowInsecureIssuer}, LoadConfig(flags, env, file), and Discover(ctx, *http.Client, issuer) returning the token and device_authorization endpoints after the issuer match and https checks.
+3. New internal/identityclient/store.go: FileStore with Load, Save (temp, fsync, rename, 0600 in 0700) and WithLock(fn) using an exclusive flock on `<cache>.lock` (unix builds only).
+4. New internal/identityclient/client.go: Client{Config, HTTP *http.Client, Now func() time.Time} with Login(ctx, prompt io.Writer), Token(ctx) and Status(), plus typed errors ErrLoginRequired and ErrIssuerUnreachable that cmd maps to exit codes 2 and 3.
+5. New internal/identityclient/env.go: ProxyEnv(worker, token, opts) rendering sh, fish, powershell, dotenv and json output.
+6. New cmd/proxy/identity.go: newIdentityCmd() with login, token, status, env and logout; register it in cmd/proxy/root.go next to the existing AddCommand calls.
+7. Tests in new internal/identityclient/*_test.go against an httptest fake issuer (discovery, device_authorization with authorization_pending then slow_down then success, refresh grant that rotates the refresh token) and a fake clock; an httptest CONNECT listener for the env test; cmd/proxy identity_test.go with a captured slog handler and stderr buffer.
 
 **Acceptance criteria**
 
-- [ ] Device-code login and refresh are tested against an httptest fake issuer with a fake clock
-- [ ] `identity env` output used with curl produces a valid Proxy-Authorization on CONNECT
-- [ ] The token never appears in CLI logs, and the refresh-token file is created with mode 0600
+- [ ] `go test ./internal/identityclient -run 'TestDeviceLogin|TestDevicePollSlowDown|TestRefreshAtTwoThirds|TestTokenNoPrompt|TestIssuerDownServesCache'` passes: login stores a refresh token, slow_down raises the poll interval, `token` refreshes exactly once after 2/3 of lifetime, an expired refresh token returns ErrLoginRequired without prompting, and an unreachable issuer still returns a valid cached token.
+- [ ] `go test ./internal/identityclient -run TestConcurrentRefreshSingleFlight -race` shows two concurrent Token() calls cause exactly one refresh request against a rotating fake issuer, and both get the same token.
+- [ ] TestCacheFilePerms checks the cache file is 0600 in a 0700 directory, and a cache chmodded to 0644 is refused with an error naming the path.
+- [ ] `go test ./internal/identityclient -run TestEnvConnectHeader` builds an http.Transport with http.ProxyURL from parsed `env` output and an httptest CONNECT listener sees `Proxy-Authorization: Basic base64("session:"+token)`; the default output contains no HTTP_PROXY.
+- [ ] `go test ./cmd/proxy -run TestIdentityCmd` confirms the subcommands are registered, no `--client-secret` flag taking a literal exists, the root `--config` is not read, and with `--verbose` captured stderr and logs contain no substring of the ID, refresh or device code values.
+- [ ] `go test ./internal/identityclient -run TestInsecureIssuerRejected` rejects an http non-loopback issuer unless AllowInsecureIssuer is set.
+- [ ] `scripts/check.sh` passes, including the coverage gate and govulncheck.
 
-**Depends on:** [`W-P1-DEX-01`](dex-oidc.md#13--w-p1-dex-01) Add reference Dex config with warden and agent-harness clients
+**Depends on:** [`W-P1-DEX-01`](dex-oidc.md#13--w-p1-dex-01) Add reference Dex config with console, data-plane, harness and CLI clients
 
-**Unblocks:** [`W-P1-IDC-03`](identity-contract.md#33--w-p1-idc-03) Add generic identity smoke test with a curl agent; [`W-P2-RCP-01`](identity-client.md#15--w-p2-rcp-01) Extend internal/identityclient with agent keys and token exchange
+**Unblocks:** [`W-P1-IDC-01`](identity-contract.md#13--w-p1-idc-01) Write the agent identity contract for harness builders; [`W-P1-IDC-03`](identity-contract.md#33--w-p1-idc-03) Add generic identity smoke test with a curl agent; [`W-P2-RCP-01`](identity-client.md#15--w-p2-rcp-01) Extend internal/identityclient with agent keys and token exchange
 
 ### 3/3 · W-P1-IDC-03
 
@@ -83,12 +131,35 @@ Create new package internal/identityclient with OIDC discovery, the device-code 
 
 Type **test** · Size **M** · Issue [#29](https://github.com/ethosagent/warden/issues/29)
 
-Add `deploy/compose/docker-compose.identity-smoke.yml` combining the identity recipe, control plane and one worker with a plain curl container on an internal-only network. `scripts/smoke-identity.sh` gets a token for a seeded LDAP user (password grant on the dev-only `agent-harness` client), curls an allowed host through the worker using `warden identity env`, then checks the CP traffic API filtered by that user and confirms the upstream test server saw no identity headers.
+Add an opt-in smoke recipe and script that prove a plain curl container, with no agent framework, can be attributed to a user through the `warden identity` CLI and the contract. The script plays the harness: it gets a seeded LDAP user's token from the dev Dex config and hands it to `warden identity env --token-stdin` inside the agent container. It does not loosen the SafeDialer private-IP block, so upstream header stripping stays covered by the W-P1-VRFY-05 integration test.
+
+**Requirements**
+
+- New deploy/compose/docker-compose.identity-smoke.yml, combined with `-f` with docker-compose.control-plane.yml and docker-compose.identity.yml (W-P1-DEX-02). It runs one worker in attribute mode and a pinned-digest curl agent on an `internal: true` network whose only route out is the worker and which cannot reach Dex. The static `warden` binary is copied from the warden image into a shared read-only volume by an init service; no new image is built.
+- New configs/config.control-plane.identity.yaml and configs/config.worker.identity.yaml with the identity block (defaultMode attribute, issuer http://dex:5556/dex with allowInsecureIssuer true, audience warden, allowedAZP [agent-harness, warden-cli]) and an allowlist entry for one public https host. No SSRF or private-IP setting is changed.
+- New scripts/smoke-identity.sh gets the token with `scripts/dex-token.sh --raw <user>` from W-P1-DEX-02 (password grant on `agent-harness`, enabled only in config.dev.yaml) run in a toolbox container on cp-net, and pipes it to `warden identity env --worker worker:8080 --token-stdin --ca /certs/proxy-ca.crt` inside the agent; the token never goes through argv or an echoed variable.
+- It checks the CP: `GET /dashboard/api/traffic?user=<seeded email>` returns the request with user_sub, user_email, user_groups containing the seeded group, and identity_status=valid. The smoke CP runs with console.auth none (the default), so all CP dashboard calls go through one helper that sends no credentials; an oidc-mode CP is out of scope, because W-P1-SSO-06 rejects the shared bearer on /dashboard/*. The smoke worker authenticates to the CP the same way the control-plane recipe's workers do (shared token before W-P1-WTOK-06, its own registered worker token after).
+- It also sends one request with no token and one with a garbage token, and checks both are allowed and recorded as `none` and `invalid`, proving attribute mode never blocks.
+- Hygiene: `set -euo pipefail`, no `set -x`, curl without -v, only token fingerprints printed, `docker compose down -v` in a trap, and a non-zero exit that names the failed step.
+- Run only on request through a new `scripts/check.sh --smoke-identity` flag, so the default check run needs no Docker.
+
+**Implementation plan**
+
+1. Add new configs/config.control-plane.identity.yaml and configs/config.worker.identity.yaml, modelled on configs/config.control-plane.yaml and configs/config.worker.yaml.
+2. Add new deploy/compose/docker-compose.identity-smoke.yml with control-plane, worker, an init service that copies /usr/local/bin/warden to a shared volume, a toolbox service on the Dex network, and the curl agent on an internal network.
+3. Add new scripts/smoke-identity.sh: run scripts/gen-certs.sh, `docker compose ... up -d --wait`, fetch the token, run `warden identity env --token-stdin` and curl in the agent, then send the no-token and bad-token requests.
+4. Add the CP helper and poll `/dashboard/api/traffic?user=` (W-P1-VRFY-04) until the expected events appear or a 60s timeout fails the step.
+5. Assert that `curl --noproxy '*' https://<allowed host>` from the agent fails, and grep the script output and `docker compose logs worker` for JWT-shaped strings.
+6. Add the `--smoke-identity` flag to scripts/check.sh next to the existing `--integration` flag.
 
 **Acceptance criteria**
 
-- [ ] Script passes from a clean `docker compose up`
-- [ ] CP traffic filtered by the seeded user shows the request with groups
-- [ ] Upstream request log contains neither Proxy-Authorization nor X-Warden-Identity
+- [ ] `docker compose -f deploy/compose/docker-compose.control-plane.yml -f deploy/compose/docker-compose.identity.yml -f deploy/compose/docker-compose.identity-smoke.yml config -q` exits 0.
+- [ ] From a clean state, `scripts/smoke-identity.sh` exits 0 and prints PASS for each step: token, routed request, CP attribution, no-token status, bad-token status, direct-egress blocked, no token in logs.
+- [ ] The CP traffic API filtered by the seeded email returns at least one event for the allowed host with user_sub set, user_groups containing the seeded LDAP group and identity_status=valid; the no-token and bad-token events show `none` and `invalid` with decision allow.
+- [ ] `scripts/smoke-identity.sh 2>&1 | grep -cE 'eyJ[A-Za-z0-9_-]{20,}'` prints 0, and the same grep over `docker compose logs worker` prints 0.
+- [ ] `scripts/check.sh` without `--smoke-identity` does not start Docker and still passes.
 
-**Depends on:** [`W-P1-IDC-02`](identity-contract.md#23--w-p1-idc-02) Add `warden identity` CLI for login, token and proxy env; [`W-P1-DEX-02`](dex-oidc.md#23--w-p1-dex-02) Add identity compose recipe with pinned Dex and seeded LDAP; [`W-P1-VRFY-04`](identity-verification.md#45--w-p1-vrfy-04) Add user filter and user breakdown to the dashboard
+**Depends on:** [`W-P1-IDC-02`](identity-contract.md#23--w-p1-idc-02) Add `warden identity` CLI for login, token, status and proxy env; [`W-P1-DEX-02`](dex-oidc.md#23--w-p1-dex-02) Add identity compose recipe with pinned Dex and seeded LDAP; [`W-P1-VRFY-04`](identity-verification.md#47--w-p1-vrfy-04) Add user filter and top-users breakdown to the dashboard
+
+**Unblocks:** [`W-P1-IDC-01`](identity-contract.md#13--w-p1-idc-01) Write the agent identity contract for harness builders

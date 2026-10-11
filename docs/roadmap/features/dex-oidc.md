@@ -4,19 +4,27 @@
 
 **Phase:** [P1 · Who did it](../README.md#phase-1--who-did-it) · **Lane:** Identity provider · **Label:** `feature:dex-oidc` · **Epic:** [#16](https://github.com/ethosagent/warden/issues/16) · **Tickets:** 3 (2S 1M)
 
-Ship a reference Dex deployment that Warden and any agent harness trust: one IdP fronting the company directory, issuing short-lived ID tokens with groups. Operators get a pinned, documented compose recipe and config they can point at LDAP/GitHub/Google connectors. Warden treats Dex only as a generic OIDC issuer.
+Ship a reference Dex deployment that Warden and agent harnesses trust: one IdP in front of the company directory that issues short-lived ID tokens with groups. Operators get a pinned, documented compose recipe and config that they can point at LDAP, GitHub, Google or upstream OIDC connectors. Warden treats Dex only as a generic OIDC issuer. None of this exists in the repo yet: there is no deploy/compose/dex/, no identity compose file, no OIDC dependency in go.mod and no secret-literal check in scripts/check.sh.
 
 ## How we build it
 
-- Static clients: `warden` is confidential, with redirectURIs `<cp>/auth/callback` and `trustedPeers: [agent-harness]`. `agent-harness` is a generic client for agent platforms and the `warden identity` CLI, with device-code enabled and redirectURIs `<harness>/auth/callback`. Secrets come from env (`$WARDEN_DEX_CLIENT_SECRET`, `$HARNESS_DEX_CLIENT_SECRET`) and are never committed.
-- `expiry.idTokens: 1h`, `expiry.signingKeys: 6h`, and refresh tokens with `validIfNotUsedFor: 168h` and `absoluteLifetime: 720h`. Storage is sqlite3 on a named volume. The groups claim comes from the connector.
-- The dev recipe uses an OpenLDAP container seeded with users and groups (warden-admins, warden-editors, warden-viewers, eng). Dex static passwords are not a reliable source of the groups claim, so they are not used for role tests. Commented examples cover the GitHub (orgs/teams), Google and generic OIDC connectors.
-- Pin the image to an exact released tag by digest, e.g. `ghcr.io/dexidp/dex:v2.x.y@sha256:...`, chosen at implementation time from the latest stable release that is at least 2 weeks old.
-- Issuer URL consistency: the issuer must be byte-identical for browsers and containers. The recipe uses `http://dex:5556/dex` and documents a hosts entry for local runs. The production docs require https.
+- Dex is only a standard OIDC issuer for Warden. Nothing in internal/ or cmd/ calls Dex-specific APIs; Dex-specific strings live only in deploy/compose/dex/, deploy/compose/docker-compose.identity.yml, scripts/dex-token.sh and docs/identity-dex.md. Any standards-compliant OIDC issuer can replace it.
+- Clients (staticClients; secrets via `secretEnv`, never committed): `warden-console` is confidential and used only for CP console login, redirect `<cp-browser-url>/auth/callback`. `warden` is the data-plane audience: confidential, no redirect URIs, never used to log anyone in, with `trustedPeers: [agent-harness, warden-cli]` so those clients can mint tokens whose aud contains `warden`. `agent-harness` is confidential, for server-side harness platforms. `warden-cli` is public (no secret) and device-code only, for `warden identity login` on user machines; it lists the Dex device callback (`<issuer>/device/callback`) in redirectURIs. Splitting console and data-plane clients means a console login token never carries aud `warden`.
+- Grants: `oauth2.grantTypes` is set explicitly to authorization_code, refresh_token and `urn:ietf:params:oauth:grant-type:device_code`; `oauth2.responseTypes: [code]`, `oauth2.skipApprovalScreen: true` (all clients are first-party). The password grant (`password` in grantTypes plus `oauth2.passwordConnector: ldap`) appears only in the dev recipe file `deploy/compose/dex/config.dev.yaml`, which the smoke and e2e tests use. The prod example `deploy/compose/dex/config.yaml` has no password grant, because it lets a client collect directory passwords and bypasses upstream MFA.
+- Scopes: clients must request `openid email profile groups offline_access`, plus `audience:server:client_id:warden` for agent-harness and warden-cli. Without `groups` the token has no groups claim and role and group policy silently see none; without `offline_access` there is no refresh token. With cross-client trust Dex sets aud to the requested peer and azp to the requesting client, so checks are `aud contains warden` and `azp in {agent-harness, warden-cli}`.
+- Expiry: `idTokens: 1h`, `signingKeys: 6h`, `deviceRequests: 5m`. Dex keeps previous public keys published until their tokens expire, and the worker verifier (p1-verify-token) refetches JWKS on an unknown kid at most once per 30s, so rotation needs no Warden restart. Refresh tokens: `validIfNotUsedFor: 168h`, `absoluteLifetime: 720h`, rotation on, `reuseInterval: 3s`; clients must serialize refresh (the CLI holds a lock file). Absolute expiry and loss of Dex storage both return `invalid_grant`; later offboarding logic must not treat that alone as a disabled user (see open cross-feature note on p3-offboarding).
+- Identity keys: the Dex `sub` is opaque and encodes the connector id together with the upstream user id. Connector `id` values (recipe: `ldap`) are permanent once users exist; renaming one or switching connectors changes every sub and requires re-keying user-scoped state (block list, `warden/users/<sub>/` secrets, grants, attribution). The docs show the `federated:id` scope for diagnostics. Group names `warden-admins`, `warden-editors`, `warden-viewers`, `eng` are recipe defaults that `console.roles` and group policy map, not a contract.
+- Dev directory: an OpenLDAP container seeded from `deploy/compose/dex/seed.ldif` with `{SSHA}` password hashes only (dev-only, path-allowlisted in the secret check). The LDAP connector uses userSearch and groupSearch so `groups` comes from the directory, and its bindPW comes from env. Dex static passwords are not used because they cannot carry groups. Commented examples cover GitHub (orgs/teams, `teamNameField`), Google and upstream OIDC, with a table showing groups source, required scope and whether refresh re-checks the upstream user.
+- Issuer and transport: the dev recipe issuer is `http://dex:5556/dex`, byte-identical for browsers (documented `127.0.0.1 dex` hosts entry, port 5556 published) and containers on cp-net. Because it is plain http on a non-loopback host, local runs set `console.oidc.allowInsecureIssuer: true` (exists in W-P1-SSO-02) and the matching worker setting `identity.allowInsecureIssuer` (W-P1-VRFY-01); both are rejected unless set explicitly and log a startup warning. Production requires an https issuer with no insecure flags.
+- Networks: Dex joins `cp-net` (CP and workers fetch discovery and JWKS) and a new `idp-net` (`internal: true`) shared with LDAP. LDAP has no host port and joins only idp-net. Dex is never attached to an agent `internal: true` network. Tokens are obtained by the harness or host outside the agent sandbox; if an agent must refresh in-sandbox it goes through its worker with an explicit allow rule for the Dex host, a documented trade-off that keeps default-deny intact. Upstream connector examples need an extra egress network, shown commented. The identity file declares every network it uses, so it works standalone and merged with `-f` into docker-compose.control-plane.yml or docker-compose.yml.
+- Image pinned by exact tag and digest (`ghcr.io/dexidp/dex:v2.x.y@sha256:...`), taken from the latest stable release at least 2 weeks old at implementation time; OpenLDAP pinned the same way; both run as the image's non-root user where the image supports it.
+- Storage and ops: sqlite3 on the named volume `dex-data` in dev (single replica only). Production uses Postgres or Kubernetes CRD storage with at least 2 replicas and backups; losing storage invalidates every session and refresh token. `telemetry.http: 0.0.0.0:5558` serves health and Prometheus metrics on cp-net only; `logger: {level: info, format: json}`, never debug in prod. A compose healthcheck gates dependents if the pinned image ships a probe tool, otherwise clients rely on retry.
+- Degraded modes (documented): Dex down means console login fails (use p1-breakglass) while issued tokens stay valid until exp; a worker that cannot fetch JWKS records `identity_status=unverified` (reason jwks_unavailable) and still allows the request in P1 attribute mode; LDAP down means new logins and refreshes fail; clock skew over 60s produces `expired`, so NTP is required. Alert on spikes in `warden_identity_verify_total{result=~"invalid|unverified"}` (the Prometheus name of the worker instrument `warden.identity.verify.total`) and on Dex health.
+- Secret hygiene: new `scripts/check-secrets.sh`, called from `scripts/check.sh`, fails if any file under deploy/compose/dex/ or the identity compose file has a `secret:`, `bindPW:` or `clientSecret:` value that is not an env reference, and allowlists only `seed.ldif` (hashes). Compose uses `${VAR:?}` so missing secrets fail fast. No token, secret or password appears in logs, test output or docs.
 
 ## Done when
 
-`docker compose -f deploy/compose/docker-compose.identity.yml up` brings up Dex + LDAP, and a seeded user can obtain an ID token with aud=warden, a groups claim and exp-iat=3600.
+With `docker compose -f deploy/compose/docker-compose.identity.yml up -d` (Dex and OpenLDAP, both pinned by tag and digest, dev config): (1) `/dex/.well-known/openid-configuration` returns the same issuer string from the host (hosts entry) and from a container on cp-net; (2) `scripts/dex-token.sh` for a seeded warden-admins user via `agent-harness` returns an ID token with aud containing `warden`, azp=`agent-harness`, groups containing `warden-admins` and exp-iat=3600; (3) the public `warden-cli` client gets a device_code and user_code; (4) the prod config has no password grant (asserted by `go test ./test/deploy`); (5) after `docker compose restart dex` existing tokens still verify against JWKS and the refresh token still works; (6) the identity file validates merged with docker-compose.control-plane.yml; (7) `scripts/check.sh` passes with its secret-literal stage; (8) docs/identity-dex.md commands run as written and cover the prod checklist and failure modes.
 
 ## Needs first
 
@@ -33,31 +41,54 @@ Nothing. This feature can start now.
 
 ## Code it touches
 
-`deploy/compose/dex/` · `deploy/compose/docker-compose.identity.yml` · `docs/identity-dex.md` · `deploy/k8s`
+`deploy/compose/dex/` · `deploy/compose/docker-compose.identity.yml` · `docs/identity-dex.md` · `scripts/check.sh` · `scripts/check-secrets.sh` · `scripts/dex-token.sh` · `test/deploy/`
 
 ## Tickets
 
 | # | Key | Ticket | Type | Size | Depends on | Issue |
 |---|---|---|---|---|---|---|
-| 1/3 | [`W-P1-DEX-01`](#13--w-p1-dex-01) | Add reference Dex config with warden and agent-harness clients | feature | S | — | [#17](https://github.com/ethosagent/warden/issues/17) |
+| 1/3 | [`W-P1-DEX-01`](#13--w-p1-dex-01) | Add reference Dex config with console, data-plane, harness and CLI clients | feature | S | — | [#17](https://github.com/ethosagent/warden/issues/17) |
 | 2/3 | [`W-P1-DEX-02`](#23--w-p1-dex-02) | Add identity compose recipe with pinned Dex and seeded LDAP | feature | M | W-P1-DEX-01 | [#18](https://github.com/ethosagent/warden/issues/18) |
-| 3/3 | [`W-P1-DEX-03`](#33--w-p1-dex-03) | Document Dex as Warden's IdP with connector and prod guidance | docs | S | W-P1-DEX-02 | [#19](https://github.com/ethosagent/warden/issues/19) |
+| 3/3 | [`W-P1-DEX-03`](#33--w-p1-dex-03) | Document Dex as Warden's IdP with connector, failure-mode and prod guidance | docs | S | W-P1-DEX-02, W-P1-VRFY-01, W-P1-SSO-02 | [#19](https://github.com/ethosagent/warden/issues/19) |
 
 ### 1/3 · W-P1-DEX-01
 
-**Add reference Dex config with warden and agent-harness clients**
+**Add reference Dex config with console, data-plane, harness and CLI clients**
 
 Type **feature** · Size **S** · Issue [#17](https://github.com/ethosagent/warden/issues/17)
 
-Add `deploy/compose/dex/config.yaml` with the issuer, sqlite3 storage, `expiry.idTokens: 1h`, the `oauth2.skipApprovalScreen: true` setting, and two staticClients: `warden` (confidential, `trustedPeers: [agent-harness]`) and `agent-harness` (generic client for any agent platform and the `warden identity` CLI, device-code grant enabled). Read client secrets from env through Dex's `secretEnv`. Add a `README` block describing each field and why the values were chosen.
+Add the Dex configuration files that every later identity ticket builds on: a prod-shaped `deploy/compose/dex/config.yaml` and a dev recipe `deploy/compose/dex/config.dev.yaml` that differs only by enabling the password grant. They define the four static clients (`warden-console`, `warden`, `agent-harness`, `warden-cli`), explicit grant types, expiry, the LDAP connector with a permanent id, telemetry and logging. A static Go test and a secret-literal check make the ticket testable without running Dex; runtime checks arrive with the compose recipe in W-P1-DEX-02. No Go package or existing compose file changes.
+
+**Requirements**
+
+- New `deploy/compose/dex/config.yaml`: issuer `http://dex:5556/dex`, `web.http: 0.0.0.0:5556`, storage sqlite3 at `/var/dex/dex.db`, `oauth2.responseTypes: [code]`, `oauth2.skipApprovalScreen: true`, `oauth2.grantTypes` = authorization_code, refresh_token, `urn:ietf:params:oauth:grant-type:device_code`; no `password` grant and no `passwordConnector`.
+- staticClients: `warden-console` (secretEnv WARDEN_CONSOLE_DEX_CLIENT_SECRET, redirect `https://localhost:7070/auth/callback`); `warden` (secretEnv WARDEN_DEX_CLIENT_SECRET, no redirectURIs, trustedPeers [agent-harness, warden-cli]); `agent-harness` (secretEnv HARNESS_DEX_CLIENT_SECRET); `warden-cli` (`public: true`, redirectURIs include `http://dex:5556/dex/device/callback`). No `secret:` literal anywhere.
+- expiry: idTokens 1h, signingKeys 6h, deviceRequests 5m, refreshTokens {validIfNotUsedFor 168h, absoluteLifetime 720h, reuseInterval 3s, disableRotation false}.
+- LDAP connector with permanent `id: ldap` and a comment that the id is encoded into every user's sub: host ldap:389, bindDN, bindPW from env, userSearch (username uid, idAttr uid, emailAttr mail, nameAttr cn), groupSearch (userMatchers DN -> member, nameAttr cn). `insecureNoSSL: true` only in the dev file, with a comment that prod uses ldaps or StartTLS with rootCA.
+- New `deploy/compose/dex/config.dev.yaml`: identical except `password` added to grantTypes, `oauth2.passwordConnector: ldap`, and the LDAP insecure transport; both files carry a header comment naming which one is dev-only.
+- `telemetry.http: 0.0.0.0:5558` and `logger: {level: info, format: json}` in both files; debug level forbidden.
+- New `scripts/check-secrets.sh` called from `scripts/check.sh` as stage `secrets (no literals in deploy/compose/dex)`: fails when `secret:`, `bindPW:` or `clientSecret:` under deploy/compose/dex/ or deploy/compose/docker-compose.identity.yml is not `$VAR` or `${VAR...}`, and allowlists only `deploy/compose/dex/seed.ldif`.
+- New `deploy/compose/dex/README.md` explaining each field, the required scope set, why the console and data-plane clients are split, why warden-cli is public, and why the password grant is dev-only. I am unsure whether the pinned Dex release expands env vars in connector fields such as bindPW; the implementer verifies this against that release's docs and records the result in the README.
+
+**Implementation plan**
+
+1. Choose the Dex release (latest stable at least 2 weeks old) and read its config reference for staticClients, secretEnv, public clients, device flow redirect, grantTypes, refreshTokens and env expansion.
+2. Write new `deploy/compose/dex/config.yaml` with the issuer, storage, oauth2, expiry, telemetry, logger, the four static clients and the LDAP connector as listed in the requirements.
+3. Write new `deploy/compose/dex/config.dev.yaml` as a copy that adds only the password grant, `passwordConnector: ldap` and LDAP insecure transport.
+4. Add new `test/deploy/dex_config_test.go` (package deploy, uses gopkg.in/yaml.v3 already in go.mod) with `TestDexReferenceConfig`: parses both files, asserts expiry values, client set, trustedPeers, `warden-cli` public with the device callback, `warden` with no redirectURIs, connector id `ldap`, no `secret` field on any client, logger level not debug, and that the prod file has no `password` grant or passwordConnector.
+5. Add the same test's diff check: the two files differ only in oauth2.grantTypes, oauth2.passwordConnector and the LDAP insecure fields.
+6. Add new `scripts/check-secrets.sh` and call it from `scripts/check.sh` after the roadmap stage, with a banner like the existing stages.
+7. Write new `deploy/compose/dex/README.md`.
 
 **Acceptance criteria**
 
-- [ ] Dex starts with the config and serves `/.well-known/openid-configuration` at the issuer
-- [ ] A token request from client `agent-harness` with scope `audience:server:client_id:warden` returns aud containing `warden`
-- [ ] No client secret literal appears in the repo (grep check in scripts/check.sh)
+- [ ] `go test ./test/deploy -run TestDexReferenceConfig` passes and fails if any asserted field (idTokens 1h, signingKeys 6h, trustedPeers, warden-cli public, connector id ldap) is changed.
+- [ ] The test fails if `password` appears in config.yaml grantTypes or if config.yaml sets passwordConnector.
+- [ ] Adding `secret: abc` to any client in config.yaml makes `scripts/check-secrets.sh` exit non-zero; the unmodified repo exits 0.
+- [ ] `scripts/check.sh` runs the new secrets stage and passes.
+- [ ] No existing file under deploy/compose/ or internal/ is modified (`git diff --stat main -- deploy/compose/*.yml internal/` is empty).
 
-**Unblocks:** [`W-P1-IDC-01`](identity-contract.md#13--w-p1-idc-01) Write the agent identity contract for harness builders; [`W-P1-IDC-02`](identity-contract.md#23--w-p1-idc-02) Add `warden identity` CLI for login, token and proxy env; [`W-P1-DEX-02`](dex-oidc.md#23--w-p1-dex-02) Add identity compose recipe with pinned Dex and seeded LDAP; [`W-P1-VRFY-01`](identity-verification.md#15--w-p1-vrfy-01) Add internal/identity OIDC verifier with cached JWKS and config
+**Unblocks:** [`W-P1-IDC-02`](identity-contract.md#23--w-p1-idc-02) Add `warden identity` CLI for login, token, status and proxy env; [`W-P1-DEX-02`](dex-oidc.md#23--w-p1-dex-02) Add identity compose recipe with pinned Dex and seeded LDAP
 
 ### 2/3 · W-P1-DEX-02
 
@@ -65,29 +96,75 @@ Add `deploy/compose/dex/config.yaml` with the issuer, sqlite3 storage, `expiry.i
 
 Type **feature** · Size **M** · Issue [#18](https://github.com/ethosagent/warden/issues/18)
 
-Add `deploy/compose/docker-compose.identity.yml` with Dex (exact tag + digest) and OpenLDAP, seeded from `deploy/compose/dex/seed.ldif` with test users and groups `warden-admins`, `warden-editors`, `warden-viewers`, `eng`. Configure Dex's LDAP connector with groupSearch so the `groups` claim is populated. The file is designed to be combined via `-f` with the control-plane and worker compose files.
+Add `deploy/compose/docker-compose.identity.yml`, which runs Dex with the dev config and a seeded OpenLDAP, both pinned by tag and digest. It declares its own networks so it works standalone and merged with the control-plane and worker compose files, and it never attaches Dex or LDAP to an agent network. Add `scripts/dex-token.sh` so this ticket, W-P1-IDC-03 and W-P1-VRFY-05 share one way to fetch and check a token. This is deploy and script work only; no worker or CP code changes.
+
+**Requirements**
+
+- Service `dex`: image `ghcr.io/dexidp/dex:<tag>@sha256:<digest>`, mounts `dex/config.dev.yaml` read-only, named volume `dex-data:/var/dex`, publishes 5556, joins cp-net and idp-net; telemetry port 5558 is not published to the host.
+- Service `ldap`: OpenLDAP pinned by tag and digest, seeded from new `deploy/compose/dex/seed.ldif`, joins only idp-net, no host port, admin password from `${LDAP_ADMIN_PASSWORD:?}`.
+- seed.ldif: groups warden-admins, warden-editors, warden-viewers, eng (groupOfNames); users alice (warden-admins, eng), bob (warden-editors), carol (warden-viewers), dave (eng only, for the 403 role test). Passwords stored only as `{SSHA}` hashes, marked dev-only.
+- Secrets via `${WARDEN_CONSOLE_DEX_CLIENT_SECRET:?}`, `${WARDEN_DEX_CLIENT_SECRET:?}`, `${HARNESS_DEX_CLIENT_SECRET:?}`, `${LDAP_BIND_PW:?}`; new committed `deploy/compose/dex/.env.example` with placeholder values and the dev test passwords (.env is already gitignored).
+- Networks declared in the file: `cp-net` (bridge, same name as docker-compose.control-plane.yml so they merge) and `idp-net` (`internal: true`). No agent network includes Dex.
+- Healthchecks: LDAP via ldapsearch; Dex via its telemetry health endpoint if the pinned image has a probe tool, else none and clients retry. Dex `depends_on` LDAP with `condition: service_healthy`.
+- New `scripts/dex-token.sh <user>`: reads the password from `DEX_TEST_PASSWORD`, runs the password grant with client agent-harness and scope `openid email profile groups offline_access audience:server:client_id:warden`, decodes the payload, asserts aud contains warden, azp=agent-harness and exp-iat=3600, prints only decoded claims, and prints the raw token only with `--raw`. Never echoes the password or client secret.
+- Back-compat: opt-in file; docker-compose.yml and docker-compose.control-plane.yml are unchanged.
+
+**Implementation plan**
+
+1. Write new `deploy/compose/dex/seed.ldif` and generate `{SSHA}` hashes with slappasswd; record the dev plaintexts only in `.env.example`.
+2. Write new `deploy/compose/docker-compose.identity.yml` with services dex and ldap, volume dex-data, networks cp-net and idp-net, healthchecks and env-sourced secrets.
+3. Pin both images: resolve the digest for the chosen tags and write `image: <repo>:<tag>@sha256:<digest>`.
+4. Add new `scripts/dex-token.sh` (bash, curl and jq), with `--raw` and a non-zero exit on any claim mismatch.
+5. Extend new `test/deploy/dex_config_test.go` with `TestIdentityComposePinned`: every `image:` in the identity file matches `:[^@]+@sha256:[0-9a-f]{64}`, ldap has no `ports`, and no service in any deploy/compose/*.yml with an `internal: true` network also lists dex.
+6. Add new `test/integration/dex_recipe_test.go` (build tag integration) `TestDexIdentityRecipe` that skips unless `WARDEN_IT_DEX=1` (the same gate W-P1-VRFY-05, W-P1-SSO-07 and W-P1-GPOL-09 use), brings the recipe up, and runs the token, device-code and restart checks, so existing `scripts/check.sh --integration` runs are unaffected.
+7. Run the verification commands below and record the output (decoded claims only) in the PR.
 
 **Acceptance criteria**
 
-- [ ] The password grant or browser login for a seeded admin yields an ID token with `groups` containing `warden-admins`
-- [ ] The Dex image reference includes both a tag and a sha256 digest
-- [ ] `docker compose -f docker-compose.control-plane.yml -f docker-compose.identity.yml config` validates
+- [ ] From the repo root, `WARDEN_CONSOLE_DEX_CLIENT_SECRET=x WARDEN_DEX_CLIENT_SECRET=x HARNESS_DEX_CLIENT_SECRET=x LDAP_BIND_PW=x LDAP_ADMIN_PASSWORD=x docker compose -f deploy/compose/docker-compose.control-plane.yml -f deploy/compose/docker-compose.identity.yml config -q` exits 0, and the same holds with deploy/compose/docker-compose.yml.
+- [ ] After `docker compose -f deploy/compose/docker-compose.identity.yml up -d` with .env from .env.example and a `127.0.0.1 dex` hosts entry, `curl -s http://dex:5556/dex/.well-known/openid-configuration` returns issuer exactly `http://dex:5556/dex` and a device_authorization_endpoint, and the same issuer is returned from a container on cp-net.
+- [ ] `DEX_TEST_PASSWORD=<alice dev password> scripts/dex-token.sh alice` exits 0 and shows aud containing `warden`, azp `agent-harness`, groups containing `warden-admins`, exp-iat 3600; for dave, groups contains `eng` and no `warden-*` group.
+- [ ] POST to `http://dex:5556/dex/device/code` with client_id=warden-cli and scope `openid groups offline_access audience:server:client_id:warden` returns device_code, user_code and verification_uri.
+- [ ] After `docker compose -f deploy/compose/docker-compose.identity.yml restart dex`, a token issued before the restart still verifies against the published JWKS and its refresh token still returns a new token.
+- [ ] `go test ./test/deploy -run TestIdentityComposePinned` passes.
 
-**Depends on:** [`W-P1-DEX-01`](dex-oidc.md#13--w-p1-dex-01) Add reference Dex config with warden and agent-harness clients
+**Depends on:** [`W-P1-DEX-01`](dex-oidc.md#13--w-p1-dex-01) Add reference Dex config with console, data-plane, harness and CLI clients
 
-**Unblocks:** [`W-P1-IDC-03`](identity-contract.md#33--w-p1-idc-03) Add generic identity smoke test with a curl agent; [`W-P1-DEX-03`](dex-oidc.md#33--w-p1-dex-03) Document Dex as Warden's IdP with connector and prod guidance; [`W-P1-VRFY-05`](identity-verification.md#55--w-p1-vrfy-05) Add Dex-backed identity e2e test behind the integration tag
+**Unblocks:** [`W-P1-IDC-03`](identity-contract.md#33--w-p1-idc-03) Add generic identity smoke test with a curl agent; [`W-P1-DEX-03`](dex-oidc.md#33--w-p1-dex-03) Document Dex as Warden's IdP with connector, failure-mode and prod guidance; [`W-P1-SSO-07`](console-sso-rbac.md#78--w-p1-sso-07) Add Dex-backed console SSO end-to-end test; [`W-P1-VRFY-05`](identity-verification.md#57--w-p1-vrfy-05) Add identity attribution e2e test and a CI integration job
 
 ### 3/3 · W-P1-DEX-03
 
-**Document Dex as Warden's IdP with connector and prod guidance**
+**Document Dex as Warden's IdP with connector, failure-mode and prod guidance**
 
 Type **docs** · Size **S** · Issue [#19](https://github.com/ethosagent/warden/issues/19)
 
-Write `docs/identity-dex.md`. It covers the token flow (agent harness -> Dex -> Warden worker), the client and trustedPeers setup, group naming used by the CP role mapping, connector examples (LDAP, GitHub teams, Google, upstream OIDC), the issuer URL rules, key rotation behavior (worker JWKS cache refresh on unknown kid), and the prod checklist: TLS, persistent storage, backups, and expiry values. State plainly that Warden only needs a standards OIDC issuer, so Dex can be replaced later.
+Write `docs/identity-dex.md`, the operator guide for running Dex as Warden's IdP. It explains the token flow, client split, scopes, group naming, connectors, issuer and network rules, key rotation, degraded modes and the production checklist, and cites the exact CP and worker config keys. It depends on W-P1-SSO-02 and W-P1-VRFY-01 so the keys it cites exist when it merges. It states plainly that Warden only needs a standards OIDC issuer.
+
+**Requirements**
+
+- Token flow: harness or CLI -> Dex (device code on warden-cli, or authorization code on agent-harness) -> ID token with aud containing `warden` and azp of the requesting client -> `Proxy-Authorization: Basic session:<token>` or `X-Warden-Identity: Bearer` to the worker, verified by internal/identity. Tokens are obtained outside the agent sandbox; in-sandbox refresh only through the worker with an explicit allow rule.
+- Client and scope section: the four clients, why console and data-plane clients are separate, trustedPeers direction, secretEnv names, redirect URIs as the browser sees them, and the required scope set including `groups` and `offline_access`.
+- Group and key section: recipe groups mapped through `console.roles.{admin,editor,viewer}` (W-P1-SSO-02) and the worker `identity:` keys `defaultMode`, `issuer`, `audience`, `allowedAZP`, `allowInsecureIssuer` and the per-agent `agents[].identity` field (W-P1-VRFY-01) by exact name; connector claim shapes differ (LDAP cn vs GitHub `org:team`); connector `id` is permanent because it is encoded into sub, with `federated:id` for diagnostics.
+- Connector table: LDAP (ldaps or StartTLS with rootCA in prod), GitHub (orgs, teams, `teamNameField`), Google (groups need a service account), upstream OIDC; columns for groups source, required scope and whether refresh re-checks the upstream user.
+- Issuer, transport and network rules: byte-identical issuer, `127.0.0.1 dex` hosts entry, dev-only `console.oidc.allowInsecureIssuer` and the worker equivalent, https required in prod; Dex on cp-net and idp-net, never on agent networks; upstream connectors need an egress network.
+- Failure modes and rotation: Dex down, LDAP down, JWKS unavailable at worker start, clock skew over 60s, storage loss, refresh absolute expiry and reuse; signingKeys 6h with JWKS refetch on unknown kid at most once per 30s; metrics to alert on; p1-breakglass for console access.
+- Prod checklist: https issuer, Postgres or Kubernetes CRD storage with at least 2 replicas (sqlite3 is single replica), backups, password grant off, logger not debug, expiry values, secrets from a secret manager or Kubernetes Secret, groupSearch scoped so tokens stay under about 8 KiB in Proxy-Authorization. Kubernetes guidance is prose only; no manifest is added to deploy/k8s in this phase.
+- No real secrets, tokens or passwords in the doc; examples show placeholders and decoded claims only.
+
+**Implementation plan**
+
+1. Write new `docs/identity-dex.md` with sections for token flow, clients and scopes, groups and keys, connectors, issuer and networks, rotation and failure modes, and prod checklist.
+2. Copy the exact key names from `internal/config/console.go` (W-P1-SSO-02) and `config.IdentitySettings` (W-P1-VRFY-01) as merged on main.
+3. Add an example CP config snippet with `console.oidc.clientID: warden-console`, `clientSecretEnv: WARDEN_CONSOLE_DEX_CLIENT_SECRET`, `redirectURL: https://localhost:7070/auth/callback` and `allowInsecureIssuer: true` marked dev-only, and a worker `identity:` snippet with `audience: warden` and `allowedAZP: [agent-harness, warden-cli]` so tokens minted for any other client are rejected.
+4. Run every fenced shell command in the doc from the repo root against the W-P1-DEX-02 recipe, using `scripts/dex-token.sh`.
+5. Link the doc from README.md, docs/control-plane.md, docs/setup-guide.md and deploy/compose/dex/README.md.
 
 **Acceptance criteria**
 
-- [ ] The doc's commands were run against the recipe and work as written
-- [ ] The doc links the CP `console.roles` mapping and the worker `identity` settings by their exact keys
+- [ ] Every fenced shell command in docs/identity-dex.md, run in order from the repo root against the recipe, exits 0 and produces the output shown.
+- [ ] `grep -nE 'console\.roles|console\.oidc|identity\.(defaultMode|issuer|audience|allowedAZP|allowInsecureIssuer)' docs/identity-dex.md` lists only keys that exist in internal/config on main, and `go test ./internal/config/...` passes.
+- [ ] The doc contains a prod checklist (https issuer, persistent HA storage, backups, password grant off, expiry values) and a failure-modes section, and warns that changing a connector id changes sub.
+- [ ] The doc names no product other than ones Warden integrates with, and contains no secret or raw token (`scripts/check-secrets.sh` passes).
+- [ ] `go run docs/roadmap/gen.go check` and `scripts/check.sh` pass, and the doc is linked from docs/control-plane.md and docs/setup-guide.md.
 
-**Depends on:** [`W-P1-DEX-02`](dex-oidc.md#23--w-p1-dex-02) Add identity compose recipe with pinned Dex and seeded LDAP
+**Depends on:** [`W-P1-DEX-02`](dex-oidc.md#23--w-p1-dex-02) Add identity compose recipe with pinned Dex and seeded LDAP; [`W-P1-VRFY-01`](identity-verification.md#17--w-p1-vrfy-01) Add internal/identity OIDC verifier with lazy JWKS, cache and config; [`W-P1-SSO-02`](console-sso-rbac.md#28--w-p1-sso-02) Parse and validate the CP-local console config block

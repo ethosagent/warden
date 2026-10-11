@@ -52,7 +52,7 @@ Extend internal/identityclient (from W-P1-IDC-02) with Ed25519 agent keys (`ward
 - [ ] Subject expiry triggers device-code prompt
 - [ ] Token never printed to stdout or logs
 
-**Depends on:** [`W-P1-IDC-02`](identity-contract.md#23--w-p1-idc-02) Add `warden identity` CLI for login, token and proxy env; [`W-P2-TOKX-03`](token-exchange.md#35--w-p2-tokx-03) Mount POST /oauth2/token with RFC 8693 request parsing
+**Depends on:** [`W-P1-IDC-02`](identity-contract.md#23--w-p1-idc-02) Add `warden identity` CLI for login, token, status and proxy env; [`W-P2-TOKX-03`](token-exchange.md#35--w-p2-tokx-03) Mount POST /oauth2/token with RFC 8693 request parsing
 
 **Unblocks:** [`W-P2-RCP-02`](identity-client.md#25--w-p2-rcp-02) Add `proxy identity exec` wrapper with local token-injecting forwarder
 
