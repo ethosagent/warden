@@ -121,6 +121,10 @@ warden proxy listening on 127.0.0.1:8080
 | `--admin-listen` | `127.0.0.1:9090` | Admin + dashboard listen address |
 | `--db` | `warden.db` | SQLite analytics database path |
 
+`--listen`, `--admin-listen`, `--ca-cert` and `--ca-key` can also be set in the config file as
+`listen:`, `adminListen:`, `tls.caCert` and `tls.caKey`. Precedence is flag > config > default, and
+the startup log (`effective listener config`) names the source of each value.
+
 ## 6. Point your agent at the proxy
 
 Configure your agent's HTTP proxy setting:

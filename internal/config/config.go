@@ -33,6 +33,12 @@ type ConfigProvider interface {
 
 // Policy is the resolved configuration the proxy enforces.
 type Policy struct {
+	// Listen, AdminListen and TLS are the optional config-file values for the
+	// listeners and CA paths; CLI flags override them (see ResolveListen).
+	Listen      string    `json:"-"`
+	AdminListen string    `json:"-"`
+	TLS         TLSConfig `json:"-"`
+
 	// Allowlist is the set of permitted destinations. Anything not present is
 	// denied (default-deny).
 	Allowlist []AllowlistEntry `json:"allowlist"`
@@ -212,7 +218,10 @@ type DenylistEntry struct {
 
 // rawConfig mirrors the on-disk YAML shape (see configs/config.example.yaml).
 type rawConfig struct {
-	Policy struct {
+	Listen      string  `yaml:"listen"`
+	AdminListen string  `yaml:"adminListen"`
+	TLS         *rawTLS `yaml:"tls"`
+	Policy      struct {
 		Allowlist []AllowlistEntry `yaml:"allowlist"`
 		Denylist  []DenylistEntry  `yaml:"denylist"`
 	} `yaml:"policy"`
@@ -281,6 +290,11 @@ func parse(data []byte) (*LocalYAMLProvider, error) {
 		CacheTTLSeconds: raw.Cache.TTL,
 		LogLevel:        raw.Logging.Level,
 		LogFormat:       raw.Logging.Format,
+	}
+	policy.Listen = raw.Listen
+	policy.AdminListen = raw.AdminListen
+	if raw.TLS != nil {
+		policy.TLS = TLSConfig(*raw.TLS)
 	}
 	policy.LogLevel = strings.ToLower(policy.LogLevel)
 	if policy.LogLevel == "" {

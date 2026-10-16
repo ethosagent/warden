@@ -32,13 +32,15 @@ scripts/gen-certs.sh
 export OPENROUTER_API_KEY="sk-or-v1-..."
 
 # Start the proxy + dashboard
-./warden run \
-  --config configs/config.openrouter.yaml \
-  --listen 127.0.0.1:8080 \
-  --ca-cert certs/proxy-ca.crt \
-  --ca-key certs/proxy-ca.key \
-  --admin-listen 127.0.0.1:9090
+./warden run --config configs/config.openrouter.yaml
 ```
+
+`listen`, `adminListen` and `tls.caCert`/`tls.caKey` can live in the config
+file (see `configs/config.example.yaml`); the equivalent flags
+(`--listen`, `--admin-listen`, `--ca-cert`, `--ca-key`) override them.
+Precedence: CLI flag > config key > built-in default (`127.0.0.1:8080`,
+`127.0.0.1:9090`, no TLS termination). Startup logs the effective values and
+their source.
 
 ```sh
 # In another terminal — request through the proxy (agent sends placeholder, real key injected)

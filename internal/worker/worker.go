@@ -35,6 +35,8 @@ import (
 
 // Params are the flag-derived inputs the worker boots from. cmd/proxy parses the
 // cobra flags into this struct; the worker owns everything after that.
+// ListenAddr, CACert, CAKey and AdminAddr are EXPLICIT flag overrides: empty
+// means "not set", and the value then comes from config or the built-in default.
 type Params struct {
 	ConfigPath string
 	ListenAddr string
@@ -56,11 +58,7 @@ type Params struct {
 // observability ServiceVersion.
 func Run(ctx context.Context, out io.Writer, p Params) error {
 	configPath := p.ConfigPath
-	listenAddr := p.ListenAddr
 	dbPath := p.DBPath
-	caCert := p.CACert
-	caKey := p.CAKey
-	adminAddr := p.AdminAddr
 	localOnlyFlag := p.LocalOnly
 
 	cfgProvider, err := config.NewLocalYAMLProvider(configPath)
@@ -71,6 +69,17 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	if err != nil {
 		return err
 	}
+
+	// Flag > config > default for listen/admin-listen/CA paths; validated here
+	// regardless of source, with errors naming the source.
+	eff, err := config.ResolveListen(pol, config.ListenFlags{
+		Listen: p.ListenAddr, AdminListen: p.AdminAddr, CACert: p.CACert, CAKey: p.CAKey,
+	})
+	if err != nil {
+		return err
+	}
+	listenAddr, adminAddr := eff.Listen.Value, eff.AdminListen.Value
+	caCert, caKey := eff.CACert.Value, eff.CAKey.Value
 
 	mapping := make(map[string]string, len(pol.Secrets))
 	placeholders := make([]string, 0, len(pol.Secrets))
@@ -90,6 +99,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// managed apply loop uses to change the level at runtime WITHOUT swapping the
 	// (widely-captured) logger instance. Format is restart-only (see LogControl).
 	logger, logCtrl := observability.NewLogger(out, pol.LogLevel, pol.LogFormat)
+	logger.Info("effective listener config", eff.LogArgs()...)
 
 	// Managed vs local-only. Managed = a control plane is configured and
 	// --local-only is not set: the worker's allow/deny policy comes ONLY from the
@@ -490,6 +500,9 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 
 	pxy, err := proxy.New(cfg)
 	if err != nil {
+		if caCert != "" {
+			return fmt.Errorf("%w (ca-cert %q from %s, ca-key %q from %s)", err, caCert, eff.CACert.Source, caKey, eff.CAKey.Source)
+		}
 		return err
 	}
 
