@@ -43,6 +43,10 @@ func NewHMACSigner(secret []byte, header, algorithm string) (*HMACSigner, error)
 	}, nil
 }
 
+// ReadsBody reports that signing consumes the whole request body, so the proxy
+// cannot apply it to a streamed (gRPC) request.
+func (h *HMACSigner) ReadsBody() bool { return true }
+
 // Transform reads the request body, computes the HMAC, sets the header, and
 // resets the body so downstream consumers can still read it.
 func (h *HMACSigner) Transform(req *http.Request) error {
