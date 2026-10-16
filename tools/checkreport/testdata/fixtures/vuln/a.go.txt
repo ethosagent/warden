@@ -1,0 +1,9 @@
+package fx
+
+import (
+	"strings"
+
+	"golang.org/x/net/html"
+)
+
+func F() { html.Parse(strings.NewReader("x")) }

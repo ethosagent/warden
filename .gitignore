@@ -5,7 +5,9 @@ cmd/proxy/proxy
 
 # Coverage / test output
 coverage.out
+coverage.product.out
 *.out
+check-report.json
 
 # Generated proxy certs/keys (gen-certs.sh) — NEVER commit private keys
 /certs/

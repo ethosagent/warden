@@ -1,0 +1,5 @@
+package fx
+
+func F() int {
+	return y
+}
