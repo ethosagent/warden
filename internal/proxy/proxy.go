@@ -53,6 +53,13 @@ type Config struct {
 	PlaceholderScopes map[string][]string
 	Transformers      []*auth.MatchedTransformer
 
+	// Listener, when set, is the socket Serve accepts on instead of binding
+	// ListenAddr. Assembly-only: cmd/proxy never sets it, so production always
+	// binds ListenAddr exactly as before; the L1 harness (#350) passes a
+	// loopback listener on port 0 so an in-process worker binds no fixed port.
+	// Serve closes it on the same ctx-done path that closes a self-bound one.
+	Listener net.Listener
+
 	// Judge is the optional inline LLM judge. When nil the proxy behaves exactly
 	// as before: a NoMatch destination is default-denied. When set, NoMatch
 	// requests are forwarded to TLS termination so the judge can inspect the full
@@ -104,6 +111,20 @@ type Config struct {
 	// byte-identical to before. It scopes to warden's egress path only: the
 	// dashboard/admin listeners never resolve through it.
 	UpstreamResolver NameResolver
+
+	// Dialer, when set, replaces the SSRF-safe upstream dialer ENTIRELY —
+	// blocklist included — for every egress dial the proxy makes. Assembly-only
+	// (the L1 harness maps allowlisted names onto local fake upstreams the
+	// SafeDialer exists to block): cmd/proxy never sets it, so production always
+	// builds NewSafeDialerWithResolver below, unchanged. When set,
+	// UpstreamResolver is unused (no SafeDialer is built to resolve through).
+	Dialer Dialer
+
+	// UpstreamRootCAs, when set, is the root pool every upstream TLS handshake
+	// the proxy CONFIGURES (via upstreamTLSConfig) verifies against, replacing
+	// the system pool. Assembly-only: cmd/proxy never sets it; nil keeps system
+	// roots, byte-identical to before.
+	UpstreamRootCAs *x509.CertPool
 }
 
 // MCPGateway is the consumer-side seam for the MCP egress gateway (defined here,
@@ -492,12 +513,20 @@ func New(cfg Config) (*Proxy, error) {
 		}
 	}
 
-	safeDial, err := NewSafeDialerWithResolver(10*time.Second, nil, cfg.UpstreamResolver)
-	if err != nil {
-		return nil, fmt.Errorf("proxy: safe dialer: %w", err)
+	// Upstream dialing. An injected Dialer (assembly-only harness seam) replaces
+	// the SSRF-safe dialer wholesale; otherwise production builds exactly what
+	// it always built, including the optional dns.upstreamResolver.
+	if cfg.Dialer != nil {
+		p.dialFunc = cfg.Dialer.Dial
+		p.dialTLS = cfg.Dialer.DialTLS
+	} else {
+		safeDial, err := NewSafeDialerWithResolver(10*time.Second, nil, cfg.UpstreamResolver)
+		if err != nil {
+			return nil, fmt.Errorf("proxy: safe dialer: %w", err)
+		}
+		p.dialFunc = safeDial.Dial
+		p.dialTLS = safeDial.DialTLS
 	}
-	p.dialFunc = safeDial.Dial
-	p.dialTLS = safeDial.DialTLS
 
 	return p, nil
 }

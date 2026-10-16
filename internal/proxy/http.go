@@ -830,9 +830,10 @@ func (p *Proxy) forward(s *requestScope) (endSession bool) {
 
 // dialUpstream dials a fresh TLS upstream for this session's fixed host and
 // installs it (plus a new buffered reader) on the scope. It always targets
-// s.domain:s.port — reuse never crosses hosts.
+// s.domain:s.port — reuse never crosses hosts. The TLS config comes from
+// upstreamTLSConfig so the assembly-only root-CA override applies here too.
 func (p *Proxy) dialUpstream(s *requestScope) error {
-	upstream, err := p.dialTLS("tcp", net.JoinHostPort(s.domain, fmt.Sprintf("%d", s.port)), &tls.Config{ServerName: s.domain})
+	upstream, err := p.dialTLS("tcp", net.JoinHostPort(s.domain, fmt.Sprintf("%d", s.port)), p.upstreamTLSConfig(s.domain))
 	if err != nil {
 		return err
 	}

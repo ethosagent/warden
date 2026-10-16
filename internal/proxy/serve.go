@@ -15,9 +15,16 @@ import (
 )
 
 func (p *Proxy) Serve(ctx context.Context) error {
-	ln, err := net.Listen("tcp", p.cfg.ListenAddr)
-	if err != nil {
-		return fmt.Errorf("proxy: listen: %w", err)
+	// An injected Listener (assembly-only harness seam) replaces the ListenAddr
+	// bind; nil keeps the production bind exactly as before. Either way the
+	// ctx-done goroutine below owns closing it.
+	ln := p.cfg.Listener
+	if ln == nil {
+		var err error
+		ln, err = net.Listen("tcp", p.cfg.ListenAddr)
+		if err != nil {
+			return fmt.Errorf("proxy: listen: %w", err)
+		}
 	}
 	p.listenerMu.Lock()
 	p.listener = ln

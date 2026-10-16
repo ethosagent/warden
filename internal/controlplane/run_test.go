@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethosagent/warden/internal/clock/clocktest"
 	"github.com/ethosagent/warden/internal/config"
 )
 
@@ -101,6 +102,21 @@ func TestRunServesHealthzFromListenAddr(t *testing.T) {
 	if err != nil || port == "" || port == "0" {
 		t.Errorf("OnReady addr = %q, want a resolved 127.0.0.1:<port>", addr)
 	}
+}
+
+// TestRunAcceptsInjectedClock proves the CP's time port: Run boots normally
+// with a fake Clock in Params. No control-plane consumer ticks on it yet (the
+// detection engine migrates in its own phase, rule L3 in #349), so the
+// assertion is the boot itself — nil keeps clock.Real(), the production
+// default exercised by every other test here.
+func TestRunAcceptsInjectedClock(t *testing.T) {
+	startAndProbe(t, Params{
+		ConfigPath:        writePolicyFile(t, "api.openai.com"),
+		StateDir:          filepath.Join(t.TempDir(), "state"),
+		AnalyticsProvider: "memory",
+		ListenAddr:        "127.0.0.1:0",
+		Clock:             clocktest.NewFake(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)),
+	}, http.DefaultClient)
 }
 
 // TestRunClosesInjectedListenerOnBootError proves a failed boot never leaks the
