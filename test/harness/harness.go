@@ -93,6 +93,10 @@ type H struct {
 	allowExtra []string
 	secrets    []secretSpec
 
+	// cpDownAtBoot (ControlPlaneDownAtBoot) starts the workers while the control
+	// plane is unreachable.
+	cpDownAtBoot bool
+
 	// suppliedTarget, when set (WithTarget), replaces the in-process target:
 	// boot mints the CAs and the clock as always but starts THIS instead.
 	suppliedTarget Target
@@ -117,6 +121,8 @@ type H struct {
 
 	agentOnce sync.Once
 	agentCl   *http.Client
+	h2Once    sync.Once
+	agentH2Cl *http.Client
 	agentRecs []RecordedResponse
 
 	cpOnce sync.Once
@@ -190,6 +196,29 @@ func WithSecret(name, value string, matchHosts ...string) Option {
 	}
 }
 
+// RotateSecret changes the real value behind a WithSecret name — the env var the
+// worker's secret backend reads, exactly what an operator does before calling
+// POST /admin/refresh-secrets. The OLD value stays registered with the canary
+// oracle (it must still never leak) alongside the new one. The in-process target
+// reads the env of this process; it fails the test for an unknown name.
+func (h *H) RotateSecret(name, value string) {
+	h.tb.Helper()
+	for _, s := range h.secrets {
+		if s.name != name {
+			continue
+		}
+		h.tb.Setenv("WARDEN_HARNESS_SECRET_"+sanitizeEnvName(name), value)
+		h.secrets = append(h.secrets, secretSpec{
+			name:        name,
+			placeholder: s.placeholder,
+			value:       value,
+			matchHosts:  s.matchHosts,
+		})
+		return
+	}
+	h.tb.Fatalf("harness: RotateSecret(%q): no such WithSecret", name)
+}
+
 // WithTarget boots the harness against a caller-supplied Target instead of the
 // default in-process one. Everything H does — the addresses, the control-plane
 // client, the outage fault, the oracles — goes through the Target interface,
@@ -198,6 +227,15 @@ func WithSecret(name, value string, matchHosts ...string) Option {
 // harness-side trust and time), then starts the target.
 func WithTarget(t Target) Option {
 	return func(h *H) { h.suppliedTarget = t }
+}
+
+// ControlPlaneDownAtBoot boots the workers while the control plane is
+// unreachable — the fail-closed-at-boot fault. The control plane's address is
+// reserved (so the workers are configured against it) and then released before
+// any worker starts; h.CP().Start() brings it up on that same address. Only the
+// in-process target can do this: a supplied Target (WithTarget) fails the test.
+func ControlPlaneDownAtBoot() Option {
+	return func(h *H) { h.cpDownAtBoot = true }
 }
 
 // NoLeakCheck opts out of the built-in goroutine-leak check: by default New's
@@ -289,12 +327,17 @@ func (h *H) boot() {
 	h.dialer = &mappingDialer{h: h}
 
 	if h.suppliedTarget != nil {
+		if h.cpDownAtBoot {
+			h.tb.Fatalf("harness: ControlPlaneDownAtBoot is an in-process fault; it cannot combine with WithTarget")
+		}
 		h.target = h.suppliedTarget
 		fatalfOn(h.tb, h.target.Start(context.Background()))
 		return
 	}
 
-	h.target = h.buildInprocessTarget()
+	ip := h.buildInprocessTarget()
+	ip.cpDownAtBoot = h.cpDownAtBoot
+	h.target = ip
 	fatalfOn(h.tb, h.target.Start(context.Background()))
 }
 
@@ -397,11 +440,14 @@ func (h *H) workerParams(i int) worker.Params {
 	// scenario's intent reads the same whichever mode boots.
 	return worker.Params{
 		Config: &fakes.FakeConfigProvider{Policy: config.Policy{
-			Allowlist:     entries,
-			LogLevel:      "info",
-			LogFormat:     "json",
-			Secrets:       mappings,
-			Observability: config.ObservabilityConfig{Enabled: true, ServiceName: "warden-harness"},
+			Allowlist: entries,
+			// A production-like secret cache: at 0 every request refetches, and a
+			// refresh endpoint that does nothing would go unnoticed.
+			CacheTTLSeconds: 3600,
+			LogLevel:        "info",
+			LogFormat:       "json",
+			Secrets:         mappings,
+			Observability:   config.ObservabilityConfig{Enabled: true, ServiceName: "warden-harness"},
 			ControlPlane: config.ControlPlaneConfig{
 				Endpoint:          "https://" + h.ControlPlaneAddr() + "/policy",
 				TokenEnv:          cpTokenEnv,
@@ -530,6 +576,9 @@ func (h *H) cleanup() {
 		}
 		if h.agentCl != nil {
 			h.agentCl.CloseIdleConnections()
+		}
+		if h.agentH2Cl != nil {
+			h.agentH2Cl.CloseIdleConnections()
 		}
 		if h.cpCl != nil {
 			h.cpCl.CloseIdleConnections()

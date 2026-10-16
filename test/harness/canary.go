@@ -100,6 +100,10 @@ func leakForms(v string) []leakForm {
 	return out
 }
 
+// unswappedForm names the violation where the PLACEHOLDER, not the value,
+// reached an in-scope upstream: the swap was skipped.
+const unswappedForm = "unswapped placeholder"
+
 // leak is one place a canary surfaced.
 type leak struct {
 	secret string // the WithSecret name
@@ -113,6 +117,10 @@ type leak struct {
 // value, in any leak form. The ONE exception: a value arriving at a host
 // inside its own matchHosts scope is the intended swap, not a leak.
 //
+// A WithSecret PLACEHOLDER arriving at an upstream inside that secret's scope
+// is a violation too (the swap never happened), reported as an "unswapped
+// placeholder" hit.
+//
 // Call it at the END of a scenario, after all traffic. It fails the test
 // naming each hit's location.
 func (h *H) AssertCanaryNeverLeaked() {
@@ -121,6 +129,24 @@ func (h *H) AssertCanaryNeverLeaked() {
 }
 
 func (h *H) assertCanaryNeverLeaked(tb testing.TB) {
+	tb.Helper()
+	if lines := h.canaryLeaks(tb); len(lines) > 0 {
+		tb.Fatalf("harness: CANARY LEAKED in %d place(s):%s", len(lines), "\n  - "+strings.Join(lines, "\n  - "))
+	}
+}
+
+// CanaryLeaks runs the same sweep as AssertCanaryNeverLeaked but RETURNS what it
+// found (one line per hit, empty when clean) instead of failing the test. It
+// exists for known-violation scenarios, which must assert that a documented
+// leak STILL happens — and fail loudly the day it stops — rather than skip.
+func (h *H) CanaryLeaks() []string {
+	h.tb.Helper()
+	return h.canaryLeaks(h.tb)
+}
+
+// canaryLeaks is the sweep: it returns one description per (secret, surface)
+// hit. It fails tb only when the sweep itself cannot run.
+func (h *H) canaryLeaks(tb testing.TB) []string {
 	tb.Helper()
 	if len(h.secrets) == 0 {
 		tb.Fatalf("harness: AssertCanaryNeverLeaked but no WithSecret secrets registered; nothing is being guarded")
@@ -192,19 +218,26 @@ func (h *H) assertCanaryNeverLeaked(tb testing.TB) {
 			where := fmt.Sprintf("upstream %s request #%d (%s %s)", u.host, i, req.Method, req.Path)
 			blob := headersText(req.Header) + req.Path + "\x00" + string(req.Body)
 			for _, sec := range h.secrets {
-				record(sec, where, blob, hostAllowed(sec.matchHosts, u.host))
+				inScope := hostAllowed(sec.matchHosts, u.host)
+				record(sec, where, blob, inScope)
+				// The placeholder arriving at a host the secret is scoped to means
+				// the swap did not happen: the agent's stand-in reached the upstream
+				// instead of the real credential. Outside the scope the placeholder
+				// is correctly left alone.
+				if key := sec.name + "\x00" + where; inScope && sec.placeholder != "" &&
+					strings.Contains(blob, sec.placeholder) && !seenHits[key] {
+					seenHits[key] = true
+					leaks = append(leaks, leak{secret: sec.name, form: unswappedForm, where: where})
+				}
 			}
 		}
 	}
 
-	if len(leaks) == 0 {
-		return
-	}
-	var b strings.Builder
+	lines := make([]string, 0, len(leaks))
 	for _, l := range leaks {
-		fmt.Fprintf(&b, "\n  - secret %q appeared %s in %s", l.secret, l.form, l.where)
+		lines = append(lines, fmt.Sprintf("secret %q appeared %s in %s", l.secret, l.form, l.where))
 	}
-	tb.Fatalf("harness: CANARY LEAKED in %d place(s):%s", len(leaks), b.String())
+	return lines
 }
 
 // headersText renders headers deterministically (sorted) for scanning.
