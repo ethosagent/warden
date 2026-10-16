@@ -33,13 +33,15 @@ func expandEnv(s string) string {
 // newSafeHTTPClient builds an *http.Client whose dials go through the proxy's
 // SafeDialer, so outbound auth-token fetches and central forwarding obey the
 // same SSRF protection as proxied traffic (no dialing link-local/private ranges).
+// resolver (dns.upstreamResolver) is the optional NameResolver those dials look
+// names up through; nil keeps net.DefaultResolver.
 //
 // When caCertPath is non-empty, that PEM CA is added to this client's trust
 // pool (system roots PLUS the CA), so a privately-signed central aggregator is
 // trusted without changing the process-wide trust store. Public-CA endpoints
 // (e.g. OAuth token URLs) keep working because the system roots are retained.
-func newSafeHTTPClient(timeout time.Duration, caCertPath string) (*http.Client, error) {
-	sd, err := proxy.NewSafeDialer(timeout, nil)
+func newSafeHTTPClient(timeout time.Duration, caCertPath string, resolver proxy.NameResolver) (*http.Client, error) {
+	sd, err := proxy.NewSafeDialerWithResolver(timeout, nil, resolver)
 	if err != nil {
 		return nil, fmt.Errorf("safe http client: %w", err)
 	}

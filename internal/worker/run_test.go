@@ -1,6 +1,8 @@
 package worker
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -8,18 +10,24 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/config"
+	"github.com/ethosagent/warden/internal/dnstest"
 	"github.com/ethosagent/warden/internal/mcp/gateway"
+	"github.com/ethosagent/warden/internal/proxy"
 	"github.com/ethosagent/warden/internal/scan"
 )
 
@@ -78,6 +86,163 @@ logging:
 	if err := runUntilCtxDone(t, runParams(t, writeConfig(t, cfg))); err != nil {
 		t.Fatalf("Run returned error on clean shutdown: %v", err)
 	}
+}
+
+// TestRun_LocalOnly_UpstreamDNS boots a worker with dns.upstreamResolver set and
+// proves the assembly accepts it and logs the one clear startup line naming the
+// configured server. The resolver threading itself is covered end-to-end in the
+// proxy package (TestSafeDialer_UpstreamResolverEndToEnd) and by
+// TestNewSafeHTTPClient_UpstreamResolver here.
+func TestRun_LocalOnly_UpstreamDNS(t *testing.T) {
+	cfg := `
+policy:
+  allowlist:
+    - domain: api.openai.com
+dns:
+  upstreamResolver: "10.20.30.2:53"
+logging:
+  level: info
+  format: text
+`
+	var out syncBuffer
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+	defer cancel()
+	if err := Run(ctx, &out, runParams(t, writeConfig(t, cfg))); err != nil {
+		t.Fatalf("Run returned error on clean shutdown: %v", err)
+	}
+	logged := out.String()
+	if !strings.Contains(logged, "upstream DNS resolver configured") {
+		t.Fatalf("startup log line missing; got:\n%s", logged)
+	}
+	if !strings.Contains(logged, "10.20.30.2:53") {
+		t.Fatalf("startup log line does not name the resolver; got:\n%s", logged)
+	}
+}
+
+// TestRun_UpstreamResolverReachesProxyDial is the worker-level wiring test for
+// dns.upstreamResolver: the resolver built from pol.DNS.UpstreamResolver must
+// land in proxy.Config.UpstreamResolver, so a CONNECT through the booted
+// worker's own listener to a name only the stub knows makes the stub count a
+// query. Deleting UpstreamResolver from the proxy.Config literal in Run leaves
+// the proxy on net.DefaultResolver, the stub stays silent, and this test
+// fails. (That the resolver then drives the proxy's real dial path end to end
+// is proven in the proxy package by TestProxy_UpstreamResolverReachesDialPath.)
+func TestRun_UpstreamResolverReachesProxyDial(t *testing.T) {
+	stub := dnstest.New(t, map[string]string{"tunnel.stub.test": "127.0.0.1"})
+
+	// Pin the proxy's listen port so the test can dial it: grab a free port,
+	// then release it for Run to bind.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("grab port: %v", err)
+	}
+	proxyAddr := ln.Addr().String()
+	if err := ln.Close(); err != nil {
+		t.Fatalf("release port: %v", err)
+	}
+
+	cfg := `
+policy:
+  allowlist:
+    - domain: tunnel.stub.test
+dns:
+  upstreamResolver: "` + stub.Addr() + `"
+logging:
+  level: error
+  format: text
+`
+	params := runParams(t, writeConfig(t, cfg))
+	params.ListenAddr = proxyAddr
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runErr := make(chan error, 1)
+	go func() { runErr <- Run(ctx, io.Discard, params) }()
+
+	// Wait for the worker's proxy to accept, then CONNECT to the stub-only
+	// name. No CA is configured, so an allowed CONNECT is raw-tunneled: the
+	// tunnel's dial resolves the name via the stub, whose loopback answer the
+	// SSRF blocklist rejects and the tunnel closes — the 200 plus the stub's
+	// query counter are the wiring proof.
+	var conn net.Conn
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		c, dialErr := net.DialTimeout("tcp", proxyAddr, time.Second)
+		if dialErr == nil {
+			conn = c
+			break
+		}
+		select {
+		case err := <-runErr:
+			t.Fatalf("Run exited before the proxy accepted: %v", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("worker proxy never accepted on %s: %v", proxyAddr, dialErr)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := fmt.Fprintf(conn, "CONNECT tunnel.stub.test:443 HTTP/1.1\r\nHost: tunnel.stub.test:443\r\n\r\n"); err != nil {
+		t.Fatalf("send CONNECT: %v", err)
+	}
+	status, err := bufio.NewReader(conn).ReadString('\n')
+	if err != nil {
+		t.Fatalf("read CONNECT response: %v", err)
+	}
+	if !strings.Contains(status, "200") {
+		t.Fatalf("CONNECT through the worker proxy: got %q, want 200", status)
+	}
+	// The 200 is written before the server-side tunnel goroutine resolves the
+	// target, so poll for the stub's counter rather than asserting immediately.
+	// Under the wiring regression (resolver never reaches proxy.Config) the
+	// counter stays at zero and the deadline expires.
+	deadline = time.Now().Add(5 * time.Second)
+	for stub.Queries.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("stub received no queries; the worker never wired dns.upstreamResolver into proxy.Config.UpstreamResolver")
+		}
+		select {
+		case err := <-runErr:
+			t.Fatalf("Run exited before the tunnel resolved: %v", err)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	cancel()
+	select {
+	case err := <-runErr:
+		if err != nil {
+			t.Fatalf("Run returned error on clean shutdown: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after ctx cancel")
+	}
+}
+
+// syncBuffer is a mutex-guarded buffer for passing as Run's out. Run's
+// background goroutines (admin server, long-poll loops) may still log after Run
+// returns, so a plain bytes.Buffer would race between the last writes and the
+// test's read.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 // TestRun_LocalOnly_FeaturesOn turns on the optional decorators and collaborators a
@@ -179,15 +344,35 @@ func TestRun_ConfigError(t *testing.T) {
 // TestNewSafeHTTPClient covers both the no-CA path and the CA-pool path, plus the
 // error path for a missing/invalid CA file.
 func TestNewSafeHTTPClient(t *testing.T) {
-	if _, err := newSafeHTTPClient(5*time.Second, ""); err != nil {
+	if _, err := newSafeHTTPClient(5*time.Second, "", nil); err != nil {
 		t.Fatalf("no-CA client: %v", err)
 	}
 	caPath := writeTestCACert(t)
-	if _, err := newSafeHTTPClient(5*time.Second, caPath); err != nil {
+	if _, err := newSafeHTTPClient(5*time.Second, caPath, nil); err != nil {
 		t.Fatalf("CA client: %v", err)
 	}
-	if _, err := newSafeHTTPClient(5*time.Second, filepath.Join(t.TempDir(), "nope.pem")); err == nil {
+	if _, err := newSafeHTTPClient(5*time.Second, filepath.Join(t.TempDir(), "nope.pem"), nil); err == nil {
 		t.Fatal("expected error for a missing CA file")
+	}
+}
+
+// TestNewSafeHTTPClient_UpstreamResolver proves the optional resolver reaches
+// the client's dial path: a request for a NAME only the stub can resolve makes
+// the stub count a query (the SafeDialer then blocks the loopback answer — SSRF
+// protection working as designed — which is exactly the deterministic,
+// network-free outcome the assertion wants).
+func TestNewSafeHTTPClient_UpstreamResolver(t *testing.T) {
+	stub := dnstest.New(t, map[string]string{"token.stub.test": "127.0.0.1"})
+	client, err := newSafeHTTPClient(5*time.Second, "", proxy.NewUpstreamResolver(stub.Addr(), nil))
+	if err != nil {
+		t.Fatalf("newSafeHTTPClient: %v", err)
+	}
+	_, err = client.Get("http://token.stub.test:1/")
+	if err == nil {
+		t.Fatal("want request failure (loopback answer is SSRF-blocked)")
+	}
+	if stub.Queries.Load() == 0 {
+		t.Fatal("stub received no queries; the client dial path ignored the configured resolver")
 	}
 }
 

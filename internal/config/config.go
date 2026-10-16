@@ -113,6 +113,11 @@ type Policy struct {
 	// Integrations above. Empty by default; then Explore reuses the judge's client
 	// exactly as before.
 	Explore ExploreConfig `json:"-"`
+	// DNS configures the resolver for warden's OWN upstream dials
+	// (dns.upstreamResolver). Boot-time LOCAL config (never on the settings
+	// wire): it is consumed once at worker assembly, like the flag-derived
+	// listen addresses. Zero value = Go's default resolver (no behavior change).
+	DNS DNSConfig `json:"-"`
 }
 
 // DeepCopy returns a deep copy of the policy, with all slices independently
@@ -249,6 +254,7 @@ type rawConfig struct {
 	Detection     *rawDetection     `yaml:"detection"`
 	LLMProviders  []rawLLMProvider  `yaml:"llmProviders"`
 	Explore       *rawExplore       `yaml:"explore"`
+	DNS           *rawDNS           `yaml:"dns"`
 }
 
 // defaultCacheTTLSeconds is used when the config omits cache.ttl.
@@ -355,6 +361,7 @@ func parse(data []byte) (*LocalYAMLProvider, error) {
 	}
 	policy.LLMProviders = llmProviders
 	policy.Explore = parseExplore(raw.Explore)
+	policy.DNS = parseDNS(raw.DNS)
 
 	if err := validate(policy); err != nil {
 		return nil, err
@@ -552,6 +559,9 @@ func validate(p Policy) error {
 	// name an existing registry entry. Placed here (not in an explore-only
 	// validator) because it needs BOTH the explore block and the llmProviders list.
 	if err := validateExploreProviderRef(p.Explore, p.LLMProviders); err != nil {
+		return err
+	}
+	if err := validateDNS(p.DNS); err != nil {
 		return err
 	}
 	return nil

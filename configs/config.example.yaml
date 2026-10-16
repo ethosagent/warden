@@ -319,3 +319,31 @@ audit:
 #     match:
 #       - severity: high            # any high-severity alert, OR…
 #       - category: security        # …any security-category alert
+
+# Upstream DNS resolver for WARDEN'S OWN lookups (OPTIONAL; omitted = Go's
+# default resolver, byte-identical behavior). When set, the proxy's upstream
+# dials — CONNECT tunnels and TLS-terminated upstreams — resolve names through
+# this "<host>:<port>" server instead of the resolver the container inherits.
+#
+# Use it where the default resolver cannot resolve public allowlisted names:
+# corporate networks / VPNs that block or filter public DNS, split-horizon
+# environments, or container runtimes whose embedded DNS forwards to a resolver
+# that refuses external names.
+#
+# Transport is plain UDP (TCP only for the DNS truncation fallback); DoH/DoT
+# resolver transports are out of scope for v1 — please don't file that as a bug.
+#
+# Scope: this governs WARDEN'S OWN upstream dials only. It does not touch the
+# dashboard/admin listeners, and it is NOT the agent's DNS path — under the
+# transparent-interception contract (#376) agent-side names are routed to
+# warden by the orchestration runtime. TLS/SNI is unaffected: the
+# client-supplied hostname is kept; only the dial target's resolution changes.
+#
+# Failure semantics: if this server is unreachable, lookups fail and each
+# affected request fails exactly like an upstream-connect failure today
+# (visible in analytics + the dashboard blocked/fail lists). There is NO silent
+# fallback to the system resolver — that would mask the misconfiguration.
+# Warden logs one line at startup and again on the first failed lookup.
+#
+# dns:
+#   upstreamResolver: "10.20.30.2:53"   # <host>:<port>; omit -> default resolver

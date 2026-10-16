@@ -219,9 +219,37 @@ cache:
 logging:
   level: info
   format: json
+
+# Optional: upstream DNS for Warden's OWN lookups (VPN / split-horizon networks).
+# dns:
+#   upstreamResolver: "10.20.30.2:53"   # <host>:<port>; omit → Go default resolver
 ```
 
 See [`configs/config.example.yaml`](configs/config.example.yaml) for the full documented config.
+
+### Upstream DNS resolver
+
+On networks where the resolver the container inherits cannot resolve public
+names — corporate networks and VPNs that block or filter public DNS,
+split-horizon environments, or container runtimes whose embedded DNS refuses
+external names — Warden cannot look up allowlisted destinations at all.
+`dns.upstreamResolver` points Warden's **own** upstream dials (CONNECT tunnels
+and TLS-terminated upstreams; SNI keeps the client-supplied hostname) at a
+specific `<host>:<port>` server. Plain UDP/TCP only — DoH/DoT transports are
+out of scope for v1.
+
+It is scoped to Warden's egress path: the dashboard/admin listeners are
+unaffected, and the **agent's** own DNS path is a separate concern (under the
+transparent-interception contract, [#376](https://github.com/ethosagent/warden/issues/376),
+agent-side names are routed to Warden by the orchestration runtime). If the
+configured server is unreachable, affected requests fail like any other
+upstream-connect failure (visible in analytics and the dashboard's
+blocked/fail lists) — there is no silent fallback to the system resolver.
+
+Use an **IP literal** for `upstreamResolver` (e.g. `10.20.30.2:53`): the server
+address itself is resolved by the system resolver, so a hostname there would be
+looked up through the very resolver being overridden — `/etc/hosts` still
+applies as before.
 
 ## Project Structure
 
