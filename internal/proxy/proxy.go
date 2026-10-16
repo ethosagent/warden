@@ -82,6 +82,11 @@ type Config struct {
 	// MCP responses are handled by MCP above and never reach this scanner.
 	ResponseScan *ResponseScanner
 
+	// EchoGuard configures the response check for secrets swapped into the same
+	// request (#389). The zero value is the default: on, blocking. It is independent
+	// of ResponseScan.
+	EchoGuard EchoGuardConfig
+
 	// DLP is the optional outbound REQUEST-body DLP scanner. Nil = disabled: the
 	// dlpScan stage returns immediately with no body read, byte-identical to
 	// before. Non-nil = the pre-swap request body is scanned in monitor mode

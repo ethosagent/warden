@@ -57,3 +57,24 @@ func TestAPIKeyInjector_UnknownLocation(t *testing.T) {
 		t.Fatalf("unexpected error message: %v", err)
 	}
 }
+
+func TestInjectedSecrets(t *testing.T) {
+	inj, _ := NewAPIKeyInjector("header", "X-Key", "k-value")
+	if got := inj.InjectedSecrets(); len(got) != 1 || got[0] != "k-value" {
+		t.Fatalf("apikey InjectedSecrets = %v", got)
+	}
+	if got := NewAWSSigV4("AK", "SK", "", "us-east-1", "s3").InjectedSecrets(); len(got) != 0 {
+		t.Fatalf("sigv4 without a session token injects no secret, got %v", got)
+	}
+	if got := NewAWSSigV4("AK", "SK", "tok", "us-east-1", "s3").InjectedSecrets(); len(got) != 1 || got[0] != "tok" {
+		t.Fatalf("sigv4 session token = %v", got)
+	}
+	o := NewOAuth2ClientCredentials(nil, "http://x", "id", "sec", nil)
+	if got := o.InjectedSecrets(); len(got) != 0 {
+		t.Fatalf("oauth2 before a token is fetched injects nothing, got %v", got)
+	}
+	o.token = "bearer-tok"
+	if got := o.InjectedSecrets(); len(got) != 1 || got[0] != "bearer-tok" {
+		t.Fatalf("oauth2 InjectedSecrets = %v", got)
+	}
+}

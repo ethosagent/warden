@@ -512,6 +512,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		Logger:            logger,
 		MCP:               bootGW,
 		ResponseScan:      respScanner,
+		EchoGuard:         proxy.EchoGuardConfig{Disabled: pol.EchoGuard.Disabled, Monitor: pol.EchoGuard.Monitor()},
 		DLP:               dlpScanner,
 		Transformers:      transformers,
 		Cost:              costEstimator,

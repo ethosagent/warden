@@ -109,6 +109,19 @@ type requestScope struct {
 	refs         []secrets.Reference
 	swappedNames []string
 
+	// echoSecrets are the exact real values put into THIS request (swapped
+	// placeholders and auth-transformer injections); the echo guard checks the
+	// response for them. Empty — and the guard fully skipped — when nothing was
+	// swapped. echoMonitorReason is set when monitor mode saw a hit (rides the allow
+	// event); abortStream is set when a streaming response was cut for a hit.
+	echoSecrets []echoSecret
+	// origRawQuery is the query as the agent sent it, kept only when a swap rewrote
+	// it, so an event never records the swapped (real) value.
+	origRawQuery      string
+	echoMonitorReason string
+	abortStream       bool
+	echoRdr           *echoReader // the streaming response guard, if one was installed
+
 	// evidence collects bounded, MASKED evidence samples (the value-free
 	// "••••<last4> (len N)" form) from scan/DLP findings on this request, capped at
 	// maxEvidenceSamples. It rides Event.Evidence — never raw matched content.
@@ -368,7 +381,7 @@ func (p *Proxy) readRequest(s *requestScope) (endSession bool) {
 // a request refused by a pipeline stage that is not a policy verdict. The caller
 // writes the client response.
 func (p *Proxy) recordDeny(s *requestScope, reason string) {
-	fullURL := "https://" + s.domain + s.req.URL.RequestURI()
+	fullURL := s.eventURL()
 	_ = p.analyticsStore().StoreEvent(analytics.Event{
 		Timestamp: time.Now(),
 		Domain:    s.domain,
@@ -411,7 +424,7 @@ func (p *Proxy) constraintGate(s *requestScope) (endSession bool) {
 		// time-window guard. Same bounded generic reason the CONNECT gate records.
 		reason = "policy"
 	}
-	fullURL := "https://" + s.domain + s.req.URL.RequestURI()
+	fullURL := s.eventURL()
 	_ = p.analyticsStore().StoreEvent(analytics.Event{
 		Timestamp: time.Now(),
 		Domain:    s.domain,
@@ -444,7 +457,7 @@ func (p *Proxy) judgeGate(s *requestScope) (endSession bool) {
 	if !s.needsJudge {
 		return false
 	}
-	fullURL := "https://" + s.domain + s.req.URL.RequestURI()
+	fullURL := s.eventURL()
 	_, hasAuth := s.req.Header["Authorization"]
 	// needsJudge was decided at CONNECT time. If a concurrent control-plane swap
 	// disabled the judge between then and now, liveJudge is nil: this request
@@ -508,7 +521,7 @@ func (p *Proxy) mcpRequestScan(s *requestScope) (endSession bool) {
 		return false
 	}
 	s.wasMCP = true
-	fullURL := "https://" + s.domain + s.req.URL.RequestURI()
+	fullURL := s.eventURL()
 	s.mcpSessKey = p.cfg.AgentID + ":" + s.domain
 	start := time.Now()
 	v := s.gw.OnRequest(s.mcpSessKey, s.req.Method, fullURL, s.req.Header, body)
@@ -695,7 +708,7 @@ func (p *Proxy) dlpScan(s *requestScope) (endSession bool) {
 // be located it stays "redact" with DLPEncoded=true, so the event honestly reflects
 // that policy asked for redaction but the request was escalated to a fail-closed block.
 func (p *Proxy) dlpDeny(s *requestScope) (endSession bool) {
-	fullURL := "https://" + s.domain + s.req.URL.RequestURI()
+	fullURL := s.eventURL()
 	reason := "dlp_" + s.dlpAction // dlp_block / dlp_redact — bounded, closed set
 	_ = p.analyticsStore().StoreEvent(analytics.Event{
 		Timestamp:   time.Now(),
@@ -809,6 +822,9 @@ func (p *Proxy) swapSecrets(s *requestScope) (endSession bool) {
 				}
 			}
 			if changed {
+				if s.origRawQuery == "" {
+					s.origRawQuery = s.req.URL.RawQuery // keep the agent's, across placeholders
+				}
 				s.req.URL.RawQuery = params.Encode()
 				swapped = true
 			}
@@ -827,6 +843,9 @@ func (p *Proxy) swapSecrets(s *requestScope) (endSession bool) {
 
 		if swapped {
 			s.refs = append(s.refs, secrets.Ref(realValue))
+			if !p.cfg.EchoGuard.Disabled {
+				s.noteSecret(placeholder, realValue)
+			}
 			// placeholder is the configured NAME (bounded, log-safe),
 			// never the secret value.
 			s.swappedNames = append(s.swappedNames, placeholder)
@@ -834,7 +853,7 @@ func (p *Proxy) swapSecrets(s *requestScope) (endSession bool) {
 	}
 
 	if len(outOfScope) > 0 {
-		p.recordOutOfScope(s.domain, s.port, s.proto, s.req.Method, s.req.URL.RequestURI(), outOfScope)
+		p.recordOutOfScope(s.domain, s.port, s.proto, s.req.Method, s.eventURL(), outOfScope)
 	}
 
 	// Set swapped body back
@@ -896,8 +915,25 @@ func transformerReadsBody(t auth.RequestTransformer) bool {
 // applyTransforms runs the configured auth transformers whose matcher matches the
 // destination domain. A transform error terminates with 502.
 func (p *Proxy) applyTransforms(s *requestScope) (endSession bool) {
+	// A swapped value means the response must be checked for it, which needs a plain
+	// body: ask for identity. Set before any transformer runs so a signer covers it.
+	if len(s.echoSecrets) > 0 {
+		s.req.Header.Set("Accept-Encoding", "identity")
+	}
 	for _, mt := range p.cfg.Transformers {
 		if mt.Matches(s.domain) {
+			// Only a transformer that really puts a value in the request needs the
+			// response checked (so a plain body); one that injects nothing (SigV4
+			// without a session token) leaves the client's Accept-Encoding alone.
+			// A source that reports nothing until it has run (a cold OAuth2 token)
+			// is caught by the recording after Transform below; its request keeps the
+			// client's encoding, so a compressed answer is decoded or refused by the
+			// guard, never passed.
+			src, ok := mt.Transformer.(auth.SecretSource)
+			injects := ok && len(src.InjectedSecrets()) > 0 && !p.cfg.EchoGuard.Disabled
+			if injects {
+				s.req.Header.Set("Accept-Encoding", "identity")
+			}
 			// A streamed (gRPC) body is never buffered, and a body-signing transformer
 			// would read it whole and stall the stream: refuse rather than mis-sign.
 			if s.streamBody && transformerReadsBody(mt.Transformer) && s.req.Body != nil && s.req.Body != http.NoBody {
@@ -908,6 +944,11 @@ func (p *Proxy) applyTransforms(s *requestScope) (endSession bool) {
 			if err := mt.Transformer.Transform(s.req); err != nil {
 				s.out.errorResponse(502, "Bad Gateway")
 				return true
+			}
+			// Record after Transform, whatever was decided before: the value is
+			// only known once the transformer has run.
+			if ok && !p.cfg.EchoGuard.Disabled {
+				s.noteTransformerSecrets(src)
 			}
 		}
 	}
@@ -1008,8 +1049,19 @@ func (p *Proxy) relayResponse(s *requestScope) (endSession bool) {
 	// leave today's behavior untouched (a 101 was never special-cased before).
 	if s.gw != nil && s.rt == nil && s.resp.StatusCode == 101 &&
 		strings.EqualFold(s.req.Header.Get("Upgrade"), "websocket") {
+		// The 101 headers are checked before the handoff writes them verbatim; frames
+		// after the upgrade are not (#399).
+		if len(s.echoSecrets) > 0 && p.echoGuardHeaders(s) {
+			return true
+		}
 		s.handoff = true
-		p.handleWSUpgrade(s.tlsConn, s.br, s.upstream, s.upstreamBR, s.resp, s.req, s.domain, s.port, s.mcpSessKey, s.gw)
+		p.handleWSUpgrade(s.tlsConn, s.br, s.upstream, s.upstreamBR, s.resp, s.req, s.eventURL(), s.domain, s.port, s.mcpSessKey, s.gw)
+		return true
+	}
+
+	// Echo guard: nothing of the response may reach the agent if it carries a value
+	// swapped into this request. One check here covers every protocol and path below.
+	if len(s.echoSecrets) > 0 && p.echoGuard(s) {
 		return true
 	}
 
@@ -1052,7 +1104,7 @@ func (p *Proxy) mcpResponseScan(s *requestScope) (terminal bool) {
 			s.mcpReason = v.Reason
 		}
 		if v.Action == gateway.Deny {
-			fullURL := "https://" + s.domain + s.req.URL.RequestURI()
+			fullURL := s.eventURL()
 			_ = p.analyticsStore().StoreEvent(analytics.Event{
 				Timestamp:   time.Now(),
 				Domain:      s.domain,
@@ -1094,7 +1146,7 @@ func (p *Proxy) mcpResponseScan(s *requestScope) (terminal bool) {
 // response is terminal for the connection, so this fully handles the request
 // (writing the deny/allow audit event) and always returns true.
 func (p *Proxy) relayMCPSSE(s *requestScope) (terminal bool) {
-	fullURL := "https://" + s.domain + s.req.URL.RequestURI()
+	fullURL := s.eventURL()
 
 	// Headers go out first; the body is then teed through the SSE scanner into the
 	// sink's writer (resp.Write cannot be used for that).
@@ -1119,7 +1171,11 @@ func (p *Proxy) relayMCPSSE(s *requestScope) (terminal bool) {
 		return false
 	})
 
+	if p.echoStreamDone(s) {
+		return true // echo guard cut the stream; its deny is the only event
+	}
 	if blocked {
+		reason := preferEchoReason(s.mcpReason, s.echoMonitorReason)
 		_ = p.analyticsStore().StoreEvent(analytics.Event{
 			Timestamp:      time.Now(),
 			Domain:         s.domain,
@@ -1130,13 +1186,13 @@ func (p *Proxy) relayMCPSSE(s *requestScope) (terminal bool) {
 			Decision:       "deny",
 			ResponseStatus: s.resp.StatusCode,
 			Tool:           s.mcpTool,
-			Reason:         s.mcpReason,
+			Reason:         reason,
 			LatencyMs:      s.latencyMs(),
 			SwappedRefs:    s.swappedNames,
 			Evidence:       s.evidence,
 		})
 		p.cfg.Metrics.RecordRequest("deny", "mcp")
-		p.cfg.Metrics.RecordBlocked(s.mcpReason)
+		p.cfg.Metrics.RecordBlocked(reason)
 		p.logDecision(decisionLog{
 			Domain: s.domain, Port: s.port, Protocol: "mcp",
 			Method: s.req.Method, URL: fullURL, Decision: "deny",
@@ -1153,7 +1209,7 @@ func (p *Proxy) relayMCPSSE(s *requestScope) (terminal bool) {
 			Decision:       "allow",
 			ResponseStatus: s.resp.StatusCode,
 			Tool:           s.mcpTool,
-			Reason:         s.mcpReason,
+			Reason:         preferEchoReason(s.mcpReason, s.echoMonitorReason),
 			LatencyMs:      s.latencyMs(),
 			SwappedRefs:    s.swappedNames,
 			Evidence:       s.evidence,
@@ -1184,6 +1240,11 @@ func (p *Proxy) finishResponse(s *requestScope) (endSession bool) {
 	}
 
 	writeErr := s.out.relay(s.resp)
+	if p.echoStreamDone(s) {
+		// The echo guard cut the stream and already recorded the deny: end the
+		// session (closing the conn) and record no allow.
+		return true
+	}
 	p.recordAllowEvent(s)
 	return writeErr != nil || s.closeAfter
 }
@@ -1241,7 +1302,7 @@ func (p *Proxy) httpResponseScan(s *requestScope) (blocked bool) {
 	if block {
 		// enforce + high leak/injection: replace the body with an error, record a
 		// deny, and return (terminal, mirrors the MCP enforce-deny branch).
-		fullURL := "https://" + s.domain + s.req.URL.RequestURI()
+		fullURL := s.eventURL()
 		_ = p.analyticsStore().StoreEvent(analytics.Event{
 			Timestamp:      time.Now(),
 			Domain:         s.domain,
@@ -1281,11 +1342,15 @@ func (p *Proxy) recordAllowEvent(s *requestScope) {
 	for _, r := range s.refs {
 		refStrs = append(refStrs, r.String())
 	}
-	fullURL := "https://" + s.domain + s.req.URL.RequestURI()
+	fullURL := s.eventURL()
 	secretRef := strings.Join(refStrs, ",")
 	proto := s.proto
 	if s.wasMCP {
 		proto = "mcp"
+	}
+	reason := s.mcpReason // "" unless wasMCP
+	if s.echoMonitorReason != "" {
+		reason = s.echoMonitorReason // echo guard in monitor mode saw a hit
 	}
 	// Cost estimate (optional). Heuristic dollar figure from observed
 	// request/response Content-Length and the destination provider's pricing;
@@ -1318,7 +1383,7 @@ func (p *Proxy) recordAllowEvent(s *requestScope) {
 		SecretRef:      secretRef,
 		JudgeReason:    s.judgeReason, // empty unless a judge allowed this request
 		Tool:           s.mcpTool,     // "" unless wasMCP
-		Reason:         s.mcpReason,   // "" unless wasMCP
+		Reason:         reason,
 		CostUSD:        costUSD,
 		Provider:       provider,
 		// DLP fields ride this single allow event (no second event is emitted).

@@ -230,3 +230,12 @@ func hmacSHA256(key, data []byte) []byte {
 	mac.Write(data)
 	return mac.Sum(nil)
 }
+
+// InjectedSecrets reports the session token sent as X-Amz-Security-Token (the
+// access/secret keys never appear in the request).
+func (s *AWSSigV4) InjectedSecrets() []string {
+	if s.sessionToken == "" {
+		return nil
+	}
+	return []string{s.sessionToken}
+}

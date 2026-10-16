@@ -105,6 +105,11 @@ func (p *Proxy) serveGRPCStream(w http.ResponseWriter, r *http.Request, rt *http
 	}
 	defer s.cleanup()
 	_ = p.runRequestStages(s)
+	if s.abortStream {
+		// The echo guard cut a stream whose headers already went out: reset it
+		// (RST_STREAM) instead of ending it cleanly.
+		panic(http.ErrAbortHandler)
+	}
 }
 
 // forwardH2 is forward's HTTP/2 leg: it sends the (stage-mutated) request over
