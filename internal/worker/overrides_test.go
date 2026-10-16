@@ -25,10 +25,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/clock"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/proxy"
 	"github.com/ethosagent/warden/test/fakes"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 )
 
 // TestOverridesAreNotConfigurable pins the security property the Overrides
@@ -42,9 +44,11 @@ import (
 //     in the CLI can set one — today in run.go, and in any file added later.
 func TestOverridesAreNotConfigurable(t *testing.T) {
 	bad := map[reflect.Type]string{
-		reflect.TypeOf((*proxy.Dialer)(nil)).Elem(): "proxy.Dialer",
-		reflect.TypeOf(&x509.CertPool{}):            "*x509.CertPool",
-		reflect.TypeOf((*clock.Clock)(nil)).Elem():  "clock.Clock",
+		reflect.TypeOf((*proxy.Dialer)(nil)).Elem():     "proxy.Dialer",
+		reflect.TypeOf(&x509.CertPool{}):                "*x509.CertPool",
+		reflect.TypeOf((*clock.Clock)(nil)).Elem():      "clock.Clock",
+		reflect.TypeOf((*sdkmetric.Reader)(nil)).Elem(): "sdkmetric.Reader",
+		reflect.TypeOf((*AnalyticsFlusher)(nil)).Elem(): "worker.AnalyticsFlusher",
 	}
 	var walk func(rt reflect.Type, path string)
 	seen := map[reflect.Type]bool{}
@@ -396,6 +400,157 @@ func TestRun_OverridesDialerMapsFakeUpstreamH2(t *testing.T) {
 	if n := dialer.countDials(); n != 1 {
 		cancel()
 		t.Errorf("mapping dialer used %d times, want 1", n)
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Run after cancel = %v, want nil", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for Run to return after cancel")
+	}
+}
+
+// TestRun_OverridesOnAnalyticsWriterFlushesAnalytics pins the analytics drain
+// seam: Run calls Overrides.OnAnalyticsWriter exactly once with the assembled
+// async writer, and Flush through that handle persists an already-made request's
+// event IMMEDIATELY — no outwaiting the async writer's 250ms flush tick. This is
+// what lets the L1 harness read events back deterministically (h.Events()).
+func TestRun_OverridesOnAnalyticsWriterFlushesAnalytics(t *testing.T) {
+	pong := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("pong"))
+	}))
+	defer pong.Close()
+
+	caCertPath, caKeyPath := writeTestCA(t)
+	caPool := x509.NewCertPool()
+	caPEM, err := os.ReadFile(caCertPath)
+	if err != nil {
+		t.Fatalf("read CA cert: %v", err)
+	}
+	if !caPool.AppendCertsFromPEM(caPEM) {
+		t.Fatal("parse CA cert")
+	}
+	upstreamRoots := x509.NewCertPool()
+	upstreamRoots.AddCert(pong.Certificate())
+
+	dialer := &mappingDialer{
+		from:   "fake.upstream.test:443",
+		toAddr: strings.TrimPrefix(pong.URL, "https://"),
+	}
+	dbPath := filepath.Join(t.TempDir(), "warden.db")
+
+	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen proxy: %v", err)
+	}
+	adminLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen admin: %v", err)
+	}
+
+	var flusher AnalyticsFlusher
+	var flushCalls int
+	p := Params{
+		Config: &fakes.FakeConfigProvider{Policy: config.Policy{
+			Allowlist: []config.AllowlistEntry{{Domain: "fake.upstream.test"}},
+			LogLevel:  "error",
+			LogFormat: "text",
+		}},
+		DBPath:        dbPath,
+		CACert:        caCertPath,
+		CAKey:         caKeyPath,
+		Version:       "test",
+		ProxyListener: proxyLn,
+		AdminListener: adminLn,
+		Overrides: &Overrides{
+			Dialer:          dialer,
+			UpstreamRootCAs: upstreamRoots,
+			OnAnalyticsWriter: func(f AnalyticsFlusher) {
+				flushCalls++
+				flusher = f
+			},
+		},
+	}
+	ready := make(chan [2]string, 1)
+	p.OnReady = func(proxyAddr, _ string) { ready <- [2]string{proxyAddr, ""} }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- Run(ctx, io.Discard, p) }()
+
+	var proxyAddr string
+	select {
+	case addrs := <-ready:
+		proxyAddr = addrs[0]
+	case err := <-errCh:
+		t.Fatalf("Run returned before OnReady: %v", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for OnReady")
+	}
+
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			Proxy: func(*http.Request) (*url.URL, error) { return url.Parse("http://" + proxyAddr) },
+			TLSClientConfig: &tls.Config{
+				RootCAs:    caPool,
+				MinVersion: tls.VersionTLS12,
+				NextProtos: []string{"http/1.1"},
+			},
+		},
+	}
+	resp, err := client.Get("https://fake.upstream.test/ping")
+	if err != nil {
+		cancel()
+		t.Fatalf("GET through the worker proxy: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		cancel()
+		t.Fatalf("GET through the worker proxy = %d, want 200", resp.StatusCode)
+	}
+	if n := dialer.countDials(); n != 1 {
+		cancel()
+		t.Errorf("mapping dialer used %d times, want 1", n)
+	}
+
+	// The seam's whole point: the drain handle arrived, and flushing it makes the
+	// request's event readable from the worker's DB without any wait.
+	if flushCalls != 1 {
+		cancel()
+		t.Fatalf("OnAnalyticsWriter called %d times, want exactly 1", flushCalls)
+	}
+	if flusher == nil {
+		cancel()
+		t.Fatal("OnAnalyticsWriter never handed over the analytics flusher; h.Events() could never drain the queue")
+	}
+	if err := flusher.Flush(); err != nil {
+		cancel()
+		t.Fatalf("flush analytics: %v", err)
+	}
+
+	st, err := analytics.NewSQLiteStore("file:"+dbPath+"?_pragma=busy_timeout(10000)", 0)
+	if err != nil {
+		cancel()
+		t.Fatalf("open the worker's analytics DB after Flush: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+	evs, err := st.GetEvents(analytics.EventFilter{})
+	if err != nil {
+		cancel()
+		t.Fatalf("read events after Flush: %v", err)
+	}
+	if len(evs) != 1 {
+		cancel()
+		t.Fatalf("after Flush the DB holds %d events, want exactly 1 (the request above, persisted on demand)", len(evs))
+	}
+	if evs[0].Domain != "fake.upstream.test" || evs[0].Decision != "allow" {
+		t.Errorf("flushed event = %s/%s, want fake.upstream.test/allow", evs[0].Domain, evs[0].Decision)
 	}
 
 	cancel()

@@ -35,6 +35,7 @@ import (
 	"github.com/ethosagent/warden/internal/proxy"
 	"github.com/ethosagent/warden/internal/scan"
 	"github.com/ethosagent/warden/internal/secrets"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 )
 
 // Params are the flag-derived inputs the worker boots from. cmd/proxy parses the
@@ -103,6 +104,29 @@ type Overrides struct {
 	// Clock is the worker's time port: the control-plane long-poll and
 	// heartbeat loops tick on it. nil = clock.Real().
 	Clock clock.Clock
+	// MetricsReader, when set, is attached to the worker's OTel meter provider
+	// as an extra reader (observability.Config.Reader) so a test can collect
+	// metrics in-process. nil = no extra reader (production default).
+	MetricsReader sdkmetric.Reader
+	// OnAnalyticsWriter, when set, is called exactly once during boot with the
+	// assembled async analytics writer's drain handle, so the L1 harness can
+	// persist everything queued the moment a scenario stops making traffic and
+	// read events back deterministically (h.Events()) instead of outwaiting the
+	// 250ms flush tick. Assembly-only like the rest of Overrides: no YAML key or
+	// CLI flag can set it (enforced by TestOverridesAreNotConfigurable), and
+	// production never sets it — nil leaves boot byte-identical.
+	OnAnalyticsWriter func(AnalyticsFlusher)
+}
+
+// AnalyticsFlusher is the drain capability of the async analytics writer: Flush
+// persists everything already queued and returns (analytics flush semantics —
+// no deadline, never a drop). A FAILED batch write is returned, not acked as
+// persisted — the batch stays buffered for the next flush, and the caller
+// learns the read-your-writes view it asked for does not exist. It is the ONLY
+// surface handed out on the writer: no reach into the queue, the batch, or the
+// underlying store.
+type AnalyticsFlusher interface {
+	Flush() error
 }
 
 // Run loads config, wires dependencies behind their interfaces, constructs the
@@ -234,6 +258,9 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		// Announce this worker's id on each pull/heartbeat so the control plane
 		// lists it as connected even before it forwards analytics.
 		rp.SetProxyID(expandEnv(pol.Central.ProxyID))
+		// Shutdown hygiene: drop the pooled keep-alive conns when Run returns, so
+		// a hosted worker leaves no open connections to the control plane.
+		defer rp.CloseIdleConnections()
 		if pullErr := rp.Pull(); pullErr != nil {
 			logger.Warn("control plane unreachable at boot; starting FAIL-CLOSED (deny all) until policy arrives", "error", pullErr)
 		} else if remote, gErr := rp.GetPolicy(); gErr == nil {
@@ -300,6 +327,10 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// handler when disabled, and record calls are nil-safe no-ops. OTel providers
 	// init ONCE here; a distributed observability change applies on the NEXT
 	// restart (the worker re-pulls settings at boot), never on a live long-poll.
+	var metricsReader sdkmetric.Reader
+	if p.Overrides != nil {
+		metricsReader = p.Overrides.MetricsReader
+	}
 	metrics, metricsHandler, shutdownObs, err := observability.New(observability.Config{
 		Enabled:            obsCfg.Enabled,
 		ServiceName:        obsCfg.ServiceName,
@@ -307,6 +338,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		MetricsEnabled:     obsCfg.MetricsEnabled,
 		OTLPEndpoint:       obsCfg.OTLPEndpoint,
 		ResourceAttributes: obsCfg.ResourceAttributes,
+		Reader:             metricsReader,
 	})
 	if err != nil {
 		return err
@@ -488,6 +520,12 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	}); rqErr != nil {
 		logger.Warn("analytics queue depth metric not registered", "error", rqErr)
 	}
+	// Assembly-only harness seam (#363): hand the drain handle to whoever asked
+	// for it at assembly time. Production never sets OnAnalyticsWriter, so this
+	// is one nil check away from byte-identical behavior.
+	if p.Overrides != nil && p.Overrides.OnAnalyticsWriter != nil {
+		p.Overrides.OnAnalyticsWriter(asyncStore)
+	}
 
 	// Audit decorators wrap the analytics WRITE chain. Order matters and is load-
 	// bearing — the final chain (outer→inner) is:
@@ -570,6 +608,8 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		if rErr != nil {
 			return rErr
 		}
+		// Same shutdown hygiene as the policy client above.
+		defer remote.CloseIdleConnections()
 		syncWorker = analytics.NewSyncWorker(store, remote, expandEnv(pol.Central.ProxyID), pol.Central.BatchSize, pol.Central.BufferCap, pol.Central.Interval)
 		logger.Info("central worker enabled", "endpoint", pol.Central.Endpoint, "proxyID", expandEnv(pol.Central.ProxyID))
 	}

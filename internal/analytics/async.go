@@ -109,6 +109,13 @@ type asyncWriter struct {
 	closeOnce sync.Once
 	wg        sync.WaitGroup
 	logger    *slog.Logger
+
+	// flushReq carries one ack channel per Flush call to the writer goroutine —
+	// the only goroutine that may touch buf, so a flush must run there. The ack
+	// receives the batch write's outcome (nil = the queue as of the request has
+	// been persisted; non-nil = the write failed and the batch is retained for
+	// retry), so a caller never mistakes an unpersisted batch for a drained one.
+	flushReq chan chan error
 }
 
 var _ AnalyticsStore = (*asyncWriter)(nil)
@@ -150,10 +157,11 @@ func newAsyncWriter(store batchStore, opts ...AsyncOption) *asyncWriter {
 		cfg.pruneInterval = defaultAsyncPruneInterval
 	}
 	w := &asyncWriter{
-		store:  store,
-		ch:     make(chan Event, cfg.queueCap),
-		cfg:    cfg,
-		logger: cfg.logger,
+		store:    store,
+		ch:       make(chan Event, cfg.queueCap),
+		cfg:      cfg,
+		logger:   cfg.logger,
+		flushReq: make(chan chan error),
 	}
 	if w.logger == nil {
 		w.logger = slog.Default()
@@ -196,6 +204,33 @@ func (w *asyncWriter) GetEvents(filter EventFilter) ([]Event, error) {
 // (a persistently high depth means SQLite is the bottleneck and callers are
 // being backpressured).
 func (w *asyncWriter) QueueDepth() int { return int(w.depth.Load()) }
+
+// Flush persists every event queued at the time of the call and returns — no
+// waiting for the flush tick, no deadline. It hands a flush request to the
+// single writer goroutine (the only goroutine allowed to touch the batch), which
+// drains the channel into the batch, writes it, and acknowledges; Flush blocks
+// on that acknowledgment, so on nil a reader over the base store sees a
+// read-your-writes view the moment Flush returns. A FAILED batch write is NOT
+// acked as persisted: the error is returned (the batch stays buffered for the
+// next flush, never dropped), so a caller reading the base store through Flush
+// — the L1 harness's event oracle — fails clearly instead of reading a short
+// list. The onBatch tee fires for the flushed batch exactly as it would on a
+// tick flush. After Close it is a no-op returning nil (Close already drained).
+func (w *asyncWriter) Flush() error {
+	// The same closeMu barrier Close uses: while Flush holds the read lock,
+	// Close cannot set closed or close ch, so the writer goroutine is provably
+	// alive to receive the request, and the ack is provably coming.
+	w.closeMu.RLock()
+	defer w.closeMu.RUnlock()
+	if w.closed {
+		return nil
+	}
+	// Buffered so the writer's send can never block, even if this goroutine
+	// went away between the request and the receive.
+	ack := make(chan error, 1)
+	w.flushReq <- ack
+	return <-ack
+}
 
 // Close stops accepting new events, drains the queue, flushes the final batch,
 // runs a final prune, and waits for the writer goroutine to exit before
@@ -249,14 +284,16 @@ func (w *asyncWriter) loop() {
 	// flushBuf writes the accumulated batch and prunes every pruneEvery flushes.
 	// On a write error it retains buf (does not clear) so the events are retried
 	// on the next flush rather than dropped — backpressure will build if the
-	// error persists, which is the correct, non-lossy behavior.
-	flushBuf := func() {
+	// error persists, which is the correct, non-lossy behavior — and returns the
+	// error so an on-demand Flush can surface it instead of acking a batch that
+	// never landed.
+	flushBuf := func() error {
 		if len(buf) == 0 {
-			return
+			return nil
 		}
 		if err := w.store.StoreEventsBatch(buf); err != nil {
 			w.logger.Warn("analytics: async batch write failed; retrying", "error", err, "batch", len(buf))
-			return
+			return err
 		}
 		buf = buf[:0]
 		flushes++
@@ -265,6 +302,7 @@ func (w *asyncWriter) loop() {
 				w.logger.Warn("analytics: async prune failed", "error", err)
 			}
 		}
+		return nil
 	}
 
 	for {
@@ -273,7 +311,7 @@ func (w *asyncWriter) loop() {
 			if !ok {
 				// Close: channel drained of live events. Flush the tail, tee it, and
 				// run a final prune, then exit.
-				flushBuf()
+				_ = flushBuf() // shutdown drain: the error is logged in flushBuf
 				emitTee()
 				if err := w.store.Prune(); err != nil {
 					w.logger.Warn("analytics: async final prune failed", "error", err)
@@ -286,11 +324,48 @@ func (w *asyncWriter) loop() {
 				tee = append(tee, e)
 			}
 			if len(buf) >= w.cfg.batchSize {
-				flushBuf()
+				_ = flushBuf() // tick/batch flush: the error is logged in flushBuf
 				emitTee()
 			}
+		case ack := <-w.flushReq:
+			// On-demand flush (Flush): pull everything already queued into the
+			// batch, write it, then acknowledge WITH the write's outcome — a
+			// failed write is returned, never acked as persisted. A producer
+			// that lands mid-drain waits for the next flush point — Flush's
+			// contract covers the queue as of the request, never a moving
+			// target. Exactly ONE ack value is sent: the first write failure
+			// wins (a drain that spans several batches reports the failure, and
+			// the buffered ack channel cannot absorb a second send).
+			var flushErr error
+		drain:
+			for {
+				select {
+				case e, ok := <-w.ch:
+					if !ok {
+						break drain // Close raced in; the close path flushes below
+					}
+					w.depth.Add(-1)
+					buf = append(buf, e)
+					if w.cfg.onBatch != nil {
+						tee = append(tee, e)
+					}
+					if len(buf) >= w.cfg.batchSize {
+						if err := flushBuf(); err != nil && flushErr == nil {
+							flushErr = err
+						}
+						emitTee()
+					}
+				default:
+					break drain
+				}
+			}
+			if err := flushBuf(); err != nil && flushErr == nil {
+				flushErr = err
+			}
+			emitTee()
+			ack <- flushErr
 		case <-flush.C:
-			flushBuf()
+			_ = flushBuf() // tick flush: the error is logged in flushBuf
 			emitTee()
 		case <-prune.C:
 			if err := w.store.Prune(); err != nil {

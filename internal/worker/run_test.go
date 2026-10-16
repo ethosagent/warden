@@ -343,6 +343,128 @@ func TestRun_ConfigError(t *testing.T) {
 	}
 }
 
+// TestRun_Managed_ClosesControlPlaneConnectionsOnShutdown pins the shutdown
+// hygiene the in-process harness (and any embedder) depends on: when Run
+// returns, the HTTP clients it assembled (policy pull/long-poll, heartbeat,
+// central forwarding) hold NO open connections to the control plane. Run
+// returning must not strand pooled keep-alive conns — in a hosted process they
+// keep server-side goroutines alive past shutdown.
+//
+// The central-forwarding leg is exercised FOR REAL: the worker's DB is
+// pre-seeded with one event, so the SyncWorker's immediate SyncOnce POSTs it
+// to /central/ingest and that client demonstrably holds a pooled connection at
+// shutdown. (With no events to forward the client never opens one, and the
+// assertion would pass vacuously even with the close missing.) Shutdown is
+// triggered only AFTER the ingest POST is observed, so the close-under-test
+// always has a connection to close.
+func TestRun_Managed_ClosesControlPlaneConnectionsOnShutdown(t *testing.T) {
+	var connsMu sync.Mutex
+	open := 0
+	sawIngest := make(chan struct{}, 1)
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/central/ingest" {
+			_, _ = io.Copy(io.Discard, r.Body)
+			select {
+			case sawIngest <- struct{}{}:
+			default:
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	srv.Config.ConnState = func(_ net.Conn, s http.ConnState) {
+		connsMu.Lock()
+		defer connsMu.Unlock()
+		switch s {
+		case http.StateNew:
+			open++
+		case http.StateClosed:
+			open--
+		}
+	}
+
+	// The worker must trust the stub CP's certificate: export it as PEM for
+	// controlPlane.caCert.
+	caPath := filepath.Join(t.TempDir(), "cp-ca.pem")
+	if err := os.WriteFile(caPath, pem.EncodeToMemory(&pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: srv.Certificate().Raw,
+	}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WARDEN_TEST_CP_TOKEN", "tok")
+
+	cfg := `
+policy:
+  allowlist:
+    - domain: api.openai.com
+logging:
+  level: error
+  format: json
+controlPlane:
+  endpoint: https://` + strings.TrimPrefix(srv.URL, "https://") + `/policy
+  tokenEnv: WARDEN_TEST_CP_TOKEN
+  caCert: ` + caPath + `
+  pollInterval: 20ms
+  longPollWait: 10ms
+  heartbeatInterval: 20ms
+central:
+  mode: worker
+  endpoint: https://` + strings.TrimPrefix(srv.URL, "https://") + `/central/ingest
+  proxyID: worker-1
+  caCert: ` + caPath + `
+  interval: 50ms
+`
+	p := runParams(t, writeConfig(t, cfg))
+
+	// Pre-seed the worker's analytics DB: the SyncWorker fires SyncOnce
+	// immediately at Start, so the forwarding client opens its connection
+	// deterministically at boot — the test never waits on a tick to make the
+	// central leg live (the 50ms interval above only matters for retries).
+	seed, err := analytics.NewSQLiteStore("file:"+p.DBPath, 0)
+	if err != nil {
+		t.Fatalf("open the worker DB to seed an event: %v", err)
+	}
+	if err := seed.StoreEvent(analytics.Event{
+		Domain:   "api.openai.com",
+		Decision: "allow",
+		Protocol: "https",
+	}); err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatalf("close the seeding store: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runErr := make(chan error, 1)
+	go func() { runErr <- Run(ctx, io.Discard, p) }()
+	select {
+	case <-sawIngest:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the central forwarding client never POSTed the seeded event to /central/ingest; the central leg never went live")
+	}
+	cancel()
+	if err := <-runErr; err != nil {
+		t.Fatalf("Run (managed) returned error on clean shutdown: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		connsMu.Lock()
+		n := open
+		connsMu.Unlock()
+		if n == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d control-plane connection(s) still open after Run returned; the assembled clients were not closed", n)
+		}
+		<-time.After(10 * time.Millisecond)
+	}
+}
+
 // TestNewSafeHTTPClient covers both the no-CA path and the CA-pool path, plus the
 // error path for a missing/invalid CA file.
 func TestNewSafeHTTPClient(t *testing.T) {
