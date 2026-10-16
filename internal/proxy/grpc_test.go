@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net"
@@ -21,6 +22,7 @@ import (
 type grpcTestBackend struct {
 	server         *httptest.Server
 	gotAuth        string
+	gotProxyAuth   string
 	gotContentType string
 	gotPath        string
 }
@@ -33,6 +35,7 @@ func startGRPCBackend(t *testing.T) *grpcTestBackend {
 	be := &grpcTestBackend{}
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		be.gotAuth = r.Header.Get("Authorization")
+		be.gotProxyAuth = r.Header.Get("Proxy-Authorization")
 		be.gotContentType = r.Header.Get("Content-Type")
 		be.gotPath = r.URL.Path
 
@@ -168,6 +171,48 @@ func TestGRPC_SecretSwapAndForward(t *testing.T) {
 	for _, e := range events {
 		if strings.Contains(e.SecretRef, "real-secret-value") || strings.Contains(e.URL, "real-secret-value") {
 			t.Fatalf("raw secret leaked into analytics event: %+v", e)
+		}
+	}
+}
+
+// TestHTTP2_BasicAuthSwap proves the HTTP/2 path (what git/curl negotiate via
+// ALPN) also swaps a placeholder inside Authorization: Basic, and leaves
+// Proxy-Authorization untouched (issue #372).
+func TestHTTP2_BasicAuthSwap(t *testing.T) {
+	caCertPEM, caKeyPEM, _, _ := generateTestCA(t)
+	be := startGRPCBackend(t)
+	backendAddr := strings.TrimPrefix(be.server.URL, "https://")
+	p, store := startTestProxyWithSecrets(t, []string{"grpc.test"}, caCertPEM, caKeyPEM,
+		map[string]string{"PLACEHOLDER_001": "real-secret-value"}, []string{"PLACEHOLDER_001"})
+	p.dialTLS = func(network, addr string, cfg *tls.Config) (*tls.Conn, error) {
+		return tls.Dial("tcp", backendAddr, &tls.Config{InsecureSkipVerify: true, NextProtos: []string{"h2"}})
+	}
+	cc := dialGRPCClient(t, p.Addr().String(), "grpc.test", caCertPEM)
+
+	req, _ := http.NewRequest("GET", "https://grpc.test/org/repo.git/info/refs?service=git-upload-pack", nil)
+	req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("x-access-token:PLACEHOLDER_001")))
+	proxyAuth := "Basic " + base64.StdEncoding.EncodeToString([]byte("u:PLACEHOLDER_001"))
+	req.Header.Set("Proxy-Authorization", proxyAuth)
+	resp, err := cc.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("round trip: %v", err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	want := "Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:real-secret-value"))
+	if be.gotAuth != want {
+		t.Fatalf("Authorization = %q, want %q", be.gotAuth, want)
+	}
+	if be.gotProxyAuth != proxyAuth {
+		t.Fatalf("Proxy-Authorization = %q, want byte-for-byte %q", be.gotProxyAuth, proxyAuth)
+	}
+	events := waitForEvent(t, store, func(e eventLike) bool {
+		return strings.Contains(e.SecretRef, "sha256:")
+	})
+	for _, e := range events {
+		if strings.Contains(e.SecretRef, "real-secret-value") {
+			t.Fatalf("raw secret leaked: %+v", e)
 		}
 	}
 }

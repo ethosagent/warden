@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/tls"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"log/slog"
@@ -646,6 +647,14 @@ func (p *Proxy) swapSecrets(s *requestScope) (endSession bool) {
 		for key, vals := range s.req.Header {
 			for i, v := range vals {
 				replaced := strings.ReplaceAll(v, placeholder, realValue)
+				// HTTP Basic auth hides the placeholder inside base64, so the raw
+				// match above cannot see it. Only the destination "Authorization"
+				// header is decoded — NEVER "Proxy-Authorization", which is
+				// addressed to Warden itself. URL-embedded credentials
+				// (https://user:pass@host) are a conscious cut: out of scope.
+				if replaced == v && key == "Authorization" {
+					replaced, _ = swapBasicAuth(v, placeholder, realValue)
+				}
 				if replaced != v {
 					s.req.Header[key][i] = replaced
 					swapped = true
@@ -698,6 +707,32 @@ func (p *Proxy) swapSecrets(s *requestScope) (endSession bool) {
 		s.req.ContentLength = int64(len(bodyStr))
 	}
 	return false
+}
+
+// swapBasicAuth swaps placeholder for realValue inside the base64 payload of an
+// "Authorization: Basic ..." value (scheme matched case-insensitively). The
+// payload must decode and split as "user:password"; otherwise, or when the
+// placeholder is absent, the value is returned unchanged (never guess). The
+// decoded credentials are never logged. Reports whether a swap happened.
+func swapBasicAuth(value, placeholder, realValue string) (string, bool) {
+	scheme, payload, ok := strings.Cut(value, " ")
+	if !ok || !strings.EqualFold(scheme, "Basic") {
+		return value, false
+	}
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(payload))
+	if err != nil {
+		return value, false
+	}
+	user, pass, ok := strings.Cut(string(raw), ":")
+	if !ok {
+		return value, false
+	}
+	newUser := strings.ReplaceAll(user, placeholder, realValue)
+	newPass := strings.ReplaceAll(pass, placeholder, realValue)
+	if newUser == user && newPass == pass {
+		return value, false
+	}
+	return scheme + " " + base64.StdEncoding.EncodeToString([]byte(newUser+":"+newPass)), true
 }
 
 // swapBodySecrets replaces every placeholder with its resolved secret in a single
