@@ -1,3 +1,11 @@
+# Local quickstart: listeners + proxy CA (run scripts/gen-certs.sh first).
+# CLI flags (--listen, --admin-listen, --ca-cert, --ca-key) override these.
+listen: "127.0.0.1:8080"
+adminListen: "127.0.0.1:9090"
+tls:
+  caCert: certs/proxy-ca.crt
+  caKey: certs/proxy-ca.key
+
 policy:
   allowlist:
     - domain: openrouter.ai
