@@ -365,3 +365,49 @@ func parseTimeWindow(s string) (parsedTimeWindow, error) {
 	}
 	return parsedTimeWindow{startHour: start, endHour: end}, nil
 }
+
+// HostMatcher matches a destination host against a fixed pattern set using the
+// SAME dialect as the allow/deny evaluator ("~regex", "*.suffix", exact). Regexes
+// are compiled once at construction so per-request matching (e.g. secret scoping)
+// does not recompile; wildcard/exact delegate to MatchDomain, the one shared
+// dialect. A nil *HostMatcher matches nothing.
+type HostMatcher struct {
+	patterns []string
+	regexes  map[string]*regexp.Regexp
+}
+
+// NewHostMatcher compiles patterns; a malformed "~regex" is an error.
+func NewHostMatcher(patterns []string) (*HostMatcher, error) {
+	m := &HostMatcher{patterns: append([]string(nil), patterns...), regexes: map[string]*regexp.Regexp{}}
+	for _, raw := range patterns {
+		pat := strings.ToLower(strings.TrimSuffix(raw, "."))
+		if rx, ok := strings.CutPrefix(pat, "~"); ok {
+			re, err := regexp.Compile(rx)
+			if err != nil {
+				return nil, fmt.Errorf("policy: invalid host regex %q: %w", raw, err)
+			}
+			m.regexes[raw] = re
+		}
+	}
+	return m, nil
+}
+
+// Matches reports whether host matches any pattern.
+func (m *HostMatcher) Matches(host string) bool {
+	if m == nil {
+		return false
+	}
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	for _, raw := range m.patterns {
+		if re, ok := m.regexes[raw]; ok {
+			if re.MatchString(host) {
+				return true
+			}
+			continue
+		}
+		if MatchDomain(raw, host) {
+			return true
+		}
+	}
+	return false
+}

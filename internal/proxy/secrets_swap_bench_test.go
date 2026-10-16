@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"net/http"
 	"strings"
 	"testing"
 )
@@ -83,4 +84,39 @@ func makeSwapBody(size int, placeholders []string) string {
 		i++
 	}
 	return sb.String()
+}
+
+// BenchmarkSwapSecretsScoped measures the per-request swapSecrets cost with and
+// without destination scoping (#373): "Unscoped" is the legacy path (no scope
+// map), "InScope" adds the matcher lookup, "OutOfScope" adds the matcher plus the
+// presence probe and the out-of-scope analytics record.
+func BenchmarkSwapSecretsScoped(b *testing.B) {
+	names := []string{"WARDEN_PLACEHOLDER_001", "WARDEN_PLACEHOLDER_002", "WARDEN_PLACEHOLDER_003"}
+	values := map[string]string{}
+	for _, n := range names {
+		values[n] = "sk-real-secret-value-" + n
+	}
+	for _, tc := range []struct {
+		name   string
+		scopes map[string][]string
+	}{
+		{"Unscoped", nil},
+		{"InScope", map[string][]string{names[0]: {"backend.test"}, names[1]: {"*.test"}, names[2]: {`~^back.*\.test$`}}},
+		{"OutOfScope", map[string][]string{names[0]: {"other.test"}, names[1]: {"*.other.test"}, names[2]: {`~^other\.test$`}}},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			p, _ := startTestProxyWithScopedSecrets(b, []string{"backend.test"}, nil, nil, values, names, tc.scopes)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				req, _ := http.NewRequest("GET", "https://backend.test/v1?k=WARDEN_PLACEHOLDER_002", nil)
+				req.Header.Set("Authorization", "Bearer WARDEN_PLACEHOLDER_001")
+				req.Header.Set("X-Other", "WARDEN_PLACEHOLDER_003")
+				s := &requestScope{domain: "backend.test", port: 443, req: req}
+				if p.swapSecrets(s) {
+					b.Fatal("swapSecrets ended the session")
+				}
+			}
+		})
+	}
 }

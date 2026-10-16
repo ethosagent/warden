@@ -35,11 +35,24 @@ policy:
 # Placeholder -> environment variable mapping for the phase-1 ENV secret
 # provider. The agent only ever holds the placeholder (e.g. openai_secret_001);
 # Warden swaps it for the real value of OPENAI_API_KEY at the edge.
+#
+# `matchHosts` scopes a placeholder to its intended destinations (policy syntax:
+# exact host, "*.suffix", or "~regex"). The placeholder is swapped ONLY on
+# requests whose destination host (the CONNECT/SNI host) matches; elsewhere it is
+# forwarded untouched and an out-of-scope event is recorded. NOTE: "~regex" is an
+# UNANCHORED (substring) match, like the policy engine: "~github\.com" also
+# matches "evil-github.com". Anchor it ("~^api\.github\.com$") or use an exact
+# host / "*.suffix".
+# An entry WITHOUT
+# matchHosts is swapped on every allowed host (legacy behavior) and logs a
+# startup warning; matchHosts is expected to become required in a future release.
 secrets:
   - placeholder: openai_secret_001
     envVar: OPENAI_API_KEY
+    matchHosts: ["api.openai.com"]
   - placeholder: anthropic_secret_001
     envVar: ANTHROPIC_API_KEY
+    matchHosts: ["api.anthropic.com"]
 
 # Secret backend selector (OPTIONAL). Omit this block for the default `env`
 # behavior above — that is byte-identical to today. `secretStore` is a sibling
@@ -230,7 +243,9 @@ responseScan:
 # with a placeholder or no auth at all; Warden injects real, request-scoped
 # credentials at the edge. Credentials are read from the environment via ${VAR}
 # and held by the proxy only — never seen by the agent, never logged.
-# `match` uses the policy syntax: exact host, "*.suffix", or "~regex".
+# `match` (required) scopes the entry to destination hosts and uses the policy
+# syntax: exact host, "*.suffix", or "~regex"; the credential is injected only on
+# requests to a matching host.
 # Types: oauth2_client_credentials | aws_sigv4 | hmac | api_key.
 auth: []
   # - match: api.salesforce.com

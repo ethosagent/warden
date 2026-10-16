@@ -212,6 +212,7 @@ policy:
 secrets:
   - placeholder: openai_secret_001
     envVar: OPENAI_API_KEY
+    matchHosts: ["api.openai.com"]       # swap only for this destination
 
 cache:
   ttl: 3600
@@ -226,6 +227,33 @@ logging:
 ```
 
 See [`configs/config.example.yaml`](configs/config.example.yaml) for the full documented config.
+
+### Scoping secrets to destination hosts
+
+A placeholder should only ever be exchanged for its real value on the host it
+belongs to. `matchHosts` (same syntax as the policy: exact host, `*.suffix`,
+`~regex`) restricts where Warden swaps a placeholder, in HTTP/1.1, HTTP/2/gRPC
+and WebSocket-upgrade requests alike:
+
+- The destination is the CONNECT/SNI host — the one the allow/deny decision used
+  and the upstream is dialed at — never a `Host` header or URL host the agent
+  controls.
+- On a non-matching host the placeholder is forwarded **untouched** (the
+  destination rejects it as an invalid credential) and a distinct
+  `secret_out_of_scope` event is recorded with the placeholder *name* only, so
+  operators can see attempted cross-host carriage. Allow/deny counts are unchanged.
+- A secret that cannot be fetched fails the request with 503 only on hosts where
+  it is in scope; an unrelated missing secret no longer 503s every request.
+- `~regex` is an **unanchored** (substring) match, exactly like the policy engine:
+  `~github\.com` also matches `evil-github.com`. Anchor it —
+  `~^api\.github\.com$` — or prefer an exact host / `*.suffix`.
+- Invalid patterns (bad regex or wildcard) fail config load.
+- `auth:` injectors (OAuth2, SigV4, HMAC, API key) are scoped by their required
+  `match` field, with the same syntax.
+
+**Migration:** entries without `matchHosts` keep the old behavior (swap on every
+allowed host) and log a startup warning per placeholder. Add `matchHosts` to each
+secret; it is expected to become required in a future release.
 
 ### Upstream DNS resolver
 

@@ -277,3 +277,88 @@ func waitForEvent(t *testing.T, store *syncStore, pred func(eventLike) bool) []e
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+// TestHTTP2_SecretScope proves the HTTP/2 header-swap loop honours matchHosts
+// (#373): a placeholder scoped to another host is forwarded unswapped with an
+// out-of-scope event, while an in-scope one is swapped.
+func TestHTTP2_SecretScope(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		hosts     []string
+		wantAuth  string
+		wantEvent bool
+	}{
+		{"out of scope", []string{"other.test"}, "Bearer PLACEHOLDER_001", true},
+		{"in scope", []string{"grpc.test"}, "Bearer real-secret-value", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			caCertPEM, caKeyPEM, _, _ := generateTestCA(t)
+			be := startGRPCBackend(t)
+			backendAddr := strings.TrimPrefix(be.server.URL, "https://")
+			p, store := startTestProxyWithScopedSecrets(t, []string{"grpc.test"}, caCertPEM, caKeyPEM,
+				map[string]string{"PLACEHOLDER_001": "real-secret-value"}, []string{"PLACEHOLDER_001"},
+				map[string][]string{"PLACEHOLDER_001": tc.hosts})
+			p.dialTLS = func(network, addr string, cfg *tls.Config) (*tls.Conn, error) {
+				return tls.Dial("tcp", backendAddr, &tls.Config{InsecureSkipVerify: true, NextProtos: []string{"h2"}})
+			}
+			cc := dialGRPCClient(t, p.Addr().String(), "grpc.test", caCertPEM)
+			req, _ := http.NewRequest("GET", "https://grpc.test/x", nil)
+			req.Header.Set("Authorization", "Bearer PLACEHOLDER_001")
+			resp, err := cc.RoundTrip(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _ = io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if be.gotAuth != tc.wantAuth {
+				t.Fatalf("Authorization = %q, want %q", be.gotAuth, tc.wantAuth)
+			}
+			time.Sleep(50 * time.Millisecond)
+			got := false
+			for _, e := range store.snapshot() {
+				if e.Decision == "secret_out_of_scope" && e.Reason == "secret_out_of_scope:PLACEHOLDER_001" {
+					got = true
+				}
+			}
+			if got != tc.wantEvent {
+				t.Fatalf("out-of-scope event = %v, want %v", got, tc.wantEvent)
+			}
+		})
+	}
+}
+
+// TestHTTP2_SecretScope_UsesConnectHostNotAuthority pins that the HTTP/2 scope
+// host is the CONNECT host: the agent sets :authority to the in-scope host over a
+// tunnel to an out-of-scope host (HTTP/2 has no Host recheck), and the placeholder
+// must stay unswapped with the out-of-scope event recorded for the CONNECT host.
+func TestHTTP2_SecretScope_UsesConnectHostNotAuthority(t *testing.T) {
+	caCertPEM, caKeyPEM, _, _ := generateTestCA(t)
+	be := startGRPCBackend(t)
+	backendAddr := strings.TrimPrefix(be.server.URL, "https://")
+	p, store := startTestProxyWithScopedSecrets(t, []string{"grpc.test"}, caCertPEM, caKeyPEM,
+		map[string]string{"PLACEHOLDER_001": "real-secret-value"}, []string{"PLACEHOLDER_001"},
+		map[string][]string{"PLACEHOLDER_001": {"trusted.test"}})
+	p.dialTLS = func(network, addr string, cfg *tls.Config) (*tls.Conn, error) {
+		return tls.Dial("tcp", backendAddr, &tls.Config{InsecureSkipVerify: true, NextProtos: []string{"h2"}})
+	}
+	cc := dialGRPCClient(t, p.Addr().String(), "grpc.test", caCertPEM)
+	req, _ := http.NewRequest("GET", "https://grpc.test/x", nil)
+	req.Host = "trusted.test" // :authority = the in-scope host
+	req.Header.Set("Authorization", "Bearer PLACEHOLDER_001")
+	resp, err := cc.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if be.gotAuth != "Bearer PLACEHOLDER_001" {
+		t.Fatalf("Authorization = %q: placeholder swapped for spoofed :authority", be.gotAuth)
+	}
+	time.Sleep(50 * time.Millisecond)
+	for _, e := range store.snapshot() {
+		if e.Decision == "secret_out_of_scope" && e.Domain == "grpc.test" && e.Reason == "secret_out_of_scope:PLACEHOLDER_001" {
+			return
+		}
+	}
+	t.Fatalf("no out-of-scope event for CONNECT host grpc.test: %+v", store.snapshot())
+}
