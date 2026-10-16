@@ -9,8 +9,14 @@ linters:
     - govet         # go vet
     - ineffassign   # ineffectual assignments
     - misspell      # common misspellings
+    - nolintlint    # every //nolint must name the linter and give a reason (#354)
     - staticcheck   # broad static analysis (subsumes gosimple/stylecheck)
     - unused        # unused code
+  settings:
+    nolintlint:
+      # A //nolint must name the linter it silences and say why.
+      require-explanation: true
+      require-specific: true
   exclusions:
     generated: lax
     presets:

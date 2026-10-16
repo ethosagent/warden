@@ -200,6 +200,10 @@ func TestCheckShReportModePassesExactArguments(t *testing.T) {
 			"-coverage-min 70 -golangci-version v2.12.2 -govulncheck-version v1.5.0 -fuzz-time 5s -keep-going -json-out /tmp/r.json"},
 		{"fast", nil, []string{"--fast", "--json"},
 			"-coverage-min 70 -golangci-version v2.12.2 -govulncheck-version v1.5.0 -fuzz-time 5s -fast -json"},
+		{"list-stages", nil, []string{"--list-stages"},
+			"-list-stages -golangci-version v2.12.2 -govulncheck-version v1.5.0 -fuzz-time 5s"},
+		{"list-stages-integration-json", nil, []string{"--json", "--integration", "--list-stages"},
+			"-list-stages -golangci-version v2.12.2 -govulncheck-version v1.5.0 -fuzz-time 5s -integration -json"},
 		{"fuzztime-env", []string{"FUZZTIME=30s"}, []string{"--json"},
 			"-coverage-min 70 -golangci-version v2.12.2 -govulncheck-version v1.5.0 -fuzz-time 30s -json"},
 	}
@@ -347,5 +351,13 @@ func TestCheckShFastStagesMatchRunner(t *testing.T) {
 					strings.Join(got, "\n  "), strings.Join(want, "\n  "))
 			}
 		})
+	}
+}
+
+// --list-stages runs nothing: it cannot be combined with the inner-loop plan.
+func TestCheckShListStagesRejectsFast(t *testing.T) {
+	out := runCheckSh(t, nil, "--list-stages", "--fast")
+	if !strings.HasPrefix(out, "exit: 2\n") || !strings.Contains(out, "--list-stages cannot be combined with --fast") {
+		t.Fatalf("output:\n%s", out)
 	}
 }

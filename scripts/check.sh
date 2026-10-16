@@ -7,6 +7,7 @@
 #
 # Usage:
 #   scripts/check.sh [--fast] [--integration] [--json] [--json-out <path>] [--keep-going]
+#   scripts/check.sh --list-stages [--integration] [--json]
 #
 #   --fast            INNER LOOP ONLY. Checks just the packages changed since
 #                     origin/main (committed, staged, unstaged and untracked) plus
@@ -26,6 +27,11 @@
 #   --json-out PATH   human output as usual, plus the report written to PATH
 #   --keep-going      run every stage after a failure, so all problems show in
 #                     one pass
+#   --list-stages     run nothing: print the name of every stage the gate runs, one
+#                     per line (with --integration, the set CI runs). With --json,
+#                     a warden.check.v1 report with one entry per stage instead.
+#                     (tools/gatecheck does not run this: it reads the banners of a
+#                     PR's check.sh as text.) Cannot be combined with --fast.
 #
 # The flags only change what is reported. The pass/fail verdict, and so the exit
 # code, is the same as without them (0 pass, non-zero fail). Agents: run
@@ -47,6 +53,7 @@ GOLANGCI_VERSION="${GOLANGCI_VERSION:-v2.12.2}"
 FUZZTIME="${FUZZTIME:-5s}"
 FAST=0
 RUN_INTEGRATION=0
+LIST_STAGES=0
 JSON=0
 JSON_OUT=""
 KEEP_GOING=0
@@ -54,6 +61,7 @@ while [ "$#" -gt 0 ]; do
 	case "$1" in
 	--integration) RUN_INTEGRATION=1 ;;
 	--fast) FAST=1 ;;
+	--list-stages) LIST_STAGES=1 ;;
 	--json) JSON=1 ;;
 	--keep-going) KEEP_GOING=1 ;;
 	--json-out)
@@ -75,6 +83,25 @@ done
 if [ "$FAST" -eq 1 ] && [ "$RUN_INTEGRATION" -eq 1 ]; then
 	echo "--fast cannot be combined with --integration: --fast is the inner loop, the full gate is what CI runs" >&2
 	exit 2
+fi
+
+if [ "$LIST_STAGES" -eq 1 ] && [ "$FAST" -eq 1 ]; then
+	echo "--list-stages cannot be combined with --fast: it lists the stages of the full gate" >&2
+	exit 2
+fi
+
+# --list-stages: tools/checkreport owns the stage list (tools/checkreport/
+# checksh_test.go keeps it in step with the banners below), so ask it. Nothing runs.
+if [ "$LIST_STAGES" -eq 1 ]; then
+	tmpbin="$(mktemp -d)"
+	trap 'rm -rf "$tmpbin"' EXIT
+	go build -o "$tmpbin/checkreport" ./tools/checkreport
+	list_args=(-list-stages -golangci-version "$GOLANGCI_VERSION" -govulncheck-version "$GOVULNCHECK_VERSION" -fuzz-time "$FUZZTIME")
+	if [ "$RUN_INTEGRATION" -eq 1 ]; then list_args+=(-integration); fi
+	if [ "$JSON" -eq 1 ]; then list_args+=(-json); fi
+	if [ -n "$JSON_OUT" ]; then list_args+=(-json-out "$JSON_OUT"); fi
+	"$tmpbin/checkreport" "${list_args[@]}"
+	exit $?
 fi
 
 # Report mode: tools/checkreport runs the same stages (tools/checkreport/

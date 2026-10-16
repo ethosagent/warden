@@ -20,7 +20,7 @@ func realMain(args []string, stdout, stderr io.Writer, environ []string) (code i
 	var cfg config
 	var asJSON bool
 	var jsonOut, only string
-	var planOnly bool
+	var planOnly, listOnly bool
 	fs.StringVar(&cfg.Root, "root", ".", "repository root to check")
 	fs.BoolVar(&cfg.Integration, "integration", false, "also run the integration stage")
 	fs.BoolVar(&cfg.KeepGoing, "keep-going", false, "run every stage after a failure")
@@ -31,13 +31,14 @@ func realMain(args []string, stdout, stderr io.Writer, environ []string) (code i
 	fs.StringVar(&cfg.GovulncheckVersion, "govulncheck-version", "", "pinned govulncheck version")
 	fs.BoolVar(&cfg.Fast, "fast", false, "check only packages changed since origin/main plus their importers; skip whole-repo stages")
 	fs.BoolVar(&planOnly, "fast-plan", false, "print the --fast package plan for scripts/check.sh and exit")
+	fs.BoolVar(&listOnly, "list-stages", false, "print the names of the stages the gate runs (one per line, or a report with -json) and exit; runs nothing")
 	fs.StringVar(&cfg.FuzzTime, "fuzz-time", defaultFuzzTime, "-fuzztime for each fuzz target")
 	fs.StringVar(&cfg.FuzzTargets, "fuzz-targets", "scripts/fuzz-targets.txt", "file listing the fuzz targets, relative to -root")
 	fs.StringVar(&only, "stages", "", "comma-separated stages to run (default: all)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if !planOnly && (cfg.GolangciVersion == "" || cfg.GovulncheckVersion == "") {
+	if !planOnly && !listOnly && (cfg.GolangciVersion == "" || cfg.GovulncheckVersion == "") {
 		fmt.Fprintln(stderr, "checkreport: -golangci-version and -govulncheck-version are required (scripts/check.sh passes them)")
 		return 2
 	}
@@ -83,6 +84,9 @@ func realMain(args []string, stdout, stderr io.Writer, environ []string) (code i
 		// Not a report: the plain-mode script reads this to scope its own commands.
 		return writeFastPlan(stdout, r.fastPlan())
 	}
+	if listOnly {
+		return writeStageList(stdout, r, asJSON, jsonOut, sc)
+	}
 	r.goVer = goVersion(r.cfg.Root)
 	rep, code = r.Run(sc)
 	return code
@@ -98,6 +102,30 @@ func writeFastPlan(w io.Writer, p FastPlan) int {
 	fmt.Fprintf(w, "fast\t%s\n", p.Base)
 	for _, pk := range p.Packages {
 		fmt.Fprintf(w, "%s\t%s\t%s\n", pk.Package, pk.Dir, pk.Reason)
+	}
+	return 0
+}
+
+// writeStageList prints the stages the gate would run for this configuration:
+// one name per line, or (with -json) a warden.check.v1 report with one passing
+// stage per name. gatecheck compares the lists of a PR's base and head to find a
+// removed stage.
+func writeStageList(w io.Writer, r *runner, asJSON bool, jsonOut string, sc *Scrubber) int {
+	defs := r.stages()
+	if !asJSON && jsonOut == "" {
+		for _, d := range defs {
+			fmt.Fprintln(w, d.name)
+		}
+		return 0
+	}
+	r.goVer = goVersion(r.cfg.Root)
+	rep := &Report{}
+	for _, d := range defs {
+		rep.Stages = append(rep.Stages, Stage{Name: d.name, Tool: d.tool(r), Metrics: map[string]any{"listed": true}})
+	}
+	rep.Finalize(sc)
+	if err := emit(rep, asJSON, jsonOut, w); err != nil {
+		return 1
 	}
 	return 0
 }
