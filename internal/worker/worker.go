@@ -467,28 +467,29 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	}
 
 	cfg := proxy.Config{
-		ListenAddr:       listenAddr,
-		Policy:           evaluator,
-		Secrets:          secretProvider,
-		Analytics:        analyticsStore,
-		PlaceholderNames: placeholders,
-		CACertPath:       caCert,
-		CAKeyPath:        caKey,
-		AgentID:          agentID,
-		Metrics:          metrics,
-		Logger:           logger,
-		MCP:              bootGW,
-		ResponseScan:     respScanner,
-		DLP:              dlpScanner,
-		Transformers:     transformers,
-		Cost:             costEstimator,
+		ListenAddr:        listenAddr,
+		Policy:            evaluator,
+		Secrets:           secretProvider,
+		Analytics:         analyticsStore,
+		PlaceholderNames:  placeholders,
+		PlaceholderScopes: secretScopes(pol.Secrets, logger),
+		CACertPath:        caCert,
+		CAKeyPath:         caKey,
+		AgentID:           agentID,
+		Metrics:           metrics,
+		Logger:            logger,
+		MCP:               bootGW,
+		ResponseScan:      respScanner,
+		DLP:               dlpScanner,
+		Transformers:      transformers,
+		Cost:              costEstimator,
 	}
 	if judge != nil {
 		cfg.Judge = judge
 		logger.Info("inline LLM judge enabled", "agent", agentID, "model", pol.Judge.Model)
 	}
 
-	pxy, err := proxy.New(cfg)
+	pxy, err := newProxy(cfg)
 	if err != nil {
 		return err
 	}
@@ -683,6 +684,10 @@ func resolveSecretStore(distributed *config.SettingsWire, local config.Policy) c
 	}
 	return local.SecretStore
 }
+
+// newProxy is a test seam so tests can inspect the proxy.Config the worker
+// assembles (e.g. that the secret scopes reach the proxy).
+var newProxy = proxy.New
 
 // awsSecretsClientFactory builds the AWS Secrets Manager client for a region,
 // resolving credentials by precedence (explicit config keys → env → IMDS role).

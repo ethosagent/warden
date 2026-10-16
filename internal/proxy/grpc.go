@@ -100,7 +100,16 @@ func (p *Proxy) serveGRPCStream(w http.ResponseWriter, r *http.Request, rt *http
 	var swappedNames []string
 	if len(p.cfg.PlaceholderNames) > 0 {
 		secretsProvider := p.secrets()
+		var outOfScope []string
 		for _, placeholder := range p.cfg.PlaceholderNames {
+			// Destination scoping (#373): see swapSecrets in http.go. domain is the
+			// CONNECT/SNI host, never the request's :authority.
+			if !p.placeholderInScope(placeholder, domain) {
+				if headerCarriesPlaceholder(r.Header, placeholder) {
+					outOfScope = append(outOfScope, placeholder)
+				}
+				continue
+			}
 			realValue, err := secretsProvider.GetSecret(placeholder)
 			if err != nil {
 				http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
@@ -127,6 +136,9 @@ func (p *Proxy) serveGRPCStream(w http.ResponseWriter, r *http.Request, rt *http
 				// the secret value.
 				swappedNames = append(swappedNames, placeholder)
 			}
+		}
+		if len(outOfScope) > 0 {
+			p.recordOutOfScope(domain, port, proto, r.Method, r.URL.RequestURI(), outOfScope)
 		}
 	}
 

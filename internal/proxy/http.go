@@ -635,7 +635,21 @@ func (p *Proxy) swapSecrets(s *requestScope) (endSession bool) {
 	// pass, since those are tiny), record which placeholders appear in the body,
 	// and collect the placeholder→value pairs for one NewReplacer body pass.
 	var bodyPairs []string
+	var outOfScope []string
 	for _, placeholder := range p.cfg.PlaceholderNames {
+		// Destination scoping (#373): a placeholder is a swap candidate only for
+		// its matchHosts. s.domain is the CONNECT/SNI host (what policy allowed and
+		// what is dialed; readRequest rejects a mismatching Host header). Out of
+		// scope: leave it untouched, never fetch its secret (so a missing secret
+		// cannot 503 an unrelated destination), and record presence by name.
+		if !p.placeholderInScope(placeholder, s.domain) {
+			if headerCarriesPlaceholder(s.req.Header, placeholder) ||
+				queryCarriesPlaceholder(s.req.URL, placeholder) ||
+				(needBodySwap && strings.Contains(bodyStr, placeholder)) {
+				outOfScope = append(outOfScope, placeholder)
+			}
+			continue
+		}
 		realValue, err := secretsProvider.GetSecret(placeholder)
 		if err != nil {
 			writeErrorResponse(s.tlsConn, 503, "Service Unavailable")
@@ -698,6 +712,10 @@ func (p *Proxy) swapSecrets(s *requestScope) (endSession bool) {
 			// never the secret value.
 			s.swappedNames = append(s.swappedNames, placeholder)
 		}
+	}
+
+	if len(outOfScope) > 0 {
+		p.recordOutOfScope(s.domain, s.port, "https", s.req.Method, s.req.URL.RequestURI(), outOfScope)
 	}
 
 	// Set swapped body back

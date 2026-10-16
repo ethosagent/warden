@@ -116,6 +116,9 @@ func (p Policy) DeepCopy() Policy {
 	cp.Allowlist = append([]AllowlistEntry(nil), p.Allowlist...)
 	cp.Denylist = append([]DenylistEntry(nil), p.Denylist...)
 	cp.Secrets = append([]SecretMapping(nil), p.Secrets...)
+	for i := range cp.Secrets {
+		cp.Secrets[i].MatchHosts = append([]string(nil), p.Secrets[i].MatchHosts...)
+	}
 	if p.SecretStore.AWS != nil {
 		aws := *p.SecretStore.AWS
 		cp.SecretStore.AWS = &aws
@@ -198,9 +201,15 @@ type AllowlistEntry struct {
 
 // SecretMapping ties a placeholder the agent holds to the env var that carries
 // the real value (phase 1 ENV provider).
+//
+// MatchHosts scopes the placeholder to destinations (exact host, "*.suffix", or
+// "~regex" — the policy dialect): it is swapped only on requests whose
+// destination host matches. Empty = unscoped (swap on every allowed host); the
+// worker logs a startup warning for such entries.
 type SecretMapping struct {
-	Placeholder string `yaml:"placeholder"`
-	EnvVar      string `yaml:"envVar"`
+	Placeholder string   `yaml:"placeholder"`
+	EnvVar      string   `yaml:"envVar"`
+	MatchHosts  []string `yaml:"matchHosts,omitempty"`
 }
 
 // DenylistEntry is a single explicitly-blocked destination. The denylist is
@@ -470,6 +479,14 @@ func validate(p Policy) error {
 		}
 		if envBackend && s.EnvVar == "" {
 			return fmt.Errorf("config: secrets[%d]: envVar is required for the env secret backend", i)
+		}
+		for j, h := range s.MatchHosts {
+			if strings.TrimSpace(h) == "" {
+				return fmt.Errorf("config: secrets[%d].matchHosts[%d]: host pattern must not be empty (omit matchHosts to leave the secret unscoped)", i, j)
+			}
+			if err := validateMatchPattern(fmt.Sprintf("secrets[%d].matchHosts[%d]", i, j), h); err != nil {
+				return err
+			}
 		}
 	}
 	seen := make(map[string]struct{}, len(p.Secrets))

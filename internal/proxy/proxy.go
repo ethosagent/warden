@@ -45,7 +45,13 @@ type Config struct {
 	CACertPath       string
 	CAKeyPath        string
 	PlaceholderNames []string
-	Transformers     []*auth.MatchedTransformer
+	// PlaceholderScopes maps a placeholder to the destination hosts it may be
+	// swapped for (policy dialect: exact, "*.suffix", "~regex"). A placeholder
+	// absent from the map (or with an empty list) is unscoped: swapped on every
+	// request, as before. On a non-matching host it is forwarded untouched and an
+	// out-of-scope event is recorded.
+	PlaceholderScopes map[string][]string
+	Transformers      []*auth.MatchedTransformer
 
 	// Judge is the optional inline LLM judge. When nil the proxy behaves exactly
 	// as before: a NoMatch destination is default-denied. When set, NoMatch
@@ -187,6 +193,7 @@ type Verdict struct {
 // skeleton constructs it and validates its configuration.
 type Proxy struct {
 	cfg        Config
+	scopes     map[string]*policy.HostMatcher // placeholder -> matchHosts; absent = unscoped
 	listenerMu sync.Mutex
 	listener   net.Listener
 	caCert     *x509.Certificate
@@ -395,7 +402,11 @@ func New(cfg Config) (*Proxy, error) {
 		// panic on a method call; nopMetrics keeps every record a no-op.
 		cfg.Metrics = nopMetrics{}
 	}
-	p := &Proxy{cfg: cfg}
+	scopes, err := newSecretScopes(cfg.PlaceholderScopes)
+	if err != nil {
+		return nil, err
+	}
+	p := &Proxy{cfg: cfg, scopes: scopes}
 	// Seed the swappable gateway from the configured one so an unmanaged worker's
 	// behavior is unchanged; a managed worker's long-poll apply loop replaces it.
 	// cfg.MCP may be an untyped-nil interface (MCP disabled) — wrapped in the
