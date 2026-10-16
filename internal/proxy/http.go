@@ -931,6 +931,14 @@ func (p *Proxy) applyTransforms(s *requestScope) (endSession bool) {
 	// body: ask for identity. Set before any transformer runs so a signer covers it.
 	if len(s.echoSecrets) > 0 {
 		s.req.Header.Set("Accept-Encoding", "identity")
+		// A WebSocket upgrade that swapped a value must not negotiate
+		// permessage-deflate (#399 review): compressed (RSV) frames cannot be
+		// scanned, so the extension offer is dropped and the upstream answers
+		// uncompressed. The frame guard refuses a compressed frame that arrives
+		// anyway.
+		if strings.EqualFold(s.req.Header.Get("Upgrade"), "websocket") {
+			s.req.Header.Del("Sec-WebSocket-Extensions")
+		}
 	}
 	for _, mt := range p.cfg.Transformers {
 		if mt.Matches(s.domain) {
@@ -1058,20 +1066,22 @@ func (p *Proxy) badGateway(s *requestScope) (endSession bool) {
 // response scan (buffered JSON or SSE), or the plain forward path. It returns
 // true when the session should end.
 func (p *Proxy) relayResponse(s *requestScope) (endSession bool) {
-	// WebSocket upgrade: an MCP server may speak JSON-RPC over a WebSocket. On a
-	// 101 the connection is consumed for the lifetime of the socket, so this
-	// branch is terminal — it hands the raw conn to the frame pump (which owns and
-	// closes the upstream), then returns. When the MCP gateway is disabled we
-	// leave today's behavior untouched (a 101 was never special-cased before).
-	if s.gw != nil && s.rt == nil && s.resp.StatusCode == 101 &&
+	// WebSocket upgrade: an MCP server may speak JSON-RPC over a WebSocket, and
+	// a plain upstream may speak its own. On a 101 the connection is consumed
+	// for the lifetime of the socket, so this branch is terminal — it hands the
+	// raw conn to the frame pump (which owns and closes the upstream), then
+	// returns. EVERY 101 to a WebSocket upgrade is pumped (#399, #408): the MCP
+	// gateway scans it when one is configured, the echo guard guards it when the
+	// request swapped a value, and with neither the pump relays frames verbatim —
+	// a plain upgrade must not lose its frames.
+	if s.rt == nil && s.resp.StatusCode == 101 &&
 		strings.EqualFold(s.req.Header.Get("Upgrade"), "websocket") {
-		// The 101 headers are checked before the handoff writes them verbatim; frames
-		// after the upgrade are not (#399).
+		// The 101 headers are checked before the handoff writes them verbatim.
 		if len(s.echoSecrets) > 0 && p.echoGuardHeaders(s) {
 			return true
 		}
 		s.handoff = true
-		p.handleWSUpgrade(s.tlsConn, s.br, s.upstream, s.upstreamBR, s.resp, s.req, s.eventURL(), s.domain, s.port, s.mcpSessKey, s.gw)
+		p.handleWSUpgrade(s)
 		return true
 	}
 

@@ -18,6 +18,7 @@ import (
 
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/auth"
+	"github.com/ethosagent/warden/internal/mcp/ws"
 	"github.com/ethosagent/warden/internal/secrets"
 )
 
@@ -596,6 +597,175 @@ func (p *Proxy) echoGuardHeaders(s *requestScope) (terminal bool) {
 		return p.echoHit(s, i, reasonSecretEcho)
 	}
 	return false
+}
+
+// wsEchoGuard carries the same guard onto a WebSocket's server->agent frame
+// stream (#399). It reuses the request's echoSet — the exact swapped values and
+// their encodings — and applies the same zero-bytes rule as the echoReader,
+// with the hold-back state carried across frame AND message boundaries for the
+// whole connection: a data frame whose payload is not yet provably clear (it
+// ends where a needle may still start) is held whole until a later frame proves
+// it, so a value split across two frames or two messages is still caught.
+//
+// The DATA stream is text/binary/continuation only — what an agent reassembles
+// a message from (RFC 6455 §5.4). Control frames (a ping, a pong, a close
+// reason can each carry data) are checked on their own and NEVER touch the data
+// accumulator: folding a control payload in would hide a value split around it
+// while the agent still reassembles the message without the control bytes. A
+// control frame is forwarded as soon as its own payload is clear of any needle,
+// and a held data tail stays held across it (RFC 6455 allows control frames
+// between fragments).
+//
+// A data frame with a reserved bit set carries an extension's (permessage-deflate)
+// compressed bytes, which cannot be scanned: it is a violation whatever the mode
+// (fail closed). Warden strips the extension offer when it swaps a value, so
+// this is only a backstop.
+//
+// The agent->server direction is never guarded: it carries the swapped value
+// legitimately. Frames are re-emitted unchanged, so a clean stream reaches the
+// agent byte-identical; a held tail the connection ends on is dropped (fail
+// closed). The hold is bounded: a later frame releases every earlier frame it
+// proves clear, so at most one maximum-size frame is ever held — never more
+// than ReadFrame itself buffers. It satisfies ws.EchoGuard.
+type wsEchoGuard struct {
+	set     *echoSet
+	monitor bool // #389 monitor mode: report the hit, keep passing bytes
+
+	acc      []byte     // DATA-stream bytes no forwarded frame is proved clear of yet
+	spare    []byte     // recycled acc buffer: emitted payloads stay valid until the next Guard
+	pend     []ws.Frame // held data frames (headers only; their payload bytes live in acc)
+	pendLen  []int      // payload length of each held frame
+	pendHead int        // first held frame not yet released
+
+	clear []ws.Frame // scratch returned to the pump, consumed before the next Guard
+
+	hit    bool   // a violation was seen (sticky)
+	secret int    // which needle hit (-1: none named)
+	reason string // why the guard closed: an echo or an unscannable frame
+	off    bool   // monitor mode after a hit: pass everything through
+}
+
+// newWSEchoGuard arms the frame guard for an upgraded connection whose request
+// swapped values. Only called when s.echoSecrets is non-empty, so a swap-free
+// upgrade builds no needle set and runs no per-frame check at all.
+func (p *Proxy) newWSEchoGuard(s *requestScope) *wsEchoGuard {
+	return &wsEchoGuard{set: s.echoSet(), monitor: p.cfg.EchoGuard.Monitor}
+}
+
+// Guard checks f on the server->agent stream and returns the frames that are
+// fully clear, in order. Data frames fold f's unmasked payload into the
+// connection's DATA stream; a control frame's payload is checked on its own and
+// leaves the data stream untouched. The returned frames may alias the guard's
+// buffers: the pump writes them before it calls Guard again.
+func (g *wsEchoGuard) Guard(f ws.Frame) ([]ws.Frame, bool) {
+	// RSV on a data frame means an extension (permessage-deflate) compressed the
+	// payload: nothing about it can be vouched for, so the connection is torn
+	// down in monitor mode too. A control frame's RSV bits stay untouched: only
+	// data frames carry a scanned payload.
+	if !f.IsControl() && (f.RSV1 || f.RSV2 || f.RSV3) {
+		g.hit, g.secret, g.reason = true, -1, reasonSecretEchoUnscannable
+		return nil, false
+	}
+	if g.off {
+		g.clear = append(g.clear[:0], f)
+		return g.clear, true
+	}
+	if f.IsControl() {
+		if secret, ok := g.set.find(f.Payload); ok {
+			clear, pass := g.found(secret)
+			if !pass {
+				return nil, false
+			}
+			// Monitor mode reported the control frame: it goes out after the
+			// held data it found (#389 monitor semantics).
+			return append(clear, f), true
+		}
+		g.clear = append(g.clear[:0], f)
+		return g.clear, true
+	}
+	g.compact()
+	g.acc = append(g.acc, f.Payload...)
+	hdr := f
+	hdr.Payload = nil
+	g.pend = append(g.pend, hdr)
+	g.pendLen = append(g.pendLen, len(f.Payload))
+	if secret, ok := g.set.find(g.acc); ok {
+		return g.found(secret)
+	}
+	// Everything before the longest needle-prefix suffix is clear of any value.
+	return g.release(len(g.acc) - g.set.heldSuffix(g.acc)), true
+}
+
+// found records a needle in the checked bytes. In block mode nothing more is
+// forwarded; in monitor mode the bytes go out anyway (#389 monitor semantics):
+// everything held is released and the guard stops guarding for the rest of the
+// connection.
+func (g *wsEchoGuard) found(secret int) ([]ws.Frame, bool) {
+	g.hit, g.secret, g.reason = true, secret, reasonSecretEcho
+	if g.monitor {
+		g.off = true
+		return g.release(len(g.acc)), true
+	}
+	return nil, false
+}
+
+// hitSecret reports the recorded finding for the deny event after the pump ends.
+func (g *wsEchoGuard) hitSecret() (secret int, hit bool) { return g.secret, g.hit }
+
+// hitReason names why the guard closed: reasonSecretEcho for a value in the
+// stream, reasonSecretEchoUnscannable for a compressed (RSV) data frame.
+func (g *wsEchoGuard) hitReason() string {
+	if g.reason == "" {
+		return reasonSecretEcho
+	}
+	return g.reason
+}
+
+// compact drops the held frames a release already returned, so a stream whose
+// every frame ends in a needle prefix cannot grow pend/pendLen by one entry per
+// frame for the whole connection (#399 review): the slices stay at the frames
+// actually held. Their acc bytes were dropped by the release that returned them
+// (acc always starts at pend[pendHead]'s first payload byte), so only headers
+// move.
+func (g *wsEchoGuard) compact() {
+	if g.pendHead == 0 {
+		return
+	}
+	n := copy(g.pend, g.pend[g.pendHead:])
+	g.pend = g.pend[:n]
+	n = copy(g.pendLen, g.pendLen[g.pendHead:])
+	g.pendLen = g.pendLen[:n]
+	g.pendHead = 0
+}
+
+// release returns the leading held frames fully covered by the first n bytes of
+// acc, whole and unchanged. The uncleared rest — at most a needle-prefix
+// suffix, plus the frame it ends in — stays for the next frame. The released
+// payloads alias the buffer that just stopped being acc: the pump writes them
+// before the next Guard recycles it as spare.
+func (g *wsEchoGuard) release(n int) []ws.Frame {
+	g.clear = g.clear[:0]
+	off := 0
+	for g.pendHead < len(g.pend) {
+		end := off + g.pendLen[g.pendHead]
+		if end > n {
+			break
+		}
+		f := g.pend[g.pendHead]
+		f.Payload = g.acc[off:end]
+		g.clear = append(g.clear, f)
+		off = end
+		g.pendHead++
+	}
+	if len(g.clear) == 0 {
+		return nil
+	}
+	g.spare = append(g.spare[:0], g.acc[n:]...)
+	g.acc, g.spare = g.spare, g.acc
+	if g.pendHead == len(g.pend) {
+		g.pend, g.pendLen, g.pendHead = g.pend[:0], g.pendLen[:0], 0
+	}
+	return g.clear
 }
 
 // echoHit handles a finding on a response that has not been written yet: block
