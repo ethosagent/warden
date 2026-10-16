@@ -41,7 +41,7 @@ func TestAnalyticsDecoratorChainOrder(t *testing.T) {
 
 	// A deny event maps to compliance controls via the Mapper, so a non-empty
 	// Compliance slice after the chain proves tagging happened.
-	ev := analytics.Event{Domain: "api.openai.com", Protocol: "https", Decision: "deny", Reason: "policy"}
+	ev := analytics.Event{Domain: "api.openai.com", Protocol: "https", Decision: "deny", Reason: "policy_denylist"}
 	if err := tagged.StoreEvent(ev); err != nil {
 		t.Fatalf("StoreEvent: %v", err)
 	}

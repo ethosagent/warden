@@ -20,9 +20,10 @@ type decisionLog struct {
 	ResponseStatus int
 	SecretRef      string
 	JudgeReason    string
-	// Reason is the bounded decision reason (e.g. the #371 constraint reasons
-	// "method_not_allowed" / "path_not_allowed" / "path_not_canonical"). A small
-	// closed enum — metadata, never content.
+	// Reason is the bounded decision reason from the ONE declared set
+	// (internal/denyreason, rule X6 in #349): policy_no_match, the #371
+	// constraint reasons, the edge/echo/MCP reasons, … A closed enum — metadata,
+	// never content. Every deny carries it (#409).
 	Reason string
 }
 
