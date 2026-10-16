@@ -1,10 +1,16 @@
 package proxy
 
 import (
+	"bufio"
+	"crypto/tls"
+	"encoding/base64"
+	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/secrets"
 )
 
@@ -176,5 +182,153 @@ func TestProxy_Secrets_SeededUntouched(t *testing.T) {
 	}
 	if v, _ := p.secrets().GetSecret("ph"); v != "seeded-value" {
 		t.Fatalf("seeded provider value = %q, want seeded-value", v)
+	}
+}
+
+// --- Issue #372: placeholder swap inside HTTP Basic auth (git over HTTPS) ---
+
+func basicHeader(userpass string) string {
+	return "Basic " + base64.StdEncoding.EncodeToString([]byte(userpass))
+}
+
+// sendThroughSwapProxy sends req through a MITM proxy configured with one
+// placeholder→secret pair and returns the headers/path the backend saw plus the
+// recorded analytics events.
+func sendThroughSwapProxy(t *testing.T, req *http.Request) (http.Header, string, []analytics.Event) {
+	t.Helper()
+	return sendThroughSwapProxyWithSecrets(t, req,
+		map[string]string{"PLACEHOLDER_001": "real-secret-value"}, []string{"PLACEHOLDER_001"})
+}
+
+// sendThroughSwapProxyWithSecrets is sendThroughSwapProxy for an arbitrary set
+// of placeholder→secret pairs (placeholders lists the names to swap).
+func sendThroughSwapProxyWithSecrets(t *testing.T, req *http.Request, secrets map[string]string, placeholders []string) (http.Header, string, []analytics.Event) {
+	t.Helper()
+	caCertPEM, caKeyPEM, caCert, caKey := generateTestCA(t)
+	backendLn, rb := startBackend(t, caCert, caKey)
+	p, store := startTestProxyWithSecrets(t, []string{"backend.test"}, caCertPEM, caKeyPEM,
+		secrets, placeholders)
+	p.dialTLS = func(network, addr string, cfg *tls.Config) (*tls.Conn, error) {
+		return tls.Dial("tcp", backendLn.Addr().String(), &tls.Config{InsecureSkipVerify: true})
+	}
+	tlsClient := dialProxyAndConnect(t, p.Addr().String(), "backend.test", caCertPEM)
+	if err := req.Write(tlsClient); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(tlsClient), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	time.Sleep(50 * time.Millisecond)
+	rb.mu.Lock()
+	defer rb.mu.Unlock()
+	return rb.headers.Clone(), rb.path, store.snapshot()
+}
+
+func TestHTTP_BasicAuthSwap(t *testing.T) {
+	const real = "real-secret-value"
+	tests := []struct {
+		name, header, want string
+		swapped            bool
+	}{
+		{"placeholder in username", basicHeader("PLACEHOLDER_001:pw"), basicHeader(real + ":pw"), true},
+		{"placeholder in password", basicHeader("user:PLACEHOLDER_001"), basicHeader("user:" + real), true},
+		{"password with colon suffix", basicHeader("user:PLACEHOLDER_001:extra"), basicHeader("user:" + real + ":extra"), true},
+		{"git x-access-token", basicHeader("x-access-token:PLACEHOLDER_001"), basicHeader("x-access-token:" + real), true},
+		{"lowercase scheme", "basic " + base64.StdEncoding.EncodeToString([]byte("u:PLACEHOLDER_001")), "basic " + base64.StdEncoding.EncodeToString([]byte("u:"+real)), true},
+		{"no placeholder untouched", basicHeader("user:other"), basicHeader("user:other"), false},
+		{"malformed base64 untouched", "Basic !!!not-base64!!!", "Basic !!!not-base64!!!", false},
+		{"no colon untouched", basicHeader("PLACEHOLDER_001"), basicHeader("PLACEHOLDER_001"), false},
+		{"bearer still swapped", "Bearer PLACEHOLDER_001", "Bearer " + real, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req, _ := http.NewRequest("GET", "https://backend.test/v1/chat", nil)
+			req.Header.Set("Authorization", tc.header)
+			hdr, _, events := sendThroughSwapProxy(t, req)
+			if got := hdr.Get("Authorization"); got != tc.want {
+				t.Fatalf("Authorization = %q, want %q", got, tc.want)
+			}
+			hasRef := false
+			for _, e := range events {
+				if strings.Contains(e.SecretRef, "sha256:") {
+					hasRef = true
+				}
+				if strings.Contains(e.SecretRef, real) || eventContains(t, e, real) || eventContains(t, e, base64.StdEncoding.EncodeToString([]byte("user:"+real))) {
+					t.Fatalf("event leaks secret: %+v", e)
+				}
+			}
+			if hasRef != tc.swapped {
+				t.Fatalf("secret ref recorded = %v, want %v (events %+v)", hasRef, tc.swapped, events)
+			}
+		})
+	}
+}
+
+func TestHTTP_BasicAuthSwap_MultiSecret(t *testing.T) {
+	// Two placeholders in one Basic credential are both swapped.
+	secrets := map[string]string{
+		"PLACEHOLDER_001": "real-user-value",
+		"PLACEHOLDER_002": "real-pass-value",
+	}
+	req, _ := http.NewRequest("GET", "https://backend.test/v1/chat", nil)
+	req.Header.Set("Authorization", basicHeader("PLACEHOLDER_001:PLACEHOLDER_002"))
+	hdr, _, _ := sendThroughSwapProxyWithSecrets(t, req, secrets, []string{"PLACEHOLDER_001", "PLACEHOLDER_002"})
+	if got := hdr.Get("Authorization"); got != basicHeader("real-user-value:real-pass-value") {
+		t.Fatalf("Authorization = %q, want %q", got, basicHeader("real-user-value:real-pass-value"))
+	}
+}
+
+func TestHTTP_BasicAuthSwap_CustomHeaderNotDecoded(t *testing.T) {
+	// A Basic value in a non-Authorization header is NOT decoded (raw match only).
+	v := basicHeader("x:PLACEHOLDER_001")
+	req, _ := http.NewRequest("GET", "https://backend.test/v1/chat", nil)
+	req.Header.Set("X-Custom-Auth", v)
+	hdr, _, _ := sendThroughSwapProxy(t, req)
+	if got := hdr.Get("X-Custom-Auth"); got != v {
+		t.Fatalf("X-Custom-Auth = %q, want unchanged %q", got, v)
+	}
+}
+
+func TestHTTP_BasicAuthSwap_ProxyAuthorizationUntouched(t *testing.T) {
+	// Proxy-Authorization is addressed to Warden itself: never decoded or swapped.
+	v := basicHeader("user:PLACEHOLDER_001")
+	req, _ := http.NewRequest("GET", "https://backend.test/v1/chat", nil)
+	req.Header.Set("Proxy-Authorization", v)
+	req.Header.Set("Authorization", basicHeader("user:PLACEHOLDER_001"))
+	hdr, _, _ := sendThroughSwapProxy(t, req)
+	if got := hdr.Get("Proxy-Authorization"); got != v {
+		t.Fatalf("Proxy-Authorization = %q, want byte-for-byte %q", got, v)
+	}
+	if got := hdr.Get("Authorization"); got != basicHeader("user:real-secret-value") {
+		t.Fatalf("Authorization not swapped: %q", got)
+	}
+}
+
+func TestHTTP_BasicAuthSwap_GitUploadPack(t *testing.T) {
+	req, _ := http.NewRequest("GET", "https://backend.test/org/repo.git/info/refs?service=git-upload-pack", nil)
+	req.Header.Set("User-Agent", "git/2.43.0")
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Git-Protocol", "version=2")
+	req.Header.Set("Authorization", basicHeader("x-access-token:PLACEHOLDER_001"))
+	hdr, path, events := sendThroughSwapProxy(t, req)
+	if path != "/org/repo.git/info/refs?service=git-upload-pack" {
+		t.Fatalf("path = %q", path)
+	}
+	if got := hdr.Get("Authorization"); got != basicHeader("x-access-token:real-secret-value") {
+		t.Fatalf("Authorization = %q", got)
+	}
+	found := false
+	for _, e := range events {
+		if strings.Contains(e.SecretRef, "sha256:") && containsStr(e.SwappedRefs, "PLACEHOLDER_001") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected SecretRef + SwappedRefs on event, got %+v", events)
 	}
 }

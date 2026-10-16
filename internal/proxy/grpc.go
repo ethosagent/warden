@@ -110,6 +110,11 @@ func (p *Proxy) serveGRPCStream(w http.ResponseWriter, r *http.Request, rt *http
 			for key, vals := range r.Header {
 				for i, v := range vals {
 					replaced := strings.ReplaceAll(v, placeholder, realValue)
+					// Basic auth (git over HTTPS): see swapSecrets in http.go.
+					// Authorization only; never Proxy-Authorization.
+					if replaced == v && key == "Authorization" {
+						replaced, _ = swapBasicAuth(v, placeholder, realValue)
+					}
 					if replaced != v {
 						r.Header[key][i] = replaced
 						swapped = true
