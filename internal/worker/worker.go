@@ -91,6 +91,28 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// (widely-captured) logger instance. Format is restart-only (see LogControl).
 	logger, logCtrl := observability.NewLogger(out, pol.LogLevel, pol.LogFormat)
 
+	// Optional upstream DNS override (dns.upstreamResolver). When set, warden's
+	// OWN upstream dials — the proxy's CONNECT tunnels and TLS-terminated
+	// upstreams (SNI keeps the client-supplied hostname), plus the
+	// SafeDialer-based auth-fetch client — resolve through that server instead
+	// of the resolver the container inherits. This is the knob for corporate
+	// VPN / split-horizon networks where the default resolver cannot resolve
+	// the public allowlisted names. The dashboard/admin listeners keep system
+	// resolution, and the agent's own DNS path is a separate concern entirely
+	// (transparent interception, #376). ONE resolver instance is shared by every
+	// SafeDialer-based consumer, so the first-failure log fires exactly once no
+	// matter which path trips it; a dead resolver fails requests exactly like
+	// any other upstream-connect failure — never a silent fallback.
+	var upstreamDNS proxy.NameResolver
+	if pol.DNS.UpstreamResolver != "" {
+		resolverAddr := pol.DNS.UpstreamResolver
+		upstreamDNS = proxy.NewUpstreamResolver(resolverAddr, func(err error) {
+			logger.Warn("upstream DNS lookup failed via the configured resolver; if the server is unreachable, upstream dials fail until it answers (no fallback to the system resolver)",
+				"resolver", resolverAddr, "error", err)
+		})
+		logger.Info("upstream DNS resolver configured for warden's own upstream dials", "resolver", resolverAddr)
+	}
+
 	// Managed vs local-only. Managed = a control plane is configured and
 	// --local-only is not set: the worker's allow/deny policy comes ONLY from the
 	// control plane and it boots fail-closed (deny all) until the first pull.
@@ -340,7 +362,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// Optional auth transforms (OAuth2 / SigV4 / HMAC / API-key) per destination.
 	var transformers []*auth.MatchedTransformer
 	if len(pol.Auth) > 0 {
-		authClient, acErr := newSafeHTTPClient(10*time.Second, "")
+		authClient, acErr := newSafeHTTPClient(10*time.Second, "", upstreamDNS)
 		if acErr != nil {
 			return acErr
 		}
@@ -482,6 +504,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		DLP:              dlpScanner,
 		Transformers:     transformers,
 		Cost:             costEstimator,
+		UpstreamResolver: upstreamDNS,
 	}
 	if judge != nil {
 		cfg.Judge = judge

@@ -90,6 +90,14 @@ type Config struct {
 	// tagged with a heuristic dollar estimate from observed request/response
 	// byte sizes — order-of-magnitude visibility, never billing-grade.
 	Cost CostEstimator
+
+	// UpstreamResolver is the optional DNS resolver for the proxy's OWN upstream
+	// dials (dns.upstreamResolver): CONNECT tunnels and TLS-terminated upstreams
+	// — which includes the certificate-relevant hostname resolution; SNI itself
+	// keeps using the client-supplied hostname. nil = Go's default resolver,
+	// byte-identical to before. It scopes to warden's egress path only: the
+	// dashboard/admin listeners never resolve through it.
+	UpstreamResolver NameResolver
 }
 
 // MCPGateway is the consumer-side seam for the MCP egress gateway (defined here,
@@ -473,7 +481,7 @@ func New(cfg Config) (*Proxy, error) {
 		}
 	}
 
-	safeDial, err := NewSafeDialer(10*time.Second, nil)
+	safeDial, err := NewSafeDialerWithResolver(10*time.Second, nil, cfg.UpstreamResolver)
 	if err != nil {
 		return nil, fmt.Errorf("proxy: safe dialer: %w", err)
 	}

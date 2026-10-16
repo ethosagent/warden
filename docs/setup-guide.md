@@ -82,6 +82,7 @@ logging:
 | `cache.ttl` | int | Secret cache TTL in seconds |
 | `logging.level` | string | `debug`, `info`, `warn`, or `error` |
 | `logging.format` | string | `json` or `text` |
+| `dns.upstreamResolver` | string | Optional `<host>:<port>` DNS server for Warden's OWN upstream dials (VPN / split-horizon networks). Plain UDP/TCP only — DoH/DoT are out of scope for v1. Omit → Go's default resolver. Use an IP literal: the server address itself is resolved by the system resolver (`/etc/hosts` still applies) |
 
 ## 4. Set secrets as environment variables
 
