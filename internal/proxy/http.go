@@ -17,6 +17,7 @@ import (
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/mcp/gateway"
 	"github.com/ethosagent/warden/internal/mcp/sse"
+	"github.com/ethosagent/warden/internal/policy"
 	"github.com/ethosagent/warden/internal/protocol"
 	"github.com/ethosagent/warden/internal/scan"
 	"github.com/ethosagent/warden/internal/secrets"
@@ -283,6 +284,9 @@ func (p *Proxy) runRequestStages(s *requestScope) (endSession bool) {
 	if p.readRequest(s) {
 		return true
 	}
+	if p.constraintGate(s) {
+		return true
+	}
 	if p.judgeGate(s) {
 		return true
 	}
@@ -313,6 +317,51 @@ func (p *Proxy) readRequest(s *requestScope) (endSession bool) {
 		hostOnly = h
 	}
 	return !strings.EqualFold(hostOnly, s.domain)
+}
+
+// constraintGate enforces the #371 method/path constraints on EVERY request of
+// a keep-alive tunnel. CONNECT admission only could-matched them (domain+port,
+// rate limit peeked); this per-request evaluation is authoritative and counts
+// the request exactly once. It runs before the judge, before any secret swap,
+// and before any upstream write, so a denied request never reaches the origin
+// and never carries a real secret. The path matched is the RAW request target
+// component — req.URL.EscapedPath() — which is byte-for-byte the path req.Write
+// sends upstream (RequestURI renders EscapedPath); URL.Path (decoded) would not
+// be what the origin sees. A NoMatch falls through unchanged (judge-eligible
+// exactly as before); an explicit Deny is terminal — a constraint violation is
+// never judge-eligible, by construction of the evaluator.
+func (p *Proxy) constraintGate(s *requestScope) (endSession bool) {
+	verdict := p.cfg.Policy.EvaluateRequest(s.domain, s.port, policy.SchemeHTTPS, s.req.Method, s.req.URL.EscapedPath())
+	if verdict.Decision != policy.Deny {
+		return false
+	}
+	reason := verdict.Reason
+	if reason == "" {
+		// Not a constraint violation: a denylist hit or an exhausted rate-limit /
+		// time-window guard. Same bounded generic reason the CONNECT gate records.
+		reason = "policy"
+	}
+	fullURL := "https://" + s.domain + s.req.URL.RequestURI()
+	_ = p.analyticsStore().StoreEvent(analytics.Event{
+		Timestamp: time.Now(),
+		Domain:    s.domain,
+		Port:      s.port,
+		Protocol:  "https",
+		Method:    s.req.Method,
+		URL:       fullURL,
+		Decision:  "deny",
+		Reason:    reason,
+		LatencyMs: s.latencyMs(),
+	})
+	p.cfg.Metrics.RecordRequest("deny", "https")
+	p.cfg.Metrics.RecordBlocked(reason)
+	p.logDecision(decisionLog{
+		Domain: s.domain, Port: s.port, Protocol: "https",
+		Method: s.req.Method, URL: fullURL, Decision: "deny",
+		Reason: reason,
+	})
+	writeErrorResponse(s.tlsConn, 403, "Forbidden")
+	return true
 }
 
 // judgeGate runs the inline judge for requests that matched no static rule. The

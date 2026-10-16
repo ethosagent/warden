@@ -259,3 +259,42 @@ func TestEvaluate_MixedDiffs(t *testing.T) {
 		t.Errorf("NewDenies[0].Domain = %q, want %q", result.NewDenies[0].Domain, "api.openai.com")
 	}
 }
+
+// #371: replay exercises a candidate's method/path constraints when the event
+// recorded a method AND a parseable URL; events missing either piece replay
+// destination-only (constraints could-match), matching the granularity they
+// were recorded at.
+func TestEvaluate_MethodConstraintReplay(t *testing.T) {
+	pol := config.Policy{
+		Allowlist: []config.AllowlistEntry{
+			{Domain: "api.example.com", Methods: []string{"GET"}},
+		},
+	}
+	events := []analytics.Event{
+		{Timestamp: time.Now(), Domain: "api.example.com", Port: 443, Protocol: "https",
+			Method: "GET", URL: "https://api.example.com/v1/x", Decision: "allow"},
+		// Same destination and method, but no URL: destination-only replay, so
+		// the candidate's method constraint cannot apply to it.
+		{Timestamp: time.Now(), Domain: "api.example.com", Port: 443, Protocol: "https",
+			Method: "POST", Decision: "allow"},
+		// POST with a URL: the candidate's methods constraint denies it — an
+		// availability regression the diff must surface.
+		{Timestamp: time.Now(), Domain: "api.example.com", Port: 443, Protocol: "https",
+			Method: "POST", URL: "https://api.example.com/v1/x", Decision: "allow"},
+	}
+
+	result := Evaluate(events, pol)
+
+	if result.TotalEvents != 3 {
+		t.Errorf("TotalEvents = %d, want 3", result.TotalEvents)
+	}
+	if result.Agreed != 2 {
+		t.Errorf("Agreed = %d, want 2", result.Agreed)
+	}
+	if len(result.NewDenies) != 1 {
+		t.Fatalf("NewDenies = %d entries, want 1", len(result.NewDenies))
+	}
+	if result.NewDenies[0].Method != "POST" {
+		t.Errorf("NewDenies[0].Method = %q, want %q", result.NewDenies[0].Method, "POST")
+	}
+}

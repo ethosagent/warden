@@ -55,8 +55,8 @@ type recordingEvaluator struct {
 	replaced []config.Policy
 }
 
-func (e *recordingEvaluator) Evaluate(string, int, policy.Scheme) policy.Decision {
-	return policy.Decision(0)
+func (e *recordingEvaluator) EvaluateRequest(string, int, policy.Scheme, string, string) policy.RequestVerdict {
+	return policy.RequestVerdict{}
 }
 
 func (e *recordingEvaluator) Replace(p config.Policy) {

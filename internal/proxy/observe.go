@@ -20,6 +20,10 @@ type decisionLog struct {
 	ResponseStatus int
 	SecretRef      string
 	JudgeReason    string
+	// Reason is the bounded decision reason (e.g. the #371 constraint reasons
+	// "method_not_allowed" / "path_not_allowed" / "path_not_canonical"). A small
+	// closed enum — metadata, never content.
+	Reason string
 }
 
 // logDecision emits one structured record next to the analytics StoreEvent.
@@ -46,6 +50,9 @@ func (p *Proxy) logDecision(d decisionLog) {
 	}
 	if d.JudgeReason != "" {
 		attrs = append(attrs, slog.String("judge_reason", d.JudgeReason))
+	}
+	if d.Reason != "" {
+		attrs = append(attrs, slog.String("reason", d.Reason))
 	}
 	if d.Decision == "deny" {
 		p.cfg.Logger.Warn("egress decision", attrs...)
