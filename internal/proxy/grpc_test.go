@@ -176,8 +176,8 @@ func TestGRPC_SecretSwapAndForward(t *testing.T) {
 }
 
 // TestHTTP2_BasicAuthSwap proves the HTTP/2 path (what git/curl negotiate via
-// ALPN) also swaps a placeholder inside Authorization: Basic, and leaves
-// Proxy-Authorization untouched (issue #372).
+// ALPN) also swaps a placeholder inside Authorization: Basic, and strips
+// Proxy-Authorization rather than swapping it (issues #372, #396).
 func TestHTTP2_BasicAuthSwap(t *testing.T) {
 	caCertPEM, caKeyPEM, _, _ := generateTestCA(t)
 	be := startGRPCBackend(t)
@@ -204,8 +204,9 @@ func TestHTTP2_BasicAuthSwap(t *testing.T) {
 	if be.gotAuth != want {
 		t.Fatalf("Authorization = %q, want %q", be.gotAuth, want)
 	}
-	if be.gotProxyAuth != proxyAuth {
-		t.Fatalf("Proxy-Authorization = %q, want byte-for-byte %q", be.gotProxyAuth, proxyAuth)
+	// Addressed to Warden: stripped (#396), so neither decoded/swapped nor forwarded.
+	if be.gotProxyAuth != "" {
+		t.Fatalf("Proxy-Authorization reached the upstream: %q", be.gotProxyAuth)
 	}
 	events := waitForEvent(t, store, func(e eventLike) bool {
 		return strings.Contains(e.SecretRef, "sha256:")

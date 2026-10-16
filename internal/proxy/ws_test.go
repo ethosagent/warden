@@ -23,6 +23,7 @@ type wsBackend struct {
 	respHeader string // extra header line(s), CRLF-terminated, added to the 101
 	push       []byte
 	gotText    chan []byte
+	reqHeaders chan string // raw upgrade request header block, when non-nil
 }
 
 // frameWire serializes a frame to its wire bytes.
@@ -83,6 +84,7 @@ func startWSBackend(t *testing.T, caCert *x509.Certificate, caKey interface{}, b
 				defer func() { _ = tlsSrv.Close() }()
 
 				br := bufio.NewReader(tlsSrv)
+				var reqHdr strings.Builder
 				for {
 					line, err := br.ReadString('\n')
 					if err != nil {
@@ -91,6 +93,10 @@ func startWSBackend(t *testing.T, caCert *x509.Certificate, caKey interface{}, b
 					if line == "\r\n" || line == "\n" {
 						break
 					}
+					reqHdr.WriteString(line)
+				}
+				if b.reqHeaders != nil {
+					b.reqHeaders <- reqHdr.String()
 				}
 				_, _ = io.WriteString(tlsSrv,
 					"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"+b.respHeader+"\r\n")

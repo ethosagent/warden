@@ -86,6 +86,10 @@ type requestScope struct {
 	// re-reading a spent body.
 	reqBody  []byte
 	bodyRead bool
+	// trailerDenied is set by trailerGuard when the h1 request body ended with
+	// trailer fields; denyTrailers (set by stripHopHeaders) answers the 400 deny.
+	trailerDenied bool
+	denyTrailers  func()
 
 	// Decision state threaded between stages.
 	judgeReason string
@@ -184,6 +188,10 @@ func (s *requestScope) ensureBody() (body []byte, ok bool) {
 	}
 	b, err := io.ReadAll(io.LimitReader(s.req.Body, maxBodySwapSize+1))
 	if err != nil {
+		if s.trailerDenied {
+			s.denyTrailers()
+			return nil, false
+		}
 		s.out.errorResponse(502, "Bad Gateway")
 		return nil, false
 	}
@@ -312,6 +320,9 @@ func (p *Proxy) serveHTTPRequest(tlsConn *tls.Conn, br *bufio.Reader, domain str
 // the keep-alive session should end.
 func (p *Proxy) runRequestStages(s *requestScope) (endSession bool) {
 	if p.readRequest(s) {
+		return true
+	}
+	if p.stripHopHeaders(s) {
 		return true
 	}
 	if p.constraintGate(s) {
@@ -1033,6 +1044,10 @@ func (p *Proxy) readUpstreamResponse(s *requestScope) (ok bool) {
 
 // badGateway writes a 502 to the client and signals the session should end.
 func (p *Proxy) badGateway(s *requestScope) (endSession bool) {
+	if s.trailerDenied {
+		s.denyTrailers()
+		return true
+	}
 	s.out.errorResponse(502, "Bad Gateway")
 	return true
 }
