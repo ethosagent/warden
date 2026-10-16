@@ -1,0 +1,5 @@
+{
+  "want": [
+    {"rule": "L6", "file": "w/trans/handler.go", "line": 3}
+  ]
+}

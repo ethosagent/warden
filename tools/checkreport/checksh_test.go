@@ -26,6 +26,7 @@ case "$1 $2" in
 "build ./..."*) ;;
 "run golang.org/x/vuln/"*) echo "No vulnerabilities found." ;;
 "test -race"*) echo "ok  	example.com/x	0.1s" ;;
+"test ./internal/archtest"*) echo "ok  	example.com/x/internal/archtest	0.2s" ;;
 "test -run"*) echo "bench output (discarded by the script)" ;;
 "build -o"*) printf '#!/bin/bash\nprintf "%%b" "$FAKE_PLAN"\n' > "$3"; chmod +x "$3" ;;
 "tool cover") printf 'x.go:1:\tF\t100.0%%\ntotal:\t(statements)\t%s\n' "${SHIM_COVERAGE:-85.9%}" ;;
@@ -272,7 +273,8 @@ func TestCheckShFastPlainMode(t *testing.T) {
 	want := []string{
 		"gofmt -l .",
 		"go vet ./internal/a ./internal/b",
-		"go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run ./internal/a ./internal/b",
+		"go test ./internal/archtest -run TestArchitecture",
+		"go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run --config .golangci.arch.yml ./internal/a ./internal/b",
 		"go test -race ./internal/a ./internal/b",
 	}
 	got := commandsIn(out)

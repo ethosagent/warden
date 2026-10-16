@@ -1,0 +1,567 @@
+# architecture.yaml — the single source of truth for Warden's architecture and
+# security rules (GitHub issue #349). Rule IDs here match the issue. Two checkers
+# read this file:
+#
+#   - internal/archtest (go test ./internal/archtest -run TestArchitecture):
+#     layers, zones, adapters, globals, struct tags, key prefixes, routes,
+#     tests-per-package — everything import graphs and ASTs can express.
+#   - the golangci-lint config generated from this file by
+#     `go run ./cmd/archgen` (.golangci.arch.yml): import bans (depguard),
+#     banned calls and references (forbidigo, with type analysis so an import
+#     alias cannot evade a ban) and the module allowlist (gomodguard_v2).
+#
+# architecture.baseline.yaml lists the violations that exist today, by rule ID
+# and package, with the exact items it allows (the offending imports, called
+# functions or target packages — never lines). A new violation item fails the
+# gate even in a baselined package; a listed violation that is fixed must have
+# its entry (or item) removed, so the baseline only ever shrinks.
+#
+# Rule states:
+#   enforced  — a checker in this repo fails on a violation (golangci, archtest
+#               or both; see `checker`).
+#   proxy     — enforced by an ordinary Go test/benchmark that already exists;
+#               `test` names it (every Test…/Benchmark… token must resolve to a
+#               real function) or `stage` names the check.sh stage that carries
+#               it. The gate validates the pointer, but does not run it by rule ID.
+#   planned   — not checkable yet; `reason` says what must land first. Nothing
+#               may be silently unchecked (#349 acceptance criteria): a rule
+#               that is only partly checked declares its parts under
+#               `coverage:` — one entry per part, `enforced:` naming the
+#               checker that covers it today or `planned:` saying what must
+#               land first.
+
+version: 1
+
+# ---------------------------------------------------------------------------
+# Classes: what a package IS. First pattern that matches the package path (relative
+# to the repo root, `/`-separated) wins, so list specific classes before broad
+# ones. `layer` is the control-plane layer (assembly > transport > domain >
+# repository); `engine`/`decision` are the data-plane parts that replace
+# "domain" there. Every package must match exactly one class (L8) and one zone
+# (Z1), or the gate fails.
+#
+# The paths include today's pre-migration layout. Ticket step 7 (out of scope
+# here) moves packages into the internal/<domain>/adapters/<x>/ and
+# internal/<server>/http/ shapes; each move deletes the overrides and the
+# matching baseline entries.
+# ---------------------------------------------------------------------------
+classes:
+  # ASSEMBLY — reads config, builds adapters, injects them. May import
+  # everything; only the paths in imported-by may import an assembly package (L2).
+  - id: assembly
+    layer: assembly
+    imported-by:
+      - cmd/**
+    paths:
+      - cmd/**                    # the real assembly
+      - internal/worker           # data-plane assembly today (step 7 splits it)
+      - internal/controlplane     # control-plane assembly today
+      - internal/dashboard        # control-plane assembly today
+      - examples/**               # demo binaries
+
+  # TRANSPORT — handlers, routes, request/response mapping. Calls domain
+  # services; never repositories, drivers or SDKs (L6).
+  - id: transport
+    layer: transport
+    paths:
+      - internal/*/http/**        # target shape: internal/<server>/http/
+      - internal/admin            # worker-local admin handlers today
+
+  # ENGINE — the data-plane egress path itself: listener, TLS, dialer, forward,
+  # relay, streaming. net and crypto/tls ARE its job (L4a, Z4).
+  - id: engine
+    layer: engine
+    paths:
+      - internal/proxy/**
+      - internal/mcp/gateway
+      - internal/mcp/sse
+      - internal/mcp/stdio
+      - internal/mcp/ws
+
+  # DECISION — pure functions over request metadata: policy, identity, scan,
+  # DLP, secret-swap rules. Return allow/deny/annotate; no I/O (L3, L4a).
+  - id: decision
+    layer: decision
+    paths:
+      - internal/policy
+      - internal/scan
+      - internal/dlp
+      - internal/mcp
+      - internal/protocol
+      - internal/agentid
+      - internal/cost
+      - internal/llmpolicy
+
+  # REPOSITORY — the only code that talks to the outside world. Imported only
+  # by assembly and by tests (L1); storage repositories import no domain other
+  # than their own (L7).
+  - id: repository
+    layer: repository
+    paths:
+      - internal/*/adapters/**    # target shape: internal/<domain>/adapters/<x>/
+      - internal/analytics        # AnalyticsStore + SQLite/HTTP impls merged today
+      - internal/secrets
+      - internal/auth
+      - internal/audit
+      - internal/llm
+      - internal/observability
+      - internal/integration
+      - internal/integration/webhook
+
+  # DOMAIN — entities, rules, decisions, ports (interfaces), services. No I/O
+  # (L3). Packages are listed explicitly: a new package must be classified here
+  # (an unlisted one fails L8), and explicit paths are what the generated
+  # golangci config can scope precisely.
+  - id: domain
+    layer: domain
+    paths:
+      - internal/config
+      - internal/detect
+      - internal/alertpipeline
+      - internal/policybuilder
+      - internal/policyeval
+
+  # DEVTOOL — developer tooling; no Warden package may import it. Exempt from
+  # layering but not from the global X rules.
+  - id: devtool
+    layer: devtool
+    paths:
+      - tools/**
+      - internal/archtest
+      - internal/archtest/**
+
+  # TESTUTIL — test helpers and fakes. Production code never imports them (S2).
+  - id: testutil
+    layer: testutil
+    paths:
+      - internal/dnstest
+      - test/**
+
+# ---------------------------------------------------------------------------
+# Zones (Z1). Every package must match exactly one. data plane and control
+# plane must not cross (Z2); shared is domain-layer only (Z3).
+# ---------------------------------------------------------------------------
+zones:
+  data:
+    - internal/proxy/**
+    - internal/worker
+    - internal/admin
+    - internal/mcp/**
+    - internal/protocol
+    - internal/scan
+    - internal/dlp
+    - internal/agentid
+    - internal/cost
+    - internal/llmpolicy
+    - internal/llm
+    - internal/dnstest
+    - examples/**
+  control:
+    - cmd/**
+    - internal/controlplane/**
+    - internal/dashboard/**
+    - internal/alertpipeline
+    - internal/audit
+    - internal/integration/**
+    - internal/detect
+    - internal/policybuilder
+    - internal/policyeval
+  shared:
+    - internal/config
+    - internal/secrets
+    - internal/analytics
+    - internal/auth
+    - internal/observability
+    - internal/policy
+    - internal/archtest
+    - internal/archtest/**
+    - tools/**
+    - test/**
+
+# ---------------------------------------------------------------------------
+# Rules. `checker` says who fails on a violation; `fix` is the text printed
+# with every finding. Everything else is rule-specific input data.
+# ---------------------------------------------------------------------------
+rules:
+
+  # --- Layering ------------------------------------------------------------
+
+  - id: L1
+    title: Imports point down only; repositories are imported only by assembly and tests
+    checker: archtest
+    fix: import the domain's port (interface) instead of the repository package, or move the caller into assembly
+
+  - id: L2
+    title: Nothing imports cmd/ or an assembly package
+    checker: archtest
+    fix: invert the dependency — assembly must construct and inject, never be imported
+
+  - id: L3
+    title: Domain packages and data-plane decision stages do no I/O
+    checker: golangci+archtest
+    fix: move the I/O behind a port the domain owns and inject it from assembly
+    banned-imports: [net, net/http, net/smtp, database/sql, os, os/exec, io/fs, crypto/rand]
+    banned-calls: ["time.Now"]
+    applies-to-classes: [domain, decision]
+    # Time, randomness and IDs come through injected ports so tests are deterministic.
+
+  - id: L4
+    title: Control plane — every external call goes through the repository layer
+    checker: golangci+archtest
+    fix: move the external call into an adapter under internal/<domain>/adapters/ and depend on its port
+    banned-imports: [database/sql, os/exec]
+    banned-calls: []
+    applies-to-classes: [domain]   # control-plane zone only, see zone-filter
+    zone-filter: control
+
+  - id: L4a
+    title: Data plane — only the engine handles proxied traffic; everything else goes through a port
+    checker: golangci+archtest
+    fix: depend on the side-call port (interface) and let assembly wire the adapter
+    banned-imports: [database/sql]
+    applies-to-classes: [engine, decision]
+    # Side-call adapters must not import the engine or decision internals; that
+    # half is the import-graph part the archtest enforces.
+
+  - id: L4b
+    title: Data-plane hot path budget — side calls only through cached, async or bounded ports
+    checker: proxy
+    stage: benchmark
+    test: scripts/check.sh benchmark smoke (go test -bench . -benchtime=1x ./...) plus the hot-path benchmarks in internal/proxy
+    fix: keep side calls off the hot path unless cached, async or behind a fail-closed timeout
+    coverage:
+      - part: the benchmarks compile and run on every gate (the smoke tripwire)
+        enforced: proxy
+      - part: synchronous port calls on the hot path are allowlisted by rule
+        planned: needs type-level call-graph analysis; lands with the port cleanup (ticket step 7)
+    reason: >-
+      the budget is a performance property; the synchronous-port-call allowlist
+      needs type-level call-graph analysis and lands with the port cleanup
+      (ticket step 7). Today the benchmark smoke run in check.sh is the tripwire.
+
+  - id: L5
+    title: Ports live in the domain; a domain never imports its own adapters
+    checker: archtest
+    fix: move the interface the domain needs into the domain package; only assembly may import the adapter
+
+  - id: L6
+    title: Transport holds no business logic and never imports repositories, drivers or SDKs
+    checker: archtest
+    fix: call a domain service; let assembly inject the adapter behind it
+    banned-imports: [database/sql]
+    applies-to-classes: [transport]
+
+  - id: L7
+    title: Storage repositories import no domain other than their own and no transport or assembly package
+    checker: archtest
+    fix: depend on the types of your own domain only; other domains depend on you through their ports
+
+  - id: L8
+    title: Every package must match a declared class and zone (catches unlayered packages)
+    checker: archtest
+    fix: add the package to architecture.yaml (classes/zones) — or move it until it fits the model
+
+  # --- Swappability ---------------------------------------------------------
+
+  - id: S1
+    title: Only assembly constructs adapters, and the backend is a validated config key
+    checker: archtest+proxy
+    test: internal/config/secretstore_test.go (TestSecretStore_UnknownBackend_Errors — an unknown backend fails config validation)
+    fix: construct adapters in cmd/ from a validated backend key; an unknown value must fail startup
+    # Import half: enforced by L1 (only assembly imports repositories/adapters).
+    # Validation half: covered today by the config test above.
+
+  - id: S2
+    title: Every port has a fake and a conformance suite; production code never imports a *test package
+    checker: archtest
+    fix: move the import behind a port in test code, or make the helper a normal internal package
+    coverage:
+      - part: no production import of a test-support package
+        enforced: archtest
+      - part: every port has a fake and a conformance suite
+        planned: no internal/<domain>/<domain>test/ suites exist until the adapter migration (step 7) creates the ports to conform to
+    reason: >-
+      the conformance-suite half is planned — no
+      internal/<domain>/<domain>test/ suites exist until the adapter migration
+      (step 7) creates ports to conform to; the import guard above is enforced.
+
+  - id: S3
+    title: Third-party modules are allowlisted per layer; a new module needs a manifest entry
+    checker: golangci
+    fix: add the module to the modules list in architecture.yaml with its allowed layers
+    # modules: below is the manifest; gomodguard_v2 fails go.mod on any module
+    # missing from it, depguard restricts non-adapter layers to stdlib + this
+    # module (see the generated .golangci.arch.yml).
+
+  - id: S4
+    title: No package-level mutable state and no init() registration
+    checker: archtest
+    fix: build it in a constructor and inject it; registration maps move to assembly
+    allowed-vars: >-
+      compile-time constants by convention: *regexp.Regexp, error sentinels,
+      `var _ Iface = (*T)(nil)` assertions, ldflags string vars, go:embed bytes,
+      and any package-level var never mutated after initialization
+
+  - id: S5
+    title: Other packages use a domain only through its package API, never through its adapters/
+    checker: archtest
+    fix: import the domain package, not internal/<domain>/adapters/<x>
+
+  # --- Zones ----------------------------------------------------------------
+
+  - id: Z1
+    title: Every package is tagged with a zone (data plane, control plane, shared)
+    checker: archtest
+    fix: add the package to a zone list in architecture.yaml
+
+  - id: Z2
+    title: Data-plane packages never import control-plane packages; control plane never imports data-plane assembly
+    checker: archtest
+    fix: depend on shared packages, or move the needed type into shared
+
+  - id: Z3
+    title: Shared packages are domain-layer only
+    checker: archtest
+    fix: move the I/O into a domain's adapter; keep the shared package pure
+
+  - id: Z4
+    title: Only the data-plane engine opens sockets for proxied traffic; side-call adapters use the shared client constructor
+    checker: archtest
+    fix: move the socket into the engine, or make this package a side-call adapter that dials through the shared SSRF-safe constructor (X4)
+
+  # --- Security boundaries --------------------------------------------------
+
+  - id: X1
+    title: Private-key signing only in control-plane signer adapters
+    checker: golangci+archtest
+    fix: move the signing into an adapter under internal/<domain>/adapters/signer/ and call it through its port
+    banned-calls:
+      - crypto/ed25519.Sign
+      - crypto/ecdsa.Sign
+      - crypto/ecdsa.SignASN1
+      - crypto/x509.CreateCertificate
+    # references-too: holding the signing function itself is as much a
+    # bypass as calling it, so the golangci side bans any use of the name.
+    references-too: true
+    signer-paths:
+      - internal/*/adapters/signer/**
+
+  - id: X2
+    title: Control-plane config fields carry json:"-" so they can never reach a worker
+    checker: archtest
+    fix: tag the field `json:"-"` (or argue it onto the wire document in architecture.yaml)
+    structs:
+      - package: internal/config
+        type: Policy
+        # The genuine wire fields: the ONLY Policy fields a worker may receive
+        # (policyWire re-projects exactly these two lists). Everything else
+        # must carry json:"-". A new field must pick a side: tag it, or argue
+        # it onto this list.
+        wire-fields: [Allowlist, Denylist]
+    # SettingsWire (internal/config) is deliberately NOT listed: it IS the
+    # control-plane→worker wire document, so its fields must marshal.
+
+  - id: X3
+    title: os.Environ is banned; exec.Command only in adapters, with an explicit environment
+    checker: golangci+archtest
+    fix: pass an explicit env (or the specific values needed) instead of the process environment
+    exec-allowed-in:
+      - repository   # adapters run processes on behalf of the domain
+      - devtool      # the checker and dev tools drive the go toolchain
+    # os.Environ: banned everywhere, no exceptions. exec in cmd/ is a baseline
+    # entry until the MCP spawn moves into an adapter.
+
+  - id: X4
+    title: No http.DefaultClient, http.Get/Post, or bare &http.Client{} — outbound clients come from the shared SSRF-safe constructor
+    checker: golangci+archtest
+    fix: build the client through the shared constructor that uses the proxy's SSRF-safe dialer
+    banned-calls:
+      - net/http.Get
+      - net/http.Post
+      - net/http.Head
+      - net/http.PostForm
+    # references-too: passing http.Get around is a bare client by proxy.
+    references-too: true
+    # The shared constructor does not exist yet (the internal/proxy SafeDialer
+    # is its core); every bare client today is a baseline entry until it lands.
+
+  - id: X5
+    title: Reserved storage key prefixes are built only by their key-builder function
+    checker: archtest
+    fix: call the builder instead of formatting the prefix by hand
+    prefixes:
+      - prefix: "warden/"
+        used-by: secret names in AWS Secrets Manager
+        builder: internal/secrets awsSecretStore.name (encodeKey)
+        owner-packages: [internal/secrets, internal/config]
+        # internal/config duplicates the default literal today (see the comment
+        # on defaultAWSNamePrefix); it is an owner until step 7 deduplicates it.
+
+  - id: X6
+    title: Deny reasons are declared once, as constants in one reasons file
+    checker: planned
+    reason: >-
+      no reasons file exists yet (internal/policy has no Reason constants;
+      verdict reasons are string literals at each call site). Creating
+      internal/<x>/reasons.go and migrating the literals is data-plane cleanup;
+      once the file exists an archtest can pin the token set.
+
+  - id: X7
+    title: No httputil.Dump*, no logging of requests/responses/bodies, no fmt.Print*/log.Print* in internal/
+    checker: golangci+archtest
+    fix: use the structured logger (internal/observability) and reference data by hash/metadata, never by value
+    banned-calls:
+      - net/http/httputil.DumpRequest
+      - net/http/httputil.DumpRequestOut
+      - net/http/httputil.DumpResponse
+      - fmt.Print
+      - fmt.Printf
+      - fmt.Println
+      - log.Print
+      - log.Printf
+      - log.Println
+    # references-too: a Dump or Print function held in a variable is the same
+    # leak one call away. (L3 does NOT set this: assigning time.Now is the
+    # sanctioned clock injection, so only the archtest call check bans it.)
+    references-too: true
+    applies-to-paths:
+      - internal/**
+    # Logging a body is a review-level rule (SEC checks); the deterministic
+    # core — the banned calls — is enforced here.
+
+  - id: X8
+    title: math/rand is banned outside tests — randomness comes through the domain's random port over crypto/rand
+    checker: golangci+archtest
+    fix: inject a randomness port backed by crypto/rand
+    banned-imports: [math/rand, math/rand/v2]
+    except-tests: true
+
+  - id: X9
+    title: HTTP routes are registered only in a routes.go per server, each declaring its role or scope
+    checker: archtest
+    fix: move the mux registration into the server's routes.go
+    route-files: ["routes.go"]
+    coverage:
+      - part: registrations live in the server's routes.go (today's strays are baselined)
+        enforced: archtest
+      - part: each route declares its role or scope, and a coverage test pins the route set
+        planned: routes.go files and role annotations do not exist yet; both land with the routes.go migration
+    reason: >-
+      the per-route role/scope declaration and the route-coverage test need
+      routes.go files and their role annotations, which the routes.go
+      migration creates; the location half above is enforced today.
+
+  # --- Structure and contracts ---------------------------------------------
+
+  - id: C1
+    title: cmd/ only parses flags, loads config and calls assembly
+    checker: golangci+archtest
+    fix: move the logic into internal/ and call it from assembly
+    banned-imports: [database/sql]
+    applies-to-paths: ["cmd/**"]
+
+  - id: C2
+    title: No pkg/ directory; no CGo SQLite driver
+    checker: golangci+archtest
+    fix: use cmd/ + internal/ for code, and modernc.org/sqlite (pure Go) for storage
+    blocked-modules:
+      - module: github.com/mattn/go-sqlite3
+        reason: C2 — CGo SQLite is banned; use modernc.org/sqlite to keep the single static binary
+
+  - id: C3
+    title: Every package has at least one _test.go
+    checker: archtest
+    fix: add a test — even a table-driven unit test of the package's core function
+
+  - id: C4
+    title: Every wire format type has a schema or golden test beside it
+    checker: proxy
+    test: >-
+      internal/controlplane/controlplane_test.go TestPolicyServedExcludesSecrets
+      and TestPolicyIncludesSettingsAndETagCovers (the /policy + settings wire
+      the worker consumes, including the json:"-" exclusion guarantee)
+    fix: add a golden/round-trip test next to the type
+    wire-types:
+      - internal/config.SettingsWire
+      - internal/config.SettingsWire.SecretsSettings
+      - internal/analytics.MCPSnapshot
+      - internal/analytics.ingestEnvelope
+      - internal/integration/webhook.alertPayload
+    coverage:
+      - part: the CP→worker policy/settings wire is pinned by wire tests (secrets absent, settings+ETag present)
+        enforced: proxy
+      - part: every wire type above is pinned by a golden/round-trip test beside it
+        planned: the remaining wire types' golden tests land with the wire-schema work
+    reason: >-
+      proxy for the CP→worker policy/settings wire today; per-type golden tests
+      for the remaining wire types are listed above and land with the
+      wire-schema work.
+
+# ---------------------------------------------------------------------------
+# S3 module manifest. gomodguard_v2 fails go.mod if any module (direct or
+# indirect) is missing from this list — a new module needs a manifest entry.
+# `layers` documents where a direct module may be imported; the per-layer import
+# bans are generated as depguard rules (adapters/repository: full list;
+# domain/decision/transport: stdlib + this module only).
+# ---------------------------------------------------------------------------
+modules:
+  direct:
+    - module: github.com/prometheus/client_golang
+      layers: [repository]
+    - module: github.com/spf13/cobra
+      layers: [assembly]
+    - module: go.opentelemetry.io/otel
+      layers: [repository]
+    - module: go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc
+      layers: [repository]
+    - module: go.opentelemetry.io/otel/exporters/prometheus
+      layers: [repository]
+    - module: go.opentelemetry.io/otel/metric
+      layers: [repository]
+    - module: go.opentelemetry.io/otel/sdk
+      layers: [repository]
+    - module: go.opentelemetry.io/otel/sdk/metric
+      layers: [repository]
+    - module: golang.org/x/net
+      layers: [engine]
+    - module: golang.org/x/sync
+      layers: [engine]
+    - module: gopkg.in/yaml.v3
+      layers: [repository]
+    - module: modernc.org/sqlite
+      layers: [repository]
+  # Indirect (go.mod's second require block; listed so gomodguard accepts
+  # go.mod, and so an upgrade that adds a module needs a manifest entry).
+  indirect:
+    - github.com/beorn7/perks
+    - github.com/cenkalti/backoff/v5
+    - github.com/cespare/xxhash/v2
+    - github.com/dustin/go-humanize
+    - github.com/go-logr/logr
+    - github.com/go-logr/stdr
+    - github.com/google/uuid
+    - github.com/grpc-ecosystem/grpc-gateway/v2
+    - github.com/inconshreveable/mousetrap
+    - github.com/kr/text
+    - github.com/mattn/go-isatty
+    - github.com/munnerz/goautoneg
+    - github.com/ncruces/go-strftime
+    - github.com/prometheus/client_model
+    - github.com/prometheus/common
+    - github.com/prometheus/otlptranslator
+    - github.com/prometheus/procfs
+    - github.com/remyoudompheng/bigfft
+    - github.com/spf13/pflag
+    - go.opentelemetry.io/auto/sdk
+    - go.opentelemetry.io/otel/log
+    - go.opentelemetry.io/otel/trace
+    - go.opentelemetry.io/proto/otlp
+    - golang.org/x/sys
+    - golang.org/x/text
+    - google.golang.org/genproto/googleapis/api
+    - google.golang.org/genproto/googleapis/rpc
+    - google.golang.org/grpc
+    - google.golang.org/protobuf
+    - modernc.org/libc
+    - modernc.org/mathutil
+    - modernc.org/memory

@@ -1,0 +1,175 @@
+# architecture.baseline.yaml — architecture and security violations that exist
+# today, by rule ID and package (never by line). Each entry's allow list pins
+# WHAT the package may keep violating with: the exact imported packages, called
+# functions or target registrations. The gate fails when a baselined package
+# gains an item that is not listed here, and fails again on stale entries or
+# items — a listed violation that gets fixed must have its entry (or item)
+# removed, so the baseline only shrinks.
+baseline:
+  - rule: C3
+    package: examples/mcp-wedge/poisoned-mcp-server
+    why: "deliberately broken demo binary: exists to show what Warden blocks, no testable core"
+  - rule: L1
+    package: internal/alertpipeline
+    why: "pre-migration: the domain still imports repositories directly (ticket step 7 moves the calls behind ports)"
+    allow: ["internal/analytics", "internal/integration"]
+  - rule: L1
+    package: internal/detect
+    why: "pre-migration: the domain still imports repositories directly (ticket step 7 moves the calls behind ports)"
+    allow: ["internal/analytics", "internal/integration"]
+  - rule: L1
+    package: internal/policybuilder
+    why: "pre-migration: the domain still imports repositories directly (ticket step 7 moves the calls behind ports)"
+    allow: ["internal/analytics"]
+  - rule: L1
+    package: internal/policyeval
+    why: "pre-migration: the domain still imports repositories directly (ticket step 7 moves the calls behind ports)"
+    allow: ["internal/analytics"]
+  - rule: L2
+    package: internal/controlplane
+    why: "pre-migration: the control-plane/worker assembly packages import each other until step 7 splits them"
+    allow: ["internal/dashboard", "internal/worker"]
+  - rule: L2
+    package: internal/worker
+    why: "pre-migration: the control-plane/worker assembly packages import each other until step 7 splits them"
+    allow: ["internal/dashboard"]
+  - rule: L3
+    package: internal/config
+    why: "pre-migration: domain/decision stages still read the clock or the network directly; step 7 injects ports"
+    allow: ["net", "net/http", "os"]
+  - rule: L3
+    package: internal/mcp
+    why: "pre-migration: domain/decision stages still read the clock or the network directly; step 7 injects ports"
+    allow: ["time.Now"]
+  - rule: L3
+    package: internal/scan
+    why: "pre-migration: domain/decision stages still read the clock or the network directly; step 7 injects ports"
+    allow: ["net"]
+  - rule: L4a
+    package: internal/llmpolicy
+    why: "pre-migration: data-plane stages still reach database/sql directly"
+    allow: ["internal/analytics"]
+  - rule: L4a
+    package: internal/mcp/gateway
+    why: "pre-migration: data-plane stages still reach database/sql directly"
+    allow: ["database/sql"]
+  - rule: L4a
+    package: internal/proxy
+    why: "pre-migration: data-plane stages still reach database/sql directly"
+    allow: ["internal/analytics", "internal/auth", "internal/observability", "internal/secrets"]
+  - rule: L6
+    package: internal/admin
+    why: "pre-migration: transport still imports repositories until step 7 inverts the dependency"
+    allow: ["internal/secrets"]
+  - rule: L7
+    package: internal/audit
+    why: "pre-migration: repositories reach across domains (shared tables) until step 7"
+    allow: ["internal/analytics"]
+  - rule: L7
+    package: internal/secrets
+    why: "pre-migration: repositories reach across domains (shared tables) until step 7"
+    allow: ["internal/auth"]
+  - rule: S4
+    package: internal/integration
+    why: "pre-migration: package-level registration tables and caches until step 7 moves them into constructors"
+    allow: ["registry"]
+  - rule: S4
+    package: internal/integration/webhook
+    why: "pre-migration: package-level registration tables and caches until step 7 moves them into constructors"
+    allow: ["init()"]
+  - rule: S4
+    package: internal/proxy
+    why: "pre-migration: package-level registration tables and caches until step 7 moves them into constructors"
+    allow: ["blockedNets", "init()"]
+  - rule: X1
+    package: examples/mcp-wedge/poisoned-mcp-server
+    why: "pre-migration: signing happens outside signer adapters until step 7 extracts them"
+    allow: ["crypto/x509.CreateCertificate"]
+  - rule: X1
+    package: internal/audit
+    why: "pre-migration: signing happens outside signer adapters until step 7 extracts them"
+    allow: ["crypto/ed25519.Sign"]
+  - rule: X1
+    package: internal/controlplane
+    why: "pre-migration: signing happens outside signer adapters until step 7 extracts them"
+    allow: ["crypto/x509.CreateCertificate"]
+  - rule: X1
+    package: internal/proxy
+    why: "pre-migration: signing happens outside signer adapters until step 7 extracts them"
+    allow: ["crypto/x509.CreateCertificate"]
+  - rule: X3
+    package: cmd/proxy
+    why: "the checker and the integration harness drive the go toolchain; adapters own exec after step 7"
+    allow: ["os/exec.CommandContext"]
+  - rule: X3
+    package: test/integration
+    why: "the checker and the integration harness drive the go toolchain; adapters own exec after step 7"
+    allow: ["os.Environ"]
+  - rule: X3
+    package: tools/checkreport
+    why: "the dev tool injects its own environ into realMain for testability; a CI tool, never the guarded agent"
+    allow: ["os.Environ"]
+  - rule: X4
+    package: internal/analytics
+    why: "pre-migration: bare http clients predate the shared SSRF-safe constructor"
+    allow: ["net/http.Client{}"]
+  - rule: X4
+    package: internal/config
+    why: "pre-migration: bare http clients predate the shared SSRF-safe constructor"
+    allow: ["net/http.Client{}"]
+  - rule: X4
+    package: internal/integration/webhook
+    why: "pre-migration: bare http clients predate the shared SSRF-safe constructor"
+    allow: ["net/http.Client{}"]
+  - rule: X4
+    package: internal/llm
+    why: "pre-migration: bare http clients predate the shared SSRF-safe constructor"
+    allow: ["net/http.Client{}"]
+  - rule: X4
+    package: internal/secrets
+    why: "pre-migration: bare http clients predate the shared SSRF-safe constructor"
+    allow: ["net/http.Client{}"]
+  - rule: X4
+    package: internal/worker
+    why: "pre-migration: bare http clients predate the shared SSRF-safe constructor"
+    allow: ["net/http.Client{}"]
+  - rule: X9
+    package: examples/mcp-wedge/poisoned-mcp-server
+    why: "pre-migration: routes registered beside handlers until the routes.go migration"
+    allow: ["/"]
+  - rule: X9
+    package: internal/admin
+    why: "pre-migration: routes registered beside handlers until the routes.go migration"
+    allow: ["/admin/refresh-secrets", "/healthz"]
+  - rule: X9
+    package: internal/controlplane
+    why: "pre-migration: routes registered beside handlers until the routes.go migration"
+    allow: ["/central/ingest", "/central/secrets", "/central/secrets/", "/control/heartbeat", "/dashboard/", "/healthz", "/policy"]
+  - rule: X9
+    package: internal/dashboard
+    why: "pre-migration: routes registered beside handlers until the routes.go migration"
+    allow: ["/dashboard/", "/dashboard/api/alerts", "/dashboard/api/analytics", "/dashboard/api/audit", "/dashboard/api/audit/verify", "/dashboard/api/detection", "/dashboard/api/endpoints", "/dashboard/api/integrations", "/dashboard/api/llmproviders", "/dashboard/api/mcp", "/dashboard/api/policy", "/dashboard/api/query", "/dashboard/api/query/generate", "/dashboard/api/query/schema", "/dashboard/api/secrets", "/dashboard/api/secretstore", "/dashboard/api/settings", "/dashboard/api/setup", "/dashboard/api/traffic", "/dashboard/api/workers"]
+  - rule: X9
+    package: internal/worker
+    why: "pre-migration: routes registered beside handlers until the routes.go migration"
+    allow: ["/admin/", "/central/ingest", "/dashboard/", "/healthz", "/metrics"]
+  - rule: Z2
+    package: internal/worker
+    why: "pre-migration: the worker data-plane assembly reaches into the control plane until step 7 splits it"
+    allow: ["internal/alertpipeline", "internal/audit", "internal/dashboard", "internal/integration"]
+  - rule: Z3
+    package: internal/analytics
+    why: "pre-migration: shared-zone packages still carry repository-layer I/O until step 7 moves it into adapters"
+    allow: ["repository"]
+  - rule: Z3
+    package: internal/auth
+    why: "pre-migration: shared-zone packages still carry repository-layer I/O until step 7 moves it into adapters"
+    allow: ["repository"]
+  - rule: Z3
+    package: internal/observability
+    why: "pre-migration: shared-zone packages still carry repository-layer I/O until step 7 moves it into adapters"
+    allow: ["repository"]
+  - rule: Z3
+    package: internal/secrets
+    why: "pre-migration: shared-zone packages still carry repository-layer I/O until step 7 moves it into adapters"
+    allow: ["repository"]

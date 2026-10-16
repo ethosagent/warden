@@ -17,6 +17,9 @@ import (
 //	d            (independent)
 //	e            (code independent; its test imports a)
 //	f            (its test imports c, which reaches a through b)
+//
+// plus the two architecture-gate packages (cmd/archgen, internal/archtest),
+// which no other package imports.
 func gitRepo(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -38,6 +41,11 @@ func gitRepo(t *testing.T) string {
 	write("e/e_test.go", "package e\n\nimport (\n\t\"testing\"\n\n\t\"example.com/fx/a\"\n)\n\nfunc TestE(t *testing.T) { _ = a.A() }\n")
 	write("f/f.go", "package f\n\nfunc F() int { return 6 }\n")
 	write("f/f_test.go", "package f\n\nimport (\n\t\"testing\"\n\n\t\"example.com/fx/c\"\n)\n\nfunc TestF(t *testing.T) { _ = c.C() }\n")
+	write("cmd/archgen/main.go", "package main\n\nfunc main() {}\n")
+	write("internal/archtest/archtest.go", "package archtest\n")
+	write("architecture.yaml", "version: 1\n")
+	write("architecture.baseline.yaml", "baseline:\n")
+	write(".golangci.arch.yml", "version: \"2\"\n")
 	write("docs/README.md", "docs\n")
 	git(t, dir, "init", "-q", "-b", "main")
 	git(t, dir, "add", "-A")
@@ -165,6 +173,21 @@ func TestFastPlan(t *testing.T) {
 			p := planFor(t, dir)
 			if !p.Full || !strings.Contains(p.Why, f) {
 				t.Fatalf("plan = %+v", p)
+			}
+		})
+	}
+
+	// The architecture definitions are inputs of the gate, not of any ordinary
+	// package: changing one adds the gate and the generator to the plan.
+	for _, f := range []string{"architecture.yaml", "architecture.baseline.yaml", ".golangci.arch.yml"} {
+		t.Run(f+" adds the architecture gate", func(t *testing.T) {
+			dir := gitRepo(t)
+			writeFile(t, dir, f, "changed\n")
+			got := reasons(planFor(t, dir))
+			for _, pkg := range []string{"internal/archtest", "cmd/archgen"} {
+				if got[pkg] == "" {
+					t.Errorf("package %s missing from %v", pkg, got)
+				}
 			}
 		})
 	}
