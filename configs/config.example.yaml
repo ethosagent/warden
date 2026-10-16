@@ -181,6 +181,18 @@ advisory:
 #   monitor  - detect + analyze + log + metric, NEVER block (the adoption wedge).
 #   enforce  - monitor PLUS block (deny non-allowlisted tools, high-severity
 #              findings, pinned-schema drift).
+# In enforce mode WebSocket and SSE MCP traffic is HELD until scanned: each WS data
+# message (text OR binary, all fragments of it) / SSE event is forwarded only after
+# the scan allows it, so a denied message never reaches its peer. A binary WS
+# message is scanned as UTF-8 JSON-RPC; one that is not valid UTF-8 JSON cannot be
+# scanned and is denied (the connection is torn down). A continuation with no open
+# message, or a new data message inside an open one, is denied too. The added
+# latency is one message. Worst-case memory is ONE buffered message per direction
+# per WS connection (8 MiB cap, so up to 16 MiB per connection) and 1 MiB per SSE
+# stream; a message/event over the cap is denied rather than forwarded unscanned.
+# WS control frames (ping/pong/close) are never held. If the gateway does not report
+# its mode, Warden fails safe and holds. Monitor mode forwards first and scans after
+# (lowest latency, nothing blocked, binary frames not scanned).
 # MCP analysis only ever makes a decision MORE restrictive; it never re-allows a
 # request the domain/port default-deny already blocked. Never persists tool
 # arguments, results, or matched content — only bounded enums and counts.

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"crypto/tls"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -1170,8 +1171,15 @@ func (p *Proxy) relayMCPSSE(s *requestScope) (terminal bool) {
 		return true
 	}
 
+	// Enforce mode holds each event until it is scanned and writes it to bodyOut
+	// only on allow. bodyOut is unchanged and the echo guard sits on s.resp.Body
+	// upstream of the scanner, so only bytes it cleared are ever held or released.
+	scan := sse.Scan
+	if p.holdMCP(s.gw) {
+		scan = sse.ScanHeld
+	}
 	blocked := false
-	scanErr := sse.Scan(s.resp.Body, bodyOut, func(data []byte) bool {
+	scanErr := scan(s.resp.Body, bodyOut, func(data []byte) bool {
 		start := time.Now()
 		v := s.gw.OnResponse(s.mcpSessKey, s.resp.StatusCode, s.resp.Header, data)
 		p.cfg.Metrics.ObserveAddedLatency("mcp_scan", time.Since(start))
@@ -1188,6 +1196,11 @@ func (p *Proxy) relayMCPSSE(s *requestScope) (terminal bool) {
 
 	if p.echoStreamDone(s) {
 		return true // echo guard cut the stream; its deny is the only event
+	}
+	if errors.Is(scanErr, sse.ErrEventTooLarge) {
+		// Enforce mode could not scan this event, so it was not forwarded.
+		blocked = true
+		s.mcpReason = "mcp_sse_event_too_large"
 	}
 	if blocked {
 		reason := preferEchoReason(s.mcpReason, s.echoMonitorReason)

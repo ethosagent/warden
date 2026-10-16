@@ -3,17 +3,20 @@ package ws
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/ethosagent/warden/internal/mcp/gateway"
 )
 
-// maxReassembledMessage caps a reassembled (fragmented) text message. A message
-// whose accumulated payload exceeds this is still forwarded verbatim, but it is
-// not scanned (no analysis on an unbounded payload).
+// maxReassembledMessage caps a reassembled (fragmented) text message. Without
+// Hold, a message whose accumulated payload exceeds this is still forwarded
+// verbatim, but it is not scanned (no analysis on an unbounded payload). With
+// Hold (enforce) it fails closed: it is denied and never forwarded.
 const maxReassembledMessage = 8 << 20 // 8 MiB
 
 // ClosePolicyViolation is the WebSocket close status used when an enforce-mode
@@ -37,6 +40,13 @@ type Pump struct {
 	GW         Scanner
 	SessionKey string
 	Log        *slog.Logger
+	// Hold (enforce mode) withholds every data message (text or binary), all
+	// fragments of it, until the gateway has scanned the complete message: it is
+	// forwarded only on allow. A binary message that is not valid UTF-8 JSON cannot
+	// be scanned and is denied. The added latency is one message; the worst-case
+	// memory is one buffered message (8 MiB) per direction. Control frames are
+	// never held. Without Hold (monitor/off) frames are forwarded first and scanned after.
+	Hold bool
 }
 
 // Run pumps frames in both directions between client and server, forwarding
@@ -146,8 +156,9 @@ const (
 	dirResponse
 )
 
-// pumpDir reads frames from src, forwards each to dst transparently, and scans
-// each completed text message through the gateway. On an enforce Deny it calls
+// pumpDir reads frames from src, forwards each to dst transparently (text
+// messages are held until scanned when Hold is set), and scans each completed
+// text message through the gateway. On an enforce Deny it calls
 // teardown (which Close-frames both peers) and returns. ctx cancellation makes
 // the goroutine stop after the current frame.
 func (p *Pump) pumpDir(
@@ -163,10 +174,14 @@ func (p *Pump) pumpDir(
 	}
 
 	var (
-		assembling bool   // inside a fragmented text message
-		acc        []byte // accumulated text payload (reassembly)
-		overCap    bool   // current message exceeded maxReassembledMessage
+		assembling bool    // inside a fragmented text message
+		acc        []byte  // accumulated payload (reassembly; with Hold, the only copy)
+		overCap    bool    // current message exceeded maxReassembledMessage
+		held       []Frame // Hold: headers (no payload) of the open message's frames
+		heldLen    []int   // Hold: payload length of each held frame (bytes live in acc)
+		binary     bool    // Hold: the open message is a binary data message
 	)
+	hold := p.Hold && p.GW != nil
 
 	for {
 		select {
@@ -180,8 +195,62 @@ func (p *Pump) pumpDir(
 			return err
 		}
 
+		if hold && !f.IsControl() {
+			// Enforce: every data message (text AND binary), all fragments, is held
+			// until scanned. Only the payload bytes are kept (once, in acc); the
+			// per-frame headers are retained so the frames are re-emitted unchanged.
+			switch f.Opcode {
+			case OpcodeText, OpcodeBinary:
+				if assembling {
+					// A new data message inside an open one is a protocol
+					// violation; the held fragments cannot be vouched for.
+					teardown()
+					return nil
+				}
+				binary = f.Opcode == OpcodeBinary
+			case OpcodeContinuation:
+				if !assembling {
+					// A continuation with no open message cannot be scanned.
+					teardown()
+					return nil
+				}
+			default:
+				// Reserved data opcode: unscannable, fail closed.
+				teardown()
+				return nil
+			}
+			if len(acc)+len(f.Payload) > maxReassembledMessage {
+				// Fail closed: never forward a message we cannot scan.
+				teardown()
+				return nil
+			}
+			acc = append(acc, f.Payload...)
+			hdr := f
+			hdr.Payload = nil
+			held = append(held, hdr)
+			heldLen = append(heldLen, len(f.Payload))
+			assembling = !f.Fin
+			if !f.Fin {
+				continue
+			}
+			if p.holdDeny(dir, acc, binary) {
+				teardown()
+				return nil
+			}
+			off := 0
+			for i, hf := range held {
+				hf.Payload = acc[off : off+heldLen[i]]
+				off += heldLen[i]
+				if werr := dst(hf); werr != nil {
+					return werr
+				}
+			}
+			held, heldLen, acc = held[:0], heldLen[:0], acc[:0]
+			continue
+		}
+
 		// Forward EVERY frame transparently first so the peer sees live traffic
-		// even for frames we do not scan.
+		// even for frames we do not scan (and, without Hold, text messages too).
 		if werr := dst(f); werr != nil {
 			return werr
 		}
@@ -238,6 +307,15 @@ func (p *Pump) pumpDir(
 			// Binary or unknown data frame: forwarded above, not scanned.
 		}
 	}
+}
+
+// holdDeny decides a fully held message. A binary message is scanned like text
+// when it is valid UTF-8 JSON; anything else cannot be scanned and fails closed.
+func (p *Pump) holdDeny(dir direction, msg []byte, binary bool) bool {
+	if binary && len(msg) > 0 && (!utf8.Valid(msg) || !json.Valid(msg)) {
+		return true
+	}
+	return p.scan(dir, msg, false)
 }
 
 // scan runs the gateway EXACTLY ONCE on a completed text message (skipped when
