@@ -164,6 +164,7 @@ func (p *Proxy) storeDeny(domain string, port int, protocol, reason string) {
 }
 
 func (p *Proxy) tunnel(client net.Conn, br *bufio.Reader, targetAddr string) {
+	p.reach(PathTunnel)
 	remote, err := p.dialFunc("tcp", targetAddr)
 	if err != nil {
 		return

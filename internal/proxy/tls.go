@@ -61,6 +61,7 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 			p.storeDeny(domain, port, "tcp", "no_tls")
 			return
 		}
+		p.reach(PathTunnel)
 		remote, dialErr := p.dialFunc("tcp", net.JoinHostPort(domain, fmt.Sprintf("%d", port)))
 		if dialErr != nil {
 			return
@@ -158,6 +159,7 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 	}
 
 	// Unrecognized protocol inside TLS: raw forwarding.
+	p.reach(PathRawTLS)
 	remote, dialErr := p.dialTLS("tcp", net.JoinHostPort(domain, fmt.Sprintf("%d", port)), &tls.Config{ServerName: domain})
 	if dialErr != nil {
 		return

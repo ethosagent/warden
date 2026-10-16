@@ -89,9 +89,12 @@ func (p *Proxy) handleGRPC(clientConn net.Conn, domain string, port int) {
 func (p *Proxy) serveGRPCStream(w http.ResponseWriter, r *http.Request, rt *http2.Transport, domain string, port int) {
 	isGRPC := strings.HasPrefix(r.Header.Get("Content-Type"), "application/grpc")
 	proto := "http2"
+	path := PathH2
 	if isGRPC {
 		proto = "grpc"
+		path = PathGRPC
 	}
+	p.reach(path)
 
 	// Swap secret placeholders in request headers (metadata) only. Snapshot the
 	// live secret provider once so a concurrent cache.ttl swap can't change it

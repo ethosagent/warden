@@ -211,6 +211,7 @@ func (s *requestScope) addEvidence(dets []scan.Detection) {
 // stale-conn redial's fresh conn. It is nil (nothing to close) before the first
 // forward and after a handoff, so there is no double close and no leak.
 func (p *Proxy) handleHTTP(tlsConn *tls.Conn, br *bufio.Reader, domain string, port int, needsJudge bool) {
+	p.reach(PathHTTP1)
 	var upstream net.Conn
 	var upstreamBR *bufio.Reader
 	defer func() {
@@ -389,6 +390,7 @@ func (p *Proxy) mcpRequestScan(s *requestScope) (endSession bool) {
 		return false
 	}
 	s.wasMCP = true
+	p.reach(PathMCP)
 	fullURL := "https://" + s.domain + s.req.URL.RequestURI()
 	s.mcpSessKey = p.cfg.AgentID + ":" + s.domain
 	start := time.Now()
@@ -940,6 +942,7 @@ func (p *Proxy) mcpResponseScan(s *requestScope) (terminal bool) {
 // response is terminal for the connection, so this fully handles the request
 // (writing the deny/allow audit event) and always returns true.
 func (p *Proxy) relayMCPSSE(s *requestScope) (terminal bool) {
+	p.reach(PathSSE)
 	fullURL := "https://" + s.domain + s.req.URL.RequestURI()
 
 	// Write the status line + headers manually: resp.Write cannot be used because

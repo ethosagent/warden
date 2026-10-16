@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("\ufeffpolicy:\n  allowlist:\n    - domain: bom.test\n")

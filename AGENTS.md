@@ -47,9 +47,40 @@ but excluded from the total). The reporter is
 `tools/checkreport` — developer tooling that no Warden package may import.
 
 `scripts/check.sh` is the single source of truth: format → vet → lint → build →
-test+race+coverage → coverage gate (`COVERAGE_MIN`, default 70) → integration
-(`--integration`). CI runs the same script, so "green locally" means "green in
-CI".
+test+race+coverage → fuzz → coverage gate (`COVERAGE_MIN`, default 70) →
+integration (`--integration`). CI runs the same script, so "green locally" means
+"green in CI".
+
+**Inner loop: `scripts/check.sh --fast`.** Checks only the packages changed since
+`origin/main` (committed, staged, unstaged, untracked) plus every package that
+imports them, in code or tests: format, vet, lint and `go test -race` on those
+packages. It skips roadmap, build, govulncheck, fuzz, the benchmark smoke run and
+the coverage gate, so a green `--fast` is not a green gate; CI and the pre-push
+hook run the full one. It prints the packages and why; with `--json` they are in
+the report's `fast` object. A leaf change takes seconds; a change to a package
+that `internal/proxy` imports also runs the proxy tests (about 40 s under
+`-race`). A change to `go.mod`, `go.sum`, `go.work`, `.golangci.yml`/`.golangci.yaml` or
+`scripts/check.sh` widens it to every package. With no `origin/main` (shallow clone) it runs the full gate and says so.
+It cannot be combined with `--integration`. Logic lives in `tools/checkreport`
+(`-fast-plan`), so plain and `--json` modes pick the same packages.
+
+**Invariant suite** (`internal/proxy/invariants_*_test.go`). One canary secret goes
+through every protocol path in `proxy.ProtocolPaths()` (tunnel, raw-tls, http1, h2,
+grpc, websocket, sse, mcp) on allow, deny, upstream-error and timeout, and must
+never show up in the agent's response, logs, analytics events or metric labels.
+Also: upstream echo, default-deny spellings, proxy-only header stripping, judge
+fail-closed. It is table-driven by path: a new path needs a `p.reach(PathX)` call at
+its dispatch site, an entry in `protocolPaths` (`internal/proxy/paths.go`) and rows
+in `invRows()`, or `TestInvariants_EveryPathHasRows` fails. A row for a known open
+bug carries `knownIssue`: it asserts the bug still reproduces and fails with "appears
+fixed: remove knownIssue" once it does not. Never loosen an assertion instead.
+
+**Fuzzing.** Targets are listed in `scripts/fuzz-targets.txt` (a test fails if a
+`Fuzz*` function is missing). The gate runs each for `FUZZTIME` (default 5s);
+`.github/workflows/fuzz-nightly.yml` runs them for minutes and uploads crashers.
+Seeds live in `testdata/fuzz/<Target>/` and replay in plain `go test`. A crasher in
+policy, CONNECT or MCP parsing is a security finding: report it, then commit the
+file as a regression seed only after triage.
 
 ## Conventions
 
@@ -102,7 +133,7 @@ internal/config/      ConfigProvider + Policy types + local YAML impl
 internal/secrets/     SecretProvider + in-memory cache + ENV impl + Reference
 internal/analytics/   AnalyticsStore + Event/EventFilter + modernc SQLite impl
 internal/policy/      default-deny allowlist evaluator (domain + port inference)
-internal/proxy/       listener / TCP-accept / TLS-termination skeleton
+internal/proxy/       listener / TCP-accept / TLS-termination; paths.go = protocol path registry
 internal/protocol/    protocol detection + HTTP handler skeleton
 internal/agentid/     agent identification (port-binding in M1)
 internal/admin/       /healthz + /admin/refresh-secrets handlers

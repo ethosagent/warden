@@ -20,6 +20,7 @@ func realMain(args []string, stdout, stderr io.Writer, environ []string) (code i
 	var cfg config
 	var asJSON bool
 	var jsonOut, only string
+	var planOnly bool
 	fs.StringVar(&cfg.Root, "root", ".", "repository root to check")
 	fs.BoolVar(&cfg.Integration, "integration", false, "also run the integration stage")
 	fs.BoolVar(&cfg.KeepGoing, "keep-going", false, "run every stage after a failure")
@@ -28,11 +29,15 @@ func realMain(args []string, stdout, stderr io.Writer, environ []string) (code i
 	fs.Float64Var(&cfg.CoverageMin, "coverage-min", 0, "minimum total coverage percent")
 	fs.StringVar(&cfg.GolangciVersion, "golangci-version", "", "pinned golangci-lint version")
 	fs.StringVar(&cfg.GovulncheckVersion, "govulncheck-version", "", "pinned govulncheck version")
+	fs.BoolVar(&cfg.Fast, "fast", false, "check only packages changed since origin/main plus their importers; skip whole-repo stages")
+	fs.BoolVar(&planOnly, "fast-plan", false, "print the --fast package plan for scripts/check.sh and exit")
+	fs.StringVar(&cfg.FuzzTime, "fuzz-time", defaultFuzzTime, "-fuzztime for each fuzz target")
+	fs.StringVar(&cfg.FuzzTargets, "fuzz-targets", "scripts/fuzz-targets.txt", "file listing the fuzz targets, relative to -root")
 	fs.StringVar(&only, "stages", "", "comma-separated stages to run (default: all)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if cfg.GolangciVersion == "" || cfg.GovulncheckVersion == "" {
+	if !planOnly && (cfg.GolangciVersion == "" || cfg.GovulncheckVersion == "") {
 		fmt.Fprintln(stderr, "checkreport: -golangci-version and -govulncheck-version are required (scripts/check.sh passes them)")
 		return 2
 	}
@@ -74,9 +79,27 @@ func realMain(args []string, stdout, stderr io.Writer, environ []string) (code i
 	}
 	r := &runner{cfg: cfg, ctx: parseCtx{Root: absRoot(cfg.Root), Module: module}, exec: osExec, human: human}
 	r.cfg.Root = r.ctx.Root
+	if planOnly {
+		// Not a report: the plain-mode script reads this to scope its own commands.
+		return writeFastPlan(stdout, r.fastPlan())
+	}
 	r.goVer = goVersion(r.cfg.Root)
 	rep, code = r.Run(sc)
 	return code
+}
+
+// writeFastPlan prints the plan in the line format scripts/check.sh reads:
+// "full<TAB>why", or "fast<TAB>base" followed by "package<TAB>dir<TAB>reason".
+func writeFastPlan(w io.Writer, p FastPlan) int {
+	if p.Full {
+		fmt.Fprintf(w, "full\t%s\n", p.Why)
+		return 0
+	}
+	fmt.Fprintf(w, "fast\t%s\n", p.Base)
+	for _, pk := range p.Packages {
+		fmt.Fprintf(w, "%s\t%s\t%s\n", pk.Package, pk.Dir, pk.Reason)
+	}
+	return 0
 }
 
 func absRoot(root string) string {
