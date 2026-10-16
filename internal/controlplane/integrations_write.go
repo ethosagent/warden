@@ -60,7 +60,8 @@ func (s *Server) integrationStatuses() []dashboard.IntegrationInstanceStatus {
 }
 
 // toManagerInstances maps persisted config instances to the integration
-// package's InstanceConfig for a manager rebuild (mirrors cmd's toInstanceConfigs).
+// package's InstanceConfig for a manager rebuild (mirrors run.go's
+// toInstanceConfigs, the boot-time mapping).
 func toManagerInstances(insts []config.IntegrationInstance) []integration.InstanceConfig {
 	out := make([]integration.InstanceConfig, 0, len(insts))
 	for _, in := range insts {
