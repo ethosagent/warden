@@ -35,6 +35,8 @@ import (
 
 // Params are the flag-derived inputs the worker boots from. cmd/proxy parses the
 // cobra flags into this struct; the worker owns everything after that.
+// ListenAddr, CACert, CAKey and AdminAddr are EXPLICIT flag overrides: empty
+// means "not set", and the value then comes from config or the built-in default.
 type Params struct {
 	ConfigPath string
 	ListenAddr string
@@ -56,11 +58,7 @@ type Params struct {
 // observability ServiceVersion.
 func Run(ctx context.Context, out io.Writer, p Params) error {
 	configPath := p.ConfigPath
-	listenAddr := p.ListenAddr
 	dbPath := p.DBPath
-	caCert := p.CACert
-	caKey := p.CAKey
-	adminAddr := p.AdminAddr
 	localOnlyFlag := p.LocalOnly
 
 	cfgProvider, err := config.NewLocalYAMLProvider(configPath)
@@ -71,6 +69,17 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	if err != nil {
 		return err
 	}
+
+	// Flag > config > default for listen/admin-listen/CA paths; validated here
+	// regardless of source, with errors naming the source.
+	eff, err := config.ResolveListen(pol, config.ListenFlags{
+		Listen: p.ListenAddr, AdminListen: p.AdminAddr, CACert: p.CACert, CAKey: p.CAKey,
+	})
+	if err != nil {
+		return err
+	}
+	listenAddr, adminAddr := eff.Listen.Value, eff.AdminListen.Value
+	caCert, caKey := eff.CACert.Value, eff.CAKey.Value
 
 	mapping := make(map[string]string, len(pol.Secrets))
 	placeholders := make([]string, 0, len(pol.Secrets))
@@ -90,6 +99,29 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// managed apply loop uses to change the level at runtime WITHOUT swapping the
 	// (widely-captured) logger instance. Format is restart-only (see LogControl).
 	logger, logCtrl := observability.NewLogger(out, pol.LogLevel, pol.LogFormat)
+	logger.Info("effective listener config", eff.LogArgs()...)
+
+	// Optional upstream DNS override (dns.upstreamResolver). When set, warden's
+	// OWN upstream dials — the proxy's CONNECT tunnels and TLS-terminated
+	// upstreams (SNI keeps the client-supplied hostname), plus the
+	// SafeDialer-based auth-fetch client — resolve through that server instead
+	// of the resolver the container inherits. This is the knob for corporate
+	// VPN / split-horizon networks where the default resolver cannot resolve
+	// the public allowlisted names. The dashboard/admin listeners keep system
+	// resolution, and the agent's own DNS path is a separate concern entirely
+	// (transparent interception, #376). ONE resolver instance is shared by every
+	// SafeDialer-based consumer, so the first-failure log fires exactly once no
+	// matter which path trips it; a dead resolver fails requests exactly like
+	// any other upstream-connect failure — never a silent fallback.
+	var upstreamDNS proxy.NameResolver
+	if pol.DNS.UpstreamResolver != "" {
+		resolverAddr := pol.DNS.UpstreamResolver
+		upstreamDNS = proxy.NewUpstreamResolver(resolverAddr, func(err error) {
+			logger.Warn("upstream DNS lookup failed via the configured resolver; if the server is unreachable, upstream dials fail until it answers (no fallback to the system resolver)",
+				"resolver", resolverAddr, "error", err)
+		})
+		logger.Info("upstream DNS resolver configured for warden's own upstream dials", "resolver", resolverAddr)
+	}
 
 	// Managed vs local-only. Managed = a control plane is configured and
 	// --local-only is not set: the worker's allow/deny policy comes ONLY from the
@@ -340,7 +372,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// Optional auth transforms (OAuth2 / SigV4 / HMAC / API-key) per destination.
 	var transformers []*auth.MatchedTransformer
 	if len(pol.Auth) > 0 {
-		authClient, acErr := newSafeHTTPClient(10*time.Second, "")
+		authClient, acErr := newSafeHTTPClient(10*time.Second, "", upstreamDNS)
 		if acErr != nil {
 			return acErr
 		}
@@ -483,6 +515,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		DLP:               dlpScanner,
 		Transformers:      transformers,
 		Cost:              costEstimator,
+		UpstreamResolver:  upstreamDNS,
 	}
 	if judge != nil {
 		cfg.Judge = judge
@@ -491,6 +524,9 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 
 	pxy, err := newProxy(cfg)
 	if err != nil {
+		if caCert != "" {
+			return fmt.Errorf("%w (ca-cert %q from %s, ca-key %q from %s)", err, caCert, eff.CACert.Source, caKey, eff.CAKey.Source)
+		}
 		return err
 	}
 

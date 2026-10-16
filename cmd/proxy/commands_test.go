@@ -8,8 +8,6 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
-
-	"github.com/ethosagent/warden/internal/config"
 )
 
 // minimalConfig is a valid default-deny worker/control-plane config with every
@@ -68,34 +66,6 @@ func TestParseDuration(t *testing.T) {
 	}
 }
 
-// TestToInstanceConfigs verifies the CP-local integration config maps onto the
-// integration package's InstanceConfig, carrying match clauses through untouched.
-func TestToInstanceConfigs(t *testing.T) {
-	if got := toInstanceConfigs(nil); got != nil {
-		t.Errorf("nil input should map to nil, got %v", got)
-	}
-	insts := []config.IntegrationInstance{{
-		Type:   "webhook",
-		Name:   "alerts",
-		Config: map[string]any{"url": "https://hooks.example/x"},
-		Match:  []config.IntegrationMatch{{Severity: "high", Category: "leak", Domain: "api.x.com", Rule: "r1"}},
-	}}
-	got := toInstanceConfigs(insts)
-	if len(got) != 1 {
-		t.Fatalf("got %d instance configs, want 1", len(got))
-	}
-	ic := got[0]
-	if ic.Type != "webhook" || ic.Name != "alerts" {
-		t.Errorf("type/name not carried: %+v", ic)
-	}
-	if len(ic.Match) != 1 || ic.Match[0].Severity != "high" || ic.Match[0].Domain != "api.x.com" {
-		t.Errorf("match clause not carried: %+v", ic.Match)
-	}
-	if ic.Config["url"] != "https://hooks.example/x" {
-		t.Errorf("opaque config not passed through: %+v", ic.Config)
-	}
-}
-
 // TestRunSubcommand exercises the `run` command's flag wiring end-to-end: it parses
 // the flags into worker.Params and starts the worker, which binds ephemeral ports
 // and shuts down on ctx cancel.
@@ -114,9 +84,9 @@ func TestRunSubcommand(t *testing.T) {
 	}
 }
 
-// TestControlPlaneSubcommand_InPlace covers runControlPlane serving the config in
-// place (no --state-dir): config validation, analytics store build, HTTP server
-// bind on an ephemeral port, and a clean ctx-driven shutdown.
+// TestControlPlaneSubcommand_InPlace covers the control-plane command serving the
+// config in place (no --state-dir): config validation, analytics store build,
+// HTTP server bind on an ephemeral port, and a clean ctx-driven shutdown.
 func TestControlPlaneSubcommand_InPlace(t *testing.T) {
 	dir := t.TempDir()
 	cfg := writeTempConfig(t, minimalConfig)

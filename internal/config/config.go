@@ -33,6 +33,12 @@ type ConfigProvider interface {
 
 // Policy is the resolved configuration the proxy enforces.
 type Policy struct {
+	// Listen, AdminListen and TLS are the optional config-file values for the
+	// listeners and CA paths; CLI flags override them (see ResolveListen).
+	Listen      string    `json:"-"`
+	AdminListen string    `json:"-"`
+	TLS         TLSConfig `json:"-"`
+
 	// Allowlist is the set of permitted destinations. Anything not present is
 	// denied (default-deny).
 	Allowlist []AllowlistEntry `json:"allowlist"`
@@ -107,6 +113,11 @@ type Policy struct {
 	// Integrations above. Empty by default; then Explore reuses the judge's client
 	// exactly as before.
 	Explore ExploreConfig `json:"-"`
+	// DNS configures the resolver for warden's OWN upstream dials
+	// (dns.upstreamResolver). Boot-time LOCAL config (never on the settings
+	// wire): it is consumed once at worker assembly, like the flag-derived
+	// listen addresses. Zero value = Go's default resolver (no behavior change).
+	DNS DNSConfig `json:"-"`
 }
 
 // DeepCopy returns a deep copy of the policy, with all slices independently
@@ -221,7 +232,10 @@ type DenylistEntry struct {
 
 // rawConfig mirrors the on-disk YAML shape (see configs/config.example.yaml).
 type rawConfig struct {
-	Policy struct {
+	Listen      string  `yaml:"listen"`
+	AdminListen string  `yaml:"adminListen"`
+	TLS         *rawTLS `yaml:"tls"`
+	Policy      struct {
 		Allowlist []AllowlistEntry `yaml:"allowlist"`
 		Denylist  []DenylistEntry  `yaml:"denylist"`
 	} `yaml:"policy"`
@@ -249,6 +263,7 @@ type rawConfig struct {
 	Detection     *rawDetection     `yaml:"detection"`
 	LLMProviders  []rawLLMProvider  `yaml:"llmProviders"`
 	Explore       *rawExplore       `yaml:"explore"`
+	DNS           *rawDNS           `yaml:"dns"`
 }
 
 // defaultCacheTTLSeconds is used when the config omits cache.ttl.
@@ -290,6 +305,11 @@ func parse(data []byte) (*LocalYAMLProvider, error) {
 		CacheTTLSeconds: raw.Cache.TTL,
 		LogLevel:        raw.Logging.Level,
 		LogFormat:       raw.Logging.Format,
+	}
+	policy.Listen = raw.Listen
+	policy.AdminListen = raw.AdminListen
+	if raw.TLS != nil {
+		policy.TLS = TLSConfig(*raw.TLS)
 	}
 	policy.LogLevel = strings.ToLower(policy.LogLevel)
 	if policy.LogLevel == "" {
@@ -350,6 +370,7 @@ func parse(data []byte) (*LocalYAMLProvider, error) {
 	}
 	policy.LLMProviders = llmProviders
 	policy.Explore = parseExplore(raw.Explore)
+	policy.DNS = parseDNS(raw.DNS)
 
 	if err := validate(policy); err != nil {
 		return nil, err
@@ -555,6 +576,9 @@ func validate(p Policy) error {
 	// name an existing registry entry. Placed here (not in an explore-only
 	// validator) because it needs BOTH the explore block and the llmProviders list.
 	if err := validateExploreProviderRef(p.Explore, p.LLMProviders); err != nil {
+		return err
+	}
+	if err := validateDNS(p.DNS); err != nil {
 		return err
 	}
 	return nil

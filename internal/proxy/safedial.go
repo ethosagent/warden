@@ -224,13 +224,25 @@ func isDeniedHostname(host string) bool {
 type SafeDialer struct {
 	allowPrivate []net.IPNet
 	timeout      time.Duration
+	// resolver resolves hostnames for this dialer's own upstream lookups
+	// (dns.upstreamResolver). nil means net.DefaultResolver — byte-identical to
+	// the behavior before the dns block existed. The blocklist and IP-pinning
+	// apply to whatever resolver resolves the name.
+	resolver NameResolver
 }
 
 // NewSafeDialer creates a SafeDialer. allowPrivate is an optional list of CIDR
 // strings that should be exempted from the private-IP blocklist (e.g.
 // "10.0.0.0/8" for a known-good internal service).
 func NewSafeDialer(timeout time.Duration, allowPrivate []string) (*SafeDialer, error) {
-	d := &SafeDialer{timeout: timeout}
+	return NewSafeDialerWithResolver(timeout, allowPrivate, nil)
+}
+
+// NewSafeDialerWithResolver is NewSafeDialer with an explicit DNS resolver for
+// the dialer's own host lookups (dns.upstreamResolver). A nil resolver is
+// byte-identical to NewSafeDialer: lookups use net.DefaultResolver.
+func NewSafeDialerWithResolver(timeout time.Duration, allowPrivate []string, resolver NameResolver) (*SafeDialer, error) {
+	d := &SafeDialer{timeout: timeout, resolver: resolver}
 	for _, cidr := range allowPrivate {
 		_, ipNet, err := net.ParseCIDR(cidr)
 		if err != nil {
@@ -260,7 +272,9 @@ func (d *SafeDialer) isBlocked(ip net.IP) bool {
 	return true
 }
 
-// resolve performs DNS lookup with a timeout and returns the resolved IPs.
+// resolve performs DNS lookup with a timeout and returns the resolved IPs. It
+// uses the dialer's configured resolver when one is set (dns.upstreamResolver),
+// otherwise net.DefaultResolver exactly as before.
 func (d *SafeDialer) resolve(host string) ([]net.IPAddr, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), d.timeout)
 	defer cancel()
@@ -269,7 +283,11 @@ func (d *SafeDialer) resolve(host string) ([]net.IPAddr, error) {
 	if ip := net.ParseIP(host); ip != nil {
 		return []net.IPAddr{{IP: ip}}, nil
 	}
-	return net.DefaultResolver.LookupIPAddr(ctx, host)
+	resolver := d.resolver
+	if resolver == nil {
+		resolver = net.DefaultResolver
+	}
+	return resolver.LookupIPAddr(ctx, host)
 }
 
 // safeHostAndIPs canonicalizes host (stripping userinfo and normalizing

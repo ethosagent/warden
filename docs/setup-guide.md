@@ -82,6 +82,7 @@ logging:
 | `cache.ttl` | int | Secret cache TTL in seconds |
 | `logging.level` | string | `debug`, `info`, `warn`, or `error` |
 | `logging.format` | string | `json` or `text` |
+| `dns.upstreamResolver` | string | Optional `<host>:<port>` DNS server for Warden's OWN upstream dials (VPN / split-horizon networks). Plain UDP/TCP only — DoH/DoT are out of scope for v1. Omit → Go's default resolver. Use an IP literal: the server address itself is resolved by the system resolver (`/etc/hosts` still applies) |
 
 ## 4. Set secrets as environment variables
 
@@ -120,6 +121,10 @@ warden proxy listening on 127.0.0.1:8080
 | `--ca-key` | (none) | CA private key (both cert+key required together) |
 | `--admin-listen` | `127.0.0.1:9090` | Admin + dashboard listen address |
 | `--db` | `warden.db` | SQLite analytics database path |
+
+`--listen`, `--admin-listen`, `--ca-cert` and `--ca-key` can also be set in the config file as
+`listen:`, `adminListen:`, `tls.caCert` and `tls.caKey`. Precedence is flag > config > default, and
+the startup log (`effective listener config`) names the source of each value.
 
 ## 6. Point your agent at the proxy
 
