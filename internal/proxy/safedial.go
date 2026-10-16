@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ethosagent/warden/internal/policy"
 )
 
 // blockedNets is the hardcoded list of private/reserved IP ranges that the
@@ -209,11 +211,11 @@ func canonicalizeHost(host string) (string, error) {
 }
 
 // isDeniedHostname reports whether host is on the hard-deny hostname list
-// (e.g. cloud-metadata endpoints). Comparison is case-insensitive and ignores a
-// single trailing dot (the DNS root form).
+// (e.g. cloud-metadata endpoints). Comparison uses policy.NormalizeHost
+// (#397), so it is case-insensitive and ignores ANY number of trailing dots —
+// a dotted spelling of a denied hostname must not slip past the list.
 func isDeniedHostname(host string) bool {
-	h := strings.ToLower(strings.TrimSuffix(host, "."))
-	_, denied := deniedHostnames[h]
+	_, denied := deniedHostnames[policy.NormalizeHost(host)]
 	return denied
 }
 

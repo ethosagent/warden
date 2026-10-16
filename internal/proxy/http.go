@@ -310,13 +310,17 @@ func (p *Proxy) runRequestStages(s *requestScope) (endSession bool) {
 
 // readRequest validates that the just-read request belongs on this connection:
 // a host-header recheck (defense in depth) against the CONNECT-time domain. A
-// mismatch ends the session (cleanup closes req.Body).
+// mismatch ends the session (cleanup closes req.Body). Both sides go through
+// policy.NormalizeHost (#397), so case and any number of trailing dots cannot
+// make the recheck disagree with the CONNECT admission it belongs to — while a
+// different host, or a Host header that is only dots (normalised to ""), still
+// ends the session (fail closed).
 func (p *Proxy) readRequest(s *requestScope) (endSession bool) {
 	hostOnly := s.req.Host
 	if h, _, err := net.SplitHostPort(s.req.Host); err == nil {
 		hostOnly = h
 	}
-	return !strings.EqualFold(hostOnly, s.domain)
+	return policy.NormalizeHost(hostOnly) != policy.NormalizeHost(s.domain)
 }
 
 // constraintGate enforces the #371 method/path constraints on EVERY request of
