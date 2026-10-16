@@ -1,0 +1,60 @@
+# Repo contract for the autonomous pipeline.
+#
+# The generic harness (a separate repo) reads this file. It knows nothing about
+# Go or Warden: every project-specific command, path and rule comes from here.
+# Schema: docs/pipeline.schema.json. test/contract keeps this file valid and
+# honest: an entry without `planned: true` must exist in the repo, and a
+# planned entry must name the issue that delivers it. When that work merges,
+# remove `planned` and `issue` in the same PR.
+version: 1
+
+commands:
+  fast:
+    run: "scripts/check.sh --fast --json"
+    planned: true
+    issue: 359 # --fast
+  gate:
+    run: "scripts/check.sh --integration --json"
+    planned: true
+    issue: 353 # --json (PR #385)
+  scenarios:
+    run: "go test ./test/scenarios/... -json"
+    planned: true
+    issue: 350
+  e2e_up:
+    run: "make e2e-up"
+    planned: true
+    issue: 351
+  e2e_down:
+    run: "make e2e-down"
+    planned: true
+    issue: 351
+
+risk_map:
+  path: ".agents/risk.yaml"
+  planned: true
+  issue: 354
+protected:
+  from_risk_map: gates
+  planned: true
+  issue: 354
+
+reviews:
+  dir:
+    path: ".agents/reviews"
+  by_tier:
+    critical: [security-invariants, hot-path, acceptance, test-quality]
+    normal: [acceptance, test-quality]
+    low: [acceptance]
+  author_and_reviewer_models_must_differ: true
+
+live_verify:
+  playbook:
+    path: ".agents/playbooks/red-team.md"
+    planned: true
+    issue: 356 # in progress
+  tiers: [critical, normal]
+
+evidence:
+  pr_template:
+    path: ".github/pull_request_template.md"

@@ -58,6 +58,39 @@ quality. Each check has a stable ID (`SEC-4`, `HOT-1`, …). Use them when
 reviewing, or run `openai-review --lens <name>`. A check that keeps finding
 the same problem should become a rule in `scripts/check.sh`.
 
+## Pipeline contract
+
+The autonomous pipeline has two parts: a generic harness (a separate repo) and
+this repo's contract. The harness knows nothing about Go or Warden. It reads
+[`.agents/pipeline.yaml`](.agents/pipeline.yaml) (schema:
+`docs/pipeline.schema.json`) for commands, paths, review lenses and the PR
+template. An entry marked `planned: true` names the issue that delivers it, so
+the harness skips it. `test/contract` fails if the file is invalid, if an
+entry that is not `planned` points at something missing, or if a `planned`
+entry names no issue. When planned work merges, drop `planned` in that PR.
+
+### Intake: the `agent-ready` label
+
+An issue gets the `agent-ready` label when all of these hold:
+
+- every issue it depends on is closed;
+- it has testable acceptance criteria;
+- its risk tier is known, or the files it touches predict it (roadmap tickets
+  carry `touches`);
+- it is sized S or M.
+
+Open issues from `.github/ISSUE_TEMPLATE/` (feature or bug). Both templates
+require acceptance criteria and "files likely touched". Roadmap issues keep
+their generated format.
+
+### Commits and PRs
+
+- One PR per issue. Put `Closes #N` in the PR description.
+- Fill `.github/pull_request_template.md`: why first, then what changes, the
+  acceptance criterion → evidence table, risk tier, review lenses and
+  outcome, and what was not done with follow-up issues.
+- Add a `Co-Authored-By:` trailer to every commit an agent writes.
+
 ## Do NOT
 
 - Add `pkg/` speculatively (use `cmd/` + `internal/`).
