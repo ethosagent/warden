@@ -33,4 +33,7 @@ description: <one line — when this skill should be used>
 - The project's build/test/convention rules live in [`AGENTS.md`](../../AGENTS.md);
   skills should defer to it rather than restating it.
 
-No skills are defined yet — add the first one as `<skill-name>/SKILL.md`.
+## Skills
+
+- [`openai-reviewer`](openai-reviewer/SKILL.md) — run Codex as Warden's code reviewer.
+- [`harness-scenario`](harness-scenario/SKILL.md) — add a fake and a scenario to the L1 test harness.

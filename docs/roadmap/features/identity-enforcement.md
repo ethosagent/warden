@@ -186,7 +186,7 @@ Add the `require` mode for an agent whose served settings entry (agents[].identi
 - [ ] A served SettingsWire with agents[].identity=require applies require to the bound agent, a standalone worker's local YAML with require is rejected, and the heartbeat body contains identity/require-v1: `go test ./internal/config -run 'TestEffectiveIdentityMode|TestRequireRejectedInStandaloneYAML|TestHeartbeatCaps'`.
 - [ ] `go test ./internal/identity -run TestContractDocMatchesConstants` passes with the new mode and reasons documented.
 
-**Depends on:** [`W-P2-WBND-02`](identity-enforcement.md#210--w-p2-wbnd-02) Bind Warden tokens to the worker's registered agent and key; [`W-P1-BLOCK-02`](user-block-list.md#28--w-p1-block-02) Enforce the block list in the worker at CONNECT, per request and per h2 stream; [`W-P1-IDC-01`](identity-contract.md#14--w-p1-idc-01) Write the agent identity contract for harness builders; [`W-P2-AREG-05`](agent-registry.md#57--w-p2-areg-05) Bind workers to an agent id and enforce agent_disabled
+**Depends on:** [`W-P2-WBND-02`](identity-enforcement.md#210--w-p2-wbnd-02) Bind Warden tokens to the worker's registered agent and key; [`W-P1-BLOCK-02`](user-block-list.md#29--w-p1-block-02) Enforce the block list in the worker at CONNECT, per request and per h2 stream; [`W-P1-IDC-01`](identity-contract.md#14--w-p1-idc-01) Write the agent identity contract for harness builders; [`W-P2-AREG-05`](agent-registry.md#57--w-p2-areg-05) Bind workers to an agent id and enforce agent_disabled
 
 **Unblocks:** [`W-P2-RCP-03`](identity-client.md#36--w-p2-rcp-03) Add the Claude Code compose recipe and docs; [`W-P4-DGR-05`](delegation-grants.md#512--w-p4-dgr-05) Enforce grant tools in worker MCP verdicts; [`W-P2-WBND-09`](identity-enforcement.md#910--w-p2-wbnd-09) Close require-mode sessions at token expiry and document require mode; [`W-P2-WBND-10`](identity-enforcement.md#1010--w-p2-wbnd-10) Test require mode and worker mTLS end to end; [`W-P4-MGW-03`](mcp-gateway.md#317--w-p4-mgw-03) Serve /mcp/{gateway} on the reserved proxy host with sessions
 
@@ -322,7 +322,7 @@ CP rollout guard for require mode. An old worker keeps attribute mode when it re
 - [ ] The same save with force=true by an admin succeeds and writes an audit entry with force and the worker ids: `go test ./internal/controlplane -run TestRequireForceAudited`.
 - [ ] An editor changing agents[].identity or identity.defaultMode gets 403 role_required, and after the worker heartbeats with identity/require-v1 an admin save succeeds without force: `go test ./internal/controlplane -run TestIdentityModeAdminOnly`.
 
-**Depends on:** [`W-P1-BLOCK-04`](user-block-list.md#48--w-p1-block-04) Add the Blocked users console panel and worker enforcement indicator; [`W-P2-AREG-02`](agent-registry.md#27--w-p2-areg-02) Expose the agent registry admin API with admin-only writes and audit; [`W-P2-AREG-03`](agent-registry.md#37--w-p2-areg-03) Add the Agents tab to the CP console; [`W-P1-SSO-05`](console-sso-rbac.md#58--w-p1-sso-05) Enforce role checks on every dashboard route
+**Depends on:** [`W-P1-BLOCK-04`](user-block-list.md#49--w-p1-block-04) Add the Blocked users console panel and worker enforcement indicator; [`W-P2-AREG-02`](agent-registry.md#27--w-p2-areg-02) Expose the agent registry admin API with admin-only writes and audit; [`W-P2-AREG-03`](agent-registry.md#37--w-p2-areg-03) Add the Agents tab to the CP console; [`W-P1-SSO-05`](console-sso-rbac.md#58--w-p1-sso-05) Enforce role checks on every dashboard route
 
 **Unblocks:** [`W-P4-DGR-04`](delegation-grants.md#412--w-p4-dgr-04) Add the grant subject resolver, delegation mode and rollout guard to the token service; [`W-P2-WBND-10`](identity-enforcement.md#1010--w-p2-wbnd-10) Test require mode and worker mTLS end to end; [`W-P3-PUS-08`](refresh-model.md#812--w-p3-pus-08) Serve perUserSecrets and userGrantEpochs as signed-bundle sections; [`W-P4-HOOK-10`](policy-hooks.md#1011--w-p4-hook-10) Guard hook settings on the CP with validation, roles, audit and capability checks
 
@@ -391,7 +391,7 @@ A CONNECT-bound Warden token lasts 15 minutes, but raw tunnels, keep-alives, h2 
 - [ ] Attribute-mode sessions are not registered and stay open past token exp: `go test ./internal/proxy -run TestAttributeSessionsNotRegistered`.
 - [ ] `go test ./internal/identity -run TestContractDocMatchesConstants` passes with the require-mode section.
 
-**Depends on:** [`W-P2-WBND-03`](identity-enforcement.md#310--w-p2-wbnd-03) Enforce identity require mode on CONNECT and terminated traffic; [`W-P1-BLOCK-05`](user-block-list.md#58--w-p1-block-05) Close open sessions of newly blocked users on policy change
+**Depends on:** [`W-P2-WBND-03`](identity-enforcement.md#310--w-p2-wbnd-03) Enforce identity require mode on CONNECT and terminated traffic; [`W-P1-BLOCK-05`](user-block-list.md#59--w-p1-block-05) Close open sessions of newly blocked users on policy change
 
 **Unblocks:** [`W-P4-DGR-10`](delegation-grants.md#1012--w-p4-dgr-10) Apply revokedGrants on workers and close revoked grant sessions; [`W-P2-WBND-10`](identity-enforcement.md#1010--w-p2-wbnd-10) Test require mode and worker mTLS end to end
 

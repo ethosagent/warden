@@ -85,7 +85,7 @@ type phaseMeta struct{ Name, Works, Color string }
 
 var phases = map[int]phaseMeta{
 	0: {"Already shipped", "Default-deny egress with TLS termination, secret swap, response scanning and DLP, MCP verdicts, policy long-poll and the fleet dashboard.", ""},
-	1: {"Who did it", "Console SSO via Dex with 3 roles, admin audit log, policy history and rollback, per-worker tokens, user token verified on the worker in attribute mode, group-aware policy, fleet-wide user block, JSON audit logs, identity contract and CLI.", "1d6b58"},
+	1: {"Who did it", "Console SSO via Dex with 3 roles, admin audit log, policy history and rollback, per-worker tokens, user token verified on the worker in attribute mode, group-aware policy, fleet-wide user block, JSON audit logs, identity contract and CLI, and an in-process test harness whose scenarios every feature extends.", "1d6b58"},
 	2: {"Proven identity", "Agent registry, RFC 8693 token service (15-minute agent-bound tokens), key manager, worker CA and mTLS, signed bundles, two-person approval with replay, scoped API keys, require-identity mode, Claude Code and Codex recipes.", "2d5d8f"},
 	3: {"Act as the user", "Consent portal, OAuth broker for Google and GitHub, per-user secrets with refresh, JIT 403 with long-poll, offboarding revocation, per-user limits.", "7a4f9a"},
 	4: {"Agents everywhere", "Delegation grants, park and notify, MCP gateway and registry, external hooks, admin MCP server, policy as code with canary.", "a2552e"},
@@ -1084,6 +1084,26 @@ func cmdIssues(rm *Roadmap, args []string) error {
 
 	if *dry {
 		fmt.Printf("dry run: %d of %d issues would be created\n", len(created), len(plan))
+		if *update {
+			// Preview -update: issues that exist and whose generated text differs.
+			// Links to issues not yet created render as #? until they exist.
+			changed := 0
+			for _, pi := range plan {
+				if created[pi.key] {
+					continue
+				}
+				want := issueState{title: pi.title, body: pi.body(), labels: pi.labels, ms: pi.ms}
+				if have[pi.key].covers(want) {
+					continue
+				}
+				changed++
+				fmt.Printf("would update #%d %s\n", num[pi.key], pi.title)
+				if *verbose {
+					fmt.Printf("%s\n----\n", want.body)
+				}
+			}
+			fmt.Printf("dry run: %d existing issues would be updated\n", changed)
+		}
 		return nil
 	}
 
@@ -1248,6 +1268,21 @@ func (rm *Roadmap) roadmapBody(open map[int]bool, num map[string]int, ref func(i
 	return b.String()
 }
 
+// needsFirst renders an item's feature-level dependencies, one line each: the
+// epic link when its phase is open, otherwise a plain "already shipped" note.
+func (rm *Roadmap) needsFirst(it *Item, open map[int]bool, num map[string]int, ref func(int) string) string {
+	var b strings.Builder
+	for _, d := range it.DependsOnItems {
+		dep := rm.byID[d]
+		if open[dep.Phase] {
+			fmt.Fprintf(&b, "- %s %s\n", ref(num["epic:"+d]), dep.Name)
+		} else {
+			fmt.Fprintf(&b, "- %s (%s, already shipped or not opened yet)\n", dep.Name, phaseLabel(dep.Phase))
+		}
+	}
+	return b.String()
+}
+
 func (rm *Roadmap) epicBody(it *Item, open map[int]bool, num map[string]int, ref func(int) string) string {
 	var b strings.Builder
 	w := func(f string, a ...any) { fmt.Fprintf(&b, f, a...) }
@@ -1259,14 +1294,7 @@ func (rm *Roadmap) epicBody(it *Item, open map[int]bool, num map[string]int, ref
 	if len(it.DependsOnItems) == 0 {
 		w("Nothing. This feature can start now.\n")
 	}
-	for _, d := range it.DependsOnItems {
-		dep := rm.byID[d]
-		if open[dep.Phase] {
-			w("- %s %s\n", ref(num["epic:"+d]), dep.Name)
-		} else {
-			w("- %s (%s, already shipped or not opened yet)\n", dep.Name, phaseLabel(dep.Phase))
-		}
-	}
+	w("%s", rm.needsFirst(it, open, num, ref))
 	w("\n### Tickets, in order\n\n")
 	for _, t := range it.Tickets {
 		w("- [ ] %s `%s` %s · %s\n", ref(num[t.Key]), t.Key, t.Title, t.Estimate)
@@ -1298,6 +1326,9 @@ func (rm *Roadmap) ticketBody(it *Item, n int, t Ticket, open map[int]bool, num 
 	for _, k := range t.DependsOn {
 		w("%s\n", line(k))
 	}
+	if len(it.DependsOnItems) > 0 {
+		w("\n### Feature needs first\n\n%s", rm.needsFirst(it, open, num, ref))
+	}
 	if u := rm.unblocks[t.Key]; len(u) > 0 {
 		w("\n### Unblocks\n\n")
 		for _, k := range u {
@@ -1306,7 +1337,7 @@ func (rm *Roadmap) ticketBody(it *Item, n int, t Ticket, open map[int]bool, num 
 	}
 	w("\n### Context\n\nPart of **%s**: %s\n\nFull design: [docs/roadmap/features/%s.md](%s)\n",
 		it.Name, it.Summary, it.Label, rm.docURL("features/"+it.Label+".md#"+ghAnchor(ticketHeading(it, t.Key))))
-	w("\n### Definition of done\n\n- [ ] One PR, merged to main behind a flag or default-off config\n- [ ] `scripts/check.sh` green, including the coverage gate\n- [ ] No secret, token or full request/response body in logs or test output\n")
+	w("\n### Definition of done\n\n- [ ] One PR, merged to main behind a flag or default-off config\n- [ ] `scripts/check.sh` green, including the coverage gate\n- [ ] Acceptance criteria are covered by `test/harness` scenarios\n- [ ] A new external dependency ships a fake in `test/harness`\n- [ ] No secret, token or full request/response body in logs or test output\n")
 	return b.String()
 }
 

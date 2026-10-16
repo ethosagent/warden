@@ -28,6 +28,7 @@ On a real deployment (CP plus at least one worker with TLS termination, Dex from
 
 ## Needs first
 
+- [L1 test harness](l1-test-harness.md) (P1 · Who did it)
 - [Dex (one IdP)](dex-oidc.md) (P1 · Who did it)
 
 ## Unblocks
@@ -65,7 +66,7 @@ On a real deployment (CP plus at least one worker with TLS termination, Dex from
 | 2/7 | [`W-P1-VRFY-02`](#27--w-p1-vrfy-02) | Extract, verify and strip identity on CONNECT, HTTP/1.1 and HTTP/2 | feature | M | W-P1-VRFY-01 | [#22](https://github.com/ethosagent/warden/issues/22) |
 | 3/7 | [`W-P1-VRFY-03`](#37--w-p1-vrfy-03) | Record user fields on worker events, receipts, decision logs and sync | feature | M | W-P1-VRFY-02 | [#23](https://github.com/ethosagent/warden/issues/23) |
 | 4/7 | [`W-P1-VRFY-04`](#47--w-p1-vrfy-04) | Add user filter and top-users breakdown to the dashboard | feature | M | W-P1-VRFY-03, W-P1-VRFY-06 | [#24](https://github.com/ethosagent/warden/issues/24) |
-| 5/7 | [`W-P1-VRFY-05`](#57--w-p1-vrfy-05) | Add identity attribution e2e test and a CI integration job | test | M | W-P1-VRFY-03, W-P1-VRFY-07, W-P1-DEX-02 | [#25](https://github.com/ethosagent/warden/issues/25) |
+| 5/7 | [`W-P1-VRFY-05`](#57--w-p1-vrfy-05) | Add identity attribution scenarios on test/harness and a CI integration job | test | M | W-P1-VRFY-03, W-P1-VRFY-07, W-P1-DEX-02 | [#25](https://github.com/ethosagent/warden/issues/25) |
 | 6/7 | [`W-P1-VRFY-06`](#67--w-p1-vrfy-06) | Store user fields in the control-plane fleet store | feature | S | W-P1-VRFY-03 | [#228](https://github.com/ethosagent/warden/issues/228) |
 | 7/7 | [`W-P1-VRFY-07`](#77--w-p1-vrfy-07) | Wire the identity verifier into worker assembly, hot reload and deployment | feature | S | W-P1-VRFY-02 | [#229](https://github.com/ethosagent/warden/issues/229) |
 
@@ -189,7 +190,7 @@ Worker side of recording. Add identity fields to analytics.Event with snake_case
 
 **Depends on:** [`W-P1-VRFY-02`](identity-verification.md#27--w-p1-vrfy-02) Extract, verify and strip identity on CONNECT, HTTP/1.1 and HTTP/2
 
-**Unblocks:** [`W-P1-BLOCK-02`](user-block-list.md#28--w-p1-block-02) Enforce the block list in the worker at CONNECT, per request and per h2 stream; [`W-P1-BLOCK-06`](user-block-list.md#68--w-p1-block-06) Raise one user_blocked Finding per user without leaking email; [`W-P4-DGR-05`](delegation-grants.md#512--w-p4-dgr-05) Enforce grant tools in worker MCP verdicts; [`W-P1-VRFY-04`](identity-verification.md#47--w-p1-vrfy-04) Add user filter and top-users breakdown to the dashboard; [`W-P1-VRFY-05`](identity-verification.md#57--w-p1-vrfy-05) Add identity attribution e2e test and a CI integration job; [`W-P1-VRFY-06`](identity-verification.md#67--w-p1-vrfy-06) Store user fields in the control-plane fleet store; [`W-P1-GPOL-03`](identity-policy.md#39--w-p1-gpol-03) Apply group-aware allow decisions at CONNECT and request time; [`W-P1-GPOL-05`](identity-policy.md#59--w-p1-gpol-05) Show affected users in policy eval replay; [`W-P2-WBND-02`](identity-enforcement.md#210--w-p2-wbnd-02) Bind Warden tokens to the worker's registered agent and key; [`W-P3-JIT-02`](jit-authorization.md#27--w-p3-jit-02) Return structured 403 for HTTP when a grant is missing; [`W-P3-PUL-02`](per-user-limits.md#210--w-p3-pul-02) Record agent id and limit rule on worker events; [`W-P1-JAUD-01`](audit-log-export.md#36--w-p1-jaud-01) Add internal/auditlog decision stream on the async writer tee
+**Unblocks:** [`W-P1-BLOCK-02`](user-block-list.md#29--w-p1-block-02) Enforce the block list in the worker at CONNECT, per request and per h2 stream; [`W-P1-BLOCK-06`](user-block-list.md#69--w-p1-block-06) Raise one user_blocked Finding per user without leaking email; [`W-P4-DGR-05`](delegation-grants.md#512--w-p4-dgr-05) Enforce grant tools in worker MCP verdicts; [`W-P1-VRFY-04`](identity-verification.md#47--w-p1-vrfy-04) Add user filter and top-users breakdown to the dashboard; [`W-P1-VRFY-05`](identity-verification.md#57--w-p1-vrfy-05) Add identity attribution scenarios on test/harness and a CI integration job; [`W-P1-VRFY-06`](identity-verification.md#67--w-p1-vrfy-06) Store user fields in the control-plane fleet store; [`W-P1-GPOL-03`](identity-policy.md#39--w-p1-gpol-03) Apply group-aware allow decisions at CONNECT and request time; [`W-P1-GPOL-05`](identity-policy.md#59--w-p1-gpol-05) Show affected users in policy eval replay; [`W-P2-WBND-02`](identity-enforcement.md#210--w-p2-wbnd-02) Bind Warden tokens to the worker's registered agent and key; [`W-P3-JIT-02`](jit-authorization.md#27--w-p3-jit-02) Return structured 403 for HTTP when a grant is missing; [`W-P3-PUL-02`](per-user-limits.md#210--w-p3-pul-02) Record agent id and limit rule on worker events; [`W-P1-JAUD-01`](audit-log-export.md#36--w-p1-jaud-01) Add internal/auditlog decision stream on the async writer tee
 
 ### 4/7 · W-P1-VRFY-04
 
@@ -226,20 +227,20 @@ Let operators filter traffic and analytics by user on worker and CP dashboards. 
 
 **Depends on:** [`W-P1-VRFY-03`](identity-verification.md#37--w-p1-vrfy-03) Record user fields on worker events, receipts, decision logs and sync; [`W-P1-VRFY-06`](identity-verification.md#67--w-p1-vrfy-06) Store user fields in the control-plane fleet store
 
-**Unblocks:** [`W-P1-IDC-03`](identity-contract.md#34--w-p1-idc-03) Add generic identity smoke test with a curl agent; [`W-P1-BLOCK-04`](user-block-list.md#48--w-p1-block-04) Add the Blocked users console panel and worker enforcement indicator; [`W-P4-AMCP-01`](admin-mcp.md#19--w-p4-amcp-01) Add the CP traffic API with a sanitized record projection; [`W-P3-PUL-05`](per-user-limits.md#510--w-p3-pul-05) Add per-user usage and cost dashboard view
+**Unblocks:** [`W-P1-IDC-03`](identity-contract.md#34--w-p1-idc-03) Add generic identity smoke test with a curl agent; [`W-P1-BLOCK-04`](user-block-list.md#49--w-p1-block-04) Add the Blocked users console panel and worker enforcement indicator; [`W-P4-AMCP-01`](admin-mcp.md#19--w-p4-amcp-01) Add the CP traffic API with a sanitized record projection; [`W-P3-PUL-05`](per-user-limits.md#510--w-p3-pul-05) Add per-user usage and cost dashboard view
 
 ### 5/7 · W-P1-VRFY-05
 
-**Add identity attribution e2e test and a CI integration job**
+**Add identity attribution scenarios on test/harness and a CI integration job**
 
 Type **test** · Size **M** · Issue [#25](https://github.com/ethosagent/warden/issues/25)
 
-Prove attribution end to end under the integration build tag. The default issuer is an in-process OIDC issuer that can mint valid, expired and wrong-audience tokens on demand, so CI does not depend on Docker. The Dex container runs only when WARDEN_IT_DEX=1, to cover a real Dex token with LDAP groups. CI has no integration job today, so this ticket adds one.
+Prove attribution end to end as scenarios on `test/harness` (L1 in-process, #350), not a new rig under test/integration. The default issuer is an in-process OIDC issuer that can mint valid, expired and wrong-audience tokens on demand, so CI does not depend on Docker. The Dex container runs only when WARDEN_IT_DEX=1, to cover a real Dex token with LDAP groups. CI has no integration job today, so this ticket adds one.
 
 **Requirements**
 
-- The test lives under //go:build integration in test/integration and compiles nothing without the tag.
-- A new in-process OIDC issuer helper (httptest discovery plus JWKS plus RS256 signer) mints valid, expired and wrong-aud tokens. When WARDEN_IT_DEX=1, the W-P1-DEX-02 recipe additionally covers a real Dex token with groups, fetched with `scripts/dex-token.sh --raw` (W-P1-DEX-02) rather than a second token client.
+- The cases are scenarios in test/scenarios (registered in scenarios_list.go) built on `test/harness`: the real worker and control plane boot in-process on loopback and the harness's fake upstream records what arrives. Only the Dex-token case (WARDEN_IT_DEX=1) stays under //go:build integration in test/integration.
+- A new in-process OIDC issuer fake in test/harness (httptest discovery plus JWKS plus RS256 signer, added as a fake per the definition of done) mints valid, expired and wrong-aud tokens. When WARDEN_IT_DEX=1, the W-P1-DEX-02 recipe additionally covers a real Dex token with groups, fetched with `scripts/dex-token.sh --raw` (W-P1-DEX-02) rather than a second token client.
 - A worker started through startProxy with a CA and identity mode attribute covers valid, expired, wrong-aud and missing tokens, each via Proxy-Authorization on CONNECT and via X-Warden-Identity, over HTTP/1.1 and HTTP/2, plus one raw-tunnel case with Proxy-Authorization only.
 - One case runs with the issuer stopped, and expects status unverified and a successful request.
 - Assertions cover event identity fields, upstream-observed headers, warden.identity.verify.total counts via an OTel manual reader, and receipts that verify with user_sub.
@@ -247,23 +248,23 @@ Prove attribution end to end under the integration build tag. The default issuer
 
 **Implementation plan**
 
-1. Add the new test/integration/oidc_issuer_test.go helper (discovery, JWKS, token minting).
-2. Add the new test/integration/identity_test.go with the case table and a header-recording upstream.
-3. Start the proxy via startProxy with fakes.FakeAnalyticsStore, a signing store and a manual metrics reader.
+1. Add the OIDC issuer fake to test/harness (discovery, JWKS, token minting).
+2. Add the identity scenarios to test/scenarios with the case table; the harness upstream records headers.
+3. Boot via harness.New; read events and metrics through h.Events() and h.Metrics().
 4. Add the WARDEN_IT_DEX=1 branch that uses the W-P1-DEX-02 compose recipe.
 5. Add the integration job to .github/workflows/ci.yml.
 
 **Acceptance criteria**
 
-- [ ] All cases return the upstream's 200, and IdentityStatus is valid, expired, invalid, none or unverified as expected: `go test -tags=integration ./test/integration -run TestIdentityAttribution`.
+- [ ] All cases return the upstream's 200, and IdentityStatus is valid, expired, invalid, none or unverified as expected: `go test -race ./test/scenarios -run 'TestScenarios/identity_'`.
 - [ ] No subtest observes Proxy-Authorization or X-Warden-Identity at the upstream.
 - [ ] warden.identity.verify.total shows the expected count for each result after the run.
 - [ ] With WARDEN_IT_DEX=1 and the identity recipe running, a Dex token for a seeded LDAP user produces an event whose UserGroups contains `eng`.
-- [ ] The new CI integration job runs `scripts/check.sh --integration` green, and `go vet ./test/integration/...` without the tag does not compile the file.
+- [ ] The new CI integration job runs `scripts/check.sh --integration` green, and `go vet ./test/integration/...` without the tag does not compile the Dex-token file.
 
 **Depends on:** [`W-P1-VRFY-03`](identity-verification.md#37--w-p1-vrfy-03) Record user fields on worker events, receipts, decision logs and sync; [`W-P1-VRFY-07`](identity-verification.md#77--w-p1-vrfy-07) Wire the identity verifier into worker assembly, hot reload and deployment; [`W-P1-DEX-02`](dex-oidc.md#23--w-p1-dex-02) Add identity compose recipe with pinned Dex and seeded LDAP
 
-**Unblocks:** [`W-P2-TOKX-05`](token-exchange.md#57--w-p2-tokx-05) Add token service end-to-end integration test; [`W-P2-SECT-01`](security-tests.md#17--w-p2-sect-01) Add security test harness with in-process CP, workers and shared fakes; [`W-P3-OFFB-04`](offboarding.md#47--w-p3-offb-04) Add an E2E test for IdP-driven offboarding and its false-positive guards; [`W-P1-GPOL-09`](identity-policy.md#99--w-p1-gpol-09) Add group policy e2e test and policy docs; [`W-P3-PUL-10`](per-user-limits.md#1010--w-p3-pul-10) Add per-user limits end-to-end test and docs
+**Unblocks:** [`W-P1-BLOCK-09`](user-block-list.md#99--w-p1-block-09) Add harness scenarios for the user block list; [`W-P2-TOKX-05`](token-exchange.md#57--w-p2-tokx-05) Add token service end-to-end integration test; [`W-P2-SECT-01`](security-tests.md#17--w-p2-sect-01) Add security test harness with in-process CP, workers and shared fakes; [`W-P3-OFFB-04`](offboarding.md#47--w-p3-offb-04) Add an E2E test for IdP-driven offboarding and its false-positive guards; [`W-P1-GPOL-09`](identity-policy.md#99--w-p1-gpol-09) Add group policy e2e test and policy docs; [`W-P3-PUL-10`](per-user-limits.md#1010--w-p3-pul-10) Add per-user limits end-to-end test and docs
 
 ### 6/7 · W-P1-VRFY-06
 
@@ -335,4 +336,4 @@ Connect the verifier to real workers. Build it from local config or the distribu
 
 **Depends on:** [`W-P1-VRFY-02`](identity-verification.md#27--w-p1-vrfy-02) Extract, verify and strip identity on CONNECT, HTTP/1.1 and HTTP/2
 
-**Unblocks:** [`W-P1-VRFY-05`](identity-verification.md#57--w-p1-vrfy-05) Add identity attribution e2e test and a CI integration job; [`W-P2-WBND-01`](identity-enforcement.md#110--w-p2-wbnd-01) Verify CP-issued Warden tokens against verified bundle keys
+**Unblocks:** [`W-P1-VRFY-05`](identity-verification.md#57--w-p1-vrfy-05) Add identity attribution scenarios on test/harness and a CI integration job; [`W-P2-WBND-01`](identity-enforcement.md#110--w-p2-wbnd-01) Verify CP-issued Warden tokens against verified bundle keys

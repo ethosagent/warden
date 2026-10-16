@@ -22,6 +22,7 @@ From a clean state, `scripts/smoke-identity.sh` starts the control plane, Dex wi
 
 ## Needs first
 
+- [L1 test harness](l1-test-harness.md) (P1 · Who did it)
 - [Dex (one IdP)](dex-oidc.md) (P1 · Who did it)
 - [Verify user token](identity-verification.md) (P1 · Who did it)
 
