@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ethosagent/warden/internal/analytics"
+	"github.com/ethosagent/warden/internal/denyreason"
 )
 
 // probe is one curl run from an agent with a machine-readable footer.
@@ -18,17 +19,18 @@ type probe struct {
 	connect  string // %{http_connect}: the proxy's CONNECT status
 	remoteIP string // empty when no TCP connection was ever established
 	errMsg   string // curl's own error text
+	url      string // %{url_effective}: the URL curl was actually given
 	raw      cmdResult
 }
 
-var probeFooter = regexp.MustCompile(`(?m)^(http_code|http_connect|remote_ip|errormsg)=(.*)$`)
+var probeFooter = regexp.MustCompile(`(?m)^(http_code|http_connect|remote_ip|errormsg|url_effective)=(.*)$`)
 
 // curlProbe runs `curl` in agent with extra flags and url, no proxy
 // involvement unless the caller adds -x, and parses the footer.
 func curlProbe(t *testing.T, agent string, args ...string) probe {
 	t.Helper()
 	full := append([]string{"curl", "-s", "-o", "/dev/null", "--max-time", "5", "-w",
-		"http_code=%{http_code}\nhttp_connect=%{http_connect}\nremote_ip=%{remote_ip}\nerrormsg=%{errormsg}\n"}, args...)
+		"http_code=%{http_code}\nhttp_connect=%{http_connect}\nremote_ip=%{remote_ip}\nerrormsg=%{errormsg}\nurl_effective=%{url_effective}\n"}, args...)
 	res := agentRun(t, agent, full...)
 	p := probe{exit: res.exit, raw: res}
 	for _, m := range probeFooter.FindAllStringSubmatch(res.stdout, -1) {
@@ -41,6 +43,8 @@ func curlProbe(t *testing.T, agent string, args ...string) probe {
 			p.remoteIP = m[2]
 		case "errormsg":
 			p.errMsg = m[2]
+		case "url_effective":
+			p.url = m[2]
 		}
 	}
 	if p.httpCode == "" {
@@ -60,7 +64,8 @@ const (
 
 // assertBlocked fails unless the probe never established a TCP connection and
 // died for a network reason in okExits. wantErr (if set) must appear in
-// curl's error text, which proves curl tried the intended address.
+// curl's error text or effective URL, which proves curl tried the intended
+// address (a name that times out resolving never appears in the error text).
 func assertBlocked(t *testing.T, p probe, wantErr string, okExits ...int) {
 	t.Helper()
 	if p.exit == 0 {
@@ -76,8 +81,8 @@ func assertBlocked(t *testing.T, p probe, wantErr string, okExits ...int) {
 	if !ok {
 		t.Fatalf("curl exit %d is not a network block (want one of %v): %s", p.exit, okExits, p.errMsg)
 	}
-	if wantErr != "" && !strings.Contains(p.errMsg, wantErr) {
-		t.Fatalf("curl error %q does not mention the intended target %q: the row may be mistyped", p.errMsg, wantErr)
+	if wantErr != "" && !strings.Contains(p.errMsg, wantErr) && !strings.Contains(p.url, wantErr) {
+		t.Fatalf("curl error %q (url %q) does not mention the intended target %q: the row may be mistyped", p.errMsg, p.url, wantErr)
 	}
 }
 
@@ -120,12 +125,12 @@ func TestIsolation_AgentHasNoRouteOut(t *testing.T) {
 		{"public-dns-over-tcp", "1.1.1.1:53", []int{curlCouldntConnect, curlTimeout}, append([]string{"http://1.1.1.1:53/"}, noProxy...)},
 		{"ipv6", "2606:4700:4700::1111", []int{curlCouldntConnect, curlTimeout}, append([]string{"-6", "https://[2606:4700:4700::1111]"}, noProxy...)},
 		{"control-plane-by-ip", cpIP + ":7070", []int{curlCouldntConnect, curlTimeout}, append([]string{"-k", "https://" + cpIP + ":7070/healthz"}, noProxy...)},
-		{"control-plane-by-name", "", []int{curlCouldntResolve, curlCouldntConnect, curlTimeout}, append([]string{"-k", "https://control-plane:7070/healthz"}, noProxy...)},
+		{"control-plane-by-name", "control-plane", []int{curlCouldntResolve, curlCouldntConnect, curlTimeout}, append([]string{"-k", "https://control-plane:7070/healthz"}, noProxy...)},
 		{"docker-network-gateway", gw + ":80", []int{curlCouldntConnect, curlTimeout}, append([]string{"http://" + gw}, noProxy...)},
 		{"docker-default-bridge-gateway", "172.17.0.1:80", []int{curlCouldntConnect, curlTimeout}, append([]string{"http://172.17.0.1"}, noProxy...)},
 		{"cloud-metadata", "169.254.169.254:80", []int{curlCouldntConnect, curlTimeout}, append([]string{"http://169.254.169.254/"}, noProxy...)},
 		{"other-worker-by-ip", w2IP + ":9090", []int{curlCouldntConnect, curlTimeout}, append([]string{"http://" + w2IP + ":9090/healthz"}, noProxy...)},
-		{"other-worker-by-name", "", []int{curlCouldntResolve, curlCouldntConnect, curlTimeout}, append([]string{"http://worker-2:9090/healthz"}, noProxy...)},
+		{"other-worker-by-name", "worker-2", []int{curlCouldntResolve, curlCouldntConnect, curlTimeout}, append([]string{"http://worker-2:9090/healthz"}, noProxy...)},
 	}
 	for _, row := range curlRows {
 		t.Run(row.name, func(t *testing.T) {
@@ -172,8 +177,10 @@ func TestIsolation_AgentHasNoRouteOut(t *testing.T) {
 		evs := events(t, svcWorker1, since, 1, func(e analytics.Event) bool {
 			return e.Domain == "api.example.test" && e.Port == 8443 && e.Decision == "deny"
 		})
-		if len(evs) == 0 {
-			t.Fatal("no worker-1 event for the wrong-port call")
+		for _, e := range evs {
+			if e.Domain == "api.example.test" && e.Port == 8443 && e.Reason != string(denyreason.PolicyNoMatch) {
+				t.Errorf("wrong-port deny reason %q, want %q", e.Reason, denyreason.PolicyNoMatch)
+			}
 		}
 	})
 }
@@ -237,6 +244,9 @@ func TestIsolation_DefaultDeny(t *testing.T) {
 			n++
 			if e.Decision != "deny" {
 				t.Errorf("evil.example.test event decision %q, want deny", e.Decision)
+			}
+			if e.Reason != string(denyreason.PolicyDenylist) {
+				t.Errorf("evil.example.test deny reason %q, want %q", e.Reason, denyreason.PolicyDenylist)
 			}
 		}
 	}

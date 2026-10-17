@@ -158,6 +158,10 @@ func workerTraffic(tb testing.TB, worker string) []byte {
 // eventsDeadline bounds how long events() waits for the async writer.
 const eventsDeadline = 20 * time.Second
 
+// eventsStablePolls is how many extra polls (500ms apart) the matched count
+// must hold steady before events() returns.
+const eventsStablePolls = 2
+
 // events returns the decision events a worker produced at or after since.
 //
 // Workers write analytics asynchronously and forward them to the control
@@ -165,9 +169,14 @@ const eventsDeadline = 20 * time.Second
 // empty in central mode). So this polls until at least want events satisfy
 // match (nil matches all) or the deadline passes, then fails with what it saw.
 // Never assert "zero events" off one read: an absent event may just be unflushed.
+//
+// Once want events match, the matched count must also stay unchanged for
+// eventsStablePolls further polls, so a duplicate flushed one tick later still
+// shows up in the result instead of being missed by an early return.
 func events(tb testing.TB, worker string, since time.Time, want int, match func(analytics.Event) bool) []analytics.Event {
 	tb.Helper()
 	var got []analytics.Event
+	lastMatched, stable := -1, 0
 	waitFor(tb, eventsDeadline, fmt.Sprintf("%d matching %s events", want, worker), func() (bool, string) {
 		code, body, err := tryGet(cpBase + trafficPath + "?limit=1000")
 		if err != nil || code != http.StatusOK {
@@ -188,8 +197,14 @@ func events(tb testing.TB, worker string, since time.Time, want int, match func(
 				matched++
 			}
 		}
-		return matched >= want, fmt.Sprintf("%d events from %s since %s, %d matching; %s",
-			len(got), worker, since.Format(time.RFC3339Nano), matched, summarize(got))
+		if matched >= want && matched == lastMatched {
+			stable++
+		} else {
+			stable = 0
+		}
+		lastMatched = matched
+		return matched >= want && stable >= eventsStablePolls, fmt.Sprintf("%d events from %s since %s, %d matching (stable %d/%d); %s",
+			len(got), worker, since.Format(time.RFC3339Nano), matched, stable, eventsStablePolls, summarize(got))
 	})
 	return got
 }
@@ -197,7 +212,7 @@ func events(tb testing.TB, worker string, since time.Time, want int, match func(
 func summarize(evs []analytics.Event) string {
 	var b strings.Builder
 	for _, e := range evs {
-		fmt.Fprintf(&b, "[%s:%d %s] ", e.Domain, e.Port, e.Decision)
+		fmt.Fprintf(&b, "[%s:%d %s %s] ", e.Domain, e.Port, e.Decision, e.Reason)
 	}
 	return b.String()
 }

@@ -301,7 +301,8 @@ Docker the package fails; it never skips. The isolation suite proves, from
 DNS, IPv6, control plane, Docker gateway/metadata, the other worker's network;
 each beside a positive control), that an allowed call reaches the fake upstream
 with the swapped canary while the agent never sees it, that a denied host
-leaves one deny event, and that the canary (raw, base64, URL, hex) is absent
+leaves exactly one deny event with reason `policy_denylist` (and the wrong-port
+call one with `policy_no_match`), and that the canary (raw, base64, URL, hex) is absent
 from agent output, every service's logs, both workers' traffic APIs and the
 control plane's fleet API. The recorder is the one place it must appear.
 Workers forward analytics to the control plane asynchronously, so event reads
