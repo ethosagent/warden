@@ -135,6 +135,17 @@ func (p *Proxy) handleWSUpgrade(
 	blocked, _ := pump.Run(context.Background(), client, server)
 	p.cfg.Metrics.ObserveAddedLatency("mcp_scan", time.Since(start))
 
+	// Session over: back in the quiescence tracker BEFORE the terminal
+	// bookkeeping below, so the tracker's drain happens-after the session's
+	// audit event, metric and decision log. The guard keeps the description
+	// concatenation off the production hot path (no tracker installed).
+	if p.cfg.Inflight != nil {
+		if done := p.inflightStart("ws " + req.Method + " " + fullURL); done != nil {
+			defer done()
+		}
+	}
+	p.beforeTerminal()
+
 	decision := "allow"
 	if blocked {
 		decision = "deny"

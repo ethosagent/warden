@@ -131,15 +131,16 @@ func TestCanary_Format(t *testing.T) {
 	}
 }
 
-// TestCanary_EchoLeakCaught is the Task D acceptance proof: an upstream that
-// reflects request headers (a malicious reflector) hands the REAL swapped
-// secret back to the agent under default worker config — the upstream-echo
-// leak (#389, being fixed separately). AssertCanaryNeverLeaked must FAIL the
-// recording TB and name WHERE the canary appeared. The pre-conditions below
-// pin the leak itself: if a fix for #389 lands, the first Fatalf here flips
-// and this test must be consciously reworked (the oracle would then be
-// catching nothing, because there is nothing to catch).
-func TestCanary_EchoLeakCaught(t *testing.T) {
+// TestCanary_EchoLeakBlocked is the #389 regression test: an upstream that
+// reflects request headers (a malicious reflector) must not hand the REAL
+// swapped secret back to the agent. The echo guard checks every response for
+// the values swapped into the request, so the reflected value is caught before
+// it reaches the agent: the exchange ends in a 502 with no relayed body, and
+// the deny is recorded with the bounded echo reason and a by-reference secret.
+// AssertCanaryNeverLeaked stays silent at the end — with the guard holding,
+// there is nothing to catch. (That the oracle itself still catches a real leak
+// on every surface is the planted-leak tests' job: TestCanary_Plant_*.)
+func TestCanary_EchoLeakBlocked(t *testing.T) {
 	value := Canary()
 	h := New(t, WithSecret("openai", value), Allow("echo.example.com"))
 	echo := h.Upstream("echo.example.com")
@@ -156,26 +157,34 @@ func TestCanary_EchoLeakCaught(t *testing.T) {
 	}
 	body, _ := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("GET the reflector = %d, want 200", resp.StatusCode)
+
+	// Pre-condition: the swap worked, so the reflector really received the real
+	// value — the echo attack is live and the guard has something to hold.
+	echoed := headersText(echo.Requests()[0].Header)
+	if !strings.Contains(echoed, value) {
+		t.Fatalf("the reflector never received the real swapped value — the scenario no longer exercises the upstream echo (#389)")
 	}
 
-	// Pre-condition (the #389 behavior): the REAL value came back to the agent.
-	if !strings.Contains(string(body), value) {
-		t.Fatalf("the reflector's body does not carry the real value — the upstream-echo leak (#389) appears fixed; rework this test so the oracle still has a real leak to catch")
+	// The echo guard blocked the response: a 502 whose body is the plain status
+	// text, never the reflected headers.
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("GET the reflector = %d, want 502 — the echo guard no longer blocks the upstream-echo leak (#389)", resp.StatusCode)
+	}
+	if strings.Contains(string(body), value) {
+		t.Fatalf("the blocked response's body still carries the real swapped value (len %d) — the echo guard leaked through its own error response", len(value))
 	}
 
-	rec := &recordingTB{T: t}
-	h.assertCanaryNeverLeaked(rec)
-	if !rec.Failed() {
-		t.Fatal("AssertCanaryNeverLeaked passed while the canary reached the agent; the oracle missed a real leak")
+	// The deny is recorded before the oracles read (the request scope leaves the
+	// quiescence tracker only after the deny event is stored), with the bounded
+	// echo reason — never the value.
+	evs := h.Events()
+	if len(evs) != 1 || evs[0].Decision != "deny" || evs[0].Reason != "secret_echo" || evs[0].Domain != "echo.example.com" {
+		t.Fatalf("events after the blocked echo = %+v, want exactly one echo.example.com deny with reason secret_echo", evs)
 	}
-	msg := rec.failureMessage()
-	for _, want := range []string{"agent response", "openai", "raw"} {
-		if !strings.Contains(msg, want) {
-			t.Errorf("oracle failure message missing %q:\n%s", want, msg)
-		}
-	}
+
+	// The full sweep stays silent: the canary reached only the in-scope upstream
+	// (the intended swap) and no oracle surface holds it.
+	h.AssertCanaryNeverLeaked()
 }
 
 // TestCanary_CleanRunPasses proves the oracle does not cry wolf: an unscoped

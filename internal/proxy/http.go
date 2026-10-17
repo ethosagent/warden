@@ -310,20 +310,10 @@ func (p *Proxy) serveHTTPRequest(tlsConn *tls.Conn, br *bufio.Reader, domain str
 		upstreamBR: upstreamBR,
 		reused:     upstream != nil,
 	}
-	// Enter the quiescence tracker here — after ReadRequest returned, before any
-	// stage runs — and leave it on every exit path AFTER this request's
-	// bookkeeping is recorded (deferred below). The allow path records its event
-	// only after the response is already in the agent's hands (#363), so "the
-	// response arrived" does not imply "the analytics are readable"; a drained
-	// tracker does. Starting after the read keeps an idle keep-alive conn parked
-	// in ReadRequest OUT of the tracker, so pooled-but-idle agent connections
-	// never block a waiter. Production (no tracker) pays one nil check and
-	// builds no description string (the guard keeps the concatenation off the
-	// hot path — see the allocation note on inflightStart).
-	if p.cfg.Inflight != nil {
-		s.inflightDone = p.inflightStart(req.Method + " https://" + domain + req.URL.RequestURI())
-	}
-	defer s.endInflight()
+	// The quiescence tracker is entered by runRequestStages — the ONE pipeline
+	// both h1 requests and h2/gRPC streams run — so this h1 path and serveGRPCStream
+	// share a single entry/exit point. Deferred here: the request's closables are
+	// released on every exit path after the stages (and their bookkeeping) ran.
 	defer s.cleanup()
 
 	end := p.runRequestStages(s)
@@ -338,7 +328,29 @@ func (p *Proxy) serveHTTPRequest(tlsConn *tls.Conn, br *bufio.Reader, domain str
 
 // runRequestStages runs the named stage chain for one request and returns whether
 // the keep-alive session should end.
+//
+// It is also the ONE quiescence-tracker entry/exit for both protocols (#363):
+// every h1 request (serveHTTPRequest) and every h2/gRPC stream (serveGRPCStream)
+// runs this pipeline, so one tracked unit per request scope starts here and the
+// deferred endInflight leaves it on every exit path AFTER the scope's terminal
+// bookkeeping is recorded — the allow path records its event only after the
+// response is already in the agent's hands, so "the response arrived" does not
+// imply "the analytics are readable"; a drained tracker does. The entry sits
+// after the request-read point (an idle keep-alive conn parked in ReadRequest
+// stays OUT of the tracker, so pooled-but-idle agent connections never block a
+// waiter), and the streaming paths step out at delivery and re-enter before
+// their terminal event (relayMCPSSE, handleWSUpgrade). Every terminal branch the
+// stages reach — echo-guard denies and stream aborts, readRequest's h2
+// refusals, badGateway — leaves exactly once through that defer, after its
+// bookkeeping. Production (no tracker) pays one nil check and builds no
+// description string (the guard keeps the concatenation off the hot path — see
+// the allocation note on inflightStart).
 func (p *Proxy) runRequestStages(s *requestScope) (endSession bool) {
+	if p.cfg.Inflight != nil {
+		s.inflightDone = p.inflightStart(s.proto + " " + s.req.Method + " " + s.eventURL())
+	}
+	defer s.endInflight()
+
 	if p.readRequest(s) {
 		return true
 	}
@@ -1210,6 +1222,17 @@ func (p *Proxy) relayMCPSSE(s *requestScope) (terminal bool) {
 		}
 		return false
 	})
+
+	// Stream over: back in the quiescence tracker BEFORE the terminal bookkeeping
+	// below — the echo guard's cut-stream deny or the stream's own allow/deny
+	// event — so the scope's done (the deferred endInflight in runRequestStages)
+	// runs after whichever record ends this stream. The guard keeps the
+	// description concatenation off the production hot path (no tracker
+	// installed).
+	if p.cfg.Inflight != nil {
+		s.inflightDone = p.inflightStart("sse " + s.req.Method + " " + fullURL)
+	}
+	p.beforeTerminal()
 
 	if p.echoStreamDone(s) {
 		return true // echo guard cut the stream; its deny is the only event

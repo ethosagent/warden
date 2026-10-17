@@ -124,7 +124,8 @@ func (t *Inflight) InFlight() []string {
 // one nil check and no allocation; the assembly-only harness tracker pays the
 // map insert. Returns nil when untracked — callers spread `if done != nil`.
 // Callers guard the DESCRIPTION build the same way (it concatenates strings);
-// see the four call sites (h1, h2/gRPC, SSE, WS).
+// see the three call sites (the shared runRequestStages entry for h1 and
+// h2/gRPC, and the SSE and WS re-entries before their terminal bookkeeping).
 func (p *Proxy) inflightStart(desc string) func() {
 	if p.cfg.Inflight == nil {
 		return nil

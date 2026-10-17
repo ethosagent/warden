@@ -4,13 +4,28 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"golang.org/x/net/http2"
 )
+
+// waitTrackerDrained fails the test when a scope never leaves the tracker,
+// naming what is still open.
+func waitTrackerDrained(t *testing.T, tr *Inflight) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := tr.WaitIdle(ctx); err != nil {
+		t.Fatalf("the scope never left the tracker: %v (in flight: %v)", err, tr.InFlight())
+	}
+}
 
 // TestInflight_StartDoneTracksDescriptions pins the tracker's basic contract:
 // a started unit is visible by its description until its done runs, done is
@@ -195,15 +210,16 @@ func TestProxy_AllowEventRecordedBeforeScopeLeavesTracker(t *testing.T) {
 }
 
 // TestProxy_GRPCStreamTrackedUntilTerminalEvent pins the h2/gRPC half of the
-// tracking (serveGRPCStream is the one handler for both): an h2 stream's scope
-// stays in the tracker until its terminal bookkeeping runs — in particular
-// through the #363 window, after the response bytes are already in the agent's
-// hands and before the event is recorded. BeforeTerminal (the assembly-only
-// worker.Overrides.BeforeTerminal hook) parks the bookkeeping in exactly that
-// window, so the assertions need no polling: while parked, InFlight must name
-// the stream, and once the tracker drains the store must already hold the
-// stream's grpc allow event. Removing serveGRPCStream's tracker slot fails
-// this at the InFlight check.
+// tracking (an h2 stream's scope is entered by the same runRequestStages entry
+// an h1 request takes): an h2 stream's scope stays in the tracker until its
+// terminal bookkeeping runs — in particular through the #363 window, after the
+// response bytes are already in the agent's hands and before the event is
+// recorded. BeforeTerminal (the assembly-only worker.Overrides.BeforeTerminal
+// hook) parks the bookkeeping in exactly that window, so the assertions need no
+// polling: while parked, InFlight must name the stream, and once the tracker
+// drains the store must already hold the stream's grpc allow event. Dropping
+// the pipeline's tracker entry for h2 (serveGRPCStream builds no slot of its
+// own) fails this at the InFlight check.
 func TestProxy_GRPCStreamTrackedUntilTerminalEvent(t *testing.T) {
 	caCertPEM, caKeyPEM, _, _ := generateTestCA(t)
 	be := startGRPCBackend(t)
@@ -299,4 +315,137 @@ func TestProxy_IdleTunnelNotTracked(t *testing.T) {
 	if err := tr.WaitIdle(ctx); err != nil {
 		t.Fatalf("WaitIdle with an idle tunnel = %v, want nil", err)
 	}
+}
+
+// TestProxy_NewPathsLeaveTrackerAfterBookkeeping pins the tracker contract on
+// the paths #388/#389 added to the shared pipeline: every terminal branch — an
+// h2 readRequest refusal (host_mismatch, declared trailers, extended CONNECT),
+// a bad gateway, and an echo-guard deny that aborts an h2 stream whose headers
+// already went out (serveGRPCStream ends it with a panic, so the pipeline's
+// deferred endInflight must fire before that) — leaves the tracker exactly
+// once, AFTER its bookkeeping. No polling: once WaitIdle returns, the store
+// must already hold exactly that path's event — or, for a 502 (an upstream
+// failure is not a policy decision), nothing at all.
+func TestProxy_NewPathsLeaveTrackerAfterBookkeeping(t *testing.T) {
+	t.Run("h2_host_mismatch", func(t *testing.T) {
+		be := newParityBackend(t, "text/plain", "ok")
+		p, store, caPEM := startEdgeProxy(t, be, nil)
+		tr := NewInflight()
+		p.cfg.Inflight = tr
+
+		req, _ := http.NewRequest("GET", "https://"+parityHost+"/x", nil)
+		req.Host = "evil.test"
+		resp, err := dialGRPCClient(t, p.Addr().String(), parityHost, caPEM).RoundTrip(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusMisdirectedRequest {
+			t.Fatalf("status = %d, want 421", resp.StatusCode)
+		}
+		waitTrackerDrained(t, tr)
+		requireSingleDeny(t, store.snapshot(), "host_mismatch")
+	})
+
+	t.Run("h2_request_trailers", func(t *testing.T) {
+		be := newParityBackend(t, "text/plain", "ok")
+		p, store, caPEM := startEdgeProxy(t, be, nil)
+		tr := NewInflight()
+		p.cfg.Inflight = tr
+
+		req, _ := http.NewRequest("POST", "https://"+parityHost+"/up", strings.NewReader("payload"))
+		req.Trailer = http.Header{"X-Checksum": nil}
+		req.Body = &trailerBody{Reader: strings.NewReader("payload"), req: req}
+		resp, err := dialGRPCClient(t, p.Addr().String(), parityHost, caPEM).RoundTrip(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", resp.StatusCode)
+		}
+		waitTrackerDrained(t, tr)
+		requireSingleDeny(t, store.snapshot(), "h2_request_trailers_unsupported")
+	})
+
+	t.Run("h2_extended_connect", func(t *testing.T) {
+		be := newParityBackend(t, "text/plain", "ok")
+		p, store, _ := startEdgeProxy(t, be, nil)
+		tr := NewInflight()
+		p.cfg.Inflight = tr
+
+		r := httptest.NewRequest("CONNECT", "https://"+parityHost+"/chat", nil)
+		r.Host = parityHost
+		r.Header.Set(":protocol", "websocket")
+		w := httptest.NewRecorder()
+		p.serveGRPCStream(w, r, &http2.Transport{}, parityHost, 443, false) //nolint:staticcheck // SA1019: same transport type the production path uses
+		if w.Code != http.StatusNotImplemented {
+			t.Fatalf("status = %d, want 501", w.Code)
+		}
+		waitTrackerDrained(t, tr)
+		requireSingleDeny(t, store.snapshot(), "h2_extended_connect_unsupported")
+	})
+
+	// A 502 records no analytics event; the scope must still leave the tracker
+	// promptly on both protocols (a hung tracker would block every oracle).
+	for _, h2 := range []bool{false, true} {
+		name := "badGateway_h1"
+		if h2 {
+			name = "badGateway_h2"
+		}
+		t.Run(name, func(t *testing.T) {
+			e := newEchoEnv(t, echoBodyHandler, nil)
+			tr := NewInflight()
+			e.p.cfg.Inflight = tr
+			e.p.dialTLS = func(string, string, *tls.Config) (*tls.Conn, error) {
+				return nil, errors.New("test: upstream unreachable")
+			}
+
+			res := e.do(h2, echoReq(t, "GET", "/h", bearer(), ""))
+			if res.err != nil {
+				t.Fatalf("GET through the proxy: %v", res.err)
+			}
+			if res.status != http.StatusBadGateway {
+				t.Fatalf("status = %d, want 502", res.status)
+			}
+			waitTrackerDrained(t, tr)
+			if evs := e.store.snapshot(); len(evs) != 0 {
+				t.Fatalf("events after a 502 = %+v, want none (an upstream failure is not a policy decision)", evs)
+			}
+		})
+	}
+
+	// The echo guard aborts an h2 stream whose headers already went out: the
+	// abort deny is recorded after partial delivery, and serveGRPCStream ends
+	// the stream with a panic — the drain below proves the scope left the
+	// tracker after that deny and before the client saw the reset.
+	t.Run("h2_echo_stream_abort", func(t *testing.T) {
+		hdr := map[string]string{
+			"Content-Type":  "application/grpc",
+			"Authorization": "Bearer " + echoPlaceholder,
+			"Te":            "trailers",
+		}
+		e := newEchoEnv(t, func(w http.ResponseWriter, r *http.Request) {
+			f := w.(http.Flusher)
+			w.Header().Set("Content-Type", "application/grpc")
+			_, _ = w.Write(grpcFrame("msg-1"))
+			f.Flush()
+			time.Sleep(30 * time.Millisecond)
+			_, _ = w.Write(grpcFrame("msg-2 " + r.Header.Get("Authorization")))
+			f.Flush()
+		}, nil)
+		tr := NewInflight()
+		e.p.cfg.Inflight = tr
+
+		res := e.do(true, echoReq(t, "POST", "/pkg.Svc/Watch", hdr, string(grpcFrame("req"))))
+		if res.err == nil {
+			t.Fatalf("gRPC stream not aborted: %q", res.body)
+		}
+		waitTrackerDrained(t, tr)
+		evs := e.store.snapshot()
+		if len(evs) != 1 || evs[0].Decision != "deny" || evs[0].Reason != "secret_echo" {
+			t.Fatalf("events after the abort = %+v, want exactly one deny/secret_echo", evs)
+		}
+	})
 }
