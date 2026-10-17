@@ -5,6 +5,8 @@ import (
 	"io"
 	"net/http"
 	"strings"
+
+	"github.com/ethosagent/warden/internal/denyreason"
 )
 
 // proxyOnlyHeaders are addressed to Warden, never to the destination (#396).
@@ -158,6 +160,6 @@ func hasTrailerValues(t http.Header) bool {
 
 // denyTrailers records the request_trailers_unsupported deny and answers 400.
 func (p *Proxy) denyTrailers(s *requestScope) {
-	p.recordDeny(s, "request_trailers_unsupported")
+	p.emitDeny(s, denyreason.RequestTrailersUnsupported, denyExtra{LatencyMs: s.latencyMs()})
 	s.out.errorResponse(http.StatusBadRequest, "Bad Request")
 }

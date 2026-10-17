@@ -17,6 +17,7 @@ import (
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/auth"
 	"github.com/ethosagent/warden/internal/config"
+	"github.com/ethosagent/warden/internal/denyreason"
 	"github.com/ethosagent/warden/internal/mcp/gateway"
 	"github.com/ethosagent/warden/internal/mcp/sse"
 	"github.com/ethosagent/warden/internal/policy"
@@ -249,6 +250,7 @@ func (s *requestScope) addEvidence(dets []scan.Detection) {
 // stale-conn redial's fresh conn. It is nil (nothing to close) before the first
 // forward and after a handoff, so there is no double close and no leak.
 func (p *Proxy) handleHTTP(tlsConn *tls.Conn, br *bufio.Reader, domain string, port int, needsJudge bool) {
+	p.reach(PathHTTP1)
 	var upstream net.Conn
 	var upstreamBR *bufio.Reader
 	defer func() {
@@ -355,13 +357,17 @@ func (p *Proxy) runRequestStages(s *requestScope) (endSession bool) {
 // the HTTP/2 shapes the proxy cannot mediate faithfully. Every refusal records a
 // deny event so it is never silent. A refusal ends the session on h1 (cleanup
 // closes req.Body); an h2 stream is refused alone, the connection's others go on.
+// Both sides of the host recheck go through policy.NormalizeHost (#397), so case
+// and any number of trailing dots cannot make the recheck disagree with the
+// CONNECT admission it belongs to — while a different host, or a Host header
+// that is only dots (normalised to ""), is still refused (fail closed).
 func (p *Proxy) readRequest(s *requestScope) (endSession bool) {
 	hostOnly := s.req.Host
 	if h, _, err := net.SplitHostPort(s.req.Host); err == nil {
 		hostOnly = h
 	}
-	if !strings.EqualFold(hostOnly, s.domain) {
-		p.recordDeny(s, "host_mismatch")
+	if policy.NormalizeHost(hostOnly) != policy.NormalizeHost(s.domain) {
+		p.emitDeny(s, denyreason.HostMismatch, denyExtra{LatencyMs: s.latencyMs()})
 		if s.rt != nil {
 			s.out.errorResponse(http.StatusMisdirectedRequest, "Misdirected Request")
 		}
@@ -375,43 +381,31 @@ func (p *Proxy) readRequest(s *requestScope) (endSession bool) {
 	// with GODEBUG=http2xconnect=1); refuse explicitly if a client sends it anyway, so
 	// it falls back to the h1 WebSocket path.
 	if s.req.Header.Get(":protocol") != "" {
-		p.recordDeny(s, "h2_extended_connect_unsupported")
+		p.emitDeny(s, denyreason.H2ExtendedConnectUnsupported, denyExtra{LatencyMs: s.latencyMs()})
 		s.out.errorResponse(http.StatusNotImplemented, "Not Implemented")
 		return true
 	}
 	// Request trailers are not forwarded by forwardH2; dropping them silently would
 	// change the request, so a stream that declares them is refused.
 	if len(s.req.Trailer) > 0 {
-		p.recordDeny(s, "h2_request_trailers_unsupported")
+		p.emitDeny(s, denyreason.H2RequestTrailersUnsupported, denyExtra{LatencyMs: s.latencyMs()})
 		s.out.errorResponse(http.StatusBadRequest, "Bad Request")
 		return true
 	}
 	return false
 }
 
-// recordDeny writes the single deny decision event (plus metrics and log line) for
-// a request refused by a pipeline stage that is not a policy verdict. The caller
-// writes the client response.
-func (p *Proxy) recordDeny(s *requestScope, reason string) {
-	fullURL := s.eventURL()
-	_ = p.analyticsStore().StoreEvent(analytics.Event{
-		Timestamp: time.Now(),
-		Domain:    s.domain,
-		Port:      s.port,
-		Protocol:  s.proto,
-		Method:    s.req.Method,
-		URL:       fullURL,
-		Decision:  "deny",
-		Reason:    reason,
-		LatencyMs: s.latencyMs(),
-	})
-	p.cfg.Metrics.RecordRequest("deny", s.proto)
-	p.cfg.Metrics.RecordBlocked(reason)
-	p.logDecision(decisionLog{
-		Domain: s.domain, Port: s.port, Protocol: s.proto,
-		Method: s.req.Method, URL: fullURL, Decision: "deny",
-		Reason: reason,
-	})
+// recordSSRFDeny is the deny path for a dial the SSRF-safe dialer refused
+// (#391): one deny through the emitDeny chokepoint with the bounded ssrf_*
+// reason and the address class. It is a no-op for any other error, so ordinary
+// dial failures (DNS failure, timeout, connection refused) keep their
+// long-standing treatment — a 502 with no analytics event, never an ssrf_* deny.
+func (p *Proxy) recordSSRFDeny(s *requestScope, err error) {
+	se, ok := AsSSRFError(err)
+	if !ok {
+		return
+	}
+	p.emitDeny(s, ssrfDenyReason(se), denyExtra{AddrClass: se.AddrClass, LatencyMs: s.latencyMs()})
 }
 
 // constraintGate enforces the #371 method/path constraints on EVERY request of
@@ -430,31 +424,10 @@ func (p *Proxy) constraintGate(s *requestScope) (endSession bool) {
 	if verdict.Decision != policy.Deny {
 		return false
 	}
-	reason := verdict.Reason
-	if reason == "" {
-		// Not a constraint violation: a denylist hit or an exhausted rate-limit /
-		// time-window guard. Same bounded generic reason the CONNECT gate records.
-		reason = "policy"
-	}
-	fullURL := s.eventURL()
-	_ = p.analyticsStore().StoreEvent(analytics.Event{
-		Timestamp: time.Now(),
-		Domain:    s.domain,
-		Port:      s.port,
-		Protocol:  s.proto,
-		Method:    s.req.Method,
-		URL:       fullURL,
-		Decision:  "deny",
-		Reason:    reason,
-		LatencyMs: s.latencyMs(),
-	})
-	p.cfg.Metrics.RecordRequest("deny", s.proto)
-	p.cfg.Metrics.RecordBlocked(reason)
-	p.logDecision(decisionLog{
-		Domain: s.domain, Port: s.port, Protocol: s.proto,
-		Method: s.req.Method, URL: fullURL, Decision: "deny",
-		Reason: reason,
-	})
+	// Every explicit Deny names itself from the declared set (#409): a
+	// constraint violation (method_not_allowed / path_not_allowed /
+	// path_not_canonical), a denylist hit, or an exhausted guard.
+	p.emitDeny(s, verdict.Reason, denyExtra{LatencyMs: s.latencyMs()})
 	s.out.errorResponse(403, "Forbidden")
 	return true
 }
@@ -486,27 +459,13 @@ func (p *Proxy) judgeGate(s *requestScope) (endSession bool) {
 		verdict = Verdict{Decision: "deny", Reason: "judge disabled"}
 	}
 	if verdict.Decision != "allow" {
-		_ = p.analyticsStore().StoreEvent(analytics.Event{
-			Timestamp:   time.Now(),
-			Domain:      s.domain,
-			Port:        s.port,
-			Protocol:    s.proto,
-			Method:      s.req.Method,
-			URL:         fullURL,
-			Decision:    "deny",
+		p.emitDeny(s, denyreason.Judge, denyExtra{
 			JudgeReason: verdict.Reason,
 			LatencyMs:   s.latencyMs(),
 			SwappedRefs: s.swappedNames,
 			Evidence:    s.evidence,
 		})
-		p.cfg.Metrics.RecordRequest("deny", s.proto)
-		p.cfg.Metrics.RecordBlocked("judge")
 		p.cfg.Metrics.RecordJudge("deny")
-		p.logDecision(decisionLog{
-			Domain: s.domain, Port: s.port, Protocol: s.proto,
-			Method: s.req.Method, URL: fullURL, Decision: "deny",
-			JudgeReason: verdict.Reason,
-		})
 		s.out.errorResponse(403, "Forbidden")
 		return true
 	}
@@ -533,6 +492,7 @@ func (p *Proxy) mcpRequestScan(s *requestScope) (endSession bool) {
 		return false
 	}
 	s.wasMCP = true
+	p.reach(PathMCP)
 	fullURL := s.eventURL()
 	s.mcpSessKey = p.cfg.AgentID + ":" + s.domain
 	start := time.Now()
@@ -542,25 +502,12 @@ func (p *Proxy) mcpRequestScan(s *requestScope) (endSession bool) {
 	s.mcpTool = v.Tool
 	s.mcpReason = v.Reason
 	if v.Action == gateway.Deny {
-		_ = p.analyticsStore().StoreEvent(analytics.Event{
-			Timestamp:   time.Now(),
-			Domain:      s.domain,
-			Port:        s.port,
+		p.emitDeny(s, gatewayDenyReason(v.Reason), denyExtra{
 			Protocol:    "mcp",
-			Method:      s.req.Method,
-			URL:         fullURL,
-			Decision:    "deny",
 			Tool:        v.Tool,
-			Reason:      v.Reason,
 			LatencyMs:   s.latencyMs(),
 			SwappedRefs: s.swappedNames,
 			Evidence:    s.evidence,
-		})
-		p.cfg.Metrics.RecordRequest("deny", "mcp")
-		p.cfg.Metrics.RecordBlocked(v.Reason)
-		p.logDecision(decisionLog{
-			Domain: s.domain, Port: s.port, Protocol: "mcp",
-			Method: s.req.Method, URL: fullURL, Decision: "deny",
 		})
 		s.out.errorResponse(403, "Forbidden")
 		return true
@@ -720,17 +667,14 @@ func (p *Proxy) dlpScan(s *requestScope) (endSession bool) {
 // be located it stays "redact" with DLPEncoded=true, so the event honestly reflects
 // that policy asked for redaction but the request was escalated to a fail-closed block.
 func (p *Proxy) dlpDeny(s *requestScope) (endSession bool) {
-	fullURL := s.eventURL()
-	reason := "dlp_" + s.dlpAction // dlp_block / dlp_redact — bounded, closed set
-	_ = p.analyticsStore().StoreEvent(analytics.Event{
-		Timestamp:   time.Now(),
-		Domain:      s.domain,
-		Port:        s.port,
-		Protocol:    s.proto,
-		Method:      s.req.Method,
-		URL:         fullURL,
-		Decision:    "deny",
-		Reason:      reason,
+	// The reason names the action that blocked the request (dlp_block, or
+	// dlp_redact for a decoded-layer redact escalated to fail-closed) — same
+	// value on the event and the metric.
+	reason := denyreason.DLPBlock
+	if s.dlpAction == config.DLPActionRedact {
+		reason = denyreason.DLPRedact
+	}
+	p.emitDeny(s, reason, denyExtra{
 		DataClasses: s.dlpClasses,
 		DLPAction:   s.dlpAction,
 		DLPRule:     s.dlpRule,
@@ -739,12 +683,6 @@ func (p *Proxy) dlpDeny(s *requestScope) (endSession bool) {
 		LatencyMs:   s.latencyMs(),
 		SwappedRefs: s.swappedNames,
 		Evidence:    s.evidence,
-	})
-	p.cfg.Metrics.RecordRequest("deny", s.proto)
-	p.cfg.Metrics.RecordBlocked("dlp")
-	p.logDecision(decisionLog{
-		Domain: s.domain, Port: s.port, Protocol: s.proto,
-		Method: s.req.Method, URL: fullURL, Decision: "deny",
 	})
 	s.out.errorResponse(403, "Forbidden")
 	return true
@@ -957,7 +895,7 @@ func (p *Proxy) applyTransforms(s *requestScope) (endSession bool) {
 			// A streamed (gRPC) body is never buffered, and a body-signing transformer
 			// would read it whole and stall the stream: refuse rather than mis-sign.
 			if s.streamBody && transformerReadsBody(mt.Transformer) && s.req.Body != nil && s.req.Body != http.NoBody {
-				p.recordDeny(s, "transform_needs_buffered_body")
+				p.emitDeny(s, denyreason.TransformNeedsBufferedBody, denyExtra{LatencyMs: s.latencyMs()})
 				s.out.errorResponse(http.StatusNotImplemented, "Not Implemented")
 				return true
 			}
@@ -1027,10 +965,12 @@ func (p *Proxy) forward(s *requestScope) (endSession bool) {
 
 // dialUpstream dials a fresh TLS upstream for this session's fixed host and
 // installs it (plus a new buffered reader) on the scope. It always targets
-// s.domain:s.port — reuse never crosses hosts.
+// s.domain:s.port — reuse never crosses hosts. The TLS config comes from
+// upstreamTLSConfig so the assembly-only root-CA override applies here too.
 func (p *Proxy) dialUpstream(s *requestScope) error {
-	upstream, err := p.dialTLS("tcp", net.JoinHostPort(s.domain, fmt.Sprintf("%d", s.port)), &tls.Config{ServerName: s.domain})
+	upstream, err := p.dialTLS("tcp", net.JoinHostPort(s.domain, fmt.Sprintf("%d", s.port)), p.upstreamTLSConfig(s.domain))
 	if err != nil {
+		p.recordSSRFDeny(s, err)
 		return err
 	}
 	s.upstream = upstream
@@ -1130,27 +1070,12 @@ func (p *Proxy) mcpResponseScan(s *requestScope) (terminal bool) {
 			s.mcpReason = v.Reason
 		}
 		if v.Action == gateway.Deny {
-			fullURL := s.eventURL()
-			_ = p.analyticsStore().StoreEvent(analytics.Event{
-				Timestamp:   time.Now(),
-				Domain:      s.domain,
-				Port:        s.port,
+			p.emitDeny(s, gatewayDenyReason(v.Reason), denyExtra{
 				Protocol:    "mcp",
-				Method:      s.req.Method,
-				URL:         fullURL,
-				Decision:    "deny",
 				Tool:        s.mcpTool,
-				Reason:      v.Reason,
 				LatencyMs:   s.latencyMs(),
 				SwappedRefs: s.swappedNames,
 				Evidence:    s.evidence,
-			})
-			p.cfg.Metrics.RecordRequest("deny", "mcp")
-			p.cfg.Metrics.RecordBlocked(v.Reason)
-			p.logDecision(decisionLog{
-				Domain: s.domain, Port: s.port, Protocol: "mcp",
-				Method: s.req.Method, URL: fullURL, Decision: "deny",
-				ResponseStatus: s.resp.StatusCode,
 			})
 			s.out.errorResponse(502, "Bad Gateway")
 			return true
@@ -1172,6 +1097,7 @@ func (p *Proxy) mcpResponseScan(s *requestScope) (terminal bool) {
 // response is terminal for the connection, so this fully handles the request
 // (writing the deny/allow audit event) and always returns true.
 func (p *Proxy) relayMCPSSE(s *requestScope) (terminal bool) {
+	p.reach(PathSSE)
 	fullURL := s.eventURL()
 
 	// Headers go out first; the body is then teed through the SSE scanner into the
@@ -1210,31 +1136,18 @@ func (p *Proxy) relayMCPSSE(s *requestScope) (terminal bool) {
 	if errors.Is(scanErr, sse.ErrEventTooLarge) {
 		// Enforce mode could not scan this event, so it was not forwarded.
 		blocked = true
-		s.mcpReason = "mcp_sse_event_too_large"
+		s.mcpReason = string(denyreason.MCPSSEEventTooLarge)
 	}
 	if blocked {
-		reason := preferEchoReason(s.mcpReason, s.echoMonitorReason)
-		_ = p.analyticsStore().StoreEvent(analytics.Event{
-			Timestamp:      time.Now(),
-			Domain:         s.domain,
-			Port:           s.port,
+		// A gateway (or held-event) deny names itself; an empty verdict reason
+		// falls back to the declared mcp_gateway_deny (#409).
+		p.emitDeny(s, gatewayDenyReason(preferEchoReason(s.mcpReason, s.echoMonitorReason)), denyExtra{
 			Protocol:       "mcp",
-			Method:         s.req.Method,
-			URL:            fullURL,
-			Decision:       "deny",
-			ResponseStatus: s.resp.StatusCode,
 			Tool:           s.mcpTool,
-			Reason:         reason,
+			ResponseStatus: s.resp.StatusCode,
 			LatencyMs:      s.latencyMs(),
 			SwappedRefs:    s.swappedNames,
 			Evidence:       s.evidence,
-		})
-		p.cfg.Metrics.RecordRequest("deny", "mcp")
-		p.cfg.Metrics.RecordBlocked(reason)
-		p.logDecision(decisionLog{
-			Domain: s.domain, Port: s.port, Protocol: "mcp",
-			Method: s.req.Method, URL: fullURL, Decision: "deny",
-			ResponseStatus: s.resp.StatusCode,
 		})
 	} else {
 		_ = p.analyticsStore().StoreEvent(analytics.Event{
@@ -1340,27 +1253,11 @@ func (p *Proxy) httpResponseScan(s *requestScope) (blocked bool) {
 	if block {
 		// enforce + high leak/injection: replace the body with an error, record a
 		// deny, and return (terminal, mirrors the MCP enforce-deny branch).
-		fullURL := s.eventURL()
-		_ = p.analyticsStore().StoreEvent(analytics.Event{
-			Timestamp:      time.Now(),
-			Domain:         s.domain,
-			Port:           s.port,
-			Protocol:       s.proto,
-			Method:         s.req.Method,
-			URL:            fullURL,
-			Decision:       "deny",
+		p.emitDeny(s, reason, denyExtra{
 			ResponseStatus: s.resp.StatusCode,
-			Reason:         reason,
 			LatencyMs:      s.latencyMs(),
 			SwappedRefs:    s.swappedNames,
 			Evidence:       s.evidence,
-		})
-		p.cfg.Metrics.RecordRequest("deny", s.proto)
-		p.cfg.Metrics.RecordBlocked(reason)
-		p.logDecision(decisionLog{
-			Domain: s.domain, Port: s.port, Protocol: s.proto,
-			Method: s.req.Method, URL: fullURL, Decision: "deny",
-			ResponseStatus: s.resp.StatusCode,
 		})
 		s.out.errorResponse(502, "Bad Gateway")
 		return true

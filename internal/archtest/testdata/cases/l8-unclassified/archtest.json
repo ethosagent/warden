@@ -1,0 +1,7 @@
+{
+  "overrides": {"lonely": {}},
+  "want": [
+    {"rule": "L8", "file": "lonely/thing.go", "line": 1},
+    {"rule": "Z1", "file": "lonely/thing.go", "line": 1}
+  ]
+}

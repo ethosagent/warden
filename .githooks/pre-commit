@@ -17,7 +17,7 @@ fi
 go vet ./...
 
 if command -v golangci-lint >/dev/null 2>&1; then
-	golangci-lint run
+	golangci-lint run --config .golangci.arch.yml
 fi
 
 echo "pre-commit OK"

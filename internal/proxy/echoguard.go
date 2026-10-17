@@ -14,10 +14,9 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 
-	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/auth"
+	"github.com/ethosagent/warden/internal/denyreason"
 	"github.com/ethosagent/warden/internal/mcp/ws"
 	"github.com/ethosagent/warden/internal/secrets"
 )
@@ -42,8 +41,10 @@ const (
 	// shorter one would match innocent text. The raw value is always matched.
 	minDerivedNeedle = 4
 
-	reasonSecretEcho            = "secret_echo"
-	reasonSecretEchoUnscannable = "secret_echo_unscannable"
+	// The guard's deny reasons come from the one declared set (internal/denyreason,
+	// rule X6 in #349); these aliases keep the call sites short.
+	reasonSecretEcho            = string(denyreason.SecretEcho)
+	reasonSecretEchoUnscannable = string(denyreason.SecretEchoUnscannable)
 )
 
 // EchoGuardConfig switches the echo guard. The zero value is the default: on,
@@ -813,28 +814,12 @@ func (p *Proxy) echoDeny(s *requestScope, secret int, reason string) {
 		}
 		refs = append(refs, secrets.Ref(sec.value).String())
 	}
-	fullURL := s.eventURL()
-	secretRef := strings.Join(refs, ",")
-	_ = p.analyticsStore().StoreEvent(analytics.Event{
-		Timestamp:      time.Now(),
-		Domain:         s.domain,
-		Port:           s.port,
-		Protocol:       s.proto,
-		Method:         s.req.Method,
-		URL:            fullURL,
-		Decision:       "deny",
+	// reason is one of the local aliases of the declared echo reasons (above).
+	p.emitDeny(s, denyreason.Reason(reason), denyExtra{
 		ResponseStatus: s.resp.StatusCode,
-		Reason:         reason,
-		SecretRef:      secretRef,
+		SecretRef:      strings.Join(refs, ","),
 		LatencyMs:      s.latencyMs(),
 		SwappedRefs:    names,
-	})
-	p.cfg.Metrics.RecordRequest("deny", s.proto)
-	p.cfg.Metrics.RecordBlocked(reason)
-	p.logDecision(decisionLog{
-		Domain: s.domain, Port: s.port, Protocol: s.proto,
-		Method: s.req.Method, URL: fullURL, Decision: "deny",
-		ResponseStatus: s.resp.StatusCode, SecretRef: secretRef,
 	})
 }
 

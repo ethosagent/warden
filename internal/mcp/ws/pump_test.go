@@ -300,7 +300,6 @@ func TestPump_BenignForwardedBothWays(t *testing.T) {
 	go func() {
 		_, _ = clientB.Write(reqWire)
 		_, _ = serverB.Write(respWire)
-		_, _ = clientB.Write(buildClose())
 	}()
 
 	serverBR := bufio.NewReader(serverB)
@@ -318,6 +317,11 @@ func TestPump_BenignForwardedBothWays(t *testing.T) {
 	if !bytes.Equal(out2.Bytes(), respWire) {
 		t.Fatalf("response not forwarded byte-identically")
 	}
+
+	// Close only after both frames arrived. A peer's Close ends the session and
+	// tears down both directions, so a Close sent earlier can race the reply
+	// still in flight on the other direction (the frame is then dropped).
+	go func() { _, _ = clientB.Write(buildClose()) }()
 
 	r := waitResult(t, res)
 	if r.blocked {

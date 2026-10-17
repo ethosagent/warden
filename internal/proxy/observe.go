@@ -20,14 +20,18 @@ type decisionLog struct {
 	ResponseStatus int
 	SecretRef      string
 	JudgeReason    string
-	// Reason is the bounded decision reason, a small closed enum: the deny
-	// reasons the warden.blocked.total{reason} metric carries (e.g.
-	// "malformed_connect", "no_tls") and the #371 constraint reasons
-	// ("method_not_allowed" / "path_not_allowed" / "path_not_canonical").
-	// Detail, when non-empty, is a bounded refinement of the reason (e.g.
-	// "request_line_too_long"). Neither ever carries request content.
+	// Reason is the bounded decision reason from the ONE declared set
+	// (internal/denyreason, rule X6 in #349): policy_no_match, the #371
+	// constraint reasons, the edge/echo/MCP reasons, … A closed enum — metadata,
+	// never content. Every deny carries it (#409). Detail, when non-empty, is a
+	// bounded refinement of the reason (e.g. "request_line_too_long"); it never
+	// carries request content.
 	Reason string
 	Detail string
+	// AddrClass is the bounded address class behind an ssrf_* Reason (see
+	// SSRFError). Empty unless Reason is one of the ssrf_* enums; it never
+	// carries a resolved address.
+	AddrClass string
 }
 
 // logDecision emits one structured record next to the analytics StoreEvent.
@@ -60,6 +64,9 @@ func (p *Proxy) logDecision(d decisionLog) {
 	}
 	if d.Detail != "" {
 		attrs = append(attrs, slog.String("detail", d.Detail))
+	}
+	if d.AddrClass != "" {
+		attrs = append(attrs, slog.String("addr_class", d.AddrClass))
 	}
 	if d.Decision == "deny" {
 		p.cfg.Logger.Warn("egress decision", attrs...)

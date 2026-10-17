@@ -1,0 +1,7 @@
+{"Action":"start","Package":"example.com/fx/internal/archtest"}
+{"Action":"run","Package":"example.com/fx/internal/archtest","Test":"TestArchitecture"}
+{"Action":"output","Package":"example.com/fx/internal/archtest","Test":"TestArchitecture","Output":"=== RUN   TestArchitecture\n"}
+{"Action":"output","Package":"example.com/fx/internal/archtest","Test":"TestArchitecture","Output":"    architecture_test.go:57: X3  internal/worker/worker.go:41:  reads os.Environ() (the process environment)  →  pass an explicit env (or the specific values needed) instead of the process environment\n"}
+{"Action":"output","Package":"example.com/fx/internal/archtest","Test":"TestArchitecture","Output":"--- FAIL: TestArchitecture (0.21s)\n"}
+{"Action":"fail","Package":"example.com/fx/internal/archtest","Test":"TestArchitecture"}
+{"Action":"fail","Package":"example.com/fx/internal/archtest"}

@@ -22,7 +22,7 @@ fmt:
 	gofmt -w .
 
 lint:
-	golangci-lint run
+	golangci-lint run --config .golangci.arch.yml
 
 repro:
 	scripts/repro-verify.sh

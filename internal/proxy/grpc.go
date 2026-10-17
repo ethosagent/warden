@@ -41,13 +41,14 @@ func (fw *flushWriter) Write(b []byte) (int, error) {
 func (p *Proxy) handleGRPC(clientConn net.Conn, domain string, port int, needsJudge bool) {
 	// DialTLSContext ignores the addr the transport would derive from the request
 	// URL and always dials the CONNECT-gated destination through the SSRF-safe
-	// dialer, negotiating ALPN h2 (required for the upstream to speak HTTP/2).
+	// dialer. The tls.Config comes from upstreamTLSConfig so the assembly-only
+	// UpstreamRootCAs override applies here like on every other upstream TLS
+	// dial, plus ALPN h2 (required for the upstream to speak HTTP/2).
 	rt := &http2.Transport{
 		DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
-			return p.dialTLS(network, net.JoinHostPort(domain, strconv.Itoa(port)), &tls.Config{
-				ServerName: domain,
-				NextProtos: []string{"h2"},
-			})
+			upstreamCfg := p.upstreamTLSConfig(domain)
+			upstreamCfg.NextProtos = []string{"h2"}
+			return p.dialTLS(network, net.JoinHostPort(domain, strconv.Itoa(port)), upstreamCfg)
 		},
 	}
 	defer rt.CloseIdleConnections()
@@ -75,9 +76,13 @@ func (p *Proxy) handleGRPC(clientConn net.Conn, domain string, port int, needsJu
 func (p *Proxy) serveGRPCStream(w http.ResponseWriter, r *http.Request, rt *http2.Transport, domain string, port int, needsJudge bool) {
 	isGRPC := strings.HasPrefix(r.Header.Get("Content-Type"), "application/grpc")
 	proto := "http2"
+	path := PathH2
 	if isGRPC {
 		proto = "grpc"
+		path = PathGRPC
 	}
+	p.reach(path)
+
 	s := &requestScope{
 		out:        h2Sink{w: w},
 		rt:         rt,
@@ -127,6 +132,10 @@ func (p *Proxy) forwardH2(s *requestScope) (endSession bool) {
 
 	resp, err := s.rt.RoundTrip(outReq)
 	if err != nil {
+		// The transport surfaces the DialTLSContext error unwrapped, so a dial
+		// the SSRF-safe dialer refused is audited here (#391); ordinary
+		// failures remain a plain 502 with no event.
+		p.recordSSRFDeny(s, err)
 		return p.badGateway(s)
 	}
 	s.resp = resp

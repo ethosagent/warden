@@ -1,0 +1,14 @@
+package fx
+
+import (
+	"os"
+	"testing"
+)
+
+// The test prints secrets the way a careless test might: a credential-shaped
+// literal and the value of a secret environment variable.
+func TestLeaksSecrets(t *testing.T) {
+	t.Log("aws key AKIAABCDEFGHIJKLMNOP")
+	t.Log("env token " + os.Getenv("CHECKREPORT_CANARY_TOKEN"))
+	t.Fatal("boom")
+}

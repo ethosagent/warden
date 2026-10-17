@@ -3,7 +3,6 @@ package proxy
 import (
 	"bufio"
 	"context"
-	"crypto/tls"
 	"fmt"
 	"io"
 	"log/slog"
@@ -12,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ethosagent/warden/internal/analytics"
+	"github.com/ethosagent/warden/internal/denyreason"
 	"github.com/ethosagent/warden/internal/mcp/ws"
 )
 
@@ -57,6 +57,7 @@ func (p *Proxy) handleWSUpgrade(s *requestScope) {
 	resp, req, gw := s.resp, s.req, s.gw
 	fullURL := s.eventURL() // the agent's original query, never a swapped one
 	defer func() { _ = upstream.Close() }()
+	p.reach(PathWebSocket)
 
 	// Resolve the WS-scan capability through the interface — never a concrete
 	// type — so any MCPGateway (including a wrapper/decorator over the real
@@ -71,7 +72,7 @@ func (p *Proxy) handleWSUpgrade(s *requestScope) {
 			// Fail closed: refuse the 101, record the block, and let the deferred
 			// upstream.Close() run. The pump never starts, so nothing else owns or
 			// closes the upstream — no leak, no double close.
-			p.refuseWSEnforce(tlsConn, req, fullURL, s.domain, s.port)
+			p.refuseWSEnforce(s)
 			return
 		}
 		// monitor/off: preserve today's pass-through (nil scanner => pump forwards
@@ -88,13 +89,13 @@ func (p *Proxy) handleWSUpgrade(s *requestScope) {
 	statusLine := fmt.Sprintf("HTTP/%d.%d %03d %s\r\n",
 		resp.ProtoMajor, resp.ProtoMinor, resp.StatusCode,
 		http.StatusText(resp.StatusCode))
-	if _, err := io.WriteString(tlsConn, statusLine); err != nil {
+	if _, err := io.WriteString(s.tlsConn, statusLine); err != nil {
 		return
 	}
-	if err := resp.Header.Write(tlsConn); err != nil {
+	if err := resp.Header.Write(s.tlsConn); err != nil {
 		return
 	}
-	if _, err := io.WriteString(tlsConn, "\r\n"); err != nil {
+	if _, err := io.WriteString(s.tlsConn, "\r\n"); err != nil {
 		return
 	}
 
@@ -147,10 +148,16 @@ func (p *Proxy) handleWSUpgrade(s *requestScope) {
 	if gw == nil {
 		proto = s.proto // a plain WebSocket upgrade: no MCP gateway is involved
 	}
-	decision := "allow"
+	// One decision event per session. The deny goes through emitDeny so it names
+	// WHY like every other deny (#409). The allow carries a Reason only for a real
+	// detection (an echo monitor hit): a non-empty Reason is alert-rule material
+	// (bridgeEvent keys on it), and a plain allowed session is not a finding.
 	if blocked {
-		decision = "deny"
-		p.cfg.Metrics.RecordBlocked("mcp_ws")
+		p.emitDeny(s, denyreason.MCPWS, denyExtra{
+			Protocol:       "mcp",
+			ResponseStatus: resp.StatusCode,
+		})
+		return
 	}
 	_ = p.analyticsStore().StoreEvent(analytics.Event{
 		Timestamp:      time.Now(),
@@ -159,14 +166,14 @@ func (p *Proxy) handleWSUpgrade(s *requestScope) {
 		Protocol:       proto,
 		Method:         req.Method,
 		URL:            fullURL,
-		Decision:       decision,
+		Decision:       "allow",
 		Reason:         s.echoMonitorReason,
 		ResponseStatus: resp.StatusCode,
 	})
-	p.cfg.Metrics.RecordRequest(decision, proto)
+	p.cfg.Metrics.RecordRequest("allow", proto)
 	p.logDecision(decisionLog{
 		Domain: s.domain, Port: s.port, Protocol: proto,
-		Method: req.Method, URL: fullURL, Decision: decision,
+		Method: req.Method, URL: fullURL, Decision: "allow",
 		ResponseStatus: resp.StatusCode,
 	})
 }
@@ -197,30 +204,16 @@ func (p *Proxy) holdMCP(gw MCPGateway) bool {
 // refuseWSEnforce fails a WebSocket upgrade closed: the live gateway cannot scan
 // WS frames and MCP mode is enforce, so Warden refuses the 101 rather than
 // forwarding frames unscanned. It writes a 502 (consistent with other MCP enforce
-// denials), records a blocked decision (analytics event + metric + decisionLog)
-// with the bounded reason mcp_ws_unscannable, and logs why at WARN. The caller's
-// deferred upstream.Close() closes the upstream; the pump is never started.
-func (p *Proxy) refuseWSEnforce(tlsConn *tls.Conn, req *http.Request, fullURL, domain string, port int) {
-	const reason = "mcp_ws_unscannable"
-	writeErrorResponse(tlsConn, 502, "Bad Gateway")
-	_ = p.analyticsStore().StoreEvent(analytics.Event{
-		Timestamp:      time.Now(),
-		Domain:         domain,
-		Port:           port,
+// denials) and records the blocked decision through emitDeny with the bounded
+// reason mcp_ws_unscannable. The caller's deferred upstream.Close() closes the
+// upstream; the pump is never started.
+func (p *Proxy) refuseWSEnforce(s *requestScope) {
+	writeErrorResponse(s.tlsConn, 502, "Bad Gateway")
+	p.emitDeny(s, denyreason.MCPWSUnscannable, denyExtra{
 		Protocol:       "mcp",
-		Method:         req.Method,
-		URL:            fullURL,
-		Decision:       "deny",
-		Reason:         reason,
-		ResponseStatus: 502,
-	})
-	p.cfg.Metrics.RecordRequest("deny", "mcp")
-	p.cfg.Metrics.RecordBlocked(reason)
-	p.logDecision(decisionLog{
-		Domain: domain, Port: port, Protocol: "mcp",
-		Method: req.Method, URL: fullURL, Decision: "deny",
 		ResponseStatus: 502,
 	})
 	p.cfg.Logger.Warn("mcp ws scanning unavailable in enforce mode; refusing upgrade",
-		slog.String("domain", domain), slog.Int("port", port), slog.String("reason", reason))
+		slog.String("domain", s.domain), slog.Int("port", s.port),
+		slog.String("reason", string(denyreason.MCPWSUnscannable)))
 }

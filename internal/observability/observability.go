@@ -8,14 +8,17 @@
 // Non-negotiable invariant: no raw secret value and no request/response body
 // ever lands in a metric label or a log record. All metric labels are bounded
 // enums or configured names (decision, protocol, reason, kind, outcome, stage,
-// placeholder ref) — never a raw domain, which is unbounded.
+// placeholder ref) — never a raw domain, which is unbounded. The blocked
+// metric's reason label is the one declared deny-reason set (internal/denyreason)
+// plus the MCP gateway's bounded verdict reasons.
 //
 // Bounded MCP enum values (the fixed sets the MCP gateway emits; documented here
 // so the bounded-label contract is explicit — an MCP tool name is NEVER a label,
 // it is unbounded and lives only in the analytics store):
 //
 //	RecordBlocked(reason):       mcp_tool_denied, mcp_tool_condition, mcp_poisoning,
-//	                              mcp_schema_drift_blocked, mcp_args_constraint, mcp_args_too_large
+//	                              mcp_schema_drift_blocked, mcp_args_constraint, mcp_args_too_large,
+//	                              ssrf_blocked, ssrf_denied_hostname (#391 dial refusals)
 //	RecordScanFinding(kind):      mcp_args_injection, mcp_args_leak, mcp_args_pii,
 //	                              mcp_args_constraint, mcp_args_too_large,
 //	                              mcp_result_injection, mcp_result_leak, mcp_result_pii,
@@ -269,10 +272,13 @@ func (m *Metrics) RecordRequest(decision, protocol string) {
 	))
 }
 
-// RecordBlocked increments warden.blocked.total{reason}. reason is a bounded
-// enum ("policy"/"judge"/"no_tls"/"host_mismatch", plus the MCP reasons
-// "mcp_tool_denied"/"mcp_poisoning"/"mcp_schema_drift_blocked"). See the package
-// doc for the full bounded set; never pass an unbounded value (e.g. a tool name).
+// RecordBlocked increments warden.blocked.total{reason}. reason is the ONE
+// declared deny-reason set (internal/denyreason — policy_no_match,
+// policy_denylist, rate_limited, time_window, the #371 constraint reasons,
+// judge, no_tls, …) plus the MCP gateway's own bounded verdict reasons
+// (mcp_tool_denied, mcp_poisoning, …). Every deny event and its metric carry
+// the SAME value. See the package doc for the bounded-label contract; never
+// pass an unbounded value (e.g. a tool name).
 func (m *Metrics) RecordBlocked(reason string) {
 	if m == nil {
 		return

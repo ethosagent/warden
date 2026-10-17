@@ -1,0 +1,51 @@
+# risk.yaml — the single source of risk tiers by path glob (GitHub issue #354).
+#
+# Read by tools/riskmap (labels each PR risk:<tier>, and makes the L2 e2e job
+# required for critical), by tools/gatecheck (the protected-paths check) and by
+# the agent harness: an agent must not commit to a `gates` path. If a task needs
+# a gate change, it stops and asks.
+#
+# The HIGHEST tier any changed file hits wins (critical > gates > normal > low).
+# A path that matches nothing is `normal`, never `low`. A pattern without a `/`
+# matches the file name at any depth; `*` stays inside one path segment and `**`
+# crosses directories. Changing this file is itself a gate change (.agents/**).
+version: 1
+
+tiers:
+  critical:   # requires L2 e2e (#351) and the security review lens
+    - internal/proxy/**        # TLS termination, secret swap, forwarding
+    - internal/secrets/**
+    - internal/policy/**
+    - internal/auth/**
+    - deploy/k8s/networkpolicy*.yaml
+    - deploy/compose/docker-compose*.yml   # network isolation
+    - Dockerfile
+    - scripts/gen-certs.sh
+  gates:      # protected paths: they define what "green" means
+    - scripts/check.sh
+    - scripts/fuzz-targets.txt
+    - .github/**
+    - .githooks/**
+    - .golangci*.yml           # base config and the generated architecture config
+    - .golangci*.yaml
+    - .agents/**
+    - architecture*.yaml       # #349
+    - architecture.baseline*.yaml
+    - tools/**                 # checkreport, riskmap, gatecheck: the gate's own code
+    - internal/archtest/**     # the architecture gate
+    - cmd/archgen/**
+    - docs/check-report.schema.json
+  normal:
+    - internal/**
+    - cmd/**
+    - test/**
+    - go.mod
+    - go.sum
+  low:        # docs only
+    - docs/**
+    - "*.md"
+
+# Accounts that count as agents, besides every GitHub Bot and any login ending
+# in [bot]. A PR opened by one of these cannot change a gate without a valid
+# gates-change-approved label (docs/maintainer-setup.md).
+agent-accounts: []

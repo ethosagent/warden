@@ -1,0 +1,6 @@
+{
+  "x2": true,
+  "want": [
+    {"rule": "X2", "file": "w/cfgx/cfgx.go", "line": 5}
+  ]
+}

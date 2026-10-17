@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ethosagent/warden/internal/config"
+	"github.com/ethosagent/warden/internal/denyreason"
 )
 
 // Scheme identifies the request scheme, used to infer the default port when an
@@ -74,30 +75,14 @@ func (d Decision) String() string {
 	}
 }
 
-// Bounded deny reasons for #371 method/path constraints. They ride the
-// analytics Event.Reason field: a closed enum of fixed identifiers, never
-// request content. The empty reason means a deny that is not a constraint
-// violation (denylist hit, or an exhausted rate-limit / time-window guard) —
-// callers render that as their generic "policy" reason.
-const (
-	// ReasonPathNotCanonical: the raw request path contains a dot segment or an
-	// encoded separator, so the bytes being matched and the resource the origin
-	// serves could differ. Denied whenever the destination has a paths
-	// constraint, before any pattern matching.
-	ReasonPathNotCanonical = "path_not_canonical"
-	// ReasonMethodNotAllowed: the request method is not in the matched entry's
-	// `methods` list.
-	ReasonMethodNotAllowed = "method_not_allowed"
-	// ReasonPathNotAllowed: the request path matches no pattern in the matched
-	// entry's `paths` list.
-	ReasonPathNotAllowed = "path_not_allowed"
-)
-
 // RequestVerdict is the per-request outcome of EvaluateRequest: the decision
-// plus, for constraint denies, the bounded reason behind it.
+// plus, for every explicit Deny, the bounded reason behind it. Reasons are the
+// ONE declared set in internal/denyreason (rule X6 in #349) — never free text.
+// A NoMatch carries no reason: it is not a deny, and the caller that turns it
+// into one names it (policy_no_match).
 type RequestVerdict struct {
 	Decision Decision
-	Reason   string
+	Reason   denyreason.Reason
 }
 
 // evalMode selects how evaluate treats #371 constraints and rate-limit
@@ -211,7 +196,10 @@ func (e *Evaluator) load(p config.Policy) {
 	rateLimits := make(map[int]parsedRateLimit)
 	timeWindows := make(map[int]parsedTimeWindow)
 
-	// Pre-compile regexes from allowlist and denylist.
+	// Pre-compile regexes from allowlist and denylist. The cache is keyed by the
+	// RAW pattern: in a "~regex" a trailing '.' is a regex metacharacter, not a
+	// DNS trailing dot, so normalising it would collapse two entries that differ
+	// only by that dot onto one key and let the later compile win (#397).
 	for _, entry := range allowlist {
 		if strings.HasPrefix(entry.Domain, "~") {
 			if re, err := regexp.Compile(entry.Domain[1:]); err == nil {
@@ -301,12 +289,21 @@ func (e *Evaluator) evaluate(domain string, port int, scheme Scheme, method, pat
 	enforce := mode == evalRequest
 	count := mode != evalConnect
 
-	domain = strings.ToLower(strings.TrimSuffix(domain, "."))
+	// ONE host normalisation for the whole evaluation (#397): everything below
+	// — deny, the canonical-path pre-pass, allow, rate-limit keys — sees this
+	// same normalised form. A host that is only dots (or empty) normalises to
+	// nothing the policy can name: deny fail-closed instead of matching it
+	// against anything (an allow-everything regex would otherwise admit it),
+	// and as an explicit Deny it can never reach the judge.
+	domain = NormalizeHost(domain)
+	if domain == "" {
+		return RequestVerdict{Decision: Deny}
+	}
 
 	// Denylist checked first — deny wins on conflict.
 	for _, entry := range e.denylist {
 		if inferredPort(entry.Port, scheme) == port && e.domainMatches(entry.Domain, domain) {
-			return RequestVerdict{Decision: Deny}
+			return RequestVerdict{Decision: Deny, Reason: denyreason.PolicyDenylist}
 		}
 	}
 
@@ -319,7 +316,7 @@ func (e *Evaluator) evaluate(domain string, port int, scheme Scheme, method, pat
 			if len(entry.Paths) > 0 &&
 				inferredPort(entry.Port, scheme) == port &&
 				e.domainMatches(entry.Domain, domain) {
-				return RequestVerdict{Decision: Deny, Reason: ReasonPathNotCanonical}
+				return RequestVerdict{Decision: Deny, Reason: denyreason.PathNotCanonical}
 			}
 		}
 	}
@@ -330,7 +327,7 @@ func (e *Evaluator) evaluate(domain string, port int, scheme Scheme, method, pat
 	// (the destination IS allowlisted, just not like this), never NoMatch — it
 	// must not reach the judge.
 	matchedEntry := false
-	var methodViolated, pathViolated bool
+	var methodViolated, pathViolated, timeWindowExcluded, rateLimited bool
 	for i, entry := range e.allowlist {
 		if inferredPort(entry.Port, scheme) != port {
 			continue
@@ -346,11 +343,13 @@ func (e *Evaluator) evaluate(domain string, port int, scheme Scheme, method, pat
 			hour := e.now().Hour()
 			if tw.startHour <= tw.endHour {
 				if hour < tw.startHour || hour >= tw.endHour {
+					timeWindowExcluded = true
 					continue
 				}
 			} else {
 				// Wrap-around (e.g. 22-6 means 22:00-06:00)
 				if hour < tw.startHour && hour >= tw.endHour {
+					timeWindowExcluded = true
 					continue
 				}
 			}
@@ -377,12 +376,14 @@ func (e *Evaluator) evaluate(domain string, port int, scheme Scheme, method, pat
 		// any) passed, so a denied request never consumes budget. If this entry
 		// is exhausted, try next entry.
 		if rl, ok := e.rateLimits[i]; ok {
-			key := fmt.Sprintf("%s:%d", entry.Domain, inferredPort(entry.Port, scheme))
+			key := fmt.Sprintf("%s:%d", rateLimitPattern(entry.Domain), inferredPort(entry.Port, scheme))
 			if count {
 				if !e.checkRateLimit(key, rl) {
+					rateLimited = true
 					continue
 				}
 			} else if !e.peekRateLimit(key, rl) {
+				rateLimited = true
 				continue
 			}
 		}
@@ -390,15 +391,19 @@ func (e *Evaluator) evaluate(domain string, port int, scheme Scheme, method, pat
 		return RequestVerdict{Decision: Allow}
 	}
 	if matchedEntry {
-		// Destination is allowlisted but every matching entry rejected it. A
-		// constraint violation names itself; guard rejections (rate limit /
-		// time window) keep the empty reason. Explicit Deny either way — not
-		// judge-eligible.
+		// Destination is allowlisted but every matching entry rejected it: an
+		// explicit Deny — not judge-eligible. A constraint violation names
+		// itself; a guard rejection names its guard (#409). Order mirrors the
+		// per-entry check order: path, method, then the guards.
 		switch {
 		case pathViolated:
-			return RequestVerdict{Decision: Deny, Reason: ReasonPathNotAllowed}
+			return RequestVerdict{Decision: Deny, Reason: denyreason.PathNotAllowed}
 		case methodViolated:
-			return RequestVerdict{Decision: Deny, Reason: ReasonMethodNotAllowed}
+			return RequestVerdict{Decision: Deny, Reason: denyreason.MethodNotAllowed}
+		case timeWindowExcluded:
+			return RequestVerdict{Decision: Deny, Reason: denyreason.TimeWindow}
+		case rateLimited:
+			return RequestVerdict{Decision: Deny, Reason: denyreason.RateLimited}
 		}
 		return RequestVerdict{Decision: Deny}
 	}
@@ -428,17 +433,47 @@ func pathMatchesAny(patterns []string, path string) bool {
 	return false
 }
 
+// NormalizeHost returns the canonical form of a destination host used for
+// EVERY host comparison in policy evaluation: lower-case, with ALL trailing
+// dots removed. "Example.COM." and "example.com..." both normalise to
+// "example.com", so a rule matches regardless of how many trailing dots the
+// request carried (#397: the previous one-dot trims let "bad.corp.test..."
+// miss its deny rule and fall through to the judge). A host that is only dots
+// — or empty — normalises to "": callers must deny it outright (fail closed),
+// never match it against a rule.
+//
+// NormalizeHost is for HOSTS, never for "~regex" PATTERNS: in a regex a
+// trailing '.' is a metacharacter, not a DNS trailing dot, and stripping it
+// changes (or breaks) the expression. Regex patterns are matched verbatim
+// against the normalised host.
+func NormalizeHost(host string) string {
+	return strings.ToLower(strings.TrimRight(host, "."))
+}
+
+// rateLimitPattern returns the pattern that names an allowlist entry's
+// rate-limit bucket: non-regex patterns are normalised so "api.example.com" and
+// "api.example.com." share ONE bucket (#397), while a "~regex" pattern is used
+// raw — normalising it would merge two regexes that differ only by a trailing
+// '.' metacharacter onto one bucket.
+func rateLimitPattern(pattern string) string {
+	if strings.HasPrefix(pattern, "~") {
+		return pattern
+	}
+	return NormalizeHost(pattern)
+}
+
 // domainMatches reports whether host matches pattern. Supports:
 //   - "~<regex>" — regex match (served from the evaluator's precompiled cache)
 //   - "*.example.com" — wildcard subdomain match
 //   - exact match (case-insensitive)
 //
-// The regex path uses the evaluator's precompiled cache (hot allow/deny path); the
-// wildcard/exact path delegates to MatchDomain so the two callers share ONE
-// dialect.
+// host arrives already normalised by evaluate — the one place the host side is
+// normalised (#397). The regex path looks the pattern up by its RAW source (the
+// key load() stored) and matches it against the normalised host — a trailing
+// '.' in a regex is a metacharacter, never a DNS dot. The wildcard/exact path
+// delegates to MatchDomain, which normalises the pattern itself, so the two
+// callers share ONE dialect.
 func (e *Evaluator) domainMatches(pattern, host string) bool {
-	pattern = strings.ToLower(strings.TrimSuffix(pattern, "."))
-	// Regex match: ~<pattern> — served from the precompiled cache.
 	if strings.HasPrefix(pattern, "~") {
 		if re, ok := e.regexCache[pattern]; ok {
 			return re.MatchString(host)
@@ -450,14 +485,21 @@ func (e *Evaluator) domainMatches(pattern, host string) bool {
 
 // MatchDomain reports whether host matches pattern using the SAME destination
 // dialect the allow/deny evaluator uses: "~regex", "*.suffix" wildcard, or exact
-// (case-insensitive). It is exported so the DLP rule evaluator reuses this ONE
-// matcher instead of forking a second dialect. Regex patterns are compiled on each
-// call (DLP rule sets are small and destination-regex is rare); a malformed regex
+// (case-insensitive). The HOST side goes through NormalizeHost, so the match
+// never depends on trailing dots or case (#397) and an empty or dots-only host —
+// the normalised form of nothing — matches nothing. The PATTERN side is
+// normalised only for the non-regex dialects: a "~regex" pattern is compiled
+// and matched verbatim, because its trailing '.' is a metacharacter, not a DNS
+// dot (#397). It is exported so the DLP rule evaluator reuses this ONE matcher
+// instead of forking a second dialect. Regex patterns are compiled on each call
+// (DLP rule sets are small and destination-regex is rare); a malformed regex
 // never matches. The hot allow/deny path keeps its precompiled cache via
 // domainMatches.
 func MatchDomain(pattern, host string) bool {
-	pattern = strings.ToLower(strings.TrimSuffix(pattern, "."))
-	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	host = NormalizeHost(host)
+	if host == "" {
+		return false
+	}
 	if rx, ok := strings.CutPrefix(pattern, "~"); ok {
 		re, err := regexp.Compile(rx)
 		if err != nil {
@@ -465,6 +507,7 @@ func MatchDomain(pattern, host string) bool {
 		}
 		return re.MatchString(host)
 	}
+	pattern = NormalizeHost(pattern)
 	if suffix, ok := strings.CutPrefix(pattern, "*."); ok {
 		return host != suffix && strings.HasSuffix(host, "."+suffix)
 	}
@@ -553,12 +596,14 @@ type HostMatcher struct {
 	regexes  map[string]*regexp.Regexp
 }
 
-// NewHostMatcher compiles patterns; a malformed "~regex" is an error.
+// NewHostMatcher compiles patterns; a malformed "~regex" is an error. Regexes
+// compile from their RAW source, keyed by it — a trailing '.' is a regex
+// metacharacter, never a DNS trailing dot (#397); Matches normalises the host,
+// never the pattern.
 func NewHostMatcher(patterns []string) (*HostMatcher, error) {
 	m := &HostMatcher{patterns: append([]string(nil), patterns...), regexes: map[string]*regexp.Regexp{}}
 	for _, raw := range patterns {
-		pat := strings.ToLower(strings.TrimSuffix(raw, "."))
-		if rx, ok := strings.CutPrefix(pat, "~"); ok {
+		if rx, ok := strings.CutPrefix(raw, "~"); ok {
 			re, err := regexp.Compile(rx)
 			if err != nil {
 				return nil, fmt.Errorf("policy: invalid host regex %q: %w", raw, err)
@@ -569,12 +614,17 @@ func NewHostMatcher(patterns []string) (*HostMatcher, error) {
 	return m, nil
 }
 
-// Matches reports whether host matches any pattern.
+// Matches reports whether host matches any pattern. host goes through
+// NormalizeHost (#397), so the match never depends on trailing dots or case;
+// a host that is only dots — or empty — matches nothing.
 func (m *HostMatcher) Matches(host string) bool {
 	if m == nil {
 		return false
 	}
-	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	host = NormalizeHost(host)
+	if host == "" {
+		return false
+	}
 	for _, raw := range m.patterns {
 		if re, ok := m.regexes[raw]; ok {
 			if re.MatchString(host) {
