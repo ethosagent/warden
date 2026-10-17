@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -104,7 +105,15 @@ func TestTLS_HostRecheckAgreesWithAdmissionOnTrailingDots(t *testing.T) {
 // number of trailing dots never disagree, while a different host — or a
 // dots-only Host header — still ends the session (fail closed).
 func TestReadRequest_HostRecheckNormalisesHost(t *testing.T) {
-	p := &Proxy{}
+	p, err := New(Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     newAllowAllEvaluator(),
+		Secrets:    newEmptySecrets(),
+		Analytics:  &syncStore{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	cases := []struct {
 		domain, host string
 		wantEnd      bool
@@ -120,7 +129,7 @@ func TestReadRequest_HostRecheckNormalisesHost(t *testing.T) {
 		{"github.com", "", true},
 	}
 	for _, c := range cases {
-		s := &requestScope{domain: c.domain, req: &http.Request{Host: c.host}}
+		s := &requestScope{domain: c.domain, req: &http.Request{Method: "GET", Host: c.host, URL: &url.URL{Path: "/"}}}
 		if got := p.readRequest(s); got != c.wantEnd {
 			t.Errorf("readRequest(domain=%q, Host=%q) = %v, want %v", c.domain, c.host, got, c.wantEnd)
 		}
