@@ -33,6 +33,10 @@ type syncStore struct {
 }
 
 func (s *syncStore) StoreEvent(e analytics.Event) error {
+	// The #409 contract, enforced on every proxy test for free: a deny without
+	// a Reason fails the run at the writing site, so a deny path that bypasses
+	// emitDeny cannot land unnoticed.
+	fakes.EnforceDenyReason(e)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.events = append(s.events, e)

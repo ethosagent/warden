@@ -1609,10 +1609,10 @@ function csvCell(v){ const s=String(v==null?'':v); return /[",\n]/.test(s)? '"'+
 function exportActivityCSV(){
   const evs=filteredActivity();   // export the currently-visible (filtered) rows, not the whole list
   if(!evs.length){ window.alert('No activity to export yet.'); return; }
-  const header=['Timestamp','ProxyID','Method','Domain','Protocol','Decision','DataClasses','SwappedRefs','CostUSD','LatencyMs'];
+  const header=['Timestamp','ProxyID','Method','Domain','Protocol','Decision','Reason','DataClasses','SwappedRefs','CostUSD','LatencyMs'];
   const rows=evs.map(e=>[
     e.Timestamp, e.ProxyID||'local', e.Method||'', e.Domain||'', e.Protocol||'',
-    eventDecision(e), (e.DataClasses||[]).join(';'), (e.SwappedRefs||[]).length,
+    eventDecision(e), e.Reason||e.JudgeReason||'', (e.DataClasses||[]).join(';'), (e.SwappedRefs||[]).length,
     e.CostUSD!=null?e.CostUSD:'', e.LatencyMs!=null?e.LatencyMs:''
   ].map(csvCell).join(','));
   const csv=[header.join(','), ...rows].join('\n');

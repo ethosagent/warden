@@ -7,6 +7,7 @@ import (
 
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/audit"
+	"github.com/ethosagent/warden/internal/denyreason"
 )
 
 // hasCompliance reports whether an event carries the given compliance tag.
@@ -39,7 +40,9 @@ func TestProxy_SetAnalytics_ComplianceToggle(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	denyEvent := analytics.Event{Decision: "deny", Protocol: "tcp"}
+	// The tagged write below is the test's own synthetic event, so it names a
+	// reason like every real deny does (#409 — the store fakes enforce it).
+	denyEvent := analytics.Event{Decision: "deny", Protocol: "tcp", Reason: string(denyreason.PolicyNoMatch)}
 
 	// Enabled: the deny event is tagged with the exfiltration control.
 	if err := p.analyticsStore().StoreEvent(denyEvent); err != nil {
@@ -122,7 +125,7 @@ func TestProxy_SetAnalytics_RaceFree(t *testing.T) {
 				case <-stop:
 					return
 				default:
-					_ = p.analyticsStore().StoreEvent(analytics.Event{Decision: "deny", Protocol: "tcp"})
+					_ = p.analyticsStore().StoreEvent(analytics.Event{Decision: "deny", Protocol: "tcp", Reason: string(denyreason.PolicyNoMatch)})
 				}
 			}
 		}()
