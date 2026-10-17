@@ -27,10 +27,12 @@ const (
 
 // Report is the whole warden.check.v1 document.
 type Report struct {
-	Schema     string  `json:"schema"`
-	OK         bool    `json:"ok"`
-	DurationMs int64   `json:"durationMs"`
-	Stages     []Stage `json:"stages"`
+	Schema     string `json:"schema"`
+	OK         bool   `json:"ok"`
+	DurationMs int64  `json:"durationMs"`
+	// Fast is set by --fast: which packages were checked and why.
+	Fast   *FastPlan `json:"fast,omitempty"`
+	Stages []Stage   `json:"stages"`
 }
 
 // Stage is one check.sh stage. A stage is ok when it ran and has no error finding.

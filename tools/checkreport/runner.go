@@ -23,6 +23,15 @@ type config struct {
 	GolangciVersion    string
 	GovulncheckVersion string
 	Only               []string // run only these stages (tests, debugging)
+
+	// Fast checks only the packages changed since origin/main plus their
+	// importers (see fastPlan), and skips the stages that are not per-package.
+	Fast bool
+	// FuzzTime is the -fuzztime given to each fuzz target; FuzzTargets is the
+	// file listing them (relative to Root), the single list check.sh and the
+	// nightly workflow share.
+	FuzzTime    string
+	FuzzTargets string
 }
 
 type execResult struct {
@@ -62,6 +71,8 @@ type runner struct {
 	goVer string
 
 	testFailed bool // the test stage ran and failed, so coverage.out is incomplete
+
+	plan *FastPlan // set when cfg.Fast resolved to a package subset
 }
 
 // stageDef is one check.sh stage. The title is the banner text check.sh prints
@@ -78,16 +89,36 @@ func (r *runner) stages() []stageDef {
 	defs := []stageDef{
 		{"format", "format (gofmt)", func(r *runner) string { return "gofmt@" + r.goVer }, (*runner).stageFormat},
 		{"vet", "vet (go vet ./...)", goTool, (*runner).stageVet},
+		{"archtest", "archtest (go test ./internal/archtest -run TestArchitecture)", goTool, (*runner).stageArchtest},
 		{"lint", fmt.Sprintf("lint (golangci-lint %s)", r.cfg.GolangciVersion), func(r *runner) string { return "golangci-lint@" + r.cfg.GolangciVersion }, (*runner).stageLint},
 		{"roadmap", "roadmap (go run docs/roadmap/gen.go check)", goTool, (*runner).stageRoadmap},
 		{"build", "build (go build ./...)", goTool, (*runner).stageBuild},
 		{"vulncheck", fmt.Sprintf("vulncheck (govulncheck %s)", r.cfg.GovulncheckVersion), func(r *runner) string { return "govulncheck@" + r.cfg.GovulncheckVersion }, (*runner).stageVuln},
 		{"test", "test (go test -race -coverprofile)", goTool, (*runner).stageTest},
+		{"fuzz", fmt.Sprintf("fuzz (go test -fuzz, %s per target)", r.fuzzTime()), goTool, (*runner).stageFuzz},
 		{"benchmark", "benchmark smoke (go test -bench . -benchtime=1x)", goTool, (*runner).stageBench},
 		{"coverage", fmt.Sprintf("coverage gate (min %s%%)", fmtFloat(r.cfg.CoverageMin)), func(*runner) string { return "go tool cover" }, (*runner).stageCoverage},
 	}
 	if r.cfg.Integration {
 		defs = append(defs, stageDef{"integration", "integration (go test -tags=integration)", goTool, (*runner).stageIntegration})
+	}
+	if r.plan != nil {
+		// --fast: per-package stages only. Everything else (build, vulncheck,
+		// roadmap, fuzz, benchmark, coverage) is whole-repo work for the full gate.
+		keep := map[string]bool{"format": true}
+		if len(r.plan.Packages) > 0 {
+			// archtest checks the whole repo every time but lives in one small
+			// package, so it stays in the inner loop too (and the fast plan
+			// adds this package whenever the architecture files change).
+			keep["vet"], keep["lint"], keep["archtest"], keep["test"] = true, true, true, true
+		}
+		var out []stageDef
+		for _, d := range defs {
+			if keep[d.name] {
+				out = append(out, d)
+			}
+		}
+		defs = out
 	}
 	if len(r.cfg.Only) == 0 {
 		return defs
@@ -111,6 +142,23 @@ func (r *runner) Run(sc *Scrubber) (*Report, int) {
 	rep := &Report{}
 	code := 0
 	stopped := false
+	if r.cfg.Fast {
+		plan := r.fastPlan()
+		fmt.Fprintln(r.human, plan.summary())
+		if !plan.Full {
+			r.plan = &plan
+			for _, pk := range plan.Packages {
+				fmt.Fprintf(r.human, "  %s  (%s)\n", pk.Package, pk.Reason)
+			}
+			if len(plan.Packages) == 0 {
+				fmt.Fprintln(r.human, "  no Go package changed: only the format check runs")
+			}
+		}
+		for _, d := range r.stages() {
+			plan.Stages = append(plan.Stages, d.name)
+		}
+		rep.Fast = &plan
+	}
 	for _, d := range r.stages() {
 		if stopped {
 			rep.Stages = append(rep.Stages, Stage{Name: d.name, Tool: d.tool(r), Skipped: true})
@@ -227,7 +275,7 @@ func (r *runner) stageFormat() Stage {
 }
 
 func (r *runner) stageVet() Stage {
-	res := r.exec(r.cfg.Root, "go", "vet", "-json", "./...")
+	res := r.exec(r.cfg.Root, "go", append([]string{"vet", "-json"}, r.pkgArgs()...)...)
 	fs := parseVet(res.Stdout, r.ctx)
 	// Packages that do not compile never reach the analyzers; their errors are
 	// plain text on stderr.
@@ -242,14 +290,29 @@ func (r *runner) stageLint() Stage {
 	}
 	defer os.RemoveAll(tmp)
 	jsonPath := filepath.Join(tmp, "lint.json")
-	res := r.exec(r.cfg.Root, "go", "run",
-		"github.com/golangci/golangci-lint/v2/cmd/golangci-lint@"+r.cfg.GolangciVersion,
-		"run", "--output.json.path="+jsonPath)
+	// The generated .golangci.arch.yml is the base config plus the
+	// architecture linters, so one run enforces both. internal/archtest's
+	// golangci-config-fresh subtest keeps the file from going stale.
+	args := []string{"run", "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@" + r.cfg.GolangciVersion,
+		"run", "--output.json.path=" + jsonPath, "--config", ".golangci.arch.yml"}
+	if r.plan != nil {
+		args = append(args, r.pkgArgs()...)
+	}
+	res := r.exec(r.cfg.Root, "go", args...)
 	data, rerr := os.ReadFile(jsonPath)
 	if rerr != nil {
 		return finish("lint", res, nil)
 	}
 	return finish("lint", res, parseLint(data, r.ctx))
+}
+
+// stageArchtest runs the architecture gate: every rule of architecture.yaml
+// against every package, with architecture.baseline.yaml applied, plus the
+// freshness pin on .golangci.arch.yml and the go.mod module manifest. One
+// small package, all of ./... — cheap enough for --fast to always pay for.
+func (r *runner) stageArchtest() Stage {
+	res := r.exec(r.cfg.Root, "go", "test", "-json", "./internal/archtest", "-run", "TestArchitecture")
+	return finish("archtest", res, parseArchtest(res.Stdout, r.ctx))
 }
 
 func (r *runner) stageRoadmap() Stage {
@@ -271,7 +334,12 @@ func (r *runner) stageVuln() Stage {
 func (r *runner) stageTest() Stage {
 	// A leftover profile from an earlier run must never be mistaken for this one.
 	_ = os.Remove(filepath.Join(r.cfg.Root, "coverage.out"))
-	res := r.exec(r.cfg.Root, "go", "test", "-race", "-coverprofile=coverage.out", "-json", "./...")
+	args := []string{"test", "-race"}
+	if r.plan == nil {
+		args = append(args, "-coverprofile=coverage.out")
+	}
+	args = append(args, "-json")
+	res := r.exec(r.cfg.Root, "go", append(args, r.pkgArgs()...)...)
 	st := finish("test", res, parseGoTest("test", res.Stdout, r.ctx))
 	r.testFailed = hasError(st.Findings)
 	return st
@@ -311,4 +379,13 @@ func readModule(root string) (string, error) {
 		return "", errors.New("no module line in go.mod")
 	}
 	return string(m[1]), nil
+}
+
+// pkgArgs is the package list the per-package stages run on: everything, or the
+// --fast subset.
+func (r *runner) pkgArgs() []string {
+	if r.plan != nil {
+		return r.plan.relDirs()
+	}
+	return []string{"./..."}
 }

@@ -62,6 +62,7 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 			p.storeDeny(domain, port, "tcp", "no_tls", "")
 			return
 		}
+		p.reach(PathTunnel)
 		remote, dialErr := p.dialFunc("tcp", net.JoinHostPort(domain, fmt.Sprintf("%d", port)))
 		if dialErr != nil {
 			// A dial the SSRF-safe dialer refused is a policy decision: audit it
@@ -158,6 +159,7 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 	if detected == protocol.Unknown {
 		proto = "raw"
 	}
+	p.reach(PathRawTLS)
 	remote, dialErr := p.dialTLS("tcp", net.JoinHostPort(domain, fmt.Sprintf("%d", port)), p.upstreamTLSConfig(domain))
 	if dialErr != nil {
 		// A dial the SSRF-safe dialer refused is a policy decision: audit it

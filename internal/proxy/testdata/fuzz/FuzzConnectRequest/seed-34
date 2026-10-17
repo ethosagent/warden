@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("GET http://allowed.test/ HTTP/1.1\r\nHost: allowed.test\r\n\r\n")

@@ -10,9 +10,34 @@
     "schema": { "const": "warden.check.v1" },
     "ok": { "type": "boolean", "description": "True only when every stage ran and passed." },
     "durationMs": { "type": "integer", "minimum": 0 },
+    "fast": { "$ref": "#/$defs/fast" },
     "stages": { "type": "array", "items": { "$ref": "#/$defs/stage" } }
   },
   "$defs": {
+    "fast": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["base", "packages"],
+      "description": "Present only for scripts/check.sh --fast: what was checked and why. A fast run is the inner loop, not the gate: stages missing from 'stages' did not run.",
+      "properties": {
+        "base": { "type": "string", "minLength": 1, "description": "The ref the change was measured against, with its merge-base commit (origin/main@abc123)." },
+        "full": { "type": "boolean", "description": "True when --fast fell back to the full gate (see 'why'); packages is then empty and every stage ran." },
+        "why": { "type": "string", "description": "Why it fell back to the full gate." },
+        "packages": { "type": "array", "items": { "$ref": "#/$defs/fastPackage" }, "description": "The packages vet, lint and test ran on." },
+        "ignored": { "type": "array", "items": { "type": "string" }, "description": "Changed files outside every Go package (docs, scripts), which no stage covers." },
+        "stages": { "type": "array", "items": { "type": "string", "minLength": 1 }, "description": "The stages that ran." }
+      }
+    },
+    "fastPackage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["package", "dir", "reason"],
+      "properties": {
+        "package": { "type": "string", "minLength": 1 },
+        "dir": { "type": "string", "minLength": 1, "description": "Repo-relative directory." },
+        "reason": { "type": "string", "minLength": 1, "description": "changed: <file>, imports <package> or test imports <package>." }
+      }
+    },
     "stage": {
       "type": "object",
       "additionalProperties": false,
@@ -21,7 +46,7 @@
         "name": {
           "type": "string",
           "minLength": 1,
-          "description": "format, vet, lint, roadmap, build, vulncheck, test, benchmark, coverage, integration (and, later, archtest, scenarios, ...)."
+          "description": "format, vet, lint, roadmap, build, vulncheck, test, fuzz, benchmark, coverage, integration (and, later, archtest, scenarios, ...)."
         },
         "tool": { "type": "string", "minLength": 1, "description": "The tool with its version, e.g. golangci-lint@v2.12.2." },
         "ok": { "type": "boolean", "description": "True when the stage ran and has no error finding." },
@@ -30,7 +55,7 @@
         "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
         "metrics": {
           "type": "object",
-          "description": "Stage numbers. coverage: total, min (percent) and lowest (the five lowest-covered packages).",
+          "description": "Stage numbers. coverage: total, min (percent) and lowest (the five lowest-covered packages). fuzz: targets, fuzzTimePerTarget and fuzzBudgetSeconds (targets x time: the most the stage adds to a run).",
           "additionalProperties": true
         }
       }

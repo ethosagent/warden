@@ -66,6 +66,7 @@ func (p *Proxy) handleWSUpgrade(
 	gw MCPGateway,
 ) {
 	defer func() { _ = upstream.Close() }()
+	p.reach(PathWebSocket)
 
 	// Resolve the WS-scan capability through the interface — never a concrete
 	// type — so any MCPGateway (including a wrapper/decorator over the real

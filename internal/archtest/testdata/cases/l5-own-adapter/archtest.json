@@ -1,0 +1,5 @@
+{
+  "want": [
+    {"rule": "L5", "file": "w/dom/dom.go", "line": 3}
+  ]
+}

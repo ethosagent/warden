@@ -321,6 +321,7 @@ func (p *Proxy) storeAllow(domain string, port int, protocol string) {
 // failure is not a policy decision: it keeps the allow audit the CONNECT has
 // always gotten, unchanged from before #391.
 func (p *Proxy) tunnel(client net.Conn, br *bufio.Reader, domain string, port int) {
+	p.reach(PathTunnel)
 	remote, err := p.dialFunc("tcp", net.JoinHostPort(domain, fmt.Sprintf("%d", port)))
 	if err != nil {
 		if !p.storeSSRFDeny(domain, port, "tcp", err) {
