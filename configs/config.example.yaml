@@ -310,8 +310,16 @@ responseScan:
 # does NOT catch: base32, base64 wrapped across lines, HTML entities,
 # quoted-printable, reversed or split values, \u escapes of non-ASCII characters in
 # the value, or gzip/deflate bytes sent without a Content-Encoding header.
-# WebSocket frames after the 101 upgrade are not checked (#399); the 101 response
-# headers are.
+# WebSocket frames after a 101 upgrade are checked too when the upgrade request
+# swapped a value (#399): the server->agent data frames (text/binary/
+# continuation) are matched as one ordered stream across frames and messages for
+# the whole connection, and ping/pong/close payloads are each checked on their
+# own. Like a streamed body, the check trades liveness for exactness: a frame
+# that ends inside the start of a value (4+ bytes) is held until the NEXT frame
+# proves it clear, and if the connection closes first the held frame is dropped,
+# not delivered. A swapped upgrade does not offer permessage-deflate, and a
+# compressed (RSV) frame that arrives anyway is refused (1008,
+# secret_echo_unscannable).
 echoGuard:
   enabled: true                   # default true; false disables the guard entirely
   action: block                   # block | monitor

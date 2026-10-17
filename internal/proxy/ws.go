@@ -43,29 +43,32 @@ func (c connRWC) Close() error                { return c.conn.Close() }
 // handleWSUpgrade completes a WebSocket handshake through Warden and runs the
 // frame pump. It writes the upstream's 101 response verbatim to the client, then
 // scans every JSON-RPC text message in both directions while forwarding frames
-// transparently. A 101 is terminal for the connection: this method fully owns
-// the client conn, the upstream, and the buffered readers, and the caller must
-// return afterward. The request scope stays valid for the whole call (the caller
-// returns immediately after setting handoff), so the session deny/allow events
-// below read it instead of a disintegrated parameter list.
+// transparently, and guards every server->agent frame for swapped values when
+// the upgrade request carried any (#399). A 101 is terminal for the connection:
+// this method fully owns the client conn, the upstream, and the buffered
+// readers, and the caller must return afterward.
 //
-// clientBR is the buffered reader over the client TLS conn (it may already hold
-// frame bytes the client pipelined after the upgrade request). upstreamBR is the
-// buffered reader used to read the 101 response (it may already hold frame bytes
-// the server sent after its 101), so both readers are reused to avoid losing
-// buffered payload.
+// The scope's buffered readers are reused so no bytes are lost: s.br may already
+// hold frame bytes the client pipelined after the upgrade request, and
+// s.upstreamBR frame bytes the server sent after its 101.
 func (p *Proxy) handleWSUpgrade(s *requestScope) {
-	defer func() { _ = s.upstream.Close() }()
+	tlsConn, clientBR := s.tlsConn, s.br
+	upstream, upstreamBR := s.upstream, s.upstreamBR
+	resp, req, gw := s.resp, s.req, s.gw
+	fullURL := s.eventURL() // the agent's original query, never a swapped one
+	defer func() { _ = upstream.Close() }()
 	p.reach(PathWebSocket)
 
 	// Resolve the WS-scan capability through the interface — never a concrete
 	// type — so any MCPGateway (including a wrapper/decorator over the real
 	// gateway) drives frame scanning. When the live gateway does NOT provide WS
 	// scanning we fail closed in enforce mode and log-once + pass through in
-	// monitor/off, instead of silently forwarding unscanned frames.
-	scanner, canScan := s.gw.(WSScanner)
-	if !canScan {
-		if p.wsEnforcing(s.gw) {
+	// monitor/off, instead of silently forwarding unscanned frames. A nil gw is
+	// no downgrade: a plain WebSocket upgrade has no gateway to scan with and is
+	// guarded for echo only.
+	scanner, canScan := gw.(WSScanner)
+	if !canScan && gw != nil {
+		if p.wsEnforcing(gw) {
 			// Fail closed: refuse the 101, record the block, and let the deferred
 			// upstream.Close() run. The pump never starts, so nothing else owns or
 			// closes the upstream — no leak, no double close.
@@ -83,7 +86,6 @@ func (p *Proxy) handleWSUpgrade(s *requestScope) {
 	// Write the 101 status line + headers verbatim (mirrors the SSE manual
 	// write). resp.Write cannot be used: there is no body and the connection is
 	// then handed to the raw frame pump.
-	resp := s.resp
 	statusLine := fmt.Sprintf("HTTP/%d.%d %03d %s\r\n",
 		resp.ProtoMajor, resp.ProtoMinor, resp.StatusCode,
 		http.StatusText(resp.StatusCode))
@@ -98,24 +100,58 @@ func (p *Proxy) handleWSUpgrade(s *requestScope) {
 	}
 
 	// scanner is a nil ws.Scanner when the capability was absent (monitor/off
-	// downgrade): the pump then forwards every frame verbatim without scanning.
-	// Enforce mode holds each text message until it is scanned, so a denied
-	// message never reaches its peer; monitor/off keep forward-then-scan.
-	pump := &ws.Pump{GW: scanner, SessionKey: s.mcpSessKey, Log: p.cfg.Logger, Hold: p.holdMCP(s.gw)}
-	client := rwc{br: s.br, conn: s.tlsConn}
-	server := connRWC{r: s.upstreamBR, conn: s.upstream}
+	// downgrade, or no gateway at all): the pump then forwards every frame
+	// verbatim without scanning. Enforce mode holds each text message until it
+	// is scanned, so a denied message never reaches its peer; monitor/off keep
+	// forward-then-scan.
+	hold := false
+	if gw != nil {
+		hold = p.holdMCP(gw)
+	}
+	pump := &ws.Pump{GW: scanner, SessionKey: s.mcpSessKey, Log: p.cfg.Logger, Hold: hold}
+	// The frame guard arms only on a swap (#399): no swapped value in the
+	// upgrade request means no needle set and no per-frame work — the frames are
+	// forwarded exactly as before.
+	var echo *wsEchoGuard
+	if len(s.echoSecrets) > 0 {
+		echo = p.newWSEchoGuard(s)
+		pump.Echo = echo
+	}
+	client := rwc{br: clientBR, conn: tlsConn}
+	server := connRWC{r: upstreamBR, conn: upstream}
 
 	start := time.Now()
 	blocked, _ := pump.Run(context.Background(), client, server)
 	p.cfg.Metrics.ObserveAddedLatency("mcp_scan", time.Since(start))
 
+	// An echo hit owns the session's one decision event: block mode wrote the
+	// deny (reason secret_echo, the secret by reference) and nothing else is
+	// recorded; in monitor mode the hit rides the allow event below, like every
+	// other echo monitor hit. An RSV (compressed) frame on the armed connection
+	// is the exception: the guard cannot scan those bytes, so it fails closed in
+	// every mode with reason secret_echo_unscannable.
+	if echo != nil {
+		if secret, hit := echo.hitSecret(); hit {
+			if r := echo.hitReason(); r == reasonSecretEchoUnscannable {
+				p.echoDeny(s, secret, r)
+				return
+			}
+			if !p.cfg.EchoGuard.Monitor {
+				p.echoDeny(s, secret, reasonSecretEcho)
+				return
+			}
+			s.echoMonitorReason = reasonSecretEcho
+		}
+	}
+
+	proto := "mcp"
+	if gw == nil {
+		proto = s.proto // a plain WebSocket upgrade: no MCP gateway is involved
+	}
 	// One decision event per session. The deny goes through emitDeny so it names
-	// WHY like every other deny (#409). The allow deliberately carries NO
-	// Reason: a non-empty Reason is alert-rule material (bridgeEvent keys on
-	// it), and an allowed session is not a finding — writing mcp_ws here
-	// unconditionally raised a SevMedium alert for every permitted MCP WebSocket
-	// session (#409 review).
-	fullURL := s.eventURL()
+	// WHY like every other deny (#409). The allow carries a Reason only for a real
+	// detection (an echo monitor hit): a non-empty Reason is alert-rule material
+	// (bridgeEvent keys on it), and a plain allowed session is not a finding.
 	if blocked {
 		p.emitDeny(s, denyreason.MCPWS, denyExtra{
 			Protocol:       "mcp",
@@ -127,16 +163,17 @@ func (p *Proxy) handleWSUpgrade(s *requestScope) {
 		Timestamp:      time.Now(),
 		Domain:         s.domain,
 		Port:           s.port,
-		Protocol:       "mcp",
-		Method:         s.req.Method,
+		Protocol:       proto,
+		Method:         req.Method,
 		URL:            fullURL,
 		Decision:       "allow",
+		Reason:         s.echoMonitorReason,
 		ResponseStatus: resp.StatusCode,
 	})
-	p.cfg.Metrics.RecordRequest("allow", "mcp")
+	p.cfg.Metrics.RecordRequest("allow", proto)
 	p.logDecision(decisionLog{
-		Domain: s.domain, Port: s.port, Protocol: "mcp",
-		Method: s.req.Method, URL: fullURL, Decision: "allow",
+		Domain: s.domain, Port: s.port, Protocol: proto,
+		Method: req.Method, URL: fullURL, Decision: "allow",
 		ResponseStatus: resp.StatusCode,
 	})
 }
