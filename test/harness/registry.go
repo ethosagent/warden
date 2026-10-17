@@ -12,6 +12,7 @@ import (
 	"github.com/ethosagent/warden/internal/clock"
 	"github.com/ethosagent/warden/internal/clock/clocktest"
 	"github.com/ethosagent/warden/internal/config"
+	"github.com/ethosagent/warden/internal/denyreason"
 	"github.com/ethosagent/warden/internal/dnstest"
 	"github.com/ethosagent/warden/internal/proxy"
 	"github.com/ethosagent/warden/internal/secrets"
@@ -217,8 +218,9 @@ func analyticsStoreConformance(t *testing.T, f *fakes.FakeAnalyticsStore) {
 	var s analytics.AnalyticsStore = f
 	for _, e := range []analytics.Event{
 		{Domain: "a.com", Decision: "allow"},
-		{Domain: "b.com", Decision: "deny"},
-		{Domain: "a.com", Decision: "deny"},
+		// A deny carries a declared reason: the fake enforces the #409 contract.
+		{Domain: "b.com", Decision: "deny", Reason: string(denyreason.PolicyNoMatch)},
+		{Domain: "a.com", Decision: "deny", Reason: string(denyreason.PolicyNoMatch)},
 	} {
 		if err := s.StoreEvent(e); err != nil {
 			t.Fatal(err)
