@@ -1,7 +1,9 @@
 package main
 
 import (
+	"maps"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -25,16 +27,22 @@ type releaseStep struct {
 	With map[string]string `yaml:"with"`
 	Env  map[string]string `yaml:"env"`
 	Run  string            `yaml:"run"`
+	// ContinueOnError is a bool or an `${{ … }}` expression; typed as any
+	// because yaml.v3 refuses to unmarshal a bool scalar into a string.
+	ContinueOnError any `yaml:"continue-on-error"`
 }
 
 type releaseJob struct {
-	Name    string            `yaml:"name"`
-	Needs   []string          `yaml:"needs"`
-	Uses    string            `yaml:"uses"`
-	With    map[string]string `yaml:"with"`
-	Secrets any               `yaml:"secrets"`
-	Outputs map[string]string `yaml:"outputs"`
-	Steps   []releaseStep     `yaml:"steps"`
+	Name            string            `yaml:"name"`
+	Needs           []string          `yaml:"needs"`
+	If              string            `yaml:"if"`
+	Uses            string            `yaml:"uses"`
+	With            map[string]string `yaml:"with"`
+	Secrets         any               `yaml:"secrets"`
+	Outputs         map[string]string `yaml:"outputs"`
+	Permissions     map[string]string `yaml:"permissions"`
+	ContinueOnError any               `yaml:"continue-on-error"`
+	Steps           []releaseStep     `yaml:"steps"`
 }
 
 const (
@@ -45,15 +53,25 @@ const (
 	testedDigest = "${{ needs.image.outputs.digest }}"
 )
 
-func releaseJobs(t *testing.T) map[string]releaseJob {
+// parseReleaseWorkflow returns the jobs and the workflow-level `permissions`
+// block: a job without a `permissions:` of its own gets the workflow-level
+// one (or GitHub's defaults when neither exists).
+func parseReleaseWorkflow(t *testing.T) (map[string]releaseJob, map[string]string) {
 	t.Helper()
 	var wf struct {
-		Jobs map[string]releaseJob `yaml:"jobs"`
+		Permissions map[string]string     `yaml:"permissions"`
+		Jobs        map[string]releaseJob `yaml:"jobs"`
 	}
 	if err := yaml.Unmarshal([]byte(mustRead(t, releaseWorkflow)), &wf); err != nil {
 		t.Fatal(err)
 	}
-	return wf.Jobs
+	return wf.Jobs, wf.Permissions
+}
+
+func releaseJobs(t *testing.T) map[string]releaseJob {
+	t.Helper()
+	jobs, _ := parseReleaseWorkflow(t)
+	return jobs
 }
 
 // needsClosure returns the job's transitive `needs` set: everything that must
@@ -227,6 +245,239 @@ func has(xs []string, x string) bool {
 		}
 	}
 	return false
+}
+
+// The sign must come before the tag in publish (#421, review round 1):
+// `cosign sign` accepts repo@digest, so the untagged digest is signable, and a
+// failed sign — a Sigstore or OIDC outage — then leaves no v{version}/latest
+// tag pointing at an unsigned image.
+func TestRealReleaseSignsTheDigestBeforeItTags(t *testing.T) {
+	pub, ok := releaseJobs(t)["publish"]
+	if !ok {
+		t.Fatal("release.yml has no publish job")
+	}
+	installed, signed, tagged := -1, -1, -1
+	for i, s := range pub.Steps {
+		switch {
+		case strings.Contains(s.Uses, "cosign-installer") && installed < 0:
+			installed = i
+		case signsImage(s.Run) && signed < 0:
+			signed = i
+		case imagetoolsCreate.MatchString(s.Run) && tagged < 0:
+			tagged = i
+		}
+	}
+	if signed < 0 || tagged < 0 {
+		t.Fatalf("publish signs at step %d and tags at step %d: it must both sign the tested digest and tag it", signed, tagged)
+	}
+	if signed > tagged {
+		t.Errorf("publish tags at step %d and signs at step %d: the sign must come first, so a failed sign leaves no tag on an unsigned image (#421)", tagged, signed)
+	}
+	if installed < 0 || installed > signed {
+		t.Errorf("cosign is installed at step %d and used at step %d: install cosign before signing", installed, signed)
+	}
+}
+
+// gateBypass matches the `if:` expressions that can fire while an earlier job
+// failed or was cancelled: any of them lets a job run behind a red e2e.
+// `!cancelled()` is covered by the cancelled() term, `!success()` is the
+// spelled-out failure().
+var gateBypass = regexp.MustCompile(`always\(\)|failure\(\)|cancelled\(\)|!success\(\)`)
+
+// continueOnErrorWanted reports whether a `continue-on-error` value turns the
+// flag on: a bare true, or an expression (which we cannot prove false, so it
+// counts as on).
+func continueOnErrorWanted(v any) bool {
+	switch t := v.(type) {
+	case bool:
+		return t
+	case string:
+		return t != "false"
+	default:
+		return false
+	}
+}
+
+// Everything in e2e's forward closure runs only because e2e passed — unless it
+// is given its own escape hatch: a job-level `if:` that fires on failure or
+// cancellation, or `continue-on-error`, would let publish tag and sign (and
+// release publish) behind a red e2e, which is exactly what #421 prevents. The
+// e2e job itself and every publish step must be equally unskippable.
+func TestRealReleaseForwardClosureCannotSkipTheGate(t *testing.T) {
+	jobs := releaseJobs(t)
+	e2e, ok := jobs["e2e"]
+	if !ok {
+		t.Fatal("release.yml has no e2e job")
+	}
+	if continueOnErrorWanted(e2e.ContinueOnError) {
+		t.Error("the e2e job has continue-on-error: the release gate may not be allowed to fail silently (#421)")
+	}
+
+	pub, ok := jobs["publish"]
+	if !ok {
+		t.Fatal("release.yml has no publish job")
+	}
+	for _, s := range pub.Steps {
+		if continueOnErrorWanted(s.ContinueOnError) {
+			t.Errorf("publish step %q has continue-on-error: tagging and signing must fail the run when they fail (#421)", s.Name)
+		}
+	}
+
+	// A job behind the gate: everything that transitively needs e2e —
+	// publish, release, and anything added later that needs them.
+	for id, job := range jobs {
+		if !needsClosure(jobs, id)["e2e"] {
+			continue
+		}
+		if gateBypass.MatchString(job.If) {
+			t.Errorf("job %q has if: %q: an if that fires on failure or cancellation lets it run behind a red e2e (#421)", id, job.If)
+		}
+		if continueOnErrorWanted(job.ContinueOnError) {
+			t.Errorf("job %q has continue-on-error: a job behind the e2e gate must fail the run when it fails (#421)", id)
+		}
+	}
+}
+
+// The registry-write surface of a `run:` step. A signature is itself a
+// sha256-….sig tag on the registry, so cosign counts as a write too.
+var registryWrites = []struct {
+	re  *regexp.Regexp
+	why string
+}{
+	{regexp.MustCompile(`\bdocker\s+push\b`), "pushes with the docker CLI (docker push)"},
+	{regexp.MustCompile(`\bdocker\s+tag\b`), "re-tags a local image (docker tag, one step short of docker push)"},
+	{regexp.MustCompile(`--push\b`), "pushes straight from a build (--push)"},
+	{regexp.MustCompile(`\bcrane\b`), "mutates the registry with crane (e.g. crane tag)"},
+	{regexp.MustCompile(`\bskopeo\b`), "copies or tags images with skopeo"},
+	{regexp.MustCompile(`\boras\b`), "pushes or tags artifacts with oras"},
+	{regexp.MustCompile(`\bregctl\b`), "copies or tags images with regctl"},
+	{regexp.MustCompile(`\bcosign\b`), "signs with cosign (the signature lands as a sha256-….sig tag)"},
+	{regexp.MustCompile(`\bimagetools\b`), "adds tags with imagetools create"},
+	{regexp.MustCompile(`ethosagent/warden`), "names the image repo (ethosagent/warden)"},
+}
+
+// The actions the image job may run, by repo — any pinned SHA of them. The
+// pre-e2e job that builds the image must stay exactly this narrow: nothing on
+// the list can tag, sign or otherwise publish the image on its own.
+var imageJobActions = map[string]bool{
+	"actions/checkout":           true,
+	"docker/setup-qemu-action":   true,
+	"docker/setup-buildx-action": true,
+	"docker/login-action":        true,
+	"docker/build-push-action":   true,
+}
+
+// The pre-e2e half of the workflow is an allowlist (#421, review round 1): no
+// job may delegate to a workflow other than the e2e job's e2e.yml, and no
+// `run:` before e2e has passed may reach the registry — push and tag tools,
+// signing tools, or the image repo — so nothing pre-e2e can publish or mutate
+// an image, whatever it is compromised into running.
+func TestRealReleasePreE2ECannotReachTheRegistry(t *testing.T) {
+	jobs := releaseJobs(t)
+	for id, job := range jobs {
+		if needsClosure(jobs, id)["e2e"] {
+			continue // behind the gate: publish signs and tags there on purpose
+		}
+		if job.Uses != "" {
+			if id != "e2e" || job.Uses != "./.github/workflows/e2e.yml" {
+				t.Errorf("job %q calls reusable workflow %q: before the gate, the only reusable call is the e2e job's ./.github/workflows/e2e.yml (#421)", id, job.Uses)
+			}
+			continue
+		}
+		for _, s := range job.Steps {
+			for _, ban := range registryWrites {
+				if ban.re.MatchString(s.Run) {
+					t.Errorf("job %q step %q %s before e2e runs; nothing pre-e2e may write to the registry (#421)", id, s.Name, ban.why)
+				}
+			}
+		}
+	}
+
+	for _, s := range jobs["image"].Steps {
+		if s.Uses == "" {
+			continue
+		}
+		action := s.Uses
+		if i := strings.Index(action, "@"); i >= 0 {
+			action = action[:i]
+		}
+		if !imageJobActions[action] {
+			t.Errorf("image job step %q uses %q: only %v may run in the pre-e2e image job (#421)", s.Name, s.Uses, slices.Sorted(maps.Keys(imageJobActions)))
+		}
+	}
+}
+
+// id-token: write mints a Sigstore identity and packages: write publishes a
+// GHCR package: only the two jobs that sign (publish, release) may hold the
+// first, and the image job — which pushes with Docker Hub credentials — needs
+// neither (#421, review round 1).
+func TestRealReleasePermissionsAreLeastPrivilege(t *testing.T) {
+	jobs, top := parseReleaseWorkflow(t)
+	maySign := map[string]bool{"publish": true, "release": true}
+	for id, job := range jobs {
+		perms := job.Permissions
+		if perms == nil {
+			perms = top // jobs without their own block get the workflow-level one
+		}
+		if perms["id-token"] == "write" && !maySign[id] {
+			t.Errorf("job %q has id-token: write: only publish and release sign the release artifacts, so only they may hold it (#421)", id)
+		}
+		if id == "image" && perms["packages"] == "write" {
+			t.Error("image job has packages: write: it pushes with Docker Hub credentials, and must not be able to publish a package before e2e (#421)")
+		}
+	}
+}
+
+// imageBuildStep returns the image job's `build` step: the only step that
+// pushes.
+func imageBuildStep(t *testing.T) releaseStep {
+	t.Helper()
+	for _, s := range releaseJobs(t)["image"].Steps {
+		if s.ID == "build" {
+			return s
+		}
+	}
+	t.Fatal("the image job has no step with id `build`")
+	return releaseStep{}
+}
+
+// withLabels parses a build-push-action `labels:` block: one KEY=VALUE per
+// line.
+func withLabels(block string) map[string]string {
+	labels := map[string]string{}
+	for _, line := range strings.Split(block, "\n") {
+		if k, v, ok := strings.Cut(strings.TrimSpace(line), "="); ok {
+			labels[k] = v
+		}
+	}
+	return labels
+}
+
+// Dropping docker/metadata-action for the digest-only push must not drop its
+// default OCI labels: title, description, created, licenses, url and
+// documentation on top of the source/revision/version already there (review
+// round 1). The values are the ones the action produced — repo fields read
+// from the push event — except `created`, which comes from the commit
+// timestamp instead of the action's start time, so the same tag always
+// carries the same label.
+func TestRealReleaseImageKeepsTheOCILabels(t *testing.T) {
+	labels := withLabels(imageBuildStep(t).With["labels"])
+	want := map[string]string{
+		"org.opencontainers.image.title":         "${{ github.event.repository.name }}",
+		"org.opencontainers.image.description":   "${{ github.event.repository.description }}",
+		"org.opencontainers.image.created":       "${{ steps.oci.outputs.created }}",
+		"org.opencontainers.image.licenses":      "${{ github.event.repository.license.spdx_id }}",
+		"org.opencontainers.image.url":           "${{ github.event.repository.html_url }}",
+		"org.opencontainers.image.documentation": "${{ github.event.repository.html_url }}#readme",
+		"org.opencontainers.image.source":        "https://github.com/${{ github.repository }}",
+		"org.opencontainers.image.revision":      "${{ github.sha }}",
+		"org.opencontainers.image.version":       "${{ github.ref_name }}",
+	}
+	for k, v := range want {
+		if labels[k] != v {
+			t.Errorf("build step label %s = %q, want %q (the docker/metadata-action default set must survive the digest-only push)", k, labels[k], v)
+		}
+	}
 }
 
 func oneLine(s string) string {

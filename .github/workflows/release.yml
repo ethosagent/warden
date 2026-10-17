@@ -17,9 +17,11 @@ name: release
 #
 # Order (#421): the image job pushes BY DIGEST ONLY — no tags — so nothing new
 # on Docker Hub is usable while the L2 e2e suite (.github/workflows/e2e.yml)
-# runs on that digest. Only the publish job, which waits for e2e, adds the
-# v{version} and latest tags to that same digest and signs it; the GitHub
-# Release comes last. A failed e2e leaves the digest untagged and unsigned.
+# runs on that digest. Only the publish job, which waits for e2e, touches that
+# same digest again: it SIGNS it first and only then adds the v{version} and
+# latest tags, so a failed sign (a Sigstore or OIDC outage) leaves no tag
+# pointing at an unsigned image. The GitHub Release comes last. A failed e2e
+# leaves the digest untagged and unsigned.
 #
 # Verify a downloaded release:
 #   cosign verify-blob \
@@ -63,6 +65,14 @@ jobs:
       # Docker Hub until publish adds them after e2e has passed (#421).
       # name-canonical=true is what lets the SBOM + provenance attestations
       # attach to the pushed index without a tag.
+      # The OCI `created` label is stamped from the commit, not the run time:
+      # re-running the same tag produces the same label (docker/metadata-action
+      # used the action's start time; the action was dropped for #421 and the
+      # label set below restores its defaults).
+      - name: Stamp the OCI created timestamp
+        id: oci
+        run: echo "created=$(git log -1 --format=%cI)" >> "$GITHUB_OUTPUT"
+
       - name: Build and push by digest (multi-arch, SBOM + provenance)
         id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
@@ -70,7 +80,16 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           outputs: type=image,name=docker.io/ethosagent/warden,push-by-digest=true,name-canonical=true,push=true
+          # The docker/metadata-action default OCI labels, set by hand since
+          # the action was dropped (#421): the repo fields come straight from
+          # the push event, as they did from the action's API lookups.
           labels: |
+            org.opencontainers.image.title=${{ github.event.repository.name }}
+            org.opencontainers.image.description=${{ github.event.repository.description }}
+            org.opencontainers.image.created=${{ steps.oci.outputs.created }}
+            org.opencontainers.image.licenses=${{ github.event.repository.license.spdx_id }}
+            org.opencontainers.image.url=${{ github.event.repository.html_url }}
+            org.opencontainers.image.documentation=${{ github.event.repository.html_url }}#readme
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ github.ref_name }}
@@ -93,10 +112,12 @@ jobs:
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
 
-  # Tags and signs the exact digest e2e tested — the first job that makes the
-  # image publicly usable. `image` is a direct need only for the digest
-  # hand-off (the needs context carries direct dependencies); the gate it waits
-  # on is e2e.
+  # Signs and then tags the exact digest e2e tested — the first job that makes
+  # the image publicly usable. The sign comes first: `cosign sign` takes
+  # repo@digest, so the untagged digest is signable, and a sign failure (a
+  # Sigstore or OIDC outage) then leaves no v*/latest tag pointing at an
+  # unsigned image. `image` is a direct need only for the digest hand-off (the
+  # needs context carries direct dependencies); the gate it waits on is e2e.
   publish:
     needs: [image, e2e]
     runs-on: ubuntu-latest
@@ -112,8 +133,19 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Install cosign
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+
+      # Signing an untagged digest works: cosign sign takes repo@digest. The
+      # signature — itself a sha256-….sig tag — exists before any version tag
+      # does, so a tag can only ever point at a signed image.
+      - name: Sign the tested digest (keyless)
+        env:
+          DIGEST: ${{ needs.image.outputs.digest }}
+        run: cosign sign --yes "docker.io/ethosagent/warden@${DIGEST}"
+
       # imagetools create re-tags the digest in place: both tags point at the
-      # very digest e2e ran on. Nothing is rebuilt.
+      # very digest e2e ran on and the step above signed. Nothing is rebuilt.
       - name: Tag the tested digest (v{version} + latest)
         env:
           DIGEST: ${{ needs.image.outputs.digest }}
@@ -123,14 +155,6 @@ jobs:
             --tag "docker.io/ethosagent/warden:${version}" \
             --tag "docker.io/ethosagent/warden:latest" \
             "docker.io/ethosagent/warden@${DIGEST}"
-
-      - name: Install cosign
-        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
-
-      - name: Sign the tested digest (keyless)
-        env:
-          DIGEST: ${{ needs.image.outputs.digest }}
-        run: cosign sign --yes "docker.io/ethosagent/warden@${DIGEST}"
 
   release:
     # Publish only once the tested digest is tagged and signed — and so only
