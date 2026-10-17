@@ -111,3 +111,37 @@ func TestResolved_LogFields(t *testing.T) {
 		}
 	}
 }
+
+func TestParseAdminTokenEnv(t *testing.T) {
+	p, err := parse([]byte("admin:\n  tokenEnv: \"  WARDEN_ADMIN_TOKEN \"\npolicy:\n  allowlist:\n    - domain: example.com\n"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	pol, _ := p.GetPolicy()
+	if pol.AdminTokenEnv != "WARDEN_ADMIN_TOKEN" {
+		t.Fatalf("AdminTokenEnv = %q, want trimmed WARDEN_ADMIN_TOKEN", pol.AdminTokenEnv)
+	}
+	// Absent block: unset (writes fail closed).
+	p, err = parse([]byte("policy:\n  allowlist:\n    - domain: example.com\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pol, _ = p.GetPolicy(); pol.AdminTokenEnv != "" {
+		t.Fatalf("absent admin block: AdminTokenEnv = %q, want empty", pol.AdminTokenEnv)
+	}
+	if _, err := parse([]byte("admin:\n  tokenEnvx: A\npolicy:\n  allowlist:\n    - domain: example.com\n")); err == nil {
+		t.Fatal("unknown admin key should fail to parse")
+	}
+}
+
+func TestResolveAdminTokenEnv_FlagBeatsConfig(t *testing.T) {
+	if got := ResolveAdminTokenEnv(Policy{AdminTokenEnv: "FROM_CFG"}, ""); got != "FROM_CFG" {
+		t.Errorf("config only = %q", got)
+	}
+	if got := ResolveAdminTokenEnv(Policy{AdminTokenEnv: "FROM_CFG"}, " FROM_FLAG "); got != "FROM_FLAG" {
+		t.Errorf("flag over config = %q", got)
+	}
+	if got := ResolveAdminTokenEnv(Policy{}, ""); got != "" {
+		t.Errorf("neither = %q, want empty", got)
+	}
+}

@@ -144,6 +144,16 @@ func (t *Target) ControlPlaneToken() (string, error) {
 	return "dev-token", nil
 }
 
+// WorkerAdminToken is the bearer token the workers' admin dashboards need for
+// writes (#425) — the env var the compose files distribute it with
+// (WARDEN_ADMIN_TOKEN, default dev-admin-token).
+func (t *Target) WorkerAdminToken() string {
+	if tok := os.Getenv("WARDEN_ADMIN_TOKEN"); tok != "" {
+		return tok
+	}
+	return "dev-admin-token"
+}
+
 // ControlPlaneCA is the root pool the control plane's TLS cert verifies
 // against: the lab proxy CA, exactly as on the in-process target.
 func (t *Target) ControlPlaneCA() (*x509.CertPool, error) { return CAPool() }

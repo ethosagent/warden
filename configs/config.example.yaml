@@ -13,6 +13,10 @@
 # With tls unset the proxy tunnels HTTPS blind (domain-only policy).
 # listen: "127.0.0.1:8080"        # proxy listener (CONNECT + MITM)
 # adminListen: "127.0.0.1:9090"   # dashboard/healthz/metrics/admin APIs
+# admin:
+#   tokenEnv: WARDEN_ADMIN_TOKEN  # env var holding the bearer token admin-dashboard WRITES need
+#                                 # (--admin-token-env overrides). Unset = writes refused (403);
+#                                 # reads stay open. See docs/control-plane.md.
 # tls:
 #   caCert: certs/proxy-ca.crt    # set caCert and caKey together
 #   caKey: certs/proxy-ca.key

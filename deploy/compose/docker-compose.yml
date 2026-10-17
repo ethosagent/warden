@@ -69,6 +69,7 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - WARDEN_CP_TOKEN=${WARDEN_CP_TOKEN:-dev-token}
+      - WARDEN_ADMIN_TOKEN=${WARDEN_ADMIN_TOKEN:-dev-admin-token}
       - WARDEN_PROXY_ID=warden-worker   # labels this worker in the fleet view
     volumes:
       - ../../configs/config.example-worker.yaml:/etc/warden/config.yaml:ro   # managed: policy from the CP
@@ -80,6 +81,7 @@ services:
       - "--ca-cert=/etc/warden/certs/proxy-ca.crt"   # terminate TLS (swap + inspect); omit for blind tunnel
       - "--ca-key=/etc/warden/certs/proxy-ca.key"
       - "--admin-listen=0.0.0.0:9090"                 # dashboard + /healthz + /admin/refresh-secrets
+      - "--admin-token-env=WARDEN_ADMIN_TOKEN"
       - "--db=/tmp/warden.db"
 
   agent:

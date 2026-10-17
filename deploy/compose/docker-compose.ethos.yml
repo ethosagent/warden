@@ -57,6 +57,7 @@ services:
       - "127.0.0.1:9091:9090"                  # this worker's own (local) dashboard
     environment:
       - WARDEN_CP_TOKEN=${WARDEN_CP_TOKEN:-dev-token}
+      - WARDEN_ADMIN_TOKEN=${WARDEN_ADMIN_TOKEN:-dev-admin-token}
       - WARDEN_PROXY_ID=ethos-worker # labels this worker in the fleet view
       # config.worker.yaml carries a demo secret mapping; this satisfies it. The
       # real value stays on the worker and never reaches the control plane.
@@ -74,6 +75,7 @@ services:
       - "--ca-cert=/etc/warden/certs/proxy-ca.crt"   # TLS terminate for full visibility
       - "--ca-key=/etc/warden/certs/proxy-ca.key"
       - "--admin-listen=0.0.0.0:9090"
+      - "--admin-token-env=WARDEN_ADMIN_TOKEN"
       - "--db=/data/warden.db"
 
   ethos:

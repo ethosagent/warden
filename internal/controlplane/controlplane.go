@@ -467,7 +467,7 @@ func (s *Server) Handler() http.Handler {
 		dash.SetDetectionWriter(s.WriteDetection)
 	}
 	// Reads stay open; every write needs the CP bearer token (fail closed).
-	dash.SetWriteGuard(s.dashboardWriteGuard)
+	dash.SetWriteGuard(s.dashboardWriteGuard())
 	mux.Handle("/dashboard/", dash.Handler())
 
 	return mux
