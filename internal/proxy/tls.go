@@ -59,7 +59,7 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 		if needsJudge {
 			// Not a TLS ClientHello: cannot terminate and inspect, so the judge
 			// cannot run. Fail closed.
-			p.storeDeny(domain, port, "tcp", "no_tls")
+			p.storeDeny(domain, port, "tcp", "no_tls", "")
 			return
 		}
 		remote, dialErr := p.dialFunc("tcp", net.JoinHostPort(domain, fmt.Sprintf("%d", port)))
@@ -149,7 +149,7 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 	// Non-HTTP traffic inside TLS cannot be judged (no request to inspect):
 	// fail closed when the judge was required.
 	if needsJudge {
-		p.storeDeny(domain, port, "tcp", "no_tls")
+		p.storeDeny(domain, port, "tcp", "no_tls", "")
 		return
 	}
 
