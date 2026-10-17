@@ -1,0 +1,64 @@
+# Warden TRANSPARENT-MODE worker config for the HERMETIC e2e stack
+# (deploy/compose/docker-compose.e2e.yml, service worker-3, issue #376).
+#
+# worker-3 serves agent-3 on its own interception network (t-net): agent-3 has
+# NO proxy environment — its dials land on this worker's transparent listeners
+# because the stack's "DNS" (the agent's extra_hosts) points the fake host
+# names at worker-3's pinned t-net IP. Same CP-managed policy, same pipeline as
+# workers 1/2; only the LOCAL wiring below differs from
+# configs/config.e2e-worker.yaml:
+#
+#   - proxy: mode "both" + the transparent listeners on the low ports 443/80
+#     (the container binds them unprivileged via the per-netns sysctl in the
+#     compose override — the same trick fakeupstream uses).
+#   - upstream.allowPrivateCIDRs gains 10.201.0.0/24 (t-net) DELIBERATELY: the
+#     loop-guard test dials self.example.test, which resolves to worker-3's
+#     own t-net address. With t-net exempted, the SSRF private-IP blocklist
+#     stays out of the way and the LOOP GUARD is the only thing that can
+#     refuse the dial — the test would otherwise pass for the wrong reason.
+#     installLoopGuard refuses self addresses even when allowPrivate covers
+#     them, which is exactly the property this stack proves.
+#
+# Everything else (CP wiring, the secret mapping, the fake DNS, the canary
+# discipline) is the e2e-worker.yaml wiring verbatim — worker-3 must behave
+# indistinguishably from the forward-mode workers apart from admission.
+
+controlPlane:
+  endpoint: https://control-plane:7070/policy
+  tokenEnv: WARDEN_CP_TOKEN
+  caCert: /etc/warden/certs/proxy-ca.crt
+  longPollWait: 30s        # how long the CP holds the poll open before 304
+  heartbeatInterval: 10s
+  localOnly: false
+
+secrets:
+  - placeholder: example_secret_001
+    envVar: EXAMPLE_SECRET
+    matchHosts: ["api.example.test", "llm.example.test"]
+
+dns:
+  upstreamResolver: "10.200.0.10:53"
+
+upstream:
+  allowPrivateCIDRs: ["10.200.0.0/24", "10.201.0.0/24"]
+
+proxy:
+  mode: both
+  transparent:
+    httpsListen: 0.0.0.0:443
+    httpListen: 0.0.0.0:80
+
+logging:
+  level: info
+  format: json
+
+mcp:
+  enabled: true
+  mode: monitor
+
+central:
+  mode: worker
+  endpoint: https://control-plane:7070/central/ingest
+  tokenEnv: WARDEN_CP_TOKEN
+  proxyID: ${WARDEN_PROXY_ID}
+  caCert: /etc/warden/certs/proxy-ca.crt

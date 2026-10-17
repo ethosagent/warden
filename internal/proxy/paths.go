@@ -17,6 +17,14 @@ const (
 	PathRawTLS Path = "raw-tls"
 	// PathHTTP1 is HTTP/1.x inside terminated TLS: the full request stage chain.
 	PathHTTP1 Path = "http1"
+	// PathTransparentTLS is a ClientHello-gated transparent :443 connection
+	// admitted to TLS termination (#376): the same termination/dispatch path as
+	// PathHTTP1 from here on.
+	PathTransparentTLS Path = "transparent-tls"
+	// PathTransparentHTTP is a plain-HTTP request admitted on the transparent
+	// :80 listener (#376): the same h1 stage chain as PathHTTP1, over an
+	// upstream scheme of http.
+	PathTransparentHTTP Path = "transparent-http"
 	// PathH2 is a plain (non-gRPC) HTTP/2 stream.
 	PathH2 Path = "h2"
 	// PathGRPC is an HTTP/2 stream with an application/grpc content type.
@@ -33,7 +41,8 @@ const (
 // constants; TestPaths_RegistryMatchesDispatch fails when a p.reach call names a
 // path that is missing here, or a registered path has no dispatch site.
 var protocolPaths = []Path{
-	PathTunnel, PathRawTLS, PathHTTP1, PathH2, PathGRPC, PathWebSocket, PathSSE, PathMCP,
+	PathTunnel, PathRawTLS, PathHTTP1, PathTransparentTLS, PathTransparentHTTP,
+	PathH2, PathGRPC, PathWebSocket, PathSSE, PathMCP,
 }
 
 // ProtocolPaths returns the registered protocol paths, in a stable order.

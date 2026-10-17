@@ -45,12 +45,19 @@ type Setting struct {
 }
 
 // Resolved is the effective listener/CA configuration after applying
-// precedence: CLI flag > config key > built-in default.
+// precedence: CLI flag > config key > built-in default. Mode and the
+// transparent listeners (#376) are config-only (no flags): Mode defaults to
+// forward, and an empty transparent listener means that port is not served.
 type Resolved struct {
 	Listen      Setting
 	AdminListen Setting
 	CACert      Setting
 	CAKey       Setting
+	Mode        Setting
+	// TransparentHTTPS / TransparentHTTP are the transparent interception
+	// listeners; Value "" = not serving that port.
+	TransparentHTTPS Setting
+	TransparentHTTP  Setting
 }
 
 // ResolveListen applies precedence and validates the result, regardless of where
@@ -66,11 +73,17 @@ func ResolveListen(pol Policy, f ListenFlags) (Resolved, error) {
 			return Setting{def, SourceDefault}
 		}
 	}
+	mode := pol.Proxy.Mode
+	modeSource := "config proxy.mode:"
+	if mode == "" {
+		mode, modeSource = DefaultProxyMode, SourceDefault
+	}
 	r := Resolved{
 		Listen:      pick(f.Listen, "listen", pol.Listen, "listen", DefaultListen),
 		AdminListen: pick(f.AdminListen, "admin-listen", pol.AdminListen, "adminListen", DefaultAdminListen),
 		CACert:      pick(f.CACert, "ca-cert", pol.TLS.CACert, "tls.caCert", ""),
 		CAKey:       pick(f.CAKey, "ca-key", pol.TLS.CAKey, "tls.caKey", ""),
+		Mode:        Setting{string(mode), modeSource},
 	}
 	if err := validateAddr(r.Listen); err != nil {
 		return Resolved{}, err
@@ -83,6 +96,12 @@ func ResolveListen(pol Policy, f ListenFlags) (Resolved, error) {
 		return Resolved{}, fmt.Errorf("config: CA cert and key must be set together: cert %q from %s, but key is unset", r.CACert.Value, r.CACert.Source)
 	case r.CACert.Value == "" && r.CAKey.Value != "":
 		return Resolved{}, fmt.Errorf("config: CA cert and key must be set together: key %q from %s, but cert is unset", r.CAKey.Value, r.CAKey.Source)
+	}
+	// Transparent listeners + their clash/CA rules (#376): config-only, so the
+	// strict checks run here where the resolved (flag/default-aware) forward and
+	// admin addresses are known.
+	if err := resolveTransparent(&r, pol); err != nil {
+		return Resolved{}, err
 	}
 	return r, nil
 }
@@ -104,6 +123,13 @@ func (r Resolved) LogArgs() []any {
 	args := []any{
 		"listen", r.Listen.Value, "listenSource", r.Listen.Source,
 		"adminListen", r.AdminListen.Value, "adminListenSource", r.AdminListen.Source,
+		"mode", r.Mode.Value, "modeSource", r.Mode.Source,
+	}
+	if r.TransparentHTTPS.Value != "" {
+		args = append(args, "transparentHTTPS", r.TransparentHTTPS.Value, "transparentHTTPSSource", r.TransparentHTTPS.Source)
+	}
+	if r.TransparentHTTP.Value != "" {
+		args = append(args, "transparentHTTP", r.TransparentHTTP.Value, "transparentHTTPSource", r.TransparentHTTP.Source)
 	}
 	if r.CACert.Value != "" {
 		args = append(args,

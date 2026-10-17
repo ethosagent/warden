@@ -17,6 +17,7 @@ import (
 
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/denyreason"
+	"github.com/ethosagent/warden/internal/policy"
 	"github.com/ethosagent/warden/internal/protocol"
 )
 
@@ -54,6 +55,12 @@ func (c bufferedConn) Read(b []byte) (int, error) { return c.Reader.Read(b) }
 // shared stage pipeline). Every other path (opaque TLS passthrough, raw
 // forwarding) cannot be judged, so a needsJudge request there fails closed —
 // preserving the default-deny invariant.
+// handleTLS is the CONNECT-tunnel entry to TLS termination: it classifies the
+// first bytes (a CONNECT tunnel may carry anything) and fails closed for
+// needsJudge traffic that is not TLS, then hands the TLS case to
+// terminateAndDispatch — the SAME termination/dispatch path the transparent
+// :443 listener uses after its ClientHello gate (#376). Forward-mode behavior
+// is unchanged byte for byte.
 func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, port int, needsJudge bool) {
 	firstByte, err := br.Peek(1)
 	if err != nil || firstByte[0] != 0x16 {
@@ -101,6 +108,18 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 		return
 	}
 
+	p.terminateAndDispatch(clientConn, br, domain, port, needsJudge)
+}
+
+// terminateAndDispatch terminates TLS for domain with the MITM leaf cert and
+// dispatches by what the decrypted stream turns out to be: an ALPN-negotiated
+// or prior-knowledge h2 connection goes to handleGRPC, HTTP to handleHTTP,
+// everything else to a needsJudge fail-closed deny or the raw-TLS forward.
+// This is the ONE post-ClientHello path for both arrivals of an allowed TLS
+// destination — the CONNECT tunnel (handleTLS) and the transparent :443
+// listener (handleTransparentTLS, #376) — so policy, swap, scan, MCP and
+// analytics CANNOT diverge between the two modes.
+func (p *Proxy) terminateAndDispatch(clientConn net.Conn, firstBytes io.Reader, domain string, port int, needsJudge bool) {
 	leaf, err := p.getOrCreateCert(domain)
 	if err != nil {
 		return
@@ -110,7 +129,7 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 		Certificates: []tls.Certificate{*leaf},
 		NextProtos:   []string{"h2", "http/1.1"},
 	}
-	bc := bufferedConn{Reader: br, Conn: clientConn}
+	bc := bufferedConn{Reader: firstBytes, Conn: clientConn}
 	tlsConn := tls.Server(bc, tlsCfg)
 	if err := tlsConn.Handshake(); err != nil {
 		return
@@ -138,7 +157,7 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 	detected := protocol.Detect(peekBytes)
 	switch detected {
 	case protocol.HTTP:
-		p.handleHTTP(tlsConn, plainReader, domain, port, needsJudge)
+		p.handleHTTP(tlsConn, plainReader, domain, port, needsJudge, policy.SchemeHTTPS, nil)
 		return
 	case protocol.HTTP2:
 		// Prior-knowledge h2 client (no ALPN): the peek saw the HTTP/2

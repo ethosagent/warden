@@ -163,7 +163,7 @@ func restoreFleet(t *testing.T) policyDoc {
 		t.Fatalf("e2e: read control-plane policy: %v", err)
 	}
 	t.Cleanup(func() {
-		for _, svc := range []string{svcCP, svcWorker1, svcWorker2} {
+		for _, svc := range []string{svcCP, svcWorker1, svcWorker2, svcWorker3} {
 			if res := compose(t, 120*time.Second, "start", svc); res.exit != 0 {
 				t.Errorf("e2e: restore: start %s: exit %d: %s", svc, res.exit, res.stderr)
 			}

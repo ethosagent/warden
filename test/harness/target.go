@@ -113,6 +113,16 @@ type inprocess struct {
 
 var _ Target = (*inprocess)(nil)
 
+// transparentReporter is the optional Target capability for interception mode
+// (#376): per worker, the bound transparent listener addresses as
+// {httpsAddr, httpAddr} ("httpAddr" empty when plain HTTP is not served).
+// Targets that bind no transparent listeners do not implement it; H.
+// TransparentAddrs fails the test loudly rather than handing a scenario an
+// empty address.
+type transparentReporter interface {
+	transparentAddrs() [][2]string
+}
+
 // Start boots the control plane first (so every worker's initial policy pull
 // succeeds and its fail-closed boot window closes before it accepts), then each
 // worker. It returns when every component has reported OnReady. Components
@@ -184,6 +194,18 @@ func (ip *inprocess) AdminAddr() string {
 		return ""
 	}
 	return ip.workers[0].adminAddr
+}
+
+// transparentAddrs reports every worker's bound interception listeners, in
+// worker order. A worker still booting reports empty strings — but Start does
+// not return until each transparent-mode worker reported OnTransparentReady,
+// so a caller after Start always sees bound addresses.
+func (ip *inprocess) transparentAddrs() [][2]string {
+	out := make([][2]string, 0, len(ip.workers))
+	for _, w := range ip.workers {
+		out = append(out, [2]string{w.tlsAddr, w.httpAddr})
+	}
+	return out
 }
 
 func (ip *inprocess) ControlPlaneAddr() string {
@@ -313,6 +335,14 @@ type workerProc struct {
 	adminAddr string
 	ran       bool
 	exitErr   error
+	// transparent + the tlsAddr/httpAddr it fills: this worker boots the
+	// interception listeners (#376) and reports their bound addresses through
+	// Params.OnTransparentReady, which transReady makes Start wait for (Serve
+	// binds them AFTER OnReady, so the first select alone would race a dialer).
+	transparent bool
+	tlsAddr     string
+	httpAddr    string
+	transReady  chan struct{}
 }
 
 func (w *workerProc) running() bool { return w.ran && w.cancel != nil }
@@ -344,27 +374,51 @@ func (w *workerProc) start(parent context.Context) error {
 		}
 		close(w.ready)
 	}
+	if w.transparent {
+		// Interception mode (#376): the worker binds the transparent listeners
+		// inside Serve — after OnReady — so Start must ALSO wait for their
+		// bound addresses before returning, or the first scenario dial races
+		// the bind.
+		w.transReady = make(chan struct{})
+		w.params.OnTransparentReady = func(httpsAddr, httpAddr string) {
+			w.tlsAddr, w.httpAddr = httpsAddr, httpAddr
+			close(w.transReady)
+		}
+	}
 	w.ctx, w.cancel = context.WithCancel(parent)
 	w.errCh = make(chan error, 1)
 	w.ran = true
 	go func() { w.errCh <- worker.Run(w.ctx, w.logs, w.params) }()
-	select {
-	case <-w.ready:
-		return nil
-	case err := <-w.errCh:
-		// Run exited on its own before OnReady — a failed boot, not a component
-		// to stop. Mark it stopped: leaving cancel set made stop() cancel a
-		// corpse and then wait the full stopDeadline on the errCh THIS select
-		// just drained, reporting a bogus "did not stop within 10s" for every
-		// failed boot. exitErr stays nil — the boot error is Start's return.
-		w.cancel = nil
-		return err
-	case <-time.After(readyDeadline):
-		w.cancel()
-		<-w.errCh
-		w.cancel = nil
-		return errors.New("worker " + w.name + " did not report OnReady within " + readyDeadline.String())
+	// waitFor is the one ready-budget select, shared by OnReady and
+	// OnTransparentReady. The errCh case marks a failed boot stopped (see
+	// below), exactly as the original inline select did.
+	waitFor := func(ch <-chan struct{}, what string) error {
+		select {
+		case <-ch:
+			return nil
+		case err := <-w.errCh:
+			// Run exited on its own before the signal — a failed boot, not a
+			// component to stop. Mark it stopped: leaving cancel set made stop()
+			// cancel a corpse and then wait the full stopDeadline on the errCh
+			// THIS select just drained, reporting a bogus "did not stop within
+			// 10s" for every failed boot. exitErr stays nil — the boot error is
+			// Start's return.
+			w.cancel = nil
+			return err
+		case <-time.After(readyDeadline):
+			w.cancel()
+			<-w.errCh
+			w.cancel = nil
+			return errors.New("worker " + w.name + " did not report " + what + " within " + readyDeadline.String())
+		}
 	}
+	if err := waitFor(w.ready, "OnReady"); err != nil {
+		return err
+	}
+	if w.transparent {
+		return waitFor(w.transReady, "OnTransparentReady")
+	}
+	return nil
 }
 
 // stop cancels the worker and waits for Run to return, recording its exit error

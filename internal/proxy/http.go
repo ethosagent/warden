@@ -3,7 +3,7 @@ package proxy
 import (
 	"bufio"
 	"bytes"
-	"crypto/tls"
+
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -36,19 +36,28 @@ const maxBodySwapSize = 10 << 20 // 10 MB
 // repeated. See cleanup for the exact per-path close semantics.
 type requestScope struct {
 	// Per-connection context (constant across the keep-alive session, copied in
-	// per request so stages read one value).
-	tlsConn    *tls.Conn // nil on HTTP/2
+	// per request so stages read one value). clientConn is the client-facing
+	// conn — the terminated TLS conn on both CONNECT and transparent :443, or
+	// the raw TCP conn on the transparent plain-HTTP listener (#376).
+	clientConn net.Conn
 	br         *bufio.Reader
 	domain     string
 	port       int
 	needsJudge bool
+	// scheme is this connection's UPSTREAM scheme: https on every terminated
+	// tunnel, http only on the transparent plain-HTTP listener. It selects the
+	// constraint-gate evaluation, the event URL prefix and the upstream dial
+	// (TLS vs plain); the zero value is SchemeHTTPS, so the h2 paths — which
+	// never ride plain HTTP — need not set it.
+	scheme policy.Scheme
 
 	// out frames every client-bound response (see responseSink). rt is non-nil
 	// only on HTTP/2: forward then round-trips over it instead of dialing an
 	// HTTP/1.1 conn, and the stages that assume an h1 conn (readRequest's
 	// mismatch handling, the WebSocket upgrade) branch on it. proto is the
-	// protocol label of this request's events: "https" on h1, "http2" or "grpc"
-	// on h2 (an MCP request is always "mcp").
+	// protocol label of this request's events: "https" on h1, "http" on the
+	// transparent plain-HTTP listener, "http2" or "grpc" on h2 (an MCP request
+	// is always "mcp").
 	out   responseSink
 	rt    http.RoundTripper
 	proto string
@@ -251,7 +260,15 @@ func (s *requestScope) addEvidence(dets []scan.Detection) {
 	}
 }
 
-// handleHTTP serves the keep-alive loop for one MITM-terminated client conn.
+// handleHTTP serves the keep-alive loop for one client conn whose requests all
+// target the same fixed domain:port. It is the shared h1 path for BOTH arrivals
+// of an allowed TLS destination — the CONNECT tunnel and the transparent :443
+// listener (scheme https, clientConn the terminated TLS conn) — and the
+// transparent plain-HTTP listener (#376: scheme http, clientConn the raw TCP
+// conn). firstReq, when non-nil, is the request the transparent floor already
+// read and gated while admitting the connection; the loop serves it instead of
+// reading another.
+//
 // The SESSION owns the upstream conn: one upstream (+ its bufio.Reader) is
 // carried across iterations so N keep-alive requests to this single fixed host
 // pay ONE upstream dial instead of N. A CONNECT tunnel targets exactly one
@@ -263,8 +280,12 @@ func (s *requestScope) addEvidence(dets []scan.Detection) {
 // Connection: close, a deny/502 terminal, an SSE stream, a client EOF, or a
 // stale-conn redial's fresh conn. It is nil (nothing to close) before the first
 // forward and after a handoff, so there is no double close and no leak.
-func (p *Proxy) handleHTTP(tlsConn *tls.Conn, br *bufio.Reader, domain string, port int, needsJudge bool) {
-	p.reach(PathHTTP1)
+func (p *Proxy) handleHTTP(clientConn net.Conn, br *bufio.Reader, domain string, port int, needsJudge bool, scheme policy.Scheme, firstReq *http.Request) {
+	if scheme == policy.SchemeHTTPS {
+		p.reach(PathHTTP1)
+	} else {
+		p.reach(PathTransparentHTTP)
+	}
 	var upstream net.Conn
 	var upstreamBR *bufio.Reader
 	defer func() {
@@ -273,7 +294,10 @@ func (p *Proxy) handleHTTP(tlsConn *tls.Conn, br *bufio.Reader, domain string, p
 		}
 	}()
 	for {
-		end, up, upBR := p.serveHTTPRequest(tlsConn, br, domain, port, needsJudge, upstream, upstreamBR)
+		end, up, upBR := p.serveHTTPRequest(clientConn, br, domain, port, needsJudge, scheme, firstReq, upstream, upstreamBR)
+		// The pre-read first request is served exactly once; later iterations
+		// read from the wire like every keep-alive request.
+		firstReq = nil
 		upstream, upstreamBR = up, upBR
 		if end {
 			return
@@ -285,16 +309,22 @@ func (p *Proxy) handleHTTP(tlsConn *tls.Conn, br *bufio.Reader, domain string, p
 // sequence, with a single deferred cleanup releasing the request's body closables
 // on every exit. The carried-in upstream (nil on the session's first request, or
 // the reusable conn from a prior clean keep-alive response) is threaded onto the
-// scope so forward reuses it. It returns whether the session should end plus the
-// upstream to carry forward: the scope's upstream on every non-handoff path (the
-// session closes it on exit or reuses it next iteration), or nil after a
-// WebSocket handoff so the session does not double-close the pump-owned conn.
-func (p *Proxy) serveHTTPRequest(tlsConn *tls.Conn, br *bufio.Reader, domain string, port int, needsJudge bool, upstream net.Conn, upstreamBR *bufio.Reader) (endSession bool, carryUpstream net.Conn, carryBR *bufio.Reader) {
-	req, err := http.ReadRequest(br)
-	if err != nil {
-		// Client gone / EOF between keep-alive requests: end the session and let it
-		// close whatever upstream was carried in (nil if none was ever dialed).
-		return true, upstream, upstreamBR
+// scope so forward reuses it. firstReq, when non-nil, was already read (and
+// policy-gated) by the transparent plain-HTTP floor; it is served as-is. It
+// returns whether the session should end plus the upstream to carry forward: the
+// scope's upstream on every non-handoff path (the session closes it on exit or
+// reuses it next iteration), or nil after a WebSocket handoff so the session does
+// not double-close the pump-owned conn.
+func (p *Proxy) serveHTTPRequest(clientConn net.Conn, br *bufio.Reader, domain string, port int, needsJudge bool, scheme policy.Scheme, firstReq *http.Request, upstream net.Conn, upstreamBR *bufio.Reader) (endSession bool, carryUpstream net.Conn, carryBR *bufio.Reader) {
+	req := firstReq
+	if req == nil {
+		var err error
+		req, err = http.ReadRequest(br)
+		if err != nil {
+			// Client gone / EOF between keep-alive requests: end the session and let it
+			// close whatever upstream was carried in (nil if none was ever dialed).
+			return true, upstream, upstreamBR
+		}
 	}
 	// Mediation-latency clock starts at the request-read point and stops where each
 	// event is written (see requestScope.latencyMs). time.Now (not the injectable
@@ -306,9 +336,10 @@ func (p *Proxy) serveHTTPRequest(tlsConn *tls.Conn, br *bufio.Reader, domain str
 	// mid-request. A nil gw/judge means the feature is disabled — identical to a
 	// nil cfg.MCP / cfg.Judge before.
 	s := &requestScope{
-		tlsConn:    tlsConn,
-		out:        connSink{w: tlsConn},
-		proto:      "https",
+		clientConn: clientConn,
+		out:        connSink{w: clientConn},
+		proto:      schemeProto(scheme),
+		scheme:     scheme,
 		br:         br,
 		domain:     domain,
 		port:       port,
@@ -460,7 +491,7 @@ func (p *Proxy) recordSSRFDeny(s *requestScope, err error) {
 // exactly as before); an explicit Deny is terminal — a constraint violation is
 // never judge-eligible, by construction of the evaluator.
 func (p *Proxy) constraintGate(s *requestScope) (endSession bool) {
-	verdict := p.cfg.Policy.EvaluateRequest(s.domain, s.port, policy.SchemeHTTPS, s.req.Method, s.req.URL.EscapedPath())
+	verdict := p.cfg.Policy.EvaluateRequest(s.domain, s.port, s.scheme, s.req.Method, s.req.URL.EscapedPath())
 	if verdict.Decision != policy.Deny {
 		return false
 	}
@@ -1003,12 +1034,19 @@ func (p *Proxy) forward(s *requestScope) (endSession bool) {
 	return false
 }
 
-// dialUpstream dials a fresh TLS upstream for this session's fixed host and
+// dialUpstream dials a fresh upstream for this session's fixed host and
 // installs it (plus a new buffered reader) on the scope. It always targets
-// s.domain:s.port — reuse never crosses hosts. The TLS config comes from
-// upstreamTLSConfig so the assembly-only root-CA override applies here too.
+// s.domain:s.port — reuse never crosses hosts. A plain-HTTP scope (#376) dials
+// plaintext; everything else dials TLS with the config from upstreamTLSConfig,
+// so the assembly-only root-CA override applies here too.
 func (p *Proxy) dialUpstream(s *requestScope) error {
-	upstream, err := p.dialTLS("tcp", net.JoinHostPort(s.domain, fmt.Sprintf("%d", s.port)), p.upstreamTLSConfig(s.domain))
+	var upstream net.Conn
+	var err error
+	if s.scheme == policy.SchemeHTTP {
+		upstream, err = p.dialFunc("tcp", net.JoinHostPort(s.domain, fmt.Sprintf("%d", s.port)))
+	} else {
+		upstream, err = p.dialTLS("tcp", net.JoinHostPort(s.domain, fmt.Sprintf("%d", s.port)), p.upstreamTLSConfig(s.domain))
+	}
 	if err != nil {
 		p.recordSSRFDeny(s, err)
 		return err

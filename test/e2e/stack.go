@@ -34,19 +34,22 @@ const (
 	svcCP       = "control-plane"
 	svcWorker1  = "worker-1"
 	svcWorker2  = "worker-2"
+	svcWorker3  = "worker-3"
 	svcAgent1   = "agent-1"
 	svcAgent2   = "agent-2"
+	svcAgent3   = "agent-3"
 	svcUpstream = "fakeupstream"
 )
 
 // allServices is every service whose logs are scanned for the canary.
-var allServices = []string{svcCP, svcWorker1, svcWorker2, svcAgent1, svcAgent2, svcUpstream}
+var allServices = []string{svcCP, svcWorker1, svcWorker2, svcWorker3, svcAgent1, svcAgent2, svcAgent3, svcUpstream}
 
 // Networks (compose-prefixed) the agents and the control plane live on.
 const (
 	netW1 = composeProject + "_w1-internal"
 	netW2 = composeProject + "_w2-internal"
 	netCP = composeProject + "_cp-net"
+	netT  = composeProject + "_t-net" // the #376 transparent interception network
 )
 
 // Host-published endpoints (all 127.0.0.1) and API paths.
@@ -62,6 +65,7 @@ const (
 var workerAdmin = map[string]string{
 	svcWorker1: "http://127.0.0.1:9091",
 	svcWorker2: "http://127.0.0.1:9092",
+	svcWorker3: "http://127.0.0.1:9093",
 }
 
 // fleetPaths are the control plane's fleet-API reads, all scanned for the canary.

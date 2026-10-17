@@ -39,14 +39,16 @@ type RecordedRequest struct {
 // of HTTP/1.1 and HTTP/2 (ALPN), signed by the harness upstream CA, that
 // records every request it receives and can be faulted (Delay, Fail,
 // EchoHeaders). Flavors (FakeLLM, FakeMCP, FakeGRPC, FakeWS) mount handlers
-// onto it; the recorder always runs first.
+// onto it; the recorder always runs first. A plain-HTTP twin of the same
+// handler serves the transparent :80 path, whose upstream hop is http (#376).
 //
 // Upstreams live in the harness registry until cleanup — get one once, then
 // call the fault methods as the scenario needs.
 type Upstream struct {
-	h    *H
-	host string
-	srv  *httptest.Server
+	h     *H
+	host  string
+	srv   *httptest.Server
+	plain *httptest.Server
 
 	mu    sync.Mutex
 	reqs  []RecordedRequest
@@ -98,6 +100,10 @@ func (h *H) Upstream(host string) *Upstream {
 	srv.Config.ErrorLog = log.New(io.Discard, "", 0)
 	srv.StartTLS()
 	u.srv = srv
+	// The plain twin (#376): same handler (recorder + faults), no TLS — the
+	// destination an http-scheme upstream dial reaches.
+	plain := httptest.NewServer(u)
+	u.plain = plain
 	h.upstreams[host] = u
 	return u
 }
@@ -267,12 +273,18 @@ func (u *Upstream) URL() string { return u.srv.URL }
 // addr is the loopback host:port the mapping dialer routes to.
 func (u *Upstream) addr() string { return strings.TrimPrefix(u.srv.URL, "https://") }
 
-// close shuts the server down (harness cleanup). CloseClientConnections first:
+// addrHTTP is the plain twin's loopback address (the transparent :80 path's
+// upstream hop dials it, #376).
+func (u *Upstream) addrHTTP() string { return strings.TrimPrefix(u.plain.URL, "http://") }
+
+// close shuts the servers down (harness cleanup). CloseClientConnections first:
 // a client leg still marked busy (a request that outlived the worker) would
 // otherwise hold Server.Close open waiting on it.
 func (u *Upstream) close() {
 	u.srv.CloseClientConnections()
 	u.srv.Close()
+	u.plain.CloseClientConnections()
+	u.plain.Close()
 }
 
 // echoHeaders reflects the request headers back as the body, keys sorted so a
@@ -355,11 +367,23 @@ func (h *H) FakeWS() *Upstream {
 // pool the harness built — a regression in either override fails the handshake.
 type mappingDialer struct{ h *H }
 
-// Dial: plain HTTP upstreams are not a harness scenario (every fake is TLS).
-// Refuse loudly so a mis-configured scenario reads as a harness error, not a
-// hang.
+// Dial maps <host>:<port> to the fake's PLAIN loopback address — the
+// transparent :80 path's upstream hop is http (#376). Unregistered hosts are
+// refused loudly so a mis-configured scenario reads as a harness error, not a
+// hang (DNS replacement, never SSRF: production's SafeDialer stays
+// production's).
 func (m *mappingDialer) Dial(network, addr string) (net.Conn, error) {
-	return nil, fmt.Errorf("harness: plain upstream dial to %s refused; fake upstreams are https-only", addr)
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, fmt.Errorf("harness: dial target %q has no port", addr)
+	}
+	m.h.mu.Lock()
+	up, ok := m.h.upstreams[host]
+	m.h.mu.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("harness: no fake upstream registered for %q (add h.Upstream(%q))", host, host)
+	}
+	return net.Dial(network, up.addrHTTP())
 }
 
 // DialTLS maps <host>:<port> to the fake's loopback address and handshakes

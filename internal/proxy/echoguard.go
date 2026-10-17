@@ -18,6 +18,7 @@ import (
 	"github.com/ethosagent/warden/internal/auth"
 	"github.com/ethosagent/warden/internal/denyreason"
 	"github.com/ethosagent/warden/internal/mcp/ws"
+	"github.com/ethosagent/warden/internal/policy"
 	"github.com/ethosagent/warden/internal/secrets"
 )
 
@@ -831,14 +832,30 @@ func (s *requestScope) noteTransformerSecrets(t auth.SecretSource) {
 }
 
 // eventURL is the request URL for an event: the query is the agent's original one,
-// never the swapped one that holds a real secret value.
+// never the swapped one that holds a real secret value. The scheme matches the
+// connection's upstream scheme (https everywhere except the transparent
+// plain-HTTP listener, #376).
 func (s *requestScope) eventURL() string {
+	prefix := "https://"
+	if s.scheme == policy.SchemeHTTP {
+		prefix = "http://"
+	}
 	if s.origRawQuery == "" {
-		return "https://" + s.domain + s.req.URL.RequestURI()
+		return prefix + s.domain + s.req.URL.RequestURI()
 	}
 	u := *s.req.URL
 	u.RawQuery = s.origRawQuery
-	return "https://" + s.domain + u.RequestURI()
+	return prefix + s.domain + u.RequestURI()
+}
+
+// schemeProto is the event protocol label for an h1 connection's scheme:
+// "http" only on the transparent plain-HTTP listener (#376); every terminated
+// tunnel keeps the "https" label it has always had.
+func schemeProto(sc policy.Scheme) string {
+	if sc == policy.SchemeHTTP {
+		return "http"
+	}
+	return "https"
 }
 
 // preferEchoReason prefers the echo guard's monitor-mode reason over the MCP one.

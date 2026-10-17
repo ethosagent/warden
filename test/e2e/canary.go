@@ -111,7 +111,7 @@ func AssertCanaryNeverLeaked(tb testing.TB, agentOutputs ...string) {
 	for i, out := range agentOutputs {
 		check(fmt.Sprintf("agent output #%d", i+1), out)
 	}
-	for _, agent := range []string{svcAgent1, svcAgent2} {
+	for _, agent := range []string{svcAgent1, svcAgent2, svcAgent3} {
 		env, exit := agentExec(tb, agent, "env")
 		if exit != 0 {
 			tb.Fatalf("e2e: env in %s exited %d", agent, exit)

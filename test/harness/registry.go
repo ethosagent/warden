@@ -258,13 +258,21 @@ func dialerConformance(t *testing.T, d *mappingDialer) {
 		_ = c.Close()
 		t.Error("DialTLS to a name with no fake must fail (default-deny stays in force)")
 	}
-	if c, err := p.Dial("tcp", "dial.example.com:80"); err == nil {
+	if c, err := p.Dial("tcp", "unregistered.example.com:80"); err == nil {
 		_ = c.Close()
-		t.Error("plain Dial must be refused: every fake upstream is TLS-only")
+		t.Error("plain Dial to a name with no fake must fail (default-deny stays in force)")
 	}
 	if c, err := p.DialTLS("tcp", "dial.example.com:443", &tls.Config{ServerName: "dial.example.com"}); err == nil {
 		_ = c.Close()
 		t.Error("DialTLS without the upstream root pool must fail, not trust the system pool")
+	}
+	// Plain Dial to a REGISTERED fake routes to its plain twin: the transparent
+	// :80 path's upstream hop is http (#376), so the fake must answer plain
+	// HTTP too — but still only for names the scenario registered.
+	if c, err := p.Dial("tcp", "dial.example.com:80"); err != nil {
+		t.Errorf("plain Dial to the registered fake: %v", err)
+	} else {
+		_ = c.Close()
 	}
 
 	conn, err := p.DialTLS("tcp", "dial.example.com:443", &tls.Config{RootCAs: d.h.upstreamCA.pool(), ServerName: "dial.example.com"})

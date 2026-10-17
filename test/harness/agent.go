@@ -2,8 +2,10 @@ package harness
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"time"
@@ -87,6 +89,76 @@ func (h *H) AgentH2() *http.Client {
 		}
 	})
 	return h.agentH2Cl
+}
+
+// TransparentAgent returns an HTTP client the way a transparently intercepted
+// agent speaks (#376): NO proxy configuration anywhere — its TLS dials go to
+// the worker's transparent :443 listener with the destination hostname as SNI,
+// which is exactly what DNS/redirect interception looks like to a client — and
+// it trusts the worker's MITM CA (the same trust a deployment distributes to
+// its agents). Shares the agent transcript, so AgentResponses and the canary
+// sweep cover it. HTTP/1.1; the h2-over-transparent path is covered by the
+// proxy package's own ALPN tests.
+func (h *H) TransparentAgent() *http.Client {
+	h.tb.Helper()
+	h.transOnce.Do(func() {
+		tlsAddr := h.TransparentAddrs()[0][0]
+		base := &http.Transport{
+			DialTLSContext: func(ctx context.Context, _, addr string) (net.Conn, error) {
+				host, _, err := net.SplitHostPort(addr)
+				if err != nil {
+					return nil, err
+				}
+				return h.dialTransparentTLS(ctx, tlsAddr, host)
+			},
+		}
+		h.transCl = &http.Client{
+			Timeout:   defaultAgentTimeout,
+			Transport: &recordingTransport{base: base, h: h},
+		}
+	})
+	return h.transCl
+}
+
+// TransparentAgentPlain is TransparentAgent for the plain-HTTP :80 listener:
+// no TLS anywhere — its dials go to the worker's transparent HTTP listener and
+// the Host header IS the destination, exactly what a redirect to :80 looks
+// like. Shares the agent transcript.
+func (h *H) TransparentAgentPlain() *http.Client {
+	h.tb.Helper()
+	h.transPlainOnce.Do(func() {
+		httpAddr := h.TransparentAddrs()[0][1]
+		base := &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				d := &net.Dialer{Timeout: 10 * time.Second}
+				return d.DialContext(ctx, "tcp", httpAddr)
+			},
+		}
+		h.transPlainCl = &http.Client{
+			Timeout:   defaultAgentTimeout,
+			Transport: &recordingTransport{base: base, h: h},
+		}
+	})
+	return h.transPlainCl
+}
+
+// dialTransparentTLS connects to the transparent listener with the destination
+// as SNI and the agent's trust (the harness proxy CA) — the whole client-side
+// of transparent interception in six lines.
+func (h *H) dialTransparentTLS(ctx context.Context, addr, serverName string) (net.Conn, error) {
+	d := &net.Dialer{Timeout: 10 * time.Second}
+	conn, err := d.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	tc := tls.Client(conn, &tls.Config{
+		ServerName: serverName, RootCAs: h.proxyCA.pool(), MinVersion: tls.VersionTLS12,
+	})
+	if err := tc.HandshakeContext(ctx); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	return tc, nil
 }
 
 // AgentResponses returns a copy of every response the agent has received

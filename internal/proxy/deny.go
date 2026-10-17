@@ -118,10 +118,15 @@ func gatewayDenyReason(reason string) denyreason.Reason {
 
 // ssrfDenyReason maps a SafeDialer refusal to its declared deny reason (#391).
 // An unknown refusal reason falls back to ssrf_blocked: it is still an SSRF
-// refusal, and the chokepoint never records an undeclared reason.
+// refusal, and the chokepoint never records an undeclared reason. The
+// transparent-mode loop guard (#376) names itself: transparent_loop_guard.
 func ssrfDenyReason(se *SSRFError) denyreason.Reason {
-	if se.Reason == SSRFReasonDeniedHostname {
+	switch se.Reason {
+	case SSRFReasonDeniedHostname:
 		return denyreason.SSRFDeniedHostname
+	case SSRFReasonSelfListener:
+		return denyreason.TransparentLoopGuard
+	default:
+		return denyreason.SSRFBlocked
 	}
-	return denyreason.SSRFBlocked
 }

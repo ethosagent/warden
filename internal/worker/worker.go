@@ -81,6 +81,15 @@ type Params struct {
 	// never sets it).
 	OnReady func(proxyAddr, adminAddr string)
 
+	// OnTransparentReady is called once with the (httpsAddr, httpAddr) pair of
+	// the BOUND transparent interception listeners (#376), just before the proxy
+	// starts accepting — httpAddr is "" when plain HTTP is not served. Like
+	// OnReady it only ever fires in transparent/both mode (forward mode binds no
+	// transparent listener, so there is nothing to report); the L1 harness uses
+	// it to dial the interception listeners without fixed ports. Nil is allowed
+	// (production never sets it).
+	OnTransparentReady func(httpsAddr, httpAddr string)
+
 	// Overrides carries the assembly-only test seams (#362). Nil (production)
 	// means every collaborator is built exactly as always; see Overrides.
 	Overrides *Overrides
@@ -246,6 +255,16 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	if len(pol.Upstream.AllowPrivateCIDRs) > 0 {
 		logger.Warn("upstream.allowPrivateCIDRs is active: the listed CIDR ranges are exempt from SSRF private-IP blocking — lab and test networks only, never set this in production",
 			"exempt", strings.Join(pol.Upstream.AllowPrivateCIDRs, ","))
+	}
+
+	// Transparent interception sees TCP only (#376). An agent that falls back to
+	// QUIC (HTTP/3 over UDP 443) or ECH bypasses the :443 listener entirely — the
+	// network around Warden must block or redirect UDP 443 so clients fall back
+	// to TCP. That is a deployment property no process can enforce, so it is
+	// loud at startup whenever the interception listeners bind.
+	if pol.Proxy.Mode == config.ProxyModeTransparent || pol.Proxy.Mode == config.ProxyModeBoth {
+		logger.Warn("transparent interception mode serves TCP only: block or redirect UDP 443 on the egress network, or agents may reach the internet over QUIC/HTTP-3 (and ECH hides the SNI) and bypass the guardrail",
+			"mode", string(pol.Proxy.Mode))
 	}
 
 	// Managed vs local-only. Managed = a control plane is configured and
@@ -641,9 +660,19 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		logger.Info("central worker enabled", "endpoint", pol.Central.Endpoint, "proxyID", expandEnv(pol.Central.ProxyID))
 	}
 
+	// Transparent-only mode has NO CONNECT listener: an injected one is unused
+	// by construction, so Run closes it here — a harness port must never leak,
+	// and the proxy's serving paths never take ownership of a listener they do
+	// not accept on (#376). forward/both keep the exact previous handoff.
+	forwardListener := p.ProxyListener
+	if pol.Proxy.Mode == config.ProxyModeTransparent && forwardListener != nil {
+		_ = forwardListener.Close()
+		forwardListener = nil
+	}
+
 	cfg := proxy.Config{
 		ListenAddr:        listenAddr,
-		Listener:          p.ProxyListener,
+		Listener:          forwardListener,
 		Policy:            evaluator,
 		Secrets:           secretProvider,
 		Analytics:         analyticsStore,
@@ -661,6 +690,14 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		Transformers:      transformers,
 		Cost:              costEstimator,
 		UpstreamResolver:  upstreamDNS,
+
+		// Interception mode (#376): internal/config validated the proxy block
+		// (mode enum, listener presence, clashes, CA requirement) during
+		// ResolveListen, so this is a straight copy of the resolved values.
+		Mode:                   pol.Proxy.Mode,
+		TransparentHTTPSListen: pol.Proxy.Transparent.HTTPSListen,
+		TransparentHTTPListen:  pol.Proxy.Transparent.HTTPListen,
+		OnTransparentReady:     p.OnTransparentReady,
 
 		UpstreamAllowPrivateCIDRs: pol.Upstream.AllowPrivateCIDRs,
 	}

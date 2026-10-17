@@ -47,6 +47,9 @@ func TestRequiredReasonsDeclared(t *testing.T) {
 		RequestTrailersUnsupported,
 		SecretEcho, SecretEchoUnscannable,
 		SSRFBlocked, SSRFDeniedHostname,
+		TransparentNoSNI, TransparentBadClientHello,
+		TransparentH2PriorKnowledge, TransparentLoopGuard,
+		MalformedRequest,
 		MCPGatewayDeny, Unspecified,
 	} {
 		if !r.Declared() {

@@ -104,6 +104,10 @@ type H struct {
 	// mcpEnabled (WithMCP) boots the workers with the MCP gateway in monitor
 	// mode, so WebSocket/SSE scenarios ride the worker's real stream paths.
 	mcpEnabled bool
+	// transparent (TransparentIntercept) boots the workers in interception mode
+	// `both` (#376): the CONNECT proxy keeps working AND the transparent
+	// listeners bind on loopback port 0 (addresses via TransparentAddrs).
+	transparent bool
 
 	// inflights is one quiescence tracker per worker (the assembly-only
 	// worker.Overrides.Inflight seam): every request scope enters at request-read
@@ -153,7 +157,13 @@ type H struct {
 	agentCl   *http.Client
 	h2Once    sync.Once
 	agentH2Cl *http.Client
-	agentRecs []RecordedResponse
+	// transOnce backs the transparent-mode agents (#376), which share the
+	// agent transcript (agentRecs) with Agent/AgentH2.
+	transOnce      sync.Once
+	transPlainOnce sync.Once
+	transCl        *http.Client
+	transPlainCl   *http.Client
+	agentRecs      []RecordedResponse
 
 	cpOnce sync.Once
 	cpCl   *CPClient
@@ -294,6 +304,16 @@ func WithMCP() Option {
 	return func(h *H) { h.mcpEnabled = true }
 }
 
+// TransparentIntercept boots the workers in interception mode `both` (#376):
+// the CONNECT proxy keeps working and the transparent interception listeners
+// bind on loopback port 0. Scenarios reach them with TransparentAgent /
+// TransparentAgentPlain (addresses via TransparentAddrs) — an SNI dial with no
+// proxy settings anywhere, exactly what DNS/redirect interception looks like
+// to a client.
+func TransparentIntercept() Option {
+	return func(h *H) { h.transparent = true }
+}
+
 // ControlPlaneDownAtBoot boots the workers while the control plane is
 // unreachable — the fail-closed-at-boot fault. The control plane's address is
 // reserved (so the workers are configured against it) and then released before
@@ -424,9 +444,10 @@ func (h *H) buildInprocessTarget() *inprocess {
 	for i := 1; i <= h.workers; i++ {
 		i := i
 		workers = append(workers, &workerProc{
-			name:     fmt.Sprintf("worker-%d", i),
-			paramsFn: func() worker.Params { return h.workerParams(i) },
-			logs:     &logBuffer{},
+			name:        fmt.Sprintf("worker-%d", i),
+			paramsFn:    func() worker.Params { return h.workerParams(i) },
+			logs:        &logBuffer{},
+			transparent: h.transparent,
 		})
 		dbPaths = append(dbPaths, h.workerDBPath(i))
 	}
@@ -533,6 +554,18 @@ func (h *H) workerParams(i int) worker.Params {
 		// run with the real gateway in front, which never blocks.
 		policy.MCP = config.MCPConfig{Enabled: true, Mode: "monitor"}
 	}
+	if h.transparent {
+		// Interception mode `both` (#376): port-0 loopback listeners, so a
+		// harness instance binds nothing that can collide; the bound addresses
+		// surface through TransparentAddrs (worker.Params.OnTransparentReady).
+		policy.Proxy = config.ProxyConfig{
+			Mode: config.ProxyModeBoth,
+			Transparent: config.TransparentConfig{
+				HTTPSListen: "127.0.0.1:0",
+				HTTPListen:  "127.0.0.1:0",
+			},
+		}
+	}
 	// The local allowlist mirrors the CP's. A managed worker ignores it (policy
 	// comes only from the control plane) but keeping the two in sync means a
 	// scenario's intent reads the same whichever mode boots.
@@ -610,6 +643,23 @@ func (h *H) ProxyAddrs() []string { return h.target.ProxyAddrs() }
 // AdminAddr is worker-1's admin/dashboard address.
 func (h *H) AdminAddr() string { return h.target.AdminAddr() }
 
+// TransparentAddrs reports each worker's bound interception listeners,
+// worker-1 first, as {httpsAddr, httpAddr} — httpAddr is "" when plain HTTP is
+// not served. It fails the test when the harness boots no transparent listeners
+// (the TransparentIntercept option was not given) or the target cannot report
+// them: a scenario dialing an empty address must fail loudly, not hang.
+func (h *H) TransparentAddrs() [][2]string {
+	h.tb.Helper()
+	if !h.transparent {
+		h.tb.Fatal("harness: TransparentAddrs needs the TransparentIntercept option")
+	}
+	tr, ok := h.target.(transparentReporter)
+	if !ok {
+		h.tb.Fatalf("harness: target %T does not report transparent listener addresses", h.target)
+	}
+	return tr.transparentAddrs()
+}
+
 // ControlPlaneAddr is the control plane's HTTPS address.
 func (h *H) ControlPlaneAddr() string { return h.target.ControlPlaneAddr() }
 
@@ -664,6 +714,12 @@ func (h *H) cleanup() {
 		}
 		if h.agentH2Cl != nil {
 			h.agentH2Cl.CloseIdleConnections()
+		}
+		if h.transCl != nil {
+			h.transCl.CloseIdleConnections()
+		}
+		if h.transPlainCl != nil {
+			h.transPlainCl.CloseIdleConnections()
 		}
 		if h.cpCl != nil {
 			h.cpCl.CloseIdleConnections()
