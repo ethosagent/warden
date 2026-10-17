@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -10,52 +11,138 @@ import (
 	"time"
 )
 
+// The bounded reason enum a *SSRFError carries. An SSRF refusal is a POLICY
+// decision and is audited as a deny; ordinary dial failures (DNS failure,
+// timeout, connection refused) are not decisions and must never carry these.
+const (
+	// SSRFReasonBlocked: the destination address is in a blocked range.
+	SSRFReasonBlocked = "ssrf_blocked"
+	// SSRFReasonDeniedHostname: the hostname itself was refused before any
+	// resolution — it is on the hard-deny list or carries URL userinfo.
+	SSRFReasonDeniedHostname = "ssrf_denied_hostname"
+)
+
+// SSRFError is the typed error the SafeDialer returns when it refuses a dial on
+// SSRF grounds. Callers tell it apart from an ordinary dial failure with
+// errors.As and audit the refusal as a deny decision (#391); an ordinary
+// failure (timeout, connection refused, DNS failure) never comes back as a
+// *SSRFError. It carries only bounded, log-safe enums — never a resolved
+// address, so the full address list is not logged.
+type SSRFError struct {
+	// Reason is the bounded refusal reason: SSRFReasonBlocked or
+	// SSRFReasonDeniedHostname.
+	Reason string
+	// AddrClass is the bounded class of the refusal:
+	//   - for SSRFReasonBlocked, the class of the blocked address:
+	//     "loopback", "private", "link_local", "metadata" (169.254.169.254),
+	//     "multicast" or "reserved";
+	//   - for SSRFReasonDeniedHostname, why the NAME was refused: "metadata"
+	//     (hard-denied metadata hostname) or "userinfo" (URL userinfo form).
+	AddrClass string
+	// msg is the human-readable refusal (host + stage). It never embeds a
+	// resolved address.
+	msg string
+}
+
+func (e *SSRFError) Error() string {
+	return fmt.Sprintf("%s [%s, class %s]", e.msg, e.Reason, e.AddrClass)
+}
+
+// AsSSRFError reports whether err is (or wraps) a *SSRFError, and returns it.
+func AsSSRFError(err error) (*SSRFError, bool) {
+	var se *SSRFError
+	if errors.As(err, &se) {
+		return se, true
+	}
+	return nil, false
+}
+
+// blockedNet is one blocklist entry: the range plus the bounded class a refused
+// dial reports for an address inside it.
+type blockedNet struct {
+	net.IPNet
+	class string
+}
+
 // blockedNets is the hardcoded list of private/reserved IP ranges that the
-// SafeDialer blocks by default to prevent SSRF attacks.
-var blockedNets []net.IPNet
+// SafeDialer blocks by default to prevent SSRF attacks, each with the address
+// class reported on a refusal.
+var blockedNets []blockedNet
 
 // deniedHostnames is a set of hostnames that must never be dialed regardless of
 // what they resolve to. Cloud-metadata endpoints commonly expose IMDS via a
 // hostname as well as the 169.254.169.254 link-local IP (already covered by
 // 169.254.0.0/16). Keys are lower-cased and stripped of any trailing dot; see
-// canonicalizeHost. The allowPrivate exception mechanism does NOT apply here:
-// these hostnames are hard-denied.
-var deniedHostnames = map[string]struct{}{
-	"metadata.google.internal": {},
+// canonicalizeHost. Values are the bounded class reported on a refusal. The
+// allowPrivate exception mechanism does NOT apply here: these hostnames are
+// hard-denied.
+var deniedHostnames = map[string]string{
+	"metadata.google.internal": "metadata",
 }
 
+// metadataIP is the cloud-metadata endpoint inside the link-local range; it gets
+// its own class on a refusal so the dashboard tells it apart from ordinary
+// link-local addresses.
+var metadataIP = net.ParseIP("169.254.169.254").To4()
+
 func init() {
-	cidrs := []string{
-		// IPv4
-		"0.0.0.0/8",
-		"10.0.0.0/8",
-		"100.64.0.0/10",
-		"127.0.0.0/8",
-		"169.254.0.0/16",
-		"172.16.0.0/12",
-		"192.0.0.0/24",
-		"192.168.0.0/16",
-		"198.51.100.0/24",
-		"203.0.113.0/24",
-		"224.0.0.0/4",
-		"240.0.0.0/4",
+	cidrs := []struct {
+		net   string
+		class string
+	}{
+		// IPv4. "reserved" covers the remaining non-globally-routable space:
+		// this-host, CGNAT/shared, IETF-protocol, documentation, future-use.
+		{"0.0.0.0/8", "reserved"},
+		{"10.0.0.0/8", "private"},
+		{"100.64.0.0/10", "reserved"},
+		{"127.0.0.0/8", "loopback"},
+		{"169.254.0.0/16", "link_local"},
+		{"172.16.0.0/12", "private"},
+		{"192.0.0.0/24", "reserved"},
+		{"192.168.0.0/16", "private"},
+		{"198.51.100.0/24", "reserved"},
+		{"203.0.113.0/24", "reserved"},
+		{"224.0.0.0/4", "multicast"},
+		{"240.0.0.0/4", "reserved"},
 		// IPv6
-		"::1/128",
-		"::/128",
-		"::ffff:0:0/96",
-		"64:ff9b::/96",
-		"2002::/16",
-		"fc00::/7",
-		"fe80::/10",
-		"ff00::/8",
+		{"::1/128", "loopback"},
+		{"::/128", "reserved"},
+		{"::ffff:0:0/96", "reserved"},
+		{"64:ff9b::/96", "reserved"},
+		{"2002::/16", "reserved"},
+		{"fc00::/7", "private"},
+		{"fe80::/10", "link_local"},
+		{"ff00::/8", "multicast"},
 	}
-	for _, cidr := range cidrs {
-		_, ipNet, err := net.ParseCIDR(cidr)
+	for _, c := range cidrs {
+		_, ipNet, err := net.ParseCIDR(c.net)
 		if err != nil {
-			panic(fmt.Sprintf("safedial: bad CIDR %q: %v", cidr, err))
+			panic(fmt.Sprintf("safedial: bad CIDR %q: %v", c.net, err))
 		}
-		blockedNets = append(blockedNets, *ipNet)
+		blockedNets = append(blockedNets, blockedNet{IPNet: *ipNet, class: c.class})
 	}
+}
+
+// classifyAddr reports the bounded class of a blocked address: the class of the
+// first blocklist range containing it, with the cloud-metadata endpoint singled
+// out of link-local. Unwrap IPv4-mapped IPv6 first, as IsPrivateIP does.
+func classifyAddr(ip net.IP) string {
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+	}
+	if ip.Equal(metadataIP) {
+		return "metadata"
+	}
+	ipLen := len(ip)
+	for i := range blockedNets {
+		if len(blockedNets[i].Mask) != ipLen {
+			continue
+		}
+		if blockedNets[i].Contains(ip) {
+			return blockedNets[i].class
+		}
+	}
+	return "reserved"
 }
 
 // IsPrivateIP reports whether ip falls within any of the hardcoded
@@ -209,12 +296,13 @@ func canonicalizeHost(host string) (string, error) {
 }
 
 // isDeniedHostname reports whether host is on the hard-deny hostname list
-// (e.g. cloud-metadata endpoints). Comparison is case-insensitive and ignores a
-// single trailing dot (the DNS root form).
-func isDeniedHostname(host string) bool {
+// (e.g. cloud-metadata endpoints), together with the bounded class a refusal
+// reports for it. Comparison is case-insensitive and ignores a single trailing
+// dot (the DNS root form).
+func isDeniedHostname(host string) (class string, denied bool) {
 	h := strings.ToLower(strings.TrimSuffix(host, "."))
-	_, denied := deniedHostnames[h]
-	return denied
+	class, denied = deniedHostnames[h]
+	return class, denied
 }
 
 // SafeDialer wraps Go's net.Dialer with DNS-pinning and private-IP blocking
@@ -294,16 +382,25 @@ func (d *SafeDialer) resolve(host string) ([]net.IPAddr, error) {
 // obfuscated IPv4 encodings), rejects hard-denied hostnames, resolves the host,
 // and returns the canonical host together with the resolved IPs that survive
 // the blocklist. It centralizes the SSRF pre-flight so Dial and DialTLS cannot
-// diverge. A "blocked (SSRF protection)" error is returned when nothing is
-// allowed, matching the existing contract.
+// diverge. Every refusal comes back as a *SSRFError (check with AsSSRFError) so
+// callers can audit it as a deny decision; the error text carries the bounded
+// reason and address class, never the resolved address list.
 func (d *SafeDialer) safeHostAndIPs(host string) (string, []net.IP, error) {
 	canonHost, err := canonicalizeHost(host)
 	if err != nil {
-		return "", nil, err
+		return "", nil, &SSRFError{
+			Reason:    SSRFReasonDeniedHostname,
+			AddrClass: "userinfo",
+			msg:       fmt.Sprintf("proxy: host %q contains userinfo (SSRF protection)", host),
+		}
 	}
 	// Hard-deny known metadata hostnames before any resolution.
-	if isDeniedHostname(canonHost) {
-		return "", nil, fmt.Errorf("proxy: host %q is blocked (SSRF protection)", canonHost)
+	if class, denied := isDeniedHostname(canonHost); denied {
+		return "", nil, &SSRFError{
+			Reason:    SSRFReasonDeniedHostname,
+			AddrClass: class,
+			msg:       fmt.Sprintf("proxy: host %q is blocked (SSRF protection)", canonHost),
+		}
 	}
 
 	ips, err := d.resolve(canonHost)
@@ -312,13 +409,22 @@ func (d *SafeDialer) safeHostAndIPs(host string) (string, []net.IP, error) {
 	}
 
 	var allowed []net.IP
+	var firstBlocked net.IP
 	for _, ipAddr := range ips {
-		if !d.isBlocked(ipAddr.IP) {
-			allowed = append(allowed, ipAddr.IP)
+		if d.isBlocked(ipAddr.IP) {
+			if firstBlocked == nil {
+				firstBlocked = ipAddr.IP
+			}
+			continue
 		}
+		allowed = append(allowed, ipAddr.IP)
 	}
 	if len(allowed) == 0 {
-		return "", nil, fmt.Errorf("proxy: all resolved IPs for %q are blocked (SSRF protection)", canonHost)
+		return "", nil, &SSRFError{
+			Reason:    SSRFReasonBlocked,
+			AddrClass: classifyAddr(firstBlocked),
+			msg:       fmt.Sprintf("proxy: all resolved IPs for %q are blocked (SSRF protection)", canonHost),
+		}
 	}
 	return canonHost, allowed, nil
 }
