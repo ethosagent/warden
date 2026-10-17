@@ -201,7 +201,10 @@ func TestSafeDialer_UserinfoRejected(t *testing.T) {
 }
 
 // Cloud-metadata hostname bypass: known metadata hostnames must be blocked
-// explicitly, including the trailing-dot form.
+// explicitly — including dotted spellings of any length and mixed case (#397:
+// the hard-deny list is consulted before resolution, so the comparison itself
+// must normalise; a two-dot spelling that slipped past would reach the resolver
+// unvalidated).
 func TestSafeDialer_MetadataHostnameBlocked(t *testing.T) {
 	d, err := NewSafeDialer(2*time.Second, nil)
 	if err != nil {
@@ -210,7 +213,10 @@ func TestSafeDialer_MetadataHostnameBlocked(t *testing.T) {
 	hosts := []string{
 		"metadata.google.internal",
 		"metadata.google.internal.",
-		"METADATA.GOOGLE.INTERNAL", // case-insensitive
+		"METADATA.GOOGLE.INTERNAL",    // case-insensitive
+		"metadata.google.internal..",  // #397: 2+ trailing dots
+		"metadata.google.internal...", // #397: 3 trailing dots
+		"METADATA.Google.Internal..",  // #397: mixed case AND trailing dots
 	}
 	for _, host := range hosts {
 		t.Run(host, func(t *testing.T) {

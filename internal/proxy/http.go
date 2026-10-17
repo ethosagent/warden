@@ -344,12 +344,16 @@ func (p *Proxy) runRequestStages(s *requestScope) (endSession bool) {
 // the HTTP/2 shapes the proxy cannot mediate faithfully. Every refusal records a
 // deny event so it is never silent. A refusal ends the session on h1 (cleanup
 // closes req.Body); an h2 stream is refused alone, the connection's others go on.
+// Both sides of the host recheck go through policy.NormalizeHost (#397), so case
+// and any number of trailing dots cannot make the recheck disagree with the
+// CONNECT admission it belongs to — while a different host, or a Host header
+// that is only dots (normalised to ""), is still refused (fail closed).
 func (p *Proxy) readRequest(s *requestScope) (endSession bool) {
 	hostOnly := s.req.Host
 	if h, _, err := net.SplitHostPort(s.req.Host); err == nil {
 		hostOnly = h
 	}
-	if !strings.EqualFold(hostOnly, s.domain) {
+	if policy.NormalizeHost(hostOnly) != policy.NormalizeHost(s.domain) {
 		p.recordDeny(s, "host_mismatch")
 		if s.rt != nil {
 			s.out.errorResponse(http.StatusMisdirectedRequest, "Misdirected Request")

@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ethosagent/warden/internal/policy"
 )
 
 // The bounded reason enum a *SSRFError carries. An SSRF refusal is a POLICY
@@ -297,11 +299,11 @@ func canonicalizeHost(host string) (string, error) {
 
 // isDeniedHostname reports whether host is on the hard-deny hostname list
 // (e.g. cloud-metadata endpoints), together with the bounded class a refusal
-// reports for it. Comparison is case-insensitive and ignores a single trailing
-// dot (the DNS root form).
+// reports for it. Comparison uses policy.NormalizeHost (#397), so it is
+// case-insensitive and ignores ANY number of trailing dots — a dotted spelling
+// of a denied hostname must not slip past the list.
 func isDeniedHostname(host string) (class string, denied bool) {
-	h := strings.ToLower(strings.TrimSuffix(host, "."))
-	class, denied = deniedHostnames[h]
+	class, denied = deniedHostnames[policy.NormalizeHost(host)]
 	return class, denied
 }
 
