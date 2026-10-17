@@ -17,6 +17,7 @@ ok
 
 === roadmap (go run docs/roadmap/gen.go check) ===
 roadmap ok
+ok  	command-line-arguments	0.1s
 
 === build (go build ./...) ===
 ok
@@ -50,6 +51,7 @@ go vet ./...
 go test ./internal/archtest -run TestArchitecture
 go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run --config .golangci.arch.yml
 go run docs/roadmap/gen.go check
+go test docs/roadmap/gen.go docs/roadmap/gen_test.go
 go build ./...
 go run golang.org/x/vuln/cmd/govulncheck@v1.5.0 ./...
 go test -race -coverprofile=coverage.out ./...
