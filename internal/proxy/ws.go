@@ -64,7 +64,7 @@ func (c connRWC) Close() error                { return c.conn.Close() }
 // readable, and a test reading one must use EventuallyWithin (the drained-
 // tracker guarantee covers every non-streaming request, never a session).
 func (p *Proxy) handleWSUpgrade(s *requestScope) {
-	tlsConn, clientBR := s.tlsConn, s.br
+	tlsConn, clientBR := s.clientConn, s.br
 	upstream, upstreamBR := s.upstream, s.upstreamBR
 	resp, req, gw := s.resp, s.req, s.gw
 	fullURL := s.eventURL() // the agent's original query, never a swapped one
@@ -102,13 +102,13 @@ func (p *Proxy) handleWSUpgrade(s *requestScope) {
 	statusLine := fmt.Sprintf("HTTP/%d.%d %03d %s\r\n",
 		resp.ProtoMajor, resp.ProtoMinor, resp.StatusCode,
 		http.StatusText(resp.StatusCode))
-	if _, err := io.WriteString(s.tlsConn, statusLine); err != nil {
+	if _, err := io.WriteString(s.clientConn, statusLine); err != nil {
 		return
 	}
-	if err := resp.Header.Write(s.tlsConn); err != nil {
+	if err := resp.Header.Write(s.clientConn); err != nil {
 		return
 	}
-	if _, err := io.WriteString(s.tlsConn, "\r\n"); err != nil {
+	if _, err := io.WriteString(s.clientConn, "\r\n"); err != nil {
 		return
 	}
 
@@ -239,7 +239,7 @@ func (p *Proxy) holdMCP(gw MCPGateway) bool {
 // reason mcp_ws_unscannable. The caller's deferred upstream.Close() closes the
 // upstream; the pump is never started.
 func (p *Proxy) refuseWSEnforce(s *requestScope) {
-	writeErrorResponse(s.tlsConn, 502, "Bad Gateway")
+	writeErrorResponse(s.clientConn, 502, "Bad Gateway")
 	p.emitDeny(s, denyreason.MCPWSUnscannable, denyExtra{
 		Protocol:       "mcp",
 		ResponseStatus: 502,

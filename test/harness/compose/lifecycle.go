@@ -123,7 +123,9 @@ func (t *Target) Stop() error {
 // from the agent (ConnectProber), exactly the way the deployment's traffic does.
 func (t *Target) ProxyAddr() string { return Proxy1 }
 
-// ProxyAddrs lists every worker's proxy address, worker-1 first.
+// ProxyAddrs lists the CONNECT workers' proxy addresses, worker-1 first.
+// worker-3 is not here: its scenarios dial THROUGH the transparent listeners
+// (agent-3 holds no proxy env), never an explicit proxy hop.
 func (t *Target) ProxyAddrs() []string { return []string{Proxy1, Proxy2} }
 
 // AdminAddr is worker-1's admin listener, published to the host (the same

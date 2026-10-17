@@ -48,6 +48,9 @@ func TestRequiredReasonsDeclared(t *testing.T) {
 		GRPCBodyPlaceholder, GRPCFrameTooLarge, GRPCFrameMalformed, GRPCFrameCompressed,
 		SecretEcho, SecretEchoUnscannable,
 		SSRFBlocked, SSRFDeniedHostname,
+		TransparentNoSNI, TransparentBadClientHello,
+		TransparentH2PriorKnowledge, TransparentLoopGuard,
+		MalformedRequest,
 		MCPGatewayDeny, Unspecified,
 	} {
 		if !r.Declared() {

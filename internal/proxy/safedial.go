@@ -23,6 +23,10 @@ const (
 	// SSRFReasonDeniedHostname: the hostname itself was refused before any
 	// resolution — it is on the hard-deny list or carries URL userinfo.
 	SSRFReasonDeniedHostname = string(denyreason.SSRFDeniedHostname)
+	// SSRFReasonSelfListener: the dial target resolved to one of Warden's OWN
+	// transparent listener addresses (#376) — serving it would re-enter the
+	// proxy (an interception loop).
+	SSRFReasonSelfListener = string(denyreason.TransparentLoopGuard)
 )
 
 // SSRFError is the typed error the SafeDialer returns when it refuses a dial on
@@ -320,7 +324,64 @@ type SafeDialer struct {
 	// the behavior before the dns block existed. The blocklist and IP-pinning
 	// apply to whatever resolver resolves the name.
 	resolver NameResolver
+	// selfIPs is the transparent-mode loop-guard set (#376): the addresses of
+	// Warden's own transparent listeners, installed at Serve time via
+	// SetSelfListenerIPs. nil (forward mode) never refuses on this ground.
+	selfIPs []net.IP
 }
+
+// SetSelfListenerIPs installs the loop-guard address set (#376): after this,
+// any dial whose RESOLVED target matches one of the addresses is refused as a
+// policy decision — even when the address would otherwise be allowed by an
+// allowPrivate exemption, which is exactly how a transparent deployment's
+// allowlist is configured.
+func (d *SafeDialer) SetSelfListenerIPs(ips []net.IP) { d.selfIPs = ips }
+
+// selfListenerAddrs derives the loop-guard set from listener addresses
+// (#376). A wildcard host ("" / "0.0.0.0" / "::") contributes every local
+// interface address plus loopback — the listener is reachable on all of them;
+// a literal host contributes exactly that address. Names that do not resolve
+// to literals contribute nothing (the dialer still applies its other checks).
+func selfListenerAddrs(addrs []string) []net.IP {
+	var out []net.IP
+	seen := map[string]bool{}
+	add := func(ip net.IP) {
+		if ip == nil {
+			return
+		}
+		key := ip.String()
+		if !seen[key] {
+			seen[key] = true
+			out = append(out, ip)
+		}
+	}
+	for _, addr := range addrs {
+		host, _, err := net.SplitHostPort(addr)
+		if err != nil {
+			continue
+		}
+		if wildcardListenHosts[host] {
+			add(net.ParseIP("127.0.0.1"))
+			add(net.ParseIP("::1"))
+			ifaces, err := net.InterfaceAddrs()
+			if err != nil {
+				continue
+			}
+			for _, ia := range ifaces {
+				if ipnet, ok := ia.(*net.IPNet); ok {
+					add(ipnet.IP)
+				}
+			}
+			continue
+		}
+		add(net.ParseIP(host))
+	}
+	return out
+}
+
+// wildcardListenHosts are the host spellings that mean "every interface" in a
+// listen address.
+var wildcardListenHosts = map[string]bool{"": true, "0.0.0.0": true, "::": true}
 
 // NewSafeDialer creates a SafeDialer. allowPrivate is an optional list of CIDR
 // strings that should be exempted from the private-IP blocklist (e.g.
@@ -409,6 +470,26 @@ func (d *SafeDialer) safeHostAndIPs(host string) (string, []net.IP, error) {
 	ips, err := d.resolve(canonHost)
 	if err != nil {
 		return "", nil, fmt.Errorf("safedial: resolve %q: %w", canonHost, err)
+	}
+
+	// Loop guard (#376): a dial target that resolves to one of Warden's own
+	// transparent listeners would re-enter the proxy (an interception loop).
+	// The refusal is a policy decision and comes BEFORE any exemption check —
+	// an allowPrivate exception exists to admit internal destinations, never
+	// the proxy itself — and it refuses the WHOLE host when any resolved
+	// address is ours, so a looped name can never be served via a sibling IP.
+	if len(d.selfIPs) > 0 {
+		for _, ipAddr := range ips {
+			for _, self := range d.selfIPs {
+				if ipAddr.IP.Equal(self) {
+					return "", nil, &SSRFError{
+						Reason:    SSRFReasonSelfListener,
+						AddrClass: "self_listener",
+						msg:       "proxy: dial target resolves to a warden listener address (loop guard)",
+					}
+				}
+			}
+		}
 	}
 
 	var allowed []net.IP

@@ -89,9 +89,10 @@ func genCerts(t *testing.T) (tls.Certificate, *x509.CertPool) {
 }
 
 // testStack is one fake upstream wired to loopback ports: the TLS app server,
-// the plain-HTTP control API, and the DNS responder.
+// its plain-HTTP twin, the plain-HTTP control API, and the DNS responder.
 type testStack struct {
 	tlsAddr     string // host:port of the TLS app server
+	plainAddr   string // host:port of the plain-HTTP app twin
 	controlAddr string // host:port of the control API
 	dns         *dnsServer
 	cert        tls.Certificate
@@ -121,6 +122,14 @@ func startTestStack(t *testing.T) *testStack {
 	}
 	go func() { _ = appSrv.ServeTLS(tlsLn, "", "") }()
 
+	plainLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen plain http: %v", err)
+	}
+	t.Cleanup(func() { _ = plainLn.Close() })
+	plainSrv := &http.Server{Handler: newApp(rec)}
+	go func() { _ = plainSrv.Serve(plainLn) }()
+
 	controlLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen control: %v", err)
@@ -133,6 +142,7 @@ func startTestStack(t *testing.T) *testStack {
 
 	return &testStack{
 		tlsAddr:     tlsLn.Addr().String(),
+		plainAddr:   plainLn.Addr().String(),
 		controlAddr: controlLn.Addr().String(),
 		dns:         dns,
 		cert:        cert,
@@ -368,6 +378,45 @@ func TestEndpoints_RecordOneEach(t *testing.T) {
 	}
 	if recs[2].Body == "" || !strings.Contains(recs[2].Body, "hi from the agent") {
 		t.Errorf("recorded body = %q, want the chat request body", recs[2].Body)
+	}
+}
+
+// TestPlainHTTPTwinServesAndRecords: the plain-HTTP app (#376) serves the same
+// recorder-backed mux as the TLS app — the shape a transparent :80 upstream hop
+// reaches. Host and headers must land in the recorder identically.
+func TestPlainHTTPTwinServesAndRecords(t *testing.T) {
+	s := startTestStack(t)
+
+	req, err := http.NewRequest(http.MethodGet, "http://"+s.plainAddr+"/echo", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = "api.example.test"
+	req.Header.Set("Authorization", "Bearer CANARY-e2e-0123456789abcdef")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("plain GET /echo: %v", err)
+	}
+	var echo struct {
+		Host   string `json:"host"`
+		Path   string `json:"path"`
+		Proto  string `json:"proto"`
+		Header map[string][]string
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&echo); err != nil {
+		t.Fatalf("decode plain /echo: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || echo.Host != "api.example.test" || echo.Path != "/echo" {
+		t.Fatalf("plain /echo = %d %+v, want 200 from api.example.test", resp.StatusCode, echo)
+	}
+
+	recs := s.recorded(t)
+	if len(recs) != 1 || recs[0].Host != "api.example.test" || recs[0].Path != "/echo" {
+		t.Fatalf("records = %+v, want one api.example.test /echo", recs)
+	}
+	if got := recs[0].Header.Get("Authorization"); got != "Bearer CANARY-e2e-0123456789abcdef" {
+		t.Errorf("recorded Authorization = %q, want the canary", got)
 	}
 }
 

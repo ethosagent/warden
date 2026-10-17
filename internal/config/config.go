@@ -133,6 +133,12 @@ type Policy struct {
 	// a worker's SSRF guard off remotely), exactly like the listen/CA paths.
 	// Zero value = no exceptions (default-deny blocklist unchanged).
 	Upstream UpstreamConfig `json:"-"`
+	// Proxy configures the interception mode (#376): the explicit CONNECT
+	// forward proxy (the default, unchanged), transparent interception on
+	// dedicated listeners, or both. Boot-time LOCAL config consumed at worker
+	// assembly like the listen addresses — json:"-" keeps it off the CP wire,
+	// so a control plane can never change how a worker is reachable.
+	Proxy ProxyConfig `json:"-"`
 }
 
 // DeepCopy returns a deep copy of the policy, with all slices independently
@@ -303,6 +309,7 @@ type rawConfig struct {
 	Explore       *rawExplore       `yaml:"explore"`
 	DNS           *rawDNS           `yaml:"dns"`
 	Upstream      *rawUpstream      `yaml:"upstream"`
+	Proxy         *rawProxy         `yaml:"proxy"`
 }
 
 // defaultCacheTTLSeconds is used when the config omits cache.ttl.
@@ -420,6 +427,7 @@ func parse(data []byte) (*LocalYAMLProvider, error) {
 	policy.Explore = parseExplore(raw.Explore)
 	policy.DNS = parseDNS(raw.DNS)
 	policy.Upstream = parseUpstream(raw.Upstream)
+	policy.Proxy = parseProxy(raw.Proxy)
 
 	if err := validate(policy); err != nil {
 		return nil, err
@@ -647,6 +655,9 @@ func validate(p Policy) error {
 		return err
 	}
 	if err := validateUpstream(p.Upstream); err != nil {
+		return err
+	}
+	if err := validateProxyMode(p.Proxy); err != nil {
 		return err
 	}
 	return nil

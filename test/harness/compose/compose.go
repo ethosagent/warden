@@ -32,8 +32,10 @@ const (
 	SvcCP       = "control-plane"
 	SvcWorker1  = "worker-1"
 	SvcWorker2  = "worker-2"
+	SvcWorker3  = "worker-3"
 	SvcAgent1   = "agent-1"
 	SvcAgent2   = "agent-2"
+	SvcAgent3   = "agent-3"
 	SvcUpstream = "fakeupstream"
 
 	// Host-published endpoints (all 127.0.0.1) and API paths. The *HostPort
@@ -47,8 +49,10 @@ const (
 	TrafficPath      = "/dashboard/api/traffic" // worker admin and CP fleet view
 	WorkerAdminHost1 = "127.0.0.1:9091"
 	WorkerAdminHost2 = "127.0.0.1:9092"
+	WorkerAdminHost3 = "127.0.0.1:9093"
 	WorkerAdmin1     = "http://" + WorkerAdminHost1
 	WorkerAdmin2     = "http://" + WorkerAdminHost2
+	WorkerAdmin3     = "http://" + WorkerAdminHost3
 	RecorderHealth   = "/_health"
 
 	// The workers' proxy and admin ports INSIDE the compose network (the proxy
@@ -61,6 +65,7 @@ const (
 	NetW1 = Project + "_w1-internal"
 	NetW2 = Project + "_w2-internal"
 	NetCP = Project + "_cp-net"
+	NetT  = Project + "_t-net" // the #376 transparent interception network
 
 	// The deployment's secret wiring (configs/config.e2e-worker.yaml): the
 	// FIXED canary the workers hold and swap, the placeholder the agents hold.
@@ -113,7 +118,7 @@ func ComposeArgs(args ...string) []string {
 }
 
 // AllServices is every service whose logs are scanned for the canary.
-var AllServices = []string{SvcCP, SvcWorker1, SvcWorker2, SvcAgent1, SvcAgent2, SvcUpstream}
+var AllServices = []string{SvcCP, SvcWorker1, SvcWorker2, SvcWorker3, SvcAgent1, SvcAgent2, SvcAgent3, SvcUpstream}
 
 // FleetPaths are the control plane's fleet-API reads, all scanned for the canary.
 var FleetPaths = []string{
@@ -130,6 +135,8 @@ func WorkerAdminBase(worker string) (string, bool) {
 		return WorkerAdmin1, true
 	case SvcWorker2:
 		return WorkerAdmin2, true
+	case SvcWorker3:
+		return WorkerAdmin3, true
 	}
 	return "", false
 }

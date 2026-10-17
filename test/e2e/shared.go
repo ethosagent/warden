@@ -37,13 +37,16 @@ const (
 	svcCP       = compose.SvcCP
 	svcWorker1  = compose.SvcWorker1
 	svcWorker2  = compose.SvcWorker2
+	svcWorker3  = compose.SvcWorker3
 	svcAgent1   = compose.SvcAgent1
 	svcAgent2   = compose.SvcAgent2
+	svcAgent3   = compose.SvcAgent3
 	svcUpstream = compose.SvcUpstream
 
 	netW1 = compose.NetW1
 	netW2 = compose.NetW2
 	netCP = compose.NetCP
+	netT  = compose.NetT
 
 	// Scenario constants shared with configs/config.e2e-*.yaml.
 	canary      = compose.Canary
@@ -60,6 +63,7 @@ var (
 	workerAdmin = map[string]string{
 		compose.SvcWorker1: compose.WorkerAdmin1,
 		compose.SvcWorker2: compose.WorkerAdmin2,
+		compose.SvcWorker3: compose.WorkerAdmin3,
 	}
 )
 

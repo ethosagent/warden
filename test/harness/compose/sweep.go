@@ -31,7 +31,7 @@ func AssertCanaryNeverLeaked(tb testing.TB, agentOutputs ...string) {
 	for i, out := range agentOutputs {
 		check(fmt.Sprintf("agent output #%d", i+1), out)
 	}
-	for _, agent := range []string{SvcAgent1, SvcAgent2} {
+	for _, agent := range []string{SvcAgent1, SvcAgent2, SvcAgent3} {
 		res, err := AgentRunRaw(agent, "env")
 		if err != nil || res.Exit != 0 {
 			tb.Fatalf("compose: env in %s: %v (exit %d)", agent, err, res.Exit)
@@ -45,7 +45,7 @@ func AssertCanaryNeverLeaked(tb testing.TB, agentOutputs ...string) {
 		}
 		check("logs of "+svc, logs)
 	}
-	for _, w := range []string{SvcWorker1, SvcWorker2} {
+	for _, w := range []string{SvcWorker1, SvcWorker2, SvcWorker3} {
 		body, err := WorkerTrafficBody(w)
 		if err != nil {
 			tb.Fatalf("compose: %v", err)

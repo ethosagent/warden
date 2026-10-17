@@ -64,6 +64,10 @@ type invRow struct {
 	wantSwap bool
 	// wantNoUpstream requires that the upstream never saw the request.
 	wantNoUpstream bool
+	// wantNoTLSUpstream requires that the TLS upstream seam was never dialled —
+	// a plain-HTTP session (:80) dials the plain seam only, so this pins the
+	// dialUpstream scheme switch (a flipped switch TLS-dials and fails here).
+	wantNoTLSUpstream bool
 	// wantDenyEvent requires a deny event to have been recorded; agentMustNot and
 	// upstreamMustNot name payloads that must never reach the agent / the
 	// upstream's WebSocket (so a deny that is recorded but not enforced fails).
@@ -93,6 +97,40 @@ func judgeOpts() invOpts {
 }
 
 func mcpOpts() invOpts { return invOpts{mcp: true} }
+
+// transOpts turns any knob set into a transparent-mode env (#376). The
+// default allowlist entry is port-less: one entry must cover BOTH transparent
+// evaluations (443/https and 80/http), exactly as the config guidance for
+// transparent mode prescribes.
+func transOpts(o invOpts) invOpts {
+	o.transparent = true
+	if o.allow == nil {
+		o.allow = []config.AllowlistEntry{{Domain: invHost}}
+	}
+	return o
+}
+
+// h1t drives r over a transparent :443 connection (SNI = destination, no
+// CONNECT); plainT drives r as plain HTTP at the transparent :80 listener.
+func h1t(r invReq) func(*invEnv) (string, []string) {
+	return func(e *invEnv) (string, []string) {
+		view, _, err := e.doTransparentH1(r)
+		if err != nil && view == "" {
+			view = err.Error()
+		}
+		return view, nil
+	}
+}
+
+func plainT(r invReq) func(*invEnv) (string, []string) {
+	return func(e *invEnv) (string, []string) {
+		view, _, err := e.doTransparentPlain(r)
+		if err != nil && view == "" {
+			view = err.Error()
+		}
+		return view, nil
+	}
+}
 
 // invBearer is the header every swap row sends: the agent's placeholder.
 func invBearer() http.Header {
@@ -191,6 +229,42 @@ func invRows() []invRow {
 			run: h1(invReq{path: "/abort", header: invBearer()})},
 		invRow{name: "http1/timeout", path: PathHTTP1, scenario: scTimeout, wantSwap: true,
 			run: h1(shortTimeout(invReq{path: "/hang", header: invBearer()}))},
+	)
+
+	// ---- transparent-tls (#376) ---------------------------------------------
+	// Same pipeline as http1, entered by SNI instead of CONNECT: the rows prove
+	// decision, swap and upstream behavior do not depend on how the conn arrived.
+	add(
+		invRow{name: "transparent-tls/allow", path: PathTransparentTLS, scenario: scAllow,
+			opts: transOpts(invOpts{}), mustReach: true, wantSwap: true,
+			run: h1t(invReq{path: "/ok", header: invBearer()})},
+		invRow{name: "transparent-tls/deny", path: PathTransparentTLS, scenario: scDeny,
+			opts: transOpts(judgeOpts()), mustReach: true, wantNoUpstream: true,
+			run: h1t(invReq{host: invJudgedHost, path: "/ok", header: invBearer()})},
+		invRow{name: "transparent-tls/upstream-error", path: PathTransparentTLS, scenario: scUpstreamErr,
+			opts: transOpts(invOpts{}), mustReach: true, wantSwap: true,
+			run: h1t(invReq{path: "/abort", header: invBearer()})},
+		invRow{name: "transparent-tls/timeout", path: PathTransparentTLS, scenario: scTimeout,
+			opts: transOpts(invOpts{}), mustReach: true, wantSwap: true,
+			run: h1t(shortTimeout(invReq{path: "/hang", header: invBearer()}))},
+	)
+
+	// ---- transparent-http (#376) --------------------------------------------
+	// Plain HTTP at the transparent :80 listener: gated on the Host header, then
+	// the same pipeline over an http-scheme upstream.
+	add(
+		invRow{name: "transparent-http/allow", path: PathTransparentHTTP, scenario: scAllow,
+			opts: transOpts(invOpts{}), mustReach: true, wantSwap: true, wantNoTLSUpstream: true,
+			run: plainT(invReq{path: "/ok", header: invBearer()})},
+		invRow{name: "transparent-http/deny", path: PathTransparentHTTP, scenario: scDeny,
+			opts: transOpts(judgeOpts()), mustReach: true, wantNoUpstream: true, wantNoTLSUpstream: true,
+			run: plainT(invReq{host: invJudgedHost, path: "/ok", header: invBearer()})},
+		invRow{name: "transparent-http/upstream-error", path: PathTransparentHTTP, scenario: scUpstreamErr,
+			opts: transOpts(invOpts{}), mustReach: true, wantSwap: true, wantNoTLSUpstream: true,
+			run: plainT(invReq{path: "/abort", header: invBearer()})},
+		invRow{name: "transparent-http/timeout", path: PathTransparentHTTP, scenario: scTimeout,
+			opts: transOpts(invOpts{}), mustReach: true, wantSwap: true, wantNoTLSUpstream: true,
+			run: plainT(shortTimeout(invReq{path: "/hang", header: invBearer()}))},
 	)
 
 	// ---- h2 -----------------------------------------------------------------
@@ -444,6 +518,9 @@ func invViolations(e *invEnv, row invRow) []string {
 	}
 	if row.wantNoUpstream && len(e.backend.requests()) > 0 {
 		violations = append(violations, "denied request reached the upstream")
+	}
+	if row.wantNoTLSUpstream && e.tlsUpstreams.Load() > 0 {
+		violations = append(violations, "plain-HTTP session dialled the TLS upstream")
 	}
 	return violations
 }

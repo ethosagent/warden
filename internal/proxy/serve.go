@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ethosagent/warden/internal/analytics"
+	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/denyreason"
 	"github.com/ethosagent/warden/internal/policy"
 )
@@ -34,38 +35,126 @@ const (
 )
 
 func (p *Proxy) Serve(ctx context.Context) error {
-	// An injected Listener (assembly-only harness seam) replaces the ListenAddr
-	// bind; nil keeps the production bind exactly as before. Either way the
-	// ctx-done goroutine below owns closing it.
-	ln := p.cfg.Listener
-	if ln == nil {
-		var err error
-		ln, err = net.Listen("tcp", p.cfg.ListenAddr)
-		if err != nil {
-			return fmt.Errorf("proxy: listen: %w", err)
+	// served is one listener plus the handler its connections go to.
+	type served struct {
+		ln     net.Listener
+		handle func(net.Conn)
+		name   string
+	}
+	var listeners []served
+	// closeAll releases every listener on a late bind failure, so a boot that
+	// fails mid-way leaves no socket behind.
+	closeAll := func() {
+		for _, l := range listeners {
+			_ = l.ln.Close()
 		}
 	}
-	p.listenerMu.Lock()
-	p.listener = ln
-	p.listenerMu.Unlock()
 
-	go func() {
-		<-ctx.Done()
-		_ = ln.Close()
-	}()
-
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			select {
-			case <-ctx.Done():
-				return nil
-			default:
-				return fmt.Errorf("proxy: accept: %w", err)
+	// The CONNECT listener binds in forward and both mode — byte-identical to
+	// before #376 (same bind, same seam precedence, same ctx-done close). In
+	// transparent-only mode it must NOT exist: the agent-facing proxy port is
+	// the point of the mode.
+	if p.cfg.Mode != config.ProxyModeTransparent {
+		ln := p.cfg.Listener
+		if ln == nil {
+			var err error
+			ln, err = net.Listen("tcp", p.cfg.ListenAddr)
+			if err != nil {
+				return fmt.Errorf("proxy: listen: %w", err)
 			}
 		}
-		go p.handleConn(conn)
+		p.listenerMu.Lock()
+		p.listener = ln
+		p.listenerMu.Unlock()
+		listeners = append(listeners, served{ln: ln, handle: p.handleConn, name: "listen"})
 	}
+
+	// The transparent listeners (#376) bind only in transparent/both mode.
+	// Either listener may come from the assembly seam instead of a bind.
+	if p.cfg.Mode == config.ProxyModeTransparent || p.cfg.Mode == config.ProxyModeBoth {
+		tlsLn := p.cfg.TransparentHTTPSListener
+		if tlsLn == nil {
+			var err error
+			tlsLn, err = net.Listen("tcp", p.cfg.TransparentHTTPSListen)
+			if err != nil {
+				closeAll()
+				return fmt.Errorf("proxy: transparent https listen: %w", err)
+			}
+		}
+		listeners = append(listeners, served{ln: tlsLn, handle: p.handleTransparentTLS, name: "transparent_https"})
+		httpLn := p.cfg.TransparentHTTPListener
+		if httpLn == nil && p.cfg.TransparentHTTPListen != "" {
+			var err error
+			httpLn, err = net.Listen("tcp", p.cfg.TransparentHTTPListen)
+			if err != nil {
+				closeAll()
+				return fmt.Errorf("proxy: transparent http listen: %w", err)
+			}
+		}
+		if httpLn != nil {
+			listeners = append(listeners, served{ln: httpLn, handle: p.handleTransparentHTTP, name: "transparent_http"})
+		}
+		p.setTransparentAddrs(tlsLn.Addr(), httpAddr(httpLn))
+		// Loop guard (#376): the guard set must be installed before the first
+		// connection is served, so no upstream dial can pre-date it.
+		p.installLoopGuard()
+		if p.cfg.OnTransparentReady != nil {
+			p.cfg.OnTransparentReady(tlsLn.Addr().String(), listenerAddrString(httpLn))
+		}
+	}
+
+	// ctx done closes every listener — injected and self-bound alike.
+	done := make(chan struct{})
+	go func() {
+		<-ctx.Done()
+		closeAll()
+		close(done)
+	}()
+
+	// One accept loop per listener; the first failure that is not the ctx-done
+	// close ends Serve with it.
+	errCh := make(chan error, len(listeners))
+	for _, l := range listeners {
+		go func(l served) {
+			for {
+				conn, err := l.ln.Accept()
+				if err != nil {
+					select {
+					case <-ctx.Done():
+						errCh <- nil
+					default:
+						errCh <- fmt.Errorf("proxy: accept (%s): %w", l.name, err)
+					}
+					return
+				}
+				go l.handle(conn)
+			}
+		}(l)
+	}
+	select {
+	case <-done:
+		return nil
+	case err := <-errCh:
+		return err
+	}
+}
+
+// httpAddr is nil-safe so setTransparentAddrs can record "plain HTTP not
+// served" as a nil address.
+func httpAddr(ln net.Listener) net.Addr {
+	if ln == nil {
+		return nil
+	}
+	return ln.Addr()
+}
+
+// listenerAddrString formats a listener's bound address, "" when there is none
+// (the plain-HTTP listener may be absent) — the OnTransparentReady shape.
+func listenerAddrString(ln net.Listener) string {
+	if ln == nil {
+		return ""
+	}
+	return ln.Addr().String()
 }
 
 // errLineTooLong reports a preamble line that crossed its byte cap before the

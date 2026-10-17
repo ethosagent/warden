@@ -323,6 +323,16 @@ verify the fake upstream via `SSL_CERT_FILE` pointing at the fake-CA + system
 bundle `test/e2e/certs/gen.sh` builds; no extra config key. `make e2e` /
 `make e2e-scenario` run the suite described above.
 
+**Transparent leg (#376):** `worker-3` + `agent-3` on the internal `t-net`
+(`10.201.0.0/24`) prove interception without any proxy configuration — agent-3
+holds no proxy env; its host entries (the stand-in for the network DNS in the
+[operator recipe](transparent-interception.md)) point the fake hosts at
+worker-3's pinned address, and worker-3 (`configs/config.e2e-worker-transparent.yaml`,
+mode `both`, `:443`/`:80`) runs the same pipeline. `self.example.test` is
+allowlisted and host-entered at worker-3's own address on purpose: the loop
+guard must refuse the re-entrant dial (`transparent_loop_guard`) even though
+t-net is exempted from the SSRF private-IP blocklist.
+
 No root anywhere: the warden services run as the image's non-root `warden`
 user, the fake upstream runs as its own non-root user (it binds 443 and 53 via
 the per-container `net.ipv4.ip_unprivileged_port_start=0` sysctl — no

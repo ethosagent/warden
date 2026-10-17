@@ -665,6 +665,10 @@ func main() {
 	certPath := os.Getenv("FAKEUPSTREAM_CERT")
 	keyPath := os.Getenv("FAKEUPSTREAM_KEY")
 	tlsAddr := envDefault("FAKEUPSTREAM_TLS_ADDR", ":443")
+	// Plain HTTP twin of the app (#376): the transparent :80 path's upstream
+	// hop is http-scheme, so the outside world must answer plain HTTP too.
+	// Set FAKEUPSTREAM_HTTP_ADDR="" to serve TLS-only.
+	httpAddr := envDefault("FAKEUPSTREAM_HTTP_ADDR", ":80")
 	controlAddr := envDefault("FAKEUPSTREAM_CONTROL_ADDR", ":8081")
 	dnsAddr := envDefault("FAKEUPSTREAM_DNS_ADDR", ":53")
 	ip := envDefault("FAKEUPSTREAM_IP", "10.200.0.10")
@@ -695,6 +699,21 @@ func main() {
 			log.Fatalf("fakeupstream: tls: %v", err)
 		}
 	}()
+
+	if httpAddr != "" {
+		plainSrv := &http.Server{
+			Addr:         httpAddr,
+			Handler:      newApp(rec),
+			ReadTimeout:  30 * time.Second,
+			WriteTimeout: 30 * time.Second,
+		}
+		go func() {
+			log.Printf("fakeupstream: plain app on %s (same mux as the TLS app)", httpAddr)
+			if err := plainSrv.ListenAndServe(); err != nil {
+				log.Fatalf("fakeupstream: plain http: %v", err)
+			}
+		}()
+	}
 
 	controlSrv := &http.Server{
 		Addr:         controlAddr,

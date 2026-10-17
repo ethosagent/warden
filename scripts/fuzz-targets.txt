@@ -7,3 +7,4 @@ FuzzMCPMessage     ./internal/mcp
 FuzzPolicyMatch    ./internal/policy
 FuzzConfigLoad     ./internal/config
 FuzzGRPCFrames     ./internal/proxy
+FuzzSniffClientHello ./internal/proxy
