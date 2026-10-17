@@ -75,6 +75,13 @@ func (p *Proxy) emitDeny(s *requestScope, reason denyreason.Reason, extra ...den
 // proxy test fakes go further and fail the run on one (test/fakes
 // EnforceDenyReason).
 func (p *Proxy) emitDenyEvent(ev analytics.Event) {
+	p.emitDenyEventDetail(ev, "")
+}
+
+// emitDenyEventDetail is emitDenyEvent plus a bounded detail for the decision
+// log (e.g. the CONNECT preamble limit that tripped). The detail is never
+// stored on the event and never carries request content.
+func (p *Proxy) emitDenyEventDetail(ev analytics.Event, detail string) {
 	if ev.Reason == "" {
 		p.cfg.Logger.Error("deny event without a reason; recording the declared unspecified fallback — route the deny through emitDeny/emitDenyEvent with a declared reason",
 			slog.String("domain", ev.Domain),
@@ -91,7 +98,7 @@ func (p *Proxy) emitDenyEvent(ev analytics.Event) {
 		Domain: ev.Domain, Port: ev.Port, Protocol: ev.Protocol,
 		Method: ev.Method, URL: ev.URL, Decision: "deny",
 		ResponseStatus: ev.ResponseStatus, SecretRef: ev.SecretRef,
-		JudgeReason: ev.JudgeReason, Reason: ev.Reason,
+		JudgeReason: ev.JudgeReason, Reason: ev.Reason, Detail: detail,
 	})
 }
 

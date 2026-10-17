@@ -23,8 +23,11 @@ type decisionLog struct {
 	// Reason is the bounded decision reason from the ONE declared set
 	// (internal/denyreason, rule X6 in #349): policy_no_match, the #371
 	// constraint reasons, the edge/echo/MCP reasons, … A closed enum — metadata,
-	// never content. Every deny carries it (#409).
+	// never content. Every deny carries it (#409). Detail, when non-empty, is a
+	// bounded refinement of the reason (e.g. "request_line_too_long"); it never
+	// carries request content.
 	Reason string
+	Detail string
 }
 
 // logDecision emits one structured record next to the analytics StoreEvent.
@@ -54,6 +57,9 @@ func (p *Proxy) logDecision(d decisionLog) {
 	}
 	if d.Reason != "" {
 		attrs = append(attrs, slog.String("reason", d.Reason))
+	}
+	if d.Detail != "" {
+		attrs = append(attrs, slog.String("detail", d.Detail))
 	}
 	if d.Decision == "deny" {
 		p.cfg.Logger.Warn("egress decision", attrs...)

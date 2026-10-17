@@ -3,6 +3,7 @@ package proxy
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -13,6 +14,23 @@ import (
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/denyreason"
 	"github.com/ethosagent/warden/internal/policy"
+)
+
+// CONNECT preamble limits. An agent controls every byte it sends to the proxy
+// port, so the request line and the whole header block are bounded before they
+// are parsed (#390, found by the red-team playbook dry run #356). They are
+// constants on purpose — the same order common proxies use — not config keys:
+// a knob would let a misconfiguration weaken the floor.
+const (
+	// maxConnectLineBytes caps the CONNECT request line, CRLF included.
+	maxConnectLineBytes = 8 << 10 // 8 KiB
+	// maxConnectHeaderBytes caps the whole preamble: the request line, every
+	// header line, and the terminating blank line.
+	maxConnectHeaderBytes = 64 << 10 // 64 KiB
+	// connectPreambleTimeout is how long a client may take to deliver the whole
+	// preamble. A slowloris agent dribbling one byte per minute must not hold a
+	// handleConn goroutine forever.
+	connectPreambleTimeout = 10 * time.Second
 )
 
 func (p *Proxy) Serve(ctx context.Context) error {
@@ -43,14 +61,70 @@ func (p *Proxy) Serve(ctx context.Context) error {
 	}
 }
 
+// errLineTooLong reports a preamble line that crossed its byte cap before the
+// terminating newline arrived (see readBoundedLine).
+var errLineTooLong = errors.New("proxy: connect preamble line too long")
+
+// Preamble rejections, answered before the drain-and-close. Connection: close
+// announces that nothing follows the response, and Content-Length: 0 delimits
+// it exactly, so a client never waits on a body of unknown length.
+const (
+	// connectLineTooLongResponse is the 414 for a request line past
+	// maxConnectLineBytes.
+	connectLineTooLongResponse = "HTTP/1.1 414 URI Too Long\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+	// connectHeadersTooLargeResponse is the 431 for a preamble past
+	// maxConnectHeaderBytes.
+	connectHeadersTooLargeResponse = "HTTP/1.1 431 Request Header Fields Too Large\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+)
+
+// readBoundedLine reads one '\n'-terminated line from br — newline included,
+// the same shape bufio.Reader.ReadString returns. Unlike ReadString it refuses
+// (with errLineTooLong, without reading or buffering a single byte past limit)
+// any longer line, so a multi-megabyte request line can never reach memory
+// whole. The accumulated line itself never occupies more than limit bytes.
+func readBoundedLine(br *bufio.Reader, limit int) (string, error) {
+	var line []byte
+	for {
+		chunk, err := br.ReadSlice('\n')
+		if len(line)+len(chunk) > limit {
+			return "", errLineTooLong
+		}
+		line = append(line, chunk...)
+		if err == nil {
+			return string(line), nil
+		}
+		if err != bufio.ErrBufferFull {
+			return "", err
+		}
+	}
+}
+
 func (p *Proxy) handleConn(conn net.Conn) {
 	defer func() { _ = conn.Close() }()
 
 	br := bufio.NewReader(conn)
-	line, err := br.ReadString('\n')
+
+	// Slowloris floor: the whole preamble (line + headers) must arrive within
+	// one deadline; a client still dribbling bytes past it is dropped silently
+	// (nothing was gated). The deadline is lifted below once the preamble
+	// completes, so it never bounds the tunnel/TLS traffic that follows.
+	preambleTimeout := p.preambleTimeout
+	if preambleTimeout <= 0 {
+		preambleTimeout = connectPreambleTimeout
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(preambleTimeout)); err != nil {
+		return
+	}
+
+	line, err := readBoundedLine(br, maxConnectLineBytes)
 	if err != nil {
-		// The client closed (or errored) before sending a request line — no egress
-		// was attempted, so there is nothing to gate or audit. Drop silently.
+		if errors.Is(err, errLineTooLong) {
+			p.rejectPreamble(conn, br, connectLineTooLongResponse, "request_line_too_long")
+			return
+		}
+		// The client closed (or errored/timed out) before sending a request line —
+		// no egress was attempted, so there is nothing to gate or audit. Drop
+		// silently.
 		return
 	}
 
@@ -62,31 +136,46 @@ func (p *Proxy) handleConn(conn net.Conn) {
 	// HTTP"). No domain is known at this pre-protocol stage, so the deny is
 	// recorded without one.
 	if !strings.HasPrefix(line, "CONNECT ") || !strings.Contains(line, "HTTP/") {
-		p.storeDeny("", 0, "tcp", denyreason.UnsupportedProtocol)
+		p.storeDeny("", 0, "tcp", denyreason.UnsupportedProtocol, "")
 		return
 	}
 
 	fields := strings.Fields(line)
 	if len(fields) < 2 {
-		p.storeDeny("", 0, "tcp", denyreason.MalformedConnect)
+		p.storeDeny("", 0, "tcp", denyreason.MalformedConnect, "")
 		return
 	}
 	target := fields[1]
 
 	domain, port, err := SplitHostPort(target)
 	if err != nil {
-		p.storeDeny("", 0, "tcp", denyreason.MalformedConnect)
+		p.storeDeny("", 0, "tcp", denyreason.MalformedConnect, "")
 		return
 	}
 
+	// Bounded header block: line + every header line + the terminating blank
+	// line must fit maxConnectHeaderBytes. Each line is capped at what is left
+	// of the budget, so one huge header trips the same 431 as many small ones.
+	total := len(line)
 	for {
-		hdr, err := br.ReadString('\n')
+		hdr, err := readBoundedLine(br, maxConnectHeaderBytes-total)
 		if err != nil {
+			if errors.Is(err, errLineTooLong) {
+				p.rejectPreamble(conn, br, connectHeadersTooLargeResponse, "headers_too_large")
+				return
+			}
 			return
 		}
+		total += len(hdr)
 		if hdr == "\r\n" || hdr == "\n" {
 			break
 		}
+	}
+	// Preamble complete — lift the deadline so it cannot cut off the tunnel or
+	// the TLS handshake, either of which may idle far longer than the preamble
+	// budget.
+	if err := conn.SetReadDeadline(time.Time{}); err != nil {
+		return
 	}
 
 	// Destination-only evaluation (#371): no method/path exists yet at CONNECT,
@@ -156,19 +245,35 @@ func (p *Proxy) handleConn(conn net.Conn) {
 	p.tunnel(conn, br, net.JoinHostPort(domain, fmt.Sprintf("%d", port)))
 }
 
+// rejectPreamble answers an over-limit CONNECT preamble with an HTTP error and
+// records exactly ONE deny decision — bounded reason plus detail, never the
+// oversized bytes themselves — then drops the connection. Before dropping, the
+// rest of the request is drained to the bit bucket, bounded by the preamble
+// deadline and io.Copy's fixed buffer (never accumulated): the client is still
+// mid-send when the limit trips, and closing on it unread would reset the
+// connection before it can read the rejection. This is the standard error
+// close (nginx/HAProxy lingering close).
+func (p *Proxy) rejectPreamble(conn net.Conn, br *bufio.Reader, resp, detail string) {
+	p.storeDeny("", 0, "tcp", denyreason.MalformedConnect, detail)
+	_, _ = fmt.Fprint(conn, resp)
+	_, _ = io.Copy(io.Discard, br)
+}
+
 // storeDeny records a pre-tunnel CONNECT-floor deny (headers/metadata only —
 // never bodies; there is no requestScope yet, so it builds the event directly
-// and hands it to the shared emitDenyEvent chokepoint). The reason is from the
-// one declared set (internal/denyreason) and rides BOTH the event and the
-// warden.blocked.total{reason} metric.
-func (p *Proxy) storeDeny(domain string, port int, protocol string, reason denyreason.Reason) {
-	p.emitDenyEvent(analytics.Event{
+// and hands it to the shared deny chokepoint). The reason is from the one
+// declared set (internal/denyreason) and rides BOTH the event and the
+// warden.blocked.total{reason} metric. detail, when non-empty, is a bounded
+// refinement of the reason (e.g. "request_line_too_long") for the decision log
+// only; it never carries request content.
+func (p *Proxy) storeDeny(domain string, port int, protocol string, reason denyreason.Reason, detail string) {
+	p.emitDenyEventDetail(analytics.Event{
 		Timestamp: time.Now(),
 		Domain:    domain,
 		Port:      port,
 		Protocol:  protocol,
 		Reason:    string(reason),
-	})
+	}, detail)
 }
 
 func (p *Proxy) tunnel(client net.Conn, br *bufio.Reader, targetAddr string) {
