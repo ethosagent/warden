@@ -30,7 +30,7 @@ services:
     image: ethosagent/warden:${WARDEN_VERSION:-0.3.0}
     networks: [cp-net]
     ports:
-      - "7070:7070"
+      - "127.0.0.1:7070:7070"
     environment:
       - WARDEN_CP_TOKEN=${WARDEN_CP_TOKEN:-dev-token}
     volumes:
@@ -56,7 +56,7 @@ services:
     depends_on: [control-plane]
     networks: [cp-net, egress, w1-internal]
     ports:
-      - "9091:9090"
+      - "127.0.0.1:9091:9090"
     environment:
       - WARDEN_CP_TOKEN=${WARDEN_CP_TOKEN:-dev-token}
       - WARDEN_PROXY_ID=worker-1
@@ -81,7 +81,7 @@ services:
     depends_on: [control-plane]
     networks: [cp-net, egress, w2-internal]
     ports:
-      - "9092:9090"
+      - "127.0.0.1:9092:9090"
     environment:
       - WARDEN_CP_TOKEN=${WARDEN_CP_TOKEN:-dev-token}
       - WARDEN_PROXY_ID=worker-2

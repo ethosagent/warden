@@ -53,9 +53,13 @@ type requestScope struct {
 	rt    http.RoundTripper
 	proto string
 	// streamBody marks a gRPC request: its (protobuf, possibly unbounded
-	// bidirectional-stream) body is never buffered or swapped — it is relayed
-	// verbatim, and DLP records it as partial like any non-text body.
+	// bidirectional-stream) body is never buffered whole or swapped — it is
+	// relayed verbatim message by message (inspected by grpcGuard), and DLP
+	// records it as partial like any non-text body.
 	streamBody bool
+	// grpcGuard inspects a gRPC request body frame by frame (nil when no
+	// placeholder is in scope for the destination, or for non-gRPC requests).
+	grpcGuard *grpcFrameGuard
 
 	// Per-request atomic-pointer snapshots, taken ONCE at the top of the request
 	// so a concurrent control-plane swap can't change them mid-request.
@@ -1256,6 +1260,11 @@ func (p *Proxy) finishResponse(s *requestScope) (endSession bool) {
 	if p.echoStreamDone(s) {
 		// The echo guard cut the stream and already recorded the deny: end the
 		// session (closing the conn) and record no allow.
+		return true
+	}
+	if s.grpcGuard.Refused() {
+		// A gRPC frame was refused after the response began: its deny is the only
+		// event, and the client leg is finished with the refusal status.
 		return true
 	}
 	p.recordAllowEvent(s)

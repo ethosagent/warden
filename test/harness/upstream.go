@@ -117,19 +117,27 @@ func (h *H) Upstream(host string) *Upstream {
 // ServeHTTP records the request, applies faults, then dispatches to a mounted
 // flavor handler (or the plain-200 default).
 func (u *Upstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	body, _ := io.ReadAll(io.LimitReader(r.Body, upstreamBodyLimit+1))
-	_ = r.Body.Close()
-	r.Body = io.NopCloser(bytes.NewReader(body))
-
+	// Record on HEADERS receipt, before the body is read: a request the worker
+	// aborts mid-body (a refused gRPC message, #418) still counts as having
+	// reached this upstream. The body is filled in once read, still before any
+	// response is written.
 	u.mu.Lock()
+	idx := len(u.reqs)
 	u.reqs = append(u.reqs, RecordedRequest{
 		Method: r.Method,
 		Host:   r.Host,
 		Path:   r.URL.Path,
 		Proto:  r.Proto,
 		Header: r.Header.Clone(),
-		Body:   body,
 	})
+	u.mu.Unlock()
+
+	body, _ := io.ReadAll(io.LimitReader(r.Body, upstreamBodyLimit+1))
+	_ = r.Body.Close()
+	r.Body = io.NopCloser(bytes.NewReader(body))
+
+	u.mu.Lock()
+	u.reqs[idx].Body = body
 	delay, fail, echo, parkGap := u.delay, u.fail, u.echo, u.parkGap
 	mux, next := u.mux, u.next
 	u.mu.Unlock()

@@ -55,6 +55,14 @@ type h2Sink struct{ w http.ResponseWriter }
 
 func (h h2Sink) errorResponse(status int, text string) { http.Error(h.w, text, status) }
 
+// grpcStatus answers with a trailers-only gRPC response (HTTP 200, the status in
+// the headers), the shape a gRPC client reads as a call that failed with r.
+func (h h2Sink) grpcStatus(r grpcRefusal) {
+	h.w.Header().Set("Content-Type", "application/grpc")
+	setGRPCStatus(h.w.Header(), "", r)
+	h.w.WriteHeader(http.StatusOK)
+}
+
 func (h h2Sink) flushing() *flushWriter {
 	fw := &flushWriter{w: h.w}
 	if f, ok := h.w.(http.Flusher); ok {

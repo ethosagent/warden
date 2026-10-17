@@ -277,7 +277,7 @@ poll with a deadline. The helpers (`agentExec`, `recorded`, `resetRecorded`,
 `events`, `logs`, `AssertCanaryNeverLeaked`) are reused by the later L2 suites.
 
 The fleet suite (`fleet_test.go`) changes policy through the route the dashboard
-uses (`PUT /dashboard/api/policy` on the control plane) and checks that both workers
+uses (`PUT /dashboard/api/policy` on the control plane, with the control-plane bearer token; an unauthenticated PUT is refused) and checks that both workers
 pick it up within one long-poll; that with the control plane stopped the workers keep
 the last policy and stay fail-closed (an allowed host works, a denied host and a host
 nobody allowed stay refused); that a restarted control plane resyncs the workers;
