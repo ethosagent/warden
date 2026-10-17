@@ -257,6 +257,45 @@ and WebSocket-upgrade requests alike:
 allowed host) and log a startup warning per placeholder. Add `matchHosts` to each
 secret; it is expected to become required in a future release.
 
+### gRPC: put credentials in metadata
+
+Warden swaps a placeholder in gRPC **metadata** (headers such as
+`authorization`), never inside a gRPC **message**. Rewriting a placeholder in a
+protobuf message without its schema is unsafe: a length-delimited field can be a
+string or a nested message, and changing a string's length means re-encoding
+every enclosing length. So a gRPC credential must ride metadata, and a
+placeholder found in a message body is refused visibly rather than silently
+reaching the upstream unswapped (#418).
+
+When a gRPC call is made to a host a placeholder is in scope for (`matchHosts`),
+Warden checks each length-prefixed message before forwarding it:
+
+- **Placeholder in a message** — the message is not forwarded. The call ends
+  with gRPC status `PERMISSION_DENIED` (7) and `grpc-message: secret
+  placeholders must be sent in gRPC metadata`, and a deny event with reason
+  `grpc_body_placeholder` is recorded. A call refused on its first message
+  reaches the upstream not at all (Warden holds the request back up to 250 ms for
+  it); on a client- or bidi-streaming call, messages before the offending one
+  were already forwarded and the stream then ends with the same status.
+- **Frame bound** — a message is buffered up to 4 MiB (`maxGRPCFrameBytes`, the
+  gRPC default message size) to be inspected. A larger one fails closed:
+  `RESOURCE_EXHAUSTED` (8), reason `grpc_frame_too_large`.
+- **Compressed messages** — a message with the compressed flag set cannot be
+  inspected and is refused: `FAILED_PRECONDITION` (9), reason
+  `grpc_frame_compressed`. Turn gRPC message compression off for calls through
+  Warden to hosts that hold a placeholder.
+- **Malformed framing** — a bad flag byte, or a stream that ends inside a
+  message: `INVALID_ARGUMENT` (3), reason `grpc_frame_malformed`.
+- **Streaming** — messages without a placeholder are forwarded as they arrive;
+  at most one message is held at a time.
+- **A placeholder split across two messages** is not detected (each message is an
+  independent value); both halves are relayed verbatim and unswapped, so no real
+  secret is ever built from them. A placeholder for a *different* host (out of
+  scope here) is not inspected for and passes untouched, as on HTTP/1.1.
+
+With no placeholder in scope for the destination, the body is streamed verbatim
+and none of the above applies.
+
 ### Upstream DNS resolver
 
 On networks where the resolver the container inherits cannot resolve public

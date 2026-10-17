@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethosagent/warden/internal/denyreason"
 	"github.com/ethosagent/warden/test/harness"
 )
 
@@ -27,11 +28,10 @@ import (
 // knownIssue" the day it does not (see expectKnown). A row is never skipped.
 // #388 (h2 request stages) and #389 (echo guard) are fixed: h2 bodies are
 // swapped and an echoing upstream's response is blocked (502) before the real
-// value reaches the agent.
-//
-//	#418  gRPC message bodies are streamed verbatim (metadata is swapped, the
-//	      message is not): the placeholder in a gRPC body reaches the upstream
-//	      unswapped. Fails safe; no real value moves.
+// value reaches the agent. gRPC credentials ride metadata (#418): the allow row
+// sends the placeholder there and the upstream sees the real value; the
+// canary_grpc_body_refused row puts the placeholder in the message, which the
+// worker refuses (grpc-status 7) without forwarding anything.
 
 // canaryValue is the planted secret of the matrix (the L1 wiring; a target
 // that wires its own secrets supersedes it, and the row bodies read the value
@@ -43,6 +43,7 @@ type canaryRow struct {
 	proto      string   // http1, h2, grpc, ws
 	deny       bool     // false: allowed destination; true: denied destination
 	echo       bool     // the allowed upstream reflects its request headers; the echo guard blocks it (#389)
+	bodyPH     bool     // grpc: the placeholder rides the message body, which the worker refuses (#418)
 	knownIssue []string // open issues this row is expected to still hit
 }
 
@@ -62,6 +63,9 @@ func (r canaryRow) host(h *harness.H) string {
 }
 
 func (r canaryRow) name() string {
+	if r.bodyPH {
+		return "canary_" + r.proto + "_body_refused"
+	}
 	path := "allow"
 	if r.deny {
 		path = "deny"
@@ -81,7 +85,8 @@ var canaryRows = []canaryRow{
 	{proto: "h2"},
 	{proto: "h2", deny: true},
 	{proto: "h2", echo: true},
-	{proto: "grpc", knownIssue: []string{"#418"}},
+	{proto: "grpc"},
+	{proto: "grpc", bodyPH: true},
 	{proto: "grpc", deny: true},
 	{proto: "ws"},
 	{proto: "ws", deny: true},
@@ -154,24 +159,35 @@ func (r canaryRow) run(t *testing.T, h *harness.H) {
 		bodySwapped = true // no body on this path: nothing to swap
 	}
 
-	if r.deny {
+	switch {
+	case r.deny:
 		if got := len(up.Requests()); got != 0 {
 			t.Fatalf("the denied upstream %s saw %d request(s), want 0", r.host(h), got)
 		}
-	} else if r.proto == "h2" || r.proto == "grpc" {
-		expectKnown(t, knownFor(r.knownIssue, "#418"), bodySwapped,
-			r.name()+": the request-body placeholder must be swapped on the HTTP/2 path")
+	case r.bodyPH:
+		if got := len(up.Requests()); got != 0 {
+			t.Fatalf("%s: the upstream saw %d request(s), want 0: a refused message must reach nobody", r.name(), got)
+		}
+		h.Eventually("the grpc_body_placeholder deny event", func() bool {
+			for _, e := range h.Events() {
+				if e.Decision == "deny" && e.Reason == string(denyreason.GRPCBodyPlaceholder) && e.Protocol == "grpc" {
+					return true
+				}
+			}
+			return false
+		})
+	case r.proto == "h2" || r.proto == "grpc":
+		expectKnown(t, knownFor(r.knownIssue, ""), bodySwapped,
+			r.name()+": the request body must reach the upstream swapped (h2) or intact (grpc, whose credentials ride metadata)")
 	}
 
 	r.assertLeaks(t, h)
 }
 
 // knownLeaks maps each open issue a row can hit to the oracle line it produces
-// (one hit per surface): #418 delivers a gRPC body's placeholder unswapped to
-// the upstream.
-var knownLeaks = map[string]string{
-	"#418": "appeared unswapped placeholder in upstream",
-}
+// (one hit per surface). None is open today; a row that sets knownIssue needs
+// its entry here.
+var knownLeaks = map[string]string{}
 
 // assertLeaks ends a row. A row with no knownIssue is the plain oracle. A row
 // with one asserts the leak set is EXACTLY the known one — each known issue
@@ -257,10 +273,16 @@ func (r canaryRow) doHTTP(t *testing.T, h *harness.H, cl *http.Client, up *harne
 }
 
 // doGRPC sends one framed unary call through the h2 agent with the placeholder
-// in the authorization metadata and in the message.
+// in the authorization metadata. The message is clean — gRPC credentials ride
+// metadata (#418) — except on the bodyPH row, where it carries the placeholder
+// and the worker must refuse it. It returns whether the upstream got the message
+// intact.
 func (r canaryRow) doGRPC(t *testing.T, h *harness.H, up *harness.Upstream, ph, sec string) (bodySwapped bool) {
 	t.Helper()
-	msg := []byte("token=" + ph)
+	msg := []byte("hello grpc")
+	if r.bodyPH {
+		msg = []byte("token=" + ph)
+	}
 	frame := make([]byte, 5+len(msg))
 	frame[1], frame[2], frame[3], frame[4] = byte(len(msg)>>24), byte(len(msg)>>16), byte(len(msg)>>8), byte(len(msg))
 	copy(frame[5:], msg)
@@ -287,11 +309,24 @@ func (r canaryRow) doGRPC(t *testing.T, h *harness.H, up *harness.Upstream, ph, 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("%s: status %d, want 200", r.name(), resp.StatusCode)
 	}
+	if r.bodyPH {
+		status := resp.Trailer.Get("Grpc-Status")
+		if status == "" {
+			status = resp.Header.Get("Grpc-Status")
+		}
+		if status != "7" {
+			t.Fatalf("%s: grpc-status = %q, want 7 (PERMISSION_DENIED)", r.name(), status)
+		}
+		if m := resp.Header.Get("Grpc-Message"); !strings.Contains(m, "secret placeholders must be sent in gRPC metadata") {
+			t.Fatalf("%s: grpc-message = %q", r.name(), m)
+		}
+		return false
+	}
 	got := lastRequest(t, up)
 	if v := got.Header.Get("Authorization"); v != "Bearer "+sec {
 		t.Errorf("%s: upstream authorization metadata = %q, want the real value", r.name(), v)
 	}
-	return bytes.Contains(got.Body, []byte("token="+sec))
+	return bytes.Equal(got.Body, frame)
 }
 
 // doWS opens a WebSocket through the worker's tunnel with the placeholder in a

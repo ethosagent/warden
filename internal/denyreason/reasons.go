@@ -57,6 +57,20 @@ const (
 	// RequestTrailersUnsupported: an HTTP/1.1 request declared trailers (#396).
 	RequestTrailersUnsupported Reason = "request_trailers_unsupported"
 
+	// GRPCBodyPlaceholder: a gRPC message frame carried a secret placeholder
+	// configured for the destination. Placeholders are swapped in metadata only;
+	// the frame is refused, never forwarded (#418).
+	GRPCBodyPlaceholder Reason = "grpc_body_placeholder"
+	// GRPCFrameTooLarge: a gRPC message frame declared a length over the
+	// inspection bound, so it cannot be checked and fails closed (#418).
+	GRPCFrameTooLarge Reason = "grpc_frame_too_large"
+	// GRPCFrameMalformed: the gRPC request body was not valid length-prefixed
+	// framing (bad flag byte, or the stream ended inside a frame) (#418).
+	GRPCFrameMalformed Reason = "grpc_frame_malformed"
+	// GRPCFrameCompressed: a gRPC message frame set the compressed flag, so its
+	// payload cannot be inspected and it fails closed (#418).
+	GRPCFrameCompressed Reason = "grpc_frame_compressed"
+
 	// SecretEcho: the response echoed a swapped secret value back toward the
 	// agent (#389).
 	SecretEcho Reason = "secret_echo"
@@ -130,6 +144,7 @@ var declared = []Reason{
 	PathNotCanonical, MethodNotAllowed, PathNotAllowed,
 	H2RequestTrailersUnsupported, H2ExtendedConnectUnsupported,
 	TransformNeedsBufferedBody, HostMismatch, RequestTrailersUnsupported,
+	GRPCBodyPlaceholder, GRPCFrameTooLarge, GRPCFrameMalformed, GRPCFrameCompressed,
 	SecretEcho, SecretEchoUnscannable,
 	SSRFBlocked, SSRFDeniedHostname,
 	UnsupportedProtocol, MalformedConnect, NoTLS,
