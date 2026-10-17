@@ -128,7 +128,7 @@ To put **your own** service behind Warden, copy the `ethos` service block: attac
 
 3. **TLS termination** — Warden presents a dynamically-generated certificate (signed by a CA the agent trusts), decrypts the traffic to plaintext, and verifies the domain.
 
-4. **Secret swap + forward** — Warden replaces placeholder tokens with real secrets in headers, query params, and body. It then forwards the request to the real destination with proper TLS. The real secret is injected at the edge and never returns to the agent.
+4. **Secret swap + forward** — Warden first checks the request's method and path against the allowlist entry's `methods`/`paths` constraints (every request of a keep-alive connection, before any swap), then replaces placeholder tokens with real secrets in headers, query params, and body. It then forwards the request to the real destination with proper TLS. The real secret is injected at the edge and never returns to the agent.
 
 5. **Response scan + log** — Warden scans the response for prompt-injection patterns and credential leakage, logs the decision (method, URL, status, secret-by-reference — never bodies or raw secrets), and returns the response to the agent.
 
@@ -146,10 +146,12 @@ To put **your own** service behind Warden, copy the `ethos` service block: attac
 ### Policy
 
 - **Domain matching** — exact, `*.wildcard`, `~regex` patterns
-- **Rate limiting** — per-rule fixed-window (`100/hour`, `10/minute`, `5/second`)
+- **Method + path constraints** — narrow an allowlist entry to specific HTTP methods (`methods`) and request paths (`paths`), enforced per request before any secret swap or upstream write (HTTP/1.1, HTTP/2/gRPC, and WebSocket upgrades alike)
+- **Rate limiting** — per-rule fixed-window (`100/hour`, `10/minute`, `5/second`); a rule's limit counts only requests that matched that rule's own constraints. **Behaviour change (#371):** limits used to be consumed once per CONNECT tunnel; they are now consumed **per request**. For a rule without `methods`/`paths`, N keep-alive requests over one tunnel now count N, not 1 — tighten the limit (or add constraints, which keep denied requests free) when migrating
 - **Time windows** — per-rule hour ranges (`9-17`)
 - **Port inference** — 443 for HTTPS, 80 for HTTP when omitted
-- **Any-match-wins evaluation** — a request matching multiple allowlist entries is allowed if any entry passes its constraints
+- **Any-match-wins evaluation** — a request matching multiple allowlist entries is allowed if any entry passes its constraints. **Sharp edge:** an unconstrained entry for the same domain makes a constrained twin useless — scope them to distinct ports or drop the unconstrained entry
+- **Path-confusion deny** — when an entry constrains `paths`, a request whose raw path contains a dot segment, a matrix parameter, or an encoded separator (`/../`, `/./`, `%2e`, `%2f`, `%5c`, `%3b`, raw or encoded `;`, backslash, `//`) is denied (`path_not_canonical`) even if it string-matches a pattern: patterns are matched against the raw percent-encoded path that goes upstream, never a decoded one. Java servers (Tomcat, Jetty, Spring) strip `;params` per segment — `/v1/..;/admin` would be `/admin` upstream, so it is denied outright. **Residual risk:** decodings Warden cannot see still apply origin-side — double-encoding (`%252e`), overlong UTF-8 (`%c0%ae`), and `%00` reach the origin verbatim when the pattern allows them, and `methods` does not inspect method-override headers such as `X-HTTP-Method-Override`
 
 ### Protocol Awareness
 
@@ -212,6 +214,7 @@ policy:
 secrets:
   - placeholder: openai_secret_001
     envVar: OPENAI_API_KEY
+    matchHosts: ["api.openai.com"]       # swap only for this destination
 
 cache:
   ttl: 3600
@@ -226,6 +229,33 @@ logging:
 ```
 
 See [`configs/config.example.yaml`](configs/config.example.yaml) for the full documented config.
+
+### Scoping secrets to destination hosts
+
+A placeholder should only ever be exchanged for its real value on the host it
+belongs to. `matchHosts` (same syntax as the policy: exact host, `*.suffix`,
+`~regex`) restricts where Warden swaps a placeholder, in HTTP/1.1, HTTP/2/gRPC
+and WebSocket-upgrade requests alike:
+
+- The destination is the CONNECT/SNI host — the one the allow/deny decision used
+  and the upstream is dialed at — never a `Host` header or URL host the agent
+  controls.
+- On a non-matching host the placeholder is forwarded **untouched** (the
+  destination rejects it as an invalid credential) and a distinct
+  `secret_out_of_scope` event is recorded with the placeholder *name* only, so
+  operators can see attempted cross-host carriage. Allow/deny counts are unchanged.
+- A secret that cannot be fetched fails the request with 503 only on hosts where
+  it is in scope; an unrelated missing secret no longer 503s every request.
+- `~regex` is an **unanchored** (substring) match, exactly like the policy engine:
+  `~github\.com` also matches `evil-github.com`. Anchor it —
+  `~^api\.github\.com$` — or prefer an exact host / `*.suffix`.
+- Invalid patterns (bad regex or wildcard) fail config load.
+- `auth:` injectors (OAuth2, SigV4, HMAC, API key) are scoped by their required
+  `match` field, with the same syntax.
+
+**Migration:** entries without `matchHosts` keep the old behavior (swap on every
+allowed host) and log a startup warning per placeholder. Add `matchHosts` to each
+secret; it is expected to become required in a future release.
 
 ### Upstream DNS resolver
 

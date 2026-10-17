@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ethosagent/warden/docs/pipeline.schema.json",
+  "title": "Warden pipeline contract (.agents/pipeline.yaml)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "commands", "reviews", "live_verify", "evidence"],
+  "properties": {
+    "version": { "const": 1 },
+    "commands": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fast", "gate", "scenarios", "e2e_up", "e2e_down"],
+      "properties": {
+        "fast": { "$ref": "#/$defs/command" },
+        "gate": { "$ref": "#/$defs/command" },
+        "scenarios": { "$ref": "#/$defs/command" },
+        "e2e_up": { "$ref": "#/$defs/command" },
+        "e2e_down": { "$ref": "#/$defs/command" }
+      }
+    },
+    "risk_map": { "$ref": "#/$defs/file" },
+    "protected": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from_risk_map"],
+      "properties": {
+        "from_risk_map": { "type": "string", "minLength": 1 },
+        "planned": { "type": "boolean" },
+        "issue": { "type": "integer" }
+      }
+    },
+    "reviews": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dir", "by_tier", "author_and_reviewer_models_must_differ"],
+      "properties": {
+        "dir": { "$ref": "#/$defs/file" },
+        "by_tier": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["critical", "normal", "low"],
+          "properties": {
+            "critical": { "$ref": "#/$defs/lenses" },
+            "normal": { "$ref": "#/$defs/lenses" },
+            "low": { "$ref": "#/$defs/lenses" }
+          }
+        },
+        "author_and_reviewer_models_must_differ": { "type": "boolean" }
+      }
+    },
+    "live_verify": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["playbook", "tiers"],
+      "properties": {
+        "playbook": { "$ref": "#/$defs/file" },
+        "tiers": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/tier" } }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pr_template"],
+      "properties": {
+        "pr_template": { "$ref": "#/$defs/file" }
+      }
+    }
+  },
+  "$defs": {
+    "tier": { "enum": ["critical", "normal", "low"] },
+    "lenses": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "enum": ["security-invariants", "architecture", "hot-path", "acceptance", "test-quality"] }
+    },
+    "command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run"],
+      "properties": {
+        "run": { "type": "string", "minLength": 1 },
+        "planned": { "type": "boolean" },
+        "issue": { "type": "integer" }
+      }
+    },
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "planned": { "type": "boolean" },
+        "issue": { "type": "integer" }
+      }
+    }
+  }
+}

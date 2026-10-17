@@ -71,6 +71,9 @@ type Policy struct {
 	// ResponseScan configures scanning of ordinary (non-MCP) HTTP/HTTPS response
 	// bodies. Off by default; when disabled every field is zero-valued and harmless.
 	ResponseScan ResponseScanConfig `json:"-"`
+	// EchoGuard configures the check for swapped secrets echoed back in a response.
+	// ON by default (zero value = enabled, block), independent of ResponseScan.
+	EchoGuard EchoGuardConfig `json:"-"`
 	// DLP configures outbound REQUEST-body data-loss-prevention scanning. Off by
 	// default; when off the dlpScan stage is a no-op (no body read) and behavior
 	// is byte-identical to before.
@@ -125,8 +128,17 @@ type Policy struct {
 func (p Policy) DeepCopy() Policy {
 	cp := p
 	cp.Allowlist = append([]AllowlistEntry(nil), p.Allowlist...)
+	for i := range cp.Allowlist {
+		// #371: constraint slices are independently allocated like every other
+		// slice, so mutating a copy cannot retarget the live policy.
+		cp.Allowlist[i].Methods = append([]string(nil), p.Allowlist[i].Methods...)
+		cp.Allowlist[i].Paths = append([]string(nil), p.Allowlist[i].Paths...)
+	}
 	cp.Denylist = append([]DenylistEntry(nil), p.Denylist...)
 	cp.Secrets = append([]SecretMapping(nil), p.Secrets...)
+	for i := range cp.Secrets {
+		cp.Secrets[i].MatchHosts = append([]string(nil), p.Secrets[i].MatchHosts...)
+	}
 	if p.SecretStore.AWS != nil {
 		aws := *p.SecretStore.AWS
 		cp.SecretStore.AWS = &aws
@@ -198,9 +210,21 @@ func (p Policy) DeepCopy() Policy {
 // zero the policy engine infers 443 (HTTPS) or 80 (HTTP). RateLimit and
 // TimeWindow are reserved for milestone 2: they parse from config but are
 // unused in phase 1.
+//
+// Methods and Paths (#371) optionally narrow what the entry permits. Both are
+// allow-lists: a non-empty Methods admits only those HTTP methods, a non-empty
+// Paths admits only request paths matching at least one pattern (raw,
+// percent-encoded byte comparison — see internal/policy). Nil/empty = any
+// method/path. An entry with constraints still matches its domain+port for
+// CONNECT admission; the per-request evaluation enforces the constraints.
 type AllowlistEntry struct {
 	Domain string `yaml:"domain" json:"domain"`
 	Port   int    `yaml:"port,omitempty" json:"port"`
+
+	// #371 request constraints: uppercased HTTP method names and path patterns
+	// (validated dialect: absolute path, "*" wildcards). Empty = unrestricted.
+	Methods []string `yaml:"methods,omitempty" json:"methods,omitempty"`
+	Paths   []string `yaml:"paths,omitempty" json:"paths,omitempty"`
 
 	// Reserved (M2): parsed but not enforced in phase 1.
 	RateLimit  string `yaml:"rateLimit,omitempty" json:"rateLimit,omitempty"`
@@ -209,9 +233,15 @@ type AllowlistEntry struct {
 
 // SecretMapping ties a placeholder the agent holds to the env var that carries
 // the real value (phase 1 ENV provider).
+//
+// MatchHosts scopes the placeholder to destinations (exact host, "*.suffix", or
+// "~regex" — the policy dialect): it is swapped only on requests whose
+// destination host matches. Empty = unscoped (swap on every allowed host); the
+// worker logs a startup warning for such entries.
 type SecretMapping struct {
-	Placeholder string `yaml:"placeholder"`
-	EnvVar      string `yaml:"envVar"`
+	Placeholder string   `yaml:"placeholder"`
+	EnvVar      string   `yaml:"envVar"`
+	MatchHosts  []string `yaml:"matchHosts,omitempty"`
 }
 
 // DenylistEntry is a single explicitly-blocked destination. The denylist is
@@ -245,6 +275,7 @@ type rawConfig struct {
 	Observability *rawObservability `yaml:"observability"`
 	MCP           *rawMCP           `yaml:"mcp"`
 	ResponseScan  *rawResponseScan  `yaml:"responseScan"`
+	EchoGuard     *rawEchoGuard     `yaml:"echoGuard"`
 	DLP           *rawDLP           `yaml:"dlp"`
 	Auth          []rawAuthEntry    `yaml:"auth"`
 	ControlPlane  *rawControlPlane  `yaml:"controlPlane"`
@@ -312,6 +343,11 @@ func parse(data []byte) (*LocalYAMLProvider, error) {
 	}
 	for i := range policy.Allowlist {
 		policy.Allowlist[i].Domain = strings.ToLower(policy.Allowlist[i].Domain)
+		// Methods normalize to upper at load (#371) so runtime matching is a
+		// case-sensitive comparison against the method exactly as sent.
+		for j, m := range policy.Allowlist[i].Methods {
+			policy.Allowlist[i].Methods[j] = strings.ToUpper(m)
+		}
 	}
 	for i := range policy.Denylist {
 		policy.Denylist[i].Domain = strings.ToLower(policy.Denylist[i].Domain)
@@ -336,6 +372,7 @@ func parse(data []byte) (*LocalYAMLProvider, error) {
 	policy.Observability = parseObservability(raw.Observability)
 	policy.MCP = parseMCP(raw.MCP)
 	policy.ResponseScan = parseResponseScan(raw.ResponseScan)
+	policy.EchoGuard = parseEchoGuard(raw.EchoGuard)
 	policy.DLP = parseDLP(raw.DLP)
 	policy.Auth = parseAuth(raw.Auth)
 	cp, err := parseControlPlane(raw.ControlPlane)
@@ -433,6 +470,19 @@ func validate(p Policy) error {
 				return err
 			}
 		}
+		// #371 request constraints: an unknown method must fail at load (the
+		// agent already holds no secret, but a typo silently broadening or
+		// narrowing what an entry admits is a policy bug — fail closed).
+		for _, m := range e.Methods {
+			if !knownHTTPMethods[m] {
+				return fmt.Errorf("config: policy.allowlist[%d]: unknown method %q; methods are uppercased and must be standard HTTP methods", i, m)
+			}
+		}
+		for _, pat := range e.Paths {
+			if err := validatePathPattern(fmt.Sprintf("policy.allowlist[%d].paths", i), pat); err != nil {
+				return err
+			}
+		}
 		// Regex domain: ~<pattern>
 		if strings.HasPrefix(e.Domain, "~") {
 			if _, err := regexp.Compile(e.Domain[1:]); err != nil {
@@ -492,6 +542,14 @@ func validate(p Policy) error {
 		if envBackend && s.EnvVar == "" {
 			return fmt.Errorf("config: secrets[%d]: envVar is required for the env secret backend", i)
 		}
+		for j, h := range s.MatchHosts {
+			if strings.TrimSpace(h) == "" {
+				return fmt.Errorf("config: secrets[%d].matchHosts[%d]: host pattern must not be empty (omit matchHosts to leave the secret unscoped)", i, j)
+			}
+			if err := validateMatchPattern(fmt.Sprintf("secrets[%d].matchHosts[%d]", i, j), h); err != nil {
+				return err
+			}
+		}
 	}
 	seen := make(map[string]struct{}, len(p.Secrets))
 	for _, s := range p.Secrets {
@@ -523,6 +581,9 @@ func validate(p Policy) error {
 		return err
 	}
 	if err := validateResponseScan(p.ResponseScan); err != nil {
+		return err
+	}
+	if err := validateEchoGuard(p.EchoGuard); err != nil {
 		return err
 	}
 	if err := validateDLP(p.DLP); err != nil {
@@ -631,6 +692,50 @@ func validateTimeWindow(name, raw string) error {
 		if err != nil || h < 0 || h > 23 {
 			return fmt.Errorf("config: %s: invalid timeWindow hour %q", name, raw)
 		}
+	}
+	return nil
+}
+
+// knownHTTPMethods is the closed set of methods an allowlist entry may constrain
+// by (#371): the core RFC methods plus the WebDAV verbs HTTP backends commonly
+// expose. Anything outside the set is rejected at load.
+var knownHTTPMethods = map[string]bool{
+	"CONNECT":   true,
+	"DELETE":    true,
+	"GET":       true,
+	"HEAD":      true,
+	"OPTIONS":   true,
+	"PATCH":     true,
+	"POST":      true,
+	"PUT":       true,
+	"TRACE":     true,
+	"PROPFIND":  true,
+	"PROPPATCH": true,
+	"MKCOL":     true,
+	"COPY":      true,
+	"MOVE":      true,
+	"LOCK":      true,
+	"UNLOCK":    true,
+	"REPORT":    true,
+}
+
+// validatePathPattern checks one allowlist `paths` pattern (#371). Patterns are
+// absolute paths matched byte-for-byte against the RAW request path (wildcards
+// aside), so anything that cannot appear in a raw path component — query,
+// fragment, backslash, empty segments — is rejected at load rather than silently
+// never matching. context is the caller's field path for a precise error.
+func validatePathPattern(context, pat string) error {
+	switch {
+	case pat == "":
+		return fmt.Errorf("config: %s: path pattern must not be empty", context)
+	case !strings.HasPrefix(pat, "/"):
+		return fmt.Errorf("config: %s: path pattern %q must start with /", context, pat)
+	case strings.ContainsAny(pat, "?#"):
+		return fmt.Errorf("config: %s: path pattern %q must not contain ? or # (matching covers the path component only)", context, pat)
+	case strings.ContainsRune(pat, '\\'):
+		return fmt.Errorf("config: %s: path pattern %q must not contain backslash", context, pat)
+	case strings.Contains(pat, "//"):
+		return fmt.Errorf("config: %s: path pattern %q must not contain empty path segments", context, pat)
 	}
 	return nil
 }

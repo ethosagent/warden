@@ -17,6 +17,7 @@ reviewers don't spend time on it.
 | Hot path | [`hot-path.md`](hot-path.md) | `HOT-*` | Changes under `internal/proxy`, `internal/policy`, `internal/scan`, `internal/mcp` or anything called per request. |
 | Acceptance | [`acceptance.md`](acceptance.md) | `ACC-*` | Every PR that closes an issue. |
 | Test quality | [`test-quality.md`](test-quality.md) | `TEST-*` | Every PR that adds or changes behaviour. |
+| Red team | [`../playbooks/red-team.md`](../playbooks/red-team.md) | `RT-*` | Exploratory attack runs against a stack built from a PR (see the playbook's rules of engagement and reporting section). |
 
 ## Which lenses a PR needs
 

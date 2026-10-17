@@ -1274,3 +1274,98 @@ responseScan:
 		t.Fatal("expected parse error for unknown field under responseScan")
 	}
 }
+
+// --- Allowlist method/path constraints (#371) ---
+
+func TestAllowlistConstraints_Parse(t *testing.T) {
+	const y = `
+policy:
+  allowlist:
+    - domain: github.com
+      methods: ["get", "HEAD"]
+    - domain: github.com
+      methods: [POST, PATCH]
+      paths: ["/acme/app/*", "/acme/app.git/*"]
+
+logging:
+  level: info
+  format: json
+`
+	pol, err := parse([]byte(y))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	a := pol.policy.Allowlist
+	if len(a) != 2 {
+		t.Fatalf("allowlist len = %d, want 2", len(a))
+	}
+	// Methods are uppercased at parse so matching stays case-sensitive against
+	// the method as sent.
+	if want := []string{"GET", "HEAD"}; len(a[0].Methods) != 2 || a[0].Methods[0] != want[0] || a[0].Methods[1] != want[1] {
+		t.Errorf("methods[0] = %v, want %v", a[0].Methods, want)
+	}
+	if len(a[1].Methods) != 2 || a[1].Methods[0] != "POST" {
+		t.Errorf("methods[1] = %v", a[1].Methods)
+	}
+	if want := []string{"/acme/app/*", "/acme/app.git/*"}; len(a[1].Paths) != 2 || a[1].Paths[0] != want[0] || a[1].Paths[1] != want[1] {
+		t.Errorf("paths = %v, want %v", a[1].Paths, want)
+	}
+	if a[0].Paths != nil {
+		t.Errorf("paths[0] = %v, want nil (omit -> any path)", a[0].Paths)
+	}
+}
+
+func TestValidate_MethodErrors(t *testing.T) {
+	cases := map[string][]string{
+		"unknown method":  {"BREW"},
+		"empty method":    {""},
+		"lowercase mixed": {"get"}, // validate sees the normalized (upper) form only
+		"one bad of many": {"GET", "NOT_A_METHOD"},
+	}
+	for name, methods := range cases {
+		p := Policy{Allowlist: []AllowlistEntry{{Domain: "x", Methods: methods}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"}
+		if err := validate(p); err == nil {
+			t.Errorf("%s: expected validation error", name)
+		}
+	}
+	// Known methods validate.
+	p := Policy{Allowlist: []AllowlistEntry{{Domain: "x", Methods: []string{"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "CONNECT", "TRACE"}}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"}
+	if err := validate(p); err != nil {
+		t.Errorf("known methods rejected: %v", err)
+	}
+}
+
+func TestValidate_PathPatternErrors(t *testing.T) {
+	cases := map[string]string{
+		"empty pattern":    "",
+		"relative pattern": "acme/app",
+		"query in pattern": "/acme/app?x=1",
+		"fragment":         "/acme/app#frag",
+		"backslash":        "/acme\\app",
+		"double slash":     "/acme//app",
+		"star only":        "*",
+	}
+	for name, pat := range cases {
+		p := Policy{Allowlist: []AllowlistEntry{{Domain: "x", Paths: []string{pat}}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"}
+		if err := validate(p); err == nil {
+			t.Errorf("%s (%q): expected validation error", name, pat)
+		}
+	}
+	// Well-formed patterns validate.
+	p := Policy{Allowlist: []AllowlistEntry{{Domain: "x", Paths: []string{"/", "/v1/*", "/acme/*/x", "/v1*.json", "/*"}}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"}
+	if err := validate(p); err != nil {
+		t.Errorf("valid patterns rejected: %v", err)
+	}
+}
+
+// DeepCopy must copy the constraint slices so mutating a copy cannot touch the
+// live policy's constraints.
+func TestDeepCopy_AllowlistConstraints(t *testing.T) {
+	p := Policy{Allowlist: []AllowlistEntry{{Domain: "x", Methods: []string{"GET"}, Paths: []string{"/v1/*"}}}, CacheTTLSeconds: 1, LogLevel: "info", LogFormat: "json"}
+	cp := p.DeepCopy()
+	cp.Allowlist[0].Methods[0] = "POST"
+	cp.Allowlist[0].Paths[0] = "/mutated"
+	if p.Allowlist[0].Methods[0] != "GET" || p.Allowlist[0].Paths[0] != "/v1/*" {
+		t.Fatalf("DeepCopy aliased constraint slices: %+v", p.Allowlist[0])
+	}
+}

@@ -88,7 +88,7 @@ func TestProxy_NilMetricsRecorder_HotPathNoPanic(t *testing.T) {
 		t.Fatal(err)
 	}
 	// If Metrics were a non-nil interface wrapping nothing this would panic.
-	p.storeDeny("example.com", 443, "tcp", "unsupported_protocol")
+	p.storeDeny("example.com", 443, "tcp", "unsupported_protocol", "")
 	p.cfg.Metrics.RecordRequest("allow", "https")
 	p.cfg.Metrics.ObserveAddedLatency("mcp_scan", time.Second)
 }

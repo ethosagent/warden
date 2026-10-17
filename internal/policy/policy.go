@@ -74,6 +74,51 @@ func (d Decision) String() string {
 	}
 }
 
+// Bounded deny reasons for #371 method/path constraints. They ride the
+// analytics Event.Reason field: a closed enum of fixed identifiers, never
+// request content. The empty reason means a deny that is not a constraint
+// violation (denylist hit, or an exhausted rate-limit / time-window guard) —
+// callers render that as their generic "policy" reason.
+const (
+	// ReasonPathNotCanonical: the raw request path contains a dot segment or an
+	// encoded separator, so the bytes being matched and the resource the origin
+	// serves could differ. Denied whenever the destination has a paths
+	// constraint, before any pattern matching.
+	ReasonPathNotCanonical = "path_not_canonical"
+	// ReasonMethodNotAllowed: the request method is not in the matched entry's
+	// `methods` list.
+	ReasonMethodNotAllowed = "method_not_allowed"
+	// ReasonPathNotAllowed: the request path matches no pattern in the matched
+	// entry's `paths` list.
+	ReasonPathNotAllowed = "path_not_allowed"
+)
+
+// RequestVerdict is the per-request outcome of EvaluateRequest: the decision
+// plus, for constraint denies, the bounded reason behind it.
+type RequestVerdict struct {
+	Decision Decision
+	Reason   string
+}
+
+// evalMode selects how evaluate treats #371 constraints and rate-limit
+// accounting. The three callers need exactly three combinations:
+//
+//   - evalTunnel: the legacy destination-only Evaluate — constraints
+//     could-match and the rate limit COUNTS (today's tunnel-level accounting,
+//     pinned by existing tests and unchanged).
+//   - evalConnect: the CONNECT gate — constraints could-match (admission only;
+//     the per-request check is authoritative) and the rate limit PEEKS, so a
+//     tunnel that turns out to violate a constraint does not consume budget.
+//   - evalRequest: the per-request check — constraints are enforced and the
+//     rate limit counts. Each request is counted exactly once.
+type evalMode uint8
+
+const (
+	evalTunnel evalMode = iota
+	evalConnect
+	evalRequest
+)
+
 // Evaluator decides whether a destination is allowed under a policy. It is
 // constructed once from a Policy and is safe for concurrent use.
 type Evaluator struct {
@@ -136,20 +181,31 @@ func (e *Evaluator) Replace(p config.Policy) {
 // It reflects the most recent Replace (control-plane hot-reload), so callers
 // such as the dashboard can display the policy actually being enforced rather
 // than a startup snapshot. Only allow/deny are returned — the evaluator never
-// holds secrets.
+// holds secrets. Entries are copied including their #371 constraint slices.
 func (e *Evaluator) CurrentPolicy() config.Policy {
 	e.swapMu.RLock()
 	defer e.swapMu.RUnlock()
 	return config.Policy{
-		Allowlist: append([]config.AllowlistEntry(nil), e.allowlist...),
+		Allowlist: cloneAllowlist(e.allowlist),
 		Denylist:  append([]config.DenylistEntry(nil), e.denylist...),
 	}
+}
+
+// cloneAllowlist copies entries AND their constraint slices, so a snapshot can
+// never alias the live policy's Methods/Paths backing arrays.
+func cloneAllowlist(entries []config.AllowlistEntry) []config.AllowlistEntry {
+	out := append([]config.AllowlistEntry(nil), entries...)
+	for i := range out {
+		out[i].Methods = append([]string(nil), entries[i].Methods...)
+		out[i].Paths = append([]string(nil), entries[i].Paths...)
+	}
+	return out
 }
 
 // load (re)builds the policy-derived state from p. NewEvaluator calls it before
 // the evaluator is shared (no lock needed); Replace calls it under swapMu.
 func (e *Evaluator) load(p config.Policy) {
-	allowlist := append([]config.AllowlistEntry(nil), p.Allowlist...)
+	allowlist := cloneAllowlist(p.Allowlist)
 	denylist := append([]config.DenylistEntry(nil), p.Denylist...)
 	regexCache := make(map[string]*regexp.Regexp)
 	rateLimits := make(map[int]parsedRateLimit)
@@ -202,27 +258,79 @@ func (e *Evaluator) load(p config.Policy) {
 // first — deny wins on conflict. Callers that compare against Allow still
 // default-deny on NoMatch, preserving the default-deny invariant; NoMatch
 // exists only so the pipeline can optionally consult the LLM judge.
+//
+// Destination-only: method/path constraints (#371) could-match (any entry for
+// the destination admits it) and the rate limit counts per tunnel, exactly as
+// before #371. Per-request enforcement is EvaluateRequest's job.
 func (e *Evaluator) Evaluate(domain string, port int, scheme Scheme) Decision {
+	return e.evaluate(domain, port, scheme, "", "", evalTunnel).Decision
+}
+
+// EvaluateRequest evaluates ONE request against the policy (#371). method/path
+// must be exactly what goes upstream: the method as sent (case-sensitive;
+// entries were uppercased at config load) and the RAW percent-encoded path —
+// URL.EscapedPath() on HTTP/1.1, the :path pseudo-header on HTTP/2 — with no
+// decoding on either side.
+//
+//   - method != "" (request mode): entries with `methods`/`paths` enforce them;
+//     a destination match that violates them is an explicit Deny (never
+//     NoMatch, so it cannot reach the LLM judge), and the rate limit counts
+//     only requests that matched the rule's own constraints.
+//   - method == "" (destination-only — the CONNECT gate): constraints
+//     could-match and the rate limit is peeked, not consumed; the per-request
+//     evaluation is authoritative and counts exactly once.
+//
+// Constraint order inside an entry is time window → method → path → rate
+// limit, so a constraint-violating request never consumes rate-limit budget.
+func (e *Evaluator) EvaluateRequest(domain string, port int, scheme Scheme, method, path string) RequestVerdict {
+	mode := evalRequest
+	if method == "" {
+		mode = evalConnect
+	}
+	return e.evaluate(domain, port, scheme, method, path, mode)
+}
+
+// evaluate is the single core behind Evaluate and EvaluateRequest.
+func (e *Evaluator) evaluate(domain string, port int, scheme Scheme, method, path string, mode evalMode) RequestVerdict {
 	// Read-lock the policy-derived state so a concurrent Replace can't swap it
 	// mid-evaluation. This is a read lock: concurrent Evaluate calls do not
 	// contend with each other, only with a (rare) Replace.
 	e.swapMu.RLock()
 	defer e.swapMu.RUnlock()
 
+	enforce := mode == evalRequest
+	count := mode != evalConnect
+
 	domain = strings.ToLower(strings.TrimSuffix(domain, "."))
 
 	// Denylist checked first — deny wins on conflict.
 	for _, entry := range e.denylist {
 		if inferredPort(entry.Port, scheme) == port && e.domainMatches(entry.Domain, domain) {
-			return Deny
+			return RequestVerdict{Decision: Deny}
+		}
+	}
+
+	// #371 canonical-path pre-pass. If ANY paths-constrained entry covers this
+	// destination, a non-canonical raw path is denied before pattern matching:
+	// any-match-wins must not let a sibling entry carry a path whose bytes we
+	// match but whose resource the origin normalizes to something else.
+	if enforce && !isCanonicalPath(path) {
+		for _, entry := range e.allowlist {
+			if len(entry.Paths) > 0 &&
+				inferredPort(entry.Port, scheme) == port &&
+				e.domainMatches(entry.Domain, domain) {
+				return RequestVerdict{Decision: Deny, Reason: ReasonPathNotCanonical}
+			}
 		}
 	}
 
 	// Then check allowlist. matchedEntry tracks whether the destination matched
-	// an allowlist entry by domain+port even if a rate-limit / time-window guard
-	// later rejected it: such a request is an explicit Deny (the destination IS
-	// allowlisted, just throttled), never NoMatch — it must not reach the judge.
+	// an allowlist entry by domain+port even if a constraint / rate-limit /
+	// time-window guard later rejected it: such a request is an explicit Deny
+	// (the destination IS allowlisted, just not like this), never NoMatch — it
+	// must not reach the judge.
 	matchedEntry := false
+	var methodViolated, pathViolated bool
 	for i, entry := range e.allowlist {
 		if inferredPort(entry.Port, scheme) != port {
 			continue
@@ -248,22 +356,76 @@ func (e *Evaluator) Evaluate(domain string, port int, scheme Scheme) Decision {
 			}
 		}
 
-		// Rate limit check — if this entry is exhausted, try next entry.
-		if rl, ok := e.rateLimits[i]; ok {
-			key := fmt.Sprintf("%s:%d", entry.Domain, inferredPort(entry.Port, scheme))
-			if !e.checkRateLimit(key, rl) {
+		// #371 method constraint — case-sensitive against the method as sent
+		// (config load uppercased the entry side).
+		if enforce && len(entry.Methods) > 0 {
+			if !containsMethod(entry.Methods, method) {
+				methodViolated = true
 				continue
 			}
 		}
 
-		return Allow
+		// #371 path constraint — raw, percent-encoded byte matching.
+		if enforce && len(entry.Paths) > 0 {
+			if !pathMatchesAny(entry.Paths, path) {
+				pathViolated = true
+				continue
+			}
+		}
+
+		// Rate limit check — reached only when this entry's constraints (if
+		// any) passed, so a denied request never consumes budget. If this entry
+		// is exhausted, try next entry.
+		if rl, ok := e.rateLimits[i]; ok {
+			key := fmt.Sprintf("%s:%d", entry.Domain, inferredPort(entry.Port, scheme))
+			if count {
+				if !e.checkRateLimit(key, rl) {
+					continue
+				}
+			} else if !e.peekRateLimit(key, rl) {
+				continue
+			}
+		}
+
+		return RequestVerdict{Decision: Allow}
 	}
 	if matchedEntry {
-		// Destination is allowlisted but every matching entry rejected it via a
-		// rate-limit / time-window guard: explicit Deny, not judge-eligible.
-		return Deny
+		// Destination is allowlisted but every matching entry rejected it. A
+		// constraint violation names itself; guard rejections (rate limit /
+		// time window) keep the empty reason. Explicit Deny either way — not
+		// judge-eligible.
+		switch {
+		case pathViolated:
+			return RequestVerdict{Decision: Deny, Reason: ReasonPathNotAllowed}
+		case methodViolated:
+			return RequestVerdict{Decision: Deny, Reason: ReasonMethodNotAllowed}
+		}
+		return RequestVerdict{Decision: Deny}
 	}
-	return NoMatch
+	return RequestVerdict{Decision: NoMatch}
+}
+
+// containsMethod reports whether method is in the entry's allowed set. Entries
+// are uppercased at config load and the request side arrives exactly as sent,
+// so this comparison is intentionally case-sensitive.
+func containsMethod(methods []string, method string) bool {
+	for _, m := range methods {
+		if m == method {
+			return true
+		}
+	}
+	return false
+}
+
+// pathMatchesAny reports whether the raw path matches at least one pattern —
+// any-match-wins within an entry, same as every other constraint list.
+func pathMatchesAny(patterns []string, path string) bool {
+	for _, pat := range patterns {
+		if matchPath(pat, path) {
+			return true
+		}
+	}
+	return false
 }
 
 // domainMatches reports whether host matches pattern. Supports:
@@ -326,6 +488,21 @@ func (e *Evaluator) checkRateLimit(key string, rl parsedRateLimit) bool {
 	return state.count <= rl.limit
 }
 
+// peekRateLimit reports whether the rate limit HAS room without consuming a
+// slot. It backs the CONNECT gate (evalConnect): tunnel admission must not
+// count a request — the per-request evaluation counts exactly once.
+func (e *Evaluator) peekRateLimit(key string, rl parsedRateLimit) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	now := e.now()
+	state, ok := e.counters[key]
+	if !ok || now.After(state.windowEnd) {
+		return true // a fresh window would start — room exists
+	}
+	return state.count < rl.limit
+}
+
 func parseRateLimit(s string) (parsedRateLimit, error) {
 	parts := strings.SplitN(s, "/", 2)
 	if len(parts) != 2 {
@@ -364,4 +541,50 @@ func parseTimeWindow(s string) (parsedTimeWindow, error) {
 		return parsedTimeWindow{}, fmt.Errorf("invalid end hour: %q", parts[1])
 	}
 	return parsedTimeWindow{startHour: start, endHour: end}, nil
+}
+
+// HostMatcher matches a destination host against a fixed pattern set using the
+// SAME dialect as the allow/deny evaluator ("~regex", "*.suffix", exact). Regexes
+// are compiled once at construction so per-request matching (e.g. secret scoping)
+// does not recompile; wildcard/exact delegate to MatchDomain, the one shared
+// dialect. A nil *HostMatcher matches nothing.
+type HostMatcher struct {
+	patterns []string
+	regexes  map[string]*regexp.Regexp
+}
+
+// NewHostMatcher compiles patterns; a malformed "~regex" is an error.
+func NewHostMatcher(patterns []string) (*HostMatcher, error) {
+	m := &HostMatcher{patterns: append([]string(nil), patterns...), regexes: map[string]*regexp.Regexp{}}
+	for _, raw := range patterns {
+		pat := strings.ToLower(strings.TrimSuffix(raw, "."))
+		if rx, ok := strings.CutPrefix(pat, "~"); ok {
+			re, err := regexp.Compile(rx)
+			if err != nil {
+				return nil, fmt.Errorf("policy: invalid host regex %q: %w", raw, err)
+			}
+			m.regexes[raw] = re
+		}
+	}
+	return m, nil
+}
+
+// Matches reports whether host matches any pattern.
+func (m *HostMatcher) Matches(host string) bool {
+	if m == nil {
+		return false
+	}
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	for _, raw := range m.patterns {
+		if re, ok := m.regexes[raw]; ok {
+			if re.MatchString(host) {
+				return true
+			}
+			continue
+		}
+		if MatchDomain(raw, host) {
+			return true
+		}
+	}
+	return false
 }

@@ -131,17 +131,25 @@ func startBackend(t testing.TB, caCert *x509.Certificate, caKey interface{}) (ne
 // startTestProxyWithSecrets creates a test proxy with secret provider and placeholder names.
 func startTestProxyWithSecrets(t testing.TB, allowedDomains []string, caCertPEM, caKeyPEM []byte, secretValues map[string]string, placeholderNames []string) (*Proxy, *syncStore) {
 	t.Helper()
+	return startTestProxyWithScopedSecrets(t, allowedDomains, caCertPEM, caKeyPEM, secretValues, placeholderNames, nil)
+}
+
+// startTestProxyWithScopedSecrets is startTestProxyWithSecrets plus per-placeholder
+// matchHosts scopes (nil = every placeholder unscoped).
+func startTestProxyWithScopedSecrets(t testing.TB, allowedDomains []string, caCertPEM, caKeyPEM []byte, secretValues map[string]string, placeholderNames []string, scopes map[string][]string) (*Proxy, *syncStore) {
+	t.Helper()
 	var entries []config.AllowlistEntry
 	for _, d := range allowedDomains {
 		entries = append(entries, config.AllowlistEntry{Domain: d, Port: 443})
 	}
 	store := &syncStore{}
 	cfg := Config{
-		ListenAddr:       "127.0.0.1:0",
-		Policy:           policy.NewEvaluator(config.Policy{Allowlist: entries}),
-		Secrets:          &fakes.FakeSecretProvider{Values: secretValues},
-		Analytics:        store,
-		PlaceholderNames: placeholderNames,
+		ListenAddr:        "127.0.0.1:0",
+		Policy:            policy.NewEvaluator(config.Policy{Allowlist: entries}),
+		Secrets:           &fakes.FakeSecretProvider{Values: secretValues},
+		Analytics:         store,
+		PlaceholderNames:  placeholderNames,
+		PlaceholderScopes: scopes,
 	}
 	if len(caCertPEM) > 0 {
 		certFile := filepath.Join(t.TempDir(), "ca.crt")
