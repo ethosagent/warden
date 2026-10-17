@@ -20,6 +20,12 @@ type decisionLog struct {
 	ResponseStatus int
 	SecretRef      string
 	JudgeReason    string
+	// Reason is the bounded deny-reason enum (e.g. "malformed_connect",
+	// "no_tls") — the same string the warden.blocked.total{reason} metric
+	// carries. Detail, when non-empty, is a bounded refinement of the reason
+	// (e.g. "request_line_too_long"). Neither ever carries request content.
+	Reason string
+	Detail string
 }
 
 // logDecision emits one structured record next to the analytics StoreEvent.
@@ -46,6 +52,12 @@ func (p *Proxy) logDecision(d decisionLog) {
 	}
 	if d.JudgeReason != "" {
 		attrs = append(attrs, slog.String("judge_reason", d.JudgeReason))
+	}
+	if d.Reason != "" {
+		attrs = append(attrs, slog.String("reason", d.Reason))
+	}
+	if d.Detail != "" {
+		attrs = append(attrs, slog.String("detail", d.Detail))
 	}
 	if d.Decision == "deny" {
 		p.cfg.Logger.Warn("egress decision", attrs...)

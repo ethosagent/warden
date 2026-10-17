@@ -91,6 +91,18 @@ their generated format.
   outcome, and what was not done with follow-up issues.
 - Add a `Co-Authored-By:` trailer to every commit an agent writes.
 
+## Task skills and decisions
+
+Step-by-step patterns for the common changes live in
+[`.agents/skills/`](.agents/skills/README.md): `add-request-stage`, `add-adapter`,
+`add-config-key`, `add-control-plane-route`. Use the matching skill before you start.
+
+Architecture decision records live in [`docs/adr/`](docs/adr/README.md). **Read the relevant
+ADR before changing that area** (data-plane/control-plane layering, per-user credentials,
+architecture checks, admin route prefixes, audit and machine events, build and dependencies).
+**Write a new ADR when a change moves a boundary**, and mark an old one superseded rather than
+silently reversing it.
+
 ## Do NOT
 
 - Add `pkg/` speculatively (use `cmd/` + `internal/`).
