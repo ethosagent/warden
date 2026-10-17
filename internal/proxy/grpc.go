@@ -140,6 +140,10 @@ func (p *Proxy) forwardH2(s *requestScope) (endSession bool) {
 
 	resp, err := s.rt.RoundTrip(outReq)
 	if err != nil {
+		// The transport surfaces the DialTLSContext error unwrapped, so a dial
+		// the SSRF-safe dialer refused is audited here (#391); ordinary
+		// failures remain a plain 502 with no event.
+		p.recordSSRFDeny(s, err)
 		return p.badGateway(s)
 	}
 	s.resp = resp
