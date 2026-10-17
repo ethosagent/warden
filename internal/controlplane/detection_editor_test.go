@@ -44,6 +44,7 @@ func hasDetector(names []string, want string) bool {
 // the served config file while preserving every other block byte-for-byte.
 func TestDetectionEditor_PUTReloadsLiveEngineAndPreservesBlocks(t *testing.T) {
 	cfg := detectionEditorConfig(t)
+	cfg.Token = "editor-token"
 	srv := New(cfg)
 	if !hasDetector(srv.pipeline.Detectors(), "error_rate") {
 		t.Fatal("precondition: error_rate should be active at startup")
@@ -78,6 +79,7 @@ func TestDetectionEditor_PUTReloadsLiveEngineAndPreservesBlocks(t *testing.T) {
 	// PUT: disable error_rate.
 	body := `{"enabled":true,"errorRate":{"enabled":false}}`
 	req, _ := http.NewRequest(http.MethodPut, cp.URL+"/dashboard/api/detection", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer editor-token")
 	putResp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)

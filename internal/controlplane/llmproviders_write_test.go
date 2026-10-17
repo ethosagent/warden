@@ -91,7 +91,7 @@ func (fakeQuery) Schema() analytics.SchemaInfo { return analytics.SchemaInfo{Dia
 // generator is RE-INJECTED live — the /query/generate endpoint stops returning the
 // 409 llm_not_configured it returned while nothing resolved.
 func TestWriteLLMProviders_ReloadReinjectsSQLGenerator(t *testing.T) {
-	cfg := Config{PolicyPath: writePolicyFile(t, "api.openai.com")}
+	cfg := Config{PolicyPath: writePolicyFile(t, "api.openai.com"), Token: "gen-token"}
 	srv := New(cfg)
 	mux := srv.Handler() // sets s.dash + runs the initial (nil) inject
 	// Attach a query engine so the endpoint clears its 404 guard; the in-memory store
@@ -126,7 +126,13 @@ func TestWriteLLMProviders_ReloadReinjectsSQLGenerator(t *testing.T) {
 
 func postGenerate(t *testing.T, base string) int {
 	t.Helper()
-	resp, err := http.Post(base+"/dashboard/api/query/generate", "application/json", strings.NewReader(`{"question":"count events"}`))
+	req, err := http.NewRequest(http.MethodPost, base+"/dashboard/api/query/generate", strings.NewReader(`{"question":"count events"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer gen-token")
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}

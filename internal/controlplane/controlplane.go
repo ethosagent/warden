@@ -323,7 +323,7 @@ func (s *Server) writeSettings(in config.SettingsWire) error { return s.WriteSet
 //
 //	GET  /policy          — allow/deny policy for workers (bearer-auth)
 //	POST /central/ingest  — fleet analytics ingest (bearer-auth)
-//	     /dashboard/      — fleet dashboard over the aggregated store
+//	     /dashboard/      — fleet dashboard over the aggregated store (writes bearer-auth)
 //	GET  /healthz         — liveness
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -462,6 +462,8 @@ func (s *Server) Handler() http.Handler {
 		})
 		dash.SetDetectionWriter(s.WriteDetection)
 	}
+	// Reads stay open; every write needs the CP bearer token (fail closed).
+	dash.SetWriteGuard(s.dashboardWriteGuard)
 	mux.Handle("/dashboard/", dash.Handler())
 
 	return mux

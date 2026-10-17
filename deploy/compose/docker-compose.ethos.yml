@@ -28,7 +28,7 @@ services:
     image: ethosagent/warden:${WARDEN_VERSION:-0.3.0}
     networks: [cp-net]
     ports:
-      - "7070:7070"                  # fleet dashboard + /policy + /central/ingest
+      - "127.0.0.1:7070:7070"                  # fleet dashboard + /policy + /central/ingest
     environment:
       - WARDEN_CP_TOKEN=${WARDEN_CP_TOKEN:-dev-token}
       # API key env for the llmProviders registry (Explore NL→SQL / judge) — resolves node-locally, never rides the wire.

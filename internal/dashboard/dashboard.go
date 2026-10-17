@@ -9,6 +9,7 @@ import (
 	"embed"
 	"encoding/json"
 	"net/http"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -122,6 +123,9 @@ type Server struct {
 	// dashboard's generator. The read path (handleQueryGenerate) takes the read
 	// lock so a concurrent re-inject never races the 409 nil-check + Evaluate.
 	sqlGenMu sync.RWMutex
+	// writeGuard, when set (control plane), gates every state-changing API call.
+	writeGuardMu sync.RWMutex
+	writeGuard   WriteGuard
 }
 
 // analyticsCacheTTL is how long a computed analytics/MCP payload is reused
@@ -411,6 +415,23 @@ func lastN(s string, n int) string {
 	return string(r[len(r)-n:])
 }
 
+// apiPrefix is the path prefix of every dashboard API route. The write guard
+// covers every method but GET/HEAD on every path under it, registered or not, so
+// a new writer is guarded by default.
+const apiPrefix = "/dashboard/api/"
+
+// WriteGuard decides whether a state-changing dashboard API request may proceed.
+// It returns status 0 to allow it, or the HTTP status and message to refuse with.
+type WriteGuard func(r *http.Request) (status int, msg string)
+
+// SetWriteGuard installs the guard run before every non-GET/HEAD request under
+// /dashboard/api/. With none set (a worker's local admin) writes are not gated.
+func (s *Server) SetWriteGuard(g WriteGuard) {
+	s.writeGuardMu.Lock()
+	defer s.writeGuardMu.Unlock()
+	s.writeGuard = g
+}
+
 // Handler returns an http.Handler that serves the dashboard routes.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -434,7 +455,26 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/dashboard/api/audit/verify", s.handleAuditVerify)
 	mux.HandleFunc("/dashboard/api/setup", s.handleSetup)
 	mux.HandleFunc("/dashboard/", s.handleIndex)
-	return mux
+	return s.guardWrites(mux)
+}
+
+// guardWrites runs the write guard ahead of the mux. It keys on the cleaned path
+// and fails closed on the method: anything but GET/HEAD is a write.
+func (s *Server) guardWrites(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead && strings.HasPrefix(path.Clean("/"+r.URL.Path)+"/", apiPrefix) {
+			s.writeGuardMu.RLock()
+			g := s.writeGuard
+			s.writeGuardMu.RUnlock()
+			if g != nil {
+				if status, msg := g(r); status != 0 {
+					writeError(w, status, msg)
+					return
+				}
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // rangeWindows maps a ?range= token to a finite lookback duration. Only these
