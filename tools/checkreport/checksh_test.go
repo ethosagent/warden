@@ -23,6 +23,7 @@ case "$1 $2" in
 "vet "*) ;;
 "run github.com/golangci/"*) echo "lint ran" ;;
 "run docs/roadmap/gen.go") echo "roadmap ok" ;;
+"test docs/roadmap/gen.go") [ -n "$SHIM_GEN_TEST_FAIL" ] && { echo "FAIL	command-line-arguments"; exit 1; }; echo "ok  	command-line-arguments	0.1s" ;;
 "build ./..."*) ;;
 "run golang.org/x/vuln/"*) echo "No vulnerabilities found." ;;
 "test -race"*) echo "ok  	example.com/x	0.1s" ;;
@@ -359,5 +360,18 @@ func TestCheckShListStagesRejectsFast(t *testing.T) {
 	out := runCheckSh(t, nil, "--list-stages", "--fast")
 	if !strings.HasPrefix(out, "exit: 2\n") || !strings.Contains(out, "--list-stages cannot be combined with --fast") {
 		t.Fatalf("output:\n%s", out)
+	}
+}
+
+// TestCheckShFailsOnGeneratorTestFailure is the plain-mode half of the roadmap
+// verdict (the --json half is TestRoadmapGeneratorTestFailureFailsStage): a
+// failing docs/roadmap generator test must fail check.sh and stop it there.
+func TestCheckShFailsOnGeneratorTestFailure(t *testing.T) {
+	got := runCheckSh(t, []string{"SHIM_GEN_TEST_FAIL=1"})
+	if !strings.HasPrefix(got, "exit: 1\n") {
+		t.Fatalf("a failing generator test must fail check.sh:\n%s", got)
+	}
+	if strings.Contains(got, "go build ./...") {
+		t.Errorf("check.sh must stop at the roadmap stage:\n%s", got)
 	}
 }

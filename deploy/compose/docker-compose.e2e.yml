@@ -1,0 +1,265 @@
+# Hermetic e2e harness for Warden (issue #366) — an OVERRIDE over
+# docker-compose.control-plane.yml. Run via `make e2e-up` / `make e2e-down`
+# (they pass both -f files; the merge follows the order they list).
+#
+#   make e2e-up     # gen certs if missing, build from source, up --wait,
+#                   # then run the hermeticity self-check
+#   make e2e-down   # down -v (removes networks + volumes)
+#
+# What this override changes vs the base stack:
+#   - ALWAYS BUILT FROM SOURCE (the repo checkout you run it from): `make
+#     e2e-up` runs `up --build` unless WARDEN_IMAGE is set (then `--no-build`,
+#     and the image must already exist). A pre-built tag is never pulled, so
+#     harness and code cannot drift — a source edit reaches the next `make
+#     e2e-up` because the build cache is invalidated by the edit.
+#   - Adds the FAKE UPSTREAM: one container playing the whole outside world
+#     (api/llm/mcp/evil.example.test on one TLS cert, a request recorder on
+#     :8081, and the DNS server for the egress network).
+#   - HERMETIC: every scenario network is internal, the
+#     fake upstream owns a pinned IP (10.200.0.10) that
+#     configs/config.e2e-worker.yaml points the workers' DNS at, and unknown
+#     names are NXDOMAIN. `make e2e-up` proves it after `--wait`: every
+#     container must get no answer from a public IP over TCP 80/443 and UDP
+#     DNS (test/e2e/hermeticity.sh), or the up fails naming the container.
+#   - Every service has a healthcheck, so `up --wait` returns only when the
+#     stack can actually serve a scenario (no fixed sleeps anywhere).
+#   - Host publishes are 127.0.0.1-only (recorder 8081, CP 7070, worker admin
+#     9091/9092) and ride ONE dedicated bridge (`published`) with outbound NAT
+#     disabled: Docker Engine ≥ 29 skips published ports on internal-only
+#     containers, so the publishers need one non-internal attachment. What
+#     that buys, precisely: the agents have NO route out except their worker;
+#     the CP, workers and fake upstream cannot complete a round trip to the
+#     internet on a host whose network does not NAT or route foreign source
+#     addresses. Their packets may leave the host un-NATed, and they CAN reach
+#     the Docker host itself. test/e2e/hermeticity.sh proves the
+#     no-round-trip property on every `make e2e-up`.
+#
+# No root: the warden services run as the image's non-root `warden` user and
+# the fake upstream as its own non-root user (unprivileged low ports come from
+# the per-container sysctl on fakeupstream below, not from capabilities). The
+# lab certs under test/e2e/certs are generated world-readable on purpose (see
+# gen.sh) so the non-root containers can read the bind-mount, and the /data
+# volumes inherit the image's warden ownership on first mount.
+#
+# Secrets: worker containers hold EXAMPLE_SECRET=CANARY-e2e-… locally; agent
+# containers hold only the placeholder (example_secret_001). The recorder is
+# the oracle: a scenario fails if the canary ever appears where the placeholder
+# should have been (or vice versa). Workers are CP-MANAGED
+# (configs/config.e2e-worker.yaml): the allow/deny policy lives in
+# configs/config.e2e-cp.yaml and is pulled by both workers; each worker keeps
+# only local wiring in its own file (secrets, DNS, the SSRF lab exception).
+#
+# `make e2e` runs the Go suite in test/e2e (build tag e2e) against this stack;
+# the /_rebind red-team switch, WebSocket + gRPC scenarios build on it later.
+
+name: warden-e2e
+
+services:
+  control-plane:
+    build:
+      context: ../..           # repo root (the Dockerfile copies the module)
+      dockerfile: Dockerfile
+    image: ${WARDEN_IMAGE:-warden-e2e:local}
+    ports: !override
+      - "127.0.0.1:7070:7070"
+    networks: !override
+      cp-net: {}               # workers reach the CP here (internal)
+      published: {}            # host → 7070 (no outbound NAT)
+    volumes:
+      # Same container target as the base mount → replaces the base's
+      # config.worker/certs mounts with the e2e policy and cert set.
+      - ../../configs/config.e2e-cp.yaml:/etc/warden/config.yaml:ro
+      - ../../test/e2e/certs:/etc/warden/certs:ro
+    healthcheck:
+      # busybox wget verifies TLS against the image's system store, which does
+      # not hold the lab proxy CA — skip verification (identity is proven where
+      # it matters: workers pin controlPlane/caCert).
+      test: ["CMD", "wget", "-q", "--spider", "--no-check-certificate", "https://127.0.0.1:7070/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  worker-1:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: ${WARDEN_IMAGE:-warden-e2e:local}
+    depends_on:
+      control-plane:
+        condition: service_healthy
+    ports: !override
+      - "127.0.0.1:9091:9090"
+    networks: !override
+      cp-net: {}               # policy pull + heartbeats + analytics ingest
+      egress: {}               # dials the fake upstream (internal, pinned IP)
+      w1-internal: {}          # agent-1's ONLY neighbor network
+      published: {}            # host → 9091 (no outbound NAT)
+    environment: !override
+      - WARDEN_CP_TOKEN=${WARDEN_CP_TOKEN:-dev-token}
+      - WARDEN_PROXY_ID=worker-1
+      # The canary the worker swaps in for example_secret_001. FIXED value so
+      # the scenario suite (and the recorder oracle) can assert on it.
+      - EXAMPLE_SECRET=CANARY-e2e-0123456789abcdef0123456789abcdef
+      # Workers verify the FAKE upstream via the Go system pool; SSL_CERT_FILE
+      # points it at (system CAs + fake-upstream CA) — no config key needed.
+      - SSL_CERT_FILE=/etc/warden/certs/upstream-ca-bundle.crt
+    volumes:
+      - ../../configs/config.e2e-worker.yaml:/etc/warden/config.yaml:ro
+      - ../../test/e2e/certs:/etc/warden/certs:ro
+    healthcheck:
+      # The admin listener is plain HTTP (proxy/CONNECT ports are TLS).
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  worker-2:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: ${WARDEN_IMAGE:-warden-e2e:local}
+    depends_on:
+      control-plane:
+        condition: service_healthy
+    ports: !override
+      - "127.0.0.1:9092:9090"
+    networks: !override
+      cp-net: {}
+      egress: {}
+      w2-internal: {}          # agent-2's ONLY neighbor network
+      published: {}
+    environment: !override
+      - WARDEN_CP_TOKEN=${WARDEN_CP_TOKEN:-dev-token}
+      - WARDEN_PROXY_ID=worker-2
+      - EXAMPLE_SECRET=CANARY-e2e-0123456789abcdef0123456789abcdef
+      - SSL_CERT_FILE=/etc/warden/certs/upstream-ca-bundle.crt
+    volumes:
+      - ../../configs/config.e2e-worker.yaml:/etc/warden/config.yaml:ro
+      - ../../test/e2e/certs:/etc/warden/certs:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  fakeupstream:
+    build:
+      context: ../..         # repo root: the module (internal/mcp/poisoned) is needed
+      dockerfile: test/e2e/fakeupstream/Dockerfile
+    image: warden-e2e-fakeupstream:local
+    # The container runs as a non-root user (see its Dockerfile) but binds 443
+    # and 53; this per-netns sysctl lets an unprivileged user bind ports <1024
+    # in its own network namespace — no capabilities granted.
+    sysctls:
+      net.ipv4.ip_unprivileged_port_start: "0"
+    networks: !override
+      egress:
+        ipv4_address: 10.200.0.10   # pinned; config.e2e-worker.yaml + cert SANs depend on it
+      published: {}        # host → 8081 recorder (no outbound NAT)
+    ports:
+      - "127.0.0.1:8081:8081"       # the request recorder (scenario oracle)
+    environment:
+      - FAKEUPSTREAM_CERT=/etc/fakeupstream/upstream-server.crt
+      - FAKEUPSTREAM_KEY=/etc/fakeupstream/upstream-server.key
+      - FAKEUPSTREAM_IP=10.200.0.10
+    volumes:
+      - ../../test/e2e/certs:/etc/fakeupstream:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8081/_health"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+
+  agent-1:
+    image: curlimages/curl:8.22.0@sha256:58adaa4e8dca9c988bae2aba4ab3434a0bb2da16bbe3f92dec39ec7785166777
+    depends_on:
+      worker-1:
+        condition: service_healthy
+    networks: !override
+      w1-internal: {}          # internal only — sole route out is worker-1
+    environment: !override
+      # Lowercase AND uppercase: curl honors only lowercase http_proxy for
+      # http:// URLs (uppercase HTTP_PROXY is ignored there), so without it a
+      # plain-http request would never reach the worker. NO_PROXY keeps the
+      # in-agent control paths (healthcheck, probes of worker-1's admin) OFF
+      # the proxy — only scenario egress is proxied.
+      - HTTP_PROXY=http://worker-1:8080
+      - HTTPS_PROXY=http://worker-1:8080
+      - http_proxy=http://worker-1:8080
+      - https_proxy=http://worker-1:8080
+      - NO_PROXY=localhost,127.0.0.1,worker-1
+      - no_proxy=localhost,127.0.0.1,worker-1
+      - CURL_CA_BUNDLE=/etc/warden/certs/proxy-ca.crt
+    entrypoint: ["sh", "-c", "exec sleep 1000000000"]   # parked; scenarios curl it via `docker compose exec`
+    volumes:
+      # Same target as the base mount → repoints the agent's CA at the e2e set.
+      - ../../test/e2e/certs/proxy-ca.crt:/etc/warden/certs/proxy-ca.crt:ro
+    healthcheck:
+      # Ready = it can reach its worker's admin listener (its only neighbor).
+      # worker-1 is in NO_PROXY, so this is a direct hit on the admin port.
+      test: ["CMD", "curl", "-fsS", "http://worker-1:9090/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+
+  agent-2:
+    image: curlimages/curl:8.22.0@sha256:58adaa4e8dca9c988bae2aba4ab3434a0bb2da16bbe3f92dec39ec7785166777
+    depends_on:
+      worker-2:
+        condition: service_healthy
+    networks: !override
+      w2-internal: {}
+    environment: !override
+      - HTTP_PROXY=http://worker-2:8080
+      - HTTPS_PROXY=http://worker-2:8080
+      - http_proxy=http://worker-2:8080
+      - https_proxy=http://worker-2:8080
+      - NO_PROXY=localhost,127.0.0.1,worker-2
+      - no_proxy=localhost,127.0.0.1,worker-2
+      - CURL_CA_BUNDLE=/etc/warden/certs/proxy-ca.crt
+    entrypoint: ["sh", "-c", "exec sleep 1000000000"]
+    volumes:
+      - ../../test/e2e/certs/proxy-ca.crt:/etc/warden/certs/proxy-ca.crt:ro
+    healthcheck:
+      # worker-2 is in NO_PROXY, so this is a direct hit on the admin port.
+      test: ["CMD", "curl", "-fsS", "http://worker-2:9090/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+
+networks:
+  # Control-plane bus, INTERNAL in the harness: workers reach the CP, nothing
+  # reaches the internet from here. (The base file declares it a plain bridge;
+  # this override tightens it.)
+  cp-net:
+    internal: true
+  # Hermetic worker→fakeupstream network: internal, pinned subnet. The fake
+  # upstream's DNS answers here; unknown names are NXDOMAIN, so nothing in the
+  # stack can resolve (let alone reach) the real internet.
+  egress:
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.200.0.0/24
+  w1-internal:
+    internal: true
+  w2-internal:
+    internal: true
+  # The ONE non-internal network, carrying only the host-published services.
+  # Masquerading is disabled: packets leave the host with a private source
+  # address, so on a host that neither NATs nor routes foreign source
+  # addresses no reply can come back and these containers cannot complete a
+  # round trip to the internet (they can still reach the Docker host).
+  # test/e2e/hermeticity.sh proves the no-round-trip property every e2e-up.
+  # It exists only because Docker Engine ≥ 29 skips published ports on
+  # containers that are internal-only.
+  published:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.enable_ip_masquerade: "false"

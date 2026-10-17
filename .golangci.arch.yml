@@ -65,6 +65,7 @@ linters:
             - '!${base-path}/internal/clock/**'
             - '!${base-path}/internal/integration/**'
             - '!${base-path}/internal/integration/webhook/**'
+            - '!${base-path}/internal/mcp/poisoned/**'
             - '!${base-path}/tools/**'
             - '!${base-path}/internal/archtest/**'
             - '!${base-path}/internal/dnstest/**'
@@ -126,6 +127,7 @@ linters:
             - '!${base-path}/internal/clock/**'
             - '!${base-path}/internal/integration/**'
             - '!${base-path}/internal/integration/webhook/**'
+            - '!${base-path}/internal/mcp/poisoned/**'
             - '!${base-path}/tools/**'
             - '!${base-path}/internal/archtest/**'
             - '!${base-path}/internal/dnstest/**'
@@ -171,6 +173,7 @@ linters:
             - '!${base-path}/internal/clock/**'
             - '!${base-path}/internal/integration/**'
             - '!${base-path}/internal/integration/webhook/**'
+            - '!${base-path}/internal/mcp/poisoned/**'
             - '!${base-path}/internal/config/**'
             - '!${base-path}/internal/denyreason/**'
             - '!${base-path}/internal/detect/**'
@@ -415,6 +418,11 @@ linters:
           - depguard
           - forbidigo
         text: 'X3:'
+      - path: ^test/harness/[^/]*\.go$
+        linters:
+          - depguard
+          - forbidigo
+        text: 'X1:'
       - path: ^test/integration/[^/]*\.go$
         linters:
           - depguard
@@ -425,6 +433,16 @@ linters:
           - depguard
           - forbidigo
         text: 'X3:'
+      - path: ^test/harness/[^/]*\.go$
+        linters:
+          - depguard
+          - forbidigo
+        text: 'X4:'
+      - path: ^test/scenarios/[^/]*\.go$
+        linters:
+          - depguard
+          - forbidigo
+        text: 'X4:'
       - path: ^internal/analytics/[^/]*\.go$
         linters:
           - depguard

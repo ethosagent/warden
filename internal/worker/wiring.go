@@ -31,8 +31,11 @@ func expandEnv(s string) string {
 }
 
 // newSafeHTTPClient builds an *http.Client whose dials go through the proxy's
-// SafeDialer, so outbound auth-token fetches and central forwarding obey the
-// same SSRF protection as proxied traffic (no dialing link-local/private ranges).
+// SafeDialer, so outbound auth-token fetches obey the same SSRF protection as
+// proxied traffic (no dialing link-local/private ranges). It deliberately does
+// NOT carry upstream.allowPrivateCIDRs: that exception widens the PROXY's
+// dialer and nothing else (one site, internal/proxy New) — a token endpoint is
+// operator infrastructure on a name, never a lab private-range upstream.
 // resolver (dns.upstreamResolver) is the optional NameResolver those dials look
 // names up through; nil keeps net.DefaultResolver.
 //

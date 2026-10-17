@@ -1,6 +1,7 @@
 package analytics
 
 import (
+	"errors"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -20,6 +21,7 @@ type fakeStore struct {
 	gate chan struct{}
 
 	mu         sync.Mutex
+	failBatch  error
 	batchSizes []int
 	pruneCalls int
 }
@@ -33,6 +35,12 @@ func (f *fakeStore) GetEvents(filter EventFilter) ([]Event, error) {
 func (f *fakeStore) StoreEventsBatch(evs []Event) error {
 	if f.gate != nil {
 		<-f.gate
+	}
+	f.mu.Lock()
+	fail := f.failBatch
+	f.mu.Unlock()
+	if fail != nil {
+		return fail
 	}
 	f.mu.Lock()
 	f.batchSizes = append(f.batchSizes, len(evs))
@@ -239,6 +247,167 @@ func TestAsyncWriter_CloseDrains(t *testing.T) {
 	}
 	if got := countEvents(t, fs); got != n+1 {
 		t.Fatalf("post-Close event not persisted: got %d, want %d", got, n+1)
+	}
+}
+
+// TestAsyncWriter_FlushPersistsQueuedImmediately pins the drain port the L1
+// harness's deterministic event oracle rides: Flush persists everything already
+// queued and returns WITHOUT waiting for the flush tick, so a reader over the
+// base store sees a read-your-writes view the moment the caller decides traffic
+// is done — no polling, no deadline. The onBatch tee fires for the flushed
+// batch too (a downstream consumer must not miss events because they were
+// flushed on demand instead of on the tick).
+func TestAsyncWriter_FlushPersistsQueuedImmediately(t *testing.T) {
+	fs := newFakeStore(t)
+	// A batch size the queued events never reach plus a flush interval longer
+	// than the test: ONLY Flush can make these events readable.
+	var teed atomic.Int64
+	w := newAsyncWriter(fs,
+		WithBatchSize(1000), WithFlushInterval(time.Hour),
+		WithOnBatch(func(evs []Event) { teed.Add(int64(len(evs))) }))
+	t.Cleanup(func() { _ = w.Close() })
+
+	const n = 5
+	for i := 0; i < n; i++ {
+		if err := w.StoreEvent(Event{Domain: "api.openai.com", Decision: "allow"}); err != nil {
+			t.Fatalf("StoreEvent: %v", err)
+		}
+	}
+	if got := countEvents(t, fs); got != 0 {
+		t.Fatalf("%d events visible before Flush, want 0 (nothing flushed yet)", got)
+	}
+
+	if err := w.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	if got := countEvents(t, fs); got != n {
+		t.Fatalf("after Flush %d events visible, want %d", got, n)
+	}
+	if got := teed.Load(); got != n {
+		t.Fatalf("tee saw %d events across Flush, want %d", got, n)
+	}
+	if w.QueueDepth() != 0 {
+		t.Fatalf("queue depth %d after Flush, want 0", w.QueueDepth())
+	}
+}
+
+// TestAsyncWriter_FlushReportsBatchWriteFailure pins the ack contract: a Flush
+// whose batch write FAILED must not ack as if the events were persisted. The
+// batch stays queued for retry (the non-lossy behavior), but the caller learns
+// the read-your-writes view it asked for does not exist — so the L1 harness's
+// event oracle fails the test clearly instead of reading a short list.
+func TestAsyncWriter_FlushReportsBatchWriteFailure(t *testing.T) {
+	fs := newFakeStore(t)
+	w := newAsyncWriter(fs, WithBatchSize(1000), WithFlushInterval(time.Hour))
+	t.Cleanup(func() { _ = w.Close() })
+
+	const n = 3
+	for i := 0; i < n; i++ {
+		if err := w.StoreEvent(Event{Domain: "d", Decision: "allow"}); err != nil {
+			t.Fatalf("StoreEvent: %v", err)
+		}
+	}
+
+	boom := errors.New("boom: disk full")
+	fs.mu.Lock()
+	fs.failBatch = boom
+	fs.mu.Unlock()
+	if err := w.Flush(); !errors.Is(err, boom) {
+		t.Fatalf("Flush with a failing batch write = %v, want the write error — a failed flush must not ack as persisted", err)
+	}
+	if got := countEvents(t, fs); got != 0 {
+		t.Fatalf("%d events visible after the failed flush, want 0 (the batch is retained for retry, never dropped)", got)
+	}
+
+	// Recovery: once the write succeeds again, the SAME Flush drains the
+	// retained batch and acks nil.
+	fs.mu.Lock()
+	fs.failBatch = nil
+	fs.mu.Unlock()
+	if err := w.Flush(); err != nil {
+		t.Fatalf("Flush after the store recovered = %v, want nil", err)
+	}
+	if got := countEvents(t, fs); got != n {
+		t.Fatalf("after recovery %d events visible, want %d", got, n)
+	}
+}
+
+// TestAsyncWriter_FlushIsIdempotentAndPostCloseSafe pins Flush's lifecycle
+// safety: flushing an empty queue is a no-op, repeated flushes persist nothing
+// twice, and Flush after Close returns instead of blocking on the dead writer.
+func TestAsyncWriter_FlushIsIdempotentAndPostCloseSafe(t *testing.T) {
+	fs := newFakeStore(t)
+	w := newAsyncWriter(fs, WithBatchSize(1000), WithFlushInterval(time.Hour))
+	t.Cleanup(func() { _ = w.Close() })
+
+	const n = 3
+	for i := 0; i < n; i++ {
+		if err := w.StoreEvent(Event{Domain: "d", Decision: "allow"}); err != nil {
+			t.Fatalf("StoreEvent: %v", err)
+		}
+	}
+	if err := w.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if err := w.Flush(); err != nil { // empty queue: a no-op, never a duplicate write
+		t.Fatalf("second Flush: %v", err)
+	}
+	if got := countEvents(t, fs); got != n {
+		t.Fatalf("two Flushes persisted %d events, want exactly %d", got, n)
+	}
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	done := make(chan struct{})
+	go func() { _ = w.Flush(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Flush after Close blocked; it must return once the writer is gone")
+	}
+}
+
+// TestAsyncWriter_FlushConcurrentWithWriters drives Flush against concurrent
+// producers (run under -race) and asserts no loss and no panic: everything
+// enqueued before Flush returns is persisted, and the rest drain on Close.
+func TestAsyncWriter_FlushConcurrentWithWriters(t *testing.T) {
+	fs := newFakeStore(t)
+	w := newAsyncWriter(fs, WithQueueCap(8), WithBatchSize(4), WithFlushInterval(time.Hour))
+	t.Cleanup(func() { _ = w.Close() })
+
+	const n = 100
+	var enqueued atomic.Int64
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < n; i++ {
+			if err := w.StoreEvent(Event{Domain: "race", Decision: "allow"}); err != nil {
+				t.Errorf("StoreEvent: %v", err)
+				return
+			}
+			enqueued.Add(1)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 10; i++ {
+			if err := w.Flush(); err != nil {
+				t.Errorf("Flush: %v", err)
+				return
+			}
+			<-time.After(time.Millisecond)
+		}
+	}()
+	wg.Wait()
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if got, want := countEvents(t, fs), int(enqueued.Load()); got != want {
+		t.Fatalf("event loss with Flush racing producers: persisted %d, enqueued %d", got, want)
 	}
 }
 

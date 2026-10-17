@@ -1,11 +1,16 @@
 // Package fakes provides hand-written in-memory test doubles for the three core
-// interfaces (ConfigProvider, SecretProvider, AnalyticsStore) so higher layers
+// interfaces (ConfigProvider, SecretProvider, AnalyticsStore) and the
+// SecretStore write port so higher layers
 // are testable without real backends.
 package fakes
 
 import (
+	"context"
 	"fmt"
+	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/config"
@@ -94,5 +99,69 @@ func (f *FakeAnalyticsStore) GetEvents(filter analytics.EventFilter) ([]analytic
 			break
 		}
 	}
+	return out, nil
+}
+
+// FakeSecretStore is an in-memory secrets.SecretStore. Get/Delete follow the
+// port's contract: Get of an absent key is an error, Delete of one is not, and
+// List returns metadata only (the value never leaves Get).
+type FakeSecretStore struct {
+	mu       sync.Mutex
+	values   map[string]string
+	versions map[string]int
+	updated  map[string]time.Time
+}
+
+var _ secrets.SecretStore = (*FakeSecretStore)(nil)
+
+// NewFakeSecretStore returns an empty store.
+func NewFakeSecretStore() *FakeSecretStore {
+	return &FakeSecretStore{
+		values:   map[string]string{},
+		versions: map[string]int{},
+		updated:  map[string]time.Time{},
+	}
+}
+
+// Get returns the value for key, or secrets.ErrSecretNotFound.
+func (f *FakeSecretStore) Get(_ context.Context, key string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	v, ok := f.values[key]
+	if !ok {
+		return "", fmt.Errorf("%w: %q", secrets.ErrSecretNotFound, key)
+	}
+	return v, nil
+}
+
+// Put upserts key=value and bumps the key's version.
+func (f *FakeSecretStore) Put(_ context.Context, key, value string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.values[key] = value
+	f.versions[key]++
+	f.updated[key] = time.Now()
+	return nil
+}
+
+// Delete removes key; deleting an absent key is not an error.
+func (f *FakeSecretStore) Delete(_ context.Context, key string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.values, key)
+	delete(f.versions, key)
+	delete(f.updated, key)
+	return nil
+}
+
+// List returns value-free metadata for every key, sorted by key.
+func (f *FakeSecretStore) List(_ context.Context) ([]secrets.SecretMeta, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]secrets.SecretMeta, 0, len(f.values))
+	for k := range f.values {
+		out = append(out, secrets.SecretMeta{Key: k, Version: fmt.Sprintf("v%d", f.versions[k]), UpdatedAt: f.updated[k]})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
 	return out, nil
 }

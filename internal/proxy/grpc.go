@@ -72,7 +72,9 @@ func (p *Proxy) handleGRPC(clientConn net.Conn, domain string, port int, needsJu
 // proto is "grpc" when the Content-Type marks a gRPC call, else "http2". A gRPC
 // body is streamed verbatim (streamBody): no buffering, no body swap, DLP records
 // it partial — exactly how h1 treats a non-text body — and protobuf field swap
-// stays deferred.
+// stays deferred. The scope's quiescence-tracker slot is entered/exited by the
+// shared pipeline (runRequestStages), so an h2 stream is tracked exactly like an
+// h1 request: one unit from stream start until its terminal bookkeeping.
 func (p *Proxy) serveGRPCStream(w http.ResponseWriter, r *http.Request, rt *http2.Transport, domain string, port int, needsJudge bool) {
 	isGRPC := strings.HasPrefix(r.Header.Get("Content-Type"), "application/grpc")
 	proto := "http2"

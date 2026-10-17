@@ -1,0 +1,72 @@
+# Warden worker config for the HERMETIC e2e stack (deploy/compose/
+# docker-compose.e2e.yml). The fake upstream container serves every name the
+# control plane's allowlist names, and the fake DNS on the egress network
+# resolves nothing else, so this stack never touches the internet.
+#
+# This worker is CP-MANAGED: the allow/deny policy lives in
+# configs/config.e2e-cp.yaml and is pulled from the control plane (fail-closed
+# at boot until the first pull). This file keeps only LOCAL wiring — the
+# secret mapping, the upstream DNS, the lab-only SSRF exception — exactly the
+# things a control plane can never set or widen:
+#   - secrets: placeholders map to env vars held by THIS worker only.
+#   - dns.upstreamResolver: warden's own upstream dials resolve through the
+#     fake DNS (10.200.0.10:53 on the internal egress network; the pinned
+#     fakeupstream IP in the compose override — change the subnet there and
+#     here together). Known scenario names resolve to it, everything else is
+#     NXDOMAIN, and there is NO fallback to the system resolver. The control
+#     plane's own policy pulls and analytics forwarding do NOT use this
+#     resolver — Docker's embedded DNS resolves those.
+#   - upstream.allowPrivateCIDRs: the whole egress network (10.200.0.0/24) is
+#     private address space and the fake upstream legitimately lives there, so
+#     it is exempted from the SSRF private-IP blocklist. json:"-" keeps it off
+#     every CP-served policy, and the worker keeps this local value when a CP
+#     policy is applied (initial and on every update) — the exception widens
+#     the proxy's dialer only, never the auth-fetch client. Lab use only.
+# (Listen/CA paths come from the compose command flags, not this file.)
+
+controlPlane:
+  endpoint: https://control-plane:7070/policy
+  tokenEnv: WARDEN_CP_TOKEN
+  caCert: /etc/warden/certs/proxy-ca.crt
+  longPollWait: 30s        # how long the CP holds the poll open before 304
+  heartbeatInterval: 10s
+  localOnly: false
+
+# Placeholder -> env var mapping. The agent sends ONLY the placeholder
+# (`example_secret_001`) in its Authorization header; this worker swaps in the
+# canary value from $EXAMPLE_SECRET — and the fake upstream's recorder is the
+# oracle proving the real value crossed the tunnel but the placeholder is all
+# the agent ever held. Scoped to the two hosts the scenarios use it on.
+secrets:
+  - placeholder: example_secret_001
+    envVar: EXAMPLE_SECRET
+    matchHosts: ["api.example.test", "llm.example.test"]
+
+dns:
+  upstreamResolver: "10.200.0.10:53"
+
+upstream:
+  allowPrivateCIDRs: ["10.200.0.0/24"]
+
+# Workers verify the fake upstream's leaf through SSL_CERT_FILE (set in the
+# compose override to the fake-CA + system bundle test/e2e/certs/gen.sh builds)
+# — the Go system pool honors it; no extra Warden config key involved.
+
+logging:
+  level: info
+  format: json
+
+# Deep MCP analysis on the poisoned MCP server traffic, so the CP dashboard
+# sees the tool inventory the scenario exercises.
+mcp:
+  enabled: true
+  mode: monitor
+
+# Forward analytics to the stack's control plane (fleet view) — the CP holds
+# NO secrets; only this worker sees the canary.
+central:
+  mode: worker
+  endpoint: https://control-plane:7070/central/ingest
+  tokenEnv: WARDEN_CP_TOKEN
+  proxyID: ${WARDEN_PROXY_ID}
+  caCert: /etc/warden/certs/proxy-ca.crt

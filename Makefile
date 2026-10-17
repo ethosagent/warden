@@ -1,7 +1,64 @@
 # Warden — thin wrappers over scripts/. The real logic lives in scripts/check.sh
 # so CI, git hooks, and `make` all run the identical gate.
 
-.PHONY: build test check integration hooks fmt lint repro release release-dry version
+.PHONY: build test check integration hooks fmt lint repro release release-dry version e2e-up e2e-down e2e-certs e2e e2e-scenario
+
+# ---------- e2e harness (issue #366, L2 part 1) ----------
+# The hermetic compose stack: control plane + 2 workers + 2 agents + the fake
+# upstream (api/llm/mcp/evil.example.test, request recorder, fake DNS), all
+# built from source, all scenario networks internal. deploy/compose/
+# docker-compose.e2e.yml is the override; configs/config.e2e-*.yaml the policy.
+# `make e2e` runs the Go suite (test/e2e) against it; see docs/docker-end-to-end.md.
+
+E2E_COMPOSE := -f deploy/compose/docker-compose.control-plane.yml -f deploy/compose/docker-compose.e2e.yml
+
+# Every file gen.sh produces; e2e-up regenerates when ANY one is missing, not
+# only the CA cert (a half-populated certs dir would boot a broken stack).
+E2E_CERTS := proxy-ca.crt proxy-ca.key upstream-ca.crt upstream-ca.key \
+             upstream-server.crt upstream-server.key upstream-ca-bundle.crt
+
+# up --build unless WARDEN_IMAGE is set: the build cache makes a no-op rebuild
+# fast, and a source edit ALWAYS reaches the containers (a pre-existing image
+# tag must never shadow the checkout — that is how a harness tests stale code).
+# With WARDEN_IMAGE set nothing is built (--no-build) and both images must
+# already exist, or e2e-up fails before starting anything.
+e2e-up: e2e-certs
+	if [ -n "$$WARDEN_IMAGE" ]; then \
+		docker image inspect "$$WARDEN_IMAGE" >/dev/null 2>&1 || { echo "e2e: WARDEN_IMAGE=$$WARDEN_IMAGE is not present locally; build or pull it first, or unset WARDEN_IMAGE to build from source" >&2; exit 1; }; \
+		docker image inspect warden-e2e-fakeupstream:local >/dev/null 2>&1 || { echo "e2e: WARDEN_IMAGE is set (--no-build) but warden-e2e-fakeupstream:local is missing; run one 'make e2e-up' without WARDEN_IMAGE to build it" >&2; exit 1; }; \
+		docker compose $(E2E_COMPOSE) up -d --wait --no-build; \
+	else \
+		docker compose $(E2E_COMPOSE) up -d --build --wait; \
+	fi
+	test/e2e/hermeticity.sh
+
+e2e-down:
+	docker compose $(E2E_COMPOSE) down -v
+
+# Idempotent cert generation: gen.sh refuses to overwrite existing keys.
+.PHONY: e2e-certs
+e2e-certs:
+	@missing=""; \
+	for f in $(E2E_CERTS); do \
+		[ -f test/e2e/certs/$$f ] || missing="$$missing $$f"; \
+	done; \
+	if [ -n "$$missing" ]; then \
+		echo "e2e: (re)generating certs; missing:$$missing"; \
+		test/e2e/certs/gen.sh; \
+	fi
+
+# The L2 suite (test/e2e, build tag e2e). TestMain runs e2e-up, waits for
+# health, runs the tests and tears the stack down (E2E_KEEP_STACK=1 keeps it;
+# E2E_STACK_RUNNING=1 reuses a stack you started). -count=1: never cached.
+E2E_GOTEST := go test -tags e2e -count=1 -timeout 20m ./test/e2e/ -v
+
+e2e:
+	$(E2E_GOTEST)
+
+# make e2e-scenario NAME=TestIsolation_DefaultDeny  (a -run regexp)
+e2e-scenario:
+	@test -n "$(NAME)" || { echo "usage: make e2e-scenario NAME=<test name regexp>" >&2; exit 2; }
+	$(E2E_GOTEST) -run '$(NAME)'
 
 build:
 	scripts/build.sh warden

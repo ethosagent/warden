@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -35,6 +36,7 @@ import (
 	"github.com/ethosagent/warden/internal/proxy"
 	"github.com/ethosagent/warden/internal/scan"
 	"github.com/ethosagent/warden/internal/secrets"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 )
 
 // Params are the flag-derived inputs the worker boots from. cmd/proxy parses the
@@ -103,6 +105,43 @@ type Overrides struct {
 	// Clock is the worker's time port: the control-plane long-poll and
 	// heartbeat loops tick on it. nil = clock.Real().
 	Clock clock.Clock
+	// MetricsReader, when set, is attached to the worker's OTel meter provider
+	// as an extra reader (observability.Config.Reader) so a test can collect
+	// metrics in-process. nil = no extra reader (production default).
+	MetricsReader sdkmetric.Reader
+	// OnAnalyticsWriter, when set, is called exactly once during boot with the
+	// assembled async analytics writer's drain handle, so the L1 harness can
+	// persist everything queued the moment a scenario stops making traffic and
+	// read events back deterministically (h.Events()) instead of outwaiting the
+	// 250ms flush tick. Assembly-only like the rest of Overrides: no YAML key or
+	// CLI flag can set it (enforced by TestOverridesAreNotConfigurable), and
+	// production never sets it — nil leaves boot byte-identical.
+	OnAnalyticsWriter func(AnalyticsFlusher)
+	// Inflight is installed as the proxy's quiescence tracker (proxy.Config
+	// .Inflight): every request scope enters it at request-read and leaves only
+	// after its terminal bookkeeping, so the harness's oracles wait for the
+	// drain instead of racing the post-response record (#363). Production never
+	// sets it — nil means the proxy runs untracked (one nil check per request).
+	Inflight *proxy.Inflight
+	// BeforeTerminal is installed as the proxy's terminal-bookkeeping hook
+	// (proxy.Config.BeforeTerminal): called at the top of every terminal
+	// bookkeeping section, it is a TEST-ONLY trap the harness parks in to make
+	// the exact post-response window whose bookkeeping race the tracker closes
+	// deterministic-red instead of flaky-red. Production never sets it (nil =
+	// one nil check, no call). It must never grow beyond a test inconveniencer:
+	// it delays bookkeeping, never egress decisions.
+	BeforeTerminal func()
+}
+
+// AnalyticsFlusher is the drain capability of the async analytics writer: Flush
+// persists everything already queued and returns (analytics flush semantics —
+// no deadline, never a drop). A FAILED batch write is returned, not acked as
+// persisted — the batch stays buffered for the next flush, and the caller
+// learns the read-your-writes view it asked for does not exist. It is the ONLY
+// surface handed out on the writer: no reach into the queue, the batch, or the
+// underlying store.
+type AnalyticsFlusher interface {
+	Flush() error
 }
 
 // Run loads config, wires dependencies behind their interfaces, constructs the
@@ -199,6 +238,16 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		logger.Info("upstream DNS resolver configured for warden's own upstream dials", "resolver", resolverAddr)
 	}
 
+	// LOCAL-ONLY SSRF exceptions (upstream.allowPrivateCIDRs): punch holes in the
+	// private-IP blocklist for lab/test networks where an allowlisted upstream
+	// legitimately sits on a private range (the L2 container harness). Security-
+	// relevant and never CP-distributable, so it is loud: one WARN naming every
+	// active exception, so a production config that sets it cannot go unnoticed.
+	if len(pol.Upstream.AllowPrivateCIDRs) > 0 {
+		logger.Warn("upstream.allowPrivateCIDRs is active: the listed CIDR ranges are exempt from SSRF private-IP blocking — lab and test networks only, never set this in production",
+			"exempt", strings.Join(pol.Upstream.AllowPrivateCIDRs, ","))
+	}
+
 	// Managed vs local-only. Managed = a control plane is configured and
 	// --local-only is not set: the worker's allow/deny policy comes ONLY from the
 	// control plane and it boots fail-closed (deny all) until the first pull.
@@ -234,6 +283,9 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		// Announce this worker's id on each pull/heartbeat so the control plane
 		// lists it as connected even before it forwards analytics.
 		rp.SetProxyID(expandEnv(pol.Central.ProxyID))
+		// Shutdown hygiene: drop the pooled keep-alive conns when Run returns, so
+		// a hosted worker leaves no open connections to the control plane.
+		defer rp.CloseIdleConnections()
 		if pullErr := rp.Pull(); pullErr != nil {
 			logger.Warn("control plane unreachable at boot; starting FAIL-CLOSED (deny all) until policy arrives", "error", pullErr)
 		} else if remote, gErr := rp.GetPolicy(); gErr == nil {
@@ -300,6 +352,10 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// handler when disabled, and record calls are nil-safe no-ops. OTel providers
 	// init ONCE here; a distributed observability change applies on the NEXT
 	// restart (the worker re-pulls settings at boot), never on a live long-poll.
+	var metricsReader sdkmetric.Reader
+	if p.Overrides != nil {
+		metricsReader = p.Overrides.MetricsReader
+	}
 	metrics, metricsHandler, shutdownObs, err := observability.New(observability.Config{
 		Enabled:            obsCfg.Enabled,
 		ServiceName:        obsCfg.ServiceName,
@@ -307,6 +363,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		MetricsEnabled:     obsCfg.MetricsEnabled,
 		OTLPEndpoint:       obsCfg.OTLPEndpoint,
 		ResourceAttributes: obsCfg.ResourceAttributes,
+		Reader:             metricsReader,
 	})
 	if err != nil {
 		return err
@@ -446,6 +503,8 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	costEstimator := cost.NewEstimator()
 
 	// Optional auth transforms (OAuth2 / SigV4 / HMAC / API-key) per destination.
+	// The fetch client deliberately gets NO upstream.allowPrivateCIDRs: the SSRF
+	// exception widens the proxy's dialer only (proxy.Config), never this one.
 	var transformers []*auth.MatchedTransformer
 	if len(pol.Auth) > 0 {
 		authClient, acErr := newSafeHTTPClient(10*time.Second, "", upstreamDNS)
@@ -487,6 +546,12 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		return int64(asyncStore.QueueDepth())
 	}); rqErr != nil {
 		logger.Warn("analytics queue depth metric not registered", "error", rqErr)
+	}
+	// Assembly-only harness seam (#363): hand the drain handle to whoever asked
+	// for it at assembly time. Production never sets OnAnalyticsWriter, so this
+	// is one nil check away from byte-identical behavior.
+	if p.Overrides != nil && p.Overrides.OnAnalyticsWriter != nil {
+		p.Overrides.OnAnalyticsWriter(asyncStore)
 	}
 
 	// Audit decorators wrap the analytics WRITE chain. Order matters and is load-
@@ -570,6 +635,8 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		if rErr != nil {
 			return rErr
 		}
+		// Same shutdown hygiene as the policy client above.
+		defer remote.CloseIdleConnections()
 		syncWorker = analytics.NewSyncWorker(store, remote, expandEnv(pol.Central.ProxyID), pol.Central.BatchSize, pol.Central.BufferCap, pol.Central.Interval)
 		logger.Info("central worker enabled", "endpoint", pol.Central.Endpoint, "proxyID", expandEnv(pol.Central.ProxyID))
 	}
@@ -594,6 +661,8 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		Transformers:      transformers,
 		Cost:              costEstimator,
 		UpstreamResolver:  upstreamDNS,
+
+		UpstreamAllowPrivateCIDRs: pol.Upstream.AllowPrivateCIDRs,
 	}
 	if judge != nil {
 		cfg.Judge = judge
@@ -604,6 +673,8 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	if p.Overrides != nil {
 		cfg.Dialer = p.Overrides.Dialer
 		cfg.UpstreamRootCAs = p.Overrides.UpstreamRootCAs
+		cfg.Inflight = p.Overrides.Inflight
+		cfg.BeforeTerminal = p.Overrides.BeforeTerminal
 	}
 
 	pxy, err := newProxy(cfg)

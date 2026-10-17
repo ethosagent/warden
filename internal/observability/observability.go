@@ -72,6 +72,13 @@ type Config struct {
 	// ResourceAttributes are extra bounded key/value pairs added to the resource
 	// (e.g. warden.proxy.id for fleet slicing). Never put secrets here.
 	ResourceAttributes map[string]string
+	// Reader, when set, is attached to the meter provider as an EXTRA metric
+	// reader, alongside the Prometheus exporter and/or the OTLP push, so a test
+	// can collect metrics in-process (an sdk/metric ManualReader). Assembly-only
+	// like worker.Overrides: production wiring never sets it, and no YAML key or
+	// CLI flag can — enforced by TestOverridesAreNotConfigurable in
+	// internal/worker.
+	Reader sdkmetric.Reader
 }
 
 // Metrics is the OTel metric emitter. All record methods are safe on a nil
@@ -148,6 +155,12 @@ func New(cfg Config) (*Metrics, http.Handler, ShutdownFunc, error) {
 		readers = append(readers, sdkmetric.WithReader(
 			sdkmetric.NewPeriodicReader(otlpExp, sdkmetric.WithInterval(15*time.Second)),
 		))
+	}
+
+	// Assembly-only in-process reader (the L1 harness's metrics oracle). A nil
+	// reader (production) adds nothing.
+	if cfg.Reader != nil {
+		readers = append(readers, sdkmetric.WithReader(cfg.Reader))
 	}
 
 	opts := append([]sdkmetric.Option{sdkmetric.WithResource(res)}, readers...)

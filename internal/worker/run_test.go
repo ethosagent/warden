@@ -31,6 +31,8 @@ import (
 	"github.com/ethosagent/warden/internal/proxy"
 	"github.com/ethosagent/warden/internal/scan"
 	"github.com/ethosagent/warden/test/fakes"
+	"reflect"
+	"sync/atomic"
 )
 
 // writeConfig writes cfg to a temp file and returns its path.
@@ -343,6 +345,128 @@ func TestRun_ConfigError(t *testing.T) {
 	}
 }
 
+// TestRun_Managed_ClosesControlPlaneConnectionsOnShutdown pins the shutdown
+// hygiene the in-process harness (and any embedder) depends on: when Run
+// returns, the HTTP clients it assembled (policy pull/long-poll, heartbeat,
+// central forwarding) hold NO open connections to the control plane. Run
+// returning must not strand pooled keep-alive conns — in a hosted process they
+// keep server-side goroutines alive past shutdown.
+//
+// The central-forwarding leg is exercised FOR REAL: the worker's DB is
+// pre-seeded with one event, so the SyncWorker's immediate SyncOnce POSTs it
+// to /central/ingest and that client demonstrably holds a pooled connection at
+// shutdown. (With no events to forward the client never opens one, and the
+// assertion would pass vacuously even with the close missing.) Shutdown is
+// triggered only AFTER the ingest POST is observed, so the close-under-test
+// always has a connection to close.
+func TestRun_Managed_ClosesControlPlaneConnectionsOnShutdown(t *testing.T) {
+	var connsMu sync.Mutex
+	open := 0
+	sawIngest := make(chan struct{}, 1)
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/central/ingest" {
+			_, _ = io.Copy(io.Discard, r.Body)
+			select {
+			case sawIngest <- struct{}{}:
+			default:
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	srv.Config.ConnState = func(_ net.Conn, s http.ConnState) {
+		connsMu.Lock()
+		defer connsMu.Unlock()
+		switch s {
+		case http.StateNew:
+			open++
+		case http.StateClosed:
+			open--
+		}
+	}
+
+	// The worker must trust the stub CP's certificate: export it as PEM for
+	// controlPlane.caCert.
+	caPath := filepath.Join(t.TempDir(), "cp-ca.pem")
+	if err := os.WriteFile(caPath, pem.EncodeToMemory(&pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: srv.Certificate().Raw,
+	}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WARDEN_TEST_CP_TOKEN", "tok")
+
+	cfg := `
+policy:
+  allowlist:
+    - domain: api.openai.com
+logging:
+  level: error
+  format: json
+controlPlane:
+  endpoint: https://` + strings.TrimPrefix(srv.URL, "https://") + `/policy
+  tokenEnv: WARDEN_TEST_CP_TOKEN
+  caCert: ` + caPath + `
+  pollInterval: 20ms
+  longPollWait: 10ms
+  heartbeatInterval: 20ms
+central:
+  mode: worker
+  endpoint: https://` + strings.TrimPrefix(srv.URL, "https://") + `/central/ingest
+  proxyID: worker-1
+  caCert: ` + caPath + `
+  interval: 50ms
+`
+	p := runParams(t, writeConfig(t, cfg))
+
+	// Pre-seed the worker's analytics DB: the SyncWorker fires SyncOnce
+	// immediately at Start, so the forwarding client opens its connection
+	// deterministically at boot — the test never waits on a tick to make the
+	// central leg live (the 50ms interval above only matters for retries).
+	seed, err := analytics.NewSQLiteStore("file:"+p.DBPath, 0)
+	if err != nil {
+		t.Fatalf("open the worker DB to seed an event: %v", err)
+	}
+	if err := seed.StoreEvent(analytics.Event{
+		Domain:   "api.openai.com",
+		Decision: "allow",
+		Protocol: "https",
+	}); err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatalf("close the seeding store: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runErr := make(chan error, 1)
+	go func() { runErr <- Run(ctx, io.Discard, p) }()
+	select {
+	case <-sawIngest:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the central forwarding client never POSTed the seeded event to /central/ingest; the central leg never went live")
+	}
+	cancel()
+	if err := <-runErr; err != nil {
+		t.Fatalf("Run (managed) returned error on clean shutdown: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		connsMu.Lock()
+		n := open
+		connsMu.Unlock()
+		if n == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d control-plane connection(s) still open after Run returned; the assembled clients were not closed", n)
+		}
+		<-time.After(10 * time.Millisecond)
+	}
+}
+
 // TestNewSafeHTTPClient covers both the no-CA path and the CA-pool path, plus the
 // error path for a missing/invalid CA file.
 func TestNewSafeHTTPClient(t *testing.T) {
@@ -609,5 +733,290 @@ func TestRunClosesInjectedListenersOnBootError(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestRun_AllowPrivateCIDRsReachProxy guards the wiring of the LOCAL-ONLY
+// upstream.allowPrivateCIDRs: the parsed list must land in
+// proxy.Config.UpstreamAllowPrivateCIDRs so the proxy's SafeDialer exempts
+// those ranges. Dropping the field from the proxy.Config literal silently
+// re-blocks every private upstream (and breaks the L2 compose stack, whose
+// fake upstream lives on a Docker bridge network).
+func TestRun_AllowPrivateCIDRsReachProxy(t *testing.T) {
+	var got proxy.Config
+	orig := newProxy
+	newProxy = func(cfg proxy.Config) (*proxy.Proxy, error) {
+		got = cfg
+		return orig(cfg)
+	}
+	t.Cleanup(func() { newProxy = orig })
+
+	cfg := `
+policy:
+  allowlist:
+    - domain: api.example.test
+upstream:
+  allowPrivateCIDRs:
+    - "10.200.0.0/24"
+logging:
+  level: error
+  format: text
+`
+	if err := runUntilCtxDone(t, runParams(t, writeConfig(t, cfg))); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	want := []string{"10.200.0.0/24"}
+	if !reflect.DeepEqual(got.UpstreamAllowPrivateCIDRs, want) {
+		t.Fatalf("UpstreamAllowPrivateCIDRs = %v, want %v", got.UpstreamAllowPrivateCIDRs, want)
+	}
+}
+
+// TestRun_AllowPrivateCIDRsWarnsLabOnly boots a worker with the SSRF exception
+// list set and asserts the one clear startup WARN that names the active
+// exceptions and says the key is for lab use only — the operator-facing line
+// production must never be able to miss.
+func TestRun_AllowPrivateCIDRsWarnsLabOnly(t *testing.T) {
+	const warnCfg = `
+policy:
+  allowlist:
+    - domain: api.example.test
+upstream:
+  allowPrivateCIDRs:
+    - "10.200.0.0/24"
+logging:
+  level: info
+  format: text
+`
+	const plainCfg = `
+policy:
+  allowlist:
+    - domain: api.example.test
+logging:
+  level: info
+  format: text
+`
+	// Deterministic waits, not sleeps: Run logs the WARN during startup, so
+	// wait for the exact line, then cancel. The quiet case waits for "proxy
+	// listening" — proof startup COMPLETED without the warning ever logging.
+	var out syncBuffer
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- Run(ctx, &out, runParams(t, writeConfig(t, warnCfg))) }()
+	waitForLog(t, &out, "upstream.allowPrivateCIDRs")
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run returned error on clean shutdown: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after ctx cancel")
+	}
+	logged := out.String()
+	if !strings.Contains(logged, "10.200.0.0/24") {
+		t.Fatalf("startup WARN does not name the active exception; got:\n%s", logged)
+	}
+	if !strings.Contains(logged, "lab") {
+		t.Fatalf("startup WARN does not say the key is lab-only; got:\n%s", logged)
+	}
+
+	// Absent block: no warning (default-off must stay silent).
+	var quiet syncBuffer
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+	done2 := make(chan error, 1)
+	go func() { done2 <- Run(ctx2, &quiet, runParams(t, writeConfig(t, plainCfg))) }()
+	waitForLog(t, &quiet, "proxy listening")
+	cancel2()
+	select {
+	case err := <-done2:
+		if err != nil {
+			t.Fatalf("Run (no exceptions) returned error on clean shutdown: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run (no exceptions) did not return after ctx cancel")
+	}
+	if strings.Contains(quiet.String(), "upstream.allowPrivateCIDRs") {
+		t.Fatalf("default-off worker must not log the lab-only warning; got:\n%s", quiet.String())
+	}
+}
+
+// TestRun_AuthFetchClientNeverExemptsPrivateRanges pins the ONE-SITE rule for
+// upstream.allowPrivateCIDRs: the exception list widens the PROXY's dialer
+// only (proxy.Config.UpstreamAllowPrivateCIDRs). The auth-fetch client (the
+// second SafeDialer, used for OAuth2/SigV4 token fetches) must never inherit
+// it — a loopback/private token endpoint stays refused by SSRF protection even
+// when the worker locally excepts that range for its upstream dials. The
+// worker boots with an oauth2 auth entry whose tokenURL is on loopback AND
+// upstream.allowPrivateCIDRs exempting loopback; driving the captured
+// transformer proves the fetch is blocked and the token endpoint is never hit.
+// Wiring the exception into the auth client again makes the fetch succeed and
+// this test fail.
+func TestRun_AuthFetchClientNeverExemptsPrivateRanges(t *testing.T) {
+	// tokenURL sits INSIDE the locally excepted range on an address with no
+	// listener. That makes the two worlds distinguishable without trusting TLS:
+	// correct wiring refuses the dial outright with the SSRF error; a stray
+	// exception would make the client ATTEMPT the dial, which fails differently
+	// (refused/timeout) — and this test fails. Loopback cannot play this role:
+	// it is never exemptable (the /_rebind defense keeps 127.0.0.0/8 forbidden).
+	var got proxy.Config
+	orig := newProxy
+	newProxy = func(cfg proxy.Config) (*proxy.Proxy, error) {
+		got = cfg
+		return orig(cfg)
+	}
+	t.Cleanup(func() { newProxy = orig })
+
+	cfg := `
+policy:
+  allowlist:
+    - domain: api.example.test
+auth:
+  - match: api.example.test
+    type: oauth2_client_credentials
+    tokenURL: http://10.200.0.1:9/token
+    clientID: e2e-client
+    clientSecret: e2e-secret
+upstream:
+  allowPrivateCIDRs:
+    - "10.200.0.0/24"
+logging:
+  level: error
+  format: text
+`
+	if err := runUntilCtxDone(t, runParams(t, writeConfig(t, cfg))); err != nil {
+		t.Fatalf("Run returned error on clean shutdown: %v", err)
+	}
+	if len(got.Transformers) != 1 {
+		t.Fatalf("transformers = %d, want 1 (the oauth2 entry)", len(got.Transformers))
+	}
+
+	req, err := http.NewRequest(http.MethodGet, "http://api.example.test/", nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	if err := got.Transformers[0].Transformer.Transform(req); err == nil ||
+		!strings.Contains(err.Error(), "blocked (SSRF protection)") {
+		t.Fatalf("token fetch: got %v, want an SSRF block (upstream.allowPrivateCIDRs must never widen the auth-fetch client)", err)
+	}
+}
+
+// TestRun_Managed_KeepsLocalUpstreamExceptions is the worker-level guard for
+// the managed-mode interaction: a CP-MANAGED worker pulls its allow/deny from
+// the control plane, but the SSRF exception list (upstream.allowPrivateCIDRs)
+// is LOCAL-only wiring that json:"-" keeps off the CP wire. The proxy's dialer
+// must therefore be built from the LOCAL value — the CP-served policy must not
+// clear it, and (being unable to name exceptions at all) must not widen it.
+// The fake CP below serves a policy with NO upstream block; if Run ever
+// sourced UpstreamAllowPrivateCIDRs from the remote policy (or the live
+// evaluator) instead of the local file, the captured proxy.Config would come
+// up empty and this test would fail.
+func TestRun_Managed_KeepsLocalUpstreamExceptions(t *testing.T) {
+	t.Setenv("WARDEN_CP_TOKEN", "test-token")
+
+	const policyV1 = `{"allowlist":[{"domain":"api.example.test"}],"denylist":[{"domain":"evil.example.test"}]}`
+	const policyV2 = `{"allowlist":[{"domain":"api.example.test"},{"domain":"llm.example.test"}],"denylist":[{"domain":"evil.example.test"}]}`
+
+	// Minimal CP: /policy serves v1, then v2 once flip is set (the long-poll
+	// returns 304 while nothing changed), /control/heartbeat is a 200.
+	var flip atomic.Bool
+	mux := http.NewServeMux()
+	mux.HandleFunc("/policy", func(w http.ResponseWriter, r *http.Request) {
+		body := policyV1
+		etag := `"v1"`
+		if flip.Load() {
+			body, etag = policyV2, `"v2"`
+		}
+		if r.URL.Query().Get("wait") != "" && r.Header.Get("If-None-Match") == etag {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("ETag", etag)
+		_, _ = w.Write([]byte(body))
+	})
+	mux.HandleFunc("/control/heartbeat", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	cp := httptest.NewTLSServer(mux)
+	defer cp.Close()
+	caPath := filepath.Join(t.TempDir(), "cp-ca.pem")
+	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cp.Certificate().Raw})
+	if err := os.WriteFile(caPath, caPEM, 0o600); err != nil {
+		t.Fatalf("write cp ca pem: %v", err)
+	}
+
+	var got proxy.Config
+	orig := newProxy
+	newProxy = func(cfg proxy.Config) (*proxy.Proxy, error) {
+		got = cfg
+		return orig(cfg)
+	}
+	t.Cleanup(func() { newProxy = orig })
+
+	// The worker's LOCAL file keeps only local things — including the SSRF
+	// exception — and carries NO allowlist (a managed worker gets it from the CP).
+	cfg := `
+controlPlane:
+  endpoint: ` + cp.URL + `/policy
+  tokenEnv: WARDEN_CP_TOKEN
+  caCert: ` + caPath + `
+  longPollWait: 50ms
+  heartbeatInterval: 1s
+upstream:
+  allowPrivateCIDRs:
+    - "10.200.0.0/24"
+logging:
+  level: info
+  format: text
+`
+	var out syncBuffer
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runErr := make(chan error, 1)
+	go func() { runErr <- Run(ctx, &out, runParams(t, writeConfig(t, cfg))) }()
+
+	// The initial CP pull must have been applied (the worker is genuinely
+	// managed). "proxy listening" is logged after the proxy (and its dialer)
+	// is built, so the captured proxy.Config is populated by then.
+	waitForLog(t, &out, "control plane policy applied")
+	waitForLog(t, &out, "proxy listening")
+	want := []string{"10.200.0.0/24"}
+	if !reflect.DeepEqual(got.UpstreamAllowPrivateCIDRs, want) {
+		t.Fatalf("UpstreamAllowPrivateCIDRs after the initial CP pull = %v, want %v (the local exception must survive a CP-served policy)", got.UpstreamAllowPrivateCIDRs, want)
+	}
+
+	// And again on every update: change the CP policy, wait for the reload,
+	// re-assert the local value is untouched.
+	flip.Store(true)
+	waitForLog(t, &out, "control plane policy reloaded")
+	if !reflect.DeepEqual(got.UpstreamAllowPrivateCIDRs, want) {
+		t.Fatalf("UpstreamAllowPrivateCIDRs after a CP policy update = %v, want %v", got.UpstreamAllowPrivateCIDRs, want)
+	}
+
+	cancel()
+	select {
+	case err := <-runErr:
+		if err != nil {
+			t.Fatalf("Run returned error on clean shutdown: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after ctx cancel")
+	}
+}
+
+// waitForLog polls buf until it contains substr, failing after a deadline.
+// Deterministic stand-in for fixed sleeps: Run's startup and background loops
+// log asynchronously, so the test waits for the exact line it asserts on.
+func waitForLog(t *testing.T, buf *syncBuffer, substr string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if strings.Contains(buf.String(), substr) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("log line %q never appeared; got:\n%s", substr, buf.String())
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }

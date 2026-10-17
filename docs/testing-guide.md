@@ -36,8 +36,7 @@ Hand-written test doubles for the three core interfaces live in `test/fakes/`:
 
 ## Integration tests
 
-Integration tests wire real components together (real SQLite store, real secret cache,
-real policy evaluator) and verify the M1 exit criteria. They run behind the `integration`
+Integration tests exercise the built artifact. They run behind the `integration`
 build tag:
 
 ```sh
@@ -52,11 +51,11 @@ go test -tags=integration -race -v ./test/integration/...
 
 | Test | What it proves |
 |------|---------------|
-| `TestE2E_AllowlistedHTTPSSucceeds` | CONNECT to allowlisted domain → 200 |
-| `TestE2E_NonAllowlistedBlocked` | CONNECT to non-allowlisted domain → 403, deny event in SQLite |
-| `TestE2E_SecretSwapped` | Real `secrets.Cache` + `EnvFetcher` resolves placeholder → real key |
-| `TestE2E_DecisionLogging` | Both allow and deny events appear in real SQLite store with correct fields |
 | `TestSingleBinary` | `CGO_ENABLED=0 go build` succeeds → confirms pure-Go, no C deps |
+
+The behavioural end-to-end checks that used to live here (allowlisted HTTPS,
+default-deny, secret swap, decision logging) are harness scenarios now:
+`go test ./test/scenarios/`.
 
 ## Full CI gate
 
@@ -77,6 +76,30 @@ This runs in order:
 6. Coverage gate (fails if below `COVERAGE_MIN`, default 70%)
 
 Add `--integration` for the full gate including e2e tests.
+
+## L2: container tests
+
+The L1 harness (`test/harness`, `test/scenarios`) runs Warden in-process. L2 runs it as
+real containers, to prove what only real containers can: the agent has no route out
+except its worker, default-deny holds, no real credential reaches the agent, and a fleet
+(one control plane, two workers) behaves when policy changes or the control plane dies.
+The suite lives in `test/e2e` behind the `e2e` build tag, so `go test ./...` and
+`scripts/check.sh` never start Docker. It needs Docker, `make` and the free host ports
+7070, 8081, 9091 and 9092 (one stack at a time).
+
+```sh
+make e2e                                  # the whole suite, ~3 min: up, test, down
+make e2e-up                               # just bring the hermetic stack up (and prove it hermetic)
+make e2e-down                             # down -v
+make e2e-scenario NAME=TestFleet_         # one test or a group (-run regexp)
+KEEP_STACK=1 make e2e                     # leave the stack up after the run, to debug
+E2E_STACK_RUNNING=1 go test -tags e2e ./test/e2e/ -run TestFleet -v   # reuse a stack you started
+```
+
+`go vet -tags e2e ./test/e2e/` compiles the package without Docker. Details of the stack,
+the oracles and the fleet scenarios: `docs/docker-end-to-end.md`. In CI the suite is the
+`e2e` job: required for `risk:critical` PRs, nightly on `main`, and a gate on every
+release image.
 
 ## Manual local testing
 
@@ -101,76 +124,9 @@ export OPENAI_API_KEY="sk-..."  # or any real API key
 
 ### Test scenarios
 
-Open a second terminal and run each scenario:
-
-#### Scenario 1: Allowed request with secret swap
-
-```sh
-curl -x http://127.0.0.1:8080 --cacert certs/proxy-ca.crt \
-  https://api.openai.com/v1/models \
-  -H "Authorization: Bearer openai_secret_001"
-```
-
-**Expected:** 200 OK with model list. The proxy replaced `openai_secret_001` with
-the real `$OPENAI_API_KEY` before forwarding.
-
-#### Scenario 2: Blocked destination (default-deny)
-
-```sh
-curl -x http://127.0.0.1:8080 --cacert certs/proxy-ca.crt \
-  https://evil.example.com/steal-data
-```
-
-**Expected:** HTTP 403 Forbidden. The destination is not on the allowlist.
-
-#### Scenario 3: POST with secret swap in header and body
-
-```sh
-curl -x http://127.0.0.1:8080 --cacert certs/proxy-ca.crt \
-  https://api.openai.com/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer openai_secret_001" \
-  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Say hello"}]}'
-```
-
-**Expected:** 200 OK with a chat response. Secret swapped in the Authorization header.
-
-#### Scenario 4: Check the dashboard
-
-Open http://127.0.0.1:9090/dashboard/ in a browser. You should see the requests from
-scenarios 1-3 in the traffic table.
-
-#### Scenario 5: Check analytics directly
-
-```sh
-sqlite3 warden.db "SELECT domain, decision, method, url, secret_ref FROM events ORDER BY id DESC LIMIT 10;"
-```
-
-**Expected:** Rows for each request. `secret_ref` shows `sha256:...` (never the raw key).
-
-#### Scenario 6: Verify no raw secret leaked
-
-```sh
-sqlite3 warden.db "SELECT COUNT(*) FROM events WHERE secret_ref LIKE '%sk-%';"
-```
-
-**Expected:** 0.
-
-#### Scenario 7: Refresh secrets
-
-```sh
-curl -X POST http://127.0.0.1:9090/admin/refresh-secrets
-```
-
-**Expected:** `refreshed`. The secret cache is dropped and refetched from env vars.
-
-#### Scenario 8: Health check
-
-```sh
-curl http://127.0.0.1:9090/healthz
-```
-
-**Expected:** `ok`.
+These run as `go test ./test/scenarios/`. See `test/scenarios/README.md`.
+The curl commands for trying them by hand are in the appendix
+[Demo by hand](#appendix-demo-by-hand).
 
 ## Docker Compose testing (full isolation proof)
 
@@ -319,3 +275,78 @@ or set `SSL_CERT_FILE=certs/proxy-ca.crt` in the environment.
 Make sure you're pointing curl at the proxy with `-x http://127.0.0.1:8080` and
 the proxy has TLS termination enabled (`--ca-cert` + `--ca-key`). Without TLS
 termination, the proxy does blind tunneling and cannot inspect or log HTTP requests.
+
+## Appendix: Demo by hand
+
+With the proxy from "Start the proxy" running, open a second terminal. Each step
+below is automated as a scenario in `test/scenarios/` (named in the heading); run
+them here only to see the behaviour with your own eyes.
+
+### Step 1: Allowed request with secret swap (`allow_with_swap`)
+
+```sh
+curl -x http://127.0.0.1:8080 --cacert certs/proxy-ca.crt \
+  https://api.openai.com/v1/models \
+  -H "Authorization: Bearer openai_secret_001"
+```
+
+**Expected:** 200 OK with model list. The proxy replaced `openai_secret_001` with
+the real `$OPENAI_API_KEY` before forwarding.
+
+### Step 2: Blocked destination (`default_deny`)
+
+```sh
+curl -x http://127.0.0.1:8080 --cacert certs/proxy-ca.crt \
+  https://evil.example.com/steal-data
+```
+
+**Expected:** HTTP 403 Forbidden. The destination is not on the allowlist.
+
+### Step 3: POST with secret swap in header and body (`swap_in_body`)
+
+```sh
+curl -x http://127.0.0.1:8080 --cacert certs/proxy-ca.crt \
+  https://api.openai.com/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer openai_secret_001" \
+  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Say hello"}]}'
+```
+
+**Expected:** 200 OK with a chat response. Secret swapped in the Authorization header.
+
+### Step 4: Check the dashboard (`dashboard_traffic_api`)
+
+Open http://127.0.0.1:9090/dashboard/ in a browser. You should see the requests from
+scenarios 1-3 in the traffic table.
+
+### Step 5: Check analytics directly (`events_recorded`)
+
+```sh
+sqlite3 warden.db "SELECT domain, decision, method, url, secret_ref FROM events ORDER BY id DESC LIMIT 10;"
+```
+
+**Expected:** Rows for each request. `secret_ref` shows `sha256:...` (never the raw key).
+
+### Step 6: Verify no raw secret leaked (every scenario ends with `AssertCanaryNeverLeaked`)
+
+```sh
+sqlite3 warden.db "SELECT COUNT(*) FROM events WHERE secret_ref LIKE '%sk-%';"
+```
+
+**Expected:** 0.
+
+### Step 7: Refresh secrets (`refresh_secrets`)
+
+```sh
+curl -X POST http://127.0.0.1:9090/admin/refresh-secrets
+```
+
+**Expected:** `refreshed`. The secret cache is dropped and refetched from env vars.
+
+### Step 8: Health check (`healthz`)
+
+```sh
+curl http://127.0.0.1:9090/healthz
+```
+
+**Expected:** `ok`.

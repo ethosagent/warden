@@ -88,6 +88,11 @@ func (h *HTTPRemoteStore) SendBatch(events []Event) error {
 	return h.post(ingestEnvelope{Events: events})
 }
 
+// CloseIdleConnections drops the pooled keep-alive connections of the forwarding
+// client. Run calls it on shutdown so a hosted worker leaves no open
+// connections — and no server-side goroutines — behind.
+func (h *HTTPRemoteStore) CloseIdleConnections() { h.client.CloseIdleConnections() }
+
 // SendMCP forwards this worker's MCP inventory + observed schema to the CP.
 func (h *HTTPRemoteStore) SendMCP(snap MCPSnapshot) error {
 	return h.post(ingestEnvelope{MCP: &snap})

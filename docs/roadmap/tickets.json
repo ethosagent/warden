@@ -16,6 +16,22 @@
     "done_when": ""
   },
   {
+    "id": "p1-harness",
+    "phase": 1,
+    "name": "L1 test harness",
+    "lane": "agent",
+    "label": "l1-test-harness",
+    "summary": "One Go test process starts the real worker and the real control plane on loopback, with fakes for everything outside Warden (upstreams, DNS, time, trust roots), and checks behaviour through Warden's own outputs. Every feature below adds a fake and a scenario to it instead of building its own test rig. Built and tracked under #350.",
+    "touches": [
+      "test/harness",
+      "test/scenarios"
+    ],
+    "design": [],
+    "tickets": [],
+    "depends_on_items": [],
+    "done_when": "Merged under #350: `go test ./test/scenarios -race` boots the real control plane and worker in one process and runs the scenario catalog, the canary oracle fails any scenario that leaks a secret, and the port-coverage test fails CI for any port interface without a registered fake."
+  },
+  {
     "id": "p1-identity-contract",
     "phase": 1,
     "name": "Identity contract + CLI",
@@ -44,6 +60,7 @@
       "scripts"
     ],
     "depends_on_items": [
+      "p1-harness",
       "p1-dex",
       "p1-verify-token"
     ],
@@ -479,7 +496,9 @@
       "scripts/dex-token.sh",
       "test/deploy/"
     ],
-    "depends_on_items": [],
+    "depends_on_items": [
+      "p1-harness"
+    ],
     "done_when": "With `docker compose -f deploy/compose/docker-compose.identity.yml up -d` (Dex and OpenLDAP, both pinned by tag and digest, dev config): (1) `/dex/.well-known/openid-configuration` returns the same issuer string from the host (hosts entry) and from a container on cp-net; (2) `scripts/dex-token.sh` for a seeded warden-admins user via `agent-harness` returns an ID token with aud containing `warden`, azp=`agent-harness`, groups containing `warden-admins` and exp-iat=3600; (3) the public `warden-cli` client gets a device_code and user_code; (4) the prod config has no password grant (asserted by `go test ./test/deploy`); (5) after `docker compose restart dex` existing tokens still verify against JWKS and the refresh token still works; (6) the identity file validates merged with docker-compose.control-plane.yml; (7) `scripts/check.sh` passes with its secret-literal stage; (8) docs/identity-dex.md commands run as written and cover the prod checklist and failure modes.",
     "tickets": [
       {
@@ -1081,6 +1100,7 @@
       "go.mod"
     ],
     "depends_on_items": [
+      "p1-harness",
       "p1-dex",
       "p1-verify-token"
     ],
@@ -1302,12 +1322,12 @@
       },
       {
         "key": "W-P1-SSO-07",
-        "title": "Add Dex-backed console SSO end-to-end test",
+        "title": "Add Dex-backed console SSO scenario on test/harness",
         "type": "test",
         "estimate": "M",
-        "body": "Every other ticket in this feature tests against an httptest fake IdP. This test proves the done-when sentence against the real reference stack: Dex with the seeded LDAP users from W-P1-DEX-02 and a CP in oidc mode. It runs behind the existing `integration` build tag in test/integration, so normal `go test ./...` is unaffected.",
+        "body": "Every other ticket in this feature tests against an httptest fake IdP. This test proves the done-when sentence against the real reference stack: Dex with the seeded LDAP users from W-P1-DEX-02 and a CP in oidc mode. It is a scenario on `test/harness` (marked L2 so #351 runs it on the compose stack) rather than a new rig in test/integration, and skips unless `WARDEN_IT_DEX=1`.",
         "requirements": [
-          "Lives in test/integration/console_sso_test.go (new) with `//go:build integration`, using the identity compose stack from W-P1-DEX-02 and the `warden-console` Dex client from W-P1-DEX-01. It skips unless `WARDEN_IT_DEX=1`, so the CI integration job from W-P1-VRFY-05 does not need Dex.",
+          "Lives in test/scenarios (console_sso.go, registered in scenarios_list.go with L2 true), building on `test/harness`, using the identity compose stack from W-P1-DEX-02 and the `warden-console` Dex client from W-P1-DEX-01. It skips unless `WARDEN_IT_DEX=1`, so the CI integration job from W-P1-VRFY-05 does not need Dex.",
           "Logs in seeded warden-viewers, warden-editors and warden-admins users through /auth/login with a cookie-jar HTTP client that submits Dex's LDAP login form; no browser is needed.",
           "Asserts the role matrix: viewer GET 200 and POST /dashboard/api/policy 403; editor PUT policy 2xx and settings with llmProviders 403; only admin POST /dashboard/api/integrations and POST /dashboard/api/secretstore succeed.",
           "Asserts that Bearer WARDEN_CP_TOKEN gets 401 on /dashboard/api/* and /central/secrets while a worker still pulls /policy.",
@@ -1315,17 +1335,17 @@
           "Test output never prints passwords, cookies, codes or tokens."
         ],
         "plan": [
-          "Create test/integration/console_sso_test.go (new) behind the integration tag, reusing helpers from test/integration/integration_test.go.",
+          "Create the console SSO scenario in test/scenarios, reusing the harness API instead of test/integration helpers.",
           "Start the CP with TLS on localhost:7070 (certs from scripts/gen-certs.sh, test client trusting the proxy CA) and a --config containing console.auth=oidc, issuer http://dex:5556/dex (resolved through the `127.0.0.1 dex` hosts entry from W-P1-DEX-02), clientID warden-console, redirectURL https://localhost:7070/auth/callback to match the W-P1-DEX-01 client, allowInsecureIssuer: true, the three role groups and a --state-dir in a temp dir.",
           "Add a login helper (new) that follows /auth/login, posts the Dex LDAP form and returns the session cookie and CSRF token from /auth/me.",
           "Run the role matrix, shared-token checks and session revocation checks as subtests.",
           "Document the run command in docs/control-plane.md next to the role matrix."
         ],
         "acceptance": [
-          "With the identity compose stack running, the suite passes: `WARDEN_IT_DEX=1 go test -tags integration ./test/integration -run TestConsoleSSO`",
+          "With the identity compose stack running, the suite passes: `WARDEN_IT_DEX=1 go test ./test/scenarios -run 'TestScenarios/console_sso'`",
           "Given the warden-viewers user, POST /dashboard/api/policy returns 403 and GET /dashboard/api/traffic returns 200",
           "Given the shared bearer only, /dashboard/api/settings and /central/secrets return 401 while /policy returns 200",
-          "Without the integration tag, `go test ./test/integration` compiles and skips this file"
+          "Without WARDEN_IT_DEX=1, `go test ./test/scenarios` skips this scenario"
         ],
         "depends_on": [
           "W-P1-SSO-06",
@@ -1398,6 +1418,7 @@
       "cmd/proxy"
     ],
     "depends_on_items": [
+      "p1-harness",
       "p1-sso-roles"
     ],
     "done_when": "On a CP started with --state-dir, console.auth=oidc and console.adminAudit.enabled=true, editing policy, settings, detection, integrations, llmproviders and secrets (both /dashboard/api/secretstore and /central/secrets) each produces exactly one chained, signed row with actor, role, auth_method, target_ref and before/after hashes. OIDC logins and an authenticated viewer's denied write also produce rows, while heartbeats, ingest and read-only POSTs produce none. No secret value or secrets.Ref string appears in any row or log line. An admin can list, filter and verify the log in the dashboard (a viewer gets 403) and with `warden control-plane admin-audit verify` while the CP is stopped. Changing any column or deleting a middle row fails verification, a swapped key file stops the CP from starting (the documented manual rotation leaves a verifiable `audit.segment_start` boundary instead), and deleting the newest rows is caught against the seq/entry_hash anchor in the emitted log lines. With the audit DB unwritable, mutations return 503 and a Finding fires while /policy keeps serving. A hand edit of the served YAML in file mode writes one config.external_change row with the new file hash.",
@@ -1580,6 +1601,7 @@
       "docs/control-plane.md"
     ],
     "depends_on_items": [
+      "p1-harness",
       "p1-sso-roles",
       "p1-admin-audit"
     ],
@@ -1831,6 +1853,7 @@
       "internal/cpstate (new)"
     ],
     "depends_on_items": [
+      "p1-harness",
       "p1-verify-token",
       "p1-sso-roles",
       "p1-admin-audit",
@@ -2092,6 +2115,39 @@
           "W-P1-BLOCK-03",
           "W-P1-AAUD-01"
         ]
+      },
+      {
+        "key": "W-P1-BLOCK-09",
+        "title": "Add harness scenarios for the user block list",
+        "type": "test",
+        "estimate": "S",
+        "body": "Prove the block list end to end as scenarios on `test/harness` (L1 in-process, #350): the real control plane and a worker fleet boot in one process, the harness mints identity tokens, and the fake upstream records what arrives. The scenarios cover the done_when sentence for the worker path: enforcement within one long-poll cycle, live session closure, one Finding per user, and a block that survives rollback, restart and a CP outage. Console denial and the offline CLI keep their package tests.",
+        "requirements": [
+          "The scenarios live in test/scenarios (block_list.go, registered in scenarios_list.go), built on `test/harness` with `harness.Fleet(2)` and the in-process OIDC issuer fake from W-P1-VRFY-05, so CI needs no Docker.",
+          "Blocking alice through the CP admin API makes her new CONNECTs on both workers return 403 `user_blocked` within one long-poll cycle, with a valid token and with an expired one, while bob's requests still reach the fake upstream.",
+          "An open keep-alive HTTP/1 session and an open tunnel of alice are closed on the block, and each closed session leaves one deny event with Reason=user_blocked and her sub.",
+          "Exactly one Finding is raised for alice across several denied requests, and neither it nor the logs contain her email.",
+          "A block survives a policy rollback, a worker restart and a CP outage; unblocking restores access and returns the served ETag to its previous value.",
+          "Every scenario ends with `h.AssertCanaryNeverLeaked()`, and output never prints token strings."
+        ],
+        "plan": [
+          "Add test/scenarios/block_list.go with the block, session-closure, finding and survival scenarios, and register them in scenarios_list.go.",
+          "Use the harness fleet, h.Events() and h.Logs() for assertions and h.Eventually instead of sleeps.",
+          "Add any missing helper (block through the CP API, restart a worker) to test/harness rather than to the scenario file."
+        ],
+        "acceptance": [
+          "Alice's CONNECT is denied with 403 user_blocked on both workers while bob's succeeds: `go test -race ./test/scenarios -run 'TestScenarios/block_list_'`.",
+          "Her open sessions are closed and each closure has one deny event with her sub.",
+          "One Finding exists for alice and no email appears in it or in the logs.",
+          "The block holds after rollback, worker restart and CP outage, and unblocking restores the previous ETag."
+        ],
+        "depends_on": [
+          "W-P1-BLOCK-02",
+          "W-P1-BLOCK-03",
+          "W-P1-BLOCK-05",
+          "W-P1-BLOCK-06",
+          "W-P1-VRFY-05"
+        ]
       }
     ],
     "phase": 1,
@@ -2126,6 +2182,7 @@
       "configs"
     ],
     "depends_on_items": [
+      "p1-harness",
       "p1-sso-roles",
       "p1-admin-audit"
     ],
@@ -2375,6 +2432,7 @@
       "docs/production-readiness.md (new)"
     ],
     "depends_on_items": [
+      "p1-harness",
       "p1-sso-roles",
       "p1-admin-audit",
       "p1-policy-history",
@@ -8237,6 +8295,7 @@
       "docs/control-plane.md"
     ],
     "depends_on_items": [
+      "p1-harness",
       "p1-dex"
     ],
     "done_when": "On a real deployment (CP plus at least one worker with TLS termination, Dex from p1-dex) with an agent in attribute mode, a request with a valid Dex token produces a local event, a signed receipt, a decision log line and a CP fleet event. Each carries the user's sub, verified email and groups with identity_status=valid. This holds for Proxy-Authorization on CONNECT and for X-Warden-Identity, over HTTP/1.1 and HTTP/2. The upstream never sees X-Warden-Identity or Proxy-Authorization on any terminated path, in any mode. Invalid, expired, conflicting and missing tokens, and tokens sent while Dex is unreachable, are recorded as invalid, expired, conflict, none and unverified respectively, have no policy subject, and are allowed. The worker starts and serves traffic with Dex down. warden.identity.verify.total reports each outcome. Existing warden.db and fleet DB files upgrade in place with no data loss, and existing receipts still verify.",
@@ -8383,31 +8442,31 @@
       },
       {
         "key": "W-P1-VRFY-05",
-        "title": "Add identity attribution e2e test and a CI integration job",
+        "title": "Add identity attribution scenarios on test/harness and a CI integration job",
         "type": "test",
         "estimate": "M",
-        "body": "Prove attribution end to end under the integration build tag. The default issuer is an in-process OIDC issuer that can mint valid, expired and wrong-audience tokens on demand, so CI does not depend on Docker. The Dex container runs only when WARDEN_IT_DEX=1, to cover a real Dex token with LDAP groups. CI has no integration job today, so this ticket adds one.",
+        "body": "Prove attribution end to end as scenarios on `test/harness` (L1 in-process, #350), not a new rig under test/integration. The default issuer is an in-process OIDC issuer that can mint valid, expired and wrong-audience tokens on demand, so CI does not depend on Docker. The Dex container runs only when WARDEN_IT_DEX=1, to cover a real Dex token with LDAP groups. CI has no integration job today, so this ticket adds one.",
         "requirements": [
-          "The test lives under //go:build integration in test/integration and compiles nothing without the tag.",
-          "A new in-process OIDC issuer helper (httptest discovery plus JWKS plus RS256 signer) mints valid, expired and wrong-aud tokens. When WARDEN_IT_DEX=1, the W-P1-DEX-02 recipe additionally covers a real Dex token with groups, fetched with `scripts/dex-token.sh --raw` (W-P1-DEX-02) rather than a second token client.",
+          "The cases are scenarios in test/scenarios (registered in scenarios_list.go) built on `test/harness`: the real worker and control plane boot in-process on loopback and the harness's fake upstream records what arrives. Only the Dex-token case (WARDEN_IT_DEX=1) stays under //go:build integration in test/integration.",
+          "A new in-process OIDC issuer fake in test/harness (httptest discovery plus JWKS plus RS256 signer, added as a fake per the definition of done) mints valid, expired and wrong-aud tokens. When WARDEN_IT_DEX=1, the W-P1-DEX-02 recipe additionally covers a real Dex token with groups, fetched with `scripts/dex-token.sh --raw` (W-P1-DEX-02) rather than a second token client.",
           "A worker started through startProxy with a CA and identity mode attribute covers valid, expired, wrong-aud and missing tokens, each via Proxy-Authorization on CONNECT and via X-Warden-Identity, over HTTP/1.1 and HTTP/2, plus one raw-tunnel case with Proxy-Authorization only.",
           "One case runs with the issuer stopped, and expects status unverified and a successful request.",
           "Assertions cover event identity fields, upstream-observed headers, warden.identity.verify.total counts via an OTel manual reader, and receipts that verify with user_sub.",
           "A new integration job in .github/workflows/ci.yml runs `scripts/check.sh --integration`. Test output never prints token strings."
         ],
         "plan": [
-          "Add the new test/integration/oidc_issuer_test.go helper (discovery, JWKS, token minting).",
-          "Add the new test/integration/identity_test.go with the case table and a header-recording upstream.",
-          "Start the proxy via startProxy with fakes.FakeAnalyticsStore, a signing store and a manual metrics reader.",
+          "Add the OIDC issuer fake to test/harness (discovery, JWKS, token minting).",
+          "Add the identity scenarios to test/scenarios with the case table; the harness upstream records headers.",
+          "Boot via harness.New; read events and metrics through h.Events() and h.Metrics().",
           "Add the WARDEN_IT_DEX=1 branch that uses the W-P1-DEX-02 compose recipe.",
           "Add the integration job to .github/workflows/ci.yml."
         ],
         "acceptance": [
-          "All cases return the upstream's 200, and IdentityStatus is valid, expired, invalid, none or unverified as expected: `go test -tags=integration ./test/integration -run TestIdentityAttribution`.",
+          "All cases return the upstream's 200, and IdentityStatus is valid, expired, invalid, none or unverified as expected: `go test -race ./test/scenarios -run 'TestScenarios/identity_'`.",
           "No subtest observes Proxy-Authorization or X-Warden-Identity at the upstream.",
           "warden.identity.verify.total shows the expected count for each result after the run.",
           "With WARDEN_IT_DEX=1 and the identity recipe running, a Dex token for a seeded LDAP user produces an event whose UserGroups contains `eng`.",
-          "The new CI integration job runs `scripts/check.sh --integration` green, and `go vet ./test/integration/...` without the tag does not compile the file."
+          "The new CI integration job runs `scripts/check.sh --integration` green, and `go vet ./test/integration/...` without the tag does not compile the Dex-token file."
         ],
         "depends_on": [
           "W-P1-VRFY-03",
@@ -8514,6 +8573,7 @@
       "configs"
     ],
     "depends_on_items": [
+      "p1-harness",
       "p1-verify-token",
       "p1-json-audit"
     ],
@@ -11789,6 +11849,7 @@
       "go.mod"
     ],
     "depends_on_items": [
+      "p1-harness",
       "p1-verify-token",
       "p1-admin-audit"
     ],

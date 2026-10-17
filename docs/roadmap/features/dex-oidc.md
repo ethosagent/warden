@@ -28,7 +28,7 @@ With `docker compose -f deploy/compose/docker-compose.identity.yml up -d` (Dex a
 
 ## Needs first
 
-Nothing. This feature can start now.
+- [L1 test harness](l1-test-harness.md) (P1 · Who did it)
 
 ## Unblocks
 
@@ -132,7 +132,7 @@ Add `deploy/compose/docker-compose.identity.yml`, which runs Dex with the dev co
 
 **Depends on:** [`W-P1-DEX-01`](dex-oidc.md#13--w-p1-dex-01) Add reference Dex config with console, data-plane, harness and CLI clients
 
-**Unblocks:** [`W-P1-IDC-03`](identity-contract.md#34--w-p1-idc-03) Add generic identity smoke test with a curl agent; [`W-P2-RCP-03`](identity-client.md#36--w-p2-rcp-03) Add the Claude Code compose recipe and docs; [`W-P1-DEX-03`](dex-oidc.md#33--w-p1-dex-03) Document Dex as Warden's IdP with connector, failure-mode and prod guidance; [`W-P3-CSIG-01`](consent-auth.md#17--w-p3-csig-01) Add the CP-local consent config block and the warden-portal Dex client; [`W-P3-CSIG-07`](consent-auth.md#77--w-p3-csig-07) Add a Dex-backed portal sign-in end-to-end test; [`W-P1-SSO-07`](console-sso-rbac.md#78--w-p1-sso-07) Add Dex-backed console SSO end-to-end test; [`W-P2-TOKX-05`](token-exchange.md#57--w-p2-tokx-05) Add token service end-to-end integration test; [`W-P1-VRFY-05`](identity-verification.md#57--w-p1-vrfy-05) Add identity attribution e2e test and a CI integration job
+**Unblocks:** [`W-P1-IDC-03`](identity-contract.md#34--w-p1-idc-03) Add generic identity smoke test with a curl agent; [`W-P2-RCP-03`](identity-client.md#36--w-p2-rcp-03) Add the Claude Code compose recipe and docs; [`W-P1-DEX-03`](dex-oidc.md#33--w-p1-dex-03) Document Dex as Warden's IdP with connector, failure-mode and prod guidance; [`W-P3-CSIG-01`](consent-auth.md#17--w-p3-csig-01) Add the CP-local consent config block and the warden-portal Dex client; [`W-P3-CSIG-07`](consent-auth.md#77--w-p3-csig-07) Add a Dex-backed portal sign-in end-to-end test; [`W-P1-SSO-07`](console-sso-rbac.md#78--w-p1-sso-07) Add Dex-backed console SSO scenario on test/harness; [`W-P2-TOKX-05`](token-exchange.md#57--w-p2-tokx-05) Add token service end-to-end integration test; [`W-P1-VRFY-05`](identity-verification.md#57--w-p1-vrfy-05) Add identity attribution scenarios on test/harness and a CI integration job
 
 ### 3/3 · W-P1-DEX-03
 
