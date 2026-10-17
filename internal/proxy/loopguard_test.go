@@ -131,6 +131,56 @@ func TestLoopGuard_IPListenerTargetRefused(t *testing.T) {
 	}
 }
 
+// TestSelfListenerAddrs_WildcardBindCoversInterfaces pins the wildcard-bind
+// branch of selfListenerAddrs (#376 review): the documented production shape is
+// a ":443 on 0.0.0.0" bind, whose guard set must come from the loopback pair
+// plus EVERY local interface address — the listener is reachable on all of
+// them. The wildcard literals themselves are never dial targets and must not
+// appear in the set.
+func TestSelfListenerAddrs_WildcardBindCoversInterfaces(t *testing.T) {
+	ips := selfListenerAddrs([]string{"0.0.0.0:443", "[::]:8443"})
+	want := map[string]bool{"127.0.0.1": true, "::1": true}
+	ifaces, err := net.InterfaceAddrs()
+	if err != nil {
+		t.Fatalf("interface addrs: %v", err)
+	}
+	for _, ia := range ifaces {
+		if ipnet, ok := ia.(*net.IPNet); ok {
+			want[ipnet.IP.String()] = true
+		}
+	}
+	got := make(map[string]bool, len(ips))
+	for _, ip := range ips {
+		got[ip.String()] = true
+	}
+	if len(got) != len(ips) {
+		t.Errorf("wildcard bind contributed duplicates: %v", ips)
+	}
+	for k := range got {
+		if !want[k] {
+			t.Errorf("wildcard bind contributed %v, which is no loopback/interface address", k)
+		}
+	}
+	for k := range want {
+		if !got[k] {
+			t.Errorf("wildcard bind missed %v (a dial to it would re-enter the proxy)", k)
+		}
+	}
+}
+
+// TestSelfListenerAddrs_LiteralBindContributesExactly pins the non-wildcard
+// branch: a literal bind contributes exactly that address (deduplicated across
+// both listeners), and a name that is no IP literal contributes nothing.
+func TestSelfListenerAddrs_LiteralBindContributesExactly(t *testing.T) {
+	ips := selfListenerAddrs([]string{"127.0.0.1:443", "127.0.0.1:80"})
+	if len(ips) != 1 || !ips[0].Equal(net.ParseIP("127.0.0.1")) {
+		t.Errorf("literal binds contributed %v, want exactly 127.0.0.1", ips)
+	}
+	if got := selfListenerAddrs([]string{"backend.test:443"}); len(got) != 0 {
+		t.Errorf("non-literal bind contributed %v, want nothing", got)
+	}
+}
+
 func TestLoopGuard_DialReturnsTypedError(t *testing.T) {
 	// The full Dial path surfaces the typed refusal (checked with errors.As by
 	// the deny-audit sites), not an ordinary dial failure.
@@ -160,6 +210,39 @@ func TestLoopGuard_ReachesThroughProxyPipeline(t *testing.T) {
 	})
 
 	// SNI and Host are the same allowed name, whose DNS points back at us.
+	req, _ := http.NewRequest(http.MethodGet, "https://loop.test/echo", nil)
+	_, status, err := env.doH1("loop.test", req)
+	if err == nil && status == 200 {
+		t.Errorf("looped request succeeded (status %d), want refusal", status)
+	}
+	env.wantDenied("loop.test", "transparent_loop_guard")
+	// The guard refused before any dial: the upstream saw nothing.
+	if rs := env.backend.requests(); len(rs) != 0 {
+		t.Errorf("the looped dial reached an upstream: %d requests", len(rs))
+	}
+}
+
+// TestLoopGuard_WildcardBindRefusesInterfaceIP is the pipeline shape the
+// wildcard-bind branch exists for (#376 review): the transparent listeners bind
+// a wildcard host — the documented production shape — so the guard set is the
+// INTERFACE addresses, and a dial to one of them (here loopback, contributed by
+// the wildcard branch itself) is refused through the production dialer. If the
+// wildcard branch stopped contributing, the bind host "0.0.0.0" would leak into
+// the set as a literal and this dial would be allowed through.
+func TestLoopGuard_WildcardBindRefusesInterfaceIP(t *testing.T) {
+	env := newTransparentEnv(t, transparentOpts{
+		allow: []config.AllowlistEntry{{Domain: "loop.test"}},
+		// The realistic transparent deployment: loopback is allowPrivate-exempted
+		// so real egress works. The guard is not an address-class rule and must
+		// win over the exemption.
+		allowPrivateCIDRs: []string{"127.0.0.0/8"},
+		prodDial:          true,
+		dns:               map[string]string{"loop.test": "127.0.0.1"},
+		tlsBind:           "0.0.0.0:0",
+	})
+
+	// SNI and Host are the same allowed name, whose DNS points at an address
+	// the wildcard bind made "ours".
 	req, _ := http.NewRequest(http.MethodGet, "https://loop.test/echo", nil)
 	_, status, err := env.doH1("loop.test", req)
 	if err == nil && status == 200 {

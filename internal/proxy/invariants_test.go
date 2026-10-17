@@ -64,6 +64,10 @@ type invRow struct {
 	wantSwap bool
 	// wantNoUpstream requires that the upstream never saw the request.
 	wantNoUpstream bool
+	// wantNoTLSUpstream requires that the TLS upstream seam was never dialled —
+	// a plain-HTTP session (:80) dials the plain seam only, so this pins the
+	// dialUpstream scheme switch (a flipped switch TLS-dials and fails here).
+	wantNoTLSUpstream bool
 	// wantDenyEvent requires a deny event to have been recorded; agentMustNot and
 	// upstreamMustNot name payloads that must never reach the agent / the
 	// upstream's WebSocket (so a deny that is recorded but not enforced fails).
@@ -250,16 +254,16 @@ func invRows() []invRow {
 	// the same pipeline over an http-scheme upstream.
 	add(
 		invRow{name: "transparent-http/allow", path: PathTransparentHTTP, scenario: scAllow,
-			opts: transOpts(invOpts{}), mustReach: true, wantSwap: true,
+			opts: transOpts(invOpts{}), mustReach: true, wantSwap: true, wantNoTLSUpstream: true,
 			run: plainT(invReq{path: "/ok", header: invBearer()})},
 		invRow{name: "transparent-http/deny", path: PathTransparentHTTP, scenario: scDeny,
-			opts: transOpts(judgeOpts()), mustReach: true, wantNoUpstream: true,
+			opts: transOpts(judgeOpts()), mustReach: true, wantNoUpstream: true, wantNoTLSUpstream: true,
 			run: plainT(invReq{host: invJudgedHost, path: "/ok", header: invBearer()})},
 		invRow{name: "transparent-http/upstream-error", path: PathTransparentHTTP, scenario: scUpstreamErr,
-			opts: transOpts(invOpts{}), mustReach: true, wantSwap: true,
+			opts: transOpts(invOpts{}), mustReach: true, wantSwap: true, wantNoTLSUpstream: true,
 			run: plainT(invReq{path: "/abort", header: invBearer()})},
 		invRow{name: "transparent-http/timeout", path: PathTransparentHTTP, scenario: scTimeout,
-			opts: transOpts(invOpts{}), mustReach: true, wantSwap: true,
+			opts: transOpts(invOpts{}), mustReach: true, wantSwap: true, wantNoTLSUpstream: true,
 			run: plainT(shortTimeout(invReq{path: "/hang", header: invBearer()}))},
 	)
 
@@ -514,6 +518,9 @@ func invViolations(e *invEnv, row invRow) []string {
 	}
 	if row.wantNoUpstream && len(e.backend.requests()) > 0 {
 		violations = append(violations, "denied request reached the upstream")
+	}
+	if row.wantNoTLSUpstream && e.tlsUpstreams.Load() > 0 {
+		violations = append(violations, "plain-HTTP session dialled the TLS upstream")
 	}
 	return violations
 }

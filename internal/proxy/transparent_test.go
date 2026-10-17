@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -53,6 +54,12 @@ type transparentOpts struct {
 	prodDial bool
 	// dns records for the dnstest stub (prodDial only).
 	dns map[string]string
+	// tlsBind overrides the transparent TLS bind host (default 127.0.0.1:0);
+	// a wildcard bind exercises the interface-address loop-guard derivation.
+	tlsBind string
+	// handshakeTimeout overrides the post-ClientHello TLS handshake deadline
+	// (white-box, like preambleTimeout) so the cutoff test needs no 10 s sleep.
+	handshakeTimeout time.Duration
 }
 
 // transparentEnv is one transparent-mode world.
@@ -67,6 +74,11 @@ type transparentEnv struct {
 
 	hitMu sync.Mutex
 	hit   map[Path]bool
+
+	// tlsUpstreams counts upstream dials made through the TLS seam. The plain
+	// :80 listener must never make one — its upstream is plain HTTP — so the
+	// count is the seam-side witness that the scheme switch routes by session.
+	tlsUpstreams atomic.Int64
 }
 
 func newTransparentEnv(t *testing.T, o transparentOpts) *transparentEnv {
@@ -105,6 +117,9 @@ func newTransparentEnv(t *testing.T, o transparentOpts) *transparentEnv {
 	if o.plainHTTP {
 		cfg.TransparentHTTPListen = "127.0.0.1:0"
 	}
+	if o.tlsBind != "" {
+		cfg.TransparentHTTPSListen = o.tlsBind
+	}
 	if o.prodDial {
 		// The production SafeDialer resolves through the stub, so the loop
 		// guard sees the addresses the agent's DNS would hand it.
@@ -114,6 +129,7 @@ func newTransparentEnv(t *testing.T, o transparentOpts) *transparentEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
+	p.handshakeTimeout = o.handshakeTimeout
 	e.p = p
 
 	registered := map[Path]bool{}
@@ -134,6 +150,7 @@ func newTransparentEnv(t *testing.T, o transparentOpts) *transparentEnv {
 		// test, as in newInvEnv). The plain-HTTP dialFunc goes to a plain
 		// sibling of the same backend handler.
 		p.dialTLS = func(_, addr string, c *tls.Config) (*tls.Conn, error) {
+			e.tlsUpstreams.Add(1)
 			return tls.Dial("tcp", e.backend.srv.Listener.Addr().String(),
 				&tls.Config{InsecureSkipVerify: true, NextProtos: c.NextProtos})
 		}
@@ -182,6 +199,9 @@ func (e *transparentEnv) reached(path Path) bool {
 	defer e.hitMu.Unlock()
 	return e.hit[path]
 }
+
+// tlsUpstreamDials reports how many upstream dials went through the TLS seam.
+func (e *transparentEnv) tlsUpstreamDials() int64 { return e.tlsUpstreams.Load() }
 
 // tlsDialSNI opens a TLS connection to the transparent listener with the given
 // SNI, trusting the proxy CA, and completes the MITM handshake.
@@ -286,6 +306,13 @@ func (e *transparentEnv) h1KeepAlive(second *http.Request) (int, int, []analytic
 // reason arrives.
 func (e *transparentEnv) wantDenied(domain, reason string) analytics.Event {
 	e.t.Helper()
+	return e.wantDeniedT(e.t, domain, reason)
+}
+
+// wantDeniedT is wantDenied with an explicit *testing.T, so SUBTESTS fail
+// themselves instead of the parent test that owns the env.
+func (e *transparentEnv) wantDeniedT(t *testing.T, domain, reason string) analytics.Event {
+	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		for _, ev := range e.store.snapshot() {
@@ -295,7 +322,7 @@ func (e *transparentEnv) wantDenied(domain, reason string) analytics.Event {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	e.t.Fatalf("no deny event for (%s, %s); events: %+v", domain, reason, e.store.snapshot())
+	t.Fatalf("no deny event for (%s, %s); events: %+v", domain, reason, e.store.snapshot())
 	return analytics.Event{}
 }
 
@@ -452,6 +479,120 @@ func TestTransparentTLS_DenylistedSNINamesTheReason(t *testing.T) {
 	e.wantDenied(transparentDenyHost, "policy_denylist")
 }
 
+// TestTransparentTLS_InvalidSNIIsDenied pins the SNI admission grammar at the
+// listener (#376 review): the sniffed server_name is client-chosen bytes, so a
+// hello naming anything that is not a plain LDH DNS name is refused with
+// transparent_bad_client_hello BEFORE policy runs and BEFORE a leaf is minted
+// for it, and the deny event carries only the escaped, truncated name — never
+// the raw control bytes.
+func TestTransparentTLS_InvalidSNIIsDenied(t *testing.T) {
+	// A wildcard allowlist that WOULD have admitted subdomains of backend.test:
+	// every hostile name below is built to sneak past it if the grammar does
+	// not hold.
+	e := newTransparentEnv(t, transparentOpts{
+		allow: []config.AllowlistEntry{{Domain: "*.backend.test"}},
+	})
+	rows := []struct{ name, sni string }{
+		{name: "CRLF injection", sni: "x\r\ny.backend.test"},
+		{name: "space", sni: "a b.backend.test"},
+		{name: "at sign", sni: "x@y.backend.test"},
+		{name: "NUL byte", sni: "a\x00backend.test"},
+		{name: "underscore", sni: "x_y.backend.test"},
+		{name: "9000-byte label", sni: strings.Repeat("x", 9000)},
+		{name: "IPv4 literal", sni: "192.0.2.10"},
+		{name: "IPv6 literal", sni: "2001:db8::1"},
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			resp, err := e.sendHello(tlsRecord(0x16, helloWithSNI(r.sni)))
+			if err != nil {
+				t.Fatalf("send: %v", err)
+			}
+			if resp != "" {
+				t.Errorf("server answered a hostile SNI with %q, want a bare close", resp)
+			}
+			// The event names the refusal and carries only the safe rendering.
+			ev := e.wantDeniedT(t, safeSNI(r.sni), "transparent_bad_client_hello")
+			if strings.ContainsRune(ev.Domain, 0) || strings.ContainsAny(ev.Domain, "\n\r") {
+				t.Errorf("deny event Domain carries a raw control byte: %q", ev.Domain)
+			}
+			// No leaf was minted for the client-chosen string.
+			if _, cached := e.p.certCache.Load(strings.ToLower(r.sni)); cached {
+				t.Errorf("a certificate was minted for hostile SNI %q", r.sni)
+			}
+		})
+	}
+}
+
+// TestTransparentTLS_ValidSNIFormsAdmitted proves the grammar admits the
+// spellings it must: an upper-case SNI and one with a single trailing dot are
+// normalised onto the allowed name before policy sees them, exactly as the
+// Host-header parity (#397) already grants.
+func TestTransparentTLS_ValidSNIFormsAdmitted(t *testing.T) {
+	e := newTransparentEnv(t, transparentOpts{})
+	for _, sni := range []string{"BACKEND.test", invHost + "."} {
+		req, _ := http.NewRequest(http.MethodGet, "https://"+invHost+"/plain", nil)
+		_, status, err := e.doH1(sni, req)
+		if err != nil || status != 200 {
+			t.Errorf("SNI %q: status = %d (err %v), want 200", sni, status, err)
+		}
+	}
+}
+
+// TestTransparentTLS_StalledHandshakeIsCutOff pins the post-ClientHello
+// handshake deadline (#376 review): a client that delivers a valid, ALLOWED
+// hello and then stalls is cut off instead of holding the connection goroutine
+// forever. The injected (250 ms) deadline must drive the cutoff — and the
+// healthy-handshake path is proven unaffected by every other transparent test,
+// which completes real handshakes through the same code.
+//
+// The stalled hello is a REAL Go client flight, captured over an in-memory
+// pipe: the synthetic helloWithSNI bytes carry no suites Go's server accepts,
+// so a server would reject them outright and never block — this test would
+// then pass even with no deadline at all.
+func TestTransparentTLS_StalledHandshakeIsCutOff(t *testing.T) {
+	flight := captureClientHelloFlight(t)
+	e := newTransparentEnv(t, transparentOpts{handshakeTimeout: 250 * time.Millisecond})
+	conn, err := net.DialTimeout("tcp", e.tlsAddr(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := conn.Write(flight); err != nil {
+		t.Fatalf("write hello: %v", err)
+	}
+	start := time.Now()
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_, _ = io.ReadAll(conn) // ends when the server closes — or at the backstop
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Errorf("stalled handshake conn stayed open %v; want the injected 250ms deadline to close it", elapsed)
+	}
+}
+
+// captureClientHelloFlight returns the exact first-flight bytes a real Go TLS
+// client sends for SNI invHost: a net.Pipe server-side reader is drained
+// through sniffClientHello, which consumes precisely the ClientHello records
+// and thereby proves the capture is a complete, parseable hello.
+func captureClientHelloFlight(t *testing.T) []byte {
+	t.Helper()
+	server, client := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+	tc := tls.Client(client, &tls.Config{
+		ServerName:         invHost,
+		InsecureSkipVerify: true, // the pipe has no server; only the flight matters
+		MinVersion:         tls.VersionTLS12,
+	})
+	errCh := make(chan error, 1)
+	go func() { errCh <- tc.Handshake() }()
+	defer func() { _ = tc.Close() }()
+	_, wire, err := sniffClientHello(bufio.NewReader(server), maxClientHelloBytes)
+	if err != nil {
+		t.Fatalf("capturing a real ClientHello flight: %v", err)
+	}
+	return wire
+}
+
 func TestTransparentTLS_HostMismatchOnH1KeepAlive(t *testing.T) {
 	e := newTransparentEnv(t, transparentOpts{})
 	// The connection was admitted on SNI backend.test; the SECOND keep-alive
@@ -549,6 +690,47 @@ func TestTransparentHTTP_ServesAllowedHost(t *testing.T) {
 	}
 	if !e.reached(PathTransparentHTTP) {
 		t.Error("PathTransparentHTTP was never announced")
+	}
+	// The :80 listener's upstream is PLAIN: the TLS seam must never be dialled
+	// for a plain-HTTP session (a scheme-switch bug would silently TLS-dial the
+	// same backend and every assertion above would still hold).
+	if n := e.tlsUpstreamDials(); n != 0 {
+		t.Errorf("plain-HTTP session made %d TLS upstream dial(s); the :80 path must dial plain", n)
+	}
+}
+
+// TestTransparentHTTP_HostPortDecidesAlike pins the Host-header port handling
+// on the plain listener (#376 review): the port is stripped exactly as
+// readRequest strips it before the gate, so "Host: x:80" and "Host: x" decide
+// alike — and a deny records the BARE host, never "x:80".
+func TestTransparentHTTP_HostPortDecidesAlike(t *testing.T) {
+	e := newTransparentEnv(t, transparentOpts{plainHTTP: true})
+	rows := []struct {
+		name       string
+		host       string
+		wantStatus int
+		wantDomain string // non-empty: a deny event naming this bare host
+	}{
+		{name: "bare host allowed", host: invHost, wantStatus: 200},
+		{name: "explicit :80 allowed", host: invHost + ":80", wantStatus: 200},
+		{name: "explicit :8080 decides alike", host: invHost + ":8080", wantStatus: 200},
+		{name: "unknown host with :80 denied on the bare host", host: "stranger.test:80", wantStatus: 403, wantDomain: "stranger.test"},
+		{name: "unknown host with :8080 denied on the bare host", host: "stranger.test:8080", wantStatus: 403, wantDomain: "stranger.test"},
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			raw := "GET /plain HTTP/1.1\r\nHost: " + r.host + "\r\nConnection: close\r\n\r\n"
+			_, status, err := e.plainDo(r.host, raw)
+			if err != nil {
+				t.Fatalf("request: %v", err)
+			}
+			if status != r.wantStatus {
+				t.Errorf("Host %q: status = %d, want %d", r.host, status, r.wantStatus)
+			}
+			if r.wantDomain != "" {
+				e.wantDeniedT(t, r.wantDomain, "policy_no_match")
+			}
+		})
 	}
 }
 

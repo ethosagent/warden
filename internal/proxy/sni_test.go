@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 )
 
@@ -320,6 +321,97 @@ func TestSniffClientHello_EmptyConn(t *testing.T) {
 	}
 	if sni != "" {
 		t.Errorf("sni = %q, want empty", sni)
+	}
+}
+
+// repeatLDH builds "a.b.c.d" from labels of the given lengths, for the
+// total-length boundary rows.
+func repeatLDH(lens ...int) string {
+	parts := make([]string, len(lens))
+	for i, n := range lens {
+		parts[i] = strings.Repeat(string(rune('a'+i)), n)
+	}
+	return strings.Join(parts, ".")
+}
+
+// TestValidateSNIHost pins the SNI admission grammar (#376 review): the sniffed
+// server_name is client-chosen bytes on an unauthenticated port, so only a
+// plain LDH DNS name may reach policy and the leaf minter — lower-cased, one
+// optional trailing dot removed, labels 1..63 bytes, total at most 253, no
+// empty label, no underscore, no control bytes, and never an IP literal. A
+// single-label name passes the grammar (policy still has to allow it).
+func TestValidateSNIHost(t *testing.T) {
+	tests := []struct {
+		name string
+		sni  string
+		want string // "" = refuse
+	}{
+		{name: "plain", sni: "backend.test", want: "backend.test"},
+		{name: "lower-cased", sni: "Backend.Test", want: "backend.test"},
+		{name: "one trailing dot removed", sni: "backend.test.", want: "backend.test"},
+		{name: "lower-cased with trailing dot", sni: "BACKEND.Test.", want: "backend.test"},
+		{name: "single label", sni: "backend", want: "backend"},
+		{name: "inner hyphen", sni: "a-b.cd-ef", want: "a-b.cd-ef"},
+		{name: "digits", sni: "host1.test2", want: "host1.test2"},
+		{name: "63-byte label", sni: repeatLDH(63, 3), want: repeatLDH(63, 3)},
+		{name: "253 bytes total", sni: repeatLDH(63, 63, 63, 61), want: repeatLDH(63, 63, 63, 61)},
+		{name: "64-byte label", sni: repeatLDH(64, 3)},
+		{name: "254 bytes total", sni: repeatLDH(63, 63, 63, 62)},
+		{name: "empty", sni: ""},
+		{name: "only a dot", sni: "."},
+		{name: "second trailing dot is an empty label", sni: "backend.test.."},
+		{name: "empty middle label", sni: "backend..test"},
+		{name: "leading hyphen", sni: "-backend.test"},
+		{name: "trailing hyphen", sni: "backend-.test"},
+		{name: "underscore", sni: "under_score.test"},
+		{name: "space", sni: "a b.test"},
+		{name: "at sign", sni: "x@y.test"},
+		{name: "NUL byte", sni: "a\x00.test"},
+		{name: "CRLF", sni: "x\r\ny.test"},
+		{name: "non-ASCII", sni: "alïce.test"},
+		{name: "IPv4 literal", sni: "10.0.0.1"},
+		{name: "loopback v4 literal", sni: "127.0.0.1"},
+		{name: "IPv6 literal", sni: "::1"},
+		{name: "full IPv6 literal", sni: "2001:db8::1"},
+		{name: "obfuscated decimal v4 is one long label", sni: strings.Repeat("2", 64)},
+		{name: "9000-byte label", sni: strings.Repeat("x", 9000)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := validateSNI(tc.sni)
+			if tc.want == "" {
+				if ok {
+					t.Errorf("validateSNI(%q) = (%q, true), want refusal", tc.sni, got)
+				}
+				return
+			}
+			if !ok || got != tc.want {
+				t.Errorf("validateSNI(%q) = (%q, %v), want (%q, true)", tc.sni, got, ok, tc.want)
+			}
+		})
+	}
+}
+
+// TestSafeSNI pins the deny-event rendering of a refused server_name: bounded
+// and %q-escaped, so raw control bytes never ride an event (analytics hygiene)
+// while an operator can still tell what was refused.
+func TestSafeSNI(t *testing.T) {
+	if got := safeSNI("x\r\ny"); got != `"x\r\ny"` {
+		t.Errorf("safeSNI control bytes = %s, want the escaped form", got)
+	}
+	if got := safeSNI("ok.test"); got != `"ok.test"` {
+		t.Errorf("safeSNI plain name = %s, want the quoted name", got)
+	}
+	long := strings.Repeat("a", 9000) + "\x00"
+	got := safeSNI(long)
+	if len(got) > 4*maxSNIDenyBytes+2 {
+		t.Errorf("safeSNI rendered %d bytes, want it bounded by the 64-byte truncation", len(got))
+	}
+	if strings.ContainsRune(got, 0) || strings.ContainsAny(got, "\n\r") {
+		t.Errorf("safeSNI carried a raw control byte: %q", got)
+	}
+	if !strings.HasPrefix(got, `"aaaa`) {
+		t.Errorf("safeSNI lost the name's head: %q", got)
 	}
 }
 

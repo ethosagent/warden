@@ -290,6 +290,10 @@ type Proxy struct {
 	caCert     *x509.Certificate
 	caKey      crypto.PrivateKey
 	certCache  sync.Map
+	// certStoreMu guards the BOUNDED insert path (storeLeafCert's size check +
+	// eviction); the hot hit path stays the lock-free Load. Mints are rare next
+	// to hits, so the mutex never sits on the per-connection fast path.
+	certStoreMu sync.Mutex
 	// certFlight collapses concurrent cache misses for the same domain so a hot
 	// new domain mints exactly one leaf instead of stampeding N keygens.
 	certFlight singleflight.Group
@@ -304,8 +308,18 @@ type Proxy struct {
 	// tests can drive the slowloris path without a real 10 s sleep; production
 	// leaves it zero-valued.
 	preambleTimeout time.Duration
-	dialFunc        func(network, addr string) (net.Conn, error)
-	dialTLS         func(network, addr string, cfg *tls.Config) (*tls.Conn, error)
+	// handshakeTimeout is the injectable TLS-handshake deadline in
+	// terminateAndDispatch (0 = handshakeTimeout const). Like preambleTimeout it
+	// exists only so white-box tests can drive the stalled-handshake path
+	// without a real 10 s sleep; production leaves it zero-valued.
+	handshakeTimeout time.Duration
+	// certCacheCap is the injectable leaf-cache entry cap (0 =
+	// maxCertCacheEntries). Like leafTTL it exists only so white-box tests can
+	// drive the eviction path without minting 10k certificates; production
+	// leaves it zero-valued.
+	certCacheCap int
+	dialFunc     func(network, addr string) (net.Conn, error)
+	dialTLS      func(network, addr string, cfg *tls.Config) (*tls.Conn, error)
 	// safeDial is the dialer behind dialFunc/dialTLS when production built it
 	// (nil under an injected cfg.Dialer). Serve uses it to install the
 	// transparent-mode loop-guard set (#376).

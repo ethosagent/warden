@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -320,6 +321,12 @@ type invEnv struct {
 	tlsAddr  string
 	httpAddr string
 	plainSrv *httptest.Server
+
+	// tlsUpstreams counts upstream dials made through the TLS seam. A plain-HTTP
+	// session must never make one — the count is the seam-side witness that the
+	// dialUpstream scheme switch routes a transparent :80 session to the plain
+	// dialer (rows declare wantNoTLSUpstream and fail the moment it is dialled).
+	tlsUpstreams atomic.Int64
 }
 
 // invOpts are the per-row proxy knobs.
@@ -408,6 +415,7 @@ func newInvEnv(t *testing.T, o invOpts) *invEnv {
 		e.hitMu.Unlock()
 	}
 	p.dialTLS = func(_, addr string, c *tls.Config) (*tls.Conn, error) {
+		e.tlsUpstreams.Add(1)
 		target := e.backend.srv.Listener.Addr().String()
 		if e.rawTLSAddr != "" && len(c.NextProtos) == 0 && e.useRawTLS {
 			target = e.rawTLSAddr

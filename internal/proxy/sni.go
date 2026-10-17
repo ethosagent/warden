@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"net"
+	"strings"
 )
 
 // The transparent :443 listener sees raw TCP, so the ClientHello IS the
@@ -41,6 +43,81 @@ const maxClientHelloBytes = 64 << 10 // 64 KiB
 // maxTLSRecordBytes is the RFC 5246 TLSPlaintext.length cap; a record claiming
 // more is not TLS.
 const maxTLSRecordBytes = 1 << 14
+
+// The SNI admission grammar (#376 review). The sniffed server_name is
+// client-chosen bytes on an unauthenticated port: before anything evaluates
+// policy on it — and before any certificate is minted for it — it must be a
+// plain LDH DNS name. The caps are the RFC 1035 wire limits, held as constants
+// on purpose like the hello/preamble budgets: a knob would let a
+// misconfiguration re-open the unbounded-growth hole (see maxCertCacheEntries).
+const (
+	// maxSNINameBytes caps a fully-qualified name (RFC 1035 §2.3.4: 255 octets
+	// on the wire, 253 in its textual presentation form).
+	maxSNINameBytes = 253
+	// maxSNILabelBytes caps one label (RFC 1035 §2.3.1).
+	maxSNILabelBytes = 63
+	// maxSNIDenyBytes caps how much of a REFUSED name a deny event carries;
+	// safeSNI %q-escapes it, so the rendered form stays bounded at 4x.
+	maxSNIDenyBytes = 64
+)
+
+// validateSNI admits the sniffed server_name only as a plain LDH DNS name and
+// returns its normalised form: lower-cased, one optional trailing dot removed.
+// Each label must be 1..maxSNILabelBytes bytes of letters/digits/hyphen with no
+// leading or trailing hyphen, the whole name at most maxSNINameBytes bytes, and
+// an IP literal (v4 or v6) is never a name — a numeric SNI is a dial target,
+// not a hostname, and policy matches hostnames. A single-label name passes the
+// grammar; whether it is ALLOWED stays entirely policy's decision. ok=false
+// means refuse with transparent_bad_client_hello — never evaluate policy, never
+// mint a certificate for the string.
+func validateSNI(sni string) (string, bool) {
+	name := strings.ToLower(sni)
+	name = strings.TrimSuffix(name, ".")
+	if name == "" || len(name) > maxSNINameBytes {
+		return "", false
+	}
+	// After the LDH check below an IPv6 literal is already impossible (a colon
+	// is not LDH); the parse catches the dotted v4 forms, which are pure LDH.
+	if net.ParseIP(name) != nil {
+		return "", false
+	}
+	for _, label := range strings.Split(name, ".") {
+		if !validLDHLabel(label) {
+			return "", false
+		}
+	}
+	return name, true
+}
+
+// validLDHLabel reports whether label is one LDH label: 1..maxSNILabelBytes
+// bytes of ASCII letters, digits or hyphen, with no leading or trailing hyphen.
+func validLDHLabel(label string) bool {
+	if len(label) == 0 || len(label) > maxSNILabelBytes {
+		return false
+	}
+	if label[0] == '-' || label[len(label)-1] == '-' {
+		return false
+	}
+	for i := 0; i < len(label); i++ {
+		c := label[i]
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' {
+			continue
+		}
+		return false // anything else — space, NUL, underscore, UTF-8, ':' …
+	}
+	return true
+}
+
+// safeSNI renders a server_name that failed validation for a deny event's
+// Domain: truncated to its first maxSNIDenyBytes bytes and %q-escaped, so raw
+// control bytes never ride an event while an operator can still tell what was
+// refused. The normalised, validated name rides events everywhere else.
+func safeSNI(sni string) string {
+	if len(sni) > maxSNIDenyBytes {
+		sni = sni[:maxSNIDenyBytes]
+	}
+	return fmt.Sprintf("%q", sni)
+}
 
 // h2ClientPreface is the exact 24-byte HTTP/2 connection preface (RFC 9113).
 const h2ClientPreface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"

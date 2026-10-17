@@ -78,6 +78,17 @@ func (p *Proxy) handleTransparentTLS(conn net.Conn) {
 		return
 	}
 
+	// The name is client-chosen bytes on an unauthenticated port: it must be a
+	// plain LDH DNS name before policy evaluates it and before any certificate
+	// is minted for it (validateSNI's normalisation matches NormalizeHost's).
+	// A refused name is audited only in its safe rendering — never the raw
+	// bytes the client picked.
+	domain, ok := validateSNI(sni)
+	if !ok {
+		p.storeDeny(safeSNI(sni), transparentHTTPSPort, "tcp", denyreason.TransparentBadClientHello, "bad_sni")
+		return
+	}
+
 	// Policy on the SNI before any handshake. Same tri-state gate as the
 	// CONNECT floor: Deny (or NoMatch with no judge) is refused with the
 	// verdict's declared reason; NoMatch with a judge proceeds to termination
@@ -144,7 +155,14 @@ func (p *Proxy) handleTransparentHTTP(conn net.Conn) {
 	_ = conn.SetReadDeadline(time.Time{})
 	bc.unbound()
 
-	host := policy.NormalizeHost(req.Host)
+	// The port is stripped exactly as readRequest strips it: the default-deny
+	// gate decides on the HOST, so "Host: x:80" and "Host: x" cannot decide
+	// differently, and a deny records the bare host.
+	host := req.Host
+	if h, _, err := net.SplitHostPort(req.Host); err == nil {
+		host = h
+	}
+	host = policy.NormalizeHost(host)
 	if host == "" {
 		// HTTP/1.1 requires Host; without it the destination is unknown and the
 		// request cannot be gated. (A full URL-form target sets req.URL.Host,
