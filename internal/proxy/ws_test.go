@@ -23,6 +23,7 @@ type wsBackend struct {
 	respHeader string // extra header line(s), CRLF-terminated, added to the 101
 	push       []byte
 	gotText    chan []byte
+	reqHeaders chan string // raw upgrade request header block, when non-nil
 }
 
 // frameWire serializes a frame to its wire bytes.
@@ -83,6 +84,7 @@ func startWSBackend(t *testing.T, caCert *x509.Certificate, caKey interface{}, b
 				defer func() { _ = tlsSrv.Close() }()
 
 				br := bufio.NewReader(tlsSrv)
+				var reqHdr strings.Builder
 				for {
 					line, err := br.ReadString('\n')
 					if err != nil {
@@ -91,6 +93,10 @@ func startWSBackend(t *testing.T, caCert *x509.Certificate, caKey interface{}, b
 					if line == "\r\n" || line == "\n" {
 						break
 					}
+					reqHdr.WriteString(line)
+				}
+				if b.reqHeaders != nil {
+					b.reqHeaders <- reqHdr.String()
 				}
 				_, _ = io.WriteString(tlsSrv,
 					"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"+b.respHeader+"\r\n")
@@ -224,6 +230,93 @@ func TestWS_AllowedToolCallForwarded(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("expected mcp allow event, got %+v", ss.snapshot())
+}
+
+// TestWS_AllowedSessionEventCarriesNoReason (#409 review): the session event's
+// Reason is DENY-only. It used to be set to mcp_ws unconditionally, so every
+// allowed MCP WebSocket session raised an alertpipeline finding (bridgeEvent
+// keys on a non-empty Reason). An allowed session's event must carry none.
+func TestWS_AllowedSessionEventCarriesNoReason(t *testing.T) {
+	caCertPEM, caKeyPEM, caCert, caKey := generateTestCA(t)
+	be := &wsBackend{}
+	backendLn := startWSBackend(t, caCert, caKey, be)
+
+	p, ss := startTestProxyWithMCP(t, []string{"backend.test"}, caCertPEM, caKeyPEM, enforceMCPConfig(), nil)
+	p.dialTLS = dialBackend(backendLn)
+
+	tlsClient, _ := wsUpgradeThroughProxy(t, p, caCertPEM)
+
+	allowed := ws.Frame{
+		Fin: true, Opcode: ws.OpcodeText, Masked: true,
+		MaskKey: [4]byte{1, 2, 3, 4},
+		Payload: []byte(mcpReadFileBody),
+	}
+	if _, err := tlsClient.Write(frameWire(allowed)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-be.gotText:
+		if string(got) != mcpReadFileBody {
+			t.Fatalf("forwarded payload mismatch: %q", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("backend did not receive forwarded text frame")
+	}
+
+	_ = tlsClient.Close()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if ev := findEvent(ss.snapshot(), "mcp", "allow"); ev != nil {
+			if ev.Reason != "" {
+				t.Fatalf("allowed WS session event carries Reason %q; an allow must never name a deny reason (#409)", ev.Reason)
+			}
+			return
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatalf("expected mcp allow event, got %+v", ss.snapshot())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestWS_DeniedSessionEventCarriesMCPWSReason pins the deny side of the same
+// field: a blocked WS session's deny event names the bounded mcp_ws reason, so
+// the alert bridge routes it as its own rule.
+func TestWS_DeniedSessionEventCarriesMCPWSReason(t *testing.T) {
+	caCertPEM, caKeyPEM, caCert, caKey := generateTestCA(t)
+	be := &wsBackend{}
+	backendLn := startWSBackend(t, caCert, caKey, be)
+
+	p, ss := startTestProxyWithMCP(t, []string{"backend.test"}, caCertPEM, caKeyPEM, enforceMCPConfig(), nil)
+	p.dialTLS = dialBackend(backendLn)
+
+	tlsClient, br := wsUpgradeThroughProxy(t, p, caCertPEM)
+
+	denied := ws.Frame{
+		Fin: true, Opcode: ws.OpcodeText, Masked: true,
+		MaskKey: [4]byte{0xAA, 0xBB, 0xCC, 0xDD},
+		Payload: []byte(mcpExecCmdBody),
+	}
+	if _, err := tlsClient.Write(frameWire(denied)); err != nil {
+		t.Fatal(err)
+	}
+	if !readUntilClose(t, br) {
+		t.Fatal("expected a Close frame to the client on enforce deny")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if ev := findEvent(ss.snapshot(), "mcp", "deny"); ev != nil {
+			if ev.Reason != "mcp_ws" {
+				t.Fatalf("denied WS session event Reason = %q, want mcp_ws", ev.Reason)
+			}
+			return
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatalf("expected mcp deny event, got %+v", ss.snapshot())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 // readUntilClose reads frames until it sees a Close (returns true) or the

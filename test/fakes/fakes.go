@@ -5,6 +5,7 @@ package fakes
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/config"
@@ -56,8 +57,23 @@ type FakeAnalyticsStore struct {
 
 var _ analytics.AnalyticsStore = (*FakeAnalyticsStore)(nil)
 
-// StoreEvent appends an event.
+// EnforceDenyReason is the #409 deny-reason contract, enforced on the write
+// side: a deny (or block) event with no Reason panics, so any exercised code
+// path that records an anonymous deny fails the test run at the offending site
+// — the panic stack names the writer. Production never reaches this: the
+// proxy's single emitDeny/emitDenyEvent chokepoint substitutes the declared
+// "unspecified" fallback, and this guard exists so a bypass of that helper
+// cannot slip through a test suite silently.
+func EnforceDenyReason(e analytics.Event) {
+	if e.Reason == "" &&
+		(strings.EqualFold(e.Decision, "deny") || strings.EqualFold(e.Decision, "block")) {
+		panic(fmt.Sprintf("analytics fake: %q event recorded with an empty Reason — every deny must name a bounded reason from internal/denyreason (#409); route it through proxy emitDeny. Event: %+v", e.Decision, e))
+	}
+}
+
+// StoreEvent appends an event, enforcing the #409 deny-reason contract.
 func (f *FakeAnalyticsStore) StoreEvent(e analytics.Event) error {
+	EnforceDenyReason(e)
 	f.Events = append(f.Events, e)
 	return nil
 }

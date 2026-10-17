@@ -47,8 +47,8 @@ func TestFakeSecretProvider(t *testing.T) {
 func TestFakeAnalyticsStore(t *testing.T) {
 	f := &FakeAnalyticsStore{}
 	_ = f.StoreEvent(analytics.Event{Domain: "a.com", Decision: "allow"})
-	_ = f.StoreEvent(analytics.Event{Domain: "b.com", Decision: "deny"})
-	_ = f.StoreEvent(analytics.Event{Domain: "a.com", Decision: "deny"})
+	_ = f.StoreEvent(analytics.Event{Domain: "b.com", Decision: "deny", Reason: "policy_no_match"})
+	_ = f.StoreEvent(analytics.Event{Domain: "a.com", Decision: "deny", Reason: "policy_denylist"})
 
 	all, _ := f.GetEvents(analytics.EventFilter{})
 	if len(all) != 3 {
@@ -69,5 +69,35 @@ func TestFakeAnalyticsStore(t *testing.T) {
 	limited, _ := f.GetEvents(analytics.EventFilter{Limit: 1})
 	if len(limited) != 1 {
 		t.Errorf("limit len = %d", len(limited))
+	}
+}
+
+// TestFakeAnalyticsStore_EnforcesDenyReason (#409): the fake fails the run on a
+// deny recorded without a Reason, so every test using it enforces the
+// deny-reason contract for free — and the contract itself is pinned here.
+func TestFakeAnalyticsStore_EnforcesDenyReason(t *testing.T) {
+	cases := []struct {
+		name string
+		e    analytics.Event
+	}{
+		{"deny without reason", analytics.Event{Domain: "x.com", Decision: "deny"}},
+		{"block without reason", analytics.Event{Domain: "x.com", Decision: "block"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("reason-less %s event did not fail the fake", tc.e.Decision)
+				}
+			}()
+			_ = (&FakeAnalyticsStore{}).StoreEvent(tc.e)
+		})
+	}
+	// Allows and reason-carrying denies are untouched.
+	f := &FakeAnalyticsStore{}
+	_ = f.StoreEvent(analytics.Event{Domain: "a.com", Decision: "allow"})
+	_ = f.StoreEvent(analytics.Event{Domain: "a.com", Decision: "deny", Reason: "policy_no_match"})
+	if len(f.Events) != 2 {
+		t.Errorf("len = %d, want 2", len(f.Events))
 	}
 }

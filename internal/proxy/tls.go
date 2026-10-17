@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/ethosagent/warden/internal/analytics"
+	"github.com/ethosagent/warden/internal/denyreason"
 	"github.com/ethosagent/warden/internal/protocol"
 )
 
@@ -59,7 +60,7 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 		if needsJudge {
 			// Not a TLS ClientHello: cannot terminate and inspect, so the judge
 			// cannot run. Fail closed.
-			p.storeDeny(domain, port, "tcp", "no_tls", "")
+			p.storeDeny(domain, port, "tcp", denyreason.NoTLS, "")
 			return
 		}
 		p.reach(PathTunnel)
@@ -150,7 +151,7 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 	// Non-HTTP traffic inside TLS cannot be judged (no request to inspect):
 	// fail closed when the judge was required.
 	if needsJudge {
-		p.storeDeny(domain, port, "tcp", "no_tls", "")
+		p.storeDeny(domain, port, "tcp", denyreason.NoTLS, "")
 		return
 	}
 

@@ -302,6 +302,9 @@ type Proxy struct {
 	// is process-wide (not per-connection) so a degraded control is visible
 	// without log spam.
 	wsDowngradeOnce sync.Once
+	// mcpModeUnknownOnce guards a single WARN when a scanning gateway does not
+	// report its mode and Warden holds its traffic (fail safe).
+	mcpModeUnknownOnce sync.Once
 
 	// pathHook, when non-nil, is told which protocol path each dispatch site
 	// takes (see reach). Only in-package tests set it, before Serve.

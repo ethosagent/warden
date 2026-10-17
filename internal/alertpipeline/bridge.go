@@ -53,6 +53,13 @@ func bridgeEvent(proxyID string, e analytics.Event) (integration.Finding, bool) 
 		// reason-carrying denies keep their reason-based rule ids for routing.
 		// Subject keys on domain, falling back to tool for MCP-only events that
 		// carry no domain.
+		//
+		// An ALLOW reaches this branch only when a monitor-mode detection rode it
+		// (the #389 echo guard's secret_echo, an MCP gateway monitor verdict):
+		// monitor mode alerts without blocking, so it must alert here. A benign
+		// allow carries no Reason — informational allow metadata lives in
+		// JudgeReason or dedicated fields (DLPAction, DLPRule, …), never here
+		// (internal/proxy/ws.go documents the allowed-session contract).
 		subject := e.Domain
 		if subject == "" {
 			subject = e.Tool
@@ -68,7 +75,9 @@ func bridgeEvent(proxyID string, e analytics.Event) (integration.Finding, bool) 
 			Ts:       e.Timestamp,
 		}, true
 	case denied:
-		// A reason-less blocked egress: the plain allowlist/default-deny fired.
+		// A reason-less blocked egress. Since #409 every proxy-written deny
+		// carries a bounded reason (internal/denyreason) and takes the branch
+		// above; this remains for external event producers that do not.
 		// Bounded fields only — domain + method for the summary, the decision enum
 		// for evidence.
 		summary := "blocked egress to " + e.Domain

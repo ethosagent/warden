@@ -117,6 +117,7 @@ classes:
     layer: domain
     paths:
       - internal/config
+      - internal/denyreason       # the one declared set of deny reasons (#409, rule X6)
       - internal/detect
       - internal/alertpipeline
       - internal/policybuilder
@@ -170,6 +171,7 @@ zones:
     - internal/policyeval
   shared:
     - internal/config
+    - internal/denyreason
     - internal/clock
     - internal/clock/clocktest
     - internal/secrets
