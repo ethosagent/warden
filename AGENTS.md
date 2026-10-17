@@ -132,6 +132,13 @@ file hits is the PR's tier; an unmatched path is `normal`, never `low`.
 `warden.check.v1` report) and CI labels the PR `risk:<tier>`; a `critical` PR
 also needs the L2 e2e job.
 
+**The `e2e` job is required for `risk:critical` PRs and for every release.**
+`.github/workflows/e2e.yml` runs `make e2e`'s suite (`test/e2e`, build tag `e2e`, hermetic
+compose stack) on PRs touching a risky path, nightly on `main`, and on the image
+`release.yml` pushes, which must pass before the GitHub Release is published. Its `paths`
+filter must cover every `critical` glob (`tools/riskmap` tests it). Run it locally with
+`make e2e`; `docs/testing-guide.md` ("L2: container tests").
+
 **Protected paths** are the `gates` tier: the files that decide what "green"
 means. They are:
 

@@ -1,0 +1,163 @@
+name: e2e
+
+# The L2 container suite (test/e2e, #351): the compose stack built from this
+# checkout, no real internet, no real credentials. Three entry points:
+#
+#   pull_request   PRs that touch a risky path. risk.yml's `e2e-required` job
+#                  waits for a check run named exactly `e2e` on the head commit
+#                  of every risk:critical PR, so EVERY critical glob in
+#                  .agents/risk.yaml must be in the paths list below
+#                  (tools/riskmap/e2e_paths_test.go fails when one is not).
+#   merge_group    the merge queue, when enabled (paths filters do not apply).
+#   schedule       nightly on the default branch.
+#   workflow_call  the release workflow, with the image it just pushed (by
+#                  digest). The suite then tests that exact image.
+#
+# Keep the job id AND name `e2e`: the check run name is what risk.yml looks for.
+# Actions are pinned to a full commit SHA, with the version in a comment.
+on:
+  pull_request:
+    paths:
+      # Every `critical` glob in .agents/risk.yaml (or a wider one).
+      - internal/proxy/**
+      - internal/secrets/**
+      - internal/policy/**
+      - internal/auth/**
+      - deploy/**
+      - Dockerfile
+      - "**/Dockerfile"   # risk.yaml's slash-less `Dockerfile` matches at any depth
+      - scripts/gen-certs.sh
+      # What the stack runs on and what the suite is made of.
+      - internal/worker/**
+      - internal/controlplane/**
+      - cmd/**
+      - configs/**
+      - test/e2e/**
+      - Makefile
+      - go.mod
+      - go.sum
+      - .github/workflows/e2e.yml
+  # A merge queue (if enabled) has no PR paths filter: every queued merge gets the run.
+  merge_group:
+  schedule:
+    - cron: "43 2 * * *"
+  workflow_call:
+    inputs:
+      image:
+        description: "Image to test, by digest (docker.io/ethosagent/warden@sha256:...). Empty builds the checkout."
+        type: string
+        required: false
+        default: ""
+    # Only the release passes these (for the pull of the image it just pushed);
+    # PR, merge-queue and nightly runs never see them.
+    secrets:
+      DOCKERHUB_USERNAME:
+        required: false
+      DOCKERHUB_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    name: e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      COMPOSE: >-
+        docker compose
+        -f deploy/compose/docker-compose.control-plane.yml
+        -f deploy/compose/docker-compose.e2e.yml
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Nothing else compiles test/e2e (the e2e tag hides it from check.sh), so
+      # a type error would otherwise surface only after the image build.
+      - name: Vet the e2e package
+        run: go vet -tags e2e ./test/e2e/
+
+      # Authenticated pull when called by the release (no anonymous rate limit).
+      # Gated on the image input, so the secrets are never used on PR runs.
+      - name: Log in to Docker Hub
+        if: ${{ inputs.image != '' }}
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # One image for the whole stack: pulled by digest when called by the
+      # release, else built once from this checkout. WARDEN_IMAGE makes the
+      # stack use it for the control plane and both workers (no rebuild).
+      - name: Prepare the image
+        env:
+          IMAGE: ${{ inputs.image }}
+        run: |
+          if [ -n "$IMAGE" ]; then
+            docker pull "$IMAGE"
+          else
+            IMAGE=warden:e2e
+            docker build -t "$IMAGE" .
+          fi
+          echo "WARDEN_IMAGE=$IMAGE" >> "$GITHUB_ENV"
+          echo "e2e image: $IMAGE" >> "$GITHUB_STEP_SUMMARY"
+
+      # With WARDEN_IMAGE set the stack runs --no-build, so the fake upstream
+      # image has to exist already.
+      - name: Build the fake upstream
+        run: $COMPOSE build fakeupstream
+
+      # KEEP_STACK=1: the suite must not tear the stack down on failure, or
+      # the diagnostics step below would find nothing to collect.
+      - name: Run the e2e suite
+        env:
+          KEEP_STACK: "1"
+        run: go test -tags e2e -count=1 -timeout 12m ./test/e2e/ -json > e2e.jsonl
+
+      - name: Summarize failures
+        if: failure()
+        run: |
+          {
+            echo "### Failed e2e tests"
+            jq -r 'select(.Action == "fail" and .Test != null) | "- `" + .Test + "`"' e2e.jsonl 2>/dev/null || true
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Everything is lab data (canary values are fixed fakes), so the logs are
+      # safe to upload. Each fetch is best-effort: one service being down must
+      # not lose the rest.
+      - name: Collect diagnostics
+        if: failure()
+        run: |
+          mkdir -p e2e-artifacts
+          $COMPOSE ps -a > e2e-artifacts/compose-ps.txt 2>&1 || true
+          $COMPOSE logs --no-color > e2e-artifacts/compose.log 2>&1 || true
+          for w in 1:9091 2:9092; do
+            curl -s --max-time 10 "http://127.0.0.1:${w#*:}/dashboard/api/traffic" > "e2e-artifacts/worker-${w%%:*}-traffic.json" || true
+          done
+          for p in traffic?limit=1000 workers policy; do
+            curl -s --max-time 10 --cacert test/e2e/certs/proxy-ca.crt "https://localhost:7070/dashboard/api/$p" > "e2e-artifacts/fleet-${p%%\?*}.json" || true
+          done
+          curl -s --max-time 10 http://127.0.0.1:8081/_recorded > e2e-artifacts/recorded.json || true
+          cp e2e.jsonl e2e-artifacts/ 2>/dev/null || true
+
+      - name: Upload diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: e2e-diagnostics
+          path: e2e-artifacts/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Tear down the stack
+        if: always()
+        run: make e2e-down
