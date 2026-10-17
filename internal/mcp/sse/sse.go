@@ -20,6 +20,10 @@ import (
 // stopped; the caller is expected to close the connection.
 var ErrBlocked = errors.New("sse: stream blocked by callback")
 
+// ErrEventTooLarge is returned by ScanHeld when one event outgrows
+// maxEventDataBytes. A held event that cannot be scanned is never forwarded.
+var ErrEventTooLarge = errors.New("sse: event too large to scan")
+
 // maxEventDataBytes caps the accumulated `data` payload for a single event. An
 // event whose data exceeds this is still forwarded verbatim, but its callback is
 // skipped (no analysis on an unbounded payload).
@@ -38,7 +42,21 @@ const maxEventDataBytes = 1 << 20 // 1 MiB
 // If onEvent returns block==true, Scan stops forwarding and returns ErrBlocked.
 // Any write or read error (other than io.EOF) is returned as-is.
 func Scan(src io.Reader, dst io.Writer, onEvent func(data []byte) (block bool)) error {
+	return scan(src, dst, false, onEvent)
+}
+
+// ScanHeld is Scan for enforce mode: each event is held, whole, until onEvent has
+// decided, and written to dst only on allow. A denied event (and everything after
+// it) is never written; Scan returns ErrBlocked. An event larger than
+// maxEventDataBytes fails closed with ErrEventTooLarge instead of being forwarded
+// unscanned. The added latency is one event.
+func ScanHeld(src io.Reader, dst io.Writer, onEvent func(data []byte) (block bool)) error {
+	return scan(src, dst, true, onEvent)
+}
+
+func scan(src io.Reader, dst io.Writer, hold bool, onEvent func(data []byte) (block bool)) error {
 	r := bufio.NewReader(src)
+	var held []byte // hold: raw bytes of the current event, not yet forwarded
 
 	var data []byte    // accumulated data: payload for the current event
 	overCap := false   // current event's data exceeded the cap
@@ -46,11 +64,17 @@ func Scan(src io.Reader, dst io.Writer, onEvent func(data []byte) (block bool)) 
 
 	// dispatch hands the current event to onEvent (unless over cap or empty) and
 	// resets the per-event accumulators. Returns true if the callback blocked.
+	var werr error // hold: write error from releasing an allowed event
 	dispatch := func() bool {
 		blocked := false
 		if haveEvent && !overCap {
 			blocked = onEvent(data)
 		}
+		if hold && !blocked && len(held) > 0 {
+			// Allowed: release the whole event verbatim.
+			_, werr = dst.Write(held)
+		}
+		held = held[:0]
 		data = data[:0]
 		overCap = false
 		haveEvent = false
@@ -60,8 +84,13 @@ func Scan(src io.Reader, dst io.Writer, onEvent func(data []byte) (block bool)) 
 	for {
 		line, err := r.ReadBytes('\n')
 		if len(line) > 0 {
-			// Forward verbatim BEFORE parsing so the client sees the live stream.
-			if _, werr := dst.Write(line); werr != nil {
+			if hold {
+				held = append(held, line...)
+				if len(held) > maxEventDataBytes {
+					return ErrEventTooLarge
+				}
+			} else if _, werr := dst.Write(line); werr != nil {
+				// Forward verbatim BEFORE parsing so the client sees the live stream.
 				return werr
 			}
 
@@ -78,6 +107,9 @@ func Scan(src io.Reader, dst io.Writer, onEvent func(data []byte) (block bool)) 
 				// Blank line: event boundary.
 				if dispatch() {
 					return ErrBlocked
+				}
+				if werr != nil {
+					return werr
 				}
 			} else {
 				haveEvent = true
@@ -104,7 +136,7 @@ func Scan(src io.Reader, dst io.Writer, onEvent func(data []byte) (block bool)) 
 				if dispatch() {
 					return ErrBlocked
 				}
-				return nil
+				return werr
 			}
 			return err
 		}

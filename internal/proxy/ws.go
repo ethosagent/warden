@@ -107,7 +107,9 @@ func (p *Proxy) handleWSUpgrade(
 
 	// scanner is a nil ws.Scanner when the capability was absent (monitor/off
 	// downgrade): the pump then forwards every frame verbatim without scanning.
-	pump := &ws.Pump{GW: scanner, SessionKey: sessionKey, Log: p.cfg.Logger}
+	// Enforce mode holds each text message until it is scanned, so a denied
+	// message never reaches its peer; monitor/off keep forward-then-scan.
+	pump := &ws.Pump{GW: scanner, SessionKey: sessionKey, Log: p.cfg.Logger, Hold: p.holdMCP(gw)}
 	client := rwc{br: clientBR, conn: tlsConn}
 	server := connRWC{r: upstreamBR, conn: upstream}
 
@@ -145,6 +147,20 @@ func (p *Proxy) handleWSUpgrade(
 func (p *Proxy) wsEnforcing(gw MCPGateway) bool {
 	mr, ok := gw.(mcpModeReader)
 	return ok && mr.Enforcing()
+}
+
+// holdMCP reports whether scanned MCP traffic must be held until the verdict. It
+// follows the live mode, but FAILS SAFE: a gateway that scans yet does not report
+// its mode is held as if enforcing (logged once) rather than silently falling
+// back to forward-then-scan.
+func (p *Proxy) holdMCP(gw MCPGateway) bool {
+	if mr, ok := gw.(mcpModeReader); ok {
+		return mr.Enforcing()
+	}
+	p.mcpModeUnknownOnce.Do(func() {
+		p.cfg.Logger.Warn("mcp gateway does not report its mode; holding messages until scanned (fail safe)")
+	})
+	return true
 }
 
 // refuseWSEnforce fails a WebSocket upgrade closed: the live gateway cannot scan
