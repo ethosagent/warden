@@ -12,8 +12,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"golang.org/x/net/http2"
 )
 
 // waitTrackerDrained fails the test when a scope never leaves the tracker,
@@ -379,7 +377,7 @@ func TestProxy_NewPathsLeaveTrackerAfterBookkeeping(t *testing.T) {
 		r.Host = parityHost
 		r.Header.Set(":protocol", "websocket")
 		w := httptest.NewRecorder()
-		p.serveGRPCStream(w, r, &http2.Transport{}, parityHost, 443, false) //nolint:staticcheck // SA1019: same transport type the production path uses
+		p.serveGRPCStream(w, r, nil, parityHost, 443, false) // refused before any forward: no transport needed
 		if w.Code != http.StatusNotImplemented {
 			t.Fatalf("status = %d, want 501", w.Code)
 		}

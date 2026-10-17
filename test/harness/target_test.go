@@ -360,7 +360,7 @@ func TestNew_BootFatalRunsTheRegisteredCleanup(t *testing.T) {
 // the started count as well as on the missing failure.
 func TestNew_ParallelRejectedBeforeAnythingBoots(t *testing.T) {
 	if !reflectHasIsParallel(t) {
-		t.Skipf("this Go's testing.T has no isParallel field; assertNotParallel cannot detect t.Parallel() — update it")
+		t.Fatal("this Go's testing.T has no isParallel field; assertNotParallel cannot detect t.Parallel() — update it")
 	}
 	ft := &fakeTarget{}
 	recCh := make(chan *recordingTB, 1)
@@ -384,10 +384,10 @@ func TestNew_ParallelRejectedBeforeAnythingBoots(t *testing.T) {
 // TestNew_RejectsParallel pins the misuse guard: New inside a t.Parallel()
 // test fails clearly (fixed env names would collide across parallel harnesses
 // in one process). The guard reads testing.T's unexported isParallel flag; if
-// a Go release renames it, skip loudly rather than silently passing.
+// a Go release renames it, fail loudly rather than silently passing.
 func TestNew_RejectsParallel(t *testing.T) {
 	if !reflectHasIsParallel(t) {
-		t.Skipf("this Go's testing.T has no isParallel field; assertNotParallel cannot detect t.Parallel() — update it")
+		t.Fatal("this Go's testing.T has no isParallel field; assertNotParallel cannot detect t.Parallel() — update it")
 	}
 	rec := &recordingTB{T: t, isParallel: true}
 	assertNotParallel(rec)
