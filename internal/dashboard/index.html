@@ -2465,8 +2465,14 @@ function renderPolicyList(id,list,entries,color,ed){
   if(!entries.length){ el.innerHTML='<tr><td class="muted" style="padding:12px 14px">none configured</td></tr>'; return; }
   el.innerHTML=entries.map((e,i)=>{
     const dom=(e.domain||'')+(e.port?(':'+e.port):'');
+    // #371 request constraints: show the methods and paths an entry is
+    // narrowed by, so an operator can see why a request was denied.
+    const cons=[];
+    if(e.methods&&e.methods.length) cons.push('methods: '+e.methods.join(','));
+    if(e.paths&&e.paths.length) cons.push('paths: '+e.paths.join(' '));
+    const consHtml=cons.length? '<div class="muted" style="font-size:11px;margin-top:2px">'+esc(cons.join(' · '))+'</div>':'';
     const rm= ed? '<button class="btn sm pol-rm" data-list="'+list+'" data-idx="'+i+'" style="color:#ff8098">Remove</button>':'';
-    return '<tr><td class="mono" style="color:'+color+'">'+esc(dom)+'</td><td style="text-align:right">'+rm+'</td></tr>';
+    return '<tr><td class="mono" style="color:'+color+'">'+esc(dom)+consHtml+'</td><td style="text-align:right">'+rm+'</td></tr>';
   }).join('');
   el.querySelectorAll('.pol-rm').forEach(b=>b.addEventListener('click',()=>removePolicyEntry(b.dataset.list,+b.dataset.idx)));
 }

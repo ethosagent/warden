@@ -14,6 +14,7 @@ import (
 	"golang.org/x/net/http2"
 
 	"github.com/ethosagent/warden/internal/analytics"
+	"github.com/ethosagent/warden/internal/policy"
 	"github.com/ethosagent/warden/internal/secrets"
 )
 
@@ -49,9 +50,9 @@ func (fw *flushWriter) Write(b []byte) (int, error) {
 // connection and reverse-proxies each stream upstream over HTTP/2. It is only
 // reached for destinations that are STATICALLY allowed (needsJudge == false):
 // HTTP/2 carries no HTTP/1 request the inline judge can inspect, so a NoMatch
-// destination fails closed before ever reaching here (see handleTLS). The domain
-// was already allowlisted at CONNECT time, so this handler does not re-evaluate
-// policy.
+// destination fails closed before ever reaching here (see handleTLS). CONNECT
+// admission only could-matched the destination; each stream re-evaluates the
+// per-request method/path constraints (#371) in serveGRPCStream.
 //
 // Secret placeholders are swapped in request METADATA (headers) only. gRPC
 // message bodies are streamed verbatim — protobuf message-field swap is
@@ -83,14 +84,53 @@ func (p *Proxy) handleGRPC(clientConn net.Conn, domain string, port int) {
 	})
 }
 
-// serveGRPCStream handles a single HTTP/2 stream: metadata secret-swap, upstream
-// round-trip, and response + trailer forwarding. proto is "grpc" when the
-// Content-Type marks a gRPC call, else "http2" (a plain HTTP/2 request).
+// serveGRPCStream handles a single HTTP/2 stream: the #371 method/path
+// constraint check, metadata secret-swap, upstream round-trip, and response +
+// trailer forwarding. proto is "grpc" when the Content-Type marks a gRPC call,
+// else "http2" (a plain HTTP/2 request).
 func (p *Proxy) serveGRPCStream(w http.ResponseWriter, r *http.Request, rt *http2.Transport, domain string, port int) {
 	isGRPC := strings.HasPrefix(r.Header.Get("Content-Type"), "application/grpc")
 	proto := "http2"
 	if isGRPC {
 		proto = "grpc"
+	}
+
+	// #371: the per-request constraint check on the HTTP/2 path, before the
+	// metadata swap and before any upstream write — the same enforcement-point
+	// contract as the HTTP/1.1 constraintGate (CONNECT admission only
+	// could-matched the constraints; this evaluation is authoritative and counts
+	// the request exactly once). The matched values are the pseudo-headers as
+	// sent: r.Method (:method, case-sensitive) and r.URL.EscapedPath() — the
+	// http2 server parses the raw :path with url.ParseRequestURI, so
+	// EscapedPath() is the exact percent-encoded path that goes upstream, never
+	// a decoded one. A NoMatch cannot occur here (the destination was statically
+	// allowed at CONNECT) but falls through fail-closed-safe either way.
+	verdict := p.cfg.Policy.EvaluateRequest(domain, port, policy.SchemeHTTPS, r.Method, r.URL.EscapedPath())
+	if verdict.Decision == policy.Deny {
+		reason := verdict.Reason
+		if reason == "" {
+			reason = "policy"
+		}
+		fullURL := "https://" + domain + r.URL.RequestURI()
+		_ = p.analyticsStore().StoreEvent(analytics.Event{
+			Timestamp: time.Now(),
+			Domain:    domain,
+			Port:      port,
+			Protocol:  proto,
+			Method:    r.Method,
+			URL:       fullURL,
+			Decision:  "deny",
+			Reason:    reason,
+		})
+		p.cfg.Metrics.RecordRequest("deny", proto)
+		p.cfg.Metrics.RecordBlocked(reason)
+		p.logDecision(decisionLog{
+			Domain: domain, Port: port, Protocol: proto,
+			Method: r.Method, URL: fullURL, Decision: "deny",
+			Reason: reason,
+		})
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
 	}
 
 	// Swap secret placeholders in request headers (metadata) only. Snapshot the

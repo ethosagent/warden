@@ -145,11 +145,14 @@ type WSScanner interface {
 type mcpModeReader interface{ Enforcing() bool }
 
 // PolicyEvaluator is the consumer-side seam for the static allow/deny decision.
-// *policy.Evaluator satisfies it. Replace is used by the control-plane apply loop
-// to hot-swap the running policy; it is kept on the interface so the proxy's
-// dependency is fully expressed by one seam.
+// *policy.Evaluator satisfies it. EvaluateRequest evaluates the policy for one
+// request; callers pass method/path = "" for the destination-only (CONNECT)
+// form, which could-matches constraints and peeks at rate limits. Replace is
+// used by the control-plane apply loop to hot-swap the running policy; it is
+// kept on the interface so the proxy's dependency is fully expressed by one
+// seam.
 type PolicyEvaluator interface {
-	Evaluate(domain string, port int, scheme policy.Scheme) policy.Decision
+	EvaluateRequest(domain string, port int, scheme policy.Scheme, method, path string) policy.RequestVerdict
 	Replace(p config.Policy)
 }
 
