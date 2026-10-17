@@ -18,6 +18,7 @@ import (
 
 	"github.com/ethosagent/warden/internal/alertpipeline"
 	"github.com/ethosagent/warden/internal/analytics"
+	"github.com/ethosagent/warden/internal/clock"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/detect"
 	"github.com/ethosagent/warden/internal/integration"
@@ -45,6 +46,12 @@ type Params struct {
 	// listener's accept backlog and Serve drains them the moment it starts, so
 	// nothing is refused. Nil is allowed (production never sets it).
 	OnReady func(addr string)
+
+	// Clock is the CP's time port (nil = clock.Real()). No control-plane
+	// consumer ticks on it yet — the detection engine migrates in its own phase
+	// (rule L3, #349) — but the field lands now so the L1 harness (#350) can
+	// inject a fake without another seam PR.
+	Clock clock.Clock
 }
 
 // Run boots a control plane from Params and serves until ctx is cancelled. It
@@ -237,6 +244,15 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	if p.Listener != nil {
 		reportedAddr = p.Listener.Addr().String()
 	}
+
+	// clk is the CP's resolved time port (nil = clock.Real(), the production
+	// default). Nothing ticks on it yet; the phase that adds the first CP
+	// consumer wires it through.
+	clk := p.Clock
+	if clk == nil {
+		clk = clock.Real()
+	}
+	_ = clk
 
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()

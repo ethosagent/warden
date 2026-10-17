@@ -10,6 +10,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -29,6 +30,7 @@ import (
 	"github.com/ethosagent/warden/internal/mcp/gateway"
 	"github.com/ethosagent/warden/internal/proxy"
 	"github.com/ethosagent/warden/internal/scan"
+	"github.com/ethosagent/warden/test/fakes"
 )
 
 // writeConfig writes cfg to a temp file and returns its path.
@@ -464,5 +466,148 @@ func TestPushMCPSnapshots(t *testing.T) {
 	}
 	if got == 0 {
 		t.Fatal("expected at least the initial MCP snapshot push to reach the ingest endpoint")
+	}
+}
+
+// goPolicy builds the minimal policy an in-process boot needs, constructed in
+// Go (never from YAML) so the ConfigProvider seam is exercised the way the L1
+// harness (#350) will use it: no config file anywhere.
+func goPolicy() config.Policy {
+	return config.Policy{
+		Allowlist: []config.AllowlistEntry{{Domain: "api.openai.com"}},
+		LogLevel:  "error",
+		LogFormat: "text",
+	}
+}
+
+// TestRunServesHealthzOnInjectedListeners proves the worker harness seam: Run
+// boots the real worker from a Go-built policy — no config file, no fixed port
+// — serves the proxy and the admin+dashboard on caller-supplied port-0
+// listeners, reports both bound addresses through OnReady (injected listeners
+// win over the resolved addresses), answers /healthz with ok, and returns nil
+// after ctx cancel. It mirrors controlplane.Run's TestRunServesHealthzOnInjectedListener.
+func TestRunServesHealthzOnInjectedListeners(t *testing.T) {
+	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen proxy: %v", err)
+	}
+	adminLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen admin: %v", err)
+	}
+
+	p := Params{
+		Config:        &fakes.FakeConfigProvider{Policy: goPolicy()},
+		DBPath:        filepath.Join(t.TempDir(), "warden.db"),
+		Version:       "test",
+		ProxyListener: proxyLn,
+		AdminListener: adminLn,
+	}
+	ready := make(chan [2]string, 1)
+	p.OnReady = func(proxyAddr, adminAddr string) { ready <- [2]string{proxyAddr, adminAddr} }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- Run(ctx, io.Discard, p) }()
+
+	var addrs [2]string
+	select {
+	case addrs = <-ready:
+	case err := <-errCh:
+		t.Fatalf("Run returned before OnReady: %v", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for OnReady")
+	}
+	if addrs[0] != proxyLn.Addr().String() {
+		t.Errorf("OnReady proxy addr = %q, want the injected listener's %q", addrs[0], proxyLn.Addr().String())
+	}
+	if addrs[1] != adminLn.Addr().String() {
+		t.Errorf("OnReady admin addr = %q, want the injected listener's %q", addrs[1], adminLn.Addr().String())
+	}
+
+	resp, err := http.Get("http://" + addrs[1] + "/healthz")
+	if err != nil {
+		cancel()
+		t.Fatalf("GET /healthz: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || string(body) != "ok" {
+		cancel()
+		t.Fatalf("GET /healthz = %d %q, want 200 %q", resp.StatusCode, body, "ok")
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Run after cancel = %v, want nil", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for Run to return after cancel")
+	}
+	// Both injected listeners must be closed by the time Run returns: the proxy
+	// closes its listener on ctx-done shutdown and Run closes the admin's, so a
+	// second boot on the same ports can never collide.
+	for name, ln := range map[string]net.Listener{"proxy": proxyLn, "admin": adminLn} {
+		if _, aerr := ln.Accept(); !errors.Is(aerr, net.ErrClosed) {
+			t.Errorf("%s listener Accept after Run = %v, want net.ErrClosed (listener leaked)", name, aerr)
+		}
+	}
+}
+
+// TestRunClosesInjectedListenersOnBootError proves a failed boot never leaks
+// the harness's ports: every early-error return in Run happens before any
+// server starts, so both injected listeners must come back closed — one
+// net.ErrClosed Accept each, at two different return sites (provider error,
+// unsupported secret backend).
+func TestRunClosesInjectedListenersOnBootError(t *testing.T) {
+	tests := []struct {
+		name string
+		pol  config.Policy
+		err  error
+	}{
+		{"config provider error", goPolicy(), errors.New("boom")},
+		{"unsupported secret backend", func() config.Policy {
+			pol := goPolicy()
+			pol.SecretStore = config.SecretStoreConfig{Backend: "bogus"}
+			return pol
+		}(), nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatalf("listen proxy: %v", err)
+			}
+			adminLn, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatalf("listen admin: %v", err)
+			}
+			// Bound the Accepts below so a leaked listener fails the test rather
+			// than hanging it.
+			for _, ln := range []net.Listener{proxyLn, adminLn} {
+				if tcp, ok := ln.(*net.TCPListener); ok {
+					_ = tcp.SetDeadline(time.Now().Add(10 * time.Second))
+				}
+			}
+
+			p := Params{
+				Config:        &fakes.FakeConfigProvider{Policy: tt.pol, Err: tt.err},
+				DBPath:        filepath.Join(t.TempDir(), "warden.db"),
+				Version:       "test",
+				ProxyListener: proxyLn,
+				AdminListener: adminLn,
+			}
+			if err := Run(context.Background(), io.Discard, p); err == nil {
+				t.Fatal("Run = nil error, want a boot error")
+			}
+			for name, ln := range map[string]net.Listener{"proxy": proxyLn, "admin": adminLn} {
+				if _, aerr := ln.Accept(); !errors.Is(aerr, net.ErrClosed) {
+					t.Errorf("%s listener Accept after failed boot = %v, want net.ErrClosed (injected listener leaked)", name, aerr)
+				}
+			}
+		})
 	}
 }

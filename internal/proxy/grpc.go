@@ -64,13 +64,14 @@ func (fw *flushWriter) Write(b []byte) (int, error) {
 func (p *Proxy) handleGRPC(clientConn net.Conn, domain string, port int) {
 	// DialTLSContext ignores the addr the transport would derive from the request
 	// URL and always dials the CONNECT-gated destination through the SSRF-safe
-	// dialer, negotiating ALPN h2 (required for the upstream to speak HTTP/2).
+	// dialer. The tls.Config comes from upstreamTLSConfig so the assembly-only
+	// UpstreamRootCAs override applies here like on every other upstream TLS
+	// dial, plus ALPN h2 (required for the upstream to speak HTTP/2).
 	rt := &http2.Transport{
 		DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
-			return p.dialTLS(network, net.JoinHostPort(domain, strconv.Itoa(port)), &tls.Config{
-				ServerName: domain,
-				NextProtos: []string{"h2"},
-			})
+			upstreamCfg := p.upstreamTLSConfig(domain)
+			upstreamCfg.NextProtos = []string{"h2"}
+			return p.dialTLS(network, net.JoinHostPort(domain, strconv.Itoa(port)), upstreamCfg)
 		},
 	}
 	defer rt.CloseIdleConnections()

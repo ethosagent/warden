@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/ethosagent/warden/internal/analytics"
+	"github.com/ethosagent/warden/internal/clock"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/mcp/gateway"
 	"github.com/ethosagent/warden/internal/proxy"
@@ -33,12 +34,16 @@ var _ ControlPlaneClient = (*config.RemoteProvider)(nil)
 // and the last-known-good policy is kept (capped backoff), so a worker rides out
 // a control-plane outage. It returns when ctx is cancelled.
 //
+// clk is the worker's time port: the backoff sleeps run on it, so tests drive
+// retries with a fake clock instead of real sleeps. nil is never passed (Run
+// resolves clock.Real()).
+//
 // onApply, when non-nil, runs after each applied policy change (same long-poll
 // round-trip) so the worker can apply the distributed behavioral settings —
 // notably rebuilding + atomically swapping the MCP gateway — in lock-step with
 // the allow/deny reload. It is passed as a closure so the loop stays free of the
 // proxy/scanner/store internals the rebuild needs.
-func longPollControlPlane(ctx context.Context, cp ControlPlaneClient, ev proxy.PolicyEvaluator, wait time.Duration, logger *slog.Logger, onApply func()) {
+func longPollControlPlane(ctx context.Context, clk clock.Clock, cp ControlPlaneClient, ev proxy.PolicyEvaluator, wait time.Duration, logger *slog.Logger, onApply func()) {
 	const maxBackoff = 15 * time.Second
 	backoff := time.Second
 	for {
@@ -54,7 +59,7 @@ func longPollControlPlane(ctx context.Context, cp ControlPlaneClient, ev proxy.P
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(backoff):
+			case <-clk.After(backoff):
 			}
 			if backoff *= 2; backoff > maxBackoff {
 				backoff = maxBackoff
@@ -79,14 +84,23 @@ func longPollControlPlane(ctx context.Context, cp ControlPlaneClient, ev proxy.P
 
 // heartbeatControlPlane pings the control plane every interval so it lists this
 // worker as online even when idle (no traffic, long-poll held open).
-func heartbeatControlPlane(ctx context.Context, cp ControlPlaneClient, interval time.Duration, logger *slog.Logger) {
-	t := time.NewTicker(interval)
+//
+// clk is the worker's time port: the beat cadence runs on it, so tests advance
+// a fake clock one interval at a time and observe exactly one heartbeat each.
+// A NewTimer+Reset cadence (not a ticker) because the Clock port has no ticker.
+// Reset happens BEFORE the beat, so the period is measured from the start of
+// each beat — a fixed cadence, identical to a ticker: a slow beat delays
+// neither the next boundary nor its own successor (an overrun boundary fires
+// into the buffered channel and is picked up the moment the loop is free).
+func heartbeatControlPlane(ctx context.Context, clk clock.Clock, cp ControlPlaneClient, interval time.Duration, logger *slog.Logger) {
+	t := clk.NewTimer(interval)
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-t.C:
+		case <-t.C():
+			t.Reset(interval)
 			if err := cp.Heartbeat(ctx); err != nil && ctx.Err() == nil {
 				logger.Debug("control plane heartbeat failed", "error", err)
 			}
