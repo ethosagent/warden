@@ -403,6 +403,38 @@ func (p *Proxy) recordDeny(s *requestScope, reason string) {
 	})
 }
 
+// recordSSRFDeny is the deny path for a dial the SSRF-safe dialer refused
+// (#391): the same single deny event recordDeny writes, plus the bounded
+// address class. It is a no-op for any other error, so ordinary dial failures
+// (DNS failure, timeout, connection refused) keep their long-standing
+// treatment — a 502 with no analytics event, never an ssrf_* deny.
+func (p *Proxy) recordSSRFDeny(s *requestScope, err error) {
+	se, ok := AsSSRFError(err)
+	if !ok {
+		return
+	}
+	fullURL := s.eventURL()
+	_ = p.analyticsStore().StoreEvent(analytics.Event{
+		Timestamp: time.Now(),
+		Domain:    s.domain,
+		Port:      s.port,
+		Protocol:  s.proto,
+		Method:    s.req.Method,
+		URL:       fullURL,
+		Decision:  "deny",
+		Reason:    se.Reason,
+		AddrClass: se.AddrClass,
+		LatencyMs: s.latencyMs(),
+	})
+	p.cfg.Metrics.RecordRequest("deny", s.proto)
+	p.cfg.Metrics.RecordBlocked(se.Reason)
+	p.logDecision(decisionLog{
+		Domain: s.domain, Port: s.port, Protocol: s.proto,
+		Method: s.req.Method, URL: fullURL, Decision: "deny",
+		Reason: se.Reason, AddrClass: se.AddrClass,
+	})
+}
+
 // constraintGate enforces the #371 method/path constraints on EVERY request of
 // a keep-alive tunnel. CONNECT admission only could-matched them (domain+port,
 // rate limit peeked); this per-request evaluation is authoritative and counts
@@ -1014,6 +1046,7 @@ func (p *Proxy) forward(s *requestScope) (endSession bool) {
 func (p *Proxy) dialUpstream(s *requestScope) error {
 	upstream, err := p.dialTLS("tcp", net.JoinHostPort(s.domain, fmt.Sprintf("%d", s.port)), p.upstreamTLSConfig(s.domain))
 	if err != nil {
+		p.recordSSRFDeny(s, err)
 		return err
 	}
 	s.upstream = upstream
