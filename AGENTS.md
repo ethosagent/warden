@@ -38,7 +38,8 @@ one report on stdout (human progress goes to stderr) and keeps going after a
 failure, so every problem shows in one pass. Each finding has a `rule`, a
 `file:line` and a `fix` that says what to do. Report format:
 [`docs/check-report.schema.json`](docs/check-report.schema.json)
-(`warden.check.v1`). Other flags: `--json-out <path>` (human output as usual,
+(`warden.check.v1`). `--list-stages` prints the stage names the gate runs (one per line; with `--json`, a
+report) and runs nothing. Other flags: `--json-out <path>` (human output as usual,
 plus the report in a file), `--keep-going` (all stages, human output). The
 exit code is the same with or without them. In report mode the console shows a
 per-stage summary instead of live tool output, and a tool that cannot run at all
@@ -118,6 +119,52 @@ file as a regression seed only after triage.
   value. Headers only; no full request/response bodies.
 - **Default-deny is sacred.** A destination not on the allowlist is blocked.
 
+## Risk tiers and protected paths
+
+[`.agents/risk.yaml`](.agents/risk.yaml) is the single source of risk tiers by
+path glob (`critical`, `gates`, `normal`, `low`). The highest tier any changed
+file hits is the PR's tier; an unmatched path is `normal`, never `low`.
+`tools/riskmap` prints it (`go run ./tools/riskmap -base <ref> -head <ref>`, a
+`warden.check.v1` report) and CI labels the PR `risk:<tier>`; a `critical` PR
+also needs the L2 e2e job.
+
+**Protected paths** are the `gates` tier: the files that decide what "green"
+means. They are:
+
+- `scripts/check.sh`, `scripts/fuzz-targets.txt`
+- `.github/**`, `.githooks/**`
+- `.golangci*.yml` / `.golangci*.yaml` (the base config and the generated `.golangci.arch.yml`)
+- `.agents/**` (this risk map and the review rubrics)
+- `architecture*.yaml`, `architecture.baseline*.yaml`
+- `tools/**` (checkreport, riskmap, gatecheck, approval), `internal/archtest/**`,
+  `cmd/archgen/**`, `docs/check-report.schema.json`
+
+**Agents must not commit to a protected path. If a task needs a gate change,
+stop and ask the maintainer.** Do not make a check green by lowering
+`COVERAGE_MIN`, deleting or skipping a test, adding a `//nolint` or a lint
+exclusion, removing a stage, or growing the architecture baseline: fix the code.
+Two CI checks enforce this, both passed by a `gates-change-approved` label that
+only a human maintainer can add, after the latest push (a bot's label, or one
+from before a later push, does not count; `docs/maintainer-setup.md`):
+
+- `gates` / protected-paths: fails a bot- or agent-opened PR that touches a
+  protected path.
+- `gates` / gates-not-weakened (`tools/gatecheck weakened`): compares base and
+  head and reports each weakening with its file, line and kind: coverage minimum,
+  a `check.sh` stage removed, renamed or skipped, or kept but neutered (`go test`
+  losing `-race`, `-coverprofile` or `-fuzz`, `./...` narrowed, the coverage
+  comparison edited, the lint `--config` swapped or a second golangci config
+  added), CI (workflows and composite actions) no longer running the gate or
+  dropping `--integration`, a test deleted or skipped (`t.Skip`, `testing.Short`,
+  an early return on `os.Getenv`, the same in a test helper), loosened lint or a
+  new `//nolint`, a rule removed or downgraded in `architecture.yaml`, a baseline
+  that grew (it may only shrink), a downgraded tool pin, a suppressed
+  vulnerability. Adding tests and raising a bar pass. It reads `check.sh` as text
+  and never runs anything from the PR head. Out of scope: a test whose body was
+  gutted but keeps its name and has no skip or guard (review catches it).
+
+Every `//nolint` must name the linter and give a reason (`nolintlint`).
+
 ## Reviews
 
 Review rubrics live in [`.agents/reviews/`](.agents/reviews/README.md), one
@@ -166,6 +213,8 @@ configs/config.example.yaml  documented sample config
 test/fakes/           hand-written fakes for the three interfaces
 test/integration/     end-to-end tests behind the `integration` build tag
 scripts/              check.sh (the gate), install-hooks.sh, gen-certs.sh
+tools/                dev tools, never in the binary: checkreport, riskmap, gatecheck (+ libs risk, approval, report)
+.agents/risk.yaml     risk tiers by path glob; the gates tier is the protected-path list
 ```
 
 Each `internal/<domain>` package keeps its interface, implementation(s), and

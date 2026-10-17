@@ -1,0 +1,108 @@
+name: risk
+
+# Labels every PR risk:critical, risk:gates, risk:normal or risk:low from
+# .agents/risk.yaml (tools/riskmap, #354) and, for critical PRs, requires the L2
+# e2e job (#351).
+#
+# pull_request_target so the job may write labels on fork PRs. Safe because only
+# BASE code runs: the PR's head is fetched as a git ref and diffed for file
+# names, never checked out or executed.
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  checks: read
+
+concurrency:
+  group: risk-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  risk:
+    runs-on: ubuntu-latest
+    outputs:
+      tier: ${{ steps.tier.outputs.tier }}
+    steps:
+      - name: Checkout base (trusted)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch the PR head as a ref (not checked out)
+        run: git fetch --no-tags origin "+refs/pull/${{ github.event.pull_request.number }}/head:refs/remotes/pr/head"
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Compute the tier
+        id: tier
+        run: |
+          if [ ! -d tools/riskmap ]; then
+            echo "::warning::tools/riskmap does not exist on the base branch yet; no risk label is set until it does"
+            echo "tier=unknown" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          go run ./tools/riskmap \
+            -base "${{ github.event.pull_request.base.sha }}" -head refs/remotes/pr/head \
+            > "$RUNNER_TEMP/risk.json"
+          tier="$(jq -r '.stages[0].metrics.tier' "$RUNNER_TEMP/risk.json")"
+          case "$tier" in critical | gates | normal | low) ;; *) echo "unexpected tier: $tier" >&2; exit 1 ;; esac
+          echo "tier=$tier" >> "$GITHUB_OUTPUT"
+          echo "risk tier: $tier" >> "$GITHUB_STEP_SUMMARY"
+
+      # The labels must exist (docs/maintainer-setup.md creates them once).
+      - name: Set the risk label
+        if: steps.tier.outputs.tier != 'unknown'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          TIER: ${{ steps.tier.outputs.tier }}
+        run: |
+          gh pr edit "$PR" --repo "${{ github.repository }}" --add-label "risk:$TIER"
+          # drop the other tiers, but only the ones the PR carries: removing an
+          # absent label is an error for gh pr edit, and swallowing every error
+          # would hide a real failure
+          have="$(gh pr view "$PR" --repo "${{ github.repository }}" --json labels --jq '.labels[].name')"
+          for t in critical gates normal low; do
+            if [ "$t" != "$TIER" ] && printf '%s\n' "$have" | grep -qx "risk:$t"; then
+              gh pr edit "$PR" --repo "${{ github.repository }}" --remove-label "risk:$t"
+            fi
+          done
+
+  # Required check for risk:critical PRs. It passes at once for every other tier.
+  # For critical it needs the L2 e2e job (#351) to have succeeded on the head
+  # commit: a check run named `e2e`. Until #351 lands there is no such job, so a
+  # critical PR stays red here on purpose (fail closed).
+  e2e-required:
+    needs: risk
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require the e2e check run for critical PRs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TIER: ${{ needs.risk.outputs.tier }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$TIER" != "critical" ]; then
+            echo "tier is $TIER: the e2e job is not required"
+            exit 0
+          fi
+          for _ in $(seq 1 60); do
+            state="$(gh api --paginate "repos/${{ github.repository }}/commits/$SHA/check-runs?per_page=100" \
+              --jq '.check_runs[]' | jq -s -r '[.[] | select(.name == "e2e")] | if length == 0 then "missing" elif all(.[]; .conclusion == "success") then "success" elif any(.[]; .status != "completed") then "pending" else "failed" end')"
+            case "$state" in
+            success) echo "e2e passed"; exit 0 ;;
+            failed) echo "::error::the e2e check failed on $SHA"; exit 1 ;;
+            esac
+            sleep 30
+          done
+          echo "::error::risk:critical PR: the e2e check run (#351) did not succeed on $SHA (state: $state)"
+          exit 1
