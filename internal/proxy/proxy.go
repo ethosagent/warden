@@ -222,10 +222,15 @@ type Proxy struct {
 	// leafTTL is the injectable leaf validity window (0 = defaultLeafTTL). Both
 	// exist only so white-box tests can drive cert expiry deterministically;
 	// production leaves them zero-valued.
-	now      func() time.Time
-	leafTTL  time.Duration
-	dialFunc func(network, addr string) (net.Conn, error)
-	dialTLS  func(network, addr string, cfg *tls.Config) (*tls.Conn, error)
+	now     func() time.Time
+	leafTTL time.Duration
+	// preambleTimeout is the injectable CONNECT-preamble read deadline (0 =
+	// connectPreambleTimeout). Like now/leafTTL it exists only so white-box
+	// tests can drive the slowloris path without a real 10 s sleep; production
+	// leaves it zero-valued.
+	preambleTimeout time.Duration
+	dialFunc        func(network, addr string) (net.Conn, error)
+	dialTLS         func(network, addr string, cfg *tls.Config) (*tls.Conn, error)
 
 	// mcp holds the live MCP gateway, swappable atomically while the hot path
 	// reads it (control-plane settings can rebuild + replace it at runtime). MCPGateway
