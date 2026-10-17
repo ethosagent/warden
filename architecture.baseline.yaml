@@ -101,6 +101,14 @@ baseline:
     package: cmd/proxy
     why: "the checker and the integration harness drive the go toolchain; adapters own exec after step 7"
     allow: ["os/exec.CommandContext"]
+  - rule: S2
+    package: examples/mcp-wedge/poisoned-mcp-server
+    why: "the demo binary and the L1 harness share one poisoned MCP server so the demo and every scenario send byte-identical attack traffic; the package is stdlib-only and holds no test helpers"
+    allow: ["internal/mcp/poisoned"]
+  - rule: X1
+    package: test/harness
+    why: "test PKI: the L1 harness mints throwaway CAs and leaves for its fake upstreams; never production signing"
+    allow: ["crypto/x509.CreateCertificate"]
   - rule: X3
     package: test/integration
     why: "the checker and the integration harness drive the go toolchain; adapters own exec after step 7"
@@ -109,6 +117,14 @@ baseline:
     package: tools/checkreport
     why: "the dev tool injects its own environ into realMain for testability; a CI tool, never the guarded agent"
     allow: ["os.Environ"]
+  - rule: X4
+    package: test/harness
+    why: "the harness's agent and oracle clients play the outside world: they dial the worker proxy or a loopback fake, never the internet"
+    allow: ["net/http.Client{}"]
+  - rule: X4
+    package: test/scenarios
+    why: "a scenario's client plays the agent and dials the worker proxy, never the internet"
+    allow: ["net/http.Client{}"]
   - rule: X4
     package: internal/analytics
     why: "pre-migration: bare http clients predate the shared SSRF-safe constructor"

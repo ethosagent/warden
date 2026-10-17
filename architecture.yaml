@@ -137,6 +137,7 @@ classes:
     paths:
       - internal/dnstest
       - internal/clock/clocktest  # fake Clock for tests (#362)
+      - internal/mcp/poisoned     # the poisoned MCP server the harness and the demo share (#363)
       - test/**
 
 # ---------------------------------------------------------------------------
