@@ -378,3 +378,43 @@ func TestFleet_DashboardPolicyWriteNeedsToken(t *testing.T) {
 		t.Fatal("a refused write still changed the fleet policy")
 	}
 }
+
+// TestFleet_WorkerDashboardWriteNeedsToken: on the real stack a worker's admin
+// dashboard refuses an unauthenticated or wrong-token write (401) and lets the
+// worker admin token through to the handler (#425). Reads stay open.
+func TestFleet_WorkerDashboardWriteNeedsToken(t *testing.T) {
+	adminToken := (&compose.Target{}).WorkerAdminToken()
+	for _, w := range fleetAgents {
+		base, ok := compose.WorkerAdminBase(w.worker)
+		if !ok {
+			t.Fatalf("no admin base for %s", w.worker)
+		}
+		put := func(auth string) int {
+			req, err := http.NewRequest(http.MethodPut, base+"/dashboard/api/detection", strings.NewReader(`{}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if auth != "" {
+				req.Header.Set("Authorization", auth)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("e2e: PUT %s detection: %v", w.worker, err)
+			}
+			_ = resp.Body.Close()
+			return resp.StatusCode
+		}
+		for _, auth := range []string{"", "Bearer wrong-token"} {
+			if c := put(auth); c != http.StatusUnauthorized {
+				t.Errorf("%s: PUT /dashboard/api/detection with auth %q = %d, want 401", w.worker, auth, c)
+			}
+		}
+		// A managed worker has no detection writer, so the handler answers 405.
+		if c := put("Bearer " + adminToken); c != http.StatusMethodNotAllowed {
+			t.Errorf("%s: PUT with the worker admin token = %d, want 405 from the handler", w.worker, c)
+		}
+		if _, err := getPolicy(base); err != nil {
+			t.Errorf("%s: GET policy (reads stay open): %v", w.worker, err)
+		}
+	}
+}

@@ -35,6 +35,7 @@ func TestMCPFleetProxyAware(t *testing.T) {
 		"w2": {Inventory: []gateway.InventoryItem{{Name: "write_file"}}},
 	}
 	srv := NewServer(ds, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
 	srv.SetMCPFleet(func(proxyID string) ([]gateway.InventoryItem, map[string]mcp.ToolProfileView) {
 		s := fleet[proxyID]
 		return s.Inventory, s.Schema

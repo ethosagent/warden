@@ -395,6 +395,10 @@ curl -s http://localhost:9090/dashboard/api/traffic | head
 curl -s http://localhost:9090/dashboard/api/blocked     # denied attempts grouped by domain
 ```
 
+Dashboard writes need the worker admin token (`WARDEN_ADMIN_TOKEN`, demo default
+`dev-admin-token`) as `Authorization: Bearer <token>`; reads are open. See
+[control-plane.md](control-plane.md#worker-admin-token).
+
 (The analytics SQLite file lives at `/tmp/warden.db` inside the proxy container and is ephemeral —
 mount a volume there if you want it to persist.)
 

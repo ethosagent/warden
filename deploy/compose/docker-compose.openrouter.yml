@@ -19,6 +19,7 @@ services:
       - "--ca-cert=/etc/warden/certs/proxy-ca.crt"
       - "--ca-key=/etc/warden/certs/proxy-ca.key"
       - "--admin-listen=0.0.0.0:9090"
+      - "--admin-token-env=WARDEN_ADMIN_TOKEN"
       - "--db=/tmp/warden.db"
 
   agent:

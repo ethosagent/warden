@@ -123,6 +123,7 @@ warden proxy listening on 127.0.0.1:8080
 | `--ca-cert` | (none) | CA cert for TLS termination; omit for blind tunneling |
 | `--ca-key` | (none) | CA private key (both cert+key required together) |
 | `--admin-listen` | `127.0.0.1:9090` | Admin + dashboard listen address |
+| `--admin-token-env` | (none) | Env var holding the bearer token dashboard **writes** need (config: `admin.tokenEnv`); unset = writes refused with 403, reads stay open. See [control-plane.md](control-plane.md#worker-admin-token) |
 | `--db` | `warden.db` | SQLite analytics database path |
 
 `--listen`, `--admin-listen`, `--ca-cert` and `--ca-key` can also be set in the config file as

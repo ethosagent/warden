@@ -1,26 +1,17 @@
 package controlplane
 
-import "net/http"
+import "github.com/ethosagent/warden/internal/dashboard"
 
 // dashboardWriteGuard gates every state-changing dashboard API call on the CP
 // bearer token. Unlike the worker-facing routes (bearerOK passes when no token is
 // configured, for development), it fails closed: with no token configured a write
-// is refused outright. The comparison is bearerOK's constant-time one. A refusal
-// is logged with the route and remote address only, never the presented header.
-func (s *Server) dashboardWriteGuard(r *http.Request) (int, string) {
-	if s.cfg.Token == "" {
-		s.logRefusedWrite(r, "no control-plane token configured")
-		return http.StatusForbidden, "dashboard writes are disabled: the control plane has no bearer token configured. " +
-			"Start it with --token-env <ENV> (e.g. WARDEN_CP_TOKEN) and send 'Authorization: Bearer <token>'"
-	}
-	if !s.bearerOK(r) {
-		s.logRefusedWrite(r, "missing or invalid bearer token")
-		return http.StatusUnauthorized, "unauthorized: dashboard writes need 'Authorization: Bearer <control-plane token>'"
-	}
-	return 0, ""
-}
-
-func (s *Server) logRefusedWrite(r *http.Request, reason string) {
-	s.cfg.Logger.Warn("control plane dashboard write refused",
-		"method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr, "reason", reason)
+// is refused outright. It is the dashboard package's shared bearer guard (also
+// used by the worker admin listener), so the constant-time compare and the
+// no-token-in-logs rule are defined once.
+func (s *Server) dashboardWriteGuard() dashboard.WriteGuard {
+	return dashboard.NewBearerWriteGuard(dashboard.BearerGuardConfig{
+		Token: s.cfg.Token, Logger: s.cfg.Logger,
+		Component: "control plane", TokenName: "control-plane token",
+		ConfigHint: "Start it with --token-env <ENV> (e.g. WARDEN_CP_TOKEN)",
+	})
 }

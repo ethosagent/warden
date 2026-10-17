@@ -20,6 +20,7 @@ func boolPtr(b bool) *bool { return &b }
 func newDetectionServer(t *testing.T, withWriter bool) (*Server, *config.DetectionConfig) {
 	t.Helper()
 	srv := NewServer(&fakeDataSource{}, config.Policy{}, emptyProvider())
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
 	stored := &config.DetectionConfig{Enabled: true}
 	srv.SetDetectionSource(func() DetectionView {
 		return NewDetectionView(*stored, activeDetectors(*stored), 7)

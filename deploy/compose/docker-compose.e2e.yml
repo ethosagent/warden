@@ -101,6 +101,7 @@ services:
       published: {}            # host → 9091 (no outbound NAT)
     environment: !override
       - WARDEN_CP_TOKEN=${WARDEN_CP_TOKEN:-dev-token}
+      - WARDEN_ADMIN_TOKEN=${WARDEN_ADMIN_TOKEN:-dev-admin-token}
       - WARDEN_PROXY_ID=worker-1
       # The canary the worker swaps in for example_secret_001. FIXED value so
       # the scenario suite (and the recorder oracle) can assert on it.
@@ -136,6 +137,7 @@ services:
       published: {}
     environment: !override
       - WARDEN_CP_TOKEN=${WARDEN_CP_TOKEN:-dev-token}
+      - WARDEN_ADMIN_TOKEN=${WARDEN_ADMIN_TOKEN:-dev-admin-token}
       - WARDEN_PROXY_ID=worker-2
       - EXAMPLE_SECRET=CANARY-e2e-0123456789abcdef0123456789abcdef
       - SSL_CERT_FILE=/etc/warden/certs/upstream-ca-bundle.crt

@@ -73,7 +73,9 @@ func (f *fakeSecretProvider) RefreshSecrets() error { return nil }
 // --- helpers ---
 
 func newTestServer(ds DataSource, pol config.Policy, sp secrets.SecretProvider) http.Handler {
-	return NewServer(ds, pol, sp).Handler()
+	srv := NewServer(ds, pol, sp)
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
+	return srv.Handler()
 }
 
 func doGet(t *testing.T, handler http.Handler, path string) *httptest.ResponseRecorder {
@@ -1037,6 +1039,7 @@ func TestMCPEndpoint(t *testing.T) {
 	}
 
 	srv := NewServer(ds, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
 	srv.SetMCPProvider(prov)
 	handler := srv.Handler()
 
@@ -1144,6 +1147,7 @@ func TestMCPEndpointSchemaViewValueFree(t *testing.T) {
 		},
 	}
 	srv := NewServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
 	srv.SetMCPProvider(prov)
 
 	rr := doGet(t, srv.Handler(), "/dashboard/api/mcp")
