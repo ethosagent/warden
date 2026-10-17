@@ -177,13 +177,18 @@ store, and the query and audit-verify `POST`s) must carry
 
 - **Fail closed.** A control plane started without a token (`--token-env` unset
   or the variable empty) refuses every dashboard write with `403` and a message
-  saying how to configure the token. There is no open mode.
+  saying how to configure the token. There is no open mode for dashboard writes.
+  A whitespace-only token counts as not configured. The worker-facing endpoints
+  (`/central/ingest`, `/control/heartbeat`) keep the existing development
+  pass-through when no token is set; the loopback publish of `:7070` in the demo
+  compose files is what bounds that.
 - **Reads stay open.** `GET` routes (traffic, analytics, policy view, workers, …)
   need no token. Restrict `:7070` to operators regardless: the demo compose files
-  publish it on `127.0.0.1` only.
-- **The UI asks once.** The first change you make in the browser prompts for the
-  token. It is kept in `sessionStorage` (this tab only; never `localStorage` or a
-  cookie) and sent as the bearer header. A `401` clears it and asks again.
+  publish it, and each worker's `:9090` admin/dashboard port, on `127.0.0.1` only
+  (the worker dashboard's own writes are not token-guarded yet).
+- **The UI asks once.** A change goes out without a token first (worker dashboards need
+  none); a `401` prompts for the token and retries once. It is kept in `sessionStorage` (this tab only; never `localStorage` or a
+  cookie) and sent as the bearer header. A `401` clears it.
   Because the credential is a header the page adds itself, a cross-site form or
   request cannot make the browser send it: writes are CSRF-safe.
 - **Audit.** A refused write logs `control plane dashboard write refused` with the

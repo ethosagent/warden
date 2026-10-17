@@ -33,7 +33,10 @@ func dashWrite(t *testing.T, h http.Handler, method, path, auth string) *httptes
 // dashboardAPIPaths is the dashboard's route table: every "/dashboard/api/..."
 // literal passed to a mux Handle/HandleFunc in the dashboard package's non-test
 // sources. Reading the source (not a hand-kept list) means a writer added there
-// is walked, and refused without a token, with no test edit.
+// is walked, and refused without a token, with no test edit. It is a source walk
+// because http.ServeMux cannot enumerate its patterns and exposing them from
+// production code just for this test is not worth it; routes registered any other
+// way are invisible here and rely on the guard's prefix match.
 func dashboardAPIPaths(t *testing.T) []string {
 	t.Helper()
 	files, err := filepath.Glob("../dashboard/*.go")
@@ -75,8 +78,11 @@ func dashboardAPIPaths(t *testing.T) []string {
 }
 
 // TestDashboardWrites_RouteTableWalk walks the dashboard route table: EVERY API
-// path refuses EVERY write method without the token (and with a wrong one), so a
-// new writer cannot ship unauthenticated. With the right token the guard lets the
+// path (as found by dashboardAPIPaths) refuses EVERY write method without the token (and with a wrong one), so a
+// writer registered with a literal path cannot ship unauthenticated. The
+// guarantee for any other registration (helper, const, another package) is the
+// guard's default-on /dashboard/api/ prefix, pinned by the unlisted-path check below.
+// With the right token the guard lets the
 // request through to the handler (whatever status the handler itself returns).
 func TestDashboardWrites_RouteTableWalk(t *testing.T) {
 	srv := New(Config{PolicyPath: writePolicyFile(t, "api.openai.com"), Token: dashTestToken})
@@ -98,10 +104,16 @@ func TestDashboardWrites_RouteTableWalk(t *testing.T) {
 			}
 		}
 	}
-	// Path-cleaning tricks are guarded too: no 200 without the token.
+	// Path-cleaning tricks: the CP's outer mux may redirect (307) to the cleaned
+	// path first; the redirected request must then be refused. (The guard's own
+	// path.Clean is pinned with an exact 401 in the dashboard package.)
 	for _, p := range []string{"/dashboard/api//policy", "/dashboard/x/../api/policy"} {
-		if rec := dashWrite(t, h, http.MethodPut, p, ""); rec.Code == http.StatusOK {
-			t.Errorf("PUT %s unauthenticated = 200", p)
+		rec := dashWrite(t, h, http.MethodPut, p, "")
+		if rec.Code == http.StatusTemporaryRedirect || rec.Code == http.StatusPermanentRedirect {
+			rec = dashWrite(t, h, http.MethodPut, rec.Header().Get("Location"), "")
+		}
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("PUT %s unauthenticated = %d, want 401", p, rec.Code)
 		}
 	}
 	// An unlisted path under the API prefix is guarded by default.
@@ -175,5 +187,20 @@ func TestDashboardWrites_RefusalIsLoggedWithoutToken(t *testing.T) {
 	}
 	if strings.Contains(out, "leaked-guess-value") || strings.Contains(out, dashTestToken) {
 		t.Fatalf("log line contains a token value: %q", out)
+	}
+}
+
+func TestDashboardWrites_WhitespaceTokenCountsAsUnset(t *testing.T) {
+	for _, tok := range []string{"   ", "\t\n ", " "} {
+		srv := New(Config{PolicyPath: writePolicyFile(t, "api.openai.com"), Token: tok})
+		rec := dashWrite(t, srv.Handler(), http.MethodPut, "/dashboard/api/policy", "Bearer "+strings.TrimSpace(tok))
+		if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "--token-env") {
+			t.Errorf("token %q: write = %d %q, want 403 with the --token-env hint", tok, rec.Code, rec.Body.String())
+		}
+	}
+	// A real token with stray whitespace (env files, trailing newline) still works trimmed.
+	srv := New(Config{PolicyPath: writePolicyFile(t, "api.openai.com"), Token: dashTestToken + "\n"})
+	if rec := dashWrite(t, srv.Handler(), http.MethodPut, "/dashboard/api/policy", "Bearer "+dashTestToken); rec.Code == http.StatusUnauthorized || rec.Code == http.StatusForbidden {
+		t.Errorf("trimmed token rejected: %d", rec.Code)
 	}
 }

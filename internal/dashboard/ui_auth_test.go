@@ -35,9 +35,25 @@ func TestWriteGuard_GatesWritesNotReads(t *testing.T) {
 	}
 }
 
+// TestWriteGuard_PathTricksAreRefused: the dashboard handler (no mux in front)
+// refuses cleaned-path tricks itself with exactly the guard's status, so the
+// guard's path.Clean cannot be dropped unnoticed.
+func TestWriteGuard_PathTricksAreRefused(t *testing.T) {
+	s := NewServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
+	s.SetWriteGuard(func(*http.Request) (int, string) { return http.StatusUnauthorized, "nope" })
+	h := s.Handler()
+	for _, p := range []string{"/dashboard/api//policy", "/dashboard/x/../api/policy", "/dashboard/./api/policy", "/dashboard/api/policy/"} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, p, nil))
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("PUT %s = %d, want 401", p, rec.Code)
+		}
+	}
+}
+
 // TestIndexHTML_TokenPrompt pins the UI contract: every state-changing API call
 // goes through authFetch, the token lives in sessionStorage only, and a 401
-// clears it.
+// clears it. A prompt happens only after a 401.
 func TestIndexHTML_TokenPrompt(t *testing.T) {
 	b, err := indexHTML, error(nil)
 	if err != nil {
@@ -54,6 +70,23 @@ func TestIndexHTML_TokenPrompt(t *testing.T) {
 		if !strings.Contains(html, want) {
 			t.Errorf("index.html missing %q", want)
 		}
+	}
+	// authFetch sends the write first and prompts only after a 401 (a worker
+	// dashboard needs no token, so it must never ask), then retries once.
+	a := strings.Index(html, "async function authFetch(")
+	if a < 0 {
+		t.Fatal("authFetch not found")
+	}
+	body := html[a:]
+	if e := strings.Index(body, "\n}\n"); e > 0 {
+		body = body[:e]
+	}
+	first, prompt, retry := strings.Index(body, "await send("), strings.Index(body, "window.prompt("), strings.LastIndex(body, "await send(")
+	if first < 0 || prompt < 0 || first >= prompt || prompt >= retry {
+		t.Errorf("authFetch must send, then prompt, then retry once (send@%d prompt@%d retry@%d)", first, prompt, retry)
+	}
+	if st := strings.Index(body, "status!==401"); st < 0 || st > prompt {
+		t.Error("authFetch must return a non-401 response before it can prompt")
 	}
 	// No raw fetch() to a dashboard API with a non-GET method.
 	raw := regexp.MustCompile(`(?s)[^h]fetch\(\s*['"\x60]/dashboard/api[^;]*?method\s*:`)

@@ -54,7 +54,7 @@ services:
         condition: service_started
     networks: [ethos-internal, egress, cp-net]
     ports:
-      - "9091:9090"                  # this worker's own (local) dashboard
+      - "127.0.0.1:9091:9090"                  # this worker's own (local) dashboard
     environment:
       - WARDEN_CP_TOKEN=${WARDEN_CP_TOKEN:-dev-token}
       - WARDEN_PROXY_ID=ethos-worker # labels this worker in the fleet view

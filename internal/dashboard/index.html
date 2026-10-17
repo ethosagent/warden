@@ -1268,23 +1268,23 @@ async function jget(url){ const r=await fetch(url); if(!r.ok) throw new Error("s
 /* ---------- write auth: the control plane needs its bearer token for every change ----------
    The token is asked for once and kept in sessionStorage (this tab only; never the persistent store
    or a cookie). It travels in the Authorization header, so a cross-site form cannot make the
-   browser send it. A 401 clears the stored token and asks again once. Reads stay open. */
+   browser send it. The write goes out without a token first (a worker dashboard needs none); only a 401 prompts, then the write is retried once with the token. A 401 clears the stored token. Reads stay open. */
 const CP_TOKEN_KEY='wardenCpToken';
 async function authFetch(url,opts){
   const o=Object.assign({},opts||{});
-  let r;
-  for(let attempt=0;attempt<2;attempt++){
-    let tok=sessionStorage.getItem(CP_TOKEN_KEY);
-    if(!tok){
-      tok=window.prompt('Control-plane token (required to make changes; kept for this browser tab only):');
-      if(tok) sessionStorage.setItem(CP_TOKEN_KEY,tok);
-    }
+  const send=tok=>{
     const h=new Headers(o.headers||{});
     if(tok) h.set('Authorization','Bearer '+tok);
-    r=await fetch(url,Object.assign({},o,{headers:h}));
-    if(r.status===401){ sessionStorage.removeItem(CP_TOKEN_KEY); if(!tok) return r; continue; }
-    return r;
-  }
+    return fetch(url,Object.assign({},o,{headers:h}));
+  };
+  let r=await send(sessionStorage.getItem(CP_TOKEN_KEY));
+  if(r.status!==401) return r;
+  sessionStorage.removeItem(CP_TOKEN_KEY);
+  const tok=window.prompt('Control-plane token (required to make changes; kept for this browser tab only):');
+  if(!tok) return r;
+  sessionStorage.setItem(CP_TOKEN_KEY,tok);
+  r=await send(tok);
+  if(r.status===401) sessionStorage.removeItem(CP_TOKEN_KEY);
   return r;
 }
 

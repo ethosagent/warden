@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -176,6 +177,9 @@ type pruner interface {
 // persistent SQLite fleet store); otherwise it defaults to an in-memory
 // CentralStore(MaxEvents) — unchanged behavior.
 func New(cfg Config) *Server {
+	// A whitespace-only token (a stray space or newline in an env file) is NOT a
+	// token: it counts as unset, so dashboard writes fail closed with the hint.
+	cfg.Token = strings.TrimSpace(cfg.Token)
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
