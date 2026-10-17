@@ -208,12 +208,70 @@ func TestWorkerAdmin_RefusalLoggedWithoutToken(t *testing.T) {
 	t.Setenv("WARDEN_TEST_ADMIN_TOKEN", adminTestToken)
 	base, logs := startAdmin(t, Params{AdminTokenEnv: "WARDEN_TEST_ADMIN_TOKEN"})
 	adminWrite(t, http.MethodPut, base+"/dashboard/api/detection", "Bearer leaked-guess-value")
+	adminWrite(t, http.MethodPost, base+"/admin/refresh-secrets", "Bearer leaked-guess-value")
 	out := logs.String()
 	if !strings.Contains(out, "worker dashboard write refused") || !strings.Contains(out, "/dashboard/api/detection") {
 		t.Fatalf("refusal not logged: %q", out)
 	}
+	if !strings.Contains(out, "/admin/refresh-secrets") {
+		t.Errorf("admin-route refusal not logged: %q", out)
+	}
 	if strings.Contains(out, "leaked-guess-value") || strings.Contains(out, adminTestToken) {
 		t.Fatalf("log contains a token value: %q", out)
+	}
+}
+
+// TestWorkerAdmin_AdminRoutesNeedToken: the state-changing /admin/ routes on the
+// same listener (#430 — POST /admin/refresh-secrets today) go through the SAME
+// shared bearer guard as the dashboard writes: 401 without or with a wrong
+// token, the handler (200 "refreshed") with the right one, and an unlisted
+// /admin/ writer is refused too (the guard keys on the prefix, not the route).
+func TestWorkerAdmin_AdminRoutesNeedToken(t *testing.T) {
+	t.Setenv("WARDEN_TEST_ADMIN_TOKEN", " "+adminTestToken+"\n")
+	base, _ := startAdmin(t, Params{AdminTokenEnv: "WARDEN_TEST_ADMIN_TOKEN"})
+	for _, p := range []string{"/admin/refresh-secrets", "/admin/brand-new-writer"} {
+		for _, auth := range []string{"", "Bearer wrong"} {
+			if c, _ := adminWrite(t, http.MethodPost, base+p, auth); c != http.StatusUnauthorized {
+				t.Errorf("POST %s with auth %q = %d, want 401", p, auth, c)
+			}
+		}
+	}
+	c, body := adminWrite(t, http.MethodPost, base+"/admin/refresh-secrets", "Bearer "+adminTestToken)
+	if c != http.StatusOK || body != "refreshed" {
+		t.Errorf("POST /admin/refresh-secrets with the token = %d %q, want 200 \"refreshed\"", c, body)
+	}
+	// GET and HEAD stay open: /admin/refresh-secrets answers its own method
+	// check, never an auth refusal.
+	req, _ := http.NewRequest(http.MethodGet, base+"/admin/refresh-secrets", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("GET /admin/refresh-secrets = %d, want the handler's 405 (open, no auth gate)", resp.StatusCode)
+	}
+}
+
+// TestWorkerAdmin_AdminRoutesFailClosedWithoutToken: no token configured (flag
+// unset, env var unset or whitespace-only) refuses an /admin/ write with 403
+// naming the flag and config key, even when the caller sends a header.
+func TestWorkerAdmin_AdminRoutesFailClosedWithoutToken(t *testing.T) {
+	t.Setenv("WARDEN_TEST_ADMIN_EMPTY", "  \t\n")
+	for name, p := range map[string]Params{
+		"flag unset":     {},
+		"env var unset":  {AdminTokenEnv: "WARDEN_TEST_ADMIN_NOT_SET"},
+		"whitespace env": {AdminTokenEnv: "WARDEN_TEST_ADMIN_EMPTY"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			base, _ := startAdmin(t, p)
+			for _, auth := range []string{"", "Bearer anything"} {
+				c, body := adminWrite(t, http.MethodPost, base+"/admin/refresh-secrets", auth)
+				if c != http.StatusForbidden || !strings.Contains(body, "--admin-token-env") || !strings.Contains(body, "admin.tokenEnv") {
+					t.Errorf("auth %q: POST = %d %q, want 403 naming --admin-token-env and admin.tokenEnv", auth, c, body)
+				}
+			}
+		})
 	}
 }
 

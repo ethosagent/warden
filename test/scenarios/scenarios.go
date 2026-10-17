@@ -45,12 +45,29 @@ func connectStatus(t *testing.T, h *harness.H, hostPort string) int {
 }
 
 // adminDo calls the worker's admin listener (healthz, refresh-secrets,
-// dashboard API) and returns the status and body.
+// dashboard API) as an operator, with the worker admin bearer token that every
+// state-changing call there needs (#425, #430); reads ignore it. Returns the
+// status and body.
 func adminDo(t *testing.T, h *harness.H, method, path string) (int, []byte) {
+	t.Helper()
+	return adminDoAuth(t, h, method, path, h.AdminToken())
+}
+
+// adminDoAnon calls the worker's admin listener with no Authorization header —
+// the unauthenticated caller the admin-token gate (#425, #430) must refuse.
+func adminDoAnon(t *testing.T, h *harness.H, method, path string) (int, []byte) {
+	t.Helper()
+	return adminDoAuth(t, h, method, path, "")
+}
+
+func adminDoAuth(t *testing.T, h *harness.H, method, path, token string) (int, []byte) {
 	t.Helper()
 	req, err := http.NewRequest(method, "http://"+h.AdminAddr()+path, nil)
 	if err != nil {
 		t.Fatalf("build %s %s: %v", method, path, err)
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	// A private transport: the shared default would leave idle connections (and
 	// their goroutines) behind the harness's leak check.
