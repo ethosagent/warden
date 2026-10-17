@@ -18,6 +18,15 @@ type RequestTransformer interface {
 	Transform(req *http.Request) error
 }
 
+// SecretSource is implemented by a RequestTransformer that puts a real secret
+// value into the request (an API key, a bearer token). InjectedSecrets is read
+// after Transform so the proxy can make sure the upstream does not echo those
+// values back to the agent. Signers whose secret never appears in the request
+// (HMAC, SigV4 key) have nothing to report.
+type SecretSource interface {
+	InjectedSecrets() []string
+}
+
 // MatchedTransformer applies a RequestTransformer only when the request
 // destination matches the configured domain pattern.
 type MatchedTransformer struct {

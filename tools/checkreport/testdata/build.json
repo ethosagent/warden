@@ -1,0 +1,5 @@
+{"ImportPath":"example.com/fx/buildbad","Action":"build-output","Output":"# example.com/fx/buildbad\n"}
+{"ImportPath":"example.com/fx/buildbad","Action":"build-output","Output":"buildbad/a.go:4:6: declared and not used: x\n"}
+{"ImportPath":"example.com/fx/buildbad","Action":"build-output","Output":"buildbad/a.go:4:14: cannot use \"s\" (untyped string constant) as int value in variable declaration\n"}
+{"ImportPath":"example.com/fx/buildbad","Action":"build-output","Output":"buildbad/a.go:5:9: undefined: y\n"}
+{"ImportPath":"example.com/fx/buildbad","Action":"build-fail"}

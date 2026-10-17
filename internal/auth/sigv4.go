@@ -43,6 +43,10 @@ func NewAWSSigV4(accessKey, secretKey, sessionToken, region, service string) *AW
 	}
 }
 
+// ReadsBody reports that signing consumes the whole request body, so the proxy
+// cannot apply it to a streamed (gRPC) request.
+func (s *AWSSigV4) ReadsBody() bool { return true }
+
 // Transform signs the HTTP request with AWS SigV4.
 func (s *AWSSigV4) Transform(req *http.Request) error {
 	// 1. Read body and compute payload hash
@@ -225,4 +229,13 @@ func hmacSHA256(key, data []byte) []byte {
 	mac := hmac.New(sha256.New, key)
 	mac.Write(data)
 	return mac.Sum(nil)
+}
+
+// InjectedSecrets reports the session token sent as X-Amz-Security-Token (the
+// access/secret keys never appear in the request).
+func (s *AWSSigV4) InjectedSecrets() []string {
+	if s.sessionToken == "" {
+		return nil
+	}
+	return []string{s.sessionToken}
 }

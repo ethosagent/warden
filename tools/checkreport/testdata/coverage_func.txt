@@ -1,0 +1,4 @@
+example.com/fx/cov/a/a.go:3:	Used		66.7%
+example.com/fx/cov/a/a.go:10:	Unused		0.0%
+example.com/fx/cov/b/b.go:3:	Never		0.0%
+total:				(statements)	22.2%

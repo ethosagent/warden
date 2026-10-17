@@ -274,6 +274,36 @@ responseScan:
   pii:
     phone: false                  # email/card(Luhn)/SSN always on; phone opt-in (noisy)
 
+# Echo guard: stops an upstream that copies the request into its response (an echo
+# endpoint, an error quoting the request, a reflected header) from handing the agent
+# the real secret Warden swapped in. It checks every response of a request for the
+# EXACT values swapped into THAT request (placeholders, Basic auth, auth
+# transformers) in raw, base64, URL-encoded, hex and JSON-escaped form — headers and
+# body, h1/h2/gRPC/SSE. ON by default and independent of responseScan; a request
+# that swapped nothing is not touched. Swapped requests ask the upstream for
+# `Accept-Encoding: identity`; gzip/deflate answers are decompressed for the check,
+# any other encoding, a compressed body of unknown length, or a compressed body over
+# the scan cap (responseScan.maxBodyBytes, else 1 MiB), is blocked as
+# secret_echo_unscannable. An uncompressed body is streamed through the check at
+# any size, so large downloads still work; the cap only bounds what is buffered.
+# Action:
+#   block    - (default) buffered response -> 502; streaming response -> the stream
+#              is aborted before any byte of the value is released. To guarantee
+#              that, a streamed response is delayed by up to the longest encoded
+#              value (tens to ~100 bytes): the last bytes are released with the
+#              next chunk or at the end of the stream. A stream that ends on the
+#              start of a value (4+ bytes) is aborted, not delivered.
+#   monitor  - record a hit (allow event, reason secret_echo) and forward anyway.
+# It targets HONEST reflectors, not an upstream trying to smuggle the value out. It
+# does NOT catch: base32, base64 wrapped across lines, HTML entities,
+# quoted-printable, reversed or split values, \u escapes of non-ASCII characters in
+# the value, or gzip/deflate bytes sent without a Content-Encoding header.
+# WebSocket frames after the 101 upgrade are not checked (#399); the 101 response
+# headers are.
+echoGuard:
+  enabled: true                   # default true; false disables the guard entirely
+  action: block                   # block | monitor
+
 # Per-destination request-authentication transforms. The agent sends a request
 # with a placeholder or no auth at all; Warden injects real, request-scoped
 # credentials at the edge. Credentials are read from the environment via ${VAR}
