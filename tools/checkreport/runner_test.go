@@ -253,6 +253,33 @@ func TestStaleRoadmapFixture(t *testing.T) {
 	}
 }
 
+// TestRoadmapGeneratorTestFailureFailsStage pins that report mode runs the
+// generator's own tests (check.sh does, in plain mode) and that a failing one
+// fails the roadmap stage with a finding, so both modes give the same verdict.
+func TestRoadmapGeneratorTestFailureFailsStage(t *testing.T) {
+	root := copyFixture(t, "clean")
+	failJSON := readTestdata(t, "gotest_fail.json")
+	var ran []string
+	cfg := config{Root: root, Only: []string{"roadmap"}, KeepGoing: true, GolangciVersion: "v", GovulncheckVersion: "v", CoverageMin: 70}
+	r := &runner{cfg: cfg, ctx: parseCtx{Root: root, Module: "example.com/fx"}, human: io.Discard, goVer: "x",
+		exec: func(dir, name string, args ...string) execResult {
+			ran = append(ran, strings.Join(args, " "))
+			if len(args) > 0 && args[0] == "test" {
+				return execResult{Stdout: failJSON, Code: 1}
+			}
+			return execResult{Stdout: []byte(`{"ok":true}`)}
+		}}
+	rep, code := r.Run(NewScrubber(nil))
+	st := stageByName(t, rep, "roadmap")
+	if code == 0 || st.OK || len(st.Findings) != 1 || st.Findings[0].Rule != "roadmap/failed" {
+		t.Fatalf("a failing generator test must fail the stage: code=%d %+v", code, st)
+	}
+	want := "test -json docs/roadmap/gen.go docs/roadmap/gen_test.go"
+	if len(ran) != 2 || ran[1] != want {
+		t.Errorf("commands run = %q, want the check then %q", ran, want)
+	}
+}
+
 func TestCrashingToolBecomesFinding(t *testing.T) {
 	root := copyFixture(t, "clean")
 	cfg := config{Root: root, Only: []string{"format", "lint"}, KeepGoing: true, GolangciVersion: "v", GovulncheckVersion: "v", CoverageMin: 70}

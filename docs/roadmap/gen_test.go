@@ -1,6 +1,7 @@
-//go:build ignore
+//go:build roadmapgen
 
-// Tests for gen.go. gen.go is a build-ignored command, so run both files:
+// Tests for gen.go. gen.go is a build-ignored command and this file carries a
+// private tag so ./... skips it; named files bypass constraints, so run both:
 //
 //	go test docs/roadmap/gen.go docs/roadmap/gen_test.go
 package main

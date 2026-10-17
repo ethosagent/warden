@@ -317,7 +317,12 @@ func (r *runner) stageArchtest() Stage {
 
 func (r *runner) stageRoadmap() Stage {
 	res := r.exec(r.cfg.Root, "go", "run", "docs/roadmap/gen.go", "check", "-json")
-	return finish("roadmap", res, parseRoadmap(res.Stdout))
+	st := finish("roadmap", res, parseRoadmap(res.Stdout))
+	// The generator's own tests are behind the roadmapgen build tag, so ./... never runs
+	// them; check.sh runs them in this stage and so must report mode.
+	tres := r.exec(r.cfg.Root, "go", "test", "-json", "docs/roadmap/gen.go", "docs/roadmap/gen_test.go")
+	st.Findings = append(st.Findings, finish("roadmap", tres, parseGoTest("roadmap", tres.Stdout, r.ctx)).Findings...)
+	return st
 }
 
 func (r *runner) stageBuild() Stage {
