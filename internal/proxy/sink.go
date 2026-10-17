@@ -76,6 +76,9 @@ func (h h2Sink) writeHeader(resp *http.Response) {
 func (h h2Sink) relay(resp *http.Response) error {
 	h.writeHeader(resp)
 	_, err := io.Copy(h.flushing(), resp.Body)
+	if err != nil {
+		return err // a broken body must not be followed by (misleading) trailers
+	}
 	// Trailers that arrived after the body (grpc-status, grpc-message, ...).
 	// http.TrailerPrefix keys set after WriteHeader are sent as trailers.
 	for k, vals := range resp.Trailer {

@@ -94,19 +94,19 @@ func judgeOpts() invOpts {
 
 func mcpOpts() invOpts { return invOpts{mcp: true} }
 
-// bearer is the header every swap row sends: the agent's placeholder.
-func bearer() http.Header {
+// invBearer is the header every swap row sends: the agent's placeholder.
+func invBearer() http.Header {
 	return hdr("Authorization", "Bearer "+invPlaceholder, "X-Api-Key", invPlaceholder)
 }
 
 func mcpHeaders() http.Header {
-	h := bearer()
+	h := invBearer()
 	h.Set("Content-Type", "application/json")
 	return h
 }
 
 func grpcHeaders() http.Header {
-	h := bearer()
+	h := invBearer()
 	h.Set("Content-Type", "application/grpc")
 	return h
 }
@@ -167,9 +167,6 @@ var rawBytes = "\x00\x01SSH-2.0-agent token=" + invPlaceholder + "\r\n"
 
 // Open issues the suite reproduces.
 const (
-	// The swapped query string is logged and stored in analytics events: the real
-	// secret lands in logs and the audit DB (recordAllowEvent uses the post-swap URL).
-	issueQueryURL = "#237"
 	// Proxy-Authorization / X-Warden-Identity / (HTTP/1) Proxy-Connection are
 	// forwarded to the upstream instead of being stripped at the proxy boundary.
 	issueHeaderStrip = "#396"
@@ -178,9 +175,7 @@ const (
 // Each known violation is the exact place (kind, and the row's own sink) it shows
 // up in; see violationKind.
 var (
-	queryURLLeak = []string{"canary in logs", "canary in analytics event"}
-	echoLeak     = []string{"canary in agent response"}
-	swapMissing  = "swap stage did not run: the upstream never received the real secret"
+	swapMissing = "swap stage did not run: the upstream never received the real secret"
 
 	// HTTP/1 forwards all three proxy-only headers; HTTP/2 has no Proxy-Connection.
 	stripLeakH1 = []string{
@@ -201,9 +196,8 @@ func invRows() []invRow {
 	// ---- http1 --------------------------------------------------------------
 	add(
 		invRow{name: "http1/allow/header", path: PathHTTP1, scenario: scAllow, mustReach: true, wantSwap: true,
-			run: h1(invReq{path: "/ok", header: bearer()})},
+			run: h1(invReq{path: "/ok", header: invBearer()})},
 		invRow{name: "http1/allow/query", path: PathHTTP1, scenario: scAllow, mustReach: true, wantSwap: true,
-			knownIssue: issueQueryURL, knownWhere: queryURLLeak,
 			run: h1(invReq{path: "/ok?key=" + invPlaceholder})},
 		invRow{name: "http1/allow/body", path: PathHTTP1, scenario: scAllow, mustReach: true, wantSwap: true,
 			run: h1(invReq{method: "POST", path: "/ok", header: hdr("Content-Type", "application/json"),
@@ -212,23 +206,23 @@ func invRows() []invRow {
 			run: h1(invReq{path: "/ok", header: hdr("Authorization",
 				"Basic "+base64.StdEncoding.EncodeToString([]byte("user:"+invPlaceholder)))})},
 		invRow{name: "http1/deny", path: PathHTTP1, scenario: scDeny, opts: judgeOpts(), wantNoUpstream: true,
-			run: h1(invReq{host: invJudgedHost, path: "/ok", header: bearer()})},
+			run: h1(invReq{host: invJudgedHost, path: "/ok", header: invBearer()})},
 		invRow{name: "http1/upstream-error", path: PathHTTP1, scenario: scUpstreamErr, wantSwap: true,
-			run: h1(invReq{path: "/abort", header: bearer()})},
+			run: h1(invReq{path: "/abort", header: invBearer()})},
 		invRow{name: "http1/timeout", path: PathHTTP1, scenario: scTimeout, wantSwap: true,
-			run: h1(shortTimeout(invReq{path: "/hang", header: bearer()}))},
+			run: h1(shortTimeout(invReq{path: "/hang", header: invBearer()}))},
 	)
 
 	// ---- h2 -----------------------------------------------------------------
 	add(
 		invRow{name: "h2/allow/header", path: PathH2, scenario: scAllow, mustReach: true, wantSwap: true,
-			run: h2(invReq{path: "/ok", header: bearer()})},
+			run: h2(invReq{path: "/ok", header: invBearer()})},
 		invRow{name: "h2/deny", path: PathH2, scenario: scDeny, opts: judgeOpts(), wantNoUpstream: true,
-			run: h2(invReq{host: invJudgedHost, path: "/ok", header: bearer()})},
+			run: h2(invReq{host: invJudgedHost, path: "/ok", header: invBearer()})},
 		invRow{name: "h2/upstream-error", path: PathH2, scenario: scUpstreamErr, wantSwap: true,
-			run: h2(invReq{path: "/abort", header: bearer()})},
+			run: h2(invReq{path: "/abort", header: invBearer()})},
 		invRow{name: "h2/timeout", path: PathH2, scenario: scTimeout, wantSwap: true,
-			run: h2(shortTimeout(invReq{path: "/hang", header: bearer()}))},
+			run: h2(shortTimeout(invReq{path: "/hang", header: invBearer()}))},
 	)
 
 	// ---- grpc ---------------------------------------------------------------
@@ -275,20 +269,20 @@ func invRows() []invRow {
 	add(
 		invRow{name: "websocket/allow", path: PathWebSocket, scenario: scAllow, opts: mcpOpts(), mustReach: true, wantSwap: true,
 			run: func(e *invEnv) (string, []string) {
-				return wsDrive(e, invHost, "/ws", bearer(), wsText(mcpReadFileBody)), nil
+				return wsDrive(e, invHost, "/ws", invBearer(), wsText(mcpReadFileBody)), nil
 			}},
 		invRow{name: "websocket/deny", path: PathWebSocket, scenario: scDeny, opts: mcpOpts(), mustReach: true, wantSwap: true,
 			wantDenyEvent: true, upstreamMustNot: invAfterBlock,
 			run: func(e *invEnv) (string, []string) {
-				return wsDrive(e, invHost, "/ws", bearer(), wsText(mcpExecCmdBody), wsText(`{"after":"`+invAfterBlock+`"}`)), nil
+				return wsDrive(e, invHost, "/ws", invBearer(), wsText(mcpExecCmdBody), wsText(`{"after":"`+invAfterBlock+`"}`)), nil
 			}},
 		invRow{name: "websocket/upstream-error", path: PathWebSocket, scenario: scUpstreamErr, opts: mcpOpts(), wantSwap: true,
 			run: func(e *invEnv) (string, []string) {
-				return wsDrive(e, invHost, "/abort", bearer()), nil
+				return wsDrive(e, invHost, "/abort", invBearer()), nil
 			}},
 		invRow{name: "websocket/timeout", path: PathWebSocket, scenario: scTimeout, opts: mcpOpts(), wantSwap: true,
 			run: func(e *invEnv) (string, []string) {
-				return wsDrive(e, invHost, "/hang", bearer()), nil
+				return wsDrive(e, invHost, "/hang", invBearer()), nil
 			}},
 	)
 
@@ -340,32 +334,28 @@ func invRows() []invRow {
 			setup: func(e *invEnv) { e.startRawTLS(true) }, run: rawTLS(invHost)},
 	)
 
-	// ---- upstream echo (#389) ----------------------------------------------
-	// An upstream that reflects the request it received hands the swapped secret
-	// straight back to the agent. With the default config nothing scrubs
-	// responses, so every path that relays an upstream body is affected.
-	const echoIssue = "#389"
+	// ---- upstream echo (#389, fixed) ---------------------------------------
+	// An upstream that reflects the request it received must never hand the
+	// swapped secret back to the agent: the echo guard blocks the response on
+	// every path that relays an upstream body.
 	add(
 		invRow{name: "http1/echo", path: PathHTTP1, scenario: scEcho, mustReach: true, wantSwap: true,
-			knownIssue: echoIssue, knownWhere: echoLeak,
-			run: h1(invReq{path: "/echo", header: bearer()})},
+			run: h1(invReq{path: "/echo", header: invBearer()})},
 		invRow{name: "h2/echo", path: PathH2, scenario: scEcho, mustReach: true, wantSwap: true,
-			knownIssue: echoIssue, knownWhere: echoLeak,
-			run: h2(invReq{path: "/echo", header: bearer()})},
+			run: h2(invReq{path: "/echo", header: invBearer()})},
 		invRow{name: "grpc/echo", path: PathGRPC, scenario: scEcho, mustReach: true, wantSwap: true,
-			knownIssue: echoIssue, knownWhere: echoLeak,
 			run: h2(invReq{method: "POST", path: "/echo", header: grpcHeaders(), body: grpcEmptyFrame})},
 		invRow{name: "mcp/echo", path: PathMCP, scenario: scEcho, opts: mcpOpts(), mustReach: true, wantSwap: true,
-			knownIssue: echoIssue, knownWhere: echoLeak,
 			run: h1(mcpReq("/mcp-echo", mcpReadFileBody))},
-		invRow{name: "sse/echo", path: PathSSE, scenario: scEcho, opts: mcpOpts(), mustReach: true, wantSwap: true,
-			knownIssue: echoIssue, knownWhere: echoLeak,
+		// The echo guard blocks this response before the SSE relay starts, so the
+		// row does not reach PathSSE; sse/allow and the other sse rows cover it.
+		invRow{name: "sse/echo", path: PathSSE, scenario: scEcho, opts: mcpOpts(), wantSwap: true,
 			run: h1(mcpReq("/sse-echo", mcpToolsList))},
 	)
 
 	// ---- proxy-only headers never reach the upstream -----------------------
 	stripHeaders := func() http.Header {
-		h := bearer()
+		h := invBearer()
 		h.Set("Proxy-Authorization", "Basic c2Vzc2lvbjp0b2tlbg==")
 		h.Set("Proxy-Connection", "keep-alive")
 		h.Set("X-Warden-Identity", "Bearer warden-identity-token")
@@ -417,10 +407,8 @@ func invRows() []invRow {
 		invRow{name: "h2/body-swap", path: PathH2, scenario: scBodySwap, mustReach: true, wantSwap: true,
 			run: h2(invReq{method: "POST", path: "/ok", body: "token=" + invPlaceholder})},
 		invRow{name: "http1/query-swap", path: PathHTTP1, scenario: scQuerySwap, mustReach: true, wantSwap: true,
-			knownIssue: issueQueryURL, knownWhere: queryURLLeak,
 			run: h1(invReq{path: "/ok?token=" + invPlaceholder})},
 		invRow{name: "h2/query-swap", path: PathH2, scenario: scQuerySwap, mustReach: true, wantSwap: true,
-			knownIssue: issueQueryURL, knownWhere: queryURLLeak,
 			run: h2(invReq{path: "/ok?token=" + invPlaceholder})},
 		invRow{name: "http1/dlp-block", path: PathHTTP1, scenario: scDLPBlock, mustReach: true, wantNoUpstream: true,
 			opts: dlpBlockOpts(),

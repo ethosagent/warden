@@ -185,7 +185,7 @@ func TestInvariants_JudgeFailClosed(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 			e := newInvEnv(t, invOpts{judge: c.judge})
-			view, status, err := e.doHTTP1(invReq{host: invJudgedHost, path: "/ok", header: bearer()})
+			view, status, err := e.doHTTP1(invReq{host: invJudgedHost, path: "/ok", header: invBearer()})
 			e.settle()
 			if c.wantAllow {
 				if status != 200 {
@@ -213,7 +213,7 @@ func TestInvariants_JudgeFailClosed(t *testing.T) {
 			t.Fatal(err)
 		}
 		e.p.SetJudge(nil) // control plane turns the judge off after CONNECT
-		view, status, err := e.doHTTP1On(tc, invReq{host: invJudgedHost, path: "/ok", header: bearer()})
+		view, status, err := e.doHTTP1On(tc, invReq{host: invJudgedHost, path: "/ok", header: invBearer()})
 		e.settle()
 		if status != 403 {
 			t.Fatalf("request with the judge disabled must be denied, got %d (%v)", status, err)

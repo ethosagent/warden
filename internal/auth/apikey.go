@@ -36,3 +36,6 @@ func (a *APIKeyInjector) Transform(req *http.Request) error {
 	}
 	return nil
 }
+
+// InjectedSecrets reports the key value placed in the request.
+func (a *APIKeyInjector) InjectedSecrets() []string { return []string{a.value} }

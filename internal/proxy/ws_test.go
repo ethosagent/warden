@@ -20,8 +20,9 @@ import (
 // wsBackend records text frames it receives from the proxy and can push a
 // server->client frame after the 101 handshake.
 type wsBackend struct {
-	push    []byte
-	gotText chan []byte
+	respHeader string // extra header line(s), CRLF-terminated, added to the 101
+	push       []byte
+	gotText    chan []byte
 }
 
 // frameWire serializes a frame to its wire bytes.
@@ -92,7 +93,7 @@ func startWSBackend(t *testing.T, caCert *x509.Certificate, caKey interface{}, b
 					}
 				}
 				_, _ = io.WriteString(tlsSrv,
-					"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+					"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"+b.respHeader+"\r\n")
 				if b.push != nil {
 					_, _ = tlsSrv.Write(b.push)
 				}

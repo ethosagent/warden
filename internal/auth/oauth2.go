@@ -97,3 +97,13 @@ func (o *OAuth2ClientCredentials) Transform(req *http.Request) error {
 	req.Header.Set("Authorization", "Bearer "+o.token)
 	return nil
 }
+
+// InjectedSecrets reports the bearer token Transform last placed in a request.
+func (o *OAuth2ClientCredentials) InjectedSecrets() []string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.token == "" {
+		return nil
+	}
+	return []string{o.token}
+}
