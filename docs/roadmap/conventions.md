@@ -80,6 +80,8 @@ progress per phase shows as a percentage on the milestones page.
 - New behaviour ships behind a flag or default-off config, so merging changes
   nothing until it is switched on.
 - `scripts/check.sh` passes, including the coverage gate.
+- Acceptance criteria are covered by `test/harness` scenarios.
+- A new external dependency ships a fake in `test/harness`.
 - No secret, token or full request/response body in logs or test output.
 - Default-deny and the core invariant in `AGENTS.md` are never weakened.
 

@@ -98,6 +98,42 @@ func TestBridgeEvent_ReasonCarryingDeny(t *testing.T) {
 	}
 }
 
+// TestBridgeEvent_PolicyDenyReasons (#409): a CONNECT policy deny now carries
+// its reason, so it routes as its OWN rule instead of the generic
+// egress_blocked. The finding count per deny is unchanged (every deny alerted
+// before as egress_blocked); only the rule id / dedup key is finer. All of the
+// new reasons stay SevMedium — none contains the poison/exfil escalation
+// substrings — so the alerts are neither noisier nor mis-escalated.
+func TestBridgeEvent_PolicyDenyReasons(t *testing.T) {
+	for _, reason := range []string{"policy_no_match", "policy_denylist", "rate_limited", "time_window"} {
+		e := analytics.Event{Domain: "api.foo.com", Decision: "deny", Reason: reason, Method: "GET"}
+		f, ok := bridgeEvent("w1", e)
+		if !ok {
+			t.Fatalf("%s: deny event should produce a finding", reason)
+		}
+		if f.RuleID != reason {
+			t.Errorf("%s: RuleID = %q, want the reason itself", reason, f.RuleID)
+		}
+		if f.DedupKey != reason+":api.foo.com" {
+			t.Errorf("%s: DedupKey = %q", reason, f.DedupKey)
+		}
+		if f.Severity != integration.SevMedium {
+			t.Errorf("%s: Severity = %v, want medium (no escalation substring)", reason, f.Severity)
+		}
+		// EGRESS HYGIENE: the bounded summary/evidence carry the reason and the
+		// domain, never more.
+		if hit := containsAny(f.Summary, "?", "SECRET", "/"); hit != "" {
+			t.Fatalf("%s: Summary %q leaked %q", reason, f.Summary, hit)
+		}
+	}
+	// The same event without the reason (an old producer) still lands on
+	// egress_blocked with the same per-domain dedup — the volume is identical.
+	old, ok := bridgeEvent("w1", analytics.Event{Domain: "api.foo.com", Decision: "deny", Method: "GET"})
+	if !ok || old.RuleID != "egress_blocked" || old.DedupKey != "egress_blocked:api.foo.com" {
+		t.Fatalf("reason-less deny = %v ok=%v, want egress_blocked", old, ok)
+	}
+}
+
 func TestBridgeEvent_ReasonMedium(t *testing.T) {
 	e := analytics.Event{Domain: "api.foo.com", Reason: "mcp_schema_drift", Tool: "search"}
 	f, ok := bridgeEvent("w1", e)
@@ -134,5 +170,47 @@ func TestBridgeEvent_BenignAllow(t *testing.T) {
 	e := analytics.Event{Domain: "api.openai.com", Decision: "allow", Method: "GET"}
 	if _, ok := bridgeEvent("w1", e); ok {
 		t.Fatal("a benign allow with no reason must NOT produce a finding")
+	}
+}
+
+// TestBridgeEvent_MonitorDetectionOnAllowBridges: monitor mode exists to ALERT
+// without blocking, so a monitor-mode detection riding an ALLOW event's bounded
+// Reason — the #389 echo guard's secret_echo, an MCP gateway's monitor verdict
+// reason — must still become a finding, exactly as before #409. The #409
+// regression (every permitted MCP WebSocket session alerting mcp_ws) was fixed
+// at its source in ws.go, which no longer writes a Reason on an allowed
+// session; the bridge keeps keying on a non-empty Reason whatever the decision.
+func TestBridgeEvent_MonitorDetectionOnAllowBridges(t *testing.T) {
+	e := analytics.Event{Domain: "api.foo.com", Decision: "allow", Reason: "secret_echo"}
+	f, ok := bridgeEvent("w1", e)
+	if !ok {
+		t.Fatal("a monitor-mode detection on an allow event must still become a finding")
+	}
+	if f.RuleID != "secret_echo" {
+		t.Errorf("RuleID = %q, want secret_echo", f.RuleID)
+	}
+	if f.Severity != integration.SevMedium {
+		t.Errorf("Severity = %v, want medium (no escalation substring)", f.Severity)
+	}
+	if f.DedupKey != "secret_echo:api.foo.com" {
+		t.Errorf("DedupKey = %q", f.DedupKey)
+	}
+}
+
+// TestBridgeEvent_AllowedMCPSessionNoFinding (#409, end to end): the session
+// event ws.go now writes for an allowed MCP WebSocket upgrade — Decision allow
+// and NO Reason — produces no finding. The regression is fixed at the source
+// (the event simply carries nothing to key on), not by silencing allow events
+// in the bridge; see TestWS_AllowedSessionEventCarriesNoReason.
+func TestBridgeEvent_AllowedMCPSessionNoFinding(t *testing.T) {
+	e := analytics.Event{
+		Domain:         "mcp.example.com",
+		Protocol:       "mcp",
+		Method:         "GET",
+		Decision:       "allow",
+		ResponseStatus: 101,
+	}
+	if _, ok := bridgeEvent("w1", e); ok {
+		t.Fatal("an allowed MCP WebSocket session (no Reason) must not produce a finding")
 	}
 }

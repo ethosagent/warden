@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ethosagent/warden/internal/denyreason"
 	"github.com/ethosagent/warden/test/harness"
 )
 
@@ -27,10 +28,8 @@ func nonAllowlistedBlocked(t *testing.T, h *harness.H) {
 
 // defaultDeny is manual step 2 (a blocked destination), driven the way an agent
 // does it: its HTTP client is refused at the tunnel, the refusal is exactly one
-// deny event, and the decision log names the domain, and the blocked metric carries
-// reason="policy". Note what is NOT asserted: a policy deny event carries no
-// reason today (Event.Reason is the MCP path's field; #409), so the scenario
-// pins the decision and the metric, not an event reason.
+// deny event with reason policy_no_match (#409), the decision log names the
+// domain, and the blocked metric carries the same reason.
 func defaultDeny(t *testing.T, h *harness.H) {
 	evil := h.Upstream("evil.example.com")
 
@@ -50,12 +49,16 @@ func defaultDeny(t *testing.T, h *harness.H) {
 	if len(denies) != 2 {
 		t.Errorf("deny events for evil.example.com = %d, want 2 (one per refused tunnel)", len(denies))
 	}
-	// TODO(#409): assert Event.Reason once policy denies carry one.
+	for _, ev := range denies {
+		if ev.Reason != string(denyreason.PolicyNoMatch) {
+			t.Errorf("deny event reason = %q, want %q (#409)", ev.Reason, denyreason.PolicyNoMatch)
+		}
+	}
 	if !strings.Contains(h.Logs(), `"decision":"deny"`) {
 		t.Error("the worker's decision log has no deny line")
 	}
 	// One blocked count per refused tunnel, labelled with the policy reason.
-	blocked := harness.MetricKey("warden.blocked.total", map[string]string{"reason": "policy"})
+	blocked := harness.MetricKey("warden.blocked.total", map[string]string{"reason": string(denyreason.PolicyNoMatch)})
 	h.Eventually("the policy-blocked metric to reach 2", func() bool {
 		return h.Metrics()[blocked] == 2
 	})

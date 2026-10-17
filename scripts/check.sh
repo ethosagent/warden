@@ -215,6 +215,7 @@ if [ "$FAST" -eq 0 ]; then
 	# the data is invalid or a generated file was hand-edited or not regenerated.
 	banner "roadmap (go run docs/roadmap/gen.go check)"
 	go run docs/roadmap/gen.go check
+	go test docs/roadmap/gen.go docs/roadmap/gen_test.go
 
 	# 4. build
 	banner "build (go build ./...)"

@@ -208,7 +208,7 @@ Create internal/notify, the CP service that turns a (kind, user_key, ref, params
 - [ ] Given a canary email and an auth failure on every channel, the notify_channel_down Finding, the outbox row and captured logs contain neither the email nor the error text: `go test ./internal/notify -run TestNoEmailInLogsOrFindings`
 - [ ] `go test -race ./internal/notify/...` passes
 
-**Depends on:** [`W-P4-NTFY-01`](user-notify.md#110--w-p4-ntfy-01) Add UserNotifier capability, typed delivery errors and user-notifier binding; [`W-P4-NTFY-07`](user-notify.md#710--w-p4-ntfy-07) Add verified user contacts table keyed by user_key; [`W-P1-SSO-01`](console-sso-rbac.md#18--w-p1-sso-01) Add internal/cpstate SQLite state store with migrations; [`W-P1-BLOCK-03`](user-block-list.md#38--w-p1-block-03) Add the CP block-list store, admin API and policy merge
+**Depends on:** [`W-P4-NTFY-01`](user-notify.md#110--w-p4-ntfy-01) Add UserNotifier capability, typed delivery errors and user-notifier binding; [`W-P4-NTFY-07`](user-notify.md#710--w-p4-ntfy-07) Add verified user contacts table keyed by user_key; [`W-P1-SSO-01`](console-sso-rbac.md#18--w-p1-sso-01) Add internal/cpstate SQLite state store with migrations; [`W-P1-BLOCK-03`](user-block-list.md#39--w-p1-block-03) Add the CP block-list store, admin API and policy merge
 
 **Unblocks:** [`W-P4-NTFY-08`](user-notify.md#810--w-p4-ntfy-08) Add CP-local notifications config block and CP wiring
 

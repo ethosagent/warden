@@ -295,14 +295,15 @@ func TestHTTP_BasicAuthSwap_CustomHeaderNotDecoded(t *testing.T) {
 }
 
 func TestHTTP_BasicAuthSwap_ProxyAuthorizationUntouched(t *testing.T) {
-	// Proxy-Authorization is addressed to Warden itself: never decoded or swapped.
+	// Proxy-Authorization is addressed to Warden itself: never decoded or swapped,
+	// and stripped before the upstream write (#396).
 	v := basicHeader("user:PLACEHOLDER_001")
 	req, _ := http.NewRequest("GET", "https://backend.test/v1/chat", nil)
 	req.Header.Set("Proxy-Authorization", v)
 	req.Header.Set("Authorization", basicHeader("user:PLACEHOLDER_001"))
 	hdr, _, _ := sendThroughSwapProxy(t, req)
-	if got := hdr.Get("Proxy-Authorization"); got != v {
-		t.Fatalf("Proxy-Authorization = %q, want byte-for-byte %q", got, v)
+	if got := hdr.Get("Proxy-Authorization"); got != "" {
+		t.Fatalf("Proxy-Authorization reached the upstream: %q", got)
 	}
 	if got := hdr.Get("Authorization"); got != basicHeader("user:real-secret-value") {
 		t.Fatalf("Authorization not swapped: %q", got)

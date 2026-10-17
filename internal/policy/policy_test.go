@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/ethosagent/warden/internal/config"
+	"github.com/ethosagent/warden/internal/denyreason"
 )
 
 func evalFor(entries ...config.AllowlistEntry) *Evaluator {
@@ -232,8 +233,8 @@ func TestEvaluateRequest_MethodConstraint(t *testing.T) {
 	}
 	if v := e.EvaluateRequest("github.com", 443, SchemeHTTPS, "POST", "/x"); v.Decision != Deny {
 		t.Errorf("POST = %v, want Deny", v.Decision)
-	} else if v.Reason != ReasonMethodNotAllowed {
-		t.Errorf("POST reason = %q, want %q", v.Reason, ReasonMethodNotAllowed)
+	} else if v.Reason != denyreason.MethodNotAllowed {
+		t.Errorf("POST reason = %q, want %q", v.Reason, denyreason.MethodNotAllowed)
 	}
 	// HTTP methods are case-sensitive: the match is against the method as sent.
 	if v := e.EvaluateRequest("github.com", 443, SchemeHTTPS, "get", "/x"); v.Decision != Deny {
@@ -247,18 +248,18 @@ func TestEvaluateRequest_PathConstraints(t *testing.T) {
 		paths   []string
 		path    string
 		want    Decision
-		wantRea string
+		wantRea denyreason.Reason
 	}{
 		{"trailing star matches the path itself", []string{"/acme/app/*"}, "/acme/app", Allow, ""},
 		{"trailing star matches under", []string{"/acme/app/*"}, "/acme/app/x/y", Allow, ""},
-		{"trailing star segment-aligned", []string{"/acme/app/*"}, "/acme/appx", Deny, ReasonPathNotAllowed},
+		{"trailing star segment-aligned", []string{"/acme/app/*"}, "/acme/appx", Deny, denyreason.PathNotAllowed},
 		{"second pattern matches", []string{"/acme/app/*", "/acme/app.git/*"}, "/acme/app.git/info/refs", Allow, ""},
-		{"outside every pattern", []string{"/acme/app/*", "/acme/app.git/*"}, "/acme/evil/x", Deny, ReasonPathNotAllowed},
+		{"outside every pattern", []string{"/acme/app/*", "/acme/app.git/*"}, "/acme/evil/x", Deny, denyreason.PathNotAllowed},
 		{"exact path", []string{"/v1/chat"}, "/v1/chat", Allow, ""},
-		{"exact path no extension", []string{"/v1/chat"}, "/v1/chatted", Deny, ReasonPathNotAllowed},
+		{"exact path no extension", []string{"/v1/chat"}, "/v1/chatted", Deny, denyreason.PathNotAllowed},
 		{"segment star", []string{"/acme/*/x"}, "/acme/foo/x", Allow, ""},
-		{"segment star one segment only", []string{"/acme/*/x"}, "/acme/a/b/x", Deny, ReasonPathNotAllowed},
-		{"case-sensitive", []string{"/v1/Chat"}, "/v1/chat", Deny, ReasonPathNotAllowed},
+		{"segment star one segment only", []string{"/acme/*/x"}, "/acme/a/b/x", Deny, denyreason.PathNotAllowed},
+		{"case-sensitive", []string{"/v1/Chat"}, "/v1/chat", Deny, denyreason.PathNotAllowed},
 		{"root pattern", []string{"/"}, "/", Allow, ""},
 	}
 	for _, c := range cases {
@@ -298,8 +299,8 @@ func TestEvaluateRequest_NonCanonicalPathDenied(t *testing.T) {
 		"/v1/..%3b/y",
 		"/v1/x%3B",
 	} {
-		if v := e.EvaluateRequest("github.com", 443, SchemeHTTPS, "GET", p); v.Decision != Deny || v.Reason != ReasonPathNotCanonical {
-			t.Errorf("path %q = %v/%q, want Deny/%s", p, v.Decision, v.Reason, ReasonPathNotCanonical)
+		if v := e.EvaluateRequest("github.com", 443, SchemeHTTPS, "GET", p); v.Decision != Deny || v.Reason != denyreason.PathNotCanonical {
+			t.Errorf("path %q = %v/%q, want Deny/%s", p, v.Decision, v.Reason, denyreason.PathNotCanonical)
 		}
 	}
 }

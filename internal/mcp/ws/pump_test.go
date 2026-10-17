@@ -16,7 +16,7 @@ import (
 )
 
 // enforceGW builds an enforce-mode gateway that allows only read_file.
-func enforceGW(t *testing.T) *gateway.Gateway {
+func enforceGW(t testing.TB) *gateway.Gateway {
 	t.Helper()
 	cfg := config.MCPConfig{
 		Enabled:              true,

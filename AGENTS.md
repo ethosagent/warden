@@ -113,6 +113,10 @@ file as a regression seed only after triage.
   regressions.
 - **Interfaces for all external deps.** Config, secrets, and storage sit behind
   `ConfigProvider`, `SecretProvider`, `AnalyticsStore`. Never reach around them.
+- **Every external dependency gets a port, a fake in `test/harness` and a
+  scenario. No feature is done without a scenario.** See the
+  [`harness-scenario`](.agents/skills/harness-scenario/SKILL.md) skill;
+  `TestPortCoverage` fails CI for a port with no registered fake.
 - **`cmd/` stays thin** (wire + start, no business logic); **`internal/` is
   organized by domain**.
 - **Logging hygiene.** Reference secrets by hash/last-4/version — never the raw

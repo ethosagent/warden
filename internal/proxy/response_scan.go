@@ -3,6 +3,7 @@ package proxy
 import (
 	"strings"
 
+	"github.com/ethosagent/warden/internal/denyreason"
 	"github.com/ethosagent/warden/internal/scan"
 )
 
@@ -83,11 +84,11 @@ func scannableContentType(contentType string) bool {
 // Scan runs the detectors over body and returns the detections plus whether the
 // response should be blocked. Blocking is true only in enforce mode AND when a
 // high-severity detection is present (mirrors the gateway's applyScanSeverity:
-// only "high" severity blocks). reason is a bounded kind for the deny event:
-// "http_response_leak" or "http_response_injection" (leak wins if both present;
-// PII alone never blocks). Detections are always returned (for logging) even when
-// not blocking.
-func (r *ResponseScanner) Scan(body []byte) (dets []scan.Detection, block bool, reason string) {
+// only "high" severity blocks). reason is from the one declared set
+// (internal/denyreason): http_response_leak or http_response_injection (leak
+// wins if both present; PII alone never blocks). Detections are always returned
+// (for logging) even when not blocking.
+func (r *ResponseScanner) Scan(body []byte) (dets []scan.Detection, block bool, reason denyreason.Reason) {
 	dets = r.scanner.ScanResponse(body)
 	if !r.enforcing() {
 		return dets, false, ""
@@ -106,9 +107,9 @@ func (r *ResponseScanner) Scan(body []byte) (dets []scan.Detection, block bool, 
 	}
 	switch {
 	case highLeak:
-		return dets, true, "http_response_leak"
+		return dets, true, denyreason.HTTPResponseLeak
 	case highInjection:
-		return dets, true, "http_response_injection"
+		return dets, true, denyreason.HTTPResponseInjection
 	default:
 		return dets, false, ""
 	}

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ethosagent/warden/internal/denyreason"
 	"github.com/ethosagent/warden/internal/policy"
 )
 
@@ -18,10 +19,10 @@ import (
 // timeout, connection refused) are not decisions and must never carry these.
 const (
 	// SSRFReasonBlocked: the destination address is in a blocked range.
-	SSRFReasonBlocked = "ssrf_blocked"
+	SSRFReasonBlocked = string(denyreason.SSRFBlocked)
 	// SSRFReasonDeniedHostname: the hostname itself was refused before any
 	// resolution — it is on the hard-deny list or carries URL userinfo.
-	SSRFReasonDeniedHostname = "ssrf_denied_hostname"
+	SSRFReasonDeniedHostname = string(denyreason.SSRFDeniedHostname)
 )
 
 // SSRFError is the typed error the SafeDialer returns when it refuses a dial on

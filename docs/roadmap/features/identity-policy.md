@@ -26,6 +26,7 @@ On a CA-enabled worker in attribute mode with `{domain: api.github.com, groups: 
 
 ## Needs first
 
+- [L1 test harness](l1-test-harness.md) (P1 · Who did it)
 - [Verify user token](identity-verification.md) (P1 · Who did it)
 - [JSON audit → SIEM](audit-log-export.md) (P1 · Who did it)
 
@@ -378,4 +379,4 @@ Prove the done-when end to end against a real Dex token, and document group-scop
 - [ ] The test asserts the judge fake receives zero calls for scoped denies.
 - [ ] Docs build and links check pass: `go run docs/roadmap/gen.go check`.
 
-**Depends on:** [`W-P1-GPOL-03`](identity-policy.md#39--w-p1-gpol-03) Apply group-aware allow decisions at CONNECT and request time; [`W-P1-GPOL-04`](identity-policy.md#49--w-p1-gpol-04) Support groups/users in MCP tool allowWhen conditions; [`W-P1-GPOL-05`](identity-policy.md#59--w-p1-gpol-05) Show affected users in policy eval replay; [`W-P1-VRFY-05`](identity-verification.md#57--w-p1-vrfy-05) Add identity attribution e2e test and a CI integration job
+**Depends on:** [`W-P1-GPOL-03`](identity-policy.md#39--w-p1-gpol-03) Apply group-aware allow decisions at CONNECT and request time; [`W-P1-GPOL-04`](identity-policy.md#49--w-p1-gpol-04) Support groups/users in MCP tool allowWhen conditions; [`W-P1-GPOL-05`](identity-policy.md#59--w-p1-gpol-05) Show affected users in policy eval replay; [`W-P1-VRFY-05`](identity-verification.md#57--w-p1-vrfy-05) Add identity attribution scenarios on test/harness and a CI integration job

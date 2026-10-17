@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ethosagent/warden/internal/analytics"
+	"github.com/ethosagent/warden/internal/denyreason"
 	"github.com/ethosagent/warden/internal/policy"
 )
 
@@ -142,20 +143,20 @@ func (p *Proxy) handleConn(conn net.Conn) {
 	// HTTP"). No domain is known at this pre-protocol stage, so the deny is
 	// recorded without one.
 	if !strings.HasPrefix(line, "CONNECT ") || !strings.Contains(line, "HTTP/") {
-		p.storeDeny("", 0, "tcp", "unsupported_protocol", "")
+		p.storeDeny("", 0, "tcp", denyreason.UnsupportedProtocol, "")
 		return
 	}
 
 	fields := strings.Fields(line)
 	if len(fields) < 2 {
-		p.storeDeny("", 0, "tcp", "malformed_connect", "")
+		p.storeDeny("", 0, "tcp", denyreason.MalformedConnect, "")
 		return
 	}
 	target := fields[1]
 
 	domain, port, err := SplitHostPort(target)
 	if err != nil {
-		p.storeDeny("", 0, "tcp", "malformed_connect", "")
+		p.storeDeny("", 0, "tcp", denyreason.MalformedConnect, "")
 		return
 	}
 
@@ -188,49 +189,52 @@ func (p *Proxy) handleConn(conn net.Conn) {
 	// so constraints could-match here and the rate limit is peeked, not
 	// consumed. The per-request check on the terminated tunnel is authoritative
 	// and counts each request exactly once.
-	decision := p.cfg.Policy.EvaluateRequest(domain, port, policy.SchemeHTTPS, "", "").Decision
+	verdict := p.cfg.Policy.EvaluateRequest(domain, port, policy.SchemeHTTPS, "", "")
 	// Tri-state gate:
 	//   Allow   -> proceed.
-	//   Deny    -> 403 (explicit denylist / throttled allow entry).
+	//   Deny    -> 403 (denylist hit, or an allowlisted destination rejected by
+	//              a constraint / rate-limit / time-window guard). The verdict
+	//              names WHY (#409): policy_denylist, rate_limited, time_window.
 	//   NoMatch -> if the judge is enabled, let CONNECT proceed to TLS
 	//              termination so the judge can inspect the full request;
-	//              otherwise default-deny exactly as before (403).
+	//              otherwise default-deny exactly as before (403) as
+	//              policy_no_match.
 	judgeEnabled := p.judge() != nil
-	if decision == policy.Deny || (decision == policy.NoMatch && !judgeEnabled) {
-		_ = p.analyticsStore().StoreEvent(analytics.Event{
+	if verdict.Decision == policy.Deny || (verdict.Decision == policy.NoMatch && !judgeEnabled) {
+		// A NoMatch default-deny is named here, at the gate: policy itself does
+		// not consider NoMatch a deny (it is judge-eligible).
+		reason := verdict.Reason
+		if verdict.Decision == policy.NoMatch {
+			reason = denyreason.PolicyNoMatch
+		}
+		p.emitDenyEvent(analytics.Event{
 			Timestamp: time.Now(),
 			Domain:    domain,
 			Port:      port,
 			Protocol:  "tcp",
-			Decision:  "deny",
+			Reason:    string(reason),
 		})
-		p.cfg.Metrics.RecordRequest("deny", "tcp")
-		p.cfg.Metrics.RecordBlocked("policy")
-		p.logDecision(decisionLog{Domain: domain, Port: port, Protocol: "tcp", Decision: "deny"})
 		_, _ = fmt.Fprint(conn, "HTTP/1.1 403 Forbidden\r\n\r\n")
 		return
 	}
 
 	if p.caCert != nil {
 		_, _ = fmt.Fprint(conn, "HTTP/1.1 200 Connection Established\r\n\r\n")
-		p.handleTLS(conn, br, domain, port, decision == policy.NoMatch)
+		p.handleTLS(conn, br, domain, port, verdict.Decision == policy.NoMatch)
 		return
 	}
 
 	// No TLS termination: the judge cannot inspect an opaque tunnel, so a
 	// NoMatch request must fail closed here — only statically Allowed
 	// destinations may be raw-tunneled.
-	if decision == policy.NoMatch {
-		_ = p.analyticsStore().StoreEvent(analytics.Event{
+	if verdict.Decision == policy.NoMatch {
+		p.emitDenyEvent(analytics.Event{
 			Timestamp: time.Now(),
 			Domain:    domain,
 			Port:      port,
 			Protocol:  "tcp",
-			Decision:  "deny",
+			Reason:    string(denyreason.PolicyNoMatch),
 		})
-		p.cfg.Metrics.RecordRequest("deny", "tcp")
-		p.cfg.Metrics.RecordBlocked("no_tls")
-		p.logDecision(decisionLog{Domain: domain, Port: port, Protocol: "tcp", Decision: "deny"})
 		_, _ = fmt.Fprint(conn, "HTTP/1.1 403 Forbidden\r\n\r\n")
 		return
 	}
@@ -248,26 +252,26 @@ func (p *Proxy) handleConn(conn net.Conn) {
 // connection before it can read the rejection. This is the standard error
 // close (nginx/HAProxy lingering close).
 func (p *Proxy) rejectPreamble(conn net.Conn, br *bufio.Reader, resp, detail string) {
-	p.storeDeny("", 0, "tcp", "malformed_connect", detail)
+	p.storeDeny("", 0, "tcp", denyreason.MalformedConnect, detail)
 	_, _ = fmt.Fprint(conn, resp)
 	_, _ = io.Copy(io.Discard, br)
 }
 
-// storeDeny records a deny decision (headers/metadata only — never bodies). The
-// reason is a bounded enum used for the warden.blocked.total{reason} metric and
-// the decision record; detail, when non-empty, is a bounded refinement of the
-// reason (e.g. "request_line_too_long"). Neither ever carries request content.
-func (p *Proxy) storeDeny(domain string, port int, protocol, reason, detail string) {
-	_ = p.analyticsStore().StoreEvent(analytics.Event{
+// storeDeny records a pre-tunnel CONNECT-floor deny (headers/metadata only —
+// never bodies; there is no requestScope yet, so it builds the event directly
+// and hands it to the shared deny chokepoint). The reason is from the one
+// declared set (internal/denyreason) and rides BOTH the event and the
+// warden.blocked.total{reason} metric. detail, when non-empty, is a bounded
+// refinement of the reason (e.g. "request_line_too_long") for the decision log
+// only; it never carries request content.
+func (p *Proxy) storeDeny(domain string, port int, protocol string, reason denyreason.Reason, detail string) {
+	p.emitDenyEventDetail(analytics.Event{
 		Timestamp: time.Now(),
 		Domain:    domain,
 		Port:      port,
 		Protocol:  protocol,
-		Decision:  "deny",
-	})
-	p.cfg.Metrics.RecordRequest("deny", protocol)
-	p.cfg.Metrics.RecordBlocked(reason)
-	p.logDecision(decisionLog{Domain: domain, Port: port, Protocol: protocol, Decision: "deny", Reason: reason, Detail: detail})
+		Reason:    string(reason),
+	}, detail)
 }
 
 // storeSSRFDeny records the deny decision for a dial the SSRF-safe dialer
@@ -280,20 +284,13 @@ func (p *Proxy) storeSSRFDeny(domain string, port int, protocol string, err erro
 	if !ok {
 		return false
 	}
-	_ = p.analyticsStore().StoreEvent(analytics.Event{
+	p.emitDenyEvent(analytics.Event{
 		Timestamp: time.Now(),
 		Domain:    domain,
 		Port:      port,
 		Protocol:  protocol,
-		Decision:  "deny",
-		Reason:    se.Reason,
+		Reason:    string(ssrfDenyReason(se)),
 		AddrClass: se.AddrClass,
-	})
-	p.cfg.Metrics.RecordRequest("deny", protocol)
-	p.cfg.Metrics.RecordBlocked(se.Reason)
-	p.logDecision(decisionLog{
-		Domain: domain, Port: port, Protocol: protocol,
-		Decision: "deny", Reason: se.Reason, AddrClass: se.AddrClass,
 	})
 	return true
 }

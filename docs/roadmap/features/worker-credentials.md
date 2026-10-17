@@ -25,6 +25,7 @@ On a CP running with --state-dir and TLS, two workers use distinct per-worker to
 
 ## Needs first
 
+- [L1 test harness](l1-test-harness.md) (P1 · Who did it)
 - [SSO + 3 roles](console-sso-rbac.md) (P1 · Who did it)
 - [Admin audit log](admin-audit-log.md) (P1 · Who did it)
 
