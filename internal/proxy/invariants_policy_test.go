@@ -88,15 +88,11 @@ func TestInvariants_DefaultDeny(t *testing.T) {
 	}
 
 	// A denylisted host must stay denied even when a permissive judge is wired in:
-	// the judge only sees NoMatch destinations, so a spelling that slips past the
-	// denylist match (NoMatch instead of Deny) would be judged and allowed.
-	// 3+ trailing dots do that today (#397); the rows flip when it is fixed.
+	// the judge only sees NoMatch destinations, so a spelling that slipped past the
+	// denylist match (NoMatch instead of Deny) would be judged and allowed. Any
+	// number of trailing dots must still deny (#397, fixed).
 	allowAll := &fakeJudge{verdict: Verdict{Decision: "allow", Reason: "invariants: judge says yes"}}
 	for _, dots := range []int{1, 2, 3, 4} {
-		known := ""
-		if dots >= 3 {
-			known = "#397"
-		}
 		target := "denied.test" + strings.Repeat(".", dots) + ":443"
 		t.Run(fmt.Sprintf("deny/denylisted %d trailing dot(s) with permissive judge", dots), func(t *testing.T) {
 			t.Parallel()
@@ -104,14 +100,8 @@ func TestInvariants_DefaultDeny(t *testing.T) {
 			o.judge = allowAll
 			e := newInvEnv(t, o)
 			_, _, status, _ := e.connectRaw(target)
-			refused := !strings.Contains(status, "200")
-			switch {
-			case known == "" && !refused:
+			if strings.Contains(status, "200") {
 				t.Fatalf("CONNECT %s must be refused, got %q", target, strings.TrimSpace(status))
-			case known != "" && refused:
-				t.Fatalf("%s appears fixed: CONNECT %s is now refused; remove the known-issue branch", known, target)
-			case known != "":
-				t.Logf("known issue %s still reproduces: CONNECT %s was allowed", known, target)
 			}
 		})
 	}
