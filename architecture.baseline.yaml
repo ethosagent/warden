@@ -166,6 +166,10 @@ baseline:
     why: "pre-migration: shared-zone packages still carry repository-layer I/O until step 7 moves it into adapters"
     allow: ["repository"]
   - rule: Z3
+    package: internal/clock
+    why: "the time source (#362) is shared by both planes' assembly; its real impl calls time.Now, so it is a repository in the shared zone, like observability"
+    allow: ["repository"]
+  - rule: Z3
     package: internal/observability
     why: "pre-migration: shared-zone packages still carry repository-layer I/O until step 7 moves it into adapters"
     allow: ["repository"]

@@ -105,6 +105,7 @@ classes:
       - internal/audit
       - internal/llm
       - internal/observability
+      - internal/clock            # the time source: the Clock port + its real-time impl (#362)
       - internal/integration
       - internal/integration/webhook
 
@@ -135,6 +136,7 @@ classes:
     layer: testutil
     paths:
       - internal/dnstest
+      - internal/clock/clocktest  # fake Clock for tests (#362)
       - test/**
 
 # ---------------------------------------------------------------------------
@@ -168,6 +170,8 @@ zones:
     - internal/policyeval
   shared:
     - internal/config
+    - internal/clock
+    - internal/clock/clocktest
     - internal/secrets
     - internal/analytics
     - internal/auth
