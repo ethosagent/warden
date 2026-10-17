@@ -33,9 +33,16 @@ const (
 )
 
 func (p *Proxy) Serve(ctx context.Context) error {
-	ln, err := net.Listen("tcp", p.cfg.ListenAddr)
-	if err != nil {
-		return fmt.Errorf("proxy: listen: %w", err)
+	// An injected Listener (assembly-only harness seam) replaces the ListenAddr
+	// bind; nil keeps the production bind exactly as before. Either way the
+	// ctx-done goroutine below owns closing it.
+	ln := p.cfg.Listener
+	if ln == nil {
+		var err error
+		ln, err = net.Listen("tcp", p.cfg.ListenAddr)
+		if err != nil {
+			return fmt.Errorf("proxy: listen: %w", err)
+		}
 	}
 	p.listenerMu.Lock()
 	p.listener = ln
@@ -177,7 +184,11 @@ func (p *Proxy) handleConn(conn net.Conn) {
 		return
 	}
 
-	decision := p.cfg.Policy.Evaluate(domain, port, policy.SchemeHTTPS)
+	// Destination-only evaluation (#371): no method/path exists yet at CONNECT,
+	// so constraints could-match here and the rate limit is peeked, not
+	// consumed. The per-request check on the terminated tunnel is authoritative
+	// and counts each request exactly once.
+	decision := p.cfg.Policy.EvaluateRequest(domain, port, policy.SchemeHTTPS, "", "").Decision
 	// Tri-state gate:
 	//   Allow   -> proceed.
 	//   Deny    -> 403 (explicit denylist / throttled allow entry).

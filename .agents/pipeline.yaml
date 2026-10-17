@@ -15,8 +15,6 @@ commands:
     issue: 359 # --fast
   gate:
     run: "scripts/check.sh --integration --json"
-    planned: true
-    issue: 353 # --json (PR #385)
   scenarios:
     run: "go test ./test/scenarios/... -json"
     planned: true
@@ -51,8 +49,6 @@ reviews:
 live_verify:
   playbook:
     path: ".agents/playbooks/red-team.md"
-    planned: true
-    issue: 356 # in progress
   tiers: [critical, normal]
 
 evidence:

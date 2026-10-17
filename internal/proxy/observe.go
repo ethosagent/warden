@@ -20,10 +20,12 @@ type decisionLog struct {
 	ResponseStatus int
 	SecretRef      string
 	JudgeReason    string
-	// Reason is the bounded deny-reason enum (e.g. "malformed_connect",
-	// "no_tls") — the same string the warden.blocked.total{reason} metric
-	// carries. Detail, when non-empty, is a bounded refinement of the reason
-	// (e.g. "request_line_too_long"). Neither ever carries request content.
+	// Reason is the bounded decision reason, a small closed enum: the deny
+	// reasons the warden.blocked.total{reason} metric carries (e.g.
+	// "malformed_connect", "no_tls") and the #371 constraint reasons
+	// ("method_not_allowed" / "path_not_allowed" / "path_not_canonical").
+	// Detail, when non-empty, is a bounded refinement of the reason (e.g.
+	// "request_line_too_long"). Neither ever carries request content.
 	Reason string
 	Detail string
 }

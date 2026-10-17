@@ -1,0 +1,6 @@
+{"ImportPath":"example.com/fx/tbuild [example.com/fx/tbuild.test]","Action":"build-output","Output":"# example.com/fx/tbuild [example.com/fx/tbuild.test]\n"}
+{"ImportPath":"example.com/fx/tbuild [example.com/fx/tbuild.test]","Action":"build-output","Output":"tbuild/a_test.go:3:27: undefined: undefinedFn\n"}
+{"ImportPath":"example.com/fx/tbuild [example.com/fx/tbuild.test]","Action":"build-fail"}
+{"Time":"2026-10-16T18:17:33.038188954+05:30","Action":"start","Package":"example.com/fx/tbuild"}
+{"Time":"2026-10-16T18:17:33.038269336+05:30","Action":"output","Package":"example.com/fx/tbuild","Output":"FAIL\texample.com/fx/tbuild [build failed]\n"}
+{"Time":"2026-10-16T18:17:33.038277648+05:30","Action":"fail","Package":"example.com/fx/tbuild","Elapsed":0,"FailedBuild":"example.com/fx/tbuild [example.com/fx/tbuild.test]"}

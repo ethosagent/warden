@@ -1,0 +1,11 @@
+{
+	"example.com/fx/vetbad": {
+		"printf": [
+			{
+				"posn": "/tmp/fx/vetbad/a.go:6:14",
+				"end": "/tmp/fx/vetbad/a.go:6:16",
+				"message": "fmt.Printf format %d has arg \"str\" of wrong type string"
+			}
+		]
+	}
+}

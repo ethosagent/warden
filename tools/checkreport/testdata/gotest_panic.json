@@ -1,0 +1,22 @@
+{"Time":"2026-10-16T18:17:27.426850242+05:30","Action":"start","Package":"example.com/fx/tpanic"}
+{"Time":"2026-10-16T18:17:27.434326995+05:30","Action":"run","Package":"example.com/fx/tpanic","Test":"TestBoom"}
+{"Time":"2026-10-16T18:17:27.434344382+05:30","Action":"output","Package":"example.com/fx/tpanic","Test":"TestBoom","Output":"=== RUN   TestBoom\n"}
+{"Time":"2026-10-16T18:17:27.434373301+05:30","Action":"output","Package":"example.com/fx/tpanic","Test":"TestBoom","Output":"--- FAIL: TestBoom (0.00s)\n"}
+{"Time":"2026-10-16T18:17:27.43652434+05:30","Action":"output","Package":"example.com/fx/tpanic","Test":"TestBoom","Output":"panic: assignment to entry in nil map [recovered, repanicked]\n"}
+{"Time":"2026-10-16T18:17:27.436527906+05:30","Action":"output","Package":"example.com/fx/tpanic","Test":"TestBoom","Output":"\n"}
+{"Time":"2026-10-16T18:17:27.436531892+05:30","Action":"output","Package":"example.com/fx/tpanic","Test":"TestBoom","Output":"goroutine 7 [running]:\n"}
+{"Time":"2026-10-16T18:17:27.436534075+05:30","Action":"output","Package":"example.com/fx/tpanic","Test":"TestBoom","Output":"testing.tRunner.func1.2({0x618460, 0x7c4260})\n"}
+{"Time":"2026-10-16T18:17:27.436537955+05:30","Action":"output","Package":"example.com/fx/tpanic","Test":"TestBoom","Output":"\t/home/mitesh/.local/go/src/testing/testing.go:1974 +0x419\n"}
+{"Time":"2026-10-16T18:17:27.436540102+05:30","Action":"output","Package":"example.com/fx/tpanic","Test":"TestBoom","Output":"testing.tRunner.func1()\n"}
+{"Time":"2026-10-16T18:17:27.436542157+05:30","Action":"output","Package":"example.com/fx/tpanic","Test":"TestBoom","Output":"\t/home/mitesh/.local/go/src/testing/testing.go:1977 +0x67f\n"}
+{"Time":"2026-10-16T18:17:27.436545597+05:30","Action":"output","Package":"example.com/fx/tpanic","Test":"TestBoom","Output":"panic({0x618460?, 0x7c4260?})\n"}
+{"Time":"2026-10-16T18:17:27.436547688+05:30","Action":"output","Package":"example.com/fx/tpanic","Test":"TestBoom","Output":"\t/home/mitesh/.local/go/src/runtime/panic.go:860 +0x13a\n"}
+{"Time":"2026-10-16T18:17:27.436550437+05:30","Action":"output","Package":"example.com/fx/tpanic","Test":"TestBoom","Output":"example.com/fx/tpanic.TestBoom(0xc0000f4248?)\n"}
+{"Time":"2026-10-16T18:17:27.436552458+05:30","Action":"output","Package":"example.com/fx/tpanic","Test":"TestBoom","Output":"\t/tmp/fx/tpanic/a_test.go:7 +0x32\n"}
+{"Time":"2026-10-16T18:17:27.436555047+05:30","Action":"output","Package":"example.com/fx/tpanic","Test":"TestBoom","Output":"testing.tRunner(0xc0000f4248, 0x653168)\n"}
+{"Time":"2026-10-16T18:17:27.436557105+05:30","Action":"output","Package":"example.com/fx/tpanic","Test":"TestBoom","Output":"\t/home/mitesh/.local/go/src/testing/testing.go:2036 +0x21d\n"}
+{"Time":"2026-10-16T18:17:27.436560903+05:30","Action":"output","Package":"example.com/fx/tpanic","Test":"TestBoom","Output":"created by testing.(*T).Run in goroutine 1\n"}
+{"Time":"2026-10-16T18:17:27.436562972+05:30","Action":"output","Package":"example.com/fx/tpanic","Test":"TestBoom","Output":"\t/home/mitesh/.local/go/src/testing/testing.go:2101 +0xb13\n"}
+{"Time":"2026-10-16T18:17:27.436776006+05:30","Action":"fail","Package":"example.com/fx/tpanic","Test":"TestBoom","Elapsed":0}
+{"Time":"2026-10-16T18:17:27.436795016+05:30","Action":"output","Package":"example.com/fx/tpanic","Output":"FAIL\texample.com/fx/tpanic\t0.010s\n"}
+{"Time":"2026-10-16T18:17:27.436805503+05:30","Action":"fail","Package":"example.com/fx/tpanic","Elapsed":0.01}
