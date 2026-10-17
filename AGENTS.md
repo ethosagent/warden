@@ -64,6 +64,18 @@ built from a PR — follow [`.agents/playbooks/red-team.md`](.agents/playbooks/r
 Every confirmed break becomes a scripted regression scenario in the L1/L2
 harnesses.
 
+## Task skills and decisions
+
+Step-by-step patterns for the common changes live in
+[`.agents/skills/`](.agents/skills/README.md): `add-request-stage`, `add-adapter`,
+`add-config-key`, `add-control-plane-route`. Use the matching skill before you start.
+
+Architecture decision records live in [`docs/adr/`](docs/adr/README.md). **Read the relevant
+ADR before changing that area** (data-plane/control-plane layering, per-user credentials,
+architecture checks, admin route prefixes, audit and machine events, build and dependencies).
+**Write a new ADR when a change moves a boundary**, and mark an old one superseded rather than
+silently reversing it.
+
 ## Do NOT
 
 - Add `pkg/` speculatively (use `cmd/` + `internal/`).
