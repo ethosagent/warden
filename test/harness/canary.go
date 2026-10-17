@@ -204,8 +204,13 @@ func (h *H) canaryLeaks(tb testing.TB) []string {
 	}
 
 	// 4. Metric names and label values (values are floats; only keys can carry).
-	for key := range h.Metrics() {
-		scan("metric key "+key, key)
+	// A target without the metrics oracle (compose) has no such surface: the
+	// sweep skips it — there is nothing there to leak through, and the scenario
+	// asserting on metrics was required to skip that assertion explicitly.
+	if h.MetricsAvailable() {
+		for key := range h.Metrics() {
+			scan("metric key "+key, key)
+		}
 	}
 
 	// 5. Every fake upstream's recorded requests. The ONE exception: the RAW
@@ -213,12 +218,45 @@ func (h *H) canaryLeaks(tb testing.TB) []string {
 	// working as designed. Every ENCODED form is a leak wherever it lands —
 	// the worker's swap never encodes, so base64/hex/escaped forms mean the
 	// value traveled outside the pipeline's intended shape.
-	for _, u := range h.upstreamsSnapshot() {
-		for i, req := range u.Requests() {
-			where := fmt.Sprintf("upstream %s request #%d (%s %s)", u.host, i, req.Method, req.Path)
+	//
+	// A target whose recorder sees hosts no scenario registered a view for
+	// (compose: the fake upstream records whatever reached it, registered or
+	// not) hands over its WHOLE recorded view instead, and that supersedes the
+	// per-upstream scan: a swap that lands on an unregistered host is exactly
+	// the leak the registered views cannot see.
+	type upstreamView struct {
+		host string
+		reqs []RecordedRequest
+	}
+	var views []upstreamView
+	if whole, ok := h.target.(WholeRecorder); ok {
+		all, err := whole.AllUpstreamRequests()
+		if err != nil {
+			tb.Fatalf("harness: read the recorded upstream view (the sweep cannot run blind): %v", err)
+		}
+		byHost := make(map[string][]RecordedRequest)
+		var hosts []string
+		for _, req := range all {
+			if _, seen := byHost[req.Host]; !seen {
+				hosts = append(hosts, req.Host)
+			}
+			byHost[req.Host] = append(byHost[req.Host], req)
+		}
+		sort.Strings(hosts)
+		for _, host := range hosts {
+			views = append(views, upstreamView{host: host, reqs: byHost[host]})
+		}
+	} else {
+		for _, u := range h.upstreamsSnapshot() {
+			views = append(views, upstreamView{host: u.host, reqs: u.Requests()})
+		}
+	}
+	for _, v := range views {
+		for i, req := range v.reqs {
+			where := fmt.Sprintf("upstream %s request #%d (%s %s)", v.host, i, req.Method, req.Path)
 			blob := headersText(req.Header) + req.Path + "\x00" + string(req.Body)
 			for _, sec := range h.secrets {
-				inScope := hostAllowed(sec.matchHosts, u.host)
+				inScope := hostAllowed(sec.matchHosts, v.host)
 				record(sec, where, blob, inScope)
 				// The placeholder arriving at a host the secret is scoped to means
 				// the swap did not happen: the agent's stand-in reached the upstream

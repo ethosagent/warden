@@ -47,6 +47,10 @@ type Upstream struct {
 	h    *H
 	host string
 	srv  *httptest.Server
+	// remote is non-nil when this Upstream is a VIEW over a fake the target
+	// hosts out of process (compose: the fakeupstream recorder): Requests read
+	// through the target and the server/fault levers have nothing to drive.
+	remote UpstreamReader
 
 	mu    sync.Mutex
 	reqs  []RecordedRequest
@@ -75,6 +79,14 @@ func (h *H) Upstream(host string) *Upstream {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if u, ok := h.upstreams[host]; ok {
+		return u
+	}
+	// On a target that hosts the fakes out of process (compose) an upstream is
+	// a view over that fake's recording, not a server here: the deployment's
+	// fake serves the traffic and answers the oracle, this process only reads.
+	if h.remoteUpstreams {
+		u := &Upstream{h: h, host: host, remote: h.target.(UpstreamReader)}
+		h.upstreams[host] = u
 		return u
 	}
 	leaf, err := h.upstreamCA.leaf(host)
@@ -179,7 +191,15 @@ func (u *Upstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // Requests returns a copy of every request recorded so far, in arrival order.
+// On a remote view the records come from the target (compose: the recorder).
 func (u *Upstream) Requests() []RecordedRequest {
+	if u.remote != nil {
+		reqs, err := u.remote.UpstreamRequests(u.host)
+		if err != nil {
+			u.h.tb.Fatalf("harness: read recorded requests for %s: %v", u.host, err)
+		}
+		return reqs
+	}
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	out := make([]RecordedRequest, len(u.reqs))
@@ -187,10 +207,20 @@ func (u *Upstream) Requests() []RecordedRequest {
 	return out
 }
 
+// inProcessOnly fails the test: the lever drives the in-process fake's server
+// or fault machinery, and this upstream is a view over a fake the target hosts
+// out of process — pretending would silently do nothing.
+func (u *Upstream) inProcessOnly(lever string) {
+	u.h.tb.Fatalf("harness: Upstream(%s).%s is in-process-only: this target hosts its fakes out of process, so the scenario cannot drive them", u.host, lever)
+}
+
 // Delay makes every subsequent request hang until the scenario advances the
 // fake clock by at least d (h.Clock().Advance(d)) — the latency fault, on
 // harness time instead of wall time.
 func (u *Upstream) Delay(d time.Duration) {
+	if u.remote != nil {
+		u.inProcessOnly("Delay")
+	}
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	u.delay = d
@@ -212,6 +242,9 @@ func (u *Upstream) Delay(d time.Duration) {
 // unparks too, so cleanup never wedges.
 func (u *Upstream) WaitParked(n int) {
 	u.h.tb.Helper()
+	if u.remote != nil {
+		u.inProcessOnly("WaitParked")
+	}
 	u.h.EventuallyWithin(readyDeadline,
 		fmt.Sprintf("%d request(s) to park on %s's Delay timer", n, u.host),
 		func() bool {
@@ -223,6 +256,9 @@ func (u *Upstream) WaitParked(n int) {
 
 // Parked reports how many requests are currently held on the Delay timer.
 func (u *Upstream) Parked() int {
+	if u.remote != nil {
+		u.inProcessOnly("Parked")
+	}
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	return u.parked
@@ -230,6 +266,9 @@ func (u *Upstream) Parked() int {
 
 // Fail makes every subsequent request answer with the given status code.
 func (u *Upstream) Fail(status int) {
+	if u.remote != nil {
+		u.inProcessOnly("Fail")
+	}
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	u.fail = status
@@ -240,6 +279,9 @@ func (u *Upstream) Fail(status int) {
 // worker config this returns the REAL swapped secret to the agent (the
 // upstream-echo leak, #389); AssertCanaryNeverLeaked must catch it.
 func (u *Upstream) EchoHeaders(on bool) {
+	if u.remote != nil {
+		u.inProcessOnly("EchoHeaders")
+	}
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	u.echo = on
@@ -247,22 +289,36 @@ func (u *Upstream) EchoHeaders(on bool) {
 
 // SetNext mounts a catch-all response handler (used for custom bodies).
 func (u *Upstream) SetNext(next http.Handler) {
+	if u.remote != nil {
+		u.inProcessOnly("SetNext")
+	}
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	u.next = next
 }
 
 // route mounts a flavor handler at pattern (longest-pattern wins; "/" makes
-// the flavor the whole server).
+// the flavor the whole server). On a remote view there is nothing to mount —
+// the deployment's fake serves its own handlers — so this is a no-op there;
+// the flavors call it unconditionally and stay one code path on both targets.
 func (u *Upstream) route(pattern string, handler http.Handler) {
+	if u.remote != nil {
+		return
+	}
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	u.mux.Handle(pattern, handler)
 }
 
 // URL is the fake's direct loopback base URL (https://127.0.0.1:port) for
-// tests that exercise the fake itself, bypassing the worker.
-func (u *Upstream) URL() string { return u.srv.URL }
+// tests that exercise the fake itself, bypassing the worker. A remote view has
+// no loopback URL — the fake lives in the deployment.
+func (u *Upstream) URL() string {
+	if u.remote != nil {
+		u.inProcessOnly("URL")
+	}
+	return u.srv.URL
+}
 
 // addr is the loopback host:port the mapping dialer routes to.
 func (u *Upstream) addr() string { return strings.TrimPrefix(u.srv.URL, "https://") }
@@ -271,6 +327,9 @@ func (u *Upstream) addr() string { return strings.TrimPrefix(u.srv.URL, "https:/
 // a client leg still marked busy (a request that outlived the worker) would
 // otherwise hold Server.Close open waiting on it.
 func (u *Upstream) close() {
+	if u.remote != nil {
+		return // nothing here hosts it; the target tears its own fake down
+	}
 	u.srv.CloseClientConnections()
 	u.srv.Close()
 }
@@ -303,7 +362,7 @@ func (u *Upstream) echoHeaders(w http.ResponseWriter, r *http.Request) {
 func (h *H) FakeGRPC() *Upstream {
 	h.tb.Helper()
 	h.grpcOnce.Do(func() {
-		u := h.Upstream("grpc.example.com")
+		u := h.Upstream(h.Host("grpc"))
 		u.route("/", grpcEchoHandler{})
 		h.grpcU = u
 	})
@@ -338,7 +397,7 @@ func (grpcEchoHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (h *H) FakeWS() *Upstream {
 	h.tb.Helper()
 	h.wsOnce.Do(func() {
-		u := h.Upstream("ws.example.com")
+		u := h.Upstream(h.Host("ws"))
 		u.route("/ws", websocket.Handler(func(conn *websocket.Conn) {
 			_, _ = io.Copy(conn, conn)
 		}))

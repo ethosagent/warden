@@ -24,12 +24,14 @@
 package harness
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -101,6 +103,12 @@ type H struct {
 	workers    int
 	allowExtra []string
 	secrets    []secretSpec
+	// secretsFromTarget records that boot took h.secrets from the target's own
+	// wiring (TargetSecrets, compose) instead of the scenario's WithSecret
+	// opts — the only case where lookupSecret answers a name it does not know
+	// with the one secret (the scenario's name describes L1 wiring there; on a
+	// WithSecret harness a misnamed secret must fail, not resolve).
+	secretsFromTarget bool
 	// mcpEnabled (WithMCP) boots the workers with the MCP gateway in monitor
 	// mode, so WebSocket/SSE scenarios ride the worker's real stream paths.
 	mcpEnabled bool
@@ -131,6 +139,13 @@ type H struct {
 	// boot mints the CAs and the clock as always but starts THIS instead.
 	suppliedTarget Target
 	target         Target
+	// remoteUpstreams is set at boot when the target implements UpstreamReader
+	// (compose): h.Upstream(host) then hands out views over the target's fakes
+	// instead of booting in-process servers.
+	remoteUpstreams bool
+	// agentClients is set at boot when the target implements AgentClients
+	// (compose): h.Agent/h.AgentH2 return the target's clients.
+	agentClients AgentClients
 
 	fake   *clocktest.Fake
 	dialer *mappingDialer
@@ -312,9 +327,105 @@ func NoLeakCheck() Option {
 }
 
 // Placeholder returns the literal token an agent uses to stand in for the
-// named secret ({{name}}). Placeholders are matched byte-for-byte by the
+// named secret ({{name}} in-process; on a target that wires its own secrets,
+// the deployment's placeholder). Placeholders are matched byte-for-byte by the
 // worker's swap stage.
-func (h *H) Placeholder(name string) string { return placeholderOf(name) }
+func (h *H) Placeholder(name string) string {
+	if s, ok := h.lookupSecret(name); ok {
+		return s.placeholder
+	}
+	return placeholderOf(name)
+}
+
+// Secret returns the real value behind a WithSecret name — what the worker
+// swaps in for the placeholder, and what a scenario asserts the upstream (and
+// only the upstream) received. On a target that wires its own secrets
+// (compose) this is the deployment's value, NOT the WithSecret argument,
+// which the target's wiring supersedes at boot.
+func (h *H) Secret(name string) string {
+	h.tb.Helper()
+	s, ok := h.lookupSecret(name)
+	if !ok {
+		h.tb.Fatalf("harness: Secret(%q): no such registered secret", name)
+	}
+	return s.value
+}
+
+// lookupSecret resolves a secret by name (last registration wins). A target
+// that wires its OWN secrets and holds exactly one of them (compose's stack)
+// answers any name: the scenario's name describes L1 wiring, the deployment
+// holds the one secret. On a WithSecret harness every name must resolve
+// exactly — a misnamed secret there is a scenario bug, never a fallback.
+func (h *H) lookupSecret(name string) (secretSpec, bool) {
+	var found secretSpec
+	ok := false
+	for _, s := range h.secrets {
+		if s.name == name {
+			found, ok = s, true
+		}
+	}
+	if !ok && h.secretsFromTarget && len(h.secrets) == 1 {
+		found, ok = h.secrets[0], true
+	}
+	return found, ok
+}
+
+// Host maps a well-known fake's alias ("api", "llm", "mcp", "evil", "grpc",
+// "ws") to the hostname that alias resolves to on this harness's target —
+// <alias>.example.com in-process, the stack's own names on compose. Scenarios
+// ask instead of hard-coding, so one body runs on both; an alias the target
+// does not serve fails the test (an L1-only lever, named).
+func (h *H) Host(alias string) string {
+	h.tb.Helper()
+	host, err := h.target.Host(alias)
+	if err != nil {
+		h.tb.Fatalf("harness: Host: %v", err)
+	}
+	return host
+}
+
+// ConnectStatus sends a CONNECT for hostPort the way the agent's traffic is
+// sent and returns the status code of the proxy's reply: the policy decision
+// itself, before any client library turns a refusal into an opaque transport
+// error. In-process this is a raw dial of the worker proxy; on a target whose
+// proxy this process cannot reach (compose) the probe runs from the agent.
+func (h *H) ConnectStatus(hostPort string) int {
+	h.tb.Helper()
+	if cp, ok := h.target.(ConnectProber); ok {
+		st, err := cp.ConnectStatus(hostPort)
+		if err != nil {
+			h.tb.Fatalf("harness: CONNECT %s probe: %v", hostPort, err)
+		}
+		return st
+	}
+	conn, err := net.DialTimeout("tcp", h.ProxyAddr(), 5*time.Second)
+	if err != nil {
+		h.tb.Fatalf("dial the worker proxy: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", hostPort, hostPort); err != nil {
+		h.tb.Fatalf("send CONNECT %s: %v", hostPort, err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		h.tb.Fatalf("read the CONNECT %s reply: %v", hostPort, err)
+	}
+	_ = resp.Body.Close()
+	return resp.StatusCode
+}
+
+// MetricsAvailable reports whether this target carries the metrics oracle. A
+// target without it (compose: the stack exports no OTel metrics) fails
+// h.Metrics loudly; a scenario that asserts on metrics asks this first and
+// skips the assertion EXPLICITLY on such a target — the documented capability
+// split, never a silent pass.
+func (h *H) MetricsAvailable() bool {
+	if ms, ok := h.target.(MetricsSupport); ok {
+		return ms.MetricsAvailable()
+	}
+	return true
+}
 
 // placeholderOf backs Placeholder; scenarios use the method.
 func placeholderOf(name string) string {
@@ -405,6 +516,24 @@ func (h *H) boot() {
 			h.tb.Fatalf("harness: ControlPlaneDownAtBoot is an in-process fault; it cannot combine with WithTarget")
 		}
 		h.target = h.suppliedTarget
+		// A target that wires its own secrets (compose) supersedes the opts':
+		// the sweep must guard the value the DEPLOYMENT actually holds.
+		if ts, ok := h.target.(TargetSecrets); ok {
+			if specs := ts.TargetSecrets(); len(specs) > 0 {
+				h.secretsFromTarget = true
+				h.secrets = h.secrets[:0]
+				for _, s := range specs {
+					h.secrets = append(h.secrets, secretSpec{
+						name:        s.Name,
+						placeholder: s.Placeholder,
+						value:       s.Value,
+						matchHosts:  s.MatchHosts,
+					})
+				}
+			}
+		}
+		_, h.remoteUpstreams = h.target.(UpstreamReader)
+		h.agentClients, _ = h.target.(AgentClients)
 		fatalfOn(h.tb, h.target.Start(context.Background()))
 		return
 	}
@@ -649,7 +778,11 @@ func (h *H) cleanup() {
 	h.cleanOnce.Do(func() {
 		if h.target != nil {
 			if err := h.target.Stop(); err != nil {
-				h.tb.Errorf("harness: %v\nlast logs:\n%s", err, tail(h.target.Logs(), 2000))
+				if logs, lerr := h.target.Logs(); lerr != nil {
+					h.tb.Errorf("harness: %v\n(logs unavailable: %v)", err, lerr)
+				} else {
+					h.tb.Errorf("harness: %v\nlast logs:\n%s", err, tail(logs, 2000))
+				}
 			}
 		}
 		h.mu.Lock()

@@ -35,7 +35,7 @@ func (h *H) FakeLLM() *FakeLLM {
 	h.tb.Helper()
 	h.llmOnce.Do(func() {
 		f := &FakeLLM{completion: defaultLLMCompletion}
-		u := h.Upstream("llm.example.com")
+		u := h.Upstream(h.Host("llm"))
 		u.route("/v1/chat/completions", http.HandlerFunc(f.serve))
 		f.u = u
 		h.llm = f

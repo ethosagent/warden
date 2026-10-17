@@ -33,9 +33,10 @@ import (
 //	      message is not): the placeholder in a gRPC body reaches the upstream
 //	      unswapped. Fails safe; no real value moves.
 
-// canaryValue is the planted secret of the matrix; canaryHost is where it may be
-// swapped in. Each row boots its own harness, so rows cannot contaminate each
-// other's sweep.
+// canaryValue is the planted secret of the matrix (the L1 wiring; a target
+// that wires its own secrets supersedes it, and the row bodies read the value
+// back through h.Secret). Each row boots its own harness, so rows cannot
+// contaminate each other's sweep.
 var canaryValue = harness.Canary()
 
 type canaryRow struct {
@@ -45,17 +46,18 @@ type canaryRow struct {
 	knownIssue []string // open issues this row is expected to still hit
 }
 
-// canaryHost is the upstream the row talks to.
-func (r canaryRow) host() string {
+// host is the upstream the row talks to, asked from the harness so one body
+// resolves the in-process fakes' names and the compose stack's alike.
+func (r canaryRow) host(h *harness.H) string {
 	switch {
 	case r.deny:
-		return "evil.example.com" // registered upstream, never allowlisted
+		return h.Host("evil") // registered upstream, never allowlisted
 	case r.proto == "grpc":
-		return "grpc.example.com"
+		return h.Host("grpc")
 	case r.proto == "ws":
-		return "ws.example.com"
+		return h.Host("ws")
 	default:
-		return "api.example.com"
+		return h.Host("api")
 	}
 }
 
@@ -85,14 +87,18 @@ var canaryRows = []canaryRow{
 	{proto: "ws", deny: true},
 }
 
-// canaryScenarios turns the matrix into catalog entries. Only the rows that use
-// no in-process-only lever are L2 (EchoHeaders is a harness fault on the fake).
+// canaryScenarios turns the matrix into catalog entries. L2 is only the rows
+// whose every lever the compose stack has — http1 and h2, allowed and denied.
+// The echo rows drive the harness's EchoHeaders fault on the fake upstream
+// (in-process-only); the gRPC and WS rows need the harness's own grpc/ws
+// fakes, which the stack's fake DNS does not serve (and the WS handshake also
+// raw-dials the worker proxy, which is published to nobody on the host).
 func canaryScenarios() []Scenario {
 	out := make([]Scenario, 0, len(canaryRows))
 	for _, row := range canaryRows {
 		out = append(out, Scenario{
 			Name: row.name(),
-			L2:   !row.echo,
+			L2:   !row.echo && (row.proto == "http1" || row.proto == "h2"),
 			Opts: []harness.Option{harness.WithSecret("canary", canaryValue, row.allowedHost())},
 			Run:  row.run,
 		})
@@ -102,13 +108,23 @@ func canaryScenarios() []Scenario {
 
 // allowedHost is the one host the secret is scoped to: the row's own host on an
 // allow path, and the protocol's allowed host on a deny path (so a swap
-// delivered to the DENIED host would be out of scope and flagged).
+// delivered to the DENIED host would be out of scope and flagged). These are
+// the L1 names on purpose: Opts are L1 wiring, superseded at boot by a target
+// that wires its own secrets (compose).
 func (r canaryRow) allowedHost() string {
-	return canaryRow{proto: r.proto}.host()
+	switch r.proto {
+	case "grpc":
+		return "grpc.example.com"
+	case "ws":
+		return "ws.example.com"
+	default:
+		return "api.example.com"
+	}
 }
 
 func (r canaryRow) run(t *testing.T, h *harness.H) {
-	up := h.Upstream(r.host())
+	host := r.host(h)
+	up := h.Upstream(host)
 	switch r.proto {
 	case "grpc":
 		if !r.deny {
@@ -124,22 +140,23 @@ func (r canaryRow) run(t *testing.T, h *harness.H) {
 	}
 
 	ph := h.Placeholder("canary")
-	var bodySwapped bool // allow path: did the body placeholder reach the upstream swapped?
+	sec := h.Secret("canary") // what the swap delivers upstream (and what must leak nowhere else)
+	var bodySwapped bool      // allow path: did the body placeholder reach the upstream swapped?
 	switch r.proto {
 	case "http1":
-		bodySwapped = r.doHTTP(t, h, h.Agent(), up, ph)
+		bodySwapped = r.doHTTP(t, h, h.Agent(), up, ph, sec)
 	case "h2":
-		bodySwapped = r.doHTTP(t, h, h.AgentH2(), up, ph)
+		bodySwapped = r.doHTTP(t, h, h.AgentH2(), up, ph, sec)
 	case "grpc":
-		bodySwapped = r.doGRPC(t, h, up, ph)
+		bodySwapped = r.doGRPC(t, h, up, ph, sec)
 	case "ws":
-		r.doWS(t, h, up, ph)
+		r.doWS(t, h, up, ph, sec)
 		bodySwapped = true // no body on this path: nothing to swap
 	}
 
 	if r.deny {
 		if got := len(up.Requests()); got != 0 {
-			t.Fatalf("the denied upstream %s saw %d request(s), want 0", r.host(), got)
+			t.Fatalf("the denied upstream %s saw %d request(s), want 0", r.host(h), got)
 		}
 	} else if r.proto == "h2" || r.proto == "grpc" {
 		expectKnown(t, knownFor(r.knownIssue, "#418"), bodySwapped,
@@ -204,9 +221,9 @@ func knownFor(rowIssues []string, check string) string {
 // doHTTP sends one POST (placeholder in a header and in the body) through cl.
 // On the allow path it asserts the header swap and returns whether the body was
 // swapped too; on the deny path it asserts the agent was refused.
-func (r canaryRow) doHTTP(t *testing.T, h *harness.H, cl *http.Client, up *harness.Upstream, ph string) (bodySwapped bool) {
+func (r canaryRow) doHTTP(t *testing.T, h *harness.H, cl *http.Client, up *harness.Upstream, ph, sec string) (bodySwapped bool) {
 	t.Helper()
-	req, err := http.NewRequest(http.MethodPost, "https://"+r.host()+"/v1/canary", strings.NewReader("key="+ph))
+	req, err := http.NewRequest(http.MethodPost, "https://"+r.host(h)+"/v1/canary", strings.NewReader("key="+ph))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,22 +250,22 @@ func (r canaryRow) doHTTP(t *testing.T, h *harness.H, cl *http.Client, up *harne
 		t.Fatalf("%s: status %d, want %d", r.name(), resp.StatusCode, want)
 	}
 	got := lastRequest(t, up)
-	if v := got.Header.Get("X-Api-Key"); v != canaryValue {
+	if v := got.Header.Get("X-Api-Key"); v != sec {
 		t.Errorf("%s: upstream header X-Api-Key = %q, want the real value (swap in a header)", r.name(), v)
 	}
-	return string(got.Body) == "key="+canaryValue
+	return string(got.Body) == "key="+sec
 }
 
 // doGRPC sends one framed unary call through the h2 agent with the placeholder
 // in the authorization metadata and in the message.
-func (r canaryRow) doGRPC(t *testing.T, h *harness.H, up *harness.Upstream, ph string) (bodySwapped bool) {
+func (r canaryRow) doGRPC(t *testing.T, h *harness.H, up *harness.Upstream, ph, sec string) (bodySwapped bool) {
 	t.Helper()
 	msg := []byte("token=" + ph)
 	frame := make([]byte, 5+len(msg))
 	frame[1], frame[2], frame[3], frame[4] = byte(len(msg)>>24), byte(len(msg)>>16), byte(len(msg)>>8), byte(len(msg))
 	copy(frame[5:], msg)
 
-	req, err := http.NewRequest(http.MethodPost, "https://"+r.host()+"/pkg.Svc/Method", bytes.NewReader(frame))
+	req, err := http.NewRequest(http.MethodPost, "https://"+r.host(h)+"/pkg.Svc/Method", bytes.NewReader(frame))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -271,10 +288,10 @@ func (r canaryRow) doGRPC(t *testing.T, h *harness.H, up *harness.Upstream, ph s
 		t.Fatalf("%s: status %d, want 200", r.name(), resp.StatusCode)
 	}
 	got := lastRequest(t, up)
-	if v := got.Header.Get("Authorization"); v != "Bearer "+canaryValue {
+	if v := got.Header.Get("Authorization"); v != "Bearer "+sec {
 		t.Errorf("%s: upstream authorization metadata = %q, want the real value", r.name(), v)
 	}
-	return bytes.Contains(got.Body, []byte("token="+canaryValue))
+	return bytes.Contains(got.Body, []byte("token="+sec))
 }
 
 // doWS opens a WebSocket through the worker's tunnel with the placeholder in a
@@ -284,7 +301,7 @@ func (r canaryRow) doGRPC(t *testing.T, h *harness.H, up *harness.Upstream, ph s
 // only until that is fixed. Allowed: the upstream sees the real value in
 // the handshake and the 101 the agent reads carries it nowhere. Denied: the
 // tunnel itself is refused.
-func (r canaryRow) doWS(t *testing.T, h *harness.H, up *harness.Upstream, ph string) {
+func (r canaryRow) doWS(t *testing.T, h *harness.H, up *harness.Upstream, ph, sec string) {
 	t.Helper()
 	conn, err := net.DialTimeout("tcp", h.ProxyAddr(), 5*time.Second)
 	if err != nil {
@@ -294,7 +311,7 @@ func (r canaryRow) doWS(t *testing.T, h *harness.H, up *harness.Upstream, ph str
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 	br := bufio.NewReader(conn)
 
-	hostPort := r.host() + ":443"
+	hostPort := r.host(h) + ":443"
 	fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", hostPort, hostPort)
 	connectResp, err := http.ReadResponse(br, nil)
 	if err != nil {
@@ -312,7 +329,7 @@ func (r canaryRow) doWS(t *testing.T, h *harness.H, up *harness.Upstream, ph str
 	}
 
 	cfg := h.AgentTLSConfig()
-	cfg.ServerName = r.host()
+	cfg.ServerName = r.host(h)
 	tlsConn := tls.Client(conn, cfg)
 	defer func() { _ = tlsConn.Close() }()
 	if err := tlsConn.Handshake(); err != nil {
@@ -320,7 +337,7 @@ func (r canaryRow) doWS(t *testing.T, h *harness.H, up *harness.Upstream, ph str
 	}
 	fmt.Fprintf(tlsConn, "GET /ws HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"+
 		"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nOrigin: https://%s\r\nX-Api-Key: %s\r\n\r\n",
-		r.host(), r.host(), ph)
+		r.host(h), r.host(h), ph)
 	resp, err := http.ReadResponse(bufio.NewReader(tlsConn), nil)
 	if err != nil {
 		t.Fatalf("%s: read the upgrade reply: %v", r.name(), err)
@@ -330,12 +347,12 @@ func (r canaryRow) doWS(t *testing.T, h *harness.H, up *harness.Upstream, ph str
 	}
 	for k, vs := range resp.Header {
 		for _, v := range vs {
-			if strings.Contains(v, canaryValue) {
+			if strings.Contains(v, sec) {
 				t.Errorf("%s: the 101 reply header %s carries the real secret to the agent", r.name(), k)
 			}
 		}
 	}
-	if v := lastRequest(t, up).Header.Get("X-Api-Key"); v != canaryValue {
+	if v := lastRequest(t, up).Header.Get("X-Api-Key"); v != sec {
 		t.Errorf("%s: upstream handshake header X-Api-Key = %q, want the real value", r.name(), v)
 	}
 }

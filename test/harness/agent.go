@@ -46,6 +46,13 @@ type RecordedResponse struct {
 func (h *H) Agent() *http.Client {
 	h.tb.Helper()
 	h.agentOnce.Do(func() {
+		// A target that hosts the agent out of process (compose) supplies the
+		// client itself — the harness wraps its transport in the recorder so the
+		// transcript (and the canary sweep) still sees what the agent saw.
+		if h.agentClients != nil {
+			h.agentCl = h.targetAgentClient(false)
+			return
+		}
 		base := &http.Transport{
 			Proxy: func(*http.Request) (*url.URL, error) { return url.Parse("http://" + h.ProxyAddr()) },
 			TLSClientConfig: &tls.Config{
@@ -59,6 +66,24 @@ func (h *H) Agent() *http.Client {
 		}
 	})
 	return h.agentCl
+}
+
+// targetAgentClient builds the agent client from a target-supplied one
+// (AgentClients): same transport, same timeout backstop, wrapped so every
+// response still lands in the agent transcript.
+func (h *H) targetAgentClient(h2 bool) *http.Client {
+	cl, err := h.agentClients.AgentClient(h2)
+	if err != nil {
+		h.tb.Fatalf("harness: agent client from the target: %v", err)
+	}
+	base := cl.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	return &http.Client{
+		Timeout:   defaultAgentTimeout,
+		Transport: &recordingTransport{base: base, h: h},
+	}
 }
 
 // AgentTLSConfig returns a fresh TLS config trusting the worker's MITM CA — the
@@ -76,6 +101,10 @@ func (h *H) AgentTLSConfig() *tls.Config {
 func (h *H) AgentH2() *http.Client {
 	h.tb.Helper()
 	h.h2Once.Do(func() {
+		if h.agentClients != nil {
+			h.agentH2Cl = h.targetAgentClient(true)
+			return
+		}
 		base := &http.Transport{
 			Proxy:             func(*http.Request) (*url.URL, error) { return url.Parse("http://" + h.ProxyAddr()) },
 			ForceAttemptHTTP2: true,

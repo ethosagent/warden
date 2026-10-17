@@ -9,11 +9,8 @@
 package scenarios
 
 import (
-	"bufio"
 	"encoding/json"
-	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"testing"
 	"time"
@@ -36,26 +33,15 @@ type Scenario struct {
 	Run  func(t *testing.T, h *harness.H)
 }
 
-// connectStatus sends a CONNECT for hostPort straight to the worker's proxy and
-// returns the status code of its reply: the policy decision itself, before any
-// client library turns a refusal into an opaque transport error.
+// connectStatus sends a CONNECT for hostPort the way the agent's traffic is
+// sent and returns the status code of its reply: the policy decision itself,
+// before any client library turns a refusal into an opaque transport error.
+// It goes through the harness, whose target either raw-dials the worker proxy
+// (in-process) or probes from the agent itself (compose, where the proxy port
+// is published to nobody on the host).
 func connectStatus(t *testing.T, h *harness.H, hostPort string) int {
 	t.Helper()
-	conn, err := net.DialTimeout("tcp", h.ProxyAddr(), 5*time.Second)
-	if err != nil {
-		t.Fatalf("dial the worker proxy: %v", err)
-	}
-	defer func() { _ = conn.Close() }()
-	if _, err := fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", hostPort, hostPort); err != nil {
-		t.Fatalf("send CONNECT %s: %v", hostPort, err)
-	}
-	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
-	if err != nil {
-		t.Fatalf("read the CONNECT %s reply: %v", hostPort, err)
-	}
-	_ = resp.Body.Close()
-	return resp.StatusCode
+	return h.ConnectStatus(hostPort)
 }
 
 // adminDo calls the worker's admin listener (healthz, refresh-secrets,
