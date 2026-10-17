@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ethosagent/warden/internal/config"
+	"github.com/ethosagent/warden/internal/denyreason"
 )
 
 // Scheme identifies the request scheme, used to infer the default port when an
@@ -74,30 +75,14 @@ func (d Decision) String() string {
 	}
 }
 
-// Bounded deny reasons for #371 method/path constraints. They ride the
-// analytics Event.Reason field: a closed enum of fixed identifiers, never
-// request content. The empty reason means a deny that is not a constraint
-// violation (denylist hit, or an exhausted rate-limit / time-window guard) —
-// callers render that as their generic "policy" reason.
-const (
-	// ReasonPathNotCanonical: the raw request path contains a dot segment or an
-	// encoded separator, so the bytes being matched and the resource the origin
-	// serves could differ. Denied whenever the destination has a paths
-	// constraint, before any pattern matching.
-	ReasonPathNotCanonical = "path_not_canonical"
-	// ReasonMethodNotAllowed: the request method is not in the matched entry's
-	// `methods` list.
-	ReasonMethodNotAllowed = "method_not_allowed"
-	// ReasonPathNotAllowed: the request path matches no pattern in the matched
-	// entry's `paths` list.
-	ReasonPathNotAllowed = "path_not_allowed"
-)
-
 // RequestVerdict is the per-request outcome of EvaluateRequest: the decision
-// plus, for constraint denies, the bounded reason behind it.
+// plus, for every explicit Deny, the bounded reason behind it. Reasons are the
+// ONE declared set in internal/denyreason (rule X6 in #349) — never free text.
+// A NoMatch carries no reason: it is not a deny, and the caller that turns it
+// into one names it (policy_no_match).
 type RequestVerdict struct {
 	Decision Decision
-	Reason   string
+	Reason   denyreason.Reason
 }
 
 // evalMode selects how evaluate treats #371 constraints and rate-limit
@@ -318,7 +303,7 @@ func (e *Evaluator) evaluate(domain string, port int, scheme Scheme, method, pat
 	// Denylist checked first — deny wins on conflict.
 	for _, entry := range e.denylist {
 		if inferredPort(entry.Port, scheme) == port && e.domainMatches(entry.Domain, domain) {
-			return RequestVerdict{Decision: Deny}
+			return RequestVerdict{Decision: Deny, Reason: denyreason.PolicyDenylist}
 		}
 	}
 
@@ -331,7 +316,7 @@ func (e *Evaluator) evaluate(domain string, port int, scheme Scheme, method, pat
 			if len(entry.Paths) > 0 &&
 				inferredPort(entry.Port, scheme) == port &&
 				e.domainMatches(entry.Domain, domain) {
-				return RequestVerdict{Decision: Deny, Reason: ReasonPathNotCanonical}
+				return RequestVerdict{Decision: Deny, Reason: denyreason.PathNotCanonical}
 			}
 		}
 	}
@@ -342,7 +327,7 @@ func (e *Evaluator) evaluate(domain string, port int, scheme Scheme, method, pat
 	// (the destination IS allowlisted, just not like this), never NoMatch — it
 	// must not reach the judge.
 	matchedEntry := false
-	var methodViolated, pathViolated bool
+	var methodViolated, pathViolated, timeWindowExcluded, rateLimited bool
 	for i, entry := range e.allowlist {
 		if inferredPort(entry.Port, scheme) != port {
 			continue
@@ -358,11 +343,13 @@ func (e *Evaluator) evaluate(domain string, port int, scheme Scheme, method, pat
 			hour := e.now().Hour()
 			if tw.startHour <= tw.endHour {
 				if hour < tw.startHour || hour >= tw.endHour {
+					timeWindowExcluded = true
 					continue
 				}
 			} else {
 				// Wrap-around (e.g. 22-6 means 22:00-06:00)
 				if hour < tw.startHour && hour >= tw.endHour {
+					timeWindowExcluded = true
 					continue
 				}
 			}
@@ -392,9 +379,11 @@ func (e *Evaluator) evaluate(domain string, port int, scheme Scheme, method, pat
 			key := fmt.Sprintf("%s:%d", rateLimitPattern(entry.Domain), inferredPort(entry.Port, scheme))
 			if count {
 				if !e.checkRateLimit(key, rl) {
+					rateLimited = true
 					continue
 				}
 			} else if !e.peekRateLimit(key, rl) {
+				rateLimited = true
 				continue
 			}
 		}
@@ -402,15 +391,19 @@ func (e *Evaluator) evaluate(domain string, port int, scheme Scheme, method, pat
 		return RequestVerdict{Decision: Allow}
 	}
 	if matchedEntry {
-		// Destination is allowlisted but every matching entry rejected it. A
-		// constraint violation names itself; guard rejections (rate limit /
-		// time window) keep the empty reason. Explicit Deny either way — not
-		// judge-eligible.
+		// Destination is allowlisted but every matching entry rejected it: an
+		// explicit Deny — not judge-eligible. A constraint violation names
+		// itself; a guard rejection names its guard (#409). Order mirrors the
+		// per-entry check order: path, method, then the guards.
 		switch {
 		case pathViolated:
-			return RequestVerdict{Decision: Deny, Reason: ReasonPathNotAllowed}
+			return RequestVerdict{Decision: Deny, Reason: denyreason.PathNotAllowed}
 		case methodViolated:
-			return RequestVerdict{Decision: Deny, Reason: ReasonMethodNotAllowed}
+			return RequestVerdict{Decision: Deny, Reason: denyreason.MethodNotAllowed}
+		case timeWindowExcluded:
+			return RequestVerdict{Decision: Deny, Reason: denyreason.TimeWindow}
+		case rateLimited:
+			return RequestVerdict{Decision: Deny, Reason: denyreason.RateLimited}
 		}
 		return RequestVerdict{Decision: Deny}
 	}

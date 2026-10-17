@@ -165,29 +165,9 @@ func wsText(body string) ws.Frame {
 // rawBytes is non-HTTP, non-TLS payload long enough for protocol sniffing (8+).
 var rawBytes = "\x00\x01SSH-2.0-agent token=" + invPlaceholder + "\r\n"
 
-// Open issues the suite reproduces.
-const (
-	// Proxy-Authorization / X-Warden-Identity / (HTTP/1) Proxy-Connection are
-	// forwarded to the upstream instead of being stripped at the proxy boundary.
-	issueHeaderStrip = "#396"
-)
-
 // Each known violation is the exact place (kind, and the row's own sink) it shows
 // up in; see violationKind.
-var (
-	swapMissing = "swap stage did not run: the upstream never received the real secret"
-
-	// HTTP/1 forwards all three proxy-only headers; HTTP/2 has no Proxy-Connection.
-	stripLeakH1 = []string{
-		"proxy-only header forwarded upstream: Proxy-Authorization",
-		"proxy-only header forwarded upstream: Proxy-Connection",
-		"proxy-only header forwarded upstream: X-Warden-Identity",
-	}
-	stripLeakH2 = []string{
-		"proxy-only header forwarded upstream: Proxy-Authorization",
-		"proxy-only header forwarded upstream: X-Warden-Identity",
-	}
-)
+var swapMissing = "swap stage did not run: the upstream never received the real secret"
 
 func invRows() []invRow {
 	var rows []invRow
@@ -379,19 +359,16 @@ func invRows() []invRow {
 	}
 	add(
 		invRow{name: "http1/header-strip", path: PathHTTP1, scenario: scHeaderStrip, mustReach: true,
-			knownIssue: issueHeaderStrip, knownWhere: stripLeakH1,
 			run: stripCheck(func(e *invEnv) string {
 				v, _, _ := e.doHTTP1(invReq{path: "/ok", header: stripHeaders()})
 				return v
 			})},
 		invRow{name: "h2/header-strip", path: PathH2, scenario: scHeaderStrip, mustReach: true,
-			knownIssue: issueHeaderStrip, knownWhere: stripLeakH2,
 			run: stripCheck(func(e *invEnv) string {
 				v, _, _ := e.doH2(invReq{path: "/ok", header: stripHeaders()})
 				return v
 			})},
 		invRow{name: "grpc/header-strip", path: PathGRPC, scenario: scHeaderStrip, mustReach: true,
-			knownIssue: issueHeaderStrip, knownWhere: stripLeakH2,
 			run: stripCheck(func(e *invEnv) string {
 				h := stripHeaders()
 				h.Set("Content-Type", "application/grpc")

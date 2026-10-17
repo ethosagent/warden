@@ -185,3 +185,57 @@ func firstOf(events [][]byte) []byte {
 }
 
 var _ io.Reader = (*bytes.Reader)(nil)
+
+func TestScanHeld_DeniedEventNeverForwarded(t *testing.T) {
+	var dst bytes.Buffer
+	input := "data: ok\n\nevent: message\ndata: poison\n\ndata: after\n\n"
+	err := ScanHeld(strings.NewReader(input), &dst, func(data []byte) bool {
+		return string(data) == "poison"
+	})
+	if !errors.Is(err, ErrBlocked) {
+		t.Fatalf("expected ErrBlocked, got %v", err)
+	}
+	if got, want := dst.String(), "data: ok\n\n"; got != want {
+		t.Fatalf("forwarded %q, want only the allowed event %q", got, want)
+	}
+}
+
+func TestScanHeld_AllowedForwardedUnchangedInOrder(t *testing.T) {
+	var dst bytes.Buffer
+	input := ": keepalive\n\nid: 1\r\nevent: m\r\ndata: a\r\ndata: b\r\n\r\ndata: tail"
+	if err := ScanHeld(strings.NewReader(input), &dst, func([]byte) bool { return false }); err != nil {
+		t.Fatal(err)
+	}
+	if dst.String() != input {
+		t.Fatalf("got %q want %q", dst.String(), input)
+	}
+}
+
+func TestScanHeld_TrailingDeniedEventAtEOFNotForwarded(t *testing.T) {
+	var dst bytes.Buffer
+	err := ScanHeld(strings.NewReader("data: bad"), &dst, func([]byte) bool { return true })
+	if !errors.Is(err, ErrBlocked) || dst.Len() != 0 {
+		t.Fatalf("err=%v forwarded=%q", err, dst.String())
+	}
+}
+
+func TestScanHeld_OverCapFailsClosed(t *testing.T) {
+	var dst bytes.Buffer
+	called := false
+	input := "data: ok\n\ndata: " + strings.Repeat("x", maxEventDataBytes+10) + "\n\n"
+	err := ScanHeld(strings.NewReader(input), &dst, func(d []byte) bool {
+		if len(d) > maxEventDataBytes {
+			called = true
+		}
+		return false
+	})
+	if !errors.Is(err, ErrEventTooLarge) {
+		t.Fatalf("expected ErrEventTooLarge, got %v", err)
+	}
+	if dst.String() != "data: ok\n\n" {
+		t.Fatalf("over-cap event leaked: len=%d", dst.Len())
+	}
+	if called {
+		t.Fatal("callback saw the over-cap payload")
+	}
+}

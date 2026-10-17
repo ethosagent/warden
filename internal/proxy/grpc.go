@@ -14,18 +14,6 @@ import (
 	"golang.org/x/net/http2"
 )
 
-// hopByHopGRPCHeaders is the set of hop-by-hop headers that must not be
-// forwarded across the proxy boundary (they describe a single transport hop, not
-// end-to-end semantics). Matched case-insensitively via http.Header canonical
-// keys, which is why they are stored in canonical form.
-var hopByHopGRPCHeaders = map[string]struct{}{
-	"Connection":        {},
-	"Proxy-Connection":  {},
-	"Keep-Alive":        {},
-	"Transfer-Encoding": {},
-	"Upgrade":           {},
-}
-
 // flushWriter wraps an io.Writer and flushes after every Write, so gRPC
 // streaming frames (which arrive incrementally and must reach the client
 // promptly) are not buffered by the HTTP/2 server's write path.
@@ -156,15 +144,28 @@ func (p *Proxy) forwardH2(s *requestScope) (endSession bool) {
 	return false
 }
 
-// copyGRPCHeaders copies every header from src to dst except the hop-by-hop set,
-// which describes a single transport hop and must not cross the proxy boundary.
+// copyGRPCHeaders copies every header from src to dst except the strip set shared
+// with the h1 stage (strippedRequestHeaders) and the headers src's Connection
+// names: they describe one transport hop, or Warden, and must not cross the proxy
+// boundary. "TE: trailers" (gRPC) is kept.
 func copyGRPCHeaders(dst, src http.Header) {
+	named := make(map[string]struct{})
+	for _, k := range connectionTokens(src) {
+		named[http.CanonicalHeaderKey(k)] = struct{}{}
+	}
 	for key, vals := range src {
-		if _, hop := hopByHopGRPCHeaders[http.CanonicalHeaderKey(key)]; hop {
+		ck := http.CanonicalHeaderKey(key)
+		if _, hop := strippedRequestHeaders[ck]; hop {
+			continue
+		}
+		if _, hop := named[ck]; hop {
 			continue
 		}
 		for _, v := range vals {
 			dst.Add(key, v)
 		}
+	}
+	if isTETrailers(src) {
+		dst.Set("TE", "trailers")
 	}
 }

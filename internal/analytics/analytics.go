@@ -49,9 +49,14 @@ type Event struct {
 	// is allowed in the store. It is deliberately NOT used as a metric label
 	// (unbounded cardinality lives only here).
 	Tool string
-	// Reason is a short, bounded decision reason for the MCP path
-	// (e.g. "mcp_tool_denied", "mcp_poisoning", "mcp_schema_drift"). It is a
-	// separate field from JudgeReason: bounded enum metadata, never content.
+	// Reason is a short, bounded decision reason carried by EVERY deny event
+	// (#409) — the one declared set in internal/denyreason (policy_no_match,
+	// policy_denylist, rate_limited, time_window, method_not_allowed, …) plus
+	// the MCP gateway's own bounded verdict reasons (mcp_tool_denied,
+	// mcp_poisoning, mcp_schema_drift). It is a separate field from
+	// JudgeReason: bounded enum metadata, never content — and never a raw
+	// secret, body, or domain. Empty on allow events unless a monitor-mode
+	// finding rode one (MCP/echo guard monitor reasons).
 	Reason string
 	// AddrClass is the bounded address class behind an SSRF dial refusal
 	// ("loopback", "private", "link_local", "metadata", "multicast",

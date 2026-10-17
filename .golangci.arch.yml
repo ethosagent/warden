@@ -30,6 +30,7 @@ linters:
         L3:
           files:
             - ${base-path}/internal/config/**
+            - ${base-path}/internal/denyreason/**
             - ${base-path}/internal/detect/**
             - ${base-path}/internal/alertpipeline/**
             - ${base-path}/internal/policybuilder/**
@@ -91,6 +92,7 @@ linters:
         L4:
           files:
             - ${base-path}/internal/config/**
+            - ${base-path}/internal/denyreason/**
             - ${base-path}/internal/detect/**
             - ${base-path}/internal/alertpipeline/**
             - ${base-path}/internal/policybuilder/**
@@ -132,6 +134,7 @@ linters:
             - '!${base-path}/internal/mcp/poisoned/**'
             - '!${base-path}/test/**'
             - '!${base-path}/internal/config/**'
+            - '!${base-path}/internal/denyreason/**'
             - '!**/*_test.go'
           deny:
             - pkg: database/sql
@@ -171,6 +174,7 @@ linters:
             - '!${base-path}/internal/integration/**'
             - '!${base-path}/internal/integration/webhook/**'
             - '!${base-path}/internal/config/**'
+            - '!${base-path}/internal/denyreason/**'
             - '!${base-path}/internal/detect/**'
             - '!${base-path}/internal/alertpipeline/**'
             - '!${base-path}/internal/policybuilder/**'
