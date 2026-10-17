@@ -64,6 +64,15 @@ type requestScope struct {
 	// upstream (the pump does), to avoid a double close.
 	handoff bool
 
+	// inflightDone, non-nil only when an assembly-only quiescence tracker is
+	// installed (worker.Overrides.Inflight; production nil = one nil check),
+	// leaves the tracker for this request scope. It runs on every terminal path
+	// AFTER the scope's bookkeeping (audit event, metric, decision log) is
+	// recorded — that ordering is what makes a drained tracker happen-after all
+	// of the request's analytics — and is idempotent, so the streaming paths
+	// (WS handoff, SSE) can step out early and re-enter without double-firing.
+	inflightDone func()
+
 	// reqBody is the request body read ONCE (bounded by maxBodySwapSize+1) and
 	// shared by MCP inspection and the secret swap. bodyRead records that the
 	// single read has happened so a second consumer reuses the buffer instead of
@@ -132,6 +141,11 @@ func (s *requestScope) cleanup() {
 		_ = s.resp.Body.Close()
 	}
 }
+
+// endInflight leaves the quiescence tracker for this scope (a no-op when no
+// tracker is installed or the scope already stepped out — done is idempotent).
+// It runs deferred in serveHTTPRequest, i.e. after every stage's bookkeeping.
+func (s *requestScope) endInflight() { runInflight(s.inflightDone) }
 
 // ensureBody reads req.Body exactly once (bounded by maxBodySwapSize+1), caches
 // the bytes on the scope, and restores req.Body as a re-readable NopCloser so a
@@ -265,6 +279,20 @@ func (p *Proxy) serveHTTPRequest(tlsConn *tls.Conn, br *bufio.Reader, domain str
 		upstreamBR: upstreamBR,
 		reused:     upstream != nil,
 	}
+	// Enter the quiescence tracker here — after ReadRequest returned, before any
+	// stage runs — and leave it on every exit path AFTER this request's
+	// bookkeeping is recorded (deferred below). The allow path records its event
+	// only after the response is already in the agent's hands (#363), so "the
+	// response arrived" does not imply "the analytics are readable"; a drained
+	// tracker does. Starting after the read keeps an idle keep-alive conn parked
+	// in ReadRequest OUT of the tracker, so pooled-but-idle agent connections
+	// never block a waiter. Production (no tracker) pays one nil check and
+	// builds no description string (the guard keeps the concatenation off the
+	// hot path — see the allocation note on inflightStart).
+	if p.cfg.Inflight != nil {
+		s.inflightDone = p.inflightStart(req.Method + " https://" + domain + req.URL.RequestURI())
+	}
+	defer s.endInflight()
 	defer s.cleanup()
 
 	end := p.runRequestStages(s)
@@ -874,7 +902,12 @@ func (p *Proxy) relayResponse(s *requestScope) (endSession bool) {
 	if s.gw != nil && s.resp.StatusCode == 101 &&
 		strings.EqualFold(s.req.Header.Get("Upgrade"), "websocket") {
 		s.handoff = true
-		p.handleWSUpgrade(s.tlsConn, s.br, s.upstream, s.upstreamBR, s.resp, s.req, s.domain, s.port, s.mcpSessKey, s.gw)
+		// The scope's tracker slot travels with the handoff: handleWSUpgrade
+		// steps it OUT once the 101 is delivered (an open session must never
+		// block the oracles) and steps back IN when the session ends, before the
+		// session's terminal event is recorded. The deferred endInflight below
+		// re-calls the same idempotent done.
+		p.handleWSUpgrade(s.tlsConn, s.br, s.upstream, s.upstreamBR, s.resp, s.req, s.domain, s.port, s.mcpSessKey, s.gw, s.inflightDone)
 		return true
 	}
 
@@ -977,6 +1010,17 @@ func (p *Proxy) relayMCPSSE(s *requestScope) (terminal bool) {
 		return true
 	}
 
+	// The SSE response is delivered: the agent now reads the stream directly, so
+	// the scope steps OUT of the quiescence tracker — an open stream may run for
+	// minutes and must never block a waiter. It steps back IN below, once the
+	// stream ends and before the terminal event is recorded, so the stream's
+	// bookkeeping is still happened-after by a drained tracker. The remaining
+	// window is the same one the WS session documents below: from this step-out
+	// until the re-entry the tracker is idle while the stream's terminal event
+	// does not exist yet, so a test reading a stream's terminal event must use
+	// EventuallyWithin (like the WS rule).
+	s.endInflight()
+
 	blocked := false
 	scanErr := sse.Scan(s.resp.Body, s.tlsConn, func(data []byte) bool {
 		start := time.Now()
@@ -992,6 +1036,15 @@ func (p *Proxy) relayMCPSSE(s *requestScope) (terminal bool) {
 		}
 		return false
 	})
+
+	// Stream over: back in the quiescence tracker BEFORE the terminal
+	// bookkeeping below, so the scope's done (the deferred endInflight in
+	// serveHTTPRequest) runs after the event — a drained tracker happens-after
+	// the stream's audit record, not just its bytes.
+	if p.cfg.Inflight != nil {
+		s.inflightDone = p.inflightStart("sse " + s.req.Method + " " + fullURL)
+	}
+	p.beforeTerminal()
 
 	if blocked {
 		_ = p.analyticsStore().StoreEvent(analytics.Event{
@@ -1151,6 +1204,11 @@ func (p *Proxy) httpResponseScan(s *requestScope) (blocked bool) {
 // judge reason — exactly one StoreEvent per allowed request. It also emits the
 // per-secret swap metric and the structured decision log.
 func (p *Proxy) recordAllowEvent(s *requestScope) {
+	// Test-only (worker.Overrides.BeforeTerminal; production nil): widen
+	// exactly the post-response window whose bookkeeping race the quiescence
+	// tracker closes, so a harness test can make the #363 race deterministic
+	// instead of flaky-red.
+	p.beforeTerminal()
 	var refStrs []string
 	for _, r := range s.refs {
 		refStrs = append(refStrs, r.String())

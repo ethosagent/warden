@@ -125,6 +125,25 @@ type Config struct {
 	// the system pool. Assembly-only: cmd/proxy never sets it; nil keeps system
 	// roots, byte-identical to before.
 	UpstreamRootCAs *x509.CertPool
+
+	// Inflight, when set, receives one Start per request-scoped handler: from
+	// request-read until the scope's terminal bookkeeping (analytics event,
+	// metric, decision log) is recorded, on every protocol path. The L1
+	// harness's oracles wait for the tracker to drain before flushing and
+	// reading, which makes them exact instead of outwaiting the analytics
+	// flush tick. Production NEVER sets it: nil costs one nil check per
+	// request and no allocation. Assembly-only (worker.Overrides.Inflight).
+	Inflight *Inflight
+
+	// BeforeTerminal, when set, is called at the top of every terminal
+	// bookkeeping section (the analytics event, metric and decision log a
+	// request, stream or session records) — a test-only hook the harness parks
+	// in to make the exact post-response window whose bookkeeping race the
+	// Inflight tracker exists to close deterministic instead of flaky-red.
+	// Production NEVER sets it (nil = one nil check, no call). It must never
+	// grow beyond a test inconveniencer: it delays bookkeeping, never egress.
+	// Assembly-only (worker.Overrides.BeforeTerminal).
+	BeforeTerminal func()
 }
 
 // MCPGateway is the consumer-side seam for the MCP egress gateway (defined here,

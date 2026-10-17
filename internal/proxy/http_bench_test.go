@@ -106,3 +106,44 @@ func BenchmarkHandleHTTPKeepAlive(b *testing.B) {
 	b.ReportMetric(float64(atomic.LoadInt64(&dials)), "dials")
 	b.ReportMetric(float64(atomic.LoadInt64(&dials))/float64(b.N), "dials/op")
 }
+
+// BenchmarkHandleHTTPInflightOn is the before/after pair for the assembly-only
+// quiescence tracker (#363): identical to BenchmarkHandleHTTP except the
+// proxy's Config.Inflight is set, so the per-request cost measured here is
+// exactly what production NEVER pays (production leaves the override nil —
+// inflightStart returns nil and the scope is one nil check). Compare the two
+// to show the hot path is unchanged when no harness is attached.
+func BenchmarkHandleHTTPInflightOn(b *testing.B) {
+	caCertPEM, caKeyPEM, caCert, caKey := generateTestCA(b)
+	backendLn, _ := startBackend(b, caCert, caKey)
+
+	p, _ := startTestProxyWithSecrets(b, []string{"backend.test"}, caCertPEM, caKeyPEM, nil, nil)
+	p.cfg.Inflight = NewInflight()
+	p.dialTLS = func(network, addr string, cfg *tls.Config) (*tls.Conn, error) {
+		return tls.Dial("tcp", backendLn.Addr().String(), &tls.Config{InsecureSkipVerify: true})
+	}
+
+	tlsClient := dialProxyAndConnect(b, p.Addr().String(), "backend.test", caCertPEM)
+	br := bufio.NewReader(tlsClient)
+
+	req, err := http.NewRequest(http.MethodGet, "https://backend.test/v1/chat", nil)
+	if err != nil {
+		b.Fatalf("new request: %v", err)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := req.Write(tlsClient); err != nil {
+			b.Fatalf("write request: %v", err)
+		}
+		resp, err := http.ReadResponse(br, req)
+		if err != nil {
+			b.Fatalf("read response: %v", err)
+		}
+		if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+			b.Fatalf("drain body: %v", err)
+		}
+		_ = resp.Body.Close()
+	}
+}

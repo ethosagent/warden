@@ -116,6 +116,20 @@ type Overrides struct {
 	// CLI flag can set it (enforced by TestOverridesAreNotConfigurable), and
 	// production never sets it — nil leaves boot byte-identical.
 	OnAnalyticsWriter func(AnalyticsFlusher)
+	// Inflight is installed as the proxy's quiescence tracker (proxy.Config
+	// .Inflight): every request scope enters it at request-read and leaves only
+	// after its terminal bookkeeping, so the harness's oracles wait for the
+	// drain instead of racing the post-response record (#363). Production never
+	// sets it — nil means the proxy runs untracked (one nil check per request).
+	Inflight *proxy.Inflight
+	// BeforeTerminal is installed as the proxy's terminal-bookkeeping hook
+	// (proxy.Config.BeforeTerminal): called at the top of every terminal
+	// bookkeeping section, it is a TEST-ONLY trap the harness parks in to make
+	// the exact post-response window whose bookkeeping race the tracker closes
+	// deterministic-red instead of flaky-red. Production never sets it (nil =
+	// one nil check, no call). It must never grow beyond a test inconveniencer:
+	// it delays bookkeeping, never egress decisions.
+	BeforeTerminal func()
 }
 
 // AnalyticsFlusher is the drain capability of the async analytics writer: Flush
@@ -643,6 +657,8 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	if p.Overrides != nil {
 		cfg.Dialer = p.Overrides.Dialer
 		cfg.UpstreamRootCAs = p.Overrides.UpstreamRootCAs
+		cfg.Inflight = p.Overrides.Inflight
+		cfg.BeforeTerminal = p.Overrides.BeforeTerminal
 	}
 
 	pxy, err := newProxy(cfg)

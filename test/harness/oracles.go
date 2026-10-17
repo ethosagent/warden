@@ -1,12 +1,14 @@
 package harness
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -22,19 +24,79 @@ import (
 // in-process target: analytics.GetEvents, the dashboard API), never a side
 // channel.
 
+// awaitQuiescence blocks until every worker's in-flight request scopes have
+// finished their terminal bookkeeping — the deterministic #363 wait. Each
+// worker's quiescence tracker (the assembly-only Overrides.Inflight seam) is
+// waited on in turn, bounded by the harness's quiescence deadline; expiring it
+// fails the test NAMING the work still in flight, never reading short. The
+// wait wakes on the drain itself (no polling): finished traffic reaches
+// quiescence in microseconds, and an OPEN stream (WS/SSE) never counts — its
+// scope stepped out when its response was delivered and only re-enters when
+// the stream ends. Targets without in-process workers (compose) have no
+// trackers; their oracles wait on the target itself.
+func (h *H) awaitQuiescence() {
+	h.tb.Helper()
+	if len(h.inflights) == 0 {
+		return
+	}
+	deadline := time.Now().Add(h.quiescenceDeadline)
+	type stuckWorker struct {
+		name string
+		open []string
+	}
+	var stuck []stuckWorker
+	for i, tr := range h.inflights {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Until(deadline))
+		err := tr.WaitIdle(ctx)
+		cancel()
+		if err == nil {
+			continue
+		}
+		stuck = append(stuck, stuckWorker{
+			name: fmt.Sprintf("worker-%d", i+1),
+			open: tr.InFlight(),
+		})
+	}
+	if len(stuck) == 0 {
+		return
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "harness: %d worker(s) still had requests in flight after %s of waiting; "+
+		"the oracles wait for every in-flight request's terminal bookkeeping (event, metric, decision log) "+
+		"so they never read short — finish or release the traffic below before reading:",
+		len(stuck), h.quiescenceDeadline)
+	for _, s := range stuck {
+		fmt.Fprintf(&b, "\n  %s:", s.name)
+		for _, desc := range s.open {
+			fmt.Fprintf(&b, "\n    %s", desc)
+		}
+	}
+	h.tb.Fatal(b.String())
+}
+
 // Logs returns everything the target's components have logged so far
-// (structured lines, exactly as a deployment's stdout), workers first.
-func (h *H) Logs() string { return h.target.Logs() }
+// (structured lines, exactly as a deployment's stdout), workers first. Like
+// every oracle it first waits for the workers' in-flight request scopes to
+// finish their terminal bookkeeping — a decision log is bookkeeping too.
+func (h *H) Logs() string {
+	h.tb.Helper()
+	h.awaitQuiescence()
+	return h.target.Logs()
+}
 
 // Events returns every analytics event across the workers, worker-1 first.
-// It first DRAINS every worker's async analytics writer (the assembly-only
-// OnAnalyticsWriter seam), so the events of traffic a scenario has finished
-// making are readable immediately — deterministically, never by outwaiting
-// the writer's 250ms flush tick. A drain whose batch write FAILED fails the
-// test: a failed flush never acks as persisted, and reading on would find a
-// short list instead of the events the scenario knows it made.
+// It first WAITS for every in-flight request scope to finish its terminal
+// bookkeeping (the proxy records an allowed request's event only after the
+// response is in the agent's hands — the #363 race), then DRAINS every
+// worker's async analytics writer (the assembly-only OnAnalyticsWriter seam),
+// so the events of traffic a scenario has finished making are readable
+// immediately — deterministically, never by outwaiting the writer's 250ms
+// flush tick. A drain whose batch write FAILED fails the test: a failed flush
+// never acks as persisted, and reading on would find a short list instead of
+// the events the scenario knows it made.
 func (h *H) Events() []analytics.Event {
 	h.tb.Helper()
+	h.awaitQuiescence()
 	if err := h.flushAnalytics(); err != nil {
 		h.tb.Fatalf("harness: drain analytics writers (a failed flush means the queued events were NOT persisted): %v", err)
 	}
@@ -47,12 +109,14 @@ func (h *H) Events() []analytics.Event {
 
 // Metrics returns the fleet-wide OTel view flattened to name{label=value} ->
 // value, SUMMED across workers (an aggregation window is per-worker, so a
-// fleet's counter under Metrics() is the total). Counters, gauges and sums
-// land under their label set; histograms get two keys per label set, suffixed
-// #count and #sum. Labels are sorted, so keys are stable — build expectations
-// with MetricKey.
+// fleet's counter under Metrics() is the total). Like every oracle it first
+// waits for the workers' in-flight request scopes to finish their terminal
+// bookkeeping. Counters, gauges and sums land under their label set;
+// histograms get two keys per label set, suffixed #count and #sum. Labels are
+// sorted, so keys are stable — build expectations with MetricKey.
 func (h *H) Metrics() map[string]float64 {
 	h.tb.Helper()
+	h.awaitQuiescence()
 	m, err := h.target.Metrics()
 	if err != nil {
 		h.tb.Fatalf("harness: collect metrics: %v", err)

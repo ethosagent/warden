@@ -94,6 +94,18 @@ func (p *Proxy) serveGRPCStream(w http.ResponseWriter, r *http.Request, rt *http
 		proto = "grpc"
 	}
 
+	// One h2 stream = one request scope in the quiescence tracker: entered when
+	// the stream starts, left when this handler returns — after the terminal
+	// event below is recorded. The scope stays tracked while the response is
+	// still streaming through io.Copy: a response being delivered is genuinely
+	// in flight, and gRPC calls are short-lived. The guard keeps the description
+	// concatenation off the production hot path (no tracker installed).
+	if p.cfg.Inflight != nil {
+		if done := p.inflightStart(proto + " " + r.Method + " https://" + domain + r.URL.RequestURI()); done != nil {
+			defer done()
+		}
+	}
+
 	// Swap secret placeholders in request headers (metadata) only. Snapshot the
 	// live secret provider once so a concurrent cache.ttl swap can't change it
 	// mid-substitution. The body is never read or modified (streamed verbatim).
@@ -195,6 +207,7 @@ func (p *Proxy) serveGRPCStream(w http.ResponseWriter, r *http.Request, rt *http
 	}
 
 	// Log ALLOW exactly like the HTTP success path.
+	p.beforeTerminal()
 	var refStrs []string
 	for _, ref := range refs {
 		refStrs = append(refStrs, ref.String())

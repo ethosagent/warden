@@ -49,6 +49,11 @@ func TestOverridesAreNotConfigurable(t *testing.T) {
 		reflect.TypeOf((*clock.Clock)(nil)).Elem():      "clock.Clock",
 		reflect.TypeOf((*sdkmetric.Reader)(nil)).Elem(): "sdkmetric.Reader",
 		reflect.TypeOf((*AnalyticsFlusher)(nil)).Elem(): "worker.AnalyticsFlusher",
+		reflect.TypeOf(&proxy.Inflight{}):               "*proxy.Inflight",
+		// Overrides.BeforeTerminal is a plain func(); the walk checks every
+		// field's TYPE before its kind switch, so a func-typed config field is
+		// caught by this entry like any other.
+		reflect.TypeOf((*func())(nil)).Elem(): "func()",
 	}
 	var walk func(rt reflect.Type, path string)
 	seen := map[reflect.Type]bool{}
