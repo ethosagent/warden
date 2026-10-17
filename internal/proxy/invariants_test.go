@@ -427,7 +427,7 @@ func invRows() []invRow {
 			run:  h1(invReq{method: "POST", path: "/ok", header: hdr("Content-Type", "text/plain"), body: piiBody})},
 		invRow{name: "h2/dlp-block", path: PathH2, scenario: scDLPBlock, mustReach: true, wantNoUpstream: true,
 			opts: dlpBlockOpts(),
-			run: h2(invReq{method: "POST", path: "/ok", header: hdr("Content-Type", "text/plain"), body: piiBody})},
+			run:  h2(invReq{method: "POST", path: "/ok", header: hdr("Content-Type", "text/plain"), body: piiBody})},
 	)
 	return rows
 }
