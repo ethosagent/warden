@@ -3,6 +3,7 @@ package proxy
 import (
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
@@ -183,4 +184,43 @@ func TestNew_KeyMismatch(t *testing.T) {
 	if !strings.Contains(err.Error(), "does not match") {
 		t.Fatalf("unexpected error: %v", err)
 	}
+}
+
+// TestNew_UpstreamAllowPrivateCIDRs_ReachesDialer proves the local-only
+// SSRF-exception list (upstream.allowPrivateCIDRs) flows from worker assembly
+// into the SafeDialer the proxy dials upstreams through: with the loopback
+// exception set, a dial to 127.0.0.1 succeeds; without it the same dial is
+// refused exactly as before the key existed.
+func TestNew_UpstreamAllowPrivateCIDRs_ReachesDialer(t *testing.T) {
+	_, _, caCert, caKey := generateTestCA(t)
+	backendLn, _ := startBackend(t, caCert, caKey)
+
+	dial := func(t *testing.T, p *Proxy) error {
+		t.Helper()
+		_, err := p.dialTLS("tcp", backendLn.Addr().String(), &tls.Config{InsecureSkipVerify: true})
+		return err
+	}
+
+	t.Run("unset keeps loopback blocked (default)", func(t *testing.T) {
+		p, err := New(goodConfig(t))
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		err = dial(t, p)
+		if err == nil || !strings.Contains(err.Error(), "blocked (SSRF protection)") {
+			t.Fatalf("dial to loopback without exceptions: got %v, want an SSRF block", err)
+		}
+	})
+
+	t.Run("exception lets the dial through", func(t *testing.T) {
+		cfg := goodConfig(t)
+		cfg.UpstreamAllowPrivateCIDRs = []string{"127.0.0.0/8"}
+		p, err := New(cfg)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		if err := dial(t, p); err != nil {
+			t.Fatalf("dial to loopback with 127.0.0.0/8 excepted: %v", err)
+		}
+	})
 }

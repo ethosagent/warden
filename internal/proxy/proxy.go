@@ -117,6 +117,13 @@ type Config struct {
 	// dashboard/admin listeners never resolve through it.
 	UpstreamResolver NameResolver
 
+	// UpstreamAllowPrivateCIDRs is the LOCAL-ONLY list of CIDR ranges exempted
+	// from the SafeDialer's private-IP blocklist (upstream.allowPrivateCIDRs).
+	// Empty (the default) = no exceptions, byte-identical to before. The worker
+	// fills it from local config only — it never arrives on the CP-served wire —
+	// and validation (range + prefix-length floors) already ran at load.
+	UpstreamAllowPrivateCIDRs []string
+
 	// Dialer, when set, replaces the SSRF-safe upstream dialer ENTIRELY —
 	// blocklist included — for every egress dial the proxy makes. Assembly-only
 	// (the L1 harness maps allowlisted names onto local fake upstreams the
@@ -556,7 +563,7 @@ func New(cfg Config) (*Proxy, error) {
 		p.dialFunc = cfg.Dialer.Dial
 		p.dialTLS = cfg.Dialer.DialTLS
 	} else {
-		safeDial, err := NewSafeDialerWithResolver(10*time.Second, nil, cfg.UpstreamResolver)
+		safeDial, err := NewSafeDialerWithResolver(10*time.Second, cfg.UpstreamAllowPrivateCIDRs, cfg.UpstreamResolver)
 		if err != nil {
 			return nil, fmt.Errorf("proxy: safe dialer: %w", err)
 		}

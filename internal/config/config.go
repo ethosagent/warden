@@ -121,6 +121,14 @@ type Policy struct {
 	// wire): it is consumed once at worker assembly, like the flag-derived
 	// listen addresses. Zero value = Go's default resolver (no behavior change).
 	DNS DNSConfig `json:"-"`
+	// Upstream holds LOCAL-ONLY exceptions to the upstream SSRF private-IP
+	// blocklist (upstream.allowPrivateCIDRs) for lab/test networks where an
+	// allowlisted upstream legitimately sits on a private range. It is a
+	// security exception, so it never travels: json:"-" keeps a CP-served
+	// policy from setting or widening it (a CP that could push it could switch
+	// a worker's SSRF guard off remotely), exactly like the listen/CA paths.
+	// Zero value = no exceptions (default-deny blocklist unchanged).
+	Upstream UpstreamConfig `json:"-"`
 }
 
 // DeepCopy returns a deep copy of the policy, with all slices independently
@@ -203,6 +211,7 @@ func (p Policy) DeepCopy() Policy {
 	// LLMProvider is a flat value struct (no nested slices/maps), so an
 	// independent backing array is a full deep copy.
 	cp.LLMProviders = append([]LLMProvider(nil), p.LLMProviders...)
+	cp.Upstream.AllowPrivateCIDRs = append([]string(nil), p.Upstream.AllowPrivateCIDRs...)
 	return cp
 }
 
@@ -286,6 +295,7 @@ type rawConfig struct {
 	LLMProviders  []rawLLMProvider  `yaml:"llmProviders"`
 	Explore       *rawExplore       `yaml:"explore"`
 	DNS           *rawDNS           `yaml:"dns"`
+	Upstream      *rawUpstream      `yaml:"upstream"`
 }
 
 // defaultCacheTTLSeconds is used when the config omits cache.ttl.
@@ -399,6 +409,7 @@ func parse(data []byte) (*LocalYAMLProvider, error) {
 	policy.LLMProviders = llmProviders
 	policy.Explore = parseExplore(raw.Explore)
 	policy.DNS = parseDNS(raw.DNS)
+	policy.Upstream = parseUpstream(raw.Upstream)
 
 	if err := validate(policy); err != nil {
 		return nil, err
@@ -623,6 +634,9 @@ func validate(p Policy) error {
 		return err
 	}
 	if err := validateDNS(p.DNS); err != nil {
+		return err
+	}
+	if err := validateUpstream(p.Upstream); err != nil {
 		return err
 	}
 	return nil

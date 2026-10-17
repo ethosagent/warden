@@ -9,11 +9,15 @@ coverage.product.out
 *.out
 check-report.json
 
-# Generated proxy certs/keys (gen-certs.sh) — NEVER commit private keys
+# Generated proxy certs/keys (gen-certs.sh, test/e2e/certs/gen.sh) — NEVER
+# commit private keys. Keep the e2e gen.sh tracked, ignore its outputs.
 /certs/
+test/e2e/certs/*
+!test/e2e/certs/gen.sh
 *.crt
 *.key
 *.pem
+*.srl
 
 # Local SQLite analytics databases
 *.db

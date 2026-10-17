@@ -427,3 +427,23 @@ audit:
 #
 # dns:
 #   upstreamResolver: "10.20.30.2:53"   # <host>:<port>; omit -> default resolver
+
+# SSRF EXCEPTIONS for warden's own upstream dials (lab and test networks only;
+# never set this in production).
+#
+# allowPrivateCIDRs lists CIDR ranges exempted from the SafeDialer's
+# private-IP blocklist, for networks where an allowlisted upstream legitimately
+# sits on a private range — the container test harness (deploy/compose/
+# docker-compose.e2e.yml) dials its fake upstream across a Docker bridge, for
+# example. Every entry must be a narrow CIDR (at least /8 for IPv4, /16 for
+# IPv6) and may never overlap loopback (127.0.0.0/8, ::1), link-local / cloud
+# metadata (169.254.0.0/16, fe80::/10), or the unspecified ranges; anything
+# else fails at startup. With the key set, warden logs one WARN listing the
+# active exceptions — treat that line as the smell it is.
+#
+# This key is LOCAL wiring: it is never served by a control plane to a worker,
+# and a managed worker ignores any attempt to push it.
+#
+# upstream:
+#   allowPrivateCIDRs:
+#     - "10.200.0.0/24"   # e.g. the e2e stack's egress subnet
