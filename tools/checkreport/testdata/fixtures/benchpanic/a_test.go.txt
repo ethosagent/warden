@@ -1,0 +1,8 @@
+package fx
+
+import "testing"
+
+func BenchmarkBoom(b *testing.B) {
+	var m map[string]int
+	m["a"] = 1
+}

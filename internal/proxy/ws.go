@@ -71,6 +71,7 @@ func (p *Proxy) handleWSUpgrade(
 	upstreamBR *bufio.Reader,
 	resp *http.Response,
 	req *http.Request,
+	fullURL string, // event URL: the agent's original query, never a swapped one
 	domain string,
 	port int,
 	sessionKey string,
@@ -90,7 +91,7 @@ func (p *Proxy) handleWSUpgrade(
 			// Fail closed: refuse the 101, record the block, and let the deferred
 			// upstream.Close() run. The pump never starts, so nothing else owns or
 			// closes the upstream — no leak, no double close.
-			p.refuseWSEnforce(tlsConn, req, domain, port)
+			p.refuseWSEnforce(tlsConn, req, fullURL, domain, port)
 			return
 		}
 		// monitor/off: preserve today's pass-through (nil scanner => pump forwards
@@ -134,19 +135,6 @@ func (p *Proxy) handleWSUpgrade(
 	blocked, _ := pump.Run(context.Background(), client, server)
 	p.cfg.Metrics.ObserveAddedLatency("mcp_scan", time.Since(start))
 
-	fullURL := "https://" + domain + req.URL.RequestURI()
-
-	// Session over: back in the quiescence tracker BEFORE the terminal
-	// bookkeeping below, so the tracker's drain happens-after the session's
-	// audit event, metric and decision log. The guard keeps the description
-	// concatenation off the production hot path (no tracker installed).
-	if p.cfg.Inflight != nil {
-		if done := p.inflightStart("ws " + req.Method + " " + fullURL); done != nil {
-			defer done()
-		}
-	}
-	p.beforeTerminal()
-
 	decision := "allow"
 	if blocked {
 		decision = "deny"
@@ -185,9 +173,8 @@ func (p *Proxy) wsEnforcing(gw MCPGateway) bool {
 // denials), records a blocked decision (analytics event + metric + decisionLog)
 // with the bounded reason mcp_ws_unscannable, and logs why at WARN. The caller's
 // deferred upstream.Close() closes the upstream; the pump is never started.
-func (p *Proxy) refuseWSEnforce(tlsConn *tls.Conn, req *http.Request, domain string, port int) {
+func (p *Proxy) refuseWSEnforce(tlsConn *tls.Conn, req *http.Request, fullURL, domain string, port int) {
 	const reason = "mcp_ws_unscannable"
-	fullURL := "https://" + domain + req.URL.RequestURI()
 	writeErrorResponse(tlsConn, 502, "Bad Gateway")
 	_ = p.analyticsStore().StoreEvent(analytics.Event{
 		Timestamp:      time.Now(),

@@ -1,0 +1,1 @@
+fmtsyn/a.go:2:8: expected ')', found 'EOF'

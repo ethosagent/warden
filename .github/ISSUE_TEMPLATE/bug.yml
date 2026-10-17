@@ -1,0 +1,58 @@
+name: Bug
+description: Report wrong behavior. Do not paste secrets or full request bodies. Report security flaws as SECURITY.md says.
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens
+      description: The wrong behavior, and the behavior you expected.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Commands or config that show the bug. Redact secrets.
+    validations:
+      required: true
+  - type: textarea
+    id: requirements
+    attributes:
+      label: Requirements
+      description: What the fix must do.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Testable statements, one checkbox each. Include a regression test.
+      placeholder: "- [ ] A regression test fails before the fix and passes after"
+    validations:
+      required: true
+  - type: textarea
+    id: touches
+    attributes:
+      label: Files likely touched
+      description: Paths or directories. The pipeline predicts the risk tier from these.
+    validations:
+      required: true
+  - type: dropdown
+    id: size
+    attributes:
+      label: Size
+      description: Agents take S or M. Split an L issue.
+      options:
+        - S
+        - M
+        - L
+    validations:
+      required: true
+  - type: textarea
+    id: out_of_scope
+    attributes:
+      label: Out of scope
+      description: What this issue must not change.
+    validations:
+      required: false

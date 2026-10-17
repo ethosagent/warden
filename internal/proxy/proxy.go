@@ -89,6 +89,11 @@ type Config struct {
 	// MCP responses are handled by MCP above and never reach this scanner.
 	ResponseScan *ResponseScanner
 
+	// EchoGuard configures the response check for secrets swapped into the same
+	// request (#389). The zero value is the default: on, blocking. It is independent
+	// of ResponseScan.
+	EchoGuard EchoGuardConfig
+
 	// DLP is the optional outbound REQUEST-body DLP scanner. Nil = disabled: the
 	// dlpScan stage returns immediately with no body read, byte-identical to
 	// before. Non-nil = the pre-swap request body is scanned in monitor mode
@@ -185,11 +190,14 @@ type WSScanner interface {
 type mcpModeReader interface{ Enforcing() bool }
 
 // PolicyEvaluator is the consumer-side seam for the static allow/deny decision.
-// *policy.Evaluator satisfies it. Replace is used by the control-plane apply loop
-// to hot-swap the running policy; it is kept on the interface so the proxy's
-// dependency is fully expressed by one seam.
+// *policy.Evaluator satisfies it. EvaluateRequest evaluates the policy for one
+// request; callers pass method/path = "" for the destination-only (CONNECT)
+// form, which could-matches constraints and peeks at rate limits. Replace is
+// used by the control-plane apply loop to hot-swap the running policy; it is
+// kept on the interface so the proxy's dependency is fully expressed by one
+// seam.
 type PolicyEvaluator interface {
-	Evaluate(domain string, port int, scheme policy.Scheme) policy.Decision
+	EvaluateRequest(domain string, port int, scheme policy.Scheme, method, path string) policy.RequestVerdict
 	Replace(p config.Policy)
 }
 
@@ -254,10 +262,15 @@ type Proxy struct {
 	// leafTTL is the injectable leaf validity window (0 = defaultLeafTTL). Both
 	// exist only so white-box tests can drive cert expiry deterministically;
 	// production leaves them zero-valued.
-	now      func() time.Time
-	leafTTL  time.Duration
-	dialFunc func(network, addr string) (net.Conn, error)
-	dialTLS  func(network, addr string, cfg *tls.Config) (*tls.Conn, error)
+	now     func() time.Time
+	leafTTL time.Duration
+	// preambleTimeout is the injectable CONNECT-preamble read deadline (0 =
+	// connectPreambleTimeout). Like now/leafTTL it exists only so white-box
+	// tests can drive the slowloris path without a real 10 s sleep; production
+	// leaves it zero-valued.
+	preambleTimeout time.Duration
+	dialFunc        func(network, addr string) (net.Conn, error)
+	dialTLS         func(network, addr string, cfg *tls.Config) (*tls.Conn, error)
 
 	// mcp holds the live MCP gateway, swappable atomically while the hot path
 	// reads it (control-plane settings can rebuild + replace it at runtime). MCPGateway
