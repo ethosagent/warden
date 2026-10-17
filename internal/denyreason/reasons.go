@@ -64,10 +64,8 @@ const (
 	// swapped values, so it fails closed (#389).
 	SecretEchoUnscannable Reason = "secret_echo_unscannable"
 
-	// SSRFBlocked and SSRFDeniedHostname BELONG TO #391: its PR #405 writes
-	// them from the SSRF dial guard. They are declared here only so the set is
-	// complete and the labels are reserved on this branch — the proxy never
-	// emits them yet. Do not remove: #405 will reference these exact values.
+	// SSRFBlocked and SSRFDeniedHostname are written by the SSRF dial guard
+	// (#391): proxy.SSRFError carries them and every refusal is audited as a deny.
 	// SSRFBlocked: the dial target was refused by the SSRF guard.
 	SSRFBlocked Reason = "ssrf_blocked"
 	// SSRFDeniedHostname: the dial target's hostname is not allowed by the
