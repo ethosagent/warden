@@ -104,6 +104,13 @@ type Config struct {
 	// byte-identical to before. It scopes to warden's egress path only: the
 	// dashboard/admin listeners never resolve through it.
 	UpstreamResolver NameResolver
+
+	// UpstreamAllowPrivateCIDRs is the LOCAL-ONLY list of CIDR ranges exempted
+	// from the SafeDialer's private-IP blocklist (upstream.allowPrivateCIDRs).
+	// Empty (the default) = no exceptions, byte-identical to before. The worker
+	// fills it from local config only — it never arrives on the CP-served wire —
+	// and validation (range + prefix-length floors) already ran at load.
+	UpstreamAllowPrivateCIDRs []string
 }
 
 // MCPGateway is the consumer-side seam for the MCP egress gateway (defined here,
@@ -497,7 +504,7 @@ func New(cfg Config) (*Proxy, error) {
 		}
 	}
 
-	safeDial, err := NewSafeDialerWithResolver(10*time.Second, nil, cfg.UpstreamResolver)
+	safeDial, err := NewSafeDialerWithResolver(10*time.Second, cfg.UpstreamAllowPrivateCIDRs, cfg.UpstreamResolver)
 	if err != nil {
 		return nil, fmt.Errorf("proxy: safe dialer: %w", err)
 	}

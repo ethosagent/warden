@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -121,6 +122,16 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 				"resolver", resolverAddr, "error", err)
 		})
 		logger.Info("upstream DNS resolver configured for warden's own upstream dials", "resolver", resolverAddr)
+	}
+
+	// LOCAL-ONLY SSRF exceptions (upstream.allowPrivateCIDRs): punch holes in the
+	// private-IP blocklist for lab/test networks where an allowlisted upstream
+	// legitimately sits on a private range (the L2 container harness). Security-
+	// relevant and never CP-distributable, so it is loud: one WARN naming every
+	// active exception, so a production config that sets it cannot go unnoticed.
+	if len(pol.Upstream.AllowPrivateCIDRs) > 0 {
+		logger.Warn("upstream.allowPrivateCIDRs is active: the listed CIDR ranges are exempt from SSRF private-IP blocking — lab and test networks only, never set this in production",
+			"exempt", strings.Join(pol.Upstream.AllowPrivateCIDRs, ","))
 	}
 
 	// Managed vs local-only. Managed = a control plane is configured and
@@ -370,6 +381,8 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	costEstimator := cost.NewEstimator()
 
 	// Optional auth transforms (OAuth2 / SigV4 / HMAC / API-key) per destination.
+	// The fetch client deliberately gets NO upstream.allowPrivateCIDRs: the SSRF
+	// exception widens the proxy's dialer only (proxy.Config), never this one.
 	var transformers []*auth.MatchedTransformer
 	if len(pol.Auth) > 0 {
 		authClient, acErr := newSafeHTTPClient(10*time.Second, "", upstreamDNS)
@@ -516,6 +529,8 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		Transformers:      transformers,
 		Cost:              costEstimator,
 		UpstreamResolver:  upstreamDNS,
+
+		UpstreamAllowPrivateCIDRs: pol.Upstream.AllowPrivateCIDRs,
 	}
 	if judge != nil {
 		cfg.Judge = judge

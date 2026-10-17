@@ -1,0 +1,24 @@
+# Warden control-plane policy for the HERMETIC e2e stack (deploy/compose/
+# docker-compose.e2e.yml). The e2e workers are CP-MANAGED
+# (configs/config.e2e-worker.yaml), so THIS is the live allow/deny policy both
+# of them pull, hot-reload on change, and enforce — the deny path
+# (evil.example.test) and the allow path (api/llm/mcp.example.test) are proven
+# against it. evil.example.test is denied explicitly even though default-deny
+# would already block it: the scenarios assert the DENY path, and a denylist
+# entry holds even if the allowlist is later widened.
+#
+# The control plane never holds secrets — nothing canary-related belongs here,
+# and nothing here can set a worker's local wiring (secrets, DNS, the SSRF
+# exception): those keys do not exist on the CP→worker wire.
+
+policy:
+  allowlist:
+    - domain: api.example.test
+    - domain: llm.example.test
+    - domain: mcp.example.test
+  denylist:
+    - domain: evil.example.test
+
+logging:
+  level: info
+  format: json
