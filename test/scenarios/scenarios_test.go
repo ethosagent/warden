@@ -45,12 +45,13 @@ func TestAll_Catalog(t *testing.T) {
 		}
 	}
 	for _, row := range canaryRows {
-		if row.echo {
-			continue // EchoHeaders is an in-process fault: L1 only
-		}
+		// L2 is exactly the rows whose levers the compose stack has: http1/h2,
+		// allowed and denied. Echo rows drive the harness's EchoHeaders fault;
+		// the grpc/ws rows need the in-process fakes the stack does not serve.
+		wantL2 := !row.echo && (row.proto == "http1" || row.proto == "h2")
 		for _, s := range All {
-			if s.Name == row.name() && !s.L2 {
-				t.Errorf("%s must be L2 (runs on compose)", s.Name)
+			if s.Name == row.name() && s.L2 != wantL2 {
+				t.Errorf("%s: L2 = %v, want %v (the compose stack serves only the http1/h2 rows)", s.Name, s.L2, wantL2)
 			}
 		}
 	}

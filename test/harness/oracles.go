@@ -117,6 +117,10 @@ func (h *H) Events() []analytics.Event {
 func (h *H) Metrics() map[string]float64 {
 	h.tb.Helper()
 	h.awaitQuiescence()
+	if !h.MetricsAvailable() {
+		h.tb.Fatalf("harness: Metrics are not available on this target (compose exports no OTel endpoint); " +
+			"ask MetricsAvailable first and skip the metrics assertion explicitly on such a target")
+	}
 	m, err := h.target.Metrics()
 	if err != nil {
 		h.tb.Fatalf("harness: collect metrics: %v", err)

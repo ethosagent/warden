@@ -204,8 +204,13 @@ func (h *H) canaryLeaks(tb testing.TB) []string {
 	}
 
 	// 4. Metric names and label values (values are floats; only keys can carry).
-	for key := range h.Metrics() {
-		scan("metric key "+key, key)
+	// A target without the metrics oracle (compose) has no such surface: the
+	// sweep skips it — there is nothing there to leak through, and the scenario
+	// asserting on metrics was required to skip that assertion explicitly.
+	if h.MetricsAvailable() {
+		for key := range h.Metrics() {
+			scan("metric key "+key, key)
+		}
 	}
 
 	// 5. Every fake upstream's recorded requests. The ONE exception: the RAW

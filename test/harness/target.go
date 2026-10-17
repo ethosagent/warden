@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -60,6 +61,16 @@ type Target interface {
 	StopControlPlane() error
 	StartControlPlane(ctx context.Context) error
 
+	// Host maps a well-known fake's alias ("api", "llm", "mcp", "evil",
+	// "unlisted", "grpc", "ws") to the hostname that alias resolves to on THIS
+	// deployment — in-process: <alias>.example.com; compose:
+	// <alias>.example.test for the names the stack's fake DNS serves. A
+	// scenario asks the harness (h.Host) instead of hard-coding a hostname, so
+	// one body runs on both; an alias the deployment does not serve is an
+	// error, which is how a scenario learns it has an L1-only lever rather than
+	// failing confusingly at connect time.
+	Host(alias string) (string, error)
+
 	// The oracle sources. Logs is everything the components logged (structured
 	// lines, exactly as a deployment's stdout); Events is every analytics event
 	// across the workers, worker-1 first, read through the production analytics
@@ -76,6 +87,91 @@ type Target interface {
 	Logs() string
 	Events() ([]analytics.Event, error)
 	Metrics() (map[string]float64, error)
+}
+
+// SecretSpec is one secret a deployment holds, as the TARGET knows it: the
+// placeholder the agent sees, the real value that never leaves the worker
+// side, and the hosts the swap is scoped to. It is the wire form of the
+// harness's own secretSpec, supplied by a target that wires its secrets
+// itself (compose: the worker containers' env).
+type SecretSpec struct {
+	Name        string
+	Placeholder string
+	Value       string
+	MatchHosts  []string
+}
+
+// AgentClients is implemented by a Target whose protected agent is NOT this
+// process (compose: the agent-1 container). When the supplied target
+// implements it, h.Agent/h.AgentH2 return the target's client, so a scenario's
+// traffic leaves the way the deployment's traffic actually does — from the
+// agent's own network namespace — instead of an in-process client pointing at
+// a proxy address this process cannot reach.
+type AgentClients interface {
+	// AgentClient returns the agent's HTTP client. h2 selects the HTTP/2
+	// flavor (the AgentH2 client: ALPN h2 on the MITM leg); false is plain
+	// HTTP/1.1. The returned client's Transport becomes the base of the
+	// harness's recording transport, so AgentResponses and the canary sweep
+	// see exactly what the agent saw.
+	AgentClient(h2 bool) (*http.Client, error)
+}
+
+// UpstreamReader is implemented by a Target that hosts the fake upstreams a
+// scenario talks to (compose: the fakeupstream container and its request
+// recorder). Then h.Upstream(host) is a VIEW over that fake — Requests read
+// through the target — and the in-process fault levers (Delay, Fail,
+// EchoHeaders) fail the test: they cannot reach into a container.
+type UpstreamReader interface {
+	// UpstreamRequests returns what the target's upstream for host has
+	// recorded, oldest first, in the RecordedRequest shape the in-process
+	// fakes record (post-pipeline: swaps already applied).
+	UpstreamRequests(host string) ([]RecordedRequest, error)
+}
+
+// TargetSecrets is implemented by a Target that wires the agent-facing
+// secrets itself (compose: the worker containers hold the real value in their
+// env; the agents hold only the placeholder). When the supplied target
+// implements it, boot registers THESE specs instead of any WithSecret values
+// — the opts describe L1 wiring, the target's is what the deployment actually
+// holds. A target with no specs leaves WithSecret in charge.
+type TargetSecrets interface {
+	TargetSecrets() []SecretSpec
+}
+
+// ConnectProber is implemented by a Target whose worker proxy is not
+// reachable from this process (compose: the proxy port is published to
+// nobody). The CONNECT probe then runs the way the deployment's own traffic
+// does — from the agent.
+type ConnectProber interface {
+	// ConnectStatus returns the status code of the proxy's reply to CONNECT
+	// hostPort: the policy decision itself, before any client library turns a
+	// refusal into an opaque transport error.
+	ConnectStatus(hostPort string) (int, error)
+}
+
+// MetricsSupport is implemented by a Target whose deployment does not carry
+// the metrics oracle (compose: the stack exports no OTel metrics anywhere).
+// MetricsAvailable returning false means h.Metrics fails the test loudly and a
+// scenario asks h.MetricsAvailable before asserting on metrics — the explicit,
+// documented skip, never a silent pass. Absent: the oracle exists (in-process).
+type MetricsSupport interface {
+	MetricsAvailable() bool
+}
+
+// harnessAliases are the well-known fake first-labels Host resolves. They are
+// the harness's own fake names — defaultAllowlist plus evil (the
+// never-allowlisted name the isolation scenarios use) and unlisted (a name no
+// policy lists at all, so a refusal there is the default-deny reason, #409).
+var harnessAliases = []string{"api", "llm", "mcp", "grpc", "ws", "evil", "unlisted"}
+
+// knownAlias reports whether alias is one of the well-known fake names.
+func knownAlias(alias string) bool {
+	for _, a := range harnessAliases {
+		if a == alias {
+			return true
+		}
+	}
+	return false
 }
 
 // readyDeadline is the OnReady budget for one component (per the ticket: 10s).
@@ -191,6 +287,15 @@ func (ip *inprocess) ControlPlaneAddr() string {
 		return ""
 	}
 	return ip.cp.addr
+}
+
+// Host resolves a well-known fake alias to its in-process hostname: the
+// harness's own fakes all live under example.com.
+func (ip *inprocess) Host(alias string) (string, error) {
+	if !knownAlias(alias) {
+		return "", fmt.Errorf("harness: Host(%q): unknown alias (have %v)", alias, harnessAliases)
+	}
+	return alias + ".example.com", nil
 }
 
 // ControlPlaneToken reads the token from the env var the harness set — the same

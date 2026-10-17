@@ -107,6 +107,13 @@ func (f *fakeTarget) StartControlPlane(_ context.Context) error {
 	return nil
 }
 
+func (f *fakeTarget) Host(alias string) (string, error) {
+	if !knownAlias(alias) {
+		return "", errors.New("fakeTarget: unknown alias " + alias)
+	}
+	return alias + ".fake", nil
+}
+
 func (f *fakeTarget) Logs() string { return f.logs }
 
 func (f *fakeTarget) Events() ([]analytics.Event, error) { return f.events, nil }
