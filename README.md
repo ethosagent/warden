@@ -273,10 +273,13 @@ Warden checks each length-prefixed message before forwarding it:
 - **Placeholder in a message** — the message is not forwarded. The call ends
   with gRPC status `PERMISSION_DENIED` (7) and `grpc-message: secret
   placeholders must be sent in gRPC metadata`, and a deny event with reason
-  `grpc_body_placeholder` is recorded. A call refused on its first message
-  reaches the upstream not at all (Warden holds the request back up to 250 ms for
-  it); on a client- or bidi-streaming call, messages before the offending one
-  were already forwarded and the stream then ends with the same status.
+  `grpc_body_placeholder` is recorded. Warden holds the request back
+  up to 250 ms for the call's first message, so a call refused on a first message
+  that arrives within that window reaches the upstream not at all. A first
+  message that arrives later means the request headers (with the swapped
+  metadata) have already gone upstream; the message itself is still refused. On
+  a client- or bidi-streaming call, messages before the offending one were
+  already forwarded and the stream then ends with the same status.
 - **Frame bound** — a message is buffered up to 4 MiB (`maxGRPCFrameBytes`, the
   gRPC default message size) to be inspected. A larger one fails closed:
   `RESOURCE_EXHAUSTED` (8), reason `grpc_frame_too_large`.
@@ -288,10 +291,19 @@ Warden checks each length-prefixed message before forwarding it:
   message: `INVALID_ARGUMENT` (3), reason `grpc_frame_malformed`.
 - **Streaming** — messages without a placeholder are forwarded as they arrive;
   at most one message is held at a time.
-- **A placeholder split across two messages** is not detected (each message is an
-  independent value); both halves are relayed verbatim and unswapped, so no real
-  secret is ever built from them. A placeholder for a *different* host (out of
-  scope here) is not inspected for and passes untouched, as on HTTP/1.1.
+- **A placeholder split across messages** is caught at the boundary: Warden
+  keeps the last bytes of the messages before (as many as the longest
+  placeholder, less one) and checks them joined with the start of the next. The
+  message that completes the placeholder is refused as above; the earlier part
+  was already forwarded, and is inert because nothing in a body is ever swapped.
+- **A placeholder for a different host** (out of scope here) is not inspected
+  for and passes untouched. Unlike an out-of-scope placeholder in an HTTP/1.1
+  body, it records no `secret_out_of_scope` event on gRPC today.
+- **Known corner** — if the upstream ends its response without reading the
+  request body and the offending message only arrives afterwards, the message
+  goes nowhere (the transport has stopped reading it), but no deny is recorded
+  and the client sees no refusal status; the call is logged as an ordinary allow.
+  Pinned by `TestGRPCBody_RefusalAfterUpstreamFinishedRecordsNoDeny`.
 
 With no placeholder in scope for the destination, the body is streamed verbatim
 and none of the above applies.

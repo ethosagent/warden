@@ -165,9 +165,6 @@ func (r canaryRow) run(t *testing.T, h *harness.H) {
 			t.Fatalf("the denied upstream %s saw %d request(s), want 0", r.host(h), got)
 		}
 	case r.bodyPH:
-		if got := len(up.Requests()); got != 0 {
-			t.Fatalf("%s: the upstream saw %d request(s), want 0: a refused message must reach nobody", r.name(), got)
-		}
 		h.Eventually("the grpc_body_placeholder deny event", func() bool {
 			for _, e := range h.Events() {
 				if e.Decision == "deny" && e.Reason == string(denyreason.GRPCBodyPlaceholder) && e.Protocol == "grpc" {
@@ -176,6 +173,9 @@ func (r canaryRow) run(t *testing.T, h *harness.H) {
 			}
 			return false
 		})
+		if got := len(up.Requests()); got != 0 {
+			t.Fatalf("%s: the upstream saw %d request(s), want 0: a refused message must reach nobody (the recorder logs on HEADERS receipt)", r.name(), got)
+		}
 	case r.proto == "h2" || r.proto == "grpc":
 		expectKnown(t, knownFor(r.knownIssue, ""), bodySwapped,
 			r.name()+": the request body must reach the upstream swapped (h2) or intact (grpc, whose credentials ride metadata)")

@@ -194,6 +194,8 @@ func TestGRPCBody_RefusedAfterResponseStarted(t *testing.T) {
 	t.Cleanup(srv.Close)
 	be := &parityBackend{srv: srv}
 	p, store, caPEM := startEdgeProxy(t, be, func(c *Config) { paritySwap(nil)(t, c) })
+	tr := NewInflight()
+	p.cfg.Inflight = tr
 
 	first := testFrame(0, []byte("first"))
 	pr, pw := io.Pipe()
@@ -212,7 +214,7 @@ func TestGRPCBody_RefusedAfterResponseStarted(t *testing.T) {
 		t.Fatalf("grpc-status %q, want 7 as a trailer", st)
 	}
 	requireSingleDeny(t, waitEvents(t, store, 1), string(denyreason.GRPCBodyPlaceholder))
-	time.Sleep(100 * time.Millisecond)
+	waitTrackerDrained(t, tr) // the stream's terminal bookkeeping is done: no second event can follow
 	requireSingleDeny(t, store.snapshot(), string(denyreason.GRPCBodyPlaceholder))
 	mu.Lock()
 	defer mu.Unlock()
@@ -239,5 +241,123 @@ func TestGRPCBody_LateFirstMessageStillRefused(t *testing.T) {
 		if strings.Contains(g.Body, grpcBodyPH) {
 			t.Fatalf("the refused message reached the upstream: %q", g.Body)
 		}
+	}
+}
+
+// recordingGRPCBackend is an h2 backend that records each request path the moment
+// its HEADERS arrive, before the body is read: an aborted request still counts.
+// It is what makes "the upstream saw nothing" observable (a recorder that waits
+// for the body would miss a request the proxy resets).
+func recordingGRPCBackend(t *testing.T, handler http.HandlerFunc) (*parityBackend, func() []string) {
+	t.Helper()
+	var (
+		mu    sync.Mutex
+		paths []string
+	)
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.URL.Path)
+		mu.Unlock()
+		if handler != nil {
+			handler(w, r)
+			return
+		}
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "application/grpc")
+		w.Header().Set("Trailer", "Grpc-Status")
+		w.WriteHeader(http.StatusOK)
+		w.Header().Set("Grpc-Status", "0")
+	}))
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	return &parityBackend{srv: srv}, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), paths...)
+	}
+}
+
+func waitPath(t *testing.T, seen func() []string, path string) []string {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, p := range seen() {
+			if p == path {
+				return seen()
+			}
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("the upstream never saw %s (saw %v)", path, seen())
+	return nil
+}
+
+// A call refused on its first message, arriving inside the hold-back window,
+// must not reach the upstream at all: not its body, and not its headers (which
+// carry the swapped real credential). A clean call on the same connection after
+// it is the barrier: the refused call's headers would have been dispatched
+// ahead of the barrier's, so once the barrier is seen the refused one is not
+// coming.
+func TestGRPCBody_FirstMessageRefusedUpstreamSeesNothing(t *testing.T) {
+	be, seen := recordingGRPCBackend(t, nil)
+	p, store, caPEM := startEdgeProxy(t, be, func(c *Config) { paritySwap(nil)(t, c) })
+	cc := dialGRPCClient(t, p.Addr().String(), parityHost, caPEM)
+	call := func(path string, msg []byte) *http.Response {
+		req, _ := http.NewRequest("POST", "https://"+parityHost+path, bytes.NewReader(testFrame(0, msg)))
+		req.Header.Set("Content-Type", "application/grpc")
+		req.Header.Set("Authorization", "Bearer "+grpcBodyPH)
+		resp, err := cc.RoundTrip(req)
+		if err != nil {
+			t.Fatalf("round trip %s: %v", path, err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		return resp
+	}
+	if st := grpcStatusOf(call("/pkg.Svc/Refused", []byte("token="+grpcBodyPH))); st != "7" {
+		t.Fatalf("grpc-status %q, want 7", st)
+	}
+	call("/pkg.Svc/Barrier", []byte("clean"))
+	for _, path := range waitPath(t, seen, "/pkg.Svc/Barrier") {
+		if path == "/pkg.Svc/Refused" {
+			t.Fatalf("the refused call reached the upstream (its headers carry the swapped credential): saw %v", seen())
+		}
+	}
+	requireSingleDeny(t, waitDenies(t, store, 1), string(denyreason.GRPCBodyPlaceholder))
+}
+
+// The upstream finished its response without reading the request, and the
+// offending message arrives afterwards. Pinned as it behaves today: nothing is
+// forwarded, the call completes cleanly, and the ledger holds the one allow with
+// no deny (the transport has stopped reading the body, so the guard never sees
+// the message). A change here must be a conscious one.
+func TestGRPCBody_RefusalAfterUpstreamFinishedRecordsNoDeny(t *testing.T) {
+	be, seen := recordingGRPCBackend(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/grpc")
+		w.Header().Set("Trailer", "Grpc-Status")
+		w.WriteHeader(http.StatusOK)
+		w.Header().Set("Grpc-Status", "0") // answers and returns without reading the body
+	})
+	p, store, caPEM := startEdgeProxy(t, be, func(c *Config) { paritySwap(nil)(t, c) })
+	tr := NewInflight()
+	p.cfg.Inflight = tr
+
+	pr, pw := io.Pipe()
+	req, _ := http.NewRequest("POST", "https://"+parityHost+"/pkg.Svc/ClientStream", pr)
+	req.Header.Set("Content-Type", "application/grpc")
+	resp, err := dialGRPCClient(t, p.Addr().String(), parityHost, caPEM).RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitPath(t, seen, "/pkg.Svc/ClientStream")
+	_, _ = pw.Write(testFrame(0, []byte(grpcBodyPH)))
+	_ = pw.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	waitTrackerDrained(t, tr)
+	evs := store.snapshot()
+	if len(evs) != 1 || evs[0].Decision != "allow" {
+		t.Fatalf("events = %+v, want exactly one allow and no deny (today's behaviour for a refusal after the upstream finished)", evs)
 	}
 }

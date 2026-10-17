@@ -22,9 +22,10 @@ const (
 	maxGRPCFrameBytes = 4 << 20
 	// grpcFirstFrameWait is how long the worker holds the upstream request back
 	// for the call's first message, so a refused unary (or first-message) call
-	// reaches the upstream not at all, not even its headers. A client that sends
-	// its first message later (an idle bidi stream) is not stalled: the request
-	// goes out and later messages are inspected as they arrive.
+	// whose message arrives in time reaches the upstream not at all, not even its
+	// headers. A client that sends its first message later (an idle bidi stream)
+	// is not stalled: the request goes out and the message is still inspected
+	// and refused when it arrives.
 	grpcFirstFrameWait = 250 * time.Millisecond
 )
 
@@ -74,9 +75,10 @@ func newGRPCRefusal(reason denyreason.Reason) grpcRefusal {
 // Nothing is forwarded for a refused frame. The first refusal is sticky, is
 // reported once through onRefuse, and surfaces as errGRPCFrameRefused.
 //
-// A placeholder split across two messages is not recognised (each message is an
-// independent value, so the halves never form the token in one): both halves
-// are relayed verbatim, unswapped, so no real secret can be built from them.
+// A placeholder split across two messages is still detected: the last
+// maxPlaceholderLen-1 bytes of the messages so far are kept and checked joined
+// with the start of the next, which is refused. The earlier half has already
+// been forwarded; it is inert, since nothing in a body is ever swapped.
 // The compressed flag is refused outright: a compressed payload cannot be
 // inspected, and no encoding is ever trusted to be placeholder-free.
 type grpcFrameGuard struct {
@@ -84,6 +86,8 @@ type grpcFrameGuard struct {
 	placeholders [][]byte
 	maxFrame     int
 	onRefuse     func(grpcRefusal)
+	tail         []byte // last maxPlaceholderLen-1 payload bytes forwarded so far
+	maxPH        int    // length of the longest placeholder
 
 	rmu   sync.Mutex // serialises Read with a Prime still filling in the background
 	buf   []byte     // the frame being released (header + payload)
@@ -98,7 +102,11 @@ type grpcFrameGuard struct {
 }
 
 func newGRPCFrameGuard(src io.ReadCloser, placeholders [][]byte, maxFrame int, onRefuse func(grpcRefusal)) *grpcFrameGuard {
-	return &grpcFrameGuard{src: src, placeholders: placeholders, maxFrame: maxFrame, onRefuse: onRefuse}
+	g := &grpcFrameGuard{src: src, placeholders: placeholders, maxFrame: maxFrame, onRefuse: onRefuse}
+	for _, ph := range placeholders {
+		g.maxPH = max(g.maxPH, len(ph))
+	}
+	return g
 }
 
 func (g *grpcFrameGuard) Read(p []byte) (int, error) {
@@ -171,7 +179,39 @@ func (g *grpcFrameGuard) nextFrame() {
 			return
 		}
 	}
+	if g.splitAcrossBoundary(payload) {
+		g.refuse(denyreason.GRPCBodyPlaceholder)
+		return
+	}
 	g.buf, g.off, g.ready = frame.Bytes(), 0, true
+}
+
+// splitAcrossBoundary reports whether a placeholder starts in the bytes kept from
+// earlier messages and ends in payload, and otherwise rolls the kept tail
+// forward over payload. Empty messages leave the tail as it was, so a split
+// across several messages is caught too.
+func (g *grpcFrameGuard) splitAcrossBoundary(payload []byte) bool {
+	keep := g.maxPH - 1
+	if keep <= 0 {
+		return false
+	}
+	if len(g.tail) > 0 && len(payload) > 0 {
+		joined := append(append(make([]byte, 0, len(g.tail)+keep), g.tail...), payload[:min(len(payload), keep)]...)
+		for _, ph := range g.placeholders {
+			if bytes.Contains(joined, ph) {
+				return true
+			}
+		}
+	}
+	if len(payload) >= keep {
+		g.tail = append(g.tail[:0], payload[len(payload)-keep:]...)
+	} else if len(payload) > 0 {
+		g.tail = append(g.tail, payload...)
+		if len(g.tail) > keep {
+			g.tail = append(g.tail[:0], g.tail[len(g.tail)-keep:]...)
+		}
+	}
+	return false
 }
 
 // Prime reads and inspects the first message, waiting at most wait for it. It

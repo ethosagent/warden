@@ -115,19 +115,46 @@ func TestGRPCFrameGuard_PlaceholderSplitByTransportChunks(t *testing.T) {
 	}
 }
 
-// A placeholder split across TWO messages is not recognised: each message is an
-// independent protobuf value and the halves never form the token in any one of
-// them. The documented behaviour is that the bytes are relayed verbatim and
-// unswapped, so no real value can ever be produced from them.
-func TestGRPCFrameGuard_PlaceholderSplitAcrossFramesIsNeverSwapped(t *testing.T) {
-	in := append(testFrame(0, []byte("token={{open")), testFrame(0, []byte("ai}}"))...)
+// A placeholder split across messages is caught at the boundary: the half that
+// completes it is refused. The first half was already forwarded; it is inert,
+// since a body is never swapped.
+func TestGRPCFrameGuard_PlaceholderSplitAcrossFramesIsRefused(t *testing.T) {
+	cases := []struct {
+		name   string
+		frames [][]byte
+		out    []byte // exactly what may be forwarded before the refusal
+	}{
+		{"two frames", [][]byte{[]byte("token={{open"), []byte("ai}}")}, testFrame(0, []byte("token={{open"))},
+		{"one byte at the boundary", [][]byte{[]byte("{{openai}"), []byte("}")}, testFrame(0, []byte("{{openai}"))},
+		{"three frames", [][]byte{[]byte("{{op"), []byte("en"), []byte("ai}}")}, append(testFrame(0, []byte("{{op")), testFrame(0, []byte("en"))...)},
+		{"empty frame between", [][]byte{[]byte("{{open"), nil, []byte("ai}}")}, append(testFrame(0, []byte("{{open")), testFrame(0, nil)...)},
+		{"long frames either side", [][]byte{append(bytes.Repeat([]byte("x"), 5000), "{{ope"...), append([]byte("nai}}"), bytes.Repeat([]byte("y"), 5000)...)}, testFrame(0, append(bytes.Repeat([]byte("x"), 5000), "{{ope"...))},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var in []byte
+			for _, f := range tc.frames {
+				in = append(in, testFrame(0, f)...)
+			}
+			g, got := newTestGuard(bytes.NewReader(in), 8192)
+			out, err := io.ReadAll(g)
+			if !errors.Is(err, errGRPCFrameRefused) || len(*got) != 1 || (*got)[0].reason != denyreason.GRPCBodyPlaceholder {
+				t.Fatalf("err=%v refusals=%+v, want one grpc_body_placeholder refusal", err, *got)
+			}
+			if !bytes.Equal(out, tc.out) {
+				t.Fatalf("forwarded %q, want only the frames before the completing one: %q", out, tc.out)
+			}
+		})
+	}
+}
+
+// Near misses are not refused: the tail is rolled, not accumulated forever.
+func TestGRPCFrameGuard_NoFalseSplitRefusal(t *testing.T) {
+	in := append(append(testFrame(0, []byte("{{open")), testFrame(0, []byte("xx}}"))...), testFrame(0, []byte("ai}}"))...)
 	g, got := newTestGuard(bytes.NewReader(in), 1024)
 	out, err := io.ReadAll(g)
-	if err != nil || len(*got) != 0 {
+	if err != nil || len(*got) != 0 || !bytes.Equal(out, in) {
 		t.Fatalf("err=%v refusals=%+v, want a clean relay", err, *got)
-	}
-	if !bytes.Equal(out, in) {
-		t.Fatalf("a split placeholder must be relayed byte-for-byte unswapped; got %q", out)
 	}
 }
 
@@ -176,6 +203,7 @@ func FuzzGRPCFrames(f *testing.F) {
 	f.Add([]byte{0, 0xff, 0xff, 0xff, 0xff})
 	f.Add([]byte{0, 0, 0})
 	f.Add(append(testFrame(0, []byte("{{open")), testFrame(0, []byte("ai}}"))...))
+	f.Add(append(append(testFrame(0, []byte("{{o")), testFrame(0, nil)...), append(testFrame(0, []byte("penai")), testFrame(0, []byte("}}"))...)...))
 	f.Fuzz(func(t *testing.T, in []byte) {
 		g, got := newTestGuard(bytes.NewReader(in), 256)
 		out, err := io.ReadAll(g)
@@ -190,7 +218,9 @@ func FuzzGRPCFrames(f *testing.F) {
 		if err == nil && len(out) != len(in) {
 			t.Fatalf("clean end but %d of %d bytes forwarded", len(out), len(in))
 		}
-		// Re-walk the forwarded frames: none may carry the placeholder.
+		// Re-walk the forwarded frames: none may carry the placeholder, alone or
+		// joined with the frames before it.
+		var joined []byte
 		for rest := out; len(rest) >= grpcFrameHeaderLen; {
 			n := int(binary.BigEndian.Uint32(rest[1:5]))
 			if grpcFrameHeaderLen+n > len(rest) {
@@ -199,7 +229,11 @@ func FuzzGRPCFrames(f *testing.F) {
 			if bytes.Contains(rest[grpcFrameHeaderLen:grpcFrameHeaderLen+n], []byte("{{openai}}")) {
 				t.Fatalf("forwarded a frame carrying the placeholder")
 			}
+			joined = append(joined, rest[grpcFrameHeaderLen:grpcFrameHeaderLen+n]...)
 			rest = rest[grpcFrameHeaderLen+n:]
+		}
+		if bytes.Contains(joined, []byte("{{openai}}")) {
+			t.Fatalf("forwarded frames jointly carry a placeholder")
 		}
 	})
 }
