@@ -1,0 +1,8 @@
+# Fuzz targets, one per line: "FuzzName ./package". The single list shared by
+# scripts/check.sh (a few seconds each) and .github/workflows/fuzz-nightly.yml
+# (minutes each). tools/checkreport's TestFuzzTargetsListIsComplete fails when a
+# Fuzz function in the repo is missing here.
+FuzzConnectRequest ./internal/proxy
+FuzzMCPMessage     ./internal/mcp
+FuzzPolicyMatch    ./internal/policy
+FuzzConfigLoad     ./internal/config

@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("\npolicy:\n  allowlist:\n    - domain: api.openai.com\n  denylist:\n    - domain: evil.example.com\n    - domain: \"*.malware.net\"\n      port: 443\n\nlogging:\n  level: info\n  format: json\n")

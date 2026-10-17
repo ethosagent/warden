@@ -254,6 +254,7 @@ func (s *requestScope) addEvidence(dets []scan.Detection) {
 // stale-conn redial's fresh conn. It is nil (nothing to close) before the first
 // forward and after a handoff, so there is no double close and no leak.
 func (p *Proxy) handleHTTP(tlsConn *tls.Conn, br *bufio.Reader, domain string, port int, needsJudge bool) {
+	p.reach(PathHTTP1)
 	var upstream net.Conn
 	var upstreamBR *bufio.Reader
 	defer func() {
@@ -383,12 +384,16 @@ func (p *Proxy) runRequestStages(s *requestScope) (endSession bool) {
 // the HTTP/2 shapes the proxy cannot mediate faithfully. Every refusal records a
 // deny event so it is never silent. A refusal ends the session on h1 (cleanup
 // closes req.Body); an h2 stream is refused alone, the connection's others go on.
+// Both sides of the host recheck go through policy.NormalizeHost (#397), so case
+// and any number of trailing dots cannot make the recheck disagree with the
+// CONNECT admission it belongs to — while a different host, or a Host header
+// that is only dots (normalised to ""), is still refused (fail closed).
 func (p *Proxy) readRequest(s *requestScope) (endSession bool) {
 	hostOnly := s.req.Host
 	if h, _, err := net.SplitHostPort(s.req.Host); err == nil {
 		hostOnly = h
 	}
-	if !strings.EqualFold(hostOnly, s.domain) {
+	if policy.NormalizeHost(hostOnly) != policy.NormalizeHost(s.domain) {
 		p.recordDeny(s, "host_mismatch")
 		if s.rt != nil {
 			s.out.errorResponse(http.StatusMisdirectedRequest, "Misdirected Request")
@@ -439,6 +444,38 @@ func (p *Proxy) recordDeny(s *requestScope, reason string) {
 		Domain: s.domain, Port: s.port, Protocol: s.proto,
 		Method: s.req.Method, URL: fullURL, Decision: "deny",
 		Reason: reason,
+	})
+}
+
+// recordSSRFDeny is the deny path for a dial the SSRF-safe dialer refused
+// (#391): the same single deny event recordDeny writes, plus the bounded
+// address class. It is a no-op for any other error, so ordinary dial failures
+// (DNS failure, timeout, connection refused) keep their long-standing
+// treatment — a 502 with no analytics event, never an ssrf_* deny.
+func (p *Proxy) recordSSRFDeny(s *requestScope, err error) {
+	se, ok := AsSSRFError(err)
+	if !ok {
+		return
+	}
+	fullURL := s.eventURL()
+	_ = p.analyticsStore().StoreEvent(analytics.Event{
+		Timestamp: time.Now(),
+		Domain:    s.domain,
+		Port:      s.port,
+		Protocol:  s.proto,
+		Method:    s.req.Method,
+		URL:       fullURL,
+		Decision:  "deny",
+		Reason:    se.Reason,
+		AddrClass: se.AddrClass,
+		LatencyMs: s.latencyMs(),
+	})
+	p.cfg.Metrics.RecordRequest("deny", s.proto)
+	p.cfg.Metrics.RecordBlocked(se.Reason)
+	p.logDecision(decisionLog{
+		Domain: s.domain, Port: s.port, Protocol: s.proto,
+		Method: s.req.Method, URL: fullURL, Decision: "deny",
+		Reason: se.Reason, AddrClass: se.AddrClass,
 	})
 }
 
@@ -561,6 +598,7 @@ func (p *Proxy) mcpRequestScan(s *requestScope) (endSession bool) {
 		return false
 	}
 	s.wasMCP = true
+	p.reach(PathMCP)
 	fullURL := s.eventURL()
 	s.mcpSessKey = p.cfg.AgentID + ":" + s.domain
 	start := time.Now()
@@ -1052,6 +1090,7 @@ func (p *Proxy) forward(s *requestScope) (endSession bool) {
 func (p *Proxy) dialUpstream(s *requestScope) error {
 	upstream, err := p.dialTLS("tcp", net.JoinHostPort(s.domain, fmt.Sprintf("%d", s.port)), p.upstreamTLSConfig(s.domain))
 	if err != nil {
+		p.recordSSRFDeny(s, err)
 		return err
 	}
 	s.upstream = upstream
@@ -1187,6 +1226,7 @@ func (p *Proxy) mcpResponseScan(s *requestScope) (terminal bool) {
 // response is terminal for the connection, so this fully handles the request
 // (writing the deny/allow audit event) and always returns true.
 func (p *Proxy) relayMCPSSE(s *requestScope) (terminal bool) {
+	p.reach(PathSSE)
 	fullURL := s.eventURL()
 
 	// Headers go out first; the body is then teed through the SSE scanner into the

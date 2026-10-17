@@ -1,0 +1,3 @@
+package thing
+
+func Thing() {}

@@ -1,0 +1,7 @@
+{
+  "want": [
+    {"rule": "L4a", "file": "w/pure/violation.go", "line": 4},
+    {"rule": "L4a", "file": "w/pure/violation.go", "line": 6},
+    {"rule": "Z2", "file": "w/pure/violation.go", "line": 6}
+  ]
+}

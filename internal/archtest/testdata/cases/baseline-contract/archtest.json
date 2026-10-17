@@ -1,0 +1,9 @@
+{
+  "baseline": [
+    {"rule": "L3", "package": "w/pure", "why": "pre-migration", "allow": ["net/http"]},
+    {"rule": "L3", "package": "w/dom", "why": "fixed already"}
+  ],
+  "want": [
+    {"rule": "baseline", "file": "architecture.baseline.yaml", "line": 6}
+  ]
+}

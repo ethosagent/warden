@@ -20,13 +20,15 @@ var update = flag.Bool("update", false, "rewrite testdata/checksh golden files")
 const goShim = `#!/bin/bash
 echo "go $*" >> "$SHIM_LOG"
 case "$1 $2" in
-"vet ./..."*) ;;
+"vet "*) ;;
 "run github.com/golangci/"*) echo "lint ran" ;;
 "run docs/roadmap/gen.go") echo "roadmap ok" ;;
 "build ./..."*) ;;
 "run golang.org/x/vuln/"*) echo "No vulnerabilities found." ;;
 "test -race"*) echo "ok  	example.com/x	0.1s" ;;
+"test ./internal/archtest"*) echo "ok  	example.com/x/internal/archtest	0.2s" ;;
 "test -run"*) echo "bench output (discarded by the script)" ;;
+"build -o"*) printf '#!/bin/bash\nprintf "%%b" "$FAKE_PLAN"\n' > "$3"; chmod +x "$3" ;;
 "tool cover") printf 'x.go:1:\tF\t100.0%%\ntotal:\t(statements)\t%s\n' "${SHIM_COVERAGE:-85.9%}" ;;
 "test -tags=integration"*) echo "ok  	example.com/integration	0.2s" ;;
 *) echo "shim: unexpected go invocation: $*" >&2; exit 99 ;;
@@ -52,6 +54,36 @@ func checkScript(t *testing.T) string {
 	return abs
 }
 
+// sandboxScript copies the script into a throwaway repo root, because check.sh
+// cds to its own repo root and writes coverage.product.out there. In the sandbox
+// the run neither touches the real tree nor depends on whether the last full run
+// left a coverage.out behind. The fuzz target list is fixed so the golden files
+// do not change when a real target is added.
+func sandboxScript(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	body, err := os.ReadFile(checkScript(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{
+		"go.mod":                   "module example.com/x\n\ngo 1.24\n",
+		"coverage.out":             "",
+		"scripts/check.sh":         string(body),
+		"scripts/fuzz-targets.txt": "# sandbox list\nFuzzOne ./one\nFuzzTwo ./two\n",
+	}
+	for name, content := range files {
+		path := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return filepath.Join(root, "scripts", "check.sh")
+}
+
 func runCheckSh(t *testing.T, env []string, args ...string) string {
 	t.Helper()
 	shims := t.TempDir()
@@ -61,7 +93,7 @@ func runCheckSh(t *testing.T, env []string, args ...string) string {
 		}
 	}
 	logPath := filepath.Join(t.TempDir(), "log")
-	script := checkScript(t)
+	script := sandboxScript(t)
 	cmd := exec.Command("bash", append([]string{script}, args...)...)
 	cmd.Env = append([]string{"PATH=" + shims + ":/usr/bin:/bin", "HOME=" + t.TempDir(), "SHIM_LOG=" + logPath}, env...)
 	var stdout, stderr bytes.Buffer
@@ -135,6 +167,7 @@ func TestCheckShBannersMatchRunnerStages(t *testing.T) {
 		title = strings.ReplaceAll(title, "${GOLANGCI_VERSION}", "v2.12.2")
 		title = strings.ReplaceAll(title, "${GOVULNCHECK_VERSION}", "v1.5.0")
 		title = strings.ReplaceAll(title, "${COVERAGE_MIN}", "70")
+		title = strings.ReplaceAll(title, "${FUZZTIME}", "5s")
 		script = append(script, title)
 	}
 	r := &runner{cfg: config{Integration: true, CoverageMin: 70, GolangciVersion: "v2.12.2", GovulncheckVersion: "v1.5.0"}}
@@ -159,12 +192,20 @@ func TestCheckShReportModePassesExactArguments(t *testing.T) {
 		want string
 	}{
 		{"json", nil, []string{"--json"},
-			"-coverage-min 70 -golangci-version v2.12.2 -govulncheck-version v1.5.0 -json"},
+			"-coverage-min 70 -golangci-version v2.12.2 -govulncheck-version v1.5.0 -fuzz-time 5s -json"},
 		{"json-integration-min", []string{"COVERAGE_MIN=81.5", "GOLANGCI_VERSION=v9.9.9", "GOVULNCHECK_VERSION=v8.8.8"},
 			[]string{"--json", "--integration"},
-			"-coverage-min 81.5 -golangci-version v9.9.9 -govulncheck-version v8.8.8 -integration -json"},
+			"-coverage-min 81.5 -golangci-version v9.9.9 -govulncheck-version v8.8.8 -fuzz-time 5s -integration -json"},
 		{"keep-going-json-out", nil, []string{"--keep-going", "--json-out", "/tmp/r.json"},
-			"-coverage-min 70 -golangci-version v2.12.2 -govulncheck-version v1.5.0 -keep-going -json-out /tmp/r.json"},
+			"-coverage-min 70 -golangci-version v2.12.2 -govulncheck-version v1.5.0 -fuzz-time 5s -keep-going -json-out /tmp/r.json"},
+		{"fast", nil, []string{"--fast", "--json"},
+			"-coverage-min 70 -golangci-version v2.12.2 -govulncheck-version v1.5.0 -fuzz-time 5s -fast -json"},
+		{"list-stages", nil, []string{"--list-stages"},
+			"-list-stages -golangci-version v2.12.2 -govulncheck-version v1.5.0 -fuzz-time 5s"},
+		{"list-stages-integration-json", nil, []string{"--json", "--integration", "--list-stages"},
+			"-list-stages -golangci-version v2.12.2 -govulncheck-version v1.5.0 -fuzz-time 5s -integration -json"},
+		{"fuzztime-env", []string{"FUZZTIME=30s"}, []string{"--json"},
+			"-coverage-min 70 -golangci-version v2.12.2 -govulncheck-version v1.5.0 -fuzz-time 30s -json"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -192,5 +233,131 @@ func TestCheckShReportModePassesExactArguments(t *testing.T) {
 				t.Errorf("checkreport args\n got: %s\nwant: %s", strings.TrimSpace(string(got)), tc.want)
 			}
 		})
+	}
+}
+
+// plan is what the stub planner prints for `checkreport -fast-plan`.
+const (
+	planTwoPkgs = `fast\torigin/main@abc123\nexample.com/x/internal/a\tinternal/a\tchanged: internal/a/a.go\nexample.com/x/internal/b\tinternal/b\timports internal/a\n`
+	planNone    = `fast\torigin/main@abc123\n`
+	planFull    = `full\torigin/main is not available (shallow clone or no remote); run git fetch origin main\n`
+)
+
+func bannersIn(out string) []string {
+	var titles []string
+	for _, m := range regexp.MustCompile(`(?m)^=== (.+) ===$`).FindAllStringSubmatch(out, -1) {
+		if m[1] != "all checks passed" {
+			titles = append(titles, m[1])
+		}
+	}
+	return titles
+}
+
+func commandsIn(out string) []string {
+	_, cmds, _ := strings.Cut(out, "--- commands ---\n")
+	return strings.Split(strings.TrimSpace(cmds), "\n")
+}
+
+// --fast in plain mode checks exactly the planned packages and nothing that is
+// not per-package.
+func TestCheckShFastPlainMode(t *testing.T) {
+	out := runCheckSh(t, []string{"FAKE_PLAN=" + planTwoPkgs}, "--fast")
+	if !strings.HasPrefix(out, "exit: 0\n") {
+		t.Fatalf("want exit 0:\n%s", out)
+	}
+	for _, want := range []string{
+		"fast: 2 package(s) against origin/main@abc123",
+		"./internal/a  (changed: internal/a/a.go)",
+		"./internal/b  (imports internal/a)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+	want := []string{
+		"gofmt -l .",
+		"go vet ./internal/a ./internal/b",
+		"go test ./internal/archtest -run TestArchitecture",
+		"go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run --config .golangci.arch.yml ./internal/a ./internal/b",
+		"go test -race ./internal/a ./internal/b",
+	}
+	got := commandsIn(out)
+	// The first logged command is the planner build; drop it.
+	if len(got) == 0 || !strings.HasPrefix(got[0], "go build -o ") {
+		t.Fatalf("commands = %v", got)
+	}
+	got = got[1:]
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("commands\n got: %v\nwant: %v", got, want)
+	}
+}
+
+func TestCheckShFastPlainModeNoGoChange(t *testing.T) {
+	out := runCheckSh(t, []string{"FAKE_PLAN=" + planNone}, "--fast")
+	if !strings.HasPrefix(out, "exit: 0\n") || !strings.Contains(out, "no Go package changed") {
+		t.Fatalf("output:\n%s", out)
+	}
+	if got := bannersIn(out); strings.Join(got, "|") != "format (gofmt)" {
+		t.Errorf("banners = %v", got)
+	}
+	for _, c := range commandsIn(out) {
+		if strings.HasPrefix(c, "go vet") || strings.HasPrefix(c, "go test") || strings.Contains(c, "golangci") {
+			t.Errorf("ran %q with no package to check", c)
+		}
+	}
+}
+
+// With no origin/main the plan is "full": the whole gate runs, and says why.
+func TestCheckShFastFallsBackToFullGate(t *testing.T) {
+	out := runCheckSh(t, []string{"FAKE_PLAN=" + planFull}, "--fast")
+	if !strings.HasPrefix(out, "exit: 0\n") || !strings.Contains(out, "fast: running the FULL gate: origin/main is not available") {
+		t.Fatalf("output:\n%s", out)
+	}
+	all := strings.Join(commandsIn(out), "\n")
+	for _, want := range []string{"govulncheck", "-coverprofile=coverage.out ./...", "-fuzz ^FuzzOne$", "-bench", "tool cover"} {
+		if !strings.Contains(all, want) {
+			t.Errorf("full-gate fallback did not run %q:\n%s", want, all)
+		}
+	}
+}
+
+func TestCheckShFastRejectsIntegration(t *testing.T) {
+	out := runCheckSh(t, []string{"FAKE_PLAN=" + planTwoPkgs}, "--fast", "--integration")
+	if !strings.HasPrefix(out, "exit: 2\n") || !strings.Contains(out, "--fast cannot be combined with --integration") {
+		t.Fatalf("output:\n%s", out)
+	}
+}
+
+// Plain mode and report mode must run the same stages for the same plan. The
+// plain run's banners are compared with the stages tools/checkreport would run.
+func TestCheckShFastStagesMatchRunner(t *testing.T) {
+	for name, tc := range map[string]struct {
+		plan string
+		pkgs []FastPkg
+	}{
+		"packages":  {planTwoPkgs, []FastPkg{{Package: "a", Dir: "internal/a"}}},
+		"no change": {planNone, nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			out := runCheckSh(t, []string{"FAKE_PLAN=" + tc.plan}, "--fast")
+			r := &runner{cfg: config{Integration: false, CoverageMin: 70, GolangciVersion: "v2.12.2", GovulncheckVersion: "v1.5.0"},
+				plan: &FastPlan{Packages: tc.pkgs}}
+			var want []string
+			for _, d := range r.stages() {
+				want = append(want, d.title)
+			}
+			if got := bannersIn(out); strings.Join(got, "\n") != strings.Join(want, "\n") {
+				t.Errorf("plain --fast stages differ from the report runner.\nplain:\n  %s\nrunner:\n  %s",
+					strings.Join(got, "\n  "), strings.Join(want, "\n  "))
+			}
+		})
+	}
+}
+
+// --list-stages runs nothing: it cannot be combined with the inner-loop plan.
+func TestCheckShListStagesRejectsFast(t *testing.T) {
+	out := runCheckSh(t, nil, "--list-stages", "--fast")
+	if !strings.HasPrefix(out, "exit: 2\n") || !strings.Contains(out, "--list-stages cannot be combined with --fast") {
+		t.Fatalf("output:\n%s", out)
 	}
 }

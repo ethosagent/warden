@@ -90,9 +90,13 @@ func (p *Proxy) handleGRPC(clientConn net.Conn, domain string, port int, needsJu
 func (p *Proxy) serveGRPCStream(w http.ResponseWriter, r *http.Request, rt *http2.Transport, domain string, port int, needsJudge bool) {
 	isGRPC := strings.HasPrefix(r.Header.Get("Content-Type"), "application/grpc")
 	proto := "http2"
+	path := PathH2
 	if isGRPC {
 		proto = "grpc"
+		path = PathGRPC
 	}
+	p.reach(path)
+
 	s := &requestScope{
 		out:        h2Sink{w: w},
 		rt:         rt,
@@ -142,6 +146,10 @@ func (p *Proxy) forwardH2(s *requestScope) (endSession bool) {
 
 	resp, err := s.rt.RoundTrip(outReq)
 	if err != nil {
+		// The transport surfaces the DialTLSContext error unwrapped, so a dial
+		// the SSRF-safe dialer refused is audited here (#391); ordinary
+		// failures remain a plain 502 with no event.
+		p.recordSSRFDeny(s, err)
 		return p.badGateway(s)
 	}
 	s.resp = resp

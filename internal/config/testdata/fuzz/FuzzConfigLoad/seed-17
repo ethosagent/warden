@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("listen: {addr: \"0.0.0.0:8080\"}\n")
