@@ -28,6 +28,10 @@ type decisionLog struct {
 	// carries request content.
 	Reason string
 	Detail string
+	// AddrClass is the bounded address class behind an ssrf_* Reason (see
+	// SSRFError). Empty unless Reason is one of the ssrf_* enums; it never
+	// carries a resolved address.
+	AddrClass string
 }
 
 // logDecision emits one structured record next to the analytics StoreEvent.
@@ -60,6 +64,9 @@ func (p *Proxy) logDecision(d decisionLog) {
 	}
 	if d.Detail != "" {
 		attrs = append(attrs, slog.String("detail", d.Detail))
+	}
+	if d.AddrClass != "" {
+		attrs = append(attrs, slog.String("addr_class", d.AddrClass))
 	}
 	if d.Decision == "deny" {
 		p.cfg.Logger.Warn("egress decision", attrs...)

@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+
+	"github.com/ethosagent/warden/internal/policy"
 )
 
 // RequestTransformer modifies an outbound HTTP request for authentication.
@@ -46,11 +48,18 @@ func NewMatchedTransformer(pattern string, t RequestTransformer) (*MatchedTransf
 }
 
 func (m *MatchedTransformer) Matches(host string) bool {
-	host = strings.ToLower(strings.TrimSuffix(host, "."))
-	pattern := strings.ToLower(m.Pattern)
+	// policy.NormalizeHost is the one shared host normalisation (#397): case
+	// and any number of trailing dots never decide the match, and a host that
+	// is only dots — or empty — matches nothing (the request would otherwise
+	// be forwarded without its credential).
+	host = policy.NormalizeHost(host)
+	if host == "" {
+		return false
+	}
 	if m.re != nil {
 		return m.re.MatchString(host)
 	}
+	pattern := policy.NormalizeHost(m.Pattern)
 	if suffix, ok := strings.CutPrefix(pattern, "*."); ok {
 		return host != suffix && strings.HasSuffix(host, "."+suffix)
 	}

@@ -10,11 +10,13 @@ package analytics
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
-	_ "modernc.org/sqlite" // pure-Go SQLite driver (no CGo)
+	sqlite "modernc.org/sqlite" // pure-Go SQLite driver (no CGo)
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 // AnalyticsStore records and queries proxy decision events.
@@ -56,6 +58,12 @@ type Event struct {
 	// secret, body, or domain. Empty on allow events unless a monitor-mode
 	// finding rode one (MCP/echo guard monitor reasons).
 	Reason string
+	// AddrClass is the bounded address class behind an SSRF dial refusal
+	// ("loopback", "private", "link_local", "metadata", "multicast",
+	// "reserved", "userinfo" — see proxy.SSRFError). It is set only on deny
+	// events whose Reason is an ssrf_* enum, and never carries the resolved
+	// address or the address list. Empty on every other event.
+	AddrClass string
 	// CostUSD is the estimated cost of this call in US dollars, derived
 	// heuristically from observed request/response byte sizes and a known
 	// provider's pricing (see internal/cost). Zero for non-LLM-provider traffic
@@ -285,8 +293,30 @@ func NewSQLiteStore(dsn string, maxEvents int) (*SQLiteStore, error) {
 	return s, nil
 }
 
+// migrateBusyTimeout is the busy timeout migrate installs on the store's write
+// handle: concurrent openers of one database file (a worker restart racing a
+// sibling worker or a dashboard) queue on SQLite's lock instead of failing
+// immediately. It is also the unit addColumnIfAbsent's retry budget is
+// expressed in.
+const migrateBusyTimeout = 5 * time.Second
+
+// migrateMaxWait bounds the total time one migrate statement may keep retrying
+// a busy database — several busy-timeout waits, so a flock of simultaneous
+// openers drains instead of any single one of them giving up.
+const migrateMaxWait = 3 * migrateBusyTimeout
+
+// migrateRetryDelay spaces busy retries. The busy timeout does the real
+// waiting inside SQLite; this just keeps the retry loop from spinning hot
+// between waits.
+const migrateRetryDelay = 50 * time.Millisecond
+
 // migrate creates the events table. Note there is no body column by design.
 func (s *SQLiteStore) migrate() error {
+	// Serialize against concurrent openers before touching the schema (below).
+	// The pragma itself takes no database lock, so it cannot fail busy.
+	if _, err := s.db.Exec(fmt.Sprintf(`PRAGMA busy_timeout = %d`, migrateBusyTimeout.Milliseconds())); err != nil {
+		return fmt.Errorf("analytics: migrate busy_timeout: %w", err)
+	}
 	const ddl = `
 CREATE TABLE IF NOT EXISTS events (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -312,7 +342,8 @@ CREATE TABLE IF NOT EXISTS events (
     dlp_encoded     INTEGER NOT NULL DEFAULT 0,
     latency_ms      INTEGER NOT NULL DEFAULT 0,
     swapped_refs    TEXT    NOT NULL DEFAULT '',
-    evidence        TEXT    NOT NULL DEFAULT ''
+    evidence        TEXT    NOT NULL DEFAULT '',
+    addr_class      TEXT    NOT NULL DEFAULT ''
 );`
 	if _, err := s.db.Exec(ddl); err != nil {
 		return fmt.Errorf("analytics: migrate: %w", err)
@@ -336,6 +367,7 @@ CREATE TABLE IF NOT EXISTS events (
 		{"latency_ms", `ALTER TABLE events ADD COLUMN latency_ms INTEGER NOT NULL DEFAULT 0`},
 		{"swapped_refs", `ALTER TABLE events ADD COLUMN swapped_refs TEXT NOT NULL DEFAULT ''`},
 		{"evidence", `ALTER TABLE events ADD COLUMN evidence TEXT NOT NULL DEFAULT ''`},
+		{"addr_class", `ALTER TABLE events ADD COLUMN addr_class TEXT NOT NULL DEFAULT ''`},
 	} {
 		if err := s.addColumnIfAbsent(c.name, c.ddl); err != nil {
 			return err
@@ -347,11 +379,72 @@ CREATE TABLE IF NOT EXISTS events (
 // addColumnIfAbsent runs an ALTER TABLE ADD COLUMN only when the column is not
 // already present, checked via PRAGMA table_info(events). This keeps migration
 // idempotent and forward-only without dropping data on persisted databases.
+//
+// Two processes can open the same database at once (a worker restart racing a
+// sibling worker or the dashboard): each may see the column absent and race to
+// ALTER. Losing that race is the migration already done, so for EVERY column —
+// the pre-#391 ones a very old database migrates through included — a
+// "duplicate column name" failure re-checks table_info and returns nil, and a
+// busy database is retried with a bounded backoff under the handle's busy
+// timeout (migrate sets it) instead of surfaced.
 func (s *SQLiteStore) addColumnIfAbsent(name, ddl string) error {
+	deadline := time.Now().Add(migrateMaxWait)
+	for {
+		present, err := s.columnPresent(name)
+		if err != nil {
+			return err
+		}
+		if present {
+			return nil
+		}
+		if _, err = s.db.Exec(ddl); err == nil {
+			return nil
+		}
+		var se *sqlite.Error
+		switch {
+		case isBusyErr(err):
+			// Another opener holds the write lock; wait it out and retry the
+			// whole check+ALTER, bounded by migrateMaxWait.
+			if time.Now().After(deadline) {
+				return fmt.Errorf("analytics: migrate add %s: %w", name, err)
+			}
+			time.Sleep(migrateRetryDelay)
+		case errors.As(err, &se) && se.Code()&0xff == sqlite3.SQLITE_ERROR:
+			// "duplicate column name: <name>" — a concurrent opener ALTERed
+			// between our table_info and this statement. The column existing
+			// IS the migration's goal: confirm by re-checking rather than by
+			// matching the error text, and succeed if it is there.
+			if present, perr := s.columnPresent(name); perr == nil && present {
+				return nil
+			}
+			return fmt.Errorf("analytics: migrate add %s: %w", name, err)
+		default:
+			return fmt.Errorf("analytics: migrate add %s: %w", name, err)
+		}
+	}
+}
+
+// columnPresent reports whether the events table has the given column, read
+// via PRAGMA table_info(events). A busy database — a concurrent opener holding
+// the write lock — is retried under the same bounded backoff as the ALTER.
+func (s *SQLiteStore) columnPresent(name string) (present bool, err error) {
+	deadline := time.Now().Add(migrateMaxWait)
+	for {
+		present, err = s.columnPresentOnce(name)
+		if err == nil || !isBusyErr(err) || time.Now().After(deadline) {
+			return present, err
+		}
+		time.Sleep(migrateRetryDelay)
+	}
+}
+
+// columnPresentOnce is one table_info read for columnPresent.
+func (s *SQLiteStore) columnPresentOnce(name string) (bool, error) {
 	rows, err := s.db.Query(`PRAGMA table_info(events)`)
 	if err != nil {
-		return fmt.Errorf("analytics: migrate table_info: %w", err)
+		return false, fmt.Errorf("analytics: migrate table_info: %w", err)
 	}
+	defer func() { _ = rows.Close() }()
 	present := false
 	for rows.Next() {
 		var (
@@ -363,27 +456,30 @@ func (s *SQLiteStore) addColumnIfAbsent(name, ddl string) error {
 			primaryKey int
 		)
 		if err := rows.Scan(&cid, &colName, &colType, &notNull, &dflt, &primaryKey); err != nil {
-			_ = rows.Close()
-			return fmt.Errorf("analytics: migrate scan table_info: %w", err)
+			return false, fmt.Errorf("analytics: migrate scan table_info: %w", err)
 		}
 		if colName == name {
 			present = true
 		}
 	}
 	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return fmt.Errorf("analytics: migrate table_info rows: %w", err)
+		return false, fmt.Errorf("analytics: migrate table_info rows: %w", err)
 	}
-	if err := rows.Close(); err != nil {
-		return fmt.Errorf("analytics: migrate table_info close: %w", err)
+	return present, nil
+}
+
+// isBusyErr reports whether err is SQLite's busy/locked family — a lock held
+// by a concurrent opener — extended codes included.
+func isBusyErr(err error) bool {
+	var se *sqlite.Error
+	if !errors.As(err, &se) {
+		return false
 	}
-	if present {
-		return nil
+	switch se.Code() & 0xff {
+	case sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED:
+		return true
 	}
-	if _, err := s.db.Exec(ddl); err != nil {
-		return fmt.Errorf("analytics: migrate add %s: %w", name, err)
-	}
-	return nil
+	return false
 }
 
 // Close releases both database handles.
@@ -427,7 +523,8 @@ func (s *SQLiteStore) StoreEvent(e Event) error {
 		e.CostUSD, e.Provider, encodeCompliance(e.Compliance),
 		encodeDataClasses(e.DataClasses), e.DLPAction, e.DLPRule,
 		boolToInt(e.DLPPartial), boolToInt(e.DLPEncoded),
-		e.LatencyMs, encodeSwappedRefs(e.SwappedRefs), encodeEvidence(e.Evidence))
+		e.LatencyMs, encodeSwappedRefs(e.SwappedRefs), encodeEvidence(e.Evidence),
+		e.AddrClass)
 	if err != nil {
 		return fmt.Errorf("analytics: insert event: %w", err)
 	}
@@ -437,8 +534,8 @@ func (s *SQLiteStore) StoreEvent(e Event) error {
 // insertColumns is the shared column list + placeholder tuple for an events
 // INSERT, used by both StoreEvent and StoreEventsBatch so the two paths can
 // never drift.
-const insertColumns = `(ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason, tool, reason, cost_usd, provider, compliance, data_classes, dlp_action, dlp_rule, dlp_partial, dlp_encoded, latency_ms, swapped_refs, evidence)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+const insertColumns = `(ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason, tool, reason, cost_usd, provider, compliance, data_classes, dlp_action, dlp_rule, dlp_partial, dlp_encoded, latency_ms, swapped_refs, evidence, addr_class)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 // StoreEventsBatch inserts every event in a single transaction — one fsync for
 // the whole batch instead of one per event — setting any zero timestamp to now,
@@ -474,7 +571,8 @@ func (s *SQLiteStore) StoreEventsBatch(evs []Event) error {
 			e.CostUSD, e.Provider, encodeCompliance(e.Compliance),
 			encodeDataClasses(e.DataClasses), e.DLPAction, e.DLPRule,
 			boolToInt(e.DLPPartial), boolToInt(e.DLPEncoded),
-			e.LatencyMs, encodeSwappedRefs(e.SwappedRefs), encodeEvidence(e.Evidence)); err != nil {
+			e.LatencyMs, encodeSwappedRefs(e.SwappedRefs), encodeEvidence(e.Evidence),
+			e.AddrClass); err != nil {
 			_ = tx.Rollback()
 			return fmt.Errorf("analytics: insert batch event: %w", err)
 		}
@@ -502,7 +600,7 @@ func (s *SQLiteStore) Prune() error {
 
 // GetEvents returns events matching filter, newest first.
 func (s *SQLiteStore) GetEvents(filter EventFilter) ([]Event, error) {
-	q := `SELECT ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason, tool, reason, cost_usd, provider, compliance, data_classes, dlp_action, dlp_rule, dlp_partial, dlp_encoded, latency_ms, swapped_refs, evidence
+	q := `SELECT ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason, tool, reason, cost_usd, provider, compliance, data_classes, dlp_action, dlp_rule, dlp_partial, dlp_encoded, latency_ms, swapped_refs, evidence, addr_class
           FROM events WHERE 1=1`
 	var args []any
 	if filter.Domain != "" {
@@ -553,7 +651,7 @@ func (s *SQLiteStore) GetEvents(filter EventFilter) ([]Event, error) {
 			&e.URL, &e.Decision, &e.ResponseStatus, &e.SecretRef, &e.JudgeReason, &e.Tool, &e.Reason,
 			&e.CostUSD, &e.Provider, &compliance,
 			&dataClasses, &e.DLPAction, &e.DLPRule, &dlpPartial, &dlpEncoded,
-			&e.LatencyMs, &swappedRefs, &evidence); err != nil {
+			&e.LatencyMs, &swappedRefs, &evidence, &e.AddrClass); err != nil {
 			return nil, fmt.Errorf("analytics: scan: %w", err)
 		}
 		e.Compliance = decodeCompliance(compliance)
@@ -582,7 +680,7 @@ func (s *SQLiteStore) count() (int, error) {
 
 // GetOldestEventIDs returns the IDs and events of the oldest N events.
 func (s *SQLiteStore) GetOldestEventIDs(limit int) ([]int64, []Event, error) {
-	const q = `SELECT id, ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason, tool, reason, cost_usd, provider, compliance, data_classes, dlp_action, dlp_rule, dlp_partial, dlp_encoded, latency_ms, swapped_refs, evidence
+	const q = `SELECT id, ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason, tool, reason, cost_usd, provider, compliance, data_classes, dlp_action, dlp_rule, dlp_partial, dlp_encoded, latency_ms, swapped_refs, evidence, addr_class
 	            FROM events ORDER BY id ASC LIMIT ?`
 	rows, err := s.db.Query(q, limit)
 	if err != nil {
@@ -608,7 +706,7 @@ func (s *SQLiteStore) GetOldestEventIDs(limit int) ([]int64, []Event, error) {
 			&e.URL, &e.Decision, &e.ResponseStatus, &e.SecretRef, &e.JudgeReason, &e.Tool, &e.Reason,
 			&e.CostUSD, &e.Provider, &compliance,
 			&dataClasses, &e.DLPAction, &e.DLPRule, &dlpPartial, &dlpEncoded,
-			&e.LatencyMs, &swappedRefs, &evidence); err != nil {
+			&e.LatencyMs, &swappedRefs, &evidence, &e.AddrClass); err != nil {
 			return nil, nil, fmt.Errorf("analytics: scan oldest IDs: %w", err)
 		}
 		e.Compliance = decodeCompliance(compliance)

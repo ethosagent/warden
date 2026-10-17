@@ -1,0 +1,97 @@
+name: fuzz-nightly
+
+# Runs every fuzz target in scripts/fuzz-targets.txt for much longer than the gate
+# does (scripts/check.sh gives each a few seconds). A crashing input is uploaded
+# as an artifact: it is the minimal reproducer. Triage it, fix the cause, then
+# commit the file under testdata/fuzz/ as a regression seed. A crash in policy,
+# CONNECT parsing or MCP parsing is a security finding: report it, do not just
+# delete the file.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      fuzztime:
+        description: "-fuzztime for each target (e.g. 30s, 10m, 1h)"
+        default: "10m"
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  targets:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.list.outputs.matrix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # One matrix entry per line of scripts/fuzz-targets.txt ("FuzzName ./pkg"),
+      # so adding a target to that file adds it here with no workflow change.
+      - name: List fuzz targets
+        id: list
+        run: |
+          entries="$(grep -v '^[[:space:]]*#' scripts/fuzz-targets.txt | awk 'NF >= 2 { printf "%s{\"name\":\"%s\",\"pkg\":\"%s\"}", sep, $1, $2; sep = "," }')"
+          if [ -z "$entries" ]; then
+            echo "scripts/fuzz-targets.txt lists no targets" >&2
+            exit 1
+          fi
+          echo "matrix={\"include\":[${entries}]}" >> "$GITHUB_OUTPUT"
+
+  fuzz:
+    needs: targets
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.targets.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          # No module/build cache: it would overlap the fuzz corpus cache below.
+          cache: false
+
+      # Keep the fuzzer's evolving corpus between nights so each run starts
+      # where the last one stopped.
+      - name: Restore fuzz corpus cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/go-build/fuzz
+          key: fuzz-corpus-${{ matrix.name }}-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-${{ matrix.name }}-
+
+      - name: Fuzz ${{ matrix.name }}
+        env:
+          FUZZ_NAME: ${{ matrix.name }}
+          FUZZ_PKG: ${{ matrix.pkg }}
+          FUZZTIME: ${{ inputs.fuzztime || '10m' }}
+        run: go test -run '^$' -fuzz "^${FUZZ_NAME}\$" -fuzztime="$FUZZTIME" "$FUZZ_PKG"
+
+      # A failing target writes its crasher to <pkg>/testdata/fuzz/<Target>/<id>,
+      # an untracked file; the committed seeds are tracked, so they are excluded.
+      - name: Collect crashers
+        if: failure()
+        run: |
+          mkdir -p crashers
+          git ls-files --others --exclude-standard -- '*/testdata/fuzz/*' | while read -r f; do
+            mkdir -p "crashers/$(dirname "$f")"
+            cp "$f" "crashers/$f"
+          done
+          find crashers -type f
+
+      - name: Upload crashers
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashers-${{ matrix.name }}
+          path: crashers
+          if-no-files-found: warn

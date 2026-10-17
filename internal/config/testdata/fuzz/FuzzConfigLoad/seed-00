@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("\npolicy:\n  allowlist:\n    - domain: api.openai.com\n    - domain: \"*.internal.company.com\"\n      port: 8443\n      rateLimit: \"100/hour\"\n      timeWindow: \"9-17\"\n\nsecrets:\n  - placeholder: openai_secret_001\n    envVar: OPENAI_API_KEY\n\ncache:\n  ttl: 1800\n\nlogging:\n  level: info\n  format: json\n")

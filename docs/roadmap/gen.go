@@ -8,6 +8,7 @@
 //
 //	go run docs/roadmap/gen.go docs                  # regenerate the docs
 //	go run docs/roadmap/gen.go check                 # fail if data is invalid or docs are stale
+//	go run docs/roadmap/gen.go check -json           # same, as one JSON document (scripts/check.sh --json)
 //	go run docs/roadmap/gen.go issues -repo owner/name -phases 1,2,3,4 [-dry-run] [-update]
 //
 // The issues command is idempotent: every issue carries a hidden
@@ -788,26 +789,68 @@ func cmdDocs(rm *Roadmap) error {
 	return nil
 }
 
-func cmdCheck(rm *Roadmap) error {
+// stale lists the generated files that differ from what tickets.json renders.
+func stale(rm *Roadmap) ([]string, error) {
 	files, err := rm.render()
 	if err != nil {
-		return err
+		return nil, err
 	}
-	var stale []string
+	var out []string
 	for path, body := range files {
 		cur, err := os.ReadFile(path)
 		if err != nil || !bytes.Equal(cur, []byte(body)) {
-			stale = append(stale, path)
+			out = append(out, path)
 		}
 	}
 	for _, f := range orphans(files) {
-		stale = append(stale, f+" (orphaned)")
+		out = append(out, f+" (orphaned)")
 	}
-	if len(stale) > 0 {
-		slices.Sort(stale)
-		return fmt.Errorf("roadmap docs are stale; run `go run docs/roadmap/gen.go docs`:\n  %s", strings.Join(stale, "\n  "))
+	slices.Sort(out)
+	return out, nil
+}
+
+func cmdCheck(rm *Roadmap) error {
+	out, err := stale(rm)
+	if err != nil {
+		return err
+	}
+	if len(out) > 0 {
+		return fmt.Errorf("roadmap docs are stale; run `go run docs/roadmap/gen.go docs`:\n  %s", strings.Join(out, "\n  "))
 	}
 	fmt.Println("roadmap ok")
+	return nil
+}
+
+// checkResult is the machine-readable form of `check`, printed by `check -json`
+// for scripts/check.sh --json (see tools/checkreport).
+type checkResult struct {
+	OK     bool     `json:"ok"`
+	Stale  []string `json:"stale,omitempty"`
+	Errors []string `json:"errors,omitempty"`
+}
+
+// cmdCheckJSON prints the check result as one JSON document on stdout. It
+// returns an error when the roadmap is not ok, so the exit code matches the
+// text form.
+func cmdCheckJSON(rm *Roadmap, loadErr error) error {
+	res := checkResult{}
+	if loadErr == nil {
+		var err error
+		res.Stale, err = stale(rm)
+		loadErr = err
+	}
+	if loadErr != nil {
+		res.Errors = []string{loadErr.Error()}
+	}
+	res.OK = len(res.Stale) == 0 && len(res.Errors) == 0
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(res); err != nil {
+		return err
+	}
+	if !res.OK {
+		return errors.New("roadmap check failed")
+	}
 	return nil
 }
 
@@ -1316,6 +1359,12 @@ func main() {
 		os.Exit(2)
 	}
 	rm, err := load()
+	if os.Args[1] == "check" && slices.Contains(os.Args[2:], "-json") {
+		if err := cmdCheckJSON(rm, err); err != nil {
+			os.Exit(1)
+		}
+		return
+	}
 	if err == nil {
 		switch os.Args[1] {
 		case "docs":

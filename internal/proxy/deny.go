@@ -29,6 +29,7 @@ type denyExtra struct {
 	LatencyMs      int64
 	SwappedRefs    []string
 	Evidence       []string
+	AddrClass      string // bounded address class behind an ssrf_* reason (#391)
 }
 
 // emitDeny records one request-scoped deny — the analytics event, the
@@ -63,6 +64,7 @@ func (p *Proxy) emitDeny(s *requestScope, reason denyreason.Reason, extra ...den
 		ev.LatencyMs = x.LatencyMs
 		ev.SwappedRefs = x.SwappedRefs
 		ev.Evidence = x.Evidence
+		ev.AddrClass = x.AddrClass
 	}
 	p.emitDenyEvent(ev)
 }
@@ -99,6 +101,7 @@ func (p *Proxy) emitDenyEventDetail(ev analytics.Event, detail string) {
 		Method: ev.Method, URL: ev.URL, Decision: "deny",
 		ResponseStatus: ev.ResponseStatus, SecretRef: ev.SecretRef,
 		JudgeReason: ev.JudgeReason, Reason: ev.Reason, Detail: detail,
+		AddrClass: ev.AddrClass,
 	})
 }
 
@@ -111,4 +114,14 @@ func gatewayDenyReason(reason string) denyreason.Reason {
 		return denyreason.Reason(reason)
 	}
 	return denyreason.MCPGatewayDeny
+}
+
+// ssrfDenyReason maps a SafeDialer refusal to its declared deny reason (#391).
+// An unknown refusal reason falls back to ssrf_blocked: it is still an SSRF
+// refusal, and the chokepoint never records an undeclared reason.
+func ssrfDenyReason(se *SSRFError) denyreason.Reason {
+	if se.Reason == SSRFReasonDeniedHostname {
+		return denyreason.SSRFDeniedHostname
+	}
+	return denyreason.SSRFBlocked
 }

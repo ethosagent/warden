@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("CONNECT 0x7f000001:443 HTTP/1.1\r\n\r\n")

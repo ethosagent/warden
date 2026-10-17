@@ -34,9 +34,16 @@ const (
 )
 
 func (p *Proxy) Serve(ctx context.Context) error {
-	ln, err := net.Listen("tcp", p.cfg.ListenAddr)
-	if err != nil {
-		return fmt.Errorf("proxy: listen: %w", err)
+	// An injected Listener (assembly-only harness seam) replaces the ListenAddr
+	// bind; nil keeps the production bind exactly as before. Either way the
+	// ctx-done goroutine below owns closing it.
+	ln := p.cfg.Listener
+	if ln == nil {
+		var err error
+		ln, err = net.Listen("tcp", p.cfg.ListenAddr)
+		if err != nil {
+			return fmt.Errorf("proxy: listen: %w", err)
+		}
 	}
 	p.listenerMu.Lock()
 	p.listener = ln
@@ -233,16 +240,7 @@ func (p *Proxy) handleConn(conn net.Conn) {
 	}
 
 	_, _ = fmt.Fprint(conn, "HTTP/1.1 200 Connection Established\r\n\r\n")
-	_ = p.analyticsStore().StoreEvent(analytics.Event{
-		Timestamp: time.Now(),
-		Domain:    domain,
-		Port:      port,
-		Protocol:  "tcp",
-		Decision:  "allow",
-	})
-	p.cfg.Metrics.RecordRequest("allow", "tcp")
-	p.logDecision(decisionLog{Domain: domain, Port: port, Protocol: "tcp", Decision: "allow"})
-	p.tunnel(conn, br, net.JoinHostPort(domain, fmt.Sprintf("%d", port)))
+	p.tunnel(conn, br, domain, port)
 }
 
 // rejectPreamble answers an over-limit CONNECT preamble with an HTTP error and
@@ -276,11 +274,59 @@ func (p *Proxy) storeDeny(domain string, port int, protocol string, reason denyr
 	}, detail)
 }
 
-func (p *Proxy) tunnel(client net.Conn, br *bufio.Reader, targetAddr string) {
-	remote, err := p.dialFunc("tcp", targetAddr)
+// storeSSRFDeny records the deny decision for a dial the SSRF-safe dialer
+// refused (#391): the event carries the bounded ssrf_* reason and the address
+// class, never the resolved address list. It is a no-op — returning false — for
+// any other error, so ordinary dial failures (DNS failure, timeout, connection
+// refused) are never mis-audited as ssrf_*.
+func (p *Proxy) storeSSRFDeny(domain string, port int, protocol string, err error) bool {
+	se, ok := AsSSRFError(err)
+	if !ok {
+		return false
+	}
+	p.emitDenyEvent(analytics.Event{
+		Timestamp: time.Now(),
+		Domain:    domain,
+		Port:      port,
+		Protocol:  protocol,
+		Reason:    string(ssrfDenyReason(se)),
+		AddrClass: se.AddrClass,
+	})
+	return true
+}
+
+// storeAllow records the single allow decision for an admitted CONNECT
+// (event + metric + log line), the raw-tunnel counterpart of storeDeny.
+func (p *Proxy) storeAllow(domain string, port int, protocol string) {
+	_ = p.analyticsStore().StoreEvent(analytics.Event{
+		Timestamp: time.Now(),
+		Domain:    domain,
+		Port:      port,
+		Protocol:  protocol,
+		Decision:  "allow",
+	})
+	p.cfg.Metrics.RecordRequest("allow", protocol)
+	p.logDecision(decisionLog{Domain: domain, Port: port, Protocol: protocol, Decision: "allow"})
+}
+
+// tunnel completes a raw (non-TLS-terminating) CONNECT: dial the destination
+// through the SSRF-safe dialer, audit ONE decision event, then pipe both ways.
+// The allow audit is written only once the dial succeeds (#391), so a refused
+// dial records the deny instead and the dashboard shows the final decision —
+// never an allow followed by a deny for the same CONNECT. The client, which
+// already has its 200, sees the tunnel close either way. An ordinary dial
+// failure is not a policy decision: it keeps the allow audit the CONNECT has
+// always gotten, unchanged from before #391.
+func (p *Proxy) tunnel(client net.Conn, br *bufio.Reader, domain string, port int) {
+	p.reach(PathTunnel)
+	remote, err := p.dialFunc("tcp", net.JoinHostPort(domain, fmt.Sprintf("%d", port)))
 	if err != nil {
+		if !p.storeSSRFDeny(domain, port, "tcp", err) {
+			p.storeAllow(domain, port, "tcp")
+		}
 		return
 	}
+	p.storeAllow(domain, port, "tcp")
 
 	var wg sync.WaitGroup
 	wg.Add(2)

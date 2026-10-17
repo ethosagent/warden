@@ -63,8 +63,13 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 			p.storeDeny(domain, port, "tcp", denyreason.NoTLS, "")
 			return
 		}
+		p.reach(PathTunnel)
 		remote, dialErr := p.dialFunc("tcp", net.JoinHostPort(domain, fmt.Sprintf("%d", port)))
 		if dialErr != nil {
+			// A dial the SSRF-safe dialer refused is a policy decision: audit it
+			// (silent before #391). Ordinary dial failures stay silent — this
+			// passthrough never wrote an event for them either.
+			p.storeSSRFDeny(domain, port, "tcp", dialErr)
 			return
 		}
 		_ = p.analyticsStore().StoreEvent(analytics.Event{
@@ -151,15 +156,20 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 	}
 
 	// Unrecognized protocol inside TLS: raw forwarding.
-	remote, dialErr := p.dialTLS("tcp", net.JoinHostPort(domain, fmt.Sprintf("%d", port)), &tls.Config{ServerName: domain})
-	if dialErr != nil {
-		return
-	}
-	defer remote.Close()
 	proto := detected.String()
 	if detected == protocol.Unknown {
 		proto = "raw"
 	}
+	p.reach(PathRawTLS)
+	remote, dialErr := p.dialTLS("tcp", net.JoinHostPort(domain, fmt.Sprintf("%d", port)), p.upstreamTLSConfig(domain))
+	if dialErr != nil {
+		// A dial the SSRF-safe dialer refused is a policy decision: audit it
+		// under the same protocol label the allow would have used (silent
+		// before #391). Ordinary dial failures stay silent, as before.
+		p.storeSSRFDeny(domain, port, proto, dialErr)
+		return
+	}
+	defer remote.Close()
 	_ = p.analyticsStore().StoreEvent(analytics.Event{
 		Timestamp: time.Now(),
 		Domain:    domain,

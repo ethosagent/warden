@@ -5,7 +5,9 @@ cmd/proxy/proxy
 
 # Coverage / test output
 coverage.out
+coverage.product.out
 *.out
+check-report.json
 
 # Generated proxy certs/keys (gen-certs.sh) — NEVER commit private keys
 /certs/
@@ -30,3 +32,11 @@ coverage.out
 
 # Internal design material — not shipped
 plan/
+
+# Binaries of the tools/ commands built in place (`go build ./tools/x` in the root or in tools/x)
+/checkreport
+/gatecheck
+/riskmap
+/tools/checkreport/checkreport
+/tools/gatecheck/gatecheck
+/tools/riskmap/riskmap
