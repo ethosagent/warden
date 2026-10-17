@@ -71,6 +71,9 @@ type Policy struct {
 	// ResponseScan configures scanning of ordinary (non-MCP) HTTP/HTTPS response
 	// bodies. Off by default; when disabled every field is zero-valued and harmless.
 	ResponseScan ResponseScanConfig `json:"-"`
+	// EchoGuard configures the check for swapped secrets echoed back in a response.
+	// ON by default (zero value = enabled, block), independent of ResponseScan.
+	EchoGuard EchoGuardConfig `json:"-"`
 	// DLP configures outbound REQUEST-body data-loss-prevention scanning. Off by
 	// default; when off the dlpScan stage is a no-op (no body read) and behavior
 	// is byte-identical to before.
@@ -272,6 +275,7 @@ type rawConfig struct {
 	Observability *rawObservability `yaml:"observability"`
 	MCP           *rawMCP           `yaml:"mcp"`
 	ResponseScan  *rawResponseScan  `yaml:"responseScan"`
+	EchoGuard     *rawEchoGuard     `yaml:"echoGuard"`
 	DLP           *rawDLP           `yaml:"dlp"`
 	Auth          []rawAuthEntry    `yaml:"auth"`
 	ControlPlane  *rawControlPlane  `yaml:"controlPlane"`
@@ -368,6 +372,7 @@ func parse(data []byte) (*LocalYAMLProvider, error) {
 	policy.Observability = parseObservability(raw.Observability)
 	policy.MCP = parseMCP(raw.MCP)
 	policy.ResponseScan = parseResponseScan(raw.ResponseScan)
+	policy.EchoGuard = parseEchoGuard(raw.EchoGuard)
 	policy.DLP = parseDLP(raw.DLP)
 	policy.Auth = parseAuth(raw.Auth)
 	cp, err := parseControlPlane(raw.ControlPlane)
@@ -576,6 +581,9 @@ func validate(p Policy) error {
 		return err
 	}
 	if err := validateResponseScan(p.ResponseScan); err != nil {
+		return err
+	}
+	if err := validateEchoGuard(p.EchoGuard); err != nil {
 		return err
 	}
 	if err := validateDLP(p.DLP); err != nil {
