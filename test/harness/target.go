@@ -101,6 +101,11 @@ type inprocess struct {
 	caPool   *x509.CertPool
 	tokenEnv string
 
+	// cpDownAtBoot makes Start bind the control plane (to learn its address) and
+	// release it again before any worker boots, so the workers' first policy pull
+	// finds nothing listening.
+	cpDownAtBoot bool
+
 	// eventsMu guards the lazily-opened read handles.
 	eventsMu    sync.Mutex
 	eventStores []*analytics.SQLiteStore
@@ -117,6 +122,9 @@ func (ip *inprocess) Start(ctx context.Context) error {
 	if !ip.cp.running() {
 		if err := ip.cp.start(ctx); err != nil {
 			return err
+		}
+		if ip.cpDownAtBoot {
+			ip.cp.stop()
 		}
 	}
 	for _, w := range ip.workers {
