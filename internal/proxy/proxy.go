@@ -60,6 +60,34 @@ type Config struct {
 	// Serve closes it on the same ctx-done path that closes a self-bound one.
 	Listener net.Listener
 
+	// Mode selects what Serve listens for (#376): "" / forward = the explicit
+	// CONNECT proxy on ListenAddr, byte-identical to before this field existed;
+	// transparent = only the transparent interception listeners (the CONNECT
+	// listener does not bind); both = both. Assembly input filled by the worker
+	// from the RESOLVED local config — internal/config has already validated the
+	// YAML surface (mode enum, listener presence, clashes) before this is set.
+	Mode config.ProxyMode
+	// TransparentHTTPSListen / TransparentHTTPListen are the transparent bind
+	// addresses (proxy.transparent.httpsListen / httpListen). An empty
+	// TransparentHTTPListen means plain HTTP is NOT served. Transparent/both
+	// mode requires a HTTPS listener (or the Listener seam below) and a CA.
+	TransparentHTTPSListen string
+	TransparentHTTPListen  string
+	// TransparentHTTPSListener / TransparentHTTPListener, when set, replace the
+	// binds above. Assembly-only (harness seam), exactly like Listener: the L1
+	// harness passes loopback listeners on port 0 so an in-process worker binds
+	// no fixed interception port. Serve closes them on the ctx-done path.
+	TransparentHTTPSListener net.Listener
+	TransparentHTTPListener  net.Listener
+	// OnTransparentReady, when set, is called exactly once by Serve after the
+	// transparent listeners are bound and the loop guard is installed, with
+	// their bound addresses — "" for the plain-HTTP address when httpListen is
+	// unset — so an assembler learns the real port-0 addresses before any
+	// client dials (the kernel backlogs hold early connections until the accept
+	// loops start). Assembly-only (worker → harness seam), like Listener; nil
+	// changes nothing. Must not block.
+	OnTransparentReady func(httpsAddr, httpAddr string)
+
 	// Judge is the optional inline LLM judge. When nil the proxy behaves exactly
 	// as before: a NoMatch destination is default-denied. When set, NoMatch
 	// requests are forwarded to TLS termination so the judge can inspect the full
@@ -262,6 +290,10 @@ type Proxy struct {
 	caCert     *x509.Certificate
 	caKey      crypto.PrivateKey
 	certCache  sync.Map
+	// certStoreMu guards the BOUNDED insert path (storeLeafCert's size check +
+	// eviction); the hot hit path stays the lock-free Load. Mints are rare next
+	// to hits, so the mutex never sits on the per-connection fast path.
+	certStoreMu sync.Mutex
 	// certFlight collapses concurrent cache misses for the same domain so a hot
 	// new domain mints exactly one leaf instead of stampeding N keygens.
 	certFlight singleflight.Group
@@ -276,8 +308,27 @@ type Proxy struct {
 	// tests can drive the slowloris path without a real 10 s sleep; production
 	// leaves it zero-valued.
 	preambleTimeout time.Duration
-	dialFunc        func(network, addr string) (net.Conn, error)
-	dialTLS         func(network, addr string, cfg *tls.Config) (*tls.Conn, error)
+	// handshakeTimeout is the injectable TLS-handshake deadline in
+	// terminateAndDispatch (0 = handshakeTimeout const). Like preambleTimeout it
+	// exists only so white-box tests can drive the stalled-handshake path
+	// without a real 10 s sleep; production leaves it zero-valued.
+	handshakeTimeout time.Duration
+	// certCacheCap is the injectable leaf-cache entry cap (0 =
+	// maxCertCacheEntries). Like leafTTL it exists only so white-box tests can
+	// drive the eviction path without minting 10k certificates; production
+	// leaves it zero-valued.
+	certCacheCap int
+	dialFunc     func(network, addr string) (net.Conn, error)
+	dialTLS      func(network, addr string, cfg *tls.Config) (*tls.Conn, error)
+	// safeDial is the dialer behind dialFunc/dialTLS when production built it
+	// (nil under an injected cfg.Dialer). Serve uses it to install the
+	// transparent-mode loop-guard set (#376).
+	safeDial *SafeDialer
+	// transparentHTTPSAddr / transparentHTTPAddr are the bound transparent
+	// listeners' addresses, guarded by listenerMu like listener (nil until
+	// Serve binds them).
+	transparentHTTPSAddr net.Addr
+	transparentHTTPAddr  net.Addr
 	// grpcMaxFrame is the injectable gRPC frame inspection bound (0 =
 	// maxGRPCFrameBytes), so white-box tests can hit the oversize path cheaply.
 	grpcMaxFrame int
@@ -573,8 +624,39 @@ func New(cfg Config) (*Proxy, error) {
 		if err != nil {
 			return nil, fmt.Errorf("proxy: safe dialer: %w", err)
 		}
+		p.safeDial = safeDial
 		p.dialFunc = safeDial.Dial
 		p.dialTLS = safeDial.DialTLS
+	}
+
+	// Interception mode (#376): "" is forward — the CONNECT proxy alone,
+	// byte-identical to before the mode existed. The mode enum and the
+	// transparent listener/CA rules mirror internal/config's boot-time checks:
+	// this is the same wall in front of a second door (assembly may construct
+	// Config directly, without going through YAML).
+	if cfg.Mode == "" {
+		cfg.Mode = config.DefaultProxyMode
+	}
+	// The struct was built before the mode defaulted; mirror it back so p.cfg
+	// (what Serve and the accessors read) carries the RESOLVED mode.
+	p.cfg.Mode = cfg.Mode
+	switch cfg.Mode {
+	case config.ProxyModeForward, config.ProxyModeTransparent, config.ProxyModeBoth:
+	default:
+		return nil, fmt.Errorf("proxy: mode %q is invalid; must be one of: forward, transparent, both", cfg.Mode)
+	}
+	if cfg.Mode == config.ProxyModeForward {
+		if cfg.TransparentHTTPSListen != "" || cfg.TransparentHTTPListen != "" ||
+			cfg.TransparentHTTPSListener != nil || cfg.TransparentHTTPListener != nil {
+			return nil, fmt.Errorf("proxy: transparent listeners are configured but mode is %q; set mode to transparent or both", cfg.Mode)
+		}
+	} else {
+		if cfg.TransparentHTTPSListener == nil && cfg.TransparentHTTPSListen == "" {
+			return nil, fmt.Errorf("proxy: mode %q requires a transparent HTTPS listener (TransparentHTTPSListen)", cfg.Mode)
+		}
+		if p.caCert == nil {
+			return nil, fmt.Errorf("proxy: mode %q intercepts TLS and requires a CA (CACertPath/CAKeyPath)", cfg.Mode)
+		}
 	}
 
 	return p, nil
@@ -592,6 +674,51 @@ func (p *Proxy) Addr() net.Addr {
 		return ln.Addr()
 	}
 	return nil
+}
+
+// TransparentHTTPSAddr / TransparentHTTPAddr return the bound transparent
+// listeners' addresses (nil = not bound / not serving that port). They exist so
+// the worker and the harness can report where interception is reachable.
+func (p *Proxy) TransparentHTTPSAddr() net.Addr {
+	p.listenerMu.Lock()
+	defer p.listenerMu.Unlock()
+	return p.transparentHTTPSAddr
+}
+
+func (p *Proxy) TransparentHTTPAddr() net.Addr {
+	p.listenerMu.Lock()
+	defer p.listenerMu.Unlock()
+	return p.transparentHTTPAddr
+}
+
+// setTransparentAddrs records the bound transparent listener addresses (called
+// by Serve before the accept loops start).
+func (p *Proxy) setTransparentAddrs(https, http net.Addr) {
+	p.listenerMu.Lock()
+	p.transparentHTTPSAddr, p.transparentHTTPAddr = https, http
+	p.listenerMu.Unlock()
+}
+
+// installLoopGuard derives the self-listener set from the bound transparent
+// listeners and installs it into the production SafeDialer (#376), so an
+// upstream dial that resolves back into Warden's own listeners is refused.
+// With an injected Dialer seam (p.safeDial == nil) there is nothing to install
+// into: the harness dialer is expected to carry its own guard, mirroring how
+// the seam replaces the whole dialer.
+func (p *Proxy) installLoopGuard() {
+	if p.safeDial == nil {
+		return
+	}
+	var addrs []string
+	if a := p.TransparentHTTPSAddr(); a != nil {
+		addrs = append(addrs, a.String())
+	}
+	if a := p.TransparentHTTPAddr(); a != nil {
+		addrs = append(addrs, a.String())
+	}
+	if ips := selfListenerAddrs(addrs); len(ips) > 0 {
+		p.safeDial.SetSelfListenerIPs(ips)
+	}
 }
 
 // SplitHostPort parses a "host:port" destination into its host and numeric

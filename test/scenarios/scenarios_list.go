@@ -29,6 +29,15 @@ var All = slices.Concat(
 
 		// Fail closed: the control plane is down when the worker boots.
 		{Name: "fail_closed_at_boot", Opts: []harness.Option{harness.Fleet(1), harness.ControlPlaneDownAtBoot()}, Run: failClosedAtBoot},
+
+		// Transparent interception (#376): the same decisions without any proxy
+		// configuration — SNI/Host-gated listeners running the one pipeline.
+		// In-process only: the levers (TransparentAgent, loopback port-0
+		// interception listeners) are assembly-only; compose proves the mode on
+		// real networks in the e2e suite.
+		{Name: "transparent_tls_allow_with_swap", Opts: append(swapOpts(), harness.TransparentIntercept()), Run: transparentTLSServeAllowWithSwap},
+		{Name: "transparent_tls_deny_parity", Opts: []harness.Option{harness.TransparentIntercept()}, Run: transparentTLSServeDeny},
+		{Name: "transparent_plain_http_allow_with_swap", Opts: append(swapOpts(), harness.TransparentIntercept()), Run: transparentPlainHTTPAllowWithSwap},
 	},
 	// Canary across protocols x allow/deny; see canary.go.
 	canaryScenarios(),

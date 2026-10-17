@@ -12,11 +12,13 @@ import (
 	"io"
 	"math/big"
 	"net"
+	"sort"
 	"sync"
 	"time"
 
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/denyreason"
+	"github.com/ethosagent/warden/internal/policy"
 	"github.com/ethosagent/warden/internal/protocol"
 )
 
@@ -31,6 +33,12 @@ const defaultLeafTTL = 24 * time.Hour
 // using a short leafTTL and advancing the injected clock past NotAfter-skew.
 const leafRenewSkew = time.Hour
 
+// handshakeTimeout bounds the TLS handshake in terminateAndDispatch: a client
+// that delivers a hello (or a CONNECT tunnel) and then stalls would otherwise
+// hold its connection goroutine forever. It is the slowloris floor for the
+// termination step, one order above the preamble budgets.
+const handshakeTimeout = 10 * time.Second
+
 // cachedCert is the certCache value. It carries the leaf's NotAfter alongside
 // the certificate so the hot cache-hit path is a cheap time comparison instead
 // of re-parsing the DER on every connection. notAfter is set at mint time from
@@ -39,6 +47,15 @@ type cachedCert struct {
 	cert     *tls.Certificate
 	notAfter time.Time
 }
+
+// maxCertCacheEntries bounds the leaf cache. Its keys include client-chosen
+// names (transparent mode mints for every allowed SNI), so without a cap any
+// agent able to reach many names grows it without bound. Held as a constant on
+// purpose like the hello/preamble budgets: a knob would let a misconfiguration
+// re-open the unbounded-growth hole. The cap is large enough that a deployment
+// never evicts names it actually serves, and eviction prefers the entries
+// closest to NotAfter (see storeLeafCert).
+const maxCertCacheEntries = 10_000
 
 type bufferedConn struct {
 	io.Reader
@@ -54,6 +71,12 @@ func (c bufferedConn) Read(b []byte) (int, error) { return c.Reader.Read(b) }
 // shared stage pipeline). Every other path (opaque TLS passthrough, raw
 // forwarding) cannot be judged, so a needsJudge request there fails closed —
 // preserving the default-deny invariant.
+// handleTLS is the CONNECT-tunnel entry to TLS termination: it classifies the
+// first bytes (a CONNECT tunnel may carry anything) and fails closed for
+// needsJudge traffic that is not TLS, then hands the TLS case to
+// terminateAndDispatch — the SAME termination/dispatch path the transparent
+// :443 listener uses after its ClientHello gate (#376). Forward-mode behavior
+// is unchanged byte for byte.
 func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, port int, needsJudge bool) {
 	firstByte, err := br.Peek(1)
 	if err != nil || firstByte[0] != 0x16 {
@@ -101,6 +124,18 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 		return
 	}
 
+	p.terminateAndDispatch(clientConn, br, domain, port, needsJudge)
+}
+
+// terminateAndDispatch terminates TLS for domain with the MITM leaf cert and
+// dispatches by what the decrypted stream turns out to be: an ALPN-negotiated
+// or prior-knowledge h2 connection goes to handleGRPC, HTTP to handleHTTP,
+// everything else to a needsJudge fail-closed deny or the raw-TLS forward.
+// This is the ONE post-ClientHello path for both arrivals of an allowed TLS
+// destination — the CONNECT tunnel (handleTLS) and the transparent :443
+// listener (handleTransparentTLS, #376) — so policy, swap, scan, MCP and
+// analytics CANNOT diverge between the two modes.
+func (p *Proxy) terminateAndDispatch(clientConn net.Conn, firstBytes io.Reader, domain string, port int, needsJudge bool) {
 	leaf, err := p.getOrCreateCert(domain)
 	if err != nil {
 		return
@@ -110,11 +145,18 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 		Certificates: []tls.Certificate{*leaf},
 		NextProtos:   []string{"h2", "http/1.1"},
 	}
-	bc := bufferedConn{Reader: br, Conn: clientConn}
+	bc := bufferedConn{Reader: firstBytes, Conn: clientConn}
 	tlsConn := tls.Server(bc, tlsCfg)
+	// Bound the handshake: after the hello a client may stall mid-negotiation,
+	// and without a deadline that goroutine never returns. Both deadlines are
+	// lifted once the handshake completes — the tunnel's own lifetime is not
+	// governed by this budget.
+	deadline := time.Now().Add(p.handshakeDeadline())
+	_ = clientConn.SetDeadline(deadline)
 	if err := tlsConn.Handshake(); err != nil {
 		return
 	}
+	_ = clientConn.SetDeadline(time.Time{})
 	defer tlsConn.Close()
 
 	plainReader := bufio.NewReader(tlsConn)
@@ -138,7 +180,7 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 	detected := protocol.Detect(peekBytes)
 	switch detected {
 	case protocol.HTTP:
-		p.handleHTTP(tlsConn, plainReader, domain, port, needsJudge)
+		p.handleHTTP(tlsConn, plainReader, domain, port, needsJudge, policy.SchemeHTTPS, nil)
 		return
 	case protocol.HTTP2:
 		// Prior-knowledge h2 client (no ALPN): the peek saw the HTTP/2
@@ -263,8 +305,83 @@ func (p *Proxy) mintLeaf(domain string) (*tls.Certificate, error) {
 		PrivateKey:  leafKey,
 	}
 
-	p.certCache.Store(domain, &cachedCert{cert: cert, notAfter: notAfter})
+	p.storeLeafCert(domain, &cachedCert{cert: cert, notAfter: notAfter})
 	return cert, nil
+}
+
+// storeLeafCert inserts a freshly minted leaf, keeping the cache at or under
+// certCap() entries: when the cap is reached, entries closest to NotAfter are
+// evicted first — expired or in-renew-window ones outright, then the soonest
+// expiring — so a bound never forces a live, long-lived leaf out ahead of a
+// dying one. The hot getOrCreateCert hit path stays the lock-free Load it was
+// before; the whole insert path sits under certStoreMu (mints are rare next to
+// hits).
+func (p *Proxy) storeLeafCert(domain string, cc *cachedCert) {
+	if _, cached := p.certCache.Load(domain); cached {
+		// Replace in place: no growth, no eviction needed.
+		p.certCache.Store(domain, cc)
+		return
+	}
+	p.certStoreMu.Lock()
+	defer p.certStoreMu.Unlock()
+	limit := p.certCap()
+	if size := cacheSize(&p.certCache); size >= limit {
+		p.evictLeafCerts(size - limit + 1)
+	}
+	p.certCache.Store(domain, cc)
+}
+
+// evictLeafCerts removes n entries: every leaf already expired or inside its
+// renew window goes first (it is dead weight), and the rest by soonest
+// NotAfter. Called with certStoreMu held.
+func (p *Proxy) evictLeafCerts(n int) {
+	now := p.clock()
+	type entry struct {
+		domain   string
+		notAfter time.Time
+	}
+	var (
+		expired []entry
+		live    []entry
+	)
+	p.certCache.Range(func(key, value any) bool {
+		cc := value.(*cachedCert)
+		e := entry{domain: key.(string), notAfter: cc.notAfter}
+		if cc.notAfter.Add(-leafRenewSkew).Before(now) {
+			expired = append(expired, e)
+		} else {
+			live = append(live, e)
+		}
+		return true
+	})
+	sort.Slice(expired, func(i, j int) bool { return expired[i].notAfter.Before(expired[j].notAfter) })
+	sort.Slice(live, func(i, j int) bool { return live[i].notAfter.Before(live[j].notAfter) })
+	victims := append(expired, live...)
+	for _, v := range victims {
+		if n <= 0 {
+			return
+		}
+		p.certCache.Delete(v.domain)
+		n--
+	}
+}
+
+// certCap returns the leaf-cache entry cap, defaulting to maxCertCacheEntries
+// when the injectable certCacheCap field is unset (production). Tests shrink it
+// to drive the eviction path without minting thousands of certificates.
+func (p *Proxy) certCap() int {
+	if p.certCacheCap > 0 {
+		return p.certCacheCap
+	}
+	return maxCertCacheEntries
+}
+
+// cacheSize counts a sync.Map the only way it allows; called only on the
+// bounded insert path, never on a hit.
+func cacheSize(m *sync.Map) int {
+	n := 0
+	m.Range(func(_, _ any) bool { n++; return true })
+	return n
 }
 
 // clock returns the proxy's time source, defaulting to time.Now when the
@@ -285,4 +402,15 @@ func (p *Proxy) leafValidity() time.Duration {
 		return p.leafTTL
 	}
 	return defaultLeafTTL
+}
+
+// handshakeDeadline returns the terminateAndDispatch handshake deadline,
+// defaulting to the handshakeTimeout const when the injectable handshakeTimeout
+// field is unset (production). Tests shrink it to drive the stalled-handshake
+// cutoff within the test's lifetime.
+func (p *Proxy) handshakeDeadline() time.Duration {
+	if p.handshakeTimeout > 0 {
+		return p.handshakeTimeout
+	}
+	return handshakeTimeout
 }

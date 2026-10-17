@@ -40,7 +40,7 @@ E2E_COMPOSE=(-f deploy/compose/docker-compose.control-plane.yml -f deploy/compos
 TIMEOUT=5
 NEG_TARGETS=(http://1.1.1.1/ https://1.1.1.1/)
 DNS_SERVER=1.1.1.1
-SERVICES=(control-plane worker-1 worker-2 fakeupstream agent-1 agent-2)
+SERVICES=(control-plane worker-1 worker-2 worker-3 fakeupstream agent-1 agent-2 agent-3)
 [ -n "${HERMETICITY_SERVICES:-}" ] && read -ra SERVICES <<<"$HERMETICITY_SERVICES"
 
 problems=()
@@ -51,10 +51,11 @@ problems=()
 positive_control() {
 	case "$1" in
 	control-plane) echo "http://worker-1:9090/healthz" ;;           # cp-net → worker admin
-	worker-1 | worker-2) echo "http://10.200.0.10:8081/_health" ;;  # egress → fake recorder
+	worker-1 | worker-2 | worker-3) echo "http://10.200.0.10:8081/_health" ;;  # egress → fake recorder
 	fakeupstream) echo "http://127.0.0.1:8081/_health" ;;           # its own recorder
 	agent-1) echo "http://worker-1:9090/healthz" ;;                 # its only neighbor
 	agent-2) echo "http://worker-2:9090/healthz" ;;
+	agent-3) echo "http://worker-3:9090/healthz" ;;                 # its only neighbor
 	*) echo "" ;;
 	esac
 }

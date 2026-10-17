@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
 	"net"
@@ -232,4 +233,79 @@ func (s *cappedStore) GetEvents(analytics.EventFilter) ([]analytics.Event, error
 		return append([]analytics.Event(nil), s.events[:s.n]...), nil
 	}
 	return append([]analytics.Event(nil), s.events[:]...), nil
+}
+
+// sniHelloSeeds are the starting points the fuzzer mutates: well-formed hellos
+// (whole, fragmented, extended), the missing-SNI shapes, and the bytes that must
+// never become a gateable name — garbage, the plaintext h2 preface, truncations,
+// and hostile server_names (control bytes, IP literals, over-limit labels).
+var sniHelloSeeds = []string{
+	string(tlsRecord(0x16, helloWithSNI("backend.test"))),
+	string(append(tlsRecord(0x16, helloWithSNI("backend.test")), "\x16\x03\x01\x00\x05more"...)),
+	string(tlsRecord(0x16, helloWithSNI("Backend.Test."))),
+	string(splitRecord(helloWithSNI("backend.test"), 9)),
+	string(tlsRecord(0x16, helloWithSNI(""))),
+	// server_name extension with an empty list: no plaintext name (the ECH case).
+	string(tlsRecord(0x16, helloWithSNI("", []byte{0x00, 0x00, 0x00, 0x02, 0x00, 0x00}))),
+	string(tlsRecord(0x16, helloWithSNI("x\r\ny.backend.test"))),
+	string(tlsRecord(0x16, helloWithSNI("a\x00.backend.test"))),
+	string(tlsRecord(0x16, helloWithSNI("a b.test"))),
+	string(tlsRecord(0x16, helloWithSNI("192.0.2.10"))),
+	string(tlsRecord(0x16, helloWithSNI(strings.Repeat("x", 9000)))),
+	"NOT-TLS",
+	"GET / HTTP/1.1\r\n\r\n",
+	h2ClientPreface,
+	h2ClientPreface[:len(h2ClientPreface)-5],
+	string(tlsRecord(0x16, helloWithSNI("backend.test"))[:len(tlsRecord(0x16, helloWithSNI("backend.test")))-10]),
+	string([]byte{0x16, 0x03}),
+	string(tlsRecord(0x16, handshakeMsg(0x01, helloBody(nil, 3, 0x00, 0x13, 0x01)))),
+	string(tlsRecord(0x16, nil)),
+}
+
+// FuzzSniffClientHello drives the ClientHello parser with arbitrary bytes.
+// Properties: no panic; a parse error never carries a name; the recorded wire
+// never exceeds the input or the hello budget; and whatever name comes out is
+// either admitted by the LDH grammar as a normalised DNS name or rendered by
+// safeSNI as a bounded, escaped string a deny event can carry.
+func FuzzSniffClientHello(f *testing.F) {
+	for _, s := range sniHelloSeeds {
+		f.Add([]byte(s))
+	}
+	f.Fuzz(func(t *testing.T, raw []byte) {
+		sni, wire, err := sniffClientHello(bufio.NewReader(bytes.NewReader(raw)), maxClientHelloBytes)
+		if err != nil {
+			if sni != "" {
+				t.Fatalf("sniff error %v alongside a name %q", err, sni)
+			}
+			return
+		}
+		if len(wire) > len(raw) || len(wire) > maxClientHelloBytes {
+			t.Fatalf("replay wire is %d bytes (input %d, budget %d)", len(wire), len(raw), maxClientHelloBytes)
+		}
+		if sni == "" {
+			return // the missing-SNI case: nothing to gate on
+		}
+		name, ok := validateSNI(sni)
+		if !ok {
+			rendered := safeSNI(sni)
+			if len(rendered) > 4*maxSNIDenyBytes+2 {
+				t.Fatalf("safeSNI rendered %d bytes, want the 64-byte truncation bound", len(rendered))
+			}
+			if strings.ContainsRune(rendered, 0) || strings.ContainsAny(rendered, "\n\r") {
+				t.Fatalf("safeSNI carried a raw control byte: %q", rendered)
+			}
+			return
+		}
+		if name != strings.ToLower(strings.TrimSuffix(sni, ".")) {
+			t.Fatalf("admitted %q as %q: normalisation is not lower-case + one trailing dot", sni, name)
+		}
+		if len(name) > maxSNINameBytes || net.ParseIP(name) != nil {
+			t.Fatalf("admitted %q: over-limit or an IP literal", name)
+		}
+		for _, label := range strings.Split(name, ".") {
+			if !validLDHLabel(label) {
+				t.Fatalf("admitted %q: label %q is not LDH", name, label)
+			}
+		}
+	})
 }

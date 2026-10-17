@@ -338,10 +338,11 @@ func PollUntil(timeout time.Duration, cond func() (bool, string)) error {
 	}
 }
 
-// WaitStackReady waits for the CP and both workers' /healthz, the recorder,
-// and the CP's worker registry (both workers online = policy pulled).
+// WaitStackReady waits for the CP and every worker's /healthz, the recorder,
+// and the CP's worker registry (every worker online = policy pulled).
 func WaitStackReady() error {
-	urls := []string{CPBase + "/healthz", WorkerAdmin1 + "/healthz", WorkerAdmin2 + "/healthz", RecorderBase + RecorderHealth}
+	urls := []string{CPBase + "/healthz", WorkerAdmin1 + "/healthz", WorkerAdmin2 + "/healthz",
+		WorkerAdmin3 + "/healthz", RecorderBase + RecorderHealth}
 	return PollUntil(StackDeadline, func() (bool, string) {
 		for _, u := range urls {
 			if code, _, err := TryGet(u); err != nil || code != http.StatusOK {
@@ -363,7 +364,7 @@ func WaitStackReady() error {
 		for _, w := range ws {
 			online[w.ProxyID] = w.Online
 		}
-		if !online[SvcWorker1] || !online[SvcWorker2] {
+		if !online[SvcWorker1] || !online[SvcWorker2] || !online[SvcWorker3] {
 			return false, fmt.Sprintf("workers online: %v", online)
 		}
 		return true, ""

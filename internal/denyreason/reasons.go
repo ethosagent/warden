@@ -96,6 +96,28 @@ const (
 	// (no ClientHello / not HTTP inside TLS), so it fails closed.
 	NoTLS Reason = "no_tls"
 
+	// TransparentNoSNI: a TLS ClientHello on a transparent :443 listener carried
+	// no readable server_name — including an ECH-encrypted hello, whose real
+	// SNI Warden cannot read — so the destination is unknown and the handshake
+	// is refused (fail closed) (#376).
+	TransparentNoSNI Reason = "transparent_no_sni"
+	// TransparentBadClientHello: the bytes on a transparent :443 listener were
+	// not a parseable TLS ClientHello (truncated, over-limit or malformed)
+	// (#376).
+	TransparentBadClientHello Reason = "transparent_bad_client_hello"
+	// TransparentH2PriorKnowledge: plaintext HTTP/2 prior-knowledge bytes
+	// arrived on a transparent :443 listener, where no TLS ClientHello — and so
+	// no SNI to gate on — can exist (#376).
+	TransparentH2PriorKnowledge Reason = "transparent_h2_prior_knowledge"
+	// TransparentLoopGuard: an upstream dial resolved to one of Warden's OWN
+	// transparent listener addresses, so serving it would re-enter the proxy
+	// (an interception loop); the dial is refused (#376).
+	TransparentLoopGuard Reason = "transparent_loop_guard"
+	// MalformedRequest: the plain-HTTP transparent floor refused a request that
+	// is not parseable enough to gate — no Host header, or a header block over
+	// the byte budget (#376).
+	MalformedRequest Reason = "malformed_request"
+
 	// Judge: the inline LLM judge denied (or was disabled mid-flight for a
 	// NoMatch request). The free-text rationale rides JudgeReason, never here.
 	Judge Reason = "judge"
@@ -148,6 +170,9 @@ var declared = []Reason{
 	SecretEcho, SecretEchoUnscannable,
 	SSRFBlocked, SSRFDeniedHostname,
 	UnsupportedProtocol, MalformedConnect, NoTLS,
+	TransparentNoSNI, TransparentBadClientHello,
+	TransparentH2PriorKnowledge, TransparentLoopGuard,
+	MalformedRequest,
 	Judge,
 	DLPBlock, DLPRedact,
 	MCPWS, MCPWSUnscannable, MCPSSEEventTooLarge, MCPGatewayDeny,

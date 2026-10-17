@@ -16,6 +16,13 @@ policy:
     - domain: api.example.test
     - domain: llm.example.test
     - domain: mcp.example.test
+    # self.example.test exists ONLY for the transparent loop-guard test (#376):
+    # worker-3's own t-net address is allowlisted so the request passes the
+    # SNI/Host gate and reaches the upstream dial — which the loop guard must
+    # then refuse. Without the guard this allowlist entry is what makes the
+    # interception loop possible, so the drill is honest. On the egress network
+    # the name is NXDOMAIN, so workers 1/2 can never reach anything with it.
+    - domain: self.example.test
   denylist:
     - domain: evil.example.test
 

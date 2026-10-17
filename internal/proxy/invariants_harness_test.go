@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -314,6 +315,18 @@ type invEnv struct {
 	rawTLSAddr string
 	rawTCPAddr string
 	useRawTLS  bool
+
+	// transparentAddr/httpAddr are the bound transparent listeners (#376), ""
+	// when the env runs forward-only; plainSrv is their plain upstream.
+	tlsAddr  string
+	httpAddr string
+	plainSrv *httptest.Server
+
+	// tlsUpstreams counts upstream dials made through the TLS seam. A plain-HTTP
+	// session must never make one — the count is the seam-side witness that the
+	// dialUpstream scheme switch routes a transparent :80 session to the plain
+	// dialer (rows declare wantNoTLSUpstream and fail the moment it is dialled).
+	tlsUpstreams atomic.Int64
 }
 
 // invOpts are the per-row proxy knobs.
@@ -323,6 +336,11 @@ type invOpts struct {
 	allow    []config.AllowlistEntry
 	denylist []config.DenylistEntry
 	dlp      *DLPScanner
+	// transparent also binds the transparent interception listeners (#376):
+	// mode "both", so the CONNECT fixtures keep working and the transparent
+	// paths are drivable. The plain-HTTP upstream dials then go to a plain
+	// sibling of the same backend handler.
+	transparent bool
 	// secrets overrides the provider; nil = the canary provider.
 	secrets *fakes.FakeSecretProvider
 	// noPlaceholders runs the proxy with no swap configured.
@@ -369,6 +387,16 @@ func newInvEnv(t *testing.T, o invOpts) *invEnv {
 		mc := enforceMCPConfig()
 		cfg.MCP = gateway.New(mc, scan.NewScanner(scan.WithPhonePII(mc.Scan.PII.Phone)), nil)
 	}
+	if o.transparent {
+		// Both keeps the CONNECT fixtures working while the transparent
+		// listeners come up; a plain sibling of the same backend handler backs
+		// the plain-HTTP rows.
+		cfg.Mode = config.ProxyModeBoth
+		cfg.TransparentHTTPSListen = "127.0.0.1:0"
+		cfg.TransparentHTTPListen = "127.0.0.1:0"
+		e.plainSrv = httptest.NewServer(http.HandlerFunc(e.backend.handle))
+		t.Cleanup(e.plainSrv.Close)
+	}
 	p, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -387,6 +415,7 @@ func newInvEnv(t *testing.T, o invOpts) *invEnv {
 		e.hitMu.Unlock()
 	}
 	p.dialTLS = func(_, addr string, c *tls.Config) (*tls.Conn, error) {
+		e.tlsUpstreams.Add(1)
 		target := e.backend.srv.Listener.Addr().String()
 		if e.rawTLSAddr != "" && len(c.NextProtos) == 0 && e.useRawTLS {
 			target = e.rawTLSAddr
@@ -394,10 +423,13 @@ func newInvEnv(t *testing.T, o invOpts) *invEnv {
 		return tls.Dial("tcp", target, &tls.Config{InsecureSkipVerify: true, NextProtos: c.NextProtos})
 	}
 	p.dialFunc = func(_, _ string) (net.Conn, error) {
-		if e.rawTCPAddr == "" {
-			return nil, fmt.Errorf("invariants: no tcp upstream")
+		if e.rawTCPAddr != "" {
+			return net.Dial("tcp", e.rawTCPAddr)
 		}
-		return net.Dial("tcp", e.rawTCPAddr)
+		if e.plainSrv != nil {
+			return net.Dial("tcp", e.plainSrv.Listener.Addr().String())
+		}
+		return nil, fmt.Errorf("invariants: no tcp upstream")
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -408,6 +440,17 @@ func newInvEnv(t *testing.T, o invOpts) *invEnv {
 	}
 	if p.Addr() == nil {
 		t.Fatal("proxy did not start")
+	}
+	if o.transparent {
+		if a := p.TransparentHTTPSAddr(); a != nil {
+			e.tlsAddr = a.String()
+		}
+		if a := p.TransparentHTTPAddr(); a != nil {
+			e.httpAddr = a.String()
+		}
+		if e.tlsAddr == "" {
+			t.Fatal("transparent env did not bind the :443 listener")
+		}
 	}
 	return e
 }
@@ -587,6 +630,66 @@ func (e *invEnv) doHTTP1On(tc *tls.Conn, r invReq) (string, int, error) {
 	defer func() { _ = resp.Body.Close() }()
 	// Build the view by hand so a stalled or aborted body still yields what the
 	// agent did receive before the read failed.
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "%s\n", resp.Status)
+	_ = resp.Header.Write(&sb)
+	body, _ := io.ReadAll(resp.Body)
+	sb.Write(body)
+	return sb.String(), resp.StatusCode, nil
+}
+
+// doTransparentH1 sends r straight to the transparent :443 listener (SNI =
+// destination, no CONNECT) and returns what the agent received. The upstream
+// hop is the regular dialTLS seam, so the backend and swap assertions are the
+// forward rows'.
+func (e *invEnv) doTransparentH1(r invReq) (string, int, error) {
+	if e.tlsAddr == "" {
+		return "", 0, fmt.Errorf("invariants: env has no transparent :443 listener")
+	}
+	conn, err := net.DialTimeout("tcp", e.tlsAddr, 2*time.Second)
+	if err != nil {
+		return err.Error(), 0, err
+	}
+	e.t.Cleanup(func() { _ = conn.Close() })
+	pool := x509.NewCertPool()
+	pool.AppendCertsFromPEM(e.caPEM)
+	tc := tls.Client(conn, &tls.Config{
+		ServerName: orDefault(r.host, invHost), RootCAs: pool,
+	})
+	_ = tc.SetDeadline(time.Now().Add(3 * time.Second))
+	if err := tc.Handshake(); err != nil {
+		return "", 0, err
+	}
+	return e.doHTTP1On(tc, r)
+}
+
+// doTransparentPlain sends r as plain HTTP to the transparent :80 listener (the
+// Host header IS the destination) and returns what the agent received.
+func (e *invEnv) doTransparentPlain(r invReq) (string, int, error) {
+	if e.httpAddr == "" {
+		return "", 0, fmt.Errorf("invariants: env has no transparent :80 listener")
+	}
+	conn, err := net.DialTimeout("tcp", e.httpAddr, 2*time.Second)
+	if err != nil {
+		return err.Error(), 0, err
+	}
+	e.t.Cleanup(func() { _ = conn.Close() })
+	req := r.build()
+	// req.Write emits origin-form with a Host header — exactly what an agent
+	// puts on the wire when DNS sent it here.
+	if err := req.Write(conn); err != nil {
+		return "", 0, err
+	}
+	to := r.timeout
+	if to == 0 {
+		to = 3 * time.Second
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(to))
+	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
+	if err != nil {
+		return "", 0, err
+	}
+	defer func() { _ = resp.Body.Close() }()
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "%s\n", resp.Status)
 	_ = resp.Header.Write(&sb)

@@ -13,8 +13,12 @@
 #     harness and code cannot drift — a source edit reaches the next `make
 #     e2e-up` because the build cache is invalidated by the edit.
 #   - Adds the FAKE UPSTREAM: one container playing the whole outside world
-#     (api/llm/mcp/evil.example.test on one TLS cert, a request recorder on
-#     :8081, and the DNS server for the egress network).
+#     (api/llm/mcp/evil.example.test on one TLS cert, its plain-HTTP twin,
+#     a request recorder on :8081, and the DNS server for the egress network).
+#   - Adds the TRANSPARENT leg (#376): worker-3 (mode both, :443/:80) and
+#     agent-3 — NO proxy env — on the internal t-net, where the agent's host
+#     entries play the part the network DNS plays in production. See
+#     configs/config.e2e-worker-transparent.yaml.
 #   - HERMETIC: every scenario network is internal, the
 #     fake upstream owns a pinned IP (10.200.0.10) that
 #     configs/config.e2e-worker.yaml points the workers' DNS at, and unknown
@@ -233,6 +237,93 @@ services:
       retries: 12
       start_period: 5s
 
+  # The TRANSPARENT interception leg (#376): worker-3 + agent-3 on t-net.
+  # agent-3 holds NO proxy environment — interception happens because the
+  # "network DNS" (here: the agent's extra_hosts, the container stand-in for
+  # the operator recipe's DNS override) points the fake host names at
+  # worker-3's pinned t-net IP, and the worker's transparent listeners on
+  # :443/:80 accept the raw dials. Config:
+  # configs/config.e2e-worker-transparent.yaml.
+  worker-3:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: ${WARDEN_IMAGE:-warden-e2e:local}
+    depends_on:
+      control-plane:
+        condition: service_healthy
+    # Binds :443/:80 as the image's non-root warden user — same per-netns
+    # sysctl trick fakeupstream uses.
+    sysctls:
+      net.ipv4.ip_unprivileged_port_start: "0"
+    ports: !override
+      - "127.0.0.1:9093:9090"
+    networks: !override
+      cp-net: {}               # policy pull + heartbeats + analytics ingest
+      egress: {}               # dials the fake upstream (internal, pinned IP)
+      t-net:
+        ipv4_address: 10.201.0.5   # pinned; the agent's host entries depend on it
+      published: {}            # host → 9093 (no outbound NAT)
+    environment: !override
+      - WARDEN_CP_TOKEN=${WARDEN_CP_TOKEN:-dev-token}
+      - WARDEN_PROXY_ID=worker-3
+      - EXAMPLE_SECRET=CANARY-e2e-0123456789abcdef0123456789abcdef
+      - SSL_CERT_FILE=/etc/warden/certs/upstream-ca-bundle.crt
+    # The loop-guard test's upstream dial: self.example.test must resolve to
+    # this worker's OWN t-net address (its transparent listener IP), so the
+    # guard — not a DNS failure — is what refuses the dial. /etc/hosts is read
+    # before dns.upstreamResolver is ever queried.
+    extra_hosts:
+      - "self.example.test:10.201.0.5"
+    volumes:
+      - ../../configs/config.e2e-worker-transparent.yaml:/etc/warden/config.yaml:ro
+      - ../../test/e2e/certs:/etc/warden/certs:ro
+      - worker3-data:/data
+    command:
+      - run
+      - "--config=/etc/warden/config.yaml"
+      - "--listen=0.0.0.0:8080"
+      - "--ca-cert=/etc/warden/certs/proxy-ca.crt"
+      - "--ca-key=/etc/warden/certs/proxy-ca.key"
+      - "--admin-listen=0.0.0.0:9090"
+      - "--db=/data/warden.db"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  agent-3:
+    image: curlimages/curl:8.22.0@sha256:58adaa4e8dca9c988bae2aba4ab3434a0bb2da16bbe3f92dec39ec7785166777
+    depends_on:
+      worker-3:
+        condition: service_healthy
+    networks: !override
+      t-net: {}                # internal only — sole neighbor is worker-3
+    # NO proxy environment: transparent mode is the deployment where the agent
+    # is never configured. The host entries ARE the network DNS: production
+    # points the agent's destinations at the interception gateway via DNS
+    # (docs/transparent-interception.md); here extra_hosts plays that part.
+    extra_hosts:
+      - "api.example.test:10.201.0.5"
+      - "llm.example.test:10.201.0.5"
+      - "evil.example.test:10.201.0.5"
+      - "self.example.test:10.201.0.5"
+    environment: !override
+      - CURL_CA_BUNDLE=/etc/warden/certs/proxy-ca.crt
+    entrypoint: ["sh", "-c", "exec sleep 1000000000"]
+    volumes:
+      - ../../test/e2e/certs/proxy-ca.crt:/etc/warden/certs/proxy-ca.crt:ro
+    healthcheck:
+      # Ready = worker-3's admin listener answers (its only neighbor; no proxy
+      # env exists to exempt).
+      test: ["CMD", "curl", "-fsS", "http://worker-3:9090/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+
 networks:
   # Control-plane bus, INTERNAL in the harness: workers reach the CP, nothing
   # reaches the internet from here. (The base file declares it a plain bridge;
@@ -251,6 +342,16 @@ networks:
     internal: true
   w2-internal:
     internal: true
+  # The TRANSPARENT interception network (#376): agent-3's only attachment.
+  # Pinned subnet — worker-3's IP (10.201.0.5) and the agent's host entries
+  # depend on it. In production this is the network whose DNS and/or default
+  # route steer agent traffic into the worker; the interception network itself
+  # is as hermetic as w1/w2-internal.
+  t-net:
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.201.0.0/24
   # The ONE non-internal network, carrying only the host-published services.
   # Masquerading is disabled: packets leave the host with a private source
   # address, so on a host that neither NATs nor routes foreign source
@@ -263,3 +364,6 @@ networks:
     driver: bridge
     driver_opts:
       com.docker.network.bridge.enable_ip_masquerade: "false"
+
+volumes:
+  worker3-data:

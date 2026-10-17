@@ -17,6 +17,27 @@
 #   caCert: certs/proxy-ca.crt    # set caCert and caKey together
 #   caKey: certs/proxy-ca.key
 
+# Transparent interception mode (#376; OPTIONAL — default `forward`, which is
+# the explicit CONNECT proxy above and byte-identical to pre-#376 behavior).
+# In transparent mode the agent is NOT configured with a proxy: the network
+# points its destinations at Warden (DNS or routing), Warden accepts raw dials
+# on these listeners, reads the destination from TLS SNI (:443) or the Host
+# header (:80), and runs the SAME pipeline — policy, swap, scans, audit, and
+# the same deny reasons as CONNECT. See docs/transparent-interception.md for
+# the deployment recipes (Docker/Kubernetes), CA distribution, and the
+# UDP-443 (QUIC) / ECH requirements.
+#
+# proxy:
+#   mode: forward                  # forward | transparent | both
+#   transparent:
+#     httpsListen: "0.0.0.0:443"   # raw TLS, SNI-gated (required in transparent/both)
+#     httpListen: "0.0.0.0:80"     # plain HTTP, Host-gated (strictly opt-in; off unless set)
+#
+# Boot validation fails fast on: an unknown mode, transparent/both without
+# httpsListen, or two listeners claiming one address (port 0 never clashes).
+# Policy entries WITHOUT a `port` match both the 443 and 80 evaluations of a
+# transparent request; port-pinned entries match only their port.
+
 policy:
   # Default-deny allowlist. A destination is permitted only if it matches an
   # entry here. Port is optional: when omitted, Warden infers 443 (HTTPS) or
