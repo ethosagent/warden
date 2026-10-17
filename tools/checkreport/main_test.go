@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -67,5 +68,63 @@ func TestRealMainUnwritableReportPathFails(t *testing.T) {
 	args := append([]string{"-root", root, "-json-out", "/nonexistent-dir/r.json", "-stages", "format"}, versionFlags...)
 	if code := realMain(args, &stdout, &stderr, nil); code == 0 || !strings.Contains(stderr.String(), "cannot write") {
 		t.Fatalf("exit %d stderr %q", code, stderr.String())
+	}
+}
+
+// listStages runs `checkreport -list-stages` on a clean fixture.
+func listStages(t *testing.T, extra ...string) (string, int) {
+	t.Helper()
+	root := copyFixture(t, "clean")
+	var stdout, stderr bytes.Buffer
+	args := append([]string{"-root", root, "-list-stages"}, extra...)
+	code := realMain(args, &stdout, &stderr, nil)
+	return stdout.String(), code
+}
+
+func TestListStagesPlain(t *testing.T) {
+	out, code := listStages(t)
+	want := "format\nvet\narchtest\nlint\nroadmap\nbuild\nvulncheck\ntest\nfuzz\nbenchmark\ncoverage\n"
+	if code != 0 || out != want {
+		t.Fatalf("exit %d, stages:\n%s\nwant:\n%s", code, out, want)
+	}
+	// no version flags needed: listing runs nothing
+	out, _ = listStages(t, "-integration")
+	if !strings.HasSuffix(out, "coverage\nintegration\n") {
+		t.Errorf("-integration adds the integration stage last:\n%s", out)
+	}
+}
+
+func TestListStagesJSONIsAValidReport(t *testing.T) {
+	out, code := listStages(t, "-json", "-integration")
+	if code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	assertValidReport(t, []byte(out))
+	for _, name := range []string{`"name": "format"`, `"name": "integration"`} {
+		if !strings.Contains(out, name) {
+			t.Errorf("report lacks %s:\n%s", name, out)
+		}
+	}
+	if strings.Contains(out, `"ok": false`) {
+		t.Errorf("listing is not a failure:\n%s", out)
+	}
+}
+
+// The plain list is the stage name of every banner check.sh prints: the names
+// gatecheck compares between base and head are the stages that really run.
+func TestListStagesNamesMatchScriptBanners(t *testing.T) {
+	b, err := os.ReadFile(checkScript(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var banners []string
+	for _, m := range regexp.MustCompile(`(?m)^\s*banner "(\S+)`).FindAllStringSubmatch(string(b), -1) {
+		if m[1] != "all" {
+			banners = append(banners, m[1])
+		}
+	}
+	out, _ := listStages(t, "-integration")
+	if got := strings.Fields(out); strings.Join(got, ",") != strings.Join(banners, ",") {
+		t.Errorf("stage names differ from check.sh banners\nlist:    %v\nbanners: %v", got, banners)
 	}
 }

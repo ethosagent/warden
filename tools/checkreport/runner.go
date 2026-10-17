@@ -89,6 +89,7 @@ func (r *runner) stages() []stageDef {
 	defs := []stageDef{
 		{"format", "format (gofmt)", func(r *runner) string { return "gofmt@" + r.goVer }, (*runner).stageFormat},
 		{"vet", "vet (go vet ./...)", goTool, (*runner).stageVet},
+		{"archtest", "archtest (go test ./internal/archtest -run TestArchitecture)", goTool, (*runner).stageArchtest},
 		{"lint", fmt.Sprintf("lint (golangci-lint %s)", r.cfg.GolangciVersion), func(r *runner) string { return "golangci-lint@" + r.cfg.GolangciVersion }, (*runner).stageLint},
 		{"roadmap", "roadmap (go run docs/roadmap/gen.go check)", goTool, (*runner).stageRoadmap},
 		{"build", "build (go build ./...)", goTool, (*runner).stageBuild},
@@ -106,7 +107,10 @@ func (r *runner) stages() []stageDef {
 		// roadmap, fuzz, benchmark, coverage) is whole-repo work for the full gate.
 		keep := map[string]bool{"format": true}
 		if len(r.plan.Packages) > 0 {
-			keep["vet"], keep["lint"], keep["test"] = true, true, true
+			// archtest checks the whole repo every time but lives in one small
+			// package, so it stays in the inner loop too (and the fast plan
+			// adds this package whenever the architecture files change).
+			keep["vet"], keep["lint"], keep["archtest"], keep["test"] = true, true, true, true
 		}
 		var out []stageDef
 		for _, d := range defs {
@@ -286,8 +290,11 @@ func (r *runner) stageLint() Stage {
 	}
 	defer os.RemoveAll(tmp)
 	jsonPath := filepath.Join(tmp, "lint.json")
+	// The generated .golangci.arch.yml is the base config plus the
+	// architecture linters, so one run enforces both. internal/archtest's
+	// golangci-config-fresh subtest keeps the file from going stale.
 	args := []string{"run", "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@" + r.cfg.GolangciVersion,
-		"run", "--output.json.path=" + jsonPath}
+		"run", "--output.json.path=" + jsonPath, "--config", ".golangci.arch.yml"}
 	if r.plan != nil {
 		args = append(args, r.pkgArgs()...)
 	}
@@ -297,6 +304,15 @@ func (r *runner) stageLint() Stage {
 		return finish("lint", res, nil)
 	}
 	return finish("lint", res, parseLint(data, r.ctx))
+}
+
+// stageArchtest runs the architecture gate: every rule of architecture.yaml
+// against every package, with architecture.baseline.yaml applied, plus the
+// freshness pin on .golangci.arch.yml and the go.mod module manifest. One
+// small package, all of ./... — cheap enough for --fast to always pay for.
+func (r *runner) stageArchtest() Stage {
+	res := r.exec(r.cfg.Root, "go", "test", "-json", "./internal/archtest", "-run", "TestArchitecture")
+	return finish("archtest", res, parseArchtest(res.Stdout, r.ctx))
 }
 
 func (r *runner) stageRoadmap() Stage {

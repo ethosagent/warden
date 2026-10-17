@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/ethosagent/warden/internal/archtest"
 )
 
 // copyFixture builds a throwaway module from testdata/fixtures/<name>. Sources
@@ -71,6 +73,14 @@ func mockExec(t *testing.T, fixture string) execFunc {
 				t.Fatal(err)
 			}
 			return execResult{Stdout: b}
+		case strings.Contains(joined, "./internal/archtest"):
+			// The gate is replayed: a fixture module does not carry
+			// internal/archtest, and the engine has its own tests.
+			b, err := os.ReadFile(filepath.Join("testdata", "fixtures", fixture, "mock-archtest.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			return execResult{Stdout: b, Code: 1}
 		}
 		return osExec(dir, name, args...)
 	}
@@ -119,6 +129,7 @@ func TestEachStageFixture(t *testing.T) {
 	}{
 		{"unformatted file", "unformatted", "format", "gofmt/unformatted", "a.go", 0, config{Only: []string{"format"}}},
 		{"vet error", "vet", "vet", "vet/printf", "a.go", 6, config{Only: []string{"vet"}}},
+		{"architecture violation (replayed)", "archtest", "archtest", "archtest/X3", "internal/worker/worker.go", 41, config{Only: []string{"archtest"}}},
 		{"lint error (replayed)", "lint", "lint", "errcheck", "a.go", 9, config{Only: []string{"lint"}}},
 		{"compile error", "compile", "build", "build/compile-error", "a.go", 4, config{Only: []string{"build"}}},
 		{"vulnerable module (mocked)", "vuln", "vulncheck", "GO-2026-5030", "a.go", 9, config{Only: []string{"vulncheck"}}},
@@ -267,4 +278,39 @@ func TestCrashingToolBecomesFinding(t *testing.T) {
 	if o := stageByName(t, rep, "lint").Findings[0].Output; !strings.Contains(o, "config invalid") {
 		t.Errorf("tool output should be attached: %q", o)
 	}
+}
+
+// TestStagesDeclared keeps runner stage names in step with the stage names
+// architecture rules may declare (`stage:`): a stage the runner adds must be
+// declarable, and a declared stage must exist here — otherwise a rule points
+// at a stage the gate never runs.
+func TestStagesDeclared(t *testing.T) {
+	r := &runner{cfg: config{Integration: true, CoverageMin: 70, GolangciVersion: "v2.12.2", GovulncheckVersion: "v1.5.0"}}
+	declared := map[string]bool{}
+	for _, d := range r.stages() {
+		declared[d.name] = true
+	}
+	allowed := archtest.CheckStages()
+	if len(allowed) != len(declared) {
+		t.Errorf("archtest declares %d stages, the runner runs %d — keep the lists in step", len(allowed), len(declared))
+	}
+	for _, s := range allowed {
+		if !declared[s] {
+			t.Errorf("archtest.CheckStages has %q but the runner has no such stage", s)
+		}
+	}
+	for s := range declared {
+		if !containsStage(allowed, s) {
+			t.Errorf("runner stage %q is not in archtest.CheckStages — rules cannot declare it", s)
+		}
+	}
+}
+
+func containsStage(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
