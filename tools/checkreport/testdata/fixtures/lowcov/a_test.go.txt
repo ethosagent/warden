@@ -1,0 +1,5 @@
+package fx
+
+import "testing"
+
+func TestUsed(t *testing.T) { Used(1) }

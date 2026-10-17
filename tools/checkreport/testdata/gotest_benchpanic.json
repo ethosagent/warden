@@ -1,0 +1,22 @@
+{"Time":"2026-10-16T18:26:56.923149777+05:30","Action":"start","Package":"example.com/fx"}
+{"Time":"2026-10-16T18:26:56.925974506+05:30","Action":"output","Package":"example.com/fx","Output":"goos: linux\n"}
+{"Time":"2026-10-16T18:26:56.926017846+05:30","Action":"output","Package":"example.com/fx","Output":"goarch: amd64\n"}
+{"Time":"2026-10-16T18:26:56.926024018+05:30","Action":"output","Package":"example.com/fx","Output":"pkg: example.com/fx\n"}
+{"Time":"2026-10-16T18:26:56.926028194+05:30","Action":"output","Package":"example.com/fx","Output":"cpu: 13th Gen Intel(R) Core(TM) i5-13600H\n"}
+{"Time":"2026-10-16T18:26:56.926066349+05:30","Action":"run","Package":"example.com/fx","Test":"BenchmarkBoom"}
+{"Time":"2026-10-16T18:26:56.926074819+05:30","Action":"output","Package":"example.com/fx","Test":"BenchmarkBoom","Output":"=== RUN   BenchmarkBoom\n"}
+{"Time":"2026-10-16T18:26:56.926079074+05:30","Action":"output","Package":"example.com/fx","Test":"BenchmarkBoom","Output":"BenchmarkBoom\n"}
+{"Time":"2026-10-16T18:26:56.928565913+05:30","Action":"output","Package":"example.com/fx","Test":"BenchmarkBoom","Output":"panic: assignment to entry in nil map\n"}
+{"Time":"2026-10-16T18:26:56.928604867+05:30","Action":"output","Package":"example.com/fx","Test":"BenchmarkBoom","Output":"\n"}
+{"Time":"2026-10-16T18:26:56.928613325+05:30","Action":"output","Package":"example.com/fx","Test":"BenchmarkBoom","Output":"goroutine 33 [running]:\n"}
+{"Time":"2026-10-16T18:26:56.928620702+05:30","Action":"output","Package":"example.com/fx","Test":"BenchmarkBoom","Output":"example.com/fx.BenchmarkBoom(0x35cea18da908?)\n"}
+{"Time":"2026-10-16T18:26:56.928625393+05:30","Action":"output","Package":"example.com/fx","Test":"BenchmarkBoom","Output":"\t/tmp/bp/a_test.go:7 +0x28\n"}
+{"Time":"2026-10-16T18:26:56.928630189+05:30","Action":"output","Package":"example.com/fx","Test":"BenchmarkBoom","Output":"testing.(*B).runN(0x35cea18da908, 0x1)\n"}
+{"Time":"2026-10-16T18:26:56.928634558+05:30","Action":"output","Package":"example.com/fx","Test":"BenchmarkBoom","Output":"\t/home/mitesh/.local/go/src/testing/benchmark.go:219 +0x190\n"}
+{"Time":"2026-10-16T18:26:56.928640187+05:30","Action":"output","Package":"example.com/fx","Test":"BenchmarkBoom","Output":"testing.(*B).run1.func1()\n"}
+{"Time":"2026-10-16T18:26:56.928644431+05:30","Action":"output","Package":"example.com/fx","Test":"BenchmarkBoom","Output":"\t/home/mitesh/.local/go/src/testing/benchmark.go:245 +0x48\n"}
+{"Time":"2026-10-16T18:26:56.928648774+05:30","Action":"output","Package":"example.com/fx","Test":"BenchmarkBoom","Output":"created by testing.(*B).run1 in goroutine 1\n"}
+{"Time":"2026-10-16T18:26:56.928652989+05:30","Action":"output","Package":"example.com/fx","Test":"BenchmarkBoom","Output":"\t/home/mitesh/.local/go/src/testing/benchmark.go:238 +0x90\n"}
+{"Time":"2026-10-16T18:26:56.928809805+05:30","Action":"output","Package":"example.com/fx","Test":"BenchmarkBoom","Output":"exit status 2\n"}
+{"Time":"2026-10-16T18:26:56.928829902+05:30","Action":"output","Package":"example.com/fx","Output":"FAIL\texample.com/fx\t0.005s\n"}
+{"Time":"2026-10-16T18:26:56.928835682+05:30","Action":"fail","Package":"example.com/fx","Elapsed":0.006}

@@ -33,6 +33,19 @@ scripts/check.sh          # the FULL gate — exactly what CI runs
 scripts/install-hooks.sh  # run once: wires pre-commit (fast) + pre-push (full)
 ```
 
+Agents: run `scripts/check.sh --json` and fix the findings in order. It prints
+one report on stdout (human progress goes to stderr) and keeps going after a
+failure, so every problem shows in one pass. Each finding has a `rule`, a
+`file:line` and a `fix` that says what to do. Report format:
+[`docs/check-report.schema.json`](docs/check-report.schema.json)
+(`warden.check.v1`). Other flags: `--json-out <path>` (human output as usual,
+plus the report in a file), `--keep-going` (all stages, human output). The
+exit code is the same with or without them. In report mode the console shows a
+per-stage summary instead of live tool output, and a tool that cannot run at all
+maps to exit 1. The coverage gate counts product code only (`tools/` is tested
+but excluded from the total). The reporter is
+`tools/checkreport` — developer tooling that no Warden package may import.
+
 `scripts/check.sh` is the single source of truth: format → vet → lint → build →
 test+race+coverage → coverage gate (`COVERAGE_MIN`, default 70) → integration
 (`--integration`). CI runs the same script, so "green locally" means "green in
