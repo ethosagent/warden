@@ -25,11 +25,13 @@ import (
 // Rows that a documented, still-open issue breaks carry knownIssue: the row
 // ASSERTS the violation still happens and fails with "appears fixed: remove
 // knownIssue" the day it does not (see expectKnown). A row is never skipped.
+// #388 (h2 request stages) and #389 (echo guard) are fixed: h2 bodies are
+// swapped and an echoing upstream's response is blocked (502) before the real
+// value reaches the agent.
 //
-//	#388  HTTP/2 does not run the request stages: the placeholder in an h2 (and
-//	      gRPC) request BODY reaches the upstream unswapped. Headers are swapped.
-//	#389  no echo guard: an upstream that reflects its request headers returns
-//	      the real secret to the agent.
+//	#418  gRPC message bodies are streamed verbatim (metadata is swapped, the
+//	      message is not): the placeholder in a gRPC body reaches the upstream
+//	      unswapped. Fails safe; no real value moves.
 
 // canaryValue is the planted secret of the matrix; canaryHost is where it may be
 // swapped in. Each row boots its own harness, so rows cannot contaminate each
@@ -39,7 +41,7 @@ var canaryValue = harness.Canary()
 type canaryRow struct {
 	proto      string   // http1, h2, grpc, ws
 	deny       bool     // false: allowed destination; true: denied destination
-	echo       bool     // the allowed upstream reflects its request headers (#389)
+	echo       bool     // the allowed upstream reflects its request headers; the echo guard blocks it (#389)
 	knownIssue []string // open issues this row is expected to still hit
 }
 
@@ -73,11 +75,11 @@ func (r canaryRow) name() string {
 var canaryRows = []canaryRow{
 	{proto: "http1"},
 	{proto: "http1", deny: true},
-	{proto: "http1", echo: true, knownIssue: []string{"#389"}},
-	{proto: "h2", knownIssue: []string{"#388"}},
+	{proto: "http1", echo: true},
+	{proto: "h2"},
 	{proto: "h2", deny: true},
-	{proto: "h2", echo: true, knownIssue: []string{"#388", "#389"}},
-	{proto: "grpc", knownIssue: []string{"#388"}},
+	{proto: "h2", echo: true},
+	{proto: "grpc", knownIssue: []string{"#418"}},
 	{proto: "grpc", deny: true},
 	{proto: "ws"},
 	{proto: "ws", deny: true},
@@ -132,7 +134,7 @@ func (r canaryRow) run(t *testing.T, h *harness.H) {
 		bodySwapped = r.doGRPC(t, h, up, ph)
 	case "ws":
 		r.doWS(t, h, up, ph)
-		bodySwapped = true // no body on this path: nothing for #388 to break
+		bodySwapped = true // no body on this path: nothing to swap
 	}
 
 	if r.deny {
@@ -140,7 +142,7 @@ func (r canaryRow) run(t *testing.T, h *harness.H) {
 			t.Fatalf("the denied upstream %s saw %d request(s), want 0", r.host(), got)
 		}
 	} else if r.proto == "h2" || r.proto == "grpc" {
-		expectKnown(t, knownFor(r.knownIssue, "#388"), bodySwapped,
+		expectKnown(t, knownFor(r.knownIssue, "#418"), bodySwapped,
 			r.name()+": the request-body placeholder must be swapped on the HTTP/2 path")
 	}
 
@@ -148,11 +150,10 @@ func (r canaryRow) run(t *testing.T, h *harness.H) {
 }
 
 // knownLeaks maps each open issue a row can hit to the oracle line it produces
-// (one hit per surface): #388 delivers the placeholder unswapped to the upstream,
-// #389 returns the real value in the agent's response.
+// (one hit per surface): #418 delivers a gRPC body's placeholder unswapped to
+// the upstream.
 var knownLeaks = map[string]string{
-	"#388": "appeared unswapped placeholder in upstream",
-	"#389": "in agent response",
+	"#418": "appeared unswapped placeholder in upstream",
 }
 
 // assertLeaks ends a row. A row with no knownIssue is the plain oracle. A row
@@ -224,8 +225,12 @@ func (r canaryRow) doHTTP(t *testing.T, h *harness.H, cl *http.Client, up *harne
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
 	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("%s: status %d, want 200", r.name(), resp.StatusCode)
+	want := http.StatusOK
+	if r.echo {
+		want = http.StatusBadGateway // the echo guard blocks the reflected secret (#389)
+	}
+	if resp.StatusCode != want {
+		t.Fatalf("%s: status %d, want %d", r.name(), resp.StatusCode, want)
 	}
 	got := lastRequest(t, up)
 	if v := got.Header.Get("X-Api-Key"); v != canaryValue {
