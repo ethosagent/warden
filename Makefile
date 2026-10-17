@@ -8,8 +8,7 @@
 # upstream (api/llm/mcp/evil.example.test, request recorder, fake DNS), all
 # built from source, all scenario networks internal. deploy/compose/
 # docker-compose.e2e.yml is the override; configs/config.e2e-*.yaml the policy.
-# The scenario driver itself lands in part 2 (#367); today you drive the stack
-# by hand (docs/docker-end-to-end.md, "Hermetic e2e harness").
+# `make e2e` runs the Go suite (test/e2e) against it; see docs/docker-end-to-end.md.
 
 E2E_COMPOSE := -f deploy/compose/docker-compose.control-plane.yml -f deploy/compose/docker-compose.e2e.yml
 
@@ -48,8 +47,18 @@ e2e-certs:
 		test/e2e/certs/gen.sh; \
 	fi
 
-e2e e2e-scenario:
-	@echo "e2e scenarios land in part 2 (issue #367) — the stack is up; drive it by hand for now."
+# The L2 suite (test/e2e, build tag e2e). TestMain runs e2e-up, waits for
+# health, runs the tests and tears the stack down (E2E_KEEP_STACK=1 keeps it;
+# E2E_STACK_RUNNING=1 reuses a stack you started). -count=1: never cached.
+E2E_GOTEST := go test -tags e2e -count=1 -timeout 20m ./test/e2e/ -v
+
+e2e:
+	$(E2E_GOTEST)
+
+# make e2e-scenario NAME=TestIsolation_DefaultDeny  (a -run regexp)
+e2e-scenario:
+	@test -n "$(NAME)" || { echo "usage: make e2e-scenario NAME=<test name regexp>" >&2; exit 2; }
+	$(E2E_GOTEST) -run '$(NAME)'
 
 build:
 	scripts/build.sh warden

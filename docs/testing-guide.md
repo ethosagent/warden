@@ -77,6 +77,30 @@ This runs in order:
 
 Add `--integration` for the full gate including e2e tests.
 
+## L2: container tests
+
+The L1 harness (`test/harness`, `test/scenarios`) runs Warden in-process. L2 runs it as
+real containers, to prove what only real containers can: the agent has no route out
+except its worker, default-deny holds, no real credential reaches the agent, and a fleet
+(one control plane, two workers) behaves when policy changes or the control plane dies.
+The suite lives in `test/e2e` behind the `e2e` build tag, so `go test ./...` and
+`scripts/check.sh` never start Docker. It needs Docker, `make` and the free host ports
+7070, 8081, 9091 and 9092 (one stack at a time).
+
+```sh
+make e2e                                  # the whole suite, ~3 min: up, test, down
+make e2e-up                               # just bring the hermetic stack up (and prove it hermetic)
+make e2e-down                             # down -v
+make e2e-scenario NAME=TestFleet_         # one test or a group (-run regexp)
+KEEP_STACK=1 make e2e                     # leave the stack up after the run, to debug
+E2E_STACK_RUNNING=1 go test -tags e2e ./test/e2e/ -run TestFleet -v   # reuse a stack you started
+```
+
+`go vet -tags e2e ./test/e2e/` compiles the package without Docker. Details of the stack,
+the oracles and the fleet scenarios: `docs/docker-end-to-end.md`. In CI the suite is the
+`e2e` job: required for `risk:critical` PRs, nightly on `main`, and a gate on every
+release image.
+
 ## Manual local testing
 
 ### Setup

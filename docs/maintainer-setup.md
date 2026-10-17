@@ -12,6 +12,7 @@ How the pieces fit:
 |---|---|---|
 | Risk map | `.agents/risk.yaml` | tiers by path glob; the `gates` tier is the protected-path list |
 | `risk` workflow | `.github/workflows/risk.yml` | labels each PR `risk:<tier>`; `e2e-required` job for `critical` |
+| `e2e` workflow | `.github/workflows/e2e.yml` | the L2 container suite: PRs on risky paths, nightly, merge queue, and the release gate |
 | `gates` workflow | `.github/workflows/gates.yml` | runs `tools/gatecheck weakened` and `tools/gatecheck protected-paths` |
 | Approval | label `gates-change-approved` | a maintainer's confirmation of a gate change or an intended weakening |
 
@@ -70,20 +71,29 @@ only after its first run).
 `enforce_admins: true` makes the rules bind the admin too; set it to `false`
 only if the maintainer must be able to push straight to `main`.
 
-### Make the e2e job required for `risk:critical` (after #351)
+### Make the e2e job required for `risk:critical`
 
 The `e2e-required` job in `risk.yml` passes at once for every tier except
 `critical`; for `critical` it waits for a check run named `e2e` on the head
-commit. It is safe to require for every PR:
+commit. That check run now exists: `.github/workflows/e2e.yml` (#369) has a job
+named `e2e`, run on every PR that touches a path in its `paths` filter (which
+includes every `critical` glob in `.agents/risk.yaml`; a test in `tools/riskmap`
+keeps them in step). `e2e-required` can therefore be added to the required
+checks. It is safe to require for every PR:
 
 ```sh
 gh api -X PATCH repos/OWNER/REPO/branches/main/protection/required_status_checks \
   -F strict=true -f 'contexts[]=check' -f 'contexts[]=gates' -f 'contexts[]=e2e-required'
 ```
 
-Do this **only once** the L2 e2e workflow (#351) exists and its job is named
-`e2e`: until then a `risk:critical` PR stays red on `e2e-required` (fail
-closed). Until the L2 job exists, leave `e2e-required` out of `contexts`.
+Do not require `e2e` itself: it does not run on PRs outside its `paths` filter, and
+a required check that never starts blocks the merge. `e2e-required` is the check
+that is always present. `e2e.yml` also runs on `merge_group`, so a merge queue can
+require `e2e` itself (every queued merge runs it, with no paths filter).
+
+The release workflow also calls `e2e.yml` on the image it pushes, and publishes the
+GitHub Release only if it passes. Nothing to configure for that; the first tag after
+this lands is its first real run.
 
 ## 4. Token permissions
 

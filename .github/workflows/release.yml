@@ -38,6 +38,9 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    # Publish only when the e2e suite passed on the image pushed below (and so
+    # only after that image job succeeded). A red e2e leaves no GitHub Release.
+    needs: [e2e]
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -102,6 +105,8 @@ jobs:
 
   image:
     runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -148,3 +153,18 @@ jobs:
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: cosign sign --yes "docker.io/ethosagent/warden@${DIGEST}"
+
+  # The release gate (#369): the L2 suite runs against the image just pushed,
+  # by digest. The image is already on Docker Hub at this point (the digest has
+  # to exist to be tested); what a failure stops is the GitHub Release.
+  e2e:
+    needs: [image]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/e2e.yml
+    with:
+      image: docker.io/ethosagent/warden@${{ needs.image.outputs.digest }}
+    # Named, not `inherit`: e2e.yml gets exactly the two it logs in with.
+    secrets:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}

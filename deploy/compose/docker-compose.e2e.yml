@@ -49,9 +49,8 @@
 # configs/config.e2e-cp.yaml and is pulled by both workers; each worker keeps
 # only local wiring in its own file (secrets, DNS, the SSRF lab exception).
 #
-# The scenario runner itself (driving recorded requests, the /_rebind red-team
-# switch, WebSocket + gRPC paths) lands in part 2 (#367); `make e2e` prints
-# that today.
+# `make e2e` runs the Go suite in test/e2e (build tag e2e) against this stack;
+# the /_rebind red-team switch, WebSocket + gRPC scenarios build on it later.
 
 name: warden-e2e
 

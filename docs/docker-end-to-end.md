@@ -106,61 +106,28 @@ warden proxy listening on 0.0.0.0:8080
 Open the dashboard at **http://localhost:9090/dashboard/** (published from the proxy; the agent
 cannot reach it — it's on the host-facing side only).
 
-## 5. Run it end-to-end
+## 5. Run `make e2e`
 
-In another terminal, exec into the **agent** container and drive traffic from inside the isolated
-network:
-
-```sh
-docker compose -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.openrouter.yml \
-  exec agent sh
-```
-
-**a) Allowed call + secret swap** — the agent sends only the *placeholder*; Warden injects the real
-key at the edge, so the call succeeds:
+The proof that the isolation holds is a test suite, not a list of curl commands:
 
 ```sh
-curl --cacert /etc/warden/certs/proxy-ca.crt \
-  https://openrouter.ai/api/v1/chat/completions \
-  -H "Authorization: Bearer openrouter_secret_001" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"openai/gpt-4o-mini","messages":[{"role":"user","content":"ping"}]}'
+make e2e
 ```
 
-A `200` with a completion proves the swap happened — the agent never had the real key, yet
-OpenRouter authenticated the request.
+It builds the hermetic stack from your checkout (control plane, two workers, two
+agents, a fake upstream; no real internet, no real credentials), runs
+`test/e2e` against it and tears it down (about 3 minutes). It checks, from inside the
+agents, that every route out fails, that an allowed call arrives upstream with the
+secret swapped while the agent only held the placeholder, that a denied host is
+refused and logged, that no real secret leaks anywhere, and that policy changes and
+control-plane outages behave as a fleet should (fail closed). See
+[Run the L2 suite](#run-the-l2-suite-make-e2e) below for flags, and
+`docs/testing-guide.md` ("L2: container tests"). CI runs the same suite as the `e2e`
+job: required for `risk:critical` PRs, nightly on `main`, and on every release image
+before the release is published.
 
-**b) Blocked call (default-deny)** — any destination not on the allowlist dies at the gate:
-
-```sh
-curl --cacert /etc/warden/certs/proxy-ca.crt https://api.github.com
-# -> "Received HTTP code 403 from proxy after CONNECT"
-```
-
-**c) Isolation proof — no direct route** — bypass the proxy and the agent has nowhere to go:
-
-```sh
-curl --noproxy '*' --max-time 5 https://openrouter.ai
-# -> times out / "Could not resolve host" — the agent has no internet without Warden
-```
-
-**d) See the decisions** — every allow/deny is logged (headers only, secret-by-reference, no
-bodies). The simplest view is the dashboard at **http://localhost:9090/dashboard/** (Traffic /
-Blocked / Stats), or hit the JSON API from the host:
-
-```sh
-curl -s http://localhost:9090/dashboard/api/traffic | head
-curl -s http://localhost:9090/dashboard/api/blocked     # denied attempts grouped by domain
-```
-
-(The analytics SQLite file lives at `/tmp/warden.db` inside the proxy container and is ephemeral —
-mount a volume there if you want it to persist.)
-
-Tear down with `Ctrl-C`, then:
-
-```sh
-docker compose -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.openrouter.yml down
-```
+To see the proof with your own eyes against the demo OpenRouter stack, follow
+[Appendix: Demo by hand](#appendix-demo-by-hand).
 
 ## 6. Use your own service instead of the demo agent
 
@@ -280,7 +247,58 @@ the next `make e2e-up`. Set `WARDEN_IMAGE` to test a specific pre-built image
 instead — then nothing is built (`--no-build`) and the image must already
 exist, or the up fails with a clear message.
 
-Try it by hand (the scenario driver lands in #367):
+## Run the L2 suite (`make e2e`)
+
+`test/e2e` is a Go package behind the `e2e` build tag, so `go test ./...` and
+`scripts/check.sh` never touch Docker. It needs Docker, `make` and free
+host ports 7070, 8081, 9091, 9092 (one stack at a time).
+
+```sh
+make e2e                                        # whole suite (~1-3 min)
+make e2e-scenario NAME=TestIsolation_DefaultDeny # one test (-run regexp)
+E2E_KEEP_STACK=1 make e2e                       # leave the stack up to debug
+E2E_STACK_RUNNING=1 go test -tags e2e ./test/e2e/ -v   # reuse a stack you started
+```
+
+`TestMain` runs `make e2e-up` (build from source, wait healthy, hermeticity
+check), polls the control plane, both workers and the recorder with a 120 s
+deadline, runs the tests, then `down -v`. With the tag set and no working
+Docker the package fails; it never skips. The isolation suite proves, from
+`agent-1`, that every route out fails for the right reason (public IP, public
+DNS, IPv6, control plane, Docker gateway/metadata, the other worker's network;
+each beside a positive control), that an allowed call reaches the fake upstream
+with the swapped canary while the agent never sees it, that a denied host
+leaves exactly one deny event with reason `policy_denylist` (and the wrong-port
+call one with `policy_no_match`), and that the canary (raw, base64, URL, hex) is absent
+from agent output, every service's logs, both workers' traffic APIs and the
+control plane's fleet API. The recorder is the one place it must appear.
+Workers forward analytics to the control plane asynchronously, so event reads
+poll with a deadline. The helpers (`agentExec`, `recorded`, `resetRecorded`,
+`events`, `logs`, `AssertCanaryNeverLeaked`) are reused by the later L2 suites.
+
+The fleet suite (`fleet_test.go`) changes policy through the route the dashboard
+uses (`PUT /dashboard/api/policy` on the control plane) and checks that both workers
+pick it up within one long-poll; that with the control plane stopped the workers keep
+the last policy and stay fail-closed (an allowed host works, a denied host and a host
+nobody allowed stay refused); that a restarted control plane resyncs the workers;
+that a restarted worker decides by policy on its first request; and that each
+agent's request is attributed to its own worker in the fleet view. Each test puts the
+stack back as it found it, so the order does not matter.
+
+### In CI
+
+`.github/workflows/e2e.yml` (job `e2e`, 15 minute limit) runs on PRs that touch a
+risky path, nightly on `main`, and as a reusable workflow that `release.yml` calls
+with the pushed image digest (`WARDEN_IMAGE`; the GitHub Release waits for it). On
+failure it uploads `docker compose logs`, both workers' traffic APIs, the fleet API
+and `/_recorded` as the `e2e-diagnostics` artifact; `KEEP_STACK=1` is what keeps the
+stack alive long enough to collect them. Its `paths` filter must include every
+`critical` glob in `.agents/risk.yaml` (a Go test in `tools/riskmap` enforces it),
+because `risk.yml` waits for a check run named `e2e` on every critical PR.
+
+## Drive it by hand
+
+Try it by hand:
 
 ```sh
 docker compose -p warden-e2e exec agent-1 curl -s \
@@ -303,7 +321,7 @@ canary secret mapping, `dns.upstreamResolver` (the fake DNS), and
 exception, local-only by design and never settable by the control plane. They
 verify the fake upstream via `SSL_CERT_FILE` pointing at the fake-CA + system
 bundle `test/e2e/certs/gen.sh` builds; no extra config key. `make e2e` /
-`make e2e-scenario` print a placeholder until the scenario suite lands.
+`make e2e-scenario` run the suite described above.
 
 No root anywhere: the warden services run as the image's non-root `warden`
 user, the fake upstream runs as its own non-root user (it binds 443 and 53 via
@@ -316,3 +334,62 @@ world-readable on purpose so the non-root containers can read the bind-mounts.
 
 - `docs/setup-guide.md` — running the binary locally (no Docker).
 - `deploy/k8s/` — the same isolation as a Kubernetes sidecar + default-deny NetworkPolicy.
+
+## Appendix: Demo by hand
+
+Manual version of the proof, against the OpenRouter demo stack from steps 1-4. `make e2e`
+(step 5) automates and extends it; use this only to watch it happen.
+
+In another terminal, exec into the **agent** container and drive traffic from inside the isolated
+network:
+
+```sh
+docker compose -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.openrouter.yml \
+  exec agent sh
+```
+
+**a) Allowed call + secret swap** — the agent sends only the *placeholder*; Warden injects the real
+key at the edge, so the call succeeds:
+
+```sh
+curl --cacert /etc/warden/certs/proxy-ca.crt \
+  https://openrouter.ai/api/v1/chat/completions \
+  -H "Authorization: Bearer openrouter_secret_001" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"openai/gpt-4o-mini","messages":[{"role":"user","content":"ping"}]}'
+```
+
+A `200` with a completion proves the swap happened — the agent never had the real key, yet
+OpenRouter authenticated the request.
+
+**b) Blocked call (default-deny)** — any destination not on the allowlist dies at the gate:
+
+```sh
+curl --cacert /etc/warden/certs/proxy-ca.crt https://api.github.com
+# -> "Received HTTP code 403 from proxy after CONNECT"
+```
+
+**c) Isolation proof — no direct route** — bypass the proxy and the agent has nowhere to go:
+
+```sh
+curl --noproxy '*' --max-time 5 https://openrouter.ai
+# -> times out / "Could not resolve host" — the agent has no internet without Warden
+```
+
+**d) See the decisions** — every allow/deny is logged (headers only, secret-by-reference, no
+bodies). The simplest view is the dashboard at **http://localhost:9090/dashboard/** (Traffic /
+Blocked / Stats), or hit the JSON API from the host:
+
+```sh
+curl -s http://localhost:9090/dashboard/api/traffic | head
+curl -s http://localhost:9090/dashboard/api/blocked     # denied attempts grouped by domain
+```
+
+(The analytics SQLite file lives at `/tmp/warden.db` inside the proxy container and is ephemeral —
+mount a volume there if you want it to persist.)
+
+Tear down with `Ctrl-C`, then:
+
+```sh
+docker compose -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.openrouter.yml down
+```
