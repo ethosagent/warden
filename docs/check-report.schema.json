@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ethosagent/warden/blob/main/docs/check-report.schema.json",
+  "title": "warden.check.v1",
+  "description": "Machine-readable result of scripts/check.sh --json. One document per run; fix the findings in stage order, then rerun.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "ok", "durationMs", "stages"],
+  "properties": {
+    "schema": { "const": "warden.check.v1" },
+    "ok": { "type": "boolean", "description": "True only when every stage ran and passed." },
+    "durationMs": { "type": "integer", "minimum": 0 },
+    "stages": { "type": "array", "items": { "$ref": "#/$defs/stage" } }
+  },
+  "$defs": {
+    "stage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "tool", "ok", "durationMs", "findings"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "format, vet, lint, roadmap, build, vulncheck, test, benchmark, coverage, integration (and, later, archtest, scenarios, ...)."
+        },
+        "tool": { "type": "string", "minLength": 1, "description": "The tool with its version, e.g. golangci-lint@v2.12.2." },
+        "ok": { "type": "boolean", "description": "True when the stage ran and has no error finding." },
+        "skipped": { "type": "boolean", "description": "The stage did not run (an earlier stage failed without --keep-going, or it could not be evaluated). A skipped stage is never ok." },
+        "durationMs": { "type": "integer", "minimum": 0 },
+        "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
+        "metrics": {
+          "type": "object",
+          "description": "Stage numbers. coverage: total, min (percent) and lowest (the five lowest-covered packages).",
+          "additionalProperties": true
+        }
+      }
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rule", "severity", "message", "fix"],
+      "properties": {
+        "rule": { "type": "string", "minLength": 1, "description": "Stable id, e.g. staticcheck/SA1019, vet/printf, test/data-race, GO-2026-5030, stage/crashed." },
+        "severity": { "enum": ["error", "warning"] },
+        "file": { "type": "string", "description": "Repo-relative path, when the finding has a location." },
+        "line": { "type": "integer", "minimum": 1 },
+        "col": { "type": "integer", "minimum": 1 },
+        "message": { "type": "string", "minLength": 1 },
+        "fix": { "type": "string", "minLength": 1, "description": "What to do about it, not only what failed." },
+        "output": { "type": "string", "maxLength": 4200, "description": "Short tool-output excerpt, capped at 4 KiB and scrubbed of secrets." }
+      }
+    }
+  }
+}

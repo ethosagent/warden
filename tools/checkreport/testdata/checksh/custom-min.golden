@@ -1,0 +1,46 @@
+exit: 0
+--- stdout ---
+
+=== format (gofmt) ===
+ok
+
+=== vet (go vet ./...) ===
+ok
+
+=== lint (golangci-lint v2.12.2) ===
+lint ran
+ok
+
+=== roadmap (go run docs/roadmap/gen.go check) ===
+roadmap ok
+
+=== build (go build ./...) ===
+ok
+
+=== vulncheck (govulncheck v1.5.0) ===
+No vulnerabilities found.
+ok
+
+=== test (go test -race -coverprofile) ===
+ok  	example.com/x	0.1s
+ok
+
+=== benchmark smoke (go test -bench . -benchtime=1x) ===
+ok
+
+=== coverage gate (min 60%) ===
+total coverage: 61.5%
+ok
+
+=== all checks passed ===
+--- stderr ---
+--- commands ---
+gofmt -l .
+go vet ./...
+go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run
+go run docs/roadmap/gen.go check
+go build ./...
+go run golang.org/x/vuln/cmd/govulncheck@v1.5.0 ./...
+go test -race -coverprofile=coverage.out ./...
+go test -run ^$ -bench . -benchtime=1x ./...
+go tool cover -func=coverage.product.out

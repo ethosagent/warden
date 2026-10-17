@@ -33,6 +33,19 @@ scripts/check.sh          # the FULL gate — exactly what CI runs
 scripts/install-hooks.sh  # run once: wires pre-commit (fast) + pre-push (full)
 ```
 
+Agents: run `scripts/check.sh --json` and fix the findings in order. It prints
+one report on stdout (human progress goes to stderr) and keeps going after a
+failure, so every problem shows in one pass. Each finding has a `rule`, a
+`file:line` and a `fix` that says what to do. Report format:
+[`docs/check-report.schema.json`](docs/check-report.schema.json)
+(`warden.check.v1`). Other flags: `--json-out <path>` (human output as usual,
+plus the report in a file), `--keep-going` (all stages, human output). The
+exit code is the same with or without them. In report mode the console shows a
+per-stage summary instead of live tool output, and a tool that cannot run at all
+maps to exit 1. The coverage gate counts product code only (`tools/` is tested
+but excluded from the total). The reporter is
+`tools/checkreport` — developer tooling that no Warden package may import.
+
 `scripts/check.sh` is the single source of truth: format → vet → lint → build →
 test+race+coverage → coverage gate (`COVERAGE_MIN`, default 70) → integration
 (`--integration`). CI runs the same script, so "green locally" means "green in
@@ -57,6 +70,45 @@ per lens: security invariants, architecture, hot path, acceptance and test
 quality. Each check has a stable ID (`SEC-4`, `HOT-1`, …). Use them when
 reviewing, or run `openai-review --lens <name>`. A check that keeps finding
 the same problem should become a rule in `scripts/check.sh`.
+
+For exploratory attack runs — actively trying to break Warden against a stack
+built from a PR — follow [`.agents/playbooks/red-team.md`](.agents/playbooks/red-team.md)
+(rules of engagement, bypass list, canary hunt, reporting as `RT-*` findings).
+Every confirmed break becomes a scripted regression scenario in the L1/L2
+harnesses.
+
+## Pipeline contract
+
+The autonomous pipeline has two parts: a generic harness (a separate repo) and
+this repo's contract. The harness knows nothing about Go or Warden. It reads
+[`.agents/pipeline.yaml`](.agents/pipeline.yaml) (schema:
+`docs/pipeline.schema.json`) for commands, paths, review lenses and the PR
+template. An entry marked `planned: true` names the issue that delivers it, so
+the harness skips it. `test/contract` fails if the file is invalid, if an
+entry that is not `planned` points at something missing, or if a `planned`
+entry names no issue. When planned work merges, drop `planned` in that PR.
+
+### Intake: the `agent-ready` label
+
+An issue gets the `agent-ready` label when all of these hold:
+
+- every issue it depends on is closed;
+- it has testable acceptance criteria;
+- its risk tier is known, or the files it touches predict it (roadmap tickets
+  carry `touches`);
+- it is sized S or M.
+
+Open issues from `.github/ISSUE_TEMPLATE/` (feature or bug). Both templates
+require acceptance criteria and "files likely touched". Roadmap issues keep
+their generated format.
+
+### Commits and PRs
+
+- One PR per issue. Put `Closes #N` in the PR description.
+- Fill `.github/pull_request_template.md`: why first, then what changes, the
+  acceptance criterion → evidence table, risk tier, review lenses and
+  outcome, and what was not done with follow-up issues.
+- Add a `Co-Authored-By:` trailer to every commit an agent writes.
 
 ## Task skills and decisions
 
