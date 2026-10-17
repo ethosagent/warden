@@ -425,12 +425,18 @@ const apiPrefix = "/dashboard/api/"
 type WriteGuard func(r *http.Request) (status int, msg string)
 
 // SetWriteGuard installs the guard run before every non-GET/HEAD request under
-// /dashboard/api/. With none set (a worker's local admin) writes are not gated.
+// /dashboard/api/. With none set, every write is refused (403): the default is
+// deny, so a host that forgets to wire a guard cannot ship an open writer.
 func (s *Server) SetWriteGuard(g WriteGuard) {
 	s.writeGuardMu.Lock()
 	defer s.writeGuardMu.Unlock()
 	s.writeGuard = g
 }
+
+// AllowUngatedWritesForTests is a WriteGuard that lets every write through. It
+// exists only so tests can exercise writers without auth; production code must
+// never install it (grep for it in review).
+func AllowUngatedWritesForTests(*http.Request) (int, string) { return 0, "" }
 
 // Handler returns an http.Handler that serves the dashboard routes.
 func (s *Server) Handler() http.Handler {
@@ -466,11 +472,13 @@ func (s *Server) guardWrites(next http.Handler) http.Handler {
 			s.writeGuardMu.RLock()
 			g := s.writeGuard
 			s.writeGuardMu.RUnlock()
-			if g != nil {
-				if status, msg := g(r); status != 0 {
-					writeError(w, status, msg)
-					return
-				}
+			if g == nil {
+				writeError(w, http.StatusForbidden, "dashboard writes are disabled: no write guard configured")
+				return
+			}
+			if status, msg := g(r); status != 0 {
+				writeError(w, status, msg)
+				return
 			}
 		}
 		next.ServeHTTP(w, r)

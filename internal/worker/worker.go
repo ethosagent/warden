@@ -781,6 +781,12 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	if adminTokenEnv != "" {
 		adminToken = os.Getenv(adminTokenEnv)
 	}
+	// Name the env var (never its value) so a typo'd name is visible at boot.
+	if strings.TrimSpace(adminToken) == "" {
+		logger.Warn("worker dashboard writes are disabled: set "+adminTokenEnvName(adminTokenEnv), "tokenEnv", adminTokenEnv)
+	} else {
+		logger.Info("worker dashboard writes require the admin token", "tokenEnv", adminTokenEnv)
+	}
 	dashSrv.SetWriteGuard(dashboard.NewBearerWriteGuard(dashboard.BearerGuardConfig{
 		Token: adminToken, Logger: logger, Component: "worker", TokenName: "worker admin token",
 		ConfigHint: "Start it with --admin-token-env <ENV> (or admin.tokenEnv in the config; e.g. WARDEN_ADMIN_TOKEN)",
@@ -971,4 +977,13 @@ func newSecretFetcher(pol config.Policy, mapping map[string]string) (secrets.Fet
 	default:
 		return nil, nil, fmt.Errorf("secretStore.backend %q is not supported", ss.Backend)
 	}
+}
+
+// adminTokenEnvName is the env var to tell the operator to set: the resolved one,
+// or the conventional example when none is configured.
+func adminTokenEnvName(resolved string) string {
+	if resolved == "" {
+		return "--admin-token-env <ENV> (or admin.tokenEnv)"
+	}
+	return resolved
 }

@@ -89,6 +89,7 @@ func TestSecretStore_ListsMetadataNoValues(t *testing.T) {
 		{Key: "STRIPE_KEY", Version: "v1"},
 	}}
 	srv := NewServer(&fakeDataSource{}, config.Policy{}, emptyProvider())
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
 	srv.SetSecretStore(store, config.SecretBackendEcho)
 
 	rr := doGet(t, srv.Handler(), "/dashboard/api/secretstore")
@@ -123,6 +124,7 @@ func TestSecretStore_ListsMetadataNoValues(t *testing.T) {
 
 func TestSecretStore_NilStoreReportsNone(t *testing.T) {
 	srv := NewServer(&fakeDataSource{}, config.Policy{}, emptyProvider())
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
 	rr := doGet(t, srv.Handler(), "/dashboard/api/secretstore")
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rr.Code)
@@ -145,6 +147,7 @@ func TestSecretStore_NilStoreReportsNone(t *testing.T) {
 func TestSecretStore_ListErrorDegradesToBackendOnly(t *testing.T) {
 	store := &fakeSecretStore{err: context.DeadlineExceeded}
 	srv := NewServer(&fakeDataSource{}, config.Policy{}, emptyProvider())
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
 	srv.SetSecretStore(store, config.SecretBackendAWS)
 	rr := doGet(t, srv.Handler(), "/dashboard/api/secretstore")
 	if rr.Code != http.StatusOK {
@@ -159,6 +162,7 @@ func TestSecretStore_ListErrorDegradesToBackendOnly(t *testing.T) {
 
 func TestSecretStore_PutUpsertsThenListsAndDeletes(t *testing.T) {
 	srv := NewServer(&fakeDataSource{}, config.Policy{}, emptyProvider())
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
 	srv.SetSecretStore(newWritableSecretStore(), config.SecretBackendEcho)
 	h := srv.Handler()
 
@@ -203,6 +207,7 @@ func TestSecretStore_PutUpsertsThenListsAndDeletes(t *testing.T) {
 
 func TestSecretStore_WriteRejectsEmptyKeyOrValue(t *testing.T) {
 	srv := NewServer(&fakeDataSource{}, config.Policy{}, emptyProvider())
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
 	srv.SetSecretStore(newWritableSecretStore(), config.SecretBackendEcho)
 	h := srv.Handler()
 
@@ -227,6 +232,7 @@ func TestSecretStore_WriteRejectsEmptyKeyOrValue(t *testing.T) {
 
 func TestSecretStore_PutLogsByReferenceNeverRaw(t *testing.T) {
 	srv := NewServer(&fakeDataSource{}, config.Policy{}, emptyProvider())
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
 	srv.SetSecretStore(newWritableSecretStore(), config.SecretBackendEcho)
 
 	var buf bytes.Buffer
@@ -255,6 +261,7 @@ func TestSecretStore_PutLogsByReferenceNeverRaw(t *testing.T) {
 
 func TestSecretStore_NilStoreRejectsWrites(t *testing.T) {
 	srv := NewServer(&fakeDataSource{}, config.Policy{}, emptyProvider())
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
 	h := srv.Handler()
 
 	if rr := doPost(t, h, "/dashboard/api/secretstore", `{"key":"K","value":"v"}`); rr.Code != http.StatusMethodNotAllowed {
@@ -279,6 +286,7 @@ func TestSecretStore_NilStoreRejectsWrites(t *testing.T) {
 
 func TestSecretStore_UnsupportedMethod(t *testing.T) {
 	srv := NewServer(&fakeDataSource{}, config.Policy{}, emptyProvider())
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
 	srv.SetSecretStore(newWritableSecretStore(), config.SecretBackendEcho)
 	req := httptest.NewRequest(http.MethodPut, "/dashboard/api/secretstore", nil)
 	rr := httptest.NewRecorder()
@@ -304,6 +312,7 @@ func sampleAlerts() []integration.Alert {
 
 func TestAlerts_ReturnsMetadata(t *testing.T) {
 	srv := NewServer(&fakeDataSource{}, config.Policy{}, emptyProvider())
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
 	srv.SetAlerts(func(int) []integration.Alert { return sampleAlerts() })
 	rr := doGet(t, srv.Handler(), "/dashboard/api/alerts")
 	if rr.Code != http.StatusOK {
@@ -329,6 +338,7 @@ func TestAlerts_ReturnsMetadata(t *testing.T) {
 
 func TestAlerts_NilSourceReturnsEmpty(t *testing.T) {
 	srv := NewServer(&fakeDataSource{}, config.Policy{}, emptyProvider())
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
 	rr := doGet(t, srv.Handler(), "/dashboard/api/alerts")
 	if strings.TrimSpace(rr.Body.String()) != "[]" {
 		t.Fatalf("nil alert source should return [], got %q", rr.Body.String())
@@ -338,6 +348,7 @@ func TestAlerts_NilSourceReturnsEmpty(t *testing.T) {
 func TestAlerts_LimitPassedThrough(t *testing.T) {
 	var gotLimit int
 	srv := NewServer(&fakeDataSource{}, config.Policy{}, emptyProvider())
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
 	srv.SetAlerts(func(limit int) []integration.Alert {
 		gotLimit = limit
 		return nil
@@ -369,6 +380,7 @@ func TestAudit_ComplianceAggregation(t *testing.T) {
 		{Timestamp: now, Domain: "c.com", Decision: "allow", Compliance: []string{"owasp:LLM01", "soc2"}},
 	}}
 	srv := NewServer(ds, config.Policy{}, emptyProvider())
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
 	rr := doGet(t, srv.Handler(), "/dashboard/api/audit")
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rr.Code)
@@ -444,6 +456,7 @@ func TestAudit_ReceiptsSummary(t *testing.T) {
 	}
 
 	srv := NewServer(&fakeDataSource{}, config.Policy{}, emptyProvider())
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
 	srv.SetAudit(logPath, trusted.PubKey())
 	rr := doGet(t, srv.Handler(), "/dashboard/api/audit")
 	var resp auditResponse
@@ -484,6 +497,7 @@ func TestAuditVerify_PastedReceipt(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 	srv := NewServer(&fakeDataSource{}, config.Policy{}, emptyProvider())
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
 	srv.SetAudit("", signer.PubKey())
 
 	post := func(payload []byte) auditVerifyResponse {
@@ -521,6 +535,7 @@ func TestAuditVerify_PastedReceipt(t *testing.T) {
 func TestSetup_States(t *testing.T) {
 	t.Run("fresh single node: no events, no policy", func(t *testing.T) {
 		srv := NewServer(&fakeDataSource{}, config.Policy{}, emptyProvider())
+		srv.SetWriteGuard(AllowUngatedWritesForTests)
 		resp := getSetup(t, srv)
 		if resp.WorkersConnected != 1 {
 			t.Fatalf("workersConnected = %d, want 1 (single node serving)", resp.WorkersConnected)
@@ -546,6 +561,7 @@ func TestSetup_States(t *testing.T) {
 		}
 		ds := &fakeDataSource{events: []analytics.Event{{Domain: "api.example.com", Decision: "allow", Timestamp: time.Now()}}}
 		srv := NewServer(ds, pol, emptyProvider())
+		srv.SetWriteGuard(AllowUngatedWritesForTests)
 		resp := getSetup(t, srv)
 		if !resp.FirstEventSeen {
 			t.Fatal("firstEventSeen should be true")
@@ -560,6 +576,7 @@ func TestSetup_States(t *testing.T) {
 
 	t.Run("fleet with live enforce settings", func(t *testing.T) {
 		srv := NewServer(&fakeDataSource{}, config.Policy{}, emptyProvider())
+		srv.SetWriteGuard(AllowUngatedWritesForTests)
 		srv.SetWorkers(func() []WorkerView { return []WorkerView{{ProxyID: "w-1"}, {ProxyID: "w-2"}} })
 		srv.SetLiveSettings(func() *config.SettingsWire {
 			return &config.SettingsWire{DLP: &config.DLPSettings{Mode: "enforce"}}
@@ -575,6 +592,7 @@ func TestSetup_States(t *testing.T) {
 
 	t.Run("monitor when only monitor guards", func(t *testing.T) {
 		srv := NewServer(&fakeDataSource{}, config.Policy{}, emptyProvider())
+		srv.SetWriteGuard(AllowUngatedWritesForTests)
 		srv.SetLiveSettings(func() *config.SettingsWire {
 			return &config.SettingsWire{
 				DLP: &config.DLPSettings{Mode: "off"},
@@ -588,6 +606,7 @@ func TestSetup_States(t *testing.T) {
 
 	t.Run("secretsConfigured via managed store", func(t *testing.T) {
 		srv := NewServer(&fakeDataSource{}, config.Policy{}, emptyProvider())
+		srv.SetWriteGuard(AllowUngatedWritesForTests)
 		srv.SetSecretStore(&fakeSecretStore{metas: []secrets.SecretMeta{{Key: "K"}}}, "echo")
 		if resp := getSetup(t, srv); !resp.SecretsConfigured {
 			t.Fatal("secretsConfigured should be true when the store lists a key")
@@ -599,6 +618,7 @@ func TestSetup_States(t *testing.T) {
 
 func TestV3Endpoints_RejectWrongMethod(t *testing.T) {
 	srv := NewServer(&fakeDataSource{}, config.Policy{}, emptyProvider())
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
 	h := srv.Handler()
 	cases := []struct {
 		method, path string

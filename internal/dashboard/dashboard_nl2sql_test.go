@@ -42,6 +42,7 @@ func nl2sqlServer(t *testing.T, gen SQLGenerator) *Server {
 		t.Fatalf("store event: %v", err)
 	}
 	srv := NewServer(store, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
 	srv.SetQueryEngine(store)
 	if gen != nil {
 		srv.SetSQLGenerator(gen)
@@ -122,6 +123,7 @@ func TestQueryGenerate_MethodNotAllowed(t *testing.T) {
 func TestQueryGenerate_NoQueryEngine(t *testing.T) {
 	// A server with a generator but no query engine still 404s.
 	srv := NewServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
 	srv.SetSQLGenerator(&fakeSQLGen{out: "SELECT 1"})
 	rr := doPost(t, srv.Handler(), "/dashboard/api/query/generate", `{"question":"x"}`)
 	if rr.Code != http.StatusNotFound {
@@ -139,6 +141,7 @@ func TestQueryGenerate_LocalStoreEngine(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	srv := NewServer(store, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
 	srv.SetQueryEngine(store)
 	gen := &fakeSQLGen{out: "SELECT domain FROM events"}
 	srv.SetSQLGenerator(gen)

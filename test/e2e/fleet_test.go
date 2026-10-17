@@ -409,8 +409,9 @@ func TestFleet_WorkerDashboardWriteNeedsToken(t *testing.T) {
 				t.Errorf("%s: PUT /dashboard/api/detection with auth %q = %d, want 401", w.worker, auth, c)
 			}
 		}
-		if c := put("Bearer " + adminToken); c == http.StatusUnauthorized || c == http.StatusForbidden {
-			t.Errorf("%s: PUT with the worker admin token = %d, want the handler to run", w.worker, c)
+		// A managed worker has no detection writer, so the handler answers 405.
+		if c := put("Bearer " + adminToken); c != http.StatusMethodNotAllowed {
+			t.Errorf("%s: PUT with the worker admin token = %d, want 405 from the handler", w.worker, c)
 		}
 		if _, err := getPolicy(base); err != nil {
 			t.Errorf("%s: GET policy (reads stay open): %v", w.worker, err)

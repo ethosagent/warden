@@ -31,6 +31,7 @@ func TestPolicyEditableFlag(t *testing.T) {
 
 	// Writer configured (control plane) -> editable.
 	srv := NewServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
 	srv.SetPolicyWriter(func(config.Policy) error { return nil })
 	var p2 policyResponse
 	doGetJSON(t, srv.Handler(), "/dashboard/api/policy", &p2)
@@ -50,6 +51,7 @@ func TestPolicyWriteRejectedWithoutWriter(t *testing.T) {
 func TestPolicyWriteCallsWriter(t *testing.T) {
 	var got config.Policy
 	srv := NewServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
 	srv.SetPolicyWriter(func(p config.Policy) error { got = p; return nil })
 	srv.SetLivePolicy(func() config.Policy { return got }) // echo reflects the write
 
@@ -68,6 +70,7 @@ func TestPolicyWriteCallsWriter(t *testing.T) {
 
 func TestPolicyWriteSurfacesValidationError(t *testing.T) {
 	srv := NewServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
 	srv.SetPolicyWriter(func(config.Policy) error { return fmt.Errorf("invalid policy: allowlist empty") })
 	rec := postJSON(t, srv.Handler(), "/dashboard/api/policy", `{"allowlist":[]}`)
 	if rec.Code != http.StatusBadRequest {
@@ -89,6 +92,7 @@ func TestSettingsEditableFlagAndLiveValue(t *testing.T) {
 
 	// Writer + live settings configured (control plane) -> editable, settings served.
 	srv := NewServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
 	srv.SetSettingsWriter(func(config.SettingsWire) error { return nil })
 	srv.SetLiveSettings(func() *config.SettingsWire {
 		return &config.SettingsWire{MCP: &config.MCPSettings{Enabled: true, Mode: "enforce"}}
@@ -114,6 +118,7 @@ func TestSettingsWriteRejectedWithoutWriter(t *testing.T) {
 func TestSettingsWriteCallsWriterAndEchoes(t *testing.T) {
 	var got config.SettingsWire
 	srv := NewServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
 	srv.SetSettingsWriter(func(s config.SettingsWire) error { got = s; return nil })
 	srv.SetLiveSettings(func() *config.SettingsWire { return &got }) // echo reflects the write
 
@@ -140,6 +145,7 @@ func TestSettingsWriteCallsWriterAndEchoes(t *testing.T) {
 
 func TestSettingsWriteSurfacesWriterError(t *testing.T) {
 	srv := NewServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
 	srv.SetSettingsWriter(func(config.SettingsWire) error { return fmt.Errorf("invalid mcp: mode bad") })
 	rec := postJSON(t, srv.Handler(), "/dashboard/api/settings", `{"mcp":{"enabled":true,"mode":"bad"}}`)
 	if rec.Code != http.StatusBadRequest {
@@ -156,6 +162,7 @@ func TestSettingsWriteSurfacesWriterError(t *testing.T) {
 // a worker (no settings writer) it is served read-only (editable=false).
 func TestSettingsSurfacesSecretsSelector(t *testing.T) {
 	srv := NewServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
 	srv.SetLiveSettings(func() *config.SettingsWire {
 		return &config.SettingsWire{Secrets: &config.SecretsSettings{Backend: "aws", Region: "us-east-1", NamePrefix: "warden/"}}
 	})
@@ -180,6 +187,7 @@ func TestSettingsSurfacesSecretsSelector(t *testing.T) {
 func TestSettingsGETMasksSecretAccessKey(t *testing.T) {
 	const rawSecret = "super-secret-access-key-abcd1234WXYZ"
 	srv := NewServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
 	srv.SetLiveSettings(func() *config.SettingsWire {
 		return &config.SettingsWire{Secrets: &config.SecretsSettings{
 			Backend: "aws", Region: "us-east-1", NamePrefix: "warden/",
@@ -215,6 +223,7 @@ func TestSettingsGETMasksSecretAccessKey(t *testing.T) {
 func TestSettingsWriteSecretsRoundTrips(t *testing.T) {
 	var got config.SettingsWire
 	srv := NewServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
 	srv.SetSettingsWriter(func(s config.SettingsWire) error { got = s; return nil })
 	srv.SetLiveSettings(func() *config.SettingsWire { return &got }) // echo reflects the write
 
@@ -246,6 +255,7 @@ func TestSettingsWriteSecretsRoundTrips(t *testing.T) {
 
 func TestWorkersEndpoint(t *testing.T) {
 	srv := NewServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
 	srv.SetWorkers(func() []WorkerView {
 		return []WorkerView{{ProxyID: "w1", Online: true, EventsForwarded: 5}}
 	})

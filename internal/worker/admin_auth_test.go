@@ -234,3 +234,28 @@ func TestWorkerAdmin_TokenEnvFromConfig(t *testing.T) {
 		t.Errorf("unauthenticated = %d, want 401", c)
 	}
 }
+
+// TestWorkerAdmin_StartupLogNamesTokenEnv: boot logs the resolved env var name
+// (INFO when it holds a token, WARN when empty), never the token value.
+func TestWorkerAdmin_StartupLogNamesTokenEnv(t *testing.T) {
+	t.Setenv("WARDEN_TEST_ADMIN_TOKEN", adminTestToken)
+	_, logs := startAdmin(t, Params{AdminTokenEnv: "WARDEN_TEST_ADMIN_TOKEN"})
+	out := logs.String()
+	if !strings.Contains(out, "worker dashboard writes require the admin token") || !strings.Contains(out, "WARDEN_TEST_ADMIN_TOKEN") {
+		t.Errorf("no INFO naming the env var: %q", out)
+	}
+	if strings.Contains(out, adminTestToken) || strings.Contains(out, "writes are disabled") {
+		t.Errorf("unexpected content in startup log: %q", out)
+	}
+
+	_, logs = startAdmin(t, Params{AdminTokenEnv: "WARDEN_TEST_ADMIN_TYPO"})
+	out = logs.String()
+	if !strings.Contains(out, "worker dashboard writes are disabled: set WARDEN_TEST_ADMIN_TYPO") || !strings.Contains(out, "level=WARN") {
+		t.Errorf("no WARN naming the empty env var: %q", out)
+	}
+
+	_, logs = startAdmin(t, Params{})
+	if out = logs.String(); !strings.Contains(out, "worker dashboard writes are disabled: set --admin-token-env") {
+		t.Errorf("no WARN when no env var is configured: %q", out)
+	}
+}
