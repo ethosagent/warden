@@ -7,6 +7,10 @@ ok
 === vet (go vet ./...) ===
 ok
 
+=== archtest (go test ./internal/archtest -run TestArchitecture) ===
+ok  	example.com/x/internal/archtest	0.2s
+ok
+
 === lint (golangci-lint v2.12.2) ===
 lint ran
 ok
@@ -47,7 +51,8 @@ ok
 --- commands ---
 gofmt -l .
 go vet ./...
-go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run
+go test ./internal/archtest -run TestArchitecture
+go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run --config .golangci.arch.yml
 go run docs/roadmap/gen.go check
 go build ./...
 go run golang.org/x/vuln/cmd/govulncheck@v1.5.0 ./...

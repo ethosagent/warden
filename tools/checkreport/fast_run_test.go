@@ -61,8 +61,8 @@ func TestRunFastReport(t *testing.T) {
 	for _, st := range rep.Stages {
 		names = append(names, st.Name)
 	}
-	if got := strings.Join(names, ","); got != "format,vet,lint,test" {
-		t.Errorf("stages = %s, want format,vet,lint,test", got)
+	if got := strings.Join(names, ","); got != "format,vet,archtest,lint,test" {
+		t.Errorf("stages = %s, want format,vet,archtest,lint,test", got)
 	}
 	if rep.Fast == nil || rep.Fast.Full || len(rep.Fast.Packages) != 2 {
 		t.Fatalf("report.fast = %+v", rep.Fast)
@@ -144,7 +144,7 @@ func TestRunFastFallsBackToFullGate(t *testing.T) {
 	for _, st := range rep.Stages {
 		names = append(names, st.Name)
 	}
-	if got := strings.Join(names, ","); got != "format,vet,lint,roadmap,build,vulncheck,test,fuzz,benchmark,coverage" {
+	if got := strings.Join(names, ","); got != "format,vet,archtest,lint,roadmap,build,vulncheck,test,fuzz,benchmark,coverage" {
 		t.Errorf("full-gate fallback ran %s", got)
 	}
 	b, _ := json.Marshal(rep)

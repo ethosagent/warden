@@ -128,6 +128,19 @@ var widenFiles = map[string]string{
 	"scripts/check.sh": "scripts/check.sh changed",
 }
 
+// archFiles are the architecture definitions and the lint config generated
+// from them. They are inputs of the architecture gate, not of any ordinary
+// package, so instead of widening to the full gate they add the gate
+// (internal/archtest) and its generator (cmd/archgen) to the plan.
+var archFiles = map[string]string{
+	"architecture.yaml":          "architecture.yaml changed",
+	"architecture.baseline.yaml": "architecture.baseline.yaml changed",
+	".golangci.arch.yml":         ".golangci.arch.yml changed",
+}
+
+// archDirs are the packages that enforce and generate the architecture checks.
+var archDirs = []string{"cmd/archgen", "internal/archtest"}
+
 // planFast maps changed files to packages and adds every package that imports
 // them, directly or through other packages, in its code or its tests.
 func planFast(root, module, base string, files []string, pkgs []listedPkg) FastPlan {
@@ -176,6 +189,24 @@ func planFast(root, module, base string, files []string, pkgs []listedPkg) FastP
 		}
 		if !testOnly(f) {
 			ripple[p.ImportPath] = true
+		}
+	}
+
+	// The architecture definitions re-run the gate and its generator, after the
+	// per-file pass so a direct "changed:" reason still wins.
+	for _, f := range files {
+		why, ok := archFiles[f]
+		if !ok {
+			continue
+		}
+		for _, d := range archDirs {
+			p, ok := byDir[d]
+			if !ok {
+				continue
+			}
+			if _, seen := reason[p.ImportPath]; !seen {
+				reason[p.ImportPath] = why
+			}
 		}
 	}
 
