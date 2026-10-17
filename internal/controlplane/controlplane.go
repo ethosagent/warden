@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -176,6 +177,9 @@ type pruner interface {
 // persistent SQLite fleet store); otherwise it defaults to an in-memory
 // CentralStore(MaxEvents) — unchanged behavior.
 func New(cfg Config) *Server {
+	// A whitespace-only token (a stray space or newline in an env file) is NOT a
+	// token: it counts as unset, so dashboard writes fail closed with the hint.
+	cfg.Token = strings.TrimSpace(cfg.Token)
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
@@ -323,7 +327,7 @@ func (s *Server) writeSettings(in config.SettingsWire) error { return s.WriteSet
 //
 //	GET  /policy          — allow/deny policy for workers (bearer-auth)
 //	POST /central/ingest  — fleet analytics ingest (bearer-auth)
-//	     /dashboard/      — fleet dashboard over the aggregated store
+//	     /dashboard/      — fleet dashboard over the aggregated store (writes bearer-auth)
 //	GET  /healthz         — liveness
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -462,6 +466,8 @@ func (s *Server) Handler() http.Handler {
 		})
 		dash.SetDetectionWriter(s.WriteDetection)
 	}
+	// Reads stay open; every write needs the CP bearer token (fail closed).
+	dash.SetWriteGuard(s.dashboardWriteGuard)
 	mux.Handle("/dashboard/", dash.Handler())
 
 	return mux

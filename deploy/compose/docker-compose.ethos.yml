@@ -28,7 +28,7 @@ services:
     image: ethosagent/warden:${WARDEN_VERSION:-0.3.0}
     networks: [cp-net]
     ports:
-      - "7070:7070"                  # fleet dashboard + /policy + /central/ingest
+      - "127.0.0.1:7070:7070"                  # fleet dashboard + /policy + /central/ingest
     environment:
       - WARDEN_CP_TOKEN=${WARDEN_CP_TOKEN:-dev-token}
       # API key env for the llmProviders registry (Explore NL→SQL / judge) — resolves node-locally, never rides the wire.
@@ -54,7 +54,7 @@ services:
         condition: service_started
     networks: [ethos-internal, egress, cp-net]
     ports:
-      - "9091:9090"                  # this worker's own (local) dashboard
+      - "127.0.0.1:9091:9090"                  # this worker's own (local) dashboard
     environment:
       - WARDEN_CP_TOKEN=${WARDEN_CP_TOKEN:-dev-token}
       - WARDEN_PROXY_ID=ethos-worker # labels this worker in the fleet view

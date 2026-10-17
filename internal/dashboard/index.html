@@ -1265,6 +1265,29 @@ function relTime(iso){
 function hhmmss(iso){ if(!iso) return "—"; const d=new Date(iso); if(isNaN(d.getTime())) return "—"; return d.toTimeString().slice(0,8); }
 async function jget(url){ const r=await fetch(url); if(!r.ok) throw new Error("status "+r.status); return r.json(); }
 
+/* ---------- write auth: the control plane needs its bearer token for every change ----------
+   The token is asked for once and kept in sessionStorage (this tab only; never the persistent store
+   or a cookie). It travels in the Authorization header, so a cross-site form cannot make the
+   browser send it. The write goes out without a token first (a worker dashboard needs none); only a 401 prompts, then the write is retried once with the token. A 401 clears the stored token. Reads stay open. */
+const CP_TOKEN_KEY='wardenCpToken';
+async function authFetch(url,opts){
+  const o=Object.assign({},opts||{});
+  const send=tok=>{
+    const h=new Headers(o.headers||{});
+    if(tok) h.set('Authorization','Bearer '+tok);
+    return fetch(url,Object.assign({},o,{headers:h}));
+  };
+  let r=await send(sessionStorage.getItem(CP_TOKEN_KEY));
+  if(r.status!==401) return r;
+  sessionStorage.removeItem(CP_TOKEN_KEY);
+  const tok=window.prompt('Control-plane token (required to make changes; kept for this browser tab only):');
+  if(!tok) return r;
+  sessionStorage.setItem(CP_TOKEN_KEY,tok);
+  r=await send(tok);
+  if(r.status===401) sessionStorage.removeItem(CP_TOKEN_KEY);
+  return r;
+}
+
 /* ---------- shared pill/chip renderers (used by live + preview) ---------- */
 const CLASS_CHIP = { credentials:'c-cred','pii.contact':'c-pii','pii.identity':'c-pii','pii.financial':'c-pii', source_code:'c-code', infrastructure:'c-infra' };
 function classChip(c){ return '<span class="chip '+(CLASS_CHIP[c]||'')+'">'+esc(c)+'</span>'; }
@@ -1350,7 +1373,7 @@ async function onModeToggleClick(mode){
   if(act.dlp) merged.dlp=Object.assign({}, s.dlp, {mode});
   if(act.mcp) merged.mcp=Object.assign({}, s.mcp, {mode});
   try{
-    const r=await fetch('/dashboard/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(merged)});
+    const r=await authFetch('/dashboard/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(merged)});
     if(!r.ok){ let m='status '+r.status; try{ const e=await r.json(); if(e&&e.error) m=e.error; }catch(_e){} throw new Error(m); }
     applyMode(mode);
     if(currentTab()==='guardrails') loadGuardrails();
@@ -1786,7 +1809,7 @@ async function saveExploreProvider(){
   const merged=Object.assign({}, cur, {explore:{llmProvider:sel.value}});
   const note=document.getElementById('exploreProviderNote');
   try{
-    const r=await fetch('/dashboard/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(merged)});
+    const r=await authFetch('/dashboard/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(merged)});
     if(!r.ok){ let m='status '+r.status; try{ const e=await r.json(); if(e&&e.error) m=e.error; }catch(_e){} throw new Error(m); }
     const d=await r.json().catch(()=>({})); window.__exploreSettings=(d&&d.settings)||merged;
     if(note){ note.textContent='saved ✓ — takes effect now'; note.style.color='var(--teal)'; setTimeout(()=>{ note.textContent=''; note.style.color=''; },2500); }
@@ -1925,7 +1948,7 @@ async function generateSqlFromNL(){
   const orig=btn?btn.textContent:'';
   if(btn){ btn.disabled=true; btn.textContent='generating…'; }
   try{
-    const r=await fetch('/dashboard/api/query/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question})});
+    const r=await authFetch('/dashboard/api/query/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question})});
     const d=await r.json().catch(()=>({error:'status '+r.status}));
     if(r.ok && d && d.sql){
       box.value=d.sql;
@@ -1956,7 +1979,7 @@ async function runQuery(){
   const sql=ta.value.trim();
   out.innerHTML='<div class="loading-note">running…</div>'; if(meta) meta.textContent='running…';
   try{
-    const r=await fetch('/dashboard/api/query',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sql,maxRows:1000})});
+    const r=await authFetch('/dashboard/api/query',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sql,maxRows:1000})});
     const d=await r.json().catch(()=>({error:'status '+r.status}));
     if(!r.ok){ out.innerHTML='<div class="note" style="color:#ff8098">✕ '+esc((d&&d.error)||('status '+r.status))+'</div>'; if(meta) meta.textContent='error'; return; }
     renderQueryResult(out,meta,d);
@@ -2123,7 +2146,7 @@ async function saveSettings(btnId, statusId){
   else if(sbb==='echo'){ body.secrets={ backend:'echo' }; }
   else { delete body.secrets; }
   try{
-    const r=await fetch('/dashboard/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const r=await authFetch('/dashboard/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     if(!r.ok){ const e=await r.json().catch(()=>({error:'status '+r.status})); throw new Error(e.error||('status '+r.status)); }
     const d=await r.json(); lastSettings=(d&&d.settings)||body; settingsEditable=!!(d&&d.editable);
     renderSettings();
@@ -2374,7 +2397,7 @@ async function saveSecret(){
   if(!key||!value){ if(msg){ msg.textContent='Key and value are required.'; msg.style.color='var(--amber)'; } return; }
   if(msg){ msg.textContent='saving…'; msg.style.color=''; }
   try{
-    const r=await fetch('/dashboard/api/secretstore',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:key,value:value})});
+    const r=await authFetch('/dashboard/api/secretstore',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:key,value:value})});
     if(!r.ok && r.status!==204){ let m='status '+r.status; try{ const e=await r.json(); if(e&&e.error) m=e.error; }catch(_e){} throw new Error(m); }
     setVal('secretKeyInput',''); setVal('secretValueInput','');
     if(msg) msg.textContent='';
@@ -2385,7 +2408,7 @@ async function saveSecret(){
 async function deleteSecretRow(key){
   if(!window.confirm('Delete secret '+key+'? Warden will stop injecting it at the edge.')) return;
   try{
-    const r=await fetch('/dashboard/api/secretstore?key='+encodeURIComponent(key),{method:'DELETE'});
+    const r=await authFetch('/dashboard/api/secretstore?key='+encodeURIComponent(key),{method:'DELETE'});
     if(!r.ok && r.status!==204){ throw new Error('status '+r.status); }
     loadSecrets();
   }catch(err){ window.alert('Delete failed: '+err.message); }
@@ -2445,7 +2468,7 @@ function flashBtn(id,txt){
   setTimeout(()=>{ b.textContent=old; b.disabled=false; }, 1800);
 }
 async function putSettings(merged){
-  const r=await fetch('/dashboard/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(merged)});
+  const r=await authFetch('/dashboard/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(merged)});
   if(!r.ok){ let m='status '+r.status; try{ const e=await r.json(); if(e&&e.error) m=e.error; }catch(_e){} throw new Error(m); }
   const d=await r.json().catch(()=>({}));
   gr.settings=(d&&d.settings)||merged; gr.settingsEditable=!!(d&&d.editable);
@@ -2492,7 +2515,7 @@ async function removePolicyEntry(list,idx){
 }
 async function savePolicy(){
   try{
-    const r=await fetch('/dashboard/api/policy',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({allowlist:gr.policy.allowlist,denylist:gr.policy.denylist})});
+    const r=await authFetch('/dashboard/api/policy',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({allowlist:gr.policy.allowlist,denylist:gr.policy.denylist})});
     if(!r.ok){ let m='status '+r.status; try{ const e=await r.json(); if(e&&e.error) m=e.error; }catch(_e){} throw new Error(m); }
     const p=await r.json();
     gr.policy=p; gr.policy.allowlist=p.allowlist||[]; gr.policy.denylist=p.denylist||[]; gr.policyEditable=!!p.editable;
@@ -2955,7 +2978,7 @@ async function saveLLMProviders(){
   const body=gr.llmp.providers.map(p=>({ name:p.name, baseURL:p.baseURL, model:p.model, apiKeyEnv:p.apiKeyEnv, timeoutSeconds:p.timeoutSeconds||0 }));
   llmpMsg('saving…',true);
   try{
-    const r=await fetch('/dashboard/api/llmproviders',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const r=await authFetch('/dashboard/api/llmproviders',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     if(!r.ok){ let m='status '+r.status; try{ const e=await r.json(); if(e&&e.error) m=e.error; }catch(_e){} throw new Error(m); }
     gr.llmp=await r.json(); gr.llmp.providers=gr.llmp.providers||[];
     renderLLMProviders();
@@ -3246,7 +3269,7 @@ async function saveDetection(){
   if(errs.length){ if(msg){ msg.textContent='✕ '+errs[0]; msg.style.color='var(--amber)'; } return; }
   if(msg){ msg.textContent='saving…'; msg.style.color=''; }
   try{
-    const r=await fetch('/dashboard/api/detection',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(doc)});
+    const r=await authFetch('/dashboard/api/detection',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(doc)});
     if(!r.ok){ let m='status '+r.status; try{ const e=await r.json(); if(e&&e.error) m=e.error; }catch(_e){} throw new Error(m); }
     detectionData=Object.assign({missing:false}, await r.json());
     renderDetection();
@@ -3310,7 +3333,7 @@ async function verifyReceipt(){
   if(!raw){ res.classList.add('bad'); res.innerHTML='Paste a receipt JSON first.'; return; }
   res.innerHTML='Verifying…';
   try{
-    const r=await fetch('/dashboard/api/audit/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:raw});
+    const r=await authFetch('/dashboard/api/audit/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:raw});
     const d=await r.json().catch(()=>({valid:false}));
     if(d&&d.valid){ res.classList.remove('bad'); res.innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="width:18px;height:18px"><path d="M20 6L9 17l-5-5"/></svg>Signature valid — Ed25519 verified'; }
     else { res.classList.add('bad'); res.innerHTML='✗ Signature invalid — does not verify against the trusted key'; }
@@ -3444,7 +3467,7 @@ async function saveIntegration(def){
   if(!match.length && st){ st.textContent='warning: empty match = no alerts'; st.style.color='var(--amber)'; }
   const body={ type:def.type, name:(val('intg-name')||'').trim(), config:config, match:match };
   try{
-    const r=await fetch('/dashboard/api/integrations',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const r=await authFetch('/dashboard/api/integrations',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     if(!r.ok){ const e=await r.json().catch(()=>({error:'status '+r.status})); throw new Error(e.error||('status '+r.status)); }
     integrationsData=await r.json();
     const form=document.getElementById('integrations-form'); if(form) form.style.display='none';
@@ -3454,7 +3477,7 @@ async function saveIntegration(def){
 async function deleteIntegration(name){
   if(!window.confirm('Delete integration "'+name+'"?')) return;
   try{
-    const r=await fetch('/dashboard/api/integrations?name='+encodeURIComponent(name),{method:'DELETE'});
+    const r=await authFetch('/dashboard/api/integrations?name='+encodeURIComponent(name),{method:'DELETE'});
     if(!r.ok){ const e=await r.json().catch(()=>({error:'status '+r.status})); throw new Error(e.error||('status '+r.status)); }
     integrationsData=await r.json();
     renderIntegrations();
