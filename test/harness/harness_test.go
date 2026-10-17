@@ -190,8 +190,11 @@ func TestCanaryLeaks_ReportsWithoutFailing(t *testing.T) {
 	if got := h.CanaryLeaks(); len(got) != 0 {
 		t.Fatalf("clean harness reported leaks: %v", got)
 	}
+	// The agent sends the raw value itself (as TestCanary_Plant_AgentResponseBody
+	// does): nothing is swapped, so the echo guard (#389) is not armed and the
+	// reflected value lands in the agent's transcript for the sweep to report.
 	plantEcho(h.Upstream("echo.example.com"))
-	postThrough(t, h, "echo.example.com", "/reflect", "token="+h.Placeholder("openai"))
+	postThrough(t, h, "echo.example.com", "/reflect", "token="+value)
 	leaks := h.CanaryLeaks()
 	if len(leaks) == 0 || !strings.Contains(strings.Join(leaks, "\n"), "agent response #0 body") {
 		t.Fatalf("CanaryLeaks = %v, want the echoed value in the agent's body", leaks)

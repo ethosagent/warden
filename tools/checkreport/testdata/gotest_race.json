@@ -1,0 +1,45 @@
+{"Time":"2026-10-16T18:17:27.704001217+05:30","Action":"start","Package":"example.com/fx/trace"}
+{"Time":"2026-10-16T18:17:27.71282246+05:30","Action":"run","Package":"example.com/fx/trace","Test":"TestRace"}
+{"Time":"2026-10-16T18:17:27.712838728+05:30","Action":"output","Package":"example.com/fx/trace","Test":"TestRace","Output":"=== RUN   TestRace\n"}
+{"Time":"2026-10-16T18:17:27.713360679+05:30","Action":"output","Package":"example.com/fx/trace","Test":"TestRace","Output":"==================\n"}
+{"Time":"2026-10-16T18:17:27.713378851+05:30","Action":"output","Package":"example.com/fx/trace","Test":"TestRace","Output":"WARNING: DATA RACE\n"}
+{"Time":"2026-10-16T18:17:27.713380516+05:30","Action":"output","Package":"example.com/fx/trace","Test":"TestRace","Output":"Read at 0x00c000018288 by goroutine 9:\n"}
+{"Time":"2026-10-16T18:17:27.713382342+05:30","Action":"output","Package":"example.com/fx/trace","Test":"TestRace","Output":"  example.com/fx/trace.TestRace.func1()\n"}
+{"Time":"2026-10-16T18:17:27.71338394+05:30","Action":"output","Package":"example.com/fx/trace","Test":"TestRace","Output":"      /tmp/fx/trace/a_test.go:8 +0x33\n"}
+{"Time":"2026-10-16T18:17:27.713385476+05:30","Action":"output","Package":"example.com/fx/trace","Test":"TestRace","Output":"\n"}
+{"Time":"2026-10-16T18:17:27.713387194+05:30","Action":"output","Package":"example.com/fx/trace","Test":"TestRace","Output":"Previous write at 0x00c000018288 by goroutine 8:\n"}
+{"Time":"2026-10-16T18:17:27.713389191+05:30","Action":"output","Package":"example.com/fx/trace","Test":"TestRace","Output":"  example.com/fx/trace.TestRace()\n"}
+{"Time":"2026-10-16T18:17:27.713390746+05:30","Action":"output","Package":"example.com/fx/trace","Test":"TestRace","Output":"      /tmp/fx/trace/a_test.go:9 +0x116\n"}
+{"Time":"2026-10-16T18:17:27.713392227+05:30","Action":"output","Package":"example.com/fx/trace","Test":"TestRace","Output":"  testing.tRunner()\n"}
+{"Time":"2026-10-16T18:17:27.71339383+05:30","Action":"output","Package":"example.com/fx/trace","Test":"TestRace","Output":"      /home/mitesh/.local/go/src/testing/testing.go:2036 +0x21c\n"}
+{"Time":"2026-10-16T18:17:27.713395413+05:30","Action":"output","Package":"example.com/fx/trace","Test":"TestRace","Output":"  testing.(*T).Run.gowrap1()\n"}
+{"Time":"2026-10-16T18:17:27.713396928+05:30","Action":"output","Package":"example.com/fx/trace","Test":"TestRace","Output":"      /home/mitesh/.local/go/src/testing/testing.go:2101 +0x38\n"}
+{"Time":"2026-10-16T18:17:27.713398439+05:30","Action":"output","Package":"example.com/fx/trace","Test":"TestRace","Output":"\n"}
+{"Time":"2026-10-16T18:17:27.713399853+05:30","Action":"output","Package":"example.com/fx/trace","Test":"TestRace","Output":"Goroutine 9 (running) created at:\n"}
+{"Time":"2026-10-16T18:17:27.713401275+05:30","Action":"output","Package":"example.com/fx/trace","Test":"TestRace","Output":"  example.com/fx/trace.TestRace()\n"}
+{"Time":"2026-10-16T18:17:27.713402705+05:30","Action":"output","Package":"example.com/fx/trace","Test":"TestRace","Output":"      /tmp/fx/trace/a_test.go:8 +0xf9\n"}
+{"Time":"2026-10-16T18:17:27.713404273+05:30","Action":"output","Package":"example.com/fx/trace","Test":"TestRace","Output":"  testing.tRunner()\n"}
+{"Time":"2026-10-16T18:17:27.713405797+05:30","Action":"output","Package":"example.com/fx/trace","Test":"TestRace","Output":"      /home/mitesh/.local/go/src/testing/testing.go:2036 +0x21c\n"}
+{"Time":"2026-10-16T18:17:27.71340779+05:30","Action":"output","Package":"example.com/fx/trace","Test":"TestRace","Output":"  testing.(*T).Run.gowrap1()\n"}
+{"Time":"2026-10-16T18:17:27.713409328+05:30","Action":"output","Package":"example.com/fx/trace","Test":"TestRace","Output":"      /home/mitesh/.local/go/src/testing/testing.go:2101 +0x38\n"}
+{"Time":"2026-10-16T18:17:27.713410826+05:30","Action":"output","Package":"example.com/fx/trace","Test":"TestRace","Output":"\n"}
+{"Time":"2026-10-16T18:17:27.713412464+05:30","Action":"output","Package":"example.com/fx/trace","Test":"TestRace","Output":"Goroutine 8 (running) created at:\n"}
+{"Time":"2026-10-16T18:17:27.713414013+05:30","Action":"output","Package":"example.com/fx/trace","Test":"TestRace","Output":"  testing.(*T).Run()\n"}
+{"Time":"2026-10-16T18:17:27.713419154+05:30","Action":"output","Package":"example.com/fx/trace","Test":"TestRace","Output":"      /home/mitesh/.local/go/src/testing/testing.go:2101 +0xb12\n"}
+{"Time":"2026-10-16T18:17:27.713421024+05:30","Action":"output","Package":"example.com/fx/trace","Test":"TestRace","Output":"  testing.runTests.func1()\n"}
+{"Time":"2026-10-16T18:17:27.713422563+05:30","Action":"output","Package":"example.com/fx/trace","Test":"TestRace","Output":"      /home/mitesh/.local/go/src/testing/testing.go:2585 +0x84\n"}
+{"Time":"2026-10-16T18:17:27.713424137+05:30","Action":"output","Package":"example.com/fx/trace","Test":"TestRace","Output":"  testing.tRunner()\n"}
+{"Time":"2026-10-16T18:17:27.713425694+05:30","Action":"output","Package":"example.com/fx/trace","Test":"TestRace","Output":"      /home/mitesh/.local/go/src/testing/testing.go:2036 +0x21c\n"}
+{"Time":"2026-10-16T18:17:27.713427403+05:30","Action":"output","Package":"example.com/fx/trace","Test":"TestRace","Output":"  testing.runTests()\n"}
+{"Time":"2026-10-16T18:17:27.713428874+05:30","Action":"output","Package":"example.com/fx/trace","Test":"TestRace","Output":"      /home/mitesh/.local/go/src/testing/testing.go:2583 +0x9e9\n"}
+{"Time":"2026-10-16T18:17:27.71343546+05:30","Action":"output","Package":"example.com/fx/trace","Test":"TestRace","Output":"  testing.(*M).Run()\n"}
+{"Time":"2026-10-16T18:17:27.713437001+05:30","Action":"output","Package":"example.com/fx/trace","Test":"TestRace","Output":"      /home/mitesh/.local/go/src/testing/testing.go:2443 +0xf4b\n"}
+{"Time":"2026-10-16T18:17:27.713438539+05:30","Action":"output","Package":"example.com/fx/trace","Test":"TestRace","Output":"  main.main()\n"}
+{"Time":"2026-10-16T18:17:27.713440051+05:30","Action":"output","Package":"example.com/fx/trace","Test":"TestRace","Output":"      _testmain.go:46 +0x164\n"}
+{"Time":"2026-10-16T18:17:27.713441535+05:30","Action":"output","Package":"example.com/fx/trace","Test":"TestRace","Output":"==================\n"}
+{"Time":"2026-10-16T18:17:27.713445147+05:30","Action":"output","Package":"example.com/fx/trace","Test":"TestRace","Output":"    testing.go:1712: race detected during execution of test\n"}
+{"Time":"2026-10-16T18:17:27.713448996+05:30","Action":"output","Package":"example.com/fx/trace","Test":"TestRace","Output":"--- FAIL: TestRace (0.00s)\n"}
+{"Time":"2026-10-16T18:17:27.713451335+05:30","Action":"fail","Package":"example.com/fx/trace","Test":"TestRace","Elapsed":0}
+{"Time":"2026-10-16T18:17:27.713463007+05:30","Action":"output","Package":"example.com/fx/trace","Output":"FAIL\n"}
+{"Time":"2026-10-16T18:17:27.713628281+05:30","Action":"output","Package":"example.com/fx/trace","Output":"FAIL\texample.com/fx/trace\t0.009s\n"}
+{"Time":"2026-10-16T18:17:27.713767543+05:30","Action":"fail","Package":"example.com/fx/trace","Elapsed":0.01}

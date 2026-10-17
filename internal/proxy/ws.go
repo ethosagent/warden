@@ -52,6 +52,18 @@ func (c connRWC) Close() error                { return c.conn.Close() }
 // buffered reader used to read the 101 response (it may already hold frame bytes
 // the server sent after its 101), so both readers are reused to avoid losing
 // buffered payload.
+//
+// inflightDone is the request scope's quiescence-tracker slot (nil when no
+// tracker is installed). It is fired once the 101 is DELIVERED — an open WS
+// session must never block a waiter — and the session re-enters the tracker
+// after the pump ends, before this session's terminal event is recorded.
+// The deliberate trade-off: the tracker does not track the OPEN session, so
+// from the 101 delivery until the re-entry below it is idle while the
+// session's terminal event does not exist yet — and a session that has just
+// ended is only re-tracked milliseconds before its event lands. "Tracker
+// idle" therefore never implies a WebSocket session's terminal event is
+// readable, and a test reading one must use EventuallyWithin (the drained-
+// tracker guarantee covers every non-streaming request, never a session).
 func (p *Proxy) handleWSUpgrade(
 	tlsConn *tls.Conn,
 	clientBR *bufio.Reader,
@@ -59,10 +71,12 @@ func (p *Proxy) handleWSUpgrade(
 	upstreamBR *bufio.Reader,
 	resp *http.Response,
 	req *http.Request,
+	fullURL string, // event URL: the agent's original query, never a swapped one
 	domain string,
 	port int,
 	sessionKey string,
 	gw MCPGateway,
+	inflightDone func(),
 ) {
 	defer func() { _ = upstream.Close() }()
 
@@ -77,7 +91,7 @@ func (p *Proxy) handleWSUpgrade(
 			// Fail closed: refuse the 101, record the block, and let the deferred
 			// upstream.Close() run. The pump never starts, so nothing else owns or
 			// closes the upstream — no leak, no double close.
-			p.refuseWSEnforce(tlsConn, req, domain, port)
+			p.refuseWSEnforce(tlsConn, req, fullURL, domain, port)
 			return
 		}
 		// monitor/off: preserve today's pass-through (nil scanner => pump forwards
@@ -104,6 +118,13 @@ func (p *Proxy) handleWSUpgrade(
 		return
 	}
 
+	// The 101 is delivered: the session is open-ended from here, so the request
+	// scope steps OUT of the quiescence tracker (firing the slot is idempotent —
+	// the caller's deferred endInflight re-calls it harmlessly). On the
+	// write-error returns above the scope was never stepped out and still ends
+	// through the caller's defer.
+	runInflight(inflightDone)
+
 	// scanner is a nil ws.Scanner when the capability was absent (monitor/off
 	// downgrade): the pump then forwards every frame verbatim without scanning.
 	pump := &ws.Pump{GW: scanner, SessionKey: sessionKey, Log: p.cfg.Logger}
@@ -114,7 +135,17 @@ func (p *Proxy) handleWSUpgrade(
 	blocked, _ := pump.Run(context.Background(), client, server)
 	p.cfg.Metrics.ObserveAddedLatency("mcp_scan", time.Since(start))
 
-	fullURL := "https://" + domain + req.URL.RequestURI()
+	// Session over: back in the quiescence tracker BEFORE the terminal
+	// bookkeeping below, so the tracker's drain happens-after the session's
+	// audit event, metric and decision log. The guard keeps the description
+	// concatenation off the production hot path (no tracker installed).
+	if p.cfg.Inflight != nil {
+		if done := p.inflightStart("ws " + req.Method + " " + fullURL); done != nil {
+			defer done()
+		}
+	}
+	p.beforeTerminal()
+
 	decision := "allow"
 	if blocked {
 		decision = "deny"
@@ -153,9 +184,8 @@ func (p *Proxy) wsEnforcing(gw MCPGateway) bool {
 // denials), records a blocked decision (analytics event + metric + decisionLog)
 // with the bounded reason mcp_ws_unscannable, and logs why at WARN. The caller's
 // deferred upstream.Close() closes the upstream; the pump is never started.
-func (p *Proxy) refuseWSEnforce(tlsConn *tls.Conn, req *http.Request, domain string, port int) {
+func (p *Proxy) refuseWSEnforce(tlsConn *tls.Conn, req *http.Request, fullURL, domain string, port int) {
 	const reason = "mcp_ws_unscannable"
-	fullURL := "https://" + domain + req.URL.RequestURI()
 	writeErrorResponse(tlsConn, 502, "Bad Gateway")
 	_ = p.analyticsStore().StoreEvent(analytics.Event{
 		Timestamp:      time.Now(),

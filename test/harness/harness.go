@@ -44,6 +44,7 @@ import (
 	"github.com/ethosagent/warden/internal/clock/clocktest"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/controlplane"
+	"github.com/ethosagent/warden/internal/proxy"
 	"github.com/ethosagent/warden/internal/worker"
 	"github.com/ethosagent/warden/test/fakes"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -77,6 +78,14 @@ type secretSpec struct {
 	matchHosts  []string
 }
 
+// defaultQuiescenceDeadline bounds how long the oracles wait for the workers'
+// in-flight request scopes to drain before failing the test with the still
+// in-flight work named. A scenario that finishes its traffic reaches quiescence
+// in microseconds (the wait wakes on the drain, never polls); the budget only
+// ever expires on a defect — a parked request (Delay fault), a stuck stream —
+// or on traffic a scenario deliberately left unfinished.
+const defaultQuiescenceDeadline = 10 * time.Second
+
 // H is one booted harness instance: a control plane, N workers, the fake
 // upstream registry, the fake clock and the oracles. Create it with New; every
 // resource it starts is torn down by the t.Cleanup it registers.
@@ -92,6 +101,27 @@ type H struct {
 	workers    int
 	allowExtra []string
 	secrets    []secretSpec
+	// mcpEnabled (WithMCP) boots the workers with the MCP gateway in monitor
+	// mode, so WebSocket/SSE scenarios ride the worker's real stream paths.
+	mcpEnabled bool
+
+	// inflights is one quiescence tracker per worker (the assembly-only
+	// worker.Overrides.Inflight seam): every request scope enters at request-read
+	// and leaves only after its terminal bookkeeping. The oracles wait for every
+	// tracker to drain BEFORE flushing and reading, which is what makes
+	// h.Events()/h.Metrics()/h.Logs() deterministic instead of outwaiting the
+	// proxy's post-response record (#363). Empty for targets without in-process
+	// workers (compose): their oracles wait on the target itself.
+	inflights []*proxy.Inflight
+	// quiescenceDeadline bounds the oracles' drain wait (WithQuiescenceDeadline
+	// overrides the default); expiring it fails the test naming what is still
+	// in flight — never a silent short read.
+	quiescenceDeadline time.Duration
+	// beforeTerminal (withBookkeepingDelay / withBeforeTerminal, test-only) is
+	// installed as the workers' proxy terminal-bookkeeping hook
+	// (worker.Overrides.BeforeTerminal): the deterministic repro/trap for the
+	// #363 window a red test can rely on.
+	beforeTerminal func()
 
 	// cpDownAtBoot (ControlPlaneDownAtBoot) starts the workers while the control
 	// plane is unreachable.
@@ -229,6 +259,41 @@ func WithTarget(t Target) Option {
 	return func(h *H) { h.suppliedTarget = t }
 }
 
+// WithQuiescenceDeadline overrides how long the oracles wait for every worker's
+// in-flight request scopes to drain before failing with the work named (the
+// default is 10s; a scenario that deliberately parks traffic shortens it).
+func WithQuiescenceDeadline(d time.Duration) Option {
+	return func(h *H) { h.quiescenceDeadline = d }
+}
+
+// withBookkeepingDelay is the TEST-ONLY repro of #363 (assembly-only: it rides
+// worker.Overrides.BeforeTerminal, which no YAML key or CLI flag can set): the
+// workers' proxy spends d at the top of its terminal bookkeeping — after the
+// response is already in the agent's hands — so a test can prove the oracles
+// WAIT for that bookkeeping instead of racing it.
+func withBookkeepingDelay(d time.Duration) Option {
+	return func(h *H) {
+		h.beforeTerminal = func() { time.Sleep(d) }
+	}
+}
+
+// withBeforeTerminal installs f as the workers' proxy terminal-bookkeeping hook
+// (worker.Overrides.BeforeTerminal), called at the top of every event, metric
+// and decision-log record. Test-only: a scenario parks terminal bookkeeping in
+// f at a deterministic point — the #363 window, after the response is delivered
+// and before the event exists — and observes the quiescence tracker around it.
+func withBeforeTerminal(f func()) Option {
+	return func(h *H) { h.beforeTerminal = f }
+}
+
+// WithMCP boots the workers with the MCP gateway in monitor mode, so scenarios
+// exercise the worker's real streaming paths (WebSocket upgrade, SSE relay)
+// against the harness's ws.example.com / mcp.example.com fakes. Monitor mode
+// never blocks: egress behaves exactly as without MCP.
+func WithMCP() Option {
+	return func(h *H) { h.mcpEnabled = true }
+}
+
 // ControlPlaneDownAtBoot boots the workers while the control plane is
 // unreachable — the fail-closed-at-boot fault. The control plane's address is
 // reserved (so the workers are configured against it) and then released before
@@ -268,12 +333,13 @@ func New(t testing.TB, opts ...Option) *H {
 	t.Helper()
 	assertNotParallel(t)
 	h := &H{
-		tb:        t,
-		root:      t.TempDir(),
-		workers:   1,
-		upstreams: make(map[string]*Upstream),
-		flushers:  make(map[int]func() error),
-		leakCheck: true,
+		tb:                 t,
+		root:               t.TempDir(),
+		workers:            1,
+		upstreams:          make(map[string]*Upstream),
+		flushers:           make(map[int]func() error),
+		quiescenceDeadline: defaultQuiescenceDeadline,
+		leakCheck:          true,
 	}
 	for _, opt := range opts {
 		opt(h)
@@ -316,6 +382,14 @@ func (h *H) boot() {
 	h.metricReaders = make([]*sdkmetric.ManualReader, h.workers)
 	for i := range h.metricReaders {
 		h.metricReaders[i] = sdkmetric.NewManualReader()
+	}
+	// One quiescence tracker per worker, handed to each boot through the
+	// assembly-only Overrides seam. The oracles wait for all of them to drain
+	// before reading; a supplied (compose) target has no in-process workers and
+	// simply leaves the slice unused.
+	h.inflights = make([]*proxy.Inflight, h.workers)
+	for i := range h.inflights {
+		h.inflights[i] = proxy.NewInflight()
 	}
 
 	token := make([]byte, 16)
@@ -435,29 +509,35 @@ func (h *H) workerParams(i int) worker.Params {
 			MatchHosts:  s.matchHosts,
 		})
 	}
+	policy := config.Policy{
+		Allowlist: entries,
+		// A production-like secret cache: at 0 every request refetches, and a
+		// refresh endpoint that does nothing would go unnoticed.
+		CacheTTLSeconds: 3600,
+		LogLevel:        "info",
+		LogFormat:       "json",
+		Secrets:         mappings,
+		Observability:   config.ObservabilityConfig{Enabled: true, ServiceName: "warden-harness"},
+		ControlPlane: config.ControlPlaneConfig{
+			Endpoint:          "https://" + h.ControlPlaneAddr() + "/policy",
+			TokenEnv:          cpTokenEnv,
+			CACert:            h.proxyCACertDst,
+			PollInterval:      time.Second,
+			LongPollWait:      50 * time.Millisecond,
+			HeartbeatInterval: time.Second,
+		},
+		Central: config.CentralConfig{ProxyID: fmt.Sprintf("worker-%d", i)},
+	}
+	if h.mcpEnabled {
+		// Monitor mode: the worker's streaming paths (WS upgrade, SSE relay)
+		// run with the real gateway in front, which never blocks.
+		policy.MCP = config.MCPConfig{Enabled: true, Mode: "monitor"}
+	}
 	// The local allowlist mirrors the CP's. A managed worker ignores it (policy
 	// comes only from the control plane) but keeping the two in sync means a
 	// scenario's intent reads the same whichever mode boots.
 	return worker.Params{
-		Config: &fakes.FakeConfigProvider{Policy: config.Policy{
-			Allowlist: entries,
-			// A production-like secret cache: at 0 every request refetches, and a
-			// refresh endpoint that does nothing would go unnoticed.
-			CacheTTLSeconds: 3600,
-			LogLevel:        "info",
-			LogFormat:       "json",
-			Secrets:         mappings,
-			Observability:   config.ObservabilityConfig{Enabled: true, ServiceName: "warden-harness"},
-			ControlPlane: config.ControlPlaneConfig{
-				Endpoint:          "https://" + h.ControlPlaneAddr() + "/policy",
-				TokenEnv:          cpTokenEnv,
-				CACert:            h.proxyCACertDst,
-				PollInterval:      time.Second,
-				LongPollWait:      50 * time.Millisecond,
-				HeartbeatInterval: time.Second,
-			},
-			Central: config.CentralConfig{ProxyID: fmt.Sprintf("worker-%d", i)},
-		}},
+		Config:  &fakes.FakeConfigProvider{Policy: policy},
 		DBPath:  h.workerDBPath(i),
 		CACert:  h.proxyCACertDst,
 		CAKey:   h.proxyCAKeyDst,
@@ -470,6 +550,11 @@ func (h *H) workerParams(i int) worker.Params {
 			OnAnalyticsWriter: func(f worker.AnalyticsFlusher) {
 				h.setFlusher(i, f.Flush)
 			},
+			// The quiescence tracker (#363): the oracles wait for this worker's
+			// in-flight scopes to drain before flushing and reading. BeforeTerminal
+			// is nil unless a test opted into the deterministic #363 repro/trap.
+			Inflight:       h.inflights[i-1],
+			BeforeTerminal: h.beforeTerminal,
 		},
 	}
 }

@@ -1,0 +1,10 @@
+exit: 1
+--- stdout ---
+
+=== format (gofmt) ===
+--- stderr ---
+gofmt found unformatted files:
+internal/x.go
+hint: run 'gofmt -w .'
+--- commands ---
+gofmt -l .

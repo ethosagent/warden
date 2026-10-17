@@ -6,7 +6,19 @@
 # so "passes locally, fails in CI" is structurally impossible.
 #
 # Usage:
-#   scripts/check.sh [--integration]
+#   scripts/check.sh [--integration] [--json] [--json-out <path>] [--keep-going]
+#
+#   (no flags)        human output, stop at the first failing stage
+#   --json            ONE warden.check.v1 JSON report on stdout (schema:
+#                     docs/check-report.schema.json); human progress goes to
+#                     stderr. Implies --keep-going.
+#   --json-out PATH   human output as usual, plus the report written to PATH
+#   --keep-going      run every stage after a failure, so all problems show in
+#                     one pass
+#
+# The flags only change what is reported. The pass/fail verdict, and so the exit
+# code, is the same as without them (0 pass, non-zero fail). Agents: run
+# `scripts/check.sh --json` and fix the findings in order.
 #
 # Env:
 #   COVERAGE_MIN          minimum total coverage percent (default: 70)
@@ -20,15 +32,52 @@ COVERAGE_MIN="${COVERAGE_MIN:-70}"
 GOVULNCHECK_VERSION="${GOVULNCHECK_VERSION:-v1.5.0}"
 GOLANGCI_VERSION="${GOLANGCI_VERSION:-v2.12.2}"
 RUN_INTEGRATION=0
-for arg in "$@"; do
-	case "$arg" in
+JSON=0
+JSON_OUT=""
+KEEP_GOING=0
+while [ "$#" -gt 0 ]; do
+	case "$1" in
 	--integration) RUN_INTEGRATION=1 ;;
+	--json) JSON=1 ;;
+	--keep-going) KEEP_GOING=1 ;;
+	--json-out)
+		if [ "$#" -lt 2 ]; then
+			echo "--json-out requires a path" >&2
+			exit 2
+		fi
+		JSON_OUT="$2"
+		shift
+		;;
 	*)
-		echo "unknown argument: $arg" >&2
+		echo "unknown argument: $1" >&2
 		exit 2
 		;;
 	esac
+	shift
 done
+
+# Report mode: tools/checkreport runs the same stages (tools/checkreport/
+# checksh_test.go keeps the two lists in step) and emits the JSON report. The
+# plain path below is untouched, so its output cannot change.
+if [ "$JSON" -eq 1 ] || [ -n "$JSON_OUT" ] || [ "$KEEP_GOING" -eq 1 ]; then
+	tmpbin="$(mktemp -d)"
+	trap 'rm -rf "$tmpbin"' EXIT
+	if ! go build -o "$tmpbin/checkreport" ./tools/checkreport; then
+		# The report must still be one valid document when the reporter itself is broken.
+		echo "check.sh: tools/checkreport does not compile" >&2
+		crash='{"schema":"warden.check.v1","ok":false,"durationMs":0,"stages":[{"name":"setup","tool":"go build","ok":false,"durationMs":0,"findings":[{"rule":"stage/crashed","severity":"error","message":"tools/checkreport did not compile","fix":"run `go build ./tools/checkreport` and fix the compile error"}]}]}'
+		if [ "$JSON" -eq 1 ]; then printf '%s\n' "$crash"; fi
+		if [ -n "$JSON_OUT" ]; then printf '%s\n' "$crash" >"$JSON_OUT"; fi
+		exit 1
+	fi
+	report_args=(-coverage-min "$COVERAGE_MIN" -golangci-version "$GOLANGCI_VERSION" -govulncheck-version "$GOVULNCHECK_VERSION")
+	if [ "$RUN_INTEGRATION" -eq 1 ]; then report_args+=(-integration); fi
+	if [ "$KEEP_GOING" -eq 1 ]; then report_args+=(-keep-going); fi
+	if [ "$JSON" -eq 1 ]; then report_args+=(-json); fi
+	if [ -n "$JSON_OUT" ]; then report_args+=(-json-out "$JSON_OUT"); fi
+	"$tmpbin/checkreport" "${report_args[@]}" || exit $?
+	exit 0
+fi
 
 banner() { printf '\n=== %s ===\n' "$1"; }
 
@@ -96,7 +145,11 @@ echo "ok"
 
 # 8. coverage gate
 banner "coverage gate (min ${COVERAGE_MIN}%)"
-total="$(go tool cover -func=coverage.out | awk '/^total:/ {gsub("%","",$3); print $3}')"
+# Product code only: tools/ (developer tooling such as tools/checkreport) is
+# tested above but must not lift the number that gates a product regression.
+module="$(awk '/^module / {print $2}' go.mod)"
+{ awk -v p="${module}/tools/" 'index($0, p) != 1' coverage.out || true; } >coverage.product.out
+total="$(go tool cover -func=coverage.product.out | awk '/^total:/ {gsub("%","",$3); print $3}')"
 echo "total coverage: ${total}%"
 if awk "BEGIN { exit !(${total} < ${COVERAGE_MIN}) }"; then
 	echo "coverage ${total}% is below minimum ${COVERAGE_MIN}%" >&2
