@@ -33,7 +33,7 @@ services:
     image: ethosagent/warden:${WARDEN_VERSION:-0.3.0}
     networks: [cp-net]
     ports:
-      - "7070:7070"                  # fleet dashboard + /policy + /central/ingest
+      - "127.0.0.1:7070:7070"                  # fleet dashboard + /policy + /central/ingest
     environment:
       - WARDEN_CP_TOKEN=${WARDEN_CP_TOKEN:-dev-token}
     volumes:
@@ -57,7 +57,7 @@ services:
         condition: service_started
     networks: [hermes-internal, egress, cp-net]
     ports:
-      - "9090:9090"                 # dashboard + /metrics (host-only; NOT reachable by Hermes)
+      - "127.0.0.1:9090:9090"                 # dashboard + /metrics (host-only; NOT reachable by Hermes)
     environment:
       - WARDEN_CP_TOKEN=${WARDEN_CP_TOKEN:-dev-token}
       - WARDEN_PROXY_ID=hermes-worker   # labels this worker in the fleet view

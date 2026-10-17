@@ -10,7 +10,8 @@ import (
 )
 
 // swapValue is the "real" secret the swap scenarios plant. A fresh canary, so
-// AssertCanaryNeverLeaked recognises it anywhere it surfaces.
+// AssertCanaryNeverLeaked recognises it anywhere it surfaces. (A target that
+// wires its own secrets — compose — supersedes it at boot.)
 var swapValue = harness.Canary()
 
 // swapOpts plants swapValue as the "openai" secret, swappable only for the
@@ -52,12 +53,15 @@ func secretSwapped(t *testing.T, h *harness.H) {
 }
 
 // allowWithSwap is manual step 1: an allowed request through the fake LLM. The
-// agent sent the placeholder; the provider saw the canary.
+// agent sent the placeholder; the provider saw the secret. The host and the
+// asserted value come from the harness, so the same body runs against the
+// in-process fakes and the compose stack (whose secret wiring is its own).
 func allowWithSwap(t *testing.T, h *harness.H) {
 	llm := h.FakeLLM()
 	ph := h.Placeholder("openai")
+	secret := h.Secret("openai")
 
-	req, err := http.NewRequest(http.MethodPost, "https://llm.example.com/v1/chat/completions",
+	req, err := http.NewRequest(http.MethodPost, "https://"+h.Host("llm")+"/v1/chat/completions",
 		strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hello"}]}`))
 	if err != nil {
 		t.Fatal(err)
@@ -74,8 +78,8 @@ func allowWithSwap(t *testing.T, h *harness.H) {
 		t.Fatalf("POST = %d, want 200", resp.StatusCode)
 	}
 
-	if got := llm.AuthHeaders(); len(got) != 1 || got[0] != "Bearer "+swapValue {
-		t.Errorf("provider Authorization headers = %v, want [Bearer <the canary>]", got)
+	if got := llm.AuthHeaders(); len(got) != 1 || got[0] != "Bearer "+secret {
+		t.Errorf("provider Authorization headers = %v, want [Bearer <the real secret>]", got)
 	}
 	h.AssertCanaryNeverLeaked()
 }

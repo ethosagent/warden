@@ -31,7 +31,7 @@ services:
     image: ethosagent/warden:${WARDEN_VERSION:-0.3.0}
     networks: [cp-net]
     ports:
-      - "7070:7070"                  # fleet dashboard + /policy + /central/ingest
+      - "127.0.0.1:7070:7070"                  # fleet dashboard + /policy + /central/ingest
     environment:
       - WARDEN_CP_TOKEN=${WARDEN_CP_TOKEN:-dev-token}
     volumes:
@@ -55,7 +55,7 @@ services:
         condition: service_started
     networks: [zeroclaw-internal, egress, cp-net]
     ports:
-      - "9090:9090"                 # dashboard + /metrics (host-only; NOT reachable by ZeroClaw)
+      - "127.0.0.1:9090:9090"                 # dashboard + /metrics (host-only; NOT reachable by ZeroClaw)
     environment:
       - WARDEN_CP_TOKEN=${WARDEN_CP_TOKEN:-dev-token}
       - WARDEN_PROXY_ID=zeroclaw-worker   # labels this worker in the fleet view

@@ -407,13 +407,13 @@ func TestH2_StageParity_Effects(t *testing.T) {
 }
 
 // TestH2_GRPCUnary_StreamedVerbatim: a gRPC call keeps working through the shared
-// pipeline — the protobuf body is relayed byte-for-byte (never buffered, swapped
+// pipeline — the protobuf body is relayed byte-for-byte (never swapped
 // or redacted), DLP records it partial, the trailer survives, and the event is
 // labelled "grpc".
 func TestH2_GRPCUnary_StreamedVerbatim(t *testing.T) {
-	// A length-prefixed frame that contains a credential-looking string and a
-	// placeholder: neither may be touched.
-	frame := "\x00\x00\x00\x00\x40" + "sk_live_51HcanaryDLPtestValue0123456789abcd PLACEHOLDER_001"
+	// A length-prefixed frame that contains a credential-looking string: it may
+	// not be touched. (A placeholder in the message is refused, not relayed: #418.)
+	frame := string(testFrame(0, []byte("sk_live_51HcanaryDLPtestValue0123456789abcd")))
 	tc := parityCase{
 		configure: func(t *testing.T, cfg *Config) {
 			parityDLP(config.DLPModeEnforce, config.DLPActionRedact)(t, cfg)

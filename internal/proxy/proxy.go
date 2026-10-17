@@ -315,6 +315,9 @@ type Proxy struct {
 	// Serve binds them).
 	transparentHTTPSAddr net.Addr
 	transparentHTTPAddr  net.Addr
+	// grpcMaxFrame is the injectable gRPC frame inspection bound (0 =
+	// maxGRPCFrameBytes), so white-box tests can hit the oversize path cheaply.
+	grpcMaxFrame int
 
 	// mcp holds the live MCP gateway, swappable atomically while the hot path
 	// reads it (control-plane settings can rebuild + replace it at runtime). MCPGateway

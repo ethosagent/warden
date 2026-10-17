@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"crypto/tls"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -301,6 +302,27 @@ func TestCanary_EncodedFormsCaught(t *testing.T) {
 	}
 	if msg := rec.failureMessage(); !strings.Contains(msg, "base64") {
 		t.Errorf("oracle failure does not name the encoding:\n%s", msg)
+	}
+}
+
+// TestCanary_UnreadableLogsFailTheSweep: a logs oracle that cannot be read is
+// a hole in the sweep, not a clean surface — the sweep must fail the test
+// naming the read failure, never count the surface as empty.
+func TestCanary_UnreadableLogsFailTheSweep(t *testing.T) {
+	ft := &fakeTarget{logsErr: errors.New("harness test: the components' logs are unreadable")}
+	h := New(t, WithTarget(ft), NoLeakCheck(), WithSecret("openai", Canary()))
+
+	// The sweep's oracle reads fail through h.tb, so point it at the recording
+	// TB for the call: the failure must land THERE, not on this test.
+	rec := &recordingTB{T: t}
+	h.tb = rec
+	h.assertCanaryNeverLeaked(rec)
+	h.tb = t
+	if !rec.Failed() {
+		t.Fatal("the sweep treated an unreadable logs oracle as clean")
+	}
+	if msg := rec.failureMessage(); !strings.Contains(msg, "logs") {
+		t.Errorf("the failure does not name the logs read:\n%s", msg)
 	}
 }
 

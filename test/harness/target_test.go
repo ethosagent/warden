@@ -31,6 +31,7 @@ type fakeTarget struct {
 	cpAddr    string
 
 	logs    string
+	logsErr error
 	events  []analytics.Event
 	metrics map[string]float64
 
@@ -107,7 +108,14 @@ func (f *fakeTarget) StartControlPlane(_ context.Context) error {
 	return nil
 }
 
-func (f *fakeTarget) Logs() string { return f.logs }
+func (f *fakeTarget) Host(alias string) (string, error) {
+	if !knownAlias(alias) {
+		return "", errors.New("fakeTarget: unknown alias " + alias)
+	}
+	return alias + ".fake", nil
+}
+
+func (f *fakeTarget) Logs() (string, error) { return f.logs, f.logsErr }
 
 func (f *fakeTarget) Events() ([]analytics.Event, error) { return f.events, nil }
 

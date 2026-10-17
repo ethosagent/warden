@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
@@ -123,7 +124,7 @@ func TestGRPC_SecretSwapAndForward(t *testing.T) {
 
 	cc := dialGRPCClient(t, p.Addr().String(), "grpc.test", caCertPEM)
 
-	req, err := http.NewRequest("POST", "https://grpc.test/pkg.Svc/Method", strings.NewReader("request-body"))
+	req, err := http.NewRequest("POST", "https://grpc.test/pkg.Svc/Method", bytes.NewReader(testFrame(0, []byte("request-body"))))
 	if err != nil {
 		t.Fatal(err)
 	}

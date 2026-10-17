@@ -167,15 +167,47 @@ after `v1=` with a constant-time comparison, and reject requests whose
 timestamp is older than your replay window (e.g. 5 minutes). Without a
 configured secret the headers are absent and deliveries are unsigned.
 
-> **Security note:** policy editing is **unauthenticated** — anyone who can reach
-> the dashboard can change policy. Restrict the control plane's port (`:7070`) to
-> operators (firewall / private network / VPN). Viewing and editing share the same
-> open access today.
+### Dashboard writes need the control-plane token
+
+Every state-changing call under `/dashboard/api/` (`PUT`, `POST`, `PATCH`,
+`DELETE`: policy, settings, integrations, detection, LLM providers, the secret
+store, and the query and audit-verify `POST`s) must carry
+`Authorization: Bearer <control-plane token>`, the same token workers use for
+`/policy` and `/central/*`, checked in constant time.
+
+- **Fail closed.** A control plane started without a token (`--token-env` unset
+  or the variable empty) refuses every dashboard write with `403` and a message
+  saying how to configure the token. There is no open mode for dashboard writes.
+  A whitespace-only token counts as not configured. The worker-facing endpoints
+  (`/central/ingest`, `/control/heartbeat`) keep the existing development
+  pass-through when no token is set; the loopback publish of `:7070` in the demo
+  compose files is what bounds that.
+- **Reads stay open.** `GET` routes (traffic, analytics, policy view, workers, …)
+  need no token. Restrict `:7070` to operators regardless: the demo compose files
+  publish it, and each worker's `:9090` admin/dashboard port, on `127.0.0.1` only
+  (the worker dashboard's own writes are not token-guarded yet).
+- **The UI asks once.** A change goes out without a token first (worker dashboards need
+  none); a `401` prompts for the token and retries once. It is kept in `sessionStorage` (this tab only; never `localStorage` or a
+  cookie) and sent as the bearer header. A `401` clears it.
+  Because the credential is a header the page adds itself, a cross-site form or
+  request cannot make the browser send it: writes are CSRF-safe.
+- **Audit.** A refused write logs `control plane dashboard write refused` with the
+  method, path, remote address and reason, never the token. A successful write
+  logs as before.
+
+```sh
+curl --cacert proxy-ca.crt -X PUT https://localhost:7070/dashboard/api/policy \
+  -H "Authorization: Bearer $WARDEN_CP_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"allowlist":[{"domain":"api.openai.com"}],"denylist":[]}'
+```
+
+A worker's own admin dashboard (its local `:9090`) is a separate listener and is
+not covered by this token; keep it off untrusted networks.
 
 ## What's deliberately not here (yet)
 
 The control plane's policy source is a YAML file it re-reads per request, and the
 fleet analytics store is in-memory (lost on restart). A database (persistent fleet
-analytics), authenticated/RBAC policy editing, and per-agent (not just per-worker)
+analytics), per-user SSO/RBAC policy editing (today one shared token), and per-agent (not just per-worker)
 slicing are future work — and because the worker↔control-plane contract is just
 HTTP, adding them doesn't change the workers.

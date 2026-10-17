@@ -36,7 +36,7 @@ services:
     image: ethosagent/warden:${WARDEN_VERSION:-0.3.0}
     networks: [cp-net]
     ports:
-      - "7070:7070"                  # fleet dashboard + /policy + /central/ingest
+      - "127.0.0.1:7070:7070"                  # fleet dashboard + /policy + /central/ingest
     environment:
       - WARDEN_CP_TOKEN=${WARDEN_CP_TOKEN:-dev-token}
     volumes:
@@ -63,7 +63,7 @@ services:
       - egress                      # the ONLY service with internet access
       - cp-net                      # pulls policy + forwards analytics to the control plane
     ports:
-      - "9090:9090"                 # dashboard + admin (host -> proxy); NOT reachable by the agent
+      - "127.0.0.1:9090:9090"                 # dashboard + admin (host -> proxy); NOT reachable by the agent
     environment:
       # Real secrets live with the proxy, never the agent.
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}

@@ -45,6 +45,7 @@ func TestRequiredReasonsDeclared(t *testing.T) {
 		H2RequestTrailersUnsupported, H2ExtendedConnectUnsupported,
 		TransformNeedsBufferedBody, HostMismatch,
 		RequestTrailersUnsupported,
+		GRPCBodyPlaceholder, GRPCFrameTooLarge, GRPCFrameMalformed, GRPCFrameCompressed,
 		SecretEcho, SecretEchoUnscannable,
 		SSRFBlocked, SSRFDeniedHostname,
 		TransparentNoSNI, TransparentBadClientHello,

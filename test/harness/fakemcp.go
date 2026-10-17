@@ -12,7 +12,7 @@ import (
 func (h *H) FakeMCP() *Upstream {
 	h.tb.Helper()
 	h.mcpOnce.Do(func() {
-		u := h.Upstream("mcp.example.com")
+		u := h.Upstream(h.Host("mcp"))
 		u.route("/", poisoned.Handler())
 		h.mcpU = u
 	})

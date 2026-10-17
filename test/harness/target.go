@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -60,6 +61,16 @@ type Target interface {
 	StopControlPlane() error
 	StartControlPlane(ctx context.Context) error
 
+	// Host maps a well-known fake's alias ("api", "llm", "mcp", "evil",
+	// "unlisted", "grpc", "ws") to the hostname that alias resolves to on THIS
+	// deployment — in-process: <alias>.example.com; compose:
+	// <alias>.example.test for the names the stack's fake DNS serves. A
+	// scenario asks the harness (h.Host) instead of hard-coding a hostname, so
+	// one body runs on both; an alias the deployment does not serve is an
+	// error, which is how a scenario learns it has an L1-only lever rather than
+	// failing confusingly at connect time.
+	Host(alias string) (string, error)
+
 	// The oracle sources. Logs is everything the components logged (structured
 	// lines, exactly as a deployment's stdout); Events is every analytics event
 	// across the workers, worker-1 first, read through the production analytics
@@ -67,15 +78,120 @@ type Target interface {
 	// value (see H.Metrics for the exact shape). Callers own nothing: Events may
 	// hold read handles that Stop releases.
 	//
+	// Logs returns the error when the components' output cannot be read (and
+	// whatever was read as the first value): an oracle the sweep cannot see is
+	// a hole, never a clean surface. Events and Metrics report their read
+	// failures the same way.
+	//
 	// Events MUST be read-your-writes: when it returns, every event of traffic
 	// the scenario has already finished making is visible. The in-process target
 	// gets this from the harness's analytics drain (H flushes each worker's
 	// async writer through the OnAnalyticsWriter seam before reading); a target
 	// whose writers are out of its reach — compose — must flush or wait itself,
 	// or a scenario reads a short list and fails confusingly late.
-	Logs() string
+	Logs() (string, error)
 	Events() ([]analytics.Event, error)
 	Metrics() (map[string]float64, error)
+}
+
+// SecretSpec is one secret a deployment holds, as the TARGET knows it: the
+// placeholder the agent sees, the real value that never leaves the worker
+// side, and the hosts the swap is scoped to. It is the wire form of the
+// harness's own secretSpec, supplied by a target that wires its secrets
+// itself (compose: the worker containers' env).
+type SecretSpec struct {
+	Name        string
+	Placeholder string
+	Value       string
+	MatchHosts  []string
+}
+
+// AgentClients is implemented by a Target whose protected agent is NOT this
+// process (compose: the agent-1 container). When the supplied target
+// implements it, h.Agent/h.AgentH2 return the target's client, so a scenario's
+// traffic leaves the way the deployment's traffic actually does — from the
+// agent's own network namespace — instead of an in-process client pointing at
+// a proxy address this process cannot reach.
+type AgentClients interface {
+	// AgentClient returns the agent's HTTP client. h2 selects the HTTP/2
+	// flavor (the AgentH2 client: ALPN h2 on the MITM leg); false is plain
+	// HTTP/1.1. The returned client's Transport becomes the base of the
+	// harness's recording transport, so AgentResponses and the canary sweep
+	// see exactly what the agent saw.
+	AgentClient(h2 bool) (*http.Client, error)
+}
+
+// UpstreamReader is implemented by a Target that hosts the fake upstreams a
+// scenario talks to (compose: the fakeupstream container and its request
+// recorder). Then h.Upstream(host) is a VIEW over that fake — Requests read
+// through the target — and the in-process fault levers (Delay, Fail,
+// EchoHeaders) fail the test: they cannot reach into a container.
+type UpstreamReader interface {
+	// UpstreamRequests returns what the target's upstream for host has
+	// recorded, oldest first, in the RecordedRequest shape the in-process
+	// fakes record (post-pipeline: swaps already applied).
+	UpstreamRequests(host string) ([]RecordedRequest, error)
+}
+
+// WholeRecorder is implemented by an UpstreamReader target whose recorder
+// sees hosts no scenario registered a view for (compose: the fake DNS serves
+// mcp/evil/whatever.example.test whether or not the scenario called h.Upstream
+// for them — the recorder records whatever reached the fake). The canary sweep
+// then scans the WHOLE recorded view instead of the registered upstreams only:
+// a raw secret is allowed only on the hosts its MatchHosts list, every encoded
+// form is a leak anywhere — a swap that lands on an unregistered host is a
+// leak, and only the whole view can say so.
+type WholeRecorder interface {
+	// AllUpstreamRequests returns every request the target's upstreams have
+	// recorded, all hosts, oldest first (post-pipeline: swaps already
+	// applied).
+	AllUpstreamRequests() ([]RecordedRequest, error)
+}
+
+// TargetSecrets is implemented by a Target that wires the agent-facing
+// secrets itself (compose: the worker containers hold the real value in their
+// env; the agents hold only the placeholder). When the supplied target
+// implements it, boot registers THESE specs instead of any WithSecret values
+// — the opts describe L1 wiring, the target's is what the deployment actually
+// holds. A target with no specs leaves WithSecret in charge.
+type TargetSecrets interface {
+	TargetSecrets() []SecretSpec
+}
+
+// ConnectProber is implemented by a Target whose worker proxy is not
+// reachable from this process (compose: the proxy port is published to
+// nobody). The CONNECT probe then runs the way the deployment's own traffic
+// does — from the agent.
+type ConnectProber interface {
+	// ConnectStatus returns the status code of the proxy's reply to CONNECT
+	// hostPort: the policy decision itself, before any client library turns a
+	// refusal into an opaque transport error.
+	ConnectStatus(hostPort string) (int, error)
+}
+
+// MetricsSupport is implemented by a Target whose deployment does not carry
+// the metrics oracle (compose: the stack exports no OTel metrics anywhere).
+// MetricsAvailable returning false means h.Metrics fails the test loudly and a
+// scenario asks h.MetricsAvailable before asserting on metrics — the explicit,
+// documented skip, never a silent pass. Absent: the oracle exists (in-process).
+type MetricsSupport interface {
+	MetricsAvailable() bool
+}
+
+// harnessAliases are the well-known fake first-labels Host resolves. They are
+// the harness's own fake names — defaultAllowlist plus evil (the
+// never-allowlisted name the isolation scenarios use) and unlisted (a name no
+// policy lists at all, so a refusal there is the default-deny reason, #409).
+var harnessAliases = []string{"api", "llm", "mcp", "grpc", "ws", "evil", "unlisted"}
+
+// knownAlias reports whether alias is one of the well-known fake names.
+func knownAlias(alias string) bool {
+	for _, a := range harnessAliases {
+		if a == alias {
+			return true
+		}
+	}
+	return false
 }
 
 // readyDeadline is the OnReady budget for one component (per the ticket: 10s).
@@ -215,6 +331,15 @@ func (ip *inprocess) ControlPlaneAddr() string {
 	return ip.cp.addr
 }
 
+// Host resolves a well-known fake alias to its in-process hostname: the
+// harness's own fakes all live under example.com.
+func (ip *inprocess) Host(alias string) (string, error) {
+	if !knownAlias(alias) {
+		return "", fmt.Errorf("harness: Host(%q): unknown alias (have %v)", alias, harnessAliases)
+	}
+	return alias + ".example.com", nil
+}
+
 // ControlPlaneToken reads the token from the env var the harness set — the same
 // mechanism a deployment distributes it with. An empty token means the env was
 // never set: report it, so a mis-wired target fails loudly instead of 401-ing.
@@ -254,8 +379,9 @@ func (ip *inprocess) StartControlPlane(ctx context.Context) error {
 }
 
 // Logs is the components' structured stdout: workers first, then the control
-// plane.
-func (ip *inprocess) Logs() string {
+// plane. The buffers are always readable in-process, so the error is nil —
+// the return exists for targets whose log reads can fail.
+func (ip *inprocess) Logs() (string, error) {
 	var b strings.Builder
 	for _, w := range ip.workers {
 		b.WriteString(w.logs.String())
@@ -263,7 +389,7 @@ func (ip *inprocess) Logs() string {
 	if ip.cp != nil {
 		b.WriteString(ip.cp.logs.String())
 	}
-	return b.String()
+	return b.String(), nil
 }
 
 // eventsDSN opens a worker's live analytics DB for reading: a busy_timeout so

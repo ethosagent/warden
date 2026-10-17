@@ -13,16 +13,16 @@ import (
 
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/config"
+	"github.com/ethosagent/warden/test/harness/compose"
 )
 
 // Fleet scenarios: the control plane pushes policy to two workers, and the
 // workers stay fail-closed when the control plane is gone.
 //
 // The policy is changed through the route the dashboard uses,
-// PUT /dashboard/api/policy on the control plane. In this stack that route is
-// open on the host-published, 127.0.0.1-only control-plane port (only the
-// worker-facing /policy and /central/ingest need the bearer token), so no
-// credential is sent here.
+// PUT /dashboard/api/policy on the control plane. Dashboard writes need the
+// control-plane bearer token (#422), so putPolicy sends it; the stack also keeps
+// the port bound to 127.0.0.1 only.
 //
 // "Allowed" and "denied" are read from the proxy's CONNECT status: 200 means
 // policy let the tunnel open, 403 means policy refused it. The fake DNS does
@@ -93,6 +93,11 @@ func putPolicy(tb testing.TB, doc policyDoc) {
 		tb.Fatal(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	token, err := (&compose.Target{}).ControlPlaneToken()
+	if err != nil {
+		tb.Fatalf("e2e: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := client.Do(req)
 	if err != nil {
 		tb.Fatalf("e2e: PUT policy: %v", err)
@@ -164,7 +169,7 @@ func restoreFleet(t *testing.T) policyDoc {
 	}
 	t.Cleanup(func() {
 		for _, svc := range []string{svcCP, svcWorker1, svcWorker2, svcWorker3} {
-			if res := compose(t, 120*time.Second, "start", svc); res.exit != 0 {
+			if res := composeRun(t, 120*time.Second, "start", svc); res.exit != 0 {
 				t.Errorf("e2e: restore: start %s: exit %d: %s", svc, res.exit, res.stderr)
 			}
 		}
@@ -226,7 +231,7 @@ func TestFleet_ControlPlaneStopped_FailsClosed(t *testing.T) {
 		waitDecision(t, w.agent, newHost, "200")
 	}
 
-	if res := compose(t, 120*time.Second, "stop", svcCP); res.exit != 0 {
+	if res := composeRun(t, 120*time.Second, "stop", svcCP); res.exit != 0 {
 		t.Fatalf("e2e: stop %s: exit %d: %s", svcCP, res.exit, res.stderr)
 	}
 	// Barrier: each worker has noticed the control plane is gone (its long
@@ -254,13 +259,13 @@ func TestFleet_ControlPlaneStopped_FailsClosed(t *testing.T) {
 // the workers reconnect and pick up a policy change made afterwards.
 func TestFleet_ControlPlaneRestarted_Resyncs(t *testing.T) {
 	orig := restoreFleet(t)
-	if res := compose(t, 120*time.Second, "stop", svcCP); res.exit != 0 {
+	if res := composeRun(t, 120*time.Second, "stop", svcCP); res.exit != 0 {
 		t.Fatalf("e2e: stop %s: exit %d: %s", svcCP, res.exit, res.stderr)
 	}
 	for _, w := range fleetAgents {
 		assertDecision(t, w.agent, againHost, "403")
 	}
-	if res := compose(t, 120*time.Second, "start", svcCP); res.exit != 0 {
+	if res := composeRun(t, 120*time.Second, "start", svcCP); res.exit != 0 {
 		t.Fatalf("e2e: start %s: exit %d: %s", svcCP, res.exit, res.stderr)
 	}
 	// Ready = healthy control plane and both workers re-registered with it.
@@ -287,7 +292,7 @@ func TestFleet_WorkerRestart_DecidesByPolicy(t *testing.T) {
 	putPolicy(t, orig.withAllowed(newHost))
 	waitDecision(t, svcAgent1, newHost, "200")
 
-	if res := compose(t, 120*time.Second, "restart", svcWorker1); res.exit != 0 {
+	if res := composeRun(t, 120*time.Second, "restart", svcWorker1); res.exit != 0 {
 		t.Fatalf("e2e: restart %s: exit %d: %s", svcWorker1, res.exit, res.stderr)
 	}
 	waitFor(t, stackDeadline, svcWorker1+" /healthz", func() (bool, string) {
@@ -336,5 +341,40 @@ func TestFleet_EventsAttributedToWorker(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// TestFleet_DashboardPolicyWriteNeedsToken: on the real stack an unauthenticated
+// or wrong-token PUT /dashboard/api/policy is refused (401) and the policy the
+// workers enforce does not change (#422).
+func TestFleet_DashboardPolicyWriteNeedsToken(t *testing.T) {
+	client, err := httpClient()
+	if err != nil {
+		t.Fatalf("e2e: %v", err)
+	}
+	body := `{"allowlist":[{"domain":"exfil.example.test"}],"denylist":[]}`
+	for _, auth := range []string{"", "Bearer wrong-token"} {
+		req, err := http.NewRequest(http.MethodPut, cpBase+"/dashboard/api/policy", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if auth != "" {
+			req.Header.Set("Authorization", auth)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("e2e: PUT policy: %v", err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("PUT /dashboard/api/policy with auth %q = %d, want 401", auth, resp.StatusCode)
+		}
+	}
+	doc, err := getPolicy(cpBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doc.allows("exfil.example.test") {
+		t.Fatal("a refused write still changed the fleet policy")
 	}
 }

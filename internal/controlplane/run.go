@@ -122,7 +122,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 
 	var token string
 	if tokenEnv != "" {
-		token = os.Getenv(tokenEnv)
+		token = strings.TrimSpace(os.Getenv(tokenEnv))
 		if token == "" {
 			logger.Warn("control-plane: token-env set but empty; serving WITHOUT auth", "env", tokenEnv)
 		}
