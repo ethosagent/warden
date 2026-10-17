@@ -410,25 +410,23 @@ func invRows() []invRow {
 			})},
 	)
 
-	// ---- h2 runs the same stages as HTTP/1.1 (#388) -------------------------
-	const h2Issue = "#388"
+	// ---- h2 runs the same stages as HTTP/1.1 (#388, fixed) -------------------
 	add(
 		invRow{name: "http1/body-swap", path: PathHTTP1, scenario: scBodySwap, mustReach: true, wantSwap: true,
 			run: h1(invReq{method: "POST", path: "/ok", body: "token=" + invPlaceholder})},
 		invRow{name: "h2/body-swap", path: PathH2, scenario: scBodySwap, mustReach: true, wantSwap: true,
-			knownIssue: h2Issue, knownWhere: []string{swapMissing},
 			run: h2(invReq{method: "POST", path: "/ok", body: "token=" + invPlaceholder})},
 		invRow{name: "http1/query-swap", path: PathHTTP1, scenario: scQuerySwap, mustReach: true, wantSwap: true,
 			knownIssue: issueQueryURL, knownWhere: queryURLLeak,
 			run: h1(invReq{path: "/ok?token=" + invPlaceholder})},
 		invRow{name: "h2/query-swap", path: PathH2, scenario: scQuerySwap, mustReach: true, wantSwap: true,
-			knownIssue: h2Issue, knownWhere: []string{swapMissing},
+			knownIssue: issueQueryURL, knownWhere: queryURLLeak,
 			run: h2(invReq{path: "/ok?token=" + invPlaceholder})},
 		invRow{name: "http1/dlp-block", path: PathHTTP1, scenario: scDLPBlock, mustReach: true, wantNoUpstream: true,
 			opts: dlpBlockOpts(),
 			run:  h1(invReq{method: "POST", path: "/ok", header: hdr("Content-Type", "text/plain"), body: piiBody})},
 		invRow{name: "h2/dlp-block", path: PathH2, scenario: scDLPBlock, mustReach: true, wantNoUpstream: true,
-			opts: dlpBlockOpts(), knownIssue: h2Issue, knownWhere: []string{"denied request reached the upstream"},
+			opts: dlpBlockOpts(),
 			run: h2(invReq{method: "POST", path: "/ok", header: hdr("Content-Type", "text/plain"), body: piiBody})},
 	)
 	return rows

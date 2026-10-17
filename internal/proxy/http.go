@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ethosagent/warden/internal/analytics"
+	"github.com/ethosagent/warden/internal/auth"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/mcp/gateway"
 	"github.com/ethosagent/warden/internal/mcp/sse"
@@ -34,11 +35,25 @@ const maxBodySwapSize = 10 << 20 // 10 MB
 type requestScope struct {
 	// Per-connection context (constant across the keep-alive session, copied in
 	// per request so stages read one value).
-	tlsConn    *tls.Conn
+	tlsConn    *tls.Conn // nil on HTTP/2
 	br         *bufio.Reader
 	domain     string
 	port       int
 	needsJudge bool
+
+	// out frames every client-bound response (see responseSink). rt is non-nil
+	// only on HTTP/2: forward then round-trips over it instead of dialing an
+	// HTTP/1.1 conn, and the stages that assume an h1 conn (readRequest's
+	// mismatch handling, the WebSocket upgrade) branch on it. proto is the
+	// protocol label of this request's events: "https" on h1, "http2" or "grpc"
+	// on h2 (an MCP request is always "mcp").
+	out   responseSink
+	rt    http.RoundTripper
+	proto string
+	// streamBody marks a gRPC request: its (protobuf, possibly unbounded
+	// bidirectional-stream) body is never buffered or swapped — it is relayed
+	// verbatim, and DLP records it as partial like any non-text body.
+	streamBody bool
 
 	// Per-request atomic-pointer snapshots, taken ONCE at the top of the request
 	// so a concurrent control-plane swap can't change them mid-request.
@@ -156,11 +171,11 @@ func (s *requestScope) ensureBody() (body []byte, ok bool) {
 	}
 	b, err := io.ReadAll(io.LimitReader(s.req.Body, maxBodySwapSize+1))
 	if err != nil {
-		writeErrorResponse(s.tlsConn, 502, "Bad Gateway")
+		s.out.errorResponse(502, "Bad Gateway")
 		return nil, false
 	}
 	if int64(len(b)) > maxBodySwapSize {
-		writeErrorResponse(s.tlsConn, 413, "Request body too large for secret substitution")
+		s.out.errorResponse(413, "Request body too large for secret substitution")
 		return nil, false
 	}
 	s.reqBody = b
@@ -255,6 +270,8 @@ func (p *Proxy) serveHTTPRequest(tlsConn *tls.Conn, br *bufio.Reader, domain str
 	// nil cfg.MCP / cfg.Judge before.
 	s := &requestScope{
 		tlsConn:    tlsConn,
+		out:        connSink{w: tlsConn},
+		proto:      "https",
 		br:         br,
 		domain:     domain,
 		port:       port,
@@ -310,14 +327,67 @@ func (p *Proxy) runRequestStages(s *requestScope) (endSession bool) {
 }
 
 // readRequest validates that the just-read request belongs on this connection:
-// a host-header recheck (defense in depth) against the CONNECT-time domain. A
-// mismatch ends the session (cleanup closes req.Body).
+// a host-header recheck (defense in depth) against the CONNECT-time domain, plus
+// the HTTP/2 shapes the proxy cannot mediate faithfully. Every refusal records a
+// deny event so it is never silent. A refusal ends the session on h1 (cleanup
+// closes req.Body); an h2 stream is refused alone, the connection's others go on.
 func (p *Proxy) readRequest(s *requestScope) (endSession bool) {
 	hostOnly := s.req.Host
 	if h, _, err := net.SplitHostPort(s.req.Host); err == nil {
 		hostOnly = h
 	}
-	return !strings.EqualFold(hostOnly, s.domain)
+	if !strings.EqualFold(hostOnly, s.domain) {
+		p.recordDeny(s, "host_mismatch")
+		if s.rt != nil {
+			s.out.errorResponse(http.StatusMisdirectedRequest, "Misdirected Request")
+		}
+		return true
+	}
+	if s.rt == nil {
+		return false
+	}
+	// RFC 8441 extended CONNECT (WebSocket over h2) cannot be relayed by the stream
+	// path. x/net does not advertise SETTINGS_ENABLE_CONNECT_PROTOCOL by default (only
+	// with GODEBUG=http2xconnect=1); refuse explicitly if a client sends it anyway, so
+	// it falls back to the h1 WebSocket path.
+	if s.req.Header.Get(":protocol") != "" {
+		p.recordDeny(s, "h2_extended_connect_unsupported")
+		s.out.errorResponse(http.StatusNotImplemented, "Not Implemented")
+		return true
+	}
+	// Request trailers are not forwarded by forwardH2; dropping them silently would
+	// change the request, so a stream that declares them is refused.
+	if len(s.req.Trailer) > 0 {
+		p.recordDeny(s, "h2_request_trailers_unsupported")
+		s.out.errorResponse(http.StatusBadRequest, "Bad Request")
+		return true
+	}
+	return false
+}
+
+// recordDeny writes the single deny decision event (plus metrics and log line) for
+// a request refused by a pipeline stage that is not a policy verdict. The caller
+// writes the client response.
+func (p *Proxy) recordDeny(s *requestScope, reason string) {
+	fullURL := "https://" + s.domain + s.req.URL.RequestURI()
+	_ = p.analyticsStore().StoreEvent(analytics.Event{
+		Timestamp: time.Now(),
+		Domain:    s.domain,
+		Port:      s.port,
+		Protocol:  s.proto,
+		Method:    s.req.Method,
+		URL:       fullURL,
+		Decision:  "deny",
+		Reason:    reason,
+		LatencyMs: s.latencyMs(),
+	})
+	p.cfg.Metrics.RecordRequest("deny", s.proto)
+	p.cfg.Metrics.RecordBlocked(reason)
+	p.logDecision(decisionLog{
+		Domain: s.domain, Port: s.port, Protocol: s.proto,
+		Method: s.req.Method, URL: fullURL, Decision: "deny",
+		Reason: reason,
+	})
 }
 
 // constraintGate enforces the #371 method/path constraints on EVERY request of
@@ -347,21 +417,21 @@ func (p *Proxy) constraintGate(s *requestScope) (endSession bool) {
 		Timestamp: time.Now(),
 		Domain:    s.domain,
 		Port:      s.port,
-		Protocol:  "https",
+		Protocol:  s.proto,
 		Method:    s.req.Method,
 		URL:       fullURL,
 		Decision:  "deny",
 		Reason:    reason,
 		LatencyMs: s.latencyMs(),
 	})
-	p.cfg.Metrics.RecordRequest("deny", "https")
+	p.cfg.Metrics.RecordRequest("deny", s.proto)
 	p.cfg.Metrics.RecordBlocked(reason)
 	p.logDecision(decisionLog{
-		Domain: s.domain, Port: s.port, Protocol: "https",
+		Domain: s.domain, Port: s.port, Protocol: s.proto,
 		Method: s.req.Method, URL: fullURL, Decision: "deny",
 		Reason: reason,
 	})
-	writeErrorResponse(s.tlsConn, 403, "Forbidden")
+	s.out.errorResponse(403, "Forbidden")
 	return true
 }
 
@@ -396,7 +466,7 @@ func (p *Proxy) judgeGate(s *requestScope) (endSession bool) {
 			Timestamp:   time.Now(),
 			Domain:      s.domain,
 			Port:        s.port,
-			Protocol:    "https",
+			Protocol:    s.proto,
 			Method:      s.req.Method,
 			URL:         fullURL,
 			Decision:    "deny",
@@ -405,15 +475,15 @@ func (p *Proxy) judgeGate(s *requestScope) (endSession bool) {
 			SwappedRefs: s.swappedNames,
 			Evidence:    s.evidence,
 		})
-		p.cfg.Metrics.RecordRequest("deny", "https")
+		p.cfg.Metrics.RecordRequest("deny", s.proto)
 		p.cfg.Metrics.RecordBlocked("judge")
 		p.cfg.Metrics.RecordJudge("deny")
 		p.logDecision(decisionLog{
-			Domain: s.domain, Port: s.port, Protocol: "https",
+			Domain: s.domain, Port: s.port, Protocol: s.proto,
 			Method: s.req.Method, URL: fullURL, Decision: "deny",
 			JudgeReason: verdict.Reason,
 		})
-		writeErrorResponse(s.tlsConn, 403, "Forbidden")
+		s.out.errorResponse(403, "Forbidden")
 		return true
 	}
 	s.judgeReason = verdict.Reason
@@ -427,7 +497,7 @@ func (p *Proxy) judgeGate(s *requestScope) (endSession bool) {
 // secret swap via the scope), classifies it, and on a Deny verdict terminates
 // with its own audit event.
 func (p *Proxy) mcpRequestScan(s *requestScope) (endSession bool) {
-	if s.gw == nil {
+	if s.gw == nil || s.streamBody {
 		return false
 	}
 	body, ok := s.ensureBody()
@@ -469,7 +539,7 @@ func (p *Proxy) mcpRequestScan(s *requestScope) (endSession bool) {
 			Domain: s.domain, Port: s.port, Protocol: "mcp",
 			Method: s.req.Method, URL: fullURL, Decision: "deny",
 		})
-		writeErrorResponse(s.tlsConn, 403, "Forbidden")
+		s.out.errorResponse(403, "Forbidden")
 		return true
 	}
 	return false
@@ -633,7 +703,7 @@ func (p *Proxy) dlpDeny(s *requestScope) (endSession bool) {
 		Timestamp:   time.Now(),
 		Domain:      s.domain,
 		Port:        s.port,
-		Protocol:    "https",
+		Protocol:    s.proto,
 		Method:      s.req.Method,
 		URL:         fullURL,
 		Decision:    "deny",
@@ -647,13 +717,13 @@ func (p *Proxy) dlpDeny(s *requestScope) (endSession bool) {
 		SwappedRefs: s.swappedNames,
 		Evidence:    s.evidence,
 	})
-	p.cfg.Metrics.RecordRequest("deny", "https")
+	p.cfg.Metrics.RecordRequest("deny", s.proto)
 	p.cfg.Metrics.RecordBlocked("dlp")
 	p.logDecision(decisionLog{
-		Domain: s.domain, Port: s.port, Protocol: "https",
+		Domain: s.domain, Port: s.port, Protocol: s.proto,
 		Method: s.req.Method, URL: fullURL, Decision: "deny",
 	})
-	writeErrorResponse(s.tlsConn, 403, "Forbidden")
+	s.out.errorResponse(403, "Forbidden")
 	return true
 }
 
@@ -672,7 +742,7 @@ func (p *Proxy) swapSecrets(s *requestScope) (endSession bool) {
 	// cache.ttl swap can't change it mid-substitution.
 	secretsProvider := p.secrets()
 
-	needBodySwap := s.req.Body != nil && s.req.Body != http.NoBody && s.req.ContentLength != 0
+	needBodySwap := !s.streamBody && s.req.Body != nil && s.req.Body != http.NoBody && s.req.ContentLength != 0
 	var bodyStr string
 	if needBodySwap {
 		b, ok := s.ensureBody()
@@ -703,7 +773,7 @@ func (p *Proxy) swapSecrets(s *requestScope) (endSession bool) {
 		}
 		realValue, err := secretsProvider.GetSecret(placeholder)
 		if err != nil {
-			writeErrorResponse(s.tlsConn, 503, "Service Unavailable")
+			s.out.errorResponse(503, "Service Unavailable")
 			return true
 		}
 		swapped := false
@@ -766,7 +836,7 @@ func (p *Proxy) swapSecrets(s *requestScope) (endSession bool) {
 	}
 
 	if len(outOfScope) > 0 {
-		p.recordOutOfScope(s.domain, s.port, "https", s.req.Method, s.req.URL.RequestURI(), outOfScope)
+		p.recordOutOfScope(s.domain, s.port, s.proto, s.req.Method, s.req.URL.RequestURI(), outOfScope)
 	}
 
 	// Set swapped body back
@@ -818,13 +888,27 @@ func swapBodySecrets(body string, pairs []string) string {
 	return strings.NewReplacer(pairs...).Replace(body)
 }
 
+// transformerReadsBody reports whether t consumes the request body (HMAC / SigV4
+// sign it). A transformer that does not say so is header-only.
+func transformerReadsBody(t auth.RequestTransformer) bool {
+	b, ok := t.(interface{ ReadsBody() bool })
+	return ok && b.ReadsBody()
+}
+
 // applyTransforms runs the configured auth transformers whose matcher matches the
 // destination domain. A transform error terminates with 502.
 func (p *Proxy) applyTransforms(s *requestScope) (endSession bool) {
 	for _, mt := range p.cfg.Transformers {
 		if mt.Matches(s.domain) {
+			// A streamed (gRPC) body is never buffered, and a body-signing transformer
+			// would read it whole and stall the stream: refuse rather than mis-sign.
+			if s.streamBody && transformerReadsBody(mt.Transformer) && s.req.Body != nil && s.req.Body != http.NoBody {
+				p.recordDeny(s, "transform_needs_buffered_body")
+				s.out.errorResponse(http.StatusNotImplemented, "Not Implemented")
+				return true
+			}
 			if err := mt.Transformer.Transform(s.req); err != nil {
-				writeErrorResponse(s.tlsConn, 502, "Bad Gateway")
+				s.out.errorResponse(502, "Bad Gateway")
 				return true
 			}
 		}
@@ -848,6 +932,9 @@ func (p *Proxy) applyTransforms(s *requestScope) (endSession bool) {
 // On success s.upstream/s.upstreamBR are the live conn the session carries. On a
 // stale redial they are the fresh conn; the dead one was already closed here.
 func (p *Proxy) forward(s *requestScope) (endSession bool) {
+	if s.rt != nil {
+		return p.forwardH2(s)
+	}
 	if !s.reused {
 		if err := p.dialUpstream(s); err != nil {
 			return p.badGateway(s)
@@ -908,7 +995,7 @@ func (p *Proxy) readUpstreamResponse(s *requestScope) (ok bool) {
 
 // badGateway writes a 502 to the client and signals the session should end.
 func (p *Proxy) badGateway(s *requestScope) (endSession bool) {
-	writeErrorResponse(s.tlsConn, 502, "Bad Gateway")
+	s.out.errorResponse(502, "Bad Gateway")
 	return true
 }
 
@@ -922,7 +1009,7 @@ func (p *Proxy) relayResponse(s *requestScope) (endSession bool) {
 	// branch is terminal — it hands the raw conn to the frame pump (which owns and
 	// closes the upstream), then returns. When the MCP gateway is disabled we
 	// leave today's behavior untouched (a 101 was never special-cased before).
-	if s.gw != nil && s.resp.StatusCode == 101 &&
+	if s.gw != nil && s.rt == nil && s.resp.StatusCode == 101 &&
 		strings.EqualFold(s.req.Header.Get("Upgrade"), "websocket") {
 		s.handoff = true
 		p.handleWSUpgrade(s.tlsConn, s.br, s.upstream, s.upstreamBR, s.resp, s.req, s.domain, s.port, s.mcpSessKey, s.gw)
@@ -990,7 +1077,7 @@ func (p *Proxy) mcpResponseScan(s *requestScope) (terminal bool) {
 				Method: s.req.Method, URL: fullURL, Decision: "deny",
 				ResponseStatus: s.resp.StatusCode,
 			})
-			writeErrorResponse(s.tlsConn, 502, "Bad Gateway")
+			s.out.errorResponse(502, "Bad Gateway")
 			return true
 		}
 		s.resp.Body = io.NopCloser(bytes.NewReader(body))
@@ -1013,24 +1100,15 @@ func (p *Proxy) relayMCPSSE(s *requestScope) (terminal bool) {
 	p.reach(PathSSE)
 	fullURL := "https://" + s.domain + s.req.URL.RequestURI()
 
-	// Write the status line + headers manually: resp.Write cannot be used because
-	// we tee the body through the SSE scanner. This preserves Content-Type,
-	// Transfer-Encoding, Cache-Control, etc.
-	statusLine := fmt.Sprintf("HTTP/%d.%d %03d %s\r\n",
-		s.resp.ProtoMajor, s.resp.ProtoMinor, s.resp.StatusCode,
-		http.StatusText(s.resp.StatusCode))
-	if _, werr := io.WriteString(s.tlsConn, statusLine); werr != nil {
-		return true
-	}
-	if werr := s.resp.Header.Write(s.tlsConn); werr != nil {
-		return true
-	}
-	if _, werr := io.WriteString(s.tlsConn, "\r\n"); werr != nil {
+	// Headers go out first; the body is then teed through the SSE scanner into the
+	// sink's writer (resp.Write cannot be used for that).
+	bodyOut, werr := s.out.stream(s.resp)
+	if werr != nil {
 		return true
 	}
 
 	blocked := false
-	scanErr := sse.Scan(s.resp.Body, s.tlsConn, func(data []byte) bool {
+	scanErr := sse.Scan(s.resp.Body, bodyOut, func(data []byte) bool {
 		start := time.Now()
 		v := s.gw.OnResponse(s.mcpSessKey, s.resp.StatusCode, s.resp.Header, data)
 		p.cfg.Metrics.ObserveAddedLatency("mcp_scan", time.Since(start))
@@ -1109,7 +1187,7 @@ func (p *Proxy) finishResponse(s *requestScope) (endSession bool) {
 		}
 	}
 
-	writeErr := s.resp.Write(s.tlsConn)
+	writeErr := s.out.relay(s.resp)
 	p.recordAllowEvent(s)
 	return writeErr != nil || s.closeAfter
 }
@@ -1172,7 +1250,7 @@ func (p *Proxy) httpResponseScan(s *requestScope) (blocked bool) {
 			Timestamp:      time.Now(),
 			Domain:         s.domain,
 			Port:           s.port,
-			Protocol:       "https",
+			Protocol:       s.proto,
 			Method:         s.req.Method,
 			URL:            fullURL,
 			Decision:       "deny",
@@ -1182,14 +1260,14 @@ func (p *Proxy) httpResponseScan(s *requestScope) (blocked bool) {
 			SwappedRefs:    s.swappedNames,
 			Evidence:       s.evidence,
 		})
-		p.cfg.Metrics.RecordRequest("deny", "https")
+		p.cfg.Metrics.RecordRequest("deny", s.proto)
 		p.cfg.Metrics.RecordBlocked(reason)
 		p.logDecision(decisionLog{
-			Domain: s.domain, Port: s.port, Protocol: "https",
+			Domain: s.domain, Port: s.port, Protocol: s.proto,
 			Method: s.req.Method, URL: fullURL, Decision: "deny",
 			ResponseStatus: s.resp.StatusCode,
 		})
-		writeErrorResponse(s.tlsConn, 502, "Bad Gateway")
+		s.out.errorResponse(502, "Bad Gateway")
 		return true
 	}
 	// monitor, or enforce with no high finding: restore the buffered body so the
@@ -1209,7 +1287,7 @@ func (p *Proxy) recordAllowEvent(s *requestScope) {
 	}
 	fullURL := "https://" + s.domain + s.req.URL.RequestURI()
 	secretRef := strings.Join(refStrs, ",")
-	proto := "https"
+	proto := s.proto
 	if s.wasMCP {
 		proto = "mcp"
 	}
