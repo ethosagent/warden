@@ -53,6 +53,13 @@ type Config struct {
 	PlaceholderScopes map[string][]string
 	Transformers      []*auth.MatchedTransformer
 
+	// Listener, when set, is the socket Serve accepts on instead of binding
+	// ListenAddr. Assembly-only: cmd/proxy never sets it, so production always
+	// binds ListenAddr exactly as before; the L1 harness (#350) passes a
+	// loopback listener on port 0 so an in-process worker binds no fixed port.
+	// Serve closes it on the same ctx-done path that closes a self-bound one.
+	Listener net.Listener
+
 	// Judge is the optional inline LLM judge. When nil the proxy behaves exactly
 	// as before: a NoMatch destination is default-denied. When set, NoMatch
 	// requests are forwarded to TLS termination so the judge can inspect the full
@@ -81,6 +88,11 @@ type Config struct {
 	// monitor logs findings and forwards unchanged, enforce replaces a flagged body.
 	// MCP responses are handled by MCP above and never reach this scanner.
 	ResponseScan *ResponseScanner
+
+	// EchoGuard configures the response check for secrets swapped into the same
+	// request (#389). The zero value is the default: on, blocking. It is independent
+	// of ResponseScan.
+	EchoGuard EchoGuardConfig
 
 	// DLP is the optional outbound REQUEST-body DLP scanner. Nil = disabled: the
 	// dlpScan stage returns immediately with no body read, byte-identical to
@@ -111,6 +123,39 @@ type Config struct {
 	// fills it from local config only — it never arrives on the CP-served wire —
 	// and validation (range + prefix-length floors) already ran at load.
 	UpstreamAllowPrivateCIDRs []string
+
+	// Dialer, when set, replaces the SSRF-safe upstream dialer ENTIRELY —
+	// blocklist included — for every egress dial the proxy makes. Assembly-only
+	// (the L1 harness maps allowlisted names onto local fake upstreams the
+	// SafeDialer exists to block): cmd/proxy never sets it, so production always
+	// builds NewSafeDialerWithResolver below, unchanged. When set,
+	// UpstreamResolver is unused (no SafeDialer is built to resolve through).
+	Dialer Dialer
+
+	// UpstreamRootCAs, when set, is the root pool every upstream TLS handshake
+	// the proxy CONFIGURES (via upstreamTLSConfig) verifies against, replacing
+	// the system pool. Assembly-only: cmd/proxy never sets it; nil keeps system
+	// roots, byte-identical to before.
+	UpstreamRootCAs *x509.CertPool
+
+	// Inflight, when set, receives one Start per request-scoped handler: from
+	// request-read until the scope's terminal bookkeeping (analytics event,
+	// metric, decision log) is recorded, on every protocol path. The L1
+	// harness's oracles wait for the tracker to drain before flushing and
+	// reading, which makes them exact instead of outwaiting the analytics
+	// flush tick. Production NEVER sets it: nil costs one nil check per
+	// request and no allocation. Assembly-only (worker.Overrides.Inflight).
+	Inflight *Inflight
+
+	// BeforeTerminal, when set, is called at the top of every terminal
+	// bookkeeping section (the analytics event, metric and decision log a
+	// request, stream or session records) — a test-only hook the harness parks
+	// in to make the exact post-response window whose bookkeeping race the
+	// Inflight tracker exists to close deterministic instead of flaky-red.
+	// Production NEVER sets it (nil = one nil check, no call). It must never
+	// grow beyond a test inconveniencer: it delays bookkeeping, never egress.
+	// Assembly-only (worker.Overrides.BeforeTerminal).
+	BeforeTerminal func()
 }
 
 // MCPGateway is the consumer-side seam for the MCP egress gateway (defined here,
@@ -152,11 +197,14 @@ type WSScanner interface {
 type mcpModeReader interface{ Enforcing() bool }
 
 // PolicyEvaluator is the consumer-side seam for the static allow/deny decision.
-// *policy.Evaluator satisfies it. Replace is used by the control-plane apply loop
-// to hot-swap the running policy; it is kept on the interface so the proxy's
-// dependency is fully expressed by one seam.
+// *policy.Evaluator satisfies it. EvaluateRequest evaluates the policy for one
+// request; callers pass method/path = "" for the destination-only (CONNECT)
+// form, which could-matches constraints and peeks at rate limits. Replace is
+// used by the control-plane apply loop to hot-swap the running policy; it is
+// kept on the interface so the proxy's dependency is fully expressed by one
+// seam.
 type PolicyEvaluator interface {
-	Evaluate(domain string, port int, scheme policy.Scheme) policy.Decision
+	EvaluateRequest(domain string, port int, scheme policy.Scheme, method, path string) policy.RequestVerdict
 	Replace(p config.Policy)
 }
 
@@ -280,6 +328,10 @@ type Proxy struct {
 	// is process-wide (not per-connection) so a degraded control is visible
 	// without log spam.
 	wsDowngradeOnce sync.Once
+
+	// pathHook, when non-nil, is told which protocol path each dispatch site
+	// takes (see reach). Only in-package tests set it, before Serve.
+	pathHook func(Path)
 }
 
 // mcpHolder wraps the MCPGateway interface so it can live behind an
@@ -504,12 +556,20 @@ func New(cfg Config) (*Proxy, error) {
 		}
 	}
 
-	safeDial, err := NewSafeDialerWithResolver(10*time.Second, cfg.UpstreamAllowPrivateCIDRs, cfg.UpstreamResolver)
-	if err != nil {
-		return nil, fmt.Errorf("proxy: safe dialer: %w", err)
+	// Upstream dialing. An injected Dialer (assembly-only harness seam) replaces
+	// the SSRF-safe dialer wholesale; otherwise production builds exactly what
+	// it always built, including the optional dns.upstreamResolver.
+	if cfg.Dialer != nil {
+		p.dialFunc = cfg.Dialer.Dial
+		p.dialTLS = cfg.Dialer.DialTLS
+	} else {
+		safeDial, err := NewSafeDialerWithResolver(10*time.Second, cfg.UpstreamAllowPrivateCIDRs, cfg.UpstreamResolver)
+		if err != nil {
+			return nil, fmt.Errorf("proxy: safe dialer: %w", err)
+		}
+		p.dialFunc = safeDial.Dial
+		p.dialTLS = safeDial.DialTLS
 	}
-	p.dialFunc = safeDial.Dial
-	p.dialTLS = safeDial.DialTLS
 
 	return p, nil
 }

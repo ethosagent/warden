@@ -148,7 +148,7 @@ services:
 
   fakeupstream:
     build:
-      context: ../..         # repo root: the module (internal/mcpwedge) is needed
+      context: ../..         # repo root: the module (internal/mcp/poisoned) is needed
       dockerfile: test/e2e/fakeupstream/Dockerfile
     image: warden-e2e-fakeupstream:local
     # The container runs as a non-root user (see its Dockerfile) but binds 443

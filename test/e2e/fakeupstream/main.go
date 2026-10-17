@@ -4,7 +4,7 @@
 //
 //   - api.example.test/  (and /echo, /ws) — generic HTTPS app
 //   - llm.example.test/v1/chat/completions — OpenAI-shaped LLM stub
-//   - mcp.example.test/   — the poisoned MCP server (internal/mcpwedge, the
+//   - mcp.example.test/   — the poisoned MCP server (internal/mcp/poisoned, the
 //     same handler the standalone mcp-wedge demo serves)
 //   - evil.example.test/  — plain 200; the exfiltration attempt itself must be
 //     refused by Warden, so the upstream never needs to misbehave
@@ -55,7 +55,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ethosagent/warden/internal/mcpwedge"
+	"github.com/ethosagent/warden/internal/mcp/poisoned"
 	"golang.org/x/net/dns/dnsmessage"
 )
 
@@ -306,7 +306,7 @@ func grpcField1(frame []byte) (payload []byte, ok bool) {
 func hostAwareDefault() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if hostRoot(r.Host) == "mcp.example.test" {
-			mcpwedge.NewHandler().ServeHTTP(w, r)
+			poisoned.Handler().ServeHTTP(w, r)
 			return
 		}
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")

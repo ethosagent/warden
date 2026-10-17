@@ -1,12 +1,12 @@
 # Build the e2e fake upstream into a tiny static image. Context is the repo
 # root (see deploy/compose/docker-compose.e2e.yml) so the build can see go.mod
-# and internal/mcpwedge. Base images are pinned by digest — same pins as the
+# and internal/mcp/poisoned. Base images are pinned by digest — same pins as the
 # root Dockerfile; bump deliberately when upgrading.
 FROM golang:1.26.9-alpine@sha256:3082400e369fa24d5fc60bca20edab3f6d604e0c5a690ec66b295eff4dd87ade AS builder
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
-COPY internal/mcpwedge/ internal/mcpwedge/
+COPY internal/mcp/poisoned/ internal/mcp/poisoned/
 COPY test/e2e/fakeupstream/ test/e2e/fakeupstream/
 RUN CGO_ENABLED=0 go build -o /fakeupstream ./test/e2e/fakeupstream/
 

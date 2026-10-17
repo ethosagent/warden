@@ -1,0 +1,6 @@
+{
+  "want": [
+    {"rule": "X1", "file": "w/sign/alias.go", "line": 5},
+    {"rule": "X1", "file": "w/sign/direct.go", "line": 5}
+  ]
+}

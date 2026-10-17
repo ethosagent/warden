@@ -9,11 +9,22 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+
+	"github.com/ethosagent/warden/internal/policy"
 )
 
 // RequestTransformer modifies an outbound HTTP request for authentication.
 type RequestTransformer interface {
 	Transform(req *http.Request) error
+}
+
+// SecretSource is implemented by a RequestTransformer that puts a real secret
+// value into the request (an API key, a bearer token). InjectedSecrets is read
+// after Transform so the proxy can make sure the upstream does not echo those
+// values back to the agent. Signers whose secret never appears in the request
+// (HMAC, SigV4 key) have nothing to report.
+type SecretSource interface {
+	InjectedSecrets() []string
 }
 
 // MatchedTransformer applies a RequestTransformer only when the request
@@ -37,11 +48,18 @@ func NewMatchedTransformer(pattern string, t RequestTransformer) (*MatchedTransf
 }
 
 func (m *MatchedTransformer) Matches(host string) bool {
-	host = strings.ToLower(strings.TrimSuffix(host, "."))
-	pattern := strings.ToLower(m.Pattern)
+	// policy.NormalizeHost is the one shared host normalisation (#397): case
+	// and any number of trailing dots never decide the match, and a host that
+	// is only dots — or empty — matches nothing (the request would otherwise
+	// be forwarded without its credential).
+	host = policy.NormalizeHost(host)
+	if host == "" {
+		return false
+	}
 	if m.re != nil {
 		return m.re.MatchString(host)
 	}
+	pattern := policy.NormalizeHost(m.Pattern)
 	if suffix, ok := strings.CutPrefix(pattern, "*."); ok {
 		return host != suffix && strings.HasSuffix(host, "."+suffix)
 	}

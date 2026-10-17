@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("---\npolicy: {}\n---\npolicy:\n  allowlist:\n    - domain: second.test\n")

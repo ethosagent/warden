@@ -7,9 +7,12 @@ package worker
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/x509"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -23,6 +26,7 @@ import (
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/audit"
 	"github.com/ethosagent/warden/internal/auth"
+	"github.com/ethosagent/warden/internal/clock"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/cost"
 	"github.com/ethosagent/warden/internal/dashboard"
@@ -32,6 +36,7 @@ import (
 	"github.com/ethosagent/warden/internal/proxy"
 	"github.com/ethosagent/warden/internal/scan"
 	"github.com/ethosagent/warden/internal/secrets"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 )
 
 // Params are the flag-derived inputs the worker boots from. cmd/proxy parses the
@@ -51,6 +56,92 @@ type Params struct {
 	// pipeline. Empty ⇒ default to a sibling of DBPath (warden-alerts.db). Ignored
 	// in managed/fleet mode (the control plane hosts the pipeline there).
 	AlertsDBPath string
+
+	// Config, when set, is the ConfigProvider Run boots from instead of loading
+	// ConfigPath. Assembly-only: cmd/proxy never sets it, so production always
+	// loads the YAML file exactly as before; the L1 harness (#350) passes a
+	// Go-built policy so an in-process worker needs no file.
+	Config config.ConfigProvider
+
+	// ProxyListener and AdminListener, when set, replace the resolved
+	// listen/admin addresses as the sockets the proxy and the admin+dashboard
+	// server accept on (an injected listener wins; the startup log states what
+	// is actually used). Assembly-only: cmd/proxy never sets them. Run closes
+	// both on a boot error — like controlplane.Run's fail closure — and the
+	// serving paths close them on shutdown.
+	ProxyListener net.Listener
+	AdminListener net.Listener
+
+	// OnReady is called once with the (proxyAddr, adminAddr) pair just before
+	// the proxy starts accepting — after both listeners are bound, so the
+	// kernel already queues connections and an immediate probe is drained the
+	// moment Serve starts. An injected listener reports its bound address; with
+	// no injection the resolved address is reported and a caller dials with
+	// retry, exactly as the startup log reports it. Nil is allowed (production
+	// never sets it).
+	OnReady func(proxyAddr, adminAddr string)
+
+	// Overrides carries the assembly-only test seams (#362). Nil (production)
+	// means every collaborator is built exactly as always; see Overrides.
+	Overrides *Overrides
+}
+
+// Overrides are assembly-only replacements for collaborators the production
+// worker always builds itself. They exist ONLY for the L1 harness (#350): a Go
+// test maps allowlisted names onto local fake upstreams and drives time without
+// sleeps, which production wiring must never be able to do. They are therefore
+// Go-only BY DESIGN — no YAML key or CLI flag can set them (enforced by
+// TestOverridesAreNotConfigurable) — and they are copied into proxy.Config and
+// the loops at boot, never read again.
+type Overrides struct {
+	// Dialer replaces the proxy's SSRF-safe upstream dialer ENTIRELY — blocklist
+	// included — so a scenario can route api.example.com to a loopback fake the
+	// SafeDialer would rightly refuse. Only ever set by tests.
+	Dialer proxy.Dialer
+	// UpstreamRootCAs replaces the root pool the proxy's upstream TLS handshakes
+	// verify against, so a fake upstream's test CA is trusted without touching
+	// the system store. nil = system roots.
+	UpstreamRootCAs *x509.CertPool
+	// Clock is the worker's time port: the control-plane long-poll and
+	// heartbeat loops tick on it. nil = clock.Real().
+	Clock clock.Clock
+	// MetricsReader, when set, is attached to the worker's OTel meter provider
+	// as an extra reader (observability.Config.Reader) so a test can collect
+	// metrics in-process. nil = no extra reader (production default).
+	MetricsReader sdkmetric.Reader
+	// OnAnalyticsWriter, when set, is called exactly once during boot with the
+	// assembled async analytics writer's drain handle, so the L1 harness can
+	// persist everything queued the moment a scenario stops making traffic and
+	// read events back deterministically (h.Events()) instead of outwaiting the
+	// 250ms flush tick. Assembly-only like the rest of Overrides: no YAML key or
+	// CLI flag can set it (enforced by TestOverridesAreNotConfigurable), and
+	// production never sets it — nil leaves boot byte-identical.
+	OnAnalyticsWriter func(AnalyticsFlusher)
+	// Inflight is installed as the proxy's quiescence tracker (proxy.Config
+	// .Inflight): every request scope enters it at request-read and leaves only
+	// after its terminal bookkeeping, so the harness's oracles wait for the
+	// drain instead of racing the post-response record (#363). Production never
+	// sets it — nil means the proxy runs untracked (one nil check per request).
+	Inflight *proxy.Inflight
+	// BeforeTerminal is installed as the proxy's terminal-bookkeeping hook
+	// (proxy.Config.BeforeTerminal): called at the top of every terminal
+	// bookkeeping section, it is a TEST-ONLY trap the harness parks in to make
+	// the exact post-response window whose bookkeeping race the tracker closes
+	// deterministic-red instead of flaky-red. Production never sets it (nil =
+	// one nil check, no call). It must never grow beyond a test inconveniencer:
+	// it delays bookkeeping, never egress decisions.
+	BeforeTerminal func()
+}
+
+// AnalyticsFlusher is the drain capability of the async analytics writer: Flush
+// persists everything already queued and returns (analytics flush semantics —
+// no deadline, never a drop). A FAILED batch write is returned, not acked as
+// persisted — the batch stays buffered for the next flush, and the caller
+// learns the read-your-writes view it asked for does not exist. It is the ONLY
+// surface handed out on the writer: no reach into the queue, the batch, or the
+// underlying store.
+type AnalyticsFlusher interface {
+	Flush() error
 }
 
 // Run loads config, wires dependencies behind their interfaces, constructs the
@@ -62,9 +153,32 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	dbPath := p.DBPath
 	localOnlyFlag := p.LocalOnly
 
-	cfgProvider, err := config.NewLocalYAMLProvider(configPath)
-	if err != nil {
-		return err
+	// A failed boot must never leak the harness's ports: every early return
+	// below precedes any server start, so both injected listeners are closed
+	// here until the serving path takes ownership (booted). Mirrors
+	// controlplane.Run's fail closure.
+	booted := false
+	defer func() {
+		if booted {
+			return
+		}
+		if p.ProxyListener != nil {
+			_ = p.ProxyListener.Close()
+		}
+		if p.AdminListener != nil {
+			_ = p.AdminListener.Close()
+		}
+	}()
+
+	// Config source: an injected ConfigProvider (assembly-only harness seam)
+	// wins; nil keeps the local YAML file load exactly as before.
+	cfgProvider := p.Config
+	if cfgProvider == nil {
+		var err error
+		cfgProvider, err = config.NewLocalYAMLProvider(configPath)
+		if err != nil {
+			return err
+		}
 	}
 	pol, err := cfgProvider.GetPolicy()
 	if err != nil {
@@ -169,6 +283,9 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		// Announce this worker's id on each pull/heartbeat so the control plane
 		// lists it as connected even before it forwards analytics.
 		rp.SetProxyID(expandEnv(pol.Central.ProxyID))
+		// Shutdown hygiene: drop the pooled keep-alive conns when Run returns, so
+		// a hosted worker leaves no open connections to the control plane.
+		defer rp.CloseIdleConnections()
 		if pullErr := rp.Pull(); pullErr != nil {
 			logger.Warn("control plane unreachable at boot; starting FAIL-CLOSED (deny all) until policy arrives", "error", pullErr)
 		} else if remote, gErr := rp.GetPolicy(); gErr == nil {
@@ -235,6 +352,10 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// handler when disabled, and record calls are nil-safe no-ops. OTel providers
 	// init ONCE here; a distributed observability change applies on the NEXT
 	// restart (the worker re-pulls settings at boot), never on a live long-poll.
+	var metricsReader sdkmetric.Reader
+	if p.Overrides != nil {
+		metricsReader = p.Overrides.MetricsReader
+	}
 	metrics, metricsHandler, shutdownObs, err := observability.New(observability.Config{
 		Enabled:            obsCfg.Enabled,
 		ServiceName:        obsCfg.ServiceName,
@@ -242,6 +363,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		MetricsEnabled:     obsCfg.MetricsEnabled,
 		OTLPEndpoint:       obsCfg.OTLPEndpoint,
 		ResourceAttributes: obsCfg.ResourceAttributes,
+		Reader:             metricsReader,
 	})
 	if err != nil {
 		return err
@@ -425,6 +547,12 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	}); rqErr != nil {
 		logger.Warn("analytics queue depth metric not registered", "error", rqErr)
 	}
+	// Assembly-only harness seam (#363): hand the drain handle to whoever asked
+	// for it at assembly time. Production never sets OnAnalyticsWriter, so this
+	// is one nil check away from byte-identical behavior.
+	if p.Overrides != nil && p.Overrides.OnAnalyticsWriter != nil {
+		p.Overrides.OnAnalyticsWriter(asyncStore)
+	}
 
 	// Audit decorators wrap the analytics WRITE chain. Order matters and is load-
 	// bearing — the final chain (outer→inner) is:
@@ -507,12 +635,15 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		if rErr != nil {
 			return rErr
 		}
+		// Same shutdown hygiene as the policy client above.
+		defer remote.CloseIdleConnections()
 		syncWorker = analytics.NewSyncWorker(store, remote, expandEnv(pol.Central.ProxyID), pol.Central.BatchSize, pol.Central.BufferCap, pol.Central.Interval)
 		logger.Info("central worker enabled", "endpoint", pol.Central.Endpoint, "proxyID", expandEnv(pol.Central.ProxyID))
 	}
 
 	cfg := proxy.Config{
 		ListenAddr:        listenAddr,
+		Listener:          p.ProxyListener,
 		Policy:            evaluator,
 		Secrets:           secretProvider,
 		Analytics:         analyticsStore,
@@ -525,6 +656,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		Logger:            logger,
 		MCP:               bootGW,
 		ResponseScan:      respScanner,
+		EchoGuard:         proxy.EchoGuardConfig{Disabled: pol.EchoGuard.Disabled, Monitor: pol.EchoGuard.Monitor()},
 		DLP:               dlpScanner,
 		Transformers:      transformers,
 		Cost:              costEstimator,
@@ -535,6 +667,14 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	if judge != nil {
 		cfg.Judge = judge
 		logger.Info("inline LLM judge enabled", "agent", agentID, "model", pol.Judge.Model)
+	}
+	// Assembly-only overrides (harness seam, #362): copied into proxy.Config and
+	// never read again. Nil (production) changes nothing on this path.
+	if p.Overrides != nil {
+		cfg.Dialer = p.Overrides.Dialer
+		cfg.UpstreamRootCAs = p.Overrides.UpstreamRootCAs
+		cfg.Inflight = p.Overrides.Inflight
+		cfg.BeforeTerminal = p.Overrides.BeforeTerminal
 	}
 
 	pxy, err := newProxy(cfg)
@@ -644,14 +784,42 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		logger.Info("metrics endpoint enabled", "path", "/metrics", "addr", adminAddr)
 	}
 
+	// The addresses the serving paths actually use and the startup log states:
+	// an injected listener's bound address wins over the resolved one, exactly
+	// like controlplane.Run's reportedAddr.
+	proxyAddr := listenAddr
+	if p.ProxyListener != nil {
+		proxyAddr = p.ProxyListener.Addr().String()
+	}
+	adminServingAddr := adminAddr
+	if p.AdminListener != nil {
+		adminServingAddr = p.AdminListener.Addr().String()
+	}
+
+	// Admin+dashboard HTTP server. The injected listener wins; with none, the
+	// goroutine binds adminAddr itself and a bind failure stays the logged,
+	// non-fatal event it always was. Closing the server when Run returns (the
+	// only exit after this point is pxy.Serve) releases the listener in every
+	// shutdown path; Serve's own ErrServerClosed return is filtered below.
+	adminHTTP := &http.Server{Handler: adminMux}
+	defer func() { _ = adminHTTP.Close() }()
 	go func() {
-		logger.Info("admin+dashboard listening", "url", fmt.Sprintf("http://%s/dashboard/", adminAddr))
-		if err := http.ListenAndServe(adminAddr, adminMux); err != nil {
+		logger.Info("admin+dashboard listening", "url", fmt.Sprintf("http://%s/dashboard/", adminServingAddr))
+		ln := p.AdminListener
+		if ln == nil {
+			var lerr error
+			ln, lerr = net.Listen("tcp", adminAddr)
+			if lerr != nil {
+				logger.Error("admin server stopped", "error", lerr)
+				return
+			}
+		}
+		if err := adminHTTP.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("admin server stopped", "error", err)
 		}
 	}()
 
-	logger.Info("proxy listening", "addr", listenAddr)
+	logger.Info("proxy listening", "addr", proxyAddr)
 
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -666,6 +834,14 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 
 	// Background workers tied to the proxy lifetime: control-plane policy polling
 	// and central event forwarding. Both stop when ctx is cancelled.
+	//
+	// clk is the worker's time port (Overrides.Clock, assembly-only; production
+	// is always clock.Real()). The loops below tick on it, so a test advances a
+	// fake clock instead of sleeping.
+	clk := clock.Real()
+	if p.Overrides != nil && p.Overrides.Clock != nil {
+		clk = p.Overrides.Clock
+	}
 	if controlPlane != nil {
 		// applier rebuilds + atomically swaps the proxy's MCP gateway AND its
 		// inline judge from the control-plane-distributed settings. It runs only for
@@ -691,8 +867,8 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 			liveCompliance:   liveCompliance,
 			liveCacheTTL:     liveCacheTTL,
 		}
-		go longPollControlPlane(ctx, controlPlane, evaluator, pol.ControlPlane.LongPollWait, logger, applier.Apply)
-		go heartbeatControlPlane(ctx, controlPlane, pol.ControlPlane.HeartbeatInterval, logger)
+		go longPollControlPlane(ctx, clk, controlPlane, evaluator, pol.ControlPlane.LongPollWait, logger, applier.Apply)
+		go heartbeatControlPlane(ctx, clk, controlPlane, pol.ControlPlane.HeartbeatInterval, logger)
 	}
 	if syncWorker != nil {
 		syncWorker.Start(ctx)
@@ -703,6 +879,15 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		go pushMCPSnapshots(ctx, mcpGW, centralRemote, pol.Central.MCPPushInterval, logger)
 	}
 
+	// Both listeners are bound and both servers are up: the kernel queues
+	// connections in the accept backlogs, so an OnReady probe issued now is
+	// drained the moment Serve starts (same discipline as controlplane.Run).
+	// From here the serving paths own the listeners, so the boot-failure close
+	// above stands down.
+	booted = true
+	if p.OnReady != nil {
+		p.OnReady(proxyAddr, adminServingAddr)
+	}
 	return pxy.Serve(ctx)
 }
 

@@ -1,0 +1,5 @@
+{
+  "want": [
+    {"rule": "Z2", "file": "w/cross/cross.go", "line": 3}
+  ]
+}

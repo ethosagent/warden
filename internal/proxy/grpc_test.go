@@ -327,15 +327,15 @@ func TestHTTP2_SecretScope(t *testing.T) {
 	}
 }
 
-// TestHTTP2_SecretScope_UsesConnectHostNotAuthority pins that the HTTP/2 scope
-// host is the CONNECT host: the agent sets :authority to the in-scope host over a
-// tunnel to an out-of-scope host (HTTP/2 has no Host recheck), and the placeholder
-// must stay unswapped with the out-of-scope event recorded for the CONNECT host.
+// TestHTTP2_SecretScope_UsesConnectHostNotAuthority pins that a spoofed
+// :authority cannot change which host a placeholder is scoped to. Since #388 the
+// shared readRequest stage (the h1 Host recheck) refuses the stream outright with
+// 421: the request never reaches the origin, so nothing is swapped.
 func TestHTTP2_SecretScope_UsesConnectHostNotAuthority(t *testing.T) {
 	caCertPEM, caKeyPEM, _, _ := generateTestCA(t)
 	be := startGRPCBackend(t)
 	backendAddr := strings.TrimPrefix(be.server.URL, "https://")
-	p, store := startTestProxyWithScopedSecrets(t, []string{"grpc.test"}, caCertPEM, caKeyPEM,
+	p, _ := startTestProxyWithScopedSecrets(t, []string{"grpc.test"}, caCertPEM, caKeyPEM,
 		map[string]string{"PLACEHOLDER_001": "real-secret-value"}, []string{"PLACEHOLDER_001"},
 		map[string][]string{"PLACEHOLDER_001": {"trusted.test"}})
 	p.dialTLS = func(network, addr string, cfg *tls.Config) (*tls.Conn, error) {
@@ -351,14 +351,10 @@ func TestHTTP2_SecretScope_UsesConnectHostNotAuthority(t *testing.T) {
 	}
 	_, _ = io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
-	if be.gotAuth != "Bearer PLACEHOLDER_001" {
-		t.Fatalf("Authorization = %q: placeholder swapped for spoofed :authority", be.gotAuth)
+	if resp.StatusCode != http.StatusMisdirectedRequest {
+		t.Fatalf("status = %d, want 421 for a :authority that differs from the CONNECT host", resp.StatusCode)
 	}
-	time.Sleep(50 * time.Millisecond)
-	for _, e := range store.snapshot() {
-		if e.Decision == "secret_out_of_scope" && e.Domain == "grpc.test" && e.Reason == "secret_out_of_scope:PLACEHOLDER_001" {
-			return
-		}
+	if be.gotAuth != "" {
+		t.Fatalf("request reached the origin with Authorization = %q", be.gotAuth)
 	}
-	t.Fatalf("no out-of-scope event for CONNECT host grpc.test: %+v", store.snapshot())
 }

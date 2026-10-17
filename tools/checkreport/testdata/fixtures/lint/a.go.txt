@@ -1,0 +1,13 @@
+package fx
+
+import (
+	"os"
+	"strings"
+)
+
+func F() string {
+	os.Open("x")
+	return strings.Title("a")
+}
+
+func unusedFn() {}

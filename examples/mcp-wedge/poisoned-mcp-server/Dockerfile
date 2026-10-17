@@ -1,4 +1,6 @@
-# Build the demo poisoned MCP server (stdlib-only Go) into a tiny static image.
+# Build the demo poisoned MCP server into a tiny static image. The binary is
+# stdlib-only plus one in-module, itself-stdlib-only package
+# (internal/mcp/poisoned, shared with the test harness) — never the test tree.
 # Context is the repo root (see examples/mcp-wedge/docker-compose.yml) so the
 # build can see go.mod and the example package.
 ARG GO_VERSION=1.26

@@ -1,0 +1,53 @@
+{
+ "Issues": [
+  {
+   "FromLinter": "errcheck",
+   "Text": "Error return value of `os.Open` is not checked",
+   "Severity": "",
+   "SourceLines": [
+    "\tos.Open(\"x\")"
+   ],
+   "Pos": {
+    "Filename": "lintbad/a.go",
+    "Offset": 72,
+    "Line": 9,
+    "Column": 9
+   },
+   "ExpectNoLint": false,
+   "ExpectedNoLintLinter": ""
+  },
+  {
+   "FromLinter": "staticcheck",
+   "Text": "SA1019: strings.Title has been deprecated since Go 1.18 and an alternative has been available since Go 1.0: The rule Title uses for word boundaries does not handle Unicode punctuation properly. Use golang.org/x/text/cases instead. ",
+   "Severity": "",
+   "SourceLines": [
+    "\treturn strings.Title(\"a\")"
+   ],
+   "Pos": {
+    "Filename": "lintbad/a.go",
+    "Offset": 86,
+    "Line": 10,
+    "Column": 9
+   },
+   "ExpectNoLint": false,
+   "ExpectedNoLintLinter": ""
+  },
+  {
+   "FromLinter": "unused",
+   "Text": "func unusedFn is unused",
+   "Severity": "",
+   "SourceLines": [
+    "func unusedFn() {}"
+   ],
+   "Pos": {
+    "Filename": "lintbad/a.go",
+    "Offset": 113,
+    "Line": 13,
+    "Column": 6
+   },
+   "ExpectNoLint": false,
+   "ExpectedNoLintLinter": ""
+  }
+ ],
+ "Report": {}
+}

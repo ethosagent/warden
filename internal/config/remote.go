@@ -88,6 +88,15 @@ func (r *RemoteProvider) SetCACert(path string) error {
 	return nil
 }
 
+// CloseIdleConnections drops the pooled keep-alive connections of the pull and
+// long-poll clients. Run calls it on shutdown so a hosted worker (Run inside a
+// longer-lived process) leaves no open connections — and no server-side
+// goroutines — behind.
+func (r *RemoteProvider) CloseIdleConnections() {
+	r.client.CloseIdleConnections()
+	r.longClient.CloseIdleConnections()
+}
+
 // Pull fetches the current policy from the control plane (one-shot, immediate).
 // On success the policy is stored; on failure the last known good policy (if
 // any) is preserved.

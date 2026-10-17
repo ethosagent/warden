@@ -21,6 +21,36 @@ policy:
   # Default-deny allowlist. A destination is permitted only if it matches an
   # entry here. Port is optional: when omitted, Warden infers 443 (HTTPS) or
   # 80 (HTTP) from the request scheme.
+  #
+  # Entries can be narrowed to specific methods and paths (`methods` / `paths`,
+  # both optional). Matching is ANY-match-wins across entries: a request is
+  # allowed when ANY entry for the destination admits it — so an unconstrained
+  # entry for the same domain makes a constrained twin useless. A rule's
+  # rateLimit counts only requests that matched that rule's own constraints.
+  #
+  # BEHAVIOUR CHANGE (#371): a rateLimit used to be consumed once per CONNECT
+  # tunnel; it is now consumed PER REQUEST. For a rule without methods/paths, N
+  # keep-alive requests over one tunnel count N, not 1 — tighten the limit (or
+  # add constraints, which keep denied requests free) when migrating.
+  #
+  # `methods` lists uppercased HTTP methods; the match is case-sensitive against
+  # the method exactly as sent — method-override headers such as
+  # X-HTTP-Method-Override are NOT checked. `paths` patterns are matched against
+  # the RAW (percent-encoded) request path — no decoding on either side:
+  #   /v1/chat      exact path
+  #   /acme/app/*   the path itself and everything under it (segment-aligned)
+  #   /acme/*/x     * matches within one path segment
+  #   /*            any path
+  # When an entry constrains paths, a request whose raw path contains a dot
+  # segment, a matrix parameter, or an encoded separator (/../, /./, %2e, %2f,
+  # %5c, %3b, raw or encoded ";", backslash, //) is DENIED (path_not_canonical)
+  # even if it string-matches a pattern — the bytes matched and the resource the
+  # origin serves must be the same thing. (Java servers strip ";params" per
+  # segment, so /v1/..;/admin would be /admin upstream.)
+  #
+  # Residual risk: decodings Warden cannot see still apply origin-side.
+  # Double-encoding (%252e), overlong UTF-8 (%c0%ae), and %00 reach the origin
+  # verbatim when a pattern allows them — scope patterns tightly.
   allowlist:
     - domain: api.openai.com            # port omitted -> inferred 443 (HTTPS)
     - domain: api.anthropic.com
@@ -28,6 +58,11 @@ policy:
       port: 8443                        # explicit port overrides inference
       rateLimit: "100/hour"             # per-rule rate limit
       timeWindow: "9-17"               # allowed hours (local time)
+    - domain: github.com                # narrowed: reads anywhere, writes only
+      methods: ["GET", "HEAD"]          # under the two allowed prefixes
+    - domain: github.com
+      methods: ["POST", "PATCH", "PUT", "DELETE"]
+      paths: ["/acme/app/*", "/acme/app.git/*"]
   denylist:
     - domain: evil.example.com
     - domain: "*.malware.net"
@@ -238,6 +273,36 @@ responseScan:
   evidence: false                 # opt-in: keep a MASKED sample per finding (never the raw value)
   pii:
     phone: false                  # email/card(Luhn)/SSN always on; phone opt-in (noisy)
+
+# Echo guard: stops an upstream that copies the request into its response (an echo
+# endpoint, an error quoting the request, a reflected header) from handing the agent
+# the real secret Warden swapped in. It checks every response of a request for the
+# EXACT values swapped into THAT request (placeholders, Basic auth, auth
+# transformers) in raw, base64, URL-encoded, hex and JSON-escaped form — headers and
+# body, h1/h2/gRPC/SSE. ON by default and independent of responseScan; a request
+# that swapped nothing is not touched. Swapped requests ask the upstream for
+# `Accept-Encoding: identity`; gzip/deflate answers are decompressed for the check,
+# any other encoding, a compressed body of unknown length, or a compressed body over
+# the scan cap (responseScan.maxBodyBytes, else 1 MiB), is blocked as
+# secret_echo_unscannable. An uncompressed body is streamed through the check at
+# any size, so large downloads still work; the cap only bounds what is buffered.
+# Action:
+#   block    - (default) buffered response -> 502; streaming response -> the stream
+#              is aborted before any byte of the value is released. To guarantee
+#              that, a streamed response is delayed by up to the longest encoded
+#              value (tens to ~100 bytes): the last bytes are released with the
+#              next chunk or at the end of the stream. A stream that ends on the
+#              start of a value (4+ bytes) is aborted, not delivered.
+#   monitor  - record a hit (allow event, reason secret_echo) and forward anyway.
+# It targets HONEST reflectors, not an upstream trying to smuggle the value out. It
+# does NOT catch: base32, base64 wrapped across lines, HTML entities,
+# quoted-printable, reversed or split values, \u escapes of non-ASCII characters in
+# the value, or gzip/deflate bytes sent without a Content-Encoding header.
+# WebSocket frames after the 101 upgrade are not checked (#399); the 101 response
+# headers are.
+echoGuard:
+  enabled: true                   # default true; false disables the guard entirely
+  action: block                   # block | monitor
 
 # Per-destination request-authentication transforms. The agent sends a request
 # with a placeholder or no auth at all; Warden injects real, request-scoped

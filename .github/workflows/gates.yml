@@ -1,0 +1,107 @@
+name: gates
+
+# The `gates` required check (#354): did this PR quietly make a check easier to
+# pass, or let a bot change a gate? It runs two Go tools, tools/gatecheck
+# weakened and tools/gatecheck protected-paths, both of which pass when a human
+# maintainer has added the `gates-change-approved` label after the latest push
+# (tools/approval verifies that through the GitHub API).
+#
+# Why pull_request_target: the workflow definition and the tool come from the
+# BASE branch, so a PR cannot edit them to pass its own check. The PR's code is
+# only ever data here: it is checked out into head/ with no credentials and
+# gatecheck READS it as text (it parses head/scripts/check.sh, it never runs it).
+# NEVER add a step that executes anything from head/ (a script, a build, a test):
+# this job holds a token, and the PR author controls everything in head/.
+# tools/gatecheck's tests and tools/gatecheck/repo_test.go pin that rule.
+#
+# Actions are pinned to a full commit SHA, with the version in a comment.
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+  checks: read
+
+concurrency:
+  group: gates-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout base (trusted)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+          fetch-depth: 0
+          persist-credentials: false
+
+      # protected-paths runs git diff in base/, never in the fork's clone: a
+      # stale fork may not have the base commit. The PR head arrives as a ref.
+      - name: Fetch the PR head as a ref into base (not checked out)
+        run: git -C base fetch --no-tags origin "+refs/pull/${{ github.event.pull_request.number }}/head:refs/remotes/pr/head"
+
+      - name: Checkout head (data only)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: head
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: base/go.mod
+          cache: false
+
+      # Until the PR that adds tools/gatecheck is merged there is no trusted
+      # copy to run. Skip loudly instead of running the PR's own copy.
+      - name: Build gatecheck from base
+        id: build
+        run: |
+          if [ ! -d base/tools/gatecheck ]; then
+            echo "::warning::tools/gatecheck does not exist on the base branch yet; the gates check is skipped until it does"
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          (cd base && go build -o "$RUNNER_TEMP/gatecheck" ./tools/gatecheck)
+          echo "available=true" >> "$GITHUB_OUTPUT"
+
+      - name: Gates not weakened
+        if: steps.build.outputs.available == 'true'
+        env:
+          # GATES_TOKEN is optional (docs/maintainer-setup.md, section 4)
+          GITHUB_TOKEN: ${{ secrets.GATES_TOKEN || github.token }}
+        run: |
+          "$RUNNER_TEMP/gatecheck" weakened \
+            -base base -head head \
+            -pr "${{ github.event.pull_request.number }}" -repo "${{ github.repository }}" \
+            > "$RUNNER_TEMP/gates-weakened.json"
+
+      - name: Protected paths
+        if: always() && steps.build.outputs.available == 'true'
+        env:
+          # GATES_TOKEN is optional (docs/maintainer-setup.md, section 4)
+          GITHUB_TOKEN: ${{ secrets.GATES_TOKEN || github.token }}
+        run: |
+          "$RUNNER_TEMP/gatecheck" protected-paths \
+            -dir base -risk base/.agents/risk.yaml \
+            -base-sha "${{ github.event.pull_request.base.sha }}" -head-sha refs/remotes/pr/head \
+            -pr "${{ github.event.pull_request.number }}" -repo "${{ github.repository }}" \
+            > "$RUNNER_TEMP/gates-protected.json"
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: gates-report
+          path: |
+            ${{ runner.temp }}/gates-weakened.json
+            ${{ runner.temp }}/gates-protected.json
+          if-no-files-found: ignore

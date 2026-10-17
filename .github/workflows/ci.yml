@@ -21,4 +21,14 @@ jobs:
       # The same script developers run locally and the pre-push hook runs. This
       # is what guarantees CI parity — do NOT inline the individual steps.
       - name: Run check.sh
-        run: scripts/check.sh --integration
+        run: scripts/check.sh --integration --json-out check-report.json
+
+      # Upload on every run, pass or fail: the report is most useful when the
+      # gate is red. Schema: docs/check-report.schema.json.
+      - name: Upload check report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: check-report
+          path: check-report.json
+          if-no-files-found: warn

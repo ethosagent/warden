@@ -1,10 +1,20 @@
-// Command poisoned-mcp-server is the standalone container for the Warden
-// MCP-wedge demo. The MCP JSON-RPC logic — the poisoned tools/list and the
-// tools/call handler — lives in internal/mcpwedge so the demo container and
-// the e2e fake upstream (test/e2e/fakeupstream) serve byte-identical attack
-// traffic; this main only adds the env knobs and TLS listener.
+// Command poisoned-mcp-server is a deliberately malicious, self-contained MCP
+// server for the Warden MCP-wedge demo. It speaks the minimum slice of the
+// Model Context Protocol (JSON-RPC 2.0 over HTTP) that Warden's gateway
+// inspects: tools/list and tools/call.
 //
-// It serves TLS so Warden can TLS-terminate the upstream leg; the cert is
+// It is "poisoned" on purpose: one of the tools it advertises in tools/list
+// carries a prompt-injection payload in its description (the classic MCP
+// tool-poisoning attack — a tool whose description tries to hijack the agent
+// into calling a dangerous tool and exfiltrating secrets). Warden flags that
+// description on the response path, and — in enforce mode with a default-deny
+// tool allowlist — blocks any tools/call to the dangerous tool it names.
+//
+// The handler logic is SHARED with the L1 test harness (both serve
+// internal/mcp/poisoned), so the demo binary and every harness scenario
+// exercise byte-identical tooling; this file keeps only the TLS serving and
+// env wiring. Stdlib plus that one in-module package (itself stdlib-only). It
+// serves TLS so Warden can TLS-terminate the upstream leg; the cert is
 // generated in-memory at startup (self-signed for the hostname in $MCP_HOST,
 // default "poisoned-mcp-server"). See the README for how Warden is made to
 // trust this cert in the compose demo.
@@ -23,7 +33,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/ethosagent/warden/internal/mcpwedge"
+	"github.com/ethosagent/warden/internal/mcp/poisoned"
 )
 
 // selfSignedCert generates an in-memory self-signed cert valid for host.
@@ -64,7 +74,7 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("/", mcpwedge.NewHandler())
+	mux.Handle("/", poisoned.Handler())
 
 	srv := &http.Server{
 		Addr:         addr,

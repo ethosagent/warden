@@ -49,9 +49,10 @@ func (c bufferedConn) Read(b []byte) (int, error) { return c.Reader.Read(b) }
 // handleTLS terminates TLS and dispatches by protocol. needsJudge is true when
 // the destination matched no static rule (policy.NoMatch) and the judge is
 // enabled: such requests are only allowed to proceed via the HTTP path, where
-// the judge can inspect method/URL/headers. Every other path (opaque TLS
-// passthrough, raw/HTTP2 forwarding) cannot be judged, so a needsJudge request
-// there fails closed — preserving the default-deny invariant.
+// the judge can inspect method/URL/headers: HTTP/1.1 and HTTP/2 (both run the
+// shared stage pipeline). Every other path (opaque TLS passthrough, raw
+// forwarding) cannot be judged, so a needsJudge request there fails closed —
+// preserving the default-deny invariant.
 func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, port int, needsJudge bool) {
 	firstByte, err := br.Peek(1)
 	if err != nil || firstByte[0] != 0x16 {
@@ -61,8 +62,13 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 			p.storeDeny(domain, port, "tcp", "no_tls", "")
 			return
 		}
+		p.reach(PathTunnel)
 		remote, dialErr := p.dialFunc("tcp", net.JoinHostPort(domain, fmt.Sprintf("%d", port)))
 		if dialErr != nil {
+			// A dial the SSRF-safe dialer refused is a policy decision: audit it
+			// (silent before #391). Ordinary dial failures stay silent — this
+			// passthrough never wrote an event for them either.
+			p.storeSSRFDeny(domain, port, "tcp", dialErr)
 			return
 		}
 		_ = p.analyticsStore().StoreEvent(analytics.Event{
@@ -119,13 +125,7 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 	// NegotiatedProtocol stays "" and this branch is skipped — the peek path below
 	// is unchanged for them.
 	if tlsConn.ConnectionState().NegotiatedProtocol == "h2" {
-		if needsJudge {
-			// HTTP/2 cannot be judged (no HTTP/1 request to inspect); fail closed,
-			// preserving the default-deny invariant for NoMatch destinations.
-			p.storeDeny(domain, port, "tcp", "no_tls", "")
-			return
-		}
-		p.handleGRPC(bufferedConn{Reader: plainReader, Conn: tlsConn}, domain, port)
+		p.handleGRPC(bufferedConn{Reader: plainReader, Conn: tlsConn}, domain, port, needsJudge)
 		return
 	}
 
@@ -140,14 +140,11 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 		p.handleHTTP(tlsConn, plainReader, domain, port, needsJudge)
 		return
 	case protocol.HTTP2:
-		if !needsJudge {
-			// Prior-knowledge h2 client (no ALPN): the peek saw the HTTP/2
-			// connection preface. Terminate HTTP/2 directly.
-			p.handleGRPC(bufferedConn{Reader: plainReader, Conn: tlsConn}, domain, port)
-			return
-		}
-		// needsJudge: HTTP/2 is unjudgeable — fall through to the fail-closed
-		// `if needsJudge { ... }` block below (unchanged).
+		// Prior-knowledge h2 client (no ALPN): the peek saw the HTTP/2
+		// connection preface. Terminate HTTP/2 directly; each stream runs the
+		// shared stage pipeline, judge included.
+		p.handleGRPC(bufferedConn{Reader: plainReader, Conn: tlsConn}, domain, port, needsJudge)
+		return
 	}
 
 	// Non-HTTP traffic inside TLS cannot be judged (no request to inspect):
@@ -158,15 +155,20 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 	}
 
 	// Unrecognized protocol inside TLS: raw forwarding.
-	remote, dialErr := p.dialTLS("tcp", net.JoinHostPort(domain, fmt.Sprintf("%d", port)), &tls.Config{ServerName: domain})
-	if dialErr != nil {
-		return
-	}
-	defer remote.Close()
 	proto := detected.String()
 	if detected == protocol.Unknown {
 		proto = "raw"
 	}
+	p.reach(PathRawTLS)
+	remote, dialErr := p.dialTLS("tcp", net.JoinHostPort(domain, fmt.Sprintf("%d", port)), p.upstreamTLSConfig(domain))
+	if dialErr != nil {
+		// A dial the SSRF-safe dialer refused is a policy decision: audit it
+		// under the same protocol label the allow would have used (silent
+		// before #391). Ordinary dial failures stay silent, as before.
+		p.storeSSRFDeny(domain, port, proto, dialErr)
+		return
+	}
+	defer remote.Close()
 	_ = p.analyticsStore().StoreEvent(analytics.Event{
 		Timestamp: time.Now(),
 		Domain:    domain,

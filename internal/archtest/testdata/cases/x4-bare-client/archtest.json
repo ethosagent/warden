@@ -1,0 +1,7 @@
+{
+  "want": [
+    {"rule": "X4", "file": "w/httpc/httpc.go", "line": 5},
+    {"rule": "X4", "file": "w/httpc/httpc.go", "line": 7},
+    {"rule": "X4", "file": "w/httpc/httpc.go", "line": 9}
+  ]
+}
