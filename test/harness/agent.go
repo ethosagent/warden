@@ -61,6 +61,34 @@ func (h *H) Agent() *http.Client {
 	return h.agentCl
 }
 
+// AgentTLSConfig returns a fresh TLS config trusting the worker's MITM CA — the
+// trust a deployment distributes to its agents. Scenarios that speak a protocol
+// the plain Agent client cannot (a WebSocket upgrade through a CONNECT tunnel)
+// build their connection with it, so they trust exactly what the agent trusts.
+func (h *H) AgentTLSConfig() *tls.Config {
+	return &tls.Config{RootCAs: h.proxyCA.pool(), MinVersion: tls.VersionTLS12}
+}
+
+// AgentH2 is Agent with HTTP/2 negotiated end to end: same proxy, same trust,
+// ALPN h2 on the MITM leg. It shares the agent transcript, so
+// AssertCanaryNeverLeaked sweeps its responses too. Use it for the h2 and gRPC
+// paths, which the worker handles separately from HTTP/1.1.
+func (h *H) AgentH2() *http.Client {
+	h.tb.Helper()
+	h.h2Once.Do(func() {
+		base := &http.Transport{
+			Proxy:             func(*http.Request) (*url.URL, error) { return url.Parse("http://" + h.ProxyAddr()) },
+			ForceAttemptHTTP2: true,
+			TLSClientConfig:   h.AgentTLSConfig(),
+		}
+		h.agentH2Cl = &http.Client{
+			Timeout:   defaultAgentTimeout,
+			Transport: &recordingTransport{base: base, h: h},
+		}
+	})
+	return h.agentH2Cl
+}
+
 // AgentResponses returns a copy of every response the agent has received
 // through h.Agent(), in order.
 func (h *H) AgentResponses() []RecordedResponse {

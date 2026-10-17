@@ -2,6 +2,7 @@ package harness
 
 import (
 	"net"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -126,5 +127,91 @@ func TestTarget_AddrsMatchH(t *testing.T) {
 		t.Errorf("target addrs = (%s, %s, %s), want the H addrs (%s, %s, %s)",
 			tgt.ProxyAddr(), tgt.AdminAddr(), tgt.ControlPlaneAddr(),
 			h.ProxyAddr(), h.AdminAddr(), h.ControlPlaneAddr())
+	}
+}
+
+// TestControlPlaneDownAtBoot_FailsClosedThenRecovers pins the boot-time outage
+// fault: a worker started while the control plane is unreachable denies even a
+// host its own local allowlist lists, and allows it within one retry once the
+// control plane is up on the address the worker was configured with.
+func TestControlPlaneDownAtBoot_FailsClosedThenRecovers(t *testing.T) {
+	h := New(t, ControlPlaneDownAtBoot())
+	h.Upstream("api.example.com")
+
+	if got := connectStatus(t, h, "api.example.com:443"); got != 403 {
+		t.Fatalf("CONNECT with the control plane down at boot = %d, want 403 (fail closed)", got)
+	}
+
+	h.CP().Start()
+	h.Eventually("the worker to pull policy from the restarted control plane", func() bool {
+		h.Clock().Advance(time.Second)
+		return connectStatus(t, h, "api.example.com:443") == 200
+	})
+}
+
+// TestControlPlaneDownAtBoot_RejectsSuppliedTarget: the fault is in-process
+// only, so combining it with WithTarget must fail loudly, not silently boot a
+// healthy stack.
+func TestControlPlaneDownAtBoot_RejectsSuppliedTarget(t *testing.T) {
+	rec := &recordingTB{T: t}
+	New(rec, ControlPlaneDownAtBoot(), WithTarget(&fakeTarget{}))
+	if !rec.Failed() || !strings.Contains(rec.failureMessage(), "ControlPlaneDownAtBoot") {
+		t.Fatalf("expected a ControlPlaneDownAtBoot failure, got failed=%v msg=%q", rec.Failed(), rec.failureMessage())
+	}
+}
+
+// TestRotateSecret_NewValueSweptToo: after a rotation the old AND the new value
+// are both guarded, and an unknown name fails.
+func TestRotateSecret_NewValueSweptToo(t *testing.T) {
+	oldV, newV := Canary(), Canary()
+	h := New(t, WithSecret("openai", oldV))
+	h.RotateSecret("openai", newV)
+	if len(h.secrets) != 2 || h.secrets[0].value != oldV || h.secrets[1].value != newV {
+		t.Fatalf("secrets after rotation = %+v, want old then new", h.secrets)
+	}
+	if got := os.Getenv("WARDEN_HARNESS_SECRET_OPENAI"); got != newV {
+		t.Errorf("env after rotation = %q, want the new value", got)
+	}
+
+	rec := &recordingTB{T: t}
+	h.tb = rec
+	h.RotateSecret("nope", "x")
+	h.tb = t
+	if !rec.Failed() {
+		t.Error("RotateSecret of an unknown name must fail the test")
+	}
+}
+
+// TestCanaryLeaks_ReportsWithoutFailing: the non-fatal sweep returns the hits a
+// known-issue scenario asserts on, and an empty list when clean.
+func TestCanaryLeaks_ReportsWithoutFailing(t *testing.T) {
+	value := Canary()
+	h := New(t, WithSecret("openai", value), Allow("echo.example.com"))
+	if got := h.CanaryLeaks(); len(got) != 0 {
+		t.Fatalf("clean harness reported leaks: %v", got)
+	}
+	plantEcho(h.Upstream("echo.example.com"))
+	postThrough(t, h, "echo.example.com", "/reflect", "token="+h.Placeholder("openai"))
+	leaks := h.CanaryLeaks()
+	if len(leaks) == 0 || !strings.Contains(strings.Join(leaks, "\n"), "agent response #0 body") {
+		t.Fatalf("CanaryLeaks = %v, want the echoed value in the agent's body", leaks)
+	}
+}
+
+// TestAgentH2_NegotiatesHTTP2 pins the h2 agent: its request rides HTTP/2 to the
+// upstream, and the response is in the shared transcript.
+func TestAgentH2_NegotiatesHTTP2(t *testing.T) {
+	h := New(t)
+	u := h.Upstream("api.example.com")
+	resp, err := h.AgentH2().Get("https://api.example.com/h2")
+	if err != nil {
+		t.Fatalf("h2 GET: %v", err)
+	}
+	_ = resp.Body.Close()
+	if reqs := u.Requests(); len(reqs) != 1 || reqs[0].Proto != "HTTP/2.0" {
+		t.Fatalf("upstream requests = %+v, want one HTTP/2.0 request", reqs)
+	}
+	if got := len(h.AgentResponses()); got != 1 {
+		t.Errorf("transcript has %d responses, want 1 (AgentH2 shares it)", got)
 	}
 }
