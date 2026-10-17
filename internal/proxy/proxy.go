@@ -45,7 +45,20 @@ type Config struct {
 	CACertPath       string
 	CAKeyPath        string
 	PlaceholderNames []string
-	Transformers     []*auth.MatchedTransformer
+	// PlaceholderScopes maps a placeholder to the destination hosts it may be
+	// swapped for (policy dialect: exact, "*.suffix", "~regex"). A placeholder
+	// absent from the map (or with an empty list) is unscoped: swapped on every
+	// request, as before. On a non-matching host it is forwarded untouched and an
+	// out-of-scope event is recorded.
+	PlaceholderScopes map[string][]string
+	Transformers      []*auth.MatchedTransformer
+
+	// Listener, when set, is the socket Serve accepts on instead of binding
+	// ListenAddr. Assembly-only: cmd/proxy never sets it, so production always
+	// binds ListenAddr exactly as before; the L1 harness (#350) passes a
+	// loopback listener on port 0 so an in-process worker binds no fixed port.
+	// Serve closes it on the same ctx-done path that closes a self-bound one.
+	Listener net.Listener
 
 	// Judge is the optional inline LLM judge. When nil the proxy behaves exactly
 	// as before: a NoMatch destination is default-denied. When set, NoMatch
@@ -98,6 +111,20 @@ type Config struct {
 	// byte-identical to before. It scopes to warden's egress path only: the
 	// dashboard/admin listeners never resolve through it.
 	UpstreamResolver NameResolver
+
+	// Dialer, when set, replaces the SSRF-safe upstream dialer ENTIRELY —
+	// blocklist included — for every egress dial the proxy makes. Assembly-only
+	// (the L1 harness maps allowlisted names onto local fake upstreams the
+	// SafeDialer exists to block): cmd/proxy never sets it, so production always
+	// builds NewSafeDialerWithResolver below, unchanged. When set,
+	// UpstreamResolver is unused (no SafeDialer is built to resolve through).
+	Dialer Dialer
+
+	// UpstreamRootCAs, when set, is the root pool every upstream TLS handshake
+	// the proxy CONFIGURES (via upstreamTLSConfig) verifies against, replacing
+	// the system pool. Assembly-only: cmd/proxy never sets it; nil keeps system
+	// roots, byte-identical to before.
+	UpstreamRootCAs *x509.CertPool
 }
 
 // MCPGateway is the consumer-side seam for the MCP egress gateway (defined here,
@@ -139,11 +166,14 @@ type WSScanner interface {
 type mcpModeReader interface{ Enforcing() bool }
 
 // PolicyEvaluator is the consumer-side seam for the static allow/deny decision.
-// *policy.Evaluator satisfies it. Replace is used by the control-plane apply loop
-// to hot-swap the running policy; it is kept on the interface so the proxy's
-// dependency is fully expressed by one seam.
+// *policy.Evaluator satisfies it. EvaluateRequest evaluates the policy for one
+// request; callers pass method/path = "" for the destination-only (CONNECT)
+// form, which could-matches constraints and peeks at rate limits. Replace is
+// used by the control-plane apply loop to hot-swap the running policy; it is
+// kept on the interface so the proxy's dependency is fully expressed by one
+// seam.
 type PolicyEvaluator interface {
-	Evaluate(domain string, port int, scheme policy.Scheme) policy.Decision
+	EvaluateRequest(domain string, port int, scheme policy.Scheme, method, path string) policy.RequestVerdict
 	Replace(p config.Policy)
 }
 
@@ -195,6 +225,7 @@ type Verdict struct {
 // skeleton constructs it and validates its configuration.
 type Proxy struct {
 	cfg        Config
+	scopes     map[string]*policy.HostMatcher // placeholder -> matchHosts; absent = unscoped
 	listenerMu sync.Mutex
 	listener   net.Listener
 	caCert     *x509.Certificate
@@ -207,10 +238,15 @@ type Proxy struct {
 	// leafTTL is the injectable leaf validity window (0 = defaultLeafTTL). Both
 	// exist only so white-box tests can drive cert expiry deterministically;
 	// production leaves them zero-valued.
-	now      func() time.Time
-	leafTTL  time.Duration
-	dialFunc func(network, addr string) (net.Conn, error)
-	dialTLS  func(network, addr string, cfg *tls.Config) (*tls.Conn, error)
+	now     func() time.Time
+	leafTTL time.Duration
+	// preambleTimeout is the injectable CONNECT-preamble read deadline (0 =
+	// connectPreambleTimeout). Like now/leafTTL it exists only so white-box
+	// tests can drive the slowloris path without a real 10 s sleep; production
+	// leaves it zero-valued.
+	preambleTimeout time.Duration
+	dialFunc        func(network, addr string) (net.Conn, error)
+	dialTLS         func(network, addr string, cfg *tls.Config) (*tls.Conn, error)
 
 	// mcp holds the live MCP gateway, swappable atomically while the hot path
 	// reads it (control-plane settings can rebuild + replace it at runtime). MCPGateway
@@ -407,7 +443,11 @@ func New(cfg Config) (*Proxy, error) {
 		// panic on a method call; nopMetrics keeps every record a no-op.
 		cfg.Metrics = nopMetrics{}
 	}
-	p := &Proxy{cfg: cfg}
+	scopes, err := newSecretScopes(cfg.PlaceholderScopes)
+	if err != nil {
+		return nil, err
+	}
+	p := &Proxy{cfg: cfg, scopes: scopes}
 	// Seed the swappable gateway from the configured one so an unmanaged worker's
 	// behavior is unchanged; a managed worker's long-poll apply loop replaces it.
 	// cfg.MCP may be an untyped-nil interface (MCP disabled) — wrapped in the
@@ -485,12 +525,20 @@ func New(cfg Config) (*Proxy, error) {
 		}
 	}
 
-	safeDial, err := NewSafeDialerWithResolver(10*time.Second, nil, cfg.UpstreamResolver)
-	if err != nil {
-		return nil, fmt.Errorf("proxy: safe dialer: %w", err)
+	// Upstream dialing. An injected Dialer (assembly-only harness seam) replaces
+	// the SSRF-safe dialer wholesale; otherwise production builds exactly what
+	// it always built, including the optional dns.upstreamResolver.
+	if cfg.Dialer != nil {
+		p.dialFunc = cfg.Dialer.Dial
+		p.dialTLS = cfg.Dialer.DialTLS
+	} else {
+		safeDial, err := NewSafeDialerWithResolver(10*time.Second, nil, cfg.UpstreamResolver)
+		if err != nil {
+			return nil, fmt.Errorf("proxy: safe dialer: %w", err)
+		}
+		p.dialFunc = safeDial.Dial
+		p.dialTLS = safeDial.DialTLS
 	}
-	p.dialFunc = safeDial.Dial
-	p.dialTLS = safeDial.DialTLS
 
 	return p, nil
 }

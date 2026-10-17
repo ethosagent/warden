@@ -17,6 +17,7 @@ import (
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/mcp/gateway"
 	"github.com/ethosagent/warden/internal/mcp/sse"
+	"github.com/ethosagent/warden/internal/policy"
 	"github.com/ethosagent/warden/internal/protocol"
 	"github.com/ethosagent/warden/internal/scan"
 	"github.com/ethosagent/warden/internal/secrets"
@@ -284,6 +285,9 @@ func (p *Proxy) runRequestStages(s *requestScope) (endSession bool) {
 	if p.readRequest(s) {
 		return true
 	}
+	if p.constraintGate(s) {
+		return true
+	}
 	if p.judgeGate(s) {
 		return true
 	}
@@ -314,6 +318,51 @@ func (p *Proxy) readRequest(s *requestScope) (endSession bool) {
 		hostOnly = h
 	}
 	return !strings.EqualFold(hostOnly, s.domain)
+}
+
+// constraintGate enforces the #371 method/path constraints on EVERY request of
+// a keep-alive tunnel. CONNECT admission only could-matched them (domain+port,
+// rate limit peeked); this per-request evaluation is authoritative and counts
+// the request exactly once. It runs before the judge, before any secret swap,
+// and before any upstream write, so a denied request never reaches the origin
+// and never carries a real secret. The path matched is the RAW request target
+// component — req.URL.EscapedPath() — which is byte-for-byte the path req.Write
+// sends upstream (RequestURI renders EscapedPath); URL.Path (decoded) would not
+// be what the origin sees. A NoMatch falls through unchanged (judge-eligible
+// exactly as before); an explicit Deny is terminal — a constraint violation is
+// never judge-eligible, by construction of the evaluator.
+func (p *Proxy) constraintGate(s *requestScope) (endSession bool) {
+	verdict := p.cfg.Policy.EvaluateRequest(s.domain, s.port, policy.SchemeHTTPS, s.req.Method, s.req.URL.EscapedPath())
+	if verdict.Decision != policy.Deny {
+		return false
+	}
+	reason := verdict.Reason
+	if reason == "" {
+		// Not a constraint violation: a denylist hit or an exhausted rate-limit /
+		// time-window guard. Same bounded generic reason the CONNECT gate records.
+		reason = "policy"
+	}
+	fullURL := "https://" + s.domain + s.req.URL.RequestURI()
+	_ = p.analyticsStore().StoreEvent(analytics.Event{
+		Timestamp: time.Now(),
+		Domain:    s.domain,
+		Port:      s.port,
+		Protocol:  "https",
+		Method:    s.req.Method,
+		URL:       fullURL,
+		Decision:  "deny",
+		Reason:    reason,
+		LatencyMs: s.latencyMs(),
+	})
+	p.cfg.Metrics.RecordRequest("deny", "https")
+	p.cfg.Metrics.RecordBlocked(reason)
+	p.logDecision(decisionLog{
+		Domain: s.domain, Port: s.port, Protocol: "https",
+		Method: s.req.Method, URL: fullURL, Decision: "deny",
+		Reason: reason,
+	})
+	writeErrorResponse(s.tlsConn, 403, "Forbidden")
+	return true
 }
 
 // judgeGate runs the inline judge for requests that matched no static rule. The
@@ -637,7 +686,21 @@ func (p *Proxy) swapSecrets(s *requestScope) (endSession bool) {
 	// pass, since those are tiny), record which placeholders appear in the body,
 	// and collect the placeholder→value pairs for one NewReplacer body pass.
 	var bodyPairs []string
+	var outOfScope []string
 	for _, placeholder := range p.cfg.PlaceholderNames {
+		// Destination scoping (#373): a placeholder is a swap candidate only for
+		// its matchHosts. s.domain is the CONNECT/SNI host (what policy allowed and
+		// what is dialed; readRequest rejects a mismatching Host header). Out of
+		// scope: leave it untouched, never fetch its secret (so a missing secret
+		// cannot 503 an unrelated destination), and record presence by name.
+		if !p.placeholderInScope(placeholder, s.domain) {
+			if headerCarriesPlaceholder(s.req.Header, placeholder) ||
+				queryCarriesPlaceholder(s.req.URL, placeholder) ||
+				(needBodySwap && strings.Contains(bodyStr, placeholder)) {
+				outOfScope = append(outOfScope, placeholder)
+			}
+			continue
+		}
 		realValue, err := secretsProvider.GetSecret(placeholder)
 		if err != nil {
 			writeErrorResponse(s.tlsConn, 503, "Service Unavailable")
@@ -700,6 +763,10 @@ func (p *Proxy) swapSecrets(s *requestScope) (endSession bool) {
 			// never the secret value.
 			s.swappedNames = append(s.swappedNames, placeholder)
 		}
+	}
+
+	if len(outOfScope) > 0 {
+		p.recordOutOfScope(s.domain, s.port, "https", s.req.Method, s.req.URL.RequestURI(), outOfScope)
 	}
 
 	// Set swapped body back
@@ -814,9 +881,10 @@ func (p *Proxy) forward(s *requestScope) (endSession bool) {
 
 // dialUpstream dials a fresh TLS upstream for this session's fixed host and
 // installs it (plus a new buffered reader) on the scope. It always targets
-// s.domain:s.port — reuse never crosses hosts.
+// s.domain:s.port — reuse never crosses hosts. The TLS config comes from
+// upstreamTLSConfig so the assembly-only root-CA override applies here too.
 func (p *Proxy) dialUpstream(s *requestScope) error {
-	upstream, err := p.dialTLS("tcp", net.JoinHostPort(s.domain, fmt.Sprintf("%d", s.port)), &tls.Config{ServerName: s.domain})
+	upstream, err := p.dialTLS("tcp", net.JoinHostPort(s.domain, fmt.Sprintf("%d", s.port)), p.upstreamTLSConfig(s.domain))
 	if err != nil {
 		return err
 	}

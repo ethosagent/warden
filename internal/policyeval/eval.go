@@ -4,6 +4,8 @@
 package policyeval
 
 import (
+	"net/url"
+
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/policy"
@@ -62,7 +64,23 @@ func Evaluate(events []analytics.Event, candidate config.Policy) *EvalResult {
 			}
 		}
 
-		candidateDecision := eval.Evaluate(e.Domain, port, scheme)
+		// Replay the per-request form (#371) when the event recorded a method and
+		// a parseable URL, so candidate method/path constraints are exercised.
+		// The event URL is the full "https://host/path?query" form the proxy
+		// records; EscapedPath() recovers the raw path component exactly as it
+		// was matched live. Without either piece the replay is destination-only
+		// (constraints could-match), matching the granularity that was recorded.
+		method := e.Method
+		path := ""
+		if u, err := url.Parse(e.URL); err == nil {
+			path = u.EscapedPath()
+		}
+		candidateDecision := policy.NoMatch
+		if method != "" && path != "" {
+			candidateDecision = eval.EvaluateRequest(e.Domain, port, scheme, method, path).Decision
+		} else {
+			candidateDecision = eval.EvaluateRequest(e.Domain, port, scheme, "", "").Decision
+		}
 		// Replay scores the STATIC policy outcome only (no judge in offline
 		// replay): a NoMatch would be default-denied, so collapse it to "deny"
 		// to compare against the historically recorded allow/deny decision.
