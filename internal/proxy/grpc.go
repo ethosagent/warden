@@ -70,11 +70,13 @@ func (p *Proxy) handleGRPC(clientConn net.Conn, domain string, port int, needsJu
 // (forwardH2) differ; a stage added to the pipeline applies to both protocols.
 //
 // proto is "grpc" when the Content-Type marks a gRPC call, else "http2". A gRPC
-// body is streamed verbatim (streamBody): no buffering, no body swap, DLP records
-// it partial — exactly how h1 treats a non-text body — and protobuf field swap
-// stays deferred. The scope's quiescence-tracker slot is entered/exited by the
-// shared pipeline (runRequestStages), so an h2 stream is tracked exactly like an
-// h1 request: one unit from stream start until its terminal bookkeeping.
+// body is never swapped (protobuf field swap is out of scope: credentials ride
+// metadata, which is). With a placeholder in scope for the destination it is
+// inspected message by message (guardGRPCBody, #418) and relayed as the
+// messages arrive; DLP records it partial, exactly how h1 treats a non-text
+// body. The scope's quiescence-tracker slot is entered/exited by the shared
+// pipeline (runRequestStages), so an h2 stream is tracked exactly like an h1
+// request: one unit from stream start until its terminal bookkeeping.
 func (p *Proxy) serveGRPCStream(w http.ResponseWriter, r *http.Request, rt *http2.Transport, domain string, port int, needsJudge bool) {
 	isGRPC := strings.HasPrefix(r.Header.Get("Content-Type"), "application/grpc")
 	proto := "http2"
@@ -99,12 +101,62 @@ func (p *Proxy) serveGRPCStream(w http.ResponseWriter, r *http.Request, rt *http
 		liveJudge:  p.judge(),
 	}
 	defer s.cleanup()
+	if isGRPC {
+		p.guardGRPCBody(s)
+	}
 	_ = p.runRequestStages(s)
+	if ref, ok := s.grpcGuard.Refusal(); ok && !s.grpcGuard.markAnswered() {
+		// The refusal came after the response was already streaming (a bidi or
+		// client-streaming call): the headers are out, so end the stream with the
+		// refusal status as trailers.
+		setGRPCStatus(w.Header(), http.TrailerPrefix, ref)
+	}
 	if s.abortStream {
 		// The echo guard cut a stream whose headers already went out: reset it
 		// (RST_STREAM) instead of ending it cleanly.
 		panic(http.ErrAbortHandler)
 	}
+}
+
+// guardGRPCBody wraps a gRPC request body so every message is inspected before
+// it is forwarded (#418): a message carrying a placeholder in scope for this
+// destination is refused, never relayed, and so is one that cannot be
+// inspected (oversize, compressed, malformed). Messages without one are
+// released as they arrive. The placeholder set and the scoping are the secret
+// swap's own (PlaceholderNames, placeholderInScope); the swap itself still
+// handles metadata only. With no placeholder in scope there is nothing to
+// protect and the body streams verbatim.
+func (p *Proxy) guardGRPCBody(s *requestScope) {
+	if s.req.Body == nil || s.req.Body == http.NoBody {
+		return
+	}
+	var phs [][]byte
+	for _, name := range p.cfg.PlaceholderNames {
+		if name != "" && p.placeholderInScope(name, s.domain) {
+			phs = append(phs, []byte(name))
+		}
+	}
+	if len(phs) == 0 {
+		return
+	}
+	maxFrame := p.grpcMaxFrame
+	if maxFrame <= 0 {
+		maxFrame = maxGRPCFrameBytes
+	}
+	s.grpcGuard = newGRPCFrameGuard(s.req.Body, phs, maxFrame, func(r grpcRefusal) {
+		// Runs on the transport goroutine that reads the body, before the read
+		// error is returned, so the deny is recorded before the stream is reset.
+		p.emitDeny(s, r.reason, denyExtra{LatencyMs: s.latencyMs(), SwappedRefs: s.swappedNames})
+	})
+	s.req.Body = s.grpcGuard
+}
+
+// setGRPCStatus sets grpc-status and grpc-message on h (prefix is
+// http.TrailerPrefix to send them as trailers after the headers went out). The
+// message is fixed ASCII text, never request content.
+func setGRPCStatus(h http.Header, prefix string, r grpcRefusal) {
+	h.Set(prefix+"Grpc-Status", strconv.Itoa(r.code))
+	h.Set(prefix+"Grpc-Message", r.message)
 }
 
 // forwardH2 is forward's HTTP/2 leg: it sends the (stage-mutated) request over
@@ -118,6 +170,12 @@ func (p *Proxy) forwardH2(s *requestScope) (endSession bool) {
 		Path:     s.req.URL.Path,
 		RawPath:  s.req.URL.RawPath,
 		RawQuery: s.req.URL.RawQuery,
+	}
+	// Inspect the call's first message before any byte goes upstream: a refused
+	// call then reaches the upstream not at all (see grpcFirstFrameWait).
+	s.grpcGuard.Prime(grpcFirstFrameWait)
+	if ref, ok := s.grpcGuard.Refusal(); ok {
+		return p.answerGRPCRefusal(s, ref)
 	}
 	outReq, err := http.NewRequestWithContext(s.req.Context(), s.req.Method, outURL.String(), s.req.Body)
 	if err != nil {
@@ -134,6 +192,9 @@ func (p *Proxy) forwardH2(s *requestScope) (endSession bool) {
 
 	resp, err := s.rt.RoundTrip(outReq)
 	if err != nil {
+		if ref, ok := s.grpcGuard.Refusal(); ok {
+			return p.answerGRPCRefusal(s, ref)
+		}
 		// The transport surfaces the DialTLSContext error unwrapped, so a dial
 		// the SSRF-safe dialer refused is audited here (#391); ordinary
 		// failures remain a plain 502 with no event.
@@ -142,6 +203,17 @@ func (p *Proxy) forwardH2(s *requestScope) (endSession bool) {
 	}
 	s.resp = resp
 	return false
+}
+
+// answerGRPCRefusal ends a call the body guard refused before any response
+// started: a trailers-only gRPC status, not a 502. The deny is already recorded
+// (the guard reports it when it refuses).
+func (p *Proxy) answerGRPCRefusal(s *requestScope, ref grpcRefusal) (endSession bool) {
+	s.grpcGuard.markAnswered()
+	if sink, isH2 := s.out.(h2Sink); isH2 {
+		sink.grpcStatus(ref)
+	}
+	return true
 }
 
 // copyGRPCHeaders copies every header from src to dst except the strip set shared
