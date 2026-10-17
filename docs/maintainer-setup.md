@@ -92,7 +92,10 @@ that is always present. `e2e.yml` also runs on `merge_group`, so a merge queue c
 require `e2e` itself (every queued merge runs it, with no paths filter).
 
 The release workflow also calls `e2e.yml` on the image it pushes, and publishes the
-GitHub Release only if it passes. Nothing to configure for that; the first tag after
+GitHub Release only if it passes. The image is pushed **by digest only** and the
+`<version>`/`latest` tags and the cosign signature are applied by a later job, after
+e2e passes (#421) — a red e2e leaves the pushed digest untagged and unsigned.
+Nothing to configure for that; the first tag after
 this lands is its first real run.
 
 ## 4. Token permissions

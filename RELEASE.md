@@ -27,6 +27,8 @@ Pushing a `v*` tag runs [`.github/workflows/release.yml`](.github/workflows/rele
 - SBOM + SLSA provenance attached to the image digest
 - the digest **signed by keyless cosign** (one signature covers both arches)
 
+The image is **tagged and signed only after it passes the L2 e2e suite** (#421). CI pushes it **by digest only** — no tags — runs `e2e.yml` on that digest, and a job that waits for e2e then adds the `<version>` and `latest` tags to that exact digest and signs it. A failed e2e run leaves the digest on Docker Hub untagged and unsigned: no new `v*` or `latest`, no new signature, no release.
+
 All signing is **keyless Sigstore** (GitHub OIDC) — no signing keys to manage; cosign + attestations use the workflow's OIDC identity. The only registry credential is a Docker Hub access token (`DOCKERHUB_TOKEN`) for the image push.
 
 ## Prerequisites — first time only
@@ -70,12 +72,16 @@ git push origin v1.2.3
 
 ## What the CI workflow does
 
-[`.github/workflows/release.yml`](.github/workflows/release.yml) runs on `push: tags: 'v*'`. Two jobs run in parallel:
+[`.github/workflows/release.yml`](.github/workflows/release.yml) runs on `push: tags: 'v*'`. Four jobs run in sequence, each waiting on the one before it:
 
-| Job | Steps | Produces |
-|---|---|---|
-| **release** | build cross-platform binaries -> SBOM (syft) -> SLSA provenance -> checksums -> cosign sign-blob -> `gh release create` | the signed GitHub Release + SBOM + provenance |
-| **image** | buildx multi-arch build + push to Docker Hub (SBOM + provenance on the digest) -> cosign sign the digest | the signed multi-arch image |
+| Job | Waits for | Steps | Produces |
+|---|---|---|---|
+| **image** | — | buildx multi-arch build **pushed by digest only** (no tags; SBOM + provenance on the digest) | the bare image digest on Docker Hub |
+| **e2e** | image | the L2 suite (`.github/workflows/e2e.yml`) **on that digest** | the gate: pass or fail |
+| **publish** | image + e2e | `docker buildx imagetools create` adds `<version>` + `latest` to the tested digest -> cosign sign the digest | the tagged, signed image — the first point at which it is publicly usable |
+| **release** | publish | build cross-platform binaries -> SBOM (syft) -> SLSA provenance -> checksums -> cosign sign-blob -> `gh release create` | the signed GitHub Release + SBOM + provenance |
+
+`tools/gatecheck` pins this order (`release_gate_test.go`): tagging or signing before e2e, or a tag/signature on anything but the tested digest, fails the check.
 
 Release notes are auto-generated from Conventional-Commit PR titles since the previous tag (`--generate-notes`) — that is the de-facto changelog; there is no `CHANGELOG.md`.
 
@@ -110,7 +116,8 @@ docker buildx imagetools inspect ethosagent/warden:1.2.3   # shows both arches
 | Failure | Symptom | Recovery |
 |---|---|---|
 | Pre-flight failed | `make release` exits before tagging | Fix (clean tree, push main, fix tests); re-run. Nothing was tagged or published. |
-| Tag pushed but workflow failed | Tag exists; no/partial Release | Fix the cause, then delete + re-push the tag: `git tag -d v1.2.3 && git push origin :refs/tags/v1.2.3`, then `make release VERSION=1.2.3` again. |
+| e2e failed on the pushed digest | The run stops at **e2e**: no `<version>`/`latest` tag, no signature, no Release | The bad image was never published under a tag. Fix the cause, then **Re-run failed jobs** from the Actions page — or delete + re-push the tag for a clean run: `git tag -d v1.2.3 && git push origin :refs/tags/v1.2.3`, then `make release VERSION=1.2.3`. |
+| image / publish failed | The run stops before or during **publish**: no/partial tags or signature, no Release | **Re-run failed jobs**. Re-tagging is idempotent; a re-run `cosign sign` adds a second signature, which is harmless. If the run stopped between tagging and signing, the re-run signs the already-tagged digest. |
 | Re-run only | Workflow flaked | Actions -> the release run -> **Re-run jobs**. Steps are idempotent except `gh release create` — if the Release was already created, delete it first: `gh release delete v1.2.3`. |
 | Bad release shipped | Broken binary/image | Cut a fixed patch: `make release VERSION=1.2.4`. Optionally mark the bad GitHub Release as a draft/pre-release with a note. |
 
