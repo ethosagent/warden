@@ -164,7 +164,7 @@ func restoreFleet(t *testing.T) policyDoc {
 	}
 	t.Cleanup(func() {
 		for _, svc := range []string{svcCP, svcWorker1, svcWorker2} {
-			if res := compose(t, 120*time.Second, "start", svc); res.exit != 0 {
+			if res := composeRun(t, 120*time.Second, "start", svc); res.exit != 0 {
 				t.Errorf("e2e: restore: start %s: exit %d: %s", svc, res.exit, res.stderr)
 			}
 		}
@@ -226,7 +226,7 @@ func TestFleet_ControlPlaneStopped_FailsClosed(t *testing.T) {
 		waitDecision(t, w.agent, newHost, "200")
 	}
 
-	if res := compose(t, 120*time.Second, "stop", svcCP); res.exit != 0 {
+	if res := composeRun(t, 120*time.Second, "stop", svcCP); res.exit != 0 {
 		t.Fatalf("e2e: stop %s: exit %d: %s", svcCP, res.exit, res.stderr)
 	}
 	// Barrier: each worker has noticed the control plane is gone (its long
@@ -254,13 +254,13 @@ func TestFleet_ControlPlaneStopped_FailsClosed(t *testing.T) {
 // the workers reconnect and pick up a policy change made afterwards.
 func TestFleet_ControlPlaneRestarted_Resyncs(t *testing.T) {
 	orig := restoreFleet(t)
-	if res := compose(t, 120*time.Second, "stop", svcCP); res.exit != 0 {
+	if res := composeRun(t, 120*time.Second, "stop", svcCP); res.exit != 0 {
 		t.Fatalf("e2e: stop %s: exit %d: %s", svcCP, res.exit, res.stderr)
 	}
 	for _, w := range fleetAgents {
 		assertDecision(t, w.agent, againHost, "403")
 	}
-	if res := compose(t, 120*time.Second, "start", svcCP); res.exit != 0 {
+	if res := composeRun(t, 120*time.Second, "start", svcCP); res.exit != 0 {
 		t.Fatalf("e2e: start %s: exit %d: %s", svcCP, res.exit, res.stderr)
 	}
 	// Ready = healthy control plane and both workers re-registered with it.
@@ -287,7 +287,7 @@ func TestFleet_WorkerRestart_DecidesByPolicy(t *testing.T) {
 	putPolicy(t, orig.withAllowed(newHost))
 	waitDecision(t, svcAgent1, newHost, "200")
 
-	if res := compose(t, 120*time.Second, "restart", svcWorker1); res.exit != 0 {
+	if res := composeRun(t, 120*time.Second, "restart", svcWorker1); res.exit != 0 {
 		t.Fatalf("e2e: restart %s: exit %d: %s", svcWorker1, res.exit, res.stderr)
 	}
 	waitFor(t, stackDeadline, svcWorker1+" /healthz", func() (bool, string) {

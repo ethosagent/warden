@@ -187,6 +187,28 @@ func TestRotateSecret_NewValueSweptToo(t *testing.T) {
 	}
 }
 
+// TestSecret_MisnamedFailsLoudlyOnL1 pins the fallback's scope: answering any
+// name with the one secret is for targets that wire their OWN secrets (compose
+// holds one; a scenario's name describes L1 wiring there). On a harness whose
+// secrets are its own (WithSecret), a misnamed secret must fail loudly — the
+// fallback would silently bless a typo.
+func TestSecret_MisnamedFailsLoudlyOnL1(t *testing.T) {
+	h := New(t, WithSecret("openai", Canary()))
+	if got, want := h.Placeholder("openai"), "{{openai}}"; got != want {
+		t.Fatalf("Placeholder(openai) = %q, want %q", got, want)
+	}
+	if got, want := h.Placeholder("typo"), "{{typo}}"; got != want {
+		t.Errorf("Placeholder(typo) = %q, want %q: a misnamed secret must not resolve", got, want)
+	}
+	rec := &recordingTB{T: t}
+	h.tb = rec
+	h.Secret("typo")
+	h.tb = t
+	if !rec.Failed() {
+		t.Error("Secret(typo) on an L1 harness must fail the test")
+	}
+}
+
 // TestCanaryLeaks_ReportsWithoutFailing: the non-fatal sweep returns the hits a
 // known-issue scenario asserts on, and an empty list when clean.
 func TestCanaryLeaks_ReportsWithoutFailing(t *testing.T) {

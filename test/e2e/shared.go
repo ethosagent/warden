@@ -15,6 +15,7 @@
 package e2e
 
 import (
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -83,6 +84,19 @@ func repoRoot() (string, error) { return compose.RepoRoot() }
 func run(dir string, timeout time.Duration, name string, args ...string) cmdResult {
 	return fromCompose(compose.Run(dir, timeout, name, args...))
 }
+
+// composeRun runs `docker compose -f … -f … args…` from the repo root: the
+// #369 fleet tests' lifecycle control (stop/start/restart of one service) over
+// the compose package's ComposeRun. It cannot take the old helper's bare
+// `compose` name — that is the imported package's identifier in this package.
+func composeRun(tb testing.TB, timeout time.Duration, args ...string) cmdResult {
+	tb.Helper()
+	return fromCompose(compose.ComposeRun(timeout, args...))
+}
+
+// httpClient is the CA-trusting host client the #369 fleet tests PUT policy
+// with — the client compose.TryGet drives, re-exported under their name.
+func httpClient() (*http.Client, error) { return compose.CAClient() }
 
 // waitFor polls cond every 500ms until it returns true or the deadline
 // passes, then fails the test with the last observation. It is the only

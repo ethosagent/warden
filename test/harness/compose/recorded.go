@@ -47,14 +47,29 @@ func FilterRecorded(recs []Request, host string) []harness.RecordedRequest {
 		if r.Host != host {
 			continue
 		}
-		out = append(out, harness.RecordedRequest{
-			Method: r.Method,
-			Host:   r.Host,
-			Path:   r.Path,
-			Proto:  r.Proto,
-			Header: r.Header,
-			Body:   []byte(r.Body),
-		})
+		out = append(out, toHarness(r))
 	}
 	return out
+}
+
+// AllRecorded maps every record into the harness's RecordedRequest, all hosts,
+// oldest first — the WholeRecorder view the canary sweep scans so a swap that
+// lands on a host no scenario registered a view for is still seen.
+func AllRecorded(recs []Request) []harness.RecordedRequest {
+	out := make([]harness.RecordedRequest, 0, len(recs))
+	for _, r := range recs {
+		out = append(out, toHarness(r))
+	}
+	return out
+}
+
+func toHarness(r Request) harness.RecordedRequest {
+	return harness.RecordedRequest{
+		Method: r.Method,
+		Host:   r.Host,
+		Path:   r.Path,
+		Proto:  r.Proto,
+		Header: r.Header,
+		Body:   []byte(r.Body),
+	}
 }

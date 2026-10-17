@@ -103,6 +103,12 @@ type H struct {
 	workers    int
 	allowExtra []string
 	secrets    []secretSpec
+	// secretsFromTarget records that boot took h.secrets from the target's own
+	// wiring (TargetSecrets, compose) instead of the scenario's WithSecret
+	// opts — the only case where lookupSecret answers a name it does not know
+	// with the one secret (the scenario's name describes L1 wiring there; on a
+	// WithSecret harness a misnamed secret must fail, not resolve).
+	secretsFromTarget bool
 	// mcpEnabled (WithMCP) boots the workers with the MCP gateway in monitor
 	// mode, so WebSocket/SSE scenarios ride the worker's real stream paths.
 	mcpEnabled bool
@@ -346,8 +352,10 @@ func (h *H) Secret(name string) string {
 }
 
 // lookupSecret resolves a secret by name (last registration wins). A target
-// that holds exactly one secret (compose's stack has one) answers any name:
-// the scenario's name describes L1 wiring, the deployment holds the one secret.
+// that wires its OWN secrets and holds exactly one of them (compose's stack)
+// answers any name: the scenario's name describes L1 wiring, the deployment
+// holds the one secret. On a WithSecret harness every name must resolve
+// exactly — a misnamed secret there is a scenario bug, never a fallback.
 func (h *H) lookupSecret(name string) (secretSpec, bool) {
 	var found secretSpec
 	ok := false
@@ -356,7 +364,7 @@ func (h *H) lookupSecret(name string) (secretSpec, bool) {
 			found, ok = s, true
 		}
 	}
-	if !ok && len(h.secrets) == 1 {
+	if !ok && h.secretsFromTarget && len(h.secrets) == 1 {
 		found, ok = h.secrets[0], true
 	}
 	return found, ok
@@ -512,6 +520,7 @@ func (h *H) boot() {
 		// the sweep must guard the value the DEPLOYMENT actually holds.
 		if ts, ok := h.target.(TargetSecrets); ok {
 			if specs := ts.TargetSecrets(); len(specs) > 0 {
+				h.secretsFromTarget = true
 				h.secrets = h.secrets[:0]
 				for _, s := range specs {
 					h.secrets = append(h.secrets, secretSpec{
@@ -769,7 +778,11 @@ func (h *H) cleanup() {
 	h.cleanOnce.Do(func() {
 		if h.target != nil {
 			if err := h.target.Stop(); err != nil {
-				h.tb.Errorf("harness: %v\nlast logs:\n%s", err, tail(h.target.Logs(), 2000))
+				if logs, lerr := h.target.Logs(); lerr != nil {
+					h.tb.Errorf("harness: %v\n(logs unavailable: %v)", err, lerr)
+				} else {
+					h.tb.Errorf("harness: %v\nlast logs:\n%s", err, tail(logs, 2000))
+				}
 			}
 		}
 		h.mu.Lock()

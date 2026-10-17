@@ -31,6 +31,7 @@ type fakeTarget struct {
 	cpAddr    string
 
 	logs    string
+	logsErr error
 	events  []analytics.Event
 	metrics map[string]float64
 
@@ -114,7 +115,7 @@ func (f *fakeTarget) Host(alias string) (string, error) {
 	return alias + ".fake", nil
 }
 
-func (f *fakeTarget) Logs() string { return f.logs }
+func (f *fakeTarget) Logs() (string, error) { return f.logs, f.logsErr }
 
 func (f *fakeTarget) Events() ([]analytics.Event, error) { return f.events, nil }
 

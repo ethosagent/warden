@@ -1,6 +1,6 @@
 //go:build e2e
 
-package compose_test
+package e2e
 
 import (
 	"context"
@@ -17,8 +17,12 @@ import (
 // The compose target's own proof (#368): boot the harness against the stack
 // and round-trip every seam the shared scenarios lean on — the agent client,
 // the recorder view, the events oracle with its settle window, the CONNECT
-// probe, the control-plane outage fault and the absent metrics oracle. Needs a
-// usable Docker (like everything under the e2e tag).
+// probe, the control-plane outage fault and the absent metrics oracle. These
+// live in THIS package (not test/harness/compose) so `make e2e` — and the CI
+// job, which runs `go test -tags e2e ./test/e2e/` directly — runs them against
+// the one stack TestMain brings up, instead of leaving them outside the suite.
+
+// TestComposeTarget_AgentRoundTrip proves the seams.
 func TestComposeTarget_AgentRoundTrip(t *testing.T) {
 	h := harness.New(t, harness.WithTarget(compose.New()))
 

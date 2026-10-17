@@ -2,6 +2,7 @@ package harness
 
 import (
 	"bytes"
+	"encoding/base64"
 	"errors"
 	"io"
 	"net/http"
@@ -42,10 +43,11 @@ func (s *stubTransport) CloseIdleConnections() {}
 type remoteTarget struct {
 	*fakeTarget
 
-	specs    []SecretSpec
-	requests map[string][]RecordedRequest
-	connect  int
-	metrics  bool // the MetricsSupport answer
+	specs       []SecretSpec
+	requests    map[string][]RecordedRequest
+	allRequests []RecordedRequest // the whole recorder view, all hosts
+	connect     int
+	metrics     bool // the MetricsSupport answer
 
 	h1Transport, h2Transport *stubTransport
 }
@@ -68,6 +70,10 @@ func (r *remoteTarget) AgentClient(h2 bool) (*http.Client, error) {
 
 func (r *remoteTarget) UpstreamRequests(host string) ([]RecordedRequest, error) {
 	return r.requests[host], nil
+}
+
+func (r *remoteTarget) AllUpstreamRequests() ([]RecordedRequest, error) {
+	return r.allRequests, nil
 }
 
 func (r *remoteTarget) ConnectStatus(string) (int, error) { return r.connect, nil }
@@ -211,6 +217,52 @@ func TestWithTarget_UpstreamReadsThroughTheTarget(t *testing.T) {
 	}
 }
 
+// TestWithTarget_CanarySweepCoversUnregisteredUpstreams pins the sweep's
+// whole-recorder clause: a target that hosts the fakes records hosts the
+// scenario never registered a view for (compose: the fake DNS serves
+// mcp/evil/... whether or not h.Upstream was called for them). The sweep must
+// scan the WHOLE recorded view — the raw value is allowed only on the hosts
+// the secret's MatchHosts list, every encoded form is a leak anywhere — or a
+// worker bug that swaps the secret toward an unregistered host passes clean.
+func TestWithTarget_CanarySweepCoversUnregisteredUpstreams(t *testing.T) {
+	rt := newRemoteTarget()
+	rt.specs = []SecretSpec{{
+		Name: "openai", Placeholder: "example_secret_001",
+		Value: "CANARY-target", MatchHosts: []string{"api.example.test"},
+	}}
+	// mcp.example.test is in NO registered view (rt.requests is empty); the
+	// recorder still holds what reached it: the raw value on the out-of-scope
+	// host, and an encoded form riding a request to a third host. In scope,
+	// the raw value on api.example.test is the swap working as designed.
+	rt.allRequests = []RecordedRequest{
+		{
+			Method: http.MethodGet, Host: "mcp.example.test", Path: "/",
+			Header: http.Header{"Authorization": {"Bearer CANARY-target"}},
+		},
+		{
+			Method: http.MethodPost, Host: "llm.example.test", Path: "/v1/x",
+			Body: []byte("q=" + base64.StdEncoding.EncodeToString([]byte("CANARY-target"))),
+		},
+		{
+			Method: http.MethodGet, Host: "api.example.test", Path: "/",
+			Header: http.Header{"Authorization": {"Bearer CANARY-target"}},
+		},
+	}
+	h := New(t, WithTarget(rt), NoLeakCheck())
+
+	lines := h.CanaryLeaks()
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "mcp.example.test") || !strings.Contains(joined, "raw") {
+		t.Errorf("the raw value reaching the unregistered, out-of-scope mcp.example.test must be reported: %v", lines)
+	}
+	if !strings.Contains(joined, "base64") {
+		t.Errorf("the encoded form on llm.example.test must be reported wherever it lands: %v", lines)
+	}
+	if strings.Contains(joined, "api.example.test") {
+		t.Errorf("the raw value on the in-scope api.example.test must stay excused: %v", lines)
+	}
+}
+
 // TestWithTarget_ConnectStatusThroughTheTarget: the CONNECT probe rides the
 // target when the proxy is not reachable from this process.
 func TestWithTarget_ConnectStatusThroughTheTarget(t *testing.T) {
@@ -247,5 +299,17 @@ func TestWithTarget_MetricsUnavailable(t *testing.T) {
 	_ = h2.Metrics()
 	if !rec.Failed() || !strings.Contains(rec.failureMessage(), "not available") {
 		t.Errorf("Metrics on a target without them must fail naming the gap, got: %s", rec.failureMessage())
+	}
+}
+
+// TestInprocess_MetricsAvailable pins the other answer of the capability: the
+// in-process target DOES carry the metrics oracle (the harness's OTel readers
+// are its Metrics source), so the catalog's metrics assertions — default_deny's
+// blocked-count leg — really run instead of silently skipping. The skip is
+// documented, but only this pin makes its accidental presence on L1 loud.
+func TestInprocess_MetricsAvailable(t *testing.T) {
+	h := New(t)
+	if !h.MetricsAvailable() {
+		t.Fatal("MetricsAvailable = false on the in-process target; the metrics assertions would skip on L1")
 	}
 }

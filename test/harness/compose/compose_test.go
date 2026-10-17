@@ -18,8 +18,9 @@ import (
 // has no build tag, so the default gate runs it): the argv the agent shim
 // builds, the `curl -i` output parser, the CONNECT footer parser, the
 // deadline+stability events poll, the recorder decoder and the leak needles.
-// The Docker-driving halves live in the e2e-tagged files and are exercised by
-// target_e2e_test.go against the running stack.
+// The Docker-driving halves live in the e2e-tagged files and are exercised
+// against the running stack by the e2e suite (test/e2e, compose_target_test.go
+// and scenarios_test.go).
 
 // TestHost pins the compose answers so the L2 spellings never move: the names
 // the stack's fake DNS serves, and the L1-only aliases that must refuse rather
@@ -366,7 +367,9 @@ func repeat(ev analytics.Event, n int) []analytics.Event {
 
 // TestDecodeRecorded: the recorder envelope decodes, a dropped record is an
 // error (the recorder must be reset between scenarios, never silently lossy),
-// and FilterRecorded keeps one host's records in the harness's shape.
+// FilterRecorded keeps one host's records in the harness's shape, and
+// AllRecorded hands over every host's records — the WholeRecorder view the
+// canary sweep scans.
 func TestDecodeRecorded(t *testing.T) {
 	body := []byte(`{"records":[` +
 		`{"id":1,"method":"POST","host":"api.example.test","path":"/v1/canary","proto":"HTTP/1.1","header":{"X-Api-Key":["example_secret_001"]},"body":"key=example_secret_001"},` +
@@ -385,6 +388,9 @@ func TestDecodeRecorded(t *testing.T) {
 	}
 	if got := FilterRecorded(recs, "evil.example.test"); len(got) != 0 {
 		t.Errorf("evil records = %v, want none", got)
+	}
+	if all := AllRecorded(recs); len(all) != 2 || all[0].Host != "api.example.test" || all[1].Host != "llm.example.test" {
+		t.Errorf("AllRecorded = %+v, want both hosts' records, oldest first", all)
 	}
 
 	if _, err := DecodeRecorded([]byte(`{"records":[],"dropped":1}`)); err == nil {

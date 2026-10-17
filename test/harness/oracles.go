@@ -77,11 +77,17 @@ func (h *H) awaitQuiescence() {
 // Logs returns everything the target's components have logged so far
 // (structured lines, exactly as a deployment's stdout), workers first. Like
 // every oracle it first waits for the workers' in-flight request scopes to
-// finish their terminal bookkeeping — a decision log is bookkeeping too.
+// finish their terminal bookkeeping — a decision log is bookkeeping too. A
+// read that failed fails the test: a log surface the oracles cannot see must
+// never read as an empty (clean) one.
 func (h *H) Logs() string {
 	h.tb.Helper()
 	h.awaitQuiescence()
-	return h.target.Logs()
+	logs, err := h.target.Logs()
+	if err != nil {
+		h.tb.Fatalf("harness: read the components' logs: %v", err)
+	}
+	return logs
 }
 
 // Events returns every analytics event across the workers, worker-1 first.

@@ -10,9 +10,11 @@
 // client carries `//go:build e2e` — exactly like test/e2e — so `go test ./...`
 // and scripts/check.sh never touch Docker.
 //
-// test/e2e keeps its #367 suite on top of this package (it imports it for the
-// stack primitives, the oracles and the leak needles), and runs the shared
-// scenarios on the target in scenarios_test.go.
+// test/e2e keeps every Docker-driving test on top of this package — its #367
+// suite (it imports it for the stack primitives, the oracles and the leak
+// needles), the shared scenarios in scenarios_test.go and this target's own
+// seam round-trips in compose_target_test.go — so one TestMain-owned stack
+// serves them all inside `make e2e` and the CI job.
 package compose
 
 import (

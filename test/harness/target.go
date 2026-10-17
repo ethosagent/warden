@@ -78,13 +78,18 @@ type Target interface {
 	// value (see H.Metrics for the exact shape). Callers own nothing: Events may
 	// hold read handles that Stop releases.
 	//
+	// Logs returns the error when the components' output cannot be read (and
+	// whatever was read as the first value): an oracle the sweep cannot see is
+	// a hole, never a clean surface. Events and Metrics report their read
+	// failures the same way.
+	//
 	// Events MUST be read-your-writes: when it returns, every event of traffic
 	// the scenario has already finished making is visible. The in-process target
 	// gets this from the harness's analytics drain (H flushes each worker's
 	// async writer through the OnAnalyticsWriter seam before reading); a target
 	// whose writers are out of its reach — compose — must flush or wait itself,
 	// or a scenario reads a short list and fails confusingly late.
-	Logs() string
+	Logs() (string, error)
 	Events() ([]analytics.Event, error)
 	Metrics() (map[string]float64, error)
 }
@@ -126,6 +131,21 @@ type UpstreamReader interface {
 	// recorded, oldest first, in the RecordedRequest shape the in-process
 	// fakes record (post-pipeline: swaps already applied).
 	UpstreamRequests(host string) ([]RecordedRequest, error)
+}
+
+// WholeRecorder is implemented by an UpstreamReader target whose recorder
+// sees hosts no scenario registered a view for (compose: the fake DNS serves
+// mcp/evil/whatever.example.test whether or not the scenario called h.Upstream
+// for them — the recorder records whatever reached the fake). The canary sweep
+// then scans the WHOLE recorded view instead of the registered upstreams only:
+// a raw secret is allowed only on the hosts its MatchHosts list, every encoded
+// form is a leak anywhere — a swap that lands on an unregistered host is a
+// leak, and only the whole view can say so.
+type WholeRecorder interface {
+	// AllUpstreamRequests returns every request the target's upstreams have
+	// recorded, all hosts, oldest first (post-pipeline: swaps already
+	// applied).
+	AllUpstreamRequests() ([]RecordedRequest, error)
 }
 
 // TargetSecrets is implemented by a Target that wires the agent-facing
@@ -337,8 +357,9 @@ func (ip *inprocess) StartControlPlane(ctx context.Context) error {
 }
 
 // Logs is the components' structured stdout: workers first, then the control
-// plane.
-func (ip *inprocess) Logs() string {
+// plane. The buffers are always readable in-process, so the error is nil —
+// the return exists for targets whose log reads can fail.
+func (ip *inprocess) Logs() (string, error) {
 	var b strings.Builder
 	for _, w := range ip.workers {
 		b.WriteString(w.logs.String())
@@ -346,7 +367,7 @@ func (ip *inprocess) Logs() string {
 	if ip.cp != nil {
 		b.WriteString(ip.cp.logs.String())
 	}
-	return b.String()
+	return b.String(), nil
 }
 
 // eventsDSN opens a worker's live analytics DB for reading: a busy_timeout so

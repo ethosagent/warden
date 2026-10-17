@@ -205,10 +205,11 @@ func oneShot(pool *x509.CertPool) *http.Client {
 	return &http.Client{Timeout: 10 * time.Second, Transport: tr}
 }
 
-// caClient is the host-side HTTPS client for the stack's TLS endpoints (the
+// CAClient is the host-side HTTPS client for the stack's TLS endpoints (the
 // control plane): it trusts the lab proxy CA the CP's server cert is minted
-// from — the same trust the operators' dashboard has.
-func caClient() (*http.Client, error) {
+// from — the same trust the operators' dashboard has. TryGet drives it for a
+// plain GET; test/e2e re-exports it for callers that need more than a GET.
+func CAClient() (*http.Client, error) {
 	pool, err := CAPool()
 	if err != nil {
 		return nil, err
@@ -218,7 +219,7 @@ func caClient() (*http.Client, error) {
 
 // TryGet GETs url with the CA-trusting client and returns status and body.
 func TryGet(url string) (int, []byte, error) {
-	cl, err := caClient()
+	cl, err := CAClient()
 	if err != nil {
 		return 0, nil, err
 	}

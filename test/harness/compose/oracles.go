@@ -3,6 +3,7 @@
 package compose
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -29,20 +30,22 @@ func LogsOf(service string) (string, error) {
 
 // Logs is everything the deployment's components logged, structured exactly as
 // a deployment's stdout: every service in section-marked order (control plane,
-// workers, agents, fake upstream). A logs read that fails rides IN the text —
-// the Target interface returns no error here, and an oracle outage must not
-// look like a clean surface.
-func (t *Target) Logs() string {
+// workers, agents, fake upstream). A service whose logs cannot be read is
+// returned as the ERROR (with the sections that did read as the first value):
+// a log surface the sweep cannot see must fail the test, never read as clean.
+func (t *Target) Logs() (string, error) {
 	var b strings.Builder
+	var errs []error
 	for _, svc := range AllServices {
 		logs, err := LogsOf(svc)
 		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", svc, err))
 			fmt.Fprintf(&b, "=== %s: LOGS READ FAILED: %v ===\n", svc, err)
 			continue
 		}
 		fmt.Fprintf(&b, "=== %s ===\n%s", svc, logs)
 	}
-	return b.String()
+	return b.String(), errors.Join(errs...)
 }
 
 // Events reads the control plane's fleet view — the read side of both workers'
@@ -90,6 +93,18 @@ func (t *Target) UpstreamRequests(host string) ([]harness.RecordedRequest, error
 		return nil, err
 	}
 	return FilterRecorded(recs, host), nil
+}
+
+// AllUpstreamRequests implements harness.WholeRecorder: EVERY request in the
+// recorder's view, all hosts, oldest first. The recorder sees whatever reached
+// the fake — hosts no scenario registered a view for included — so the canary
+// sweep reads it whole instead of only the registered upstreams.
+func (t *Target) AllUpstreamRequests() ([]harness.RecordedRequest, error) {
+	recs, err := RecorderRequests()
+	if err != nil {
+		return nil, err
+	}
+	return AllRecorded(recs), nil
 }
 
 // ConnectStatus sends CONNECT hostPort the way the agent's own traffic is sent
