@@ -33,4 +33,15 @@ description: <one line — when this skill should be used>
 - The project's build/test/convention rules live in [`AGENTS.md`](../../AGENTS.md);
   skills should defer to it rather than restating it.
 
-No skills are defined yet — add the first one as `<skill-name>/SKILL.md`.
+## Skills
+
+| Skill | Use it to |
+|---|---|
+| [`add-request-stage`](add-request-stage/SKILL.md) | add a decision stage to the HTTP request path |
+| [`add-adapter`](add-adapter/SKILL.md) | add an implementation behind an interface, chosen by a `backend:` key |
+| [`add-config-key`](add-config-key/SKILL.md) | add a config key with default, validation and docs |
+| [`add-control-plane-route`](add-control-plane-route/SKILL.md) | add a control-plane or dashboard HTTP route |
+| [`openai-reviewer`](openai-reviewer/SKILL.md) | review code with the Codex CLI and the review rubrics |
+
+Each task skill points at the review rubrics in [`../reviews/`](../reviews/README.md) and the
+decisions in [`docs/adr/`](../../docs/adr/README.md). A harness-scenario skill is part of #350.
