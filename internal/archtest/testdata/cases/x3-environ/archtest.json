@@ -1,0 +1,6 @@
+{
+  "want": [
+    {"rule": "X3", "file": "w/envtest/env.go", "line": 5},
+    {"rule": "X3", "file": "w/envtest/env_test.go", "line": 8}
+  ]
+}

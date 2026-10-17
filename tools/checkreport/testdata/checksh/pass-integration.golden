@@ -7,6 +7,10 @@ ok
 === vet (go vet ./...) ===
 ok
 
+=== archtest (go test ./internal/archtest -run TestArchitecture) ===
+ok  	example.com/x/internal/archtest	0.2s
+ok
+
 === lint (golangci-lint v2.12.2) ===
 lint ran
 ok
@@ -25,6 +29,12 @@ ok
 ok  	example.com/x	0.1s
 ok
 
+=== fuzz (go test -fuzz, 5s per target) ===
+bench output (discarded by the script)
+bench output (discarded by the script)
+fuzz budget: 2 target(s) x 5s
+ok
+
 === benchmark smoke (go test -bench . -benchtime=1x) ===
 ok
 
@@ -41,11 +51,14 @@ ok
 --- commands ---
 gofmt -l .
 go vet ./...
-go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run
+go test ./internal/archtest -run TestArchitecture
+go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run --config .golangci.arch.yml
 go run docs/roadmap/gen.go check
 go build ./...
 go run golang.org/x/vuln/cmd/govulncheck@v1.5.0 ./...
 go test -race -coverprofile=coverage.out ./...
+go test -run ^$ -fuzz ^FuzzOne$ -fuzztime=5s ./one
+go test -run ^$ -fuzz ^FuzzTwo$ -fuzztime=5s ./two
 go test -run ^$ -bench . -benchtime=1x ./...
 go tool cover -func=coverage.product.out
 go test -tags=integration ./test/integration/...
