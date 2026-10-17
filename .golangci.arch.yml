@@ -65,11 +65,11 @@ linters:
             - '!${base-path}/internal/clock/**'
             - '!${base-path}/internal/integration/**'
             - '!${base-path}/internal/integration/webhook/**'
+            - '!${base-path}/internal/mcp/poisoned/**'
             - '!${base-path}/tools/**'
             - '!${base-path}/internal/archtest/**'
             - '!${base-path}/internal/dnstest/**'
             - '!${base-path}/internal/clock/clocktest/**'
-            - '!${base-path}/internal/mcp/poisoned/**'
             - '!${base-path}/test/**'
             - '!**/*_test.go'
           deny:
@@ -127,11 +127,11 @@ linters:
             - '!${base-path}/internal/clock/**'
             - '!${base-path}/internal/integration/**'
             - '!${base-path}/internal/integration/webhook/**'
+            - '!${base-path}/internal/mcp/poisoned/**'
             - '!${base-path}/tools/**'
             - '!${base-path}/internal/archtest/**'
             - '!${base-path}/internal/dnstest/**'
             - '!${base-path}/internal/clock/clocktest/**'
-            - '!${base-path}/internal/mcp/poisoned/**'
             - '!${base-path}/test/**'
             - '!${base-path}/internal/config/**'
             - '!${base-path}/internal/denyreason/**'
@@ -173,6 +173,7 @@ linters:
             - '!${base-path}/internal/clock/**'
             - '!${base-path}/internal/integration/**'
             - '!${base-path}/internal/integration/webhook/**'
+            - '!${base-path}/internal/mcp/poisoned/**'
             - '!${base-path}/internal/config/**'
             - '!${base-path}/internal/denyreason/**'
             - '!${base-path}/internal/detect/**'
@@ -183,7 +184,6 @@ linters:
             - '!${base-path}/internal/archtest/**'
             - '!${base-path}/internal/dnstest/**'
             - '!${base-path}/internal/clock/clocktest/**'
-            - '!${base-path}/internal/mcp/poisoned/**'
             - '!${base-path}/test/**'
             - '!**/*_test.go'
           deny:
@@ -418,11 +418,6 @@ linters:
           - depguard
           - forbidigo
         text: 'X3:'
-      - path: ^examples/mcp-wedge/poisoned-mcp-server/[^/]*\.go$
-        linters:
-          - depguard
-          - forbidigo
-        text: 'S2:'
       - path: ^test/harness/[^/]*\.go$
         linters:
           - depguard

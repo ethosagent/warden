@@ -108,6 +108,7 @@ classes:
       - internal/clock            # the time source: the Clock port + its real-time impl (#362)
       - internal/integration
       - internal/integration/webhook
+      - internal/mcp/poisoned     # the poisoned MCP server (HTTP I/O) the demo binary and the L1 harness share (#363)
 
   # DOMAIN — entities, rules, decisions, ports (interfaces), services. No I/O
   # (L3). Packages are listed explicitly: a new package must be classified here
@@ -138,7 +139,6 @@ classes:
     paths:
       - internal/dnstest
       - internal/clock/clocktest  # fake Clock for tests (#362)
-      - internal/mcp/poisoned     # the poisoned MCP server the harness and the demo share (#363)
       - test/**
 
 # ---------------------------------------------------------------------------

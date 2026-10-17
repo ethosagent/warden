@@ -3,6 +3,7 @@ package harness
 import (
 	"net"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -91,6 +92,10 @@ func TestFleet_RejectsZero(t *testing.T) {
 // the moment checkGoroutines becomes a no-op — the guard has to be able to
 // bite, or every other green result here means nothing.
 func TestNew_GoroutineLeakCheckFires(t *testing.T) {
+	// Goroutines from earlier tests that are still exiting would inflate the
+	// baseline New captures; when they finish, the count can drop back under it
+	// and the count gate hides the planted leak. Boot only once the count settles.
+	settleGoroutines(t)
 	rec := &recordingTB{T: t}
 	h := New(rec)
 	if rec.Failed() {
@@ -216,5 +221,21 @@ func TestAgentH2_NegotiatesHTTP2(t *testing.T) {
 	}
 	if got := len(h.AgentResponses()); got != 1 {
 		t.Errorf("transcript has %d responses, want 1 (AgentH2 shares it)", got)
+	}
+}
+
+// settleGoroutines waits until the process goroutine count has stopped
+// falling, so a baseline captured next is not inflated by exiting goroutines.
+func settleGoroutines(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	prev, stable := runtime.NumGoroutine(), 0
+	for stable < 5 && time.Now().Before(deadline) {
+		<-time.After(20 * time.Millisecond)
+		if n := runtime.NumGoroutine(); n < prev {
+			prev, stable = n, 0
+		} else {
+			stable++
+		}
 	}
 }

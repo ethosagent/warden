@@ -93,7 +93,7 @@ var usesRe = regexp.MustCompile(`(?m)^\s*(?:-\s+)?uses:\s*(\S+)(.*)$`)
 
 func TestRealWorkflowsPinActionsToCommitSHAs(t *testing.T) {
 	pinned := regexp.MustCompile(`^[\w.\-]+/[\w.\-/]+@[0-9a-f]{40}$`)
-	for _, f := range []string{"gates.yml", "risk.yml"} {
+	for _, f := range []string{"gates.yml", "risk.yml", "e2e.yml"} {
 		text := mustRead(t, "../../.github/workflows/"+f)
 		ms := usesRe.FindAllStringSubmatch(text, -1)
 		if len(ms) == 0 {

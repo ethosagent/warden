@@ -101,10 +101,6 @@ baseline:
     package: cmd/proxy
     why: "the checker and the integration harness drive the go toolchain; adapters own exec after step 7"
     allow: ["os/exec.CommandContext"]
-  - rule: S2
-    package: examples/mcp-wedge/poisoned-mcp-server
-    why: "the demo binary and the L1 harness share one poisoned MCP server so the demo and every scenario send byte-identical attack traffic; the package is stdlib-only and holds no test helpers"
-    allow: ["internal/mcp/poisoned"]
   - rule: X1
     package: test/harness
     why: "test PKI: the L1 harness mints throwaway CAs and leaves for its fake upstreams; never production signing"

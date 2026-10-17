@@ -71,7 +71,7 @@ func Compare(baseTree, headTree Tree) ([]report.Finding, error) {
 	d := &diff{base: base, head: head}
 	var out []report.Finding
 	for _, detect := range []func() []report.Finding{
-		d.pins, d.assignments, d.stageList, d.stageCommands, d.scriptEdits, d.stageGuards, d.bannerDuplicates, d.swallowed, d.ci, d.testsDeleted, d.testsSkipped,
+		d.pins, d.assignments, d.stageList, d.stageCommands, d.scriptEdits, d.stageGuards, d.bannerDuplicates, d.swallowed, d.ci, d.e2e, d.testsDeleted, d.testsSkipped,
 		d.lint, d.lintConfigs, d.nolintAdded, d.architecture, d.baseline, d.vuln,
 	} {
 		out = append(out, detect()...)
