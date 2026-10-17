@@ -280,7 +280,37 @@ the next `make e2e-up`. Set `WARDEN_IMAGE` to test a specific pre-built image
 instead — then nothing is built (`--no-build`) and the image must already
 exist, or the up fails with a clear message.
 
-Try it by hand (the scenario driver lands in #367):
+## Run the L2 suite (`make e2e`)
+
+`test/e2e` is a Go package behind the `e2e` build tag, so `go test ./...` and
+`scripts/check.sh` never touch Docker. It needs Docker, `make` and free
+host ports 7070, 8081, 9091, 9092 (one stack at a time).
+
+```sh
+make e2e                                        # whole suite (~1-3 min)
+make e2e-scenario NAME=TestIsolation_DefaultDeny # one test (-run regexp)
+E2E_KEEP_STACK=1 make e2e                       # leave the stack up to debug
+E2E_STACK_RUNNING=1 go test -tags e2e ./test/e2e/ -v   # reuse a stack you started
+```
+
+`TestMain` runs `make e2e-up` (build from source, wait healthy, hermeticity
+check), polls the control plane, both workers and the recorder with a 120 s
+deadline, runs the tests, then `down -v`. With the tag set and no working
+Docker the package fails; it never skips. The isolation suite proves, from
+`agent-1`, that every route out fails for the right reason (public IP, public
+DNS, IPv6, control plane, Docker gateway/metadata, the other worker's network;
+each beside a positive control), that an allowed call reaches the fake upstream
+with the swapped canary while the agent never sees it, that a denied host
+leaves one deny event, and that the canary (raw, base64, URL, hex) is absent
+from agent output, every service's logs, both workers' traffic APIs and the
+control plane's fleet API. The recorder is the one place it must appear.
+Workers forward analytics to the control plane asynchronously, so event reads
+poll with a deadline. The helpers (`agentExec`, `recorded`, `resetRecorded`,
+`events`, `logs`, `AssertCanaryNeverLeaked`) are reused by the later L2 suites.
+
+## Drive it by hand
+
+Try it by hand:
 
 ```sh
 docker compose -p warden-e2e exec agent-1 curl -s \
