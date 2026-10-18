@@ -215,11 +215,18 @@ admin token>`, constant-time compare).
   is read from the worker's own environment; the compose files use
   `WARDEN_ADMIN_TOKEN`, defaulting to the demo value `dev-admin-token`. Surrounding
   whitespace is trimmed.
+- **What needs the token.** Every state-changing call on the admin listener — any
+  method but `GET`/`HEAD`:
+  - every `/dashboard/api/*` writer (`PUT /dashboard/api/policy`,
+    `PUT /dashboard/api/detection`, …),
+  - every `/admin/*` writer — today `POST /admin/refresh-secrets` (drop the secret
+    cache and refetch). A writer added under `/admin/` later is guarded by default.
+- **Reads stay open.** `GET`/`HEAD` need no token: `/healthz`, `/metrics`, the
+  dashboard pages and every `/dashboard/api/*` and `/admin/*` read.
 - **Fail closed.** With no token configured (flag and key unset, the variable unset or
-  empty or whitespace-only) every dashboard write is refused with `403` and a message
+  empty or whitespace-only) every write is refused with `403` and a message
   that names `--admin-token-env` and `admin.tokenEnv`. A missing or wrong token is
-  `401`. `GET`/`HEAD` reads stay open; `/healthz`, `/metrics` and `/admin/*` are
-  unchanged.
+  `401`.
 - **UI.** The dashboard prompts for the admin token after a `401`, exactly as above.
 - **Audit.** A refused write logs `worker dashboard write refused` (WARN) with the
   method, path, remote address and reason, never the token.
@@ -230,6 +237,8 @@ WARDEN_ADMIN_TOKEN=$(openssl rand -hex 32) \
   ./warden run --config configs/config.yaml --admin-token-env WARDEN_ADMIN_TOKEN
 curl -X PUT http://127.0.0.1:9090/dashboard/api/detection \
   -H "Authorization: Bearer $WARDEN_ADMIN_TOKEN" -H 'Content-Type: application/json' -d '{"enabled":true}'
+curl -X POST http://127.0.0.1:9090/admin/refresh-secrets \
+  -H "Authorization: Bearer $WARDEN_ADMIN_TOKEN"
 ```
 
 ## What's deliberately not here (yet)

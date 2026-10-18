@@ -95,6 +95,16 @@ func refreshSecrets(t *testing.T, h *harness.H) {
 		t.Fatalf("between the rotation and the refresh the upstream saw %q, want the cached original value", got)
 	}
 
+	// The route is a writer: an unauthenticated call is refused and leaves the
+	// cache alone (#430) — the still-cached value proves it did nothing.
+	if status, _ := adminDoAnon(t, h, http.MethodPost, "/admin/refresh-secrets"); status != http.StatusUnauthorized {
+		t.Fatalf("POST /admin/refresh-secrets without a token = %d, want 401", status)
+	}
+	get(t, h, "https://api.example.com/still-cached", auth)
+	if got := lastRequest(t, u).Header.Get("Authorization"); got != "Bearer "+swapValue {
+		t.Fatalf("after the refused refresh the upstream saw %q, want the still-cached original value", got)
+	}
+
 	status, body := adminDo(t, h, http.MethodPost, "/admin/refresh-secrets")
 	if status != http.StatusOK || string(body) != "refreshed" {
 		t.Fatalf("POST /admin/refresh-secrets = %d %q, want 200 \"refreshed\"", status, body)

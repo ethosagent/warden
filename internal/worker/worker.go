@@ -810,9 +810,11 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		return dashboard.LLMProvidersView{Providers: BuildLLMProviderViews(startupProviders)}
 	})
 	adminMux.Handle("/healthz", adminSrv.Handler())
-	adminMux.Handle("/admin/", adminSrv.Handler())
-	// Reads stay open; every dashboard write needs the worker admin bearer token
-	// and fails closed (403) when none is configured. Same guard as the control plane.
+	// Reads stay open; every state-changing route on this listener — the
+	// dashboard writers and /admin/* (POST /admin/refresh-secrets, #430) —
+	// needs the worker admin bearer token and fails closed (403) when none is
+	// configured. One shared bearer guard for both mounts, same as the control
+	// plane's.
 	adminTokenEnv := config.ResolveAdminTokenEnv(pol, p.AdminTokenEnv)
 	adminToken := ""
 	if adminTokenEnv != "" {
@@ -824,10 +826,15 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	} else {
 		logger.Info("worker dashboard writes require the admin token", "tokenEnv", adminTokenEnv)
 	}
-	dashSrv.SetWriteGuard(dashboard.NewBearerWriteGuard(dashboard.BearerGuardConfig{
+	adminBearer := dashboard.NewBearerWriteGuard(dashboard.BearerGuardConfig{
 		Token: adminToken, Logger: logger, Component: "worker", TokenName: "worker admin token",
 		ConfigHint: "Start it with --admin-token-env <ENV> (or admin.tokenEnv in the config; e.g. WARDEN_ADMIN_TOKEN)",
-	}))
+	})
+	// admin.WriteGuard re-declares the dashboard's seam (the admin package
+	// cannot import the dashboard), so the shared guard passes straight through.
+	adminSrv.SetWriteGuard(admin.WriteGuard(adminBearer))
+	adminMux.Handle("/admin/", adminSrv.Handler())
+	dashSrv.SetWriteGuard(adminBearer)
 	adminMux.Handle("/dashboard/", dashSrv.Handler())
 	// Central ingest endpoint (aggregator mode only): workers POST event batches
 	// here. It lives on the admin (private) listener, never the agent-facing port.

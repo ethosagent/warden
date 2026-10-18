@@ -174,7 +174,10 @@ The dashboard shows:
 | `GET /dashboard/api/blocked` | Denied events grouped by domain |
 | `GET /dashboard/api/stats` | Summary statistics |
 | `GET /healthz` | Liveness probe |
-| `POST /admin/refresh-secrets` | Drop secret cache and refetch |
+| `POST /admin/refresh-secrets` | Drop secret cache and refetch — needs the worker admin token (`Authorization: Bearer`, see [control-plane.md](control-plane.md#worker-admin-token)) |
+
+Writes on this listener (any method but `GET`/`HEAD` under `/dashboard/api/` or
+`/admin/`) all need that token; the `GET` routes above are open.
 
 ## 8. Verify it works
 

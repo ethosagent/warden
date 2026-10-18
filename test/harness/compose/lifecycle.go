@@ -146,8 +146,9 @@ func (t *Target) ControlPlaneToken() (string, error) {
 	return "dev-token", nil
 }
 
-// WorkerAdminToken is the bearer token the workers' admin dashboards need for
-// writes (#425) — the env var the compose files distribute it with
+// WorkerAdminToken is the bearer token the workers' admin listener needs for
+// every state-changing call — the dashboard writers (#425) and /admin/*
+// (#430) — the env var the compose files distribute it with
 // (WARDEN_ADMIN_TOKEN, default dev-admin-token).
 func (t *Target) WorkerAdminToken() string {
 	if tok := os.Getenv("WARDEN_ADMIN_TOKEN"); tok != "" {

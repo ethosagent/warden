@@ -58,6 +58,13 @@ import (
 // process, which is exactly why a harness cannot run under t.Parallel().
 const cpTokenEnv = "WARDEN_HARNESS_CP_TOKEN"
 
+// adminTokenEnv is the env var the harness's workers read their admin bearer
+// token from (Params.AdminTokenEnv): the token every state-changing call on a
+// worker's admin listener needs — the dashboard writers (#425) and /admin/*
+// (#430). Set once per harness instance with a random token, via t.Setenv, the
+// same distribution mechanism as a deployment's WARDEN_ADMIN_TOKEN.
+const adminTokenEnv = "WARDEN_HARNESS_ADMIN_TOKEN"
+
 // defaultAllowlist are the harness's own well-known fake hostnames (see
 // Upstream). They ship allowed because they ARE the harness's loopback
 // stand-ins for real providers; everything else stays default-deny until
@@ -529,6 +536,12 @@ func (h *H) boot() {
 	}
 	h.tb.Setenv(cpTokenEnv, hex.EncodeToString(token))
 
+	adminTok := make([]byte, 16)
+	if _, err := rand.Read(adminTok); err != nil {
+		h.tb.Fatalf("harness: generate worker admin token: %v", err)
+	}
+	h.tb.Setenv(adminTokenEnv, hex.EncodeToString(adminTok))
+
 	h.dialer = &mappingDialer{h: h}
 
 	if h.suppliedTarget != nil {
@@ -699,11 +712,12 @@ func (h *H) workerParams(i int) worker.Params {
 	// comes only from the control plane) but keeping the two in sync means a
 	// scenario's intent reads the same whichever mode boots.
 	return worker.Params{
-		Config:  &fakes.FakeConfigProvider{Policy: policy},
-		DBPath:  h.workerDBPath(i),
-		CACert:  h.proxyCACertDst,
-		CAKey:   h.proxyCAKeyDst,
-		Version: "harness",
+		Config:        &fakes.FakeConfigProvider{Policy: policy},
+		DBPath:        h.workerDBPath(i),
+		CACert:        h.proxyCACertDst,
+		CAKey:         h.proxyCAKeyDst,
+		Version:       "harness",
+		AdminTokenEnv: adminTokenEnv,
 		Overrides: &worker.Overrides{
 			Dialer:          h.dialer,
 			UpstreamRootCAs: h.upstreamCA.pool(),
@@ -771,6 +785,19 @@ func (h *H) ProxyAddrs() []string { return h.target.ProxyAddrs() }
 
 // AdminAddr is worker-1's admin/dashboard address.
 func (h *H) AdminAddr() string { return h.target.AdminAddr() }
+
+// AdminToken is the worker admin bearer token this deployment's workers were
+// booted with: every state-changing call on a worker's admin listener — the
+// dashboard writers (#425) and /admin/* (#430) — needs it as
+// 'Authorization: Bearer'; reads are open. In-process it is the env var the
+// harness set; a supplied target supplies its own (compose: the
+// WARDEN_ADMIN_TOKEN the compose files distribute).
+func (h *H) AdminToken() string {
+	if ts, ok := h.target.(AdminTokenSource); ok {
+		return ts.WorkerAdminToken()
+	}
+	return ""
+}
 
 // TransparentAddrs reports each worker's bound interception listeners,
 // worker-1 first, as {httpsAddr, httpAddr} — httpAddr is "" when plain HTTP is

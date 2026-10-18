@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -384,6 +385,10 @@ func TestFleet_DashboardPolicyWriteNeedsToken(t *testing.T) {
 // worker admin token through to the handler (#425). Reads stay open.
 func TestFleet_WorkerDashboardWriteNeedsToken(t *testing.T) {
 	adminToken := (&compose.Target{}).WorkerAdminToken()
+	// Keep-alives off, like every other host-side probe (compose.oneShot): an
+	// idle keep-alive conn (two goroutines) is exactly what the harness's
+	// goroutine-leak check flags as a leak.
+	client := &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{DisableKeepAlives: true}}
 	for _, w := range fleetAgents {
 		base, ok := compose.WorkerAdminBase(w.worker)
 		if !ok {
@@ -397,7 +402,7 @@ func TestFleet_WorkerDashboardWriteNeedsToken(t *testing.T) {
 			if auth != "" {
 				req.Header.Set("Authorization", auth)
 			}
-			resp, err := http.DefaultClient.Do(req)
+			resp, err := client.Do(req)
 			if err != nil {
 				t.Fatalf("e2e: PUT %s detection: %v", w.worker, err)
 			}
@@ -412,6 +417,32 @@ func TestFleet_WorkerDashboardWriteNeedsToken(t *testing.T) {
 		// A managed worker has no detection writer, so the handler answers 405.
 		if c := put("Bearer " + adminToken); c != http.StatusMethodNotAllowed {
 			t.Errorf("%s: PUT with the worker admin token = %d, want 405 from the handler", w.worker, c)
+		}
+		// The /admin/ routes are writers too (#430): the same token gate, and
+		// with it the refresh actually runs.
+		post := func(auth string) (int, string) {
+			req, err := http.NewRequest(http.MethodPost, base+"/admin/refresh-secrets", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if auth != "" {
+				req.Header.Set("Authorization", auth)
+			}
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatalf("e2e: POST %s refresh-secrets: %v", w.worker, err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			b, _ := io.ReadAll(resp.Body)
+			return resp.StatusCode, string(b)
+		}
+		for _, auth := range []string{"", "Bearer wrong-token"} {
+			if c, _ := post(auth); c != http.StatusUnauthorized {
+				t.Errorf("%s: POST /admin/refresh-secrets with auth %q = %d, want 401", w.worker, auth, c)
+			}
+		}
+		if c, body := post("Bearer " + adminToken); c != http.StatusOK || body != "refreshed" {
+			t.Errorf("%s: POST /admin/refresh-secrets with the token = %d %q, want 200 \"refreshed\"", w.worker, c, body)
 		}
 		if _, err := getPolicy(base); err != nil {
 			t.Errorf("%s: GET policy (reads stay open): %v", w.worker, err)
