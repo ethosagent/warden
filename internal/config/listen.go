@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 )
 
 // Built-in defaults for the listeners (the lowest-precedence source).
@@ -137,4 +138,13 @@ func (r Resolved) LogArgs() []any {
 			"caKey", r.CAKey.Value, "caKeySource", r.CAKey.Source)
 	}
 	return args
+}
+
+// ResolveAdminTokenEnv returns the env var name holding the worker admin token:
+// the --admin-token-env flag if set, else `admin.tokenEnv`, else "" (unset).
+func ResolveAdminTokenEnv(pol Policy, flag string) string {
+	if f := strings.TrimSpace(flag); f != "" {
+		return f
+	}
+	return pol.AdminTokenEnv
 }

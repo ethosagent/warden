@@ -1,8 +1,11 @@
 package dashboard
 
 import (
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -11,7 +14,7 @@ import (
 )
 
 // TestWriteGuard_GatesWritesNotReads covers the guard hook itself: reads pass,
-// every write method is passed to the guard, and no guard means no gating.
+// every write method is passed to the guard.
 func TestWriteGuard_GatesWritesNotReads(t *testing.T) {
 	s := NewServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
 	s.SetWriteGuard(func(r *http.Request) (int, string) {
@@ -32,6 +35,24 @@ func TestWriteGuard_GatesWritesNotReads(t *testing.T) {
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dashboard/api/setup", nil))
 	if rec.Code == http.StatusUnauthorized {
 		t.Error("GET must not be guarded")
+	}
+}
+
+// TestWriteGuard_DeniesByDefault: a server nobody installed a guard on refuses
+// every write (403) instead of serving it open; reads still work.
+func TestWriteGuard_DeniesByDefault(t *testing.T) {
+	h := NewServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}}).Handler()
+	for _, m := range []string{http.MethodPut, http.MethodPost, http.MethodDelete} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(m, "/dashboard/api/policy", nil))
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("%s with no guard set = %d, want 403", m, rec.Code)
+		}
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dashboard/api/setup", nil))
+	if rec.Code == http.StatusForbidden {
+		t.Error("GET must not be refused by the default guard")
 	}
 }
 
@@ -92,5 +113,29 @@ func TestIndexHTML_TokenPrompt(t *testing.T) {
 	raw := regexp.MustCompile(`(?s)[^h]fetch\(\s*['"\x60]/dashboard/api[^;]*?method\s*:`)
 	if loc := raw.FindStringIndex(html); loc != nil {
 		t.Errorf("raw fetch with a write method; use authFetch: %.120s", html[loc[0]:])
+	}
+}
+
+// TestAllowUngatedWritesForTests_NotUsedInProduction: the open-writes guard may
+// appear only in test files and its own declaration.
+func TestAllowUngatedWritesForTests_NotUsedInProduction(t *testing.T) {
+	err := filepath.WalkDir("../..", func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() && (d.Name() == ".git" || d.Name() == "node_modules") {
+			return filepath.SkipDir
+		}
+		if d.IsDir() || !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") || filepath.Base(p) == "dashboard.go" {
+			return nil
+		}
+		b, rerr := os.ReadFile(p)
+		if rerr == nil && strings.Contains(string(b), "AllowUngatedWritesForTests") {
+			t.Errorf("%s references AllowUngatedWritesForTests; it is for tests only", p)
+		}
+		return rerr
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }

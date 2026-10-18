@@ -338,10 +338,13 @@ sqlite3 warden.db "SELECT COUNT(*) FROM events WHERE secret_ref LIKE '%sk-%';"
 ### Step 7: Refresh secrets (`refresh_secrets`)
 
 ```sh
-curl -X POST http://127.0.0.1:9090/admin/refresh-secrets
+curl -X POST http://127.0.0.1:9090/admin/refresh-secrets \
+  -H "Authorization: Bearer $WARDEN_ADMIN_TOKEN"
 ```
 
 **Expected:** `refreshed`. The secret cache is dropped and refetched from env vars.
+The route is a writer: without the worker admin token it answers `401`, and with no
+token configured at all `403` (see [control-plane.md](control-plane.md#worker-admin-token)).
 
 ### Step 8: Health check (`healthz`)
 

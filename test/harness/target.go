@@ -106,6 +106,15 @@ type SecretSpec struct {
 	MatchHosts  []string
 }
 
+// AdminTokenSource is implemented by a Target whose workers were booted with an
+// admin bearer token (in-process: the env var the harness set; compose: the
+// WARDEN_ADMIN_TOKEN the compose files distribute). Scenarios that call a
+// worker's admin listener as an operator — POST /admin/refresh-secrets (#430)
+// and the dashboard writers (#425) — send it as 'Authorization: Bearer'.
+type AdminTokenSource interface {
+	WorkerAdminToken() string
+}
+
 // AgentClients is implemented by a Target whose protected agent is NOT this
 // process (compose: the agent-1 container). When the supplied target
 // implements it, h.Agent/h.AgentH2 return the target's client, so a scenario's
@@ -349,6 +358,13 @@ func (ip *inprocess) ControlPlaneToken() (string, error) {
 		return "", fmt.Errorf("harness: control-plane token env %s is empty", ip.tokenEnv)
 	}
 	return token, nil
+}
+
+// WorkerAdminToken reads the workers' admin bearer token from the env var the
+// harness set for them (adminTokenEnv) — the same distribution mechanism a
+// deployment uses. Empty only if boot never ran, which H fails on loudly.
+func (ip *inprocess) WorkerAdminToken() string {
+	return os.Getenv(adminTokenEnv)
 }
 
 func (ip *inprocess) ControlPlaneCA() (*x509.CertPool, error) {

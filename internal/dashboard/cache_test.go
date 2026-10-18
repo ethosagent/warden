@@ -68,6 +68,7 @@ func (c *fakeClock) advance(d time.Duration) {
 func cacheTestServer(events []analytics.Event, clk *fakeClock) (http.Handler, *countingDataSource) {
 	cds := &countingDataSource{inner: &fakeDataSource{events: events}}
 	srv := NewServer(cds, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
 	srv.now = clk.now
 	return srv.Handler(), cds
 }

@@ -72,6 +72,7 @@ func TestDashboardDependsOnConfigEditorSeam(t *testing.T) {
 	// The dashboard's write setters take function injection; sourcing them from the
 	// ConfigEditor seam is exactly the control-plane wiring pattern in Handler.
 	var ce ConfigEditor = editor
+	dash.SetWriteGuard(dashboard.AllowUngatedWritesForTests) // the seam is under test, not auth
 	dash.SetPolicyWriter(ce.WritePolicy)
 	dash.SetSettingsWriter(ce.WriteSettings)
 

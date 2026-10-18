@@ -77,3 +77,27 @@ func TestRunParams_ConfigListenWinsOverFlagDefault(t *testing.T) {
 		t.Fatalf("flag must win: %+v", r)
 	}
 }
+
+// TestRunParams_AdminTokenEnvFlag: --admin-token-env reaches worker.Params; unset is empty.
+func TestRunParams_AdminTokenEnvFlag(t *testing.T) {
+	for args, want := range map[string]string{"": "", "WARDEN_ADMIN_TOKEN": "WARDEN_ADMIN_TOKEN"} {
+		root := &cobra.Command{Use: "warden"}
+		root.PersistentFlags().String("config", "x.yaml", "")
+		run := newRunCmd()
+		root.AddCommand(run)
+		var argv []string
+		if args != "" {
+			argv = []string{"--admin-token-env", args}
+		}
+		if err := run.ParseFlags(argv); err != nil {
+			t.Fatal(err)
+		}
+		p, err := runParams(run)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p.AdminTokenEnv != want {
+			t.Errorf("flag %q: AdminTokenEnv = %q, want %q", args, p.AdminTokenEnv, want)
+		}
+	}
+}

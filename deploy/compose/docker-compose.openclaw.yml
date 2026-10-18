@@ -59,6 +59,7 @@ services:
       - "127.0.0.1:9090:9090"                 # dashboard + /metrics (host-only; NOT reachable by OpenClaw)
     environment:
       - WARDEN_CP_TOKEN=${WARDEN_CP_TOKEN:-dev-token}
+      - WARDEN_ADMIN_TOKEN=${WARDEN_ADMIN_TOKEN:-dev-admin-token}
       - WARDEN_PROXY_ID=openclaw-worker   # labels this worker in the fleet view
     volumes:
       - ../../configs/config.recipe-worker.yaml:/etc/warden/config.yaml:ro   # managed: policy from the CP
@@ -71,6 +72,7 @@ services:
       - "--ca-cert=/etc/warden/certs/proxy-ca.crt"   # TLS terminate for full visibility; omit both for blind tunnel (domain-only)
       - "--ca-key=/etc/warden/certs/proxy-ca.key"
       - "--admin-listen=0.0.0.0:9090"
+      - "--admin-token-env=WARDEN_ADMIN_TOKEN"
       - "--db=/data/warden.db"
 
   openclaw:

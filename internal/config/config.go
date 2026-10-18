@@ -38,6 +38,10 @@ type Policy struct {
 	Listen      string    `json:"-"`
 	AdminListen string    `json:"-"`
 	TLS         TLSConfig `json:"-"`
+	// AdminTokenEnv names the env var holding the worker admin bearer token that
+	// dashboard writes on the admin listener need (`admin.tokenEnv`; the
+	// --admin-token-env flag overrides it). Empty = unset, and writes are refused.
+	AdminTokenEnv string `json:"-"`
 
 	// Allowlist is the set of permitted destinations. Anything not present is
 	// denied (default-deny).
@@ -271,7 +275,10 @@ type rawConfig struct {
 	Listen      string  `yaml:"listen"`
 	AdminListen string  `yaml:"adminListen"`
 	TLS         *rawTLS `yaml:"tls"`
-	Policy      struct {
+	Admin       *struct {
+		TokenEnv string `yaml:"tokenEnv"`
+	} `yaml:"admin"`
+	Policy struct {
 		Allowlist []AllowlistEntry `yaml:"allowlist"`
 		Denylist  []DenylistEntry  `yaml:"denylist"`
 	} `yaml:"policy"`
@@ -347,6 +354,9 @@ func parse(data []byte) (*LocalYAMLProvider, error) {
 	}
 	policy.Listen = raw.Listen
 	policy.AdminListen = raw.AdminListen
+	if raw.Admin != nil {
+		policy.AdminTokenEnv = strings.TrimSpace(raw.Admin.TokenEnv)
+	}
 	if raw.TLS != nil {
 		policy.TLS = TLSConfig(*raw.TLS)
 	}

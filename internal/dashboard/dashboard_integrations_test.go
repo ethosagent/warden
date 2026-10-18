@@ -18,6 +18,7 @@ import (
 func newIntegrationsServer(t *testing.T, withWriter bool) (*Server, *[]IntegrationInstanceStatus) {
 	t.Helper()
 	srv := NewServer(&fakeDataSource{}, config.Policy{}, emptyProvider())
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
 	store := &[]IntegrationInstanceStatus{}
 	srv.SetIntegrationsSource(func() []IntegrationInstanceStatus { return *store })
 	if withWriter {
@@ -59,6 +60,7 @@ func getIntegrationsJSON(t *testing.T, srv *Server) integrationsResponse {
 func TestIntegrations_GETCatalogAlwaysPresent(t *testing.T) {
 	// Nil source (worker): definitions still listed, instances empty, not editable.
 	srv := NewServer(&fakeDataSource{}, config.Policy{}, emptyProvider())
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
 	resp := getIntegrationsJSON(t, srv)
 	if len(resp.Definitions) != 2 {
 		t.Fatalf("definitions = %d, want 2 (webhook, slack)", len(resp.Definitions))

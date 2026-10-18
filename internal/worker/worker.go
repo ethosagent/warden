@@ -50,8 +50,12 @@ type Params struct {
 	CACert     string
 	CAKey      string
 	AdminAddr  string
-	Version    string
-	LocalOnly  bool
+	// AdminTokenEnv is the explicit --admin-token-env override: the env var holding
+	// the bearer token dashboard writes on the admin listener need. Empty falls back
+	// to config `admin.tokenEnv`; with neither (or an empty value) writes are refused.
+	AdminTokenEnv string
+	Version       string
+	LocalOnly     bool
 	// AlertsDBPath is the SQLite alert-store path for the LOCAL-ONLY embedded alert
 	// pipeline. Empty ⇒ default to a sibling of DBPath (warden-alerts.db). Ignored
 	// in managed/fleet mode (the control plane hosts the pipeline there).
@@ -806,7 +810,31 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		return dashboard.LLMProvidersView{Providers: BuildLLMProviderViews(startupProviders)}
 	})
 	adminMux.Handle("/healthz", adminSrv.Handler())
+	// Reads stay open; every state-changing route on this listener — the
+	// dashboard writers and /admin/* (POST /admin/refresh-secrets, #430) —
+	// needs the worker admin bearer token and fails closed (403) when none is
+	// configured. One shared bearer guard for both mounts, same as the control
+	// plane's.
+	adminTokenEnv := config.ResolveAdminTokenEnv(pol, p.AdminTokenEnv)
+	adminToken := ""
+	if adminTokenEnv != "" {
+		adminToken = os.Getenv(adminTokenEnv)
+	}
+	// Name the env var (never its value) so a typo'd name is visible at boot.
+	if strings.TrimSpace(adminToken) == "" {
+		logger.Warn("worker dashboard writes are disabled: set "+adminTokenEnvName(adminTokenEnv), "tokenEnv", adminTokenEnv)
+	} else {
+		logger.Info("worker dashboard writes require the admin token", "tokenEnv", adminTokenEnv)
+	}
+	adminBearer := dashboard.NewBearerWriteGuard(dashboard.BearerGuardConfig{
+		Token: adminToken, Logger: logger, Component: "worker", TokenName: "worker admin token",
+		ConfigHint: "Start it with --admin-token-env <ENV> (or admin.tokenEnv in the config; e.g. WARDEN_ADMIN_TOKEN)",
+	})
+	// admin.WriteGuard re-declares the dashboard's seam (the admin package
+	// cannot import the dashboard), so the shared guard passes straight through.
+	adminSrv.SetWriteGuard(admin.WriteGuard(adminBearer))
 	adminMux.Handle("/admin/", adminSrv.Handler())
+	dashSrv.SetWriteGuard(adminBearer)
 	adminMux.Handle("/dashboard/", dashSrv.Handler())
 	// Central ingest endpoint (aggregator mode only): workers POST event batches
 	// here. It lives on the admin (private) listener, never the agent-facing port.
@@ -993,4 +1021,13 @@ func newSecretFetcher(pol config.Policy, mapping map[string]string) (secrets.Fet
 	default:
 		return nil, nil, fmt.Errorf("secretStore.backend %q is not supported", ss.Backend)
 	}
+}
+
+// adminTokenEnvName is the env var to tell the operator to set: the resolved one,
+// or the conventional example when none is configured.
+func adminTokenEnvName(resolved string) string {
+	if resolved == "" {
+		return "--admin-token-env <ENV> (or admin.tokenEnv)"
+	}
+	return resolved
 }

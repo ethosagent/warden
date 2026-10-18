@@ -52,16 +52,21 @@ func runParams(cmd *cobra.Command) (worker.Params, error) {
 	if err != nil {
 		return worker.Params{}, err
 	}
+	adminTokenEnv, err := cmd.Flags().GetString("admin-token-env")
+	if err != nil {
+		return worker.Params{}, err
+	}
 	return worker.Params{
-		ConfigPath:   configPath,
-		ListenAddr:   listenAddr,
-		DBPath:       dbPath,
-		CACert:       caCert,
-		CAKey:        caKey,
-		AdminAddr:    adminAddr,
-		Version:      version,
-		LocalOnly:    localOnly,
-		AlertsDBPath: alertsDB,
+		AdminTokenEnv: adminTokenEnv,
+		ConfigPath:    configPath,
+		ListenAddr:    listenAddr,
+		DBPath:        dbPath,
+		CACert:        caCert,
+		CAKey:         caKey,
+		AdminAddr:     adminAddr,
+		Version:       version,
+		LocalOnly:     localOnly,
+		AlertsDBPath:  alertsDB,
 	}, nil
 }
 
@@ -86,6 +91,7 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().String("ca-cert", "", "path to proxy CA certificate for TLS termination (overrides config tls.caCert)")
 	cmd.Flags().String("ca-key", "", "path to proxy CA private key for TLS termination (overrides config tls.caKey)")
 	cmd.Flags().String("admin-listen", config.DefaultAdminListen, "admin + dashboard HTTP listen address (overrides config adminListen:)")
+	cmd.Flags().String("admin-token-env", "", "env var holding the bearer token dashboard writes on the admin listener need (overrides config admin.tokenEnv); unset = writes refused")
 	cmd.Flags().Bool("local-only", false, "ignore the control plane and enforce local policy (standalone)")
 	cmd.Flags().String("alerts-db", "", "sqlite alert-store DB path for --local-only (default: sibling of --db, named warden-alerts.db); ignored in managed/fleet mode")
 

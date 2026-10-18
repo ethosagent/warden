@@ -18,6 +18,7 @@ import (
 func newLLMProvidersServer(t *testing.T, withWriter bool) (*Server, *[]config.LLMProvider) {
 	t.Helper()
 	srv := NewServer(&fakeDataSource{}, config.Policy{}, emptyProvider())
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
 	stored := &[]config.LLMProvider{{
 		Name: "openai-main", BaseURL: "https://api.openai.com/v1", Model: "gpt-4o-mini", APIKeyEnv: "OPENAI_API_KEY",
 	}}

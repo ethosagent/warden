@@ -1265,10 +1265,10 @@ function relTime(iso){
 function hhmmss(iso){ if(!iso) return "—"; const d=new Date(iso); if(isNaN(d.getTime())) return "—"; return d.toTimeString().slice(0,8); }
 async function jget(url){ const r=await fetch(url); if(!r.ok) throw new Error("status "+r.status); return r.json(); }
 
-/* ---------- write auth: the control plane needs its bearer token for every change ----------
+/* ---------- write auth: the control plane and the worker admin listener need their bearer token for every change ----------
    The token is asked for once and kept in sessionStorage (this tab only; never the persistent store
    or a cookie). It travels in the Authorization header, so a cross-site form cannot make the
-   browser send it. The write goes out without a token first (a worker dashboard needs none); only a 401 prompts, then the write is retried once with the token. A 401 clears the stored token. Reads stay open. */
+   browser send it. The write goes out without a token first (a dashboard with no guard needs none); only a 401 prompts, then the write is retried once with the token. A 401 clears the stored token. Reads stay open. */
 const CP_TOKEN_KEY='wardenCpToken';
 async function authFetch(url,opts){
   const o=Object.assign({},opts||{});
@@ -1280,7 +1280,7 @@ async function authFetch(url,opts){
   let r=await send(sessionStorage.getItem(CP_TOKEN_KEY));
   if(r.status!==401) return r;
   sessionStorage.removeItem(CP_TOKEN_KEY);
-  const tok=window.prompt('Control-plane token (required to make changes; kept for this browser tab only):');
+  const tok=window.prompt('Admin token (required to make changes; kept for this browser tab only):');
   if(!tok) return r;
   sessionStorage.setItem(CP_TOKEN_KEY,tok);
   r=await send(tok);

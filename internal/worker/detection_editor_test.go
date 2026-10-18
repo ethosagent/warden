@@ -57,6 +57,7 @@ func TestWorkerDetectionEditor_PUTReloadsEmbeddedEngine(t *testing.T) {
 	}
 	defer func() { _ = store.Close() }()
 	dash := dashboard.NewServer(store, pol, fakeSecrets{})
+	dash.SetWriteGuard(dashboard.AllowUngatedWritesForTests) // the editor is under test, not auth
 	alerts.wireDashboard(dash)
 
 	ts := httptest.NewServer(dash.Handler())

@@ -174,7 +174,7 @@ To put **your own** service behind Warden, copy the `ethos` service block: attac
 - **Dashboard** — built-in HTML UI at `/dashboard/` with auto-refresh, traffic table, policy view, secret references, blocked list, stats
 - **JSON APIs** — `/dashboard/api/traffic`, `/dashboard/api/policy`, `/dashboard/api/secrets`, `/dashboard/api/blocked`, `/dashboard/api/stats`
 - **Cost tracking** — estimated spend per LLM provider (OpenAI, Anthropic, Google, Cohere)
-- **Admin** — `GET /healthz` (liveness), `POST /admin/refresh-secrets` (drop cache + refetch)
+- **Admin** — `GET /healthz` (liveness), `POST /admin/refresh-secrets` (drop cache + refetch; needs the worker admin token, like every dashboard write)
 
 ### Governance
 

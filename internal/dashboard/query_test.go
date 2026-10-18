@@ -36,6 +36,7 @@ func queryTestServer(t *testing.T) http.Handler {
 		t.Fatalf("store event: %v", err)
 	}
 	srv := NewServer(store, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
 	srv.SetQueryEngine(store)
 	return srv.Handler()
 }
@@ -95,6 +96,7 @@ func TestQueryEndpoints_LocalStore(t *testing.T) {
 		t.Fatalf("store event: %v", err)
 	}
 	srv := NewServer(store, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
 	srv.SetQueryEngine(store)
 	h := srv.Handler()
 

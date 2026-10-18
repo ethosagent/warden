@@ -184,10 +184,8 @@ store, and the query and audit-verify `POST`s) must carry
   compose files is what bounds that.
 - **Reads stay open.** `GET` routes (traffic, analytics, policy view, workers, …)
   need no token. Restrict `:7070` to operators regardless: the demo compose files
-  publish it, and each worker's `:9090` admin/dashboard port, on `127.0.0.1` only
-  (the worker dashboard's own writes are not token-guarded yet).
-- **The UI asks once.** A change goes out without a token first (worker dashboards need
-  none); a `401` prompts for the token and retries once. It is kept in `sessionStorage` (this tab only; never `localStorage` or a
+  publish it, and each worker's `:9090` admin/dashboard port, on `127.0.0.1` only.
+- **The UI asks once.** A change goes out without a token first; a `401` prompts for the token and retries once. It is kept in `sessionStorage` (this tab only; never `localStorage` or a
   cookie) and sent as the bearer header. A `401` clears it.
   Because the credential is a header the page adds itself, a cross-site form or
   request cannot make the browser send it: writes are CSRF-safe.
@@ -201,8 +199,47 @@ curl --cacert proxy-ca.crt -X PUT https://localhost:7070/dashboard/api/policy \
   -d '{"allowlist":[{"domain":"api.openai.com"}],"denylist":[]}'
 ```
 
-A worker's own admin dashboard (its local `:9090`) is a separate listener and is
-not covered by this token; keep it off untrusted networks.
+A worker's own admin dashboard (its local `:9090`) is a separate listener with its
+own token, not this one: see [Worker admin token](#worker-admin-token).
+
+## Worker admin token
+
+The worker's admin listener (`:9090`, default `127.0.0.1:9090`) serves the same
+dashboard as the control plane, with live writers for detection, integrations and the
+managed secret store. Those writes use the same guard as above, with a **worker admin
+token** that is separate from the control-plane token (`Authorization: Bearer <worker
+admin token>`, constant-time compare).
+
+- **Configure it.** Name the env var that holds the token with `--admin-token-env
+  <ENV>` or `admin.tokenEnv: <ENV>` in the worker config (the flag wins). The token
+  is read from the worker's own environment; the compose files use
+  `WARDEN_ADMIN_TOKEN`, defaulting to the demo value `dev-admin-token`. Surrounding
+  whitespace is trimmed.
+- **What needs the token.** Every state-changing call on the admin listener — any
+  method but `GET`/`HEAD`:
+  - every `/dashboard/api/*` writer (`PUT /dashboard/api/policy`,
+    `PUT /dashboard/api/detection`, …),
+  - every `/admin/*` writer — today `POST /admin/refresh-secrets` (drop the secret
+    cache and refetch). A writer added under `/admin/` later is guarded by default.
+- **Reads stay open.** `GET`/`HEAD` need no token: `/healthz`, `/metrics`, the
+  dashboard pages and every `/dashboard/api/*` and `/admin/*` read.
+- **Fail closed.** With no token configured (flag and key unset, the variable unset or
+  empty or whitespace-only) every write is refused with `403` and a message
+  that names `--admin-token-env` and `admin.tokenEnv`. A missing or wrong token is
+  `401`.
+- **UI.** The dashboard prompts for the admin token after a `401`, exactly as above.
+- **Audit.** A refused write logs `worker dashboard write refused` (WARN) with the
+  method, path, remote address and reason, never the token.
+- Keep the admin port on loopback (the default) or a private network regardless.
+
+```sh
+WARDEN_ADMIN_TOKEN=$(openssl rand -hex 32) \
+  ./warden run --config configs/config.yaml --admin-token-env WARDEN_ADMIN_TOKEN
+curl -X PUT http://127.0.0.1:9090/dashboard/api/detection \
+  -H "Authorization: Bearer $WARDEN_ADMIN_TOKEN" -H 'Content-Type: application/json' -d '{"enabled":true}'
+curl -X POST http://127.0.0.1:9090/admin/refresh-secrets \
+  -H "Authorization: Bearer $WARDEN_ADMIN_TOKEN"
+```
 
 ## What's deliberately not here (yet)
 
