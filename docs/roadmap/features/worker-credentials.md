@@ -53,11 +53,11 @@ On a CP running with --state-dir and TLS, two workers use distinct per-worker to
 | 4/11 | [`W-P1-WTOK-04`](#411--w-p1-wtok-04) | Add strict worker auth mode and the WARDEN_CP_TOKEN migration guide | feature | S | W-P1-WTOK-02, W-P1-WTOK-03, W-P1-WTOK-07 | [#54](https://github.com/ethosagent/warden/issues/54) |
 | 5/11 | [`W-P1-WTOK-05`](#511--w-p1-wtok-05) | Add offline worker token bootstrap CLI | feature | S | W-P1-WTOK-01, W-P1-AAUD-05 | [#235](https://github.com/ethosagent/warden/issues/235) |
 | 6/11 | [`W-P1-WTOK-06`](#611--w-p1-wtok-06) | Move the control-plane compose recipe and e2e stack to per-worker tokens | chore | S | W-P1-WTOK-04, W-P1-WTOK-05, W-P1-WTOK-07 | [#236](https://github.com/ethosagent/warden/issues/236) |
-| 7/11 | [`W-P1-WTOK-07`](#711--w-p1-wtok-07) | Add --admin-token-env to the control plane for the dashboard write guard | feature | S | — | — |
-| 8/11 | [`W-P1-WTOK-08`](#811--w-p1-wtok-08) | Let the ingest handler take a pluggable authorizer instead of a static token | chore | S | — | — |
-| 9/11 | [`W-P1-WTOK-09`](#911--w-p1-wtok-09) | Re-authenticate held long-polls and cancel them when their token is revoked | feature | S | W-P1-WTOK-02 | — |
-| 10/11 | [`W-P1-WTOK-10`](#1011--w-p1-wtok-10) | Add the worker tokens console panel and fleet auth badge | feature | S | W-P1-WTOK-03 | — |
-| 11/11 | [`W-P1-WTOK-11`](#1111--w-p1-wtok-11) | Move the remaining compose recipes and sample worker configs to per-worker tokens | chore | S | W-P1-WTOK-06 | — |
+| 7/11 | [`W-P1-WTOK-07`](#711--w-p1-wtok-07) | Add --admin-token-env to the control plane for the dashboard write guard | feature | S | — | [#461](https://github.com/ethosagent/warden/issues/461) |
+| 8/11 | [`W-P1-WTOK-08`](#811--w-p1-wtok-08) | Let the ingest handler take a pluggable authorizer instead of a static token | chore | S | — | [#462](https://github.com/ethosagent/warden/issues/462) |
+| 9/11 | [`W-P1-WTOK-09`](#911--w-p1-wtok-09) | Re-authenticate held long-polls and cancel them when their token is revoked | feature | S | W-P1-WTOK-02 | [#463](https://github.com/ethosagent/warden/issues/463) |
+| 10/11 | [`W-P1-WTOK-10`](#1011--w-p1-wtok-10) | Add the worker tokens console panel and fleet auth badge | feature | S | W-P1-WTOK-03 | [#464](https://github.com/ethosagent/warden/issues/464) |
+| 11/11 | [`W-P1-WTOK-11`](#1111--w-p1-wtok-11) | Move the remaining compose recipes and sample worker configs to per-worker tokens | chore | S | W-P1-WTOK-06 | [#465](https://github.com/ethosagent/warden/issues/465) |
 
 ### 1/11 · W-P1-WTOK-01
 
@@ -316,7 +316,7 @@ Type **chore** · Size **S** · Issue [#236](https://github.com/ethosagent/warde
 
 **Add --admin-token-env to the control plane for the dashboard write guard**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#461](https://github.com/ethosagent/warden/issues/461)
 
 **Context.** Every dashboard write on the CP (`dashboard.SetWriteGuard` with `NewBearerWriteGuard`, internal/controlplane/dashboard_auth.go, added by #422/#425) and `/central/secrets` today accept the same single `--token-env` token that workers use to authenticate. The CP has no separate admin token (only workers have `--admin-token-env`). Once workers get their own tokens (this feature) the shared token goes away, and with it every dashboard write would silently be refused. This ticket gives the CP its own admin bearer, separate from the worker/legacy token, so strict worker-token mode (W-P1-WTOK-04) and the compose move (W-P1-WTOK-06) never disable dashboard writes. The SSO tickets call it the 'CP admin bearer'. In oidc mode sessions replace it for the console (W-P1-SSO-05/06). Siblings in the Per-worker tokens feature (epic #50): W-P1-WTOK-01 (#51) token store, W-P1-WTOK-08 ingest authorizer refactor, W-P1-WTOK-02 (#52) WorkerAuthenticator on /policy, heartbeat and ingest, W-P1-WTOK-09 held long-poll re-authentication and cancel on revoke, W-P1-WTOK-03 (#53) admin API and fleet fields, W-P1-WTOK-10 console panel, W-P1-WTOK-07 the CP's own admin token for dashboard writes, W-P1-WTOK-04 (#54) strict mode and migration guide, W-P1-WTOK-05 (#235) offline bootstrap CLI, W-P1-WTOK-06 (#236) control-plane and e2e compose move, W-P1-WTOK-11 remaining compose recipes.
 
@@ -354,7 +354,7 @@ Type **feature** · Size **S** · Issue —
 
 **Let the ingest handler take a pluggable authorizer instead of a static token**
 
-Type **chore** · Size **S** · Issue —
+Type **chore** · Size **S** · Issue [#462](https://github.com/ethosagent/warden/issues/462)
 
 **Context.** `/central/ingest` is served by `analytics.NewIngestHandler(store, token)`, which compares one shared bearer string and takes the proxy id from the self-reported `X-Warden-Proxy-ID` header. Per-worker tokens (W-P1-WTOK-02) need the handler to ask a pluggable authorizer who the caller is, and to use the authorizer's proxy id for every stored event and callback. This ticket is that behaviour-neutral refactor, split from the original W-P1-WTOK-02 (#52) in the 2026-10-19 pass because it touches only internal/analytics and its two call sites and can merge first. Siblings in the Per-worker tokens feature (epic #50): W-P1-WTOK-01 (#51) token store, W-P1-WTOK-08 ingest authorizer refactor, W-P1-WTOK-02 (#52) WorkerAuthenticator on /policy, heartbeat and ingest, W-P1-WTOK-09 held long-poll re-authentication and cancel on revoke, W-P1-WTOK-03 (#53) admin API and fleet fields, W-P1-WTOK-10 console panel, W-P1-WTOK-07 the CP's own admin token for dashboard writes, W-P1-WTOK-04 (#54) strict mode and migration guide, W-P1-WTOK-05 (#235) offline bootstrap CLI, W-P1-WTOK-06 (#236) control-plane and e2e compose move, W-P1-WTOK-11 remaining compose recipes.
 
@@ -388,7 +388,7 @@ Type **chore** · Size **S** · Issue —
 
 **Re-authenticate held long-polls and cancel them when their token is revoked**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#463](https://github.com/ethosagent/warden/issues/463)
 
 **Context.** `/policy` is a long-poll: a worker holds a request open for up to 30 s (`controlPlane.longPollWait`). If a token is revoked while its request is parked, the worker must not receive another policy response, and the revoked worker should find out at once instead of at the end of the wait. This ticket makes every `/policy` response re-authenticate and lets a revoke cancel that token's held long-polls. It was split from the original W-P1-WTOK-02 (#52). A revoked worker keeps enforcing its last-known-good, default-deny policy, gets no updates and cannot heartbeat or ingest; stopping its traffic means stopping the worker. Siblings in the Per-worker tokens feature (epic #50): W-P1-WTOK-01 (#51) token store, W-P1-WTOK-08 ingest authorizer refactor, W-P1-WTOK-02 (#52) WorkerAuthenticator on /policy, heartbeat and ingest, W-P1-WTOK-09 held long-poll re-authentication and cancel on revoke, W-P1-WTOK-03 (#53) admin API and fleet fields, W-P1-WTOK-10 console panel, W-P1-WTOK-07 the CP's own admin token for dashboard writes, W-P1-WTOK-04 (#54) strict mode and migration guide, W-P1-WTOK-05 (#235) offline bootstrap CLI, W-P1-WTOK-06 (#236) control-plane and e2e compose move, W-P1-WTOK-11 remaining compose recipes.
 
@@ -425,7 +425,7 @@ Type **feature** · Size **S** · Issue —
 
 **Add the worker tokens console panel and fleet auth badge**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#464](https://github.com/ethosagent/warden/issues/464)
 
 **Context.** This is the console UI for per-worker tokens: a 'Worker tokens' panel that creates, lists and revokes tokens and shows the new token exactly once, plus a legacy/unverified badge in the fleet view. It was split from the original W-P1-WTOK-03 (#53). This repo has no browser test harness, so behaviour is proven with Go tests on the served HTML and the handlers. Siblings in the Per-worker tokens feature (epic #50): W-P1-WTOK-01 (#51) token store, W-P1-WTOK-08 ingest authorizer refactor, W-P1-WTOK-02 (#52) WorkerAuthenticator on /policy, heartbeat and ingest, W-P1-WTOK-09 held long-poll re-authentication and cancel on revoke, W-P1-WTOK-03 (#53) admin API and fleet fields, W-P1-WTOK-10 console panel, W-P1-WTOK-07 the CP's own admin token for dashboard writes, W-P1-WTOK-04 (#54) strict mode and migration guide, W-P1-WTOK-05 (#235) offline bootstrap CLI, W-P1-WTOK-06 (#236) control-plane and e2e compose move, W-P1-WTOK-11 remaining compose recipes.
 
@@ -459,7 +459,7 @@ Type **feature** · Size **S** · Issue —
 
 **Move the remaining compose recipes and sample worker configs to per-worker tokens**
 
-Type **chore** · Size **S** · Issue —
+Type **chore** · Size **S** · Issue [#465](https://github.com/ethosagent/warden/issues/465)
 
 **Context.** After the control-plane recipe and e2e stack moved (W-P1-WTOK-06), the other compose recipes that run a CP and workers must follow so no shipped example depends on the shared `WARDEN_CP_TOKEN`: `docker-compose.yml`, `docker-compose.hermes.yml`, `docker-compose.openclaw.yml`, `docker-compose.zeroclaw.yml` and `docker-compose.ethos.yml` (they pass `--token-env=WARDEN_CP_TOKEN`), the `docker-compose.openrouter.yml` header comment, and the sample worker configs. It was split from the original W-P1-WTOK-06 (#236) because the pattern is already proven by W-P1-WTOK-06 and these files are exercised only by a static test, not by the e2e stack. Siblings in the Per-worker tokens feature (epic #50): W-P1-WTOK-01 (#51) token store, W-P1-WTOK-08 ingest authorizer refactor, W-P1-WTOK-02 (#52) WorkerAuthenticator on /policy, heartbeat and ingest, W-P1-WTOK-09 held long-poll re-authentication and cancel on revoke, W-P1-WTOK-03 (#53) admin API and fleet fields, W-P1-WTOK-10 console panel, W-P1-WTOK-07 the CP's own admin token for dashboard writes, W-P1-WTOK-04 (#54) strict mode and migration guide, W-P1-WTOK-05 (#235) offline bootstrap CLI, W-P1-WTOK-06 (#236) control-plane and e2e compose move, W-P1-WTOK-11 remaining compose recipes.
 

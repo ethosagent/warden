@@ -54,7 +54,7 @@ With audit.jsonLog.enabled: true and output: file on a real worker, every stored
 | 1/7 | [`W-P1-JAUD-05`](#17--w-p1-jaud-05) | Record the pre-swap URL on events and decision logs | feature | S | — | [#237](https://github.com/ethosagent/warden/issues/237) |
 | 2/7 | [`W-P1-JAUD-06`](#27--w-p1-jaud-06) | Set a bounded Reason on every deny event | feature | S | — | [#238](https://github.com/ethosagent/warden/issues/238) |
 | 3/7 | [`W-P1-JAUD-01`](#37--w-p1-jaud-01) | Add audit.jsonLog config, an additive analytics tee and the closed decision Record | feature | S | W-P1-VRFY-03 | [#66](https://github.com/ethosagent/warden/issues/66) |
-| 4/7 | [`W-P1-JAUD-07`](#47--w-p1-jaud-07) | Add the auditlog sink: bounded queue, rotation, metrics and worker wiring | feature | M | W-P1-JAUD-01 | — |
+| 4/7 | [`W-P1-JAUD-07`](#47--w-p1-jaud-07) | Add the auditlog sink: bounded queue, rotation, metrics and worker wiring | feature | M | W-P1-JAUD-01 | [#466](https://github.com/ethosagent/warden/issues/466) |
 | 5/7 | [`W-P1-JAUD-02`](#57--w-p1-jaud-02) | Publish the decision v1 JSON Schema with closed-field and leak tests | test | S | W-P1-JAUD-01, W-P1-JAUD-07 | [#67](https://github.com/ethosagent/warden/issues/67) |
 | 6/7 | [`W-P1-JAUD-03`](#67--w-p1-jaud-03) | Write CP admin audit lines as warden.admin.v1 JSON | feature | S | W-P1-JAUD-07, W-P1-AAUD-06, W-P1-AAUD-02 | [#68](https://github.com/ethosagent/warden/issues/68) |
 | 7/7 | [`W-P1-JAUD-04`](#77--w-p1-jaud-04) | Document SIEM shipping with Vector and Fluent Bit examples and the reason set | docs | S | W-P1-JAUD-02, W-P1-JAUD-03 | [#69](https://github.com/ethosagent/warden/issues/69) |
@@ -147,7 +147,7 @@ Merging needs the human `gates-change-approved` label because this ticket touche
 
 **Add the auditlog sink: bounded queue, rotation, metrics and worker wiring**
 
-Type **feature** · Size **M** · Issue —
+Type **feature** · Size **M** · Issue [#466](https://github.com/ethosagent/warden/issues/466)
 
 **Context.** The JSON audit feature (epic #65) is delivered as: W-P1-JAUD-05 and W-P1-JAUD-06 (both done on main), W-P1-JAUD-01 config + additive tee + the closed `Record`, W-P1-JAUD-07 the sink (queue, rotation, metrics, worker wiring), W-P1-JAUD-02 the decision schema and leak guards, W-P1-JAUD-03 CP admin lines as `warden.admin.v1`, and W-P1-JAUD-04 the SIEM docs and shipper examples. This ticket (W-P1-JAUD-07) is the second half of the original #66 (the first half, W-P1-JAUD-01, holds the config, the additive tee and `Record`). It adds the `Sink` that turns tee'd analytics batches into `warden.decision.v1` lines on stdout, stderr or a rotating file, and wires it into the worker. The sink is a tee on the async analytics writer's goroutine and hands batches to its own bounded queue, so it adds no I/O to the request goroutine and cannot stall the async writer (which is backpressure-only by design: its queue never drops). The SQLite store and signed receipts stay the record of truth; the stream is best effort, and a write error or drop never fails a request.
 

@@ -63,12 +63,12 @@ On a CP started with `--state-dir` and `--policy-store=versioned`, an existing d
 | 4/12 | [`W-P1-PVER-04`](#412--w-p1-pver-04) | Add history panel with diff view and rollback to dashboard | feature | S | W-P1-PVER-03, W-P1-PVER-08, W-P1-SSO-04, W-P1-SSO-09 | [#45](https://github.com/ethosagent/warden/issues/45) |
 | 5/12 | [`W-P1-PVER-05`](#512--w-p1-pver-05) | Mirror head into the served YAML and detect external edits | feature | M | W-P1-PVER-02, W-P1-AAUD-08 | [#233](https://github.com/ethosagent/warden/issues/233) |
 | 6/12 | [`W-P1-PVER-06`](#612--w-p1-pver-06) | Add warden policy import and export commands | feature | S | W-P1-PVER-01, W-P1-AAUD-05 | [#234](https://github.com/ethosagent/warden/issues/234) |
-| 7/12 | [`W-P1-PVER-07`](#712--w-p1-pver-07) | Import the served config as version 1 on first versioned start | feature | S | W-P1-PVER-01, W-P1-AAUD-05 | — |
-| 8/12 | [`W-P1-PVER-08`](#812--w-p1-pver-08) | Add the version header, If-Match and 409 contract and the policy audit hasher | feature | S | W-P1-PVER-02, W-P1-AAUD-02 | — |
-| 9/12 | [`W-P1-PVER-09`](#912--w-p1-pver-09) | Add structural policy diff and DiffKey on allow/deny entries | feature | S | — | — |
-| 10/12 | [`W-P1-PVER-10`](#1012--w-p1-pver-10) | Map worker ETags to policy versions and log ETag-only changes | feature | S | W-P1-PVER-01, W-P1-PVER-11 | — |
-| 11/12 | [`W-P1-PVER-11`](#1112--w-p1-pver-11) | Add serve-time wire overlays to the policy server | feature | S | — | — |
-| 12/12 | [`W-P1-PVER-12`](#1212--w-p1-pver-12) | Document the versioned policy store, mirror and release plan | docs | S | W-P1-PVER-03, W-P1-PVER-05, W-P1-PVER-06, W-P1-PVER-08, W-P1-PVER-10 | — |
+| 7/12 | [`W-P1-PVER-07`](#712--w-p1-pver-07) | Import the served config as version 1 on first versioned start | feature | S | W-P1-PVER-01, W-P1-AAUD-05 | [#455](https://github.com/ethosagent/warden/issues/455) |
+| 8/12 | [`W-P1-PVER-08`](#812--w-p1-pver-08) | Add the version header, If-Match and 409 contract and the policy audit hasher | feature | S | W-P1-PVER-02, W-P1-AAUD-02 | [#456](https://github.com/ethosagent/warden/issues/456) |
+| 9/12 | [`W-P1-PVER-09`](#912--w-p1-pver-09) | Add structural policy diff and DiffKey on allow/deny entries | feature | S | — | [#457](https://github.com/ethosagent/warden/issues/457) |
+| 10/12 | [`W-P1-PVER-10`](#1012--w-p1-pver-10) | Map worker ETags to policy versions and log ETag-only changes | feature | S | W-P1-PVER-01, W-P1-PVER-11 | [#458](https://github.com/ethosagent/warden/issues/458) |
+| 11/12 | [`W-P1-PVER-11`](#1112--w-p1-pver-11) | Add serve-time wire overlays to the policy server | feature | S | — | [#459](https://github.com/ethosagent/warden/issues/459) |
+| 12/12 | [`W-P1-PVER-12`](#1212--w-p1-pver-12) | Document the versioned policy store, mirror and release plan | docs | S | W-P1-PVER-03, W-P1-PVER-05, W-P1-PVER-06, W-P1-PVER-08, W-P1-PVER-10 | [#460](https://github.com/ethosagent/warden/issues/460) |
 
 ### 1/12 · W-P1-PVER-01
 
@@ -323,7 +323,7 @@ Type **feature** · Size **S** · Issue [#234](https://github.com/ethosagent/war
 
 **Import the served config as version 1 on first versioned start**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#455](https://github.com/ethosagent/warden/issues/455)
 
 **Context.** An existing deployment that switches to `--policy-store=versioned` already has a served config.yaml with allow/deny policy and settings. The store must start with that policy as version 1, so workers keep the exact policy and ETag they have and no worker reports `behind`. This ticket was split from the original W-P1-PVER-02 (#43, the '43a' in the 2026-10-19 audit). It runs once, only in versioned mode with an empty store. Siblings in the Policy history + rollback feature (epic #41): W-P1-PVER-11 serve-time overlay seam, W-P1-PVER-01 (#42) versioned store and serving head, W-P1-PVER-07 initial import as version 1, W-P1-PVER-02 (#43) publish path for policy/settings/llmProviders writes, W-P1-PVER-08 version header, If-Match and 409 contract, W-P1-PVER-09 structural diff, W-P1-PVER-03 (#44) history and rollback APIs, W-P1-PVER-04 (#45) history panel, W-P1-PVER-05 (#233) mirror and drift, W-P1-PVER-10 fleet policy version and publish-log appends, W-P1-PVER-06 (#234) import/export CLI, W-P1-PVER-12 docs and release plan.
 
@@ -360,7 +360,7 @@ Type **feature** · Size **S** · Issue —
 
 **Add the version header, If-Match and 409 contract and the policy audit hasher**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#456](https://github.com/ethosagent/warden/issues/456)
 
 **Context.** Two editors can open the policy tab at once; in versioned mode a save must name the head it was based on, and a stale save must fail with a body that names the conflicting author. This ticket adds that HTTP contract on top of the publish path (W-P1-PVER-02) and registers the `policy` state hasher so HTTP saves record before/after hashes in the admin audit log. It was split from the original W-P1-PVER-02 (#43, the '43c' in the 2026-10-19 audit). Siblings in the Policy history + rollback feature (epic #41): W-P1-PVER-11 serve-time overlay seam, W-P1-PVER-01 (#42) versioned store and serving head, W-P1-PVER-07 initial import as version 1, W-P1-PVER-02 (#43) publish path for policy/settings/llmProviders writes, W-P1-PVER-08 version header, If-Match and 409 contract, W-P1-PVER-09 structural diff, W-P1-PVER-03 (#44) history and rollback APIs, W-P1-PVER-04 (#45) history panel, W-P1-PVER-05 (#233) mirror and drift, W-P1-PVER-10 fleet policy version and publish-log appends, W-P1-PVER-06 (#234) import/export CLI, W-P1-PVER-12 docs and release plan.
 
@@ -397,7 +397,7 @@ Type **feature** · Size **S** · Issue —
 
 **Add structural policy diff and DiffKey on allow/deny entries**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#457](https://github.com/ethosagent/warden/issues/457)
 
 **Context.** History and approvals both need to say what a policy change did, not show a text diff. This ticket adds a pure structural diff over two policy docs and the `DiffKey()` method that identifies allow/deny entries, so later features (the history API W-P1-PVER-03, the history panel, P2 approvals' widening classification W-P2-APPR-02, W-P1-GPOL-01 adding groups/users to the key) share one definition. It was split from the original W-P1-PVER-03 (#44) because it is a pure function with no store or HTTP dependency. Siblings in the Policy history + rollback feature (epic #41): W-P1-PVER-11 serve-time overlay seam, W-P1-PVER-01 (#42) versioned store and serving head, W-P1-PVER-07 initial import as version 1, W-P1-PVER-02 (#43) publish path for policy/settings/llmProviders writes, W-P1-PVER-08 version header, If-Match and 409 contract, W-P1-PVER-09 structural diff, W-P1-PVER-03 (#44) history and rollback APIs, W-P1-PVER-04 (#45) history panel, W-P1-PVER-05 (#233) mirror and drift, W-P1-PVER-10 fleet policy version and publish-log appends, W-P1-PVER-06 (#234) import/export CLI, W-P1-PVER-12 docs and release plan.
 
@@ -430,7 +430,7 @@ Type **feature** · Size **S** · Issue —
 
 **Map worker ETags to policy versions and log ETag-only changes**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#458](https://github.com/ethosagent/warden/issues/458)
 
 **Context.** The fleet view should say which policy version each worker runs, but workers report an ETag, and the served ETag can change without a new version (a block-list edit, an AWS credential rotation, later the agent registry). This ticket records every served-ETag change in `policy_publish_log` and maps heartbeat ETags back to versions, so an up-to-date worker never shows as `unknown`. It was split from the original W-P1-PVER-05 (#233, the '233b' in the 2026-10-19 audit). P2 signed bundles take `policy_publish_log.seq` as their monotonic number and read this path. Siblings in the Policy history + rollback feature (epic #41): W-P1-PVER-11 serve-time overlay seam, W-P1-PVER-01 (#42) versioned store and serving head, W-P1-PVER-07 initial import as version 1, W-P1-PVER-02 (#43) publish path for policy/settings/llmProviders writes, W-P1-PVER-08 version header, If-Match and 409 contract, W-P1-PVER-09 structural diff, W-P1-PVER-03 (#44) history and rollback APIs, W-P1-PVER-04 (#45) history panel, W-P1-PVER-05 (#233) mirror and drift, W-P1-PVER-10 fleet policy version and publish-log appends, W-P1-PVER-06 (#234) import/export CLI, W-P1-PVER-12 docs and release plan.
 
@@ -466,7 +466,7 @@ Type **feature** · Size **S** · Issue —
 
 **Add serve-time wire overlays to the policy server**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#459](https://github.com/ethosagent/warden/issues/459)
 
 **Context.** The policy server builds the wire (`policyWire`) from the served YAML (today) or from a policy version (W-P1-PVER-01). Some data must be merged into the served wire at serve time but must never be stored in a policy version, because a rollback would otherwise restore it: the AWS credential (W-P1-PVER-01), the block list (W-P1-BLOCK-03) and, in P2, the agent registry. This ticket adds that one seam, so those features do not each edit `loadPolicy` and do not depend on each other. It adds no overlay itself and changes no behaviour. Siblings in the Policy history + rollback feature (epic #41): W-P1-PVER-11 serve-time overlay seam, W-P1-PVER-01 (#42) versioned store and serving head, W-P1-PVER-07 initial import as version 1, W-P1-PVER-02 (#43) publish path for policy/settings/llmProviders writes, W-P1-PVER-08 version header, If-Match and 409 contract, W-P1-PVER-09 structural diff, W-P1-PVER-03 (#44) history and rollback APIs, W-P1-PVER-04 (#45) history panel, W-P1-PVER-05 (#233) mirror and drift, W-P1-PVER-10 fleet policy version and publish-log appends, W-P1-PVER-06 (#234) import/export CLI, W-P1-PVER-12 docs and release plan.
 
@@ -500,7 +500,7 @@ Type **feature** · Size **S** · Issue —
 
 **Document the versioned policy store, mirror and release plan**
 
-Type **docs** · Size **S** · Issue —
+Type **docs** · Size **S** · Issue [#460](https://github.com/ethosagent/warden/issues/460)
 
 **Context.** Policy history changes how operators think about the served YAML, so the behaviour and the rollout need one place in the docs. This ticket documents the feature once its pieces exist. It was split from the original W-P1-PVER-05 (#233), where the documentation requirement was mixed in with code. Siblings in the Policy history + rollback feature (epic #41): W-P1-PVER-11 serve-time overlay seam, W-P1-PVER-01 (#42) versioned store and serving head, W-P1-PVER-07 initial import as version 1, W-P1-PVER-02 (#43) publish path for policy/settings/llmProviders writes, W-P1-PVER-08 version header, If-Match and 409 contract, W-P1-PVER-09 structural diff, W-P1-PVER-03 (#44) history and rollback APIs, W-P1-PVER-04 (#45) history panel, W-P1-PVER-05 (#233) mirror and drift, W-P1-PVER-10 fleet policy version and publish-log appends, W-P1-PVER-06 (#234) import/export CLI, W-P1-PVER-12 docs and release plan.
 

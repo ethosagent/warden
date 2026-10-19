@@ -72,10 +72,10 @@ On a CP started with --state-dir, console.auth=oidc and console.adminAudit.enabl
 | 2/8 | [`W-P1-AAUD-02`](#28--w-p1-aaud-02) | Record CP admin mutations through audit middleware | feature | M | W-P1-AAUD-05, W-P1-SSO-04, W-P1-SSO-05, W-P1-WTOK-07 | [#39](https://github.com/ethosagent/warden/issues/39) |
 | 3/8 | [`W-P1-AAUD-03`](#38--w-p1-aaud-03) | Show admin audit log and chain verification in the dashboard | feature | S | W-P1-AAUD-01, W-P1-AAUD-02, W-P1-AAUD-05, W-P1-SSO-05 | [#40](https://github.com/ethosagent/warden/issues/40) |
 | 4/8 | [`W-P1-AAUD-04`](#48--w-p1-aaud-04) | Add offline admin audit verify and export CLI | feature | S | W-P1-AAUD-01, W-P1-AAUD-05, W-P1-SSO-01 | [#232](https://github.com/ethosagent/warden/issues/232) |
-| 5/8 | [`W-P1-AAUD-05`](#58--w-p1-aaud-05) | Gate admin audit behind config, check the key id at startup, add segment rotation and a shared CLI recorder opener | feature | S | W-P1-AAUD-01, W-P1-SSO-01, W-P1-SSO-02 | — |
-| 6/8 | [`W-P1-AAUD-06`](#68--w-p1-aaud-06) | Emit warden.admin.v1 slog lines and the 5-minute checkpoint | feature | S | W-P1-AAUD-01, W-P1-AAUD-05 | — |
-| 7/8 | [`W-P1-AAUD-07`](#78--w-p1-aaud-07) | Record auth.login, auth.login_failed and auth.logout in the admin audit log | feature | S | W-P1-AAUD-02, W-P1-SSO-03, W-P1-SSO-04 | — |
-| 8/8 | [`W-P1-AAUD-08`](#88--w-p1-aaud-08) | Audit hand edits of the served YAML in file mode as config.external_change | feature | S | W-P1-AAUD-05 | — |
+| 5/8 | [`W-P1-AAUD-05`](#58--w-p1-aaud-05) | Gate admin audit behind config, check the key id at startup, add segment rotation and a shared CLI recorder opener | feature | S | W-P1-AAUD-01, W-P1-SSO-01, W-P1-SSO-02 | [#451](https://github.com/ethosagent/warden/issues/451) |
+| 6/8 | [`W-P1-AAUD-06`](#68--w-p1-aaud-06) | Emit warden.admin.v1 slog lines and the 5-minute checkpoint | feature | S | W-P1-AAUD-01, W-P1-AAUD-05 | [#452](https://github.com/ethosagent/warden/issues/452) |
+| 7/8 | [`W-P1-AAUD-07`](#78--w-p1-aaud-07) | Record auth.login, auth.login_failed and auth.logout in the admin audit log | feature | S | W-P1-AAUD-02, W-P1-SSO-03, W-P1-SSO-04 | [#453](https://github.com/ethosagent/warden/issues/453) |
+| 8/8 | [`W-P1-AAUD-08`](#88--w-p1-aaud-08) | Audit hand edits of the served YAML in file mode as config.external_change | feature | S | W-P1-AAUD-05 | [#454](https://github.com/ethosagent/warden/issues/454) |
 
 ### 1/8 · W-P1-AAUD-01
 
@@ -276,7 +276,7 @@ Type **feature** · Size **S** · Issue [#232](https://github.com/ethosagent/war
 
 **Gate admin audit behind config, check the key id at startup, add segment rotation and a shared CLI recorder opener**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#451](https://github.com/ethosagent/warden/issues/451)
 
 **Context.** Admin audit must be off by default, must never silently change signing keys, and every offline CLI that writes admin changes (policy import W-P1-PVER-06, worker tokens W-P1-WTOK-05, block list W-P1-BLOCK-08) must record them with the same key. This ticket wires the W-P1-AAUD-01 store into the CP behind `console.adminAudit.enabled`, adds the fail-closed key_id check, the documented manual segment rotation, and the shared CLI recorder opener `adminaudit.OpenForCLI`. It is the audit split called '#38b' in the 2026-10-19 audit and replaces the former stub for this key. Siblings in the Admin audit log feature (epic #37): W-P1-AAUD-01 (#38) store and verify, W-P1-AAUD-05 config gate, startup key check, segment rotation and the CLI opener, W-P1-AAUD-02 (#39) request middleware, W-P1-AAUD-06 slog emitter and checkpoint, W-P1-AAUD-07 login and logout events, W-P1-AAUD-08 file-mode external edits, W-P1-AAUD-03 (#40) dashboard tab, W-P1-AAUD-04 (#232) offline verify and export.
 
@@ -321,7 +321,7 @@ Type **feature** · Size **S** · Issue —
 
 **Emit warden.admin.v1 slog lines and the 5-minute checkpoint**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#452](https://github.com/ethosagent/warden/issues/452)
 
 **Context.** The hash chain proves internal consistency, but an attacker who can write the state dir can delete the newest rows or restore an older backup. Every entry (and a periodic head checkpoint) is therefore also emitted as a `warden.admin.v1` JSON log line so an off-host copy of the logs anchors the chain. This ticket adds the `Emitter` seam, the default slog emitter and the checkpoint ticker; it was split from the original W-P1-AAUD-02 (#39, the '39b' in the 2026-10-19 audit) and replaces the former stub for this key. W-P1-JAUD-03 (p1-json-audit) later plugs `auditlog.Writer` into this seam. Siblings in the Admin audit log feature (epic #37): W-P1-AAUD-01 (#38) store and verify, W-P1-AAUD-05 config gate, startup key check, segment rotation and the CLI opener, W-P1-AAUD-02 (#39) request middleware, W-P1-AAUD-06 slog emitter and checkpoint, W-P1-AAUD-07 login and logout events, W-P1-AAUD-08 file-mode external edits, W-P1-AAUD-03 (#40) dashboard tab, W-P1-AAUD-04 (#232) offline verify and export.
 
@@ -361,7 +361,7 @@ Type **feature** · Size **S** · Issue —
 
 **Record auth.login, auth.login_failed and auth.logout in the admin audit log**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#453](https://github.com/ethosagent/warden/issues/453)
 
 **Context.** Sign-ins are admin-relevant events: who got into the console, who failed to, and who ended a session. The middleware (W-P1-AAUD-02) deliberately never chains requests without a session, so login attempts are recorded explicitly by the auth handlers through the `Recorder`. This ticket was split from the original W-P1-AAUD-02 (#39, the '39c' in the 2026-10-19 audit). Break-glass attempts are recorded by W-P1-OPS1-08, not here. Siblings in the Admin audit log feature (epic #37): W-P1-AAUD-01 (#38) store and verify, W-P1-AAUD-05 config gate, startup key check, segment rotation and the CLI opener, W-P1-AAUD-02 (#39) request middleware, W-P1-AAUD-06 slog emitter and checkpoint, W-P1-AAUD-07 login and logout events, W-P1-AAUD-08 file-mode external edits, W-P1-AAUD-03 (#40) dashboard tab, W-P1-AAUD-04 (#232) offline verify and export.
 
@@ -397,7 +397,7 @@ Type **feature** · Size **S** · Issue —
 
 **Audit hand edits of the served YAML in file mode as config.external_change**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#454](https://github.com/ethosagent/warden/issues/454)
 
 **Context.** In the default `--policy-store=file` mode the CP serves the YAML on disk and re-reads it every 3 s (`policyReloadInterval`), so an operator or an attacker with write access to the state dir can change policy with no admin action ever passing through the HTTP middleware. This ticket records such a change as one `config.external_change` row. It was split from the original W-P1-AAUD-02 (#39, the '39d' in the 2026-10-19 audit). The versioned-mode variant (drift between the served YAML and head) is recorded by W-P1-PVER-05 through the helper added here. Siblings in the Admin audit log feature (epic #37): W-P1-AAUD-01 (#38) store and verify, W-P1-AAUD-05 config gate, startup key check, segment rotation and the CLI opener, W-P1-AAUD-02 (#39) request middleware, W-P1-AAUD-06 slog emitter and checkpoint, W-P1-AAUD-07 login and logout events, W-P1-AAUD-08 file-mode external edits, W-P1-AAUD-03 (#40) dashboard tab, W-P1-AAUD-04 (#232) offline verify and export.
 

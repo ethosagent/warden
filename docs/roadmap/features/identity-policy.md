@@ -55,16 +55,16 @@ On a CA-enabled worker in attribute mode with `{domain: api.github.com, groups: 
 | 2/14 | [`W-P1-GPOL-06`](#214--w-p1-gpol-06) | Project scoped rules into fail-closed policy wire fields | feature | S | W-P1-GPOL-01 | [#244](https://github.com/ethosagent/warden/issues/244) |
 | 3/14 | [`W-P1-GPOL-02`](#314--w-p1-gpol-02) | Make the policy evaluator subject-aware: EvaluateFor and PeekFor with a request context | feature | M | W-P1-GPOL-01, W-P1-VRFY-01 | [#61](https://github.com/ethosagent/warden/issues/61) |
 | 4/14 | [`W-P1-GPOL-03`](#414--w-p1-gpol-03) | Thread a deferred enum through CONNECT, TLS, HTTP, gRPC and the transparent listeners and fail closed on identity-conditional decisions | feature | M | W-P1-GPOL-02, W-P1-VRFY-02 | [#62](https://github.com/ethosagent/warden/issues/62) |
-| 5/14 | [`W-P1-GPOL-10`](#514--w-p1-gpol-10) | Decide scoped allow entries on every request with the request subject, add reasons and metrics and lift the allow-entry guard | feature | M | W-P1-GPOL-03, W-P1-GPOL-02, W-P1-GPOL-06, W-P1-VRFY-02, W-P1-VRFY-03 | — |
+| 5/14 | [`W-P1-GPOL-10`](#514--w-p1-gpol-10) | Decide scoped allow entries on every request with the request subject, add reasons and metrics and lift the allow-entry guard | feature | M | W-P1-GPOL-03, W-P1-GPOL-02, W-P1-GPOL-06, W-P1-VRFY-02, W-P1-VRFY-03 | [#478](https://github.com/ethosagent/warden/issues/478) |
 | 6/14 | [`W-P1-GPOL-04`](#614--w-p1-gpol-04) | Pass the verified subject to the MCP gateway through RequestMeta | feature | S | W-P1-VRFY-02 | [#63](https://github.com/ethosagent/warden/issues/63) |
-| 7/14 | [`W-P1-GPOL-11`](#714--w-p1-gpol-11) | Support groups/users in MCP tool allowWhen conditions | feature | S | W-P1-GPOL-04, W-P1-GPOL-02, W-P1-GPOL-06 | — |
+| 7/14 | [`W-P1-GPOL-11`](#714--w-p1-gpol-11) | Support groups/users in MCP tool allowWhen conditions | feature | S | W-P1-GPOL-04, W-P1-GPOL-02, W-P1-GPOL-06 | [#479](https://github.com/ethosagent/warden/issues/479) |
 | 8/14 | [`W-P1-GPOL-05`](#814--w-p1-gpol-05) | Show affected users in policy eval replay | feature | S | W-P1-GPOL-02, W-P1-VRFY-03 | [#64](https://github.com/ethosagent/warden/issues/64) |
-| 9/14 | [`W-P1-GPOL-12`](#914--w-p1-gpol-12) | Add config.LintScoped shadow warnings and print them in policy eval | feature | S | W-P1-GPOL-01 | — |
+| 9/14 | [`W-P1-GPOL-12`](#914--w-p1-gpol-12) | Add config.LintScoped shadow warnings and print them in policy eval | feature | S | W-P1-GPOL-01 | [#480](https://github.com/ethosagent/warden/issues/480) |
 | 10/14 | [`W-P1-GPOL-07`](#1014--w-p1-gpol-07) | Report groupPolicy support in the heartbeat and flag old workers | feature | S | W-P1-GPOL-06, W-P1-BLOCK-10 | [#245](https://github.com/ethosagent/warden/issues/245) |
 | 11/14 | [`W-P1-GPOL-08`](#1114--w-p1-gpol-08) | Edit groups/users in the dashboard policy editor | feature | M | W-P1-GPOL-10, W-P1-GPOL-11, W-P1-GPOL-12 | [#246](https://github.com/ethosagent/warden/issues/246) |
 | 12/14 | [`W-P1-GPOL-09`](#1214--w-p1-gpol-09) | Add group policy scenarios on the L1 harness | test | M | W-P1-GPOL-10, W-P1-GPOL-11, W-P1-GPOL-05, W-P1-VRFY-11 | [#247](https://github.com/ethosagent/warden/issues/247) |
-| 13/14 | [`W-P1-GPOL-13`](#1314--w-p1-gpol-13) | Document group-scoped rules | docs | S | W-P1-GPOL-10, W-P1-GPOL-11, W-P1-GPOL-05, W-P1-GPOL-07, W-P1-GPOL-12 | — |
-| 14/14 | [`W-P1-GPOL-14`](#1414--w-p1-gpol-14) | Add the real-Dex group policy check on the L2 identity stack | test | S | W-P1-DEX-04, W-P1-GPOL-10, W-P1-GPOL-11 | — |
+| 13/14 | [`W-P1-GPOL-13`](#1314--w-p1-gpol-13) | Document group-scoped rules | docs | S | W-P1-GPOL-10, W-P1-GPOL-11, W-P1-GPOL-05, W-P1-GPOL-07, W-P1-GPOL-12 | [#481](https://github.com/ethosagent/warden/issues/481) |
+| 14/14 | [`W-P1-GPOL-14`](#1414--w-p1-gpol-14) | Add the real-Dex group policy check on the L2 identity stack | test | S | W-P1-DEX-04, W-P1-GPOL-10, W-P1-GPOL-11 | [#482](https://github.com/ethosagent/warden/issues/482) |
 
 ### 1/14 · W-P1-GPOL-01
 
@@ -259,7 +259,7 @@ OUT of scope: the per-request decision with the subject, reasons on request even
 
 **Decide scoped allow entries on every request with the request subject, add reasons and metrics and lift the allow-entry guard**
 
-Type **feature** · Size **M** · Issue —
+Type **feature** · Size **M** · Issue [#478](https://github.com/ethosagent/warden/issues/478)
 
 **Context.** The group-policy feature (epic #59) is delivered as: W-P1-GPOL-01 schema + guard, W-P1-GPOL-06 fail-closed wire, W-P1-GPOL-02 evaluator, W-P1-GPOL-03 `deferred` enum and CONNECT handling, W-P1-GPOL-10 per-request scoped decisions (lifts the allow-entry guard), W-P1-GPOL-04 subject plumbing into the MCP gateway, W-P1-GPOL-11 group/user `allowWhen` (lifts the MCP guard), W-P1-GPOL-05 affected users in `policy eval`, W-P1-GPOL-12 shadow lint, W-P1-GPOL-07 heartbeat capability, W-P1-GPOL-08 dashboard editor, W-P1-GPOL-09 L1 scenarios, W-P1-GPOL-13 docs and W-P1-GPOL-14 the real-Dex check. This ticket (W-P1-GPOL-10) is the second half of the original proxy ticket #62 (the first half, W-P1-GPOL-03, holds the `deferred` enum and CONNECT handling). One keep-alive tunnel can carry requests from different users, so the decision has to be re-made per request with that request's subject, on HTTP/1.1, WebSocket upgrades and every h2/gRPC stream.
 
@@ -350,7 +350,7 @@ OUT of scope: evaluating groups/users in `allowWhen` and lifting the config guar
 
 **Support groups/users in MCP tool allowWhen conditions**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#479](https://github.com/ethosagent/warden/issues/479)
 
 **Context.** The group-policy feature (epic #59) is delivered as: W-P1-GPOL-01 schema + guard, W-P1-GPOL-06 fail-closed wire, W-P1-GPOL-02 evaluator, W-P1-GPOL-03 `deferred` enum and CONNECT handling, W-P1-GPOL-10 per-request scoped decisions (lifts the allow-entry guard), W-P1-GPOL-04 subject plumbing into the MCP gateway, W-P1-GPOL-11 group/user `allowWhen` (lifts the MCP guard), W-P1-GPOL-05 affected users in `policy eval`, W-P1-GPOL-12 shadow lint, W-P1-GPOL-07 heartbeat capability, W-P1-GPOL-08 dashboard editor, W-P1-GPOL-09 L1 scenarios, W-P1-GPOL-13 docs and W-P1-GPOL-14 the real-Dex check. This ticket (W-P1-GPOL-11) is the second half of the original MCP ticket #63: it makes `allowWhen` on an MCP tool require a group or user (for example a `pay` tool limited to `finance`), using the subject that W-P1-GPOL-04 plumbed into `OnRequest`. A failure uses the existing Kind `mcp_tool_condition`; a nil subject never satisfies a group or user condition. It lifts the MCP part of the W-P1-GPOL-01 guard, which is safe because W-P1-GPOL-06 already makes old workers deny a scoped tool.
 
@@ -434,7 +434,7 @@ OUT of scope: lint (W-P1-GPOL-12); the dashboard (W-P1-GPOL-08).
 
 **Add config.LintScoped shadow warnings and print them in policy eval**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#480](https://github.com/ethosagent/warden/issues/480)
 
 **Context.** The group-policy feature (epic #59) is delivered as: W-P1-GPOL-01 schema + guard, W-P1-GPOL-06 fail-closed wire, W-P1-GPOL-02 evaluator, W-P1-GPOL-03 `deferred` enum and CONNECT handling, W-P1-GPOL-10 per-request scoped decisions (lifts the allow-entry guard), W-P1-GPOL-04 subject plumbing into the MCP gateway, W-P1-GPOL-11 group/user `allowWhen` (lifts the MCP guard), W-P1-GPOL-05 affected users in `policy eval`, W-P1-GPOL-12 shadow lint, W-P1-GPOL-07 heartbeat capability, W-P1-GPOL-08 dashboard editor, W-P1-GPOL-09 L1 scenarios, W-P1-GPOL-13 docs and W-P1-GPOL-14 the real-Dex check. This ticket (W-P1-GPOL-12) was split from the original #64 "affected users in policy eval" (now W-P1-GPOL-05). A scoped entry is useless when an unscoped or wildcard entry for the same destination already admits everyone; this lint finds that. It needs only the schema (W-P1-GPOL-01), so it can be built in parallel with the evaluator, and the dashboard editor (W-P1-GPOL-08) shows its warnings.
 
@@ -585,7 +585,7 @@ OUT of scope: documentation (W-P1-GPOL-13); the real Dex run (W-P1-GPOL-14).
 
 **Document group-scoped rules**
 
-Type **docs** · Size **S** · Issue —
+Type **docs** · Size **S** · Issue [#481](https://github.com/ethosagent/warden/issues/481)
 
 **Context.** The group-policy feature (epic #59) is delivered as: W-P1-GPOL-01 schema + guard, W-P1-GPOL-06 fail-closed wire, W-P1-GPOL-02 evaluator, W-P1-GPOL-03 `deferred` enum and CONNECT handling, W-P1-GPOL-10 per-request scoped decisions (lifts the allow-entry guard), W-P1-GPOL-04 subject plumbing into the MCP gateway, W-P1-GPOL-11 group/user `allowWhen` (lifts the MCP guard), W-P1-GPOL-05 affected users in `policy eval`, W-P1-GPOL-12 shadow lint, W-P1-GPOL-07 heartbeat capability, W-P1-GPOL-08 dashboard editor, W-P1-GPOL-09 L1 scenarios, W-P1-GPOL-13 docs and W-P1-GPOL-14 the real-Dex check. This ticket (W-P1-GPOL-13) was split from the original #247 "e2e test and docs" so that the documentation is owned and checkable on its own. It documents the matching rules and the fail-closed cases of the merged feature; every statement is tied to a test that already exists.
 
@@ -619,7 +619,7 @@ OUT of scope: code changes; the scenarios (W-P1-GPOL-09).
 
 **Add the real-Dex group policy check on the L2 identity stack**
 
-Type **test** · Size **S** · Issue —
+Type **test** · Size **S** · Issue [#482](https://github.com/ethosagent/warden/issues/482)
 
 **Context.** The group-policy feature (epic #59) is delivered as: W-P1-GPOL-01 schema + guard, W-P1-GPOL-06 fail-closed wire, W-P1-GPOL-02 evaluator, W-P1-GPOL-03 `deferred` enum and CONNECT handling, W-P1-GPOL-10 per-request scoped decisions (lifts the allow-entry guard), W-P1-GPOL-04 subject plumbing into the MCP gateway, W-P1-GPOL-11 group/user `allowWhen` (lifts the MCP guard), W-P1-GPOL-05 affected users in `policy eval`, W-P1-GPOL-12 shadow lint, W-P1-GPOL-07 heartbeat capability, W-P1-GPOL-08 dashboard editor, W-P1-GPOL-09 L1 scenarios, W-P1-GPOL-13 docs and W-P1-GPOL-14 the real-Dex check. The L1 scenarios (W-P1-GPOL-09) prove the behaviour against a fake issuer. This ticket (W-P1-GPOL-14) was split from the original #247 and repeats the core cases once against a real Dex token with LDAP groups from the seeded users of W-P1-DEX-02, on the L2 identity stack of W-P1-DEX-04. It needs Docker, so it is gated by the e2e build tag and runs in the CI `e2e` job only.
 

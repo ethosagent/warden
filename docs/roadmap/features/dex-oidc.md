@@ -57,9 +57,9 @@ With `make e2e-identity-up` (Dex and OpenLDAP, both pinned by tag and digest, de
 | 1/6 | [`W-P1-DEX-01`](#16--w-p1-dex-01) | Add reference Dex config with console, data-plane, harness and CLI clients | feature | S | — | [#17](https://github.com/ethosagent/warden/issues/17) |
 | 2/6 | [`W-P1-DEX-02`](#26--w-p1-dex-02) | Add identity compose recipe with pinned Dex and seeded LDAP | feature | S | W-P1-DEX-01 | [#18](https://github.com/ethosagent/warden/issues/18) |
 | 3/6 | [`W-P1-DEX-03`](#36--w-p1-dex-03) | Document Dex as Warden's IdP with connector, failure-mode and prod guidance | docs | S | W-P1-DEX-02, W-P1-DEX-04, W-P1-DEX-05, W-P1-SSO-02, W-P1-SSO-09, W-P1-VRFY-01, W-P1-VRFY-08, W-P1-VRFY-12 | [#19](https://github.com/ethosagent/warden/issues/19) |
-| 4/6 | [`W-P1-DEX-04`](#46--w-p1-dex-04) | Add the shared L2 identity e2e stack with Dex, a CP, an attribute-mode worker and a curl agent | test | M | W-P1-DEX-02 | — |
-| 5/6 | [`W-P1-DEX-05`](#56--w-p1-dex-05) | Add scripts/dex-token.sh to fetch and check a seeded user's ID token | feature | S | W-P1-DEX-01 | — |
-| 6/6 | [`W-P1-DEX-06`](#66--w-p1-dex-06) | Prove the Dex recipe at runtime on the L2 identity stack | test | S | W-P1-DEX-04, W-P1-DEX-05 | — |
+| 4/6 | [`W-P1-DEX-04`](#46--w-p1-dex-04) | Add the shared L2 identity e2e stack with Dex, a CP, an attribute-mode worker and a curl agent | test | M | W-P1-DEX-02 | [#437](https://github.com/ethosagent/warden/issues/437) |
+| 5/6 | [`W-P1-DEX-05`](#56--w-p1-dex-05) | Add scripts/dex-token.sh to fetch and check a seeded user's ID token | feature | S | W-P1-DEX-01 | [#438](https://github.com/ethosagent/warden/issues/438) |
+| 6/6 | [`W-P1-DEX-06`](#66--w-p1-dex-06) | Prove the Dex recipe at runtime on the L2 identity stack | test | S | W-P1-DEX-04, W-P1-DEX-05 | [#439](https://github.com/ethosagent/warden/issues/439) |
 
 ### 1/6 · W-P1-DEX-01
 
@@ -204,7 +204,7 @@ What to build: docs/identity-dex.md plus links, and two tests that keep the doc 
 
 **Add the shared L2 identity e2e stack with Dex, a CP, an attribute-mode worker and a curl agent**
 
-Type **test** · Size **M** · Issue —
+Type **test** · Size **M** · Issue [#437](https://github.com/ethosagent/warden/issues/437)
 
 Context: feature p1-dex (epic #16). Three later tickets need real Dex, a real control plane, a real worker and a real agent container: W-P1-IDC-03 (curl-agent attribution smoke), W-P1-IDC-07 (`identity exec`) and W-P1-SSO-07 (console SSO). Without a shared stack each would invent the same compose files, certs, port handling and helpers. This ticket (new, created by the P1 split pass; it replaces the earlier stub) builds that stack once, as an L2 test layer (`test/e2e/identity`, build tag `e2e`, `make e2e-identity`). Behaviour tests for identity attribution already run in-process on L1 (test/harness, W-P1-VRFY-05); this stack exists only for what needs real containers or real Dex. It depends on W-P1-DEX-02 (the Dex+LDAP recipe). It deliberately ships NO identity or console block in the worker/CP configs: W-P1-IDC-03 adds the worker `identity:` block and W-P1-SSO-07 adds the CP `console:` block, each editing its own config file, so this ticket merges before the verifier and the console exist. Out of scope: the identity behaviour tests (IDC-03/07, SSO-07), the Dex runtime proofs (W-P1-DEX-06).
 
@@ -258,7 +258,7 @@ Merging needs the human `gates-change-approved` label because this ticket touche
 
 **Add scripts/dex-token.sh to fetch and check a seeded user's ID token**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#438](https://github.com/ethosagent/warden/issues/438)
 
 Context: feature p1-dex (epic #16). The operator docs (W-P1-DEX-03), the Dex runtime proofs (W-P1-DEX-06) and humans trying the recipe all need one way to fetch an ID token for a seeded LDAP user and check its claims. This ticket was split from the original recipe ticket W-P1-DEX-02 (#18). It depends only on W-P1-DEX-01 (the dev Dex config that defines `agent-harness`, the password grant and `audience:server:client_id:warden`). Go-based tests in test/e2e/identity use their own Go helper (`dexToken`, W-P1-DEX-04) and do not shell out to this script. Out of scope: the compose recipe (DEX-02), running Dex (DEX-06).
 
@@ -294,7 +294,7 @@ What to build: `scripts/dex-token.sh <user>` plus a Go test that runs it against
 
 **Prove the Dex recipe at runtime on the L2 identity stack**
 
-Type **test** · Size **S** · Issue —
+Type **test** · Size **S** · Issue [#439](https://github.com/ethosagent/warden/issues/439)
 
 Context: feature p1-dex (epic #16). The static tests (DEX-01, DEX-02, DEX-05) prove the Dex files and the token script are well-formed; this ticket proves the recipe actually works when Dex and OpenLDAP run. It holds the runtime checks that the original compose-recipe ticket W-P1-DEX-02 (#18) listed as acceptance, now written as Go tests on the shared stack from W-P1-DEX-04 instead of a WARDEN_IT_DEX integration test. Out of scope: Warden code (nothing here touches the worker or CP), the verifier (p1-verify-token) and the console (p1-sso-roles).
 
