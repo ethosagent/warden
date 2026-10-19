@@ -472,23 +472,23 @@ Type **test** · Size **S** · Issue —
 
 OUT of scope: the L1 test (W-P1-OPS1-09); the runbook text (W-P1-OPS1-03).
 
-**What to build.** One L2 test in `test/e2e` (build tag `e2e`).
+**What to build.** One L2 test in `test/e2e/identity` (build tag `e2e`), because it needs the identity stack (the base `make e2e` stack has no Dex).
 
 **Requirements**
 
-- New `test/e2e/breakglass_test.go` (`//go:build e2e`) with `TestBreakGlassDexDown`, using the identity stack helpers of W-P1-DEX-04 (Dex, CP in oidc mode, a worker). The CP is configured with `console.breakGlass` enabled, a hash produced in the test with `controlplane.HashPassword`, TLS from the e2e certs, and the hash passed through an env var.
-- Flow: stack up and the worker synced; stop the Dex container; restart the CP container; assert the worker still receives `/policy` (ETag unchanged) and heartbeats, `/auth/login` returns 503 `idp_unavailable`; log in at `/auth/breakglass` with a Go HTTP client whose dialer is overridden to reach the published CP port (no /etc/hosts edits); assert `/auth/me` shows `authMethod` `breakglass`, the CP log contains exactly one `msg=breakglass_login` ERROR line, and a bad-password attempt leaves one `denied` audit row.
-- The test skips with a clear message unless the L2 environment is available, like the other tests in test/e2e. No real external account is used; the password in the test is generated per run and never logged.
+- New `test/e2e/identity/breakglass_test.go` (`//go:build e2e`) with `TestBreakGlassDexDown`, using the identity stack helpers of W-P1-DEX-04 (Dex, CP in oidc mode with issuer `http://localhost:5556/dex` and `internalIssuerURL: http://dex:5556`, a worker). The CP is configured with `console.breakGlass` enabled, a hash produced in the test with `controlplane.HashPassword`, TLS from the e2e certs, and the hash passed through an env var.
+- Flow: stack up and the worker synced; stop the Dex container; restart the CP container; assert the worker still receives `/policy` (ETag unchanged) and heartbeats, `/auth/login` returns 503 `idp_unavailable`; log in at `/auth/breakglass` with a Go HTTP client for the published CP port `https://localhost:7070` (TLS trusting the lab CA, no dialer override, no /etc/hosts edit); assert `/auth/me` shows `authMethod` `breakglass`, the CP log contains exactly one `msg=breakglass_login` ERROR line, and a bad-password attempt leaves one `denied` audit row.
+- The test starts with `requireStack(t)` (W-P1-DEX-04): with the stack missing it fails under `CI=true` and skips with a loud `BLOCKED` message only locally. No real external account is used; the password in the test is generated per run and never logged.
 
 **Implementation plan**
 
-1. Read test/e2e/shared.go and the W-P1-DEX-04 helpers; write the test.
-2. Run `make e2e-scenario NAME=TestBreakGlassDexDown` where Docker is available (CI job e2e).
+1. Read test/e2e/identity (stack_test.go, helpers_test.go from W-P1-DEX-04); write the test there.
+2. Run `make e2e-identity-scenario NAME=TestBreakGlassDexDown` where Docker is available (CI job e2e).
 
 **Acceptance criteria**
 
-- [ ] `make e2e-scenario NAME=TestBreakGlassDexDown` passes in the CI `e2e` job: after Dex is stopped and the CP restarted, /policy still reaches the worker, /auth/login is 503, and the break-glass login produces an admin session, one ERROR log line and one audit row.
-- [ ] `go vet -tags e2e ./test/e2e/...` is clean and `go test ./test/e2e` without the tag compiles nothing from this file. `scripts/check.sh` passes.
+- [ ] `make e2e-identity-scenario NAME=TestBreakGlassDexDown` passes in the CI `e2e` job: after Dex is stopped and the CP restarted, /policy still reaches the worker, /auth/login is 503, and the break-glass login produces an admin session, one ERROR log line and one audit row.
+- [ ] `go vet -tags e2e ./test/e2e/identity/` is clean, `go list ./test/e2e/identity` without the tag reports `build constraints exclude all Go files`, and with the stack missing `CI=true go test -tags e2e ./test/e2e/identity -run TestBreakGlassDexDown` fails with `BLOCKED:`. `scripts/check.sh` passes.
 
 **Depends on:** [`W-P1-DEX-04`](dex-oidc.md#46--w-p1-dex-04) Add the shared L2 identity e2e stack with Dex, a CP, an attribute-mode worker and a curl agent; [`W-P1-OPS1-09`](ops-hardening.md#911--w-p1-ops1-09) Add break-glass startup guards, the session banner and the degraded-mode test
 

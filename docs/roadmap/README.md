@@ -23,7 +23,7 @@ Grey tags exist today; coloured tags show the phase that adds each part. The cor
 
 | Phase | What works at the end | Features | Tickets | S / M / L | Eng-weeks |
 |---|---|---|---|---|---|
-| [P1 · Who did it](#phase-1--who-did-it) | Console SSO via Dex with 3 roles, admin audit log, policy history and rollback, per-worker tokens, user token verified on the worker in attribute mode, group-aware policy, fleet-wide user block, JSON audit logs, identity contract and CLI, and an in-process test harness whose scenarios every feature extends. | 12 | 110 | 81 / 29 / 0 | 34–61 |
+| [P1 · Who did it](#phase-1--who-did-it) | Console SSO via Dex with 3 roles, admin audit log, policy history and rollback, per-worker tokens, user token verified on the worker in attribute mode, group-aware policy, fleet-wide user block, JSON audit logs, identity contract and CLI, and an in-process test harness whose scenarios every feature extends. | 12 | 111 | 82 / 29 / 0 | 34–62 |
 | [P2 · Proven identity](#phase-2--proven-identity) | Agent registry, RFC 8693 token service (15-minute agent-bound tokens), key manager, worker CA and mTLS, signed bundles, two-person approval with replay, scoped API keys, require-identity mode, Claude Code and Codex recipes. | 10 | 75 | 32 / 43 / 0 | 32–56 |
 | [P3 · Act as the user](#phase-3--act-as-the-user) | Consent portal, OAuth broker for Google and GitHub, per-user secrets with refresh, JIT 403 with long-poll, offboarding revocation, per-user limits. | 7 | 59 | 22 / 37 / 0 | 27–46 |
 | [P4 · Agents everywhere](#phase-4--agents-everywhere) | Delegation grants, park and notify, MCP gateway and registry, external hooks, admin MCP server, policy as code with canary. | 8 | 89 | 32 / 57 / 0 | 41–70 |
@@ -72,7 +72,7 @@ flowchart LR
 |---|---|---|---|---|---|
 | 1 | [L1 test harness](features/l1-test-harness.md) | Agent / harness | — | 0 () | — |
 | 2 | [Dex (one IdP)](features/dex-oidc.md) | Identity provider | [L1 test harness](features/l1-test-harness.md) | 6 (5S 1M) | [#16](https://github.com/ethosagent/warden/issues/16) |
-| 3 | [Verify user token](features/identity-verification.md) | Worker | [L1 test harness](features/l1-test-harness.md), [Dex (one IdP)](features/dex-oidc.md) | 11 (8S 3M) | [#20](https://github.com/ethosagent/warden/issues/20) |
+| 3 | [Verify user token](features/identity-verification.md) | Worker | [L1 test harness](features/l1-test-harness.md), [Dex (one IdP)](features/dex-oidc.md) | 12 (9S 3M) | [#20](https://github.com/ethosagent/warden/issues/20) |
 | 4 | [Identity contract + CLI](features/identity-contract.md) | Agent / harness | [L1 test harness](features/l1-test-harness.md), [Dex (one IdP)](features/dex-oidc.md), [Verify user token](features/identity-verification.md) | 7 (6S 1M) | [#26](https://github.com/ethosagent/warden/issues/26) |
 | 5 | [SSO + 3 roles](features/console-sso-rbac.md) | Control plane | [L1 test harness](features/l1-test-harness.md), [Dex (one IdP)](features/dex-oidc.md), [Verify user token](features/identity-verification.md) | 11 (7S 4M) | [#30](https://github.com/ethosagent/warden/issues/30) |
 | 6 | [Admin audit log](features/admin-audit-log.md) | Control plane | [L1 test harness](features/l1-test-harness.md), [SSO + 3 roles](features/console-sso-rbac.md) | 8 (6S 2M) | [#37](https://github.com/ethosagent/warden/issues/37) |

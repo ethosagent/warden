@@ -166,7 +166,7 @@ Type **feature** · Size **M** · Issue [#48](https://github.com/ethosagent/ward
 - [ ] `user_blocked` is in `denyreason.Declared()` and no literal of it exists outside the package: `go test ./internal/denyreason`; the invariants suite still passes: `go test -race ./internal/proxy -run TestInvariants`.
 - [ ] `IsBlocked` at 5000 entries allocates 0 per call: `go test ./internal/policy -run TestIsBlockedAllocs` (uses `testing.AllocsPerRun`); `go test -race ./internal/policy ./internal/proxy ./internal/worker` and `scripts/check.sh` pass.
 
-**Depends on:** [`W-P1-BLOCK-01`](user-block-list.md#112--w-p1-block-01) Carry blockedUsers in config.Policy and the policy wire; [`W-P1-VRFY-02`](identity-verification.md#211--w-p1-vrfy-02) Extract and verify identity on CONNECT, HTTP/1.1 and HTTP/2 before the proxy-only strip; [`W-P1-VRFY-03`](identity-verification.md#311--w-p1-vrfy-03) Add identity fields to analytics.Event and the local SQLite store; [`W-P1-VRFY-09`](identity-verification.md#911--w-p1-vrfy-09) Stamp identity on every proxy event and decision log
+**Depends on:** [`W-P1-BLOCK-01`](user-block-list.md#112--w-p1-block-01) Carry blockedUsers in config.Policy and the policy wire; [`W-P1-VRFY-02`](identity-verification.md#212--w-p1-vrfy-02) Extract and verify identity on CONNECT, HTTP/1.1 and HTTP/2 before the proxy-only strip; [`W-P1-VRFY-03`](identity-verification.md#312--w-p1-vrfy-03) Add identity fields to analytics.Event and the local SQLite store; [`W-P1-VRFY-09`](identity-verification.md#912--w-p1-vrfy-09) Stamp identity on every proxy event and decision log
 
 **Unblocks:** [`W-P1-BLOCK-05`](user-block-list.md#512--w-p1-block-05) Close open sessions of newly blocked users on policy change; [`W-P1-BLOCK-06`](user-block-list.md#612--w-p1-block-06) Raise one user_blocked Finding per user without leaking email; [`W-P1-BLOCK-09`](user-block-list.md#912--w-p1-block-09) Add harness scenarios for blocking users and cutting their sessions; [`W-P1-BLOCK-10`](user-block-list.md#1012--w-p1-block-10) Advertise and record worker caps (blocklist/v1) in the heartbeat; [`W-P2-AREG-05`](agent-registry.md#57--w-p2-areg-05) Bind workers to an agent id and enforce agent_disabled; [`W-P3-OFFB-04`](offboarding.md#47--w-p3-offb-04) Add an E2E test for IdP-driven offboarding and its false-positive guards; [`W-P2-WBND-03`](identity-enforcement.md#310--w-p2-wbnd-03) Enforce identity require mode on CONNECT and terminated traffic; [`W-P3-PUL-09`](per-user-limits.md#910--w-p3-pul-09) Enforce per-user rate limits per request in the proxy; [`W-P4-HOOK-07`](policy-hooks.md#711--w-p4-hook-07) Wire the pre-request hook stage into the HTTP/1.1 proxy path
 
@@ -243,7 +243,7 @@ Type **feature** · Size **S** · Issue [#239](https://github.com/ethosagent/war
 - [ ] The traffic user row block link carries both sub and email as prefill parameters: `go test ./internal/dashboard -run TestBlockThisUserLink`.
 - [ ] The panel markup is gated by the admin role check in the template (data-min-role=admin) and direct API calls from an editor get 403 (covered by W-P1-BLOCK-11): `go test ./internal/dashboard -run TestBlockedUsersPanelAdminOnly`; `go test ./internal/dashboard` and `scripts/check.sh` pass.
 
-**Depends on:** [`W-P1-BLOCK-11`](user-block-list.md#1112--w-p1-block-11) Add the block-list admin API with audit and self-unblock protection; [`W-P1-BLOCK-10`](user-block-list.md#1012--w-p1-block-10) Advertise and record worker caps (blocklist/v1) in the heartbeat; [`W-P1-VRFY-10`](identity-verification.md#1011--w-p1-vrfy-10) Add the top-users breakdown and the user column and filter box to the dashboard
+**Depends on:** [`W-P1-BLOCK-11`](user-block-list.md#1112--w-p1-block-11) Add the block-list admin API with audit and self-unblock protection; [`W-P1-BLOCK-10`](user-block-list.md#1012--w-p1-block-10) Advertise and record worker caps (blocklist/v1) in the heartbeat; [`W-P1-VRFY-10`](identity-verification.md#1012--w-p1-vrfy-10) Add the top-users breakdown and the user column and filter box to the dashboard
 
 ### 5/12 · W-P1-BLOCK-05
 
@@ -323,7 +323,7 @@ Type **feature** · Size **S** · Issue [#241](https://github.com/ethosagent/war
 - [ ] An event without UserSub still produces the fleet-wide `user_blocked:unknown` Finding: `go test ./internal/alertpipeline -run TestBridgeUserBlockedNoSub`.
 - [ ] Existing bridge tests pass unchanged: `go test ./internal/alertpipeline`; `scripts/check.sh` passes.
 
-**Depends on:** [`W-P1-BLOCK-02`](user-block-list.md#212--w-p1-block-02) Enforce the block list in the worker at CONNECT and per request; [`W-P1-VRFY-03`](identity-verification.md#311--w-p1-vrfy-03) Add identity fields to analytics.Event and the local SQLite store
+**Depends on:** [`W-P1-BLOCK-02`](user-block-list.md#212--w-p1-block-02) Enforce the block list in the worker at CONNECT and per request; [`W-P1-VRFY-03`](identity-verification.md#312--w-p1-vrfy-03) Add identity fields to analytics.Event and the local SQLite store
 
 **Unblocks:** [`W-P1-BLOCK-09`](user-block-list.md#912--w-p1-block-09) Add harness scenarios for blocking users and cutting their sessions
 
@@ -438,7 +438,7 @@ Type **test** · Size **S** · Issue —
 - [ ] One Finding exists for alice and no email appears in it or in the logs: `go test -race ./test/scenarios -run 'TestScenarios/block_list_finding'`.
 - [ ] `go test -race ./test/scenarios` and `scripts/check.sh` pass.
 
-**Depends on:** [`W-P1-BLOCK-02`](user-block-list.md#212--w-p1-block-02) Enforce the block list in the worker at CONNECT and per request; [`W-P1-BLOCK-05`](user-block-list.md#512--w-p1-block-05) Close open sessions of newly blocked users on policy change; [`W-P1-BLOCK-06`](user-block-list.md#612--w-p1-block-06) Raise one user_blocked Finding per user without leaking email; [`W-P1-BLOCK-11`](user-block-list.md#1112--w-p1-block-11) Add the block-list admin API with audit and self-unblock protection; [`W-P1-VRFY-11`](identity-verification.md#1111--w-p1-vrfy-11) Add the in-process OIDC issuer fake and agent token options to the test harness
+**Depends on:** [`W-P1-BLOCK-02`](user-block-list.md#212--w-p1-block-02) Enforce the block list in the worker at CONNECT and per request; [`W-P1-BLOCK-05`](user-block-list.md#512--w-p1-block-05) Close open sessions of newly blocked users on policy change; [`W-P1-BLOCK-06`](user-block-list.md#612--w-p1-block-06) Raise one user_blocked Finding per user without leaking email; [`W-P1-BLOCK-11`](user-block-list.md#1112--w-p1-block-11) Add the block-list admin API with audit and self-unblock protection; [`W-P1-VRFY-11`](identity-verification.md#1112--w-p1-vrfy-11) Add the in-process OIDC issuer fake and agent token options to the test harness
 
 **Unblocks:** [`W-P1-BLOCK-12`](user-block-list.md#1212--w-p1-block-12) Add harness scenarios proving a block survives rollback, restart and CP outage
 
