@@ -76,9 +76,9 @@ On a CP started with `console.auth: oidc` in --config, an https redirectURL and 
 | 6/11 | [`W-P1-SSO-06`](#611--w-p1-sso-06) | Require an admin session on /central/secrets and flag open consoles | feature | S | W-P1-SSO-03, W-P1-SSO-05 | [#36](https://github.com/ethosagent/warden/issues/36) |
 | 7/11 | [`W-P1-SSO-07`](#711--w-p1-sso-07) | Add the L2 Dex-backed console SSO end-to-end test | test | M | W-P1-SSO-06, W-P1-SSO-08, W-P1-DEX-04 | [#230](https://github.com/ethosagent/warden/issues/230) |
 | 8/11 | [`W-P1-SSO-08`](#811--w-p1-sso-08) | Add admin session list and revoke API | feature | S | W-P1-SSO-05, W-P1-SSO-09, W-P1-SSO-11 | [#231](https://github.com/ethosagent/warden/issues/231) |
-| 9/11 | [`W-P1-SSO-09`](#911--w-p1-sso-09) | Add POST /auth/logout, GET /auth/me and the dashboard api() fetch wrapper | feature | S | W-P1-SSO-04 | — |
-| 10/11 | [`W-P1-SSO-10`](#1011--w-p1-sso-10) | Authorize settings writes per field and rate-limit query/generate | feature | S | W-P1-SSO-05 | — |
-| 11/11 | [`W-P1-SSO-11`](#1111--w-p1-sso-11) | Make the dashboard UI role-aware and document the role matrix | feature | S | W-P1-SSO-05, W-P1-SSO-09, W-P1-SSO-10 | — |
+| 9/11 | [`W-P1-SSO-09`](#911--w-p1-sso-09) | Add POST /auth/logout, GET /auth/me and the dashboard api() fetch wrapper | feature | S | W-P1-SSO-04 | [#448](https://github.com/ethosagent/warden/issues/448) |
+| 10/11 | [`W-P1-SSO-10`](#1011--w-p1-sso-10) | Authorize settings writes per field and rate-limit query/generate | feature | S | W-P1-SSO-05 | [#449](https://github.com/ethosagent/warden/issues/449) |
+| 11/11 | [`W-P1-SSO-11`](#1111--w-p1-sso-11) | Make the dashboard UI role-aware and document the role matrix | feature | S | W-P1-SSO-05, W-P1-SSO-09, W-P1-SSO-10 | [#450](https://github.com/ethosagent/warden/issues/450) |
 
 ### 1/11 · W-P1-SSO-01
 
@@ -451,7 +451,7 @@ What to build: two admin routes mounted by the CP and a panel in the UI. IMPORTA
 
 **Add POST /auth/logout, GET /auth/me and the dashboard api() fetch wrapper**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#448](https://github.com/ethosagent/warden/issues/448)
 
 Context: feature p1-sso-roles (epic #30). Once sessions exist (W-P1-SSO-04), the browser needs a way to learn who it is, to get its CSRF token and to log out, and the dashboard needs one fetch wrapper that sends that token. This ticket (new, split from the original M ticket #34) adds `POST /auth/logout`, `GET /auth/me` and the UI wrapper. It depends on SSO-04. Siblings: SSO-03 (login), SSO-05 (enforcement), SSO-11 (role-aware UI and docs, which builds on /auth/me), SSO-08 (sessions panel). Other tickets use /auth/me (W-P1-PVER-04 rollback button, W-P1-OPS1-09 break-glass test, W-P2-AREG-03 Agents tab via api()). Out of scope: role enforcement, login.
 
@@ -488,7 +488,7 @@ What to build: two handlers registered in internal/controlplane/routes.go (rule 
 
 **Authorize settings writes per field and rate-limit query/generate**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#449](https://github.com/ethosagent/warden/issues/449)
 
 Context: feature p1-sso-roles (epic #30). SettingsWire carries llmProviders, the secrets selector, identity and other fields that decide where workers send real credentials, so an editor must not be able to change them. W-P1-SSO-05 therefore makes settings writes admin-only (fail-closed); this ticket (new, split from the original M ticket #35) relaxes that to a per-field check so editors can change only the harmless fields, and adds the per-session rate limit on the LLM-spending query/generate route. It depends on SSO-05 (authz table, requireRole, Principal). Siblings: SSO-11 (UI and docs). W-P2-APPR-02, W-P2-WBND-07 and W-P4-HOOK-10 later reuse the editor-field set and add admin-only fields to it. Out of scope: the table itself, UI, docs.
 
@@ -526,7 +526,7 @@ What to build: `settingsFieldsChanged`, the context-aware settings writer, the t
 
 **Make the dashboard UI role-aware and document the role matrix**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#450](https://github.com/ethosagent/warden/issues/450)
 
 Context: feature p1-sso-roles (epic #30). The server is the only enforcement point (SSO-05, SSO-10), but a viewer should not be shown buttons that always fail. This ticket (new, split from the original M ticket #35) hides controls the current role cannot use, shows who is signed in with a logout button, and writes the role matrix and the none-versus-oidc behaviour into docs/control-plane.md. It depends on SSO-05 (table), SSO-09 (/auth/me, logout and the api() wrapper) and SSO-10 (per-field rules to document). Out of scope: server-side enforcement, the sessions admin panel (SSO-08), the none-to-oidc migration guide (SSO-06).
 

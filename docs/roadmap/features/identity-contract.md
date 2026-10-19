@@ -47,9 +47,9 @@ On the shared L2 identity stack (`make e2e-identity-up`: control plane, Dex with
 | 2/7 | [`W-P1-IDC-02`](#27--w-p1-idc-02) | Add internal/identityclient: config, discovery, device login, locked file cache, Token and Status | feature | M | — | [#28](https://github.com/ethosagent/warden/issues/28) |
 | 3/7 | [`W-P1-IDC-03`](#37--w-p1-idc-03) | Add the L2 identity attribution smoke with a curl agent | test | S | W-P1-DEX-04, W-P1-IDC-05, W-P1-VRFY-07, W-P1-VRFY-09, W-P1-VRFY-04 | [#29](https://github.com/ethosagent/warden/issues/29) |
 | 4/7 | [`W-P1-IDC-04`](#47--w-p1-idc-04) | Add the loopback CONNECT forwarder that injects a fresh identity token | feature | S | W-P1-IDC-02 | [#303](https://github.com/ethosagent/warden/issues/303) |
-| 5/7 | [`W-P1-IDC-05`](#57--w-p1-idc-05) | Add the `warden identity` cobra subtree: login, token, status, env and logout | feature | S | W-P1-IDC-02 | — |
-| 6/7 | [`W-P1-IDC-06`](#67--w-p1-idc-06) | Add `warden identity exec` to run a child behind the forwarder | feature | S | W-P1-IDC-04, W-P1-IDC-05 | — |
-| 7/7 | [`W-P1-IDC-07`](#77--w-p1-idc-07) | Add the L2 test for `warden identity exec` attribution | test | S | W-P1-IDC-03, W-P1-IDC-06 | — |
+| 5/7 | [`W-P1-IDC-05`](#57--w-p1-idc-05) | Add the `warden identity` cobra subtree: login, token, status, env and logout | feature | S | W-P1-IDC-02 | [#445](https://github.com/ethosagent/warden/issues/445) |
+| 6/7 | [`W-P1-IDC-06`](#67--w-p1-idc-06) | Add `warden identity exec` to run a child behind the forwarder | feature | S | W-P1-IDC-04, W-P1-IDC-05 | [#446](https://github.com/ethosagent/warden/issues/446) |
+| 7/7 | [`W-P1-IDC-07`](#77--w-p1-idc-07) | Add the L2 test for `warden identity exec` attribution | test | S | W-P1-IDC-03, W-P1-IDC-06 | [#447](https://github.com/ethosagent/warden/issues/447) |
 
 ### 1/7 · W-P1-IDC-01
 
@@ -221,7 +221,7 @@ What to build: internal/identityclient/forwarder.go and its tests. Nothing outsi
 
 **Add the `warden identity` cobra subtree: login, token, status, env and logout**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#445](https://github.com/ethosagent/warden/issues/445)
 
 Context: feature p1-identity-contract (epic #26). W-P1-IDC-02 (#28) ships the identityclient library; this ticket exposes it as the `warden identity` command tree and adds the proxy-env renderer. It was split from the original M ticket #28. It depends on IDC-02. Siblings: IDC-04 (forwarder) and IDC-06 (`identity exec`, which reuses the env renderer for CA variables), IDC-03 (L2 smoke that runs `identity env --token-stdin`), IDC-01 (docs). Adding the subtree changes nothing about `run` or `control-plane`; the worker and CP are untouched. cmd/ stays thin: logic lives in internal/identityclient.
 
@@ -258,7 +258,7 @@ What to build: cmd/proxy/identity.go with five subcommands registered in cmd/pro
 
 **Add `warden identity exec` to run a child behind the forwarder**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#446](https://github.com/ethosagent/warden/issues/446)
 
 Context: feature p1-identity-contract (epic #26). The forwarder (W-P1-IDC-04, issue #303) injects a fresh identity token into every CONNECT; this ticket is the command that makes it usable: `warden identity exec --worker host:port -- <cmd>` starts the forwarder on loopback, runs the child with HTTPS_PROXY pointing at it, and supervises the child. The user's token is therefore never in the parent's or the child's environment or argv. It was split from the original `identity exec` ticket #303. It depends on IDC-04 (forwarder) and IDC-05 (the `identity` subtree and the env renderer for CA variables). Siblings: IDC-07 (L2 test), IDC-01 (docs). P2 later adds `--agent-id` and `--run-as` to this command (W-P2-RCP-06). Out of scope: the forwarder internals and the cache/refresh logic.
 
@@ -294,7 +294,7 @@ What to build: cmd/proxy/identity_exec.go (flags and wiring only) and internal/i
 
 **Add the L2 test for `warden identity exec` attribution**
 
-Type **test** · Size **S** · Issue —
+Type **test** · Size **S** · Issue [#447](https://github.com/ethosagent/warden/issues/447)
 
 Context: feature p1-identity-contract (epic #26). The feature's done-when says `warden identity exec --worker <worker> -- curl https://<allowed host>` is attributed to the same user while the child's environment and argv contain no token. W-P1-IDC-03 proves the `env` path; this ticket proves the `exec` path on the same real stack. It is new (created by the P1 split pass); no earlier ticket covered the exec done-when with a test beyond unit level. Depends on IDC-03 (the identity config and the smoke it extends) and IDC-06 (the command). Refresh behaviour while a child runs is proven by the unit test TestForwarderRefresh (Dex tokens last 1h, too long for an L2 test). Out of scope: any code change.
 

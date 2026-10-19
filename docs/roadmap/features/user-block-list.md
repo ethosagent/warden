@@ -74,10 +74,10 @@ On a managed deployment where every connected worker advertises blocklist/v1, an
 | 6/12 | [`W-P1-BLOCK-06`](#612--w-p1-block-06) | Raise one user_blocked Finding per user without leaking email | feature | S | W-P1-BLOCK-02, W-P1-VRFY-03 | [#241](https://github.com/ethosagent/warden/issues/241) |
 | 7/12 | [`W-P1-BLOCK-07`](#712--w-p1-block-07) | Deny console login and sessions for blocked principals | feature | S | W-P1-BLOCK-03, W-P1-SSO-03, W-P1-SSO-04, W-P1-AAUD-05, W-P1-OPS1-08 | [#242](https://github.com/ethosagent/warden/issues/242) |
 | 8/12 | [`W-P1-BLOCK-08`](#812--w-p1-block-08) | Add offline block add, remove and list commands to the control-plane CLI | feature | S | W-P1-BLOCK-03, W-P1-AAUD-05 | [#304](https://github.com/ethosagent/warden/issues/304) |
-| 9/12 | [`W-P1-BLOCK-09`](#912--w-p1-block-09) | Add harness scenarios for blocking users and cutting their sessions | test | S | W-P1-BLOCK-02, W-P1-BLOCK-05, W-P1-BLOCK-06, W-P1-BLOCK-11, W-P1-VRFY-11 | — |
-| 10/12 | [`W-P1-BLOCK-10`](#1012--w-p1-block-10) | Advertise and record worker caps (blocklist/v1) in the heartbeat | feature | S | W-P1-BLOCK-02 | — |
-| 11/12 | [`W-P1-BLOCK-11`](#1112--w-p1-block-11) | Add the block-list admin API with audit and self-unblock protection | feature | S | W-P1-BLOCK-03, W-P1-SSO-05, W-P1-AAUD-02 | — |
-| 12/12 | [`W-P1-BLOCK-12`](#1212--w-p1-block-12) | Add harness scenarios proving a block survives rollback, restart and CP outage | test | S | W-P1-BLOCK-09, W-P1-BLOCK-08, W-P1-PVER-03, W-P1-PVER-07 | — |
+| 9/12 | [`W-P1-BLOCK-09`](#912--w-p1-block-09) | Add harness scenarios for blocking users and cutting their sessions | test | S | W-P1-BLOCK-02, W-P1-BLOCK-05, W-P1-BLOCK-06, W-P1-BLOCK-11, W-P1-VRFY-11 | [#474](https://github.com/ethosagent/warden/issues/474) |
+| 10/12 | [`W-P1-BLOCK-10`](#1012--w-p1-block-10) | Advertise and record worker caps (blocklist/v1) in the heartbeat | feature | S | W-P1-BLOCK-02 | [#475](https://github.com/ethosagent/warden/issues/475) |
+| 11/12 | [`W-P1-BLOCK-11`](#1112--w-p1-block-11) | Add the block-list admin API with audit and self-unblock protection | feature | S | W-P1-BLOCK-03, W-P1-SSO-05, W-P1-AAUD-02 | [#476](https://github.com/ethosagent/warden/issues/476) |
+| 12/12 | [`W-P1-BLOCK-12`](#1212--w-p1-block-12) | Add harness scenarios proving a block survives rollback, restart and CP outage | test | S | W-P1-BLOCK-09, W-P1-BLOCK-08, W-P1-PVER-03, W-P1-PVER-07 | [#477](https://github.com/ethosagent/warden/issues/477) |
 
 ### 1/12 · W-P1-BLOCK-01
 
@@ -409,7 +409,7 @@ Type **feature** · Size **S** · Issue [#304](https://github.com/ethosagent/war
 
 **Add harness scenarios for blocking users and cutting their sessions**
 
-Type **test** · Size **S** · Issue —
+Type **test** · Size **S** · Issue [#474](https://github.com/ethosagent/warden/issues/474)
 
 **Context.** Prove the worker path of the block list end to end as L1 scenarios on `test/harness` (in-process, no Docker): the real control plane and a worker fleet boot in one process, the harness mints identity tokens through the in-process OIDC issuer fake (W-P1-VRFY-11), and the fake upstream records what arrives. This ticket covers enforcement within one long-poll cycle, live session closure and one Finding per user. Survival across rollback, restart and CP outage is W-P1-BLOCK-12. Console denial and the offline CLI keep their package tests. Siblings in the User block list feature (epic #46): W-P1-BLOCK-01 (#47) wire type and validator, W-P1-BLOCK-02 (#48) worker enforcement, W-P1-BLOCK-10 worker caps in the heartbeat, W-P1-BLOCK-03 (#49) CP store and policy merge, W-P1-BLOCK-11 admin API, W-P1-BLOCK-04 (#239) console panel, W-P1-BLOCK-05 (#240) close open sessions, W-P1-BLOCK-06 (#241) Finding per user, W-P1-BLOCK-07 (#242) console login denial, W-P1-BLOCK-08 (#304) offline CLI, W-P1-BLOCK-09 and W-P1-BLOCK-12 harness scenarios.
 
@@ -446,7 +446,7 @@ Type **test** · Size **S** · Issue —
 
 **Advertise and record worker caps (blocklist/v1) in the heartbeat**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#475](https://github.com/ethosagent/warden/issues/475)
 
 **Context.** An old worker decodes the new policy wire without error (encoding/json drops unknown fields) and would look current while silently ignoring the block list. So workers advertise capabilities on every heartbeat and the CP records them, letting the console warn about connected workers that do not enforce the list. This generic `caps` channel is also what later features reuse (group policy W-P1-GPOL-07, hooks, bundles, usercost). This ticket was taken out of W-P1-BLOCK-02 (#48) and W-P1-BLOCK-04 (#239) in the 2026-10-19 split pass and replaces the former stub for this key. Siblings in the User block list feature (epic #46): W-P1-BLOCK-01 (#47) wire type and validator, W-P1-BLOCK-02 (#48) worker enforcement, W-P1-BLOCK-10 worker caps in the heartbeat, W-P1-BLOCK-03 (#49) CP store and policy merge, W-P1-BLOCK-11 admin API, W-P1-BLOCK-04 (#239) console panel, W-P1-BLOCK-05 (#240) close open sessions, W-P1-BLOCK-06 (#241) Finding per user, W-P1-BLOCK-07 (#242) console login denial, W-P1-BLOCK-08 (#304) offline CLI, W-P1-BLOCK-09 and W-P1-BLOCK-12 harness scenarios.
 
@@ -483,7 +483,7 @@ Type **feature** · Size **S** · Issue —
 
 **Add the block-list admin API with audit and self-unblock protection**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#476](https://github.com/ethosagent/warden/issues/476)
 
 **Context.** Admins manage the block list from the console. This ticket adds the admin-only endpoints to list, add and remove entries on top of `BlockStore` (W-P1-BLOCK-03), with role checks, admin audit rows and protection against an admin removing their own block. It was split from the original W-P1-BLOCK-03 (#49); the console panel is W-P1-BLOCK-04. Dashboard writes are guarded: until SSO sessions replace it, every state-changing call needs the CP dashboard-write bearer and fails closed without one. Siblings in the User block list feature (epic #46): W-P1-BLOCK-01 (#47) wire type and validator, W-P1-BLOCK-02 (#48) worker enforcement, W-P1-BLOCK-10 worker caps in the heartbeat, W-P1-BLOCK-03 (#49) CP store and policy merge, W-P1-BLOCK-11 admin API, W-P1-BLOCK-04 (#239) console panel, W-P1-BLOCK-05 (#240) close open sessions, W-P1-BLOCK-06 (#241) Finding per user, W-P1-BLOCK-07 (#242) console login denial, W-P1-BLOCK-08 (#304) offline CLI, W-P1-BLOCK-09 and W-P1-BLOCK-12 harness scenarios.
 
@@ -523,7 +523,7 @@ Type **feature** · Size **S** · Issue —
 
 **Add harness scenarios proving a block survives rollback, restart and CP outage**
 
-Type **test** · Size **S** · Issue —
+Type **test** · Size **S** · Issue [#477](https://github.com/ethosagent/warden/issues/477)
 
 **Context.** The block list is the incident kill switch, so the done-when sentence also requires that a block survives anything that could silently undo it: a policy rollback, a worker restart and a control-plane outage, and that unblocking restores access and returns the served ETag to its previous value. These scenarios need policy versioning (a rollback) and a CP stop/start, which is why they were separated from the enforcement scenarios (W-P1-BLOCK-09, 2026-10-19 split pass). Siblings in the User block list feature (epic #46): W-P1-BLOCK-01 (#47) wire type and validator, W-P1-BLOCK-02 (#48) worker enforcement, W-P1-BLOCK-10 worker caps in the heartbeat, W-P1-BLOCK-03 (#49) CP store and policy merge, W-P1-BLOCK-11 admin API, W-P1-BLOCK-04 (#239) console panel, W-P1-BLOCK-05 (#240) close open sessions, W-P1-BLOCK-06 (#241) Finding per user, W-P1-BLOCK-07 (#242) console login denial, W-P1-BLOCK-08 (#304) offline CLI, W-P1-BLOCK-09 and W-P1-BLOCK-12 harness scenarios.
 

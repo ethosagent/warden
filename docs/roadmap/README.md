@@ -70,7 +70,7 @@ flowchart LR
 
 | # | Feature | Lane | Needs first | Tickets | Epic |
 |---|---|---|---|---|---|
-| 1 | [L1 test harness](features/l1-test-harness.md) | Agent / harness | — | 0 () | — |
+| 1 | [L1 test harness](features/l1-test-harness.md) | Agent / harness | — | 0 () | [#436](https://github.com/ethosagent/warden/issues/436) |
 | 2 | [Dex (one IdP)](features/dex-oidc.md) | Identity provider | [L1 test harness](features/l1-test-harness.md) | 6 (5S 1M) | [#16](https://github.com/ethosagent/warden/issues/16) |
 | 3 | [Verify user token](features/identity-verification.md) | Worker | [L1 test harness](features/l1-test-harness.md), [Dex (one IdP)](features/dex-oidc.md) | 12 (9S 3M) | [#20](https://github.com/ethosagent/warden/issues/20) |
 | 4 | [Identity contract + CLI](features/identity-contract.md) | Agent / harness | [L1 test harness](features/l1-test-harness.md), [Dex (one IdP)](features/dex-oidc.md), [Verify user token](features/identity-verification.md) | 7 (6S 1M) | [#26](https://github.com/ethosagent/warden/issues/26) |

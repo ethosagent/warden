@@ -60,14 +60,14 @@ Break-glass, on the compose recipe: with Dex stopped, the CP is restarted and st
 |---|---|---|---|---|---|---|
 | 1/11 | [`W-P1-OPS1-01`](#111--w-p1-ops1-01) | Add argon2id password-hash helpers, the hash-password command and console.breakGlass config validation | feature | S | W-P1-SSO-02 | [#56](https://github.com/ethosagent/warden/issues/56) |
 | 2/11 | [`W-P1-OPS1-02`](#211--w-p1-ops1-02) | Add BackupTo (VACUUM INTO) to the cpstate, alert and fleet SQLite stores | feature | S | W-P1-SSO-01 | [#57](https://github.com/ethosagent/warden/issues/57) |
-| 3/11 | [`W-P1-OPS1-05`](#311--w-p1-ops1-05) | Add the CP state-dir instance lock | feature | S | W-P1-SSO-01 | — |
-| 4/11 | [`W-P1-OPS1-06`](#411--w-p1-ops1-06) | Add the backup runner: flags, set layout, manifest, schedule and pruning | feature | M | W-P1-OPS1-02, W-P1-SSO-01, W-P1-AAUD-01 | — |
-| 5/11 | [`W-P1-OPS1-07`](#511--w-p1-ops1-07) | Raise backup health Findings and expose backup status in /dashboard/api/setup | feature | S | W-P1-OPS1-06, W-P1-OPS1-08, W-P1-SSO-05 | — |
-| 6/11 | [`W-P1-OPS1-11`](#611--w-p1-ops1-11) | Add the admin backup trigger and the offline control-plane backup command | feature | S | W-P1-OPS1-06, W-P1-OPS1-05, W-P1-SSO-05, W-P1-AAUD-02 | — |
+| 3/11 | [`W-P1-OPS1-05`](#311--w-p1-ops1-05) | Add the CP state-dir instance lock | feature | S | W-P1-SSO-01 | [#467](https://github.com/ethosagent/warden/issues/467) |
+| 4/11 | [`W-P1-OPS1-06`](#411--w-p1-ops1-06) | Add the backup runner: flags, set layout, manifest, schedule and pruning | feature | M | W-P1-OPS1-02, W-P1-SSO-01, W-P1-AAUD-01 | [#468](https://github.com/ethosagent/warden/issues/468) |
+| 5/11 | [`W-P1-OPS1-07`](#511--w-p1-ops1-07) | Raise backup health Findings and expose backup status in /dashboard/api/setup | feature | S | W-P1-OPS1-06, W-P1-OPS1-08, W-P1-SSO-05 | [#469](https://github.com/ethosagent/warden/issues/469) |
+| 6/11 | [`W-P1-OPS1-11`](#611--w-p1-ops1-11) | Add the admin backup trigger and the offline control-plane backup command | feature | S | W-P1-OPS1-06, W-P1-OPS1-05, W-P1-SSO-05, W-P1-AAUD-02 | [#470](https://github.com/ethosagent/warden/issues/470) |
 | 7/11 | [`W-P1-OPS1-04`](#711--w-p1-ops1-04) | Add the verified restore command | feature | M | W-P1-OPS1-06, W-P1-OPS1-05, W-P1-AAUD-01, W-P1-PVER-01, W-P1-PVER-02, W-P1-WTOK-01, W-P1-SSO-04 | [#243](https://github.com/ethosagent/warden/issues/243) |
-| 8/11 | [`W-P1-OPS1-08`](#811--w-p1-ops1-08) | Add POST /auth/breakglass with rate limits, a session, a signed audit row and a Finding | feature | M | W-P1-OPS1-01, W-P1-SSO-04, W-P1-SSO-05, W-P1-AAUD-01, W-P1-AAUD-02, W-P1-AAUD-05 | — |
-| 9/11 | [`W-P1-OPS1-09`](#911--w-p1-ops1-09) | Add break-glass startup guards, the session banner and the degraded-mode test | feature | S | W-P1-OPS1-08, W-P1-SSO-03, W-P1-SSO-04, W-P1-SSO-09 | — |
-| 10/11 | [`W-P1-OPS1-10`](#1011--w-p1-ops1-10) | Add the L2 break-glass test with Dex stopped | test | S | W-P1-DEX-04, W-P1-OPS1-09 | — |
+| 8/11 | [`W-P1-OPS1-08`](#811--w-p1-ops1-08) | Add POST /auth/breakglass with rate limits, a session, a signed audit row and a Finding | feature | M | W-P1-OPS1-01, W-P1-SSO-04, W-P1-SSO-05, W-P1-AAUD-01, W-P1-AAUD-02, W-P1-AAUD-05 | [#471](https://github.com/ethosagent/warden/issues/471) |
+| 9/11 | [`W-P1-OPS1-09`](#911--w-p1-ops1-09) | Add break-glass startup guards, the session banner and the degraded-mode test | feature | S | W-P1-OPS1-08, W-P1-SSO-03, W-P1-SSO-04, W-P1-SSO-09 | [#472](https://github.com/ethosagent/warden/issues/472) |
+| 10/11 | [`W-P1-OPS1-10`](#1011--w-p1-ops1-10) | Add the L2 break-glass test with Dex stopped | test | S | W-P1-DEX-04, W-P1-OPS1-09 | [#473](https://github.com/ethosagent/warden/issues/473) |
 | 11/11 | [`W-P1-OPS1-03`](#1111--w-p1-ops1-03) | Write break-glass and backup runbooks and a production readiness guide | docs | S | W-P1-OPS1-01, W-P1-OPS1-04, W-P1-OPS1-05, W-P1-OPS1-06, W-P1-OPS1-07, W-P1-OPS1-11, W-P1-OPS1-08, W-P1-OPS1-09, W-P1-SSO-06, W-P1-WTOK-04, W-P1-JAUD-03, W-P1-AAUD-03 | [#58](https://github.com/ethosagent/warden/issues/58) |
 
 ### 1/11 · W-P1-OPS1-01
@@ -167,7 +167,7 @@ OUT of scope: choosing paths, manifests, scheduling and pruning (W-P1-OPS1-06); 
 
 **Add the CP state-dir instance lock**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#467](https://github.com/ethosagent/warden/issues/467)
 
 **Context.** SQLite holds no lock that an idle CP keeps, so a flock file is the only reliable way to refuse a restore or an offline backup while a CP is running, and it also stops two CPs from sharing one state dir. This ticket (W-P1-OPS1-05) was carved out of the original restore ticket #243 (now W-P1-OPS1-04) so that the backup CLI (W-P1-OPS1-11) and restore (W-P1-OPS1-04) both depend on it and the earlier soft cycle between the backup and restore tickets disappears. P2 tickets (W-P2-KEYS-05, W-P2-KEYS-06) reuse `AcquireDirLock` for their offline commands.
 
@@ -205,7 +205,7 @@ OUT of scope: the restore command (W-P1-OPS1-04), the backup CLI (W-P1-OPS1-11).
 
 **Add the backup runner: flags, set layout, manifest, schedule and pruning**
 
-Type **feature** · Size **M** · Issue —
+Type **feature** · Size **M** · Issue [#468](https://github.com/ethosagent/warden/issues/468)
 
 **Context.** The CP can write consistent, atomic, pruned backup sets of its SQLite state and served config. This ticket (W-P1-OPS1-06) was split from the original backup ticket #57 (the foundation, `BackupTo` on the stores, kept the original key W-P1-OPS1-02). It builds the runner on top of `BackupTo`. Sibling tickets: W-P1-OPS1-05 (lock), W-P1-OPS1-07 (health Findings and setup status) and W-P1-OPS1-11 (admin route and the offline CLI; uses the `BackupReporter` seam and `RunOnce` defined here), W-P1-OPS1-04 (restore; reads the manifest defined here), W-P1-OPS1-03 (docs).
 
@@ -251,7 +251,7 @@ OUT of scope: Findings and the `/dashboard/api/setup` fields (W-P1-OPS1-07); `PO
 
 **Raise backup health Findings and expose backup status in /dashboard/api/setup**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#469](https://github.com/ethosagent/warden/issues/469)
 
 **Context.** Backups that fail silently are worse than none. This ticket (W-P1-OPS1-07) makes the runner of W-P1-OPS1-06 visible: Findings when a backup fails or goes stale, and backup status in `/dashboard/api/setup`. It was split from the original backup ticket #57. A later split moved the admin `POST /dashboard/api/backup` trigger and the offline `warden control-plane backup` command to W-P1-OPS1-11, because they are a separate route and a separate command. It publishes Findings through `Server.publishFinding`, which W-P1-OPS1-08 (break-glass login) owns.
 
@@ -288,7 +288,7 @@ OUT of scope: the runner, manifest and pruning (W-P1-OPS1-06); the lock (W-P1-OP
 
 **Add the admin backup trigger and the offline control-plane backup command**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#470](https://github.com/ethosagent/warden/issues/470)
 
 **Context.** The runner of W-P1-OPS1-06 takes scheduled backups. This ticket (W-P1-OPS1-11) lets an operator run one on demand, in two ways: an audited admin `POST /dashboard/api/backup` while the CP runs, and `warden control-plane backup` for a stopped CP. It was split from W-P1-OPS1-07 (itself split from the original backup ticket #57) because the route and the command are separate subsystems from the health Findings and setup status. Sibling tickets: W-P1-OPS1-02 (BackupTo), -05 (lock, which the offline command takes), -06 (runner and `RunOnce`), -07 (health Findings and setup status), -04 (restore), -03 (docs).
 
@@ -373,7 +373,7 @@ OUT of scope: taking backups (W-P1-OPS1-06/-11); the lock implementation (W-P1-O
 
 **Add POST /auth/breakglass with rate limits, a session, a signed audit row and a Finding**
 
-Type **feature** · Size **M** · Issue —
+Type **feature** · Size **M** · Issue [#471](https://github.com/ethosagent/warden/issues/471)
 
 **Context.** Break-glass is an emergency local admin login for when Dex is down. This ticket (W-P1-OPS1-08) is the login itself and was split from the original break-glass ticket #56 (foundation: W-P1-OPS1-01, GitHub #56; guards, banner and degraded-mode test: W-P1-OPS1-09; L2 Dex-down test: W-P1-OPS1-10). It uses the PHC helpers and hash loader of W-P1-OPS1-01. It also owns `Server.publishFinding`, the seam through which the CP publishes Findings; the backup health ticket (W-P1-OPS1-07) and P2/P3 tickets depend on it.
 
@@ -422,7 +422,7 @@ OUT of scope: startup refusals (TLS/loopback, `--state-dir`), the `/auth/me` ass
 
 **Add break-glass startup guards, the session banner and the degraded-mode test**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#472](https://github.com/ethosagent/warden/issues/472)
 
 **Context.** The last piece of break-glass, split from the original ticket #56 (foundation W-P1-OPS1-01, login W-P1-OPS1-08). This ticket (W-P1-OPS1-09) makes enabling break-glass safe and proves the whole point of the feature: with the OIDC issuer unreachable the CP still starts, still serves workers, and the break-glass login still works. It relies on lazy OIDC discovery from W-P1-SSO-03 (`/auth/login` answers 503 `idp_unavailable` while discovery retries).
 
@@ -466,7 +466,7 @@ OUT of scope: the login route and Findings (W-P1-OPS1-08); the real-Dex compose 
 
 **Add the L2 break-glass test with Dex stopped**
 
-Type **test** · Size **S** · Issue —
+Type **test** · Size **S** · Issue [#473](https://github.com/ethosagent/warden/issues/473)
 
 **Context.** The done-when of the break-glass and backup feature says: with Dex stopped, the CP is restarted and still serves workers, and an operator can log in with break-glass over TLS. The L1 test `TestControlPlaneBreakGlassDegraded` (W-P1-OPS1-09) proves it with a fake issuer; this ticket (W-P1-OPS1-10, new) proves it against the real Dex container using the L2 identity stack from W-P1-DEX-04. It exists because that scenario had no automated owner after the split of #56.
 

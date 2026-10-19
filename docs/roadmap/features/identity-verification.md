@@ -71,11 +71,11 @@ On a real deployment (CP plus at least one worker with TLS termination, Dex from
 | 5/12 | [`W-P1-VRFY-05`](#512--w-p1-vrfy-05) | Add identity attribution scenarios on the L1 harness | test | S | W-P1-VRFY-07, W-P1-VRFY-09, W-P1-VRFY-11 | [#25](https://github.com/ethosagent/warden/issues/25) |
 | 6/12 | [`W-P1-VRFY-06`](#612--w-p1-vrfy-06) | Store user fields in the control-plane fleet store | feature | S | W-P1-VRFY-03 | [#228](https://github.com/ethosagent/warden/issues/228) |
 | 7/12 | [`W-P1-VRFY-07`](#712--w-p1-vrfy-07) | Wire the identity verifier into worker assembly, hot reload and deployment | feature | S | W-P1-VRFY-01, W-P1-VRFY-02, W-P1-VRFY-08 | [#229](https://github.com/ethosagent/warden/issues/229) |
-| 8/12 | [`W-P1-VRFY-08`](#812--w-p1-vrfy-08) | Add the identity settings block to SettingsWire, local YAML and the per-agent field | feature | M | — | — |
-| 9/12 | [`W-P1-VRFY-09`](#912--w-p1-vrfy-09) | Stamp identity on every proxy event and decision log | feature | S | W-P1-VRFY-02, W-P1-VRFY-03 | — |
-| 10/12 | [`W-P1-VRFY-10`](#1012--w-p1-vrfy-10) | Add the top-users breakdown and the user column and filter box to the dashboard | feature | S | W-P1-VRFY-04 | — |
-| 11/12 | [`W-P1-VRFY-11`](#1112--w-p1-vrfy-11) | Add the in-process OIDC issuer fake and agent token options to the test harness | test | S | W-P1-VRFY-01 | — |
-| 12/12 | [`W-P1-VRFY-12`](#1212--w-p1-vrfy-12) | Add the shared OIDC HTTP client with internal-origin rewrite and the http-issuer rule | feature | S | — | — |
+| 8/12 | [`W-P1-VRFY-08`](#812--w-p1-vrfy-08) | Add the identity settings block to SettingsWire, local YAML and the per-agent field | feature | M | — | [#440](https://github.com/ethosagent/warden/issues/440) |
+| 9/12 | [`W-P1-VRFY-09`](#912--w-p1-vrfy-09) | Stamp identity on every proxy event and decision log | feature | S | W-P1-VRFY-02, W-P1-VRFY-03 | [#441](https://github.com/ethosagent/warden/issues/441) |
+| 10/12 | [`W-P1-VRFY-10`](#1012--w-p1-vrfy-10) | Add the top-users breakdown and the user column and filter box to the dashboard | feature | S | W-P1-VRFY-04 | [#442](https://github.com/ethosagent/warden/issues/442) |
+| 11/12 | [`W-P1-VRFY-11`](#1112--w-p1-vrfy-11) | Add the in-process OIDC issuer fake and agent token options to the test harness | test | S | W-P1-VRFY-01 | [#443](https://github.com/ethosagent/warden/issues/443) |
+| 12/12 | [`W-P1-VRFY-12`](#1212--w-p1-vrfy-12) | Add the shared OIDC HTTP client with internal-origin rewrite and the http-issuer rule | feature | S | — | [#444](https://github.com/ethosagent/warden/issues/444) |
 
 ### 1/12 · W-P1-VRFY-01
 
@@ -375,7 +375,7 @@ Context: feature p1-verify-token (epic #20). Connects the verifier to real worke
 
 **Add the identity settings block to SettingsWire, local YAML and the per-agent field**
 
-Type **feature** · Size **M** · Issue —
+Type **feature** · Size **M** · Issue [#440](https://github.com/ethosagent/warden/issues/440)
 
 Context: feature p1-verify-token (epic #20). A worker needs to be told which issuer to trust and which agents attribute. This ticket adds that configuration end to end and nothing else: the `identity` settings block on the CP-to-worker wire (SettingsWire), the same block in a standalone worker's local YAML, the per-agent `identity` mode field, validation, and the CP settings writer so a dashboard edit never drops the block. It was split from the original M ticket #21 (W-P1-VRFY-01, the verifier package) because config and the verifier are separate subsystems with different consumers: p1-group-policy, p2 binding and the docs need the keys, not the verifier. It has no dependencies and needs no import of internal/identity (the mode strings are constants in internal/config). Siblings: VRFY-01 (the verifier that reads this config), VRFY-07 (builds the verifier from this config on the worker and hot-reloads it), VRFY-02 (uses the resolved mode). Out of scope: building a verifier, hot reload, deploy templates, docs (VRFY-07).
 
@@ -417,7 +417,7 @@ What to build: IdentitySettings and its YAML/JSON plumbing in internal/config, p
 
 **Stamp identity on every proxy event and decision log**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#441](https://github.com/ethosagent/warden/issues/441)
 
 Context: feature p1-verify-token (epic #20). W-P1-VRFY-02 resolves who the caller is (connIdentity) and W-P1-VRFY-03 gave events and the store identity fields; this ticket connects them: every analytics event the proxy writes carries the caller's identity, and every decision log line names the user and status. It was split from the original M ticket #23 (the Event and storage half stayed in W-P1-VRFY-03). It depends on VRFY-02 (connIdentity) and VRFY-03 (fields). Siblings: VRFY-05 (L1 scenarios that assert the stamping end to end), VRFY-06/04 (CP side). Out of scope: columns and Event fields (VRFY-03), identity resolution (VRFY-02).
 
@@ -457,7 +457,7 @@ What to build: one chokepoint `p.recordEvent(ci connIdentity, e analytics.Event)
 
 **Add the top-users breakdown and the user column and filter box to the dashboard**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#442](https://github.com/ethosagent/warden/issues/442)
 
 Context: feature p1-verify-token (epic #20). W-P1-VRFY-04 (#24) added the `?user=` filter on the APIs; this ticket shows it to operators. It adds a `topUsers` block to the analytics response and, in the dashboard UI, a user column on the traffic table and a filter box that sets `?user=`. It was split from the original M ticket #24 so the API part (VRFY-04) can merge and be consumed alone. It depends on VRFY-04. W-P1-BLOCK-04 builds its block-user links on the user rows rendered here. Out of scope: the filter itself (VRFY-04), any new route, per-user usage and cost (W-P3-PUL-05).
 
@@ -493,7 +493,7 @@ What to build: the topUsers aggregate on worker and fleet stores and the HTML/JS
 
 **Add the in-process OIDC issuer fake and agent token options to the test harness**
 
-Type **test** · Size **S** · Issue —
+Type **test** · Size **S** · Issue [#443](https://github.com/ethosagent/warden/issues/443)
 
 Context: feature p1-verify-token (epic #20). Attribution scenarios (W-P1-VRFY-05) and several later features (block list, group policy, token exchange, per-user limits, offboarding, security tests) need a controllable OIDC issuer without Docker. This ticket was split out of the original scenario ticket #25 (W-P1-VRFY-05) so those features depend on the fake alone. It provides: an in-process OIDC issuer fake and the harness plumbing to send tokens from the agent. It depends on VRFY-01 only for a conformance test against the real verifier (the verifier-seam suite identitytest.RunVerifierSuite of VRFY-01 is separate and is not extended here). Out of scope: the scenarios themselves and the worker identity option (VRFY-05), real Dex (p1-dex).
 
@@ -529,7 +529,7 @@ What to build: `fakes.OIDCIssuer` in test/fakes, harness helpers that let the ag
 
 **Add the shared OIDC HTTP client with internal-origin rewrite and the http-issuer rule**
 
-Type **feature** · Size **S** · Issue —
+Type **feature** · Size **S** · Issue [#444](https://github.com/ethosagent/warden/issues/444)
 
 Context: feature p1-verify-token (epic #20). Every server-side OIDC call in Warden must work in the dev and demo setup, where the browser and the CLI on the host reach the IdP at `http://localhost:5556/dex` while containers (the CP and the workers) cannot: inside a container `localhost` is the container itself, and the IdP is reachable only as `http://dex:5556` on the compose network. The decision is split-horizon: the issuer string stays the public one (`http://localhost:5556/dex`, byte-identical in every token, discovery document and redirect), and containers that must call the IdP set an optional internal issuer URL (for example `http://dex:5556`). Server-side calls (discovery, JWKS, token exchange) whose origin equals the issuer's origin are sent to the internal origin; only the scheme, host and port of the TCP destination change, so go-oidc's issuer checks still pass. This ticket (new, created by the Dex-learnings pass; no GitHub issue yet) is the shared foundation: one dedicated `http.Client` with that rewrite, the way to hand it to go-oidc and golang.org/x/oauth2, and the http-issuer rule. It creates the package internal/identity (the scaffold; the verifier arrives in W-P1-VRFY-01) and adds the go-oidc and golang.org/x/oauth2 dependencies. Siblings: W-P1-VRFY-01 (the verifier; depends on this ticket and builds no client of its own), W-P1-VRFY-08 (worker `identity.internalIssuerURL` key), W-P1-SSO-02 (console `console.oidc.internalIssuerURL` key), W-P1-SSO-03 (console login: discovery and code exchange use this client), W-P1-DEX-01/02/04 (dev issuer and container configs). Out of scope here: the verifier, config parsing and validation of the YAML keys, wiring into the worker or CP, the Dex files and docs.
 
