@@ -145,7 +145,7 @@ Add the agent registry handlers to internal/dashboard behind a new `SetAgentRegi
 - [ ] Given `console.auth: none`, POST returns 403 use_cli; given no --state-dir, GET returns 503 state_dir_required; on a worker dashboard the routes return 404.
 - [ ] `go test ./internal/dashboard ./internal/controlplane -race -run 'TestAgents|TestAuthzRouteCoverage'` passes.
 
-**Depends on:** [`W-P2-AREG-01`](agent-registry.md#17--w-p2-areg-01) Add internal/agentreg store, schema and validation; [`W-P1-SSO-05`](console-sso-rbac.md#58--w-p1-sso-05) Enforce role checks on every dashboard route; [`W-P1-AAUD-02`](admin-audit-log.md#24--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware
+**Depends on:** [`W-P2-AREG-01`](agent-registry.md#17--w-p2-areg-01) Add internal/agentreg store, schema and validation; [`W-P1-SSO-05`](console-sso-rbac.md#58--w-p1-sso-05) Enforce role checks on every dashboard route; [`W-P1-AAUD-02`](admin-audit-log.md#26--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware
 
 **Unblocks:** [`W-P2-AREG-03`](agent-registry.md#37--w-p2-areg-03) Add the Agents tab to the CP console; [`W-P2-AREG-04`](agent-registry.md#47--w-p2-areg-04) Serve registered agents in the policy wire; [`W-P2-APPR-08`](policy-approvals.md#89--w-p2-appr-08) Hold block-list removals and widening agent edits for approval; [`W-P3-OFFB-07`](offboarding.md#77--w-p3-offb-07) Flag agents owned by blocked or offboarded users; [`W-P4-AMCP-03`](admin-mcp.md#59--w-p4-amcp-03) Implement the explain_decision, query_traffic and list_agents tools; [`W-P2-WBND-07`](identity-enforcement.md#710--w-p2-wbnd-07) Refuse require mode for agents served by workers without the capability
 
@@ -181,7 +181,7 @@ Add an Agents tab to internal/dashboard/index.html that calls the W-P2-AREG-02 e
 - [ ] Given display_name `<img src=x onerror=alert(1)>`, the list renders it as text.
 - [ ] `go test ./internal/dashboard -run 'TestSetupAgentRegistry|TestIndexAgentsTab'` and `go test ./internal/controlplane -run TestHeartbeatAgentFields` pass.
 
-**Depends on:** [`W-P2-AREG-02`](agent-registry.md#27--w-p2-areg-02) Expose the agent registry admin API with admin-only writes and audit; [`W-P1-SSO-04`](console-sso-rbac.md#48--w-p1-sso-04) Add server-side sessions, logout, /auth/me and CSRF; [`W-P1-BLOCK-04`](user-block-list.md#49--w-p1-block-04) Add the Blocked users console panel and worker enforcement indicator
+**Depends on:** [`W-P2-AREG-02`](agent-registry.md#27--w-p2-areg-02) Expose the agent registry admin API with admin-only writes and audit; [`W-P1-SSO-04`](console-sso-rbac.md#48--w-p1-sso-04) Add server-side sessions, logout, /auth/me and CSRF; [`W-P1-BLOCK-04`](user-block-list.md#410--w-p1-block-04) Add the Blocked users console panel and worker enforcement indicator
 
 **Unblocks:** [`W-P2-WBND-07`](identity-enforcement.md#710--w-p2-wbnd-07) Refuse require mode for agents served by workers without the capability; [`W-P3-PUS-07`](refresh-model.md#712--w-p3-pus-07) Add the worker-mTLS mint endpoint POST /control/user-token; [`W-P3-JIT-01`](jit-authorization.md#17--w-p3-jit-01) Add CP endpoint to create or reuse pending authorizations
 
@@ -218,7 +218,7 @@ Add `registeredAgents` (id, status and key thumbprints) to the /policy wire, mer
 - [ ] Given `--policy-store=versioned`, a rollback to a version from before the disable leaves the agent disabled in the served wire, and the disable wrote one publish_log row with reason agent_registry.
 - [ ] `go test ./internal/config -run TestRegisteredAgents` and `go test ./internal/controlplane -race -run 'TestPolicyWireRegisteredAgents|TestLongPollWakesOnAgentWrite'` pass.
 
-**Depends on:** [`W-P2-AREG-01`](agent-registry.md#17--w-p2-areg-01) Add internal/agentreg store, schema and validation; [`W-P2-AREG-02`](agent-registry.md#27--w-p2-areg-02) Expose the agent registry admin API with admin-only writes and audit; [`W-P1-BLOCK-03`](user-block-list.md#39--w-p1-block-03) Add the CP block-list store, admin API and policy merge; [`W-P1-PVER-05`](policy-versioning.md#56--w-p1-pver-05) Mirror head into the served YAML and detect external edits
+**Depends on:** [`W-P2-AREG-01`](agent-registry.md#17--w-p2-areg-01) Add internal/agentreg store, schema and validation; [`W-P2-AREG-02`](agent-registry.md#27--w-p2-areg-02) Expose the agent registry admin API with admin-only writes and audit; [`W-P1-BLOCK-03`](user-block-list.md#310--w-p1-block-03) Add the CP block-list store, admin API and policy merge; [`W-P1-PVER-05`](policy-versioning.md#56--w-p1-pver-05) Mirror head into the served YAML and detect external edits
 
 **Unblocks:** [`W-P2-RCP-03`](identity-client.md#36--w-p2-rcp-03) Add the Claude Code compose recipe and docs; [`W-P2-AREG-05`](agent-registry.md#57--w-p2-areg-05) Bind workers to an agent id and enforce agent_disabled; [`W-P3-PORT-01`](consent-portal.md#17--w-p3-port-01) Serve the portal page and the connections list API; [`W-P2-WBND-02`](identity-enforcement.md#210--w-p2-wbnd-02) Bind Warden tokens to the worker's registered agent and key; [`W-P2-WBND-06`](identity-enforcement.md#610--w-p2-wbnd-06) Add token issuer, agent key thumbprints and email claims to CP outputs
 
@@ -257,7 +257,7 @@ Let an operator pin a worker to a registered agent id with `--agent-id` or `cent
 - [ ] Given a worker with --agent-id claude-code, the heartbeat body it sends contains agentID `claude-code`, its effective identityMode and `agentreg/v1` in caps, and is under 4096 bytes.
 - [ ] `go test ./internal/proxy ./internal/worker -race -run 'TestAgentDisabled|TestResolveAgentID'` and `go test ./internal/config -run TestHeartbeatAgent` pass.
 
-**Depends on:** [`W-P2-AREG-04`](agent-registry.md#47--w-p2-areg-04) Serve registered agents in the policy wire; [`W-P1-BLOCK-02`](user-block-list.md#29--w-p1-block-02) Enforce the block list in the worker at CONNECT, per request and per h2 stream; [`W-P1-BLOCK-05`](user-block-list.md#59--w-p1-block-05) Close open sessions of newly blocked users on policy change; [`W-P1-VRFY-02`](identity-verification.md#27--w-p1-vrfy-02) Extract, verify and strip identity on CONNECT, HTTP/1.1 and HTTP/2
+**Depends on:** [`W-P2-AREG-04`](agent-registry.md#47--w-p2-areg-04) Serve registered agents in the policy wire; [`W-P1-BLOCK-02`](user-block-list.md#210--w-p1-block-02) Enforce the block list in the worker at CONNECT, per request and per h2 stream; [`W-P1-BLOCK-05`](user-block-list.md#510--w-p1-block-05) Close open sessions of newly blocked users on policy change; [`W-P1-VRFY-02`](identity-verification.md#29--w-p1-vrfy-02) Extract, verify and strip identity on CONNECT, HTTP/1.1 and HTTP/2
 
 **Unblocks:** [`W-P2-RCP-03`](identity-client.md#36--w-p2-rcp-03) Add the Claude Code compose recipe and docs; [`W-P2-AREG-07`](agent-registry.md#77--w-p2-areg-07) Document the agent registry and add an end-to-end test; [`W-P2-SECT-01`](security-tests.md#17--w-p2-sect-01) Add security test harness with in-process CP, workers and shared fakes; [`W-P2-SECT-03`](security-tests.md#37--w-p2-sect-03) Add binding, cross-agent and issued-token lifetime cases; [`W-P4-AMCP-03`](admin-mcp.md#59--w-p4-amcp-03) Implement the explain_decision, query_traffic and list_agents tools; [`W-P2-WBND-02`](identity-enforcement.md#210--w-p2-wbnd-02) Bind Warden tokens to the worker's registered agent and key; [`W-P2-WBND-03`](identity-enforcement.md#310--w-p2-wbnd-03) Enforce identity require mode on CONNECT and terminated traffic; [`W-P4-MGW-10`](mcp-gateway.md#1017--w-p4-mgw-10) Verify and apply the mcpGateways bundle section on the worker
 
@@ -290,7 +290,7 @@ Add `warden control-plane agent register|update|list|disable|enable --state-dir`
 - [ ] Given a running CP on the same state dir, a CLI disable appears in GET /policy within 3s.
 - [ ] `go test ./cmd/proxy -run TestControlPlaneAgent` passes.
 
-**Depends on:** [`W-P2-AREG-01`](agent-registry.md#17--w-p2-areg-01) Add internal/agentreg store, schema and validation; [`W-P1-AAUD-01`](admin-audit-log.md#14--w-p1-aaud-01) Add signed, hash-chained admin audit store on cpstate
+**Depends on:** [`W-P2-AREG-01`](agent-registry.md#17--w-p2-areg-01) Add internal/agentreg store, schema and validation; [`W-P1-AAUD-01`](admin-audit-log.md#16--w-p1-aaud-01) Add signed, hash-chained admin audit store on cpstate
 
 **Unblocks:** [`W-P2-RCP-03`](identity-client.md#36--w-p2-rcp-03) Add the Claude Code compose recipe and docs; [`W-P2-RCP-05`](identity-client.md#56--w-p2-rcp-05) Add the isolation proof script for the recipes; [`W-P2-AREG-07`](agent-registry.md#77--w-p2-areg-07) Document the agent registry and add an end-to-end test
 

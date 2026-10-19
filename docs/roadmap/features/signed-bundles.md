@@ -247,7 +247,7 @@ Add worker metrics for bundle rejections, seq, age and staleness, and extend the
 - [ ] Given a heartbeat with bundleSeq 50 while head seq is 10, the fleet API reports bundle_seq_ahead and exactly one ERROR line is logged for that worker.
 - [ ] A heartbeat without any bundle fields is accepted and stored as before.
 
-**Depends on:** [`W-P2-SBND-04`](signed-bundles.md#47--w-p2-sbnd-04) Verify signed bundles in RemoteProvider and keep last-known-good in memory; [`W-P1-BLOCK-04`](user-block-list.md#49--w-p1-block-04) Add the Blocked users console panel and worker enforcement indicator
+**Depends on:** [`W-P2-SBND-04`](signed-bundles.md#47--w-p2-sbnd-04) Verify signed bundles in RemoteProvider and keep last-known-good in memory; [`W-P1-BLOCK-04`](user-block-list.md#410--w-p1-block-04) Add the Blocked users console panel and worker enforcement indicator
 
 **Unblocks:** [`W-P2-SBND-07`](signed-bundles.md#77--w-p2-sbnd-07) Add staged bundle key rotation, pin export and rollout docs; [`W-P2-SECT-01`](security-tests.md#17--w-p2-sect-01) Add security test harness with in-process CP, workers and shared fakes; [`W-P2-SECT-04`](security-tests.md#47--w-p2-sect-04) Add worker cert and signed bundle attack cases; [`W-P4-MREG-05`](mcp-registry.md#511--w-p4-mreg-05) Publish the registry as a signed-bundle section; [`W-P4-MREG-07`](mcp-registry.md#711--w-p4-mreg-07) Verify and compile the registry section on the worker; [`W-P4-GOPS-09`](policy-as-code.md#611--w-p4-gops-09) Serve policy per rollout cohort with ordered bundle seqs
 

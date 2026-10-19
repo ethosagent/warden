@@ -126,7 +126,7 @@ Create new package internal/identityclient (OIDC discovery, RFC 8628 device-code
 - [ ] `go test ./internal/identityclient -run TestInsecureIssuerRejected` rejects an http non-loopback issuer unless AllowInsecureIssuer is set.
 - [ ] `scripts/check.sh` passes, including the coverage gate and govulncheck.
 
-**Depends on:** [`W-P1-DEX-01`](dex-oidc.md#13--w-p1-dex-01) Add reference Dex config with console, data-plane, harness and CLI clients
+**Depends on:** [`W-P1-DEX-01`](dex-oidc.md#14--w-p1-dex-01) Add reference Dex config with console, data-plane, harness and CLI clients
 
 **Unblocks:** [`W-P1-IDC-01`](identity-contract.md#14--w-p1-idc-01) Write the agent identity contract for harness builders; [`W-P1-IDC-03`](identity-contract.md#34--w-p1-idc-03) Add generic identity smoke test with a curl agent; [`W-P1-IDC-04`](identity-contract.md#44--w-p1-idc-04) Add `warden identity exec` with a loopback forwarder that refreshes the token; [`W-P2-RCP-01`](identity-client.md#16--w-p2-rcp-01) Extend internal/identityclient with agent keys and token exchange
 
@@ -165,7 +165,7 @@ Add an opt-in smoke recipe and script that prove a plain curl container, with no
 - [ ] `scripts/smoke-identity.sh 2>&1 | grep -cE 'eyJ[A-Za-z0-9_-]{20,}'` prints 0, and the same grep over `docker compose logs worker` prints 0.
 - [ ] `scripts/check.sh` without `--smoke-identity` does not start Docker and still passes.
 
-**Depends on:** [`W-P1-IDC-02`](identity-contract.md#24--w-p1-idc-02) Add `warden identity` CLI for login, token, status and proxy env; [`W-P1-DEX-02`](dex-oidc.md#23--w-p1-dex-02) Add identity compose recipe with pinned Dex and seeded LDAP; [`W-P1-VRFY-04`](identity-verification.md#47--w-p1-vrfy-04) Add user filter and top-users breakdown to the dashboard
+**Depends on:** [`W-P1-IDC-02`](identity-contract.md#24--w-p1-idc-02) Add `warden identity` CLI for login, token, status and proxy env; [`W-P1-DEX-02`](dex-oidc.md#24--w-p1-dex-02) Add identity compose recipe with pinned Dex and seeded LDAP; [`W-P1-VRFY-04`](identity-verification.md#49--w-p1-vrfy-04) Add user filter and top-users breakdown to the dashboard
 
 **Unblocks:** [`W-P1-IDC-01`](identity-contract.md#14--w-p1-idc-01) Write the agent identity contract for harness builders; [`W-P2-RCP-05`](identity-client.md#56--w-p2-rcp-05) Add the isolation proof script for the recipes
 

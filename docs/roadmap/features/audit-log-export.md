@@ -124,7 +124,7 @@ Most deny events have an empty Event.Reason today: storeDeny in internal/proxy/s
 - [ ] Every deny event produced in the test run has a Reason contained in Reasons().
 - [ ] `go test -race ./internal/proxy -run TestDenyReasons` passes.
 
-**Unblocks:** [`W-P1-BLOCK-02`](user-block-list.md#29--w-p1-block-02) Enforce the block list in the worker at CONNECT, per request and per h2 stream; [`W-P4-AMCP-07`](admin-mcp.md#29--w-p4-amcp-07) Add the CP explain API with historical version resolution; [`W-P1-GPOL-03`](identity-policy.md#39--w-p1-gpol-03) Apply group-aware allow decisions at CONNECT and request time; [`W-P3-PUS-04`](refresh-model.md#412--w-p3-pus-04) Swap per-user placeholders only for bound identities on mapped domains; [`W-P3-JIT-02`](jit-authorization.md#27--w-p3-jit-02) Return structured 403 for HTTP when a grant is missing; [`W-P3-PUL-09`](per-user-limits.md#910--w-p3-pul-09) Enforce per-user rate limits per request in the proxy; [`W-P4-HOOK-07`](policy-hooks.md#711--w-p4-hook-07) Wire the pre-request hook stage into the HTTP/1.1 proxy path; [`W-P1-JAUD-02`](audit-log-export.md#46--w-p1-jaud-02) Publish decision v1 JSON Schema with closed-field and leak tests
+**Unblocks:** [`W-P1-BLOCK-02`](user-block-list.md#210--w-p1-block-02) Enforce the block list in the worker at CONNECT, per request and per h2 stream; [`W-P4-AMCP-07`](admin-mcp.md#29--w-p4-amcp-07) Add the CP explain API with historical version resolution; [`W-P1-GPOL-03`](identity-policy.md#39--w-p1-gpol-03) Apply group-aware allow decisions at CONNECT and request time; [`W-P3-PUS-04`](refresh-model.md#412--w-p3-pus-04) Swap per-user placeholders only for bound identities on mapped domains; [`W-P3-JIT-02`](jit-authorization.md#27--w-p3-jit-02) Return structured 403 for HTTP when a grant is missing; [`W-P3-PUL-09`](per-user-limits.md#910--w-p3-pul-09) Enforce per-user rate limits per request in the proxy; [`W-P4-HOOK-07`](policy-hooks.md#711--w-p4-hook-07) Wire the pre-request hook stage into the HTTP/1.1 proxy path; [`W-P1-JAUD-02`](audit-log-export.md#46--w-p1-jaud-02) Publish decision v1 JSON Schema with closed-field and leak tests
 
 ### 3/6 · W-P1-JAUD-01
 
@@ -165,7 +165,7 @@ Create new package internal/auditlog that writes one warden.decision.v1 JSON lin
 - [ ] With output stdout, stdout carries only lines whose schema is warden.decision.v1 and operational records go to stderr.
 - [ ] Config `audit: {jsonLog: {enabled: true, output: file}}` with no path, or output syslog, fails to load with an error naming audit.jsonLog: `go test ./internal/config -run TestAuditJSONLogConfig`.
 
-**Depends on:** [`W-P1-VRFY-03`](identity-verification.md#37--w-p1-vrfy-03) Record user fields on worker events, receipts, decision logs and sync; [`W-P1-JAUD-05`](audit-log-export.md#16--w-p1-jaud-05) Record the pre-swap URL on events and decision logs
+**Depends on:** [`W-P1-VRFY-03`](identity-verification.md#39--w-p1-vrfy-03) Record user fields on worker events, receipts, decision logs and sync; [`W-P1-JAUD-05`](audit-log-export.md#16--w-p1-jaud-05) Record the pre-swap URL on events and decision logs
 
 **Unblocks:** [`W-P4-AMCP-01`](admin-mcp.md#19--w-p4-amcp-01) Add the CP traffic API with a sanitized record projection; [`W-P1-JAUD-02`](audit-log-export.md#46--w-p1-jaud-02) Publish decision v1 JSON Schema with closed-field and leak tests; [`W-P1-JAUD-03`](audit-log-export.md#56--w-p1-jaud-03) Write CP admin audit lines as warden.admin.v1 JSON
 
@@ -238,7 +238,7 @@ Let the control plane read the same audit.jsonLog block and pass an auditlog wri
 - [ ] With a writer that errors, the policy save still returns 200 and the admin audit chain still verifies.
 - [ ] A request body field named token with a value never appears in the emitted line.
 
-**Depends on:** [`W-P1-JAUD-01`](audit-log-export.md#36--w-p1-jaud-01) Add internal/auditlog decision stream on the async writer tee; [`W-P1-AAUD-02`](admin-audit-log.md#24--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware
+**Depends on:** [`W-P1-JAUD-01`](audit-log-export.md#36--w-p1-jaud-01) Add internal/auditlog decision stream on the async writer tee; [`W-P1-AAUD-02`](admin-audit-log.md#26--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware
 
 **Unblocks:** [`W-P1-OPS1-03`](ops-hardening.md#34--w-p1-ops1-03) Write break-glass and backup runbooks and a production readiness guide; [`W-P3-PORT-02`](consent-portal.md#27--w-p3-port-02) Implement revoke with grant, secret, epoch and provider steps; [`W-P1-JAUD-04`](audit-log-export.md#66--w-p1-jaud-04) Document SIEM shipping with Vector and Fluent Bit examples
 

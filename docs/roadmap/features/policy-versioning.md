@@ -141,7 +141,7 @@ In versioned mode, import the served config as version 1 on first start, then ro
 - [ ] Given `--policy-store=file`, the existing internal/controlplane and internal/dashboard tests pass with only signature updates.
 - [ ] `go test -race ./internal/controlplane -run 'TestPolicyMigrationByteIdentical|TestVersionedWriters|TestSettingsFieldOwnership'` and `go test ./internal/dashboard -run 'TestPolicyWrite|TestLLMProviders'` pass.
 
-**Depends on:** [`W-P1-PVER-01`](policy-versioning.md#16--w-p1-pver-01) Add versioned policy store and serve the head version; [`W-P1-SSO-05`](console-sso-rbac.md#58--w-p1-sso-05) Enforce role checks on every dashboard route; [`W-P1-AAUD-02`](admin-audit-log.md#24--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware
+**Depends on:** [`W-P1-PVER-01`](policy-versioning.md#16--w-p1-pver-01) Add versioned policy store and serve the head version; [`W-P1-SSO-05`](console-sso-rbac.md#58--w-p1-sso-05) Enforce role checks on every dashboard route; [`W-P1-AAUD-02`](admin-audit-log.md#26--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware
 
 **Unblocks:** [`W-P1-PVER-03`](policy-versioning.md#36--w-p1-pver-03) Add policy history, structural diff and rollback APIs; [`W-P1-PVER-05`](policy-versioning.md#56--w-p1-pver-05) Mirror head into the served YAML and detect external edits; [`W-P1-PVER-06`](policy-versioning.md#66--w-p1-pver-06) Add warden policy import and export commands; [`W-P2-APPR-01`](policy-approvals.md#19--w-p2-appr-01) Add approvals config, draft store and state machine
 
@@ -180,7 +180,7 @@ Add dashboard APIs to list versions, fetch one version, diff two versions and ro
 - [ ] Given a rollback, admin audit holds one row with target=policy, before=`v3:<sha>` and after=`v4:<sha>`; no response body or log line contains the raw secretAccessKey and the blocked users list is unchanged.
 - [ ] `go test -race ./internal/controlplane -run 'TestPolicyDiff|TestPolicyRollback|TestPolicyHistoryAPI'` passes.
 
-**Depends on:** [`W-P1-PVER-02`](policy-versioning.md#26--w-p1-pver-02) Route policy, settings and llmProviders writes through versioned publish; [`W-P1-AAUD-02`](admin-audit-log.md#24--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware
+**Depends on:** [`W-P1-PVER-02`](policy-versioning.md#26--w-p1-pver-02) Route policy, settings and llmProviders writes through versioned publish; [`W-P1-AAUD-02`](admin-audit-log.md#26--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware
 
 **Unblocks:** [`W-P1-PVER-04`](policy-versioning.md#46--w-p1-pver-04) Add history panel with diff view and rollback to dashboard; [`W-P2-APPR-02`](policy-approvals.md#29--w-p2-appr-02) Implement widening-change classification; [`W-P2-APPR-04`](policy-approvals.md#49--w-p2-appr-04) Add the change draft API with the two-person rule; [`W-P2-APPR-06`](policy-approvals.md#69--w-p2-appr-06) Gate every versioned write path through one clearance check
 
@@ -292,6 +292,6 @@ Add `warden policy import` and `warden policy export` under the existing `warden
 - [ ] `warden policy export --version 1` output loads with config.NewLocalYAMLProvider and contains no secretAccessKey value.
 - [ ] `go test ./cmd/proxy -run 'TestPolicyImport|TestPolicyExport'` passes.
 
-**Depends on:** [`W-P1-PVER-02`](policy-versioning.md#26--w-p1-pver-02) Route policy, settings and llmProviders writes through versioned publish; [`W-P1-AAUD-01`](admin-audit-log.md#14--w-p1-aaud-01) Add signed, hash-chained admin audit store on cpstate
+**Depends on:** [`W-P1-PVER-02`](policy-versioning.md#26--w-p1-pver-02) Route policy, settings and llmProviders writes through versioned publish; [`W-P1-AAUD-01`](admin-audit-log.md#16--w-p1-aaud-01) Add signed, hash-chained admin audit store on cpstate
 
 **Unblocks:** [`W-P2-APPR-06`](policy-approvals.md#69--w-p2-appr-06) Gate every versioned write path through one clearance check; [`W-P4-GOPS-01`](policy-as-code.md#111--w-p4-gops-01) Add warden policy lint with a shared repo doc parser

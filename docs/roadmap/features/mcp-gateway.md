@@ -141,7 +141,7 @@ Add CP state for gateway definitions: which agents may use a gateway and which r
 - [ ] Deleting registry server `gh` while gateway `dev` references it returns 409; after a registry rollback that removes `search`, GET /dashboard/api/mcp/gateways/dev lists `search` in stale_tools.
 - [ ] `go test ./internal/mcpgateways/...` passes, and the W-P2-APIK-02 route coverage test passes with the new routes.
 
-**Depends on:** [`W-P4-MREG-02`](mcp-registry.md#211--w-p4-mreg-02) Add registry REST API with versioning, diff and rollback; [`W-P1-AAUD-02`](admin-audit-log.md#24--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware; [`W-P2-APIK-02`](api-keys.md#27--w-p2-apik-02) Authenticate API keys and enforce per-route scopes in the authz table
+**Depends on:** [`W-P4-MREG-02`](mcp-registry.md#211--w-p4-mreg-02) Add registry REST API with versioning, diff and rollback; [`W-P1-AAUD-02`](admin-audit-log.md#26--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware; [`W-P2-APIK-02`](api-keys.md#27--w-p2-apik-02) Authenticate API keys and enforce per-route scopes in the authz table
 
 **Unblocks:** [`W-P4-MGW-09`](mcp-gateway.md#917--w-p4-mgw-09) Serve gateway definitions as the mcpGateways signed-bundle section; [`W-P4-MGW-14`](mcp-gateway.md#1417--w-p4-mgw-14) Store MCP gateway fields and upstream state in the CP fleet store; [`W-P4-MGW-17`](mcp-gateway.md#1717--w-p4-mgw-17) Generate agent MCP client config for a gateway
 

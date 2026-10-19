@@ -100,7 +100,7 @@ Add the per-user limit rules and the wire-only cost block list to config.Policy 
 - [ ] With none of the keys set, the /policy body and ETag equal the pre-change golden: `go test ./internal/controlplane -run TestPolicyWire_UserLimitsAbsentUnchanged`.
 - [ ] Until the guard is lifted, a config with a non-empty userLimits fails to load with `not yet enforced`.
 
-**Depends on:** [`W-P1-GPOL-01`](identity-policy.md#19--w-p1-gpol-01) Add groups/users to allow entries and MCP conditions schema; [`W-P1-BLOCK-01`](user-block-list.md#19--w-p1-block-01) Carry blockedUsers in config.Policy and the policy wire
+**Depends on:** [`W-P1-GPOL-01`](identity-policy.md#19--w-p1-gpol-01) Add groups/users to allow entries and MCP conditions schema; [`W-P1-BLOCK-01`](user-block-list.md#110--w-p1-block-01) Carry blockedUsers in config.Policy and the policy wire
 
 **Unblocks:** [`W-P3-PUL-03`](per-user-limits.md#310--w-p3-pul-03) Add per-user limit matching and counters to the policy evaluator; [`W-P3-PUL-08`](per-user-limits.md#810--w-p3-pul-08) Publish fleet cost blocks as costBlockedUsers from the control plane
 
@@ -136,7 +136,7 @@ The user columns, the (user_sub, ts) index and the Query Builder exposure alread
 - [ ] A proxy event for a subject with AgentID `claude-code` is stored with agent_id `claude-code` and returned by GetOldestEventIDs.
 - [ ] The W-P1-JAUD-02 schema tests pass with the new fields: `go test ./internal/auditlog`.
 
-**Depends on:** [`W-P1-VRFY-03`](identity-verification.md#37--w-p1-vrfy-03) Record user fields on worker events, receipts, decision logs and sync; [`W-P1-JAUD-02`](audit-log-export.md#46--w-p1-jaud-02) Publish decision v1 JSON Schema with closed-field and leak tests
+**Depends on:** [`W-P1-VRFY-03`](identity-verification.md#39--w-p1-vrfy-03) Record user fields on worker events, receipts, decision logs and sync; [`W-P1-JAUD-02`](audit-log-export.md#46--w-p1-jaud-02) Publish decision v1 JSON Schema with closed-field and leak tests
 
 **Unblocks:** [`W-P3-PUL-04`](per-user-limits.md#410--w-p3-pul-04) Cap daily estimated cost per user in the worker; [`W-P3-PUL-07`](per-user-limits.md#710--w-p3-pul-07) Fill fleet agent_id and add the per-user daily usage rollup; [`W-P3-PUL-09`](per-user-limits.md#910--w-p3-pul-09) Enforce per-user rate limits per request in the proxy
 
@@ -256,7 +256,7 @@ Give operators one place to see who is using which providers and how much they a
 - [ ] A user with todayCostUSD at or above capUSD has atLimit true, and a sub listed in costBlockedUsers has costBlocked true.
 - [ ] The fleet warning shows when a connected worker lacks userlimits/v1 and user limits are served, and is absent otherwise.
 
-**Depends on:** [`W-P3-PUL-07`](per-user-limits.md#710--w-p3-pul-07) Fill fleet agent_id and add the per-user daily usage rollup; [`W-P3-PUL-08`](per-user-limits.md#810--w-p3-pul-08) Publish fleet cost blocks as costBlockedUsers from the control plane; [`W-P1-VRFY-04`](identity-verification.md#47--w-p1-vrfy-04) Add user filter and top-users breakdown to the dashboard; [`W-P1-SSO-05`](console-sso-rbac.md#58--w-p1-sso-05) Enforce role checks on every dashboard route; [`W-P2-APIK-02`](api-keys.md#27--w-p2-apik-02) Authenticate API keys and enforce per-route scopes in the authz table; [`W-P1-GPOL-07`](identity-policy.md#79--w-p1-gpol-07) Report groupPolicy support in heartbeat and flag old workers
+**Depends on:** [`W-P3-PUL-07`](per-user-limits.md#710--w-p3-pul-07) Fill fleet agent_id and add the per-user daily usage rollup; [`W-P3-PUL-08`](per-user-limits.md#810--w-p3-pul-08) Publish fleet cost blocks as costBlockedUsers from the control plane; [`W-P1-VRFY-04`](identity-verification.md#49--w-p1-vrfy-04) Add user filter and top-users breakdown to the dashboard; [`W-P1-SSO-05`](console-sso-rbac.md#58--w-p1-sso-05) Enforce role checks on every dashboard route; [`W-P2-APIK-02`](api-keys.md#27--w-p2-apik-02) Authenticate API keys and enforce per-route scopes in the authz table; [`W-P1-GPOL-07`](identity-policy.md#79--w-p1-gpol-07) Report groupPolicy support in heartbeat and flag old workers
 
 **Unblocks:** [`W-P3-PUL-10`](per-user-limits.md#1010--w-p3-pul-10) Add per-user limits end-to-end test and docs
 
@@ -326,7 +326,7 @@ Control-plane half of recording. Ingest stores only ProxyID today, so the existi
 - [ ] After pruning every event row by maxEvents, UsageByUser still returns the same totals.
 - [ ] An old fleet DB opens with no data loss and a second open is a no-op: `go test ./internal/analytics -run TestFleetMigrate_LimitRule`.
 
-**Depends on:** [`W-P3-PUL-02`](per-user-limits.md#210--w-p3-pul-02) Record agent id and limit rule on worker events; [`W-P1-VRFY-06`](identity-verification.md#67--w-p1-vrfy-06) Store user fields in the control-plane fleet store
+**Depends on:** [`W-P3-PUL-02`](per-user-limits.md#210--w-p3-pul-02) Record agent id and limit rule on worker events; [`W-P1-VRFY-06`](identity-verification.md#69--w-p1-vrfy-06) Store user fields in the control-plane fleet store
 
 **Unblocks:** [`W-P3-PORT-01`](consent-portal.md#17--w-p3-port-01) Serve the portal page and the connections list API; [`W-P4-AMCP-01`](admin-mcp.md#19--w-p4-amcp-01) Add the CP traffic API with a sanitized record projection; [`W-P3-PUL-05`](per-user-limits.md#510--w-p3-pul-05) Add per-user usage and cost dashboard view; [`W-P3-PUL-08`](per-user-limits.md#810--w-p3-pul-08) Publish fleet cost blocks as costBlockedUsers from the control plane
 
@@ -408,7 +408,7 @@ Wire the evaluator's user limits into the worker. Policy and rate limits are che
 - [ ] The deny event carries user_sub, reason user_rate_limited and limit_rule, and no metric label contains a sub or email.
 - [ ] With no user limits configured, `go test ./internal/proxy` passes unchanged.
 
-**Depends on:** [`W-P3-PUL-02`](per-user-limits.md#210--w-p3-pul-02) Record agent id and limit rule on worker events; [`W-P3-PUL-03`](per-user-limits.md#310--w-p3-pul-03) Add per-user limit matching and counters to the policy evaluator; [`W-P1-GPOL-03`](identity-policy.md#39--w-p1-gpol-03) Apply group-aware allow decisions at CONNECT and request time; [`W-P1-BLOCK-02`](user-block-list.md#29--w-p1-block-02) Enforce the block list in the worker at CONNECT, per request and per h2 stream; [`W-P1-JAUD-06`](audit-log-export.md#26--w-p1-jaud-06) Set a bounded Reason on every deny event; [`W-P1-JAUD-02`](audit-log-export.md#46--w-p1-jaud-02) Publish decision v1 JSON Schema with closed-field and leak tests
+**Depends on:** [`W-P3-PUL-02`](per-user-limits.md#210--w-p3-pul-02) Record agent id and limit rule on worker events; [`W-P3-PUL-03`](per-user-limits.md#310--w-p3-pul-03) Add per-user limit matching and counters to the policy evaluator; [`W-P1-GPOL-03`](identity-policy.md#39--w-p1-gpol-03) Apply group-aware allow decisions at CONNECT and request time; [`W-P1-BLOCK-02`](user-block-list.md#210--w-p1-block-02) Enforce the block list in the worker at CONNECT, per request and per h2 stream; [`W-P1-JAUD-06`](audit-log-export.md#26--w-p1-jaud-06) Set a bounded Reason on every deny event; [`W-P1-JAUD-02`](audit-log-export.md#46--w-p1-jaud-02) Publish decision v1 JSON Schema with closed-field and leak tests
 
 **Unblocks:** [`W-P3-PUL-04`](per-user-limits.md#410--w-p3-pul-04) Cap daily estimated cost per user in the worker; [`W-P3-PUL-10`](per-user-limits.md#1010--w-p3-pul-10) Add per-user limits end-to-end test and docs
 
@@ -441,4 +441,4 @@ Prove the done-when end to end with two workers and one CP under the integration
 - [ ] The test asserts zero judge calls for limit denials.
 - [ ] `go run docs/roadmap/gen.go check` and `scripts/check.sh` pass after the docs change.
 
-**Depends on:** [`W-P3-PUL-04`](per-user-limits.md#410--w-p3-pul-04) Cap daily estimated cost per user in the worker; [`W-P3-PUL-05`](per-user-limits.md#510--w-p3-pul-05) Add per-user usage and cost dashboard view; [`W-P3-PUL-08`](per-user-limits.md#810--w-p3-pul-08) Publish fleet cost blocks as costBlockedUsers from the control plane; [`W-P3-PUL-09`](per-user-limits.md#910--w-p3-pul-09) Enforce per-user rate limits per request in the proxy; [`W-P1-VRFY-05`](identity-verification.md#57--w-p1-vrfy-05) Add identity attribution scenarios on test/harness and a CI integration job
+**Depends on:** [`W-P3-PUL-04`](per-user-limits.md#410--w-p3-pul-04) Cap daily estimated cost per user in the worker; [`W-P3-PUL-05`](per-user-limits.md#510--w-p3-pul-05) Add per-user usage and cost dashboard view; [`W-P3-PUL-08`](per-user-limits.md#810--w-p3-pul-08) Publish fleet cost blocks as costBlockedUsers from the control plane; [`W-P3-PUL-09`](per-user-limits.md#910--w-p3-pul-09) Enforce per-user rate limits per request in the proxy; [`W-P1-VRFY-05`](identity-verification.md#59--w-p1-vrfy-05) Add identity attribution scenarios on test/harness and a CI integration job

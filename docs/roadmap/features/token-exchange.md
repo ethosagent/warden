@@ -140,7 +140,7 @@ Add `Service.Exchange` in internal/tokensvc. It authenticates the agent (TOKX-01
 - [ ] An expired subject, a wrong azp, an unverified status and ErrNoActiveKey each give the mapped error, and no token is minted: `go test ./internal/tokensvc -run TestExchangeSubjectAndSignerFailures`.
 - [ ] A subject that expires in 5m yields exp equal to the subject exp and ExpiresIn 300. The same (idp_iss, sub, agent) within 12h keeps its sid, gets a new one after 12h+1s idle, gets session_revoked after Revoke for a subject issued before it, and a new sid for a subject issued after it: `go test ./internal/tokensvc -run TestExchangeSessionID`.
 
-**Depends on:** [`W-P2-TOKX-01`](token-exchange.md#17--w-p2-tokx-01) Add private_key_jwt client assertion verification; [`W-P2-KEYS-02`](key-management.md#27--w-p2-keys-02) Add the keys config gate, file key store and signing_keys metadata; [`W-P1-VRFY-01`](identity-verification.md#17--w-p1-vrfy-01) Add internal/identity OIDC verifier with lazy JWKS, cache and config; [`W-P1-BLOCK-03`](user-block-list.md#39--w-p1-block-03) Add the CP block-list store, admin API and policy merge; [`W-P1-BLOCK-07`](user-block-list.md#79--w-p1-block-07) Deny console login and sessions for blocked principals
+**Depends on:** [`W-P2-TOKX-01`](token-exchange.md#17--w-p2-tokx-01) Add private_key_jwt client assertion verification; [`W-P2-KEYS-02`](key-management.md#27--w-p2-keys-02) Add the keys config gate, file key store and signing_keys metadata; [`W-P1-VRFY-01`](identity-verification.md#19--w-p1-vrfy-01) Add internal/identity OIDC verifier with lazy JWKS, cache and config; [`W-P1-BLOCK-03`](user-block-list.md#310--w-p1-block-03) Add the CP block-list store, admin API and policy merge; [`W-P1-BLOCK-07`](user-block-list.md#710--w-p1-block-07) Deny console login and sessions for blocked principals
 
 **Unblocks:** [`W-P2-TOKX-03`](token-exchange.md#37--w-p2-tokx-03) Mount POST /oauth2/token with RFC 8693 request parsing and config; [`W-P2-WBND-06`](identity-enforcement.md#610--w-p2-wbnd-06) Add token issuer, agent key thumbprints and email claims to CP outputs; [`W-P4-NTFY-07`](user-notify.md#710--w-p4-ntfy-07) Add verified user contacts table keyed by user_key
 
@@ -219,7 +219,7 @@ Add the three-stage rate limits, so an unauthenticated caller cannot drain a rea
 - [ ] With the event store forced to fail, a valid exchange returns 503 and the body has no access_token: `go test ./internal/tokensvc -run TestExchangeEventStoreFailClosed`.
 - [ ] The set of denied-counter reasons equals the tokensvc Reason enum: `go test ./internal/tokensvc -run TestMetricReasonsBounded`.
 
-**Depends on:** [`W-P2-TOKX-03`](token-exchange.md#37--w-p2-tokx-03) Mount POST /oauth2/token with RFC 8693 request parsing and config; [`W-P1-AAUD-02`](admin-audit-log.md#24--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware
+**Depends on:** [`W-P2-TOKX-03`](token-exchange.md#37--w-p2-tokx-03) Mount POST /oauth2/token with RFC 8693 request parsing and config; [`W-P1-AAUD-02`](admin-audit-log.md#26--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware
 
 **Unblocks:** [`W-P2-TOKX-05`](token-exchange.md#57--w-p2-tokx-05) Add token service end-to-end integration test; [`W-P2-TOKX-06`](token-exchange.md#67--w-p2-tokx-06) Document the token service for operators and harness authors; [`W-P2-SECT-01`](security-tests.md#17--w-p2-sect-01) Add security test harness with in-process CP, workers and shared fakes; [`W-P2-SECT-02`](security-tests.md#27--w-p2-sect-02) Add token forgery, confusion and replay cases; [`W-P3-BRKR-03`](oauth-broker.md#39--w-p3-brkr-03) Implement POST /connect/start with PKCE, CSRF and scope capping; [`W-P4-DGR-02`](delegation-grants.md#212--w-p4-dgr-02) Add the agent grant request API; [`W-P4-DGR-04`](delegation-grants.md#412--w-p4-dgr-04) Add the grant subject resolver, delegation mode and rollout guard to the token service
 
@@ -256,7 +256,7 @@ Prove the exchange end to end under the integration build tag. By default it use
 - [ ] With the issuer stopped and a cold cache the response is 503, never 200.
 - [ ] With WARDEN_IT_DEX=1, alice's real Dex token exchanges successfully. Captured test and CP logs contain no substring starting with `eyJ`.
 
-**Depends on:** [`W-P2-TOKX-04`](token-exchange.md#47--w-p2-tokx-04) Add rate limits, issuance records and metrics for token exchange; [`W-P2-TOKX-07`](token-exchange.md#77--w-p2-tokx-07) Add admin revocation for token sessions; [`W-P2-KEYS-04`](key-management.md#47--w-p2-keys-04) Serve the token JWKS, readiness and admin key API from the control plane; [`W-P1-VRFY-05`](identity-verification.md#57--w-p1-vrfy-05) Add identity attribution scenarios on test/harness and a CI integration job; [`W-P1-DEX-02`](dex-oidc.md#23--w-p1-dex-02) Add identity compose recipe with pinned Dex and seeded LDAP
+**Depends on:** [`W-P2-TOKX-04`](token-exchange.md#47--w-p2-tokx-04) Add rate limits, issuance records and metrics for token exchange; [`W-P2-TOKX-07`](token-exchange.md#77--w-p2-tokx-07) Add admin revocation for token sessions; [`W-P2-KEYS-04`](key-management.md#47--w-p2-keys-04) Serve the token JWKS, readiness and admin key API from the control plane; [`W-P1-VRFY-05`](identity-verification.md#59--w-p1-vrfy-05) Add identity attribution scenarios on test/harness and a CI integration job; [`W-P1-DEX-02`](dex-oidc.md#24--w-p1-dex-02) Add identity compose recipe with pinned Dex and seeded LDAP
 
 ### 6/7 · W-P2-TOKX-06
 
@@ -317,6 +317,6 @@ Add admin routes that revoke one token session, or all sessions for a user or an
 - [ ] Revoke-all by agent_id revokes only that agent's sessions, and the response count matches.
 - [ ] With tokenService disabled, every /dashboard/api/token-sessions route returns 404.
 
-**Depends on:** [`W-P2-TOKX-03`](token-exchange.md#37--w-p2-tokx-03) Mount POST /oauth2/token with RFC 8693 request parsing and config; [`W-P1-AAUD-02`](admin-audit-log.md#24--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware
+**Depends on:** [`W-P2-TOKX-03`](token-exchange.md#37--w-p2-tokx-03) Mount POST /oauth2/token with RFC 8693 request parsing and config; [`W-P1-AAUD-02`](admin-audit-log.md#26--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware
 
 **Unblocks:** [`W-P2-TOKX-05`](token-exchange.md#57--w-p2-tokx-05) Add token service end-to-end integration test; [`W-P2-TOKX-06`](token-exchange.md#67--w-p2-tokx-06) Document the token service for operators and harness authors; [`W-P3-OFFB-01`](offboarding.md#17--w-p3-offb-01) Implement the resumable two-stage Offboarder; [`W-P3-PUS-07`](refresh-model.md#712--w-p3-pus-07) Add the worker-mTLS mint endpoint POST /control/user-token

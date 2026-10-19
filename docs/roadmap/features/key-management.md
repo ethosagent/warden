@@ -135,7 +135,7 @@ Add the default-off CP-local `keys:` block, the `keys.PrivateKeyStore` seam with
 - [ ] Config with backend echo, bundle alg ES256, or enabled without --state-dir fails naming the field: `go test ./internal/config -run TestKeysConfig`
 - [ ] With keys.enabled false, no keys dir or signing_keys table exists and existing tests pass: `go test ./cmd/proxy ./internal/controlplane`
 
-**Depends on:** [`W-P2-KEYS-01`](key-management.md#17--w-p2-keys-01) Add internal/keys Signer, JWK and RFC 7638 kid helpers; [`W-P1-SSO-01`](console-sso-rbac.md#18--w-p1-sso-01) Add internal/cpstate SQLite state store with migrations; [`W-P1-AAUD-01`](admin-audit-log.md#14--w-p1-aaud-01) Add signed, hash-chained admin audit store on cpstate
+**Depends on:** [`W-P2-KEYS-01`](key-management.md#17--w-p2-keys-01) Add internal/keys Signer, JWK and RFC 7638 kid helpers; [`W-P1-SSO-01`](console-sso-rbac.md#18--w-p1-sso-01) Add internal/cpstate SQLite state store with migrations; [`W-P1-AAUD-01`](admin-audit-log.md#16--w-p1-aaud-01) Add signed, hash-chained admin audit store on cpstate
 
 **Unblocks:** [`W-P2-TOKX-02`](token-exchange.md#27--w-p2-tokx-02) Implement token exchange policy checks and JWT minting; [`W-P2-KEYS-03`](key-management.md#37--w-p2-keys-03) Implement per-purpose rotation with prepublish and overlap windows; [`W-P2-KEYS-07`](key-management.md#77--w-p2-keys-07) Add an opt-in AWS Secrets Manager key store isolated from workers; [`W-P2-WCA-01`](worker-mtls.md#18--w-p2-wca-01) Add internal/workerca intermediate CA, workerCA config and ca init
 
@@ -212,7 +212,7 @@ Mount the public `GET /.well-known/jwks.json` for token keys, a `GET /readyz` th
 - [ ] Viewer and editor get 403 on both admin routes, admin gets 200 with no private fields, and an admin rotate writes one admin audit row with outcome ok: `go test ./internal/controlplane -run TestKeysAdminAPI`
 - [ ] With the store failing at startup /readyz returns 503 and /healthz 200; with keys disabled all key routes return 404 and the route-coverage test passes: `go test ./internal/controlplane ./internal/dashboard`
 
-**Depends on:** [`W-P2-KEYS-03`](key-management.md#37--w-p2-keys-03) Implement per-purpose rotation with prepublish and overlap windows; [`W-P1-SSO-05`](console-sso-rbac.md#58--w-p1-sso-05) Enforce role checks on every dashboard route; [`W-P1-AAUD-02`](admin-audit-log.md#24--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware
+**Depends on:** [`W-P2-KEYS-03`](key-management.md#37--w-p2-keys-03) Implement per-purpose rotation with prepublish and overlap windows; [`W-P1-SSO-05`](console-sso-rbac.md#58--w-p1-sso-05) Enforce role checks on every dashboard route; [`W-P1-AAUD-02`](admin-audit-log.md#26--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware
 
 **Unblocks:** [`W-P2-TOKX-03`](token-exchange.md#37--w-p2-tokx-03) Mount POST /oauth2/token with RFC 8693 request parsing and config; [`W-P2-TOKX-05`](token-exchange.md#57--w-p2-tokx-05) Add token service end-to-end integration test; [`W-P2-KEYS-05`](key-management.md#57--w-p2-keys-05) Add the keys CLI, backup integration and key rotation runbook; [`W-P2-SBND-02`](signed-bundles.md#27--w-p2-sbnd-02) Serve the signed bundle envelope on GET /policy behind --bundles; [`W-P2-SECT-03`](security-tests.md#37--w-p2-sect-03) Add binding, cross-agent and issued-token lifetime cases; [`W-P2-SECT-05`](security-tests.md#57--w-p2-sect-05) Add Go-only test seams for in-process CP and worker runs
 
@@ -287,7 +287,7 @@ P1 has no supported way to rotate the admin audit Ed25519 key: W-P1-AAUD-01 fail
 - [ ] After rotation the CP starts; with the retired key copied back over cp-audit.key, startup fails naming the expected key_id.
 - [ ] After rotation `go run ./cmd/proxy control-plane admin-audit verify --state-dir <dir>` exits 0, and restoring a pre-rotation backup set passes the fingerprint check without --new-audit-key.
 
-**Depends on:** [`W-P1-AAUD-04`](admin-audit-log.md#44--w-p1-aaud-04) Add offline admin audit verify and export CLI; [`W-P1-OPS1-04`](ops-hardening.md#44--w-p1-ops1-04) Add CP state-dir lock and verified restore command
+**Depends on:** [`W-P1-AAUD-04`](admin-audit-log.md#46--w-p1-aaud-04) Add offline admin audit verify and export CLI; [`W-P1-OPS1-04`](ops-hardening.md#44--w-p1-ops1-04) Add CP state-dir lock and verified restore command
 
 ### 7/7 · W-P2-KEYS-07
 

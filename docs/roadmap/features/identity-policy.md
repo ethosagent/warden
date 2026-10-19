@@ -132,7 +132,7 @@ Add `EvaluateFor(domain, port, scheme, *identity.Subject) Result` to `internal/p
 - [ ] `go test ./internal/policy -run '^$' -bench 'BenchmarkEvaluate' -count 10` compared with benchstat against main shows 5% or less ns/op change and 0 extra allocs/op for BenchmarkEvaluate.
 - [ ] `go test -race ./internal/policy -run TestEvaluateFor_ConcurrentReplace` passes.
 
-**Depends on:** [`W-P1-GPOL-01`](identity-policy.md#19--w-p1-gpol-01) Add groups/users to allow entries and MCP conditions schema; [`W-P1-VRFY-01`](identity-verification.md#17--w-p1-vrfy-01) Add internal/identity OIDC verifier with lazy JWKS, cache and config
+**Depends on:** [`W-P1-GPOL-01`](identity-policy.md#19--w-p1-gpol-01) Add groups/users to allow entries and MCP conditions schema; [`W-P1-VRFY-01`](identity-verification.md#19--w-p1-vrfy-01) Add internal/identity OIDC verifier with lazy JWKS, cache and config
 
 **Unblocks:** [`W-P4-AMCP-07`](admin-mcp.md#29--w-p4-amcp-07) Add the CP explain API with historical version resolution; [`W-P1-GPOL-03`](identity-policy.md#39--w-p1-gpol-03) Apply group-aware allow decisions at CONNECT and request time; [`W-P1-GPOL-04`](identity-policy.md#49--w-p1-gpol-04) Support groups/users in MCP tool allowWhen conditions; [`W-P1-GPOL-05`](identity-policy.md#59--w-p1-gpol-05) Show affected users in policy eval replay; [`W-P3-PUL-03`](per-user-limits.md#310--w-p3-pul-03) Add per-user limit matching and counters to the policy evaluator
 
@@ -172,7 +172,7 @@ Enforce scoped allow entries in the worker at CONNECT and on every request, then
 - [ ] With a judge fake that always allows, non-member and anonymous requests to a scoped-only host are denied and the fake gets zero calls.
 - [ ] An expired token on a request to a scoped-only host is denied with identity_status=expired on the event.
 
-**Depends on:** [`W-P1-GPOL-02`](identity-policy.md#29--w-p1-gpol-02) Make the policy evaluator subject-aware with EvaluateFor; [`W-P1-GPOL-06`](identity-policy.md#69--w-p1-gpol-06) Project scoped rules into fail-closed policy wire fields; [`W-P1-VRFY-02`](identity-verification.md#27--w-p1-vrfy-02) Extract, verify and strip identity on CONNECT, HTTP/1.1 and HTTP/2; [`W-P1-VRFY-03`](identity-verification.md#37--w-p1-vrfy-03) Record user fields on worker events, receipts, decision logs and sync; [`W-P1-JAUD-06`](audit-log-export.md#26--w-p1-jaud-06) Set a bounded Reason on every deny event
+**Depends on:** [`W-P1-GPOL-02`](identity-policy.md#29--w-p1-gpol-02) Make the policy evaluator subject-aware with EvaluateFor; [`W-P1-GPOL-06`](identity-policy.md#69--w-p1-gpol-06) Project scoped rules into fail-closed policy wire fields; [`W-P1-VRFY-02`](identity-verification.md#29--w-p1-vrfy-02) Extract, verify and strip identity on CONNECT, HTTP/1.1 and HTTP/2; [`W-P1-VRFY-03`](identity-verification.md#39--w-p1-vrfy-03) Record user fields on worker events, receipts, decision logs and sync; [`W-P1-JAUD-06`](audit-log-export.md#26--w-p1-jaud-06) Set a bounded Reason on every deny event
 
 **Unblocks:** [`W-P1-GPOL-08`](identity-policy.md#89--w-p1-gpol-08) Edit groups/users in the dashboard policy editor; [`W-P1-GPOL-09`](identity-policy.md#99--w-p1-gpol-09) Add group policy e2e test and policy docs; [`W-P3-PUL-09`](per-user-limits.md#910--w-p3-pul-09) Enforce per-user rate limits per request in the proxy; [`W-P4-HOOK-07`](policy-hooks.md#711--w-p4-hook-07) Wire the pre-request hook stage into the HTTP/1.1 proxy path
 
@@ -211,7 +211,7 @@ Let `allowWhen` on an MCP tool require a group or user, so a tool the policy all
 - [ ] Over WebSocket, the subject from the upgrade request is used for each frame: `go test ./internal/proxy -run TestMCPWS_SubjectFromUpgrade`.
 - [ ] Existing suites pass with the new signature: `go test ./internal/mcp/... ./internal/proxy`.
 
-**Depends on:** [`W-P1-GPOL-02`](identity-policy.md#29--w-p1-gpol-02) Make the policy evaluator subject-aware with EvaluateFor; [`W-P1-GPOL-06`](identity-policy.md#69--w-p1-gpol-06) Project scoped rules into fail-closed policy wire fields; [`W-P1-VRFY-02`](identity-verification.md#27--w-p1-vrfy-02) Extract, verify and strip identity on CONNECT, HTTP/1.1 and HTTP/2
+**Depends on:** [`W-P1-GPOL-02`](identity-policy.md#29--w-p1-gpol-02) Make the policy evaluator subject-aware with EvaluateFor; [`W-P1-GPOL-06`](identity-policy.md#69--w-p1-gpol-06) Project scoped rules into fail-closed policy wire fields; [`W-P1-VRFY-02`](identity-verification.md#29--w-p1-vrfy-02) Extract, verify and strip identity on CONNECT, HTTP/1.1 and HTTP/2
 
 **Unblocks:** [`W-P4-DGR-05`](delegation-grants.md#512--w-p4-dgr-05) Enforce grant tools in worker MCP verdicts; [`W-P1-GPOL-08`](identity-policy.md#89--w-p1-gpol-08) Edit groups/users in the dashboard policy editor; [`W-P1-GPOL-09`](identity-policy.md#99--w-p1-gpol-09) Add group policy e2e test and policy docs
 
@@ -248,7 +248,7 @@ Make `policyeval.Evaluate` replay events with the recorded user so `warden polic
 - [ ] A scoped entry for api.github.com plus an unscoped `*.github.com` entry produces a shadow warning: `go test ./internal/config -run TestLintScoped`.
 - [ ] `go test ./cmd/proxy -run TestEvalCmd_AffectedUsers` shows the affected-users line.
 
-**Depends on:** [`W-P1-GPOL-02`](identity-policy.md#29--w-p1-gpol-02) Make the policy evaluator subject-aware with EvaluateFor; [`W-P1-VRFY-03`](identity-verification.md#37--w-p1-vrfy-03) Record user fields on worker events, receipts, decision logs and sync
+**Depends on:** [`W-P1-GPOL-02`](identity-policy.md#29--w-p1-gpol-02) Make the policy evaluator subject-aware with EvaluateFor; [`W-P1-VRFY-03`](identity-verification.md#39--w-p1-vrfy-03) Record user fields on worker events, receipts, decision logs and sync
 
 **Unblocks:** [`W-P2-APPR-03`](policy-approvals.md#39--w-p2-appr-03) Replay fleet events against base and draft for each revision; [`W-P1-GPOL-08`](identity-policy.md#89--w-p1-gpol-08) Edit groups/users in the dashboard policy editor; [`W-P1-GPOL-09`](identity-policy.md#99--w-p1-gpol-09) Add group policy e2e test and policy docs
 
@@ -379,4 +379,4 @@ Prove the done-when end to end against a real Dex token, and document group-scop
 - [ ] The test asserts the judge fake receives zero calls for scoped denies.
 - [ ] Docs build and links check pass: `go run docs/roadmap/gen.go check`.
 
-**Depends on:** [`W-P1-GPOL-03`](identity-policy.md#39--w-p1-gpol-03) Apply group-aware allow decisions at CONNECT and request time; [`W-P1-GPOL-04`](identity-policy.md#49--w-p1-gpol-04) Support groups/users in MCP tool allowWhen conditions; [`W-P1-GPOL-05`](identity-policy.md#59--w-p1-gpol-05) Show affected users in policy eval replay; [`W-P1-VRFY-05`](identity-verification.md#57--w-p1-vrfy-05) Add identity attribution scenarios on test/harness and a CI integration job
+**Depends on:** [`W-P1-GPOL-03`](identity-policy.md#39--w-p1-gpol-03) Apply group-aware allow decisions at CONNECT and request time; [`W-P1-GPOL-04`](identity-policy.md#49--w-p1-gpol-04) Support groups/users in MCP tool allowWhen conditions; [`W-P1-GPOL-05`](identity-policy.md#59--w-p1-gpol-05) Show affected users in policy eval replay; [`W-P1-VRFY-05`](identity-verification.md#59--w-p1-vrfy-05) Add identity attribution scenarios on test/harness and a CI integration job

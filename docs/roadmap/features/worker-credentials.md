@@ -170,7 +170,7 @@ Add the admin API and a console panel to create, list and revoke worker tokens, 
 - [ ] One admin audit row is written per create and per revoke, and a heartbeat or ingest POST writes no audit row.
 - [ ] `go test -race ./internal/dashboard -run TestWorkerTokensAPI` and `go test -race ./internal/controlplane -run 'TestWorkerTokensAudit|TestAuditSkipsWorkerRoutes'` pass.
 
-**Depends on:** [`W-P1-WTOK-02`](worker-credentials.md#26--w-p1-wtok-02) Authenticate /policy, heartbeat and ingest with per-worker tokens; [`W-P1-SSO-05`](console-sso-rbac.md#58--w-p1-sso-05) Enforce role checks on every dashboard route; [`W-P1-AAUD-02`](admin-audit-log.md#24--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware
+**Depends on:** [`W-P1-WTOK-02`](worker-credentials.md#26--w-p1-wtok-02) Authenticate /policy, heartbeat and ingest with per-worker tokens; [`W-P1-SSO-05`](console-sso-rbac.md#58--w-p1-sso-05) Enforce role checks on every dashboard route; [`W-P1-AAUD-02`](admin-audit-log.md#26--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware
 
 **Unblocks:** [`W-P1-WTOK-04`](worker-credentials.md#46--w-p1-wtok-04) Add strict worker auth mode and the WARDEN_CP_TOKEN migration guide; [`W-P2-WCA-08`](worker-mtls.md#88--w-p2-wca-08) Add worker enrollment admin API and console panel
 
@@ -243,7 +243,7 @@ Add `warden control-plane token create|list|revoke` that opens cpstate in --stat
 - [ ] After interleaved CLI and API creates and revokes, adminaudit.Verify returns ok and each action appears once with the right actor.
 - [ ] `go test -race ./cmd/proxy -run TestControlPlaneTokenCmd` passes.
 
-**Depends on:** [`W-P1-WTOK-01`](worker-credentials.md#16--w-p1-wtok-01) Add worker token store with hashed storage, revocation and in-memory index; [`W-P1-AAUD-01`](admin-audit-log.md#14--w-p1-aaud-01) Add signed, hash-chained admin audit store on cpstate
+**Depends on:** [`W-P1-WTOK-01`](worker-credentials.md#16--w-p1-wtok-01) Add worker token store with hashed storage, revocation and in-memory index; [`W-P1-AAUD-01`](admin-audit-log.md#16--w-p1-aaud-01) Add signed, hash-chained admin audit store on cpstate
 
 **Unblocks:** [`W-P1-WTOK-04`](worker-credentials.md#46--w-p1-wtok-04) Add strict worker auth mode and the WARDEN_CP_TOKEN migration guide; [`W-P1-WTOK-06`](worker-credentials.md#66--w-p1-wtok-06) Move compose recipes and worker configs to per-worker tokens; [`W-P2-WCA-02`](worker-mtls.md#28--w-p2-wca-02) Add enrollment token store, POST /control/enroll and enroll-token CLI
 

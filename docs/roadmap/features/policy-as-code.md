@@ -170,7 +170,7 @@ Add new package internal/gitsync that fetches one policy file from a Git repo on
 - [ ] Given gitops.enabled with console.approvals.enabled false, an http:// repo, or ssh without knownHostsFile, the CP exits non-zero naming the key; a host key not in knownHostsFile gives host_key_mismatch.
 - [ ] `go test -race ./internal/gitsync ./internal/config -run 'TestGitSync|TestGitOpsConfig'` and `go test -race ./internal/controlplane -run 'TestGitOpsStatusAPI|TestGitDraftImport|TestAuthzRouteCoverage'` pass.
 
-**Depends on:** [`W-P4-GOPS-01`](policy-as-code.md#111--w-p4-gops-01) Add warden policy lint with a shared repo doc parser; [`W-P2-APPR-04`](policy-approvals.md#49--w-p2-appr-04) Add the change draft API with the two-person rule; [`W-P2-APPR-06`](policy-approvals.md#69--w-p2-appr-06) Gate every versioned write path through one clearance check; [`W-P2-APIK-02`](api-keys.md#27--w-p2-apik-02) Authenticate API keys and enforce per-route scopes in the authz table; [`W-P1-AAUD-02`](admin-audit-log.md#24--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware
+**Depends on:** [`W-P4-GOPS-01`](policy-as-code.md#111--w-p4-gops-01) Add warden policy lint with a shared repo doc parser; [`W-P2-APPR-04`](policy-approvals.md#49--w-p2-appr-04) Add the change draft API with the two-person rule; [`W-P2-APPR-06`](policy-approvals.md#69--w-p2-appr-06) Gate every versioned write path through one clearance check; [`W-P2-APIK-02`](api-keys.md#27--w-p2-apik-02) Authenticate API keys and enforce per-route scopes in the authz table; [`W-P1-AAUD-02`](admin-audit-log.md#26--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware
 
 **Unblocks:** [`W-P4-GOPS-03`](policy-as-code.md#411--w-p4-gops-03) Add Git provenance, authoritative mode and git drift
 
@@ -248,7 +248,7 @@ Canary needs a version that is approved but not yet head, which P2 does not have
 - [ ] Given console.rollouts.enabled without strict worker auth, the CP exits non-zero naming --require-worker-tokens.
 - [ ] `go test -race ./internal/rollout ./internal/approvals -run 'TestRolloutStore|TestMembership|TestDraftStaged'` and `go test -race ./internal/controlplane -run TestRolloutStart` pass.
 
-**Depends on:** [`W-P2-APPR-06`](policy-approvals.md#69--w-p2-appr-06) Gate every versioned write path through one clearance check; [`W-P1-PVER-05`](policy-versioning.md#56--w-p1-pver-05) Mirror head into the served YAML and detect external edits; [`W-P2-APIK-02`](api-keys.md#27--w-p2-apik-02) Authenticate API keys and enforce per-route scopes in the authz table; [`W-P1-AAUD-02`](admin-audit-log.md#24--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware; [`W-P1-WTOK-04`](worker-credentials.md#46--w-p1-wtok-04) Add strict worker auth mode and the WARDEN_CP_TOKEN migration guide
+**Depends on:** [`W-P2-APPR-06`](policy-approvals.md#69--w-p2-appr-06) Gate every versioned write path through one clearance check; [`W-P1-PVER-05`](policy-versioning.md#56--w-p1-pver-05) Mirror head into the served YAML and detect external edits; [`W-P2-APIK-02`](api-keys.md#27--w-p2-apik-02) Authenticate API keys and enforce per-route scopes in the authz table; [`W-P1-AAUD-02`](admin-audit-log.md#26--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware; [`W-P1-WTOK-04`](worker-credentials.md#46--w-p1-wtok-04) Add strict worker auth mode and the WARDEN_CP_TOKEN migration guide
 
 **Unblocks:** [`W-P4-GOPS-09`](policy-as-code.md#611--w-p4-gops-09) Serve policy per rollout cohort with ordered bundle seqs
 
@@ -329,7 +329,7 @@ Add the rollout transitions and the status API operators use to decide. Promote 
 - [ ] Given a policy:write API key, rollback returns 200 and promote returns 403 insufficient_scope; a viewer session gets 403 on both with an outcome=denied audit row.
 - [ ] `go test -race ./internal/controlplane -run 'TestRolloutPromote|TestRolloutRollback|TestRolloutSupersede|TestRolloutStatus|TestRolloutAuthz'` and `go test -race ./internal/analytics -run TestFleetCohortStats` pass.
 
-**Depends on:** [`W-P4-GOPS-09`](policy-as-code.md#611--w-p4-gops-09) Serve policy per rollout cohort with ordered bundle seqs; [`W-P2-APPR-07`](policy-approvals.md#79--w-p2-appr-07) Add audited break-glass emergency apply with post-hoc review; [`W-P1-AAUD-02`](admin-audit-log.md#24--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware
+**Depends on:** [`W-P4-GOPS-09`](policy-as-code.md#611--w-p4-gops-09) Serve policy per rollout cohort with ordered bundle seqs; [`W-P2-APPR-07`](policy-approvals.md#79--w-p2-appr-07) Add audited break-glass emergency apply with post-hoc review; [`W-P1-AAUD-02`](admin-audit-log.md#26--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware
 
 **Unblocks:** [`W-P4-GOPS-10`](policy-as-code.md#811--w-p4-gops-10) Add CP-side automatic rollout rollback; [`W-P4-GOPS-06`](policy-as-code.md#911--w-p4-gops-06) Build the console Rollouts page
 

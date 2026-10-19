@@ -607,6 +607,17 @@
           "W-P1-VRFY-01",
           "W-P1-SSO-02"
         ]
+      },
+      {
+        "key": "W-P1-DEX-04",
+        "title": "Add the L2 identity e2e stack",
+        "type": "feature",
+        "estimate": "S",
+        "body": "STUB: placeholder created by the P1 split pass so other features can depend on this key. The owning split agent replaces this whole ticket.",
+        "requirements": [],
+        "plan": [],
+        "acceptance": [],
+        "depends_on": []
       }
     ],
     "phase": 1,
@@ -1566,6 +1577,28 @@
         "depends_on": [
           "W-P1-AAUD-01"
         ]
+      },
+      {
+        "key": "W-P1-AAUD-05",
+        "title": "Gate admin audit behind config, check the key id at startup, add segment rotation and a shared CLI recorder opener",
+        "type": "feature",
+        "estimate": "S",
+        "body": "STUB: placeholder created by the P1 split pass so other features can depend on this key. The owning split agent replaces this whole ticket.",
+        "requirements": [],
+        "plan": [],
+        "acceptance": [],
+        "depends_on": []
+      },
+      {
+        "key": "W-P1-AAUD-06",
+        "title": "Emit warden.admin.v1 slog lines and the 5-minute checkpoint",
+        "type": "feature",
+        "estimate": "S",
+        "body": "STUB: placeholder created by the P1 split pass so other features can depend on this key. The owning split agent replaces this whole ticket.",
+        "requirements": [],
+        "plan": [],
+        "acceptance": [],
+        "depends_on": []
       }
     ],
     "phase": 1,
@@ -2148,6 +2181,17 @@
           "W-P1-BLOCK-06",
           "W-P1-VRFY-05"
         ]
+      },
+      {
+        "key": "W-P1-BLOCK-10",
+        "title": "Advertise and record worker caps (blocklist/v1) in the heartbeat",
+        "type": "feature",
+        "estimate": "S",
+        "body": "STUB: placeholder created by the P1 split pass so other features can depend on this key. The owning split agent replaces this whole ticket.",
+        "requirements": [],
+        "plan": [],
+        "acceptance": [],
+        "depends_on": []
       }
     ],
     "phase": 1,
@@ -8535,6 +8579,28 @@
         "depends_on": [
           "W-P1-VRFY-02"
         ]
+      },
+      {
+        "key": "W-P1-VRFY-08",
+        "title": "Add the identity settings block to SettingsWire, local YAML and the per-agent field",
+        "type": "feature",
+        "estimate": "M",
+        "body": "STUB: placeholder created by the P1 split pass so other features can depend on this key. The owning split agent replaces this whole ticket.",
+        "requirements": [],
+        "plan": [],
+        "acceptance": [],
+        "depends_on": []
+      },
+      {
+        "key": "W-P1-VRFY-09",
+        "title": "Stamp identity on every proxy event and decision log",
+        "type": "feature",
+        "estimate": "S",
+        "body": "STUB: placeholder created by the P1 split pass so other features can depend on this key. The owning split agent replaces this whole ticket.",
+        "requirements": [],
+        "plan": [],
+        "acceptance": [],
+        "depends_on": []
       }
     ],
     "phase": 1,

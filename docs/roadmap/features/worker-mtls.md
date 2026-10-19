@@ -140,7 +140,7 @@ Add the cpstate tables for enrollment tokens and issued worker certs, the unauth
 - [ ] Neither the DB file nor any audit row or captured log contains the plaintext token or its sha256, and without workerCA.enabled /control/enroll returns 404.
 - [ ] `go test -race ./internal/controlplane -run 'TestEnroll|TestEnrollmentTokens'` and `go test -race ./cmd/proxy -run TestControlPlaneEnrollTokenCmd` pass.
 
-**Depends on:** [`W-P2-WCA-01`](worker-mtls.md#18--w-p2-wca-01) Add internal/workerca intermediate CA, workerCA config and ca init; [`W-P1-WTOK-05`](worker-credentials.md#56--w-p1-wtok-05) Add offline worker token bootstrap CLI; [`W-P1-AAUD-02`](admin-audit-log.md#24--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware
+**Depends on:** [`W-P2-WCA-01`](worker-mtls.md#18--w-p2-wca-01) Add internal/workerca intermediate CA, workerCA config and ca init; [`W-P1-WTOK-05`](worker-credentials.md#56--w-p1-wtok-05) Add offline worker token bootstrap CLI; [`W-P1-AAUD-02`](admin-audit-log.md#26--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware
 
 **Unblocks:** [`W-P2-WCA-04`](worker-mtls.md#48--w-p2-wca-04) Accept worker certs in WorkerAuthenticator and add /control/renew; [`W-P2-WCA-08`](worker-mtls.md#88--w-p2-wca-08) Add worker enrollment admin API and console panel
 

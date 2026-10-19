@@ -312,7 +312,7 @@ Add the `hookGate` stage to runRequestStages after dlpScan and before swapSecret
 - [ ] A settings apply with a broken hook keeps the previous hook, and a first apply with a broken failMode-closed hook denies with hook_unavailable: `go test ./internal/worker -run TestApplier_HookBuildFailure`.
 - [ ] With no hooks, `go test ./internal/proxy -run '^$' -bench BenchmarkHandleHTTP -benchmem` shows no extra allocs/op compared with main.
 
-**Depends on:** [`W-P4-HOOK-01`](policy-hooks.md#111--w-p4-hook-01) Add hook framework, config and metrics; [`W-P1-JAUD-05`](audit-log-export.md#16--w-p1-jaud-05) Record the pre-swap URL on events and decision logs; [`W-P1-JAUD-06`](audit-log-export.md#26--w-p1-jaud-06) Set a bounded Reason on every deny event; [`W-P1-GPOL-03`](identity-policy.md#39--w-p1-gpol-03) Apply group-aware allow decisions at CONNECT and request time; [`W-P1-BLOCK-02`](user-block-list.md#29--w-p1-block-02) Enforce the block list in the worker at CONNECT, per request and per h2 stream
+**Depends on:** [`W-P4-HOOK-01`](policy-hooks.md#111--w-p4-hook-01) Add hook framework, config and metrics; [`W-P1-JAUD-05`](audit-log-export.md#16--w-p1-jaud-05) Record the pre-swap URL on events and decision logs; [`W-P1-JAUD-06`](audit-log-export.md#26--w-p1-jaud-06) Set a bounded Reason on every deny event; [`W-P1-GPOL-03`](identity-policy.md#39--w-p1-gpol-03) Apply group-aware allow decisions at CONNECT and request time; [`W-P1-BLOCK-02`](user-block-list.md#210--w-p1-block-02) Enforce the block list in the worker at CONNECT, per request and per h2 stream
 
 **Unblocks:** [`W-P4-HOOK-02`](policy-hooks.md#211--w-p4-hook-02) Add CEL hook type; [`W-P4-HOOK-03`](policy-hooks.md#311--w-p4-hook-03) Add signed webhook hook type; [`W-P4-HOOK-05`](policy-hooks.md#511--w-p4-hook-05) Add post-response hooks; [`W-P4-HOOK-08`](policy-hooks.md#811--w-p4-hook-08) Run hooks at CONNECT, per h2 stream and on MCP over WebSocket and stdio; [`W-P4-HOOK-09`](policy-hooks.md#911--w-p4-hook-09) Run pre hooks in the MCP hub before routing tools/call; [`W-P4-HOOK-10`](policy-hooks.md#1011--w-p4-hook-10) Guard hook settings on the CP with validation, roles, audit and capability checks
 
@@ -416,7 +416,7 @@ A hook URL receives identity metadata and a failMode-closed hook can deny the wh
 - [ ] A CEL syntax error is rejected at save with 400 naming the hook: `go test ./internal/controlplane -run TestSettingsHooks_Validation`.
 - [ ] The approvals classifier marks a hooks change as widening: `go test ./internal/controlplane/... -run TestClassify_HooksWidening`.
 
-**Depends on:** [`W-P4-HOOK-07`](policy-hooks.md#711--w-p4-hook-07) Wire the pre-request hook stage into the HTTP/1.1 proxy path; [`W-P1-SSO-05`](console-sso-rbac.md#58--w-p1-sso-05) Enforce role checks on every dashboard route; [`W-P1-AAUD-02`](admin-audit-log.md#24--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware; [`W-P2-WBND-07`](identity-enforcement.md#710--w-p2-wbnd-07) Refuse require mode for agents served by workers without the capability
+**Depends on:** [`W-P4-HOOK-07`](policy-hooks.md#711--w-p4-hook-07) Wire the pre-request hook stage into the HTTP/1.1 proxy path; [`W-P1-SSO-05`](console-sso-rbac.md#58--w-p1-sso-05) Enforce role checks on every dashboard route; [`W-P1-AAUD-02`](admin-audit-log.md#26--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware; [`W-P2-WBND-07`](identity-enforcement.md#710--w-p2-wbnd-07) Refuse require mode for agents served by workers without the capability
 
 ### 11/11 · W-P4-HOOK-11
 
