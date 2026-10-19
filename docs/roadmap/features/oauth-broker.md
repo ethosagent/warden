@@ -130,7 +130,7 @@ Add cpstate migrations for pending_authorizations, connect_attempts and oauth_gr
 - [ ] BeginGrant then ActivateGrant twice for the same (user_key, provider) leaves one row with a new grant_id and advanced updated_at; RevokeGrant twice succeeds.
 - [ ] The 21st open pending for one user_key returns ErrTooMany, and no struct field or oauth_grants column is named or typed as a token, secret or value. Verify with `go test ./internal/oauthbroker/... -run TestGrantStoreConformance`.
 
-**Depends on:** [`W-P1-SSO-01`](console-sso-rbac.md#18--w-p1-sso-01) Add internal/cpstate SQLite state store with migrations
+**Depends on:** [`W-P1-SSO-01`](console-sso-rbac.md#111--w-p1-sso-01) Add internal/cpstate SQLite state store with migrations
 
 **Unblocks:** [`W-P3-BRKR-03`](oauth-broker.md#39--w-p3-brkr-03) Implement POST /connect/start with PKCE, CSRF and scope capping; [`W-P3-PORT-01`](consent-portal.md#17--w-p3-port-01) Serve the portal page and the connections list API; [`W-P3-PORT-05`](consent-portal.md#57--w-p3-port-05) Bump grant epochs on revoke and report workers without usersecrets/v1; [`W-P3-PUS-03`](refresh-model.md#312--w-p3-pus-03) Implement the CP user-token refresh engine; [`W-P3-JIT-01`](jit-authorization.md#17--w-p3-jit-01) Add CP endpoint to create or reuse pending authorizations
 
@@ -169,7 +169,7 @@ Add `POST /connect/start` on the CP behind the portal session middleware. It che
 - [ ] GET writes nothing and returns 303; a POST without valid CSRF returns 403; no session gives 303 to /portal/login; the 11th start in a minute returns 429.
 - [ ] With providers set and no consent.store or an echo one, CP startup fails with the documented error; with no providers, /connect/start returns 404. Verify with `go test ./internal/controlplane -run TestOAuthBrokerGate`.
 
-**Depends on:** [`W-P3-BRKR-01`](oauth-broker.md#19--w-p3-brkr-01) Add provider config model with Google and GitHub defaults; [`W-P3-BRKR-02`](oauth-broker.md#29--w-p3-brkr-02) Add pending authorization, attempt and grant metadata stores; [`W-P3-CSIG-04`](consent-auth.md#47--w-p3-csig-04) Add the portal session middleware, CSRF, logout and console isolation; [`W-P1-BLOCK-03`](user-block-list.md#39--w-p1-block-03) Add the CP block-list store, admin API and policy merge; [`W-P2-TOKX-04`](token-exchange.md#47--w-p2-tokx-04) Add rate limits, issuance records and metrics for token exchange
+**Depends on:** [`W-P3-BRKR-01`](oauth-broker.md#19--w-p3-brkr-01) Add provider config model with Google and GitHub defaults; [`W-P3-BRKR-02`](oauth-broker.md#29--w-p3-brkr-02) Add pending authorization, attempt and grant metadata stores; [`W-P3-CSIG-04`](consent-auth.md#47--w-p3-csig-04) Add the portal session middleware, CSRF, logout and console isolation; [`W-P1-BLOCK-03`](user-block-list.md#312--w-p1-block-03) Add the CP block-list store and merge it into the served policy; [`W-P2-TOKX-04`](token-exchange.md#47--w-p2-tokx-04) Add rate limits, issuance records and metrics for token exchange
 
 **Unblocks:** [`W-P3-BRKR-04`](oauth-broker.md#49--w-p3-brkr-04) Implement /connect/callback and write tokens to the secret backend; [`W-P3-PORT-03`](consent-portal.md#37--w-p3-port-03) Add the pending landing page and connect, continue and decline actions; [`W-P4-MREG-11`](mcp-registry.md#1111--w-p4-mreg-11) Discover OAuth settings for remote MCP registry servers; [`W-P3-PUS-07`](refresh-model.md#712--w-p3-pus-07) Add the worker-mTLS mint endpoint POST /control/user-token; [`W-P3-JIT-01`](jit-authorization.md#17--w-p3-jit-01) Add CP endpoint to create or reuse pending authorizations
 
@@ -209,7 +209,7 @@ Add `GET /connect/callback`: consume the attempt once, require the same browser 
 - [ ] With fakes.MemorySecretStore set to fail Put, the response is 503 secret_store_unavailable and after the reconciler runs the grant is revoked and no key exists.
 - [ ] Logs and audit rows across all cases contain no access token, refresh token, code, state, verifier or `sha256:` reference. Verify with `go test ./internal/oauthbroker -run TestCallbackNoSecretLeak`.
 
-**Depends on:** [`W-P3-BRKR-03`](oauth-broker.md#39--w-p3-brkr-03) Implement POST /connect/start with PKCE, CSRF and scope capping; [`W-P1-AAUD-01`](admin-audit-log.md#14--w-p1-aaud-01) Add signed, hash-chained admin audit store on cpstate
+**Depends on:** [`W-P3-BRKR-03`](oauth-broker.md#39--w-p3-brkr-03) Implement POST /connect/start with PKCE, CSRF and scope capping; [`W-P1-AAUD-01`](admin-audit-log.md#18--w-p1-aaud-01) Add signed, hash-chained admin audit store on cpstate
 
 **Unblocks:** [`W-P3-BRKR-08`](oauth-broker.md#89--w-p3-brkr-08) Record the connected provider account and enforce account rules; [`W-P3-PORT-02`](consent-portal.md#27--w-p3-port-02) Implement revoke with grant, secret, epoch and provider steps; [`W-P3-OFFB-06`](offboarding.md#67--w-p3-offb-06) Audit and test blocked-user refusals across portal and connect; [`W-P4-MREG-11`](mcp-registry.md#1111--w-p4-mreg-11) Discover OAuth settings for remote MCP registry servers; [`W-P3-PUS-03`](refresh-model.md#312--w-p3-pus-03) Implement the CP user-token refresh engine; [`W-P3-PUS-11`](refresh-model.md#1112--w-p3-pus-11) Add the per-user secrets end-to-end integration test; [`W-P3-JIT-07`](jit-authorization.md#77--w-p3-jit-07) Add end-to-end test for the JIT consent loop
 
@@ -275,7 +275,7 @@ W-P3-CSIG-06 owns the reserved prefixes (`users/`, `idp/`, `revoking/`, `oauth-c
 - [ ] A google provider with clientSecretKey `oauth-clients/google` resolves its secret from a fake consent.store and never calls the distributed secretStore; clientSecretKey `oauth-clients/other` for provider google fails validation. Verify with `go test ./internal/oauthbroker -run TestClientSecretFromUserStore`.
 - [ ] A failed read at startup logs only the key, and the first connect returns 503 provider_unavailable.
 
-**Depends on:** [`W-P3-CSIG-06`](consent-auth.md#67--w-p3-csig-06) Add the CP-only user credential store, user key helpers and reserved secret prefixes; [`W-P3-BRKR-01`](oauth-broker.md#19--w-p3-brkr-01) Add provider config model with Google and GitHub defaults; [`W-P1-SSO-06`](console-sso-rbac.md#68--w-p1-sso-06) Require an admin session on /central/secrets and flag open consoles
+**Depends on:** [`W-P3-CSIG-06`](consent-auth.md#67--w-p3-csig-06) Add the CP-only user credential store, user key helpers and reserved secret prefixes; [`W-P3-BRKR-01`](oauth-broker.md#19--w-p3-brkr-01) Add provider config model with Google and GitHub defaults; [`W-P1-SSO-06`](console-sso-rbac.md#611--w-p1-sso-06) Require an admin session on /central/secrets and flag open consoles
 
 **Unblocks:** [`W-P3-BRKR-09`](oauth-broker.md#99--w-p3-brkr-09) Add end-to-end OAuth broker test with fake Google and GitHub; [`W-P4-MREG-11`](mcp-registry.md#1111--w-p4-mreg-11) Discover OAuth settings for remote MCP registry servers
 

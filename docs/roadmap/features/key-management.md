@@ -20,7 +20,7 @@ Adds a default-off signing-key subsystem to the control plane that owns the keys
 - Endpoints: `GET /.well-known/jwks.json` on the CP mux next to /healthz, public, outside withSession, the authz table, the admin audit middleware and worker auth. It serves token keys in states next, active and retired-within-overlap with public members only, precomputed bytes, `Content-Type: application/jwk-set+json`, `Cache-Control: public, max-age=300` and ETag = quoted base64url sha256 of the body (304 on If-None-Match). `GET /dashboard/api/keys` (admin) and `POST /dashboard/api/keys/rotate` (admin, X-Warden-CSRF, Audited) go through a new `dashboard.SetKeysSource` seam and the W-P1-SSO-05 authz table.
 - Degraded modes: /healthz stays pure liveness. A new `GET /readyz` returns 503 `{"keys":"no_active_key"}` only when keys are enabled and a purpose has no loaded active key (W-P5-RETN-06 later adds store and KMS checks to it). If material cannot be loaded, the CP still starts and serves /policy, signing returns `keys.ErrNoActiveKey` (token endpoint 503, no new bundle so workers keep last-known-good), a `signing_key_unavailable` Finding is published, and loading retries with backoff from 1s to 60s. It never generates a replacement when rows exist. Loaded keys sit in memory behind an atomic.Pointer, so a later backend outage only blocks rotation; a failed rotation keeps the current key and raises `key_rotation_failed`, and an active key older than 2x the interval raises `key_overdue`.
 - Audit and observability: every generate, activate, retire, revoke, destroy and rotate request goes through the optional adminaudit.Recorder (W-P1-AAUD-01) with actions keys.*, target `keys:<purpose>`, target_ref `kid:<kid>` and auth_method system, oidc, breakglass or cli; a `keys_transition` slog line with kid, purpose and state is always written. Key material never appears in logs, rows, API responses, errors or backups. In-memory counters `warden_cp_key_transitions_total{purpose,to}`, `warden_cp_key_sign_errors_total{purpose}` and gauge `warden_cp_key_active_age_seconds{purpose}` are added to the W-P5-RETN-06 export list. Sign is CPU only and off every worker path.
-- Ops: `warden control-plane keys list|rotate|export|reset` works against cpstate and the key store directly, like W-P1-WTOK-05; list, rotate and export run with or without a running CP, and `reset` (replace a purpose's keys after a restore that lost material) refuses while the W-P1-OPS1-04 lock is held. The W-P1-OPS1-02 manifest lists the file key dir under not_included, and restore warns when live rows have no readable material. The admin key routes are ScopeNone for API keys in P2 (W-P2-APIK-02), so the CLI works on the state dir only.
+- Ops: `warden control-plane keys list|rotate|export|reset` works against cpstate and the key store directly, like W-P1-WTOK-05; list, rotate and export run with or without a running CP, and `reset` (replace a purpose's keys after a restore that lost material) refuses while the W-P1-OPS1-05 lock is held. The W-P1-OPS1-06 manifest lists the file key dir under not_included, and restore warns when live rows have no readable material. The admin key routes are ScopeNone for API keys in P2 (W-P2-APIK-02), so the CLI works on the state dir only.
 - Admin audit key rotation (carry-forward from p1-admin-audit): `warden control-plane admin-audit rotate-key` (offline, takes the state-dir lock) appends an `audit.key_rotated` entry signed by the old key naming the new key_id and public key, then switches the key file. adminaudit.Verify, VerifyExport, the AAUD-01 startup check and the OPS1-04 restore fingerprint check accept a key change only at such an entry. A dedicated command is used instead of a startup flag so a restart can never rotate the key. This is the supported admin-audit key rotation; P1 ships a single key with only the documented manual new-segment procedure (W-P1-AAUD-01/04), and chains containing those `audit.segment_start` entries keep verifying.
 
 ## Done when
@@ -56,8 +56,8 @@ On a CP started with --state-dir and `keys.enabled: true` using the default file
 | 2/7 | [`W-P2-KEYS-02`](#27--w-p2-keys-02) | Add the keys config gate, file key store and signing_keys metadata | feature | M | W-P2-KEYS-01, W-P1-SSO-01, W-P1-AAUD-01 | [#77](https://github.com/ethosagent/warden/issues/77) |
 | 3/7 | [`W-P2-KEYS-03`](#37--w-p2-keys-03) | Implement per-purpose rotation with prepublish and overlap windows | feature | M | W-P2-KEYS-02 | [#78](https://github.com/ethosagent/warden/issues/78) |
 | 4/7 | [`W-P2-KEYS-04`](#47--w-p2-keys-04) | Serve the token JWKS, readiness and admin key API from the control plane | feature | S | W-P2-KEYS-03, W-P1-SSO-05, W-P1-AAUD-02 | [#79](https://github.com/ethosagent/warden/issues/79) |
-| 5/7 | [`W-P2-KEYS-05`](#57--w-p2-keys-05) | Add the keys CLI, backup integration and key rotation runbook | feature | M | W-P2-KEYS-04, W-P1-OPS1-04 | [#80](https://github.com/ethosagent/warden/issues/80) |
-| 6/7 | [`W-P2-KEYS-06`](#67--w-p2-keys-06) | Add offline admin audit key rotation with a signed rotation entry | feature | S | W-P1-AAUD-04, W-P1-OPS1-04 | [#248](https://github.com/ethosagent/warden/issues/248) |
+| 5/7 | [`W-P2-KEYS-05`](#57--w-p2-keys-05) | Add the keys CLI, backup integration and key rotation runbook | feature | M | W-P2-KEYS-04, W-P1-OPS1-04, W-P1-OPS1-05, W-P1-OPS1-06 | [#80](https://github.com/ethosagent/warden/issues/80) |
+| 6/7 | [`W-P2-KEYS-06`](#67--w-p2-keys-06) | Add offline admin audit key rotation with a signed rotation entry | feature | S | W-P1-AAUD-04, W-P1-OPS1-04, W-P1-AAUD-05, W-P1-OPS1-05 | [#248](https://github.com/ethosagent/warden/issues/248) |
 | 7/7 | [`W-P2-KEYS-07`](#77--w-p2-keys-07) | Add an opt-in AWS Secrets Manager key store isolated from workers | feature | S | W-P2-KEYS-02 | [#249](https://github.com/ethosagent/warden/issues/249) |
 
 ### 1/7 · W-P2-KEYS-01
@@ -135,7 +135,7 @@ Add the default-off CP-local `keys:` block, the `keys.PrivateKeyStore` seam with
 - [ ] Config with backend echo, bundle alg ES256, or enabled without --state-dir fails naming the field: `go test ./internal/config -run TestKeysConfig`
 - [ ] With keys.enabled false, no keys dir or signing_keys table exists and existing tests pass: `go test ./cmd/proxy ./internal/controlplane`
 
-**Depends on:** [`W-P2-KEYS-01`](key-management.md#17--w-p2-keys-01) Add internal/keys Signer, JWK and RFC 7638 kid helpers; [`W-P1-SSO-01`](console-sso-rbac.md#18--w-p1-sso-01) Add internal/cpstate SQLite state store with migrations; [`W-P1-AAUD-01`](admin-audit-log.md#14--w-p1-aaud-01) Add signed, hash-chained admin audit store on cpstate
+**Depends on:** [`W-P2-KEYS-01`](key-management.md#17--w-p2-keys-01) Add internal/keys Signer, JWK and RFC 7638 kid helpers; [`W-P1-SSO-01`](console-sso-rbac.md#111--w-p1-sso-01) Add internal/cpstate SQLite state store with migrations; [`W-P1-AAUD-01`](admin-audit-log.md#18--w-p1-aaud-01) Add signed, hash-chained admin audit store on cpstate
 
 **Unblocks:** [`W-P2-TOKX-02`](token-exchange.md#27--w-p2-tokx-02) Implement token exchange policy checks and JWT minting; [`W-P2-KEYS-03`](key-management.md#37--w-p2-keys-03) Implement per-purpose rotation with prepublish and overlap windows; [`W-P2-KEYS-07`](key-management.md#77--w-p2-keys-07) Add an opt-in AWS Secrets Manager key store isolated from workers; [`W-P2-WCA-01`](worker-mtls.md#18--w-p2-wca-01) Add internal/workerca intermediate CA, workerCA config and ca init
 
@@ -212,7 +212,7 @@ Mount the public `GET /.well-known/jwks.json` for token keys, a `GET /readyz` th
 - [ ] Viewer and editor get 403 on both admin routes, admin gets 200 with no private fields, and an admin rotate writes one admin audit row with outcome ok: `go test ./internal/controlplane -run TestKeysAdminAPI`
 - [ ] With the store failing at startup /readyz returns 503 and /healthz 200; with keys disabled all key routes return 404 and the route-coverage test passes: `go test ./internal/controlplane ./internal/dashboard`
 
-**Depends on:** [`W-P2-KEYS-03`](key-management.md#37--w-p2-keys-03) Implement per-purpose rotation with prepublish and overlap windows; [`W-P1-SSO-05`](console-sso-rbac.md#58--w-p1-sso-05) Enforce role checks on every dashboard route; [`W-P1-AAUD-02`](admin-audit-log.md#24--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware
+**Depends on:** [`W-P2-KEYS-03`](key-management.md#37--w-p2-keys-03) Implement per-purpose rotation with prepublish and overlap windows; [`W-P1-SSO-05`](console-sso-rbac.md#511--w-p1-sso-05) Enforce role checks on every dashboard route and replace the bearer write guard in oidc mode; [`W-P1-AAUD-02`](admin-audit-log.md#28--w-p1-aaud-02) Record CP admin mutations through audit middleware
 
 **Unblocks:** [`W-P2-TOKX-03`](token-exchange.md#37--w-p2-tokx-03) Mount POST /oauth2/token with RFC 8693 request parsing and config; [`W-P2-TOKX-05`](token-exchange.md#57--w-p2-tokx-05) Add token service end-to-end integration test; [`W-P2-KEYS-05`](key-management.md#57--w-p2-keys-05) Add the keys CLI, backup integration and key rotation runbook; [`W-P2-SBND-02`](signed-bundles.md#27--w-p2-sbnd-02) Serve the signed bundle envelope on GET /policy behind --bundles; [`W-P2-SECT-03`](security-tests.md#37--w-p2-sect-03) Add binding, cross-agent and issued-token lifetime cases; [`W-P2-SECT-05`](security-tests.md#57--w-p2-sect-05) Add Go-only test seams for in-process CP and worker runs
 
@@ -227,16 +227,16 @@ Add `warden control-plane keys list|rotate|export|reset` that works on cpstate a
 **Requirements**
 
 - Commands under newControlPlaneCmd: `keys list [--purpose] [--jwks] [--json]`, `keys rotate --purpose token [--emergency --yes]` (bundle rotation is `--purpose bundle --stage|--activate [--force]`, added by W-P2-SBND-07), `keys export --purpose bundle [--state next|active]` (public JWK only; without --state it prints a JWKS of the active and next keys for `controlPlane.bundleKeysFile`) and `keys reset --purpose P --yes`; all take --state-dir and --config.
-- list, rotate and export work with or without a running CP; the CP picks up changes within 2s through the KEYS-03 data_version poll. reset refuses with 'control plane is running' while the W-P1-OPS1-04 lock is held.
+- list, rotate and export work with or without a running CP; the CP picks up changes within 2s through the KEYS-03 data_version poll. reset refuses with 'control plane is running' while the W-P1-OPS1-05 lock is held.
 - `--emergency` without `--yes` on a non-TTY stdin exits non-zero and changes nothing. `keys rotate --purpose bundle` without `--stage` or `--activate` exits non-zero and prints the next kid to pin.
 - Each write appends one admin audit row (auth_method cli, OS user) through adminaudit.Store.Append when the table exists, otherwise a log line. Output never contains a `d` member or PEM block.
-- Backup and restore: the W-P1-OPS1-02 manifest lists the file key dir under not_included; W-P1-OPS1-04 restore warns and prints the `keys reset` hint when a non-destroyed row has no readable material.
+- Backup and restore: the W-P1-OPS1-06 manifest lists the file key dir under not_included; W-P1-OPS1-04 restore warns and prints the `keys reset` hint when a non-destroyed row has no readable material.
 - docs/runbooks/key-rotation.md (new) covers scheduled rotation, manual rotation, staged bundle rotation (export, pin in `controlPlane.bundleKeys` or `bundleKeysFile` on every worker, `--stage`, then `--activate` once heartbeats show the pin, W-P2-SBND-07), emergency rotation and its effect on in-flight tokens, the 'revoke sessions' step through the W-P2-TOKX-07 token-session revoke routes, checking propagation with curl and the fleet view, and restore. docs/control-plane.md documents the `keys:` block.
 
 **Implementation plan**
 
 1. Create cmd/proxy/controlplane_keys.go (new): newControlPlaneKeysCmd with the four subcommands, opening cpstate and the key store and calling the Manager.
-2. Make `reset` take the lock with cpstate.AcquireDirLock (W-P1-OPS1-04).
+2. Make `reset` take the lock with cpstate.AcquireDirLock (W-P1-OPS1-05).
 3. Add the key dir to not_included in internal/controlplane/backup.go and the material check to cmd/proxy/restore.go.
 4. Write docs/runbooks/key-rotation.md (new) and update docs/control-plane.md and docs/production-readiness.md.
 5. Add cmd/proxy/controlplane_keys_test.go (new) and a test/integration/keys_rotation_test.go (new, build tag integration) that signs a JWS, rotates through the CLI, and verifies old and new JWS against a fetched JWKS through the overlap.
@@ -250,7 +250,7 @@ Add `warden control-plane keys list|rotate|export|reset` that works on cpstate a
 - [ ] A backup set's manifest lists the key dir under not_included, and restoring into a dir without key material prints the reset hint: `go test ./cmd/proxy -run TestKeysRestoreHint`
 - [ ] `go test -tags integration ./test/integration -run TestKeysRotationDrill` passes with zero verification failures across the rotation.
 
-**Depends on:** [`W-P2-KEYS-04`](key-management.md#47--w-p2-keys-04) Serve the token JWKS, readiness and admin key API from the control plane; [`W-P1-OPS1-04`](ops-hardening.md#44--w-p1-ops1-04) Add CP state-dir lock and verified restore command
+**Depends on:** [`W-P2-KEYS-04`](key-management.md#47--w-p2-keys-04) Serve the token JWKS, readiness and admin key API from the control plane; [`W-P1-OPS1-04`](ops-hardening.md#711--w-p1-ops1-04) Add the verified restore command; [`W-P1-OPS1-05`](ops-hardening.md#311--w-p1-ops1-05) Add the CP state-dir instance lock; [`W-P1-OPS1-06`](ops-hardening.md#411--w-p1-ops1-06) Add the backup runner: flags, set layout, manifest, schedule and pruning
 
 **Unblocks:** [`W-P2-RCP-03`](identity-client.md#36--w-p2-rcp-03) Add the Claude Code compose recipe and docs; [`W-P2-SBND-07`](signed-bundles.md#77--w-p2-sbnd-07) Add staged bundle key rotation, pin export and rollout docs
 
@@ -264,7 +264,7 @@ P1 has no supported way to rotate the admin audit Ed25519 key: W-P1-AAUD-01 fail
 
 **Requirements**
 
-- `warden control-plane admin-audit rotate-key --state-dir <dir> [--admin-audit-key-file]` takes the W-P1-OPS1-04 lock and exits with 'control plane is running' if it is held.
+- `warden control-plane admin-audit rotate-key --state-dir <dir> [--admin-audit-key-file]` takes the W-P1-OPS1-05 lock and exits with 'control plane is running' if it is held.
 - It creates the new key at a temp path with audit.LoadOrCreateSigner, appends `audit.key_rotated` with details {old_key_id, new_key_id, new_public_key} signed by the old key in BEGIN IMMEDIATE, renames the new key over the key file, and keeps the old one as `cp-audit.<old_key_id>.key.retired` (0600) so a restored older set can still append.
 - The AAUD-01 startup check accepts a key_id that differs from the head row's only when the latest `audit.key_rotated` entry names it.
 - `adminaudit.Verify` and `VerifyExport` learn public keys from the chain and accept a key_id change only immediately after a valid `audit.key_rotated` entry; any other change returns firstBadSeq.
@@ -287,7 +287,7 @@ P1 has no supported way to rotate the admin audit Ed25519 key: W-P1-AAUD-01 fail
 - [ ] After rotation the CP starts; with the retired key copied back over cp-audit.key, startup fails naming the expected key_id.
 - [ ] After rotation `go run ./cmd/proxy control-plane admin-audit verify --state-dir <dir>` exits 0, and restoring a pre-rotation backup set passes the fingerprint check without --new-audit-key.
 
-**Depends on:** [`W-P1-AAUD-04`](admin-audit-log.md#44--w-p1-aaud-04) Add offline admin audit verify and export CLI; [`W-P1-OPS1-04`](ops-hardening.md#44--w-p1-ops1-04) Add CP state-dir lock and verified restore command
+**Depends on:** [`W-P1-AAUD-04`](admin-audit-log.md#48--w-p1-aaud-04) Add offline admin audit verify and export CLI; [`W-P1-OPS1-04`](ops-hardening.md#711--w-p1-ops1-04) Add the verified restore command; [`W-P1-AAUD-05`](admin-audit-log.md#58--w-p1-aaud-05) Gate admin audit behind config, check the key id at startup, add segment rotation and a shared CLI recorder opener; [`W-P1-OPS1-05`](ops-hardening.md#311--w-p1-ops1-05) Add the CP state-dir instance lock
 
 ### 7/7 · W-P2-KEYS-07
 

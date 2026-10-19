@@ -58,11 +58,11 @@ Done when a CP running with --state-dir, TLS and `workerCA.enabled` (intermediat
 | 1/8 | [`W-P2-WCA-01`](#18--w-p2-wca-01) | Add internal/workerca intermediate CA, workerCA config and ca init | feature | M | W-P2-KEYS-02, W-P2-WCA-07 | [#88](https://github.com/ethosagent/warden/issues/88) |
 | 2/8 | [`W-P2-WCA-02`](#28--w-p2-wca-02) | Add enrollment token store, POST /control/enroll and enroll-token CLI | feature | M | W-P2-WCA-01, W-P1-WTOK-05, W-P1-AAUD-02 | [#89](https://github.com/ethosagent/warden/issues/89) |
 | 3/8 | [`W-P2-WCA-03`](#38--w-p2-wca-03) | Add worker enrollment, auto-renew and cert-based CP client | feature | M | W-P2-WCA-04 | [#90](https://github.com/ethosagent/warden/issues/90) |
-| 4/8 | [`W-P2-WCA-04`](#48--w-p2-wca-04) | Accept worker certs in WorkerAuthenticator and add /control/renew | feature | M | W-P2-WCA-02, W-P1-WTOK-04 | [#91](https://github.com/ethosagent/warden/issues/91) |
+| 4/8 | [`W-P2-WCA-04`](#48--w-p2-wca-04) | Accept worker certs in WorkerAuthenticator and add /control/renew | feature | M | W-P2-WCA-02, W-P1-WTOK-04, W-P1-WTOK-09 | [#91](https://github.com/ethosagent/warden/issues/91) |
 | 5/8 | [`W-P2-WCA-05`](#58--w-p2-wca-05) | Implement worker cert revocation in the console and CLI | feature | S | W-P2-WCA-04 | [#92](https://github.com/ethosagent/warden/issues/92) |
 | 6/8 | [`W-P2-WCA-06`](#68--w-p2-wca-06) | Move the compose recipe to worker certs and document the migration | chore | S | W-P2-WCA-03, W-P2-WCA-05, W-P2-WCA-08, W-P1-WTOK-06 | [#93](https://github.com/ethosagent/warden/issues/93) |
 | 7/8 | [`W-P2-WCA-07`](#78--w-p2-wca-07) | Reserve the cp/ secret namespace from workers and /central/secrets | feature | S | — | [#255](https://github.com/ethosagent/warden/issues/255) |
-| 8/8 | [`W-P2-WCA-08`](#88--w-p2-wca-08) | Add worker enrollment admin API and console panel | feature | S | W-P2-WCA-02, W-P1-WTOK-03 | [#256](https://github.com/ethosagent/warden/issues/256) |
+| 8/8 | [`W-P2-WCA-08`](#88--w-p2-wca-08) | Add worker enrollment admin API and console panel | feature | S | W-P2-WCA-02, W-P1-WTOK-03, W-P1-WTOK-10 | [#256](https://github.com/ethosagent/warden/issues/256) |
 
 ### 1/8 · W-P2-WCA-01
 
@@ -140,7 +140,7 @@ Add the cpstate tables for enrollment tokens and issued worker certs, the unauth
 - [ ] Neither the DB file nor any audit row or captured log contains the plaintext token or its sha256, and without workerCA.enabled /control/enroll returns 404.
 - [ ] `go test -race ./internal/controlplane -run 'TestEnroll|TestEnrollmentTokens'` and `go test -race ./cmd/proxy -run TestControlPlaneEnrollTokenCmd` pass.
 
-**Depends on:** [`W-P2-WCA-01`](worker-mtls.md#18--w-p2-wca-01) Add internal/workerca intermediate CA, workerCA config and ca init; [`W-P1-WTOK-05`](worker-credentials.md#56--w-p1-wtok-05) Add offline worker token bootstrap CLI; [`W-P1-AAUD-02`](admin-audit-log.md#24--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware
+**Depends on:** [`W-P2-WCA-01`](worker-mtls.md#18--w-p2-wca-01) Add internal/workerca intermediate CA, workerCA config and ca init; [`W-P1-WTOK-05`](worker-credentials.md#511--w-p1-wtok-05) Add offline worker token bootstrap CLI; [`W-P1-AAUD-02`](admin-audit-log.md#28--w-p1-aaud-02) Record CP admin mutations through audit middleware
 
 **Unblocks:** [`W-P2-WCA-04`](worker-mtls.md#48--w-p2-wca-04) Accept worker certs in WorkerAuthenticator and add /control/renew; [`W-P2-WCA-08`](worker-mtls.md#88--w-p2-wca-08) Add worker enrollment admin API and console panel
 
@@ -220,7 +220,7 @@ Extend the P1 WorkerAuthenticator with a cert principal on /policy, /control/hea
 - [ ] /control/renew returns a new serial with prev_serial set; a renew from a superseded serial whose successor has been seen revokes the worker and its next /policy gets 401.
 - [ ] `go test -race ./internal/controlplane -run 'TestWorkerCertAuth|TestWorkerAuthModes|TestCentralSecretsRejectsWorkerCert|TestRenew'`, `go test ./internal/controlplane -run '^$' -bench BenchmarkWorkerCertAuthenticate` (under 20µs/op) and `go test ./cmd/proxy -run TestControlPlaneAuthFlags` pass.
 
-**Depends on:** [`W-P2-WCA-02`](worker-mtls.md#28--w-p2-wca-02) Add enrollment token store, POST /control/enroll and enroll-token CLI; [`W-P1-WTOK-04`](worker-credentials.md#46--w-p1-wtok-04) Add strict worker auth mode and the WARDEN_CP_TOKEN migration guide
+**Depends on:** [`W-P2-WCA-02`](worker-mtls.md#28--w-p2-wca-02) Add enrollment token store, POST /control/enroll and enroll-token CLI; [`W-P1-WTOK-04`](worker-credentials.md#411--w-p1-wtok-04) Add strict worker auth mode and the WARDEN_CP_TOKEN migration guide; [`W-P1-WTOK-09`](worker-credentials.md#911--w-p1-wtok-09) Re-authenticate held long-polls and cancel them when their token is revoked
 
 **Unblocks:** [`W-P2-WCA-03`](worker-mtls.md#38--w-p2-wca-03) Add worker enrollment, auto-renew and cert-based CP client; [`W-P2-WCA-05`](worker-mtls.md#58--w-p2-wca-05) Implement worker cert revocation in the console and CLI; [`W-P2-SECT-05`](security-tests.md#57--w-p2-sect-05) Add Go-only test seams for in-process CP and worker runs; [`W-P4-GOPS-09`](policy-as-code.md#611--w-p4-gops-09) Serve policy per rollout cohort with ordered bundle seqs; [`W-P3-PUS-07`](refresh-model.md#712--w-p3-pus-07) Add the worker-mTLS mint endpoint POST /control/user-token; [`W-P3-JIT-01`](jit-authorization.md#17--w-p3-jit-01) Add CP endpoint to create or reuse pending authorizations; [`W-P3-JIT-04`](jit-authorization.md#47--w-p3-jit-04) Add /connect/{id}/status long-poll on the CP
 
@@ -295,7 +295,7 @@ Switch the control-plane compose recipe from per-worker `wwt_` tokens to enrollm
 - [ ] docs/control-plane.md has the migration section with ordered steps, and docs/runbooks/worker-certs.md covers enroll, renewal failure, revoke and intermediate rotation.
 - [ ] `scripts/check.sh` passes, including `go run docs/roadmap/gen.go check`.
 
-**Depends on:** [`W-P2-WCA-03`](worker-mtls.md#38--w-p2-wca-03) Add worker enrollment, auto-renew and cert-based CP client; [`W-P2-WCA-05`](worker-mtls.md#58--w-p2-wca-05) Implement worker cert revocation in the console and CLI; [`W-P2-WCA-08`](worker-mtls.md#88--w-p2-wca-08) Add worker enrollment admin API and console panel; [`W-P1-WTOK-06`](worker-credentials.md#66--w-p1-wtok-06) Move compose recipes and worker configs to per-worker tokens
+**Depends on:** [`W-P2-WCA-03`](worker-mtls.md#38--w-p2-wca-03) Add worker enrollment, auto-renew and cert-based CP client; [`W-P2-WCA-05`](worker-mtls.md#58--w-p2-wca-05) Implement worker cert revocation in the console and CLI; [`W-P2-WCA-08`](worker-mtls.md#88--w-p2-wca-08) Add worker enrollment admin API and console panel; [`W-P1-WTOK-06`](worker-credentials.md#611--w-p1-wtok-06) Move the control-plane compose recipe and e2e stack to per-worker tokens
 
 ### 7/8 · W-P2-WCA-07
 
@@ -360,6 +360,6 @@ Add the admin API and console panel to create, list and revoke `wet_` enrollment
 - [ ] DELETE sets revokedAt in the next GET, and POST /control/enroll with that token returns 401.
 - [ ] `go test -race ./internal/dashboard -run TestWorkerEnrollmentsAPI` and `go test -race ./internal/controlplane -run 'TestAuthzRouteCoverage|TestEnrollmentsAudit'` pass.
 
-**Depends on:** [`W-P2-WCA-02`](worker-mtls.md#28--w-p2-wca-02) Add enrollment token store, POST /control/enroll and enroll-token CLI; [`W-P1-WTOK-03`](worker-credentials.md#36--w-p1-wtok-03) Add worker token admin API, dashboard panel and fleet auth fields
+**Depends on:** [`W-P2-WCA-02`](worker-mtls.md#28--w-p2-wca-02) Add enrollment token store, POST /control/enroll and enroll-token CLI; [`W-P1-WTOK-03`](worker-credentials.md#311--w-p1-wtok-03) Add worker token admin API and fleet auth fields; [`W-P1-WTOK-10`](worker-credentials.md#1011--w-p1-wtok-10) Add the worker tokens console panel and fleet auth badge
 
 **Unblocks:** [`W-P2-WCA-06`](worker-mtls.md#68--w-p2-wca-06) Move the compose recipe to worker certs and document the migration; [`W-P2-SECT-01`](security-tests.md#17--w-p2-sect-01) Add security test harness with in-process CP, workers and shared fakes

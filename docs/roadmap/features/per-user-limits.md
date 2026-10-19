@@ -11,15 +11,15 @@ Operators can set rate limits and daily estimated-cost caps per verified user, o
 - Scope and gate: default off. With no `policy.userLimits`, `policy.defaultUserLimit` or `policy.anonymousLimit`, GET /policy and its ETag are byte-identical (golden test) and `BenchmarkEvaluate` shows no extra allocations. Limits are checked only after the existing allow decision, never turn Deny, NoMatch or Conditional into Allow, and never touch secret swap.
 - Config (W-P3-PUL-01): new `config.UserLimit{Name, Match UserLimitMatch{Users, Groups, Agents, Domains []string}, PerAgent bool, RateLimit string, DailyCostUSD float64}`, `Policy.UserLimits []UserLimit`, `Policy.DefaultUserLimit *UserLimit` and `Policy.AnonymousLimit *UserLimit` (yaml/json omitempty). `Name` is required and unique in userLimits (agent-id charset); `default` and `anonymous` are reserved for the two single rules. Users and Groups use the W-P1-GPOL-01 normalizer; an email value matches only when `identity.Subject.EmailVerified`. Domains use the `policy.MatchDomain` dialect and empty means all domains. RateLimit uses the existing `validateRateLimit` (second, minute, hour). At most 256 rules. `config.LintUserLimits` warns on overlapping rules in one tier, dailyCostUSD with no CA, and agents whose identity mode is not require.
 - Precedence: exactly one rule applies to a request. Tiers in order are rules matching by users, then by groups, then agents-only rules, then `defaultUserLimit`; within a tier the first rule in list order whose match fields and domains both match wins. A nil subject (no, invalid or expired token) uses only `anonymousLimit`, keyed by the worker's resolved agent id, and is never charged to a sub read from an unverified token. A strict per-user guarantee needs identity mode require; this is documented.
-- Evaluator (W-P3-PUL-03): `EvaluateFor(domain, port, scheme, *identity.Subject) Result`, `PeekFor` and `identity.Subject` from P1 (W-P1-GPOL-02, W-P1-VRFY-01) are kept unchanged. New `ChargeUserLimit` and non-charging `PeekUserLimit` take the same arguments plus the agent id and return the P1 `Result` with two additive fields, `LimitRule` and `RetryAfter`. Bucket key `ul:<name>:<sub>` plus `:<agentID>` when PerAgent (anonymous: `ul:anonymous:anon:<agentID>`), so a rule has one budget across all its domains. Buckets live in a sharded map that `load()` does not re-make: `Replace` drops only buckets of rules whose canonical definition hash changed or that were removed, so blockedUsers or costBlockedUsers changes never reset windows. Expired buckets are swept about once a minute; at `maxUserLimitBuckets` (100000) a new key is denied fail-closed and counted.
-- Proxy (W-P3-PUL-09): new `userLimitStage` in `runRequestStages` after identityStage, the W-P1-BLOCK-02 blockStage and the W-P1-GPOL-03 scopedPolicyStage, before judgeGate, charged per request so a keep-alive session carrying several users limits each correctly. h2 streams are charged in `serveGRPCStream`, WebSocket upgrades once per upgrade, and raw tunnels (no CA) once at CONNECT; a TLS-terminated CONNECT uses PeekUserLimit only. Over the rate: 429 `{"error":"user_rate_limited"}` with integer Retry-After. The worker heartbeat adds cap `userlimits/v1`.
+- Evaluator (W-P3-PUL-03): `EvaluateFor(rc RequestContext) RequestVerdict`, `PeekFor` and `identity.Subject` from P1 (W-P1-GPOL-02, W-P1-VRFY-01) are kept unchanged. New `ChargeUserLimit` and non-charging `PeekUserLimit` take the request context plus the agent id and return the P1 `RequestVerdict` with two additive fields, `LimitRule` and `RetryAfter`. Bucket key `ul:<name>:<sub>` plus `:<agentID>` when PerAgent (anonymous: `ul:anonymous:anon:<agentID>`), so a rule has one budget across all its domains. Buckets live in a sharded map that `load()` does not re-make: `Replace` drops only buckets of rules whose canonical definition hash changed or that were removed, so blockedUsers or costBlockedUsers changes never reset windows. Expired buckets are swept about once a minute; at `maxUserLimitBuckets` (100000) a new key is denied fail-closed and counted.
+- Proxy (W-P3-PUL-09): new `userLimitStage` in `runRequestStages` after identityStage, the W-P1-BLOCK-02 blockStage and the `constraintGate` policy stage (extended by W-P1-GPOL-10), before judgeGate, charged per request so a keep-alive session carrying several users limits each correctly. h2 streams are charged in `serveGRPCStream`, WebSocket upgrades once per upgrade, and raw tunnels (no CA) once at CONNECT; a TLS-terminated CONNECT uses PeekUserLimit only. Over the rate: 429 `{"error":"user_rate_limited"}` with integer Retry-After. The worker heartbeat adds cap `userlimits/v1`.
 - Cost input (W-P3-PUL-06): `recordAllowEvent` today prices from `req/resp.ContentLength` and clamps -1 to 0, so chunked and SSE LLM responses cost $0. Counting wrappers on the forwarded request body and the response copy (including relayMCPSSE and serveGRPCStream) supply the bytes actually relayed whenever Content-Length is unknown. This fix ships with no flag because it is a bug fix: streamed responses were priced at $0. Caps are on estimated spend (bytes/4 with the built-in prices in `cost.defaultProviders`) and are documented as such.
 - Worker cost cap (W-P3-PUL-04): new `cost.Ledger` keyed by (UTC day, sub or anon key, rule name), owned by the worker and passed to the proxy, fed from `recordAllowEvent` and seeded at boot from the local SQLite store (sum of today's cost_usd by user_sub and limit_rule). Before a request to a destination `Estimator` tracks, the request is refused when spend so far is at or over the rule's DailyCostUSD, or when the wire lists the sub for that rule today: 403 `{"error":"user_cost_limited"}` with Retry-After to the next UTC midnight. When a cost-capped rule applies to a tracked destination that cannot be measured (raw tunnel, no CA, WebSocket), the request is denied with `user_cost_unmeasurable`. The cap is soft: it can overshoot by in-flight requests and by fleet sync lag.
 - Analytics: reuse the P1 user columns, (user_sub, ts) index, `EventFilter.User`, ?user= filters and topUsers (W-P1-VRFY-03/04/06). W-P3-PUL-02 adds only `Event.AgentID` (json `agent_id,omitempty`) and `Event.LimitRule` (json `limit_rule,omitempty`) on the worker. W-P3-PUL-07 fills the existing fleet `agent_id` column at ingest (central_http.go stores only ProxyID today), adds `limit_rule`, and adds the rollup `user_usage_daily(day, sub, agent_id, limit_rule, email, requests, denies_json, cost_usd)` updated in the StoreAggregatedEvent transaction only when the event insert succeeded, so a retried batch never double counts. The rollup is kept 35 days regardless of events retention and maxEvents pruning.
 - Fleet cost blocks (W-P3-PUL-08): the CP recomputes today's over-cap (sub, rule) pairs from the rollup on a 30s debounce after ingest and at startup, looking up each rule's DailyCostUSD by name in the served policy. It serves `costBlockedUsers: [{sub, rule, day}]` inside policyWire (sorted, omitempty, at most `config.MaxCostBlockedUsers` = 5000), computed state that is never stored in policy_versions so a rollback cannot clear it. Each change appends a `policy_publish_log` row with reason `user_cost` and calls Refresh, so W-P2-SBND-02 signed bundles get a new seq. One shared `config.ValidateCostBlockedUsers` runs on the CP and in parseRemotePolicy. Workers ignore entries whose day is not the current UTC day, so blocks lapse at midnight even when the CP is down.
 - Degraded modes: CP down, workers keep the last-known-good list until each entry's day ends and their local ledger and rate buckets keep enforcing. Worker restart: ledger reseeded from local SQLite; rate buckets start empty (documented). IdP down: new tokens fail verification and fall into anonymousLimit. Rollup or recompute error: the CP keeps the last list and counts the error, never serving an empty list because of a failure. Analytics provider memory: the CP aggregator is disabled with one WARN.
 - Dashboard (W-P3-PUL-05): `GET /dashboard/api/usage/users?window=24h|7d|30d&sort=cost|requests&limit=` (path chosen so it does not collide with the W-P3-OFFB-03 `/dashboard/api/users/{sub}/...` routes) returns per-user requests, denies by reason, estimated cost, top agents, matched rule, cap and today's block state from the rollup. It has a W-P1-SSO-05 authz row with role viewer and Scope `traffic:read` (W-P2-APIK-02). The Users usage view sorts by cost, flags users at or over their cap, drills down via ?user=, renders claims with textContent only, and warns when connected workers lack `userlimits/v1`.
-- Observability: `RecordBlocked` for `user_rate_limited`, `user_cost_limited` and `user_cost_unmeasurable`, added to internal/proxy/reasons.go (W-P1-JAUD-06) and the warden.decision.v1 reason enum with a schema_rev bump (W-P1-JAUD-02). New OTel counter `warden.user_limit.denied.total{kind=rate|cost|unmeasurable}` and gauge `warden.user_limit.buckets`, never with sub, email or group labels. The decision log carries limit_rule. CP in-memory `warden_cp_cost_blocked_users` gauge and `warden_cp_cost_recompute_errors_total` counter are left for W-P5-RETN-06 to export.
+- Observability: `RecordBlocked` for `user_rate_limited`, `user_cost_limited` and `user_cost_unmeasurable`, added to internal/denyreason (the declared set from W-P1-JAUD-06) and the warden.decision.v1 reason enum with a schema_rev bump (W-P1-JAUD-02). New OTel counter `warden.user_limit.denied.total{kind=rate|cost|unmeasurable}` and gauge `warden.user_limit.buckets`, never with sub, email or group labels. The decision log carries limit_rule. CP in-memory `warden_cp_cost_blocked_users` gauge and `warden_cp_cost_recompute_errors_total` counter are left for W-P5-RETN-06 to export.
 - Rollout safety for cost caps: workers that enforce dailyCostUSD (W-P3-PUL-04) add `usercost/v1` to the heartbeat caps, because an older worker fails open on cost caps. A policy save that adds a rule with dailyCostUSD, or sets one on an existing rule, returns 409 `{"error":"workers_lack_capability","capability":"usercost/v1","workers":[ids]}` while any connected worker lacks that cap, unless the admin sends `force=true`, which is recorded in the admin audit row (the W-P2-WBND-07 pattern).
 
 ## Done when
@@ -53,15 +53,15 @@ On a managed deployment with two CA-enabled workers that advertise userlimits/v1
 | # | Key | Ticket | Type | Size | Depends on | Issue |
 |---|---|---|---|---|---|---|
 | 1/10 | [`W-P3-PUL-01`](#110--w-p3-pul-01) | Add userLimits config, costBlockedUsers wire type and validation | feature | S | W-P1-GPOL-01, W-P1-BLOCK-01 | [#151](https://github.com/ethosagent/warden/issues/151) |
-| 2/10 | [`W-P3-PUL-02`](#210--w-p3-pul-02) | Record agent id and limit rule on worker events | feature | S | W-P1-VRFY-03, W-P1-JAUD-02 | [#152](https://github.com/ethosagent/warden/issues/152) |
+| 2/10 | [`W-P3-PUL-02`](#210--w-p3-pul-02) | Record agent id and limit rule on worker events | feature | S | W-P1-JAUD-02, W-P1-VRFY-09 | [#152](https://github.com/ethosagent/warden/issues/152) |
 | 3/10 | [`W-P3-PUL-03`](#310--w-p3-pul-03) | Add per-user limit matching and counters to the policy evaluator | feature | M | W-P3-PUL-01, W-P1-GPOL-02 | [#153](https://github.com/ethosagent/warden/issues/153) |
 | 4/10 | [`W-P3-PUL-04`](#410--w-p3-pul-04) | Cap daily estimated cost per user in the worker | feature | M | W-P3-PUL-02, W-P3-PUL-03, W-P3-PUL-06, W-P3-PUL-09 | [#154](https://github.com/ethosagent/warden/issues/154) |
 | 5/10 | [`W-P3-PUL-05`](#510--w-p3-pul-05) | Add per-user usage and cost dashboard view | feature | M | W-P3-PUL-07, W-P3-PUL-08, W-P1-VRFY-04, W-P1-SSO-05, W-P2-APIK-02, W-P1-GPOL-07 | [#155](https://github.com/ethosagent/warden/issues/155) |
 | 6/10 | [`W-P3-PUL-06`](#610--w-p3-pul-06) | Count relayed bytes for cost estimates on streamed responses | feature | S | — | [#290](https://github.com/ethosagent/warden/issues/290) |
 | 7/10 | [`W-P3-PUL-07`](#710--w-p3-pul-07) | Fill fleet agent_id and add the per-user daily usage rollup | feature | M | W-P3-PUL-02, W-P1-VRFY-06 | [#291](https://github.com/ethosagent/warden/issues/291) |
-| 8/10 | [`W-P3-PUL-08`](#810--w-p3-pul-08) | Publish fleet cost blocks as costBlockedUsers from the control plane | feature | M | W-P3-PUL-01, W-P3-PUL-07, W-P1-PVER-05, W-P2-SBND-02 | [#292](https://github.com/ethosagent/warden/issues/292) |
-| 9/10 | [`W-P3-PUL-09`](#910--w-p3-pul-09) | Enforce per-user rate limits per request in the proxy | feature | M | W-P3-PUL-02, W-P3-PUL-03, W-P1-GPOL-03, W-P1-BLOCK-02, W-P1-JAUD-06, W-P1-JAUD-02 | [#293](https://github.com/ethosagent/warden/issues/293) |
-| 10/10 | [`W-P3-PUL-10`](#1010--w-p3-pul-10) | Add per-user limits end-to-end test and docs | test | S | W-P3-PUL-04, W-P3-PUL-05, W-P3-PUL-08, W-P3-PUL-09, W-P1-VRFY-05 | [#294](https://github.com/ethosagent/warden/issues/294) |
+| 8/10 | [`W-P3-PUL-08`](#810--w-p3-pul-08) | Publish fleet cost blocks as costBlockedUsers from the control plane | feature | M | W-P3-PUL-01, W-P3-PUL-07, W-P2-SBND-02, W-P1-PVER-10, W-P1-BLOCK-10 | [#292](https://github.com/ethosagent/warden/issues/292) |
+| 9/10 | [`W-P3-PUL-09`](#910--w-p3-pul-09) | Enforce per-user rate limits per request in the proxy | feature | M | W-P3-PUL-02, W-P3-PUL-03, W-P1-BLOCK-02, W-P1-JAUD-02, W-P1-GPOL-10 | [#293](https://github.com/ethosagent/warden/issues/293) |
+| 10/10 | [`W-P3-PUL-10`](#1010--w-p3-pul-10) | Add per-user limits end-to-end test and docs | test | S | W-P3-PUL-04, W-P3-PUL-05, W-P3-PUL-08, W-P3-PUL-09, W-P1-VRFY-11 | [#294](https://github.com/ethosagent/warden/issues/294) |
 
 ### 1/10 · W-P3-PUL-01
 
@@ -100,7 +100,7 @@ Add the per-user limit rules and the wire-only cost block list to config.Policy 
 - [ ] With none of the keys set, the /policy body and ETag equal the pre-change golden: `go test ./internal/controlplane -run TestPolicyWire_UserLimitsAbsentUnchanged`.
 - [ ] Until the guard is lifted, a config with a non-empty userLimits fails to load with `not yet enforced`.
 
-**Depends on:** [`W-P1-GPOL-01`](identity-policy.md#19--w-p1-gpol-01) Add groups/users to allow entries and MCP conditions schema; [`W-P1-BLOCK-01`](user-block-list.md#19--w-p1-block-01) Carry blockedUsers in config.Policy and the policy wire
+**Depends on:** [`W-P1-GPOL-01`](identity-policy.md#114--w-p1-gpol-01) Add groups/users to allow entries and MCP conditions schema; [`W-P1-BLOCK-01`](user-block-list.md#112--w-p1-block-01) Carry blockedUsers in config.Policy and the policy wire
 
 **Unblocks:** [`W-P3-PUL-03`](per-user-limits.md#310--w-p3-pul-03) Add per-user limit matching and counters to the policy evaluator; [`W-P3-PUL-08`](per-user-limits.md#810--w-p3-pul-08) Publish fleet cost blocks as costBlockedUsers from the control plane
 
@@ -136,7 +136,7 @@ The user columns, the (user_sub, ts) index and the Query Builder exposure alread
 - [ ] A proxy event for a subject with AgentID `claude-code` is stored with agent_id `claude-code` and returned by GetOldestEventIDs.
 - [ ] The W-P1-JAUD-02 schema tests pass with the new fields: `go test ./internal/auditlog`.
 
-**Depends on:** [`W-P1-VRFY-03`](identity-verification.md#37--w-p1-vrfy-03) Record user fields on worker events, receipts, decision logs and sync; [`W-P1-JAUD-02`](audit-log-export.md#46--w-p1-jaud-02) Publish decision v1 JSON Schema with closed-field and leak tests
+**Depends on:** [`W-P1-JAUD-02`](audit-log-export.md#57--w-p1-jaud-02) Publish the decision v1 JSON Schema with closed-field and leak tests; [`W-P1-VRFY-09`](identity-verification.md#911--w-p1-vrfy-09) Stamp identity on every proxy event and decision log
 
 **Unblocks:** [`W-P3-PUL-04`](per-user-limits.md#410--w-p3-pul-04) Cap daily estimated cost per user in the worker; [`W-P3-PUL-07`](per-user-limits.md#710--w-p3-pul-07) Fill fleet agent_id and add the per-user daily usage rollup; [`W-P3-PUL-09`](per-user-limits.md#910--w-p3-pul-09) Enforce per-user rate limits per request in the proxy
 
@@ -146,17 +146,17 @@ The user columns, the (user_sub, ts) index and the Query Builder exposure alread
 
 Type **feature** · Size **M** · Issue [#153](https://github.com/ethosagent/warden/issues/153)
 
-Teach internal/policy to pick the one user limit that applies to a request and to charge its rate bucket, without changing the P1 `EvaluateFor(domain, port, scheme, *identity.Subject) Result`, `PeekFor` or `identity.Subject`. User-limit buckets must survive `Replace`, because today load() re-makes the counters map and every costBlockedUsers or blockedUsers change would reset every user's window fleet-wide. This ticket is policy-package only; the PUL-01 guard still rejects userLimits, so merging changes nothing.
+Teach internal/policy to pick the one user limit that applies to a request and to charge its rate bucket, without changing the P1 `EvaluateFor(rc RequestContext) RequestVerdict` and `PeekFor` (W-P1-GPOL-02), `RequestContext.Subject` or `identity.Subject`. User-limit buckets must survive `Replace`, because today load() re-makes the counters map and every costBlockedUsers or blockedUsers change would reset every user's window fleet-wide. This ticket is policy-package only; the PUL-01 guard still rejects userLimits, so merging changes nothing.
 
 **Requirements**
 
-- Keep EvaluateFor, PeekFor, Evaluate and identity.Subject unchanged. Add `ChargeUserLimit(domain string, port int, scheme Scheme, subj *identity.Subject, agentID string) Result` and non-charging `PeekUserLimit` with the same arguments. Result gains additive fields `LimitRule string` and `RetryAfter time.Duration`; over the limit it returns Decision Deny with Reason `user_rate_limited`.
+- Keep EvaluateFor, PeekFor, Evaluate and identity.Subject unchanged. Add `ChargeUserLimit(rc RequestContext, agentID string) RequestVerdict` and non-charging `PeekUserLimit` with the same arguments (the subject is `rc.Subject`). RequestVerdict gains additive fields `LimitRule string` and `RetryAfter time.Duration`; over the limit it returns Decision Deny with Reason `user_rate_limited`.
 - Selection: users tier, then groups tier, then agents-only tier, then defaultUserLimit; within a tier the first rule in list order whose match fields and Domains both match. Users match by sub, or by email only when EmailVerified. A nil subject uses only anonymousLimit. No matching rule means Allow with empty LimitRule.
 - Bucket key `ul:<name>:<sub>` plus `:<agentID>` when PerAgent; nil subject `ul:anonymous:anon:<agentID>`. One budget per rule across all its domains.
 - Buckets live in a new 64-shard map separate from e.mu that load() does not re-make. On Replace, buckets are kept for rules whose canonical definition hash is unchanged and dropped for rules that changed or were removed. Allowlist per-entry counters keep today's behaviour.
 - Expired buckets are swept about once a minute, amortized on charge. At `maxUserLimitBuckets` (100000) after a sweep, a new key is denied with user_rate_limited (fail closed) and counted.
 - New `MatchUserLimit(subj, agentID, domain) (UserLimitRule{Name, DailyCostUSD, PerAgent}, bool)` and `IsCostBlocked(sub, rule string, now time.Time) bool`, which builds its set in load() from Policy.CostBlockedUsers and ignores entries whose day is not now's UTC day.
-- Hot path: with no user limits, BenchmarkEvaluate adds 0 allocations and changes by 5% or less; ChargeUserLimit with 256 rules stays under 1 microsecond per op.
+- Hot path: with no user limits, `testing.AllocsPerRun` of EvaluateFor with a nil subject equals the baseline recorded from main; ChargeUserLimit with 256 rules stays under 1 microsecond per op.
 
 **Implementation plan**
 
@@ -164,7 +164,7 @@ Teach internal/policy to pick the one user limit that applies to a request and t
 2. internal/policy/userlimit.go (new): sharded bucket map, ChargeUserLimit, PeekUserLimit, MatchUserLimit, the amortized sweep and the bucket cap.
 3. internal/policy/policy.go Replace/load: keep the user bucket map, and drop buckets whose rule name is gone or whose defHash changed.
 4. internal/policy/userlimit.go: build the cost-blocked set in load() and add IsCostBlocked.
-5. internal/policy/policy.go Result: add LimitRule and RetryAfter fields.
+5. internal/policy/policy.go RequestVerdict: add LimitRule and RetryAfter fields.
 6. Tests in internal/policy/userlimit_test.go: precedence, per-agent split, anonymous key, Replace preservation, sweep with a fake clock, cap, -race concurrency, and a benchmark.
 
 **Acceptance criteria**
@@ -174,9 +174,9 @@ Teach internal/policy to pick the one user limit that applies to a request and t
 - [ ] A Replace that changes only blockedUsers or costBlockedUsers keeps alice denied; changing her rule's rateLimit resets her bucket: `go test ./internal/policy -run TestReplace_KeepsUserBuckets`.
 - [ ] IsCostBlocked is true for an entry dated today and false for one dated yesterday under a fake clock.
 - [ ] `go test -race ./internal/policy -run TestUserLimit_Concurrent` passes.
-- [ ] `go test ./internal/policy -run '^$' -bench BenchmarkEvaluate -benchmem` shows 0 extra allocs compared with main.
+- [ ] `go test ./internal/policy -run TestEvaluateFor_NoUserLimitAllocs` passes: `testing.AllocsPerRun` of EvaluateFor with a nil subject and no userLimits equals the baseline recorded from main (red first: fails if the charge path allocates).
 
-**Depends on:** [`W-P3-PUL-01`](per-user-limits.md#110--w-p3-pul-01) Add userLimits config, costBlockedUsers wire type and validation; [`W-P1-GPOL-02`](identity-policy.md#29--w-p1-gpol-02) Make the policy evaluator subject-aware with EvaluateFor
+**Depends on:** [`W-P3-PUL-01`](per-user-limits.md#110--w-p3-pul-01) Add userLimits config, costBlockedUsers wire type and validation; [`W-P1-GPOL-02`](identity-policy.md#314--w-p1-gpol-02) Make the policy evaluator subject-aware: EvaluateFor and PeekFor with a request context
 
 **Unblocks:** [`W-P3-PUL-04`](per-user-limits.md#410--w-p3-pul-04) Cap daily estimated cost per user in the worker; [`W-P3-PUL-09`](per-user-limits.md#910--w-p3-pul-09) Enforce per-user rate limits per request in the proxy
 
@@ -195,7 +195,7 @@ Add a worker-owned per-user, per-rule, per-UTC-day spend ledger fed from recordA
 - At boot the worker seeds the ledger from the local SQLite store with a new `SQLiteStore.CostByUserSince(ctx, since)` (sum of cost_usd grouped by user_sub and limit_rule since UTC midnight, using the W-P3-PUL-02 index).
 - In userLimitStage, before forwarding to a tracked destination with a matched rule that has DailyCostUSD: deny when ledger spend is at or over the cap, or when `IsCostBlocked(sub, rule, now)` is true. Response 403 `{"error":"user_cost_limited"}` with Retry-After in seconds to the next UTC midnight; the deny event carries Reason, the VRFY user fields and LimitRule.
 - When such a rule applies to a tracked destination that cannot be measured (raw tunnel without CA at CONNECT, WebSocket), deny with 403 `{"error":"user_cost_unmeasurable"}`.
-- recordAllowEvent adds the estimate to the ledger and sets Event.LimitRule. Add `user_cost_limited` and `user_cost_unmeasurable` to internal/proxy/reasons.go and the decision schema enum with a schema_rev bump, and call RecordBlocked; increment `warden.user_limit.denied.total{kind=cost|unmeasurable}`.
+- recordAllowEvent adds the estimate to the ledger and sets Event.LimitRule. Add `user_cost_limited` and `user_cost_unmeasurable` to internal/denyreason/reasons.go and the decision schema enum with a schema_rev bump, and call RecordBlocked; increment `warden.user_limit.denied.total{kind=cost|unmeasurable}`.
 - The cap is soft: overshoot is bounded by in-flight requests on this worker plus fleet sync lag; documented in W-P3-PUL-10. Logs never carry email or per-user spend above debug.
 - RemoteProvider.Heartbeat adds `usercost/v1` to caps once this ticket lifts the guard, so the CP can refuse cost-cap rules while older workers that would fail open are connected (W-P3-PUL-08).
 
@@ -206,7 +206,7 @@ Add a worker-owned per-user, per-rule, per-UTC-day spend ledger fed from recordA
 3. internal/worker/worker.go: build the Ledger next to cost.NewEstimator, seed it from the local store, and pass it in proxy.Config.UserCost.
 4. internal/proxy/http.go userLimitStage (from W-P3-PUL-09): add the cost check using MatchUserLimit, Ledger.Spent and IsCostBlocked; add the unmeasurable check at CONNECT for raw tunnels and in ws.go.
 5. internal/proxy/http.go recordAllowEvent: add the estimate to the ledger and set LimitRule.
-6. internal/proxy/reasons.go and docs/schemas/warden.decision.v1.json: add the two reasons; internal/config: lift the guard for dailyCostUSD.
+6. internal/denyreason/reasons.go and docs/schemas/warden.decision.v1.json: add the two reasons; internal/config: lift the guard for dailyCostUSD.
 7. Tests in internal/proxy and internal/cost covering the acceptance cases with a fake clock.
 8. internal/config RemoteProvider heartbeat: add the `usercost/v1` cap next to `userlimits/v1`.
 
@@ -238,7 +238,7 @@ Give operators one place to see who is using which providers and how much they a
 - On the CP the data comes from `UsageByUser` on the fleet store (W-P3-PUL-07); on a standalone worker dashboard the same handler uses the local SQLiteStore implementation. Responses are cached 30s keyed by window, sort and limit, like handleAnalytics.
 - Authz: a W-P1-SSO-05 row with minimum role viewer and Scope `traffic:read` (W-P2-APIK-02 coverage). No principal gives 401 JSON; a `wak_` key without traffic:read gives 403 insufficient_scope.
 - index.html: a Users usage view (inside the W-P3-OFFB-03 Users tab when present) sorted by cost, with an at-limit badge and a drill-down to the traffic view with ?user=<sub> (W-P1-VRFY-04). Every claim value is rendered with textContent.
-- Fleet view: when the served policy has user limits, show 'N connected workers do not enforce user limits' for workers whose heartbeat caps lack `userlimits/v1` (W-P1-BLOCK-04, W-P1-GPOL-07 caps registry).
+- Fleet view: when the served policy has user limits, show 'N connected workers do not enforce user limits' for workers whose heartbeat caps lack `userlimits/v1` (W-P1-BLOCK-10, W-P1-GPOL-07 caps registry).
 
 **Implementation plan**
 
@@ -256,7 +256,7 @@ Give operators one place to see who is using which providers and how much they a
 - [ ] A user with todayCostUSD at or above capUSD has atLimit true, and a sub listed in costBlockedUsers has costBlocked true.
 - [ ] The fleet warning shows when a connected worker lacks userlimits/v1 and user limits are served, and is absent otherwise.
 
-**Depends on:** [`W-P3-PUL-07`](per-user-limits.md#710--w-p3-pul-07) Fill fleet agent_id and add the per-user daily usage rollup; [`W-P3-PUL-08`](per-user-limits.md#810--w-p3-pul-08) Publish fleet cost blocks as costBlockedUsers from the control plane; [`W-P1-VRFY-04`](identity-verification.md#47--w-p1-vrfy-04) Add user filter and top-users breakdown to the dashboard; [`W-P1-SSO-05`](console-sso-rbac.md#58--w-p1-sso-05) Enforce role checks on every dashboard route; [`W-P2-APIK-02`](api-keys.md#27--w-p2-apik-02) Authenticate API keys and enforce per-route scopes in the authz table; [`W-P1-GPOL-07`](identity-policy.md#79--w-p1-gpol-07) Report groupPolicy support in heartbeat and flag old workers
+**Depends on:** [`W-P3-PUL-07`](per-user-limits.md#710--w-p3-pul-07) Fill fleet agent_id and add the per-user daily usage rollup; [`W-P3-PUL-08`](per-user-limits.md#810--w-p3-pul-08) Publish fleet cost blocks as costBlockedUsers from the control plane; [`W-P1-VRFY-04`](identity-verification.md#411--w-p1-vrfy-04) Add the user filter to the event stores and the traffic and analytics APIs; [`W-P1-SSO-05`](console-sso-rbac.md#511--w-p1-sso-05) Enforce role checks on every dashboard route and replace the bearer write guard in oidc mode; [`W-P2-APIK-02`](api-keys.md#27--w-p2-apik-02) Authenticate API keys and enforce per-route scopes in the authz table; [`W-P1-GPOL-07`](identity-policy.md#1014--w-p1-gpol-07) Report groupPolicy support in the heartbeat and flag old workers
 
 **Unblocks:** [`W-P3-PUL-10`](per-user-limits.md#1010--w-p3-pul-10) Add per-user limits end-to-end test and docs
 
@@ -326,7 +326,7 @@ Control-plane half of recording. Ingest stores only ProxyID today, so the existi
 - [ ] After pruning every event row by maxEvents, UsageByUser still returns the same totals.
 - [ ] An old fleet DB opens with no data loss and a second open is a no-op: `go test ./internal/analytics -run TestFleetMigrate_LimitRule`.
 
-**Depends on:** [`W-P3-PUL-02`](per-user-limits.md#210--w-p3-pul-02) Record agent id and limit rule on worker events; [`W-P1-VRFY-06`](identity-verification.md#67--w-p1-vrfy-06) Store user fields in the control-plane fleet store
+**Depends on:** [`W-P3-PUL-02`](per-user-limits.md#210--w-p3-pul-02) Record agent id and limit rule on worker events; [`W-P1-VRFY-06`](identity-verification.md#611--w-p1-vrfy-06) Store user fields in the control-plane fleet store
 
 **Unblocks:** [`W-P3-PORT-01`](consent-portal.md#17--w-p3-port-01) Serve the portal page and the connections list API; [`W-P4-AMCP-01`](admin-mcp.md#19--w-p4-amcp-01) Add the CP traffic API with a sanitized record projection; [`W-P3-PUL-05`](per-user-limits.md#510--w-p3-pul-05) Add per-user usage and cost dashboard view; [`W-P3-PUL-08`](per-user-limits.md#810--w-p3-pul-08) Publish fleet cost blocks as costBlockedUsers from the control plane
 
@@ -343,7 +343,7 @@ A per-worker ledger alone lets a user spend the cap once on every worker. The CP
 - A new userCostAggregator in internal/controlplane runs after ingest through the existing `ingest.SetOnEvents` hook, debounced to at most once per 30s, plus once at startup and at each UTC midnight. It runs only when some rule sets DailyCostUSD and the analytics provider is sqlite; with provider memory it logs one WARN and stays off.
 - Each run reads `TodayCostByRule` for the current UTC day, looks up each rule's DailyCostUSD by name in the served policy (unknown or removed names are skipped), and builds a sorted `[]config.CostBlockedUser{Sub, Rule, Day}` capped at MaxCostBlockedUsers and checked with ValidateCostBlockedUsers. Anonymous spend is never published.
 - The list is computed state merged into policyWire in loadPolicy like blockedUsers and never stored in policy_versions, so a rollback cannot clear it. Entries for past days are never served.
-- When the list changes, append a policy_publish_log row with reason `user_cost` (W-P1-PVER-05 pattern) and call policyServer.Refresh so W-P2-SBND-02 bundles get a higher seq and long-poll waiters wake. An unchanged list writes nothing.
+- When the list changes, append a policy_publish_log row with reason `user_cost` (W-P1-PVER-10 pattern) and call policyServer.Refresh so W-P2-SBND-02 bundles get a higher seq and long-poll waiters wake. An unchanged list writes nothing.
 - A query error keeps the previous list and ETag, logs one ERROR `user_cost_recompute_failed` without subs, and increments the in-memory `warden_cp_cost_recompute_errors_total`; gauge `warden_cp_cost_blocked_users` holds the list size, both for W-P5-RETN-06 to export.
 - With no dailyCostUSD rule, nothing runs and /policy is byte-identical. Logs carry counts only, never emails.
 - Capability check: a policy save (dashboard policy write, `warden policy import`, rollback, or an approvals draft when it is applied) that adds a rule with dailyCostUSD or sets dailyCostUSD on an existing rule returns 409 `{"error":"workers_lack_capability","capability":"usercost/v1","workers":[ids]}` while any connected worker lacks `usercost/v1` in its heartbeat caps. `force=true` overrides; only admins may force, and the admin audit row records force and the listed worker ids.
@@ -355,7 +355,7 @@ A per-worker ledger alone lets a user spend the cap once on every worker. The CP
 3. internal/controlplane policy server loadPolicy: merge the current list into policyWire.CostBlockedUsers.
 4. internal/controlplane: on change, append the `user_cost` publish_log row and call Refresh.
 5. Tests with two simulated workers, a fake clock and a failing store fake.
-6. internal/controlplane publish path: add the usercost/v1 capability check using the caps stored by W-P1-BLOCK-04, with the force override and its audit details.
+6. internal/controlplane publish path: add the usercost/v1 capability check using the caps stored by W-P1-BLOCK-10, with the force override and its audit details.
 
 **Acceptance criteria**
 
@@ -367,7 +367,7 @@ A per-worker ledger alone lets a user spend the cap once on every worker. The CP
 - [ ] With no dailyCostUSD rule, the /policy body equals the golden: `go test ./internal/controlplane -run TestPolicyWire_UserLimitsAbsentUnchanged`.
 - [ ] With one connected worker lacking usercost/v1, saving a rule with dailyCostUSD 5 returns 409 naming that worker and leaves head unchanged; an admin save with force=true succeeds and writes an audit row with force and the worker id; a rateLimit-only rule saves without the check: `go test ./internal/controlplane -run TestCostCapCapabilityGate`
 
-**Depends on:** [`W-P3-PUL-01`](per-user-limits.md#110--w-p3-pul-01) Add userLimits config, costBlockedUsers wire type and validation; [`W-P3-PUL-07`](per-user-limits.md#710--w-p3-pul-07) Fill fleet agent_id and add the per-user daily usage rollup; [`W-P1-PVER-05`](policy-versioning.md#56--w-p1-pver-05) Mirror head into the served YAML and detect external edits; [`W-P2-SBND-02`](signed-bundles.md#27--w-p2-sbnd-02) Serve the signed bundle envelope on GET /policy behind --bundles
+**Depends on:** [`W-P3-PUL-01`](per-user-limits.md#110--w-p3-pul-01) Add userLimits config, costBlockedUsers wire type and validation; [`W-P3-PUL-07`](per-user-limits.md#710--w-p3-pul-07) Fill fleet agent_id and add the per-user daily usage rollup; [`W-P2-SBND-02`](signed-bundles.md#27--w-p2-sbnd-02) Serve the signed bundle envelope on GET /policy behind --bundles; [`W-P1-PVER-10`](policy-versioning.md#1012--w-p1-pver-10) Map worker ETags to policy versions and log ETag-only changes; [`W-P1-BLOCK-10`](user-block-list.md#1012--w-p1-block-10) Advertise and record worker caps (blocklist/v1) in the heartbeat
 
 **Unblocks:** [`W-P3-PUL-05`](per-user-limits.md#510--w-p3-pul-05) Add per-user usage and cost dashboard view; [`W-P3-PUL-10`](per-user-limits.md#1010--w-p3-pul-10) Add per-user limits end-to-end test and docs
 
@@ -382,9 +382,9 @@ Wire the evaluator's user limits into the worker. Policy and rate limits are che
 **Requirements**
 
 - `proxy.PolicyEvaluator` gains ChargeUserLimit, PeekUserLimit, MatchUserLimit and IsCostBlocked.
-- New `userLimitStage` in runRequestStages after identityStage, blockStage and scopedPolicyStage and before judgeGate, using the request's subject and the worker's resolved agent id. A TLS-terminated CONNECT uses PeekUserLimit only; a raw tunnel without CA is charged once at CONNECT; serveGRPCStream charges per stream; ws.go charges per upgrade.
+- New `userLimitStage` in runRequestStages after identityStage, blockStage and the policy stage `constraintGate` (extended by W-P1-GPOL-10) and before judgeGate, using the request's subject and the worker's resolved agent id. A TLS-terminated CONNECT uses PeekUserLimit only; a raw tunnel without CA is charged once at CONNECT; serveGRPCStream charges per stream; ws.go charges per upgrade.
 - Over the limit: 429 with integer Retry-After and JSON `{"error":"user_rate_limited"}`, on the request or the h2 stream; the judge is never called; the deny event goes through p.recordEvent with Reason and LimitRule; RecordBlocked("user_rate_limited") and `warden.user_limit.denied.total{kind=rate}` are recorded.
-- Add `user_rate_limited` to internal/proxy/reasons.go and the warden.decision.v1 reason enum with a schema_rev bump. decisionLog gains limit_rule.
+- Add `user_rate_limited` to internal/denyreason/reasons.go and the warden.decision.v1 reason enum with a schema_rev bump. decisionLog gains limit_rule.
 - Gauge `warden.user_limit.buckets`; no metric carries a sub, email or group label.
 - RemoteProvider.Heartbeat adds `userlimits/v1` to caps. internal/config lifts the guard for rules without dailyCostUSD.
 - With no user limits, request handling, events and metrics are unchanged.
@@ -395,7 +395,7 @@ Wire the evaluator's user limits into the worker. Policy and rate limits are che
 2. internal/proxy/http.go: add userLimitStage to runRequestStages and a denyUserRateLimited helper writing the 429.
 3. internal/proxy/serve.go handleConn: PeekUserLimit for TLS sessions, ChargeUserLimit for raw tunnels.
 4. internal/proxy/grpc.go serveGRPCStream and internal/proxy/ws.go: charge per stream and per upgrade.
-5. internal/proxy/reasons.go and docs/schemas/warden.decision.v1.json: add the reason; internal/observability: add the counter and gauge.
+5. internal/denyreason/reasons.go and docs/schemas/warden.decision.v1.json: add the reason; internal/observability: add the counter and gauge.
 6. internal/worker RemoteProvider heartbeat: add the cap; internal/config: lift the guard for rateLimit-only rules.
 7. Tests in internal/proxy using the W-P1-VRFY-01 fake verifier.
 
@@ -408,7 +408,7 @@ Wire the evaluator's user limits into the worker. Policy and rate limits are che
 - [ ] The deny event carries user_sub, reason user_rate_limited and limit_rule, and no metric label contains a sub or email.
 - [ ] With no user limits configured, `go test ./internal/proxy` passes unchanged.
 
-**Depends on:** [`W-P3-PUL-02`](per-user-limits.md#210--w-p3-pul-02) Record agent id and limit rule on worker events; [`W-P3-PUL-03`](per-user-limits.md#310--w-p3-pul-03) Add per-user limit matching and counters to the policy evaluator; [`W-P1-GPOL-03`](identity-policy.md#39--w-p1-gpol-03) Apply group-aware allow decisions at CONNECT and request time; [`W-P1-BLOCK-02`](user-block-list.md#29--w-p1-block-02) Enforce the block list in the worker at CONNECT, per request and per h2 stream; [`W-P1-JAUD-06`](audit-log-export.md#26--w-p1-jaud-06) Set a bounded Reason on every deny event; [`W-P1-JAUD-02`](audit-log-export.md#46--w-p1-jaud-02) Publish decision v1 JSON Schema with closed-field and leak tests
+**Depends on:** [`W-P3-PUL-02`](per-user-limits.md#210--w-p3-pul-02) Record agent id and limit rule on worker events; [`W-P3-PUL-03`](per-user-limits.md#310--w-p3-pul-03) Add per-user limit matching and counters to the policy evaluator; [`W-P1-BLOCK-02`](user-block-list.md#212--w-p1-block-02) Enforce the block list in the worker at CONNECT and per request; [`W-P1-JAUD-02`](audit-log-export.md#57--w-p1-jaud-02) Publish the decision v1 JSON Schema with closed-field and leak tests; [`W-P1-GPOL-10`](identity-policy.md#514--w-p1-gpol-10) Decide scoped allow entries on every request with the request subject, add reasons and metrics and lift the allow-entry guard
 
 **Unblocks:** [`W-P3-PUL-04`](per-user-limits.md#410--w-p3-pul-04) Cap daily estimated cost per user in the worker; [`W-P3-PUL-10`](per-user-limits.md#1010--w-p3-pul-10) Add per-user limits end-to-end test and docs
 
@@ -418,11 +418,11 @@ Wire the evaluator's user limits into the worker. Policy and rate limits are che
 
 Type **test** · Size **S** · Issue [#294](https://github.com/ethosagent/warden/issues/294)
 
-Prove the done-when end to end with two workers and one CP under the integration build tag, and document how per-user limits behave, including where they are approximate. Operators need the overshoot bounds, the anonymous and raw-tunnel rules and the UTC-day reset written down before relying on caps.
+Prove the done-when end to end with two workers and one CP on the L1 harness, and document how per-user limits behave, including where they are approximate. Operators need the overshoot bounds, the anonymous and raw-tunnel rules and the UTC-day reset written down before relying on caps.
 
 **Requirements**
 
-- An integration test under `//go:build integration` with two in-process CA-enabled workers, one CP with the sqlite fleet store and the in-process OIDC issuer from W-P1-VRFY-05.
+- L1 scenarios in test/scenarios/userlimits.go (registered in scenarios_list.go, no build tag, no Docker) with two in-process CA-enabled workers, one CP with the sqlite fleet store and the in-process `fakes.OIDCIssuer` from W-P1-VRFY-11 (`harness.WithOIDCIssuer()`); add any missing second-worker option to test/harness.
 - It covers a rate deny for one user while another continues, survival of the window across an unrelated policy change, a cost cap on one worker with streamed responses, the CP-published costBlockedUsers stopping the user on the second worker, the anonymous bucket, and the usage endpoint totals.
 - It asserts the judge fake is never called for user_rate_limited or user_cost_limited, and that no token or email appears in test output.
 - docs/policy.md and docs/control-plane.md: the userLimits schema, precedence tiers, perAgent, anonymousLimit and the need for identity mode require for a strict guarantee, per-worker rate limits (N workers allow up to N times the rate), the cost overshoot bound and fleet lag, raw-tunnel and unmeasurable handling, estimated (not billed) spend, UTC-day reset and the NTP requirement.
@@ -430,15 +430,15 @@ Prove the done-when end to end with two workers and one CP under the integration
 
 **Implementation plan**
 
-1. test/integration/userlimits_test.go (new): set up the two workers, CP and issuer and run the scenarios.
+1. test/scenarios/userlimits.go (new): set up the two workers, CP and issuer and run the scenarios, named `user_limits_*`.
 2. docs/policy.md: add the userLimits section.
 3. docs/control-plane.md: add costBlockedUsers, the aggregator, the usage endpoint and rollout notes.
-4. Run the test in the W-P1-VRFY-05 CI integration job.
+4. Run the scenarios in the default gate: `go test -race ./test/scenarios -run 'TestScenarios/user_limits_'`.
 
 **Acceptance criteria**
 
-- [ ] `go test -tags integration ./test/integration -run TestPerUserLimitsE2E` passes and asserts both deny reasons and the usage totals.
+- [ ] `go test -race ./test/scenarios -run 'TestScenarios/user_limits_'` passes and asserts both deny reasons and the usage totals.
 - [ ] The test asserts zero judge calls for limit denials.
 - [ ] `go run docs/roadmap/gen.go check` and `scripts/check.sh` pass after the docs change.
 
-**Depends on:** [`W-P3-PUL-04`](per-user-limits.md#410--w-p3-pul-04) Cap daily estimated cost per user in the worker; [`W-P3-PUL-05`](per-user-limits.md#510--w-p3-pul-05) Add per-user usage and cost dashboard view; [`W-P3-PUL-08`](per-user-limits.md#810--w-p3-pul-08) Publish fleet cost blocks as costBlockedUsers from the control plane; [`W-P3-PUL-09`](per-user-limits.md#910--w-p3-pul-09) Enforce per-user rate limits per request in the proxy; [`W-P1-VRFY-05`](identity-verification.md#57--w-p1-vrfy-05) Add identity attribution scenarios on test/harness and a CI integration job
+**Depends on:** [`W-P3-PUL-04`](per-user-limits.md#410--w-p3-pul-04) Cap daily estimated cost per user in the worker; [`W-P3-PUL-05`](per-user-limits.md#510--w-p3-pul-05) Add per-user usage and cost dashboard view; [`W-P3-PUL-08`](per-user-limits.md#810--w-p3-pul-08) Publish fleet cost blocks as costBlockedUsers from the control plane; [`W-P3-PUL-09`](per-user-limits.md#910--w-p3-pul-09) Enforce per-user rate limits per request in the proxy; [`W-P1-VRFY-11`](identity-verification.md#1111--w-p1-vrfy-11) Add the in-process OIDC issuer fake and agent token options to the test harness

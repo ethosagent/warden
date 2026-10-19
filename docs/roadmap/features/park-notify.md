@@ -42,7 +42,7 @@ In the in-process integration setup of W-P3-PUS-11/W-P3-JIT-07 (CP with consent,
 | # | Key | Ticket | Type | Size | Depends on | Issue |
 |---|---|---|---|---|---|---|
 | 1/8 | [`W-P4-PARK-01`](#18--w-p4-park-01) | Add perUserSecrets.park config and ship it in the signed bundle | feature | S | W-P3-PUS-02, W-P3-PUS-08, W-P3-PUS-09 | [#222](https://github.com/ethosagent/warden/issues/222) |
-| 2/8 | [`W-P4-PARK-02`](#28--w-p4-park-02) | Notify the user once per pending when the agent can park | feature | M | W-P4-PARK-01, W-P3-JIT-01, W-P4-NTFY-05 | [#223](https://github.com/ethosagent/warden/issues/223) |
+| 2/8 | [`W-P4-PARK-02`](#28--w-p4-park-02) | Notify the user once per pending when the agent can park | feature | M | W-P4-PARK-01, W-P3-JIT-01, W-P4-NTFY-05, W-P1-BLOCK-10 | [#223](https://github.com/ethosagent/warden/issues/223) |
 | 3/8 | [`W-P4-PARK-03`](#38--w-p4-park-03) | Add the park limiter and coalescing status waiter | feature | M | W-P4-PARK-01, W-P3-JIT-02, W-P3-JIT-04, W-P2-WCA-03 | [#224](https://github.com/ethosagent/warden/issues/224) |
 | 4/8 | [`W-P4-PARK-04`](#48--w-p4-park-04) | Park and resume HTTP/1.1 requests in the jitDeny stage | feature | M | W-P4-PARK-02, W-P4-PARK-03, W-P3-JIT-03, W-P3-PUS-05 | [#225](https://github.com/ethosagent/warden/issues/225) |
 | 5/8 | [`W-P4-PARK-05`](#58--w-p4-park-05) | Park MCP gateway tool calls with progress notifications | feature | M | W-P4-PARK-02, W-P4-PARK-03, W-P4-MGW-07, W-P3-JIT-03 | [#226](https://github.com/ethosagent/warden/issues/226) |
@@ -100,7 +100,7 @@ Extend the W-P3-JIT-01 create-or-reuse logic so the CP itself decides whether to
 
 - No new route. After JIT-01 verifies subject_token and takes act.sub, the CP looks up perUserSecrets.park for that agent. The JIT-01 request shape, 32 KiB cap and DisallowUnknownFields stay unchanged.
 - Reuse the notified_at, notify_kind and notify_status columns and the GrantStore.MarkNotified compare-and-set from W-P4-NTFY-05 (no new migration): park installs a KindSelector on that single send path, so racing workers, reuse of the pending and connect_link never send twice for one pending_id. On reuse of a pending that was never notified (for example, notifications enabled after it was created), the same claim runs.
-- Kind is park_pending when park.enabled, the agent is in park.agents, park.notify and notifications.kinds.park_pending are true, and the calling worker principal's heartbeat caps (W-P1-BLOCK-04) include `park/v1`; otherwise connect_link as W-P4-NTFY-05 defines (when notifications.kinds.connect_link is true). ref = pending:<pending_id> for both kinds.
+- Kind is park_pending when park.enabled, the agent is in park.agents, park.notify and notifications.kinds.park_pending are true, and the calling worker principal's heartbeat caps (W-P1-BLOCK-10) include `park/v1`; otherwise connect_link as W-P4-NTFY-05 defines (when notifications.kinds.connect_link is true). ref = pending:<pending_id> for both kinds.
 - Content comes only from pending-row columns: agent id, provider display name, scopes, authorize_url and maxWait seconds. Never host, path, method or agent-supplied text. The recipient is resolved from the row's user_key, never from worker input.
 - Decline cooldown: when a denied pending for the same (user_key, agent_id, provider) completed less than declineCooldown ago, nothing is sent and the response says queued=false, reason declined_recently.
 - Response gains additive `notify: {queued: bool, kind, reason}` with reason in sent|already_sent|disabled|no_channel|rate_limited|declined_recently|failed. The send runs asynchronously through notify.Service.Send (W-P4-NTFY-04): queued=true means the send was accepted, and a delivery failure is recorded on the row and never fails the pending call.
@@ -125,7 +125,7 @@ Extend the W-P3-JIT-01 create-or-reuse logic so the CP itself decides whether to
 - [ ] `go test ./internal/controlplane -run TestAuthzRouteCoverage` passes with no new route.
 - [ ] Given park enabled for the agent but a calling worker whose heartbeat lacks `park/v1`, the pending gets one connect_link send, no park_pending, and the response notify is {queued: true, kind: connect_link}: `go test ./internal/oauthbroker -run TestParkNotifyNeedsCap`.
 
-**Depends on:** [`W-P4-PARK-01`](park-notify.md#18--w-p4-park-01) Add perUserSecrets.park config and ship it in the signed bundle; [`W-P3-JIT-01`](jit-authorization.md#17--w-p3-jit-01) Add CP endpoint to create or reuse pending authorizations; [`W-P4-NTFY-05`](user-notify.md#510--w-p4-ntfy-05) Send connect-link notifications from JIT pending creation
+**Depends on:** [`W-P4-PARK-01`](park-notify.md#18--w-p4-park-01) Add perUserSecrets.park config and ship it in the signed bundle; [`W-P3-JIT-01`](jit-authorization.md#17--w-p3-jit-01) Add CP endpoint to create or reuse pending authorizations; [`W-P4-NTFY-05`](user-notify.md#510--w-p4-ntfy-05) Send connect-link notifications from JIT pending creation; [`W-P1-BLOCK-10`](user-block-list.md#1012--w-p1-block-10) Advertise and record worker caps (blocklist/v1) in the heartbeat
 
 **Unblocks:** [`W-P4-PARK-04`](park-notify.md#48--w-p4-park-04) Park and resume HTTP/1.1 requests in the jitDeny stage; [`W-P4-PARK-05`](park-notify.md#58--w-p4-park-05) Park MCP gateway tool calls with progress notifications
 
@@ -256,7 +256,7 @@ Add OTel instruments and additive event fields for park outcomes, so operators c
 
 - internal/observability: counter warden.park.total{outcome,provider} with outcome in resumed|timeout|denied|expired|client_gone|shutdown|overflow|not_parkable|not_notifiable|cp_unavailable, histogram warden.park.wait (seconds, buckets up to 60) and up-down counter warden.park.active. provider is a configured id or `other`; no sub or agent labels. Nil-safe like the existing instruments.
 - analytics.Event gains ParkOutcome (json park_outcome) and ParkWaitMs (json park_wait_ms), both omitempty, added with addColumnIfAbsent to the local SQLite store and FleetSQLiteStore and carried on AggregatedEvent (W-P3-PUS-10 pattern).
-- Non-resumed parks keep Reason authorization_required; no new value is added to internal/proxy/reasons.go, so bridgeEvent in internal/alertpipeline still raises no finding.
+- Non-resumed parks keep Reason authorization_required; no new value is added to internal/denyreason/reasons.go, so bridgeEvent in internal/alertpipeline still raises no finding.
 - The park wait is excluded from warden.request.added_latency and from the resumed event's latency; ParkWaitMs carries it instead.
 - The decision log line gains park_outcome when set.
 - No body, token, status_token or query string is recorded.

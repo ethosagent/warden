@@ -56,12 +56,12 @@ Setup: a CP running with console.auth=oidc, `consent.enabled: true` in --config,
 | # | Key | Ticket | Type | Size | Depends on | Issue |
 |---|---|---|---|---|---|---|
 | 1/7 | [`W-P3-CSIG-01`](#17--w-p3-csig-01) | Add the CP-local consent config block and the warden-portal Dex client | feature | S | W-P1-SSO-02, W-P1-DEX-01, W-P1-DEX-02, W-P1-VRFY-01 | [#128](https://github.com/ethosagent/warden/issues/128) |
-| 2/7 | [`W-P3-CSIG-02`](#27--w-p3-csig-02) | Implement portal login, callback and session store | feature | M | W-P3-CSIG-01, W-P3-CSIG-05, W-P1-BLOCK-07, W-P1-AAUD-02 | [#129](https://github.com/ethosagent/warden/issues/129) |
+| 2/7 | [`W-P3-CSIG-02`](#27--w-p3-csig-02) | Implement portal login, callback and session store | feature | M | W-P3-CSIG-01, W-P3-CSIG-05, W-P1-BLOCK-07, W-P1-AAUD-05 | [#129](https://github.com/ethosagent/warden/issues/129) |
 | 3/7 | [`W-P3-CSIG-03`](#37--w-p3-csig-03) | Store the IdP refresh token in a CP-only secret namespace on login | feature | M | W-P3-CSIG-02, W-P3-CSIG-06 | [#130](https://github.com/ethosagent/warden/issues/130) |
 | 4/7 | [`W-P3-CSIG-04`](#47--w-p3-csig-04) | Add the portal session middleware, CSRF, logout and console isolation | feature | M | W-P3-CSIG-02, W-P1-SSO-05, W-P1-SSO-08, W-P1-BLOCK-07 | [#131](https://github.com/ethosagent/warden/issues/131) |
-| 5/7 | [`W-P3-CSIG-05`](#57--w-p3-csig-05) | Extract the console OIDC flow and session store into internal/webauth | chore | M | W-P1-SSO-03, W-P1-SSO-04 | [#276](https://github.com/ethosagent/warden/issues/276) |
+| 5/7 | [`W-P3-CSIG-05`](#57--w-p3-csig-05) | Extract the console OIDC flow and session store into internal/webauth | chore | M | W-P1-SSO-03, W-P1-SSO-04, W-P1-SSO-09 | [#276](https://github.com/ethosagent/warden/issues/276) |
 | 6/7 | [`W-P3-CSIG-06`](#67--w-p3-csig-06) | Add the CP-only user credential store, user key helpers and reserved secret prefixes | feature | M | W-P3-CSIG-01 | [#277](https://github.com/ethosagent/warden/issues/277) |
-| 7/7 | [`W-P3-CSIG-07`](#77--w-p3-csig-07) | Add a Dex-backed portal sign-in end-to-end test | test | S | W-P3-CSIG-03, W-P3-CSIG-04, W-P1-DEX-02, W-P1-SSO-07 | [#278](https://github.com/ethosagent/warden/issues/278) |
+| 7/7 | [`W-P3-CSIG-07`](#77--w-p3-csig-07) | Add a Dex-backed portal sign-in end-to-end test | test | S | W-P3-CSIG-03, W-P3-CSIG-04, W-P1-SSO-07, W-P1-DEX-04 | [#278](https://github.com/ethosagent/warden/issues/278) |
 
 ### 1/7 · W-P3-CSIG-01
 
@@ -100,7 +100,7 @@ Add the operator-owned `consent:` block, modeled on the P1 console block: read o
 - [ ] `go test ./test/deploy -run TestDexReferenceConfig` asserts the warden-portal client, its redirect and its absence from warden.trustedPeers. Adding `secret: abc` to it makes `scripts/check-secrets.sh` exit non-zero.
 - [ ] With no consent block, existing tests pass unchanged: `go test ./internal/config ./internal/controlplane ./cmd/proxy`
 
-**Depends on:** [`W-P1-SSO-02`](console-sso-rbac.md#28--w-p1-sso-02) Parse and validate the CP-local console config block; [`W-P1-DEX-01`](dex-oidc.md#13--w-p1-dex-01) Add reference Dex config with console, data-plane, harness and CLI clients; [`W-P1-DEX-02`](dex-oidc.md#23--w-p1-dex-02) Add identity compose recipe with pinned Dex and seeded LDAP; [`W-P1-VRFY-01`](identity-verification.md#17--w-p1-vrfy-01) Add internal/identity OIDC verifier with lazy JWKS, cache and config
+**Depends on:** [`W-P1-SSO-02`](console-sso-rbac.md#211--w-p1-sso-02) Parse and validate the CP-local console config block; [`W-P1-DEX-01`](dex-oidc.md#16--w-p1-dex-01) Add reference Dex config with console, data-plane, harness and CLI clients; [`W-P1-DEX-02`](dex-oidc.md#26--w-p1-dex-02) Add identity compose recipe with pinned Dex and seeded LDAP; [`W-P1-VRFY-01`](identity-verification.md#111--w-p1-vrfy-01) Add internal/identity OIDC verifier with lazy JWKS, cache and config
 
 **Unblocks:** [`W-P3-CSIG-02`](consent-auth.md#27--w-p3-csig-02) Implement portal login, callback and session store; [`W-P3-CSIG-06`](consent-auth.md#67--w-p3-csig-06) Add the CP-only user credential store, user key helpers and reserved secret prefixes; [`W-P3-BRKR-01`](oauth-broker.md#19--w-p3-brkr-01) Add provider config model with Google and GitHub defaults; [`W-P3-JIT-01`](jit-authorization.md#17--w-p3-jit-01) Add CP endpoint to create or reuse pending authorizations
 
@@ -140,7 +140,7 @@ Add the new internal/portal package with GET /portal/login, GET /portal/callback
 - [ ] A blocked sub, a blocked email, and a user outside a non-empty allowedGroups each get no session and the matching login_error: `go test ./internal/portal -run TestPortalAdmission`
 - [ ] With the fake provider down, /portal/login returns 503 idp_unavailable while /policy answers as before; without a consent block /portal/login returns 404; captured logs hold no code, verifier, nonce, raw ID token or raw session id: `go test ./internal/portal ./internal/controlplane -run 'TestPortalIdPDown|TestPortalNotMounted'`
 
-**Depends on:** [`W-P3-CSIG-01`](consent-auth.md#17--w-p3-csig-01) Add the CP-local consent config block and the warden-portal Dex client; [`W-P3-CSIG-05`](consent-auth.md#57--w-p3-csig-05) Extract the console OIDC flow and session store into internal/webauth; [`W-P1-BLOCK-07`](user-block-list.md#79--w-p1-block-07) Deny console login and sessions for blocked principals; [`W-P1-AAUD-02`](admin-audit-log.md#24--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware
+**Depends on:** [`W-P3-CSIG-01`](consent-auth.md#17--w-p3-csig-01) Add the CP-local consent config block and the warden-portal Dex client; [`W-P3-CSIG-05`](consent-auth.md#57--w-p3-csig-05) Extract the console OIDC flow and session store into internal/webauth; [`W-P1-BLOCK-07`](user-block-list.md#712--w-p1-block-07) Deny console login and sessions for blocked principals; [`W-P1-AAUD-05`](admin-audit-log.md#58--w-p1-aaud-05) Gate admin audit behind config, check the key id at startup, add segment rotation and a shared CLI recorder opener
 
 **Unblocks:** [`W-P3-CSIG-03`](consent-auth.md#37--w-p3-csig-03) Store the IdP refresh token in a CP-only secret namespace on login; [`W-P3-CSIG-04`](consent-auth.md#47--w-p3-csig-04) Add the portal session middleware, CSRF, logout and console isolation; [`W-P3-PORT-03`](consent-portal.md#37--w-p3-port-03) Add the pending landing page and connect, continue and decline actions; [`W-P4-NTFY-07`](user-notify.md#710--w-p4-ntfy-07) Add verified user contacts table keyed by user_key
 
@@ -219,7 +219,7 @@ Add the exported portal.RequireSession middleware and portal.PrincipalFrom, whic
 - [ ] Blocking a signed-in user's sub makes their next portal request 401, and an admin DELETE /dashboard/api/sessions?kind=portal&sub=<sub> does the same: `go test ./internal/controlplane -run TestPortalSessionRevocation`
 - [ ] A request to /policy carrying a portal cookie makes no call to the portal store (counted with a fake): `go test ./internal/controlplane -run TestPortalNotOnWorkerRoutes`
 
-**Depends on:** [`W-P3-CSIG-02`](consent-auth.md#27--w-p3-csig-02) Implement portal login, callback and session store; [`W-P1-SSO-05`](console-sso-rbac.md#58--w-p1-sso-05) Enforce role checks on every dashboard route; [`W-P1-SSO-08`](console-sso-rbac.md#88--w-p1-sso-08) Add admin session list and revoke API; [`W-P1-BLOCK-07`](user-block-list.md#79--w-p1-block-07) Deny console login and sessions for blocked principals
+**Depends on:** [`W-P3-CSIG-02`](consent-auth.md#27--w-p3-csig-02) Implement portal login, callback and session store; [`W-P1-SSO-05`](console-sso-rbac.md#511--w-p1-sso-05) Enforce role checks on every dashboard route and replace the bearer write guard in oidc mode; [`W-P1-SSO-08`](console-sso-rbac.md#811--w-p1-sso-08) Add admin session list and revoke API; [`W-P1-BLOCK-07`](user-block-list.md#712--w-p1-block-07) Deny console login and sessions for blocked principals
 
 **Unblocks:** [`W-P3-CSIG-07`](consent-auth.md#77--w-p3-csig-07) Add a Dex-backed portal sign-in end-to-end test; [`W-P3-BRKR-03`](oauth-broker.md#39--w-p3-brkr-03) Implement POST /connect/start with PKCE, CSRF and scope capping; [`W-P3-PORT-01`](consent-portal.md#17--w-p3-port-01) Serve the portal page and the connections list API; [`W-P3-OFFB-06`](offboarding.md#67--w-p3-offb-06) Audit and test blocked-user refusals across portal and connect; [`W-P4-DGR-03`](delegation-grants.md#312--w-p4-dgr-03) Build the grant approval pages in the consent portal; [`W-P3-JIT-04`](jit-authorization.md#47--w-p3-jit-04) Add /connect/{id}/status long-poll on the CP; [`W-P4-NTFY-09`](user-notify.md#910--w-p4-ntfy-09) Add per-user channel order preference in the portal
 
@@ -255,7 +255,7 @@ P1 puts the OIDC login flow, the oidc_pending store, SessionStore and the sessio
 - [ ] Two SessionStores on different tables in the same cpstate DB do not see each other's rows, and CSRFToken differs for the same id under different labels: `go test ./internal/webauth -run 'TestSessionTables|TestCSRFLabel'`
 - [ ] `go list -deps ./internal/webauth | grep -E 'internal/(controlplane|dashboard|portal)$'` prints nothing.
 
-**Depends on:** [`W-P1-SSO-03`](console-sso-rbac.md#38--w-p1-sso-03) Implement OIDC login and callback with PKCE on the control plane; [`W-P1-SSO-04`](console-sso-rbac.md#48--w-p1-sso-04) Add server-side sessions, logout, /auth/me and CSRF
+**Depends on:** [`W-P1-SSO-03`](console-sso-rbac.md#311--w-p1-sso-03) Implement OIDC login and callback with PKCE on the control plane; [`W-P1-SSO-04`](console-sso-rbac.md#411--w-p1-sso-04) Add server-side sessions, the session middleware, cookie and CSRF; [`W-P1-SSO-09`](console-sso-rbac.md#911--w-p1-sso-09) Add POST /auth/logout, GET /auth/me and the dashboard api() fetch wrapper
 
 **Unblocks:** [`W-P3-CSIG-02`](consent-auth.md#27--w-p3-csig-02) Implement portal login, callback and session store
 
@@ -303,11 +303,11 @@ Every P3 feature stores per-user credentials: IdP refresh tokens (this feature),
 
 Type **test** · Size **S** · Issue [#278](https://github.com/ethosagent/warden/issues/278)
 
-Every other ticket here tests against the httptest fake IdP. This test proves the done-when sentence against the reference identity stack, using the seeded LDAP users from W-P1-DEX-02 and the warden-portal client, in the same way W-P1-SSO-07 does for the console. It runs behind the `integration` build tag and WARDEN_IT_DEX=1, so normal `go test ./...` is unaffected.
+Every other ticket here tests against the httptest fake IdP. This test proves the done-when sentence against the reference identity stack, using the seeded LDAP users from W-P1-DEX-02 on the shared L2 identity stack of W-P1-DEX-04 and the warden-portal client, in the same way W-P1-SSO-07 does for the console. It is an L2 test (build tag `e2e`, `make e2e-identity-scenario NAME=TestPortalSignIn`), so normal `go test ./...` and scripts/check.sh are unaffected.
 
 **Requirements**
 
-- Lives in test/integration/portal_signin_test.go (new) with `//go:build integration`, and skips unless WARDEN_IT_DEX=1. It reuses the login helper style of W-P1-SSO-07: a cookie-jar client that submits Dex's LDAP form, with no browser.
+- Lives in test/e2e/identity/portal_signin_test.go (new) with `//go:build e2e` on the shared stack from W-P1-DEX-04. It reuses the `dexClient` helper of W-P1-DEX-04 and the login helper style of W-P1-SSO-07: a cookie-jar client that submits Dex's LDAP form, with no browser.
 - The CP runs with console.auth=oidc, consent.enabled with issuer http://dex:5556/dex, redirectURL https://localhost:7070/portal/callback, allowInsecureIssuer true, and a persistent consent.store (the AWS fake, never echo).
 - Asserts the done-when: the session cookie, the stored `idp/<userKey>` token (which successfully refreshes at the Dex token endpoint), the value-free idp_links row, 401 on /dashboard/api/* and /central/secrets with the portal cookie, CSRF 403, and 503 on /portal/login with Dex stopped while /policy still works.
 - Asserts that an ID token minted for warden-portal is rejected by the worker identity verifier (aud lacks warden).
@@ -316,16 +316,16 @@ Every other ticket here tests against the httptest fake IdP. This test proves th
 
 **Implementation plan**
 
-1. Create test/integration/portal_signin_test.go (new) reusing helpers from test/integration/integration_test.go and the W-P1-SSO-07 login helper.
-2. Start the identity stack from W-P1-DEX-02 with WARDEN_PORTAL_DEX_CLIENT_SECRET set, and the CP with the consent block and a temp --state-dir.
+1. Create test/e2e/identity/portal_signin_test.go (new) reusing the dexClient helper from W-P1-DEX-04 and the W-P1-SSO-07 login helper.
+2. Add the consent block and the warden-portal client settings (WARDEN_PORTAL_DEX_CLIENT_SECRET from deploy/compose/dex/.env.example) to configs/config.e2e-identity-cp.yaml (created by W-P1-DEX-04, extended by W-P1-SSO-07); the CP already runs with --state-dir on the stack.
 3. Run sign-in, storage, isolation, CSRF, IdP-down and verifier-rejection checks as subtests.
 4. Document the run command in docs/control-plane.md next to the console SSO test.
 
 **Acceptance criteria**
 
-- [ ] With the identity compose stack running, `WARDEN_IT_DEX=1 go test -tags integration ./test/integration -run TestPortalSignIn` passes.
+- [ ] With Docker available, `make e2e-identity-scenario NAME=TestPortalSignIn` passes.
 - [ ] User alice signs in at /portal; GET /portal/api/me returns her sub; GET /dashboard/api/traffic with the portal cookie returns 401.
 - [ ] After login the backend holds `idp/<userKey>`, and that token refreshes successfully at the Dex token endpoint.
-- [ ] Without the integration tag, `go vet ./test/integration` succeeds and the file is not built.
+- [ ] `go vet -tags e2e ./test/e2e/identity/` is clean, and without the tag `go list ./test/e2e/identity` reports `build constraints exclude all Go files`, so the default gate never touches Docker.
 
-**Depends on:** [`W-P3-CSIG-03`](consent-auth.md#37--w-p3-csig-03) Store the IdP refresh token in a CP-only secret namespace on login; [`W-P3-CSIG-04`](consent-auth.md#47--w-p3-csig-04) Add the portal session middleware, CSRF, logout and console isolation; [`W-P1-DEX-02`](dex-oidc.md#23--w-p1-dex-02) Add identity compose recipe with pinned Dex and seeded LDAP; [`W-P1-SSO-07`](console-sso-rbac.md#78--w-p1-sso-07) Add Dex-backed console SSO scenario on test/harness
+**Depends on:** [`W-P3-CSIG-03`](consent-auth.md#37--w-p3-csig-03) Store the IdP refresh token in a CP-only secret namespace on login; [`W-P3-CSIG-04`](consent-auth.md#47--w-p3-csig-04) Add the portal session middleware, CSRF, logout and console isolation; [`W-P1-SSO-07`](console-sso-rbac.md#711--w-p1-sso-07) Add the L2 Dex-backed console SSO end-to-end test; [`W-P1-DEX-04`](dex-oidc.md#46--w-p1-dex-04) Add the shared L2 identity e2e stack with Dex, a CP, an attribute-mode worker and a curl agent
