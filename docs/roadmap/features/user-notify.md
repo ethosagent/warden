@@ -208,7 +208,7 @@ Create internal/notify, the CP service that turns a (kind, user_key, ref, params
 - [ ] Given a canary email and an auth failure on every channel, the notify_channel_down Finding, the outbox row and captured logs contain neither the email nor the error text: `go test ./internal/notify -run TestNoEmailInLogsOrFindings`
 - [ ] `go test -race ./internal/notify/...` passes
 
-**Depends on:** [`W-P4-NTFY-01`](user-notify.md#110--w-p4-ntfy-01) Add UserNotifier capability, typed delivery errors and user-notifier binding; [`W-P4-NTFY-07`](user-notify.md#710--w-p4-ntfy-07) Add verified user contacts table keyed by user_key; [`W-P1-SSO-01`](console-sso-rbac.md#18--w-p1-sso-01) Add internal/cpstate SQLite state store with migrations; [`W-P1-BLOCK-03`](user-block-list.md#310--w-p1-block-03) Add the CP block-list store, admin API and policy merge
+**Depends on:** [`W-P4-NTFY-01`](user-notify.md#110--w-p4-ntfy-01) Add UserNotifier capability, typed delivery errors and user-notifier binding; [`W-P4-NTFY-07`](user-notify.md#710--w-p4-ntfy-07) Add verified user contacts table keyed by user_key; [`W-P1-SSO-01`](console-sso-rbac.md#111--w-p1-sso-01) Add internal/cpstate SQLite state store with migrations; [`W-P1-BLOCK-03`](user-block-list.md#312--w-p1-block-03) Add the CP block-list store and merge it into the served policy
 
 **Unblocks:** [`W-P4-NTFY-08`](user-notify.md#810--w-p4-ntfy-08) Add CP-local notifications config block and CP wiring
 
@@ -282,7 +282,7 @@ Add an admin-only console page to read and write the notifications block, previe
 - [ ] Given an admin with a verified email and a fake email channel, POST .../test delivers one message to that address, the 6th call in a minute gets 429, and under console.auth none it returns 409 no_recipient: `go test ./internal/dashboard -run TestNotificationsTestSend`
 - [ ] Given one dead message on instance `mail`, GET /dashboard/api/integrations reports dead=1 for `mail` and 0 for others: `go test ./internal/dashboard -run TestIntegrationsDeliveryCounters`
 
-**Depends on:** [`W-P4-NTFY-08`](user-notify.md#810--w-p4-ntfy-08) Add CP-local notifications config block and CP wiring; [`W-P1-SSO-05`](console-sso-rbac.md#58--w-p1-sso-05) Enforce role checks on every dashboard route; [`W-P1-AAUD-02`](admin-audit-log.md#26--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware
+**Depends on:** [`W-P4-NTFY-08`](user-notify.md#810--w-p4-ntfy-08) Add CP-local notifications config block and CP wiring; [`W-P1-SSO-05`](console-sso-rbac.md#511--w-p1-sso-05) Enforce role checks on every dashboard route and replace the bearer write guard in oidc mode; [`W-P1-AAUD-02`](admin-audit-log.md#28--w-p1-aaud-02) Record CP admin mutations through audit middleware
 
 **Unblocks:** [`W-P4-NTFY-10`](user-notify.md#1010--w-p4-ntfy-10) Add end-to-end test for connect-link notifications with fallback
 
@@ -317,7 +317,7 @@ No earlier ticket stores a durable, verified email per user: idp_links exists on
 - [ ] Given a JIT pending created for a token with a verified email, a jit row exists; with notifications disabled no row is written: `go test ./internal/oauthbroker -run TestJITRecordsContact`
 - [ ] Given a contact store that returns an error, login and pending creation still succeed and logs contain no email: `go test ./internal/contacts/... ./internal/portal/... -run ContactFailure`
 
-**Depends on:** [`W-P3-CSIG-02`](consent-auth.md#27--w-p3-csig-02) Implement portal login, callback and session store; [`W-P3-CSIG-06`](consent-auth.md#67--w-p3-csig-06) Add the CP-only user credential store, user key helpers and reserved secret prefixes; [`W-P3-JIT-01`](jit-authorization.md#17--w-p3-jit-01) Add CP endpoint to create or reuse pending authorizations; [`W-P1-SSO-03`](console-sso-rbac.md#38--w-p1-sso-03) Implement OIDC login and callback with PKCE on the control plane; [`W-P2-TOKX-02`](token-exchange.md#27--w-p2-tokx-02) Implement token exchange policy checks and JWT minting; [`W-P3-OFFB-01`](offboarding.md#17--w-p3-offb-01) Implement the resumable two-stage Offboarder
+**Depends on:** [`W-P3-CSIG-02`](consent-auth.md#27--w-p3-csig-02) Implement portal login, callback and session store; [`W-P3-CSIG-06`](consent-auth.md#67--w-p3-csig-06) Add the CP-only user credential store, user key helpers and reserved secret prefixes; [`W-P3-JIT-01`](jit-authorization.md#17--w-p3-jit-01) Add CP endpoint to create or reuse pending authorizations; [`W-P1-SSO-03`](console-sso-rbac.md#311--w-p1-sso-03) Implement OIDC login and callback with PKCE on the control plane; [`W-P2-TOKX-02`](token-exchange.md#27--w-p2-tokx-02) Implement token exchange policy checks and JWT minting; [`W-P3-OFFB-01`](offboarding.md#17--w-p3-offb-01) Implement the resumable two-stage Offboarder
 
 **Unblocks:** [`W-P4-NTFY-04`](user-notify.md#410--w-p4-ntfy-04) Add notify service with durable outbox, dispatcher, templates and dedup; [`W-P4-NTFY-08`](user-notify.md#810--w-p4-ntfy-08) Add CP-local notifications config block and CP wiring
 

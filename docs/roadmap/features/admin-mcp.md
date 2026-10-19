@@ -53,7 +53,7 @@ On a CP with --state-dir, console.auth=oidc, --policy-store=versioned and consol
 | # | Key | Ticket | Type | Size | Depends on | Issue |
 |---|---|---|---|---|---|---|
 | 1/9 | [`W-P4-AMCP-01`](#19--w-p4-amcp-01) | Add the CP traffic API with a sanitized record projection | feature | M | W-P2-APIK-02, W-P1-JAUD-01, W-P1-VRFY-04, W-P1-VRFY-06, W-P3-PUL-07 | [#201](https://github.com/ethosagent/warden/issues/201) |
-| 2/9 | [`W-P4-AMCP-07`](#29--w-p4-amcp-07) | Add the CP explain API with historical version resolution | feature | M | W-P4-AMCP-01, W-P1-PVER-01, W-P1-GPOL-02, W-P1-JAUD-06 | [#323](https://github.com/ethosagent/warden/issues/323) |
+| 2/9 | [`W-P4-AMCP-07`](#29--w-p4-amcp-07) | Add the CP explain API with historical version resolution | feature | M | W-P4-AMCP-01, W-P1-PVER-01, W-P1-GPOL-02 | [#323](https://github.com/ethosagent/warden/issues/323) |
 | 3/9 | [`W-P4-AMCP-02`](#39--w-p4-amcp-02) | Add the admin-mcp command with stdio transport and scope-filtered tools | feature | M | W-P2-APIK-03, W-P4-MGW-01 | [#202](https://github.com/ethosagent/warden/issues/202) |
 | 4/9 | [`W-P4-AMCP-08`](#49--w-p4-amcp-08) | Add the admin-mcp Streamable HTTP transport with per-caller keys | feature | S | W-P4-AMCP-02 | [#324](https://github.com/ethosagent/warden/issues/324) |
 | 5/9 | [`W-P4-AMCP-03`](#59--w-p4-amcp-03) | Implement the explain_decision, query_traffic and list_agents tools | feature | M | W-P4-AMCP-01, W-P4-AMCP-07, W-P4-AMCP-02, W-P2-AREG-02, W-P2-AREG-05 | [#203](https://github.com/ethosagent/warden/issues/203) |
@@ -95,7 +95,7 @@ Add `GET /dashboard/api/traffic/records` on the CP (a new path beside the raw `/
 - [ ] `go test ./internal/controlplane -run TestAuthzRouteCoverage` passes with the new row, and a key holding only policy:read gets 403 insufficient_scope.
 - [ ] With console.apiKeys.enabled=false, GET /dashboard/api/traffic/records returns 404 and `go test ./internal/controlplane ./internal/dashboard` passes unchanged.
 
-**Depends on:** [`W-P2-APIK-02`](api-keys.md#27--w-p2-apik-02) Authenticate API keys and enforce per-route scopes in the authz table; [`W-P1-JAUD-01`](audit-log-export.md#36--w-p1-jaud-01) Add internal/auditlog decision stream on the async writer tee; [`W-P1-VRFY-04`](identity-verification.md#49--w-p1-vrfy-04) Add user filter and top-users breakdown to the dashboard; [`W-P1-VRFY-06`](identity-verification.md#69--w-p1-vrfy-06) Store user fields in the control-plane fleet store; [`W-P3-PUL-07`](per-user-limits.md#710--w-p3-pul-07) Fill fleet agent_id and add the per-user daily usage rollup
+**Depends on:** [`W-P2-APIK-02`](api-keys.md#27--w-p2-apik-02) Authenticate API keys and enforce per-route scopes in the authz table; [`W-P1-JAUD-01`](audit-log-export.md#37--w-p1-jaud-01) Add audit.jsonLog config, an additive analytics tee and the closed decision Record; [`W-P1-VRFY-04`](identity-verification.md#411--w-p1-vrfy-04) Add the user filter to the event stores and the traffic and analytics APIs; [`W-P1-VRFY-06`](identity-verification.md#611--w-p1-vrfy-06) Store user fields in the control-plane fleet store; [`W-P3-PUL-07`](per-user-limits.md#710--w-p3-pul-07) Fill fleet agent_id and add the per-user daily usage rollup
 
 **Unblocks:** [`W-P4-AMCP-07`](admin-mcp.md#29--w-p4-amcp-07) Add the CP explain API with historical version resolution; [`W-P4-AMCP-03`](admin-mcp.md#59--w-p4-amcp-03) Implement the explain_decision, query_traffic and list_agents tools; [`W-P4-AMCP-04`](admin-mcp.md#69--w-p4-amcp-04) Add CP suggest and replay routes and the suggest_policy and replay_policy tools
 
@@ -132,7 +132,7 @@ Add `GET /dashboard/api/explain`, which loads one fleet event and shows both wha
 - [ ] A key with traffic:read but not policy:read gets list and index without entry; an unknown uid returns 404 event_not_found.
 - [ ] `go test ./internal/policy -run TestExplainMatchesPeekFor` and `go test ./internal/analytics -run TestGetEventByUID` pass, and TestAuthzRouteCoverage passes with the new row.
 
-**Depends on:** [`W-P4-AMCP-01`](admin-mcp.md#19--w-p4-amcp-01) Add the CP traffic API with a sanitized record projection; [`W-P1-PVER-01`](policy-versioning.md#16--w-p1-pver-01) Add versioned policy store and serve the head version; [`W-P1-GPOL-02`](identity-policy.md#29--w-p1-gpol-02) Make the policy evaluator subject-aware with EvaluateFor; [`W-P1-JAUD-06`](audit-log-export.md#26--w-p1-jaud-06) Set a bounded Reason on every deny event
+**Depends on:** [`W-P4-AMCP-01`](admin-mcp.md#19--w-p4-amcp-01) Add the CP traffic API with a sanitized record projection; [`W-P1-PVER-01`](policy-versioning.md#112--w-p1-pver-01) Add versioned policy store and serve the head version; [`W-P1-GPOL-02`](identity-policy.md#314--w-p1-gpol-02) Make the policy evaluator subject-aware: EvaluateFor and PeekFor with a request context
 
 **Unblocks:** [`W-P4-AMCP-03`](admin-mcp.md#59--w-p4-amcp-03) Implement the explain_decision, query_traffic and list_agents tools; [`W-P4-GOPS-09`](policy-as-code.md#611--w-p4-gops-09) Serve policy per rollout cohort with ordered bundle seqs
 

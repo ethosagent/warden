@@ -50,12 +50,12 @@ From a clean clone, following only docs/recipes/claude-code.md and docs/recipes/
 
 | # | Key | Ticket | Type | Size | Depends on | Issue |
 |---|---|---|---|---|---|---|
-| 1/6 | [`W-P2-RCP-01`](#16--w-p2-rcp-01) | Extend internal/identityclient with agent keys and token exchange | feature | M | W-P1-IDC-02, W-P2-KEYS-01, W-P2-TOKX-03 | [#117](https://github.com/ethosagent/warden/issues/117) |
+| 1/6 | [`W-P2-RCP-01`](#16--w-p2-rcp-01) | Extend internal/identityclient with agent keys and token exchange | feature | M | W-P1-IDC-02, W-P2-KEYS-01, W-P2-TOKX-03, W-P1-IDC-05 | [#117](https://github.com/ethosagent/warden/issues/117) |
 | 2/6 | [`W-P2-RCP-02`](#26--w-p2-rcp-02) | Add the token-injecting forwarder and `warden identity forward` | feature | M | W-P2-RCP-01, W-P1-IDC-04 | [#118](https://github.com/ethosagent/warden/issues/118) |
 | 3/6 | [`W-P2-RCP-03`](#36--w-p2-rcp-03) | Add the Claude Code compose recipe and docs | feature | M | W-P2-RCP-02, W-P2-WBND-03, W-P2-AREG-04, W-P1-DEX-02, W-P1-WTOK-06, W-P2-AREG-05, W-P2-AREG-06, W-P2-KEYS-05 | [#119](https://github.com/ethosagent/warden/issues/119) |
 | 4/6 | [`W-P2-RCP-04`](#46--w-p2-rcp-04) | Add the Codex CLI compose recipe and docs | feature | S | W-P2-RCP-03 | [#120](https://github.com/ethosagent/warden/issues/120) |
 | 5/6 | [`W-P2-RCP-05`](#56--w-p2-rcp-05) | Add the isolation proof script for the recipes | test | S | W-P2-RCP-03, W-P2-RCP-04, W-P1-IDC-03, W-P2-AREG-06 | [#121](https://github.com/ethosagent/warden/issues/121) |
-| 6/6 | [`W-P2-RCP-06`](#66--w-p2-rcp-06) | Extend `warden identity exec` with agent tokens and `--run-as` | feature | S | W-P2-RCP-02, W-P1-IDC-04 | [#272](https://github.com/ethosagent/warden/issues/272) |
+| 6/6 | [`W-P2-RCP-06`](#66--w-p2-rcp-06) | Extend `warden identity exec` with agent tokens and `--run-as` | feature | S | W-P2-RCP-02, W-P1-IDC-06 | [#272](https://github.com/ethosagent/warden/issues/272) |
 
 ### 1/6 · W-P2-RCP-01
 
@@ -95,7 +95,7 @@ Extend internal/identityclient (W-P1-IDC-02) with Ed25519 agent keys, private_ke
 - [ ] `go test ./cmd/proxy -run TestIdentityEnrollAndTokenNoLeak` runs enroll, `token --agent-id` and `status --agent-id` with `--verbose`; stderr and slog output contain no substring of the subject token, assertion, Warden token or key seed, and the token appears only on stdout of `token`.
 - [ ] `scripts/check.sh` passes, including the coverage gate and govulncheck.
 
-**Depends on:** [`W-P1-IDC-02`](identity-contract.md#24--w-p1-idc-02) Add `warden identity` CLI for login, token, status and proxy env; [`W-P2-KEYS-01`](key-management.md#17--w-p2-keys-01) Add internal/keys Signer, JWK and RFC 7638 kid helpers; [`W-P2-TOKX-03`](token-exchange.md#37--w-p2-tokx-03) Mount POST /oauth2/token with RFC 8693 request parsing and config
+**Depends on:** [`W-P1-IDC-02`](identity-contract.md#27--w-p1-idc-02) Add internal/identityclient: config, discovery, device login, locked file cache, Token and Status; [`W-P2-KEYS-01`](key-management.md#17--w-p2-keys-01) Add internal/keys Signer, JWK and RFC 7638 kid helpers; [`W-P2-TOKX-03`](token-exchange.md#37--w-p2-tokx-03) Mount POST /oauth2/token with RFC 8693 request parsing and config; [`W-P1-IDC-05`](identity-contract.md#57--w-p1-idc-05) Add the `warden identity` cobra subtree: login, token, status, env and logout
 
 **Unblocks:** [`W-P2-RCP-02`](identity-client.md#26--w-p2-rcp-02) Add the token-injecting forwarder and `warden identity forward`
 
@@ -135,7 +135,7 @@ Extend the P1 CONNECT-only loopback forwarder from W-P1-IDC-04 (internal/identit
 - [ ] `go test ./internal/identityclient -run '^$' -bench BenchmarkForwarderConnect` reports CONNECT setup overhead under 2ms/op against a loopback fake worker.
 - [ ] `scripts/check.sh` passes, including the coverage gate.
 
-**Depends on:** [`W-P2-RCP-01`](identity-client.md#16--w-p2-rcp-01) Extend internal/identityclient with agent keys and token exchange; [`W-P1-IDC-04`](identity-contract.md#44--w-p1-idc-04) Add `warden identity exec` with a loopback forwarder that refreshes the token
+**Depends on:** [`W-P2-RCP-01`](identity-client.md#16--w-p2-rcp-01) Extend internal/identityclient with agent keys and token exchange; [`W-P1-IDC-04`](identity-contract.md#47--w-p1-idc-04) Add the loopback CONNECT forwarder that injects a fresh identity token
 
 **Unblocks:** [`W-P2-RCP-03`](identity-client.md#36--w-p2-rcp-03) Add the Claude Code compose recipe and docs; [`W-P2-RCP-06`](identity-client.md#66--w-p2-rcp-06) Extend `warden identity exec` with agent tokens and `--run-as`
 
@@ -173,7 +173,7 @@ Add a Claude Code recipe that runs the agent on an internal-only network, the `w
 - [ ] `docker compose exec claude-code env` contains no `sk-ant-` value and `grep -cE 'eyJ[A-Za-z0-9_-]{20,}'` over it prints 0.
 - [ ] `scripts/check.sh` passes, including its secret-literal stage.
 
-**Depends on:** [`W-P2-RCP-02`](identity-client.md#26--w-p2-rcp-02) Add the token-injecting forwarder and `warden identity forward`; [`W-P2-WBND-03`](identity-enforcement.md#310--w-p2-wbnd-03) Enforce identity require mode on CONNECT and terminated traffic; [`W-P2-AREG-04`](agent-registry.md#47--w-p2-areg-04) Serve registered agents in the policy wire; [`W-P1-DEX-02`](dex-oidc.md#24--w-p1-dex-02) Add identity compose recipe with pinned Dex and seeded LDAP; [`W-P1-WTOK-06`](worker-credentials.md#66--w-p1-wtok-06) Move compose recipes and worker configs to per-worker tokens; [`W-P2-AREG-05`](agent-registry.md#57--w-p2-areg-05) Bind workers to an agent id and enforce agent_disabled; [`W-P2-AREG-06`](agent-registry.md#67--w-p2-areg-06) Add an offline agent registry CLI; [`W-P2-KEYS-05`](key-management.md#57--w-p2-keys-05) Add the keys CLI, backup integration and key rotation runbook
+**Depends on:** [`W-P2-RCP-02`](identity-client.md#26--w-p2-rcp-02) Add the token-injecting forwarder and `warden identity forward`; [`W-P2-WBND-03`](identity-enforcement.md#310--w-p2-wbnd-03) Enforce identity require mode on CONNECT and terminated traffic; [`W-P2-AREG-04`](agent-registry.md#47--w-p2-areg-04) Serve registered agents in the policy wire; [`W-P1-DEX-02`](dex-oidc.md#26--w-p1-dex-02) Add identity compose recipe with pinned Dex and seeded LDAP; [`W-P1-WTOK-06`](worker-credentials.md#611--w-p1-wtok-06) Move the control-plane compose recipe and e2e stack to per-worker tokens; [`W-P2-AREG-05`](agent-registry.md#57--w-p2-areg-05) Bind workers to an agent id and enforce agent_disabled; [`W-P2-AREG-06`](agent-registry.md#67--w-p2-areg-06) Add an offline agent registry CLI; [`W-P2-KEYS-05`](key-management.md#57--w-p2-keys-05) Add the keys CLI, backup integration and key rotation runbook
 
 **Unblocks:** [`W-P2-RCP-04`](identity-client.md#46--w-p2-rcp-04) Add the Codex CLI compose recipe and docs; [`W-P2-RCP-05`](identity-client.md#56--w-p2-rcp-05) Add the isolation proof script for the recipes
 
@@ -247,7 +247,7 @@ Add scripts/recipe-isolation.sh, which proves for each recipe that the agent has
 - [ ] `scripts/check.sh` without `--smoke-recipes` starts no Docker container and passes; `scripts/check.sh --smoke-recipes` runs both recipes.
 - [ ] `shellcheck scripts/recipe-isolation.sh` exits 0.
 
-**Depends on:** [`W-P2-RCP-03`](identity-client.md#36--w-p2-rcp-03) Add the Claude Code compose recipe and docs; [`W-P2-RCP-04`](identity-client.md#46--w-p2-rcp-04) Add the Codex CLI compose recipe and docs; [`W-P1-IDC-03`](identity-contract.md#34--w-p1-idc-03) Add generic identity smoke test with a curl agent; [`W-P2-AREG-06`](agent-registry.md#67--w-p2-areg-06) Add an offline agent registry CLI
+**Depends on:** [`W-P2-RCP-03`](identity-client.md#36--w-p2-rcp-03) Add the Claude Code compose recipe and docs; [`W-P2-RCP-04`](identity-client.md#46--w-p2-rcp-04) Add the Codex CLI compose recipe and docs; [`W-P1-IDC-03`](identity-contract.md#37--w-p1-idc-03) Add the L2 identity attribution smoke with a curl agent; [`W-P2-AREG-06`](agent-registry.md#67--w-p2-areg-06) Add an offline agent registry CLI
 
 ### 6/6 · W-P2-RCP-06
 
@@ -279,4 +279,4 @@ W-P1-IDC-04 ships `warden identity exec` in P1 with the user's Dex ID token. Add
 - [ ] On Linux as root, `go test ./cmd/proxy -run TestIdentityExecRunAs` shows the child runs as the given uid and cannot open the agent key file; on other platforms `--run-as` exits non-zero before starting the child.
 - [ ] The P1 TestIdentityExec cases from W-P1-IDC-04 pass unchanged, and `scripts/check.sh` passes.
 
-**Depends on:** [`W-P2-RCP-02`](identity-client.md#26--w-p2-rcp-02) Add the token-injecting forwarder and `warden identity forward`; [`W-P1-IDC-04`](identity-contract.md#44--w-p1-idc-04) Add `warden identity exec` with a loopback forwarder that refreshes the token
+**Depends on:** [`W-P2-RCP-02`](identity-client.md#26--w-p2-rcp-02) Add the token-injecting forwarder and `warden identity forward`; [`W-P1-IDC-06`](identity-contract.md#67--w-p1-idc-06) Add `warden identity exec` to run a child behind the forwarder

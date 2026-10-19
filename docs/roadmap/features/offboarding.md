@@ -56,10 +56,10 @@ With consent.offboarding.mode enforce and revokeGrace 0, removing a user from an
 
 | # | Key | Ticket | Type | Size | Depends on | Issue |
 |---|---|---|---|---|---|---|
-| 1/7 | [`W-P3-OFFB-01`](#17--w-p3-offb-01) | Implement the resumable two-stage Offboarder | feature | M | W-P3-PORT-02, W-P3-PORT-07, W-P3-PUS-08, W-P3-CSIG-03, W-P1-BLOCK-03, W-P1-BLOCK-07, W-P1-AAUD-02, W-P1-OPS1-01, W-P2-APIK-03, W-P2-TOKX-07 | [#162](https://github.com/ethosagent/warden/issues/162) |
-| 2/7 | [`W-P3-OFFB-02`](#27--w-p3-offb-02) | Add the IdP refresh job in observe mode with safe token write-back | feature | M | W-P3-CSIG-03, W-P1-OPS1-01 | [#163](https://github.com/ethosagent/warden/issues/163) |
+| 1/7 | [`W-P3-OFFB-01`](#17--w-p3-offb-01) | Implement the resumable two-stage Offboarder | feature | M | W-P3-PORT-02, W-P3-PORT-07, W-P3-PUS-08, W-P3-CSIG-03, W-P1-BLOCK-03, W-P1-BLOCK-07, W-P1-AAUD-02, W-P2-APIK-03, W-P2-TOKX-07, W-P1-OPS1-08 | [#162](https://github.com/ethosagent/warden/issues/162) |
+| 2/7 | [`W-P3-OFFB-02`](#27--w-p3-offb-02) | Add the IdP refresh job in observe mode with safe token write-back | feature | M | W-P3-CSIG-03, W-P1-OPS1-08 | [#163](https://github.com/ethosagent/warden/issues/163) |
 | 3/7 | [`W-P3-OFFB-03`](#37--w-p3-offb-03) | Add the console Users tab and manual offboard routes | feature | M | W-P3-OFFB-01, W-P1-SSO-05, W-P2-APIK-02 | [#164](https://github.com/ethosagent/warden/issues/164) |
-| 4/7 | [`W-P3-OFFB-04`](#47--w-p3-offb-04) | Add an E2E test for IdP-driven offboarding and its false-positive guards | test | M | W-P3-OFFB-05, W-P3-OFFB-03, W-P3-OFFB-06, W-P1-VRFY-05, W-P2-SECT-01, W-P1-BLOCK-02 | [#165](https://github.com/ethosagent/warden/issues/165) |
+| 4/7 | [`W-P3-OFFB-04`](#47--w-p3-offb-04) | Add an E2E test for IdP-driven offboarding and its false-positive guards | test | M | W-P3-OFFB-05, W-P3-OFFB-03, W-P3-OFFB-06, W-P2-SECT-01, W-P1-BLOCK-02, W-P1-VRFY-11 | [#165](https://github.com/ethosagent/warden/issues/165) |
 | 5/7 | [`W-P3-OFFB-05`](#57--w-p3-offb-05) | Offboard on confirmed upstream refusal with a circuit breaker | feature | S | W-P3-OFFB-01, W-P3-OFFB-02 | [#298](https://github.com/ethosagent/warden/issues/298) |
 | 6/7 | [`W-P3-OFFB-06`](#67--w-p3-offb-06) | Audit and test blocked-user refusals across portal and connect | feature | S | W-P3-CSIG-04, W-P3-BRKR-04, W-P1-BLOCK-07 | [#299](https://github.com/ethosagent/warden/issues/299) |
 | 7/7 | [`W-P3-OFFB-07`](#77--w-p3-offb-07) | Flag agents owned by blocked or offboarded users | feature | S | W-P3-OFFB-03, W-P2-AREG-02 | [#300](https://github.com/ethosagent/warden/issues/300) |
@@ -101,7 +101,7 @@ Add the Offboarder in new package internal/offboard that removes every credentia
 - [ ] Given EraseAfter in 24h and a Cancel before then, then the block is gone only if the admin removed it, the run is cancelled and the fake providers saw no revoke call
 - [ ] Captured logs and Findings from every test contain no token, Reference, email or reason text
 
-**Depends on:** [`W-P3-PORT-02`](consent-portal.md#27--w-p3-port-02) Implement revoke with grant, secret, epoch and provider steps; [`W-P3-PORT-07`](consent-portal.md#77--w-p3-port-07) Add provider revoke retries and the orphan token sweep; [`W-P3-PUS-08`](refresh-model.md#812--w-p3-pus-08) Serve perUserSecrets and userGrantEpochs as signed-bundle sections; [`W-P3-CSIG-03`](consent-auth.md#37--w-p3-csig-03) Store the IdP refresh token in a CP-only secret namespace on login; [`W-P1-BLOCK-03`](user-block-list.md#310--w-p1-block-03) Add the CP block-list store, admin API and policy merge; [`W-P1-BLOCK-07`](user-block-list.md#710--w-p1-block-07) Deny console login and sessions for blocked principals; [`W-P1-AAUD-02`](admin-audit-log.md#26--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware; [`W-P1-OPS1-01`](ops-hardening.md#14--w-p1-ops1-01) Add break-glass local admin with alerting and audit; [`W-P2-APIK-03`](api-keys.md#37--w-p2-apik-03) Add the API key management and self-introspection API; [`W-P2-TOKX-07`](token-exchange.md#77--w-p2-tokx-07) Add admin revocation for token sessions
+**Depends on:** [`W-P3-PORT-02`](consent-portal.md#27--w-p3-port-02) Implement revoke with grant, secret, epoch and provider steps; [`W-P3-PORT-07`](consent-portal.md#77--w-p3-port-07) Add provider revoke retries and the orphan token sweep; [`W-P3-PUS-08`](refresh-model.md#812--w-p3-pus-08) Serve perUserSecrets and userGrantEpochs as signed-bundle sections; [`W-P3-CSIG-03`](consent-auth.md#37--w-p3-csig-03) Store the IdP refresh token in a CP-only secret namespace on login; [`W-P1-BLOCK-03`](user-block-list.md#312--w-p1-block-03) Add the CP block-list store and merge it into the served policy; [`W-P1-BLOCK-07`](user-block-list.md#712--w-p1-block-07) Deny console login and sessions for blocked principals; [`W-P1-AAUD-02`](admin-audit-log.md#28--w-p1-aaud-02) Record CP admin mutations through audit middleware; [`W-P2-APIK-03`](api-keys.md#37--w-p2-apik-03) Add the API key management and self-introspection API; [`W-P2-TOKX-07`](token-exchange.md#77--w-p2-tokx-07) Add admin revocation for token sessions; [`W-P1-OPS1-08`](ops-hardening.md#811--w-p1-ops1-08) Add POST /auth/breakglass with rate limits, a session, a signed audit row and a Finding
 
 **Unblocks:** [`W-P3-OFFB-03`](offboarding.md#37--w-p3-offb-03) Add the console Users tab and manual offboard routes; [`W-P3-OFFB-05`](offboarding.md#57--w-p3-offb-05) Offboard on confirmed upstream refusal with a circuit breaker; [`W-P4-DGR-06`](delegation-grants.md#612--w-p4-dgr-06) Add grant revocation routes, revokedGrants bundle section and offboard step; [`W-P4-NTFY-07`](user-notify.md#710--w-p4-ntfy-07) Add verified user contacts table keyed by user_key
 
@@ -143,7 +143,7 @@ Add the CP job that refreshes each portal user's stored IdP refresh token, verif
 - [ ] Given a link 70h before relink_due_at with reauthWarning 72h, then it moves to expiring and one offboarding_reauth_required Finding is published; given a link past relink_due_at, then no refresh call is made and link_state is reauth_required
 - [ ] Given mode off, then no goroutine starts and /policy is byte-identical; given mode observe, then no Offboard call is possible because the Job has no Offboarder seam: `go test ./internal/controlplane -run TestOffboardingJob_ModeOff`
 
-**Depends on:** [`W-P3-CSIG-03`](consent-auth.md#37--w-p3-csig-03) Store the IdP refresh token in a CP-only secret namespace on login; [`W-P1-OPS1-01`](ops-hardening.md#14--w-p1-ops1-01) Add break-glass local admin with alerting and audit
+**Depends on:** [`W-P3-CSIG-03`](consent-auth.md#37--w-p3-csig-03) Store the IdP refresh token in a CP-only secret namespace on login; [`W-P1-OPS1-08`](ops-hardening.md#811--w-p1-ops1-08) Add POST /auth/breakglass with rate limits, a session, a signed audit row and a Finding
 
 **Unblocks:** [`W-P3-OFFB-05`](offboarding.md#57--w-p3-offb-05) Offboard on confirmed upstream refusal with a circuit breaker
 
@@ -181,7 +181,7 @@ Give admins a Users tab listing portal users with link state and offboarding sta
 - [ ] Given an offboarded user, then GET /dashboard/api/users shows blocked=true and offboardedAt, and the body contains no `sha256:` or token strings
 - [ ] `go test ./internal/controlplane -run TestAuthzRouteCoverage` passes with the new routes classified
 
-**Depends on:** [`W-P3-OFFB-01`](offboarding.md#17--w-p3-offb-01) Implement the resumable two-stage Offboarder; [`W-P1-SSO-05`](console-sso-rbac.md#58--w-p1-sso-05) Enforce role checks on every dashboard route; [`W-P2-APIK-02`](api-keys.md#27--w-p2-apik-02) Authenticate API keys and enforce per-route scopes in the authz table
+**Depends on:** [`W-P3-OFFB-01`](offboarding.md#17--w-p3-offb-01) Implement the resumable two-stage Offboarder; [`W-P1-SSO-05`](console-sso-rbac.md#511--w-p1-sso-05) Enforce role checks on every dashboard route and replace the bearer write guard in oidc mode; [`W-P2-APIK-02`](api-keys.md#27--w-p2-apik-02) Authenticate API keys and enforce per-route scopes in the authz table
 
 **Unblocks:** [`W-P3-OFFB-04`](offboarding.md#47--w-p3-offb-04) Add an E2E test for IdP-driven offboarding and its false-positive guards; [`W-P3-OFFB-07`](offboarding.md#77--w-p3-offb-07) Flag agents owned by blocked or offboarded users
 
@@ -217,7 +217,7 @@ Prove the whole chain under the integration tag: a user disabled upstream is blo
 - [ ] One user.offboarded audit row with actor system:offboarding and one user_offboarded Finding exist
 - [ ] `go test -tags=integration ./test/integration -run TestOffboarding_Guards` shows no offboard for Expire, Forget and re-login, and the breaker open with an unchanged BlockStore for the fleet-wide 500 case
 
-**Depends on:** [`W-P3-OFFB-05`](offboarding.md#57--w-p3-offb-05) Offboard on confirmed upstream refusal with a circuit breaker; [`W-P3-OFFB-03`](offboarding.md#37--w-p3-offb-03) Add the console Users tab and manual offboard routes; [`W-P3-OFFB-06`](offboarding.md#67--w-p3-offb-06) Audit and test blocked-user refusals across portal and connect; [`W-P1-VRFY-05`](identity-verification.md#59--w-p1-vrfy-05) Add identity attribution scenarios on test/harness and a CI integration job; [`W-P2-SECT-01`](security-tests.md#17--w-p2-sect-01) Add security test harness with in-process CP, workers and shared fakes; [`W-P1-BLOCK-02`](user-block-list.md#210--w-p1-block-02) Enforce the block list in the worker at CONNECT, per request and per h2 stream
+**Depends on:** [`W-P3-OFFB-05`](offboarding.md#57--w-p3-offb-05) Offboard on confirmed upstream refusal with a circuit breaker; [`W-P3-OFFB-03`](offboarding.md#37--w-p3-offb-03) Add the console Users tab and manual offboard routes; [`W-P3-OFFB-06`](offboarding.md#67--w-p3-offb-06) Audit and test blocked-user refusals across portal and connect; [`W-P2-SECT-01`](security-tests.md#17--w-p2-sect-01) Add security test harness with in-process CP, workers and shared fakes; [`W-P1-BLOCK-02`](user-block-list.md#212--w-p1-block-02) Enforce the block list in the worker at CONNECT and per request; [`W-P1-VRFY-11`](identity-verification.md#1111--w-p1-vrfy-11) Add the in-process OIDC issuer fake and agent token options to the test harness
 
 ### 5/7 · W-P3-OFFB-05
 
@@ -288,7 +288,7 @@ An offboarded user whose IdP account still works must not sign in to the consent
 - [ ] Given a blocked sub at /connect/callback with a valid state, then 403, consent.store saw no Put and oauth_grants has no new row: `go test ./internal/oauthbroker -run TestConnect_BlockedUser`
 - [ ] `go test ./internal/controlplane -run TestBlockedUserRefusals` passes, and an empty block list leaves the existing portal and connect tests green
 
-**Depends on:** [`W-P3-CSIG-04`](consent-auth.md#47--w-p3-csig-04) Add the portal session middleware, CSRF, logout and console isolation; [`W-P3-BRKR-04`](oauth-broker.md#49--w-p3-brkr-04) Implement /connect/callback and write tokens to the secret backend; [`W-P1-BLOCK-07`](user-block-list.md#710--w-p1-block-07) Deny console login and sessions for blocked principals
+**Depends on:** [`W-P3-CSIG-04`](consent-auth.md#47--w-p3-csig-04) Add the portal session middleware, CSRF, logout and console isolation; [`W-P3-BRKR-04`](oauth-broker.md#49--w-p3-brkr-04) Implement /connect/callback and write tokens to the secret backend; [`W-P1-BLOCK-07`](user-block-list.md#712--w-p1-block-07) Deny console login and sessions for blocked principals
 
 **Unblocks:** [`W-P3-OFFB-04`](offboarding.md#47--w-p3-offb-04) Add an E2E test for IdP-driven offboarding and its false-positive guards
 

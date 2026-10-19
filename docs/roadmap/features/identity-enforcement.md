@@ -60,12 +60,12 @@ On a compose deployment with a CP (token service, signed bundles, worker CA, age
 | # | Key | Ticket | Type | Size | Depends on | Issue |
 |---|---|---|---|---|---|---|
 | 1/10 | [`W-P2-WBND-01`](#110--w-p2-wbnd-01) | Verify CP-issued Warden tokens against verified bundle keys | feature | M | W-P1-VRFY-07, W-P2-SBND-04, W-P2-KEYS-01, W-P2-WBND-04, W-P2-WBND-06 | [#111](https://github.com/ethosagent/warden/issues/111) |
-| 2/10 | [`W-P2-WBND-02`](#210--w-p2-wbnd-02) | Bind Warden tokens to the worker's registered agent and key | feature | M | W-P2-WBND-01, W-P2-AREG-04, W-P1-VRFY-03, W-P2-AREG-05 | [#112](https://github.com/ethosagent/warden/issues/112) |
+| 2/10 | [`W-P2-WBND-02`](#210--w-p2-wbnd-02) | Bind Warden tokens to the worker's registered agent and key | feature | M | W-P2-WBND-01, W-P2-AREG-04, W-P1-VRFY-03, W-P2-AREG-05, W-P1-VRFY-09 | [#112](https://github.com/ethosagent/warden/issues/112) |
 | 3/10 | [`W-P2-WBND-03`](#310--w-p2-wbnd-03) | Enforce identity require mode on CONNECT and terminated traffic | feature | M | W-P2-WBND-02, W-P1-BLOCK-02, W-P1-IDC-01, W-P2-AREG-05 | [#113](https://github.com/ethosagent/warden/issues/113) |
 | 4/10 | [`W-P2-WBND-04`](#410--w-p2-wbnd-04) | Extend identity metrics with token type and binding reasons | feature | S | W-P1-VRFY-02 | [#114](https://github.com/ethosagent/warden/issues/114) |
 | 5/10 | [`W-P2-WBND-05`](#510--w-p2-wbnd-05) | Use the worker mTLS client cert for all CP calls | feature | S | W-P2-WCA-03 | [#115](https://github.com/ethosagent/warden/issues/115) |
 | 6/10 | [`W-P2-WBND-06`](#610--w-p2-wbnd-06) | Add token issuer, agent key thumbprints and email claims to CP outputs | feature | S | W-P2-SBND-02, W-P2-AREG-04, W-P2-TOKX-02, W-P2-TOKX-03 | [#267](https://github.com/ethosagent/warden/issues/267) |
-| 7/10 | [`W-P2-WBND-07`](#710--w-p2-wbnd-07) | Refuse require mode for agents served by workers without the capability | feature | S | W-P1-BLOCK-04, W-P2-AREG-02, W-P2-AREG-03, W-P1-SSO-05 | [#268](https://github.com/ethosagent/warden/issues/268) |
+| 7/10 | [`W-P2-WBND-07`](#710--w-p2-wbnd-07) | Refuse require mode for agents served by workers without the capability | feature | S | W-P2-AREG-02, W-P2-AREG-03, W-P1-SSO-10, W-P1-BLOCK-10 | [#268](https://github.com/ethosagent/warden/issues/268) |
 | 8/10 | [`W-P2-WBND-08`](#810--w-p2-wbnd-08) | Store agent and token type fields in the CP fleet store | feature | S | W-P1-VRFY-06, W-P2-WBND-02 | [#269](https://github.com/ethosagent/warden/issues/269) |
 | 9/10 | [`W-P2-WBND-09`](#910--w-p2-wbnd-09) | Close require-mode sessions at token expiry and document require mode | feature | M | W-P2-WBND-03, W-P1-BLOCK-05 | [#270](https://github.com/ethosagent/warden/issues/270) |
 | 10/10 | [`W-P2-WBND-10`](#1010--w-p2-wbnd-10) | Test require mode and worker mTLS end to end | test | M | W-P2-WBND-03, W-P2-WBND-05, W-P2-WBND-06, W-P2-WBND-07, W-P2-WBND-08, W-P2-WBND-09 | [#271](https://github.com/ethosagent/warden/issues/271) |
@@ -106,7 +106,7 @@ Add a Warden token verifier to the P1 internal/identity package that takes its k
 - [ ] A fake CP serving bundle v1 and then v2 with a rotated key causes a keyset swap with zero requests to any JWKS endpoint, and a worker with no pins (legacy wire) leaves Warden tokens at unverified/jwks_unavailable: `go test ./internal/worker -run TestBundleAppliesTokenKeys`.
 - [ ] `go test ./internal/identity -run '^$' -bench BenchmarkWardenVerify -benchmem` shows the cached path under 100µs/op, and a captured slog buffer from the tests above contains no substring of any test token.
 
-**Depends on:** [`W-P1-VRFY-07`](identity-verification.md#79--w-p1-vrfy-07) Wire the identity verifier into worker assembly, hot reload and deployment; [`W-P2-SBND-04`](signed-bundles.md#47--w-p2-sbnd-04) Verify signed bundles in RemoteProvider and keep last-known-good in memory; [`W-P2-KEYS-01`](key-management.md#17--w-p2-keys-01) Add internal/keys Signer, JWK and RFC 7638 kid helpers; [`W-P2-WBND-04`](identity-enforcement.md#410--w-p2-wbnd-04) Extend identity metrics with token type and binding reasons; [`W-P2-WBND-06`](identity-enforcement.md#610--w-p2-wbnd-06) Add token issuer, agent key thumbprints and email claims to CP outputs
+**Depends on:** [`W-P1-VRFY-07`](identity-verification.md#711--w-p1-vrfy-07) Wire the identity verifier into worker assembly, hot reload and deployment; [`W-P2-SBND-04`](signed-bundles.md#47--w-p2-sbnd-04) Verify signed bundles in RemoteProvider and keep last-known-good in memory; [`W-P2-KEYS-01`](key-management.md#17--w-p2-keys-01) Add internal/keys Signer, JWK and RFC 7638 kid helpers; [`W-P2-WBND-04`](identity-enforcement.md#410--w-p2-wbnd-04) Extend identity metrics with token type and binding reasons; [`W-P2-WBND-06`](identity-enforcement.md#610--w-p2-wbnd-06) Add token issuer, agent key thumbprints and email claims to CP outputs
 
 **Unblocks:** [`W-P2-WBND-02`](identity-enforcement.md#210--w-p2-wbnd-02) Bind Warden tokens to the worker's registered agent and key; [`W-P3-PUS-07`](refresh-model.md#712--w-p3-pus-07) Add the worker-mTLS mint endpoint POST /control/user-token
 
@@ -146,7 +146,7 @@ Using the worker agent id from W-P2-AREG-05, check that every Warden token was m
 - [ ] An old warden.db opens with the new columns added and an identity-free Event marshals to the same bytes as before: `go test ./internal/analytics -run TestMigrateUserActColumn`.
 - [ ] `go test ./internal/proxy -run '^$' -bench BenchmarkBindingCheck -benchmem` reports 0 allocs/op.
 
-**Depends on:** [`W-P2-WBND-01`](identity-enforcement.md#110--w-p2-wbnd-01) Verify CP-issued Warden tokens against verified bundle keys; [`W-P2-AREG-04`](agent-registry.md#47--w-p2-areg-04) Serve registered agents in the policy wire; [`W-P1-VRFY-03`](identity-verification.md#39--w-p1-vrfy-03) Record user fields on worker events, receipts, decision logs and sync; [`W-P2-AREG-05`](agent-registry.md#57--w-p2-areg-05) Bind workers to an agent id and enforce agent_disabled
+**Depends on:** [`W-P2-WBND-01`](identity-enforcement.md#110--w-p2-wbnd-01) Verify CP-issued Warden tokens against verified bundle keys; [`W-P2-AREG-04`](agent-registry.md#47--w-p2-areg-04) Serve registered agents in the policy wire; [`W-P1-VRFY-03`](identity-verification.md#311--w-p1-vrfy-03) Add identity fields to analytics.Event and the local SQLite store; [`W-P2-AREG-05`](agent-registry.md#57--w-p2-areg-05) Bind workers to an agent id and enforce agent_disabled; [`W-P1-VRFY-09`](identity-verification.md#911--w-p1-vrfy-09) Stamp identity on every proxy event and decision log
 
 **Unblocks:** [`W-P2-WBND-03`](identity-enforcement.md#310--w-p2-wbnd-03) Enforce identity require mode on CONNECT and terminated traffic; [`W-P2-WBND-08`](identity-enforcement.md#810--w-p2-wbnd-08) Store agent and token type fields in the CP fleet store; [`W-P3-PUS-04`](refresh-model.md#412--w-p3-pus-04) Swap per-user placeholders only for bound identities on mapped domains; [`W-P4-MGW-11`](mcp-gateway.md#1117--w-p4-mgw-11) Add Proxy.ServeInternal for in-process hub egress
 
@@ -186,7 +186,7 @@ Add the `require` mode for an agent whose served settings entry (agents[].identi
 - [ ] A served SettingsWire with agents[].identity=require applies require to the bound agent, a standalone worker's local YAML with require is rejected, and the heartbeat body contains identity/require-v1: `go test ./internal/config -run 'TestEffectiveIdentityMode|TestRequireRejectedInStandaloneYAML|TestHeartbeatCaps'`.
 - [ ] `go test ./internal/identity -run TestContractDocMatchesConstants` passes with the new mode and reasons documented.
 
-**Depends on:** [`W-P2-WBND-02`](identity-enforcement.md#210--w-p2-wbnd-02) Bind Warden tokens to the worker's registered agent and key; [`W-P1-BLOCK-02`](user-block-list.md#210--w-p1-block-02) Enforce the block list in the worker at CONNECT, per request and per h2 stream; [`W-P1-IDC-01`](identity-contract.md#14--w-p1-idc-01) Write the agent identity contract for harness builders; [`W-P2-AREG-05`](agent-registry.md#57--w-p2-areg-05) Bind workers to an agent id and enforce agent_disabled
+**Depends on:** [`W-P2-WBND-02`](identity-enforcement.md#210--w-p2-wbnd-02) Bind Warden tokens to the worker's registered agent and key; [`W-P1-BLOCK-02`](user-block-list.md#212--w-p1-block-02) Enforce the block list in the worker at CONNECT and per request; [`W-P1-IDC-01`](identity-contract.md#17--w-p1-idc-01) Write the agent identity contract for harness builders; [`W-P2-AREG-05`](agent-registry.md#57--w-p2-areg-05) Bind workers to an agent id and enforce agent_disabled
 
 **Unblocks:** [`W-P2-RCP-03`](identity-client.md#36--w-p2-rcp-03) Add the Claude Code compose recipe and docs; [`W-P4-DGR-05`](delegation-grants.md#512--w-p4-dgr-05) Enforce grant tools in worker MCP verdicts; [`W-P2-WBND-09`](identity-enforcement.md#910--w-p2-wbnd-09) Close require-mode sessions at token expiry and document require mode; [`W-P2-WBND-10`](identity-enforcement.md#1010--w-p2-wbnd-10) Test require mode and worker mTLS end to end; [`W-P4-MGW-03`](mcp-gateway.md#317--w-p4-mgw-03) Serve /mcp/{gateway} on the reserved proxy host with sessions
 
@@ -222,7 +222,7 @@ Extend the P1 instrument warden.identity.verify.total instead of adding new fail
 - [ ] Given stored events with statuses valid, invalid/cnf_mismatch and none, GET /dashboard/api/analytics returns an identity block with those counts, and with no identity events the block is absent: `go test ./internal/dashboard -run TestIdentitySummary`.
 - [ ] A fake CP whose Date header is 120s ahead sets warden.controlplane.clock_skew_seconds to about 120: `go test ./internal/config -run TestPollLongClockSkew`.
 
-**Depends on:** [`W-P1-VRFY-02`](identity-verification.md#29--w-p1-vrfy-02) Extract, verify and strip identity on CONNECT, HTTP/1.1 and HTTP/2
+**Depends on:** [`W-P1-VRFY-02`](identity-verification.md#211--w-p1-vrfy-02) Extract and verify identity on CONNECT, HTTP/1.1 and HTTP/2 before the proxy-only strip
 
 **Unblocks:** [`W-P2-SECT-01`](security-tests.md#17--w-p2-sect-01) Add security test harness with in-process CP, workers and shared fakes; [`W-P2-SECT-02`](security-tests.md#27--w-p2-sect-02) Add token forgery, confusion and replay cases; [`W-P2-WBND-01`](identity-enforcement.md#110--w-p2-wbnd-01) Verify CP-issued Warden tokens against verified bundle keys
 
@@ -322,7 +322,7 @@ CP rollout guard for require mode. An old worker keeps attribute mode when it re
 - [ ] The same save with force=true by an admin succeeds and writes an audit entry with force and the worker ids: `go test ./internal/controlplane -run TestRequireForceAudited`.
 - [ ] An editor changing agents[].identity or identity.defaultMode gets 403 role_required, and after the worker heartbeats with identity/require-v1 an admin save succeeds without force: `go test ./internal/controlplane -run TestIdentityModeAdminOnly`.
 
-**Depends on:** [`W-P1-BLOCK-04`](user-block-list.md#410--w-p1-block-04) Add the Blocked users console panel and worker enforcement indicator; [`W-P2-AREG-02`](agent-registry.md#27--w-p2-areg-02) Expose the agent registry admin API with admin-only writes and audit; [`W-P2-AREG-03`](agent-registry.md#37--w-p2-areg-03) Add the Agents tab to the CP console; [`W-P1-SSO-05`](console-sso-rbac.md#58--w-p1-sso-05) Enforce role checks on every dashboard route
+**Depends on:** [`W-P2-AREG-02`](agent-registry.md#27--w-p2-areg-02) Expose the agent registry admin API with admin-only writes and audit; [`W-P2-AREG-03`](agent-registry.md#37--w-p2-areg-03) Add the Agents tab to the CP console; [`W-P1-SSO-10`](console-sso-rbac.md#1011--w-p1-sso-10) Authorize settings writes per field and rate-limit query/generate; [`W-P1-BLOCK-10`](user-block-list.md#1012--w-p1-block-10) Advertise and record worker caps (blocklist/v1) in the heartbeat
 
 **Unblocks:** [`W-P4-DGR-04`](delegation-grants.md#412--w-p4-dgr-04) Add the grant subject resolver, delegation mode and rollout guard to the token service; [`W-P2-WBND-10`](identity-enforcement.md#1010--w-p2-wbnd-10) Test require mode and worker mTLS end to end; [`W-P3-PUS-08`](refresh-model.md#812--w-p3-pus-08) Serve perUserSecrets and userGrantEpochs as signed-bundle sections; [`W-P4-HOOK-10`](policy-hooks.md#1011--w-p4-hook-10) Guard hook settings on the CP with validation, roles, audit and capability checks
 
@@ -354,7 +354,7 @@ CP half of recording the agent, split from W-P2-WBND-02 because the conventions 
 - [ ] An ingested event with user_act=a1 and identity_token_type=warden is returned with both fields by GetEvents: `go test ./internal/controlplane -run TestIngestCarriesUserAct`.
 - [ ] An event without the fields stores empty defaults without error.
 
-**Depends on:** [`W-P1-VRFY-06`](identity-verification.md#69--w-p1-vrfy-06) Store user fields in the control-plane fleet store; [`W-P2-WBND-02`](identity-enforcement.md#210--w-p2-wbnd-02) Bind Warden tokens to the worker's registered agent and key
+**Depends on:** [`W-P1-VRFY-06`](identity-verification.md#611--w-p1-vrfy-06) Store user fields in the control-plane fleet store; [`W-P2-WBND-02`](identity-enforcement.md#210--w-p2-wbnd-02) Bind Warden tokens to the worker's registered agent and key
 
 **Unblocks:** [`W-P2-WBND-10`](identity-enforcement.md#1010--w-p2-wbnd-10) Test require mode and worker mTLS end to end
 
@@ -391,7 +391,7 @@ A CONNECT-bound Warden token lasts 15 minutes, but raw tunnels, keep-alives, h2 
 - [ ] Attribute-mode sessions are not registered and stay open past token exp: `go test ./internal/proxy -run TestAttributeSessionsNotRegistered`.
 - [ ] `go test ./internal/identity -run TestContractDocMatchesConstants` passes with the require-mode section.
 
-**Depends on:** [`W-P2-WBND-03`](identity-enforcement.md#310--w-p2-wbnd-03) Enforce identity require mode on CONNECT and terminated traffic; [`W-P1-BLOCK-05`](user-block-list.md#510--w-p1-block-05) Close open sessions of newly blocked users on policy change
+**Depends on:** [`W-P2-WBND-03`](identity-enforcement.md#310--w-p2-wbnd-03) Enforce identity require mode on CONNECT and terminated traffic; [`W-P1-BLOCK-05`](user-block-list.md#512--w-p1-block-05) Close open sessions of newly blocked users on policy change
 
 **Unblocks:** [`W-P4-DGR-10`](delegation-grants.md#1012--w-p4-dgr-10) Apply revokedGrants on workers and close revoked grant sessions; [`W-P2-WBND-10`](identity-enforcement.md#1010--w-p2-wbnd-10) Test require mode and worker mTLS end to end
 

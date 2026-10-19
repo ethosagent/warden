@@ -50,10 +50,10 @@ On a managed deployment where every worker reports `hooks/v1`: a CEL, an embedde
 | 4/11 | [`W-P4-HOOK-04`](#411--w-p4-hook-04) | Add OPA REST hook type | feature | S | W-P4-HOOK-03 | [#211](https://github.com/ethosagent/warden/issues/211) |
 | 5/11 | [`W-P4-HOOK-05`](#511--w-p4-hook-05) | Add post-response hooks | feature | M | W-P4-HOOK-07 | [#212](https://github.com/ethosagent/warden/issues/212) |
 | 6/11 | [`W-P4-HOOK-06`](#611--w-p4-hook-06) | Write operator docs and the hook input schema | docs | S | W-P4-HOOK-02, W-P4-HOOK-03, W-P4-HOOK-04, W-P4-HOOK-05, W-P4-HOOK-08, W-P4-HOOK-11 | [#213](https://github.com/ethosagent/warden/issues/213) |
-| 7/11 | [`W-P4-HOOK-07`](#711--w-p4-hook-07) | Wire the pre-request hook stage into the HTTP/1.1 proxy path | feature | M | W-P4-HOOK-01, W-P1-JAUD-05, W-P1-JAUD-06, W-P1-GPOL-03, W-P1-BLOCK-02 | [#332](https://github.com/ethosagent/warden/issues/332) |
+| 7/11 | [`W-P4-HOOK-07`](#711--w-p4-hook-07) | Wire the pre-request hook stage into the HTTP/1.1 proxy path | feature | M | W-P4-HOOK-01, W-P1-GPOL-03, W-P1-BLOCK-02, W-P1-BLOCK-10 | [#332](https://github.com/ethosagent/warden/issues/332) |
 | 8/11 | [`W-P4-HOOK-08`](#811--w-p4-hook-08) | Run hooks at CONNECT, per h2 stream and on MCP over WebSocket and stdio | feature | M | W-P4-HOOK-07 | [#333](https://github.com/ethosagent/warden/issues/333) |
 | 9/11 | [`W-P4-HOOK-09`](#911--w-p4-hook-09) | Run pre hooks in the MCP hub before routing tools/call | feature | S | W-P4-HOOK-07, W-P4-MGW-06 | [#334](https://github.com/ethosagent/warden/issues/334) |
-| 10/11 | [`W-P4-HOOK-10`](#1011--w-p4-hook-10) | Guard hook settings on the CP with validation, roles, audit and capability checks | feature | M | W-P4-HOOK-07, W-P1-SSO-05, W-P1-AAUD-02, W-P2-WBND-07 | [#335](https://github.com/ethosagent/warden/issues/335) |
+| 10/11 | [`W-P4-HOOK-10`](#1011--w-p4-hook-10) | Guard hook settings on the CP with validation, roles, audit and capability checks | feature | M | W-P4-HOOK-07, W-P1-AAUD-02, W-P2-WBND-07, W-P1-SSO-10 | [#335](https://github.com/ethosagent/warden/issues/335) |
 | 11/11 | [`W-P4-HOOK-11`](#1111--w-p4-hook-11) | Add embedded OPA hook mode with restricted builtins | feature | M | W-P4-HOOK-04 | [#336](https://github.com/ethosagent/warden/issues/336) |
 
 ### 1/11 · W-P4-HOOK-01
@@ -312,7 +312,7 @@ Add the `hookGate` stage to runRequestStages after dlpScan and before swapSecret
 - [ ] A settings apply with a broken hook keeps the previous hook, and a first apply with a broken failMode-closed hook denies with hook_unavailable: `go test ./internal/worker -run TestApplier_HookBuildFailure`.
 - [ ] With no hooks, `go test ./internal/proxy -run '^$' -bench BenchmarkHandleHTTP -benchmem` shows no extra allocs/op compared with main.
 
-**Depends on:** [`W-P4-HOOK-01`](policy-hooks.md#111--w-p4-hook-01) Add hook framework, config and metrics; [`W-P1-JAUD-05`](audit-log-export.md#16--w-p1-jaud-05) Record the pre-swap URL on events and decision logs; [`W-P1-JAUD-06`](audit-log-export.md#26--w-p1-jaud-06) Set a bounded Reason on every deny event; [`W-P1-GPOL-03`](identity-policy.md#39--w-p1-gpol-03) Apply group-aware allow decisions at CONNECT and request time; [`W-P1-BLOCK-02`](user-block-list.md#210--w-p1-block-02) Enforce the block list in the worker at CONNECT, per request and per h2 stream
+**Depends on:** [`W-P4-HOOK-01`](policy-hooks.md#111--w-p4-hook-01) Add hook framework, config and metrics; [`W-P1-GPOL-03`](identity-policy.md#414--w-p1-gpol-03) Thread a deferred enum through CONNECT, TLS, HTTP, gRPC and the transparent listeners and fail closed on identity-conditional decisions; [`W-P1-BLOCK-02`](user-block-list.md#212--w-p1-block-02) Enforce the block list in the worker at CONNECT and per request; [`W-P1-BLOCK-10`](user-block-list.md#1012--w-p1-block-10) Advertise and record worker caps (blocklist/v1) in the heartbeat
 
 **Unblocks:** [`W-P4-HOOK-02`](policy-hooks.md#211--w-p4-hook-02) Add CEL hook type; [`W-P4-HOOK-03`](policy-hooks.md#311--w-p4-hook-03) Add signed webhook hook type; [`W-P4-HOOK-05`](policy-hooks.md#511--w-p4-hook-05) Add post-response hooks; [`W-P4-HOOK-08`](policy-hooks.md#811--w-p4-hook-08) Run hooks at CONNECT, per h2 stream and on MCP over WebSocket and stdio; [`W-P4-HOOK-09`](policy-hooks.md#911--w-p4-hook-09) Run pre hooks in the MCP hub before routing tools/call; [`W-P4-HOOK-10`](policy-hooks.md#1011--w-p4-hook-10) Guard hook settings on the CP with validation, roles, audit and capability checks
 
@@ -416,7 +416,7 @@ A hook URL receives identity metadata and a failMode-closed hook can deny the wh
 - [ ] A CEL syntax error is rejected at save with 400 naming the hook: `go test ./internal/controlplane -run TestSettingsHooks_Validation`.
 - [ ] The approvals classifier marks a hooks change as widening: `go test ./internal/controlplane/... -run TestClassify_HooksWidening`.
 
-**Depends on:** [`W-P4-HOOK-07`](policy-hooks.md#711--w-p4-hook-07) Wire the pre-request hook stage into the HTTP/1.1 proxy path; [`W-P1-SSO-05`](console-sso-rbac.md#58--w-p1-sso-05) Enforce role checks on every dashboard route; [`W-P1-AAUD-02`](admin-audit-log.md#26--w-p1-aaud-02) Record CP admin mutations and logins through audit middleware; [`W-P2-WBND-07`](identity-enforcement.md#710--w-p2-wbnd-07) Refuse require mode for agents served by workers without the capability
+**Depends on:** [`W-P4-HOOK-07`](policy-hooks.md#711--w-p4-hook-07) Wire the pre-request hook stage into the HTTP/1.1 proxy path; [`W-P1-AAUD-02`](admin-audit-log.md#28--w-p1-aaud-02) Record CP admin mutations through audit middleware; [`W-P2-WBND-07`](identity-enforcement.md#710--w-p2-wbnd-07) Refuse require mode for agents served by workers without the capability; [`W-P1-SSO-10`](console-sso-rbac.md#1011--w-p1-sso-10) Authorize settings writes per field and rate-limit query/generate
 
 ### 11/11 · W-P4-HOOK-11
 
