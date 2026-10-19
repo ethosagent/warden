@@ -248,7 +248,7 @@ Merging needs the human `gates-change-approved` label because this ticket touche
 - [ ] `go test ./tools/riskmap -run TestE2EWorkflowPathsCoverEveryCriticalGlob` passes; the e2e job runs `make e2e-identity`.
 - [ ] `grep -rE 'eyJ[A-Za-z0-9_-]{20,}' test/e2e/identity deploy/compose configs` prints nothing and `scripts/check.sh` passes.
 - [ ] Blocked is not passed, proven without Docker: `go test -tags e2e ./test/e2e/identity -run TestStackGate` passes (CI=true with the stack missing yields fail and a message starting `BLOCKED:`; CI unset yields skip and a message starting `BLOCKED (skipped, not passed):`; the stack present yields neither). On a machine with no docker on PATH, `CI=true go test -tags e2e ./test/e2e/identity -run TestIdentityStackBoots` exits non-zero and prints `BLOCKED:`, and the same command with CI unset exits 0 and prints `BLOCKED (skipped, not passed)`.
-- [ ] `grep -rnE 'dexClient|DialContext|/etc/hosts' test/e2e/identity` prints nothing (no test-only dialer, no hosts entry).
+- [ ] `grep -rnE 'dex[C]lient|Dial[C]ontext|/etc/hosts' test/e2e/identity` prints nothing (no test-only dialer, no hosts entry).
 
 **Depends on:** [`W-P1-DEX-02`](dex-oidc.md#26--w-p1-dex-02) Add identity compose recipe with pinned Dex and seeded LDAP
 
@@ -320,6 +320,6 @@ What to build: tests in test/e2e/identity (build tag e2e) named `TestDex*`, so `
 - [ ] `TestDexTokenClaims` fails (red first) when idTokens is changed from 1h, aud no longer contains `warden`, or alice loses the warden-admins group.
 - [ ] `grep -rE 'eyJ[A-Za-z0-9_-]{20,}' test/e2e/identity` prints nothing, and the `make e2e-identity` output captured to a file contains no JWT-shaped string: `make e2e-identity 2>&1 | grep -cE 'eyJ[A-Za-z0-9_-]{20,}'` prints 0.
 - [ ] `go vet -tags e2e ./test/e2e/identity/` is clean and `scripts/check.sh` passes.
-- [ ] Dex is reached with no test-only dialer: `grep -rnE 'dexClient|DialContext|--resolve|DEX_RESOLVE' test/e2e/identity` prints nothing, and with the stack missing `CI=true go test -tags e2e ./test/e2e/identity -run TestDexIssuerConsistent` fails with `BLOCKED:`.
+- [ ] Dex is reached with no test-only dialer: `grep -rnE 'dex[C]lient|Dial[C]ontext|--resolve|DEX_[R]ESOLVE' test/e2e/identity` prints nothing, and with the stack missing `CI=true go test -tags e2e ./test/e2e/identity -run TestDexIssuerConsistent` fails with `BLOCKED:`.
 
 **Depends on:** [`W-P1-DEX-04`](dex-oidc.md#46--w-p1-dex-04) Add the shared L2 identity e2e stack with Dex, a CP, an attribute-mode worker and a curl agent; [`W-P1-DEX-05`](dex-oidc.md#56--w-p1-dex-05) Add scripts/dex-token.sh to fetch and check a seeded user's ID token
