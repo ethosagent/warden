@@ -139,7 +139,7 @@ Merging needs the human `gates-change-approved` label because this ticket touche
 - [ ] A fully populated Event carrying a fake secret in `SecretRef` and `Evidence` produces a line that contains neither: `go test ./internal/auditlog -run TestFromEvent_NeverMapsSecretRef`.
 - [ ] `go run ./cmd/archgen` leaves no diff and `go test ./internal/archtest` passes with `internal/auditlog` classified; existing worker and analytics tests pass unchanged. `scripts/check.sh` passes.
 
-**Depends on:** [`W-P1-VRFY-03`](identity-verification.md#311--w-p1-vrfy-03) Add identity fields to analytics.Event and the local SQLite store
+**Depends on:** [`W-P1-VRFY-03`](identity-verification.md#312--w-p1-vrfy-03) Add identity fields to analytics.Event and the local SQLite store
 
 **Unblocks:** [`W-P4-AMCP-01`](admin-mcp.md#19--w-p4-amcp-01) Add the CP traffic API with a sanitized record projection; [`W-P1-JAUD-07`](audit-log-export.md#47--w-p1-jaud-07) Add the auditlog sink: bounded queue, rotation, metrics and worker wiring; [`W-P1-JAUD-02`](audit-log-export.md#57--w-p1-jaud-02) Publish the decision v1 JSON Schema with closed-field and leak tests
 

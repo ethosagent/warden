@@ -106,7 +106,7 @@ Add a Warden token verifier to the P1 internal/identity package that takes its k
 - [ ] A fake CP serving bundle v1 and then v2 with a rotated key causes a keyset swap with zero requests to any JWKS endpoint, and a worker with no pins (legacy wire) leaves Warden tokens at unverified/jwks_unavailable: `go test ./internal/worker -run TestBundleAppliesTokenKeys`.
 - [ ] `go test ./internal/identity -run '^$' -bench BenchmarkWardenVerify -benchmem` shows the cached path under 100µs/op, and a captured slog buffer from the tests above contains no substring of any test token.
 
-**Depends on:** [`W-P1-VRFY-07`](identity-verification.md#711--w-p1-vrfy-07) Wire the identity verifier into worker assembly, hot reload and deployment; [`W-P2-SBND-04`](signed-bundles.md#47--w-p2-sbnd-04) Verify signed bundles in RemoteProvider and keep last-known-good in memory; [`W-P2-KEYS-01`](key-management.md#17--w-p2-keys-01) Add internal/keys Signer, JWK and RFC 7638 kid helpers; [`W-P2-WBND-04`](identity-enforcement.md#410--w-p2-wbnd-04) Extend identity metrics with token type and binding reasons; [`W-P2-WBND-06`](identity-enforcement.md#610--w-p2-wbnd-06) Add token issuer, agent key thumbprints and email claims to CP outputs
+**Depends on:** [`W-P1-VRFY-07`](identity-verification.md#712--w-p1-vrfy-07) Wire the identity verifier into worker assembly, hot reload and deployment; [`W-P2-SBND-04`](signed-bundles.md#47--w-p2-sbnd-04) Verify signed bundles in RemoteProvider and keep last-known-good in memory; [`W-P2-KEYS-01`](key-management.md#17--w-p2-keys-01) Add internal/keys Signer, JWK and RFC 7638 kid helpers; [`W-P2-WBND-04`](identity-enforcement.md#410--w-p2-wbnd-04) Extend identity metrics with token type and binding reasons; [`W-P2-WBND-06`](identity-enforcement.md#610--w-p2-wbnd-06) Add token issuer, agent key thumbprints and email claims to CP outputs
 
 **Unblocks:** [`W-P2-WBND-02`](identity-enforcement.md#210--w-p2-wbnd-02) Bind Warden tokens to the worker's registered agent and key; [`W-P3-PUS-07`](refresh-model.md#712--w-p3-pus-07) Add the worker-mTLS mint endpoint POST /control/user-token
 
@@ -146,7 +146,7 @@ Using the worker agent id from W-P2-AREG-05, check that every Warden token was m
 - [ ] An old warden.db opens with the new columns added and an identity-free Event marshals to the same bytes as before: `go test ./internal/analytics -run TestMigrateUserActColumn`.
 - [ ] `go test ./internal/proxy -run '^$' -bench BenchmarkBindingCheck -benchmem` reports 0 allocs/op.
 
-**Depends on:** [`W-P2-WBND-01`](identity-enforcement.md#110--w-p2-wbnd-01) Verify CP-issued Warden tokens against verified bundle keys; [`W-P2-AREG-04`](agent-registry.md#47--w-p2-areg-04) Serve registered agents in the policy wire; [`W-P1-VRFY-03`](identity-verification.md#311--w-p1-vrfy-03) Add identity fields to analytics.Event and the local SQLite store; [`W-P2-AREG-05`](agent-registry.md#57--w-p2-areg-05) Bind workers to an agent id and enforce agent_disabled; [`W-P1-VRFY-09`](identity-verification.md#911--w-p1-vrfy-09) Stamp identity on every proxy event and decision log
+**Depends on:** [`W-P2-WBND-01`](identity-enforcement.md#110--w-p2-wbnd-01) Verify CP-issued Warden tokens against verified bundle keys; [`W-P2-AREG-04`](agent-registry.md#47--w-p2-areg-04) Serve registered agents in the policy wire; [`W-P1-VRFY-03`](identity-verification.md#312--w-p1-vrfy-03) Add identity fields to analytics.Event and the local SQLite store; [`W-P2-AREG-05`](agent-registry.md#57--w-p2-areg-05) Bind workers to an agent id and enforce agent_disabled; [`W-P1-VRFY-09`](identity-verification.md#912--w-p1-vrfy-09) Stamp identity on every proxy event and decision log
 
 **Unblocks:** [`W-P2-WBND-03`](identity-enforcement.md#310--w-p2-wbnd-03) Enforce identity require mode on CONNECT and terminated traffic; [`W-P2-WBND-08`](identity-enforcement.md#810--w-p2-wbnd-08) Store agent and token type fields in the CP fleet store; [`W-P3-PUS-04`](refresh-model.md#412--w-p3-pus-04) Swap per-user placeholders only for bound identities on mapped domains; [`W-P4-MGW-11`](mcp-gateway.md#1117--w-p4-mgw-11) Add Proxy.ServeInternal for in-process hub egress
 
@@ -222,7 +222,7 @@ Extend the P1 instrument warden.identity.verify.total instead of adding new fail
 - [ ] Given stored events with statuses valid, invalid/cnf_mismatch and none, GET /dashboard/api/analytics returns an identity block with those counts, and with no identity events the block is absent: `go test ./internal/dashboard -run TestIdentitySummary`.
 - [ ] A fake CP whose Date header is 120s ahead sets warden.controlplane.clock_skew_seconds to about 120: `go test ./internal/config -run TestPollLongClockSkew`.
 
-**Depends on:** [`W-P1-VRFY-02`](identity-verification.md#211--w-p1-vrfy-02) Extract and verify identity on CONNECT, HTTP/1.1 and HTTP/2 before the proxy-only strip
+**Depends on:** [`W-P1-VRFY-02`](identity-verification.md#212--w-p1-vrfy-02) Extract and verify identity on CONNECT, HTTP/1.1 and HTTP/2 before the proxy-only strip
 
 **Unblocks:** [`W-P2-SECT-01`](security-tests.md#17--w-p2-sect-01) Add security test harness with in-process CP, workers and shared fakes; [`W-P2-SECT-02`](security-tests.md#27--w-p2-sect-02) Add token forgery, confusion and replay cases; [`W-P2-WBND-01`](identity-enforcement.md#110--w-p2-wbnd-01) Verify CP-issued Warden tokens against verified bundle keys
 
@@ -354,7 +354,7 @@ CP half of recording the agent, split from W-P2-WBND-02 because the conventions 
 - [ ] An ingested event with user_act=a1 and identity_token_type=warden is returned with both fields by GetEvents: `go test ./internal/controlplane -run TestIngestCarriesUserAct`.
 - [ ] An event without the fields stores empty defaults without error.
 
-**Depends on:** [`W-P1-VRFY-06`](identity-verification.md#611--w-p1-vrfy-06) Store user fields in the control-plane fleet store; [`W-P2-WBND-02`](identity-enforcement.md#210--w-p2-wbnd-02) Bind Warden tokens to the worker's registered agent and key
+**Depends on:** [`W-P1-VRFY-06`](identity-verification.md#612--w-p1-vrfy-06) Store user fields in the control-plane fleet store; [`W-P2-WBND-02`](identity-enforcement.md#210--w-p2-wbnd-02) Bind Warden tokens to the worker's registered agent and key
 
 **Unblocks:** [`W-P2-WBND-10`](identity-enforcement.md#1010--w-p2-wbnd-10) Test require mode and worker mTLS end to end
 

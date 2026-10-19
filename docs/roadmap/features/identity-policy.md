@@ -204,7 +204,7 @@ OUT of scope: any change to `internal/proxy` behaviour (W-P1-GPOL-03/-10), MCP c
 - [ ] `go test -race ./internal/policy -run TestEvaluateFor_ConcurrentReplace` passes with Replace racing EvaluateFor/PeekFor.
 - [ ] `go test ./internal/identity -run 'TestPrincipals|TestSubjectFromCopiesGroupsTruncated'` and `go test ./internal/denyreason` pass; existing `go test ./internal/policy ./internal/proxy` pass unchanged. `scripts/check.sh` passes.
 
-**Depends on:** [`W-P1-GPOL-01`](identity-policy.md#114--w-p1-gpol-01) Add groups/users to allow entries and MCP conditions schema; [`W-P1-VRFY-01`](identity-verification.md#111--w-p1-vrfy-01) Add internal/identity OIDC verifier with lazy JWKS, cache and config
+**Depends on:** [`W-P1-GPOL-01`](identity-policy.md#114--w-p1-gpol-01) Add groups/users to allow entries and MCP conditions schema; [`W-P1-VRFY-01`](identity-verification.md#112--w-p1-vrfy-01) Add internal/identity OIDC verifier with lazy JWKS, cache and config
 
 **Unblocks:** [`W-P4-AMCP-07`](admin-mcp.md#29--w-p4-amcp-07) Add the CP explain API with historical version resolution; [`W-P1-GPOL-03`](identity-policy.md#414--w-p1-gpol-03) Thread a deferred enum through CONNECT, TLS, HTTP, gRPC and the transparent listeners and fail closed on identity-conditional decisions; [`W-P1-GPOL-10`](identity-policy.md#514--w-p1-gpol-10) Decide scoped allow entries on every request with the request subject, add reasons and metrics and lift the allow-entry guard; [`W-P1-GPOL-11`](identity-policy.md#714--w-p1-gpol-11) Support groups/users in MCP tool allowWhen conditions; [`W-P1-GPOL-05`](identity-policy.md#814--w-p1-gpol-05) Show affected users in policy eval replay; [`W-P3-PUL-03`](per-user-limits.md#310--w-p3-pul-03) Add per-user limit matching and counters to the policy evaluator
 
@@ -251,7 +251,7 @@ OUT of scope: the per-request decision with the subject, reasons on request even
 - [ ] An evaluator that returns an unknown Decision value makes the CONNECT gate deny with a declared reason and the ERROR log: `go test ./internal/proxy -run TestConnectGate_UnknownDecisionFailsClosed`.
 - [ ] `grep -rn needsJudge internal/proxy --include=*.go` finds no match outside comments, and existing tests pass: `go test -race ./internal/proxy ./test/scenarios`. `scripts/check.sh` passes.
 
-**Depends on:** [`W-P1-GPOL-02`](identity-policy.md#314--w-p1-gpol-02) Make the policy evaluator subject-aware: EvaluateFor and PeekFor with a request context; [`W-P1-VRFY-02`](identity-verification.md#211--w-p1-vrfy-02) Extract and verify identity on CONNECT, HTTP/1.1 and HTTP/2 before the proxy-only strip
+**Depends on:** [`W-P1-GPOL-02`](identity-policy.md#314--w-p1-gpol-02) Make the policy evaluator subject-aware: EvaluateFor and PeekFor with a request context; [`W-P1-VRFY-02`](identity-verification.md#212--w-p1-vrfy-02) Extract and verify identity on CONNECT, HTTP/1.1 and HTTP/2 before the proxy-only strip
 
 **Unblocks:** [`W-P1-GPOL-10`](identity-policy.md#514--w-p1-gpol-10) Decide scoped allow entries on every request with the request subject, add reasons and metrics and lift the allow-entry guard; [`W-P4-HOOK-07`](policy-hooks.md#711--w-p4-hook-07) Wire the pre-request hook stage into the HTTP/1.1 proxy path
 
@@ -303,7 +303,7 @@ OUT of scope: the enum and CONNECT handling (W-P1-GPOL-03); MCP conditions (W-P1
 - [ ] A config with groups on an allow entry now loads, while groups on an MCP allowWhen, a denylist entry or a task-scope constraint are still rejected: `go test ./internal/config -run 'TestAllowlistGroupsAccepted|TestGuardStillRejectsOtherPaths'`.
 - [ ] With no scoped entries existing proxy and scenario tests pass unchanged: `go test -race ./internal/proxy ./test/scenarios`. `scripts/check.sh` passes.
 
-**Depends on:** [`W-P1-GPOL-03`](identity-policy.md#414--w-p1-gpol-03) Thread a deferred enum through CONNECT, TLS, HTTP, gRPC and the transparent listeners and fail closed on identity-conditional decisions; [`W-P1-GPOL-02`](identity-policy.md#314--w-p1-gpol-02) Make the policy evaluator subject-aware: EvaluateFor and PeekFor with a request context; [`W-P1-GPOL-06`](identity-policy.md#214--w-p1-gpol-06) Project scoped rules into fail-closed policy wire fields; [`W-P1-VRFY-02`](identity-verification.md#211--w-p1-vrfy-02) Extract and verify identity on CONNECT, HTTP/1.1 and HTTP/2 before the proxy-only strip; [`W-P1-VRFY-03`](identity-verification.md#311--w-p1-vrfy-03) Add identity fields to analytics.Event and the local SQLite store
+**Depends on:** [`W-P1-GPOL-03`](identity-policy.md#414--w-p1-gpol-03) Thread a deferred enum through CONNECT, TLS, HTTP, gRPC and the transparent listeners and fail closed on identity-conditional decisions; [`W-P1-GPOL-02`](identity-policy.md#314--w-p1-gpol-02) Make the policy evaluator subject-aware: EvaluateFor and PeekFor with a request context; [`W-P1-GPOL-06`](identity-policy.md#214--w-p1-gpol-06) Project scoped rules into fail-closed policy wire fields; [`W-P1-VRFY-02`](identity-verification.md#212--w-p1-vrfy-02) Extract and verify identity on CONNECT, HTTP/1.1 and HTTP/2 before the proxy-only strip; [`W-P1-VRFY-03`](identity-verification.md#312--w-p1-vrfy-03) Add identity fields to analytics.Event and the local SQLite store
 
 **Unblocks:** [`W-P1-GPOL-08`](identity-policy.md#1114--w-p1-gpol-08) Edit groups/users in the dashboard policy editor; [`W-P1-GPOL-09`](identity-policy.md#1214--w-p1-gpol-09) Add group policy scenarios on the L1 harness; [`W-P1-GPOL-13`](identity-policy.md#1314--w-p1-gpol-13) Document group-scoped rules; [`W-P1-GPOL-14`](identity-policy.md#1414--w-p1-gpol-14) Add the real-Dex group policy check on the L2 identity stack; [`W-P3-PUL-09`](per-user-limits.md#910--w-p3-pul-09) Enforce per-user rate limits per request in the proxy
 
@@ -342,7 +342,7 @@ OUT of scope: evaluating groups/users in `allowWhen` and lifting the config guar
 - [ ] Gateway verdicts are unchanged with and without a subject: `go test ./internal/mcp/gateway`.
 - [ ] Existing suites pass with the new signature: `go test -race ./internal/mcp/... ./internal/proxy ./cmd/proxy`. `scripts/check.sh` passes.
 
-**Depends on:** [`W-P1-VRFY-02`](identity-verification.md#211--w-p1-vrfy-02) Extract and verify identity on CONNECT, HTTP/1.1 and HTTP/2 before the proxy-only strip
+**Depends on:** [`W-P1-VRFY-02`](identity-verification.md#212--w-p1-vrfy-02) Extract and verify identity on CONNECT, HTTP/1.1 and HTTP/2 before the proxy-only strip
 
 **Unblocks:** [`W-P4-DGR-05`](delegation-grants.md#512--w-p4-dgr-05) Enforce grant tools in worker MCP verdicts; [`W-P1-GPOL-11`](identity-policy.md#714--w-p1-gpol-11) Support groups/users in MCP tool allowWhen conditions
 
@@ -426,7 +426,7 @@ OUT of scope: lint (W-P1-GPOL-12); the dashboard (W-P1-GPOL-08).
 - [ ] `go test ./cmd/proxy -run TestEvalCmd_AffectedUsers` shows the affected-users line and the anonymous count; `--user alice@corp.example` filters to alice; the output contains no token.
 - [ ] Existing policyeval tests pass unchanged. `scripts/check.sh` passes.
 
-**Depends on:** [`W-P1-GPOL-02`](identity-policy.md#314--w-p1-gpol-02) Make the policy evaluator subject-aware: EvaluateFor and PeekFor with a request context; [`W-P1-VRFY-03`](identity-verification.md#311--w-p1-vrfy-03) Add identity fields to analytics.Event and the local SQLite store
+**Depends on:** [`W-P1-GPOL-02`](identity-policy.md#314--w-p1-gpol-02) Make the policy evaluator subject-aware: EvaluateFor and PeekFor with a request context; [`W-P1-VRFY-03`](identity-verification.md#312--w-p1-vrfy-03) Add identity fields to analytics.Event and the local SQLite store
 
 **Unblocks:** [`W-P2-APPR-03`](policy-approvals.md#39--w-p2-appr-03) Replay fleet events against base and draft for each revision; [`W-P1-GPOL-09`](identity-policy.md#1214--w-p1-gpol-09) Add group policy scenarios on the L1 harness; [`W-P1-GPOL-13`](identity-policy.md#1314--w-p1-gpol-13) Document group-scoped rules
 
@@ -579,7 +579,7 @@ OUT of scope: documentation (W-P1-GPOL-13); the real Dex run (W-P1-GPOL-14).
 - [ ] `groups_old_worker_denies` fails if the wire projection of W-P1-GPOL-06 is removed (proves the fail-closed wire end to end).
 - [ ] `go test ./test/scenarios` (the full catalog) still passes. `scripts/check.sh` passes.
 
-**Depends on:** [`W-P1-GPOL-10`](identity-policy.md#514--w-p1-gpol-10) Decide scoped allow entries on every request with the request subject, add reasons and metrics and lift the allow-entry guard; [`W-P1-GPOL-11`](identity-policy.md#714--w-p1-gpol-11) Support groups/users in MCP tool allowWhen conditions; [`W-P1-GPOL-05`](identity-policy.md#814--w-p1-gpol-05) Show affected users in policy eval replay; [`W-P1-VRFY-11`](identity-verification.md#1111--w-p1-vrfy-11) Add the in-process OIDC issuer fake and agent token options to the test harness
+**Depends on:** [`W-P1-GPOL-10`](identity-policy.md#514--w-p1-gpol-10) Decide scoped allow entries on every request with the request subject, add reasons and metrics and lift the allow-entry guard; [`W-P1-GPOL-11`](identity-policy.md#714--w-p1-gpol-11) Support groups/users in MCP tool allowWhen conditions; [`W-P1-GPOL-05`](identity-policy.md#814--w-p1-gpol-05) Show affected users in policy eval replay; [`W-P1-VRFY-11`](identity-verification.md#1112--w-p1-vrfy-11) Add the in-process OIDC issuer fake and agent token options to the test harness
 
 ### 13/14 · W-P1-GPOL-13
 
@@ -625,22 +625,22 @@ Type **test** · Size **S** · Issue —
 
 OUT of scope: everything covered by W-P1-GPOL-09.
 
-**What to build.** One L2 test in `test/e2e`.
+**What to build.** One L2 test in `test/e2e/identity`, because it needs the identity stack (the base `make e2e` stack has no Dex).
 
 **Requirements**
 
-- New `test/e2e/group_policy_test.go` (`//go:build e2e`) with `TestGroupPolicyDex` using the W-P1-DEX-04 stack: a worker with a CA, identity mode attribute and `{domain: <fake upstream host>, groups: [eng]}`; a Dex token for an eng user (fetched with the DEX-02 token script helper) is allowed over Proxy-Authorization and over X-Warden-Identity; a Dex token for a user without the group is denied with `group_not_allowed`; no token is denied with `identity_required`; an MCP tool gated to a group behaves the same.
+- New `test/e2e/identity/group_policy_test.go` (`//go:build e2e`) with `TestGroupPolicyDex` using the W-P1-DEX-04 stack: a worker with a CA, identity mode attribute, `internalIssuerURL: http://dex:5556` (issuer `http://localhost:5556/dex`) and `{domain: <fake upstream host>, groups: [eng]}`; a Dex token for an eng user (fetched on the host with the `dexToken` helper of W-P1-DEX-04, plain `http://localhost:5556`, no dialer override) is allowed over Proxy-Authorization and over X-Warden-Identity; a Dex token for a user without the group is denied with `group_not_allowed`; no token is denied with `identity_required`; an MCP tool gated to a group behaves the same.
 - Assertions use the event store and the fake upstream; the test never prints tokens; the seeded LDAP users come from the DEX-02 recipe, no external account.
-- The test skips with a clear message unless the L2 environment is available.
+- The test starts with `requireStack(t)` (W-P1-DEX-04): with the stack missing it fails under `CI=true` and skips with a loud `BLOCKED` message only locally.
 
 **Implementation plan**
 
-1. Read test/e2e/shared.go and the W-P1-DEX-04 helpers; write the test.
-2. Run `make e2e-scenario NAME=TestGroupPolicyDex` where Docker is available.
+1. Read test/e2e/identity (stack_test.go, helpers_test.go from W-P1-DEX-04); write the test there.
+2. Run `make e2e-identity-scenario NAME=TestGroupPolicyDex` where Docker is available.
 
 **Acceptance criteria**
 
-- [ ] `make e2e-scenario NAME=TestGroupPolicyDex` passes in the CI `e2e` job; the eng token is allowed, the non-member denied with `group_not_allowed` and the anonymous request denied with `identity_required`.
-- [ ] `go vet -tags e2e ./test/e2e/...` is clean and the file is not compiled without the tag. `scripts/check.sh` passes.
+- [ ] `make e2e-identity-scenario NAME=TestGroupPolicyDex` passes in the CI `e2e` job (a Dex token minted for a host client verifies on the worker, which reaches Dex through its internal issuer URL); the eng token is allowed, the non-member denied with `group_not_allowed` and the anonymous request denied with `identity_required`.
+- [ ] `go vet -tags e2e ./test/e2e/identity/` is clean, the file is not compiled without the tag, and with the stack missing `CI=true go test -tags e2e ./test/e2e/identity -run TestGroupPolicyDex` fails with `BLOCKED:`. `scripts/check.sh` passes.
 
 **Depends on:** [`W-P1-DEX-04`](dex-oidc.md#46--w-p1-dex-04) Add the shared L2 identity e2e stack with Dex, a CP, an attribute-mode worker and a curl agent; [`W-P1-GPOL-10`](identity-policy.md#514--w-p1-gpol-10) Decide scoped allow entries on every request with the request subject, add reasons and metrics and lift the allow-entry guard; [`W-P1-GPOL-11`](identity-policy.md#714--w-p1-gpol-11) Support groups/users in MCP tool allowWhen conditions
