@@ -228,7 +228,7 @@ Revoke reaches workers through the userGrantEpochs signed-bundle section that W-
 
 - internal/controlplane implements oauthbroker.EpochBumper{Bump(ctx, userKey) error} over EpochStore.Bump (W-P3-PUS-08) and passes it to the Broker constructor; oauthbroker never imports controlplane.
 - A failed Bump is returned to RevokeUserGrant, which reports epoch: failed and status partial; the secret is already deleted, so a later mint still finds nothing.
-- New WorkerCapsReader{WorkersWithoutCap(cap string) []string} over the heartbeat caps the worker registry already stores (W-P1-BLOCK-04); RevokeUserGrant returns workers_without_cap for usersecrets/v1.
+- New WorkerCapsReader{WorkersWithoutCap(cap string) []string} over the heartbeat caps the worker registry already stores (W-P1-BLOCK-10); RevokeUserGrant returns workers_without_cap for usersecrets/v1.
 - No second epoch table, wire field, retention key or heartbeat cap is added; keys are secrets.UserKey values from W-P3-CSIG-06.
 - Logs `msg=grant_epoch_bumped key_prefix` with the first 8 characters of the user key, never the sub.
 

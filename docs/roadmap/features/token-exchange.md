@@ -63,7 +63,7 @@ On a CP with --state-dir, `tokenService.enabled: true` and an https issuer, a to
 | 2/7 | [`W-P2-TOKX-02`](#27--w-p2-tokx-02) | Implement token exchange policy checks and JWT minting | feature | M | W-P2-TOKX-01, W-P2-KEYS-02, W-P1-VRFY-01, W-P1-BLOCK-03, W-P1-BLOCK-07 | [#83](https://github.com/ethosagent/warden/issues/83) |
 | 3/7 | [`W-P2-TOKX-03`](#37--w-p2-tokx-03) | Mount POST /oauth2/token with RFC 8693 request parsing and config | feature | M | W-P2-TOKX-02, W-P1-SSO-02, W-P1-SSO-05, W-P2-KEYS-04 | [#84](https://github.com/ethosagent/warden/issues/84) |
 | 4/7 | [`W-P2-TOKX-04`](#47--w-p2-tokx-04) | Add rate limits, issuance records and metrics for token exchange | feature | M | W-P2-TOKX-03, W-P1-AAUD-02 | [#85](https://github.com/ethosagent/warden/issues/85) |
-| 5/7 | [`W-P2-TOKX-05`](#57--w-p2-tokx-05) | Add token service end-to-end integration test | test | M | W-P2-TOKX-04, W-P2-TOKX-07, W-P2-KEYS-04, W-P1-DEX-02, W-P1-VRFY-11 | [#86](https://github.com/ethosagent/warden/issues/86) |
+| 5/7 | [`W-P2-TOKX-05`](#57--w-p2-tokx-05) | Add token service end-to-end integration test | test | M | W-P2-TOKX-04, W-P2-TOKX-07, W-P2-KEYS-04, W-P1-DEX-04, W-P1-VRFY-11 | [#86](https://github.com/ethosagent/warden/issues/86) |
 | 6/7 | [`W-P2-TOKX-06`](#67--w-p2-tokx-06) | Document the token service for operators and harness authors | docs | S | W-P2-TOKX-04, W-P2-TOKX-07 | [#253](https://github.com/ethosagent/warden/issues/253) |
 | 7/7 | [`W-P2-TOKX-07`](#77--w-p2-tokx-07) | Add admin revocation for token sessions | feature | S | W-P2-TOKX-03, W-P1-AAUD-02 | [#254](https://github.com/ethosagent/warden/issues/254) |
 
@@ -229,34 +229,34 @@ Add the three-stage rate limits, so an unauthenticated caller cannot drain a rea
 
 Type **test** · Size **M** · Issue [#86](https://github.com/ethosagent/warden/issues/86)
 
-Prove the exchange end to end under the integration build tag. By default it uses the in-process OIDC issuer from W-P1-VRFY-05, so CI needs no Docker; with WARDEN_IT_DEX=1 it uses the W-P1-DEX-02 recipe and its seeded LDAP users. The test reuses the existing Dex clients and does not change Dex config. It covers the happy path, the main denials, replay after a CP restart, revocation and the IdP-down 503.
+Prove the exchange end to end in Go tests. The main test uses the in-process `fakes.OIDCIssuer` from W-P1-VRFY-11, so it runs in the default gate with no Docker; an L2 subtest on the shared identity stack of W-P1-DEX-04 uses a real Dex token of the seeded LDAP user alice. The test reuses the existing Dex clients and does not change Dex config. It covers the happy path, the main denials, replay after a CP restart, revocation and the IdP-down 503.
 
 **Requirements**
 
-- New //go:build integration test test/integration/token_exchange_test.go, run by `scripts/check.sh --integration` and the CI integration job from W-P1-VRFY-05.
+- New test `TestTokenExchangeE2E` in internal/controlplane/tokenexchange_e2e_test.go (no build tag, no Docker), run by the default `go test -race ./...` stage of scripts/check.sh.
 - Start the CP in process with a temp --state-dir, tokenService enabled, and the identity issuer pointed at the in-process issuer (azp agent-harness, groups eng). Seed an agent with an Ed25519 public JWK through agentreg.Store.Create.
 - Happy path: build an assertion with keys.SignCompact, exchange it, fetch /.well-known/jwks.json (W-P2-KEYS-04), and verify the token with keys.ParseCompact and keys.Verify. Check typ, iss, aud, sub, idp_iss, email, act.sub, cnf.jkt, sid, and exp <= subject exp.
 - Negative subtests check the OAuth error, HTTP status and token_events row count for each case: replayed assertion (also after restarting the CP on the same state dir), blocked user (BlockStore.Add), disabled agent (SetStatus), user outside allowed_groups, expired subject, wrong assertion aud, and a revoked session (W-P2-TOKX-07).
 - Degraded subtest: with the issuer stopped and a cold JWKS cache, the exchange returns 503 temporarily_unavailable.
-- WARDEN_IT_DEX=1 subtest: `scripts/dex-token.sh --raw alice` produces a real Dex token that exchanges successfully, and the resulting groups include warden-admins. No new Dex users, clients or trustedPeers are added.
+- L2 subtest `TestTokenExchangeDex` in test/e2e/identity/token_exchange_test.go (`//go:build e2e`, shared stack from W-P1-DEX-04, run by `make e2e-identity-scenario NAME=TestTokenExchangeDex`): the `dexToken(t, "alice")` helper produces a real Dex token that exchanges successfully against the stack's CP (tokenService enabled in configs/config.e2e-identity-cp.yaml), and the resulting groups include warden-admins. No new Dex users, clients or trustedPeers are added.
 - Test output never prints tokens. Captured CP logs are scanned for JWT-shaped strings.
 
 **Implementation plan**
 
-1. New test/integration/token_exchange_test.go using the issuer helper from W-P1-VRFY-05 (test/integration/oidc_issuer_test.go).
+1. New internal/controlplane/tokenexchange_e2e_test.go using fakes.OIDCIssuer from W-P1-VRFY-11 (test/fakes/oidcissuer.go).
 2. Helper to build controlplane.Server with tokenService, agentreg and BlockStore on a temp state dir, and to restart it on the same dir.
 3. Happy-path, negative, restart, revoke and degraded subtests.
-4. Dex subtest gated on WARDEN_IT_DEX=1 using deploy/compose/docker-compose.identity.yml and scripts/dex-token.sh.
+4. L2 Dex subtest in test/e2e/identity/token_exchange_test.go using the dexToken helper and the stack from W-P1-DEX-04.
 
 **Acceptance criteria**
 
-- [ ] `go test -tags=integration ./test/integration -run TestTokenExchangeE2E` passes on a machine without Docker, and `scripts/check.sh --integration` is green.
+- [ ] `go test -race ./internal/controlplane -run TestTokenExchangeE2E` passes on a machine without Docker, and `scripts/check.sh` is green.
 - [ ] The verified token has typ wt+jwt, aud=warden-worker, act.sub equal to the agent id, cnf.jkt equal to the test key's RFC 7638 thumbprint, and exp-iat <= 900.
 - [ ] Replay (before and after restart) gives 401 invalid_client, a blocked user 400 invalid_grant, a disabled agent 401 invalid_client, a user outside groups 400 unauthorized_client, an expired subject 400 invalid_grant, and a revoked session 400 invalid_grant.
 - [ ] With the issuer stopped and a cold cache the response is 503, never 200.
-- [ ] With WARDEN_IT_DEX=1, alice's real Dex token exchanges successfully. Captured test and CP logs contain no substring starting with `eyJ`.
+- [ ] `make e2e-identity-scenario NAME=TestTokenExchangeDex` passes: alice's real Dex token exchanges successfully. Captured test and CP logs contain no substring starting with `eyJ`.
 
-**Depends on:** [`W-P2-TOKX-04`](token-exchange.md#47--w-p2-tokx-04) Add rate limits, issuance records and metrics for token exchange; [`W-P2-TOKX-07`](token-exchange.md#77--w-p2-tokx-07) Add admin revocation for token sessions; [`W-P2-KEYS-04`](key-management.md#47--w-p2-keys-04) Serve the token JWKS, readiness and admin key API from the control plane; [`W-P1-DEX-02`](dex-oidc.md#26--w-p1-dex-02) Add identity compose recipe with pinned Dex and seeded LDAP; [`W-P1-VRFY-11`](identity-verification.md#1111--w-p1-vrfy-11) Add the in-process OIDC issuer fake and agent token options to the test harness
+**Depends on:** [`W-P2-TOKX-04`](token-exchange.md#47--w-p2-tokx-04) Add rate limits, issuance records and metrics for token exchange; [`W-P2-TOKX-07`](token-exchange.md#77--w-p2-tokx-07) Add admin revocation for token sessions; [`W-P2-KEYS-04`](key-management.md#47--w-p2-keys-04) Serve the token JWKS, readiness and admin key API from the control plane; [`W-P1-DEX-04`](dex-oidc.md#46--w-p1-dex-04) Add the shared L2 identity e2e stack with Dex, a CP, an attribute-mode worker and a curl agent; [`W-P1-VRFY-11`](identity-verification.md#1111--w-p1-vrfy-11) Add the in-process OIDC issuer fake and agent token options to the test harness
 
 ### 6/7 · W-P2-TOKX-06
 

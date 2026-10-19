@@ -121,7 +121,7 @@ Add `GET /dashboard/api/explain`, which loads one fleet event and shows both wha
 1. New internal/policy/explain.go: Explanation and `(*Evaluator).Explain`, reusing the W-P1-GPOL-02 `evaluate` walk with charge=false; TestExplainMatchesPeekFor runs a differential check over the fixture corpus and BenchmarkEvaluate stays unchanged.
 2. internal/analytics/analytics.go: new EventLookup interface; internal/analytics/fleet_sqlite.go and central.go: GetEventByUID with TestGetEventByUID for both stores.
 3. internal/controlplane/policystore.go: add VersionAt to PolicyVersionStore and the SQLite implementation; TestVersionAtNearby.
-4. New internal/controlplane/adminapi_explain.go: `handleAdminExplain`, the cause mapping from the bounded Reason enum (W-P1-JAUD-06), the policy:read gate for `static.entry`, and the authz row and mount in controlplane.go Handler.
+4. New internal/controlplane/adminapi_explain.go: `handleAdminExplain`, the cause mapping from the bounded Reason enum (internal/denyreason, on main since W-P1-JAUD-06), the policy:read gate for `static.entry`, and the authz row and mount in controlplane.go Handler.
 5. Tests in internal/controlplane/adminapi_explain_test.go: TestAdminExplainHistorical, TestAdminExplainRecordedDLP, TestAdminExplainAmbiguous, TestAdminExplainFileMode, TestAdminExplainCandidates, TestAdminExplainNoPolicyRead.
 
 **Acceptance criteria**

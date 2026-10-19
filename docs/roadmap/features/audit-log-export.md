@@ -105,6 +105,8 @@ OUT of scope: the queue, writer, rotation, metrics and worker wiring (W-P1-JAUD-
 
 **What to build.** `internal/config/audit.go` (existing), `internal/analytics/async.go` (existing), and a new package `internal/auditlog` with `record.go`.
 
+Merging needs the human `gates-change-approved` label because this ticket touches `architecture.yaml` (and the regenerated `.golangci.arch.yml`); request maintainer approval when opening the PR.
+
 **Requirements**
 
 - Config in the existing node-local `audit:` block (`Config.Audit` is `json:"-"`, restart only; never in SettingsWire): `audit.jsonLog {enabled: false, output: stdout|stderr|file, path, maxSizeMB: 100, maxBackups: 10, maxAgeDays: 30, compress: false, fileMode: 0600, query: drop|keys}` as `JSONLogConfig` on `AuditConfig`; parsed in `parseAudit` (a new `jsonLog` entry in `rawAudit`) and checked in `validateAudit` (`internal/config/audit.go`). Defaults: `output: stdout`, `query: drop`. Validation rejects `output: file` without `path`, an unknown `output` or `query` value, `maxSizeMB <= 0`, negative `maxBackups`/`maxAgeDays`, and a `fileMode` outside 0600..0640 owner-rw masks; errors name `audit.jsonLog.<field>`. Absent block = disabled.
@@ -116,6 +118,7 @@ OUT of scope: the queue, writer, rotation, metrics and worker wiring (W-P1-JAUD-
 - Line cap: `(Record) MarshalLine() ([]byte, error)` returns `json.Marshal(record)` plus a newline in one buffer. A line larger than 16 KiB is shrunk by dropping optional fields in this order until it fits: `groups`, `data_classes`, `swapped_refs`, `compliance`, `judge_reason`, `query_keys`; `truncated` is then true. `slog` is not used, so no `time`/`level`/`msg` keys appear.
 - Fields of `analytics.Event` that are deliberately not mapped (`SecretRef`, `Evidence`, `AddrClass`, `DLPEncoded`, `UID`) are listed in an `excludedEventFields` variable with a one-line reason each; W-P1-JAUD-02 enforces that every Event field is mapped or excluded.
 - Back-compat: nothing in this ticket runs at runtime; the only changed behaviour is that `WithOnBatch` can be given twice.
+- Merging needs the human `gates-change-approved` label because this ticket touches `architecture.yaml` (and the regenerated `.golangci.arch.yml`); request maintainer approval when opening the PR.
 
 **Implementation plan**
 
@@ -152,6 +155,8 @@ OUT of scope: the `Record` and config (W-P1-JAUD-01); the schema file and leak t
 
 **What to build.** `internal/auditlog/sink.go` (new), metrics in `internal/observability`, a `gopkg.in/natefinch/lumberjack.v2` dependency, and wiring in `internal/worker/worker.go`.
 
+Merging needs the human `gates-change-approved` label because this ticket touches `architecture.yaml` (and the regenerated `.golangci.arch.yml`); request maintainer approval when opening the PR.
+
 **Requirements**
 
 - New `internal/auditlog/sink.go`: `New(cfg config.JSONLogConfig, meta Meta, m *observability.Metrics, logger *slog.Logger) (*Sink, error)`, `Observe(evs []analytics.Event)` (the tee), `Close(ctx) error`. `Observe` assigns `seq` from a per-boot atomic counter starting at 1 and converts events with `FromEvent` on the caller's (async writer) goroutine, so a dropped batch shows as a gap in `seq`; it then enqueues the batch on a bounded channel (64 batches) without blocking. A full channel drops the whole batch and adds its length to the dropped counter. The tee must not retain the input slice.
@@ -163,6 +168,7 @@ OUT of scope: the `Record` and config (W-P1-JAUD-01); the schema file and leak t
 - Worker wiring (`internal/worker/worker.go`, next to the `alerts.Observe` tee at the `asyncOpts` build): when `pol.Audit.JSONLog.Enabled`, build `Meta` (`ProxyID` = `expandEnv(pol.Central.ProxyID)` else `os.Hostname()`, with `ProxyIDSource` `config` or `hostname`; `AgentID` the worker's agent id; `BootID` 16 random bytes in hex), create the sink, append `analytics.WithOnBatch(sink.Observe)`, and close it after `asyncStore.Close()`. When `output` is `stdout`, the operational logger built at `observability.NewLogger(out, ...)` is moved to stderr and this is logged once, so the streams never mix. The tee is installed after compliance tagging and signing in the decorator chain (it sees each stored event once) and is unaffected by the managed apply loop rebuilding the TaggingStore.
 - Back-compat: with the block absent or `enabled: false` there is no tee, no goroutine, no file and no change to analytics rows, receipts or fleet ingest.
 - Add `gopkg.in/natefinch/lumberjack.v2` to go.mod and to the S3 module manifest in architecture.yaml (layers `[repository]`, since `internal/auditlog` is a repository package); `govulncheck` stays clean.
+- Merging needs the human `gates-change-approved` label because this ticket touches `architecture.yaml` (and the regenerated `.golangci.arch.yml`); request maintainer approval when opening the PR.
 
 **Implementation plan**
 
@@ -283,6 +289,8 @@ OUT of scope: code changes to the sink or schemas; running Vector or Fluent Bit 
 
 **What to build.** `docs/siem.md`, `docs/siem/vector.yaml`, `docs/siem/fluent-bit.conf`, `deploy/compose/docker-compose.siem.yml`, and doc tests in `internal/auditlog`.
 
+Merging needs the human `gates-change-approved` label because this ticket touches `scripts/check.sh`; request maintainer approval when opening the PR.
+
 **Requirements**
 
 - `docs/siem.md` explains: the streams versus operational logs, the `audit.jsonLog` config, a field table for both schemas checked against `docs/schemas`, the versioning rule, gap detection with `boot_id` and `seq`, and the time notes (`ts` is producer wall clock; consumers sort by `ts`; a worked SIEM onboarding example that sorts by `ts`).
@@ -293,6 +301,7 @@ OUT of scope: code changes to the sink or schemas; running Vector or Fluent Bit 
 - Kubernetes guidance: `output: stdout` with a node-level collector filtering on the `schema` key, operational logs on stderr.
 - New `deploy/compose/docker-compose.siem.yml` override (used with `deploy/compose/docker-compose.yml`) enables `audit.jsonLog` with `output: file` on a shared volume and runs Vector with a file sink.
 - Link `docs/siem.md` from `docs/architecture.md` and the README docs list.
+- Merging needs the human `gates-change-approved` label because this ticket touches `scripts/check.sh`; request maintainer approval when opening the PR.
 
 **Implementation plan**
 

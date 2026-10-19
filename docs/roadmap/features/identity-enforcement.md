@@ -161,7 +161,7 @@ Add the `require` mode for an agent whose served settings entry (agents[].identi
 **Requirements**
 
 - Mode resolution for the bound agent: SettingsWire agents[].identity for the W-P2-AREG-05 agent id, then identity.defaultMode, then off. config validation now accepts `require` in served SettingsWire (CP write path and parseRemotePolicy); local YAML on a worker without controlPlane.endpoint keeps rejecting it, so a standalone worker never enters require. The effective mode and its source are logged on change and shown on /dashboard/api/status.
-- CONNECT in require mode: the W-P2-AREG-05 agent_disabled check runs first (403). Proxy-Authorization is mandatory and must verify (W-P2-WBND-01) and bind (W-P2-WBND-02) with TokenType=warden. Otherwise the worker writes 407 Proxy Authentication Required with `Proxy-Authenticate: Basic realm="warden"`, Content-Type application/json, Connection: close and body {"error":"identity_required","reason":"<bounded reason>"}, before the block-list check, Policy.Evaluate and any dial, and stores a deny event with the new Reason identity_required in internal/proxy/reasons.go.
+- CONNECT in require mode: the W-P2-AREG-05 agent_disabled check runs first (403). Proxy-Authorization is mandatory and must verify (W-P2-WBND-01) and bind (W-P2-WBND-02) with TokenType=warden. Otherwise the worker writes 407 Proxy Authentication Required with `Proxy-Authenticate: Basic realm="warden"`, Content-Type application/json, Connection: close and body {"error":"identity_required","reason":"<bounded reason>"}, before the block-list check, Policy.Evaluate and any dial, and stores a deny event with the new Reason identity_required in internal/denyreason/reasons.go.
 - Terminated traffic (runRequestStages, serveGRPCStream, WebSocket upgrade in ws.go, MCP over HTTP): an X-Warden-Identity header whose sub or act differs from the CONNECT identity gets 403 identity_conflict; a request after the CONNECT identity's exp plus skew gets 403 identity_expired with Connection: close; h2 streams get 403 on the stream. No 401 or WWW-Authenticate is ever written, and MCP denies are plain JSON like the existing mcpRequestScan 403, with no JSON-RPC body.
 - Fail closed: in require mode, before the first verified bundle, with an empty keyset, or with an unregistered bound agent, every CONNECT gets 407 with reason jwks_unavailable or agent_unregistered. A bundle loaded from the opt-in W-P2-SBND-06 cache lifts this at restart without the CP.
 - Default-deny is unchanged: the block list (W-P1-BLOCK-02) and policy evaluation, including GPOL EvaluateFor with the Warden subject, still run after identity passes. Attribute and off modes are byte-for-byte unchanged.
@@ -301,17 +301,17 @@ CP rollout guard for require mode. An old worker keeps attribute mode when it re
 
 **Requirements**
 
-- Use the agentID and caps that W-P2-AREG-03 and W-P1-BLOCK-04 already store per worker; no new heartbeat field.
+- Use the agentID and caps that W-P2-AREG-03 and W-P1-BLOCK-10 already store per worker; no new heartbeat field.
 - A settings save (POST/PUT /dashboard/api/settings, and a held draft when it is applied under p2-approvals) that sets agents[].identity=require for an agent id, or identity.defaultMode=require, returns 409 {"error":"workers_lack_capability","workers":[ids]} when any connected worker reporting that agentID (or any connected worker, for defaultMode) lacks identity/require-v1.
 - A `force=true` query parameter overrides the check; only admins may force, and the admin audit entry records force and the listed worker ids.
-- agents[].identity and identity.defaultMode become admin-only fields in the W-P1-SSO-05 per-field settings check, so an editor cannot downgrade an agent from require.
+- agents[].identity and identity.defaultMode become admin-only fields in the W-P1-SSO-10 per-field settings check, so an editor cannot downgrade an agent from require.
 - The Agents page (W-P2-AREG-03) and the worker list show 'N connected workers for this agent do not enforce require mode' when such workers exist.
 - Workers that send no agentID are listed as 'agent unknown' and do not block a per-agent switch; docs/control-plane.md tells operators to set `--agent-id` or central.agentID on every worker before using require.
 
 **Implementation plan**
 
 1. internal/controlplane settings write path (WriteSettings): capability check before persisting a require mode, force override and audit fields.
-2. internal/controlplane authz per-field table (W-P1-SSO-05): mark agents[].identity and identity.defaultMode admin-only.
+2. internal/controlplane authz per-field table (W-P1-SSO-10): mark agents[].identity and identity.defaultMode admin-only.
 3. internal/dashboard index.html and handlers: warning on the Agents page and the worker list.
 4. docs/control-plane.md: runbook for moving an agent from attribute to require, with the capability check and rollback.
 5. Tests: internal/controlplane TestRequireRefusedForOldWorkers, TestRequireForceAudited and TestIdentityModeAdminOnly.

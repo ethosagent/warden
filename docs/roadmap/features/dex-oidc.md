@@ -148,7 +148,7 @@ What to build: the compose file, `seed.ldif`, `.env.example` and a static Go tes
 
 **Depends on:** [`W-P1-DEX-01`](dex-oidc.md#16--w-p1-dex-01) Add reference Dex config with console, data-plane, harness and CLI clients
 
-**Unblocks:** [`W-P2-RCP-03`](identity-client.md#36--w-p2-rcp-03) Add the Claude Code compose recipe and docs; [`W-P1-DEX-03`](dex-oidc.md#36--w-p1-dex-03) Document Dex as Warden's IdP with connector, failure-mode and prod guidance; [`W-P1-DEX-04`](dex-oidc.md#46--w-p1-dex-04) Add the shared L2 identity e2e stack with Dex, a CP, an attribute-mode worker and a curl agent; [`W-P3-CSIG-01`](consent-auth.md#17--w-p3-csig-01) Add the CP-local consent config block and the warden-portal Dex client; [`W-P2-TOKX-05`](token-exchange.md#57--w-p2-tokx-05) Add token service end-to-end integration test
+**Unblocks:** [`W-P2-RCP-03`](identity-client.md#36--w-p2-rcp-03) Add the Claude Code compose recipe and docs; [`W-P1-DEX-03`](dex-oidc.md#36--w-p1-dex-03) Document Dex as Warden's IdP with connector, failure-mode and prod guidance; [`W-P1-DEX-04`](dex-oidc.md#46--w-p1-dex-04) Add the shared L2 identity e2e stack with Dex, a CP, an attribute-mode worker and a curl agent; [`W-P3-CSIG-01`](consent-auth.md#17--w-p3-csig-01) Add the CP-local consent config block and the warden-portal Dex client
 
 ### 3/6 · W-P1-DEX-03
 
@@ -241,7 +241,7 @@ Merging needs the human `gates-change-approved` label because this ticket touche
 
 **Depends on:** [`W-P1-DEX-02`](dex-oidc.md#26--w-p1-dex-02) Add identity compose recipe with pinned Dex and seeded LDAP
 
-**Unblocks:** [`W-P1-IDC-03`](identity-contract.md#37--w-p1-idc-03) Add the L2 identity attribution smoke with a curl agent; [`W-P1-DEX-03`](dex-oidc.md#36--w-p1-dex-03) Document Dex as Warden's IdP with connector, failure-mode and prod guidance; [`W-P1-DEX-06`](dex-oidc.md#66--w-p1-dex-06) Prove the Dex recipe at runtime on the L2 identity stack; [`W-P3-CSIG-07`](consent-auth.md#77--w-p3-csig-07) Add a Dex-backed portal sign-in end-to-end test; [`W-P1-SSO-07`](console-sso-rbac.md#711--w-p1-sso-07) Add the L2 Dex-backed console SSO end-to-end test; [`W-P1-OPS1-10`](ops-hardening.md#1011--w-p1-ops1-10) Add the L2 break-glass test with Dex stopped; [`W-P1-GPOL-14`](identity-policy.md#1414--w-p1-gpol-14) Add the real-Dex group policy check on the L2 identity stack
+**Unblocks:** [`W-P1-IDC-03`](identity-contract.md#37--w-p1-idc-03) Add the L2 identity attribution smoke with a curl agent; [`W-P1-DEX-03`](dex-oidc.md#36--w-p1-dex-03) Document Dex as Warden's IdP with connector, failure-mode and prod guidance; [`W-P1-DEX-06`](dex-oidc.md#66--w-p1-dex-06) Prove the Dex recipe at runtime on the L2 identity stack; [`W-P3-CSIG-07`](consent-auth.md#77--w-p3-csig-07) Add a Dex-backed portal sign-in end-to-end test; [`W-P1-SSO-07`](console-sso-rbac.md#711--w-p1-sso-07) Add the L2 Dex-backed console SSO end-to-end test; [`W-P1-OPS1-10`](ops-hardening.md#1011--w-p1-ops1-10) Add the L2 break-glass test with Dex stopped; [`W-P2-TOKX-05`](token-exchange.md#57--w-p2-tokx-05) Add token service end-to-end integration test; [`W-P3-OFFB-04`](offboarding.md#47--w-p3-offb-04) Add an E2E test for IdP-driven offboarding and its false-positive guards; [`W-P1-GPOL-14`](identity-policy.md#1414--w-p1-gpol-14) Add the real-Dex group policy check on the L2 identity stack
 
 ### 5/6 · W-P1-DEX-05
 

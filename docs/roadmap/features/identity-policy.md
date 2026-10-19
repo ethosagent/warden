@@ -19,7 +19,7 @@ Allow entries and MCP tool `allowWhen` conditions can be limited to IdP groups o
 - Replay and lint: `policyeval.Evaluate` builds a subject from Event.UserSub/UserEmail/UserGroups only when the recorded identity status is valid, calls EvaluateFor with the recorded method and path, and maps Conditional to deny. EvalDiff gains `AffectedUsers` (up to 20, sorted), `AffectedUsersTotal` and `AnonymousCount`. `warden policy eval` prints them and accepts `--user` (W-P1-GPOL-05). A new `config.LintScoped` warns about scoped entries shadowed by an unscoped or wildcard entry for the same destination and `warden policy eval` prints the warnings (W-P1-GPOL-12). Workers log once per agent when scoped entries exist but that agent's identity mode is off.
 - Observability: scoped denies go through emitDeny, so `RecordBlocked("identity_required"|"group_not_allowed"|"identity_groups_truncated")` receives the declared reasons from `internal/denyreason`; a new OTel counter `warden.policy.scoped.total{result=allow|not_member|no_identity}` (Prometheus name warden_policy_scoped_total) has no user or group labels. Raw tokens, group lists and emails never appear in metric labels or debug logs. The decision-log reason enum is derived from denyreason.Declared() by W-P1-JAUD-02.
 - Dashboard (W-P1-GPOL-08): the CP policy editor adds groups/users chip inputs per allow entry and per MCP allowWhen, saved through `/dashboard/api/policy` and the existing policy writer; the worker and CP policy views show a `scoped` badge and the lint warnings. Sorted, normalized groups/users keep ETags and the P1 policy-history diff deterministic.
-- Tests and docs: W-P1-GPOL-09 holds the L1 scenarios (test/scenarios on the test/harness in-process rig with the VRFY-05 issuer fake), W-P1-GPOL-14 repeats the core cases once against real Dex on the L2 stack (W-P1-DEX-04), and W-P1-GPOL-13 documents the feature in docs/group-policy.md.
+- Tests and docs: W-P1-GPOL-09 holds the L1 scenarios (test/scenarios on the test/harness in-process rig with the VRFY-11 issuer fake), W-P1-GPOL-14 repeats the core cases once against real Dex on the L2 stack (W-P1-DEX-04), and W-P1-GPOL-13 documents the feature in docs/group-policy.md.
 
 ## Done when
 
@@ -62,7 +62,7 @@ On a CA-enabled worker in attribute mode with `{domain: api.github.com, groups: 
 | 9/14 | [`W-P1-GPOL-12`](#914--w-p1-gpol-12) | Add config.LintScoped shadow warnings and print them in policy eval | feature | S | W-P1-GPOL-01 | — |
 | 10/14 | [`W-P1-GPOL-07`](#1014--w-p1-gpol-07) | Report groupPolicy support in the heartbeat and flag old workers | feature | S | W-P1-GPOL-06, W-P1-BLOCK-10 | [#245](https://github.com/ethosagent/warden/issues/245) |
 | 11/14 | [`W-P1-GPOL-08`](#1114--w-p1-gpol-08) | Edit groups/users in the dashboard policy editor | feature | M | W-P1-GPOL-10, W-P1-GPOL-11, W-P1-GPOL-12 | [#246](https://github.com/ethosagent/warden/issues/246) |
-| 12/14 | [`W-P1-GPOL-09`](#1214--w-p1-gpol-09) | Add group policy scenarios on the L1 harness | test | M | W-P1-GPOL-10, W-P1-GPOL-11, W-P1-GPOL-05 | [#247](https://github.com/ethosagent/warden/issues/247) |
+| 12/14 | [`W-P1-GPOL-09`](#1214--w-p1-gpol-09) | Add group policy scenarios on the L1 harness | test | M | W-P1-GPOL-10, W-P1-GPOL-11, W-P1-GPOL-05, W-P1-VRFY-11 | [#247](https://github.com/ethosagent/warden/issues/247) |
 | 13/14 | [`W-P1-GPOL-13`](#1314--w-p1-gpol-13) | Document group-scoped rules | docs | S | W-P1-GPOL-10, W-P1-GPOL-11, W-P1-GPOL-05, W-P1-GPOL-07, W-P1-GPOL-12 | — |
 | 14/14 | [`W-P1-GPOL-14`](#1414--w-p1-gpol-14) | Add the real-Dex group policy check on the L2 identity stack | test | S | W-P1-DEX-04, W-P1-GPOL-10, W-P1-GPOL-11 | — |
 
@@ -263,7 +263,7 @@ Type **feature** · Size **M** · Issue —
 
 **Context.** The group-policy feature (epic #59) is delivered as: W-P1-GPOL-01 schema + guard, W-P1-GPOL-06 fail-closed wire, W-P1-GPOL-02 evaluator, W-P1-GPOL-03 `deferred` enum and CONNECT handling, W-P1-GPOL-10 per-request scoped decisions (lifts the allow-entry guard), W-P1-GPOL-04 subject plumbing into the MCP gateway, W-P1-GPOL-11 group/user `allowWhen` (lifts the MCP guard), W-P1-GPOL-05 affected users in `policy eval`, W-P1-GPOL-12 shadow lint, W-P1-GPOL-07 heartbeat capability, W-P1-GPOL-08 dashboard editor, W-P1-GPOL-09 L1 scenarios, W-P1-GPOL-13 docs and W-P1-GPOL-14 the real-Dex check. This ticket (W-P1-GPOL-10) is the second half of the original proxy ticket #62 (the first half, W-P1-GPOL-03, holds the `deferred` enum and CONNECT handling). One keep-alive tunnel can carry requests from different users, so the decision has to be re-made per request with that request's subject, on HTTP/1.1, WebSocket upgrades and every h2/gRPC stream.
 
-On main every request of every protocol already passes `constraintGate` in `runRequestStages` (internal/proxy/http.go), which evaluates the live policy with `EvaluateRequest` for the #371 method/path constraints and counts the rate limit exactly once. Adding a second evaluating stage would double-charge rate limits, so this ticket extends that stage to pass the request subject (the name `scopedPolicyStage` used in later-phase tickets refers to this stage's slot). The stage runs after `identityStage` (W-P1-VRFY-02) and, when present, the user block check (W-P1-BLOCK-02), and before `judgeGate`.
+On main every request of every protocol already passes `constraintGate` in `runRequestStages` (internal/proxy/http.go), which evaluates the live policy with `EvaluateRequest` for the #371 method/path constraints and counts the rate limit exactly once. Adding a second evaluating stage would double-charge rate limits, so this ticket extends that stage to pass the request subject (later-phase tickets place their stages relative to this `constraintGate` slot). The stage runs after `identityStage` (W-P1-VRFY-02) and, when present, the user block check (W-P1-BLOCK-02), and before `judgeGate`.
 
 OUT of scope: the enum and CONNECT handling (W-P1-GPOL-03); MCP conditions (W-P1-GPOL-11); the fleet badge (W-P1-GPOL-07).
 
@@ -552,7 +552,7 @@ OUT of scope: any change to enforcement; the worker dashboard stays read-only.
 
 Type **test** · Size **M** · Issue [#247](https://github.com/ethosagent/warden/issues/247)
 
-**Context.** The group-policy feature (epic #59) is delivered as: W-P1-GPOL-01 schema + guard, W-P1-GPOL-06 fail-closed wire, W-P1-GPOL-02 evaluator, W-P1-GPOL-03 `deferred` enum and CONNECT handling, W-P1-GPOL-10 per-request scoped decisions (lifts the allow-entry guard), W-P1-GPOL-04 subject plumbing into the MCP gateway, W-P1-GPOL-11 group/user `allowWhen` (lifts the MCP guard), W-P1-GPOL-05 affected users in `policy eval`, W-P1-GPOL-12 shadow lint, W-P1-GPOL-07 heartbeat capability, W-P1-GPOL-08 dashboard editor, W-P1-GPOL-09 L1 scenarios, W-P1-GPOL-13 docs and W-P1-GPOL-14 the real-Dex check. This ticket (W-P1-GPOL-09, GitHub #247, relabelled M) proves the feature's done-when end to end on the in-process L1 harness (`test/harness`, `test/scenarios`), using the in-process OIDC issuer fake and scenario scaffolding of W-P1-VRFY-05. The original #247 held 8 scenarios, a real-Dex run and the docs; it was split into this ticket, the docs ticket W-P1-GPOL-13 and the real-Dex check W-P1-GPOL-14.
+**Context.** The group-policy feature (epic #59) is delivered as: W-P1-GPOL-01 schema + guard, W-P1-GPOL-06 fail-closed wire, W-P1-GPOL-02 evaluator, W-P1-GPOL-03 `deferred` enum and CONNECT handling, W-P1-GPOL-10 per-request scoped decisions (lifts the allow-entry guard), W-P1-GPOL-04 subject plumbing into the MCP gateway, W-P1-GPOL-11 group/user `allowWhen` (lifts the MCP guard), W-P1-GPOL-05 affected users in `policy eval`, W-P1-GPOL-12 shadow lint, W-P1-GPOL-07 heartbeat capability, W-P1-GPOL-08 dashboard editor, W-P1-GPOL-09 L1 scenarios, W-P1-GPOL-13 docs and W-P1-GPOL-14 the real-Dex check. This ticket (W-P1-GPOL-09, GitHub #247, relabelled M) proves the feature's done-when end to end on the in-process L1 harness (`test/harness`, `test/scenarios`), using the in-process OIDC issuer fake of W-P1-VRFY-11 and the scenario scaffolding of W-P1-VRFY-05. The original #247 held 8 scenarios, a real-Dex run and the docs; it was split into this ticket, the docs ticket W-P1-GPOL-13 and the real-Dex check W-P1-GPOL-14.
 
 OUT of scope: documentation (W-P1-GPOL-13); the real Dex run (W-P1-GPOL-14).
 
@@ -562,14 +562,14 @@ OUT of scope: documentation (W-P1-GPOL-13); the real Dex run (W-P1-GPOL-14).
 
 - Scenarios (names are subtest names; each asserts on `h.Events()`, `h.Logs()`, `h.Metrics()` and the fake upstream's `Requests()`): `groups_member_allowed` (valid eng token over Proxy-Authorization and over X-Warden-Identity), `groups_nonmember_denied` (`group_not_allowed`), `groups_anonymous_denied`, `groups_expired_denied` (`identity_required`, event identity_status expired), `groups_keepalive_mixed_users` (eng then sales on one keep-alive tunnel), `groups_h2_per_stream`, `groups_no_ca_conditional` (raw tunnel needs a subject at CONNECT), `groups_raw_bytes_conditional` (non-TLS bytes after a Conditional CONNECT are denied), `groups_truncated` (member in a partial list allowed, non-member `identity_groups_truncated`), `groups_mcp_tool_gated` (finance allowed, eng denied, enforce mode), `groups_old_worker_denies` (the CP wire loaded through a frozen pre-change decoder denies the scoped host and the gated tool) and `groups_policy_eval_affected_users` (replay lists only eng users).
 - Every deny scenario asserts the fake judge received zero calls and the upstream received nothing; every allow scenario asserts the upstream never saw Proxy-Authorization or X-Warden-Identity.
-- Token minting uses the VRFY-05 issuer fake (valid, expired, wrong-aud tokens and a groups claim, including a truncated one); no real IdP and no network beyond loopback. Scenarios use `h.Eventually` and the fake clock, no sleeps.
+- Token minting uses the VRFY-11 issuer fake (valid, expired, wrong-aud tokens and a groups claim, including a truncated one); no real IdP and no network beyond loopback. Scenarios use `h.Eventually` and the fake clock, no sleeps.
 - The scenarios work against the CP-served policy (fleet mode) so the scoped projection and merge are exercised.
 - Scenario output never prints token strings.
 
 **Implementation plan**
 
 1. Add the scenario functions in a new test/scenarios/groups.go and register each with its Opts in scenarios_list.go.
-2. Add the small harness helpers needed (a group-claim option on the issuer fake) in test/harness if VRFY-05 lacks them.
+2. Add the small harness helpers needed (a group-claim option on the issuer fake) in test/harness if VRFY-11 lacks them.
 3. Run `go test -race ./test/scenarios -run 'TestScenarios/groups_'`, then scripts/check.sh.
 
 **Acceptance criteria**
@@ -579,7 +579,7 @@ OUT of scope: documentation (W-P1-GPOL-13); the real Dex run (W-P1-GPOL-14).
 - [ ] `groups_old_worker_denies` fails if the wire projection of W-P1-GPOL-06 is removed (proves the fail-closed wire end to end).
 - [ ] `go test ./test/scenarios` (the full catalog) still passes. `scripts/check.sh` passes.
 
-**Depends on:** [`W-P1-GPOL-10`](identity-policy.md#514--w-p1-gpol-10) Decide scoped allow entries on every request with the request subject, add reasons and metrics and lift the allow-entry guard; [`W-P1-GPOL-11`](identity-policy.md#714--w-p1-gpol-11) Support groups/users in MCP tool allowWhen conditions; [`W-P1-GPOL-05`](identity-policy.md#814--w-p1-gpol-05) Show affected users in policy eval replay
+**Depends on:** [`W-P1-GPOL-10`](identity-policy.md#514--w-p1-gpol-10) Decide scoped allow entries on every request with the request subject, add reasons and metrics and lift the allow-entry guard; [`W-P1-GPOL-11`](identity-policy.md#714--w-p1-gpol-11) Support groups/users in MCP tool allowWhen conditions; [`W-P1-GPOL-05`](identity-policy.md#814--w-p1-gpol-05) Show affected users in policy eval replay; [`W-P1-VRFY-11`](identity-verification.md#1111--w-p1-vrfy-11) Add the in-process OIDC issuer fake and agent token options to the test harness
 
 ### 13/14 · W-P1-GPOL-13
 

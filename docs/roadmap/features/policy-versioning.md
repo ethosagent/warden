@@ -460,7 +460,7 @@ Type **feature** · Size **S** · Issue —
 
 **Depends on:** [`W-P1-PVER-01`](policy-versioning.md#112--w-p1-pver-01) Add versioned policy store and serve the head version; [`W-P1-PVER-11`](policy-versioning.md#1112--w-p1-pver-11) Add serve-time wire overlays to the policy server
 
-**Unblocks:** [`W-P1-PVER-12`](policy-versioning.md#1212--w-p1-pver-12) Document the versioned policy store, mirror and release plan; [`W-P2-AREG-04`](agent-registry.md#47--w-p2-areg-04) Serve registered agents in the policy wire; [`W-P2-SBND-02`](signed-bundles.md#27--w-p2-sbnd-02) Serve the signed bundle envelope on GET /policy behind --bundles; [`W-P4-GOPS-04`](policy-as-code.md#511--w-p4-gops-04) Add staged versions and the rollout model; [`W-P3-PUL-08`](per-user-limits.md#810--w-p3-pul-08) Publish fleet cost blocks as costBlockedUsers from the control plane
+**Unblocks:** [`W-P1-PVER-12`](policy-versioning.md#1212--w-p1-pver-12) Document the versioned policy store, mirror and release plan; [`W-P2-AREG-04`](agent-registry.md#47--w-p2-areg-04) Serve registered agents in the policy wire; [`W-P2-SBND-02`](signed-bundles.md#27--w-p2-sbnd-02) Serve the signed bundle envelope on GET /policy behind --bundles; [`W-P4-GOPS-04`](policy-as-code.md#511--w-p4-gops-04) Add staged versions and the rollout model; [`W-P4-GOPS-09`](policy-as-code.md#611--w-p4-gops-09) Serve policy per rollout cohort with ordered bundle seqs; [`W-P3-PUL-08`](per-user-limits.md#810--w-p3-pul-08) Publish fleet cost blocks as costBlockedUsers from the control plane
 
 ### 11/12 · W-P1-PVER-11
 

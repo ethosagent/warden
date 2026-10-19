@@ -63,7 +63,7 @@ On a deployment with tokenService, consent, `--bundles=require` and `grants.enab
 | 1/12 | [`W-P4-DGR-01`](#112--w-p4-dgr-01) | Add grants config, model, SQLite store and transitions | feature | M | W-P1-AAUD-01, W-P2-TOKX-03 | [#167](https://github.com/ethosagent/warden/issues/167) |
 | 2/12 | [`W-P4-DGR-02`](#212--w-p4-dgr-02) | Add the agent grant request API | feature | M | W-P4-DGR-01, W-P2-TOKX-04, W-P2-APIK-02, W-P2-AREG-01 | [#168](https://github.com/ethosagent/warden/issues/168) |
 | 3/12 | [`W-P4-DGR-03`](#312--w-p4-dgr-03) | Build the grant approval pages in the consent portal | feature | M | W-P4-DGR-02, W-P3-CSIG-04, W-P3-PORT-01 | [#169](https://github.com/ethosagent/warden/issues/169) |
-| 4/12 | [`W-P4-DGR-04`](#412--w-p4-dgr-04) | Add the grant subject resolver, delegation mode and rollout guard to the token service | feature | M | W-P4-DGR-01, W-P2-TOKX-04, W-P2-WBND-07 | [#170](https://github.com/ethosagent/warden/issues/170) |
+| 4/12 | [`W-P4-DGR-04`](#412--w-p4-dgr-04) | Add the grant subject resolver, delegation mode and rollout guard to the token service | feature | M | W-P4-DGR-01, W-P2-TOKX-04, W-P2-WBND-07, W-P1-BLOCK-10 | [#170](https://github.com/ethosagent/warden/issues/170) |
 | 5/12 | [`W-P4-DGR-05`](#512--w-p4-dgr-05) | Enforce grant tools in worker MCP verdicts | feature | M | W-P4-DGR-04, W-P1-GPOL-04, W-P2-WBND-03, W-P1-JAUD-02, W-P1-VRFY-09 | [#171](https://github.com/ethosagent/warden/issues/171) |
 | 6/12 | [`W-P4-DGR-06`](#612--w-p4-dgr-06) | Add grant revocation routes, revokedGrants bundle section and offboard step | feature | M | W-P4-DGR-03, W-P4-DGR-04, W-P2-SBND-02, W-P3-OFFB-01 | [#172](https://github.com/ethosagent/warden/issues/172) |
 | 7/12 | [`W-P4-DGR-07`](#712--w-p4-dgr-07) | Add the grant expiry sweeper, console list, fleet column and CP metrics | feature | M | W-P4-DGR-01, W-P4-DGR-06 | [#173](https://github.com/ethosagent/warden/issues/173) |
@@ -203,8 +203,8 @@ Register a tokensvc SubjectResolver for `urn:warden:params:token-type:grant` so 
 - New internal/tokensvc/subject_grant.go: grantResolver registered in the W-P2-TOKX-02 resolver map only when grants are enabled; Exchange is not rewritten. subject_token is the grant id; the resolver reads it through a narrow tokensvc.GrantSource interface on every exchange (no cache).
 - Checks: the grant exists and agent_id equals the assertion agent (else invalid_grant/grant_not_found externally, recorded as grant_agent_mismatch for a mismatch); pending, denied, revoked, expired or expires_at <= now map to grant_pending|grant_denied|grant_revoked|grant_expired; an idp_links row with link_state offboarded gives user_offboarded; a store error gives temporarily_unavailable/grant_store_unavailable. The common steps then run on the snapshot subject: agent active, BlockChecker, groups snapshot against current allowed_groups, scope.
 - Minting: header typ `wgt+jwt`; sub, idp_iss, email, groups from the snapshot; act.sub = agent; sid from SessionStore.Touch(iss, sub, agent) so session revoke and offboarding apply; cnf.jkt from the assertion key; extra claims grant_id, tools (sorted) and providers (sorted) added to identity.WardenClaims with omitempty; exp = min(iat+ttl, grant expires_at). Over 12 KiB gives token_too_large.
-- Delegation mode: new `agents[].delegation: optional|required` (default optional) in SettingsWire with DeepCopy and round-trip support, admin-only in the W-P1-SSO-05 per-field settings check. When required, id_token exchange for that agent gives invalid_grant/grant_required.
-- Rollout guard: grant exchange gives temporarily_unavailable/grant_unenforceable while any connected worker reporting that agentID lacks heartbeat cap `grants/v1`, using the per-worker agentID and caps stored by W-P2-AREG-03 and W-P1-BLOCK-04; the settings save that enables grants or delegation required returns 409 workers_lack_capability unless an admin passes force=true (audited), as in W-P2-WBND-07.
+- Delegation mode: new `agents[].delegation: optional|required` (default optional) in SettingsWire with DeepCopy and round-trip support, admin-only in the W-P1-SSO-10 per-field settings check. When required, id_token exchange for that agent gives invalid_grant/grant_required.
+- Rollout guard: grant exchange gives temporarily_unavailable/grant_unenforceable while any connected worker reporting that agentID lacks heartbeat cap `grants/v1`, using the per-worker agentID and caps stored by W-P2-AREG-03 and W-P1-BLOCK-10; the settings save that enables grants or delegation required returns 409 workers_lack_capability unless an admin passes force=true (audited), as in W-P2-WBND-07.
 - Add grant_not_found, grant_pending, grant_denied, grant_revoked, grant_expired, grant_agent_mismatch, grant_required, grant_unenforceable, grant_store_unavailable and user_offboarded to the closed Reason enum, docs/token-service.md and the p2-security-tests pin. cpstate migration tokensvc/0004 adds grant_id to token_events; the warden.token.v1 line gains grant_id. Tools and purpose are never logged.
 - An optional GrantBlockedHook(grant_id, reason) is called on grant_revoked and grant_expired denials for W-P4-DGR-09 and never blocks the response. Exchange p99 stays at or under 25ms with one extra indexed read.
 
@@ -226,7 +226,7 @@ Register a tokensvc SubjectResolver for `urn:warden:params:token-type:grant` so 
 - [ ] Given `delegation: required` for agent A, A's id_token exchange returns invalid_grant/grant_required; given a connected worker for A without grants/v1, A's grant exchange returns temporarily_unavailable/grant_unenforceable.
 - [ ] `go test ./internal/tokensvc -run 'TestMetricReasonsBounded|TestNonGrantTokensUnchanged'` passes, showing the enum is pinned and id_token tokens are byte-identical to the W-P2-TOKX-02 golden.
 
-**Depends on:** [`W-P4-DGR-01`](delegation-grants.md#112--w-p4-dgr-01) Add grants config, model, SQLite store and transitions; [`W-P2-TOKX-04`](token-exchange.md#47--w-p2-tokx-04) Add rate limits, issuance records and metrics for token exchange; [`W-P2-WBND-07`](identity-enforcement.md#710--w-p2-wbnd-07) Refuse require mode for agents served by workers without the capability
+**Depends on:** [`W-P4-DGR-01`](delegation-grants.md#112--w-p4-dgr-01) Add grants config, model, SQLite store and transitions; [`W-P2-TOKX-04`](token-exchange.md#47--w-p2-tokx-04) Add rate limits, issuance records and metrics for token exchange; [`W-P2-WBND-07`](identity-enforcement.md#710--w-p2-wbnd-07) Refuse require mode for agents served by workers without the capability; [`W-P1-BLOCK-10`](user-block-list.md#1012--w-p1-block-10) Advertise and record worker caps (blocklist/v1) in the heartbeat
 
 **Unblocks:** [`W-P4-DGR-05`](delegation-grants.md#512--w-p4-dgr-05) Enforce grant tools in worker MCP verdicts; [`W-P4-DGR-06`](delegation-grants.md#612--w-p4-dgr-06) Add grant revocation routes, revokedGrants bundle section and offboard step; [`W-P4-DGR-09`](delegation-grants.md#912--w-p4-dgr-09) Send grant approval, expiring and blocked notifications
 
@@ -245,7 +245,7 @@ Teach the worker to verify grant tokens and narrow MCP tools/call to the grant's
 - With a GrantID, a body that ParseToolCall cannot read (including JSON-RPC batch arrays) is denied with `mcp_grant_unparsed` whatever FailClosedOnError says. A worker whose MCP gateway is nil or disabled answers requests carrying a grant token with 403 `grant_unenforceable`. stdio (`warden mcp`) carries no token and is documented as out of scope.
 - Delegation mode: an MCP tools/call from a Warden token without grant_id for an agent with served `delegation: required` is denied with `mcp_grant_required`.
 - Covers internal/proxy/http.go mcpRequestScan (HTTP/1 and h2) and the WebSocket pump (internal/mcp/ws/pump.go), which already pass the verified subject through RequestMeta after W-P1-GPOL-04.
-- Recording: analytics.Event.GrantID (json grant_id, omitempty) with local SQLite addColumnIfAbsent in insertColumns, StoreEvent, StoreEventsBatch, GetEvents and GetOldestEventIDs; auditlog.FromEvent and docs/schemas/warden.decision.v1.json gain grant_id with a schema_rev bump; mcp_grant_scope, mcp_grant_unparsed, mcp_grant_required and grant_unenforceable join internal/proxy/reasons.go. Tool names and grant ids never become metric labels.
+- Recording: analytics.Event.GrantID (json grant_id, omitempty) with local SQLite addColumnIfAbsent in insertColumns, StoreEvent, StoreEventsBatch, GetEvents and GetOldestEventIDs; auditlog.FromEvent and docs/schemas/warden.decision.v1.json gain grant_id with a schema_rev bump; mcp_grant_scope, mcp_grant_unparsed, mcp_grant_required and grant_unenforceable join internal/denyreason/reasons.go. Tool names and grant ids never become metric labels.
 - RemoteProvider.Heartbeat adds cap `grants/v1`. The grant check is a map lookup with 0 allocs/op on the allowed path.
 
 **Implementation plan**
@@ -254,7 +254,7 @@ Teach the worker to verify grant tokens and narrow MCP tools/call to the grant's
 2. internal/mcp/gateway/gateway.go: add grantCheck(meta, call) after the task-scope block in OnRequest; force Deny for grant findings regardless of applyMode; make failVerdict deny with mcp_grant_unparsed when meta carries a GrantID.
 3. internal/proxy/http.go: before mcpRequestScan, refuse grant tokens with 403 grant_unenforceable when s.gw is nil or disabled; apply the delegation-required check from served agent settings.
 4. internal/analytics/analytics.go, internal/auditlog and docs/schemas/warden.decision.v1.json: add grant_id and bump schema_rev; stamp it where W-P1-VRFY-03 stamps user fields.
-5. internal/proxy/reasons.go: add the new reasons; internal/config/remote.go Heartbeat: add `grants/v1`.
+5. internal/denyreason/reasons.go: add the new reasons; internal/config/remote.go Heartbeat: add `grants/v1`.
 6. Tests: gateway TestGrantScopeNarrows, TestGrantNeverWidens, TestGrantNamespacedEntryFailsClosed, TestGrantMonitorModeStillDenies, TestGrantBatchBodyDenied, TestGrantDenyConsumesRateToken; proxy TestGrantScopeAllTransports, TestGrantUnenforceableWhenMCPOff; BenchmarkGrantCheck.
 
 **Acceptance criteria**
@@ -436,7 +436,7 @@ Make a revoked grant's live token stop working on every pinned worker within one
 
 1. internal/identity: add the revoked-grant set to the WardenVerifier snapshot and the grant_revoked reason.
 2. internal/worker/applier.go: read `revokedGrants` from the verified bundle and pass it with the token keys on apply.
-3. internal/proxy: register grant_id with sessions in the W-P1-BLOCK-05 registry and add CloseRevokedGrantSessions to the post-apply hook; add mcp_grant_revoked and grant_revoked to reasons.go.
+3. internal/proxy: register grant_id with sessions in the W-P1-BLOCK-05 registry and add CloseRevokedGrantSessions to the post-apply hook; add mcp_grant_revoked and grant_revoked to internal/denyreason/reasons.go.
 4. Tests: TestRevokedGrantRejected, TestRevokedGrantDeniedAfterBundleApply, TestRevokedGrantNotAnonymousInAttributeMode, TestRevokedGrantSessionClosed.
 
 **Acceptance criteria**
@@ -463,12 +463,12 @@ A grant names the per-user providers the agent may use, so a grant for 'read cal
 - When the verified subject carries a GrantID, a per-user secret swap for provider p happens only when p is in Subject.GrantProviders; an empty or absent list allows no per-user providers.
 - Any other per-user swap is refused before the UserTokenSource is called: 403 JSON {"error":"grant_provider_scope"} on terminated HTTP and an MCPError via the internal/connect builder on MCP, with Event.Reason grant_provider_scope and no upstream request.
 - Tokens without grant_id keep the existing W-P3-PUS-09 behaviour byte for byte.
-- grant_provider_scope joins internal/proxy/reasons.go and the decision schema reason list; Event.UserTokenProvider (W-P3-PUS-10) is not set for a refused swap. No provider token or mapping value is logged.
+- grant_provider_scope joins internal/denyreason/reasons.go and the decision schema reason list; Event.UserTokenProvider (W-P3-PUS-10) is not set for a refused swap. No provider token or mapping value is logged.
 
 **Implementation plan**
 
 1. internal/proxy per-user swap path (where W-P3-PUS-09 calls UserTokenSource.AccessToken): add the grant provider check before the call.
-2. Build the 403 and MCP error responses with the existing builders; add the reason to internal/proxy/reasons.go and docs/schemas/warden.decision.v1.json.
+2. Build the 403 and MCP error responses with the existing builders; add the reason to internal/denyreason/reasons.go and docs/schemas/warden.decision.v1.json.
 3. Tests: TestGrantProviderSwapAllowed, TestGrantProviderSwapRefused, TestNonGrantSwapUnchanged.
 
 **Acceptance criteria**

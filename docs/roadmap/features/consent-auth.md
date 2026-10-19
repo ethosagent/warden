@@ -303,11 +303,11 @@ Every P3 feature stores per-user credentials: IdP refresh tokens (this feature),
 
 Type **test** · Size **S** · Issue [#278](https://github.com/ethosagent/warden/issues/278)
 
-Every other ticket here tests against the httptest fake IdP. This test proves the done-when sentence against the reference identity stack, using the seeded LDAP users from W-P1-DEX-02 and the warden-portal client, in the same way W-P1-SSO-07 does for the console. It runs behind the `integration` build tag and WARDEN_IT_DEX=1, so normal `go test ./...` is unaffected.
+Every other ticket here tests against the httptest fake IdP. This test proves the done-when sentence against the reference identity stack, using the seeded LDAP users from W-P1-DEX-02 on the shared L2 identity stack of W-P1-DEX-04 and the warden-portal client, in the same way W-P1-SSO-07 does for the console. It is an L2 test (build tag `e2e`, `make e2e-identity-scenario NAME=TestPortalSignIn`), so normal `go test ./...` and scripts/check.sh are unaffected.
 
 **Requirements**
 
-- Lives in test/integration/portal_signin_test.go (new) with `//go:build integration`, and skips unless WARDEN_IT_DEX=1. It reuses the login helper style of W-P1-SSO-07: a cookie-jar client that submits Dex's LDAP form, with no browser.
+- Lives in test/e2e/identity/portal_signin_test.go (new) with `//go:build e2e` on the shared stack from W-P1-DEX-04. It reuses the `dexClient` helper of W-P1-DEX-04 and the login helper style of W-P1-SSO-07: a cookie-jar client that submits Dex's LDAP form, with no browser.
 - The CP runs with console.auth=oidc, consent.enabled with issuer http://dex:5556/dex, redirectURL https://localhost:7070/portal/callback, allowInsecureIssuer true, and a persistent consent.store (the AWS fake, never echo).
 - Asserts the done-when: the session cookie, the stored `idp/<userKey>` token (which successfully refreshes at the Dex token endpoint), the value-free idp_links row, 401 on /dashboard/api/* and /central/secrets with the portal cookie, CSRF 403, and 503 on /portal/login with Dex stopped while /policy still works.
 - Asserts that an ID token minted for warden-portal is rejected by the worker identity verifier (aud lacks warden).
@@ -316,16 +316,16 @@ Every other ticket here tests against the httptest fake IdP. This test proves th
 
 **Implementation plan**
 
-1. Create test/integration/portal_signin_test.go (new) reusing helpers from test/integration/integration_test.go and the W-P1-SSO-07 login helper.
-2. Start the identity stack from W-P1-DEX-02 with WARDEN_PORTAL_DEX_CLIENT_SECRET set, and the CP with the consent block and a temp --state-dir.
+1. Create test/e2e/identity/portal_signin_test.go (new) reusing the dexClient helper from W-P1-DEX-04 and the W-P1-SSO-07 login helper.
+2. Add the consent block and the warden-portal client settings (WARDEN_PORTAL_DEX_CLIENT_SECRET from deploy/compose/dex/.env.example) to configs/config.e2e-identity-cp.yaml (created by W-P1-DEX-04, extended by W-P1-SSO-07); the CP already runs with --state-dir on the stack.
 3. Run sign-in, storage, isolation, CSRF, IdP-down and verifier-rejection checks as subtests.
 4. Document the run command in docs/control-plane.md next to the console SSO test.
 
 **Acceptance criteria**
 
-- [ ] With the identity compose stack running, `WARDEN_IT_DEX=1 go test -tags integration ./test/integration -run TestPortalSignIn` passes.
+- [ ] With Docker available, `make e2e-identity-scenario NAME=TestPortalSignIn` passes.
 - [ ] User alice signs in at /portal; GET /portal/api/me returns her sub; GET /dashboard/api/traffic with the portal cookie returns 401.
 - [ ] After login the backend holds `idp/<userKey>`, and that token refreshes successfully at the Dex token endpoint.
-- [ ] Without the integration tag, `go vet ./test/integration` succeeds and the file is not built.
+- [ ] `go vet -tags e2e ./test/e2e/identity/` is clean, and without the tag `go list ./test/e2e/identity` reports `build constraints exclude all Go files`, so the default gate never touches Docker.
 
 **Depends on:** [`W-P3-CSIG-03`](consent-auth.md#37--w-p3-csig-03) Store the IdP refresh token in a CP-only secret namespace on login; [`W-P3-CSIG-04`](consent-auth.md#47--w-p3-csig-04) Add the portal session middleware, CSRF, logout and console isolation; [`W-P1-SSO-07`](console-sso-rbac.md#711--w-p1-sso-07) Add the L2 Dex-backed console SSO end-to-end test; [`W-P1-DEX-04`](dex-oidc.md#46--w-p1-dex-04) Add the shared L2 identity e2e stack with Dex, a CP, an attribute-mode worker and a curl agent
