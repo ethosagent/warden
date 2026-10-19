@@ -175,7 +175,7 @@ Add a two-policy replay that evaluates recent fleet events under both the base v
 - [ ] The stored result_json for events whose URLs have paths and queries contains no `url` key, no `/` path segment and no `?`.
 - [ ] `go test -race ./internal/policyeval -run TestCompare` and `go test -race ./internal/analytics ./internal/approvals -run 'TestScanReplayEvents|TestReplay'` pass.
 
-**Depends on:** [`W-P2-APPR-01`](policy-approvals.md#19--w-p2-appr-01) Add approvals config, draft store and state machine; [`W-P1-GPOL-05`](identity-policy.md#814--w-p1-gpol-05) Show affected users in policy eval replay; [`W-P1-VRFY-06`](identity-verification.md#611--w-p1-vrfy-06) Store user fields in the control-plane fleet store
+**Depends on:** [`W-P2-APPR-01`](policy-approvals.md#19--w-p2-appr-01) Add approvals config, draft store and state machine; [`W-P1-GPOL-05`](identity-policy.md#814--w-p1-gpol-05) Show affected users in policy eval replay; [`W-P1-VRFY-06`](identity-verification.md#612--w-p1-vrfy-06) Store user fields in the control-plane fleet store
 
 **Unblocks:** [`W-P2-APPR-04`](policy-approvals.md#49--w-p2-appr-04) Add the change draft API with the two-person rule; [`W-P4-AMCP-04`](admin-mcp.md#69--w-p4-amcp-04) Add CP suggest and replay routes and the suggest_policy and replay_policy tools; [`W-P4-GOPS-08`](policy-as-code.md#211--w-p4-gops-08) Add warden policy replay against the CP for CI
 
