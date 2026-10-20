@@ -5,11 +5,17 @@
   </picture>
 </p>
 
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License"></a>
+  <a href="https://github.com/ethosagent/warden/releases"><img src="https://img.shields.io/github/v/release/ethosagent/warden" alt="Release"></a>
+  <img src="https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go&logoColor=white" alt="Go 1.26+">
+</p>
+
 # Warden
 
-**An agent egress guardrail proxy that makes it structurally impossible for an LLM agent to bypass security controls.**
+**A default-deny egress proxy for AI agents. The agent can't bypass it — it's the only route out of the network.**
 
-Warden sits between your AI agent and the internet as a MITM proxy. The agent has no direct network route — every outbound request passes through Warden, which enforces default-deny policy, swaps placeholder tokens for real secrets at the network edge, scans responses for threats, and logs every decision. The agent never holds a real credential and cannot reach a destination you haven't explicitly allowed.
+Warden sits between your AI agent and the internet. Every outbound connection goes through it. There is no opt-out: the agent's container has no direct internet route, so Warden is the single chokepoint that enforces policy, swaps placeholder tokens for real secrets at the edge, scans responses, and logs every decision. The agent never holds a real credential and cannot reach a destination you haven't explicitly allowed.
 
 Built for teams running LLM agents (coding assistants, support bots, autonomous workflows) who need a security boundary that doesn't rely on the agent behaving correctly.
 
@@ -18,6 +24,14 @@ Built for teams running LLM agents (coding assistants, support bots, autonomous 
 </p>
 
 **Roadmap:** where Warden is going next (user identity, acting as the user with consent, and an enterprise control plane) lives in [`docs/roadmap/`](docs/roadmap/README.md), including the [final design](docs/roadmap/architecture.svg).
+
+## Why Warden
+
+- **It works below the agent.** Controls sit in the network path, so they hold even when the agent is prompt-injected, buggy or compromised. SDK-level guardrails can be ignored; a network proxy can't.
+- **Credentials never reach the agent.** Tokens are injected at the edge per request. The agent holds only meaningless placeholders.
+- **Default-deny.** Nothing gets out unless your policy says so — no implicit allow, no fail-open.
+- **Agent-neutral.** Any harness that can use an HTTP proxy works: Cursor, Claude Code, Codex, OpenHands, custom agents. No SDK integration required.
+- **Self-hosted and open.** Single binary, your infrastructure, Apache-2.0.
 
 ## Quickstart
 
@@ -86,12 +100,12 @@ Dashboard: **http://localhost:9090/dashboard/**.
 
 Warden ships drop-in Docker Compose recipes that put a popular agent runtime behind it with **zero local build** — the Warden image is pulled straight from Docker Hub (`ethosagent/warden`). The agent runs on an internal-only network with **no route to the internet**; Warden is its sole way out. Each recipe boots **allow-all**, so you immediately *see* every call on the dashboard — then you tighten the policy.
 
-| Agent | What it is | Bring it up | Agent UI | Warden dashboard |
+| Agent | Stack | Bring it up | Agent UI | Warden dashboard |
 |---|---|---|---|---|
-| **[Ethos](docs/recipes/ethos.md)** | Node agent (web UI + API) | `docker compose -f deploy/compose/docker-compose.ethos.yml up` | http://localhost:3000 | http://localhost:9091/dashboard/ |
-| **[Hermes](docs/recipes/hermes.md)** | Node + OpenAI-compatible API | `docker compose -f deploy/compose/docker-compose.hermes.yml up` | http://localhost:8642 | http://localhost:9090/dashboard/ |
-| **[OpenClaw](docs/recipes/openclaw.md)** | Node self-hosted assistant | `docker compose -f deploy/compose/docker-compose.openclaw.yml up` | http://localhost:18789/ | http://localhost:9090/dashboard/ |
-| **[ZeroClaw](docs/recipes/zeroclaw.md)** | Rust single binary | `docker compose -f deploy/compose/docker-compose.zeroclaw.yml up` | http://localhost:42617 | http://localhost:9090/dashboard/ |
+| **[Ethos](docs/recipes/ethos.md)** | Node.js web UI + API | `docker compose -f deploy/compose/docker-compose.ethos.yml up` | http://localhost:3000 | http://localhost:9091/dashboard/ |
+| **[Hermes](docs/recipes/hermes.md)** | Node.js, OpenAI-compatible | `docker compose -f deploy/compose/docker-compose.hermes.yml up` | http://localhost:8642 | http://localhost:9090/dashboard/ |
+| **[OpenClaw](docs/recipes/openclaw.md)** | Node.js self-hosted assistant | `docker compose -f deploy/compose/docker-compose.openclaw.yml up` | http://localhost:18789/ | http://localhost:9090/dashboard/ |
+| **[ZeroClaw](docs/recipes/zeroclaw.md)** | Rust, single binary | `docker compose -f deploy/compose/docker-compose.zeroclaw.yml up` | http://localhost:42617 | http://localhost:9090/dashboard/ |
 
 ```sh
 # One-time: generate the proxy CA the compose files mount
@@ -106,19 +120,13 @@ WARDEN_VERSION=0.3.0 docker compose -f deploy/compose/docker-compose.ethos.yml u
 
 Every recipe also runs a **control-plane** that serves policy and aggregates the agent's traffic into a fleet dashboard at **https://localhost:7070/dashboard/** (served with the proxy CA — trust it). Full per-recipe details (ports, the Node `fetch` proxy workaround, and how to prove isolation) are in **[docs/recipes/](docs/recipes/)**.
 
-#### How a recipe works (Ethos, in detail)
+#### How a recipe works
 
-[`deploy/compose/docker-compose.ethos.yml`](deploy/compose/docker-compose.ethos.yml) wraps the [Ethos](https://github.com/ethosagent/ethos) agent runtime so **all of its egress flows through Warden** with full visibility. Ethos runs on an internal-only network (no direct internet); the Warden worker is its sole route out, and the policy is **allow-all** for now, so nothing is blocked — you just *see* every call. The compose encodes everything needed to route and observe a real agent:
-
-| Concern | How it's handled |
-|---|---|
-| **No bypass** | Ethos is on an `internal: true` network — its only egress is the Warden worker; a direct call simply fails. |
-| **Proxy routing** | `HTTP(S)_PROXY=http://worker:8080`, plus **`NODE_USE_ENV_PROXY=1`** — Node's built-in `fetch` ignores `HTTPS_PROXY` without it, so agent calls would otherwise go direct and fail (`fetch failed`). |
-| **TLS trust** | The proxy CA is mounted and trusted via `NODE_EXTRA_CA_CERTS` / `SSL_CERT_FILE` / `REQUESTS_CA_BUNDLE`, so Warden can terminate TLS and see URLs/methods/status. |
-| **UI access** | An internal network blocks host port-publishing, so a tiny `socat` sidecar forwards the Ethos UI to the host **without** giving Ethos an internet route. |
-| **Persistent audit** | Named data volumes hold the analytics DBs so they survive restarts/redeploys. |
-
-To put **your own** service behind Warden, copy the `ethos` service block: attach it to `ethos-internal` only, set the proxy env (incl. `NODE_USE_ENV_PROXY=1` for Node runtimes), trust the CA, and add its destinations to the allowlist. Full walkthrough: [docs/docker-end-to-end.md](docs/docker-end-to-end.md).
+Each recipe puts the agent on a Docker `internal: true` network — its only egress
+is the Warden worker. `HTTP(S)_PROXY` is set, the proxy CA is trusted, and a
+`socat` sidecar forwards the agent UI to the host without giving the agent an
+internet route. To put **your own** service behind Warden, see
+[docs/docker-end-to-end.md](docs/docker-end-to-end.md).
 
 ## How It Works
 
@@ -147,11 +155,12 @@ To put **your own** service behind Warden, copy the `ethos` service block: attac
 
 - **Domain matching** — exact, `*.wildcard`, `~regex` patterns
 - **Method + path constraints** — narrow an allowlist entry to specific HTTP methods (`methods`) and request paths (`paths`), enforced per request before any secret swap or upstream write (HTTP/1.1, HTTP/2/gRPC, and WebSocket upgrades alike)
-- **Rate limiting** — per-rule fixed-window (`100/hour`, `10/minute`, `5/second`); a rule's limit counts only requests that matched that rule's own constraints. **Behaviour change (#371):** limits used to be consumed once per CONNECT tunnel; they are now consumed **per request**. For a rule without `methods`/`paths`, N keep-alive requests over one tunnel now count N, not 1 — tighten the limit (or add constraints, which keep denied requests free) when migrating
+- **Rate limiting** — per-rule fixed-window (`100/hour`, `10/minute`, `5/second`)
 - **Time windows** — per-rule hour ranges (`9-17`)
 - **Port inference** — 443 for HTTPS, 80 for HTTP when omitted
-- **Any-match-wins evaluation** — a request matching multiple allowlist entries is allowed if any entry passes its constraints. **Sharp edge:** an unconstrained entry for the same domain makes a constrained twin useless — scope them to distinct ports or drop the unconstrained entry
-- **Path-confusion deny** — when an entry constrains `paths`, a request whose raw path contains a dot segment, a matrix parameter, or an encoded separator (`/../`, `/./`, `%2e`, `%2f`, `%5c`, `%3b`, raw or encoded `;`, backslash, `//`) is denied (`path_not_canonical`) even if it string-matches a pattern: patterns are matched against the raw percent-encoded path that goes upstream, never a decoded one. Java servers (Tomcat, Jetty, Spring) strip `;params` per segment — `/v1/..;/admin` would be `/admin` upstream, so it is denied outright. **Residual risk:** decodings Warden cannot see still apply origin-side — double-encoding (`%252e`), overlong UTF-8 (`%c0%ae`), and `%00` reach the origin verbatim when the pattern allows them, and `methods` does not inspect method-override headers such as `X-HTTP-Method-Override`
+- **Path-confusion deny** — requests with path traversal patterns (`/../`, `%2e`, matrix params) are denied outright when `paths` constraints are active
+
+Policy evaluation details and edge cases: [docs/protocol-details.md](docs/protocol-details.md#policy-evaluation-details).
 
 ### Protocol Awareness
 
@@ -192,7 +201,7 @@ To put **your own** service behind Warden, copy the `ethos` service block: attac
 
 ## What Warden Does NOT Do
 
-- **Not a content moderation layer** — we sit at the network boundary outside the agent, not inside it. For in-process guardrails, look at NeMo Guardrails.
+- **Not a content moderation layer** — Warden sits at the network boundary outside the agent, not inside it. Use in-process guardrails for prompt/response filtering.
 - **No bare local-process mode** — agents can spawn containers and redirect traffic; host-process isolation is unwinnable. A container runtime is required.
 - **No full body logging** — by design, analytics store headers and metadata only. Bodies are never persisted.
 - **No automatic policy weakening** — the enforcing proxy is deterministic. LLM-assisted features (planned) are advisory only and cannot modify live policy.
@@ -232,105 +241,24 @@ See [`configs/config.example.yaml`](configs/config.example.yaml) for the full do
 
 ### Scoping secrets to destination hosts
 
-A placeholder should only ever be exchanged for its real value on the host it
-belongs to. `matchHosts` (same syntax as the policy: exact host, `*.suffix`,
-`~regex`) restricts where Warden swaps a placeholder, in HTTP/1.1, HTTP/2/gRPC
-and WebSocket-upgrade requests alike:
-
-- The destination is the CONNECT/SNI host — the one the allow/deny decision used
-  and the upstream is dialed at — never a `Host` header or URL host the agent
-  controls.
-- On a non-matching host the placeholder is forwarded **untouched** (the
-  destination rejects it as an invalid credential) and a distinct
-  `secret_out_of_scope` event is recorded with the placeholder *name* only, so
-  operators can see attempted cross-host carriage. Allow/deny counts are unchanged.
-- A secret that cannot be fetched fails the request with 503 only on hosts where
-  it is in scope; an unrelated missing secret no longer 503s every request.
-- `~regex` is an **unanchored** (substring) match, exactly like the policy engine:
-  `~github\.com` also matches `evil-github.com`. Anchor it —
-  `~^api\.github\.com$` — or prefer an exact host / `*.suffix`.
-- Invalid patterns (bad regex or wildcard) fail config load.
-- `auth:` injectors (OAuth2, SigV4, HMAC, API key) are scoped by their required
-  `match` field, with the same syntax.
-
-**Migration:** entries without `matchHosts` keep the old behavior (swap on every
-allowed host) and log a startup warning per placeholder. Add `matchHosts` to each
-secret; it is expected to become required in a future release.
+`matchHosts` restricts where Warden swaps a placeholder — the same syntax as the
+policy (exact host, `*.suffix`, `~regex`). A placeholder sent to a non-matching
+host is forwarded **untouched** and a `secret_out_of_scope` event is recorded.
+Full details: [docs/protocol-details.md](docs/protocol-details.md#scoping-secrets-to-destination-hosts).
 
 ### gRPC: put credentials in metadata
 
-Warden swaps a placeholder in gRPC **metadata** (headers such as
-`authorization`), never inside a gRPC **message**. Rewriting a placeholder in a
-protobuf message without its schema is unsafe: a length-delimited field can be a
-string or a nested message, and changing a string's length means re-encoding
-every enclosing length. So a gRPC credential must ride metadata, and a
-placeholder found in a message body is refused visibly rather than silently
-reaching the upstream unswapped (#418).
-
-When a gRPC call is made to a host a placeholder is in scope for (`matchHosts`),
-Warden checks each length-prefixed message before forwarding it:
-
-- **Placeholder in a message** — the message is not forwarded. The call ends
-  with gRPC status `PERMISSION_DENIED` (7) and `grpc-message: secret
-  placeholders must be sent in gRPC metadata`, and a deny event with reason
-  `grpc_body_placeholder` is recorded. Warden holds the request back
-  up to 250 ms for the call's first message, so a call refused on a first message
-  that arrives within that window reaches the upstream not at all. A first
-  message that arrives later means the request headers (with the swapped
-  metadata) have already gone upstream; the message itself is still refused. On
-  a client- or bidi-streaming call, messages before the offending one were
-  already forwarded and the stream then ends with the same status.
-- **Frame bound** — a message is buffered up to 4 MiB (`maxGRPCFrameBytes`, the
-  gRPC default message size) to be inspected. A larger one fails closed:
-  `RESOURCE_EXHAUSTED` (8), reason `grpc_frame_too_large`.
-- **Compressed messages** — a message with the compressed flag set cannot be
-  inspected and is refused: `FAILED_PRECONDITION` (9), reason
-  `grpc_frame_compressed`. Turn gRPC message compression off for calls through
-  Warden to hosts that hold a placeholder.
-- **Malformed framing** — a bad flag byte, or a stream that ends inside a
-  message: `INVALID_ARGUMENT` (3), reason `grpc_frame_malformed`.
-- **Streaming** — messages without a placeholder are forwarded as they arrive;
-  at most one message is held at a time.
-- **A placeholder split across messages** is caught at the boundary: Warden
-  keeps the last bytes of the messages before (as many as the longest
-  placeholder, less one) and checks them joined with the start of the next. The
-  message that completes the placeholder is refused as above; the earlier part
-  was already forwarded, and is inert because nothing in a body is ever swapped.
-- **A placeholder for a different host** (out of scope here) is not inspected
-  for and passes untouched. Unlike an out-of-scope placeholder in an HTTP/1.1
-  body, it records no `secret_out_of_scope` event on gRPC today.
-- **Known corner** — if the upstream ends its response without reading the
-  request body and the offending message only arrives afterwards, the message
-  goes nowhere (the transport has stopped reading it), but no deny is recorded
-  and the client sees no refusal status; the call is logged as an ordinary allow.
-  Pinned by `TestGRPCBody_RefusalAfterUpstreamFinishedRecordsNoDeny`.
-
-With no placeholder in scope for the destination, the body is streamed verbatim
-and none of the above applies.
+Warden swaps placeholders in gRPC **metadata** (headers), never inside protobuf
+message bodies. If a placeholder appears in a gRPC message body, Warden refuses
+the call with `PERMISSION_DENIED` rather than silently passing it through.
+Streaming, split-frame detection, and compressed-message handling are all
+covered. Full details: [docs/protocol-details.md](docs/protocol-details.md#grpc-credential-scanning-in-message-bodies).
 
 ### Upstream DNS resolver
 
-On networks where the resolver the container inherits cannot resolve public
-names — corporate networks and VPNs that block or filter public DNS,
-split-horizon environments, or container runtimes whose embedded DNS refuses
-external names — Warden cannot look up allowlisted destinations at all.
-`dns.upstreamResolver` points Warden's **own** upstream dials (CONNECT tunnels
-and TLS-terminated upstreams; SNI keeps the client-supplied hostname) at a
-specific `<host>:<port>` server. Plain UDP/TCP only — DoH/DoT transports are
-out of scope for v1.
-
-It is scoped to Warden's egress path: the dashboard/admin listeners are
-unaffected, and the **agent's** own DNS path is a separate concern (under the
-transparent-interception contract, [#376](https://github.com/ethosagent/warden/issues/376),
-agent-side names are routed to Warden by the orchestration runtime). If the
-configured server is unreachable, affected requests fail like any other
-upstream-connect failure (visible in analytics and the dashboard's
-blocked/fail lists) — there is no silent fallback to the system resolver.
-
-Use an **IP literal** for `upstreamResolver` (e.g. `10.20.30.2:53`): the server
-address itself is resolved by the system resolver, so a hostname there would be
-looked up through the very resolver being overridden — `/etc/hosts` still
-applies as before.
+`dns.upstreamResolver` points Warden's upstream dials at a specific DNS server
+(`<host>:<port>`) for corporate networks, VPNs and split-horizon environments.
+Full details: [docs/protocol-details.md](docs/protocol-details.md#upstream-dns-resolver).
 
 ## Project Structure
 
@@ -429,13 +357,5 @@ The end goal is that safe agent access feels like nothing extra to the people us
 5. Optionally, connect Slack or email for notifications, the SIEM export, and policy as code from git.
 
 *Agent builders* register the agent, route its traffic through a Warden worker (ready-made recipes exist for common harnesses), and optionally use the single Warden MCP gateway URL in place of many MCP servers.
-
-**Why Warden**
-
-- **It works below the agent.** Controls sit in the network path, so they hold even when the agent is prompt-injected, buggy or compromised.
-- **Credentials never reach the agent.** Tokens are injected at the edge per user and per request, and refreshed and revoked centrally.
-- **Agent-neutral.** Any harness that can use an HTTP proxy works, through a documented identity contract and the `warden identity` CLI.
-- **Useful at every step.** Each phase ships on its own and is production-usable. Start with egress control today and add identity when you need it.
-- **Self-hosted and open.** One deployment per company, your IdP, your secret store, Apache-2.0.
 
 Follow the work on the [Roadmap issue](https://github.com/ethosagent/warden/issues/15).
