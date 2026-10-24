@@ -1,0 +1,69 @@
+# DEV ONLY. Passwords are {SSHA} hashes from slappasswd; the plaintext is only
+# in .env.example (DEX_TEST_PASSWORD). Never reuse this directory outside a laptop or CI.
+dn: dc=example,dc=org
+objectClass: top
+objectClass: dcObject
+objectClass: organization
+dc: example
+o: example
+
+dn: ou=people,dc=example,dc=org
+objectClass: organizationalUnit
+ou: people
+
+dn: ou=groups,dc=example,dc=org
+objectClass: organizationalUnit
+ou: groups
+
+dn: uid=alice,ou=people,dc=example,dc=org
+objectClass: inetOrgPerson
+uid: alice
+cn: Alice
+sn: Example
+mail: alice@example.org
+userPassword: {SSHA}GMNiQBiT60IIphwv1jyErVw/l9q8IiUi
+
+dn: uid=bob,ou=people,dc=example,dc=org
+objectClass: inetOrgPerson
+uid: bob
+cn: Bob
+sn: Example
+mail: bob@example.org
+userPassword: {SSHA}NpgJp58y+FOFqWw5GkEqtdBfWb2f3gGq
+
+dn: uid=carol,ou=people,dc=example,dc=org
+objectClass: inetOrgPerson
+uid: carol
+cn: Carol
+sn: Example
+mail: carol@example.org
+userPassword: {SSHA}vLgIusRBpnUbbDCyVuzti5z1gOnPsN8X
+
+dn: uid=dave,ou=people,dc=example,dc=org
+objectClass: inetOrgPerson
+uid: dave
+cn: Dave
+sn: Example
+mail: dave@example.org
+userPassword: {SSHA}vbf7Ud4Sx8jHxdKT3sYQCeGTd2au+sUI
+
+dn: cn=warden-admins,ou=groups,dc=example,dc=org
+objectClass: groupOfNames
+cn: warden-admins
+member: uid=alice,ou=people,dc=example,dc=org
+
+dn: cn=warden-editors,ou=groups,dc=example,dc=org
+objectClass: groupOfNames
+cn: warden-editors
+member: uid=bob,ou=people,dc=example,dc=org
+
+dn: cn=warden-viewers,ou=groups,dc=example,dc=org
+objectClass: groupOfNames
+cn: warden-viewers
+member: uid=carol,ou=people,dc=example,dc=org
+
+dn: cn=eng,ou=groups,dc=example,dc=org
+objectClass: groupOfNames
+cn: eng
+member: uid=alice,ou=people,dc=example,dc=org
+member: uid=dave,ou=people,dc=example,dc=org

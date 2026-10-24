@@ -3,14 +3,16 @@
 Reference config for the identity provider that Warden's identity features test
 against. Warden treats Dex as a generic OIDC issuer: nothing under `internal/`
 or `cmd/` names it, and every Dex-specific string lives in this directory.
-This directory holds configuration only. The pinned compose recipe and seeded
-LDAP arrive with W-P1-DEX-02.
+The pinned compose recipe is `../docker-compose.identity.yml`; `seed.ldif` seeds
+its LDAP directory.
 
 ## Files
 
 | File | Purpose |
 |---|---|
 | `config.yaml` | Prod-shaped example. https issuer **placeholder**, no password grant, LDAP over StartTLS. Not used by any test stack. |
+| `seed.ldif` | **Dev only.** Groups warden-admins, warden-editors, warden-viewers, eng; users alice (admins, eng), bob (editors), carol (viewers), dave (eng only). `{SSHA}` hashes only. |
+| `.env.example` | Dev placeholder secrets and the plaintext test password. |
 | `config.dev.yaml` | **Dev only.** Differs from `config.yaml` in exactly: the issuer, the `warden-cli` device callback, `oauth2.grantTypes` (adds `password`), `oauth2.passwordConnector`, and the LDAP transport (`insecureNoSSL`). `test/deploy` asserts this. |
 
 Both files also set `web.http: 0.0.0.0:5556`, `telemetry.http: 0.0.0.0:5558`,
@@ -107,9 +109,41 @@ Static clients use `secretEnv` (read by `cmd/dex/serve.go`), never `secret:`.
 
 ## Pinned release
 
-Tested baseline: `ghcr.io/dexidp/dex:v2.41.1`. W-P1-DEX-02 adds the image
-digest. A later bump is its own change that re-runs the runtime proofs
-(W-P1-DEX-06).
+Tested baseline: `ghcr.io/dexidp/dex:v2.41.1`, pinned to the multi-arch index
+digest `sha256:bc7cfce7c17f52864e2bb2a4dc1d2f86a41e3019f6d42e81d92a301fad0c8a1d`
+(resolved 2026-10-24 with `docker buildx imagetools inspect ghcr.io/dexidp/dex:v2.41.1`).
+
+LDAP: `bitnamilegacy/openldap:2.6.10`, index digest
+`sha256:687f14a22b5c74fb057a57221acdbe7b8c82e2d3619fc380db3af48ec4aa04ed`
+(resolved 2026-10-24 the same way). It runs as uid 1001 and loads `seed.ldif`
+from `/ldifs` on first start. Bitnami no longer publishes free images, so this
+legacy tag gets no updates; it is acceptable for a dev-only directory that sits
+on an internal network.
+
+The Dex image ships busybox `wget`, so Dex has a healthcheck against its
+telemetry `/healthz` (port 5558, unpublished) and `depends_on: dex:
+service_healthy` works. The LDAP image's healthcheck uses its own `ldapsearch`.
+The LDAP image has no `nslookup` or `wget`, so #437's hermeticity probe
+reaches `ldap` through a sidecar rather than inside the container.
+
+A later Dex bump is its own change (new tag and digest) that re-runs
+W-P1-DEX-06: `make e2e-identity-scenario NAME=TestDex`.
+
+## Compose recipe
+
+```sh
+set -a; . deploy/compose/dex/.env.example; set +a
+cd deploy/compose
+docker compose -f docker-compose.identity.yml up -d                      # standalone
+docker compose -f docker-compose.control-plane.yml -f docker-compose.identity.yml up -d
+docker compose -f docker-compose.yml -f docker-compose.identity.yml up -d
+```
+
+The host reaches Dex at `http://localhost:5556` (published on `127.0.0.1` only,
+the dev issuer origin). Containers on `cp-net` reach it at `http://dex:5556`
+(`internalIssuerURL`). Telemetry port 5558 is not published. LDAP is on the
+internal `idp-net` only, and neither service joins an agent network. Every user
+in `seed.ldif` has the password `DEX_TEST_PASSWORD` from `.env.example`.
 
 ## Replacing Dex
 
@@ -130,8 +164,8 @@ No Go change is needed.
 ## Tests
 
 ```sh
-go test ./test/deploy -run 'TestDexReferenceConfig|TestCheckSecretsScript'
+go test ./test/deploy -run 'TestDexReferenceConfig|TestCheckSecretsScript|TestIdentityComposePinned'
 ```
 
-These are static: no container starts. Runtime checks arrive with the compose
-recipe (W-P1-DEX-02) and W-P1-DEX-06.
+These are static: no container starts (add `TestIdentityComposePinned` for the
+compose file). Runtime checks arrive with W-P1-DEX-06.
