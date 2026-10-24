@@ -29,7 +29,7 @@ classes:
     paths: ["w/pure"]
   - id: repository
     layer: repository
-    paths: ["**/adapters/**", "w/repo", "w/adapter"]
+    paths: ["**/adapters/**", "w/repo", "w/adapter", "w/httpctor"]
   - id: domain
     layer: domain
     paths: ["w/dom", "w/domx", "w/other", "w/ctl"]
@@ -41,7 +41,7 @@ classes:
     layer: transport
     paths: ["w/*"]
 zones:
-  data: ["w/eng", "w/pure", "w/cross"]
+  data: ["w/eng", "w/pure", "w/cross", "w/httpctor"]
   control: ["w/asm", "w/trans", "w/runner", "w/routes", "w/ctl", "w/dom", "w/domx", "w/other", "w/repo", "w/adapter", "w/sign", "w/state", "w/app", "w/keys", "w/httpc", "w/cfgx", "w/svc", "w/envtest", "w/notest", "w/mux", "w/with", "w/cgo", "w/dom/adapters/store"]
   shared: ["w/fakes", "w/conv"]
 rules:
@@ -128,6 +128,7 @@ rules:
     checker: archtest
     fix: use the shared constructor
     banned-calls: ["net/http.Get"]
+    client-constructors: ["w/httpctor/ctor.go"]
   - id: X5
     title: key prefixes only via the builder
     checker: archtest
@@ -260,6 +261,10 @@ func TestEngineRules(t *testing.T) {
 		// X4 — three shapes of a bare outbound client.
 		"w/httpc/httpc.go":      "package httpc\n\nimport \"net/http\"\n\nfunc Get() { http.Get(\"https://x\") }\n\nfunc Do() { http.DefaultClient.Do(nil) }\n\nfunc New() *http.Client { return &http.Client{} }\n",
 		"w/httpc/httpc_test.go": "package httpc\n",
+		// X4/Z4 — the client-constructors exemption is per file, not per package.
+		"w/httpctor/ctor.go":      "package httpctor\n\nimport (\n\t_ \"crypto/tls\"\n\t_ \"net\"\n\t\"net/http\"\n)\n\nfunc New() *http.Client { return &http.Client{} }\n\nfunc Get() { http.Get(\"https://x\") }\n",
+		"w/httpctor/other.go":     "package httpctor\n\nimport (\n\t\"net\"\n\t\"net/http\"\n)\n\nvar _ net.Conn\n\nfunc Other() *http.Client { return &http.Client{} }\n",
+		"w/httpctor/ctor_test.go": "package httpctor\n",
 		// X5 — the reserved key prefix formatted by hand.
 		"w/keys/keys.go":      "package keys\n\nvar K = \"warden/thing\"\n",
 		"w/keys/keys_test.go": "package keys\n",
@@ -318,6 +323,9 @@ func TestEngineRules(t *testing.T) {
 		want{"X4", "w/httpc/httpc.go", 5},
 		want{"X4", "w/httpc/httpc.go", 7},
 		want{"X4", "w/httpc/httpc.go", 9},
+		want{"X4", "w/httpctor/ctor.go", 11},
+		want{"X4", "w/httpctor/other.go", 10},
+		want{"Z4", "w/httpctor/other.go", 4},
 		want{"X5", "w/keys/keys.go", 3},
 		want{"X9", "w/mux/mux.go", 7},
 		want{"S4", "w/state/state.go", 3},

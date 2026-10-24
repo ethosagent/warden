@@ -84,7 +84,11 @@ func (e *Engine) checkCalls(p *Package, f *File) {
 		rules = kept
 	}
 
+	// X4's client checks do not apply inside a named shared client constructor file.
 	x4on := e.on("X4")
+	if x4 := e.Arch.Rule("X4"); x4 != nil && e.match.matchAny(x4.ClientConstructors, f.Name) {
+		x4on = false
+	}
 	x9 := e.Arch.Rule("X9")
 	x9on := e.on("X9") && !e.match.matchAny(x9.RouteFiles, path.Base(f.Name))
 	ast.Inspect(f.AST, func(n ast.Node) bool {
