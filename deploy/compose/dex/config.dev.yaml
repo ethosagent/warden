@@ -1,0 +1,92 @@
+# DEV ONLY: password grant and plain LDAP. The prod-shaped example is config.yaml;
+# this file differs from it only in the issuer, the warden-cli device callback,
+# the password grant and passwordConnector, and the LDAP transport.
+
+# Dex is published on 127.0.0.1:5556; containers reach it through an internal
+# issuer URL (see README, "Split horizon"). The issuer string is permanent.
+issuer: http://localhost:5556/dex
+
+storage:
+  type: sqlite3
+  config:
+    file: /var/dex/dex.db
+
+web:
+  http: 0.0.0.0:5556
+
+telemetry:
+  http: 0.0.0.0:5558
+
+logger:
+  level: info
+  format: json
+
+oauth2:
+  responseTypes: [code]
+  # The approval screen returns HTTP 500 "Approval rejected" with a static client plus a local connector on Dex v2.41.1; all clients are first-party, so it stays off.
+  skipApprovalScreen: true
+  grantTypes:
+    - authorization_code
+    - refresh_token
+    - urn:ietf:params:oauth:grant-type:device_code
+    # DEV ONLY: lets scripts fetch a token for a seeded user without a browser.
+    - password
+  passwordConnector: ldap
+
+expiry:
+  idTokens: 1h
+  signingKeys: 6h
+  deviceRequests: 5m
+  refreshTokens:
+    validIfNotUsedFor: 168h
+    absoluteLifetime: 720h
+    reuseInterval: 3s
+    disableRotation: false
+
+staticClients:
+  - id: warden-console
+    name: Warden console
+    secretEnv: WARDEN_CONSOLE_DEX_CLIENT_SECRET
+    redirectURIs:
+      - https://localhost:7070/auth/callback
+  - id: warden
+    name: Warden data plane
+    secretEnv: WARDEN_DEX_CLIENT_SECRET
+    trustedPeers:
+      - agent-harness
+      - warden-cli
+  - id: agent-harness
+    name: Agent harness
+    secretEnv: HARNESS_DEX_CLIENT_SECRET
+  - id: warden-cli
+    name: Warden CLI
+    public: true
+    redirectURIs:
+      - http://localhost:5556/dex/device/callback
+
+connectors:
+  - type: ldap
+    name: LDAP
+    # PERMANENT: the connector id is encoded into every user's sub. Renaming it makes every user a new person.
+    id: ldap
+    config:
+      host: ldap:389
+      # dev only; production uses ldaps or StartTLS with rootCA
+      insecureNoSSL: true
+      bindDN: cn=admin,dc=example,dc=org
+      # Expanded from the environment by Dex (see README, "Secrets and env expansion").
+      bindPW: $LDAP_BIND_PW
+      userSearch:
+        baseDN: ou=people,dc=example,dc=org
+        filter: "(objectClass=inetOrgPerson)"
+        username: uid
+        idAttr: uid
+        emailAttr: mail
+        nameAttr: cn
+      groupSearch:
+        baseDN: ou=groups,dc=example,dc=org
+        filter: "(objectClass=groupOfNames)"
+        userMatchers:
+          - userAttr: DN
+            groupAttr: member
+        nameAttr: cn
