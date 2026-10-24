@@ -31,6 +31,7 @@ linters:
           files:
             - ${base-path}/internal/config/**
             - ${base-path}/internal/denyreason/**
+            - ${base-path}/internal/identity/**
             - ${base-path}/internal/detect/**
             - ${base-path}/internal/alertpipeline/**
             - ${base-path}/internal/policybuilder/**
@@ -93,6 +94,7 @@ linters:
           files:
             - ${base-path}/internal/config/**
             - ${base-path}/internal/denyreason/**
+            - ${base-path}/internal/identity/**
             - ${base-path}/internal/detect/**
             - ${base-path}/internal/alertpipeline/**
             - ${base-path}/internal/policybuilder/**
@@ -133,8 +135,10 @@ linters:
             - '!${base-path}/internal/dnstest/**'
             - '!${base-path}/internal/clock/clocktest/**'
             - '!${base-path}/test/**'
+            - '!${base-path}/internal/identity/adapters/oidc/**'
             - '!${base-path}/internal/config/**'
             - '!${base-path}/internal/denyreason/**'
+            - '!${base-path}/internal/identity/**'
             - '!**/*_test.go'
           deny:
             - pkg: database/sql
@@ -176,6 +180,7 @@ linters:
             - '!${base-path}/internal/mcp/poisoned/**'
             - '!${base-path}/internal/config/**'
             - '!${base-path}/internal/denyreason/**'
+            - '!${base-path}/internal/identity/**'
             - '!${base-path}/internal/detect/**'
             - '!${base-path}/internal/alertpipeline/**'
             - '!${base-path}/internal/policybuilder/**'
@@ -253,6 +258,7 @@ linters:
           msg: 'X7: use the structured logger (internal/observability) and reference data by hash/metadata, never by value'
     gomodguard_v2:
       allowed:
+        - module: github.com/coreos/go-oidc/v3
         - module: github.com/prometheus/client_golang
         - module: github.com/spf13/cobra
         - module: go.opentelemetry.io/otel
@@ -262,6 +268,7 @@ linters:
         - module: go.opentelemetry.io/otel/sdk
         - module: go.opentelemetry.io/otel/sdk/metric
         - module: golang.org/x/net
+        - module: golang.org/x/oauth2
         - module: golang.org/x/sync
         - module: gopkg.in/yaml.v3
         - module: modernc.org/sqlite
