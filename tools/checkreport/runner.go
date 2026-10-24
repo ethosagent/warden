@@ -92,6 +92,7 @@ func (r *runner) stages() []stageDef {
 		{"archtest", "archtest (go test ./internal/archtest -run TestArchitecture)", goTool, (*runner).stageArchtest},
 		{"lint", fmt.Sprintf("lint (golangci-lint %s)", r.cfg.GolangciVersion), func(r *runner) string { return "golangci-lint@" + r.cfg.GolangciVersion }, (*runner).stageLint},
 		{"roadmap", "roadmap (go run docs/roadmap/gen.go check)", goTool, (*runner).stageRoadmap},
+		{"secrets", "secrets (no literals in deploy/compose/dex)", func(*runner) string { return "bash" }, (*runner).stageSecrets},
 		{"build", "build (go build ./...)", goTool, (*runner).stageBuild},
 		{"vulncheck", fmt.Sprintf("vulncheck (govulncheck %s)", r.cfg.GovulncheckVersion), func(r *runner) string { return "govulncheck@" + r.cfg.GovulncheckVersion }, (*runner).stageVuln},
 		{"test", "test (go test -race -coverprofile)", goTool, (*runner).stageTest},
@@ -323,6 +324,13 @@ func (r *runner) stageRoadmap() Stage {
 	tres := r.exec(r.cfg.Root, "go", "test", "-json", "docs/roadmap/gen.go", "docs/roadmap/gen_test.go")
 	st.Findings = append(st.Findings, finish("roadmap", tres, parseGoTest("roadmap", tres.Stdout, r.ctx)).Findings...)
 	return st
+}
+
+// stageSecrets runs scripts/check-secrets.sh and turns each stderr line
+// (`secrets: <file>:<line>: <key> is a literal; ...`) into a finding.
+func (r *runner) stageSecrets() Stage {
+	res := r.exec(r.cfg.Root, "bash", "scripts/check-secrets.sh")
+	return finish("secrets", res, parseSecrets(res.Stderr))
 }
 
 func (r *runner) stageBuild() Stage {

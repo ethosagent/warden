@@ -19,6 +19,9 @@ ok
 roadmap ok
 ok  	command-line-arguments	0.1s
 
+=== secrets (no literals in deploy/compose/dex) ===
+ok
+
 === build (go build ./...) ===
 ok
 

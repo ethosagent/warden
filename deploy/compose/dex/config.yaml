@@ -1,0 +1,88 @@
+# Prod-shaped example. Not used by any test stack. The dev recipe is
+# config.dev.yaml (DEV ONLY: password grant, plain LDAP, http issuer).
+
+# PLACEHOLDER: set your final public https issuer before real users exist (it is permanent).
+issuer: https://dex.example.com/dex
+
+storage:
+  type: sqlite3
+  config:
+    file: /var/dex/dex.db
+
+web:
+  http: 0.0.0.0:5556
+
+telemetry:
+  http: 0.0.0.0:5558
+
+logger:
+  level: info
+  format: json
+
+oauth2:
+  responseTypes: [code]
+  # The approval screen returns HTTP 500 "Approval rejected" with a static client plus a local connector on Dex v2.41.1; all clients are first-party, so it stays off.
+  skipApprovalScreen: true
+  grantTypes:
+    - authorization_code
+    - refresh_token
+    - urn:ietf:params:oauth:grant-type:device_code
+
+expiry:
+  idTokens: 1h
+  signingKeys: 6h
+  deviceRequests: 5m
+  refreshTokens:
+    validIfNotUsedFor: 168h
+    absoluteLifetime: 720h
+    reuseInterval: 3s
+    disableRotation: false
+
+staticClients:
+  - id: warden-console
+    name: Warden console
+    secretEnv: WARDEN_CONSOLE_DEX_CLIENT_SECRET
+    redirectURIs:
+      - https://localhost:7070/auth/callback
+  - id: warden
+    name: Warden data plane
+    secretEnv: WARDEN_DEX_CLIENT_SECRET
+    trustedPeers:
+      - agent-harness
+      - warden-cli
+  - id: agent-harness
+    name: Agent harness
+    secretEnv: HARNESS_DEX_CLIENT_SECRET
+  - id: warden-cli
+    name: Warden CLI
+    public: true
+    redirectURIs:
+      - https://dex.example.com/dex/device/callback
+
+connectors:
+  - type: ldap
+    name: LDAP
+    # PERMANENT: the connector id is encoded into every user's sub. Renaming it makes every user a new person.
+    id: ldap
+    config:
+      host: ldap:389
+      # Prod: StartTLS (or ldaps:// on the host) verified against rootCA.
+      startTLS: true
+      rootCA: /etc/dex/ldap-ca.pem
+      bindDN: cn=admin,dc=example,dc=org
+      # Expanded from the environment by Dex (see README, "Secrets and env expansion").
+      bindPW: $LDAP_BIND_PW
+      userSearch:
+        baseDN: ou=people,dc=example,dc=org
+        filter: "(objectClass=inetOrgPerson)"
+        username: uid
+        idAttr: uid
+        emailAttr: mail
+        nameAttr: cn
+      groupSearch:
+        baseDN: ou=groups,dc=example,dc=org
+        filter: "(objectClass=groupOfNames)"
+        userMatchers:
+          - userAttr: DN
+            groupAttr: member
+        nameAttr: cn

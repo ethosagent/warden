@@ -83,7 +83,7 @@ func listStages(t *testing.T, extra ...string) (string, int) {
 
 func TestListStagesPlain(t *testing.T) {
 	out, code := listStages(t)
-	want := "format\nvet\narchtest\nlint\nroadmap\nbuild\nvulncheck\ntest\nfuzz\nbenchmark\ncoverage\n"
+	want := "format\nvet\narchtest\nlint\nroadmap\nsecrets\nbuild\nvulncheck\ntest\nfuzz\nbenchmark\ncoverage\n"
 	if code != 0 || out != want {
 		t.Fatalf("exit %d, stages:\n%s\nwant:\n%s", code, out, want)
 	}

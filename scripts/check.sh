@@ -217,6 +217,10 @@ if [ "$FAST" -eq 0 ]; then
 	go run docs/roadmap/gen.go check
 	go test docs/roadmap/gen.go docs/roadmap/gen_test.go
 
+	# 3c. no secret literals in the identity recipe files.
+	banner "secrets (no literals in deploy/compose/dex)"
+	scripts/check-secrets.sh
+
 	# 4. build
 	banner "build (go build ./...)"
 	go build ./...

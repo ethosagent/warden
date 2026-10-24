@@ -67,7 +67,7 @@ type Class struct {
 // at one explicitly with `stage:` — free text is not accepted, so a renamed
 // stage fails here instead of silently unchecking the rule.
 var checkStages = []string{
-	"format", "vet", "archtest", "lint", "roadmap", "build", "vulncheck",
+	"format", "vet", "archtest", "lint", "roadmap", "secrets", "build", "vulncheck",
 	"test", "fuzz", "benchmark", "coverage", "integration",
 }
 
