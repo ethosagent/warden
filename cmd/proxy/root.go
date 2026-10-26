@@ -25,6 +25,7 @@ func newRootCmd() *cobra.Command {
 	rootCmd.AddCommand(newVersionCmd())
 	rootCmd.AddCommand(newAdviseCmd())
 	rootCmd.AddCommand(newMCPCmd())
+	rootCmd.AddCommand(newIdentityCmd())
 
 	policyCmd := newPolicyCmd()
 	policyCmd.AddCommand(newSuggestCmd())
