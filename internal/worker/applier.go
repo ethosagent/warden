@@ -216,8 +216,8 @@ func (a *SettingsApplier) Apply() {
 	}
 
 	// --- Identity verifier + mode (live) ---
-	// The wiring rebuilds the verifier only when an issuer, audience, JWKS, azp,
-	// skew or TTL input moved; a mode-only change swaps the mode. A rebuild
+	// The wiring rebuilds the verifier only when an issuer, internalIssuerURL,
+	// audience, JWKS, azp, groupsClaim, skew or TTL input moved; a mode-only change swaps the mode. A rebuild
 	// failure or an unknown mode keeps the previous config.
 	if settings != nil && a.identity != nil {
 		a.identity.apply(config.IdentityFromSettings(settings.Identity), config.AgentsFromSettings(settings.Agents))
