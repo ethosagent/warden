@@ -1,6 +1,8 @@
 package analytics
 
 import (
+	"database/sql"
+	"strings"
 	"testing"
 	"time"
 )
@@ -122,6 +124,41 @@ func TestUserFilterIsParameterized(t *testing.T) {
 			if err != nil || len(all) != 4 {
 				t.Fatalf("%s: table damaged after User=%q: %d events, err %v", storeName, hostile, len(all), err)
 			}
+		}
+	}
+}
+
+// The User predicate must be answerable from indexes on both stores, not a scan.
+func TestUserFilterUsesIndexes(t *testing.T) {
+	local, err := NewSQLiteStore(":memory:", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = local.Close() })
+	fleet, err := NewFleetSQLiteStore(":memory:", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = fleet.Close() })
+	for name, db := range map[string]interface {
+		Query(string, ...any) (*sql.Rows, error)
+	}{"local": local.db, "fleet": fleet.db} {
+		rows, err := db.Query("EXPLAIN QUERY PLAN SELECT ts FROM events WHERE 1=1"+userFilterSQL, "x", "x")
+		if err != nil {
+			t.Fatalf("%s: explain: %v", name, err)
+		}
+		var plan strings.Builder
+		for rows.Next() {
+			var id, parent, unused int
+			var detail string
+			if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+				t.Fatal(err)
+			}
+			plan.WriteString(detail + "\n")
+		}
+		_ = rows.Close()
+		if !strings.Contains(plan.String(), "idx_events_user_sub_ts") || !strings.Contains(plan.String(), "idx_events_user_email_lower") {
+			t.Errorf("%s: plan does not use both user indexes:\n%s", name, plan.String())
 		}
 	}
 }

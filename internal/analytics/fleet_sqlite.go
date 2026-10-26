@@ -109,6 +109,11 @@ CREATE INDEX IF NOT EXISTS idx_events_tool ON events(tool);`
 	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_events_user_sub_ts ON events (user_sub, ts)`); err != nil {
 		return fmt.Errorf("analytics: fleet migrate user index: %w", err)
 	}
+	// lower(user_email) lets SQLite plan the User filter's OR as two index
+	// lookups (user_sub, lower(user_email)) instead of a scan.
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_events_user_email_lower ON events (lower(user_email))`); err != nil {
+		return fmt.Errorf("analytics: migrate user email index: %w", err)
+	}
 	return nil
 }
 

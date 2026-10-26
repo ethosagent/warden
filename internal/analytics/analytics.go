@@ -295,7 +295,17 @@ func (f EventFilter) MatchesUser(e Event) bool {
 	if f.User == "" {
 		return true
 	}
-	return e.UserSub == f.User || strings.EqualFold(e.UserEmail, f.User)
+	// SQLite lower() folds ASCII only; match it so the stores agree.
+	return e.UserSub == f.User || asciiLower(e.UserEmail) == asciiLower(f.User)
+}
+
+func asciiLower(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= 'A' && r <= 'Z' {
+			return r + 'a' - 'A'
+		}
+		return r
+	}, s)
 }
 
 // defaultMaxEvents is the retention cap when none is supplied.
@@ -455,6 +465,11 @@ CREATE TABLE IF NOT EXISTS events (
 	// The index needs user_sub to exist, so it comes after the column loop.
 	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_events_user_sub_ts ON events (user_sub, ts)`); err != nil {
 		return fmt.Errorf("analytics: migrate user index: %w", err)
+	}
+	// lower(user_email) lets SQLite plan the User filter's OR as two index
+	// lookups (user_sub, lower(user_email)) instead of a scan.
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_events_user_email_lower ON events (lower(user_email))`); err != nil {
+		return fmt.Errorf("analytics: migrate user email index: %w", err)
 	}
 	return nil
 }
