@@ -151,9 +151,14 @@ func Run(ctx context.Context, spec ExecSpec) (int, error) {
 		c, s, e := p.Wait()
 		done <- result{c, s, e}
 	}()
+	sigs := spec.Signals
 	for {
 		select {
-		case sig := <-spec.Signals:
+		case sig, ok := <-sigs:
+			if !ok {
+				sigs = nil // a closed channel means no more signals; wait for the child only
+				continue
+			}
 			if ForwardSignal(sig, spec.StdinIsTerminal) {
 				_ = p.Signal(sig)
 			}

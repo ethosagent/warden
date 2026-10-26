@@ -243,3 +243,19 @@ func TestExecExitCodes(t *testing.T) {
 		}
 	})
 }
+
+func TestExecClosedSignalChannel(t *testing.T) {
+	p := newFakeProc()
+	ch := make(chan os.Signal)
+	close(ch)
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		close(p.exit)
+	}()
+	code, err := identityclient.Run(context.Background(), identityclient.ExecSpec{
+		Start: func() (identityclient.Process, error) { return p, nil }, Signals: ch,
+	})
+	if err != nil || code != 0 {
+		t.Errorf("code = %d, err = %v", code, err)
+	}
+}
