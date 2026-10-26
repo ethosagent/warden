@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,7 +18,6 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/spf13/pflag"
 
 	"github.com/ethosagent/warden/internal/identityclient"
 	"github.com/ethosagent/warden/test/fakes"
@@ -173,20 +173,24 @@ func TestIdentityCmd(t *testing.T) {
 
 	t.Run("no flag takes a literal client secret", func(t *testing.T) {
 		id := newIdentityCmd()
-		var all []*pflag.Flag
-		visit := func(f *pflag.Flag) { all = append(all, f) }
-		id.PersistentFlags().VisitAll(visit)
+		usages := id.PersistentFlags().FlagUsages()
 		for _, c := range id.Commands() {
-			c.Flags().VisitAll(visit)
+			usages += c.LocalFlags().FlagUsages()
+		}
+		var names []string
+		for _, m := range regexp.MustCompile(`--([a-z][a-z-]*)`).FindAllStringSubmatch(usages, -1) {
+			names = append(names, m[1])
+		}
+		if len(names) < 10 {
+			t.Fatalf("flag scan found too few flags: %v", names)
 		}
 		var secretFlags []string
-		for _, f := range all {
-			n := strings.ToLower(f.Name)
+		for _, n := range names {
 			if strings.Contains(n, "secret") || strings.Contains(n, "password") {
-				secretFlags = append(secretFlags, f.Name)
+				secretFlags = append(secretFlags, n)
 			}
 			if n == "token" || n == "refresh-token" || n == "id-token" {
-				t.Errorf("flag --%s would take a token on argv", f.Name)
+				t.Errorf("flag --%s would take a token on argv", n)
 			}
 		}
 		if len(secretFlags) != 1 || secretFlags[0] != "client-secret-env" {
@@ -271,9 +275,7 @@ func TestIdentityCmd(t *testing.T) {
 		secrets := []string{testDeviceCode, testRefresh, testAccess, "IDP-ERROR-BODY-MARKER"}
 		for _, tok := range []string{first, second} {
 			secrets = append(secrets, strings.TrimSpace(tok))
-			for _, seg := range strings.Split(strings.TrimSpace(tok), ".") {
-				secrets = append(secrets, seg)
-			}
+			secrets = append(secrets, strings.Split(strings.TrimSpace(tok), ".")...)
 		}
 		for _, s := range secrets {
 			if len(s) >= 8 && strings.Contains(all, s) {
