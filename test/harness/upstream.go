@@ -30,6 +30,8 @@ type RecordedRequest struct {
 	Method string
 	Host   string
 	Path   string
+	// Query is the raw query string as the upstream received it (after any swap).
+	Query  string
 	Proto  string
 	Header http.Header
 	Body   []byte
@@ -135,6 +137,7 @@ func (u *Upstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Method: r.Method,
 		Host:   r.Host,
 		Path:   r.URL.Path,
+		Query:  r.URL.RawQuery,
 		Proto:  r.Proto,
 		Header: r.Header.Clone(),
 	})

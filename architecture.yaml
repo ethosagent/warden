@@ -103,7 +103,7 @@ classes:
       - internal/secrets
       - internal/auth
       - internal/audit
-      - internal/auditlog         # the JSON decision stream: Record mapping now, file sink later (JAUD-01/07)
+      - internal/auditlog         # the JSON decision stream: Record mapping and the rotating sink (JAUD-01/07)
       - internal/llm
       - internal/observability
       - internal/clock            # the time source: the Clock port + its real-time impl (#362)
@@ -545,6 +545,8 @@ modules:
       layers: [repository, assembly]
     - module: golang.org/x/sync
       layers: [engine]
+    - module: gopkg.in/natefinch/lumberjack.v2
+      layers: [repository]
     - module: gopkg.in/yaml.v3
       layers: [repository]
     - module: modernc.org/sqlite

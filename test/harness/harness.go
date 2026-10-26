@@ -123,6 +123,11 @@ type H struct {
 	// `both` (#376): the CONNECT proxy keeps working AND the transparent
 	// listeners bind on loopback port 0 (addresses via TransparentAddrs).
 	transparent bool
+	// auditLogs (WithAuditLogs) turns on the JSON decision stream and signed
+	// receipts; unreachableJudge (WithUnreachableJudge) enables the inline judge
+	// against an endpoint that is never called.
+	auditLogs        bool
+	unreachableJudge bool
 
 	// inflights is one quiescence tracker per worker (the assembly-only
 	// worker.Overrides.Inflight seam): every request scope enters at request-read
@@ -708,6 +713,7 @@ func (h *H) workerParams(i int) worker.Params {
 			},
 		}
 	}
+	h.applyAuditLogs(i, &policy)
 	// The local allowlist mirrors the CP's. A managed worker ignores it (policy
 	// comes only from the control plane) but keeping the two in sync means a
 	// scenario's intent reads the same whichever mode boots.
@@ -944,6 +950,8 @@ func harnessGoroutineLeaks() []string {
 			continue // the once-per-process signal pump (see above)
 		case strings.HasPrefix(block, "goroutine 1 "):
 			continue // the test binary's main goroutine
+		case strings.Contains(block, "lumberjack.v2") && strings.Contains(block, "millRun"):
+			continue // lumberjack v2.2.1 starts one mill goroutine per Logger and offers no way to stop it (Close only closes the file); the JSON decision stream's rotating file writer
 		case strings.Contains(block, "runCleanup"):
 			continue // the cleanup goroutine doing this very check
 		case strings.Contains(block, "testing.(*T).Run("), strings.Contains(block, "testing.tRunner("):
