@@ -453,7 +453,7 @@ func identityRawTunnel(t *testing.T, h *harness.H) {
 	}
 	for _, c := range cases {
 		recs := decisionLogRecords(t, h, func(r map[string]any) bool {
-			return r["protocol"] == "tcp" && r["identity_status"] == statusOrAbsent(c) &&
+			return r["protocol"] == "tcp" && r["identity_status"] == c.status &&
 				r["identity_reason"] == reasonOrAbsent(c) && r["user_sub"] == subOrAbsent(c)
 		})
 		if len(recs) != 1 {
@@ -490,8 +490,6 @@ func bySubOrStatus(t *testing.T, evs []analytics.Event, c idToken) analytics.Eve
 	}
 	return hit[0]
 }
-
-func statusOrAbsent(c idToken) any { return c.status }
 
 func reasonOrAbsent(c idToken) any {
 	if c.reason == "" {
@@ -673,6 +671,7 @@ func identityOff(t *testing.T, h *harness.H) {
 		assertDecisionLog(t, h, url, off)
 	}
 	assertIdentityEvent(t, "no_token", only(t, evs, "https://"+identityHost+"/no_token"), idToken{name: "none"}, "allow")
+	assertDecisionLog(t, h, "https://"+identityHost+"/no_token", idToken{name: "none"})
 	assertIdentityEvent(t, "no_token receipt", only(t, h.Receipts(), "https://"+identityHost+"/no_token"), idToken{name: "none"}, "allow")
 
 	assertVerifyCounts(t, h, map[[2]string]float64{})
