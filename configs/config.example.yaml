@@ -427,6 +427,19 @@ audit:
     log: ""                       # JSONL receipts path (required when enabled)
   compliance:
     enabled: false                # tag events with OWASP/MITRE control IDs
+  # JSON decision stream (warden.decision.v1): one JSON line per stored event for a
+  # SIEM shipper. Node-local, restart-only. Off when the block is absent. The
+  # option set is validated at startup; the writer ships in a later release.
+  jsonLog:
+    enabled: false                # off by default
+    output: stdout                # stdout | stderr | file
+    path: ""                      # required when output is file
+    maxSizeMB: 100                # rotate the file at this size
+    maxBackups: 10                # rotated files kept (0 = no count limit)
+    maxAgeDays: 30                # days a rotated file is kept (0 = no age limit)
+    compress: false               # gzip rotated files
+    fileMode: 0600                # 0600 or 0640
+    query: drop                   # drop = no query data; keys = parameter names only
 
 # Outbound alert integrations (control-plane-only; NEVER served to workers).
 # Security-relevant findings are deduped into Alerts, persisted to the alert

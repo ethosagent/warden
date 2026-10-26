@@ -103,6 +103,7 @@ classes:
       - internal/secrets
       - internal/auth
       - internal/audit
+      - internal/auditlog         # the JSON decision stream: Record mapping now, file sink later (JAUD-01/07)
       - internal/llm
       - internal/observability
       - internal/clock            # the time source: the Clock port + its real-time impl (#362)
@@ -153,6 +154,7 @@ zones:
     - internal/admin
     - internal/mcp/**
     - internal/identity/adapters/oidc  # data, not shared: Z3 allows only domain packages in shared (#444)
+    - internal/auditlog  # worker-side JSON decision stream (JAUD-01/07)
     - internal/protocol
     - internal/scan
     - internal/dlp
