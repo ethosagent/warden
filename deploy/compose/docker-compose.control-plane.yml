@@ -54,6 +54,9 @@ services:
   worker-1:
     image: ethosagent/warden:${WARDEN_VERSION:-0.3.0}
     depends_on: [control-plane]
+    # Identity verification (docs/control-plane.md): a worker with an identity: block
+    # must reach the OIDC issuer, over `egress` (public issuer) or `cp-net`
+    # (compose-network issuer via identity.internalIssuerURL). Operator-set value.
     networks: [cp-net, egress, w1-internal]
     ports:
       - "127.0.0.1:9091:9090"
@@ -81,6 +84,9 @@ services:
   worker-2:
     image: ethosagent/warden:${WARDEN_VERSION:-0.3.0}
     depends_on: [control-plane]
+    # Identity verification (docs/control-plane.md): a worker with an identity: block
+    # must reach the OIDC issuer, over `egress` (public issuer) or `cp-net`
+    # (compose-network issuer via identity.internalIssuerURL). Operator-set value.
     networks: [cp-net, egress, w2-internal]
     ports:
       - "127.0.0.1:9092:9090"
