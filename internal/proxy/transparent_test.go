@@ -60,6 +60,8 @@ type transparentOpts struct {
 	// handshakeTimeout overrides the post-ClientHello TLS handshake deadline
 	// (white-box, like preambleTimeout) so the cutoff test needs no 10 s sleep.
 	handshakeTimeout time.Duration
+	// identity enables the identity verifier (W-P1-VRFY-02).
+	identity IdentityConfig
 }
 
 // transparentEnv is one transparent-mode world.
@@ -109,6 +111,7 @@ func newTransparentEnv(t *testing.T, o transparentOpts) *transparentEnv {
 		Metrics:          e.metrics,
 		Logger:           slog.New(slog.NewTextHandler(e.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 		Judge:            o.judge,
+		Identity:         o.identity,
 		PlaceholderNames: []string{invPlaceholder},
 
 		TransparentHTTPSListen:    "127.0.0.1:0",

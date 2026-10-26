@@ -77,7 +77,7 @@ func (c bufferedConn) Read(b []byte) (int, error) { return c.Reader.Read(b) }
 // terminateAndDispatch — the SAME termination/dispatch path the transparent
 // :443 listener uses after its ClientHello gate (#376). Forward-mode behavior
 // is unchanged byte for byte.
-func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, port int, needsJudge bool) {
+func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, port int, needsJudge bool, ci connIdentity) {
 	firstByte, err := br.Peek(1)
 	if err != nil || firstByte[0] != 0x16 {
 		if needsJudge {
@@ -124,7 +124,7 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 		return
 	}
 
-	p.terminateAndDispatch(clientConn, br, domain, port, needsJudge)
+	p.terminateAndDispatch(clientConn, br, domain, port, needsJudge, ci)
 }
 
 // terminateAndDispatch terminates TLS for domain with the MITM leaf cert and
@@ -135,7 +135,7 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 // destination — the CONNECT tunnel (handleTLS) and the transparent :443
 // listener (handleTransparentTLS, #376) — so policy, swap, scan, MCP and
 // analytics CANNOT diverge between the two modes.
-func (p *Proxy) terminateAndDispatch(clientConn net.Conn, firstBytes io.Reader, domain string, port int, needsJudge bool) {
+func (p *Proxy) terminateAndDispatch(clientConn net.Conn, firstBytes io.Reader, domain string, port int, needsJudge bool, ci connIdentity) {
 	leaf, err := p.getOrCreateCert(domain)
 	if err != nil {
 		return
@@ -168,7 +168,7 @@ func (p *Proxy) terminateAndDispatch(clientConn net.Conn, firstBytes io.Reader, 
 	// NegotiatedProtocol stays "" and this branch is skipped — the peek path below
 	// is unchanged for them.
 	if tlsConn.ConnectionState().NegotiatedProtocol == "h2" {
-		p.handleGRPC(bufferedConn{Reader: plainReader, Conn: tlsConn}, domain, port, needsJudge)
+		p.handleGRPC(bufferedConn{Reader: plainReader, Conn: tlsConn}, domain, port, needsJudge, ci)
 		return
 	}
 
@@ -180,13 +180,13 @@ func (p *Proxy) terminateAndDispatch(clientConn net.Conn, firstBytes io.Reader, 
 	detected := protocol.Detect(peekBytes)
 	switch detected {
 	case protocol.HTTP:
-		p.handleHTTP(tlsConn, plainReader, domain, port, needsJudge, policy.SchemeHTTPS, nil)
+		p.handleHTTP(tlsConn, plainReader, domain, port, needsJudge, policy.SchemeHTTPS, nil, ci)
 		return
 	case protocol.HTTP2:
 		// Prior-knowledge h2 client (no ALPN): the peek saw the HTTP/2
 		// connection preface. Terminate HTTP/2 directly; each stream runs the
 		// shared stage pipeline, judge included.
-		p.handleGRPC(bufferedConn{Reader: plainReader, Conn: tlsConn}, domain, port, needsJudge)
+		p.handleGRPC(bufferedConn{Reader: plainReader, Conn: tlsConn}, domain, port, needsJudge, ci)
 		return
 	}
 

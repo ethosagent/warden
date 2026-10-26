@@ -93,6 +93,11 @@ type Config struct {
 	// requests are forwarded to TLS termination so the judge can inspect the full
 	// request. The judge is never authoritative over static rules.
 	Judge Judge
+	// Identity is the optional user-token verifier and the agent's identity mode
+	// (W-P1-VRFY-02). The zero value is mode off: no token is read, verified or
+	// attributed, and the request path is unchanged. Worker assembly fills it
+	// (W-P1-VRFY-07); SetIdentity swaps it at runtime.
+	Identity IdentityConfig
 	// AgentID identifies the single configured agent for judge lookups. The
 	// port-binding model is one proxy per agent, so a single id suffices.
 	AgentID string
@@ -246,6 +251,7 @@ type MetricsRecorder interface {
 	RecordScanFinding(kind string)
 	RecordJudge(outcome string)
 	ObserveAddedLatency(stage string, d time.Duration)
+	RecordIdentityVerify(result, reason string)
 }
 
 // CostEstimator is the consumer-side seam for the optional LLM cost estimator.
@@ -266,6 +272,7 @@ func (nopMetrics) RecordSecretSwap(placeholderRef string)            {}
 func (nopMetrics) RecordScanFinding(kind string)                     {}
 func (nopMetrics) RecordJudge(outcome string)                        {}
 func (nopMetrics) ObserveAddedLatency(stage string, d time.Duration) {}
+func (nopMetrics) RecordIdentityVerify(result, reason string)        {}
 
 // Judge renders an allow/deny verdict for a request that matched no static
 // rule. It is defined here (consumer-side) so the proxy does not depend on the
@@ -358,6 +365,17 @@ type Proxy struct {
 	// seeded from cfg.Secrets in New (which New validates as non-nil), so an
 	// unmanaged worker's behavior is unchanged.
 	secretsP atomic.Pointer[secretsHolder]
+
+	// identityP holds the live identity verifier and mode, swappable atomically
+	// while the hot path reads it (identity.go). A nil pointer means mode off.
+	// It is seeded from cfg.Identity in New.
+	identityP atomic.Pointer[identityHolder]
+	// warnNoCA / warnTransparentOnly make each startup warning fire once per
+	// process, however often SetIdentity runs.
+	warnNoCA, warnTransparentOnly sync.Once
+	// identityTimeout overrides identityVerifyTimeout (0 = the const). White-box,
+	// like preambleTimeout: tests shrink it to pin the bound.
+	identityTimeout time.Duration
 
 	// analyticsP holds the live analytics store, swappable atomically while the
 	// hot path reads it (a control-plane compliance toggle rebuilds only the
@@ -548,6 +566,7 @@ func New(cfg Config) (*Proxy, error) {
 	// non-nil) cfg values so an unmanaged worker reads exactly what it did before;
 	// a managed worker's apply loop replaces them on cache.ttl / compliance changes.
 	p.secretsP.Store(&secretsHolder{s: cfg.Secrets})
+	p.identityP.Store(newIdentityHolder(cfg.Identity.Verifier, cfg.Identity.Mode))
 	p.analyticsP.Store(&analyticsHolder{a: cfg.Analytics})
 	// Seed the swappable DLP scanner from cfg.DLP (may be nil = disabled). A nil
 	// *DLPScanner stores and loads back as nil, so dlp() reads exactly what a
@@ -658,6 +677,8 @@ func New(cfg Config) (*Proxy, error) {
 			return nil, fmt.Errorf("proxy: mode %q intercepts TLS and requires a CA (CACertPath/CAKeyPath)", cfg.Mode)
 		}
 	}
+
+	p.warnIdentityCoverage()
 
 	return p, nil
 }

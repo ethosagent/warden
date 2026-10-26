@@ -12,9 +12,9 @@ import (
 // proxyOnlyHeaders are addressed to Warden, never to the destination (#396).
 // Warden reads any value it needs from them before stripHopHeaders runs.
 var proxyOnlyHeaders = []string{
-	"Proxy-Authorization",
+	proxyAuthorizationHeader,
 	"Proxy-Connection",
-	"X-Warden-Identity",
+	IdentityHeader,
 }
 
 // hopByHopRequestHeaders are the RFC 9110 §7.6.1 hop-by-hop fields (plus the

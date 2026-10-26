@@ -3,6 +3,7 @@ package proxy
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
@@ -359,4 +360,19 @@ func TestHTTP2_SecretScope_UsesConnectHostNotAuthority(t *testing.T) {
 	if be.gotAuth != "" {
 		t.Fatalf("request reached the origin with Authorization = %q", be.gotAuth)
 	}
+}
+
+// h2 returns a round tripper whose one HTTP/2 connection is a CONNECT tunnel
+// (with connectExtra header lines) to the identity env's proxy. It lives here
+// because this file is where the deprecated x/net http2 client is allowed.
+func (e *idEnv) h2(connectExtra string) http.RoundTripper {
+	e.t.Helper()
+	conn, br, status := e.connect(connectExtra)
+	if !strings.Contains(status, "200") {
+		e.t.Fatalf("CONNECT status = %q, want 200", status)
+	}
+	tc := e.tlsOver(conn, br, "h2")
+	tr := &http2.Transport{DialTLSContext: func(context.Context, string, string, *tls.Config) (net.Conn, error) { return tc, nil }}
+	e.t.Cleanup(tr.CloseIdleConnections)
+	return tr
 }
