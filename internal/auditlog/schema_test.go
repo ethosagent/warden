@@ -334,8 +334,10 @@ func TestDecisionSchemaReasons(t *testing.T) {
 	}
 
 	want := map[string]bool{}
+	declared := map[string]bool{}
 	for _, r := range denyreason.Declared() {
 		want[string(r)] = true
+		declared[string(r)] = true
 	}
 	for _, r := range gatewayReasons {
 		want[r] = true
@@ -373,7 +375,7 @@ func TestDecisionSchemaReasons(t *testing.T) {
 		lits[l] = true
 	}
 	for _, r := range gatewayReasons {
-		if !lits[r] && !want[r] {
+		if !lits[r] && !declared[r] {
 			t.Errorf("gatewayReasons lists %q, which no longer appears in internal/mcp/gateway", r)
 		}
 	}
