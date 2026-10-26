@@ -263,6 +263,10 @@ func (s *FleetSQLiteStore) GetEvents(filter EventFilter) ([]Event, error) {
 		q += " AND proxy_id = ?"
 		args = append(args, filter.ProxyID)
 	}
+	if filter.User != "" {
+		q += userFilterSQL
+		args = append(args, filter.User, filter.User)
+	}
 	if !filter.Since.IsZero() {
 		q += " AND ts >= ?"
 		args = append(args, filter.Since.UnixNano())
@@ -341,6 +345,10 @@ func (s *FleetSQLiteStore) GetAggregatedEvents(filter AggregatedFilter) ([]Aggre
 	if filter.AgentID != "" {
 		q += " AND agent_id = ?"
 		args = append(args, filter.AgentID)
+	}
+	if filter.User != "" {
+		q += userFilterSQL
+		args = append(args, filter.User, filter.User)
 	}
 	if !filter.Since.IsZero() {
 		q += " AND ts >= ?"

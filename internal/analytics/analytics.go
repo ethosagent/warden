@@ -274,11 +274,28 @@ type EventFilter struct {
 	// Tool filters by MCP tool name for per-tool drill-down.
 	Tool  string
 	Since time.Time
+	// User narrows to one person: an exact user_sub match, or a case-insensitive
+	// user_email match. Empty = no user filter. Always bound as a parameter.
+	User string
 	// ProxyID filters to events from one worker in a fleet view. Honored by the
 	// aggregating CentralStore; ignored by the local SQLite store (single node).
 	ProxyID string
 	// Limit caps the number of rows returned (0 = no cap).
 	Limit int
+}
+
+// userFilterSQL is the shared WHERE fragment for EventFilter.User; both SQLite
+// stores bind the same value twice (sub, then email).
+const userFilterSQL = " AND (user_sub = ? OR lower(user_email) = lower(?))"
+
+// MatchesUser reports whether e belongs to f.User (true when no user filter is
+// set). It is the in-memory twin of userFilterSQL, for stores and fakes that do
+// not run SQL.
+func (f EventFilter) MatchesUser(e Event) bool {
+	if f.User == "" {
+		return true
+	}
+	return e.UserSub == f.User || strings.EqualFold(e.UserEmail, f.User)
 }
 
 // defaultMaxEvents is the retention cap when none is supplied.
@@ -688,6 +705,10 @@ func (s *SQLiteStore) GetEvents(filter EventFilter) ([]Event, error) {
 	if filter.Tool != "" {
 		q += " AND tool = ?"
 		args = append(args, filter.Tool)
+	}
+	if filter.User != "" {
+		q += userFilterSQL
+		args = append(args, filter.User, filter.User)
 	}
 	if !filter.Since.IsZero() {
 		q += " AND ts >= ?"
