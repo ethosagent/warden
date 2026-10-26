@@ -232,20 +232,20 @@ func (p *Proxy) handleConn(conn net.Conn) {
 	// HTTP"). No domain is known at this pre-protocol stage, so the deny is
 	// recorded without one.
 	if !strings.HasPrefix(line, "CONNECT ") || !strings.Contains(line, "HTTP/") {
-		p.storeDeny("", 0, "tcp", denyreason.UnsupportedProtocol, "")
+		p.storeDeny(connIdentity{}, "", 0, "tcp", denyreason.UnsupportedProtocol, "")
 		return
 	}
 
 	fields := strings.Fields(line)
 	if len(fields) < 2 {
-		p.storeDeny("", 0, "tcp", denyreason.MalformedConnect, "")
+		p.storeDeny(connIdentity{}, "", 0, "tcp", denyreason.MalformedConnect, "")
 		return
 	}
 	target := fields[1]
 
 	domain, port, err := SplitHostPort(target)
 	if err != nil {
-		p.storeDeny("", 0, "tcp", denyreason.MalformedConnect, "")
+		p.storeDeny(connIdentity{}, "", 0, "tcp", denyreason.MalformedConnect, "")
 		return
 	}
 
@@ -311,7 +311,7 @@ func (p *Proxy) handleConn(conn net.Conn) {
 		if verdict.Decision == policy.NoMatch {
 			reason = denyreason.PolicyNoMatch
 		}
-		p.emitDenyEvent(analytics.Event{
+		p.emitDenyEvent(ci, analytics.Event{
 			Timestamp: time.Now(),
 			Domain:    domain,
 			Port:      port,
@@ -332,7 +332,7 @@ func (p *Proxy) handleConn(conn net.Conn) {
 	// NoMatch request must fail closed here — only statically Allowed
 	// destinations may be raw-tunneled.
 	if verdict.Decision == policy.NoMatch {
-		p.emitDenyEvent(analytics.Event{
+		p.emitDenyEvent(ci, analytics.Event{
 			Timestamp: time.Now(),
 			Domain:    domain,
 			Port:      port,
@@ -363,7 +363,7 @@ func isHeaderLine(line, name string) bool {
 // connection before it can read the rejection. This is the standard error
 // close (nginx/HAProxy lingering close).
 func (p *Proxy) rejectPreamble(conn net.Conn, br *bufio.Reader, resp, detail string) {
-	p.storeDeny("", 0, "tcp", denyreason.MalformedConnect, detail)
+	p.storeDeny(connIdentity{}, "", 0, "tcp", denyreason.MalformedConnect, detail)
 	_, _ = fmt.Fprint(conn, resp)
 	_, _ = io.Copy(io.Discard, br)
 }
@@ -375,8 +375,8 @@ func (p *Proxy) rejectPreamble(conn net.Conn, br *bufio.Reader, resp, detail str
 // warden.blocked.total{reason} metric. detail, when non-empty, is a bounded
 // refinement of the reason (e.g. "request_line_too_long") for the decision log
 // only; it never carries request content.
-func (p *Proxy) storeDeny(domain string, port int, protocol string, reason denyreason.Reason, detail string) {
-	p.emitDenyEventDetail(analytics.Event{
+func (p *Proxy) storeDeny(ci connIdentity, domain string, port int, protocol string, reason denyreason.Reason, detail string) {
+	p.emitDenyEventDetail(ci, analytics.Event{
 		Timestamp: time.Now(),
 		Domain:    domain,
 		Port:      port,
@@ -390,12 +390,12 @@ func (p *Proxy) storeDeny(domain string, port int, protocol string, reason denyr
 // class, never the resolved address list. It is a no-op — returning false — for
 // any other error, so ordinary dial failures (DNS failure, timeout, connection
 // refused) are never mis-audited as ssrf_*.
-func (p *Proxy) storeSSRFDeny(domain string, port int, protocol string, err error) bool {
+func (p *Proxy) storeSSRFDeny(ci connIdentity, domain string, port int, protocol string, err error) bool {
 	se, ok := AsSSRFError(err)
 	if !ok {
 		return false
 	}
-	p.emitDenyEvent(analytics.Event{
+	p.emitDenyEvent(ci, analytics.Event{
 		Timestamp: time.Now(),
 		Domain:    domain,
 		Port:      port,
@@ -408,8 +408,8 @@ func (p *Proxy) storeSSRFDeny(domain string, port int, protocol string, err erro
 
 // storeAllow records the single allow decision for an admitted CONNECT
 // (event + metric + log line), the raw-tunnel counterpart of storeDeny.
-func (p *Proxy) storeAllow(domain string, port int, protocol string) {
-	_ = p.analyticsStore().StoreEvent(analytics.Event{
+func (p *Proxy) storeAllow(ci connIdentity, domain string, port int, protocol string) {
+	p.recordEvent(ci, analytics.Event{
 		Timestamp: time.Now(),
 		Domain:    domain,
 		Port:      port,
@@ -417,7 +417,7 @@ func (p *Proxy) storeAllow(domain string, port int, protocol string) {
 		Decision:  "allow",
 	})
 	p.cfg.Metrics.RecordRequest("allow", protocol)
-	p.logDecision(decisionLog{Domain: domain, Port: port, Protocol: protocol, Decision: "allow"})
+	p.logDecision(decisionLog{Domain: domain, Port: port, Protocol: protocol, Decision: "allow", ID: ci})
 }
 
 // tunnel completes a raw (non-TLS-terminating) CONNECT: dial the destination
@@ -431,16 +431,16 @@ func (p *Proxy) storeAllow(domain string, port int, protocol string) {
 //
 // The connection's identity is accepted but unused here: a raw tunnel is opaque
 // and records no per-request identity (stamping events is W-P1-VRFY-09).
-func (p *Proxy) tunnel(client net.Conn, br *bufio.Reader, domain string, port int, _ connIdentity) {
+func (p *Proxy) tunnel(client net.Conn, br *bufio.Reader, domain string, port int, ci connIdentity) {
 	p.reach(PathTunnel)
 	remote, err := p.dialFunc("tcp", net.JoinHostPort(domain, fmt.Sprintf("%d", port)))
 	if err != nil {
-		if !p.storeSSRFDeny(domain, port, "tcp", err) {
-			p.storeAllow(domain, port, "tcp")
+		if !p.storeSSRFDeny(ci, domain, port, "tcp", err) {
+			p.storeAllow(ci, domain, port, "tcp")
 		}
 		return
 	}
-	p.storeAllow(domain, port, "tcp")
+	p.storeAllow(ci, domain, port, "tcp")
 
 	var wg sync.WaitGroup
 	wg.Add(2)

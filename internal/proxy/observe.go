@@ -1,8 +1,10 @@
 package proxy
 
 import (
+	"context"
 	"log/slog"
 
+	"github.com/ethosagent/warden/internal/identity"
 	"github.com/ethosagent/warden/internal/mcp/gateway"
 	"github.com/ethosagent/warden/internal/scan"
 )
@@ -32,6 +34,11 @@ type decisionLog struct {
 	// SSRFError). Empty unless Reason is one of the ssrf_* enums; it never
 	// carries a resolved address.
 	AddrClass string
+	// ID is the caller's identity. While identity is on, logDecision logs its
+	// status (none included) and reason, and the sub and group count only for
+	// status valid. The email and the group list are logged at debug level only;
+	// the token is never here.
+	ID connIdentity
 }
 
 // logDecision emits one structured record next to the analytics StoreEvent.
@@ -67,6 +74,25 @@ func (p *Proxy) logDecision(d decisionLog) {
 	}
 	if d.AddrClass != "" {
 		attrs = append(attrs, slog.String("addr_class", d.AddrClass))
+	}
+	// Identity off logs nothing identity-related, like the event. Identity on
+	// always logs the status, none included.
+	if p.identity() != nil {
+		st := d.ID.status()
+		attrs = append(attrs, slog.String("identity_status", string(st)))
+		if d.ID.Reason != "" {
+			attrs = append(attrs, slog.String("identity_reason", string(d.ID.Reason)))
+		}
+		if st == identity.StatusValid {
+			attrs = append(attrs, slog.String("user_sub", d.ID.Claims.Sub), slog.Int("groups_count", len(d.ID.Claims.Groups)))
+			if p.cfg.Logger.Enabled(context.Background(), slog.LevelDebug) {
+				p.cfg.Logger.Debug("egress decision identity",
+					slog.String("user_sub", d.ID.Claims.Sub),
+					slog.String("user_email", d.ID.Claims.Email),
+					slog.Any("user_groups", d.ID.Claims.Groups),
+				)
+			}
+		}
 	}
 	if d.Decision == "deny" {
 		p.cfg.Logger.Warn("egress decision", attrs...)

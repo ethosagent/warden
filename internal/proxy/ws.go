@@ -190,7 +190,7 @@ func (p *Proxy) handleWSUpgrade(s *requestScope) {
 		})
 		return
 	}
-	_ = p.analyticsStore().StoreEvent(analytics.Event{
+	p.recordEvent(s.resolved(), analytics.Event{
 		Timestamp:      time.Now(),
 		Domain:         s.domain,
 		Port:           s.port,
@@ -206,6 +206,7 @@ func (p *Proxy) handleWSUpgrade(s *requestScope) {
 		Domain: s.domain, Port: s.port, Protocol: proto,
 		Method: req.Method, URL: fullURL, Decision: "allow",
 		ResponseStatus: resp.StatusCode,
+		ID:             s.resolved(),
 	})
 }
 
