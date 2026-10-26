@@ -62,7 +62,7 @@ jobs:
       # Keep the fuzzer's evolving corpus between nights so each run starts
       # where the last one stopped.
       - name: Restore fuzz corpus cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/go-build/fuzz
           key: fuzz-corpus-${{ matrix.name }}-${{ github.run_id }}
@@ -90,7 +90,7 @@ jobs:
 
       - name: Upload crashers
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fuzz-crashers-${{ matrix.name }}
           path: crashers
