@@ -164,6 +164,9 @@ func TestDexTokenScript(t *testing.T) {
 		}
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		if f.auth != "" {
+			t.Errorf("credentials must travel in the form body, got an Authorization header")
+		}
 		for k, v := range map[string]string{"grant_type": "password", "username": "alice", "scope": tokScope, "client_id": "agent-harness"} {
 			if f.form.Get(k) != v {
 				t.Errorf("form %s = %q, want %q", k, f.form.Get(k), v)
@@ -189,6 +192,7 @@ func TestDexTokenScript(t *testing.T) {
 		body func() any
 		want string
 	}{
+		{"body_not_object", func() any { return "<html>oops</html>" }, "not JSON"},
 		{"no_id_token", func() any { return map[string]any{"access_token": "at"} }, "no id_token"},
 		{"payload_not_json", func() any { return map[string]any{"id_token": "h." + b64([]byte("not json")) + ".s"} }, "not JSON"},
 	} {

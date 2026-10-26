@@ -66,7 +66,7 @@ if [ "$code" != 200 ]; then
 	die "token request failed: HTTP $code, error=$err"
 fi
 
-id=$(jq -r '.id_token // empty' "$tmp")
+id=$(jq -r '.id_token // empty' "$tmp" 2>/dev/null) || die "token response is not JSON"
 [ -n "$id" ] || die "response has no id_token"
 
 seg=$(cut -d. -f2 <<<"$id" | tr '_-' '/+')

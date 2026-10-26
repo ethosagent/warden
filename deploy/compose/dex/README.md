@@ -185,7 +185,7 @@ No Go change is needed.
 ## Tests
 
 ```sh
-go test ./test/deploy -run 'TestDexReferenceConfig|TestCheckSecretsScript|TestIdentityComposePinned'
+go test ./test/deploy -run 'TestDexReferenceConfig|TestCheckSecretsScript|TestIdentityComposePinned|TestDexTokenScript'
 ```
 
 These are static: no container starts (add `TestIdentityComposePinned` for the
