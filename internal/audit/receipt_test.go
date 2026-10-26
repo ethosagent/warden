@@ -170,3 +170,42 @@ func TestNewSignerFromKey(t *testing.T) {
 		t.Fatal("Verify returned false for receipt signed with NewSignerFromKey")
 	}
 }
+
+// An identity-free event's receipt has no user_* keys; an attributed event's
+// receipt carries them and still verifies.
+func TestReceiptIdentityFields(t *testing.T) {
+	signer, err := NewSigner()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	plain, err := signer.Sign(sampleEvent())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"user_", "identity_"} {
+		if bytes.Contains(plain.EventJSON, []byte(k)) {
+			t.Fatalf("identity-free receipt contains %q: %s", k, plain.EventJSON)
+		}
+	}
+
+	ev := sampleEvent()
+	ev.UserSub = "sub-1"
+	ev.IdentityStatus = "valid"
+	ev.UserGroups = []string{"cn=eng,ou=groups,dc=corp"}
+	r, err := signer.Sign(ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(r.EventJSON, []byte(`"user_sub"`)) || !bytes.Contains(r.EventJSON, []byte(`"identity_status":"valid"`)) {
+		t.Fatalf("attributed receipt missing identity keys: %s", r.EventJSON)
+	}
+	if !Verify(r, signer.PubKey()) {
+		t.Fatal("attributed receipt does not verify")
+	}
+	// Tampering with the identity invalidates it.
+	r.EventJSON = bytes.Replace(r.EventJSON, []byte("sub-1"), []byte("sub-2"), 1)
+	if Verify(r, signer.PubKey()) {
+		t.Fatal("tampered identity still verifies")
+	}
+}
