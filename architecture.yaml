@@ -107,6 +107,7 @@ classes:
       - internal/llm
       - internal/observability
       - internal/clock            # the time source: the Clock port + its real-time impl (#362)
+      - internal/cpstate          # the control plane's SQLite state DB + migration runner (SSO-01)
       - internal/integration
       - internal/integration/webhook
       - internal/mcp/poisoned     # the poisoned MCP server (HTTP I/O) the demo binary and the L1 harness share (#363)
@@ -168,6 +169,7 @@ zones:
   control:
     - cmd/**
     - internal/controlplane/**
+    - internal/cpstate
     - internal/dashboard/**
     - internal/alertpipeline
     - internal/audit

@@ -3,6 +3,7 @@ package controlplane
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
@@ -10,6 +11,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -288,4 +291,132 @@ func TestDirWritable(t *testing.T) {
 	if dirWritable(filepath.Join(t.TempDir(), "does-not-exist")) {
 		t.Fatal("expected a non-existent directory to be non-writable")
 	}
+}
+
+// TestRunCreatesStateDB: with --state-dir, Run opens <state-dir>/warden-cp.db
+// (mode 0600) before serving, closes it on shutdown, and does not create it
+// without a state dir.
+func TestRunCreatesStateDB(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "state")
+	startAndProbe(t, Params{
+		ConfigPath:        writePolicyFile(t, "api.openai.com"),
+		StateDir:          stateDir,
+		AnalyticsProvider: "memory",
+		ListenAddr:        "127.0.0.1:0",
+	}, http.DefaultClient)
+
+	fi, err := os.Stat(filepath.Join(stateDir, "warden-cp.db"))
+	if err != nil {
+		t.Fatalf("warden-cp.db not created: %v", err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Errorf("warden-cp.db mode = %o, want 600", perm)
+	}
+}
+
+// TestRunLogsStateDB: the startup line carries the db path and applied
+// migration IDs, and nothing else about the contents.
+func TestRunLogsStateDB(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "state")
+	ctx, cancel := context.WithCancel(context.Background())
+	ready := make(chan string, 1)
+	errCh := make(chan error, 1)
+	var out syncBuffer
+	go func() {
+		errCh <- Run(ctx, &out, Params{
+			ConfigPath:        writePolicyFile(t, "api.openai.com"),
+			StateDir:          stateDir,
+			AnalyticsProvider: "memory",
+			ListenAddr:        "127.0.0.1:0",
+			OnReady:           func(a string) { ready <- a },
+		})
+	}()
+	select {
+	case <-ready:
+	case err := <-errCh:
+		t.Fatalf("Run returned early: %v", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for OnReady")
+	}
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Fatalf("Run = %v", err)
+	}
+	log := out.String()
+	for _, want := range []string{"control plane state db", filepath.Join(stateDir, "warden-cp.db"), `"applied"`} {
+		if !strings.Contains(log, want) {
+			t.Errorf("startup log missing %q:\n%s", want, log)
+		}
+	}
+}
+
+// TestRunCorruptStateDB: a warden-cp.db of random bytes stops startup with an
+// error naming the path, and closes an injected listener.
+func TestRunCorruptStateDB(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "state")
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dbFile := filepath.Join(stateDir, "warden-cp.db")
+	garbage := make([]byte, 4096)
+	if _, err := rand.Read(garbage); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dbFile, garbage, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tcp, ok := ln.(*net.TCPListener); ok {
+		_ = tcp.SetDeadline(time.Now().Add(10 * time.Second))
+	}
+
+	err = Run(context.Background(), &bytes.Buffer{}, Params{
+		ConfigPath:        writePolicyFile(t, "api.openai.com"),
+		StateDir:          stateDir,
+		AnalyticsProvider: "memory",
+		Listener:          ln,
+	})
+	if err == nil || !strings.Contains(err.Error(), dbFile) {
+		t.Fatalf("Run err = %v, want one naming %s", err, dbFile)
+	}
+	if _, aerr := ln.Accept(); !errors.Is(aerr, net.ErrClosed) {
+		t.Errorf("Accept after failed boot = %v, want net.ErrClosed", aerr)
+	}
+	after, _ := os.ReadFile(dbFile)
+	if !bytes.Equal(after, garbage) {
+		t.Error("corrupt state db was modified")
+	}
+}
+
+// TestRunNoStateDirNoStateDB: without --state-dir no warden-cp.db appears.
+func TestRunNoStateDirNoStateDB(t *testing.T) {
+	startAndProbe(t, Params{
+		ConfigPath:        writePolicyFile(t, "api.openai.com"),
+		AnalyticsProvider: "memory",
+		ListenAddr:        "127.0.0.1:0",
+	}, http.DefaultClient)
+	if _, err := os.Stat("warden-cp.db"); err == nil {
+		t.Error("warden-cp.db created in the working directory without --state-dir")
+	}
+}
+
+// syncBuffer is a bytes.Buffer safe for the log writer goroutine and the test.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
 }
