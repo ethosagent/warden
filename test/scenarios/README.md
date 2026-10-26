@@ -33,6 +33,23 @@ Scenario names are the subtest names; the canary matrix is
 Rules: no sleeps — wait with `h.Eventually`, `Upstream.WaitParked` and the fake
 clock (`h.Clock().Advance`). Close every response body.
 
+## Minting user tokens (OIDC issuer fake)
+
+`harness.WithOIDCIssuer()` starts an in-process OIDC issuer (`fakes.OIDCIssuer`,
+`test/fakes/oidcissuer.go`) and exposes it as `h.Issuer()`; it stops at cleanup
+and shares the harness clock, so `h.Clock().Advance` moves token time too. Mint
+with `h.Issuer().Mint(fakes.Valid("sub", "a@example.com", "group"...))`, or
+`fakes.Expired()`, `WrongAudience()`, `WrongAZP()`, `TooLong()`, `RotateKey()`
+and the `With*` overrides (`WithClaim`, `WithAlg`, `WithKID`, `WithoutClaim`, ...).
+`Stop()` / `Start()` take the issuer down and up; `JWKSRequests()` counts key
+fetches. Present the token with `h.AgentWithProxyToken(tok)` /
+`h.AgentH2WithProxyToken(tok)` (sent as `Proxy-Authorization: Basic` on CONNECT),
+`h.ConnectStatusWithAuth(hostPort, rawHeaderValue)` for Bearer, malformed or
+duplicate forms, or set `X-Warden-Identity` on a request yourself. The issuer is
+plain http on loopback, so a verifier config for it needs
+`InternalIssuerURL: h.Issuer().Issuer()` (the http-issuer rule). Never print a
+token in a failure message; name the claim instead.
+
 ## Known issues
 
 A row that an open issue breaks is marked `knownIssue` (see `canary.go` and

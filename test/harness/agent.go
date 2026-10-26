@@ -120,6 +120,44 @@ func (h *H) AgentH2() *http.Client {
 	return h.agentH2Cl
 }
 
+// AgentWithProxyToken is Agent presenting a user token to the proxy: the same
+// transport, trust and transcript, but the proxy URL is
+// http://session:<token>@<worker>, so Go sends
+// "Proxy-Authorization: Basic base64(session:<token>)" on every CONNECT. A new
+// client per call (a token is per client); the token is never logged. Per-request
+// X-Warden-Identity needs no helper: set the header on the request.
+func (h *H) AgentWithProxyToken(token string) *http.Client {
+	h.tb.Helper()
+	return h.proxyTokenClient(h.ProxyAddr(), token, false)
+}
+
+// AgentH2WithProxyToken is AgentH2 presenting a user token the way
+// AgentWithProxyToken does.
+func (h *H) AgentH2WithProxyToken(token string) *http.Client {
+	h.tb.Helper()
+	return h.proxyTokenClient(h.ProxyAddr(), token, true)
+}
+
+// proxyTokenClient builds the token-carrying agent against proxyAddr (a test
+// points it at a header recorder).
+func (h *H) proxyTokenClient(proxyAddr, token string, h2 bool) *http.Client {
+	h.tb.Helper()
+	if h.agentClients != nil {
+		h.tb.Fatal("harness: the proxy-token agents are in-process only; this target supplies its own agent clients")
+	}
+	proxyURL := &url.URL{Scheme: "http", User: url.UserPassword("session", token), Host: proxyAddr}
+	base := &http.Transport{
+		Proxy:             func(*http.Request) (*url.URL, error) { return proxyURL, nil },
+		ForceAttemptHTTP2: h2,
+		TLSClientConfig:   h.AgentTLSConfig(),
+	}
+	cl := &http.Client{Timeout: defaultAgentTimeout, Transport: &recordingTransport{base: base, h: h}}
+	h.mu.Lock()
+	h.tokenClients = append(h.tokenClients, cl)
+	h.mu.Unlock()
+	return cl
+}
+
 // TransparentAgent returns an HTTP client the way a transparently intercepted
 // agent speaks (#376): NO proxy configuration anywhere — its TLS dials go to
 // the worker's transparent :443 listener with the destination hostname as SNI,
