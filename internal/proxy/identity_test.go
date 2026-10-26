@@ -195,21 +195,20 @@ func (c *idH1) get(extra string) int {
 	return resp.StatusCode
 }
 
-func (e *idEnv) h2(connectExtra string) *http2.ClientConn { //nolint:staticcheck // SA1019: same client conn type the other h2 tests use
+// h2 returns a round tripper whose one HTTP/2 connection is the CONNECT tunnel.
+func (e *idEnv) h2(connectExtra string) http.RoundTripper {
 	e.t.Helper()
 	conn, br, status := e.connect(connectExtra)
 	if !strings.Contains(status, "200") {
 		e.t.Fatalf("CONNECT status = %q, want 200", status)
 	}
 	tc := e.tlsOver(conn, br, "h2")
-	cc, err := (&http2.Transport{}).NewClientConn(tc) //nolint:staticcheck // SA1019: same client conn type the other h2 tests use
-	if err != nil {
-		e.t.Fatal(err)
-	}
-	return cc
+	tr := &http2.Transport{DialTLSContext: func(context.Context, string, string, *tls.Config) (net.Conn, error) { return tc, nil }}
+	e.t.Cleanup(tr.CloseIdleConnections)
+	return tr
 }
 
-func h2Get(t *testing.T, cc *http2.ClientConn, hdr map[string]string) int { //nolint:staticcheck // SA1019: same client conn type the other h2 tests use
+func h2Get(t *testing.T, cc http.RoundTripper, hdr map[string]string) int {
 	t.Helper()
 	req, _ := http.NewRequest("GET", "https://"+idHost+"/x", nil)
 	for k, v := range hdr {
