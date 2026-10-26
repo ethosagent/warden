@@ -626,3 +626,41 @@ func TestSessionsDisabledOnBadRedirect(t *testing.T) {
 		t.Fatal("sessions enabled for an unusable redirect URL")
 	}
 }
+
+func TestSessionOriginNormalized(t *testing.T) {
+	for in, want := range map[string]string{
+		"https://CP.example:443/auth/callback":  "https://cp.example",
+		"https://cp.example:8443/auth/callback": "https://cp.example:8443",
+		"http://localhost:80/auth/callback":     "http://localhost",
+		"http://[::1]:8081/auth/callback":       "http://[::1]:8081",
+	} {
+		c, err := NewSessionCookie(in)
+		if err != nil || c.origin != want {
+			t.Errorf("NewSessionCookie(%q).origin = %q, %v; want %q", in, c.origin, err, want)
+		}
+	}
+}
+
+// failingTouch resolves every session but fails to record activity.
+type failingTouch struct{}
+
+func (*failingTouch) Lookup(context.Context, string) (Session, bool, error) {
+	return Session{Sub: "u1", IDHash: "0123456789abcdef", LastSeenAt: time.Unix(0, 0)}, true, nil
+}
+func (*failingTouch) Touch(context.Context, string) (bool, error) {
+	return false, context.DeadlineExceeded
+}
+
+func TestSessionTouchFailureStillServes(t *testing.T) {
+	var buf bytes.Buffer
+	h := withSession(principalProbe(), &failingTouch{}, testCookie(t), slog.New(slog.NewTextHandler(&buf, nil)))
+	rec := probe(h, testCookie(t), "raw-secret-id")
+	if rec.Code != http.StatusOK || rec.Body.String() != "u1" {
+		t.Fatalf("touch failure: %d %q, want the request served with its Principal", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(buf.String(), "01234567") || strings.Contains(buf.String(), "raw-secret-id") {
+		t.Fatalf("log = %q", buf.String())
+	}
+}
+
+func (*failingTouch) Now() time.Time { return time.Now() }

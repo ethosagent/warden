@@ -42,7 +42,15 @@ func NewSessionCookie(redirectURL string) (SessionCookie, error) {
 	if err != nil || u.Host == "" {
 		return SessionCookie{}, fmt.Errorf("session cookie: redirect URL %q is not absolute", redirectURL)
 	}
-	origin := u.Scheme + "://" + u.Host
+	// Browsers send Origin lowercased and without the scheme's default port.
+	host := strings.ToLower(u.Hostname())
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	if p := u.Port(); p != "" && !(u.Scheme == "https" && p == "443") && !(u.Scheme == "http" && p == "80") {
+		host += ":" + p
+	}
+	origin := strings.ToLower(u.Scheme) + "://" + host
 	switch u.Scheme {
 	case "https":
 		return SessionCookie{Name: cookieNameSecure, Secure: true, origin: origin}, nil
