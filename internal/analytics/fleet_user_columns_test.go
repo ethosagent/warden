@@ -144,8 +144,17 @@ func TestSyncIdentityFields(t *testing.T) {
 // user fields without error.
 func TestFleetEventWithoutIdentity(t *testing.T) {
 	fleet := newFleetStore(t, 0, 0)
-	if err := fleet.StoreAggregatedEvent(aggEvent("proxy-a", "a", "x.com", "allow", time.Now())); err != nil {
+	srv := newIngestServer(t, NewIngestHandler(fleet, ""))
+	rs, err := NewHTTPRemoteStore(srv.URL, "", "proxy-a", srv.Client())
+	if err != nil {
 		t.Fatal(err)
+	}
+	local := newTestStore(t, 0)
+	if err := local.StoreEvent(Event{Timestamp: time.Now(), Domain: "x.com", Decision: "allow"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewSyncWorker(local, rs, "proxy-a", 5, 100, time.Hour).SyncOnce(); err != nil {
+		t.Fatalf("SyncOnce: %v", err)
 	}
 	got, err := fleet.GetEvents(EventFilter{})
 	if err != nil || len(got) != 1 {
