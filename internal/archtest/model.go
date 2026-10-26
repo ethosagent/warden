@@ -99,19 +99,20 @@ type Rule struct {
 	// much a violation as calling it. Rules without it keep references legal —
 	// assigning time.Now is the sanctioned clock injection, so L3 bans only
 	// the call, which the archtest AST check sees precisely.
-	ReferencesToo    bool            `yaml:"references-too"`
-	AppliesToClasses []string        `yaml:"applies-to-classes"`
-	ZoneFilter       string          `yaml:"zone-filter"`
-	SignerPaths      []string        `yaml:"signer-paths"`
-	ExecAllowedIn    []string        `yaml:"exec-allowed-in"`
-	Structs          []StructRef     `yaml:"structs"`
-	Prefixes         []PrefixRule    `yaml:"prefixes"`
-	AppliesToPaths   []string        `yaml:"applies-to-paths"`
-	RouteFiles       []string        `yaml:"route-files"`
-	BlockedModules   []BlockedModule `yaml:"blocked-modules"`
-	AllowedVars      string          `yaml:"allowed-vars"`
-	ExceptTests      bool            `yaml:"except-tests"`
-	WireTypes        []string        `yaml:"wire-types"`
+	ReferencesToo      bool            `yaml:"references-too"`
+	AppliesToClasses   []string        `yaml:"applies-to-classes"`
+	ZoneFilter         string          `yaml:"zone-filter"`
+	SignerPaths        []string        `yaml:"signer-paths"`
+	ClientConstructors []string        `yaml:"client-constructors"`
+	ExecAllowedIn      []string        `yaml:"exec-allowed-in"`
+	Structs            []StructRef     `yaml:"structs"`
+	Prefixes           []PrefixRule    `yaml:"prefixes"`
+	AppliesToPaths     []string        `yaml:"applies-to-paths"`
+	RouteFiles         []string        `yaml:"route-files"`
+	BlockedModules     []BlockedModule `yaml:"blocked-modules"`
+	AllowedVars        string          `yaml:"allowed-vars"`
+	ExceptTests        bool            `yaml:"except-tests"`
+	WireTypes          []string        `yaml:"wire-types"`
 }
 
 // StructRef names a struct whose fields are pinned by X2. WireFields is the

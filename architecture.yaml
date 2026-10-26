@@ -119,6 +119,7 @@ classes:
     paths:
       - internal/config
       - internal/denyreason       # the one declared set of deny reasons (#409, rule X6)
+      - internal/identity         # identity types, the http-issuer rule (pure; #444)
       - internal/detect
       - internal/alertpipeline
       - internal/policybuilder
@@ -151,6 +152,7 @@ zones:
     - internal/worker
     - internal/admin
     - internal/mcp/**
+    - internal/identity/adapters/oidc  # data, not shared: Z3 allows only domain packages in shared (#444)
     - internal/protocol
     - internal/scan
     - internal/dlp
@@ -173,6 +175,7 @@ zones:
   shared:
     - internal/config
     - internal/denyreason
+    - internal/identity
     - internal/clock
     - internal/clock/clocktest
     - internal/secrets
@@ -389,8 +392,11 @@ rules:
       - net/http.PostForm
     # references-too: passing http.Get around is a bare client by proxy.
     references-too: true
-    # The shared constructor does not exist yet (the internal/proxy SafeDialer
-    # is its core); every bare client today is a baseline entry until it lands.
+    # client-constructors names the files that ARE a shared client constructor:
+    # they may build &http.Client{} (and, for Z4, import net and crypto/tls).
+    # Every other bare client is a baseline entry until it moves to one.
+    client-constructors:
+      - internal/identity/adapters/oidc/httpclient.go   # the shared OIDC client (#444); Proxy=nil, no redirects, capped body
 
   - id: X5
     title: Reserved storage key prefixes are built only by their key-builder function
@@ -513,6 +519,8 @@ rules:
 # ---------------------------------------------------------------------------
 modules:
   direct:
+    - module: github.com/coreos/go-oidc/v3
+      layers: [repository]
     - module: github.com/prometheus/client_golang
       layers: [repository]
     - module: github.com/spf13/cobra
@@ -531,6 +539,8 @@ modules:
       layers: [repository]
     - module: golang.org/x/net
       layers: [engine]
+    - module: golang.org/x/oauth2
+      layers: [repository, assembly]
     - module: golang.org/x/sync
       layers: [engine]
     - module: gopkg.in/yaml.v3
@@ -544,6 +554,7 @@ modules:
     - github.com/cenkalti/backoff/v5
     - github.com/cespare/xxhash/v2
     - github.com/dustin/go-humanize
+    - github.com/go-jose/go-jose/v4
     - github.com/go-logr/logr
     - github.com/go-logr/stdr
     - github.com/google/uuid

@@ -186,12 +186,20 @@ func (e *Engine) checkImports(p *Package) {
 	// Z4 — side-call adapters in the data plane never open raw sockets; the
 	// engine does, and everything else dials through the shared constructor.
 	if e.on("Z4") && p.Zone == "data" && p.Class.ID == "repository" {
-		for _, imp := range p.Imports {
-			if imp == "net" || imp == "crypto/tls" {
-				file, line := e.importLoc(p, imp)
-				e.fireItem("Z4", p, file, line, imp,
-					fmt.Sprintf("side-call adapter imports %s and could open its own socket", imp))
-				break
+		var ctors []string
+		if x4 := e.Arch.Rule("X4"); x4 != nil {
+			ctors = x4.ClientConstructors
+		}
+		for _, f := range p.Files {
+			// The named shared client constructor files may dial; any other file may not.
+			if e.match.matchAny(ctors, f.Name) {
+				continue
+			}
+			for _, is := range f.AST.Imports {
+				if imp := unquote(is.Path.Value); imp == "net" || imp == "crypto/tls" {
+					e.fireItem("Z4", p, f.Name, p.Fset.Position(is.Pos()).Line, imp,
+						fmt.Sprintf("side-call adapter imports %s and could open its own socket", imp))
+				}
 			}
 		}
 	}
