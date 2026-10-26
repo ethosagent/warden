@@ -1,10 +1,12 @@
 package harness
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"strings"
@@ -260,6 +262,35 @@ func (c *CPClient) GetJSON(path string, v any) error {
 		return fmt.Errorf("harness: control plane %s = %d", path, resp.StatusCode)
 	}
 	return json.NewDecoder(resp.Body).Decode(v)
+}
+
+// PostJSON POSTs in as JSON to a control-plane path with the bearer token and
+// decodes the response into out (nil to ignore it). A non-200 reply is an
+// error carrying the status and the control plane's message.
+func (c *CPClient) PostJSON(path string, in, out any) error {
+	body, err := json.Marshal(in)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPost, "https://"+c.addr+path, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.cl.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<10))
+		return fmt.Errorf("harness: control plane POST %s = %d: %s", path, resp.StatusCode, msg)
+	}
+	if out == nil {
+		return nil
+	}
+	return json.NewDecoder(resp.Body).Decode(out)
 }
 
 // Workers lists the fleet view: every worker that has pulled policy or
