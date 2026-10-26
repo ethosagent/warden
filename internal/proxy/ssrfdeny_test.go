@@ -79,11 +79,12 @@ type fakeMetrics struct {
 	mu       sync.Mutex
 	blocked  map[string]int
 	requests map[[2]string]int
+	identity map[[2]string]int
 	log      []string
 }
 
 func newFakeMetrics() *fakeMetrics {
-	return &fakeMetrics{blocked: map[string]int{}, requests: map[[2]string]int{}}
+	return &fakeMetrics{blocked: map[string]int{}, requests: map[[2]string]int{}, identity: map[[2]string]int{}}
 }
 
 func (m *fakeMetrics) record(format string, args ...any) {
@@ -113,6 +114,19 @@ func (m *fakeMetrics) RecordScanFinding(kind string) { m.record("RecordScanFindi
 func (m *fakeMetrics) RecordJudge(outcome string)    { m.record("RecordJudge(%q)", outcome) }
 func (m *fakeMetrics) ObserveAddedLatency(stage string, d time.Duration) {
 	m.record("ObserveAddedLatency(%q)", stage)
+}
+func (m *fakeMetrics) RecordIdentityVerify(result, reason string) {
+	m.mu.Lock()
+	m.identity[[2]string{result, reason}]++
+	m.mu.Unlock()
+	m.record("RecordIdentityVerify(%q, %q)", result, reason)
+}
+
+// identityCount returns how often RecordIdentityVerify saw the result/reason pair.
+func (m *fakeMetrics) identityCount(result, reason string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.identity[[2]string{result, reason}]
 }
 
 // blockedCount returns how often RecordBlocked saw the reason.

@@ -223,3 +223,29 @@ func TestBuildResourceDefaults(t *testing.T) {
 		t.Errorf("expected custom resource attribute, got %q", got)
 	}
 }
+
+func TestRecordIdentityVerify(t *testing.T) {
+	var nilm *Metrics
+	nilm.RecordIdentityVerify("valid", "none") // nil-safe
+
+	m, h, shutdown := newWithHandler(t)
+	defer func() { _ = shutdown(context.Background()) }()
+	m.RecordIdentityVerify("invalid", "bad_signature")
+	m.RecordIdentityVerify("invalid", "bad_signature")
+	m.ObserveAddedLatency("identity", time.Millisecond)
+
+	body := scrape(t, h)
+	for _, want := range []string{
+		"warden_identity_verify_total",
+		`result="invalid"`,
+		`reason="bad_signature"`,
+		`stage="identity"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("scrape missing %q\n---\n%s", want, body)
+		}
+	}
+	if !strings.Contains(body, `warden_identity_verify_total{`) || !strings.Contains(body, "} 2") {
+		t.Errorf("identity counter did not reach 2\n---\n%s", body)
+	}
+}

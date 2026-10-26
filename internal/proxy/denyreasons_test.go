@@ -35,6 +35,7 @@ func (m *recordingMetrics) RecordSecretSwap(placeholderRef string)            {}
 func (m *recordingMetrics) RecordScanFinding(kind string)                     {}
 func (m *recordingMetrics) RecordJudge(outcome string)                        {}
 func (m *recordingMetrics) ObserveAddedLatency(stage string, d time.Duration) {}
+func (m *recordingMetrics) RecordIdentityVerify(result, reason string)        {}
 
 func (m *recordingMetrics) add(reason string) {
 	m.mu.Lock()
