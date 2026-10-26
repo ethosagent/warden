@@ -287,7 +287,7 @@ stack back as it found it, so the order does not matter.
 
 ### In CI
 
-`.github/workflows/e2e.yml` (job `e2e`, 25 minute limit) runs on PRs that touch a
+`.github/workflows/e2e.yml` (job `e2e`, 15 minute limit; the identity suite is the separate job `e2e-identity`) runs on PRs that touch a
 risky path, nightly on `main`, and as a reusable workflow that `release.yml` calls
 with the pushed image digest (`WARDEN_IMAGE`; the GitHub Release waits for it). On
 failure it uploads `docker compose logs`, both workers' traffic APIs, the fleet API
