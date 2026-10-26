@@ -164,7 +164,11 @@ func (p *Proxy) malformed() idResult {
 // verifyToken runs one bounded Verify and counts it. The raw token goes to the
 // verifier and nowhere else.
 func (p *Proxy) verifyToken(h *identityHolder, tok string) idResult {
-	ctx, cancel := context.WithTimeout(context.Background(), identityVerifyTimeout)
+	timeout := p.identityTimeout
+	if timeout <= 0 {
+		timeout = identityVerifyTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	c, st, r := h.v.Verify(ctx, tok)
 	cancel()
 	p.recordIdentity(st, r)

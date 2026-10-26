@@ -131,17 +131,27 @@ func basicAuth(tok string) string {
 // returns the raw conn, its reader and the status line.
 func (e *idEnv) connect(extra string) (net.Conn, *bufio.Reader, string) {
 	e.t.Helper()
-	conn, err := net.Dial("tcp", e.p.Addr().String())
+	conn, br, status, err := e.dialConnect(extra)
 	if err != nil {
 		e.t.Fatal(err)
 	}
 	e.t.Cleanup(func() { _ = conn.Close() })
+	return conn, br, status
+}
+
+// dialConnect is connect without testing.T calls, safe off the test goroutine.
+func (e *idEnv) dialConnect(extra string) (net.Conn, *bufio.Reader, string, error) {
+	conn, err := net.Dial("tcp", e.p.Addr().String())
+	if err != nil {
+		return nil, nil, "", err
+	}
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 	_, _ = fmt.Fprintf(conn, "CONNECT %s:443 HTTP/1.1\r\nHost: %s:443\r\n%s\r\n", idHost, idHost, extra)
 	br := bufio.NewReader(conn)
 	status, err := br.ReadString('\n')
 	if err != nil {
-		e.t.Fatal(err)
+		_ = conn.Close()
+		return nil, nil, "", err
 	}
 	for {
 		line, err := br.ReadString('\n')
@@ -149,7 +159,7 @@ func (e *idEnv) connect(extra string) (net.Conn, *bufio.Reader, string) {
 			break
 		}
 	}
-	return conn, br, status
+	return conn, br, status, nil
 }
 
 func (e *idEnv) tlsOver(conn net.Conn, br *bufio.Reader, protos ...string) *tls.Conn {
@@ -829,11 +839,12 @@ func TestIdentityHotSwap(t *testing.T) {
 		clients.Add(1)
 		go func() {
 			defer clients.Done()
-			conn, br, status := e.connect("Proxy-Authorization: " + basicAuth("tok-alice") + "\r\n")
-			if !strings.Contains(status, "200") {
+			conn, br, status, err := e.dialConnect("Proxy-Authorization: " + basicAuth("tok-alice") + "\r\n")
+			if err != nil || !strings.Contains(status, "200") {
 				failed.Add(1)
 				return
 			}
+			defer func() { _ = conn.Close() }()
 			pool := x509.NewCertPool()
 			pool.AppendCertsFromPEM(e.caPEM)
 			tc := tls.Client(&bufferedTLSConn{Reader: br, Conn: conn}, &tls.Config{ServerName: idHost, RootCAs: pool, NextProtos: []string{"http/1.1"}})
@@ -1137,4 +1148,46 @@ func BenchmarkIdentityStage(b *testing.B) {
 			p.captureIdentityHeader(s)
 		}
 	})
+}
+
+// blockingVerifier waits for its context, like a verifier stuck on a key fetch.
+type blockingVerifier struct {
+	deadlineSet atomic.Bool
+}
+
+func (b *blockingVerifier) Verify(ctx context.Context, _ string, _ ...identity.VerifyOption) (identity.Claims, identity.Status, identity.Reason) {
+	if _, ok := ctx.Deadline(); ok {
+		b.deadlineSet.Store(true)
+	}
+	select {
+	case <-ctx.Done():
+		return identity.Claims{}, identity.StatusUnverified, identity.ReasonJWKSUnavailable
+	case <-time.After(30 * time.Second):
+		return identity.Claims{}, identity.StatusValid, ""
+	}
+}
+
+// TestIdentityVerifyIsBounded pins the Verify timeout on the request path
+// (HOT-1): a verifier stuck on a key fetch cannot hold CONNECT or a request.
+func TestIdentityVerifyIsBounded(t *testing.T) {
+	bv := &blockingVerifier{}
+	p := stageProxy(t, bv, IdentityModeAttribute, nil, nil)
+	p.identityTimeout = 50 * time.Millisecond
+
+	start := time.Now()
+	ci := p.resolveConnIdentity(1, basicAuth("tok"))
+	if ci.Status != identity.StatusUnverified || ci.Reason != identity.ReasonJWKSUnavailable {
+		t.Errorf("connect: %+v, want unverified/jwks_unavailable", ci)
+	}
+	s := stageScope(connIdentity{}, "Bearer tok")
+	runIdentity(t, p, s)
+	if s.idStatus != identity.StatusUnverified || s.subject != nil {
+		t.Errorf("request: status %q subject %+v, want unverified and nil", s.idStatus, s.subject)
+	}
+	if d := time.Since(start); d > 5*time.Second {
+		t.Errorf("two stuck verifications took %v, want about twice the 50ms bound", d)
+	}
+	if !bv.deadlineSet.Load() {
+		t.Error("Verify ran without a deadline")
+	}
 }

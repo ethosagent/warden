@@ -373,6 +373,9 @@ type Proxy struct {
 	// warnNoCA / warnTransparentOnly make each startup warning fire once per
 	// process, however often SetIdentity runs.
 	warnNoCA, warnTransparentOnly sync.Once
+	// identityTimeout overrides identityVerifyTimeout (0 = the const). White-box,
+	// like preambleTimeout: tests shrink it to pin the bound.
+	identityTimeout time.Duration
 
 	// analyticsP holds the live analytics store, swappable atomically while the
 	// hot path reads it (a control-plane compliance toggle rebuilds only the
