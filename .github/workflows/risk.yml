@@ -79,7 +79,10 @@ jobs:
 
   # Required check for risk:critical PRs. It passes at once for every other tier.
   # For critical it needs the L2 e2e job (#351) to have succeeded on the head
-  # commit: a check run named `e2e`. Until #351 lands there is no such job, so a
+  # commit: a check run named `e2e`, and the one named `e2e-identity` (the identity
+  # suite, W-P1-DEX-04, a separate job so `e2e` stays within gatecheck's 15-minute
+  # cap). Both run on every critical PR (their paths filters cover every critical
+  # glob), so a missing run of either stays red. Until #351 lands there is no such job, so a
   # critical PR stays red here on purpose (fail closed).
   e2e-required:
     needs: risk
@@ -97,7 +100,7 @@ jobs:
           fi
           for _ in $(seq 1 60); do
             state="$(gh api --paginate "repos/${{ github.repository }}/commits/$SHA/check-runs?per_page=100" \
-              --jq '.check_runs[]' | jq -s -r '[.[] | select(.name == "e2e")] | if length == 0 then "missing" elif all(.[]; .conclusion == "success") then "success" elif any(.[]; .status != "completed") then "pending" else "failed" end')"
+              --jq '.check_runs[]' | jq -s -r '[.[] | select(.name == "e2e" or .name == "e2e-identity")] | if ([.[].name] | unique | length) < 2 then "missing" elif all(.[]; .conclusion == "success") then "success" elif any(.[]; .status != "completed") then "pending" else "failed" end')"
             case "$state" in
             success) echo "e2e passed"; exit 0 ;;
             failed) echo "::error::the e2e check failed on $SHA"; exit 1 ;;

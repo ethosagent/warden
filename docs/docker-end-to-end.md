@@ -351,7 +351,7 @@ reason instead of exiting, so that test still runs on a machine without Docker.
 discovery from the host returning issuer `http://localhost:5556/dex`, an allowed
 host reachable through the worker, a non-allowlisted host denied, and direct
 egress (and Dex) unreachable from agent-1. In CI, `.github/workflows/e2e.yml`
-runs `make e2e-identity` after the base stack has been torn down.
+runs `make e2e-identity` in its own job, `e2e-identity` (separate runner, 15 minute cap, `E2E_IDENTITY_TIMEOUT=8m`), so the `e2e` job keeps its 15 minute cap. Its failure log is the `e2e-identity-diagnostics` artifact, and the risk:critical gate waits for it as well as for `e2e`.
 
 ## Drive it by hand
 
