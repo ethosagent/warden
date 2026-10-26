@@ -75,10 +75,10 @@ payload=$(base64 -d <<<"$seg" 2>/dev/null) || die "id_token payload is not valid
 jq -e . >/dev/null 2>&1 <<<"$payload" || die "id_token payload is not JSON"
 
 jq -e --arg a "$AUDIENCE" '(.aud | if type == "array" then . else [.] end) | index($a) != null' \
-	>/dev/null <<<"$payload" || die "claim check failed: aud does not contain $AUDIENCE (aud=$(jq -c .aud <<<"$payload"))"
-jq -e --arg c "$CLIENT_ID" '.azp == $c' >/dev/null <<<"$payload" ||
+	>/dev/null 2>&1 <<<"$payload" || die "claim check failed: aud does not contain $AUDIENCE (aud=$(jq -c .aud <<<"$payload"))"
+jq -e --arg c "$CLIENT_ID" '.azp == $c' >/dev/null 2>&1 <<<"$payload" ||
 	die "claim check failed: azp is $(jq -c .azp <<<"$payload"), want $CLIENT_ID"
-jq -e '(.exp - .iat) == 3600' >/dev/null <<<"$payload" ||
+jq -e '(.exp - .iat) == 3600' >/dev/null 2>&1 <<<"$payload" ||
 	die "claim check failed: exp-iat is $(jq -c '.exp - .iat' <<<"$payload"), want 3600"
 
 if [ "$raw" -eq 1 ]; then

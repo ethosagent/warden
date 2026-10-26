@@ -155,8 +155,12 @@ func TestDexTokenScript(t *testing.T) {
 				t.Errorf("stdout missing %q: %s", w, stdout)
 			}
 		}
-		if strings.Contains(stdout, "iss") && strings.Contains(stdout, "localhost:5556") {
-			t.Errorf("stdout prints more than the listed claims: %s", stdout)
+		var got map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+			t.Fatalf("stdout is not one JSON object: %v: %s", err, stdout)
+		}
+		if len(got) != 7 {
+			t.Errorf("stdout must hold exactly the 7 listed claims, got %d: %s", len(got), stdout)
 		}
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -165,8 +169,7 @@ func TestDexTokenScript(t *testing.T) {
 				t.Errorf("form %s = %q, want %q", k, f.form.Get(k), v)
 			}
 		}
-		_, hasBasic := strings.CutPrefix(f.auth, "Basic ")
-		if !hasBasic && (f.form.Get("client_secret") != tokSecret || f.form.Get("password") != tokPassword) {
+		if f.form.Get("client_secret") != tokSecret || f.form.Get("password") != tokPassword {
 			t.Errorf("credentials missing from the request")
 		}
 		noLeak(t, stdout+stderr, mkJWT(t, goodClaims()))
@@ -174,10 +177,30 @@ func TestDexTokenScript(t *testing.T) {
 
 	t.Run("aud_string", func(t *testing.T) {
 		srv, _ := serve(t, 200, tokenBody(with(goodClaims(), "aud", "warden")))
-		if _, stderr, code := run(t, baseEnv(srv), "alice"); code != 0 {
+		stdout, stderr, code := run(t, baseEnv(srv), "alice")
+		if code != 0 {
 			t.Fatalf("exit %d, stderr=%q", code, stderr)
 		}
+		noLeak(t, stdout+stderr, mkJWT(t, with(goodClaims(), "aud", "warden")))
 	})
+
+	for _, tc := range []struct {
+		name string
+		body func() any
+		want string
+	}{
+		{"no_id_token", func() any { return map[string]any{"access_token": "at"} }, "no id_token"},
+		{"payload_not_json", func() any { return map[string]any{"id_token": "h." + b64([]byte("not json")) + ".s"} }, "not JSON"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _ := serve(t, 200, tc.body)
+			stdout, stderr, code := run(t, baseEnv(srv), "alice")
+			if code == 0 || !strings.Contains(stderr, tc.want) {
+				t.Errorf("want non-zero exit naming %q; code=%d stderr=%q", tc.want, code, stderr)
+			}
+			noLeak(t, stdout+stderr, "")
+		})
+	}
 
 	for _, tc := range []struct {
 		name   string
