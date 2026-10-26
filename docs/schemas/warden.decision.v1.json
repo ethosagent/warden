@@ -105,7 +105,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["status"],
-      "description": "Verified end-user attribution. status is set whenever the event carried an identity status; every other field only when status is valid. The object is absent when identity is off for the worker.",
+      "description": "Verified end-user attribution. status is set whenever the event carried an identity status; every other field only when status is valid. The object is absent when the event carries no identity status, which is every event of a worker with identity off.",
       "properties": {
         "status": { "type": "string", "description": "Identity verification status: valid, invalid, expired, unverified, conflict, or none (identity is on and the request carried no token). Open string, no enum, so a later status does not break readers." },
         "sub": { "type": "string", "description": "Subject claim; only when status is valid." },
