@@ -492,3 +492,27 @@ audit:
 # upstream:
 #   allowPrivateCIDRs:
 #     - "10.200.0.0/24"   # e.g. the e2e stack's egress subnet
+
+# Identity verification (OFF when this block is absent: no token is read or
+# verified and behavior is byte-identical to before). Attribute mode verifies a
+# user token and records who made the request; it never blocks. The block holds
+# no secrets. Phase 1 modes: off | attribute ("require" arrives in Phase 2).
+# Per-agent override: `identity: off|attribute` on an agents[] entry.
+#identity:
+#  defaultMode: attribute                  # off | attribute (default off)
+#  issuer: http://localhost:5556/dex       # dev only: plain http needs internalIssuerURL
+#  internalIssuerURL: http://dex:5556      # dev-only split-horizon: origin containers use to reach the issuer
+#  audience: warden
+#  allowedAZP: [agent-harness, warden-cli] # empty = no azp check
+#  groupsClaim: groups
+#  clockSkewSeconds: 60                    # 0..300 (0 = default 60)
+#  maxTokenTTLSeconds: 3600                # >0 overrides the default 3600
+
+# Production form: an
+# https issuer and no internalIssuerURL. The block holds no secrets.
+#identity:
+#  defaultMode: attribute                  # off | attribute (default off)
+#  issuer: https://idp.example.com
+#  audience: warden
+#  allowedAZP: [agent-harness, warden-cli] # empty = no azp check
+#  groupsClaim: groups
