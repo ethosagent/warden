@@ -18,6 +18,9 @@ import (
 // CSRFHeader carries the per-session CSRF token on state-changing requests.
 const CSRFHeader = "X-Warden-CSRF"
 
+// defaultPort lists the ports a browser leaves out of Origin.
+var defaultPort = map[string]string{"https": "443", "http": "80"}
+
 const (
 	cookieNameSecure = "__Host-warden_console"
 	cookieNamePlain  = "warden_console"
@@ -47,7 +50,7 @@ func NewSessionCookie(redirectURL string) (SessionCookie, error) {
 	if strings.Contains(host, ":") {
 		host = "[" + host + "]"
 	}
-	if p := u.Port(); p != "" && !((u.Scheme == "https" && p == "443") || (u.Scheme == "http" && p == "80")) {
+	if p := u.Port(); p != "" && p != defaultPort[u.Scheme] {
 		host += ":" + p
 	}
 	origin := strings.ToLower(u.Scheme) + "://" + host
