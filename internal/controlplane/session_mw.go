@@ -47,7 +47,7 @@ func NewSessionCookie(redirectURL string) (SessionCookie, error) {
 	if strings.Contains(host, ":") {
 		host = "[" + host + "]"
 	}
-	if p := u.Port(); p != "" && !(u.Scheme == "https" && p == "443") && !(u.Scheme == "http" && p == "80") {
+	if p := u.Port(); p != "" && !((u.Scheme == "https" && p == "443") || (u.Scheme == "http" && p == "80")) {
 		host += ":" + p
 	}
 	origin := strings.ToLower(u.Scheme) + "://" + host
