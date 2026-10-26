@@ -18,7 +18,7 @@ var portSuffixes = []string{"Provider", "Store", "Client", "Dialer", "Clock", "N
 
 // namedPorts are real I/O ports whose names carry no suffix; they are held to
 // the same rule. Add one here when a port is named for what it does.
-var namedPorts = map[string]bool{"proxy.Judge": true, "dashboard.SQLGenerator": true}
+var namedPorts = map[string]bool{"proxy.Judge": true, "dashboard.SQLGenerator": true, "identity.Verifier": true}
 
 func isPortName(pkg, name string) bool {
 	if namedPorts[pkg+"."+name] {
