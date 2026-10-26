@@ -241,13 +241,13 @@ func TestStageSecretsRealScript(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeFile(t, root, "scripts/check-secrets.sh", string(script))
-	writeFile(t, root, "deploy/compose/dex/config.yaml", "staticClients:\n  - id: x\n    secret: lit"+"eral\n")
+	writeFile(t, root, "deploy/compose/dex/config.yaml", "staticClients:\n  - id: x\n    secret: hunt"+"er2zq\n")
 	r := &runner{cfg: config{Root: root}, ctx: parseCtx{Root: root}, exec: osExec}
 	st := r.stageSecrets()
 	if st.OK || len(st.Findings) != 1 || st.Findings[0].File != "deploy/compose/dex/config.yaml" || st.Findings[0].Line != 3 {
 		t.Fatalf("want one finding at config.yaml:3, got %+v", st)
 	}
-	if f := st.Findings[0]; strings.Contains(f.Message+f.Output+f.Fix, "hunter2x") {
+	if f := st.Findings[0]; strings.Contains(f.Message+f.Output+f.Fix, "hunter2zq") {
 		t.Errorf("finding leaked the value: %+v", f)
 	}
 }
