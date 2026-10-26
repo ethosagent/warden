@@ -20,8 +20,6 @@ import (
 	"testing"
 	"time"
 
-	"golang.org/x/net/http2"
-
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/identity"
 	"github.com/ethosagent/warden/internal/policy"
@@ -193,19 +191,6 @@ func (c *idH1) get(extra string) int {
 	_, _ = io.Copy(io.Discard, resp.Body)
 	_ = resp.Body.Close()
 	return resp.StatusCode
-}
-
-// h2 returns a round tripper whose one HTTP/2 connection is the CONNECT tunnel.
-func (e *idEnv) h2(connectExtra string) http.RoundTripper {
-	e.t.Helper()
-	conn, br, status := e.connect(connectExtra)
-	if !strings.Contains(status, "200") {
-		e.t.Fatalf("CONNECT status = %q, want 200", status)
-	}
-	tc := e.tlsOver(conn, br, "h2")
-	tr := &http2.Transport{DialTLSContext: func(context.Context, string, string, *tls.Config) (net.Conn, error) { return tc, nil }}
-	e.t.Cleanup(tr.CloseIdleConnections)
-	return tr
 }
 
 func h2Get(t *testing.T, cc http.RoundTripper, hdr map[string]string) int {
