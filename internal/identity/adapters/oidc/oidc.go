@@ -176,6 +176,7 @@ func (v *verifier) Verify(ctx context.Context, raw string, opts ...identity.Veri
 	if now.After(c.Expiry.Add(skew)) {
 		return uv, identity.StatusExpired, ""
 	}
+	// The bounded Reason set has no not-yet-valid value; malformed is deliberate.
 	if p.nbf != nil && now.Add(skew).Before(*p.nbf) {
 		return identity.Claims{}, identity.StatusInvalid, identity.ReasonMalformed
 	}
