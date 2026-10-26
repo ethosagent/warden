@@ -94,6 +94,9 @@ type Metrics struct {
 	scanFindings   metric.Int64Counter
 	judge          metric.Int64Counter
 	identityVerify metric.Int64Counter
+	auditLines     metric.Int64Counter
+	auditErrors    metric.Int64Counter
+	auditDropped   metric.Int64Counter
 	addedLatency   metric.Float64Histogram
 	breakerOpen    metric.Int64UpDownCounter
 	cacheStale     metric.Int64UpDownCounter
@@ -238,6 +241,24 @@ func newMetrics(provider *sdkmetric.MeterProvider, serviceVersion string) (*Metr
 	); err != nil {
 		return nil, fmt.Errorf("observability: judge counter: %w", err)
 	}
+	if m.auditLines, err = meter.Int64Counter(
+		"warden.auditlog.lines.total",
+		metric.WithDescription("JSON decision stream lines written, by schema."),
+	); err != nil {
+		return nil, fmt.Errorf("observability: auditlog lines counter: %w", err)
+	}
+	if m.auditErrors, err = meter.Int64Counter(
+		"warden.auditlog.write_errors.total",
+		metric.WithDescription("JSON decision stream write failures by reason (marshal, write, flush)."),
+	); err != nil {
+		return nil, fmt.Errorf("observability: auditlog write errors counter: %w", err)
+	}
+	if m.auditDropped, err = meter.Int64Counter(
+		"warden.auditlog.dropped.total",
+		metric.WithDescription("JSON decision stream events dropped because the sink queue was full or closed."),
+	); err != nil {
+		return nil, fmt.Errorf("observability: auditlog dropped counter: %w", err)
+	}
 	if m.identityVerify, err = meter.Int64Counter(
 		"warden.identity.verify.total",
 		metric.WithDescription("Identity token outcomes by result (identity status) and reason."),
@@ -307,6 +328,37 @@ func (m *Metrics) RecordBlocked(reason string) {
 	m.blocked.Add(context.Background(), 1, metric.WithAttributes(
 		attribute.String("reason", reason),
 	))
+}
+
+// RecordAuditLogLine increments warden.auditlog.lines.total{schema}. schema is
+// the bounded record schema id (warden.decision.v1).
+func (m *Metrics) RecordAuditLogLine(schema string) {
+	if m == nil {
+		return
+	}
+	m.auditLines.Add(context.Background(), 1, metric.WithAttributes(
+		attribute.String("schema", schema),
+	))
+}
+
+// RecordAuditLogWriteError increments warden.auditlog.write_errors.total{reason}.
+// reason is one of the bounded values marshal, write or flush.
+func (m *Metrics) RecordAuditLogWriteError(reason string) {
+	if m == nil {
+		return
+	}
+	m.auditErrors.Add(context.Background(), 1, metric.WithAttributes(
+		attribute.String("reason", reason),
+	))
+}
+
+// RecordAuditLogDropped adds n to warden.auditlog.dropped.total. n <= 0 is
+// ignored.
+func (m *Metrics) RecordAuditLogDropped(n int) {
+	if m == nil || n <= 0 {
+		return
+	}
+	m.auditDropped.Add(context.Background(), int64(n))
 }
 
 // RecordSecretSwap increments warden.secret.swaps.total{placeholder_ref}.

@@ -25,6 +25,7 @@ import (
 	"github.com/ethosagent/warden/internal/admin"
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/audit"
+	"github.com/ethosagent/warden/internal/auditlog"
 	"github.com/ethosagent/warden/internal/auth"
 	"github.com/ethosagent/warden/internal/clock"
 	"github.com/ethosagent/warden/internal/config"
@@ -56,6 +57,10 @@ type Params struct {
 	AdminTokenEnv string
 	Version       string
 	LocalOnly     bool
+	// ErrOut, when set, receives the operational log while audit.jsonLog writes
+	// its decision stream to stdout (the logger moves off stdout so the streams
+	// never mix). nil means os.Stderr; cmd/proxy never sets it.
+	ErrOut io.Writer
 	// AlertsDBPath is the SQLite alert-store path for the LOCAL-ONLY embedded alert
 	// pipeline. Empty ⇒ default to a sibling of DBPath (warden-alerts.db). Ignored
 	// in managed/fleet mode (the control plane hosts the pipeline there).
@@ -226,7 +231,17 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// the proxy; lifecycle logs below also use it. logCtrl is the live handle the
 	// managed apply loop uses to change the level at runtime WITHOUT swapping the
 	// (widely-captured) logger instance. Format is restart-only (see LogControl).
-	logger, logCtrl := observability.NewLogger(out, pol.LogLevel, pol.LogFormat)
+	// With the JSON decision stream on stdout the operational logger moves to
+	// stderr, so the two streams never mix; the move is logged once below.
+	logOut := out
+	jsonLogOnStdout := pol.Audit.JSONLog.Enabled && jsonLogOutput(pol.Audit.JSONLog) == config.JSONLogOutputStdout
+	if jsonLogOnStdout {
+		logOut = errOut(p)
+	}
+	logger, logCtrl := observability.NewLogger(logOut, pol.LogLevel, pol.LogFormat)
+	if jsonLogOnStdout {
+		logger.Info("audit.jsonLog.output is stdout: operational logs moved to stderr so stdout carries only warden.decision.v1 lines")
+	}
 	logger.Info("effective listener config", eff.LogArgs()...)
 
 	// Optional upstream DNS override (dns.upstreamResolver). When set, warden's
@@ -556,6 +571,27 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	asyncOpts := []analytics.AsyncOption{analytics.WithLogger(logger)}
 	if alerts != nil {
 		asyncOpts = append(asyncOpts, analytics.WithOnBatch(alerts.Observe))
+	}
+	// JSON decision stream (audit.jsonLog): a second tee on the same writer
+	// goroutine. The sink hands batches to its own bounded queue and never blocks
+	// it. Built (and its close deferred) BEFORE the async writer so the deferred
+	// LIFO order closes the sink AFTER asyncStore.Close() has drained its final
+	// batch into the tee. A path that cannot be opened fails startup here.
+	if pol.Audit.JSONLog.Enabled {
+		sinkOpts := []auditlog.Option{}
+		if jsonLogOnStdout {
+			sinkOpts = append(sinkOpts, auditlog.WithWriter(out))
+		}
+		sink, sErr := auditlog.New(pol.Audit.JSONLog, newAuditMeta(pol, agentID), metrics, logger, sinkOpts...)
+		if sErr != nil {
+			return sErr
+		}
+		defer func() {
+			ctx, cancel := context.WithTimeout(context.Background(), jsonLogCloseTimeout)
+			defer cancel()
+			_ = sink.Close(ctx)
+		}()
+		asyncOpts = append(asyncOpts, analytics.WithOnBatch(sink.Observe))
 	}
 	asyncStore := analytics.NewAsyncWriter(store, asyncOpts...)
 	// Drain + flush the async queue on shutdown BEFORE the store handle closes.

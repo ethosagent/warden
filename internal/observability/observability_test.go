@@ -224,6 +224,39 @@ func TestBuildResourceDefaults(t *testing.T) {
 	}
 }
 
+// TestAuditLogMetrics: the three JSON decision stream counters are nil-safe and
+// increment with their bounded labels.
+func TestAuditLogMetrics(t *testing.T) {
+	var nilM *Metrics
+	nilM.RecordAuditLogLine("warden.decision.v1")
+	nilM.RecordAuditLogWriteError("write")
+	nilM.RecordAuditLogDropped(3)
+
+	m, h, shutdown := newWithHandler(t)
+	defer func() { _ = shutdown(context.Background()) }()
+
+	m.RecordAuditLogLine("warden.decision.v1")
+	m.RecordAuditLogLine("warden.decision.v1")
+	m.RecordAuditLogWriteError("flush")
+	m.RecordAuditLogDropped(5)
+	m.RecordAuditLogDropped(0)
+	m.RecordAuditLogDropped(-2)
+
+	body := scrape(t, h)
+	for _, want := range []string{
+		`warden_auditlog_lines_total{`,
+		`schema="warden.decision.v1"} 2`,
+		`warden_auditlog_write_errors_total{`,
+		`reason="flush"} 1`,
+		`warden_auditlog_dropped_total{`,
+		`} 5`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("scrape missing %q\n---\n%s", want, body)
+		}
+	}
+}
+
 func TestRecordIdentityVerify(t *testing.T) {
 	var nilm *Metrics
 	nilm.RecordIdentityVerify("valid", "none") // nil-safe

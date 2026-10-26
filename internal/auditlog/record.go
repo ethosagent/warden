@@ -116,7 +116,7 @@ type Record struct {
 }
 
 // excludedEventFields lists the analytics.Event fields deliberately NOT mapped
-// into Record, each with the reason. A later ticket (the schema ticket) enforces
+// into Record, each with the reason. TestEventFieldsAccountedFor enforces
 // that every Event field is either mapped by FromEvent or listed here.
 var excludedEventFields = map[string]string{
 	"SecretRef":      "references a secret by hash/last-4; a credential-adjacent value never leaves the store",
