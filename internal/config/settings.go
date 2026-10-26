@@ -50,6 +50,9 @@ type SettingsWire struct {
 	// judge + llmProviders) is the only way the CP can read explore.llmProvider at
 	// runtime; it is wire-safe (just a name) and harmless dead config on workers.
 	Explore *ExploreSettings `json:"explore,omitempty"`
+	// Identity distributes the secret-free identity-verification block (issuer,
+	// audience, claim names). Absent means off.
+	Identity *IdentitySettings `json:"identity,omitempty"`
 }
 
 // ExploreSettings is the secret-free wire mirror of config.ExploreConfig. It
@@ -144,6 +147,8 @@ type JudgeCircuitBreakerSettings struct {
 type AgentSettings struct {
 	ID     string `json:"id"`
 	Policy string `json:"policy,omitempty"`
+	// Identity is the per-agent identity mode override (off|attribute).
+	Identity string `json:"identity,omitempty"`
 }
 
 // ObservabilitySettings carries the distributable observability knobs. Resource
@@ -310,6 +315,11 @@ func SettingsWireFromPolicy(p Policy) *SettingsWire {
 	}
 	if ex := exploreSettingsFromPolicy(p.Explore); ex != nil {
 		s.Explore = ex
+		any = true
+	}
+
+	if id := identitySettingsFromPolicy(p.Identity); id != nil {
+		s.Identity = id
 		any = true
 	}
 
@@ -849,6 +859,9 @@ func (s *SettingsWire) DeepCopy() *SettingsWire {
 	if s.Explore != nil {
 		ex := *s.Explore
 		cp.Explore = &ex
+	}
+	if s.Identity != nil {
+		cp.Identity = s.Identity.clone()
 	}
 	return &cp
 }
