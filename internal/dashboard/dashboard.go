@@ -549,7 +549,8 @@ const maxUserParamLen = 320
 // caller answers 400. The value is only ever bound as an SQL parameter.
 func userParam(q url.Values) (user string, ok bool) {
 	user = strings.TrimSpace(q.Get("user"))
-	if utf8.RuneCountInString(user) > maxUserParamLen {
+	// NUL is the analytics cache-key separator, so it can never be part of a value.
+	if utf8.RuneCountInString(user) > maxUserParamLen || strings.ContainsRune(user, 0) {
 		return "", false
 	}
 	return user, true

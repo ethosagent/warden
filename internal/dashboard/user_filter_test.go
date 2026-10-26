@@ -224,3 +224,14 @@ func TestQueryBuilderUserColumns(t *testing.T) {
 		})
 	}
 }
+
+func TestAnalyticsUserInjectionAndNUL(t *testing.T) {
+	h := newTestServer(&fakeDataSource{events: userEvents()}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
+	if n, _ := analyticsTotal(t, h, "?range=24h&user="+url.QueryEscape("x' OR '1'='1")); n != 0 {
+		t.Errorf("injection value matched %d requests, want 0", n)
+	}
+	// A NUL would alias the cache key's separator, so it is refused.
+	if rr := doGet(t, h, "/dashboard/api/analytics?range=24h&user=a%00b"); rr.Code != http.StatusBadRequest {
+		t.Errorf("NUL in user: status %d, want 400", rr.Code)
+	}
+}
