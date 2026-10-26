@@ -455,18 +455,23 @@ func TestOIDCLoginManyGroupsKeepsRole(t *testing.T) {
 
 func TestOIDCLoginNextIsRelative(t *testing.T) {
 	for next, want := range map[string]string{
-		"https://evil.example":           "/dashboard/",
-		"//evil.example":                 "/dashboard/",
-		"//evil.example/dashboard/":      "/dashboard/",
-		"/dashboard//evil.example":       "/dashboard/",
-		`/dashboard/\evil.example`:       "/dashboard/",
-		"/dashboard/../central/secrets":  "/dashboard/",
-		"/evil":                          "/dashboard/",
-		"javascript:alert(1)":            "/dashboard/",
-		"/dashboard/\r\nSet-Cookie: x=y": "/dashboard/",
-		"":                               "/dashboard/",
-		"/dashboard/alerts":              "/dashboard/alerts",
-		"/dashboard/?tab=policy":         "/dashboard/?tab=policy",
+		"https://evil.example":              "/dashboard/",
+		"//evil.example":                    "/dashboard/",
+		"//evil.example/dashboard/":         "/dashboard/",
+		"/dashboard//evil.example":          "/dashboard/",
+		`/dashboard/\evil.example`:          "/dashboard/",
+		"/dashboard/../central/secrets":     "/dashboard/",
+		"/evil":                             "/dashboard/",
+		"javascript:alert(1)":               "/dashboard/",
+		"/dashboard/\r\nSet-Cookie: x=y":    "/dashboard/",
+		"/dashboard/a%2F%2Fb":               "/dashboard/",
+		"/dashboard/a%2f%2fb":               "/dashboard/",
+		"/dashboard/a%5Cb":                  "/dashboard/",
+		"/dashboard/%2e%2e/central/secrets": "/dashboard/",
+		"/dashboard/a%0d%0ab":               "/dashboard/",
+		"":                                  "/dashboard/",
+		"/dashboard/alerts":                 "/dashboard/alerts",
+		"/dashboard/?tab=policy":            "/dashboard/?tab=policy",
 	} {
 		t.Run(next, func(t *testing.T) {
 			r := newRig(t, rigOpts{})
