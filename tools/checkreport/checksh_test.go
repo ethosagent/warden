@@ -71,6 +71,7 @@ func sandboxScript(t *testing.T) string {
 		"go.mod":                   "module example.com/x\n\ngo 1.24\n",
 		"coverage.out":             "",
 		"scripts/check.sh":         string(body),
+		"scripts/check-secrets.sh": "#!/bin/bash\necho ok\n",
 		"scripts/fuzz-targets.txt": "# sandbox list\nFuzzOne ./one\nFuzzTwo ./two\n",
 	}
 	for name, content := range files {

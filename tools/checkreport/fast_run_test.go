@@ -144,7 +144,7 @@ func TestRunFastFallsBackToFullGate(t *testing.T) {
 	for _, st := range rep.Stages {
 		names = append(names, st.Name)
 	}
-	if got := strings.Join(names, ","); got != "format,vet,archtest,lint,roadmap,build,vulncheck,test,fuzz,benchmark,coverage" {
+	if got := strings.Join(names, ","); got != "format,vet,archtest,lint,roadmap,secrets,build,vulncheck,test,fuzz,benchmark,coverage" {
 		t.Errorf("full-gate fallback ran %s", got)
 	}
 	b, _ := json.Marshal(rep)

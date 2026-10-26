@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -176,6 +177,28 @@ func parseRoadmap(data []byte) []Finding {
 			Rule: "roadmap/invalid", Severity: sevError, File: "docs/roadmap/tickets.json",
 			Message: e,
 			Fix:     "fix docs/roadmap/tickets.json as the message says, then run `go run docs/roadmap/gen.go docs`",
+		})
+	}
+	return out
+}
+
+// secretsLine matches `secrets: <file>:<line>: <key> is a literal; ...`, the only
+// shape scripts/check-secrets.sh prints for a finding. It never carries a value.
+var secretsLine = regexp.MustCompile(`^secrets: (.+):(\d+): (secret|bindPW|clientSecret) is a literal`)
+
+// parseSecrets parses the stderr of scripts/check-secrets.sh.
+func parseSecrets(stderr []byte) []Finding {
+	var out []Finding
+	for _, l := range strings.Split(string(stderr), "\n") {
+		m := secretsLine.FindStringSubmatch(l)
+		if m == nil {
+			continue
+		}
+		n, _ := strconv.Atoi(m[2])
+		out = append(out, Finding{
+			Rule: "secrets/literal", Severity: sevError, File: m[1], Line: n,
+			Message: m[3] + " holds a literal instead of an env reference",
+			Fix:     "replace the value with an env reference ($VAR or ${VAR:?}) and supply it from the environment",
 		})
 	}
 	return out

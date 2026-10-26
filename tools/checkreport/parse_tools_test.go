@@ -2,6 +2,8 @@ package main
 
 import (
 	"math"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -208,5 +210,44 @@ func TestCoverageExcludesTools(t *testing.T) {
 	}
 	if st := coverageStage(prof, "example.com/fx", 60); len(st.Findings) != 1 {
 		t.Errorf("tools coverage must not lift the gate: %+v", st)
+	}
+}
+
+func TestParseSecrets(t *testing.T) {
+	stderr := []byte("secrets: deploy/compose/dex/a.yaml:2: secret is a literal; use an env reference ($VAR or ${VAR:?})\n" +
+		"noise line\n" +
+		"secrets: deploy/compose/docker-compose.identity.yml:7: bindPW is a literal; use an env reference ($VAR or ${VAR:?})\n")
+	fs := parseSecrets(stderr)
+	if len(fs) != 2 {
+		t.Fatalf("got %+v", fs)
+	}
+	if fs[0].Rule != "secrets/literal" || fs[0].File != "deploy/compose/dex/a.yaml" || fs[0].Line != 2 || !strings.Contains(fs[0].Message, "secret") {
+		t.Errorf("first: %+v", fs[0])
+	}
+	if fs[1].File != "deploy/compose/docker-compose.identity.yml" || fs[1].Line != 7 {
+		t.Errorf("second: %+v", fs[1])
+	}
+	if fs := parseSecrets([]byte("ok\n")); len(fs) != 0 {
+		t.Errorf("clean output must give no findings: %+v", fs)
+	}
+}
+
+// TestStageSecretsRealScript runs the real script so the stderr-to-findings
+// wiring is covered end to end, not only parseSecrets on canned text.
+func TestStageSecretsRealScript(t *testing.T) {
+	root := t.TempDir()
+	script, err := os.ReadFile(filepath.Join("..", "..", "scripts", "check-secrets.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, root, "scripts/check-secrets.sh", string(script))
+	writeFile(t, root, "deploy/compose/dex/config.yaml", "staticClients:\n  - id: x\n    secret: hunt"+"er2zq\n")
+	r := &runner{cfg: config{Root: root}, ctx: parseCtx{Root: root}, exec: osExec}
+	st := r.stageSecrets()
+	if st.OK || len(st.Findings) != 1 || st.Findings[0].File != "deploy/compose/dex/config.yaml" || st.Findings[0].Line != 3 {
+		t.Fatalf("want one finding at config.yaml:3, got %+v", st)
+	}
+	if f := st.Findings[0]; strings.Contains(f.Message+f.Output+f.Fix, "hunter2zq") {
+		t.Errorf("finding leaked the value: %+v", f)
 	}
 }

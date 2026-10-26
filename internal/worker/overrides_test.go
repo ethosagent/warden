@@ -458,6 +458,7 @@ func TestRun_OverridesOnAnalyticsWriterFlushesAnalytics(t *testing.T) {
 
 	var flusher AnalyticsFlusher
 	var flushCalls int
+	inflight := proxy.NewInflight()
 	p := Params{
 		Config: &fakes.FakeConfigProvider{Policy: config.Policy{
 			Allowlist: []config.AllowlistEntry{{Domain: "fake.upstream.test"}},
@@ -473,6 +474,7 @@ func TestRun_OverridesOnAnalyticsWriterFlushesAnalytics(t *testing.T) {
 		Overrides: &Overrides{
 			Dialer:          dialer,
 			UpstreamRootCAs: upstreamRoots,
+			Inflight:        inflight,
 			OnAnalyticsWriter: func(f AnalyticsFlusher) {
 				flushCalls++
 				flusher = f
@@ -533,6 +535,15 @@ func TestRun_OverridesOnAnalyticsWriterFlushesAnalytics(t *testing.T) {
 	if flusher == nil {
 		cancel()
 		t.Fatal("OnAnalyticsWriter never handed over the analytics flusher; h.Events() could never drain the queue")
+	}
+	// The allow event is recorded after the response is relayed (#363), so wait
+	// for the request's terminal bookkeeping before flushing, as the harness does.
+	idleCtx, idleCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	err = inflight.WaitIdle(idleCtx)
+	idleCancel()
+	if err != nil {
+		cancel()
+		t.Fatalf("wait for the request's terminal bookkeeping: %v (in flight: %v)", err, inflight.InFlight())
 	}
 	if err := flusher.Flush(); err != nil {
 		cancel()
