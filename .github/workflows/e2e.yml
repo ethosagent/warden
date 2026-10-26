@@ -14,6 +14,11 @@ name: e2e
 #                  digest). The suite then tests that exact image.
 #
 # Keep the job id AND name `e2e`: the check run name is what risk.yml looks for.
+# tools/gatecheck caps that job at 15 minutes, so the identity suite (W-P1-DEX-04)
+# runs in its own job, `e2e-identity`, with the same triggers. risk.yml's
+# `e2e-required` waits for both check runs on a critical PR, and the release waits
+# for the whole called workflow, which only succeeds when every job does
+# (tools/gatecheck/release_gate_test.go pins the release side).
 # Actions are pinned to a full commit SHA, with the version in a comment.
 on:
   pull_request:
@@ -65,19 +70,12 @@ jobs:
   e2e:
     name: e2e
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 15
     env:
       COMPOSE: >-
         docker compose
         -f deploy/compose/docker-compose.control-plane.yml
         -f deploy/compose/docker-compose.e2e.yml
-      # The identity stack (W-P1-DEX-04) adds Dex + LDAP and the identity override.
-      COMPOSE_IDENTITY: >-
-        docker compose
-        -f deploy/compose/docker-compose.control-plane.yml
-        -f deploy/compose/docker-compose.e2e.yml
-        -f deploy/compose/docker-compose.identity.yml
-        -f deploy/compose/docker-compose.e2e-identity.yml
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -93,9 +91,7 @@ jobs:
       # Nothing else compiles test/e2e (the e2e tag hides it from check.sh), so
       # a type error would otherwise surface only after the image build.
       - name: Vet the e2e package
-        run: |
-          go vet -tags e2e ./test/e2e/
-          go vet -tags e2e ./test/e2e/identity/
+        run: go vet -tags e2e ./test/e2e/
 
       # Authenticated pull when called by the release (no anonymous rate limit).
       # Gated on the image input, so the secrets are never used on PR runs.
@@ -134,20 +130,6 @@ jobs:
           KEEP_STACK: "1"
         run: go test -tags e2e -count=1 -timeout 12m ./test/e2e/ -json > e2e.jsonl
 
-      # The identity stack shares the warden-e2e project and host ports with
-      # the base stack, so the base stack goes first. KEEP_STACK=1 again so the
-      # diagnostics step can read the identity stack on failure. CI=true (set by
-      # GitHub Actions) makes a missing stack FAIL the identity tests rather than
-      # skip them, so this step cannot go green without the stack.
-      - name: Tear down the base stack
-        run: make e2e-down
-
-      - name: Run the identity e2e suite
-        env:
-          KEEP_STACK: "1"
-        shell: bash   # -eo pipefail: the default `bash -e` would let tee mask a failing suite
-        run: make e2e-identity 2>&1 | tee e2e-identity.log
-
       - name: Summarize failures
         if: failure()
         run: |
@@ -172,11 +154,7 @@ jobs:
             curl -s --max-time 10 --cacert test/e2e/certs/proxy-ca.crt "https://localhost:7070/dashboard/api/$p" > "e2e-artifacts/fleet-${p%%\?*}.json" || true
           done
           curl -s --max-time 10 http://127.0.0.1:8081/_recorded > e2e-artifacts/recorded.json || true
-          cp e2e.jsonl e2e-identity.log e2e-artifacts/ 2>/dev/null || true
-          # The identity stack, if it is the one still up (dev placeholder secrets only).
-          (set -a; . deploy/compose/dex/.env.example; set +a
-           $COMPOSE_IDENTITY ps -a > e2e-artifacts/compose-identity-ps.txt 2>&1 || true
-           $COMPOSE_IDENTITY logs --no-color > e2e-artifacts/compose-identity.log 2>&1 || true)
+          cp e2e.jsonl e2e-artifacts/ 2>/dev/null || true
 
       - name: Upload diagnostics
         if: failure()
@@ -189,6 +167,105 @@ jobs:
 
       - name: Tear down the stack
         if: always()
+        run: make e2e-down
+
+  # The identity stack: the e2e stack plus Dex and seeded LDAP (W-P1-DEX-04).
+  # A separate job so `e2e` keeps its 15-minute cap, and a separate runner so the
+  # two stacks (same compose project and host ports) never collide.
+  e2e-identity:
+    name: e2e-identity
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      COMPOSE: >-
+        docker compose
+        -f deploy/compose/docker-compose.control-plane.yml
+        -f deploy/compose/docker-compose.e2e.yml
+      COMPOSE_IDENTITY: >-
+        docker compose
+        -f deploy/compose/docker-compose.control-plane.yml
+        -f deploy/compose/docker-compose.e2e.yml
+        -f deploy/compose/docker-compose.identity.yml
+        -f deploy/compose/docker-compose.e2e-identity.yml
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Vet the identity e2e package
+        run: go vet -tags e2e ./test/e2e/identity/
+
+      - name: Log in to Docker Hub
+        if: ${{ inputs.image != '' }}
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Prepare the image
+        env:
+          IMAGE: ${{ inputs.image }}
         run: |
-          make e2e-identity-down || true
-          make e2e-down
+          if [ -n "$IMAGE" ]; then
+            docker pull "$IMAGE"
+          else
+            IMAGE=warden:e2e
+            docker build -t "$IMAGE" .
+          fi
+          echo "WARDEN_IMAGE=$IMAGE" >> "$GITHUB_ENV"
+          echo "e2e-identity image: $IMAGE" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build the fake upstream
+        run: $COMPOSE build fakeupstream
+
+      # KEEP_STACK=1 so the diagnostics step can read the stack on failure.
+      # CI=true (set by GitHub Actions) makes a missing stack FAIL the tests
+      # rather than skip them. The go test timeout (8m, stack bring-up included)
+      # plus the setup above fits the 15-minute job, and the step cap leaves the
+      # diagnostics and teardown steps time to run.
+      - name: Run the identity e2e suite
+        timeout-minutes: 10
+        env:
+          KEEP_STACK: "1"
+          E2E_IDENTITY_TIMEOUT: 8m
+        shell: bash   # -eo pipefail: the default `bash -e` would let tee mask a failing suite
+        run: make e2e-identity 2>&1 | tee e2e-identity.log
+
+      - name: Summarize failures
+        if: failure()
+        run: |
+          {
+            echo "### Failed identity e2e tests"
+            grep -E '^\s*--- (FAIL|SKIP)' e2e-identity.log 2>/dev/null | sed -E 's/^\s*/- `/; s/$/`/' || true
+            echo "(see the e2e-identity-diagnostics artifact for the full log and compose logs)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Lab data only (dev placeholder secrets), so the logs are safe to upload.
+      - name: Collect diagnostics
+        if: failure()
+        run: |
+          mkdir -p e2e-artifacts
+          cp e2e-identity.log e2e-artifacts/ 2>/dev/null || true
+          (set -a; . deploy/compose/dex/.env.example; set +a
+           $COMPOSE_IDENTITY ps -a > e2e-artifacts/compose-identity-ps.txt 2>&1 || true
+           $COMPOSE_IDENTITY logs --no-color > e2e-artifacts/compose-identity.log 2>&1 || true)
+
+      - name: Upload diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: e2e-identity-diagnostics
+          path: e2e-artifacts/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Tear down the stack
+        if: always()
+        run: make e2e-identity-down

@@ -102,7 +102,10 @@ e2e-identity-down:
 # e2e-identity-down (E2E_KEEP_STACK=1 keeps the stack; E2E_STACK_RUNNING=1
 # reuses one you started). Without a usable stack its tests are BLOCKED: they
 # fail under CI=true and skip loudly otherwise.
-E2E_IDENTITY_GOTEST := go test -tags e2e -count=1 -timeout 20m ./test/e2e/identity/ -v
+# E2E_IDENTITY_TIMEOUT bounds the whole run, stack bring-up included; CI sets it
+# so the run fits the e2e-identity job's 15-minute cap.
+E2E_IDENTITY_TIMEOUT ?= 10m
+E2E_IDENTITY_GOTEST := go test -tags e2e -count=1 -timeout $(E2E_IDENTITY_TIMEOUT) ./test/e2e/identity/ -v
 
 e2e-identity:
 	$(E2E_IDENTITY_GOTEST)
