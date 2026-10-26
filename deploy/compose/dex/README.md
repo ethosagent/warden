@@ -11,7 +11,7 @@ LDAP arrive with W-P1-DEX-02.
 | File | Purpose |
 |---|---|
 | `config.yaml` | Prod-shaped example. https issuer **placeholder**, no password grant, LDAP over StartTLS. Not used by any test stack. |
-| `config.dev.yaml` | **Dev only.** Differs from `config.yaml` in exactly: the issuer, the `warden-cli` device callback, `oauth2.grantTypes` (adds `password`), `oauth2.passwordConnector`, and the LDAP transport (`insecureNoSSL`). `test/deploy` asserts this. |
+| `config.dev.yaml` | **Dev only.** Differs from `config.yaml` in exactly: the issuer, the `warden-cli` device callback, `oauth2.grantTypes` (adds `password`), `oauth2.passwordConnector`, and the LDAP transport keys (`insecureNoSSL` vs `startTLS` + `rootCA`). `test/deploy` asserts this. |
 
 Both files also set `web.http: 0.0.0.0:5556`, `telemetry.http: 0.0.0.0:5558`,
 sqlite3 storage at `/var/dex/dex.db`, and `logger: {level: info, format: json}`

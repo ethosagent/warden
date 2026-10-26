@@ -24,6 +24,8 @@ func TestCheckSecretsScript(t *testing.T) {
 		{name: "env_refs_ok", files: map[string]string{dexDir + "a.yaml": "secret: $FOO\nbindPW: ${LDAP_BIND_PW}\nclientSecret: ${X:?}\n"}},
 		{name: "seed_ldif_ok", files: map[string]string{dexDir + "seed.ldif": "userPassword: {SSHA}abc\nsecret: abc\n"}},
 		{name: "comment_ignored", files: map[string]string{dexDir + "a.yaml": "# secret: abc\nid: x\n"}},
+		{name: "flow_literal", files: map[string]string{dexDir + "f.yaml": "staticClients: [{id: x, secret: flowlit}]\n"}, wantErr: dexDir + "f.yaml:1", secret: "flowlit"},
+		{name: "flow_env_ok", files: map[string]string{dexDir + "f.yaml": "staticClients: [{id: x, secret: $FOO}, {bindPW: ${BAR}}]\n"}},
 		{name: "secret_literal", files: map[string]string{dexDir + "a.yaml": "id: x\nsecret: abc\n"}, wantErr: dexDir + "a.yaml:2", secret: "abc"},
 		{name: "bindpw_literal", files: map[string]string{dexDir + "b.yaml": "bindPW: hunter2\n"}, wantErr: dexDir + "b.yaml:1", secret: "hunter2"},
 		{name: "clientsecret_literal", files: map[string]string{"deploy/compose/docker-compose.identity.yml": "services:\n  a:\n    clientSecret: x\n"}, wantErr: "deploy/compose/docker-compose.identity.yml:3", secret: "clientSecret: x"},
