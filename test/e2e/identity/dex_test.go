@@ -247,7 +247,10 @@ func TestDexIssuerConsistent(t *testing.T) {
 func runTokenScript(t testing.TB, user, password string, extra ...string) (stdout, stderr string, exit int) {
 	t.Helper()
 	if _, err := exec.LookPath("jq"); err != nil {
-		t.Fatalf("identity: scripts/dex-token.sh needs jq on PATH")
+		if os.Getenv("CI") == "true" {
+			t.Fatalf("BLOCKED: scripts/dex-token.sh needs jq on PATH")
+		}
+		t.Skip("BLOCKED (skipped, not passed): scripts/dex-token.sh needs jq on PATH; this test did NOT run")
 	}
 	root, err := compose.RepoRoot()
 	if err != nil {
