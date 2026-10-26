@@ -110,7 +110,8 @@ type Process interface {
 type ExecSpec struct {
 	// Start starts the child.
 	Start func() (Process, error)
-	// Signals delivers the signals received by the supervisor.
+	// Signals delivers the signals received by the supervisor. A nil or closed
+	// channel means no signals; Run then waits for the child alone.
 	Signals <-chan os.Signal
 	// StdinIsTerminal is true when stdin is a terminal; the terminal then
 	// delivers SIGINT and SIGQUIT to the child's foreground group itself.

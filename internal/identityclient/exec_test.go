@@ -244,18 +244,27 @@ func TestExecExitCodes(t *testing.T) {
 	})
 }
 
+// TestExecClosedSignalChannel checks that a closed channel and a nil channel
+// both leave Run waiting for the child alone and returning its code. A busy
+// loop on a closed channel is not observable as a failure here; the guard is
+// the `ok` check in Run.
 func TestExecClosedSignalChannel(t *testing.T) {
-	p := newFakeProc()
-	ch := make(chan os.Signal)
-	close(ch)
-	go func() {
-		time.Sleep(20 * time.Millisecond)
-		close(p.exit)
-	}()
-	code, err := identityclient.Run(context.Background(), identityclient.ExecSpec{
-		Start: func() (identityclient.Process, error) { return p, nil }, Signals: ch,
-	})
-	if err != nil || code != 0 {
-		t.Errorf("code = %d, err = %v", code, err)
+	closed := make(chan os.Signal)
+	close(closed)
+	for name, ch := range map[string]<-chan os.Signal{"closed": closed, "nil": nil} {
+		t.Run(name, func(t *testing.T) {
+			p := newFakeProc()
+			p.code = 5
+			go func() {
+				time.Sleep(20 * time.Millisecond)
+				close(p.exit)
+			}()
+			code, err := identityclient.Run(context.Background(), identityclient.ExecSpec{
+				Start: func() (identityclient.Process, error) { return p, nil }, Signals: ch,
+			})
+			if err != nil || code != 5 {
+				t.Errorf("code = %d, err = %v", code, err)
+			}
+		})
 	}
 }
