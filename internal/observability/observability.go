@@ -346,8 +346,6 @@ func (m *Metrics) RecordJudge(outcome string) {
 
 // RecordIdentityVerify increments warden.identity.verify.total{result,reason}.
 // result is the bounded identity status (none|valid|invalid|expired|
-// unverified|conflict)|valid|invalid|expired|
-// unverified|conflict)|none|valid|invalid|expired|
 // unverified|conflict) and reason the bounded identity.Reason set, "none" when
 // there is no reason. It is not incremented while identity is off, so no
 // result="off" series appears here (off is an event status, not a counter label).
