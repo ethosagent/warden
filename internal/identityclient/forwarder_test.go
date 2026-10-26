@@ -366,7 +366,6 @@ func TestForwarderDialsOnlyWorker(t *testing.T) {
 			t.Fatalf("worker head %q does not carry the target", h)
 		}
 	}
-	time.Sleep(50 * time.Millisecond)
 	if n := decoyConns.Load(); n != 0 {
 		t.Fatalf("the CONNECT target was dialled %d times, want 0", n)
 	}

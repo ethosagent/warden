@@ -319,6 +319,7 @@ func (f *Forwarder) handle(ctx context.Context, conn net.Conn) {
 	}
 	f.log().Info("identity forwarder: CONNECT relayed", "token_fp", fp, "status", status)
 	if status != 200 {
+		_ = wc.SetReadDeadline(f.now().Add(f.preamble()))
 		relayErrorBody(conn, wbr, head)
 		return
 	}
