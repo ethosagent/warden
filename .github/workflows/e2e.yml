@@ -15,9 +15,10 @@ name: e2e
 #
 # Keep the job id AND name `e2e`: the check run name is what risk.yml looks for.
 # tools/gatecheck caps that job at 15 minutes, so the identity suite (W-P1-DEX-04)
-# runs in its own job, `e2e-identity`, with the same triggers. risk.yml does not
-# wait for it; the release does, because a called workflow only succeeds when
-# every one of its jobs does.
+# runs in its own job, `e2e-identity`, with the same triggers. risk.yml's
+# `e2e-required` waits for both check runs on a critical PR, and the release waits
+# for the whole called workflow, which only succeeds when every job does
+# (tools/riskmap/e2e_paths_test.go pins this).
 # Actions are pinned to a full commit SHA, with the version in a comment.
 on:
   pull_request:
@@ -267,4 +268,4 @@ jobs:
 
       - name: Tear down the stack
         if: always()
-        run: make e2e-identity-down || true
+        run: make e2e-identity-down
