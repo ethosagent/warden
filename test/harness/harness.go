@@ -142,6 +142,15 @@ type H struct {
 	// #363 window a red test can rely on.
 	beforeTerminal func()
 
+	// wantIssuer (WithOIDCIssuer) starts the in-process OIDC issuer fake at
+	// boot; issuer is it.
+	wantIssuer bool
+	issuer     *fakes.OIDCIssuer
+
+	// tokenClients are the AgentWithProxyToken / AgentH2WithProxyToken clients,
+	// kept so cleanup can close their idle tunnels.
+	tokenClients []*http.Client
+
 	// cpDownAtBoot (ControlPlaneDownAtBoot) starts the workers while the control
 	// plane is unreachable.
 	cpDownAtBoot bool
@@ -326,6 +335,13 @@ func WithMCP() Option {
 	return func(h *H) { h.mcpEnabled = true }
 }
 
+// WithOIDCIssuer starts the in-process OIDC issuer fake (fakes.OIDCIssuer) for
+// the scenario and exposes it as h.Issuer(). Its clock is the harness's fake
+// clock, so minted tokens agree with the worker's time. It stops at cleanup.
+func WithOIDCIssuer() Option {
+	return func(h *H) { h.wantIssuer = true }
+}
+
 // TransparentIntercept boots the workers in interception mode `both` (#376):
 // the CONNECT proxy keeps working and the transparent interception listeners
 // bind on loopback port 0. Scenarios reach them with TransparentAgent /
@@ -425,12 +441,36 @@ func (h *H) ConnectStatus(hostPort string) int {
 		}
 		return st
 	}
+	return h.connectStatus(hostPort, "")
+}
+
+// ConnectStatusWithAuth is ConnectStatus with a raw Proxy-Authorization header
+// line, for the credential shapes a client library will not produce: the
+// Bearer form, a malformed form, duplicate lines. proxyAuthorization is
+// written verbatim as the header value, so a value containing
+// "\r\nProxy-Authorization: " yields a duplicate line; the empty string sends
+// no header. In-process only: a compose target's probe cannot carry headers.
+// The value is never logged; failures name the host.
+func (h *H) ConnectStatusWithAuth(hostPort, proxyAuthorization string) int {
+	h.tb.Helper()
+	if _, ok := h.target.(ConnectProber); ok {
+		h.tb.Fatalf("harness: ConnectStatusWithAuth needs the in-process worker proxy; this target probes CONNECT itself")
+	}
+	return h.connectStatus(hostPort, proxyAuthorization)
+}
+
+func (h *H) connectStatus(hostPort, proxyAuthorization string) int {
+	h.tb.Helper()
 	conn, err := net.DialTimeout("tcp", h.ProxyAddr(), 5*time.Second)
 	if err != nil {
 		h.tb.Fatalf("dial the worker proxy: %v", err)
 	}
 	defer func() { _ = conn.Close() }()
-	if _, err := fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", hostPort, hostPort); err != nil {
+	req := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n", hostPort, hostPort)
+	if proxyAuthorization != "" {
+		req += "Proxy-Authorization: " + proxyAuthorization + "\r\n"
+	}
+	if _, err := fmt.Fprint(conn, req+"\r\n"); err != nil {
 		h.tb.Fatalf("send CONNECT %s: %v", hostPort, err)
 	}
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
@@ -440,6 +480,15 @@ func (h *H) ConnectStatus(hostPort string) int {
 	}
 	_ = resp.Body.Close()
 	return resp.StatusCode
+}
+
+// Issuer returns the in-process OIDC issuer started by WithOIDCIssuer.
+func (h *H) Issuer() *fakes.OIDCIssuer {
+	h.tb.Helper()
+	if h.issuer == nil {
+		h.tb.Fatal("harness: Issuer needs the WithOIDCIssuer option")
+	}
+	return h.issuer
 }
 
 // MetricsAvailable reports whether this target carries the metrics oracle. A
@@ -517,6 +566,9 @@ func (h *H) boot() {
 	h.upstreamCA = newCA(h.tb, "warden-harness-upstream-ca")
 
 	h.fake = clocktest.NewFake(time.Now())
+	if h.wantIssuer {
+		h.issuer = fakes.NewOIDCIssuer(h.tb, fakes.WithIssuerClock(h.fake.Now))
+	}
 	h.metricReaders = make([]*sdkmetric.ManualReader, h.workers)
 	for i := range h.metricReaders {
 		h.metricReaders[i] = sdkmetric.NewManualReader()
@@ -883,6 +935,9 @@ func (h *H) cleanup() {
 		}
 		if h.cpCl != nil {
 			h.cpCl.CloseIdleConnections()
+		}
+		for _, c := range h.tokenClients {
+			c.CloseIdleConnections()
 		}
 		h.checkGoroutines()
 	})
