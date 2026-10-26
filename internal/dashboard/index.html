@@ -748,6 +748,13 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
           <div class="card-pad feed" id="overviewFeed"></div>
         </div>
       </div>
+      <div class="card" style="margin-top:16px">
+        <div class="card-head"><h3>Top users</h3><span class="sub" id="topUsersSub">by request count</span></div>
+        <table id="topUsersTable">
+          <thead><tr><th>User</th><th class="num">Requests</th><th class="num">Denied</th></tr></thead>
+          <tbody id="topUsersBody"></tbody>
+        </table>
+      </div>
       </div><!-- /demo-only -->
     </section>
 
@@ -776,13 +783,14 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
         <span class="fchip proto" style="margin-left:8px" onclick="setActProto('https', this)">https</span>
         <span class="fchip proto" onclick="setActProto('mcp', this)">mcp</span>
         <span class="fchip proto" onclick="setActProto('grpc', this)">grpc</span>
+        <input type="text" id="actUser" maxlength="320" placeholder="Filter by user (email or sub)" aria-label="Filter by user" style="margin-left:8px" oninput="onUserFilterInput(this.value)" />
         <span class="fchip on" style="margin-left:8px">Fleet</span>
       </div>
 
       <div class="card">
         <table id="activityTable">
           <thead><tr>
-            <th style="width:76px">Time</th><th>Worker</th><th>Method</th><th>Destination</th>
+            <th style="width:76px">Time</th><th>Worker</th><th>User</th><th>Method</th><th>Destination</th>
             <th>Proto</th><th>Decision</th><th>Data classes</th><th>Swaps</th><th class="num">Cost</th><th class="num">Latency</th>
           </tr></thead>
           <tbody id="activityBody"></tbody>
@@ -1336,7 +1344,25 @@ function loadTab(page){
 /* ============================================================
    State + top-bar controls
    ============================================================ */
-const state = { range:"24h", proxy:"" };
+const state = { range:"24h", proxy:"", user:"" };
+/* Operator-typed user filter -> ?user= on the traffic, analytics and endpoints calls.
+   The server trims it and answers 400 past 320 characters, so cut it to the same
+   bound here (characters, not UTF-16 units). */
+const USER_FILTER_MAX = 320;
+function userQS(){ return state.user ? 'user='+encodeURIComponent(state.user) : ''; }
+function withQS(url){ const q=userQS(); return q ? url+(url.indexOf('?')<0?'?':'&')+q : url; }
+function setUserFilter(v){
+  state.user = Array.from(String(v==null?'':v).trim()).slice(0, USER_FILTER_MAX).join('');
+  const t=currentTab();
+  if(t==='overview') loadOverview();
+  else if(t==='activity'){
+    loadActivity();
+    const ep=document.getElementById('actsub-endpoints');
+    if(ep&&ep.classList.contains('active')) loadEndpoints();
+  }
+}
+let userFilterTimer=null;
+function onUserFilterInput(v){ clearTimeout(userFilterTimer); userFilterTimer=setTimeout(()=>setUserFilter(v), 300); }
 const RANGES=[["24h","Last 24h"],["7d","Last 7 days"],["1h","Last hour"],["15m","Last 15 min"],["all","All time"]];
 function rangeLabel(){ const f=RANGES.find(r=>r[0]===state.range); return f?f[1]:"Last 24h"; }
 
@@ -1446,7 +1472,7 @@ function applySetup(){
    ============================================================ */
 async function loadOverview(){
   let d;
-  try{ d=await jget('/dashboard/api/analytics?range='+encodeURIComponent(state.range)+(state.proxy?'&proxy='+encodeURIComponent(state.proxy):'')); }
+  try{ d=await jget(withQS('/dashboard/api/analytics?range='+encodeURIComponent(state.range)+(state.proxy?'&proxy='+encodeURIComponent(state.proxy):''))); }
   catch(e){ const u=document.getElementById('updatedLabel'); if(u) u.textContent='offline'; return; }
   window.__analytics=d;
   buildScope(d.proxies||[]);
@@ -1476,6 +1502,34 @@ function renderOverview(d){
   renderDonut(t, act);
   renderEgressChart(d.timeline||[]);
   renderClassBars(dlp.byClass||[]);
+  renderTopUsers(d.topUsers||[]);
+}
+/* Top users. Email and sub come from an IdP, so every cell is built with
+   textContent: no claim value is ever parsed as markup. */
+function userCell(email, sub){
+  return email || sub || '';
+}
+function renderTopUsers(users){
+  const body=document.getElementById('topUsersBody'); if(!body) return;
+  const sub=document.getElementById('topUsersSub');
+  if(sub) sub.textContent = state.user ? 'filtered: '+state.user : 'by request count';
+  while(body.firstChild) body.removeChild(body.firstChild);
+  if(!users.length){
+    const tr=document.createElement('tr'), td=document.createElement('td');
+    td.colSpan=3; td.className='muted'; td.style.cssText='text-align:center;padding:18px';
+    td.textContent='No verified users in this window.';
+    tr.appendChild(td); body.appendChild(tr); return;
+  }
+  users.forEach(u=>{
+    const tr=document.createElement('tr');
+    const who=document.createElement('td'); who.className='mono';
+    if(u.unattributed){ who.textContent='(unattributed)'; who.classList.add('muted'); }
+    else { who.textContent=userCell(u.email, u.sub); if(u.email&&u.sub) who.title=u.sub; }
+    const n=document.createElement('td'); n.className='num'; n.textContent=fmtNum(u.count||0);
+    const dn=document.createElement('td'); dn.className='num'; dn.textContent=fmtNum(u.denied||0);
+    tr.appendChild(who); tr.appendChild(n); tr.appendChild(dn);
+    body.appendChild(tr);
+  });
 }
 function renderDonut(t,act){
   const allowed=t.allowed||0, redact=act.redact||0, block=t.denied||0, monitor=act.monitor||0;
@@ -1557,7 +1611,7 @@ function renderOverviewFeed(evs){
    Traffic (/dashboard/api/traffic) — shared by Activity + Overview feed
    ============================================================ */
 async function loadTraffic(){
-  const evs=await jget('/dashboard/api/traffic');
+  const evs=await jget(withQS('/dashboard/api/traffic'));
   window.__traffic=Array.isArray(evs)?evs:[];
   return window.__traffic;
 }
@@ -1607,7 +1661,7 @@ function renderActivity(){
   const evs=filteredActivity();
   body.innerHTML='';
   if(!evs.length){
-    body.innerHTML='<tr><td colspan="10" class="muted" style="text-align:center;padding:18px">No requests match this filter.</td></tr>';
+    body.innerHTML='<tr><td colspan="11" class="muted" style="text-align:center;padding:18px">No requests match this filter.</td></tr>';
     return;
   }
   evs.forEach((e,i)=>{
@@ -1620,9 +1674,15 @@ function renderActivity(){
     tr.innerHTML='<td class="mono">'+hhmmss(e.Timestamp)+'</td><td>'+esc(e.ProxyID||'local')+'</td><td class="mono">'+esc(e.Method||'')+'</td>'
       +'<td class="mono" style="color:#bcd">'+esc(e.Domain||'')+'</td><td>'+protoPill(e.Protocol)+'</td><td>'+decPill(dec)+'</td>'
       +'<td>'+cls+'</td><td class="num">'+(swaps||'<span class="muted">0</span>')+'</td><td class="num">'+cost+'</td><td class="num">'+lat+'</td>';
+    // User cell: claim values go in via textContent, never through the innerHTML above.
+    const ut=document.createElement('td'); ut.className='mono';
+    const who=userCell(e.user_email, e.user_sub);
+    if(who){ ut.textContent=who; if(e.user_email&&e.user_sub) ut.title=e.user_sub; }
+    else { ut.className='muted'; ut.textContent='—'; }
+    tr.insertBefore(ut, tr.children[2]);
     body.appendChild(tr);
     const dr=document.createElement('tr'); dr.className='detail-row';
-    dr.innerHTML='<td colspan="10"><div class="detail-inner" id="adet'+i+'">'+activityDetail(e,dec)+'</div></td>';
+    dr.innerHTML='<td colspan="11"><div class="detail-inner" id="adet'+i+'">'+activityDetail(e,dec)+'</div></td>';
     tr.addEventListener('click', ()=>{ const d=document.getElementById('adet'+i); if(d) d.classList.toggle('open'); });
     body.appendChild(dr);
   });
@@ -1693,7 +1753,7 @@ async function loadEndpoints(){
   if(!body) return;
   body.innerHTML='<tr><td colspan="6" class="loading-note">Loading…</td></tr>';
   let d;
-  try{ d=await jget('/dashboard/api/endpoints?pageSize=200'+(state.proxy?'&proxy='+encodeURIComponent(state.proxy):'')); }
+  try{ d=await jget(withQS('/dashboard/api/endpoints?pageSize=200'+(state.proxy?'&proxy='+encodeURIComponent(state.proxy):''))); }
   catch(e){ body.innerHTML='<tr><td colspan="6" class="muted" style="text-align:center;padding:18px">Endpoints unavailable.</td></tr>'; if(sub) sub.textContent='—'; return; }
   const items=(d&&Array.isArray(d.items))?d.items:[];
   const total=(d&&typeof d.total==='number')?d.total:items.length;

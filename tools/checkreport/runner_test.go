@@ -160,7 +160,11 @@ func TestEachStageFixture(t *testing.T) {
 			if found == nil {
 				t.Fatalf("no finding with rule %q: %+v", tc.rule, st.Findings)
 			}
-			if found.File != tc.file || found.Line != tc.line {
+			// The race fixture's two writes are on lines 8 (goroutine) and 9 (test
+			// body); the race detector reports whichever access it catches second,
+			// which depends on scheduling, so either line is the race's location.
+			raceOtherLine := tc.rule == "test/data-race" && found.Line == 9
+			if found.File != tc.file || (found.Line != tc.line && !raceOtherLine) {
 				t.Errorf("location = %s:%d, want %s:%d", found.File, found.Line, tc.file, tc.line)
 			}
 			if found.Fix == "" || found.Message == "" || found.Severity != "error" {

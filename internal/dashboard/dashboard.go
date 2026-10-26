@@ -9,12 +9,14 @@ import (
 	"embed"
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"path"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/config"
@@ -539,6 +541,21 @@ func writeJSONBytes(w http.ResponseWriter, body []byte) {
 	_, _ = w.Write(body)
 }
 
+// maxUserParamLen bounds ?user= (an email address is at most 320 characters).
+const maxUserParamLen = 320
+
+// userParam reads the optional ?user= filter: trimmed, and rejected when longer
+// than maxUserParamLen characters. ok is false when the value is too long; the
+// caller answers 400. The value is only ever bound as an SQL parameter.
+func userParam(q url.Values) (user string, ok bool) {
+	user = strings.TrimSpace(q.Get("user"))
+	// NUL is the analytics cache-key separator, so it can never be part of a value.
+	if utf8.RuneCountInString(user) > maxUserParamLen || strings.ContainsRune(user, 0) {
+		return "", false
+	}
+	return user, true
+}
+
 // handleTraffic serves GET /dashboard/api/traffic.
 func (s *Server) handleTraffic(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -547,9 +564,15 @@ func (s *Server) handleTraffic(w http.ResponseWriter, r *http.Request) {
 	}
 
 	q := r.URL.Query()
+	user, ok := userParam(q)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid user parameter")
+		return
+	}
 	filter := analytics.EventFilter{
 		Domain:   q.Get("domain"),
 		Decision: q.Get("decision"),
+		User:     user,
 	}
 	if v := q.Get("since"); v != "" {
 		t, err := time.Parse(time.RFC3339, v)
@@ -815,12 +838,17 @@ func (s *Server) handleEndpoints(w http.ResponseWriter, r *http.Request) {
 
 	// Optional domain filter for the domain→endpoints drill-down.
 	domainFilter := q.Get("domain")
+	user, ok := userParam(q)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid user parameter")
+		return
+	}
 
 	// Optional time-window filter, mirroring handleAnalytics.
 	cutoff, finite := rangeCutoff(q.Get("range"), time.Now())
 
 	// Limit 0 means no cap — aggregate over every recorded event.
-	f := analytics.EventFilter{Domain: domainFilter, ProxyID: q.Get("proxy"), Limit: 0}
+	f := analytics.EventFilter{Domain: domainFilter, ProxyID: q.Get("proxy"), User: user, Limit: 0}
 	if finite {
 		f.Since = cutoff
 	}
@@ -1010,12 +1038,16 @@ type analyticsResponse struct {
 	Hourly        []hourlyBucket   `json:"hourly"`
 	TopDomains    []topDomain      `json:"topDomains"`
 	TopEndpoints  []topEndpoint    `json:"topEndpoints"`
-	Blocked       []blockedGroup   `json:"blocked"`
-	Secrets       []secretUsage    `json:"secrets"`
-	Judge         []judgeEntry     `json:"judge"`
-	Writes        []writeEntry     `json:"writes"`
-	Cost          costSummary      `json:"cost"`
-	Compliance    []complianceTag  `json:"compliance"`
+	// TopUsers is the per-user breakdown (see analytics.TopUsers). Sub and Email
+	// are IdP claim values; the UI renders them as text only. Empty when the
+	// store holds no identity data.
+	TopUsers   []analytics.UserCount `json:"topUsers"`
+	Blocked    []blockedGroup        `json:"blocked"`
+	Secrets    []secretUsage         `json:"secrets"`
+	Judge      []judgeEntry          `json:"judge"`
+	Writes     []writeEntry          `json:"writes"`
+	Cost       costSummary           `json:"cost"`
+	Compliance []complianceTag       `json:"compliance"`
 	// DLP is the outbound-request data-loss-prevention aggregate: by-class,
 	// by-action, and the class×destination matrix. Zero-valued (empty slices,
 	// zero counts) when no event carries a data class.
@@ -1297,17 +1329,22 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The payload is a pure function of the time window and the proxy selector —
-	// the only two query params computeAnalytics reads — plus the event store and
-	// the wall clock. Key on exactly those two params (NUL-separated so no pair of
-	// distinct values can alias) and serve a cached body within the TTL; a
-	// different range or proxy is a different key, so one filter never returns
-	// another's data.
+	// The payload is a pure function of the time window, the proxy selector and
+	// the user filter — the only query params computeAnalytics reads — plus the
+	// event store and the wall clock. Key on exactly those params (NUL-separated
+	// so no tuple of distinct values can alias) and serve a cached body within
+	// the TTL; a different range, proxy or user is a different key, so one
+	// filter never returns another's data.
 	q := r.URL.Query()
-	key := q.Get("range") + "\x00" + q.Get("proxy")
+	user, ok := userParam(q)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid user parameter")
+		return
+	}
+	key := q.Get("range") + "\x00" + q.Get("proxy") + "\x00" + user
 	now := s.now()
 	body, err := s.analyticsCache.getOrCompute(key, now, analyticsCacheTTL, func() ([]byte, error) {
-		return s.computeAnalytics(q.Get("range"), q.Get("proxy"), now)
+		return s.computeAnalytics(q.Get("range"), q.Get("proxy"), user, now)
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -1317,13 +1354,13 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 }
 
 // computeAnalytics builds the full analytics aggregate payload for the given
-// time-range token and proxy selector, evaluated at now, and returns it
+// time-range token, proxy selector and user filter, evaluated at now, and returns it
 // serialized. It is the cache-miss path for handleAnalytics: byte-for-byte the
 // payload the dashboard has always returned for a given (range, proxy) filter.
-func (s *Server) computeAnalytics(rangeParam, selectedProxy string, now time.Time) ([]byte, error) {
+func (s *Server) computeAnalytics(rangeParam, selectedProxy, user string, now time.Time) ([]byte, error) {
 	cutoff, finite := rangeCutoff(rangeParam, now)
 
-	f := analytics.EventFilter{Limit: 0}
+	f := analytics.EventFilter{Limit: 0, User: user}
 	if finite {
 		f.Since = cutoff
 	}
@@ -1351,6 +1388,7 @@ func (s *Server) computeAnalytics(rangeParam, selectedProxy string, now time.Tim
 		Hourly:       make([]hourlyBucket, 24),
 		TopDomains:   []topDomain{},
 		TopEndpoints: []topEndpoint{},
+		TopUsers:     analytics.TopUsers(events),
 		Blocked:      []blockedGroup{},
 		Secrets:      []secretUsage{},
 		Judge:        []judgeEntry{},

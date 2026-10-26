@@ -524,6 +524,50 @@ func TestAsyncWriter_OnBatchTee(t *testing.T) {
 	}
 }
 
+// TestAsyncWriter_OnBatchTee_Additive proves WithOnBatch is additive: two tees
+// both see every event exactly once, in registration order per batch, and a nil
+// function is ignored.
+func TestAsyncWriter_OnBatchTee_Additive(t *testing.T) {
+	fs := newFakeStore(t)
+	var mu sync.Mutex
+	var order []string
+	counts := map[string]int{}
+	tee := func(name string) func([]Event) {
+		return func(evs []Event) {
+			mu.Lock()
+			defer mu.Unlock()
+			order = append(order, name)
+			counts[name] += len(evs)
+		}
+	}
+	w := newAsyncWriter(fs,
+		WithBatchSize(4), WithFlushInterval(10*time.Millisecond),
+		WithOnBatch(tee("first")), WithOnBatch(nil), WithOnBatch(tee("second")),
+	)
+	const n = 10
+	for i := 0; i < n; i++ {
+		if err := w.StoreEvent(Event{Domain: "api.openai.com", Decision: "allow"}); err != nil {
+			t.Fatalf("StoreEvent: %v", err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if counts["first"] != n || counts["second"] != n {
+		t.Fatalf("each tee must see each event once: %v, want %d", counts, n)
+	}
+	if len(order)%2 != 0 {
+		t.Fatalf("tees must fire the same number of times: %v", order)
+	}
+	for i := 0; i < len(order); i += 2 {
+		if order[i] != "first" || order[i+1] != "second" {
+			t.Fatalf("tees must run in registration order per batch: %v", order)
+		}
+	}
+}
+
 // TestAsyncWriter_OnBatchTee_NilNoop asserts a nil tee (the default) is a no-op:
 // events persist normally and nothing is allocated for teeing.
 func TestAsyncWriter_OnBatchTee_NilNoop(t *testing.T) {
