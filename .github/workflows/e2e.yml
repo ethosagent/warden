@@ -65,7 +65,7 @@ jobs:
   e2e:
     name: e2e
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     env:
       COMPOSE: >-
         docker compose
@@ -145,6 +145,7 @@ jobs:
       - name: Run the identity e2e suite
         env:
           KEEP_STACK: "1"
+        shell: bash   # -eo pipefail: the default `bash -e` would let tee mask a failing suite
         run: make e2e-identity 2>&1 | tee e2e-identity.log
 
       - name: Summarize failures

@@ -88,8 +88,8 @@ func TestE2EWorkflowShape(t *testing.T) {
 	if !ok || job.Name != "e2e" {
 		t.Errorf("the job id and name must both be `e2e` (risk.yml waits for that check run); got id present %v, name %q", ok, job.Name)
 	}
-	if job.TimeoutMinutes != 15 {
-		t.Errorf("timeout-minutes = %d, want 15", job.TimeoutMinutes)
+	if job.TimeoutMinutes != 25 {
+		t.Errorf("timeout-minutes = %d, want 25 (the base suite and the identity suite share the job)", job.TimeoutMinutes)
 	}
 	for _, p := range e2eRunProblems(job.ContinueOnErr, job.Steps) {
 		t.Error(p)

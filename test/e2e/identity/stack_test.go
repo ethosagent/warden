@@ -60,6 +60,11 @@ func bringUp() string {
 		return "the docker daemon is not reachable: " + firstLine(res.Stderr)
 	}
 	if !compose.ExternalStack() {
+		// The project name and host ports are shared with `make e2e`: never
+		// start (or later tear down) over a stack someone else owns.
+		if res := compose.Run(".", compose.ProbeDeadline, "docker", "ps", "-q", "--filter", "label=com.docker.compose.project="+compose.Project); strings.TrimSpace(res.Stdout) != "" {
+			return "the " + compose.Project + " project already has running containers; run `make e2e-down` or `make e2e-identity-down` first, or set E2E_STACK_RUNNING=1 to use that stack"
+		}
 		started = true
 		if code := compose.MakeTarget("e2e-identity-up", compose.UpDeadline); code != 0 {
 			return fmt.Sprintf("make e2e-identity-up failed (exit %d); its output is above", code)
