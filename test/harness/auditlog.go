@@ -39,10 +39,6 @@ func (h *H) decisionLogPath(i int) string {
 	return filepath.Join(h.root, fmt.Sprintf("worker-%d-decisions.jsonl", i))
 }
 
-func (h *H) receiptLogPath(i int) string {
-	return filepath.Join(h.root, fmt.Sprintf("worker-%d-receipts.jsonl", i))
-}
-
 // applyAuditLogs sets the node-local audit and judge blocks on worker i's policy.
 func (h *H) applyAuditLogs(i int, p *config.Policy) {
 	if h.auditLogs {
