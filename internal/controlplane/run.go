@@ -151,7 +151,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	var state *cpstate.DB
 	if stateDir != "" {
 		statePath := filepath.Join(stateDir, "warden-cp.db")
-		state, err = cpstate.Open(ctx, statePath, nil)
+		state, err = cpstate.Open(ctx, statePath, SessionMigrations())
 		if err != nil {
 			return fail(fmt.Errorf("control-plane: state db: %w", err))
 		}
