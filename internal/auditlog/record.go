@@ -65,7 +65,9 @@ type Meta struct {
 }
 
 // User is the verified end-user attribution. Status is set whenever the event
-// carried an identity status; every other field only when the status is valid.
+// carried an identity status, none (identity on, no token sent) included; an
+// event with no status (identity off) has no user object. Every other field is
+// set only when the status is valid.
 type User struct {
 	Status          string   `json:"status"`
 	Sub             string   `json:"sub,omitempty"`

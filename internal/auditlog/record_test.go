@@ -119,7 +119,23 @@ func TestFromEvent_Identity(t *testing.T) {
 		}
 	})
 
-	t.Run("no status omits the user object", func(t *testing.T) {
+	t.Run("none status is exported bare", func(t *testing.T) {
+		// Identity on and no token sent: the worker stamps none. The line says
+		// so, which tells it apart from identity off (no user object).
+		ev := base
+		ev.IdentityStatus = "none"
+		line := string(marshal(t, FromEvent(ev, testMeta, QueryDrop)))
+		if !strings.Contains(line, `"user":{"status":"none"}`) {
+			t.Fatalf("want bare user.status none: %s", line)
+		}
+		for _, leak := range []string{"sub-1", "a@b.test", "sid-1", "g1", `"sub"`, `"groups"`} {
+			if strings.Contains(line, leak) {
+				t.Fatalf("line leaks %q: %s", leak, line)
+			}
+		}
+	})
+
+	t.Run("no status (identity off) omits the user object", func(t *testing.T) {
 		line := string(marshal(t, FromEvent(base, testMeta, QueryDrop)))
 		if strings.Contains(line, `"user"`) || strings.Contains(line, "sub-1") {
 			t.Fatalf("unattributed event must carry no user: %s", line)
