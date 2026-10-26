@@ -65,8 +65,10 @@ scenario changes it live by read-modify-write on `/dashboard/api/settings`
 The catalog is `identity_*` (`test/scenarios/identity.go`):
 `go test ./test/scenarios -race -run 'TestScenarios/identity_'`. Notes:
 
-- An event with no token stores no `identity_status` (status none leaves the
-  event unstamped); the `none` outcome shows in `warden.identity.verify.total`.
+- With identity on, an event for a request with no token stores
+  `identity_status=none` (and so do its receipt and decision log line); with
+  identity off (`identity_mode_off`) the status stays empty, byte-identical to a
+  pre-identity event, so an auditor can tell the two apart.
 - The worker's verifier uses real time and re-fetches a failed key set at most
   every 30s, so a scenario recovers an issuer by changing a verifier input
   (a rebuild), not by waiting.

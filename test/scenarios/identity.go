@@ -181,17 +181,6 @@ func only(t *testing.T, evs []analytics.Event, url string) analytics.Event {
 	return hit[0]
 }
 
-// eventStatus is the identity_status an event stores for c. A caller with no
-// token (status none) is stored unstamped, so an unattributed event stays
-// byte-identical to one written before identity existed (W-P1-VRFY-09); the
-// "none" outcome is visible in warden.identity.verify.total instead.
-func eventStatus(c idToken) string {
-	if c.status == "none" {
-		return ""
-	}
-	return c.status
-}
-
 // assertIdentityEvent checks one event (or the event a receipt signed) against
 // what the case must record. Only status valid carries user fields.
 func assertIdentityEvent(t *testing.T, what string, e analytics.Event, c idToken, decision string) {
@@ -199,7 +188,7 @@ func assertIdentityEvent(t *testing.T, what string, e analytics.Event, c idToken
 	if e.Decision != decision {
 		t.Errorf("%s: decision %q, want %q", what, e.Decision, decision)
 	}
-	if want := eventStatus(c); e.IdentityStatus != want {
+	if want := c.status; e.IdentityStatus != want {
 		t.Errorf("%s: identity_status %q, want %q", what, e.IdentityStatus, want)
 	}
 	if e.IdentityReason != c.reason {
@@ -249,8 +238,9 @@ func assertDecisionLog(t *testing.T, h *harness.H, url string, c idToken) {
 
 func assertDecisionRecord(t *testing.T, rec map[string]any, c idToken) {
 	t.Helper()
-	// A caller with no token logs no identity attributes at all.
-	wantStatus := eventStatus(c)
+	// Identity on and no token logs identity_status=none; identity off (status
+	// empty here) logs no identity attributes at all.
+	wantStatus := c.status
 	if got, _ := rec["identity_status"].(string); got != wantStatus {
 		t.Errorf("%s: log identity_status %q, want %q", c.name, got, wantStatus)
 	}
@@ -491,7 +481,7 @@ func bySubOrStatus(t *testing.T, evs []analytics.Event, c idToken) analytics.Eve
 		switch {
 		case c.sub != "" && e.UserSub == c.sub:
 			hit = append(hit, e)
-		case c.sub == "" && e.IdentityStatus == eventStatus(c) && e.IdentityReason == c.reason:
+		case c.sub == "" && e.IdentityStatus == c.status && e.IdentityReason == c.reason:
 			hit = append(hit, e)
 		}
 	}
@@ -501,12 +491,7 @@ func bySubOrStatus(t *testing.T, evs []analytics.Event, c idToken) analytics.Eve
 	return hit[0]
 }
 
-func statusOrAbsent(c idToken) any {
-	if c.status == "none" {
-		return nil
-	}
-	return c.status
-}
+func statusOrAbsent(c idToken) any { return c.status }
 
 func reasonOrAbsent(c idToken) any {
 	if c.reason == "" {
@@ -628,7 +613,7 @@ func identityDenyAttributed(t *testing.T, h *harness.H) {
 	}
 	want := map[string]int{}
 	for _, r := range rows {
-		want["deny|"+eventStatus(r.want)+"|"+r.want.reason+"|"+r.want.sub]++
+		want["deny|"+r.want.status+"|"+r.want.reason+"|"+r.want.sub]++
 	}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Errorf("deny events by decision|status|reason|sub = %v, want %v", got, want)
@@ -678,14 +663,17 @@ func identityOff(t *testing.T, h *harness.H) {
 	}
 
 	evs := h.Events()
-	off := idToken{name: "off", status: "off"}
+	// Identity off: the event is byte-identical to a pre-identity one, so the
+	// status is empty even though a token was presented.
+	off := idToken{name: "off"}
 	for _, x := range idTransports {
 		url := "https://" + identityHost + "/" + x.name
 		assertIdentityEvent(t, x.name, only(t, evs, url), off, "allow")
 		assertIdentityEvent(t, x.name+" receipt", only(t, h.Receipts(), url), off, "allow")
 		assertDecisionLog(t, h, url, off)
 	}
-	assertIdentityEvent(t, "no_token", only(t, evs, "https://"+identityHost+"/no_token"), idToken{name: "none", status: "none"}, "allow")
+	assertIdentityEvent(t, "no_token", only(t, evs, "https://"+identityHost+"/no_token"), idToken{name: "none"}, "allow")
+	assertIdentityEvent(t, "no_token receipt", only(t, h.Receipts(), "https://"+identityHost+"/no_token"), idToken{name: "none"}, "allow")
 
 	assertVerifyCounts(t, h, map[[2]string]float64{})
 	if n := h.Issuer().JWKSRequests() + h.Issuer().DiscoveryRequests(); n != 0 {
@@ -930,11 +918,11 @@ func identityHotReload(t *testing.T, h *harness.H) {
 	if err := apply(func(s *config.IdentitySettings) { s.DefaultMode = config.IdentityModeOff }); err != nil {
 		t.Fatalf("switch to off: %v", err)
 	}
-	settle("the worker to apply mode off", "off", "")
+	settle("the worker to apply mode off", "", "")
 	before := verifyCounts(h)
 	for i := 0; i < 3; i++ {
-		if e := probe(fmt.Sprintf("/off_%d", i)); e.IdentityStatus != "off" || e.UserSub != "" {
-			t.Fatalf("mode off: identity_status %q user_sub %q, want off with no user", e.IdentityStatus, e.UserSub)
+		if e := probe(fmt.Sprintf("/off_%d", i)); e.IdentityStatus != "" || e.UserSub != "" {
+			t.Fatalf("mode off: identity_status %q user_sub %q, want empty with no user", e.IdentityStatus, e.UserSub)
 		}
 	}
 	if h.MetricsAvailable() {
