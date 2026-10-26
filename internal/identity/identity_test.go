@@ -85,3 +85,20 @@ func TestApplyOptions(t *testing.T) {
 		t.Error("nonce not applied")
 	}
 }
+
+func TestNormalizeGroupsMax(t *testing.T) {
+	var in []string
+	for i := 0; i < 300; i++ {
+		in = append(in, fmt.Sprintf("g%03d", i))
+	}
+	got, trunc := identity.NormalizeGroupsMax(in, identity.MaxConsoleGroups)
+	if len(got) != identity.MaxConsoleGroups || !trunc {
+		t.Fatalf("kept %d truncated=%v, want %d true", len(got), trunc, identity.MaxConsoleGroups)
+	}
+	if got, trunc := identity.NormalizeGroupsMax(in[:256], identity.MaxConsoleGroups); len(got) != 256 || trunc {
+		t.Fatalf("exactly the cap: kept %d truncated=%v", len(got), trunc)
+	}
+	if got, _ := identity.NormalizeGroups(in); len(got) != identity.MaxGroups {
+		t.Fatalf("default cap kept %d, want %d", len(got), identity.MaxGroups)
+	}
+}

@@ -240,7 +240,9 @@ control plane after both checks and never taken from the request. No access, ref
 ID token is stored, and `offline_access` is not requested. `next` is honoured only as a
 path under `/dashboard/`. A failed login redirects to `/dashboard/?login_error=<code>` with
 a code from `state_invalid`, `nonce_mismatch`, `token_invalid`, `exchange_failed`,
-`idp_error`, `no_role` or `idp_unavailable`; IdP error text is never echoed. Discovery
+`idp_error`, `no_role` or `idp_unavailable`; IdP error text is never echoed. `/auth/login`
+itself answers 503 `login_busy` when 10,000 logins are pending and 500 `login_error`
+if the attempt cannot be stored. At most 256 groups are read from the token. Discovery
 runs in the background with backoff, so an unreachable IdP never blocks startup or
 `/policy`; until it succeeds both routes answer 503 `idp_unavailable`. Each attempt logs
 one `console_login` line (`result`, `reason`, `sub`, `duration_ms`), never a code, state,

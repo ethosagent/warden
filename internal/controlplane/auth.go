@@ -30,6 +30,10 @@ const (
 	loginIDPError       = "idp_error"
 	loginNoRole         = "no_role"
 	loginIDPUnavailable = "idp_unavailable"
+	// loginBusy and loginInternal answer /auth/login itself (JSON, not a
+	// redirect): the pending table is full, or storing the attempt failed.
+	loginBusy     = "login_busy"
+	loginInternal = "login_error"
 )
 
 const (
@@ -191,10 +195,9 @@ func (a *authService) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Next: sanitizeNext(r.URL.Query().Get("next")), BrowserHash: sha256Hex(browser),
 	})
 	if err != nil {
-		code := "login_error"
-		status := http.StatusInternalServerError
+		code, status := loginInternal, http.StatusInternalServerError
 		if errors.Is(err, errPendingFull) {
-			code, status = "login_busy", http.StatusServiceUnavailable
+			code, status = loginBusy, http.StatusServiceUnavailable
 		}
 		a.logger.Warn("console_login", "result", "failed", "reason", code, "duration_ms", time.Since(start).Milliseconds())
 		writeAuthError(w, status, code)
@@ -321,6 +324,10 @@ func sanitizeNext(raw string) string {
 	}
 	u, err := url.Parse(raw)
 	if err != nil || u.Scheme != "" || u.Host != "" || u.User != nil || !strings.HasPrefix(u.Path, dashboardHome) {
+		return dashboardHome
+	}
+	// The decoded path must pass the same separator rules as the raw string.
+	if strings.Contains(u.Path, "//") || strings.ContainsAny(u.Path, "\\\r\n\t") {
 		return dashboardHome
 	}
 	for _, seg := range strings.Split(u.Path, "/") {

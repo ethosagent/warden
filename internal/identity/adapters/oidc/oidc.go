@@ -25,14 +25,16 @@ const (
 // means lazy discovery from the issuer. InternalIssuerURL and CAFile go to the
 // shared HTTP client. Now is for tests; nil means time.Now.
 type Config struct {
-	Issuer            string
-	Audience          string
-	Audiences         []string
-	AllowedAZP        []string
-	JWKSURL           string
-	ClockSkew         time.Duration
-	MaxTokenTTL       time.Duration
-	GroupsClaim       string
+	Issuer      string
+	Audience    string
+	Audiences   []string
+	AllowedAZP  []string
+	JWKSURL     string
+	ClockSkew   time.Duration
+	MaxTokenTTL time.Duration
+	GroupsClaim string
+	// MaxGroups caps the groups kept from a token; zero means identity.MaxGroups.
+	MaxGroups         int
 	InternalIssuerURL string
 	CAFile            string
 	Now               func() time.Time
@@ -75,6 +77,12 @@ func NewOIDCVerifier(cfg Config) (identity.Verifier, error) {
 		return nil, errors.New("oidc verifier: max token ttl must not be negative")
 	case cfg.MaxTokenTTL == 0:
 		cfg.MaxTokenTTL = identity.DefaultMaxTokenTTL
+	}
+	switch {
+	case cfg.MaxGroups < 0:
+		return nil, errors.New("oidc verifier: max groups must not be negative")
+	case cfg.MaxGroups == 0:
+		cfg.MaxGroups = identity.MaxGroups
 	}
 	if cfg.GroupsClaim == "" {
 		cfg.GroupsClaim = identity.DefaultGroupsClaim
@@ -127,7 +135,7 @@ func (v *verifier) Verify(ctx context.Context, raw string, opts ...identity.Veri
 		}
 	}
 
-	hdr, p, err := parseToken(raw, v.cfg.GroupsClaim)
+	hdr, p, err := parseToken(raw, v.cfg.GroupsClaim, v.cfg.MaxGroups)
 	if err != nil {
 		return identity.Claims{}, identity.StatusInvalid, identity.ReasonMalformed
 	}

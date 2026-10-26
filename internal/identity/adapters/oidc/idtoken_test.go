@@ -87,3 +87,22 @@ type failingTransport struct{}
 func (failingTransport) RoundTrip(*http.Request) (*http.Response, error) {
 	return nil, http.ErrHandlerTimeout
 }
+
+func TestIDTokenVerifierKeepsUpTo256Groups(t *testing.T) {
+	sg := newRSASigner(t, "k1")
+	srv := newJWKSServer(t, "", sg)
+	groups := make([]string, 300)
+	for i := range groups {
+		groups[i] = "g" + string(rune('a'+i/26/26%26)) + string(rune('a'+i/26%26)) + string(rune('a'+i%26))
+	}
+	c := baseClaims(srv.URL, testNow)
+	c["aud"], c["azp"], c["nonce"], c["groups"] = "warden-console", "warden-console", "n", groups
+	v, err := NewIDTokenVerifier(IDTokenConfig{Issuer: srv.URL, ClientID: "warden-console", InternalIssuerURL: srv.URL, Now: (&clock{t: testNow}).now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, st, _ := v.Verify(ctx2s(t), sg.sign(c), identity.WithNonce("n"))
+	if st != identity.StatusValid || len(got.Groups) != identity.MaxConsoleGroups || !got.GroupsTruncated {
+		t.Fatalf("status %s, kept %d groups (truncated=%v), want %d", st, len(got.Groups), got.GroupsTruncated, identity.MaxConsoleGroups)
+	}
+}

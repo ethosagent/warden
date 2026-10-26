@@ -40,6 +40,7 @@ func NewIDTokenVerifier(cfg IDTokenConfig) (identity.Verifier, error) {
 		Issuer:            cfg.Issuer,
 		Audience:          cfg.ClientID,
 		AllowedAZP:        []string{cfg.ClientID},
+		MaxGroups:         identity.MaxConsoleGroups,
 		InternalIssuerURL: cfg.InternalIssuerURL,
 		CAFile:            cfg.CAFile,
 		Now:               cfg.Now,

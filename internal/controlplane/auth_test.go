@@ -3,6 +3,7 @@ package controlplane
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -433,6 +434,22 @@ func TestOIDCLoginNoRole(t *testing.T) {
 	wantRedirect(t, rec, "/dashboard/?login_error=no_role")
 	if r.sessionRows() != 0 || cookieNamed(rec, "warden_console") != nil {
 		t.Fatal("a session was created for a user with no role")
+	}
+}
+
+func TestOIDCLoginManyGroupsKeepsRole(t *testing.T) {
+	r := newRig(t, rigOpts{})
+	r.ready()
+	groups := []string{"staff"}
+	for i := 0; i < 100; i++ {
+		groups = append(groups, fmt.Sprintf("g%03d", i))
+	}
+	// "staff" sorts after 100 other groups: past the worker's 64-entry cap, inside
+	// the console's 256.
+	r.idp.SetLogin(fakes.Valid("dave", "d@example.com", groups...))
+	wantRedirect(t, r.finish(r.start("")), "/dashboard/")
+	if r.sessionRows() != 1 {
+		t.Fatal("no session for a user whose role group is past the 64th")
 	}
 }
 
