@@ -30,6 +30,13 @@
 # All probes run with the proxy environment unset, so they measure the
 # container's own network path and never the worker's deny path.
 #
+# E2E_IDENTITY=1 (set by `make e2e-identity-up`) checks the identity stack: the
+# compose files gain docker-compose.identity.yml + docker-compose.e2e-identity.yml
+# and the service list gains dex and ldap (W-P1-DEX-04). dex has the published
+# bridge (like the CP) and ldap sits on the internal idp-net only. ldap has no
+# nslookup, so its UDP DNS negative is a raw query over bash's /dev/udp (an
+# answer byte back is a leak).
+#
 # HERMETICITY_SERVICES overrides the service list (red-path drills:
 # HERMETICITY_SERVICES="ghost agent-1" ./test/e2e/hermeticity.sh).
 set -uo pipefail
@@ -41,6 +48,10 @@ TIMEOUT=5
 NEG_TARGETS=(http://1.1.1.1/ https://1.1.1.1/)
 DNS_SERVER=1.1.1.1
 SERVICES=(control-plane worker-1 worker-2 worker-3 fakeupstream agent-1 agent-2 agent-3)
+if [ "${E2E_IDENTITY:-}" = 1 ]; then
+	E2E_COMPOSE+=(-f deploy/compose/docker-compose.identity.yml -f deploy/compose/docker-compose.e2e-identity.yml)
+	SERVICES+=(dex ldap)
+fi
 [ -n "${HERMETICITY_SERVICES:-}" ] && read -ra SERVICES <<<"$HERMETICITY_SERVICES"
 
 problems=()
@@ -56,6 +67,8 @@ positive_control() {
 	agent-1) echo "http://worker-1:9090/healthz" ;;                 # its only neighbor
 	agent-2) echo "http://worker-2:9090/healthz" ;;
 	agent-3) echo "http://worker-3:9090/healthz" ;;                 # its only neighbor
+	dex) echo "http://127.0.0.1:5558/healthz" ;;                    # its own telemetry listener
+	ldap) echo "http://dex:5558/healthz" ;;                         # idp-net → dex telemetry
 	*) echo "" ;;
 	esac
 }
@@ -78,11 +91,17 @@ for svc in "${SERVICES[@]}"; do
 		continue
 	fi
 
-	# The UDP DNS negative needs nslookup too: without it the probe would exit
-	# non-zero and silently read as "no answer", so require it up front.
+	# The UDP DNS negative needs nslookup too (bash's /dev/udp for ldap, whose
+	# image has no nslookup): without a tool the probe would exit non-zero and
+	# silently read as "no answer", so require one up front.
+	dns_tool=nslookup
 	if ! exec_svc "$svc" "command -v nslookup" >/dev/null 2>&1; then
-		problems+=("$svc: no nslookup in the container — the UDP DNS probe cannot run")
-		continue
+		if [ "$svc" = ldap ] && exec_svc "$svc" "command -v bash && command -v timeout" >/dev/null 2>&1; then
+			dns_tool=devudp
+		else
+			problems+=("$svc: no nslookup in the container — the UDP DNS probe cannot run")
+			continue
+		fi
 	fi
 
 	# fetch URL — exit 0 only on a completed HTTP fetch. Proxy variables are
@@ -119,7 +138,13 @@ for svc in "${SERVICES[@]}"; do
 		fi
 	done
 	# example.com is a name a real resolver answers; an answer here is a leak.
-	if exec_svc "$svc" "nslookup -type=A -retry=1 -timeout=$TIMEOUT example.com $DNS_SERVER" >/dev/null 2>&1; then
+	if [ "$dns_tool" = nslookup ]; then
+		dns_cmd="nslookup -type=A -retry=1 -timeout=$TIMEOUT example.com $DNS_SERVER"
+	else
+		# One raw A query for example.com; any reply byte is an answer.
+		dns_cmd="bash -c 'exec 3<>/dev/udp/$DNS_SERVER/53 && printf \"\\x12\\x34\\x01\\x00\\x00\\x01\\x00\\x00\\x00\\x00\\x00\\x00\\x07example\\x03com\\x00\\x00\\x01\\x00\\x01\" >&3 && timeout $TIMEOUT head -c 1 <&3 | od -An -tx1 | grep -q .'"
+	fi
+	if exec_svc "$svc" "$dns_cmd" >/dev/null 2>&1; then
 		leaks+=("UDP DNS query to $DNS_SERVER:53 got an answer")
 	fi
 

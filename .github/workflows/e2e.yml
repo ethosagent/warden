@@ -32,7 +32,9 @@ on:
       - internal/controlplane/**
       - cmd/**
       - configs/**
+      - deploy/compose/dex/**
       - test/e2e/**
+      - test/e2e/identity/**
       - Makefile
       - go.mod
       - go.sum
@@ -69,6 +71,13 @@ jobs:
         docker compose
         -f deploy/compose/docker-compose.control-plane.yml
         -f deploy/compose/docker-compose.e2e.yml
+      # The identity stack (W-P1-DEX-04) adds Dex + LDAP and the identity override.
+      COMPOSE_IDENTITY: >-
+        docker compose
+        -f deploy/compose/docker-compose.control-plane.yml
+        -f deploy/compose/docker-compose.e2e.yml
+        -f deploy/compose/docker-compose.identity.yml
+        -f deploy/compose/docker-compose.e2e-identity.yml
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -84,7 +93,9 @@ jobs:
       # Nothing else compiles test/e2e (the e2e tag hides it from check.sh), so
       # a type error would otherwise surface only after the image build.
       - name: Vet the e2e package
-        run: go vet -tags e2e ./test/e2e/
+        run: |
+          go vet -tags e2e ./test/e2e/
+          go vet -tags e2e ./test/e2e/identity/
 
       # Authenticated pull when called by the release (no anonymous rate limit).
       # Gated on the image input, so the secrets are never used on PR runs.
@@ -123,6 +134,19 @@ jobs:
           KEEP_STACK: "1"
         run: go test -tags e2e -count=1 -timeout 12m ./test/e2e/ -json > e2e.jsonl
 
+      # The identity stack shares the warden-e2e project and host ports with
+      # the base stack, so the base stack goes first. KEEP_STACK=1 again so the
+      # diagnostics step can read the identity stack on failure. CI=true (set by
+      # GitHub Actions) makes a missing stack FAIL the identity tests rather than
+      # skip them, so this step cannot go green without the stack.
+      - name: Tear down the base stack
+        run: make e2e-down
+
+      - name: Run the identity e2e suite
+        env:
+          KEEP_STACK: "1"
+        run: make e2e-identity 2>&1 | tee e2e-identity.log
+
       - name: Summarize failures
         if: failure()
         run: |
@@ -147,7 +171,11 @@ jobs:
             curl -s --max-time 10 --cacert test/e2e/certs/proxy-ca.crt "https://localhost:7070/dashboard/api/$p" > "e2e-artifacts/fleet-${p%%\?*}.json" || true
           done
           curl -s --max-time 10 http://127.0.0.1:8081/_recorded > e2e-artifacts/recorded.json || true
-          cp e2e.jsonl e2e-artifacts/ 2>/dev/null || true
+          cp e2e.jsonl e2e-identity.log e2e-artifacts/ 2>/dev/null || true
+          # The identity stack, if it is the one still up (dev placeholder secrets only).
+          (set -a; . deploy/compose/dex/.env.example; set +a
+           $COMPOSE_IDENTITY ps -a > e2e-artifacts/compose-identity-ps.txt 2>&1 || true
+           $COMPOSE_IDENTITY logs --no-color > e2e-artifacts/compose-identity.log 2>&1 || true)
 
       - name: Upload diagnostics
         if: failure()
@@ -160,4 +188,6 @@ jobs:
 
       - name: Tear down the stack
         if: always()
-        run: make e2e-down
+        run: |
+          make e2e-identity-down || true
+          make e2e-down
