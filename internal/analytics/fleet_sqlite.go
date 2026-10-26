@@ -109,6 +109,11 @@ CREATE INDEX IF NOT EXISTS idx_events_tool ON events(tool);`
 	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_events_user_sub_ts ON events (user_sub, ts)`); err != nil {
 		return fmt.Errorf("analytics: fleet migrate user index: %w", err)
 	}
+	// lower(user_email) lets SQLite plan the User filter's OR as two index
+	// lookups (user_sub, lower(user_email)) instead of a scan.
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_events_user_email_lower ON events (lower(user_email))`); err != nil {
+		return fmt.Errorf("analytics: migrate user email index: %w", err)
+	}
 	return nil
 }
 
@@ -263,6 +268,10 @@ func (s *FleetSQLiteStore) GetEvents(filter EventFilter) ([]Event, error) {
 		q += " AND proxy_id = ?"
 		args = append(args, filter.ProxyID)
 	}
+	if filter.User != "" {
+		q += userFilterSQL
+		args = append(args, filter.User, filter.User)
+	}
 	if !filter.Since.IsZero() {
 		q += " AND ts >= ?"
 		args = append(args, filter.Since.UnixNano())
@@ -341,6 +350,10 @@ func (s *FleetSQLiteStore) GetAggregatedEvents(filter AggregatedFilter) ([]Aggre
 	if filter.AgentID != "" {
 		q += " AND agent_id = ?"
 		args = append(args, filter.AgentID)
+	}
+	if filter.User != "" {
+		q += userFilterSQL
+		args = append(args, filter.User, filter.User)
 	}
 	if !filter.Since.IsZero() {
 		q += " AND ts >= ?"
