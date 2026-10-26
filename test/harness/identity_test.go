@@ -33,7 +33,11 @@ func TestWithIdentity(t *testing.T) {
 	get("/ok", h.MintUserToken(fakes.Valid("alice", "alice@example.com", "eng")))
 	get("/other", h.MintUserToken(fakes.WrongAudience()))
 
-	for _, e := range h.Events() {
+	evs := h.Events()
+	if len(evs) != 2 {
+		t.Fatalf("%d events, want 2", len(evs))
+	}
+	for _, e := range evs {
 		switch e.URL {
 		case "https://api.example.com/ok":
 			if e.IdentityStatus != "valid" || e.UserSub != "alice" || e.UserEmail != "alice@example.com" {

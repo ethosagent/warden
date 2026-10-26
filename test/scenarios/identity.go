@@ -315,11 +315,17 @@ func assertVerifyCounts(t *testing.T, h *harness.H, want map[[2]string]float64) 
 // in every mode, including off.
 func assertUpstreamClean(t *testing.T, up *harness.Upstream, n int) {
 	t.Helper()
-	reqs := up.Requests()
-	if len(reqs) != n {
-		t.Errorf("upstream saw %d requests, want %d", len(reqs), n)
+	if got := len(up.Requests()); got != n {
+		t.Errorf("upstream saw %d requests, want %d", got, n)
 	}
-	for _, r := range reqs {
+	assertNoIdentityHeaders(t, up)
+}
+
+// assertNoIdentityHeaders is assertUpstreamClean for a scenario whose request
+// count is not fixed (it polls until a reload lands).
+func assertNoIdentityHeaders(t *testing.T, up *harness.Upstream) {
+	t.Helper()
+	for _, r := range up.Requests() {
 		for _, name := range []string{"Proxy-Authorization", "X-Warden-Identity"} {
 			if v := r.Header.Values(name); len(v) > 0 {
 				t.Errorf("upstream request %s carries %s", r.Path, name)
@@ -734,6 +740,7 @@ func identityIssuerDown(t *testing.T, h *harness.H) {
 		}
 		return only(t, h.Events(), "https://"+identityHost+path).IdentityStatus == "valid"
 	})
+	assertNoIdentityHeaders(t, up)
 	assertNoLeakOf(t, h, []string{tok}, up)
 }
 
@@ -966,6 +973,6 @@ func identityHotReload(t *testing.T, h *harness.H) {
 	if h.MetricsAvailable() && verifyCounts(h)[[2]string{"valid", "none"}] == 0 {
 		t.Error("no valid verification was ever counted")
 	}
-	assertUpstreamClean(t, up, len(up.Requests()))
+	assertNoIdentityHeaders(t, up)
 	assertNoLeakOf(t, h, []string{tok, newAud}, up)
 }
