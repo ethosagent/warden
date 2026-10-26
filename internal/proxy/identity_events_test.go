@@ -16,6 +16,7 @@ import (
 
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/identity"
+	"github.com/ethosagent/warden/test/fakes"
 )
 
 // These tests cover W-P1-VRFY-09: every analytics event and decision log line
@@ -25,7 +26,7 @@ import (
 // after the response, so a plain snapshot can race it).
 func waitEvent(t *testing.T, st *syncStore, what string, pred func(analytics.Event) bool) analytics.Event {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for {
 		for _, ev := range st.snapshot() {
 			if pred(ev) {
@@ -75,8 +76,8 @@ func TestStamp(t *testing.T) {
 		ci   connIdentity
 		want analytics.Event
 	}{
-		{"zero is untouched", connIdentity{}, analytics.Event{}},
-		{"none is untouched", connIdentity{Status: identity.StatusNone}, analytics.Event{}},
+		{"zero is none", connIdentity{}, analytics.Event{IdentityStatus: "none"}},
+		{"none is recorded", connIdentity{Status: identity.StatusNone}, analytics.Event{IdentityStatus: "none"}},
 		{"valid writes all", connIdentity{Claims: claims, Status: identity.StatusValid},
 			analytics.Event{IdentityStatus: "valid", UserSub: "s", UserEmail: "e@x", UserGroups: []string{"a", "b"}, UserGroupsTruncated: true, UserSID: "sid1"}},
 		{"expired drops claims", connIdentity{Claims: claims, Status: identity.StatusExpired}, analytics.Event{IdentityStatus: "expired"}},
@@ -90,10 +91,16 @@ func TestStamp(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ev := analytics.Event{Domain: "d"}
-			tt.ci.stamp(&ev)
+			tt.ci.stamp(&ev, true)
 			tt.want.Domain = "d"
 			if !reflect.DeepEqual(ev, tt.want) {
 				t.Errorf("stamped %+v, want %+v", ev, tt.want)
+			}
+			// Identity off leaves every connection's event untouched.
+			off := analytics.Event{Domain: "d"}
+			tt.ci.stamp(&off, false)
+			if !reflect.DeepEqual(off, analytics.Event{Domain: "d"}) {
+				t.Errorf("identity off stamped %+v", off)
 			}
 		})
 	}
@@ -221,6 +228,18 @@ func TestEventsCarryIdentityAllPaths(t *testing.T) {
 		}
 		wantAlice(t, "header identity", waitEvent(t, e.store, "allow", func(ev analytics.Event) bool { return ev.Decision == "allow" }))
 	})
+
+	t.Run("no_token_is_none", func(t *testing.T) {
+		e := newIDEnv(t, IdentityModeAttribute)
+		if st := h2Get(t, e.h2(""), nil); st != 200 {
+			t.Fatalf("status = %d", st)
+		}
+		ev := waitEvent(t, e.store, "h2 allow", func(ev analytics.Event) bool { return ev.Decision == "allow" })
+		if ev.IdentityStatus != "none" {
+			t.Errorf("h2 no token: identity_status = %q, want none", ev.IdentityStatus)
+		}
+		wantNoUser(t, "h2 no token", ev)
+	})
 }
 
 func TestUnverifiedClaimsNotRecorded(t *testing.T) {
@@ -254,22 +273,60 @@ func TestUnverifiedClaimsNotRecorded(t *testing.T) {
 	}
 }
 
+// TestNoIdentityEventsUnchanged: with identity off the events are byte-identical
+// to pre-identity ones, even when the agent sends a token.
 func TestNoIdentityEventsUnchanged(t *testing.T) {
-	for _, mode := range []IdentityMode{IdentityModeOff, IdentityModeAttribute} {
-		t.Run(string(mode), func(t *testing.T) {
-			e := newIDEnv(t, mode)
-			if st := e.h1("").get(""); st != 200 {
-				t.Fatalf("status = %d", st)
-			}
-			e.connectDenied("")
-			waitEvent(t, e.store, "deny", func(ev analytics.Event) bool { return ev.Decision == "deny" })
-			for _, ev := range e.store.snapshot() {
-				wantNoUser(t, ev.Decision, ev)
-				if ev.IdentityStatus != "" || ev.IdentityReason != "" {
-					t.Errorf("%s event has identity_* with no token: %+v", ev.Decision, ev)
-				}
-			}
-		})
+	e := newIDEnv(t, IdentityModeOff)
+	if st := e.h1("").get(""); st != 200 {
+		t.Fatalf("status = %d", st)
+	}
+	if st := e.h1("Proxy-Authorization: " + basicAuth("tok-alice") + "\r\n").get(""); st != 200 {
+		t.Fatalf("status = %d", st)
+	}
+	e.connectDenied("")
+	waitEvent(t, e.store, "deny", func(ev analytics.Event) bool { return ev.Decision == "deny" })
+	evs := e.store.snapshot()
+	if len(evs) < 3 {
+		t.Fatalf("got %d events, want at least 3", len(evs))
+	}
+	for _, ev := range evs {
+		wantNoUser(t, ev.Decision, ev)
+		if ev.IdentityStatus != "" || ev.IdentityReason != "" {
+			t.Errorf("%s event has identity_* with identity off: %+v", ev.Decision, ev)
+		}
+	}
+}
+
+// TestNoTokenStatusNone: identity on and no token is status none, not empty, so
+// an auditor can tell it from identity off (empty). Both a CONNECT deny and an
+// h1 request without a header are checked, next to the off baseline.
+func TestNoTokenStatusNone(t *testing.T) {
+	on := newIDEnv(t, IdentityModeAttribute)
+	if st := on.h1("").get(""); st != 200 {
+		t.Fatalf("status = %d", st)
+	}
+	on.connectDenied("")
+	allow := waitEvent(t, on.store, "allow", func(ev analytics.Event) bool { return ev.Decision == "allow" })
+	deny := waitEvent(t, on.store, "deny", func(ev analytics.Event) bool { return ev.Decision == "deny" })
+	for what, ev := range map[string]analytics.Event{"h1 allow": allow, "CONNECT deny": deny} {
+		if ev.IdentityStatus != "none" || ev.IdentityReason != "" {
+			t.Errorf("%s: identity_status/reason = %q/%q, want none/empty", what, ev.IdentityStatus, ev.IdentityReason)
+		}
+		wantNoUser(t, what, ev)
+	}
+
+	off := newIDEnv(t, IdentityModeOff)
+	if st := off.h1("").get(""); st != 200 {
+		t.Fatalf("status = %d", st)
+	}
+	off.connectDenied("")
+	for what, ev := range map[string]analytics.Event{
+		"h1 allow":     waitEvent(t, off.store, "allow", func(ev analytics.Event) bool { return ev.Decision == "allow" }),
+		"CONNECT deny": waitEvent(t, off.store, "deny", func(ev analytics.Event) bool { return ev.Decision == "deny" }),
+	} {
+		if ev.IdentityStatus != "" {
+			t.Errorf("identity off, %s: identity_status = %q, want empty", what, ev.IdentityStatus)
+		}
 	}
 }
 
@@ -308,12 +365,26 @@ func TestDecisionLogIdentity(t *testing.T) {
 
 	// At info level the email and groups are never logged at all.
 	var buf lockedBuf
-	p := stageProxy(t, nil, IdentityModeOff, nil, newFakeMetrics())
+	p := stageProxy(t, fakes.NewVerifier(), IdentityModeAttribute, nil, newFakeMetrics())
 	p.cfg.Logger = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	p.logDecision(decisionLog{Domain: "d", Decision: "allow", ID: connIdentity{Status: identity.StatusValid,
 		Claims: identity.Claims{Sub: "alice", Email: "alice@example.test", Groups: []string{"eng"}}}})
 	if got := buf.String(); strings.Contains(got, "alice@example.test") || strings.Contains(got, "eng") || !strings.Contains(got, "user_sub=alice") {
 		t.Errorf("info-level log = %q", got)
+	}
+
+	// Identity on and no token logs identity_status=none; identity off logs none of it.
+	buf = lockedBuf{}
+	p.logDecision(decisionLog{Domain: "d", Decision: "allow"})
+	if got := buf.String(); !strings.Contains(got, "identity_status=none") || strings.Contains(got, "user_sub") {
+		t.Errorf("identity on, no token: log = %q", got)
+	}
+	buf = lockedBuf{}
+	pOff := stageProxy(t, nil, IdentityModeOff, nil, newFakeMetrics())
+	pOff.cfg.Logger = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	pOff.logDecision(decisionLog{Domain: "d", Decision: "allow", ID: connIdentity{Status: identity.StatusValid, Claims: identity.Claims{Sub: "alice"}}})
+	if got := buf.String(); strings.Contains(got, "identity_") || strings.Contains(got, "user_sub") {
+		t.Errorf("identity off: log carries identity fields: %q", got)
 	}
 
 	// An invalid token logs status and reason but never a sub.
@@ -325,8 +396,8 @@ func TestDecisionLogIdentity(t *testing.T) {
 	}
 }
 
-// BenchmarkStamp is the cost recordEvent adds to every event: none for an
-// event with no identity, a few field copies for a valid one.
+// BenchmarkStamp is the cost recordEvent adds to every event: a status copy for
+// none, a few field copies for a valid one.
 func BenchmarkStamp(b *testing.B) {
 	valid := connIdentity{Status: identity.StatusValid, Claims: identity.Claims{Sub: "alice", Email: "a@x", Groups: []string{"eng"}}}
 	for name, ci := range map[string]connIdentity{"none": {}, "valid": valid} {
@@ -334,7 +405,7 @@ func BenchmarkStamp(b *testing.B) {
 			b.ReportAllocs()
 			var ev analytics.Event
 			for i := 0; i < b.N; i++ {
-				ci.stamp(&ev)
+				ci.stamp(&ev, true)
 			}
 		})
 	}

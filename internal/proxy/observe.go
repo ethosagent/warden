@@ -34,9 +34,10 @@ type decisionLog struct {
 	// SSRFError). Empty unless Reason is one of the ssrf_* enums; it never
 	// carries a resolved address.
 	AddrClass string
-	// ID is the caller's identity. logDecision logs its status and reason when
-	// set, and the sub and group count only for status valid. The email and the
-	// group list are logged at debug level only; the token is never here.
+	// ID is the caller's identity. While identity is on, logDecision logs its
+	// status (none included) and reason, and the sub and group count only for
+	// status valid. The email and the group list are logged at debug level only;
+	// the token is never here.
 	ID connIdentity
 }
 
@@ -74,8 +75,10 @@ func (p *Proxy) logDecision(d decisionLog) {
 	if d.AddrClass != "" {
 		attrs = append(attrs, slog.String("addr_class", d.AddrClass))
 	}
-	st := d.ID.status()
-	if st != identity.StatusNone {
+	// Identity off logs nothing identity-related, like the event. Identity on
+	// always logs the status, none included.
+	if p.identity() != nil {
+		st := d.ID.status()
 		attrs = append(attrs, slog.String("identity_status", string(st)))
 		if d.ID.Reason != "" {
 			attrs = append(attrs, slog.String("identity_reason", string(d.ID.Reason)))

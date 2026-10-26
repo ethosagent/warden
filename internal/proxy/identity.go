@@ -328,17 +328,19 @@ func (p *Proxy) headerResult(h *identityHolder, raw string, n int) idResult {
 	return p.verifyToken(h, tok)
 }
 
-// stamp writes the identity onto an event about to be stored. Status none (and
-// the zero value) leaves the event untouched, so an event with no identity is
-// byte-identical to one written before identity existed. The status and
-// reason are written for every other status; the user_* fields only for status
-// valid, so the unverified sub, email or groups that Verify returns for an
-// expired or invalid token never reach storage.
-func (c connIdentity) stamp(ev *analytics.Event) {
-	st := c.status()
-	if st == identity.StatusNone {
+// stamp writes the identity onto an event about to be stored. on is whether
+// identity is live for this worker (mode attribute). With identity off the event
+// is left untouched, whatever the connection carried, so it is byte-identical to
+// one written before identity existed. With identity on, every event gets a
+// status: a request with no token gets none, which an auditor can tell apart
+// from off (empty). The reason is written with it; the user_* fields only for
+// status valid, so the unverified sub, email or groups that Verify returns for
+// an expired or invalid token never reach storage.
+func (c connIdentity) stamp(ev *analytics.Event, on bool) {
+	if !on {
 		return
 	}
+	st := c.status()
 	ev.IdentityStatus = string(st)
 	ev.IdentityReason = string(c.Reason)
 	if st != identity.StatusValid {
@@ -352,10 +354,10 @@ func (c connIdentity) stamp(ev *analytics.Event) {
 }
 
 // recordEvent is the one place the proxy hands an event to the analytics
-// store: it stamps the caller's identity first. A new StoreEvent call anywhere
+// store: it stamps the caller's identity first (only while identity is on). A new StoreEvent call anywhere
 // else in the package fails TestAllEventsCarryIdentity.
 func (p *Proxy) recordEvent(ci connIdentity, ev analytics.Event) {
-	ci.stamp(&ev)
+	ci.stamp(&ev, p.identity() != nil)
 	_ = p.analyticsStore().StoreEvent(ev)
 }
 
