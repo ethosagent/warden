@@ -440,9 +440,91 @@ func (s *Server) SetWriteGuard(g WriteGuard) {
 // never install it (grep for it in review).
 func AllowUngatedWritesForTests(*http.Request) (int, string) { return 0, "" }
 
-// Handler returns an http.Handler that serves the dashboard routes.
+// Route is one {method, path} the dashboard serves. Action is a stable dotted
+// name for the operation (for example "policy.write"); the control plane keys
+// its authorization table on {Method, Path} and carries Action into audit.
+type Route struct {
+	Method, Path, Action string
+}
+
+// Routes lists every method each dashboard handler accepts, plus GET
+// /dashboard/. Handler registers its mux from this list, so a route cannot be
+// served without an entry here, and the control plane's authz coverage test
+// walks it. It returns a fresh slice on each call.
+func Routes() []Route {
+	const (
+		get  = http.MethodGet
+		post = http.MethodPost
+		put  = http.MethodPut
+		del  = http.MethodDelete
+	)
+	return []Route{
+		{get, "/dashboard/", "ui.read"},
+		{get, "/dashboard/api/traffic", "traffic.read"},
+		{get, "/dashboard/api/policy", "policy.read"},
+		{post, "/dashboard/api/policy", "policy.write"},
+		{put, "/dashboard/api/policy", "policy.write"},
+		{get, "/dashboard/api/settings", "settings.read"},
+		{post, "/dashboard/api/settings", "settings.write"},
+		{put, "/dashboard/api/settings", "settings.write"},
+		{get, "/dashboard/api/secrets", "secrets.read"},
+		{get, "/dashboard/api/endpoints", "endpoints.read"},
+		{get, "/dashboard/api/analytics", "analytics.read"},
+		{get, "/dashboard/api/mcp", "mcp.read"},
+		{get, "/dashboard/api/workers", "workers.read"},
+		{get, "/dashboard/api/query/schema", "query.schema"},
+		{post, "/dashboard/api/query", "query.run"},
+		{post, "/dashboard/api/query/generate", "query.generate"},
+		{get, "/dashboard/api/secretstore", "secretstore.read"},
+		{post, "/dashboard/api/secretstore", "secretstore.write"},
+		{del, "/dashboard/api/secretstore", "secretstore.delete"},
+		{get, "/dashboard/api/alerts", "alerts.read"},
+		{get, "/dashboard/api/integrations", "integrations.read"},
+		{post, "/dashboard/api/integrations", "integrations.write"},
+		{del, "/dashboard/api/integrations", "integrations.delete"},
+		{get, "/dashboard/api/detection", "detection.read"},
+		{post, "/dashboard/api/detection", "detection.write"},
+		{put, "/dashboard/api/detection", "detection.write"},
+		{get, "/dashboard/api/llmproviders", "llmproviders.read"},
+		{post, "/dashboard/api/llmproviders", "llmproviders.write"},
+		{put, "/dashboard/api/llmproviders", "llmproviders.write"},
+		{get, "/dashboard/api/audit", "audit.read"},
+		{post, "/dashboard/api/audit/verify", "audit.verify"},
+		{get, "/dashboard/api/setup", "setup.read"},
+	}
+}
+
+// routeMux is the Handler's mux. It refuses to register a path that Routes() does
+// not list, so a route cannot be served without an entry the control plane's
+// authorization table is checked against. The patterns stay string literals at
+// each call so the route-table walks in the control-plane and worker tests see
+// them.
+type routeMux struct {
+	*http.ServeMux
+	listed map[string]bool
+}
+
+func newRouteMux() *routeMux {
+	m := &routeMux{ServeMux: http.NewServeMux(), listed: map[string]bool{}}
+	for _, rt := range Routes() {
+		m.listed[rt.Path] = true
+	}
+	return m
+}
+
+// HandleFunc registers pattern and panics, at construction, if Routes() does not
+// list it.
+func (m *routeMux) HandleFunc(pattern string, h func(http.ResponseWriter, *http.Request)) {
+	if !m.listed[pattern] {
+		panic("dashboard: " + pattern + " is registered but missing from Routes()")
+	}
+	m.ServeMux.HandleFunc(pattern, h)
+}
+
+// Handler returns an http.Handler that serves the dashboard routes. Every path
+// it registers must appear in Routes().
 func (s *Server) Handler() http.Handler {
-	mux := http.NewServeMux()
+	mux := newRouteMux()
 	mux.HandleFunc("/dashboard/api/traffic", s.handleTraffic)
 	mux.HandleFunc("/dashboard/api/policy", s.handlePolicy)
 	mux.HandleFunc("/dashboard/api/settings", s.handleSettings)
