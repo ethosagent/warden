@@ -172,7 +172,7 @@ func (r *identityRunner) runExec(cmd *cobra.Command, args []string, worker, list
 	}
 	defer stopSigs()
 
-	child := exec.CommandContext(ctx, args[0], args[1:]...) //nolint:gosec // G204: running the user's command is the purpose of exec
+	child := exec.CommandContext(ctx, args[0], args[1:]...)
 	child.Env = env
 	child.Stdin = r.deps.stdin
 	child.Stdout = cmd.OutOrStdout()
