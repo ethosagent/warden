@@ -361,7 +361,8 @@ func resolveConsole(logger *slog.Logger, configPath, servedPath, stateDir string
 		return config.ConsoleConfig{}, fmt.Errorf("control-plane: %w", err)
 	}
 	if stateDir != "" && servedPath != configPath {
-		if served, serr := config.LoadConsole(servedPath); serr == nil && !reflect.DeepEqual(served, cc) {
+		served, serr := config.LoadConsole(servedPath)
+		if serr != nil || !reflect.DeepEqual(served, cc) {
 			logger.Warn("control-plane: the served config copy holds a different console block; ignoring it and using --config",
 				"served", servedPath, "config", configPath)
 		}
