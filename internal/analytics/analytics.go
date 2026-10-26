@@ -149,8 +149,9 @@ type Event struct {
 	UserGroupsTruncated bool `json:"user_groups_truncated,omitempty"`
 	// UserSID is the OIDC session id claim ("sid"), "" when absent.
 	UserSID string `json:"user_sid,omitempty"`
-	// IdentityStatus is the bounded verification status (e.g. "valid"); "" when
-	// no token was presented. Bounded enum metadata, never token content.
+	// IdentityStatus is the bounded verification status (e.g. "valid"). "none"
+	// means identity is on and no token was presented; "" means identity is off
+	// (or the row predates identity). Bounded enum metadata, never token content.
 	IdentityStatus string `json:"identity_status,omitempty"`
 	// IdentityReason is the bounded reason behind a non-valid status. Never
 	// token content.

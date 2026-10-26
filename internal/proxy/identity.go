@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/identity"
 )
@@ -325,4 +326,47 @@ func (p *Proxy) headerResult(h *identityHolder, raw string, n int) idResult {
 		return p.malformed()
 	}
 	return p.verifyToken(h, tok)
+}
+
+// stamp writes the identity onto an event about to be stored. on is whether
+// identity is live for this worker (mode attribute). With identity off the event
+// is left untouched, whatever the connection carried, so it is byte-identical to
+// one written before identity existed. With identity on, every event gets a
+// status: a request with no token gets none, which an auditor can tell apart
+// from off (empty). The reason is written with it; the user_* fields only for
+// status valid, so the unverified sub, email or groups that Verify returns for
+// an expired or invalid token never reach storage.
+func (c connIdentity) stamp(ev *analytics.Event, on bool) {
+	if !on {
+		return
+	}
+	st := c.status()
+	ev.IdentityStatus = string(st)
+	ev.IdentityReason = string(c.Reason)
+	if st != identity.StatusValid {
+		return
+	}
+	ev.UserSub = c.Claims.Sub
+	ev.UserEmail = c.Claims.Email
+	ev.UserGroups = c.Claims.Groups
+	ev.UserGroupsTruncated = c.Claims.GroupsTruncated
+	ev.UserSID = c.Claims.SID
+}
+
+// recordEvent is the one place the proxy hands an event to the analytics
+// store: it stamps the caller's identity first (only while identity is on). A new StoreEvent call anywhere
+// else in the package fails TestAllEventsCarryIdentity.
+func (p *Proxy) recordEvent(ci connIdentity, ev analytics.Event) {
+	ci.stamp(&ev, p.identity() != nil)
+	_ = p.analyticsStore().StoreEvent(ev)
+}
+
+// resolved is the identity this request's events carry: the per-request result
+// once identityStage has run (it can differ from the CONNECT identity: expired,
+// conflict, a header identity), the connection's identity before that.
+func (s *requestScope) resolved() connIdentity {
+	if s.idStatus == "" {
+		return s.ci
+	}
+	return connIdentity{Claims: s.idClaims, Status: s.idStatus, Reason: s.idReason}
 }

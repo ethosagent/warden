@@ -898,7 +898,7 @@ func (p *Proxy) swapSecrets(s *requestScope) (endSession bool) {
 	}
 
 	if len(outOfScope) > 0 {
-		p.recordOutOfScope(s.domain, s.port, s.proto, s.req.Method, s.eventURL(), outOfScope)
+		p.recordOutOfScope(s.resolved(), s.domain, s.port, s.proto, s.req.Method, s.eventURL(), outOfScope)
 	}
 
 	// Set swapped body back
@@ -1274,7 +1274,7 @@ func (p *Proxy) relayMCPSSE(s *requestScope) (terminal bool) {
 			Evidence:       s.evidence,
 		})
 	} else {
-		_ = p.analyticsStore().StoreEvent(analytics.Event{
+		p.recordEvent(s.resolved(), analytics.Event{
 			Timestamp:      time.Now(),
 			Domain:         s.domain,
 			Port:           s.port,
@@ -1294,6 +1294,7 @@ func (p *Proxy) relayMCPSSE(s *requestScope) (terminal bool) {
 			Domain: s.domain, Port: s.port, Protocol: "mcp",
 			Method: s.req.Method, URL: fullURL, Decision: "allow",
 			ResponseStatus: s.resp.StatusCode,
+			ID:             s.resolved(),
 		})
 	}
 
@@ -1440,7 +1441,7 @@ func (p *Proxy) recordAllowEvent(s *requestScope) {
 			provider = est.Provider
 		}
 	}
-	_ = p.analyticsStore().StoreEvent(analytics.Event{
+	p.recordEvent(s.resolved(), analytics.Event{
 		Timestamp:      time.Now(),
 		Domain:         s.domain,
 		Port:           s.port,
@@ -1479,7 +1480,7 @@ func (p *Proxy) recordAllowEvent(s *requestScope) {
 		Domain: s.domain, Port: s.port, Protocol: proto,
 		Method: s.req.Method, URL: fullURL, Decision: "allow",
 		ResponseStatus: s.resp.StatusCode, SecretRef: secretRef,
-		JudgeReason: s.judgeReason,
+		JudgeReason: s.judgeReason, ID: s.resolved(),
 	})
 }
 
