@@ -139,11 +139,18 @@ func TestDecisionStream_AllowDenyAndWebSocket(t *testing.T) {
 	for _, e := range rows {
 		byDomain[e.Domain+"/"+e.Decision] = e.Compliance
 	}
+	tagged := 0
 	for _, r := range recs {
+		if len(r.Compliance) > 0 {
+			tagged++
+		}
 		want := byDomain[r.Domain+"/"+r.Decision]
 		if strings.Join(r.Compliance, ",") != strings.Join(want, ",") {
 			t.Errorf("%s/%s compliance = %v, want the row's %v", r.Domain, r.Decision, r.Compliance, want)
 		}
+	}
+	if tagged == 0 {
+		t.Error("no line carries the compliance tags the tagging decorator set")
 	}
 	for _, r := range recs {
 		if r.BootID == "" || r.ProxyID == "" || r.ProxyIDSource == "" || r.AgentID == "" {

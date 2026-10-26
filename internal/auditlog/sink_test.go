@@ -284,10 +284,10 @@ func TestRotation(t *testing.T) {
 		for i := range batch {
 			batch[i] = ev
 		}
-		for {
-			before := len(s.ch)
-			if before < queueBatches/2 {
-				break
+		deadline := time.Now().Add(10 * time.Second)
+		for len(s.ch) >= queueBatches/2 {
+			if time.Now().After(deadline) {
+				t.Fatal("the sink's writer never drained the queue")
 			}
 			time.Sleep(time.Millisecond)
 		}

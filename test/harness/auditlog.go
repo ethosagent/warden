@@ -15,7 +15,7 @@ import (
 const judgeKeyEnv = "WARDEN_HARNESS_JUDGE_KEY"
 
 // WithAuditLogs boots every worker with the JSON decision stream (audit.jsonLog,
-// file output, mode 0600) and signed receipts on, both under the harness root,
+// file output, mode 0600), compliance tagging and signed receipts on, both under the harness root,
 // so a scenario can compare the stream with the SQLite rows and the receipts
 // (DecisionLines, ReceiptLines). The block is node-local worker config, so it
 // applies to a managed worker exactly as to a standalone one.
@@ -56,6 +56,7 @@ func (h *H) applyAuditLogs(i int, p *config.Policy) {
 			FileMode:   0o600,
 			Query:      config.JSONLogQueryDrop,
 		}
+		p.Audit.Compliance = config.ComplianceConfig{Enabled: true}
 		p.Audit.SignedReceipts = config.SignedReceiptsConfig{
 			Enabled: true,
 			KeyFile: filepath.Join(h.root, fmt.Sprintf("worker-%d-receipt.key", i)),
