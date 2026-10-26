@@ -83,7 +83,7 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 		if needsJudge {
 			// Not a TLS ClientHello: cannot terminate and inspect, so the judge
 			// cannot run. Fail closed.
-			p.storeDeny(domain, port, "tcp", denyreason.NoTLS, "")
+			p.storeDeny(ci, domain, port, "tcp", denyreason.NoTLS, "")
 			return
 		}
 		p.reach(PathTunnel)
@@ -92,10 +92,10 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 			// A dial the SSRF-safe dialer refused is a policy decision: audit it
 			// (silent before #391). Ordinary dial failures stay silent — this
 			// passthrough never wrote an event for them either.
-			p.storeSSRFDeny(domain, port, "tcp", dialErr)
+			p.storeSSRFDeny(ci, domain, port, "tcp", dialErr)
 			return
 		}
-		_ = p.analyticsStore().StoreEvent(analytics.Event{
+		p.recordEvent(ci, analytics.Event{
 			Timestamp: time.Now(),
 			Domain:    domain,
 			Port:      port,
@@ -103,7 +103,7 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 			Decision:  "allow",
 		})
 		p.cfg.Metrics.RecordRequest("allow", "tcp")
-		p.logDecision(decisionLog{Domain: domain, Port: port, Protocol: "tcp", Decision: "allow"})
+		p.logDecision(decisionLog{Domain: domain, Port: port, Protocol: "tcp", Decision: "allow", ID: ci})
 		var wg sync.WaitGroup
 		wg.Add(2)
 		go func() {
@@ -193,7 +193,7 @@ func (p *Proxy) terminateAndDispatch(clientConn net.Conn, firstBytes io.Reader, 
 	// Non-HTTP traffic inside TLS cannot be judged (no request to inspect):
 	// fail closed when the judge was required.
 	if needsJudge {
-		p.storeDeny(domain, port, "tcp", denyreason.NoTLS, "")
+		p.storeDeny(ci, domain, port, "tcp", denyreason.NoTLS, "")
 		return
 	}
 
@@ -208,11 +208,11 @@ func (p *Proxy) terminateAndDispatch(clientConn net.Conn, firstBytes io.Reader, 
 		// A dial the SSRF-safe dialer refused is a policy decision: audit it
 		// under the same protocol label the allow would have used (silent
 		// before #391). Ordinary dial failures stay silent, as before.
-		p.storeSSRFDeny(domain, port, proto, dialErr)
+		p.storeSSRFDeny(ci, domain, port, proto, dialErr)
 		return
 	}
 	defer remote.Close()
-	_ = p.analyticsStore().StoreEvent(analytics.Event{
+	p.recordEvent(ci, analytics.Event{
 		Timestamp: time.Now(),
 		Domain:    domain,
 		Port:      port,
@@ -220,7 +220,7 @@ func (p *Proxy) terminateAndDispatch(clientConn net.Conn, firstBytes io.Reader, 
 		Decision:  "allow",
 	})
 	p.cfg.Metrics.RecordRequest("allow", proto)
-	p.logDecision(decisionLog{Domain: domain, Port: port, Protocol: proto, Decision: "allow"})
+	p.logDecision(decisionLog{Domain: domain, Port: port, Protocol: proto, Decision: "allow", ID: ci})
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {

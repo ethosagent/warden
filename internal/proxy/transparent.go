@@ -55,16 +55,16 @@ func (p *Proxy) handleTransparentTLS(conn net.Conn) {
 	if err != nil {
 		switch {
 		case errors.Is(err, errH2PriorKnowledge):
-			p.storeDeny("", transparentHTTPSPort, "tcp", denyreason.TransparentH2PriorKnowledge, "")
+			p.storeDeny(connIdentity{}, "", transparentHTTPSPort, "tcp", denyreason.TransparentH2PriorKnowledge, "")
 		case errors.Is(err, errHelloTruncated):
 			// Client gone / stalled mid-hello: nothing was gated, drop silently
 			// (CONNECT-floor parity).
 		case errors.Is(err, errNotTLSRecord):
-			p.storeDeny("", transparentHTTPSPort, "tcp", denyreason.TransparentBadClientHello, "not_tls")
+			p.storeDeny(connIdentity{}, "", transparentHTTPSPort, "tcp", denyreason.TransparentBadClientHello, "not_tls")
 		case errors.Is(err, errHelloTooLarge):
-			p.storeDeny("", transparentHTTPSPort, "tcp", denyreason.TransparentBadClientHello, "hello_too_large")
+			p.storeDeny(connIdentity{}, "", transparentHTTPSPort, "tcp", denyreason.TransparentBadClientHello, "hello_too_large")
 		default:
-			p.storeDeny("", transparentHTTPSPort, "tcp", denyreason.TransparentBadClientHello, "malformed")
+			p.storeDeny(connIdentity{}, "", transparentHTTPSPort, "tcp", denyreason.TransparentBadClientHello, "malformed")
 		}
 		return
 	}
@@ -74,7 +74,7 @@ func (p *Proxy) handleTransparentTLS(conn net.Conn) {
 	if domain == "" {
 		// A readable hello that names no server — the ECH case included: the
 		// real SNI is encrypted, so the destination is unknown. Refuse.
-		p.storeDeny("", transparentHTTPSPort, "tcp", denyreason.TransparentNoSNI, "")
+		p.storeDeny(connIdentity{}, "", transparentHTTPSPort, "tcp", denyreason.TransparentNoSNI, "")
 		return
 	}
 
@@ -85,7 +85,7 @@ func (p *Proxy) handleTransparentTLS(conn net.Conn) {
 	// bytes the client picked.
 	domain, ok := validateSNI(sni)
 	if !ok {
-		p.storeDeny(safeSNI(sni), transparentHTTPSPort, "tcp", denyreason.TransparentBadClientHello, "bad_sni")
+		p.storeDeny(connIdentity{}, safeSNI(sni), transparentHTTPSPort, "tcp", denyreason.TransparentBadClientHello, "bad_sni")
 		return
 	}
 
@@ -100,7 +100,7 @@ func (p *Proxy) handleTransparentTLS(conn net.Conn) {
 		if verdict.Decision == policy.NoMatch {
 			reason = denyreason.PolicyNoMatch
 		}
-		p.emitDenyEvent(analytics.Event{
+		p.emitDenyEvent(connIdentity{}, analytics.Event{
 			Timestamp: time.Now(),
 			Domain:    domain,
 			Port:      transparentHTTPSPort,
@@ -179,7 +179,7 @@ func (p *Proxy) handleTransparentHTTP(conn net.Conn) {
 		if verdict.Decision == policy.NoMatch {
 			reason = denyreason.PolicyNoMatch
 		}
-		p.emitDenyEvent(analytics.Event{
+		p.emitDenyEvent(connIdentity{}, analytics.Event{
 			Timestamp: time.Now(),
 			Domain:    host,
 			Port:      transparentHTTPPort,
@@ -199,7 +199,7 @@ func (p *Proxy) handleTransparentHTTP(conn net.Conn) {
 // the CONNECT floor uses — the client is often still mid-send when the limit
 // trips, and closing unread would reset before it can read the response.
 func (p *Proxy) rejectPlainHTTP(conn net.Conn, br *bufio.Reader, resp, detail string) {
-	p.storeDeny("", transparentHTTPPort, "http", denyreason.MalformedRequest, detail)
+	p.storeDeny(connIdentity{}, "", transparentHTTPPort, "http", denyreason.MalformedRequest, detail)
 	_, _ = fmt.Fprint(conn, resp)
 	_, _ = io.Copy(io.Discard, br)
 }
