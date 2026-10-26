@@ -25,7 +25,8 @@
 //	                              mcp_poisoning_description_injection, mcp_schema_drift_added,
 //	                              mcp_chain_read_then_send, mcp_chain_permission_probing,
 //	                              mcp_chain_rapid_repeat
-//	ObserveAddedLatency(stage):  mcp_scan
+//	ObserveAddedLatency(stage):  mcp_scan, identity
+//	RecordIdentityVerify:         result is an identity status, reason an identity.Reason
 //
 // Disabled mode is free: when Config.Enabled is false (or the *Metrics is nil)
 // New returns a nil *Metrics and a nil http.Handler, and every record method is
@@ -87,18 +88,19 @@ type Metrics struct {
 	provider *sdkmetric.MeterProvider
 	meter    metric.Meter
 
-	requests     metric.Int64Counter
-	blocked      metric.Int64Counter
-	secretSwaps  metric.Int64Counter
-	scanFindings metric.Int64Counter
-	judge        metric.Int64Counter
-	auditLines   metric.Int64Counter
-	auditErrors  metric.Int64Counter
-	auditDropped metric.Int64Counter
-	addedLatency metric.Float64Histogram
-	breakerOpen  metric.Int64UpDownCounter
-	cacheStale   metric.Int64UpDownCounter
-	buildInfo    metric.Int64Gauge
+	requests       metric.Int64Counter
+	blocked        metric.Int64Counter
+	secretSwaps    metric.Int64Counter
+	scanFindings   metric.Int64Counter
+	judge          metric.Int64Counter
+	identityVerify metric.Int64Counter
+	auditLines     metric.Int64Counter
+	auditErrors    metric.Int64Counter
+	auditDropped   metric.Int64Counter
+	addedLatency   metric.Float64Histogram
+	breakerOpen    metric.Int64UpDownCounter
+	cacheStale     metric.Int64UpDownCounter
+	buildInfo      metric.Int64Gauge
 }
 
 // ShutdownFunc flushes and closes the meter provider. It is always non-nil; in
@@ -257,6 +259,12 @@ func newMetrics(provider *sdkmetric.MeterProvider, serviceVersion string) (*Metr
 	); err != nil {
 		return nil, fmt.Errorf("observability: auditlog dropped counter: %w", err)
 	}
+	if m.identityVerify, err = meter.Int64Counter(
+		"warden.identity.verify.total",
+		metric.WithDescription("Identity token outcomes by result (identity status) and reason."),
+	); err != nil {
+		return nil, fmt.Errorf("observability: identity verify counter: %w", err)
+	}
 	if m.addedLatency, err = meter.Float64Histogram(
 		"warden.request.added_latency",
 		metric.WithDescription("Added latency by pipeline stage."),
@@ -385,6 +393,22 @@ func (m *Metrics) RecordJudge(outcome string) {
 	}
 	m.judge.Add(context.Background(), 1, metric.WithAttributes(
 		attribute.String("outcome", outcome),
+	))
+}
+
+// RecordIdentityVerify increments warden.identity.verify.total{result,reason}.
+// result is the bounded identity status (none|valid|invalid|expired|
+// unverified|conflict) and reason the bounded identity.Reason set, "none" when
+// there is no reason. It is not incremented while identity is off, so no
+// result="off" series appears here (off is an event status, not a counter label).
+// Never pass token text or a claim value.
+func (m *Metrics) RecordIdentityVerify(result, reason string) {
+	if m == nil {
+		return
+	}
+	m.identityVerify.Add(context.Background(), 1, metric.WithAttributes(
+		attribute.String("result", result),
+		attribute.String("reason", reason),
 	))
 }
 

@@ -108,6 +108,9 @@ func (m *metricSink) RecordJudge(outcome string)    { m.add("judge outcome=%s", 
 func (m *metricSink) ObserveAddedLatency(stage string, _ time.Duration) {
 	m.add("latency stage=%s", stage)
 }
+func (m *metricSink) RecordIdentityVerify(result, reason string) {
+	m.add("identity_verify result=%s reason=%s", result, reason)
+}
 
 // seenReq is one request the upstream received.
 type seenReq struct {

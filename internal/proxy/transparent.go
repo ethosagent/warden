@@ -115,7 +115,7 @@ func (p *Proxy) handleTransparentTLS(conn net.Conn) {
 	// in br, then the conn itself — into the same post-ClientHello path forward
 	// mode uses.
 	replay := io.MultiReader(bytes.NewReader(helloWire), br, conn)
-	p.terminateAndDispatch(conn, replay, domain, transparentHTTPSPort, verdict.Decision == policy.NoMatch)
+	p.terminateAndDispatch(conn, replay, domain, transparentHTTPSPort, verdict.Decision == policy.NoMatch, connIdentity{})
 }
 
 // handleTransparentHTTP serves one connection on the transparent :80 listener:
@@ -191,7 +191,7 @@ func (p *Proxy) handleTransparentHTTP(conn net.Conn) {
 	}
 
 	// Admitted: the SAME h1 pipeline a CONNECT tunnel runs, over http.
-	p.handleHTTP(conn, br, host, transparentHTTPPort, verdict.Decision == policy.NoMatch, policy.SchemeHTTP, req)
+	p.handleHTTP(conn, br, host, transparentHTTPPort, verdict.Decision == policy.NoMatch, policy.SchemeHTTP, req, connIdentity{})
 }
 
 // rejectPlainHTTP is the plain-HTTP floor's bounded rejection: ONE deny with a

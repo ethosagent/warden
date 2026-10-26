@@ -274,11 +274,38 @@ type EventFilter struct {
 	// Tool filters by MCP tool name for per-tool drill-down.
 	Tool  string
 	Since time.Time
+	// User narrows to one person: an exact user_sub match, or a case-insensitive
+	// user_email match. Empty = no user filter. Always bound as a parameter.
+	User string
 	// ProxyID filters to events from one worker in a fleet view. Honored by the
 	// aggregating CentralStore; ignored by the local SQLite store (single node).
 	ProxyID string
 	// Limit caps the number of rows returned (0 = no cap).
 	Limit int
+}
+
+// userFilterSQL is the shared WHERE fragment for EventFilter.User; both SQLite
+// stores bind the same value twice (sub, then email).
+const userFilterSQL = " AND (user_sub = ? OR lower(user_email) = lower(?))"
+
+// MatchesUser reports whether e belongs to f.User (true when no user filter is
+// set). It is the in-memory twin of userFilterSQL, for stores and fakes that do
+// not run SQL.
+func (f EventFilter) MatchesUser(e Event) bool {
+	if f.User == "" {
+		return true
+	}
+	// SQLite lower() folds ASCII only; match it so the stores agree.
+	return e.UserSub == f.User || asciiLower(e.UserEmail) == asciiLower(f.User)
+}
+
+func asciiLower(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= 'A' && r <= 'Z' {
+			return r + 'a' - 'A'
+		}
+		return r
+	}, s)
 }
 
 // defaultMaxEvents is the retention cap when none is supplied.
@@ -438,6 +465,11 @@ CREATE TABLE IF NOT EXISTS events (
 	// The index needs user_sub to exist, so it comes after the column loop.
 	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_events_user_sub_ts ON events (user_sub, ts)`); err != nil {
 		return fmt.Errorf("analytics: migrate user index: %w", err)
+	}
+	// lower(user_email) lets SQLite plan the User filter's OR as two index
+	// lookups (user_sub, lower(user_email)) instead of a scan.
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_events_user_email_lower ON events (lower(user_email))`); err != nil {
+		return fmt.Errorf("analytics: migrate user email index: %w", err)
 	}
 	return nil
 }
@@ -688,6 +720,10 @@ func (s *SQLiteStore) GetEvents(filter EventFilter) ([]Event, error) {
 	if filter.Tool != "" {
 		q += " AND tool = ?"
 		args = append(args, filter.Tool)
+	}
+	if filter.User != "" {
+		q += userFilterSQL
+		args = append(args, filter.User, filter.User)
 	}
 	if !filter.Since.IsZero() {
 		q += " AND ts >= ?"

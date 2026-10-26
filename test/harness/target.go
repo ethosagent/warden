@@ -442,6 +442,27 @@ func (ip *inprocess) Events() ([]analytics.Event, error) {
 	return out, nil
 }
 
+// SeedEvents writes events straight into worker-1's analytics store through the
+// production store (a second writer handle on the same SQLite file), so a
+// scenario can prove read-side behaviour (filters, aggregates) before the
+// proxy stamps those fields itself.
+func (ip *inprocess) SeedEvents(evs []analytics.Event) error {
+	if len(ip.dbPaths) == 0 {
+		return fmt.Errorf("harness: no worker analytics store to seed")
+	}
+	st, err := analytics.NewSQLiteStore("file:"+ip.dbPaths[0]+eventsDSN, 0)
+	if err != nil {
+		return fmt.Errorf("harness: open worker-1 analytics store for seeding: %w", err)
+	}
+	defer func() { _ = st.Close() }()
+	for _, e := range evs {
+		if err := st.StoreEvent(e); err != nil {
+			return fmt.Errorf("harness: seed event: %w", err)
+		}
+	}
+	return nil
+}
+
 // Metrics merges every worker's OTel reader into the fleet-wide view. An
 // aggregation window is per-worker, so a fleet's counter under Metrics is the
 // SUM across workers; histograms get two keys per label set, suffixed #count

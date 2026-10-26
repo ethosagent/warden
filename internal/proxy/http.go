@@ -18,6 +18,7 @@ import (
 	"github.com/ethosagent/warden/internal/auth"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/denyreason"
+	"github.com/ethosagent/warden/internal/identity"
 	"github.com/ethosagent/warden/internal/mcp/gateway"
 	"github.com/ethosagent/warden/internal/mcp/sse"
 	"github.com/ethosagent/warden/internal/policy"
@@ -114,6 +115,20 @@ type requestScope struct {
 	// trailer fields; denyTrailers (set by stripHopHeaders) answers the 400 deny.
 	trailerDenied bool
 	denyTrailers  func()
+
+	// Identity (identity.go). ci is the connection's CONNECT identity; rawIdentity
+	// and rawIdentityN are the X-Warden-Identity value and count captured before
+	// stripHopHeaders deletes it, cleared again by identityStage. The id* fields
+	// are the resolved result; subject is non-nil only for status valid. idClaims
+	// may hold the unverified sub of an invalid or expired token: for the
+	// block-list deny check only, never for a policy decision.
+	ci           connIdentity
+	rawIdentity  string
+	rawIdentityN int
+	idStatus     identity.Status
+	idReason     identity.Reason
+	idClaims     identity.Claims
+	subject      *identity.Subject
 
 	// Decision state threaded between stages.
 	judgeReason string
@@ -284,7 +299,7 @@ func (s *requestScope) addEvidence(dets []scan.Detection) {
 // Connection: close, a deny/502 terminal, an SSE stream, a client EOF, or a
 // stale-conn redial's fresh conn. It is nil (nothing to close) before the first
 // forward and after a handoff, so there is no double close and no leak.
-func (p *Proxy) handleHTTP(clientConn net.Conn, br *bufio.Reader, domain string, port int, needsJudge bool, scheme policy.Scheme, firstReq *http.Request) {
+func (p *Proxy) handleHTTP(clientConn net.Conn, br *bufio.Reader, domain string, port int, needsJudge bool, scheme policy.Scheme, firstReq *http.Request, ci connIdentity) {
 	if scheme == policy.SchemeHTTPS {
 		p.reach(PathHTTP1)
 	} else {
@@ -298,7 +313,7 @@ func (p *Proxy) handleHTTP(clientConn net.Conn, br *bufio.Reader, domain string,
 		}
 	}()
 	for {
-		end, up, upBR := p.serveHTTPRequest(clientConn, br, domain, port, needsJudge, scheme, firstReq, upstream, upstreamBR)
+		end, up, upBR := p.serveHTTPRequest(clientConn, br, domain, port, needsJudge, scheme, firstReq, upstream, upstreamBR, ci)
 		// The pre-read first request is served exactly once; later iterations
 		// read from the wire like every keep-alive request.
 		firstReq = nil
@@ -319,7 +334,7 @@ func (p *Proxy) handleHTTP(clientConn net.Conn, br *bufio.Reader, domain string,
 // scope's upstream on every non-handoff path (the session closes it on exit or
 // reuses it next iteration), or nil after a WebSocket handoff so the session does
 // not double-close the pump-owned conn.
-func (p *Proxy) serveHTTPRequest(clientConn net.Conn, br *bufio.Reader, domain string, port int, needsJudge bool, scheme policy.Scheme, firstReq *http.Request, upstream net.Conn, upstreamBR *bufio.Reader) (endSession bool, carryUpstream net.Conn, carryBR *bufio.Reader) {
+func (p *Proxy) serveHTTPRequest(clientConn net.Conn, br *bufio.Reader, domain string, port int, needsJudge bool, scheme policy.Scheme, firstReq *http.Request, upstream net.Conn, upstreamBR *bufio.Reader, ci connIdentity) (endSession bool, carryUpstream net.Conn, carryBR *bufio.Reader) {
 	req := firstReq
 	if req == nil {
 		var err error
@@ -355,6 +370,7 @@ func (p *Proxy) serveHTTPRequest(clientConn net.Conn, br *bufio.Reader, domain s
 		upstream:   upstream,
 		upstreamBR: upstreamBR,
 		reused:     upstream != nil,
+		ci:         ci,
 	}
 	// The quiescence tracker is entered by runRequestStages — the ONE pipeline
 	// both h1 requests and h2/gRPC streams run — so this h1 path and serveGRPCStream
@@ -400,7 +416,11 @@ func (p *Proxy) runRequestStages(s *requestScope) (endSession bool) {
 	if p.readRequest(s) {
 		return true
 	}
+	p.captureIdentityHeader(s)
 	if p.stripHopHeaders(s) {
+		return true
+	}
+	if p.identityStage(s) {
 		return true
 	}
 	if p.constraintGate(s) {

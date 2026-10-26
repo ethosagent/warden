@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -111,6 +112,23 @@ func (h *H) Events() []analytics.Event {
 		h.tb.Fatalf("harness: read analytics events: %v", err)
 	}
 	return evs
+}
+
+// SeedEvents writes events into worker-1's analytics store, for scenarios that
+// prove read-side behaviour on fields the proxy does not stamp yet. It is an
+// in-process lever: a target that cannot seed (compose) fails the test, so a
+// scenario using it must not set L2.
+func (h *H) SeedEvents(evs ...analytics.Event) {
+	h.tb.Helper()
+	sd, ok := h.target.(interface {
+		SeedEvents([]analytics.Event) error
+	})
+	if !ok {
+		h.tb.Fatalf("harness: this target cannot seed events (in-process only)")
+	}
+	if err := sd.SeedEvents(evs); err != nil {
+		h.tb.Fatalf("%v", err)
+	}
 }
 
 // Metrics returns the fleet-wide OTel view flattened to name{label=value} ->
@@ -260,6 +278,32 @@ func (c *CPClient) GetJSON(path string, v any) error {
 		return fmt.Errorf("harness: control plane %s = %d", path, resp.StatusCode)
 	}
 	return json.NewDecoder(resp.Body).Decode(v)
+}
+
+// IngestEvents posts events to the control plane's /central/ingest exactly as a
+// worker's sync does (bearer token, X-Warden-Proxy-ID), so a scenario can prove
+// CP read-side behaviour on fields the proxy does not stamp yet.
+func (c *CPClient) IngestEvents(proxyID string, evs []analytics.Event) error {
+	body, err := json.Marshal(map[string]any{"events": evs})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPost, "https://"+c.addr+"/central/ingest", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set(analytics.ProxyIDHeader, proxyID)
+	resp, err := c.cl.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("harness: control plane ingest = %d", resp.StatusCode)
+	}
+	return nil
 }
 
 // Workers lists the fleet view: every worker that has pulled policy or

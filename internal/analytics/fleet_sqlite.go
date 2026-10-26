@@ -97,7 +97,82 @@ CREATE INDEX IF NOT EXISTS idx_events_tool ON events(tool);`
 	if _, err := s.db.Exec(ddl); err != nil {
 		return fmt.Errorf("analytics: fleet migrate: %w", err)
 	}
+	// Forward-only, add-only migrations for fleet databases created before a
+	// column existed. Each is guarded by PRAGMA table_info, so re-running
+	// migrate is a no-op and no data is ever dropped.
+	for _, c := range fleetColumnMigrations {
+		if err := s.addColumnIfAbsent(c.name, c.ddl); err != nil {
+			return err
+		}
+	}
+	// The index needs user_sub to exist, so it comes after the column loop.
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_events_user_sub_ts ON events (user_sub, ts)`); err != nil {
+		return fmt.Errorf("analytics: fleet migrate user index: %w", err)
+	}
+	// lower(user_email) lets SQLite plan the User filter's OR as two index
+	// lookups (user_sub, lower(user_email)) instead of a scan.
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_events_user_email_lower ON events (lower(user_email))`); err != nil {
+		return fmt.Errorf("analytics: migrate user email index: %w", err)
+	}
 	return nil
+}
+
+// fleetColumnMigrations lists the columns added after the original fleet
+// schema. Later tickets append here and reuse addColumnIfAbsent.
+var fleetColumnMigrations = []struct{ name, ddl string }{
+	{"user_sub", `ALTER TABLE events ADD COLUMN user_sub TEXT NOT NULL DEFAULT ''`},
+	{"user_email", `ALTER TABLE events ADD COLUMN user_email TEXT NOT NULL DEFAULT ''`},
+	{"user_groups", `ALTER TABLE events ADD COLUMN user_groups TEXT NOT NULL DEFAULT ''`},
+	{"user_groups_truncated", `ALTER TABLE events ADD COLUMN user_groups_truncated INTEGER NOT NULL DEFAULT 0`},
+	{"user_sid", `ALTER TABLE events ADD COLUMN user_sid TEXT NOT NULL DEFAULT ''`},
+	{"identity_status", `ALTER TABLE events ADD COLUMN identity_status TEXT NOT NULL DEFAULT ''`},
+	{"identity_reason", `ALTER TABLE events ADD COLUMN identity_reason TEXT NOT NULL DEFAULT ''`},
+}
+
+// addColumnIfAbsent runs ddl (an ALTER TABLE ADD COLUMN) only when the events
+// table has no column called name, checked via PRAGMA table_info(events). The
+// control plane is a single writer on one connection, so there is no race to
+// retry; a "duplicate column" failure is still re-checked and tolerated.
+func (s *FleetSQLiteStore) addColumnIfAbsent(name, ddl string) error {
+	present, err := s.columnPresent(name)
+	if err != nil {
+		return err
+	}
+	if present {
+		return nil
+	}
+	if _, err := s.db.Exec(ddl); err != nil {
+		if again, perr := s.columnPresent(name); perr == nil && again {
+			return nil
+		}
+		return fmt.Errorf("analytics: fleet migrate add %s: %w", name, err)
+	}
+	return nil
+}
+
+func (s *FleetSQLiteStore) columnPresent(name string) (bool, error) {
+	rows, err := s.db.Query(`PRAGMA table_info(events)`)
+	if err != nil {
+		return false, fmt.Errorf("analytics: fleet migrate table_info: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var (
+			cid, notNull, pk int
+			col, colType     string
+			dflt             sql.NullString
+		)
+		if err := rows.Scan(&cid, &col, &colType, &notNull, &dflt, &pk); err != nil {
+			return false, fmt.Errorf("analytics: fleet migrate scan table_info: %w", err)
+		}
+		if col == name {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("analytics: fleet migrate table_info rows: %w", err)
+	}
+	return false, nil
 }
 
 // StoreAggregatedEvent persists an aggregated event, then prunes by age and cap.
@@ -111,14 +186,17 @@ func (s *FleetSQLiteStore) StoreAggregatedEvent(e AggregatedEvent) error {
 		e.Timestamp = time.Now()
 	}
 	const ins = `INSERT INTO events
-        (event_uid, proxy_id, agent_id, ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason, tool, reason, cost_usd, provider, compliance)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (event_uid, proxy_id, agent_id, ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason, tool, reason, cost_usd, provider, compliance,
+         user_sub, user_email, user_groups, user_groups_truncated, user_sid, identity_status, identity_reason)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(event_uid) WHERE event_uid IS NOT NULL AND event_uid != '' DO NOTHING`
 	_, err := s.db.Exec(ins,
 		nullIfEmpty(e.EventUID()), e.ProxyID, e.AgentID, e.Timestamp.UnixNano(),
 		e.Domain, e.Port, e.Protocol, e.Method, e.URL, e.Decision, e.ResponseStatus,
 		e.SecretRef, e.JudgeReason, e.Tool, e.Reason, e.CostUSD, e.Provider,
-		encodeCompliance(e.Compliance))
+		encodeCompliance(e.Compliance),
+		e.UserSub, e.UserEmail, EncodeGroups(e.UserGroups), boolToInt(e.UserGroupsTruncated),
+		e.UserSID, e.IdentityStatus, e.IdentityReason)
 	if err != nil {
 		return fmt.Errorf("analytics: fleet insert event: %w", err)
 	}
@@ -166,7 +244,8 @@ func (s *FleetSQLiteStore) PruneExpired() error { return s.prune() }
 
 // GetEvents returns events matching filter, newest first, with Event.ProxyID set.
 func (s *FleetSQLiteStore) GetEvents(filter EventFilter) ([]Event, error) {
-	q := `SELECT proxy_id, ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason, tool, reason, cost_usd, provider, compliance
+	q := `SELECT proxy_id, ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason, tool, reason, cost_usd, provider, compliance,
+                 user_sub, user_email, user_groups, user_groups_truncated, user_sid, identity_status, identity_reason
           FROM events WHERE 1=1`
 	var args []any
 	if filter.Domain != "" {
@@ -189,6 +268,10 @@ func (s *FleetSQLiteStore) GetEvents(filter EventFilter) ([]Event, error) {
 		q += " AND proxy_id = ?"
 		args = append(args, filter.ProxyID)
 	}
+	if filter.User != "" {
+		q += userFilterSQL
+		args = append(args, filter.User, filter.User)
+	}
 	if !filter.Since.IsZero() {
 		q += " AND ts >= ?"
 		args = append(args, filter.Since.UnixNano())
@@ -208,16 +291,21 @@ func (s *FleetSQLiteStore) GetEvents(filter EventFilter) ([]Event, error) {
 	var out []Event
 	for rows.Next() {
 		var (
-			e          Event
-			ts         int64
-			compliance string
+			e           Event
+			ts          int64
+			compliance  string
+			userGroups  string
+			groupsTrunc int
 		)
 		if err := rows.Scan(&e.ProxyID, &ts, &e.Domain, &e.Port, &e.Protocol, &e.Method,
 			&e.URL, &e.Decision, &e.ResponseStatus, &e.SecretRef, &e.JudgeReason, &e.Tool, &e.Reason,
-			&e.CostUSD, &e.Provider, &compliance); err != nil {
+			&e.CostUSD, &e.Provider, &compliance,
+			&e.UserSub, &e.UserEmail, &userGroups, &groupsTrunc, &e.UserSID, &e.IdentityStatus, &e.IdentityReason); err != nil {
 			return nil, fmt.Errorf("analytics: fleet scan: %w", err)
 		}
 		e.Compliance = decodeCompliance(compliance)
+		e.UserGroups = DecodeGroups(userGroups)
+		e.UserGroupsTruncated = groupsTrunc != 0
 		e.Timestamp = time.Unix(0, ts).UTC()
 		out = append(out, e)
 	}
@@ -230,7 +318,8 @@ func (s *FleetSQLiteStore) GetEvents(filter EventFilter) ([]Event, error) {
 // GetAggregatedEvents returns aggregated events matching filter, newest first,
 // with ProxyID and AgentID populated. It additionally filters by agent_id.
 func (s *FleetSQLiteStore) GetAggregatedEvents(filter AggregatedFilter) ([]AggregatedEvent, error) {
-	q := `SELECT proxy_id, agent_id, ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason, tool, reason, cost_usd, provider, compliance
+	q := `SELECT proxy_id, agent_id, ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason, tool, reason, cost_usd, provider, compliance,
+                 user_sub, user_email, user_groups, user_groups_truncated, user_sid, identity_status, identity_reason
           FROM events WHERE 1=1`
 	var args []any
 	if filter.Domain != "" {
@@ -262,6 +351,10 @@ func (s *FleetSQLiteStore) GetAggregatedEvents(filter AggregatedFilter) ([]Aggre
 		q += " AND agent_id = ?"
 		args = append(args, filter.AgentID)
 	}
+	if filter.User != "" {
+		q += userFilterSQL
+		args = append(args, filter.User, filter.User)
+	}
 	if !filter.Since.IsZero() {
 		q += " AND ts >= ?"
 		args = append(args, filter.Since.UnixNano())
@@ -281,16 +374,21 @@ func (s *FleetSQLiteStore) GetAggregatedEvents(filter AggregatedFilter) ([]Aggre
 	var out []AggregatedEvent
 	for rows.Next() {
 		var (
-			a          AggregatedEvent
-			ts         int64
-			compliance string
+			a           AggregatedEvent
+			ts          int64
+			compliance  string
+			userGroups  string
+			groupsTrunc int
 		)
 		if err := rows.Scan(&a.ProxyID, &a.AgentID, &ts, &a.Domain, &a.Port, &a.Protocol, &a.Method,
 			&a.URL, &a.Decision, &a.ResponseStatus, &a.SecretRef, &a.JudgeReason, &a.Tool, &a.Reason,
-			&a.CostUSD, &a.Provider, &compliance); err != nil {
+			&a.CostUSD, &a.Provider, &compliance,
+			&a.UserSub, &a.UserEmail, &userGroups, &groupsTrunc, &a.UserSID, &a.IdentityStatus, &a.IdentityReason); err != nil {
 			return nil, fmt.Errorf("analytics: fleet agg scan: %w", err)
 		}
 		a.Compliance = decodeCompliance(compliance)
+		a.UserGroups = DecodeGroups(userGroups)
+		a.UserGroupsTruncated = groupsTrunc != 0
 		a.Timestamp = time.Unix(0, ts).UTC()
 		// Surface the originating proxy on the embedded Event as well, matching
 		// CentralStore's GetEvents behavior.

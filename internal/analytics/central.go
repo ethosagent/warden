@@ -117,6 +117,9 @@ func (c *CentralStore) GetAggregatedEvents(filter AggregatedFilter) ([]Aggregate
 		if !filter.Since.IsZero() && e.Timestamp.Before(filter.Since) {
 			continue
 		}
+		if !filter.MatchesUser(e.Event) {
+			continue
+		}
 		if filter.ProxyID != "" && e.ProxyID != filter.ProxyID {
 			continue
 		}

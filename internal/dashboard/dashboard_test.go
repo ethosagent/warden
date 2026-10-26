@@ -41,6 +41,9 @@ func (f *fakeDataSource) GetEvents(filter analytics.EventFilter) ([]analytics.Ev
 		if filter.ProxyID != "" && e.ProxyID != filter.ProxyID {
 			continue
 		}
+		if !filter.MatchesUser(e) {
+			continue
+		}
 		if !filter.Since.IsZero() && e.Timestamp.Before(filter.Since) {
 			continue
 		}

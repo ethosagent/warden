@@ -253,6 +253,10 @@ func (p *Proxy) handleConn(conn net.Conn) {
 	// line must fit maxConnectHeaderBytes. Each line is capped at what is left
 	// of the budget, so one huge header trips the same 431 as many small ones.
 	total := len(line)
+	// Proxy-Authorization carries the user token (identity.go). Only the first
+	// line's value is kept; a second line makes the identity malformed.
+	var proxyAuth string
+	proxyAuthLines := 0
 	for {
 		hdr, err := readBoundedLine(br, maxConnectHeaderBytes-total)
 		if err != nil {
@@ -266,6 +270,12 @@ func (p *Proxy) handleConn(conn net.Conn) {
 		if hdr == "\r\n" || hdr == "\n" {
 			break
 		}
+		if isHeaderLine(hdr, proxyAuthorizationHeader) {
+			if proxyAuthLines == 0 {
+				proxyAuth = hdr[len(proxyAuthorizationHeader)+1:]
+			}
+			proxyAuthLines++
+		}
 	}
 	// Preamble complete — lift the deadline so it cannot cut off the tunnel or
 	// the TLS handshake, either of which may idle far longer than the preamble
@@ -273,6 +283,11 @@ func (p *Proxy) handleConn(conn net.Conn) {
 	if err := conn.SetReadDeadline(time.Time{}); err != nil {
 		return
 	}
+
+	// Resolve who is asking before the policy check, so a CONNECT deny is
+	// attributable too. A CONNECT with no token (the common case) does no work
+	// here; one with a token is bounded by identityVerifyTimeout.
+	ci := p.resolveConnIdentity(proxyAuthLines, proxyAuth)
 
 	// Destination-only evaluation (#371): no method/path exists yet at CONNECT,
 	// so constraints could-match here and the rate limit is peeked, not
@@ -309,7 +324,7 @@ func (p *Proxy) handleConn(conn net.Conn) {
 
 	if p.caCert != nil {
 		_, _ = fmt.Fprint(conn, "HTTP/1.1 200 Connection Established\r\n\r\n")
-		p.handleTLS(conn, br, domain, port, verdict.Decision == policy.NoMatch)
+		p.handleTLS(conn, br, domain, port, verdict.Decision == policy.NoMatch, ci)
 		return
 	}
 
@@ -329,7 +344,14 @@ func (p *Proxy) handleConn(conn net.Conn) {
 	}
 
 	_, _ = fmt.Fprint(conn, "HTTP/1.1 200 Connection Established\r\n\r\n")
-	p.tunnel(conn, br, domain, port)
+	p.tunnel(conn, br, domain, port, ci)
+}
+
+// isHeaderLine reports whether the raw header line starts with "<name>:",
+// case-insensitively. It allocates nothing, so the CONNECT loop pays one
+// length check and a compare per header line.
+func isHeaderLine(line, name string) bool {
+	return len(line) > len(name) && line[len(name)] == ':' && strings.EqualFold(line[:len(name)], name)
 }
 
 // rejectPreamble answers an over-limit CONNECT preamble with an HTTP error and
@@ -406,7 +428,10 @@ func (p *Proxy) storeAllow(domain string, port int, protocol string) {
 // already has its 200, sees the tunnel close either way. An ordinary dial
 // failure is not a policy decision: it keeps the allow audit the CONNECT has
 // always gotten, unchanged from before #391.
-func (p *Proxy) tunnel(client net.Conn, br *bufio.Reader, domain string, port int) {
+//
+// The connection's identity is accepted but unused here: a raw tunnel is opaque
+// and records no per-request identity (stamping events is W-P1-VRFY-09).
+func (p *Proxy) tunnel(client net.Conn, br *bufio.Reader, domain string, port int, _ connIdentity) {
 	p.reach(PathTunnel)
 	remote, err := p.dialFunc("tcp", net.JoinHostPort(domain, fmt.Sprintf("%d", port)))
 	if err != nil {

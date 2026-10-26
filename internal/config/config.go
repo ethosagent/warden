@@ -65,6 +65,8 @@ type Policy struct {
 	Judge JudgeConfig `json:"-"`
 	// Agents holds per-agent natural-language policies consulted by the judge.
 	Agents []AgentPolicy `json:"-"`
+	// Identity configures user-token attribution. Zero value (no block) means off.
+	Identity IdentitySettings `json:"-"`
 	// Advisory configures the optional offline advisory mode (CLI-only).
 	Advisory AdvisoryConfig `json:"-"`
 	// Observability configures OTel metrics + structured logging. Off by default.
@@ -162,6 +164,7 @@ func (p Policy) DeepCopy() Policy {
 		cp.SecretStore.AWS = &aws
 	}
 	cp.Agents = append([]AgentPolicy(nil), p.Agents...)
+	cp.Identity = *p.Identity.clone()
 	if p.Observability.ResourceAttributes != nil {
 		ra := make(map[string]string, len(p.Observability.ResourceAttributes))
 		for k, v := range p.Observability.ResourceAttributes {
@@ -293,6 +296,7 @@ type rawConfig struct {
 	} `yaml:"logging"`
 	Judge         *rawJudge         `yaml:"judge"`
 	Agents        []rawAgent        `yaml:"agents"`
+	Identity      *IdentitySettings `yaml:"identity"`
 	Advisory      *rawAdvisory      `yaml:"advisory"`
 	Observability *rawObservability `yaml:"observability"`
 	MCP           *rawMCP           `yaml:"mcp"`
@@ -386,6 +390,7 @@ func parse(data []byte) (*LocalYAMLProvider, error) {
 	for _, a := range raw.Agents {
 		policy.Agents = append(policy.Agents, AgentPolicy(a))
 	}
+	policy.Identity = IdentityFromSettings(raw.Identity)
 	if raw.Advisory != nil {
 		policy.Advisory.Enabled = raw.Advisory.Enabled
 	}
@@ -601,6 +606,9 @@ func validate(p Policy) error {
 		return fmt.Errorf("config: logging.format %q is invalid; must be one of: json, text", p.LogFormat)
 	}
 	if err := validateAgents(p.Agents); err != nil {
+		return err
+	}
+	if err := validateIdentity(p.Identity, p.Agents); err != nil {
 		return err
 	}
 	if err := validateJudge(p.Judge, p.Agents); err != nil {
