@@ -74,6 +74,10 @@ type Config struct {
 	// dashboard's read-only secretstore tab. Empty when no writable store is
 	// configured, in which case that tab reports backend "none".
 	SecretStoreBackend string
+	// Console is the CP-local console sign-in config, resolved from --config by
+	// resolveConsole. Nothing consumes it yet: login and sessions arrive in later
+	// tickets, and the zero value (Auth "" == none) changes no behaviour.
+	Console config.ConsoleConfig
 	// DetectionEnabled gates the temporal-detection engine. When true (the
 	// default when no detection block disables it), New builds the engine AND — so
 	// alerts land without any sink configured — the always-on Alert Store (the

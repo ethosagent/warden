@@ -5,11 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"syscall"
 	"time"
@@ -121,6 +124,16 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 			"hint", "pass --state-dir pointing at a writable, container-user-owned volume (e.g. /data) so the control plane can seed and edit a writable copy")
 	}
 
+	// The console block comes from the operator-owned --config file only; the
+	// served copy is seeded once and rewritten by the dashboard.
+	consoleCfg, err := resolveConsole(logger, configPath, servedPath, stateDir, os.Getenv)
+	if err != nil {
+		return fail(err)
+	}
+	if err := checkConsoleSupported(consoleCfg); err != nil {
+		return fail(err)
+	}
+
 	var token string
 	if tokenEnv != "" {
 		token = strings.TrimSpace(os.Getenv(tokenEnv))
@@ -215,6 +228,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		Integrations: integrations,
 		AlertDBPath:  alertDBPath,
 		SecretStore:  secretStore,
+		Console:      consoleCfg,
 		// Report the backend name to the dashboard only when a writable store was
 		// actually built (echo/aws); env/none leaves it empty → tab reports "none".
 		SecretStoreBackend: secretStoreBackendName(secretStore, pol.SecretStore),
@@ -345,6 +359,53 @@ func seedServedConfig(servedPath, seedPath string) (bool, error) {
 		return false, fmt.Errorf("write served config %s: %w", servedPath, err)
 	}
 	return true, nil
+}
+
+// errConsoleOIDCUnavailable is the temporary guard of W-P1-SSO-02. It is removed
+// by W-P1-SSO-06, the ticket that also secures /central/secrets, so no build
+// serves oidc login while a human route still accepts the shared bearer.
+var errConsoleOIDCUnavailable = errors.New("control-plane: console oidc enforcement is not available in this build")
+
+// resolveConsole loads the console block from configPath (the operator-owned
+// --config file, never the served copy) and checks what oidc mode needs at
+// startup: a non-empty client-secret env var and a --state-dir. Error and log
+// text name the env var, never its value. When a state dir is set, a served copy
+// holding a different console block is ignored with a warning; without one the
+// CP serves configPath itself and there is no second copy.
+func resolveConsole(logger *slog.Logger, configPath, servedPath, stateDir string, getenv func(string) string) (config.ConsoleConfig, error) {
+	cc, err := config.LoadConsole(configPath)
+	if err != nil {
+		return config.ConsoleConfig{}, fmt.Errorf("control-plane: %w", err)
+	}
+	if stateDir != "" && servedPath != configPath {
+		served, serr := config.LoadConsole(servedPath)
+		if serr != nil || !reflect.DeepEqual(served, cc) {
+			logger.Warn("control-plane: the served config copy holds a different console block; ignoring it and using --config",
+				"served", servedPath, "config", configPath)
+		}
+	}
+	if cc.Auth != config.ConsoleAuthOIDC {
+		return cc, nil
+	}
+	if strings.TrimSpace(getenv(cc.OIDC.ClientSecretEnv)) == "" {
+		return config.ConsoleConfig{}, fmt.Errorf("control-plane: console.auth is oidc but environment variable %s (console.oidc.clientSecretEnv) is empty", cc.OIDC.ClientSecretEnv)
+	}
+	if stateDir == "" {
+		return config.ConsoleConfig{}, errors.New("control-plane: console.auth is oidc and requires --state-dir for session storage")
+	}
+	if u, perr := url.Parse(cc.OIDC.Issuer); perr == nil && u.Scheme == "http" && cc.OIDC.InternalIssuerURL != "" {
+		logger.Warn("control-plane: console oidc is using a plain-http issuer via internalIssuerURL; this is the development profile, use an https issuer in production",
+			"issuer", cc.OIDC.Issuer, "internalIssuerURL", cc.OIDC.InternalIssuerURL)
+	}
+	return cc, nil
+}
+
+// checkConsoleSupported is the temporary oidc guard (see errConsoleOIDCUnavailable).
+func checkConsoleSupported(cc config.ConsoleConfig) error {
+	if cc.Auth == config.ConsoleAuthOIDC {
+		return errConsoleOIDCUnavailable
+	}
+	return nil
 }
 
 // toInstanceConfigs maps the CP-local integrations config onto the integration
