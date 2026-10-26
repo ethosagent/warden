@@ -105,7 +105,7 @@ func (r *rig) runExec(mode string, sigs chan os.Signal, args ...string) execResu
 func (r *rig) startExec(mode string, sigs chan os.Signal, out *syncBuf, args ...string) (func() execResult, *syncBuf) {
 	r.t.Helper()
 	d := r.deps()
-	d.environ = func() []string { return append(os.Environ(), helperEnv+"="+mode) }
+	d.environ = func() []string { return []string{"PATH=" + os.Getenv("PATH"), helperEnv + "=" + mode} }
 	if sigs != nil {
 		d.signals = func() (<-chan os.Signal, func()) { return sigs, func() {} }
 	}

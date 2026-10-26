@@ -103,8 +103,8 @@ baseline:
     allow: ["crypto/x509.CreateCertificate"]
   - rule: X3
     package: cmd/proxy
-    why: "the checker and the integration harness drive the go toolchain; adapters own exec after step 7"
-    allow: ["os/exec.CommandContext"]
+    why: "the checker and the integration harness drive the go toolchain; adapters own exec after step 7. identity exec (#446) starts the user's command with the parent environment minus proxy and WARDEN_IDENTITY_* variables; it is a CLI run by the user, never the guarded agent"
+    allow: ["os/exec.CommandContext", "os.Environ"]
   - rule: X1
     package: test/harness
     why: "test PKI: the L1 harness mints throwaway CAs and leaves for its fake upstreams; never production signing"
