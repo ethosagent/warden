@@ -35,7 +35,7 @@ type asyncConfig struct {
 	pruneEvery    int
 	pruneInterval time.Duration
 	logger        *slog.Logger
-	onBatch       func([]Event)
+	onBatch       []func([]Event)
 }
 
 // AsyncOption configures a NewAsyncWriter.
@@ -62,10 +62,20 @@ func WithLogger(l *slog.Logger) AsyncOption { return func(c *asyncConfig) { c.lo
 // subsequent SQLite write succeeds or is retried, so every event is teed exactly
 // ONCE. The local-only worker uses this to feed its own event stream into the
 // embedded alert pipeline's Observe fan-in without adding latency to request
-// handling. fn must not retain the slice past the call (the backing array is a
-// fresh allocation per batch, but the contract is copy-if-kept). A nil fn (the
-// default) disables the tee at zero cost.
-func WithOnBatch(fn func([]Event)) AsyncOption { return func(c *asyncConfig) { c.onBatch = fn } }
+// handling. The option is ADDITIVE: each call registers another tee, and every
+// tee runs once per batch, in registration order, on the writer goroutine (so a
+// slow tee delays the next ones; tees must hand off, not do I/O inline). fn must
+// not retain the slice past the call (the backing array is a fresh allocation
+// per batch, but the contract is copy-if-kept) and all tees share that one
+// slice, so none may modify it. A nil fn is ignored; with no tee installed
+// (the default) nothing is allocated.
+func WithOnBatch(fn func([]Event)) AsyncOption {
+	return func(c *asyncConfig) {
+		if fn != nil {
+			c.onBatch = append(c.onBatch, fn)
+		}
+	}
+}
 
 // asyncWriter is an AnalyticsStore decorator that moves the local SQLite write
 // off the request goroutine: StoreEvent enqueues onto a bounded channel and a
@@ -274,10 +284,12 @@ func (w *asyncWriter) loop() {
 	// a later batch. It is decoupled from write success so an event is teed once,
 	// when its flush point is reached.
 	emitTee := func() {
-		if w.cfg.onBatch == nil || len(tee) == 0 {
+		if len(w.cfg.onBatch) == 0 || len(tee) == 0 {
 			return
 		}
-		w.cfg.onBatch(tee)
+		for _, fn := range w.cfg.onBatch {
+			fn(tee)
+		}
 		tee = nil
 	}
 
@@ -320,7 +332,7 @@ func (w *asyncWriter) loop() {
 			}
 			w.depth.Add(-1)
 			buf = append(buf, e)
-			if w.cfg.onBatch != nil {
+			if len(w.cfg.onBatch) > 0 {
 				tee = append(tee, e)
 			}
 			if len(buf) >= w.cfg.batchSize {
@@ -346,7 +358,7 @@ func (w *asyncWriter) loop() {
 					}
 					w.depth.Add(-1)
 					buf = append(buf, e)
-					if w.cfg.onBatch != nil {
+					if len(w.cfg.onBatch) > 0 {
 						tee = append(tee, e)
 					}
 					if len(buf) >= w.cfg.batchSize {

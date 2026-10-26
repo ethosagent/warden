@@ -9,11 +9,14 @@ import (
 type AgentPolicy struct {
 	ID     string
 	Policy string
+	// Identity is this agent's identity mode override: "", off or attribute.
+	Identity string
 }
 
 type rawAgent struct {
-	ID     string `yaml:"id"`
-	Policy string `yaml:"policy"`
+	ID       string `yaml:"id"`
+	Policy   string `yaml:"policy"`
+	Identity string `yaml:"identity"`
 }
 
 // validateAgents enforces that agent ids are present and unique. Agent policies
@@ -26,6 +29,9 @@ func validateAgents(agents []AgentPolicy) error {
 		}
 		if _, dup := seen[a.ID]; dup {
 			return fmt.Errorf("config: agents: duplicate id %q", a.ID)
+		}
+		if err := validateIdentityMode(fmt.Sprintf("agents[%d].identity", i), a.Identity); err != nil {
+			return err
 		}
 		seen[a.ID] = struct{}{}
 	}

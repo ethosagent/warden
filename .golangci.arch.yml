@@ -61,6 +61,7 @@ linters:
             - '!${base-path}/internal/secrets/**'
             - '!${base-path}/internal/auth/**'
             - '!${base-path}/internal/audit/**'
+            - '!${base-path}/internal/auditlog/**'
             - '!${base-path}/internal/llm/**'
             - '!${base-path}/internal/observability/**'
             - '!${base-path}/internal/clock/**'
@@ -125,6 +126,7 @@ linters:
             - '!${base-path}/internal/secrets/**'
             - '!${base-path}/internal/auth/**'
             - '!${base-path}/internal/audit/**'
+            - '!${base-path}/internal/auditlog/**'
             - '!${base-path}/internal/llm/**'
             - '!${base-path}/internal/observability/**'
             - '!${base-path}/internal/clock/**'
@@ -174,6 +176,7 @@ linters:
             - '!${base-path}/internal/secrets/**'
             - '!${base-path}/internal/auth/**'
             - '!${base-path}/internal/audit/**'
+            - '!${base-path}/internal/auditlog/**'
             - '!${base-path}/internal/llm/**'
             - '!${base-path}/internal/observability/**'
             - '!${base-path}/internal/clock/**'
@@ -380,6 +383,11 @@ linters:
           - forbidigo
         text: 'L6:'
       - path: ^internal/audit/[^/]*\.go$
+        linters:
+          - depguard
+          - forbidigo
+        text: 'L7:'
+      - path: ^internal/auditlog/[^/]*\.go$
         linters:
           - depguard
           - forbidigo
