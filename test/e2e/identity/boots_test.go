@@ -47,6 +47,14 @@ func TestIdentityStackBoots(t *testing.T) {
 		}
 	})
 
+	t.Run("dex issues an ID token for a seeded user", func(t *testing.T) {
+		// Proves the password grant, the scope string and the LDAP seed end to
+		// end; the token itself is never logged.
+		if n := len(strings.Split(dexToken(t, "alice"), ".")); n != 3 {
+			t.Errorf("ID token has %d dot-separated segments, want 3 (a JWT)", n)
+		}
+	})
+
 	t.Run("allowed host reachable through the worker", func(t *testing.T) {
 		res := agentExec(t, "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
 			"--max-time", compose.AgentCurlMaxTime, "--cacert", compose.AgentCABundle, "https://api.example.test/")
