@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -16,7 +17,7 @@ import (
 func testIdentity() *config.IdentitySettings {
 	return &config.IdentitySettings{
 		DefaultMode: "attribute", Issuer: "http://localhost:5556/dex", Audience: "warden",
-		AllowedAZP: []string{"agent-harness", "warden-cli"}, GroupsClaim: "groups",
+		AllowedAZP: []string{"agent-harness", "warden-cli"}, GroupsClaim: "groups", JWKSURL: "http://dex:5556/keys",
 		ClockSkewSeconds: 30, MaxTokenTTLSeconds: 600, InternalIssuerURL: "http://dex:5556",
 	}
 }
@@ -149,5 +150,24 @@ func TestPolicyServedIncludesIdentity(t *testing.T) {
 	_, etagB := fetchPolicyRaw(t, ts.URL)
 	if etagA == etagB {
 		t.Fatal("ETag did not change when the identity block changed")
+	}
+}
+
+func TestWriteSettingsIdentityRejectsInvalid(t *testing.T) {
+	path := writePolicyFile(t, "api.openai.com")
+	srv := New(Config{PolicyPath: path})
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = srv.WriteSettings(config.SettingsWire{Identity: &config.IdentitySettings{
+		DefaultMode: "require", Issuer: "https://idp.example.com", Audience: "warden",
+	}})
+	if err == nil || !strings.Contains(err.Error(), "Phase 2") {
+		t.Fatalf("want a Phase 2 rejection, got %v", err)
+	}
+	after, _ := os.ReadFile(path)
+	if string(after) != string(before) {
+		t.Fatal("a rejected write must leave the file unchanged")
 	}
 }

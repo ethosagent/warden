@@ -23,6 +23,7 @@ func TestValidateIdentity(t *testing.T) {
 		{"attribute https with internal url", identityBlock("  defaultMode: attribute\n  issuer: https://idp.example.com\n  audience: warden\n  internalIssuerURL: http://dex:5556\n"), ""},
 		{"http issuer with internal url", identityBlock("  defaultMode: attribute\n  issuer: http://localhost:5556/dex\n  audience: warden\n  internalIssuerURL: http://dex:5556\n"), ""},
 		{"internal url trailing slash", identityBlock("  issuer: https://i.example.com\n  internalIssuerURL: http://dex:5556/\n"), ""},
+		{"http issuer rejected even when off", identityBlock("  issuer: http://dex:5556\n"), "plain http"},
 		{"require is Phase 2", identityBlock("  defaultMode: require\n  issuer: https://i.example.com\n  audience: warden\n"), "Phase 2"},
 		{"unknown mode", identityBlock("  defaultMode: enforce\n  issuer: https://i.example.com\n  audience: warden\n"), "invalid"},
 		{"http issuer without internal url", identityBlock("  defaultMode: attribute\n  issuer: http://dex:5556\n  audience: warden\n"), "plain http"},

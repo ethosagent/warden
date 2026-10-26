@@ -104,14 +104,16 @@ func validateIdentity(s IdentitySettings, agents []AgentPolicy) error {
 			return err
 		}
 	}
-	if !identityEnabled(s, agents) {
-		return nil
+	if identityEnabled(s, agents) {
+		if strings.TrimSpace(s.Issuer) == "" {
+			return fmt.Errorf("config: identity.issuer is required when an identity mode is attribute")
+		}
+		if strings.TrimSpace(s.Audience) == "" {
+			return fmt.Errorf("config: identity.audience is required when an identity mode is attribute")
+		}
 	}
 	if strings.TrimSpace(s.Issuer) == "" {
-		return fmt.Errorf("config: identity.issuer is required when an identity mode is attribute")
-	}
-	if strings.TrimSpace(s.Audience) == "" {
-		return fmt.Errorf("config: identity.audience is required when an identity mode is attribute")
+		return nil
 	}
 	// Same rule as identity.CheckIssuer: https always passes, plain http only
 	// when an internal issuer URL is configured.
