@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/identity"
 )
@@ -325,4 +326,45 @@ func (p *Proxy) headerResult(h *identityHolder, raw string, n int) idResult {
 		return p.malformed()
 	}
 	return p.verifyToken(h, tok)
+}
+
+// stamp writes the identity onto an event about to be stored. Status none (and
+// the zero value) leaves the event untouched, so an event with no identity is
+// byte-identical to one written before identity existed. The status and
+// reason are written for every other status; the user_* fields only for status
+// valid, so the unverified sub, email or groups that Verify returns for an
+// expired or invalid token never reach storage.
+func (c connIdentity) stamp(ev *analytics.Event) {
+	st := c.status()
+	if st == identity.StatusNone {
+		return
+	}
+	ev.IdentityStatus = string(st)
+	ev.IdentityReason = string(c.Reason)
+	if st != identity.StatusValid {
+		return
+	}
+	ev.UserSub = c.Claims.Sub
+	ev.UserEmail = c.Claims.Email
+	ev.UserGroups = c.Claims.Groups
+	ev.UserGroupsTruncated = c.Claims.GroupsTruncated
+	ev.UserSID = c.Claims.SID
+}
+
+// recordEvent is the one place the proxy hands an event to the analytics
+// store: it stamps the caller's identity first. A new StoreEvent call anywhere
+// else in the package fails TestAllEventsCarryIdentity.
+func (p *Proxy) recordEvent(ci connIdentity, ev analytics.Event) {
+	ci.stamp(&ev)
+	_ = p.analyticsStore().StoreEvent(ev)
+}
+
+// resolved is the identity this request's events carry: the per-request result
+// once identityStage has run (it can differ from the CONNECT identity: expired,
+// conflict, a header identity), the connection's identity before that.
+func (s *requestScope) resolved() connIdentity {
+	if s.idStatus == "" {
+		return s.ci
+	}
+	return connIdentity{Claims: s.idClaims, Status: s.idStatus, Reason: s.idReason}
 }

@@ -31,7 +31,10 @@ import (
 // status rules, on CONNECT, HTTP/1.1, WebSocket upgrades and h2/gRPC. The
 // verifier is the fakes.Verifier; metrics are the fakeMetrics counter.
 
-const idHost = "hdr.test"
+const (
+	idHost            = "hdr.test"
+	scopedPlaceholder = "PLACEHOLDER_001"
+)
 
 // idClock is a controllable proxy clock.
 type idClock struct {
@@ -61,6 +64,7 @@ type idEnv struct {
 	clk   *idClock
 	logs  *lockedBuf
 	be    *headerBackend
+	store *syncStore
 }
 
 // idClaims is a valid token's claims, expiring ttl after now.
@@ -73,7 +77,7 @@ func idClaims(sub string, exp time.Time) identity.Claims {
 // tok-bad (invalid, bad_signature) and tok-down (unverified).
 func newIDEnv(t *testing.T, mode IdentityMode) *idEnv {
 	t.Helper()
-	e := &idEnv{t: t, v: fakes.NewVerifier(), m: newFakeMetrics(), logs: &lockedBuf{}}
+	e := &idEnv{t: t, v: fakes.NewVerifier(), m: newFakeMetrics(), logs: &lockedBuf{}, store: &syncStore{}}
 	e.clk = &idClock{t: time.Now()}
 	exp := e.clk.now().Add(time.Hour)
 	e.v.Set("tok-alice", idClaims("alice", exp), identity.StatusValid, "")
@@ -92,14 +96,18 @@ func newIDEnv(t *testing.T, mode IdentityMode) *idEnv {
 		Policy: policy.NewEvaluator(config.Policy{Allowlist: []config.AllowlistEntry{
 			{Domain: idHost, Port: 443},
 		}}),
-		Secrets:    &fakes.FakeSecretProvider{Values: map[string]string{}},
-		Analytics:  &syncStore{},
-		AgentID:    "agent",
-		Metrics:    e.m,
-		Logger:     slog.New(slog.NewTextHandler(e.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
-		CACertPath: filepath.Join(dir, "ca.crt"),
-		CAKeyPath:  filepath.Join(dir, "ca.key"),
-		Identity:   IdentityConfig{Verifier: e.v, Mode: mode},
+		Secrets:   &fakes.FakeSecretProvider{Values: map[string]string{scopedPlaceholder: "real-value"}},
+		Analytics: e.store,
+		AgentID:   "agent",
+		Metrics:   e.m,
+		// One placeholder scoped to a host other than idHost, so a request carrying
+		// it records a secret_out_of_scope event (TestEventsCarryIdentityAllPaths).
+		PlaceholderNames:  []string{scopedPlaceholder},
+		PlaceholderScopes: map[string][]string{scopedPlaceholder: {"other.test"}},
+		Logger:            slog.New(slog.NewTextHandler(e.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		CACertPath:        filepath.Join(dir, "ca.crt"),
+		CAKeyPath:         filepath.Join(dir, "ca.key"),
+		Identity:          IdentityConfig{Verifier: e.v, Mode: mode},
 	}
 	if err := os.WriteFile(cfg.CACertPath, caPEM, 0o600); err != nil {
 		t.Fatal(err)
@@ -141,12 +149,17 @@ func (e *idEnv) connect(extra string) (net.Conn, *bufio.Reader, string) {
 
 // dialConnect is connect without testing.T calls, safe off the test goroutine.
 func (e *idEnv) dialConnect(extra string) (net.Conn, *bufio.Reader, string, error) {
+	return e.dialConnectTo(idHost, extra)
+}
+
+// dialConnectTo is dialConnect for an arbitrary host.
+func (e *idEnv) dialConnectTo(host, extra string) (net.Conn, *bufio.Reader, string, error) {
 	conn, err := net.Dial("tcp", e.p.Addr().String())
 	if err != nil {
 		return nil, nil, "", err
 	}
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
-	_, _ = fmt.Fprintf(conn, "CONNECT %s:443 HTTP/1.1\r\nHost: %s:443\r\n%s\r\n", idHost, idHost, extra)
+	_, _ = fmt.Fprintf(conn, "CONNECT %s:443 HTTP/1.1\r\nHost: %s:443\r\n%s\r\n", host, host, extra)
 	br := bufio.NewReader(conn)
 	status, err := br.ReadString('\n')
 	if err != nil {

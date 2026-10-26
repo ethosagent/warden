@@ -79,10 +79,10 @@ func queryCarriesPlaceholder(u *url.URL, placeholder string) bool {
 
 // recordOutOfScope emits one analytics event + log record per placeholder that
 // was present but out of scope. Only the placeholder NAME is recorded.
-func (p *Proxy) recordOutOfScope(domain string, port int, protocol, method, fullURL string, names []string) {
+func (p *Proxy) recordOutOfScope(ci connIdentity, domain string, port int, protocol, method, fullURL string, names []string) {
 	for _, name := range names {
 		reason := decisionSecretOutOfScope + ":" + name
-		_ = p.analyticsStore().StoreEvent(analytics.Event{
+		p.recordEvent(ci, analytics.Event{
 			Timestamp: time.Now(),
 			Domain:    domain,
 			Port:      port,
@@ -94,7 +94,7 @@ func (p *Proxy) recordOutOfScope(domain string, port int, protocol, method, full
 		})
 		p.logDecision(decisionLog{
 			Domain: domain, Port: port, Protocol: protocol,
-			Method: method, URL: fullURL, Decision: decisionSecretOutOfScope,
+			Method: method, URL: fullURL, Decision: decisionSecretOutOfScope, ID: ci,
 		})
 	}
 }
