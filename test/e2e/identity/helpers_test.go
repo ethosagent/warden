@@ -99,6 +99,19 @@ func devEnv(t testing.TB, key string) string {
 // error code.
 func dexToken(t testing.TB, user string) string {
 	t.Helper()
+	return dexGrant(t, user).IDToken
+}
+
+// grant is the secret-bearing part of a Dex token response. Nothing in it may
+// reach a log line.
+type grant struct {
+	IDToken      string
+	RefreshToken string
+}
+
+// dexGrant is dexToken with the refresh token too (scope offline_access).
+func dexGrant(t testing.TB, user string) grant {
+	t.Helper()
 	form := url.Values{
 		"grant_type": {"password"},
 		"username":   {user},
@@ -121,8 +134,9 @@ func dexToken(t testing.TB, user string) string {
 		t.Fatalf("identity: read the token response for %q: %v", user, err)
 	}
 	var out struct {
-		IDToken string `json:"id_token"`
-		Error   string `json:"error"`
+		IDToken      string `json:"id_token"`
+		RefreshToken string `json:"refresh_token"`
+		Error        string `json:"error"`
 	}
 	if err := json.Unmarshal(body, &out); err != nil {
 		t.Fatalf("identity: dex token response for %q (status %d) is not JSON", user, resp.StatusCode)
@@ -130,7 +144,7 @@ func dexToken(t testing.TB, user string) string {
 	if resp.StatusCode != http.StatusOK || out.IDToken == "" {
 		t.Fatalf("identity: dex refused the password grant for %q: status %d, error %q", user, resp.StatusCode, out.Error)
 	}
-	return out.IDToken
+	return grant{IDToken: out.IDToken, RefreshToken: out.RefreshToken}
 }
 
 // redactURLError drops the request URL from a net/http error (it carries no
