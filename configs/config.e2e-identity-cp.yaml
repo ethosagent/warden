@@ -1,0 +1,37 @@
+# Warden control-plane config for the L2 IDENTITY stack (deploy/compose/
+# docker-compose.e2e-identity.yml): a copy of config.e2e-cp.yaml with NO
+# console block. W-P1-SSO-07 adds the CP `console:` block here (with
+# internalIssuerURL http://dex:5556); this ticket ships none. Keep the two
+# files otherwise in step.
+#
+# Original header, for the HERMETIC e2e stack (deploy/compose/
+# docker-compose.e2e.yml). The e2e workers are CP-MANAGED
+# (configs/config.e2e-worker.yaml), so THIS is the live allow/deny policy both
+# of them pull, hot-reload on change, and enforce — the deny path
+# (evil.example.test) and the allow path (api/llm/mcp.example.test) are proven
+# against it. evil.example.test is denied explicitly even though default-deny
+# would already block it: the scenarios assert the DENY path, and a denylist
+# entry holds even if the allowlist is later widened.
+#
+# The control plane never holds secrets — nothing canary-related belongs here,
+# and nothing here can set a worker's local wiring (secrets, DNS, the SSRF
+# exception): those keys do not exist on the CP→worker wire.
+
+policy:
+  allowlist:
+    - domain: api.example.test
+    - domain: llm.example.test
+    - domain: mcp.example.test
+    # self.example.test exists ONLY for the transparent loop-guard test (#376):
+    # worker-3's own t-net address is allowlisted so the request passes the
+    # SNI/Host gate and reaches the upstream dial — which the loop guard must
+    # then refuse. Without the guard this allowlist entry is what makes the
+    # interception loop possible, so the drill is honest. On the egress network
+    # the name is NXDOMAIN, so workers 1/2 can never reach anything with it.
+    - domain: self.example.test
+  denylist:
+    - domain: evil.example.test
+
+logging:
+  level: info
+  format: json

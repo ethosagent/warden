@@ -24,6 +24,7 @@ type e2eStep struct {
 	Run           string `yaml:"run"`
 	If            string `yaml:"if"`
 	ContinueOnErr string `yaml:"continue-on-error"`
+	Shell         string `yaml:"shell"`
 }
 
 type e2eWorkflow struct {
@@ -99,6 +100,53 @@ func TestE2EWorkflowShape(t *testing.T) {
 	}
 	if in, ok := wf.On.WorkflowCall.Inputs["image"]; !ok || in.Type != "string" {
 		t.Error("e2e.yml must accept a string `image` input on workflow_call (the release passes its digest)")
+	}
+}
+
+// The identity suite runs in its own job so `e2e` keeps its 15-minute cap.
+// risk.yml waits for it on critical PRs and the release waits for the whole
+// called workflow, so it gets the same guard as `e2e`: id and name, the cap, and
+// a run step that always runs and cannot swallow a failure.
+func TestE2EIdentityJobShape(t *testing.T) {
+	var wf e2eWorkflow
+	if err := yaml.Unmarshal(readRepoFile(t, "../../.github/workflows/e2e.yml"), &wf); err != nil {
+		t.Fatal(err)
+	}
+	job, ok := wf.Jobs["e2e-identity"]
+	if !ok || job.Name != "e2e-identity" {
+		t.Fatalf("the job id and name must both be `e2e-identity` (risk.yml waits for that check run); got id present %v, name %q", ok, job.Name)
+	}
+	if job.TimeoutMinutes < 1 || job.TimeoutMinutes > 15 {
+		t.Errorf("timeout-minutes = %d, want 1..15", job.TimeoutMinutes)
+	}
+	if job.ContinueOnErr != "" && job.ContinueOnErr != "false" {
+		t.Errorf("the e2e-identity job has continue-on-error: %s", job.ContinueOnErr)
+	}
+	run := regexp.MustCompile(`(^|[\s;&|])make\s+e2e-identity(\s|$)`)
+	found := false
+	for _, st := range job.Steps {
+		if !run.MatchString(st.Run) {
+			continue
+		}
+		found = true
+		if st.If != "" || (st.ContinueOnErr != "" && st.ContinueOnErr != "false") {
+			t.Errorf("the step that runs the identity suite must always run and block (if %q, continue-on-error %q)", st.If, st.ContinueOnErr)
+		}
+		if strings.Contains(st.Run, "|") && st.Shell != "bash" {
+			t.Errorf("the identity run step pipes the suite into tee; it needs `shell: bash` so pipefail holds (shell %q)", st.Shell)
+		}
+		for _, line := range strings.Split(st.Run, "\n") {
+			if e2eSwallowRe.MatchString(line) {
+				t.Errorf("the identity run step ignores a failure: %q", strings.TrimSpace(line))
+			}
+		}
+	}
+	if !found {
+		t.Error("the e2e-identity job has no step that runs `make e2e-identity`")
+	}
+	rk := string(readRepoFile(t, "../../.github/workflows/risk.yml"))
+	if !strings.Contains(rk, `.name == "e2e-identity"`) {
+		t.Error("risk.yml's e2e-required must wait for the `e2e-identity` check run as well as `e2e`")
 	}
 }
 
