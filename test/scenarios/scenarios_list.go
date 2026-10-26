@@ -3,6 +3,7 @@ package scenarios
 import (
 	"slices"
 
+	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/test/harness"
 )
 
@@ -40,6 +41,22 @@ var All = slices.Concat(
 		{Name: "transparent_tls_allow_with_swap", Opts: append(swapOpts(), harness.TransparentIntercept()), Run: transparentTLSServeAllowWithSwap},
 		{Name: "transparent_tls_deny_parity", Opts: []harness.Option{harness.TransparentIntercept()}, Run: transparentTLSServeDeny},
 		{Name: "transparent_plain_http_allow_with_swap", Opts: append(swapOpts(), harness.TransparentIntercept()), Run: transparentPlainHTTPAllowWithSwap},
+
+		// Identity attribution (W-P1-VRFY-05): user tokens verified against the
+		// in-process OIDC issuer fake, recorded on events, receipts and decision
+		// logs. In-process only (the issuer fake and the settings write are).
+		{Name: "identity_connect_h1", Opts: identityOpts(), Run: identityMatrix(idTransports[0])},
+		{Name: "identity_connect_h2", Opts: identityOpts(), Run: identityMatrix(idTransports[1])},
+		{Name: "identity_header_h1", Opts: identityOpts(), Run: identityMatrix(idTransports[2])},
+		{Name: "identity_header_h2", Opts: identityOpts(), Run: identityMatrix(idTransports[3])},
+		{Name: "identity_raw_tunnel", Opts: identityOpts(), Run: identityRawTunnel},
+		{Name: "identity_websocket", Opts: identityOpts(), Run: identityWebSocket},
+		{Name: "identity_conflict", Opts: identityOpts(), Run: identityConflict},
+		{Name: "identity_deny_attributed", Opts: identityOpts(), Run: identityDenyAttributed},
+		{Name: "identity_mode_off", Opts: []harness.Option{harness.WithIdentity(config.IdentityModeOff)}, Run: identityOff},
+		{Name: "identity_issuer_down", Opts: identityOpts(), Run: identityIssuerDown},
+		{Name: "identity_transparent", Opts: append(identityOpts(), harness.TransparentIntercept()), Run: identityTransparent},
+		{Name: "identity_hot_reload", Opts: identityOpts(), Run: identityHotReload},
 	},
 	// Canary across protocols x allow/deny; see canary.go.
 	canaryScenarios(),

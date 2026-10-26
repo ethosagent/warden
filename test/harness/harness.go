@@ -146,6 +146,9 @@ type H struct {
 	// boot; issuer is it.
 	wantIssuer bool
 	issuer     *fakes.OIDCIssuer
+	// identityMode (WithIdentity) is the default identity mode distributed to
+	// the workers; "" means no identity block at all.
+	identityMode string
 
 	// tokenClients are the AgentWithProxyToken / AgentH2WithProxyToken clients,
 	// kept so cleanup can close their idle tunnels.
@@ -684,6 +687,7 @@ func (h *H) writeCPConfig() string {
 	for _, d := range h.allowDomains() {
 		fmt.Fprintf(&b, "    - domain: %s\n", d)
 	}
+	b.WriteString(h.identityYAML())
 	path := filepath.Join(h.root, "cp-config.yaml")
 	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
 		h.tb.Fatalf("harness: write control-plane config: %v", err)
@@ -742,6 +746,10 @@ func (h *H) workerParams(i int) worker.Params {
 			HeartbeatInterval: time.Second,
 		},
 		Central: config.CentralConfig{ProxyID: fmt.Sprintf("worker-%d", i)},
+	}
+	if h.identityMode != "" {
+		policy.Identity = h.identitySettings()
+		policy.Audit.SignedReceipts = config.SignedReceiptsConfig{Enabled: true, Log: h.receiptLogPath(i)}
 	}
 	if h.mcpEnabled {
 		// Monitor mode: the worker's streaming paths (WS upgrade, SSE relay)

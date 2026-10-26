@@ -50,6 +50,31 @@ plain http on loopback, so a verifier config for it needs
 `InternalIssuerURL: h.Issuer().Issuer()` (the http-issuer rule). Never print a
 token in a failure message; name the claim instead.
 
+## Identity scenarios
+
+`harness.WithIdentity("attribute"|"off")` boots the worker with the `identity`
+block pointing at the issuer fake (audience `warden`, allowedAZP
+`agent-harness` and `warden-cli`, `internalIssuerURL` = the fake's origin) and
+turns on signed receipts. Mint tokens the block accepts with
+`h.MintUserToken(fakes.Valid(...), fakes.Expired(), ...)`; the fake's own
+defaults do not match the block. `h.Receipts()` returns the events worker-1
+signed, signature-checked. The block is served by the control plane, so a
+scenario changes it live by read-modify-write on `/dashboard/api/settings`
+(`h.CP().GetJSON` / `PostJSON`); the worker applies it without a restart.
+
+The catalog is `identity_*` (`test/scenarios/identity.go`):
+`go test ./test/scenarios -race -run 'TestScenarios/identity_'`. Notes:
+
+- With identity on, an event for a request with no token stores
+  `identity_status=none` (and so do its receipt and decision log line); with
+  identity off (`identity_mode_off`) the status stays empty, byte-identical to a
+  pre-identity event, so an auditor can tell the two apart.
+- The worker's verifier uses real time and re-fetches a failed key set at most
+  every 30s, so a scenario recovers an issuer by changing a verifier input
+  (a rebuild), not by waiting.
+- No scenario prints a token; `assertNoLeakOf` checks logs, events, receipts,
+  metrics and upstream recordings for each token and its pieces.
+
 ## Known issues
 
 A row that an open issue breaks is marked `knownIssue` (see `canary.go` and
