@@ -226,6 +226,26 @@ var and `--state-dir`. Until W-P1-SSO-06 lands it then refuses to start with
 routes while a human route still accepts the shared bearer. See
 `configs/config.control-plane.yaml` for commented examples.
 
+### Login routes
+
+In `oidc` mode (with `--state-dir`) the control plane serves `GET /auth/login` and
+`GET /auth/callback`; in `none` mode both are 404. Login is the authorization-code flow
+with S256 PKCE, a random `state` and `nonce`, and a pending row in the state DB (10 minute
+TTL, single use, at most 10,000 rows). The row is bound to the browser by a short-lived
+`__Host-warden_login` cookie (`warden_login` on an http loopback redirect URL). The ID
+token must pass the shared verifier with `aud` = `oidc.clientID`, an `azp` equal to it
+when present (required when `aud` has several entries), RS256 or ES256 only, and the
+nonce. The user then needs a role from `console.roles`; the session id is minted by the
+control plane after both checks and never taken from the request. No access, refresh or
+ID token is stored, and `offline_access` is not requested. `next` is honoured only as a
+path under `/dashboard/`. A failed login redirects to `/dashboard/?login_error=<code>` with
+a code from `state_invalid`, `nonce_mismatch`, `token_invalid`, `exchange_failed`,
+`idp_error`, `no_role` or `idp_unavailable`; IdP error text is never echoed. Discovery
+runs in the background with backoff, so an unreachable IdP never blocks startup or
+`/policy`; until it succeeds both routes answer 503 `idp_unavailable`. Each attempt logs
+one `console_login` line (`result`, `reason`, `sub`, `duration_ms`), never a code, state,
+verifier, nonce or token.
+
 ## Worker admin token
 
 The worker's admin listener (`:9090`, default `127.0.0.1:9090`) serves the same

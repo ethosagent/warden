@@ -79,6 +79,12 @@ type Config struct {
 	// sessions (withSession); the zero value (Auth "" == none) changes no
 	// behaviour. Login and role enforcement arrive in later tickets.
 	Console config.ConsoleConfig
+	// ClientSecret is the console OIDC client secret, read by Run from the
+	// environment variable console.oidc.clientSecretEnv names. It is never logged.
+	ClientSecret string
+	// Now is the clock for sessions, pending logins and ID-token checks (nil =
+	// time.Now). The L1 harness injects its fake clock through Params.Clock.
+	Now func() time.Time
 	// DetectionEnabled gates the temporal-detection engine. When true (the
 	// default when no detection block disables it), New builds the engine AND — so
 	// alerts land without any sink configured — the always-on Alert Store (the
@@ -172,6 +178,9 @@ type Server struct {
 	sessions      *SessionStore
 	sessionCookie SessionCookie
 	sessionReader sessionReader
+	// auth is the console OIDC login (/auth/login, /auth/callback); set only when
+	// sessions are.
+	auth *authService
 }
 
 // Compile-time assertions that the concrete types satisfy their role interfaces.
@@ -218,6 +227,7 @@ func New(cfg Config) *Server {
 		detectionConfig: cfg.DetectionConfig,
 	}
 	s.initSessions()
+	s.initAuth()
 	// Alert pipeline (CP-hosted alert delivery + always-on Alert Store). Constructed
 	// whenever an alert DB path is set — even with ZERO configured integrations —
 	// because it serves two always-on purposes:
@@ -272,6 +282,10 @@ func New(cfg Config) *Server {
 func (s *Server) Start(ctx context.Context) {
 	if s.sessions != nil {
 		go s.sweepSessions(ctx)
+	}
+	if s.auth != nil {
+		go s.auth.discover(ctx)
+		go s.auth.sweep(ctx)
 	}
 	// Alert pipeline: start the embeddable assembly (manager start + the
 	// detection tick loop, both ctx-scoped). The pipeline captures ctx as its
@@ -489,6 +503,7 @@ func (s *Server) Handler() http.Handler {
 	// Reads stay open; every write needs the CP bearer token (fail closed).
 	dash.SetWriteGuard(s.dashboardWriteGuard())
 	mux.Handle("/dashboard/", s.sessionWrap(dash.Handler()))
+	s.registerAuthRoutes(mux)
 
 	return mux
 }

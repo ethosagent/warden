@@ -56,6 +56,12 @@ type Params struct {
 	// (rule L3, #349) — but the field lands now so the L1 harness (#350) can
 	// inject a fake without another seam PR.
 	Clock clock.Clock
+
+	// SkipConsoleOIDCGuard lets console.auth: oidc start despite the temporary
+	// guard (errConsoleOIDCUnavailable). It exists only so the L1 harness can
+	// drive a real login before W-P1-SSO-06 removes the guard; cmd/ never sets
+	// it. SSO-06 deletes this field together with the guard.
+	SkipConsoleOIDCGuard bool
 }
 
 // Run boots a control plane from Params and serves until ctx is cancelled. It
@@ -130,8 +136,10 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	if err != nil {
 		return fail(err)
 	}
-	if err := checkConsoleSupported(consoleCfg); err != nil {
-		return fail(err)
+	if !p.SkipConsoleOIDCGuard {
+		if err := checkConsoleSupported(consoleCfg); err != nil {
+			return fail(err)
+		}
 	}
 
 	var token string
@@ -154,7 +162,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		// Every mode registers the sessions migration, so switching console.auth
 		// never trips the downgrade guard. The open is not cancellable: a shutdown
 		// signal must not abandon a migration half way through boot.
-		state, err = cpstate.Open(context.WithoutCancel(ctx), statePath, SessionMigrations())
+		state, err = cpstate.Open(context.WithoutCancel(ctx), statePath, append(SessionMigrations(), OIDCPendingMigrations()...))
 		if err != nil {
 			return fail(fmt.Errorf("control-plane: state db: %w", err))
 		}
@@ -221,6 +229,18 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		return fail(fmt.Errorf("control-plane: secret store: %w", err))
 	}
 
+	// clk is the CP's resolved time port (nil = clock.Real(), the production
+	// default). Console sessions, pending logins and ID-token checks read it.
+	clk := p.Clock
+	if clk == nil {
+		clk = clock.Real()
+	}
+	var clientSecret string
+	if consoleCfg.Auth == config.ConsoleAuthOIDC {
+		// resolveConsole already proved the variable is non-empty.
+		clientSecret = strings.TrimSpace(os.Getenv(consoleCfg.OIDC.ClientSecretEnv))
+	}
+
 	srv := New(Config{
 		State:        state,
 		PolicyPath:   servedPath,
@@ -232,6 +252,8 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		AlertDBPath:  alertDBPath,
 		SecretStore:  secretStore,
 		Console:      consoleCfg,
+		ClientSecret: clientSecret,
+		Now:          clk.Now,
 		// Report the backend name to the dashboard only when a writable store was
 		// actually built (echo/aws); env/none leaves it empty → tab reports "none".
 		SecretStoreBackend: secretStoreBackendName(secretStore, pol.SecretStore),
@@ -278,15 +300,6 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	if p.Listener != nil {
 		reportedAddr = p.Listener.Addr().String()
 	}
-
-	// clk is the CP's resolved time port (nil = clock.Real(), the production
-	// default). Nothing ticks on it yet; the phase that adds the first CP
-	// consumer wires it through.
-	clk := p.Clock
-	if clk == nil {
-		clk = clock.Real()
-	}
-	_ = clk
 
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
