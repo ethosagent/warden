@@ -145,6 +145,27 @@ the dev issuer origin). Containers on `cp-net` reach it at `http://dex:5556`
 internal `idp-net` only, and neither service joins an agent network. Every user
 in `seed.ldif` has the password `DEX_TEST_PASSWORD` from `.env.example`.
 
+## Fetching a test token
+
+`scripts/dex-token.sh <user> [--raw]` gets an ID token for a seeded user with the
+password grant (client `agent-harness`, scope
+`openid email profile groups offline_access audience:server:client_id:warden`)
+and checks `aud` contains `warden`, `azp` is `agent-harness` and `exp - iat` is
+3600. **Dev only:** it needs `config.dev.yaml`; the prod config refuses the grant.
+
+```sh
+set -a; . deploy/compose/dex/.env.example; set +a
+scripts/dex-token.sh alice          # decoded claims only
+scripts/dex-token.sh alice --raw    # the token alone on stdout
+```
+
+Variables: `DEX_TEST_PASSWORD` (user password), `HARNESS_DEX_CLIENT_SECRET`
+(client secret), both from `.env.example`, and `DEX_URL` (default
+`http://localhost:5556/dex`, the published dev issuer, right for the host). A
+container that runs the script sets `DEX_URL=http://dex:5556/dex`, because
+`localhost` is itself there. A missing variable or a failed claim check exits
+non-zero and names it. Never paste the `--raw` output into logs or issues.
+
 ## Replacing Dex
 
 Warden speaks only standard OIDC. To use another issuer:
