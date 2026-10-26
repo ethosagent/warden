@@ -18,7 +18,7 @@ name: e2e
 # runs in its own job, `e2e-identity`, with the same triggers. risk.yml's
 # `e2e-required` waits for both check runs on a critical PR, and the release waits
 # for the whole called workflow, which only succeeds when every job does
-# (tools/riskmap/e2e_paths_test.go pins this).
+# (tools/gatecheck/release_gate_test.go pins the release side).
 # Actions are pinned to a full commit SHA, with the version in a comment.
 on:
   pull_request:
