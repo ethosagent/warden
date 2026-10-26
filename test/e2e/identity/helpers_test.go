@@ -4,6 +4,7 @@ package identity
 
 import (
 	"bufio"
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -39,29 +40,21 @@ const (
 // dialer override, no hosts entry, just a timeout.
 var hostClient = &http.Client{Timeout: 15 * time.Second}
 
-// stackGate decides what a missing stack means: under CI it is a failure (a
-// skip must never let the e2e job go green), elsewhere a loud skip. Pure, so it
-// is unit-tested without Docker.
-func stackGate(ci, available bool, reason string) (fail bool, msg string) {
-	switch {
-	case available:
-		return false, ""
-	case ci:
-		return true, "BLOCKED: the identity stack is unavailable (" + reason + "); run `make e2e-identity-up` or `make e2e-identity`"
-	default:
-		return false, "BLOCKED (skipped, not passed): the identity stack is unavailable (" + reason + "); this test did NOT run"
+// stackGate decides what a missing stack means: always a failure, so a test
+// that could not run never reads as a pass (gates/test-skipped forbids a skip).
+// Pure, so it is unit-tested without Docker.
+func stackGate(available bool, reason string) (msg string) {
+	if available {
+		return ""
 	}
+	return "BLOCKED: the identity stack is unavailable (" + reason + "); run `make e2e-identity-up` or `make e2e-identity`"
 }
 
 // requireStack is the first line of every test in this package.
 func requireStack(t *testing.T) {
 	t.Helper()
-	fail, msg := stackGate(os.Getenv("CI") == "true", stackUnavailable == "", stackUnavailable)
-	if fail {
+	if msg := stackGate(stackUnavailable == "", stackUnavailable); msg != "" {
 		t.Fatalf("%s", msg)
-	}
-	if msg != "" {
-		t.Skip(msg)
 	}
 }
 
@@ -70,9 +63,12 @@ func requireStack(t *testing.T) {
 // deploy/compose/dex/.env.example.
 func devEnv(t testing.TB, key string) string {
 	t.Helper()
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
+	return cmp.Or(os.Getenv(key), devEnvFileValue(t, key))
+}
+
+// devEnvFileValue returns KEY's dev placeholder from deploy/compose/dex/.env.example.
+func devEnvFileValue(t testing.TB, key string) string {
+	t.Helper()
 	root, err := compose.RepoRoot()
 	if err != nil {
 		t.Fatalf("identity: %v", err)

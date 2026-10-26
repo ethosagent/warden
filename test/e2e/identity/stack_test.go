@@ -7,7 +7,7 @@
 // so `go test ./...` and scripts/check.sh never touch Docker.
 //
 // Every test starts with requireStack(t): a missing stack is BLOCKED, never a
-// pass (it fails under CI=true and skips loudly otherwise).
+// pass (it fails, in CI and locally alike).
 package identity
 
 import (
@@ -33,7 +33,7 @@ var stackUnavailable string
 // E2E_KEEP_STACK=1 (or KEEP_STACK=1) skips the teardown; E2E_STACK_RUNNING=1
 // skips bring-up and teardown (the caller owns a running stack). Unlike
 // test/e2e, an unusable stack does NOT end the run: the reason is recorded and
-// requireStack turns it into BLOCKED (fail under CI, loud skip elsewhere), so
+// requireStack turns it into a BLOCKED failure, so
 // the pure tests (TestStackGate) still run on a machine with no Docker.
 func TestMain(m *testing.M) {
 	os.Exit(runMain(m))
