@@ -153,13 +153,16 @@ func TestIdentitySmoke(t *testing.T) {
 		if res.Exit != 0 || !strings.HasPrefix(status, "200 ") {
 			t.Fatalf("tokenless request was not allowed: exit %d, status %q (stderr: %s)", res.Exit, status, firstLine(res.Stderr))
 		}
-		waitEvent(t, "a new none event", func() (analytics.Event, bool) {
+		e := waitEvent(t, "a new none event", func() (analytics.Event, bool) {
 			evs := statusEvents(t, allowedHost, "none")
 			if len(evs) > before {
 				return evs[0], true
 			}
 			return analytics.Event{}, false
 		})
+		if e.Decision != "allow" {
+			t.Errorf("none event decision = %q, want allow", e.Decision)
+		}
 	})
 
 	t.Run("5 garbage token is allowed and recorded invalid", func(t *testing.T) {
@@ -176,6 +179,9 @@ func TestIdentitySmoke(t *testing.T) {
 			}
 			return analytics.Event{}, false
 		})
+		if e.Decision != "allow" {
+			t.Errorf("invalid event decision = %q, want allow", e.Decision)
+		}
 		if e.UserSub != "" || e.UserEmail != "" {
 			t.Errorf("an invalid token must carry no user, got sub %q email %q", e.UserSub, e.UserEmail)
 		}
@@ -183,7 +189,9 @@ func TestIdentitySmoke(t *testing.T) {
 
 	t.Run("6 direct egress blocked and Dex unreachable from the agent", func(t *testing.T) {
 		direct := func(u string) compose.Result {
-			return agentExec(t, "curl", "-s", "-o", "/dev/null", "--noproxy", "*", "--max-time", "5", u)
+			// --cacert so a TLS failure alone cannot read as "blocked".
+			return agentExec(t, "curl", "-s", "-o", "/dev/null", "--noproxy", "*", "--max-time", "5",
+				"--cacert", compose.AgentCABundle, u)
 		}
 		if res := direct("https://" + allowedHost + "/"); res.Exit == 0 {
 			t.Errorf("agent-1 reached %s with no proxy (exit 0)", allowedHost)
