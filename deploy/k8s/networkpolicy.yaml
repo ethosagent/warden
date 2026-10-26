@@ -29,7 +29,8 @@ spec:
     # Identity verification (docs/control-plane.md, "Identity verification"): the
     # Warden worker fetches the OIDC issuer's discovery document and JWKS over
     # HTTPS. The address below is an OPERATOR-SET VALUE: replace the documentation
-    # address (TEST-NET-1, never routable) with your issuer's address, or delete
+    # address (TEST-NET-1, never routable) with your issuer's address, and the port
+    # if the issuer is not on 443, or delete
     # this rule when identity stays off. Workers only contact the issuer on the
     # first token they verify, never at startup.
     - to:
