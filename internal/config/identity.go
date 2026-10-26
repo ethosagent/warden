@@ -49,7 +49,7 @@ type IdentitySettings struct {
 	// MaxTokenTTLSeconds > 0 overrides the default maximum token lifetime (3600).
 	MaxTokenTTLSeconds int `json:"maxTokenTTLSeconds,omitempty" yaml:"maxTokenTTLSeconds"`
 	// InternalIssuerURL is the origin containers use to reach the issuer when it
-	// differs from Issuer (for example http://dex:5556). It is what permits a
+	// differs from Issuer (for example http://idp:5556). It is what permits a
 	// plain-http Issuer in development; there is no insecure-issuer key.
 	InternalIssuerURL string `json:"internalIssuerURL,omitempty" yaml:"internalIssuerURL"`
 }

@@ -99,7 +99,10 @@ func TestSettingsApplierIdentity(t *testing.T) {
 
 	// Each verifier input replaces it.
 	for name, mut := range map[string]func(*config.IdentitySettings){
-		"issuer":            func(s *config.IdentitySettings) { s.Issuer = "http://other.test"; s.InternalIssuerURL = "http://other.test" },
+		"issuer": func(s *config.IdentitySettings) {
+			s.Issuer = "http://other.test"
+			s.InternalIssuerURL = "http://other.test"
+		},
 		"internalIssuerURL": func(s *config.IdentitySettings) { s.InternalIssuerURL = "http://dex:5556" },
 		"audience":          func(s *config.IdentitySettings) { s.Audience = "other" },
 		"jwksURL":           func(s *config.IdentitySettings) { s.JWKSURL = "http://dex:5556/keys" },
