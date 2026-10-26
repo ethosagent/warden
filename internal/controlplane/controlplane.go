@@ -696,6 +696,18 @@ func (s *Server) WriteSettings(in config.SettingsWire) error {
 	}
 	settingsBlocks = append(settingsBlocks, agentsEdit)
 
+	// identity: encode in.Identity → the on-disk identity block (same keys as the
+	// wire), or delete it when nil. The block is secret-free.
+	identityEdit := blockEdit{key: "identity"}
+	if in.Identity != nil {
+		var node yaml.Node
+		if err := node.Encode(identityYAML(*in.Identity)); err != nil {
+			return fmt.Errorf("controlplane: encode identity settings: %w", err)
+		}
+		identityEdit.node, identityEdit.present = &node, true
+	}
+	settingsBlocks = append(settingsBlocks, identityEdit)
+
 	// observability: encode in.Observability → the on-disk observability block, or
 	// delete it when observability is absent or disabled (so the worker turns OTel
 	// off on its next restart).
@@ -1033,8 +1045,24 @@ type judgeCacheYAML struct {
 
 // agentYAML mirrors one on-disk `agents:` list item (config.rawAgent).
 type agentYAML struct {
-	ID     string `yaml:"id"`
-	Policy string `yaml:"policy,omitempty"`
+	ID       string `yaml:"id"`
+	Policy   string `yaml:"policy,omitempty"`
+	Identity string `yaml:"identity,omitempty"`
+}
+
+// identityYAML mirrors the on-disk `identity:` block (config.IdentitySettings
+// yaml keys) with omitempty so unset tuning stays absent and the loader
+// applies its defaults.
+type identityYAML struct {
+	DefaultMode        string   `yaml:"defaultMode,omitempty"`
+	Issuer             string   `yaml:"issuer,omitempty"`
+	Audience           string   `yaml:"audience,omitempty"`
+	AllowedAZP         []string `yaml:"allowedAZP,omitempty"`
+	JWKSURL            string   `yaml:"jwksURL,omitempty"`
+	GroupsClaim        string   `yaml:"groupsClaim,omitempty"`
+	ClockSkewSeconds   int      `yaml:"clockSkewSeconds,omitempty"`
+	MaxTokenTTLSeconds int      `yaml:"maxTokenTTLSeconds,omitempty"`
+	InternalIssuerURL  string   `yaml:"internalIssuerURL,omitempty"`
 }
 
 // secondsToDuration renders a positive whole-second count as a Go duration string
@@ -1102,7 +1130,7 @@ func exploreSettingsNode(s *config.ExploreSettings) (*yaml.Node, error) {
 func agentsSettingsNode(in []config.AgentSettings) (*yaml.Node, error) {
 	out := make([]agentYAML, 0, len(in))
 	for _, a := range in {
-		out = append(out, agentYAML{ID: a.ID, Policy: a.Policy})
+		out = append(out, agentYAML{ID: a.ID, Policy: a.Policy, Identity: a.Identity})
 	}
 	var node yaml.Node
 	if err := node.Encode(out); err != nil {
