@@ -24,7 +24,7 @@ const (
 )
 
 // Console defaults. Idle 1h / Absolute 12h are the decided values (not 8h/24h);
-// the client id is the reference console client of the Dex dev profile.
+// the client id is the reference console client of the dev identity profile.
 const (
 	DefaultConsoleClientID = "warden-console"
 	DefaultConsoleIdle     = time.Hour
@@ -92,7 +92,7 @@ type ConsoleOIDC struct {
 	// Scopes default to openid, email, profile, groups.
 	Scopes []string
 	// InternalIssuerURL is the origin the CP container uses to reach the IdP
-	// (for example http://dex:5556) when it differs from Issuer. It is what
+	// (for example http://idp:5556) when it differs from Issuer. It is what
 	// permits a plain-http Issuer in development; there is no insecure-issuer key.
 	InternalIssuerURL string
 }
