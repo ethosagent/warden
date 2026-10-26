@@ -684,6 +684,19 @@ func TestIdentityDuplicateHeaders(t *testing.T) {
 		requireStripped(t, e.be.headers())
 	})
 
+	t.Run("duplicate_next_to_live_connect", func(t *testing.T) {
+		e := newIDEnv(t, IdentityModeAttribute)
+		p := stageProxy(t, e.v, IdentityModeAttribute, e.clk, nil)
+		ci := p.resolveConnIdentity(1, basicAuth("tok-alice"))
+		for _, vals := range [][]string{{"Bearer tok-alice", "Bearer tok-alice"}, {"Token tok-alice"}} {
+			s := stageScope(ci, vals...)
+			runIdentity(t, p, s)
+			if s.idStatus != identity.StatusInvalid || s.idReason != identity.ReasonMalformed || s.subject != nil {
+				t.Errorf("%q: status %q reason %q subject %+v, want invalid/malformed", vals, s.idStatus, s.idReason, s.subject)
+			}
+		}
+	})
+
 	t.Run("stage", func(t *testing.T) {
 		e := newIDEnv(t, IdentityModeAttribute)
 		p := stageProxy(t, e.v, IdentityModeAttribute, e.clk, nil)

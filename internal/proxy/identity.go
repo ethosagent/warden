@@ -67,6 +67,10 @@ func newIdentityHolder(v identity.Verifier, mode IdentityMode) *identityHolder {
 	return &identityHolder{v: v, skew: skew}
 }
 
+// identity loads the live holder; nil means mode off. One snapshot per use keeps
+// a concurrent SetIdentity from changing the verifier mid-request.
+func (p *Proxy) identity() *identityHolder { return p.identityP.Load() }
+
 // SetIdentity atomically swaps the identity verifier and mode. A nil verifier
 // or any mode but attribute turns identity off. It is race-free against the
 // hot path; connections already open keep the identity they resolved at CONNECT.
@@ -79,7 +83,7 @@ func (p *Proxy) SetIdentity(v identity.Verifier, mode IdentityMode) {
 // warnIdentityCoverage logs, once each, the two places attribute mode cannot
 // see a token: raw tunnels (no CA) and a transparent-only worker (no CONNECT).
 func (p *Proxy) warnIdentityCoverage() {
-	if p.identityP.Load() == nil {
+	if p.identity() == nil {
 		return
 	}
 	if p.caCert == nil {
@@ -130,7 +134,7 @@ func (p *Proxy) resolveConnIdentity(lines int, value string) connIdentity {
 	if lines == 0 {
 		return connIdentity{Status: identity.StatusNone}
 	}
-	h := p.identityP.Load()
+	h := p.identity()
 	if h == nil {
 		return connIdentity{Status: identity.StatusOff}
 	}
@@ -234,6 +238,8 @@ func (p *Proxy) captureIdentityHeader(s *requestScope) {
 //   - the header is used only when CONNECT carried no token (none or off);
 //   - a valid CONNECT identity plus a valid header with a different sub gives
 //     conflict and no subject;
+//   - a header that is not one well-formed Bearer value is invalid/malformed,
+//     even next to a live CONNECT identity;
 //   - otherwise the CONNECT result stands (a failed CONNECT token is not
 //     overridden by a header).
 //
@@ -244,7 +250,7 @@ func (p *Proxy) identityStage(s *requestScope) (endSession bool) {
 	ci := s.ci
 	cs := ci.status()
 
-	h := p.identityP.Load()
+	h := p.identity()
 	if h == nil {
 		if n > 0 || (cs != identity.StatusNone) {
 			s.idStatus = identity.StatusOff
@@ -282,7 +288,13 @@ func (p *Proxy) identityStage(s *requestScope) (endSession bool) {
 	case connLive:
 		r = idResult{claims: ci.Claims, status: identity.StatusValid}
 		if n > 0 {
-			if hr := p.headerResult(h, raw, n); hr.status == identity.StatusValid && hr.claims.Sub != ci.Claims.Sub {
+			hr := p.headerResult(h, raw, n)
+			switch {
+			case hr.status == identity.StatusInvalid && hr.reason == identity.ReasonMalformed:
+				// A header that is not a single well-formed Bearer value is malformed
+				// even next to a live CONNECT identity.
+				r = hr
+			case hr.status == identity.StatusValid && hr.claims.Sub != ci.Claims.Sub:
 				r = idResult{status: identity.StatusConflict}
 				p.recordIdentity(identity.StatusConflict, "")
 			}
