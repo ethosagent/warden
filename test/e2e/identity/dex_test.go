@@ -4,6 +4,7 @@ package identity
 
 import (
 	"crypto"
+	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
 	"encoding/base64"
@@ -19,7 +20,6 @@ import (
 	"sort"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/ethosagent/warden/test/harness/compose"
 )
@@ -264,36 +264,8 @@ func runTokenScript(t testing.TB, user, password string, extra ...string) (stdou
 	env = append(env,
 		"DEX_TEST_PASSWORD="+password,
 		"HARNESS_DEX_CLIENT_SECRET="+devEnv(t, "HARNESS_DEX_CLIENT_SECRET"))
-	res := runWithEnv(root, env, filepath.Join(root, "scripts", "dex-token.sh"), append([]string{user}, extra...)...)
+	res := compose.RunEnv(root, env, compose.ComposeDeadline, filepath.Join(root, "scripts", "dex-token.sh"), append([]string{user}, extra...)...)
 	return res.Stdout, res.Stderr, res.Exit
-}
-
-func runWithEnv(dir string, env []string, name string, args ...string) compose.Result {
-	cmd := exec.Command(name, args...)
-	cmd.Dir = dir
-	cmd.Env = env
-	var out, errb strings.Builder
-	cmd.Stdout, cmd.Stderr = &out, &errb
-	done := make(chan error, 1)
-	if err := cmd.Start(); err != nil {
-		return compose.Result{Exit: -1, Stderr: err.Error()}
-	}
-	go func() { done <- cmd.Wait() }()
-	select {
-	case err := <-done:
-		res := compose.Result{Stdout: out.String(), Stderr: errb.String()}
-		if ee, ok := err.(*exec.ExitError); ok {
-			res.Exit = ee.ExitCode()
-		} else if err != nil {
-			res.Exit = -1
-			res.Stderr += err.Error()
-		}
-		return res
-	case <-time.After(60 * time.Second):
-		_ = cmd.Process.Kill()
-		<-done
-		return compose.Result{Exit: -1, Stderr: "timed out"}
-	}
 }
 
 func TestDexTokenClaims(t *testing.T) {
@@ -492,19 +464,67 @@ func verifyRS256(token string, set jwks) (string, error) {
 	return "", fmt.Errorf("no key with kid %q in the published set %v", hdr.Kid, kids)
 }
 
-// TestDexVerifyRS256Rejects pins the verifier itself (no Docker): a tampered
-// payload, a wrong key and a non-RS256 alg all fail.
-func TestDexVerifyRS256Rejects(t *testing.T) {
-	if _, err := verifyRS256("a.b", jwks{}); err == nil {
-		t.Error("a two-segment token verified")
+// signRS256 builds a JWT signed with key, for the verifier tests.
+func signRS256(t *testing.T, key *rsa.PrivateKey, kid, payload string) string {
+	t.Helper()
+	enc := base64.RawURLEncoding.EncodeToString
+	signing := enc([]byte(`{"alg":"RS256","kid":"`+kid+`"}`)) + "." + enc([]byte(payload))
+	digest := sha256.Sum256([]byte(signing))
+	sig, err := rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, digest[:])
+	if err != nil {
+		t.Fatal(err)
 	}
-	hdr := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","kid":"k"}`))
-	if _, err := verifyRS256(hdr+".e30.c2ln", jwks{}); err == nil {
-		t.Error("alg none verified")
+	return signing + "." + enc(sig)
+}
+
+func publicSet(kid string, key *rsa.PrivateKey) jwks {
+	var set jwks
+	set.Keys = append(set.Keys, struct {
+		Kid string `json:"kid"`
+		Kty string `json:"kty"`
+		Alg string `json:"alg"`
+		N   string `json:"n"`
+		E   string `json:"e"`
+	}{
+		Kid: kid, Kty: "RSA", Alg: "RS256",
+		N: base64.RawURLEncoding.EncodeToString(key.N.Bytes()),
+		E: base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key.E)).Bytes()),
+	})
+	return set
+}
+
+// TestDexVerifyRS256 pins the verifier with no Docker, so the restart proof
+// cannot go vacuous: a good token verifies; a tampered payload, a signature by
+// another key, alg none, an unknown kid and a malformed token all fail.
+func TestDexVerifyRS256(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
 	}
-	hdr = base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256","kid":"k"}`))
-	if _, err := verifyRS256(hdr+".e30.c2ln", jwks{}); err == nil {
-		t.Error("a token with an unknown kid verified")
+	other, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set := publicSet("k1", key)
+	good := signRS256(t, key, "k1", `{"sub":"x"}`)
+	if kid, err := verifyRS256(good, set); err != nil || kid != "k1" {
+		t.Fatalf("a correctly signed token: kid %q, err %v", kid, err)
+	}
+
+	parts := strings.Split(good, ".")
+	tampered := parts[0] + "." + base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"y"}`)) + "." + parts[2]
+	noneHdr := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","kid":"k1"}`))
+	rejects := map[string]string{
+		"tampered payload":     tampered,
+		"signed by a stranger": signRS256(t, other, "k1", `{"sub":"x"}`),
+		"unknown kid":          signRS256(t, key, "k2", `{"sub":"x"}`),
+		"alg none":             noneHdr + "." + parts[1] + "." + parts[2],
+		"two segments":         "a.b",
+	}
+	for name, tok := range rejects {
+		if _, err := verifyRS256(tok, set); err == nil {
+			t.Errorf("%s: the token verified", name)
+		}
 	}
 }
 

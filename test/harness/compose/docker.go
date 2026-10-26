@@ -58,19 +58,27 @@ func RepoRoot() (string, error) {
 // Run executes name in dir with a hard timeout. A process that cannot start
 // or is killed by the timeout returns Exit -1 with the reason in Stderr.
 func Run(dir string, timeout time.Duration, name string, args ...string) Result {
-	return runCmd(dir, nil, timeout, name, args...)
+	return runCmd(dir, nil, nil, timeout, name, args...)
 }
 
 // RunStdin is Run with stdin fed to the process (the agent shim's --data-binary @-).
 func RunStdin(dir string, timeout time.Duration, stdin []byte, name string, args ...string) Result {
-	return runCmd(dir, stdin, timeout, name, args...)
+	return runCmd(dir, nil, stdin, timeout, name, args...)
 }
 
-func runCmd(dir string, stdin []byte, timeout time.Duration, name string, args ...string) Result {
+// RunEnv is Run with the process environment replaced by env (KEY=VALUE).
+func RunEnv(dir string, env []string, timeout time.Duration, name string, args ...string) Result {
+	return runCmd(dir, env, nil, timeout, name, args...)
+}
+
+func runCmd(dir string, env []string, stdin []byte, timeout time.Duration, name string, args ...string) Result {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := execCommand(ctx, name, args...)
 	cmd.Dir = dir
+	if env != nil {
+		cmd.Env = env
+	}
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
