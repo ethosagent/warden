@@ -27,6 +27,7 @@ var All = slices.Concat(
 		{Name: "refresh_secrets", Opts: swapOpts(), Run: refreshSecrets},
 		{Name: "healthz", Run: healthz},
 		{Name: "user_filter_api", Opts: []harness.Option{harness.Fleet(1)}, Run: userFilterAPI},
+		{Name: "top_users_api", Opts: []harness.Option{harness.Fleet(1)}, Run: topUsersAPI},
 
 		// Fail closed: the control plane is down when the worker boots.
 		{Name: "fail_closed_at_boot", Opts: []harness.Option{harness.Fleet(1), harness.ControlPlaneDownAtBoot()}, Run: failClosedAtBoot},

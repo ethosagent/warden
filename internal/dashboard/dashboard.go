@@ -838,12 +838,17 @@ func (s *Server) handleEndpoints(w http.ResponseWriter, r *http.Request) {
 
 	// Optional domain filter for the domain→endpoints drill-down.
 	domainFilter := q.Get("domain")
+	user, ok := userParam(q)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid user parameter")
+		return
+	}
 
 	// Optional time-window filter, mirroring handleAnalytics.
 	cutoff, finite := rangeCutoff(q.Get("range"), time.Now())
 
 	// Limit 0 means no cap — aggregate over every recorded event.
-	f := analytics.EventFilter{Domain: domainFilter, ProxyID: q.Get("proxy"), Limit: 0}
+	f := analytics.EventFilter{Domain: domainFilter, ProxyID: q.Get("proxy"), User: user, Limit: 0}
 	if finite {
 		f.Since = cutoff
 	}
@@ -1033,12 +1038,16 @@ type analyticsResponse struct {
 	Hourly        []hourlyBucket   `json:"hourly"`
 	TopDomains    []topDomain      `json:"topDomains"`
 	TopEndpoints  []topEndpoint    `json:"topEndpoints"`
-	Blocked       []blockedGroup   `json:"blocked"`
-	Secrets       []secretUsage    `json:"secrets"`
-	Judge         []judgeEntry     `json:"judge"`
-	Writes        []writeEntry     `json:"writes"`
-	Cost          costSummary      `json:"cost"`
-	Compliance    []complianceTag  `json:"compliance"`
+	// TopUsers is the per-user breakdown (see analytics.TopUsers). Sub and Email
+	// are IdP claim values; the UI renders them as text only. Empty when the
+	// store holds no identity data.
+	TopUsers   []analytics.UserCount `json:"topUsers"`
+	Blocked    []blockedGroup        `json:"blocked"`
+	Secrets    []secretUsage         `json:"secrets"`
+	Judge      []judgeEntry          `json:"judge"`
+	Writes     []writeEntry          `json:"writes"`
+	Cost       costSummary           `json:"cost"`
+	Compliance []complianceTag       `json:"compliance"`
 	// DLP is the outbound-request data-loss-prevention aggregate: by-class,
 	// by-action, and the class×destination matrix. Zero-valued (empty slices,
 	// zero counts) when no event carries a data class.
@@ -1379,6 +1388,7 @@ func (s *Server) computeAnalytics(rangeParam, selectedProxy, user string, now ti
 		Hourly:       make([]hourlyBucket, 24),
 		TopDomains:   []topDomain{},
 		TopEndpoints: []topEndpoint{},
+		TopUsers:     analytics.TopUsers(events),
 		Blocked:      []blockedGroup{},
 		Secrets:      []secretUsage{},
 		Judge:        []judgeEntry{},
