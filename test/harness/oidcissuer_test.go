@@ -244,8 +244,12 @@ func TestAgentWithProxyToken(t *testing.T) {
 				_ = resp.Body.Close()
 			}
 			got := rec.auths()
-			if len(got) != 1 || got[0] != want {
-				t.Errorf("recorded Proxy-Authorization = %q, want one %q", got, want)
+			if len(got) != 1 {
+				t.Fatalf("recorded %d Proxy-Authorization lines, want 1", len(got))
+			}
+			if got[0] != want { // never print the value: it carries the token
+				t.Errorf("Proxy-Authorization is not Basic base64(session:<token>) (scheme %q, length %d, want length %d)",
+					strings.SplitN(got[0], " ", 2)[0], len(got[0]), len(want))
 			}
 		})
 	}
@@ -268,7 +272,7 @@ func TestAgentWithProxyToken(t *testing.T) {
 			}
 		}
 		for _, rec := range h.AgentResponses() {
-			if strings.Contains(rec.URL, token) {
+			if strings.Contains(rec.URL+"\n"+rec.Err, token) {
 				t.Error("the agent transcript holds the token")
 			}
 		}
