@@ -98,7 +98,6 @@ type fwdRig struct {
 	logs   *bytes.Buffer
 	done   chan error
 	cancel context.CancelFunc
-	token  atomic.Value // func(context.Context) (string, error)
 }
 
 func startForwarder(t *testing.T, workerReply string, tok func(context.Context) (string, error)) *fwdRig {
