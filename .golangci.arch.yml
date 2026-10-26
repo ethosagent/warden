@@ -71,6 +71,7 @@ linters:
             - '!${base-path}/internal/archtest/**'
             - '!${base-path}/internal/dnstest/**'
             - '!${base-path}/internal/clock/clocktest/**'
+            - '!${base-path}/internal/identity/identitytest/**'
             - '!${base-path}/test/**'
             - '!**/*_test.go'
           deny:
@@ -134,6 +135,7 @@ linters:
             - '!${base-path}/internal/archtest/**'
             - '!${base-path}/internal/dnstest/**'
             - '!${base-path}/internal/clock/clocktest/**'
+            - '!${base-path}/internal/identity/identitytest/**'
             - '!${base-path}/test/**'
             - '!${base-path}/internal/identity/adapters/oidc/**'
             - '!${base-path}/internal/config/**'
@@ -189,6 +191,7 @@ linters:
             - '!${base-path}/internal/archtest/**'
             - '!${base-path}/internal/dnstest/**'
             - '!${base-path}/internal/clock/clocktest/**'
+            - '!${base-path}/internal/identity/identitytest/**'
             - '!${base-path}/test/**'
             - '!**/*_test.go'
           deny:
@@ -259,6 +262,7 @@ linters:
     gomodguard_v2:
       allowed:
         - module: github.com/coreos/go-oidc/v3
+        - module: github.com/go-jose/go-jose/v4
         - module: github.com/prometheus/client_golang
         - module: github.com/spf13/cobra
         - module: go.opentelemetry.io/otel

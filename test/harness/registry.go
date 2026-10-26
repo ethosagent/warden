@@ -14,6 +14,7 @@ import (
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/denyreason"
 	"github.com/ethosagent/warden/internal/dnstest"
+	"github.com/ethosagent/warden/internal/identity/identitytest"
 	"github.com/ethosagent/warden/internal/proxy"
 	"github.com/ethosagent/warden/internal/secrets"
 	"github.com/ethosagent/warden/test/fakes"
@@ -51,6 +52,7 @@ var Fakes = map[string]FakeEntry{
 	"analytics.AnalyticsStore": entry("fakes.FakeAnalyticsStore", func(testing.TB) *fakes.FakeAnalyticsStore { return &fakes.FakeAnalyticsStore{} }, analyticsStoreConformance),
 	"proxy.Dialer":             entry("harness mappingDialer (via New)", newDialerFake, dialerConformance),
 	"proxy.NameResolver":       entry("dnstest.New + proxy.NewUpstreamResolver", newNameResolverFake, nameResolverConformance),
+	"identity.Verifier":        entry("fakes.NewVerifier", func(testing.TB) *fakes.Verifier { return fakes.NewVerifier() }, verifierConformance),
 	"clock.Clock":              entry("clocktest.NewFake", func(testing.TB) *clocktest.Fake { return clocktest.NewFake(time.Unix(1_700_000_000, 0)) }, clockConformance),
 }
 
@@ -72,6 +74,12 @@ var Excluded = map[string]string{
 	"secrets.AWSSecretsClient":  "vendor SDK adapter behind secrets.SecretStore/Fetcher; package tests fake it, and the harness resolves secrets through the env SecretProvider",
 	"secrets.GCPSecretClient":   "vendor SDK adapter behind a Fetcher; package tests fake it, and the harness resolves secrets through the env SecretProvider",
 	"worker.ControlPlaneClient": "the worker's view of the control plane; the harness runs the real control plane (*config.RemoteProvider) rather than a fake",
+}
+
+// --- identity.Verifier ---
+
+func verifierConformance(t *testing.T, f *fakes.Verifier) {
+	identitytest.RunVerifierSuite(t, func(*testing.T) identitytest.Fixture { return fakes.VerifierSuiteFixture(f) })
 }
 
 // --- config.ConfigProvider ---
