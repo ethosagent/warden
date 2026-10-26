@@ -510,9 +510,6 @@ func TestIdentityComposePinned(t *testing.T) {
 					agent[n] = true
 				}
 			}
-			for _, a := range []string{"agent-internal", "w1-internal", "w2-internal", "t-net"} {
-				agent[a] = true
-			}
 			for name, s := range cf.Services {
 				if name != "dex" && name != "ldap" {
 					continue
