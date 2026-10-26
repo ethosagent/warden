@@ -25,10 +25,7 @@ func requireTools(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{"curl", "jq"} {
 		if _, err := exec.LookPath(name); err != nil {
-			if os.Getenv("CI") == "true" {
-				t.Fatalf("curl and jq are required in CI: %s not on PATH", name)
-			}
-			t.Skipf("BLOCKED (skipped, not passed): %s not on PATH", name)
+			t.Fatalf("BLOCKED: scripts/dex-token.sh needs curl and jq; %s not on PATH", name)
 		}
 	}
 }
