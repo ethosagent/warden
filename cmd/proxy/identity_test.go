@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -116,7 +117,8 @@ func (r *rig) deps() identityDeps {
 			}
 			return os.ReadFile(p)
 		},
-		stdin: strings.NewReader(r.stdin),
+		openFile: func(p string) (io.ReadCloser, error) { return os.Open(p) },
+		stdin:    strings.NewReader(r.stdin),
 	}
 }
 
@@ -349,6 +351,13 @@ func TestIdentityCmdOutputs(t *testing.T) {
 		stdout, _, err = r.run("identity", "env", "--worker", "w:8080", "--token-file", f, "--format", "json")
 		if err != nil || !strings.Contains(stdout, `"HTTPS_PROXY": "http://session:`+tok) {
 			t.Fatalf("file env: %q %v", stdout, err)
+		}
+		big := filepath.Join(t.TempDir(), "big")
+		if err := os.WriteFile(big, bytes.Repeat([]byte("a"), 70<<10), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if stdout, _, err := r.run("identity", "env", "--worker", "w:8080", "--token-file", big); err == nil || stdout != "" {
+			t.Errorf("an oversize token file must be refused: %q %v", stdout, err)
 		}
 		if _, _, err := r.run("identity", "env", "--worker", "w:8080", "--token-stdin", "--token-file", f); err == nil {
 			t.Error("--token-stdin with --token-file should be refused")

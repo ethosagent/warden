@@ -183,6 +183,7 @@ func TestProxyEnvRejects(t *testing.T) {
 	}{
 		"no port":       {"worker", "SECRET-TOK", identityclient.EnvOptions{}},
 		"scheme":        {"http://worker:8080", "SECRET-TOK", identityclient.EnvOptions{}},
+		"newline host":  {"wor\nker:8080", "SECRET-TOK", identityclient.EnvOptions{}},
 		"bad port":      {"worker:99999", "SECRET-TOK", identityclient.EnvOptions{}},
 		"userinfo":      {"u@worker:8080", "SECRET-TOK", identityclient.EnvOptions{}},
 		"empty token":   {"worker:8080", "", identityclient.EnvOptions{}},

@@ -57,7 +57,7 @@ func ProxyVars(worker, token string, opts EnvOptions) ([]EnvVar, error) {
 	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
 		return nil, errors.New("identityclient: worker port must be a number from 1 to 65535")
 	}
-	if strings.ContainsAny(host, "/@?#\\ ") {
+	if strings.ContainsAny(host, "/@?#\\ ") || hasControl(host) {
 		return nil, errors.New("identityclient: worker must be host:port without a scheme, user or path")
 	}
 	if token == "" {

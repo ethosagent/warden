@@ -47,13 +47,14 @@ func exitCode(err error) int {
 type identityDeps struct {
 	getenv   func(string) string
 	readFile func(string) ([]byte, error)
+	openFile func(string) (io.ReadCloser, error)
 	stdin    io.Reader
 	// tune adjusts the client after construction (tests inject a fake sleeper).
 	tune func(*identityclient.Client)
 }
 
 func defaultIdentityDeps() identityDeps {
-	return identityDeps{getenv: os.Getenv, readFile: os.ReadFile, stdin: os.Stdin}
+	return identityDeps{getenv: os.Getenv, readFile: os.ReadFile, openFile: func(p string) (io.ReadCloser, error) { return os.Open(p) }, stdin: os.Stdin}
 }
 
 // identityFlags are the persistent flags of `warden identity`.
@@ -306,7 +307,7 @@ func (r *identityRunner) envToken(cmd *cobra.Command, fromStdin bool, file strin
 	case fromStdin:
 		raw, err = io.ReadAll(io.LimitReader(r.deps.stdin, maxTokenInput+1))
 	case file != "":
-		raw, err = r.deps.readFile(file)
+		raw, err = readCapped(r.deps.openFile, file)
 	default:
 		c, cerr := r.client(cmd)
 		if cerr != nil {
@@ -331,4 +332,15 @@ func (r *identityRunner) envToken(cmd *cobra.Command, fromStdin bool, file strin
 	}
 	exp, _ := identityclient.TokenExpiry(token)
 	return token, exp, nil
+}
+
+// readCapped reads at most maxTokenInput+1 bytes of the named file, so an
+// oversize file is refused without being buffered whole.
+func readCapped(open func(string) (io.ReadCloser, error), path string) ([]byte, error) {
+	f, err := open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	return io.ReadAll(io.LimitReader(f, maxTokenInput+1))
 }
