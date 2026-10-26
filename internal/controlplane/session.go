@@ -136,6 +136,9 @@ func (s *SessionStore) Create(ctx context.Context, in SessionInput) (string, Ses
 	return rawID, sess, nil
 }
 
+// Now is the store's clock.
+func (s *SessionStore) Now() time.Time { return s.now() }
+
 // expired reports whether sess is past its idle or absolute limit at now.
 func (s *SessionStore) expired(sess Session, now time.Time) bool {
 	return !now.Before(sess.ExpiresAt) || !now.Before(sess.LastSeenAt.Add(s.idle))

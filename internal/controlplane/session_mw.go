@@ -89,12 +89,20 @@ func (c SessionCookie) From(r *http.Request) (string, bool) {
 	return ck.Value, true
 }
 
+// sessionReader is the part of SessionStore the middleware uses. It is a seam so
+// a test can count calls (the worker routes must make none).
+type sessionReader interface {
+	Lookup(ctx context.Context, rawID string) (Session, bool, error)
+	Touch(ctx context.Context, rawID string) (bool, error)
+	Now() time.Time
+}
+
 // withSession authenticates but never denies for a missing session: a request
 // with a live session cookie gets a Principal in its context, anything else
 // passes through unchanged (role enforcement is W-P1-SSO-05). The one refusal
 // is CSRF: a state-changing request that carries a live session must present a
 // matching X-Warden-CSRF and, if it sends Origin, the console's own origin.
-func withSession(next http.Handler, store *SessionStore, cookie SessionCookie, logger *slog.Logger) http.Handler {
+func withSession(next http.Handler, store sessionReader, cookie SessionCookie, logger *slog.Logger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rawID, ok := cookie.From(r)
 		if !ok {
@@ -118,7 +126,7 @@ func withSession(next http.Handler, store *SessionStore, cookie SessionCookie, l
 			_, _ = w.Write([]byte(`{"error":"csrf"}` + "\n"))
 			return
 		}
-		if !sess.LastSeenAt.After(store.now().Add(-touchInterval)) {
+		if !sess.LastSeenAt.After(store.Now().Add(-touchInterval)) {
 			if _, err := store.Touch(r.Context(), rawID); err != nil {
 				logger.Warn("console session touch failed", "session", shortHash(sess.IDHash), "error", err)
 			}
@@ -168,15 +176,16 @@ func (s *Server) initSessions() {
 	}
 	s.sessionCookie = cookie
 	s.sessions = NewSessionStore(s.cfg.State.SQL(), cc.Session.Idle, cc.Session.Absolute, nil)
+	s.sessionReader = s.sessions
 }
 
 // sessionWrap applies withSession when sessions are enabled and is the identity
 // otherwise.
 func (s *Server) sessionWrap(h http.Handler) http.Handler {
-	if s.sessions == nil {
+	if s.sessionReader == nil {
 		return h
 	}
-	return withSession(h, s.sessions, s.sessionCookie, s.cfg.Logger)
+	return withSession(h, s.sessionReader, s.sessionCookie, s.cfg.Logger)
 }
 
 // sweepSessions deletes expired sessions every minute until ctx is done.

@@ -461,9 +461,9 @@ func TestSessionPrincipal(t *testing.T) {
 	}
 }
 
-// TestSessionLogsHideSecrets checks the CSRF refusal log carries at most the
+// TestSessionLogsNoSecrets checks the CSRF refusal log carries at most the
 // 8-char id-hash prefix, never the cookie value or the expected token.
-func TestSessionLogsHideSecrets(t *testing.T) {
+func TestSessionLogsNoSecrets(t *testing.T) {
 	clk := newFakeClock()
 	store, _ := newTestStore(t, clk)
 	cookie := testCookie(t)
@@ -543,4 +543,86 @@ func TestSessionSweeperRuns(t *testing.T) {
 	}
 	cancel()
 	<-done
+}
+
+// countingReader is a fake session store that counts every call.
+type countingReader struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (c *countingReader) hit() { c.mu.Lock(); c.calls++; c.mu.Unlock() }
+func (c *countingReader) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.calls
+}
+
+func (c *countingReader) Lookup(context.Context, string) (Session, bool, error) {
+	c.hit()
+	return Session{}, false, nil
+}
+
+func (c *countingReader) Touch(context.Context, string) (bool, error) { c.hit(); return false, nil }
+func (c *countingReader) Now() time.Time                              { return time.Now() }
+
+func TestSessionNotOnWorkerRoutes(t *testing.T) {
+	db := openSessionDB(t)
+	srv := New(Config{
+		PolicyPath: writePolicyFile(t, "api.openai.com"), Token: dashTestToken, State: db,
+		Console: config.ConsoleConfig{
+			Auth: config.ConsoleAuthOIDC, OIDC: config.ConsoleOIDC{RedirectURL: testRedirectHTTPS},
+			Session: config.ConsoleSession{Idle: time.Hour, Absolute: 12 * time.Hour},
+		},
+	})
+	fake := &countingReader{}
+	srv.sessionReader = fake
+	h := srv.Handler()
+	send := func(method, path string) {
+		req := httptest.NewRequest(method, path, strings.NewReader(`{}`))
+		req.AddCookie(&http.Cookie{Name: srv.sessionCookie.Name, Value: "some-session-id"})
+		req.Header.Set("Authorization", "Bearer "+dashTestToken)
+		h.ServeHTTP(httptest.NewRecorder(), req)
+	}
+	for _, r := range []struct{ method, path string }{
+		{http.MethodGet, "/policy"},
+		{http.MethodPost, "/control/heartbeat"},
+		{http.MethodPost, "/central/ingest"},
+		{http.MethodGet, "/healthz"},
+	} {
+		send(r.method, r.path)
+		if n := fake.count(); n != 0 {
+			t.Fatalf("%s %s queried the session store %d times", r.method, r.path, n)
+		}
+	}
+	send(http.MethodGet, "/dashboard/api/workers")
+	if fake.count() == 0 {
+		t.Fatal("a dashboard request must reach the session store")
+	}
+}
+
+func TestSessionLookupFailureHasNoPrincipal(t *testing.T) {
+	clk := newFakeClock()
+	store, db := newTestStore(t, clk)
+	cookie := testCookie(t)
+	raw, _, _ := store.Create(context.Background(), testSessionInput())
+	var buf bytes.Buffer
+	h := withSession(principalProbe(), store, cookie, slog.New(slog.NewTextHandler(&buf, nil)))
+	_ = db.Close() // every later query fails
+	if rec := probe(h, cookie, raw); rec.Code != http.StatusNoContent {
+		t.Fatalf("store failure: %d, want pass-through without a Principal", rec.Code)
+	}
+	if !strings.Contains(buf.String(), "lookup failed") || strings.Contains(buf.String(), raw) {
+		t.Fatalf("log = %q", buf.String())
+	}
+}
+
+func TestSessionsDisabledOnBadRedirect(t *testing.T) {
+	srv := New(Config{
+		PolicyPath: writePolicyFile(t, "a.example"), State: openSessionDB(t),
+		Console: config.ConsoleConfig{Auth: config.ConsoleAuthOIDC, OIDC: config.ConsoleOIDC{RedirectURL: "ftp://x/y"}},
+	})
+	if srv.sessions != nil || srv.sessionReader != nil {
+		t.Fatal("sessions enabled for an unusable redirect URL")
+	}
 }

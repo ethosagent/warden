@@ -171,6 +171,7 @@ type Server struct {
 	// DB. When set, Handler wraps /dashboard/ and /central/secrets in withSession.
 	sessions      *SessionStore
 	sessionCookie SessionCookie
+	sessionReader sessionReader
 }
 
 // Compile-time assertions that the concrete types satisfy their role interfaces.
