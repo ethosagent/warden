@@ -1354,7 +1354,12 @@ function withQS(url){ const q=userQS(); return q ? url+(url.indexOf('?')<0?'?':'
 function setUserFilter(v){
   state.user = Array.from(String(v==null?'':v).trim()).slice(0, USER_FILTER_MAX).join('');
   const t=currentTab();
-  if(t==='overview') loadOverview(); else if(t==='activity') loadActivity();
+  if(t==='overview') loadOverview();
+  else if(t==='activity'){
+    loadActivity();
+    const ep=document.getElementById('actsub-endpoints');
+    if(ep&&ep.classList.contains('active')) loadEndpoints();
+  }
 }
 let userFilterTimer=null;
 function onUserFilterInput(v){ clearTimeout(userFilterTimer); userFilterTimer=setTimeout(()=>setUserFilter(v), 300); }

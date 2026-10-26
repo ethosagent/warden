@@ -196,6 +196,9 @@ var claimTokens = regexp.MustCompile(`user_email|user_sub|user_groups|UserEmail|
 // htmlSinks are the DOM and string APIs that parse markup.
 var htmlSinks = regexp.MustCompile(`innerHTML|outerHTML|insertAdjacentHTML|document\.write|\besc\(`)
 
+// Limit: it is statement-local, so a claim aliased into a variable first
+// (const x = e.user_email; el.innerHTML = x) is not caught; review covers that.
+//
 // claimMarkupViolations reports every statement that assigns innerHTML (or
 // otherwise builds markup) from a claim-derived value. A statement runs from a
 // line holding a sink to the first line that ends in ';'.
