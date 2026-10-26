@@ -151,7 +151,10 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	var state *cpstate.DB
 	if stateDir != "" {
 		statePath := filepath.Join(stateDir, "warden-cp.db")
-		state, err = cpstate.Open(ctx, statePath, SessionMigrations())
+		// Every mode registers the sessions migration, so switching console.auth
+		// never trips the downgrade guard. The open is not cancellable: a shutdown
+		// signal must not abandon a migration half way through boot.
+		state, err = cpstate.Open(context.WithoutCancel(ctx), statePath, SessionMigrations())
 		if err != nil {
 			return fail(fmt.Errorf("control-plane: state db: %w", err))
 		}
