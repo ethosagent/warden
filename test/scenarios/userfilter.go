@@ -18,9 +18,9 @@ import (
 func userFilterAPI(t *testing.T, h *harness.H) {
 	now := time.Now().UTC()
 	seed := []analytics.Event{
-		analytics.Event{Timestamp: now, Domain: "alice-1.example.com", Port: 443, Protocol: "https", Method: "GET", URL: "https://alice-1.example.com/", Decision: "allow", UserSub: "sub-alice", UserEmail: "alice@corp.example", IdentityStatus: "valid"},
-		analytics.Event{Timestamp: now.Add(time.Second), Domain: "alice-2.example.com", Port: 443, Protocol: "https", Method: "GET", URL: "https://alice-2.example.com/", Decision: "deny", UserSub: "sub-alice", UserEmail: "alice@corp.example", IdentityStatus: "valid"},
-		analytics.Event{Timestamp: now.Add(2 * time.Second), Domain: "bob-1.example.com", Port: 443, Protocol: "https", Method: "GET", URL: "https://bob-1.example.com/", Decision: "allow", UserSub: "sub-bob", UserEmail: "bob@corp.example", IdentityStatus: "valid"},
+		{Timestamp: now, Domain: "alice-1.example.com", Port: 443, Protocol: "https", Method: "GET", URL: "https://alice-1.example.com/", Decision: "allow", UserSub: "sub-alice", UserEmail: "alice@corp.example", IdentityStatus: "valid"},
+		{Timestamp: now.Add(time.Second), Domain: "alice-2.example.com", Port: 443, Protocol: "https", Method: "GET", URL: "https://alice-2.example.com/", Decision: "deny", UserSub: "sub-alice", UserEmail: "alice@corp.example", IdentityStatus: "valid"},
+		{Timestamp: now.Add(2 * time.Second), Domain: "bob-1.example.com", Port: 443, Protocol: "https", Method: "GET", URL: "https://bob-1.example.com/", Decision: "allow", UserSub: "sub-bob", UserEmail: "bob@corp.example", IdentityStatus: "valid"},
 	}
 	h.SeedEvents(seed...)
 	if err := h.CP().IngestEvents("worker-1", seed); err != nil {
