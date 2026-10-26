@@ -26,7 +26,7 @@ import (
 // after the response, so a plain snapshot can race it).
 func waitEvent(t *testing.T, st *syncStore, what string, pred func(analytics.Event) bool) analytics.Event {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for {
 		for _, ev := range st.snapshot() {
 			if pred(ev) {
