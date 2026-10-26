@@ -302,3 +302,11 @@ func TestFingerprint(t *testing.T) {
 		t.Fatal("fingerprint must not be a token substring")
 	}
 }
+
+func TestLoginWarnsOnExpiredToken(t *testing.T) {
+	r := newRig(t)
+	r.idp.clockSkew = -2 * tokenTTL
+	if w := strings.Join(r.login(t), "|"); !strings.Contains(w, "expired") {
+		t.Fatalf("warnings = %q", w)
+	}
+}

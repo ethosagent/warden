@@ -175,6 +175,9 @@ func (c *Client) Login(ctx context.Context, prompt io.Writer) ([]string, error) 
 	if tok.RefreshToken == "" {
 		warnings = append(warnings, "no refresh_token was issued (is offline_access granted?): the login ends with the ID token")
 	}
+	if !cl.Expiry.After(c.now()) {
+		warnings = append(warnings, "the ID token is already expired (check the clocks of this host and the issuer)")
+	}
 	if len(cl.Groups) == 0 {
 		warnings = append(warnings, "the ID token has no groups claim")
 	}

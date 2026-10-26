@@ -69,6 +69,7 @@ type fakeIdP struct {
 	deviceCalls  atomic.Int64
 	tokenDelay   time.Duration
 	lastForm     map[string][]string
+	clockSkew    time.Duration // added to the minted token times
 }
 
 func newIdP(t *testing.T, clk *fakeClock) *fakeIdP {
@@ -124,7 +125,7 @@ func (p *fakeIdP) device(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *fakeIdP) mint() string {
-	now := p.clock.Now()
+	now := p.clock.Now().Add(p.clockSkew)
 	return p.signer.Mint(
 		fakes.Valid("user-1", "u@example.com", p.groups...),
 		fakes.WithIss(p.srv.URL), fakes.WithAud(p.aud...), fakes.WithAZP("warden-cli"),
