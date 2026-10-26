@@ -238,3 +238,31 @@ func TestExcludedEventFields(t *testing.T) {
 		}
 	}
 }
+
+// Optional fields are dropped one at a time in the documented order, stopping as
+// soon as the line fits.
+func TestMarshalLine_DropOrder(t *testing.T) {
+	big := func(n int) []string {
+		out := make([]string, 64)
+		for i := range out {
+			out[i] = strings.Repeat("x", n)
+		}
+		return out
+	}
+	// Each list is ~8 KiB at 128 bytes x 64 entries: two lists overflow the cap.
+	ev := analytics.Event{DataClasses: big(120), SwappedRefs: big(120), Compliance: big(120), JudgeReason: strings.Repeat("j", 400)}
+	line := marshal(t, FromEvent(ev, testMeta, QueryDrop))
+	var back Record
+	if err := json.Unmarshal(line, &back); err != nil {
+		t.Fatal(err)
+	}
+	if len(line) > MaxLineBytes || !back.Truncated {
+		t.Fatalf("len=%d truncated=%v", len(line), back.Truncated)
+	}
+	if back.DataClasses != nil || back.SwappedRefs != nil {
+		t.Fatal("data_classes and swapped_refs must go first")
+	}
+	if back.Compliance == nil || back.JudgeReason == "" {
+		t.Fatal("compliance and judge_reason must survive when dropping earlier fields is enough")
+	}
+}

@@ -169,7 +169,7 @@ func validateJSONLog(j JSONLogConfig) error {
 	default:
 		return fmt.Errorf("config: audit.jsonLog.query %q is not one of drop, keys", j.Query)
 	}
-	if j.Enabled && j.Output == JSONLogOutputFile && j.Path == "" {
+	if j.Output == JSONLogOutputFile && j.Path == "" {
 		return fmt.Errorf("config: audit.jsonLog.path is required when audit.jsonLog.output is file")
 	}
 	if j.MaxSizeMB <= 0 {

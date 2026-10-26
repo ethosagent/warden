@@ -67,7 +67,7 @@ baseline:
     allow: ["internal/analytics"]
   - rule: L7
     package: internal/auditlog
-    why: "pre-migration: repositories reach across domains (shared tables) until step 7"
+    why: "imports analytics for the Event type it projects; Event lives in a repository package until the store split (step 7)"
     allow: ["internal/analytics"]
   - rule: L7
     package: internal/secrets
