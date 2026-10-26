@@ -1,7 +1,7 @@
 # Warden — thin wrappers over scripts/. The real logic lives in scripts/check.sh
 # so CI, git hooks, and `make` all run the identical gate.
 
-.PHONY: build test check integration hooks fmt lint repro release release-dry version e2e-up e2e-down e2e-certs e2e e2e-scenario
+.PHONY: build test check integration hooks fmt lint repro release release-dry version e2e-up e2e-down e2e-certs e2e e2e-scenario e2e-identity-up e2e-identity-down e2e-identity e2e-identity-scenario
 
 # ---------- e2e harness (issue #366, L2 part 1) ----------
 # The hermetic compose stack: control plane + 2 workers + 2 agents + the fake
@@ -59,6 +59,61 @@ e2e:
 e2e-scenario:
 	@test -n "$(NAME)" || { echo "usage: make e2e-scenario NAME=<test name regexp>" >&2; exit 2; }
 	$(E2E_GOTEST) -run '$(NAME)'
+
+# ---------- L2 identity stack (W-P1-DEX-04) ----------
+# The e2e stack plus Dex + seeded LDAP (docker-compose.identity.yml) and the
+# identity overrides (docker-compose.e2e-identity.yml). SAME compose project
+# (warden-e2e) and host ports as `make e2e`, so the two are mutually exclusive:
+# run one after the other. `make e2e` / `make e2e-scenario` are unchanged.
+# Dex client secrets and LDAP passwords come from deploy/compose/dex/.env.example
+# (dev placeholders) unless the caller exports others.
+E2E_IDENTITY_COMPOSE := $(E2E_COMPOSE) -f deploy/compose/docker-compose.identity.yml -f deploy/compose/docker-compose.e2e-identity.yml
+E2E_IDENTITY_ENV := deploy/compose/dex/.env.example
+
+# Exports each KEY=VALUE of the env file that the caller has not set.
+define E2E_IDENTITY_LOAD_ENV
+while IFS='=' read -r k v; do \
+	case "$$k" in ''|'#'*) continue ;; esac; \
+	[ -n "$$(printenv "$$k")" ] || export "$$k=$$v"; \
+done < $(E2E_IDENTITY_ENV)
+endef
+
+e2e-identity-up: e2e-certs
+	@running="$$(docker ps -q --filter label=com.docker.compose.project=warden-e2e)"; \
+	if [ -n "$$running" ]; then \
+		echo "e2e-identity-up: the warden-e2e project already has running containers (the base e2e stack or an identity stack shares its name and host ports). Run 'make e2e-down' (or 'make e2e-identity-down' for an identity stack) first." >&2; \
+		exit 1; \
+	fi
+	@set -e; $(E2E_IDENTITY_LOAD_ENV); \
+	if [ -n "$$WARDEN_IMAGE" ]; then \
+		docker image inspect "$$WARDEN_IMAGE" >/dev/null 2>&1 || { echo "e2e-identity: WARDEN_IMAGE=$$WARDEN_IMAGE is not present locally; build or pull it first, or unset WARDEN_IMAGE to build from source" >&2; exit 1; }; \
+		docker image inspect warden-e2e-fakeupstream:local >/dev/null 2>&1 || { echo "e2e-identity: WARDEN_IMAGE is set (--no-build) but warden-e2e-fakeupstream:local is missing; run one 'make e2e-identity-up' without WARDEN_IMAGE to build it" >&2; exit 1; }; \
+		docker compose $(E2E_IDENTITY_COMPOSE) up -d --wait --no-build; \
+	else \
+		docker compose $(E2E_IDENTITY_COMPOSE) up -d --build --wait; \
+	fi; \
+	E2E_IDENTITY=1 test/e2e/hermeticity.sh
+
+e2e-identity-down:
+	@set -e; $(E2E_IDENTITY_LOAD_ENV); \
+	docker compose $(E2E_IDENTITY_COMPOSE) down -v
+
+# test/e2e/identity (build tag e2e): TestMain runs e2e-identity-up and
+# e2e-identity-down (E2E_KEEP_STACK=1 keeps the stack; E2E_STACK_RUNNING=1
+# reuses one you started). Without a usable stack its tests are BLOCKED: they
+# fail under CI=true and skip loudly otherwise.
+# E2E_IDENTITY_TIMEOUT bounds the whole run, stack bring-up included; CI sets it
+# so the run fits the e2e-identity job's 15-minute cap.
+E2E_IDENTITY_TIMEOUT ?= 10m
+E2E_IDENTITY_GOTEST := go test -tags e2e -count=1 -timeout $(E2E_IDENTITY_TIMEOUT) ./test/e2e/identity/ -v
+
+e2e-identity:
+	$(E2E_IDENTITY_GOTEST)
+
+# make e2e-identity-scenario NAME=TestIdentityStackBoots  (a -run regexp)
+e2e-identity-scenario:
+	@test -n "$(NAME)" || { echo "usage: make e2e-identity-scenario NAME=<test name regexp>" >&2; exit 2; }
+	$(E2E_IDENTITY_GOTEST) -run '$(NAME)'
 
 build:
 	scripts/build.sh warden

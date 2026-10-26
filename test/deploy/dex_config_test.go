@@ -4,9 +4,12 @@ package deploy
 
 import (
 	"fmt"
+	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -382,4 +385,222 @@ func contains(l []string, s string) bool {
 		}
 	}
 	return false
+}
+
+type composeFile struct {
+	Services map[string]struct {
+		Image       string   `yaml:"image"`
+		Ports       []string `yaml:"ports"`
+		Networks    any      `yaml:"networks"`
+		Environment any      `yaml:"environment"`
+		DependsOn   any      `yaml:"depends_on"`
+		Restart     string   `yaml:"restart"`
+		Healthcheck struct {
+			Test []string `yaml:"test"`
+		} `yaml:"healthcheck"`
+	} `yaml:"services"`
+	Networks map[string]map[string]any `yaml:"networks"`
+}
+
+func loadCompose(t *testing.T, name string) composeFile {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(repoRoot(t), "deploy", "compose", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var c composeFile
+	if err := yaml.Unmarshal(raw, &c); err != nil {
+		t.Fatalf("%s: %v", name, err)
+	}
+	return c
+}
+
+// netNames returns the network names of a service in either the list or the map form.
+func netNames(v any) []string {
+	var out []string
+	switch n := v.(type) {
+	case []any:
+		for _, e := range n {
+			out = append(out, fmt.Sprint(e))
+		}
+	case map[string]any:
+		for k := range n {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// TestIdentityComposePinned is a static check of docker-compose.identity.yml:
+// pinned images, minimal ports, network placement and env-sourced secrets.
+func TestIdentityComposePinned(t *testing.T) {
+	root := repoRoot(t)
+	c := loadCompose(t, "docker-compose.identity.yml")
+	dex, ok := c.Services["dex"]
+	if !ok {
+		t.Fatal("service dex missing")
+	}
+	ldap, ok := c.Services["ldap"]
+	if !ok {
+		t.Fatal("service ldap missing")
+	}
+
+	t.Run("digests", func(t *testing.T) {
+		re := regexp.MustCompile(`^[^@]+:[^@]+@sha256:[0-9a-f]{64}$`)
+		for name, s := range c.Services {
+			if !re.MatchString(s.Image) {
+				t.Errorf("%s image %q is not pinned by tag and sha256 digest", name, s.Image)
+			}
+		}
+		if !strings.HasPrefix(dex.Image, "ghcr.io/dexidp/dex:v2.41.1@") {
+			t.Errorf("dex image %q must be ghcr.io/dexidp/dex:v2.41.1@sha256:...", dex.Image)
+		}
+	})
+
+	t.Run("issuer_port", func(t *testing.T) {
+		_, cfg := readDex(t, "config.dev.yaml")
+		u, err := url.Parse(fmt.Sprint(cfg["issuer"]))
+		if err != nil || u.Port() == "" {
+			t.Fatalf("issuer %v has no port: %v", cfg["issuer"], err)
+		}
+		want := []string{"127.0.0.1:" + u.Port() + ":" + u.Port()}
+		if !reflect.DeepEqual(dex.Ports, want) {
+			t.Errorf("dex ports = %v, want exactly %v (telemetry 5558 must stay unpublished)", dex.Ports, want)
+		}
+	})
+
+	t.Run("ldap_no_ports", func(t *testing.T) {
+		if len(ldap.Ports) != 0 {
+			t.Errorf("ldap publishes ports %v", ldap.Ports)
+		}
+	})
+
+	t.Run("networks", func(t *testing.T) {
+		if got := netNames(dex.Networks); !reflect.DeepEqual(got, []string{"cp-net", "idp-net"}) {
+			t.Errorf("dex networks = %v, want [cp-net idp-net]", got)
+		}
+		if got := netNames(ldap.Networks); !reflect.DeepEqual(got, []string{"idp-net"}) {
+			t.Errorf("ldap networks = %v, want [idp-net]", got)
+		}
+		if c.Networks["idp-net"]["internal"] != true {
+			t.Error("idp-net must be internal: true")
+		}
+		if _, ok := c.Networks["cp-net"]; !ok {
+			t.Error("cp-net not declared")
+		}
+		if _, ok := c.Networks["cp-net"]["internal"]; ok {
+			t.Error("cp-net must not set internal: the e2e override owns it")
+		}
+		if _, ok := loadCompose(t, "docker-compose.control-plane.yml").Networks["cp-net"]; !ok {
+			t.Error("cp-net is not a network of docker-compose.control-plane.yml")
+		}
+	})
+
+	t.Run("no_agent_net", func(t *testing.T) {
+		files, err := filepath.Glob(filepath.Join(root, "deploy", "compose", "docker-compose*.yml"))
+		if err != nil || len(files) == 0 {
+			t.Fatalf("no compose files: %v", err)
+		}
+		for _, f := range files {
+			cf := loadCompose(t, filepath.Base(f))
+			agent := map[string]bool{}
+			for n, def := range cf.Networks {
+				if def["internal"] == true && n != "idp-net" && n != "cp-net" {
+					agent[n] = true
+				}
+			}
+			for name, s := range cf.Services {
+				if name != "dex" && name != "ldap" {
+					continue
+				}
+				for _, n := range netNames(s.Networks) {
+					if agent[n] {
+						t.Errorf("%s: service %s is on agent network %s", filepath.Base(f), name, n)
+					}
+				}
+			}
+		}
+	})
+
+	t.Run("secrets_env", func(t *testing.T) {
+		envs := map[string][]string{}
+		for name, s := range c.Services {
+			switch e := s.Environment.(type) {
+			case []any:
+				for _, kv := range e {
+					envs[name] = append(envs[name], fmt.Sprint(kv))
+				}
+			case map[string]any:
+				for k, v := range e {
+					envs[name] = append(envs[name], k+"="+fmt.Sprint(v))
+				}
+			}
+		}
+		secrets := []string{"WARDEN_CONSOLE_DEX_CLIENT_SECRET", "WARDEN_DEX_CLIENT_SECRET", "HARNESS_DEX_CLIENT_SECRET", "LDAP_BIND_PW", "LDAP_ADMIN_PASSWORD"}
+		seen := map[string]bool{}
+		for svc, kvs := range envs {
+			for _, kv := range kvs {
+				for _, name := range secrets {
+					if !strings.HasPrefix(kv, name+"=") {
+						continue
+					}
+					seen[name] = true
+					if !regexp.MustCompile(`^` + name + `=\$\{` + name + `:\?[^}]*\}$`).MatchString(kv) {
+						t.Errorf("%s: %s must be exactly ${%s:?...}", svc, name, name)
+					}
+				}
+			}
+		}
+		for _, name := range secrets {
+			if !seen[name] {
+				t.Errorf("secret %s is not set in any service environment", name)
+			}
+		}
+	})
+
+	t.Run("dex_waits_for_ldap", func(t *testing.T) {
+		dep, _ := dex.DependsOn.(map[string]any)
+		if at(dep, "ldap", "condition") != "service_healthy" {
+			t.Errorf("dex depends_on = %v, want ldap: service_healthy", dex.DependsOn)
+		}
+	})
+
+	t.Run("dex_healthcheck", func(t *testing.T) {
+		want := []string{"CMD", "wget", "-q", "--spider", "http://127.0.0.1:5558/healthz"}
+		if !reflect.DeepEqual(dex.Healthcheck.Test, want) {
+			t.Errorf("dex healthcheck = %v, want %v", dex.Healthcheck.Test, want)
+		}
+	})
+
+	t.Run("no_restart_policy", func(t *testing.T) {
+		for name, s := range c.Services {
+			if s.Restart != "" {
+				t.Errorf("service %s sets restart: %s (not part of the recipe)", name, s.Restart)
+			}
+		}
+	})
+
+	t.Run("env_example_keys", func(t *testing.T) {
+		raw, err := os.ReadFile(filepath.Join(root, "deploy", "compose", "dex", ".env.example"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, k := range []string{
+			"WARDEN_CONSOLE_DEX_CLIENT_SECRET", "WARDEN_DEX_CLIENT_SECRET", "HARNESS_DEX_CLIENT_SECRET",
+			"LDAP_ADMIN_PASSWORD", "LDAP_BIND_PW", "DEX_TEST_PASSWORD",
+		} {
+			if !regexp.MustCompile(`(?m)^` + k + `=`).Match(raw) {
+				t.Errorf(".env.example is missing %s", k)
+			}
+		}
+	})
+
+	t.Run("check_secrets", func(t *testing.T) {
+		cmd := exec.Command("bash", filepath.Join(root, "scripts", "check-secrets.sh"))
+		cmd.Env = []string{"ROOT=" + root, "PATH=" + os.Getenv("PATH")}
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Errorf("check-secrets.sh: %v\n%s", err, out)
+		}
+	})
 }

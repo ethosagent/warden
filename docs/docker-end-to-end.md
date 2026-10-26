@@ -287,7 +287,7 @@ stack back as it found it, so the order does not matter.
 
 ### In CI
 
-`.github/workflows/e2e.yml` (job `e2e`, 15 minute limit) runs on PRs that touch a
+`.github/workflows/e2e.yml` (job `e2e`, 15 minute limit; the identity suite is the separate job `e2e-identity`) runs on PRs that touch a
 risky path, nightly on `main`, and as a reusable workflow that `release.yml` calls
 with the pushed image digest (`WARDEN_IMAGE`; the GitHub Release waits for it). On
 failure it uploads `docker compose logs`, both workers' traffic APIs, the fleet API
@@ -295,6 +295,63 @@ and `/_recorded` as the `e2e-diagnostics` artifact; `KEEP_STACK=1` is what keeps
 stack alive long enough to collect them. Its `paths` filter must include every
 `critical` glob in `.agents/risk.yaml` (a Go test in `tools/riskmap` enforces it),
 because `risk.yml` waits for a check run named `e2e` on every critical PR.
+
+## The L2 identity stack (`make e2e-identity`)
+
+The identity tickets (attribution smoke, `identity exec`, console SSO, the Dex
+runtime proofs) all need real Dex, a real control plane, a real worker and a
+real agent container. `make e2e-identity-*` builds that stack once: the e2e
+stack above plus the Dex + seeded LDAP recipe (`docker-compose.identity.yml`)
+plus a small override (`deploy/compose/docker-compose.e2e-identity.yml`):
+
+```sh
+make e2e-identity-up                                  # up --build --wait, then the hermeticity check (dex and ldap included)
+make e2e-identity                                     # go test -tags e2e ./test/e2e/identity/ (brings the stack up and down itself)
+make e2e-identity-scenario NAME=TestIdentityStackBoots # one test (-run regexp)
+make e2e-identity-down                                # down -v
+```
+
+- **Mutually exclusive with `make e2e`.** Same compose project (`warden-e2e`)
+  and host ports (CP 7070, recorder 8081, worker admins 9091-9093) plus Dex on
+  5556. `make e2e-identity-up` exits non-zero, naming `make e2e-down`, when the
+  project already has running containers. Run one stack after the other.
+- **Secrets.** Dex client secrets and LDAP passwords are the dev placeholders in
+  `deploy/compose/dex/.env.example`; the Makefile loads them unless you export
+  your own.
+- **Split-horizon.** The host reaches Dex at `http://localhost:5556/dex` (its
+  published port, the issuer); the CP and worker-1 containers reach it as
+  `http://dex:5556` (the later tickets set `internalIssuerURL` to that). agent-1
+  stays on its internal network and has no route to Dex. There is no test-only
+  dialer and no hosts entry.
+- **No identity or console block yet.** The CP and worker-1 load
+  `configs/config.e2e-identity-cp.yaml` and `config.e2e-identity-worker.yaml`,
+  copies of the base e2e configs. The worker `identity:` block (W-P1-IDC-03) and
+  the CP `console:` block (W-P1-SSO-07) are added there by those tickets.
+- **The warden CLI in agent-1.** A one-shot `warden-bin` service copies the
+  static `warden` binary from the warden image into a volume that agent-1 mounts
+  read-only at `/opt/warden`; no extra image is built.
+
+The Go package `test/e2e/identity` (build tag `e2e`) holds the helpers the later
+suites share: `dexURL` and a plain `hostClient` for the host side;
+`dexToken(t, user)` (password grant on `agent-harness`; it returns the raw ID
+token and never logs it, the password or the client secret); `cpTraffic(t,
+query)` (the CP traffic API, decoded); `agentExec(t, args...)` (a command in
+agent-1 via `docker compose exec`); `workerLogs(t)` (worker-1 logs, for
+token-leak sweeps); and `requireStack(t)`.
+
+**Blocked is not passed.** `requireStack(t)` is the first line of every test in
+the package. When the stack is unavailable (no docker CLI or daemon, project not
+up, Dex unreachable) it calls `t.Fatalf` with a message starting `BLOCKED:`, in CI and locally
+alike, so a run that could not reach the stack never goes green (a skip would
+also trip `gates/test-skipped`). The decision is the pure function
+`stackGate`, unit-tested by `TestStackGate` without Docker. `TestMain` records the
+reason instead of exiting, so that test still runs on a machine without Docker.
+
+`TestIdentityStackBoots` is the stack's own proof: CP and worker-1 healthy, Dex
+discovery from the host returning issuer `http://localhost:5556/dex`, an allowed
+host reachable through the worker, a non-allowlisted host denied, and direct
+egress (and Dex) unreachable from agent-1. In CI, `.github/workflows/e2e.yml`
+runs `make e2e-identity` in its own job, `e2e-identity` (separate runner, 15 minute cap, `E2E_IDENTITY_TIMEOUT=8m`), so the `e2e` job keeps its 15 minute cap. Its failure log is the `e2e-identity-diagnostics` artifact, and the risk:critical gate waits for it as well as for `e2e`.
 
 ## Drive it by hand
 

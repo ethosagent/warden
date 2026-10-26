@@ -1,0 +1,86 @@
+# Shared L2 IDENTITY stack (W-P1-DEX-04): the hermetic e2e stack plus Dex and
+# seeded LDAP, in one override. Merge order matters:
+#
+#   docker compose \
+#     -f docker-compose.control-plane.yml -f docker-compose.e2e.yml \
+#     -f docker-compose.identity.yml -f docker-compose.e2e-identity.yml ...
+#
+# Run it with `make e2e-identity-up` / `make e2e-identity-down` /
+# `make e2e-identity` (docs/docker-end-to-end.md). It uses the SAME compose
+# project (warden-e2e) and host ports as `make e2e` (CP 7070, recorder 8081,
+# worker admins 9091-9093) plus Dex on 5556, so the two stacks are mutually
+# exclusive: run one after the other.
+#
+# Split-horizon: the host reaches Dex at http://localhost:5556 (its published
+# port, the dev issuer origin); the CP and worker containers reach it as
+# http://dex:5556 (the internalIssuerURL the later tickets configure);
+# agent-1 has no route to Dex. No test-only dialer, no hosts entry.
+#
+# What this adds on top of the merged files:
+#   - dex rides the `published` bridge too: Docker Engine >= 29 skips published
+#     ports on internal-only containers (same trick as docker-compose.e2e.yml).
+#     The 127.0.0.1:5556 publish itself comes from docker-compose.identity.yml.
+#   - the CP and worker-1 load identity-stack copies of the base e2e configs,
+#     which deliberately carry NO identity or console block: W-P1-IDC-03 adds
+#     the worker block and W-P1-SSO-07 the CP block, each in its own file.
+#   - the Dex client secrets reach the CP (console + data-plane) and worker-1
+#     (data-plane) as env, from deploy/compose/dex/.env.example unless the
+#     caller exports others (the Makefile does that).
+#   - agent-1 can run the warden CLI: `warden-bin` copies the static binary
+#     from the warden image into a volume that agent-1 mounts read-only at
+#     /opt/warden (no new image). agent-1 stays on w1-internal only.
+#   - the CP already runs with --state-dir /data on the cp-data named volume
+#     (docker-compose.control-plane.yml); nothing to change here.
+services:
+  dex:
+    # Replace (not merge) the networks: dex needs cp-net (workers and CP reach
+    # it), idp-net (LDAP) and the published bridge (the host reaches 5556).
+    networks: !override
+      cp-net: {}
+      idp-net: {}
+      published: {}
+
+  control-plane:
+    image: ${WARDEN_IMAGE:-warden-e2e:local}
+    depends_on:
+      dex:
+        condition: service_healthy
+    environment:
+      - WARDEN_CONSOLE_DEX_CLIENT_SECRET=${WARDEN_CONSOLE_DEX_CLIENT_SECRET:?set it (see dex/.env.example)}
+      - WARDEN_DEX_CLIENT_SECRET=${WARDEN_DEX_CLIENT_SECRET:?set it (see dex/.env.example)}
+    volumes:
+      # Same container target as the e2e mount: swaps in the identity copy.
+      - ../../configs/config.e2e-identity-cp.yaml:/etc/warden/config.yaml:ro
+
+  worker-1:
+    depends_on:
+      dex:
+        condition: service_healthy
+    environment:
+      - WARDEN_DEX_CLIENT_SECRET=${WARDEN_DEX_CLIENT_SECRET:?set it (see dex/.env.example)}
+    volumes:
+      - ../../configs/config.e2e-identity-worker.yaml:/etc/warden/config.yaml:ro
+
+  # One-shot: copy the static warden binary into the shared volume, then exit.
+  warden-bin:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: ${WARDEN_IMAGE:-warden-e2e:local}
+    # root only so it can write the fresh named volume; no network at all.
+    user: "0:0"
+    network_mode: none
+    restart: "no"
+    entrypoint: ["sh", "-c", "cp /usr/local/bin/warden /opt/warden/warden && chmod 0755 /opt/warden/warden"]
+    volumes:
+      - warden-bin:/opt/warden
+
+  agent-1:
+    depends_on:
+      warden-bin:
+        condition: service_completed_successfully
+    volumes:
+      - warden-bin:/opt/warden:ro
+
+volumes:
+  warden-bin: {}
