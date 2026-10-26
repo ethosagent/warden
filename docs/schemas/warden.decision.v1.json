@@ -105,9 +105,9 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["status"],
-      "description": "Verified end-user attribution. status is set whenever the event carried an identity status; every other field only when status is valid.",
+      "description": "Verified end-user attribution. status is set whenever the event carried an identity status; every other field only when status is valid. The object is absent when identity is off for the worker.",
       "properties": {
-        "status": { "type": "string", "description": "Identity verification status, for example valid." },
+        "status": { "type": "string", "description": "Identity verification status: valid, invalid, expired, unverified, conflict, or none (identity is on and the request carried no token). Open string, no enum, so a later status does not break readers." },
         "sub": { "type": "string", "description": "Subject claim; only when status is valid." },
         "email": { "type": "string", "description": "Email claim; only when status is valid." },
         "groups": { "type": "array", "items": { "type": "string" }, "maxItems": 64, "description": "Group claims, capped at 64 entries; only when status is valid." },

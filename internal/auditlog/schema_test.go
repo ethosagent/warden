@@ -405,3 +405,48 @@ func TestDecisionSchemaDescription(t *testing.T) {
 		}
 	}
 }
+
+// With identity on and no token the worker stamps status none; the line must
+// carry a user object holding just that status, and the schema must accept it.
+// user is optional (identity off omits it) and user.status is an open string,
+// so none validates without a schema change.
+func TestDecisionSchemaAcceptsUserStatusNone(t *testing.T) {
+	s := loadDecisionSchema(t)
+	if contains(s.Required, "user") {
+		t.Error("user must stay optional: identity off omits the object")
+	}
+	user := s.Properties["user"]
+	if !contains(user.Required, "status") {
+		t.Error("user.status must be required")
+	}
+	st := user.Properties["status"]
+	if st.Type != "string" || len(st.Enum) != 0 || st.Pattern != "" {
+		t.Errorf("user.status = %+v, want an open string (none must validate)", st)
+	}
+
+	ev := events(1)[0]
+	ev.IdentityStatus = "none"
+	ev.UserSub, ev.UserEmail, ev.UserGroups = "unverified-sub", "x@y.test", []string{"g"}
+	raw, err := json.Marshal(FromEvent(ev, sinkMeta, QueryDrop))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var inst map[string]any
+	if err := json.Unmarshal(raw, &inst); err != nil {
+		t.Fatal(err)
+	}
+	u, _ := inst["user"].(map[string]any)
+	if len(u) != 1 || u["status"] != "none" {
+		t.Errorf("user = %v, want exactly {status: none}", u)
+	}
+
+	ev.IdentityStatus = ""
+	raw, _ = json.Marshal(FromEvent(ev, sinkMeta, QueryDrop))
+	var off map[string]any
+	if err := json.Unmarshal(raw, &off); err != nil {
+		t.Fatal(err)
+	}
+	if _, has := off["user"]; has {
+		t.Errorf("identity off (empty status) must omit user: %s", raw)
+	}
+}
