@@ -726,6 +726,12 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		return err
 	}
 
+	// Identity (W-P1-VRFY-07): build the user-token verifier from the identity
+	// block and this agent's mode. Construction does no network I/O, so a worker
+	// whose issuer is down still starts. Mode stays off unless configured.
+	idWiring := newIdentityWiring(pxy, agentID, logger)
+	idWiring.apply(pol.Identity, pol.Agents)
+
 	// liveMCPGW tracks the gateway currently swapped into the proxy so shutdown
 	// (and each rebuild) closes the right one. It starts as the boot-time gateway
 	// (possibly nil); the managed apply loop below replaces it on each change.
@@ -921,6 +927,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 			agentID:          agentID,
 			logger:           logger,
 			logCtrl:          logCtrl,
+			identity:         idWiring,
 			signedStore:      signedStore,
 			complianceMapper: complianceMapper,
 			secretFetcher:    secretFetcher,

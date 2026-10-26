@@ -62,6 +62,11 @@ services:
       - agent-internal              # receives agent traffic
       - egress                      # the ONLY service with internet access
       - cp-net                      # pulls policy + forwards analytics to the control plane
+      # Identity verification (identity: block, docs/control-plane.md): the worker
+      # must reach the OIDC issuer. A public issuer works over `egress`; an issuer
+      # on the compose network (docker-compose.identity.yml's dex, on cp-net) is
+      # reached through identity.internalIssuerURL. The issuer address is an
+      # operator-set value; nothing here contacts it at startup.
     ports:
       - "127.0.0.1:9090:9090"                 # dashboard + admin (host -> proxy); NOT reachable by the agent
     environment:

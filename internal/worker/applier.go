@@ -39,6 +39,9 @@ type SettingsApplier struct {
 	agentID    string
 	logger     *slog.Logger
 	logCtrl    *observability.LogControl
+	// identity owns the user-token verifier and this agent's identity mode. Nil
+	// leaves identity untouched (tests that build an applier without one).
+	identity *identityWiring
 
 	// Compliance tagging is rebuilt around this stable base signed store using the
 	// reusable mapper, so a toggle never disturbs the signing layer or base store.
@@ -210,6 +213,14 @@ func (a *SettingsApplier) Apply() {
 			a.logger.Info("compliance tagging disabled by control-plane settings")
 		}
 		a.liveCompliance = wantCompliance
+	}
+
+	// --- Identity verifier + mode (live) ---
+	// The wiring rebuilds the verifier only when an issuer, audience, JWKS, azp,
+	// skew or TTL input moved; a mode-only change swaps the mode. A rebuild
+	// failure or an unknown mode keeps the previous config.
+	if settings != nil && a.identity != nil {
+		a.identity.apply(config.IdentityFromSettings(settings.Identity), config.AgentsFromSettings(settings.Agents))
 	}
 
 	// --- Observability (apply-on-RESTART, NOT live) ---

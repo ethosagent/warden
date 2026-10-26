@@ -26,5 +26,17 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
+    # Identity verification (docs/control-plane.md, "Identity verification"): the
+    # Warden worker fetches the OIDC issuer's discovery document and JWKS over
+    # HTTPS. The address below is an OPERATOR-SET VALUE: replace the documentation
+    # address (TEST-NET-1, never routable) with your issuer's address, or delete
+    # this rule when identity stays off. Workers only contact the issuer on the
+    # first token they verify, never at startup.
+    - to:
+        - ipBlock:
+            cidr: 192.0.2.10/32 # REPLACE: your OIDC issuer (identity.issuer / internalIssuerURL host)
+      ports:
+        - protocol: TCP
+          port: 443
     # Everything else is denied by omission: no rule permits general internet
     # egress, so the agent's only working egress is the in-pod proxy sidecar.

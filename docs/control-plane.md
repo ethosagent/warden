@@ -241,6 +241,99 @@ curl -X POST http://127.0.0.1:9090/admin/refresh-secrets \
   -H "Authorization: Bearer $WARDEN_ADMIN_TOKEN"
 ```
 
+## Identity verification
+
+A worker can attribute traffic to the person behind an agent by verifying a user
+token from an OIDC issuer (for example the reference Dex). It is **off unless
+configured** and, in P1, only **attributes**: it records who made a request and
+never blocks one.
+
+### The `identity` block
+
+The same block is served to managed workers (in the settings document) and read
+from local YAML by standalone workers. It holds no secrets.
+
+```yaml
+identity:
+  defaultMode: attribute        # off (default) | attribute
+  issuer: https://dex.example.com/dex
+  audience: warden
+  allowedAZP: [agent-harness, warden-cli]
+  # optional:
+  # internalIssuerURL: http://dex:5556   # how containers reach the issuer
+  # jwksURL: https://dex.example.com/dex/keys
+  # groupsClaim: groups
+  # clockSkewSeconds: 60                 # 0..300
+  # maxTokenTTLSeconds: 3600
+
+agents:
+  - id: research-bot
+    identity: attribute          # per-agent override of defaultMode
+```
+
+- A worker resolves its mode from the `agents` entry whose `id` matches the
+  agent id the worker uses (the single configured agent's id, otherwise
+  `agent:<port>`), then `identity.defaultMode`, then off. `require` is a Phase 2
+  mode: config validation rejects it, and a worker that is served it (a newer
+  control plane) keeps its previous identity config and logs one warning.
+- `issuer` and `audience` are required once any mode is `attribute`. An `http`
+  issuer is rejected unless `internalIssuerURL` is set; use `internalIssuerURL`
+  when workers reach the issuer on a container network (`http://dex:5556`) while
+  tokens carry the public issuer.
+- `allowedAZP: [agent-harness, warden-cli]` is the recommended value for the
+  reference Dex clients. There is no built-in default: empty means no `azp` check.
+- The worker builds the verifier at startup **without contacting the issuer**; keys
+  are fetched on the first token. A worker with the issuer down still starts and
+  serves, and tokens it cannot verify are recorded as unverified and allowed.
+- A settings change hot-reloads with no restart. The verifier is rebuilt only when
+  `issuer`, `internalIssuerURL`, `audience`, `jwksURL`, `allowedAZP`, `groupsClaim`,
+  `clockSkewSeconds` or `maxTokenTTLSeconds` change; a mode-only change swaps the
+  mode and keeps the verifier. A failed rebuild keeps the previous config and logs
+  one warning (no token data).
+
+### Where the token travels
+
+- `Proxy-Authorization` on `CONNECT` works everywhere, with or without TLS
+  termination: Basic with username `session` and the token as password, or
+  `Bearer <token>`. It identifies the whole tunnel.
+- `X-Warden-Identity: Bearer <token>` needs TLS termination (a CA configured), because
+  Warden must read the request headers. On a tunnel it cannot
+  decrypt it is never seen. Both headers are stripped before forwarding.
+- In transparent mode there is no `CONNECT`, so only `X-Warden-Identity` on
+  terminated traffic attributes. A worker in that mode logs a startup warning, as
+  does attribute mode without a CA.
+
+### Trust rules
+
+- `sub` is authoritative. Email matching is only ever meaningful with a verified
+  email (`email_verified: true`); an unverified email never identifies anyone.
+- Only a token with status `valid` yields a policy subject, so group and user rules
+  can never match an unverified caller.
+
+### Limits and gaps
+
+- A token is at most 16 KiB.
+- The `CONNECT` request line is capped at 8 KiB and the header block at 64 KiB,
+  with a 10 s deadline. Over a limit the worker answers 431 and records deny reason
+  `malformed_connect` with detail `headers_too_large`.
+- In transparent mode (no `CONNECT`) only `X-Warden-Identity` on terminated traffic
+  attributes.
+- A P1 identity is a **bearer assertion** signed by the IdP and **not yet bound to
+  the agent**: whoever holds a valid token can present it. P2 adds binding and
+  bundle-distributed JWKS.
+
+### Deployment and rollout
+
+Workers need egress to the issuer. `deploy/k8s/networkpolicy.yaml` carries an
+issuer egress rule whose address is an **operator-set value** (replace the
+documentation address); the compose templates note which network reaches it
+(`egress` for a public issuer, `cp-net` for one on the compose network).
+
+Roll out **control plane first**: upgrade the control plane so it accepts and serves
+the `identity` block, then upgrade workers, then set `identity.defaultMode` or a
+per-agent `identity` value. Workers on an older build ignore the block, and a worker
+on this build with no block stays off, so every step is safe to pause at.
+
 ## What's deliberately not here (yet)
 
 The control plane's policy source is a YAML file it re-reads per request, and the
