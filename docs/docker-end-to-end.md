@@ -341,9 +341,9 @@ token-leak sweeps); and `requireStack(t)`.
 
 **Blocked is not passed.** `requireStack(t)` is the first line of every test in
 the package. When the stack is unavailable (no docker CLI or daemon, project not
-up, Dex unreachable) it calls `t.Fatalf` with a message starting `BLOCKED:` when
-`CI=true`, so the CI `e2e` job cannot go green on a skip, and `t.Skipf` with
-`BLOCKED (skipped, not passed):` otherwise. The decision is the pure function
+up, Dex unreachable) it calls `t.Fatalf` with a message starting `BLOCKED:`, in CI and locally
+alike, so a run that could not reach the stack never goes green (a skip would
+also trip `gates/test-skipped`). The decision is the pure function
 `stackGate`, unit-tested by `TestStackGate` without Docker. `TestMain` records the
 reason instead of exiting, so that test still runs on a machine without Docker.
 
