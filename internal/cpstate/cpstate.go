@@ -57,7 +57,10 @@ type DB struct {
 // migs only ensures the schema_migrations table exists.
 //
 // Open is fail-closed: a file that is not a database or fails quick_check
-// returns an error naming path, and the file is left as found.
+// returns an error naming path, and the file is left as found. (Files cpstate
+// created are already in WAL mode; a file switched to another journal mode by
+// an external tool has its header switched back to WAL on connect, before the
+// checks run, but its content is never altered.)
 func Open(ctx context.Context, path string, migs []Migration) (*DB, error) {
 	if err := validateMigrations(migs); err != nil {
 		return nil, err
