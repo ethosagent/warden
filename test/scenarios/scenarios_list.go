@@ -108,12 +108,20 @@ var All = slices.Concat(
 		// genesis entry and logs its key_id before serving. In-process only (it
 		// reads the CP state dir).
 		{Name: "admin_audit_enabled_genesis", Opts: adminAuditOpts(), Run: adminAuditEnabledGenesis},
+		{Name: "admin_audit_offline_verify", Opts: adminAuditOpts(), Run: adminAuditOfflineVerify},
 		// Admin audit middleware (W-P1-AAUD-02): an admin-bearer write in
 		// console.auth none is one row for cp-admin-token; wrong bearers and worker
 		// traffic write none. In-process only (it reads the CP state dir).
 		{Name: "admin_audit_records_bearer_write", Opts: adminAuditBearerOpts(), Run: adminAuditRecordsBearerWrite},
 		// In oidc mode a viewer's refused write is one denied row; no session, no row.
 		{Name: "admin_audit_records_viewer_denied", Opts: adminAuditOIDCOpts(), Run: adminAuditRecordsViewerDenied},
+		// Admin audit dashboard API (W-P1-AAUD-03): list, verify and pubkey over the
+		// real chain, read-only (no row added); verify needs the admin bearer in none
+		// mode and admin in oidc, where a viewer may read only the keys; with admin
+		// audit off all three are 404. In-process only (they read the CP state dir).
+		{Name: "admin_audit_dashboard_bearer", Opts: adminAuditBearerOpts(), Run: adminAuditDashboardBearer},
+		{Name: "admin_audit_dashboard_roles", Opts: adminAuditOIDCOpts(), Run: adminAuditDashboardRoles},
+		{Name: "admin_audit_dashboard_disabled", Opts: []harness.Option{harness.WithControlPlaneAdminToken()}, Run: adminAuditDashboardDisabled},
 		// CP admin bearer (W-P1-WTOK-07): --admin-token-env opens dashboard writes,
 		// the shared worker token does not, and the admin token opens no worker
 		// route. In-process only (the compose stack sets no admin token yet).

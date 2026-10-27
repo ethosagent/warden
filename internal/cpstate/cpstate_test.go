@@ -379,3 +379,52 @@ func TestCloseIdempotent(t *testing.T) {
 		t.Errorf("second Close = %v", err)
 	}
 }
+
+// TestOpenReadOnlyAllowNewer: a reader that only reads its own tables may
+// tolerate IDs a newer binary applied. AllowNewer decides per unknown ID; an
+// ID it refuses still trips the guard, and the file is never modified.
+func TestOpenReadOnlyAllowNewer(t *testing.T) {
+	path := dbPath(t)
+	d := openT(t, path, mig1, mig2, mig3)
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ro, err := OpenReadOnlyWith(context.Background(), path, []Migration{mig1}, ReadOnlyOptions{
+		AllowNewer: func(id string) bool { return id != "t/0001" },
+	})
+	if err != nil {
+		t.Fatalf("OpenReadOnlyWith tolerating newer IDs: %v", err)
+	}
+	if got := ro.Applied(); !slices.Equal(got, []string{"t/0001", "t/0002", "t/0003"}) {
+		t.Errorf("Applied = %v, want every ID the file holds", got)
+	}
+	if _, err := ro.SQL().Exec("INSERT INTO t1 (v) VALUES ('x')"); err == nil {
+		t.Error("write through the tolerant read-only handle succeeded")
+	}
+	if err := ro.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = OpenReadOnlyWith(context.Background(), path, []Migration{mig1}, ReadOnlyOptions{
+		AllowNewer: func(id string) bool { return id != "t/0003" },
+	})
+	if err == nil || !strings.Contains(err.Error(), "t/0003") {
+		t.Errorf("OpenReadOnlyWith refusing t/0003 = %v, want an error naming it", err)
+	}
+	// A nil AllowNewer is plain OpenReadOnly.
+	if _, err := OpenReadOnlyWith(context.Background(), path, []Migration{mig1}, ReadOnlyOptions{}); err == nil {
+		t.Error("OpenReadOnlyWith without AllowNewer accepted unknown IDs")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Error("database bytes changed")
+	}
+}
