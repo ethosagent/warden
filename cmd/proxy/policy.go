@@ -13,7 +13,7 @@ import (
 func newPolicyCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "policy",
-		Short: "Policy inspection and suggestion tools.",
+		Short: "Policy inspection, suggestion, import and export tools.",
 	}
 }
 
