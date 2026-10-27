@@ -148,6 +148,22 @@ func TestControlPlaneCorruptStateDB(t *testing.T) {
 	}
 }
 
+// TestControlPlaneRequireConsoleAuth: --require-console-auth makes the
+// control-plane command exit with an error when console.auth is none (main
+// turns a command error into a non-zero exit).
+func TestControlPlaneRequireConsoleAuth(t *testing.T) {
+	err := executeRoot(t, "control-plane",
+		"--config", writeTempConfig(t, minimalConfig),
+		"--listen", "127.0.0.1:0",
+		"--state-dir", filepath.Join(t.TempDir(), "state"),
+		"--analytics-provider", "memory",
+		"--require-console-auth",
+	)
+	if err == nil || !strings.Contains(err.Error(), "console.auth") {
+		t.Fatalf("control-plane --require-console-auth in none mode = %v, want an error naming console.auth", err)
+	}
+}
+
 // TestControlPlaneSubcommand_CAFlagMismatch covers the guard that both --ca-cert and
 // --ca-key must be provided together.
 func TestControlPlaneSubcommand_CAFlagMismatch(t *testing.T) {

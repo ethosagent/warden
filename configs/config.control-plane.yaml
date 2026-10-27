@@ -42,10 +42,11 @@ logging:
 
 # Console sign-in (CP-LOCAL; read from this --config file only, never served to
 # workers, and edits to the --state-dir copy are ignored). Absent block means
-# `auth: none`: today's behaviour, dashboard writes gated by the admin bearer.
-# `auth: oidc` needs --state-dir and the client-secret env var; in this build the
-# control plane still refuses to start with it (enforcement lands with
-# W-P1-SSO-06). The block holds the env var NAME, never the secret.
+# `auth: none`: today's behaviour (open reads, dashboard writes gated by the admin
+# bearer), with a startup warning; --require-console-auth refuses to start in it.
+# `auth: oidc` needs --state-dir and the client-secret env var; every human route
+# (/dashboard/*, /central/secrets) then needs a session and the shared bearer
+# opens none of them. The block holds the env var NAME, never the secret.
 # Defaults: clientID warden-console, scopes [openid, email, profile, groups],
 # session idle 1h / absolute 12h (0 < idle <= absolute <= 168h). Group matching
 # is exact and case-sensitive; the highest matching role wins. Changing this

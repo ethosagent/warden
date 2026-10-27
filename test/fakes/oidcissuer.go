@@ -15,6 +15,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -48,6 +50,11 @@ type OIDCIssuer struct {
 	jwksReqs atomic.Int64
 	discReqs atomic.Int64
 
+	// public, when set, is the iss string and URL prefix the fake presents
+	// (WithPublicIssuer); the listener stays on addr.
+	public string
+	flow   flowState
+
 	mu      sync.Mutex
 	srv     *httptest.Server // nil while stopped
 	keys    []*issuerKey     // published, in order; keys[0] signs by default
@@ -61,6 +68,15 @@ type IssuerOption func(*OIDCIssuer)
 // clock so tokens agree with the worker's time).
 func WithIssuerClock(fn func() time.Time) IssuerOption {
 	return func(i *OIDCIssuer) { i.now = fn }
+}
+
+// WithPublicIssuer makes the fake present base (for example
+// http://localhost:5556/dex) as its issuer while it listens on its own loopback
+// address: the iss claim, every URL in the discovery document and the path
+// prefix it serves all follow base. A client reaches it only through an
+// internal-origin rewrite, which is what the internalIssuerURL tests exercise.
+func WithPublicIssuer(base string) IssuerOption {
+	return func(i *OIDCIssuer) { i.public = strings.TrimRight(base, "/") }
 }
 
 type issuerKey struct {
@@ -90,7 +106,18 @@ func NewOIDCIssuer(tb testing.TB, opts ...IssuerOption) *OIDCIssuer {
 }
 
 // Issuer is the iss string: the base URL, stable across Stop and Start.
-func (i *OIDCIssuer) Issuer() string { return "http://" + i.addr }
+func (i *OIDCIssuer) Issuer() string {
+	if i.public != "" {
+		return i.public
+	}
+	return "http://" + i.addr
+}
+
+// Addr is the loopback host:port the fake listens on, whatever Issuer says.
+func (i *OIDCIssuer) Addr() string { return i.addr }
+
+// URL is the base URL of the listener itself (the internal origin).
+func (i *OIDCIssuer) URL() string { return "http://" + i.addr }
 
 // JWKSURL is where the key set is served.
 func (i *OIDCIssuer) JWKSURL() string { return i.Issuer() + "/jwks" }
@@ -159,11 +186,21 @@ func (i *OIDCIssuer) serve(l net.Listener) {
 // route dispatches the two endpoints by path (a switch, not a mux, so the fake
 // registers no routes: X9 keeps those in a server's routes.go).
 func (i *OIDCIssuer) route(w http.ResponseWriter, r *http.Request) {
-	switch r.URL.Path {
+	path := r.URL.Path
+	if i.public != "" {
+		if u, err := url.Parse(i.public); err == nil {
+			path = strings.TrimPrefix(path, strings.TrimRight(u.Path, "/"))
+		}
+	}
+	switch path {
 	case "/.well-known/openid-configuration":
 		i.handleDiscovery(w, r)
 	case "/jwks":
 		i.handleJWKS(w, r)
+	case "/auth":
+		i.handleAuthorize(w, r)
+	case "/token":
+		i.handleToken(w, r)
 	default:
 		http.NotFound(w, r)
 	}

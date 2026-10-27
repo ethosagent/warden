@@ -48,8 +48,11 @@ func Reasons() []Reason {
 
 // Limits and defaults that Warden enforces itself.
 const (
-	MaxTokenBytes      = 16 << 10
-	MaxGroups          = 64
+	MaxTokenBytes = 16 << 10
+	MaxGroups     = 64
+	// MaxConsoleGroups is the cap the console login applies: a human can hold
+	// more groups than an agent token.
+	MaxConsoleGroups   = 256
 	MaxGroupBytes      = 256
 	DefaultClockSkew   = 60 * time.Second
 	MaxClockSkew       = 5 * time.Minute
@@ -106,7 +109,10 @@ func SubjectFrom(c Claims, s Status) *Subject {
 // MaxGroupBytes, sorts, de-duplicates and keeps at most MaxGroups. The bool is
 // true when anything was dropped for size or count, so callers can fail closed
 // on a partial list.
-func NormalizeGroups(in []string) ([]string, bool) {
+func NormalizeGroups(in []string) ([]string, bool) { return NormalizeGroupsMax(in, MaxGroups) }
+
+// NormalizeGroupsMax is NormalizeGroups with a caller-chosen entry cap.
+func NormalizeGroupsMax(in []string, maxGroups int) ([]string, bool) {
 	truncated := false
 	out := make([]string, 0, len(in))
 	for _, g := range in {
@@ -127,8 +133,8 @@ func NormalizeGroups(in []string) ([]string, bool) {
 		}
 	}
 	out = out[:w]
-	if len(out) > MaxGroups {
-		out = out[:MaxGroups]
+	if len(out) > maxGroups {
+		out = out[:maxGroups]
 		truncated = true
 	}
 	if len(out) == 0 {

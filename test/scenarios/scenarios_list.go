@@ -57,6 +57,14 @@ var All = slices.Concat(
 		{Name: "identity_issuer_down", Opts: identityOpts(), Run: identityIssuerDown},
 		{Name: "identity_transparent", Opts: append(identityOpts(), harness.TransparentIntercept()), Run: identityTransparent},
 		{Name: "identity_hot_reload", Opts: identityOpts(), Run: identityHotReload},
+
+		// Console OIDC login (W-P1-SSO-03): a real login through the issuer fake
+		// creates a session with the right cookie flags, and the session expires
+		// by the control plane's clock. In-process only (issuer fake, fake clock).
+		{Name: "console_oidc_login", Opts: consoleOpts(), Run: consoleOIDCLogin},
+		// Console enforcement (W-P1-SSO-06): oidc starts, the shared bearer opens no
+		// human route, and workers keep pulling /policy with it.
+		{Name: "console_oidc_bearer_rejected", Opts: consoleOpts(), Run: consoleOIDCBearerRejected},
 	},
 	// Canary across protocols x allow/deny; see canary.go.
 	canaryScenarios(),

@@ -169,11 +169,21 @@ configured secret the headers are absent and deliveries are unsigned.
 
 ### Dashboard writes need the control-plane token
 
-Every state-changing call under `/dashboard/api/` (`PUT`, `POST`, `PATCH`,
+This is the `console.auth: none` mode (the default). Dashboard reads are open;
+every state-changing call under `/dashboard/api/` (`PUT`, `POST`, `PATCH`,
 `DELETE`: policy, settings, integrations, detection, LLM providers, the secret
-store, and the query and audit-verify `POST`s) must carry
-`Authorization: Bearer <control-plane token>`, the same token workers use for
-`/policy` and `/central/*`, checked in constant time.
+store, and the query and audit-verify `POST`s) is gated by the control-plane
+admin bearer, `Authorization: Bearer <control-plane token>`, checked in constant
+time and fail closed. Until a separate admin token exists, that bearer is the
+`--token-env` token. `/central/secrets` takes the same bearer in this mode. In
+`console.auth: oidc` none of this applies: sessions and CSRF replace the bearer
+on every human route (see [Migrating from none to oidc](#migrating-from-none-to-oidc)).
+
+- **Visible.** At startup the control plane logs one warning,
+  `console.auth=none: dashboard reads are unauthenticated; writes need the admin bearer`,
+  `GET /dashboard/api/setup` returns `"authMode":"none"`, and the dashboard shows a
+  persistent "Open console" banner. Start the control plane with
+  `--require-console-auth` to make none mode a startup error instead.
 
 - **Fail closed.** A control plane started without a token (`--token-env` unset
   or the variable empty) refuses every dashboard write with `403` and a message
@@ -221,10 +231,59 @@ needs a restart. It holds the *name* of the client-secret env var, never the sec
 | `session.idle`, `session.absolute` | `1h`, `12h` | `0 < idle <= absolute <= 168h`. |
 
 In `oidc` mode the control plane also needs a non-empty value in the client-secret env
-var and `--state-dir`. Until W-P1-SSO-06 lands it then refuses to start with
-"console oidc enforcement is not available in this build", so no build serves login
-routes while a human route still accepts the shared bearer. See
+var and `--state-dir`; without either it refuses to start. See
 `configs/config.control-plane.yaml` for commented examples.
+
+In `oidc` mode every human route needs a session: each `/dashboard/*` route needs at
+least the viewer role, writes need the CSRF header, and `/central/secrets` (GET, POST
+and `DELETE /central/secrets/{key}`) needs an admin session plus CSRF. An
+`Authorization` header is ignored on those routes, so neither the shared
+`--token-env` token nor any other bearer opens them (401 without a session, 403 for a
+role below admin). The worker routes (`/policy`, `/control/heartbeat`,
+`/central/ingest`) keep the shared bearer in both modes.
+
+### Migrating from none to oidc
+
+1. Add the `console:` block to the operator-owned `--config` file: `auth: oidc`, the
+   `oidc` block (`issuer`, `clientSecretEnv`, `redirectURL`, and `internalIssuerURL`
+   when the control plane reaches the IdP on a different origin than the browser) and
+   `roles` mapping your IdP groups to `admin`, `editor` and `viewer`.
+2. Put the client secret in the environment variable `oidc.clientSecretEnv` names.
+3. Start the control plane with `--state-dir` on a writable volume (sessions and
+   pending logins live in `<state-dir>/warden-cp.db`). Add `--require-console-auth`
+   so a lost `console:` block fails startup instead of reopening the console.
+4. Verify: the startup log no longer carries the `console.auth=none` warning; opening
+   `/dashboard/` redirects to the IdP; after sign-in a viewer can read every tab but
+   gets 403 on a policy change, and an admin can edit integrations, LLM providers and
+   secrets. A request with only `Authorization: Bearer $WARDEN_CP_TOKEN` gets 401 on
+   `/dashboard/api/*` and `/central/secrets`, while workers keep pulling `/policy`.
+
+Scripts that call `/central/secrets` with the shared bearer stop working in oidc
+mode: secret writes then need an admin session plus CSRF, so they go through the
+admin's secret store tab in the dashboard until scoped API keys exist. Scripts that
+write `/dashboard/api/*` with the bearer stop working for the same reason.
+
+### Login routes
+
+In `oidc` mode (with `--state-dir`) the control plane serves `GET /auth/login` and
+`GET /auth/callback`; in `none` mode both are 404. Login is the authorization-code flow
+with S256 PKCE, a random `state` and `nonce`, and a pending row in the state DB (10 minute
+TTL, single use, at most 10,000 rows). The row is bound to the browser by a short-lived
+`__Host-warden_login` cookie (`warden_login` on an http loopback redirect URL). The ID
+token must pass the shared verifier with `aud` = `oidc.clientID`, an `azp` equal to it
+when present (required when `aud` has several entries), RS256 or ES256 only, and the
+nonce. The user then needs a role from `console.roles`; the session id is minted by the
+control plane after both checks and never taken from the request. No access, refresh or
+ID token is stored, and `offline_access` is not requested. `next` is honoured only as a
+path under `/dashboard/`. A failed login redirects to `/dashboard/?login_error=<code>` with
+a code from `state_invalid`, `nonce_mismatch`, `token_invalid`, `exchange_failed`,
+`idp_error`, `no_role` or `idp_unavailable`; IdP error text is never echoed. `/auth/login`
+itself answers 503 `login_busy` when 10,000 logins are pending and 500 `login_error`
+if the attempt cannot be stored. At most 256 groups are read from the token. Discovery
+runs in the background with backoff, so an unreachable IdP never blocks startup or
+`/policy`; until it succeeds both routes answer 503 `idp_unavailable`. Each attempt logs
+one `console_login` line (`result`, `reason`, `sub`, `duration_ms`), never a code, state,
+verifier, nonce or token.
 
 ## Console roles and the role matrix
 
@@ -238,9 +297,8 @@ The console has two modes, chosen by `console.auth`:
 | Shared tokens | the bearer is the write credential | the shared tokens never open a human route, the bearer included |
 | `/auth/me`, `/auth/logout` | absent (`404`) | any live session; logout is CSRF-checked and ends only the console session, not the IdP's |
 
-This section describes `oidc` once it is served; until W-P1-SSO-06 lands the control
-plane refuses to start in `oidc` mode (see [Console sign-in config](#console-sign-in-config)).
-Moving a deployment from `none` to `oidc` is a separate guide.
+Moving a deployment from `none` to `oidc` is covered in
+[Migrating from none to oidc](#migrating-from-none-to-oidc).
 
 **Roles.** The role is the highest of `admin` > `editor` > `viewer` whose
 `console.roles` groups match the user's IdP groups. Roles are computed from the groups

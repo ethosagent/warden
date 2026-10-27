@@ -639,6 +639,22 @@ func TestV3Endpoints_RejectWrongMethod(t *testing.T) {
 	}
 }
 
+// TestSetup_AuthMode: authMode is absent until the host sets it (a worker's
+// dashboard is not a console) and reports what SetAuthMode was given.
+func TestSetup_AuthMode(t *testing.T) {
+	srv := NewServer(&fakeDataSource{}, config.Policy{}, emptyProvider())
+	rr := doGet(t, srv.Handler(), "/dashboard/api/setup")
+	if strings.Contains(rr.Body.String(), "authMode") {
+		t.Fatalf("authMode present without SetAuthMode: %s", rr.Body.String())
+	}
+	for _, mode := range []string{"none", "oidc"} {
+		srv.SetAuthMode(mode)
+		if got := getSetup(t, srv).AuthMode; got != mode {
+			t.Errorf("authMode = %q, want %q", got, mode)
+		}
+	}
+}
+
 // --- helpers ---
 
 func getSetup(t *testing.T, srv *Server) setupResponse {
@@ -677,4 +693,16 @@ func bytesToStrings(bs [][]byte) []string {
 		out[i] = string(b)
 	}
 	return out
+}
+
+// TestIndexHTML_AuthNoneBanner pins the open-console banner: it starts hidden
+// and applySetup shows it only when /dashboard/api/setup reports authMode none.
+func TestIndexHTML_AuthNoneBanner(t *testing.T) {
+	html := string(indexHTML)
+	if !strings.Contains(html, `<span id="authNoneBanner" role="status" hidden`) {
+		t.Error("index.html lacks the hidden-by-default authNoneBanner")
+	}
+	if !strings.Contains(html, `nb.hidden=(s.authMode!=='none')`) {
+		t.Error("applySetup does not drive authNoneBanner from authMode")
+	}
 }

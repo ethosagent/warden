@@ -55,6 +55,11 @@ type Params struct {
 	// query/generate rate limit ticks on it; the detection engine migrates in its
 	// own phase (rule L3, #349).
 	Clock clock.Clock
+
+	// RequireConsoleAuth refuses to start when console.auth is none, so an
+	// operator can make an open console a startup error
+	// (--require-console-auth).
+	RequireConsoleAuth bool
 }
 
 // Run boots a control plane from Params and serves until ctx is cancelled. It
@@ -129,8 +134,12 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	if err != nil {
 		return fail(err)
 	}
-	if err := checkConsoleSupported(consoleCfg); err != nil {
-		return fail(err)
+	if consoleCfg.Auth != config.ConsoleAuthOIDC {
+		if p.RequireConsoleAuth {
+			return fail(errors.New("control-plane: console.auth is none and --require-console-auth is set; configure console.auth: oidc"))
+		}
+		logger.Warn("console.auth=none: dashboard reads are unauthenticated; writes need the admin bearer",
+			"hint", "set console.auth: oidc (see docs/control-plane.md, \"Migrating from none to oidc\")")
 	}
 
 	var token string
@@ -153,7 +162,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		// Every mode registers the sessions migration, so switching console.auth
 		// never trips the downgrade guard. The open is not cancellable: a shutdown
 		// signal must not abandon a migration half way through boot.
-		state, err = cpstate.Open(context.WithoutCancel(ctx), statePath, SessionMigrations())
+		state, err = cpstate.Open(context.WithoutCancel(ctx), statePath, append(SessionMigrations(), OIDCPendingMigrations()...))
 		if err != nil {
 			return fail(fmt.Errorf("control-plane: state db: %w", err))
 		}
@@ -220,6 +229,18 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		return fail(fmt.Errorf("control-plane: secret store: %w", err))
 	}
 
+	// clk is the CP's resolved time port (nil = clock.Real(), the production
+	// default). Console sessions, pending logins and ID-token checks read it.
+	clk := p.Clock
+	if clk == nil {
+		clk = clock.Real()
+	}
+	var clientSecret string
+	if consoleCfg.Auth == config.ConsoleAuthOIDC {
+		// resolveConsole already proved the variable is non-empty.
+		clientSecret = strings.TrimSpace(os.Getenv(consoleCfg.OIDC.ClientSecretEnv))
+	}
+
 	srv := New(Config{
 		State:        state,
 		PolicyPath:   servedPath,
@@ -231,6 +252,8 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		AlertDBPath:  alertDBPath,
 		SecretStore:  secretStore,
 		Console:      consoleCfg,
+		ClientSecret: clientSecret,
+		Now:          clk.Now,
 		// Report the backend name to the dashboard only when a writable store was
 		// actually built (echo/aws); env/none leaves it empty → tab reports "none".
 		SecretStoreBackend: secretStoreBackendName(secretStore, pol.SecretStore),
@@ -356,11 +379,6 @@ func seedServedConfig(servedPath, seedPath string) (bool, error) {
 	return true, nil
 }
 
-// errConsoleOIDCUnavailable is the temporary guard of W-P1-SSO-02. It is removed
-// by W-P1-SSO-06, the ticket that also secures /central/secrets, so no build
-// serves oidc login while a human route still accepts the shared bearer.
-var errConsoleOIDCUnavailable = errors.New("control-plane: console oidc enforcement is not available in this build")
-
 // resolveConsole loads the console block from configPath (the operator-owned
 // --config file, never the served copy) and checks what oidc mode needs at
 // startup: a non-empty client-secret env var and a --state-dir. Error and log
@@ -393,14 +411,6 @@ func resolveConsole(logger *slog.Logger, configPath, servedPath, stateDir string
 			"issuer", cc.OIDC.Issuer, "internalIssuerURL", cc.OIDC.InternalIssuerURL)
 	}
 	return cc, nil
-}
-
-// checkConsoleSupported is the temporary oidc guard (see errConsoleOIDCUnavailable).
-func checkConsoleSupported(cc config.ConsoleConfig) error {
-	if cc.Auth == config.ConsoleAuthOIDC {
-		return errConsoleOIDCUnavailable
-	}
-	return nil
 }
 
 // toInstanceConfigs maps the CP-local integrations config onto the integration

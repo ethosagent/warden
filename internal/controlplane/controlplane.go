@@ -77,9 +77,15 @@ type Config struct {
 	SecretStoreBackend string
 	// Console is the CP-local console sign-in config, resolved from --config by
 	// resolveConsole. In oidc mode with State set it turns on server-side
-	// sessions (withSession); the zero value (Auth "" == none) changes no
-	// behaviour. Login and role enforcement arrive in later tickets.
+	// sessions, login and role enforcement on /dashboard/ and /central/secrets;
+	// the zero value (Auth "" == none) changes no behaviour.
 	Console config.ConsoleConfig
+	// ClientSecret is the console OIDC client secret, read by Run from the
+	// environment variable console.oidc.clientSecretEnv names. It is never logged.
+	ClientSecret string
+	// Now is the clock for sessions, pending logins and ID-token checks (nil =
+	// time.Now). The L1 harness injects its fake clock through Params.Clock.
+	Now func() time.Time
 	// DetectionEnabled gates the temporal-detection engine. When true (the
 	// default when no detection block disables it), New builds the engine AND — so
 	// alerts land without any sink configured — the always-on Alert Store (the
@@ -179,6 +185,9 @@ type Server struct {
 	// generateLimit is the per-session token bucket on POST
 	// /dashboard/api/query/generate in oidc mode (it spends LLM tokens).
 	generateLimit *sessionLimiter
+	// auth is the console OIDC login (/auth/login, /auth/callback); set only when
+	// sessions are.
+	auth *authService
 }
 
 // Compile-time assertions that the concrete types satisfy their role interfaces.
@@ -229,6 +238,7 @@ func New(cfg Config) *Server {
 		generateLimit:   newSessionLimiter(cfg.Clock, queryGenerateLimit, time.Minute),
 	}
 	s.initSessions()
+	s.initAuth()
 	// Alert pipeline (CP-hosted alert delivery + always-on Alert Store). Constructed
 	// whenever an alert DB path is set — even with ZERO configured integrations —
 	// because it serves two always-on purposes:
@@ -283,6 +293,10 @@ func New(cfg Config) *Server {
 func (s *Server) Start(ctx context.Context) {
 	if s.sessions != nil {
 		go s.sweepSessions(ctx)
+	}
+	if s.auth != nil {
+		go s.auth.discover(ctx)
+		go s.auth.sweep(ctx)
 	}
 	// Alert pipeline: start the embeddable assembly (manager start + the
 	// detection tick loop, both ctx-scoped). The pipeline captures ctx as its
@@ -358,7 +372,8 @@ func (s *Server) writeSettings(in config.SettingsWire) error { return s.WriteSet
 //
 //	GET  /policy          — allow/deny policy for workers (bearer-auth)
 //	POST /central/ingest  — fleet analytics ingest (bearer-auth)
-//	     /dashboard/      — fleet dashboard over the aggregated store (writes bearer-auth)
+//	     /dashboard/      — fleet dashboard over the aggregated store (writes bearer-auth; sessions in oidc mode)
+//	     /central/secrets — secret store writes, when one is configured (bearer; admin session in oidc mode)
 //	GET  /healthz         — liveness
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -393,9 +408,10 @@ func (s *Server) Handler() http.Handler {
 	// Secret write path (/central/secrets), mounted ONLY when a writable store is
 	// configured (echo now; aws in Phase 5). A nil store means the routes are
 	// absent → 404, so a control plane on backend env/none behaves exactly as
-	// before. The handlers apply the SAME constant-time bearer gate as the other
-	// /central/* routes; GET returns metadata only, and a POST value is held in
-	// transit only and logged by-reference, never persisted in the CP.
+	// before. In console.auth none the handlers apply the SAME constant-time
+	// bearer gate as the other /central/* routes; in oidc mode they need an admin
+	// session plus CSRF (secretsAuthOK). GET returns metadata only, and a POST
+	// value is held in transit only and logged by-reference, never persisted.
 	if s.secretStore != nil {
 		mux.Handle("/central/secrets", s.sessionWrap(http.HandlerFunc(s.handleSecrets)))
 		mux.Handle("/central/secrets/", s.sessionWrap(http.HandlerFunc(s.handleSecretByKey)))
@@ -472,6 +488,7 @@ func (s *Server) Handler() http.Handler {
 	//     dashboard itself; the CP does not SIGN receipts (workers do), so no
 	//     receipts source is wired and the receipts block stays zeroed.
 	dash.SetSecretStore(s.secretStore, s.cfg.SecretStoreBackend)
+	dash.SetAuthMode(s.authMode())
 	if s.integrationsStore != nil {
 		// Alerts + integration status read from the CURRENT manager (re-pointed on
 		// reload), so a reload never silently breaks the alerts tab or the status view.
