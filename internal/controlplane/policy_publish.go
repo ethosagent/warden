@@ -131,9 +131,10 @@ func (s *Server) headDoc(ctx context.Context) (int64, policyWire, error) {
 // read when that is zero. A moved head is a *dashboard.ConflictError naming
 // the current head and its author (it unwraps to ErrConflict). A new credential value
 // in the doc is written to the served YAML secretStore first and only its
-// fingerprint is stored; the YAML is put back if no version is created. The
-// one log line is Create's. A validation error is a
-// *dashboard.InvalidPolicyError (its text is the loader's).
+// fingerprint is stored; the YAML is put back if no version is created. A
+// new version is mirrored into the served YAML (mirrorHead), whose failure
+// never fails the save. The one log line on success is Create's. A validation
+// error is a *dashboard.InvalidPolicyError (its text is the loader's).
 func (s *Server) publish(ctx context.Context, mutate func(*policyWire) error, meta dashboard.WriteMeta, source string) error {
 	_, _, err := s.publishVersion(ctx, mutate, meta, source)
 	return err
@@ -183,6 +184,9 @@ func (s *Server) publishVersion(ctx context.Context, mutate func(*policyWire) er
 			return 0, false, s.conflictError(ctx, err)
 		}
 		return 0, false, err
+	}
+	if changed {
+		s.mirrorHead(ctx, version)
 	}
 	s.refresh()
 	s.reinjectExploreLLM()

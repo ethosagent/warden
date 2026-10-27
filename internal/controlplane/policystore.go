@@ -22,9 +22,13 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/ethosagent/warden/internal/adminaudit"
 	"github.com/ethosagent/warden/internal/config"
@@ -732,4 +736,216 @@ func (im policyImport) record(ctx context.Context, servedYAML []byte, version in
 	}); err != nil {
 		im.logger.Error("control plane: admin audit append failed", "action", actionPolicyInitialImport, "error", err)
 	}
+}
+
+// The write-through mirror (W-P1-PVER-05). In versioned mode the served YAML
+// is not the policy source, but --policy-store=file or an older binary serves
+// it, so after every head move the control plane renders head into it. A hand
+// edit of its policy/settings blocks is drift: warned about once per distinct
+// blocks hash, shown on the dashboard and audited as config.external_change,
+// never served. It comes back in only through `warden policy import`.
+
+// mirrorDriftMsg is the drift warning, worded as the design states it.
+const mirrorDriftMsg = "served config policy block differs from head; ignored"
+
+// policyMirror is the mirror and drift state. Every field but drift is guarded
+// by Server.writeMu; drift is read by the dashboard without it.
+type policyMirror struct {
+	// head is the version the served YAML was last mirrored from or checked
+	// against (0 = not yet, before the first tick), headSHA its doc_sha256.
+	head    int64
+	headSHA string
+	// hash is the blocks hash (servedBlocksHash) the served YAML has when it
+	// equals head; "" when unknown (a failed mirror), which skips the check.
+	hash string
+	// warned are the blocks hashes already reported as drift against this
+	// head, oldest first and at most externalSeenMax, so each distinct edit is
+	// warned about once (a head move starts over).
+	warned []string
+	// primeErr is the last first-tick error logged, so it is logged once.
+	primeErr string
+	drift    atomic.Bool
+}
+
+// record sets the mirrored head and hash and clears drift.
+func (m *policyMirror) record(v PolicyVersion, hash string) {
+	m.head, m.headSHA, m.hash, m.warned = v.Version, v.DocSHA256, hash, nil
+	m.drift.Store(false)
+}
+
+// policyDrift reports whether the served YAML's policy/settings blocks differ
+// from head (always false in file mode).
+func (s *Server) policyDrift() bool { return s.mirror.drift.Load() }
+
+// mirrorHead renders head version into the served YAML through
+// atomicWriteConfig (validated by the full loader, never a partial file) and
+// records the mirrored blocks hash. The credential, held in versions only as
+// its fingerprint, keeps the served file's live value (renderDocToRoot's
+// preserve-on-empty rule); blocks no policy version carries are kept as the
+// file has them. A failure is logged at error with the version and never
+// fails or rolls back the version. The caller holds writeMu.
+func (s *Server) mirrorHead(ctx context.Context, version int64) {
+	v, err := s.versions.Get(ctx, version)
+	if err == nil {
+		err = s.writeMirror(v.Doc)
+	}
+	if err != nil {
+		s.cfg.Logger.Error("control plane: cannot mirror the policy head into the served config; the version stands",
+			"version", version, "error", err)
+		// The file is not head and its expected hash is unknown: skip the drift
+		// check until the next head move mirrors again. The drift state is kept
+		// as it was: a failed mirror neither shows nor clears the banner.
+		s.mirror.head, s.mirror.headSHA, s.mirror.hash = version, v.DocSHA256, ""
+		return
+	}
+	hash, err := servedBlocksHash(s.cfg.PolicyPath)
+	if err != nil {
+		hash = ""
+	}
+	s.mirror.record(v, hash)
+}
+
+// writeMirror replaces the served YAML with doc rendered into it. A served
+// file that is unreadable, does not parse or is read-only is left alone: it is
+// the only home of the CP-local blocks, and a read-only file is the operator's
+// choice.
+func (s *Server) writeMirror(doc policyWire) error {
+	raw, err := os.ReadFile(s.cfg.PolicyPath)
+	if err != nil {
+		return fmt.Errorf("read the served config: %w", err)
+	}
+	root := map[string]yaml.Node{}
+	if err := yaml.Unmarshal(raw, &root); err != nil {
+		return fmt.Errorf("parse the served config: %w", err)
+	}
+	f, err := os.OpenFile(s.cfg.PolicyPath, os.O_WRONLY, 0)
+	if err != nil {
+		return fmt.Errorf("the served config is not writable: %w", err)
+	}
+	_ = f.Close()
+	if err := renderDocToRoot(root, doc); err != nil {
+		return err
+	}
+	return s.atomicWriteConfig(root)
+}
+
+// expectedBlocksHash is the blocks hash the served YAML would have with doc
+// mirrored into it, computed on a validated temp copy; the served file is not
+// written.
+func (s *Server) expectedBlocksHash(doc policyWire) (string, error) {
+	root := s.readServedRoot()
+	if err := renderDocToRoot(root, doc); err != nil {
+		return "", err
+	}
+	tmpName, err := s.writeValidatedTemp(root)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = os.Remove(tmpName) }()
+	return servedBlocksHash(tmpName)
+}
+
+// checkMirror is the versioned ticker's mirror and drift step. A head moved
+// outside the publish path (the CLI, another control plane) is mirrored. On
+// the first tick the served file is not written: its expected hash is
+// computed from head, so an edit made while the control plane was down is
+// drift rather than overwritten. Then the served YAML's blocks hash is
+// compared with the mirrored one; a difference is an external edit, warned
+// about and audited once per distinct hash and never served. Head 0 (an empty
+// store, before the initial import) serves the YAML and has no mirror.
+func (s *Server) checkMirror(ctx context.Context) {
+	// The head is read under writeMu: a publish holds it from Create to its
+	// mirror, so a head read before it could mirror an older version over a
+	// newer one.
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	head, err := s.versions.Head(ctx)
+	if err != nil || head == 0 {
+		return // Refresh already logged a store error
+	}
+	if head != s.mirror.head {
+		if s.mirror.head != 0 {
+			s.mirrorHead(ctx, head)
+		} else if !s.primeMirror(ctx, head) {
+			return
+		}
+	}
+	if s.mirror.hash == "" {
+		return
+	}
+	sum, err := servedBlocksHash(s.cfg.PolicyPath)
+	if err != nil {
+		return // unreadable: keep the last drift state
+	}
+	if sum == s.mirror.hash {
+		s.mirror.drift.Store(false)
+		return
+	}
+	s.mirror.drift.Store(true)
+	if slices.Contains(s.mirror.warned, sum) {
+		return
+	}
+	if len(s.mirror.warned) == externalSeenMax {
+		s.mirror.warned = slices.Delete(s.mirror.warned, 0, 1)
+	}
+	s.mirror.warned = append(s.mirror.warned, sum)
+	s.cfg.Logger.Warn(mirrorDriftMsg, "file_sha256", sum, "head", s.mirror.head)
+	s.auditExternalChange(ctx, externalChangeTarget,
+		fmt.Sprintf("v%d:%s", s.mirror.head, s.mirror.headSHA), "file:"+sum)
+}
+
+// primeMirror records head and the served YAML's expected blocks hash on the
+// first tick. It reports false, leaving the state unset so the next tick
+// retries, when head cannot be read or rendered.
+func (s *Server) primeMirror(ctx context.Context, head int64) bool {
+	v, err := s.versions.Get(ctx, head)
+	if err != nil {
+		return false
+	}
+	hash, err := s.expectedBlocksHash(v.Doc)
+	if err != nil {
+		if msg := err.Error(); msg != s.mirror.primeErr {
+			s.mirror.primeErr = msg
+			s.cfg.Logger.Warn("control plane: cannot compute the served config's expected policy blocks; drift check skipped until it can",
+				"head", head, "error", err)
+		}
+		return false
+	}
+	s.mirror.primeErr = ""
+	s.mirror.record(v, hash)
+	return true
+}
+
+// servedBlocksHash is the sha256 of the policy and settings blocks of the
+// config at path, as the full loader reads them (the wire file mode would
+// serve), so formatting, comments and the CP-local blocks do not count. The
+// credential value is left out: it lives only in the served YAML and the
+// credential overlay serves it, so editing it there is not drift. A file the
+// loader rejects hashes to its raw bytes: it is never equal to head.
+func servedBlocksHash(path string) (string, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	prov, err := config.NewLocalYAMLProvider(path)
+	if err != nil {
+		return sha256Hex(string(raw)), nil
+	}
+	p, err := prov.GetPolicy()
+	if err != nil {
+		return sha256Hex(string(raw)), nil
+	}
+	w := policyWire{Allowlist: p.Allowlist, Denylist: p.Denylist, Settings: config.SettingsWireFromPolicy(p)}
+	if w.Settings != nil && w.Settings.Secrets != nil {
+		settings := *w.Settings
+		secrets := *settings.Secrets
+		secrets.SecretAccessKey = ""
+		settings.Secrets = &secrets
+		w.Settings = &settings
+	}
+	b, err := json.Marshal(w)
+	if err != nil {
+		return "", err
+	}
+	return sha256Hex(string(b)), nil
 }

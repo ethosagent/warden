@@ -86,6 +86,10 @@ var All = slices.Concat(
 		// a new version workers enforce, audited as policy.rollback. In-process
 		// only (it reads the CP state dir).
 		{Name: "policy_history_rollback", Opts: policyHistoryOpts(), Run: policyHistoryRollback},
+		// Mirror and drift (W-P1-PVER-05): a save is mirrored into the served
+		// YAML; a hand edit is never served, shows as drift and is audited once.
+		// In-process only (it edits the CP's file and reads its state dir).
+		{Name: "policy_store_mirror_drift", Opts: policyMirrorOpts(), Run: policyStoreMirrorDrift},
 
 		// Admin audit gate (W-P1-AAUD-05): enabled, the control plane writes the
 		// genesis entry and logs its key_id before serving. In-process only (it
@@ -101,6 +105,10 @@ var All = slices.Concat(
 		// the shared worker token does not, and the admin token opens no worker
 		// route. In-process only (the compose stack sets no admin token yet).
 		{Name: "cp_admin_token_separates_writes", Opts: cpAdminOpts(), Run: cpAdminTokenSeparatesWrites},
+		// File-mode external edits (W-P1-AAUD-08): a hand edit of the served YAML
+		// is served and recorded once as config.external_change; a dashboard save
+		// is not. In-process only (it edits the CP's file and reads its state dir).
+		{Name: "admin_audit_external_edit", Opts: adminAuditOpts(), Run: adminAuditExternalEdit},
 	},
 	// Canary across protocols x allow/deny; see canary.go.
 	canaryScenarios(),

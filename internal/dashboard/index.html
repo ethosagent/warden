@@ -894,6 +894,9 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
         <div class="actions"><span class="note" id="grEditNote"></span></div>
       </div>
 
+      <!-- --policy-store=versioned: the served YAML's policy was edited by hand (drift, W-P1-PVER-05). Shown from /dashboard/api/policy drift. -->
+      <div id="policyDriftBanner" role="status" hidden style="margin:0 0 12px; padding:8px 12px; border-radius:6px; font-size:12.5px; color:var(--amber); border:1px solid var(--amber)">⚠ The served config file's policy was edited by hand and differs from the head version. Workers are still served the head version; the edit is ignored. To use it, bring it in with <code>warden policy import</code>; putting the file back clears this.</div>
+
       <div class="empty-only" id="es-guardrails"></div>
 
       <div class="demo-only">
@@ -2658,6 +2661,7 @@ async function loadGuardrails(){
   gr.policy.allowlist = gr.policy.allowlist||[];
   gr.policy.denylist = gr.policy.denylist||[];
   gr.policyEditable = !!(pol&&pol.editable);
+  renderPolicyDrift(pol);
   gr.settings = (setres&&setres.settings) || {};
   gr.settingsEditable = !!(setres&&setres.editable);
   gr.analytics = an || {dlp:{}};
@@ -2743,8 +2747,14 @@ async function savePolicy(){
     if(!r.ok){ let m='status '+r.status; try{ const e=await r.json(); if(e&&e.error) m=e.error; }catch(_e){} throw new Error(m); }
     const p=await r.json();
     gr.policy=p; gr.policy.allowlist=p.allowlist||[]; gr.policy.denylist=p.denylist||[]; gr.policyEditable=!!p.editable;
+    renderPolicyDrift(p);
     renderEgress();
   }catch(err){ window.alert('Policy save failed: '+err.message); loadGuardrails(); }
+}
+// renderPolicyDrift shows the drift banner while /dashboard/api/policy reports
+// that the served YAML differs from the head version (versioned store only).
+function renderPolicyDrift(p){
+  const b=document.getElementById('policyDriftBanner'); if(b) b.hidden=!(p&&p.drift===true);
 }
 
 /* ---------- DLP (observed matrix /analytics · rules /settings.dlp) ---------- */

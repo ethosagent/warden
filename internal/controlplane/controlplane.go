@@ -213,6 +213,14 @@ type Server struct {
 	// audit is the admin audit middleware's state; nil when cfg.AdminAudit is
 	// (admin audit disabled), in which case no route is wrapped.
 	audit *adminAuditor
+	// auditRec is cfg.AdminAudit as a Recorder (nil with admin audit off) and ext
+	// tracks the served file's hashes for the file-mode external-edit audit
+	// (adminaudit_external.go).
+	auditRec adminaudit.Recorder
+	ext      externalEdits
+	// mirror is the versioned-mode write-through mirror and drift state
+	// (W-P1-PVER-05, policystore.go); unused in file mode.
+	mirror policyMirror
 }
 
 // Compile-time assertions that the concrete types satisfy their role interfaces.
@@ -273,6 +281,8 @@ func New(cfg Config) *Server {
 	s.warnAdminToken()
 	if cfg.AdminAudit != nil {
 		s.enableAdminAudit(cfg.AdminAudit, cfg.AdminAudit.Probe, cfg.AdminAudit.StateHash)
+		s.auditRec = cfg.AdminAudit
+		s.primeExternalEdit()
 	}
 	// Alert pipeline (CP-hosted alert delivery + always-on Alert Store). Constructed
 	// whenever an alert DB path is set — even with ZERO configured integrations —
@@ -363,7 +373,7 @@ func (s *Server) Start(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				s.policy.Refresh()
+				s.reloadPolicy(ctx)
 			}
 		}
 	}()
@@ -490,6 +500,9 @@ func (s *Server) Handler() http.Handler {
 		adminaudit.Annotate(ctx, "policy@"+s.policy.currentETag(), nil)
 		return nil
 	})
+	// Drift banner: a hand edit of the served YAML in versioned mode
+	// (W-P1-PVER-05). Always false in file mode.
+	dash.SetPolicyDrift(s.policyDrift)
 	// The settings writer is context-aware: in oidc mode it authorizes the edit
 	// per field against the caller's role (writeSettingsAs); in none mode it is
 	// editor.WriteSettings unchanged.
@@ -749,7 +762,13 @@ func (s *Server) atomicWriteConfig(root map[string]yaml.Node) error {
 		return err
 	}
 	defer func() { _ = os.Remove(tmpName) }() // no-op once renamed
-	if err := os.Rename(tmpName, s.cfg.PolicyPath); err != nil {
+	// The bytes just validated, hashed by persist as this CP's own write so the
+	// file-mode re-read does not audit it as an external edit (W-P1-AAUD-08).
+	data, err := os.ReadFile(tmpName)
+	if err != nil {
+		return fmt.Errorf("controlplane: read temp policy: %w", err)
+	}
+	if err := s.ext.persist(tmpName, s.cfg.PolicyPath, data); err != nil {
 		return fmt.Errorf("controlplane: persist policy: %w", err)
 	}
 	return nil

@@ -84,8 +84,8 @@ func plusAllow(t *testing.T, s *Server, domain string) config.Policy {
 
 // TestVersionedWriters: a save in versioned mode creates a version with the
 // author taken from the request: a session Principal (oidc), a break-glass
-// session, or anonymous in console.auth none. The served YAML is not
-// rewritten, and workers are served the new head.
+// session, or anonymous in console.auth none. Workers are served the new head,
+// and the served YAML mirrors it (W-P1-PVER-05).
 func TestVersionedWriters(t *testing.T) {
 	cases := []struct {
 		name string
@@ -101,7 +101,6 @@ func TestVersionedWriters(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			path := writePolicyFile(t, "api.openai.com")
 			srv, _ := newPublishServer(t, path, config.ConsoleConfig{})
-			yamlBefore := readFile(t, path)
 
 			if err := srv.WritePolicy(tc.ctx, plusAllow(t, srv, "new.example.com"), dashboard.WriteMeta{Message: "add new"}); err != nil {
 				t.Fatal(err)
@@ -113,8 +112,9 @@ func TestVersionedWriters(t *testing.T) {
 			if got := allowDomainsOf(v.Doc); !slices.Equal(got, []string{"api.openai.com", "new.example.com"}) {
 				t.Fatalf("v2 allowlist = %v", got)
 			}
-			if got := readFile(t, path); got != yamlBefore {
-				t.Fatalf("versioned policy save rewrote the served YAML:\n%s", got)
+			// The served YAML is a write-through mirror of head (W-P1-PVER-05).
+			if got := allowDomainsOf(yamlWire(t, path)); !slices.Equal(got, []string{"api.openai.com", "new.example.com"}) {
+				t.Fatalf("served YAML allowlist = %v, want head v2 mirrored", got)
 			}
 			w, _, _, _ := srv.policy.snapshot()
 			if got := allowDomainsOf(w); !slices.Contains(got, "new.example.com") {
@@ -190,12 +190,11 @@ func TestVersionedWritersHTTP(t *testing.T) {
 
 // TestVersionedLLMProvidersReachWorkers: an llmProviders edit in versioned
 // mode creates a version with source llmproviders, /policy serves the new
-// registry, a blocked long-poll waiter wakes, and the CP-local readers see
-// head without the YAML changing.
+// registry, a blocked long-poll waiter wakes, the CP-local readers see head,
+// and the served YAML mirrors it (W-P1-PVER-05).
 func TestVersionedLLMProvidersReachWorkers(t *testing.T) {
 	path := writePolicyFile(t, "api.openai.com")
 	srv, _ := newPublishServer(t, path, config.ConsoleConfig{})
-	yamlBefore := readFile(t, path)
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 	auth := map[string]string{"Authorization": "Bearer " + dashTestToken}
@@ -249,8 +248,9 @@ func TestVersionedLLMProvidersReachWorkers(t *testing.T) {
 	if view := srv.llmProvidersView(); len(view.Providers) != 1 || view.Providers[0].Name != "p1" {
 		t.Fatalf("llmProvidersView = %+v, want head's registry", view)
 	}
-	if got := readFile(t, path); got != yamlBefore {
-		t.Fatalf("versioned llmProviders save rewrote the served YAML:\n%s", got)
+	// The served YAML is a write-through mirror of head (W-P1-PVER-05).
+	if got := wireJSON(t, yamlWire(t, path)); got != wireJSON(t, servedWire(srv)) {
+		t.Fatalf("served YAML = %s, want head v2 mirrored", got)
 	}
 }
 
