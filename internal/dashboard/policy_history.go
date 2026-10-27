@@ -286,9 +286,13 @@ func splitVersionPath(p string) (seg, action string, ok bool) {
 // RoutePath maps a request path to the Routes() path it is served under: a
 // concrete version path (/dashboard/api/policy/versions/3/diff) becomes its
 // template (/dashboard/api/policy/versions/{v}/diff), whatever the segment
-// holds; every other path is returned unchanged. The control plane keys its
+// holds, and a worker token path (/dashboard/api/worker-tokens/wt_x) becomes
+// /dashboard/api/worker-tokens/{id}; every other path is returned unchanged. The control plane keys its
 // authz table and audit classification on the result.
 func RoutePath(p string) string {
+	if _, ok := workerTokenID(p); ok {
+		return workerTokensPath + "/{id}"
+	}
 	if _, action, ok := splitVersionPath(p); ok {
 		t := policyVersionsPath + "/{v}"
 		if action != "" {

@@ -122,6 +122,11 @@ func authzTable() map[routeKey]authzRow {
 		{get, "/dashboard/api/policy/versions/{v}", readRow(viewer, "policy.version.read")},
 		{get, "/dashboard/api/policy/versions/{v}/diff", readRow(viewer, "policy.diff")},
 		{post, "/dashboard/api/policy/versions/{v}/rollback", auditedRow(editor, "policy.rollback", "policy")},
+		// Worker tokens (W-P1-WTOK-03): viewers may list; minting and revoking are
+		// admin only, and the handler also refuses them outside console.auth oidc.
+		{get, "/dashboard/api/worker-tokens", readRow(viewer, "worker_token.read")},
+		{post, "/dashboard/api/worker-tokens", auditedRow(admin, "worker_token.create", "worker_tokens")},
+		{del, "/dashboard/api/worker-tokens/{id}", auditedRow(admin, "worker_token.revoke", "worker_tokens")},
 		// Served by the control plane itself, ahead of dash.Handler (cpDashboardRoutes).
 		{get, "/dashboard/api/sessions", readRow(admin, "sessions.read")},
 		{del, "/dashboard/api/sessions", auditedRow(admin, "sessions.revoke", "sessions")},

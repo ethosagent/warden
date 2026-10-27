@@ -555,6 +555,9 @@ fails when the two differ.
 | `/dashboard/api/settings` | PUT | editor | `settings.write` |
 | `/dashboard/api/setup` | GET | viewer | `setup.read` |
 | `/dashboard/api/traffic` | GET | viewer | `traffic.read` |
+| `/dashboard/api/worker-tokens` | GET | viewer | `worker_token.read` |
+| `/dashboard/api/worker-tokens` | POST | admin | `worker_token.create` |
+| `/dashboard/api/worker-tokens/{id}` | DELETE | admin | `worker_token.revoke` |
 | `/dashboard/api/workers` | GET | viewer | `workers.read` |
 
 A method and path with no row is refused (`403`) for every role, `GET` included.
@@ -808,6 +811,26 @@ YAML if the mirror is lost.
 - **Release N+2** removes YAML as a policy source: `--policy-store=file` is
   removed, the served YAML is only the write-through mirror of head, and hand
   edits are never served (they come in through `warden policy import`).
+
+## Worker tokens API
+
+With a state dir (`--state-dir`) the control plane keeps per-worker tokens (a worker
+presents `wwt_...` on `/policy`, `/control/heartbeat` and `/central/ingest`; the token's bound
+proxy id is the identity the control plane records). Admins manage them under
+`/dashboard/api/worker-tokens`:
+
+| Request | Role | Result |
+|---|---|---|
+| `GET /dashboard/api/worker-tokens` | viewer | 200, every token (revoked included): `id`, `name`, `proxyID`, `createdBy`, `createdAt`, `expiresAt`, `lastUsedAt`, `revokedAt`. Never the token or its hash. |
+| `POST /dashboard/api/worker-tokens` `{name, proxyID, expiresIn?}` | admin | 201 with the metadata and `token`, the only time the plaintext is shown (`Cache-Control: no-store`). `expiresIn` is a duration such as `720h`. 400 for invalid input or an unknown field, 409 for a taken name or a proxy id that already has two active tokens, 413 over 8 KiB. |
+| `DELETE /dashboard/api/worker-tokens/{id}` | admin | 204, soft revoke: the token's next request is a 401. 404 for an unknown id. |
+
+With `console.auth: none` a mint or revoke answers 403 `{"error":"use_cli"}` (there is no identity to
+attribute it to); use `warden control-plane token` on the control plane host. Listing still works.
+With admin audit on, create and revoke are rows (`worker_token.create`, `worker_token.revoke`,
+target `worker_tokens`, `target_ref` `token:<id>`); no row, log line or later response holds the token.
+A `wwt_` bearer never opens these routes. `GET /dashboard/api/workers` adds `authKind`
+(`token`, `legacy` or `none`), `tokenName`, `tokenLastUsed` and `legacyRequests` per worker.
 
 ## Worker admin token
 

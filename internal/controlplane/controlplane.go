@@ -574,8 +574,11 @@ func (s *Server) Handler() http.Handler {
 			views[i].Behind = views[i].PolicyETag != "" && views[i].PolicyETag != cur
 		}
 		fillPolicyVersions(s.versions, views)
+		s.fillWorkerAuth(views)
 		return views
 	})
+	// Worker token admin routes and their audit hasher (W-P1-WTOK-03).
+	s.wireWorkerTokens(dash)
 	// Dashboard-V3 read tabs. Each source EXISTS on the control plane:
 	//   - secretstore: the CP's WRITE store lists KEY metadata (never values). Nil
 	//     store (env/none backend) → the tab reports backend "none".

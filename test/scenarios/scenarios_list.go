@@ -109,6 +109,12 @@ var All = slices.Concat(
 		// out-of-process revoke takes effect, and it opens no human route.
 		// In-process only (it writes the CP state dir, fake clock).
 		{Name: "worker_token_auth", Opts: workerTokenOpts(), Run: workerTokenAuth},
+		// Worker token admin API (W-P1-WTOK-03): an admin mints (shown once),
+		// lists and revokes tokens from the console; the fleet view shows how each
+		// worker authenticates; create and revoke are audited. In-process only.
+		{Name: "worker_token_admin_api", Opts: workerTokenAdminOpts(), Run: workerTokenAdminAPI},
+		// Without console sign-in the API is read-only: writes answer use_cli.
+		{Name: "worker_token_admin_use_cli", Opts: workerTokenOpts(), Run: workerTokenAdminUseCLI},
 
 		// Admin audit gate (W-P1-AAUD-05): enabled, the control plane writes the
 		// genesis entry and logs its key_id before serving. In-process only (it
