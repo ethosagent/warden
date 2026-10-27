@@ -153,7 +153,8 @@ func TestBlockedUsersSizeLimit(t *testing.T) {
 	for i := range big {
 		big[i] = BlockedUser{
 			Sub:   fmt.Sprintf("S%04d", i) + strings.Repeat("s", 250),
-			Email: strings.Repeat("e", 240) + fmt.Sprintf("%04d", i) + "@x.co"[:4],
+			// 240 + 4 + len("@x.co") = 249 bytes, under the 254 email cap.
+			Email: strings.Repeat("e", 240) + fmt.Sprintf("%04d", i) + "@x.co",
 		}
 	}
 	err := ValidateBlockedUsers(big)

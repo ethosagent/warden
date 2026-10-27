@@ -1,6 +1,7 @@
 package controlplane
 
 import (
+	"context"
 	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
@@ -1622,7 +1623,7 @@ func TestLoadPolicyIgnoresYAMLBlockedUsers(t *testing.T) {
 	}
 	logs := &bytes.Buffer{}
 	ps := newPolicyServer(path, "", slog.New(slog.NewJSONHandler(logs, nil)), NewWorkerRegistry())
-	wire, err := ps.loadPolicy()
+	wire, _, err := ps.loadPolicy(context.Background())
 	if err != nil {
 		t.Fatalf("loadPolicy: %v", err)
 	}
