@@ -118,6 +118,10 @@ var All = slices.Concat(
 		// warden.admin.v1 lines equal to the stored row. In-process only.
 		{Name: "admin_audit_json_log_writes_lines", Opts: adminAuditJSONLogOpts(), Run: adminAuditJSONLogWritesLines},
 		{Name: "admin_audit_records_viewer_denied", Opts: adminAuditOIDCOpts(), Run: adminAuditRecordsViewerDenied},
+		// Login and logout events (W-P1-AAUD-07): a sign-in, a no-role sign-in and a
+		// logout are one row each, for the verified user. In-process only (issuer
+		// fake, CP state dir).
+		{Name: "admin_audit_records_login_logout", Opts: adminAuditOIDCOpts(), Run: adminAuditRecordsLoginLogout},
 		// Admin audit dashboard API (W-P1-AAUD-03): list, verify and pubkey over the
 		// real chain, read-only (no row added); verify needs the admin bearer in none
 		// mode and admin in oidc, where a viewer may read only the keys; with admin

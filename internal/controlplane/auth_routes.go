@@ -85,7 +85,9 @@ func (s *Server) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 // live session without a valid CSRF token (403, session kept). The logout is
 // local: the session row is deleted and the cookie cleared; the IdP is never
 // called and there is no redirect, so the IdP's own session is untouched. A
-// request without a live session still gets 204 and a clearing cookie.
+// request without a live session still gets 204 and a clearing cookie. With
+// admin audit on, ending a live session records auth.logout; a request
+// without one records nothing.
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	if s.sessions == nil {
@@ -99,12 +101,17 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.hasSessionPrincipal(r) {
 		rawID, _ := s.sessionCookie.From(r)
+		// The audit actor is the session's Principal, taken before the row goes.
+		who, _ := s.resolveActor(r)
 		if err := s.sessions.Delete(r.Context(), rawID); err != nil {
 			s.cfg.Logger.Error("console logout failed", "session", shortHash(hashID(rawID)), "error", err)
 			authError(w, http.StatusInternalServerError, "session store error")
 			return
 		}
 		s.cfg.Logger.Info("console logout", "session", shortHash(hashID(rawID)))
+		if s.audit != nil {
+			s.recordLogout(r, who, hashID(rawID))
+		}
 	}
 	http.SetCookie(w, s.sessionCookie.Clear())
 	w.WriteHeader(http.StatusNoContent)
