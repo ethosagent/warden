@@ -25,8 +25,9 @@ type authzRow struct {
 
 // authzTable is the deny-by-default authorization table for the dashboard
 // routes the control plane serves: a {method, path} with no row is refused for
-// every role, GET included. Every dashboard.Routes() entry must have a row
-// (TestAuthzRouteCoverage) and the row's Action must equal the route's.
+// every role, GET included. Every dashboard.Routes() and cpDashboardRoutes()
+// entry must have a row (TestAuthzRouteCoverage) and the row's Action must equal
+// the route's.
 //
 // Settings writes need editor at the route; the settings writer then requires
 // admin for any changed field outside config.EditorSettingsFields
@@ -79,6 +80,9 @@ func authzTable() map[routeKey]authzRow {
 		{get, "/dashboard/api/audit", authzRow{viewer, "audit.read"}},
 		{post, "/dashboard/api/audit/verify", authzRow{viewer, "audit.verify"}},
 		{get, "/dashboard/api/setup", authzRow{viewer, "setup.read"}},
+		// Served by the control plane itself, ahead of dash.Handler (cpDashboardRoutes).
+		{get, "/dashboard/api/sessions", authzRow{admin, "sessions.read"}},
+		{del, "/dashboard/api/sessions", authzRow{admin, "sessions.revoke"}},
 	}
 	t := make(map[routeKey]authzRow, len(rows))
 	for _, r := range rows {

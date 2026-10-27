@@ -248,7 +248,25 @@ in the login token and stored with the session, and the role is re-derived from 
 current `console.roles` on every request, so a `console.roles` change applies after a
 restart. A user demoted or removed in the IdP keeps their console role until the
 session's idle (1h) or absolute (12h) expiry unless an admin revokes it with the
-sessions API (W-P1-SSO-08).
+sessions API below. This is documented behaviour, not a bug: revocation is the
+manual control for offboarding.
+
+**Listing and revoking sessions** (admin, `oidc` mode only; `404` in `none` mode).
+The *Console sessions* card on the Settings page uses the same API:
+
+- `GET /dashboard/api/sessions` returns the live sessions, newest first:
+  `[{handle, iss, sub, email, authMethod, createdAt, lastSeenAt, expiresAt, current}]`.
+  `handle` is the hex sha256 of the session id, which cannot be used as a cookie; the
+  raw id and the CSRF token are never returned. `current` marks the caller's session.
+- `DELETE /dashboard/api/sessions?handle=<hex>` revokes one session (`404` if unknown);
+  `DELETE /dashboard/api/sessions?sub=<sub>` revokes every session of that subject
+  (`{"revoked": n}`, `0` is not an error). Send exactly one of the two (`400` otherwise).
+  The next request with a revoked cookie gets `401`.
+- Both need an admin session; `DELETE` also needs `X-Warden-CSRF`. The routes are
+  served by the control plane ahead of the dashboard, so the shared and admin bearer
+  tokens never reach them (`401` without a session). Each revoke logs
+  `console_session_revoked` with `by_sub`, `target_sub` and `count` (and the first 8
+  hex characters of a revoked handle), never a cookie value.
 
 **The UI follows the role.** After `GET /auth/me` succeeds the dashboard shows the
 signed-in email, the role and a *Log out* button, and hides every control whose
@@ -291,6 +309,8 @@ fails when the two differ.
 | `/dashboard/api/secretstore` | GET | viewer | `secretstore.read` |
 | `/dashboard/api/secretstore` | POST | admin | `secretstore.write` |
 | `/dashboard/api/secretstore` | DELETE | admin | `secretstore.delete` |
+| `/dashboard/api/sessions` | GET | admin | `sessions.read` |
+| `/dashboard/api/sessions` | DELETE | admin | `sessions.revoke` |
 | `/dashboard/api/settings` | GET | viewer | `settings.read` |
 | `/dashboard/api/settings` | POST | editor | `settings.write` |
 | `/dashboard/api/settings` | PUT | editor | `settings.write` |

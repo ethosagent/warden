@@ -19,15 +19,40 @@ import (
 // field (writeSettingsAs). If oidc is configured but sessions could not start (no
 // state db, bad redirect URL) there is no Principal source, so every dashboard
 // request is refused rather than falling back to the bearer.
+//
+// The control plane also serves cpDashboardRoutes itself, on exact paths that
+// win over the "/dashboard/" prefix. They sit outside dash.Handler, so its write
+// guard never runs for them: each is wrapped in withSession (session, CSRF on
+// DELETE) and requireRole (admin) here. In none mode they are mounted as 404,
+// because the dashboard would otherwise serve its index page for the path.
 func (s *Server) mountDashboard(mux *http.ServeMux, dash *dashboard.Server) {
 	if s.cfg.Console.Auth != config.ConsoleAuthOIDC {
 		dash.SetWriteGuard(s.dashboardWriteGuard())
 		mux.Handle("/dashboard/", s.sessionWrap(dash.Handler()))
+		mux.Handle(sessionsAdminPath, http.NotFoundHandler())
 		return
 	}
+	table := authzTable()
 	dash.SetWriteGuard(s.sessionWriteGuard())
-	guarded := requireRole(s.limitQueryGenerate(dash.Handler()), authzTable(), s.cfg.Console, s.cfg.Logger)
+	guarded := requireRole(s.limitQueryGenerate(dash.Handler()), table, s.cfg.Console, s.cfg.Logger)
 	mux.Handle("/dashboard/", s.sessionWrap(guarded))
+	// GET lists, DELETE revokes (?handle= or ?sub=); admin only.
+	// TODO(#39, #38): audit record per revoke once the admin audit chain lands; a
+	// per-session rate limit arrives with the shared console limiter.
+	mux.Handle(sessionsAdminPath, s.sessionWrap(requireRole(http.HandlerFunc(s.handleSessions), table, s.cfg.Console, s.cfg.Logger)))
+}
+
+// sessionsAdminPath is the admin session list and revoke route (W-P1-SSO-08).
+const sessionsAdminPath = "/dashboard/api/sessions"
+
+// cpDashboardRoutes lists the /dashboard/ routes the control plane serves
+// itself rather than through dash.Handler, in dashboard.Routes' form, so the
+// authz coverage test walks them too.
+func cpDashboardRoutes() []dashboard.Route {
+	return []dashboard.Route{
+		{Method: http.MethodGet, Path: sessionsAdminPath, Action: "sessions.read"},
+		{Method: http.MethodDelete, Path: sessionsAdminPath, Action: "sessions.revoke"},
+	}
 }
 
 // registerAuthRoutes mounts the browser session routes (rule X9: registrations
