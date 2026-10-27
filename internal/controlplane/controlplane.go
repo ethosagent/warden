@@ -42,6 +42,12 @@ type Config struct {
 	// it and closes it after the HTTP server drains; feature stores build on
 	// State.SQL() and register their migrations through cpstate.Open.
 	State *cpstate.DB
+	// PolicyStore is the --policy-store mode: PolicyStoreFile ("" = file, the
+	// default) serves PolicyPath; PolicyStoreVersioned serves the head version
+	// of the versioned store in State (and needs State; Run enforces it). With
+	// an empty store (head 0) versioned mode serves PolicyPath exactly as file
+	// mode does.
+	PolicyStore string
 	// AdminAudit is the signed admin audit chain on State. Nil means admin
 	// audit is disabled (console.adminAudit.enabled false, the default).
 	AdminAudit *adminaudit.Store
@@ -154,6 +160,9 @@ type Server struct {
 	registry *WorkerRegistry
 	mcp      *mcpStore
 	policy   *policyServer
+	// versions is the versioned policy store; nil in file mode. Its Create
+	// refreshes the policy server, so long-poll waiters wake at once.
+	versions PolicyVersionStore
 	writeMu  sync.Mutex // serializes policy + integrations edits
 	// pipeline is the embeddable alert-delivery assembly (manager + engine + tick +
 	// bridge). Nil when no alert DB path is configured (or when its store/manager
@@ -232,8 +241,8 @@ func New(cfg Config) *Server {
 		central:  store,
 		registry: registry,
 		mcp:      newMCPStore(),
-		// The policy-serving component owns the watch and performs the initial load
-		// so /policy and the dashboard have policy immediately (unchanged behavior).
+		// The policy-serving component owns the watch; the initial load runs below,
+		// after serve-time overlay registration.
 		policy: newPolicyServer(cfg.PolicyPath, cfg.Token, cfg.Logger, registry),
 		// Write-scoped secret store (nil ⇒ /central/secrets not mounted).
 		secretStore: cfg.SecretStore,
@@ -241,6 +250,11 @@ func New(cfg Config) *Server {
 		detectionConfig: cfg.DetectionConfig,
 		generateLimit:   newSessionLimiter(cfg.Clock, queryGenerateLimit, time.Minute),
 	}
+	// Register serve-time wire overlays (s.policy.addOverlay) here, before the
+	// initial load, so they apply to the first served wire. Versioned mode
+	// registers credential; W-P1-BLOCK-03 adds blocked_users.
+	s.initPolicyStore()
+	s.policy.Refresh() // initial load so /policy and the dashboard have policy immediately
 	s.initSessions()
 	s.initAuth()
 	// Alert pipeline (CP-hosted alert delivery + always-on Alert Store). Constructed
@@ -583,21 +597,8 @@ func (s *Server) WritePolicy(p config.Policy) error {
 		_ = yaml.Unmarshal(cur, &root)
 	}
 
-	// Replace the policy block with the edited allow/deny.
-	var policyNode yaml.Node
-	if err := policyNode.Encode(policyYAML{Allowlist: p.Allowlist, Denylist: p.Denylist}); err != nil {
-		return fmt.Errorf("controlplane: encode policy block: %w", err)
-	}
-	root["policy"] = policyNode
-
-	// Ensure a logging block exists (preserved from the current file when
-	// present; otherwise default to info/json). The editor does not change it.
-	if _, ok := root["logging"]; !ok {
-		var logNode yaml.Node
-		if err := logNode.Encode(map[string]string{"level": "info", "format": "json"}); err != nil {
-			return fmt.Errorf("controlplane: encode logging block: %w", err)
-		}
-		root["logging"] = logNode
+	if err := renderPolicyBlock(root, p.Allowlist, p.Denylist); err != nil {
+		return err
 	}
 
 	if err := s.atomicWriteConfig(root); err != nil {
@@ -611,40 +612,128 @@ func (s *Server) WritePolicy(p config.Policy) error {
 	return nil
 }
 
+// renderPolicyBlock replaces root's policy block with allow/deny and makes sure
+// a logging block exists (kept from the current file when present, otherwise
+// info/json). It is the policy half of WritePolicy and renderDocToRoot.
+func renderPolicyBlock(root map[string]yaml.Node, allow []config.AllowlistEntry, deny []config.DenylistEntry) error {
+	var policyNode yaml.Node
+	if err := policyNode.Encode(policyYAML{Allowlist: allow, Denylist: deny}); err != nil {
+		return fmt.Errorf("controlplane: encode policy block: %w", err)
+	}
+	root["policy"] = policyNode
+	if _, ok := root["logging"]; !ok {
+		var logNode yaml.Node
+		if err := logNode.Encode(map[string]string{"level": "info", "format": "json"}); err != nil {
+			return fmt.Errorf("controlplane: encode logging block: %w", err)
+		}
+		root["logging"] = logNode
+	}
+	return nil
+}
+
+// readServedRoot loads the served file as a top-level YAML map so blocks the
+// caller does not own survive. A missing, unreadable or malformed file yields
+// an empty map; the loader validation of the result still guards it.
+func (s *Server) readServedRoot() map[string]yaml.Node {
+	root := map[string]yaml.Node{}
+	if cur, err := os.ReadFile(s.cfg.PolicyPath); err == nil {
+		_ = yaml.Unmarshal(cur, &root)
+	}
+	return root
+}
+
+// renderDocToRoot renders a policy doc into root, a copy of the served YAML
+// root: the policy block, the settings blocks WriteSettings owns and the
+// llmProviders block, with the encoders the dashboard writers use. A
+// credential the doc carries only as a fingerprint keeps the served file's
+// live value (the preserve-on-empty rule). Blocks no dashboard writer owns
+// (dlp, advisory) are left as the served file has them.
+func renderDocToRoot(root map[string]yaml.Node, doc policyWire) error {
+	if err := renderPolicyBlock(root, doc.Allowlist, doc.Denylist); err != nil {
+		return err
+	}
+	var settings config.SettingsWire
+	if doc.Settings != nil {
+		settings = *doc.Settings
+	}
+	if settings.Secrets != nil && isRedactedCredential(settings.Secrets.SecretAccessKey) {
+		sec := *settings.Secrets
+		sec.SecretAccessKey = ""
+		settings.Secrets = &sec
+	}
+	if err := renderSettingsBlocks(root, settings); err != nil {
+		return err
+	}
+	return renderLLMProvidersBlock(root, config.LLMProvidersFromSettings(settings.LLMProviders))
+}
+
+// validateDoc checks a candidate policy doc with the full config loader, the
+// same check atomicWriteConfig makes before a write: it renders the doc into a
+// copy of the served YAML root, writes it to a temp file and loads it. This
+// enforces default-deny (an empty allowlist is rejected) and the cross-block
+// references (judge/explore llmProvider). Nothing is persisted. Callers run it
+// before PolicyVersionStore.Create.
+func (s *Server) validateDoc(doc policyWire) error {
+	root := s.readServedRoot()
+	if err := renderDocToRoot(root, doc); err != nil {
+		return err
+	}
+	tmpName, err := s.writeValidatedTemp(root)
+	if err != nil {
+		return err
+	}
+	_ = os.Remove(tmpName)
+	return nil
+}
+
 // atomicWriteConfig marshals the top-level config map, writes it to a temp file
 // in the policy file's directory, validates it with the full loader (so a bad
 // edit can never replace a good config — default-deny is enforced here), then
 // renames it into place. Callers refresh the watch afterward. The caller MUST
 // hold s.writeMu.
 func (s *Server) atomicWriteConfig(root map[string]yaml.Node) error {
+	tmpName, err := s.writeValidatedTemp(root)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.Remove(tmpName) }() // no-op once renamed
+	if err := os.Rename(tmpName, s.cfg.PolicyPath); err != nil {
+		return fmt.Errorf("controlplane: persist policy: %w", err)
+	}
+	return nil
+}
+
+// writeValidatedTemp marshals root to a temp file next to the policy file and
+// validates it with the full loader. It returns the temp file's name for the
+// caller to rename or remove; on error nothing is left behind.
+func (s *Server) writeValidatedTemp(root map[string]yaml.Node) (string, error) {
 	data, err := yaml.Marshal(root)
 	if err != nil {
-		return fmt.Errorf("controlplane: marshal config: %w", err)
+		return "", fmt.Errorf("controlplane: marshal config: %w", err)
 	}
 
 	dir := filepath.Dir(s.cfg.PolicyPath)
 	tmp, err := os.CreateTemp(dir, ".warden-policy-*.yaml")
 	if err != nil {
-		return fmt.Errorf("controlplane: create temp policy: %w", err)
+		return "", fmt.Errorf("controlplane: create temp policy: %w", err)
 	}
 	tmpName := tmp.Name()
-	defer func() { _ = os.Remove(tmpName) }() // no-op once renamed
 	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()
-		return fmt.Errorf("controlplane: write temp policy: %w", err)
+		_ = os.Remove(tmpName)
+		return "", fmt.Errorf("controlplane: write temp policy: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("controlplane: close temp policy: %w", err)
+		_ = os.Remove(tmpName)
+		return "", fmt.Errorf("controlplane: close temp policy: %w", err)
 	}
 	// Validate the candidate with the full loader before it can replace the live
 	// file (this enforces default-deny: an empty allowlist is rejected here).
 	if _, err := config.NewLocalYAMLProvider(tmpName); err != nil {
-		return fmt.Errorf("invalid policy: %w", err)
+		_ = os.Remove(tmpName)
+		return "", fmt.Errorf("invalid policy: %w", err)
 	}
-	if err := os.Rename(tmpName, s.cfg.PolicyPath); err != nil {
-		return fmt.Errorf("controlplane: persist policy: %w", err)
-	}
-	return nil
+	return tmpName, nil
 }
 
 // writeSettings validates and atomically persists an edited behavioral settings
@@ -703,7 +792,9 @@ func (s *Server) writeSettingsChecked(in config.SettingsWire, check func(live *c
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	if check != nil {
-		cur, err := s.policy.loadPolicy()
+		// The on-disk settings, without serve-time overlays: overlays carry
+		// data no settings writer owns.
+		cur, err := s.policy.loadBase(context.Background())
 		if err != nil {
 			return fmt.Errorf("controlplane: read live settings: %w", err)
 		}
@@ -720,6 +811,54 @@ func (s *Server) writeSettingsChecked(in config.SettingsWire, check func(live *c
 		_ = yaml.Unmarshal(cur, &root)
 	}
 
+	if err := renderSettingsBlocks(root, in); err != nil {
+		return err
+	}
+
+	if err := s.atomicWriteConfig(root); err != nil {
+		return err
+	}
+	// Wake long-poll waiters with the new settings now, like writePolicy.
+	s.refresh()
+	// Re-inject the CP dashboard's Explore generator so a judge / explore provider
+	// selection change takes effect on the CP without a restart (the judge itself
+	// runs on workers, which rebuild it from the refreshed settings on next apply).
+	s.reinjectExploreLLM()
+	mode := "off"
+	if in.MCP != nil && in.MCP.Enabled {
+		mode = in.MCP.Mode
+	}
+	judge := "off"
+	if in.Judge != nil && in.Judge.Enabled {
+		judge = "on"
+	}
+	logging := "unchanged"
+	if in.Logging != nil {
+		logging = in.Logging.Level
+	}
+	compliance := "unchanged"
+	if in.Compliance != nil {
+		if in.Compliance.Enabled {
+			compliance = "on"
+		} else {
+			compliance = "off"
+		}
+	}
+	observability := "off"
+	if in.Observability != nil && in.Observability.Enabled {
+		observability = "on"
+	}
+	s.cfg.Logger.Info("control plane settings updated via dashboard",
+		"mcp", mode, "judge", judge, "agents", len(in.Agents),
+		"logging", logging, "compliance", compliance, "observability", observability)
+	return nil
+}
+
+// renderSettingsBlocks rewrites the settings blocks WriteSettings owns in root
+// from in: each block is encoded or, when absent or disabled, deleted (logging
+// and cache only ever replaced), and compliance is merged into the audit block.
+// It is the settings half of WriteSettings and renderDocToRoot.
+func renderSettingsBlocks(root map[string]yaml.Node, in config.SettingsWire) error {
 	// settingsBlocks is the per-block rewrite table. Each entry owns one top-level
 	// key: it either encodes a replacement node (present) or removes the key
 	// (absent). later phases append entries here (judge, observability, …) so a
@@ -879,43 +1018,6 @@ func (s *Server) writeSettingsChecked(in config.SettingsWire, check func(live *c
 			return fmt.Errorf("controlplane: merge audit.compliance: %w", err)
 		}
 	}
-
-	if err := s.atomicWriteConfig(root); err != nil {
-		return err
-	}
-	// Wake long-poll waiters with the new settings now, like writePolicy.
-	s.refresh()
-	// Re-inject the CP dashboard's Explore generator so a judge / explore provider
-	// selection change takes effect on the CP without a restart (the judge itself
-	// runs on workers, which rebuild it from the refreshed settings on next apply).
-	s.reinjectExploreLLM()
-	mode := "off"
-	if in.MCP != nil && in.MCP.Enabled {
-		mode = in.MCP.Mode
-	}
-	judge := "off"
-	if in.Judge != nil && in.Judge.Enabled {
-		judge = "on"
-	}
-	logging := "unchanged"
-	if in.Logging != nil {
-		logging = in.Logging.Level
-	}
-	compliance := "unchanged"
-	if in.Compliance != nil {
-		if in.Compliance.Enabled {
-			compliance = "on"
-		} else {
-			compliance = "off"
-		}
-	}
-	observability := "off"
-	if in.Observability != nil && in.Observability.Enabled {
-		observability = "on"
-	}
-	s.cfg.Logger.Info("control plane settings updated via dashboard",
-		"mcp", mode, "judge", judge, "agents", len(in.Agents),
-		"logging", logging, "compliance", compliance, "observability", observability)
 	return nil
 }
 

@@ -182,8 +182,7 @@ func (h *H) ConsoleSessions() []ConsoleSession {
 	if _, err := os.Stat(path); err != nil {
 		h.tb.Fatalf("harness: control-plane state db: %v", err)
 	}
-	db, err := cpstate.OpenReadOnly(context.Background(), path,
-		controlplane.StateMigrations())
+	db, err := cpstate.OpenReadOnly(context.Background(), path, controlplane.StateMigrations())
 	if err != nil {
 		h.tb.Fatalf("harness: open the state db: %v", err)
 	}

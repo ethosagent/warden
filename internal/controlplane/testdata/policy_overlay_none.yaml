@@ -1,0 +1,27 @@
+policy:
+  allowlist:
+    - domain: api.openai.com
+    - domain: api.anthropic.com
+      port: 443
+  denylist:
+    - domain: evil.example.com
+secrets:
+  - placeholder: openai_secret_001
+    envVar: OPENAI_API_KEY
+logging:
+  level: info
+  format: json
+mcp:
+  enabled: true
+  mode: enforce
+llmProviders:
+  - name: p1
+    baseURL: https://api.openai.com/v1
+    model: gpt-4o-mini
+    apiKeyEnv: OPENAI_API_KEY
+judge:
+  enabled: true
+  llmProvider: p1
+agents:
+  - id: agent-1
+    policy: be careful
