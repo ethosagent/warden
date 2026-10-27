@@ -23,6 +23,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/ethosagent/warden/internal/adminaudit"
 	"github.com/ethosagent/warden/internal/alertpipeline"
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/clock"
@@ -47,6 +48,9 @@ type Config struct {
 	// an empty store (head 0) versioned mode serves PolicyPath exactly as file
 	// mode does.
 	PolicyStore string
+	// AdminAudit is the signed admin audit chain on State. Nil means admin
+	// audit is disabled (console.adminAudit.enabled false, the default).
+	AdminAudit *adminaudit.Store
 	// PolicyPath is the YAML file whose allow/deny policy is served to workers.
 	// It is re-read on each /policy request so edits propagate on the next poll.
 	PolicyPath string

@@ -62,6 +62,9 @@ func (h *H) prepareConsole() {
 }
 
 func (h *H) applyConsole(p *controlplane.Params, addr *string) {
+	if h.wantAdminAudit {
+		p.StateDir = filepath.Join(h.root, "cp-state")
+	}
 	if !h.wantConsole {
 		return
 	}
@@ -72,12 +75,19 @@ func (h *H) applyConsole(p *controlplane.Params, addr *string) {
 
 // consoleYAML renders the console block for the control plane's config file.
 func (h *H) consoleYAML() string {
+	audit := ""
+	if h.wantAdminAudit {
+		audit = "  adminAudit:\n    enabled: true\n"
+	}
 	if !h.wantConsole {
-		return ""
+		if audit == "" {
+			return ""
+		}
+		return "\nconsole:\n" + audit
 	}
 	return fmt.Sprintf(`
 console:
-  auth: oidc
+`+audit+`  auth: oidc
   oidc:
     issuer: %[1]s
     internalIssuerURL: %[1]s

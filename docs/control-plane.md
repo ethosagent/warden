@@ -229,6 +229,7 @@ needs a restart. It holds the *name* of the client-secret env var, never the sec
 | `oidc.internalIssuerURL` | none | Origin the control-plane container uses to reach the IdP, for example `http://dex:5556`. Origin only; there is no insecure-issuer key. |
 | `roles.admin`, `roles.editor`, `roles.viewer` | none | IdP group names, matched exactly and case-sensitively; the highest matching role wins. `roles.admin` needs at least one group. |
 | `session.idle`, `session.absolute` | `1h`, `12h` | `0 < idle <= absolute <= 168h`. |
+| `adminAudit.enabled` | `false` | Turns on the signed admin audit log; needs `--state-dir`. See [Admin audit log](#admin-audit-log). |
 
 In `oidc` mode the control plane also needs a non-empty value in the client-secret env
 var and `--state-dir`; without either it refuses to start. See
@@ -241,6 +242,52 @@ and `DELETE /central/secrets/{key}`) needs an admin session plus CSRF. An
 `--token-env` token nor any other bearer opens them (401 without a session, 403 for a
 role below admin). The worker routes (`/policy`, `/control/heartbeat`,
 `/central/ingest`) keep the shared bearer in both modes.
+
+### Admin audit log
+
+`console.adminAudit.enabled: true` turns on the admin audit log: a hash-chained,
+Ed25519-signed table in `<state-dir>/warden-cp.db`. It is off by default. Off, the
+control plane creates no key file, no HMAC key file and no audit rows, and behaves
+exactly as before. On without `--state-dir` it refuses to start
+(`control-plane: console.adminAudit.enabled needs --state-dir`).
+
+The first enabled start creates the signing key at `--admin-audit-key-file` (default
+`<state-dir>/cp-audit.key`, PKCS#8, mode 0600) and the actor HMAC key
+`cp-audit-hmac.key` beside it, writes the chain's genesis entry and logs one
+`admin audit enabled` line with `key_id` and the base64 public key (never the private
+key or the HMAC key). Put the key on a separate secret mount with
+`--admin-audit-key-file=/secrets/cp-audit.key`; the HMAC key then lives in
+`/secrets` too.
+
+Every later start checks the keys before serving and fails closed when the chain has
+rows and:
+
+- the key file (or the HMAC key file beside it) is missing. A missing key is never
+  replaced silently; restore it from backup.
+- the key's `key_id` is not the chain head's `key_id`. The error names the expected
+  `key_id` and `--admin-audit-key-file`.
+- the HMAC key does not match the one the chain was started with.
+
+Turning the feature off again keeps the rows and the tables; the control plane always
+registers the admin audit migration, so the state database never trips the
+downgrade guard.
+
+**Manual key change (new segment).** To move to a new signing key, stop the control
+plane, archive the old segment (the offline verify and export commands and the full
+runbook come with W-P1-AAUD-04), put the new key at `--admin-audit-key-file` with the
+same `cp-audit-hmac.key` beside it, and start once with
+`--admin-audit-new-segment=<new key_id>`. The control plane appends one
+`audit.segment_start` entry signed by the new key, linked to the old head and naming
+the previous `key_id`; every later row carries the new `key_id`, and verification
+reads each segment's public key from the chain. The flag must equal the loaded key's
+`key_id` (anything else stops startup) and is a no-op once the head is on that key,
+so leaving it set can never rotate twice. The flag without
+`console.adminAudit.enabled` is a startup error. Automatic rotation is W-P2-KEYS-06.
+
+Offline CLIs that change admin state record through the same chain with
+`adminaudit.OpenForCLI`: actor `cli:<os user>`, auth_method `cli`, the same key
+check, and never a new key while rows exist. On a state dir where audit was never
+enabled they skip the record with a notice.
 
 ### Migrating from none to oidc
 

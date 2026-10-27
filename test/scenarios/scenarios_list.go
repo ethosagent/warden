@@ -70,6 +70,11 @@ var All = slices.Concat(
 		// a head written out of process reaches workers. In-process only (it
 		// writes the control plane's state database).
 		{Name: "policy_store_versioned", Opts: policyStoreOpts(), Run: policyStoreVersioned},
+
+		// Admin audit gate (W-P1-AAUD-05): enabled, the control plane writes the
+		// genesis entry and logs its key_id before serving. In-process only (it
+		// reads the CP state dir).
+		{Name: "admin_audit_enabled_genesis", Opts: adminAuditOpts(), Run: adminAuditEnabledGenesis},
 	},
 	// Canary across protocols x allow/deny; see canary.go.
 	canaryScenarios(),

@@ -133,17 +133,6 @@ BEGIN SELECT RAISE(ABORT, 'policy_publish_log is append-only'); END;`,
 	}}
 }
 
-// StateMigrations are every migration the control plane registers with
-// cpstate.Open, in order. Run uses it; out-of-process tools opening the same
-// file must too, or the downgrade guard refuses the file.
-func StateMigrations() []cpstate.Migration {
-	var migs []cpstate.Migration
-	migs = append(migs, SessionMigrations()...)
-	migs = append(migs, OIDCPendingMigrations()...)
-	migs = append(migs, PolicyStoreMigrations()...)
-	return migs
-}
-
 // PolicyAuthor is who created a version. Kind is one of the AuthorKind values.
 type PolicyAuthor struct {
 	Sub, Email, Kind string

@@ -77,6 +77,16 @@ type ConsoleConfig struct {
 	OIDC    ConsoleOIDC
 	Roles   ConsoleRoles
 	Session ConsoleSession
+	// AdminAudit gates the signed admin audit chain (default off).
+	AdminAudit ConsoleAdminAudit
+}
+
+// ConsoleAdminAudit is the `console.adminAudit` sub-block. Enabled (default
+// false) turns on the signed, hash-chained admin audit log in
+// <state-dir>/warden-cp.db; it needs --state-dir. Off means no key file, no
+// HMAC key file and no audit rows are ever created.
+type ConsoleAdminAudit struct {
+	Enabled bool
 }
 
 // ConsoleOIDC is the console's OIDC client registration.
@@ -157,6 +167,9 @@ type rawConsole struct {
 		Idle     string `yaml:"idle"`
 		Absolute string `yaml:"absolute"`
 	} `yaml:"session"`
+	AdminAudit struct {
+		Enabled bool `yaml:"enabled"`
+	} `yaml:"adminAudit"`
 }
 
 // parseConsole converts the raw block and applies defaults. An absent block is
@@ -201,6 +214,7 @@ func parseConsole(r *rawConsole) (ConsoleConfig, error) {
 		}
 		c.Session.Absolute = d
 	}
+	c.AdminAudit.Enabled = r.AdminAudit.Enabled
 	return c, nil
 }
 

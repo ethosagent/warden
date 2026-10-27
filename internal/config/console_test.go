@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -177,5 +178,57 @@ func TestConsoleConfigLoadConsole(t *testing.T) {
 	}
 	if _, err := LoadConsole(writeConsoleTemp(t, consoleYAML("console:\n  auth: oidc\n"))); err == nil {
 		t.Error("invalid oidc block must error")
+	}
+}
+
+// TestConsoleAdminAuditBlock: console.adminAudit.enabled defaults to false
+// (absent block, and a console block without the sub-block), parses true and
+// false, and a misspelled key under it fails the strict decode.
+func TestConsoleAdminAuditBlock(t *testing.T) {
+	for _, tc := range []struct {
+		name, yaml string
+		want       bool
+	}{
+		{"absent console block", "", false},
+		{"console block without adminAudit", "console:\n  auth: none\n", false},
+		{"enabled true", "console:\n  adminAudit:\n    enabled: true\n", true},
+		{"enabled false", "console:\n  adminAudit:\n    enabled: false\n", false},
+		{"with oidc", validOIDC + "  adminAudit:\n    enabled: true\n", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := LoadConsole(writeConsoleTemp(t, consoleYAML(tc.yaml)))
+			if err != nil {
+				t.Fatalf("LoadConsole: %v", err)
+			}
+			if c.AdminAudit.Enabled != tc.want {
+				t.Errorf("AdminAudit.Enabled = %v, want %v", c.AdminAudit.Enabled, tc.want)
+			}
+		})
+	}
+	if _, err := LoadConsole(writeConsoleTemp(t, consoleYAML("console:\n  adminAudit:\n    enable: true\n"))); err == nil {
+		t.Error("a misspelled console.adminAudit key must fail to parse")
+	}
+	if _, err := LoadConsole(writeConsoleTemp(t, consoleYAML("console:\n  adminAudit:\n    enabled: maybe\n"))); err == nil {
+		t.Error("a non-boolean console.adminAudit.enabled must fail to parse")
+	}
+}
+
+// TestConsoleAdminAuditNotOnPolicyWire: like the rest of console:, the
+// adminAudit sub-block never reaches the JSON policy wire.
+func TestConsoleAdminAuditNotOnPolicyWire(t *testing.T) {
+	prov, err := parse(consoleYAML("console:\n  adminAudit:\n    enabled: true\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, _ := prov.GetPolicy()
+	if !p.Console.AdminAudit.Enabled {
+		t.Fatal("parse dropped console.adminAudit.enabled")
+	}
+	b, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := strings.ToLower(string(b)); strings.Contains(s, "adminaudit") || strings.Contains(s, "console") {
+		t.Errorf("policy JSON carries the console block: %s", b)
 	}
 }

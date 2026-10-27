@@ -19,6 +19,7 @@ import (
 
 	_ "github.com/ethosagent/warden/internal/integration/webhook" // register the webhook sink
 
+	"github.com/ethosagent/warden/internal/adminaudit"
 	"github.com/ethosagent/warden/internal/alertpipeline"
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/clock"
@@ -65,6 +66,15 @@ type Params struct {
 	// operator can make an open console a startup error
 	// (--require-console-auth).
 	RequireConsoleAuth bool
+
+	// AdminAuditKeyFile is the admin audit signing key (--admin-audit-key-file;
+	// empty = <state-dir>/cp-audit.key). The HMAC key sits beside it. Used only
+	// when console.adminAudit.enabled is true.
+	AdminAuditKeyFile string
+	// AdminAuditNewSegment (--admin-audit-new-segment) is the key_id of a new
+	// signing key to start a chain segment for; it must equal the loaded key's
+	// key_id and is a no-op once the head is on that key.
+	AdminAuditNewSegment string
 }
 
 // Run boots a control plane from Params and serves until ctx is cancelled. It
@@ -151,6 +161,10 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 			"hint", "set console.auth: oidc (see docs/control-plane.md, \"Migrating from none to oidc\")")
 	}
 
+	if err := checkAdminAuditFlags(consoleCfg, stateDir, p); err != nil {
+		return fail(err)
+	}
+
 	var token string
 	if tokenEnv != "" {
 		token = strings.TrimSpace(os.Getenv(tokenEnv))
@@ -168,10 +182,11 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	var state *cpstate.DB
 	if stateDir != "" {
 		statePath := filepath.Join(stateDir, "warden-cp.db")
-		// Every mode registers every migration (sessions, policy store, ...), so
-		// switching console.auth or --policy-store never trips the downgrade
-		// guard. The open is not cancellable: a shutdown signal must not abandon
-		// a migration half way through boot.
+		// Every mode registers every migration (StateMigrations: sessions,
+		// policy store, admin audit, ...), so switching console.auth,
+		// --policy-store or console.adminAudit never trips the downgrade guard.
+		// The open is not cancellable: a shutdown signal must not abandon a
+		// migration half way through boot.
 		state, err = cpstate.Open(context.WithoutCancel(ctx), statePath, StateMigrations())
 		if err != nil {
 			return fail(fmt.Errorf("control-plane: state db: %w", err))
@@ -188,6 +203,21 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 			return fail(err)
 		}
 		logger.Info("control plane policy store", "mode", policyStore, "head", head)
+	}
+
+	// Admin audit (console.adminAudit.enabled): off by default, in which case no
+	// key file, store or rows exist. On, a key that does not match the chain
+	// stops startup here, before anything is served.
+	var adminAudit *adminaudit.Store
+	if consoleCfg.AdminAudit.Enabled {
+		auditClk := p.Clock
+		if auditClk == nil {
+			auditClk = clock.Real()
+		}
+		adminAudit, err = openAdminAudit(context.WithoutCancel(ctx), logger, state, stateDir, p, auditClk)
+		if err != nil {
+			return fail(err)
+		}
 	}
 
 	// Build the fleet analytics store. sqlite (default) persists events and powers
@@ -264,6 +294,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	srv := New(Config{
 		State:        state,
 		PolicyStore:  policyStore,
+		AdminAudit:   adminAudit,
 		PolicyPath:   servedPath,
 		Token:        token,
 		MaxEvents:    maxEvents,

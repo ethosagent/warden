@@ -658,4 +658,9 @@ func TestLoadArchitectureSharedRepositoriesValidation(t *testing.T) {
 			t.Errorf("entry %s: err = %v, want a shared-repositories error", entry, err)
 		}
 	}
+	// The list only means something on L7; anywhere else it is refused.
+	doc := "version: 1\nclasses:\n  - id: repository\n    layer: repository\n    paths: [\"w/*\"]\nzones:\n  control: [\"w/*\"]\nrules:\n  - id: L6\n    title: t\n    checker: archtest\n    fix: f\n    shared-repositories: [w/store]\nmodules:\n  direct:\n    - module: golang.org/x/net\n      layers: [repository]\n"
+	if _, err := LoadArchitecture([]byte(doc)); err == nil || !strings.Contains(err.Error(), "shared-repositories") {
+		t.Errorf("shared-repositories on L6: err = %v, want a shared-repositories error", err)
+	}
 }

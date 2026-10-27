@@ -17,7 +17,7 @@ const (
 // checked, and fields in which an added item means something is now allowed.
 var (
 	archBanLists   = []string{"banned-imports", "banned-calls", "applies-to-classes", "applies-to-paths", "blocked-modules", "wire-types", "structs", "prefixes"}
-	archAllowLists = []string{"exec-allowed-in", "signer-paths", "route-files", "wire-fields", "allowed-vars"}
+	archAllowLists = []string{"exec-allowed-in", "signer-paths", "route-files", "wire-fields", "allowed-vars", "shared-repositories"}
 	// classes that are exempt from layering: a package moved into one escapes the rules.
 	archExemptClasses = map[string]bool{"devtool": true, "testutil": true, "assembly": true}
 )
