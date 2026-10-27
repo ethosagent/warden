@@ -175,7 +175,7 @@ func (b *BlockStore) dataVersion(ctx context.Context) (int64, error) {
 
 // OnChange registers fn to run after every successful in-process mutation and
 // after Watch sees another process write, in both cases after the policy refresh.
-// concurrently with itself, so it must be safe for that.
+// fn may run concurrently with itself, so it must be safe for that.
 func (b *BlockStore) OnChange(fn func()) {
 	if fn == nil {
 		return
@@ -482,7 +482,7 @@ func (s *Server) initBlockStore() {
 		return
 	}
 	s.blocks = NewBlockStore(s.cfg.State, BlockStoreOptions{Clock: s.cfg.Clock, OnRefresh: s.policy.Refresh, Logger: s.cfg.Logger})
-	rep := &blockLoadReporter{logger: s.cfg.Logger, now: s.cfg.Clock.Now, publish: s.publishFinding}
+	rep := &blockLoadReporter{logger: s.cfg.Logger, now: s.cfg.Clock.Now, publish: s.publishFindingOK}
 	if err := s.policy.addOverlay(blockedUsersOverlay(s.blocks, rep)); err != nil {
 		// Unreachable: registration precedes the first Refresh and the name is
 		// unique. Logged rather than ignored so a wiring change shows up.
@@ -490,9 +490,9 @@ func (s *Server) initBlockStore() {
 	}
 }
 
-// publishFinding sends f to the alert pipeline's bus and reports whether there
+// publishFindingOK sends f to the alert pipeline's bus and reports whether there
 // was one. The pipeline is built after the first Refresh, so it is read per call.
-func (s *Server) publishFinding(f integration.Finding) bool {
+func (s *Server) publishFindingOK(f integration.Finding) bool {
 	if s.pipeline == nil {
 		return false
 	}

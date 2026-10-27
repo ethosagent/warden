@@ -112,6 +112,7 @@ var All = slices.Concat(
 		// genesis entry and logs its key_id before serving. In-process only (it
 		// reads the CP state dir).
 		{Name: "admin_audit_enabled_genesis", Opts: adminAuditOpts(), Run: adminAuditEnabledGenesis},
+		{Name: "admin_audit_offline_verify", Opts: adminAuditOpts(), Run: adminAuditOfflineVerify},
 		// Admin audit middleware (W-P1-AAUD-02): an admin-bearer write in
 		// console.auth none is one row for cp-admin-token; wrong bearers and worker
 		// traffic write none. In-process only (it reads the CP state dir).

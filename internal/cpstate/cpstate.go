@@ -101,6 +101,23 @@ func Open(ctx context.Context, path string, migs []Migration) (*DB, error) {
 // a reader built from an older schema refuses a newer file. A missing file is
 // an error: read-only never creates one.
 func OpenReadOnly(ctx context.Context, path string, migs []Migration) (*DB, error) {
+	return OpenReadOnlyWith(ctx, path, migs, ReadOnlyOptions{})
+}
+
+// ReadOnlyOptions relaxes OpenReadOnlyWith.
+type ReadOnlyOptions struct {
+	// AllowNewer, when set, is asked about each ID the file holds that migs
+	// does not register; true tolerates it. The downgrade guard exists so an
+	// older binary never writes against a schema it does not understand; a
+	// read-only reader that touches only its own tables can safely open a
+	// file a newer binary migrated, as long as no newer migration changed
+	// those tables (the reader refuses IDs in its own namespace). Nil keeps
+	// the guard strict.
+	AllowNewer func(id string) bool
+}
+
+// OpenReadOnlyWith is OpenReadOnly with options.
+func OpenReadOnlyWith(ctx context.Context, path string, migs []Migration, o ReadOnlyOptions) (*DB, error) {
 	if err := validateMigrations(migs); err != nil {
 		return nil, err
 	}
@@ -120,12 +137,28 @@ func OpenReadOnly(ctx context.Context, path string, migs []Migration) (*DB, erro
 		_ = d.db.Close()
 		return nil, err
 	}
-	if err := checkKnown(path, known, migs); err != nil {
+	if err := checkKnown(path, unknownToCheck(known, o.AllowNewer), migs); err != nil {
 		_ = d.db.Close()
 		return nil, err
 	}
 	d.applied = known
 	return d, nil
+}
+
+// unknownToCheck drops the IDs allow tolerates (all IDs are kept with a nil
+// allow). Registered IDs pass checkKnown either way, so asking allow about
+// them is harmless.
+func unknownToCheck(applied []string, allow func(string) bool) []string {
+	if allow == nil {
+		return applied
+	}
+	var out []string
+	for _, id := range applied {
+		if !allow(id) {
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 // SQL returns the underlying single-connection handle for feature stores to
