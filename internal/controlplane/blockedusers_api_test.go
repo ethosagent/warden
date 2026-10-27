@@ -250,8 +250,8 @@ func TestBlockedUsers_APIValidation(t *testing.T) {
 	if rec := post(`{"reason":"nothing to block"}`); rec.Code != http.StatusBadRequest {
 		t.Errorf("neither field = %d %s, want 400", rec.Code, rec.Body)
 	}
-	if rec := post(`{"email":"nope"}`); rec.Code != http.StatusBadRequest {
-		t.Errorf("email without @ = %d, want 400", rec.Code)
+	if rec := post(`{"email":"nope"}`); rec.Code != http.StatusBadRequest || strings.Contains(rec.Body.String(), "policy.blockedUsers") {
+		t.Errorf("email without @ = %d %s, want 400 in request wording", rec.Code, rec.Body)
 	}
 	for _, body := range []string{`{"email":"a@b.co","extra":1}`, `not json`, `{"email":"a@b.co"} {}`, `{"email":7}`} {
 		if rec := post(body); rec.Code != http.StatusBadRequest {

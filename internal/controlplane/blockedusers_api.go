@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
@@ -29,7 +30,8 @@ const blockedUsersCreatedByBearer = actorCPAdminToken
 
 // blockListAPI adapts a BlockStore to the dashboard's BlockListStore.
 type blockListAPI struct {
-	store *BlockStore
+	store  *BlockStore
+	logger *slog.Logger
 }
 
 var _ dashboard.BlockListStore = blockListAPI{}
@@ -62,10 +64,18 @@ func isSelf(ctx context.Context, e BlockEntry) bool {
 }
 
 func toBlockView(e BlockEntry) dashboard.BlockListEntry {
-	return dashboard.BlockListEntry{
-		ID: e.ID, Sub: e.Sub, Email: e.Email, Reason: e.Reason, CreatedBy: e.CreatedBy,
-		CreatedAt: e.CreatedAt.UTC().Format(time.RFC3339),
+	v := dashboard.BlockListEntry{ID: e.ID, Sub: e.Sub, Email: e.Email, Reason: e.Reason, CreatedBy: e.CreatedBy}
+	if !e.CreatedAt.IsZero() {
+		v.CreatedAt = e.CreatedAt.UTC().Format(time.RFC3339)
 	}
+	return v
+}
+
+// unexpected logs an error the dashboard will answer with a fixed 500 and
+// returns it. The errors carry no entry value or reason.
+func (a blockListAPI) unexpected(op string, err error) error {
+	a.logger.Error("block list request failed", "op", op, "error", err)
+	return err
 }
 
 // annotateBlock attaches the entry reference and which identifiers it holds. It
@@ -88,7 +98,7 @@ func boolStr(b bool) string {
 func (a blockListAPI) List(ctx context.Context) ([]dashboard.BlockListEntry, error) {
 	entries, err := a.store.List(ctx)
 	if err != nil {
-		return nil, err
+		return nil, a.unexpected("list", err)
 	}
 	out := make([]dashboard.BlockListEntry, 0, len(entries))
 	for _, e := range entries {
@@ -101,7 +111,7 @@ func (a blockListAPI) Add(ctx context.Context, in dashboard.BlockListAdd) (dashb
 	actor := blockActor(ctx)
 	id, err := a.store.Add(ctx, BlockEntry{Sub: in.Sub, Email: in.Email, Reason: in.Reason}, actor)
 	if err != nil {
-		return dashboard.BlockListEntry{}, mapBlockErr(err)
+		return dashboard.BlockListEntry{}, a.mapErr("add", err)
 	}
 	stored := BlockEntry{ID: id, Sub: strings.TrimSpace(in.Sub), Email: strings.ToLower(strings.TrimSpace(in.Email)), Reason: in.Reason, CreatedBy: actor}
 	if entries, lerr := a.store.List(ctx); lerr == nil {
@@ -119,7 +129,7 @@ func (a blockListAPI) Add(ctx context.Context, in dashboard.BlockListAdd) (dashb
 func (a blockListAPI) Remove(ctx context.Context, id string) error {
 	entries, err := a.store.List(ctx)
 	if err != nil {
-		return err
+		return a.unexpected("remove", err)
 	}
 	for _, e := range entries {
 		if e.ID != id {
@@ -129,9 +139,18 @@ func (a blockListAPI) Remove(ctx context.Context, id string) error {
 		if isSelf(ctx, e) {
 			return dashboard.ErrBlockSelfUnblock
 		}
-		return mapBlockErr(a.store.Remove(ctx, id, blockActor(ctx)))
+		return a.mapErr("remove", a.store.Remove(ctx, id, blockActor(ctx)))
 	}
 	return dashboard.ErrBlockNotFound
+}
+
+// mapErr is mapBlockErr that also logs an error with no dashboard equivalent.
+func (a blockListAPI) mapErr(op string, err error) error {
+	mapped := mapBlockErr(err)
+	if mapped != nil && mapped == err {
+		return a.unexpected(op, err)
+	}
+	return mapped
 }
 
 // mapBlockErr maps a BlockStore error to the dashboard's. Other errors pass
@@ -147,10 +166,22 @@ func mapBlockErr(err error) error {
 	case errors.Is(err, ErrNotFound):
 		return dashboard.ErrBlockNotFound
 	case errors.Is(err, ErrInvalid):
-		return fmt.Errorf("%w: %s", dashboard.ErrBlockInvalid, strings.TrimPrefix(err.Error(), ErrInvalid.Error()+": "))
+		return fmt.Errorf("%w: %s", dashboard.ErrBlockInvalid, requestWording(strings.TrimPrefix(err.Error(), ErrInvalid.Error()+": ")))
 	default:
 		return err
 	}
+}
+
+// requestWording drops the validator's "config: policy.blockedUsers[N]: "
+// prefix: the index is the entry's place in the merged sorted list, not
+// anything the caller sent.
+func requestWording(msg string) string {
+	if rest, ok := strings.CutPrefix(msg, "config: policy.blockedUsers["); ok {
+		if _, tail, found := strings.Cut(rest, "]: "); found {
+			return tail
+		}
+	}
+	return msg
 }
 
 // blockListNoState answers every call with state_dir_required: a control plane
@@ -176,7 +207,7 @@ func (s *Server) blockListStore() dashboard.BlockListStore {
 	if s.blocks == nil {
 		return blockListNoState{}
 	}
-	return blockListAPI{store: s.blocks}
+	return blockListAPI{store: s.blocks, logger: s.cfg.Logger}
 }
 
 // blockedUsersHash is the keyed hash of the block list's canonical sub/email
