@@ -587,9 +587,10 @@ append is logged at ERROR and does not stop startup.
   the served YAML `secretStore` block and is merged in when `/policy` is built,
   so workers get the same bytes as before. In history responses and diffs a
   credential appears only as its fingerprint, never the value.
-- Serve-time overlay data is not stored either. The credential is the only
-  overlay today; the block list will be one when it ships. A rollback therefore
-  never restores an old credential or block list.
+- Serve-time overlay data is not stored either. The credential
+  (versioned mode) and the user block list (whenever a state dir is set) are the
+  overlays today. A rollback therefore never restores an old credential or
+  block list.
 - CP-local blocks (integrations, detection, `central`, `controlPlane`, ...)
   are not versioned; their editors keep rewriting the served YAML.
 

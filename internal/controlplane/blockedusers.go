@@ -333,36 +333,43 @@ func newBlockID() (string, error) {
 }
 
 // blockLoadReporter reports a failed block-list load once per episode: the
-// first failure logs one ERROR line and publishes a high-severity Finding;
-// repeats stay quiet until a load succeeds.
+// first failure logs one ERROR line, and the first failure that finds an alert
+// pipeline publishes one high-severity Finding (the pipeline is built after the
+// initial load, so an episode that starts there still publishes on its next
+// failure). Repeats stay quiet until a load succeeds.
 type blockLoadReporter struct {
-	logger  *slog.Logger
-	publish func(integration.Finding) // nil when there is no alert pipeline
-	now     func() time.Time
-	failing atomic.Bool
+	logger    *slog.Logger
+	publish   func(integration.Finding) bool // false when there is no alert pipeline
+	now       func() time.Time
+	failing   atomic.Bool
+	published atomic.Bool
 }
 
 func (r *blockLoadReporter) failed() {
-	if !r.failing.CompareAndSwap(false, true) {
+	if r.failing.CompareAndSwap(false, true) {
+		// No entry values and no error text: the log line is the signal when no
+		// alert pipeline exists, and the Refresh warning carries the cause.
+		r.logger.Error(blockLoadFailedMsg)
+	}
+	if r.published.Load() || !r.published.CompareAndSwap(false, true) {
 		return
 	}
-	// No entry values and no error text: the log line is the signal when no
-	// alert pipeline exists, and the Refresh warning carries the cause.
-	r.logger.Error(blockLoadFailedMsg)
-	if r.publish == nil {
-		return
-	}
-	r.publish(integration.Finding{
+	if !r.publish(integration.Finding{
 		RuleID:   blockLoadFailedMsg,
 		Category: "security",
 		Severity: integration.SevHigh,
 		Summary:  "The user block list could not be read; workers keep the last block list they were served",
 		DedupKey: blockLoadFailedMsg,
 		Ts:       r.now(),
-	})
+	}) {
+		r.published.Store(false) // no pipeline yet: try again on the next failure
+	}
 }
 
-func (r *blockLoadReporter) ok() { r.failing.Store(false) }
+func (r *blockLoadReporter) ok() {
+	r.failing.Store(false)
+	r.published.Store(false)
+}
 
 // blockedUsersOverlay is the serve-time overlay that merges the stored block
 // list into the wire. Because it is an overlay the list is never part of a
@@ -417,13 +424,16 @@ func (s *Server) initBlockStore() {
 	}
 }
 
-// publishFinding sends f to the alert pipeline's bus; a no-op without one. The
-// pipeline is built after the first Refresh, so it is read per call.
-func (s *Server) publishFinding(f integration.Finding) {
+// publishFinding sends f to the alert pipeline's bus and reports whether there
+// was one. The pipeline is built after the first Refresh, so it is read per call.
+func (s *Server) publishFinding(f integration.Finding) bool {
 	if s.pipeline == nil {
-		return
+		return false
 	}
-	if m := s.pipeline.CurrentManager(); m != nil {
-		m.Bus().PublishFinding(f)
+	m := s.pipeline.CurrentManager()
+	if m == nil {
+		return false
 	}
+	m.Bus().PublishFinding(f)
+	return true
 }

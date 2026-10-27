@@ -18,6 +18,7 @@ import (
 
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/cpstate"
+	"github.com/ethosagent/warden/internal/integration"
 )
 
 // blockServer builds a Server with a state DB (file-mode policy) and a log sink.
@@ -381,5 +382,39 @@ func TestBlockedUsers_StoreWithoutServer(t *testing.T) {
 	}
 	if list, _ := st.List(ctx); len(list) != 0 {
 		t.Errorf("List after Remove = %+v", list)
+	}
+}
+
+// TestBlockedUsers_FindingWaitsForPipeline: an episode that starts before the
+// alert pipeline exists (the initial load) still publishes its one Finding on
+// the next failure once there is a pipeline, and not again within the episode.
+func TestBlockedUsers_FindingWaitsForPipeline(t *testing.T) {
+	var published int
+	havePipeline := false
+	rep := &blockLoadReporter{
+		logger: slog.New(slog.DiscardHandler),
+		now:    time.Now,
+		publish: func(integration.Finding) bool {
+			if !havePipeline {
+				return false
+			}
+			published++
+			return true
+		},
+	}
+	rep.failed()
+	if published != 0 {
+		t.Fatalf("published %d Findings without a pipeline", published)
+	}
+	havePipeline = true
+	rep.failed()
+	rep.failed()
+	if published != 1 {
+		t.Errorf("published %d Findings in one episode, want 1", published)
+	}
+	rep.ok()
+	rep.failed()
+	if published != 2 {
+		t.Errorf("published %d Findings after a new episode, want 2", published)
 	}
 }
