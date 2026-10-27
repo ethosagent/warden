@@ -279,6 +279,17 @@ func TestPolicyRollbackAudited(t *testing.T) {
 	if strings.Contains(logs.String(), "v3.example.com") {
 		t.Fatal("a log line carries doc content")
 	}
+	// A maximal note keeps the prefix: the note is cut to fit the store's
+	// message cap, never the "rollback to v<N>" part.
+	note := strings.Repeat("é", 512)
+	rollbackBody(t, e.send("", http.MethodPost, rollbackPath(2), `{"note":"`+note+`"}`, ifMatch(4)))
+	v5 := headVersion(t, e.srv)
+	if got := []rune(v5.Message); len(got) != maxPolicyMessage || !strings.HasPrefix(v5.Message, "rollback to v2: éé") {
+		t.Fatalf("v5 message = %d runes %.40q, want %d runes starting rollback to v2:", len(got), v5.Message, maxPolicyMessage)
+	}
+	if got := rollbackMessage(12345, ""); got != "rollback to v12345" {
+		t.Fatalf("rollbackMessage without a note = %q", got)
+	}
 }
 
 // TestPolicyRollbackKeepsCredentialAndOverlays: a rollback past a credential

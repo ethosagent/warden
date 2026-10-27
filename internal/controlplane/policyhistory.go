@@ -90,10 +90,7 @@ func (h policyHistory) Diff(ctx context.Context, version, against int64) (dashbo
 // to head's creates nothing. The log line names versions and the actor only,
 // never doc content.
 func (h policyHistory) Rollback(ctx context.Context, version int64, note string, meta dashboard.WriteMeta) (dashboard.RollbackResult, error) {
-	meta.Message = fmt.Sprintf("rollback to v%d", version)
-	if note != "" {
-		meta.Message += ": " + note
-	}
+	meta.Message = rollbackMessage(version, note)
 	var fromHead int64
 	mutate := func(w *policyWire) error {
 		head, err := h.s.versions.Head(ctx)
@@ -123,6 +120,21 @@ func (h policyHistory) Rollback(ctx context.Context, version int64, note string,
 		"changed", changed, "actor_sub", actor.Sub)
 	adminaudit.Annotate(ctx, "policy@"+h.s.policy.currentETag(), nil)
 	return dashboard.RollbackResult{Head: newHead, Changed: changed}, nil
+}
+
+// rollbackMessage is "rollback to v<N>", plus ": <note>" when there is a
+// note. The note is cut, never the prefix, so the message fits the store's
+// maxPolicyMessage and always names the target version.
+func rollbackMessage(version int64, note string) string {
+	msg := fmt.Sprintf("rollback to v%d", version)
+	if note == "" {
+		return msg
+	}
+	msg += ": "
+	if r := []rune(note); len(r) > maxPolicyMessage-len(msg) {
+		note = string(r[:maxPolicyMessage-len(msg)])
+	}
+	return msg + note
 }
 
 // keepCredential sets doc's secretAccessKey to key (head's fingerprint, or ""
