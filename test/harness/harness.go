@@ -162,6 +162,9 @@ type H struct {
 	// versionedPolicy (WithVersionedPolicyStore) boots the control plane with
 	// --policy-store=versioned and a state dir.
 	versionedPolicy bool
+	// wantWorkerTokens (WithWorkerTokens) boots the control plane with a state
+	// dir, so it builds the worker token store, on the harness's fake clock.
+	wantWorkerTokens bool
 	// wantAdminAudit (WithAdminAudit) boots the control plane with
 	// console.adminAudit.enabled and a state dir.
 	wantAdminAudit bool
@@ -619,6 +622,9 @@ func (h *H) boot() {
 	}
 
 	if h.suppliedTarget != nil {
+		if h.wantWorkerTokens {
+			h.tb.Fatalf("harness: WithWorkerTokens boots an in-process control plane; it cannot combine with WithTarget")
+		}
 		if h.versionedPolicy {
 			h.tb.Fatalf("harness: WithVersionedPolicyStore boots an in-process control plane; it cannot combine with WithTarget")
 		}

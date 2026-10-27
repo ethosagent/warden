@@ -3,7 +3,6 @@ package controlplane
 import (
 	"context"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -16,7 +15,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/config"
 )
 
@@ -39,7 +37,7 @@ type PolicyServer interface {
 // against the worker registry, exactly as before.
 type policyServer struct {
 	policyPath string
-	token      string
+	auth       *WorkerAuthenticator
 	logger     *slog.Logger
 	registry   *WorkerRegistry
 	watch      *policyWatch
@@ -80,11 +78,13 @@ const maxOverlayErrLen = 256
 // newPolicyServer constructs the policy-serving component. It does not load:
 // the owner registers overlays (addOverlay) and then calls Refresh once, so
 // /policy and the dashboard have policy immediately. registry receives
-// SeenPolicyPull on each poll; token gates access when non-empty.
+// SeenPolicyPull on each poll; token is the shared token the default
+// authenticator checks (empty = open). New replaces the authenticator with the
+// control plane's own (worker tokens, mode, counters) before serving.
 func newPolicyServer(policyPath, token string, logger *slog.Logger, registry *WorkerRegistry) *policyServer {
 	return &policyServer{
 		policyPath: policyPath,
-		token:      token,
+		auth:       NewWorkerAuthenticator(WorkerAuthConfig{Legacy: token, Registry: registry, Logger: logger}),
 		logger:     logger,
 		registry:   registry,
 		watch:      newPolicyWatch(),
@@ -367,18 +367,17 @@ func (ps *policyServer) ServePolicy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if ps.token != "" {
-		want := "Bearer " + ps.token
-		if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte(want)) != 1 {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
+	principal, err := ps.auth.Authenticate(r)
+	if err != nil {
+		WriteWorkerAuthError(w, err)
+		return
 	}
 	if !ps.sealed.Load() {
 		ps.sealOverlays() // first request ends overlay registration
 	}
-	// Register the worker as connected (it announces its id on the pull).
-	ps.registry.SeenPolicyPull(r.Header.Get(analytics.ProxyIDHeader))
+	// Register the worker as connected under the authenticated id: a token's
+	// bound proxy id, never the raw header.
+	ps.registry.SeenPolicyPull(principal.ProxyID)
 
 	inm := trimETag(r.Header.Get("If-None-Match"))
 	wait := parseWait(r.URL.Query().Get("wait"))

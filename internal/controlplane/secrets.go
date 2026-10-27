@@ -69,8 +69,12 @@ func NewSecretStore(cfg config.SecretStoreConfig, logger *slog.Logger) (secrets.
 // bearerOK reports whether the request presents the configured bearer token,
 // compared in constant time. An empty configured token disables auth (development
 // only), matching the other CP routes. Shared by the secret endpoints (in
-// console.auth none only) and the heartbeat handler so the gate is defined once.
+// console.auth none only); worker routes use WorkerAuthenticator.
 func (s *Server) bearerOK(r *http.Request) bool {
+	// A worker token never opens a human route, whatever the configured token.
+	if hasWorkerTokenBearer(r) {
+		return false
+	}
 	if s.cfg.Token == "" {
 		return true
 	}

@@ -79,6 +79,12 @@ var All = slices.Concat(
 		// as cli. In-process only (it writes the CP state dir).
 		{Name: "policy_import_export", Opts: policyImportOpts(), Run: policyImportExport},
 
+		// Per-worker tokens (W-P1-WTOK-02): a bound token authenticates /policy,
+		// heartbeat and ingest, its bound id is what the CP records, an
+		// out-of-process revoke takes effect, and it opens no human route.
+		// In-process only (it writes the CP state dir, fake clock).
+		{Name: "worker_token_auth", Opts: workerTokenOpts(), Run: workerTokenAuth},
+
 		// Admin audit gate (W-P1-AAUD-05): enabled, the control plane writes the
 		// genesis entry and logs its key_id before serving. In-process only (it
 		// reads the CP state dir).

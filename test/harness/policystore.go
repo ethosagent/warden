@@ -25,11 +25,19 @@ func (h *H) applyPolicyStore(p *controlplane.Params) {
 
 // ControlPlaneStateDB is the path of the control plane's state database, for a
 // scenario that plays an out-of-process writer (the CLI). It needs
-// WithVersionedPolicyStore or WithConsoleOIDC.
+// WithVersionedPolicyStore, WithConsoleOIDC or WithWorkerTokens.
 func (h *H) ControlPlaneStateDB() string {
 	h.tb.Helper()
-	if !h.versionedPolicy && !h.wantConsole {
-		h.tb.Fatal("harness: ControlPlaneStateDB needs WithVersionedPolicyStore or WithConsoleOIDC")
+	if !h.versionedPolicy && !h.wantConsole && !h.wantWorkerTokens {
+		h.tb.Fatal("harness: ControlPlaneStateDB needs WithVersionedPolicyStore, WithConsoleOIDC or WithWorkerTokens")
 	}
 	return filepath.Join(h.root, "cp-state", "warden-cp.db")
+}
+
+// WithWorkerTokens boots the control plane with a state dir, so it builds the
+// per-worker token store (W-P1-WTOK-02) on the harness's fake clock. The
+// workers keep using the shared token; a scenario mints tokens out of process
+// (ControlPlaneStateDB) and presents them through CP().Do. In-process only.
+func WithWorkerTokens() Option {
+	return func(h *H) { h.wantWorkerTokens = true }
 }
