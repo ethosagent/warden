@@ -202,6 +202,30 @@ curl --cacert proxy-ca.crt -X PUT https://localhost:7070/dashboard/api/policy \
 A worker's own admin dashboard (its local `:9090`) is a separate listener with its
 own token, not this one: see [Worker admin token](#worker-admin-token).
 
+## Console sign-in config
+
+The control plane reads an optional `console:` block from the operator-owned
+`--config` file (never the `--state-dir` copy, which is seeded once and rewritten by
+the dashboard, so a different block there is ignored with a warning). It is
+control-plane-local: it never reaches a worker or the settings wire, and changing it
+needs a restart. It holds the *name* of the client-secret env var, never the secret.
+
+| Key | Default | Notes |
+|---|---|---|
+| `auth` | `none` | `none` keeps today's behaviour; `oidc` enables SSO. Any other value is a startup error. |
+| `oidc.issuer`, `oidc.clientSecretEnv`, `oidc.redirectURL` | required for `oidc` | The issuer must be https unless `oidc.internalIssuerURL` is set (the dev profile); `redirectURL` is absolute, ends in `/auth/callback` and is https unless its host is loopback. |
+| `oidc.clientID` | `warden-console` | The reference Dex client. |
+| `oidc.scopes` | `openid email profile groups` | Must include `openid`. |
+| `oidc.internalIssuerURL` | none | Origin the control-plane container uses to reach the IdP, for example `http://dex:5556`. Origin only; there is no insecure-issuer key. |
+| `roles.admin`, `roles.editor`, `roles.viewer` | none | IdP group names, matched exactly and case-sensitively; the highest matching role wins. `roles.admin` needs at least one group. |
+| `session.idle`, `session.absolute` | `1h`, `12h` | `0 < idle <= absolute <= 168h`. |
+
+In `oidc` mode the control plane also needs a non-empty value in the client-secret env
+var and `--state-dir`. Until W-P1-SSO-06 lands it then refuses to start with
+"console oidc enforcement is not available in this build", so no build serves login
+routes while a human route still accepts the shared bearer. See
+`configs/config.control-plane.yaml` for commented examples.
+
 ## Worker admin token
 
 The worker's admin listener (`:9090`, default `127.0.0.1:9090`) serves the same

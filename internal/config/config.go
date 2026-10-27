@@ -106,6 +106,11 @@ type Policy struct {
 	// CP-local (never on the worker wire). An absent block = detection ON with
 	// engine defaults; see DetectionConfig.
 	Detection DetectionConfig `json:"-"`
+
+	// Console is the control-plane-local console sign-in config (auth mode, OIDC
+	// client, role groups, session bounds). It is read by the control plane from
+	// --config only and never leaves it: json:"-" keeps it off the worker wire.
+	Console ConsoleConfig `json:"-"`
 	// LLMProviders is the shared, named LLM-provider registry (name + baseURL +
 	// model + apiKeyEnv NAME + optional timeout). It carries no secret VALUE, so
 	// it RIDES the secret-free settings wire (unlike the CP-local blocks above):
@@ -309,6 +314,7 @@ type rawConfig struct {
 	Audit         *rawAudit         `yaml:"audit"`
 	Integrations  []rawIntegration  `yaml:"integrations"`
 	Detection     *rawDetection     `yaml:"detection"`
+	Console       *rawConsole       `yaml:"console"`
 	LLMProviders  []rawLLMProvider  `yaml:"llmProviders"`
 	Explore       *rawExplore       `yaml:"explore"`
 	DNS           *rawDNS           `yaml:"dns"`
@@ -424,6 +430,11 @@ func parse(data []byte) (*LocalYAMLProvider, error) {
 		return nil, err
 	}
 	policy.Detection = detection
+	console, err := parseConsole(raw.Console)
+	if err != nil {
+		return nil, err
+	}
+	policy.Console = console
 	llmProviders, err := parseLLMProviders(raw.LLMProviders)
 	if err != nil {
 		return nil, err
@@ -639,6 +650,9 @@ func validate(p Policy) error {
 		return err
 	}
 	if err := validateIntegrations(p.Integrations); err != nil {
+		return err
+	}
+	if err := validateConsole(p.Console); err != nil {
 		return err
 	}
 	if err := validateDetection(p.Detection); err != nil {
