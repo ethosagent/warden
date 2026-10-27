@@ -320,17 +320,19 @@ make e2e-identity-down                                # down -v
   your own.
 - **Split-horizon.** The host reaches Dex at `http://localhost:5556/dex` (its
   published port, the issuer); the CP and worker-1 containers reach it as
-  `http://dex:5556` (the CP's `console.oidc.internalIssuerURL`). agent-1 stays
-  on its internal network and has no route to Dex. There is no test-only dialer
-  and no hosts entry.
-- **Console in oidc mode.** The CP loads `configs/config.e2e-identity-cp.yaml`,
-  a copy of the base e2e CP config plus a `console:` block (W-P1-SSO-07: the
-  `warden-console` Dex client, roles from the seeded groups: alice admin, bob
-  editor, carol viewer, dave none) and an echo `secretStore` so
-  `/central/secrets` is mounted. Every `/dashboard/*` read on this stack
-  therefore needs a session, unlike `make e2e`. worker-1 loads
-  `config.e2e-identity-worker.yaml`, a copy of the base worker config; its
-  `identity:` block is W-P1-IDC-03's.
+  `http://dex:5556` (the CP's `console.oidc.internalIssuerURL` and the worker's
+  `identity.internalIssuerURL`). agent-1 stays on its internal network and has
+  no route to Dex. There is no test-only dialer and no hosts entry.
+- **Console in oidc mode, identity block on the worker.** The CP loads
+  `configs/config.e2e-identity-cp.yaml`, a copy of the base e2e CP config plus a
+  `console:` block (W-P1-SSO-07: the `warden-console` Dex client, roles from the
+  seeded groups: alice admin, bob editor, carol viewer, dave none) and an echo
+  `secretStore` so `/central/secrets` is mounted. Every `/dashboard/*` read on
+  this stack therefore needs a session, unlike `make e2e`. worker-1 loads
+  `config.e2e-identity-worker.yaml`, a copy of the base worker config with an
+  `identity:` block in attribute mode (issuer `http://localhost:5556/dex`,
+  `internalIssuerURL: http://dex:5556`, W-P1-IDC-03); `TestIdentitySmoke` proves
+  it with a curl agent.
 - **The warden CLI in agent-1.** A one-shot `warden-bin` service copies the
   static `warden` binary from the warden image into a volume that agent-1 mounts
   read-only at `/opt/warden`; no extra image is built.
