@@ -68,8 +68,8 @@ func NewSecretStore(cfg config.SecretStoreConfig, logger *slog.Logger) (secrets.
 
 // bearerOK reports whether the request presents the configured bearer token,
 // compared in constant time. An empty configured token disables auth (development
-// only), matching the other CP routes. Shared by the secret endpoints and the
-// heartbeat handler so the gate is defined once.
+// only), matching the other CP routes. Shared by the secret endpoints (in
+// console.auth none only) and the heartbeat handler so the gate is defined once.
 func (s *Server) bearerOK(r *http.Request) bool {
 	if s.cfg.Token == "" {
 		return true
@@ -78,13 +78,56 @@ func (s *Server) bearerOK(r *http.Request) bool {
 	return subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte(want)) == 1
 }
 
+// secretsAction is the action name a /central/secrets request is authorized
+// and logged under in oidc mode.
+func secretsAction(method string) string {
+	switch method {
+	case http.MethodGet, http.MethodHead:
+		return "secrets.read"
+	case http.MethodDelete:
+		return "secrets.delete"
+	}
+	return "secrets.write"
+}
+
+// secretsAuthOK gates every /central/secrets request and writes the refusal
+// itself. In console.auth none it is bearerOK, exactly as before. In oidc mode
+// the routes are human routes: only an admin session counts, and the
+// Authorization header is never read, so neither the shared token nor any
+// other bearer opens them. withSession (wrapped around both mounts) has
+// already refused a session write without a matching CSRF header or with a
+// foreign Origin, and puts no Principal in the context without a live session;
+// with sessions unavailable (no state db) every request is therefore 401.
+func (s *Server) secretsAuthOK(w http.ResponseWriter, r *http.Request) bool {
+	if s.cfg.Console.Auth != config.ConsoleAuthOIDC {
+		if !s.bearerOK(r) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return false
+		}
+		return true
+	}
+	row := authzRow{MinRole: config.RoleAdmin, Action: secretsAction(r.Method)}
+	p, ok := PrincipalFrom(r.Context())
+	if !ok {
+		logDenied(s.cfg.Logger, row, 0, Principal{}, r)
+		writeAuthzJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthenticated"})
+		return false
+	}
+	role, _ := s.cfg.Console.RoleFor(p.Groups)
+	if role < row.MinRole {
+		logDenied(s.cfg.Logger, row, role, p, r)
+		writeAuthzJSON(w, http.StatusForbidden, map[string]string{"error": "role_required", "need": row.MinRole.String()})
+		return false
+	}
+	return true
+}
+
 // handleSecrets serves the collection route POST /central/secrets (upsert) and
 // GET /central/secrets (list metadata). It is mounted only when a writable store
-// is configured; the same constant-time bearer gate as the other /central/*
-// routes fronts every method.
+// is configured; secretsAuthOK fronts every method (the shared bearer in none
+// mode, an admin session plus CSRF in oidc mode).
 func (s *Server) handleSecrets(w http.ResponseWriter, r *http.Request) {
-	if !s.bearerOK(r) {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	if !s.secretsAuthOK(w, r) {
 		return
 	}
 	switch r.Method {
@@ -152,10 +195,10 @@ func (s *Server) listSecrets(w http.ResponseWriter, r *http.Request) {
 
 // handleSecretByKey serves DELETE /central/secrets/{key}. Delete is idempotent
 // (removing an absent key returns 204). Only DELETE is allowed on this subtree;
-// there is no value in hand, so it logs the key only.
+// there is no value in hand, so it logs the key only. secretsAuthOK gates it
+// like the collection route.
 func (s *Server) handleSecretByKey(w http.ResponseWriter, r *http.Request) {
-	if !s.bearerOK(r) {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	if !s.secretsAuthOK(w, r) {
 		return
 	}
 	if r.Method != http.MethodDelete {

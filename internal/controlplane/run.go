@@ -57,11 +57,10 @@ type Params struct {
 	// inject a fake without another seam PR.
 	Clock clock.Clock
 
-	// SkipConsoleOIDCGuard lets console.auth: oidc start despite the temporary
-	// guard (errConsoleOIDCUnavailable). It exists only so the L1 harness can
-	// drive a real login before W-P1-SSO-06 removes the guard; cmd/ never sets
-	// it. SSO-06 deletes this field together with the guard.
-	SkipConsoleOIDCGuard bool
+	// RequireConsoleAuth refuses to start when console.auth is none, so an
+	// operator can make an open console a startup error
+	// (--require-console-auth).
+	RequireConsoleAuth bool
 }
 
 // Run boots a control plane from Params and serves until ctx is cancelled. It
@@ -136,10 +135,12 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	if err != nil {
 		return fail(err)
 	}
-	if !p.SkipConsoleOIDCGuard {
-		if err := checkConsoleSupported(consoleCfg); err != nil {
-			return fail(err)
+	if consoleCfg.Auth != config.ConsoleAuthOIDC {
+		if p.RequireConsoleAuth {
+			return fail(errors.New("control-plane: console.auth is none and --require-console-auth is set; configure console.auth: oidc"))
 		}
+		logger.Warn("console.auth=none: dashboard reads are unauthenticated; writes need the admin bearer",
+			"hint", "set console.auth: oidc (see docs/control-plane.md, \"Migrating from none to oidc\")")
 	}
 
 	var token string
@@ -377,11 +378,6 @@ func seedServedConfig(servedPath, seedPath string) (bool, error) {
 	return true, nil
 }
 
-// errConsoleOIDCUnavailable is the temporary guard of W-P1-SSO-02. It is removed
-// by W-P1-SSO-06, the ticket that also secures /central/secrets, so no build
-// serves oidc login while a human route still accepts the shared bearer.
-var errConsoleOIDCUnavailable = errors.New("control-plane: console oidc enforcement is not available in this build")
-
 // resolveConsole loads the console block from configPath (the operator-owned
 // --config file, never the served copy) and checks what oidc mode needs at
 // startup: a non-empty client-secret env var and a --state-dir. Error and log
@@ -414,14 +410,6 @@ func resolveConsole(logger *slog.Logger, configPath, servedPath, stateDir string
 			"issuer", cc.OIDC.Issuer, "internalIssuerURL", cc.OIDC.InternalIssuerURL)
 	}
 	return cc, nil
-}
-
-// checkConsoleSupported is the temporary oidc guard (see errConsoleOIDCUnavailable).
-func checkConsoleSupported(cc config.ConsoleConfig) error {
-	if cc.Auth == config.ConsoleAuthOIDC {
-		return errConsoleOIDCUnavailable
-	}
-	return nil
 }
 
 // toInstanceConfigs maps the CP-local integrations config onto the integration

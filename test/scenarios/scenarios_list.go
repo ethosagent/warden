@@ -62,6 +62,9 @@ var All = slices.Concat(
 		// creates a session with the right cookie flags, and the session expires
 		// by the control plane's clock. In-process only (issuer fake, fake clock).
 		{Name: "console_oidc_login", Opts: consoleOpts(), Run: consoleOIDCLogin},
+		// Console enforcement (W-P1-SSO-06): oidc starts, the shared bearer opens no
+		// human route, and workers keep pulling /policy with it.
+		{Name: "console_oidc_bearer_rejected", Opts: consoleOpts(), Run: consoleOIDCBearerRejected},
 	},
 	// Canary across protocols x allow/deny; see canary.go.
 	canaryScenarios(),

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/secrets"
 )
@@ -391,4 +392,186 @@ func hasKey(metas []secrets.SecretMeta, key string) bool {
 		}
 	}
 	return false
+}
+
+// newSecretsOIDCEnv is a control plane in console.auth oidc mode with an echo
+// secret store mounted, so /central/secrets exists. Sessions are created
+// in-process, as in the authz tests.
+func newSecretsOIDCEnv(t *testing.T) *authzEnv {
+	t.Helper()
+	logger, buf := testLogger()
+	db := openSessionDB(t)
+	policy := writePolicyFile(t, "api.openai.com")
+	srv := New(Config{
+		PolicyPath: policy, Token: dashTestToken, State: db, Logger: logger,
+		Console: authzConsole(defaultRoles()), SecretStore: secrets.NewEchoStore(),
+	})
+	if srv.sessions == nil {
+		t.Fatal("oidc mode with a state db must enable sessions")
+	}
+	srv.sessions = NewSessionStore(db.SQL(), time.Hour, 12*time.Hour, newFakeClock().Now)
+	srv.sessionReader = srv.sessions
+	return &authzEnv{srv: srv, h: srv.Handler(), log: buf, policy: policy}
+}
+
+// TestSecretsOIDCMode: in oidc mode /central/secrets needs an admin session plus
+// CSRF; the shared bearer (or any bearer) opens nothing, and editors and viewers
+// are refused.
+func TestSecretsOIDCMode(t *testing.T) {
+	e := newSecretsOIDCEnv(t)
+	routes := []struct {
+		method, path, body string
+		wantOK             int
+	}{
+		{http.MethodPost, "/central/secrets", `{"key":"K","value":"V123456"}`, http.StatusNoContent},
+		{http.MethodGet, "/central/secrets", "", http.StatusOK},
+		{http.MethodDelete, "/central/secrets/K", "", http.StatusNoContent},
+	}
+	bearerOnly := func(method, path, body, bearer string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		if bearer != "" {
+			req.Header.Set("Authorization", "Bearer "+bearer)
+		}
+		rec := httptest.NewRecorder()
+		e.h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	for _, rt := range routes {
+		for _, bearer := range []string{"", dashTestToken, "a-cp-admin-token"} {
+			if rec := bearerOnly(rt.method, rt.path, rt.body, bearer); rec.Code != http.StatusUnauthorized {
+				t.Errorf("%s %s with bearer %q only = %d, want 401", rt.method, rt.path, bearer, rec.Code)
+			}
+		}
+	}
+	// The dashboard is closed to the bearer too (the human routes share one rule).
+	if rec := bearerOnly(http.MethodGet, "/dashboard/api/traffic", "", dashTestToken); rec.Code != http.StatusUnauthorized {
+		t.Errorf("GET /dashboard/api/traffic with the shared bearer only = %d, want 401", rec.Code)
+	}
+
+	for _, group := range []string{groupEditor, groupViewer, "g-unmapped"} {
+		raw := e.session(t, group)
+		for _, rt := range routes {
+			rec := e.do(raw, rt.method, rt.path, rt.body)
+			if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), `"need":"admin"`) {
+				t.Errorf("%s %s as %s = %d %q, want 403 need admin", rt.method, rt.path, group, rec.Code, rec.Body.String())
+			}
+		}
+	}
+
+	admin := e.session(t, groupAdmin)
+	for _, rt := range routes {
+		if rec := e.do(admin, rt.method, rt.path, rt.body); rec.Code != rt.wantOK {
+			t.Errorf("%s %s as admin = %d %q, want %d", rt.method, rt.path, rec.Code, rec.Body.String(), rt.wantOK)
+		}
+	}
+
+	// An admin session without the CSRF header, or from a foreign Origin, is refused.
+	req := httptest.NewRequest(http.MethodPost, "/central/secrets", strings.NewReader(routes[0].body))
+	req.AddCookie(&http.Cookie{Name: e.srv.sessionCookie.Name, Value: admin})
+	req.Header.Set("Authorization", "Bearer "+dashTestToken)
+	rec := httptest.NewRecorder()
+	e.h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden || strings.TrimSpace(rec.Body.String()) != `{"error":"csrf"}` {
+		t.Errorf("admin POST without CSRF = %d %q, want 403 csrf", rec.Code, rec.Body.String())
+	}
+	req = httptest.NewRequest(http.MethodDelete, "/central/secrets/K", nil)
+	req.AddCookie(&http.Cookie{Name: e.srv.sessionCookie.Name, Value: admin})
+	req.Header.Set(CSRFHeader, CSRFToken(admin))
+	req.Header.Set("Origin", "https://evil.example")
+	rec = httptest.NewRecorder()
+	e.h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("admin DELETE from a foreign Origin = %d, want 403", rec.Code)
+	}
+
+	// Refusals are logged by action and subject, never with a credential.
+	logs := e.log.String()
+	for _, want := range []string{"console_authz_denied", "action=secrets.write", "action=secrets.read", "action=secrets.delete", "role=editor", "path=/central/secrets"} {
+		if !strings.Contains(logs, want) {
+			t.Errorf("log missing %q", want)
+		}
+	}
+	for _, banned := range []string{admin, CSRFToken(admin), dashTestToken, "V123456"} {
+		if strings.Contains(logs, banned) {
+			t.Errorf("log leaks %q", banned)
+		}
+	}
+}
+
+// TestSecretsOIDCWithoutSessionsFailsClosed: oidc configured but no session
+// store (no state db) must refuse /central/secrets, never fall back to the bearer.
+func TestSecretsOIDCWithoutSessionsFailsClosed(t *testing.T) {
+	logger, _ := testLogger()
+	srv := New(Config{
+		PolicyPath: writePolicyFile(t, "a.example"), Token: dashTestToken, Logger: logger,
+		Console: authzConsole(defaultRoles()), SecretStore: secrets.NewEchoStore(),
+	})
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+	for _, m := range []string{http.MethodGet, http.MethodPost} {
+		if code, _ := do(t, m, ts.URL+"/central/secrets", dashTestToken, `{"key":"K","value":"V"}`); code != http.StatusUnauthorized {
+			t.Errorf("%s with sessions unavailable = %d, want 401", m, code)
+		}
+	}
+	if code, _ := do(t, http.MethodDelete, ts.URL+"/central/secrets/K", dashTestToken, ""); code != http.StatusUnauthorized {
+		t.Errorf("DELETE with sessions unavailable = %d, want 401", code)
+	}
+}
+
+// TestSecretsAuthActions pins the action name each /central/secrets request is
+// authorized and logged under.
+func TestSecretsAuthActions(t *testing.T) {
+	for _, c := range []struct{ method, want string }{
+		{http.MethodGet, "secrets.read"},
+		{http.MethodPost, "secrets.write"},
+		{http.MethodDelete, "secrets.delete"},
+		{http.MethodPut, "secrets.write"},
+	} {
+		if got := secretsAction(c.method); got != c.want {
+			t.Errorf("secretsAction(%s) = %q, want %q", c.method, got, c.want)
+		}
+	}
+}
+
+// TestSharedTokenWorkerRoutes: the worker routes keep their shared-bearer gate
+// in both console modes. The same requests get the same statuses whether the
+// console runs none or oidc.
+func TestSharedTokenWorkerRoutes(t *testing.T) {
+	ingestBody := `{"events":[]}`
+	type req struct {
+		method, path, body, bearer string
+		want                       int
+	}
+	reqs := []req{
+		{http.MethodGet, "/policy", "", dashTestToken, http.StatusOK},
+		{http.MethodGet, "/policy", "", "", http.StatusUnauthorized},
+		{http.MethodGet, "/policy", "", "wrong", http.StatusUnauthorized},
+		{http.MethodPost, "/control/heartbeat", `{"policyETag":""}`, dashTestToken, http.StatusNoContent},
+		{http.MethodPost, "/control/heartbeat", `{"policyETag":""}`, "", http.StatusUnauthorized},
+		{http.MethodPost, "/central/ingest", ingestBody, dashTestToken, http.StatusNoContent},
+		{http.MethodPost, "/central/ingest", ingestBody, "", http.StatusUnauthorized},
+	}
+	modes := map[string]Config{
+		"none": {Token: dashTestToken, State: openSessionDB(t)},
+		"oidc": {Token: dashTestToken, State: openSessionDB(t), Console: authzConsole(defaultRoles())},
+	}
+	for name, cfg := range modes {
+		logger, _ := testLogger()
+		cfg.Logger = logger
+		cfg.PolicyPath = writePolicyFile(t, "api.openai.com")
+		h := New(cfg).Handler()
+		for _, r := range reqs {
+			hr := httptest.NewRequest(r.method, r.path, strings.NewReader(r.body))
+			hr.Header.Set(analytics.ProxyIDHeader, "w1")
+			if r.bearer != "" {
+				hr.Header.Set("Authorization", "Bearer "+r.bearer)
+			}
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, hr)
+			if rec.Code != r.want {
+				t.Errorf("%s: %s %s bearer=%q = %d, want %d", name, r.method, r.path, r.bearer, rec.Code, r.want)
+			}
+		}
+	}
 }

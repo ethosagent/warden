@@ -34,9 +34,7 @@ const (
 // internalIssuerURL are the issuer fake (implies WithOIDCIssuer), the redirect
 // URL is the control plane's own https origin, state lives in a state dir, and
 // the control plane's clock is the harness's fake clock, so a scenario can
-// expire a session with h.Clock().Advance. It also lifts the temporary oidc
-// startup guard for this harness only (controlplane.Params.SkipConsoleOIDCGuard),
-// until W-P1-SSO-06 removes the guard. The fake is registered as the console
+// expire a session with h.Clock().Advance. The fake is registered as the console
 // client and, until SetLogin says otherwise, signs users in with no groups.
 func WithConsoleOIDC() Option {
 	return func(h *H) {
@@ -69,7 +67,6 @@ func (h *H) applyConsole(p *controlplane.Params, addr *string) {
 	}
 	*addr = h.consoleAddr
 	p.StateDir = filepath.Join(h.root, "cp-state")
-	p.SkipConsoleOIDCGuard = true
 	p.Clock = h.fake
 }
 

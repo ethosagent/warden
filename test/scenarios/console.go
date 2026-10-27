@@ -141,8 +141,8 @@ func consoleOIDCLogin(t *testing.T, h *harness.H) {
 	if !refusedForCSRF(t, b) {
 		t.Fatal("a write with the new session and no CSRF header was not refused for csrf")
 	}
-	// With the CSRF token it gets past the session middleware (the bearer write
-	// guard that still protects the route answers instead).
+	// With the CSRF token it gets past the session middleware (the role check
+	// and the handler answer instead).
 	resp, body := consoleDo(t, b, http.MethodPost, consoleWritePath, http.Header{controlplane.CSRFHeader: {controlplane.CSRFToken(sc.Value)}})
 	if strings.Contains(body, `"csrf"`) {
 		t.Fatalf("a write with the right CSRF token was refused for csrf: %d %s", resp.StatusCode, body)
@@ -183,6 +183,29 @@ func consoleOIDCLogin(t *testing.T, h *harness.H) {
 		if secret != "" && strings.Contains(logs, secret) {
 			t.Errorf("the logs contain the %s", name)
 		}
+	}
+}
+
+// consoleOIDCBearerRejected (W-P1-SSO-06): with console.auth oidc the control
+// plane starts (the temporary startup guard is gone), the shared control-plane
+// bearer opens no human route, and workers keep using it on /policy.
+func consoleOIDCBearerRejected(t *testing.T, h *harness.H) {
+	var traffic any
+	err := h.CP().GetJSON("/dashboard/api/traffic", &traffic)
+	if err == nil || !strings.Contains(err.Error(), "= 401") {
+		t.Fatalf("GET /dashboard/api/traffic with only the shared bearer = %v, want 401", err)
+	}
+	var policy struct {
+		Allowlist []any `json:"allowlist"`
+	}
+	if err := h.CP().GetJSON("/policy", &policy); err != nil {
+		t.Fatalf("GET /policy with the shared bearer: %v", err)
+	}
+	if len(policy.Allowlist) == 0 {
+		t.Fatal("/policy served an empty allowlist")
+	}
+	if strings.Contains(h.Logs(), "console.auth=none") {
+		t.Fatal("an oidc control plane logged the none-mode warning")
 	}
 }
 

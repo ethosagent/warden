@@ -90,6 +90,9 @@ type Server struct {
 	// secretBackend names the active backend (echo/aws/env) for display.
 	secretStore   secrets.SecretStore
 	secretBackend string
+	// authMode is the console sign-in mode reported by /dashboard/api/setup
+	// (SetAuthMode); empty on a worker.
+	authMode string
 	// alertsFn returns integration alerts (bounded, egress-safe metadata) for the
 	// alerts endpoint; nil (a worker with no integrations) = [].
 	alertsFn func(limit int) []integration.Alert

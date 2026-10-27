@@ -39,3 +39,13 @@ func (s *Server) registerAuthRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/auth/login", s.auth.handleLogin)
 	mux.HandleFunc("/auth/callback", s.auth.handleCallback)
 }
+
+// authMode is the console sign-in mode the dashboard reports as authMode:
+// "oidc" when console.auth is oidc, otherwise "none" (an absent console block
+// is none).
+func (s *Server) authMode() string {
+	if s.cfg.Console.Auth == config.ConsoleAuthOIDC {
+		return config.ConsoleAuthOIDC
+	}
+	return config.ConsoleAuthNone
+}

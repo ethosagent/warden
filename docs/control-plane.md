@@ -169,11 +169,21 @@ configured secret the headers are absent and deliveries are unsigned.
 
 ### Dashboard writes need the control-plane token
 
-Every state-changing call under `/dashboard/api/` (`PUT`, `POST`, `PATCH`,
+This is the `console.auth: none` mode (the default). Dashboard reads are open;
+every state-changing call under `/dashboard/api/` (`PUT`, `POST`, `PATCH`,
 `DELETE`: policy, settings, integrations, detection, LLM providers, the secret
-store, and the query and audit-verify `POST`s) must carry
-`Authorization: Bearer <control-plane token>`, the same token workers use for
-`/policy` and `/central/*`, checked in constant time.
+store, and the query and audit-verify `POST`s) is gated by the control-plane
+admin bearer, `Authorization: Bearer <control-plane token>`, checked in constant
+time and fail closed. Until a separate admin token exists, that bearer is the
+`--token-env` token. `/central/secrets` takes the same bearer in this mode. In
+`console.auth: oidc` none of this applies: sessions and CSRF replace the bearer
+on every human route (see [Migrating from none to oidc](#migrating-from-none-to-oidc)).
+
+- **Visible.** At startup the control plane logs one warning,
+  `console.auth=none: dashboard reads are unauthenticated; writes need the admin bearer`,
+  `GET /dashboard/api/setup` returns `"authMode":"none"`, and the dashboard shows a
+  persistent "Open console" banner. Start the control plane with
+  `--require-console-auth` to make none mode a startup error instead.
 
 - **Fail closed.** A control plane started without a token (`--token-env` unset
   or the variable empty) refuses every dashboard write with `403` and a message
@@ -221,10 +231,37 @@ needs a restart. It holds the *name* of the client-secret env var, never the sec
 | `session.idle`, `session.absolute` | `1h`, `12h` | `0 < idle <= absolute <= 168h`. |
 
 In `oidc` mode the control plane also needs a non-empty value in the client-secret env
-var and `--state-dir`. Until W-P1-SSO-06 lands it then refuses to start with
-"console oidc enforcement is not available in this build", so no build serves login
-routes while a human route still accepts the shared bearer. See
+var and `--state-dir`; without either it refuses to start. See
 `configs/config.control-plane.yaml` for commented examples.
+
+In `oidc` mode every human route needs a session: each `/dashboard/*` route needs at
+least the viewer role, writes need the CSRF header, and `/central/secrets` (GET, POST
+and `DELETE /central/secrets/{key}`) needs an admin session plus CSRF. An
+`Authorization` header is ignored on those routes, so neither the shared
+`--token-env` token nor any other bearer opens them (401 without a session, 403 for a
+role below admin). The worker routes (`/policy`, `/control/heartbeat`,
+`/central/ingest`) keep the shared bearer in both modes.
+
+### Migrating from none to oidc
+
+1. Add the `console:` block to the operator-owned `--config` file: `auth: oidc`, the
+   `oidc` block (`issuer`, `clientSecretEnv`, `redirectURL`, and `internalIssuerURL`
+   when the control plane reaches the IdP on a different origin than the browser) and
+   `roles` mapping your IdP groups to `admin`, `editor` and `viewer`.
+2. Put the client secret in the environment variable `oidc.clientSecretEnv` names.
+3. Start the control plane with `--state-dir` on a writable volume (sessions and
+   pending logins live in `<state-dir>/warden-cp.db`). Add `--require-console-auth`
+   so a lost `console:` block fails startup instead of reopening the console.
+4. Verify: the startup log no longer carries the `console.auth=none` warning; opening
+   `/dashboard/` redirects to the IdP; after sign-in a viewer can read every tab but
+   gets 403 on a policy change, and an admin can edit integrations, LLM providers and
+   secrets. A request with only `Authorization: Bearer $WARDEN_CP_TOKEN` gets 401 on
+   `/dashboard/api/*` and `/central/secrets`, while workers keep pulling `/policy`.
+
+Scripts that call `/central/secrets` with the shared bearer stop working in oidc
+mode: secret writes then need an admin session plus CSRF, so they go through the
+admin's secret store tab in the dashboard until scoped API keys exist. Scripts that
+write `/dashboard/api/*` with the bearer stop working for the same reason.
 
 ### Login routes
 
