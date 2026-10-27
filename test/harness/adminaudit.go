@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/ethosagent/warden/internal/controlplane"
 	"github.com/ethosagent/warden/internal/cpstate"
@@ -19,6 +20,47 @@ import (
 // and a state dir under the harness root. It combines with WithConsoleOIDC.
 func WithAdminAudit() Option {
 	return func(h *H) { h.wantAdminAudit = true }
+}
+
+// WithAdminAuditJSONLog is WithAdminAudit plus audit.jsonLog with a file
+// output under the harness root (W-P1-JAUD-03): every admin audit row and
+// checkpoint is also written as a warden.admin.v1 line.
+func WithAdminAuditJSONLog() Option {
+	return func(h *H) { h.wantAdminAudit, h.wantAdminJSONLog = true, true }
+}
+
+func (h *H) adminJSONLogPath() string { return filepath.Join(h.root, "cp-audit", "admin.jsonl") }
+
+// auditJSONLogYAML renders the audit block of the control plane's config.
+func (h *H) auditJSONLogYAML() string {
+	if !h.wantAdminJSONLog {
+		return ""
+	}
+	return "\naudit:\n  jsonLog:\n    enabled: true\n    output: file\n    path: " + h.adminJSONLogPath() + "\n"
+}
+
+// AdminAuditJSONLines returns the lines of the admin JSON stream file as it is
+// now, in file order ("" lines dropped). The stream is written by a background
+// goroutine, so callers poll until the line they expect appears.
+func (h *H) AdminAuditJSONLines() []string {
+	h.tb.Helper()
+	if !h.wantAdminJSONLog {
+		h.tb.Fatal("harness: AdminAuditJSONLines needs the WithAdminAuditJSONLog option")
+	}
+	raw, err := os.ReadFile(h.adminJSONLogPath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		h.tb.Fatalf("harness: read the admin JSON stream: %v", err)
+	}
+	var out []string
+	for _, ln := range strings.Split(string(raw), "\n") {
+		if ln != "" {
+			out = append(out, ln)
+		}
+	}
+	return out
 }
 
 // AdminAuditRow is one row of the control plane's admin_audit table.
