@@ -84,6 +84,6 @@ func newControlPlaneCmd() *cobra.Command {
 	cmd.Flags().String("admin-audit-key-file", "", "admin audit signing key (default <state-dir>/cp-audit.key; the HMAC key sits beside it); used when console.adminAudit.enabled")
 	cmd.Flags().String("admin-audit-new-segment", "", "key_id of a new admin audit signing key: start a new chain segment for it (manual rotation; no-op once the chain head is on that key)")
 	// Offline subcommands over the CP state dir (read-only).
-	cmd.AddCommand(newAdminAuditCmd())
+	cmd.AddCommand(newAdminAuditCmd(), newHashPasswordCmd())
 	return cmd
 }
