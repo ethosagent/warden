@@ -434,6 +434,42 @@ Settings writes (`POST`/`PUT /dashboard/api/settings`) are then checked per chan
 `POST /dashboard/api/query/generate` is limited to 10 calls a minute per console session (`429` past it).
 <!-- authz-matrix:end -->
 
+## Versioned policy store (`--policy-store`)
+
+`--policy-store=file|versioned` picks where the policy served on `/policy` comes
+from. `file` (the default) serves the served config YAML, exactly as before.
+`versioned` serves the head of an append-only version history in
+`<state-dir>/warden-cp.db` and requires `--state-dir`; without it, or with any
+other value, the control plane refuses to start.
+
+- Each version holds the allow/deny lists and the distributed settings. An AWS
+  `secretAccessKey` is never stored: a version keeps only its fingerprint
+  (`sha256:<16 hex>`), and the live value is read from the served YAML
+  `secretStore` block when `/policy` is built, so workers get the same bytes as
+  before.
+- The first versioned start on an empty store imports the served config's
+  allow/deny lists and settings as version 1 (author `system:import`, source
+  `import`, message `initial import from <served path>`). `/policy` serves the
+  same bytes and ETag before and after, so no worker sees a change. If the
+  import would change the ETag, the control plane refuses to start and leaves
+  the store empty; start with `--policy-store=file` and report it. A store that
+  already has versions is never re-imported, and two control planes racing the
+  first start import once. With `console.adminAudit.enabled` the import appends
+  one `policy.initial_import` admin audit row (target `policy`, auth_method
+  `system`, before `file:<sha256 of the served YAML>`, after
+  `v1:<doc_sha256>`); a failed append is logged at ERROR and does not stop
+  startup.
+- Nothing else writes versions yet: dashboard saves, history and rollback come
+  in later releases.
+- The control plane checks for a new head every 3 seconds and only re-reads a
+  version when the head moved, so a version written by another process reaches
+  workers within 3 seconds plus one long-poll cycle. The `/policy` hot path
+  never reads the database.
+- Startup fails closed: if the store cannot be read, the head points at a
+  missing version, or a version fails its `doc_sha256` check, the control plane
+  refuses to start and never falls back to the YAML. A read error at runtime
+  keeps serving the last good policy and logs a warning.
+
 ## Worker admin token
 
 The worker's admin listener (`:9090`, default `127.0.0.1:9090`) serves the same
