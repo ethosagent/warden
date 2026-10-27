@@ -403,7 +403,7 @@ func (s *Server) Handler() http.Handler {
 	var policyServe PolicyServer = s.policy
 	mux.HandleFunc("/policy", policyServe.ServePolicy)
 	mux.HandleFunc("/control/heartbeat", s.handleHeartbeat)
-	ingest := analytics.NewIngestHandler(s.central, s.cfg.Token)
+	ingest := analytics.NewIngestHandler(s.central, analytics.StaticTokenAuthorizer(s.cfg.Token))
 	// Central ingest lands in the IngestSink seam: tag worker activity in the
 	// registry and store each worker's MCP snapshot. Wiring the seam's methods (vs
 	// reaching into fields) documents the ingest surface; behavior is unchanged.

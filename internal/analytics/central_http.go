@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/ethosagent/warden/internal/mcp"
@@ -137,22 +138,45 @@ func (h *HTTPRemoteStore) post(env ingestEnvelope) error {
 
 // IngestHandler is the aggregator side of central aggregation: an HTTP handler
 // that accepts batches of events from workers and stores them in a FleetStore,
-// tagging each with the originating proxy id from the request header. The store
+// tagging each with the proxy id the authorizer returns. The store
 // is the FleetStore interface so the control plane can back it with either the
 // in-memory CentralStore or a persistent FleetSQLiteStore.
 type IngestHandler struct {
 	store     FleetStore
-	token     string
+	authorize IngestAuthorizer
 	onIngest  func(proxyID string, n int)                // optional; see SetOnIngest
 	onMCP     func(proxyID string, snap MCPSnapshot)     // optional; see SetOnMCP
 	onSecrets func(proxyID string, refs []SecretRefView) // optional; see SetOnSecrets
 	onEvents  func(proxyID string, events []Event)       // optional; see SetOnEvents
 }
 
+// IngestAuthorizer decides who is calling /central/ingest. It returns the proxy
+// id to attribute the request to and a status: 0 accepts the request, anything
+// else is the HTTP status to answer (401 unauthorized, 403 for a binding
+// failure). The returned proxy id labels every stored event and callback.
+type IngestAuthorizer func(r *http.Request) (proxyID string, status int)
+
+// StaticTokenAuthorizer is the shared-bearer authorizer. An empty token accepts
+// every request; otherwise the Authorization header must equal "Bearer <token>"
+// (constant-time compare). The accepted proxy id is the self-reported
+// X-Warden-Proxy-ID header value.
+func StaticTokenAuthorizer(token string) IngestAuthorizer {
+	return func(r *http.Request) (string, int) {
+		if token != "" {
+			got := r.Header.Get("Authorization")
+			want := "Bearer " + token
+			if subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
+				return "", http.StatusUnauthorized
+			}
+		}
+		return r.Header.Get(ProxyIDHeader), 0
+	}
+}
+
 // NewIngestHandler returns a handler that ingests event batches into store.
-// When token is non-empty, requests must present it as a bearer credential.
-func NewIngestHandler(store FleetStore, token string) *IngestHandler {
-	return &IngestHandler{store: store, token: token}
+// auth authenticates each request and supplies the proxy id it is attributed to.
+func NewIngestHandler(store FleetStore, auth IngestAuthorizer) *IngestHandler {
+	return &IngestHandler{store: store, authorize: auth}
 }
 
 // SetOnIngest registers an optional callback invoked after a batch is stored,
@@ -189,15 +213,11 @@ func (i *IngestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if i.token != "" {
-		got := r.Header.Get("Authorization")
-		want := "Bearer " + i.token
-		if subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
+	proxyID, status := i.authorize(r)
+	if status != 0 {
+		http.Error(w, strings.ToLower(http.StatusText(status)), status)
+		return
 	}
-	proxyID := r.Header.Get(ProxyIDHeader)
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxIngestBytes))
 	if err != nil {
 		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
