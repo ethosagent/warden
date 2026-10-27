@@ -46,7 +46,7 @@ func blockErr(err error) error {
 func newBlockAddCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "add",
-		Short: "Block a user by Dex sub, email or both.",
+		Short: "Block a user by subject, email or both.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			stateDir, _ := cmd.Flags().GetString("state-dir")
@@ -65,7 +65,7 @@ func newBlockAddCmd() *cobra.Command {
 	}
 	cmd.Flags().String("state-dir", "", "control-plane state dir holding warden-cp.db (required)")
 	cmd.Flags().String("admin-audit-key-file", "", "admin audit signing key (default <state-dir>/cp-audit.key)")
-	cmd.Flags().String("sub", "", "Dex subject (exact match)")
+	cmd.Flags().String("sub", "", "identity-provider subject (exact match)")
 	cmd.Flags().String("email", "", "email address (case-insensitive)")
 	cmd.Flags().String("reason", "", "why the user is blocked (up to 512 bytes)")
 	_ = cmd.MarkFlagRequired("state-dir")
