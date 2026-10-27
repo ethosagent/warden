@@ -23,7 +23,7 @@ const (
 	// authenticated actor writes one admin audit row.
 	classAudited routeClass = "audited"
 	// classReadOnly routes change nothing, including the read-only POSTs
-	// (query, query/generate, audit/verify). No row.
+	// (query, query/generate, audit/verify, admin-audit/verify). No row.
 	classReadOnly routeClass = "read-only"
 	// classWorkerPlane routes serve workers (/policy, heartbeat, ingest,
 	// healthz). They are never wrapped in the audit chain.
@@ -59,7 +59,9 @@ func auditedRow(role config.Role, action, target string) authzRow {
 
 // authzTable is the deny-by-default authorization table for the dashboard
 // routes the control plane serves: a {method, path} with no row is refused for
-// every role, GET included. Every dashboard.Routes() and cpDashboardRoutes()
+// every role, GET included. A request is looked up by dashboard.RoutePath, so
+// a templated route's row covers every concrete version path. Every
+// dashboard.Routes() and cpDashboardRoutes()
 // entry must have a row (TestAuthzRouteCoverage) and the row's Action must equal
 // the route's. Every row has a Class; an audited row also names its Target.
 //
@@ -113,7 +115,18 @@ func authzTable() map[routeKey]authzRow {
 		{put, "/dashboard/api/llmproviders", auditedRow(admin, "llmproviders.write", "llmproviders")},
 		{get, "/dashboard/api/audit", readRow(viewer, "audit.read")},
 		{post, "/dashboard/api/audit/verify", readRow(viewer, "audit.verify")},
+		// The admin audit log (W-P1-AAUD-03). verify is a read-only POST; the
+		// public keys are not secret, so any role may read them.
+		{get, "/dashboard/api/admin-audit", readRow(admin, "adminaudit.read")},
+		{post, "/dashboard/api/admin-audit/verify", readRow(admin, "adminaudit.verify")},
+		{get, "/dashboard/api/admin-audit/pubkey", readRow(viewer, "adminaudit.pubkey")},
 		{get, "/dashboard/api/setup", readRow(viewer, "setup.read")},
+		// Policy history (W-P1-PVER-03). Requests are matched on their template
+		// ({v} is any version segment; dashboard.RoutePath).
+		{get, "/dashboard/api/policy/versions", readRow(viewer, "policy.versions.read")},
+		{get, "/dashboard/api/policy/versions/{v}", readRow(viewer, "policy.version.read")},
+		{get, "/dashboard/api/policy/versions/{v}/diff", readRow(viewer, "policy.diff")},
+		{post, "/dashboard/api/policy/versions/{v}/rollback", auditedRow(editor, "policy.rollback", "policy")},
 		// Served by the control plane itself, ahead of dash.Handler (cpDashboardRoutes).
 		{get, "/dashboard/api/sessions", readRow(admin, "sessions.read")},
 		{del, "/dashboard/api/sessions", auditedRow(admin, "sessions.revoke", "sessions")},
@@ -189,7 +202,7 @@ func requireRole(next http.Handler, table map[routeKey]authzRow, console config.
 			return
 		}
 		role, _ := console.RoleFor(p.Groups) // zero (no role) when no group matches
-		row, listed := table[routeKey{r.Method, r.URL.Path}]
+		row, listed := table[routeKey{r.Method, dashboard.RoutePath(r.URL.Path)}]
 		if !listed {
 			logDenied(logger, row, role, p, r)
 			writeAuthzJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})

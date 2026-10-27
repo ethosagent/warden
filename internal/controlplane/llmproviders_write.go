@@ -11,6 +11,7 @@ package controlplane
 // + timeouts; nothing here holds, echoes, or logs a key value.
 
 import (
+	"context"
 	"fmt"
 	"os"
 
@@ -36,7 +37,14 @@ import (
 // good file — so a duplicate name, a missing required field, OR removing a provider
 // still referenced by the judge/Explore is rejected THERE, and we do not reimplement
 // that validation.
-func (s *Server) WriteLLMProviders(ps []config.LLMProvider) error {
+//
+// In versioned mode it creates a policy version instead (publishLLMProviders);
+// ctx carries the author and meta the expected head and message. File mode
+// ignores both.
+func (s *Server) WriteLLMProviders(ctx context.Context, ps []config.LLMProvider, meta dashboard.WriteMeta) error {
+	if s.versions != nil {
+		return s.publishLLMProviders(ctx, ps, meta)
+	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
@@ -47,14 +55,8 @@ func (s *Server) WriteLLMProviders(ps []config.LLMProvider) error {
 		_ = yaml.Unmarshal(cur, &root)
 	}
 
-	if len(ps) == 0 {
-		delete(root, "llmProviders")
-	} else {
-		node, err := config.EncodeLLMProvidersNode(ps)
-		if err != nil {
-			return fmt.Errorf("controlplane: encode llmProviders block: %w", err)
-		}
-		root["llmProviders"] = node
+	if err := renderLLMProvidersBlock(root, ps); err != nil {
+		return err
 	}
 
 	if err := s.atomicWriteConfig(root); err != nil {
@@ -68,6 +70,21 @@ func (s *Server) WriteLLMProviders(ps []config.LLMProvider) error {
 	// reloadDetection's live re-point).
 	s.reinjectExploreLLM()
 	s.cfg.Logger.Info("control plane llmProviders updated via dashboard", "count", len(ps))
+	return nil
+}
+
+// renderLLMProvidersBlock replaces root's llmProviders block with ps; an empty
+// list deletes the key. It is shared by WriteLLMProviders and renderDocToRoot.
+func renderLLMProvidersBlock(root map[string]yaml.Node, ps []config.LLMProvider) error {
+	if len(ps) == 0 {
+		delete(root, "llmProviders")
+		return nil
+	}
+	node, err := config.EncodeLLMProvidersNode(ps)
+	if err != nil {
+		return fmt.Errorf("controlplane: encode llmProviders block: %w", err)
+	}
+	root["llmProviders"] = node
 	return nil
 }
 

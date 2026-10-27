@@ -71,11 +71,19 @@ func OpenForCLI(ctx context.Context, stateDir, keyFile string, migs []cpstate.Mi
 		_ = db.Close()
 		return nil, nil, err
 	}
+	return &cliRecorder{store: s, actor: CLIActor()}, db.Close, nil
+}
+
+// CLIActor is the identity an offline CLI acts as: cli:<os user>, or
+// cli:unknown when the user is unknown. It is the actor of every entry the
+// OpenForCLI Recorder writes; CLIs stamp it on what else they write (a policy
+// version's author) so both name the same person.
+func CLIActor() string {
 	name := osUserName()
 	if name == "" {
 		name = "unknown"
 	}
-	return &cliRecorder{store: s, actor: cliActorPrefix + name}, db.Close, nil
+	return cliActorPrefix + name
 }
 
 // withOwnMigrations returns migs plus any adminaudit migration it lacks.

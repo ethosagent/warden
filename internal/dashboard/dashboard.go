@@ -9,7 +9,6 @@ import (
 	"crypto/ed25519"
 	"embed"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/url"
 	"path"
@@ -17,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -50,17 +50,27 @@ type MCPProvider interface {
 
 // Server holds the dependencies needed by the dashboard HTTP handlers.
 type Server struct {
-	data         DataSource
-	policy       config.Policy
-	secrets      secrets.SecretProvider
-	mcp          MCPProvider                                // nil when the MCP gateway is disabled
-	livePolicy   func() config.Policy                       // nil = serve the static startup policy
-	policyWriter func(context.Context, config.Policy) error // nil = read-only (worker / no editor)
+	data       DataSource
+	policy     config.Policy
+	secrets    secrets.SecretProvider
+	mcp        MCPProvider          // nil when the MCP gateway is disabled
+	livePolicy func() config.Policy // nil = serve the static startup policy
+	// policyDrift reports served-YAML drift (SetPolicyDrift); nil = never.
+	policyDrift func() bool
+	// policyWriter applies an edited allow/deny policy; nil = read-only (worker /
+	// no editor).
+	policyWriter func(context.Context, config.Policy, WriteMeta) error
+	// policyVersion returns the head policy version shared by the policy,
+	// settings and llmProviders documents; nil or 0 = file mode (no versions).
+	policyVersion func(context.Context) (int64, error)
+	// policyHistory serves the policy history routes; nil = they answer 404
+	// (a worker, or a control plane in file mode).
+	policyHistory PolicyHistory
 	// liveSettings returns the behavioral settings currently in force (nil = none);
 	// settingsWriter applies an edited settings document. Both are control-plane-
 	// only: a worker leaves settingsWriter nil so its settings panel is read-only.
 	liveSettings   func() *config.SettingsWire
-	settingsWriter func(context.Context, config.SettingsWire) error
+	settingsWriter func(context.Context, config.SettingsWire, WriteMeta) error
 	workersFn      func() []WorkerView // nil = no fleet worker registry
 	// mcpFleet, when set (control plane), returns the inventory + observed schema
 	// for a given worker (empty proxyID = most-recent worker). It takes precedence
@@ -124,7 +134,7 @@ type Server struct {
 	// (PUT/POST → 405). The writer is control-plane/local-only; a managed worker
 	// gets only the source.
 	llmProvidersSource func() LLMProvidersView
-	llmProvidersWriter func([]config.LLMProvider) error
+	llmProvidersWriter func(context.Context, []config.LLMProvider, WriteMeta) error
 	// sqlGenMu guards sqlGen, which — unlike the other set-once wiring — can be
 	// RE-INJECTED at runtime when a provider/Explore selection edit reloads the CP
 	// dashboard's generator. The read path (handleQueryGenerate) takes the read
@@ -133,6 +143,11 @@ type Server struct {
 	// writeGuard, when set (control plane), gates every state-changing API call.
 	writeGuardMu sync.RWMutex
 	writeGuard   WriteGuard
+	// adminAudit, when set (control plane with console.adminAudit enabled),
+	// serves the admin audit log API; nil makes those routes 404.
+	// adminAuditVerifying admits one verify run at a time.
+	adminAudit          AdminAuditSource
+	adminAuditVerifying atomic.Bool
 }
 
 // analyticsCacheTTL is how long a computed analytics/MCP payload is reused
@@ -223,8 +238,11 @@ type WorkerView struct {
 	// PolicyETag is the worker's current policy version; Behind is true when it
 	// differs from the policy the control plane is currently serving.
 	PolicyETag string `json:"policyETag,omitempty"`
-	Behind     bool   `json:"behind"`
-	Online     bool   `json:"online"`
+	// PolicyVersion is the policy version PolicyETag maps to in the control
+	// plane's versioned store; 0 (omitted) when unknown or in file mode.
+	PolicyVersion int64 `json:"policyVersion,omitempty"`
+	Behind        bool  `json:"behind"`
+	Online        bool  `json:"online"`
 }
 
 // NewServer constructs a dashboard Server. The policy argument is the static
@@ -255,22 +273,28 @@ func (s *Server) SetLivePolicy(fn func() config.Policy) {
 	s.livePolicy = fn
 }
 
+// SetPolicyDrift supplies a function reporting whether the served YAML's
+// policy blocks differ from the head version (a hand edit that is not served),
+// for the drift banner. Unset, drift is always false.
+func (s *Server) SetPolicyDrift(fn func() bool) {
+	s.policyDrift = fn
+}
+
+// WriteMeta is the write metadata a dashboard writer receives with an edit:
+// the policy version the edit was based on (0 = whatever the head is when the
+// write runs) and an optional version message. In versioned mode the handlers
+// fill ExpectedHead from If-Match (writeMeta).
+type WriteMeta struct {
+	ExpectedHead int64
+	Message      string
+}
+
 // SetPolicyWriter enables editing allow/deny policy from the dashboard. It is a
 // control-plane-only capability: when set, POST /dashboard/api/policy validates
 // and applies the new policy via fn (which persists it so workers pull it on
-// their next poll). Workers never set this, so they expose no policy-write path.
-func (s *Server) SetPolicyWriter(fn func(config.Policy) error) {
-	if fn == nil {
-		s.policyWriter = nil
-		return
-	}
-	s.policyWriter = func(_ context.Context, p config.Policy) error { return fn(p) }
-}
-
-// SetPolicyWriterContext is SetPolicyWriter for a writer that needs the
-// request context, for example to annotate the control plane's admin audit
-// entry with the resulting policy version.
-func (s *Server) SetPolicyWriterContext(fn func(context.Context, config.Policy) error) {
+// their next poll). fn receives the request context, which carries the caller's
+// identity. Workers never set this, so they expose no policy-write path.
+func (s *Server) SetPolicyWriter(fn func(context.Context, config.Policy, WriteMeta) error) {
 	s.policyWriter = fn
 }
 
@@ -285,20 +309,11 @@ func (s *Server) SetLiveSettings(fn func() *config.SettingsWire) {
 // SetSettingsWriter enables editing behavioral settings from the dashboard. Like
 // SetPolicyWriter it is a control-plane-only capability: when set,
 // POST /dashboard/api/settings validates and applies the new settings via fn
-// (which persists them so workers pull them on their next poll). Workers never
-// set this, so they expose no settings-write path.
-func (s *Server) SetSettingsWriter(fn func(config.SettingsWire) error) {
-	if fn == nil {
-		s.settingsWriter = nil
-		return
-	}
-	s.settingsWriter = func(_ context.Context, w config.SettingsWire) error { return fn(w) }
-}
-
-// SetSettingsWriterContext is SetSettingsWriter for a writer that needs the
-// request context, for example to authorize the edit against the caller's
-// console role. A *RoleRequiredError from fn is answered with 403.
-func (s *Server) SetSettingsWriterContext(fn func(context.Context, config.SettingsWire) error) {
+// (which persists them so workers pull them on their next poll). fn receives
+// the request context, for example to authorize the edit against the caller's
+// console role; a *RoleRequiredError from fn is answered with 403. Workers
+// never set this, so they expose no settings-write path.
+func (s *Server) SetSettingsWriter(fn func(context.Context, config.SettingsWire, WriteMeta) error) {
 	s.settingsWriter = fn
 }
 
@@ -396,6 +411,12 @@ type policyResponse struct {
 	// Editable reports whether this dashboard can save policy changes (true only
 	// on the control plane, where a policy writer is configured).
 	Editable bool `json:"editable"`
+	// Version is the head policy version in versioned mode; absent in file mode.
+	Version int64 `json:"version,omitempty"`
+	// Drift is true when the control plane's served YAML policy/settings blocks
+	// were edited by hand and differ from the head version it serves
+	// (--policy-store=versioned); the edit is not served.
+	Drift bool `json:"drift"`
 }
 
 // policyEditRequest is the body accepted by POST /dashboard/api/policy.
@@ -411,6 +432,8 @@ type policyEditRequest struct {
 type settingsResponse struct {
 	Settings *settingsView `json:"settings"`
 	Editable bool          `json:"editable"`
+	// Version is the head policy version in versioned mode; absent in file mode.
+	Version int64 `json:"version,omitempty"`
 }
 
 // settingsView is the dashboard-facing projection of a SettingsWire. It embeds
@@ -541,15 +564,24 @@ func Routes() []Route {
 		{put, "/dashboard/api/llmproviders", "llmproviders.write"},
 		{get, "/dashboard/api/audit", "audit.read"},
 		{post, "/dashboard/api/audit/verify", "audit.verify"},
+		{get, "/dashboard/api/admin-audit", "adminaudit.read"},
+		{post, "/dashboard/api/admin-audit/verify", "adminaudit.verify"},
+		{get, "/dashboard/api/admin-audit/pubkey", "adminaudit.pubkey"},
 		{get, "/dashboard/api/setup", "setup.read"},
+		{get, "/dashboard/api/policy/versions", "policy.versions.read"},
+		{get, "/dashboard/api/policy/versions/{v}", "policy.version.read"},
+		{get, "/dashboard/api/policy/versions/{v}/diff", "policy.diff"},
+		{post, "/dashboard/api/policy/versions/{v}/rollback", "policy.rollback"},
 	}
 }
 
 // routeMux is the Handler's mux. It refuses to register a path that Routes() does
 // not list, so a route cannot be served without an entry the control plane's
-// authorization table is checked against. The patterns stay string literals at
-// each call so the route-table walks in the control-plane and worker tests see
-// them.
+// authorization table is checked against. A templated path
+// (/dashboard/api/policy/versions/{v}) lists the subtree pattern up to its
+// first segment variable (/dashboard/api/policy/versions/). The patterns stay
+// string literals at each call so the route-table walks in the control-plane
+// and worker tests see them.
 type routeMux struct {
 	*http.ServeMux
 	listed map[string]bool
@@ -558,6 +590,10 @@ type routeMux struct {
 func newRouteMux() *routeMux {
 	m := &routeMux{ServeMux: http.NewServeMux(), listed: map[string]bool{}}
 	for _, rt := range Routes() {
+		if i := strings.Index(rt.Path, "{"); i >= 0 {
+			m.listed[rt.Path[:i]] = true
+			continue
+		}
 		m.listed[rt.Path] = true
 	}
 	return m
@@ -594,6 +630,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/dashboard/api/llmproviders", s.handleLLMProviders)
 	mux.HandleFunc("/dashboard/api/audit", s.handleAudit)
 	mux.HandleFunc("/dashboard/api/audit/verify", s.handleAuditVerify)
+	// New routes are registered in routes.go (rule X9; see registerRoutes).
+	s.registerRoutes(mux)
 	mux.HandleFunc("/dashboard/api/setup", s.handleSetup)
 	mux.HandleFunc("/dashboard/", s.handleIndex)
 	return s.guardWrites(mux)
@@ -750,7 +788,11 @@ func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) getPolicy(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) getPolicy(w http.ResponseWriter, r *http.Request) {
+	version, ok := s.versionForGet(w, r)
+	if !ok {
+		return
+	}
 	// Prefer the live (hot-reloadable) policy so the panel matches what is
 	// actually being enforced; fall back to the startup snapshot.
 	pol := s.policy
@@ -761,6 +803,8 @@ func (s *Server) getPolicy(w http.ResponseWriter, _ *http.Request) {
 		Allowlist: pol.Allowlist,
 		Denylist:  pol.Denylist,
 		Editable:  s.policyWriter != nil,
+		Version:   version,
+		Drift:     s.policyDrift != nil && s.policyDrift(),
 	}
 	if resp.Allowlist == nil {
 		resp.Allowlist = []config.AllowlistEntry{}
@@ -785,9 +829,13 @@ func (s *Server) putPolicy(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
+	meta, ok := s.writeMeta(w, r)
+	if !ok {
+		return
+	}
 	pol := config.Policy{Allowlist: req.Allowlist, Denylist: req.Denylist}
-	if err := s.policyWriter(r.Context(), pol); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+	if err := s.policyWriter(r.Context(), pol, meta); err != nil {
+		writeWriterError(w, err)
 		return
 	}
 	// Echo back the now-current policy so the UI can refresh from the response.
@@ -810,7 +858,11 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) getSettings(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
+	version, ok := s.versionForGet(w, r)
+	if !ok {
+		return
+	}
 	var settings *config.SettingsWire
 	if s.liveSettings != nil {
 		settings = s.liveSettings()
@@ -825,6 +877,7 @@ func (s *Server) getSettings(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, settingsResponse{
 		Settings: view,
 		Editable: s.settingsWriter != nil,
+		Version:  version,
 	})
 }
 
@@ -842,13 +895,12 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	if err := s.settingsWriter(r.Context(), settings); err != nil {
-		var re *RoleRequiredError
-		if errors.As(err, &re) {
-			writeJSONStatus(w, http.StatusForbidden, roleRequiredResponse{Error: "role_required", Need: re.Need, Fields: re.Fields})
-			return
-		}
-		writeError(w, http.StatusBadRequest, err.Error())
+	meta, ok := s.writeMeta(w, r)
+	if !ok {
+		return
+	}
+	if err := s.settingsWriter(r.Context(), settings, meta); err != nil {
+		writeWriterError(w, err)
 		return
 	}
 	// Echo back the now-current settings so the UI can refresh from the response.
