@@ -589,6 +589,11 @@ func (s *Server) Handler() http.Handler {
 	//     receipts source is wired and the receipts block stays zeroed.
 	dash.SetSecretStore(s.secretStore, s.cfg.SecretStoreBackend)
 	dash.SetAuthMode(s.authMode())
+	// Admin audit log API (W-P1-AAUD-03): only with console.adminAudit on;
+	// without a source the dashboard answers 404 and hides the tab.
+	if s.cfg.AdminAudit != nil {
+		dash.SetAdminAudit(adminAuditDashSource{store: s.cfg.AdminAudit, logger: s.cfg.Logger})
+	}
 	if s.integrationsStore != nil {
 		// Alerts + integration status read from the CURRENT manager (re-pointed on
 		// reload), so a reload never silently breaks the alerts tab or the status view.

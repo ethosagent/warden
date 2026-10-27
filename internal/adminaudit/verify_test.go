@@ -166,6 +166,21 @@ func TestVerifyActorHMAC(t *testing.T) {
 	}
 }
 
+// TestVerifyWithStoreKey: the store-keyed Verify checks the side table with
+// the store's own HMAC key, whatever opts.HMACKey says.
+func TestVerifyWithStoreKey(t *testing.T) {
+	s, db := freshStore(t)
+	record(t, s, 3)
+	if res, err := s.VerifyWithStoreKey(context.Background(), VerifyOptions{}); err != nil || !res.OK || res.Checked != 4 {
+		t.Fatalf("untouched = %+v, %v", res, err)
+	}
+	exec(t, db, "UPDATE admin_audit_actor SET sub = 'mallory' WHERE seq = 3")
+	res, err := s.VerifyWithStoreKey(context.Background(), VerifyOptions{HMACKey: []byte("not the store key")})
+	if err != nil || res.OK || res.FirstBadSeq != 3 || res.Reason != ReasonActorID {
+		t.Fatalf("tampered sub = %+v, %v; want actor_id at 3", res, err)
+	}
+}
+
 func TestChainVerifierRejectsBadKeys(t *testing.T) {
 	v := newChainVerifier(nil)
 	signer := newSigner(t)
