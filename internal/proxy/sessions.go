@@ -207,8 +207,11 @@ type closedSession struct {
 	closers []io.Closer
 }
 
-// takeBlocked marks and returns the sessions matching blocked. blockedID reports
-// a session's matching identity so the event names the claims that matched.
+// takeBlocked marks and returns the sessions whose registered sub or email the
+// callbacks report blocked, once each. claimsBlocked picks, among a session's
+// bound identities, the one the deny event names. Sessions that may be cut now
+// carry their closers; a busy HTTP/1 session carries none and is cut by its
+// endRequest.
 func (r *sessionRegistry) takeBlocked(subBlocked, emailBlocked func(string) bool, claimsBlocked func(identity.Claims) bool) []closedSession {
 	r.mu.Lock()
 	defer r.mu.Unlock()
