@@ -228,6 +228,15 @@ func (s *Store) Verify(ctx context.Context, opts VerifyOptions) (Result, error) 
 	return res, nil
 }
 
+// VerifyWithStoreKey is Verify with the store's own HMAC key in place of
+// opts.HMACKey, so rows that have a side row are also checked for actor_id =
+// HMAC(sub) without the key leaving the store. The control plane's dashboard
+// verify (W-P1-AAUD-03) uses it.
+func (s *Store) VerifyWithStoreKey(ctx context.Context, opts VerifyOptions) (Result, error) {
+	opts.HMACKey = s.hmacKey
+	return s.Verify(ctx, opts)
+}
+
 // readPage returns up to n rows with after < seq <= upper, in seq order.
 func (s *Store) readPage(ctx context.Context, after, upper int64, n int) ([]storedRow, error) {
 	rows, err := s.db.SQL().QueryContext(ctx,

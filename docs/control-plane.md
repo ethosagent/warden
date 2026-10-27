@@ -320,8 +320,8 @@ llmproviders writes, `/dashboard/api/secretstore` POST and DELETE, `/central/sec
 POST, `DELETE /central/secrets/{key}` and the admin session revoke
 (`DELETE /dashboard/api/sessions`). Which routes count comes from the authz route
 table (`Audited`), not from the HTTP method, so worker heartbeats, ingest, `/policy`
-and the read-only POSTs (`/dashboard/api/query`, `query/generate`, `audit/verify`)
-never write a row. Each row carries:
+and the read-only POSTs (`/dashboard/api/query`, `query/generate`, `audit/verify`,
+`admin-audit/verify`) never write a row. Each row carries:
 
 - the actor: the session's subject, role and `auth_method` (`oidc` or `breakglass`),
   or, in `console.auth: none`, actor `cp-admin-token` with role `admin` and
@@ -351,6 +351,43 @@ is logged at ERROR with `persist_failed=true`, an `admin_audit_degraded` alert i
 raised, and further audited changes answer 503 `{"error":"admin_audit_unavailable"}`
 before they run, until the database accepts writes again. Reads, `/policy`, ingest
 and heartbeats never depend on the audit log.
+
+**Reading and verifying in the dashboard.** With the log on, the control plane
+serves three read-only routes and an **Admin log** tab (separate from the receipts
+**Audit** tab and its `/dashboard/api/audit*` routes). Off, or on a worker, all three
+answer 404 and the tab stays hidden; the tab is also hidden from viewers and editors.
+Nothing in the dashboard writes to the chain, and none of these routes is recorded.
+
+| Route | Role (oidc) | What it returns |
+|---|---|---|
+| `GET /dashboard/api/admin-audit` | admin | `{entries, nextCursor}`, newest first |
+| `POST /dashboard/api/admin-audit/verify` | admin | `{ok, checked, firstBadSeq, reason, headSeq, headHash, lastVerifiedSeq, partial}` |
+| `GET /dashboard/api/admin-audit/pubkey` | any role | `{alg: "ed25519", keys: [{keyId, publicKey, firstSeq}]}` |
+
+The list takes `actor` (a sub or an `actor_id`), `action`, `outcome` (`ok`,
+`denied`, `rejected`, `error`), `since` (RFC3339), `limit` (1 to 200, default 50)
+and `cursor`; a malformed value answers 400. Pass the returned `nextCursor` as
+`cursor` for the next page; it is 0 on the last one. Each entry has the signed fields
+(hashes in hex) plus the actor's plaintext sub and email from the side table, never
+a signature or a request body.
+
+Verify streams the chain and checks seq continuity, every `prev_hash` link, each
+recomputed entry hash, each Ed25519 signature under the key its `key_id` names (keys
+come from the chain's genesis and `segment_start` entries), that the key changes only
+at a `segment_start`, and the signed `actor_id` against the side table with the
+control plane's HMAC key. The optional body `{fromSeq, anchor: {seq, hash}}` starts
+at `fromSeq` and compares the entry at `anchor.seq` with a hex entry hash you saw
+earlier (for example the head of an emitted log line), which also detects a deleted
+tail. One call checks at most 10,000 rows: when `partial` is true, call again with
+`fromSeq` = `lastVerifiedSeq + 1` (the tab does this for you). On failure `ok` is
+false, `firstBadSeq` is the first row that does not verify and `reason` names the
+check (`entry_hash`, `prev_hash`, `signature`, `seq_gap`, `actor_id`,
+`anchor_mismatch`, ...); the control plane also logs it at WARN. One verification
+runs at a time; a concurrent call answers 429. In `console.auth: none` the verify
+POST, like every dashboard POST, needs the `--admin-token-env` bearer.
+
+The pubkey route lists every key the chain declares, so entries signed before a
+manual key change stay verifiable; the tab shows each key with a copy button.
 
 Offline CLIs that change admin state record through the same chain with
 `adminaudit.OpenForCLI`: actor `cli:<os user>`, auth_method `cli`, the same key
@@ -457,6 +494,9 @@ fails when the two differ.
 | Route | Method | Minimum role | Action |
 |---|---|---|---|
 | `/dashboard/` | GET | viewer | `ui.read` |
+| `/dashboard/api/admin-audit` | GET | admin | `adminaudit.read` |
+| `/dashboard/api/admin-audit/pubkey` | GET | viewer | `adminaudit.pubkey` |
+| `/dashboard/api/admin-audit/verify` | POST | admin | `adminaudit.verify` |
 | `/dashboard/api/alerts` | GET | viewer | `alerts.read` |
 | `/dashboard/api/analytics` | GET | viewer | `analytics.read` |
 | `/dashboard/api/audit` | GET | viewer | `audit.read` |

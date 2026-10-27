@@ -23,7 +23,7 @@ const (
 	// authenticated actor writes one admin audit row.
 	classAudited routeClass = "audited"
 	// classReadOnly routes change nothing, including the read-only POSTs
-	// (query, query/generate, audit/verify). No row.
+	// (query, query/generate, audit/verify, admin-audit/verify). No row.
 	classReadOnly routeClass = "read-only"
 	// classWorkerPlane routes serve workers (/policy, heartbeat, ingest,
 	// healthz). They are never wrapped in the audit chain.
@@ -113,6 +113,11 @@ func authzTable() map[routeKey]authzRow {
 		{put, "/dashboard/api/llmproviders", auditedRow(admin, "llmproviders.write", "llmproviders")},
 		{get, "/dashboard/api/audit", readRow(viewer, "audit.read")},
 		{post, "/dashboard/api/audit/verify", readRow(viewer, "audit.verify")},
+		// The admin audit log (W-P1-AAUD-03). verify is a read-only POST; the
+		// public keys are not secret, so any role may read them.
+		{get, "/dashboard/api/admin-audit", readRow(admin, "adminaudit.read")},
+		{post, "/dashboard/api/admin-audit/verify", readRow(admin, "adminaudit.verify")},
+		{get, "/dashboard/api/admin-audit/pubkey", readRow(viewer, "adminaudit.pubkey")},
 		{get, "/dashboard/api/setup", readRow(viewer, "setup.read")},
 		// Served by the control plane itself, ahead of dash.Handler (cpDashboardRoutes).
 		{get, "/dashboard/api/sessions", readRow(admin, "sessions.read")},

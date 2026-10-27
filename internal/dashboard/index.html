@@ -484,6 +484,10 @@
     <div class="nav-item" data-page="audit">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 11l3 3 8-8"/><path d="M20 12v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9"/></svg>
       Audit</div>
+    <!-- Admin log (W-P1-AAUD-03): hidden until adminLogProbe sees an admin (or none mode) and a wired API. -->
+    <div class="nav-item" data-page="adminlog" data-min-role="admin" id="adminLogNav" style="display:none">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6z"/><path d="M9 12h6M9 15.5h4M9 8.5h6"/></svg>
+      Admin log</div>
 
     <div class="nav-group-label">Operate</div>
     <div class="nav-item" data-page="fleet">
@@ -1099,6 +1103,41 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
       </div><!-- /demo-only -->
     </section>
 
+    <!-- ============ ADMIN LOG (W-P1-AAUD-03) ============ -->
+    <section class="page" id="page-adminlog">
+      <div class="page-head">
+        <div><h1>Admin log</h1><div class="desc">Who changed what on the control plane: signed, hash-chained admin audit entries (read-only)</div></div>
+      </div>
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-head"><h3>Chain verification</h3>
+          <span style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <input type="text" id="al-anchor-seq" maxlength="20" placeholder="Anchor seq (optional)" aria-label="Anchor seq" style="width:150px" />
+            <input type="text" id="al-anchor-hash" maxlength="64" placeholder="Anchor entry hash, hex (optional)" aria-label="Anchor entry hash" style="width:260px" />
+            <button class="btn primary sm" id="al-verify">Verify chain</button>
+          </span></div>
+        <div class="card-pad"><div class="note" id="al-verify-result">Checks every entry's hash link and Ed25519 signature. An anchor (a head seen earlier, for example in an emitted log line) also detects a deleted tail.</div></div>
+      </div>
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-head"><h3>Signing keys</h3><span class="sub">every key the chain declares, oldest first</span></div>
+        <div class="card-pad" id="al-keys"><div class="note">Loading…</div></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h3>Entries</h3>
+          <span style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <input type="text" id="al-actor" maxlength="320" placeholder="Actor (sub or actor id)" aria-label="Filter by actor" />
+            <input type="text" id="al-action" maxlength="128" placeholder="Action (e.g. policy.write)" aria-label="Filter by action" />
+            <select class="btn sm" id="al-outcome" aria-label="Filter by outcome"><option value="">any outcome</option><option value="ok">ok</option><option value="denied">denied</option><option value="rejected">rejected</option><option value="error">error</option></select>
+            <button class="btn sm" id="al-apply">Apply</button>
+          </span></div>
+        <div id="al-list"><div class="card-pad note">Loading…</div></div>
+        <div class="card-pad" style="display:flex;gap:8px;align-items:center">
+          <button class="btn sm" id="al-newer" disabled>← Newer</button>
+          <button class="btn sm" id="al-older" disabled>Older →</button>
+          <span class="sub" id="al-page"></span>
+        </div>
+      </div>
+    </section>
+
     <!-- ============ FLEET ============ -->
     <section class="page" id="page-fleet">
       <div class="page-head">
@@ -1462,6 +1501,7 @@ function loadTab(page){
     case 'mcp':         loadMCPPage(); break;
     case 'alerts':      loadAlerts(); loadDetection(); break;
     case 'audit':       loadAudit(); break;
+    case 'adminlog':    loadAdminLog(); break;
     case 'get-started': refreshOnboarding(); break;
   }
 }
@@ -3708,6 +3748,120 @@ async function deleteIntegration(name){
   }catch(err){ alert('Delete failed: '+err.message); }
 }
 
+/* adminlog:begin */
+/* ============================================================
+   Admin log (W-P1-AAUD-03): GET /dashboard/api/admin-audit, POST .../verify,
+   GET .../pubkey, all through api(). Read-only: nothing here writes to the chain.
+   The nav item shows only to an admin (roleAllows; none mode leaves it to the server)
+   and only when the API is wired (a worker or a CP with admin audit off answers 404).
+   Every rendered field goes through esc(); errors are generic messages.
+   ============================================================ */
+const AL_LIMIT=50;
+const AL_OUTCOME={ok:'p-allow',denied:'p-deny',rejected:'p-med',error:'p-high'};
+const al={cursors:[0], next:0, filter:{actor:'',action:'',outcome:''}, verifying:false};
+async function adminLogProbe(){
+  const nav=document.getElementById('adminLogNav'); if(!nav) return;
+  await authInit();
+  if(!roleAllows('admin')){ nav.style.display='none'; return; }
+  let r=null;
+  try{ r=await api('GET','/dashboard/api/admin-audit/pubkey'); }catch(e){ r=null; }
+  nav.style.display= r&&r.ok ? '' : 'none';
+}
+function alQS(){
+  const p=new URLSearchParams();
+  p.set('limit',String(AL_LIMIT));
+  const c=al.cursors[al.cursors.length-1]; if(c>0) p.set('cursor',String(c));
+  if(al.filter.actor) p.set('actor',al.filter.actor);
+  if(al.filter.action) p.set('action',al.filter.action);
+  if(al.filter.outcome) p.set('outcome',al.filter.outcome);
+  return p.toString();
+}
+async function loadAdminLog(){ loadAdminLogKeys(); loadAdminLogEntries(); }
+async function loadAdminLogEntries(){
+  const list=document.getElementById('al-list'); if(!list) return;
+  let r=null, d=null;
+  try{ r=await api('GET','/dashboard/api/admin-audit?'+alQS()); if(r.ok) d=await r.json(); }catch(e){ d=null; }
+  const older=document.getElementById('al-older'), newer=document.getElementById('al-newer'), pg=document.getElementById('al-page');
+  newer.disabled=al.cursors.length<=1;
+  if(!d||!Array.isArray(d.entries)){
+    al.next=0; older.disabled=true; pg.textContent='';
+    list.innerHTML='<div class="card-pad note">'+(r&&r.status===400?'Check the filters: one of them is not valid.':'The admin log is unavailable.')+'</div>';
+    return;
+  }
+  al.next=d.nextCursor||0; older.disabled=!al.next;
+  pg.textContent='page '+al.cursors.length;
+  if(!d.entries.length){ list.innerHTML='<div class="card-pad note">No entries match.</div>'; return; }
+  list.innerHTML='<table><thead><tr><th>Seq</th><th>Time</th><th>Actor</th><th>Action</th><th>Target</th><th>Outcome</th><th>Key</th></tr></thead><tbody>'+
+    d.entries.map(x=>'<tr><td class="mono">'+esc(x.seq)+'</td>'
+      +'<td style="font-size:12px">'+esc(x.time)+'</td>'
+      +'<td><b>'+esc(x.actorEmail||x.actorSub||x.actorId)+'</b>'
+        +'<div class="muted" style="font-size:11px">'+esc(x.actorRole)+' · '+esc(x.authMethod)+'</div></td>'
+      +'<td class="mono" style="font-size:12px">'+esc(x.action)+'</td>'
+      +'<td style="font-size:12px">'+esc(x.target)+'<div class="mono muted" style="font-size:11px">'+esc(x.targetRef)+'</div></td>'
+      +'<td><span class="pill '+esc(AL_OUTCOME[x.outcome]||'p-low')+'">'+esc(x.outcome)+'</span> <span class="muted" style="font-size:11px">'+esc(x.httpStatus)+'</span></td>'
+      +'<td class="mono muted" style="font-size:11px">'+esc(x.keyId)+'</td></tr>').join('')+'</tbody></table>';
+}
+async function loadAdminLogKeys(){
+  const box=document.getElementById('al-keys'); if(!box) return;
+  let d=null;
+  try{ const r=await api('GET','/dashboard/api/admin-audit/pubkey'); if(r.ok) d=await r.json(); }catch(e){ d=null; }
+  if(!d||!Array.isArray(d.keys)){ box.innerHTML='<div class="note">Signing keys are unavailable.</div>'; return; }
+  if(!d.keys.length){ box.innerHTML='<div class="note">No signing key yet.</div>'; return; }
+  box.innerHTML=d.keys.map(k=>'<div style="display:flex;align-items:center;gap:10px;padding:6px 0;flex-wrap:wrap">'
+    +'<span class="tag">'+esc(d.alg)+'</span><span class="mono" style="font-size:12px">key '+esc(k.keyId)+'</span>'
+    +'<span class="muted" style="font-size:11px">from seq '+esc(k.firstSeq)+'</span>'
+    +'<code class="mono" style="font-size:11px;word-break:break-all">'+esc(k.publicKey)+'</code>'
+    +'<button class="btn sm al-copy" data-key="'+esc(k.publicKey)+'">Copy</button></div>').join('');
+  box.querySelectorAll('.al-copy').forEach(b=>b.addEventListener('click',async()=>{
+    try{ await navigator.clipboard.writeText(b.dataset.key); b.textContent='Copied'; }catch(e){ b.textContent='Copy failed'; }
+  }));
+}
+/* verifyAdminLog runs POST .../verify and, while the server reports a partial run (its per-call
+   row cap), resumes from lastVerifiedSeq+1, so a long chain is checked in bounded requests. */
+async function verifyAdminLog(){
+  if(al.verifying) return;
+  const out=document.getElementById('al-verify-result'), btn=document.getElementById('al-verify');
+  const aSeq=document.getElementById('al-anchor-seq').value.trim(), aHash=document.getElementById('al-anchor-hash').value.trim();
+  let anchor=null;
+  if(aSeq||aHash){
+    if(!/^[1-9][0-9]*$/.test(aSeq)||!/^[0-9a-fA-F]{64}$/.test(aHash)){ out.textContent='An anchor needs a positive seq and a 64-character hex entry hash.'; return; }
+    anchor={seq:Number(aSeq),hash:aHash.toLowerCase()};
+  }
+  al.verifying=true; btn.disabled=true; out.textContent='Verifying…';
+  let checked=0, from=0, res=null, status=0;
+  try{
+    for(let i=0;i<1000;i++){
+      const body={fromSeq:from}; if(anchor) body.anchor=anchor;
+      const r=await api('POST','/dashboard/api/admin-audit/verify',body);
+      status=r.status;
+      if(!r.ok){ res=null; break; }
+      res=await r.json();
+      checked+=res.checked||0;
+      if(!res.ok||!res.partial) break;
+      from=(res.lastVerifiedSeq||0)+1;
+    }
+  }catch(e){ res=null; }
+  al.verifying=false; btn.disabled=false;
+  if(!res){
+    out.textContent= status===429 ? 'A verification is already running. Try again in a moment.' : 'Verification could not run. Try again.';
+    return;
+  }
+  if(res.ok&&res.partial){ out.textContent='Verified '+checked+' entries so far; the run stopped early. Verify again to continue.'; return; }
+  out.innerHTML= res.ok
+    ? '<b style="color:var(--teal)">Chain intact.</b> '+esc(checked)+' entries verified; head seq '+esc(res.headSeq)+' <span class="mono muted" style="font-size:11px">'+esc(res.headHash)+'</span>'
+    : '<b style="color:var(--red)">Chain broken at seq '+esc(res.firstBadSeq)+'</b> ('+esc(res.reason||'failed check')+'). Last verified seq '+esc(res.lastVerifiedSeq)+'.';
+}
+(function(){
+  const g=id=>document.getElementById(id);
+  const apply=()=>{ al.filter={actor:g('al-actor').value.trim(),action:g('al-action').value.trim(),outcome:g('al-outcome').value}; al.cursors=[0]; loadAdminLogEntries(); };
+  if(g('al-apply')) g('al-apply').addEventListener('click',apply);
+  ['al-actor','al-action'].forEach(id=>{ const el=g(id); if(el) el.addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); apply(); } }); });
+  if(g('al-older')) g('al-older').addEventListener('click',()=>{ if(al.next){ al.cursors.push(al.next); loadAdminLogEntries(); } });
+  if(g('al-newer')) g('al-newer').addEventListener('click',()=>{ if(al.cursors.length>1){ al.cursors.pop(); loadAdminLogEntries(); } });
+  if(g('al-verify')) g('al-verify').addEventListener('click',verifyAdminLog);
+})();
+/* adminlog:end */
+
 /* ============================================================
    Init
    ============================================================ */
@@ -3746,6 +3900,7 @@ syncCollapse('mcpToolsCard','warden.mcpToolsOpen',false);
 // initial data
 loadSetup();
 refreshAlertBadge();  // seed the sidebar Alerts badge without opening the tab
+adminLogProbe();      // show the Admin log tab only where it is wired and allowed
 const savedTab = (function(){ try{ return localStorage.getItem('warden.tab'); }catch(e){ return null; } })();
 const startTab = (savedTab && document.getElementById('page-'+savedTab)) ? savedTab : 'overview';
 go(startTab);
