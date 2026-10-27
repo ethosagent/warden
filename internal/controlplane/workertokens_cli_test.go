@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ethosagent/warden/internal/adminaudit"
+	"github.com/ethosagent/warden/internal/cpstate"
 )
 
 // cliFailRecorder fails every audit append.
@@ -98,5 +99,21 @@ func TestWriteWorkerTokenList(t *testing.T) {
 	}
 	if got := tokenStatus(Token{ExpiresAt: time.Unix(1, 0)}, time.Now()); got != "expired" {
 		t.Errorf("status = %q", got)
+	}
+}
+
+// TestOfflineWorkerTokensLegacyStateDir: a state database from a binary
+// without worker tokens answers with a hint, not a raw SQL error.
+func TestOfflineWorkerTokensLegacyStateDir(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db, err := cpstate.Open(ctx, filepath.Join(dir, adminaudit.StateDBFileName), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	_, err = OpenWorkerTokensOfflineReadOnly(ctx, dir)
+	if err == nil || !strings.Contains(err.Error(), "no worker_tokens table") {
+		t.Fatalf("err = %v", err)
 	}
 }
