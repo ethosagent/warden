@@ -65,6 +65,10 @@ var All = slices.Concat(
 		// Console enforcement (W-P1-SSO-06): oidc starts, the shared bearer opens no
 		// human route, and workers keep pulling /policy with it.
 		{Name: "console_oidc_bearer_rejected", Opts: consoleOpts(), Run: consoleOIDCBearerRejected},
+		// Admin audit gate (W-P1-AAUD-05): enabled, the control plane writes the
+		// genesis entry and logs its key_id before serving. In-process only (it
+		// reads the CP state dir).
+		{Name: "admin_audit_enabled_genesis", Opts: adminAuditOpts(), Run: adminAuditEnabledGenesis},
 	},
 	// Canary across protocols x allow/deny; see canary.go.
 	canaryScenarios(),

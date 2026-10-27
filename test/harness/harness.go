@@ -159,6 +159,9 @@ type H struct {
 	// listen address (its https origin is the registered redirect URL).
 	wantConsole bool
 	consoleAddr string
+	// wantAdminAudit (WithAdminAudit) boots the control plane with
+	// console.adminAudit.enabled and a state dir.
+	wantAdminAudit bool
 
 	// tokenClients are the AgentWithProxyToken / AgentH2WithProxyToken clients,
 	// kept so cleanup can close their idle tunnels.
