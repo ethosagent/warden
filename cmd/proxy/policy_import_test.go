@@ -312,7 +312,8 @@ func TestPolicyImport(t *testing.T) {
 		s, e, err := getPolicyETag(t, client, base, etag, "30s")
 		polled <- result{s, e, err, time.Now()}
 	}()
-	time.Sleep(200 * time.Millisecond) // let the long-poll park
+	// The import lands before the CP's next reload tick (3s), so the poll is
+	// parked on the old ETag whichever starts first.
 
 	file := writeTempConfig(t, importNewConfig)
 	start := time.Now()
