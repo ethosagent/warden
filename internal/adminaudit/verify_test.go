@@ -166,7 +166,7 @@ func TestVerifyActorHMAC(t *testing.T) {
 	}
 }
 
-func TestVerifyUnknownKey(t *testing.T) {
+func TestChainVerifierRejectsBadKeys(t *testing.T) {
 	v := newChainVerifier(nil)
 	signer := newSigner(t)
 	e := Entry{V: 1, Seq: 1, Action: ActionGenesis, PrevHash: make([]byte, 32), KeyID: "x"}

@@ -20,18 +20,18 @@ const verifyPageSize = 256
 
 // Reasons Verify reports for the first bad seq.
 const (
-	ReasonSeqGap         = "seq_gap"        // a seq is missing (deleted row)
-	ReasonMalformed      = "malformed_row"  // a NULL column or undecodable details
-	ReasonGenesis        = "genesis"        // seq 1 is not a proper genesis, or genesis appears later
-	ReasonPrevHash       = "prev_hash"      // prev_hash does not link to the previous entry
-	ReasonEntryHash      = "entry_hash"     // the stored entry_hash is not sha256(canonical)
-	ReasonDeclaredKey    = "declared_key"   // a key-defining entry's public key is bad or not its key_id
-	ReasonKeyChange      = "key_change"     // key_id changed outside a segment_start/key_rotated entry
-	ReasonUnknownKey     = "unknown_key"    // no key in the chain declares this key_id
-	ReasonSignature      = "signature"      // the signature does not verify
-	ReasonActorID        = "actor_id"       // actor_id is not HMAC(sub) of the side row
-	ReasonAnchorMissing  = "anchor_missing" // the chain ends before the anchor seq (tail deleted)
-	ReasonAnchorMismatch = "anchor_mismatch"
+	ReasonSeqGap         = "seq_gap"         // a seq is missing (deleted row)
+	ReasonMalformed      = "malformed_row"   // a NULL column or undecodable details
+	ReasonGenesis        = "genesis"         // seq 1 is not a proper genesis, or genesis appears later
+	ReasonPrevHash       = "prev_hash"       // prev_hash does not link to the previous entry
+	ReasonEntryHash      = "entry_hash"      // the stored entry_hash is not sha256(canonical)
+	ReasonDeclaredKey    = "declared_key"    // a key-defining entry's public key is bad or not its key_id
+	ReasonKeyChange      = "key_change"      // key_id changed outside a segment_start/key_rotated entry
+	ReasonUnknownKey     = "unknown_key"     // no key in the chain declares this key_id
+	ReasonSignature      = "signature"       // the signature does not verify
+	ReasonActorID        = "actor_id"        // actor_id is not HMAC(sub) of the side row
+	ReasonAnchorMissing  = "anchor_missing"  // the chain ends before the anchor seq (tail deleted)
+	ReasonAnchorMismatch = "anchor_mismatch" // the entry at the anchor seq has a different hash
 )
 
 // Anchor is a previously observed head (for example from an emitted log
