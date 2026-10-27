@@ -201,14 +201,29 @@ func TestVersionedLLMProvidersReachWorkers(t *testing.T) {
 	auth := map[string]string{"Authorization": "Bearer " + dashTestToken}
 	_, _, etag := getPolicy(t, ts.URL+"/policy", auth)
 
-	woke := make(chan []byte, 1)
+	type pollResult struct {
+		code int
+		body []byte
+		err  error
+	}
+	woke := make(chan pollResult, 1)
 	go func() {
-		hdr := map[string]string{"Authorization": auth["Authorization"], "If-None-Match": etag}
-		code, b, _ := getPolicy(t, ts.URL+"/policy?wait=20s", hdr)
-		if code != http.StatusOK {
-			b = nil
+		// No t.Fatal off the test goroutine: the result goes back on the channel.
+		req, err := http.NewRequest(http.MethodGet, ts.URL+"/policy?wait=20s", nil)
+		if err != nil {
+			woke <- pollResult{err: err}
+			return
 		}
-		woke <- b
+		req.Header.Set("Authorization", auth["Authorization"])
+		req.Header.Set("If-None-Match", etag)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			woke <- pollResult{err: err}
+			return
+		}
+		defer func() { _ = resp.Body.Close() }()
+		b, err := io.ReadAll(resp.Body)
+		woke <- pollResult{code: resp.StatusCode, body: b, err: err}
 	}()
 	// No sleep: a waiter already blocked is woken by the watch broadcast, and
 	// one that snapshots after the write sees a new ETag and returns at once.
@@ -221,9 +236,9 @@ func TestVersionedLLMProvidersReachWorkers(t *testing.T) {
 		t.Fatalf("head = v%d source %q, want v2 from llmproviders", v.Version, v.Source)
 	}
 	select {
-	case b := <-woke:
-		if !strings.Contains(string(b), `"name":"p1"`) {
-			t.Fatalf("the woken waiter got %s, want the new registry", b)
+	case r := <-woke:
+		if r.err != nil || r.code != http.StatusOK || !strings.Contains(string(r.body), `"name":"p1"`) {
+			t.Fatalf("the woken waiter got %d %s (err %v), want 200 with the new registry", r.code, r.body, r.err)
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("the long-poll waiter was not woken by the llmProviders save")
@@ -527,5 +542,26 @@ func TestVersionedPublishLogsOnlyVersionLine(t *testing.T) {
 	}
 	if !slices.Equal(msgs, []string{"policy version created", "policy version created"}) {
 		t.Fatalf("log messages = %q, want only the version line per save", msgs)
+	}
+}
+
+// TestVersionedSettingsNewCredentialUnreadableYAML: in versioned mode the
+// served YAML is the only home of the CP-local blocks, so a new credential is
+// refused, not written over a file that does not parse.
+func TestVersionedSettingsNewCredentialUnreadableYAML(t *testing.T) {
+	path := writeCredentialPolicyFile(t)
+	srv, _ := newPublishServer(t, path, config.ConsoleConfig{})
+	const broken = "policy: [unclosed\n"
+	if err := os.WriteFile(path, []byte(broken), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.WriteSettings(context.Background(), awsSettings("sk-unwritten"), dashboard.WriteMeta{}); err == nil {
+		t.Fatal("a new credential over a malformed served YAML was accepted")
+	}
+	if got := readFile(t, path); got != broken {
+		t.Fatalf("the malformed served YAML was replaced:\n%s", got)
+	}
+	if h := mustHead(t, srv.versions); h != 1 {
+		t.Fatalf("head = %d, want 1", h)
 	}
 }

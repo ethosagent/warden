@@ -186,11 +186,19 @@ func credentialOf(doc policyWire) string {
 
 // writeCredential writes sec, carrying a new raw secretAccessKey, as the
 // served YAML's secretStore block: the credential lives only there, and the
-// credential overlay serves it. It returns a func that puts the previous file
-// back. The caller holds writeMu.
+// credential overlay serves it. In versioned mode the served YAML is also the
+// only home of the CP-local blocks, so an unreadable or malformed file refuses
+// the save instead of being replaced. It returns a func that puts the previous
+// file back. The caller holds writeMu.
 func (s *Server) writeCredential(sec config.SecretsSettings) (func(), error) {
-	prev, readErr := os.ReadFile(s.cfg.PolicyPath)
-	root := s.readServedRoot()
+	prev, err := os.ReadFile(s.cfg.PolicyPath)
+	if err != nil {
+		return nil, fmt.Errorf("controlplane: read the served config for the new credential: %w", err)
+	}
+	root := map[string]yaml.Node{}
+	if err := yaml.Unmarshal(prev, &root); err != nil {
+		return nil, fmt.Errorf("controlplane: parse the served config for the new credential: %w", err)
+	}
 	node, err := config.EncodeSecretStoreNode(config.SecretStoreConfigFromSettings(&sec))
 	if err != nil {
 		return nil, fmt.Errorf("controlplane: encode secretStore settings: %w", err)
@@ -200,11 +208,8 @@ func (s *Server) writeCredential(sec config.SecretsSettings) (func(), error) {
 		return nil, err
 	}
 	return func() {
-		if readErr != nil {
-			return
-		}
 		if err := s.restoreServedFile(prev); err != nil {
-			s.cfg.Logger.Error("control plane: cannot restore the served config after a failed publish", "error", err)
+			s.cfg.Logger.Error("control plane: cannot restore the served config after a failed publish; the new credential stays in it", "error", err)
 		}
 	}, nil
 }
