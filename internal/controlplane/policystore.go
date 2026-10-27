@@ -22,13 +22,18 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/ethosagent/warden/internal/adminaudit"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/cpstate"
+	"github.com/ethosagent/warden/internal/dashboard"
 )
 
 // Policy store modes (--policy-store).
@@ -132,6 +137,10 @@ CREATE TRIGGER policy_publish_log_no_update BEFORE UPDATE ON policy_publish_log
 BEGIN SELECT RAISE(ABORT, 'policy_publish_log is append-only'); END;
 CREATE TRIGGER policy_publish_log_no_delete BEFORE DELETE ON policy_publish_log
 BEGIN SELECT RAISE(ABORT, 'policy_publish_log is append-only'); END;`,
+	}, {
+		// VersionForETag reads the newest row per etag on every fleet-view load.
+		ID:  "policystore/0002",
+		SQL: `CREATE INDEX policy_publish_log_etag ON policy_publish_log (etag, seq);`,
 	}}
 }
 
@@ -153,8 +162,8 @@ type PolicyVersion struct {
 	DocSHA256 string
 }
 
-// PublishEntry is one policy_publish_log row: a head move (or, later, an ETag
-// change without a new version) and the served ETag it produced.
+// PublishEntry is one policy_publish_log row: a head move, or a served-ETag
+// change without a new version (AppendPublish), and the served ETag.
 type PublishEntry struct {
 	Seq      int64
 	Version  int64
@@ -184,6 +193,14 @@ type PolicyVersionStore interface {
 	// PublishLog returns up to limit publish-log rows after afterSeq, oldest
 	// first.
 	PublishLog(ctx context.Context, afterSeq int64, limit int) ([]PublishEntry, error)
+	// AppendPublish records that the served ETag changed while the head stayed
+	// at version (an overlay change). It appends nothing and returns false when
+	// version is no longer the head (that head's own Create row covers it) or
+	// when the newest row already has this version and etag.
+	AppendPublish(ctx context.Context, version int64, etag, reason, actor string) (appended bool, err error)
+	// VersionForETag returns the version of the newest publish-log row with
+	// etag; ok is false when no row has it (or the read fails).
+	VersionForETag(ctx context.Context, etag string) (version int64, ok bool)
 }
 
 // sqlitePolicyStore is the PolicyVersionStore on the cpstate SQLite DB.
@@ -257,13 +274,76 @@ func (st *sqlitePolicyStore) Create(ctx context.Context, doc policyWire, author 
 // createTx is Create's transaction. It returns the new version and its parent,
 // or the head and changed=false for a doc equal to head's.
 func (st *sqlitePolicyStore) createTx(ctx context.Context, docJSON []byte, docSHA, etag string, author PolicyAuthor, msg, source string, expectedHead int64) (version, parent int64, changed bool, err error) {
+	err = st.immediateTx(ctx, func(conn *sql.Conn) error {
+		var head int64
+		if err := conn.QueryRowContext(ctx, "SELECT version FROM policy_head").Scan(&head); err != nil {
+			return fmt.Errorf("policy store: read head: %w", err)
+		}
+		if head != expectedHead {
+			return fmt.Errorf("%w: head is v%d, expected v%d", ErrConflict, head, expectedHead)
+		}
+		if head > 0 {
+			var headSHA string
+			err := conn.QueryRowContext(ctx, "SELECT doc_sha256 FROM policy_versions WHERE version = ?", head).Scan(&headSHA)
+			if err != nil {
+				return fmt.Errorf("policy store: read head v%d: %w", head, err)
+			}
+			if headSHA == docSHA {
+				version, parent = head, head
+				return errNoChange
+			}
+		}
+		var next int64
+		if err := conn.QueryRowContext(ctx, "SELECT COALESCE(MAX(version), 0) + 1 FROM policy_versions").Scan(&next); err != nil {
+			return fmt.Errorf("policy store: next version: %w", err)
+		}
+		at := st.now().UnixMilli()
+		if _, err := conn.ExecContext(ctx,
+			`INSERT INTO policy_versions (version, parent_version, created_at, author_sub, author_email, author_kind, message, source, doc_json, doc_sha256)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			next, head, at, author.Sub, author.Email, author.Kind, msg, source, string(docJSON), docSHA); err != nil {
+			return fmt.Errorf("policy store: insert version: %w", err)
+		}
+		// The cross-process compare-and-swap.
+		res, err := conn.ExecContext(ctx, "UPDATE policy_head SET version = ? WHERE version = ?", next, expectedHead)
+		if err != nil {
+			return fmt.Errorf("policy store: move head: %w", err)
+		}
+		if n, err := res.RowsAffected(); err != nil || n != 1 {
+			return fmt.Errorf("%w: head is no longer v%d", ErrConflict, expectedHead)
+		}
+		if _, err := conn.ExecContext(ctx,
+			`INSERT INTO policy_publish_log (version, etag, reason, actor_sub, at) VALUES (?, ?, ?, ?, ?)`,
+			next, etag, source, author.Sub, at); err != nil {
+			return fmt.Errorf("policy store: append publish log: %w", err)
+		}
+		version, parent, changed = next, head, true
+		return nil
+	})
+	if errors.Is(err, errNoChange) {
+		return version, parent, false, nil
+	}
+	if err != nil {
+		return 0, 0, false, err
+	}
+	return version, parent, changed, nil
+}
+
+// errNoChange makes immediateTx roll back a transaction that has nothing to
+// write; callers map it to their own no-change result.
+var errNoChange = errors.New("policy store: nothing to write")
+
+// immediateTx runs fn in a BEGIN IMMEDIATE transaction on one connection, so
+// its reads and writes see no other writer, in this process or another. It
+// commits when fn returns nil and rolls back otherwise.
+func (st *sqlitePolicyStore) immediateTx(ctx context.Context, fn func(conn *sql.Conn) error) error {
 	conn, err := st.db.Conn(ctx)
 	if err != nil {
-		return 0, 0, false, fmt.Errorf("policy store: connection: %w", err)
+		return fmt.Errorf("policy store: connection: %w", err)
 	}
 	defer func() { _ = conn.Close() }()
 	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return 0, 0, false, fmt.Errorf("policy store: begin: %w", err)
+		return fmt.Errorf("policy store: begin: %w", err)
 	}
 	committed := false
 	defer func() {
@@ -271,53 +351,69 @@ func (st *sqlitePolicyStore) createTx(ctx context.Context, docJSON []byte, docSH
 			_, _ = conn.ExecContext(context.WithoutCancel(ctx), "ROLLBACK")
 		}
 	}()
-
-	var head int64
-	if err := conn.QueryRowContext(ctx, "SELECT version FROM policy_head").Scan(&head); err != nil {
-		return 0, 0, false, fmt.Errorf("policy store: read head: %w", err)
-	}
-	if head != expectedHead {
-		return 0, 0, false, fmt.Errorf("%w: head is v%d, expected v%d", ErrConflict, head, expectedHead)
-	}
-	if head > 0 {
-		var headSHA string
-		err := conn.QueryRowContext(ctx, "SELECT doc_sha256 FROM policy_versions WHERE version = ?", head).Scan(&headSHA)
-		if err != nil {
-			return 0, 0, false, fmt.Errorf("policy store: read head v%d: %w", head, err)
-		}
-		if headSHA == docSHA {
-			return head, head, false, nil
-		}
-	}
-	var next int64
-	if err := conn.QueryRowContext(ctx, "SELECT COALESCE(MAX(version), 0) + 1 FROM policy_versions").Scan(&next); err != nil {
-		return 0, 0, false, fmt.Errorf("policy store: next version: %w", err)
-	}
-	at := st.now().UnixMilli()
-	if _, err := conn.ExecContext(ctx,
-		`INSERT INTO policy_versions (version, parent_version, created_at, author_sub, author_email, author_kind, message, source, doc_json, doc_sha256)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		next, head, at, author.Sub, author.Email, author.Kind, msg, source, string(docJSON), docSHA); err != nil {
-		return 0, 0, false, fmt.Errorf("policy store: insert version: %w", err)
-	}
-	// The cross-process compare-and-swap.
-	res, err := conn.ExecContext(ctx, "UPDATE policy_head SET version = ? WHERE version = ?", next, expectedHead)
-	if err != nil {
-		return 0, 0, false, fmt.Errorf("policy store: move head: %w", err)
-	}
-	if n, err := res.RowsAffected(); err != nil || n != 1 {
-		return 0, 0, false, fmt.Errorf("%w: head is no longer v%d", ErrConflict, expectedHead)
-	}
-	if _, err := conn.ExecContext(ctx,
-		`INSERT INTO policy_publish_log (version, etag, reason, actor_sub, at) VALUES (?, ?, ?, ?, ?)`,
-		next, etag, source, author.Sub, at); err != nil {
-		return 0, 0, false, fmt.Errorf("policy store: append publish log: %w", err)
+	if err := fn(conn); err != nil {
+		return err
 	}
 	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return 0, 0, false, fmt.Errorf("policy store: commit: %w", err)
+		return fmt.Errorf("policy store: commit: %w", err)
 	}
 	committed = true
-	return next, head, true, nil
+	return nil
+}
+
+// AppendPublish implements PolicyVersionStore. The head check and the
+// newest-row check run in one BEGIN IMMEDIATE transaction with the insert, so
+// two control planes refreshing at once append one row.
+func (st *sqlitePolicyStore) AppendPublish(ctx context.Context, version int64, etag, reason, actor string) (bool, error) {
+	if etag == "" || reason == "" || strings.TrimSpace(actor) == "" {
+		return false, errors.New("policy store: publish entry needs an etag, a reason and an actor")
+	}
+	err := st.immediateTx(ctx, func(conn *sql.Conn) error {
+		var head int64
+		if err := conn.QueryRowContext(ctx, "SELECT version FROM policy_head").Scan(&head); err != nil {
+			return fmt.Errorf("policy store: read head: %w", err)
+		}
+		if head != version {
+			return errNoChange
+		}
+		var lastVer int64
+		var lastETag string
+		err := conn.QueryRowContext(ctx, "SELECT version, etag FROM policy_publish_log ORDER BY seq DESC LIMIT 1").Scan(&lastVer, &lastETag)
+		switch {
+		case err == nil && lastVer == version && lastETag == etag:
+			return errNoChange
+		case err != nil && !errors.Is(err, sql.ErrNoRows):
+			return fmt.Errorf("policy store: read publish log: %w", err)
+		}
+		if _, err := conn.ExecContext(ctx,
+			`INSERT INTO policy_publish_log (version, etag, reason, actor_sub, at) VALUES (?, ?, ?, ?, ?)`,
+			version, etag, reason, actor, st.now().UnixMilli()); err != nil {
+			return fmt.Errorf("policy store: append publish log: %w", err)
+		}
+		return nil
+	})
+	if errors.Is(err, errNoChange) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// VersionForETag implements PolicyVersionStore. A read error is logged and
+// reported as unknown: the fleet view degrades to the bare ETag.
+func (st *sqlitePolicyStore) VersionForETag(ctx context.Context, etag string) (int64, bool) {
+	if etag == "" {
+		return 0, false
+	}
+	var v int64
+	err := st.db.QueryRowContext(ctx,
+		"SELECT version FROM policy_publish_log WHERE etag = ? ORDER BY seq DESC LIMIT 1", etag).Scan(&v)
+	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			st.logger.Warn("policy store: etag lookup failed", "error", err)
+		}
+		return 0, false
+	}
+	return v, true
 }
 
 // Head implements PolicyVersionStore.
@@ -513,6 +609,34 @@ func credentialOverlay(policyPath string) wireOverlay {
 	}}
 }
 
+// fleetVersionLookupTimeout bounds the ETag lookups of one worker-list call.
+const fleetVersionLookupTimeout = 2 * time.Second
+
+// fillPolicyVersions sets PolicyVersion on each view whose heartbeat ETag maps
+// to a version in st's publish log. It runs only when the dashboard builds the
+// worker list, with one lookup per distinct ETag per call; st nil (file mode)
+// leaves the views alone.
+func fillPolicyVersions(st PolicyVersionStore, views []dashboard.WorkerView) {
+	if st == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), fleetVersionLookupTimeout)
+	defer cancel()
+	seen := make(map[string]int64)
+	for i := range views {
+		etag := views[i].PolicyETag
+		if etag == "" {
+			continue
+		}
+		v, cached := seen[etag]
+		if !cached {
+			v, _ = st.VersionForETag(ctx, etag) // 0 when unknown
+			seen[etag] = v
+		}
+		views[i].PolicyVersion = v
+	}
+}
+
 // checkPolicyStoreStartup is the fail-closed startup check of versioned mode:
 // the head must be readable and, when non-zero, its version present and intact.
 func checkPolicyStoreStartup(ctx context.Context, st PolicyVersionStore, dbPath string) (int64, error) {
@@ -614,7 +738,7 @@ func (s *Server) policyImport() policyImport {
 		path:  s.cfg.PolicyPath,
 		load:  s.policy.loadFile,
 		served: func(ctx context.Context) (string, error) {
-			wire, _, err := s.policy.loadPolicy(ctx)
+			wire, _, _, err := s.policy.loadPolicy(ctx)
 			if err != nil {
 				return "", err
 			}
@@ -732,4 +856,216 @@ func (im policyImport) record(ctx context.Context, servedYAML []byte, version in
 	}); err != nil {
 		im.logger.Error("control plane: admin audit append failed", "action", actionPolicyInitialImport, "error", err)
 	}
+}
+
+// The write-through mirror (W-P1-PVER-05). In versioned mode the served YAML
+// is not the policy source, but --policy-store=file or an older binary serves
+// it, so after every head move the control plane renders head into it. A hand
+// edit of its policy/settings blocks is drift: warned about once per distinct
+// blocks hash, shown on the dashboard and audited as config.external_change,
+// never served. It comes back in only through `warden policy import`.
+
+// mirrorDriftMsg is the drift warning, worded as the design states it.
+const mirrorDriftMsg = "served config policy block differs from head; ignored"
+
+// policyMirror is the mirror and drift state. Every field but drift is guarded
+// by Server.writeMu; drift is read by the dashboard without it.
+type policyMirror struct {
+	// head is the version the served YAML was last mirrored from or checked
+	// against (0 = not yet, before the first tick), headSHA its doc_sha256.
+	head    int64
+	headSHA string
+	// hash is the blocks hash (servedBlocksHash) the served YAML has when it
+	// equals head; "" when unknown (a failed mirror), which skips the check.
+	hash string
+	// warned are the blocks hashes already reported as drift against this
+	// head, oldest first and at most externalSeenMax, so each distinct edit is
+	// warned about once (a head move starts over).
+	warned []string
+	// primeErr is the last first-tick error logged, so it is logged once.
+	primeErr string
+	drift    atomic.Bool
+}
+
+// record sets the mirrored head and hash and clears drift.
+func (m *policyMirror) record(v PolicyVersion, hash string) {
+	m.head, m.headSHA, m.hash, m.warned = v.Version, v.DocSHA256, hash, nil
+	m.drift.Store(false)
+}
+
+// policyDrift reports whether the served YAML's policy/settings blocks differ
+// from head (always false in file mode).
+func (s *Server) policyDrift() bool { return s.mirror.drift.Load() }
+
+// mirrorHead renders head version into the served YAML through
+// atomicWriteConfig (validated by the full loader, never a partial file) and
+// records the mirrored blocks hash. The credential, held in versions only as
+// its fingerprint, keeps the served file's live value (renderDocToRoot's
+// preserve-on-empty rule); blocks no policy version carries are kept as the
+// file has them. A failure is logged at error with the version and never
+// fails or rolls back the version. The caller holds writeMu.
+func (s *Server) mirrorHead(ctx context.Context, version int64) {
+	v, err := s.versions.Get(ctx, version)
+	if err == nil {
+		err = s.writeMirror(v.Doc)
+	}
+	if err != nil {
+		s.cfg.Logger.Error("control plane: cannot mirror the policy head into the served config; the version stands",
+			"version", version, "error", err)
+		// The file is not head and its expected hash is unknown: skip the drift
+		// check until the next head move mirrors again. The drift state is kept
+		// as it was: a failed mirror neither shows nor clears the banner.
+		s.mirror.head, s.mirror.headSHA, s.mirror.hash = version, v.DocSHA256, ""
+		return
+	}
+	hash, err := servedBlocksHash(s.cfg.PolicyPath)
+	if err != nil {
+		hash = ""
+	}
+	s.mirror.record(v, hash)
+}
+
+// writeMirror replaces the served YAML with doc rendered into it. A served
+// file that is unreadable, does not parse or is read-only is left alone: it is
+// the only home of the CP-local blocks, and a read-only file is the operator's
+// choice.
+func (s *Server) writeMirror(doc policyWire) error {
+	raw, err := os.ReadFile(s.cfg.PolicyPath)
+	if err != nil {
+		return fmt.Errorf("read the served config: %w", err)
+	}
+	root := map[string]yaml.Node{}
+	if err := yaml.Unmarshal(raw, &root); err != nil {
+		return fmt.Errorf("parse the served config: %w", err)
+	}
+	f, err := os.OpenFile(s.cfg.PolicyPath, os.O_WRONLY, 0)
+	if err != nil {
+		return fmt.Errorf("the served config is not writable: %w", err)
+	}
+	_ = f.Close()
+	if err := renderDocToRoot(root, doc); err != nil {
+		return err
+	}
+	return s.atomicWriteConfig(root)
+}
+
+// expectedBlocksHash is the blocks hash the served YAML would have with doc
+// mirrored into it, computed on a validated temp copy; the served file is not
+// written.
+func (s *Server) expectedBlocksHash(doc policyWire) (string, error) {
+	root := s.readServedRoot()
+	if err := renderDocToRoot(root, doc); err != nil {
+		return "", err
+	}
+	tmpName, err := s.writeValidatedTemp(root)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = os.Remove(tmpName) }()
+	return servedBlocksHash(tmpName)
+}
+
+// checkMirror is the versioned ticker's mirror and drift step. A head moved
+// outside the publish path (the CLI, another control plane) is mirrored. On
+// the first tick the served file is not written: its expected hash is
+// computed from head, so an edit made while the control plane was down is
+// drift rather than overwritten. Then the served YAML's blocks hash is
+// compared with the mirrored one; a difference is an external edit, warned
+// about and audited once per distinct hash and never served. Head 0 (an empty
+// store, before the initial import) serves the YAML and has no mirror.
+func (s *Server) checkMirror(ctx context.Context) {
+	// The head is read under writeMu: a publish holds it from Create to its
+	// mirror, so a head read before it could mirror an older version over a
+	// newer one.
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	head, err := s.versions.Head(ctx)
+	if err != nil || head == 0 {
+		return // Refresh already logged a store error
+	}
+	if head != s.mirror.head {
+		if s.mirror.head != 0 {
+			s.mirrorHead(ctx, head)
+		} else if !s.primeMirror(ctx, head) {
+			return
+		}
+	}
+	if s.mirror.hash == "" {
+		return
+	}
+	sum, err := servedBlocksHash(s.cfg.PolicyPath)
+	if err != nil {
+		return // unreadable: keep the last drift state
+	}
+	if sum == s.mirror.hash {
+		s.mirror.drift.Store(false)
+		return
+	}
+	s.mirror.drift.Store(true)
+	if slices.Contains(s.mirror.warned, sum) {
+		return
+	}
+	if len(s.mirror.warned) == externalSeenMax {
+		s.mirror.warned = slices.Delete(s.mirror.warned, 0, 1)
+	}
+	s.mirror.warned = append(s.mirror.warned, sum)
+	s.cfg.Logger.Warn(mirrorDriftMsg, "file_sha256", sum, "head", s.mirror.head)
+	s.auditExternalChange(ctx, externalChangeTarget,
+		fmt.Sprintf("v%d:%s", s.mirror.head, s.mirror.headSHA), "file:"+sum)
+}
+
+// primeMirror records head and the served YAML's expected blocks hash on the
+// first tick. It reports false, leaving the state unset so the next tick
+// retries, when head cannot be read or rendered.
+func (s *Server) primeMirror(ctx context.Context, head int64) bool {
+	v, err := s.versions.Get(ctx, head)
+	if err != nil {
+		return false
+	}
+	hash, err := s.expectedBlocksHash(v.Doc)
+	if err != nil {
+		if msg := err.Error(); msg != s.mirror.primeErr {
+			s.mirror.primeErr = msg
+			s.cfg.Logger.Warn("control plane: cannot compute the served config's expected policy blocks; drift check skipped until it can",
+				"head", head, "error", err)
+		}
+		return false
+	}
+	s.mirror.primeErr = ""
+	s.mirror.record(v, hash)
+	return true
+}
+
+// servedBlocksHash is the sha256 of the policy and settings blocks of the
+// config at path, as the full loader reads them (the wire file mode would
+// serve), so formatting, comments and the CP-local blocks do not count. The
+// credential value is left out: it lives only in the served YAML and the
+// credential overlay serves it, so editing it there is not drift. A file the
+// loader rejects hashes to its raw bytes: it is never equal to head.
+func servedBlocksHash(path string) (string, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	prov, err := config.NewLocalYAMLProvider(path)
+	if err != nil {
+		return sha256Hex(string(raw)), nil
+	}
+	p, err := prov.GetPolicy()
+	if err != nil {
+		return sha256Hex(string(raw)), nil
+	}
+	w := policyWire{Allowlist: p.Allowlist, Denylist: p.Denylist, Settings: config.SettingsWireFromPolicy(p)}
+	if w.Settings != nil && w.Settings.Secrets != nil {
+		settings := *w.Settings
+		secrets := *settings.Secrets
+		secrets.SecretAccessKey = ""
+		settings.Secrets = &secrets
+		w.Settings = &settings
+	}
+	b, err := json.Marshal(w)
+	if err != nil {
+		return "", err
+	}
+	return sha256Hex(string(b)), nil
 }

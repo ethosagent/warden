@@ -336,18 +336,18 @@ func (c *CPClient) IngestEvents(proxyID string, evs []analytics.Event) error {
 	return nil
 }
 
-// RawResponse is a control-plane reply as Do returns it.
+// RawResponse is a control-plane reply as DoWorker returns it.
 type RawResponse struct {
 	Status int
 	Header http.Header
 	Body   string
 }
 
-// Do sends one request to the control plane with the credential the caller
+// DoWorker sends one request to the control plane with the credential the caller
 // chooses (bearer "" sends no Authorization header; a non-empty proxyID sets
 // X-Warden-Proxy-ID), so a scenario can play a worker or an intruder. A
 // transport error fails the test; any HTTP status is returned as is.
-func (c *CPClient) Do(method, path, bearer, proxyID, body string) RawResponse {
+func (c *CPClient) DoWorker(method, path, bearer, proxyID, body string) RawResponse {
 	c.h.tb.Helper()
 	req, err := http.NewRequest(method, "https://"+c.addr+path, strings.NewReader(body))
 	if err != nil {

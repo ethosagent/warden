@@ -1,6 +1,9 @@
 package harness
 
 import (
+	"bytes"
+	"io"
+	"net/http"
 	"path/filepath"
 
 	"github.com/ethosagent/warden/internal/controlplane"
@@ -37,7 +40,48 @@ func (h *H) ControlPlaneStateDB() string {
 // WithWorkerTokens boots the control plane with a state dir, so it builds the
 // per-worker token store (W-P1-WTOK-02) on the harness's fake clock. The
 // workers keep using the shared token; a scenario mints tokens out of process
-// (ControlPlaneStateDB) and presents them through CP().Do. In-process only.
+// (ControlPlaneStateDB) and presents them through CP().DoWorker. In-process only.
 func WithWorkerTokens() Option {
 	return func(h *H) { h.wantWorkerTokens = true }
+}
+
+// CPResponse is one control-plane reply: status, headers and up to 64 KiB of
+// the body.
+type CPResponse struct {
+	Status int
+	Header http.Header
+	Body   []byte
+}
+
+// Send sends one request to a control-plane path with the shared bearer and
+// the extra headers hdr (for example If-Match), and returns the reply whatever
+// its status, so a scenario can assert on a 4xx and on response headers.
+func (c *CPClient) Send(method, path string, hdr http.Header, body []byte) (CPResponse, error) {
+	var r io.Reader
+	if body != nil {
+		r = bytes.NewReader(body)
+	}
+	req, err := http.NewRequest(method, "https://"+c.addr+path, r)
+	if err != nil {
+		return CPResponse{}, err
+	}
+	for k, vs := range hdr {
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := c.cl.Do(req)
+	if err != nil {
+		return CPResponse{}, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if err != nil {
+		return CPResponse{}, err
+	}
+	return CPResponse{Status: resp.StatusCode, Header: resp.Header, Body: b}, nil
 }

@@ -26,20 +26,24 @@ import (
 // DELETE) and requireRole (admin) here. In none mode they are mounted as 404,
 // because the dashboard would otherwise serve its index page for the path.
 func (s *Server) mountDashboard(mux *http.ServeMux, dash *dashboard.Server) {
+	table := authzTable()
+	// With admin audit on, every mount below runs behind the request-id and
+	// audit middleware (sessionAuditWrap), outside the write guard and authz,
+	// so their refusals are recorded; with it off the wrapping is the identity.
+	classify := dashboardRoute(table)
 	if s.cfg.Console.Auth != config.ConsoleAuthOIDC {
 		dash.SetWriteGuard(s.dashboardWriteGuard())
-		mux.Handle("/dashboard/", s.sessionWrap(dash.Handler()))
+		mux.Handle("/dashboard/", s.sessionAuditWrap(classify, dash.Handler()))
 		mux.Handle(sessionsAdminPath, http.NotFoundHandler())
 		return
 	}
-	table := authzTable()
 	dash.SetWriteGuard(s.sessionWriteGuard())
 	guarded := requireRole(s.limitQueryGenerate(dash.Handler()), table, s.cfg.Console, s.cfg.Logger)
-	mux.Handle("/dashboard/", s.sessionWrap(guarded))
-	// GET lists, DELETE revokes (?handle= or ?sub=); admin only.
-	// TODO(#39, #38): audit record per revoke once the admin audit chain lands; a
-	// per-session rate limit arrives with the shared console limiter.
-	mux.Handle(sessionsAdminPath, s.sessionWrap(requireRole(http.HandlerFunc(s.handleSessions), table, s.cfg.Console, s.cfg.Logger)))
+	mux.Handle("/dashboard/", s.sessionAuditWrap(classify, guarded))
+	// GET lists, DELETE revokes (?handle= or ?sub=); admin only. A revoke is an
+	// audited admin change.
+	// TODO(#39): a per-session rate limit arrives with the shared console limiter.
+	mux.Handle(sessionsAdminPath, s.sessionAuditWrap(classify, requireRole(http.HandlerFunc(s.handleSessions), table, s.cfg.Console, s.cfg.Logger)))
 }
 
 // sessionsAdminPath is the admin session list and revoke route (W-P1-SSO-08).

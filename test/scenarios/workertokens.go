@@ -113,14 +113,14 @@ func workerTokenAuth(t *testing.T, h *harness.H) {
 	// token store runs on the harness clock): advance it until A authenticates.
 	h.Eventually("the control plane to load the new tokens", func() bool {
 		h.Clock().Advance(3 * time.Second)
-		return cp.Do(http.MethodGet, "/policy", a, "", "").Status == http.StatusOK
+		return cp.DoWorker(http.MethodGet, "/policy", a, "", "").Status == http.StatusOK
 	})
 
 	// Binding: a header naming another worker is refused on every route, with
 	// the same text, and the refusal registers nothing.
 	for _, rt := range routes {
 		for _, hdr := range []string{"tok-worker-b", "tok-worker-a-2"} {
-			got := cp.Do(rt.method, rt.path, a, hdr, rt.body)
+			got := cp.DoWorker(rt.method, rt.path, a, hdr, rt.body)
 			if got.Status != http.StatusForbidden || !strings.Contains(got.Body, "proxy id mismatch") {
 				t.Errorf("%s with header %q = %d %q, want 403 proxy id mismatch", rt.path, hdr, got.Status, got.Body)
 			}
@@ -129,7 +129,7 @@ func workerTokenAuth(t *testing.T, h *harness.H) {
 	// Without the header every route accepts the token and the control plane
 	// records the id the token is bound to.
 	for _, rt := range routes {
-		if got := cp.Do(rt.method, rt.path, a, "", rt.body); got.Status != rt.ok {
+		if got := cp.DoWorker(rt.method, rt.path, a, "", rt.body); got.Status != rt.ok {
 			t.Errorf("%s with token A = %d, want %d", rt.path, got.Status, rt.ok)
 		}
 	}
@@ -152,7 +152,7 @@ func workerTokenAuth(t *testing.T, h *harness.H) {
 	}
 
 	// A worker token opens no human route and cannot write the dashboard.
-	if got := cp.Do(http.MethodPost, "/dashboard/api/policy", a, "", `{"allowlist":[{"domain":"evil.example.com"}]}`); got.Status != http.StatusUnauthorized {
+	if got := cp.DoWorker(http.MethodPost, "/dashboard/api/policy", a, "", `{"allowlist":[{"domain":"evil.example.com"}]}`); got.Status != http.StatusUnauthorized {
 		t.Errorf("dashboard write with a worker token = %d, want 401", got.Status)
 	}
 
@@ -161,21 +161,21 @@ func workerTokenAuth(t *testing.T, h *harness.H) {
 	revokeWorkerToken(t, h, aID)
 	h.Eventually("the revoke to reach the control plane", func() bool {
 		h.Clock().Advance(3 * time.Second)
-		return cp.Do(http.MethodGet, "/policy", a, "", "").Status == http.StatusUnauthorized
+		return cp.DoWorker(http.MethodGet, "/policy", a, "", "").Status == http.StatusUnauthorized
 	})
 	for _, rt := range routes {
-		got := cp.Do(rt.method, rt.path, a, "", rt.body)
+		got := cp.DoWorker(rt.method, rt.path, a, "", rt.body)
 		if got.Status != http.StatusUnauthorized || strings.TrimSpace(got.Body) != "unauthorized" || got.Header.Get("WWW-Authenticate") != "Bearer" {
 			t.Errorf("%s with revoked A = %d %q, want 401 unauthorized", rt.path, got.Status, got.Body)
 		}
-		if got := cp.Do(rt.method, rt.path, b, "", rt.body); got.Status != rt.ok {
+		if got := cp.DoWorker(rt.method, rt.path, b, "", rt.body); got.Status != rt.ok {
 			t.Errorf("%s with token B = %d, want %d", rt.path, got.Status, rt.ok)
 		}
 	}
 
 	// The shared token still authenticates (mixed mode): the harness workers
 	// run on it, and an unauthenticated caller is refused.
-	if got := cp.Do(http.MethodGet, "/policy", "", "", ""); got.Status != http.StatusUnauthorized {
+	if got := cp.DoWorker(http.MethodGet, "/policy", "", "", ""); got.Status != http.StatusUnauthorized {
 		t.Errorf("anonymous /policy = %d, want 401", got.Status)
 	}
 	h.Eventually("the shared-token workers to stay registered", func() bool {
