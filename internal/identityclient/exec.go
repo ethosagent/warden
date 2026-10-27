@@ -40,46 +40,118 @@ func LoopbackProxyURL(addr net.Addr, credential string) string {
 	return u.String()
 }
 
+// ChildEnvAllowlist names the parent variables every supervised child gets
+// when they are set: the ones a shell, a locale and a terminal need. Every
+// other parent variable reaches the child only through
+// ChildEnvOptions.Passthrough. The LC_* names are listed one by one because the
+// parent environment is looked up by name, never enumerated (rule X3).
+var ChildEnvAllowlist = []string{
+	"PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "TMPDIR", "TZ",
+	"LANG", "LC_ALL", "LC_CTYPE", "LC_NUMERIC", "LC_TIME", "LC_COLLATE",
+	"LC_MONETARY", "LC_MESSAGES", "LC_PAPER", "LC_NAME", "LC_ADDRESS",
+	"LC_TELEPHONE", "LC_MEASUREMENT", "LC_IDENTIFICATION",
+}
+
+// proxyVarNames are the proxy variables, upper cased, that the child gets
+// only from BuildChildEnv itself.
+var proxyVarNames = map[string]bool{"ALL_PROXY": true, "HTTP_PROXY": true, "HTTPS_PROXY": true, "NO_PROXY": true}
+
+// ValidatePassthroughName reports whether name may be passed from the parent
+// to the child with `--env`. It refuses a name that is not a shell variable
+// name (NAME=VALUE included, so a value never sits in argv), a proxy variable
+// in any case and a WARDEN_IDENTITY_* variable in any case: those are what the
+// child environment strips on purpose.
+func ValidatePassthroughName(name string) error {
+	if strings.Contains(name, "=") {
+		return fmt.Errorf("--env %q: give a variable name only; its value is read from the environment", name)
+	}
+	if !validEnvName(name) {
+		return fmt.Errorf("--env %q is not a valid variable name", name)
+	}
+	up := strings.ToUpper(name)
+	if proxyVarNames[up] {
+		return fmt.Errorf("--env %s: the proxy variables are set by exec and cannot be passed through", name)
+	}
+	if strings.HasPrefix(up, "WARDEN_IDENTITY_") {
+		return fmt.Errorf("--env %s: WARDEN_IDENTITY_* variables never reach the command", name)
+	}
+	return nil
+}
+
+// validEnvName reports whether s matches [A-Za-z_][A-Za-z0-9_]*.
+func validEnvName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, c := range s {
+		switch {
+		case c == '_', c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z':
+		case c >= '0' && c <= '9' && i > 0:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // ChildEnvOptions selects optional parts of the child environment.
 type ChildEnvOptions struct {
 	// IncludeHTTP also sets HTTP_PROXY and http_proxy.
 	IncludeHTTP bool
 	// CA is a CA bundle path exported through CAVars.
 	CA string
+	// Passthrough names further parent variables to copy, beyond
+	// ChildEnvAllowlist. Each must pass ValidatePassthroughName.
+	Passthrough []string
 }
 
-// BuildChildEnv returns the environment of the supervised child: parent with
-// every proxy variable (ALL_PROXY, HTTP_PROXY, HTTPS_PROXY, NO_PROXY in any
-// case), the CA variables and every WARDEN_IDENTITY_* variable removed, then
-// HTTPS_PROXY and https_proxy set to proxyURL, NO_PROXY and no_proxy set to
-// loopback, HTTP_PROXY and http_proxy only with IncludeHTTP, and the CA
-// variables with CA. The warnings say what was overridden; they never hold a
-// value, because an inherited proxy URL may carry credentials.
-func BuildChildEnv(parent []string, proxyURL string, opts ChildEnvOptions) (env []string, warnings []string) {
-	drop := map[string]bool{}
-	for _, n := range []string{"ALL_PROXY", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"} {
-		drop[n] = true
+// BuildChildEnv returns the environment of the supervised child. lookup reads
+// one parent variable (os.LookupEnv in the CLI). The child gets the set
+// variables of ChildEnvAllowlist and of opts.Passthrough, then HTTPS_PROXY and
+// https_proxy set to proxyURL, NO_PROXY and no_proxy set to loopback,
+// HTTP_PROXY and http_proxy only with IncludeHTTP, and the CA variables with
+// CA. Nothing else from the parent reaches it, so an API key or a
+// WARDEN_IDENTITY_* setting stays behind unless it is named. It fails when a
+// Passthrough name is refused by ValidatePassthroughName. The warnings say
+// what was skipped or overridden; they never hold a value, because an
+// inherited proxy URL may carry credentials.
+func BuildChildEnv(lookup func(string) (string, bool), proxyURL string, opts ChildEnvOptions) (env []string, warnings []string, err error) {
+	for _, n := range opts.Passthrough {
+		if err := ValidatePassthroughName(n); err != nil {
+			return nil, nil, err
+		}
 	}
 	ca := CAVars(opts.CA)
+	caNames := map[string]bool{}
 	for _, v := range ca {
-		drop[v.Name] = true
+		caNames[v.Name] = true
 	}
-	overrodeHTTPS := false
-	for _, kv := range parent {
-		name, _, _ := strings.Cut(kv, "=")
-		up := strings.ToUpper(name)
-		switch {
-		case strings.HasPrefix(name, "WARDEN_IDENTITY_"):
-			continue
-		case drop[up]:
-			if up == "HTTPS_PROXY" {
-				overrodeHTTPS = true
-			}
+	seen := map[string]bool{}
+	for _, n := range ChildEnvAllowlist {
+		seen[n] = true
+		if v, ok := lookup(n); ok {
+			env = append(env, n+"="+v)
+		}
+	}
+	for _, n := range opts.Passthrough {
+		if seen[n] {
 			continue
 		}
-		env = append(env, kv)
+		seen[n] = true
+		if caNames[n] {
+			warnings = append(warnings, "--env "+n+" was ignored: --ca sets it")
+			continue
+		}
+		v, ok := lookup(n)
+		if !ok {
+			warnings = append(warnings, "--env "+n+" is not set in the environment; skipped")
+			continue
+		}
+		env = append(env, n+"="+v)
 	}
-	if overrodeHTTPS {
+	_, upper := lookup("HTTPS_PROXY")
+	_, lower := lookup("https_proxy")
+	if upper || lower {
 		warnings = append(warnings, "an inherited HTTPS_PROXY was replaced by the loopback forwarder")
 	}
 	set := func(name, value string) { env = append(env, name+"="+value) }
@@ -94,7 +166,7 @@ func BuildChildEnv(parent []string, proxyURL string, opts ChildEnvOptions) (env 
 	for _, v := range ca {
 		set(v.Name, v.Value)
 	}
-	return env, warnings
+	return env, warnings, nil
 }
 
 // Process is a started child. Tests substitute a fake.

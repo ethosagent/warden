@@ -54,8 +54,9 @@ type identityDeps struct {
 	readFile func(string) ([]byte, error)
 	openFile func(string) (io.ReadCloser, error)
 	stdin    io.Reader
-	// environ is the parent environment handed to `exec`; nil selects os.Environ.
-	environ func() []string
+	// lookupEnv reads one parent variable for the `exec` child; nil selects
+	// os.LookupEnv. The parent environment is never enumerated (rule X3).
+	lookupEnv func(string) (string, bool)
 	// signals delivers the signals `exec` forwards; nil subscribes to the
 	// process's SIGTERM, SIGHUP, SIGINT and SIGQUIT.
 	signals func() (<-chan os.Signal, func())
