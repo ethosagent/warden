@@ -320,15 +320,19 @@ make e2e-identity-down                                # down -v
   your own.
 - **Split-horizon.** The host reaches Dex at `http://localhost:5556/dex` (its
   published port, the issuer); the CP and worker-1 containers reach it as
-  `http://dex:5556` (the later tickets set `internalIssuerURL` to that). agent-1
-  stays on its internal network and has no route to Dex. There is no test-only
-  dialer and no hosts entry.
-- **Identity block on the worker, no console block yet.** The CP and worker-1
-  load `configs/config.e2e-identity-cp.yaml` and `config.e2e-identity-worker.yaml`,
-  copies of the base e2e configs. The worker carries an `identity:` block in
-  attribute mode (issuer `http://localhost:5556/dex`, `internalIssuerURL:
-  http://dex:5556`); `TestIdentitySmoke` proves it with a curl agent. The CP
-  `console:` block (W-P1-SSO-07) is added to the CP file by that ticket.
+  `http://dex:5556` (the CP's `console.oidc.internalIssuerURL` and the worker's
+  `identity.internalIssuerURL`). agent-1 stays on its internal network and has
+  no route to Dex. There is no test-only dialer and no hosts entry.
+- **Console in oidc mode, identity block on the worker.** The CP loads
+  `configs/config.e2e-identity-cp.yaml`, a copy of the base e2e CP config plus a
+  `console:` block (W-P1-SSO-07: the `warden-console` Dex client, roles from the
+  seeded groups: alice admin, bob editor, carol viewer, dave none) and an echo
+  `secretStore` so `/central/secrets` is mounted. Every `/dashboard/*` read on
+  this stack therefore needs a session, unlike `make e2e`. worker-1 loads
+  `config.e2e-identity-worker.yaml`, a copy of the base worker config with an
+  `identity:` block in attribute mode (issuer `http://localhost:5556/dex`,
+  `internalIssuerURL: http://dex:5556`, W-P1-IDC-03); `TestIdentitySmoke` proves
+  it with a curl agent.
 - **The warden CLI in agent-1.** A one-shot `warden-bin` service copies the
   static `warden` binary from the warden image into a volume that agent-1 mounts
   read-only at `/opt/warden`; no extra image is built.
@@ -336,8 +340,11 @@ make e2e-identity-down                                # down -v
 The Go package `test/e2e/identity` (build tag `e2e`) holds the helpers the later
 suites share: `dexURL` and a plain `hostClient` for the host side;
 `dexToken(t, user)` (password grant on `agent-harness`; it returns the raw ID
-token and never logs it, the password or the client secret); `cpTraffic(t,
-query)` (the CP traffic API, decoded); `agentExec(t, args...)` (a command in
+token and never logs it, the password or the client secret); `loginAs(t,
+user)` (a console session from the browser flow: `/auth/login`, Dex's LDAP
+password form, `/auth/callback`, driven by a plain `net/http` client with a
+cookie jar); `cpTraffic(t, query)` (the CP traffic API, decoded, read as a
+signed-in user); `agentExec(t, args...)` (a command in
 agent-1 via `docker compose exec`); `workerLogs(t)` (worker-1 logs, for
 token-leak sweeps); and `requireStack(t)`.
 
@@ -352,7 +359,14 @@ reason instead of exiting, so that test still runs on a machine without Docker.
 `TestIdentityStackBoots` is the stack's own proof: CP and worker-1 healthy, Dex
 discovery from the host returning issuer `http://localhost:5556/dex`, an allowed
 host reachable through the worker, a non-allowlisted host denied, and direct
-egress (and Dex) unreachable from agent-1. In CI, `.github/workflows/e2e.yml`
+egress (and Dex) unreachable from agent-1. The `TestConsoleSSO*` tests prove
+console SSO against real Dex: the role matrix (a viewer reads traffic but gets
+`403` on a policy write; the shared bearer gets `401` on `/dashboard/api/settings`
+and `/central/secrets` and `200` on `/policy`), the split horizon (the login
+redirect points at the public issuer while the CP completes the callback over
+`dex:5556`), an admin revoke ending a viewer's session, and Dex down (CP
+restarted: `/policy` `200`, `/auth/login` `503 idp_unavailable`; the test brings
+Dex and the CP back afterwards). In CI, `.github/workflows/e2e.yml`
 runs `make e2e-identity` in its own job, `e2e-identity` (separate runner, 15 minute cap, `E2E_IDENTITY_TIMEOUT=8m`), so the `e2e` job keeps its 15 minute cap. Its failure log is the `e2e-identity-diagnostics` artifact, and the risk:critical gate waits for it as well as for `e2e`.
 
 ## Drive it by hand

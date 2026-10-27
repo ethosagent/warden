@@ -186,7 +186,7 @@ func (s *Server) initSessions() {
 		s.cfg.Logger.Warn("control plane: console session cookie is not Secure (http loopback redirectURL); use https outside development")
 	}
 	s.sessionCookie = cookie
-	s.sessions = NewSessionStore(s.cfg.State.SQL(), cc.Session.Idle, cc.Session.Absolute, nil)
+	s.sessions = NewSessionStore(s.cfg.State.SQL(), cc.Session.Idle, cc.Session.Absolute, s.cfg.Now)
 	s.sessionReader = s.sessions
 }
 

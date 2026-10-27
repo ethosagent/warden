@@ -154,6 +154,11 @@ type H struct {
 	// identityMode (WithIdentity) is the default identity mode distributed to
 	// the workers; "" means no identity block at all.
 	identityMode string
+	// wantConsole (WithConsoleOIDC) boots the control plane with console.auth
+	// oidc against the issuer fake; consoleAddr is the control plane's reserved
+	// listen address (its https origin is the registered redirect URL).
+	wantConsole bool
+	consoleAddr string
 
 	// tokenClients are the AgentWithProxyToken / AgentH2WithProxyToken clients,
 	// kept so cleanup can close their idle tunnels.
@@ -603,6 +608,9 @@ func (h *H) boot() {
 	h.tb.Setenv(adminTokenEnv, hex.EncodeToString(adminTok))
 
 	h.dialer = &mappingDialer{h: h}
+	if h.wantConsole {
+		h.prepareConsole()
+	}
 
 	if h.suppliedTarget != nil {
 		if h.cpDownAtBoot {
@@ -680,6 +688,7 @@ func (h *H) buildInprocessTarget() *inprocess {
 		caPool:   h.proxyCA.pool(),
 		tokenEnv: cpTokenEnv,
 	}
+	h.applyConsole(&ip.cp.params, &ip.cp.addr)
 	return ip
 }
 
@@ -693,6 +702,7 @@ func (h *H) writeCPConfig() string {
 		fmt.Fprintf(&b, "    - domain: %s\n", d)
 	}
 	b.WriteString(h.identityYAML())
+	b.WriteString(h.consoleYAML())
 	path := filepath.Join(h.root, "cp-config.yaml")
 	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
 		h.tb.Fatalf("harness: write control-plane config: %v", err)
