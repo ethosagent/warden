@@ -603,7 +603,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/dashboard/api/llmproviders", s.handleLLMProviders)
 	mux.HandleFunc("/dashboard/api/audit", s.handleAudit)
 	mux.HandleFunc("/dashboard/api/audit/verify", s.handleAuditVerify)
-	// Routes added since rule X9 live in routes.go.
+	// New routes are registered in routes.go (rule X9; see registerRoutes).
 	s.registerRoutes(mux)
 	mux.HandleFunc("/dashboard/api/setup", s.handleSetup)
 	mux.HandleFunc("/dashboard/", s.handleIndex)
