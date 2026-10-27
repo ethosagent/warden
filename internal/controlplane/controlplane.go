@@ -228,8 +228,8 @@ func New(cfg Config) *Server {
 		central:  store,
 		registry: registry,
 		mcp:      newMCPStore(),
-		// The policy-serving component owns the watch; the initial load runs below
-		// once overlays are registered.
+		// The policy-serving component owns the watch; the initial load runs below,
+		// after serve-time overlay registration.
 		policy: newPolicyServer(cfg.PolicyPath, cfg.Token, cfg.Logger, registry),
 		// Write-scoped secret store (nil ⇒ /central/secrets not mounted).
 		secretStore: cfg.SecretStore,
@@ -237,7 +237,9 @@ func New(cfg Config) *Server {
 		detectionConfig: cfg.DetectionConfig,
 		generateLimit:   newSessionLimiter(cfg.Clock, queryGenerateLimit, time.Minute),
 	}
-	// Serve-time wire overlays are registered here, before the initial load.
+	// Register serve-time wire overlays (s.policy.addOverlay) here, before the
+	// initial load, so they apply to the first served wire. None yet:
+	// W-P1-PVER-01 registers credential, W-P1-BLOCK-03 blocked_users.
 	s.policy.Refresh() // initial load so /policy and the dashboard have policy immediately
 	s.initSessions()
 	s.initAuth()
