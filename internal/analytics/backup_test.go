@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/ethosagent/warden/internal/cpstate"
 )
 
 func openBackupCopy(t *testing.T, path string) *sql.DB {
@@ -93,8 +95,8 @@ func TestBackupTo_Destination(t *testing.T) {
 	if err := os.WriteFile(existing, []byte("keep me"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.BackupTo(ctx, existing); err == nil {
-		t.Fatal("existing dst: want error")
+	if err := s.BackupTo(ctx, existing); !errors.Is(err, cpstate.ErrBackupDestExists) {
+		t.Fatalf("existing dst: err = %v, want ErrBackupDestExists", err)
 	}
 	if b, _ := os.ReadFile(existing); string(b) != "keep me" {
 		t.Fatalf("existing dst modified: %q", b)
