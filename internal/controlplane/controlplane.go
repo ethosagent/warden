@@ -75,8 +75,9 @@ type Config struct {
 	// configured, in which case that tab reports backend "none".
 	SecretStoreBackend string
 	// Console is the CP-local console sign-in config, resolved from --config by
-	// resolveConsole. Nothing consumes it yet: login and sessions arrive in later
-	// tickets, and the zero value (Auth "" == none) changes no behaviour.
+	// resolveConsole. In oidc mode with State set it turns on server-side
+	// sessions (withSession); the zero value (Auth "" == none) changes no
+	// behaviour. Login and role enforcement arrive in later tickets.
 	Console config.ConsoleConfig
 	// DetectionEnabled gates the temporal-detection engine. When true (the
 	// default when no detection block disables it), New builds the engine AND — so
@@ -166,6 +167,11 @@ type Server struct {
 	// only in-process LLM consumer; the judge runs on workers). Set once in Handler
 	// before serving, then read under writeMu by WriteSettings/WriteLLMProviders.
 	dash *dashboard.Server
+	// sessions and sessionCookie are set only in console.auth oidc with a state
+	// DB. When set, Handler wraps /dashboard/ and /central/secrets in withSession.
+	sessions      *SessionStore
+	sessionCookie SessionCookie
+	sessionReader sessionReader
 }
 
 // Compile-time assertions that the concrete types satisfy their role interfaces.
@@ -211,6 +217,7 @@ func New(cfg Config) *Server {
 		// Live typed detection config for the dashboard editor + WriteDetection base.
 		detectionConfig: cfg.DetectionConfig,
 	}
+	s.initSessions()
 	// Alert pipeline (CP-hosted alert delivery + always-on Alert Store). Constructed
 	// whenever an alert DB path is set — even with ZERO configured integrations —
 	// because it serves two always-on purposes:
@@ -263,6 +270,9 @@ func New(cfg Config) *Server {
 // policy file (editor edits refresh synchronously). It also starts the retention
 // prune loop when the store supports it. It returns when ctx is done.
 func (s *Server) Start(ctx context.Context) {
+	if s.sessions != nil {
+		go s.sweepSessions(ctx)
+	}
 	// Alert pipeline: start the embeddable assembly (manager start + the
 	// detection tick loop, both ctx-scoped). The pipeline captures ctx as its
 	// lifecycle context so a live reload can bind a rebuilt manager's router
@@ -376,8 +386,8 @@ func (s *Server) Handler() http.Handler {
 	// /central/* routes; GET returns metadata only, and a POST value is held in
 	// transit only and logged by-reference, never persisted in the CP.
 	if s.secretStore != nil {
-		mux.HandleFunc("/central/secrets", s.handleSecrets)
-		mux.HandleFunc("/central/secrets/", s.handleSecretByKey)
+		mux.Handle("/central/secrets", s.sessionWrap(http.HandlerFunc(s.handleSecrets)))
+		mux.Handle("/central/secrets/", s.sessionWrap(http.HandlerFunc(s.handleSecretByKey)))
 	}
 
 	// The fleet dashboard reads the aggregated central store. The control plane
@@ -478,7 +488,7 @@ func (s *Server) Handler() http.Handler {
 	}
 	// Reads stay open; every write needs the CP bearer token (fail closed).
 	dash.SetWriteGuard(s.dashboardWriteGuard())
-	mux.Handle("/dashboard/", dash.Handler())
+	mux.Handle("/dashboard/", s.sessionWrap(dash.Handler()))
 
 	return mux
 }
