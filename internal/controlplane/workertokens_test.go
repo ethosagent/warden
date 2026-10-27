@@ -194,9 +194,7 @@ func TestWorkerTokenStoreRunLoopOnFakeClock(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { e.store.Run(ctx); close(done) }()
-	for e.clk.PendingTimers() < 2 {
-		time.Sleep(time.Millisecond)
-	}
+	waitFor(t, func() bool { return e.clk.PendingTimers() >= 2 })
 	_, tok := e.create(t, "w", "p")
 	e.store.MarkUsed(tok.ID, e.clk.Now())
 	e.clk.Advance(defaultTokenFlushInterval)
