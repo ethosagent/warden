@@ -1,8 +1,8 @@
 # Warden control-plane config for the L2 IDENTITY stack (deploy/compose/
-# docker-compose.e2e-identity.yml): a copy of config.e2e-cp.yaml with NO
-# console block. W-P1-SSO-07 adds the CP `console:` block here (with
-# internalIssuerURL http://dex:5556); this ticket ships none. Keep the two
-# files otherwise in step.
+# docker-compose.e2e-identity.yml): a copy of config.e2e-cp.yaml plus the
+# console block below (W-P1-SSO-07), which puts the console in oidc mode
+# against the stack's Dex, and an echo secretStore that mounts /central/secrets.
+# Keep the two files otherwise in step.
 #
 # Original header, for the HERMETIC e2e stack (deploy/compose/
 # docker-compose.e2e.yml). The e2e workers are CP-MANAGED
@@ -35,3 +35,32 @@ policy:
 logging:
   level: info
   format: json
+
+# NON-PRODUCTION echo store (it persists nothing): only so the CP mounts
+# /central/secrets on this stack (W-P1-SSO-07). Without a writable store the
+# route is absent (404) and the console SSO test could not prove the shared
+# bearer is refused there (401) while an admin session is let in.
+secretStore:
+  backend: echo
+
+# Console sign-in against the stack's Dex (W-P1-SSO-07, test/e2e/identity/
+# console_sso_test.go). Split horizon: the browser (the host) reaches Dex at the
+# public issuer http://localhost:5556/dex; inside the CP container localhost is
+# the CP itself, so the CP reaches Dex as http://dex:5556 (internalIssuerURL).
+# The secret is the env var NAME; its dev value comes from deploy/compose/dex/
+# .env.example via docker-compose.e2e-identity.yml. Roles map the seeded LDAP
+# groups (deploy/compose/dex/seed.ldif): alice admin, bob editor, carol viewer,
+# dave (eng only) no role. With this block every /dashboard/* read needs a
+# session, so the package helpers read the CP as a signed-in user.
+console:
+  auth: oidc
+  oidc:
+    issuer: http://localhost:5556/dex
+    internalIssuerURL: http://dex:5556
+    clientID: warden-console
+    clientSecretEnv: WARDEN_CONSOLE_DEX_CLIENT_SECRET
+    redirectURL: https://localhost:7070/auth/callback
+  roles:
+    admin: [warden-admins]
+    editor: [warden-editors]
+    viewer: [warden-viewers]

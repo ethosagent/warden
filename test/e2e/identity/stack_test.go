@@ -85,7 +85,9 @@ func firstLine(s string) string {
 }
 
 // waitStackReady polls the CP, worker-1, Dex discovery and the CP's worker
-// registry (worker-1 online = policy pulled) until compose.StackDeadline.
+// registry (worker-1 online = policy pulled) until compose.StackDeadline. The
+// registry read is a signed-in console read (the console is in oidc mode), so
+// a ready stack also means the Dex login works end to end.
 func waitStackReady() error {
 	return compose.PollUntil(compose.StackDeadline, func() (bool, string) {
 		if code, _, err := compose.TryGet(compose.CPBase + "/healthz"); err != nil || code != http.StatusOK {
@@ -97,7 +99,7 @@ func waitStackReady() error {
 		if code, _, err := compose.PlainGet(dexURL + discoveryPath); err != nil || code != http.StatusOK {
 			return false, fmt.Sprintf("dex discovery: status %d err %v", code, err)
 		}
-		body, err := compose.FleetBody("/dashboard/api/workers")
+		body, err := consoleFleetBody("/dashboard/api/workers")
 		if err != nil {
 			return false, err.Error()
 		}

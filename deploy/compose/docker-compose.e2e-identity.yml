@@ -13,16 +13,17 @@
 #
 # Split-horizon: the host reaches Dex at http://localhost:5556 (its published
 # port, the dev issuer origin); the CP and worker containers reach it as
-# http://dex:5556 (the internalIssuerURL the later tickets configure);
+# http://dex:5556 (the CP's console internalIssuerURL);
 # agent-1 has no route to Dex. No test-only dialer, no hosts entry.
 #
 # What this adds on top of the merged files:
 #   - dex rides the `published` bridge too: Docker Engine >= 29 skips published
 #     ports on internal-only containers (same trick as docker-compose.e2e.yml).
 #     The 127.0.0.1:5556 publish itself comes from docker-compose.identity.yml.
-#   - the CP and worker-1 load identity-stack copies of the base e2e configs,
-#     which deliberately carry NO identity or console block: W-P1-IDC-03 adds
-#     the worker block and W-P1-SSO-07 the CP block, each in its own file.
+#   - the CP and worker-1 load identity-stack copies of the base e2e configs.
+#     The CP copy carries the console block (oidc against this Dex,
+#     W-P1-SSO-07), so its /dashboard/* reads need a session; W-P1-IDC-03 adds
+#     the worker identity block to the worker copy.
 #   - the Dex client secrets reach the CP (console + data-plane) and worker-1
 #     (data-plane) as env, from deploy/compose/dex/.env.example unless the
 #     caller exports others (the Makefile does that).
