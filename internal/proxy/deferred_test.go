@@ -53,7 +53,7 @@ func TestDeferredFor(t *testing.T) {
 			t.Errorf("deferredFor(%+v) = %v, want %v", c.v, got, c.want)
 		}
 	}
-	for d, s := range map[deferred]string{deferNone: "none", deferJudge: "judge", deferIdentity: "identity", deferred(9): "unknown"} {
+	for d, s := range map[deferred]string{deferNone: "deferNone", deferJudge: "deferJudge", deferIdentity: "deferIdentity", deferred(9): "deferUnknown"} {
 		if d.String() != s {
 			t.Errorf("deferred(%d).String() = %q, want %q", d, d.String(), s)
 		}

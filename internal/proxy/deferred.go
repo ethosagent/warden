@@ -27,13 +27,13 @@ const (
 func (d deferred) String() string {
 	switch d {
 	case deferNone:
-		return "none"
+		return "deferNone"
 	case deferJudge:
-		return "judge"
+		return "deferJudge"
 	case deferIdentity:
-		return "identity"
+		return "deferIdentity"
 	default:
-		return "unknown"
+		return "deferUnknown"
 	}
 }
 
