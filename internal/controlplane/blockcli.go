@@ -7,7 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
+	"slices"
 
 	"github.com/ethosagent/warden/internal/adminaudit"
 	"github.com/ethosagent/warden/internal/cpstate"
@@ -102,11 +102,10 @@ func ListBlockedOffline(ctx context.Context, stateDir string) ([]BlockEntry, err
 		return nil, err
 	}
 	defer func() { _ = db.Close() }()
-	out, err := NewBlockStore(db, BlockStoreOptions{}).List(ctx)
-	if err != nil && strings.Contains(err.Error(), "no such table") {
+	if !slices.Contains(db.Applied(), blockMigrationID) {
 		return nil, nil
 	}
-	return out, err
+	return NewBlockStore(db, BlockStoreOptions{}).List(ctx)
 }
 
 // openBlockCLI opens the audit recorder (nil when audit was never enabled) and

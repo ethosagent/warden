@@ -46,6 +46,9 @@ const blockedUsersOverlayName = "blocked_users"
 // block-list load.
 const blockLoadFailedMsg = "blocklist_load_failed"
 
+// blockMigrationID is the cpstate migration that creates blocked_users.
+const blockMigrationID = "blocklist/0001"
+
 const blockMigration0001 = `
 CREATE TABLE blocked_users (
     id         TEXT PRIMARY KEY,
@@ -63,7 +66,7 @@ CREATE UNIQUE INDEX idx_blocked_users_email ON blocked_users (email);
 // BlockMigrations returns the cpstate migrations the block list needs, for a
 // caller that opens the state DB itself. StateMigrations includes them.
 func BlockMigrations() []cpstate.Migration {
-	return []cpstate.Migration{{ID: "blocklist/0001", SQL: blockMigration0001}}
+	return []cpstate.Migration{{ID: blockMigrationID, SQL: blockMigration0001}}
 }
 
 // BlockEntry is one stored block-list entry. Sub and Email are stored trimmed
@@ -170,8 +173,9 @@ func (b *BlockStore) dataVersion(ctx context.Context) (int64, error) {
 	return v, nil
 }
 
-// OnChange registers fn to run after every successful in-process mutation, after
-// the policy refresh. A mutation made by another process does not run it.
+// OnChange registers fn to run after every successful in-process mutation and
+// after Watch sees another process write, in both cases after the policy refresh.
+// concurrently with itself, so it must be safe for that.
 func (b *BlockStore) OnChange(fn func()) {
 	if fn == nil {
 		return

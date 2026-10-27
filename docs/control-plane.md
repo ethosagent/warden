@@ -808,8 +808,9 @@ appends one `blocked_users.add` or `blocked_users.remove` row (actor
 `block:<id>`). The reason text is not recorded in the row or logged. The
 audit key is checked first: with audit rows present and the key missing or not
 matching, the command exits non-zero and writes nothing. If the audit append
-still fails, an add is rolled back and a remove deletes nothing, so a block
-never exists without its audit row. A state dir where audit was never enabled
+still fails, an add is rolled back and a remove deletes nothing. The block and
+its audit row are two commits, not one transaction, so a crash between them
+(or two concurrent removes of one id) can leave one without the other. A state dir where audit was never enabled
 gets a one-line notice and no row.
 
 **Pickup.** A running control plane polls `PRAGMA data_version` every 2 s and,
