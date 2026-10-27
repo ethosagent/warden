@@ -83,6 +83,10 @@ var All = slices.Concat(
 		// genesis entry and logs its key_id before serving. In-process only (it
 		// reads the CP state dir).
 		{Name: "admin_audit_enabled_genesis", Opts: adminAuditOpts(), Run: adminAuditEnabledGenesis},
+		// Admin audit anchor (W-P1-AAUD-06): the chain head is logged as a
+		// warden.admin.v1 checkpoint at startup and every 5 minutes of the CP's
+		// clock. In-process only (fake clock, CP state dir).
+		{Name: "admin_audit_checkpoint", Opts: adminAuditOpts(), Run: adminAuditCheckpoint},
 	},
 	// Canary across protocols x allow/deny; see canary.go.
 	canaryScenarios(),
