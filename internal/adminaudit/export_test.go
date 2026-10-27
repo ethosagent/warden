@@ -3,6 +3,7 @@ package adminaudit
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethosagent/warden/internal/audit"
 	"github.com/ethosagent/warden/internal/cpstate"
 )
 
@@ -522,5 +524,41 @@ func TestResultReport(t *testing.T) {
 	r := Result{OK: false, Checked: 3, FirstBadSeq: 4, Reason: ReasonPrevHash, HeadSeq: 9, HeadHash: []byte{0xab, 0x01}, LastVerifiedSeq: 3}.Report()
 	if r.HeadHash != "ab01" || r.FirstBadSeq != 4 || r.Reason != ReasonPrevHash || r.HeadSeq != 9 || r.LastVerifiedSeq != 3 || r.Checked != 3 {
 		t.Fatalf("Report = %+v", r)
+	}
+}
+
+// goldenExportStore is a chain with a fixed key, HMAC key and clock, so its
+// export is byte-for-byte reproducible.
+func goldenExportStore(t *testing.T) *Store {
+	t.Helper()
+	seed := bytes.Repeat([]byte{7}, ed25519.SeedSize)
+	s := newStore(t, openDB(t, dbPath(t)), audit.NewSignerFromKey(ed25519.NewKeyFromSeed(seed)))
+	record(t, s, 2)
+	return s
+}
+
+// TestExportGolden pins the export wire format (warden.admin.export.v1): the
+// keys record, field names and order, hex hashes and the identity field.
+// Changing it breaks exports already held by auditors; bump ExportFormat.
+func TestExportGolden(t *testing.T) {
+	s := goldenExportStore(t)
+	for name, o := range map[string]ExportOptions{
+		"export_v1.golden.jsonl":          {},
+		"export_v1_identity.golden.jsonl": {IncludeIdentity: true},
+	} {
+		var buf bytes.Buffer
+		if _, err := s.Export(context.Background(), &buf, o); err != nil {
+			t.Fatal(err)
+		}
+		want, err := os.ReadFile(filepath.Join("testdata", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(buf.Bytes(), want) {
+			t.Errorf("%s: export =\n%s\nwant\n%s", name, buf.Bytes(), want)
+		}
+		if res := verifyExport(t, filepath.Join("testdata", name), VerifyExportOptions{HMACKey: testHMACKey}); !res.OK || res.Checked != 3 {
+			t.Errorf("%s: VerifyExport = %+v", name, res)
+		}
 	}
 }
