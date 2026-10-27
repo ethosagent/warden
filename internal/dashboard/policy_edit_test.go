@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -32,7 +33,7 @@ func TestPolicyEditableFlag(t *testing.T) {
 	// Writer configured (control plane) -> editable.
 	srv := NewServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
 	srv.SetWriteGuard(AllowUngatedWritesForTests)
-	srv.SetPolicyWriter(func(config.Policy) error { return nil })
+	srv.SetPolicyWriter(func(context.Context, config.Policy, WriteMeta) error { return nil })
 	var p2 policyResponse
 	doGetJSON(t, srv.Handler(), "/dashboard/api/policy", &p2)
 	if !p2.Editable {
@@ -52,7 +53,7 @@ func TestPolicyWriteCallsWriter(t *testing.T) {
 	var got config.Policy
 	srv := NewServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
 	srv.SetWriteGuard(AllowUngatedWritesForTests)
-	srv.SetPolicyWriter(func(p config.Policy) error { got = p; return nil })
+	srv.SetPolicyWriter(func(_ context.Context, p config.Policy, _ WriteMeta) error { got = p; return nil })
 	srv.SetLivePolicy(func() config.Policy { return got }) // echo reflects the write
 
 	rec := postJSON(t, srv.Handler(), "/dashboard/api/policy",
@@ -71,7 +72,9 @@ func TestPolicyWriteCallsWriter(t *testing.T) {
 func TestPolicyWriteSurfacesValidationError(t *testing.T) {
 	srv := NewServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
 	srv.SetWriteGuard(AllowUngatedWritesForTests)
-	srv.SetPolicyWriter(func(config.Policy) error { return fmt.Errorf("invalid policy: allowlist empty") })
+	srv.SetPolicyWriter(func(context.Context, config.Policy, WriteMeta) error {
+		return fmt.Errorf("invalid policy: allowlist empty")
+	})
 	rec := postJSON(t, srv.Handler(), "/dashboard/api/policy", `{"allowlist":[]}`)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status %d, want 400", rec.Code)
@@ -93,7 +96,7 @@ func TestSettingsEditableFlagAndLiveValue(t *testing.T) {
 	// Writer + live settings configured (control plane) -> editable, settings served.
 	srv := NewServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
 	srv.SetWriteGuard(AllowUngatedWritesForTests)
-	srv.SetSettingsWriter(func(config.SettingsWire) error { return nil })
+	srv.SetSettingsWriter(func(context.Context, config.SettingsWire, WriteMeta) error { return nil })
 	srv.SetLiveSettings(func() *config.SettingsWire {
 		return &config.SettingsWire{MCP: &config.MCPSettings{Enabled: true, Mode: "enforce"}}
 	})
@@ -119,7 +122,7 @@ func TestSettingsWriteCallsWriterAndEchoes(t *testing.T) {
 	var got config.SettingsWire
 	srv := NewServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
 	srv.SetWriteGuard(AllowUngatedWritesForTests)
-	srv.SetSettingsWriter(func(s config.SettingsWire) error { got = s; return nil })
+	srv.SetSettingsWriter(func(_ context.Context, s config.SettingsWire, _ WriteMeta) error { got = s; return nil })
 	srv.SetLiveSettings(func() *config.SettingsWire { return &got }) // echo reflects the write
 
 	rec := postJSON(t, srv.Handler(), "/dashboard/api/settings",
@@ -146,7 +149,9 @@ func TestSettingsWriteCallsWriterAndEchoes(t *testing.T) {
 func TestSettingsWriteSurfacesWriterError(t *testing.T) {
 	srv := NewServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
 	srv.SetWriteGuard(AllowUngatedWritesForTests)
-	srv.SetSettingsWriter(func(config.SettingsWire) error { return fmt.Errorf("invalid mcp: mode bad") })
+	srv.SetSettingsWriter(func(context.Context, config.SettingsWire, WriteMeta) error {
+		return fmt.Errorf("invalid mcp: mode bad")
+	})
 	rec := postJSON(t, srv.Handler(), "/dashboard/api/settings", `{"mcp":{"enabled":true,"mode":"bad"}}`)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status %d, want 400", rec.Code)
@@ -224,7 +229,7 @@ func TestSettingsWriteSecretsRoundTrips(t *testing.T) {
 	var got config.SettingsWire
 	srv := NewServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
 	srv.SetWriteGuard(AllowUngatedWritesForTests)
-	srv.SetSettingsWriter(func(s config.SettingsWire) error { got = s; return nil })
+	srv.SetSettingsWriter(func(_ context.Context, s config.SettingsWire, _ WriteMeta) error { got = s; return nil })
 	srv.SetLiveSettings(func() *config.SettingsWire { return &got }) // echo reflects the write
 
 	rec := postJSON(t, srv.Handler(), "/dashboard/api/settings",
@@ -271,5 +276,53 @@ func TestWorkersEndpoint(t *testing.T) {
 	doGetJSON(t, h, "/dashboard/api/workers", &ws2)
 	if len(ws2) != 0 {
 		t.Fatalf("worker dashboard should report no workers, got %+v", ws2)
+	}
+}
+
+// TestWritersReceiveContextAndMeta: the policy, settings and llmProviders
+// writers get the request context (it carries the caller's identity) and, until
+// W-P1-PVER-08 reads If-Match, an empty WriteMeta.
+func TestWritersReceiveContextAndMeta(t *testing.T) {
+	type seen struct {
+		ctx  bool
+		meta WriteMeta
+	}
+	got := map[string]seen{}
+	record := func(name string, ctx context.Context, meta WriteMeta) {
+		got[name] = seen{ctx: ctx.Value(ctxKey{}) == "marker", meta: meta}
+	}
+	srv := NewServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
+	srv.SetPolicyWriter(func(ctx context.Context, _ config.Policy, m WriteMeta) error {
+		record("policy", ctx, m)
+		return nil
+	})
+	srv.SetSettingsWriter(func(ctx context.Context, _ config.SettingsWire, m WriteMeta) error {
+		record("settings", ctx, m)
+		return nil
+	})
+	srv.SetLLMProvidersWriter(func(ctx context.Context, _ []config.LLMProvider, m WriteMeta) error {
+		record("llmproviders", ctx, m)
+		return nil
+	})
+	h := srv.Handler()
+	for path, body := range map[string]string{
+		"/dashboard/api/policy":       `{"allowlist":[{"domain":"x.com"}]}`,
+		"/dashboard/api/settings":     `{}`,
+		"/dashboard/api/llmproviders": `[]`,
+	} {
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		req = req.WithContext(context.WithValue(req.Context(), ctxKey{}, "marker"))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("POST %s = %d %s", path, rec.Code, rec.Body.String())
+		}
+	}
+	for _, name := range []string{"policy", "settings", "llmproviders"} {
+		s, ok := got[name]
+		if !ok || !s.ctx || s.meta != (WriteMeta{}) {
+			t.Errorf("%s writer: called=%v sawCtx=%v meta=%+v, want the request context and an empty WriteMeta", name, ok, s.ctx, s.meta)
+		}
 	}
 }

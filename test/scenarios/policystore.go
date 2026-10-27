@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"net/http"
+	"slices"
 	"testing"
 
 	"github.com/ethosagent/warden/internal/controlplane"
@@ -170,4 +171,68 @@ func policyVersionAuthors(t *testing.T, path string) []string {
 		t.Fatalf("read policy_versions: %v", err)
 	}
 	return out
+}
+
+// The versioned publish scenario (W-P1-PVER-02): with --policy-store=versioned
+// a dashboard policy save creates version 2 instead of rewriting the YAML and
+// workers enforce it; an llmProviders save creates version 3 that carries the
+// policy edit. In console.auth none both are authored "anonymous".
+
+func policyStorePublishOpts() []harness.Option {
+	return []harness.Option{harness.WithVersionedPolicyStore()}
+}
+
+func policyStoreDashboardPublish(t *testing.T, h *harness.H) {
+	h.Upstream(pverHost)
+	if got := connectStatus(t, h, pverHost+":443"); got != http.StatusForbidden {
+		t.Fatalf("imported v1: CONNECT %s = %d, want 403", pverHost, got)
+	}
+
+	var cur struct {
+		Allowlist []map[string]any `json:"allowlist"`
+		Denylist  []map[string]any `json:"denylist"`
+	}
+	if err := h.CP().GetJSON("/dashboard/api/policy", &cur); err != nil {
+		t.Fatal(err)
+	}
+	edit := map[string]any{
+		"allowlist": append(cur.Allowlist, map[string]any{"domain": pverHost}),
+		"denylist":  cur.Denylist,
+	}
+	if err := h.CP().PostJSON("/dashboard/api/policy", edit, nil); err != nil {
+		t.Fatalf("dashboard policy save: %v", err)
+	}
+	h.Eventually("workers enforce the published version 2", func() bool {
+		return connectStatus(t, h, pverHost+":443") == http.StatusOK
+	})
+	if got := connectStatus(t, h, "api.example.com:443"); got != http.StatusOK {
+		t.Errorf("v2: CONNECT api.example.com = %d, want 200 (kept from v1)", got)
+	}
+
+	providers := []map[string]any{{
+		"name": "pver", "baseURL": "https://llm.example.com/v1", "model": "m1", "apiKeyEnv": "PVER_LLM_KEY",
+	}}
+	if err := h.CP().PostJSON("/dashboard/api/llmproviders", providers, nil); err != nil {
+		t.Fatalf("dashboard llmProviders save: %v", err)
+	}
+	var view struct {
+		Providers []struct {
+			Name string `json:"name"`
+		} `json:"providers"`
+	}
+	if err := h.CP().GetJSON("/dashboard/api/llmproviders", &view); err != nil {
+		t.Fatal(err)
+	}
+	if len(view.Providers) != 1 || view.Providers[0].Name != "pver" {
+		t.Fatalf("llmProviders view = %+v, want the published registry", view.Providers)
+	}
+
+	want := []string{"system:import/import", "anonymous/policy", "anonymous/llmproviders"}
+	if got := policyVersionAuthors(t, h.ControlPlaneStateDB()); !slices.Equal(got, want) {
+		t.Fatalf("policy versions = %v, want %v", got, want)
+	}
+	// Version 3 carried the policy edit: the host stays allowed.
+	if got := connectStatus(t, h, pverHost+":443"); got != http.StatusOK {
+		t.Errorf("v3: CONNECT %s = %d, want 200 (carried from v2)", pverHost, got)
+	}
 }

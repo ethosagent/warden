@@ -50,17 +50,19 @@ type MCPProvider interface {
 
 // Server holds the dependencies needed by the dashboard HTTP handlers.
 type Server struct {
-	data         DataSource
-	policy       config.Policy
-	secrets      secrets.SecretProvider
-	mcp          MCPProvider               // nil when the MCP gateway is disabled
-	livePolicy   func() config.Policy      // nil = serve the static startup policy
-	policyWriter func(config.Policy) error // nil = read-only (worker / no editor)
+	data       DataSource
+	policy     config.Policy
+	secrets    secrets.SecretProvider
+	mcp        MCPProvider          // nil when the MCP gateway is disabled
+	livePolicy func() config.Policy // nil = serve the static startup policy
+	// policyWriter applies an edited allow/deny policy; nil = read-only (worker /
+	// no editor).
+	policyWriter func(context.Context, config.Policy, WriteMeta) error
 	// liveSettings returns the behavioral settings currently in force (nil = none);
 	// settingsWriter applies an edited settings document. Both are control-plane-
 	// only: a worker leaves settingsWriter nil so its settings panel is read-only.
 	liveSettings   func() *config.SettingsWire
-	settingsWriter func(context.Context, config.SettingsWire) error
+	settingsWriter func(context.Context, config.SettingsWire, WriteMeta) error
 	workersFn      func() []WorkerView // nil = no fleet worker registry
 	// mcpFleet, when set (control plane), returns the inventory + observed schema
 	// for a given worker (empty proxyID = most-recent worker). It takes precedence
@@ -124,7 +126,7 @@ type Server struct {
 	// (PUT/POST → 405). The writer is control-plane/local-only; a managed worker
 	// gets only the source.
 	llmProvidersSource func() LLMProvidersView
-	llmProvidersWriter func([]config.LLMProvider) error
+	llmProvidersWriter func(context.Context, []config.LLMProvider, WriteMeta) error
 	// sqlGenMu guards sqlGen, which — unlike the other set-once wiring — can be
 	// RE-INJECTED at runtime when a provider/Explore selection edit reloads the CP
 	// dashboard's generator. The read path (handleQueryGenerate) takes the read
@@ -255,11 +257,21 @@ func (s *Server) SetLivePolicy(fn func() config.Policy) {
 	s.livePolicy = fn
 }
 
+// WriteMeta is the write metadata a dashboard writer receives with an edit:
+// the policy version the edit was based on (0 = whatever the head is when the
+// write runs) and an optional version message. The handlers pass the zero
+// value today; W-P1-PVER-08 fills it from If-Match.
+type WriteMeta struct {
+	ExpectedHead int64
+	Message      string
+}
+
 // SetPolicyWriter enables editing allow/deny policy from the dashboard. It is a
 // control-plane-only capability: when set, POST /dashboard/api/policy validates
 // and applies the new policy via fn (which persists it so workers pull it on
-// their next poll). Workers never set this, so they expose no policy-write path.
-func (s *Server) SetPolicyWriter(fn func(config.Policy) error) {
+// their next poll). fn receives the request context, which carries the caller's
+// identity. Workers never set this, so they expose no policy-write path.
+func (s *Server) SetPolicyWriter(fn func(context.Context, config.Policy, WriteMeta) error) {
 	s.policyWriter = fn
 }
 
@@ -274,20 +286,11 @@ func (s *Server) SetLiveSettings(fn func() *config.SettingsWire) {
 // SetSettingsWriter enables editing behavioral settings from the dashboard. Like
 // SetPolicyWriter it is a control-plane-only capability: when set,
 // POST /dashboard/api/settings validates and applies the new settings via fn
-// (which persists them so workers pull them on their next poll). Workers never
-// set this, so they expose no settings-write path.
-func (s *Server) SetSettingsWriter(fn func(config.SettingsWire) error) {
-	if fn == nil {
-		s.settingsWriter = nil
-		return
-	}
-	s.settingsWriter = func(_ context.Context, w config.SettingsWire) error { return fn(w) }
-}
-
-// SetSettingsWriterContext is SetSettingsWriter for a writer that needs the
-// request context, for example to authorize the edit against the caller's
-// console role. A *RoleRequiredError from fn is answered with 403.
-func (s *Server) SetSettingsWriterContext(fn func(context.Context, config.SettingsWire) error) {
+// (which persists them so workers pull them on their next poll). fn receives
+// the request context, for example to authorize the edit against the caller's
+// console role; a *RoleRequiredError from fn is answered with 403. Workers
+// never set this, so they expose no settings-write path.
+func (s *Server) SetSettingsWriter(fn func(context.Context, config.SettingsWire, WriteMeta) error) {
 	s.settingsWriter = fn
 }
 
@@ -775,7 +778,7 @@ func (s *Server) putPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pol := config.Policy{Allowlist: req.Allowlist, Denylist: req.Denylist}
-	if err := s.policyWriter(pol); err != nil {
+	if err := s.policyWriter(r.Context(), pol, WriteMeta{}); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -831,7 +834,7 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	if err := s.settingsWriter(r.Context(), settings); err != nil {
+	if err := s.settingsWriter(r.Context(), settings, WriteMeta{}); err != nil {
 		var re *RoleRequiredError
 		if errors.As(err, &re) {
 			writeJSONStatus(w, http.StatusForbidden, roleRequiredResponse{Error: "role_required", Need: re.Need, Fields: re.Fields})

@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -18,11 +19,11 @@ func TestRoutesMatchHandler(t *testing.T) {
 	srv := NewServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
 	srv.SetWriteGuard(AllowUngatedWritesForTests)
 	// Writers on, so a listed write is not refused for lack of one.
-	srv.SetPolicyWriter(func(config.Policy) error { return nil })
-	srv.SetSettingsWriter(func(config.SettingsWire) error { return nil })
+	srv.SetPolicyWriter(func(context.Context, config.Policy, WriteMeta) error { return nil })
+	srv.SetSettingsWriter(func(context.Context, config.SettingsWire, WriteMeta) error { return nil })
 	srv.SetIntegrationsWriter(func([]config.IntegrationInstance) error { return nil })
 	srv.SetDetectionWriter(func(config.DetectionConfig) error { return nil })
-	srv.SetLLMProvidersWriter(func([]config.LLMProvider) error { return nil })
+	srv.SetLLMProvidersWriter(func(context.Context, []config.LLMProvider, WriteMeta) error { return nil })
 	srv.SetSecretStore(secrets.NewEchoStore(), "echo")
 	h := srv.Handler()
 

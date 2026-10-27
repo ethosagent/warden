@@ -382,9 +382,15 @@ func (s *Server) Start(ctx context.Context) {
 func (s *Server) refresh() { s.policy.Refresh() }
 
 // writePolicy / writeSettings are unexported forwarders to the exported
-// ConfigEditor methods, kept so internal call sites (and tests) read naturally.
-func (s *Server) writePolicy(p config.Policy) error          { return s.WritePolicy(p) }
-func (s *Server) writeSettings(in config.SettingsWire) error { return s.WriteSettings(in) }
+// ConfigEditor methods with no caller identity or write metadata, kept so
+// internal call sites (and tests) read naturally.
+func (s *Server) writePolicy(p config.Policy) error {
+	return s.WritePolicy(context.Background(), p, dashboard.WriteMeta{})
+}
+
+func (s *Server) writeSettings(in config.SettingsWire) error {
+	return s.WriteSettings(context.Background(), in, dashboard.WriteMeta{})
+}
 
 // Handler returns the control plane's HTTP routes:
 //
@@ -454,12 +460,14 @@ func (s *Server) Handler() http.Handler {
 	// Editing is a control-plane-only capability, sourced from the ConfigEditor
 	// seam: persist edits to the served config file so workers pull them on their
 	// next poll. The read side reflects the live watch.
+	// In versioned mode each writer creates a policy version authored by the
+	// request's Principal instead.
 	var editor ConfigEditor = s
 	dash.SetPolicyWriter(editor.WritePolicy)
-	// The settings writer is context-aware: in oidc mode it authorizes the edit
-	// per field against the caller's role (writeSettingsAs); in none mode it is
+	// In oidc mode the settings writer authorizes the edit per field against
+	// the caller's role (writeSettingsAs); in none mode it is
 	// editor.WriteSettings unchanged.
-	dash.SetSettingsWriterContext(s.writeSettingsAs)
+	dash.SetSettingsWriter(s.writeSettingsAs)
 	dash.SetLiveSettings(func() *config.SettingsWire {
 		w, _, _, _ := s.policy.snapshot()
 		return w.Settings
@@ -483,7 +491,7 @@ func (s *Server) Handler() http.Handler {
 	// env; the writer persists the `llmProviders` block and reloads the consumers.
 	// Editing is control-plane-only (workers get the source, not the writer → 405).
 	dash.SetLLMProvidersSource(s.llmProvidersView)
-	dash.SetLLMProvidersWriter(s.WriteLLMProviders)
+	dash.SetLLMProvidersWriter(editor.WriteLLMProviders)
 	// Per-worker MCP view (inventory + observed schema), selected by ?proxy=.
 	dash.SetMCPFleet(s.mcp.For)
 	// Connected-workers list for the fleet view, with a "behind" flag for any
@@ -582,8 +590,13 @@ type policyYAML struct {
 // other block byte-for-byte intact.
 //
 // WritePolicy is the ConfigEditor seam's policy-write method; the lowercase
-// writePolicy forwarder preserves the internal call sites.
-func (s *Server) WritePolicy(p config.Policy) error {
+// writePolicy forwarder preserves the internal call sites. In versioned mode it
+// creates a policy version instead (publishPolicy); ctx carries the author and
+// meta the expected head and message. File mode ignores both.
+func (s *Server) WritePolicy(ctx context.Context, p config.Policy, meta dashboard.WriteMeta) error {
+	if s.versions != nil {
+		return s.publishPolicy(ctx, p, meta)
+	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
@@ -707,33 +720,45 @@ func (s *Server) atomicWriteConfig(root map[string]yaml.Node) error {
 // validates it with the full loader. It returns the temp file's name for the
 // caller to rename or remove; on error nothing is left behind.
 func (s *Server) writeValidatedTemp(root map[string]yaml.Node) (string, error) {
+	name, _, err := s.writeCheckedTemp(root)
+	return name, err
+}
+
+// writeCheckedTemp is writeValidatedTemp that also returns the loaded policy.
+func (s *Server) writeCheckedTemp(root map[string]yaml.Node) (string, config.Policy, error) {
 	data, err := yaml.Marshal(root)
 	if err != nil {
-		return "", fmt.Errorf("controlplane: marshal config: %w", err)
+		return "", config.Policy{}, fmt.Errorf("controlplane: marshal config: %w", err)
 	}
 
 	dir := filepath.Dir(s.cfg.PolicyPath)
 	tmp, err := os.CreateTemp(dir, ".warden-policy-*.yaml")
 	if err != nil {
-		return "", fmt.Errorf("controlplane: create temp policy: %w", err)
+		return "", config.Policy{}, fmt.Errorf("controlplane: create temp policy: %w", err)
 	}
 	tmpName := tmp.Name()
 	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()
 		_ = os.Remove(tmpName)
-		return "", fmt.Errorf("controlplane: write temp policy: %w", err)
+		return "", config.Policy{}, fmt.Errorf("controlplane: write temp policy: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
 		_ = os.Remove(tmpName)
-		return "", fmt.Errorf("controlplane: close temp policy: %w", err)
+		return "", config.Policy{}, fmt.Errorf("controlplane: close temp policy: %w", err)
 	}
 	// Validate the candidate with the full loader before it can replace the live
 	// file (this enforces default-deny: an empty allowlist is rejected here).
-	if _, err := config.NewLocalYAMLProvider(tmpName); err != nil {
+	prov, err := config.NewLocalYAMLProvider(tmpName)
+	if err != nil {
 		_ = os.Remove(tmpName)
-		return "", fmt.Errorf("invalid policy: %w", err)
+		return "", config.Policy{}, fmt.Errorf("invalid policy: %w", err)
 	}
-	return tmpName, nil
+	p, err := prov.GetPolicy()
+	if err != nil {
+		_ = os.Remove(tmpName)
+		return "", config.Policy{}, fmt.Errorf("invalid policy: %w", err)
+	}
+	return tmpName, p, nil
 }
 
 // writeSettings validates and atomically persists an edited behavioral settings
@@ -781,14 +806,21 @@ func existingSecretAccessKey(root map[string]yaml.Node) string {
 	return existing.AWS.SecretAccessKey
 }
 
-func (s *Server) WriteSettings(in config.SettingsWire) error {
-	return s.writeSettingsChecked(in, nil)
+// WriteSettings is the ConfigEditor seam's settings-write method. In versioned
+// mode it creates a policy version instead (publishSettings); ctx carries the
+// author and meta the expected head and message. File mode ignores both.
+func (s *Server) WriteSettings(ctx context.Context, in config.SettingsWire, meta dashboard.WriteMeta) error {
+	return s.writeSettingsChecked(ctx, in, meta, nil)
 }
 
 // writeSettingsChecked is WriteSettings with an optional check that runs under
-// writeMu against the settings currently on disk, so nothing can change them
-// between the check and the write. A check error refuses the write unchanged.
-func (s *Server) writeSettingsChecked(in config.SettingsWire, check func(live *config.SettingsWire) error) error {
+// writeMu against the settings currently served without overlays (the file,
+// or head in versioned mode), so nothing can change them between the check
+// and the write. A check error refuses the write unchanged.
+func (s *Server) writeSettingsChecked(ctx context.Context, in config.SettingsWire, meta dashboard.WriteMeta, check func(live *config.SettingsWire) error) error {
+	if s.versions != nil {
+		return s.publishSettings(ctx, in, meta, check)
+	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	if check != nil {

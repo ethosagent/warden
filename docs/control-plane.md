@@ -459,8 +459,22 @@ other value, the control plane refuses to start.
   `system`, before `file:<sha256 of the served YAML>`, after
   `v1:<doc_sha256>`); a failed append is logged at ERROR and does not stop
   startup.
-- Nothing else writes versions yet: dashboard saves, history and rollback come
-  in later releases.
+- Dashboard saves of the policy, the settings form and the LLM providers each
+  create a new version from the head instead of rewriting the YAML (source
+  `policy`, `settings` or `llmproviders`). A save changes only its own fields
+  and carries every other field from the head, including `dlp` and `advisory`,
+  which the settings form does not edit. An edit the config loader rejects (for
+  example an empty allowlist) returns the loader error and creates no version;
+  a save that changes nothing creates none either. The author is the signed-in
+  user (sub and email, kind `oidc`), `breakglass:<username>` for a break-glass
+  session, or `anonymous` (kind `none`) in `console.auth: none`, where the
+  bearer proves possession of the shared token, not an identity.
+- A settings save with an empty `secretAccessKey` keeps the live credential. A
+  new value is written to the served YAML `secretStore` block (the only place
+  the credential lives) and the version stores only its fingerprint; if the
+  version cannot be created the YAML is put back.
+- The other CP-local editors (integrations, detection) keep rewriting the YAML.
+  History and rollback come in later releases.
 - The control plane checks for a new head every 3 seconds and only re-reads a
   version when the head moved, so a version written by another process reaches
   workers within 3 seconds plus one long-poll cycle. The `/policy` hot path

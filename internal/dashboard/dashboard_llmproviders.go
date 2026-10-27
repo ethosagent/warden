@@ -14,6 +14,7 @@ package dashboard
 // bounded, value-free reason string.
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -67,8 +68,9 @@ func (s *Server) SetLLMProvidersSource(fn func() LLMProvidersView) {
 // SetLLMProvidersWriter enables editing the registry from the dashboard. Like the
 // integrations/detection writers it persists the FULL provider list to the served/own
 // config file and reloads the live consumers (client map + judge + Explore
-// SQLGenerator). Nodes without it leave this nil, so PUT/POST return 405.
-func (s *Server) SetLLMProvidersWriter(fn func([]config.LLMProvider) error) {
+// SQLGenerator). fn receives the request context, which carries the caller's
+// identity. Nodes without it leave this nil, so PUT/POST return 405.
+func (s *Server) SetLLMProvidersWriter(fn func(context.Context, []config.LLMProvider, WriteMeta) error) {
 	s.llmProvidersWriter = fn
 }
 
@@ -128,7 +130,7 @@ func (s *Server) putLLMProviders(w http.ResponseWriter, r *http.Request) {
 			Timeout:   time.Duration(rq.TimeoutSeconds) * time.Second,
 		})
 	}
-	if err := s.llmProvidersWriter(providers); err != nil {
+	if err := s.llmProvidersWriter(r.Context(), providers, WriteMeta{}); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
