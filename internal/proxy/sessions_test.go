@@ -400,4 +400,3 @@ func TestBlocklistMetrics(t *testing.T) {
 		t.Errorf("after unblock: closed = %d entries = %d, want 2 and 0", closed, entries)
 	}
 }
-
