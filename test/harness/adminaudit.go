@@ -35,8 +35,12 @@ type AdminAuditRow struct {
 	BeforeHash string
 	AfterHash  string
 	RequestID  string
-	// Sub is the actor's sub from the side table ("" without a side row).
-	Sub string
+	ClientIP   string
+	// Details is the row's details object as stored (JSON).
+	Details string
+	// Sub and Email are the actor's from the side table ("" without a side row).
+	Sub   string
+	Email string
 }
 
 // AdminAuditRows reads the admin_audit table of the control plane's state
@@ -57,7 +61,8 @@ func (h *H) AdminAuditRows() []AdminAuditRow {
 	}
 	defer func() { _ = db.Close() }()
 	rows, err := db.SQL().Query(`SELECT a.seq, a.action, a.auth_method, a.key_id, a.actor_role, a.target,
-		a.target_ref, a.outcome, a.http_status, a.before_hash, a.after_hash, a.request_id, COALESCE(s.sub, '')
+		a.target_ref, a.outcome, a.http_status, a.before_hash, a.after_hash, a.request_id, a.client_ip,
+		a.details_json, COALESCE(s.sub, ''), COALESCE(s.email, '')
 		FROM admin_audit a LEFT JOIN admin_audit_actor s ON s.seq = a.seq ORDER BY a.seq`)
 	if err != nil {
 		h.tb.Fatalf("harness: read admin_audit: %v", err)
@@ -67,7 +72,8 @@ func (h *H) AdminAuditRows() []AdminAuditRow {
 	for rows.Next() {
 		var r AdminAuditRow
 		if err := rows.Scan(&r.Seq, &r.Action, &r.AuthMethod, &r.KeyID, &r.ActorRole, &r.Target,
-			&r.TargetRef, &r.Outcome, &r.HTTPStatus, &r.BeforeHash, &r.AfterHash, &r.RequestID, &r.Sub); err != nil {
+			&r.TargetRef, &r.Outcome, &r.HTTPStatus, &r.BeforeHash, &r.AfterHash, &r.RequestID, &r.ClientIP,
+			&r.Details, &r.Sub, &r.Email); err != nil {
 			h.tb.Fatalf("harness: scan an admin_audit row: %v", err)
 		}
 		out = append(out, r)
