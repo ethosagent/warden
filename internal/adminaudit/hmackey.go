@@ -34,10 +34,11 @@ func LoadOrCreateHMACKey(path string) ([]byte, error) {
 	if path == "" {
 		return nil, errors.New("adminaudit: empty HMAC key file path")
 	}
-	data, err := os.ReadFile(path)
+	_, err := os.Stat(path)
 	switch {
 	case err == nil:
-		return checkHMACKey(path, data)
+		// The file may be one a concurrent creator is still writing.
+		return waitForHMACKey(path)
 	case !errors.Is(err, os.ErrNotExist):
 		return nil, fmt.Errorf("adminaudit: read HMAC key file %q: %w", path, err)
 	}

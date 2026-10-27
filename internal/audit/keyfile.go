@@ -39,10 +39,11 @@ func LoadOrCreateSigner(path string) (*Signer, error) {
 	if path == "" {
 		return nil, errors.New("audit: empty key file path")
 	}
-	data, err := os.ReadFile(path)
+	_, err := os.Stat(path)
 	switch {
 	case err == nil:
-		return parseSignerPEM(path, data)
+		// The file may be one a concurrent creator is still writing.
+		return waitForKey(path)
 	case !errors.Is(err, os.ErrNotExist):
 		return nil, fmt.Errorf("audit: read key file %q: %w", path, err)
 	}

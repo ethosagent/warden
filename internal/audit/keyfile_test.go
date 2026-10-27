@@ -123,3 +123,35 @@ func TestKeyID(t *testing.T) {
 		t.Fatalf("KeyID = %q, want %q", got, want)
 	}
 }
+
+// TestLoadOrCreateSignerWaitsForPartialFile: a key file that exists but is
+// still empty (another process created it and has not written yet) is
+// re-read until the writer finishes, not rejected at once.
+func TestLoadOrCreateSignerWaitsForPartialFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "partial.key")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	want, err := NewSigner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(want.privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0o600)
+	}()
+	got, err := LoadOrCreateSigner(path)
+	if werr := <-done; werr != nil {
+		t.Fatal(werr)
+	}
+	if err != nil {
+		t.Fatalf("LoadOrCreateSigner: %v", err)
+	}
+	if !bytes.Equal(got.PubKey(), want.PubKey()) {
+		t.Fatal("loaded a different key than the writer wrote")
+	}
+}

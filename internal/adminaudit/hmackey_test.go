@@ -77,3 +77,21 @@ func TestDefaultHMACKeyPath(t *testing.T) {
 		t.Fatalf("DefaultHMACKeyPath = %q", got)
 	}
 }
+
+// TestLoadOrCreateHMACKeyWaitsForPartialFile: an existing but still empty key
+// file is re-read until the concurrent creator finishes writing it.
+func TestLoadOrCreateHMACKeyWaitsForPartialFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), HMACKeyFileName)
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- os.WriteFile(path, testHMACKey, 0o600) }()
+	got, err := LoadOrCreateHMACKey(path)
+	if werr := <-done; werr != nil {
+		t.Fatal(werr)
+	}
+	if err != nil || !bytes.Equal(got, testHMACKey) {
+		t.Fatalf("LoadOrCreateHMACKey: equal=%v err=%v", bytes.Equal(got, testHMACKey), err)
+	}
+}
