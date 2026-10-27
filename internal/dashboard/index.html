@@ -1257,6 +1257,16 @@ LIMIT 8;</textarea>
           <div id="llmp-msg" class="note" style="margin-top:8px; display:none"></div>
         </div>
       </div>
+
+      <!-- Console sessions (W-P1-SSO-08): admin only, and only in console.auth oidc (loadSessions shows it). -->
+      <div class="card" id="sessions-card" data-min-role="admin" style="margin-bottom:16px; display:none">
+        <div class="card-head"><h3>Console sessions</h3><span style="display:flex;align-items:center;gap:8px"><span class="sub" id="sess-status"></span><button data-min-role="admin" class="btn sm" id="sess-refresh" onclick="loadSessions()">Refresh</button></span></div>
+        <div class="card-pad">
+          <div class="note" style="margin-bottom:10px">Signed-in console users. A role comes from the IdP groups captured at sign-in, so removing someone from a group takes effect only when their session ends (idle or absolute timeout). Revoke a session here to end it now.</div>
+          <div id="sess-list"></div>
+          <div id="sess-msg" class="note" style="margin-top:8px; display:none"></div>
+        </div>
+      </div>
     </section>
 
   </main>
@@ -2220,6 +2230,7 @@ async function loadSettings(){
   renderSettings();
   loadIntegrations();
   loadLLMProviders();
+  loadSessions();
 }
 function renderPolicyLine(p){
   const el=document.getElementById('rt-policy'); if(!el) return;
@@ -2584,6 +2595,43 @@ async function deleteSecretRow(key){
     if(!r.ok && r.status!==204){ throw new Error('status '+r.status); }
     loadSecrets();
   }catch(err){ window.alert('Delete failed: '+err.message); }
+}
+
+/* ---------- Console sessions (admin): GET / DELETE /dashboard/api/sessions through api() ----------
+   Shown only in oidc mode to an admin; the server enforces both (none mode: 404, others: 403).
+   Rows carry a handle (the session's id hash), never the raw id or its CSRF token. */
+async function loadSessions(){
+  const card=document.getElementById('sessions-card'); if(!card) return;
+  await authInit();
+  if(authMode!=='oidc'||!roleAllows('admin')){ card.style.display='none'; return; }
+  card.style.display='';
+  const list=document.getElementById('sess-list'), st=document.getElementById('sess-status');
+  let rows=null;
+  try{ const r=await api('GET','/dashboard/api/sessions'); if(r.ok) rows=await r.json(); }catch(e){ rows=null; }
+  if(!Array.isArray(rows)){ list.innerHTML='<div class="note" style="padding:8px 0">Sessions unavailable.</div>'; st.textContent=''; return; }
+  st.textContent=rows.length+' live';
+  if(!rows.length){ list.innerHTML='<div class="note" style="padding:8px 0">No live sessions.</div>'; return; }
+  list.innerHTML='<table><thead><tr><th>User</th><th>Method</th><th>Signed in</th><th>Last seen</th><th>Expires</th><th></th></tr></thead><tbody>'+
+    rows.map(x=>'<tr><td><b>'+esc(x.email||x.sub)+'</b>'+(x.current?' <span class="muted">(you)</span>':'')
+      +'<div class="mono muted" style="font-size:11px">'+esc(x.sub)+'</div></td>'
+      +'<td style="font-size:12px">'+esc(x.authMethod||'—')+'</td>'
+      +'<td style="font-size:12px">'+esc(relTime(x.createdAt))+'</td>'
+      +'<td style="font-size:12px">'+esc(relTime(x.lastSeenAt))+'</td>'
+      +'<td style="font-size:12px">'+esc(x.expiresAt||'—')+'</td>'
+      +'<td style="text-align:right;white-space:nowrap"><button data-min-role="admin" class="btn sm sess-revoke" data-handle="'+esc(x.handle)+'" style="color:#ff8098">Revoke</button> '
+      +'<button data-min-role="admin" class="btn sm sess-revoke-sub" data-sub="'+esc(x.sub)+'" style="color:#ff8098">Revoke all for user</button></td></tr>').join('')+'</tbody></table>';
+  list.querySelectorAll('.sess-revoke').forEach(b=>b.addEventListener('click',()=>revokeSessions('handle',b.dataset.handle,'this session')));
+  list.querySelectorAll('.sess-revoke-sub').forEach(b=>b.addEventListener('click',()=>revokeSessions('sub',b.dataset.sub,'every session of '+b.dataset.sub)));
+}
+async function revokeSessions(kind,value,what){
+  if(!window.confirm('Revoke '+what+'? The user must sign in again.')) return;
+  const msg=document.getElementById('sess-msg');
+  let r=null;
+  try{ r=await api('DELETE','/dashboard/api/sessions?'+kind+'='+encodeURIComponent(value)); }catch(e){ r=null; }
+  let d=null; if(r&&r.ok){ try{ d=await r.json(); }catch(e){ d=null; } }
+  msg.style.display='';
+  msg.textContent= r&&r.ok ? ('Revoked '+((d&&d.revoked)||0)+' session(s).') : ('Revoke failed'+(r?(': status '+r.status):'')+'.');
+  loadSessions();
 }
 
 /* ============================================================

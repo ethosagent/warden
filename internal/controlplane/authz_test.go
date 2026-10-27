@@ -93,6 +93,12 @@ func (e *authzEnv) do(rawID, method, path, body string) *httptest.ResponseRecord
 
 const policyBody = `{"allowlist":[{"domain":"api.openai.com"}],"denylist":[]}`
 
+// servedDashboardRoutes is every /dashboard/ route in oidc mode: the
+// dashboard's own plus the ones the control plane mounts ahead of it.
+func servedDashboardRoutes() []dashboard.Route {
+	return append(dashboard.Routes(), cpDashboardRoutes()...)
+}
+
 func TestAuthzMatrix(t *testing.T) {
 	e := newAuthzEnv(t)
 	table := authzTable()
@@ -108,7 +114,7 @@ func TestAuthzMatrix(t *testing.T) {
 	}
 	for _, r := range roles {
 		raw := e.session(t, r.group)
-		for _, rt := range dashboard.Routes() {
+		for _, rt := range servedDashboardRoutes() {
 			row, ok := table[routeKey{rt.Method, rt.Path}]
 			if !ok {
 				t.Fatalf("%s %s has no authz row", rt.Method, rt.Path)
@@ -138,7 +144,7 @@ func missingRows(table map[routeKey]authzRow, routes []dashboard.Route) []string
 }
 
 func TestAuthzRouteCoverage(t *testing.T) {
-	routes := dashboard.Routes()
+	routes := servedDashboardRoutes()
 	table := authzTable()
 	if miss := missingRows(table, routes); len(miss) != 0 {
 		t.Fatalf("routes without a matching authz row:\n%s", strings.Join(miss, "\n"))
@@ -190,7 +196,7 @@ func TestOIDCModeBearerNeverOpensDashboard(t *testing.T) {
 	e := newAuthzEnv(t)
 	// The shared token and any other bearer, with no session, open nothing.
 	for _, bearer := range []string{"Bearer " + dashTestToken, "Bearer a-cp-admin-token"} {
-		for _, rt := range dashboard.Routes() {
+		for _, rt := range servedDashboardRoutes() {
 			req := httptest.NewRequest(rt.Method, rt.Path, strings.NewReader("{}"))
 			req.Header.Set("Authorization", bearer)
 			rec := httptest.NewRecorder()

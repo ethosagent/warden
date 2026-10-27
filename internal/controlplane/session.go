@@ -207,6 +207,17 @@ func (s *SessionStore) Delete(ctx context.Context, rawID string) error {
 	return nil
 }
 
+// DeleteByHash removes the session whose id hash is idHash (the admin
+// "handle") and reports whether one existed.
+func (s *SessionStore) DeleteByHash(ctx context.Context, idHash string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE id_hash = ?`, idHash)
+	if err != nil {
+		return false, fmt.Errorf("sessions: delete by hash: %w", err)
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
 // DeleteBySub removes every session of sub and returns how many it removed.
 func (s *SessionStore) DeleteBySub(ctx context.Context, sub string) (int, error) {
 	res, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE sub = ?`, sub)

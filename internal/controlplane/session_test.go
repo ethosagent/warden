@@ -441,6 +441,16 @@ func TestSessionStoreCRUD(t *testing.T) {
 	if err := store.Delete(ctx, "missing"); err != nil {
 		t.Fatalf("Delete of a missing session: %v", err)
 	}
+	d, _, _ := store.Create(ctx, in2)
+	if ok, err := store.DeleteByHash(ctx, hashID(d)); err != nil || !ok {
+		t.Fatalf("DeleteByHash = %v, %v; want true", ok, err)
+	}
+	if _, ok, _ := store.Lookup(ctx, d); ok {
+		t.Fatal("session survives DeleteByHash")
+	}
+	if ok, err := store.DeleteByHash(ctx, hashID(d)); err != nil || ok {
+		t.Fatalf("DeleteByHash of a missing session = %v, %v; want false", ok, err)
+	}
 }
 
 func TestSessionPrincipal(t *testing.T) {
