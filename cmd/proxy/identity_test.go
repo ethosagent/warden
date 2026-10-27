@@ -98,6 +98,9 @@ type rig struct {
 	stdin    string
 	skew     time.Duration // added to the client clock
 	cacheDir string
+	// parent holds extra parent variables `exec` may look up, beyond env,
+	// PATH and the helper mode.
+	parent map[string]string
 }
 
 func newRig(t *testing.T, issuer string) *rig {

@@ -75,6 +75,7 @@ func (r *identityRunner) execCmd() *cobra.Command {
 	var (
 		worker, listen, ca string
 		includeHTTP        bool
+		passEnv            []string
 	)
 	cmd := &cobra.Command{
 		Use:   "exec --worker host:port [flags] -- COMMAND [ARGS...]",
@@ -83,13 +84,18 @@ func (r *identityRunner) execCmd() *cobra.Command {
 			"The forwarder takes a fresh ID token from the login cache for every new CONNECT and sends it to the " +
 			"worker, so the token is never in the command's environment or arguments. The command sees only " +
 			"a random per-run proxy credential.\n\n" +
+			"The command does not inherit the whole environment. It gets PATH, HOME, USER, LOGNAME, SHELL, TERM, " +
+			"TMPDIR, TZ, LANG and the LC_* locale variables when they are set, plus the proxy, NO_PROXY and --ca " +
+			"variables exec sets. Pass any other variable, such as an API key, by name with --env NAME (repeatable); " +
+			"its value is read from this environment, never from the command line. --env refuses the proxy " +
+			"variables and WARDEN_IDENTITY_*.\n\n" +
 			"Without a login, a terminal runs the device-code login on stderr; otherwise exec exits 2 without " +
 			"starting the command. The exit code is the command's, or 128+N when signal N killed it. A command " +
 			"running as the same user can still read the identity cache file; use another user for the command.",
 		SilenceUsage: true, SilenceErrors: true,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return r.runExec(cmd, args, worker, listen, ca, includeHTTP)
+			return r.runExec(cmd, args, worker, listen, ca, includeHTTP, passEnv)
 		},
 	}
 	cmd.Flags().SetInterspersed(false) // flags after COMMAND belong to the command
@@ -99,15 +105,21 @@ func (r *identityRunner) execCmd() *cobra.Command {
 	fl.StringVar(&listen, "listen", "127.0.0.1:0", "loopback address of the forwarder")
 	fl.StringVar(&ca, "ca", "", "CA bundle `PATH` to export as SSL_CERT_FILE, CURL_CA_BUNDLE, REQUESTS_CA_BUNDLE and NODE_EXTRA_CA_CERTS")
 	fl.BoolVar(&includeHTTP, "include-http", false, "also set HTTP_PROXY and http_proxy (the worker denies plain http)")
+	fl.StringArrayVar(&passEnv, "env", nil, "pass the environment variable `NAME` to the command as well (repeatable; name only, the value is read from the environment)")
 	return cmd
 }
 
-func (r *identityRunner) runExec(cmd *cobra.Command, args []string, worker, listen, ca string, includeHTTP bool) error {
+func (r *identityRunner) runExec(cmd *cobra.Command, args []string, worker, listen, ca string, includeHTTP bool, passEnv []string) error {
 	if _, _, err := net.SplitHostPort(worker); err != nil || strings.ContainsAny(worker, "/@ ") {
 		return errors.New("--worker must be host:port")
 	}
 	if err := loopbackListenAddr(listen); err != nil {
 		return err
+	}
+	for _, n := range passEnv {
+		if err := identityclient.ValidatePassthroughName(n); err != nil {
+			return err
+		}
 	}
 	c, err := r.client(cmd)
 	if err != nil {
@@ -158,12 +170,15 @@ func (r *identityRunner) runExec(cmd *cobra.Command, args []string, worker, list
 	go func() { fwdDone <- fw.Serve(fctx, ln) }()
 	defer func() { stopFwd(); <-fwdDone }()
 
-	environ := os.Environ
-	if r.deps.environ != nil {
-		environ = r.deps.environ
+	lookup := os.LookupEnv
+	if r.deps.lookupEnv != nil {
+		lookup = r.deps.lookupEnv
 	}
-	env, warnings := identityclient.BuildChildEnv(environ(), identityclient.LoopbackProxyURL(ln.Addr(), credential),
-		identityclient.ChildEnvOptions{IncludeHTTP: includeHTTP, CA: ca})
+	env, warnings, err := identityclient.BuildChildEnv(lookup, identityclient.LoopbackProxyURL(ln.Addr(), credential),
+		identityclient.ChildEnvOptions{IncludeHTTP: includeHTTP, CA: ca, Passthrough: passEnv})
+	if err != nil {
+		return err
+	}
 	warn(cmd, warnings...)
 
 	sigs, stopSigs := notifySignals()

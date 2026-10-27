@@ -24,26 +24,50 @@ func envMap(env []string) map[string]string {
 	return m
 }
 
+// lookupIn returns a lookup func over a fixed parent environment.
+func lookupIn(parent map[string]string) func(string) (string, bool) {
+	return func(k string) (string, bool) {
+		v, ok := parent[k]
+		return v, ok
+	}
+}
+
 func TestBuildChildEnv(t *testing.T) {
 	const proxy = "http://wx:cred@127.0.0.1:4000"
-	parent := []string{
-		"PATH=/bin", "HOME=/h",
-		"ALL_PROXY=http://x", "all_proxy=http://x", "HTTP_PROXY=http://x", "http_proxy=http://x",
-		"HTTPS_PROXY=http://user:pw@x", "https_proxy=http://x", "No_Proxy=other",
-		"WARDEN_IDENTITY_ISSUER=https://idp", "WARDEN_IDENTITY_CLIENT_SECRET_VAR=s",
-		"SSL_CERT_FILE=/old",
+	parent := map[string]string{
+		"PATH": "/bin", "HOME": "/h", "USER": "u", "LOGNAME": "u", "SHELL": "/bin/sh", "TERM": "xterm",
+		"TMPDIR": "/tmp", "TZ": "UTC", "LANG": "C.UTF-8", "LC_ALL": "C", "LC_CTYPE": "C", "LC_MESSAGES": "C",
+		"ALL_PROXY": "http://x", "all_proxy": "http://x", "HTTP_PROXY": "http://x", "http_proxy": "http://x",
+		"HTTPS_PROXY": "http://user:pw@x", "https_proxy": "http://x", "No_Proxy": "other",
+		"WARDEN_IDENTITY_ISSUER": "https://idp", "WARDEN_IDENTITY_CLIENT_SECRET_VAR": "s",
+		"SSL_CERT_FILE": "/old", "ANTHROPIC_API_KEY": "sk-test", "EDITOR": "vi",
+	}
+	lookup := lookupIn(parent)
+	build := func(opts identityclient.ChildEnvOptions) ([]string, []string) {
+		t.Helper()
+		env, warns, err := identityclient.BuildChildEnv(lookup, proxy, opts)
+		if err != nil {
+			t.Fatalf("BuildChildEnv: %v", err)
+		}
+		return env, warns
 	}
 
-	t.Run("inherited proxy and identity variables are removed", func(t *testing.T) {
-		env, _ := identityclient.BuildChildEnv(parent, proxy, identityclient.ChildEnvOptions{})
+	t.Run("only allowlisted variables are inherited", func(t *testing.T) {
+		env, _ := build(identityclient.ChildEnvOptions{})
 		m := envMap(env)
-		for _, k := range []string{"ALL_PROXY", "all_proxy", "HTTP_PROXY", "http_proxy", "No_Proxy", "WARDEN_IDENTITY_ISSUER", "WARDEN_IDENTITY_CLIENT_SECRET_VAR"} {
-			if _, ok := m[k]; ok {
-				t.Errorf("%s survived", k)
+		for _, k := range []string{"PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "TMPDIR", "TZ", "LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES"} {
+			if m[k] != parent[k] {
+				t.Errorf("%s = %q, want %q", k, m[k], parent[k])
 			}
 		}
-		if m["PATH"] != "/bin" || m["HOME"] != "/h" || m["SSL_CERT_FILE"] != "/old" {
-			t.Errorf("unrelated variables changed: %v", m)
+		for _, k := range []string{"ANTHROPIC_API_KEY", "EDITOR", "SSL_CERT_FILE", "ALL_PROXY", "all_proxy", "HTTP_PROXY", "http_proxy", "No_Proxy",
+			"WARDEN_IDENTITY_ISSUER", "WARDEN_IDENTITY_CLIENT_SECRET_VAR"} {
+			if _, ok := m[k]; ok {
+				t.Errorf("%s reached the child", k)
+			}
+		}
+		if _, ok := m["LC_TIME"]; ok {
+			t.Error("an unset allowlisted variable was added")
 		}
 		if m["HTTPS_PROXY"] != proxy || m["https_proxy"] != proxy {
 			t.Errorf("HTTPS_PROXY = %q, https_proxy = %q", m["HTTPS_PROXY"], m["https_proxy"])
@@ -58,22 +82,70 @@ func TestBuildChildEnv(t *testing.T) {
 		}
 	})
 
+	t.Run("passthrough adds named variables", func(t *testing.T) {
+		env, warns := build(identityclient.ChildEnvOptions{Passthrough: []string{"ANTHROPIC_API_KEY", "PATH", "ANTHROPIC_API_KEY"}})
+		m := envMap(env)
+		if m["ANTHROPIC_API_KEY"] != "sk-test" {
+			t.Errorf("ANTHROPIC_API_KEY = %q", m["ANTHROPIC_API_KEY"])
+		}
+		for _, k := range []string{"ANTHROPIC_API_KEY=", "PATH="} {
+			if n := strings.Count("\n"+strings.Join(env, "\n"), "\n"+k); n != 1 {
+				t.Errorf("%s appears %d times", k, n)
+			}
+		}
+		if _, ok := m["EDITOR"]; ok {
+			t.Error("an unnamed variable reached the child")
+		}
+		for _, w := range warns {
+			if strings.Contains(w, "ANTHROPIC_API_KEY") {
+				t.Errorf("unexpected warning %q", w)
+			}
+		}
+	})
+
+	t.Run("a passthrough variable that is not set is skipped with a warning", func(t *testing.T) {
+		env, warns := build(identityclient.ChildEnvOptions{Passthrough: []string{"NOT_SET_HERE"}})
+		if _, ok := envMap(env)["NOT_SET_HERE"]; ok {
+			t.Error("an unset variable was added")
+		}
+		if !slicesContain(warns, "NOT_SET_HERE") {
+			t.Errorf("warnings = %q, want one naming NOT_SET_HERE", warns)
+		}
+	})
+
+	t.Run("refused passthrough names fail", func(t *testing.T) {
+		for _, n := range []string{"HTTPS_PROXY", "https_proxy", "Http_Proxy", "ALL_PROXY", "no_proxy",
+			"WARDEN_IDENTITY_TOKEN", "warden_identity_issuer", "A=B", "", "1ABC", "A-B", "A B"} {
+			if _, _, err := identityclient.BuildChildEnv(lookup, proxy, identityclient.ChildEnvOptions{Passthrough: []string{n}}); err == nil {
+				t.Errorf("--env %q was accepted", n)
+			}
+			if err := identityclient.ValidatePassthroughName(n); err == nil {
+				t.Errorf("ValidatePassthroughName(%q) accepted it", n)
+			}
+		}
+		for _, n := range []string{"ANTHROPIC_API_KEY", "_X", "lower_ok", "A1"} {
+			if err := identityclient.ValidatePassthroughName(n); err != nil {
+				t.Errorf("ValidatePassthroughName(%q) = %v", n, err)
+			}
+		}
+	})
+
 	t.Run("override warning is emitted without the old value", func(t *testing.T) {
-		_, warns := identityclient.BuildChildEnv(parent, proxy, identityclient.ChildEnvOptions{})
+		_, warns := build(identityclient.ChildEnvOptions{})
 		if len(warns) != 1 || !strings.Contains(warns[0], "HTTPS_PROXY") {
 			t.Fatalf("warnings = %q", warns)
 		}
 		if strings.Contains(warns[0], "pw") {
 			t.Errorf("warning leaks the inherited value: %q", warns[0])
 		}
-		_, warns = identityclient.BuildChildEnv([]string{"PATH=/bin"}, proxy, identityclient.ChildEnvOptions{})
+		_, warns, _ = identityclient.BuildChildEnv(lookupIn(map[string]string{"PATH": "/bin"}), proxy, identityclient.ChildEnvOptions{})
 		if len(warns) != 0 {
 			t.Errorf("warning without an inherited HTTPS_PROXY: %q", warns)
 		}
 	})
 
 	t.Run("HTTP_PROXY only with include-http", func(t *testing.T) {
-		env, _ := identityclient.BuildChildEnv(parent, proxy, identityclient.ChildEnvOptions{IncludeHTTP: true})
+		env, _ := build(identityclient.ChildEnvOptions{IncludeHTTP: true})
 		m := envMap(env)
 		if m["HTTP_PROXY"] != proxy || m["http_proxy"] != proxy {
 			t.Errorf("HTTP_PROXY = %q, http_proxy = %q", m["HTTP_PROXY"], m["http_proxy"])
@@ -84,7 +156,7 @@ func TestBuildChildEnv(t *testing.T) {
 	})
 
 	t.Run("CA variables with ca", func(t *testing.T) {
-		env, _ := identityclient.BuildChildEnv(parent, proxy, identityclient.ChildEnvOptions{CA: "/ca.pem"})
+		env, warns := build(identityclient.ChildEnvOptions{CA: "/ca.pem", Passthrough: []string{"SSL_CERT_FILE"}})
 		m := envMap(env)
 		for _, v := range identityclient.CAVars("/ca.pem") {
 			if m[v.Name] != "/ca.pem" {
@@ -94,7 +166,24 @@ func TestBuildChildEnv(t *testing.T) {
 		if n := strings.Count(strings.Join(env, "\n"), "SSL_CERT_FILE="); n != 1 {
 			t.Errorf("SSL_CERT_FILE appears %d times", n)
 		}
+		if !slicesContain(warns, "SSL_CERT_FILE") {
+			t.Errorf("warnings = %q, want one saying --ca overrides --env SSL_CERT_FILE", warns)
+		}
+		env, _ = build(identityclient.ChildEnvOptions{Passthrough: []string{"SSL_CERT_FILE"}})
+		if envMap(env)["SSL_CERT_FILE"] != "/old" {
+			t.Error("--env SSL_CERT_FILE without --ca did not pass the parent value")
+		}
 	})
+}
+
+// slicesContain reports whether any element of s contains sub.
+func slicesContain(s []string, sub string) bool {
+	for _, x := range s {
+		if strings.Contains(x, sub) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestProxyCredentialAndURL(t *testing.T) {
