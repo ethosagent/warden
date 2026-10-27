@@ -289,6 +289,13 @@ Offline CLIs that change admin state record through the same chain with
 check, and never a new key while rows exist. On a state dir where audit was never
 enabled they skip the record with a notice.
 
+**Hand edits of the served YAML.** In the default file policy-store mode, when the
+3-second re-read finds served-config bytes that no control-plane writer produced,
+the control plane still serves them and appends one `config.external_change` row
+(auth_method `system`, target `policy`, before `file:<old sha256>`, after
+`file:<new sha256>`), once per distinct file hash; the row and its log line carry
+only the two hashes, never the file's content or path.
+
 ### Migrating from none to oidc
 
 1. Add the `console:` block to the operator-owned `--config` file: `auth: oidc`, the

@@ -192,6 +192,11 @@ type Server struct {
 	// auth is the console OIDC login (/auth/login, /auth/callback); set only when
 	// sessions are.
 	auth *authService
+	// auditRec is cfg.AdminAudit as a Recorder (nil with admin audit off) and ext
+	// tracks the served file's hashes for the file-mode external-edit audit
+	// (adminaudit_external.go).
+	auditRec adminaudit.Recorder
+	ext      externalEdits
 }
 
 // Compile-time assertions that the concrete types satisfy their role interfaces.
@@ -243,6 +248,10 @@ func New(cfg Config) *Server {
 	}
 	s.initSessions()
 	s.initAuth()
+	if cfg.AdminAudit != nil {
+		s.auditRec = cfg.AdminAudit
+		s.primeExternalEdit()
+	}
 	// Alert pipeline (CP-hosted alert delivery + always-on Alert Store). Constructed
 	// whenever an alert DB path is set — even with ZERO configured integrations —
 	// because it serves two always-on purposes:
@@ -332,7 +341,7 @@ func (s *Server) Start(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				s.policy.Refresh()
+				s.reloadPolicy(ctx)
 			}
 		}
 	}()
@@ -641,7 +650,7 @@ func (s *Server) atomicWriteConfig(root map[string]yaml.Node) error {
 	if _, err := config.NewLocalYAMLProvider(tmpName); err != nil {
 		return fmt.Errorf("invalid policy: %w", err)
 	}
-	if err := os.Rename(tmpName, s.cfg.PolicyPath); err != nil {
+	if err := s.ext.persist(tmpName, s.cfg.PolicyPath, data); err != nil {
 		return fmt.Errorf("controlplane: persist policy: %w", err)
 	}
 	return nil

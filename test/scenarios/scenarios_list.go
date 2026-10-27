@@ -69,6 +69,10 @@ var All = slices.Concat(
 		// genesis entry and logs its key_id before serving. In-process only (it
 		// reads the CP state dir).
 		{Name: "admin_audit_enabled_genesis", Opts: adminAuditOpts(), Run: adminAuditEnabledGenesis},
+		// File-mode external edits (W-P1-AAUD-08): a hand edit of the served YAML
+		// is served and recorded once as config.external_change; a dashboard save
+		// is not. In-process only (it edits the CP's file and reads its state dir).
+		{Name: "admin_audit_external_edit", Opts: adminAuditOpts(), Run: adminAuditExternalEdit},
 	},
 	// Canary across protocols x allow/deny; see canary.go.
 	canaryScenarios(),
