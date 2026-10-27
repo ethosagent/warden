@@ -1,17 +1,21 @@
 package controlplane
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"io"
+	"log/slog"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -1546,5 +1550,89 @@ func TestControlPlane_QueryEngineWiring(t *testing.T) {
 	memCP.ServeHTTP(rr2, httptest.NewRequest(http.MethodGet, "/dashboard/api/query/schema", nil))
 	if rr2.Code != http.StatusNotFound {
 		t.Fatalf("memory CP: want 404 query schema (no SQL engine), got %d", rr2.Code)
+	}
+}
+
+// TestPolicyWireBlockedUsersOmittedWhenEmpty pins the /policy body and ETag
+// captured before blockedUsers existed: with no list the wire is byte-identical.
+func TestPolicyWireBlockedUsersOmittedWhenEmpty(t *testing.T) {
+	const (
+		goldenBody = `{"allowlist":[{"domain":"api.openai.com","port":0}],"denylist":[{"domain":"evil.example.com","port":0}]}` + "\n"
+		goldenETag = "50bfeb002edec514"
+	)
+	srv := New(Config{PolicyPath: writePolicyFile(t, "api.openai.com")})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/policy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != goldenBody {
+		t.Errorf("body = %q, want %q", b, goldenBody)
+	}
+	if got := strings.Trim(resp.Header.Get("ETag"), `"`); got != goldenETag {
+		t.Errorf("ETag = %q, want %q", got, goldenETag)
+	}
+}
+
+// TestWritePolicyKeepsBlockedUsers verifies a dashboard policy edit carrying a
+// block list keeps policy.blockedUsers in the file (it is not dropped).
+func TestWritePolicyKeepsBlockedUsers(t *testing.T) {
+	path := writePolicyFile(t, "api.openai.com")
+	srv := New(Config{PolicyPath: path})
+
+	if err := srv.writePolicy(config.Policy{
+		Allowlist:    []config.AllowlistEntry{{Domain: "api.anthropic.com"}},
+		BlockedUsers: []config.BlockedUser{{Sub: "u1"}, {Email: "alice@corp.com"}},
+	}); err != nil {
+		t.Fatalf("writePolicy: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "blockedUsers:") {
+		t.Fatalf("policy.blockedUsers dropped from file:\n%s", data)
+	}
+	prov, err := config.NewLocalYAMLProvider(path)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	p, _ := prov.GetPolicy()
+	want := []config.BlockedUser{{Email: "alice@corp.com"}, {Sub: "u1"}}
+	if !reflect.DeepEqual(p.BlockedUsers, want) {
+		t.Errorf("BlockedUsers = %+v, want %+v", p.BlockedUsers, want)
+	}
+}
+
+// TestLoadPolicyIgnoresYAMLBlockedUsers verifies a CP policy file carrying a
+// blockedUsers list is not served (the console API is the only source) and
+// logs a warning that never names an entry value.
+func TestLoadPolicyIgnoresYAMLBlockedUsers(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "policy.yaml")
+	body := "policy:\n  allowlist:\n    - domain: api.openai.com\n  blockedUsers:\n    - sub: secret-sub-value\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	logs := &bytes.Buffer{}
+	ps := newPolicyServer(path, "", slog.New(slog.NewJSONHandler(logs, nil)), NewWorkerRegistry())
+	wire, err := ps.loadPolicy()
+	if err != nil {
+		t.Fatalf("loadPolicy: %v", err)
+	}
+	if len(wire.BlockedUsers) != 0 {
+		t.Errorf("wire.BlockedUsers = %+v, want none", wire.BlockedUsers)
+	}
+	if !strings.Contains(logs.String(), "blockedUsers") {
+		t.Errorf("expected a blockedUsers warning, logs: %s", logs)
+	}
+	if strings.Contains(logs.String(), "secret-sub-value") {
+		t.Errorf("warning leaked an entry value: %s", logs)
 	}
 }

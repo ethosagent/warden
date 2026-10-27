@@ -132,6 +132,12 @@ func (ps *policyServer) loadPolicy() (policyWire, error) {
 	if err != nil {
 		return policyWire{}, err
 	}
+	// The console API is the only source of the served block list (merged from
+	// the CP store); a YAML list is ignored, loudly, and never echoed.
+	if len(p.BlockedUsers) > 0 {
+		ps.logger.Warn("control plane: policy file contains blockedUsers; ignored (manage the block list from the console)",
+			"entries", len(p.BlockedUsers))
+	}
 	// SettingsWireFromPolicy projects only the secret-free behavioral blocks and
 	// returns nil when the config is pure allow/deny, so the "settings" key stays
 	// absent in that case (back-compat).

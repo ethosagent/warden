@@ -125,7 +125,10 @@ type Config struct {
 type policyWire struct {
 	Allowlist []config.AllowlistEntry `json:"allowlist"`
 	Denylist  []config.DenylistEntry  `json:"denylist"`
-	Settings  *config.SettingsWire    `json:"settings,omitempty"`
+	// BlockedUsers is the user block list (sub and email only; reason and actor
+	// stay on the CP). Omitempty keeps the wire and ETag unchanged when empty.
+	BlockedUsers []config.BlockedUser `json:"blockedUsers,omitempty"`
+	Settings     *config.SettingsWire `json:"settings,omitempty"`
 }
 
 // Long-poll bounds and the external-edit re-read cadence.
@@ -554,6 +557,8 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 type policyYAML struct {
 	Allowlist []config.AllowlistEntry `yaml:"allowlist"`
 	Denylist  []config.DenylistEntry  `yaml:"denylist"`
+	// BlockedUsers keeps policy.blockedUsers in the file across an edit.
+	BlockedUsers []config.BlockedUser `yaml:"blockedUsers,omitempty"`
 }
 
 // writePolicy validates and atomically persists an edited allow/deny policy to
@@ -585,7 +590,7 @@ func (s *Server) WritePolicy(p config.Policy) error {
 
 	// Replace the policy block with the edited allow/deny.
 	var policyNode yaml.Node
-	if err := policyNode.Encode(policyYAML{Allowlist: p.Allowlist, Denylist: p.Denylist}); err != nil {
+	if err := policyNode.Encode(policyYAML{Allowlist: p.Allowlist, Denylist: p.Denylist, BlockedUsers: p.BlockedUsers}); err != nil {
 		return fmt.Errorf("controlplane: encode policy block: %w", err)
 	}
 	root["policy"] = policyNode

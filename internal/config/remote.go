@@ -258,7 +258,10 @@ func (r *RemoteProvider) clearErr() {
 // parsed in one pass.
 type remoteWire struct {
 	Policy
-	Settings *SettingsWire `json:"settings,omitempty"`
+	// BlockedUsers is decoded here, not through Policy (whose field is
+	// json:"-" for rule X2), then copied onto the policy in parseRemotePolicy.
+	BlockedUsers []BlockedUser `json:"blockedUsers,omitempty"`
+	Settings     *SettingsWire `json:"settings,omitempty"`
 }
 
 // parseRemotePolicy decodes a control-plane policy response, applies the same
@@ -285,6 +288,7 @@ func parseRemotePolicy(body []byte) (*Policy, *SettingsWire, error) {
 	for i := range p.Denylist {
 		p.Denylist[i].Domain = strings.ToLower(p.Denylist[i].Domain)
 	}
+	p.BlockedUsers = normalizeBlockedUsers(w.BlockedUsers)
 	if err := validate(p); err != nil {
 		return nil, nil, err
 	}
