@@ -94,6 +94,9 @@ var All = slices.Concat(
 		// imported while the control plane runs, reaches workers and is audited
 		// as cli. In-process only (it writes the CP state dir).
 		{Name: "policy_import_export", Opts: policyImportOpts(), Run: policyImportExport},
+		// Fleet policy version (W-P1-PVER-10): a served-ETag change without a
+		// Create is logged, and workers on head show its version.
+		{Name: "policy_store_fleet_version", Opts: policyStoreOpts(), Run: policyStoreFleetVersion},
 
 		// Admin audit gate (W-P1-AAUD-05): enabled, the control plane writes the
 		// genesis entry and logs its key_id before serving. In-process only (it

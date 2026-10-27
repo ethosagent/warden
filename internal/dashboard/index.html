@@ -1937,7 +1937,7 @@ function renderFleet(ws){
     const status=w.online
       ? '<span class="pill p-green"><span class="d" style="background:var(--green)"></span>online</span>'
       : '<span class="pill p-redact"><span class="d" style="background:var(--amber)"></span>stale</span>';
-    const etag=w.policyETag||'—';
+    const etag=(w.policyVersion?'v'+w.policyVersion+' · ':'')+(w.policyETag||'—');
     const etagPill=w.behind?'<span class="pill p-redact">behind</span>':'<span class="pill p-allow">up-to-date</span>';
     const pending=w.behind?'<span class="pill p-high">policy behind</span>':'<span class="muted">—</span>';
     return '<tr><td class="mono">'+esc(w.proxyID||'—')+'</td><td>'+status+'</td>'
