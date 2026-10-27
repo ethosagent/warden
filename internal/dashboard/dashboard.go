@@ -5,9 +5,11 @@
 package dashboard
 
 import (
+	"context"
 	"crypto/ed25519"
 	"embed"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
 	"path"
@@ -58,7 +60,7 @@ type Server struct {
 	// settingsWriter applies an edited settings document. Both are control-plane-
 	// only: a worker leaves settingsWriter nil so its settings panel is read-only.
 	liveSettings   func() *config.SettingsWire
-	settingsWriter func(config.SettingsWire) error
+	settingsWriter func(context.Context, config.SettingsWire) error
 	workersFn      func() []WorkerView // nil = no fleet worker registry
 	// mcpFleet, when set (control plane), returns the inventory + observed schema
 	// for a given worker (empty proxyID = most-recent worker). It takes precedence
@@ -272,7 +274,42 @@ func (s *Server) SetLiveSettings(fn func() *config.SettingsWire) {
 // (which persists them so workers pull them on their next poll). Workers never
 // set this, so they expose no settings-write path.
 func (s *Server) SetSettingsWriter(fn func(config.SettingsWire) error) {
+	if fn == nil {
+		s.settingsWriter = nil
+		return
+	}
+	s.settingsWriter = func(_ context.Context, w config.SettingsWire) error { return fn(w) }
+}
+
+// SetSettingsWriterContext is SetSettingsWriter for a writer that needs the
+// request context, for example to authorize the edit against the caller's
+// console role. A *RoleRequiredError from fn is answered with 403.
+func (s *Server) SetSettingsWriterContext(fn func(context.Context, config.SettingsWire) error) {
 	s.settingsWriter = fn
+}
+
+// RoleRequiredError is returned by a context-aware writer when the caller's
+// console role may not make the edit. Need is the role required ("editor",
+// "admin"); Fields names the settings fields that need it, when the refusal is
+// per field. The dashboard answers it with 403
+// {"error":"role_required","need":...,"fields":[...]}.
+type RoleRequiredError struct {
+	Need   string
+	Fields []string
+}
+
+func (e *RoleRequiredError) Error() string {
+	if len(e.Fields) == 0 {
+		return "role " + e.Need + " required"
+	}
+	return "role " + e.Need + " required to change " + strings.Join(e.Fields, ", ")
+}
+
+// roleRequiredResponse is the 403 body for a RoleRequiredError.
+type roleRequiredResponse struct {
+	Error  string   `json:"error"`
+	Need   string   `json:"need"`
+	Fields []string `json:"fields,omitempty"`
 }
 
 // SetWorkers supplies the "connected workers" rows for the fleet view. Set only
@@ -791,7 +828,12 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	if err := s.settingsWriter(settings); err != nil {
+	if err := s.settingsWriter(r.Context(), settings); err != nil {
+		var re *RoleRequiredError
+		if errors.As(err, &re) {
+			writeJSONStatus(w, http.StatusForbidden, roleRequiredResponse{Error: "role_required", Need: re.Need, Fields: re.Fields})
+			return
+		}
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}

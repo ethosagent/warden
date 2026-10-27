@@ -28,8 +28,10 @@ type authzRow struct {
 // every role, GET included. Every dashboard.Routes() entry must have a row
 // (TestAuthzRouteCoverage) and the row's Action must equal the route's.
 //
-// Settings writes are admin-only until W-P1-SSO-10 authorizes them per field;
-// query/generate is editor-only until that ticket adds its rate limit.
+// Settings writes need editor at the route; the settings writer then requires
+// admin for any changed field outside config.EditorSettingsFields
+// (writeSettingsAs). query/generate is editor-only and limited per session to
+// queryGenerateLimit calls a minute (limitQueryGenerate).
 func authzTable() map[routeKey]authzRow {
 	const (
 		get  = http.MethodGet
@@ -51,8 +53,8 @@ func authzTable() map[routeKey]authzRow {
 		{post, "/dashboard/api/policy", authzRow{editor, "policy.write"}},
 		{put, "/dashboard/api/policy", authzRow{editor, "policy.write"}},
 		{get, "/dashboard/api/settings", authzRow{viewer, "settings.read"}},
-		{post, "/dashboard/api/settings", authzRow{admin, "settings.write"}},
-		{put, "/dashboard/api/settings", authzRow{admin, "settings.write"}},
+		{post, "/dashboard/api/settings", authzRow{editor, "settings.write"}},
+		{put, "/dashboard/api/settings", authzRow{editor, "settings.write"}},
 		{get, "/dashboard/api/secrets", authzRow{viewer, "secrets.read"}},
 		{get, "/dashboard/api/endpoints", authzRow{viewer, "endpoints.read"}},
 		{get, "/dashboard/api/analytics", authzRow{viewer, "analytics.read"}},

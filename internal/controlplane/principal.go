@@ -20,6 +20,9 @@ type Principal struct {
 	Email      string
 	Groups     []string
 	AuthMethod string
+	// SessionHash is sha256 of the session id for a session Principal (never the
+	// raw id). It keys per-session state such as the query/generate rate limit.
+	SessionHash string
 }
 
 type principalKey struct{}

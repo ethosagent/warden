@@ -25,6 +25,7 @@ import (
 
 	"github.com/ethosagent/warden/internal/alertpipeline"
 	"github.com/ethosagent/warden/internal/analytics"
+	"github.com/ethosagent/warden/internal/clock"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/cpstate"
 	"github.com/ethosagent/warden/internal/dashboard"
@@ -100,6 +101,9 @@ type Config struct {
 	// ResolveTTL is the silence window after which a firing alert auto-resolves
 	// (P4). 0 selects the AlertManager default; a negative value disables it.
 	ResolveTTL time.Duration
+	// Clock is the control plane's time port (nil = clock.Real()). The console
+	// query/generate rate limit ticks on it.
+	Clock clock.Clock
 }
 
 // policyWire is the shape sent to workers: allow/deny policy plus the optional
@@ -172,6 +176,9 @@ type Server struct {
 	sessions      *SessionStore
 	sessionCookie SessionCookie
 	sessionReader sessionReader
+	// generateLimit is the per-session token bucket on POST
+	// /dashboard/api/query/generate in oidc mode (it spends LLM tokens).
+	generateLimit *sessionLimiter
 }
 
 // Compile-time assertions that the concrete types satisfy their role interfaces.
@@ -199,6 +206,9 @@ func New(cfg Config) *Server {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
+	if cfg.Clock == nil {
+		cfg.Clock = clock.Real()
+	}
 	store := cfg.Store
 	if store == nil {
 		store = analytics.NewCentralStore(cfg.MaxEvents)
@@ -216,6 +226,7 @@ func New(cfg Config) *Server {
 		secretStore: cfg.SecretStore,
 		// Live typed detection config for the dashboard editor + WriteDetection base.
 		detectionConfig: cfg.DetectionConfig,
+		generateLimit:   newSessionLimiter(cfg.Clock, queryGenerateLimit, time.Minute),
 	}
 	s.initSessions()
 	// Alert pipeline (CP-hosted alert delivery + always-on Alert Store). Constructed
@@ -411,7 +422,10 @@ func (s *Server) Handler() http.Handler {
 	// next poll. The read side reflects the live watch.
 	var editor ConfigEditor = s
 	dash.SetPolicyWriter(editor.WritePolicy)
-	dash.SetSettingsWriter(editor.WriteSettings)
+	// The settings writer is context-aware: in oidc mode it authorizes the edit
+	// per field against the caller's role (writeSettingsAs); in none mode it is
+	// editor.WriteSettings unchanged.
+	dash.SetSettingsWriterContext(s.writeSettingsAs)
 	dash.SetLiveSettings(func() *config.SettingsWire {
 		w, _, _, _ := s.policy.snapshot()
 		return w.Settings
@@ -657,8 +671,24 @@ func existingSecretAccessKey(root map[string]yaml.Node) string {
 }
 
 func (s *Server) WriteSettings(in config.SettingsWire) error {
+	return s.writeSettingsChecked(in, nil)
+}
+
+// writeSettingsChecked is WriteSettings with an optional check that runs under
+// writeMu against the settings currently on disk, so nothing can change them
+// between the check and the write. A check error refuses the write unchanged.
+func (s *Server) writeSettingsChecked(in config.SettingsWire, check func(live *config.SettingsWire) error) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
+	if check != nil {
+		cur, err := s.policy.loadPolicy()
+		if err != nil {
+			return fmt.Errorf("controlplane: read live settings: %w", err)
+		}
+		if err := check(cur.Settings); err != nil {
+			return err
+		}
+	}
 
 	// Load the current file as a top-level YAML map so policy/logging/secrets and
 	// any block this phase does not own survive untouched. A missing/unreadable

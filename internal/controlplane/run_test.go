@@ -108,9 +108,10 @@ func TestRunServesHealthzFromListenAddr(t *testing.T) {
 }
 
 // TestRunAcceptsInjectedClock proves the CP's time port: Run boots normally
-// with a fake Clock in Params. No control-plane consumer ticks on it yet (the
-// detection engine migrates in its own phase, rule L3 in #349), so the
-// assertion is the boot itself — nil keeps clock.Real(), the production
+// with a fake Clock in Params. Its one consumer so far, the console
+// query/generate rate limit, is tested with the fake in TestAuthzQueryGenerateEditor
+// (the detection engine migrates in its own phase, rule L3 in #349), so the
+// assertion here is the boot itself — nil keeps clock.Real(), the production
 // default exercised by every other test here.
 func TestRunAcceptsInjectedClock(t *testing.T) {
 	startAndProbe(t, Params{

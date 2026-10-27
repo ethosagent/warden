@@ -51,10 +51,9 @@ type Params struct {
 	// nothing is refused. Nil is allowed (production never sets it).
 	OnReady func(addr string)
 
-	// Clock is the CP's time port (nil = clock.Real()). No control-plane
-	// consumer ticks on it yet — the detection engine migrates in its own phase
-	// (rule L3, #349) — but the field lands now so the L1 harness (#350) can
-	// inject a fake without another seam PR.
+	// Clock is the CP's time port (nil = clock.Real()). The console
+	// query/generate rate limit ticks on it; the detection engine migrates in its
+	// own phase (rule L3, #349).
 	Clock clock.Clock
 }
 
@@ -244,6 +243,8 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		// Typed CP-local detection config for the dashboard editor + WriteDetection
 		// round-trip base (the resolved fields above drive the initial engine build).
 		DetectionConfig: pol.Detection,
+		// The CP's time port (nil = clock.Real() inside New).
+		Clock: p.Clock,
 	})
 
 	httpSrv := &http.Server{
@@ -278,15 +279,6 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	if p.Listener != nil {
 		reportedAddr = p.Listener.Addr().String()
 	}
-
-	// clk is the CP's resolved time port (nil = clock.Real(), the production
-	// default). Nothing ticks on it yet; the phase that adds the first CP
-	// consumer wires it through.
-	clk := p.Clock
-	if clk == nil {
-		clk = clock.Real()
-	}
-	_ = clk
 
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
