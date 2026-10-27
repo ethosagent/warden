@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"strings"
@@ -79,6 +80,10 @@ type ConsoleConfig struct {
 	Session ConsoleSession
 	// AdminAudit gates the signed admin audit chain (default off).
 	AdminAudit ConsoleAdminAudit
+	// TrustedProxies lists the CIDRs of reverse proxies in front of the
+	// control plane (default empty). Only a peer inside one of them may set the
+	// client address the admin audit log records, through X-Forwarded-For.
+	TrustedProxies []string
 }
 
 // ConsoleAdminAudit is the `console.adminAudit` sub-block. Enabled (default
@@ -170,6 +175,7 @@ type rawConsole struct {
 	AdminAudit struct {
 		Enabled bool `yaml:"enabled"`
 	} `yaml:"adminAudit"`
+	TrustedProxies []string `yaml:"trustedProxies"`
 }
 
 // parseConsole converts the raw block and applies defaults. An absent block is
@@ -215,12 +221,18 @@ func parseConsole(r *rawConsole) (ConsoleConfig, error) {
 		c.Session.Absolute = d
 	}
 	c.AdminAudit.Enabled = r.AdminAudit.Enabled
+	for _, p := range r.TrustedProxies {
+		c.TrustedProxies = append(c.TrustedProxies, strings.TrimSpace(p))
+	}
 	return c, nil
 }
 
 // validateConsole enforces the console block's invariants at startup. The oidc
 // rules apply only when Auth is oidc; the auth value itself is always checked.
 func validateConsole(c ConsoleConfig) error {
+	if err := validateTrustedProxies(c.TrustedProxies); err != nil {
+		return err
+	}
 	switch c.Auth {
 	case "", ConsoleAuthNone:
 		return nil
@@ -263,6 +275,18 @@ func validateConsole(c ConsoleConfig) error {
 	s := c.Session
 	if s.Idle <= 0 || s.Absolute <= 0 || s.Idle > s.Absolute || s.Absolute > MaxConsoleSession {
 		return fmt.Errorf("config: console.session needs 0 < idle (%s) <= absolute (%s) <= %s", s.Idle, s.Absolute, MaxConsoleSession)
+	}
+	return nil
+}
+
+// validateTrustedProxies requires every console.trustedProxies entry to be a
+// CIDR (192.0.2.0/24, 2001:db8::/32); a bare address or a typo is a startup
+// error, never a silently trusted peer.
+func validateTrustedProxies(cidrs []string) error {
+	for _, c := range cidrs {
+		if _, err := netip.ParsePrefix(c); err != nil {
+			return fmt.Errorf("config: console.trustedProxies entry %q is not a CIDR (for example 10.0.0.0/8)", c)
+		}
 	}
 	return nil
 }

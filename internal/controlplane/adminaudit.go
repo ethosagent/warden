@@ -31,8 +31,12 @@ const adminAuditVerifyFailedRule = "admin_audit_verify_failed"
 // adminaudit.OpenForCLI) all open warden-cp.db with this one list; a feature
 // that adds tables appends its migrations here.
 func StateMigrations() []cpstate.Migration {
-	migs := append(SessionMigrations(), OIDCPendingMigrations()...)
-	return append(migs, adminaudit.Migrations()...)
+	var migs []cpstate.Migration
+	migs = append(migs, SessionMigrations()...)
+	migs = append(migs, OIDCPendingMigrations()...)
+	migs = append(migs, PolicyStoreMigrations()...)
+	migs = append(migs, adminaudit.Migrations()...)
+	return migs
 }
 
 // checkAdminAuditFlags validates the admin audit config against the flags
@@ -51,9 +55,9 @@ func checkAdminAuditFlags(cc config.ConsoleConfig, stateDir string, p Params) er
 // openAdminAudit builds the admin audit store on the CP state database: it
 // loads (or, on an empty chain, creates) the signing key and the HMAC key,
 // runs the fail-closed key check, starts a new segment when asked, writes
-// genesis on first use, and logs the key_id and public key. Key material is
-// never logged.
-func openAdminAudit(ctx context.Context, logger *slog.Logger, state *cpstate.DB, stateDir string, p Params, clk clock.Clock) (*adminaudit.Store, error) {
+// genesis on first use, installs em as the store's Emitter, and logs the
+// key_id and public key. Key material is never logged.
+func openAdminAudit(ctx context.Context, logger *slog.Logger, state *cpstate.DB, stateDir string, p Params, clk clock.Clock, em adminaudit.Emitter) (*adminaudit.Store, error) {
 	keyFile := p.AdminAuditKeyFile
 	if keyFile == "" {
 		keyFile = adminaudit.DefaultKeyPath(stateDir)
@@ -63,10 +67,14 @@ func openAdminAudit(ctx context.Context, logger *slog.Logger, state *cpstate.DB,
 		KeyFile:    keyFile,
 		NewSegment: p.AdminAuditNewSegment,
 		Clock:      clk,
+		Logger:     logger,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("control-plane: admin audit: %w", err)
 	}
+	// Every entry committed from here on also goes to em (the warden.admin.v1
+	// log line), so an off-host copy anchors the chain.
+	s.SetEmitter(em)
 	logger.Info("admin audit enabled",
 		"key_id", s.KeyID(),
 		"public_key", base64.StdEncoding.EncodeToString(s.PublicKey()),
@@ -145,4 +153,12 @@ func (s *Server) publishFinding(f integration.Finding) {
 		return
 	}
 	m.Bus().PublishFinding(f)
+}
+
+// runCheckpointLoop runs the admin audit checkpoint loop until ctx is
+// cancelled, then closes done. It is a named function so a goroutine dump
+// shows whether the loop is running.
+func runCheckpointLoop(ctx context.Context, done chan<- struct{}, s *adminaudit.Store, e adminaudit.Emitter, interval time.Duration, clk clock.Clock) {
+	defer close(done)
+	adminaudit.RunCheckpoints(ctx, s, e, interval, clk)
 }

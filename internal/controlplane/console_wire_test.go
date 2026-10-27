@@ -110,10 +110,10 @@ func TestWritersPreserveConsoleBlock(t *testing.T) {
 				return err
 			}
 			p.Allowlist = append(p.Allowlist, config.AllowlistEntry{Domain: "added.example.com"})
-			return srv.WritePolicy(p)
+			return srv.writePolicy(p)
 		},
 		"WriteSettings": func() error {
-			return srv.WriteSettings(config.SettingsWire{Identity: &config.IdentitySettings{
+			return srv.writeSettings(config.SettingsWire{Identity: &config.IdentitySettings{
 				DefaultMode: "attribute", Issuer: "https://idp.example.com", Audience: "warden",
 			}})
 		},

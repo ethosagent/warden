@@ -2,6 +2,8 @@ package harness
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 
@@ -25,6 +27,16 @@ type AdminAuditRow struct {
 	Action     string
 	AuthMethod string
 	KeyID      string
+	ActorRole  string
+	Target     string
+	TargetRef  string
+	Outcome    string
+	HTTPStatus int
+	BeforeHash string
+	AfterHash  string
+	RequestID  string
+	// Sub is the actor's sub from the side table ("" without a side row).
+	Sub string
 }
 
 // AdminAuditRows reads the admin_audit table of the control plane's state
@@ -44,7 +56,9 @@ func (h *H) AdminAuditRows() []AdminAuditRow {
 		h.tb.Fatalf("harness: open the state db: %v", err)
 	}
 	defer func() { _ = db.Close() }()
-	rows, err := db.SQL().Query(`SELECT seq, action, auth_method, key_id FROM admin_audit ORDER BY seq`)
+	rows, err := db.SQL().Query(`SELECT a.seq, a.action, a.auth_method, a.key_id, a.actor_role, a.target,
+		a.target_ref, a.outcome, a.http_status, a.before_hash, a.after_hash, a.request_id, COALESCE(s.sub, '')
+		FROM admin_audit a LEFT JOIN admin_audit_actor s ON s.seq = a.seq ORDER BY a.seq`)
 	if err != nil {
 		h.tb.Fatalf("harness: read admin_audit: %v", err)
 	}
@@ -52,7 +66,8 @@ func (h *H) AdminAuditRows() []AdminAuditRow {
 	var out []AdminAuditRow
 	for rows.Next() {
 		var r AdminAuditRow
-		if err := rows.Scan(&r.Seq, &r.Action, &r.AuthMethod, &r.KeyID); err != nil {
+		if err := rows.Scan(&r.Seq, &r.Action, &r.AuthMethod, &r.KeyID, &r.ActorRole, &r.Target,
+			&r.TargetRef, &r.Outcome, &r.HTTPStatus, &r.BeforeHash, &r.AfterHash, &r.RequestID, &r.Sub); err != nil {
 			h.tb.Fatalf("harness: scan an admin_audit row: %v", err)
 		}
 		out = append(out, r)
@@ -80,4 +95,48 @@ func (h *H) AdminAuditStateDir() string {
 		h.tb.Fatal("harness: AdminAuditStateDir needs the WithAdminAudit option")
 	}
 	return filepath.Join(h.root, "cp-state")
+}
+
+// EditControlPlaneConfig rewrites the control plane's served YAML outside the
+// control plane, the way an operator's editor or a config tool would (a temp
+// file renamed into place), and returns the new content's "file:<sha256>"
+// state hash. The control plane serves it on its next re-read. With a state
+// dir the served file is the copy the control plane seeded there.
+func (h *H) EditControlPlaneConfig(edit func(string) string) string {
+	h.tb.Helper()
+	path := h.controlPlaneConfigPath()
+	cur, err := os.ReadFile(path)
+	if err != nil {
+		h.tb.Fatalf("harness: read control-plane config: %v", err)
+	}
+	next := []byte(edit(string(cur)))
+	tmp := path + ".edit"
+	if err := os.WriteFile(tmp, next, 0o600); err != nil {
+		h.tb.Fatalf("harness: write control-plane config: %v", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		h.tb.Fatalf("harness: replace control-plane config: %v", err)
+	}
+	sum := sha256.Sum256(next)
+	return "file:" + hex.EncodeToString(sum[:])
+}
+
+// ReadControlPlaneConfig returns the control plane's served YAML as it is on
+// disk now (with a state dir, the copy the control plane seeded there).
+func (h *H) ReadControlPlaneConfig() string {
+	h.tb.Helper()
+	cur, err := os.ReadFile(h.controlPlaneConfigPath())
+	if err != nil {
+		h.tb.Fatalf("harness: read control-plane config: %v", err)
+	}
+	return string(cur)
+}
+
+// controlPlaneConfigPath is the served YAML: the seeded copy in the state dir
+// when the control plane has one, otherwise the config it was started with.
+func (h *H) controlPlaneConfigPath() string {
+	if h.wantAdminAudit || h.wantConsole || h.versionedPolicy {
+		return filepath.Join(h.root, "cp-state", "config.yaml")
+	}
+	return filepath.Join(h.root, "cp-config.yaml")
 }

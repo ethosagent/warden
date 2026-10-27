@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -41,7 +42,7 @@ func newLLMProvidersServer(t *testing.T, withWriter bool) (*Server, *[]config.LL
 		return LLMProvidersView{Providers: out}
 	})
 	if withWriter {
-		srv.SetLLMProvidersWriter(func(ps []config.LLMProvider) error {
+		srv.SetLLMProvidersWriter(func(_ context.Context, ps []config.LLMProvider, _ WriteMeta) error {
 			*stored = ps
 			return nil
 		})
