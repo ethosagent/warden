@@ -189,8 +189,10 @@ func RunCheckpoints(ctx context.Context, s *Store, e Emitter, interval time.Dura
 			s.checkpoint(ctx, e, clk)
 			return
 		case <-t.C():
-			s.checkpoint(ctx, e, clk)
+			// Re-arm first, as at startup: once a checkpoint is visible the
+			// next one is already scheduled.
 			t.Reset(interval)
+			s.checkpoint(ctx, e, clk)
 		}
 	}
 }
