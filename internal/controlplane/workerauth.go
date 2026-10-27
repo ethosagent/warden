@@ -1,6 +1,7 @@
 package controlplane
 
 import (
+	"context"
 	"crypto/subtle"
 	"errors"
 	"log/slog"
@@ -45,17 +46,22 @@ var (
 	ErrProxyIDMismatch = errors.New("worker auth: proxy id mismatch")
 )
 
-// workerAuthMode is resolved once at startup. strict (worker tokens only) is
-// added by W-P1-WTOK-04 as one more case in resolveWorkerAuthMode and Authenticate.
+// workerAuthMode is resolved once at startup.
 type workerAuthMode string
 
 const (
-	modeOpen  workerAuthMode = "open"  // no shared token: anonymous accepted
-	modeMixed workerAuthMode = "mixed" // shared token set: tokens or the shared token
+	modeOpen   workerAuthMode = "open"   // no shared token: anonymous accepted
+	modeMixed  workerAuthMode = "mixed"  // shared token set: tokens or the shared token
+	modeStrict workerAuthMode = "strict" // --require-worker-tokens: wwt_ tokens only
 )
 
-func resolveWorkerAuthMode(legacy string) workerAuthMode {
-	if legacy == "" {
+// resolveWorkerAuthMode picks the mode: strict wins over everything (a shared
+// token never authenticates a worker in it), then a shared token means mixed.
+func resolveWorkerAuthMode(legacy string, strict bool) workerAuthMode {
+	switch {
+	case strict:
+		return modeStrict
+	case legacy == "":
 		return modeOpen
 	}
 	return modeMixed
@@ -65,6 +71,9 @@ const (
 	// maxLegacyIDs caps the per-proxy-id legacy request counter. The ids are
 	// unverified headers, so the map must not grow without bound.
 	maxLegacyIDs = 10_000
+	// legacyWarnEvery is the rate limit of the "legacy worker token in use"
+	// warning per proxy id; its set is bounded by maxLegacyIDs too.
+	legacyWarnEvery = time.Hour
 	// rejectLogEvery is the rate limit per (reason, remote address).
 	rejectLogEvery = time.Minute
 	// maxRejectKeys bounds the rejection-log rate-limit map.
@@ -83,6 +92,9 @@ type WorkerAuthConfig struct {
 	Clock    clock.Clock
 	// TLS reports whether the control plane serves TLS (for the startup warning).
 	TLS bool
+	// Strict (--require-worker-tokens) accepts wwt_ worker tokens only: the
+	// shared token and anonymous callers get 401 whatever Legacy holds.
+	Strict bool
 }
 
 // WorkerAuthenticator authenticates the worker-plane routes (/policy,
@@ -102,6 +114,8 @@ type WorkerAuthenticator struct {
 	counters   map[[2]string]int64 // {kind, outcome}: bounded labels, no proxy id
 	legacyReqs map[string]int64    // per proxy id, capped at maxLegacyIDs
 	rejectedAt map[string]time.Time
+	legacyWarn map[string]time.Time // last legacy warning per proxy id, capped
+	nextSweep  time.Time            // earliest next expiry sweep of legacyWarn
 }
 
 // NewWorkerAuthenticator builds the authenticator and resolves the mode.
@@ -113,23 +127,46 @@ func NewWorkerAuthenticator(c WorkerAuthConfig) *WorkerAuthenticator {
 		c.Clock = clock.Real()
 	}
 	return &WorkerAuthenticator{
-		mode: resolveWorkerAuthMode(c.Legacy), legacy: c.Legacy, tokens: c.Tokens,
+		mode: resolveWorkerAuthMode(c.Legacy, c.Strict), legacy: c.Legacy, tokens: c.Tokens,
 		registry: c.Registry, log: c.Logger, clk: c.Clock, tls: c.TLS,
 		counters:   map[[2]string]int64{},
 		legacyReqs: map[string]int64{},
 		rejectedAt: map[string]time.Time{},
+		legacyWarn: map[string]time.Time{},
 	}
 }
 
 // LogMode logs the resolved mode once, with the open-mode and no-TLS warnings.
 func (a *WorkerAuthenticator) LogMode() {
-	a.log.Info("control plane worker auth", "auth_mode", string(a.mode), "worker_tokens", a.tokens != nil)
+	a.log.Info("control plane worker auth", "auth_mode", string(a.mode),
+		"legacy_token", a.legacy != "", "tls", a.tls,
+		"worker_tokens", a.tokens != nil, "active_worker_tokens", a.activeTokens())
 	if a.mode == modeOpen {
-		a.log.Warn("worker auth is open: anonymous callers are accepted on /policy, /control/heartbeat and /central/ingest (set --token-env or issue worker tokens)")
+		a.log.Warn("worker auth is open: anonymous callers are accepted on /policy, /control/heartbeat and /central/ingest (issue worker tokens, or set --legacy-token-env)")
 	}
 	if !a.tls && (a.mode != modeOpen || a.tokens != nil) {
 		a.log.Warn("worker auth tokens are sent in clear text: the control plane has no TLS (set --ca-cert and --ca-key)")
 	}
+}
+
+// activeTokens counts the tokens that can authenticate now (not revoked, not
+// expired); 0 without a token store.
+func (a *WorkerAuthenticator) activeTokens() int {
+	if a.tokens == nil {
+		return 0
+	}
+	list, err := a.tokens.List(context.Background())
+	if err != nil {
+		a.log.Warn("control plane worker auth: cannot count worker tokens", "err", err)
+		return 0
+	}
+	now, n := a.clk.Now(), 0
+	for _, t := range list {
+		if t.RevokedAt.IsZero() && !a.tokens.expired(t, now) {
+			n++
+		}
+	}
+	return n
 }
 
 // bearer returns the presented bearer credential, if any.
@@ -168,6 +205,7 @@ func (a *WorkerAuthenticator) Authenticate(r *http.Request) (WorkerPrincipal, er
 		a.tokens.MarkUsed(p.TokenID, a.clk.Now())
 	case KindLegacy:
 		a.countLegacy(p.ProxyID)
+		a.warnLegacy(p.ProxyID)
 	}
 	if a.registry != nil {
 		a.registry.recordAuth(p)
@@ -212,6 +250,14 @@ func (a *WorkerAuthenticator) resolve(r *http.Request) (p WorkerPrincipal, reaso
 	}
 	hdr := r.Header.Get(analytics.ProxyIDHeader)
 	switch a.mode {
+	case modeStrict:
+		// Only wwt_ tokens count: the shared token and anonymous callers are
+		// refused whatever they present.
+		p.Kind = KindNone
+		if has {
+			p.Kind = KindLegacy
+		}
+		return p, "worker_token_required", "", ErrUnauthorized
 	case modeOpen:
 		return WorkerPrincipal{Kind: KindNone, ProxyID: hdr}, "", "", nil
 	default: // modeMixed
@@ -269,6 +315,41 @@ func (a *WorkerAuthenticator) LegacyRequests(proxyID string) int64 {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.legacyReqs[proxyID]
+}
+
+// warnLegacy logs "legacy worker token in use" at most once per proxy id per
+// hour, so a fleet still on the shared token shows up in the log without one
+// line per request. The set is bounded by maxLegacyIDs (the ids are unverified
+// headers): at the cap, expired entries are swept at most once a minute and an
+// id that still does not fit goes unwarned. Never logs the token.
+func (a *WorkerAuthenticator) warnLegacy(proxyID string) {
+	now := a.clk.Now()
+	a.mu.Lock()
+	at, seen := a.legacyWarn[proxyID]
+	if seen && now.Sub(at) < legacyWarnEvery {
+		a.mu.Unlock()
+		return
+	}
+	if !seen && len(a.legacyWarn) >= maxLegacyIDs {
+		if now.Before(a.nextSweep) {
+			a.mu.Unlock()
+			return
+		}
+		a.nextSweep = now.Add(time.Minute)
+		for k, t := range a.legacyWarn {
+			if now.Sub(t) >= legacyWarnEvery {
+				delete(a.legacyWarn, k)
+			}
+		}
+		if len(a.legacyWarn) >= maxLegacyIDs {
+			a.mu.Unlock()
+			return
+		}
+	}
+	a.legacyWarn[proxyID] = now
+	a.mu.Unlock()
+	a.log.Warn("legacy worker token in use", "proxy_id", proxyID,
+		"hint", "issue this worker its own token (docs/control-plane.md, \"Migrating from WARDEN_CP_TOKEN\")")
 }
 
 func (a *WorkerAuthenticator) legacyIDs() int {

@@ -98,7 +98,7 @@ the change — no restart.
 ```sh
 # Control plane (HTTPS, minted from the proxy CA):
 warden control-plane --config configs/config.control-plane.yaml \
-  --listen 0.0.0.0:7070 --token-env WARDEN_CP_TOKEN \
+  --listen 0.0.0.0:7070 --legacy-token-env WARDEN_CP_TOKEN \
   --admin-token-env WARDEN_CP_ADMIN_TOKEN \
   --ca-cert certs/proxy-ca.crt --ca-key certs/proxy-ca.key --tls-host control-plane
 
@@ -182,7 +182,7 @@ on every human route (see [Migrating from none to oidc](#migrating-from-none-to-
 
 - **The admin token.** Start the control plane with `--admin-token-env <ENV>`
   (for example `--admin-token-env WARDEN_CP_ADMIN_TOKEN`) naming the env var that
-  holds its own admin bearer. It is separate from the `--token-env` token workers
+  holds its own admin bearer. It is separate from the `--legacy-token-env` token workers
   present: once it is set, the worker token gets `401` on dashboard writes and on
   `/central/secrets`, and the admin token gets `401` on the worker routes
   (`/policy`, `/control/heartbeat`, `/central/ingest`). Use different values; the
@@ -191,7 +191,7 @@ on every human route (see [Migrating from none to oidc](#migrating-from-none-to-
   Giving the control plane its own admin token means retiring the shared worker
   token (per-worker tokens) never disables dashboard writes.
 - **Fallback.** Without `--admin-token-env`, the admin bearer is the shared
-  `--token-env` token, exactly as before, and startup logs one warning:
+  `--legacy-token-env` token, exactly as before, and startup logs one warning:
   `dashboard writes use the shared worker token; set --admin-token-env`. With no
   token of either kind, `/central/secrets` keeps the development pass-through of
   the worker routes, and dashboard writes are refused (below).
@@ -202,7 +202,7 @@ on every human route (see [Migrating from none to oidc](#migrating-from-none-to-
   `--require-console-auth` to make none mode a startup error instead.
 
 - **Fail closed.** A control plane started with no admin bearer (neither
-  `--admin-token-env` nor `--token-env`, or their variables empty) refuses every
+  `--admin-token-env` nor `--legacy-token-env`, or their variables empty) refuses every
   dashboard write with `403` and a message (`dashboard writes are disabled`) that
   names `--admin-token-env`. There is no open mode for dashboard writes. A
   whitespace-only token counts as not configured. When `--admin-token-env` names
@@ -269,7 +269,7 @@ In `oidc` mode every human route needs a session: each `/dashboard/*` route need
 least the viewer role, writes need the CSRF header, and `/central/secrets` (GET, POST
 and `DELETE /central/secrets/{key}`) needs an admin session plus CSRF. An
 `Authorization` header is ignored on those routes, so neither the shared
-`--token-env` token, the `--admin-token-env` token nor any other bearer opens them (401 without a session, 403 for a
+`--legacy-token-env` token, the `--admin-token-env` token nor any other bearer opens them (401 without a session, 403 for a
 role below admin). The worker routes (`/policy`, `/control/heartbeat`,
 `/central/ingest`) keep the shared bearer in both modes.
 
@@ -871,6 +871,98 @@ With admin audit on, create and revoke are rows (`worker_token.create`, `worker_
 target `worker_tokens`, `target_ref` `token:<id>`); no row, log line or later response holds the token.
 A `wwt_` bearer never opens these routes. `GET /dashboard/api/workers` adds `authKind`
 (`token`, `legacy` or `none`), `tokenName`, `tokenLastUsed` and `legacyRequests` per worker.
+
+## Migrating from WARDEN_CP_TOKEN
+
+Until now every worker and the control plane shared one bearer token (`WARDEN_CP_TOKEN` in the
+compose recipes, named by `--token-env`). Per-worker tokens replace it: one revocable `wwt_...`
+token per worker, bound to one proxy id. The control plane has three auth modes, resolved once at
+startup and logged as `auth_mode=...`:
+
+| `auth_mode` | When | Workers authenticate with |
+|---|---|---|
+| `open` | no shared token, not strict | any caller without a `wwt_` token (development; a warning is logged). A `wwt_` bearer is always validated |
+| `mixed` | `--legacy-token-env` set (or its deprecated alias `--token-env`) | a worker token or the shared token |
+| `strict` | `--require-worker-tokens` | a worker token only: the shared token and anonymous callers get `401` |
+
+The startup line `control plane worker auth` also carries `legacy_token` (whether a shared token is
+configured, never its value), `tls` and `active_worker_tokens`. Worker tokens over plain HTTP log a
+warning, since the bearer then travels in clear text.
+
+The flags only change how **workers** authenticate. Dashboard writes and `/central/secrets` take
+the control plane's own admin bearer (`--admin-token-env`), so removing the shared token never
+disables them. The shared token reaches the write guard only as the fallback while
+`--admin-token-env` is unset.
+
+| Flag | Meaning |
+|---|---|
+| `--legacy-token-env <ENV>` | env var holding the shared worker token. Unset (the default) means there is none. `--token-env` is a deprecated alias: it still works and logs a deprecation notice; naming two different variables with the two flags is a startup error. |
+| `--require-worker-tokens` | strict mode (default off). Needs `--state-dir` (tokens live in its database), TLS (`--ca-cert` and `--ca-key`) unless `--allow-insecure-worker-auth` is set, and no legacy token. |
+| `--allow-insecure-worker-auth` | lets `--require-worker-tokens` run without TLS (development only). |
+
+A violation exits non-zero before the control plane listens, with an error that names the flag
+(`--require-worker-tokens requires --state-dir`, `--require-worker-tokens cannot be combined with
+--legacy-token-env`, `--require-worker-tokens requires TLS (--ca-cert and --ca-key) or
+--allow-insecure-worker-auth`).
+
+### Migration steps
+
+1. **Upgrade with `--legacy-token-env` and set `--admin-token-env`.** Rename `--token-env` to
+   `--legacy-token-env` (the old name keeps working) and add `--admin-token-env
+   WARDEN_CP_ADMIN_TOKEN` with a value different from the shared token, so dashboard writes no
+   longer depend on it. Add `--state-dir` if the control plane has none. The control plane starts
+   in `mixed` mode: nothing changes for the workers.
+2. **Create one token per worker.** Use `POST /dashboard/api/worker-tokens` (see [Worker tokens
+   API](#worker-tokens-api)) with `{"name": "...", "proxyID": "..."}`. The plaintext is shown once
+   in the response and never again. Minting needs `console.auth: oidc` and an admin session; with
+   `console.auth: none` the API answers `403 use_cli` (the offline `warden control-plane token`
+   command it points to is not shipped yet). Give every worker (or replica) its own token and its
+   own `proxyID`.
+3. **Point the worker at its token.** Put the token in an env var of the worker and name that var
+   in both `controlPlane.tokenEnv` and `central.tokenEnv` (policy pull and heartbeat use the first,
+   analytics ingest the second). Set `central.proxyID` to the same value the token is bound to:
+   the control plane answers `403 proxy id mismatch` for any other `X-Warden-Proxy-ID`. Without
+   `central.proxyID` the worker sends no id and the control plane records the token's bound id.
+   Restart the worker. No code or image change is needed.
+4. **Confirm no legacy badge.** `GET /dashboard/api/workers` shows `authKind` per worker (`token`,
+   `legacy` or `none`) and, for `legacy` workers, `legacyRequests`. While any worker still
+   presents the shared token the control plane logs `legacy worker token in use` once per proxy id
+   per hour (never the token). The control plane has no metrics endpoint in P1, so the fleet view and
+   this warning are the signals. Move on only when every worker shows `authKind: token`.
+5. **Restart with `--require-worker-tokens`** and without `--legacy-token-env`. The startup line now
+   says `auth_mode=strict`. The shared token, an anonymous caller or any non-`wwt_` bearer gets
+   `401` on `/policy`, `/control/heartbeat` and `/central/ingest`.
+6. **Unset the shared env var** (`WARDEN_CP_TOKEN`) everywhere it was distributed.
+
+Strict mode with `console.auth: none` and no `--admin-token-env` (and so no admin token at all)
+fails closed: dashboard writes are refused with `403`, `/central/secrets` is not mounted (`404`),
+and the control plane logs an ERROR, `dashboard writes are disabled: set --admin-token-env`. With
+`--admin-token-env` set, both keep working. In `console.auth: oidc` sessions replace the admin
+bearer and strict mode needs no admin token.
+
+### Rotation
+
+A proxy id can hold at most two active tokens at once, so a rotation overlaps old and new:
+
+1. Create a second token for the same `proxyID` (a third active one is refused with `409`).
+2. Restart the worker with the new token in its env var.
+3. Check the old token's `lastUsedAt` stops moving, then revoke it
+   (`DELETE /dashboard/api/worker-tokens/{id}`).
+
+### One token per replica
+
+P1 has no prefix binding: a token is bound to exactly one proxy id, compared exactly. Run each
+replica with its own token and its own stable `central.proxyID`. Autoscaled pools whose replicas
+cannot carry a stable id move to per-pod certificates with worker enrollment in P2 (W-P2-WCA).
+
+### A revoked worker
+
+A revoked (or expired) token gets `401` on its next request, with the same generic body as any
+other bad credential. The worker keeps enforcing the last policy it pulled, which stays
+default-deny (anything not on that allowlist is still blocked), and it can no longer heartbeat or
+ingest, so the fleet view shows it offline. A worker that restarts while revoked boots fail-closed
+and denies all egress until a pull succeeds. A long-poll already held when the token is revoked ends
+as usual; its next poll is refused.
 
 ## Worker admin token
 

@@ -115,6 +115,14 @@ var All = slices.Concat(
 		{Name: "worker_token_admin_api", Opts: workerTokenAdminOpts(), Run: workerTokenAdminAPI},
 		// Without console sign-in the API is read-only: writes answer use_cli.
 		{Name: "worker_token_admin_use_cli", Opts: workerTokenOpts(), Run: workerTokenAdminUseCLI},
+		// Strict worker auth (W-P1-WTOK-04): --require-worker-tokens refuses the
+		// shared token on the worker routes while the admin token keeps dashboard
+		// and secret writes working; with no admin token both fail closed. Mixed
+		// mode marks shared-token workers legacy and warns once per proxy id.
+		// In-process only (state dir, fake clock).
+		{Name: "strict_worker_auth", Opts: strictAuthOpts(), Run: strictWorkerAuth},
+		{Name: "strict_worker_auth_no_admin_token", Opts: strictNoAdminOpts(), Run: strictNoAdminTokenFailsClosed},
+		{Name: "legacy_worker_token_warning", Run: legacyWorkerWarning},
 
 		// Admin audit gate (W-P1-AAUD-05): enabled, the control plane writes the
 		// genesis entry and logs its key_id before serving. In-process only (it

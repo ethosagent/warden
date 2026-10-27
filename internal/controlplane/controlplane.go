@@ -67,6 +67,10 @@ type Config struct {
 	// fallback to Token off, so a flag naming an empty variable refuses writes
 	// instead of reopening them to the shared worker token.
 	RequireAdminToken bool
+	// RequireWorkerTokens is --require-worker-tokens: the worker routes accept
+	// wwt_ tokens only (strict mode). Run refuses it together with a shared
+	// token, without a state dir, or without TLS.
+	RequireWorkerTokens bool
 	// MaxEvents caps the central analytics store (0 = default).
 	MaxEvents int
 	// Store is the fleet analytics backend (persistent SQLite or in-memory). When
@@ -284,7 +288,7 @@ func New(cfg Config) *Server {
 	// with a default one, replaced here by the configured one.
 	s.workerAuth = NewWorkerAuthenticator(WorkerAuthConfig{
 		Legacy: cfg.Token, Tokens: cfg.WorkerTokens, Registry: registry,
-		Logger: cfg.Logger, Clock: cfg.Clock, TLS: cfg.TLS,
+		Logger: cfg.Logger, Clock: cfg.Clock, TLS: cfg.TLS, Strict: cfg.RequireWorkerTokens,
 	})
 	s.policy.auth = s.workerAuth
 	s.workerAuth.LogMode()
@@ -296,6 +300,7 @@ func New(cfg Config) *Server {
 	s.initSessions()
 	s.initAuth()
 	s.warnAdminToken()
+	s.failClosedWithoutAdminToken()
 	if cfg.AdminAudit != nil {
 		s.enableAdminAudit(cfg.AdminAudit, cfg.AdminAudit.Probe, cfg.AdminAudit.StateHash)
 		s.auditRec = cfg.AdminAudit
