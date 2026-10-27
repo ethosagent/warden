@@ -68,8 +68,9 @@ func NewSecretStore(cfg config.SecretStoreConfig, logger *slog.Logger) (secrets.
 
 // bearerOK reports whether the request presents the configured bearer token,
 // compared in constant time. An empty configured token disables auth (development
-// only), matching the other CP routes. Shared by the secret endpoints (in
-// console.auth none only) and the heartbeat handler so the gate is defined once.
+// only), matching the other CP routes. It gates /control/heartbeat (/policy and
+// /central/ingest check the same token in their own handlers); the human secret
+// routes use adminBearerOK instead.
 func (s *Server) bearerOK(r *http.Request) bool {
 	if s.cfg.Token == "" {
 		return true
@@ -91,7 +92,8 @@ func secretsAction(method string) string {
 }
 
 // secretsAuthOK gates every /central/secrets request and writes the refusal
-// itself. In console.auth none it is bearerOK, exactly as before. In oidc mode
+// itself. In console.auth none it is adminBearerOK: the CP admin bearer, or the
+// shared worker token while no admin token is configured. In oidc mode
 // the routes are human routes: only an admin session counts, and the
 // Authorization header is never read, so neither the shared token nor any
 // other bearer opens them. withSession (wrapped around both mounts) has
@@ -100,7 +102,7 @@ func secretsAction(method string) string {
 // with sessions unavailable (no state db) every request is therefore 401.
 func (s *Server) secretsAuthOK(w http.ResponseWriter, r *http.Request) bool {
 	if s.cfg.Console.Auth != config.ConsoleAuthOIDC {
-		if !s.bearerOK(r) {
+		if !s.adminBearerOK(r) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return false
 		}
@@ -124,7 +126,7 @@ func (s *Server) secretsAuthOK(w http.ResponseWriter, r *http.Request) bool {
 
 // handleSecrets serves the collection route POST /central/secrets (upsert) and
 // GET /central/secrets (list metadata). It is mounted only when a writable store
-// is configured; secretsAuthOK fronts every method (the shared bearer in none
+// is configured; secretsAuthOK fronts every method (the admin bearer in none
 // mode, an admin session plus CSRF in oidc mode).
 func (s *Server) handleSecrets(w http.ResponseWriter, r *http.Request) {
 	if !s.secretsAuthOK(w, r) {

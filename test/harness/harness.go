@@ -162,6 +162,9 @@ type H struct {
 	// wantAdminAudit (WithAdminAudit) boots the control plane with
 	// console.adminAudit.enabled and a state dir.
 	wantAdminAudit bool
+	// wantCPAdmin (WithControlPlaneAdminToken) boots the control plane with its
+	// own admin bearer (--admin-token-env), separate from the worker token.
+	wantCPAdmin bool
 
 	// tokenClients are the AgentWithProxyToken / AgentH2WithProxyToken clients,
 	// kept so cleanup can close their idle tunnels.
@@ -614,6 +617,9 @@ func (h *H) boot() {
 	if h.wantConsole {
 		h.prepareConsole()
 	}
+	if h.wantCPAdmin {
+		h.prepareCPAdmin()
+	}
 
 	if h.suppliedTarget != nil {
 		if h.cpDownAtBoot {
@@ -692,6 +698,7 @@ func (h *H) buildInprocessTarget() *inprocess {
 		tokenEnv: cpTokenEnv,
 	}
 	h.applyConsole(&ip.cp.params, &ip.cp.addr)
+	h.applyCPAdmin(&ip.cp.params)
 	return ip
 }
 
