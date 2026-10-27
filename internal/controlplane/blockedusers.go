@@ -416,7 +416,7 @@ func (s *Server) initBlockStore() {
 		return
 	}
 	s.blocks = NewBlockStore(s.cfg.State, BlockStoreOptions{Clock: s.cfg.Clock, OnRefresh: s.policy.Refresh})
-	rep := &blockLoadReporter{logger: s.cfg.Logger, now: s.cfg.Clock.Now, publish: s.publishFinding}
+	rep := &blockLoadReporter{logger: s.cfg.Logger, now: s.cfg.Clock.Now, publish: s.publishFindingOK}
 	if err := s.policy.addOverlay(blockedUsersOverlay(s.blocks, rep)); err != nil {
 		// Unreachable: registration precedes the first Refresh and the name is
 		// unique. Logged rather than ignored so a wiring change shows up.
@@ -424,9 +424,9 @@ func (s *Server) initBlockStore() {
 	}
 }
 
-// publishFinding sends f to the alert pipeline's bus and reports whether there
+// publishFindingOK sends f to the alert pipeline's bus and reports whether there
 // was one. The pipeline is built after the first Refresh, so it is read per call.
-func (s *Server) publishFinding(f integration.Finding) bool {
+func (s *Server) publishFindingOK(f integration.Finding) bool {
 	if s.pipeline == nil {
 		return false
 	}
