@@ -487,7 +487,14 @@ func (r *BackupRunner) write(ctx context.Context) (res BackupResult, db string, 
 			errBackupSpace, free, float64(need)*backupMinSpace, need)
 	}
 
-	tmp := filepath.Join(r.cfg.Dir, backupTmpPrefix+start.Format(BackupSetLayout))
+	// A set name is one second wide: when a set (or a stale .tmp-) already
+	// holds this second, as with an on-demand run beside the schedule, take the
+	// next free one rather than fail after copying everything.
+	stamp := start
+	for taken(r.cfg.Dir, stamp) {
+		stamp = stamp.Add(time.Second)
+	}
+	tmp := filepath.Join(r.cfg.Dir, backupTmpPrefix+stamp.Format(BackupSetLayout))
 	if err := os.Mkdir(tmp, 0o700); err != nil {
 		return res, db, fmt.Errorf("backup: create set dir: %w", err)
 	}
@@ -553,7 +560,7 @@ func (r *BackupRunner) write(ctx context.Context) (res BackupResult, db string, 
 			return res, db, err
 		}
 	}
-	name := start.Format(BackupSetLayout)
+	name := stamp.Format(BackupSetLayout)
 	final := filepath.Join(r.cfg.Dir, name)
 	if err := os.Rename(tmp, final); err != nil {
 		return res, db, fmt.Errorf("backup: publish set: %w", err)
@@ -608,6 +615,17 @@ func writeBackupFile(path string, b []byte) (BackupFile, error) {
 	}
 	sum := sha256.Sum256(b)
 	return BackupFile{Name: name, SHA256: hex.EncodeToString(sum[:]), Size: int64(len(b))}, nil
+}
+
+// taken reports whether dir already holds the set or .tmp- name for at.
+func taken(dir string, at time.Time) bool {
+	n := at.Format(BackupSetLayout)
+	for _, p := range []string{n, backupTmpPrefix + n} {
+		if _, err := os.Lstat(filepath.Join(dir, p)); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func syncDir(dir string) error {

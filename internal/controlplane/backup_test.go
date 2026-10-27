@@ -192,8 +192,15 @@ func TestBackup_ConsistentUnderWrites(t *testing.T) {
 			}
 		}()
 	}
-	for committed.Load() < 50 {
-		time.Sleep(time.Millisecond)
+	for deadline := time.Now().Add(30 * time.Second); committed.Load() < 50; time.Sleep(time.Millisecond) {
+		select {
+		case err := <-errc:
+			t.Fatalf("writer failed before the backup: %v", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("writers did not commit 50 rows in 30s")
+		}
 	}
 
 	cfg := testBackupConfig(t)
@@ -434,8 +441,13 @@ func TestBackup_NoOverlap(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatalf("first RunOnce: %v", err)
 	}
-	if _, err := r.RunOnce(context.Background()); errors.Is(err, ErrBackupInProgress) {
-		t.Fatal("the lock was not released")
+	// Released; a run in the same second takes the next set name.
+	second, err := r.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RunOnce after release: %v", err)
+	}
+	if sets, _ := listBackupSets(cfg.Dir); len(sets) != 2 || sets[0].name != second.Set {
+		t.Fatalf("sets = %v, want two distinct sets", sets)
 	}
 }
 
