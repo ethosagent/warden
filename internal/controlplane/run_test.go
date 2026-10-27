@@ -421,3 +421,140 @@ func (s *syncBuffer) String() string {
 	defer s.mu.Unlock()
 	return s.b.String()
 }
+
+// runCPServing boots Run on loopback with p and returns the base URL, the log buffer
+// and a stop func that cancels and waits for Run to return nil.
+func runCPServing(t *testing.T, p Params) (string, *syncBuffer, func()) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	ready := make(chan string, 1)
+	errCh := make(chan error, 1)
+	out := &syncBuffer{}
+	p.ListenAddr = "127.0.0.1:0"
+	p.AnalyticsProvider = "memory"
+	p.AlertsDB = filepath.Join(t.TempDir(), "alerts.db")
+	p.OnReady = func(a string) { ready <- a }
+	go func() { errCh <- Run(ctx, out, p) }()
+	var addr string
+	select {
+	case addr = <-ready:
+	case err := <-errCh:
+		cancel()
+		t.Fatalf("Run returned early: %v", err)
+	case <-time.After(10 * time.Second):
+		cancel()
+		t.Fatal("timed out waiting for OnReady")
+	}
+	stop := func() {
+		cancel()
+		if err := <-errCh; err != nil {
+			t.Errorf("Run = %v", err)
+		}
+	}
+	return "http://" + addr, out, stop
+}
+
+func putPolicy(t *testing.T, base, bearer string) int {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPut, base+"/dashboard/api/policy", strings.NewReader(policyPutBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	return resp.StatusCode
+}
+
+// TestAdminTokenEnvEmpty: --admin-token-env naming an empty variable logs the
+// WARN and refuses dashboard writes, even with the shared worker token.
+func TestAdminTokenEnvEmpty(t *testing.T) {
+	t.Setenv("WARDEN_TEST_CP_TOKEN", workerTok)
+	t.Setenv("WARDEN_TEST_CP_ADMIN_TOKEN", "  ")
+	base, logs, stop := runCPServing(t, Params{
+		ConfigPath: writePolicyFile(t, "api.openai.com"),
+		TokenEnv:   "WARDEN_TEST_CP_TOKEN", AdminTokenEnv: "WARDEN_TEST_CP_ADMIN_TOKEN",
+	})
+	defer stop()
+	for _, bearer := range []string{workerTok, ""} {
+		if c := putPolicy(t, base, bearer); c != http.StatusForbidden {
+			t.Errorf("write with bearer %q = %d, want 403", bearer, c)
+		}
+	}
+	if !strings.Contains(logs.String(), "control-plane: admin-token-env set but empty; dashboard writes will be refused") {
+		t.Errorf("missing empty-env WARN:\n%s", logs.String())
+	}
+}
+
+// TestAdminTokenNeverLogged: neither the admin token nor the shared token
+// appears in the control plane's logs across startup, an accepted write and a
+// refused one, including the equal-tokens warning path.
+func TestAdminTokenNeverLogged(t *testing.T) {
+	for name, worker := range map[string]string{"distinct": workerTok, "equal": adminTok} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("WARDEN_TEST_CP_TOKEN", worker)
+			t.Setenv("WARDEN_TEST_CP_ADMIN_TOKEN", adminTok)
+			base, logs, stop := runCPServing(t, Params{
+				ConfigPath: writePolicyFile(t, "api.openai.com"),
+				TokenEnv:   "WARDEN_TEST_CP_TOKEN", AdminTokenEnv: "WARDEN_TEST_CP_ADMIN_TOKEN",
+			})
+			if c := putPolicy(t, base, adminTok); c != http.StatusOK {
+				t.Errorf("write with the admin token = %d, want 200", c)
+			}
+			if name == "distinct" {
+				if c := putPolicy(t, base, worker); c != http.StatusUnauthorized {
+					t.Errorf("write with the worker token = %d, want 401", c)
+				}
+			}
+			stop()
+			out := logs.String()
+			if strings.Contains(out, adminTok) || strings.Contains(out, worker) {
+				t.Fatalf("a token value reached the logs:\n%s", out)
+			}
+			if name == "equal" && !strings.Contains(out, "admin token equals the shared worker token") {
+				t.Errorf("missing equal-tokens WARN:\n%s", out)
+			}
+			if strings.Contains(out, "dashboard writes use the shared worker token") {
+				t.Errorf("fallback WARN logged with an admin token set:\n%s", out)
+			}
+		})
+	}
+}
+
+// TestResolveAdminToken: the empty-variable WARN says writes are refused only in
+// console.auth none; in oidc sessions replace the admin bearer, so it says the
+// token is unused instead. A set value is trimmed and never logged.
+func TestResolveAdminToken(t *testing.T) {
+	env := map[string]string{"SET": " " + adminTok + "\n", "EMPTY": "  "}
+	getenv := func(k string) string { return env[k] }
+	for _, c := range []struct {
+		name, envName string
+		auth          string
+		want, log     string
+	}{
+		{"unset", "", config.ConsoleAuthNone, "", ""},
+		{"set", "SET", config.ConsoleAuthNone, adminTok, ""},
+		{"empty none", "EMPTY", config.ConsoleAuthNone, "", "admin-token-env set but empty; dashboard writes will be refused"},
+		{"empty oidc", "EMPTY", config.ConsoleAuthOIDC, "", "admin-token-env set but empty; the admin token is unused in console.auth oidc"},
+	} {
+		logger, buf := testLogger()
+		if got := resolveAdminToken(logger, c.envName, c.auth, getenv); got != c.want {
+			t.Errorf("%s: token = %q, want %q", c.name, got, c.want)
+		}
+		out := buf.String()
+		if c.log == "" && out != "" || c.log != "" && !strings.Contains(out, c.log) {
+			t.Errorf("%s: log = %q, want %q", c.name, out, c.log)
+		}
+		if c.auth == config.ConsoleAuthOIDC && strings.Contains(out, "will be refused") {
+			t.Errorf("%s: oidc log claims writes are refused: %q", c.name, out)
+		}
+		if strings.Contains(out, adminTok) {
+			t.Errorf("%s: log carries the token value", c.name)
+		}
+	}
+}

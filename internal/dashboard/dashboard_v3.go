@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ethosagent/warden/internal/adminaudit"
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/audit"
 	"github.com/ethosagent/warden/internal/integration"
@@ -162,6 +163,8 @@ func (s *Server) putSecret(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "key and value are required")
 		return
 	}
+	// The control plane's admin audit row names the key, never the value.
+	adminaudit.Annotate(r.Context(), "secret:"+key, map[string]string{adminaudit.DetailOp: "put"})
 	if err := s.secretStore.Put(r.Context(), key, req.Value); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -185,6 +188,7 @@ func (s *Server) deleteSecret(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "key is required")
 		return
 	}
+	adminaudit.Annotate(r.Context(), "secret:"+key, map[string]string{adminaudit.DetailOp: "delete"})
 	if err := s.secretStore.Delete(r.Context(), key); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return

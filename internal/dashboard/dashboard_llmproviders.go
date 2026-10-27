@@ -14,6 +14,7 @@ package dashboard
 // bounded, value-free reason string.
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -43,6 +44,9 @@ type LLMProviderView struct {
 type LLMProvidersView struct {
 	Providers []LLMProviderView `json:"providers"`
 	Editable  bool              `json:"editable"`
+	// Version is the head policy version in versioned mode (the registry is
+	// part of the versioned document); absent in file mode.
+	Version int64 `json:"version,omitempty"`
 }
 
 // llmProviderReq is one entry in the PUT/POST body. It carries the apiKeyEnv NAME
@@ -67,8 +71,9 @@ func (s *Server) SetLLMProvidersSource(fn func() LLMProvidersView) {
 // SetLLMProvidersWriter enables editing the registry from the dashboard. Like the
 // integrations/detection writers it persists the FULL provider list to the served/own
 // config file and reloads the live consumers (client map + judge + Explore
-// SQLGenerator). Nodes without it leave this nil, so PUT/POST return 405.
-func (s *Server) SetLLMProvidersWriter(fn func([]config.LLMProvider) error) {
+// SQLGenerator). fn receives the request context, which carries the caller's
+// identity. Nodes without it leave this nil, so PUT/POST return 405.
+func (s *Server) SetLLMProvidersWriter(fn func(context.Context, []config.LLMProvider, WriteMeta) error) {
 	s.llmProvidersWriter = fn
 }
 
@@ -89,7 +94,11 @@ func (s *Server) handleLLMProviders(w http.ResponseWriter, r *http.Request) {
 
 // getLLMProviders returns the configured providers + resolution status. A nil source
 // yields an empty list; editable is true only where a writer is configured.
-func (s *Server) getLLMProviders(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) getLLMProviders(w http.ResponseWriter, r *http.Request) {
+	version, ok := s.versionForGet(w, r)
+	if !ok {
+		return
+	}
 	var v LLMProvidersView
 	if s.llmProvidersSource != nil {
 		v = s.llmProvidersSource()
@@ -98,6 +107,7 @@ func (s *Server) getLLMProviders(w http.ResponseWriter, _ *http.Request) {
 		v.Providers = []LLMProviderView{}
 	}
 	v.Editable = s.llmProvidersWriter != nil
+	v.Version = version
 	writeJSON(w, v)
 }
 
@@ -128,8 +138,12 @@ func (s *Server) putLLMProviders(w http.ResponseWriter, r *http.Request) {
 			Timeout:   time.Duration(rq.TimeoutSeconds) * time.Second,
 		})
 	}
-	if err := s.llmProvidersWriter(providers); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+	meta, ok := s.writeMeta(w, r)
+	if !ok {
+		return
+	}
+	if err := s.llmProvidersWriter(r.Context(), providers, meta); err != nil {
+		writeWriterError(w, err)
 		return
 	}
 	// Echo back the now-current view so the UI refreshes from the authoritative
