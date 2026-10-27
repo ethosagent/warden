@@ -19,6 +19,7 @@ import (
 	"github.com/ethosagent/warden/internal/adminaudit"
 	"github.com/ethosagent/warden/internal/clock"
 	"github.com/ethosagent/warden/internal/config"
+	"github.com/ethosagent/warden/internal/dashboard"
 	"github.com/ethosagent/warden/internal/integration"
 )
 
@@ -128,7 +129,7 @@ func (s *Server) auditWrap(classify func(*http.Request) (authzRow, bool), next h
 // console.auth mode.
 func dashboardRoute(table map[routeKey]authzRow) func(*http.Request) (authzRow, bool) {
 	return func(r *http.Request) (authzRow, bool) {
-		row, ok := table[routeKey{r.Method, r.URL.Path}]
+		row, ok := table[routeKey{r.Method, dashboard.RoutePath(r.URL.Path)}]
 		return row, ok
 	}
 }

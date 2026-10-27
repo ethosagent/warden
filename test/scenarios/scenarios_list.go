@@ -82,6 +82,10 @@ var All = slices.Concat(
 		// it, a stale save is a 409 naming the author and is audited rejected.
 		// In-process only (it reads the CP state dir).
 		{Name: "policy_if_match_conflict", Opts: policyContractOpts(), Run: policyIfMatchConflict},
+		// Policy history (W-P1-PVER-03): list, diff and a rollback that creates
+		// a new version workers enforce, audited as policy.rollback. In-process
+		// only (it reads the CP state dir).
+		{Name: "policy_history_rollback", Opts: policyHistoryOpts(), Run: policyHistoryRollback},
 
 		// Admin audit gate (W-P1-AAUD-05): enabled, the control plane writes the
 		// genesis entry and logs its key_id before serving. In-process only (it

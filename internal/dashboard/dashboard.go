@@ -60,6 +60,9 @@ type Server struct {
 	// policyVersion returns the head policy version shared by the policy,
 	// settings and llmProviders documents; nil or 0 = file mode (no versions).
 	policyVersion func(context.Context) (int64, error)
+	// policyHistory serves the policy history routes; nil = they answer 404
+	// (a worker, or a control plane in file mode).
+	policyHistory PolicyHistory
 	// liveSettings returns the behavioral settings currently in force (nil = none);
 	// settingsWriter applies an edited settings document. Both are control-plane-
 	// only: a worker leaves settingsWriter nil so its settings panel is read-only.
@@ -540,14 +543,20 @@ func Routes() []Route {
 		{get, "/dashboard/api/audit", "audit.read"},
 		{post, "/dashboard/api/audit/verify", "audit.verify"},
 		{get, "/dashboard/api/setup", "setup.read"},
+		{get, "/dashboard/api/policy/versions", "policy.versions.read"},
+		{get, "/dashboard/api/policy/versions/{v}", "policy.version.read"},
+		{get, "/dashboard/api/policy/versions/{v}/diff", "policy.diff"},
+		{post, "/dashboard/api/policy/versions/{v}/rollback", "policy.rollback"},
 	}
 }
 
 // routeMux is the Handler's mux. It refuses to register a path that Routes() does
 // not list, so a route cannot be served without an entry the control plane's
-// authorization table is checked against. The patterns stay string literals at
-// each call so the route-table walks in the control-plane and worker tests see
-// them.
+// authorization table is checked against. A templated path
+// (/dashboard/api/policy/versions/{v}) lists the subtree pattern up to its
+// first segment variable (/dashboard/api/policy/versions/). The patterns stay
+// string literals at each call so the route-table walks in the control-plane
+// and worker tests see them.
 type routeMux struct {
 	*http.ServeMux
 	listed map[string]bool
@@ -556,6 +565,10 @@ type routeMux struct {
 func newRouteMux() *routeMux {
 	m := &routeMux{ServeMux: http.NewServeMux(), listed: map[string]bool{}}
 	for _, rt := range Routes() {
+		if i := strings.Index(rt.Path, "{"); i >= 0 {
+			m.listed[rt.Path[:i]] = true
+			continue
+		}
 		m.listed[rt.Path] = true
 	}
 	return m
@@ -593,6 +606,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/dashboard/api/audit", s.handleAudit)
 	mux.HandleFunc("/dashboard/api/audit/verify", s.handleAuditVerify)
 	mux.HandleFunc("/dashboard/api/setup", s.handleSetup)
+	s.registerRoutes(mux)
 	mux.HandleFunc("/dashboard/", s.handleIndex)
 	return s.guardWrites(mux)
 }

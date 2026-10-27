@@ -132,31 +132,39 @@ func (s *Server) headDoc(ctx context.Context) (int64, policyWire, error) {
 // the current head and its author (it unwraps to ErrConflict). A new credential value
 // in the doc is written to the served YAML secretStore first and only its
 // fingerprint is stored; the YAML is put back if no version is created. The
-// one log line is Create's.
+// one log line is Create's. A validation error is a
+// *dashboard.InvalidPolicyError (its text is the loader's).
 func (s *Server) publish(ctx context.Context, mutate func(*policyWire) error, meta dashboard.WriteMeta, source string) error {
+	_, _, err := s.publishVersion(ctx, mutate, meta, source)
+	return err
+}
+
+// publishVersion is publish that also returns the head after the write and
+// whether a version was created (false when the result equals head).
+func (s *Server) publishVersion(ctx context.Context, mutate func(*policyWire) error, meta dashboard.WriteMeta, source string) (int64, bool, error) {
 	author, err := s.writeAuthor(ctx)
 	if err != nil {
-		return err
+		return 0, false, err
 	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
 	head, doc, err := s.headDoc(ctx)
 	if err != nil {
-		return fmt.Errorf("controlplane: read policy head: %w", err)
+		return 0, false, fmt.Errorf("controlplane: read policy head: %w", err)
 	}
 	headKey := credentialOf(doc)
 	if err := mutate(&doc); err != nil {
-		return err
+		return 0, false, err
 	}
 	if err := s.validateDoc(doc); err != nil {
-		return err
+		return 0, false, &dashboard.InvalidPolicyError{Err: err}
 	}
 	var restore func()
 	if key := credentialOf(doc); key != "" && !isRedactedCredential(key) {
 		if redactCredential(key) != headKey {
 			if restore, err = s.writeCredential(*doc.Settings.Secrets); err != nil {
-				return err
+				return 0, false, err
 			}
 		}
 		doc = RedactCredentials(doc)
@@ -165,19 +173,20 @@ func (s *Server) publish(ctx context.Context, mutate func(*policyWire) error, me
 	if expected == 0 {
 		expected = head
 	}
-	if _, _, err := s.versions.Create(ctx, doc, author, meta.Message, source, expected); err != nil {
+	version, changed, err := s.versions.Create(ctx, doc, author, meta.Message, source, expected)
+	if err != nil {
 		if restore != nil {
 			restore()
 			s.refresh()
 		}
 		if errors.Is(err, ErrConflict) {
-			return s.conflictError(ctx, err)
+			return 0, false, s.conflictError(ctx, err)
 		}
-		return err
+		return 0, false, err
 	}
 	s.refresh()
 	s.reinjectExploreLLM()
-	return nil
+	return version, changed, nil
 }
 
 // credentialOf is the doc's AWS secretAccessKey ("" when absent).

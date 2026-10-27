@@ -25,6 +25,7 @@ func TestRoutesMatchHandler(t *testing.T) {
 	srv.SetDetectionWriter(func(config.DetectionConfig) error { return nil })
 	srv.SetLLMProvidersWriter(func(context.Context, []config.LLMProvider, WriteMeta) error { return nil })
 	srv.SetSecretStore(secrets.NewEchoStore(), "echo")
+	srv.SetPolicyHistory(&fakeHistory{})
 	h := srv.Handler()
 
 	listed := map[string]bool{}

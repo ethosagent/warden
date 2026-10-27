@@ -59,7 +59,9 @@ func auditedRow(role config.Role, action, target string) authzRow {
 
 // authzTable is the deny-by-default authorization table for the dashboard
 // routes the control plane serves: a {method, path} with no row is refused for
-// every role, GET included. Every dashboard.Routes() and cpDashboardRoutes()
+// every role, GET included. A request is looked up by dashboard.RoutePath, so
+// a templated route's row covers every concrete version path. Every
+// dashboard.Routes() and cpDashboardRoutes()
 // entry must have a row (TestAuthzRouteCoverage) and the row's Action must equal
 // the route's. Every row has a Class; an audited row also names its Target.
 //
@@ -114,6 +116,12 @@ func authzTable() map[routeKey]authzRow {
 		{get, "/dashboard/api/audit", readRow(viewer, "audit.read")},
 		{post, "/dashboard/api/audit/verify", readRow(viewer, "audit.verify")},
 		{get, "/dashboard/api/setup", readRow(viewer, "setup.read")},
+		// Policy history (W-P1-PVER-03). Requests are matched on their template
+		// ({v} is any version segment; dashboard.RoutePath).
+		{get, "/dashboard/api/policy/versions", readRow(viewer, "policy.versions.read")},
+		{get, "/dashboard/api/policy/versions/{v}", readRow(viewer, "policy.version.read")},
+		{get, "/dashboard/api/policy/versions/{v}/diff", readRow(viewer, "policy.diff")},
+		{post, "/dashboard/api/policy/versions/{v}/rollback", auditedRow(editor, "policy.rollback", "policy")},
 		// Served by the control plane itself, ahead of dash.Handler (cpDashboardRoutes).
 		{get, "/dashboard/api/sessions", readRow(admin, "sessions.read")},
 		{del, "/dashboard/api/sessions", auditedRow(admin, "sessions.revoke", "sessions")},
@@ -189,7 +197,7 @@ func requireRole(next http.Handler, table map[routeKey]authzRow, console config.
 			return
 		}
 		role, _ := console.RoleFor(p.Groups) // zero (no role) when no group matches
-		row, listed := table[routeKey{r.Method, r.URL.Path}]
+		row, listed := table[routeKey{r.Method, dashboard.RoutePath(r.URL.Path)}]
 		if !listed {
 			logDenied(logger, row, role, p, r)
 			writeAuthzJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})

@@ -527,6 +527,9 @@ func (s *Server) Handler() http.Handler {
 		// the built-in hasher of the served allow/deny. A no-op without admin
 		// audit.
 		s.RegisterStateHasher(auditTargetPolicy, s.versionedPolicyHash)
+		// History, diff and rollback routes (W-P1-PVER-03); without this they
+		// answer 404.
+		dash.SetPolicyHistory(s.policyHistoryAPI())
 	}
 	// Per-worker MCP view (inventory + observed schema), selected by ?proxy=.
 	dash.SetMCPFleet(s.mcp.For)

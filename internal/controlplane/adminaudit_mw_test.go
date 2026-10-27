@@ -170,6 +170,12 @@ func (e *auditEnv) send(rawID, bearer, method, target, body string, hdr ...strin
 // auditedRequest is a request that succeeds on an audited route.
 type auditedRequest struct{ target, body string }
 
+// auditedHeaders are the extra header name/value pairs an auditedRequests
+// entry needs.
+var auditedHeaders = map[routeKey][]string{
+	{http.MethodPost, "/dashboard/api/policy/versions/{v}/rollback"}: {"If-Match", `"v1"`},
+}
+
 // auditedRequests maps every audited route to a request an admin can make
 // successfully. A new audited route without an entry fails
 // TestAdminAuditAllAuditedRoutes.
@@ -187,8 +193,10 @@ var auditedRequests = map[routeKey]auditedRequest{
 	{http.MethodPost, "/dashboard/api/llmproviders"}:   {"/dashboard/api/llmproviders", `[{"name":"p1","baseURL":"https://api.openai.com/v1","model":"gpt-4o-mini","apiKeyEnv":"OPENAI_API_KEY"}]`},
 	{http.MethodPut, "/dashboard/api/llmproviders"}:    {"/dashboard/api/llmproviders", `[]`},
 	{http.MethodDelete, "/dashboard/api/sessions"}:     {"/dashboard/api/sessions?sub=nobody", ""},
-	{http.MethodPost, "/central/secrets"}:              {"/central/secrets", `{"key":"CP_KEY","value":"v2"}`},
-	{http.MethodDelete, "/central/secrets/"}:           {"/central/secrets/CP_KEY", ""},
+	// Served by the stub history TestAdminAuditAllAuditedRoutes installs.
+	{http.MethodPost, "/dashboard/api/policy/versions/{v}/rollback"}: {"/dashboard/api/policy/versions/1/rollback", `{}`},
+	{http.MethodPost, "/central/secrets"}:                            {"/central/secrets", `{"key":"CP_KEY","value":"v2"}`},
+	{http.MethodDelete, "/central/secrets/"}:                         {"/central/secrets/CP_KEY", ""},
 }
 
 // allAuditedRoutes lists every audited row of both route tables in a stable
@@ -225,6 +233,7 @@ func auditRow(k routeKey) authzRow {
 
 func TestAdminAuditAllAuditedRoutes(t *testing.T) {
 	e := newOIDCAuditEnv(t)
+	e.srv.dash.SetPolicyHistory(stubHistory{})
 	admin := e.session(t, groupAdmin)
 	hashed := map[string]bool{"policy": true, "settings": true, "integrations": true, "detection": true, "llmproviders": true}
 	routes := allAuditedRoutes()
@@ -238,7 +247,7 @@ func TestAdminAuditAllAuditedRoutes(t *testing.T) {
 		}
 		row := auditRow(k)
 		before := len(e.rec.inputs())
-		rec := e.send(admin, "", k.Method, req.target, req.body)
+		rec := e.send(admin, "", k.Method, req.target, req.body, auditedHeaders[k]...)
 		if rec.Code/100 != 2 {
 			t.Fatalf("%s %s = %d %s, want 2xx", k.Method, req.target, rec.Code, rec.Body.String())
 		}
