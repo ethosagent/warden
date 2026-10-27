@@ -28,7 +28,7 @@ const (
 	defaultHistoryLimit = 50
 	maxHistoryLimit     = 200
 	// maxRollbackNote caps the optional rollback note, in characters.
-	maxRollbackNote = 512
+	maxRollbackNote = maxPolicyMessage
 	// maxRollbackBody caps the rollback request body ({"note": ...}).
 	maxRollbackBody = 4 << 10
 )
@@ -218,17 +218,8 @@ func (s *Server) diffPolicyVersion(w http.ResponseWriter, r *http.Request, v int
 // rollbackPolicyVersion requires If-Match (428 without it, 400 malformed): a
 // rollback is always based on the head the editor saw.
 func (s *Server) rollbackPolicyVersion(w http.ResponseWriter, r *http.Request, v int64) {
-	raw, present := r.Header["If-Match"]
-	if !present {
-		writeJSONStatus(w, http.StatusPreconditionRequired, map[string]string{
-			"error":  "precondition_required",
-			"detail": `a rollback needs If-Match: "v<N>", the head version from the last GET`,
-		})
-		return
-	}
-	expected, ok := parseIfMatch(raw)
+	expected, ok := requireIfMatch(w, r, "a rollback")
 	if !ok {
-		writeError(w, http.StatusBadRequest, `invalid If-Match: want "v<N>", the version from the last GET`)
 		return
 	}
 	var req rollbackRequest

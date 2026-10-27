@@ -412,6 +412,18 @@
   .cp-note { margin-top:6px; padding:12px 15px; border-radius:10px; border:1px dashed var(--border); background:var(--surface-2);
     font-size:12.5px; color:var(--muted); }
   .cp-note b { color:var(--text); }
+  /* ---------- Policy history (W-P1-PVER-04) ---------- */
+  .ph-row { display:flex; align-items:center; gap:10px; padding:9px 14px; border-top:1px solid var(--border); cursor:pointer; font-size:13px; }
+  .ph-row:hover, .ph-row.sel { background:var(--surface-2); }
+  .ph-row .ph-msg { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .ph-diff ul { list-style:none; margin:6px 0 12px; padding:0; }
+  .ph-diff li { padding:6px 0; border-top:1px solid var(--border); font-size:12px; }
+  .ph-diff .mono { word-break:break-all; }
+  #policyMsgDialog { background:var(--surface); color:var(--text); border:1px solid var(--border); border-radius:var(--radius);
+    padding:18px; width:min(460px,92vw); box-shadow:var(--shadow); }
+  #policyMsgDialog::backdrop { background:rgba(0,0,0,.55); }
+  #policyMsgDialog input { width:100%; box-sizing:border-box; background:var(--surface-2); border:1px solid var(--border); color:var(--text);
+    padding:7px 11px; border-radius:9px; font:inherit; font-size:13px; margin:6px 0 14px; }
 </style>
 </head>
 <body>
@@ -922,6 +934,16 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
           </div>
         </div>
         <div class="note" id="egressReadonly" style="margin-top:12px; display:none">Egress policy is read-only on this node — it is managed by the control plane.</div>
+        <!-- Policy history (W-P1-PVER-04): shown only when GET /dashboard/api/policy reports a version (--policy-store=versioned). -->
+        <div class="card" id="policyHistory" style="display:none;margin-top:16px">
+          <div class="card-head"><h3>History</h3><span class="sub" id="ph-head"></span></div>
+          <div id="ph-list"></div>
+          <div class="card-pad" style="display:flex;gap:8px;align-items:center">
+            <button data-min-role="viewer" class="btn sm" id="ph-more" style="display:none">Load more</button>
+            <span class="sub" id="ph-status"></span>
+          </div>
+          <div class="card-pad ph-diff" id="ph-diff" style="display:none;border-top:1px solid var(--border)"></div>
+        </div>
       </div>
 
       <!-- DLP matrix + rules -->
@@ -1275,6 +1297,20 @@ LIMIT 8;</textarea>
   </main>
 </div>
 
+<!-- Save message and rollback confirm dialog (W-P1-PVER-04); askPolicyDialog fills it with textContent. -->
+<dialog id="policyMsgDialog">
+  <form method="dialog">
+    <h3 id="pmd-title" style="margin:0 0 6px"></h3>
+    <div class="note" id="pmd-desc"></div>
+    <label for="pmd-input" class="sub" style="display:block;margin-top:12px">Message (optional, up to 512 characters)</label>
+    <input type="text" id="pmd-input" maxlength="512" autocomplete="off" />
+    <div style="display:flex;justify-content:flex-end;gap:8px">
+      <button class="btn sm" value="cancel">Cancel</button>
+      <button class="btn primary sm" value="ok" id="pmd-ok">Save</button>
+    </div>
+  </form>
+</dialog>
+
 <script>
 "use strict";
 /* ============================================================
@@ -1314,6 +1350,7 @@ function hhmmss(iso){ if(!iso) return "—"; const d=new Date(iso); if(isNaN(d.g
    - 404: console.auth none (or a worker dashboard). Writes take the bearer path, authFetch.
    - anything else (network error, 5xx): no CSRF, no prompt; requests go out as they are.
    body is JSON-encoded unless it is already a string; either way it is sent as application/json.
+   hdrs (optional) are extra request headers, e.g. If-Match on a versioned policy write.
    The returned Response is fetch()'s, so callers check r.ok / r.status and read r.json(). */
 const SAFE_METHODS={GET:1,HEAD:1,OPTIONS:1};
 let authMode='';     // 'oidc' | 'none' | 'unknown', set by authInit
@@ -1340,9 +1377,9 @@ function authInit(){
   })();
   return authReady;
 }
-async function api(method,url,body){
+async function api(method,url,body,hdrs){
   await authInit();
-  const h=new Headers();
+  const h=new Headers(hdrs||{});
   const o={method:method,headers:h,credentials:'same-origin'};
   if(body!==undefined){
     h.set('Content-Type','application/json');
@@ -1419,7 +1456,11 @@ async function logout(){
   main.append(h,p,a);
   document.body.replaceChildren(main);
 }
-async function jget(url){ const r=await api('GET',url); if(!r.ok) throw new Error("status "+r.status); return r.json(); }
+async function jget(url){
+  const r=await api('GET',url); if(!r.ok) throw new Error("status "+r.status);
+  if(POLICY_DOC_GET.test(url)) notePolicyHead(r); // the head a later save names in If-Match
+  return r.json();
+}
 
 /* ---------- shared pill/chip renderers (used by live + preview) ---------- */
 const CLASS_CHIP = { credentials:'c-cred','pii.contact':'c-pii','pii.identity':'c-pii','pii.financial':'c-pii', source_code:'c-code', infrastructure:'c-infra' };
@@ -1524,7 +1565,7 @@ async function onModeToggleClick(mode){
   if(act.dlp) merged.dlp=Object.assign({}, s.dlp, {mode});
   if(act.mcp) merged.mcp=Object.assign({}, s.mcp, {mode});
   try{
-    const r=await api('PUT','/dashboard/api/settings',merged);
+    const r=await policyWrite('PUT','/dashboard/api/settings',merged,'settings');
     if(!r.ok){ let m='status '+r.status; try{ const e=await r.json(); if(e&&e.error) m=e.error; }catch(_e){} throw new Error(m); }
     applyMode(mode);
     if(currentTab()==='guardrails') loadGuardrails();
@@ -1995,7 +2036,7 @@ async function saveExploreProvider(){
   const merged=Object.assign({}, cur, {explore:{llmProvider:sel.value}});
   const note=document.getElementById('exploreProviderNote');
   try{
-    const r=await api('PUT','/dashboard/api/settings',merged);
+    const r=await policyWrite('PUT','/dashboard/api/settings',merged,'settings');
     if(!r.ok){ let m='status '+r.status; try{ const e=await r.json(); if(e&&e.error) m=e.error; }catch(_e){} throw new Error(m); }
     const d=await r.json().catch(()=>({})); window.__exploreSettings=(d&&d.settings)||merged;
     if(note){ note.textContent='saved ✓ — takes effect now'; note.style.color='var(--teal)'; setTimeout(()=>{ note.textContent=''; note.style.color=''; },2500); }
@@ -2333,7 +2374,7 @@ async function saveSettings(btnId, statusId){
   else if(sbb==='echo'){ body.secrets={ backend:'echo' }; }
   else { delete body.secrets; }
   try{
-    const r=await api('POST','/dashboard/api/settings',body);
+    const r=await policyWrite('POST','/dashboard/api/settings',body,'settings');
     if(!r.ok){ const e=await r.json().catch(()=>({error:'status '+r.status})); throw new Error(e.error||('status '+r.status)); }
     const d=await r.json(); lastSettings=(d&&d.settings)||body; settingsEditable=!!(d&&d.editable);
     renderSettings();
@@ -2666,6 +2707,7 @@ async function loadGuardrails(){
   const note=document.getElementById('grEditNote');
   if(note) note.textContent = gr.settingsEditable ? '' : 'read-only (managed by control plane)';
   renderEgress();
+  showPolicyHistory(pol);
   renderDLP();
   renderJudge();   // the /llmproviders fetch above feeds the judge selector's name list;
                    // the registry CARD itself lives on Settings (renderLLMProviders there)
@@ -2692,7 +2734,7 @@ function flashBtn(id,txt){
   setTimeout(()=>{ b.textContent=old; b.disabled=false; }, 1800);
 }
 async function putSettings(merged){
-  const r=await api('PUT','/dashboard/api/settings',merged);
+  const r=await policyWrite('PUT','/dashboard/api/settings',merged,'settings');
   if(!r.ok){ let m='status '+r.status; try{ const e=await r.json(); if(e&&e.error) m=e.error; }catch(_e){} throw new Error(m); }
   const d=await r.json().catch(()=>({}));
   gr.settings=(d&&d.settings)||merged; gr.settingsEditable=!!(d&&d.editable);
@@ -2739,12 +2781,18 @@ async function removePolicyEntry(list,idx){
 }
 async function savePolicy(){
   try{
-    const r=await api('PUT','/dashboard/api/policy',{allowlist:gr.policy.allowlist,denylist:gr.policy.denylist});
+    const r=await policyWrite('PUT','/dashboard/api/policy',{allowlist:gr.policy.allowlist,denylist:gr.policy.denylist},'policy');
     if(!r.ok){ let m='status '+r.status; try{ const e=await r.json(); if(e&&e.error) m=e.error; }catch(_e){} throw new Error(m); }
     const p=await r.json();
     gr.policy=p; gr.policy.allowlist=p.allowlist||[]; gr.policy.denylist=p.denylist||[]; gr.policyEditable=!!p.editable;
     renderEgress();
-  }catch(err){ window.alert('Policy save failed: '+err.message); loadGuardrails(); }
+  }catch(err){
+    // A 409 keeps the unsaved edit on screen (policyWrite already took the new head), so the
+    // next change saves it on top of that head. Anything else reloads the live policy.
+    if(err.conflict){ renderEgress(); window.alert('Policy save failed: '+err.message+'. Your edit is kept here but not saved; the next change saves it on top of v'+err.head+'. Reload the page to discard it.'); return; }
+    if(!err.cancelled) window.alert('Policy save failed: '+err.message);
+    loadGuardrails();
+  }
 }
 
 /* ---------- DLP (observed matrix /analytics · rules /settings.dlp) ---------- */
@@ -3202,7 +3250,7 @@ async function saveLLMProviders(){
   const body=gr.llmp.providers.map(p=>({ name:p.name, baseURL:p.baseURL, model:p.model, apiKeyEnv:p.apiKeyEnv, timeoutSeconds:p.timeoutSeconds||0 }));
   llmpMsg('saving…',true);
   try{
-    const r=await api('PUT','/dashboard/api/llmproviders',body);
+    const r=await policyWrite('PUT','/dashboard/api/llmproviders',body,'LLM providers');
     if(!r.ok){ let m='status '+r.status; try{ const e=await r.json(); if(e&&e.error) m=e.error; }catch(_e){} throw new Error(m); }
     gr.llmp=await r.json(); gr.llmp.providers=gr.llmp.providers||[];
     renderLLMProviders();
@@ -3707,6 +3755,208 @@ async function deleteIntegration(name){
     renderIntegrations();
   }catch(err){ alert('Delete failed: '+err.message); }
 }
+
+/* policyhistory:begin */
+/* ============================================================
+   Policy history (W-P1-PVER-04). In --policy-store=versioned the policy, settings and
+   llmProviders panels edit one versioned document:
+   - policyWrite sends every save of the three with If-Match: "v<head>" (the head from the last
+     GET of one of them) and the optional message from the save dialog, percent-encoded in
+     X-Warden-Policy-Message. A 409 says who moved the head, takes the new head and leaves the
+     user's unsaved edits where they are. File mode (no version) sends neither header.
+   - The History card on the Egress tab lists versions (GET /dashboard/api/policy/versions,
+     cursor 'load more'), renders the server's structural diff of a selected version against
+     head (GET .../{v}/diff; nothing is diffed here) and rolls back (POST .../{v}/rollback with
+     If-Match, after a confirm dialog naming the target) for editor and admin.
+   Author and message are whatever the saver typed: this block sets every server value with
+   textContent and builds no markup from strings. Credentials only ever arrive as fingerprints.
+   ============================================================ */
+const PH_VERSIONS='/dashboard/api/policy/versions';
+const PH_LIMIT=20;
+const POLICY_MSG_MAX=512;
+const POLICY_DOC_GET=/^\/dashboard\/api\/(policy|settings|llmproviders)(\?|$)/;
+let policyHead=0;   // head version from the last policy/settings/llmProviders response; 0 = file mode
+const ph={seq:0, next:0, head:0, selected:0};
+function notePolicyHead(r){
+  const v=r&&r.headers?r.headers.get('X-Warden-Policy-Version'):null;
+  if(v&&/^[1-9][0-9]*$/.test(v)) policyHead=Number(v);
+}
+function phEl(tag,cls,text){
+  const e=document.createElement(tag);
+  if(cls) e.className=cls;
+  if(text!=null) e.textContent=String(text);
+  return e;
+}
+function phClip(s){ return Array.from(String(s||'')).slice(0,POLICY_MSG_MAX).join(''); }
+/* askPolicyDialog(title,desc,okLabel): the save message / rollback confirm dialog. Resolves to
+   the typed message ('' for none) or null when cancelled (Cancel, Escape). */
+function askPolicyDialog(title,desc,okLabel){
+  const d=document.getElementById('policyMsgDialog');
+  if(!d||typeof d.showModal!=='function'){
+    const t=window.prompt(title+'\n'+desc+'\n\nMessage (optional):','');
+    return Promise.resolve(t===null?null:phClip(t));
+  }
+  document.getElementById('pmd-title').textContent=title;
+  document.getElementById('pmd-desc').textContent=desc;
+  document.getElementById('pmd-ok').textContent=okLabel;
+  const input=document.getElementById('pmd-input'); input.value='';
+  return new Promise(res=>{
+    d.returnValue='';
+    d.addEventListener('close',()=>res(d.returnValue==='ok'?phClip(input.value):null),{once:true});
+    d.showModal(); input.focus();
+  });
+}
+/* conflictError turns a 409 policy_conflict body into the error the save flows show. */
+function conflictError(body){
+  const a=(body&&body.author)||{};
+  const head=Number(body&&body.head)||0;
+  const e=new Error('policy changed by '+(a.email||a.sub||'someone else')+' (v'+head+')');
+  e.conflict=true; e.head=head;
+  return e;
+}
+/* policyWrite(method,url,body,what): a policy, settings or llmProviders save. Returns api()'s
+   Response; throws a conflict error on 409 and a cancelled error when the dialog is dismissed. */
+async function policyWrite(method,url,body,what){
+  const hdrs={};
+  if(policyHead>0){
+    const msg=await askPolicyDialog('Save '+what,'This save creates a new policy version on top of v'+policyHead+'.','Save');
+    if(msg===null){ const e=new Error('save cancelled'); e.cancelled=true; throw e; }
+    hdrs['If-Match']='"v'+policyHead+'"';
+    if(msg) hdrs['X-Warden-Policy-Message']=encodeURIComponent(msg);
+  }
+  const r=await api(method,url,body,hdrs);
+  if(r.status===409){
+    let b=null; try{ b=await r.json(); }catch(_e){ b=null; }
+    const e=conflictError(b);
+    if(e.head>0) policyHead=e.head;   // the next save is based on the new head; the edit stays local
+    loadPolicyHistory(true);
+    throw e;
+  }
+  notePolicyHead(r);
+  if(r.ok) loadPolicyHistory(true);
+  return r;
+}
+function showPolicyHistory(pol){
+  const card=document.getElementById('policyHistory'); if(!card) return;
+  const v=Number(pol&&pol.version)||0;
+  card.style.display=v>0?'':'none';
+  if(v>0) loadPolicyHistory(true);
+}
+async function loadPolicyHistory(reset){
+  const card=document.getElementById('policyHistory'), list=document.getElementById('ph-list'), more=document.getElementById('ph-more');
+  if(!card||!list||card.style.display==='none') return;
+  const seq=++ph.seq;
+  const cursor=reset?0:ph.next;
+  let d=null;
+  try{ d=await jget(PH_VERSIONS+'?limit='+PH_LIMIT+(cursor?'&cursor='+cursor:'')); }catch(e){ d=null; }
+  if(seq!==ph.seq) return;   // a newer load replaced this one
+  if(!d||!Array.isArray(d.versions)){
+    if(reset) list.replaceChildren(phEl('div','card-pad note','The policy history is unavailable.'));
+    more.style.display='none';
+    return;
+  }
+  if(reset){ list.replaceChildren(); document.getElementById('ph-diff').style.display='none'; ph.selected=0; }
+  ph.head=Number(d.head)||0;
+  document.getElementById('ph-head').textContent=ph.head?('head v'+ph.head):'';
+  d.versions.forEach(x=>list.appendChild(phRow(x)));
+  if(reset&&!d.versions.length) list.appendChild(phEl('div','card-pad note','No versions yet.'));
+  ph.next=Number(d.next_cursor)||0;
+  more.style.display=ph.next?'':'none';
+}
+function phRow(x){
+  const v=Number(x.version)||0;
+  const row=phEl('div','ph-row'); row.dataset.version=String(v);
+  const ver=phEl('span','mono','v'+x.version);
+  const who=phEl('b');
+  who.textContent=x.author_email||x.author_sub||'';
+  const when=phEl('span','muted');
+  when.textContent=relTime(x.created_at); when.title=String(x.created_at||'');
+  const src=phEl('span','tag',x.source||'');
+  const msg=phEl('span','ph-msg');
+  msg.textContent=x.message||''; msg.title=msg.textContent;
+  row.append(ver,who,when,src,msg);
+  if(v===ph.head){
+    row.appendChild(phEl('span','pill p-allow','head'));
+  }else{
+    const b=phEl('button','btn sm','Roll back');
+    b.setAttribute('data-min-role','editor');
+    b.disabled=!roleAllows('editor');
+    b.addEventListener('click',ev=>{ ev.stopPropagation(); rollbackTo(v); });
+    row.appendChild(b);
+  }
+  row.addEventListener('click',()=>showPolicyDiff(v));
+  return row;
+}
+function phVal(v){ try{ return JSON.stringify(v); }catch(e){ return String(v); } }
+/* phChangeList renders one section of the server's diff: each change's kind, its key (an entry's
+   DiffKey or a settings path) and the old and new values. */
+function phChangeList(title,changes,keyOf){
+  const wrap=phEl('div');
+  wrap.appendChild(phEl('h4',null,title+' ('+changes.length+')'));
+  const ul=phEl('ul');
+  changes.forEach(c=>{
+    const li=phEl('li');
+    const kind=String(c.kind||'');
+    li.appendChild(phEl('span','pill '+(kind==='added'?'p-allow':kind==='removed'?'p-deny':'p-med'),kind));
+    li.appendChild(phEl('span','mono',' '+keyOf(c)));
+    if(kind!=='added') li.appendChild(phEl('div','mono muted','old: '+phVal(c.before)));
+    if(kind!=='removed') li.appendChild(phEl('div','mono','new: '+phVal(c.after)));
+    ul.appendChild(li);
+  });
+  wrap.appendChild(ul);
+  return wrap;
+}
+async function showPolicyDiff(v){
+  const box=document.getElementById('ph-diff'); if(!box) return;
+  ph.selected=v;
+  document.querySelectorAll('#ph-list .ph-row').forEach(r=>r.classList.toggle('sel',r.dataset.version===String(v)));
+  box.style.display='';
+  box.replaceChildren(phEl('div','note','Loading the diff of v'+v+'…'));
+  let d=null;
+  try{ d=await jget(PH_VERSIONS+'/'+encodeURIComponent(v)+'/diff'); }catch(e){ d=null; }
+  if(ph.selected!==v) return;
+  if(!d||!d.diff){ box.replaceChildren(phEl('div','note','The diff of v'+v+' is unavailable.')); return; }
+  const allow=d.diff.allow||[], deny=d.diff.deny||[], settings=d.diff.settings||[];
+  const parts=[phEl('div','sub','Diff v'+d.from+' (head) → v'+d.to+': what rolling back to v'+d.to+' changes')];
+  if(!allow.length&&!deny.length&&!settings.length) parts.push(phEl('div','note','No differences: v'+d.to+' has the same policy and settings as head.'));
+  if(allow.length) parts.push(phChangeList('Allowlist',allow,c=>c.key));
+  if(deny.length) parts.push(phChangeList('Denylist',deny,c=>c.key));
+  if(settings.length) parts.push(phChangeList('Settings',settings,c=>c.path));
+  box.replaceChildren(...parts);
+}
+async function rollbackTo(v){
+  if(!roleAllows('editor')) return;
+  const head=policyHead;
+  if(!head||v===head) return;
+  const note=await askPolicyDialog('Roll back to v'+v+'?','This publishes the policy and settings of v'+v+' as a new version on top of v'+head+'. History is kept; credentials and the block list stay as they are now.','Roll back to v'+v);
+  if(note===null) return;
+  const st=document.getElementById('ph-status');
+  st.textContent='rolling back to v'+v+'…';
+  let r=null, b=null;
+  try{ r=await api('POST',PH_VERSIONS+'/'+encodeURIComponent(v)+'/rollback',note?{note:note}:undefined,{'If-Match':'"v'+head+'"'}); }catch(e){ r=null; }
+  if(!r){ st.textContent='✕ rollback failed: the control plane did not answer'; return; }
+  try{ b=await r.json(); }catch(_e){ b=null; }
+  if(r.status===409){
+    const e=conflictError(b);
+    if(e.head>0) policyHead=e.head;
+    st.textContent='✕ '+e.message+'. Check the history, then roll back again.';
+    loadPolicyHistory(true);
+    return;
+  }
+  if(r.status===422){ st.textContent='✕ v'+v+' no longer passes validation'+(b&&b.detail?(': '+b.detail):''); return; }
+  if(!r.ok){ st.textContent='✕ rollback failed: '+((b&&b.error)||('status '+r.status)); return; }
+  notePolicyHead(r);
+  st.textContent=(b&&b.changed===false)?('v'+v+' matches head: nothing changed.'):('rolled back: head is now v'+((b&&b.head)||policyHead)+'.');
+  loadGuardrails();
+}
+(function(){
+  const more=document.getElementById('ph-more');
+  if(more) more.addEventListener('click',()=>loadPolicyHistory(false));
+  // Enter in the message field confirms (the form's first button is Cancel).
+  const input=document.getElementById('pmd-input'), d=document.getElementById('policyMsgDialog');
+  if(input&&d&&typeof d.close==='function') input.addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); d.close('ok'); } });
+})();
+/* policyhistory:end */
 
 /* ============================================================
    Init

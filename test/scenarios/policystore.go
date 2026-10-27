@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"slices"
 	"testing"
@@ -199,9 +200,19 @@ func policyStoreDashboardPublish(t *testing.T, h *harness.H) {
 		"allowlist": append(cur.Allowlist, map[string]any{"domain": pverHost}),
 		"denylist":  cur.Denylist,
 	}
-	if err := h.CP().PostJSON("/dashboard/api/policy", edit, nil); err != nil {
-		t.Fatalf("dashboard policy save: %v", err)
+	// Versioned saves name the head they were based on (W-P1-PVER-04).
+	save := func(path, ifMatch string, in any) {
+		t.Helper()
+		raw, err := json.Marshal(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r, err := h.CP().Send(http.MethodPost, path, http.Header{"If-Match": {ifMatch}}, raw)
+		if err != nil || r.Status != http.StatusOK {
+			t.Fatalf("dashboard save %s from %s = %d %s (%v)", path, ifMatch, r.Status, r.Body, err)
+		}
 	}
+	save("/dashboard/api/policy", `"v1"`, edit)
 	h.Eventually("workers enforce the published version 2", func() bool {
 		return connectStatus(t, h, pverHost+":443") == http.StatusOK
 	})
@@ -212,9 +223,7 @@ func policyStoreDashboardPublish(t *testing.T, h *harness.H) {
 	providers := []map[string]any{{
 		"name": "pver", "baseURL": "https://llm.example.com/v1", "model": "m1", "apiKeyEnv": "PVER_LLM_KEY",
 	}}
-	if err := h.CP().PostJSON("/dashboard/api/llmproviders", providers, nil); err != nil {
-		t.Fatalf("dashboard llmProviders save: %v", err)
-	}
+	save("/dashboard/api/llmproviders", `"v2"`, providers)
 	var view struct {
 		Providers []struct {
 			Name string `json:"name"`

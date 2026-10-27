@@ -545,12 +545,17 @@ other value, the control plane refuses to start.
   (`/dashboard/api/policy`, `/dashboard/api/settings`,
   `/dashboard/api/llmproviders`) return it as `version` in the body and in an
   `X-Warden-Policy-Version: N` header; in file mode neither is present. A save
-  may send `If-Match: "v<N>"` with the version it was based on. If the head has
+  must send `If-Match: "v<N>"` with the version it was based on. If the head has
   moved since, the save returns `409 {"error":"policy_conflict","head":M,
   "author":{"sub":...,"email":...}}` (the head's author, never doc content) and
   creates nothing, so a settings save makes a concurrent policy save from the
-  same version conflict. A malformed `If-Match` returns 400; a missing one is
-  accepted for now. In file mode `If-Match` is ignored. `/policy`'s
+  same version conflict. A missing `If-Match` returns `428
+  {"error":"precondition_required"}` and a malformed one 400; neither creates a
+  version. A save may also send an optional message in
+  `X-Warden-Policy-Message`, percent-encoded UTF-8 (as `encodeURIComponent`
+  writes it), at most 512 characters after decoding, with control characters
+  stripped; it is stored on the new version, and a longer or badly encoded
+  value returns 400. In file mode both headers are ignored. `/policy`'s
   content-hash ETag is unchanged. With `console.adminAudit.enabled` a policy
   save's audit row records before and after as `v<N>:<doc_sha256>`, and a 409
   is recorded with outcome `rejected`.
@@ -559,7 +564,16 @@ other value, the control plane refuses to start.
   the credential lives) and the version stores only its fingerprint; if the
   version cannot be created the YAML is put back.
 - The other CP-local editors (integrations, detection) keep rewriting the YAML.
-  History and rollback come in later releases.
+- The console's Guardrails → Egress tab shows a History card in versioned mode
+  (hidden in file mode): versions newest first with author, relative time,
+  source and message, 20 at a time with "Load more"; selecting one shows the
+  server's structural diff from head to that version (added, removed and
+  changed entries and settings paths with old and new values); editors and
+  admins get a Roll back button that asks for confirmation naming the target
+  version and an optional note. The policy, settings and LLM provider saves ask
+  for an optional message and send `If-Match`; on a 409 the console says
+  `policy changed by <author> (v<N>)`, takes the new head and keeps the unsaved
+  edit on screen.
 - The control plane checks for a new head every 3 seconds and only re-reads a
   version when the head moved, so a version written by another process reaches
   workers within 3 seconds plus one long-poll cycle. The `/policy` hot path

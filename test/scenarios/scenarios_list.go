@@ -86,6 +86,12 @@ var All = slices.Concat(
 		// a new version workers enforce, audited as policy.rollback. In-process
 		// only (it reads the CP state dir).
 		{Name: "policy_history_rollback", Opts: policyHistoryOpts(), Run: policyHistoryRollback},
+		// History panel (W-P1-PVER-04): a versioned save without If-Match is a
+		// 428; one naming the head carries its message into the history.
+		// In-process only (versioned store).
+		{Name: "policy_save_if_match_required", Opts: policySaveIfMatchOpts(), Run: policySaveIfMatchRequired},
+		// File mode saves without If-Match as before.
+		{Name: "policy_file_mode_save_without_if_match", Run: policyFileModeSaveWithoutIfMatch},
 
 		// Admin audit gate (W-P1-AAUD-05): enabled, the control plane writes the
 		// genesis entry and logs its key_id before serving. In-process only (it

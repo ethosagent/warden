@@ -115,8 +115,8 @@ func TestPolicyFileModeNoVersion(t *testing.T) {
 }
 
 // TestPolicyIfMatchParsed: "v<N>" becomes ExpectedHead N on every writer; no
-// If-Match leaves it 0 (accepted until W-P1-PVER-04); a malformed one is 400
-// and never reaches the writer.
+// If-Match is a 428 (W-P1-PVER-04, TestPolicyWriteMissingIfMatch428) and a
+// malformed one is 400; neither reaches the writer.
 func TestPolicyIfMatchParsed(t *testing.T) {
 	for path, body := range versionedRoutes {
 		srv, got := versionedServer(5, nil)
@@ -128,11 +128,11 @@ func TestPolicyIfMatchParsed(t *testing.T) {
 			t.Errorf("%s ExpectedHead = %d, want 5", path, got[path].ExpectedHead)
 		}
 		delete(got, path)
-		if rec := sendWrite(h, path, body, ""); rec.Code != http.StatusOK {
-			t.Fatalf("%s without If-Match = %d", path, rec.Code)
+		if rec := sendWrite(h, path, body, ""); rec.Code != http.StatusPreconditionRequired {
+			t.Fatalf("%s without If-Match = %d, want 428", path, rec.Code)
 		}
-		if m, ok := got[path]; !ok || m.ExpectedHead != 0 {
-			t.Errorf("%s without If-Match: called=%v meta=%+v, want ExpectedHead 0", path, ok, m)
+		if _, called := got[path]; called {
+			t.Errorf("%s without If-Match reached the writer", path)
 		}
 		for _, bad := range []string{"v5", `"5"`, `"v0"`, `"v-1"`, `W/"v5"`, `"v5x"`, `*`, `"v5", "v6"`, `"v99999999999999999999"`} {
 			delete(got, path)
