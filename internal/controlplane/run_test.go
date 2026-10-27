@@ -525,3 +525,36 @@ func TestAdminTokenNeverLogged(t *testing.T) {
 		})
 	}
 }
+
+// TestResolveAdminToken: the empty-variable WARN says writes are refused only in
+// console.auth none; in oidc sessions replace the admin bearer, so it says the
+// token is unused instead. A set value is trimmed and never logged.
+func TestResolveAdminToken(t *testing.T) {
+	env := map[string]string{"SET": " " + adminTok + "\n", "EMPTY": "  "}
+	getenv := func(k string) string { return env[k] }
+	for _, c := range []struct {
+		name, envName string
+		auth          string
+		want, log     string
+	}{
+		{"unset", "", config.ConsoleAuthNone, "", ""},
+		{"set", "SET", config.ConsoleAuthNone, adminTok, ""},
+		{"empty none", "EMPTY", config.ConsoleAuthNone, "", "admin-token-env set but empty; dashboard writes will be refused"},
+		{"empty oidc", "EMPTY", config.ConsoleAuthOIDC, "", "admin-token-env set but empty; the admin token is unused in console.auth oidc"},
+	} {
+		logger, buf := testLogger()
+		if got := resolveAdminToken(logger, c.envName, c.auth, getenv); got != c.want {
+			t.Errorf("%s: token = %q, want %q", c.name, got, c.want)
+		}
+		out := buf.String()
+		if c.log == "" && out != "" || c.log != "" && !strings.Contains(out, c.log) {
+			t.Errorf("%s: log = %q, want %q", c.name, out, c.log)
+		}
+		if c.auth == config.ConsoleAuthOIDC && strings.Contains(out, "will be refused") {
+			t.Errorf("%s: oidc log claims writes are refused: %q", c.name, out)
+		}
+		if strings.Contains(out, adminTok) {
+			t.Errorf("%s: log carries the token value", c.name)
+		}
+	}
+}

@@ -156,13 +156,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	} else {
 		logger.Warn("control-plane: no token configured; serving WITHOUT auth (set --token-env for production)")
 	}
-	var adminToken string
-	if p.AdminTokenEnv != "" {
-		adminToken = strings.TrimSpace(os.Getenv(p.AdminTokenEnv))
-		if adminToken == "" {
-			logger.Warn("control-plane: admin-token-env set but empty; dashboard writes will be refused", "env", p.AdminTokenEnv)
-		}
-	}
+	adminToken := resolveAdminToken(logger, p.AdminTokenEnv, consoleCfg.Auth, os.Getenv)
 
 	// Durable CP state (sessions, audit, tokens, ... register migrations here as
 	// they land). Only with --state-dir; a corrupt file stops startup so state is
@@ -394,6 +388,26 @@ func seedServedConfig(servedPath, seedPath string) (bool, error) {
 		return false, fmt.Errorf("write served config %s: %w", servedPath, err)
 	}
 	return true, nil
+}
+
+// resolveAdminToken reads the CP admin bearer from the env var --admin-token-env
+// names ("" = flag unset). A named but empty variable is logged by name, never
+// value: in console.auth none dashboard writes are then refused (the fallback to
+// the worker token is off), in oidc sessions replace the bearer and the token is
+// simply unused.
+func resolveAdminToken(logger *slog.Logger, env, consoleAuth string, getenv func(string) string) string {
+	if env == "" {
+		return ""
+	}
+	token := strings.TrimSpace(getenv(env))
+	if token == "" {
+		if consoleAuth == config.ConsoleAuthOIDC {
+			logger.Warn("control-plane: admin-token-env set but empty; the admin token is unused in console.auth oidc", "env", env)
+		} else {
+			logger.Warn("control-plane: admin-token-env set but empty; dashboard writes will be refused", "env", env)
+		}
+	}
+	return token
 }
 
 // resolveConsole loads the console block from configPath (the operator-owned
