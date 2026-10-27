@@ -323,10 +323,12 @@ make e2e-identity-down                                # down -v
   `http://dex:5556` (the later tickets set `internalIssuerURL` to that). agent-1
   stays on its internal network and has no route to Dex. There is no test-only
   dialer and no hosts entry.
-- **No identity or console block yet.** The CP and worker-1 load
-  `configs/config.e2e-identity-cp.yaml` and `config.e2e-identity-worker.yaml`,
-  copies of the base e2e configs. The worker `identity:` block (W-P1-IDC-03) and
-  the CP `console:` block (W-P1-SSO-07) are added there by those tickets.
+- **Identity block on the worker, no console block yet.** The CP and worker-1
+  load `configs/config.e2e-identity-cp.yaml` and `config.e2e-identity-worker.yaml`,
+  copies of the base e2e configs. The worker carries an `identity:` block in
+  attribute mode (issuer `http://localhost:5556/dex`, `internalIssuerURL:
+  http://dex:5556`); `TestIdentitySmoke` proves it with a curl agent. The CP
+  `console:` block (W-P1-SSO-07) is added to the CP file by that ticket.
 - **The warden CLI in agent-1.** A one-shot `warden-bin` service copies the
   static `warden` binary from the warden image into a volume that agent-1 mounts
   read-only at `/opt/warden`; no extra image is built.
