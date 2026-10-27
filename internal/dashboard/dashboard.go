@@ -237,6 +237,9 @@ type WorkerView struct {
 	PolicyVersion int64 `json:"policyVersion,omitempty"`
 	Behind        bool  `json:"behind"`
 	Online        bool  `json:"online"`
+	// Caps are the capabilities the worker advertised on its latest heartbeat
+	// (display only; the control plane never acts on them in P1).
+	Caps []string `json:"caps,omitempty"`
 }
 
 // NewServer constructs a dashboard Server. The policy argument is the static
