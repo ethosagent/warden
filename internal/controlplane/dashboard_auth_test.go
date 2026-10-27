@@ -390,3 +390,17 @@ func TestAdminTokenEqualsSharedTokenWarns(t *testing.T) {
 		t.Errorf("log carries the token value:\n%s", buf.String())
 	}
 }
+
+// TestAdminTokenFallbackWarnNoneModeOnly: in console.auth oidc sessions replace
+// the bearer on every human route, so the fallback warning is not logged there.
+func TestAdminTokenFallbackWarnNoneModeOnly(t *testing.T) {
+	logger, buf := testLogger()
+	New(Config{
+		PolicyPath: writePolicyFile(t, "api.openai.com"),
+		Token:      workerTok, Logger: logger,
+		State: openSessionDB(t), Console: authzConsole(defaultRoles()),
+	})
+	if strings.Contains(buf.String(), "shared worker token") {
+		t.Errorf("fallback WARN logged in oidc mode:\n%s", buf.String())
+	}
+}
