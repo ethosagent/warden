@@ -13,6 +13,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/ethosagent/warden/internal/analytics"
+	"github.com/ethosagent/warden/internal/secrets"
 )
 
 const dashTestToken = "dash-s3cret"
@@ -154,7 +157,7 @@ func TestDashboardWrites_FailClosedWithoutToken(t *testing.T) {
 		if rec.Code != http.StatusForbidden {
 			t.Fatalf("no token configured, auth %q: PUT = %d, want 403", auth, rec.Code)
 		}
-		if !strings.Contains(rec.Body.String(), "--token-env") {
+		if !strings.Contains(rec.Body.String(), "--admin-token-env") {
 			t.Fatalf("body should say how to configure the token: %s", rec.Body.String())
 		}
 	}
@@ -194,13 +197,196 @@ func TestDashboardWrites_WhitespaceTokenCountsAsUnset(t *testing.T) {
 	for _, tok := range []string{"   ", "\t\n ", " "} {
 		srv := New(Config{PolicyPath: writePolicyFile(t, "api.openai.com"), Token: tok})
 		rec := dashWrite(t, srv.Handler(), http.MethodPut, "/dashboard/api/policy", "Bearer "+strings.TrimSpace(tok))
-		if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "--token-env") {
-			t.Errorf("token %q: write = %d %q, want 403 with the --token-env hint", tok, rec.Code, rec.Body.String())
+		if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "--admin-token-env") {
+			t.Errorf("token %q: write = %d %q, want 403 with the --admin-token-env hint", tok, rec.Code, rec.Body.String())
 		}
 	}
 	// A real token with stray whitespace (env files, trailing newline) still works trimmed.
 	srv := New(Config{PolicyPath: writePolicyFile(t, "api.openai.com"), Token: dashTestToken + "\n"})
 	if rec := dashWrite(t, srv.Handler(), http.MethodPut, "/dashboard/api/policy", "Bearer "+dashTestToken); rec.Code == http.StatusUnauthorized || rec.Code == http.StatusForbidden {
 		t.Errorf("trimmed token rejected: %d", rec.Code)
+	}
+}
+
+// Separate CP admin bearer (W-P1-WTOK-07). adminTok is the --admin-token-env
+// value, workerTok the shared --token-env value workers present.
+const (
+	adminTok  = "cp-admin-s3cret"
+	workerTok = "cp-worker-s3cret"
+)
+
+const policyPutBody = `{"allowlist":[{"domain":"api.openai.com"}],"denylist":[]}`
+
+func dashPolicyPut(t *testing.T, h http.Handler, bearer string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPut, "/dashboard/api/policy", strings.NewReader(policyPutBody))
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+// TestAdminTokenSeparatesWriteAuth: with an admin token configured, dashboard
+// writes and /central/secrets take only the admin token; the shared worker
+// token is refused with 401.
+func TestAdminTokenSeparatesWriteAuth(t *testing.T) {
+	srv := New(Config{
+		PolicyPath: writePolicyFile(t, "api.openai.com"),
+		Token:      workerTok, AdminToken: adminTok,
+		SecretStore: secrets.NewEchoStore(),
+	})
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	if rec := dashPolicyPut(t, srv.Handler(), workerTok); rec.Code != http.StatusUnauthorized {
+		t.Errorf("dashboard write with the worker token = %d, want 401", rec.Code)
+	}
+	if rec := dashPolicyPut(t, srv.Handler(), adminTok); rec.Code != http.StatusOK {
+		t.Errorf("dashboard write with the admin token = %d %q, want 200", rec.Code, rec.Body.String())
+	}
+	secretReqs := []struct{ method, path, body string }{
+		{http.MethodPost, "/central/secrets", `{"key":"K","value":"V123456"}`},
+		{http.MethodGet, "/central/secrets", ""},
+		{http.MethodDelete, "/central/secrets/K", ""},
+	}
+	for _, r := range secretReqs {
+		if code, _ := do(t, r.method, ts.URL+r.path, workerTok, r.body); code != http.StatusUnauthorized {
+			t.Errorf("%s %s with the worker token = %d, want 401", r.method, r.path, code)
+		}
+	}
+	wants := []int{http.StatusNoContent, http.StatusOK, http.StatusNoContent}
+	for i, r := range secretReqs {
+		if code, _ := do(t, r.method, ts.URL+r.path, adminTok, r.body); code != wants[i] {
+			t.Errorf("%s %s with the admin token = %d, want %d", r.method, r.path, code, wants[i])
+		}
+	}
+}
+
+// TestAdminTokenFallbackToSharedToken: with only the shared token, dashboard
+// and secret writes still take it, and startup warns once naming the flag.
+func TestAdminTokenFallbackToSharedToken(t *testing.T) {
+	logger, buf := testLogger()
+	srv := New(Config{
+		PolicyPath:  writePolicyFile(t, "api.openai.com"),
+		Token:       workerTok,
+		Logger:      logger,
+		SecretStore: secrets.NewEchoStore(),
+	})
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	if rec := dashPolicyPut(t, srv.Handler(), workerTok); rec.Code != http.StatusOK {
+		t.Errorf("dashboard write with the shared token = %d, want 200", rec.Code)
+	}
+	if code, _ := do(t, http.MethodPost, ts.URL+"/central/secrets", workerTok, `{"key":"K","value":"V123456"}`); code != http.StatusNoContent {
+		t.Errorf("secret write with the shared token = %d, want 204", code)
+	}
+	const warn = "dashboard writes use the shared worker token; set --admin-token-env"
+	if n := strings.Count(buf.String(), warn); n != 1 {
+		t.Errorf("fallback WARN logged %d times, want once:\n%s", n, buf.String())
+	}
+	if strings.Contains(buf.String(), workerTok) {
+		t.Errorf("log carries the token value:\n%s", buf.String())
+	}
+}
+
+// TestDashboardWritesRefusedWithoutAnyToken: neither token configured, the
+// guard fails closed with a 403 that names --admin-token-env, and no fallback
+// warning is logged (there is nothing to fall back to).
+func TestDashboardWritesRefusedWithoutAnyToken(t *testing.T) {
+	logger, buf := testLogger()
+	srv := New(Config{PolicyPath: writePolicyFile(t, "api.openai.com"), Logger: logger})
+	for _, bearer := range []string{"", "anything"} {
+		rec := dashPolicyPut(t, srv.Handler(), bearer)
+		if rec.Code != http.StatusForbidden ||
+			!strings.Contains(rec.Body.String(), "dashboard writes are disabled") ||
+			!strings.Contains(rec.Body.String(), "--admin-token-env") {
+			t.Errorf("bearer %q: write = %d %q, want 403 'dashboard writes are disabled' naming --admin-token-env", bearer, rec.Code, rec.Body.String())
+		}
+	}
+	if strings.Contains(buf.String(), "shared worker token") {
+		t.Errorf("fallback WARN logged with no shared token:\n%s", buf.String())
+	}
+}
+
+// TestAdminTokenNotAWorkerCredential: the admin token opens no worker route
+// while a shared token is configured, and the shared token opens no dashboard
+// write while an admin token is set.
+func TestAdminTokenNotAWorkerCredential(t *testing.T) {
+	srv := New(Config{
+		PolicyPath: writePolicyFile(t, "api.openai.com"),
+		Token:      workerTok, AdminToken: adminTok,
+	})
+	h := srv.Handler()
+	type req struct{ method, path, body string }
+	worker := []req{
+		{http.MethodGet, "/policy", ""},
+		{http.MethodPost, "/control/heartbeat", `{"policyETag":""}`},
+		{http.MethodPost, "/central/ingest", `{"events":[]}`},
+	}
+	send := func(r req, bearer string) int {
+		hr := httptest.NewRequest(r.method, r.path, strings.NewReader(r.body))
+		hr.Header.Set(analytics.ProxyIDHeader, "w1")
+		hr.Header.Set("Authorization", "Bearer "+bearer)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, hr)
+		return rec.Code
+	}
+	for _, r := range worker {
+		if c := send(r, adminTok); c != http.StatusUnauthorized {
+			t.Errorf("%s %s with the admin token = %d, want 401", r.method, r.path, c)
+		}
+		if c := send(r, workerTok); c == http.StatusUnauthorized {
+			t.Errorf("%s %s with the worker token = 401, want it accepted", r.method, r.path)
+		}
+	}
+	if rec := dashPolicyPut(t, h, workerTok); rec.Code != http.StatusUnauthorized {
+		t.Errorf("dashboard write with the worker token = %d, want 401", rec.Code)
+	}
+}
+
+// TestAdminTokenRequiredDoesNotFallBack: when --admin-token-env names an empty
+// variable (RequireAdminToken with no AdminToken) the shared token must not
+// reopen writes: dashboard writes are 403 and secret routes 401.
+func TestAdminTokenRequiredDoesNotFallBack(t *testing.T) {
+	logger, buf := testLogger()
+	srv := New(Config{
+		PolicyPath: writePolicyFile(t, "api.openai.com"),
+		Token:      workerTok, RequireAdminToken: true,
+		Logger: logger, SecretStore: secrets.NewEchoStore(),
+	})
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+	if rec := dashPolicyPut(t, srv.Handler(), workerTok); rec.Code != http.StatusForbidden {
+		t.Errorf("dashboard write with the worker token = %d, want 403", rec.Code)
+	}
+	for _, bearer := range []string{workerTok, ""} {
+		if code, _ := do(t, http.MethodGet, ts.URL+"/central/secrets", bearer, ""); code != http.StatusUnauthorized {
+			t.Errorf("secret list with bearer %q = %d, want 401", bearer, code)
+		}
+	}
+	if strings.Contains(buf.String(), "shared worker token") {
+		t.Errorf("fallback WARN logged although the fallback is off:\n%s", buf.String())
+	}
+}
+
+// TestAdminTokenEqualsSharedTokenWarns: the same value for both tokens starts
+// but warns that they should differ, without logging the value.
+func TestAdminTokenEqualsSharedTokenWarns(t *testing.T) {
+	logger, buf := testLogger()
+	srv := New(Config{
+		PolicyPath: writePolicyFile(t, "api.openai.com"),
+		Token:      adminTok, AdminToken: adminTok, Logger: logger,
+	})
+	if rec := dashPolicyPut(t, srv.Handler(), adminTok); rec.Code != http.StatusOK {
+		t.Errorf("dashboard write = %d, want 200", rec.Code)
+	}
+	if !strings.Contains(buf.String(), "admin token equals the shared worker token") {
+		t.Errorf("no WARN for equal tokens:\n%s", buf.String())
+	}
+	if strings.Contains(buf.String(), adminTok) {
+		t.Errorf("log carries the token value:\n%s", buf.String())
 	}
 }

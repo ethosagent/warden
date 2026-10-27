@@ -99,6 +99,7 @@ the change — no restart.
 # Control plane (HTTPS, minted from the proxy CA):
 warden control-plane --config configs/config.control-plane.yaml \
   --listen 0.0.0.0:7070 --token-env WARDEN_CP_TOKEN \
+  --admin-token-env WARDEN_CP_ADMIN_TOKEN \
   --ca-cert certs/proxy-ca.crt --ca-key certs/proxy-ca.key --tls-host control-plane
 
 # Worker pointed at it (configs/config.worker.yaml sets controlPlane + central):
@@ -173,22 +174,42 @@ This is the `console.auth: none` mode (the default). Dashboard reads are open;
 every state-changing call under `/dashboard/api/` (`PUT`, `POST`, `PATCH`,
 `DELETE`: policy, settings, integrations, detection, LLM providers, the secret
 store, and the query and audit-verify `POST`s) is gated by the control-plane
-admin bearer, `Authorization: Bearer <control-plane token>`, checked in constant
-time and fail closed. Until a separate admin token exists, that bearer is the
-`--token-env` token. `/central/secrets` takes the same bearer in this mode. In
+admin bearer, `Authorization: Bearer <control-plane admin token>`, checked in
+constant time and fail closed. `/central/secrets` (GET, POST and
+`DELETE /central/secrets/{key}`) takes the same bearer in this mode. In
 `console.auth: oidc` none of this applies: sessions and CSRF replace the bearer
 on every human route (see [Migrating from none to oidc](#migrating-from-none-to-oidc)).
 
+- **The admin token.** Start the control plane with `--admin-token-env <ENV>`
+  (for example `--admin-token-env WARDEN_CP_ADMIN_TOKEN`) naming the env var that
+  holds its own admin bearer. It is separate from the `--token-env` token workers
+  present: once it is set, the worker token gets `401` on dashboard writes and on
+  `/central/secrets`, and the admin token gets `401` on the worker routes
+  (`/policy`, `/control/heartbeat`, `/central/ingest`). Use different values; the
+  control plane warns at startup when the two are equal. Scripts that write with
+  `curl -H "Authorization: Bearer ..."` must send the admin token once it is set.
+  Giving the control plane its own admin token means retiring the shared worker
+  token (per-worker tokens) never disables dashboard writes.
+- **Fallback.** Without `--admin-token-env`, the admin bearer is the shared
+  `--token-env` token, exactly as before, and startup logs one warning:
+  `dashboard writes use the shared worker token; set --admin-token-env`. With no
+  token of either kind, `/central/secrets` keeps the development pass-through of
+  the worker routes, and dashboard writes are refused (below).
 - **Visible.** At startup the control plane logs one warning,
   `console.auth=none: dashboard reads are unauthenticated; writes need the admin bearer`,
   `GET /dashboard/api/setup` returns `"authMode":"none"`, and the dashboard shows a
   persistent "Open console" banner. Start the control plane with
   `--require-console-auth` to make none mode a startup error instead.
 
-- **Fail closed.** A control plane started without a token (`--token-env` unset
-  or the variable empty) refuses every dashboard write with `403` and a message
-  saying how to configure the token. There is no open mode for dashboard writes.
-  A whitespace-only token counts as not configured. The worker-facing endpoints
+- **Fail closed.** A control plane started with no admin bearer (neither
+  `--admin-token-env` nor `--token-env`, or their variables empty) refuses every
+  dashboard write with `403` and a message (`dashboard writes are disabled`) that
+  names `--admin-token-env`. There is no open mode for dashboard writes. A
+  whitespace-only token counts as not configured. When `--admin-token-env` names
+  an empty variable the control plane logs
+  `control-plane: admin-token-env set but empty; dashboard writes will be refused`
+  and does not fall back to the worker token: dashboard writes get `403` and
+  `/central/secrets` gets `401`. No token value is ever logged. The worker-facing endpoints
   (`/central/ingest`, `/control/heartbeat`) keep the existing development
   pass-through when no token is set; the loopback publish of `:7070` in the demo
   compose files is what bounds that.
@@ -205,9 +226,17 @@ on every human route (see [Migrating from none to oidc](#migrating-from-none-to-
 
 ```sh
 curl --cacert proxy-ca.crt -X PUT https://localhost:7070/dashboard/api/policy \
-  -H "Authorization: Bearer $WARDEN_CP_TOKEN" -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $WARDEN_CP_ADMIN_TOKEN" -H 'Content-Type: application/json' \
   -d '{"allowlist":[{"domain":"api.openai.com"}],"denylist":[]}'
+
+# Secret writes take the same admin bearer:
+curl --cacert proxy-ca.crt -X POST https://localhost:7070/central/secrets \
+  -H "Authorization: Bearer $WARDEN_CP_ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"key":"openai","value":"..."}'
 ```
+
+Without `--admin-token-env` (the fallback), use `$WARDEN_CP_TOKEN` in these
+examples instead.
 
 A worker's own admin dashboard (its local `:9090`) is a separate listener with its
 own token, not this one: see [Worker admin token](#worker-admin-token).
@@ -238,7 +267,7 @@ In `oidc` mode every human route needs a session: each `/dashboard/*` route need
 least the viewer role, writes need the CSRF header, and `/central/secrets` (GET, POST
 and `DELETE /central/secrets/{key}`) needs an admin session plus CSRF. An
 `Authorization` header is ignored on those routes, so neither the shared
-`--token-env` token nor any other bearer opens them (401 without a session, 403 for a
+`--token-env` token, the `--admin-token-env` token nor any other bearer opens them (401 without a session, 403 for a
 role below admin). The worker routes (`/policy`, `/control/heartbeat`,
 `/central/ingest`) keep the shared bearer in both modes.
 
@@ -255,10 +284,10 @@ role below admin). The worker routes (`/policy`, `/control/heartbeat`,
 4. Verify: the startup log no longer carries the `console.auth=none` warning; opening
    `/dashboard/` redirects to the IdP; after sign-in a viewer can read every tab but
    gets 403 on a policy change, and an admin can edit integrations, LLM providers and
-   secrets. A request with only `Authorization: Bearer $WARDEN_CP_TOKEN` gets 401 on
+   secrets. A request with only a bearer (`$WARDEN_CP_TOKEN` or `$WARDEN_CP_ADMIN_TOKEN`) gets 401 on
    `/dashboard/api/*` and `/central/secrets`, while workers keep pulling `/policy`.
 
-Scripts that call `/central/secrets` with the shared bearer stop working in oidc
+Scripts that call `/central/secrets` with the admin (or shared) bearer stop working in oidc
 mode: secret writes then need an admin session plus CSRF, so they go through the
 admin's secret store tab in the dashboard until scoped API keys exist. Scripts that
 write `/dashboard/api/*` with the bearer stop working for the same reason.

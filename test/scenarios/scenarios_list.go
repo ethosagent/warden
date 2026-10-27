@@ -65,6 +65,10 @@ var All = slices.Concat(
 		// Console enforcement (W-P1-SSO-06): oidc starts, the shared bearer opens no
 		// human route, and workers keep pulling /policy with it.
 		{Name: "console_oidc_bearer_rejected", Opts: consoleOpts(), Run: consoleOIDCBearerRejected},
+		// CP admin bearer (W-P1-WTOK-07): --admin-token-env opens dashboard writes,
+		// the shared worker token does not, and the admin token opens no worker
+		// route. In-process only (the compose stack sets no admin token yet).
+		{Name: "cp_admin_token_separates_writes", Opts: cpAdminOpts(), Run: cpAdminTokenSeparatesWrites},
 	},
 	// Canary across protocols x allow/deny; see canary.go.
 	canaryScenarios(),

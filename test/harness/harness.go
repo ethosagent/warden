@@ -159,6 +159,9 @@ type H struct {
 	// listen address (its https origin is the registered redirect URL).
 	wantConsole bool
 	consoleAddr string
+	// wantCPAdmin (WithControlPlaneAdminToken) boots the control plane with its
+	// own admin bearer (--admin-token-env), separate from the worker token.
+	wantCPAdmin bool
 
 	// tokenClients are the AgentWithProxyToken / AgentH2WithProxyToken clients,
 	// kept so cleanup can close their idle tunnels.
@@ -611,6 +614,9 @@ func (h *H) boot() {
 	if h.wantConsole {
 		h.prepareConsole()
 	}
+	if h.wantCPAdmin {
+		h.prepareCPAdmin()
+	}
 
 	if h.suppliedTarget != nil {
 		if h.cpDownAtBoot {
@@ -689,6 +695,7 @@ func (h *H) buildInprocessTarget() *inprocess {
 		tokenEnv: cpTokenEnv,
 	}
 	h.applyConsole(&ip.cp.params, &ip.cp.addr)
+	h.applyCPAdmin(&ip.cp.params)
 	return ip
 }
 

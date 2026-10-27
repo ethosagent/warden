@@ -40,6 +40,11 @@ type Params struct {
 	AnalyticsProvider, AnalyticsDB   string
 	AlertsDB                         string
 
+	// AdminTokenEnv names the env var holding the CP's own admin bearer
+	// (--admin-token-env) for dashboard writes and /central/secrets. Empty =
+	// unset: they fall back to the TokenEnv token.
+	AdminTokenEnv string
+
 	// Listener, when set, replaces ListenAddr. Tests pass a loopback listener on
 	// port 0. Run closes it on a boot error and, on the serving path, on
 	// shutdown (via httpSrv.Shutdown, which closes listeners Serve registered).
@@ -151,6 +156,13 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	} else {
 		logger.Warn("control-plane: no token configured; serving WITHOUT auth (set --token-env for production)")
 	}
+	var adminToken string
+	if p.AdminTokenEnv != "" {
+		adminToken = strings.TrimSpace(os.Getenv(p.AdminTokenEnv))
+		if adminToken == "" {
+			logger.Warn("control-plane: admin-token-env set but empty; dashboard writes will be refused", "env", p.AdminTokenEnv)
+		}
+	}
 
 	// Durable CP state (sessions, audit, tokens, ... register migrations here as
 	// they land). Only with --state-dir; a corrupt file stops startup so state is
@@ -254,6 +266,11 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		Console:      consoleCfg,
 		ClientSecret: clientSecret,
 		Now:          clk.Now,
+
+		// The CP's own admin bearer. An explicit --admin-token-env never falls
+		// back to the worker token, even when its variable is empty.
+		AdminToken:        adminToken,
+		RequireAdminToken: p.AdminTokenEnv != "",
 		// Report the backend name to the dashboard only when a writable store was
 		// actually built (echo/aws); env/none leaves it empty → tab reports "none".
 		SecretStoreBackend: secretStoreBackendName(secretStore, pol.SecretStore),

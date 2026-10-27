@@ -47,6 +47,15 @@ type Config struct {
 	// Token is the bearer token workers must present on /policy and
 	// /central/ingest. Empty disables auth (development only).
 	Token string
+	// AdminToken is the CP's own admin bearer (--admin-token-env): the token
+	// dashboard writes and /central/secrets take in console.auth none. It never
+	// authenticates a worker route. Empty falls back to Token (back-compat)
+	// unless RequireAdminToken is set.
+	AdminToken string
+	// RequireAdminToken is set when --admin-token-env was given. It turns the
+	// fallback to Token off, so a flag naming an empty variable refuses writes
+	// instead of reopening them to the shared worker token.
+	RequireAdminToken bool
 	// MaxEvents caps the central analytics store (0 = default).
 	MaxEvents int
 	// Store is the fleet analytics backend (persistent SQLite or in-memory). When
@@ -212,6 +221,7 @@ func New(cfg Config) *Server {
 	// A whitespace-only token (a stray space or newline in an env file) is NOT a
 	// token: it counts as unset, so dashboard writes fail closed with the hint.
 	cfg.Token = strings.TrimSpace(cfg.Token)
+	cfg.AdminToken = strings.TrimSpace(cfg.AdminToken)
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
@@ -239,6 +249,7 @@ func New(cfg Config) *Server {
 	}
 	s.initSessions()
 	s.initAuth()
+	s.warnAdminToken()
 	// Alert pipeline (CP-hosted alert delivery + always-on Alert Store). Constructed
 	// whenever an alert DB path is set — even with ZERO configured integrations —
 	// because it serves two always-on purposes:
