@@ -13,6 +13,6 @@ import (
 func main() {
 	if err := Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "warden: %v\n", err)
-		os.Exit(1)
+		os.Exit(exitCode(err))
 	}
 }
