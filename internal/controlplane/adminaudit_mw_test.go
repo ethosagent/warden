@@ -421,7 +421,8 @@ func TestAdminAuditBearerActor(t *testing.T) {
 
 // TestAdminAuditOpenWrites: with no token configured at all (development),
 // /central/secrets accepts an anonymous write; it is recorded with
-// auth_method none, while the dashboard's fail-closed 403 writes no row.
+// auth_method none, while the dashboard's fail-closed 403 and an anonymous
+// 400 write no row.
 func TestAdminAuditOpenWrites(t *testing.T) {
 	e := newAuditEnv(t, auditEnvOpts{})
 	if rec := e.send("", "", http.MethodPost, "/central/secrets", `{"key":"K","value":"v"}`); rec.Code != http.StatusNoContent {
@@ -429,6 +430,10 @@ func TestAdminAuditOpenWrites(t *testing.T) {
 	}
 	if rec := e.send("", "", http.MethodPut, "/dashboard/api/policy", policyBody); rec.Code != http.StatusForbidden {
 		t.Fatalf("open PUT policy = %d, want 403 (no token: fail closed)", rec.Code)
+	}
+	// An anonymous request that changes nothing is noise, not a change: no row.
+	if rec := e.send("", "", http.MethodPost, "/central/secrets", `not json`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("open bad POST /central/secrets = %d", rec.Code)
 	}
 	rows := e.rec.inputs()
 	if len(rows) != 1 || rows[0].AuthMethod != adminaudit.AuthMethodNone || rows[0].Actor.Sub != "" || rows[0].TargetRef != "secret:K" {

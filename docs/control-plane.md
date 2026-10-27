@@ -328,6 +328,9 @@ never write a row. Each row carries:
   `auth_method` `bearer` for a write that presented the `--admin-token-env` bearer.
   A request with neither a session nor that bearer writes no row (it is counted and
   logged as `admin_audit_unauthenticated`, at most once a minute per client address).
+  The one exception is a development control plane with no token configured at all,
+  where `/central/secrets` accepts anonymous writes: a successful anonymous change is
+  recorded with `auth_method` `none`; a failed or refused one still writes no row.
 - the outcome: `ok` (2xx/3xx), `denied` (401/403, including a CSRF refusal, for an
   authenticated actor), `rejected` (other 4xx) or `error` (5xx), and the HTTP status.
 - `before_hash` and `after_hash`: HMAC-SHA256 of the target's state with the

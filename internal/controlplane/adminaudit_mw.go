@@ -173,8 +173,9 @@ func (s *Server) resolveActor(r *http.Request) (auditActor, bool) {
 
 // openWrites reports whether a request with no credential at all can change
 // admin state: console.auth none with no admin token and no shared token
-// (development only; /central/secrets then passes, see adminBearerOK). Such a
-// change is recorded with auth_method none rather than going unrecorded.
+// (development only; /central/secrets then passes, see adminBearerOK). A
+// successful anonymous change is recorded with auth_method none rather than
+// going unrecorded; a failed or refused one writes no row.
 func (s *Server) openWrites() bool {
 	return s.cfg.Console.Auth != config.ConsoleAuthOIDC && s.dashboardWriteToken() == "" && !s.cfg.RequireAdminToken
 }
@@ -223,7 +224,10 @@ func (s *Server) adminAuditMiddleware(classify func(*http.Request) (authzRow, bo
 		next.ServeHTTP(sw.writer(), r.WithContext(actx))
 		status := sw.code()
 		outcome := outcomeFor(status)
-		if !authed && outcome == adminaudit.OutcomeDenied {
+		if !authed && outcome != adminaudit.OutcomeOK {
+			// Only an anonymous request that changed state needs a row; anything
+			// else is counted like other unauthenticated traffic, so open mode
+			// cannot be used to flood the table either.
 			a.noteUnauthenticated(r, row)
 			return
 		}
