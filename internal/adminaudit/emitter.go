@@ -24,8 +24,12 @@ const (
 // Emitter receives every committed entry and the periodic head checkpoints,
 // so an off-host copy of what it writes anchors the chain: deleting the
 // newest rows or restoring an older backup no longer matches the copy. The
-// store calls Emit after the append's transaction commits; an Emitter must not
-// call back into the store. W-P1-JAUD-03 plugs auditlog.Writer in here.
+// store calls Emit synchronously on the recording goroutine, after the
+// append's transaction has committed and its connection is released: a slow
+// sink delays that caller's return (never the append itself or other
+// appends' transactions), so an implementation must be fast or hand off to
+// its own buffered writer. An Emitter must not call back into the store.
+// W-P1-JAUD-03 plugs auditlog.Writer in here.
 type Emitter interface {
 	Emit(e Entry, who Identity)
 	Checkpoint(c Checkpoint)

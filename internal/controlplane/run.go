@@ -192,13 +192,18 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// Admin audit (console.adminAudit.enabled): off by default, in which case no
 	// key file, store or rows exist. On, a key that does not match the chain
 	// stops startup here, before anything is served.
-	var adminAudit *adminaudit.Store
+	var (
+		adminAudit   *adminaudit.Store
+		auditEmitter adminaudit.Emitter
+	)
 	if consoleCfg.AdminAudit.Enabled {
 		auditClk := p.Clock
 		if auditClk == nil {
 			auditClk = clock.Real()
 		}
-		adminAudit, err = openAdminAudit(context.WithoutCancel(ctx), logger, state, stateDir, p, auditClk)
+		// One emitter for entries and checkpoints: W-P1-JAUD-03 swaps it here.
+		auditEmitter = adminaudit.NewSlogEmitter(logger)
+		adminAudit, err = openAdminAudit(context.WithoutCancel(ctx), logger, state, stateDir, p, auditClk, auditEmitter)
 		if err != nil {
 			return fail(err)
 		}
@@ -350,7 +355,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	if adminAudit != nil {
 		cpCtx, cpCancel := context.WithCancel(ctx)
 		done := make(chan struct{})
-		go runCheckpointLoop(cpCtx, done, adminAudit, adminaudit.NewSlogEmitter(logger), p.AdminAuditCheckpointInterval, clk)
+		go runCheckpointLoop(cpCtx, done, adminAudit, auditEmitter, p.AdminAuditCheckpointInterval, clk)
 		defer func() {
 			cpCancel()
 			<-done

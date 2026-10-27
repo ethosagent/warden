@@ -41,9 +41,9 @@ func checkAdminAuditFlags(cc config.ConsoleConfig, stateDir string, p Params) er
 // openAdminAudit builds the admin audit store on the CP state database: it
 // loads (or, on an empty chain, creates) the signing key and the HMAC key,
 // runs the fail-closed key check, starts a new segment when asked, writes
-// genesis on first use, installs the slog Emitter, and logs the key_id and
-// public key. Key material is never logged.
-func openAdminAudit(ctx context.Context, logger *slog.Logger, state *cpstate.DB, stateDir string, p Params, clk clock.Clock) (*adminaudit.Store, error) {
+// genesis on first use, installs em as the store's Emitter, and logs the
+// key_id and public key. Key material is never logged.
+func openAdminAudit(ctx context.Context, logger *slog.Logger, state *cpstate.DB, stateDir string, p Params, clk clock.Clock, em adminaudit.Emitter) (*adminaudit.Store, error) {
 	keyFile := p.AdminAuditKeyFile
 	if keyFile == "" {
 		keyFile = adminaudit.DefaultKeyPath(stateDir)
@@ -58,9 +58,9 @@ func openAdminAudit(ctx context.Context, logger *slog.Logger, state *cpstate.DB,
 	if err != nil {
 		return nil, fmt.Errorf("control-plane: admin audit: %w", err)
 	}
-	// Every entry committed from here on is also a warden.admin.v1 log line,
-	// so an off-host copy of the logs anchors the chain.
-	s.SetEmitter(adminaudit.NewSlogEmitter(logger))
+	// Every entry committed from here on also goes to em (the warden.admin.v1
+	// log line), so an off-host copy anchors the chain.
+	s.SetEmitter(em)
 	logger.Info("admin audit enabled",
 		"key_id", s.KeyID(),
 		"public_key", base64.StdEncoding.EncodeToString(s.PublicKey()),

@@ -124,7 +124,7 @@ func TestCheckpointLifecycle(t *testing.T) {
 
 // TestEmitterNoSecretLeak drives a request carrying the canary as its bearer
 // token and body through a handler that records an admin audit entry with the
-// store openAdminAudit builds (the one Run uses, slog Emitter installed). The
+// store openAdminAudit builds with the slog Emitter, as Run does. The
 // handler records only safe, derived fields, as the AAUD-02 middleware's
 // Annotate does; the emitted line must hold neither the canary nor a body or
 // authorization field.
@@ -139,7 +139,7 @@ func TestEmitterNoSecretLeak(t *testing.T) {
 	var logs syncBuffer
 	logger := slog.New(slog.NewJSONHandler(&logs, nil))
 	clk := clocktest.NewFake(time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC))
-	store, err := openAdminAudit(context.Background(), logger, state, stateDir, Params{}, clk)
+	store, err := openAdminAudit(context.Background(), logger, state, stateDir, Params{}, clk, adminaudit.NewSlogEmitter(logger))
 	if err != nil {
 		t.Fatal(err)
 	}
