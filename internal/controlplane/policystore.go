@@ -21,10 +21,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"time"
 	"unicode"
 
+	"github.com/ethosagent/warden/internal/adminaudit"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/cpstate"
 )
@@ -573,5 +575,160 @@ func (s *Server) initPolicyStore() {
 		// Unreachable: registration precedes the first Refresh and the name is
 		// unique. Logged rather than ignored so a wiring change shows up.
 		s.cfg.Logger.Error("control plane: credential overlay not registered", "error", err)
+	}
+}
+
+// The initial import's identity and audit action (W-P1-PVER-07).
+const (
+	importAuthorSub           = "system:import"
+	actionPolicyInitialImport = "policy.initial_import"
+	auditTargetPolicy         = "policy"
+	auditActorSystem          = "system"
+)
+
+// policyImport is the initial import of the served YAML as version 1. Its
+// collaborators are funcs so a test can fake the served-ETag prediction.
+type policyImport struct {
+	store PolicyVersionStore
+	// path is the served YAML.
+	path string
+	// load builds the doc from the served YAML (allowlist, denylist,
+	// SettingsWireFromPolicy), never from serve-time overlay data.
+	load func() (policyWire, error)
+	// served is the ETag /policy serves now; predict is the ETag doc would be
+	// served with as head.
+	served  func(ctx context.Context) (string, error)
+	predict func(ctx context.Context, doc policyWire) (string, error)
+	// validate is Server.validateDoc; refresh reloads the policy server.
+	validate func(doc policyWire) error
+	refresh  func()
+	// audit is the admin audit recorder; nil when admin audit is disabled.
+	audit  adminaudit.Recorder
+	logger *slog.Logger
+}
+
+// policyImport wires the import to the Server's policy server and store.
+func (s *Server) policyImport() policyImport {
+	im := policyImport{
+		store: s.versions,
+		path:  s.cfg.PolicyPath,
+		load:  s.policy.loadFile,
+		served: func(ctx context.Context) (string, error) {
+			wire, _, err := s.policy.loadPolicy(ctx)
+			if err != nil {
+				return "", err
+			}
+			return etagFor(wire), nil
+		},
+		predict:  s.policy.servedETag,
+		validate: s.validateDoc,
+		refresh:  s.policy.Refresh,
+		logger:   s.cfg.Logger,
+	}
+	if s.cfg.AdminAudit != nil {
+		im.audit = s.cfg.AdminAudit
+	}
+	return im
+}
+
+// importInitialVersion stores the served YAML's policy doc as version 1 on
+// the first versioned start (W-P1-PVER-07), so workers keep the exact policy
+// and ETag they have. Run calls it in versioned mode before serving. It is a
+// no-op in file mode and on a non-empty store; an error means the control
+// plane must not start.
+func (s *Server) importInitialVersion(ctx context.Context) error {
+	if s.versions == nil {
+		return nil
+	}
+	return s.policyImport().run(ctx)
+}
+
+// run is importInitialVersion. The served ETag is predicted before anything is
+// written, so a doc that would change it leaves the store empty; Create is a
+// compare-and-swap from head 0, so control planes racing the first start
+// import once.
+func (im policyImport) run(ctx context.Context) error {
+	const flag = "control-plane: --policy-store=versioned"
+	head, err := im.store.Head(ctx)
+	if err != nil {
+		return fmt.Errorf("%s: cannot read the policy store: %w", flag, err)
+	}
+	if head != 0 {
+		return nil
+	}
+	raw, err := os.ReadFile(im.path)
+	if err != nil {
+		return fmt.Errorf("%s: read the served config for the initial import: %w", flag, err)
+	}
+	doc, err := im.load()
+	if err != nil {
+		return fmt.Errorf("%s: load the served config %s for the initial import: %w", flag, im.path, err)
+	}
+	doc = RedactCredentials(doc)
+	if err := im.validate(doc); err != nil {
+		return fmt.Errorf("%s: the served config %s does not validate as version 1: %w "+
+			"(fix the config, or start with --policy-store=file)", flag, im.path, err)
+	}
+	before, err := im.served(ctx)
+	if err != nil {
+		return fmt.Errorf("%s: compute the served /policy ETag: %w", flag, err)
+	}
+	predicted, err := im.predict(ctx, doc)
+	if err != nil {
+		return fmt.Errorf("%s: compute the /policy ETag of version 1: %w", flag, err)
+	}
+	if predicted != before {
+		return fmt.Errorf("%s: importing %s as version 1 would change the served /policy ETag from %s to %s, "+
+			"so every worker would see a policy change; nothing was imported and the policy store is still empty. "+
+			"Start with --policy-store=file and report this as a bug (the served config holds something a policy version cannot carry)",
+			flag, im.path, before, predicted)
+	}
+	version, _, err := im.store.Create(ctx, doc, PolicyAuthor{Sub: importAuthorSub, Kind: AuthorKindSystem},
+		"initial import from "+im.path, SourceImport, 0)
+	if errors.Is(err, ErrConflict) {
+		// Another control plane on the same state DB imported first.
+		im.refresh()
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("%s: store the served config as version 1: %w", flag, err)
+	}
+	after, err := im.served(ctx)
+	if err != nil {
+		return fmt.Errorf("%s: compute the served /policy ETag after the initial import: %w", flag, err)
+	}
+	if after != before {
+		return fmt.Errorf("%s: the initial import of %s changed the served /policy ETag from %s to %s; "+
+			"start with --policy-store=file (it serves the YAML, unchanged) and report this as a bug",
+			flag, im.path, before, after)
+	}
+	im.record(ctx, raw, version)
+	return nil
+}
+
+// record appends the import's admin audit row directly through the Recorder:
+// startup is outside the HTTP audit middleware. A failure is logged and does
+// not stop startup.
+func (im policyImport) record(ctx context.Context, servedYAML []byte, version int64) {
+	if im.audit == nil {
+		return
+	}
+	v, err := im.store.Get(ctx, version)
+	if err != nil {
+		im.logger.Error("control plane: admin audit append failed", "action", actionPolicyInitialImport, "error", err)
+		return
+	}
+	sum := sha256.Sum256(servedYAML)
+	if _, err := im.audit.Record(ctx, adminaudit.Input{
+		Actor:      adminaudit.Actor{Sub: auditActorSystem},
+		ActorRole:  auditActorSystem,
+		AuthMethod: adminaudit.AuthMethodSystem,
+		Action:     actionPolicyInitialImport,
+		Target:     auditTargetPolicy,
+		Outcome:    adminaudit.OutcomeOK,
+		BeforeHash: "file:" + hex.EncodeToString(sum[:]),
+		AfterHash:  fmt.Sprintf("v%d:%s", v.Version, v.DocSHA256),
+	}); err != nil {
+		im.logger.Error("control plane: admin audit append failed", "action", actionPolicyInitialImport, "error", err)
 	}
 }

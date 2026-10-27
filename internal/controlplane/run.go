@@ -329,6 +329,15 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 			}
 			return fail(errors.New("control-plane: --policy-store=versioned: the head policy failed to load (see the log above); refusing to start"))
 		}
+		// First versioned start: the served YAML becomes version 1, with the
+		// served /policy bytes and ETag unchanged (W-P1-PVER-07). Not
+		// cancellable, like the store check above.
+		if err := srv.importInitialVersion(context.WithoutCancel(ctx)); err != nil {
+			if srv.integrationsStore != nil {
+				_ = srv.integrationsStore.Close() // Start never ran, so nothing else closes it
+			}
+			return fail(err)
+		}
 	}
 
 	httpSrv := &http.Server{
