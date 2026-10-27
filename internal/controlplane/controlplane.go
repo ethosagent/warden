@@ -696,12 +696,18 @@ func renderPolicyBlock(root map[string]yaml.Node, allow []config.AllowlistEntry,
 	return nil
 }
 
-// readServedRoot loads the served file as a top-level YAML map so blocks the
-// caller does not own survive. A missing, unreadable or malformed file yields
-// an empty map; the loader validation of the result still guards it.
+// readServedRoot is readRoot of the served file.
 func (s *Server) readServedRoot() map[string]yaml.Node {
+	return readRoot(s.cfg.PolicyPath)
+}
+
+// readRoot loads the config YAML at path (the served file, or a file being
+// imported) as a top-level YAML map so blocks the caller does not own survive.
+// A missing, unreadable or malformed file yields an empty map; the loader
+// validation of the result still guards it.
+func readRoot(path string) map[string]yaml.Node {
 	root := map[string]yaml.Node{}
-	if cur, err := os.ReadFile(s.cfg.PolicyPath); err == nil {
+	if cur, err := os.ReadFile(path); err == nil {
 		_ = yaml.Unmarshal(cur, &root)
 	}
 	return root
@@ -739,11 +745,18 @@ func renderDocToRoot(root map[string]yaml.Node, doc policyWire) error {
 // references (judge/explore llmProvider). Nothing is persisted. Callers run it
 // before PolicyVersionStore.Create.
 func (s *Server) validateDoc(doc policyWire) error {
-	root := s.readServedRoot()
+	return validateDocAgainst(s.cfg.PolicyPath, filepath.Dir(s.cfg.PolicyPath), doc)
+}
+
+// validateDocAgainst is validateDoc against the config YAML at rootPath: doc
+// is rendered into a copy of that file's top-level map and the result is
+// loaded from a temp file in tmpDir ("" = the system temp dir), then removed.
+func validateDocAgainst(rootPath, tmpDir string, doc policyWire) error {
+	root := readRoot(rootPath)
 	if err := renderDocToRoot(root, doc); err != nil {
 		return err
 	}
-	tmpName, err := s.writeValidatedTemp(root)
+	tmpName, err := writeValidatedTempIn(tmpDir, root)
 	if err != nil {
 		return err
 	}
@@ -784,12 +797,24 @@ func (s *Server) writeValidatedTemp(root map[string]yaml.Node) (string, error) {
 
 // writeCheckedTemp is writeValidatedTemp that also returns the loaded policy.
 func (s *Server) writeCheckedTemp(root map[string]yaml.Node) (string, config.Policy, error) {
+	return writeCheckedTempIn(filepath.Dir(s.cfg.PolicyPath), root)
+}
+
+// writeValidatedTempIn is writeValidatedTemp with the temp file in dir ("" =
+// the system temp dir).
+func writeValidatedTempIn(dir string, root map[string]yaml.Node) (string, error) {
+	name, _, err := writeCheckedTempIn(dir, root)
+	return name, err
+}
+
+// writeCheckedTempIn is writeCheckedTemp with the temp file in dir ("" = the
+// system temp dir).
+func writeCheckedTempIn(dir string, root map[string]yaml.Node) (string, config.Policy, error) {
 	data, err := yaml.Marshal(root)
 	if err != nil {
 		return "", config.Policy{}, fmt.Errorf("controlplane: marshal config: %w", err)
 	}
 
-	dir := filepath.Dir(s.cfg.PolicyPath)
 	tmp, err := os.CreateTemp(dir, ".warden-policy-*.yaml")
 	if err != nil {
 		return "", config.Policy{}, fmt.Errorf("controlplane: create temp policy: %w", err)

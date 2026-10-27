@@ -90,6 +90,10 @@ var All = slices.Concat(
 		// YAML; a hand edit is never served, shows as drift and is audited once.
 		// In-process only (it edits the CP's file and reads its state dir).
 		{Name: "policy_store_mirror_drift", Opts: policyMirrorOpts(), Run: policyStoreMirrorDrift},
+		// Import/export CLI (W-P1-PVER-06): an exported version, edited and
+		// imported while the control plane runs, reaches workers and is audited
+		// as cli. In-process only (it writes the CP state dir).
+		{Name: "policy_import_export", Opts: policyImportOpts(), Run: policyImportExport},
 
 		// Admin audit gate (W-P1-AAUD-05): enabled, the control plane writes the
 		// genesis entry and logs its key_id before serving. In-process only (it

@@ -584,6 +584,32 @@ other value, the control plane refuses to start.
   is not used. Edits to the credential or to CP-local blocks are not drift.
   Bring an edit in with `warden policy import`; putting the file back, or the
   next save, clears the drift.
+- `warden policy import --state-dir <dir> --file <yaml> [--message m]
+  [--admin-audit-key-file F] [--expected-head N]` stores a config YAML's
+  policy, settings and llmProviders blocks as a new version, with the control
+  plane running or stopped. The file is loaded strictly (an unknown key is an
+  error) and checked like a dashboard write, against the file itself and
+  against `<dir>/config.yaml` when it exists. A raw `secretAccessKey` is stored
+  as its fingerprint; it must match the served config's credential, because
+  the store cannot carry a new value (change the credential in the served
+  config instead). A file without the credential is refused while the served
+  config has one, so an unedited export cannot drop it. The version is authored `cli:<os user>` with source
+  `import`, and is created by compare-and-swap from the current head (or
+  `--expected-head`): a moved head exits non-zero naming the new head, and a
+  file equal to the head prints `no change` and exits 0. The state dir must
+  already hold the store (any control plane of this version started with
+  `--state-dir` creates it). When admin audit has rows in the state dir, the
+  import appends a `policy.import` row (actor `cli:<os user>`, auth_method
+  `cli`, target `policy`, before `v<head>:<doc_sha256>`, after
+  `v<new>:<doc_sha256>`); a missing or mismatching key file aborts before the
+  version is written. Without admin audit it prints a one-line notice.
+- `warden policy export --state-dir <dir> [--version N]` opens the database
+  read-only and writes one version (default: the head) to stdout as a config
+  YAML (policy, the settings blocks and llmProviders) that the loader accepts,
+  for a downgrade, disaster recovery or a GitOps hand-off. Credential values and
+  fingerprints are never written: a version with an AWS credential is exported
+  without `secretStore.aws.accessKeyId`/`secretAccessKey`, with a note on
+  stderr; add them back before you serve or re-import the file.
 - The control plane checks for a new head every 3 seconds and only re-reads a
   version when the head moved, so a version written by another process reaches
   workers within 3 seconds plus one long-poll cycle. The `/policy` hot path
