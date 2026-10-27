@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -167,6 +168,8 @@ type OpenOptions struct {
 	// another key then gets an audit.segment_start entry.
 	NewSegment string
 	Clock      clock.Clock
+	// Logger receives the store's own failures (Options.Logger).
+	Logger *slog.Logger
 }
 
 // Open builds a writing Store on db and runs the startup checks, in order:
@@ -204,7 +207,7 @@ func Open(ctx context.Context, db *cpstate.DB, o OpenOptions) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := NewStore(db, Options{Signer: signer, HMACKey: hk, Clock: o.Clock})
+	s := NewStore(db, Options{Signer: signer, HMACKey: hk, Clock: o.Clock, Logger: o.Logger})
 	if o.NewSegment != "" {
 		if o.NewSegment != s.keyID {
 			return nil, fmt.Errorf("%w: %s=%s but the key at %s has key_id %s",
