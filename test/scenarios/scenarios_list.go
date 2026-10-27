@@ -82,6 +82,10 @@ var All = slices.Concat(
 		// load guard still refuses groups/users, so a scoped save is a 400 and
 		// the destination stays denied; an unscoped save still applies.
 		{Name: "scoped_policy_fail_closed", Run: scopedPolicyFailClosed},
+		// Deferred identity (W-P1-GPOL-03): the CONNECT gate decides with the
+		// verified subject; a member's token still does not open a scoped host
+		// while the load guard keeps scoped rules out.
+		{Name: "scoped_policy_deferred_identity", Opts: identityOpts(), Run: scopedPolicyDeferredIdentity},
 		// Version contract (W-P1-PVER-08): GET reports the head, If-Match names
 		// it, a stale save is a 409 naming the author and is audited rejected.
 		// In-process only (it reads the CP state dir).
