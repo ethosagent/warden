@@ -265,6 +265,12 @@ type AllowlistEntry struct {
 	TimeWindow string `yaml:"timeWindow,omitempty" json:"timeWindow,omitempty"`
 }
 
+// DiffKey identifies an allow entry for the structural policy diff: today
+// domain|port. Methods, paths, rateLimit and timeWindow are compared
+// attributes, not part of the key, so changing one on the same destination
+// shows as "changed". W-P1-GPOL-01 extends the key with groups/users.
+func (e AllowlistEntry) DiffKey() string { return diffKey(e.Domain, e.Port) }
+
 // SecretMapping ties a placeholder the agent holds to the env var that carries
 // the real value (phase 1 ENV provider).
 //
@@ -284,6 +290,12 @@ type DenylistEntry struct {
 	Domain string `yaml:"domain" json:"domain"`
 	Port   int    `yaml:"port,omitempty" json:"port"`
 }
+
+// DiffKey identifies a deny entry for the structural policy diff (domain|port),
+// the same shape as AllowlistEntry.DiffKey.
+func (e DenylistEntry) DiffKey() string { return diffKey(e.Domain, e.Port) }
+
+func diffKey(domain string, port int) string { return domain + "|" + strconv.Itoa(port) }
 
 // rawConfig mirrors the on-disk YAML shape (see configs/config.example.yaml).
 type rawConfig struct {
