@@ -14,7 +14,9 @@ import (
 //
 // In oidc mode sessions replace the bearer: withSession authenticates, then
 // requireRole applies the authz table, and the write guard accepts only a
-// session Principal. If oidc is configured but sessions could not start (no
+// session Principal. Inside requireRole, query/generate is rate-limited per
+// session (limitQueryGenerate) and the settings writer authorizes each changed
+// field (writeSettingsAs). If oidc is configured but sessions could not start (no
 // state db, bad redirect URL) there is no Principal source, so every dashboard
 // request is refused rather than falling back to the bearer.
 func (s *Server) mountDashboard(mux *http.ServeMux, dash *dashboard.Server) {
@@ -24,6 +26,6 @@ func (s *Server) mountDashboard(mux *http.ServeMux, dash *dashboard.Server) {
 		return
 	}
 	dash.SetWriteGuard(s.sessionWriteGuard())
-	guarded := requireRole(dash.Handler(), authzTable(), s.cfg.Console, s.cfg.Logger)
+	guarded := requireRole(s.limitQueryGenerate(dash.Handler()), authzTable(), s.cfg.Console, s.cfg.Logger)
 	mux.Handle("/dashboard/", s.sessionWrap(guarded))
 }

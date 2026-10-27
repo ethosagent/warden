@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethosagent/warden/internal/clock/clocktest"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/cpstate"
 	"github.com/ethosagent/warden/internal/dashboard"
@@ -29,6 +30,7 @@ type authzEnv struct {
 	h      http.Handler
 	log    *bytes.Buffer
 	policy string
+	clk    *clocktest.Fake // the CP clock port (rate limits)
 }
 
 func authzConsole(roles config.ConsoleRoles) config.ConsoleConfig {
@@ -47,13 +49,14 @@ func defaultRoles() config.ConsoleRoles {
 func newAuthzEnvOn(t *testing.T, db *cpstate.DB, policy string, roles config.ConsoleRoles) *authzEnv {
 	t.Helper()
 	logger, buf := testLogger()
-	srv := New(Config{PolicyPath: policy, Token: dashTestToken, State: db, Console: authzConsole(roles), Logger: logger})
+	clk := clocktest.NewFake(time.Unix(1_800_000_000, 0))
+	srv := New(Config{PolicyPath: policy, Token: dashTestToken, State: db, Console: authzConsole(roles), Logger: logger, Clock: clk})
 	if srv.sessions == nil {
 		t.Fatal("oidc mode with a state db must enable sessions")
 	}
 	srv.sessions = NewSessionStore(db.SQL(), time.Hour, 12*time.Hour, newFakeClock().Now)
 	srv.sessionReader = srv.sessions
-	return &authzEnv{srv: srv, h: srv.Handler(), log: buf, policy: policy}
+	return &authzEnv{srv: srv, h: srv.Handler(), log: buf, policy: policy, clk: clk}
 }
 
 func newAuthzEnv(t *testing.T) *authzEnv {
@@ -291,9 +294,11 @@ func TestAuthzEditorSettingsAdminOnly(t *testing.T) {
 	e.srv.dash.SetSQLGenerator(sqlGenFunc(func(string) (string, error) { return "SELECT 1", nil }))
 	editor := e.session(t, groupEditor)
 
-	rec := e.do(editor, http.MethodPost, "/dashboard/api/settings", `{}`)
-	if rec.Code != http.StatusForbidden || strings.TrimSpace(rec.Body.String()) != `{"error":"role_required","need":"admin"}` {
-		t.Errorf("editor POST settings = %d %q, want 403 need admin", rec.Code, rec.Body.String())
+	// An editor's settings write that touches an admin-only field is refused
+	// with that field named (per-field rules: TestAuthzSettingsPerField).
+	rec := e.do(editor, http.MethodPost, "/dashboard/api/settings", `{"explore":{"llmProvider":"p1"}}`)
+	if rec.Code != http.StatusForbidden || strings.TrimSpace(rec.Body.String()) != `{"error":"role_required","need":"admin","fields":["explore"]}` {
+		t.Errorf("editor POST settings = %d %q, want 403 need admin fields [explore]", rec.Code, rec.Body.String())
 	}
 	if rec := e.do(editor, http.MethodPost, "/dashboard/api/policy", policyBody); rec.Code != http.StatusOK {
 		t.Errorf("editor POST policy = %d %s, want 200", rec.Code, rec.Body.String())

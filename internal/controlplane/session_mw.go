@@ -144,7 +144,7 @@ func withSession(next http.Handler, store sessionReader, cookie SessionCookie, l
 		}
 		p := Principal{
 			Kind: PrincipalSession, Iss: sess.Iss, Sub: sess.Sub, Email: sess.Email,
-			Groups: sess.Groups, AuthMethod: sess.AuthMethod,
+			Groups: sess.Groups, AuthMethod: sess.AuthMethod, SessionHash: sess.IDHash,
 		}
 		next.ServeHTTP(w, r.WithContext(WithPrincipal(r.Context(), p)))
 	})
