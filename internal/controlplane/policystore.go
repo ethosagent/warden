@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -757,9 +758,10 @@ type policyMirror struct {
 	// hash is the blocks hash (servedBlocksHash) the served YAML has when it
 	// equals head; "" when unknown (a failed mirror), which skips the check.
 	hash string
-	// warned is the blocks hash last reported as drift, so each distinct edit
-	// is warned about and audited once.
-	warned string
+	// warned are the blocks hashes already reported as drift against this
+	// head, oldest first and at most externalSeenMax, so each distinct edit is
+	// warned about once (a head move starts over).
+	warned []string
 	// primeErr is the last first-tick error logged, so it is logged once.
 	primeErr string
 	drift    atomic.Bool
@@ -767,7 +769,7 @@ type policyMirror struct {
 
 // record sets the mirrored head and hash and clears drift.
 func (m *policyMirror) record(v PolicyVersion, hash string) {
-	m.head, m.headSHA, m.hash, m.warned = v.Version, v.DocSHA256, hash, ""
+	m.head, m.headSHA, m.hash, m.warned = v.Version, v.DocSHA256, hash, nil
 	m.drift.Store(false)
 }
 
@@ -876,15 +878,17 @@ func (s *Server) checkMirror(ctx context.Context) {
 		return // unreadable: keep the last drift state
 	}
 	if sum == s.mirror.hash {
-		s.mirror.warned = ""
 		s.mirror.drift.Store(false)
 		return
 	}
 	s.mirror.drift.Store(true)
-	if sum == s.mirror.warned {
+	if slices.Contains(s.mirror.warned, sum) {
 		return
 	}
-	s.mirror.warned = sum
+	if len(s.mirror.warned) == externalSeenMax {
+		s.mirror.warned = slices.Delete(s.mirror.warned, 0, 1)
+	}
+	s.mirror.warned = append(s.mirror.warned, sum)
 	s.cfg.Logger.Warn(mirrorDriftMsg, "file_sha256", sum, "head", s.mirror.head)
 	s.auditExternalChange(ctx, externalChangeTarget,
 		fmt.Sprintf("v%d:%s", s.mirror.head, s.mirror.headSHA), "file:"+sum)

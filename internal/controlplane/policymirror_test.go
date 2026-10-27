@@ -186,20 +186,45 @@ func TestPolicyMirrorCLIVersion(t *testing.T) {
 	}
 }
 
+// makeUnwritable makes the served YAML unwritable for the mirror: read-only
+// (0444), or, for root, which ignores file modes, replaced by a directory.
+// The returned func reports how the served path changed ("" = untouched).
+func makeUnwritable(t *testing.T, path string) func() string {
+	t.Helper()
+	if os.Geteuid() != 0 {
+		want := readFile(t, path)
+		if err := os.Chmod(path, 0o444); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
+		return func() string {
+			if got := readFile(t, path); got != want {
+				return "the read-only served YAML was replaced:\n" + got
+			}
+			return ""
+		}
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return func() string {
+		if fi, err := os.Stat(path); err != nil || !fi.IsDir() {
+			return "the unwritable served path was replaced"
+		}
+		return ""
+	}
+}
+
 // TestPolicyMirrorFailureNonFatal: with the served YAML read-only the save
 // still creates a version, workers get it, and exactly one error line names
 // the version.
 func TestPolicyMirrorFailureNonFatal(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root ignores file permissions")
-	}
 	path := writePolicyFile(t, "api.openai.com")
 	srv, logs := newPublishServer(t, path, config.ConsoleConfig{})
-	before := readFile(t, path)
-	if err := os.Chmod(path, 0o444); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
+	before := makeUnwritable(t, path)
 	logs.Reset()
 
 	if err := srv.WritePolicy(context.Background(), plusAllow(t, srv, "ro.example.com"), dashboard.WriteMeta{}); err != nil {
@@ -211,8 +236,8 @@ func TestPolicyMirrorFailureNonFatal(t *testing.T) {
 	if got := allowDomainsOf(servedWire(srv)); !slices.Contains(got, "ro.example.com") {
 		t.Fatalf("served allowlist = %v, want head v2", got)
 	}
-	if got := readFile(t, path); got != before {
-		t.Fatalf("the read-only served YAML was replaced:\n%s", got)
+	if got := before(); got != "" {
+		t.Fatal(got)
 	}
 	var errs []map[string]any
 	for line := range strings.Lines(logs.String()) {
@@ -357,8 +382,8 @@ func TestPolicyDriftClears(t *testing.T) {
 	if got := allowDomainsOf(yamlWire(t, path)); slices.Contains(got, "hand.example.com") || !slices.Contains(got, "saved.example.com") {
 		t.Fatalf("served YAML allowlist = %v, want head v2", got)
 	}
-	if n := len(logLines(t, logs.String(), mirrorDriftMsg)); n != 2 {
-		t.Fatalf("%d drift warnings, want 2 (one per hand edit)", n)
+	if n := len(logLines(t, logs.String(), mirrorDriftMsg)); n != 1 {
+		t.Fatalf("%d drift warnings, want 1 (the same edit twice is one distinct file hash)", n)
 	}
 }
 

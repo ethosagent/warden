@@ -492,9 +492,9 @@ other value, the control plane refuses to start.
 - A hand edit of the YAML's policy or settings blocks is drift: it is never
   served. The 3-second check logs `served config policy block differs from
   head; ignored` (with `file_sha256`, the hash of those blocks, and `head`)
-  once per distinct edit, `GET /dashboard/api/policy` reports `drift: true` and
+  once per distinct file hash, `GET /dashboard/api/policy` reports `drift: true` and
   the Guardrails page shows a banner. With `console.adminAudit.enabled` each
-  distinct edit appends one `config.external_change` row (before
+  distinct file hash appends one `config.external_change` row (before
   `v<head>:<doc_sha256>`, after `file:<file_sha256>`); the file-mode check above
   is not used. Edits to the credential or to CP-local blocks are not drift.
   Bring an edit in with `warden policy import`; putting the file back, or the
