@@ -1,12 +1,15 @@
 package scenarios
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/ethosagent/warden/internal/adminaudit"
+	"github.com/ethosagent/warden/internal/controlplane"
 	"github.com/ethosagent/warden/test/harness"
 )
 
@@ -54,5 +57,47 @@ func adminAuditEnabledGenesis(t *testing.T, h *harness.H) {
 	}
 	if !found {
 		t.Error("no `admin audit enabled` startup line")
+	}
+}
+
+// adminAuditOfflineVerify (W-P1-AAUD-04): the control plane verifies the
+// chain's newest rows at startup and logs the result; the offline verifier
+// and exporter read the same state dir read-only while the control plane runs
+// (no key file, no audit row), and the export verifies with no database.
+func adminAuditOfflineVerify(t *testing.T, h *harness.H) {
+	var verified map[string]any
+	for _, line := range strings.Split(h.Logs(), "\n") {
+		var rec map[string]any
+		if json.Unmarshal([]byte(line), &rec) == nil && rec["msg"] == "admin audit chain verified" {
+			verified = rec
+		}
+		if rec["msg"] == "admin audit chain verification failed" {
+			t.Fatalf("startup verification failed on a fresh chain: %v", rec)
+		}
+	}
+	if verified == nil || verified["checked"] != float64(1) || verified["head_seq"] != float64(1) {
+		t.Fatalf("startup verify line = %v, want checked=1 head_seq=1", verified)
+	}
+
+	ctx := context.Background()
+	st, closeFn, err := adminaudit.OpenReadOnly(ctx, h.AdminAuditStateDir(), controlplane.StateMigrations())
+	if err != nil {
+		t.Fatalf("OpenReadOnly on the live state dir: %v", err)
+	}
+	defer func() { _ = closeFn() }()
+	res, err := st.VerifyAll(ctx, adminaudit.VerifyOptions{})
+	if err != nil || !res.OK || res.Checked != 1 {
+		t.Fatalf("offline VerifyAll = %+v, %v", res, err)
+	}
+	out := filepath.Join(t.TempDir(), "admin-audit.jsonl")
+	if _, err := st.ExportFile(ctx, out, adminaudit.ExportOptions{}); err != nil {
+		t.Fatalf("ExportFile: %v", err)
+	}
+	anchor := &adminaudit.Anchor{Seq: res.HeadSeq, Hash: res.HeadHash}
+	if vr, err := adminaudit.VerifyExport(out, adminaudit.VerifyExportOptions{Anchor: anchor}); err != nil || !vr.OK {
+		t.Fatalf("VerifyExport = %+v, %v", vr, err)
+	}
+	if rows := h.AdminAuditRows(); len(rows) != 1 {
+		t.Errorf("admin_audit has %d rows after offline verify and export, want 1 (they write nothing)", len(rows))
 	}
 }

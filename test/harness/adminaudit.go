@@ -70,3 +70,14 @@ func (h *H) AdminAuditStateFile(name string) bool {
 	_, err := os.Stat(filepath.Join(h.root, "cp-state", name))
 	return err == nil
 }
+
+// AdminAuditStateDir is the control plane's state dir (it holds warden-cp.db
+// and, by default, the audit keys), for scenarios that drive the offline
+// admin-audit verify and export functions against a live control plane.
+func (h *H) AdminAuditStateDir() string {
+	h.tb.Helper()
+	if !h.wantAdminAudit {
+		h.tb.Fatal("harness: AdminAuditStateDir needs the WithAdminAudit option")
+	}
+	return filepath.Join(h.root, "cp-state")
+}

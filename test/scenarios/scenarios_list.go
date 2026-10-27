@@ -69,6 +69,7 @@ var All = slices.Concat(
 		// genesis entry and logs its key_id before serving. In-process only (it
 		// reads the CP state dir).
 		{Name: "admin_audit_enabled_genesis", Opts: adminAuditOpts(), Run: adminAuditEnabledGenesis},
+		{Name: "admin_audit_offline_verify", Opts: adminAuditOpts(), Run: adminAuditOfflineVerify},
 	},
 	// Canary across protocols x allow/deny; see canary.go.
 	canaryScenarios(),

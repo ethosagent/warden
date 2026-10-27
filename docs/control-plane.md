@@ -273,8 +273,8 @@ registers the admin audit migration, so the state database never trips the
 downgrade guard.
 
 **Manual key change (new segment).** To move to a new signing key, stop the control
-plane, archive the old segment (the offline verify and export commands and the full
-runbook come with W-P1-AAUD-04), put the new key at `--admin-audit-key-file` with the
+plane, check and archive the old segment with `admin-audit verify` and `admin-audit
+export` (below), put the new key at `--admin-audit-key-file` with the
 same `cp-audit-hmac.key` beside it, and start once with
 `--admin-audit-new-segment=<new key_id>`. The control plane appends one
 `audit.segment_start` entry signed by the new key, linked to the old head and naming
@@ -282,7 +282,36 @@ the previous `key_id`; every later row carries the new `key_id`, and verificatio
 reads each segment's public key from the chain. The flag must equal the loaded key's
 `key_id` (anything else stops startup) and is a no-op once the head is on that key,
 so leaving it set can never rotate twice. The flag without
-`console.adminAudit.enabled` is a startup error. Automatic rotation is W-P2-KEYS-06.
+`console.adminAudit.enabled` is a startup error. The step-by-step procedure is
+[docs/runbooks/admin-audit-key.md](runbooks/admin-audit-key.md). Automatic rotation is W-P2-KEYS-06.
+
+**Startup verification.** After the key check, every enabled start verifies the
+newest 1000 rows and the head signature. A failure logs
+`admin audit chain verification failed` at ERROR (with `first_bad_seq` and `reason`)
+and publishes an `admin_audit_verify_failed` Finding (severity critical) to the alert
+pipeline. The control plane still starts and serves `/policy`.
+
+**Offline verify and export.** Two subcommands check the chain without a running
+control plane, for example after a restore or when the control plane is down. Both
+open `<state-dir>/warden-cp.db` read-only (the file's bytes and mtime stay unchanged),
+read public keys from the chain, never load the signing key and write no audit row.
+
+```sh
+warden control-plane admin-audit verify --state-dir /data [--from-seq N] [--anchor seq:hash]
+warden control-plane admin-audit export --state-dir /data --out audit.jsonl [--include-identity]
+```
+
+- `admin-audit verify` prints `{ok, checked, firstBadSeq, reason, headSeq, headHash,
+  lastVerifiedSeq}` (hashes in hex) and exits 0 when the chain verifies, 1 when it does
+  not (`firstBadSeq` is the first bad entry) and 2 on a usage or I/O error. `--anchor`
+  takes an earlier `headSeq:headHash` and fails when the newest rows were removed.
+- `admin-audit export` writes JSONL to a new file (mode 0600, never overwriting): one
+  `keys` record with every `key_id`, its public key and first seq, then every entry in
+  seq order. The side-table sub and email are left out unless `--include-identity` is
+  set. `adminaudit.VerifyExport` verifies the file with no database.
+- A state dir migrated by a newer Warden still opens: the read-only open tolerates
+  migrations of other features it does not know, and refuses only an unknown
+  `adminaudit/` migration (a chain layout this binary cannot read).
 
 Offline CLIs that change admin state record through the same chain with
 `adminaudit.OpenForCLI`: actor `cli:<os user>`, auth_method `cli`, the same key
