@@ -539,6 +539,7 @@ func (p *Proxy) constraintGate(s *requestScope) (endSession bool) {
 	// identity this request does not carry (identity_required).
 	reason := verdict.Reason
 	if verdict.Decision != policy.Deny && verdict.Decision != policy.Conditional {
+		p.cfg.Logger.Error("unhandled policy decision", "decision", int(verdict.Decision), "domain", s.domain, "port", s.port)
 		reason = denyreason.PolicyNoMatch
 	}
 	p.emitDeny(s, reason, denyExtra{LatencyMs: s.latencyMs()})
@@ -546,8 +547,10 @@ func (p *Proxy) constraintGate(s *requestScope) (endSession bool) {
 	return true
 }
 
-// recordScoped counts a decision that depended on who asked, on the bounded
-// result label only: never a user, group, token or email.
+// recordScoped counts a decision on a destination that has identity-scoped
+// entries (the verdict's Scoped flag), on the bounded result label only: never
+// a user, group, token or email. An allow is counted even when an unscoped
+// sibling entry admitted the request, so allow is an upper bound.
 func (p *Proxy) recordScoped(v policy.RequestVerdict) {
 	if !v.Scoped {
 		return
