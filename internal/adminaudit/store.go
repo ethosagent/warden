@@ -12,7 +12,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethosagent/warden/internal/audit"
@@ -73,10 +75,13 @@ type Recorder interface {
 
 // Options configures a Store. Signer and HMACKey are needed only to Record;
 // a read-only Store (Verify, List, Head, PubKeys) may leave them unset.
+// Logger receives the store's own failures (an emitter panic, a checkpoint
+// that cannot read the head); nil means slog.Default.
 type Options struct {
 	Signer  *audit.Signer
 	HMACKey []byte
 	Clock   clock.Clock
+	Logger  *slog.Logger
 }
 
 // Store is the admin audit chain on a cpstate database.
@@ -86,6 +91,8 @@ type Store struct {
 	keyID   string
 	hmacKey []byte
 	clock   clock.Clock
+	logger  *slog.Logger
+	emitter atomic.Pointer[emitterBox]
 }
 
 var _ Recorder = (*Store)(nil)
@@ -93,9 +100,12 @@ var _ Recorder = (*Store)(nil)
 // NewStore returns a Store over db. It does no I/O; the tables must exist
 // (cpstate.Open with Migrations()).
 func NewStore(db *cpstate.DB, opts Options) *Store {
-	s := &Store{db: db, signer: opts.Signer, hmacKey: opts.HMACKey, clock: opts.Clock}
+	s := &Store{db: db, signer: opts.Signer, hmacKey: opts.HMACKey, clock: opts.Clock, logger: opts.Logger}
 	if s.clock == nil {
 		s.clock = clock.Real()
+	}
+	if s.logger == nil {
+		s.logger = slog.Default()
 	}
 	if s.signer != nil {
 		s.keyID = audit.KeyID(s.signer.PubKey())
@@ -200,14 +210,28 @@ type buildFunc func(head headRow) (*Entry, *Actor, error)
 // IMMEDIATE, so two processes on one file serialise and extend one linear
 // chain: read the head, write genesis if the table is empty, build, sign and
 // insert seq+1 (plus the side row), COMMIT. Any error rolls back everything.
-func (s *Store) appendTx(ctx context.Context, build buildFunc) (out Entry, err error) {
+// This is the store's one write path: once the transaction has committed and
+// the connection is released, every row it wrote goes to the Emitter, oldest
+// first; a failed append emits nothing.
+func (s *Store) appendTx(ctx context.Context, build buildFunc) (Entry, error) {
+	out, rows, err := s.commitTx(ctx, build)
+	if err != nil {
+		return Entry{}, err
+	}
+	s.emit(rows)
+	return out, nil
+}
+
+// commitTx is appendTx without the emit: it returns the entry appendTx
+// reports and every row the committed transaction wrote.
+func (s *Store) commitTx(ctx context.Context, build buildFunc) (out Entry, rows []emitted, err error) {
 	conn, err := s.db.SQL().Conn(ctx)
 	if err != nil {
-		return Entry{}, fmt.Errorf("adminaudit: acquire connection: %w", err)
+		return Entry{}, nil, fmt.Errorf("adminaudit: acquire connection: %w", err)
 	}
 	defer func() { _ = conn.Close() }()
 	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return Entry{}, fmt.Errorf("adminaudit: begin: %w", err)
+		return Entry{}, nil, fmt.Errorf("adminaudit: begin: %w", err)
 	}
 	committed := false
 	defer func() {
@@ -218,27 +242,28 @@ func (s *Store) appendTx(ctx context.Context, build buildFunc) (out Entry, err e
 
 	head, found, err := readHead(ctx, conn)
 	if err != nil {
-		return Entry{}, err
+		return Entry{}, nil, err
 	}
 	now := s.clock.Now()
 	var g Entry
 	if !found {
 		g = s.genesis(now)
 		if err := s.signAndInsert(ctx, conn, &g, nil); err != nil {
-			return Entry{}, err
+			return Entry{}, nil, err
 		}
 		head = headRow{Seq: g.Seq, Hash: g.EntryHash, KeyID: g.KeyID}
+		rows = append(rows, emitted{entry: g})
 	}
 	e, side, err := build(head)
 	if err != nil {
-		return Entry{}, err
+		return Entry{}, nil, err
 	}
 	if e == nil {
 		if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
-			return Entry{}, fmt.Errorf("adminaudit: commit: %w", err)
+			return Entry{}, nil, fmt.Errorf("adminaudit: commit: %w", err)
 		}
 		committed = true
-		return g, nil
+		return g, rows, nil
 	}
 	e.V = EntryVersion
 	e.Seq = head.Seq + 1
@@ -246,13 +271,17 @@ func (s *Store) appendTx(ctx context.Context, build buildFunc) (out Entry, err e
 	e.KeyID = s.keyID
 	e.PrevHash = head.Hash
 	if err := s.signAndInsert(ctx, conn, e, side); err != nil {
-		return Entry{}, err
+		return Entry{}, nil, err
 	}
 	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return Entry{}, fmt.Errorf("adminaudit: commit: %w", err)
+		return Entry{}, nil, fmt.Errorf("adminaudit: commit: %w", err)
 	}
 	committed = true
-	return *e, nil
+	var who Identity
+	if side != nil {
+		who = Identity{Sub: side.Sub, Email: side.Email}
+	}
+	return *e, append(rows, emitted{entry: *e, who: who}), nil
 }
 
 // rollback ends an open transaction. If even that fails the connection's
