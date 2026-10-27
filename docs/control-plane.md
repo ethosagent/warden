@@ -364,6 +364,31 @@ the control plane still serves them and appends one `config.external_change` row
 `file:<new sha256>`), once per distinct file hash; the row and its log line carry
 only the two hashes, never the file's content or path.
 
+#### Anchoring the audit chain
+
+The hash chain proves the rows agree with each other, but someone who can write the
+state dir can still delete the newest rows or restore an older backup, and the shorter
+chain still verifies. To catch that, the control plane also writes the chain to its log
+(stdout, at INFO whatever `logLevel` says), as `schema=warden.admin.v1` lines:
+
+- `msg=admin_audit`, one per committed entry, after its transaction commits: `seq`,
+  `ts`, `entry_hash`, `prev_hash`, `key_id`, `actor_id`, `actor_sub`, `actor_email`,
+  `actor_role`, `auth_method`, `action`, `target`, `target_ref`, `outcome`,
+  `http_status`, `before_hash`, `after_hash`, `client_ip`, `request_id` and `details`.
+  The plaintext `actor_sub` and `actor_email` appear only here and in the side table,
+  never in the signed bytes. Only the fields of a validated entry are written: no
+  request body, bearer token or secret value.
+- `msg=admin_audit.checkpoint`, the chain head (`head_seq`, `head_entry_hash`,
+  `key_id`) at startup, every 5 minutes and at shutdown.
+
+Ship these lines off-host (your log collector or SIEM) where the control plane's state
+dir cannot reach them. The newest `admin_audit.checkpoint` or `admin_audit` line you
+hold is an anchor: verify the chain with `--anchor <seq>:<entry_hash>` (the offline
+verify CLI comes with W-P1-AAUD-04). Verification fails with `anchor_missing` when the
+chain no longer reaches that seq (rows deleted from the tail, or an older backup
+restored) and `anchor_mismatch` when the entry at that seq has a different hash. A
+log line that fails to write never fails or rolls back the admin change itself.
+
 ### Migrating from none to oidc
 
 1. Add the `console:` block to the operator-owned `--config` file: `auth: oidc`, the

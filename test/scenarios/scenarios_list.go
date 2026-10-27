@@ -122,6 +122,10 @@ var All = slices.Concat(
 		// is served and recorded once as config.external_change; a dashboard save
 		// is not. In-process only (it edits the CP's file and reads its state dir).
 		{Name: "admin_audit_external_edit", Opts: adminAuditOpts(), Run: adminAuditExternalEdit},
+		// Admin audit anchor (W-P1-AAUD-06): the chain head is logged as a
+		// warden.admin.v1 checkpoint at startup and every 5 minutes of the CP's
+		// clock. In-process only (fake clock, CP state dir).
+		{Name: "admin_audit_checkpoint", Opts: adminAuditOpts(), Run: adminAuditCheckpoint},
 	},
 	// Canary across protocols x allow/deny; see canary.go.
 	canaryScenarios(),
