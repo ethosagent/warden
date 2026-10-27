@@ -198,7 +198,7 @@ func TestControlPlaneRecipeUsesPerWorkerTokens(t *testing.T) {
 // The shared worker configs name the in-container variable, so two workers can
 // share one file and still hold different tokens.
 func TestWorkerConfigsUseWorkerTokenEnv(t *testing.T) {
-	for _, name := range []string{"config.worker.yaml", "config.e2e-worker.yaml", "config.e2e-worker-transparent.yaml"} {
+	for _, name := range []string{"config.worker.yaml", "config.e2e-worker.yaml", "config.e2e-worker-transparent.yaml", "config.e2e-identity-worker.yaml"} {
 		raw, err := os.ReadFile("../../../configs/" + name)
 		if err != nil {
 			t.Fatal(err)
