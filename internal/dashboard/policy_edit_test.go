@@ -1,11 +1,14 @@
 package dashboard
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/ethosagent/warden/internal/config"
@@ -32,7 +35,7 @@ func TestPolicyEditableFlag(t *testing.T) {
 	// Writer configured (control plane) -> editable.
 	srv := NewServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
 	srv.SetWriteGuard(AllowUngatedWritesForTests)
-	srv.SetPolicyWriter(func(config.Policy) error { return nil })
+	srv.SetPolicyWriter(func(context.Context, config.Policy, WriteMeta) error { return nil })
 	var p2 policyResponse
 	doGetJSON(t, srv.Handler(), "/dashboard/api/policy", &p2)
 	if !p2.Editable {
@@ -52,7 +55,7 @@ func TestPolicyWriteCallsWriter(t *testing.T) {
 	var got config.Policy
 	srv := NewServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
 	srv.SetWriteGuard(AllowUngatedWritesForTests)
-	srv.SetPolicyWriter(func(p config.Policy) error { got = p; return nil })
+	srv.SetPolicyWriter(func(_ context.Context, p config.Policy, _ WriteMeta) error { got = p; return nil })
 	srv.SetLivePolicy(func() config.Policy { return got }) // echo reflects the write
 
 	rec := postJSON(t, srv.Handler(), "/dashboard/api/policy",
@@ -71,7 +74,9 @@ func TestPolicyWriteCallsWriter(t *testing.T) {
 func TestPolicyWriteSurfacesValidationError(t *testing.T) {
 	srv := NewServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
 	srv.SetWriteGuard(AllowUngatedWritesForTests)
-	srv.SetPolicyWriter(func(config.Policy) error { return fmt.Errorf("invalid policy: allowlist empty") })
+	srv.SetPolicyWriter(func(context.Context, config.Policy, WriteMeta) error {
+		return fmt.Errorf("invalid policy: allowlist empty")
+	})
 	rec := postJSON(t, srv.Handler(), "/dashboard/api/policy", `{"allowlist":[]}`)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status %d, want 400", rec.Code)
@@ -93,7 +98,7 @@ func TestSettingsEditableFlagAndLiveValue(t *testing.T) {
 	// Writer + live settings configured (control plane) -> editable, settings served.
 	srv := NewServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
 	srv.SetWriteGuard(AllowUngatedWritesForTests)
-	srv.SetSettingsWriter(func(config.SettingsWire) error { return nil })
+	srv.SetSettingsWriter(func(context.Context, config.SettingsWire, WriteMeta) error { return nil })
 	srv.SetLiveSettings(func() *config.SettingsWire {
 		return &config.SettingsWire{MCP: &config.MCPSettings{Enabled: true, Mode: "enforce"}}
 	})
@@ -119,7 +124,7 @@ func TestSettingsWriteCallsWriterAndEchoes(t *testing.T) {
 	var got config.SettingsWire
 	srv := NewServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
 	srv.SetWriteGuard(AllowUngatedWritesForTests)
-	srv.SetSettingsWriter(func(s config.SettingsWire) error { got = s; return nil })
+	srv.SetSettingsWriter(func(_ context.Context, s config.SettingsWire, _ WriteMeta) error { got = s; return nil })
 	srv.SetLiveSettings(func() *config.SettingsWire { return &got }) // echo reflects the write
 
 	rec := postJSON(t, srv.Handler(), "/dashboard/api/settings",
@@ -146,7 +151,9 @@ func TestSettingsWriteCallsWriterAndEchoes(t *testing.T) {
 func TestSettingsWriteSurfacesWriterError(t *testing.T) {
 	srv := NewServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
 	srv.SetWriteGuard(AllowUngatedWritesForTests)
-	srv.SetSettingsWriter(func(config.SettingsWire) error { return fmt.Errorf("invalid mcp: mode bad") })
+	srv.SetSettingsWriter(func(context.Context, config.SettingsWire, WriteMeta) error {
+		return fmt.Errorf("invalid mcp: mode bad")
+	})
 	rec := postJSON(t, srv.Handler(), "/dashboard/api/settings", `{"mcp":{"enabled":true,"mode":"bad"}}`)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status %d, want 400", rec.Code)
@@ -224,7 +231,7 @@ func TestSettingsWriteSecretsRoundTrips(t *testing.T) {
 	var got config.SettingsWire
 	srv := NewServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
 	srv.SetWriteGuard(AllowUngatedWritesForTests)
-	srv.SetSettingsWriter(func(s config.SettingsWire) error { got = s; return nil })
+	srv.SetSettingsWriter(func(_ context.Context, s config.SettingsWire, _ WriteMeta) error { got = s; return nil })
 	srv.SetLiveSettings(func() *config.SettingsWire { return &got }) // echo reflects the write
 
 	rec := postJSON(t, srv.Handler(), "/dashboard/api/settings",
@@ -271,5 +278,356 @@ func TestWorkersEndpoint(t *testing.T) {
 	doGetJSON(t, h, "/dashboard/api/workers", &ws2)
 	if len(ws2) != 0 {
 		t.Fatalf("worker dashboard should report no workers, got %+v", ws2)
+	}
+}
+
+// TestWritersReceiveContextAndMeta: the policy, settings and llmProviders
+// writers get the request context (it carries the caller's identity) and, in
+// file mode, an empty WriteMeta (policy_conflict_test.go covers If-Match).
+func TestWritersReceiveContextAndMeta(t *testing.T) {
+	type seen struct {
+		ctx  bool
+		meta WriteMeta
+	}
+	got := map[string]seen{}
+	record := func(name string, ctx context.Context, meta WriteMeta) {
+		got[name] = seen{ctx: ctx.Value(ctxKey{}) == "marker", meta: meta}
+	}
+	srv := NewServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
+	srv.SetPolicyWriter(func(ctx context.Context, _ config.Policy, m WriteMeta) error {
+		record("policy", ctx, m)
+		return nil
+	})
+	srv.SetSettingsWriter(func(ctx context.Context, _ config.SettingsWire, m WriteMeta) error {
+		record("settings", ctx, m)
+		return nil
+	})
+	srv.SetLLMProvidersWriter(func(ctx context.Context, _ []config.LLMProvider, m WriteMeta) error {
+		record("llmproviders", ctx, m)
+		return nil
+	})
+	h := srv.Handler()
+	for path, body := range map[string]string{
+		"/dashboard/api/policy":       `{"allowlist":[{"domain":"x.com"}]}`,
+		"/dashboard/api/settings":     `{}`,
+		"/dashboard/api/llmproviders": `[]`,
+	} {
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		req = req.WithContext(context.WithValue(req.Context(), ctxKey{}, "marker"))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("POST %s = %d %s", path, rec.Code, rec.Body.String())
+		}
+	}
+	for _, name := range []string{"policy", "settings", "llmproviders"} {
+		s, ok := got[name]
+		if !ok || !s.ctx || s.meta != (WriteMeta{}) {
+			t.Errorf("%s writer: called=%v sawCtx=%v meta=%+v, want the request context and an empty WriteMeta", name, ok, s.ctx, s.meta)
+		}
+	}
+}
+
+// TestPolicyDriftField: GET /dashboard/api/policy reports drift from the
+// control plane's SetPolicyDrift func, and false without one (a worker).
+func TestPolicyDriftField(t *testing.T) {
+	var p policyResponse
+	doGetJSON(t, newTestServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}}), "/dashboard/api/policy", &p)
+	if p.Drift {
+		t.Error("drift should be false without a drift func")
+	}
+	var drift atomic.Bool
+	srv := NewServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
+	srv.SetPolicyDrift(drift.Load)
+	for _, want := range []bool{false, true, false} {
+		drift.Store(want)
+		var got policyResponse
+		doGetJSON(t, srv.Handler(), "/dashboard/api/policy", &got)
+		if got.Drift != want {
+			t.Errorf("drift = %v, want %v", got.Drift, want)
+		}
+	}
+}
+
+// TestPolicyDriftBannerServedHTML: the served console carries the drift
+// banner, hidden by default, pointing to `warden policy import`, and shown
+// only while /dashboard/api/policy reports drift.
+func TestPolicyDriftBannerServedHTML(t *testing.T) {
+	rr := doGet(t, newTestServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}}), "/dashboard/")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /dashboard/ = %d", rr.Code)
+	}
+	html := rr.Body.String()
+	start := strings.Index(html, `<div id="policyDriftBanner" role="status" hidden`)
+	if start < 0 {
+		t.Fatal("the served console lacks the hidden-by-default policyDriftBanner")
+	}
+	banner := html[start:]
+	banner = banner[:strings.Index(banner, "</div>")]
+	if !strings.Contains(banner, "<code>warden policy import</code>") {
+		t.Errorf("the drift banner does not point to warden policy import: %s", banner)
+	}
+	if !strings.Contains(html, `b.hidden=!(p&&p.drift===true)`) {
+		t.Error("renderPolicyDrift does not drive the banner from the drift field")
+	}
+	for _, call := range []string{"renderPolicyDrift(pol);", "renderPolicyDrift(p);"} {
+		if !strings.Contains(html, call) {
+			t.Errorf("the policy load/save path does not call %s", call)
+		}
+	}
+}
+
+// TestPolicyWriteMissingIfMatch428 (W-P1-PVER-04): in versioned mode a
+// policy, settings or llmProviders save without If-Match is a 428
+// precondition_required and never reaches the writer, like a rollback; with
+// If-Match it goes through.
+func TestPolicyWriteMissingIfMatch428(t *testing.T) {
+	for path, body := range versionedRoutes {
+		srv, got := versionedServer(5, nil)
+		h := srv.Handler()
+		for _, method := range []string{http.MethodPost, http.MethodPut} {
+			req := httptest.NewRequest(method, path, strings.NewReader(body))
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusPreconditionRequired {
+				t.Fatalf("%s %s without If-Match = %d %s, want 428", method, path, rec.Code, rec.Body.String())
+			}
+			var e map[string]string
+			if err := json.Unmarshal(rec.Body.Bytes(), &e); err != nil || e["error"] != "precondition_required" || !strings.Contains(e["detail"], "If-Match") {
+				t.Errorf("%s %s 428 body = %s, want error precondition_required naming If-Match", method, path, rec.Body.String())
+			}
+			if _, called := got[path]; called {
+				t.Errorf("%s %s without If-Match reached the writer", method, path)
+			}
+		}
+		if rec := sendWrite(h, path, body, `"v5"`); rec.Code != http.StatusOK || got[path].ExpectedHead != 5 {
+			t.Errorf("%s with If-Match v5 = %d meta %+v, want 200 at ExpectedHead 5", path, rec.Code, got[path])
+		}
+	}
+}
+
+// TestPolicyWriteMessage: in versioned mode the optional save message travels
+// percent-encoded in X-Warden-Policy-Message and reaches the writer decoded,
+// with control characters stripped; more than 512 characters or a broken
+// encoding is a 400 that never reaches the writer.
+func TestPolicyWriteMessage(t *testing.T) {
+	send := func(h http.Handler, path, body, msg string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPut, path, strings.NewReader(body))
+		req.Header.Set("If-Match", `"v5"`)
+		req.Header.Set(PolicyMessageHeader, msg)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+	for path, body := range versionedRoutes {
+		srv, got := versionedServer(5, nil)
+		h := srv.Handler()
+		if rec := send(h, path, body, "allow%20%C3%A9x%0A.com%20%E2%9C%93"); rec.Code != http.StatusOK {
+			t.Fatalf("%s with a message = %d %s", path, rec.Code, rec.Body.String())
+		}
+		if want := "allow éx.com ✓"; got[path].Message != want || got[path].ExpectedHead != 5 {
+			t.Errorf("%s meta = %+v, want message %q at ExpectedHead 5", path, got[path], want)
+		}
+		if rec := send(h, path, body, strings.Repeat("%C3%A9", maxPolicyMessage)); rec.Code != http.StatusOK || len([]rune(got[path].Message)) != maxPolicyMessage {
+			t.Errorf("%s with a %d-character message = %d, want 200", path, maxPolicyMessage, rec.Code)
+		}
+		for _, bad := range []string{strings.Repeat("a", maxPolicyMessage+1), "bad%zzescape", "%E2%9C"} {
+			delete(got, path)
+			if rec := send(h, path, body, bad); rec.Code != http.StatusBadRequest {
+				t.Errorf("%s message %.20q = %d, want 400", path, bad, rec.Code)
+			}
+			if _, called := got[path]; called {
+				t.Errorf("%s message %.20q reached the writer", path, bad)
+			}
+		}
+	}
+}
+
+// TestPolicyFileModeUnchanged: in file mode GET /dashboard/api/policy has no
+// version field, saves without If-Match still succeed, and a message header is
+// ignored (there are no versions to carry it).
+func TestPolicyFileModeUnchanged(t *testing.T) {
+	srv, got := versionedServer(0, nil)
+	h := srv.Handler()
+	rec := doGet(t, h, "/dashboard/api/policy")
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := raw["version"]; ok || rec.Header().Get(PolicyVersionHeader) != "" {
+		t.Errorf("file mode GET policy reports a version: %s", rec.Body.String())
+	}
+	for path, body := range versionedRoutes {
+		req := httptest.NewRequest(http.MethodPut, path, strings.NewReader(body))
+		req.Header.Set(PolicyMessageHeader, "ignored")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK || got[path] != (WriteMeta{}) {
+			t.Errorf("file mode save %s without If-Match = %d meta %+v, want 200 with an empty WriteMeta", path, rec.Code, got[path])
+		}
+	}
+}
+
+// historyRegion returns the policy history script block (between the
+// policyhistory:begin and policyhistory:end markers) of the page served in
+// versioned mode.
+func historyRegion(t *testing.T) (html, region string) {
+	t.Helper()
+	srv, _ := versionedServer(5, nil)
+	rec := doGet(t, srv.Handler(), "/dashboard/")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /dashboard/ = %d", rec.Code)
+	}
+	html = rec.Body.String()
+	a, b := strings.Index(html, "/* policyhistory:begin */"), strings.Index(html, "/* policyhistory:end */")
+	if a < 0 || b < a {
+		t.Fatalf("policyhistory:begin/end markers not found (begin@%d end@%d)", a, b)
+	}
+	return html, html[a:b]
+}
+
+// TestPolicyHistoryPanelServedHTML pins the History panel (W-P1-PVER-04): a
+// hidden container shown only when the policy GET reports a version, the
+// version list fetched from /dashboard/api/policy/versions with cursor 'load
+// more', the server's diff rendered (nothing diffed client-side), a rollback
+// that goes through api() (the one place that sets X-Warden-CSRF) with
+// If-Match from the head after a confirm dialog naming the target version,
+// gated on editor, and the policy, settings and llmProviders saves sending
+// If-Match and the optional message and handling a 409.
+func TestPolicyHistoryPanelServedHTML(t *testing.T) {
+	html, region := historyRegion(t)
+
+	if !regexp.MustCompile(`<div class="card" id="policyHistory" style="display:none[^"]*">`).MatchString(html) {
+		t.Error("the History container must be in the page, hidden by default")
+	}
+	egress := html[strings.Index(html, `id="sub-egress"`):]
+	if i := strings.Index(egress, `id="policyHistory"`); i < 0 || i > strings.Index(egress, `id="sub-dlp"`) {
+		t.Error("the History panel must sit in the policy (Egress) tab")
+	}
+	show := funcBody(t, region, "function showPolicyHistory(")
+	if !strings.Contains(show, "pol.version") || !strings.Contains(show, "card.style.display=v>0?'':'none'") {
+		t.Error("showPolicyHistory must show the panel only when the policy GET has a version")
+	}
+	if !strings.Contains(funcBody(t, html, "async function loadGuardrails("), "showPolicyHistory(pol)") {
+		t.Error("loadGuardrails must hand the policy GET to showPolicyHistory")
+	}
+
+	if !strings.Contains(region, "const PH_VERSIONS='/dashboard/api/policy/versions'") {
+		t.Error("the panel must fetch /dashboard/api/policy/versions")
+	}
+	list := funcBody(t, region, "async function loadPolicyHistory(")
+	for _, want := range []string{"jget(PH_VERSIONS+", "reset?0:ph.next", "'&cursor='+cursor", "d.next_cursor", "'ph-more'"} {
+		if !strings.Contains(list, want) {
+			t.Errorf("loadPolicyHistory: %q missing (list through jget with the cursor and load more)", want)
+		}
+	}
+	row := funcBody(t, region, "function phRow(")
+	for _, want := range []string{"'v'+x.version", "x.author_email||x.author_sub", "relTime(x.created_at)", "x.message"} {
+		if !strings.Contains(row, want) {
+			t.Errorf("phRow: %q missing (version, author, relative time, message)", want)
+		}
+	}
+	if !regexp.MustCompile(`<button[^>]*data-min-role="viewer"[^>]*id="ph-more"`).MatchString(html) {
+		t.Error("the load more button must be in the panel")
+	}
+
+	diff := funcBody(t, region, "async function showPolicyDiff(")
+	if !strings.Contains(diff, "jget(PH_VERSIONS+'/'+encodeURIComponent(v)+'/diff')") {
+		t.Error("selecting a version must fetch its /diff")
+	}
+	for _, want := range []string{"d.diff.allow", "d.diff.deny", "d.diff.settings"} {
+		if !strings.Contains(diff, want) {
+			t.Errorf("showPolicyDiff must render %s", want)
+		}
+	}
+	changes := funcBody(t, region, "function phChangeList(")
+	for _, want := range []string{"c.kind", "c.before", "c.after"} {
+		if !strings.Contains(changes, want) {
+			t.Errorf("phChangeList must render %s (added, removed, changed with old and new)", want)
+		}
+	}
+
+	rb := funcBody(t, region, "async function rollbackTo(")
+	if !regexp.MustCompile(`api\('POST',PH_VERSIONS\+'/'\+encodeURIComponent\(v\)\+'/rollback',[^;]*\{'If-Match':'"v'\+head\+'"'\}\)`).MatchString(rb) {
+		t.Error("rollbackTo must POST .../rollback through api() with If-Match set to the head")
+	}
+	_, apiStart, apiEnd := apiRegion(t, html)
+	apiBody := funcBody(t, html[apiStart:apiEnd], "async function api(method,url,body,hdrs){")
+	if !strings.Contains(apiBody, "new Headers(hdrs||{})") || !strings.Contains(apiBody, "h.set('X-Warden-CSRF',csrfToken)") {
+		t.Error("api() must keep the caller's headers (If-Match) and add X-Warden-CSRF")
+	}
+	if c, d := strings.Index(rb, "askPolicyDialog('Roll back to v'+v"), strings.Index(rb, "api('POST'"); c < 0 || c > d || !strings.Contains(rb, "if(note===null) return;") {
+		t.Error("rollbackTo must confirm in a dialog naming the target version before it POSTs")
+	}
+	if !strings.Contains(rb, "if(!roleAllows('editor')) return;") {
+		t.Error("rollbackTo must refuse below editor")
+	}
+	if !strings.Contains(row, "setAttribute('data-min-role','editor')") || !strings.Contains(row, "disabled=!roleAllows('editor')") {
+		t.Error("the rollback button must be gated on editor (hidden by role and disabled from /auth/me)")
+	}
+
+	pw := funcBody(t, region, "async function policyWrite(")
+	for _, want := range []string{
+		`hdrs['If-Match']='"v'+policyHead+'"'`,
+		"hdrs['X-Warden-Policy-Message']=encodeURIComponent(msg)",
+		"api(method,url,body,hdrs)",
+		"r.status===409",
+		"policyHead=e.head",
+	} {
+		if !strings.Contains(pw, want) {
+			t.Errorf("policyWrite: %q missing", want)
+		}
+	}
+	if !strings.Contains(funcBody(t, region, "function conflictError("), "'policy changed by '+(a.email||a.sub") {
+		t.Error("a 409 must say 'policy changed by <author> (v<N>)'")
+	}
+	if !strings.Contains(html, `id="pmd-input" maxlength="512"`) {
+		t.Error("the save message input must be capped at 512 characters")
+	}
+	if !strings.Contains(funcBody(t, html, "async function jget("), "notePolicyHead(r)") {
+		t.Error("jget must note the head from the policy, settings and llmProviders GETs")
+	}
+	// Every policy, settings and llmProviders write goes through policyWrite.
+	if m := regexp.MustCompile(`api\('(POST|PUT)','/dashboard/api/(policy|settings|llmproviders)'`).FindString(html); m != "" {
+		t.Errorf("a save bypasses policyWrite: %s", m)
+	}
+	for _, path := range []string{"/dashboard/api/policy", "/dashboard/api/settings", "/dashboard/api/llmproviders"} {
+		if !regexp.MustCompile(`policyWrite\('(POST|PUT)','` + regexp.QuoteMeta(path) + `'`).MatchString(html) {
+			t.Errorf("no save of %s goes through policyWrite", path)
+		}
+	}
+	// A conflicted policy edit is kept, not reloaded away.
+	sp := funcBody(t, html, "async function savePolicy(")
+	if c, l := strings.Index(sp, "if(err.conflict)"), strings.Index(sp, "loadGuardrails()"); c < 0 || l < c {
+		t.Error("savePolicy must keep the user's edit on a 409 (no reload before the conflict branch)")
+	}
+}
+
+// TestPolicyHistoryPanelNoInnerHTML: author and message come from whoever
+// saved a version, so the history block renders every value with textContent
+// and never touches innerHTML (or any other HTML sink). Each read of an
+// author or message field is a textContent assignment.
+func TestPolicyHistoryPanelNoInnerHTML(t *testing.T) {
+	_, region := historyRegion(t)
+	for _, sink := range []string{"innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "createContextualFragment"} {
+		if strings.Contains(region, sink) {
+			t.Errorf("the policy history block uses %s: render with textContent", sink)
+		}
+	}
+	fields := regexp.MustCompile(`\.(author_email|author_sub|message)\b|\b(a\.email|a\.sub)\b`)
+	n := 0
+	for _, line := range strings.Split(region, "\n") {
+		if !fields.MatchString(line) {
+			continue
+		}
+		n++
+		if !strings.Contains(line, ".textContent=") && !strings.Contains(line, "new Error(") {
+			t.Errorf("author or message used outside a textContent assignment: %s", strings.TrimSpace(line))
+		}
+	}
+	if n == 0 {
+		t.Error("no author or message rendering found in the policy history block")
 	}
 }

@@ -266,11 +266,11 @@ func TestAuthzSettingsPerField(t *testing.T) {
 func TestSettingsWriterFailsClosed(t *testing.T) {
 	e := newAuthzEnv(t)
 	var re *dashboard.RoleRequiredError
-	if err := e.srv.writeSettingsAs(context.Background(), config.SettingsWire{}); !errors.As(err, &re) || re.Need != "editor" {
+	if err := e.srv.writeSettingsAs(context.Background(), config.SettingsWire{}, dashboard.WriteMeta{}); !errors.As(err, &re) || re.Need != "editor" {
 		t.Fatalf("no Principal = %v, want RoleRequiredError need editor", err)
 	}
 	ctx := WithPrincipal(context.Background(), Principal{Kind: PrincipalSession, Sub: "u1", Groups: []string{groupViewer}})
-	if err := e.srv.writeSettingsAs(ctx, config.SettingsWire{}); !errors.As(err, &re) || re.Need != "editor" {
+	if err := e.srv.writeSettingsAs(ctx, config.SettingsWire{}, dashboard.WriteMeta{}); !errors.As(err, &re) || re.Need != "editor" {
 		t.Fatalf("viewer Principal = %v, want RoleRequiredError need editor", err)
 	}
 	if !strings.Contains(re.Error(), "editor") {
@@ -280,7 +280,7 @@ func TestSettingsWriterFailsClosed(t *testing.T) {
 	path := writePolicyFile(t, "api.openai.com")
 	none := New(Config{PolicyPath: path})
 	in := config.SettingsWire{Agents: []config.AgentSettings{{ID: "agent-x", Identity: "off"}}}
-	if err := none.writeSettingsAs(context.Background(), in); err != nil {
+	if err := none.writeSettingsAs(context.Background(), in, dashboard.WriteMeta{}); err != nil {
 		t.Fatalf("none mode write = %v, want it applied", err)
 	}
 	if got := readFile(t, path); !strings.Contains(got, "agent-x") {

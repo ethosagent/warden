@@ -21,7 +21,7 @@ func TestSettingsWriterContext(t *testing.T) {
 	srv.SetWriteGuard(AllowUngatedWritesForTests)
 	var sawCtx bool
 	var refuse error
-	srv.SetSettingsWriterContext(func(ctx context.Context, _ config.SettingsWire) error {
+	srv.SetSettingsWriter(func(ctx context.Context, _ config.SettingsWire, _ WriteMeta) error {
 		sawCtx = ctx.Value(ctxKey{}) == "marker"
 		return refuse
 	})

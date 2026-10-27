@@ -3,10 +3,15 @@ package controlplane
 import (
 	"bytes"
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -163,6 +168,32 @@ func TestAuthzRouteCoverage(t *testing.T) {
 	sort.Strings(stale)
 	if len(stale) != 0 {
 		t.Fatalf("authz rows for routes the dashboard does not serve: %v", stale)
+	}
+
+	// Every row is classified for the admin audit middleware, and the
+	// control plane's own mux patterns are classified too.
+	if bad := unclassified(table); len(bad) != 0 {
+		t.Fatalf("authz rows without a valid audit classification:\n%s", strings.Join(bad, "\n"))
+	}
+	if bad := unclassified(cpRouteTable()); len(bad) != 0 {
+		t.Fatalf("control-plane routes without a valid audit classification:\n%s", strings.Join(bad, "\n"))
+	}
+	if miss := unclassifiedPatterns(t, table, cpRouteTable()); len(miss) != 0 {
+		t.Fatalf("mux patterns registered in Server.Handler with no classification: %v", miss)
+	}
+	// Red first: a route added to the dashboard without a classification, or an
+	// audited row without its target, is reported by name.
+	broken := authzTable()
+	broken[routeKey{http.MethodPost, "/dashboard/api/new-writer"}] = authzRow{MinRole: config.RoleAdmin, Action: "new.write"}
+	broken[routeKey{http.MethodPut, "/dashboard/api/policy"}] = authzRow{MinRole: config.RoleEditor, Action: "policy.write", Audited: true, Class: classAudited}
+	if bad := unclassified(broken); len(bad) != 2 || !strings.Contains(strings.Join(bad, " "), "POST /dashboard/api/new-writer") ||
+		!strings.Contains(strings.Join(bad, " "), "PUT /dashboard/api/policy") {
+		t.Fatalf("classification check did not name the broken rows: %v", bad)
+	}
+	cp := cpRouteTable()
+	delete(cp, routeKey{http.MethodPost, "/control/heartbeat"})
+	if miss := unclassifiedPatterns(t, table, cp); len(miss) != 1 || miss[0] != "/control/heartbeat" {
+		t.Fatalf("pattern check did not name the unclassified pattern: %v", miss)
 	}
 
 	// Red first: a deleted row is reported by name.
@@ -430,4 +461,98 @@ func TestOIDCWithoutSessionsFailsClosed(t *testing.T) {
 			t.Errorf("%s with sessions unavailable = %d, want 401", m, rec.Code)
 		}
 	}
+}
+
+// unclassified names the rows whose audit classification is missing or
+// inconsistent: an unknown Class, Audited disagreeing with Class, or an
+// audited row without Action or Target.
+func unclassified(table map[routeKey]authzRow) []string {
+	valid := map[routeClass]bool{classAudited: true, classReadOnly: true, classWorkerPlane: true, classHandlerRecorded: true}
+	var out []string
+	for k, r := range table {
+		name := k.Method + " " + k.Path
+		switch {
+		case !valid[r.Class]:
+			out = append(out, name+": no classification")
+		case r.Audited != (r.Class == classAudited):
+			out = append(out, name+": Audited disagrees with Class "+string(r.Class))
+		case r.Audited && (r.Action == "" || r.Target == ""):
+			out = append(out, name+": audited without Action or Target")
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// unclassifiedPatterns walks the package's non-test sources for patterns
+// passed to mux.Handle / mux.HandleFunc (string literals and string
+// constants) and returns those neither table classifies. "/dashboard/" is the
+// dashboard mount, whose routes the authz table covers row by row.
+func unclassifiedPatterns(t *testing.T, dash, cp map[routeKey]authzRow) []string {
+	t.Helper()
+	files, err := filepath.Glob("*.go")
+	if err != nil || len(files) == 0 {
+		t.Fatalf("cannot list package sources: %v", err)
+	}
+	consts := map[string]string{}
+	var calls []ast.Expr
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		af, err := parser.ParseFile(token.NewFileSet(), f, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ast.Inspect(af, func(n ast.Node) bool {
+			switch n := n.(type) {
+			case *ast.ValueSpec:
+				for i, name := range n.Names {
+					if i < len(n.Values) {
+						if lit, ok := n.Values[i].(*ast.BasicLit); ok && lit.Kind == token.STRING {
+							consts[name.Name], _ = strconv.Unquote(lit.Value)
+						}
+					}
+				}
+			case *ast.CallExpr:
+				sel, ok := n.Fun.(*ast.SelectorExpr)
+				if !ok || len(n.Args) == 0 || (sel.Sel.Name != "Handle" && sel.Sel.Name != "HandleFunc") {
+					return true
+				}
+				if recv, ok := sel.X.(*ast.Ident); ok && recv.Name == "mux" {
+					calls = append(calls, n.Args[0])
+				}
+			}
+			return true
+		})
+	}
+	paths := map[string]bool{}
+	for _, tbl := range []map[routeKey]authzRow{dash, cp} {
+		for k := range tbl {
+			paths[k.Path] = true
+		}
+	}
+	var out []string
+	seen := 0
+	for _, arg := range calls {
+		var p string
+		switch a := arg.(type) {
+		case *ast.BasicLit:
+			p, _ = strconv.Unquote(a.Value)
+		case *ast.Ident:
+			p = consts[a.Name]
+		}
+		if p == "" {
+			t.Fatalf("a mux registration uses a pattern the walk cannot resolve: %#v", arg)
+		}
+		seen++
+		if p != "/dashboard/" && !paths[p] {
+			out = append(out, p)
+		}
+	}
+	if seen < 10 {
+		t.Fatalf("pattern walk found only %d registrations", seen)
+	}
+	sort.Strings(out)
+	return out
 }

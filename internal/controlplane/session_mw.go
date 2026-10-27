@@ -114,6 +114,14 @@ type sessionReader interface {
 // is CSRF: a state-changing request that carries a live session must present a
 // matching X-Warden-CSRF and, if it sends Origin, the console's own origin.
 func withSession(next http.Handler, store sessionReader, cookie SessionCookie, logger *slog.Logger) http.Handler {
+	return withSessionRefuse(next, csrfRefusal, store, cookie, logger)
+}
+
+// withSessionRefuse is withSession with the CSRF refusal handler given. The
+// refusal runs with the session's Principal in its context (and csrfRefused
+// set), so the admin audit middleware wrapped around it records the refused
+// write as denied. next never runs for a refused request.
+func withSessionRefuse(next, refuse http.Handler, store sessionReader, cookie SessionCookie, logger *slog.Logger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rawID, ok := cookie.From(r)
 		if !ok {
@@ -130,21 +138,20 @@ func withSession(next http.Handler, store sessionReader, cookie SessionCookie, l
 			next.ServeHTTP(w, r)
 			return
 		}
+		p := Principal{
+			Kind: PrincipalSession, Iss: sess.Iss, Sub: sess.Sub, Email: sess.Email,
+			Groups: sess.Groups, AuthMethod: sess.AuthMethod, SessionHash: sess.IDHash,
+		}
 		if !csrfOK(r, rawID, cookie.origin) {
 			logger.Warn("console csrf check failed", "session", shortHash(sess.IDHash), "method", r.Method, "path", r.URL.Path)
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusForbidden)
-			_, _ = w.Write([]byte(`{"error":"csrf"}` + "\n"))
+			ctx := WithPrincipal(context.WithValue(r.Context(), csrfRefusedKey{}, true), p)
+			refuse.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
 		if !sess.LastSeenAt.After(store.Now().Add(-touchInterval)) {
 			if _, err := store.Touch(r.Context(), rawID); err != nil {
 				logger.Warn("console session touch failed", "session", shortHash(sess.IDHash), "error", err)
 			}
-		}
-		p := Principal{
-			Kind: PrincipalSession, Iss: sess.Iss, Sub: sess.Sub, Email: sess.Email,
-			Groups: sess.Groups, AuthMethod: sess.AuthMethod, SessionHash: sess.IDHash,
 		}
 		next.ServeHTTP(w, r.WithContext(WithPrincipal(r.Context(), p)))
 	})
@@ -197,6 +204,17 @@ func (s *Server) sessionWrap(h http.Handler) http.Handler {
 		return h
 	}
 	return withSession(h, s.sessionReader, s.sessionCookie, s.cfg.Logger)
+}
+
+// sessionAuditWrap is sessionWrap for an admin route: h runs behind the
+// request-id and admin audit middleware (auditWrap, a no-op with audit off),
+// and so does the CSRF refusal, so a refused session write is recorded too.
+func (s *Server) sessionAuditWrap(classify func(*http.Request) (authzRow, bool), h http.Handler) http.Handler {
+	inner := s.auditWrap(classify, h)
+	if s.sessionReader == nil {
+		return inner
+	}
+	return withSessionRefuse(inner, s.auditWrap(classify, csrfRefusal), s.sessionReader, s.sessionCookie, s.cfg.Logger)
 }
 
 // sweepSessions deletes expired sessions every minute until ctx is done.

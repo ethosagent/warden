@@ -4,10 +4,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -55,6 +59,45 @@ func policyStoreVersioned(t *testing.T, h *harness.H) {
 	}
 	if got := connectStatus(t, h, "api.example.com:443"); got != http.StatusOK {
 		t.Errorf("head v2: CONNECT api.example.com = %d, want 200", got)
+	}
+}
+
+// policyStoreFleetVersion (W-P1-PVER-10): the out-of-process writer records
+// version 2 (version 1 is the imported YAML) with no served ETag, so the control plane's Refresh appends the
+// publish-log row for the ETag it actually serves (reason external), and the
+// fleet view maps every up-to-date worker's heartbeat ETag to version 2
+// instead of showing it as unknown.
+func policyStoreFleetVersion(t *testing.T, h *harness.H) {
+	h.Upstream(pverHost)
+	appendPolicyVersion(t, h.ControlPlaneStateDB(),
+		`{"allowlist":[{"domain":"api.example.com"},{"domain":"`+pverHost+`"}],"denylist":null}`)
+	h.Eventually("workers enforce head version 2", func() bool {
+		return connectStatus(t, h, pverHost+":443") == http.StatusOK
+	})
+
+	type worker struct {
+		ProxyID       string `json:"proxyID"`
+		PolicyETag    string `json:"policyETag"`
+		PolicyVersion int64  `json:"policyVersion"`
+		Behind        bool   `json:"behind"`
+	}
+	var last []worker
+	h.Eventually("every worker shows policy version 2, up to date", func() bool {
+		// Workers heartbeat on the harness's fake clock: one beat per advance.
+		h.Clock().Advance(time.Second)
+		last = nil
+		if err := h.CP().GetJSON("/dashboard/api/workers", &last); err != nil || len(last) == 0 {
+			return false
+		}
+		for _, w := range last {
+			if w.PolicyETag == "" || w.PolicyVersion != 2 || w.Behind {
+				return false
+			}
+		}
+		return true
+	})
+	if len(last) == 0 {
+		t.Fatalf("fleet view lists no workers")
 	}
 }
 
@@ -175,6 +218,168 @@ func policyVersionAuthors(t *testing.T, path string) []string {
 		t.Fatalf("read policy_versions: %v", err)
 	}
 	return out
+}
+
+// The versioned publish scenario (W-P1-PVER-02): with --policy-store=versioned
+// a dashboard policy save creates version 2 instead of rewriting the YAML and
+// workers enforce it; an llmProviders save creates version 3 that carries the
+// policy edit. In console.auth none both are authored "anonymous".
+
+func policyStorePublishOpts() []harness.Option {
+	return []harness.Option{harness.WithVersionedPolicyStore()}
+}
+
+func policyStoreDashboardPublish(t *testing.T, h *harness.H) {
+	h.Upstream(pverHost)
+	if got := connectStatus(t, h, pverHost+":443"); got != http.StatusForbidden {
+		t.Fatalf("imported v1: CONNECT %s = %d, want 403", pverHost, got)
+	}
+
+	var cur struct {
+		Allowlist []map[string]any `json:"allowlist"`
+		Denylist  []map[string]any `json:"denylist"`
+	}
+	if err := h.CP().GetJSON("/dashboard/api/policy", &cur); err != nil {
+		t.Fatal(err)
+	}
+	edit := map[string]any{
+		"allowlist": append(cur.Allowlist, map[string]any{"domain": pverHost}),
+		"denylist":  cur.Denylist,
+	}
+	// Versioned saves name the head they were based on (W-P1-PVER-04).
+	save := func(path, ifMatch string, in any) {
+		t.Helper()
+		raw, err := json.Marshal(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r, err := h.CP().Send(http.MethodPost, path, http.Header{"If-Match": {ifMatch}}, raw)
+		if err != nil || r.Status != http.StatusOK {
+			t.Fatalf("dashboard save %s from %s = %d %s (%v)", path, ifMatch, r.Status, r.Body, err)
+		}
+	}
+	save("/dashboard/api/policy", `"v1"`, edit)
+	h.Eventually("workers enforce the published version 2", func() bool {
+		return connectStatus(t, h, pverHost+":443") == http.StatusOK
+	})
+	if got := connectStatus(t, h, "api.example.com:443"); got != http.StatusOK {
+		t.Errorf("v2: CONNECT api.example.com = %d, want 200 (kept from v1)", got)
+	}
+
+	providers := []map[string]any{{
+		"name": "pver", "baseURL": "https://llm.example.com/v1", "model": "m1", "apiKeyEnv": "PVER_LLM_KEY",
+	}}
+	save("/dashboard/api/llmproviders", `"v2"`, providers)
+	var view struct {
+		Providers []struct {
+			Name string `json:"name"`
+		} `json:"providers"`
+	}
+	if err := h.CP().GetJSON("/dashboard/api/llmproviders", &view); err != nil {
+		t.Fatal(err)
+	}
+	if len(view.Providers) != 1 || view.Providers[0].Name != "pver" {
+		t.Fatalf("llmProviders view = %+v, want the published registry", view.Providers)
+	}
+
+	want := []string{"system:import/import", "anonymous/policy", "anonymous/llmproviders"}
+	if got := policyVersionAuthors(t, h.ControlPlaneStateDB()); !slices.Equal(got, want) {
+		t.Fatalf("policy versions = %v, want %v", got, want)
+	}
+	// Version 3 carried the policy edit: the host stays allowed.
+	if got := connectStatus(t, h, pverHost+":443"); got != http.StatusOK {
+		t.Errorf("v3: CONNECT %s = %d, want 200 (carried from v2)", pverHost, got)
+	}
+}
+
+// The mirror and drift scenario (W-P1-PVER-05): with --policy-store=versioned
+// a dashboard save is mirrored into the served YAML. A hand edit of the YAML's
+// policy block is not served: the dashboard reports drift and admin audit
+// records one config.external_change row (before v<head>:..., after file:...).
+// Putting the file back clears the drift.
+
+func policyMirrorOpts() []harness.Option {
+	return []harness.Option{harness.WithVersionedPolicyStore(), harness.WithAdminAudit()}
+}
+
+// handHost is added to the served YAML by hand; it must never be enforced.
+const handHost = "hand.example.com"
+
+func policyStoreMirrorDrift(t *testing.T, h *harness.H) {
+	h.Upstream(pverHost)
+	h.Upstream(handHost)
+
+	var cur struct {
+		Allowlist []map[string]any `json:"allowlist"`
+		Denylist  []map[string]any `json:"denylist"`
+	}
+	if err := h.CP().GetJSON("/dashboard/api/policy", &cur); err != nil {
+		t.Fatal(err)
+	}
+	edit := map[string]any{"allowlist": append(cur.Allowlist, map[string]any{"domain": pverHost}), "denylist": cur.Denylist}
+	raw, err := json.Marshal(edit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Versioned saves name the head they were based on (W-P1-PVER-04).
+	if r, err := h.CP().Send(http.MethodPost, "/dashboard/api/policy", http.Header{"If-Match": {`"v1"`}}, raw); err != nil || r.Status != http.StatusOK {
+		t.Fatalf("dashboard policy save from v1 = %d %s (%v)", r.Status, r.Body, err)
+	}
+	h.Eventually("workers enforce the published version 2", func() bool {
+		return connectStatus(t, h, pverHost+":443") == http.StatusOK
+	})
+	mirrored := h.ReadControlPlaneConfig()
+	if !strings.Contains(mirrored, "domain: "+pverHost) {
+		t.Fatalf("the served YAML does not mirror head version 2:\n%s", mirrored)
+	}
+
+	drift := func() bool {
+		var p struct {
+			Drift bool `json:"drift"`
+		}
+		if err := h.CP().GetJSON("/dashboard/api/policy", &p); err != nil {
+			t.Fatal(err)
+		}
+		return p.Drift
+	}
+	external := func() []harness.AdminAuditRow {
+		var out []harness.AdminAuditRow
+		for _, r := range h.AdminAuditRows() {
+			if r.Action == externalChangeAction {
+				out = append(out, r)
+			}
+		}
+		return out
+	}
+	if drift() || len(external()) != 0 {
+		t.Fatal("the control plane's own mirror write was reported as an external edit")
+	}
+
+	h.EditControlPlaneConfig(func(body string) string {
+		return strings.Replace(body, "  allowlist:\n", "  allowlist:\n    - domain: "+handHost+"\n", 1)
+	})
+	h.EventuallyWithin(15*time.Second, "the hand edit is recorded as config.external_change", func() bool {
+		return len(external()) == 1
+	})
+	row := external()[0]
+	if row.AuthMethod != "system" || row.Target != "policy" ||
+		!strings.HasPrefix(row.BeforeHash, "v2:") || !strings.HasPrefix(row.AfterHash, "file:") {
+		t.Fatalf("external change row = %+v, want system/policy, before v2:<doc_sha256>, after file:<sha256>", row)
+	}
+	if !drift() {
+		t.Fatal("GET /dashboard/api/policy drift = false after a hand edit")
+	}
+	if got := connectStatus(t, h, handHost+":443"); got != http.StatusForbidden {
+		t.Fatalf("CONNECT %s = %d, want 403 (a hand edit is never served)", handHost, got)
+	}
+
+	h.EditControlPlaneConfig(func(string) string { return mirrored })
+	h.EventuallyWithin(15*time.Second, "drift clears with the YAML back at head", func() bool {
+		return !drift()
+	})
+	if n := len(external()); n != 1 {
+		t.Fatalf("%d config.external_change rows, want 1", n)
+	}
 }
 
 // The import/export CLI scenario (W-P1-PVER-06): the scenario plays `warden

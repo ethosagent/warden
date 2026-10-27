@@ -40,7 +40,7 @@ func TestIndexAPIWrapper(t *testing.T) {
 	html := servedIndex(t)
 	region, start, end := apiRegion(t, html)
 
-	if !strings.Contains(region, "async function api(method,url,body){") {
+	if !strings.Contains(region, "async function api(method,url,body,hdrs){") {
 		t.Fatal("api(method,url,body) wrapper not found")
 	}
 	// No fetch( outside the wrapper region.
@@ -74,7 +74,7 @@ func TestIndexAPIWrapper(t *testing.T) {
 		t.Error("a 401 from /auth/me must redirect to login")
 	}
 
-	apiBody := funcBody(t, region, "async function api(method,url,body){")
+	apiBody := funcBody(t, region, "async function api(method,url,body,hdrs){")
 	if !strings.Contains(apiBody, "await authInit()") {
 		t.Error("api() must wait for /auth/me before sending")
 	}
