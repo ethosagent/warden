@@ -486,9 +486,8 @@ func (s *Server) Handler() http.Handler {
 		})
 		dash.SetDetectionWriter(s.WriteDetection)
 	}
-	// Reads stay open; every write needs the CP bearer token (fail closed).
-	dash.SetWriteGuard(s.dashboardWriteGuard())
-	mux.Handle("/dashboard/", s.sessionWrap(dash.Handler()))
+	// Write guard and mount (bearer in none mode; sessions and roles in oidc): routes.go.
+	s.mountDashboard(mux, dash)
 
 	return mux
 }

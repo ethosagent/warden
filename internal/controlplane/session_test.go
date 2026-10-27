@@ -189,6 +189,7 @@ func TestSessionCSRF(t *testing.T) {
 	cc := config.ConsoleConfig{
 		Auth:    config.ConsoleAuthOIDC,
 		OIDC:    config.ConsoleOIDC{RedirectURL: testRedirectHTTPS},
+		Roles:   config.ConsoleRoles{Admin: []string{"warden-admins"}},
 		Session: config.ConsoleSession{Idle: time.Hour, Absolute: 12 * time.Hour},
 	}
 	srv := New(Config{PolicyPath: policy, Token: dashTestToken, State: db, Console: cc})
@@ -249,8 +250,9 @@ func TestSessionCSRF(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET with session: %d", rec.Code)
 	}
-	if rec := dashWrite(t, h, http.MethodPut, "/dashboard/api/policy", "Bearer "+dashTestToken); rec.Code == http.StatusUnauthorized || rec.Code == http.StatusForbidden {
-		t.Fatalf("sessionless bearer write: %d, want the handler to run", rec.Code)
+	// In oidc mode the shared bearer no longer opens a dashboard write (W-P1-SSO-05).
+	if rec := dashWrite(t, h, http.MethodPut, "/dashboard/api/policy", "Bearer "+dashTestToken); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("sessionless bearer write: %d, want 401", rec.Code)
 	}
 }
 

@@ -160,7 +160,7 @@ baseline:
   - rule: X9
     package: internal/controlplane
     why: "pre-migration: routes registered beside handlers until the routes.go migration"
-    allow: ["/central/ingest", "/central/secrets", "/central/secrets/", "/control/heartbeat", "/dashboard/", "/healthz", "/policy"]
+    allow: ["/central/ingest", "/central/secrets", "/central/secrets/", "/control/heartbeat", "/healthz", "/policy"]
   - rule: X9
     package: internal/dashboard
     why: "pre-migration: routes registered beside handlers until the routes.go migration"
