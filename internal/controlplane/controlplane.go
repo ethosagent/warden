@@ -518,6 +518,16 @@ func (s *Server) Handler() http.Handler {
 	// Editing is control-plane-only (workers get the source, not the writer → 405).
 	dash.SetLLMProvidersSource(s.llmProvidersView)
 	dash.SetLLMProvidersWriter(editor.WriteLLMProviders)
+	// Version contract (W-P1-PVER-08): in versioned mode the policy, settings
+	// and llmProviders GETs report the shared head and writes read If-Match
+	// into WriteMeta.ExpectedHead; file mode reports no version.
+	dash.SetPolicyVersion(s.policyVersionHead)
+	if s.versions != nil {
+		// HTTP saves record before and after as v<N>:<doc_sha256>, replacing
+		// the built-in hasher of the served allow/deny. A no-op without admin
+		// audit.
+		s.RegisterStateHasher(auditTargetPolicy, s.versionedPolicyHash)
+	}
 	// Per-worker MCP view (inventory + observed schema), selected by ?proxy=.
 	dash.SetMCPFleet(s.mcp.For)
 	// Connected-workers list for the fleet view, with a "behind" flag for any

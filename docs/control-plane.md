@@ -537,6 +537,19 @@ other value, the control plane refuses to start.
   user (sub and email, kind `oidc`), `breakglass:<username>` for a break-glass
   session, or `anonymous` (kind `none`) in `console.auth: none`, where the
   bearer proves possession of the shared token, not an identity.
+- Policy, settings and LLM providers share one head version. Their GETs
+  (`/dashboard/api/policy`, `/dashboard/api/settings`,
+  `/dashboard/api/llmproviders`) return it as `version` in the body and in an
+  `X-Warden-Policy-Version: N` header; in file mode neither is present. A save
+  may send `If-Match: "v<N>"` with the version it was based on. If the head has
+  moved since, the save returns `409 {"error":"policy_conflict","head":M,
+  "author":{"sub":...,"email":...}}` (the head's author, never doc content) and
+  creates nothing, so a settings save makes a concurrent policy save from the
+  same version conflict. A malformed `If-Match` returns 400; a missing one is
+  accepted for now. In file mode `If-Match` is ignored. `/policy`'s
+  content-hash ETag is unchanged. With `console.adminAudit.enabled` a policy
+  save's audit row records before and after as `v<N>:<doc_sha256>`, and a 409
+  is recorded with outcome `rejected`.
 - A settings save with an empty `secretAccessKey` keeps the live credential. A
   new value is written to the served YAML `secretStore` block (the only place
   the credential lives) and the version stores only its fingerprint; if the

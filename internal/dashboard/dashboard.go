@@ -9,7 +9,6 @@ import (
 	"crypto/ed25519"
 	"embed"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/url"
 	"path"
@@ -58,6 +57,9 @@ type Server struct {
 	// policyWriter applies an edited allow/deny policy; nil = read-only (worker /
 	// no editor).
 	policyWriter func(context.Context, config.Policy, WriteMeta) error
+	// policyVersion returns the head policy version shared by the policy,
+	// settings and llmProviders documents; nil or 0 = file mode (no versions).
+	policyVersion func(context.Context) (int64, error)
 	// liveSettings returns the behavioral settings currently in force (nil = none);
 	// settingsWriter applies an edited settings document. Both are control-plane-
 	// only: a worker leaves settingsWriter nil so its settings panel is read-only.
@@ -259,8 +261,8 @@ func (s *Server) SetLivePolicy(fn func() config.Policy) {
 
 // WriteMeta is the write metadata a dashboard writer receives with an edit:
 // the policy version the edit was based on (0 = whatever the head is when the
-// write runs) and an optional version message. The handlers pass the zero
-// value today; W-P1-PVER-08 fills it from If-Match.
+// write runs) and an optional version message. In versioned mode the handlers
+// fill ExpectedHead from If-Match (writeMeta).
 type WriteMeta struct {
 	ExpectedHead int64
 	Message      string
@@ -388,6 +390,8 @@ type policyResponse struct {
 	// Editable reports whether this dashboard can save policy changes (true only
 	// on the control plane, where a policy writer is configured).
 	Editable bool `json:"editable"`
+	// Version is the head policy version in versioned mode; absent in file mode.
+	Version int64 `json:"version,omitempty"`
 }
 
 // policyEditRequest is the body accepted by POST /dashboard/api/policy.
@@ -403,6 +407,8 @@ type policyEditRequest struct {
 type settingsResponse struct {
 	Settings *settingsView `json:"settings"`
 	Editable bool          `json:"editable"`
+	// Version is the head policy version in versioned mode; absent in file mode.
+	Version int64 `json:"version,omitempty"`
 }
 
 // settingsView is the dashboard-facing projection of a SettingsWire. It embeds
@@ -742,7 +748,11 @@ func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) getPolicy(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) getPolicy(w http.ResponseWriter, r *http.Request) {
+	version, ok := s.versionForGet(w, r)
+	if !ok {
+		return
+	}
 	// Prefer the live (hot-reloadable) policy so the panel matches what is
 	// actually being enforced; fall back to the startup snapshot.
 	pol := s.policy
@@ -753,6 +763,7 @@ func (s *Server) getPolicy(w http.ResponseWriter, _ *http.Request) {
 		Allowlist: pol.Allowlist,
 		Denylist:  pol.Denylist,
 		Editable:  s.policyWriter != nil,
+		Version:   version,
 	}
 	if resp.Allowlist == nil {
 		resp.Allowlist = []config.AllowlistEntry{}
@@ -777,9 +788,13 @@ func (s *Server) putPolicy(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
+	meta, ok := s.writeMeta(w, r)
+	if !ok {
+		return
+	}
 	pol := config.Policy{Allowlist: req.Allowlist, Denylist: req.Denylist}
-	if err := s.policyWriter(r.Context(), pol, WriteMeta{}); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+	if err := s.policyWriter(r.Context(), pol, meta); err != nil {
+		writeWriterError(w, err)
 		return
 	}
 	// Echo back the now-current policy so the UI can refresh from the response.
@@ -802,7 +817,11 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) getSettings(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
+	version, ok := s.versionForGet(w, r)
+	if !ok {
+		return
+	}
 	var settings *config.SettingsWire
 	if s.liveSettings != nil {
 		settings = s.liveSettings()
@@ -817,6 +836,7 @@ func (s *Server) getSettings(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, settingsResponse{
 		Settings: view,
 		Editable: s.settingsWriter != nil,
+		Version:  version,
 	})
 }
 
@@ -834,13 +854,12 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	if err := s.settingsWriter(r.Context(), settings, WriteMeta{}); err != nil {
-		var re *RoleRequiredError
-		if errors.As(err, &re) {
-			writeJSONStatus(w, http.StatusForbidden, roleRequiredResponse{Error: "role_required", Need: re.Need, Fields: re.Fields})
-			return
-		}
-		writeError(w, http.StatusBadRequest, err.Error())
+	meta, ok := s.writeMeta(w, r)
+	if !ok {
+		return
+	}
+	if err := s.settingsWriter(r.Context(), settings, meta); err != nil {
+		writeWriterError(w, err)
 		return
 	}
 	// Echo back the now-current settings so the UI can refresh from the response.

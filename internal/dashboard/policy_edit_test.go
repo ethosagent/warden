@@ -280,8 +280,8 @@ func TestWorkersEndpoint(t *testing.T) {
 }
 
 // TestWritersReceiveContextAndMeta: the policy, settings and llmProviders
-// writers get the request context (it carries the caller's identity) and, until
-// W-P1-PVER-08 reads If-Match, an empty WriteMeta.
+// writers get the request context (it carries the caller's identity) and, in
+// file mode, an empty WriteMeta (policy_conflict_test.go covers If-Match).
 func TestWritersReceiveContextAndMeta(t *testing.T) {
 	type seen struct {
 		ctx  bool

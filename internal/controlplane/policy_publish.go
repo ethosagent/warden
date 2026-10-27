@@ -128,7 +128,8 @@ func (s *Server) headDoc(ctx context.Context) (int64, policyWire, error) {
 // publish creates a policy version: under writeMu it reads head, applies
 // mutate, validates the result with validateDoc (a validation error leaves
 // head unchanged), and calls Create with meta.ExpectedHead, or the head it
-// read when that is zero. A moved head is ErrConflict. A new credential value
+// read when that is zero. A moved head is a *dashboard.ConflictError naming
+// the current head and its author (it unwraps to ErrConflict). A new credential value
 // in the doc is written to the served YAML secretStore first and only its
 // fingerprint is stored; the YAML is put back if no version is created. The
 // one log line is Create's.
@@ -168,6 +169,9 @@ func (s *Server) publish(ctx context.Context, mutate func(*policyWire) error, me
 		if restore != nil {
 			restore()
 			s.refresh()
+		}
+		if errors.Is(err, ErrConflict) {
+			return s.conflictError(ctx, err)
 		}
 		return err
 	}
@@ -303,4 +307,48 @@ func (s *Server) publishLLMProviders(ctx context.Context, ps []config.LLMProvide
 		w.Settings = composeSettings(w.Settings, cand.Settings, SourceLLMProviders)
 		return nil
 	}, meta, SourceLLMProviders)
+}
+
+// conflictError is the dashboard-visible form of a Create conflict: the
+// current head and its author, so the 409 can say who saved first. The
+// author's sub and email are those the version stores; dashboard writes are
+// always authenticated (bearer or session), so only console users see them.
+// If the head cannot be read the error still maps to 409, without an author.
+func (s *Server) conflictError(ctx context.Context, err error) error {
+	ce := &dashboard.ConflictError{Err: err}
+	head, herr := s.versions.Head(ctx)
+	if herr != nil {
+		return ce
+	}
+	ce.Head = head
+	if v, gerr := s.versions.Get(ctx, head); gerr == nil {
+		ce.Author = dashboard.ConflictAuthor{Sub: v.Author.Sub, Email: v.Author.Email}
+	}
+	return ce
+}
+
+// policyVersionHead is the dashboard's policy version source: the head
+// version in versioned mode, 0 in file mode.
+func (s *Server) policyVersionHead(ctx context.Context) (int64, error) {
+	if s.versions == nil {
+		return 0, nil
+	}
+	return s.versions.Head(ctx)
+}
+
+// versionedPolicyHash is the admin audit state hasher for target policy in
+// versioned mode: "v<head>:<doc_sha256>", the same form as the initial
+// import's after_hash, so consecutive rows chain by version. doc_sha256 is
+// the stored digest of the credential-redacted doc, never the doc itself. An
+// empty store hashes to "".
+func (s *Server) versionedPolicyHash(ctx context.Context) (string, error) {
+	head, err := s.versions.Head(ctx)
+	if err != nil || head == 0 {
+		return "", err
+	}
+	v, err := s.versions.Get(ctx, head)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("v%d:%s", v.Version, v.DocSHA256), nil
 }

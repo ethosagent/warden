@@ -78,6 +78,10 @@ var All = slices.Concat(
 		// saves create versions authored anonymous that workers enforce.
 		// In-process only (it reads the CP state dir).
 		{Name: "policy_store_dashboard_publish", Opts: policyStorePublishOpts(), Run: policyStoreDashboardPublish},
+		// Version contract (W-P1-PVER-08): GET reports the head, If-Match names
+		// it, a stale save is a 409 naming the author and is audited rejected.
+		// In-process only (it reads the CP state dir).
+		{Name: "policy_if_match_conflict", Opts: policyContractOpts(), Run: policyIfMatchConflict},
 
 		// Admin audit gate (W-P1-AAUD-05): enabled, the control plane writes the
 		// genesis entry and logs its key_id before serving. In-process only (it
