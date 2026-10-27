@@ -65,6 +65,11 @@ var All = slices.Concat(
 		// Console enforcement (W-P1-SSO-06): oidc starts, the shared bearer opens no
 		// human route, and workers keep pulling /policy with it.
 		{Name: "console_oidc_bearer_rejected", Opts: consoleOpts(), Run: consoleOIDCBearerRejected},
+
+		// Versioned policy store (W-P1-PVER-01): an empty store serves the YAML;
+		// a head written out of process reaches workers. In-process only (it
+		// writes the control plane's state database).
+		{Name: "policy_store_versioned", Opts: policyStoreOpts(), Run: policyStoreVersioned},
 	},
 	// Canary across protocols x allow/deny; see canary.go.
 	canaryScenarios(),

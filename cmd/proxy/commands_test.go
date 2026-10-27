@@ -164,6 +164,40 @@ func TestControlPlaneRequireConsoleAuth(t *testing.T) {
 	}
 }
 
+// TestPolicyStoreFlag: --policy-store=versioned without --state-dir and an
+// unknown value exit non-zero before listening; versioned with a state dir
+// starts.
+func TestPolicyStoreFlag(t *testing.T) {
+	for name, tc := range map[string]struct {
+		args []string
+		want string
+	}{
+		"versioned without state dir": {[]string{"--policy-store", "versioned"}, "--state-dir"},
+		"unknown value":               {[]string{"--policy-store", "git", "--state-dir", filepath.Join(t.TempDir(), "state")}, "--policy-store"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			args := append([]string{"control-plane",
+				"--config", writeTempConfig(t, minimalConfig),
+				"--listen", "127.0.0.1:0",
+				"--analytics-provider", "memory",
+			}, tc.args...)
+			if err := executeRoot(t, args...); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("control-plane %v = %v, want an error naming %s", tc.args, err, tc.want)
+			}
+		})
+	}
+	err := executeRoot(t, "control-plane",
+		"--config", writeTempConfig(t, minimalConfig),
+		"--listen", "127.0.0.1:0",
+		"--analytics-provider", "memory",
+		"--state-dir", filepath.Join(t.TempDir(), "state"),
+		"--policy-store", "versioned",
+	)
+	if err != nil {
+		t.Fatalf("control-plane --policy-store=versioned --state-dir = %v, want a clean start and shutdown", err)
+	}
+}
+
 // TestControlPlaneSubcommand_CAFlagMismatch covers the guard that both --ca-cert and
 // --ca-key must be provided together.
 func TestControlPlaneSubcommand_CAFlagMismatch(t *testing.T) {

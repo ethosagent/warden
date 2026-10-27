@@ -42,12 +42,14 @@ func newControlPlaneCmd() *cobra.Command {
 			aRetention, _ := cmd.Flags().GetInt("analytics-retention-days")
 			alertsDB, _ := cmd.Flags().GetString("alerts-db")
 			requireConsoleAuth, _ := cmd.Flags().GetBool("require-console-auth")
+			policyStore, _ := cmd.Flags().GetString("policy-store")
 			return controlplane.Run(cmd.Context(), cmd.OutOrStdout(), controlplane.Params{
 				ConfigPath: configPath, ListenAddr: listenAddr, TokenEnv: tokenEnv,
 				CACert: caCert, CAKey: caKey, TLSHost: tlsHost, StateDir: stateDir,
 				MaxEvents: maxEvents, AnalyticsProvider: aProvider, AnalyticsDB: aDB,
 				RetentionDays: aRetention, AlertsDB: alertsDB,
 				RequireConsoleAuth: requireConsoleAuth,
+				PolicyStore:        policyStore,
 			})
 		},
 	}
@@ -62,6 +64,7 @@ func newControlPlaneCmd() *cobra.Command {
 	cmd.Flags().String("analytics-db", "", "sqlite fleet analytics DB path (default: <state-dir>/warden-fleet.db, else ./warden-fleet.db)")
 	cmd.Flags().Int("analytics-retention-days", 30, "prune fleet analytics events older than N days (0 = keep forever)")
 	cmd.Flags().String("alerts-db", "", "sqlite alert store DB path (default: sibling of the analytics DB, named warden-alerts.db)")
+	cmd.Flags().String("policy-store", controlplane.PolicyStoreFile, "where served policy comes from: file (default, the served YAML) | versioned (append-only versions in <state-dir>/warden-cp.db; requires --state-dir)")
 	cmd.Flags().Bool("require-console-auth", false, "refuse to start unless console.auth is oidc (no open dashboard)")
 	return cmd
 }

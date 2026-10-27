@@ -56,6 +56,11 @@ type Params struct {
 	// own phase (rule L3, #349).
 	Clock clock.Clock
 
+	// PolicyStore is --policy-store: "file" (or "", the default) serves the
+	// YAML; "versioned" serves the head of the versioned policy store and
+	// requires StateDir. Any other value is a startup error.
+	PolicyStore string
+
 	// RequireConsoleAuth refuses to start when console.auth is none, so an
 	// operator can make an open console a startup error
 	// (--require-console-auth).
@@ -80,6 +85,10 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 			_ = p.Listener.Close()
 		}
 		return err
+	}
+	policyStore, err := resolvePolicyStore(p.PolicyStore, stateDir)
+	if err != nil {
+		return fail(err)
 	}
 	// Resolve the SERVED path. With no --state-dir we serve+edit --config in place
 	// (unchanged behavior). With --state-dir we serve+edit a writable copy seeded
@@ -159,15 +168,24 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	var state *cpstate.DB
 	if stateDir != "" {
 		statePath := filepath.Join(stateDir, "warden-cp.db")
-		// Every mode registers the sessions migration, so switching console.auth
-		// never trips the downgrade guard. The open is not cancellable: a shutdown
-		// signal must not abandon a migration half way through boot.
-		state, err = cpstate.Open(context.WithoutCancel(ctx), statePath, append(SessionMigrations(), OIDCPendingMigrations()...))
+		// Every mode registers every migration (sessions, policy store, ...), so
+		// switching console.auth or --policy-store never trips the downgrade
+		// guard. The open is not cancellable: a shutdown signal must not abandon
+		// a migration half way through boot.
+		state, err = cpstate.Open(context.WithoutCancel(ctx), statePath, StateMigrations())
 		if err != nil {
 			return fail(fmt.Errorf("control-plane: state db: %w", err))
 		}
 		defer func() { _ = state.Close() }()
 		logger.Info("control plane state db", "db", statePath, "applied", state.Applied())
+	}
+	if policyStore == PolicyStoreVersioned {
+		// Fail closed: never fall back to the possibly older YAML.
+		head, err := checkPolicyStoreStartup(ctx, newSQLitePolicyStore(state.SQL(), nil, logger), state.Path())
+		if err != nil {
+			return fail(err)
+		}
+		logger.Info("control plane policy store", "mode", policyStore, "head", head)
 	}
 
 	// Build the fleet analytics store. sqlite (default) persists events and powers
@@ -243,6 +261,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 
 	srv := New(Config{
 		State:        state,
+		PolicyStore:  policyStore,
 		PolicyPath:   servedPath,
 		Token:        token,
 		MaxEvents:    maxEvents,
@@ -269,6 +288,15 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		// The CP's time port (nil = clock.Real() inside New).
 		Clock: p.Clock,
 	})
+
+	if policyStore == PolicyStoreVersioned {
+		if _, _, ok, _ := srv.policy.snapshot(); !ok {
+			if srv.integrationsStore != nil {
+				_ = srv.integrationsStore.Close() // Start never ran, so nothing else closes it
+			}
+			return fail(errors.New("control-plane: --policy-store=versioned: the head policy failed to load (see the log above); refusing to start"))
+		}
+	}
 
 	httpSrv := &http.Server{
 		Addr:    listenAddr,

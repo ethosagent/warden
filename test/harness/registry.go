@@ -61,19 +61,20 @@ var Fakes = map[string]FakeEntry{
 // agree with the reason; an exclusion for an interface that no longer exists
 // fails TestPortCoverage.
 var Excluded = map[string]string{
-	"analytics.FleetStore":      "the control plane's own persistent store; the harness runs the real one (analytics.NewFleetStore), a fake would hide ingest bugs",
-	"analytics.RemoteStore":     "the worker->control-plane event sink; the only implementation is the HTTP client, and the harness runs the real control plane on loopback",
-	"gateway.Store":             "MCP gateway persistence, implemented by the real SQLite analytics store the harness already boots; not an external dependency",
-	"dashboard.MCPProvider":     "read-only view of the in-process MCP gateway; no external system behind it",
-	"llmpolicy.LLMClient":       "the judge's provider client; the production client will run against FakeLLM at the HTTP wire; the first judge scenario must add a harness option for judge config",
-	"proxy.Judge":               "the proxy's view of llmpolicy.Judge, whose provider client is covered by the llmpolicy.LLMClient exclusion; a fake Judge would skip the prompt and fail-closed path the scenarios must exercise",
-	"dashboard.SQLGenerator":    "the Explore tab's NL->SQL surface, satisfied by the real *llm.Client; it will run against FakeLLM at the HTTP wire once a scenario drives Explore",
-	"secrets.Fetcher":           "the per-placeholder loader behind the env SecretProvider the harness already uses; the vendor Fetchers (AWS, GCP) are covered by their package tests",
-	"integration.Alerter":       "outbound alert sinks (webhook, alertmanager) behind the alert pipeline; no L1 scenario drives alert delivery yet, and package tests cover them with httptest servers",
-	"integration.EventStreamer": "the raw event firehose sink, defined but not wired (M2); nothing calls it, so there is no boundary to fake yet",
-	"secrets.AWSSecretsClient":  "vendor SDK adapter behind secrets.SecretStore/Fetcher; package tests fake it, and the harness resolves secrets through the env SecretProvider",
-	"secrets.GCPSecretClient":   "vendor SDK adapter behind a Fetcher; package tests fake it, and the harness resolves secrets through the env SecretProvider",
-	"worker.ControlPlaneClient": "the worker's view of the control plane; the harness runs the real control plane (*config.RemoteProvider) rather than a fake",
+	"analytics.FleetStore":            "the control plane's own persistent store; the harness runs the real one (analytics.NewFleetStore), a fake would hide ingest bugs",
+	"analytics.RemoteStore":           "the worker->control-plane event sink; the only implementation is the HTTP client, and the harness runs the real control plane on loopback",
+	"gateway.Store":                   "MCP gateway persistence, implemented by the real SQLite analytics store the harness already boots; not an external dependency",
+	"dashboard.MCPProvider":           "read-only view of the in-process MCP gateway; no external system behind it",
+	"llmpolicy.LLMClient":             "the judge's provider client; the production client will run against FakeLLM at the HTTP wire; the first judge scenario must add a harness option for judge config",
+	"proxy.Judge":                     "the proxy's view of llmpolicy.Judge, whose provider client is covered by the llmpolicy.LLMClient exclusion; a fake Judge would skip the prompt and fail-closed path the scenarios must exercise",
+	"dashboard.SQLGenerator":          "the Explore tab's NL->SQL surface, satisfied by the real *llm.Client; it will run against FakeLLM at the HTTP wire once a scenario drives Explore",
+	"secrets.Fetcher":                 "the per-placeholder loader behind the env SecretProvider the harness already uses; the vendor Fetchers (AWS, GCP) are covered by their package tests",
+	"integration.Alerter":             "outbound alert sinks (webhook, alertmanager) behind the alert pipeline; no L1 scenario drives alert delivery yet, and package tests cover them with httptest servers",
+	"integration.EventStreamer":       "the raw event firehose sink, defined but not wired (M2); nothing calls it, so there is no boundary to fake yet",
+	"secrets.AWSSecretsClient":        "vendor SDK adapter behind secrets.SecretStore/Fetcher; package tests fake it, and the harness resolves secrets through the env SecretProvider",
+	"secrets.GCPSecretClient":         "vendor SDK adapter behind a Fetcher; package tests fake it, and the harness resolves secrets through the env SecretProvider",
+	"controlplane.PolicyVersionStore": "the control plane's own versioned policy store on the cpstate SQLite DB; the harness runs the real one (--policy-store=versioned), a fake would hide the compare-and-swap and transaction behaviour",
+	"worker.ControlPlaneClient":       "the worker's view of the control plane; the harness runs the real control plane (*config.RemoteProvider) rather than a fake",
 }
 
 // --- identity.Verifier ---

@@ -159,6 +159,9 @@ type H struct {
 	// listen address (its https origin is the registered redirect URL).
 	wantConsole bool
 	consoleAddr string
+	// versionedPolicy (WithVersionedPolicyStore) boots the control plane with
+	// --policy-store=versioned and a state dir.
+	versionedPolicy bool
 
 	// tokenClients are the AgentWithProxyToken / AgentH2WithProxyToken clients,
 	// kept so cleanup can close their idle tunnels.
@@ -613,6 +616,9 @@ func (h *H) boot() {
 	}
 
 	if h.suppliedTarget != nil {
+		if h.versionedPolicy {
+			h.tb.Fatalf("harness: WithVersionedPolicyStore boots an in-process control plane; it cannot combine with WithTarget")
+		}
 		if h.cpDownAtBoot {
 			h.tb.Fatalf("harness: ControlPlaneDownAtBoot is an in-process fault; it cannot combine with WithTarget")
 		}
@@ -689,6 +695,7 @@ func (h *H) buildInprocessTarget() *inprocess {
 		tokenEnv: cpTokenEnv,
 	}
 	h.applyConsole(&ip.cp.params, &ip.cp.addr)
+	h.applyPolicyStore(&ip.cp.params)
 	return ip
 }
 
