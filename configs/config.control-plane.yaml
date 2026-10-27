@@ -67,6 +67,9 @@ logging:
 #  session:
 #    idle: 1h
 #    absolute: 12h
+#  adminAudit:
+#    enabled: false                        # signed admin audit log (default false); needs --state-dir.
+#                                          # Key: --admin-audit-key-file (default <state-dir>/cp-audit.key).
 #
 # Compose dev profile (Dex): the CP runs in a container where `localhost` is
 # itself, so the browser-facing issuer stays public and internalIssuerURL names
