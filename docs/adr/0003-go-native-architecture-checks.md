@@ -22,3 +22,8 @@ that runs under `go test ./...`. A baseline file records today's violations so t
 - No new toolchain in the gate; the same checks run locally and in CI.
 - Rule IDs map onto archcheck's model if it gains Go support later.
 - A review check that keeps finding the same problem should become one of these rules.
+- The baseline is the only record of violations. The one standing exception is rule L7's
+  `shared-repositories` list (#537): exact paths of shared infrastructure (the CP state DB, the clock
+  port, the signer) that any repository may import. It is not a violation list, so it does not have to
+  shrink, but adding an entry is a gates change: `tools/gatecheck` reports it as a widened allowance and
+  only a maintainer's `gates-change-approved` label passes it.

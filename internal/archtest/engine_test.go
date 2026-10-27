@@ -598,3 +598,69 @@ func init() { table = nil } // test-only setup is allowed
 	// conv has a test file, so C3 stays quiet and S4 finds nothing.
 	assertFindings(t, NewEngine(arch, "example.com/tiny", nil).Run(pkgs))
 }
+
+// TestEngineL7SharedRepositories pins L7's shared-repositories list: a
+// repository may import a listed infrastructure repository from another
+// domain, and any other cross-domain repository import still fails.
+func TestEngineL7SharedRepositories(t *testing.T) {
+	const arch = `
+version: 1
+classes:
+  - id: assembly
+    layer: assembly
+    imported-by: ["cmd/**"]
+    paths: ["cmd/**"]
+  - id: repository
+    layer: repository
+    paths: ["w/*"]
+zones:
+  control: ["w/*"]
+rules:
+  - id: L7
+    title: repositories import no other domain
+    checker: archtest
+    fix: depend on your own domain only
+    shared-repositories: [w/store]
+modules:
+  direct:
+    - module: golang.org/x/net
+      layers: [repository]
+`
+	root := writeModule(t, map[string]string{
+		"go.mod":              "module example.com/tiny\n\ngo 1.24\n",
+		"w/feat/feat.go":      "package feat\n\nimport (\n\t_ \"example.com/tiny/w/other\"\n\t_ \"example.com/tiny/w/store\"\n)\n",
+		"w/feat/feat_test.go": "package feat\n",
+		"w/store/store.go":    "package store\n",
+		"w/store/s_test.go":   "package store\n",
+		"w/other/other.go":    "package other\n",
+		"w/other/o_test.go":   "package other\n",
+	})
+	a, err := LoadArchitecture([]byte(arch))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkgs, err := LoadPackages(root, root+"/w/feat", root+"/w/store", root+"/w/other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := NewEngine(a, "example.com/tiny", nil)
+	e.SkipRules = map[string]bool{"C3": true}
+	// Only the import of w/other fires; w/store is listed as shared.
+	assertFindings(t, e.Run(pkgs), want{"L7", "w/feat/feat.go", 4})
+}
+
+// TestLoadArchitectureSharedRepositoriesValidation: a shared-repositories
+// entry is an exact package path, never empty and never a glob.
+func TestLoadArchitectureSharedRepositoriesValidation(t *testing.T) {
+	for _, entry := range []string{`""`, `"internal/*"`, `"internal/**"`} {
+		doc := "version: 1\nclasses:\n  - id: repository\n    layer: repository\n    paths: [\"w/*\"]\nzones:\n  control: [\"w/*\"]\nrules:\n  - id: L7\n    title: t\n    checker: archtest\n    fix: f\n    shared-repositories: [" + entry + "]\nmodules:\n  direct:\n    - module: golang.org/x/net\n      layers: [repository]\n"
+		if _, err := LoadArchitecture([]byte(doc)); err == nil || !strings.Contains(err.Error(), "shared-repositories") {
+			t.Errorf("entry %s: err = %v, want a shared-repositories error", entry, err)
+		}
+	}
+	// The list only means something on L7; anywhere else it is refused.
+	doc := "version: 1\nclasses:\n  - id: repository\n    layer: repository\n    paths: [\"w/*\"]\nzones:\n  control: [\"w/*\"]\nrules:\n  - id: L6\n    title: t\n    checker: archtest\n    fix: f\n    shared-repositories: [w/store]\nmodules:\n  direct:\n    - module: golang.org/x/net\n      layers: [repository]\n"
+	if _, err := LoadArchitecture([]byte(doc)); err == nil || !strings.Contains(err.Error(), "shared-repositories") {
+		t.Errorf("shared-repositories on L6: err = %v, want a shared-repositories error", err)
+	}
+}

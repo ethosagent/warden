@@ -273,6 +273,12 @@ rules:
     title: Storage repositories import no domain other than their own and no transport or assembly package
     checker: archtest
     fix: depend on the types of your own domain only; other domains depend on you through their ports
+    # Shared infrastructure every repository may import: these are not another
+    # domain's storage. Exact paths; adding one is a gates change.
+    shared-repositories:
+      - internal/cpstate   # the CP state DB; feature stores declare migrations and pass them to cpstate.Open (SSO-01)
+      - internal/clock     # the Clock port + its real-time impl (#362)
+      - internal/audit     # the Ed25519 signer (audit.Signer, SignBytes/VerifyBytes, KeyID) that signed stores reuse
 
   - id: L8
     title: Every package must match a declared class and zone (catches unlayered packages)
