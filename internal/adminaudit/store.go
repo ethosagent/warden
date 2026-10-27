@@ -192,7 +192,8 @@ type headRow struct {
 
 // buildFunc decides the next entry given the current head (after genesis on an
 // empty table). It returns the entry to append (store-stamped fields are
-// overwritten) and an optional side-table actor.
+// overwritten) and an optional side-table actor, or a nil entry to append
+// nothing more (the transaction still commits a genesis it wrote).
 type buildFunc func(head headRow) (*Entry, *Actor, error)
 
 // appendTx runs one append on a dedicated connection inside an explicit BEGIN
@@ -220,8 +221,9 @@ func (s *Store) appendTx(ctx context.Context, build buildFunc) (out Entry, err e
 		return Entry{}, err
 	}
 	now := s.clock.Now()
+	var g Entry
 	if !found {
-		g := s.genesis(now)
+		g = s.genesis(now)
 		if err := s.signAndInsert(ctx, conn, &g, nil); err != nil {
 			return Entry{}, err
 		}
@@ -230,6 +232,13 @@ func (s *Store) appendTx(ctx context.Context, build buildFunc) (out Entry, err e
 	e, side, err := build(head)
 	if err != nil {
 		return Entry{}, err
+	}
+	if e == nil {
+		if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+			return Entry{}, fmt.Errorf("adminaudit: commit: %w", err)
+		}
+		committed = true
+		return g, nil
 	}
 	e.V = EntryVersion
 	e.Seq = head.Seq + 1
