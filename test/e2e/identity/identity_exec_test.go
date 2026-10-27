@@ -37,8 +37,7 @@ const (
 )
 
 // execCache is a fresh per-test cache directory inside agent-1.
-func execCache(t testing.TB) string {
-	t.Helper()
+func execCache() string {
 	return fmt.Sprintf("/tmp/warden-idc07-%d", time.Now().UnixNano())
 }
 
@@ -114,7 +113,7 @@ func validEventsFor(t testing.TB, host, email string) []analytics.Event {
 func TestIdentityExecAttribution(t *testing.T) {
 	requireStack(t)
 	token := dexToken(t, smokeUser)
-	dir := execCache(t)
+	dir := execCache()
 	seedCache(t, dir, token)
 
 	before := len(validEventsFor(t, allowedHost, smokeEmail))
@@ -166,10 +165,11 @@ func TestIdentityExecAttribution(t *testing.T) {
 func TestIdentityExecChildSecrets(t *testing.T) {
 	requireStack(t)
 	token := dexToken(t, smokeUser)
-	dir := execCache(t)
+	dir := execCache()
 	seedCache(t, dir, token)
 
 	script := `tr '\0' '\n' < /proc/$$/environ; echo; echo ARGV; tr '\0' '\n' < /proc/$$/cmdline; echo; echo CURL-$((6*7)); exec "$@"`
+	before := len(validEventsFor(t, allowedHost, smokeEmail))
 	res := identityExec(t, dir, append([]string{"sh", "-c", script, "sh"}, execCurl(allowedHost)...)...)
 	report, curlOut, ok := strings.Cut(res.Stdout, execMarker)
 	if !ok {
@@ -178,6 +178,14 @@ func TestIdentityExecChildSecrets(t *testing.T) {
 	if status := strings.TrimSpace(curlOut); res.Exit != 0 || !strings.HasPrefix(status, "200 ") {
 		t.Fatalf("child curl: exit %d, status %q; want exit 0, 200 (stderr: %s)", res.Exit, status, firstLine(res.Stderr))
 	}
+	// The same child's request carried alice: the token went through the
+	// forwarder, not through anything the child holds.
+	waitEvent(t, "a new valid event for "+smokeEmail+" from the reporting child", func() (analytics.Event, bool) {
+		if evs := validEventsFor(t, allowedHost, smokeEmail); len(evs) > before {
+			return evs[0], true
+		}
+		return analytics.Event{}, false
+	})
 	envPart, argvPart, _ := strings.Cut(report, "\nARGV\n")
 
 	sweep(t, "the child's environment", envPart, token)
@@ -218,7 +226,7 @@ func TestIdentityExecChildSecrets(t *testing.T) {
 // (login required) and never starts the child.
 func TestIdentityExecNoLogin(t *testing.T) {
 	requireStack(t)
-	dir := execCache(t)
+	dir := execCache()
 	t.Cleanup(func() { _, _ = compose.AgentRunRaw(compose.SvcAgent1, "rm", "-rf", dir) })
 	res := identityExec(t, dir, "echo", "child-started")
 	if res.Exit != 2 {
