@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/ethosagent/warden/internal/identityclient"
 )
 
 // The child of these tests is this test binary re-executed in helper mode.
@@ -30,16 +32,30 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
+// probedEnv are the variables the env helper reports. The child looks each
+// one up by name, because rule X3 bans enumerating the environment even in
+// tests; the list covers the allowlist, everything exec sets and every
+// variable the tests expect to stay behind.
+var probedEnv = []string{
+	"PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "TMPDIR", "TZ", "LANG", "LC_ALL", "LC_TIME",
+	"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy",
+	"SSL_CERT_FILE", "ANTHROPIC_API_KEY", "EDITOR", "NOT_SET_HERE",
+	identityclient.EnvIssuer, identityclient.EnvClientID, identityclient.EnvAudience, identityclient.EnvScopes,
+	identityclient.EnvCacheDir, "WARDEN_IDENTITY_TOKEN",
+}
+
 // execHelper plays the supervised child.
 //
-//	env      print the environment and argv, one line each
+//	env      print the probedEnv variables that are set and argv, one line each
 //	wait     print READY and block until killed
 //	connect  CONNECT through HTTPS_PROXY the way a client would and print the status line
 func execHelper(mode string) int {
 	switch mode {
 	case "env":
-		for _, kv := range os.Environ() {
-			fmt.Println("ENV " + kv)
+		for _, k := range probedEnv {
+			if v, ok := os.LookupEnv(k); ok {
+				fmt.Println("ENV " + k + "=" + v)
+			}
 		}
 		for _, a := range os.Args {
 			fmt.Println("ARG " + a)
@@ -105,7 +121,20 @@ func (r *rig) runExec(mode string, sigs chan os.Signal, args ...string) execResu
 func (r *rig) startExec(mode string, sigs chan os.Signal, out *syncBuf, args ...string) (func() execResult, *syncBuf) {
 	r.t.Helper()
 	d := r.deps()
-	d.environ = func() []string { return []string{"PATH=" + os.Getenv("PATH"), helperEnv + "=" + mode} }
+	// The parent holds the identity settings too, so the tests see that
+	// WARDEN_IDENTITY_* stays behind. The helper mode reaches the child only
+	// through --env, which every run passes.
+	parent := map[string]string{"PATH": os.Getenv("PATH"), helperEnv: mode}
+	for k, v := range r.env {
+		parent[k] = v
+	}
+	for k, v := range r.parent {
+		parent[k] = v
+	}
+	d.lookupEnv = func(k string) (string, bool) {
+		v, ok := parent[k]
+		return v, ok
+	}
 	if sigs != nil {
 		d.signals = func() (<-chan os.Signal, func()) { return sigs, func() {} }
 	}
@@ -118,7 +147,7 @@ func (r *rig) startExec(mode string, sigs chan os.Signal, out *syncBuf, args ...
 	var errb syncBuf
 	root.SetOut(out)
 	root.SetErr(&errb)
-	root.SetArgs(append([]string{"identity", "exec"}, args...))
+	root.SetArgs(append([]string{"identity", "exec", "--env", helperEnv}, args...))
 	ch := make(chan error, 1)
 	go func() { ch <- root.Execute() }()
 	return func() execResult {
@@ -167,6 +196,63 @@ func TestIdentityExec(t *testing.T) {
 		}
 		if strings.Contains(res.stdout, "WARDEN_IDENTITY_") {
 			t.Error("WARDEN_IDENTITY_* reached the child")
+		}
+	})
+
+	t.Run("only allowlisted variables reach the child unless named with --env", func(t *testing.T) {
+		r := newRig(t, p.srv.URL)
+		r.loggedIn()
+		r.parent = map[string]string{
+			"HOME": "/home/u", "LANG": "C.UTF-8", "LC_TIME": "C", "TERM": "xterm",
+			"ANTHROPIC_API_KEY": "sk-test-key", "EDITOR": "vi",
+			"HTTPS_PROXY": "http://user:pw@corp:3128", "WARDEN_IDENTITY_TOKEN": "parent-token",
+		}
+		res := r.runExec("env", nil, "--worker", "127.0.0.1:9", "--", self, "-test.run=NONE")
+		if res.err != nil {
+			t.Fatalf("exec: %v\n%s", res.err, res.stderr)
+		}
+		for _, want := range []string{"ENV HOME=/home/u", "ENV LANG=C.UTF-8", "ENV LC_TIME=C", "ENV TERM=xterm", "ENV PATH="} {
+			if !strings.Contains(res.stdout, want) {
+				t.Errorf("child output lacks %q", want)
+			}
+		}
+		for _, gone := range []string{"ANTHROPIC_API_KEY", "EDITOR", "corp:3128", "WARDEN_IDENTITY_", "parent-token"} {
+			if strings.Contains(res.stdout, gone) {
+				t.Errorf("%s reached the child without --env", gone)
+			}
+		}
+		if !strings.Contains(res.stderr, "HTTPS_PROXY was replaced") || strings.Contains(res.stderr, "pw@corp") {
+			t.Errorf("stderr = %q, want the override warning without the old value", res.stderr)
+		}
+
+		res = r.runExec("env", nil, "--worker", "127.0.0.1:9", "--env", "ANTHROPIC_API_KEY", "--env", "NOT_SET_HERE", "--", self, "-test.run=NONE")
+		if res.err != nil {
+			t.Fatalf("exec --env: %v\n%s", res.err, res.stderr)
+		}
+		if !strings.Contains(res.stdout, "ENV ANTHROPIC_API_KEY=sk-test-key") {
+			t.Error("--env ANTHROPIC_API_KEY did not reach the child")
+		}
+		if strings.Contains(res.stdout, "EDITOR") || strings.Contains(res.stdout, "NOT_SET_HERE") {
+			t.Error("an unnamed or unset variable reached the child")
+		}
+		if !strings.Contains(res.stderr, "NOT_SET_HERE") {
+			t.Errorf("stderr = %q, want a warning for the unset --env NOT_SET_HERE", res.stderr)
+		}
+	})
+
+	t.Run("--env refuses proxy, identity and invalid names before any child starts", func(t *testing.T) {
+		r := newRig(t, p.srv.URL)
+		r.loggedIn()
+		r.parent = map[string]string{"HTTPS_PROXY": "http://x", "WARDEN_IDENTITY_TOKEN": "parent-token"}
+		marker := filepath.Join(t.TempDir(), "started")
+		for _, name := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "ALL_PROXY", "NO_PROXY", "WARDEN_IDENTITY_TOKEN", "warden_identity_cache_dir", "KEY=value", "1BAD", ""} {
+			res := r.runExec("env", nil, "--worker", "127.0.0.1:9", "--env", name, "--", "touch", marker)
+			if res.err == nil || !strings.Contains(res.err.Error(), "--env") {
+				t.Errorf("--env %q: err = %v", name, res.err)
+			}
+		}
+		if _, err := os.Stat(marker); err == nil {
+			t.Error("the child started")
 		}
 	})
 
