@@ -52,7 +52,9 @@ a worker. There are exactly three calls:
    changes**, or **304** at the timeout; the worker re-polls immediately. Policy
    edits reach workers in ~one round-trip, not after a fixed interval.
 2. **Heartbeat** — `POST /control/heartbeat` (~every 10s) so the CP lists the
-   worker as online even when idle, and knows its current policy version.
+   worker as online even when idle, and knows its current policy version and the
+   capabilities it advertises (`caps`, e.g. `blocklist/v1`), so the console can flag
+   workers that would silently ignore newer policy fields.
 3. **Analytics** — `POST /central/ingest` (worker → CP).
 
 The dashboard shows only what the CP already has (pushed analytics + the
