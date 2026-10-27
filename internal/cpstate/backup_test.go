@@ -161,3 +161,17 @@ func TestBackupTo_Mode(t *testing.T) {
 		t.Fatalf("mode = %v, want 0600", fi.Mode().Perm())
 	}
 }
+
+func TestSchemaVersion_CountsAppliedMigrations(t *testing.T) {
+	ctx := context.Background()
+	path := dbPath(t)
+	d := openT(t, path, mig1)
+	if v, err := d.SchemaVersion(ctx); err != nil || v != 1 {
+		t.Fatalf("SchemaVersion = %d, %v; want 1", v, err)
+	}
+	_ = d.Close()
+	d = openT(t, path, mig1, mig2)
+	if v, err := d.SchemaVersion(ctx); err != nil || v != 2 {
+		t.Fatalf("SchemaVersion after a second migration = %d, %v; want 2", v, err)
+	}
+}
