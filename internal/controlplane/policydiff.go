@@ -64,15 +64,8 @@ type PathChange struct {
 
 // credentialPaths are the settings paths (relative to "settings") that hold a
 // credential. In a redacted doc they carry only a fingerprint (see
-// isCredentialFingerprint), and DiffDocs refuses a doc where they do not.
+// isRedactedCredential), and DiffDocs refuses a doc where they do not.
 var credentialPaths = [][]string{{"secrets", "secretAccessKey"}}
-
-// credentialFingerprintPrefix and credentialFingerprintHexLen describe the
-// redacted form of a credential, sha256:<16 lowercase hex> (W-P1-PVER-01).
-const (
-	credentialFingerprintPrefix = "sha256:"
-	credentialFingerprintHexLen = 16
-)
 
 // DiffDocs returns the structural diff from a (older) to b (newer). Both docs
 // must be redacted: a non-fingerprint value at a credential path in either doc
@@ -232,7 +225,7 @@ func checkRedacted(which string, tree map[string]any) error {
 		if !ok {
 			continue
 		}
-		if s, isStr := v.(string); isStr && isCredentialFingerprint(s) {
+		if s, isStr := v.(string); isStr && isRedactedCredential(s) {
 			continue
 		}
 		return fmt.Errorf("policy diff: settings.%s in doc %s is not a credential fingerprint; only redacted docs can be diffed",
@@ -253,21 +246,6 @@ func lookupPath(tree map[string]any, path []string) (any, bool) {
 		}
 	}
 	return cur, true
-}
-
-// isCredentialFingerprint reports whether s is the redacted form of a
-// credential: "sha256:" followed by exactly 16 lowercase hex characters.
-func isCredentialFingerprint(s string) bool {
-	hex, ok := strings.CutPrefix(s, credentialFingerprintPrefix)
-	if !ok || len(hex) != credentialFingerprintHexLen {
-		return false
-	}
-	for _, c := range hex {
-		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
-			return false
-		}
-	}
-	return true
 }
 
 // walkSettings compares two JSON objects key by key, recursing into nested

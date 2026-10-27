@@ -99,6 +99,7 @@ the change — no restart.
 # Control plane (HTTPS, minted from the proxy CA):
 warden control-plane --config configs/config.control-plane.yaml \
   --listen 0.0.0.0:7070 --token-env WARDEN_CP_TOKEN \
+  --admin-token-env WARDEN_CP_ADMIN_TOKEN \
   --ca-cert certs/proxy-ca.crt --ca-key certs/proxy-ca.key --tls-host control-plane
 
 # Worker pointed at it (configs/config.worker.yaml sets controlPlane + central):
@@ -173,22 +174,42 @@ This is the `console.auth: none` mode (the default). Dashboard reads are open;
 every state-changing call under `/dashboard/api/` (`PUT`, `POST`, `PATCH`,
 `DELETE`: policy, settings, integrations, detection, LLM providers, the secret
 store, and the query and audit-verify `POST`s) is gated by the control-plane
-admin bearer, `Authorization: Bearer <control-plane token>`, checked in constant
-time and fail closed. Until a separate admin token exists, that bearer is the
-`--token-env` token. `/central/secrets` takes the same bearer in this mode. In
+admin bearer, `Authorization: Bearer <control-plane admin token>`, checked in
+constant time and fail closed. `/central/secrets` (GET, POST and
+`DELETE /central/secrets/{key}`) takes the same bearer in this mode. In
 `console.auth: oidc` none of this applies: sessions and CSRF replace the bearer
 on every human route (see [Migrating from none to oidc](#migrating-from-none-to-oidc)).
 
+- **The admin token.** Start the control plane with `--admin-token-env <ENV>`
+  (for example `--admin-token-env WARDEN_CP_ADMIN_TOKEN`) naming the env var that
+  holds its own admin bearer. It is separate from the `--token-env` token workers
+  present: once it is set, the worker token gets `401` on dashboard writes and on
+  `/central/secrets`, and the admin token gets `401` on the worker routes
+  (`/policy`, `/control/heartbeat`, `/central/ingest`). Use different values; the
+  control plane warns at startup when the two are equal. Scripts that write with
+  `curl -H "Authorization: Bearer ..."` must send the admin token once it is set.
+  Giving the control plane its own admin token means retiring the shared worker
+  token (per-worker tokens) never disables dashboard writes.
+- **Fallback.** Without `--admin-token-env`, the admin bearer is the shared
+  `--token-env` token, exactly as before, and startup logs one warning:
+  `dashboard writes use the shared worker token; set --admin-token-env`. With no
+  token of either kind, `/central/secrets` keeps the development pass-through of
+  the worker routes, and dashboard writes are refused (below).
 - **Visible.** At startup the control plane logs one warning,
   `console.auth=none: dashboard reads are unauthenticated; writes need the admin bearer`,
   `GET /dashboard/api/setup` returns `"authMode":"none"`, and the dashboard shows a
   persistent "Open console" banner. Start the control plane with
   `--require-console-auth` to make none mode a startup error instead.
 
-- **Fail closed.** A control plane started without a token (`--token-env` unset
-  or the variable empty) refuses every dashboard write with `403` and a message
-  saying how to configure the token. There is no open mode for dashboard writes.
-  A whitespace-only token counts as not configured. The worker-facing endpoints
+- **Fail closed.** A control plane started with no admin bearer (neither
+  `--admin-token-env` nor `--token-env`, or their variables empty) refuses every
+  dashboard write with `403` and a message (`dashboard writes are disabled`) that
+  names `--admin-token-env`. There is no open mode for dashboard writes. A
+  whitespace-only token counts as not configured. When `--admin-token-env` names
+  an empty variable the control plane logs
+  `control-plane: admin-token-env set but empty; dashboard writes will be refused`
+  and does not fall back to the worker token: dashboard writes get `403` and
+  `/central/secrets` gets `401`. No token value is ever logged. The worker-facing endpoints
   (`/central/ingest`, `/control/heartbeat`) keep the existing development
   pass-through when no token is set; the loopback publish of `:7070` in the demo
   compose files is what bounds that.
@@ -205,9 +226,17 @@ on every human route (see [Migrating from none to oidc](#migrating-from-none-to-
 
 ```sh
 curl --cacert proxy-ca.crt -X PUT https://localhost:7070/dashboard/api/policy \
-  -H "Authorization: Bearer $WARDEN_CP_TOKEN" -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $WARDEN_CP_ADMIN_TOKEN" -H 'Content-Type: application/json' \
   -d '{"allowlist":[{"domain":"api.openai.com"}],"denylist":[]}'
+
+# Secret writes take the same admin bearer:
+curl --cacert proxy-ca.crt -X POST https://localhost:7070/central/secrets \
+  -H "Authorization: Bearer $WARDEN_CP_ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"key":"openai","value":"..."}'
 ```
+
+Without `--admin-token-env` (the fallback), use `$WARDEN_CP_TOKEN` in these
+examples instead.
 
 A worker's own admin dashboard (its local `:9090`) is a separate listener with its
 own token, not this one: see [Worker admin token](#worker-admin-token).
@@ -230,6 +259,7 @@ needs a restart. It holds the *name* of the client-secret env var, never the sec
 | `roles.admin`, `roles.editor`, `roles.viewer` | none | IdP group names, matched exactly and case-sensitively; the highest matching role wins. `roles.admin` needs at least one group. |
 | `session.idle`, `session.absolute` | `1h`, `12h` | `0 < idle <= absolute <= 168h`. |
 | `adminAudit.enabled` | `false` | Turns on the signed admin audit log; needs `--state-dir`. See [Admin audit log](#admin-audit-log). |
+| `trustedProxies` | none | CIDRs of reverse proxies in front of the control plane. Only a peer inside one may set the client address the admin audit log records, through `X-Forwarded-For`. A bare address or anything that is not a CIDR is a startup error. |
 
 In `oidc` mode the control plane also needs a non-empty value in the client-secret env
 var and `--state-dir`; without either it refuses to start. See
@@ -239,7 +269,7 @@ In `oidc` mode every human route needs a session: each `/dashboard/*` route need
 least the viewer role, writes need the CSRF header, and `/central/secrets` (GET, POST
 and `DELETE /central/secrets/{key}`) needs an admin session plus CSRF. An
 `Authorization` header is ignored on those routes, so neither the shared
-`--token-env` token nor any other bearer opens them (401 without a session, 403 for a
+`--token-env` token, the `--admin-token-env` token nor any other bearer opens them (401 without a session, 403 for a
 role below admin). The worker routes (`/policy`, `/control/heartbeat`,
 `/central/ingest`) keep the shared bearer in both modes.
 
@@ -284,10 +314,55 @@ reads each segment's public key from the chain. The flag must equal the loaded k
 so leaving it set can never rotate twice. The flag without
 `console.adminAudit.enabled` is a startup error. Automatic rotation is W-P2-KEYS-06.
 
+**What is recorded.** With the log on, every admin change made through the control
+plane writes one row: dashboard policy, settings, detection, integrations and
+llmproviders writes, `/dashboard/api/secretstore` POST and DELETE, `/central/secrets`
+POST, `DELETE /central/secrets/{key}` and the admin session revoke
+(`DELETE /dashboard/api/sessions`). Which routes count comes from the authz route
+table (`Audited`), not from the HTTP method, so worker heartbeats, ingest, `/policy`
+and the read-only POSTs (`/dashboard/api/query`, `query/generate`, `audit/verify`)
+never write a row. Each row carries:
+
+- the actor: the session's subject, role and `auth_method` (`oidc` or `breakglass`),
+  or, in `console.auth: none`, actor `cp-admin-token` with role `admin` and
+  `auth_method` `bearer` for a write that presented the `--admin-token-env` bearer.
+  A request with neither a session nor that bearer writes no row (it is counted and
+  logged as `admin_audit_unauthenticated`, at most once a minute per client address).
+  The one exception is a development control plane with no token configured at all,
+  where `/central/secrets` accepts anonymous writes: a successful anonymous change is
+  recorded with `auth_method` `none`; a failed or refused one still writes no row.
+- the outcome: `ok` (2xx/3xx), `denied` (401/403, including a CSRF refusal, for an
+  authenticated actor), `rejected` (other 4xx) or `error` (5xx), and the HTTP status.
+- `before_hash` and `after_hash`: HMAC-SHA256 of the target's state with the
+  CP-local HMAC key, so low-entropy config cannot be guessed from a hash. A denied
+  write has equal hashes. Secret stores keep their state outside Warden, so secrets
+  rows have empty hashes and name the key (`target_ref` `secret:<key>`, `op` put or
+  delete); a policy write names the version written (`policy@<etag>`). No secret
+  value, bearer or body is ever in a row.
+- `request_id` (a valid incoming `X-Request-Id` of up to 64 `[A-Za-z0-9-]`
+  characters, or a new one; echoed in the response) and `client_ip` (the peer
+  address, or the left-most valid `X-Forwarded-For` address when the peer is in
+  `console.trustedProxies`).
+
+Audited changes run one at a time behind a control-plane-wide lock, so the hashes
+describe exactly that change; a change that waits more than 30 s answers 503
+`admin_audit_busy`. If a row cannot be appended after a change succeeded, the entry
+is logged at ERROR with `persist_failed=true`, an `admin_audit_degraded` alert is
+raised, and further audited changes answer 503 `{"error":"admin_audit_unavailable"}`
+before they run, until the database accepts writes again. Reads, `/policy`, ingest
+and heartbeats never depend on the audit log.
+
 Offline CLIs that change admin state record through the same chain with
 `adminaudit.OpenForCLI`: actor `cli:<os user>`, auth_method `cli`, the same key
 check, and never a new key while rows exist. On a state dir where audit was never
 enabled they skip the record with a notice.
+
+**Hand edits of the served YAML.** In the default file policy-store mode, when the
+3-second re-read finds served-config bytes that no control-plane writer produced,
+the control plane still serves them and appends one `config.external_change` row
+(auth_method `system`, target `policy`, before `file:<old sha256>`, after
+`file:<new sha256>`), once per distinct file hash; the row and its log line carry
+only the two hashes, never the file's content or path.
 
 #### Anchoring the audit chain
 
@@ -327,10 +402,10 @@ log line that fails to write never fails or rolls back the admin change itself.
 4. Verify: the startup log no longer carries the `console.auth=none` warning; opening
    `/dashboard/` redirects to the IdP; after sign-in a viewer can read every tab but
    gets 403 on a policy change, and an admin can edit integrations, LLM providers and
-   secrets. A request with only `Authorization: Bearer $WARDEN_CP_TOKEN` gets 401 on
+   secrets. A request with only a bearer (`$WARDEN_CP_TOKEN` or `$WARDEN_CP_ADMIN_TOKEN`) gets 401 on
    `/dashboard/api/*` and `/central/secrets`, while workers keep pulling `/policy`.
 
-Scripts that call `/central/secrets` with the shared bearer stop working in oidc
+Scripts that call `/central/secrets` with the admin (or shared) bearer stop working in oidc
 mode: secret writes then need an admin session plus CSRF, so they go through the
 admin's secret store tab in the dashboard until scoped API keys exist. Scripts that
 write `/dashboard/api/*` with the bearer stop working for the same reason.
@@ -432,6 +507,10 @@ fails when the two differ.
 | `/dashboard/api/policy` | GET | viewer | `policy.read` |
 | `/dashboard/api/policy` | POST | editor | `policy.write` |
 | `/dashboard/api/policy` | PUT | editor | `policy.write` |
+| `/dashboard/api/policy/versions` | GET | viewer | `policy.versions.read` |
+| `/dashboard/api/policy/versions/{v}` | GET | viewer | `policy.version.read` |
+| `/dashboard/api/policy/versions/{v}/diff` | GET | viewer | `policy.diff` |
+| `/dashboard/api/policy/versions/{v}/rollback` | POST | editor | `policy.rollback` |
 | `/dashboard/api/query` | POST | viewer | `query.run` |
 | `/dashboard/api/query/generate` | POST | editor | `query.generate` |
 | `/dashboard/api/query/schema` | GET | viewer | `query.schema` |
@@ -459,48 +538,185 @@ Settings writes (`POST`/`PUT /dashboard/api/settings`) are then checked per chan
 `POST /dashboard/api/query/generate` is limited to 10 calls a minute per console session (`429` past it).
 <!-- authz-matrix:end -->
 
-## Versioned policy store (`--policy-store`)
+## Policy history (`--policy-store`)
 
-`--policy-store=file|versioned` picks where the policy served on `/policy` comes
-from. `file` (the default) serves the served config YAML, exactly as before.
-`versioned` serves the head of an append-only version history in
-`<state-dir>/warden-cp.db` and requires `--state-dir`; without it, or with any
-other value, the control plane refuses to start.
+The allow/deny policy and the distributed settings can live in an append-only
+versioned store in control-plane state instead of being edited in place in the
+served YAML. Every save creates a new version with its author and message,
+editors can diff any two versions and roll back, and workers are always served
+the head version. The feature is off by default; see the release plan at the
+end of this section.
 
-- Each version holds the allow/deny lists and the distributed settings. An AWS
-  `secretAccessKey` is never stored: a version keeps only its fingerprint
-  (`sha256:<16 hex>`), and the live value is read from the served YAML
-  `secretStore` block when `/policy` is built, so workers get the same bytes as
-  before.
-- The first versioned start on an empty store imports the served config's
-  allow/deny lists and settings as version 1 (author `system:import`, source
-  `import`, message `initial import from <served path>`). `/policy` serves the
-  same bytes and ETag before and after, so no worker sees a change. If the
-  import would change the ETag, the control plane refuses to start and leaves
-  the store empty; start with `--policy-store=file` and report it. A store that
-  already has versions is never re-imported, and two control planes racing the
-  first start import once. With `console.adminAudit.enabled` the import appends
-  one `policy.initial_import` admin audit row (target `policy`, auth_method
-  `system`, before `file:<sha256 of the served YAML>`, after
-  `v1:<doc_sha256>`); a failed append is logged at ERROR and does not stop
-  startup.
+### Turning it on
+
+`warden control-plane --policy-store=file|versioned` picks where the policy
+served on `/policy` comes from.
+
+- `file` (the default) serves the served config YAML, exactly as before. With
+  `--state-dir` the served YAML is a writable copy seeded once from `--config`
+  (`<state-dir>/config.yaml`); without `--state-dir` the dashboard keeps
+  editing `--config` in place.
+- `versioned` serves the head of the version history in
+  `<state-dir>/warden-cp.db` and requires `--state-dir`; without it, or with any
+  other flag value, the control plane refuses to start.
+
+### Version 1: the migration
+
+The first versioned start on an empty store imports the served config's
+allow/deny lists and settings as version 1 (author `system:import`, source
+`import`, message `initial import from <served path>`). `/policy` serves the
+same bytes and ETag before and after, so no worker sees a change. If the import
+would change the ETag, the control plane refuses to start and leaves the store
+empty; start with `--policy-store=file` and report it. A store that already has
+versions is never re-imported, and two control planes racing the first start
+import once. With `console.adminAudit.enabled` the import appends one
+`policy.initial_import` admin audit row (target `policy`, auth_method `system`,
+before `file:<sha256 of the served YAML>`, after `v1:<doc_sha256>`); a failed
+append is logged at ERROR and does not stop startup.
+
+### What a version holds, and what it never holds
+
+- Each version holds the allow/deny lists and the distributed settings
+  (including `llmProviders`), its parent version, the author (sub, email,
+  kind), a message, the source (`import`, `policy`, `settings`,
+  `llmproviders`, `rollback`) and the `doc_sha256` of the stored doc. Versions
+  and the publish log are append-only: SQLite triggers refuse an UPDATE or
+  DELETE.
+- **Credential values are never stored.** An AWS `secretAccessKey` is kept in a
+  version only as its fingerprint, `sha256:<16 hex>`; the live value stays in
+  the served YAML `secretStore` block and is merged in when `/policy` is built,
+  so workers get the same bytes as before. In history responses and diffs a
+  credential appears only as its fingerprint, never the value.
+- Serve-time overlay data is not stored either. The credential is the only
+  overlay today; the block list will be one when it ships. A rollback therefore
+  never restores an old credential or block list.
+- CP-local blocks (integrations, detection, `central`, `controlPlane`, ...)
+  are not versioned; their editors keep rewriting the served YAML.
+
+### Saves, authors and field ownership
+
+- Dashboard saves of the policy, the settings form and the LLM providers each
+  create a new version from the head (source `policy`, `settings` or
+  `llmproviders`). Each writer changes only the fields it owns and carries
+  every other field from the head: the policy save owns the allow/deny lists,
+  the LLM providers save owns `llmProviders`, and the settings save owns the
+  rest of the settings except `dlp` and `advisory`, which the settings form
+  does not edit and which are always carried from the head (change them with
+  `warden policy import`).
+- An edit the config loader rejects (for example an empty allowlist) returns
+  the loader error and creates no version; a save that changes nothing creates
+  none either.
+- The author is the signed-in user (sub and email, kind `oidc`),
+  `breakglass:<username>` for a break-glass session, or `anonymous` (kind
+  `none`) in `console.auth: none`, where the bearer proves possession of the
+  shared token, not an identity.
+- A settings save with an empty `secretAccessKey` keeps the live credential. A
+  new value is written to the served YAML `secretStore` block (the only place
+  the credential lives) and the version stores only its fingerprint; if the
+  version cannot be created the YAML is put back.
+
+### The version header, If-Match, 409 and 428
+
+- Policy, settings and LLM providers share one head version. Their GETs
+  (`/dashboard/api/policy`, `/dashboard/api/settings`,
+  `/dashboard/api/llmproviders`) and `GET /dashboard/api/policy/versions`
+  return it as `version` (`head` for the history list) in the body and in an
+  `X-Warden-Policy-Version: N` header; in file mode neither is present.
+  `/policy`'s content-hash ETag is unchanged.
+- In versioned mode every save must send `If-Match: "v<N>"` with the version
+  it was based on. If the head has moved since, the save returns `409
+  {"error":"policy_conflict","head":M,"author":{"sub":...,"email":...}}` (the
+  head's author, never doc content) and creates nothing, so a settings save
+  makes a concurrent policy save from the same version conflict. A missing
+  `If-Match` on a save or a rollback returns `428
+  {"error":"precondition_required"}` and a malformed one 400; neither creates a
+  version.
+- A save may also send an optional message in `X-Warden-Policy-Message`,
+  percent-encoded UTF-8 (as `encodeURIComponent` writes it), at most 512
+  characters after decoding, with control characters stripped; it is stored on
+  the new version, and a longer or badly encoded value returns 400.
+- In file mode `If-Match` and `X-Warden-Policy-Message` are ignored and saves
+  work as before.
+
+### History, diff and rollback
+
+In versioned mode the control plane serves these routes (in file mode they
+answer 404). Reads need the viewer role and a rollback the editor role (see the
+role matrix above).
+
+| Route | What it returns |
+|---|---|
+| `GET /dashboard/api/policy/versions?cursor=&limit=` | `{"head":N,"versions":[...],"next_cursor":C}`: version metadata (version, parent, created_at, author_sub, author_email, author_kind, message, source, doc_sha256), newest first, 50 per page by default and at most 200; pass `next_cursor` as `cursor` for the next page (0 = no more). |
+| `GET /dashboard/api/policy/versions/{v}` | One version's metadata and its `doc`, credential as a fingerprint. |
+| `GET /dashboard/api/policy/versions/{v}/diff?against={u}` | `{"from":u,"to":v,"diff":{"allow":[...],"deny":[...],"settings":[...]}}`: the structural diff from `u` (default: the head) to `v`, by entry and settings path, each change `added`, `removed` or `changed`. With the default it is what a rollback to `v` would change. |
+| `POST /dashboard/api/policy/versions/{v}/rollback` | Body `{"note":"..."}` (optional, at most 512 characters). Publishes version `v`'s doc as a **new** head version (source `rollback`, message `rollback to v<N>[: note]`); history is never rewritten. Returns `{"head":M,"changed":true}` and `X-Warden-Policy-Version: M`; a target equal to the head creates nothing (`changed: false`). |
+
+A rollback keeps the head's credential fingerprint (the served credential does
+not change), is revalidated with today's config loader (a target that no longer
+validates answers `422 {"error":"invalid_policy"}` and creates nothing), and
+uses the same conflict check as a save. An unknown version answers 404.
+
+The console's Guardrails → Egress tab shows a History card on these routes in
+versioned mode (hidden in file mode): versions newest first with author,
+relative time, source and message, 20 at a time with "Load more"; selecting one
+shows the server's structural diff from head to that version (added, removed
+and changed entries and settings paths with old and new values); editors and
+admins get a Roll back button that asks for confirmation naming the target
+version and an optional note. The policy, settings and LLM provider saves ask
+for an optional message and send `If-Match`; on a 409 the console says
+`policy changed by <author> (v<N>)`, takes the new head and keeps the unsaved
+edit on screen.
+
+### The served YAML: write-through mirror and drift
+
+- The served YAML is a write-through mirror of the head: after every head move
+  (a dashboard save, a rollback, or a version from another process seen by the
+  3-second check) the control plane renders the head's policy and settings
+  blocks into it, with the live credential, through the same validated atomic
+  write. So `--policy-store=file` or an older binary serves the same policy. A
+  mirror failure (for example a read-only file) is logged at ERROR with the
+  version and never fails the save.
+- A hand edit of the YAML's policy or settings blocks is drift: it is never
+  served. The 3-second check logs `served config policy block differs from
+  head; ignored` (with `file_sha256`, the hash of those blocks, and `head`) once
+  per distinct file hash, `GET /dashboard/api/policy` reports `drift: true` and
+  the Guardrails page shows a banner. With `console.adminAudit.enabled` each
+  distinct file hash appends one `config.external_change` row (before
+  `v<head>:<doc_sha256>`, after `file:<file_sha256>`); the file-mode check in
+  the admin audit section is not used. Edits to the credential or to CP-local
+  blocks are not drift. Bring an edit in with `warden policy import`; putting
+  the file back, or the next save, clears the drift.
+- The first check after a restart does not write the file: it compares the file
+  with what the head would render to, so an edit made while the control plane
+  was down shows as drift instead of being overwritten.
+- The control plane checks for a new head every 3 seconds and only re-reads a
+  version when the head moved, so a version written by another process reaches
+  workers within 3 seconds plus one long-poll cycle. The `/policy` hot path
+  never reads the database.
+- Startup fails closed: if the store cannot be read, the head points at a
+  missing version, or a version fails its `doc_sha256` check, the control plane
+  refuses to start and never falls back to the YAML. A read error at runtime
+  keeps serving the last good policy and logs a warning.
+
+### `warden policy import` and `warden policy export`
+
 - `warden policy import --state-dir <dir> --file <yaml> [--message m]
   [--admin-audit-key-file F] [--expected-head N]` stores a config YAML's
   policy, settings and llmProviders blocks as a new version, with the control
   plane running or stopped. The file is loaded strictly (an unknown key is an
   error) and checked like a dashboard write, against the file itself and
   against `<dir>/config.yaml` when it exists. A raw `secretAccessKey` is stored
-  as its fingerprint; it must match the served config's credential, because
-  the store cannot carry a new value (change the credential in the served
-  config instead). A file without the credential is refused while the served
-  config has one, so an unedited export cannot drop it. The version is authored `cli:<os user>` with source
-  `import`, and is created by compare-and-swap from the current head (or
-  `--expected-head`): a moved head exits non-zero naming the new head, and a
-  file equal to the head prints `no change` and exits 0. The state dir must
-  already hold the store (any control plane of this version started with
-  `--state-dir` creates it). When admin audit has rows in the state dir, the
-  import appends a `policy.import` row (actor `cli:<os user>`, auth_method
-  `cli`, target `policy`, before `v<head>:<doc_sha256>`, after
+  as its fingerprint; it must match the served config's credential, because the
+  store cannot carry a new value (change the credential in the served config
+  instead). A file without the credential is refused while the served config
+  has one, so an unedited export cannot drop it. The version is authored
+  `cli:<os user>` with source `import`, and is created by compare-and-swap from
+  the current head (or `--expected-head`): a moved head exits non-zero naming
+  the new head, and a file equal to the head prints `no change` and exits 0.
+  The state dir must already hold the store (any control plane of this version
+  started with `--state-dir` creates it). When admin audit has rows in the
+  state dir, the import appends a `policy.import` row (actor `cli:<os user>`,
+  auth_method `cli`, target `policy`, before `v<head>:<doc_sha256>`, after
   `v<new>:<doc_sha256>`); a missing or mismatching key file aborts before the
   version is written. Without admin audit it prints a one-line notice.
 - `warden policy export --state-dir <dir> [--version N]` opens the database
@@ -510,15 +726,58 @@ other value, the control plane refuses to start.
   fingerprints are never written: a version with an AWS credential is exported
   without `secretStore.aws.accessKeyId`/`secretAccessKey`, with a note on
   stderr; add them back before you serve or re-import the file.
-- Dashboard saves, history and rollback come in later releases.
-- The control plane checks for a new head every 3 seconds and only re-reads a
-  version when the head moved, so a version written by another process reaches
-  workers within 3 seconds plus one long-poll cycle. The `/policy` hot path
-  never reads the database.
-- Startup fails closed: if the store cannot be read, the head points at a
-  missing version, or a version fails its `doc_sha256` check, the control plane
-  refuses to start and never falls back to the YAML. A read error at runtime
-  keeps serving the last good policy and logs a warning.
+
+### Fleet policy version
+
+Every head move appends a publish-log row with the `/policy` ETag it serves. A
+served-ETag change without a new version (an overlay change, such as the
+credential edited in the served YAML, or a version recorded without the ETag
+the control plane actually serves) is appended by the control plane on its next
+refresh, with the overlay's name or `external` as the reason, and logged as
+`policy publish logged`. The fleet view maps each worker's heartbeat ETag to the newest
+version with that ETag and shows `v<N> · <etag>`
+(`policyVersion` in `GET /dashboard/api/workers`); an ETag with no row, and
+every worker in file mode, shows the bare ETag. The `behind` flag still
+compares the worker's ETag with the one served now.
+
+### What is audited
+
+With `console.adminAudit.enabled`, these policy changes append admin audit
+rows (target `policy`, before and after as `v<N>:<doc_sha256>` in versioned
+mode):
+
+- `policy.initial_import`: the version 1 migration (auth_method `system`).
+- `policy.write`: a dashboard policy save, including a rejected 409 (outcome
+  `rejected`); settings and LLM providers saves are `settings.write` and
+  `llmproviders.write`.
+- `policy.rollback`: a rollback.
+- `policy.import`: `warden policy import` (auth_method `cli`).
+- `config.external_change`: a hand edit of the served YAML (drift in versioned
+  mode, a served change in file mode; auth_method `system`).
+
+History reads and diffs are not audited. Credentials appear in history only as
+fingerprints; audit rows carry only state hashes, and exports leave the
+credential out.
+
+### Downgrade
+
+Because the served YAML mirrors the head, restarting with
+`--policy-store=file` (or an older binary) serves the same policy. Edits made
+in file mode go to the YAML only, not to the store; before switching back to
+`versioned`, bring them in with `warden policy import`, or they show as drift
+and are not served. `warden policy export` writes any version as a loadable
+YAML if the mirror is lost.
+
+### Release plan
+
+- **Release N** (the first release with policy history) ships the versioned
+  store only behind `--policy-store=versioned`; the default stays `file`.
+- **Release N+1** flips the default to `versioned`. `--policy-store=file` stays
+  as an explicit opt-out, and a control plane started without `--state-dir`
+  keeps file mode with a startup WARN.
+- **Release N+2** removes YAML as a policy source: `--policy-store=file` is
+  removed, the served YAML is only the write-through mirror of head, and hand
+  edits are never served (they come in through `warden policy import`).
 
 ## Worker admin token
 
@@ -680,7 +939,8 @@ on this build with no block stays off, so every step is safe to pause at.
 
 ## What's deliberately not here (yet)
 
-The control plane's policy source is a YAML file it re-reads per request, and the
+The control plane's policy source is a YAML file it re-reads per request (or,
+with `--policy-store=versioned`, the versioned store above), and the
 fleet analytics store is in-memory (lost on restart). A database (persistent fleet
 analytics), per-user SSO/RBAC policy editing (today one shared token), and per-agent (not just per-worker)
 slicing are future work — and because the worker↔control-plane contract is just

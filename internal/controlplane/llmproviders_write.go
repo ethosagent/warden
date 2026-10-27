@@ -11,6 +11,7 @@ package controlplane
 // + timeouts; nothing here holds, echoes, or logs a key value.
 
 import (
+	"context"
 	"fmt"
 	"os"
 
@@ -36,7 +37,14 @@ import (
 // good file — so a duplicate name, a missing required field, OR removing a provider
 // still referenced by the judge/Explore is rejected THERE, and we do not reimplement
 // that validation.
-func (s *Server) WriteLLMProviders(ps []config.LLMProvider) error {
+//
+// In versioned mode it creates a policy version instead (publishLLMProviders);
+// ctx carries the author and meta the expected head and message. File mode
+// ignores both.
+func (s *Server) WriteLLMProviders(ctx context.Context, ps []config.LLMProvider, meta dashboard.WriteMeta) error {
+	if s.versions != nil {
+		return s.publishLLMProviders(ctx, ps, meta)
+	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
