@@ -322,7 +322,11 @@ func (s *WorkerTokenStore) Create(ctx context.Context, o CreateOpts) (string, To
 		}
 		return "", Token{}, fmt.Errorf("worker tokens: insert: %w", err)
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	n, err := res.RowsAffected()
+	if err != nil {
+		return "", Token{}, fmt.Errorf("worker tokens: insert: %w", err)
+	}
+	if n == 0 {
 		return "", Token{}, ErrTooManyActive
 	}
 	if err := s.reload(ctx); err != nil {
@@ -402,7 +406,11 @@ func (s *WorkerTokenStore) Revoke(ctx context.Context, id, actor string) error {
 	if err != nil {
 		return fmt.Errorf("worker tokens: revoke: %w", err)
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("worker tokens: revoke: %w", err)
+	}
+	if n == 0 {
 		var one int
 		err := s.db.QueryRowContext(ctx, `SELECT 1 FROM worker_tokens WHERE id = ?`, id).Scan(&one)
 		if errors.Is(err, sql.ErrNoRows) {
