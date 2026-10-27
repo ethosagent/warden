@@ -2,6 +2,8 @@ package harness
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 
@@ -25,6 +27,9 @@ type AdminAuditRow struct {
 	Action     string
 	AuthMethod string
 	KeyID      string
+	Target     string
+	BeforeHash string
+	AfterHash  string
 }
 
 // AdminAuditRows reads the admin_audit table of the control plane's state
@@ -44,7 +49,7 @@ func (h *H) AdminAuditRows() []AdminAuditRow {
 		h.tb.Fatalf("harness: open the state db: %v", err)
 	}
 	defer func() { _ = db.Close() }()
-	rows, err := db.SQL().Query(`SELECT seq, action, auth_method, key_id FROM admin_audit ORDER BY seq`)
+	rows, err := db.SQL().Query(`SELECT seq, action, auth_method, key_id, target, before_hash, after_hash FROM admin_audit ORDER BY seq`)
 	if err != nil {
 		h.tb.Fatalf("harness: read admin_audit: %v", err)
 	}
@@ -52,7 +57,7 @@ func (h *H) AdminAuditRows() []AdminAuditRow {
 	var out []AdminAuditRow
 	for rows.Next() {
 		var r AdminAuditRow
-		if err := rows.Scan(&r.Seq, &r.Action, &r.AuthMethod, &r.KeyID); err != nil {
+		if err := rows.Scan(&r.Seq, &r.Action, &r.AuthMethod, &r.KeyID, &r.Target, &r.BeforeHash, &r.AfterHash); err != nil {
 			h.tb.Fatalf("harness: scan an admin_audit row: %v", err)
 		}
 		out = append(out, r)
@@ -69,4 +74,31 @@ func (h *H) AdminAuditStateFile(name string) bool {
 	h.tb.Helper()
 	_, err := os.Stat(filepath.Join(h.root, "cp-state", name))
 	return err == nil
+}
+
+// EditControlPlaneConfig rewrites the control plane's served YAML outside the
+// control plane, the way an operator's editor or a config tool would (a temp
+// file renamed into place), and returns the new content's "file:<sha256>"
+// state hash. The control plane serves it on its next re-read. With a state
+// dir the served file is the copy the control plane seeded there.
+func (h *H) EditControlPlaneConfig(edit func(string) string) string {
+	h.tb.Helper()
+	path := filepath.Join(h.root, "cp-config.yaml")
+	if h.wantAdminAudit || h.wantConsole {
+		path = filepath.Join(h.root, "cp-state", "config.yaml")
+	}
+	cur, err := os.ReadFile(path)
+	if err != nil {
+		h.tb.Fatalf("harness: read control-plane config: %v", err)
+	}
+	next := []byte(edit(string(cur)))
+	tmp := path + ".edit"
+	if err := os.WriteFile(tmp, next, 0o600); err != nil {
+		h.tb.Fatalf("harness: write control-plane config: %v", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		h.tb.Fatalf("harness: replace control-plane config: %v", err)
+	}
+	sum := sha256.Sum256(next)
+	return "file:" + hex.EncodeToString(sum[:])
 }
