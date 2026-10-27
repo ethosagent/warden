@@ -85,6 +85,8 @@ func (e *recordingEvaluator) EvaluateRequest(string, int, policy.Scheme, string,
 	return policy.RequestVerdict{}
 }
 
+func (e *recordingEvaluator) IsBlocked(string, string) bool { return false }
+
 func (e *recordingEvaluator) Replace(p config.Policy) {
 	e.mu.Lock()
 	e.replaced = append(e.replaced, p)
@@ -148,6 +150,46 @@ func TestLongPollControlPlane_DrivesReloadViaInterface(t *testing.T) {
 	if ev.replaced[0].LogLevel != want.LogLevel {
 		t.Errorf("evaluator got policy %+v, want %+v (fetched via GetPolicy)", ev.replaced[0], want)
 	}
+}
+
+// TestLongPollAppliesBlockList proves a managed worker enforces blockedUsers as
+// soon as the long-poll loop has called Replace: the real evaluator (the one the
+// proxy consults) starts blocking the fetched sub and email, and blocks nobody
+// before the first pull.
+func TestLongPollAppliesBlockList(t *testing.T) {
+	fake := &fakeControlPlaneClient{policy: config.Policy{
+		BlockedUsers: []config.BlockedUser{{Sub: "u1"}, {Email: "alice@corp.com"}},
+	}}
+	ev := policy.NewEvaluator(config.Policy{})
+	if ev.IsBlocked("u1", "alice@corp.com") {
+		t.Fatal("blocked before the first pull")
+	}
+
+	applied := make(chan struct{}, 1)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		longPollControlPlane(ctx, clock.Real(), fake, ev, 10*time.Millisecond, logger, func() { applied <- struct{}{} })
+		close(done)
+	}()
+	select {
+	case <-applied:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the policy was never applied")
+	}
+	if !ev.IsBlocked("u1", "") {
+		t.Error("sub u1 not blocked after Replace")
+	}
+	if !ev.IsBlocked("", "alice@corp.com") {
+		t.Error("email alice@corp.com not blocked after Replace")
+	}
+	if ev.IsBlocked("u2", "bob@corp.com") {
+		t.Error("an unlisted user is blocked")
+	}
+	cancel()
+	<-done
 }
 
 // TestHeartbeatControlPlane_TicksViaInterface proves the heartbeat loop pings the

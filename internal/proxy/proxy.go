@@ -239,6 +239,10 @@ type mcpModeReader interface{ Enforcing() bool }
 type PolicyEvaluator interface {
 	EvaluateRequest(domain string, port int, scheme policy.Scheme, method, path string) policy.RequestVerdict
 	Replace(p config.Policy)
+	// IsBlocked reports whether a user's claims (sub exact, email lowercase)
+	// match the admin block list. It is read from the same snapshot Replace
+	// swaps, allocates nothing and takes one read lock.
+	IsBlocked(sub, email string) bool
 }
 
 // MetricsRecorder is the consumer-side seam for the nil-safe OTel metric emitter.

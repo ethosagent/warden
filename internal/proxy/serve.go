@@ -289,6 +289,12 @@ func (p *Proxy) handleConn(conn net.Conn) {
 	// here; one with a token is bounded by identityVerifyTimeout.
 	ci := p.resolveConnIdentity(proxyAuthLines, proxyAuth)
 
+	// A blocked user is refused before the policy check, any dial and the 200,
+	// on both the TLS-terminating and the raw-tunnel path.
+	if p.connectBlocked(conn, ci, domain, port) {
+		return
+	}
+
 	// Destination-only evaluation (#371): no method/path exists yet at CONNECT,
 	// so constraints could-match here and the rate limit is peeked, not
 	// consumed. The per-request check on the terminated tunnel is authoritative

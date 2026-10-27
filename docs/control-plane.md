@@ -615,6 +615,32 @@ agents:
   the agent**: whoever holds a valid token can present it. P2 adds binding and
   bundle-distributed JWKS.
 
+### Block list enforcement
+
+A worker denies every request from a user on the block list (`policy.blockedUsers`,
+by IdP `sub` and/or email). The list lives in the worker's policy evaluator and is
+swapped with allow/deny, at boot, on every long-poll update and for standalone
+YAML. It is checked at `CONNECT` (a `403` with `{"error":"user_blocked"}` before any
+dial, TLS or raw tunnel) and again on every request (HTTP/1.1 keep-alive, h2, gRPC
+streams and WebSocket upgrades, before any policy gate, judge or secret swap). Each
+deny records reason `user_blocked` and ends the session. `sub` is an exact match;
+email is matched case-insensitively.
+
+Matching uses the claims of any token the worker parsed, verified or not (valid,
+expired, bad signature): a match can only deny. Gaps:
+
+- A request that carries **no token** is anonymous in attribute mode and is not
+  matched (P2 require mode closes this).
+- With `identity` mode off the worker parses no token, so there are no claims to
+  match: the block list needs attribute mode.
+- In transparent mode there is no `CONNECT` and no `Proxy-Authorization`, so the
+  `CONNECT` check cannot run; only requests carrying `X-Warden-Identity` on
+  terminated traffic are matched.
+- Every policy update also resets rate-limit windows, so each block or unblock
+  resets them on every worker.
+- Sessions that are already open are cut at their next request; closing idle
+  tunnels, h2 connections and WebSockets at once is a separate ticket.
+
 ### Deployment and rollout
 
 Workers need egress to the issuer. `deploy/k8s/networkpolicy.yaml` carries an
