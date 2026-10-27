@@ -21,7 +21,7 @@ not parse against the real CLI.
 
 Related: the reference identity provider is Dex
 ([`deploy/compose/dex/README.md`](../deploy/compose/dex/README.md), and the
-operator guide `docs/identity-dex.md` once it lands), and the recipes index
+operator guide [`docs/identity-dex.md`](identity-dex.md)), and the recipes index
 [`docs/recipes/README.md`](recipes/README.md#per-user-identity).
 
 ## Token
