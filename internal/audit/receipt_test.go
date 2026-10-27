@@ -209,3 +209,49 @@ func TestReceiptIdentityFields(t *testing.T) {
 		t.Fatal("tampered identity still verifies")
 	}
 }
+
+func TestSignBytesRoundTrip(t *testing.T) {
+	signer, err := NewSigner()
+	if err != nil {
+		t.Fatalf("NewSigner: %v", err)
+	}
+	msg := []byte("entry hash bytes")
+	sig := signer.SignBytes(msg)
+	if !VerifyBytes(signer.PubKey(), msg, sig) {
+		t.Fatal("VerifyBytes rejected a valid signature")
+	}
+	if VerifyBytes(signer.PubKey(), []byte("other"), sig) {
+		t.Fatal("VerifyBytes accepted a signature over different bytes")
+	}
+	other, _ := NewSigner()
+	if VerifyBytes(other.PubKey(), msg, sig) {
+		t.Fatal("VerifyBytes accepted a signature under the wrong key")
+	}
+	if VerifyBytes(ed25519.PublicKey{1, 2, 3}, msg, sig) {
+		t.Fatal("VerifyBytes accepted a short public key")
+	}
+	// Domain separation: SignBytes does not sign the bare message.
+	if ed25519.Verify(signer.PubKey(), msg, sig) {
+		t.Fatal("SignBytes signature verifies without the domain prefix")
+	}
+}
+
+// TestVerifyBytesRejectsReceiptSignature pins the domain separation in the
+// other direction: a receipt signature produced by Sign(event) over some bytes
+// never verifies as a SignBytes signature over the same bytes.
+func TestVerifyBytesRejectsReceiptSignature(t *testing.T) {
+	signer, err := NewSigner()
+	if err != nil {
+		t.Fatalf("NewSigner: %v", err)
+	}
+	receipt, err := signer.Sign(sampleEvent())
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	if !Verify(receipt, signer.PubKey()) {
+		t.Fatal("receipt does not verify")
+	}
+	if VerifyBytes(signer.PubKey(), receipt.EventJSON, receipt.Signature) {
+		t.Fatal("receipt signature verified as a SignBytes signature")
+	}
+}
