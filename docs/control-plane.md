@@ -955,7 +955,9 @@ that the new list matches is **cut when the change is applied**, not drained:
   and the close interrupts active streams, not only new ones;
 - an idle HTTP/1 keep-alive connection is closed without another request;
 - an HTTP/1 connection that is mid-request finishes that request, delivers its
-  full response, and is then closed.
+  full response, and is then closed. An HTTP/1 streaming response (for example
+  SSE) that began before the block runs to its end; the same stream over h2, a
+  tunnel or a WebSocket is cut at once.
 
 After each applied policy change the worker closes the matching sessions and
 writes **one** `user_blocked` deny event per closed session (its protocol, domain

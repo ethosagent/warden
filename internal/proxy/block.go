@@ -48,6 +48,7 @@ func (p *Proxy) blockStage(s *requestScope) (endSession bool) {
 		// carried, so a later block can cut it (an anonymous request binds nothing).
 		s.sess.bind(s.ci)
 		s.sess.bind(connIdentity{Claims: s.idClaims, Status: s.idStatus})
+		// idHeaderClaims is only ever set from a header that verified valid.
 		s.sess.bind(connIdentity{Claims: s.idHeaderClaims, Status: identity.StatusValid})
 		return false
 	}
