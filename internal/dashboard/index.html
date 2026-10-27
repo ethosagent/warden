@@ -67,6 +67,21 @@
   .scope-menu div:hover { background:var(--surface-2); color:var(--text); }
   .scope-menu div.sel { color:var(--teal); }
 
+  /* ---------- role-aware chrome (console.auth oidc) ----------
+     A control whose data-min-role (viewer, editor or admin) is above the signed-in role is
+     hidden. <html data-role> is set only by applyRole after GET /auth/me succeeded, so in
+     none mode (404) or when /auth/me fails nothing is hidden. Pure CSS, so controls rendered
+     later (innerHTML) are covered too, and !important beats the inline display the tabs set.
+     Cosmetic only: the server enforces every route and settings field. */
+  html[data-role="none"] [data-min-role],
+  html[data-role="viewer"] [data-min-role="editor"],
+  html[data-role="viewer"] [data-min-role="admin"],
+  html[data-role="editor"] [data-min-role="admin"] { display:none !important; }
+  .whoami { display:flex; align-items:center; gap:8px; font-size:12.5px; color:var(--muted); }
+  .whoami .who { color:var(--text); max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .whoami .role { font-size:11px; font-weight:600; letter-spacing:.4px; text-transform:uppercase; padding:2px 8px;
+    border-radius:999px; border:1px solid var(--border); background:var(--surface); }
+
   /* ---------- Sidebar nav ---------- */
   .nav-group-label { color:var(--muted); font-size:10.5px; font-weight:700; letter-spacing:.8px; text-transform:uppercase;
     padding:14px 12px 6px; }
@@ -424,6 +439,12 @@
     <div class="scope" id="scope" style="display:none">
       <button class="scope-btn" id="scopeBtn"><span class="dot"></span><span id="scopeLabel">Fleet</span> ▾</button>
       <div class="scope-menu" id="scopeMenu"></div>
+    </div>
+
+    <div class="whoami" id="whoami" style="display:none">
+      <span class="who" id="whoamiEmail"></span>
+      <span class="role" id="whoamiRole"></span>
+      <button class="btn sm" id="logoutBtn" onclick="logout()">Log out</button>
     </div>
   </header>
 
@@ -817,7 +838,7 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
           <div class="desc">Set a secret here → stored in the secret store → workers fetch it directly. Warden injects the real value at the edge; the agent only ever sees the placeholder.</div>
         </div>
         <div class="actions">
-          <button class="btn primary" id="secretAddBtn" onclick="toggleSecretForm()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>Add secret</button>
+          <button data-min-role="admin" class="btn primary" id="secretAddBtn" onclick="toggleSecretForm()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>Add secret</button>
         </div>
       </div>
 
@@ -825,7 +846,7 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
         <div class="form-row" style="grid-template-columns:1fr 1fr 150px">
           <div class="field"><label>Key (placeholder)</label><input id="secretKeyInput" type="text" placeholder="{{NEW_SECRET}}"/></div>
           <div class="field"><label>Value (write-only)</label><input id="secretValueInput" type="password" placeholder="paste secret value" autocomplete="new-password"/></div>
-          <div class="field" style="justify-content:flex-end"><button class="btn primary sm" onclick="saveSecret()">Save secret</button></div>
+          <div class="field" style="justify-content:flex-end"><button data-min-role="admin" class="btn primary sm" onclick="saveSecret()">Save secret</button></div>
         </div>
         <div style="display:flex; gap:9px; margin-top:6px; align-items:center">
           <button class="btn sm" onclick="toggleSecretForm()">Cancel</button>
@@ -885,14 +906,14 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
           <div class="card collapse-card open" id="egressAllowCard">
             <div class="card-head clickable" onclick="toggleCollapse('egressAllowCard','warden.egAllowOpen')">
               <h3><span class="pill p-allow" style="margin-right:6px">allow</span>Allowlist</h3>
-              <span style="display:flex;align-items:center;gap:8px"><button class="btn sm" id="allowAddBtn" onclick="event.stopPropagation();addPolicyEntry('allow')">+ Add domain</button><span class="caret">▾</span></span>
+              <span style="display:flex;align-items:center;gap:8px"><button data-min-role="editor" class="btn sm" id="allowAddBtn" onclick="event.stopPropagation();addPolicyEntry('allow')">+ Add domain</button><span class="caret">▾</span></span>
             </div>
             <div class="collapse-body"><table><tbody id="allowList"></tbody></table></div>
           </div>
           <div class="card collapse-card open" id="egressDenyCard">
             <div class="card-head clickable" onclick="toggleCollapse('egressDenyCard','warden.egDenyOpen')">
               <h3><span class="pill p-deny" style="margin-right:6px">deny</span>Denylist</h3>
-              <span style="display:flex;align-items:center;gap:8px"><button class="btn sm" id="denyAddBtn" onclick="event.stopPropagation();addPolicyEntry('deny')">+ Add domain</button><span class="caret">▾</span></span>
+              <span style="display:flex;align-items:center;gap:8px"><button data-min-role="editor" class="btn sm" id="denyAddBtn" onclick="event.stopPropagation();addPolicyEntry('deny')">+ Add domain</button><span class="caret">▾</span></span>
             </div>
             <div class="collapse-body"><table><tbody id="denyList"></tbody></table></div>
           </div>
@@ -925,8 +946,8 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
             <div style="display:flex; gap:10px; align-items:center">
               <label class="note" style="display:flex; gap:6px; align-items:center">Mode
                 <select id="dlpMode" class="btn sm"><option value="off">off</option><option value="monitor">monitor</option><option value="enforce">enforce</option></select></label>
-              <button class="btn sm" id="dlpAddRuleBtn" onclick="addDlpRule()">+ Add rule</button>
-              <button class="btn primary sm" id="dlpSaveBtn" onclick="saveDLP()">Save DLP</button>
+              <button data-min-role="editor" class="btn sm" id="dlpAddRuleBtn" onclick="addDlpRule()">+ Add rule</button>
+              <button data-min-role="editor" class="btn primary sm" id="dlpSaveBtn" onclick="saveDLP()">Save DLP</button>
             </div>
           </div>
           <div class="card-pad">
@@ -944,7 +965,7 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
       <div class="subpage" id="sub-judge">
         <div class="grid g2">
           <div class="card">
-            <div class="card-head"><h3>LLM judge configuration</h3><button class="btn primary sm" id="judgeSaveBtn" onclick="saveJudge()">Save judge</button></div>
+            <div class="card-head"><h3>LLM judge configuration</h3><button data-min-role="admin" class="btn primary sm" id="judgeSaveBtn" onclick="saveJudge()">Save judge</button></div>
             <div class="card-pad" id="judgeConfig"></div>
           </div>
           <div class="card">
@@ -967,7 +988,7 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
         <div class="card-head clickable" onclick="toggleCollapse('mcpPolicyCard','warden.mcpPolicyOpen')">
           <h3>MCP policy</h3>
           <span style="display:flex;align-items:center;gap:8px">
-            <button class="btn primary sm" id="mcpSaveBtn" onclick="event.stopPropagation();saveMCP()">Save MCP</button>
+            <button data-min-role="admin" class="btn primary sm" id="mcpSaveBtn" onclick="event.stopPropagation();saveMCP()">Save MCP</button>
             <span class="caret">▸</span>
           </span>
         </div>
@@ -1119,11 +1140,11 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
         <div class="card-pad">
           <div style="display:flex; gap:10px">
             <input type="text" id="nlInput" value="which domains had the most blocked egress this week?" style="flex:1; background:var(--surface-2); border:1px solid var(--border); color:var(--text); padding:9px 12px; border-radius:9px; font:inherit;"/>
-            <button class="btn primary" id="nlGenBtn">Generate SQL →</button>
+            <button data-min-role="editor" class="btn primary" id="nlGenBtn">Generate SQL →</button>
           </div>
           <div style="display:flex; align-items:center; gap:8px; margin-top:10px; flex-wrap:wrap">
             <span class="muted" style="font-size:12px">Provider</span>
-            <select class="btn" id="exploreProvider" onchange="saveExploreProvider()" style="display:none"></select>
+            <select data-min-role="admin" class="btn" id="exploreProvider" onchange="saveExploreProvider()" style="display:none"></select>
             <span class="note" id="exploreProviderNote" style="font-size:12px"></span>
           </div>
           <div class="note" style="margin-top:8px">Your configured LLM writes SQL into the editor below — review it, then Run.</div>
@@ -1175,7 +1196,7 @@ LIMIT 8;</textarea>
               <input type="number" id="rt-cache-ttl" placeholder="3600" min="0"/></div>
             <div style="display:flex; align-items:center; justify-content:space-between; padding:8px 0; border-top:1px solid var(--border)">
               <div><b>OpenTelemetry export</b><div class="note">Emit traces + metrics to a collector (applies on worker restart)</div></div>
-              <label class="switch"><input type="checkbox" id="rt-otel"><span class="sl"></span></label>
+              <label class="switch" id="rt-otel-switch" data-min-role="admin"><input type="checkbox" id="rt-otel"><span class="sl"></span></label>
             </div>
             <div style="display:flex; align-items:center; justify-content:space-between; padding:8px 0; border-top:1px solid var(--border)">
               <div><b>Compliance tagging</b><div class="note">Tag events with OWASP/MITRE control IDs (bodies never persisted)</div></div>
@@ -1183,7 +1204,7 @@ LIMIT 8;</textarea>
             </div>
             <div class="kv" style="border-top:1px solid var(--border); padding-top:10px"><span class="k">Egress policy</span><span id="rt-policy" class="muted">—</span></div>
             <div id="rt-editcontrols" style="margin-top:12px; display:none">
-              <button class="btn primary sm" id="rt-save">Save runtime settings</button>
+              <button data-min-role="editor" class="btn primary sm" id="rt-save">Save runtime settings</button>
               <button class="btn sm" id="rt-reset">Reset</button>
             </div>
             <div id="rt-readonly" class="note" style="margin-top:10px; display:none">Read-only — runtime settings are managed by the control plane.</div>
@@ -1194,7 +1215,7 @@ LIMIT 8;</textarea>
           <div class="card-head"><h3>Integrations</h3><span class="sub" id="integrations-status"></span></div>
           <div class="card-pad">
             <div id="integrations-list"></div>
-            <button class="btn primary sm" id="integrations-addbtn" style="display:none; margin-top:12px">+ Add integration</button>
+            <button data-min-role="admin" class="btn primary sm" id="integrations-addbtn" style="display:none; margin-top:12px">+ Add integration</button>
             <div id="integrations-readonly" class="note" style="display:none; margin-top:10px">Managed by control plane — integrations are read-only on this node.</div>
             <div id="integrations-form" style="display:none; margin-top:12px"></div>
           </div>
@@ -1220,7 +1241,7 @@ LIMIT 8;</textarea>
           <div id="sb-help" class="note"></div>
           <div class="note" style="margin-top:8px">Workers adopt the selected backend on their next policy poll. The <b>control plane's own store</b> (backing the Secrets page) adopts a new backend on restart.</div>
           <div id="sb-editcontrols" style="margin-top:12px; display:none">
-            <button class="btn primary sm" id="sb-save" onclick="saveSettings('sb-save','sb-status')">Save secret backend</button>
+            <button data-min-role="admin" class="btn primary sm" id="sb-save" onclick="saveSettings('sb-save','sb-status')">Save secret backend</button>
             <span id="sb-status" class="sub" style="margin-left:8px"></span>
           </div>
           <div id="sb-readonly" class="note" style="margin-top:10px; display:none">Read-only — the secret backend is managed by the control plane.</div>
@@ -1228,7 +1249,7 @@ LIMIT 8;</textarea>
       </div>
 
       <div class="card" style="margin-bottom:16px">
-        <div class="card-head"><h3>LLM Providers</h3><span style="display:flex;align-items:center;gap:8px"><span class="sub" id="llmp-status"></span><button class="btn primary sm" id="llmp-addbtn" style="display:none" onclick="addLLMProvider()">+ Add provider</button><button class="btn primary sm" id="llmp-savebtn" style="display:none" onclick="saveLLMProviders()">Save providers</button></span></div>
+        <div class="card-head"><h3>LLM Providers</h3><span style="display:flex;align-items:center;gap:8px"><span class="sub" id="llmp-status"></span><button data-min-role="admin" class="btn primary sm" id="llmp-addbtn" style="display:none" onclick="addLLMProvider()">+ Add provider</button><button data-min-role="admin" class="btn primary sm" id="llmp-savebtn" style="display:none" onclick="saveLLMProviders()">Save providers</button></span></div>
         <div class="card-pad">
           <div class="note" style="margin-bottom:10px">A shared registry of LLM endpoints. The Judge and Explore each pick a provider <b>by name</b>. <b>apiKeyEnv</b> is the env-var NAME only — the value resolves from each node's own environment and is never entered or shown here.</div>
           <div id="llmp-list"></div>
@@ -1271,12 +1292,62 @@ function relTime(iso){
   const d=Math.round(h/24); return d+"d ago";
 }
 function hhmmss(iso){ if(!iso) return "—"; const d=new Date(iso); if(isNaN(d.getTime())) return "—"; return d.toTimeString().slice(0,8); }
-async function jget(url){ const r=await fetch(url); if(!r.ok) throw new Error("status "+r.status); return r.json(); }
+/* api:begin */
+/* ---------- api(method, url, body): the one fetch wrapper; nothing else calls fetch() ----------
+   GET /auth/me (once, cached) decides how this page authenticates:
+   - 200: console.auth oidc with a live session. The response's csrf is sent as X-Warden-CSRF on
+     every state-changing request; a 401 sends the browser to /auth/login?next=<this page>.
+   - 401: oidc, but not signed in: go to /auth/login.
+   - 404: console.auth none (or a worker dashboard). Writes take the bearer path, authFetch.
+   - anything else (network error, 5xx): no CSRF, no prompt; requests go out as they are.
+   body is JSON-encoded unless it is already a string; either way it is sent as application/json.
+   The returned Response is fetch()'s, so callers check r.ok / r.status and read r.json(). */
+const SAFE_METHODS={GET:1,HEAD:1,OPTIONS:1};
+let authMode='';     // 'oidc' | 'none' | 'unknown', set by authInit
+let csrfToken='';
+let me=null;         // the /auth/me body in oidc mode: {sub,email,role,authMethod,csrf,expiresAt}
+let authReady=null;
+function loginRedirect(){
+  location.assign('/auth/login?next='+encodeURIComponent(location.pathname+location.search+location.hash));
+}
+function authInit(){
+  if(authReady) return authReady;
+  authReady=(async()=>{
+    let r;
+    try{ r=await fetch('/auth/me',{credentials:'same-origin',cache:'no-store'}); }
+    catch(e){ authMode='unknown'; return; }
+    if(r.ok){
+      try{ me=await r.json(); }catch(e){ me=null; }
+      if(me&&me.csrf){ authMode='oidc'; csrfToken=me.csrf; applyRole(me); } else { authMode='unknown'; }
+      return;
+    }
+    if(r.status===404){ authMode='none'; return; }
+    if(r.status===401){ authMode='oidc'; loginRedirect(); return; }
+    authMode='unknown';
+  })();
+  return authReady;
+}
+async function api(method,url,body){
+  await authInit();
+  const h=new Headers();
+  const o={method:method,headers:h,credentials:'same-origin'};
+  if(body!==undefined){
+    h.set('Content-Type','application/json');
+    o.body=typeof body==='string'?body:JSON.stringify(body);
+  }
+  if(authMode==='none') return authFetch(url,o);
+  if(csrfToken&&!SAFE_METHODS[method]) h.set('X-Warden-CSRF',csrfToken);
+  const r=await fetch(url,o);
+  if(r.status===401&&authMode==='oidc') loginRedirect();
+  return r;
+}
 
-/* ---------- write auth: the control plane and the worker admin listener need their bearer token for every change ----------
-   The token is asked for once and kept in sessionStorage (this tab only; never the persistent store
-   or a cookie). It travels in the Authorization header, so a cross-site form cannot make the
-   browser send it. The write goes out without a token first (a dashboard with no guard needs none); only a 401 prompts, then the write is retried once with the token. A 401 clears the stored token. Reads stay open. */
+/* ---------- none mode: the control plane and the worker admin listener need their bearer token for every change ----------
+   Reached only through api() when /auth/me is 404. The token is asked for once and kept in
+   sessionStorage (this tab only; never the persistent store or a cookie). It travels in the
+   Authorization header, so a cross-site form cannot make the browser send it. The request goes out
+   without a token first (a dashboard with no guard needs none); only a 401 prompts, then it is
+   retried once with the token. A 401 clears the stored token. Reads stay open. */
 const CP_TOKEN_KEY='wardenCpToken';
 async function authFetch(url,opts){
   const o=Object.assign({},opts||{});
@@ -1295,6 +1366,47 @@ async function authFetch(url,opts){
   if(r.status===401) sessionStorage.removeItem(CP_TOKEN_KEY);
   return r;
 }
+/* api:end */
+
+/* ---------- role-aware UI: driven only by a successful /auth/me (see the CSS above) ----------
+   ROLE_RANK mirrors config.Role (none < viewer < editor < admin); a role string it does not
+   know ranks as none, so an unexpected value hides every gated control (fail closed). */
+const ROLE_RANK={none:0,viewer:1,editor:2,admin:3};
+function roleOf(m){ const r=m&&m.role; return Object.prototype.hasOwnProperty.call(ROLE_RANK,r)?r:'none'; }
+function applyRole(m){
+  const role=roleOf(m);
+  document.documentElement.setAttribute('data-role',role);
+  const box=document.getElementById('whoami');
+  if(!box) return;
+  document.getElementById('whoamiEmail').textContent=(m&&(m.email||m.sub))||'';
+  document.getElementById('whoamiRole').textContent=role;
+  box.style.display='';
+}
+/* roleAllows(min): false only when /auth/me named a role below min. In none mode, or when
+   /auth/me failed, there is no role to compare and the server decides. */
+function roleAllows(min){
+  if(authMode!=='oidc'||!me) return true;
+  return ROLE_RANK[roleOf(me)]>=ROLE_RANK[min];
+}
+/* logout: POST /auth/logout through api() (CSRF header). The logout is local, so the IdP may
+   still hold a session: show a signed-out page with an explicit sign-in link instead of
+   bouncing straight back through /auth/login. */
+async function logout(){
+  const b=document.getElementById('logoutBtn'); if(b) b.disabled=true;
+  let r=null;
+  try{ r=await api('POST','/auth/logout'); }catch(e){ r=null; }
+  if(!r||!r.ok){ if(b) b.disabled=false; window.alert('Log out failed'+(r?(': status '+r.status):'')+'.'); return; }
+  const main=document.createElement('div');
+  main.style.cssText='max-width:420px;margin:18vh auto;text-align:center;font-family:inherit;color:var(--text)';
+  const h=document.createElement('h1'); h.textContent='Signed out'; h.style.fontSize='20px';
+  const p=document.createElement('p'); p.className='note';
+  p.textContent='Your Warden console session has ended. Your identity provider session is unchanged.';
+  const a=document.createElement('a'); a.className='btn primary'; a.textContent='Sign in again';
+  a.href='/auth/login?next='+encodeURIComponent('/dashboard/');
+  main.append(h,p,a);
+  document.body.replaceChildren(main);
+}
+async function jget(url){ const r=await api('GET',url); if(!r.ok) throw new Error("status "+r.status); return r.json(); }
 
 /* ---------- shared pill/chip renderers (used by live + preview) ---------- */
 const CLASS_CHIP = { credentials:'c-cred','pii.contact':'c-pii','pii.identity':'c-pii','pii.financial':'c-pii', source_code:'c-code', infrastructure:'c-infra' };
@@ -1387,7 +1499,7 @@ async function fetchSettingsDoc(){
 async function onModeToggleClick(mode){
   const doc=await fetchSettingsDoc();
   if(!doc){ return; }                      // unreachable: leave visual state as-is
-  if(!doc.editable){ applyMode(postureFromSettings(doc.settings)); return; } // static badge
+  if(!doc.editable||!roleAllows('editor')){ applyMode(postureFromSettings(doc.settings)); return; } // static badge
   const s=doc.settings, act=activeGuards(s);
   const n=(act.dlp?1:0)+(act.mcp?1:0);
   if(n===0){
@@ -1399,7 +1511,7 @@ async function onModeToggleClick(mode){
   if(act.dlp) merged.dlp=Object.assign({}, s.dlp, {mode});
   if(act.mcp) merged.mcp=Object.assign({}, s.mcp, {mode});
   try{
-    const r=await authFetch('/dashboard/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(merged)});
+    const r=await api('PUT','/dashboard/api/settings',merged);
     if(!r.ok){ let m='status '+r.status; try{ const e=await r.json(); if(e&&e.error) m=e.error; }catch(_e){} throw new Error(m); }
     applyMode(mode);
     if(currentTab()==='guardrails') loadGuardrails();
@@ -1869,7 +1981,7 @@ async function saveExploreProvider(){
   const merged=Object.assign({}, cur, {explore:{llmProvider:sel.value}});
   const note=document.getElementById('exploreProviderNote');
   try{
-    const r=await authFetch('/dashboard/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(merged)});
+    const r=await api('PUT','/dashboard/api/settings',merged);
     if(!r.ok){ let m='status '+r.status; try{ const e=await r.json(); if(e&&e.error) m=e.error; }catch(_e){} throw new Error(m); }
     const d=await r.json().catch(()=>({})); window.__exploreSettings=(d&&d.settings)||merged;
     if(note){ note.textContent='saved ✓ — takes effect now'; note.style.color='var(--teal)'; setTimeout(()=>{ note.textContent=''; note.style.color=''; },2500); }
@@ -2008,7 +2120,7 @@ async function generateSqlFromNL(){
   const orig=btn?btn.textContent:'';
   if(btn){ btn.disabled=true; btn.textContent='generating…'; }
   try{
-    const r=await authFetch('/dashboard/api/query/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question})});
+    const r=await api('POST','/dashboard/api/query/generate',{question});
     const d=await r.json().catch(()=>({error:'status '+r.status}));
     if(r.ok && d && d.sql){
       box.value=d.sql;
@@ -2039,7 +2151,7 @@ async function runQuery(){
   const sql=ta.value.trim();
   out.innerHTML='<div class="loading-note">running…</div>'; if(meta) meta.textContent='running…';
   try{
-    const r=await authFetch('/dashboard/api/query',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sql,maxRows:1000})});
+    const r=await api('POST','/dashboard/api/query',{sql,maxRows:1000});
     const d=await r.json().catch(()=>({error:'status '+r.status}));
     if(!r.ok){ out.innerHTML='<div class="note" style="color:#ff8098">✕ '+esc((d&&d.error)||('status '+r.status))+'</div>'; if(meta) meta.textContent='error'; return; }
     renderQueryResult(out,meta,d);
@@ -2206,7 +2318,7 @@ async function saveSettings(btnId, statusId){
   else if(sbb==='echo'){ body.secrets={ backend:'echo' }; }
   else { delete body.secrets; }
   try{
-    const r=await authFetch('/dashboard/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const r=await api('POST','/dashboard/api/settings',body);
     if(!r.ok){ const e=await r.json().catch(()=>({error:'status '+r.status})); throw new Error(e.error||('status '+r.status)); }
     const d=await r.json(); lastSettings=(d&&d.settings)||body; settingsEditable=!!(d&&d.editable);
     renderSettings();
@@ -2438,8 +2550,8 @@ function renderSecrets(d){
       +'<td>'+backendBadge(backend)+'</td>'
       +'<td class="mono" style="font-size:12px">'+esc(e.version||'—')+'</td>'
       +'<td class="muted">'+(e.updatedAt?relTime(e.updatedAt):'—')+'</td>'
-      +'<td><button class="btn sm sec-rotate" data-key="'+esc(key)+'">Rotate</button> '
-      +'<button class="btn sm sec-del" data-key="'+esc(key)+'" style="color:#ff8098">Delete</button></td></tr>';
+      +'<td><button data-min-role="admin" class="btn sm sec-rotate" data-key="'+esc(key)+'">Rotate</button> '
+      +'<button data-min-role="admin" class="btn sm sec-del" data-key="'+esc(key)+'" style="color:#ff8098">Delete</button></td></tr>';
   }).join('');
   body.querySelectorAll('.sec-rotate').forEach(b=>b.addEventListener('click',()=>rotateSecret(b.dataset.key)));
   body.querySelectorAll('.sec-del').forEach(b=>b.addEventListener('click',()=>deleteSecretRow(b.dataset.key)));
@@ -2457,7 +2569,7 @@ async function saveSecret(){
   if(!key||!value){ if(msg){ msg.textContent='Key and value are required.'; msg.style.color='var(--amber)'; } return; }
   if(msg){ msg.textContent='saving…'; msg.style.color=''; }
   try{
-    const r=await authFetch('/dashboard/api/secretstore',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:key,value:value})});
+    const r=await api('POST','/dashboard/api/secretstore',{key:key,value:value});
     if(!r.ok && r.status!==204){ let m='status '+r.status; try{ const e=await r.json(); if(e&&e.error) m=e.error; }catch(_e){} throw new Error(m); }
     setVal('secretKeyInput',''); setVal('secretValueInput','');
     if(msg) msg.textContent='';
@@ -2468,7 +2580,7 @@ async function saveSecret(){
 async function deleteSecretRow(key){
   if(!window.confirm('Delete secret '+key+'? Warden will stop injecting it at the edge.')) return;
   try{
-    const r=await authFetch('/dashboard/api/secretstore?key='+encodeURIComponent(key),{method:'DELETE'});
+    const r=await api('DELETE','/dashboard/api/secretstore?key='+encodeURIComponent(key));
     if(!r.ok && r.status!==204){ throw new Error('status '+r.status); }
     loadSecrets();
   }catch(err){ window.alert('Delete failed: '+err.message); }
@@ -2528,7 +2640,7 @@ function flashBtn(id,txt){
   setTimeout(()=>{ b.textContent=old; b.disabled=false; }, 1800);
 }
 async function putSettings(merged){
-  const r=await authFetch('/dashboard/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(merged)});
+  const r=await api('PUT','/dashboard/api/settings',merged);
   if(!r.ok){ let m='status '+r.status; try{ const e=await r.json(); if(e&&e.error) m=e.error; }catch(_e){} throw new Error(m); }
   const d=await r.json().catch(()=>({}));
   gr.settings=(d&&d.settings)||merged; gr.settingsEditable=!!(d&&d.editable);
@@ -2554,7 +2666,7 @@ function renderPolicyList(id,list,entries,color,ed){
     if(e.methods&&e.methods.length) cons.push('methods: '+e.methods.join(','));
     if(e.paths&&e.paths.length) cons.push('paths: '+e.paths.join(' '));
     const consHtml=cons.length? '<div class="muted" style="font-size:11px;margin-top:2px">'+esc(cons.join(' · '))+'</div>':'';
-    const rm= ed? '<button class="btn sm pol-rm" data-list="'+list+'" data-idx="'+i+'" style="color:#ff8098">Remove</button>':'';
+    const rm= ed? '<button data-min-role="editor" class="btn sm pol-rm" data-list="'+list+'" data-idx="'+i+'" style="color:#ff8098">Remove</button>':'';
     return '<tr><td class="mono" style="color:'+color+'">'+esc(dom)+consHtml+'</td><td style="text-align:right">'+rm+'</td></tr>';
   }).join('');
   el.querySelectorAll('.pol-rm').forEach(b=>b.addEventListener('click',()=>removePolicyEntry(b.dataset.list,+b.dataset.idx)));
@@ -2575,7 +2687,7 @@ async function removePolicyEntry(list,idx){
 }
 async function savePolicy(){
   try{
-    const r=await authFetch('/dashboard/api/policy',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({allowlist:gr.policy.allowlist,denylist:gr.policy.denylist})});
+    const r=await api('PUT','/dashboard/api/policy',{allowlist:gr.policy.allowlist,denylist:gr.policy.denylist});
     if(!r.ok){ let m='status '+r.status; try{ const e=await r.json(); if(e&&e.error) m=e.error; }catch(_e){} throw new Error(m); }
     const p=await r.json();
     gr.policy=p; gr.policy.allowlist=p.allowlist||[]; gr.policy.denylist=p.denylist||[]; gr.policyEditable=!!p.editable;
@@ -2645,7 +2757,7 @@ function renderDlpRules(){
   if(!gr.dlp.rules.length){ el.innerHTML='<div class="note" style="padding:4px 0">No rules — class defaults apply.</div>'; return; }
   const inputStyle='background:var(--surface-2);border:1px solid var(--border);color:var(--text);padding:7px 10px;border-radius:8px;font:inherit;font-size:12.5px';
   el.innerHTML=gr.dlp.rules.map((r,i)=>{
-    const rm= ed? '<button class="btn sm dlp-rm" data-idx="'+i+'" style="color:#ff8098">✕</button>':'';
+    const rm= ed? '<button data-min-role="editor" class="btn sm dlp-rm" data-idx="'+i+'" style="color:#ff8098">✕</button>':'';
     return '<div class="form-row dlp-rule" style="grid-template-columns:1fr 1.4fr 130px 44px; margin-bottom:8px; align-items:center">'
       +'<input class="dlp-class" data-idx="'+i+'" type="text" value="'+esc(r.class)+'" placeholder="class or *" '+(ed?'':'disabled')+' style="'+inputStyle+'"/>'
       +'<input class="dlp-to" data-idx="'+i+'" type="text" value="'+esc((r.to||[]).join(', '))+'" placeholder="destinations (blank = any)" '+(ed?'':'disabled')+' style="'+inputStyle+'"/>'
@@ -2778,11 +2890,11 @@ function mcpListBlock(list,arr,ed){
       +'<input id="mcpAdd_'+list+'" type="text" placeholder="exact tool name" '
       +'onkeydown="if(event.key===\'Enter\'){event.preventDefault();addMcpTool(\''+list+'\');}" '
       +'style="background:var(--surface-2);border:1px solid var(--border);color:var(--text);padding:5px 9px;border-radius:7px;font:inherit;font-size:12px;width:150px"/>'
-      +'<button class="btn sm" onclick="addMcpTool(\''+list+'\')">+ Add</button></div>'
+      +'<button data-min-role="admin" class="btn sm" onclick="addMcpTool(\''+list+'\')">+ Add</button></div>'
     : '';
   let h='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">'+pill+add+'</div>';
   if(!arr.length){ h+=mcpImplicitRule(list); return h; }
-  h+=arr.map((t,i)=>'<div style="display:flex;align-items:center;justify-content:space-between;padding:4px 0"><span class="mono" style="font-size:12.5px">'+esc(t)+'</span>'+(ed?'<button class="btn sm mcp-tool-rm" data-list="'+list+'" data-idx="'+i+'" style="color:#ff8098">✕</button>':'')+'</div>').join('');
+  h+=arr.map((t,i)=>'<div style="display:flex;align-items:center;justify-content:space-between;padding:4px 0"><span class="mono" style="font-size:12.5px">'+esc(t)+'</span>'+(ed?'<button data-min-role="admin" class="btn sm mcp-tool-rm" data-list="'+list+'" data-idx="'+i+'" style="color:#ff8098">✕</button>':'')+'</div>').join('');
   return h;
 }
 /* mcpImplicitRule — DISPLAY-ONLY pseudo-rule shown when a tool list is empty, so
@@ -2998,7 +3110,7 @@ function llmpRow(p,i){
     +'<td>'+inp('apiKeyEnv',p.apiKeyEnv,'OPENAI_API_KEY',150)+'</td>'
     +'<td>'+inp('timeout',p.timeoutSeconds||'','30',56)+'</td>'
     +'<td>'+(p.name?llmpResolvedPill(p):'<span class="muted">new</span>')+'</td>'
-    +'<td><button class="btn sm" title="Remove provider" onclick="removeLLMProvider('+i+')">✕</button></td>'
+    +'<td><button data-min-role="admin" class="btn sm" title="Remove provider" onclick="removeLLMProvider('+i+')">✕</button></td>'
     +'</tr>';
 }
 // captureLLMPRows reads the editable input rows back into gr.llmp.providers so an
@@ -3038,7 +3150,7 @@ async function saveLLMProviders(){
   const body=gr.llmp.providers.map(p=>({ name:p.name, baseURL:p.baseURL, model:p.model, apiKeyEnv:p.apiKeyEnv, timeoutSeconds:p.timeoutSeconds||0 }));
   llmpMsg('saving…',true);
   try{
-    const r=await authFetch('/dashboard/api/llmproviders',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const r=await api('PUT','/dashboard/api/llmproviders',body);
     if(!r.ok){ let m='status '+r.status; try{ const e=await r.json(); if(e&&e.error) m=e.error; }catch(_e){} throw new Error(m); }
     gr.llmp=await r.json(); gr.llmp.providers=gr.llmp.providers||[];
     renderLLMProviders();
@@ -3292,7 +3404,7 @@ function renderDetection(){
       + detField('det_responseTime_degradeFactor','Degrade factor', rt.degradeFactor,'3.0',ed,'× baseline to trip')
       + detField('det_responseTime_baselineAlpha','Baseline alpha', rt.baselineAlpha,'0.3',ed,'EWMA smoothing 0–1'), ed);
   const saveRow = ed
-    ? '<div style="margin-top:8px"><button class="btn primary sm" id="detectionSaveBtn" onclick="saveDetection()">Save detection</button> <span id="detectionMsg" class="sub"></span></div>'
+    ? '<div style="margin-top:8px"><button data-min-role="editor" class="btn primary sm" id="detectionSaveBtn" onclick="saveDetection()">Save detection</button> <span id="detectionMsg" class="sub"></span></div>'
     : '';
   host.innerHTML='<div style="margin-bottom:14px">'+statusLine+'</div>'+h+saveRow;
 }
@@ -3329,7 +3441,7 @@ async function saveDetection(){
   if(errs.length){ if(msg){ msg.textContent='✕ '+errs[0]; msg.style.color='var(--amber)'; } return; }
   if(msg){ msg.textContent='saving…'; msg.style.color=''; }
   try{
-    const r=await authFetch('/dashboard/api/detection',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(doc)});
+    const r=await api('PUT','/dashboard/api/detection',doc);
     if(!r.ok){ let m='status '+r.status; try{ const e=await r.json(); if(e&&e.error) m=e.error; }catch(_e){} throw new Error(m); }
     detectionData=Object.assign({missing:false}, await r.json());
     renderDetection();
@@ -3393,7 +3505,7 @@ async function verifyReceipt(){
   if(!raw){ res.classList.add('bad'); res.innerHTML='Paste a receipt JSON first.'; return; }
   res.innerHTML='Verifying…';
   try{
-    const r=await authFetch('/dashboard/api/audit/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:raw});
+    const r=await api('POST','/dashboard/api/audit/verify',raw);
     const d=await r.json().catch(()=>({valid:false}));
     if(d&&d.valid){ res.classList.remove('bad'); res.innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="width:18px;height:18px"><path d="M20 6L9 17l-5-5"/></svg>Signature valid — Ed25519 verified'; }
     else { res.classList.add('bad'); res.innerHTML='✗ Signature invalid — does not verify against the trusted key'; }
@@ -3449,7 +3561,7 @@ function renderIntegrations(){
           +'<td class="note" style="font-size:12px">'+esc(i.match||'')+'</td>'
           +'<td style="font-size:12px">'+intgConfigTags(i.config)+'</td>'
           +'<td style="text-align:right; white-space:nowrap">'+intgStatusPill(i.status,i.statusReason)
-          +(editable?' <button class="btn sm" title="Delete integration" onclick="deleteIntegration(\''+esc(i.name).replace(/'/g,"\\'")+'\')">✕</button>':'')
+          +(editable?' <button data-min-role="admin" class="btn sm" title="Delete integration" onclick="deleteIntegration(\''+esc(i.name).replace(/'/g,"\\'")+'\')">✕</button>':'')
           +'</td></tr>'
         ).join('')+'</tbody></table>';
     }
@@ -3498,7 +3610,7 @@ function renderIntegrationForm(){
     +'<input id="intg-m-cat" placeholder="category (e.g. security)" style="flex:1; min-width:140px" oninput="updateIntgMatchWarn()"/>'
     +'</div><div class="note" id="intg-match-warn"></div></div>'
     +unavailNote
-    +'<div style="margin-top:8px"><button class="btn primary sm" id="intg-save"'+(disabled?' disabled':'')+'>Save integration</button> '
+    +'<div style="margin-top:8px"><button data-min-role="admin" class="btn primary sm" id="intg-save"'+(disabled?' disabled':'')+'>Save integration</button> '
     +'<button class="btn sm" id="intg-cancel">Cancel</button> <span id="intg-save-status" class="sub"></span></div>';
   const save=document.getElementById('intg-save'); if(save && !disabled) save.addEventListener('click', ()=>saveIntegration(def));
   const cancel=document.getElementById('intg-cancel'); if(cancel) cancel.addEventListener('click', toggleIntegrationForm);
@@ -3527,7 +3639,7 @@ async function saveIntegration(def){
   if(!match.length && st){ st.textContent='warning: empty match = no alerts'; st.style.color='var(--amber)'; }
   const body={ type:def.type, name:(val('intg-name')||'').trim(), config:config, match:match };
   try{
-    const r=await authFetch('/dashboard/api/integrations',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const r=await api('POST','/dashboard/api/integrations',body);
     if(!r.ok){ const e=await r.json().catch(()=>({error:'status '+r.status})); throw new Error(e.error||('status '+r.status)); }
     integrationsData=await r.json();
     const form=document.getElementById('integrations-form'); if(form) form.style.display='none';
@@ -3537,7 +3649,7 @@ async function saveIntegration(def){
 async function deleteIntegration(name){
   if(!window.confirm('Delete integration "'+name+'"?')) return;
   try{
-    const r=await authFetch('/dashboard/api/integrations?name='+encodeURIComponent(name),{method:'DELETE'});
+    const r=await api('DELETE','/dashboard/api/integrations?name='+encodeURIComponent(name));
     if(!r.ok){ const e=await r.json().catch(()=>({error:'status '+r.status})); throw new Error(e.error||('status '+r.status)); }
     integrationsData=await r.json();
     renderIntegrations();

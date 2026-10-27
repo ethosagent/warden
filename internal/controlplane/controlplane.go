@@ -502,6 +502,7 @@ func (s *Server) Handler() http.Handler {
 	}
 	// Write guard and mount (bearer in none mode; sessions and roles in oidc): routes.go.
 	s.mountDashboard(mux, dash)
+	s.registerAuthRoutes(mux)
 
 	return mux
 }

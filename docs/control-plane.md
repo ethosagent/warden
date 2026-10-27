@@ -226,6 +226,89 @@ var and `--state-dir`. Until W-P1-SSO-06 lands it then refuses to start with
 routes while a human route still accepts the shared bearer. See
 `configs/config.control-plane.yaml` for commented examples.
 
+## Console roles and the role matrix
+
+The console has two modes, chosen by `console.auth`:
+
+| | `none` (default) | `oidc` |
+|---|---|---|
+| Who you are | nobody: there is no sign-in | an IdP user with a server-side session (cookie) |
+| Reads | open reads: any client that reaches `:7070` | need a session with at least `viewer` |
+| Writes | gated by the CP admin bearer (`Authorization: Bearer`, [above](#dashboard-writes-need-the-control-plane-token)) | need a session, the role in the matrix below and the session's CSRF token (`X-Warden-CSRF`, from `GET /auth/me`) |
+| Shared tokens | the bearer is the write credential | the shared tokens never open a human route, the bearer included |
+| `/auth/me`, `/auth/logout` | absent (`404`) | any live session; logout is CSRF-checked and ends only the console session, not the IdP's |
+
+This section describes `oidc` once it is served; until W-P1-SSO-06 lands the control
+plane refuses to start in `oidc` mode (see [Console sign-in config](#console-sign-in-config)).
+Moving a deployment from `none` to `oidc` is a separate guide.
+
+**Roles.** The role is the highest of `admin` > `editor` > `viewer` whose
+`console.roles` groups match the user's IdP groups. Roles are computed from the groups
+in the login token and stored with the session, and the role is re-derived from the
+current `console.roles` on every request, so a `console.roles` change applies after a
+restart. A user demoted or removed in the IdP keeps their console role until the
+session's idle (1h) or absolute (12h) expiry unless an admin revokes it with the
+sessions API (W-P1-SSO-08).
+
+**The UI follows the role.** After `GET /auth/me` succeeds the dashboard shows the
+signed-in email, the role and a *Log out* button, and hides every control whose
+minimum role is above the user's (the `data-min-role` attribute in
+`internal/dashboard/index.html`). Hiding is cosmetic: the server checks every request
+against the table below. In `none` mode nothing is hidden and no user is shown.
+
+**Role matrix** (`oidc` mode). Generated from the authz table; `TestAuthzMatrixDoc`
+fails when the two differ.
+
+<!-- authz-matrix:start -->
+<!-- Generated from authzTable() and internal/config/settings_roles.go; do not edit by hand.
+     Regenerate: go test ./internal/controlplane -run TestAuthzMatrixDoc -update -->
+
+| Route | Method | Minimum role | Action |
+|---|---|---|---|
+| `/dashboard/` | GET | viewer | `ui.read` |
+| `/dashboard/api/alerts` | GET | viewer | `alerts.read` |
+| `/dashboard/api/analytics` | GET | viewer | `analytics.read` |
+| `/dashboard/api/audit` | GET | viewer | `audit.read` |
+| `/dashboard/api/audit/verify` | POST | viewer | `audit.verify` |
+| `/dashboard/api/detection` | GET | viewer | `detection.read` |
+| `/dashboard/api/detection` | POST | editor | `detection.write` |
+| `/dashboard/api/detection` | PUT | editor | `detection.write` |
+| `/dashboard/api/endpoints` | GET | viewer | `endpoints.read` |
+| `/dashboard/api/integrations` | GET | viewer | `integrations.read` |
+| `/dashboard/api/integrations` | POST | admin | `integrations.write` |
+| `/dashboard/api/integrations` | DELETE | admin | `integrations.delete` |
+| `/dashboard/api/llmproviders` | GET | viewer | `llmproviders.read` |
+| `/dashboard/api/llmproviders` | POST | admin | `llmproviders.write` |
+| `/dashboard/api/llmproviders` | PUT | admin | `llmproviders.write` |
+| `/dashboard/api/mcp` | GET | viewer | `mcp.read` |
+| `/dashboard/api/policy` | GET | viewer | `policy.read` |
+| `/dashboard/api/policy` | POST | editor | `policy.write` |
+| `/dashboard/api/policy` | PUT | editor | `policy.write` |
+| `/dashboard/api/query` | POST | viewer | `query.run` |
+| `/dashboard/api/query/generate` | POST | editor | `query.generate` |
+| `/dashboard/api/query/schema` | GET | viewer | `query.schema` |
+| `/dashboard/api/secrets` | GET | viewer | `secrets.read` |
+| `/dashboard/api/secretstore` | GET | viewer | `secretstore.read` |
+| `/dashboard/api/secretstore` | POST | admin | `secretstore.write` |
+| `/dashboard/api/secretstore` | DELETE | admin | `secretstore.delete` |
+| `/dashboard/api/settings` | GET | viewer | `settings.read` |
+| `/dashboard/api/settings` | POST | editor | `settings.write` |
+| `/dashboard/api/settings` | PUT | editor | `settings.write` |
+| `/dashboard/api/setup` | GET | viewer | `setup.read` |
+| `/dashboard/api/traffic` | GET | viewer | `traffic.read` |
+| `/dashboard/api/workers` | GET | viewer | `workers.read` |
+
+A method and path with no row is refused (`403`) for every role, `GET` included.
+
+Settings writes (`POST`/`PUT /dashboard/api/settings`) are then checked per changed field:
+
+- An editor may change only `advisory`, `agents`, `cacheTTLSeconds`, `compliance`, `dlp`, `logging`.
+- Inside those, these subfields still need admin (list elements are matched by `id`): `agents[].identity`.
+- Every other field needs admin, including any field added later.
+
+`POST /dashboard/api/query/generate` is limited to 10 calls a minute per console session (`429` past it).
+<!-- authz-matrix:end -->
+
 ## Worker admin token
 
 The worker's admin listener (`:9090`, default `127.0.0.1:9090`) serves the same
