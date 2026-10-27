@@ -65,6 +65,16 @@ var All = slices.Concat(
 		// Console enforcement (W-P1-SSO-06): oidc starts, the shared bearer opens no
 		// human route, and workers keep pulling /policy with it.
 		{Name: "console_oidc_bearer_rejected", Opts: consoleOpts(), Run: consoleOIDCBearerRejected},
+
+		// Versioned policy store (W-P1-PVER-01): the first start imports the YAML
+		// as version 1; a head written out of process reaches workers. In-process
+		// only (it writes the control plane's state database).
+		{Name: "policy_store_versioned", Opts: policyStoreOpts(), Run: policyStoreVersioned},
+		// Initial import (W-P1-PVER-07): version 1 by system:import plus one
+		// audit row, enforcement unchanged, nothing more after a restart.
+		// In-process only (it reads the CP state dir).
+		{Name: "policy_store_initial_import", Opts: policyImportOpts(), Run: policyStoreInitialImport},
+
 		// Admin audit gate (W-P1-AAUD-05): enabled, the control plane writes the
 		// genesis entry and logs its key_id before serving. In-process only (it
 		// reads the CP state dir).

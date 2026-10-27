@@ -50,6 +50,16 @@ type policyServer struct {
 	overlayMu sync.Mutex
 	overlays  []wireOverlay
 	sealed    atomic.Bool
+
+	// versions is the versioned policy store (--policy-store=versioned), nil in
+	// file mode. When its head is above 0 the base wire is the head doc instead
+	// of the YAML. Set once at wiring time, before the first Refresh.
+	versions PolicyVersionStore
+	// headMu guards the cached head: headVer and the doc JSON it was decoded
+	// from, so a Refresh with an unchanged head reads only the head version.
+	headMu  sync.Mutex
+	headVer int64
+	headDoc []byte
 }
 
 // wireOverlay merges serve-time data into the served wire: data that must reach
@@ -229,26 +239,103 @@ func (ps *policyServer) snapshot() (policyWire, string, bool, <-chan struct{}) {
 // any overlay error fails the load (an *overlayError). It seals overlay
 // registration.
 func (ps *policyServer) loadPolicy(ctx context.Context) (policyWire, map[string]string, error) {
-	overlays := ps.sealOverlays()
-	wire, err := ps.loadBase()
+	ps.sealOverlays() // even a failed first load ends registration
+	wire, err := ps.loadBase(ctx)
 	if err != nil {
 		return policyWire{}, nil, err
 	}
-	fps := make(map[string]string, len(overlays))
-	for _, o := range overlays {
-		fp, err := o.apply(ctx, &wire)
-		if err != nil {
-			return policyWire{}, nil, &overlayError{name: o.name, err: err}
-		}
-		fps[o.name] = fp
+	fps, err := ps.applyOverlays(ctx, &wire)
+	if err != nil {
+		return policyWire{}, nil, err
 	}
 	return wire, fps, nil
 }
 
-// loadBase re-reads and validates the policy file, returning the allow/deny
-// wire view with no overlay applied. Re-reading per call keeps served policy
-// fresh without a watcher.
-func (ps *policyServer) loadBase() (policyWire, error) {
+// applyOverlays runs every overlay on wire in registration order and returns
+// their fingerprints; an overlay error is an *overlayError. It seals overlay
+// registration.
+func (ps *policyServer) applyOverlays(ctx context.Context, wire *policyWire) (map[string]string, error) {
+	overlays := ps.sealOverlays()
+	fps := make(map[string]string, len(overlays))
+	for _, o := range overlays {
+		fp, err := o.apply(ctx, wire)
+		if err != nil {
+			return nil, &overlayError{name: o.name, err: err}
+		}
+		fps[o.name] = fp
+	}
+	return fps, nil
+}
+
+// servedETag is the /policy ETag doc would be served with: the hash of doc
+// with the overlays applied. doc is not modified. The versioned store records
+// it in the publish log.
+func (ps *policyServer) servedETag(ctx context.Context, doc policyWire) (string, error) {
+	b, err := json.Marshal(doc)
+	if err != nil {
+		return "", err
+	}
+	var wire policyWire
+	if err := json.Unmarshal(b, &wire); err != nil {
+		return "", err
+	}
+	if _, err := ps.applyOverlays(ctx, &wire); err != nil {
+		return "", err
+	}
+	return etagFor(wire), nil
+}
+
+// loadBase returns the served wire with no overlay applied: the head doc of the
+// versioned store when it has one, otherwise the policy file, re-read and
+// validated per call so served policy stays fresh without a watcher.
+func (ps *policyServer) loadBase(ctx context.Context) (policyWire, error) {
+	if ps.versions != nil {
+		wire, ok, err := ps.loadHead(ctx)
+		if err != nil {
+			return policyWire{}, err
+		}
+		if ok {
+			return wire, nil
+		}
+	}
+	return ps.loadFile()
+}
+
+// loadHead returns the head doc of the versioned store, or ok=false when the
+// store is empty (head 0). It reads only the head version unless the head
+// moved, in which case it fetches the new doc (checked against doc_sha256).
+// Each call decodes a fresh copy, so overlays can modify it freely.
+func (ps *policyServer) loadHead(ctx context.Context) (policyWire, bool, error) {
+	head, err := ps.versions.Head(ctx)
+	if err != nil {
+		return policyWire{}, false, err
+	}
+	if head == 0 {
+		return policyWire{}, false, nil
+	}
+	ps.headMu.Lock()
+	defer ps.headMu.Unlock()
+	if head != ps.headVer {
+		v, err := ps.versions.Get(ctx, head)
+		if err != nil {
+			return policyWire{}, false, err
+		}
+		b, err := json.Marshal(v.Doc)
+		if err != nil {
+			return policyWire{}, false, fmt.Errorf("policy store: encode head v%d: %w", head, err)
+		}
+		ps.headVer, ps.headDoc = head, b
+	}
+	var wire policyWire
+	if err := json.Unmarshal(ps.headDoc, &wire); err != nil {
+		return policyWire{}, false, fmt.Errorf("policy store: decode head v%d: %w", head, err)
+	}
+	return wire, true, nil
+}
+
+// loadFile re-reads and validates the policy file, returning the allow/deny
+// wire view with no overlay applied.
+func (ps *policyServer) loadFile() (policyWire, error) {
 	prov, err := config.NewLocalYAMLProvider(ps.policyPath)
 	if err != nil {
 		return policyWire{}, err
