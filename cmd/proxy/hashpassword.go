@@ -1,12 +1,13 @@
 package main
 
 import (
-	"bytes"
+	"bufio"
 	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -60,16 +61,16 @@ func newHashPasswordCmd() *cobra.Command {
 // readPasswordLine reads one line (at most maxPasswordLine bytes before the
 // newline) and strips the trailing CR/LF.
 func readPasswordLine(in io.Reader) (string, error) {
-	buf, err := io.ReadAll(io.LimitReader(in, maxPasswordLine+2))
-	if err != nil {
+	// ReadString stops at the newline, so a terminal does not need Ctrl-D.
+	line, err := bufio.NewReader(io.LimitReader(in, maxPasswordLine+2)).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
 		return "", errors.New("cannot read the password from stdin")
 	}
-	line, _, _ := bytes.Cut(buf, []byte("\n"))
-	line = bytes.TrimSuffix(line, []byte("\r"))
+	line = strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
 	if len(line) > maxPasswordLine {
 		return "", controlplane.ErrPasswordTooLong
 	}
-	return string(line), nil
+	return line, nil
 }
 
 // promptPassword asks twice on the terminal with echo off.
