@@ -78,6 +78,10 @@ var All = slices.Concat(
 		// saves create versions authored anonymous that workers enforce.
 		// In-process only (it reads the CP state dir).
 		{Name: "policy_store_dashboard_publish", Opts: policyStorePublishOpts(), Run: policyStoreDashboardPublish},
+		// Mirror and drift (W-P1-PVER-05): a save is mirrored into the served
+		// YAML; a hand edit is never served, shows as drift and is audited once.
+		// In-process only (it edits the CP's file and reads its state dir).
+		{Name: "policy_store_mirror_drift", Opts: policyMirrorOpts(), Run: policyStoreMirrorDrift},
 
 		// Admin audit gate (W-P1-AAUD-05): enabled, the control plane writes the
 		// genesis entry and logs its key_id before serving. In-process only (it

@@ -467,8 +467,8 @@ other value, the control plane refuses to start.
   `v1:<doc_sha256>`); a failed append is logged at ERROR and does not stop
   startup.
 - Dashboard saves of the policy, the settings form and the LLM providers each
-  create a new version from the head instead of rewriting the YAML (source
-  `policy`, `settings` or `llmproviders`). A save changes only its own fields
+  create a new version from the head (source `policy`, `settings` or
+  `llmproviders`); the YAML is then mirrored from it (below). A save changes only its own fields
   and carries every other field from the head, including `dlp` and `advisory`,
   which the settings form does not edit. An edit the config loader rejects (for
   example an empty allowlist) returns the loader error and creates no version;
@@ -482,6 +482,23 @@ other value, the control plane refuses to start.
   version cannot be created the YAML is put back.
 - The other CP-local editors (integrations, detection) keep rewriting the YAML.
   History and rollback come in later releases.
+- The served YAML is a write-through mirror of the head: after every head move
+  (a dashboard save, or a version from another process seen by the 3-second
+  check) the control plane renders the head's policy and settings blocks into
+  it, with the live credential, through the same validated atomic write. So
+  `--policy-store=file` or an older binary serves the same policy. A mirror
+  failure (for example a read-only file) is logged at ERROR with the version
+  and never fails the save.
+- A hand edit of the YAML's policy or settings blocks is drift: it is never
+  served. The 3-second check logs `served config policy block differs from
+  head; ignored` (with `file_sha256`, the hash of those blocks, and `head`)
+  once per distinct edit, `GET /dashboard/api/policy` reports `drift: true` and
+  the Guardrails page shows a banner. With `console.adminAudit.enabled` each
+  distinct edit appends one `config.external_change` row (before
+  `v<head>:<doc_sha256>`, after `file:<file_sha256>`); the file-mode check above
+  is not used. Edits to the credential or to CP-local blocks are not drift.
+  Bring an edit in with `warden policy import`; putting the file back, or the
+  next save, clears the drift.
 - The control plane checks for a new head every 3 seconds and only re-reads a
   version when the head moved, so a version written by another process reaches
   workers within 3 seconds plus one long-poll cycle. The `/policy` hot path

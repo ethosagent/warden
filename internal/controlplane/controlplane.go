@@ -206,6 +206,9 @@ type Server struct {
 	// (adminaudit_external.go).
 	auditRec adminaudit.Recorder
 	ext      externalEdits
+	// mirror is the versioned-mode write-through mirror and drift state
+	// (W-P1-PVER-05, policystore.go); unused in file mode.
+	mirror policyMirror
 }
 
 // Compile-time assertions that the concrete types satisfy their role interfaces.
@@ -473,6 +476,9 @@ func (s *Server) Handler() http.Handler {
 	// request's Principal instead.
 	var editor ConfigEditor = s
 	dash.SetPolicyWriter(editor.WritePolicy)
+	// Drift banner: a hand edit of the served YAML in versioned mode
+	// (W-P1-PVER-05). Always false in file mode.
+	dash.SetPolicyDrift(s.policyDrift)
 	// In oidc mode the settings writer authorizes the edit per field against
 	// the caller's role (writeSettingsAs); in none mode it is
 	// editor.WriteSettings unchanged.

@@ -6,7 +6,9 @@ import (
 	"encoding/hex"
 	"net/http"
 	"slices"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/ethosagent/warden/internal/controlplane"
 	"github.com/ethosagent/warden/internal/cpstate"
@@ -234,5 +236,90 @@ func policyStoreDashboardPublish(t *testing.T, h *harness.H) {
 	// Version 3 carried the policy edit: the host stays allowed.
 	if got := connectStatus(t, h, pverHost+":443"); got != http.StatusOK {
 		t.Errorf("v3: CONNECT %s = %d, want 200 (carried from v2)", pverHost, got)
+	}
+}
+
+// The mirror and drift scenario (W-P1-PVER-05): with --policy-store=versioned
+// a dashboard save is mirrored into the served YAML. A hand edit of the YAML's
+// policy block is not served: the dashboard reports drift and admin audit
+// records one config.external_change row (before v<head>:..., after file:...).
+// Putting the file back clears the drift.
+
+func policyMirrorOpts() []harness.Option {
+	return []harness.Option{harness.WithVersionedPolicyStore(), harness.WithAdminAudit()}
+}
+
+// handHost is added to the served YAML by hand; it must never be enforced.
+const handHost = "hand.example.com"
+
+func policyStoreMirrorDrift(t *testing.T, h *harness.H) {
+	h.Upstream(pverHost)
+	h.Upstream(handHost)
+
+	var cur struct {
+		Allowlist []map[string]any `json:"allowlist"`
+		Denylist  []map[string]any `json:"denylist"`
+	}
+	if err := h.CP().GetJSON("/dashboard/api/policy", &cur); err != nil {
+		t.Fatal(err)
+	}
+	edit := map[string]any{"allowlist": append(cur.Allowlist, map[string]any{"domain": pverHost}), "denylist": cur.Denylist}
+	if err := h.CP().PostJSON("/dashboard/api/policy", edit, nil); err != nil {
+		t.Fatalf("dashboard policy save: %v", err)
+	}
+	h.Eventually("workers enforce the published version 2", func() bool {
+		return connectStatus(t, h, pverHost+":443") == http.StatusOK
+	})
+	mirrored := h.ReadControlPlaneConfig()
+	if !strings.Contains(mirrored, "domain: "+pverHost) {
+		t.Fatalf("the served YAML does not mirror head version 2:\n%s", mirrored)
+	}
+
+	drift := func() bool {
+		var p struct {
+			Drift bool `json:"drift"`
+		}
+		if err := h.CP().GetJSON("/dashboard/api/policy", &p); err != nil {
+			t.Fatal(err)
+		}
+		return p.Drift
+	}
+	external := func() []harness.AdminAuditRow {
+		var out []harness.AdminAuditRow
+		for _, r := range h.AdminAuditRows() {
+			if r.Action == externalChangeAction {
+				out = append(out, r)
+			}
+		}
+		return out
+	}
+	if drift() || len(external()) != 0 {
+		t.Fatal("the control plane's own mirror write was reported as an external edit")
+	}
+
+	h.EditControlPlaneConfig(func(body string) string {
+		return strings.Replace(body, "  allowlist:\n", "  allowlist:\n    - domain: "+handHost+"\n", 1)
+	})
+	h.EventuallyWithin(15*time.Second, "the hand edit is recorded as config.external_change", func() bool {
+		return len(external()) == 1
+	})
+	row := external()[0]
+	if row.AuthMethod != "system" || row.Target != "policy" ||
+		!strings.HasPrefix(row.BeforeHash, "v2:") || !strings.HasPrefix(row.AfterHash, "file:") {
+		t.Fatalf("external change row = %+v, want system/policy, before v2:<doc_sha256>, after file:<sha256>", row)
+	}
+	if !drift() {
+		t.Fatal("GET /dashboard/api/policy drift = false after a hand edit")
+	}
+	if got := connectStatus(t, h, handHost+":443"); got != http.StatusForbidden {
+		t.Fatalf("CONNECT %s = %d, want 403 (a hand edit is never served)", handHost, got)
+	}
+
+	h.EditControlPlaneConfig(func(string) string { return mirrored })
+	h.EventuallyWithin(15*time.Second, "drift clears with the YAML back at head", func() bool {
+		return !drift()
+	})
+	if n := len(external()); n != 1 {
+		t.Fatalf("%d config.external_change rows, want 1", n)
 	}
 }

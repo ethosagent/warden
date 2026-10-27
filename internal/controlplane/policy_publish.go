@@ -130,8 +130,9 @@ func (s *Server) headDoc(ctx context.Context) (int64, policyWire, error) {
 // head unchanged), and calls Create with meta.ExpectedHead, or the head it
 // read when that is zero. A moved head is ErrConflict. A new credential value
 // in the doc is written to the served YAML secretStore first and only its
-// fingerprint is stored; the YAML is put back if no version is created. The
-// one log line is Create's.
+// fingerprint is stored; the YAML is put back if no version is created. A
+// new version is mirrored into the served YAML (mirrorHead), whose failure
+// never fails the save. The one log line on success is Create's.
 func (s *Server) publish(ctx context.Context, mutate func(*policyWire) error, meta dashboard.WriteMeta, source string) error {
 	author, err := s.writeAuthor(ctx)
 	if err != nil {
@@ -164,12 +165,16 @@ func (s *Server) publish(ctx context.Context, mutate func(*policyWire) error, me
 	if expected == 0 {
 		expected = head
 	}
-	if _, _, err := s.versions.Create(ctx, doc, author, meta.Message, source, expected); err != nil {
+	version, changed, err := s.versions.Create(ctx, doc, author, meta.Message, source, expected)
+	if err != nil {
 		if restore != nil {
 			restore()
 			s.refresh()
 		}
 		return err
+	}
+	if changed {
+		s.mirrorHead(ctx, version)
 	}
 	s.refresh()
 	s.reinjectExploreLLM()

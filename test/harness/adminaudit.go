@@ -83,10 +83,7 @@ func (h *H) AdminAuditStateFile(name string) bool {
 // dir the served file is the copy the control plane seeded there.
 func (h *H) EditControlPlaneConfig(edit func(string) string) string {
 	h.tb.Helper()
-	path := filepath.Join(h.root, "cp-config.yaml")
-	if h.wantAdminAudit || h.wantConsole {
-		path = filepath.Join(h.root, "cp-state", "config.yaml")
-	}
+	path := h.controlPlaneConfigPath()
 	cur, err := os.ReadFile(path)
 	if err != nil {
 		h.tb.Fatalf("harness: read control-plane config: %v", err)
@@ -101,4 +98,24 @@ func (h *H) EditControlPlaneConfig(edit func(string) string) string {
 	}
 	sum := sha256.Sum256(next)
 	return "file:" + hex.EncodeToString(sum[:])
+}
+
+// ReadControlPlaneConfig returns the control plane's served YAML as it is on
+// disk now (with a state dir, the copy the control plane seeded there).
+func (h *H) ReadControlPlaneConfig() string {
+	h.tb.Helper()
+	cur, err := os.ReadFile(h.controlPlaneConfigPath())
+	if err != nil {
+		h.tb.Fatalf("harness: read control-plane config: %v", err)
+	}
+	return string(cur)
+}
+
+// controlPlaneConfigPath is the served YAML: the seeded copy in the state dir
+// when the control plane has one, otherwise the config it was started with.
+func (h *H) controlPlaneConfigPath() string {
+	if h.wantAdminAudit || h.wantConsole || h.versionedPolicy {
+		return filepath.Join(h.root, "cp-state", "config.yaml")
+	}
+	return filepath.Join(h.root, "cp-config.yaml")
 }

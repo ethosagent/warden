@@ -77,10 +77,16 @@ func (s *Server) primeExternalEdit() {
 	s.ext.observe(s.cfg.PolicyPath)
 }
 
-// reloadPolicy is one tick of the file-mode re-read: reload the served policy
-// (served exactly as before), then audit a change no CP writer made.
+// reloadPolicy is one tick of the policy re-read: reload the served policy
+// (served exactly as before). In file mode it then audits a change no CP
+// writer made. In versioned mode the file is not served, so the mirror's
+// drift check (checkMirror, W-P1-PVER-05) replaces that check.
 func (s *Server) reloadPolicy(ctx context.Context) {
 	s.policy.Refresh()
+	if s.versions != nil {
+		s.checkMirror(ctx)
+		return
+	}
 	if s.auditRec == nil {
 		return
 	}

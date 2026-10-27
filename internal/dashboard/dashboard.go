@@ -55,6 +55,8 @@ type Server struct {
 	secrets    secrets.SecretProvider
 	mcp        MCPProvider          // nil when the MCP gateway is disabled
 	livePolicy func() config.Policy // nil = serve the static startup policy
+	// policyDrift reports served-YAML drift (SetPolicyDrift); nil = never.
+	policyDrift func() bool
 	// policyWriter applies an edited allow/deny policy; nil = read-only (worker /
 	// no editor).
 	policyWriter func(context.Context, config.Policy, WriteMeta) error
@@ -257,6 +259,13 @@ func (s *Server) SetLivePolicy(fn func() config.Policy) {
 	s.livePolicy = fn
 }
 
+// SetPolicyDrift supplies a function reporting whether the served YAML's
+// policy blocks differ from the head version (a hand edit that is not served),
+// for the drift banner. Unset, drift is always false.
+func (s *Server) SetPolicyDrift(fn func() bool) {
+	s.policyDrift = fn
+}
+
 // WriteMeta is the write metadata a dashboard writer receives with an edit:
 // the policy version the edit was based on (0 = whatever the head is when the
 // write runs) and an optional version message. The handlers pass the zero
@@ -388,6 +397,10 @@ type policyResponse struct {
 	// Editable reports whether this dashboard can save policy changes (true only
 	// on the control plane, where a policy writer is configured).
 	Editable bool `json:"editable"`
+	// Drift is true when the control plane's served YAML policy/settings blocks
+	// were edited by hand and differ from the head version it serves
+	// (--policy-store=versioned); the edit is not served.
+	Drift bool `json:"drift"`
 }
 
 // policyEditRequest is the body accepted by POST /dashboard/api/policy.
@@ -753,6 +766,7 @@ func (s *Server) getPolicy(w http.ResponseWriter, _ *http.Request) {
 		Allowlist: pol.Allowlist,
 		Denylist:  pol.Denylist,
 		Editable:  s.policyWriter != nil,
+		Drift:     s.policyDrift != nil && s.policyDrift(),
 	}
 	if resp.Allowlist == nil {
 		resp.Allowlist = []config.AllowlistEntry{}

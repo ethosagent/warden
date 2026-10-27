@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/ethosagent/warden/internal/config"
@@ -323,6 +324,56 @@ func TestWritersReceiveContextAndMeta(t *testing.T) {
 		s, ok := got[name]
 		if !ok || !s.ctx || s.meta != (WriteMeta{}) {
 			t.Errorf("%s writer: called=%v sawCtx=%v meta=%+v, want the request context and an empty WriteMeta", name, ok, s.ctx, s.meta)
+		}
+	}
+}
+
+// TestPolicyDriftField: GET /dashboard/api/policy reports drift from the
+// control plane's SetPolicyDrift func, and false without one (a worker).
+func TestPolicyDriftField(t *testing.T) {
+	var p policyResponse
+	doGetJSON(t, newTestServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}}), "/dashboard/api/policy", &p)
+	if p.Drift {
+		t.Error("drift should be false without a drift func")
+	}
+	var drift atomic.Bool
+	srv := NewServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
+	srv.SetPolicyDrift(drift.Load)
+	for _, want := range []bool{false, true, false} {
+		drift.Store(want)
+		var got policyResponse
+		doGetJSON(t, srv.Handler(), "/dashboard/api/policy", &got)
+		if got.Drift != want {
+			t.Errorf("drift = %v, want %v", got.Drift, want)
+		}
+	}
+}
+
+// TestPolicyDriftBannerServedHTML: the served console carries the drift
+// banner, hidden by default, pointing to `warden policy import`, and shown
+// only while /dashboard/api/policy reports drift.
+func TestPolicyDriftBannerServedHTML(t *testing.T) {
+	rr := doGet(t, newTestServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}}), "/dashboard/")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /dashboard/ = %d", rr.Code)
+	}
+	html := rr.Body.String()
+	start := strings.Index(html, `<div id="policyDriftBanner" role="status" hidden`)
+	if start < 0 {
+		t.Fatal("the served console lacks the hidden-by-default policyDriftBanner")
+	}
+	banner := html[start:]
+	banner = banner[:strings.Index(banner, "</div>")]
+	if !strings.Contains(banner, "<code>warden policy import</code>") {
+		t.Errorf("the drift banner does not point to warden policy import: %s", banner)
+	}
+	if !strings.Contains(html, `b.hidden=!(p&&p.drift===true)`) {
+		t.Error("renderPolicyDrift does not drive the banner from the drift field")
+	}
+	for _, call := range []string{"renderPolicyDrift(pol);", "renderPolicyDrift(p);"} {
+		if !strings.Contains(html, call) {
+			t.Errorf("the policy load/save path does not call %s", call)
 		}
 	}
 }
