@@ -715,7 +715,8 @@ func (im policyImport) record(ctx context.Context, servedYAML []byte, version in
 	}
 	v, err := im.store.Get(ctx, version)
 	if err != nil {
-		im.logger.Error("control plane: admin audit append failed", "action", actionPolicyInitialImport, "error", err)
+		im.logger.Error("control plane: cannot read the imported version for its admin audit row; no row appended",
+			"action", actionPolicyInitialImport, "version", version, "error", err)
 		return
 	}
 	sum := sha256.Sum256(servedYAML)
