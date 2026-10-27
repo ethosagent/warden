@@ -30,7 +30,12 @@ type exitError struct {
 	err  error
 }
 
-func (e *exitError) Error() string { return e.err.Error() }
+func (e *exitError) Error() string {
+	if e.err == nil {
+		return ""
+	}
+	return e.err.Error()
+}
 func (e *exitError) Unwrap() error { return e.err }
 
 // exitCode is the process exit code for an error returned by Execute.
@@ -49,6 +54,12 @@ type identityDeps struct {
 	readFile func(string) ([]byte, error)
 	openFile func(string) (io.ReadCloser, error)
 	stdin    io.Reader
+	// lookupEnv reads one parent variable for the `exec` child; nil selects
+	// os.LookupEnv. The parent environment is never enumerated (rule X3).
+	lookupEnv func(string) (string, bool)
+	// signals delivers the signals `exec` forwards; nil subscribes to the
+	// process's SIGTERM, SIGHUP, SIGINT and SIGQUIT.
+	signals func() (<-chan os.Signal, func())
 	// tune adjusts the client after construction (tests inject a fake sleeper).
 	tune func(*identityclient.Client)
 }
@@ -90,7 +101,7 @@ func newIdentityCmdWith(deps identityDeps) *cobra.Command {
 	pf.BoolVar(&f.verbose, "verbose", false, "log issuer, client id, scopes, expiry and a token fingerprint to stderr (never a token)")
 
 	r := &identityRunner{deps: deps, f: f}
-	cmd.AddCommand(r.loginCmd(), r.tokenCmd(), r.statusCmd(), r.envCmd(), r.logoutCmd())
+	cmd.AddCommand(r.loginCmd(), r.tokenCmd(), r.statusCmd(), r.envCmd(), r.logoutCmd(), r.execCmd())
 	return cmd
 }
 
