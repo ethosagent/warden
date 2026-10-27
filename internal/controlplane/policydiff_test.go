@@ -341,3 +341,37 @@ func shuffled[T any](rng *rand.Rand, in []T) []T {
 	rng.Shuffle(len(out), func(i, j int) { out[i], out[j] = out[j], out[i] })
 	return out
 }
+
+// TestPolicyDiffJSONShape pins the serialized shape W-P1-PVER-03 serves, so a
+// renamed field or a changed omitempty fails here rather than in a client.
+func TestPolicyDiffJSONShape(t *testing.T) {
+	a := policyWire{
+		Allowlist: []config.AllowlistEntry{{Domain: "a.example.com", Port: 443, RateLimit: "1/s"}},
+		Settings:  &config.SettingsWire{Judge: &config.JudgeSettings{Enabled: true, Model: "m1"}},
+	}
+	b := policyWire{
+		Allowlist: []config.AllowlistEntry{{Domain: "a.example.com", Port: 443, RateLimit: "2/s"}},
+		Denylist:  []config.DenylistEntry{{Domain: "d.example.com"}},
+		Settings:  &config.SettingsWire{Judge: &config.JudgeSettings{Enabled: false, Model: "m1"}},
+	}
+	got, err := json.Marshal(mustDiff(t, a, b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = `{"allow":[{"key":"a.example.com|443","kind":"changed",` +
+		`"before":{"domain":"a.example.com","port":443,"rateLimit":"1/s"},` +
+		`"after":{"domain":"a.example.com","port":443,"rateLimit":"2/s"},"countBefore":1,"countAfter":1}],` +
+		`"deny":[{"key":"d.example.com|0","kind":"added","after":{"domain":"d.example.com","port":0},"countBefore":0,"countAfter":1}],` +
+		`"settings":[{"path":"settings.judge.enabled","kind":"changed","before":true,"after":false}]}`
+	if string(got) != want {
+		t.Fatalf("JSON shape:\n got %s\nwant %s", got, want)
+	}
+	// An empty diff serializes as empty lists, never null.
+	empty, err := json.Marshal(mustDiff(t, policyWire{}, policyWire{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(empty) != `{"allow":[],"deny":[],"settings":[]}` {
+		t.Fatalf("empty diff JSON: %s", empty)
+	}
+}
