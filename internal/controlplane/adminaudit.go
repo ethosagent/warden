@@ -20,9 +20,13 @@ import (
 // adminaudit.OpenForCLI) all open warden-cp.db with this one list; a feature
 // that adds tables appends its migrations here.
 func StateMigrations() []cpstate.Migration {
-	migs := append(SessionMigrations(), OIDCPendingMigrations()...)
+	var migs []cpstate.Migration
+	migs = append(migs, SessionMigrations()...)
+	migs = append(migs, OIDCPendingMigrations()...)
+	migs = append(migs, PolicyStoreMigrations()...)
 	migs = append(migs, adminaudit.Migrations()...)
-	return append(migs, WorkerTokenMigrations()...)
+	migs = append(migs, WorkerTokenMigrations()...)
+	return migs
 }
 
 // checkAdminAuditFlags validates the admin audit config against the flags
