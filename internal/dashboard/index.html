@@ -1271,12 +1271,62 @@ function relTime(iso){
   const d=Math.round(h/24); return d+"d ago";
 }
 function hhmmss(iso){ if(!iso) return "—"; const d=new Date(iso); if(isNaN(d.getTime())) return "—"; return d.toTimeString().slice(0,8); }
-async function jget(url){ const r=await fetch(url); if(!r.ok) throw new Error("status "+r.status); return r.json(); }
+/* api:begin */
+/* ---------- api(method, url, body): the one fetch wrapper; nothing else calls fetch() ----------
+   GET /auth/me (once, cached) decides how this page authenticates:
+   - 200: console.auth oidc with a live session. The response's csrf is sent as X-Warden-CSRF on
+     every state-changing request; a 401 sends the browser to /auth/login?next=<this page>.
+   - 401: oidc, but not signed in: go to /auth/login.
+   - 404: console.auth none (or a worker dashboard). Writes take the bearer path, authFetch.
+   - anything else (network error, 5xx): no CSRF, no prompt; requests go out as they are.
+   body is JSON-encoded unless it is already a string; either way it is sent as application/json.
+   The returned Response is fetch()'s, so callers check r.ok / r.status and read r.json(). */
+const SAFE_METHODS={GET:1,HEAD:1,OPTIONS:1};
+let authMode='';     // 'oidc' | 'none' | 'unknown', set by authInit
+let csrfToken='';
+let me=null;         // the /auth/me body in oidc mode: {sub,email,role,authMethod,csrf,expiresAt}
+let authReady=null;
+function loginRedirect(){
+  location.assign('/auth/login?next='+encodeURIComponent(location.pathname+location.search+location.hash));
+}
+function authInit(){
+  if(authReady) return authReady;
+  authReady=(async()=>{
+    let r;
+    try{ r=await fetch('/auth/me',{credentials:'same-origin',cache:'no-store'}); }
+    catch(e){ authMode='unknown'; return; }
+    if(r.ok){
+      try{ me=await r.json(); }catch(e){ me=null; }
+      if(me&&me.csrf){ authMode='oidc'; csrfToken=me.csrf; } else { authMode='unknown'; }
+      return;
+    }
+    if(r.status===404){ authMode='none'; return; }
+    if(r.status===401){ authMode='oidc'; loginRedirect(); return; }
+    authMode='unknown';
+  })();
+  return authReady;
+}
+async function api(method,url,body){
+  await authInit();
+  const h=new Headers();
+  const o={method:method,headers:h,credentials:'same-origin'};
+  if(body!==undefined){
+    h.set('Content-Type','application/json');
+    o.body=typeof body==='string'?body:JSON.stringify(body);
+  }
+  if(authMode==='none') return authFetch(url,o);
+  if(csrfToken&&!SAFE_METHODS[method]) h.set('X-Warden-CSRF',csrfToken);
+  const r=await fetch(url,o);
+  if(r.status===401&&authMode==='oidc') loginRedirect();
+  return r;
+}
 
-/* ---------- write auth: the control plane and the worker admin listener need their bearer token for every change ----------
-   The token is asked for once and kept in sessionStorage (this tab only; never the persistent store
-   or a cookie). It travels in the Authorization header, so a cross-site form cannot make the
-   browser send it. The write goes out without a token first (a dashboard with no guard needs none); only a 401 prompts, then the write is retried once with the token. A 401 clears the stored token. Reads stay open. */
+/* ---------- none mode: the control plane and the worker admin listener need their bearer token for every change ----------
+   Reached only through api() when /auth/me is 404. The token is asked for once and kept in
+   sessionStorage (this tab only; never the persistent store or a cookie). It travels in the
+   Authorization header, so a cross-site form cannot make the browser send it. The request goes out
+   without a token first (a dashboard with no guard needs none); only a 401 prompts, then it is
+   retried once with the token. A 401 clears the stored token. Reads stay open. */
 const CP_TOKEN_KEY='wardenCpToken';
 async function authFetch(url,opts){
   const o=Object.assign({},opts||{});
@@ -1295,6 +1345,8 @@ async function authFetch(url,opts){
   if(r.status===401) sessionStorage.removeItem(CP_TOKEN_KEY);
   return r;
 }
+/* api:end */
+async function jget(url){ const r=await api('GET',url); if(!r.ok) throw new Error("status "+r.status); return r.json(); }
 
 /* ---------- shared pill/chip renderers (used by live + preview) ---------- */
 const CLASS_CHIP = { credentials:'c-cred','pii.contact':'c-pii','pii.identity':'c-pii','pii.financial':'c-pii', source_code:'c-code', infrastructure:'c-infra' };
@@ -1399,7 +1451,7 @@ async function onModeToggleClick(mode){
   if(act.dlp) merged.dlp=Object.assign({}, s.dlp, {mode});
   if(act.mcp) merged.mcp=Object.assign({}, s.mcp, {mode});
   try{
-    const r=await authFetch('/dashboard/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(merged)});
+    const r=await api('PUT','/dashboard/api/settings',merged);
     if(!r.ok){ let m='status '+r.status; try{ const e=await r.json(); if(e&&e.error) m=e.error; }catch(_e){} throw new Error(m); }
     applyMode(mode);
     if(currentTab()==='guardrails') loadGuardrails();
@@ -1869,7 +1921,7 @@ async function saveExploreProvider(){
   const merged=Object.assign({}, cur, {explore:{llmProvider:sel.value}});
   const note=document.getElementById('exploreProviderNote');
   try{
-    const r=await authFetch('/dashboard/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(merged)});
+    const r=await api('PUT','/dashboard/api/settings',merged);
     if(!r.ok){ let m='status '+r.status; try{ const e=await r.json(); if(e&&e.error) m=e.error; }catch(_e){} throw new Error(m); }
     const d=await r.json().catch(()=>({})); window.__exploreSettings=(d&&d.settings)||merged;
     if(note){ note.textContent='saved ✓ — takes effect now'; note.style.color='var(--teal)'; setTimeout(()=>{ note.textContent=''; note.style.color=''; },2500); }
@@ -2008,7 +2060,7 @@ async function generateSqlFromNL(){
   const orig=btn?btn.textContent:'';
   if(btn){ btn.disabled=true; btn.textContent='generating…'; }
   try{
-    const r=await authFetch('/dashboard/api/query/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question})});
+    const r=await api('POST','/dashboard/api/query/generate',{question});
     const d=await r.json().catch(()=>({error:'status '+r.status}));
     if(r.ok && d && d.sql){
       box.value=d.sql;
@@ -2039,7 +2091,7 @@ async function runQuery(){
   const sql=ta.value.trim();
   out.innerHTML='<div class="loading-note">running…</div>'; if(meta) meta.textContent='running…';
   try{
-    const r=await authFetch('/dashboard/api/query',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sql,maxRows:1000})});
+    const r=await api('POST','/dashboard/api/query',{sql,maxRows:1000});
     const d=await r.json().catch(()=>({error:'status '+r.status}));
     if(!r.ok){ out.innerHTML='<div class="note" style="color:#ff8098">✕ '+esc((d&&d.error)||('status '+r.status))+'</div>'; if(meta) meta.textContent='error'; return; }
     renderQueryResult(out,meta,d);
@@ -2206,7 +2258,7 @@ async function saveSettings(btnId, statusId){
   else if(sbb==='echo'){ body.secrets={ backend:'echo' }; }
   else { delete body.secrets; }
   try{
-    const r=await authFetch('/dashboard/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const r=await api('POST','/dashboard/api/settings',body);
     if(!r.ok){ const e=await r.json().catch(()=>({error:'status '+r.status})); throw new Error(e.error||('status '+r.status)); }
     const d=await r.json(); lastSettings=(d&&d.settings)||body; settingsEditable=!!(d&&d.editable);
     renderSettings();
@@ -2457,7 +2509,7 @@ async function saveSecret(){
   if(!key||!value){ if(msg){ msg.textContent='Key and value are required.'; msg.style.color='var(--amber)'; } return; }
   if(msg){ msg.textContent='saving…'; msg.style.color=''; }
   try{
-    const r=await authFetch('/dashboard/api/secretstore',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:key,value:value})});
+    const r=await api('POST','/dashboard/api/secretstore',{key:key,value:value});
     if(!r.ok && r.status!==204){ let m='status '+r.status; try{ const e=await r.json(); if(e&&e.error) m=e.error; }catch(_e){} throw new Error(m); }
     setVal('secretKeyInput',''); setVal('secretValueInput','');
     if(msg) msg.textContent='';
@@ -2468,7 +2520,7 @@ async function saveSecret(){
 async function deleteSecretRow(key){
   if(!window.confirm('Delete secret '+key+'? Warden will stop injecting it at the edge.')) return;
   try{
-    const r=await authFetch('/dashboard/api/secretstore?key='+encodeURIComponent(key),{method:'DELETE'});
+    const r=await api('DELETE','/dashboard/api/secretstore?key='+encodeURIComponent(key));
     if(!r.ok && r.status!==204){ throw new Error('status '+r.status); }
     loadSecrets();
   }catch(err){ window.alert('Delete failed: '+err.message); }
@@ -2528,7 +2580,7 @@ function flashBtn(id,txt){
   setTimeout(()=>{ b.textContent=old; b.disabled=false; }, 1800);
 }
 async function putSettings(merged){
-  const r=await authFetch('/dashboard/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(merged)});
+  const r=await api('PUT','/dashboard/api/settings',merged);
   if(!r.ok){ let m='status '+r.status; try{ const e=await r.json(); if(e&&e.error) m=e.error; }catch(_e){} throw new Error(m); }
   const d=await r.json().catch(()=>({}));
   gr.settings=(d&&d.settings)||merged; gr.settingsEditable=!!(d&&d.editable);
@@ -2575,7 +2627,7 @@ async function removePolicyEntry(list,idx){
 }
 async function savePolicy(){
   try{
-    const r=await authFetch('/dashboard/api/policy',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({allowlist:gr.policy.allowlist,denylist:gr.policy.denylist})});
+    const r=await api('PUT','/dashboard/api/policy',{allowlist:gr.policy.allowlist,denylist:gr.policy.denylist});
     if(!r.ok){ let m='status '+r.status; try{ const e=await r.json(); if(e&&e.error) m=e.error; }catch(_e){} throw new Error(m); }
     const p=await r.json();
     gr.policy=p; gr.policy.allowlist=p.allowlist||[]; gr.policy.denylist=p.denylist||[]; gr.policyEditable=!!p.editable;
@@ -3038,7 +3090,7 @@ async function saveLLMProviders(){
   const body=gr.llmp.providers.map(p=>({ name:p.name, baseURL:p.baseURL, model:p.model, apiKeyEnv:p.apiKeyEnv, timeoutSeconds:p.timeoutSeconds||0 }));
   llmpMsg('saving…',true);
   try{
-    const r=await authFetch('/dashboard/api/llmproviders',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const r=await api('PUT','/dashboard/api/llmproviders',body);
     if(!r.ok){ let m='status '+r.status; try{ const e=await r.json(); if(e&&e.error) m=e.error; }catch(_e){} throw new Error(m); }
     gr.llmp=await r.json(); gr.llmp.providers=gr.llmp.providers||[];
     renderLLMProviders();
@@ -3329,7 +3381,7 @@ async function saveDetection(){
   if(errs.length){ if(msg){ msg.textContent='✕ '+errs[0]; msg.style.color='var(--amber)'; } return; }
   if(msg){ msg.textContent='saving…'; msg.style.color=''; }
   try{
-    const r=await authFetch('/dashboard/api/detection',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(doc)});
+    const r=await api('PUT','/dashboard/api/detection',doc);
     if(!r.ok){ let m='status '+r.status; try{ const e=await r.json(); if(e&&e.error) m=e.error; }catch(_e){} throw new Error(m); }
     detectionData=Object.assign({missing:false}, await r.json());
     renderDetection();
@@ -3393,7 +3445,7 @@ async function verifyReceipt(){
   if(!raw){ res.classList.add('bad'); res.innerHTML='Paste a receipt JSON first.'; return; }
   res.innerHTML='Verifying…';
   try{
-    const r=await authFetch('/dashboard/api/audit/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:raw});
+    const r=await api('POST','/dashboard/api/audit/verify',raw);
     const d=await r.json().catch(()=>({valid:false}));
     if(d&&d.valid){ res.classList.remove('bad'); res.innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="width:18px;height:18px"><path d="M20 6L9 17l-5-5"/></svg>Signature valid — Ed25519 verified'; }
     else { res.classList.add('bad'); res.innerHTML='✗ Signature invalid — does not verify against the trusted key'; }
@@ -3527,7 +3579,7 @@ async function saveIntegration(def){
   if(!match.length && st){ st.textContent='warning: empty match = no alerts'; st.style.color='var(--amber)'; }
   const body={ type:def.type, name:(val('intg-name')||'').trim(), config:config, match:match };
   try{
-    const r=await authFetch('/dashboard/api/integrations',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const r=await api('POST','/dashboard/api/integrations',body);
     if(!r.ok){ const e=await r.json().catch(()=>({error:'status '+r.status})); throw new Error(e.error||('status '+r.status)); }
     integrationsData=await r.json();
     const form=document.getElementById('integrations-form'); if(form) form.style.display='none';
@@ -3537,7 +3589,7 @@ async function saveIntegration(def){
 async function deleteIntegration(name){
   if(!window.confirm('Delete integration "'+name+'"?')) return;
   try{
-    const r=await authFetch('/dashboard/api/integrations?name='+encodeURIComponent(name),{method:'DELETE'});
+    const r=await api('DELETE','/dashboard/api/integrations?name='+encodeURIComponent(name));
     if(!r.ok){ const e=await r.json().catch(()=>({error:'status '+r.status})); throw new Error(e.error||('status '+r.status)); }
     integrationsData=await r.json();
     renderIntegrations();
