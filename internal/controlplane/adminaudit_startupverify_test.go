@@ -3,10 +3,12 @@ package controlplane
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ethosagent/warden/internal/adminaudit"
 	"github.com/ethosagent/warden/internal/clock"
@@ -145,5 +147,21 @@ func TestStartupVerifyNilSafe(t *testing.T) {
 	s.verifyAdminAuditAtStartup(context.Background())
 	if logLine(buf.String(), "admin audit startup verification could not run") == nil {
 		t.Errorf("a closed database was not logged:\n%s", buf.String())
+	}
+}
+
+// TestVerifyFailedFinding: the Finding names the seq and reason of a failed
+// check, and an unreadable chain gets reason verify_error with no error text.
+func TestVerifyFailedFinding(t *testing.T) {
+	now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	f := verifyFailedFinding(adminaudit.Result{FirstBadSeq: 9, Reason: adminaudit.ReasonSignature, HeadSeq: 12}, nil, now)
+	if f.RuleID != adminAuditVerifyFailedRule || f.Severity != integration.SevCritical || f.Ts != now ||
+		string(f.Evidence) != "first_bad_seq=9 reason=signature head_seq=12" || !strings.Contains(f.Summary, "seq 9") ||
+		!strings.HasPrefix(f.DedupKey, adminAuditVerifyFailedRule+":") {
+		t.Errorf("finding = %+v", f)
+	}
+	f = verifyFailedFinding(adminaudit.Result{}, errors.New("disk I/O error at /secret/path"), now)
+	if !strings.Contains(string(f.Evidence), "reason="+verifyErrorReason) || strings.Contains(f.Summary+string(f.Evidence), "/secret/path") {
+		t.Errorf("error finding = %+v, want reason verify_error and no error text", f)
 	}
 }

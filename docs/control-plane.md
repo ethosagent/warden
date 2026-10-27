@@ -289,7 +289,8 @@ so leaving it set can never rotate twice. The flag without
 newest 1000 rows and the head signature. A failure logs
 `admin audit chain verification failed` at ERROR (with `first_bad_seq` and `reason`)
 and publishes an `admin_audit_verify_failed` Finding (severity critical) to the alert
-pipeline. The control plane still starts and serves `/policy`.
+pipeline; a chain that cannot be read at all raises the same Finding with reason
+`verify_error`. The control plane still starts and serves `/policy`.
 
 **Offline verify and export.** Two subcommands check the chain without a running
 control plane, for example after a restore or when the control plane is down. Both

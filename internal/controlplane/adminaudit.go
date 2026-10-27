@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"time"
 
 	"github.com/ethosagent/warden/internal/adminaudit"
 	"github.com/ethosagent/warden/internal/clock"
@@ -87,7 +88,10 @@ func (s *Server) verifyAdminAuditAtStartup(ctx context.Context) {
 	logger := s.cfg.Logger
 	res, err := st.VerifyTail(ctx, startupVerifyRows)
 	if err != nil {
-		logger.Error("admin audit startup verification could not run", "error", err)
+		// A chain the CP cannot even read is as suspicious as one that fails.
+		logger.Error("admin audit startup verification could not run", "error", err,
+			"hint", "run `warden control-plane admin-audit verify --state-dir <dir>`")
+		s.publishFinding(verifyFailedFinding(adminaudit.Result{}, err, s.cfg.Clock.Now()))
 		return
 	}
 	if res.OK {
@@ -98,16 +102,35 @@ func (s *Server) verifyAdminAuditAtStartup(ctx context.Context) {
 		"first_bad_seq", res.FirstBadSeq, "reason", res.Reason,
 		"head_seq", res.HeadSeq, "checked", res.Checked,
 		"hint", "stop changes and run `warden control-plane admin-audit verify --state-dir <dir>`; see docs/runbooks/admin-audit-key.md")
-	s.publishFinding(integration.Finding{
+	s.publishFinding(verifyFailedFinding(res, nil, s.cfg.Clock.Now()))
+}
+
+// verifyErrorReason is the Finding reason when the startup check could not
+// read the chain at all.
+const verifyErrorReason = "verify_error"
+
+// verifyFailedFinding builds the admin_audit_verify_failed Finding for a
+// failed result, or for verifyErr when the check could not run. It carries
+// only the seq, the reason and the head seq: no error text, no row content.
+func verifyFailedFinding(res adminaudit.Result, verifyErr error, now time.Time) integration.Finding {
+	reason := res.Reason
+	if verifyErr != nil {
+		reason = verifyErrorReason
+	}
+	summary := fmt.Sprintf("admin audit chain verification failed at seq %d (%s)", res.FirstBadSeq, reason)
+	if verifyErr != nil {
+		summary = "admin audit chain verification could not read the chain (" + reason + ")"
+	}
+	return integration.Finding{
 		RuleID:   adminAuditVerifyFailedRule,
 		Category: "security",
 		Severity: integration.SevCritical,
 		Subject:  integration.Subject{Tool: "admin_audit"},
-		Summary:  fmt.Sprintf("admin audit chain verification failed at seq %d (%s)", res.FirstBadSeq, res.Reason),
-		Evidence: integration.Evidence(fmt.Sprintf("first_bad_seq=%d reason=%s head_seq=%d", res.FirstBadSeq, res.Reason, res.HeadSeq)),
+		Summary:  summary,
+		Evidence: integration.Evidence(fmt.Sprintf("first_bad_seq=%d reason=%s head_seq=%d", res.FirstBadSeq, reason, res.HeadSeq)),
 		DedupKey: adminAuditVerifyFailedRule + ":admin_audit",
-		Ts:       s.cfg.Clock.Now(),
-	})
+		Ts:       now,
+	}
 }
 
 // publishFinding publishes f on the current alert manager's bus. Nil-safe: a

@@ -48,8 +48,8 @@ warden control-plane admin-audit export --state-dir /data --out /backup/admin-au
 
 The control plane also checks the newest 1000 rows and the head signature at every
 start. A failure logs `admin audit chain verification failed` at ERROR with
-`first_bad_seq` and raises an `admin_audit_verify_failed` alert, but the control plane
-keeps serving policy. When that happens, run a full `verify` and investigate before
+`first_bad_seq` and raises an `admin_audit_verify_failed` alert (reason `verify_error`
+when the chain could not be read at all), but the control plane keeps serving policy. When that happens, run a full `verify` and investigate before
 any key change.
 
 ## Manual key change (new segment)

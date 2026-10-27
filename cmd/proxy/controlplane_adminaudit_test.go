@@ -154,6 +154,7 @@ func TestAdminAuditCmdUsageErrors(t *testing.T) {
 	empty := t.TempDir()
 	for name, args := range map[string][]string{
 		"no subcommand":      {"control-plane", "admin-audit"},
+		"unknown subcommand": {"control-plane", "admin-audit", "verfy", "--state-dir", dir},
 		"no state dir":       {"control-plane", "admin-audit", "verify"},
 		"unknown flag":       {"control-plane", "admin-audit", "verify", "--state-dir", dir, "--nope"},
 		"positional arg":     {"control-plane", "admin-audit", "verify", "--state-dir", dir, "extra"},

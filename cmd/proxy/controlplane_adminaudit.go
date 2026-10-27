@@ -31,7 +31,7 @@ func newAdminAuditCmd() *cobra.Command {
 			"<state-dir>/warden-cp.db. They open the database read-only, take public keys " +
 			"from the chain (so they work after a key change without any key file) and " +
 			"never load the signing key. Safe to run with the control plane stopped or running.",
-		Args: cobra.NoArgs,
+		Args: usageArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return usageErr(fmt.Errorf("admin-audit needs a subcommand: verify or export"))
 		},
