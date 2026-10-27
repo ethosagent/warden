@@ -20,6 +20,7 @@ import (
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/clock"
 	"github.com/ethosagent/warden/internal/config"
+	"github.com/ethosagent/warden/internal/cpstate"
 	"github.com/ethosagent/warden/internal/detect"
 	"github.com/ethosagent/warden/internal/integration"
 	"github.com/ethosagent/warden/internal/observability"
@@ -130,6 +131,21 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		logger.Warn("control-plane: no token configured; serving WITHOUT auth (set --token-env for production)")
 	}
 
+	// Durable CP state (sessions, audit, tokens, ... register migrations here as
+	// they land). Only with --state-dir; a corrupt file stops startup so state is
+	// never silently replaced. Closed after the HTTP server drains (defers run
+	// after Shutdown returns).
+	var state *cpstate.DB
+	if stateDir != "" {
+		statePath := filepath.Join(stateDir, "warden-cp.db")
+		state, err = cpstate.Open(ctx, statePath, nil)
+		if err != nil {
+			return fail(fmt.Errorf("control-plane: state db: %w", err))
+		}
+		defer func() { _ = state.Close() }()
+		logger.Info("control plane state db", "db", statePath, "applied", state.Applied())
+	}
+
 	// Build the fleet analytics store. sqlite (default) persists events and powers
 	// the read-only Query Builder; memory is ephemeral. The DB path defaults under
 	// --state-dir (a writable volume) when set, else the working directory.
@@ -190,6 +206,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	}
 
 	srv := New(Config{
+		State:        state,
 		PolicyPath:   servedPath,
 		Token:        token,
 		MaxEvents:    maxEvents,

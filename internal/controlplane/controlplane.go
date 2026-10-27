@@ -26,6 +26,7 @@ import (
 	"github.com/ethosagent/warden/internal/alertpipeline"
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/config"
+	"github.com/ethosagent/warden/internal/cpstate"
 	"github.com/ethosagent/warden/internal/dashboard"
 	"github.com/ethosagent/warden/internal/detect"
 	"github.com/ethosagent/warden/internal/integration"
@@ -34,6 +35,11 @@ import (
 
 // Config configures the control-plane server.
 type Config struct {
+	// State is the durable control-plane state database (<state-dir>/warden-cp.db).
+	// Nil without --state-dir, in which case behaviour is unchanged. Run opens
+	// it and closes it after the HTTP server drains; feature stores build on
+	// State.SQL() and register their migrations through cpstate.Open.
+	State *cpstate.DB
 	// PolicyPath is the YAML file whose allow/deny policy is served to workers.
 	// It is re-read on each /policy request so edits propagate on the next poll.
 	PolicyPath string

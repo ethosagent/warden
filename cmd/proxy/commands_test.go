@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -119,6 +120,31 @@ func TestControlPlaneSubcommand_StateDir(t *testing.T) {
 	// The served config was seeded into the state dir.
 	if _, err := os.Stat(filepath.Join(stateDir, "config.yaml")); err != nil {
 		t.Errorf("served config not seeded into state dir: %v", err)
+	}
+}
+
+// TestControlPlaneCorruptStateDB covers the fail-closed exit path: a warden-cp.db
+// that is not a database makes the command return an error naming the file
+// (main turns any command error into a non-zero exit).
+func TestControlPlaneCorruptStateDB(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "state")
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dbFile := filepath.Join(stateDir, "warden-cp.db")
+	if err := os.WriteFile(dbFile, bytes.Repeat([]byte("\x01garbage"), 600), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := executeRoot(t, "control-plane",
+		"--config", writeTempConfig(t, minimalConfig),
+		"--listen", "127.0.0.1:0",
+		"--state-dir", stateDir,
+	)
+	if err == nil {
+		t.Fatal("control-plane with a corrupt state db returned nil, want an error")
+	}
+	if !strings.Contains(err.Error(), dbFile) {
+		t.Errorf("error %q does not name %s", err, dbFile)
 	}
 }
 
