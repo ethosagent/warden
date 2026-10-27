@@ -2,6 +2,7 @@ package compose
 
 import (
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -27,6 +28,8 @@ type composeService struct {
 	Entrypoint  yaml.Node `yaml:"entrypoint"`
 	Environment yaml.Node `yaml:"environment"`
 	DependsOn   yaml.Node `yaml:"depends_on"`
+	NetworkMode string    `yaml:"network_mode"`
+	Volumes     []string  `yaml:"volumes"`
 }
 
 func loadCompose(t *testing.T, name string) (composeFile, string) {
@@ -247,5 +250,127 @@ func TestComposeEnvExampleMatchesDefaults(t *testing.T) {
 	}
 	if !regexp.MustCompile(`^dev-`).MatchString(got["WARDEN_CP_ADMIN_TOKEN"]) {
 		t.Errorf("WARDEN_CP_ADMIN_TOKEN is not an obvious dev placeholder")
+	}
+}
+
+// The remaining recipes (W-P1-WTOK-11) follow the same pattern. Each runs one
+// control plane and one worker, so the worker holds WARDEN_WORKER_1_TOKEN.
+var singleWorkerRecipes = []struct {
+	file, cp, worker, proxyID string
+}{
+	{"docker-compose.yml", "control-plane", "proxy", "warden-worker"},
+	{"docker-compose.hermes.yml", "control-plane", "warden", "hermes-worker"},
+	{"docker-compose.openclaw.yml", "control-plane", "warden", "openclaw-worker"},
+	{"docker-compose.zeroclaw.yml", "control-plane", "warden", "zeroclaw-worker"},
+	{"docker-compose.ethos.yml", "control-plane", "worker", "ethos-worker"},
+}
+
+func TestRecipesUsePerWorkerTokens(t *testing.T) {
+	for _, tc := range singleWorkerRecipes {
+		t.Run(tc.file, func(t *testing.T) {
+			f, text := loadCompose(t, tc.file)
+			if strings.Contains(text, "WARDEN_CP_TOKEN") {
+				t.Errorf("%s still mentions WARDEN_CP_TOKEN", tc.file)
+			}
+			if strings.Contains(text, "--token-env") {
+				t.Errorf("%s still passes --token-env", tc.file)
+			}
+
+			cp := f.Services[tc.cp]
+			cmd := words(cp.Command)
+			for _, want := range []string{"--require-worker-tokens", "--admin-token-env=WARDEN_CP_ADMIN_TOKEN", "--ca-cert=", "--ca-key=", "--state-dir=/data"} {
+				if !strings.Contains(cmd, want) {
+					t.Errorf("%s: control-plane command lacks %s: %s", tc.file, want, cmd)
+				}
+			}
+			if got := conditions(t, cp.DependsOn)["cp-bootstrap"]; got != "service_completed_successfully" {
+				t.Errorf("%s: control-plane depends_on cp-bootstrap with %q, want service_completed_successfully", tc.file, got)
+			}
+			if !strings.HasPrefix(env(t, cp.Environment)["WARDEN_CP_ADMIN_TOKEN"], "${WARDEN_CP_ADMIN_TOKEN:-") {
+				t.Errorf("%s: control-plane WARDEN_CP_ADMIN_TOKEN = %q, want a ${WARDEN_CP_ADMIN_TOKEN:-dev} default", tc.file, env(t, cp.Environment)["WARDEN_CP_ADMIN_TOKEN"])
+			}
+
+			w := f.Services[tc.worker]
+			if got := conditions(t, w.DependsOn)["cp-bootstrap"]; got != "service_completed_successfully" {
+				t.Errorf("%s: %s depends_on cp-bootstrap with %q, want service_completed_successfully", tc.file, tc.worker, got)
+			}
+			m := tokenVar.FindStringSubmatch(env(t, w.Environment)["WARDEN_WORKER_TOKEN"])
+			if m == nil || m[1] != "WARDEN_WORKER_1_TOKEN" {
+				t.Fatalf("%s: %s WARDEN_WORKER_TOKEN is not ${WARDEN_WORKER_1_TOKEN:-<wwt_ dev value>}", tc.file, tc.worker)
+			}
+			if got := env(t, w.Environment)["WARDEN_PROXY_ID"]; got != tc.proxyID {
+				t.Errorf("%s: %s WARDEN_PROXY_ID = %q, want %q", tc.file, tc.worker, got, tc.proxyID)
+			}
+
+			boot, ok := f.Services["cp-bootstrap"]
+			if !ok {
+				t.Fatalf("%s has no cp-bootstrap service", tc.file)
+			}
+			bcmd := words(boot.Entrypoint) + " " + words(boot.Command)
+			if !strings.Contains(bcmd, "--proxy-id "+tc.proxyID) {
+				t.Errorf("%s: cp-bootstrap does not register %s", tc.file, tc.proxyID)
+			}
+			if !strings.Contains(bcmd, "--from-env WARDEN_WORKER_1_TOKEN") || !strings.Contains(bcmd, "token create") {
+				t.Errorf("%s: cp-bootstrap does not import WARDEN_WORKER_1_TOKEN with token create --from-env", tc.file)
+			}
+			if env(t, boot.Environment)["WARDEN_WORKER_1_TOKEN"] != env(t, w.Environment)["WARDEN_WORKER_TOKEN"] {
+				t.Errorf("%s: cp-bootstrap and %s disagree on the worker token default", tc.file, tc.worker)
+			}
+			if got := boot.NetworkMode; got != "none" {
+				t.Errorf("%s: cp-bootstrap network_mode = %q, want none", tc.file, got)
+			}
+			// The bootstrap must write to the volume the control plane mounts at /data.
+			if vol := dataVolume(t, cp.Volumes); vol == "" || !strings.Contains(strings.Join(boot.Volumes, " "), vol+":/data") {
+				t.Errorf("%s: cp-bootstrap does not mount the control plane's state volume %q at /data", tc.file, vol)
+			}
+		})
+	}
+}
+
+// dataVolume is the named volume the service mounts at /data.
+func dataVolume(t *testing.T, vols []string) string {
+	t.Helper()
+	for _, v := range vols {
+		if name, rest, ok := strings.Cut(v, ":"); ok && strings.HasPrefix(rest, "/data") && !strings.HasPrefix(name, ".") {
+			return name
+		}
+	}
+	return ""
+}
+
+// The shipped examples carry no reference to the retired shared token.
+func TestNoSharedCPTokenInShippedExamples(t *testing.T) {
+	var paths []string
+	for _, glob := range []string{composeDir + "*", "../../../configs/*"} {
+		m, err := filepath.Glob(glob)
+		if err != nil {
+			t.Fatal(err)
+		}
+		paths = append(paths, m...)
+	}
+	paths = append(paths, "../../../docs/demo-dlp.md")
+	for _, p := range paths {
+		if st, err := os.Stat(p); err != nil || st.IsDir() {
+			continue
+		}
+		raw, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(raw), "WARDEN_CP_TOKEN") {
+			t.Errorf("%s mentions WARDEN_CP_TOKEN", p)
+		}
+	}
+}
+
+func TestSampleWorkerConfigsUseWorkerTokenEnv(t *testing.T) {
+	for _, name := range []string{"config.example-worker.yaml", "config.recipe-worker.yaml", "config.openrouter-worker.yaml"} {
+		raw, err := os.ReadFile("../../../configs/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n := strings.Count(string(raw), "tokenEnv: WARDEN_WORKER_TOKEN"); n != 2 {
+			t.Errorf("%s: %d tokenEnv: WARDEN_WORKER_TOKEN lines, want 2", name, n)
+		}
 	}
 }

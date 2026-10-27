@@ -1,8 +1,11 @@
 # Override for testing with OpenRouter.
 # The base file provides the control-plane + proxy (worker) topology; this
 # override only re-points the proxy at the OpenRouter worker config + key.
-# Usage:
-#   WARDEN_CP_TOKEN=dev-token \
+# Tokens: the base file's per-worker tokens apply unchanged (cp-bootstrap registers
+# WARDEN_WORKER_1_TOKEN, the proxy reads it as WARDEN_WORKER_TOKEN, the control plane
+# runs --require-worker-tokens with WARDEN_CP_ADMIN_TOKEN). The defaults are dev
+# placeholders (.env.example); export your own to override.
+# Usage (set OPENROUTER_API_KEY first):
 #   docker compose -f docker-compose.yml -f docker-compose.openrouter.yml up
 
 services:
