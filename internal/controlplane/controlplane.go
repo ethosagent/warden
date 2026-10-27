@@ -232,8 +232,8 @@ func New(cfg Config) *Server {
 		central:  store,
 		registry: registry,
 		mcp:      newMCPStore(),
-		// The policy-serving component owns the watch and performs the initial load
-		// so /policy and the dashboard have policy immediately (unchanged behavior).
+		// The policy-serving component owns the watch; the initial load runs below,
+		// after serve-time overlay registration.
 		policy: newPolicyServer(cfg.PolicyPath, cfg.Token, cfg.Logger, registry),
 		// Write-scoped secret store (nil ⇒ /central/secrets not mounted).
 		secretStore: cfg.SecretStore,
@@ -241,6 +241,10 @@ func New(cfg Config) *Server {
 		detectionConfig: cfg.DetectionConfig,
 		generateLimit:   newSessionLimiter(cfg.Clock, queryGenerateLimit, time.Minute),
 	}
+	// Register serve-time wire overlays (s.policy.addOverlay) here, before the
+	// initial load, so they apply to the first served wire. None yet:
+	// W-P1-PVER-01 registers credential, W-P1-BLOCK-03 blocked_users.
+	s.policy.Refresh() // initial load so /policy and the dashboard have policy immediately
 	s.initSessions()
 	s.initAuth()
 	// Alert pipeline (CP-hosted alert delivery + always-on Alert Store). Constructed
@@ -703,7 +707,9 @@ func (s *Server) writeSettingsChecked(in config.SettingsWire, check func(live *c
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	if check != nil {
-		cur, err := s.policy.loadPolicy()
+		// The on-disk settings, without serve-time overlays: overlays carry
+		// data no settings writer owns.
+		cur, err := s.policy.loadBase()
 		if err != nil {
 			return fmt.Errorf("controlplane: read live settings: %w", err)
 		}
