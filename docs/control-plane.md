@@ -382,6 +382,40 @@ raised, and further audited changes answer 503 `{"error":"admin_audit_unavailabl
 before they run, until the database accepts writes again. Reads, `/policy`, ingest
 and heartbeats never depend on the audit log.
 
+**Sign-ins and sign-outs.** In `oidc` mode the login and logout handlers record
+their own rows (the middleware never wraps `/auth/*`), all with target `session`,
+`auth_method` `oidc` (`breakglass` for the logout of a break-glass session), a `request_id` (echoed as `X-Request-Id`) and `client_ip`:
+
+| Action | When | Actor | Outcome | Details |
+|---|---|---|---|---|
+| `auth.login` | `GET /auth/callback` created a session | the verified ID token's `sub` and `email`, role from `console.roles` | `ok` (status 302) | `{role}` |
+| `auth.login_failed` | `GET /auth/callback` failed after its pending `state` was consumed | the verified token's subject when there is one (`no_role`), otherwise `anonymous` | `denied` or `error` (status 302) | `{reason}` |
+| `auth.logout` | `POST /auth/logout` ended a live session | the session's user, captured before the row is deleted | `ok` (status 204) | none |
+
+`target_ref` of `auth.login` and `auth.logout` is the first 8 hex characters of the
+session's id hash (the `console_login`/`console logout` log lines use the same value),
+so a sign-in and its sign-out can be matched. `details.reason` is a closed set:
+
+| `reason` | Outcome | Cause (`login_error` code) |
+|---|---|---|
+| `no_role` | `denied` | the verified user matches no `console.roles` group (`no_role`) |
+| `bad_token` | `denied` | the ID token failed verification or its nonce did not match (`token_invalid`, `nonce_mismatch`) |
+| `state_invalid` | `denied` | the state was valid but the browser-binding login cookie was missing or wrong (`state_invalid`) |
+| `idp_error` | `error` | the IdP answered with an error, or its keys could not be fetched (`idp_error`, `idp_unavailable`) |
+| `exchange_failed` | `error` | no code, the token exchange failed, or the session could not be stored (`exchange_failed`) |
+
+A callback with a missing, unknown or expired `state` consumed nothing and writes no
+row, and neither does a logout without a live session or one refused for CSRF. At most
+20 `auth.login_failed` rows per client address are written per minute. At most 4,096
+addresses are tracked at once; while all of them are inside their minute, a new
+address writes no row either. Further attempts only increment an in-memory counter and
+log `admin_audit_login_failed_rate_limited`, at most once a minute per address.
+Successful logins are never rate-limited. The authorization code, `state`, PKCE
+verifier, nonce, tokens and cookie values never appear in a row or a log line. If a
+row cannot be appended, the entry is logged at ERROR with `persist_failed=true` and
+the `admin_audit_degraded` alert is raised as above, but the sign-in or sign-out
+itself still succeeds: it changes no admin state.
+
 **Reading and verifying in the dashboard.** With the log on, the control plane
 serves three read-only routes and an **Admin log** tab (separate from the receipts
 **Audit** tab and its `/dashboard/api/audit*` routes). Off, or on a worker, all three
