@@ -44,6 +44,11 @@ func (p *Proxy) blockStage(s *requestScope) (endSession bool) {
 	// The CONNECT claims usually equal the resolved ones: look them up once.
 	connSame := s.ci.Claims.Sub == s.idClaims.Sub && s.ci.Claims.Email == s.idClaims.Email
 	if !p.claimsBlocked(s.idClaims) && (connSame || !p.claimsBlocked(s.ci.Claims)) && !p.claimsBlocked(s.idHeaderClaims) {
+		// Not blocked now: register the session under every identity this request
+		// carried, so a later block can cut it (an anonymous request binds nothing).
+		s.sess.bind(s.ci)
+		s.sess.bind(connIdentity{Claims: s.idClaims, Status: s.idStatus})
+		s.sess.bind(connIdentity{Claims: s.idHeaderClaims, Status: identity.StatusValid})
 		return false
 	}
 	p.emitDeny(s, denyreason.UserBlocked, denyExtra{LatencyMs: s.latencyMs()})

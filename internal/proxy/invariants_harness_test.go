@@ -112,6 +112,9 @@ func (m *metricSink) RecordIdentityVerify(result, reason string) {
 	m.add("identity_verify result=%s reason=%s", result, reason)
 }
 
+func (m *metricSink) RecordBlocklistEntries(n int)        { m.add("blocklist_entries n=%d", n) }
+func (m *metricSink) RecordBlocklistSessionsClosed(n int) { m.add("blocklist_closed n=%d", n) }
+
 // seenReq is one request the upstream received.
 type seenReq struct {
 	path   string

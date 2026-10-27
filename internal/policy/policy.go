@@ -120,6 +120,7 @@ type Evaluator struct {
 	// critical section as allow/deny.
 	blockedSubs   map[string]struct{}
 	blockedEmails map[string]struct{}
+	blockedCount  int
 
 	// Rate limiting (fixed-window).
 	mu         sync.Mutex
@@ -236,11 +237,17 @@ func (e *Evaluator) load(p config.Policy) {
 
 	blockedSubs := make(map[string]struct{}, len(p.BlockedUsers))
 	blockedEmails := make(map[string]struct{}, len(p.BlockedUsers))
+	blockedCount := 0
 	for _, u := range p.BlockedUsers {
-		if sub := strings.TrimSpace(u.Sub); sub != "" {
+		sub := strings.TrimSpace(u.Sub)
+		email := strings.ToLower(strings.TrimSpace(u.Email))
+		if sub != "" || email != "" {
+			blockedCount++
+		}
+		if sub != "" {
 			blockedSubs[sub] = struct{}{}
 		}
-		if email := strings.ToLower(strings.TrimSpace(u.Email)); email != "" {
+		if email != "" {
 			blockedEmails[email] = struct{}{}
 		}
 	}
@@ -249,6 +256,7 @@ func (e *Evaluator) load(p config.Policy) {
 	e.denylist = denylist
 	e.blockedSubs = blockedSubs
 	e.blockedEmails = blockedEmails
+	e.blockedCount = blockedCount
 	e.regexCache = regexCache
 	e.rateLimits = rateLimits
 	e.timeWindows = timeWindows
@@ -279,6 +287,15 @@ func (e *Evaluator) IsBlocked(sub, email string) bool {
 		}
 	}
 	return false
+}
+
+// BlockedCount is the number of users on the block list (entries with a sub or
+// an email), read from the same snapshot as IsBlocked. It feeds the
+// warden.blocklist.entries gauge.
+func (e *Evaluator) BlockedCount() int {
+	e.swapMu.RLock()
+	defer e.swapMu.RUnlock()
+	return e.blockedCount
 }
 
 // Evaluate returns Allow if (domain, port) matches an allowlist entry under the

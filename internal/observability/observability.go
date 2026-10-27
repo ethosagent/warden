@@ -27,6 +27,7 @@
 //	                              mcp_chain_rapid_repeat
 //	ObserveAddedLatency(stage):  mcp_scan, identity
 //	RecordIdentityVerify:         result is an identity status, reason an identity.Reason
+//	RecordBlocklist*:             unlabelled (an entry count and a closed-session count)
 //
 // Disabled mode is free: when Config.Enabled is false (or the *Metrics is nil)
 // New returns a nil *Metrics and a nil http.Handler, and every record method is
@@ -101,6 +102,8 @@ type Metrics struct {
 	breakerOpen    metric.Int64UpDownCounter
 	cacheStale     metric.Int64UpDownCounter
 	buildInfo      metric.Int64Gauge
+	blocklistSize  metric.Int64Gauge
+	blocklistCut   metric.Int64Counter
 }
 
 // ShutdownFunc flushes and closes the meter provider. It is always non-nil; in
@@ -265,6 +268,18 @@ func newMetrics(provider *sdkmetric.MeterProvider, serviceVersion string) (*Metr
 	); err != nil {
 		return nil, fmt.Errorf("observability: identity verify counter: %w", err)
 	}
+	if m.blocklistSize, err = meter.Int64Gauge(
+		"warden.blocklist.entries",
+		metric.WithDescription("Users on the admin block list after the last applied policy change."),
+	); err != nil {
+		return nil, fmt.Errorf("observability: blocklist entries gauge: %w", err)
+	}
+	if m.blocklistCut, err = meter.Int64Counter(
+		"warden.blocklist.sessions_closed.total",
+		metric.WithDescription("Open sessions closed because their user was added to the block list."),
+	); err != nil {
+		return nil, fmt.Errorf("observability: blocklist sessions closed counter: %w", err)
+	}
 	if m.addedLatency, err = meter.Float64Histogram(
 		"warden.request.added_latency",
 		metric.WithDescription("Added latency by pipeline stage."),
@@ -410,6 +425,25 @@ func (m *Metrics) RecordIdentityVerify(result, reason string) {
 		attribute.String("result", result),
 		attribute.String("reason", reason),
 	))
+}
+
+// RecordBlocklistEntries sets the warden.blocklist.entries gauge to the number
+// of users on the block list after an applied policy change. No label carries
+// identity.
+func (m *Metrics) RecordBlocklistEntries(n int) {
+	if m == nil {
+		return
+	}
+	m.blocklistSize.Record(context.Background(), int64(n))
+}
+
+// RecordBlocklistSessionsClosed adds n to
+// warden.blocklist.sessions_closed.total. No label carries identity.
+func (m *Metrics) RecordBlocklistSessionsClosed(n int) {
+	if m == nil || n <= 0 {
+		return
+	}
+	m.blocklistCut.Add(context.Background(), int64(n))
 }
 
 // ObserveAddedLatency records warden.request.added_latency{stage} in seconds.
