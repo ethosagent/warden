@@ -906,6 +906,48 @@ target `worker_tokens`, `target_ref` `token:<id>`); no row, log line or later re
 A `wwt_` bearer never opens these routes. `GET /dashboard/api/workers` adds `authKind`
 (`token`, `legacy` or `none`), `tokenName`, `tokenLastUsed` and `legacyRequests` per worker.
 
+## Worker token CLI
+
+`warden control-plane token` creates, lists and revokes worker tokens straight on
+`<state-dir>/warden-cp.db`, with the control plane running or stopped. It needs no admin login, so it
+bootstraps the first tokens, and it is the only way to mint or revoke with `console.auth: none`. A
+running control plane sees a change within about 2 seconds, with no restart. Every subcommand
+takes a required `--state-dir`.
+
+```sh
+# Mint a token: the plaintext is printed once to stdout (the id and a note go to stderr).
+warden control-plane token create --name worker-2 --proxy-id worker-2 --state-dir /var/lib/warden-cp
+
+# Write it to a new file (mode 0600) instead; only the id is printed.
+warden control-plane token create --name worker-2 --proxy-id worker-2 --state-dir D --out worker-2.token
+
+# Register a value you generated (a wwt_ token, 4 + 52 characters), for compose or Kubernetes Secrets.
+WARDEN_WORKER_1_TOKEN=wwt_... warden control-plane token create --name worker-1 --proxy-id worker-1 \
+  --from-env WARDEN_WORKER_1_TOKEN --state-dir D
+
+warden control-plane token list --state-dir D [--json]
+warden control-plane token revoke --id wt_... --state-dir D
+```
+
+| Flag (create) | Meaning |
+|---|---|
+| `--name`, `--proxy-id` | required; the name is unique (1-64 characters), the token is bound to exactly one proxy id |
+| `--expires-in` | lifetime such as `720h`; default never |
+| `--from-env VAR`, `--from-file F` | register the `wwt_` value instead of minting one; the plaintext is never printed. Re-running with the same name and value changes nothing and exits 0; the same name with a different value fails |
+| `--out F` | write a minted token to the new file `F` (mode 0600); an existing file is never overwritten |
+| `--admin-audit-key-file` | admin audit signing key (default `<state-dir>/cp-audit.key`) |
+
+At most two tokens per proxy id may be active, so a rotation can overlap old and new. Exit codes: 1
+for any failure (invalid input, a taken name, a bad key), 2 for `revoke` of an unknown id.
+`list` opens the database read-only and never shows a token or its hash.
+
+When admin audit is on in the state dir, `create` and `revoke` append `worker_token.create` and
+`worker_token.revoke` rows (target `worker_tokens`, `target_ref` `token:<id>`, `auth_method` `cli`,
+actor `cli:<os user>`, details holding the id, name and proxy id only). With audit rows present and
+the signing key missing or not matching, the command exits non-zero and writes nothing. When audit
+was never enabled, a one-line notice says no row was appended. A no-op (an identical import, a
+repeat revoke) appends nothing.
+
 ## Migrating from WARDEN_CP_TOKEN
 
 Until now every worker and the control plane shared one bearer token (`WARDEN_CP_TOKEN` in the
@@ -948,10 +990,11 @@ A violation exits non-zero before the control plane listens, with an error that 
    in `mixed` mode: nothing changes for the workers.
 2. **Create one token per worker.** Use `POST /dashboard/api/worker-tokens` (see [Worker tokens
    API](#worker-tokens-api)) with `{"name": "...", "proxyID": "..."}`. The plaintext is shown once
-   in the response and never again. Minting needs `console.auth: oidc` and an admin session; with
-   `console.auth: none` the API answers `403 use_cli` (the offline `warden control-plane token`
-   command it points to is not shipped yet). Give every worker (or replica) its own token and its
-   own `proxyID`.
+   in the response and never again. Minting through the API needs `console.auth: oidc` and an admin session; with
+   `console.auth: none` the API answers `403 use_cli`. Use the offline `warden control-plane token
+   create` command instead (see [Worker token CLI](#worker-token-cli)), which needs no login and
+   works before the first start. Give every worker (or replica) its own token and its own
+   `proxyID`.
 3. **Point the worker at its token.** Put the token in an env var of the worker and name that var
    in both `controlPlane.tokenEnv` and `central.tokenEnv` (policy pull and heartbeat use the first,
    analytics ingest the second). Set `central.proxyID` to the same value the token is bound to:
