@@ -251,12 +251,15 @@ func (a *Architecture) validate() error {
 				}
 			}
 		}
-		plannedPart := false
+		if len(r.SharedRepositories) > 0 && r.ID != "L7" {
+			errs = append(errs, fmt.Sprintf("rule %s: shared-repositories is only honoured on L7", r.ID))
+		}
 		for i, sr := range r.SharedRepositories {
 			if sr == "" || strings.ContainsAny(sr, "*?[") {
 				errs = append(errs, fmt.Sprintf("rule %s: shared-repositories[%d] %q must be an exact package path", r.ID, i, sr))
 			}
 		}
+		plannedPart := false
 		for i, c := range r.Coverage {
 			if c.Part == "" {
 				errs = append(errs, fmt.Sprintf("rule %s: coverage[%d] needs part", r.ID, i))

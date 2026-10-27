@@ -438,6 +438,10 @@ func weakenings() []weakening {
 			edit: func(t *testing.T, m memTree) {
 				m.replace(t, "architecture.yaml", "      - repository\n", "      - repository\n      - engine\n")
 			}},
+		{name: "arch shared repository added", kind: "arch-rule-loosened", file: "architecture.yaml", marker: "- internal/cpstate",
+			edit: func(t *testing.T, m memTree) {
+				m.replace(t, "architecture.yaml", "    fix: pass an env\n", "    fix: pass an env\n    shared-repositories:\n      - internal/cpstate\n")
+			}},
 		{name: "arch references-too dropped", kind: "arch-rule-loosened", file: "architecture.yaml", marker: "references-too: false",
 			edit: func(t *testing.T, m memTree) {
 				m.replace(t, "architecture.yaml", "references-too: true", "references-too: false")
