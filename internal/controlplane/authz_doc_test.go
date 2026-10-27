@@ -100,7 +100,7 @@ func TestAuthzMatrixDoc(t *testing.T) {
 	// The check is not vacuous: one more row in the table changes the output.
 	t.Run("added_row_is_detected", func(t *testing.T) {
 		table := authzTable()
-		table[routeKey{http.MethodPost, "/dashboard/api/new-thing"}] = authzRow{config.RoleAdmin, "new.write"}
+		table[routeKey{http.MethodPost, "/dashboard/api/new-thing"}] = authzRow{MinRole: config.RoleAdmin, Action: "new.write"}
 		if renderAuthzMatrix(table) == got {
 			t.Fatal("adding a row to the authz table did not change the generated matrix")
 		}

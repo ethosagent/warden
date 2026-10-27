@@ -1,6 +1,8 @@
 package controlplane
 
 import (
+	"context"
+
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/dashboard"
@@ -14,17 +16,23 @@ import (
 // (notably the dashboard wiring in Handler) depend on these seams, not on the
 // concrete Server.
 
-// ConfigEditor is the config-editing seam: it validates and atomically persists
-// edited allow/deny policy and behavioral settings to the served config file so
-// workers pull them on their next poll. The YAML-preservation + atomic-rename +
-// validate-before-replace behavior lives in the implementation (Server).
+// ConfigEditor is the config-editing seam: it validates and persists edited
+// allow/deny policy, behavioral settings and the LLM-provider registry so
+// workers pull them on their next poll. In file mode that is an atomic rewrite
+// of the served config file; in versioned mode it is a new policy version built
+// from head, authored by the Principal in ctx. The YAML-preservation +
+// atomic-rename + validate-before-replace behavior lives in the implementation
+// (Server).
 type ConfigEditor interface {
 	// WritePolicy persists an edited allow/deny policy, preserving every other
 	// config block byte-for-byte, then wakes long-poll waiters.
-	WritePolicy(p config.Policy) error
+	WritePolicy(ctx context.Context, p config.Policy, meta dashboard.WriteMeta) error
 	// WriteSettings persists an edited behavioral settings document, preserving
 	// every block it does not own byte-for-byte, then wakes long-poll waiters.
-	WriteSettings(s config.SettingsWire) error
+	WriteSettings(ctx context.Context, s config.SettingsWire, meta dashboard.WriteMeta) error
+	// WriteLLMProviders persists an edited LLM-provider registry, preserving
+	// every other block, then wakes long-poll waiters.
+	WriteLLMProviders(ctx context.Context, ps []config.LLMProvider, meta dashboard.WriteMeta) error
 }
 
 // WorkerTracker is the fleet-tracking seam: it records the three worker→CP

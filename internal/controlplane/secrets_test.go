@@ -575,3 +575,28 @@ func TestSharedTokenWorkerRoutes(t *testing.T) {
 		}
 	}
 }
+
+// TestSecretsAdminTokenGate pins adminBearerOK's two other corners: an admin
+// token alone gates the secret routes (no bearer and a wrong one get 401), and
+// with no token of either kind they keep today's development-open behaviour.
+func TestSecretsAdminTokenGate(t *testing.T) {
+	adminOnly := New(Config{
+		PolicyPath: writePolicyFile(t, "api.openai.com"), AdminToken: adminTok,
+		SecretStore: secrets.NewEchoStore(),
+	})
+	ts := httptest.NewServer(adminOnly.Handler())
+	t.Cleanup(ts.Close)
+	for _, bearer := range []string{"", "wrong"} {
+		if code, _ := do(t, http.MethodGet, ts.URL+"/central/secrets", bearer, ""); code != http.StatusUnauthorized {
+			t.Errorf("admin-only CP, bearer %q: list = %d, want 401", bearer, code)
+		}
+	}
+	if code, _ := do(t, http.MethodGet, ts.URL+"/central/secrets", adminTok, ""); code != http.StatusOK {
+		t.Errorf("admin-only CP, admin token: list = %d, want 200", code)
+	}
+
+	open, _ := newSecretsTestServer(t, "")
+	if code, _ := do(t, http.MethodGet, open.URL+"/central/secrets", "", ""); code != http.StatusOK {
+		t.Errorf("no token configured: list = %d, want 200 (development-open)", code)
+	}
+}

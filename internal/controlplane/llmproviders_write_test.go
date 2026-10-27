@@ -10,6 +10,7 @@ import (
 
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/config"
+	"github.com/ethosagent/warden/internal/dashboard"
 )
 
 // TestWriteLLMProviders_RoundTripPreservesBlocks asserts the registry writer adds the
@@ -24,7 +25,7 @@ func TestWriteLLMProviders_RoundTripPreservesBlocks(t *testing.T) {
 		{Name: "openai-main", BaseURL: "https://api.openai.com/v1", Model: "gpt-4o-mini", APIKeyEnv: "OPENAI_API_KEY"},
 		{Name: "anthropic-judge", BaseURL: "https://api.anthropic.com/v1", Model: "claude-haiku-4-5", APIKeyEnv: "ANTHROPIC_API_KEY"},
 	}
-	if err := srv.WriteLLMProviders(providers); err != nil {
+	if err := srv.WriteLLMProviders(context.Background(), providers, dashboard.WriteMeta{}); err != nil {
 		t.Fatalf("WriteLLMProviders: %v", err)
 	}
 
@@ -47,7 +48,7 @@ func TestWriteLLMProviders_RoundTripPreservesBlocks(t *testing.T) {
 	}
 
 	// Empty list DELETES the key rather than writing an empty sequence.
-	if err := srv.WriteLLMProviders(nil); err != nil {
+	if err := srv.WriteLLMProviders(context.Background(), nil, dashboard.WriteMeta{}); err != nil {
 		t.Fatalf("WriteLLMProviders(nil): %v", err)
 	}
 	got = readFile(t, cfg.PolicyPath)
@@ -67,7 +68,7 @@ func TestWriteLLMProviders_RejectsDanglingReference(t *testing.T) {
 	srv := New(Config{PolicyPath: path})
 
 	// Removing every provider while judge.llmProvider still points at "p1" must fail.
-	if err := srv.WriteLLMProviders(nil); err == nil {
+	if err := srv.WriteLLMProviders(context.Background(), nil, dashboard.WriteMeta{}); err == nil {
 		t.Fatal("removing a referenced provider should be rejected by the full loader")
 	}
 	// The good file survived (the referenced provider is still there).
@@ -108,12 +109,12 @@ func TestWriteLLMProviders_ReloadReinjectsSQLGenerator(t *testing.T) {
 	// Make a provider resolvable on THIS (control-plane) node, register it, then select
 	// it for Explore. WriteSettings' re-inject must install the generator.
 	t.Setenv("TEST_LLM_KEY", "present")
-	if err := srv.WriteLLMProviders([]config.LLMProvider{
+	if err := srv.WriteLLMProviders(context.Background(), []config.LLMProvider{
 		{Name: "p1", BaseURL: "https://example.invalid/v1", Model: "m", APIKeyEnv: "TEST_LLM_KEY"},
-	}); err != nil {
+	}, dashboard.WriteMeta{}); err != nil {
 		t.Fatalf("WriteLLMProviders: %v", err)
 	}
-	if err := srv.WriteSettings(config.SettingsWire{Explore: &config.ExploreSettings{LLMProvider: "p1"}}); err != nil {
+	if err := srv.writeSettings(config.SettingsWire{Explore: &config.ExploreSettings{LLMProvider: "p1"}}); err != nil {
 		t.Fatalf("WriteSettings(explore): %v", err)
 	}
 

@@ -60,7 +60,19 @@ type policyServer struct {
 	headMu  sync.Mutex
 	headVer int64
 	headDoc []byte
+	// pubMu guards pubVer/pubETag: the head version and served ETag last
+	// confirmed in the publish log, so a Refresh that serves the same pair
+	// again skips the store.
+	pubMu   sync.Mutex
+	pubVer  int64
+	pubETag string
 }
+
+// Publish-log values of an ETag change without a new version.
+const (
+	publishActorSystem    = "system"
+	publishReasonExternal = "external"
+)
 
 // wireOverlay merges serve-time data into the served wire: data that must reach
 // workers but must never be stored in a policy version, because a rollback
@@ -178,9 +190,12 @@ func (w *policyWatch) fingerprints() map[string]string {
 
 // Refresh re-reads the policy file and updates the watch. On a read/parse error
 // it logs and keeps the last good policy, so a mid-edit malformed file never
-// breaks workers.
+// breaks workers. In versioned mode it first records a served-ETag change
+// without a new version in the publish log, so a worker on the new ETag maps
+// to a version from the moment it can fetch it.
 func (ps *policyServer) Refresh() {
-	wire, fps, err := ps.loadPolicy(context.Background())
+	ctx := context.Background()
+	wire, fps, head, err := ps.loadPolicy(ctx)
 	if err != nil {
 		var oe *overlayError
 		if errors.As(err, &oe) {
@@ -191,7 +206,51 @@ func (ps *policyServer) Refresh() {
 		ps.logger.Warn("control plane: policy reload failed; keeping last-known-good", "error", err)
 		return
 	}
-	ps.watch.set(wire, etagFor(wire), fps)
+	etag := etagFor(wire)
+	ps.recordPublish(ctx, head, etag, fps)
+	ps.watch.set(wire, etag, fps)
+}
+
+// recordPublish appends a publish-log row when the served ETag of head (0 =
+// file mode or an empty store: nothing to map) is not the newest row. A Create
+// has already appended its own row, so after a head move this appends
+// nothing; the store re-checks under its transaction. A store error is logged
+// and retried on the next Refresh; serving never waits on it.
+func (ps *policyServer) recordPublish(ctx context.Context, head int64, etag string, fps map[string]string) {
+	if ps.versions == nil || head == 0 {
+		return
+	}
+	ps.pubMu.Lock()
+	defer ps.pubMu.Unlock()
+	if head == ps.pubVer && etag == ps.pubETag {
+		return
+	}
+	reason := ps.publishReason(fps)
+	appended, err := ps.versions.AppendPublish(ctx, head, etag, reason, publishActorSystem)
+	if err != nil {
+		ps.logger.Warn("control plane: policy publish log append failed", "version", head, "error", boundedErr(err))
+		return
+	}
+	ps.pubVer, ps.pubETag = head, etag
+	if appended {
+		ps.logger.Info("policy publish logged", "version", head, "etag", etag, "reason", reason)
+	}
+}
+
+// publishReason names the first overlay, in registration order, whose
+// fingerprint differs from the last load's, or "external" when none does or
+// nothing has loaded yet (a restart cannot tell what changed while down).
+func (ps *policyServer) publishReason(fps map[string]string) string {
+	if _, _, ok, _ := ps.watch.snapshot(); !ok {
+		return publishReasonExternal
+	}
+	prev := ps.watch.fingerprints()
+	for _, o := range ps.sealOverlays() {
+		if fps[o.name] != prev[o.name] {
+			return o.name
+		}
+	}
+	return publishReasonExternal
 }
 
 // overlayError names the overlay whose apply failed a load.
@@ -234,21 +293,21 @@ func (ps *policyServer) snapshot() (policyWire, string, bool, <-chan struct{}) {
 	return ps.watch.snapshot()
 }
 
-// loadPolicy builds the served wire: the base wire from the policy file, then
-// every overlay in registration order. It returns each overlay's fingerprint;
-// any overlay error fails the load (an *overlayError). It seals overlay
-// registration.
-func (ps *policyServer) loadPolicy(ctx context.Context) (policyWire, map[string]string, error) {
+// loadPolicy builds the served wire: the base wire, then every overlay in
+// registration order. It returns each overlay's fingerprint and the head
+// version the base came from (0 = the policy file); any overlay error fails
+// the load (an *overlayError). It seals overlay registration.
+func (ps *policyServer) loadPolicy(ctx context.Context) (policyWire, map[string]string, int64, error) {
 	ps.sealOverlays() // even a failed first load ends registration
-	wire, err := ps.loadBase(ctx)
+	wire, head, err := ps.loadBaseHead(ctx)
 	if err != nil {
-		return policyWire{}, nil, err
+		return policyWire{}, nil, 0, err
 	}
 	fps, err := ps.applyOverlays(ctx, &wire)
 	if err != nil {
-		return policyWire{}, nil, err
+		return policyWire{}, nil, 0, err
 	}
-	return wire, fps, nil
+	return wire, fps, head, nil
 }
 
 // applyOverlays runs every overlay on wire in registration order and returns
@@ -289,48 +348,56 @@ func (ps *policyServer) servedETag(ctx context.Context, doc policyWire) (string,
 // versioned store when it has one, otherwise the policy file, re-read and
 // validated per call so served policy stays fresh without a watcher.
 func (ps *policyServer) loadBase(ctx context.Context) (policyWire, error) {
-	if ps.versions != nil {
-		wire, ok, err := ps.loadHead(ctx)
-		if err != nil {
-			return policyWire{}, err
-		}
-		if ok {
-			return wire, nil
-		}
-	}
-	return ps.loadFile()
+	wire, _, err := ps.loadBaseHead(ctx)
+	return wire, err
 }
 
-// loadHead returns the head doc of the versioned store, or ok=false when the
-// store is empty (head 0). It reads only the head version unless the head
+// loadBaseHead is loadBase plus the head version the wire came from (0 = the
+// policy file).
+func (ps *policyServer) loadBaseHead(ctx context.Context) (policyWire, int64, error) {
+	if ps.versions != nil {
+		wire, head, err := ps.loadHead(ctx)
+		if err != nil {
+			return policyWire{}, 0, err
+		}
+		if head > 0 {
+			return wire, head, nil
+		}
+	}
+	wire, err := ps.loadFile()
+	return wire, 0, err
+}
+
+// loadHead returns the head doc of the versioned store and its version, or
+// version 0 when the store is empty. It reads only the head version unless the head
 // moved, in which case it fetches the new doc (checked against doc_sha256).
 // Each call decodes a fresh copy, so overlays can modify it freely.
-func (ps *policyServer) loadHead(ctx context.Context) (policyWire, bool, error) {
+func (ps *policyServer) loadHead(ctx context.Context) (policyWire, int64, error) {
 	head, err := ps.versions.Head(ctx)
 	if err != nil {
-		return policyWire{}, false, err
+		return policyWire{}, 0, err
 	}
 	if head == 0 {
-		return policyWire{}, false, nil
+		return policyWire{}, 0, nil
 	}
 	ps.headMu.Lock()
 	defer ps.headMu.Unlock()
 	if head != ps.headVer {
 		v, err := ps.versions.Get(ctx, head)
 		if err != nil {
-			return policyWire{}, false, err
+			return policyWire{}, 0, err
 		}
 		b, err := json.Marshal(v.Doc)
 		if err != nil {
-			return policyWire{}, false, fmt.Errorf("policy store: encode head v%d: %w", head, err)
+			return policyWire{}, 0, fmt.Errorf("policy store: encode head v%d: %w", head, err)
 		}
 		ps.headVer, ps.headDoc = head, b
 	}
 	var wire policyWire
 	if err := json.Unmarshal(ps.headDoc, &wire); err != nil {
-		return policyWire{}, false, fmt.Errorf("policy store: decode head v%d: %w", head, err)
+		return policyWire{}, 0, fmt.Errorf("policy store: decode head v%d: %w", head, err)
 	}
-	return wire, true, nil
+	return wire, head, nil
 }
 
 // loadFile re-reads and validates the policy file, returning the allow/deny

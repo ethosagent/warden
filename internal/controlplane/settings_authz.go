@@ -21,9 +21,9 @@ import (
 // (config.SettingsFieldMinRole). The check runs under writeMu against the
 // settings on disk, so a concurrent admin edit cannot slip between the check
 // and the write. A refusal is a *dashboard.RoleRequiredError naming the fields.
-func (s *Server) writeSettingsAs(ctx context.Context, in config.SettingsWire) error {
+func (s *Server) writeSettingsAs(ctx context.Context, in config.SettingsWire, meta dashboard.WriteMeta) error {
 	if s.cfg.Console.Auth != config.ConsoleAuthOIDC {
-		return s.WriteSettings(in)
+		return s.WriteSettings(ctx, in, meta)
 	}
 	var role config.Role
 	p, ok := PrincipalFrom(ctx)
@@ -34,9 +34,9 @@ func (s *Server) writeSettingsAs(ctx context.Context, in config.SettingsWire) er
 		return &dashboard.RoleRequiredError{Need: config.RoleEditor.String()}
 	}
 	if role >= config.RoleAdmin {
-		return s.WriteSettings(in)
+		return s.WriteSettings(ctx, in, meta)
 	}
-	return s.writeSettingsChecked(in, func(live *config.SettingsWire) error {
+	return s.writeSettingsChecked(ctx, in, meta, func(live *config.SettingsWire) error {
 		changed, err := settingsWireFieldsChanged(live, in)
 		if err != nil {
 			return fmt.Errorf("controlplane: compare settings: %w", err)
