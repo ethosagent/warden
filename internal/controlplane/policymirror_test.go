@@ -109,7 +109,7 @@ func addAllowToYAML(t *testing.T, path, domain string) string {
 // /policy bytes.
 func TestPolicyMirror(t *testing.T) {
 	path := writeCredentialPolicyFile(t)
-	srv, _ := newPublishServer(t, path, config.ConsoleConfig{})
+	srv, logs := newPublishServer(t, path, config.ConsoleConfig{})
 	ctx := context.Background()
 
 	saves := []func() error{
@@ -143,6 +143,9 @@ func TestPolicyMirror(t *testing.T) {
 	}
 	if strings.Contains(readFile(t, path), credentialRedactPrefix) {
 		t.Fatal("the mirror wrote a credential fingerprint into the served YAML")
+	}
+	if strings.Contains(logs.String(), policyStoreSecret) {
+		t.Fatal("the credential reached a log line")
 	}
 
 	versioned := httptest.NewServer(srv.Handler())
