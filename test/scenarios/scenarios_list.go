@@ -75,6 +75,10 @@ var All = slices.Concat(
 		{Name: "admin_audit_records_bearer_write", Opts: adminAuditBearerOpts(), Run: adminAuditRecordsBearerWrite},
 		// In oidc mode a viewer's refused write is one denied row; no session, no row.
 		{Name: "admin_audit_records_viewer_denied", Opts: adminAuditOIDCOpts(), Run: adminAuditRecordsViewerDenied},
+		// Login and logout events (W-P1-AAUD-07): a sign-in, a no-role sign-in and a
+		// logout are one row each, for the verified user. In-process only (issuer
+		// fake, CP state dir).
+		{Name: "admin_audit_records_login_logout", Opts: adminAuditOIDCOpts(), Run: adminAuditRecordsLoginLogout},
 		// CP admin bearer (W-P1-WTOK-07): --admin-token-env opens dashboard writes,
 		// the shared worker token does not, and the admin token opens no worker
 		// route. In-process only (the compose stack sets no admin token yet).

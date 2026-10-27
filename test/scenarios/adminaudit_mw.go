@@ -101,10 +101,10 @@ func adminAuditRecordsViewerDenied(t *testing.T, h *harness.H) {
 		t.Fatalf("POST /dashboard/api/policy with no session = %d, want 401", resp.StatusCode)
 	}
 	rows := h.AdminAuditRows()
-	if len(rows) != 2 {
-		t.Fatalf("admin_audit = %+v, want genesis and one denied write", rows)
+	if len(rows) != 3 || rows[1].Action != "auth.login" {
+		t.Fatalf("admin_audit = %+v, want genesis, the viewer's login and one denied write", rows)
 	}
-	r := rows[1]
+	r := rows[2]
 	if r.Action != "policy.write" || r.Outcome != adminaudit.OutcomeDenied || r.HTTPStatus != http.StatusForbidden ||
 		r.AuthMethod != adminaudit.AuthMethodOIDC || r.ActorRole != "viewer" || r.Sub != "vera" {
 		t.Fatalf("denied row = %+v", r)
@@ -117,6 +117,18 @@ func adminAuditRecordsViewerDenied(t *testing.T, h *harness.H) {
 // consoleLogin signs a user in through the issuer fake and returns the
 // browser holding the session and the session's CSRF token.
 func consoleLogin(t *testing.T, h *harness.H, login fakes.MintOption) (*harness.Browser, string) {
+	t.Helper()
+	b, resp := consoleCallback(t, h, login)
+	sc := cookieIn(resp, consoleSessionCookie)
+	if resp.StatusCode != http.StatusFound || sc == nil {
+		t.Fatalf("/auth/callback = %d, session cookie %v", resp.StatusCode, sc != nil)
+	}
+	return b, controlplane.CSRFToken(sc.Value)
+}
+
+// consoleCallback runs one login through the issuer fake in a new browser and
+// returns that browser and the callback's response, whatever its outcome.
+func consoleCallback(t *testing.T, h *harness.H, login fakes.MintOption) (*harness.Browser, *http.Response) {
 	t.Helper()
 	h.Issuer().SetLogin(login)
 	b := h.ConsoleBrowser()
@@ -138,9 +150,5 @@ func consoleLogin(t *testing.T, h *harness.H, login fakes.MintOption) (*harness.
 	}
 	_ = idpResp.Body.Close()
 	resp, _ = consoleDo(t, b, http.MethodGet, idpResp.Header.Get("Location"), nil)
-	sc := cookieIn(resp, consoleSessionCookie)
-	if resp.StatusCode != http.StatusFound || sc == nil {
-		t.Fatalf("/auth/callback = %d, session cookie %v", resp.StatusCode, sc != nil)
-	}
-	return b, controlplane.CSRFToken(sc.Value)
+	return b, resp
 }

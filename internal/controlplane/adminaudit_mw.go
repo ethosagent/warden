@@ -78,6 +78,13 @@ type adminAuditor struct {
 	unauthenticated atomic.Int64
 	unauthLog       *addrLimiter
 
+	// loginFailed rate-limits auth.login_failed rows per client address
+	// (W-P1-AAUD-07); an attempt over the limit only bumps loginFailedDropped
+	// and the throttled loginFailedLog line.
+	loginFailed        *windowLimiter
+	loginFailedDropped atomic.Int64
+	loginFailedLog     *addrLimiter
+
 	hashersMu sync.RWMutex
 	hashers   map[string]func(context.Context) (string, error)
 
@@ -90,12 +97,14 @@ func newAdminAuditor(rec adminaudit.Recorder, probe func(context.Context) error,
 	mac func(string, []byte) (string, error), cc config.ConsoleConfig, clk clock.Clock, logger *slog.Logger) *adminAuditor {
 	a := &adminAuditor{
 		rec: rec, probe: probe, mac: mac,
-		sem:         make(chan struct{}, 1),
-		lockTimeout: adminMutationTimeout,
-		unauthLog:   newAddrLimiter(clk, unauthLogEvery, unauthLogMaxAddrs),
-		hashers:     map[string]func(context.Context) (string, error){},
-		clock:       clk,
-		logger:      logger,
+		sem:            make(chan struct{}, 1),
+		lockTimeout:    adminMutationTimeout,
+		unauthLog:      newAddrLimiter(clk, unauthLogEvery, unauthLogMaxAddrs),
+		loginFailed:    newWindowLimiter(clk, loginFailedPerMinute, loginFailedWindow, loginFailedMaxAddrs),
+		loginFailedLog: newAddrLimiter(clk, unauthLogEvery, unauthLogMaxAddrs),
+		hashers:        map[string]func(context.Context) (string, error){},
+		clock:          clk,
+		logger:         logger,
 	}
 	for _, c := range cc.TrustedProxies {
 		// Validated at config load; a bad entry here is skipped, never trusted.
@@ -112,6 +121,9 @@ func newAdminAuditor(rec adminaudit.Recorder, probe func(context.Context) error,
 func (s *Server) enableAdminAudit(rec adminaudit.Recorder, probe func(context.Context) error, mac func(string, []byte) (string, error)) {
 	s.audit = newAdminAuditor(rec, probe, mac, s.cfg.Console, s.cfg.Clock, s.cfg.Logger)
 	s.registerBuiltinStateHashers()
+	if s.auth != nil {
+		s.auth.audit = s.recordLogin
+	}
 }
 
 // auditWrap puts next behind the request-id and admin audit middleware,
