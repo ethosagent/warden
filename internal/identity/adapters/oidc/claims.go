@@ -29,7 +29,7 @@ var errMalformed = errors.New("oidc: malformed token")
 
 // parseToken decodes header and payload of a compact JWS. Errors are fixed
 // and never carry token text.
-func parseToken(raw, groupsClaim string) (tokenHeader, parsedToken, error) {
+func parseToken(raw, groupsClaim string, maxGroups int) (tokenHeader, parsedToken, error) {
 	var h tokenHeader
 	var p parsedToken
 	parts := strings.Split(raw, ".")
@@ -53,12 +53,12 @@ func parseToken(raw, groupsClaim string) (tokenHeader, parsedToken, error) {
 	if err := dec.Decode(&m); err != nil {
 		return h, p, errMalformed
 	}
-	p, err = mapClaims(m, groupsClaim)
+	p, err = mapClaims(m, groupsClaim, maxGroups)
 	return h, p, err
 }
 
 // mapClaims is the one place token claims become identity.Claims.
-func mapClaims(m map[string]any, groupsClaim string) (parsedToken, error) {
+func mapClaims(m map[string]any, groupsClaim string, maxGroups int) (parsedToken, error) {
 	var p parsedToken
 	c := &p.claims
 	var ok bool
@@ -131,7 +131,7 @@ func mapClaims(m map[string]any, groupsClaim string) (parsedToken, error) {
 			}
 		}
 	}
-	c.Groups, c.GroupsTruncated = identity.NormalizeGroups(groups)
+	c.Groups, c.GroupsTruncated = identity.NormalizeGroupsMax(groups, maxGroups)
 	return p, nil
 }
 
