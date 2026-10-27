@@ -113,6 +113,11 @@ type Rule struct {
 	AllowedVars        string          `yaml:"allowed-vars"`
 	ExceptTests        bool            `yaml:"except-tests"`
 	WireTypes          []string        `yaml:"wire-types"`
+	// SharedRepositories lists the repository packages L7 lets any repository
+	// import across domains: shared infrastructure (the CP state DB, the clock
+	// port, the signer) rather than another domain's storage. Exact package
+	// paths, never globs, so each exception is named.
+	SharedRepositories []string `yaml:"shared-repositories"`
 }
 
 // StructRef names a struct whose fields are pinned by X2. WireFields is the
@@ -247,6 +252,11 @@ func (a *Architecture) validate() error {
 			}
 		}
 		plannedPart := false
+		for i, sr := range r.SharedRepositories {
+			if sr == "" || strings.ContainsAny(sr, "*?[") {
+				errs = append(errs, fmt.Sprintf("rule %s: shared-repositories[%d] %q must be an exact package path", r.ID, i, sr))
+			}
+		}
 		for i, c := range r.Coverage {
 			if c.Part == "" {
 				errs = append(errs, fmt.Sprintf("rule %s: coverage[%d] needs part", r.ID, i))

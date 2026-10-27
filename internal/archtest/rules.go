@@ -260,7 +260,7 @@ func (e *Engine) checkEdge(p *Package, imp string) {
 		case "assembly":
 			// only assembly talks to repositories (L1/S1)
 		case "repository":
-			if p.Domain != q.Domain {
+			if p.Domain != q.Domain && !e.sharedRepository(q.Path) {
 				e.fireItem("L7", p, impFile, line, q.Path, fmt.Sprintf("repository %s imports another domain's repository %s", p.Path, q.Path))
 			}
 		case "transport":
@@ -364,6 +364,13 @@ func (e *Engine) ruleApplies(r *Rule, p *Package) bool {
 		return false
 	}
 	return true
+}
+
+// sharedRepository reports whether L7 lists path as shared infrastructure
+// that any repository may import.
+func (e *Engine) sharedRepository(path string) bool {
+	l7 := e.Arch.Rule("L7")
+	return l7 != nil && contains(l7.SharedRepositories, path)
 }
 
 func contains(list []string, s string) bool {
