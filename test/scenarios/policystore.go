@@ -5,8 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"net/http"
+	"os"
+	"path/filepath"
 	"testing"
 
+	"gopkg.in/yaml.v3"
+
+	"github.com/ethosagent/warden/internal/adminaudit"
 	"github.com/ethosagent/warden/internal/controlplane"
 	"github.com/ethosagent/warden/internal/cpstate"
 	"github.com/ethosagent/warden/test/harness"
@@ -170,4 +175,105 @@ func policyVersionAuthors(t *testing.T, path string) []string {
 		t.Fatalf("read policy_versions: %v", err)
 	}
 	return out
+}
+
+// The import/export CLI scenario (W-P1-PVER-06): the scenario plays `warden
+// policy export` and `warden policy import` through the same internal/
+// controlplane calls the commands make. It exports head version 1, adds a host
+// to the exported file and imports it while the control plane runs; workers
+// enforce the imported version within the reload tick plus one long-poll
+// cycle, the version is authored cli:<os user>, and one policy.import audit
+// row with auth_method cli is appended. Re-importing the file changes nothing.
+
+func policyImportExport(t *testing.T, h *harness.H) {
+	h.Upstream(pverHost)
+	if got := connectStatus(t, h, pverHost+":443"); got != http.StatusForbidden {
+		t.Fatalf("v1: CONNECT %s = %d, want 403 (not in the YAML)", pverHost, got)
+	}
+	ctx := context.Background()
+	stateDir := filepath.Dir(h.ControlPlaneStateDB())
+
+	exported := exportPolicyVersion(t, stateDir, 1)
+	var root map[string]any
+	if err := yaml.Unmarshal(exported, &root); err != nil {
+		t.Fatalf("export is not YAML: %v", err)
+	}
+	pol, _ := root["policy"].(map[string]any)
+	allow, _ := pol["allowlist"].([]any)
+	pol["allowlist"] = append(allow, map[string]any{"domain": pverHost})
+	edited, err := yaml.Marshal(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(t.TempDir(), "policy.yaml")
+	if err := os.WriteFile(file, edited, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	importOnce := func() controlplane.PolicyImportResult {
+		t.Helper()
+		doc, err := controlplane.ValidatePolicyDocFile(file)
+		if err != nil {
+			t.Fatalf("validate the import file: %v", err)
+		}
+		rec, closeAudit, err := adminaudit.OpenForCLI(ctx, stateDir, "", controlplane.StateMigrations())
+		if err != nil || rec == nil {
+			t.Fatalf("open the CLI audit recorder = %v, %v; want a recorder", rec, err)
+		}
+		defer func() { _ = closeAudit() }()
+		st, err := controlplane.OpenPolicyStore(ctx, stateDir)
+		if err != nil {
+			t.Fatalf("open the policy store: %v", err)
+		}
+		defer func() { _ = st.Close() }()
+		res, err := st.Import(ctx, doc, "scenario import", -1, rec)
+		if err != nil {
+			t.Fatalf("import: %v", err)
+		}
+		return res
+	}
+
+	if res := importOnce(); !res.Changed || res.Version != 2 || res.Parent != 1 {
+		t.Fatalf("import = %+v, want version 2 from 1", res)
+	}
+	h.Eventually("workers enforce the imported version 2", func() bool {
+		return connectStatus(t, h, pverHost+":443") == http.StatusOK
+	})
+	if got := connectStatus(t, h, "api.example.com:443"); got != http.StatusOK {
+		t.Errorf("v2: CONNECT api.example.com = %d, want 200 (kept from v1)", got)
+	}
+	authors := policyVersionAuthors(t, h.ControlPlaneStateDB())
+	if len(authors) != 2 || authors[1] != adminaudit.CLIActor()+"/import" {
+		t.Errorf("policy versions = %v, want version 2 by %s/import", authors, adminaudit.CLIActor())
+	}
+	if res := importOnce(); res.Changed || res.Version != 2 {
+		t.Errorf("re-import = %+v, want no change at version 2", res)
+	}
+	var imports int
+	for _, r := range h.AdminAuditRows() {
+		if r.Action == "policy.import" {
+			imports++
+			if r.AuthMethod != adminaudit.AuthMethodCLI {
+				t.Errorf("policy.import auth_method = %q, want cli", r.AuthMethod)
+			}
+		}
+	}
+	if imports != 1 {
+		t.Errorf("%d policy.import audit rows, want 1", imports)
+	}
+}
+
+// exportPolicyVersion plays `warden policy export --version v`.
+func exportPolicyVersion(t *testing.T, stateDir string, v int64) []byte {
+	t.Helper()
+	st, err := controlplane.OpenPolicyStoreReadOnly(context.Background(), stateDir)
+	if err != nil {
+		t.Fatalf("open the policy store read-only: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+	exp, err := st.Export(context.Background(), v)
+	if err != nil {
+		t.Fatalf("export version %d: %v", v, err)
+	}
+	return exp.YAML
 }

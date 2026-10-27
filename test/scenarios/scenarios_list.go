@@ -74,11 +74,19 @@ var All = slices.Concat(
 		// audit row, enforcement unchanged, nothing more after a restart.
 		// In-process only (it reads the CP state dir).
 		{Name: "policy_store_initial_import", Opts: policyImportOpts(), Run: policyStoreInitialImport},
+		// Import/export CLI (W-P1-PVER-06): an exported version, edited and
+		// imported while the control plane runs, reaches workers and is audited
+		// as cli. In-process only (it writes the CP state dir).
+		{Name: "policy_import_export", Opts: policyImportOpts(), Run: policyImportExport},
 
 		// Admin audit gate (W-P1-AAUD-05): enabled, the control plane writes the
 		// genesis entry and logs its key_id before serving. In-process only (it
 		// reads the CP state dir).
 		{Name: "admin_audit_enabled_genesis", Opts: adminAuditOpts(), Run: adminAuditEnabledGenesis},
+		// Admin audit anchor (W-P1-AAUD-06): the chain head is logged as a
+		// warden.admin.v1 checkpoint at startup and every 5 minutes of the CP's
+		// clock. In-process only (fake clock, CP state dir).
+		{Name: "admin_audit_checkpoint", Opts: adminAuditOpts(), Run: adminAuditCheckpoint},
 	},
 	// Canary across protocols x allow/deny; see canary.go.
 	canaryScenarios(),

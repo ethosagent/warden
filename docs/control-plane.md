@@ -289,6 +289,31 @@ Offline CLIs that change admin state record through the same chain with
 check, and never a new key while rows exist. On a state dir where audit was never
 enabled they skip the record with a notice.
 
+#### Anchoring the audit chain
+
+The hash chain proves the rows agree with each other, but someone who can write the
+state dir can still delete the newest rows or restore an older backup, and the shorter
+chain still verifies. To catch that, the control plane also writes the chain to its log
+(stdout, at INFO whatever `logLevel` says), as `schema=warden.admin.v1` lines:
+
+- `msg=admin_audit`, one per committed entry, after its transaction commits: `seq`,
+  `ts`, `entry_hash`, `prev_hash`, `key_id`, `actor_id`, `actor_sub`, `actor_email`,
+  `actor_role`, `auth_method`, `action`, `target`, `target_ref`, `outcome`,
+  `http_status`, `before_hash`, `after_hash`, `client_ip`, `request_id` and `details`.
+  The plaintext `actor_sub` and `actor_email` appear only here and in the side table,
+  never in the signed bytes. Only the fields of a validated entry are written: no
+  request body, bearer token or secret value.
+- `msg=admin_audit.checkpoint`, the chain head (`head_seq`, `head_entry_hash`,
+  `key_id`) at startup, every 5 minutes and at shutdown.
+
+Ship these lines off-host (your log collector or SIEM) where the control plane's state
+dir cannot reach them. The newest `admin_audit.checkpoint` or `admin_audit` line you
+hold is an anchor: verify the chain with `--anchor <seq>:<entry_hash>` (the offline
+verify CLI comes with W-P1-AAUD-04). Verification fails with `anchor_missing` when the
+chain no longer reaches that seq (rows deleted from the tail, or an older backup
+restored) and `anchor_mismatch` when the entry at that seq has a different hash. A
+log line that fails to write never fails or rolls back the admin change itself.
+
 ### Migrating from none to oidc
 
 1. Add the `console:` block to the operator-owned `--config` file: `auth: oidc`, the
@@ -459,8 +484,33 @@ other value, the control plane refuses to start.
   `system`, before `file:<sha256 of the served YAML>`, after
   `v1:<doc_sha256>`); a failed append is logged at ERROR and does not stop
   startup.
-- Nothing else writes versions yet: dashboard saves, history and rollback come
-  in later releases.
+- `warden policy import --state-dir <dir> --file <yaml> [--message m]
+  [--admin-audit-key-file F] [--expected-head N]` stores a config YAML's
+  policy, settings and llmProviders blocks as a new version, with the control
+  plane running or stopped. The file is loaded strictly (an unknown key is an
+  error) and checked like a dashboard write, against the file itself and
+  against `<dir>/config.yaml` when it exists. A raw `secretAccessKey` is stored
+  as its fingerprint; it must match the served config's credential, because
+  the store cannot carry a new value (change the credential in the served
+  config instead). A file without the credential is refused while the served
+  config has one, so an unedited export cannot drop it. The version is authored `cli:<os user>` with source
+  `import`, and is created by compare-and-swap from the current head (or
+  `--expected-head`): a moved head exits non-zero naming the new head, and a
+  file equal to the head prints `no change` and exits 0. The state dir must
+  already hold the store (any control plane of this version started with
+  `--state-dir` creates it). When admin audit has rows in the state dir, the
+  import appends a `policy.import` row (actor `cli:<os user>`, auth_method
+  `cli`, target `policy`, before `v<head>:<doc_sha256>`, after
+  `v<new>:<doc_sha256>`); a missing or mismatching key file aborts before the
+  version is written. Without admin audit it prints a one-line notice.
+- `warden policy export --state-dir <dir> [--version N]` opens the database
+  read-only and writes one version (default: the head) to stdout as a config
+  YAML (policy, the settings blocks and llmProviders) that the loader accepts,
+  for a downgrade, disaster recovery or a GitOps hand-off. Credential values and
+  fingerprints are never written: a version with an AWS credential is exported
+  without `secretStore.aws.accessKeyId`/`secretAccessKey`, with a note on
+  stderr; add them back before you serve or re-import the file.
+- Dashboard saves, history and rollback come in later releases.
 - The control plane checks for a new head every 3 seconds and only re-reads a
   version when the head moved, so a version written by another process reaches
   workers within 3 seconds plus one long-poll cycle. The `/policy` hot path

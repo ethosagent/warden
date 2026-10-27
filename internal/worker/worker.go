@@ -679,7 +679,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	switch pol.Central.Mode {
 	case "aggregator":
 		centralStore = analytics.NewCentralStore(pol.Central.MaxEvents)
-		ingestHandler = analytics.NewIngestHandler(centralStore, os.Getenv(pol.Central.TokenEnv))
+		ingestHandler = analytics.NewIngestHandler(centralStore, analytics.StaticTokenAuthorizer(os.Getenv(pol.Central.TokenEnv)))
 		logger.Info("central aggregator enabled", "ingest", "/central/ingest")
 	case "worker":
 		// The control plane is the worker's own trusted, operator-configured
