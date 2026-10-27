@@ -123,6 +123,12 @@ type MCPToolConstraints struct {
 	// AllowWhen, when non-nil, further gates an already-allowed tool to a
 	// specific agent id and/or server-local time window. nil = no extra condition.
 	AllowWhen *MCPToolCondition
+	// AllowWhenScoped is wire-only (W-P1-GPOL-06): when the control plane serves
+	// a groups/users allowWhen, it puts the real condition here and replaces
+	// AllowWhen with the ReservedScopedAgentID sentinel, so a worker that does
+	// not know this field denies the tool. A worker merges it back into
+	// AllowWhen on pull. Never read from YAML and never set on a loaded Policy.
+	AllowWhenScoped *MCPToolCondition `yaml:"-" json:",omitempty"`
 }
 
 // MCPToolCondition further restricts an allowed tool. It only narrows: a tool
@@ -441,15 +447,22 @@ func cloneToolConstraints(in map[string]MCPToolConstraints) map[string]MCPToolCo
 			}
 			ctc.Fields = fields
 		}
-		if tc.AllowWhen != nil {
-			aw := *tc.AllowWhen
-			aw.Groups = append([]string(nil), tc.AllowWhen.Groups...)
-			aw.Users = append([]string(nil), tc.AllowWhen.Users...)
-			ctc.AllowWhen = &aw
-		}
+		ctc.AllowWhen = cloneCondition(tc.AllowWhen)
+		ctc.AllowWhenScoped = cloneCondition(tc.AllowWhenScoped)
 		out[tool] = ctc
 	}
 	return out
+}
+
+// cloneCondition deep-copies an allowWhen condition (nil-safe).
+func cloneCondition(in *MCPToolCondition) *MCPToolCondition {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	out.Groups = append([]string(nil), in.Groups...)
+	out.Users = append([]string(nil), in.Users...)
+	return &out
 }
 
 // validateMCP enforces the MCP block's requirements only when it is enabled, so

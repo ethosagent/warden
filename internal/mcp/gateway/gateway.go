@@ -127,7 +127,11 @@ type compiledToolConstraints struct {
 // gate and the time window parsed once into [startHour, endHour) (server local).
 // A zero value (hasWindow false, agentID "") imposes no extra restriction.
 type compiledCondition struct {
-	agentID   string
+	agentID string
+	// scoped marks a groups/users condition. The gateway cannot evaluate those
+	// yet (W-P1-GPOL-04/-11), so it denies the tool rather than run it as if
+	// the condition were global.
+	scoped    bool
 	hasWindow bool
 	startHour int
 	endHour   int
@@ -456,7 +460,10 @@ func compileConditions(cs map[string]config.MCPToolConstraints) map[string]compi
 		if tc.AllowWhen == nil {
 			continue
 		}
-		cc := compiledCondition{agentID: tc.AllowWhen.AgentID}
+		cc := compiledCondition{
+			agentID: tc.AllowWhen.AgentID,
+			scoped:  len(tc.AllowWhen.Groups) > 0 || len(tc.AllowWhen.Users) > 0,
+		}
 		if tc.AllowWhen.TimeWindow != "" {
 			if start, end, ok := parseConditionWindow(tc.AllowWhen.TimeWindow); ok {
 				cc.hasWindow = true
@@ -1126,6 +1133,9 @@ func hashSchema(raw json.RawMessage) string {
 // for the current agent / time. detail is a short, value-free phrase suitable
 // for a Finding.Detail. now is server local time (the injectable clock).
 func (g *Gateway) conditionDenies(cc compiledCondition, now time.Time) (detail string, deny bool) {
+	if cc.scoped {
+		return "identity-scoped condition not supported", true
+	}
 	if cc.agentID != "" && g.agentID != cc.agentID {
 		return "agent not permitted", true
 	}
