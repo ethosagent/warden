@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -242,5 +243,149 @@ func TestWorkerViewAuthFields(t *testing.T) {
 	}
 	if _, ok := got[2]["authKind"]; ok {
 		t.Errorf("unauthenticated worker has an authKind: %v", got[2])
+	}
+}
+
+// --- console panel and fleet badge (W-P1-WTOK-10): string-level tests on the
+// served HTML, since the repo has no browser harness ---
+
+func workerTokensJS(t *testing.T, html string) (load, create, revoke, show string) {
+	t.Helper()
+	js := html[strings.Index(html, "<script>"):]
+	return funcBody(t, js, "async function loadWorkerTokens(){"),
+		funcBody(t, js, "async function createWorkerToken(){"),
+		funcBody(t, js, "async function revokeWorkerToken(id,name){"),
+		funcBody(t, js, "function showWorkerToken(tok){")
+}
+
+func TestWorkerTokensPanelServedHTML(t *testing.T) {
+	html := servedIndex(t)
+	start := strings.Index(html, `id="wtok-card"`)
+	if start < 0 {
+		t.Fatal("Worker tokens panel (id=wtok-card) not found")
+	}
+	if !strings.Contains(html[start:start+600], "Worker tokens") {
+		t.Error("panel has no Worker tokens heading")
+	}
+	// The card sits on the fleet page, outside demo-only so it shows before
+	// the first worker connects.
+	fleet := strings.Index(html, `id="page-fleet"`)
+	end := strings.Index(html[fleet:], "</section>")
+	if start < fleet || start > fleet+end {
+		t.Fatal("panel is not inside the fleet page")
+	}
+	demo := strings.Index(html[fleet:], `class="demo-only"`)
+	if demo >= 0 && start > fleet+demo && start < fleet+strings.Index(html[fleet:], "<!-- /demo-only -->") {
+		t.Fatal("panel is inside the demo-only block, which hides it until a worker exists")
+	}
+
+	load, create, revoke, _ := workerTokensJS(t, html)
+	if !strings.Contains(load, "api('GET','/dashboard/api/worker-tokens')") {
+		t.Error("loadWorkerTokens must list through api('GET', ...)")
+	}
+	if !strings.Contains(create, "api('POST','/dashboard/api/worker-tokens'") {
+		t.Error("createWorkerToken must POST through api()")
+	}
+	if !strings.Contains(revoke, "api('DELETE','/dashboard/api/worker-tokens/'+encodeURIComponent(id))") {
+		t.Error("revokeWorkerToken must DELETE through api() with an encoded id")
+	}
+	if !strings.Contains(revoke, "window.confirm(") {
+		t.Error("revoke must confirm first")
+	}
+	all := load + create + revoke
+	if strings.Contains(strings.ToLower(all), "csrf") || strings.Contains(all, "fetch(") {
+		t.Error("the panel must not handle CSRF or call fetch itself; api() sets X-Warden-CSRF")
+	}
+	if !strings.Contains(funcBody(t, html[strings.Index(html, "<script>"):], "async function api(method,url,body,hdrs){"), "X-Warden-CSRF") {
+		t.Error("api() must set the CSRF header on writes")
+	}
+
+	// Writes are admin-only in oidc; none mode shows a read-only list and the CLI notice.
+	if !strings.Contains(load, "authMode==='oidc'&&roleAllows('admin')") {
+		t.Error("write controls must depend on an oidc admin")
+	}
+	if !strings.Contains(html, "warden control-plane token create") {
+		t.Error("none-mode notice must point to `warden control-plane token create`")
+	}
+	for _, marker := range []string{`id="wtok-new"`, `wtok-revoke"`} {
+		for _, loc := range regexp.MustCompile(regexp.QuoteMeta(marker)).FindAllStringIndex(html, -1) {
+			if tag := tagAt(html, loc[0]); strings.HasPrefix(tag, "<button") && !strings.Contains(tag, `data-min-role="admin"`) {
+				t.Errorf("%s: button without data-min-role=\"admin\": %.160s", marker, tag)
+			}
+		}
+	}
+
+	// Names and proxy ids reach the DOM only through esc().
+	for _, f := range []string{"x.name", "x.proxyID", "x.id"} {
+		for _, loc := range regexp.MustCompile(regexp.QuoteMeta(f)).FindAllStringIndex(load, -1) {
+			if !strings.HasSuffix(load[:loc[0]], "esc(") {
+				t.Errorf("%s rendered without esc(): %.80s", f, load[loc[0]-20:])
+			}
+		}
+	}
+}
+
+func TestWorkerTokensPanelShowOnce(t *testing.T) {
+	html := servedIndex(t)
+	i := strings.Index(html, `id="wtokDialog"`)
+	if i < 0 {
+		t.Fatal("one-time token dialog (id=wtokDialog) not found")
+	}
+	dlg := html[i:]
+	dlg = dlg[:strings.Index(dlg, "</dialog>")]
+	low := strings.ToLower(dlg)
+	if !strings.Contains(low, "only once") || !strings.Contains(low, "cannot be shown again") {
+		t.Error("modal must carry the show-once warning")
+	}
+	for _, id := range []string{`id="wtok-value"`, `id="wtok-copy"`} {
+		if !strings.Contains(dlg, id) {
+			t.Errorf("modal lacks %s", id)
+		}
+	}
+
+	load, create, revoke, show := workerTokensJS(t, html)
+	js := html[strings.Index(html, "<script>"):]
+	if !strings.Contains(show, "textContent=tok") {
+		t.Error("the token must be set with textContent")
+	}
+	if strings.Contains(show, "innerHTML") {
+		t.Error("the token must never go through innerHTML")
+	}
+	closer := funcBody(t, js, "function clearWorkerToken(){")
+	if !strings.Contains(closer, "textContent=''") {
+		t.Error("closing the modal must clear the token from the DOM")
+	}
+	if !strings.Contains(js, "'close',clearWorkerToken") {
+		t.Error("the dialog's close event (Esc included) must clear the token")
+	}
+	// The token never reaches storage, a URL or a log.
+	for name, body := range map[string]string{"load": load, "create": create, "revoke": revoke, "show": show, "clear": closer} {
+		for _, bad := range []string{"localStorage", "sessionStorage", "location.", "history.", "console.", "encodeURIComponent(tok", "innerHTML=tok", "alert("} {
+			if strings.Contains(body, bad) {
+				t.Errorf("%s: forbidden %q near the token", name, bad)
+			}
+		}
+	}
+	// The only .token read is the 201 body, passed straight to the modal.
+	if strings.Count(create, ".token") != 1 || !strings.Contains(create, "showWorkerToken(") {
+		t.Error("create must hand the 201 token only to showWorkerToken")
+	}
+}
+
+func TestFleetLegacyBadgeServedHTML(t *testing.T) {
+	html := servedIndex(t)
+	js := html[strings.Index(html, "<script>"):]
+	if !strings.Contains(html, "<th>Auth</th>") {
+		t.Error("fleet table has no Auth column")
+	}
+	badge := funcBody(t, js, "function fleetAuthBadge(w){")
+	for _, want := range []string{"'legacy'", "'none'", "legacy / unverified", "'token'", "esc(w.tokenName"} {
+		if !strings.Contains(badge, want) {
+			t.Errorf("fleetAuthBadge lacks %s", want)
+		}
+	}
+	render := funcBody(t, js, "function renderFleet(ws){")
+	if !strings.Contains(render, "fleetAuthBadge(w)") {
+		t.Error("renderFleet must render the badge")
 	}
 }
