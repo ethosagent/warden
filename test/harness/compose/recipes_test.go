@@ -248,6 +248,16 @@ func TestComposeEnvExampleMatchesDefaults(t *testing.T) {
 			t.Errorf(".env.example %s = %q, compose default %q (worker %d)", m[1], got[m[1]], m[2], i+1)
 		}
 	}
+	for _, tc := range singleWorkerRecipes {
+		f, _ := loadCompose(t, tc.file)
+		m := tokenVar.FindStringSubmatch(env(t, f.Services[tc.worker].Environment)["WARDEN_WORKER_TOKEN"])
+		if m == nil || got[m[1]] != m[2] {
+			t.Errorf("%s: worker token default does not match .env.example", tc.file)
+		}
+		if a := env(t, f.Services[tc.cp].Environment)["WARDEN_CP_ADMIN_TOKEN"]; a != "${WARDEN_CP_ADMIN_TOKEN:-"+got["WARDEN_CP_ADMIN_TOKEN"]+"}" {
+			t.Errorf("%s: WARDEN_CP_ADMIN_TOKEN default %q does not match .env.example", tc.file, a)
+		}
+	}
 	if !regexp.MustCompile(`^dev-`).MatchString(got["WARDEN_CP_ADMIN_TOKEN"]) {
 		t.Errorf("WARDEN_CP_ADMIN_TOKEN is not an obvious dev placeholder")
 	}
