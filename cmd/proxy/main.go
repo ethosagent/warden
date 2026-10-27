@@ -12,7 +12,9 @@ import (
 
 func main() {
 	if err := Execute(); err != nil {
-		fmt.Fprintf(os.Stderr, "warden: %v\n", err)
-		os.Exit(1)
+		if msg := err.Error(); msg != "" {
+			fmt.Fprintf(os.Stderr, "warden: %s\n", msg)
+		}
+		os.Exit(exitCode(err))
 	}
 }

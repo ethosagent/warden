@@ -21,8 +21,8 @@
 #     ports on internal-only containers (same trick as docker-compose.e2e.yml).
 #     The 127.0.0.1:5556 publish itself comes from docker-compose.identity.yml.
 #   - the CP and worker-1 load identity-stack copies of the base e2e configs,
-#     which deliberately carry NO identity or console block: W-P1-IDC-03 adds
-#     the worker block and W-P1-SSO-07 the CP block, each in its own file.
+#     the worker one has the attribute-mode identity block (W-P1-IDC-03); the
+#     CP one has no console block yet (W-P1-SSO-07 adds it in its own file).
 #   - the Dex client secrets reach the CP (console + data-plane) and worker-1
 #     (data-plane) as env, from deploy/compose/dex/.env.example unless the
 #     caller exports others (the Makefile does that).

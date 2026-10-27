@@ -102,6 +102,26 @@ the proof that Warden is the *only* way out. (Distroless agent images may lack a
 shell; run the same two `curl` commands from any sidecar on `<tool>-internal`, or
 read the dashboard's Traffic / Blocked views instead.)
 
+## Per-user identity
+
+A worker in identity `attribute` mode records which user each request was made
+for, without blocking anything. To send the user's identity from a recipe's
+agent, give the agent an OIDC ID token from the worker's issuer on the CONNECT:
+the proxy URL becomes `http://session:<token>@warden:8080`. The full contract
+(token rules, headers, statuses, limits, harness duties) is in
+[`docs/identity-contract.md`](../identity-contract.md).
+
+For a CLI agent, `warden identity exec --worker <worker>:8080 --ca proxy-ca.crt -- <agent>`
+is the safer path: it runs the agent behind a loopback forwarder that holds the
+token in memory and injects a fresh one on every new CONNECT, so the token is
+never in the agent's environment or argv. The agent gets only an allowlisted
+environment (PATH, HOME, locale and the like, plus the proxy and CA variables);
+pass anything else, such as an API key, by name with `--env NAME`. A tunnel
+opened before a refresh keeps its original token, and an agent running as the
+same uid can still read the identity cache file, so run it as a separate uid.
+Transparent-mode recipes carry no proxy URL, so only `X-Warden-Identity` on
+terminated traffic applies there.
+
 ## Tighten the policy
 
 Allow-all is for first-run visibility. Once you can see the agent's real traffic
