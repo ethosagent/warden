@@ -70,6 +70,8 @@ logging:
 #  adminAudit:
 #    enabled: false                        # signed admin audit log (default false); needs --state-dir.
 #                                          # Key: --admin-audit-key-file (default <state-dir>/cp-audit.key).
+#  trustedProxies: []                      # CIDRs of reverse proxies whose X-Forwarded-For sets the
+#                                          # admin audit client_ip (default none: the peer address).
 #
 # Compose dev profile (Dex): the CP runs in a container where `localhost` is
 # itself, so the browser-facing issuer stays public and internalIssuerURL names

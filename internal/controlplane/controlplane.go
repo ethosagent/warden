@@ -57,6 +57,15 @@ type Config struct {
 	// Token is the bearer token workers must present on /policy and
 	// /central/ingest. Empty disables auth (development only).
 	Token string
+	// AdminToken is the CP's own admin bearer (--admin-token-env): the token
+	// dashboard writes and /central/secrets take in console.auth none. It never
+	// authenticates a worker route. Empty falls back to Token (back-compat)
+	// unless RequireAdminToken is set.
+	AdminToken string
+	// RequireAdminToken is set when --admin-token-env was given. It turns the
+	// fallback to Token off, so a flag naming an empty variable refuses writes
+	// instead of reopening them to the shared worker token.
+	RequireAdminToken bool
 	// MaxEvents caps the central analytics store (0 = default).
 	MaxEvents int
 	// Store is the fleet analytics backend (persistent SQLite or in-memory). When
@@ -201,6 +210,9 @@ type Server struct {
 	// auth is the console OIDC login (/auth/login, /auth/callback); set only when
 	// sessions are.
 	auth *authService
+	// audit is the admin audit middleware's state; nil when cfg.AdminAudit is
+	// (admin audit disabled), in which case no route is wrapped.
+	audit *adminAuditor
 }
 
 // Compile-time assertions that the concrete types satisfy their role interfaces.
@@ -225,6 +237,7 @@ func New(cfg Config) *Server {
 	// A whitespace-only token (a stray space or newline in an env file) is NOT a
 	// token: it counts as unset, so dashboard writes fail closed with the hint.
 	cfg.Token = strings.TrimSpace(cfg.Token)
+	cfg.AdminToken = strings.TrimSpace(cfg.AdminToken)
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
@@ -257,6 +270,10 @@ func New(cfg Config) *Server {
 	s.policy.Refresh() // initial load so /policy and the dashboard have policy immediately
 	s.initSessions()
 	s.initAuth()
+	s.warnAdminToken()
+	if cfg.AdminAudit != nil {
+		s.enableAdminAudit(cfg.AdminAudit, cfg.AdminAudit.Probe, cfg.AdminAudit.StateHash)
+	}
 	// Alert pipeline (CP-hosted alert delivery + always-on Alert Store). Constructed
 	// whenever an alert DB path is set — even with ZERO configured integrations —
 	// because it serves two always-on purposes:
@@ -436,9 +453,11 @@ func (s *Server) Handler() http.Handler {
 	// bearer gate as the other /central/* routes; in oidc mode they need an admin
 	// session plus CSRF (secretsAuthOK). GET returns metadata only, and a POST
 	// value is held in transit only and logged by-reference, never persisted.
+	// With admin audit on, POST and DELETE are recorded (sessionAuditWrap).
 	if s.secretStore != nil {
-		mux.Handle("/central/secrets", s.sessionWrap(http.HandlerFunc(s.handleSecrets)))
-		mux.Handle("/central/secrets/", s.sessionWrap(http.HandlerFunc(s.handleSecretByKey)))
+		cpRoutes := cpRouteTable()
+		mux.Handle("/central/secrets", s.sessionAuditWrap(patternRoute(cpRoutes, "/central/secrets"), http.HandlerFunc(s.handleSecrets)))
+		mux.Handle("/central/secrets/", s.sessionAuditWrap(patternRoute(cpRoutes, "/central/secrets/"), http.HandlerFunc(s.handleSecretByKey)))
 	}
 
 	// The fleet dashboard reads the aggregated central store. The control plane
@@ -463,9 +482,16 @@ func (s *Server) Handler() http.Handler {
 	// In versioned mode each writer creates a policy version authored by the
 	// request's Principal instead.
 	var editor ConfigEditor = s
-	dash.SetPolicyWriter(editor.WritePolicy)
-	// In oidc mode the settings writer authorizes the edit per field against
-	// the caller's role (writeSettingsAs); in none mode it is
+	dash.SetPolicyWriter(func(ctx context.Context, p config.Policy, meta dashboard.WriteMeta) error {
+		if err := editor.WritePolicy(ctx, p, meta); err != nil {
+			return err
+		}
+		// The admin audit entry (when enabled) names the version written.
+		adminaudit.Annotate(ctx, "policy@"+s.policy.currentETag(), nil)
+		return nil
+	})
+	// The settings writer is context-aware: in oidc mode it authorizes the edit
+	// per field against the caller's role (writeSettingsAs); in none mode it is
 	// editor.WriteSettings unchanged.
 	dash.SetSettingsWriter(s.writeSettingsAs)
 	dash.SetLiveSettings(func() *config.SettingsWire {
