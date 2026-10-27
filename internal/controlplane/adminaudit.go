@@ -21,7 +21,8 @@ import (
 // that adds tables appends its migrations here.
 func StateMigrations() []cpstate.Migration {
 	migs := append(SessionMigrations(), OIDCPendingMigrations()...)
-	return append(migs, adminaudit.Migrations()...)
+	migs = append(migs, adminaudit.Migrations()...)
+	return append(migs, WorkerTokenMigrations()...)
 }
 
 // checkAdminAuditFlags validates the admin audit config against the flags
