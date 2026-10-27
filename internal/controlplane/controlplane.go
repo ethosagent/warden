@@ -543,6 +543,10 @@ func (s *Server) Handler() http.Handler {
 	// and llmProviders GETs report the shared head and writes read If-Match
 	// into WriteMeta.ExpectedHead; file mode reports no version.
 	dash.SetPolicyVersion(s.policyVersionHead)
+	// Block list admin API (W-P1-BLOCK-11). Without a state DB the stub answers
+	// 503 state_dir_required; the hasher is a no-op without admin audit.
+	dash.SetBlockListStore(s.blockListStore())
+	s.RegisterStateHasher(blockedUsersTarget, s.blockedUsersHash)
 	if s.versions != nil {
 		// HTTP saves record before and after as v<N>:<doc_sha256>, replacing
 		// the built-in hasher of the served allow/deny. A no-op without admin
