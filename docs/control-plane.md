@@ -78,10 +78,33 @@ local-only/standalone worker still requires one.
 # 1. Generate the bake-once proxy CA (the control plane mints its cert from it).
 OUT_DIR=deploy/compose/certs ./scripts/gen-certs.sh
 
-# 2. Bring up the control plane + two workers + two synthetic agents.
-WARDEN_CP_TOKEN=dev-token \
-  docker compose -f deploy/compose/docker-compose.control-plane.yml up
+# 2. Bring up the control plane + two workers + two synthetic agents. The compose
+#    defaults are public dev placeholders (deploy/compose/.env.example); for
+#    anything but a laptop, set your own values first (see below).
+docker compose -f deploy/compose/docker-compose.control-plane.yml up
 ```
+
+The recipe runs on [per-worker tokens](#worker-token-cli). A one-shot `cp-bootstrap` service
+registers each worker's token with `warden control-plane token create --from-env` on the control
+plane's state volume (`cp-data`) before the control plane and the workers start; running `up` again
+changes nothing. The control plane runs strict (`--require-worker-tokens`) with its own admin token
+(`--admin-token-env=WARDEN_CP_ADMIN_TOKEN`), TLS stays on, and no shared `WARDEN_CP_TOKEN` exists.
+Each worker container reads its own token (`WARDEN_WORKER_1_TOKEN`, `WARDEN_WORKER_2_TOKEN`)
+under the in-container name `WARDEN_WORKER_TOKEN`, which `configs/config.worker.yaml` names in both
+`controlPlane.tokenEnv` and `central.tokenEnv`, so the two workers share one config file and still
+hold different tokens.
+
+To use your own values, generate a token per worker and export it (or put it in a git-ignored
+`deploy/compose/.env`) before `up`:
+
+```sh
+echo wwt_$(head -c32 /dev/urandom | base32 | tr -d = | tr A-Z a-z | head -c52)   # one per worker
+export WARDEN_WORKER_1_TOKEN=wwt_...  WARDEN_WORKER_2_TOKEN=wwt_...  WARDEN_CP_ADMIN_TOKEN=...
+```
+
+Never commit a real value. [`deploy/compose/.env.example`](../deploy/compose/.env.example) lists the
+variables with obviously fake dev placeholders. Dashboard writes (policy edits) need
+`Authorization: Bearer $WARDEN_CP_ADMIN_TOKEN`; a worker token never opens them.
 
 - Fleet dashboard: **https://localhost:7070/dashboard/** (cert signed by the
   proxy CA — trust it in your browser, or `curl --cacert deploy/compose/certs/proxy-ca.crt`).
@@ -952,7 +975,9 @@ repeat revoke) appends nothing.
 
 Until now every worker and the control plane shared one bearer token (`WARDEN_CP_TOKEN` in the
 compose recipes, named by `--token-env`). Per-worker tokens replace it: one revocable `wwt_...`
-token per worker, bound to one proxy id. The control plane has three auth modes, resolved once at
+token per worker, bound to one proxy id. The control-plane compose recipe and the e2e stack have
+already moved (see [Run it](#run-it)); the other recipes still use the shared token until they follow.
+The control plane has three auth modes, resolved once at
 startup and logged as `auth_mode=...`:
 
 | `auth_mode` | When | Workers authenticate with |
@@ -1025,6 +1050,34 @@ A proxy id can hold at most two active tokens at once, so a rotation overlaps ol
 2. Restart the worker with the new token in its env var.
 3. Check the old token's `lastUsedAt` stops moving, then revoke it
    (`DELETE /dashboard/api/worker-tokens/{id}`).
+
+### Compromised-token runbook
+
+A worker token is suspected leaked (a log, a ticket, a laptop, a container image). The aim is to
+stop the token working at once and give the worker a new one, with the worker never running open.
+
+1. **Revoke the token.** From the console, `DELETE /dashboard/api/worker-tokens/{id}` (an admin
+   session; `GET /dashboard/api/worker-tokens` lists the ids), or on the host that holds the state
+   volume, `warden control-plane token revoke --id wt_... --state-dir <dir>`. The control plane sees
+   the revocation within about 2 seconds, with no restart.
+2. **Watch the worker fail.** Its next `/policy` and `/control/heartbeat` calls get `401`, and
+   ingest stops. The worker keeps enforcing the last-known-good policy it pulled, which is still
+   default-deny, but receives no updates, and the fleet view shows it offline. A worker that
+   restarts while revoked boots fail-closed and denies all egress until a pull succeeds.
+3. **Re-bootstrap a replacement.** Mint a new token for the same proxy id with `warden control-plane
+   token create --name <new-name> --proxy-id <id> --state-dir <dir>` (or `--from-env` with a value
+   you generated), put it in the worker's env var and restart the worker. At most 2 tokens may be
+   active per proxy id, so a replacement can be created before the old one is revoked: step 3 may
+   come before step 1 when the worker must keep updating, at the cost of a longer exposure.
+   Token names are unique and a revoked name stays taken. In the compose recipe, generate a new
+   value, set `WARDEN_WORKER_N_TOKEN` to it, give that worker a new `--name` in the `cp-bootstrap`
+   command (for example `w1-2`), then run `docker compose up -d`: `cp-bootstrap` registers the new
+   token and recreates the worker with it. Reusing the old name with a new value makes
+   `cp-bootstrap` fail, by design.
+4. **Look for misuse.** In `GET /dashboard/api/workers` and the console fleet view, `tokenLastUsed`
+   per worker (the token's `last_used_at`) shows when a token was last presented. Use at an
+   unexpected time, or after the worker was stopped, means someone else holds the token. Check it
+   before revoking (to see whether it is being used) and after (it must stop moving).
 
 ### One token per replica
 

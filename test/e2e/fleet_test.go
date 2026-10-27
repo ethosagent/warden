@@ -449,3 +449,100 @@ func TestFleet_WorkerDashboardWriteNeedsToken(t *testing.T) {
 		}
 	}
 }
+
+// workerAuthKinds reads authKind per proxy id from the control plane's fleet view.
+func workerAuthKinds(t *testing.T) map[string]string {
+	t.Helper()
+	code, body, err := tryGet(cpBase + "/dashboard/api/workers")
+	if err != nil || code != http.StatusOK {
+		t.Fatalf("e2e: GET /dashboard/api/workers: status %d err %v", code, err)
+	}
+	var ws []struct {
+		ProxyID  string `json:"proxyID"`
+		AuthKind string `json:"authKind"`
+	}
+	if err := json.Unmarshal(body, &ws); err != nil {
+		t.Fatalf("e2e: decode workers: %v", err)
+	}
+	out := map[string]string{}
+	for _, w := range ws {
+		out[w.ProxyID] = w.AuthKind
+	}
+	return out
+}
+
+// tokenRows lists the registered worker tokens (id by name) with the offline
+// CLI, run inside the control-plane container on its state volume.
+func tokenRows(t *testing.T) map[string]string {
+	t.Helper()
+	res := composeRun(t, 60*time.Second, "exec", "-T", svcCP, "warden", "control-plane", "token", "list", "--state-dir=/data", "--json")
+	if res.exit != 0 {
+		t.Fatalf("e2e: token list: exit %d: %s", res.exit, res.stderr)
+	}
+	var rows []struct{ ID, Name string }
+	if err := json.Unmarshal([]byte(res.stdout), &rows); err != nil {
+		t.Fatalf("e2e: decode token list: %v", err)
+	}
+	out := map[string]string{}
+	for _, r := range rows {
+		out[r.Name] = r.ID
+	}
+	return out
+}
+
+// TestFleetPerWorkerTokens: every worker authenticates with its own token
+// (authKind=token), the retired shared token and the CP's admin token are both
+// refused on the worker routes (401), and bringing the stack up a second time
+// registers nothing new (token create --from-env is a no-op on a known value).
+func TestFleetPerWorkerTokens(t *testing.T) {
+	restoreFleet(t)
+	kinds := workerAuthKinds(t)
+	for _, w := range []string{svcWorker1, svcWorker2, svcWorker3} {
+		if kinds[w] != "token" {
+			t.Errorf("%s authKind = %q, want token (all: %v)", w, kinds[w], kinds)
+		}
+	}
+
+	client, err := httpClient()
+	if err != nil {
+		t.Fatalf("e2e: %v", err)
+	}
+	// The shared token the stack used to hand every worker, and the CP's admin
+	// token, are not worker credentials in strict mode.
+	for _, bearer := range []string{"dev-token", "dev-cp-admin-token"} {
+		req, err := http.NewRequest(http.MethodGet, cpBase+"/policy", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+bearer)
+		req.Header.Set("X-Warden-Proxy-ID", svcWorker1)
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("e2e: GET /policy: %v", err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("GET /policy with bearer %q = %d, want 401", bearer, resp.StatusCode)
+		}
+	}
+
+	before := tokenRows(t)
+	if len(before) != 3 {
+		t.Fatalf("registered tokens = %v, want w1, w2 and w3", before)
+	}
+	if res := composeRun(t, 10*time.Minute, "up", "-d", "--no-build"); res.exit != 0 {
+		t.Fatalf("e2e: second up: exit %d: %s", res.exit, res.stderr)
+	}
+	if err := waitStackReady(); err != nil {
+		t.Fatalf("e2e: stack not ready after the second up: %v", err)
+	}
+	after := tokenRows(t)
+	if len(after) != len(before) {
+		t.Fatalf("second up changed the token rows: before %v after %v", before, after)
+	}
+	for name, id := range before {
+		if after[name] != id {
+			t.Errorf("token %s id changed across the second up: %s -> %s", name, id, after[name])
+		}
+	}
+}
