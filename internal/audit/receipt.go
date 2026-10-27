@@ -60,6 +60,34 @@ func (s *Signer) Sign(event analytics.Event) (*Receipt, error) {
 	}, nil
 }
 
+// adminDomain prefixes every message SignBytes signs and VerifyBytes checks.
+// The separator keeps a signature over arbitrary bytes from ever verifying as
+// a receipt signature (Sign signs the bare event JSON) and the reverse.
+const adminDomain = "warden.admin.v1\x00"
+
+// domainMessage returns adminDomain || b in a fresh slice.
+func domainMessage(b []byte) []byte {
+	msg := make([]byte, 0, len(adminDomain)+len(b))
+	msg = append(msg, adminDomain...)
+	return append(msg, b...)
+}
+
+// SignBytes signs the domain-separated message "warden.admin.v1\x00" || b. It
+// is the admin audit chain's signature primitive; Sign and the Receipt format
+// are unaffected.
+func (s *Signer) SignBytes(b []byte) []byte {
+	return ed25519.Sign(s.privateKey, domainMessage(b))
+}
+
+// VerifyBytes reports whether sig is pub's SignBytes signature over b. A
+// public key of the wrong length is reported as invalid, never a panic.
+func VerifyBytes(pub ed25519.PublicKey, b, sig []byte) bool {
+	if len(pub) != ed25519.PublicKeySize {
+		return false
+	}
+	return ed25519.Verify(pub, domainMessage(b), sig)
+}
+
 // PubKey returns the signer's public key for distribution.
 func (s *Signer) PubKey() ed25519.PublicKey {
 	return s.publicKey

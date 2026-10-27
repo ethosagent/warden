@@ -108,6 +108,7 @@ classes:
       - internal/observability
       - internal/clock            # the time source: the Clock port + its real-time impl (#362)
       - internal/cpstate          # the control plane's SQLite state DB + migration runner (SSO-01)
+      - internal/adminaudit       # the CP admin audit chain: signed, hash-chained rows on cpstate (AAUD-01)
       - internal/identityclient   # the `warden identity` client: device login, file cache, token refresh (file and network I/O; #28)
       - internal/integration
       - internal/integration/webhook
@@ -171,6 +172,7 @@ zones:
     - cmd/**
     - internal/controlplane/**
     - internal/cpstate
+    - internal/adminaudit
     - internal/dashboard/**
     - internal/alertpipeline
     - internal/audit
@@ -273,6 +275,12 @@ rules:
     title: Storage repositories import no domain other than their own and no transport or assembly package
     checker: archtest
     fix: depend on the types of your own domain only; other domains depend on you through their ports
+    # Shared infrastructure every repository may import: these are not another
+    # domain's storage. Exact paths; adding one is a gates change.
+    shared-repositories:
+      - internal/cpstate   # the CP state DB; feature stores declare migrations and pass them to cpstate.Open (SSO-01)
+      - internal/clock     # the Clock port + its real-time impl (#362)
+      - internal/audit     # the Ed25519 signer (audit.Signer, SignBytes/VerifyBytes, KeyID) that signed stores reuse
 
   - id: L8
     title: Every package must match a declared class and zone (catches unlayered packages)

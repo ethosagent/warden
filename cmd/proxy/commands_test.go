@@ -164,6 +164,28 @@ func TestControlPlaneRequireConsoleAuth(t *testing.T) {
 	}
 }
 
+// TestControlPlaneAdminAuditFlags: --admin-audit-key-file and
+// --admin-audit-new-segment reach controlplane.Params: the key is created at
+// the given path, and a new-segment value that is not that key's key_id stops
+// the command.
+func TestControlPlaneAdminAuditFlags(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "state")
+	keyFile := filepath.Join(t.TempDir(), "audit.pem")
+	cfg := writeTempConfig(t, minimalConfig+"console:\n  adminAudit:\n    enabled: true\n")
+	args := []string{"control-plane", "--config", cfg, "--listen", "127.0.0.1:0",
+		"--state-dir", stateDir, "--analytics-provider", "memory", "--admin-audit-key-file", keyFile}
+	if err := executeRoot(t, args...); err != nil {
+		t.Fatalf("control-plane with admin audit = %v", err)
+	}
+	if _, err := os.Stat(keyFile); err != nil {
+		t.Fatalf("--admin-audit-key-file not used: %v", err)
+	}
+	err := executeRoot(t, append(args, "--admin-audit-new-segment", "0000000000000000")...)
+	if err == nil || !strings.Contains(err.Error(), "--admin-audit-new-segment") {
+		t.Fatalf("control-plane with a wrong --admin-audit-new-segment = %v, want an error naming the flag", err)
+	}
+}
+
 // TestControlPlaneSubcommand_CAFlagMismatch covers the guard that both --ca-cert and
 // --ca-key must be provided together.
 func TestControlPlaneSubcommand_CAFlagMismatch(t *testing.T) {
