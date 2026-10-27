@@ -180,8 +180,10 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		logger.Info("control plane state db", "db", statePath, "applied", state.Applied())
 	}
 	if policyStore == PolicyStoreVersioned {
-		// Fail closed: never fall back to the possibly older YAML.
-		head, err := checkPolicyStoreStartup(ctx, newSQLitePolicyStore(state.SQL(), nil, logger), state.Path())
+		// Fail closed: never fall back to the possibly older YAML. Not
+		// cancellable, like the open above: a shutdown signal during boot must
+		// not read as a broken store.
+		head, err := checkPolicyStoreStartup(context.WithoutCancel(ctx), newSQLitePolicyStore(state.SQL(), nil, logger), state.Path())
 		if err != nil {
 			return fail(err)
 		}

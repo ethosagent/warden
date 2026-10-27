@@ -465,8 +465,9 @@ func TestPolicyServerVersionedLongPoll(t *testing.T) {
 		code, body, _ := getPolicy(t, ts.URL+"/policy?wait=5s", map[string]string{"If-None-Match": etag})
 		done <- result{code, body, time.Now()}
 	}()
-	// Let the waiter block on the current ETag before the write.
-	time.Sleep(100 * time.Millisecond)
+	// No sleep: a waiter already blocked is woken by the watch broadcast, and
+	// one that snapshots after the write sees a new ETag and returns at once;
+	// either way it must hold the new doc within 1s.
 	doc := docWithAllow(baseDoc(t, s), "woken.example.com")
 	start := time.Now()
 	if _, changed, err := s.versions.Create(context.Background(), doc, testAuthor, "wake", SourcePolicy, 0); err != nil || !changed {
