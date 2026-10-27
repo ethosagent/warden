@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/ethosagent/warden/internal/adminaudit"
@@ -180,7 +181,7 @@ func resolveExistingPrefix(p string) (string, error) {
 				r = filepath.Join(r, tail[i])
 			}
 			return r, nil
-		} else if !errors.Is(err, os.ErrNotExist) {
+		} else if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, syscall.ENOTDIR) {
 			return "", err
 		}
 		parent := filepath.Dir(cur)

@@ -656,13 +656,12 @@ func TestBackup_ReporterCalledOnFailure(t *testing.T) {
 
 // A failing backup never stops the control plane serving /policy.
 func TestBackup_ReporterCalledOnFailure_CPKeepsServing(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root ignores directory permissions")
-	}
-	dir := filepath.Join(t.TempDir(), "backups")
-	if err := os.Mkdir(dir, 0o500); err != nil {
+	// The backup dir sits under a regular file, so every run fails (as root too).
+	blocker := filepath.Join(t.TempDir(), "blocker")
+	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	dir := filepath.Join(blocker, "backups")
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
