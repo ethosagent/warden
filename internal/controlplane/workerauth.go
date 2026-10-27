@@ -102,6 +102,18 @@ type WorkerAuthenticator struct {
 	counters   map[[2]string]int64 // {kind, outcome}: bounded labels, no proxy id
 	legacyReqs map[string]int64    // per proxy id, capped at maxLegacyIDs
 	rejectedAt map[string]time.Time
+
+	// cancels holds one revoke channel per token id that has a parked
+	// long-poll, shared by all of that token's waiters and removed when the
+	// last one returns. Keyed by id so cert principals (W-P2-WCA-04) can key
+	// it by worker id as well.
+	cancelMu sync.Mutex
+	cancels  map[string]*cancelEntry
+}
+
+type cancelEntry struct {
+	ch      chan struct{}
+	waiters int
 }
 
 // NewWorkerAuthenticator builds the authenticator and resolves the mode.
@@ -112,13 +124,67 @@ func NewWorkerAuthenticator(c WorkerAuthConfig) *WorkerAuthenticator {
 	if c.Clock == nil {
 		c.Clock = clock.Real()
 	}
-	return &WorkerAuthenticator{
+	a := &WorkerAuthenticator{
 		mode: resolveWorkerAuthMode(c.Legacy), legacy: c.Legacy, tokens: c.Tokens,
 		registry: c.Registry, log: c.Logger, clk: c.Clock, tls: c.TLS,
 		counters:   map[[2]string]int64{},
 		legacyReqs: map[string]int64{},
 		rejectedAt: map[string]time.Time{},
+		cancels:    map[string]*cancelEntry{},
 	}
+	if c.Tokens != nil {
+		c.Tokens.OnRevoked(a.cancelToken)
+	}
+	return a
+}
+
+// WatchRevoke registers a parked long-poll of p and returns a channel closed
+// when its credential is revoked, plus a release func to call when the poll
+// returns. Only token principals have a per-credential identity: for legacy
+// and none it returns a nil channel (never ready) and a no-op release.
+func (a *WorkerAuthenticator) WatchRevoke(p WorkerPrincipal) (<-chan struct{}, func()) {
+	if p.Kind != KindToken || p.TokenID == "" {
+		return nil, func() {}
+	}
+	a.cancelMu.Lock()
+	e := a.cancels[p.TokenID]
+	if e == nil {
+		e = &cancelEntry{ch: make(chan struct{})}
+		a.cancels[p.TokenID] = e
+	}
+	e.waiters++
+	a.cancelMu.Unlock()
+	return e.ch, func() {
+		a.cancelMu.Lock()
+		defer a.cancelMu.Unlock()
+		if e.waiters--; e.waiters == 0 && a.cancels[p.TokenID] == e {
+			delete(a.cancels, p.TokenID)
+		}
+	}
+}
+
+// cancelToken is the OnRevoked hook: it wakes every parked long-poll of id.
+func (a *WorkerAuthenticator) cancelToken(id string) {
+	a.cancelMu.Lock()
+	e := a.cancels[id]
+	delete(a.cancels, id)
+	a.cancelMu.Unlock()
+	if e != nil {
+		close(e.ch)
+	}
+}
+
+// Reauthenticate re-checks p against the in-memory token index before a
+// response is written after a wait. It does no DB I/O and does not count or
+// mark the token used. Legacy and none principals always pass.
+func (a *WorkerAuthenticator) Reauthenticate(p WorkerPrincipal) error {
+	if p.Kind != KindToken {
+		return nil
+	}
+	if a.tokens == nil || a.tokens.Valid(p.TokenID) != nil {
+		return ErrUnauthorized
+	}
+	return nil
 }
 
 // LogMode logs the resolved mode once, with the open-mode and no-TLS warnings.

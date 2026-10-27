@@ -449,6 +449,12 @@ func (ps *policyServer) ServePolicy(w http.ResponseWriter, r *http.Request) {
 	inm := trimETag(r.Header.Get("If-None-Match"))
 	wait := parseWait(r.URL.Query().Get("wait"))
 
+	// A token's held request registers lazily when it first parks and is
+	// released when the handler returns.
+	var revoked <-chan struct{}
+	release := func() {}
+	defer func() { release() }()
+
 	for {
 		wire, etag, ok, ch := ps.watch.snapshot()
 		if !ok {
@@ -457,6 +463,11 @@ func (ps *policyServer) ServePolicy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if etag != inm {
+			// Re-authenticate before any write: a token revoked while this
+			// request waited never receives the new policy.
+			if !ps.stillAuthorized(w, principal) {
+				return
+			}
 			w.Header().Set("ETag", `"`+etag+`"`)
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(wire)
@@ -467,11 +478,26 @@ func (ps *policyServer) ServePolicy(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNotModified)
 			return
 		}
+		if revoked == nil {
+			revoked, release = ps.auth.WatchRevoke(principal)
+		}
+		// Register first, then check: a revoke between the initial
+		// authentication and the park is seen here, never missed.
+		if !ps.stillAuthorized(w, principal) {
+			return
+		}
 		timer := time.NewTimer(wait)
 		select {
 		case <-ch:
 			timer.Stop() // policy changed — loop re-evaluates and serves it
+		case <-revoked:
+			timer.Stop()
+			WriteWorkerAuthError(w, ErrUnauthorized)
+			return
 		case <-timer.C:
+			if !ps.stillAuthorized(w, principal) {
+				return
+			}
 			w.Header().Set("ETag", `"`+etag+`"`)
 			w.WriteHeader(http.StatusNotModified)
 			return
@@ -480,6 +506,16 @@ func (ps *policyServer) ServePolicy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+// stillAuthorized re-authenticates p from the in-memory index and writes 401
+// when its credential is no longer valid.
+func (ps *policyServer) stillAuthorized(w http.ResponseWriter, p WorkerPrincipal) bool {
+	if err := ps.auth.Reauthenticate(p); err != nil {
+		WriteWorkerAuthError(w, err)
+		return false
+	}
+	return true
 }
 
 // parseWait parses the ?wait= long-poll duration, clamped to [min,max]; an

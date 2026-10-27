@@ -255,6 +255,22 @@ func (s *WorkerTokenStore) Authenticate(plaintext string) (Token, error) {
 	return t, nil
 }
 
+// Valid re-checks an already authenticated token by id against the in-memory
+// index (no DB I/O, no hashing): ErrUnknown, ErrRevoked or ErrExpired when it
+// no longer authenticates.
+func (s *WorkerTokenStore) Valid(id string) error {
+	t, ok := s.idx.Load().byID[id]
+	switch {
+	case !ok:
+		return ErrUnknown
+	case !t.RevokedAt.IsZero():
+		return ErrRevoked
+	case s.expired(t, s.clk.Now()):
+		return ErrExpired
+	}
+	return nil
+}
+
 // Create mints (or imports) a token and returns its plaintext, which no later
 // call returns. Importing the same name and value as an active row is a no-op
 // that returns the existing token.
