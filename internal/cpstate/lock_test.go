@@ -80,7 +80,7 @@ func TestAcquireDirLock_HelperProcess(t *testing.T) {
 func TestAcquireDirLock_ReleasedOnProcessDeath(t *testing.T) {
 	dir := t.TempDir()
 	cmd := exec.Command(os.Args[0], "-test.run=^TestAcquireDirLock_HelperProcess$")
-	cmd.Env = append(os.Environ(), "CPSTATE_LOCK_HELPER_DIR="+dir)
+	cmd.Env = []string{"CPSTATE_LOCK_HELPER_DIR=" + dir}
 	out, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
