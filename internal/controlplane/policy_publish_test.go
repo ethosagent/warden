@@ -145,6 +145,7 @@ func TestVersionedWritersHTTP(t *testing.T) {
 		h := srv.Handler()
 		send := func(auth string) int {
 			req := httptest.NewRequest(http.MethodPost, "/dashboard/api/policy", strings.NewReader(body))
+			req.Header.Set("If-Match", `"v1"`)
 			if auth != "" {
 				req.Header.Set("Authorization", auth)
 			}
@@ -178,7 +179,13 @@ func TestVersionedWritersHTTP(t *testing.T) {
 		srv.sessionReader = srv.sessions
 		e := &authzEnv{srv: srv, h: srv.Handler()}
 		raw := e.session(t, groupAdmin)
-		if rec := e.do(raw, http.MethodPost, "/dashboard/api/policy", body); rec.Code != http.StatusOK {
+		req := httptest.NewRequest(http.MethodPost, "/dashboard/api/policy", strings.NewReader(body))
+		req.AddCookie(&http.Cookie{Name: srv.sessionCookie.Name, Value: raw})
+		req.Header.Set(CSRFHeader, CSRFToken(raw))
+		req.Header.Set("If-Match", `"v1"`)
+		rec := httptest.NewRecorder()
+		e.h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
 			t.Fatalf("session write = %d %s", rec.Code, rec.Body.String())
 		}
 		in := testSessionInput()

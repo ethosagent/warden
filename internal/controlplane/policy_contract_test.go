@@ -244,12 +244,12 @@ func TestPolicyIfMatchCurrent(t *testing.T) {
 		if rec := e.send("", http.MethodPost, "/dashboard/api/policy", allowBody("api.openai.com", "x.example.com"), ifMatch(1)); rec.Code != http.StatusOK {
 			t.Fatalf("save with the bearer = %d %s", rec.Code, rec.Body.String())
 		}
-		// A missing If-Match is still accepted (W-P1-PVER-04 makes it 428).
-		if rec := e.send("", http.MethodPost, "/dashboard/api/policy", allowBody("api.openai.com", "y.example.com"), ""); rec.Code != http.StatusOK {
-			t.Fatalf("save without If-Match = %d", rec.Code)
+		// A missing If-Match is a 428 and creates nothing (W-P1-PVER-04).
+		if rec := e.send("", http.MethodPost, "/dashboard/api/policy", allowBody("api.openai.com", "y.example.com"), ""); rec.Code != http.StatusPreconditionRequired {
+			t.Fatalf("save without If-Match = %d, want 428", rec.Code)
 		}
-		if h := mustHead(t, e.srv.versions); h != 3 {
-			t.Fatalf("head = %d, want 3", h)
+		if h := mustHead(t, e.srv.versions); h != 2 {
+			t.Fatalf("head = %d after a save without If-Match, want 2", h)
 		}
 	})
 }

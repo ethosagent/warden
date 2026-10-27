@@ -552,12 +552,17 @@ other value, the control plane refuses to start.
   (`/dashboard/api/policy`, `/dashboard/api/settings`,
   `/dashboard/api/llmproviders`) return it as `version` in the body and in an
   `X-Warden-Policy-Version: N` header; in file mode neither is present. A save
-  may send `If-Match: "v<N>"` with the version it was based on. If the head has
+  must send `If-Match: "v<N>"` with the version it was based on. If the head has
   moved since, the save returns `409 {"error":"policy_conflict","head":M,
   "author":{"sub":...,"email":...}}` (the head's author, never doc content) and
   creates nothing, so a settings save makes a concurrent policy save from the
-  same version conflict. A malformed `If-Match` returns 400; a missing one is
-  accepted for now. In file mode `If-Match` is ignored. `/policy`'s
+  same version conflict. A missing `If-Match` returns `428
+  {"error":"precondition_required"}` and a malformed one 400; neither creates a
+  version. A save may also send an optional message in
+  `X-Warden-Policy-Message`, percent-encoded UTF-8 (as `encodeURIComponent`
+  writes it), at most 512 characters after decoding, with control characters
+  stripped; it is stored on the new version, and a longer or badly encoded
+  value returns 400. In file mode both headers are ignored. `/policy`'s
   content-hash ETag is unchanged. With `console.adminAudit.enabled` a policy
   save's audit row records before and after as `v<N>:<doc_sha256>`, and a 409
   is recorded with outcome `rejected`.

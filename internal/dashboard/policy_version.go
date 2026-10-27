@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // The policy version contract (W-P1-PVER-08). In --policy-store=versioned the
@@ -21,6 +23,14 @@ import (
 // PolicyVersionHeader carries the head policy version on the policy, settings
 // and llmProviders GETs in versioned mode.
 const PolicyVersionHeader = "X-Warden-Policy-Version"
+
+// PolicyMessageHeader carries a versioned save's optional message,
+// percent-encoded UTF-8 (a header value cannot hold arbitrary text), at most
+// maxPolicyMessage characters once decoded. File mode ignores it.
+const PolicyMessageHeader = "X-Warden-Policy-Message"
+
+// maxPolicyMessage caps a save message, in characters: the store's cap.
+const maxPolicyMessage = 512
 
 // ConflictAuthor is the author of the head version a stale write conflicted
 // with.
@@ -85,10 +95,12 @@ func (s *Server) versionForGet(w http.ResponseWriter, r *http.Request) (int64, b
 	return v, true
 }
 
-// writeMeta builds a write's WriteMeta. In versioned mode it reads If-Match:
-// absent is accepted (ExpectedHead 0: the head at write time), a malformed
-// value is answered 400. In file mode If-Match is ignored. On a refusal it has
-// written the response and returns false.
+// writeMeta builds a write's WriteMeta. In versioned mode it requires
+// If-Match (428 when absent, 400 when malformed: every save names the head it
+// was based on) and reads the optional PolicyMessageHeader (400 when it is not
+// valid percent-encoded UTF-8 or is longer than maxPolicyMessage characters).
+// In file mode both headers are ignored. On a refusal it has written the
+// response and returns false.
 func (s *Server) writeMeta(w http.ResponseWriter, r *http.Request) (WriteMeta, bool) {
 	v, err := s.headVersion(r.Context())
 	if err != nil {
@@ -98,16 +110,52 @@ func (s *Server) writeMeta(w http.ResponseWriter, r *http.Request) (WriteMeta, b
 	if v == 0 {
 		return WriteMeta{}, true
 	}
+	n, ok := requireIfMatch(w, r, "a save")
+	if !ok {
+		return WriteMeta{}, false
+	}
+	msg, ok := policyMessage(r.Header.Get(PolicyMessageHeader))
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid "+PolicyMessageHeader+": want percent-encoded UTF-8, at most 512 characters")
+		return WriteMeta{}, false
+	}
+	return WriteMeta{ExpectedHead: n, Message: msg}, true
+}
+
+// requireIfMatch reads the If-Match a versioned write must carry: 428
+// precondition_required when it is absent, 400 when it is malformed. what
+// names the write in the 428 detail. On a refusal it has written the response
+// and returns false.
+func requireIfMatch(w http.ResponseWriter, r *http.Request, what string) (int64, bool) {
 	raw, present := r.Header["If-Match"]
 	if !present {
-		return WriteMeta{}, true
+		writeJSONStatus(w, http.StatusPreconditionRequired, map[string]string{
+			"error":  "precondition_required",
+			"detail": what + ` needs If-Match: "v<N>", the head version from the last GET`,
+		})
+		return 0, false
 	}
 	n, ok := parseIfMatch(raw)
 	if !ok {
 		writeError(w, http.StatusBadRequest, `invalid If-Match: want "v<N>", the version from the last GET`)
-		return WriteMeta{}, false
+		return 0, false
 	}
-	return WriteMeta{ExpectedHead: n}, true
+	return n, true
+}
+
+// policyMessage decodes a PolicyMessageHeader value: percent-encoded UTF-8
+// (encodeURIComponent), control characters stripped, at most maxPolicyMessage
+// characters. "" is no message.
+func policyMessage(raw string) (string, bool) {
+	msg, err := url.PathUnescape(raw)
+	if err != nil || !utf8.ValidString(msg) {
+		return "", false
+	}
+	msg = stripControl(msg)
+	if utf8.RuneCountInString(msg) > maxPolicyMessage {
+		return "", false
+	}
+	return msg, true
 }
 
 // parseIfMatch parses exactly one If-Match value of the form "v<N>" (quoted,

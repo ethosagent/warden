@@ -97,6 +97,12 @@ var All = slices.Concat(
 		// Fleet policy version (W-P1-PVER-10): a served-ETag change without a
 		// Create is logged, and workers on head show its version.
 		{Name: "policy_store_fleet_version", Opts: policyStoreOpts(), Run: policyStoreFleetVersion},
+		// History panel (W-P1-PVER-04): a versioned save without If-Match is a
+		// 428; one naming the head carries its message into the history.
+		// In-process only (versioned store).
+		{Name: "policy_save_if_match_required", Opts: policySaveIfMatchOpts(), Run: policySaveIfMatchRequired},
+		// File mode saves without If-Match as before.
+		{Name: "policy_file_mode_save_without_if_match", Run: policyFileModeSaveWithoutIfMatch},
 
 		// Admin audit gate (W-P1-AAUD-05): enabled, the control plane writes the
 		// genesis entry and logs its key_id before serving. In-process only (it
