@@ -74,12 +74,20 @@ func ProxyVars(worker, token string, opts EnvOptions) ([]EnvVar, error) {
 		vars = append(vars, EnvVar{"HTTP_PROXY", proxy}, EnvVar{"http_proxy", proxy})
 	}
 	vars = append(vars, EnvVar{"NO_PROXY", "localhost,127.0.0.1"})
-	if opts.CA != "" {
-		for _, n := range []string{"SSL_CERT_FILE", "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS"} {
-			vars = append(vars, EnvVar{n, opts.CA})
-		}
+	return append(vars, CAVars(opts.CA)...), nil
+}
+
+// CAVars returns the CA bundle variables for path, or nil when path is empty.
+// `identity env` and `identity exec` share it so both export the same set.
+func CAVars(path string) []EnvVar {
+	if path == "" {
+		return nil
 	}
-	return vars, nil
+	var vars []EnvVar
+	for _, n := range []string{"SSL_CERT_FILE", "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS"} {
+		vars = append(vars, EnvVar{n, path})
+	}
+	return vars
 }
 
 // ProxyEnv renders the proxy environment for worker and token as text ending
