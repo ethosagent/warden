@@ -205,8 +205,21 @@ func TestEventsCarryIdentityAllPaths(t *testing.T) {
 		tc := e.tlsOver(conn, br, "http/1.1")
 		_, _ = io.WriteString(tc, "GET /ws HTTP/1.1\r\nHost: "+idHost+"\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"+
 			"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n")
-		if line, err := bufio.NewReader(tc).ReadString('\n'); err != nil || !strings.HasPrefix(line, "HTTP/1.1 101") {
+		hr := bufio.NewReader(tc)
+		if line, err := hr.ReadString('\n'); err != nil || !strings.HasPrefix(line, "HTTP/1.1 101") {
 			t.Fatalf("status = %q err %v, want 101", line, err)
+		}
+		// Read the whole 101 header block before closing: the proxy writes the
+		// status line, headers and blank line separately, and a close that lands
+		// between them fails a write and ends the handler before any event.
+		for {
+			l, err := hr.ReadString('\n')
+			if err != nil {
+				t.Fatalf("reading 101 headers: %v", err)
+			}
+			if l == "\r\n" {
+				break
+			}
 		}
 		_ = tc.Close() // the session event is written when the pump ends
 		wantAlice(t, "websocket", waitEvent(t, e.store, "websocket", func(ev analytics.Event) bool { return ev.Decision == "allow" }))
