@@ -174,20 +174,21 @@ func StaticTokenAuthorizer(token string) IngestAuthorizer {
 }
 
 // NewIngestHandler returns a handler that ingests event batches into store.
-// auth authenticates each request and supplies the proxy id it is attributed to.
+// auth authenticates each request and supplies the proxy id it is attributed to;
+// it must be non-nil (a nil auth panics on the first request, failing closed).
 func NewIngestHandler(store FleetStore, auth IngestAuthorizer) *IngestHandler {
 	return &IngestHandler{store: store, authorize: auth}
 }
 
 // SetOnIngest registers an optional callback invoked after a batch is stored,
-// with the sender's proxy id and the batch size. The control plane uses it to
+// with the authorized proxy id and the batch size. The control plane uses it to
 // track which workers are connected and how much they forward.
 func (i *IngestHandler) SetOnIngest(fn func(proxyID string, n int)) {
 	i.onIngest = fn
 }
 
 // SetOnEvents registers an optional callback invoked after a batch is stored,
-// with the sender's proxy id and the batch of events. The control plane uses it
+// with the authorized proxy id and the batch of events. The control plane uses it
 // to bridge security-relevant events into the integrations alert pipeline. It is
 // independent of onIngest (which only carries the batch count).
 func (i *IngestHandler) SetOnEvents(fn func(proxyID string, events []Event)) {
@@ -207,7 +208,7 @@ func (i *IngestHandler) SetOnSecrets(fn func(proxyID string, refs []SecretRefVie
 }
 
 // ServeHTTP accepts POST <json array of Event> and stores each event with the
-// sender's proxy id. It returns 204 on success.
+// authorizer's proxy id. It returns 204 on success.
 func (i *IngestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
