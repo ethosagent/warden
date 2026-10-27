@@ -20,8 +20,8 @@ import (
 
 // W-P1-GPOL-03: the connection-level handling of identity-conditional
 // decisions. Evaluators are built directly from a policy with a scoped entry
-// (the config guard from GPOL-01 is bypassed on purpose); until GPOL-10 passes
-// the request subject, every request of a deferred-identity session is denied.
+// (the config guard from GPOL-01 is bypassed on purpose); GPOL-10 passes the
+// request subject, so a member's request on such a session is allowed.
 
 // scopedEdit installs an evaluator with {domain: idHost, groups: [eng]}.
 func scopedEdit(extra func(*Config)) func(*Config) {
@@ -92,26 +92,33 @@ func (e *idEnv) waitDeny(t *testing.T, reason denyreason.Reason, n int) []analyt
 
 func TestDeferredIdentity_ConnectWithCA(t *testing.T) {
 	e := newIDEnvCfg(t, IdentityModeAttribute, scopedEdit(nil))
-	for name, hdr := range map[string]string{
-		"member token": "Proxy-Authorization: " + basicAuth("tok-alice") + "\r\n",
-		"no token":     "",
+	// W-P1-GPOL-10: the request subject is passed, so a member's token opens
+	// the host while a request with no identity is still refused.
+	for name, tc := range map[string]struct {
+		hdr  string
+		want int
+	}{
+		"member token": {"Proxy-Authorization: " + basicAuth("tok-alice") + "\r\n", http.StatusOK},
+		"no token":     {"", http.StatusForbidden},
 	} {
 		t.Run(name, func(t *testing.T) {
 			before := len(e.denyEvents())
-			conn, br, status := e.connect(hdr)
+			conn, br, status := e.connect(tc.hdr)
 			if !strings.Contains(status, "200") {
 				t.Fatalf("CONNECT status = %q, want 200", status)
 			}
 			c := &idH1{t: t, tc: e.tlsOver(conn, br, "http/1.1")}
 			c.br = bufio.NewReader(c.tc)
-			if got := c.get(""); got != http.StatusForbidden {
-				t.Fatalf("request status = %d, want 403", got)
+			if got := c.get(""); got != tc.want {
+				t.Fatalf("request status = %d, want %d", got, tc.want)
 			}
-			e.waitDeny(t, denyreason.IdentityRequired, before+1)
+			if tc.want == http.StatusForbidden {
+				e.waitDeny(t, denyreason.IdentityRequired, before+1)
+			}
 		})
 	}
-	if e.dials.Load() != 0 {
-		t.Errorf("upstream dials = %d, want 0", e.dials.Load())
+	if e.dials.Load() != 1 {
+		t.Errorf("upstream dials = %d, want 1 (the member's only)", e.dials.Load())
 	}
 }
 
