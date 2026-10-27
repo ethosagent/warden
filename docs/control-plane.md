@@ -259,6 +259,7 @@ needs a restart. It holds the *name* of the client-secret env var, never the sec
 | `roles.admin`, `roles.editor`, `roles.viewer` | none | IdP group names, matched exactly and case-sensitively; the highest matching role wins. `roles.admin` needs at least one group. |
 | `session.idle`, `session.absolute` | `1h`, `12h` | `0 < idle <= absolute <= 168h`. |
 | `adminAudit.enabled` | `false` | Turns on the signed admin audit log; needs `--state-dir`. See [Admin audit log](#admin-audit-log). |
+| `trustedProxies` | none | CIDRs of reverse proxies in front of the control plane. Only a peer inside one may set the client address the admin audit log records, through `X-Forwarded-For`. A bare address or anything that is not a CIDR is a startup error. |
 
 In `oidc` mode the control plane also needs a non-empty value in the client-secret env
 var and `--state-dir`; without either it refuses to start. See
@@ -312,6 +313,41 @@ reads each segment's public key from the chain. The flag must equal the loaded k
 `key_id` (anything else stops startup) and is a no-op once the head is on that key,
 so leaving it set can never rotate twice. The flag without
 `console.adminAudit.enabled` is a startup error. Automatic rotation is W-P2-KEYS-06.
+
+**What is recorded.** With the log on, every admin change made through the control
+plane writes one row: dashboard policy, settings, detection, integrations and
+llmproviders writes, `/dashboard/api/secretstore` POST and DELETE, `/central/secrets`
+POST, `DELETE /central/secrets/{key}` and the admin session revoke
+(`DELETE /dashboard/api/sessions`). Which routes count comes from the authz route
+table (`Audited`), not from the HTTP method, so worker heartbeats, ingest, `/policy`
+and the read-only POSTs (`/dashboard/api/query`, `query/generate`, `audit/verify`)
+never write a row. Each row carries:
+
+- the actor: the session's subject, role and `auth_method` (`oidc` or `breakglass`),
+  or, in `console.auth: none`, actor `cp-admin-token` with role `admin` and
+  `auth_method` `bearer` for a write that presented the `--admin-token-env` bearer.
+  A request with neither a session nor that bearer writes no row (it is counted and
+  logged as `admin_audit_unauthenticated`, at most once a minute per client address).
+- the outcome: `ok` (2xx/3xx), `denied` (401/403, including a CSRF refusal, for an
+  authenticated actor), `rejected` (other 4xx) or `error` (5xx), and the HTTP status.
+- `before_hash` and `after_hash`: HMAC-SHA256 of the target's state with the
+  CP-local HMAC key, so low-entropy config cannot be guessed from a hash. A denied
+  write has equal hashes. Secret stores keep their state outside Warden, so secrets
+  rows have empty hashes and name the key (`target_ref` `secret:<key>`, `op` put or
+  delete); a policy write names the version written (`policy@<etag>`). No secret
+  value, bearer or body is ever in a row.
+- `request_id` (a valid incoming `X-Request-Id` of up to 64 `[A-Za-z0-9-]`
+  characters, or a new one; echoed in the response) and `client_ip` (the peer
+  address, or the left-most valid `X-Forwarded-For` address when the peer is in
+  `console.trustedProxies`).
+
+Audited changes run one at a time behind a control-plane-wide lock, so the hashes
+describe exactly that change; a change that waits more than 30 s answers 503
+`admin_audit_busy`. If a row cannot be appended after a change succeeded, the entry
+is logged at ERROR with `persist_failed=true`, an `admin_audit_degraded` alert is
+raised, and further audited changes answer 503 `{"error":"admin_audit_unavailable"}`
+before they run, until the database accepts writes again. Reads, `/policy`, ingest
+and heartbeats never depend on the audit log.
 
 Offline CLIs that change admin state record through the same chain with
 `adminaudit.OpenForCLI`: actor `cli:<os user>`, auth_method `cli`, the same key

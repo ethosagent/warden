@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/ethosagent/warden/internal/adminaudit"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/secrets"
 )
@@ -161,6 +162,8 @@ func (s *Server) putSecret(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "key and value are required", http.StatusBadRequest)
 		return
 	}
+	// The audit row names the key, never the value.
+	adminaudit.Annotate(r.Context(), secretRef(key), map[string]string{adminaudit.DetailOp: "put"})
 	if err := s.secretStore.Put(r.Context(), key, body.Value); err != nil {
 		// By-reference only: the error path must not leak the value either.
 		s.cfg.Logger.Error("control plane secret put failed",
@@ -195,6 +198,9 @@ func (s *Server) listSecrets(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// secretRef is the admin audit target_ref of a secret key.
+func secretRef(key string) string { return "secret:" + key }
+
 // handleSecretByKey serves DELETE /central/secrets/{key}. Delete is idempotent
 // (removing an absent key returns 204). Only DELETE is allowed on this subtree;
 // there is no value in hand, so it logs the key only. secretsAuthOK gates it
@@ -214,6 +220,7 @@ func (s *Server) handleSecretByKey(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "key is required", http.StatusBadRequest)
 		return
 	}
+	adminaudit.Annotate(r.Context(), secretRef(key), map[string]string{adminaudit.DetailOp: "delete"})
 	if err := s.secretStore.Delete(r.Context(), key); err != nil {
 		s.cfg.Logger.Error("control plane secret delete failed", "key", key, "error", err)
 		http.Error(w, "secret store error", http.StatusInternalServerError)

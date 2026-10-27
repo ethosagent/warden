@@ -53,9 +53,9 @@ type Server struct {
 	data         DataSource
 	policy       config.Policy
 	secrets      secrets.SecretProvider
-	mcp          MCPProvider               // nil when the MCP gateway is disabled
-	livePolicy   func() config.Policy      // nil = serve the static startup policy
-	policyWriter func(config.Policy) error // nil = read-only (worker / no editor)
+	mcp          MCPProvider                                // nil when the MCP gateway is disabled
+	livePolicy   func() config.Policy                       // nil = serve the static startup policy
+	policyWriter func(context.Context, config.Policy) error // nil = read-only (worker / no editor)
 	// liveSettings returns the behavioral settings currently in force (nil = none);
 	// settingsWriter applies an edited settings document. Both are control-plane-
 	// only: a worker leaves settingsWriter nil so its settings panel is read-only.
@@ -260,6 +260,17 @@ func (s *Server) SetLivePolicy(fn func() config.Policy) {
 // and applies the new policy via fn (which persists it so workers pull it on
 // their next poll). Workers never set this, so they expose no policy-write path.
 func (s *Server) SetPolicyWriter(fn func(config.Policy) error) {
+	if fn == nil {
+		s.policyWriter = nil
+		return
+	}
+	s.policyWriter = func(_ context.Context, p config.Policy) error { return fn(p) }
+}
+
+// SetPolicyWriterContext is SetPolicyWriter for a writer that needs the
+// request context, for example to annotate the control plane's admin audit
+// entry with the resulting policy version.
+func (s *Server) SetPolicyWriterContext(fn func(context.Context, config.Policy) error) {
 	s.policyWriter = fn
 }
 
@@ -775,7 +786,7 @@ func (s *Server) putPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pol := config.Policy{Allowlist: req.Allowlist, Denylist: req.Denylist}
-	if err := s.policyWriter(pol); err != nil {
+	if err := s.policyWriter(r.Context(), pol); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}

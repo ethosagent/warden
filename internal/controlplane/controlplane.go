@@ -201,6 +201,9 @@ type Server struct {
 	// auth is the console OIDC login (/auth/login, /auth/callback); set only when
 	// sessions are.
 	auth *authService
+	// audit is the admin audit middleware's state; nil when cfg.AdminAudit is
+	// (admin audit disabled), in which case no route is wrapped.
+	audit *adminAuditor
 }
 
 // Compile-time assertions that the concrete types satisfy their role interfaces.
@@ -254,6 +257,9 @@ func New(cfg Config) *Server {
 	s.initSessions()
 	s.initAuth()
 	s.warnAdminToken()
+	if cfg.AdminAudit != nil {
+		s.enableAdminAudit(cfg.AdminAudit, cfg.AdminAudit.Probe, cfg.AdminAudit.StateHash)
+	}
 	// Alert pipeline (CP-hosted alert delivery + always-on Alert Store). Constructed
 	// whenever an alert DB path is set — even with ZERO configured integrations —
 	// because it serves two always-on purposes:
@@ -427,9 +433,11 @@ func (s *Server) Handler() http.Handler {
 	// bearer gate as the other /central/* routes; in oidc mode they need an admin
 	// session plus CSRF (secretsAuthOK). GET returns metadata only, and a POST
 	// value is held in transit only and logged by-reference, never persisted.
+	// With admin audit on, POST and DELETE are recorded (sessionAuditWrap).
 	if s.secretStore != nil {
-		mux.Handle("/central/secrets", s.sessionWrap(http.HandlerFunc(s.handleSecrets)))
-		mux.Handle("/central/secrets/", s.sessionWrap(http.HandlerFunc(s.handleSecretByKey)))
+		cpRoutes := cpRouteTable()
+		mux.Handle("/central/secrets", s.sessionAuditWrap(patternRoute(cpRoutes, "/central/secrets"), http.HandlerFunc(s.handleSecrets)))
+		mux.Handle("/central/secrets/", s.sessionAuditWrap(patternRoute(cpRoutes, "/central/secrets/"), http.HandlerFunc(s.handleSecretByKey)))
 	}
 
 	// The fleet dashboard reads the aggregated central store. The control plane
@@ -452,7 +460,14 @@ func (s *Server) Handler() http.Handler {
 	// seam: persist edits to the served config file so workers pull them on their
 	// next poll. The read side reflects the live watch.
 	var editor ConfigEditor = s
-	dash.SetPolicyWriter(editor.WritePolicy)
+	dash.SetPolicyWriterContext(func(ctx context.Context, p config.Policy) error {
+		if err := editor.WritePolicy(p); err != nil {
+			return err
+		}
+		// The admin audit entry (when enabled) names the version written.
+		adminaudit.Annotate(ctx, "policy@"+s.policy.currentETag(), nil)
+		return nil
+	})
 	// The settings writer is context-aware: in oidc mode it authorizes the edit
 	// per field against the caller's role (writeSettingsAs); in none mode it is
 	// editor.WriteSettings unchanged.

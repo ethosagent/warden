@@ -232,3 +232,32 @@ func TestConsoleAdminAuditNotOnPolicyWire(t *testing.T) {
 		t.Errorf("policy JSON carries the console block: %s", b)
 	}
 }
+
+// TestConsoleTrustedProxies: console.trustedProxies defaults to empty, keeps
+// valid IPv4 and IPv6 CIDRs, and refuses a bare address or garbage by naming
+// the key, in none mode as well as oidc.
+func TestConsoleTrustedProxies(t *testing.T) {
+	c, err := LoadConsole(writeConsoleTemp(t, consoleYAML("")))
+	if err != nil {
+		t.Fatalf("LoadConsole: %v", err)
+	}
+	if len(c.TrustedProxies) != 0 {
+		t.Fatalf("default TrustedProxies = %v, want empty", c.TrustedProxies)
+	}
+	c, err = LoadConsole(writeConsoleTemp(t, consoleYAML("console:\n  trustedProxies: [\"10.0.0.0/8\", \" 2001:db8::/32 \"]\n")))
+	if err != nil {
+		t.Fatalf("LoadConsole: %v", err)
+	}
+	if len(c.TrustedProxies) != 2 || c.TrustedProxies[0] != "10.0.0.0/8" || c.TrustedProxies[1] != "2001:db8::/32" {
+		t.Fatalf("TrustedProxies = %q", c.TrustedProxies)
+	}
+	for _, bad := range []string{"10.0.0.1", "not-a-cidr", "10.0.0.0/33", ""} {
+		_, err := LoadConsole(writeConsoleTemp(t, consoleYAML("console:\n  trustedProxies: [\""+bad+"\"]\n")))
+		if err == nil || !strings.Contains(err.Error(), "console.trustedProxies") {
+			t.Errorf("trustedProxies %q: err = %v, want a console.trustedProxies error", bad, err)
+		}
+	}
+	if _, err := LoadConsole(writeConsoleTemp(t, consoleYAML(validOIDC+"  trustedProxies: [\"192.0.2.1\"]\n"))); err == nil {
+		t.Error("a bare address in trustedProxies must fail in oidc mode too")
+	}
+}
