@@ -108,6 +108,7 @@ classes:
       - internal/observability
       - internal/clock            # the time source: the Clock port + its real-time impl (#362)
       - internal/cpstate          # the control plane's SQLite state DB + migration runner (SSO-01)
+      - internal/identityclient   # the `warden identity` client: device login, file cache, token refresh (file and network I/O; #28)
       - internal/integration
       - internal/integration/webhook
       - internal/mcp/poisoned     # the poisoned MCP server (HTTP I/O) the demo binary and the L1 harness share (#363)
@@ -173,6 +174,7 @@ zones:
     - internal/dashboard/**
     - internal/alertpipeline
     - internal/audit
+    - internal/identityclient  # CLI-side client: runs on the user's host, imported by cmd/ only (#28)
     - internal/integration/**
     - internal/detect
     - internal/policybuilder
@@ -403,6 +405,7 @@ rules:
     # Every other bare client is a baseline entry until it moves to one.
     client-constructors:
       - internal/identity/adapters/oidc/httpclient.go   # the shared OIDC client (#444); Proxy=nil, no redirects, capped body
+      - internal/identityclient/httpclient.go           # the CLI-side IdP client (#28); Proxy=nil, no redirects, capped body
 
   - id: X5
     title: Reserved storage key prefixes are built only by their key-builder function

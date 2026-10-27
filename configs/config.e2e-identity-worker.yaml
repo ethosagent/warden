@@ -1,8 +1,6 @@
 # Warden worker config for the L2 IDENTITY stack (deploy/compose/
-# docker-compose.e2e-identity.yml): a copy of config.e2e-worker.yaml with NO
-# identity block. W-P1-IDC-03 adds the worker `identity:` block here (with
-# internalIssuerURL http://dex:5556); this ticket ships none, so the worker
-# runs exactly as in the base e2e stack. Keep the two files otherwise in step.
+# docker-compose.e2e-identity.yml): a copy of config.e2e-worker.yaml plus the
+# `identity:` block below (W-P1-IDC-03). Keep the two files otherwise in step.
 #
 # Original header, for the HERMETIC e2e stack (deploy/compose/
 # docker-compose.e2e.yml). The fake upstream container serves every name the
@@ -57,6 +55,18 @@ upstream:
 # Workers verify the fake upstream's leaf through SSL_CERT_FILE (set in the
 # compose override to the fake-CA + system bundle test/e2e/certs/gen.sh builds)
 # — the Go system pool honors it; no extra Warden config key involved.
+
+# Attribute mode: verify a presented token and record who it is, never block.
+# The issuer string is the public one Dex puts in every token; the worker
+# container cannot reach localhost:5556, so internalIssuerURL is where it
+# actually fetches discovery and keys. There is no insecure-issuer key: plain
+# http is allowed only because internalIssuerURL is set.
+identity:
+  defaultMode: attribute
+  issuer: http://localhost:5556/dex
+  internalIssuerURL: http://dex:5556
+  audience: warden
+  allowedAZP: [agent-harness, warden-cli]
 
 logging:
   level: info

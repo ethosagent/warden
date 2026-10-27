@@ -120,6 +120,8 @@ WARDEN_VERSION=0.3.0 docker compose -f deploy/compose/docker-compose.ethos.yml u
 
 Every recipe also runs a **control-plane** that serves policy and aggregates the agent's traffic into a fleet dashboard at **https://localhost:7070/dashboard/** (served with the proxy CA — trust it). Full per-recipe details (ports, the Node `fetch` proxy workaround, and how to prove isolation) are in **[docs/recipes/](docs/recipes/)**.
 
+**Per-user identity.** To record which user each agent request was made for, a harness sends the user's OIDC ID token to the worker. The **[agent identity contract](docs/identity-contract.md)** says exactly what token to send, how to send it (`Proxy-Authorization` on CONNECT, or `warden identity exec`), what the worker records, and what a harness must never do.
+
 #### How a recipe works
 
 Each recipe puts the agent on a Docker `internal: true` network — its only egress

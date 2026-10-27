@@ -2,6 +2,7 @@ package identity
 
 import (
 	"errors"
+	"net/netip"
 	"net/url"
 	"strings"
 )
@@ -62,4 +63,34 @@ func parseAbs(raw string) (*url.URL, error) {
 		return nil, errors.New("must not contain a fragment")
 	}
 	return u, nil
+}
+
+// CheckClientIssuer is the issuer rule for a client that runs on the user's own
+// host (the `warden identity` CLI). It takes the same shape rules as
+// CheckIssuer (absolute URL with a host, no userinfo, query or fragment), and
+// accepts https always and plain http only for a loopback host (see
+// IsLoopbackHost). There is no override: such a client never needs the
+// split-horizon internal issuer URL. Errors never carry the raw URL.
+func CheckClientIssuer(issuer string) error {
+	if issuer == "" {
+		return errors.New("identity: issuer is required")
+	}
+	u, err := parseAbs(issuer)
+	if err != nil {
+		return errors.New("identity: issuer: " + err.Error())
+	}
+	if strings.EqualFold(u.Scheme, "http") && !IsLoopbackHost(u.Hostname()) {
+		return errors.New("identity: issuer must use https; plain http is accepted only for a loopback host (localhost, 127.0.0.0/8, ::1)")
+	}
+	return nil
+}
+
+// IsLoopbackHost reports whether host (a bare name or IP literal, no port) is
+// "localhost", an address in 127.0.0.0/8 or ::1.
+func IsLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip, err := netip.ParseAddr(host)
+	return err == nil && ip.Unmap().IsLoopback()
 }

@@ -55,3 +55,36 @@ func TestCheckIssuerHTTPErrorNamesKey(t *testing.T) {
 		t.Fatalf("error must name internalIssuerURL and https, got %v", err)
 	}
 }
+
+func TestCheckClientIssuer(t *testing.T) {
+	cases := []struct {
+		issuer string
+		ok     bool
+	}{
+		{"https://idp.example.com", true},
+		{"https://idp.example.com/realms/x", true},
+		{"http://localhost:5556/dex", true},
+		{"http://LOCALHOST:5556/dex", true},
+		{"http://127.0.0.1:5556/dex", true},
+		{"http://127.9.9.9/dex", true},
+		{"http://[::1]:5556/dex", true},
+		{"http://dex:5556", false},
+		{"http://10.0.0.1", false},
+		{"http://idp.example.com", false},
+		{"http://localhost.evil.example", false},
+		{"", false},
+		{"https://h/?q", false},
+		{"https://h/#f", false},
+		{"https://u:p@h", false},
+		{"ftp://localhost", false},
+	}
+	for _, tc := range cases {
+		err := identity.CheckClientIssuer(tc.issuer)
+		if tc.ok != (err == nil) {
+			t.Errorf("CheckClientIssuer(%q) err=%v, want ok=%v", tc.issuer, err, tc.ok)
+		}
+		if err != nil && tc.issuer != "" && strings.Contains(err.Error(), "p@h") {
+			t.Errorf("error leaks userinfo: %v", err)
+		}
+	}
+}
