@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"time"
 
 	"github.com/ethosagent/warden/internal/adminaudit"
 	"github.com/ethosagent/warden/internal/clock"
@@ -40,8 +41,8 @@ func checkAdminAuditFlags(cc config.ConsoleConfig, stateDir string, p Params) er
 // openAdminAudit builds the admin audit store on the CP state database: it
 // loads (or, on an empty chain, creates) the signing key and the HMAC key,
 // runs the fail-closed key check, starts a new segment when asked, writes
-// genesis on first use, and logs the key_id and public key. Key material is
-// never logged.
+// genesis on first use, installs the slog Emitter, and logs the key_id and
+// public key. Key material is never logged.
 func openAdminAudit(ctx context.Context, logger *slog.Logger, state *cpstate.DB, stateDir string, p Params, clk clock.Clock) (*adminaudit.Store, error) {
 	keyFile := p.AdminAuditKeyFile
 	if keyFile == "" {
@@ -52,13 +53,25 @@ func openAdminAudit(ctx context.Context, logger *slog.Logger, state *cpstate.DB,
 		KeyFile:    keyFile,
 		NewSegment: p.AdminAuditNewSegment,
 		Clock:      clk,
+		Logger:     logger,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("control-plane: admin audit: %w", err)
 	}
+	// Every entry committed from here on is also a warden.admin.v1 log line,
+	// so an off-host copy of the logs anchors the chain.
+	s.SetEmitter(adminaudit.NewSlogEmitter(logger))
 	logger.Info("admin audit enabled",
 		"key_id", s.KeyID(),
 		"public_key", base64.StdEncoding.EncodeToString(s.PublicKey()),
 		"key_file", keyFile)
 	return s, nil
+}
+
+// runCheckpointLoop runs the admin audit checkpoint loop until ctx is
+// cancelled, then closes done. It is a named function so a goroutine dump
+// shows whether the loop is running.
+func runCheckpointLoop(ctx context.Context, done chan<- struct{}, s *adminaudit.Store, e adminaudit.Emitter, interval time.Duration, clk clock.Clock) {
+	defer close(done)
+	adminaudit.RunCheckpoints(ctx, s, e, interval, clk)
 }

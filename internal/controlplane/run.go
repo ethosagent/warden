@@ -70,6 +70,10 @@ type Params struct {
 	// signing key to start a chain segment for; it must equal the loaded key's
 	// key_id and is a no-op once the head is on that key.
 	AdminAuditNewSegment string
+	// AdminAuditCheckpointInterval is how often the admin audit chain head is
+	// logged as an admin_audit.checkpoint line (0 = every 5 minutes). Tests
+	// drive it with Clock.
+	AdminAuditCheckpointInterval time.Duration
 }
 
 // Run boots a control plane from Params and serves until ctx is cancelled. It
@@ -339,6 +343,19 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 
 	// Periodic re-read so external edits to the policy file propagate to workers.
 	srv.Start(ctx)
+
+	// Admin audit checkpoints: the chain head is logged at startup, every
+	// interval and at shutdown. Run waits for the loop before the state DB
+	// closes. With admin audit disabled no goroutine starts.
+	if adminAudit != nil {
+		cpCtx, cpCancel := context.WithCancel(ctx)
+		done := make(chan struct{})
+		go runCheckpointLoop(cpCtx, done, adminAudit, adminaudit.NewSlogEmitter(logger), p.AdminAuditCheckpointInterval, clk)
+		defer func() {
+			cpCancel()
+			<-done
+		}()
+	}
 
 	errCh := make(chan error, 1)
 	go func() {
