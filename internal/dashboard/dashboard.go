@@ -223,8 +223,11 @@ type WorkerView struct {
 	// PolicyETag is the worker's current policy version; Behind is true when it
 	// differs from the policy the control plane is currently serving.
 	PolicyETag string `json:"policyETag,omitempty"`
-	Behind     bool   `json:"behind"`
-	Online     bool   `json:"online"`
+	// PolicyVersion is the policy version PolicyETag maps to in the control
+	// plane's versioned store; 0 (omitted) when unknown or in file mode.
+	PolicyVersion int64 `json:"policyVersion,omitempty"`
+	Behind        bool  `json:"behind"`
+	Online        bool  `json:"online"`
 }
 
 // NewServer constructs a dashboard Server. The policy argument is the static

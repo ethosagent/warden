@@ -27,6 +27,7 @@ import (
 
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/cpstate"
+	"github.com/ethosagent/warden/internal/dashboard"
 )
 
 // Policy store modes (--policy-store).
@@ -130,6 +131,10 @@ CREATE TRIGGER policy_publish_log_no_update BEFORE UPDATE ON policy_publish_log
 BEGIN SELECT RAISE(ABORT, 'policy_publish_log is append-only'); END;
 CREATE TRIGGER policy_publish_log_no_delete BEFORE DELETE ON policy_publish_log
 BEGIN SELECT RAISE(ABORT, 'policy_publish_log is append-only'); END;`,
+	}, {
+		// VersionForETag reads the newest row per etag on every fleet-view load.
+		ID:  "policystore/0002",
+		SQL: `CREATE INDEX policy_publish_log_etag ON policy_publish_log (etag, seq);`,
 	}}
 }
 
@@ -162,8 +167,8 @@ type PolicyVersion struct {
 	DocSHA256 string
 }
 
-// PublishEntry is one policy_publish_log row: a head move (or, later, an ETag
-// change without a new version) and the served ETag it produced.
+// PublishEntry is one policy_publish_log row: a head move, or a served-ETag
+// change without a new version (AppendPublish), and the served ETag.
 type PublishEntry struct {
 	Seq      int64
 	Version  int64
@@ -193,6 +198,14 @@ type PolicyVersionStore interface {
 	// PublishLog returns up to limit publish-log rows after afterSeq, oldest
 	// first.
 	PublishLog(ctx context.Context, afterSeq int64, limit int) ([]PublishEntry, error)
+	// AppendPublish records that the served ETag changed while the head stayed
+	// at version (an overlay change). It appends nothing and returns false when
+	// version is no longer the head (that head's own Create row covers it) or
+	// when the newest row already has this version and etag.
+	AppendPublish(ctx context.Context, version int64, etag, reason, actor string) (appended bool, err error)
+	// VersionForETag returns the version of the newest publish-log row with
+	// etag; ok is false when no row has it (or the read fails).
+	VersionForETag(ctx context.Context, etag string) (version int64, ok bool)
 }
 
 // sqlitePolicyStore is the PolicyVersionStore on the cpstate SQLite DB.
@@ -266,13 +279,76 @@ func (st *sqlitePolicyStore) Create(ctx context.Context, doc policyWire, author 
 // createTx is Create's transaction. It returns the new version and its parent,
 // or the head and changed=false for a doc equal to head's.
 func (st *sqlitePolicyStore) createTx(ctx context.Context, docJSON []byte, docSHA, etag string, author PolicyAuthor, msg, source string, expectedHead int64) (version, parent int64, changed bool, err error) {
+	err = st.immediateTx(ctx, func(conn *sql.Conn) error {
+		var head int64
+		if err := conn.QueryRowContext(ctx, "SELECT version FROM policy_head").Scan(&head); err != nil {
+			return fmt.Errorf("policy store: read head: %w", err)
+		}
+		if head != expectedHead {
+			return fmt.Errorf("%w: head is v%d, expected v%d", ErrConflict, head, expectedHead)
+		}
+		if head > 0 {
+			var headSHA string
+			err := conn.QueryRowContext(ctx, "SELECT doc_sha256 FROM policy_versions WHERE version = ?", head).Scan(&headSHA)
+			if err != nil {
+				return fmt.Errorf("policy store: read head v%d: %w", head, err)
+			}
+			if headSHA == docSHA {
+				version, parent = head, head
+				return errNoChange
+			}
+		}
+		var next int64
+		if err := conn.QueryRowContext(ctx, "SELECT COALESCE(MAX(version), 0) + 1 FROM policy_versions").Scan(&next); err != nil {
+			return fmt.Errorf("policy store: next version: %w", err)
+		}
+		at := st.now().UnixMilli()
+		if _, err := conn.ExecContext(ctx,
+			`INSERT INTO policy_versions (version, parent_version, created_at, author_sub, author_email, author_kind, message, source, doc_json, doc_sha256)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			next, head, at, author.Sub, author.Email, author.Kind, msg, source, string(docJSON), docSHA); err != nil {
+			return fmt.Errorf("policy store: insert version: %w", err)
+		}
+		// The cross-process compare-and-swap.
+		res, err := conn.ExecContext(ctx, "UPDATE policy_head SET version = ? WHERE version = ?", next, expectedHead)
+		if err != nil {
+			return fmt.Errorf("policy store: move head: %w", err)
+		}
+		if n, err := res.RowsAffected(); err != nil || n != 1 {
+			return fmt.Errorf("%w: head is no longer v%d", ErrConflict, expectedHead)
+		}
+		if _, err := conn.ExecContext(ctx,
+			`INSERT INTO policy_publish_log (version, etag, reason, actor_sub, at) VALUES (?, ?, ?, ?, ?)`,
+			next, etag, source, author.Sub, at); err != nil {
+			return fmt.Errorf("policy store: append publish log: %w", err)
+		}
+		version, parent, changed = next, head, true
+		return nil
+	})
+	if errors.Is(err, errNoChange) {
+		return version, parent, false, nil
+	}
+	if err != nil {
+		return 0, 0, false, err
+	}
+	return version, parent, changed, nil
+}
+
+// errNoChange makes immediateTx roll back a transaction that has nothing to
+// write; callers map it to their own no-change result.
+var errNoChange = errors.New("policy store: nothing to write")
+
+// immediateTx runs fn in a BEGIN IMMEDIATE transaction on one connection, so
+// its reads and writes see no other writer, in this process or another. It
+// commits when fn returns nil and rolls back otherwise.
+func (st *sqlitePolicyStore) immediateTx(ctx context.Context, fn func(conn *sql.Conn) error) error {
 	conn, err := st.db.Conn(ctx)
 	if err != nil {
-		return 0, 0, false, fmt.Errorf("policy store: connection: %w", err)
+		return fmt.Errorf("policy store: connection: %w", err)
 	}
 	defer func() { _ = conn.Close() }()
 	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return 0, 0, false, fmt.Errorf("policy store: begin: %w", err)
+		return fmt.Errorf("policy store: begin: %w", err)
 	}
 	committed := false
 	defer func() {
@@ -280,53 +356,69 @@ func (st *sqlitePolicyStore) createTx(ctx context.Context, docJSON []byte, docSH
 			_, _ = conn.ExecContext(context.WithoutCancel(ctx), "ROLLBACK")
 		}
 	}()
-
-	var head int64
-	if err := conn.QueryRowContext(ctx, "SELECT version FROM policy_head").Scan(&head); err != nil {
-		return 0, 0, false, fmt.Errorf("policy store: read head: %w", err)
-	}
-	if head != expectedHead {
-		return 0, 0, false, fmt.Errorf("%w: head is v%d, expected v%d", ErrConflict, head, expectedHead)
-	}
-	if head > 0 {
-		var headSHA string
-		err := conn.QueryRowContext(ctx, "SELECT doc_sha256 FROM policy_versions WHERE version = ?", head).Scan(&headSHA)
-		if err != nil {
-			return 0, 0, false, fmt.Errorf("policy store: read head v%d: %w", head, err)
-		}
-		if headSHA == docSHA {
-			return head, head, false, nil
-		}
-	}
-	var next int64
-	if err := conn.QueryRowContext(ctx, "SELECT COALESCE(MAX(version), 0) + 1 FROM policy_versions").Scan(&next); err != nil {
-		return 0, 0, false, fmt.Errorf("policy store: next version: %w", err)
-	}
-	at := st.now().UnixMilli()
-	if _, err := conn.ExecContext(ctx,
-		`INSERT INTO policy_versions (version, parent_version, created_at, author_sub, author_email, author_kind, message, source, doc_json, doc_sha256)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		next, head, at, author.Sub, author.Email, author.Kind, msg, source, string(docJSON), docSHA); err != nil {
-		return 0, 0, false, fmt.Errorf("policy store: insert version: %w", err)
-	}
-	// The cross-process compare-and-swap.
-	res, err := conn.ExecContext(ctx, "UPDATE policy_head SET version = ? WHERE version = ?", next, expectedHead)
-	if err != nil {
-		return 0, 0, false, fmt.Errorf("policy store: move head: %w", err)
-	}
-	if n, err := res.RowsAffected(); err != nil || n != 1 {
-		return 0, 0, false, fmt.Errorf("%w: head is no longer v%d", ErrConflict, expectedHead)
-	}
-	if _, err := conn.ExecContext(ctx,
-		`INSERT INTO policy_publish_log (version, etag, reason, actor_sub, at) VALUES (?, ?, ?, ?, ?)`,
-		next, etag, source, author.Sub, at); err != nil {
-		return 0, 0, false, fmt.Errorf("policy store: append publish log: %w", err)
+	if err := fn(conn); err != nil {
+		return err
 	}
 	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return 0, 0, false, fmt.Errorf("policy store: commit: %w", err)
+		return fmt.Errorf("policy store: commit: %w", err)
 	}
 	committed = true
-	return next, head, true, nil
+	return nil
+}
+
+// AppendPublish implements PolicyVersionStore. The head check and the
+// newest-row check run in one BEGIN IMMEDIATE transaction with the insert, so
+// two control planes refreshing at once append one row.
+func (st *sqlitePolicyStore) AppendPublish(ctx context.Context, version int64, etag, reason, actor string) (bool, error) {
+	if etag == "" || reason == "" || strings.TrimSpace(actor) == "" {
+		return false, errors.New("policy store: publish entry needs an etag, a reason and an actor")
+	}
+	err := st.immediateTx(ctx, func(conn *sql.Conn) error {
+		var head int64
+		if err := conn.QueryRowContext(ctx, "SELECT version FROM policy_head").Scan(&head); err != nil {
+			return fmt.Errorf("policy store: read head: %w", err)
+		}
+		if head != version {
+			return errNoChange
+		}
+		var lastVer int64
+		var lastETag string
+		err := conn.QueryRowContext(ctx, "SELECT version, etag FROM policy_publish_log ORDER BY seq DESC LIMIT 1").Scan(&lastVer, &lastETag)
+		switch {
+		case err == nil && lastVer == version && lastETag == etag:
+			return errNoChange
+		case err != nil && !errors.Is(err, sql.ErrNoRows):
+			return fmt.Errorf("policy store: read publish log: %w", err)
+		}
+		if _, err := conn.ExecContext(ctx,
+			`INSERT INTO policy_publish_log (version, etag, reason, actor_sub, at) VALUES (?, ?, ?, ?, ?)`,
+			version, etag, reason, actor, st.now().UnixMilli()); err != nil {
+			return fmt.Errorf("policy store: append publish log: %w", err)
+		}
+		return nil
+	})
+	if errors.Is(err, errNoChange) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// VersionForETag implements PolicyVersionStore. A read error is logged and
+// reported as unknown: the fleet view degrades to the bare ETag.
+func (st *sqlitePolicyStore) VersionForETag(ctx context.Context, etag string) (int64, bool) {
+	if etag == "" {
+		return 0, false
+	}
+	var v int64
+	err := st.db.QueryRowContext(ctx,
+		"SELECT version FROM policy_publish_log WHERE etag = ? ORDER BY seq DESC LIMIT 1", etag).Scan(&v)
+	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			st.logger.Warn("policy store: etag lookup failed", "error", err)
+		}
+		return 0, false
+	}
+	return v, true
 }
 
 // Head implements PolicyVersionStore.
@@ -520,6 +612,34 @@ func credentialOverlay(policyPath string) wireOverlay {
 		}
 		return redactCredential(live), nil
 	}}
+}
+
+// fleetVersionLookupTimeout bounds the ETag lookups of one worker-list call.
+const fleetVersionLookupTimeout = 2 * time.Second
+
+// fillPolicyVersions sets PolicyVersion on each view whose heartbeat ETag maps
+// to a version in st's publish log. It runs only when the dashboard builds the
+// worker list, with one lookup per distinct ETag per call; st nil (file mode)
+// leaves the views alone.
+func fillPolicyVersions(st PolicyVersionStore, views []dashboard.WorkerView) {
+	if st == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), fleetVersionLookupTimeout)
+	defer cancel()
+	seen := make(map[string]int64)
+	for i := range views {
+		etag := views[i].PolicyETag
+		if etag == "" {
+			continue
+		}
+		v, cached := seen[etag]
+		if !cached {
+			v, _ = st.VersionForETag(ctx, etag) // 0 when unknown
+			seen[etag] = v
+		}
+		views[i].PolicyVersion = v
+	}
 }
 
 // checkPolicyStoreStartup is the fail-closed startup check of versioned mode:

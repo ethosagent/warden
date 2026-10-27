@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/ethosagent/warden/internal/controlplane"
 	"github.com/ethosagent/warden/internal/cpstate"
@@ -49,6 +50,45 @@ func policyStoreVersioned(t *testing.T, h *harness.H) {
 	}
 	if got := connectStatus(t, h, "api.example.com:443"); got != http.StatusOK {
 		t.Errorf("head v1: CONNECT api.example.com = %d, want 200", got)
+	}
+}
+
+// policyStoreFleetVersion (W-P1-PVER-10): the out-of-process writer records
+// version 1 with no served ETag, so the control plane's Refresh appends the
+// publish-log row for the ETag it actually serves (reason external), and the
+// fleet view maps every up-to-date worker's heartbeat ETag to version 1
+// instead of showing it as unknown.
+func policyStoreFleetVersion(t *testing.T, h *harness.H) {
+	h.Upstream(pverHost)
+	appendPolicyVersion(t, h.ControlPlaneStateDB(),
+		`{"allowlist":[{"domain":"api.example.com"},{"domain":"`+pverHost+`"}],"denylist":null}`)
+	h.Eventually("workers enforce head version 1", func() bool {
+		return connectStatus(t, h, pverHost+":443") == http.StatusOK
+	})
+
+	type worker struct {
+		ProxyID       string `json:"proxyID"`
+		PolicyETag    string `json:"policyETag"`
+		PolicyVersion int64  `json:"policyVersion"`
+		Behind        bool   `json:"behind"`
+	}
+	var last []worker
+	h.Eventually("every worker shows policy version 1, up to date", func() bool {
+		// Workers heartbeat on the harness's fake clock: one beat per advance.
+		h.Clock().Advance(time.Second)
+		last = nil
+		if err := h.CP().GetJSON("/dashboard/api/workers", &last); err != nil || len(last) == 0 {
+			return false
+		}
+		for _, w := range last {
+			if w.PolicyETag == "" || w.PolicyVersion != 1 || w.Behind {
+				return false
+			}
+		}
+		return true
+	})
+	if len(last) == 0 {
+		t.Fatalf("fleet view lists no workers")
 	}
 }
 

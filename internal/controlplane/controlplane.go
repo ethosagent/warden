@@ -483,7 +483,8 @@ func (s *Server) Handler() http.Handler {
 	// Per-worker MCP view (inventory + observed schema), selected by ?proxy=.
 	dash.SetMCPFleet(s.mcp.For)
 	// Connected-workers list for the fleet view, with a "behind" flag for any
-	// worker whose policy version differs from what the CP currently serves.
+	// worker whose policy version differs from what the CP currently serves,
+	// and (versioned mode) the version its heartbeat ETag maps to.
 	var tracker WorkerTracker = s.registry
 	dash.SetWorkers(func() []dashboard.WorkerView {
 		cur := s.policy.currentETag()
@@ -491,6 +492,7 @@ func (s *Server) Handler() http.Handler {
 		for i := range views {
 			views[i].Behind = views[i].PolicyETag != "" && views[i].PolicyETag != cur
 		}
+		fillPolicyVersions(s.versions, views)
 		return views
 	})
 	// Dashboard-V3 read tabs. Each source EXISTS on the control plane:

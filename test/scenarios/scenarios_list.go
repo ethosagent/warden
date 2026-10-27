@@ -70,6 +70,9 @@ var All = slices.Concat(
 		// a head written out of process reaches workers. In-process only (it
 		// writes the control plane's state database).
 		{Name: "policy_store_versioned", Opts: policyStoreOpts(), Run: policyStoreVersioned},
+		// Fleet policy version (W-P1-PVER-10): a served-ETag change without a
+		// Create is logged, and workers on head show its version.
+		{Name: "policy_store_fleet_version", Opts: policyStoreOpts(), Run: policyStoreFleetVersion},
 	},
 	// Canary across protocols x allow/deny; see canary.go.
 	canaryScenarios(),
