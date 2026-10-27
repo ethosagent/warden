@@ -392,7 +392,7 @@ func TestPolicyDiffScopedEntryIdentity(t *testing.T) {
 	for _, c := range got {
 		kinds[c.Kind] = c.Key
 	}
-	if kinds[ChangeRemoved] != "a.example.com|443" || kinds[ChangeAdded] != "a.example.com|443|groups=eng,ops" {
+	if kinds[ChangeRemoved] != "a.example.com|443" || kinds[ChangeAdded] != `a.example.com|443|groups="eng","ops"` {
 		t.Fatalf("keys: %+v", kinds)
 	}
 	if d := mustDiff(t, policyWire{Allowlist: []config.AllowlistEntry{scoped}}, policyWire{Allowlist: []config.AllowlistEntry{reordered}}).Allow; len(d) != 1 || d[0].Kind != ChangeChanged {

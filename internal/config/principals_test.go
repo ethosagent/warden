@@ -95,8 +95,8 @@ func TestMCPAllowWhenGroupsRejectedUntilEnforced(t *testing.T) {
 
 func TestDenylistGroupsRejected(t *testing.T) {
 	err := loadErr(t, "policy:\n  allowlist:\n    - domain: a.com\n  denylist:\n    - domain: b.com\n      groups: [eng]\n")
-	if err == nil {
-		t.Fatal("denylist groups must fail to load")
+	if err == nil || !strings.Contains(err.Error(), "groups") {
+		t.Fatalf("denylist groups must fail to load as an unknown field, got %v", err)
 	}
 }
 
@@ -210,5 +210,15 @@ func TestDiffKeyScoped(t *testing.T) {
 	g := AllowlistEntry{Domain: "a.com", Port: 443, Groups: []string{"a"}}
 	if u.DiffKey() == g.DiffKey() {
 		t.Error("users and groups collide")
+	}
+}
+
+func TestDiffKeyScopedNoCollision(t *testing.T) {
+	a := AllowlistEntry{Domain: "a.com", Groups: []string{"a,b", "c"}}
+	b := AllowlistEntry{Domain: "a.com", Groups: []string{"a", "b,c"}}
+	forged := AllowlistEntry{Domain: "a.com", Groups: []string{`x"|users="y`}}
+	real := AllowlistEntry{Domain: "a.com", Groups: []string{"x"}, Users: []string{"y"}}
+	if a.DiffKey() == b.DiffKey() || forged.DiffKey() == real.DiffKey() {
+		t.Errorf("collision: %q %q / %q %q", a.DiffKey(), b.DiffKey(), forged.DiffKey(), real.DiffKey())
 	}
 }

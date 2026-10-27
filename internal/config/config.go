@@ -286,10 +286,15 @@ func (e AllowlistEntry) DiffKey() string {
 	return k
 }
 
-// joinSorted joins a sorted copy of vs with commas (the receiver stays as is).
+// joinSorted joins a sorted copy of vs (the receiver stays as is). Each value
+// is quoted so a value containing "," or "|" cannot collide with another list
+// or forge a key segment.
 func joinSorted(vs []string) string {
 	c := append([]string(nil), vs...)
 	sort.Strings(c)
+	for i, v := range c {
+		c[i] = strconv.Quote(v)
+	}
 	return strings.Join(c, ",")
 }
 
