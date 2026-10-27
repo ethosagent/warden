@@ -172,7 +172,7 @@ func (o *OfflinePolicyStore) Import(ctx context.Context, doc PolicyDoc, msg stri
 		if err := validateDocAgainst(o.servedPath, o.stateDir, doc.wire); err != nil {
 			return PolicyImportResult{}, fmt.Errorf("policy file %s does not validate against the served config %s: %w", doc.path, o.servedPath, err)
 		}
-		if err := o.checkCredential(ctx, doc); err != nil {
+		if err := o.checkCredential(doc); err != nil {
 			return PolicyImportResult{}, err
 		}
 	}
@@ -212,23 +212,33 @@ func (o *OfflinePolicyStore) Import(ctx context.Context, doc PolicyDoc, msg stri
 }
 
 // checkCredential refuses a doc whose credential fingerprint differs from the
-// served config's live value. A version keeps only the fingerprint and the
-// control plane serves the served config's value, so importing a rotated
-// credential would silently drop it. Only fingerprints are compared or named.
-func (o *OfflinePolicyStore) checkCredential(ctx context.Context, doc PolicyDoc) error {
-	w := doc.wire
-	if w.Settings == nil || w.Settings.Secrets == nil || !isRedactedCredential(w.Settings.Secrets.SecretAccessKey) {
-		return nil
-	}
-	want := w.Settings.Secrets.SecretAccessKey
-	live, err := credentialOverlay(o.servedPath).apply(ctx, &w)
+// served config's live value, including a doc with no credential while the
+// served config has one. A version keeps only the fingerprint and the control
+// plane serves the served config's value for it, so importing a rotated
+// credential would silently drop it, and importing none (an unedited export)
+// would serve no credential. Only fingerprints are compared or named.
+func (o *OfflinePolicyStore) checkCredential(doc PolicyDoc) error {
+	prov, err := config.NewLocalYAMLProvider(o.servedPath)
 	if err != nil {
 		return fmt.Errorf("policy import: read the served config %s: %w", o.servedPath, err)
 	}
-	if live != want {
+	p, err := prov.GetPolicy()
+	if err != nil {
+		return fmt.Errorf("policy import: read the served config %s: %w", o.servedPath, err)
+	}
+	live := ""
+	if p.SecretStore.AWS != nil && p.SecretStore.AWS.SecretAccessKey != "" {
+		live = redactCredential(p.SecretStore.AWS.SecretAccessKey)
+	}
+	got := ""
+	if w := doc.wire; w.Settings != nil && w.Settings.Secrets != nil {
+		got = w.Settings.Secrets.SecretAccessKey
+	}
+	if got != live {
 		return fmt.Errorf("policy file %s: secretStore.aws.secretAccessKey (%s) differs from the served config %s (%s); "+
-			"a policy version stores only the fingerprint, so change the credential in the served config instead",
-			doc.path, want, o.servedPath, fingerprintOrNone(live))
+			"a policy version stores only the fingerprint and the control plane serves the served config's value, "+
+			"so put the served credential in the file, or change the credential in the served config first",
+			doc.path, fingerprintOrNone(got), o.servedPath, fingerprintOrNone(live))
 	}
 	return nil
 }

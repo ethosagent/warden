@@ -100,7 +100,7 @@ func newPolicyExportCmd() *cobra.Command {
 			}
 			if exp.CredentialOmitted {
 				_, _ = fmt.Fprintln(cmd.ErrOrStderr(),
-					"note: secretStore.aws.accessKeyId and secretAccessKey were left out; add them before serving this file")
+					"note: secretStore.aws.accessKeyId and secretAccessKey were left out; add them before serving or importing this file")
 			}
 			_, err = cmd.OutOrStdout().Write(exp.YAML)
 			return err

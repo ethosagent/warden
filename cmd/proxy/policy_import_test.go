@@ -511,7 +511,8 @@ func assertLoadable(t *testing.T, out string) config.Policy {
 // secretAccessKey; export without --version writes the head.
 func TestPolicyExport(t *testing.T) {
 	stateDir := seedStateDir(t, importCredentialConfig)
-	file := writeTempConfig(t, importNewConfig)
+	file := writeTempConfig(t, strings.Replace(importCredentialConfig,
+		"    - domain: secretsmanager.us-east-1.amazonaws.com\n", "    - domain: api.anthropic.com\n", 1))
 	if _, stderr, err := runPolicy(t, "import", "--state-dir", stateDir, "--file", file); err != nil {
 		t.Fatalf("import: %v\n%s", err, stderr)
 	}
@@ -544,6 +545,35 @@ func TestPolicyExport(t *testing.T) {
 
 	if _, _, err := runPolicy(t, "export", "--state-dir", stateDir, "--version", "9"); err == nil {
 		t.Error("export of a missing version succeeded")
+	}
+}
+
+// TestPolicyImportCredentialDropRefused: a file without the AWS credential
+// (for example an unedited export) is refused when the served config carries
+// one, because the control plane would then serve no credential.
+func TestPolicyImportCredentialDropRefused(t *testing.T) {
+	stateDir := seedStateDir(t, importCredentialConfig)
+	exported, _, err := runPolicy(t, "export", "--state-dir", stateDir)
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	for name, body := range map[string]string{"export round-trip": exported, "no secretStore": importNewConfig} {
+		t.Run(name, func(t *testing.T) {
+			file := writeTempConfig(t, body)
+			_, stderr, err := runPolicy(t, "import", "--state-dir", stateDir, "--file", file)
+			if err == nil {
+				t.Fatal("import without the served credential succeeded")
+			}
+			if strings.Contains(err.Error()+stderr, importLiveSecret) {
+				t.Error("the refusal printed a credential value")
+			}
+			if !strings.Contains(err.Error(), "secretAccessKey") {
+				t.Errorf("error = %q, want it to name secretAccessKey", err)
+			}
+			if _, head := readStore(t, stateDir); head != 1 {
+				t.Errorf("head = v%d after the refused import, want v1", head)
+			}
+		})
 	}
 }
 

@@ -467,7 +467,8 @@ other value, the control plane refuses to start.
   against `<dir>/config.yaml` when it exists. A raw `secretAccessKey` is stored
   as its fingerprint; it must match the served config's credential, because
   the store cannot carry a new value (change the credential in the served
-  config instead). The version is authored `cli:<os user>` with source
+  config instead). A file without the credential is refused while the served
+  config has one, so an unedited export cannot drop it. The version is authored `cli:<os user>` with source
   `import`, and is created by compare-and-swap from the current head (or
   `--expected-head`): a moved head exits non-zero naming the new head, and a
   file equal to the head prints `no change` and exits 0. The state dir must
@@ -483,7 +484,7 @@ other value, the control plane refuses to start.
   for a downgrade, disaster recovery or a GitOps hand-off. Credential values and
   fingerprints are never written: a version with an AWS credential is exported
   without `secretStore.aws.accessKeyId`/`secretAccessKey`, with a note on
-  stderr.
+  stderr; add them back before you serve or re-import the file.
 - Dashboard saves, history and rollback come in later releases.
 - The control plane checks for a new head every 3 seconds and only re-reads a
   version when the head moved, so a version written by another process reaches
