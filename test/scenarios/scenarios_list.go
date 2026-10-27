@@ -74,6 +74,10 @@ var All = slices.Concat(
 		// audit row, enforcement unchanged, nothing more after a restart.
 		// In-process only (it reads the CP state dir).
 		{Name: "policy_store_initial_import", Opts: policyImportOpts(), Run: policyStoreInitialImport},
+		// Block-list store (W-P1-BLOCK-03): a block written through BlockStore by
+		// another process reaches the served policy (sub/email only) and leaves on
+		// removal. In-process only (it writes the CP state dir).
+		{Name: "block_list_served", Opts: blockListOpts(), Run: blockListServed},
 		// Import/export CLI (W-P1-PVER-06): an exported version, edited and
 		// imported while the control plane runs, reaches workers and is audited
 		// as cli. In-process only (it writes the CP state dir).

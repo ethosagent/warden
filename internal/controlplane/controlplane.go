@@ -166,7 +166,11 @@ type Server struct {
 	// versions is the versioned policy store; nil in file mode. Its Create
 	// refreshes the policy server, so long-poll waiters wake at once.
 	versions PolicyVersionStore
-	writeMu  sync.Mutex // serializes policy + integrations edits
+
+	// blocks is the user block list store; nil without State (and then no
+	// blocked_users overlay is registered).
+	blocks  *BlockStore
+	writeMu sync.Mutex // serializes policy + integrations edits
 	// pipeline is the embeddable alert-delivery assembly (manager + engine + tick +
 	// bridge). Nil when no alert DB path is configured (or when its store/manager
 	// failed to build — fail-open: a broken alert config never stops policy
@@ -257,6 +261,7 @@ func New(cfg Config) *Server {
 	// initial load, so they apply to the first served wire. Versioned mode
 	// registers credential; W-P1-BLOCK-03 adds blocked_users.
 	s.initPolicyStore()
+	s.initBlockStore()
 	s.policy.Refresh() // initial load so /policy and the dashboard have policy immediately
 	s.initSessions()
 	s.initAuth()
