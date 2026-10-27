@@ -514,17 +514,52 @@ func (p *Proxy) recordSSRFDeny(s *requestScope, err error) {
 // be what the origin sees. A NoMatch falls through unchanged (judge-eligible
 // exactly as before); an explicit Deny is terminal — a constraint violation is
 // never judge-eligible, by construction of the evaluator.
+//
+// W-P1-GPOL-10: the same single evaluation carries the request's verified
+// subject (s.subject, nil unless identityStage found status valid), so an
+// identity-scoped entry is decided per request on every protocol. It is the
+// only per-request policy evaluation, so a rate limit is charged once.
 func (p *Proxy) constraintGate(s *requestScope) (endSession bool) {
-	verdict := p.cfg.Policy.EvaluateRequest(s.domain, s.port, s.scheme, s.req.Method, s.req.URL.EscapedPath())
-	if verdict.Decision != policy.Deny {
+	verdict := p.cfg.Policy.EvaluateFor(policy.RequestContext{
+		Domain: s.domain, Port: s.port, Scheme: s.scheme,
+		Method: s.req.Method, Path: s.req.URL.EscapedPath(),
+		Subject: s.subject,
+	})
+	p.recordScoped(verdict)
+	switch verdict.Decision {
+	case policy.Allow, policy.NoMatch:
 		return false
 	}
+	// Deny and Conditional are terminal, and anything else fails closed here.
 	// Every explicit Deny names itself from the declared set (#409): a
 	// constraint violation (method_not_allowed / path_not_allowed /
-	// path_not_canonical), a denylist hit, or an exhausted guard.
-	p.emitDeny(s, verdict.Reason, denyExtra{LatencyMs: s.latencyMs()})
+	// path_not_canonical), a denylist hit, an exhausted guard, or a scoped
+	// entry the subject is not in (group_not_allowed /
+	// identity_groups_truncated). A Conditional means a scoped entry needs an
+	// identity this request does not carry (identity_required).
+	reason := verdict.Reason
+	if verdict.Decision != policy.Deny && verdict.Decision != policy.Conditional {
+		reason = denyreason.PolicyNoMatch
+	}
+	p.emitDeny(s, reason, denyExtra{LatencyMs: s.latencyMs()})
 	s.out.errorResponse(403, "Forbidden")
 	return true
+}
+
+// recordScoped counts a decision that depended on who asked, on the bounded
+// result label only: never a user, group, token or email.
+func (p *Proxy) recordScoped(v policy.RequestVerdict) {
+	if !v.Scoped {
+		return
+	}
+	switch {
+	case v.Decision == policy.Allow:
+		p.cfg.Metrics.RecordScoped("allow")
+	case v.Decision == policy.Conditional:
+		p.cfg.Metrics.RecordScoped("no_identity")
+	case v.Reason == denyreason.GroupNotAllowed || v.Reason == denyreason.IdentityGroupsTruncated:
+		p.cfg.Metrics.RecordScoped("not_member")
+	}
 }
 
 // judgeGate runs the inline judge for requests that matched no static rule. The
