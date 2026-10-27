@@ -489,6 +489,7 @@ func (s *Server) Handler() http.Handler {
 	// Reads stay open; every write needs the CP bearer token (fail closed).
 	dash.SetWriteGuard(s.dashboardWriteGuard())
 	mux.Handle("/dashboard/", s.sessionWrap(dash.Handler()))
+	s.registerAuthRoutes(mux)
 
 	return mux
 }
