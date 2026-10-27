@@ -365,6 +365,10 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		Clock: p.Clock,
 	})
 
+	// Bounded chain check (newest rows + head signature) once the alert
+	// pipeline exists to carry its Finding. A failure is reported, never fatal.
+	srv.verifyAdminAuditAtStartup(context.WithoutCancel(ctx))
+
 	if policyStore == PolicyStoreVersioned {
 		if _, _, ok, _ := srv.policy.snapshot(); !ok {
 			if srv.integrationsStore != nil {
