@@ -1171,6 +1171,26 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
 
       <div class="empty-only" id="es-fleet"></div>
 
+      <!-- Worker tokens (W-P1-WTOK-10): outside demo-only so it shows before the first worker connects.
+           loadWorkerTokens hides it when the API answers 404 (no state dir, or a worker dashboard). -->
+      <div class="card" id="wtok-card" style="margin-bottom:16px; display:none">
+        <div class="card-head"><h3>Worker tokens</h3><span style="display:flex;align-items:center;gap:8px"><span class="sub" id="wtok-status"></span><button data-min-role="admin" class="btn primary sm" id="wtok-new" style="display:none" onclick="toggleWorkerTokenForm()">+ New token</button></span></div>
+        <div class="card-pad">
+          <div class="note" style="margin-bottom:10px">Each worker authenticates with its own token, bound to one proxy id. A token is shown once when created and only its hash is stored. Revoke a token to cut that worker off.</div>
+          <div class="note" id="wtok-cli" style="margin-bottom:10px; display:none">This console has no sign-in (console.auth: none), so tokens are listed here but created and revoked on the control plane host with <span class="mono">warden control-plane token create</span> (and <span class="mono">revoke</span>).</div>
+          <div id="wtok-form" data-min-role="admin" style="display:none; margin-bottom:12px">
+            <div class="form-row">
+              <div class="field"><label for="wtok-name">Name</label><input type="text" id="wtok-name" maxlength="128" autocomplete="off" placeholder="e.g. worker-eu-1" /></div>
+              <div class="field"><label for="wtok-proxy">Proxy id</label><input type="text" id="wtok-proxy" maxlength="128" autocomplete="off" placeholder="the worker's proxy id" /></div>
+              <div class="field"><label for="wtok-exp">Expires in (optional)</label><input type="text" id="wtok-exp" maxlength="16" autocomplete="off" placeholder="e.g. 720h" /></div>
+              <div class="field" style="justify-content:flex-end"><button data-min-role="admin" class="btn primary sm" id="wtok-create" onclick="createWorkerToken()">Create token</button></div>
+            </div>
+          </div>
+          <div id="wtok-list"></div>
+          <div id="wtok-msg" class="note" style="margin-top:8px; display:none"></div>
+        </div>
+      </div>
+
       <div class="demo-only">
       <div class="kpi-row">
         <div class="card stat"><div class="k"><span class="health-dot" style="background:var(--green)"></span>Online</div><div class="v">—</div><div class="delta"></div></div>
@@ -1181,7 +1201,7 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
 
       <div class="card">
         <table id="fleetTable"><thead><tr>
-          <th>Worker</th><th>Status</th><th>Policy ETag</th><th>Pending</th><th>Last heartbeat</th><th>Last policy pull</th><th class="num">Events fwd</th>
+          <th>Worker</th><th>Auth</th><th>Status</th><th>Policy ETag</th><th>Pending</th><th>Last heartbeat</th><th>Last policy pull</th><th class="num">Events fwd</th>
         </tr></thead><tbody id="fleetBody"></tbody></table>
       </div>
       </div><!-- /demo-only -->
@@ -1349,6 +1369,19 @@ LIMIT 8;</textarea>
     <div style="display:flex;justify-content:flex-end;gap:8px">
       <button class="btn sm" value="cancel">Cancel</button>
       <button class="btn primary sm" value="ok" id="pmd-ok">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- One-time worker token dialog (W-P1-WTOK-10); showWorkerToken fills it with textContent and clearWorkerToken empties it on close. -->
+<dialog id="wtokDialog">
+  <form method="dialog">
+    <h3 style="margin:0 0 6px">Worker token created</h3>
+    <div class="note" style="color:var(--amber)"><b>Copy this token now.</b> It is shown only once and cannot be shown again. Anyone holding it can act as that worker.</div>
+    <code class="mono" id="wtok-value" style="display:block;margin:12px 0;padding:8px;word-break:break-all;user-select:all"></code>
+    <div style="display:flex;justify-content:flex-end;gap:8px">
+      <button type="button" class="btn sm" id="wtok-copy">Copy</button>
+      <button class="btn primary sm" value="close">Close</button>
     </div>
   </form>
 </dialog>
@@ -1991,6 +2024,7 @@ document.querySelectorAll('#actSubtabs button').forEach(b=>{
    Fleet (/dashboard/api/workers)
    ============================================================ */
 async function loadFleet(){
+  loadWorkerTokens();
   let ws;
   try{ ws=await jget('/dashboard/api/workers'); }catch(e){ ws=[]; }
   ws=Array.isArray(ws)?ws:[];
@@ -2000,6 +2034,14 @@ async function loadFleet(){
   renderFleet(ws);
 }
 function fleetStat(k,v,delta){ return '<div class="card stat"><div class="k">'+k+'</div><div class="v">'+v+'</div><div class="delta">'+esc(delta)+'</div></div>'; }
+/* fleetAuthBadge: how the worker authenticates. A shared-token (legacy) or open (none) worker's
+   proxy id is self-reported, so it is flagged; a token worker shows its token's name. */
+function fleetAuthBadge(w){
+  const k=w.authKind;
+  if(k==='legacy'||k==='none') return '<span class="pill p-redact" title="the proxy id is self-reported, not verified">legacy / unverified</span>';
+  if(k==='token') return '<span class="pill p-allow">token</span> <span class="mono" style="font-size:12px">'+esc(w.tokenName||'')+'</span>';
+  return '<span class="muted">—</span>';
+}
 function renderFleet(ws){
   const online=ws.filter(w=>w.online).length;
   const stale=ws.length-online;
@@ -2023,12 +2065,97 @@ function renderFleet(ws){
     let pending=w.behind?'<span class="pill p-high">policy behind</span>':'';
     if(w.noGroupPolicy) pending+=(pending?' ':'')+'<span class="pill p-high" title="Denies group-scoped rules until upgraded">no groupPolicy</span>';
     if(!pending) pending='<span class="muted">—</span>';
-    return '<tr><td class="mono">'+esc(w.proxyID||'—')+'</td><td>'+status+'</td>'
+    return '<tr><td class="mono">'+esc(w.proxyID||'—')+'</td><td>'+fleetAuthBadge(w)+'</td><td>'+status+'</td>'
       +'<td class="mono" style="font-size:12px">'+esc(etag)+' '+etagPill+'</td>'
       +'<td>'+pending+'</td><td class="muted">'+relTime(w.lastSeen)+'</td>'
       +'<td class="muted">'+relTime(w.lastPolicyPull)+'</td><td class="num">'+fmtNum(w.eventsForwarded||0)+'</td></tr>';
   }).join('');
 }
+
+/* ---------- Worker tokens (W-P1-WTOK-10): GET / POST / DELETE /dashboard/api/worker-tokens through api() ----------
+   The list is open to every role; create and revoke are rendered only for an oidc admin (the server
+   enforces it, and answers 403 use_cli in console.auth none). The plaintext token exists only in the
+   201 body of a create: it goes straight to showWorkerToken, which sets it with textContent, and the
+   dialog's close event empties it. It is never put in storage, a URL, a log or innerHTML. */
+async function loadWorkerTokens(){
+  const card=document.getElementById('wtok-card'); if(!card) return;
+  await authInit();
+  const list=document.getElementById('wtok-list'), st=document.getElementById('wtok-status');
+  let r=null, rows=null;
+  try{ r=await api('GET','/dashboard/api/worker-tokens'); if(r.ok) rows=await r.json(); }catch(e){ rows=null; }
+  if(r&&r.status===404){ card.style.display='none'; return; }
+  card.style.display='';
+  const canWrite=authMode==='oidc'&&roleAllows('admin');
+  document.getElementById('wtok-new').style.display=canWrite?'':'none';
+  document.getElementById('wtok-cli').style.display=authMode==='oidc'?'none':'';
+  if(!canWrite) document.getElementById('wtok-form').style.display='none';
+  if(!Array.isArray(rows)){ list.innerHTML='<div class="note" style="padding:8px 0">Worker tokens unavailable.</div>'; st.textContent=''; return; }
+  const active=rows.filter(x=>!x.revokedAt).length;
+  st.textContent=active+' active';
+  if(!rows.length){ list.innerHTML='<div class="note" style="padding:8px 0">No worker tokens yet.</div>'; return; }
+  list.innerHTML='<table><thead><tr><th>Name</th><th>Proxy id</th><th>Created</th><th>Last used</th><th>Expires</th><th>Revoked</th><th></th></tr></thead><tbody>'+
+    rows.map(x=>'<tr><td><b>'+esc(x.name)+'</b></td>'
+      +'<td class="mono" style="font-size:12px">'+esc(x.proxyID)+'</td>'
+      +'<td style="font-size:12px">'+esc(x.createdAt?relTime(x.createdAt):'—')+'</td>'
+      +'<td style="font-size:12px">'+esc(x.lastUsedAt?relTime(x.lastUsedAt):'never')+'</td>'
+      +'<td style="font-size:12px">'+esc(x.expiresAt||'never')+'</td>'
+      +'<td style="font-size:12px">'+(x.revokedAt?esc(x.revokedAt):'—')+'</td>'
+      +'<td style="text-align:right">'+(canWrite&&!x.revokedAt?'<button data-min-role="admin" class="btn sm wtok-revoke" data-id="'+esc(x.id)+'" data-name="'+esc(x.name)+'" style="color:#ff8098">Revoke</button>':'')+'</td></tr>').join('')+'</tbody></table>';
+  list.querySelectorAll('.wtok-revoke').forEach(b=>b.addEventListener('click',()=>revokeWorkerToken(b.dataset.id,b.dataset.name)));
+}
+function toggleWorkerTokenForm(){
+  const f=document.getElementById('wtok-form'); f.style.display=f.style.display==='none'?'':'none';
+}
+function workerTokenMsg(text){
+  const m=document.getElementById('wtok-msg'); m.style.display=text?'':'none'; m.textContent=text||'';
+}
+async function createWorkerToken(){
+  const name=document.getElementById('wtok-name').value.trim();
+  const proxyID=document.getElementById('wtok-proxy').value.trim();
+  const exp=document.getElementById('wtok-exp').value.trim();
+  if(!name||!proxyID){ workerTokenMsg('Name and proxy id are required.'); return; }
+  const body={name:name,proxyID:proxyID};
+  if(exp) body.expiresIn=exp;
+  const btn=document.getElementById('wtok-create'); btn.disabled=true;
+  let r=null, d=null;
+  try{ r=await api('POST','/dashboard/api/worker-tokens',body); if(r.status===201) d=await r.json(); }catch(e){ r=null; d=null; }
+  btn.disabled=false;
+  const tok=d&&d.token; d=null;
+  if(!tok){
+    let why=r?('status '+r.status):'network error';
+    if(r&&r.status!==201){ try{ const e=await r.json(); if(e&&e.error) why=e.error; }catch(x){} }
+    workerTokenMsg('Create failed: '+why+'.'); return;
+  }
+  workerTokenMsg('');
+  document.getElementById('wtok-name').value=''; document.getElementById('wtok-proxy').value=''; document.getElementById('wtok-exp').value='';
+  document.getElementById('wtok-form').style.display='none';
+  showWorkerToken(tok);
+  loadWorkerTokens();
+}
+async function revokeWorkerToken(id,name){
+  if(!window.confirm('Revoke worker token "'+name+'"? That worker is cut off at once and cannot be re-enabled.')) return;
+  let r=null;
+  try{ r=await api('DELETE','/dashboard/api/worker-tokens/'+encodeURIComponent(id)); }catch(e){ r=null; }
+  workerTokenMsg(r&&r.status===204 ? 'Revoked "'+name+'".' : 'Revoke failed'+(r?(': status '+r.status):'')+'.');
+  loadWorkerTokens();
+}
+function showWorkerToken(tok){
+  document.getElementById('wtok-value').textContent=tok;
+  const dlg=document.getElementById('wtokDialog');
+  if(typeof dlg.showModal==='function') dlg.showModal(); else dlg.setAttribute('open','');
+}
+function clearWorkerToken(){
+  document.getElementById('wtok-value').textContent='';
+  const b=document.getElementById('wtok-copy'); if(b) b.textContent='Copy';
+}
+(function(){
+  const dlg=document.getElementById('wtokDialog'), cp=document.getElementById('wtok-copy');
+  if(dlg) dlg.addEventListener('close',clearWorkerToken);
+  if(cp) cp.addEventListener('click',async()=>{
+    try{ await navigator.clipboard.writeText(document.getElementById('wtok-value').textContent); cp.textContent='Copied'; }
+    catch(e){ cp.textContent='Copy failed: select the token and copy it'; }
+  });
+})();
 
 /* ============================================================
    Explore (/dashboard/api/query + /query/schema)
