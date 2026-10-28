@@ -140,7 +140,10 @@ type Config struct {
 type policyWire struct {
 	Allowlist []config.AllowlistEntry `json:"allowlist"`
 	Denylist  []config.DenylistEntry  `json:"denylist"`
-	Settings  *config.SettingsWire    `json:"settings,omitempty"`
+	// BlockedUsers is the user block list (sub and email only; reason and actor
+	// stay on the CP). Omitempty keeps the wire and ETag unchanged when empty.
+	BlockedUsers []config.BlockedUser `json:"blockedUsers,omitempty"`
+	Settings     *config.SettingsWire `json:"settings,omitempty"`
 	// ScopedAllowlist and ScopedAllowPos are filled only by projectScoped, at
 	// serve time: identity-scoped allow entries move out of Allowlist so a
 	// worker that decodes leniently cannot read one as global. Never stored.
@@ -177,7 +180,11 @@ type Server struct {
 	// versions is the versioned policy store; nil in file mode. Its Create
 	// refreshes the policy server, so long-poll waiters wake at once.
 	versions PolicyVersionStore
-	writeMu  sync.Mutex // serializes policy + integrations edits
+
+	// blocks is the user block list store; nil without State (and then no
+	// blocked_users overlay is registered).
+	blocks  *BlockStore
+	writeMu sync.Mutex // serializes policy + integrations edits
 	// pipeline is the embeddable alert-delivery assembly (manager + engine + tick +
 	// bridge). Nil when no alert DB path is configured (or when its store/manager
 	// failed to build — fail-open: a broken alert config never stops policy
@@ -280,6 +287,7 @@ func New(cfg Config) *Server {
 	// initial load, so they apply to the first served wire. Versioned mode
 	// registers credential; W-P1-BLOCK-03 adds blocked_users.
 	s.initPolicyStore()
+	s.initBlockStore()
 	s.policy.Refresh() // initial load so /policy and the dashboard have policy immediately
 	s.initSessions()
 	s.initAuth()
@@ -640,6 +648,8 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 type policyYAML struct {
 	Allowlist []config.AllowlistEntry `yaml:"allowlist"`
 	Denylist  []config.DenylistEntry  `yaml:"denylist"`
+	// BlockedUsers keeps policy.blockedUsers in the file across an edit.
+	BlockedUsers []config.BlockedUser `yaml:"blockedUsers,omitempty"`
 }
 
 // writePolicy validates and atomically persists an edited allow/deny policy to
@@ -674,7 +684,7 @@ func (s *Server) WritePolicy(ctx context.Context, p config.Policy, meta dashboar
 		_ = yaml.Unmarshal(cur, &root)
 	}
 
-	if err := renderPolicyBlock(root, p.Allowlist, p.Denylist); err != nil {
+	if err := renderPolicyBlock(root, p.Allowlist, p.Denylist, p.BlockedUsers); err != nil {
 		return err
 	}
 
@@ -692,9 +702,9 @@ func (s *Server) WritePolicy(ctx context.Context, p config.Policy, meta dashboar
 // renderPolicyBlock replaces root's policy block with allow/deny and makes sure
 // a logging block exists (kept from the current file when present, otherwise
 // info/json). It is the policy half of WritePolicy and renderDocToRoot.
-func renderPolicyBlock(root map[string]yaml.Node, allow []config.AllowlistEntry, deny []config.DenylistEntry) error {
+func renderPolicyBlock(root map[string]yaml.Node, allow []config.AllowlistEntry, deny []config.DenylistEntry, blocked []config.BlockedUser) error {
 	var policyNode yaml.Node
-	if err := policyNode.Encode(policyYAML{Allowlist: allow, Denylist: deny}); err != nil {
+	if err := policyNode.Encode(policyYAML{Allowlist: allow, Denylist: deny, BlockedUsers: blocked}); err != nil {
 		return fmt.Errorf("controlplane: encode policy block: %w", err)
 	}
 	root["policy"] = policyNode
@@ -732,7 +742,7 @@ func readRoot(path string) map[string]yaml.Node {
 // live value (the preserve-on-empty rule). Blocks no dashboard writer owns
 // (dlp, advisory) are left as the served file has them.
 func renderDocToRoot(root map[string]yaml.Node, doc policyWire) error {
-	if err := renderPolicyBlock(root, doc.Allowlist, doc.Denylist); err != nil {
+	if err := renderPolicyBlock(root, doc.Allowlist, doc.Denylist, nil); err != nil {
 		return err
 	}
 	var settings config.SettingsWire

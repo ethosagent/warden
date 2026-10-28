@@ -691,9 +691,10 @@ append is logged at ERROR and does not stop startup.
   the served YAML `secretStore` block and is merged in when `/policy` is built,
   so workers get the same bytes as before. In history responses and diffs a
   credential appears only as its fingerprint, never the value.
-- Serve-time overlay data is not stored either. The credential is the only
-  overlay today; the block list will be one when it ships. A rollback therefore
-  never restores an old credential or block list.
+- Serve-time overlay data is not stored either. The credential
+  (versioned mode) and the user block list (whenever a state dir is set) are the
+  overlays today. A rollback therefore never restores an old credential or
+  block list.
 - CP-local blocks (integrations, detection, `central`, `controlPlane`, ...)
   are not versioned; their editors keep rewriting the served YAML.
 
@@ -882,6 +883,48 @@ YAML if the mirror is lost.
 - **Release N+2** removes YAML as a policy source: `--policy-store=file` is
   removed, the served YAML is only the write-through mirror of head, and hand
   edits are never served (they come in through `warden policy import`).
+
+## Block list: offline CLI
+
+The user block list lives in `<state-dir>/warden-cp.db`, outside policy
+versions. When the console or the IdP is unavailable, or a script needs to
+block someone without a browser session, use the command line. It works with
+the control plane running or stopped.
+
+```sh
+warden control-plane block add --state-dir D [--sub S] [--email E] --reason R
+warden control-plane block remove --state-dir D --id ID
+warden control-plane block list --state-dir D [--json]
+```
+
+- `add` needs `--sub`, `--email` or both, and prints the new id. It uses the
+  same store and validator as the admin API: the email is lowercased, a
+  duplicate sub or email is refused, the reason is at most 512 bytes with no
+  control characters, and the count and size limits apply. A validation error
+  exits 1 with the API's message.
+- `remove` exits 2 for an id that is not on the list.
+- `list` opens the database read-only.
+- `--admin-audit-key-file` (add and remove) defaults to `<state-dir>/cp-audit.key`.
+
+**Audit.** With admin audit enabled in the state dir, each add and remove
+appends one `blocked_users.add` or `blocked_users.remove` row (actor
+`cli:<os user>`, auth_method `cli`, target `blocked_users`, target_ref
+`block:<id>`). The reason text is not recorded in the row or logged. The
+audit key is checked first: with audit rows present and the key missing or not
+matching, the command exits non-zero and writes nothing. If the audit append
+still fails, an add is rolled back and a remove deletes nothing. The block and
+its audit row are two commits, not one transaction, so a crash between them
+(or two concurrent removes of one id) can leave one without the other. A state dir where audit was never enabled
+gets a one-line notice and no row.
+
+**Pickup.** A running control plane polls `PRAGMA data_version` every 2 s and,
+when another process wrote, refreshes the served policy and runs the block
+store's change callbacks. A connected worker then receives the new list within
+2 s plus one long-poll round trip.
+
+The CLI has no console identity, so the self-unblock check of the admin API does
+not apply. Write access to the state dir already allows policy changes, so
+this adds no new authority.
 
 ## Worker admin token
 
