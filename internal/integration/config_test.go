@@ -99,3 +99,28 @@ func TestExpandEnv(t *testing.T) {
 		t.Errorf("plain value changed: %q", got)
 	}
 }
+
+func TestRoutesFinding(t *testing.T) {
+	f := Finding{
+		RuleID: "breakglass_login", Category: "security", Severity: SevCritical,
+		DedupKey: "breakglass_login:success",
+	}
+	for name, tc := range map[string]struct {
+		match []MatchClause
+		want  bool
+	}{
+		"empty routes nothing": {nil, false},
+		"by rule":              {[]MatchClause{{Rule: "breakglass_login"}}, true},
+		"by severity":          {[]MatchClause{{Severity: "critical"}}, true},
+		"by category":          {[]MatchClause{{Category: "security"}}, true},
+		"rule and severity":    {[]MatchClause{{Rule: "breakglass_login", Severity: "low"}}, false},
+		"other rule":           {[]MatchClause{{Rule: "egress_blocked"}}, false},
+		"second clause wins":   {[]MatchClause{{Rule: "egress_blocked"}, {Severity: "critical"}}, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := RoutesFinding(tc.match, f); got != tc.want {
+				t.Fatalf("RoutesFinding = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

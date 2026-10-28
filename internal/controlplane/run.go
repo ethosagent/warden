@@ -247,6 +247,13 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	if err := checkAdminAuditFlags(consoleCfg, stateDir, p); err != nil {
 		return fail(err)
 	}
+	bindAddr := listenAddr
+	if p.Listener != nil {
+		bindAddr = p.Listener.Addr().String()
+	}
+	if err := ValidateBreakGlassStartup(consoleCfg, p, bindAddr); err != nil {
+		return fail(err)
+	}
 
 	var token string
 	if p.TokenEnv != "" {
@@ -469,6 +476,8 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		// The CP's time port (nil = clock.Real() inside New).
 		Clock: p.Clock,
 	})
+
+	srv.warnBreakGlassSetup(integrations)
 
 	if p.Findings != nil {
 		srv.findings = p.Findings

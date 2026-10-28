@@ -616,6 +616,19 @@ failures. With admin audit on, a row that cannot be written fails the login clos
 audit_unavailable`). The limiter is in memory: its windows reset when the control plane
 restarts. The password and the submitted username are never stored or logged.
 
+Enabling break-glass is guarded at startup. The control plane refuses to start when
+`--state-dir` is empty, when the hash does not load or is outside the argon2id bounds (the
+error names `console.breakGlass.passwordHashEnv` or `passwordHashFile`, never the value),
+and when it would serve plain HTTP (no `--ca-cert`/`--ca-key`) on a non-loopback `--listen`
+address (`0.0.0.0`, `::`, an empty host such as `:7070`, any non-loopback IP or hostname)
+unless `console.breakGlass.allowBehindTLSTerminator` is true. It logs a WARN at startup when
+no alert pipeline exists or no integration's `alerts.match` routes a critical
+`breakglass_login` Finding, and when `console.adminAudit.enabled` is false. While a
+break-glass session is live it logs the WARN `breakglass_session_active` (count and earliest
+expiry, no session id) every 5 minutes, and the dashboard shows a red banner with the
+expiry. The control plane starts, serves workers and accepts break-glass logins with the
+IdP unreachable; `/auth/login` answers `503 idp_unavailable` until discovery succeeds.
+
 Moving a deployment from `none` to `oidc` is covered in
 [Migrating from none to oidc](#migrating-from-none-to-oidc).
 

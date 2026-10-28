@@ -474,6 +474,8 @@ OUT of scope: the L1 test (W-P1-OPS1-09); the runbook text (W-P1-OPS1-03).
 
 **What to build.** One L2 test in `test/e2e/identity` (build tag `e2e`), because it needs the identity stack (the base `make e2e` stack has no Dex).
 
+**As built.** The identity CP config has no break-glass block, so the test writes a copy of `configs/config.e2e-identity-cp.yaml` plus `console.adminAudit.enabled` and `console.breakGlass` (hash from env `WARDEN_BREAKGLASS_HASH`) into a temp dir, with a compose override that mounts it, and force-recreates only the `control-plane` service (state volume kept). The password is random per run; only its hash reaches the container. A cleanup starts Dex and recreates the CP on its normal config, so later tests see the stock stack.
+
 **Requirements**
 
 - New `test/e2e/identity/breakglass_test.go` (`//go:build e2e`) with `TestBreakGlassDexDown`, using the identity stack helpers of W-P1-DEX-04 (Dex, CP in oidc mode with issuer `http://localhost:5556/dex` and `internalIssuerURL: http://dex:5556`, a worker). The CP is configured with `console.breakGlass` enabled, a hash produced in the test with `controlplane.HashPassword`, TLS from the e2e certs, and the hash passed through an env var.
