@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestLintScoped(t *testing.T) {
@@ -41,6 +42,9 @@ func TestLintScoped(t *testing.T) {
 		{"unscoped path prefix covers scoped", []AllowlistEntry{
 			{Domain: "a.com", Paths: []string{"/v1/*"}}, {Domain: "a.com", Groups: g, Paths: []string{"/v1/x", "/v1/y/*"}},
 		}, []string{"allowlist[1] (a.com, groups) is shadowed by allowlist[0] (a.com), which admits everyone"}},
+		{"unscoped with rate limit is not shadowing", []AllowlistEntry{
+			{Domain: "a.com", RateLimit: "10/second"}, {Domain: "a.com", Groups: g},
+		}, nil},
 		{"different port", []AllowlistEntry{
 			{Domain: "a.com", Port: 8443}, {Domain: "a.com", Groups: g},
 		}, nil},
@@ -115,5 +119,15 @@ func TestLintScoped_BoundsLongPattern(t *testing.T) {
 	}})
 	if len(got) != 1 || len(got[0]) > 300 {
 		t.Fatalf("warning not bounded: %d %q", len(got), got)
+	}
+}
+
+func TestLintScoped_TruncationKeepsValidUTF8(t *testing.T) {
+	long := strings.Repeat("é", 100)
+	got := LintScoped(Policy{Allowlist: []AllowlistEntry{
+		{Domain: long}, {Domain: long, Groups: []string{"g"}},
+	}})
+	if len(got) != 1 || !utf8.ValidString(got[0]) {
+		t.Fatalf("invalid UTF-8 in warning: %q", got)
 	}
 }

@@ -59,7 +59,7 @@ func (e AllowlistEntry) scopeLabel() string {
 
 func lintPattern(d string) string {
 	if len(d) > maxLintPattern {
-		return d[:maxLintPattern] + "..."
+		return strings.ToValidUTF8(d[:maxLintPattern], "") + "..."
 	}
 	return d
 }
