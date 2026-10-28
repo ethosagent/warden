@@ -82,10 +82,14 @@ type fakeMetrics struct {
 	identity map[[2]string]int
 	scoped   map[string]int
 	log      []string
+	// blocklistEntries is the last RecordBlocklistEntries value (-1: never set);
+	// blocklistClosed sums RecordBlocklistSessionsClosed.
+	blocklistEntries int
+	blocklistClosed  int
 }
 
 func newFakeMetrics() *fakeMetrics {
-	return &fakeMetrics{blocked: map[string]int{}, requests: map[[2]string]int{}, identity: map[[2]string]int{}, scoped: map[string]int{}}
+	return &fakeMetrics{blocked: map[string]int{}, requests: map[[2]string]int{}, identity: map[[2]string]int{}, scoped: map[string]int{}, blocklistEntries: -1}
 }
 
 func (m *fakeMetrics) record(format string, args ...any) {
@@ -121,6 +125,20 @@ func (m *fakeMetrics) RecordIdentityVerify(result, reason string) {
 	m.identity[[2]string{result, reason}]++
 	m.mu.Unlock()
 	m.record("RecordIdentityVerify(%q, %q)", result, reason)
+}
+
+func (m *fakeMetrics) RecordBlocklistEntries(n int) {
+	m.mu.Lock()
+	m.blocklistEntries = n
+	m.mu.Unlock()
+	m.record("RecordBlocklistEntries(%d)", n)
+}
+
+func (m *fakeMetrics) RecordBlocklistSessionsClosed(n int) {
+	m.mu.Lock()
+	m.blocklistClosed += n
+	m.mu.Unlock()
+	m.record("RecordBlocklistSessionsClosed(%d)", n)
 }
 
 func (m *fakeMetrics) RecordScoped(result string) {

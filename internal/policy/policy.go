@@ -141,6 +141,12 @@ type Evaluator struct {
 	allowlist  []config.AllowlistEntry
 	denylist   []config.DenylistEntry
 	regexCache map[string]*regexp.Regexp
+	// blockedSubs and blockedEmails are the user block list (IdP sub exact,
+	// email lowercase). They live under swapMu so Replace swaps them in the same
+	// critical section as allow/deny.
+	blockedSubs   map[string]struct{}
+	blockedEmails map[string]struct{}
+	blockedCount  int
 
 	// Rate limiting (fixed-window).
 	mu         sync.Mutex
@@ -272,8 +278,28 @@ func (e *Evaluator) load(p config.Policy) {
 		}
 	}
 
+	blockedSubs := make(map[string]struct{}, len(p.BlockedUsers))
+	blockedEmails := make(map[string]struct{}, len(p.BlockedUsers))
+	blockedCount := 0
+	for _, u := range p.BlockedUsers {
+		sub := strings.TrimSpace(u.Sub)
+		email := strings.ToLower(strings.TrimSpace(u.Email))
+		if sub != "" || email != "" {
+			blockedCount++
+		}
+		if sub != "" {
+			blockedSubs[sub] = struct{}{}
+		}
+		if email != "" {
+			blockedEmails[email] = struct{}{}
+		}
+	}
+
 	e.allowlist = allowlist
 	e.denylist = denylist
+	e.blockedSubs = blockedSubs
+	e.blockedEmails = blockedEmails
+	e.blockedCount = blockedCount
 	e.regexCache = regexCache
 	e.rateLimits = rateLimits
 	e.timeWindows = timeWindows
@@ -283,6 +309,38 @@ func (e *Evaluator) load(p config.Policy) {
 	e.mu.Lock()
 	e.counters = make(map[string]*rateState)
 	e.mu.Unlock()
+}
+
+// IsBlocked reports whether a user's claims match the admin block list: sub is
+// an exact match, email must already be lowercase (the proxy lowercases it once
+// when identity is resolved). It takes one read lock and does at most two map
+// lookups, allocating nothing. It reads the same snapshot Replace swaps, so a
+// block or unblock lands atomically with the allow/deny set. Empty claims never
+// match. Every Replace also resets the rate-limit windows, so a block change
+// resets them fleet-wide (documented, left to a follow-up).
+func (e *Evaluator) IsBlocked(sub, email string) bool {
+	e.swapMu.RLock()
+	defer e.swapMu.RUnlock()
+	if sub != "" {
+		if _, ok := e.blockedSubs[sub]; ok {
+			return true
+		}
+	}
+	if email != "" {
+		if _, ok := e.blockedEmails[email]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// BlockedCount is the number of users on the block list (entries with a sub or
+// an email), read from the same snapshot as IsBlocked. It feeds the
+// warden.blocklist.entries gauge.
+func (e *Evaluator) BlockedCount() int {
+	e.swapMu.RLock()
+	defer e.swapMu.RUnlock()
+	return e.blockedCount
 }
 
 // Evaluate returns Allow if (domain, port) matches an allowlist entry under the

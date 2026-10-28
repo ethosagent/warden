@@ -1082,6 +1082,32 @@ agents:
   the agent**: whoever holds a valid token can present it. P2 adds binding and
   bundle-distributed JWKS.
 
+### Block list enforcement
+
+A worker denies every request from a user on the block list (`policy.blockedUsers`,
+by IdP `sub` and/or email). The list lives in the worker's policy evaluator and is
+swapped with allow/deny, at boot, on every long-poll update and for standalone
+YAML. It is checked at `CONNECT` (a `403` with `{"error":"user_blocked"}` before any
+dial, TLS or raw tunnel) and again on every request (HTTP/1.1 keep-alive, h2, gRPC
+streams and WebSocket upgrades, before any policy gate, judge or secret swap). Each
+deny records reason `user_blocked` and ends the session. `sub` is an exact match;
+email is matched case-insensitively.
+
+Matching uses the claims of any token the worker parsed, verified or not (valid,
+expired, bad signature): a match can only deny. Gaps:
+
+- A request that carries **no token** is anonymous in attribute mode and is not
+  matched (P2 require mode closes this).
+- With `identity` mode off the worker parses no token, so there are no claims to
+  match: the block list needs attribute mode.
+- In transparent mode there is no `CONNECT` and no `Proxy-Authorization`, so the
+  `CONNECT` check cannot run; only requests carrying `X-Warden-Identity` on
+  terminated traffic are matched.
+- Every policy update also resets rate-limit windows, so each block or unblock
+  resets them on every worker.
+- Sessions that are already open are cut at their next request; a user who is
+  blocked is cut at once (see [Block list](#block-list)).
+
 ### Deployment and rollout
 
 Workers need egress to the issuer. `deploy/k8s/networkpolicy.yaml` carries an
@@ -1093,6 +1119,66 @@ Roll out **control plane first**: upgrade the control plane so it accepts and se
 the `identity` block, then upgrade workers, then set `identity.defaultMode` or a
 per-agent `identity` value. Workers on an older build ignore the block, and a worker
 on this build with no block stays off, so every step is safe to pause at.
+
+## Block list
+
+An admin blocks a person by Dex `sub` or email. The list ships to workers on the
+policy wire as `blockedUsers`; a worker denies any request whose identity claims
+match with `403 {"error":"user_blocked"}` and a deny event with reason
+`user_blocked`. Matching uses the claims of any token the worker parsed, verified
+or not (an expired or bad-signature token still names its user), because a match
+can only deny.
+
+### Open sessions are cut
+
+A request that **arrived** under the old policy completes under it. A **session**
+that the new list matches is **cut when the change is applied**, not drained:
+
+- a raw CONNECT tunnel, an HTTP/2 connection and a WebSocket are closed at once,
+  and the close interrupts active streams, not only new ones;
+- an idle HTTP/1 keep-alive connection is closed without another request;
+- an HTTP/1 connection that is mid-request finishes that request, delivers its
+  full response, and is then closed. An HTTP/1 streaming response (for example
+  SSE) that began before the block runs to its end; the same stream over h2, a
+  tunnel or a WebSocket is cut at once.
+
+After each applied policy change the worker closes the matching sessions and
+writes **one** `user_blocked` deny event per closed session (its protocol, domain
+and the user's sub). Sessions with no identity are not tracked, so anonymous
+traffic pays nothing. Two metrics report it, neither labelled with identity:
+`warden_blocklist_entries` (users on the list after the last applied change) and
+`warden_blocklist_sessions_closed_total`.
+
+### How fast a block applies
+
+`BlockStore.Add` refreshes the served policy, which wakes held long-polls at
+once, so a connected worker applies a block within about 1 s. The offline CLI
+(`warden control-plane block add --state-dir`) adds at most one 2 s `data_version`
+poll. A worker backing off after control-plane errors applies it after at most the
+15 s backoff plus one long-poll round trip; `controlPlane.longPollWait` (default
+30 s) does not delay a changed policy.
+
+### Known gaps
+
+- **No token, no match.** In identity `attribute` mode a request or session that
+  carries no token at all has no claims to match and is not blocked. P2 `require`
+  mode closes this gap.
+- **Identity off.** With identity mode off the worker parses no token, so nothing
+  is matched; turn identity on (`attribute`) for the block list to bite.
+- **Transparent mode.** There is no CONNECT, so only an `X-Warden-Identity` header
+  on terminated traffic identifies a user; a transparent connection is tracked
+  only once such a header resolves.
+- **Rate limits restart.** Every policy replace resets the rate-limit windows, so a
+  block change resets them fleet-wide.
+
+### Degraded modes
+
+- **Control plane unreachable:** a worker keeps its last list and never unblocks
+  on its own; new blocks apply when it reconnects.
+- **Dex down:** admins cannot sign in to the console; use break-glass to block or
+  unblock.
+- **No `--state-dir`:** the control plane has no block-list store, so the
+  block-list API answers 503 `state_dir_required` and `/policy` is unchanged.
 
 ## What's deliberately not here (yet)
 
