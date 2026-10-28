@@ -198,7 +198,7 @@ type Config struct {
 // v.Action/v.Tool/v.Reason/v.Findings — so the interface deliberately reuses
 // gateway.Verdict rather than introducing a second verdict type.
 type MCPGateway interface {
-	OnRequest(sessionKey, method, url string, hdr http.Header, body []byte) gateway.Verdict
+	OnRequest(sessionKey, method, url string, hdr http.Header, body []byte, meta gateway.RequestMeta) gateway.Verdict
 	OnResponse(sessionKey string, status int, hdr http.Header, body []byte) gateway.Verdict
 	MaxResponseScanBytes() int
 	Close() error
@@ -216,7 +216,7 @@ type MCPGateway interface {
 // logged-downgrade (monitor/off) branch instead of silently passing frames
 // through unscanned. This is the ONE WS-scanning seam the plan permits.
 type WSScanner interface {
-	OnRequest(sessionKey, method, url string, hdr http.Header, body []byte) gateway.Verdict
+	OnRequest(sessionKey, method, url string, hdr http.Header, body []byte, meta gateway.RequestMeta) gateway.Verdict
 	OnResponse(sessionKey string, status int, hdr http.Header, body []byte) gateway.Verdict
 	ScansWSFrames()
 }
@@ -238,7 +238,13 @@ type mcpModeReader interface{ Enforcing() bool }
 // seam.
 type PolicyEvaluator interface {
 	EvaluateRequest(domain string, port int, scheme policy.Scheme, method, path string) policy.RequestVerdict
+	// EvaluateFor is the subject-aware form the connection-level gates use.
+	EvaluateFor(rc policy.RequestContext) policy.RequestVerdict
 	Replace(p config.Policy)
+	// IsBlocked reports whether a user's claims (sub exact, email lowercase)
+	// match the admin block list. It is read from the same snapshot Replace
+	// swaps, allocates nothing and takes one read lock.
+	IsBlocked(sub, email string) bool
 }
 
 // MetricsRecorder is the consumer-side seam for the nil-safe OTel metric emitter.
@@ -252,6 +258,13 @@ type MetricsRecorder interface {
 	RecordJudge(outcome string)
 	ObserveAddedLatency(stage string, d time.Duration)
 	RecordIdentityVerify(result, reason string)
+	// RecordBlocklistEntries sets the block-list size gauge; RecordBlocklistSessionsClosed
+	// adds to the closed-sessions counter. Neither carries identity.
+	RecordBlocklistEntries(n int)
+	RecordBlocklistSessionsClosed(n int)
+	// RecordScoped counts a decision that depended on the request subject
+	// (result: allow|not_member|no_identity). No user or group label.
+	RecordScoped(result string)
 }
 
 // CostEstimator is the consumer-side seam for the optional LLM cost estimator.
@@ -273,6 +286,9 @@ func (nopMetrics) RecordScanFinding(kind string)                     {}
 func (nopMetrics) RecordJudge(outcome string)                        {}
 func (nopMetrics) ObserveAddedLatency(stage string, d time.Duration) {}
 func (nopMetrics) RecordIdentityVerify(result, reason string)        {}
+func (nopMetrics) RecordBlocklistEntries(n int)                      {}
+func (nopMetrics) RecordBlocklistSessionsClosed(n int)               {}
+func (nopMetrics) RecordScoped(result string)                        {}
 
 // Judge renders an allow/deny verdict for a request that matched no static
 // rule. It is defined here (consumer-side) so the proxy does not depend on the
@@ -400,6 +416,9 @@ type Proxy struct {
 	// is process-wide (not per-connection) so a degraded control is visible
 	// without log spam.
 	wsDowngradeOnce sync.Once
+
+	// sessions is the open-session registry CloseBlockedSessions cuts from.
+	sessions *sessionRegistry
 	// mcpModeUnknownOnce guards a single WARN when a scanning gateway does not
 	// report its mode and Warden holds its traffic (fail safe).
 	mcpModeUnknownOnce sync.Once
@@ -553,7 +572,7 @@ func New(cfg Config) (*Proxy, error) {
 	if err != nil {
 		return nil, err
 	}
-	p := &Proxy{cfg: cfg, scopes: scopes}
+	p := &Proxy{cfg: cfg, scopes: scopes, sessions: newSessionRegistry()}
 	// Seed the swappable gateway from the configured one so an unmanaged worker's
 	// behavior is unchanged; a managed worker's long-poll apply loop replaces it.
 	// cfg.MCP may be an untyped-nil interface (MCP disabled) — wrapped in the

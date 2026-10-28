@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -142,6 +143,14 @@ type Server struct {
 	// writeGuard, when set (control plane), gates every state-changing API call.
 	writeGuardMu sync.RWMutex
 	writeGuard   WriteGuard
+	// adminAudit, when set (control plane with console.adminAudit enabled),
+	// serves the admin audit log API; nil makes those routes 404.
+	// adminAuditVerifying admits one verify run at a time.
+	adminAudit          AdminAuditSource
+	adminAuditVerifying atomic.Bool
+	// blockList, when set (control plane), serves the block list admin API; nil
+	// makes those routes 404.
+	blockList BlockListStore
 }
 
 // analyticsCacheTTL is how long a computed analytics/MCP payload is reused
@@ -237,6 +246,9 @@ type WorkerView struct {
 	PolicyVersion int64 `json:"policyVersion,omitempty"`
 	Behind        bool  `json:"behind"`
 	Online        bool  `json:"online"`
+	// Caps are the capabilities the worker advertised on its latest heartbeat
+	// (display only; the control plane never acts on them in P1).
+	Caps []string `json:"caps,omitempty"`
 }
 
 // NewServer constructs a dashboard Server. The policy argument is the static
@@ -558,11 +570,17 @@ func Routes() []Route {
 		{put, "/dashboard/api/llmproviders", "llmproviders.write"},
 		{get, "/dashboard/api/audit", "audit.read"},
 		{post, "/dashboard/api/audit/verify", "audit.verify"},
+		{get, "/dashboard/api/admin-audit", "adminaudit.read"},
+		{post, "/dashboard/api/admin-audit/verify", "adminaudit.verify"},
+		{get, "/dashboard/api/admin-audit/pubkey", "adminaudit.pubkey"},
 		{get, "/dashboard/api/setup", "setup.read"},
 		{get, "/dashboard/api/policy/versions", "policy.versions.read"},
 		{get, "/dashboard/api/policy/versions/{v}", "policy.version.read"},
 		{get, "/dashboard/api/policy/versions/{v}/diff", "policy.diff"},
 		{post, "/dashboard/api/policy/versions/{v}/rollback", "policy.rollback"},
+		{get, "/dashboard/api/blocked-users", "blocked_users.read"},
+		{post, "/dashboard/api/blocked-users", "blocked_users.add"},
+		{del, "/dashboard/api/blocked-users/{id}", "blocked_users.remove"},
 	}
 }
 
@@ -621,8 +639,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/dashboard/api/llmproviders", s.handleLLMProviders)
 	mux.HandleFunc("/dashboard/api/audit", s.handleAudit)
 	mux.HandleFunc("/dashboard/api/audit/verify", s.handleAuditVerify)
-	mux.HandleFunc("/dashboard/api/setup", s.handleSetup)
+	// New routes are registered in routes.go (rule X9; see registerRoutes).
 	s.registerRoutes(mux)
+	mux.HandleFunc("/dashboard/api/setup", s.handleSetup)
 	mux.HandleFunc("/dashboard/", s.handleIndex)
 	return s.guardWrites(mux)
 }

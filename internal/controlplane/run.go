@@ -365,6 +365,10 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		Clock: p.Clock,
 	})
 
+	// Bounded chain check (newest rows + head signature) once the alert
+	// pipeline exists to carry its Finding. A failure is reported, never fatal.
+	srv.verifyAdminAuditAtStartup(context.WithoutCancel(ctx))
+
 	if policyStore == PolicyStoreVersioned {
 		if _, _, ok, _ := srv.policy.snapshot(); !ok {
 			if srv.integrationsStore != nil {
@@ -421,6 +425,22 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 
 	// Periodic re-read so external edits to the policy file propagate to workers.
 	srv.Start(ctx)
+
+	// Block list: pick up writes by the offline CLI (`control-plane block`)
+	// within BlockWatchInterval. Run waits for the loop before the state DB
+	// closes.
+	if srv.blocks != nil {
+		wCtx, wCancel := context.WithCancel(ctx)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			srv.blocks.Watch(wCtx, BlockWatchInterval)
+		}()
+		defer func() {
+			wCancel()
+			<-done
+		}()
+	}
 
 	// Admin audit checkpoints: the chain head is logged at startup, every
 	// interval and at shutdown. Run waits for the loop before the state DB

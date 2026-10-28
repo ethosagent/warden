@@ -275,8 +275,11 @@ func boundedErr(err error) string {
 // etagFor is a short, stable content hash of the served policy. Because Settings
 // is part of policyWire, the ETag automatically covers behavioral settings too:
 // any settings change alters the marshaled bytes → a new ETag → long-poll wake.
+//
+// It hashes the projected wire (projectScoped), the exact shape served, so the
+// ETag of a stored doc equals the ETag of the body workers receive.
 func etagFor(wire policyWire) string {
-	b, _ := json.Marshal(wire)
+	b, _ := json.Marshal(projectScoped(wire))
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:8]) // 16 hex chars
 }
@@ -411,6 +414,12 @@ func (ps *policyServer) loadFile() (policyWire, error) {
 	if err != nil {
 		return policyWire{}, err
 	}
+	// The console API is the only source of the served block list (merged from
+	// the CP store); a YAML list is ignored, loudly, and never echoed.
+	if len(p.BlockedUsers) > 0 {
+		ps.logger.Warn("control plane: policy file contains blockedUsers; ignored (manage the block list from the console)",
+			"entries", len(p.BlockedUsers))
+	}
 	// SettingsWireFromPolicy projects only the secret-free behavioral blocks and
 	// returns nil when the config is pure allow/deny, so the "settings" key stays
 	// absent in that case (back-compat).
@@ -470,7 +479,9 @@ func (ps *policyServer) ServePolicy(w http.ResponseWriter, r *http.Request) {
 			}
 			w.Header().Set("ETag", `"`+etag+`"`)
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(wire)
+			// The watch holds the real rules (dashboard, audit and diff read
+			// them); the fail-closed projection happens here, on the way out.
+			_ = json.NewEncoder(w).Encode(projectScoped(wire))
 			return
 		}
 		if wait <= 0 {

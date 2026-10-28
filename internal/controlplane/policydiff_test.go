@@ -375,3 +375,27 @@ func TestPolicyDiffJSONShape(t *testing.T) {
 		t.Fatalf("empty diff JSON: %s", empty)
 	}
 }
+
+// A scoped entry is a different rule from the global one on the same
+// destination (W-P1-GPOL-01): narrowing/widening shows as removed+added keyed
+// by scope, not as an in-place "changed", and group order is irrelevant.
+func TestPolicyDiffScopedEntryIdentity(t *testing.T) {
+	global := config.AllowlistEntry{Domain: "a.example.com", Port: 443}
+	scoped := config.AllowlistEntry{Domain: "a.example.com", Port: 443, Groups: []string{"eng", "ops"}}
+	reordered := config.AllowlistEntry{Domain: "a.example.com", Port: 443, Groups: []string{"ops", "eng"}}
+
+	got := mustDiff(t, policyWire{Allowlist: []config.AllowlistEntry{global}}, policyWire{Allowlist: []config.AllowlistEntry{scoped}}).Allow
+	if len(got) != 2 || got[0].Kind == ChangeChanged || got[1].Kind == ChangeChanged {
+		t.Fatalf("global->scoped: want removed+added, got %+v", got)
+	}
+	kinds := map[ChangeKind]string{}
+	for _, c := range got {
+		kinds[c.Kind] = c.Key
+	}
+	if kinds[ChangeRemoved] != "a.example.com|443" || kinds[ChangeAdded] != `a.example.com|443|groups="eng","ops"` {
+		t.Fatalf("keys: %+v", kinds)
+	}
+	if d := mustDiff(t, policyWire{Allowlist: []config.AllowlistEntry{scoped}}, policyWire{Allowlist: []config.AllowlistEntry{reordered}}).Allow; len(d) != 1 || d[0].Kind != ChangeChanged {
+		t.Fatalf("reordered groups share a key; the encoded difference is a change, got %+v", d)
+	}
+}

@@ -52,7 +52,9 @@ a worker. There are exactly three calls:
    changes**, or **304** at the timeout; the worker re-polls immediately. Policy
    edits reach workers in ~one round-trip, not after a fixed interval.
 2. **Heartbeat** — `POST /control/heartbeat` (~every 10s) so the CP lists the
-   worker as online even when idle, and knows its current policy version.
+   worker as online even when idle, and knows its current policy version and the
+   capabilities it advertises (`caps`, e.g. `blocklist/v1`), so the console can flag
+   workers that would silently ignore newer policy fields.
 3. **Analytics** — `POST /central/ingest` (worker → CP).
 
 The dashboard shows only what the CP already has (pushed analytics + the
@@ -303,8 +305,8 @@ registers the admin audit migration, so the state database never trips the
 downgrade guard.
 
 **Manual key change (new segment).** To move to a new signing key, stop the control
-plane, archive the old segment (the offline verify and export commands and the full
-runbook come with W-P1-AAUD-04), put the new key at `--admin-audit-key-file` with the
+plane, check and archive the old segment with `admin-audit verify` and `admin-audit
+export` (below), put the new key at `--admin-audit-key-file` with the
 same `cp-audit-hmac.key` beside it, and start once with
 `--admin-audit-new-segment=<new key_id>`. The control plane appends one
 `audit.segment_start` entry signed by the new key, linked to the old head and naming
@@ -312,7 +314,37 @@ the previous `key_id`; every later row carries the new `key_id`, and verificatio
 reads each segment's public key from the chain. The flag must equal the loaded key's
 `key_id` (anything else stops startup) and is a no-op once the head is on that key,
 so leaving it set can never rotate twice. The flag without
-`console.adminAudit.enabled` is a startup error. Automatic rotation is W-P2-KEYS-06.
+`console.adminAudit.enabled` is a startup error. The step-by-step procedure is
+[docs/runbooks/admin-audit-key.md](runbooks/admin-audit-key.md). Automatic rotation is W-P2-KEYS-06.
+
+**Startup verification.** After the key check, every enabled start verifies the
+newest 1000 rows and the head signature. A failure logs
+`admin audit chain verification failed` at ERROR (with `first_bad_seq` and `reason`)
+and publishes an `admin_audit_verify_failed` Finding (severity critical) to the alert
+pipeline; a chain that cannot be read at all raises the same Finding with reason
+`verify_error`. The control plane still starts and serves `/policy`.
+
+**Offline verify and export.** Two subcommands check the chain without a running
+control plane, for example after a restore or when the control plane is down. Both
+open `<state-dir>/warden-cp.db` read-only (the file's bytes and mtime stay unchanged),
+read public keys from the chain, never load the signing key and write no audit row.
+
+```sh
+warden control-plane admin-audit verify --state-dir /data [--from-seq N] [--anchor seq:hash]
+warden control-plane admin-audit export --state-dir /data --out audit.jsonl [--include-identity]
+```
+
+- `admin-audit verify` prints `{ok, checked, firstBadSeq, reason, headSeq, headHash,
+  lastVerifiedSeq}` (hashes in hex) and exits 0 when the chain verifies, 1 when it does
+  not (`firstBadSeq` is the first bad entry) and 2 on a usage or I/O error. `--anchor`
+  takes an earlier `headSeq:headHash` and fails when the newest rows were removed.
+- `admin-audit export` writes JSONL to a new file (mode 0600, never overwriting): one
+  `keys` record with every `key_id`, its public key and first seq, then every entry in
+  seq order. The side-table sub and email are left out unless `--include-identity` is
+  set. `adminaudit.VerifyExport` verifies the file with no database.
+- A state dir migrated by a newer Warden still opens: the read-only open tolerates
+  migrations of other features it does not know, and refuses only an unknown
+  `adminaudit/` migration (a chain layout this binary cannot read).
 
 **What is recorded.** With the log on, every admin change made through the control
 plane writes one row: dashboard policy, settings, detection, integrations and
@@ -320,8 +352,8 @@ llmproviders writes, `/dashboard/api/secretstore` POST and DELETE, `/central/sec
 POST, `DELETE /central/secrets/{key}` and the admin session revoke
 (`DELETE /dashboard/api/sessions`). Which routes count comes from the authz route
 table (`Audited`), not from the HTTP method, so worker heartbeats, ingest, `/policy`
-and the read-only POSTs (`/dashboard/api/query`, `query/generate`, `audit/verify`)
-never write a row. Each row carries:
+and the read-only POSTs (`/dashboard/api/query`, `query/generate`, `audit/verify`,
+`admin-audit/verify`) never write a row. Each row carries:
 
 - the actor: the session's subject, role and `auth_method` (`oidc` or `breakglass`),
   or, in `console.auth: none`, actor `cp-admin-token` with role `admin` and
@@ -351,6 +383,77 @@ is logged at ERROR with `persist_failed=true`, an `admin_audit_degraded` alert i
 raised, and further audited changes answer 503 `{"error":"admin_audit_unavailable"}`
 before they run, until the database accepts writes again. Reads, `/policy`, ingest
 and heartbeats never depend on the audit log.
+
+**Sign-ins and sign-outs.** In `oidc` mode the login and logout handlers record
+their own rows (the middleware never wraps `/auth/*`), all with target `session`,
+`auth_method` `oidc` (`breakglass` for the logout of a break-glass session), a `request_id` (echoed as `X-Request-Id`) and `client_ip`:
+
+| Action | When | Actor | Outcome | Details |
+|---|---|---|---|---|
+| `auth.login` | `GET /auth/callback` created a session | the verified ID token's `sub` and `email`, role from `console.roles` | `ok` (status 302) | `{role}` |
+| `auth.login_failed` | `GET /auth/callback` failed after its pending `state` was consumed | the verified token's subject when there is one (`no_role`), otherwise `anonymous` | `denied` or `error` (status 302) | `{reason}` |
+| `auth.logout` | `POST /auth/logout` ended a live session | the session's user, captured before the row is deleted | `ok` (status 204) | none |
+
+`target_ref` of `auth.login` and `auth.logout` is the first 8 hex characters of the
+session's id hash (the `console_login`/`console logout` log lines use the same value),
+so a sign-in and its sign-out can be matched. `details.reason` is a closed set:
+
+| `reason` | Outcome | Cause (`login_error` code) |
+|---|---|---|
+| `no_role` | `denied` | the verified user matches no `console.roles` group (`no_role`) |
+| `bad_token` | `denied` | the ID token failed verification or its nonce did not match (`token_invalid`, `nonce_mismatch`) |
+| `state_invalid` | `denied` | the state was valid but the browser-binding login cookie was missing or wrong (`state_invalid`) |
+| `idp_error` | `error` | the IdP answered with an error, or its keys could not be fetched (`idp_error`, `idp_unavailable`) |
+| `exchange_failed` | `error` | no code, the token exchange failed, or the session could not be stored (`exchange_failed`) |
+
+A callback with a missing, unknown or expired `state` consumed nothing and writes no
+row, and neither does a logout without a live session or one refused for CSRF. At most
+20 `auth.login_failed` rows per client address are written per minute. At most 4,096
+addresses are tracked at once; while all of them are inside their minute, a new
+address writes no row either. Further attempts only increment an in-memory counter and
+log `admin_audit_login_failed_rate_limited`, at most once a minute per address.
+Successful logins are never rate-limited. The authorization code, `state`, PKCE
+verifier, nonce, tokens and cookie values never appear in a row or a log line. If a
+row cannot be appended, the entry is logged at ERROR with `persist_failed=true` and
+the `admin_audit_degraded` alert is raised as above, but the sign-in or sign-out
+itself still succeeds: it changes no admin state.
+
+**Reading and verifying in the dashboard.** With the log on, the control plane
+serves three read-only routes and an **Admin log** tab (separate from the receipts
+**Audit** tab and its `/dashboard/api/audit*` routes). Off, or on a worker, all three
+answer 404 and the tab stays hidden; the tab is also hidden from viewers and editors.
+Nothing in the dashboard writes to the chain, and none of these routes is recorded.
+
+| Route | Role (oidc) | What it returns |
+|---|---|---|
+| `GET /dashboard/api/admin-audit` | admin | `{entries, nextCursor}`, newest first |
+| `POST /dashboard/api/admin-audit/verify` | admin | `{ok, checked, firstBadSeq, reason, headSeq, headHash, lastVerifiedSeq, partial}` |
+| `GET /dashboard/api/admin-audit/pubkey` | any role | `{alg: "ed25519", keys: [{keyId, publicKey, firstSeq}]}` |
+
+The list takes `actor` (a sub or an `actor_id`), `action`, `outcome` (`ok`,
+`denied`, `rejected`, `error`), `since` (RFC3339), `limit` (1 to 200, default 50)
+and `cursor`; a malformed value answers 400. Pass the returned `nextCursor` as
+`cursor` for the next page; it is 0 on the last one. Each entry has the signed fields
+(hashes in hex) plus the actor's plaintext sub and email from the side table, never
+a signature or a request body.
+
+Verify streams the chain and checks seq continuity, every `prev_hash` link, each
+recomputed entry hash, each Ed25519 signature under the key its `key_id` names (keys
+come from the chain's genesis and `segment_start` entries), that the key changes only
+at a `segment_start`, and the signed `actor_id` against the side table with the
+control plane's HMAC key. The optional body `{fromSeq, anchor: {seq, hash}}` starts
+at `fromSeq` and compares the entry at `anchor.seq` with a hex entry hash you saw
+earlier (for example the head of an emitted log line), which also detects a deleted
+tail. One call checks at most 10,000 rows: when `partial` is true, call again with
+`fromSeq` = `lastVerifiedSeq + 1` (the tab does this for you). On failure `ok` is
+false, `firstBadSeq` is the first row that does not verify and `reason` names the
+check (`entry_hash`, `prev_hash`, `signature`, `seq_gap`, `actor_id`,
+`anchor_mismatch`, ...); the control plane also logs it at WARN. One verification
+runs at a time; a concurrent call answers 429. In `console.auth: none` the verify
+POST, like every dashboard POST, needs the `--admin-token-env` bearer.
+
+The pubkey route lists every key the chain declares, so entries signed before a
+manual key change stay verifiable; the tab shows each key with a copy button.
 
 Offline CLIs that change admin state record through the same chain with
 `adminaudit.OpenForCLI`: actor `cli:<os user>`, auth_method `cli`, the same key
@@ -383,8 +486,8 @@ chain still verifies. To catch that, the control plane also writes the chain to 
 
 Ship these lines off-host (your log collector or SIEM) where the control plane's state
 dir cannot reach them. The newest `admin_audit.checkpoint` or `admin_audit` line you
-hold is an anchor: verify the chain with `--anchor <seq>:<entry_hash>` (the offline
-verify CLI comes with W-P1-AAUD-04). Verification fails with `anchor_missing` when the
+hold is an anchor: verify the chain with `admin-audit verify --anchor <seq>:<entry_hash>`
+(see "Offline verify and export" above). Verification fails with `anchor_missing` when the
 chain no longer reaches that seq (rows deleted from the tail, or an older backup
 restored) and `anchor_mismatch` when the entry at that seq has a different hash. A
 log line that fails to write never fails or rolls back the admin change itself.
@@ -489,10 +592,16 @@ fails when the two differ.
 | Route | Method | Minimum role | Action |
 |---|---|---|---|
 | `/dashboard/` | GET | viewer | `ui.read` |
+| `/dashboard/api/admin-audit` | GET | admin | `adminaudit.read` |
+| `/dashboard/api/admin-audit/pubkey` | GET | viewer | `adminaudit.pubkey` |
+| `/dashboard/api/admin-audit/verify` | POST | admin | `adminaudit.verify` |
 | `/dashboard/api/alerts` | GET | viewer | `alerts.read` |
 | `/dashboard/api/analytics` | GET | viewer | `analytics.read` |
 | `/dashboard/api/audit` | GET | viewer | `audit.read` |
 | `/dashboard/api/audit/verify` | POST | viewer | `audit.verify` |
+| `/dashboard/api/blocked-users` | GET | admin | `blocked_users.read` |
+| `/dashboard/api/blocked-users` | POST | admin | `blocked_users.add` |
+| `/dashboard/api/blocked-users/{id}` | DELETE | admin | `blocked_users.remove` |
 | `/dashboard/api/detection` | GET | viewer | `detection.read` |
 | `/dashboard/api/detection` | POST | editor | `detection.write` |
 | `/dashboard/api/detection` | PUT | editor | `detection.write` |
@@ -587,9 +696,10 @@ append is logged at ERROR and does not stop startup.
   the served YAML `secretStore` block and is merged in when `/policy` is built,
   so workers get the same bytes as before. In history responses and diffs a
   credential appears only as its fingerprint, never the value.
-- Serve-time overlay data is not stored either. The credential is the only
-  overlay today; the block list will be one when it ships. A rollback therefore
-  never restores an old credential or block list.
+- Serve-time overlay data is not stored either. The credential
+  (versioned mode) and the user block list (whenever a state dir is set) are the
+  overlays today. A rollback therefore never restores an old credential or
+  block list.
 - CP-local blocks (integrations, detection, `central`, `controlPlane`, ...)
   are not versioned; their editors keep rewriting the served YAML.
 
@@ -779,6 +889,48 @@ YAML if the mirror is lost.
   removed, the served YAML is only the write-through mirror of head, and hand
   edits are never served (they come in through `warden policy import`).
 
+## Block list: offline CLI
+
+The user block list lives in `<state-dir>/warden-cp.db`, outside policy
+versions. When the console or the IdP is unavailable, or a script needs to
+block someone without a browser session, use the command line. It works with
+the control plane running or stopped.
+
+```sh
+warden control-plane block add --state-dir D [--sub S] [--email E] --reason R
+warden control-plane block remove --state-dir D --id ID
+warden control-plane block list --state-dir D [--json]
+```
+
+- `add` needs `--sub`, `--email` or both, and prints the new id. It uses the
+  same store and validator as the admin API: the email is lowercased, a
+  duplicate sub or email is refused, the reason is at most 512 bytes with no
+  control characters, and the count and size limits apply. A validation error
+  exits 1 with the API's message.
+- `remove` exits 2 for an id that is not on the list.
+- `list` opens the database read-only.
+- `--admin-audit-key-file` (add and remove) defaults to `<state-dir>/cp-audit.key`.
+
+**Audit.** With admin audit enabled in the state dir, each add and remove
+appends one `blocked_users.add` or `blocked_users.remove` row (actor
+`cli:<os user>`, auth_method `cli`, target `blocked_users`, target_ref
+`block:<id>`). The reason text is not recorded in the row or logged. The
+audit key is checked first: with audit rows present and the key missing or not
+matching, the command exits non-zero and writes nothing. If the audit append
+still fails, an add is rolled back and a remove deletes nothing. The block and
+its audit row are two commits, not one transaction, so a crash between them
+(or two concurrent removes of one id) can leave one without the other. A state dir where audit was never enabled
+gets a one-line notice and no row.
+
+**Pickup.** A running control plane polls `PRAGMA data_version` every 2 s and,
+when another process wrote, refreshes the served policy and runs the block
+store's change callbacks. A connected worker then receives the new list within
+2 s plus one long-poll round trip.
+
+The CLI has no console identity, so the self-unblock check of the admin API does
+not apply. Write access to the state dir already allows policy changes, so
+this adds no new authority.
+
 ## Worker admin token
 
 The worker's admin listener (`:9090`, default `127.0.0.1:9090`) serves the same
@@ -899,6 +1051,32 @@ agents:
   the agent**: whoever holds a valid token can present it. P2 adds binding and
   bundle-distributed JWKS.
 
+### Block list enforcement
+
+A worker denies every request from a user on the block list (`policy.blockedUsers`,
+by IdP `sub` and/or email). The list lives in the worker's policy evaluator and is
+swapped with allow/deny, at boot, on every long-poll update and for standalone
+YAML. It is checked at `CONNECT` (a `403` with `{"error":"user_blocked"}` before any
+dial, TLS or raw tunnel) and again on every request (HTTP/1.1 keep-alive, h2, gRPC
+streams and WebSocket upgrades, before any policy gate, judge or secret swap). Each
+deny records reason `user_blocked` and ends the session. `sub` is an exact match;
+email is matched case-insensitively.
+
+Matching uses the claims of any token the worker parsed, verified or not (valid,
+expired, bad signature): a match can only deny. Gaps:
+
+- A request that carries **no token** is anonymous in attribute mode and is not
+  matched (P2 require mode closes this).
+- With `identity` mode off the worker parses no token, so there are no claims to
+  match: the block list needs attribute mode.
+- In transparent mode there is no `CONNECT` and no `Proxy-Authorization`, so the
+  `CONNECT` check cannot run; only requests carrying `X-Warden-Identity` on
+  terminated traffic are matched.
+- Every policy update also resets rate-limit windows, so each block or unblock
+  resets them on every worker.
+- Sessions that are already open are cut at their next request; a user who is
+  blocked is cut at once (see [Block list](#block-list)).
+
 ### Deployment and rollout
 
 Workers need egress to the issuer. `deploy/k8s/networkpolicy.yaml` carries an
@@ -910,6 +1088,66 @@ Roll out **control plane first**: upgrade the control plane so it accepts and se
 the `identity` block, then upgrade workers, then set `identity.defaultMode` or a
 per-agent `identity` value. Workers on an older build ignore the block, and a worker
 on this build with no block stays off, so every step is safe to pause at.
+
+## Block list
+
+An admin blocks a person by Dex `sub` or email. The list ships to workers on the
+policy wire as `blockedUsers`; a worker denies any request whose identity claims
+match with `403 {"error":"user_blocked"}` and a deny event with reason
+`user_blocked`. Matching uses the claims of any token the worker parsed, verified
+or not (an expired or bad-signature token still names its user), because a match
+can only deny.
+
+### Open sessions are cut
+
+A request that **arrived** under the old policy completes under it. A **session**
+that the new list matches is **cut when the change is applied**, not drained:
+
+- a raw CONNECT tunnel, an HTTP/2 connection and a WebSocket are closed at once,
+  and the close interrupts active streams, not only new ones;
+- an idle HTTP/1 keep-alive connection is closed without another request;
+- an HTTP/1 connection that is mid-request finishes that request, delivers its
+  full response, and is then closed. An HTTP/1 streaming response (for example
+  SSE) that began before the block runs to its end; the same stream over h2, a
+  tunnel or a WebSocket is cut at once.
+
+After each applied policy change the worker closes the matching sessions and
+writes **one** `user_blocked` deny event per closed session (its protocol, domain
+and the user's sub). Sessions with no identity are not tracked, so anonymous
+traffic pays nothing. Two metrics report it, neither labelled with identity:
+`warden_blocklist_entries` (users on the list after the last applied change) and
+`warden_blocklist_sessions_closed_total`.
+
+### How fast a block applies
+
+`BlockStore.Add` refreshes the served policy, which wakes held long-polls at
+once, so a connected worker applies a block within about 1 s. The offline CLI
+(`warden control-plane block add --state-dir`) adds at most one 2 s `data_version`
+poll. A worker backing off after control-plane errors applies it after at most the
+15 s backoff plus one long-poll round trip; `controlPlane.longPollWait` (default
+30 s) does not delay a changed policy.
+
+### Known gaps
+
+- **No token, no match.** In identity `attribute` mode a request or session that
+  carries no token at all has no claims to match and is not blocked. P2 `require`
+  mode closes this gap.
+- **Identity off.** With identity mode off the worker parses no token, so nothing
+  is matched; turn identity on (`attribute`) for the block list to bite.
+- **Transparent mode.** There is no CONNECT, so only an `X-Warden-Identity` header
+  on terminated traffic identifies a user; a transparent connection is tracked
+  only once such a header resolves.
+- **Rate limits restart.** Every policy replace resets the rate-limit windows, so a
+  block change resets them fleet-wide.
+
+### Degraded modes
+
+- **Control plane unreachable:** a worker keeps its last list and never unblocks
+  on its own; new blocks apply when it reconnects.
+- **Dex down:** admins cannot sign in to the console; use break-glass to block or
+  unblock.
+- **No `--state-dir`:** the control plane has no block-list store, so the
+  block-list API answers 503 `state_dir_required` and `/policy` is unchanged.
 
 ## What's deliberately not here (yet)
 
