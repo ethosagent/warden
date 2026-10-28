@@ -130,6 +130,14 @@ type H struct {
 	// against an endpoint that is never called.
 	auditLogs        bool
 	unreachableJudge bool
+	// fakeJudge (WithFakeJudge) is the counting judge endpoint; noProxyCA
+	// (WithoutProxyCA) boots the workers without a TLS-termination CA.
+	fakeJudge *FakeJudge
+	noProxyCA bool
+	// scopedAllow (WithScopedAllow) extends the control plane's boot YAML;
+	// closers run at cleanup, before the leak check.
+	scopedAllow []scopedAllowSpec
+	closers     []func()
 
 	// inflights is one quiescence tracker per worker (the assembly-only
 	// worker.Overrides.Inflight seam): every request scope enters at request-read
@@ -729,6 +737,9 @@ func (h *H) writeCPConfig() string {
 	for _, d := range h.allowDomains() {
 		fmt.Fprintf(&b, "    - domain: %s\n", d)
 	}
+	for _, sc := range h.scopedAllow {
+		fmt.Fprintf(&b, "    - domain: %s\n      groups: [%s]\n", sc.domain, strings.Join(sc.groups, ", "))
+	}
 	b.WriteString(h.identityYAML())
 	b.WriteString(h.consoleYAML())
 	path := filepath.Join(h.root, "cp-config.yaml")
@@ -816,14 +827,19 @@ func (h *H) workerParams(i int) worker.Params {
 		}
 	}
 	h.applyAuditLogs(i, &policy)
+	h.applyFakeJudge(&policy)
 	// The local allowlist mirrors the CP's. A managed worker ignores it (policy
 	// comes only from the control plane) but keeping the two in sync means a
 	// scenario's intent reads the same whichever mode boots.
+	caCert, caKey := h.proxyCACertDst, h.proxyCAKeyDst
+	if h.noProxyCA {
+		caCert, caKey = "", ""
+	}
 	return worker.Params{
 		Config:        &fakes.FakeConfigProvider{Policy: policy},
 		DBPath:        h.workerDBPath(i),
-		CACert:        h.proxyCACertDst,
-		CAKey:         h.proxyCAKeyDst,
+		CACert:        caCert,
+		CAKey:         caKey,
 		Version:       "harness",
 		AdminTokenEnv: adminTokenEnv,
 		Overrides: &worker.Overrides{
@@ -976,6 +992,9 @@ func (h *H) cleanup() {
 		h.mu.Unlock()
 		for _, u := range ups {
 			u.close()
+		}
+		for _, c := range h.closers {
+			c()
 		}
 		if h.agentCl != nil {
 			h.agentCl.CloseIdleConnections()
