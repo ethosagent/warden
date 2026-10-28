@@ -54,7 +54,7 @@ responseScan:
 # cert via the same proxy CA this worker already uses.
 controlPlane:
   endpoint: https://control-plane:7070/policy
-  tokenEnv: WARDEN_CP_TOKEN
+  tokenEnv: WARDEN_WORKER_TOKEN
   caCert: /etc/warden/certs/proxy-ca.crt
   longPollWait: 30s         # how long the CP holds /policy open before returning 304
   heartbeatInterval: 10s    # liveness ping cadence
@@ -64,7 +64,7 @@ controlPlane:
 central:
   mode: worker
   endpoint: https://control-plane:7070/central/ingest
-  tokenEnv: WARDEN_CP_TOKEN
+  tokenEnv: WARDEN_WORKER_TOKEN
   proxyID: ${WARDEN_PROXY_ID}   # set per worker so the fleet view can slice by proxy
   caCert: /etc/warden/certs/proxy-ca.crt
   mcpPushInterval: 30s          # forward MCP inventory + observed schema (when mcp.enabled)

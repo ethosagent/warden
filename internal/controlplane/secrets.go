@@ -1,7 +1,6 @@
 package controlplane
 
 import (
-	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -65,19 +64,6 @@ func NewSecretStore(cfg config.SecretStoreConfig, logger *slog.Logger) (secrets.
 		// env / empty: no writable store — endpoints not mounted.
 		return nil, nil
 	}
-}
-
-// bearerOK reports whether the request presents the configured bearer token,
-// compared in constant time. An empty configured token disables auth (development
-// only), matching the other CP routes. It gates /control/heartbeat (/policy and
-// /central/ingest check the same token in their own handlers); the human secret
-// routes use adminBearerOK instead.
-func (s *Server) bearerOK(r *http.Request) bool {
-	if s.cfg.Token == "" {
-		return true
-	}
-	want := "Bearer " + s.cfg.Token
-	return subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte(want)) == 1
 }
 
 // secretsAction is the action name a /central/secrets request is authorized

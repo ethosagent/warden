@@ -556,12 +556,16 @@ modules:
       layers: [repository]
     - module: go.opentelemetry.io/otel/sdk/metric
       layers: [repository]
+    - module: golang.org/x/crypto
+      layers: [assembly]
     - module: golang.org/x/net
       layers: [engine]
     - module: golang.org/x/oauth2
       layers: [repository, assembly]
     - module: golang.org/x/sync
       layers: [engine]
+    - module: golang.org/x/term
+      layers: [assembly]
     - module: gopkg.in/natefinch/lumberjack.v2
       layers: [repository]
     - module: gopkg.in/yaml.v3

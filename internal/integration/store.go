@@ -1,11 +1,14 @@
 package integration
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/ethosagent/warden/internal/cpstate"
 
 	_ "modernc.org/sqlite" // pure-Go SQLite driver (no CGo)
 )
@@ -185,4 +188,11 @@ func (s *Store) RecordDeadLetter(alertID, integrationName, errMsg string, ts tim
 func (s *Store) Close() error {
 	s.closeOnce.Do(func() { s.closeErr = s.db.Close() })
 	return s.closeErr
+}
+
+// BackupTo writes a consistent copy of the alert database to dst (see
+// cpstate.VacuumInto for the destination rules). It runs on the store's single
+// connection, so concurrent alert writes queue behind it rather than failing.
+func (s *Store) BackupTo(ctx context.Context, dst string) error {
+	return cpstate.VacuumInto(ctx, s.db, dst)
 }

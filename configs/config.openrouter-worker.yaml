@@ -23,7 +23,7 @@ secrets:
 
 controlPlane:
   endpoint: https://control-plane:7070/policy
-  tokenEnv: WARDEN_CP_TOKEN
+  tokenEnv: WARDEN_WORKER_TOKEN
   caCert: /etc/warden/certs/proxy-ca.crt
   longPollWait: 30s
   heartbeatInterval: 10s
@@ -32,7 +32,7 @@ controlPlane:
 central:
   mode: worker
   endpoint: https://control-plane:7070/central/ingest
-  tokenEnv: WARDEN_CP_TOKEN
+  tokenEnv: WARDEN_WORKER_TOKEN
   proxyID: ${WARDEN_PROXY_ID}
   caCert: /etc/warden/certs/proxy-ca.crt
   mcpPushInterval: 30s
