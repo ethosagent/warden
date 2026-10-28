@@ -77,6 +77,10 @@ var All = slices.Concat(
 		// Versioned policy store (W-P1-PVER-01): the first start imports the YAML
 		// as version 1; a head written out of process reaches workers. In-process
 		// only (it writes the control plane's state database).
+		// Scheduled backups (W-P1-OPS1-06): a startup set, the next one past the
+		// interval on the fake clock, pruning, no key files. In-process only.
+		{Name: "backup_scheduled", Opts: backupOpts(), Run: backupScheduled},
+
 		{Name: "policy_store_versioned", Opts: policyStoreOpts(), Run: policyStoreVersioned},
 		// Initial import (W-P1-PVER-07): version 1 by system:import plus one
 		// audit row, enforcement unchanged, nothing more after a restart.

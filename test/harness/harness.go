@@ -174,6 +174,8 @@ type H struct {
 	// wantCPAdmin (WithControlPlaneAdminToken) boots the control plane with its
 	// own admin bearer (--admin-token-env), separate from the worker token.
 	wantCPAdmin bool
+	// wantBackup (WithBackup) boots the control plane with --backup-dir.
+	wantBackup bool
 
 	// tokenClients are the AgentWithProxyToken / AgentH2WithProxyToken clients,
 	// kept so cleanup can close their idle tunnels.
@@ -643,6 +645,9 @@ func (h *H) boot() {
 		if h.versionedPolicy {
 			h.tb.Fatalf("harness: WithVersionedPolicyStore boots an in-process control plane; it cannot combine with WithTarget")
 		}
+		if h.wantBackup {
+			h.tb.Fatalf("harness: WithBackup boots an in-process control plane; it cannot combine with WithTarget")
+		}
 		if h.cpDownAtBoot {
 			h.tb.Fatalf("harness: ControlPlaneDownAtBoot is an in-process fault; it cannot combine with WithTarget")
 		}
@@ -721,6 +726,7 @@ func (h *H) buildInprocessTarget() *inprocess {
 	h.applyConsole(&ip.cp.params, &ip.cp.addr)
 	h.applyPolicyStore(&ip.cp.params)
 	h.applyCPAdmin(&ip.cp.params)
+	h.applyBackup(&ip.cp.params)
 	return ip
 }
 
