@@ -213,6 +213,7 @@ func (s *Server) finishBreakGlass(w http.ResponseWriter, r *http.Request, ip, ac
 	}, CreateOptions{AbsoluteTTL: ttl})
 	if err != nil {
 		s.cfg.Logger.Error("breakglass_session_failed", "error", err)
+		_ = s.recordBreakGlass(r, adminaudit.OutcomeError, http.StatusServiceUnavailable, actor, "", map[string]string{detailReason: bgNoSession})
 		authError(w, http.StatusServiceUnavailable, bgNoSession)
 		s.breakGlassOutcome(bgNoSession, ip, "")
 		return

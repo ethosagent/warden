@@ -569,3 +569,18 @@ func TestBreakGlass_SessionSweepKeepsLiveSession(t *testing.T) {
 		t.Fatal("break-glass session died of idleness")
 	}
 }
+
+func TestBreakGlass_SessionStoreFailureIsAuditedAndRefused(t *testing.T) {
+	r := newBGRig(t, bgOpts{})
+	if _, err := r.srv.cfg.State.SQL().Exec(`DROP TABLE sessions`); err != nil {
+		t.Fatal(err)
+	}
+	rec := r.post("192.0.2.1", bgUser, bgPassword)
+	if rec.Code != http.StatusServiceUnavailable || errBody(t, rec) != "session_unavailable" || r.cookie(rec) != nil {
+		t.Fatalf("session store down: %d %s", rec.Code, rec.Body.String())
+	}
+	rows := r.rec.inputs()
+	if len(rows) != 1 || rows[0].Outcome != adminaudit.OutcomeError || rows[0].Details["reason"] != "session_unavailable" {
+		t.Fatalf("rows = %+v, want one error row", rows)
+	}
+}

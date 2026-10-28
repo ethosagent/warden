@@ -562,7 +562,8 @@ breakglass_unavailable` when it cannot be read). Every attempt logs one ERROR li
 `breakglass_login` (outcome, client address and, on success, the 8-character session
 hash), and publishes a `breakglass_login` Finding: critical per login, high for
 failures. With admin audit on, a row that cannot be written fails the login closed (`503
-audit_unavailable`). The password and the submitted username are never stored or logged.
+audit_unavailable`). The limiter is in memory: its windows reset when the control plane
+restarts. The password and the submitted username are never stored or logged.
 
 Moving a deployment from `none` to `oidc` is covered in
 [Migrating from none to oidc](#migrating-from-none-to-oidc).
