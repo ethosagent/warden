@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"os"
 	"path/filepath"
 	"time"
 
@@ -14,6 +15,13 @@ import (
 // as skipped. In-process only.
 func WithBackup() Option {
 	return func(h *H) { h.wantBackup = true }
+}
+
+// WithBackupUnwritable is WithBackup with a backup directory that cannot be
+// created (it sits under a regular file, which fails for root too), so every
+// run fails.
+func WithBackupUnwritable() Option {
+	return func(h *H) { h.wantBackup, h.backupUnwritable = true, true }
 }
 
 // BackupInterval and BackupKeep are WithBackup's schedule and retention.
@@ -42,6 +50,13 @@ func (h *H) BackupDir() string {
 	h.tb.Helper()
 	if !h.wantBackup {
 		h.tb.Fatal("harness: BackupDir needs the WithBackup option")
+	}
+	if h.backupUnwritable {
+		blocker := filepath.Join(h.root, "cp-backup-blocker")
+		if err := os.WriteFile(blocker, nil, 0o600); err != nil {
+			h.tb.Fatalf("harness: write the backup blocker: %v", err)
+		}
+		return filepath.Join(blocker, "cp-backups")
 	}
 	return filepath.Join(h.root, "cp-backups")
 }

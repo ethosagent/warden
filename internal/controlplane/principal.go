@@ -1,6 +1,10 @@
 package controlplane
 
-import "context"
+import (
+	"context"
+
+	"github.com/ethosagent/warden/internal/config"
+)
 
 // Principal kinds. Kind says how the caller authenticated, so later auth
 // methods (break-glass, API keys) reuse the same type and context key.
@@ -36,4 +40,25 @@ func WithPrincipal(ctx context.Context, p Principal) context.Context {
 func PrincipalFrom(ctx context.Context) (Principal, bool) {
 	p, ok := ctx.Value(principalKey{}).(Principal)
 	return p, ok
+}
+
+// principalRole is the console role of p. A break-glass Principal is always
+// admin: it carries no IdP groups, so console.roles cannot name it, and the
+// session exists only after the configured credential verified. Every other
+// Principal gets the role its groups map to (zero when none does).
+func principalRole(c config.ConsoleConfig, p Principal) config.Role {
+	if p.Kind == PrincipalBreakglass {
+		return config.RoleAdmin
+	}
+	role, _ := c.RoleFor(p.Groups)
+	return role
+}
+
+// sessionRole is principalRole for a stored session.
+func sessionRole(c config.ConsoleConfig, s Session) config.Role {
+	if s.AuthMethod == AuthMethodBreakglass {
+		return config.RoleAdmin
+	}
+	role, _ := c.RoleFor(s.Groups)
+	return role
 }

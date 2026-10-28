@@ -1,9 +1,11 @@
 package harness
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
@@ -50,6 +52,9 @@ func (h *H) prepareConsole() {
 		h.tb.Fatal("harness: WithConsoleOIDC boots an in-process control plane; it cannot combine with WithTarget")
 	}
 	h.tb.Setenv(consoleSecretEnv, consoleSecretValue)
+	if h.wantBreakGlass {
+		h.writeBreakGlassHash()
+	}
 	h.issuer.RegisterClient(ConsoleClientID, consoleSecretValue)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -62,6 +67,12 @@ func (h *H) prepareConsole() {
 }
 
 func (h *H) applyConsole(p *controlplane.Params, addr *string) {
+	if h.wantWorkerTokens {
+		p.StateDir = filepath.Join(h.root, "cp-state")
+		// The token store polls for out-of-process revokes on the CP's clock:
+		// h.Clock().Advance drives it.
+		p.Clock = h.fake
+	}
 	if h.wantAdminAudit {
 		p.StateDir = filepath.Join(h.root, "cp-state")
 		// The checkpoint loop runs on the CP's clock: h.Clock().Advance drives it.
@@ -78,8 +89,11 @@ func (h *H) applyConsole(p *controlplane.Params, addr *string) {
 // consoleYAML renders the console block for the control plane's config file.
 func (h *H) consoleYAML() string {
 	audit := ""
+	if h.wantBreakGlass && h.wantConsole {
+		audit += fmt.Sprintf("  breakGlass:\n    enabled: true\n    username: %s\n    passwordHashFile: %s\n", BreakGlassUsername, h.breakGlassHash)
+	}
 	if h.wantAdminAudit {
-		audit = "  adminAudit:\n    enabled: true\n"
+		audit += "  adminAudit:\n    enabled: true\n"
 	}
 	if !h.wantConsole {
 		if audit == "" {
@@ -146,12 +160,24 @@ type Browser struct {
 // Do sends one request with the browser's cookies. url is absolute, or a path
 // on the console. The response body is read by the caller, who closes it.
 func (b *Browser) Do(method, target string, hdr http.Header) (*http.Response, error) {
+	return b.DoBody(method, target, hdr, nil)
+}
+
+// DoBody is Do with a request body (sent as application/json when not nil).
+func (b *Browser) DoBody(method, target string, hdr http.Header, body []byte) (*http.Response, error) {
 	if len(target) > 0 && target[0] == '/' {
 		target = b.base + target
 	}
-	req, err := http.NewRequestWithContext(context.Background(), method, target, nil)
+	var rd io.Reader
+	if body != nil {
+		rd = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(context.Background(), method, target, rd)
 	if err != nil {
 		return nil, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
 	}
 	for k, v := range hdr {
 		req.Header[k] = v

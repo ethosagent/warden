@@ -1,7 +1,6 @@
 package controlplane
 
 import (
-	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -67,19 +66,6 @@ func NewSecretStore(cfg config.SecretStoreConfig, logger *slog.Logger) (secrets.
 	}
 }
 
-// bearerOK reports whether the request presents the configured bearer token,
-// compared in constant time. An empty configured token disables auth (development
-// only), matching the other CP routes. It gates /control/heartbeat (/policy and
-// /central/ingest check the same token in their own handlers); the human secret
-// routes use adminBearerOK instead.
-func (s *Server) bearerOK(r *http.Request) bool {
-	if s.cfg.Token == "" {
-		return true
-	}
-	want := "Bearer " + s.cfg.Token
-	return subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte(want)) == 1
-}
-
 // secretsAction is the action name a /central/secrets request is authorized
 // and logged under in oidc mode.
 func secretsAction(method string) string {
@@ -116,7 +102,7 @@ func (s *Server) secretsAuthOK(w http.ResponseWriter, r *http.Request) bool {
 		writeAuthzJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthenticated"})
 		return false
 	}
-	role, _ := s.cfg.Console.RoleFor(p.Groups)
+	role := principalRole(s.cfg.Console, p)
 	if role < row.MinRole {
 		logDenied(s.cfg.Logger, row, role, p, r)
 		writeAuthzJSON(w, http.StatusForbidden, map[string]string{"error": "role_required", "need": row.MinRole.String()})

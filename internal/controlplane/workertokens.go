@@ -51,8 +51,8 @@ var (
 )
 
 var (
-	// ErrNotFound: Revoke named an id that does not exist.
-	ErrNotFound = errors.New("worker token: not found")
+	// ErrWorkerTokenNotFound: Revoke named an id that does not exist.
+	ErrWorkerTokenNotFound = errors.New("worker token: not found")
 	// ErrTooManyActive: the proxy_id already has the maximum active tokens.
 	ErrTooManyActive = errors.New("worker token: proxy id already has the maximum number of active tokens")
 	// ErrNameTaken: a token (active or revoked) already has this name.
@@ -255,6 +255,22 @@ func (s *WorkerTokenStore) Authenticate(plaintext string) (Token, error) {
 	return t, nil
 }
 
+// Valid re-checks an already authenticated token by id against the in-memory
+// index (no DB I/O, no hashing): ErrUnknown, ErrRevoked or ErrExpired when it
+// no longer authenticates.
+func (s *WorkerTokenStore) Valid(id string) error {
+	t, ok := s.idx.Load().byID[id]
+	switch {
+	case !ok:
+		return ErrUnknown
+	case !t.RevokedAt.IsZero():
+		return ErrRevoked
+	case s.expired(t, s.clk.Now()):
+		return ErrExpired
+	}
+	return nil
+}
+
 // Create mints (or imports) a token and returns its plaintext, which no later
 // call returns. Importing the same name and value as an active row is a no-op
 // that returns the existing token.
@@ -395,7 +411,7 @@ func (s *WorkerTokenStore) rowByName(ctx context.Context, name string) (tokenRow
 }
 
 // Revoke soft-deletes a token. It is idempotent: revoking a revoked token
-// keeps the first revoked_at and revoked_by. An unknown id is ErrNotFound.
+// keeps the first revoked_at and revoked_by. An unknown id is ErrWorkerTokenNotFound.
 func (s *WorkerTokenStore) Revoke(ctx context.Context, id, actor string) error {
 	if actor == "" {
 		return fmt.Errorf("%w: actor is required", ErrInvalidInput)
@@ -414,7 +430,7 @@ func (s *WorkerTokenStore) Revoke(ctx context.Context, id, actor string) error {
 		var one int
 		err := s.db.QueryRowContext(ctx, `SELECT 1 FROM worker_tokens WHERE id = ?`, id).Scan(&one)
 		if errors.Is(err, sql.ErrNoRows) {
-			return ErrNotFound
+			return ErrWorkerTokenNotFound
 		}
 		if err != nil {
 			return fmt.Errorf("worker tokens: revoke: %w", err)

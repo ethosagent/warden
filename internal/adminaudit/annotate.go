@@ -11,9 +11,13 @@ import (
 const (
 	DetailOp   = "op"   // the operation, for example put or delete
 	DetailEtag = "etag" // the resulting version of the target, for example a policy ETag
+	// DetailHasSub and DetailHasEmail say which identifiers a block list entry
+	// holds ("true" or "false"), never the identifiers themselves.
+	DetailHasSub   = "has_sub"
+	DetailHasEmail = "has_email"
 )
 
-var annotationKeys = map[string]bool{DetailOp: true, DetailEtag: true}
+var annotationKeys = map[string]bool{DetailOp: true, DetailEtag: true, DetailHasSub: true, DetailHasEmail: true}
 
 // Annotation is the per-request carrier the admin audit middleware puts in
 // the request context. Handlers fill it through Annotate; the middleware reads
@@ -36,7 +40,7 @@ func WithAnnotation(ctx context.Context) (context.Context, *Annotation) {
 // policy@<etag>) and details to the audit entry of the request ctx belongs
 // to. It is a no-op when the request is not audited. A later call replaces
 // the target_ref when it is non-empty and merges details. Only the closed
-// detail keys (DetailOp, DetailEtag) are kept, and a target_ref or value that
+// detail keys (DetailOp, DetailEtag, DetailHasSub, DetailHasEmail) are kept, and a target_ref or value that
 // would fail entry validation is dropped rather than failing the row.
 func Annotate(ctx context.Context, targetRef string, details map[string]string) {
 	a, ok := ctx.Value(annotationKey{}).(*Annotation)

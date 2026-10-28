@@ -706,3 +706,71 @@ func TestIndexHTML_AuthNoneBanner(t *testing.T) {
 		t.Error("applySetup does not drive authNoneBanner from authMode")
 	}
 }
+
+// TestSetup_BackupStatus: backup is absent until SetBackupStatus is given a
+// closure that returns a status, and follows that closure per request.
+func TestSetup_BackupStatus(t *testing.T) {
+	srv := NewServer(&fakeDataSource{}, config.Policy{}, emptyProvider())
+	if rr := doGet(t, srv.Handler(), "/dashboard/api/setup"); strings.Contains(rr.Body.String(), "backup") {
+		t.Fatalf("backup present without SetBackupStatus: %s", rr.Body.String())
+	}
+	var st *BackupStatus
+	srv.SetBackupStatus(func(*http.Request) *BackupStatus { return st })
+	if getSetup(t, srv).Backup != nil {
+		t.Error("backup present when the closure returns nil")
+	}
+	st = &BackupStatus{Enabled: true, LastSet: "20270115T080000Z", SizeBytes: 9}
+	if got := getSetup(t, srv).Backup; got == nil || got.LastSet != st.LastSet || got.SizeBytes != 9 || !got.Enabled {
+		t.Errorf("backup = %+v", got)
+	}
+}
+
+// TestIndexHTML_BackupBadge pins the admin backup badge: hidden by default,
+// driven from setup.backup, and filled with textContent (no innerHTML).
+func TestIndexHTML_BackupBadge(t *testing.T) {
+	html := string(indexHTML)
+	for _, want := range []string{`<span id="backupBadge" role="status" hidden`, `applyBackupBadge(s.backup)`, `el.textContent=bad?'Backup failing'`} {
+		if !strings.Contains(html, want) {
+			t.Errorf("index.html lacks %q", want)
+		}
+	}
+	i := strings.Index(html, "function applyBackupBadge")
+	if i < 0 || strings.Contains(html[i:i+900], "innerHTML") {
+		t.Error("applyBackupBadge must not use innerHTML")
+	}
+}
+
+func TestWorkerViewCaps(t *testing.T) {
+	with, _ := json.Marshal(WorkerView{ProxyID: "a", Caps: []string{"blocklist/v1"}})
+	if !strings.Contains(string(with), `"caps":["blocklist/v1"]`) {
+		t.Errorf("caps missing: %s", with)
+	}
+	without, _ := json.Marshal(WorkerView{ProxyID: "a"})
+	if strings.Contains(string(without), "caps") {
+		t.Errorf("empty caps serialized: %s", without)
+	}
+}
+
+// TestFleetNoGroupPolicyBadge: the fleet JSON carries noGroupPolicy and the
+// served dashboard renders the "no groupPolicy" badge from it.
+func TestFleetNoGroupPolicyBadge(t *testing.T) {
+	srv := NewServer(&fakeDataSource{}, config.Policy{}, emptyProvider())
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
+	srv.SetWorkers(func() []WorkerView {
+		return []WorkerView{{ProxyID: "old", NoGroupPolicy: true}, {ProxyID: "new"}}
+	})
+	var rows []map[string]any
+	rr := doGet(t, srv.Handler(), "/dashboard/api/workers")
+	if err := json.Unmarshal(rr.Body.Bytes(), &rows); err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || rows[0]["noGroupPolicy"] != true || rows[1]["noGroupPolicy"] != false {
+		t.Fatalf("fleet JSON = %s", rr.Body.String())
+	}
+	page := doGet(t, srv.Handler(), "/dashboard/").Body.String()
+	for _, want := range []string{"w.noGroupPolicy", "no groupPolicy"} {
+		if !strings.Contains(page, want) {
+			t.Errorf("served dashboard lacks %q", want)
+		}
+	}
+}

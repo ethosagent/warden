@@ -142,3 +142,42 @@ func TestPolicyHistoryDocsAudit(t *testing.T) {
 		}
 	}
 }
+
+// blockListDoc returns the Block list section of docs/control-plane.md.
+func blockListDoc(t *testing.T) string {
+	t.Helper()
+	raw, err := os.ReadFile(authzDocPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", authzDocPath, err)
+	}
+	// The trailing newline keeps "## Block list: offline CLI" from matching.
+	const heading = "\n## Block list\n"
+	start := strings.Index(string(raw), heading)
+	if start < 0 {
+		t.Fatalf("%s has no Block list section", authzDocPath)
+	}
+	section := string(raw)[start+1:]
+	if end := strings.Index(section[len(heading)-1:], "\n## "); end >= 0 {
+		section = section[:len(heading)-1+end]
+	}
+	return section
+}
+
+// TestBlockListDocsMentionBounds keeps the Block list section stating the cut
+// semantics, the propagation bound, the gaps and the degraded modes.
+func TestBlockListDocsMentionBounds(t *testing.T) {
+	doc := blockListDoc(t)
+	for _, want := range []string{
+		"user_blocked",
+		"arrived", "cut when the change is applied", "interrupts active streams",
+		"about 1 s", "2 s", "15 s", "longPollWait",
+		"No token, no match", "require",
+		"Transparent mode", "X-Warden-Identity",
+		"unreachable", "last list", "break-glass", "state_dir_required",
+		"warden_blocklist_entries", "warden_blocklist_sessions_closed_total",
+	} {
+		if !strings.Contains(doc, want) {
+			t.Errorf("Block list section does not mention %q", want)
+		}
+	}
+}

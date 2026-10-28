@@ -136,14 +136,32 @@ func (t *Target) AdminAddr() string { return WorkerAdminHost1 }
 // harness's CP client builds "https://" around it.
 func (t *Target) ControlPlaneAddr() string { return CPHostPort }
 
-// ControlPlaneToken is the token the stack's API authenticates with — the env
-// var a deployment distributes it with (compose files: WARDEN_CP_TOKEN,
-// default dev-token).
+// ControlPlaneToken is the bearer the control plane's dashboard writes need:
+// its own admin token (--admin-token-env), the env var a deployment
+// distributes it with (compose files: WARDEN_CP_ADMIN_TOKEN, default
+// dev-cp-admin-token). It is not a worker credential: workers hold per-worker
+// tokens (WorkerToken).
 func (t *Target) ControlPlaneToken() (string, error) {
-	if tok := os.Getenv("WARDEN_CP_TOKEN"); tok != "" {
+	if tok := os.Getenv("WARDEN_CP_ADMIN_TOKEN"); tok != "" {
 		return tok, nil
 	}
-	return "dev-token", nil
+	return "dev-cp-admin-token", nil
+}
+
+// WorkerToken is worker n's (1-3) own token, as the compose files distribute
+// it: WARDEN_WORKER_<n>_TOKEN, defaulting to the dev placeholder in
+// deploy/compose/.env.example. The harness uses it to call the worker routes
+// the way that worker does.
+func (t *Target) WorkerToken(n int) string {
+	defaults := map[int]string{
+		1: "wwt_devonlyworkeronetokennotarealsecretxxxxxxxxxxxxxxxxx",
+		2: "wwt_devonlyworkertwotokennotarealsecretxxxxxxxxxxxxxxxxx",
+		3: "wwt_devonlyworkerthreetokennotarealsecretxxxxxxxxxxxxxxx",
+	}
+	if tok := os.Getenv(fmt.Sprintf("WARDEN_WORKER_%d_TOKEN", n)); tok != "" {
+		return tok
+	}
+	return defaults[n]
 }
 
 // WorkerAdminToken is the bearer token the workers' admin listener needs for

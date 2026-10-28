@@ -72,6 +72,9 @@ type Server struct {
 	liveSettings   func() *config.SettingsWire
 	settingsWriter func(context.Context, config.SettingsWire, WriteMeta) error
 	workersFn      func() []WorkerView // nil = no fleet worker registry
+	// workerTokens serves the worker token admin routes; nil = they answer 404
+	// (a worker, or a control plane without a state dir).
+	workerTokens WorkerTokenAdmin
 	// mcpFleet, when set (control plane), returns the inventory + observed schema
 	// for a given worker (empty proxyID = most-recent worker). It takes precedence
 	// over the single-node mcp gateway.
@@ -105,6 +108,9 @@ type Server struct {
 	// authMode is the console sign-in mode reported by /dashboard/api/setup
 	// (SetAuthMode); empty on a worker.
 	authMode string
+	// backupFn reports the scheduled-backup status for /dashboard/api/setup (nil
+	// off the control plane); set through SetBackupStatus.
+	backupFn func(*http.Request) *BackupStatus
 	// alertsFn returns integration alerts (bounded, egress-safe metadata) for the
 	// alerts endpoint; nil (a worker with no integrations) = [].
 	alertsFn func(limit int) []integration.Alert
@@ -151,6 +157,9 @@ type Server struct {
 	// backup, when set (control plane with --backup-dir), starts an on-demand
 	// backup; nil makes POST /dashboard/api/backup 404.
 	backup BackupStarter
+	// blockList, when set (control plane), serves the block list admin API; nil
+	// makes those routes 404.
+	blockList BlockListStore
 }
 
 // analyticsCacheTTL is how long a computed analytics/MCP payload is reused
@@ -246,6 +255,26 @@ type WorkerView struct {
 	PolicyVersion int64 `json:"policyVersion,omitempty"`
 	Behind        bool  `json:"behind"`
 	Online        bool  `json:"online"`
+	// AuthKind is how the worker last authenticated: token (a per-worker
+	// token; ProxyID is the token's bound id), legacy (the shared token; the
+	// id is the worker's unverified header) or none (open control plane).
+	// Empty until the worker has made an authenticated request.
+	AuthKind string `json:"authKind,omitempty"`
+	// TokenName and TokenLastUsed describe the token behind a token worker;
+	// TokenLastUsed is the token's last-use time, flushed to the store at most
+	// once a minute, so it can trail LastSeen.
+	TokenName     string `json:"tokenName,omitempty"`
+	TokenLastUsed string `json:"tokenLastUsed,omitempty"`
+	// LegacyRequests counts the worker's requests authenticated with the shared
+	// token since the control plane started (in memory; a restart resets it).
+	LegacyRequests int64 `json:"legacyRequests"`
+	// Caps are the capabilities the worker advertised on its latest heartbeat
+	// (display only; the control plane never acts on them in P1).
+	Caps []string `json:"caps,omitempty"`
+	// NoGroupPolicy is true when the served policy has identity-scoped rules
+	// and the worker does not advertise grouppolicy/v1: it denies those
+	// destinations (fail closed). Set by the control plane per snapshot.
+	NoGroupPolicy bool `json:"noGroupPolicy"`
 }
 
 // NewServer constructs a dashboard Server. The policy argument is the static
@@ -409,8 +438,12 @@ type endpointsResponse struct {
 }
 
 type policyResponse struct {
-	Allowlist []config.AllowlistEntry `json:"allowlist"`
-	Denylist  []config.DenylistEntry  `json:"denylist"`
+	Allowlist []allowEntryView       `json:"allowlist"`
+	Denylist  []config.DenylistEntry `json:"denylist"`
+	// Lint is the shadow warnings config.LintScoped finds in the allowlist (a
+	// global entry that makes a scoped one unreachable). Always an array; the
+	// text carries indexes and domain patterns, never a group or user value.
+	Lint []string `json:"lint"`
 	// Editable reports whether this dashboard can save policy changes (true only
 	// on the control plane, where a policy writer is configured).
 	Editable bool `json:"editable"`
@@ -420,6 +453,22 @@ type policyResponse struct {
 	// were edited by hand and differ from the head version it serves
 	// (--policy-store=versioned); the edit is not served.
 	Drift bool `json:"drift"`
+}
+
+// allowEntryView is an allow entry as the dashboard reads it: the config entry
+// plus Scoped, true when it carries groups/users, so every policy view can show
+// the badge without client-side logic (W-P1-GPOL-08). The POST body ignores it.
+type allowEntryView struct {
+	config.AllowlistEntry
+	Scoped bool `json:"scoped,omitempty"`
+}
+
+func allowViews(in []config.AllowlistEntry) []allowEntryView {
+	out := make([]allowEntryView, len(in))
+	for i, e := range in {
+		out[i] = allowEntryView{AllowlistEntry: e, Scoped: len(e.Groups) > 0 || len(e.Users) > 0}
+	}
+	return out
 }
 
 // policyEditRequest is the body accepted by POST /dashboard/api/policy.
@@ -448,6 +497,45 @@ type settingsResponse struct {
 type settingsView struct {
 	*config.SettingsWire
 	Secrets *secretsSettingsView `json:"secrets,omitempty"`
+	// MCP shadows the embedded mcp block the same way, so each tool constraint
+	// carries `scoped` (its allowWhen has groups/users) without client logic.
+	MCP *mcpSettingsView `json:"mcp,omitempty"`
+}
+
+type mcpSettingsView struct {
+	*config.MCPSettings
+	Tools *mcpToolsView `json:"tools,omitempty"`
+}
+
+type mcpToolsView struct {
+	*config.MCPToolsSettings
+	Constraints map[string]mcpConstraintView `json:"constraints,omitempty"`
+}
+
+type mcpConstraintView struct {
+	config.MCPToolConstraints
+	Scoped bool `json:"scoped,omitempty"`
+}
+
+// newSettingsView builds the dashboard view of a live settings document.
+func newSettingsView(s *config.SettingsWire) *settingsView {
+	v := &settingsView{SettingsWire: s, Secrets: maskSecretsSettings(s.Secrets)}
+	if s.MCP == nil {
+		return v
+	}
+	v.MCP = &mcpSettingsView{MCPSettings: s.MCP}
+	if t := s.MCP.Tools; t != nil {
+		tv := &mcpToolsView{MCPToolsSettings: t}
+		if len(t.Constraints) > 0 {
+			tv.Constraints = make(map[string]mcpConstraintView, len(t.Constraints))
+			for name, c := range t.Constraints {
+				tv.Constraints[name] = mcpConstraintView{MCPToolConstraints: c,
+					Scoped: c.AllowWhen != nil && (len(c.AllowWhen.Groups) > 0 || len(c.AllowWhen.Users) > 0)}
+			}
+		}
+		v.MCP.Tools = tv
+	}
+	return v
 }
 
 // secretsSettingsView is the masked, dashboard-facing form of SecretsSettings. It
@@ -576,6 +664,12 @@ func Routes() []Route {
 		{get, "/dashboard/api/policy/versions/{v}/diff", "policy.diff"},
 		{post, "/dashboard/api/policy/versions/{v}/rollback", "policy.rollback"},
 		{post, "/dashboard/api/backup", "backup.run"},
+		{get, "/dashboard/api/worker-tokens", "worker_token.read"},
+		{post, "/dashboard/api/worker-tokens", "worker_token.create"},
+		{del, "/dashboard/api/worker-tokens/{id}", "worker_token.revoke"},
+		{get, "/dashboard/api/blocked-users", "blocked_users.read"},
+		{post, "/dashboard/api/blocked-users", "blocked_users.add"},
+		{del, "/dashboard/api/blocked-users/{id}", "blocked_users.remove"},
 	}
 }
 
@@ -804,14 +898,12 @@ func (s *Server) getPolicy(w http.ResponseWriter, r *http.Request) {
 		pol = s.livePolicy()
 	}
 	resp := policyResponse{
-		Allowlist: pol.Allowlist,
+		Allowlist: allowViews(pol.Allowlist),
 		Denylist:  pol.Denylist,
+		Lint:      append([]string{}, config.LintScoped(pol)...),
 		Editable:  s.policyWriter != nil,
 		Version:   version,
 		Drift:     s.policyDrift != nil && s.policyDrift(),
-	}
-	if resp.Allowlist == nil {
-		resp.Allowlist = []config.AllowlistEntry{}
 	}
 	if resp.Denylist == nil {
 		resp.Denylist = []config.DenylistEntry{}
@@ -876,7 +968,7 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 		// Wrap the live wire in the masking view. maskSecretsSettings ALWAYS runs
 		// when a secrets block is present, so the outer (masked) Secrets field is set
 		// and the embedded raw secretAccessKey can never be serialized.
-		view = &settingsView{SettingsWire: settings, Secrets: maskSecretsSettings(settings.Secrets)}
+		view = newSettingsView(settings)
 	}
 	writeJSON(w, settingsResponse{
 		Settings: view,

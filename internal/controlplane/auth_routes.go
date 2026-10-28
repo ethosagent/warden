@@ -48,7 +48,7 @@ func (s *Server) liveSession(r *http.Request) (string, Session, bool, error) {
 // the request context, i.e. the request carries a live session cookie.
 func (s *Server) hasSessionPrincipal(r *http.Request) bool {
 	p, ok := PrincipalFrom(r.Context())
-	return ok && p.Kind == PrincipalSession
+	return ok && (p.Kind == PrincipalSession || p.Kind == PrincipalBreakglass)
 }
 
 // handleAuthMe serves GET /auth/me: 200 with the caller's identity for a live
@@ -74,7 +74,7 @@ func (s *Server) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 		authError(w, http.StatusUnauthorized, "unauthenticated")
 		return
 	}
-	role, _ := s.cfg.Console.RoleFor(sess.Groups)
+	role := sessionRole(s.cfg.Console, sess)
 	writeAuthJSON(w, http.StatusOK, meResponse{
 		Sub: sess.Sub, Email: sess.Email, Role: role.String(), AuthMethod: sess.AuthMethod,
 		CSRF: CSRFToken(rawID), ExpiresAt: sess.ExpiresAt.UTC().Format(time.RFC3339),

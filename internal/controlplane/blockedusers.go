@@ -1,0 +1,645 @@
+package controlplane
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"sort"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/ethosagent/warden/internal/clock"
+	"github.com/ethosagent/warden/internal/config"
+	"github.com/ethosagent/warden/internal/cpstate"
+	"github.com/ethosagent/warden/internal/integration"
+)
+
+// The user block list lives in the control-plane state DB, outside policy
+// versions, so a rollback or import can never unblock anyone. BlockStore is its
+// only write path (the admin API, the offline CLI and P3 offboarding all call
+// it); the blocked_users overlay merges it into the served wire.
+
+// Errors BlockStore returns. The admin API (W-P1-BLOCK-11) maps them to
+// 400, 409, 422 and 404.
+var (
+	ErrInvalid   = errors.New("blocklist: invalid entry")
+	ErrDuplicate = errors.New("blocklist: entry already blocked")
+	ErrTooMany   = errors.New("blocklist: block list is full")
+	ErrNotFound  = errors.New("blocklist: entry not found")
+)
+
+// maxBlockReasonBytes caps an entry's free-text reason.
+const maxBlockReasonBytes = 512
+
+// blockedUsersOverlayName is the overlay name and the key of its fingerprint.
+const blockedUsersOverlayName = "blocked_users"
+
+// blockLoadFailedMsg is the log message and the Finding rule id of a failed
+// block-list load.
+const blockLoadFailedMsg = "blocklist_load_failed"
+
+// blockMigrationID is the cpstate migration that creates blocked_users.
+const blockMigrationID = "blocklist/0001"
+
+const blockMigration0001 = `
+CREATE TABLE blocked_users (
+    id         TEXT PRIMARY KEY,
+    sub        TEXT,
+    email      TEXT,
+    reason     TEXT,
+    created_by TEXT,
+    created_at INTEGER,
+    CHECK (sub IS NOT NULL OR email IS NOT NULL)
+);
+CREATE UNIQUE INDEX idx_blocked_users_sub ON blocked_users (sub);
+CREATE UNIQUE INDEX idx_blocked_users_email ON blocked_users (email);
+`
+
+// BlockMigrations returns the cpstate migrations the block list needs, for a
+// caller that opens the state DB itself. StateMigrations includes them.
+func BlockMigrations() []cpstate.Migration {
+	return []cpstate.Migration{{ID: blockMigrationID, SQL: blockMigration0001}}
+}
+
+// BlockEntry is one stored block-list entry. Sub and Email are stored trimmed
+// (email also lowercase); at least one is set.
+type BlockEntry struct {
+	ID        string
+	Sub       string
+	Email     string
+	Reason    string
+	CreatedBy string
+	CreatedAt time.Time
+}
+
+// BlockStoreOptions configures NewBlockStore.
+type BlockStoreOptions struct {
+	// Clock stamps created_at; nil means the real clock.
+	Clock clock.Clock
+	// OnRefresh runs after every successful in-process mutation, before the
+	// OnChange callbacks. The control plane sets it to the policy server's
+	// Refresh so held long-polls wake at once. Nil for the offline CLI.
+	OnRefresh func()
+	// Logger receives Watch's errors; nil means slog.Default.
+	Logger *slog.Logger
+}
+
+// BlockStore reads and writes the block list on the control-plane state DB. It
+// needs no Server, so the offline CLI can build one.
+type BlockStore struct {
+	db        *cpstate.DB
+	clock     clock.Clock
+	onRefresh func()
+	logger    *slog.Logger
+
+	mu        sync.Mutex
+	callbacks []func()
+
+	// snap is the in-memory block list IsBlocked reads: an immutable snapshot
+	// swapped whole, so no request runs a query. It is nil until the first load
+	// succeeds; a failed refresh keeps the previous one.
+	snap atomic.Pointer[blockSnapshot]
+	// refreshMu serializes read-build-swap, so refreshes apply in the order they
+	// read the database and an older read cannot replace a newer snapshot.
+	refreshMu sync.Mutex
+	// revoker ends a blocked principal's console sessions; nil when the console
+	// has no sessions.
+	revoker atomic.Pointer[sessionRevokerBox]
+}
+
+// SessionRevoker ends console sessions by principal. SessionStore implements
+// it; BlockStore takes the interface so it does not import the session store.
+type SessionRevoker interface {
+	DeleteBySub(ctx context.Context, sub string) (int, error)
+	DeleteByEmail(ctx context.Context, email string) (int, error)
+}
+
+type sessionRevokerBox struct{ r SessionRevoker }
+
+// blockSnapshot is one immutable copy of the block list.
+type blockSnapshot struct {
+	subs   map[string]struct{}
+	emails map[string]struct{}
+}
+
+// NewBlockStore returns a store over db, which must have been opened with
+// BlockMigrations (directly or through StateMigrations).
+func NewBlockStore(db *cpstate.DB, opts BlockStoreOptions) *BlockStore {
+	clk := opts.Clock
+	if clk == nil {
+		clk = clock.Real()
+	}
+	lg := opts.Logger
+	if lg == nil {
+		lg = slog.Default()
+	}
+	b := &BlockStore{db: db, clock: clk, onRefresh: opts.OnRefresh, logger: lg}
+	// A failed first load leaves the snapshot nil: Ready is false and console
+	// login fails closed until a later refresh succeeds.
+	b.refreshSnapshot(context.Background())
+	return b
+}
+
+// SetSessionRevoker sets the revoker Add uses to end the sessions of a newly
+// blocked principal. The control plane sets it when the console has sessions.
+func (b *BlockStore) SetSessionRevoker(r SessionRevoker) {
+	if r == nil {
+		b.revoker.Store(nil)
+		return
+	}
+	b.revoker.Store(&sessionRevokerBox{r: r})
+}
+
+// Ready reports whether a block list has been loaded. Console login refuses
+// (503) until it is, because it cannot tell who is blocked.
+func (b *BlockStore) Ready() bool { return b.snap.Load() != nil }
+
+// IsBlocked reports whether the exact sub or the lowercased email is on the
+// block list. It reads the in-memory snapshot and never queries the database;
+// before the first successful load it reports false (see Ready).
+func (b *BlockStore) IsBlocked(sub, email string) bool {
+	s := b.snap.Load()
+	if s == nil {
+		return false
+	}
+	if sub != "" {
+		if _, ok := s.subs[sub]; ok {
+			return true
+		}
+	}
+	if email != "" {
+		if _, ok := s.emails[strings.ToLower(strings.TrimSpace(email))]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// refreshSnapshot reloads the snapshot from the database and returns the
+// entries that were not in the previous one. On a failure it keeps the
+// previous snapshot and logs (the error text carries no entry value).
+func (b *BlockStore) refreshSnapshot(ctx context.Context) []config.BlockedUser {
+	b.refreshMu.Lock()
+	defer b.refreshMu.Unlock()
+	list, err := b.Wire(ctx)
+	if err != nil {
+		b.logger.Error("blocklist: snapshot refresh failed; keeping the previous block list", "error", err)
+		return nil
+	}
+	next := &blockSnapshot{subs: map[string]struct{}{}, emails: map[string]struct{}{}}
+	for _, u := range list {
+		if u.Sub != "" {
+			next.subs[u.Sub] = struct{}{}
+		}
+		if u.Email != "" {
+			next.emails[u.Email] = struct{}{}
+		}
+	}
+	prev := b.snap.Swap(next)
+	if prev == nil {
+		// The first load is not a change; the middleware checks every request.
+		return nil
+	}
+	var added []config.BlockedUser
+	for _, u := range list {
+		_, hadSub := prev.subs[u.Sub]
+		_, hadEmail := prev.emails[u.Email]
+		if (u.Sub != "" && !hadSub) || (u.Email != "" && !hadEmail) {
+			added = append(added, u)
+		}
+	}
+	return added
+}
+
+// revoke ends every session of the blocked principals in list.
+func (b *BlockStore) revoke(ctx context.Context, list ...config.BlockedUser) {
+	box := b.revoker.Load()
+	if box == nil {
+		return
+	}
+	for _, u := range list {
+		if u.Sub != "" {
+			if _, err := box.r.DeleteBySub(ctx, u.Sub); err != nil {
+				b.logger.Error("blocklist: session revoke failed", "error", err)
+			}
+		}
+		if u.Email != "" {
+			if _, err := box.r.DeleteByEmail(ctx, u.Email); err != nil {
+				b.logger.Error("blocklist: session revoke failed", "error", err)
+			}
+		}
+	}
+}
+
+// BlockWatchInterval is how often the control plane polls for a block-list
+// write by another process (the offline CLI).
+const BlockWatchInterval = 2 * time.Second
+
+// Watch polls PRAGMA data_version every interval until ctx is done. The pragma
+// changes only when another connection (in practice another process: cpstate
+// holds one connection per handle) commits to the database, so it catches the
+// offline CLI's writes without a table scan. On a change it runs the policy
+// refresh and the OnChange callbacks, as an in-process mutation does. It also
+// runs them once at start, so a write between the control plane's first load
+// and the first poll is not missed. A poll error is logged once per episode
+// and the previous state is kept.
+func (b *BlockStore) Watch(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = BlockWatchInterval
+	}
+	last, err := b.dataVersion(ctx)
+	failing := err != nil
+	if failing {
+		b.logger.Warn("blocklist watch: data_version unreadable; keeping the previous block list", "error", err)
+	}
+	b.watchChanged(ctx)
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		v, err := b.dataVersion(ctx)
+		if err != nil {
+			if ctx.Err() == nil && !failing {
+				b.logger.Warn("blocklist watch: data_version unreadable; keeping the previous block list", "error", err)
+			}
+			failing = true
+			continue
+		}
+		failing = false
+		if v != last {
+			last = v
+			b.watchChanged(ctx)
+		}
+	}
+}
+
+// dataVersion reads PRAGMA data_version on the store's connection.
+func (b *BlockStore) dataVersion(ctx context.Context) (int64, error) {
+	var v int64
+	if err := b.db.SQL().QueryRowContext(ctx, "PRAGMA data_version").Scan(&v); err != nil {
+		return 0, fmt.Errorf("blocklist: data_version: %w", err)
+	}
+	return v, nil
+}
+
+// OnChange registers fn to run after every successful in-process mutation and
+// after Watch sees another process write, in both cases after the policy refresh.
+// fn may run concurrently with itself, so it must be safe for that.
+func (b *BlockStore) OnChange(fn func()) {
+	if fn == nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.callbacks = append(b.callbacks, fn)
+}
+
+// watchChanged is changed for a write by another process: sessions of any
+// entry that process added are ended too, so lifting the block later cannot
+// bring them back.
+func (b *BlockStore) watchChanged(ctx context.Context) {
+	added := b.refreshSnapshot(ctx)
+	b.revoke(context.WithoutCancel(ctx), added...)
+	b.notify()
+}
+
+// changed refreshes the snapshot, then runs the policy refresh and the
+// OnChange callbacks.
+func (b *BlockStore) changed(ctx context.Context) {
+	b.refreshSnapshot(ctx)
+	b.notify()
+}
+
+// notify runs the policy refresh and then the OnChange callbacks.
+func (b *BlockStore) notify() {
+	if b.onRefresh != nil {
+		b.onRefresh()
+	}
+	b.mu.Lock()
+	cbs := append([]func(){}, b.callbacks...)
+	b.mu.Unlock()
+	for _, fn := range cbs {
+		fn()
+	}
+}
+
+// List returns every entry, oldest first.
+func (b *BlockStore) List(ctx context.Context) ([]BlockEntry, error) {
+	rows, err := b.db.SQL().QueryContext(ctx,
+		`SELECT id, sub, email, reason, created_by, created_at FROM blocked_users ORDER BY created_at, id`)
+	if err != nil {
+		return nil, fmt.Errorf("blocklist: list: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []BlockEntry
+	for rows.Next() {
+		var e BlockEntry
+		var sub, email, reason, by sql.NullString
+		var at sql.NullInt64
+		if err := rows.Scan(&e.ID, &sub, &email, &reason, &by, &at); err != nil {
+			return nil, fmt.Errorf("blocklist: list: %w", err)
+		}
+		e.Sub, e.Email, e.Reason, e.CreatedBy = sub.String, email.String, reason.String, by.String
+		e.CreatedAt = time.UnixMilli(at.Int64)
+		out = append(out, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("blocklist: list: %w", err)
+	}
+	return out, nil
+}
+
+// Wire returns the list as it rides the policy wire: sub and email only,
+// sorted by (sub, email), nil when empty.
+func (b *BlockStore) Wire(ctx context.Context) ([]config.BlockedUser, error) {
+	rows, err := b.db.SQL().QueryContext(ctx, `SELECT sub, email FROM blocked_users`)
+	if err != nil {
+		return nil, fmt.Errorf("blocklist: read: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	return scanWire(rows)
+}
+
+func scanWire(rows *sql.Rows) ([]config.BlockedUser, error) {
+	var out []config.BlockedUser
+	for rows.Next() {
+		var sub, email sql.NullString
+		if err := rows.Scan(&sub, &email); err != nil {
+			return nil, fmt.Errorf("blocklist: read: %w", err)
+		}
+		out = append(out, config.BlockedUser{Sub: sub.String, Email: email.String})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("blocklist: read: %w", err)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Sub != out[j].Sub {
+			return out[i].Sub < out[j].Sub
+		}
+		return out[i].Email < out[j].Email
+	})
+	return out, nil
+}
+
+// Add stores entry (ID, CreatedBy and CreatedAt are ignored) and returns its id.
+// actor is recorded as created_by (oidc:<sub>, cli:<user>, system:offboarding).
+// The resulting list is checked with config.ValidateBlockedUsers, so the count
+// and total-size limits apply. On success the policy is refreshed and the
+// OnChange callbacks run.
+func (b *BlockStore) Add(ctx context.Context, entry BlockEntry, actor string) (string, error) {
+	sub := strings.TrimSpace(entry.Sub)
+	email := strings.ToLower(strings.TrimSpace(entry.Email))
+	if len(entry.Reason) > maxBlockReasonBytes {
+		return "", fmt.Errorf("%w: reason exceeds %d bytes", ErrInvalid, maxBlockReasonBytes)
+	}
+	if strings.IndexFunc(entry.Reason, isControl) >= 0 {
+		return "", fmt.Errorf("%w: reason has a control character", ErrInvalid)
+	}
+	if strings.TrimSpace(actor) == "" {
+		return "", fmt.Errorf("%w: actor is required", ErrInvalid)
+	}
+	id, err := newBlockID()
+	if err != nil {
+		return "", err
+	}
+	if err := b.insert(ctx, id, sub, email, entry.Reason, actor); err != nil {
+		return "", err
+	}
+	// Refresh the snapshot first so the middleware denies the principal at
+	// once, then end their sessions (they cannot return after an unblock).
+	b.changed(ctx)
+	b.revoke(context.WithoutCancel(ctx), config.BlockedUser{Sub: sub, Email: email})
+	return id, nil
+}
+
+func isControl(r rune) bool { return r < 0x20 || r == 0x7f }
+
+// insert runs Add's read-validate-write under one BEGIN IMMEDIATE transaction,
+// so a concurrent writer (the CLI) cannot slip past the limits.
+func (b *BlockStore) insert(ctx context.Context, id, sub, email, reason, actor string) error {
+	conn, err := b.db.SQL().Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("blocklist: connection: %w", err)
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return fmt.Errorf("blocklist: begin: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.WithoutCancel(ctx), "ROLLBACK")
+		}
+	}()
+
+	rows, err := conn.QueryContext(ctx, `SELECT sub, email FROM blocked_users`)
+	if err != nil {
+		return fmt.Errorf("blocklist: read: %w", err)
+	}
+	list, err := scanWire(rows)
+	_ = rows.Close()
+	if err != nil {
+		return err
+	}
+	for _, u := range list {
+		if (sub != "" && u.Sub == sub) || (email != "" && u.Email == email) {
+			return ErrDuplicate
+		}
+	}
+	list = append(list, config.BlockedUser{Sub: sub, Email: email})
+	sort.Slice(list, func(i, j int) bool {
+		if list[i].Sub != list[j].Sub {
+			return list[i].Sub < list[j].Sub
+		}
+		return list[i].Email < list[j].Email
+	})
+	if err := validateBlockList(list); err != nil {
+		return err
+	}
+
+	if _, err := conn.ExecContext(ctx,
+		`INSERT INTO blocked_users (id, sub, email, reason, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		id, nullIfEmpty(sub), nullIfEmpty(email), reason, actor, b.clock.Now().UnixMilli()); err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return ErrDuplicate
+		}
+		return fmt.Errorf("blocklist: insert: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return fmt.Errorf("blocklist: commit: %w", err)
+	}
+	committed = true
+	return nil
+}
+
+// validateBlockList maps config.ValidateBlockedUsers to the store's errors. The
+// error text names an index or a size, never an entry value.
+func validateBlockList(list []config.BlockedUser) error {
+	if len(list) > config.MaxBlockedUsers {
+		return fmt.Errorf("%w: %d entries exceeds the limit of %d", ErrTooMany, len(list), config.MaxBlockedUsers)
+	}
+	err := config.ValidateBlockedUsers(list)
+	if err == nil {
+		return nil
+	}
+	if enc, mErr := json.Marshal(list); mErr == nil && len(enc) > config.MaxBlockedUsersBytes {
+		return fmt.Errorf("%w: total size %d bytes exceeds the limit of %d", ErrTooMany, len(enc), config.MaxBlockedUsersBytes)
+	}
+	return fmt.Errorf("%w: %s", ErrInvalid, err.Error())
+}
+
+// Remove deletes the entry with id and returns ErrNotFound when there is none.
+// actor is the caller's identity string; it is not stored (the admin audit
+// records removals) but must be non-empty.
+func (b *BlockStore) Remove(ctx context.Context, id, actor string) error {
+	if strings.TrimSpace(actor) == "" {
+		return fmt.Errorf("%w: actor is required", ErrInvalid)
+	}
+	res, err := b.db.SQL().ExecContext(ctx, `DELETE FROM blocked_users WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("blocklist: delete: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("blocklist: delete: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	b.changed(ctx)
+	return nil
+}
+
+func nullIfEmpty(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+// newBlockID returns "bu_" plus 16 hex characters.
+func newBlockID() (string, error) {
+	var raw [8]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", fmt.Errorf("blocklist: id: %w", err)
+	}
+	return "bu_" + hex.EncodeToString(raw[:]), nil
+}
+
+// blockLoadReporter reports a failed block-list load once per episode: the
+// first failure logs one ERROR line, and the first failure that finds an alert
+// pipeline publishes one high-severity Finding (the pipeline is built after the
+// initial load, so an episode that starts there still publishes on its next
+// failure). Repeats stay quiet until a load succeeds.
+type blockLoadReporter struct {
+	logger    *slog.Logger
+	publish   func(integration.Finding) bool // false when there is no alert pipeline
+	now       func() time.Time
+	failing   atomic.Bool
+	published atomic.Bool
+}
+
+func (r *blockLoadReporter) failed() {
+	if r.failing.CompareAndSwap(false, true) {
+		// No entry values and no error text: the log line is the signal when no
+		// alert pipeline exists, and the Refresh warning carries the cause.
+		r.logger.Error(blockLoadFailedMsg)
+	}
+	if r.published.Load() || !r.published.CompareAndSwap(false, true) {
+		return
+	}
+	if !r.publish(integration.Finding{
+		RuleID:   blockLoadFailedMsg,
+		Category: "security",
+		Severity: integration.SevHigh,
+		Summary:  "The user block list could not be read; workers keep the last block list they were served",
+		DedupKey: blockLoadFailedMsg,
+		Ts:       r.now(),
+	}) {
+		r.published.Store(false) // no pipeline yet: try again on the next failure
+	}
+}
+
+func (r *blockLoadReporter) ok() {
+	r.failing.Store(false)
+	r.published.Store(false)
+}
+
+// blockedUsersOverlay is the serve-time overlay that merges the stored block
+// list into the wire. Because it is an overlay the list is never part of a
+// policy version. A store error fails the load, so Refresh keeps the previous
+// wire and ETag rather than serving an empty list.
+func blockedUsersOverlay(store *BlockStore, rep *blockLoadReporter) wireOverlay {
+	return wireOverlay{name: blockedUsersOverlayName, apply: func(ctx context.Context, w *policyWire) (string, error) {
+		fp, err := withBlockedUsers(ctx, store, w)
+		if err != nil {
+			rep.failed()
+			return "", err
+		}
+		rep.ok()
+		return fp, nil
+	}}
+}
+
+// withBlockedUsers sets w.BlockedUsers from the store and returns the list's
+// fingerprint: the first 16 hex of the sha256 of the canonical list, empty when
+// the list is empty.
+func withBlockedUsers(ctx context.Context, store *BlockStore, w *policyWire) (string, error) {
+	list, err := store.Wire(ctx)
+	if err != nil {
+		return "", err
+	}
+	if len(list) == 0 {
+		w.BlockedUsers = nil
+		return "", nil
+	}
+	b, err := json.Marshal(list)
+	if err != nil {
+		return "", fmt.Errorf("blocklist: encode: %w", err)
+	}
+	w.BlockedUsers = list
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:8]), nil
+}
+
+// initBlockStore builds the block store and registers its overlay when the
+// control plane has a state DB. It runs before the first Refresh. Without State
+// it does nothing, so /policy is byte-identical to a build without the list.
+func (s *Server) initBlockStore() {
+	if s.cfg.State == nil {
+		return
+	}
+	s.blocks = NewBlockStore(s.cfg.State, BlockStoreOptions{Clock: s.cfg.Clock, OnRefresh: s.policy.Refresh, Logger: s.cfg.Logger})
+	rep := &blockLoadReporter{logger: s.cfg.Logger, now: s.cfg.Clock.Now, publish: s.publishFindingOK}
+	if err := s.policy.addOverlay(blockedUsersOverlay(s.blocks, rep)); err != nil {
+		// Unreachable: registration precedes the first Refresh and the name is
+		// unique. Logged rather than ignored so a wiring change shows up.
+		s.cfg.Logger.Error("control plane: blocked_users overlay not registered", "error", err)
+	}
+}
+
+// publishFindingOK sends f to the alert pipeline's bus and reports whether there
+// was one. The pipeline is built after the first Refresh, so it is read per call.
+func (s *Server) publishFindingOK(f integration.Finding) bool {
+	if s.pipeline == nil {
+		return false
+	}
+	m := s.pipeline.CurrentManager()
+	if m == nil {
+		return false
+	}
+	m.Bus().PublishFinding(f)
+	return true
+}

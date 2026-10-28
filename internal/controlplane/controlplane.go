@@ -17,8 +17,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
+	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -54,8 +58,9 @@ type Config struct {
 	// PolicyPath is the YAML file whose allow/deny policy is served to workers.
 	// It is re-read on each /policy request so edits propagate on the next poll.
 	PolicyPath string
-	// Token is the bearer token workers must present on /policy and
-	// /central/ingest. Empty disables auth (development only).
+	// Token is the shared (legacy) bearer token workers may present on /policy,
+	// /control/heartbeat and /central/ingest, next to per-worker tokens. Empty
+	// selects open mode: anonymous callers are accepted (development only).
 	Token string
 	// AdminToken is the CP's own admin bearer (--admin-token-env): the token
 	// dashboard writes and /central/secrets take in console.auth none. It never
@@ -66,6 +71,10 @@ type Config struct {
 	// fallback to Token off, so a flag naming an empty variable refuses writes
 	// instead of reopening them to the shared worker token.
 	RequireAdminToken bool
+	// RequireWorkerTokens is --require-worker-tokens: the worker routes accept
+	// wwt_ tokens only (strict mode). Run refuses it together with a shared
+	// token, without a state dir, or without TLS.
+	RequireWorkerTokens bool
 	// MaxEvents caps the central analytics store (0 = default).
 	MaxEvents int
 	// Store is the fleet analytics backend (persistent SQLite or in-memory). When
@@ -129,6 +138,12 @@ type Config struct {
 	// Clock is the control plane's time port (nil = clock.Real()). The console
 	// query/generate rate limit ticks on it.
 	Clock clock.Clock
+	// WorkerTokens is the per-worker token store. Run builds it when State is
+	// open; nil means no wwt_ token is accepted and behaviour is unchanged.
+	WorkerTokens *WorkerTokenStore
+	// TLS reports that the control plane serves TLS; without it, token auth logs
+	// a clear-text warning at startup.
+	TLS bool
 }
 
 // policyWire is the shape sent to workers: allow/deny policy plus the optional
@@ -140,7 +155,15 @@ type Config struct {
 type policyWire struct {
 	Allowlist []config.AllowlistEntry `json:"allowlist"`
 	Denylist  []config.DenylistEntry  `json:"denylist"`
-	Settings  *config.SettingsWire    `json:"settings,omitempty"`
+	// BlockedUsers is the user block list (sub and email only; reason and actor
+	// stay on the CP). Omitempty keeps the wire and ETag unchanged when empty.
+	BlockedUsers []config.BlockedUser `json:"blockedUsers,omitempty"`
+	Settings     *config.SettingsWire `json:"settings,omitempty"`
+	// ScopedAllowlist and ScopedAllowPos are filled only by projectScoped, at
+	// serve time: identity-scoped allow entries move out of Allowlist so a
+	// worker that decodes leniently cannot read one as global. Never stored.
+	ScopedAllowlist []config.AllowlistEntry `json:"scopedAllowlist,omitempty"`
+	ScopedAllowPos  []int                   `json:"scopedAllowPos,omitempty"`
 }
 
 // Long-poll bounds and the external-edit re-read cadence.
@@ -169,10 +192,19 @@ type Server struct {
 	registry *WorkerRegistry
 	mcp      *mcpStore
 	policy   *policyServer
+	// workerAuth authenticates /policy, /control/heartbeat and /central/ingest.
+	workerAuth *WorkerAuthenticator
 	// versions is the versioned policy store; nil in file mode. Its Create
 	// refreshes the policy server, so long-poll waiters wake at once.
 	versions PolicyVersionStore
-	writeMu  sync.Mutex // serializes policy + integrations edits
+
+	// blocks is the user block list store; nil without State (and then no
+	// blocked_users overlay is registered).
+	blocks  *BlockStore
+	writeMu sync.Mutex // serializes policy + integrations edits
+	// gp holds the scoped-rule count of the served ETag and the per-worker
+	// "lacks grouppolicy" log marks (W-P1-GPOL-07).
+	gp groupPolicyFlags
 	// pipeline is the embeddable alert-delivery assembly (manager + engine + tick +
 	// bridge). Nil when no alert DB path is configured (or when its store/manager
 	// failed to build — fail-open: a broken alert config never stops policy
@@ -213,6 +245,15 @@ type Server struct {
 	// audit is the admin audit middleware's state; nil when cfg.AdminAudit is
 	// (admin audit disabled), in which case no route is wrapped.
 	audit *adminAuditor
+	// breakGlass is the break-glass login (POST /auth/breakglass); nil unless
+	// console.breakGlass.enabled (W-P1-OPS1-08).
+	breakGlass *breakGlass
+	// findings, when set, receives every Finding instead of the alert pipeline.
+	// Tests inject a fake here.
+	findings FindingPublisher
+	// backupRunner is the scheduled backup runner (nil with --backup-dir unset);
+	// Run stores it after New so /dashboard/api/setup can report its status.
+	backupRunner atomic.Pointer[BackupRunner]
 	// auditRec is cfg.AdminAudit as a Recorder (nil with admin audit off) and ext
 	// tracks the served file's hashes for the file-mode external-edit audit
 	// (adminaudit_external.go).
@@ -271,14 +312,25 @@ func New(cfg Config) *Server {
 		detectionConfig: cfg.DetectionConfig,
 		generateLimit:   newSessionLimiter(cfg.Clock, queryGenerateLimit, time.Minute),
 	}
+	// One authenticator for the three worker routes; the policy server was built
+	// with a default one, replaced here by the configured one.
+	s.workerAuth = NewWorkerAuthenticator(WorkerAuthConfig{
+		Legacy: cfg.Token, Tokens: cfg.WorkerTokens, Registry: registry,
+		Logger: cfg.Logger, Clock: cfg.Clock, TLS: cfg.TLS, Strict: cfg.RequireWorkerTokens,
+	})
+	s.policy.auth = s.workerAuth
+	s.workerAuth.LogMode()
 	// Register serve-time wire overlays (s.policy.addOverlay) here, before the
 	// initial load, so they apply to the first served wire. Versioned mode
 	// registers credential; W-P1-BLOCK-03 adds blocked_users.
 	s.initPolicyStore()
+	s.initBlockStore()
 	s.policy.Refresh() // initial load so /policy and the dashboard have policy immediately
 	s.initSessions()
 	s.initAuth()
+	s.initBreakGlass()
 	s.warnAdminToken()
+	s.failClosedWithoutAdminToken()
 	if cfg.AdminAudit != nil {
 		s.enableAdminAudit(cfg.AdminAudit, cfg.AdminAudit.Probe, cfg.AdminAudit.StateHash)
 		s.auditRec = cfg.AdminAudit
@@ -338,6 +390,9 @@ func New(cfg Config) *Server {
 func (s *Server) Start(ctx context.Context) {
 	if s.sessions != nil {
 		go s.sweepSessions(ctx)
+		if s.breakGlass != nil {
+			go s.runBreakGlassSessionWarn(ctx)
+		}
 	}
 	if s.auth != nil {
 		go s.auth.discover(ctx)
@@ -421,8 +476,8 @@ func (s *Server) writeSettings(in config.SettingsWire) error {
 
 // Handler returns the control plane's HTTP routes:
 //
-//	GET  /policy          — allow/deny policy for workers (bearer-auth)
-//	POST /central/ingest  — fleet analytics ingest (bearer-auth)
+//	GET  /policy          — allow/deny policy for workers (worker token or shared bearer)
+//	POST /control/heartbeat, /central/ingest — worker heartbeat and fleet analytics ingest (same auth)
 //	     /dashboard/      — fleet dashboard over the aggregated store (writes bearer-auth; sessions in oidc mode)
 //	     /central/secrets — secret store writes, when one is configured (bearer; admin session in oidc mode)
 //	GET  /healthz         — liveness
@@ -436,7 +491,7 @@ func (s *Server) Handler() http.Handler {
 	var policyServe PolicyServer = s.policy
 	mux.HandleFunc("/policy", policyServe.ServePolicy)
 	mux.HandleFunc("/control/heartbeat", s.handleHeartbeat)
-	ingest := analytics.NewIngestHandler(s.central, s.cfg.Token)
+	ingest := analytics.NewIngestHandler(s.central, s.workerAuth.IngestAuthorizer())
 	// Central ingest lands in the IngestSink seam: tag worker activity in the
 	// registry and store each worker's MCP snapshot. Wiring the seam's methods (vs
 	// reaching into fields) documents the ingest surface; behavior is unchanged.
@@ -454,7 +509,7 @@ func (s *Server) Handler() http.Handler {
 			s.pipeline.Observe(proxyID, events)
 		})
 	}
-	mux.Handle("/central/ingest", ingest)
+	mux.Handle("/central/ingest", ingestAuthErrors(ingest))
 
 	// Secret write path (/central/secrets), mounted ONLY when a writable store is
 	// configured (echo now; aws in Phase 5). A nil store means the routes are
@@ -535,6 +590,10 @@ func (s *Server) Handler() http.Handler {
 	// and llmProviders GETs report the shared head and writes read If-Match
 	// into WriteMeta.ExpectedHead; file mode reports no version.
 	dash.SetPolicyVersion(s.policyVersionHead)
+	// Block list admin API (W-P1-BLOCK-11). Without a state DB the stub answers
+	// 503 state_dir_required; the hasher is a no-op without admin audit.
+	dash.SetBlockListStore(s.blockListStore())
+	s.RegisterStateHasher(blockedUsersTarget, s.blockedUsersHash)
 	if s.versions != nil {
 		// HTTP saves record before and after as v<N>:<doc_sha256>, replacing
 		// the built-in hasher of the served allow/deny. A no-op without admin
@@ -553,12 +612,16 @@ func (s *Server) Handler() http.Handler {
 	dash.SetWorkers(func() []dashboard.WorkerView {
 		cur := s.policy.currentETag()
 		views := tracker.Views()
+		FlagNoGroupPolicy(views, s.scopedEntries())
 		for i := range views {
 			views[i].Behind = views[i].PolicyETag != "" && views[i].PolicyETag != cur
 		}
 		fillPolicyVersions(s.versions, views)
+		s.fillWorkerAuth(views)
 		return views
 	})
+	// Worker token admin routes and their audit hasher (W-P1-WTOK-03).
+	s.wireWorkerTokens(dash)
 	// Dashboard-V3 read tabs. Each source EXISTS on the control plane:
 	//   - secretstore: the CP's WRITE store lists KEY metadata (never values). Nil
 	//     store (env/none backend) → the tab reports backend "none".
@@ -569,6 +632,7 @@ func (s *Server) Handler() http.Handler {
 	//     receipts source is wired and the receipts block stays zeroed.
 	dash.SetSecretStore(s.secretStore, s.cfg.SecretStoreBackend)
 	dash.SetAuthMode(s.authMode())
+	dash.SetBackupStatus(s.backupStatusFor)
 	// Admin audit log API (W-P1-AAUD-03): only with console.adminAudit on;
 	// without a source the dashboard answers 404 and hides the tab.
 	if s.cfg.AdminAudit != nil {
@@ -609,24 +673,51 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
-// handleHeartbeat records a worker liveness ping. Body: {"policyETag": "..."}.
+// handleHeartbeat records a worker liveness ping. Body: {"policyETag": "...", "caps": ["blocklist/v1"]}.
 // It is one of the three worker→CP interactions; the CP never calls the worker.
 func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !s.bearerOK(r) {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	principal, err := s.workerAuth.Authenticate(r)
+	if err != nil {
+		WriteWorkerAuthError(w, err)
 		return
 	}
 	var body struct {
-		PolicyETag string `json:"policyETag"`
+		PolicyETag string   `json:"policyETag"`
+		Caps       []string `json:"caps"`
 	}
 	// Body is optional/tiny; ignore decode errors (heartbeat is best-effort).
 	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body)
-	s.registry.SeenHeartbeat(r.Header.Get(analytics.ProxyIDHeader), trimETag(body.PolicyETag))
+	caps := normalizeCaps(body.Caps)
+	s.registry.SeenHeartbeat(principal.ProxyID, trimETag(body.PolicyETag), caps)
+	s.noteGroupPolicy(principal.ProxyID, caps)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// capPattern is the shape of an accepted worker capability string.
+var capPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._/-]{0,31}$`)
+
+// maxCaps bounds the capabilities kept per heartbeat.
+const maxCaps = 16
+
+// normalizeCaps drops capability strings that do not match capPattern, removes
+// duplicates, sorts, and keeps at most maxCaps. It never trusts the worker.
+func normalizeCaps(in []string) []string {
+	var out []string
+	for _, c := range in {
+		if capPattern.MatchString(c) {
+			out = append(out, c)
+		}
+	}
+	sort.Strings(out)
+	out = slices.Compact(out)
+	if len(out) > maxCaps {
+		out = out[:maxCaps]
+	}
+	return out
 }
 
 // policyYAML is the policy sub-block written back when policy is edited from the
@@ -635,6 +726,8 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 type policyYAML struct {
 	Allowlist []config.AllowlistEntry `yaml:"allowlist"`
 	Denylist  []config.DenylistEntry  `yaml:"denylist"`
+	// BlockedUsers keeps policy.blockedUsers in the file across an edit.
+	BlockedUsers []config.BlockedUser `yaml:"blockedUsers,omitempty"`
 }
 
 // writePolicy validates and atomically persists an edited allow/deny policy to
@@ -669,7 +762,7 @@ func (s *Server) WritePolicy(ctx context.Context, p config.Policy, meta dashboar
 		_ = yaml.Unmarshal(cur, &root)
 	}
 
-	if err := renderPolicyBlock(root, p.Allowlist, p.Denylist); err != nil {
+	if err := renderPolicyBlock(root, p.Allowlist, p.Denylist, p.BlockedUsers); err != nil {
 		return err
 	}
 
@@ -687,9 +780,9 @@ func (s *Server) WritePolicy(ctx context.Context, p config.Policy, meta dashboar
 // renderPolicyBlock replaces root's policy block with allow/deny and makes sure
 // a logging block exists (kept from the current file when present, otherwise
 // info/json). It is the policy half of WritePolicy and renderDocToRoot.
-func renderPolicyBlock(root map[string]yaml.Node, allow []config.AllowlistEntry, deny []config.DenylistEntry) error {
+func renderPolicyBlock(root map[string]yaml.Node, allow []config.AllowlistEntry, deny []config.DenylistEntry, blocked []config.BlockedUser) error {
 	var policyNode yaml.Node
-	if err := policyNode.Encode(policyYAML{Allowlist: allow, Denylist: deny}); err != nil {
+	if err := policyNode.Encode(policyYAML{Allowlist: allow, Denylist: deny, BlockedUsers: blocked}); err != nil {
 		return fmt.Errorf("controlplane: encode policy block: %w", err)
 	}
 	root["policy"] = policyNode
@@ -727,7 +820,7 @@ func readRoot(path string) map[string]yaml.Node {
 // live value (the preserve-on-empty rule). Blocks no dashboard writer owns
 // (dlp, advisory) are left as the served file has them.
 func renderDocToRoot(root map[string]yaml.Node, doc policyWire) error {
-	if err := renderPolicyBlock(root, doc.Allowlist, doc.Denylist); err != nil {
+	if err := renderPolicyBlock(root, doc.Allowlist, doc.Denylist, nil); err != nil {
 		return err
 	}
 	var settings config.SettingsWire
@@ -1217,10 +1310,55 @@ type mcpYAML struct {
 }
 
 type mcpToolsYAML struct {
-	Allow       []string                             `yaml:"allow,omitempty"`
-	Deny        []string                             `yaml:"deny,omitempty"`
-	RateLimit   map[string]string                    `yaml:"rateLimit,omitempty"`
-	Constraints map[string]config.MCPToolConstraints `yaml:"constraints,omitempty"`
+	Allow       []string                     `yaml:"allow,omitempty"`
+	Deny        []string                     `yaml:"deny,omitempty"`
+	RateLimit   map[string]string            `yaml:"rateLimit,omitempty"`
+	Constraints map[string]mcpConstraintYAML `yaml:"constraints,omitempty"`
+}
+
+// mcpConstraintYAML mirrors the on-disk constraint (config.rawMCPToolConstraint).
+// config.MCPToolConstraints has no yaml tags, so encoding it directly would write
+// lowercased keys the loader rejects (W-P1-GPOL-08: a groups allowWhen saved from
+// the dashboard must reload).
+type mcpConstraintYAML struct {
+	MaxArgsBytes int                     `yaml:"maxArgsBytes,omitempty"`
+	Fields       map[string]mcpFieldYAML `yaml:"fields,omitempty"`
+	AllowWhen    *mcpConditionYAML       `yaml:"allowWhen,omitempty"`
+}
+
+type mcpFieldYAML struct {
+	Match     string `yaml:"match,omitempty"`
+	MaxLen    int    `yaml:"maxLen,omitempty"`
+	Required  bool   `yaml:"required,omitempty"`
+	Forbidden bool   `yaml:"forbidden,omitempty"`
+}
+
+type mcpConditionYAML struct {
+	AgentID    string   `yaml:"agentId,omitempty"`
+	TimeWindow string   `yaml:"timeWindow,omitempty"`
+	Groups     []string `yaml:"groups,omitempty"`
+	Users      []string `yaml:"users,omitempty"`
+}
+
+func mcpConstraintsYAML(in map[string]config.MCPToolConstraints) map[string]mcpConstraintYAML {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]mcpConstraintYAML, len(in))
+	for tool, c := range in {
+		y := mcpConstraintYAML{MaxArgsBytes: c.MaxArgsBytes}
+		if len(c.Fields) > 0 {
+			y.Fields = make(map[string]mcpFieldYAML, len(c.Fields))
+			for name, f := range c.Fields {
+				y.Fields[name] = mcpFieldYAML{Match: f.Match, MaxLen: f.MaxLen, Required: f.Required, Forbidden: f.Forbidden}
+			}
+		}
+		if aw := c.AllowWhen; aw != nil {
+			y.AllowWhen = &mcpConditionYAML{AgentID: aw.AgentID, TimeWindow: aw.TimeWindow, Groups: aw.Groups, Users: aw.Users}
+		}
+		out[tool] = y
+	}
+	return out
 }
 
 type mcpSchemaYAML struct {
@@ -1289,13 +1427,13 @@ func mcpSettingsNode(s *config.MCPSettings) (*yaml.Node, error) {
 		(len(s.Tools.Allow) > 0 || len(s.Tools.Deny) > 0 ||
 			len(s.Tools.RateLimit) > 0 || len(s.Tools.Constraints) > 0) {
 		// Reuse the wire→config tool mapping so allow/deny/rate/constraints stay in
-		// one place; the on-disk constraint shape matches config.MCPToolConstraints.
+		// one place; mcpConstraintsYAML gives them the on-disk key names.
 		tools := config.MCPConfigFromSettings(s).Tools
 		raw.Tools = &mcpToolsYAML{
 			Allow:       tools.Allow,
 			Deny:        tools.Deny,
 			RateLimit:   tools.RateLimit,
-			Constraints: tools.Constraints,
+			Constraints: mcpConstraintsYAML(tools.Constraints),
 		}
 	}
 	var node yaml.Node

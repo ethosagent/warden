@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/ethosagent/warden/internal/analytics"
-	"github.com/ethosagent/warden/internal/denyreason"
 	"github.com/ethosagent/warden/internal/policy"
 	"github.com/ethosagent/warden/internal/protocol"
 )
@@ -64,29 +63,40 @@ type bufferedConn struct {
 
 func (c bufferedConn) Read(b []byte) (int, error) { return c.Reader.Read(b) }
 
-// handleTLS terminates TLS and dispatches by protocol. needsJudge is true when
-// the destination matched no static rule (policy.NoMatch) and the judge is
-// enabled: such requests are only allowed to proceed via the HTTP path, where
-// the judge can inspect method/URL/headers: HTTP/1.1 and HTTP/2 (both run the
-// shared stage pipeline). Every other path (opaque TLS passthrough, raw
-// forwarding) cannot be judged, so a needsJudge request there fails closed —
+// handleTLS terminates TLS and dispatches by protocol. d says what the CONNECT
+// gate left undecided: deferJudge when the destination matched no static rule
+// (policy.NoMatch) and the judge is enabled, deferIdentity when it is reachable
+// only for some identities. Such requests are only allowed to proceed via the
+// HTTP path, where the judge or the per-request subject can decide on
+// method/URL/headers: HTTP/1.1 and HTTP/2 (both run the shared stage
+// pipeline). Every other path (opaque TLS passthrough, raw forwarding) cannot
+// be decided per request, so a deferred request there fails closed —
 // preserving the default-deny invariant.
 // handleTLS is the CONNECT-tunnel entry to TLS termination: it classifies the
 // first bytes (a CONNECT tunnel may carry anything) and fails closed for
-// needsJudge traffic that is not TLS, then hands the TLS case to
+// deferred traffic that is not TLS, then hands the TLS case to
 // terminateAndDispatch — the SAME termination/dispatch path the transparent
 // :443 listener uses after its ClientHello gate (#376). Forward-mode behavior
 // is unchanged byte for byte.
-func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, port int, needsJudge bool, ci connIdentity) {
+func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, port int, d deferred, ci connIdentity) {
 	firstByte, err := br.Peek(1)
 	if err != nil || firstByte[0] != 0x16 {
-		if needsJudge {
-			// Not a TLS ClientHello: cannot terminate and inspect, so the judge
-			// cannot run. Fail closed.
-			p.storeDeny(ci, domain, port, "tcp", denyreason.NoTLS, "")
+		if d != deferNone {
+			// Not a TLS ClientHello: cannot terminate and inspect, so neither the
+			// judge nor the per-request subject check can run. Fail closed.
+			p.storeDeny(ci, domain, port, "tcp", failClosedReason(d), "")
 			return
 		}
 		p.reach(PathTunnel)
+		// Only an attributed tunnel registers (see tunnel): a block-list cut must
+		// reach this opaque passthrough, the form a CONNECT takes on a worker
+		// with TLS termination, as well as the CA-less one.
+		var sess *session
+		if ci.Claims.Sub != "" || ci.Claims.Email != "" {
+			sess = p.sessions.newSession("tcp", domain, port, true, clientConn)
+			sess.bind(ci)
+			defer sess.release()
+		}
 		remote, dialErr := p.dialFunc("tcp", net.JoinHostPort(domain, fmt.Sprintf("%d", port)))
 		if dialErr != nil {
 			// A dial the SSRF-safe dialer refused is a policy decision: audit it
@@ -95,6 +105,7 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 			p.storeSSRFDeny(ci, domain, port, "tcp", dialErr)
 			return
 		}
+		sess.addCloser(remote)
 		p.recordEvent(ci, analytics.Event{
 			Timestamp: time.Now(),
 			Domain:    domain,
@@ -124,18 +135,18 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 		return
 	}
 
-	p.terminateAndDispatch(clientConn, br, domain, port, needsJudge, ci)
+	p.terminateAndDispatch(clientConn, br, domain, port, d, ci)
 }
 
 // terminateAndDispatch terminates TLS for domain with the MITM leaf cert and
 // dispatches by what the decrypted stream turns out to be: an ALPN-negotiated
 // or prior-knowledge h2 connection goes to handleGRPC, HTTP to handleHTTP,
-// everything else to a needsJudge fail-closed deny or the raw-TLS forward.
+// everything else to a deferred fail-closed deny or the raw-TLS forward.
 // This is the ONE post-ClientHello path for both arrivals of an allowed TLS
 // destination — the CONNECT tunnel (handleTLS) and the transparent :443
 // listener (handleTransparentTLS, #376) — so policy, swap, scan, MCP and
 // analytics CANNOT diverge between the two modes.
-func (p *Proxy) terminateAndDispatch(clientConn net.Conn, firstBytes io.Reader, domain string, port int, needsJudge bool, ci connIdentity) {
+func (p *Proxy) terminateAndDispatch(clientConn net.Conn, firstBytes io.Reader, domain string, port int, d deferred, ci connIdentity) {
 	leaf, err := p.getOrCreateCert(domain)
 	if err != nil {
 		return
@@ -168,7 +179,7 @@ func (p *Proxy) terminateAndDispatch(clientConn net.Conn, firstBytes io.Reader, 
 	// NegotiatedProtocol stays "" and this branch is skipped — the peek path below
 	// is unchanged for them.
 	if tlsConn.ConnectionState().NegotiatedProtocol == "h2" {
-		p.handleGRPC(bufferedConn{Reader: plainReader, Conn: tlsConn}, domain, port, needsJudge, ci)
+		p.handleGRPC(bufferedConn{Reader: plainReader, Conn: tlsConn}, domain, port, d, ci)
 		return
 	}
 
@@ -180,20 +191,21 @@ func (p *Proxy) terminateAndDispatch(clientConn net.Conn, firstBytes io.Reader, 
 	detected := protocol.Detect(peekBytes)
 	switch detected {
 	case protocol.HTTP:
-		p.handleHTTP(tlsConn, plainReader, domain, port, needsJudge, policy.SchemeHTTPS, nil, ci)
+		p.handleHTTP(tlsConn, plainReader, domain, port, d, policy.SchemeHTTPS, nil, ci)
 		return
 	case protocol.HTTP2:
 		// Prior-knowledge h2 client (no ALPN): the peek saw the HTTP/2
 		// connection preface. Terminate HTTP/2 directly; each stream runs the
 		// shared stage pipeline, judge included.
-		p.handleGRPC(bufferedConn{Reader: plainReader, Conn: tlsConn}, domain, port, needsJudge, ci)
+		p.handleGRPC(bufferedConn{Reader: plainReader, Conn: tlsConn}, domain, port, d, ci)
 		return
 	}
 
-	// Non-HTTP traffic inside TLS cannot be judged (no request to inspect):
-	// fail closed when the judge was required.
-	if needsJudge {
-		p.storeDeny(ci, domain, port, "tcp", denyreason.NoTLS, "")
+	// Non-HTTP traffic inside TLS cannot be judged or checked against a subject
+	// (no request to inspect): fail closed when a per-request decision was
+	// required.
+	if d != deferNone {
+		p.storeDeny(ci, domain, port, "tcp", failClosedReason(d), "")
 		return
 	}
 

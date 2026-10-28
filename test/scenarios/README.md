@@ -50,6 +50,27 @@ plain http on loopback, so a verifier config for it needs
 `InternalIssuerURL: h.Issuer().Issuer()` (the http-issuer rule). Never print a
 token in a failure message; name the claim instead.
 
+## Block-list scenarios
+
+`h.BlockUser(sub, email)` blocks a user through `POST /dashboard/api/blocked-users`
+with the control plane's admin bearer (needs `WithControlPlaneAdminToken` and a
+state dir, e.g. `WithAdminAudit`) and returns the entry id. On a `Fleet(n)` the
+worker-1 helpers are not enough: `h.ConnectReplyAt(i, hostPort, auth)` returns a
+CONNECT reply's status and body, `h.DialConnectAt(i, hostPort, auth)` keeps the
+connection open past the 200, and `h.AgentWithProxyTokenAt(i, tok)` is a token
+client of worker `i` (all 0-based). `harness.WithCentralForwarding()` makes the
+workers forward events to `/central/ingest`, so a Finding the control plane
+derives is readable at `/dashboard/api/alerts`; it also drains each worker's
+local event store, so count events before forwarding or not at all.
+
+Survival (`block_list_survives_*`, `block_list_unblock_restores`): add
+`WithVersionedPolicyStore()` for the rollback and the offline `BlockStore`
+write (`h.ControlPlaneStateDB()`), and `h.RestartWorker(i)` to restart worker
+`i` (0-based) in process. It returns the worker on a new proxy address and
+fail-closed until it pulls policy; the `*At` helpers follow it, a client or
+connection made before the restart does not. Dashboard writes need the admin
+bearer: `h.CP().SendBearer(h.ControlPlaneAdminToken(), ...)`.
+
 ## Identity scenarios
 
 `harness.WithIdentity("attribute"|"off")` boots the worker with the `identity`
@@ -74,6 +95,22 @@ The catalog is `identity_*` (`test/scenarios/identity.go`):
   (a rebuild), not by waiting.
 - No scenario prints a token; `assertNoLeakOf` checks logs, events, receipts,
   metrics and upstream recordings for each token and its pieces.
+
+## Group-policy scenarios
+
+`groups_*` (`test/scenarios/groups.go`) prove the group-aware policy end to end:
+`go test ./test/scenarios -race -run 'TestScenarios/groups_'`. Harness levers:
+`harness.WithFakeJudge()` points the inline judge at a counting loopback fake
+(`h.Judge().Calls()`; also served through the control plane, since a managed
+worker's first settings apply replaces its boot judge), so a deny scenario can
+assert the judge was never consulted (`groupsJudgeLive` is the positive control); `harness.WithScopedAllow(domain, groups...)` serves a
+`{domain, groups}` entry from the control plane's boot YAML (the dashboard
+policy save, `savePolicy`, is the other way in); `harness.WithoutProxyCA()`
+boots a worker that cannot terminate TLS. MCP settings are applied on change,
+so `groups_mcp_tool_gated` adds the `mcp:` block with
+`h.EditControlPlaneConfig` after boot. `groups_old_worker_denies` decodes the
+real `/policy` body with a frozen pre-group decoder and feeds the result to the
+real evaluator and MCP gateway.
 
 ## Known issues
 

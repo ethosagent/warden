@@ -27,6 +27,8 @@ func TestRoutesMatchHandler(t *testing.T) {
 	srv.SetSecretStore(secrets.NewEchoStore(), "echo")
 	srv.SetPolicyHistory(&fakeHistory{})
 	srv.SetBackup(func() error { return nil })
+	srv.SetWorkerTokens(&fakeWorkerTokens{})
+	srv.SetAuthMode("oidc")
 	h := srv.Handler()
 
 	listed := map[string]bool{}

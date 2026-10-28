@@ -60,8 +60,10 @@ type authService struct {
 	verifier identity.Verifier
 	pending  *pendingStore
 	sessions *SessionStore
-	cookie   SessionCookie
-	logger   *slog.Logger
+	// blocks is the user block list; nil means none is kept.
+	blocks *BlockStore
+	cookie SessionCookie
+	logger *slog.Logger
 
 	loginCookieName string
 	endpoints       atomic.Pointer[oidc.Endpoints]
@@ -114,6 +116,7 @@ func (s *Server) initAuth() {
 		verifier:        verifier,
 		pending:         newPendingStore(s.cfg.State.SQL(), s.cfg.Now),
 		sessions:        s.sessions,
+		blocks:          s.blocks,
 		cookie:          s.sessionCookie,
 		logger:          s.cfg.Logger,
 		loginCookieName: name,
@@ -193,6 +196,10 @@ func (a *authService) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeAuthError(w, http.StatusServiceUnavailable, loginIDPUnavailable)
 		return
 	}
+	if a.blocks != nil && !a.blocks.Ready() {
+		writeAuthError(w, http.StatusServiceUnavailable, loginBlockUnavailable)
+		return
+	}
 	state, nonce, browser := randomToken(32), randomToken(32), randomToken(32)
 	verifier := oauth2.GenerateVerifier()
 	err := a.pending.Put(r.Context(), pendingLogin{
@@ -257,6 +264,14 @@ func (a *authService) handleCallback(w http.ResponseWriter, r *http.Request) {
 	if a.audit != nil && (res.reason == "" || res.consumed) {
 		a.audit(r, res)
 	}
+	switch res.reason {
+	case loginUserBlocked:
+		writeAuthError(w, http.StatusForbidden, loginUserBlocked)
+		return
+	case loginBlockUnavailable:
+		writeAuthError(w, http.StatusServiceUnavailable, loginBlockUnavailable)
+		return
+	}
 	if res.reason != "" {
 		http.Redirect(w, r, dashboardHome+"?login_error="+url.QueryEscape(res.reason), http.StatusFound)
 		return
@@ -311,6 +326,16 @@ func (a *authService) finishLogin(w http.ResponseWriter, r *http.Request, oc oau
 	}
 	// From here the token is verified, so the attempt has a known actor.
 	actor := adminaudit.Actor{Sub: claims.Sub, Email: claims.Email}
+	// A blocked principal gets no session, whatever their role. Without a
+	// loaded block list the console cannot tell, so it refuses too.
+	if a.blocks != nil {
+		if !a.blocks.Ready() {
+			return "", loginResult{consumed: true, reason: loginBlockUnavailable, sub: claims.Sub, actor: actor}
+		}
+		if a.blocks.IsBlocked(claims.Sub, claims.Email) {
+			return "", loginResult{consumed: true, reason: loginUserBlocked, sub: claims.Sub, actor: actor}
+		}
+	}
 	role, ok := a.cfg.RoleFor(claims.Groups)
 	if !ok {
 		return "", loginResult{consumed: true, reason: loginNoRole, sub: claims.Sub, actor: actor}

@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -48,6 +49,12 @@ type Policy struct {
 	Allowlist []AllowlistEntry `json:"allowlist"`
 	// Denylist is checked before the allowlist; deny wins on conflict.
 	Denylist []DenylistEntry `json:"denylist"`
+	// BlockedUsers is the admin user block list (IdP sub and/or email),
+	// normalized and validated at load. json:"-" satisfies architecture rule
+	// X2 (Policy's only declared wire fields are Allowlist/Denylist); the list
+	// still rides the wire through remoteWire.BlockedUsers (worker decode) and
+	// controlplane.policyWire.BlockedUsers (CP encode).
+	BlockedUsers []BlockedUser `json:"-"`
 	// Secrets maps placeholder tokens to their source env var (phase 1).
 	Secrets []SecretMapping `json:"-"`
 	// SecretStore selects the backend the worker resolves placeholders through
@@ -158,8 +165,11 @@ func (p Policy) DeepCopy() Policy {
 		// slice, so mutating a copy cannot retarget the live policy.
 		cp.Allowlist[i].Methods = append([]string(nil), p.Allowlist[i].Methods...)
 		cp.Allowlist[i].Paths = append([]string(nil), p.Allowlist[i].Paths...)
+		cp.Allowlist[i].Groups = append([]string(nil), p.Allowlist[i].Groups...)
+		cp.Allowlist[i].Users = append([]string(nil), p.Allowlist[i].Users...)
 	}
 	cp.Denylist = append([]DenylistEntry(nil), p.Denylist...)
+	cp.BlockedUsers = append([]BlockedUser(nil), p.BlockedUsers...)
 	cp.Secrets = append([]SecretMapping(nil), p.Secrets...)
 	for i := range cp.Secrets {
 		cp.Secrets[i].MatchHosts = append([]string(nil), p.Secrets[i].MatchHosts...)
@@ -253,6 +263,14 @@ type AllowlistEntry struct {
 	Methods []string `yaml:"methods,omitempty" json:"methods,omitempty"`
 	Paths   []string `yaml:"paths,omitempty" json:"paths,omitempty"`
 
+	// W-P1-GPOL-01 identity scope: limit the entry to IdP groups (exact,
+	// case-sensitive) and/or named users (email, lowercased, or exact sub).
+	// Empty = global, as before. Enforced per request with the verified
+	// subject: a scoped entry never allows an anonymous request, and a
+	// non-member is denied outright (never sent to the judge).
+	Groups []string `yaml:"groups,omitempty" json:"groups,omitempty"`
+	Users  []string `yaml:"users,omitempty" json:"users,omitempty"`
+
 	// Reserved (M2): parsed but not enforced in phase 1.
 	RateLimit  string `yaml:"rateLimit,omitempty" json:"rateLimit,omitempty"`
 	TimeWindow string `yaml:"timeWindow,omitempty" json:"timeWindow,omitempty"`
@@ -261,8 +279,31 @@ type AllowlistEntry struct {
 // DiffKey identifies an allow entry for the structural policy diff: today
 // domain|port. Methods, paths, rateLimit and timeWindow are compared
 // attributes, not part of the key, so changing one on the same destination
-// shows as "changed". W-P1-GPOL-01 extends the key with groups/users.
-func (e AllowlistEntry) DiffKey() string { return diffKey(e.Domain, e.Port) }
+// shows as "changed". Groups and users are part of the key (only when set, so
+// unscoped keys are unchanged): a rule scoped to different principals is a
+// different rule, not an edit of the global one.
+func (e AllowlistEntry) DiffKey() string {
+	k := diffKey(e.Domain, e.Port)
+	if len(e.Groups) > 0 {
+		k += "|groups=" + joinSorted(e.Groups)
+	}
+	if len(e.Users) > 0 {
+		k += "|users=" + joinSorted(e.Users)
+	}
+	return k
+}
+
+// joinSorted joins a sorted copy of vs (the receiver stays as is). Each value
+// is quoted so a value containing "," or "|" cannot collide with another list
+// or forge a key segment.
+func joinSorted(vs []string) string {
+	c := append([]string(nil), vs...)
+	sort.Strings(c)
+	for i, v := range c {
+		c[i] = strconv.Quote(v)
+	}
+	return strings.Join(c, ",")
+}
 
 // SecretMapping ties a placeholder the agent holds to the env var that carries
 // the real value (phase 1 ENV provider).
@@ -301,6 +342,8 @@ type rawConfig struct {
 	Policy struct {
 		Allowlist []AllowlistEntry `yaml:"allowlist"`
 		Denylist  []DenylistEntry  `yaml:"denylist"`
+		// BlockedUsers: the user block list (see BlockedUser).
+		BlockedUsers []BlockedUser `yaml:"blockedUsers"`
 	} `yaml:"policy"`
 	Secrets     []SecretMapping `yaml:"secrets"`
 	SecretStore *rawSecretStore `yaml:"secretStore"`
@@ -368,6 +411,7 @@ func parse(data []byte) (*LocalYAMLProvider, error) {
 	policy := Policy{
 		Allowlist:       raw.Policy.Allowlist,
 		Denylist:        raw.Policy.Denylist,
+		BlockedUsers:    normalizeBlockedUsers(raw.Policy.BlockedUsers),
 		Secrets:         raw.Secrets,
 		SecretStore:     parseSecretStore(raw.SecretStore),
 		CacheTTLSeconds: raw.Cache.TTL,
@@ -490,6 +534,9 @@ func parseDurationField(name, raw string, dst *time.Duration) error {
 // the core allow/deny policy inline and delegates each feature domain to its own
 // validate helper (defined alongside that domain's types).
 func validate(p Policy) error {
+	if err := ValidateBlockedUsers(p.BlockedUsers); err != nil {
+		return err
+	}
 	// A control-plane-managed worker (controlPlane configured, not local-only)
 	// gets its policy from the CP and boots fail-closed, so it needs no local
 	// allowlist. Every other mode must declare at least one allow entry.
@@ -540,6 +587,19 @@ func validate(p Policy) error {
 				return err
 			}
 		}
+		// W-P1-GPOL-01/-10: validate the principal values. The evaluator
+		// enforces them per request (and the wire projects them fail-closed),
+		// so an allow entry may carry groups/users (MCP allowWhen too, W-P1-GPOL-11).
+		path := fmt.Sprintf("policy.allowlist[%d]", i)
+		g, u, err := normalizePrincipals(path, e.Groups, e.Users)
+		if err != nil {
+			return err
+		}
+		// Store the trimmed, lowercased, sorted lists (as the MCP condition
+		// does) so the served body, its ETag and the policy-history diff do not
+		// depend on how the operator or the dashboard spelled the values. The
+		// slice shares its backing array with the caller's Policy.
+		p.Allowlist[i].Groups, p.Allowlist[i].Users = g, u
 		// Regex domain: ~<pattern>
 		if strings.HasPrefix(e.Domain, "~") {
 			if _, err := regexp.Compile(e.Domain[1:]); err != nil {

@@ -36,6 +36,7 @@ func StateMigrations() []cpstate.Migration {
 	migs = append(migs, OIDCPendingMigrations()...)
 	migs = append(migs, PolicyStoreMigrations()...)
 	migs = append(migs, adminaudit.Migrations()...)
+	migs = append(migs, BlockMigrations()...)
 	migs = append(migs, WorkerTokenMigrations()...)
 	return migs
 }
@@ -142,24 +143,49 @@ func verifyFailedFinding(res adminaudit.Result, verifyErr error, now time.Time) 
 	}
 }
 
-// publishFinding publishes f on the current alert manager's bus. Nil-safe: a
-// CP without an alert pipeline (or whose manager failed to build) drops it;
-// the caller has already logged the event.
+// FindingPublisher is how the control plane publishes a Finding. The alert
+// pipeline's bus satisfies it; tests inject a fake through Server.findings.
+type FindingPublisher interface {
+	PublishFinding(f integration.Finding)
+}
+
+// publishFinding publishes f through the control plane's FindingPublisher: the
+// test override when set, else the current alert manager's bus. A control
+// plane with no alert pipeline (or whose manager failed to build) cannot
+// deliver it, so the Finding is logged at ERROR by rule id and severity only.
 func (s *Server) publishFinding(f integration.Finding) {
-	if s.pipeline == nil {
+	if s.findings != nil {
+		s.findings.PublishFinding(f)
 		return
 	}
-	m := s.pipeline.CurrentManager()
-	if m == nil {
-		return
+	if s.pipeline != nil {
+		if m := s.pipeline.CurrentManager(); m != nil {
+			m.Bus().PublishFinding(f)
+			return
+		}
 	}
-	m.Bus().PublishFinding(f)
+	s.cfg.Logger.Error("finding_not_published", "rule", f.RuleID, "severity", f.Severity.String())
+}
+
+// checkpointLoopHooks lets a test observe the checkpoint loop's lifecycle
+// without inspecting goroutine stacks. Both fields are optional.
+type checkpointLoopHooks struct {
+	// started is called when the loop goroutine begins.
+	started func()
+	// exited is called as the loop returns, before done is closed, so it has
+	// run by the time Run's shutdown wait on done completes.
+	exited func()
 }
 
 // runCheckpointLoop runs the admin audit checkpoint loop until ctx is
-// cancelled, then closes done. It is a named function so a goroutine dump
-// shows whether the loop is running.
-func runCheckpointLoop(ctx context.Context, done chan<- struct{}, s *adminaudit.Store, e adminaudit.Emitter, interval time.Duration, clk clock.Clock) {
+// cancelled, then closes done.
+func runCheckpointLoop(ctx context.Context, done chan<- struct{}, s *adminaudit.Store, e adminaudit.Emitter, interval time.Duration, clk clock.Clock, hooks checkpointLoopHooks) {
 	defer close(done)
+	if hooks.started != nil {
+		hooks.started()
+	}
+	if hooks.exited != nil {
+		defer hooks.exited()
+	}
 	adminaudit.RunCheckpoints(ctx, s, e, interval, clk)
 }

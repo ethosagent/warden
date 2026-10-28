@@ -1,7 +1,6 @@
 package controlplane
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -34,7 +33,7 @@ type rig struct {
 	h     http.Handler
 	clk   *fakeClock
 	db    *cpstate.DB
-	logs  *bytes.Buffer
+	logs  *syncBuf
 	redir string
 }
 
@@ -64,8 +63,7 @@ func newRig(t *testing.T, o rigOpts) *rig {
 	if o.redirect == "" {
 		o.redirect = "http://127.0.0.1:7070/auth/callback"
 	}
-	db, err := cpstate.Open(context.Background(), filepath.Join(t.TempDir(), "warden-cp.db"),
-		append(SessionMigrations(), OIDCPendingMigrations()...))
+	db, err := cpstate.Open(context.Background(), filepath.Join(t.TempDir(), "warden-cp.db"), StateMigrations())
 	if err != nil {
 		t.Fatalf("cpstate.Open: %v", err)
 	}
@@ -84,7 +82,7 @@ func newRig(t *testing.T, o rigOpts) *rig {
 	if !o.noInternal {
 		cc.OIDC.InternalIssuerURL = idp.URL()
 	}
-	logs := &bytes.Buffer{}
+	logs := &syncBuf{}
 	srv := New(Config{
 		PolicyPath: writePolicyFile(t, "a.example"), State: db, Console: cc,
 		ClientSecret: rigClientSecret, Now: clk.Now,

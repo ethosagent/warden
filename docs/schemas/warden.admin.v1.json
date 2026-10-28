@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ethosagent/warden/blob/main/docs/schemas/warden.admin.v1.json",
+  "title": "warden.admin.v1",
+  "description": "One line of the Warden control plane's JSON admin stream (audit.jsonLog, read by the control plane): one JSON object per stored admin audit entry plus a periodic chain-head checkpoint, newline-delimited. Versioning: v1 accepts only additive optional fields, each with a schema_rev bump; the Go record (internal/auditlog), this schema and the docs change in the same pull request. A breaking change ships as warden.admin.v2 next to v1 for one minor release. Consumers must ignore unknown fields. Time and ordering: ts is the producing control plane's wall clock when the entry was stored (the checkpoint's own instant for a checkpoint) and may skew across hosts; lines are not ordered, so consumers must sort by ts, never by line order. seq orders lines within one boot_id, and a gap in seq means lines were dropped (the control plane's signed admin_audit chain stays the record of truth). chain_seq, entry_hash, prev_hash and key_id are copied from the stored chain row, so a shipped copy anchors the chain off host; a checkpoint has action admin_audit.checkpoint, with chain_seq and entry_hash naming the chain head and an empty prev_hash. actor.sub and actor.email are the plaintext identity from the side table and are absent for rows the store writes itself and for checkpoints. Request bodies, headers, tokens and cookies are deliberately never exported.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "schema_rev", "ts", "cp_id", "boot_id", "seq", "actor", "auth_method", "action",
+    "target", "target_ref", "outcome", "before_hash", "after_hash", "request_id",
+    "chain_seq", "entry_hash", "prev_hash", "key_id"
+  ],
+  "properties": {
+    "schema": { "const": "warden.admin.v1", "type": "string", "description": "Schema identifier; always warden.admin.v1." },
+    "schema_rev": { "type": "integer", "minimum": 1, "description": "Revision within v1; bumped when an additive optional field is added." },
+    "ts": { "type": "string", "format": "date-time", "description": "UTC RFC 3339 with nanoseconds; the control plane's wall clock when the entry was stored. Sort by this." },
+    "cp_id": { "type": "string", "description": "The control plane that wrote the line (its hostname)." },
+    "boot_id": { "type": "string", "description": "Random per-process id; seq restarts at 1 for each boot_id." },
+    "seq": { "type": "integer", "minimum": 0, "description": "Per-boot line counter; a gap means dropped lines." },
+    "actor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role"],
+      "description": "Who made the change.",
+      "properties": {
+        "sub": { "type": "string", "description": "Plaintext identity subject from the side table; absent for system rows and checkpoints." },
+        "email": { "type": "string", "description": "Plaintext email from the side table; absent when unknown." },
+        "role": { "type": "string", "description": "The actor's console role at the time (empty for system rows and checkpoints)." }
+      }
+    },
+    "auth_method": { "type": "string", "description": "How the actor authenticated: oidc, breakglass, cli, bearer, none or system." },
+    "action": { "type": "string", "description": "The audited action, for example policy.write, or admin_audit.checkpoint for a chain-head checkpoint." },
+    "target": { "type": "string", "description": "The kind of thing changed, for example policy or secretstore." },
+    "target_ref": { "type": "string", "description": "A bounded reference to the thing changed (a route path or name), never a value." },
+    "outcome": { "type": "string", "enum": ["ok", "denied", "rejected", "error"], "description": "ok: applied. denied: refused by authorization or CSRF. rejected: invalid request. error: failed server-side." },
+    "before_hash": { "type": "string", "description": "Keyed hash of the state before the change; empty when not applicable." },
+    "after_hash": { "type": "string", "description": "Keyed hash of the state after the change; equal to before_hash when nothing changed." },
+    "request_id": { "type": "string", "description": "The request id, for correlation with the control plane's logs." },
+    "chain_seq": { "type": "integer", "minimum": 0, "description": "The row's seq in the admin audit chain; the head's seq for a checkpoint." },
+    "entry_hash": { "type": "string", "description": "Lowercase hex entry_hash of the stored row; the head's hash for a checkpoint." },
+    "prev_hash": { "type": "string", "description": "Lowercase hex prev_hash of the stored row; empty for a checkpoint." },
+    "key_id": { "type": "string", "description": "The signing key id the row (or the head) is under." }
+  }
+}

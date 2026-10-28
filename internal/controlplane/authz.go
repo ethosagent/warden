@@ -129,6 +129,16 @@ func authzTable() map[routeKey]authzRow {
 		{post, "/dashboard/api/policy/versions/{v}/rollback", auditedRow(editor, "policy.rollback", "policy")},
 		// On-demand backup (W-P1-OPS1-11); 404 unless --backup-dir is set.
 		{post, "/dashboard/api/backup", auditedRow(admin, "backup.run", "backup")},
+		// Worker tokens (W-P1-WTOK-03): viewers may list; minting and revoking are
+		// admin only, and the handler also refuses them outside console.auth oidc.
+		{get, "/dashboard/api/worker-tokens", readRow(viewer, "worker_token.read")},
+		{post, "/dashboard/api/worker-tokens", auditedRow(admin, "worker_token.create", "worker_tokens")},
+		{del, "/dashboard/api/worker-tokens/{id}", auditedRow(admin, "worker_token.revoke", "worker_tokens")},
+		// The user block list (W-P1-BLOCK-11). Requests are matched on their
+		// template ({id} is any entry id; dashboard.RoutePath).
+		{get, "/dashboard/api/blocked-users", readRow(admin, "blocked_users.read")},
+		{post, "/dashboard/api/blocked-users", auditedRow(admin, "blocked_users.add", blockedUsersTarget)},
+		{del, "/dashboard/api/blocked-users/{id}", auditedRow(admin, "blocked_users.remove", blockedUsersTarget)},
 		// Served by the control plane itself, ahead of dash.Handler (cpDashboardRoutes).
 		{get, "/dashboard/api/sessions", readRow(admin, "sessions.read")},
 		{del, "/dashboard/api/sessions", auditedRow(admin, "sessions.revoke", "sessions")},
@@ -169,6 +179,7 @@ func cpRouteTable() map[routeKey]authzRow {
 		{get, "/auth/login", handler("auth.login")},
 		{get, "/auth/callback", handler("auth.callback")},
 		{post, "/auth/logout", handler("auth.logout")},
+		{post, "/auth/breakglass", handler("auth.breakglass")},
 	}
 	t := make(map[routeKey]authzRow, len(rows))
 	for _, r := range rows {
@@ -203,7 +214,7 @@ func requireRole(next http.Handler, table map[routeKey]authzRow, console config.
 			http.Redirect(w, r, "/auth/login?next="+url.QueryEscape(r.URL.RequestURI()), http.StatusFound)
 			return
 		}
-		role, _ := console.RoleFor(p.Groups) // zero (no role) when no group matches
+		role := principalRole(console, p) // zero (no role) when no group matches
 		row, listed := table[routeKey{r.Method, dashboard.RoutePath(r.URL.Path)}]
 		if !listed {
 			logDenied(logger, row, role, p, r)
