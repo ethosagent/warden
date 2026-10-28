@@ -137,8 +137,10 @@ func TestBackup_StaleTicker(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go h.runStale(ctx, done)
-	for clk.PendingTimers() == 0 {
-		time.Sleep(time.Millisecond)
+	for deadline := time.Now().Add(5 * time.Second); clk.PendingTimers() == 0; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the staleness check never armed its timer")
+		}
 	}
 	clk.Advance(15 * time.Minute)
 	for deadline := time.Now().Add(5 * time.Second); len(pub.all()) == 0 && time.Now().Before(deadline); time.Sleep(time.Millisecond) {
