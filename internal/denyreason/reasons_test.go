@@ -42,6 +42,7 @@ func TestRequiredReasonsDeclared(t *testing.T) {
 	for _, r := range []Reason{
 		PolicyNoMatch, PolicyDenylist, RateLimited, TimeWindow,
 		PathNotCanonical, MethodNotAllowed, PathNotAllowed,
+		IdentityRequired, GroupNotAllowed, IdentityGroupsTruncated,
 		H2RequestTrailersUnsupported, H2ExtendedConnectUnsupported,
 		TransformNeedsBufferedBody, HostMismatch,
 		RequestTrailersUnsupported,
@@ -51,7 +52,7 @@ func TestRequiredReasonsDeclared(t *testing.T) {
 		TransparentNoSNI, TransparentBadClientHello,
 		TransparentH2PriorKnowledge, TransparentLoopGuard,
 		MalformedRequest,
-		MCPGatewayDeny, Unspecified,
+		MCPGatewayDeny, UserBlocked, Unspecified,
 	} {
 		if !r.Declared() {
 			t.Errorf("required reason %q is not declared", r)

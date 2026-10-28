@@ -27,6 +27,7 @@
 //	                              mcp_chain_rapid_repeat
 //	ObserveAddedLatency(stage):  mcp_scan, identity
 //	RecordIdentityVerify:         result is an identity status, reason an identity.Reason
+//	RecordBlocklist*:             unlabelled (an entry count and a closed-session count)
 //
 // Disabled mode is free: when Config.Enabled is false (or the *Metrics is nil)
 // New returns a nil *Metrics and a nil http.Handler, and every record method is
@@ -93,6 +94,7 @@ type Metrics struct {
 	secretSwaps    metric.Int64Counter
 	scanFindings   metric.Int64Counter
 	judge          metric.Int64Counter
+	scoped         metric.Int64Counter
 	identityVerify metric.Int64Counter
 	auditLines     metric.Int64Counter
 	auditErrors    metric.Int64Counter
@@ -101,6 +103,8 @@ type Metrics struct {
 	breakerOpen    metric.Int64UpDownCounter
 	cacheStale     metric.Int64UpDownCounter
 	buildInfo      metric.Int64Gauge
+	blocklistSize  metric.Int64Gauge
+	blocklistCut   metric.Int64Counter
 }
 
 // ShutdownFunc flushes and closes the meter provider. It is always non-nil; in
@@ -241,6 +245,12 @@ func newMetrics(provider *sdkmetric.MeterProvider, serviceVersion string) (*Metr
 	); err != nil {
 		return nil, fmt.Errorf("observability: judge counter: %w", err)
 	}
+	if m.scoped, err = meter.Int64Counter(
+		"warden.policy.scoped.total",
+		metric.WithDescription("Per-request decisions on identity-scoped allow entries by result (allow, not_member, no_identity)."),
+	); err != nil {
+		return nil, fmt.Errorf("observability: policy scoped counter: %w", err)
+	}
 	if m.auditLines, err = meter.Int64Counter(
 		"warden.auditlog.lines.total",
 		metric.WithDescription("JSON decision stream lines written, by schema."),
@@ -264,6 +274,18 @@ func newMetrics(provider *sdkmetric.MeterProvider, serviceVersion string) (*Metr
 		metric.WithDescription("Identity token outcomes by result (identity status) and reason."),
 	); err != nil {
 		return nil, fmt.Errorf("observability: identity verify counter: %w", err)
+	}
+	if m.blocklistSize, err = meter.Int64Gauge(
+		"warden.blocklist.entries",
+		metric.WithDescription("Users on the admin block list after the last applied policy change."),
+	); err != nil {
+		return nil, fmt.Errorf("observability: blocklist entries gauge: %w", err)
+	}
+	if m.blocklistCut, err = meter.Int64Counter(
+		"warden.blocklist.sessions_closed.total",
+		metric.WithDescription("Open sessions closed because their user was added to the block list."),
+	); err != nil {
+		return nil, fmt.Errorf("observability: blocklist sessions closed counter: %w", err)
 	}
 	if m.addedLatency, err = meter.Float64Histogram(
 		"warden.request.added_latency",
@@ -396,6 +418,18 @@ func (m *Metrics) RecordJudge(outcome string) {
 	))
 }
 
+// RecordScoped increments warden.policy.scoped.total{result}. result is a
+// bounded enum (allow|not_member|no_identity); there is deliberately no user,
+// group or token label.
+func (m *Metrics) RecordScoped(result string) {
+	if m == nil {
+		return
+	}
+	m.scoped.Add(context.Background(), 1, metric.WithAttributes(
+		attribute.String("result", result),
+	))
+}
+
 // RecordIdentityVerify increments warden.identity.verify.total{result,reason}.
 // result is the bounded identity status (none|valid|invalid|expired|
 // unverified|conflict) and reason the bounded identity.Reason set, "none" when
@@ -410,6 +444,25 @@ func (m *Metrics) RecordIdentityVerify(result, reason string) {
 		attribute.String("result", result),
 		attribute.String("reason", reason),
 	))
+}
+
+// RecordBlocklistEntries sets the warden.blocklist.entries gauge to the number
+// of users on the block list after an applied policy change. No label carries
+// identity.
+func (m *Metrics) RecordBlocklistEntries(n int) {
+	if m == nil {
+		return
+	}
+	m.blocklistSize.Record(context.Background(), int64(n))
+}
+
+// RecordBlocklistSessionsClosed adds n to
+// warden.blocklist.sessions_closed.total. No label carries identity.
+func (m *Metrics) RecordBlocklistSessionsClosed(n int) {
+	if m == nil || n <= 0 {
+		return
+	}
+	m.blocklistCut.Add(context.Background(), int64(n))
 }
 
 // ObserveAddedLatency records warden.request.added_latency{stage} in seconds.

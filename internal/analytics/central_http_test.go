@@ -1,6 +1,7 @@
 package analytics
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -18,7 +19,7 @@ import (
 // the batch size, not double it.
 func TestCentralIngestRetryAfterLostAck_NoDuplicates(t *testing.T) {
 	fleet := newFleetStore(t, 0, 0)
-	ingest := NewIngestHandler(fleet, "")
+	ingest := NewIngestHandler(fleet, StaticTokenAuthorizer(""))
 
 	var calls int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -68,7 +69,7 @@ func TestCentralIngestRetryAfterLostAck_NoDuplicates(t *testing.T) {
 // never reject it.
 func TestIngestEmptyUID_AlwaysStored(t *testing.T) {
 	fleet := newFleetStore(t, 0, 0)
-	srv := httptest.NewServer(NewIngestHandler(fleet, ""))
+	srv := httptest.NewServer(NewIngestHandler(fleet, StaticTokenAuthorizer("")))
 	defer srv.Close()
 
 	const body = `[{"Domain":"legacy.example.com","Decision":"allow"}]`
@@ -146,7 +147,7 @@ func TestCentralStore_DedupForgetsEvictedUIDs(t *testing.T) {
 // the new cost/compliance fields) and the proxy id survive the hop.
 func TestCentralIngestRoundTrip(t *testing.T) {
 	cs := NewCentralStore(0)
-	srv := httptest.NewServer(NewIngestHandler(cs, "secret"))
+	srv := httptest.NewServer(NewIngestHandler(cs, StaticTokenAuthorizer("secret")))
 	defer srv.Close()
 
 	rs, err := NewHTTPRemoteStore(srv.URL, "secret", "proxy-1", srv.Client())
@@ -186,7 +187,7 @@ func TestCentralIngestRoundTrip(t *testing.T) {
 // and that ServeHTTP is nil-safe when no onEvents callback is registered.
 func TestIngestOnEvents(t *testing.T) {
 	cs := NewCentralStore(0)
-	h := NewIngestHandler(cs, "")
+	h := NewIngestHandler(cs, StaticTokenAuthorizer(""))
 	var gotProxy string
 	var gotEvents []Event
 	h.SetOnEvents(func(proxyID string, events []Event) {
@@ -218,7 +219,7 @@ func TestIngestOnEvents(t *testing.T) {
 func TestIngestOnEventsNilSafe(t *testing.T) {
 	// No SetOnEvents call: a POST must still succeed (204), not panic on a nil fn.
 	cs := NewCentralStore(0)
-	srv := httptest.NewServer(NewIngestHandler(cs, ""))
+	srv := httptest.NewServer(NewIngestHandler(cs, StaticTokenAuthorizer("")))
 	defer srv.Close()
 	rs, err := NewHTTPRemoteStore(srv.URL, "", "p", srv.Client())
 	if err != nil {
@@ -233,7 +234,7 @@ func TestIngestOnEventsNilSafe(t *testing.T) {
 // routes to the onMCP callback with the sender's proxy id (value-free schema).
 func TestIngestMCPSnapshot(t *testing.T) {
 	cs := NewCentralStore(0)
-	h := NewIngestHandler(cs, "")
+	h := NewIngestHandler(cs, StaticTokenAuthorizer(""))
 	var gotProxy string
 	var gotSnap MCPSnapshot
 	h.SetOnMCP(func(p string, s MCPSnapshot) { gotProxy, gotSnap = p, s })
@@ -270,7 +271,7 @@ func TestIngestMCPSnapshot(t *testing.T) {
 // JSON array of events (pre-envelope wire format).
 func TestIngestBareArrayBackCompat(t *testing.T) {
 	cs := NewCentralStore(0)
-	srv := httptest.NewServer(NewIngestHandler(cs, ""))
+	srv := httptest.NewServer(NewIngestHandler(cs, StaticTokenAuthorizer("")))
 	defer srv.Close()
 	req, _ := http.NewRequest(http.MethodPost, srv.URL,
 		strings.NewReader(`[{"Domain":"a.com","Decision":"allow"}]`))
@@ -322,7 +323,7 @@ func TestCentralStoreProxyFilter(t *testing.T) {
 // bearer token (SendBatch surfaces the non-2xx as an error so the worker retries).
 func TestCentralIngestRejectsBadToken(t *testing.T) {
 	cs := NewCentralStore(0)
-	srv := httptest.NewServer(NewIngestHandler(cs, "secret"))
+	srv := httptest.NewServer(NewIngestHandler(cs, StaticTokenAuthorizer("secret")))
 	defer srv.Close()
 
 	rs, err := NewHTTPRemoteStore(srv.URL, "wrong-token", "", srv.Client())
@@ -341,7 +342,7 @@ func TestCentralIngestRejectsBadToken(t *testing.T) {
 // the sender's proxy id and batch size (the control plane uses it to track workers).
 func TestIngestOnIngestHook(t *testing.T) {
 	cs := NewCentralStore(0)
-	h := NewIngestHandler(cs, "")
+	h := NewIngestHandler(cs, StaticTokenAuthorizer(""))
 	var gotProxy string
 	var gotN int
 	h.SetOnIngest(func(p string, n int) { gotProxy, gotN = p, n })
@@ -389,5 +390,92 @@ func TestSQLiteCostComplianceRoundTrip(t *testing.T) {
 	}
 	if len(got[0].Compliance) != 2 || got[0].Compliance[1] != "owasp:LLM06" {
 		t.Errorf("compliance lost: %v", got[0].Compliance)
+	}
+}
+
+// TestIngestHandlerAuthorizerProxyID verifies the authorizer's proxy id, not the
+// self-reported header, labels every stored event and every callback.
+func TestIngestHandlerAuthorizerProxyID(t *testing.T) {
+	cs := NewCentralStore(0)
+	h := NewIngestHandler(cs, func(*http.Request) (string, int) { return "bound-1", 0 })
+	var ingestID, eventsID, mcpID, secretsID string
+	h.SetOnIngest(func(id string, _ int) { ingestID = id })
+	h.SetOnEvents(func(id string, _ []Event) { eventsID = id })
+	h.SetOnMCP(func(id string, _ MCPSnapshot) { mcpID = id })
+	h.SetOnSecrets(func(id string, _ []SecretRefView) { secretsID = id })
+
+	body := `{"events":[{"domain":"a.example.com","decision":"allow"}],"mcp":{"inventory":[],"schema":{}},"secrets":[{"placeholder":"P"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/central/ingest", strings.NewReader(body))
+	req.Header.Set(ProxyIDHeader, "spoofed")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", rec.Code)
+	}
+	for name, got := range map[string]string{"onIngest": ingestID, "onEvents": eventsID, "onMCP": mcpID, "onSecrets": secretsID} {
+		if got != "bound-1" {
+			t.Errorf("%s proxyID = %q, want bound-1", name, got)
+		}
+	}
+	stored, _ := cs.GetAggregatedEvents(AggregatedFilter{})
+	if len(stored) != 1 || stored[0].ProxyID != "bound-1" {
+		t.Fatalf("stored = %+v, want one event with ProxyID bound-1", stored)
+	}
+}
+
+// errReader fails the test if the handler reads the body of a rejected request.
+type errReader struct{ t *testing.T }
+
+func (e errReader) Read([]byte) (int, error) {
+	e.t.Helper()
+	e.t.Error("body read despite authorizer rejection")
+	return 0, io.EOF
+}
+
+// TestIngestHandlerAuthorizerRejects verifies a non-zero authorizer status is
+// answered as-is before the body is read or anything is stored.
+func TestIngestHandlerAuthorizerRejects(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		cs := NewCentralStore(0)
+		h := NewIngestHandler(cs, func(*http.Request) (string, int) { return "", status })
+		called := false
+		h.SetOnIngest(func(string, int) { called = true })
+		req := httptest.NewRequest(http.MethodPost, "/central/ingest", errReader{t})
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != status {
+			t.Errorf("status = %d, want %d", rec.Code, status)
+		}
+		if stored, _ := cs.GetAggregatedEvents(AggregatedFilter{}); called || len(stored) != 0 {
+			t.Errorf("status %d: request was processed", status)
+		}
+	}
+}
+
+// TestStaticTokenAuthorizer pins the legacy shared-token behaviour.
+func TestStaticTokenAuthorizer(t *testing.T) {
+	mk := func(auth string) *http.Request {
+		r := httptest.NewRequest(http.MethodPost, "/central/ingest", nil)
+		if auth != "" {
+			r.Header.Set("Authorization", auth)
+		}
+		r.Header.Set(ProxyIDHeader, "hdr-proxy")
+		return r
+	}
+	open := StaticTokenAuthorizer("")
+	if id, st := open(mk("")); id != "hdr-proxy" || st != 0 {
+		t.Errorf("empty token: got (%q, %d), want (hdr-proxy, 0)", id, st)
+	}
+	if id, st := open(mk("Bearer anything")); id != "hdr-proxy" || st != 0 {
+		t.Errorf("empty token with header: got (%q, %d)", id, st)
+	}
+	auth := StaticTokenAuthorizer("secret")
+	if id, st := auth(mk("Bearer secret")); id != "hdr-proxy" || st != 0 {
+		t.Errorf("exact bearer: got (%q, %d), want (hdr-proxy, 0)", id, st)
+	}
+	for _, bad := range []string{"", "Bearer wrong", "secret", "Bearer secret ", "bearer secret"} {
+		if _, st := auth(mk(bad)); st != http.StatusUnauthorized {
+			t.Errorf("Authorization %q: status = %d, want 401", bad, st)
+		}
 	}
 }

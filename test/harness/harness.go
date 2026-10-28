@@ -119,6 +119,8 @@ type H struct {
 	// mcpEnabled (WithMCP) boots the workers with the MCP gateway in monitor
 	// mode, so WebSocket/SSE scenarios ride the worker's real stream paths.
 	mcpEnabled bool
+	// mcpConfig (WithMCPConfig) replaces the monitor-mode default.
+	mcpConfig *config.MCPConfig
 	// transparent (TransparentIntercept) boots the workers in interception mode
 	// `both` (#376): the CONNECT proxy keeps working AND the transparent
 	// listeners bind on loopback port 0 (addresses via TransparentAddrs).
@@ -162,6 +164,12 @@ type H struct {
 	// versionedPolicy (WithVersionedPolicyStore) boots the control plane with
 	// --policy-store=versioned and a state dir.
 	versionedPolicy bool
+	// wantWorkerTokens (WithWorkerTokens) boots the control plane with a state
+	// dir, so it builds the worker token store, on the harness's fake clock.
+	wantWorkerTokens bool
+	// wantStrict (WithStrictWorkerAuth) boots the control plane with
+	// --require-worker-tokens and no shared token.
+	wantStrict bool
 	// wantAdminAudit (WithAdminAudit) boots the control plane with
 	// console.adminAudit.enabled and a state dir.
 	wantAdminAudit bool
@@ -357,6 +365,15 @@ func withBeforeTerminal(f func()) Option {
 // never blocks: egress behaves exactly as without MCP.
 func WithMCP() Option {
 	return func(h *H) { h.mcpEnabled = true }
+}
+
+// WithMCPConfig is WithMCP with an explicit gateway config (mode, tool policy,
+// allowWhen conditions), for scenarios that need enforce mode.
+func WithMCPConfig(cfg config.MCPConfig) Option {
+	return func(h *H) {
+		h.mcpEnabled = true
+		h.mcpConfig = &cfg
+	}
 }
 
 // WithOIDCIssuer starts the in-process OIDC issuer fake (fakes.OIDCIssuer) for
@@ -627,6 +644,9 @@ func (h *H) boot() {
 	}
 
 	if h.suppliedTarget != nil {
+		if h.wantWorkerTokens {
+			h.tb.Fatalf("harness: WithWorkerTokens boots an in-process control plane; it cannot combine with WithTarget")
+		}
 		if h.versionedPolicy {
 			h.tb.Fatalf("harness: WithVersionedPolicyStore boots an in-process control plane; it cannot combine with WithTarget")
 		}
@@ -712,6 +732,7 @@ func (h *H) buildInprocessTarget() *inprocess {
 	h.applyPolicyStore(&ip.cp.params)
 	h.applyCPAdmin(&ip.cp.params)
 	h.applyBackup(&ip.cp.params)
+	h.applyStrict(&ip.cp.params)
 	return ip
 }
 
@@ -726,6 +747,7 @@ func (h *H) writeCPConfig() string {
 	}
 	b.WriteString(h.identityYAML())
 	b.WriteString(h.consoleYAML())
+	b.WriteString(h.strictYAML())
 	path := filepath.Join(h.root, "cp-config.yaml")
 	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
 		h.tb.Fatalf("harness: write control-plane config: %v", err)
@@ -793,6 +815,10 @@ func (h *H) workerParams(i int) worker.Params {
 		// Monitor mode: the worker's streaming paths (WS upgrade, SSE relay)
 		// run with the real gateway in front, which never blocks.
 		policy.MCP = config.MCPConfig{Enabled: true, Mode: "monitor"}
+		if h.mcpConfig != nil {
+			policy.MCP = *h.mcpConfig
+			policy.MCP.Enabled = true
+		}
 	}
 	if h.transparent {
 		// Interception mode `both` (#376): port-0 loopback listeners, so a

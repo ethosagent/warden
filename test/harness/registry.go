@@ -74,6 +74,7 @@ var Excluded = map[string]string{
 	"secrets.AWSSecretsClient":        "vendor SDK adapter behind secrets.SecretStore/Fetcher; package tests fake it, and the harness resolves secrets through the env SecretProvider",
 	"secrets.GCPSecretClient":         "vendor SDK adapter behind a Fetcher; package tests fake it, and the harness resolves secrets through the env SecretProvider",
 	"controlplane.PolicyVersionStore": "the control plane's own versioned policy store on the cpstate SQLite DB; the harness runs the real one (--policy-store=versioned), a fake would hide the compare-and-swap and transaction behaviour",
+	"dashboard.BlockListStore":        "the dashboard's view of the control plane's own block list on the cpstate SQLite DB (controlplane.BlockStore); the harness runs the real one, a fake would hide the limits and uniqueness the store enforces",
 	"worker.ControlPlaneClient":       "the worker's view of the control plane; the harness runs the real control plane (*config.RemoteProvider) rather than a fake",
 }
 

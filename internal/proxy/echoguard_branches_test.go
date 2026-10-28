@@ -239,7 +239,7 @@ type urlGW struct {
 	verdict gateway.Verdict
 }
 
-func (g *urlGW) OnRequest(string, string, string, http.Header, []byte) gateway.Verdict {
+func (g *urlGW) OnRequest(string, string, string, http.Header, []byte, gateway.RequestMeta) gateway.Verdict {
 	return gateway.Verdict{Action: gateway.Pass, Tool: "t"}
 }
 
