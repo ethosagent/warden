@@ -35,7 +35,16 @@ type headerBackend struct {
 	// as the response body.
 	trailer http.Header
 	echo    string
-	srv     *httptest.Server
+	// reqs counts the requests the handler served.
+	reqs int
+	srv  *httptest.Server
+}
+
+// requests returns how many requests reached the backend.
+func (b *headerBackend) requests() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.reqs
 }
 
 func newHeaderBackend(t *testing.T, grpc bool) *headerBackend {
@@ -45,6 +54,7 @@ func newHeaderBackend(t *testing.T, grpc bool) *headerBackend {
 		_, _ = io.Copy(io.Discard, r.Body)
 		b.mu.Lock()
 		b.got = r.Header.Clone()
+		b.reqs++
 		b.trailer = r.Trailer.Clone()
 		b.mu.Unlock()
 		if grpc {
