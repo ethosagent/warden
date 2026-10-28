@@ -290,6 +290,12 @@ func (p *Proxy) handleConn(conn net.Conn) {
 	// here; one with a token is bounded by identityVerifyTimeout.
 	ci := p.resolveConnIdentity(proxyAuthLines, proxyAuth)
 
+	// A blocked user is refused before the policy check, any dial and the 200,
+	// on both the TLS-terminating and the raw-tunnel path.
+	if p.connectBlocked(conn, ci, domain, port) {
+		return
+	}
+
 	// Destination-only evaluation (#371): no method/path exists yet at CONNECT,
 	// so constraints could-match here and the rate limit is peeked, not
 	// consumed. The per-request check on the terminated tunnel is authoritative
@@ -456,10 +462,17 @@ func (p *Proxy) storeAllow(ci connIdentity, domain string, port int, protocol st
 // failure is not a policy decision: it keeps the allow audit the CONNECT has
 // always gotten, unchanged from before #391.
 //
-// The connection's identity is accepted but unused here: a raw tunnel is opaque
-// and records no per-request identity (stamping events is W-P1-VRFY-09).
+// A raw tunnel is opaque and records no per-request identity (stamping events
+// is W-P1-VRFY-09); the CONNECT identity only registers it for a block-list cut.
 func (p *Proxy) tunnel(client net.Conn, br *bufio.Reader, domain string, port int, ci connIdentity, until time.Time) {
 	p.reach(PathTunnel)
+	// Only an attributed tunnel registers: an anonymous one costs nothing here.
+	var sess *session
+	if ci.Claims.Sub != "" || ci.Claims.Email != "" {
+		sess = p.sessions.newSession("tcp", domain, port, true, client)
+		sess.bind(ci)
+		defer sess.release()
+	}
 	remote, err := p.dialFunc("tcp", net.JoinHostPort(domain, fmt.Sprintf("%d", port)))
 	if err != nil {
 		if !p.storeSSRFDeny(ci, domain, port, "tcp", err) {
@@ -468,6 +481,7 @@ func (p *Proxy) tunnel(client net.Conn, br *bufio.Reader, domain string, port in
 		return
 	}
 	p.storeAllow(ci, domain, port, "tcp")
+	sess.addCloser(remote)
 
 	// A tunnel admitted through a scoped entry cannot be re-checked per request,
 	// so it lives only as long as the token: both ends are cut at until. A
