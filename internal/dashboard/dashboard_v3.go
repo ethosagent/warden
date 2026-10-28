@@ -47,6 +47,14 @@ func (s *Server) SetAuthMode(mode string) {
 	s.authMode = mode
 }
 
+// SetBackupStatus supplies the scheduled-backup status that /dashboard/api/setup
+// reports as backup. fn runs per request and returns nil to omit the field
+// (backups off, or a caller that is not an admin). Only the control plane sets
+// it.
+func (s *Server) SetBackupStatus(fn func(*http.Request) *BackupStatus) {
+	s.backupFn = fn
+}
+
 // SetAlerts supplies the integration Alert lister for the alerts endpoint. Set
 // only where an alert store exists (the control plane); leaving it nil (a worker
 // with no integrations) makes the endpoint return []. limit bounds the rows.
@@ -511,6 +519,19 @@ type setupResponse struct {
 	// plane through SetAuthMode; absent on a worker's dashboard. The UI shows a
 	// persistent banner when it is none.
 	AuthMode string `json:"authMode,omitempty"`
+	// Backup is the scheduled-backup status, present only when the control plane
+	// runs backups and the caller is an admin.
+	Backup *BackupStatus `json:"backup,omitempty"`
+}
+
+// BackupStatus is the value-free state of the control plane's scheduled backups.
+// Times are RFC3339 UTC strings, empty when there has been no success yet.
+type BackupStatus struct {
+	Enabled       bool   `json:"enabled"`
+	LastSuccessAt string `json:"lastSuccessAt"`
+	LastError     string `json:"lastError"`
+	LastSet       string `json:"lastSet"`
+	SizeBytes     int64  `json:"sizeBytes"`
 }
 
 // handleSetup serves GET /dashboard/api/setup: onboarding status computed from
@@ -521,6 +542,9 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := setupResponse{Mode: s.setupMode(), AuthMode: s.authMode}
+	if s.backupFn != nil {
+		resp.Backup = s.backupFn(r)
+	}
 
 	// workersConnected: the fleet registry size when set (control plane); on a
 	// single node the dashboard is itself serving, so report 1.
