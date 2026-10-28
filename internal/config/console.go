@@ -84,6 +84,32 @@ type ConsoleConfig struct {
 	// control plane (default empty). Only a peer inside one of them may set the
 	// client address the admin audit log records, through X-Forwarded-For.
 	TrustedProxies []string
+	// BreakGlass is the emergency local admin login for when the IdP is down
+	// (default off). CP-local like the rest of this block.
+	BreakGlass ConsoleBreakGlass
+}
+
+// Break-glass bounds. SessionTTL defaults to DefaultBreakGlassSessionTTL and
+// must be in (0, MaxBreakGlassSessionTTL]; Username is capped in bytes.
+const (
+	DefaultBreakGlassSessionTTL = time.Hour
+	MaxBreakGlassSessionTTL     = 4 * time.Hour
+	MaxBreakGlassUsernameBytes  = 128
+)
+
+// ConsoleBreakGlass is the `console.breakGlass` sub-block. It holds the NAME of
+// the env var or file that carries the password hash, never the hash itself.
+// Exactly one of PasswordHashEnv and PasswordHashFile is set when Enabled.
+type ConsoleBreakGlass struct {
+	Enabled          bool
+	Username         string
+	PasswordHashEnv  string
+	PasswordHashFile string
+	// SessionTTL is the lifetime of a break-glass session (default 1h, max 4h).
+	SessionTTL time.Duration
+	// AllowBehindTLSTerminator acknowledges that TLS ends at a proxy in front of
+	// the control plane (consumed by the startup guards, not by config checks).
+	AllowBehindTLSTerminator bool
 }
 
 // ConsoleAdminAudit is the `console.adminAudit` sub-block. Enabled (default
@@ -176,6 +202,14 @@ type rawConsole struct {
 		Enabled bool `yaml:"enabled"`
 	} `yaml:"adminAudit"`
 	TrustedProxies []string `yaml:"trustedProxies"`
+	BreakGlass     struct {
+		Enabled                  bool   `yaml:"enabled"`
+		Username                 string `yaml:"username"`
+		PasswordHashEnv          string `yaml:"passwordHashEnv"`
+		PasswordHashFile         string `yaml:"passwordHashFile"`
+		SessionTTL               string `yaml:"sessionTTL"`
+		AllowBehindTLSTerminator bool   `yaml:"allowBehindTLSTerminator"`
+	} `yaml:"breakGlass"`
 }
 
 // parseConsole converts the raw block and applies defaults. An absent block is
@@ -187,6 +221,7 @@ func parseConsole(r *rawConsole) (ConsoleConfig, error) {
 		Session: ConsoleSession{
 			Idle: DefaultConsoleIdle, Absolute: DefaultConsoleAbsolute,
 		},
+		BreakGlass: ConsoleBreakGlass{SessionTTL: DefaultBreakGlassSessionTTL},
 	}
 	if r == nil {
 		return c, nil
@@ -224,13 +259,54 @@ func parseConsole(r *rawConsole) (ConsoleConfig, error) {
 	for _, p := range r.TrustedProxies {
 		c.TrustedProxies = append(c.TrustedProxies, strings.TrimSpace(p))
 	}
+	bg := r.BreakGlass
+	c.BreakGlass.Enabled = bg.Enabled
+	c.BreakGlass.Username = strings.TrimSpace(bg.Username)
+	c.BreakGlass.PasswordHashEnv = strings.TrimSpace(bg.PasswordHashEnv)
+	c.BreakGlass.PasswordHashFile = strings.TrimSpace(bg.PasswordHashFile)
+	c.BreakGlass.AllowBehindTLSTerminator = bg.AllowBehindTLSTerminator
+	if s := strings.TrimSpace(bg.SessionTTL); s != "" {
+		d, err := time.ParseDuration(s)
+		if err != nil {
+			return ConsoleConfig{}, fmt.Errorf("config: console.breakGlass.sessionTTL %q is not a valid duration: %w", s, err)
+		}
+		c.BreakGlass.SessionTTL = d
+	}
 	return c, nil
+}
+
+// validateBreakGlass checks console.breakGlass when it is enabled. Errors name
+// the key and never carry a hash or password; it does not read any secret.
+func validateBreakGlass(c ConsoleConfig) error {
+	b := c.BreakGlass
+	if !b.Enabled {
+		return nil
+	}
+	if c.Auth != ConsoleAuthOIDC {
+		return fmt.Errorf("config: console.breakGlass.enabled: requires console.auth %q", ConsoleAuthOIDC)
+	}
+	if b.Username == "" {
+		return fmt.Errorf("config: console.breakGlass.username: must not be empty")
+	}
+	if len(b.Username) > MaxBreakGlassUsernameBytes {
+		return fmt.Errorf("config: console.breakGlass.username: must be at most %d bytes", MaxBreakGlassUsernameBytes)
+	}
+	if (b.PasswordHashEnv == "") == (b.PasswordHashFile == "") {
+		return fmt.Errorf("config: console.breakGlass.passwordHashEnv: set exactly one of passwordHashEnv and passwordHashFile")
+	}
+	if b.SessionTTL <= 0 || b.SessionTTL > MaxBreakGlassSessionTTL {
+		return fmt.Errorf("config: console.breakGlass.sessionTTL: must be > 0 and at most %s", MaxBreakGlassSessionTTL)
+	}
+	return nil
 }
 
 // validateConsole enforces the console block's invariants at startup. The oidc
 // rules apply only when Auth is oidc; the auth value itself is always checked.
 func validateConsole(c ConsoleConfig) error {
 	if err := validateTrustedProxies(c.TrustedProxies); err != nil {
+		return err
+	}
+	if err := validateBreakGlass(c); err != nil {
 		return err
 	}
 	switch c.Auth {

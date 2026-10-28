@@ -116,8 +116,9 @@ func newControlPlaneCmd() *cobra.Command {
 	cmd.Flags().Duration("backup-interval", controlplane.DefaultBackupInterval, "time between scheduled backups (minimum 1h)")
 	cmd.Flags().Int("backup-keep", controlplane.DefaultBackupKeep, "complete backup sets to keep (minimum 1)")
 	cmd.Flags().StringSlice("backup-include", controlplane.DefaultBackupInclude, "what a backup set contains, from cp,alerts,config,fleet (fleet is opt-in)")
-	// Offline subcommands over the CP state dir (admin-audit is read-only; backup
-	// takes the state-dir lock and writes only under --backup-dir).
-	cmd.AddCommand(newAdminAuditCmd(), newBackupCmd(), newControlPlaneTokenCmd(), newControlPlaneBlockCmd())
+	// Offline subcommands (admin-audit is read-only over the CP state dir; backup
+	// takes the state-dir lock and writes only under --backup-dir; hash-password
+	// touches no state).
+	cmd.AddCommand(newAdminAuditCmd(), newHashPasswordCmd(), newBackupCmd(), newControlPlaneTokenCmd(), newControlPlaneBlockCmd())
 	return cmd
 }

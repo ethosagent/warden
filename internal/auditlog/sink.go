@@ -63,7 +63,22 @@ type Option func(*Sink)
 // It has no effect on the file output.
 func WithWriter(w io.Writer) Option { return func(s *Sink) { s.override = w } }
 
-// Sink turns tee'd analytics batches into warden.decision.v1 lines. Observe runs
+// batch is one queue entry: a tee'd batch of decision records, or one admin
+// record (never both).
+type batch struct {
+	recs  []Record
+	admin *AdminRecord
+}
+
+func (b batch) size() int {
+	if b.admin != nil {
+		return 1
+	}
+	return len(b.recs)
+}
+
+// Sink turns tee'd analytics batches into warden.decision.v1 lines and, on the
+// control plane, admin rows into warden.admin.v1 lines through the same queue. Observe runs
 // on the async analytics writer's goroutine: it converts the batch, assigns seq
 // and hands it to a bounded channel WITHOUT blocking; one writer goroutine
 // marshals and writes. The stream is best effort: a full queue drops the whole
@@ -80,7 +95,7 @@ type Sink struct {
 	// mu orders Observe's send against Close's channel close.
 	mu     sync.RWMutex
 	closed bool
-	ch     chan []Record
+	ch     chan batch
 
 	abort     chan struct{} // closed when Close's context ends before the drain
 	abortOnce sync.Once
@@ -90,8 +105,9 @@ type Sink struct {
 	closer io.Closer // lumberjack, nil for stdout/stderr
 	bw     *bufio.Writer
 
-	pending  int          // lines buffered since the last successful flush
-	lastWarn atomic.Int64 // unix nanos of the last write-error WARN
+	pendingDecision int          // decision lines buffered since the last successful flush
+	pendingAdmin    int          // admin lines buffered since the last successful flush
+	lastWarn        atomic.Int64 // unix nanos of the last write-error WARN
 }
 
 // New opens the output and starts the writer goroutine. A file path that cannot
@@ -107,7 +123,7 @@ func New(cfg config.JSONLogConfig, meta Meta, m Metrics, logger *slog.Logger, op
 		meta:    meta,
 		metrics: m,
 		logger:  logger,
-		ch:      make(chan []Record, queueBatches),
+		ch:      make(chan batch, queueBatches),
 		abort:   make(chan struct{}),
 		done:    make(chan struct{}),
 	}
@@ -208,9 +224,33 @@ func (s *Sink) Observe(evs []analytics.Event) {
 		return
 	}
 	select {
-	case s.ch <- recs:
+	case s.ch <- batch{recs: recs}:
 	default:
 		s.metrics.RecordAuditLogDropped(len(recs))
+	}
+}
+
+// WriteAdmin queues one warden.admin.v1 line. It shares the queue, caps, line
+// limit and metrics of Observe (the schema label separates the streams) and
+// never blocks or fails the caller: a full or closed queue drops the line and
+// counts it. seq comes from the same per-boot counter as decision lines; a
+// gap shows a dropped line.
+func (s *Sink) WriteAdmin(rec AdminRecord) {
+	if s == nil {
+		return
+	}
+	rec = rec.bounded(s.meta)
+	rec.Seq = s.seq.Add(1)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.closed {
+		s.metrics.RecordAuditLogDropped(1)
+		return
+	}
+	select {
+	case s.ch <- batch{admin: &rec}:
+	default:
+		s.metrics.RecordAuditLogDropped(1)
 	}
 }
 
@@ -249,26 +289,37 @@ func (s *Sink) run() {
 			}
 		}
 	}()
-	for recs := range s.ch {
+	for b := range s.ch {
 		select {
 		case <-s.abort:
-			s.metrics.RecordAuditLogDropped(len(recs))
+			s.metrics.RecordAuditLogDropped(b.size())
 			continue
 		default:
 		}
-		for i := range recs {
-			s.writeRecord(recs[i])
+		if b.admin != nil {
+			if s.writeLine(b.admin) {
+				s.pendingAdmin++
+			}
+		}
+		for i := range b.recs {
+			if s.writeLine(b.recs[i]) {
+				s.pendingDecision++
+			}
 		}
 		s.flush()
 	}
 }
 
-// writeRecord marshals one record and writes it with a single Write call.
-func (s *Sink) writeRecord(r Record) {
+// lineMarshaler is a record the sink can write: Record or *AdminRecord.
+type lineMarshaler interface{ MarshalLine() ([]byte, error) }
+
+// writeLine marshals one record and writes it with a single Write call. It
+// reports whether the line reached the buffer.
+func (s *Sink) writeLine(r lineMarshaler) bool {
 	line, err := r.MarshalLine()
 	if err != nil {
 		s.recordError(reasonMarshal)
-		return
+		return false
 	}
 	// Flush first when the line would straddle the buffer, so the underlying
 	// output never sees half a line.
@@ -278,22 +329,25 @@ func (s *Sink) writeRecord(r Record) {
 	if _, err := s.bw.Write(line); err != nil {
 		s.recordError(reasonWrite)
 		s.bw.Reset(s.out) // bufio errors are sticky; start clean for the next line
-		return
+		return false
 	}
-	s.pending++
+	return true
 }
 
 // flush pushes the buffer to the output and credits the lines it carried.
 func (s *Sink) flush() {
-	n := s.pending
-	s.pending = 0
+	nDecision, nAdmin := s.pendingDecision, s.pendingAdmin
+	s.pendingDecision, s.pendingAdmin = 0, 0
 	if err := s.bw.Flush(); err != nil {
 		s.recordError(reasonFlush)
 		s.bw.Reset(s.out)
 		return
 	}
-	for i := 0; i < n; i++ {
+	for i := 0; i < nDecision; i++ {
 		s.metrics.RecordAuditLogLine(SchemaDecisionV1)
+	}
+	for i := 0; i < nAdmin; i++ {
+		s.metrics.RecordAuditLogLine(SchemaAdminV1)
 	}
 }
 
@@ -308,6 +362,6 @@ func (s *Sink) recordError(reason string) {
 		return
 	}
 	if s.lastWarn.CompareAndSwap(last, now) {
-		s.logger.Warn("audit JSON decision stream write failed; lines are being lost (SQLite remains the record)", "reason", reason)
+		s.logger.Warn("audit JSON stream write failed; lines are being lost (SQLite remains the record)", "reason", reason)
 	}
 }
