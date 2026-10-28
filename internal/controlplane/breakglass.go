@@ -162,7 +162,7 @@ func (s *Server) handleBreakGlass(w http.ResponseWriter, r *http.Request) {
 		phc = DummyPHC()
 	}
 	passOK := bg.verify(phc, req.Password)
-	if !(match && passOK) {
+	if !match || !passOK {
 		bg.limiter.fail(ip)
 		_ = s.recordBreakGlass(r, adminaudit.OutcomeDenied, http.StatusUnauthorized, actor, "", nil)
 		authError(w, http.StatusUnauthorized, "invalid_credentials")
