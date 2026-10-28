@@ -122,6 +122,8 @@ Every recipe also runs a **control-plane** that serves policy and aggregates the
 
 **Per-user identity.** To record which user each agent request was made for, a harness sends the user's OIDC ID token to the worker. The **[agent identity contract](docs/identity-contract.md)** says exactly what token to send, how to send it (`Proxy-Authorization` on CONNECT, or `warden identity exec`), what the worker records, and what a harness must never do.
 
+**Group-scoped policy.** An allow entry or an MCP tool `allowWhen` can be limited to IdP `groups` or named `users`; a non-member, or a request with no verified identity, is denied and never sent to the judge. Rules, fail-closed cases, deny reasons, `policy eval` replay and metrics: **[docs/group-policy.md](docs/group-policy.md)**.
+
 #### How a recipe works
 
 Each recipe puts the agent on a Docker `internal: true` network — its only egress
