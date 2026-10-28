@@ -96,6 +96,9 @@ var All = slices.Concat(
 		// another process reaches the served policy (sub/email only) and leaves on
 		// removal. In-process only (it writes the CP state dir).
 		{Name: "block_list_served", Opts: blockListOpts(), Run: blockListServed},
+		// Block-list admin API (W-P1-BLOCK-11).
+		{Name: "block_api_bearer", Opts: blockAPIBearerOpts(), Run: blockAPIBearer},
+		{Name: "block_api_roles", Opts: blockAPIOIDCOpts(), Run: blockAPIRoles},
 		// Versioned publish (W-P1-PVER-02): dashboard policy and llmProviders
 		// saves create versions authored anonymous that workers enforce.
 		// In-process only (it reads the CP state dir).
