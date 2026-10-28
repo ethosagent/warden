@@ -27,7 +27,7 @@ warden control-plane --config /etc/warden/config.yaml --state-dir /data \
 A set is written at startup when none is newer than the interval, then every
 `--backup-interval` after the newest set, so a control plane that restarts nightly
 still backs up. A flag error names the flag (`--backup-dir requires --state-dir`,
-`--backup-interval 30m is too short: the minimum is 1h`, and so on). In the compose
+`--backup-interval 30m0s is too short: the minimum is 1h`, and so on). In the compose
 recipe the volume `cp-backups` is mounted at `/backups` and the flags are commented
 in `deploy/compose/docker-compose.control-plane.yml`; uncomment them and give the
 volume to the image user once (the comment shows the command).

@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
-	"github.com/spf13/pflag"
 	"gopkg.in/yaml.v3"
 
 	"github.com/ethosagent/warden/internal/config"
@@ -167,16 +166,17 @@ var (
 	dottedKey  = regexp.MustCompile(`^[a-z][A-Za-z0-9]*(\.[A-Za-z][A-Za-z0-9]*)+$`)
 )
 
-// allFlags collects the flag names of cmd and every command below it.
-func allFlags(cmd *cobra.Command, into map[string]bool) {
-	add := func(fs *pflag.FlagSet) {
-		fs.VisitAll(func(f *pflag.Flag) { into[f.Name] = true })
+// hasFlag reports whether cmd or any command below it has the long flag name.
+func hasFlag(cmd *cobra.Command, name string) bool {
+	if cmd.Flags().Lookup(name) != nil || cmd.PersistentFlags().Lookup(name) != nil {
+		return true
 	}
-	add(cmd.Flags())
-	add(cmd.PersistentFlags())
 	for _, c := range cmd.Commands() {
-		allFlags(c, into)
+		if hasFlag(c, name) {
+			return true
+		}
 	}
+	return false
 }
 
 // configKeyKnown reports whether the dotted key names a field of the config
@@ -206,17 +206,14 @@ func configKeyKnown(t testing.TB, key string) bool {
 func TestProductionReadinessKeysExist(t *testing.T) {
 	doc := readDoc(t, readinessDoc)
 
-	flags := map[string]bool{}
-	allFlags(newControlPlaneCmd(), flags)
-	allFlags(newRunCmd(), flags)
-	flags["config"] = true // the root's persistent --config
+	cp, run := newControlPlaneCmd(), newRunCmd()
 
 	var nFlags, nKeys int
 	for _, m := range backtickRe.FindAllStringSubmatch(doc, -1) {
 		tok := strings.TrimSpace(m[1])
 		if f := strings.SplitN(tok, "=", 2)[0]; longFlagRe.MatchString(f) {
 			nFlags++
-			if !flags[strings.TrimPrefix(f, "--")] {
+			if name := strings.TrimPrefix(f, "--"); !hasFlag(cp, name) && !hasFlag(run, name) && name != "config" { // config: the root's persistent flag
 				t.Errorf("%s names flag %s, which is on neither the control-plane nor the run command", readinessDoc, f)
 			}
 			continue
