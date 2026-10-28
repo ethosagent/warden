@@ -188,7 +188,7 @@ func breakGlassLogLines(t testing.TB, cp string) []string {
 	return out
 }
 
-// policyETag GETs /policy with the shared bearer and returns its ETag.
+// policyETag GETs /policy with worker-1's token and returns its ETag.
 func policyETag(t testing.TB) string {
 	t.Helper()
 	c, err := newBrowser()

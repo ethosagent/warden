@@ -194,3 +194,37 @@ func TestStoreReopenPersistence(t *testing.T) {
 		t.Errorf("persisted severity = %v, want high", got.Severity)
 	}
 }
+
+// A second opener holding the write lock briefly must not make UpsertAlert
+// fail with SQLITE_BUSY (the alert would be lost): the store waits for it.
+func TestStore_UpsertWaitsForAnotherWriter(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "alerts.db")
+	s, err := NewStore(path)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	other, err := NewStore(path)
+	if err != nil {
+		t.Fatalf("NewStore (second opener): %v", err)
+	}
+	t.Cleanup(func() { _ = other.Close() })
+
+	tx, err := other.db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`DELETE FROM dead_letters WHERE id = -1`); err != nil {
+		t.Fatal(err)
+	}
+	released := make(chan struct{})
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		_ = tx.Commit()
+		close(released)
+	}()
+	if _, err := s.UpsertAlert(sampleAlert("a1", "k1", SevHigh, time.Unix(1_700_000_000, 0))); err != nil {
+		t.Fatalf("UpsertAlert while another connection held the write lock: %v", err)
+	}
+	<-released
+}

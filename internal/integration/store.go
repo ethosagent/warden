@@ -22,6 +22,10 @@ type Store struct {
 	closeErr  error
 }
 
+// storeBusyTimeout is how long a statement waits for another connection's
+// lock on the alert database before failing with SQLITE_BUSY.
+const storeBusyTimeout = 5 * time.Second
+
 // NewStore opens (or creates) a SQLite database at dbPath and migrates the
 // schema. Use a temp-file path in tests (not ":memory:", which is not shared
 // across connections).
@@ -33,6 +37,13 @@ func NewStore(dbPath string) (*Store, error) {
 	// A single connection is sufficient for the alert pipeline and avoids
 	// cross-connection visibility surprises.
 	db.SetMaxOpenConns(1)
+	// Another opener of the same file (the backup runner, an offline CLI, a
+	// test harness reading alerts) can hold the write lock briefly: wait for
+	// it rather than fail an alert upsert with SQLITE_BUSY and lose the alert.
+	if _, err := db.Exec(fmt.Sprintf(`PRAGMA busy_timeout = %d`, storeBusyTimeout.Milliseconds())); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("integration: busy_timeout: %w", err)
+	}
 	s := &Store{db: db}
 	if err := s.migrate(); err != nil {
 		_ = db.Close()

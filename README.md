@@ -120,6 +120,8 @@ WARDEN_VERSION=0.3.0 docker compose -f deploy/compose/docker-compose.ethos.yml u
 
 Every recipe also runs a **control-plane** that serves policy and aggregates the agent's traffic into a fleet dashboard at **https://localhost:7070/dashboard/** (served with the proxy CA — trust it). Full per-recipe details (ports, the Node `fetch` proxy workaround, and how to prove isolation) are in **[docs/recipes/](docs/recipes/)**.
 
+**Going to production.** The **[production readiness checklist](docs/production-readiness.md)** lists every flag and config key to set (TLS, per-worker tokens, console SSO and roles, signed admin audit, backups, break-glass) and how to check each one. The two runbooks cover the emergencies: **[break-glass console login](docs/runbooks/break-glass.md)** for when Dex is down, and **[backup and restore](docs/runbooks/backup-restore.md)**.
+
 **Per-user identity.** To record which user each agent request was made for, a harness sends the user's OIDC ID token to the worker. The **[agent identity contract](docs/identity-contract.md)** says exactly what token to send, how to send it (`Proxy-Authorization` on CONNECT, or `warden identity exec`), what the worker records, and what a harness must never do. To run the identity provider (Dex: clients, connectors, issuer rules, failure modes, production checklist), see the **[Dex operator guide](docs/identity-dex.md)**.
 
 **Group-scoped policy.** An allow entry or an MCP tool `allowWhen` can be limited to IdP `groups` or named `users`; a non-member, or a request with no verified identity, is denied and never sent to the judge. Rules, fail-closed cases, deny reasons, `policy eval` replay and metrics: **[docs/group-policy.md](docs/group-policy.md)**.

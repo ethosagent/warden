@@ -11,6 +11,9 @@ They are **separate processes that only ever talk over HTTPS**, so you can run
 them together on one host today and split the control plane onto its own host
 later by *moving a service* — no code change.
 
+Before a control plane serves real traffic, work through the [production readiness
+checklist](production-readiness.md).
+
 ```
                  ┌──────────────────────────────┐
    GET /policy   │      warden control-plane     │   POST /central/ingest
@@ -616,6 +619,9 @@ failures. With admin audit on, a row that cannot be written fails the login clos
 audit_unavailable`). The limiter is in memory: its windows reset when the control plane
 restarts. The password and the submitted username are never stored or logged.
 
+The step-by-step procedure (generate the hash, log in during a Dex outage, rotate it
+afterwards) is the [break-glass runbook](runbooks/break-glass.md).
+
 Enabling break-glass is guarded at startup. The control plane refuses to start when
 `--state-dir` is empty, when the hash does not load or is outside the argon2id bounds (the
 error names `console.breakGlass.passwordHashEnv` or `passwordHashFile`, never the value),
@@ -985,6 +991,9 @@ due backup. `--backup-keep` (default 7, minimum 1) newest complete sets are
 kept; `--backup-include` picks from `cp`, `alerts`, `config` and `fleet`
 (default `cp,alerts,config`; `fleet` is opt-in).
 
+The drill (copy sets off host, `warden control-plane restore`, re-applying what
+happened after the set) is the [backup and restore runbook](runbooks/backup-restore.md).
+
 Each set is a directory named `<UTC time>Z` (`20060102T150405Z`) holding a
 consistent copy of each database (`warden-cp.db`, `warden-alerts.db`,
 `warden-fleet.db`), the served `config.yaml` and a `manifest.json` written last.
@@ -1014,6 +1023,7 @@ no alert pipeline the Finding is logged at ERROR as `finding_not_published`.
 `lastError`, `lastSet`, `sizeBytes`) for an admin session, or for any caller when
 `console.auth` is `none`. Viewers and editors never see it, and it is absent when
 `--backup-dir` is unset. The dashboard header shows a green or red badge from it.
+
 ### On-demand backups
 
 With `--backup-dir` set, `POST /dashboard/api/backup` (admin role, audited as
