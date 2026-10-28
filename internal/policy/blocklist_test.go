@@ -139,3 +139,14 @@ func BenchmarkIsBlocked(b *testing.B) {
 		_ = e.IsBlocked("sub-x", "x@corp.com")
 	}
 }
+
+func TestBlockedCount(t *testing.T) {
+	e := NewEvaluator(config.Policy{BlockedUsers: []config.BlockedUser{{Sub: "u1"}, {Email: "A@b.com"}, {Sub: "u2", Email: "u2@b.com"}, {}}})
+	if got := e.BlockedCount(); got != 3 {
+		t.Errorf("BlockedCount = %d, want 3 (users with a sub or an email)", got)
+	}
+	e.Replace(config.Policy{})
+	if got := e.BlockedCount(); got != 0 {
+		t.Errorf("after Replace: BlockedCount = %d, want 0", got)
+	}
+}

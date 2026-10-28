@@ -258,6 +258,10 @@ type MetricsRecorder interface {
 	RecordJudge(outcome string)
 	ObserveAddedLatency(stage string, d time.Duration)
 	RecordIdentityVerify(result, reason string)
+	// RecordBlocklistEntries sets the block-list size gauge; RecordBlocklistSessionsClosed
+	// adds to the closed-sessions counter. Neither carries identity.
+	RecordBlocklistEntries(n int)
+	RecordBlocklistSessionsClosed(n int)
 	// RecordScoped counts a decision that depended on the request subject
 	// (result: allow|not_member|no_identity). No user or group label.
 	RecordScoped(result string)
@@ -282,6 +286,8 @@ func (nopMetrics) RecordScanFinding(kind string)                     {}
 func (nopMetrics) RecordJudge(outcome string)                        {}
 func (nopMetrics) ObserveAddedLatency(stage string, d time.Duration) {}
 func (nopMetrics) RecordIdentityVerify(result, reason string)        {}
+func (nopMetrics) RecordBlocklistEntries(n int)                      {}
+func (nopMetrics) RecordBlocklistSessionsClosed(n int)               {}
 func (nopMetrics) RecordScoped(result string)                        {}
 
 // Judge renders an allow/deny verdict for a request that matched no static
@@ -410,6 +416,9 @@ type Proxy struct {
 	// is process-wide (not per-connection) so a degraded control is visible
 	// without log spam.
 	wsDowngradeOnce sync.Once
+
+	// sessions is the open-session registry CloseBlockedSessions cuts from.
+	sessions *sessionRegistry
 	// mcpModeUnknownOnce guards a single WARN when a scanning gateway does not
 	// report its mode and Warden holds its traffic (fail safe).
 	mcpModeUnknownOnce sync.Once
@@ -563,7 +572,7 @@ func New(cfg Config) (*Proxy, error) {
 	if err != nil {
 		return nil, err
 	}
-	p := &Proxy{cfg: cfg, scopes: scopes}
+	p := &Proxy{cfg: cfg, scopes: scopes, sessions: newSessionRegistry()}
 	// Seed the swappable gateway from the configured one so an unmanaged worker's
 	// behavior is unchanged; a managed worker's long-poll apply loop replaces it.
 	// cfg.MCP may be an untyped-nil interface (MCP disabled) — wrapped in the
