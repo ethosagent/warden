@@ -297,3 +297,29 @@ func TestStdioPumpNilSubject(t *testing.T) {
 		}
 	}
 }
+
+// A stdio session has no verified identity, so a tool gated to a group is
+// denied while an ungated one passes (W-P1-GPOL-11).
+func TestMCPGroupCondition_StdioDenies(t *testing.T) {
+	cfg := config.MCPConfig{
+		Enabled: true,
+		Mode:    "enforce",
+		Tools: config.MCPToolsConfig{
+			Allow:       []string{"safe_tool", "pay"},
+			Constraints: map[string]config.MCPToolConstraints{"pay": {AllowWhen: &config.MCPToolCondition{Groups: []string{"finance"}}}},
+		},
+	}
+	p := &Pump{GW: gateway.New(cfg, scan.NewScanner(), nil), SessionKey: "stdio"}
+	in := string(callLine(t, 1, "pay")) + "\n" + string(callLine(t, 2, "safe_tool")) + "\n"
+
+	var serverIn, clientOut bytes.Buffer
+	if err := p.PumpRequests(strings.NewReader(in), &serverIn, &clientOut); err != nil {
+		t.Fatalf("PumpRequests: %v", err)
+	}
+	if strings.Contains(serverIn.String(), `"pay"`) || !strings.Contains(serverIn.String(), "safe_tool") {
+		t.Errorf("serverIn = %q: want only safe_tool forwarded", serverIn.String())
+	}
+	if !strings.Contains(clientOut.String(), `"id":1`) {
+		t.Errorf("clientOut = %q: want a deny response for the gated call", clientOut.String())
+	}
+}

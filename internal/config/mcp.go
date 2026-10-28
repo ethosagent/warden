@@ -580,8 +580,8 @@ func validateToolConstraints(prefix string, cs map[string]MCPToolConstraints, ta
 }
 
 // validateAllowWhen validates one allowWhen condition. Groups/users are
-// normalized-checked and then rejected: on the tool policy until the gateway
-// enforces them (W-P1-GPOL-11 lifts that), and permanently in a task scope,
+// normalized-checked and accepted on the tool policy (the gateway matches them
+// against the request subject, W-P1-GPOL-11) but rejected in a task scope,
 // which has no per-user meaning. The agent id "!identity-scoped" is reserved
 // for the W-P1-GPOL-06 wire sentinel.
 func validateAllowWhen(path string, aw *MCPToolCondition, taskScope bool) error {
@@ -599,10 +599,8 @@ func validateAllowWhen(path string, aw *MCPToolCondition, taskScope bool) error 
 	if taskScope {
 		return fmt.Errorf("config: %s: groups/users are not supported in a task-scope allowWhen", path)
 	}
-	if _, _, err := normalizePrincipals(path, aw.Groups, aw.Users); err != nil {
-		return err
-	}
-	return rejectUnenforcedPrincipals(path, aw.Groups, aw.Users)
+	_, _, err := normalizePrincipals(path, aw.Groups, aw.Users)
+	return err
 }
 
 // validateScopes validates the task-scope block: unique non-empty ids, a valid

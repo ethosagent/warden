@@ -757,17 +757,6 @@ func TestConditionAgentIDMismatchDenies(t *testing.T) {
 	}
 }
 
-// A groups/users condition must never run as a global one: until the gateway
-// enforces principals it denies the tool (W-P1-GPOL-06 fail-closed merge).
-func TestConditionScopedDeniesUntilEnforced(t *testing.T) {
-	cfg := conditionCfg(modeEnforce, &config.MCPToolCondition{Groups: []string{"eng"}})
-	gw := newGWAgent(t, cfg, "ci-agent")
-	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "deploy", `{}`), RequestMeta{})
-	if v.Action != Deny || v.Reason != "mcp_tool_condition" {
-		t.Fatalf("scoped condition must Deny, got action=%v reason=%q findings=%v", v.Action, v.Reason, v.Findings)
-	}
-}
-
 // The wire sentinel served to workers that predate group policy denies every
 // agent (W-P1-GPOL-06).
 func TestConditionWireSentinelDenies(t *testing.T) {

@@ -89,22 +89,35 @@ func TestAllowlistGroupsAccepted(t *testing.T) {
 	}
 }
 
-// TestGuardStillRejectsOtherPaths: only the allow-entry guard was lifted.
+// TestGuardStillRejectsOtherPaths: the allow-entry and MCP tool allowWhen
+// guards were lifted; denylist and task-scope paths stay rejected.
 func TestGuardStillRejectsOtherPaths(t *testing.T) {
-	t.Run("mcp allowWhen", func(t *testing.T) { TestMCPAllowWhenGroupsRejectedUntilEnforced(t) })
 	t.Run("denylist", func(t *testing.T) { TestDenylistGroupsRejected(t) })
 	t.Run("task scope", func(t *testing.T) { TestScopeConstraintGroupsRejected(t) })
 }
 
 const mcpHead = "policy: { allowlist: [ { domain: a.com } ] }\nmcp:\n  enabled: true\n  mode: enforce\n"
 
-func TestMCPAllowWhenGroupsRejectedUntilEnforced(t *testing.T) {
-	for _, field := range []string{"groups: [eng]", "users: [u-1]"} {
+func TestMCPAllowWhenGroupsAccepted(t *testing.T) {
+	for _, field := range []string{"groups: [eng]", "users: [u-1]", "users: [Alice@Corp.Example]"} {
 		y := mcpHead + "  tools:\n    allow: [deploy]\n    constraints:\n      deploy:\n        allowWhen:\n          " + field + "\n"
-		err := loadErr(t, y)
-		if err == nil || !strings.Contains(err.Error(), `mcp.tools.constraints["deploy"].allowWhen`) || !strings.Contains(err.Error(), "not yet enforced") {
-			t.Errorf("%s: err = %v", field, err)
+		prov, err := NewLocalYAMLProvider(writeTemp(t, y))
+		if err != nil {
+			t.Fatalf("%s: %v", field, err)
 		}
+		pol, err := prov.GetPolicy()
+		if err != nil {
+			t.Fatal(err)
+		}
+		aw := pol.MCP.Tools.Constraints["deploy"].AllowWhen
+		if aw == nil || len(aw.Groups)+len(aw.Users) != 1 {
+			t.Errorf("%s: condition lost its principals: %+v", field, aw)
+		}
+	}
+	// Bad values still report their own path.
+	y := mcpHead + "  tools:\n    allow: [deploy]\n    constraints:\n      deploy:\n        allowWhen:\n          groups: ['']\n"
+	if err := loadErr(t, y); err == nil || !strings.Contains(err.Error(), `mcp.tools.constraints["deploy"].allowWhen`) {
+		t.Errorf("empty group: %v", err)
 	}
 }
 
