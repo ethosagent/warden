@@ -742,6 +742,7 @@ func (h *H) writeCPConfig() string {
 	}
 	b.WriteString(h.identityYAML())
 	b.WriteString(h.consoleYAML())
+	b.WriteString(h.fakeJudgeYAML())
 	path := filepath.Join(h.root, "cp-config.yaml")
 	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
 		h.tb.Fatalf("harness: write control-plane config: %v", err)

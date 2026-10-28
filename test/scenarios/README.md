@@ -80,8 +80,9 @@ The catalog is `identity_*` (`test/scenarios/identity.go`):
 `groups_*` (`test/scenarios/groups.go`) prove the group-aware policy end to end:
 `go test ./test/scenarios -race -run 'TestScenarios/groups_'`. Harness levers:
 `harness.WithFakeJudge()` points the inline judge at a counting loopback fake
-(`h.Judge().Calls()`), so a deny scenario can assert the judge was never
-consulted; `harness.WithScopedAllow(domain, groups...)` serves a
+(`h.Judge().Calls()`; also served through the control plane, since a managed
+worker's first settings apply replaces its boot judge), so a deny scenario can
+assert the judge was never consulted (`groupsJudgeLive` is the positive control); `harness.WithScopedAllow(domain, groups...)` serves a
 `{domain, groups}` entry from the control plane's boot YAML (the dashboard
 policy save, `savePolicy`, is the other way in); `harness.WithoutProxyCA()`
 boots a worker that cannot terminate TLS. MCP settings are applied on change,

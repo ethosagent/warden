@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -50,11 +51,40 @@ func (h *H) Judge() *FakeJudge {
 	return h.fakeJudge
 }
 
+// The judge needs a policy for its agent: with one agent configured the
+// worker's id is that agent's id.
+const (
+	fakeJudgeAgent  = "harness-agent"
+	fakeJudgePolicy = "Deny everything."
+)
+
+// fakeJudgeYAML is the judge and agents blocks the control plane distributes
+// (settings carry the key's env NAME only). The harness worker is always
+// control-plane managed, and its first settings apply replaces the boot-local
+// judge with what the control plane serves, so the judge must be served too.
+func (h *H) fakeJudgeYAML() string {
+	if h.fakeJudge == nil {
+		return ""
+	}
+	return fmt.Sprintf(`
+judge:
+  enabled: true
+  model: harness-judge
+  baseURL: %s
+  apiKeyEnv: %s
+  timeout: 1s
+agents:
+  - id: %s
+    policy: %q
+`, h.fakeJudge.URL(), judgeKeyEnv, fakeJudgeAgent, fakeJudgePolicy)
+}
+
 // applyFakeJudge points worker policy p's judge at the fake endpoint.
 func (h *H) applyFakeJudge(p *config.Policy) {
 	if h.fakeJudge == nil {
 		return
 	}
+	p.Agents = []config.AgentPolicy{{ID: fakeJudgeAgent, Policy: fakeJudgePolicy}}
 	p.Judge = config.JudgeConfig{
 		Enabled:   true,
 		Model:     "harness-judge",

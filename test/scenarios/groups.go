@@ -60,19 +60,16 @@ func groupsServe(t *testing.T, h *harness.H, scopedGroups ...string) {
 	})
 }
 
-// groupsNoLeak fails when any request an upstream received carried a header
-// that must stay on the agent side of the proxy.
-func groupsNoLeak(t *testing.T, ups ...*harness.Upstream) {
+// groupsClean is every scenario's last word: no upstream request carried an
+// identity header, the judge was never consulted, and no token (or a piece of
+// one) is in the logs, events, receipts, metrics or upstream recordings.
+func groupsClean(t *testing.T, h *harness.H, tokens []string, ups ...*harness.Upstream) {
 	t.Helper()
 	for _, u := range ups {
-		for i, r := range u.Requests() {
-			for _, hdr := range []string{"Proxy-Authorization", "X-Warden-Identity"} {
-				if v := r.Header.Get(hdr); v != "" {
-					t.Errorf("upstream request %d carried %s", i, hdr)
-				}
-			}
-		}
+		assertNoIdentityHeaders(t, u)
 	}
+	groupsJudgeIdle(t, h)
+	assertNoLeakOf(t, h, tokens, ups...)
 }
 
 // groupsJudgeIdle asserts the judge was never consulted: the endpoint received
@@ -90,6 +87,20 @@ func groupsJudgeIdle(t *testing.T, h *harness.H) {
 			}
 		}
 	}
+}
+
+// groupsJudgeLive is the positive control for groupsJudgeIdle: a request to a
+// destination no rule matches is judged, so the fake receives exactly one call
+// and the request is refused with the judge's reason. It proves the judge is
+// wired after the scenario's control-plane change, so a zero elsewhere means
+// "not consulted" and not "not there". Call it last: it adds a judge call.
+func groupsJudgeLive(t *testing.T, h *harness.H) {
+	t.Helper()
+	before := h.Judge().Calls()
+	if got := getStatus(t, h.Agent(), "unlisted.example.com", ""); got != http.StatusForbidden {
+		t.Fatalf("unlisted destination = %d, want 403 from the judge", got)
+	}
+	h.Eventually("the judge fake receives the unlisted request", func() bool { return h.Judge().Calls() == before+1 })
 }
 
 // groupsDenyEvents counts deny events on host with reason, with the identity
@@ -148,26 +159,8 @@ type groupsTunnel struct {
 // the CONNECT reply. With a 200 the caller owns the connection.
 func groupsConnect(t *testing.T, h *harness.H, host, proxyAuth string) (*groupsTunnel, int) {
 	t.Helper()
-	conn, err := net.DialTimeout("tcp", h.ProxyAddr(), 5*time.Second)
-	if err != nil {
-		t.Fatalf("dial the worker proxy: %v", err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
-	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
-	req := fmt.Sprintf("CONNECT %s:443 HTTP/1.1\r\nHost: %s:443\r\n", host, host)
-	if proxyAuth != "" {
-		req += "Proxy-Authorization: " + proxyAuth + "\r\n"
-	}
-	if _, err := io.WriteString(conn, req+"\r\n"); err != nil {
-		t.Fatalf("send CONNECT %s: %v", host, err)
-	}
-	br := bufio.NewReader(conn)
-	resp, err := http.ReadResponse(br, nil)
-	if err != nil {
-		t.Fatalf("read the CONNECT %s reply: %v", host, err)
-	}
-	_ = resp.Body.Close()
-	return &groupsTunnel{conn: conn, br: br, host: host}, resp.StatusCode
+	conn, br, st := dialConnect(t, h, host+":443", proxyAuth)
+	return &groupsTunnel{conn: conn, br: br, host: host}, st
 }
 
 // startTLS runs the client handshake over the tunnel with cfg and swaps the
@@ -226,8 +219,7 @@ func groupsMemberAllowed(t *testing.T, h *harness.H) {
 	if n := len(up.Requests()); n != 2 {
 		t.Errorf("upstream saw %d requests, want 2", n)
 	}
-	groupsNoLeak(t, up)
-	groupsJudgeIdle(t, h)
+	groupsClean(t, h, []string{eng}, up)
 }
 
 // groupsNonMemberDenied: a valid token of the wrong group is denied outright
@@ -252,7 +244,8 @@ func groupsNonMemberDenied(t *testing.T, h *harness.H) {
 	if n := len(up.Requests()); n != 0 {
 		t.Errorf("upstream saw %d requests, want 0", n)
 	}
-	groupsJudgeIdle(t, h)
+	groupsClean(t, h, []string{sales}, up)
+	groupsJudgeLive(t, h)
 	if h.MetricsAvailable() {
 		// Only the request-level decision is counted; the CONNECT refusal is an
 		// audit event alone.
@@ -265,10 +258,12 @@ func groupsNonMemberDenied(t *testing.T, h *harness.H) {
 
 // groupsAnonymousDenied: with no token the CONNECT is admitted (the decision
 // is deferred to the request) and each request is refused identity_required,
-// on HTTP/1.1 and on h2. Nothing reaches the upstream or the judge.
+// on HTTP/1.1 and on h2; so is a wrong-audience token (status invalid). Nothing
+// reaches the upstream or the judge.
 func groupsAnonymousDenied(t *testing.T, h *harness.H) {
 	up := h.Upstream(scopedHost)
 	h.Upstream(plainHost)
+	invalid := h.MintUserToken(fakes.Valid("walt", "walt@example.com", "eng"), fakes.WrongAudience())
 	groupsServe(t, h, "eng")
 
 	if got := getStatus(t, h.Agent(), scopedHost, ""); got != http.StatusForbidden {
@@ -277,18 +272,23 @@ func groupsAnonymousDenied(t *testing.T, h *harness.H) {
 	if got := getStatus(t, h.AgentH2(), scopedHost, ""); got != http.StatusForbidden {
 		t.Fatalf("anonymous h2 = %d, want 403", got)
 	}
+	// A token for another audience is no identity at all, even in the right group.
+	if got := getStatus(t, h.Agent(), scopedHost, invalid); got != http.StatusForbidden {
+		t.Fatalf("wrong-audience token = %d, want 403", got)
+	}
 
-	h.Eventually("both refusals are audited as identity_required", func() bool {
-		return groupsDenyEvents(h, scopedHost, "identity_required", "") == 2
+	h.Eventually("every refusal is audited as identity_required", func() bool {
+		return groupsDenyEvents(h, scopedHost, "identity_required", "") == 3 &&
+			groupsDenyEvents(h, scopedHost, "identity_required", "invalid") == 1
 	})
 	if n := len(up.Requests()); n != 0 {
 		t.Errorf("upstream saw %d requests, want 0", n)
 	}
-	groupsJudgeIdle(t, h)
+	groupsClean(t, h, []string{invalid}, up)
 	if h.MetricsAvailable() {
 		k := harness.MetricKey("warden.policy.scoped.total", map[string]string{"result": "no_identity"})
-		if got := h.Metrics()[k]; got != 2 {
-			t.Errorf("%s = %v, want 2", k, got)
+		if got := h.Metrics()[k]; got != 3 {
+			t.Errorf("%s = %v, want 3", k, got)
 		}
 	}
 }
@@ -315,7 +315,7 @@ func groupsExpiredDenied(t *testing.T, h *harness.H) {
 	if n := len(up.Requests()); n != 0 {
 		t.Errorf("upstream saw %d requests, want 0", n)
 	}
-	groupsJudgeIdle(t, h)
+	groupsClean(t, h, []string{expired}, up)
 }
 
 // groupsKeepaliveMixedUsers: one keep-alive tunnel carries requests from
@@ -351,8 +351,7 @@ func groupsKeepaliveMixedUsers(t *testing.T, h *harness.H) {
 	if n := len(up.Requests()); n != 2 {
 		t.Errorf("upstream saw %d requests, want 2 (eng only)", n)
 	}
-	groupsNoLeak(t, up)
-	groupsJudgeIdle(t, h)
+	groupsClean(t, h, []string{eng, sales}, up)
 }
 
 // groupsH2PerStream: on one h2 connection every stream is decided by its own
@@ -401,8 +400,7 @@ func groupsH2PerStream(t *testing.T, h *harness.H) {
 	if n := len(up.Requests()); n != 5 {
 		t.Errorf("upstream saw %d requests, want 5 (the eng streams)", n)
 	}
-	groupsNoLeak(t, up)
-	groupsJudgeIdle(t, h)
+	groupsClean(t, h, []string{eng, sales}, up)
 }
 
 // groupsNoCAConditional: a worker with no TLS-termination CA cannot decide per
@@ -446,13 +444,12 @@ func groupsNoCAConditional(t *testing.T, h *harness.H) {
 	if n := len(up.Requests()); n != 1 {
 		t.Errorf("upstream saw %d requests, want 1 (the member)", n)
 	}
-	groupsNoLeak(t, up)
 
 	// An unscoped destination is tunneled with no identity, as before.
 	if got := h.ConnectStatusWithAuth(plainHost+":443", ""); got != http.StatusOK {
 		t.Errorf("unscoped CONNECT = %d, want 200", got)
 	}
-	groupsJudgeIdle(t, h)
+	groupsClean(t, h, []string{eng, sales, expired}, up)
 }
 
 // groupsRawBytesConditional: a CONNECT to a scoped host with no token (a
@@ -493,7 +490,7 @@ func groupsRawBytesConditional(t *testing.T, h *harness.H) {
 	if n := len(up.Requests()); n != 0 {
 		t.Errorf("upstream saw %d requests, want 0", n)
 	}
-	groupsJudgeIdle(t, h)
+	groupsClean(t, h, []string{eng}, up)
 }
 
 // groupsTruncated: the verifier keeps at most identity.MaxGroups (64) groups
@@ -541,8 +538,7 @@ func groupsTruncated(t *testing.T, h *harness.H) {
 	if n := len(up.Requests()); n != 1 {
 		t.Errorf("upstream saw %d requests, want 1 (the member)", n)
 	}
-	groupsNoLeak(t, up)
-	groupsJudgeIdle(t, h)
+	groupsClean(t, h, []string{member, partial}, up)
 }
 
 // mcpGatedBody is a tools/call for tool.
@@ -660,7 +656,8 @@ func groupsMCPToolGated(t *testing.T, h *harness.H) {
 			t.Errorf("MCP upstream request %d carried an identity header", i)
 		}
 	}
-	groupsJudgeIdle(t, h)
+	groupsClean(t, h, []string{fin, eng, expired})
+	groupsJudgeLive(t, h)
 }
 
 // The frozen pre-GPOL decoder. It is the shape a worker built before group
