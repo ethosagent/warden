@@ -179,7 +179,7 @@ func newTokenRevokeCmd() *cobra.Command {
 			}
 			tok, changed, err := o.Revoke(cmd.Context(), id)
 			switch {
-			case errors.Is(err, controlplane.ErrNotFound):
+			case errors.Is(err, controlplane.ErrWorkerTokenNotFound):
 				return &exitError{code: 2, err: fmt.Errorf("no worker token with id %q", id)}
 			case err != nil:
 				return err

@@ -5,9 +5,11 @@ package policyeval
 
 import (
 	"net/url"
+	"sort"
 
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/config"
+	"github.com/ethosagent/warden/internal/identity"
 	"github.com/ethosagent/warden/internal/policy"
 )
 
@@ -17,7 +19,14 @@ type EvalResult struct {
 	Agreed      int
 	NewAllows   []EvalDiff // was denied, now allowed (security regression)
 	NewDenies   []EvalDiff // was allowed, now denied (availability regression)
+	// AnonymousCount totals the disagreeing events replayed without a valid
+	// recorded identity, across NewAllows and NewDenies.
+	AnonymousCount int
 }
+
+// MaxAffectedUsers caps EvalDiff.AffectedUsers; AffectedUsersTotal keeps the
+// true count.
+const MaxAffectedUsers = 20
 
 // EvalDiff represents a group of events where the candidate policy disagrees.
 type EvalDiff struct {
@@ -26,6 +35,36 @@ type EvalDiff struct {
 	Method   string
 	Count    int
 	Decision string // original decision
+	// AffectedUsers are the distinct users behind the disagreeing events (the
+	// email, else the sub), sorted and capped at MaxAffectedUsers. Only sub or
+	// email: never a token or a group list.
+	AffectedUsers      []string
+	AffectedUsersTotal int
+	// AnonymousCount is the disagreeing events with no valid recorded identity
+	// (replayed as anonymous), so pre-identity traffic is not read as user impact.
+	AnonymousCount int
+}
+
+// replaySubject builds the policy subject from the identity recorded on e, only
+// when that identity was valid. Recorded groups are a point-in-time snapshot.
+func replaySubject(e analytics.Event) *identity.Subject {
+	if e.IdentityStatus != string(identity.StatusValid) {
+		return nil
+	}
+	return &identity.Subject{
+		Sub:             e.UserSub,
+		Email:           e.UserEmail,
+		EmailVerified:   e.UserEmail != "",
+		Groups:          e.UserGroups,
+		GroupsTruncated: e.UserGroupsTruncated,
+	}
+}
+
+// diffAcc accumulates one (domain, port, method, type) group.
+type diffAcc struct {
+	count     int
+	users     map[string]struct{}
+	anonymous int
 }
 
 // Evaluate replays events against a candidate policy and diffs outcomes.
@@ -46,7 +85,7 @@ func Evaluate(events []analytics.Event, candidate config.Policy) *EvalResult {
 		method   string
 		diffType string // "new_allow" or "new_deny"
 	}
-	diffs := make(map[diffKey]int)
+	diffs := make(map[diffKey]*diffAcc)
 
 	for _, e := range events {
 		// Determine scheme from protocol or port.
@@ -75,17 +114,19 @@ func Evaluate(events []analytics.Event, candidate config.Policy) *EvalResult {
 		if u, err := url.Parse(e.URL); err == nil {
 			path = u.EscapedPath()
 		}
-		candidateDecision := policy.NoMatch
-		if method != "" && path != "" {
-			candidateDecision = eval.EvaluateRequest(e.Domain, port, scheme, method, path).Decision
-		} else {
-			candidateDecision = eval.EvaluateRequest(e.Domain, port, scheme, "", "").Decision
+		if method == "" || path == "" {
+			method, path = "", ""
 		}
+		subject := replaySubject(e)
+		candidateDecision := eval.EvaluateFor(policy.RequestContext{
+			Domain: e.Domain, Port: port, Scheme: scheme, Method: method, Path: path, Subject: subject,
+		}).Decision
 		// Replay scores the STATIC policy outcome only (no judge in offline
-		// replay): a NoMatch would be default-denied, so collapse it to "deny"
-		// to compare against the historically recorded allow/deny decision.
+		// replay): a NoMatch would be default-denied, and a Conditional (a
+		// scoped entry without a valid identity) is a deny too, so collapse
+		// both to "deny" to compare against the recorded allow/deny decision.
 		candidateStr := candidateDecision.String()
-		if candidateDecision == policy.NoMatch {
+		if candidateDecision == policy.NoMatch || candidateDecision == policy.Conditional {
 			candidateStr = "deny"
 		}
 
@@ -94,23 +135,50 @@ func Evaluate(events []analytics.Event, candidate config.Policy) *EvalResult {
 			continue
 		}
 
-		if e.Decision == "deny" && candidateStr == "allow" {
-			key := diffKey{domain: e.Domain, port: port, method: e.Method, diffType: "new_allow"}
-			diffs[key]++
-		} else if e.Decision == "allow" && candidateStr == "deny" {
-			key := diffKey{domain: e.Domain, port: port, method: e.Method, diffType: "new_deny"}
-			diffs[key]++
+		var key diffKey
+		switch {
+		case e.Decision == "deny" && candidateStr == "allow":
+			key = diffKey{domain: e.Domain, port: port, method: e.Method, diffType: "new_allow"}
+		case e.Decision == "allow" && candidateStr == "deny":
+			key = diffKey{domain: e.Domain, port: port, method: e.Method, diffType: "new_deny"}
+		default:
+			continue
+		}
+		acc := diffs[key]
+		if acc == nil {
+			acc = &diffAcc{users: map[string]struct{}{}}
+			diffs[key] = acc
+		}
+		acc.count++
+		if subject == nil {
+			acc.anonymous++
+			result.AnonymousCount++
+		} else if u := userLabel(e); u != "" {
+			acc.users[u] = struct{}{}
 		}
 	}
 
 	// Convert grouped diffs to slices.
-	for key, count := range diffs {
+	for key, acc := range diffs {
+		users := make([]string, 0, len(acc.users))
+		for u := range acc.users {
+			users = append(users, u)
+		}
+		sort.Strings(users)
+		total := len(users)
+		if len(users) > MaxAffectedUsers {
+			users = users[:MaxAffectedUsers]
+		}
 		d := EvalDiff{
-			Domain:   key.domain,
-			Port:     key.port,
-			Method:   key.method,
-			Count:    count,
-			Decision: map[string]string{"new_allow": "deny", "new_deny": "allow"}[key.diffType],
+			Domain: key.domain,
+			Port:   key.port,
+			Method: key.method,
+			Count:  acc.count,
+
+			AffectedUsers:      users,
+			AffectedUsersTotal: total,
+			AnonymousCount:     acc.anonymous,
+			Decision:           map[string]string{"new_allow": "deny", "new_deny": "allow"}[key.diffType],
 		}
 		if key.diffType == "new_allow" {
 			result.NewAllows = append(result.NewAllows, d)
@@ -120,4 +188,12 @@ func Evaluate(events []analytics.Event, candidate config.Policy) *EvalResult {
 	}
 
 	return result
+}
+
+// userLabel names the user behind e for the report: the email, else the sub.
+func userLabel(e analytics.Event) string {
+	if e.UserEmail != "" {
+		return e.UserEmail
+	}
+	return e.UserSub
 }

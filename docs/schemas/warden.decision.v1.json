@@ -28,6 +28,7 @@
           "enum": [
           "dlp_block",
           "dlp_redact",
+          "group_not_allowed",
           "grpc_body_placeholder",
           "grpc_frame_compressed",
           "grpc_frame_malformed",
@@ -37,6 +38,8 @@
           "host_mismatch",
           "http_response_injection",
           "http_response_leak",
+          "identity_groups_truncated",
+          "identity_required",
           "judge",
           "malformed_connect",
           "malformed_request",
@@ -77,7 +80,8 @@
           "transparent_loop_guard",
           "transparent_no_sni",
           "unspecified",
-          "unsupported_protocol"
+          "unsupported_protocol",
+          "user_blocked"
           ]
         },
         { "pattern": "^mcp_chain_[a-z0-9_]+$" }

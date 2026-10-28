@@ -297,7 +297,7 @@ func TestPolicyRollbackAudited(t *testing.T) {
 // before and after, and no response or log line holds a raw secretAccessKey.
 func TestPolicyRollbackKeepsCredentialAndOverlays(t *testing.T) {
 	var logs bytes.Buffer
-	blocked := wireOverlay{name: "blocked_users", apply: func(_ context.Context, w *policyWire) (string, error) {
+	blocked := wireOverlay{name: "test_blocked_users", apply: func(_ context.Context, w *policyWire) (string, error) {
 		w.Denylist = append(append([]config.DenylistEntry(nil), w.Denylist...), config.DenylistEntry{Domain: "blocked.example"})
 		return "fp-blocked-users", nil
 	}}
@@ -333,7 +333,7 @@ func TestPolicyRollbackKeepsCredentialAndOverlays(t *testing.T) {
 		t.Fatalf("v3 agents = %+v, want v1's (none)", v3.Doc.Settings.Agents)
 	}
 	overlayAfter := e.srv.policy.overlayFingerprints()
-	if overlayBefore["blocked_users"] != "fp-blocked-users" || overlayAfter["blocked_users"] != overlayBefore["blocked_users"] {
+	if overlayBefore["test_blocked_users"] != "fp-blocked-users" || overlayAfter["test_blocked_users"] != overlayBefore["test_blocked_users"] {
 		t.Fatalf("blocked_users overlay before %v after %v, want identical", overlayBefore, overlayAfter)
 	}
 	w, _, _, _ := e.srv.policy.snapshot()

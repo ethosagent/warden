@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"encoding/pem"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -366,5 +367,51 @@ func TestRemoteProvider_RejectsHTTP(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "HTTPS") {
 		t.Errorf("error should mention HTTPS, got: %v", err)
+	}
+}
+
+// TestHeartbeatCaps verifies the heartbeat body carries the advertised caps next
+// to policyETag, and omits the field when none are set.
+func TestHeartbeatCaps(t *testing.T) {
+	var raw []byte
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	caPath := filepath.Join(t.TempDir(), "ca.pem")
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw})
+	if err := os.WriteFile(caPath, certPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rp, err := NewRemoteProvider(srv.URL+"/policy", "tok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rp.SetCACert(caPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := rp.Heartbeat(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "caps") {
+		t.Errorf("body without caps = %s, want no caps field", raw)
+	}
+	if got := WorkerCaps(); len(got) != 1 || got[0] != CapBlocklistV1 {
+		t.Fatalf("WorkerCaps() = %v", got)
+	}
+	rp.SetCaps(WorkerCaps())
+	if err := rp.Heartbeat(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var b struct {
+		PolicyETag string   `json:"policyETag"`
+		Caps       []string `json:"caps"`
+	}
+	if err := json.Unmarshal(raw, &b); err != nil {
+		t.Fatal(err)
+	}
+	if len(b.Caps) != 1 || b.Caps[0] != "blocklist/v1" {
+		t.Errorf("caps = %v, want [blocklist/v1]; body %s", b.Caps, raw)
 	}
 }

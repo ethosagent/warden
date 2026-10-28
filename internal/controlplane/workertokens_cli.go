@@ -209,7 +209,7 @@ func (o *OfflineWorkerTokens) Create(ctx context.Context, c OfflineCreate) (Offl
 
 // Revoke revokes a token and appends the worker_token.revoke audit row. It
 // returns the token and changed=false, with no audit row, when it was already
-// revoked. An unknown id is ErrNotFound.
+// revoked. An unknown id is ErrWorkerTokenNotFound.
 func (o *OfflineWorkerTokens) Revoke(ctx context.Context, id string) (tok Token, changed bool, err error) {
 	toks, err := o.st.List(ctx)
 	if err != nil {
@@ -222,7 +222,7 @@ func (o *OfflineWorkerTokens) Revoke(ctx context.Context, id string) (tok Token,
 		}
 	}
 	if !found {
-		return Token{}, false, ErrNotFound
+		return Token{}, false, ErrWorkerTokenNotFound
 	}
 	if !tok.RevokedAt.IsZero() {
 		return tok, false, nil

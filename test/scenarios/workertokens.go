@@ -198,3 +198,65 @@ func workerTokenAuth(t *testing.T, h *harness.H) {
 		}
 	}
 }
+
+// workerTokenLongPollRevoke (W-P1-WTOK-09): two tokens each hold a
+// GET /policy?wait=30s. Revoking A out of process (the CLI case) returns A's
+// held request with 401 at the next reload, never a policy response; B's stays
+// parked and still receives the next policy change.
+func workerTokenLongPollRevoke(t *testing.T, h *harness.H) {
+	cp := h.CP()
+	a, aID := mintWorkerToken(t, h, "lp-a", "lp-worker-a")
+	b, _ := mintWorkerToken(t, h, "lp-b", "lp-worker-b")
+	h.Eventually("the control plane to load the new tokens", func() bool {
+		h.Clock().Advance(3 * time.Second)
+		return cp.DoWorker(http.MethodGet, "/policy", a, "", "").Status == http.StatusOK &&
+			cp.DoWorker(http.MethodGet, "/policy", b, "", "").Status == http.StatusOK
+	})
+	first := cp.DoWorker(http.MethodGet, "/policy", b, "", "")
+	etag := first.Header.Get("ETag")
+	if etag == "" {
+		t.Fatal("GET /policy returned no ETag")
+	}
+	hold := func(tok string) <-chan harness.RawResponse {
+		return cp.HoldWorker(http.MethodGet, "/policy?wait=30s", tok, http.Header{"If-None-Match": {etag}})
+	}
+	heldA, heldB := hold(a), hold(b)
+	time.Sleep(200 * time.Millisecond) // let both park; the assertions below hold either way
+
+	revokeWorkerToken(t, h, aID)
+	var gotA harness.RawResponse
+	h.Eventually("A's held request to be cancelled by the revoke", func() bool {
+		h.Clock().Advance(3 * time.Second)
+		select {
+		case gotA = <-heldA:
+			return true
+		default:
+			return false
+		}
+	})
+	if gotA.Status != http.StatusUnauthorized || strings.TrimSpace(gotA.Body) != "unauthorized" {
+		t.Errorf("held request of revoked A = %d %q, want 401 unauthorized", gotA.Status, gotA.Body)
+	}
+	select {
+	case got := <-heldB:
+		t.Fatalf("B's held request returned %d when only A was revoked", got.Status)
+	default:
+	}
+
+	// A policy change still reaches B.
+	body := `{"allowlist":[{"domain":"lp-changed.example.com"}],"denylist":[]}`
+	if code, resp, err := cp.Do(http.MethodPut, "/dashboard/api/policy", cp.Token(), []byte(body)); err != nil || code != http.StatusOK {
+		t.Fatalf("PUT /dashboard/api/policy = %d %s %v", code, resp, err)
+	}
+	h.Eventually("B's held request to receive the changed policy", func() bool {
+		select {
+		case got := <-heldB:
+			return got.Status == http.StatusOK && strings.Contains(got.Body, "lp-changed.example.com")
+		default:
+			return false
+		}
+	})
+	if strings.Contains(h.Logs(), a) || strings.Contains(h.Logs(), b) {
+		t.Error("a worker token appears in the logs")
+	}
+}
