@@ -157,18 +157,21 @@ func (b *Browser) Do(method, target string, hdr http.Header) (*http.Response, er
 	return b.DoBody(method, target, hdr, nil)
 }
 
-// DoBody is Do with a request body (nil sends none).
+// DoBody is Do with a request body (sent as application/json when not nil).
 func (b *Browser) DoBody(method, target string, hdr http.Header, body []byte) (*http.Response, error) {
 	if len(target) > 0 && target[0] == '/' {
 		target = b.base + target
 	}
-	var r io.Reader
+	var rd io.Reader
 	if body != nil {
-		r = bytes.NewReader(body)
+		rd = bytes.NewReader(body)
 	}
-	req, err := http.NewRequestWithContext(context.Background(), method, target, r)
+	req, err := http.NewRequestWithContext(context.Background(), method, target, rd)
 	if err != nil {
 		return nil, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
 	}
 	for k, v := range hdr {
 		req.Header[k] = v

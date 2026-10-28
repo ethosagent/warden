@@ -64,8 +64,7 @@ func newRig(t *testing.T, o rigOpts) *rig {
 	if o.redirect == "" {
 		o.redirect = "http://127.0.0.1:7070/auth/callback"
 	}
-	db, err := cpstate.Open(context.Background(), filepath.Join(t.TempDir(), "warden-cp.db"),
-		append(SessionMigrations(), OIDCPendingMigrations()...))
+	db, err := cpstate.Open(context.Background(), filepath.Join(t.TempDir(), "warden-cp.db"), StateMigrations())
 	if err != nil {
 		t.Fatalf("cpstate.Open: %v", err)
 	}

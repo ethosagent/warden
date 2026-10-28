@@ -82,6 +82,16 @@ func longPollControlPlane(ctx context.Context, clk clock.Clock, cp ControlPlaneC
 	}
 }
 
+// onPolicyApplied composes the long-poll onApply callback: the settings applier
+// first, then the session cut, so sessions of a newly blocked user are closed
+// for every applied change (the evaluator was already replaced by then).
+func onPolicyApplied(apply, closeBlocked func()) func() {
+	return func() {
+		apply()
+		closeBlocked()
+	}
+}
+
 // heartbeatControlPlane pings the control plane every interval so it lists this
 // worker as online even when idle (no traffic, long-poll held open).
 //

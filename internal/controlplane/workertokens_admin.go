@@ -87,7 +87,7 @@ func (a workerTokenAdmin) mapError(op string, err error) error {
 		return fmt.Errorf("%w: %v", dashboard.ErrWorkerTokenInvalid, err)
 	case errors.Is(err, ErrNameTaken), errors.Is(err, ErrTooManyActive), errors.Is(err, ErrTokenInUse):
 		return dashboard.ErrWorkerTokenConflict
-	case errors.Is(err, ErrNotFound):
+	case errors.Is(err, ErrWorkerTokenNotFound):
 		return dashboard.ErrWorkerTokenNotFound
 	}
 	a.logger.Error("worker tokens: "+op+" failed", "error", err)

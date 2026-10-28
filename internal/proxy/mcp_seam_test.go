@@ -17,7 +17,7 @@ type fakeMCPGateway struct {
 	onRequestCalls int
 }
 
-func (f *fakeMCPGateway) OnRequest(sessionKey, method, url string, hdr http.Header, body []byte) gateway.Verdict {
+func (f *fakeMCPGateway) OnRequest(sessionKey, method, url string, hdr http.Header, body []byte, meta gateway.RequestMeta) gateway.Verdict {
 	f.onRequestCalls++
 	return gateway.Verdict{Action: gateway.Deny, Reason: "fake_deny", Tool: "fake"}
 }

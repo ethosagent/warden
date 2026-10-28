@@ -33,7 +33,7 @@ const (
 // handleTransparentTLS serves one connection on the transparent :443 listener:
 // the ClientHello is sniffed BEFORE any handshake (its server_name is the only
 // destination signal there is), policy is evaluated on (SNI, 443, https) with
-// the same tri-state gate as the CONNECT floor, and only then does TLS
+// the same admission gate as the CONNECT floor, and only then does TLS
 // termination begin — via terminateAndDispatch, the ONE post-ClientHello path
 // shared with forward mode, so h1 and h2 (ALPN) enter the same pipeline. Fail
 // closed everywhere: no readable SNI (including ECH), a malformed or over-limit
@@ -89,23 +89,19 @@ func (p *Proxy) handleTransparentTLS(conn net.Conn) {
 		return
 	}
 
-	// Policy on the SNI before any handshake. Same tri-state gate as the
-	// CONNECT floor: Deny (or NoMatch with no judge) is refused with the
-	// verdict's declared reason; NoMatch with a judge proceeds to termination
-	// so the judge can inspect the real request.
-	verdict := p.cfg.Policy.EvaluateRequest(domain, transparentHTTPSPort, policy.SchemeHTTPS, "", "")
-	judgeEnabled := p.judge() != nil
-	if verdict.Decision == policy.Deny || (verdict.Decision == policy.NoMatch && !judgeEnabled) {
-		reason := verdict.Reason
-		if verdict.Decision == policy.NoMatch {
-			reason = denyreason.PolicyNoMatch
-		}
+	// Policy on the SNI before any handshake, through the same gate as the
+	// CONNECT floor (admit): Deny (or NoMatch with no judge) is refused with the
+	// declared reason; NoMatch with a judge, and a Conditional destination (no
+	// Proxy-Authorization exists here), proceed to termination so the judge or
+	// the per-request subject can decide the real request.
+	g := p.admit(policy.RequestContext{Domain: domain, Port: transparentHTTPSPort, Scheme: policy.SchemeHTTPS})
+	if g.deny {
 		p.emitDenyEvent(connIdentity{}, analytics.Event{
 			Timestamp: time.Now(),
 			Domain:    domain,
 			Port:      transparentHTTPSPort,
 			Protocol:  "tcp",
-			Reason:    string(reason),
+			Reason:    string(g.reason),
 		})
 		return
 	}
@@ -115,7 +111,7 @@ func (p *Proxy) handleTransparentTLS(conn net.Conn) {
 	// in br, then the conn itself — into the same post-ClientHello path forward
 	// mode uses.
 	replay := io.MultiReader(bytes.NewReader(helloWire), br, conn)
-	p.terminateAndDispatch(conn, replay, domain, transparentHTTPSPort, verdict.Decision == policy.NoMatch, connIdentity{})
+	p.terminateAndDispatch(conn, replay, domain, transparentHTTPSPort, g.defers, connIdentity{})
 }
 
 // handleTransparentHTTP serves one connection on the transparent :80 listener:
@@ -172,26 +168,21 @@ func (p *Proxy) handleTransparentHTTP(conn net.Conn) {
 		return
 	}
 
-	verdict := p.cfg.Policy.EvaluateRequest(host, transparentHTTPPort, policy.SchemeHTTP, "", "")
-	judgeEnabled := p.judge() != nil
-	if verdict.Decision == policy.Deny || (verdict.Decision == policy.NoMatch && !judgeEnabled) {
-		reason := verdict.Reason
-		if verdict.Decision == policy.NoMatch {
-			reason = denyreason.PolicyNoMatch
-		}
+	g := p.admit(policy.RequestContext{Domain: host, Port: transparentHTTPPort, Scheme: policy.SchemeHTTP})
+	if g.deny {
 		p.emitDenyEvent(connIdentity{}, analytics.Event{
 			Timestamp: time.Now(),
 			Domain:    host,
 			Port:      transparentHTTPPort,
 			Protocol:  "http",
-			Reason:    string(reason),
+			Reason:    string(g.reason),
 		})
 		_, _ = fmt.Fprint(conn, "HTTP/1.1 403 Forbidden\r\n\r\n")
 		return
 	}
 
 	// Admitted: the SAME h1 pipeline a CONNECT tunnel runs, over http.
-	p.handleHTTP(conn, br, host, transparentHTTPPort, verdict.Decision == policy.NoMatch, policy.SchemeHTTP, req, connIdentity{})
+	p.handleHTTP(conn, br, host, transparentHTTPPort, g.defers, policy.SchemeHTTP, req, connIdentity{})
 }
 
 // rejectPlainHTTP is the plain-HTTP floor's bounded rejection: ONE deny with a

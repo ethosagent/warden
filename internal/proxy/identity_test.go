@@ -65,6 +65,18 @@ type idEnv struct {
 	logs  *lockedBuf
 	be    *headerBackend
 	store *syncStore
+
+	// dials counts every upstream dial (TLS or raw). rawDial, set through
+	// setRaw, answers the raw tunnel dial; unset, a raw dial fails.
+	dials   atomic.Int64
+	rawMu   sync.Mutex
+	rawDial func() (net.Conn, error)
+}
+
+func (e *idEnv) setRaw(f func() (net.Conn, error)) {
+	e.rawMu.Lock()
+	e.rawDial = f
+	e.rawMu.Unlock()
 }
 
 // idClaims is a valid token's claims, expiring ttl after now.
@@ -76,6 +88,13 @@ func idClaims(sub string, exp time.Time) identity.Claims {
 // fake verifier knows these tokens: tok-alice and tok-bob (valid), tok-expired,
 // tok-bad (invalid, bad_signature) and tok-down (unverified).
 func newIDEnv(t *testing.T, mode IdentityMode) *idEnv {
+	t.Helper()
+	return newIDEnvCfg(t, mode, nil)
+}
+
+// newIDEnvCfg is newIDEnv with a hook that edits the proxy Config before New
+// (policy, judge, CA paths cleared for a no-CA proxy).
+func newIDEnvCfg(t *testing.T, mode IdentityMode, edit func(*Config)) *idEnv {
 	t.Helper()
 	e := &idEnv{t: t, v: fakes.NewVerifier(), m: newFakeMetrics(), logs: &lockedBuf{}, store: &syncStore{}}
 	e.clk = &idClock{t: time.Now()}
@@ -109,18 +128,34 @@ func newIDEnv(t *testing.T, mode IdentityMode) *idEnv {
 		CAKeyPath:         filepath.Join(dir, "ca.key"),
 		Identity:          IdentityConfig{Verifier: e.v, Mode: mode},
 	}
-	if err := os.WriteFile(cfg.CACertPath, caPEM, 0o600); err != nil {
-		t.Fatal(err)
+	if edit != nil {
+		edit(&cfg)
 	}
-	if err := os.WriteFile(cfg.CAKeyPath, caKeyPEM, 0o600); err != nil {
-		t.Fatal(err)
+	if cfg.CACertPath != "" {
+		if err := os.WriteFile(cfg.CACertPath, caPEM, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(cfg.CAKeyPath, caKeyPEM, 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	p, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	p.now = e.clk.now
+	p.dialFunc = func(_, _ string) (net.Conn, error) {
+		e.dials.Add(1)
+		e.rawMu.Lock()
+		f := e.rawDial
+		e.rawMu.Unlock()
+		if f == nil {
+			return nil, fmt.Errorf("no raw upstream")
+		}
+		return f()
+	}
 	p.dialTLS = func(_, _ string, c *tls.Config) (*tls.Conn, error) {
+		e.dials.Add(1)
 		return tls.Dial("tcp", backendAddr, &tls.Config{InsecureSkipVerify: true, NextProtos: c.NextProtos})
 	}
 	e.p = p
