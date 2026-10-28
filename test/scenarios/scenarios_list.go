@@ -89,6 +89,11 @@ var All = slices.Concat(
 		// Block-list admin API (W-P1-BLOCK-11).
 		{Name: "block_api_bearer", Opts: blockAPIBearerOpts(), Run: blockAPIBearer},
 		{Name: "block_api_roles", Opts: blockAPIOIDCOpts(), Run: blockAPIRoles},
+		// Console denial for blocked principals (W-P1-BLOCK-07): a block ends the
+		// admin's session and refuses their next login (403, one audit row);
+		// break-glass still opens the console. In-process only (it writes the CP
+		// state dir and reads the session table).
+		{Name: "blocked_principal_denied", Opts: breakGlassOpts(), Run: blockedPrincipalDenied},
 		// Versioned publish (W-P1-PVER-02): dashboard policy and llmProviders
 		// saves create versions authored anonymous that workers enforce.
 		// In-process only (it reads the CP state dir).

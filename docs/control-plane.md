@@ -392,6 +392,8 @@ their own rows (the middleware never wraps `/auth/*`), all with target `session`
 |---|---|---|---|---|
 | `auth.login` | `GET /auth/callback` created a session | the verified ID token's `sub` and `email`, role from `console.roles` | `ok` (status 302) | `{role}` |
 | `auth.login_failed` | `GET /auth/callback` failed after its pending `state` was consumed | the verified token's subject when there is one (`no_role`), otherwise `anonymous` | `denied` or `error` (status 302) | `{reason}` |
+| `auth.blocked_login` | `GET /auth/callback` refused a verified principal who is on the user block list | the verified token's `sub` and `email` | `denied` (status 403) | `{reason: user_blocked}` |
+| `auth.blocked_session` | the session middleware refused a request from a blocked principal (at most one row a minute per principal) | the session's `sub` and `email` | `denied` (status 403) | `{reason: user_blocked}` |
 | `auth.logout` | `POST /auth/logout` ended a live session | the session's user, captured before the row is deleted | `ok` (status 204) | none |
 | `auth.breakglass` | `POST /auth/breakglass` (only with `console.breakGlass.enabled`) | `breakglass:<configured username>` on a username match, `breakglass:unknown` otherwise; `auth_method` `breakglass` | `ok` (200), `denied` (401), `error` (503); a rate-limited request adds at most one `denied` row (`{reason: rate_limited}`) per address per 15 minutes | none |
 
@@ -406,6 +408,18 @@ so a sign-in and its sign-out can be matched. `details.reason` is a closed set:
 | `state_invalid` | `denied` | the state was valid but the browser-binding login cookie was missing or wrong (`state_invalid`) |
 | `idp_error` | `error` | the IdP answered with an error, or its keys could not be fetched (`idp_error`, `idp_unavailable`) |
 | `exchange_failed` | `error` | no code, the token exchange failed, or the session could not be stored (`exchange_failed`) |
+
+A principal on the user block list is refused at the callback with `403 {"error":"user_blocked"}`
+and no session cookie, recorded as `auth.blocked_login` (it shares the 20-a-minute per-address
+cap with `auth.login_failed`). While no block list has loaded (the first read of the state
+database failed) `/auth/login` and the callback answer `503 {"error":"block_list_unavailable"}`
+and a callback that got that far is recorded as `auth.login_failed` with reason
+`block_list_unavailable`; `/policy` is not affected by the console check. The session
+middleware also answers `403 {"error":"user_blocked"}` to a live session whose principal is
+blocked, from an in-memory snapshot (no query per request). Blocking a principal deletes
+their sessions (by sub, and by lowercased email), and lifting the block does not bring them back.
+A block written by the offline CLI is picked up by the control plane's watcher and does the same.
+Break-glass sessions are exempt from both checks.
 
 A callback with a missing, unknown or expired `state` consumed nothing and writes no
 row, and neither does a logout without a live session or one refused for CSRF. At most

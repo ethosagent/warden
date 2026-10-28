@@ -149,9 +149,11 @@ func blockAPIRoles(t *testing.T, h *harness.H) {
 		t.Errorf("created_by = %q, want oidc:ada", own.CreatedBy)
 	}
 
+	// Blocking herself ends her session (W-P1-BLOCK-07), so she cannot lift the
+	// block: her DELETE is refused as unauthenticated and the entry stays.
 	resp, body = blockAPIDo(t, ada, acsrf, http.MethodDelete, path+"/"+own.ID, "")
-	if resp.StatusCode != http.StatusForbidden || !strings.Contains(body, "self_unblock_forbidden") {
-		t.Fatalf("self DELETE = %d %s, want 403 self_unblock_forbidden", resp.StatusCode, body)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("self DELETE = %d %s, want 401 (her session was revoked by her own block)", resp.StatusCode, body)
 	}
 	if got := servedBlocked(t, h); len(got) != 1 || got[0].Email != "ada@example.com" {
 		t.Fatalf("served blockedUsers = %+v after the refused self-unblock, want ada's entry", got)
@@ -163,19 +165,17 @@ func blockAPIRoles(t *testing.T, h *harness.H) {
 	}
 	h.Eventually("the control plane stops serving the block", func() bool { return len(servedBlocked(t, h)) == 0 })
 
-	var denied, ok, selfDenied int
+	var denied, ok int
 	for _, r := range h.AdminAuditRows() {
 		switch {
 		case r.Action == "blocked_users.add" && r.Outcome == adminaudit.OutcomeDenied && r.Sub == "vera":
 			denied++
 		case r.Action == "blocked_users.add" && r.Outcome == adminaudit.OutcomeOK && r.Sub == "ada":
 			ok++
-		case r.Action == "blocked_users.remove" && r.Outcome != adminaudit.OutcomeOK && r.Sub == "ada":
-			selfDenied++
 		}
 	}
-	if denied != 1 || ok != 1 || selfDenied != 1 {
-		t.Errorf("audit rows: viewer denied %d, admin add %d, self-unblock refused %d; want 1 each: %+v", denied, ok, selfDenied, h.AdminAuditRows())
+	if denied != 1 || ok != 1 {
+		t.Errorf("audit rows: viewer denied %d, admin add %d; want 1 each: %+v", denied, ok, h.AdminAuditRows())
 	}
 	if strings.Contains(h.Logs(), blockAPIReason) {
 		t.Error("a log line carries the reason")

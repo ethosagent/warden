@@ -102,6 +102,29 @@ type BlockStore struct {
 
 	mu        sync.Mutex
 	callbacks []func()
+
+	// snap is the in-memory block list IsBlocked reads: an immutable snapshot
+	// swapped whole, so no request runs a query. It is nil until the first load
+	// succeeds; a failed refresh keeps the previous one.
+	snap atomic.Pointer[blockSnapshot]
+	// revoker ends a blocked principal's console sessions; nil when the console
+	// has no sessions.
+	revoker atomic.Pointer[sessionRevokerBox]
+}
+
+// SessionRevoker ends console sessions by principal. SessionStore implements
+// it; BlockStore takes the interface so it does not import the session store.
+type SessionRevoker interface {
+	DeleteBySub(ctx context.Context, sub string) (int, error)
+	DeleteByEmail(ctx context.Context, email string) (int, error)
+}
+
+type sessionRevokerBox struct{ r SessionRevoker }
+
+// blockSnapshot is one immutable copy of the block list.
+type blockSnapshot struct {
+	subs   map[string]struct{}
+	emails map[string]struct{}
 }
 
 // NewBlockStore returns a store over db, which must have been opened with
@@ -115,7 +138,100 @@ func NewBlockStore(db *cpstate.DB, opts BlockStoreOptions) *BlockStore {
 	if lg == nil {
 		lg = slog.Default()
 	}
-	return &BlockStore{db: db, clock: clk, onRefresh: opts.OnRefresh, logger: lg}
+	b := &BlockStore{db: db, clock: clk, onRefresh: opts.OnRefresh, logger: lg}
+	// A failed first load leaves the snapshot nil: Ready is false and console
+	// login fails closed until a later refresh succeeds.
+	b.refreshSnapshot(context.Background())
+	return b
+}
+
+// SetSessionRevoker sets the revoker Add uses to end the sessions of a newly
+// blocked principal. The control plane sets it when the console has sessions.
+func (b *BlockStore) SetSessionRevoker(r SessionRevoker) {
+	if r == nil {
+		b.revoker.Store(nil)
+		return
+	}
+	b.revoker.Store(&sessionRevokerBox{r: r})
+}
+
+// Ready reports whether a block list has been loaded. Console login refuses
+// (503) until it is, because it cannot tell who is blocked.
+func (b *BlockStore) Ready() bool { return b.snap.Load() != nil }
+
+// IsBlocked reports whether the exact sub or the lowercased email is on the
+// block list. It reads the in-memory snapshot and never queries the database;
+// before the first successful load it reports false (see Ready).
+func (b *BlockStore) IsBlocked(sub, email string) bool {
+	s := b.snap.Load()
+	if s == nil {
+		return false
+	}
+	if sub != "" {
+		if _, ok := s.subs[sub]; ok {
+			return true
+		}
+	}
+	if email != "" {
+		if _, ok := s.emails[strings.ToLower(strings.TrimSpace(email))]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// refreshSnapshot reloads the snapshot from the database and returns the
+// entries that were not in the previous one. On a failure it keeps the
+// previous snapshot and logs (the error text carries no entry value).
+func (b *BlockStore) refreshSnapshot(ctx context.Context) []config.BlockedUser {
+	list, err := b.Wire(ctx)
+	if err != nil {
+		b.logger.Error("blocklist: snapshot refresh failed; keeping the previous block list", "error", err)
+		return nil
+	}
+	next := &blockSnapshot{subs: map[string]struct{}{}, emails: map[string]struct{}{}}
+	for _, u := range list {
+		if u.Sub != "" {
+			next.subs[u.Sub] = struct{}{}
+		}
+		if u.Email != "" {
+			next.emails[u.Email] = struct{}{}
+		}
+	}
+	prev := b.snap.Swap(next)
+	if prev == nil {
+		// The first load is not a change; the middleware checks every request.
+		return nil
+	}
+	var added []config.BlockedUser
+	for _, u := range list {
+		_, hadSub := prev.subs[u.Sub]
+		_, hadEmail := prev.emails[u.Email]
+		if (u.Sub != "" && !hadSub) || (u.Email != "" && !hadEmail) {
+			added = append(added, u)
+		}
+	}
+	return added
+}
+
+// revoke ends every session of the blocked principals in list.
+func (b *BlockStore) revoke(ctx context.Context, list ...config.BlockedUser) {
+	box := b.revoker.Load()
+	if box == nil {
+		return
+	}
+	for _, u := range list {
+		if u.Sub != "" {
+			if _, err := box.r.DeleteBySub(ctx, u.Sub); err != nil {
+				b.logger.Error("blocklist: session revoke failed", "error", err)
+			}
+		}
+		if u.Email != "" {
+			if _, err := box.r.DeleteByEmail(ctx, u.Email); err != nil {
+				b.logger.Error("blocklist: session revoke failed", "error", err)
+			}
+		}
+	}
 }
 
 // BlockWatchInterval is how often the control plane polls for a block-list
@@ -139,7 +255,7 @@ func (b *BlockStore) Watch(ctx context.Context, interval time.Duration) {
 	if failing {
 		b.logger.Warn("blocklist watch: data_version unreadable; keeping the previous block list", "error", err)
 	}
-	b.changed()
+	b.watchChanged(ctx)
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
@@ -159,7 +275,7 @@ func (b *BlockStore) Watch(ctx context.Context, interval time.Duration) {
 		failing = false
 		if v != last {
 			last = v
-			b.changed()
+			b.watchChanged(ctx)
 		}
 	}
 }
@@ -185,8 +301,24 @@ func (b *BlockStore) OnChange(fn func()) {
 	b.callbacks = append(b.callbacks, fn)
 }
 
-// changed runs the policy refresh and then the OnChange callbacks.
-func (b *BlockStore) changed() {
+// watchChanged is changed for a write by another process: sessions of any
+// entry that process added are ended too, so lifting the block later cannot
+// bring them back.
+func (b *BlockStore) watchChanged(ctx context.Context) {
+	added := b.refreshSnapshot(ctx)
+	b.revoke(context.WithoutCancel(ctx), added...)
+	b.notify()
+}
+
+// changed refreshes the snapshot, then runs the policy refresh and the
+// OnChange callbacks.
+func (b *BlockStore) changed(ctx context.Context) {
+	b.refreshSnapshot(ctx)
+	b.notify()
+}
+
+// notify runs the policy refresh and then the OnChange callbacks.
+func (b *BlockStore) notify() {
 	if b.onRefresh != nil {
 		b.onRefresh()
 	}
@@ -280,7 +412,10 @@ func (b *BlockStore) Add(ctx context.Context, entry BlockEntry, actor string) (s
 	if err := b.insert(ctx, id, sub, email, entry.Reason, actor); err != nil {
 		return "", err
 	}
-	b.changed()
+	// Refresh the snapshot first so the middleware denies the principal at
+	// once, then end their sessions (they cannot return after an unblock).
+	b.changed(ctx)
+	b.revoke(context.WithoutCancel(ctx), config.BlockedUser{Sub: sub, Email: email})
 	return id, nil
 }
 
@@ -378,7 +513,7 @@ func (b *BlockStore) Remove(ctx context.Context, id, actor string) error {
 	if n == 0 {
 		return ErrNotFound
 	}
-	b.changed()
+	b.changed(ctx)
 	return nil
 }
 
