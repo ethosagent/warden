@@ -109,6 +109,15 @@ request is terminated and the judge decides (fail-closed on any judge error). Ju
 consulted **only** for `NoMatch` — allowlisted traffic never pays for it. Non-HTTP or
 non-TLS traffic under judge is denied; statically-allowed opaque traffic is raw-tunnelled.
 
+**Analytics events and the JSON audit stream.** Each decision becomes one analytics event
+in the worker's SQLite store. Every deny event carries a `Reason` from the single closed set
+declared in `internal/denyreason` (MCP gateway reasons are declared by `internal/mcp/gateway`),
+the same value that labels `warden_blocked_total`. With `audit.jsonLog` on, the same events are
+also written as `warden.decision.v1` JSON lines (and the control plane's admin audit entries as
+`warden.admin.v1`) for a SIEM shipper. The reason values, both schemas' fields, rotation and
+shipper examples are in **[docs/siem.md](siem.md)**; the reasons are listed in
+[Deny reasons](siem.md#deny-reasons) and nowhere else.
+
 ---
 
 ## 3. Control plane & config plane

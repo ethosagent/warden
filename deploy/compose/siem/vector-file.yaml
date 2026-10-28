@@ -1,0 +1,17 @@
+# Extra Vector config merged after docs/siem/vector.yaml by docker-compose.siem.yml:
+# it adds a file sink so the routed lines of each stream land in their own file
+# on the siem-out volume. Replace it with your SIEM sink (docs/siem.md).
+sinks:
+  file_decision:
+    type: file
+    inputs: [tag_decision]
+    path: /var/lib/siem-out/decisions.jsonl
+    encoding:
+      codec: json
+
+  file_admin:
+    type: file
+    inputs: [tag_admin]
+    path: /var/lib/siem-out/admin.jsonl
+    encoding:
+      codec: json

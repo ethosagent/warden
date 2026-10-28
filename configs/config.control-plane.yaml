@@ -72,6 +72,15 @@ logging:
 #                                          # Key: --admin-audit-key-file (default <state-dir>/cp-audit.key).
 #  trustedProxies: []                      # CIDRs of reverse proxies whose X-Forwarded-For sets the
 #                                          # admin audit client_ip (default none: the peer address).
+#  breakGlass:                             # emergency local admin login for when the IdP is down;
+#                                          # off by default; needs auth: oidc. Make the hash with
+#                                          # `warden control-plane hash-password` (argon2id).
+#    enabled: false
+#    username: breakglass-admin            # placeholder; at most 128 bytes
+#    passwordHashEnv: WARDEN_BREAKGLASS_HASH  # env var NAME holding the hash; or passwordHashFile
+#                                          # (exactly one; a file is re-read so it can rotate)
+#    sessionTTL: 1h                        # default 1h, max 4h
+#    allowBehindTLSTerminator: false
 #
 # Compose dev profile (Dex): the CP runs in a container where `localhost` is
 # itself, so the browser-facing issuer stays public and internalIssuerURL names
