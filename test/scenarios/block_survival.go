@@ -292,4 +292,3 @@ func blockListUnblockRestores(t *testing.T, h *harness.H) {
 
 // blockedUsersAPIPath is the block-list admin API collection.
 const blockedUsersAPIPath = "/dashboard/api/blocked-users"
-
