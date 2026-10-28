@@ -114,6 +114,18 @@ func TestMCPAllowWhenGroupsAccepted(t *testing.T) {
 			t.Errorf("%s: condition lost its principals: %+v", field, aw)
 		}
 	}
+	// Padded values are stored trimmed, so they can still match.
+	prov, err := NewLocalYAMLProvider(writeTemp(t, mcpHead+"  tools:\n    allow: [deploy]\n    constraints:\n      deploy:\n        allowWhen:\n          groups: [' finance ']\n          users: [' Bob@Corp.Test ']\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pol, err := prov.GetPolicy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if aw := pol.MCP.Tools.Constraints["deploy"].AllowWhen; aw.Groups[0] != "finance" || aw.Users[0] != "bob@corp.test" {
+		t.Errorf("principals not normalized: %+v", aw)
+	}
 	// Bad values still report their own path.
 	y := mcpHead + "  tools:\n    allow: [deploy]\n    constraints:\n      deploy:\n        allowWhen:\n          groups: ['']\n"
 	if err := loadErr(t, y); err == nil || !strings.Contains(err.Error(), `mcp.tools.constraints["deploy"].allowWhen`) {

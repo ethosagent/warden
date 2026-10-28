@@ -599,8 +599,14 @@ func validateAllowWhen(path string, aw *MCPToolCondition, taskScope bool) error 
 	if taskScope {
 		return fmt.Errorf("config: %s: groups/users are not supported in a task-scope allowWhen", path)
 	}
-	_, _, err := normalizePrincipals(path, aw.Groups, aw.Users)
-	return err
+	g, u, err := normalizePrincipals(path, aw.Groups, aw.Users)
+	if err != nil {
+		return err
+	}
+	// Store the trimmed, de-duplicated lists (as the wire path does) so a
+	// padded value cannot compile into a principal that never matches.
+	aw.Groups, aw.Users = g, u
+	return nil
 }
 
 // validateScopes validates the task-scope block: unique non-empty ids, a valid
