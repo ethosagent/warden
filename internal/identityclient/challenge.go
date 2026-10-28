@@ -3,6 +3,7 @@ package identityclient
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -20,6 +21,20 @@ import (
 
 // challengeError is the `error` of a challenge body.
 const challengeError = "identity_required"
+
+// The in-tunnel challenge (#621): the forwarder asks for it with
+// challengeAskHeader on an anonymous CONNECT, and a worker that terminates TLS
+// answers 200 with the offer in signInHeader. Both names are pinned to the
+// worker's constants (internal/proxy ChallengeHeader, ChallengeInTunnel,
+// SignInHeader) by the contract doc test.
+const (
+	challengeAskHeader = "X-Warden-Challenge"
+	challengeAskValue  = "in-tunnel"
+	signInHeader       = "X-Warden-Sign-In"
+	// maxOfferHeaderBytes caps the encoded X-Warden-Sign-In value. A real offer
+	// is about 1 KiB.
+	maxOfferHeaderBytes = 16 << 10
+)
 
 // challengeBody is the 407 body as a worker writes it and as the agent gets it
 // (without the device code).
@@ -104,10 +119,7 @@ func (c *Challenger) Handle(ctx context.Context, body []byte) []byte {
 		out.SignIn = nil
 		return mustJSON(out)
 	}
-	// A compromised or misconfigured worker must not make this client poll a
-	// foreign issuer or sign in with another client.
-	if si.Issuer != c.Client.Config.Issuer || si.ClientID != c.Client.Config.ClientID || si.DeviceCode == "" {
-		c.log().Warn("identity challenge ignored: the offer is not for this issuer and client")
+	if !c.trusted(*si) {
 		cb.SignIn = nil
 		cb.SignInError = "untrusted_offer"
 		return mustJSON(cb)
@@ -118,6 +130,45 @@ func (c *Challenger) Handle(ctx context.Context, body []byte) []byte {
 	pub.DeviceCode = ""
 	relay.SignIn = &pub
 	return mustJSON(relay)
+}
+
+// trusted reports whether an offer is for this client's issuer and client id and
+// carries a device code. A compromised or misconfigured worker must not make
+// this client poll a foreign issuer or sign in with another client. It logs the
+// outcome only, never the offer.
+func (c *Challenger) trusted(si signInInfo) bool {
+	if si.Issuer != c.Client.Config.Issuer || si.ClientID != c.Client.Config.ClientID || si.DeviceCode == "" {
+		c.log().Warn("identity challenge ignored: the offer is not for this issuer and client", "outcome", "untrusted_offer")
+		return false
+	}
+	return true
+}
+
+// HandleOffer processes the X-Warden-Sign-In value of an in-tunnel challenge
+// (base64url JSON of the sign_in object, no padding): it decodes it within a
+// bound, checks it like Handle does, then tells the user and starts the poll.
+// An offer that is not decodable or not trusted is dropped (logged as
+// untrusted_offer, never its content). The agent sees none of it: the
+// forwarder has already removed the header.
+func (c *Challenger) HandleOffer(ctx context.Context, value string) {
+	if value == "" || len(value) > maxOfferHeaderBytes {
+		c.log().Warn("identity challenge ignored: the offer header is unusable", "outcome", "untrusted_offer")
+		return
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(value, "="))
+	if err != nil {
+		c.log().Warn("identity challenge ignored: the offer header is unusable", "outcome", "untrusted_offer")
+		return
+	}
+	var si signInInfo
+	if err := json.NewDecoder(bytes.NewReader(raw)).Decode(&si); err != nil {
+		c.log().Warn("identity challenge ignored: the offer header is unusable", "outcome", "untrusted_offer")
+		return
+	}
+	if !c.trusted(si) {
+		return
+	}
+	c.start(ctx, si)
 }
 
 // start tells the user and begins the one background poll, unless one is
@@ -184,4 +235,25 @@ func headerValue(head, name string) string {
 		}
 	}
 	return ""
+}
+
+// stripHeader removes every line of the named header from a raw head and
+// returns the first one's value (whitespace trimmed) and the head without them.
+// The status line and the other headers are kept byte for byte.
+func stripHeader(head, name string) (value, out string) {
+	lines := strings.SplitAfter(head, "\n")
+	kept := lines[:0]
+	found := false
+	for i, l := range lines {
+		if i > 0 {
+			if k, v, ok := strings.Cut(l, ":"); ok && strings.EqualFold(strings.TrimSpace(k), name) {
+				if !found {
+					value, found = strings.TrimSpace(v), true
+				}
+				continue
+			}
+		}
+		kept = append(kept, l)
+	}
+	return value, strings.Join(kept, "")
 }

@@ -9,6 +9,10 @@ const (
 	TestMaxConnectHeaderBytes = maxConnectHeaderBytes
 	TestConnectPreamble       = connectPreambleTimeout
 	TestWorkerDialTimeout     = workerDialTimeout
+
+	TestChallengeAskHeader = challengeAskHeader
+	TestChallengeAskValue  = challengeAskValue
+	TestSignInHeader       = signInHeader
 )
 
 // SetPreambleTimeout shortens the preamble deadline for a timeout test.

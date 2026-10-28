@@ -233,6 +233,8 @@ func TestContractDocMatchesConstants(t *testing.T) {
 			proxyAuthorizationHeader + ": Bearer <token>",
 			"http://" + ProxyAuthUsername + ":<token>@<worker>:8080",
 			IdentityHeader + ": Bearer <token>",
+			ChallengeHeader + ": " + ChallengeInTunnel,
+			SignInHeader + ": <base64url JSON of the sign_in object>",
 			"user name is `" + ProxyAuthUsername + "` (case-sensitive)",
 		} {
 			if !strings.Contains(doc, want) {

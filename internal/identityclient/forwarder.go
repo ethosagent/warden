@@ -332,6 +332,11 @@ func (f *Forwarder) handle(ctx context.Context, conn net.Conn) {
 	if !anonymous {
 		authLine = "Proxy-Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte(workerUser+":"+token)) + "\r\n"
 	}
+	// An anonymous CONNECT asks the worker to put the challenge inside the tunnel
+	// (#621): the worker's 200 then carries the offer, which is removed below.
+	if anonymous {
+		authLine = challengeAskHeader + ": " + challengeAskValue + "\r\n"
+	}
 	if _, err := fmt.Fprintf(wc, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n%s\r\n", target, target, authLine); err != nil {
 		rejectAndClose(conn, br, "502 Bad Gateway", "Content-Type: text/plain\r\n", "warden forwarder: worker_unreachable\n")
 		return
@@ -346,6 +351,15 @@ func (f *Forwarder) handle(ctx context.Context, conn net.Conn) {
 	if status == 407 && f.Challenge != nil {
 		f.relayChallenge(ctx, conn, br, wc, wbr, head, fp)
 		return
+	}
+	if status == 200 {
+		// The offer header never reaches the agent, whoever sent it.
+		var offer string
+		offer, head = stripHeader(head, signInHeader)
+		if anonymous && f.Challenge != nil && offer != "" {
+			f.Challenge.HandleOffer(ctx, offer)
+			f.log().Info("identity forwarder: in-tunnel sign-in challenge", "token_fp", fp)
+		}
 	}
 	if _, err := io.WriteString(conn, head); err != nil {
 		return
