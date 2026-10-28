@@ -350,8 +350,8 @@ llmproviders writes, `/dashboard/api/secretstore` POST and DELETE, `/central/sec
 POST, `DELETE /central/secrets/{key}` and the admin session revoke
 (`DELETE /dashboard/api/sessions`). Which routes count comes from the authz route
 table (`Audited`), not from the HTTP method, so worker heartbeats, ingest, `/policy`
-and the read-only POSTs (`/dashboard/api/query`, `query/generate`, `audit/verify`)
-never write a row. Each row carries:
+and the read-only POSTs (`/dashboard/api/query`, `query/generate`, `audit/verify`,
+`admin-audit/verify`) never write a row. Each row carries:
 
 - the actor: the session's subject, role and `auth_method` (`oidc` or `breakglass`),
   or, in `console.auth: none`, actor `cp-admin-token` with role `admin` and
@@ -381,6 +381,77 @@ is logged at ERROR with `persist_failed=true`, an `admin_audit_degraded` alert i
 raised, and further audited changes answer 503 `{"error":"admin_audit_unavailable"}`
 before they run, until the database accepts writes again. Reads, `/policy`, ingest
 and heartbeats never depend on the audit log.
+
+**Sign-ins and sign-outs.** In `oidc` mode the login and logout handlers record
+their own rows (the middleware never wraps `/auth/*`), all with target `session`,
+`auth_method` `oidc` (`breakglass` for the logout of a break-glass session), a `request_id` (echoed as `X-Request-Id`) and `client_ip`:
+
+| Action | When | Actor | Outcome | Details |
+|---|---|---|---|---|
+| `auth.login` | `GET /auth/callback` created a session | the verified ID token's `sub` and `email`, role from `console.roles` | `ok` (status 302) | `{role}` |
+| `auth.login_failed` | `GET /auth/callback` failed after its pending `state` was consumed | the verified token's subject when there is one (`no_role`), otherwise `anonymous` | `denied` or `error` (status 302) | `{reason}` |
+| `auth.logout` | `POST /auth/logout` ended a live session | the session's user, captured before the row is deleted | `ok` (status 204) | none |
+
+`target_ref` of `auth.login` and `auth.logout` is the first 8 hex characters of the
+session's id hash (the `console_login`/`console logout` log lines use the same value),
+so a sign-in and its sign-out can be matched. `details.reason` is a closed set:
+
+| `reason` | Outcome | Cause (`login_error` code) |
+|---|---|---|
+| `no_role` | `denied` | the verified user matches no `console.roles` group (`no_role`) |
+| `bad_token` | `denied` | the ID token failed verification or its nonce did not match (`token_invalid`, `nonce_mismatch`) |
+| `state_invalid` | `denied` | the state was valid but the browser-binding login cookie was missing or wrong (`state_invalid`) |
+| `idp_error` | `error` | the IdP answered with an error, or its keys could not be fetched (`idp_error`, `idp_unavailable`) |
+| `exchange_failed` | `error` | no code, the token exchange failed, or the session could not be stored (`exchange_failed`) |
+
+A callback with a missing, unknown or expired `state` consumed nothing and writes no
+row, and neither does a logout without a live session or one refused for CSRF. At most
+20 `auth.login_failed` rows per client address are written per minute. At most 4,096
+addresses are tracked at once; while all of them are inside their minute, a new
+address writes no row either. Further attempts only increment an in-memory counter and
+log `admin_audit_login_failed_rate_limited`, at most once a minute per address.
+Successful logins are never rate-limited. The authorization code, `state`, PKCE
+verifier, nonce, tokens and cookie values never appear in a row or a log line. If a
+row cannot be appended, the entry is logged at ERROR with `persist_failed=true` and
+the `admin_audit_degraded` alert is raised as above, but the sign-in or sign-out
+itself still succeeds: it changes no admin state.
+
+**Reading and verifying in the dashboard.** With the log on, the control plane
+serves three read-only routes and an **Admin log** tab (separate from the receipts
+**Audit** tab and its `/dashboard/api/audit*` routes). Off, or on a worker, all three
+answer 404 and the tab stays hidden; the tab is also hidden from viewers and editors.
+Nothing in the dashboard writes to the chain, and none of these routes is recorded.
+
+| Route | Role (oidc) | What it returns |
+|---|---|---|
+| `GET /dashboard/api/admin-audit` | admin | `{entries, nextCursor}`, newest first |
+| `POST /dashboard/api/admin-audit/verify` | admin | `{ok, checked, firstBadSeq, reason, headSeq, headHash, lastVerifiedSeq, partial}` |
+| `GET /dashboard/api/admin-audit/pubkey` | any role | `{alg: "ed25519", keys: [{keyId, publicKey, firstSeq}]}` |
+
+The list takes `actor` (a sub or an `actor_id`), `action`, `outcome` (`ok`,
+`denied`, `rejected`, `error`), `since` (RFC3339), `limit` (1 to 200, default 50)
+and `cursor`; a malformed value answers 400. Pass the returned `nextCursor` as
+`cursor` for the next page; it is 0 on the last one. Each entry has the signed fields
+(hashes in hex) plus the actor's plaintext sub and email from the side table, never
+a signature or a request body.
+
+Verify streams the chain and checks seq continuity, every `prev_hash` link, each
+recomputed entry hash, each Ed25519 signature under the key its `key_id` names (keys
+come from the chain's genesis and `segment_start` entries), that the key changes only
+at a `segment_start`, and the signed `actor_id` against the side table with the
+control plane's HMAC key. The optional body `{fromSeq, anchor: {seq, hash}}` starts
+at `fromSeq` and compares the entry at `anchor.seq` with a hex entry hash you saw
+earlier (for example the head of an emitted log line), which also detects a deleted
+tail. One call checks at most 10,000 rows: when `partial` is true, call again with
+`fromSeq` = `lastVerifiedSeq + 1` (the tab does this for you). On failure `ok` is
+false, `firstBadSeq` is the first row that does not verify and `reason` names the
+check (`entry_hash`, `prev_hash`, `signature`, `seq_gap`, `actor_id`,
+`anchor_mismatch`, ...); the control plane also logs it at WARN. One verification
+runs at a time; a concurrent call answers 429. In `console.auth: none` the verify
+POST, like every dashboard POST, needs the `--admin-token-env` bearer.
+
+The pubkey route lists every key the chain declares, so entries signed before a
+manual key change stay verifiable; the tab shows each key with a copy button.
 
 Offline CLIs that change admin state record through the same chain with
 `adminaudit.OpenForCLI`: actor `cli:<os user>`, auth_method `cli`, the same key
@@ -519,6 +590,9 @@ fails when the two differ.
 | Route | Method | Minimum role | Action |
 |---|---|---|---|
 | `/dashboard/` | GET | viewer | `ui.read` |
+| `/dashboard/api/admin-audit` | GET | admin | `adminaudit.read` |
+| `/dashboard/api/admin-audit/pubkey` | GET | viewer | `adminaudit.pubkey` |
+| `/dashboard/api/admin-audit/verify` | POST | admin | `adminaudit.verify` |
 | `/dashboard/api/alerts` | GET | viewer | `alerts.read` |
 | `/dashboard/api/analytics` | GET | viewer | `analytics.read` |
 | `/dashboard/api/audit` | GET | viewer | `audit.read` |

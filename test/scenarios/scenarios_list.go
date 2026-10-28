@@ -82,6 +82,22 @@ var All = slices.Concat(
 		// saves create versions authored anonymous that workers enforce.
 		// In-process only (it reads the CP state dir).
 		{Name: "policy_store_dashboard_publish", Opts: policyStorePublishOpts(), Run: policyStoreDashboardPublish},
+		// Scoped policy (W-P1-GPOL-10): with identity off a scoped entry loads
+		// but allows nobody (identity_required); an unscoped entry still applies.
+		{Name: "scoped_policy_fail_closed", Run: scopedPolicyFailClosed},
+		// Per-request scoped decisions (W-P1-GPOL-10): each request, on h1 and
+		// every h2 stream, is decided with its own verified subject; members are
+		// forwarded, non-members and anonymous callers are denied.
+		{Name: "scoped_policy_deferred_identity", Opts: identityOpts(), Run: scopedPolicyDeferredIdentity},
+		// Replay of recorded identities (W-P1-GPOL-05): a candidate narrowing a
+		// scoped rule names the affected user and counts anonymous apart.
+		{Name: "scoped_policy_replay_affected_users", Opts: identityOpts(), Run: scopedPolicyReplayAffectedUsers},
+		// MCP subject seam (W-P1-GPOL-04): the verified subject reaches the MCP
+		// gateway through RequestMeta without changing any verdict.
+		{Name: "mcp_subject_seam_unchanged", Opts: mcpSubjectOpts(), Run: mcpSubjectSeamUnchanged},
+		// Group-gated MCP tools (W-P1-GPOL-11): allowWhen.groups is decided with
+		// the request's verified subject; non-members are denied mcp_tool_condition.
+		{Name: "mcp_group_condition", Opts: mcpGroupOpts(), Run: mcpGroupCondition},
 		// Version contract (W-P1-PVER-08): GET reports the head, If-Match names
 		// it, a stale save is a 409 naming the author and is audited rejected.
 		// In-process only (it reads the CP state dir).
@@ -119,6 +135,17 @@ var All = slices.Concat(
 		{Name: "admin_audit_records_bearer_write", Opts: adminAuditBearerOpts(), Run: adminAuditRecordsBearerWrite},
 		// In oidc mode a viewer's refused write is one denied row; no session, no row.
 		{Name: "admin_audit_records_viewer_denied", Opts: adminAuditOIDCOpts(), Run: adminAuditRecordsViewerDenied},
+		// Login and logout events (W-P1-AAUD-07): a sign-in, a no-role sign-in and a
+		// logout are one row each, for the verified user. In-process only (issuer
+		// fake, CP state dir).
+		{Name: "admin_audit_records_login_logout", Opts: adminAuditOIDCOpts(), Run: adminAuditRecordsLoginLogout},
+		// Admin audit dashboard API (W-P1-AAUD-03): list, verify and pubkey over the
+		// real chain, read-only (no row added); verify needs the admin bearer in none
+		// mode and admin in oidc, where a viewer may read only the keys; with admin
+		// audit off all three are 404. In-process only (they read the CP state dir).
+		{Name: "admin_audit_dashboard_bearer", Opts: adminAuditBearerOpts(), Run: adminAuditDashboardBearer},
+		{Name: "admin_audit_dashboard_roles", Opts: adminAuditOIDCOpts(), Run: adminAuditDashboardRoles},
+		{Name: "admin_audit_dashboard_disabled", Opts: []harness.Option{harness.WithControlPlaneAdminToken()}, Run: adminAuditDashboardDisabled},
 		// CP admin bearer (W-P1-WTOK-07): --admin-token-env opens dashboard writes,
 		// the shared worker token does not, and the admin token opens no worker
 		// route. In-process only (the compose stack sets no admin token yet).

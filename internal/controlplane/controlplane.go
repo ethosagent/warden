@@ -144,6 +144,11 @@ type policyWire struct {
 	// stay on the CP). Omitempty keeps the wire and ETag unchanged when empty.
 	BlockedUsers []config.BlockedUser `json:"blockedUsers,omitempty"`
 	Settings     *config.SettingsWire `json:"settings,omitempty"`
+	// ScopedAllowlist and ScopedAllowPos are filled only by projectScoped, at
+	// serve time: identity-scoped allow entries move out of Allowlist so a
+	// worker that decodes leniently cannot read one as global. Never stored.
+	ScopedAllowlist []config.AllowlistEntry `json:"scopedAllowlist,omitempty"`
+	ScopedAllowPos  []int                   `json:"scopedAllowPos,omitempty"`
 }
 
 // Long-poll bounds and the external-edit re-read cadence.
@@ -577,6 +582,11 @@ func (s *Server) Handler() http.Handler {
 	//     receipts source is wired and the receipts block stays zeroed.
 	dash.SetSecretStore(s.secretStore, s.cfg.SecretStoreBackend)
 	dash.SetAuthMode(s.authMode())
+	// Admin audit log API (W-P1-AAUD-03): only with console.adminAudit on;
+	// without a source the dashboard answers 404 and hides the tab.
+	if s.cfg.AdminAudit != nil {
+		dash.SetAdminAudit(adminAuditDashSource{store: s.cfg.AdminAudit, logger: s.cfg.Logger})
+	}
 	if s.integrationsStore != nil {
 		// Alerts + integration status read from the CURRENT manager (re-pointed on
 		// reload), so a reload never silently breaks the alerts tab or the status view.
