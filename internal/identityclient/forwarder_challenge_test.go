@@ -163,6 +163,7 @@ func startChallengeForwarderT(t *testing.T, r *rig, offer, tunnel func() string)
 	cr.chal = &identityclient.Challenger{Client: r.cl, Notify: cr.notes.add, Log: log}
 	fwd := &identityclient.Forwarder{
 		WorkerAddr: w.ln.Addr().String(), ClientCredential: fwdCred, Challenge: cr.chal, Log: log,
+		InTunnel: tunnel != nil,
 		Token: func(ctx context.Context) (string, error) {
 			res, err := r.cl.Token(ctx)
 			return res.IDToken, err
@@ -232,8 +233,8 @@ func TestForwarderChallenge(t *testing.T) {
 	}
 	// The worker was dialled with no Proxy-Authorization at all.
 	heads := cr.worker.Heads()
-	if len(heads) != 1 || strings.Contains(heads[0], "Proxy-Authorization") {
-		t.Fatalf("worker heads = %q, want one CONNECT without credentials", heads)
+	if len(heads) != 1 || strings.Contains(heads[0], "Proxy-Authorization") || strings.Contains(heads[0], "X-Warden-Challenge") {
+		t.Fatalf("worker heads = %q, want one CONNECT without credentials and without the in-tunnel ask", heads)
 	}
 	// The agent's body: the contract fields, no device code anywhere.
 	if strings.Contains(string(body), deviceCode) || strings.Contains(string(body), "device_code") {

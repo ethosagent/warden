@@ -382,8 +382,10 @@ A client that sends `X-Warden-Challenge: in-tunnel` also reads `X-Warden-Sign-In
 from the `200` head, **removes it before the agent sees the head**, runs the same
 checks 1 to 5 on the decoded offer (bounded size; an offer it does not trust is
 dropped, with no poll), and then splices the tunnel, where the agent reads the
-`403` above. `warden identity exec --challenge` asks for the in-tunnel challenge
-on every anonymous CONNECT. A direct client without that header keeps the `407`.
+`403` above. `warden identity exec --challenge-in-tunnel` (which implies
+`--challenge`) asks for the in-tunnel challenge on every anonymous CONNECT; plain
+`--challenge` keeps the `407` flow. A direct client without that header keeps the
+`407`.
 
 **Phase 1 trade-off.** An agent that talks to the worker directly, with no
 forwarder, receives the whole body including `device_code`, and may implement

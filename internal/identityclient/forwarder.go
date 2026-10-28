@@ -107,6 +107,15 @@ type Forwarder struct {
 	// device code. When nil, no login means 503 login_required and nothing is
 	// dialled, as before.
 	Challenge *Challenger
+	// InTunnel, with Challenge set, asks the worker to put the sign-in challenge
+	// inside the tunnel (#621) instead of refusing the CONNECT with a 407: the
+	// anonymous CONNECT carries X-Warden-Challenge: in-tunnel, and a worker that
+	// terminates TLS answers 200 with the offer in X-Warden-Sign-In (removed here
+	// before the agent sees the head); the agent's first request then gets a 403
+	// that names the link. A worker that cannot (no CA, an older build) still
+	// sends the 407, which is handled as before. Without InTunnel the CONNECT is
+	// byte for byte what it was.
+	InTunnel bool
 
 	// preambleTimeout overrides connectPreambleTimeout in tests.
 	preambleTimeout time.Duration
@@ -334,7 +343,7 @@ func (f *Forwarder) handle(ctx context.Context, conn net.Conn) {
 	}
 	// An anonymous CONNECT asks the worker to put the challenge inside the tunnel
 	// (#621): the worker's 200 then carries the offer, which is removed below.
-	if anonymous {
+	if anonymous && f.InTunnel {
 		authLine = challengeAskHeader + ": " + challengeAskValue + "\r\n"
 	}
 	if _, err := fmt.Fprintf(wc, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n%s\r\n", target, target, authLine); err != nil {
@@ -356,7 +365,7 @@ func (f *Forwarder) handle(ctx context.Context, conn net.Conn) {
 		// The offer header never reaches the agent, whoever sent it.
 		var offer string
 		offer, head = stripHeader(head, signInHeader)
-		if anonymous && f.Challenge != nil && offer != "" {
+		if anonymous && f.InTunnel && f.Challenge != nil && offer != "" {
 			f.Challenge.HandleOffer(ctx, offer)
 			f.log().Info("identity forwarder: in-tunnel sign-in challenge", "token_fp", fp)
 		}
