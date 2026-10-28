@@ -147,6 +147,7 @@ event, the decision log and `warden_blocked_total{reason}`.
 | `identity_groups_truncated` | As `group_not_allowed`, but the subject's group list was truncated and the entry has `groups`. |
 <!-- group-policy-reasons:end -->
 
+The full reason set, with every other deny reason, is in [siem.md](siem.md#deny-reasons).
 `TestGroupPolicyDocReasons` checks that this table equals the group-policy entries
 of `denyreason.Declared()`.
 
