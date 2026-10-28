@@ -98,6 +98,14 @@ policy:
   denylist:
     - domain: evil.example.com
     - domain: "*.malware.net"
+  # Optional user block list (default: empty = no behaviour change). Each entry
+  # needs a `sub` (IdP subject, max 255 bytes) and/or an `email` (max 254 bytes,
+  # must contain '@'); emails are lowercased, entries deduped and sorted. At most
+  # 5000 entries and 512 KiB serialized. On a control plane this YAML list is
+  # ignored with a warning: manage the list from the console instead.
+  # blockedUsers:
+  #   - sub: "CgUxMjM0NRIFbG9jYWw"
+  #   - email: former.employee@corp.example
 
 # Placeholder -> environment variable mapping for the phase-1 ENV secret
 # provider. The agent only ever holds the placeholder (e.g. openai_secret_001);

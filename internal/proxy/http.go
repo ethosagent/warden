@@ -128,7 +128,11 @@ type requestScope struct {
 	idStatus     identity.Status
 	idReason     identity.Reason
 	idClaims     identity.Claims
-	subject      *identity.Subject
+	// idHeaderClaims keeps the verified header claims when they conflict with
+	// the CONNECT identity (the result then carries no claims), so the
+	// block-list check still sees both users. Deny-only, like idClaims.
+	idHeaderClaims identity.Claims
+	subject        *identity.Subject
 
 	// Decision state threaded between stages.
 	judgeReason string
@@ -421,6 +425,9 @@ func (p *Proxy) runRequestStages(s *requestScope) (endSession bool) {
 		return true
 	}
 	if p.identityStage(s) {
+		return true
+	}
+	if p.blockStage(s) {
 		return true
 	}
 	if p.constraintGate(s) {
@@ -1522,6 +1529,9 @@ func (p *Proxy) recordAllowEvent(s *requestScope) {
 	})
 }
 
+// writeErrorResponse writes a terminal HTTP/1.1 error. Every caller ends the
+// session after it, so the response says Connection: close: a keep-alive client
+// then does not race the close by sending its next request on this conn.
 func writeErrorResponse(w io.Writer, statusCode int, statusText string) {
 	resp := &http.Response{
 		StatusCode:    statusCode,
@@ -1532,6 +1542,7 @@ func writeErrorResponse(w io.Writer, statusCode int, statusText string) {
 		Header:        http.Header{},
 		Body:          io.NopCloser(strings.NewReader(statusText + "\n")),
 		ContentLength: int64(len(statusText) + 1),
+		Close:         true,
 	}
 	_ = resp.Write(w)
 }
