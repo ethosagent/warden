@@ -85,6 +85,9 @@ var All = slices.Concat(
 		// every h2 stream, is decided with its own verified subject; members are
 		// forwarded, non-members and anonymous callers are denied.
 		{Name: "scoped_policy_deferred_identity", Opts: identityOpts(), Run: scopedPolicyDeferredIdentity},
+		// MCP subject seam (W-P1-GPOL-04): the verified subject reaches the MCP
+		// gateway through RequestMeta without changing any verdict.
+		{Name: "mcp_subject_seam_unchanged", Opts: mcpSubjectOpts(), Run: mcpSubjectSeamUnchanged},
 		// Version contract (W-P1-PVER-08): GET reports the head, If-Match names
 		// it, a stale save is a 409 naming the author and is audited rejected.
 		// In-process only (it reads the CP state dir).

@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -258,5 +259,41 @@ func TestReadLineLongLineDoesNotPanic(t *testing.T) {
 	}
 	if string(got) != "short" {
 		t.Fatalf("resync failed, got %q", got)
+	}
+}
+
+// metaGW records the RequestMeta of every request it is shown.
+type metaGW struct {
+	inner *gateway.Gateway
+	metas []gateway.RequestMeta
+}
+
+func (m *metaGW) OnRequest(sk, method, url string, hdr http.Header, body []byte, meta gateway.RequestMeta) gateway.Verdict {
+	m.metas = append(m.metas, meta)
+	return m.inner.OnRequest(sk, method, url, hdr, body, meta)
+}
+
+func (m *metaGW) OnResponse(sk string, status int, hdr http.Header, body []byte) gateway.Verdict {
+	return m.inner.OnResponse(sk, status, hdr, body)
+}
+
+// A stdio session has no verified identity: every request reaches the gateway
+// with a nil subject (W-P1-GPOL-04).
+func TestStdioPumpNilSubject(t *testing.T) {
+	gw := &metaGW{inner: newGW(t, "enforce", "safe_tool")}
+	p := &Pump{GW: gw, SessionKey: "stdio"}
+	in := string(callLine(t, 1, "safe_tool")) + "\n" + string(callLine(t, 2, "other_tool")) + "\n"
+
+	var serverIn, clientOut bytes.Buffer
+	if err := p.PumpRequests(strings.NewReader(in), &serverIn, &clientOut); err != nil {
+		t.Fatalf("PumpRequests: %v", err)
+	}
+	if len(gw.metas) != 2 {
+		t.Fatalf("gateway saw %d requests, want 2", len(gw.metas))
+	}
+	for i, m := range gw.metas {
+		if m.Subject != nil {
+			t.Errorf("request %d carried subject %+v, want nil", i, m.Subject)
+		}
 	}
 }
