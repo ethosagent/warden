@@ -283,6 +283,35 @@ func TestRecordIdentityVerify(t *testing.T) {
 	}
 }
 
+func TestBlocklistMetrics(t *testing.T) {
+	var nilm *Metrics
+	nilm.RecordBlocklistEntries(3) // nil-safe
+	nilm.RecordBlocklistSessionsClosed(1)
+
+	m, h, shutdown := newWithHandler(t)
+	defer func() { _ = shutdown(context.Background()) }()
+	m.RecordBlocklistEntries(5)
+	m.RecordBlocklistEntries(2)
+	m.RecordBlocklistSessionsClosed(3)
+	m.RecordBlocklistSessionsClosed(0) // nothing closed: no change
+
+	body := scrape(t, h)
+	for name, want := range map[string]string{"warden_blocklist_entries{": "} 2", "warden_blocklist_sessions_closed_total{": "} 3"} {
+		found := false
+		for _, line := range strings.Split(body, "\n") {
+			if strings.HasPrefix(line, name) && strings.HasSuffix(line, want) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("scrape has no %s... line ending %q\n---\n%s", name, want, body)
+		}
+	}
+	if strings.Contains(body, "sub=") || strings.Contains(body, "email=") {
+		t.Errorf("a blocklist series carries identity\n%s", body)
+	}
+}
+
 func TestScopedCounterScrape(t *testing.T) {
 	m, h, shutdown := newWithHandler(t)
 	defer func() { _ = shutdown(context.Background()) }()

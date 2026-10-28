@@ -135,9 +135,9 @@ func TestWritersPreserveConsoleBlock(t *testing.T) {
 	}
 }
 
-func testLogger() (*slog.Logger, *bytes.Buffer) {
-	var buf bytes.Buffer
-	return slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})), &buf
+func testLogger() (*slog.Logger, *syncBuf) {
+	buf := &syncBuf{}
+	return slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})), buf
 }
 
 func writeFileT(t *testing.T, path, body string) {

@@ -54,7 +54,14 @@ type BlockListStore interface {
 	Add(ctx context.Context, in BlockListAdd) (BlockListEntry, error)
 	// Remove deletes the entry; ErrBlockSelfUnblock when the caller is it.
 	Remove(ctx context.Context, id string) error
+	// WorkersWithoutEnforcement returns the number of connected workers that
+	// did not advertise blocklist/v1 and up to maxEnforcementIDs of their proxy
+	// ids (sorted). Such a worker ignores the list while reporting a current ETag.
+	WorkersWithoutEnforcement(ctx context.Context) (int, []string)
 }
+
+// maxEnforcementIDs bounds the proxy ids the list response names.
+const maxEnforcementIDs = 50
 
 const (
 	blockedUsersPath = "/dashboard/api/blocked-users"
@@ -72,6 +79,9 @@ func (s *Server) SetBlockListStore(st BlockListStore) {
 
 type blockedUsersListResponse struct {
 	Entries []BlockListEntry `json:"entries"`
+	// WorkersWithoutEnforcement counts connected workers lacking blocklist/v1.
+	WorkersWithoutEnforcement    int      `json:"workersWithoutEnforcement"`
+	WorkersWithoutEnforcementIDs []string `json:"workersWithoutEnforcementIDs"`
 }
 
 type blockedUsersAddRequest struct {
@@ -104,7 +114,14 @@ func (s *Server) handleBlockedUsers(w http.ResponseWriter, r *http.Request) {
 		if entries == nil {
 			entries = []BlockListEntry{}
 		}
-		writeJSON(w, blockedUsersListResponse{Entries: entries})
+		n, ids := s.blockList.WorkersWithoutEnforcement(r.Context())
+		if len(ids) > maxEnforcementIDs {
+			ids = ids[:maxEnforcementIDs]
+		}
+		if ids == nil {
+			ids = []string{}
+		}
+		writeJSON(w, blockedUsersListResponse{Entries: entries, WorkersWithoutEnforcement: n, WorkersWithoutEnforcementIDs: ids})
 		return
 	}
 	var req blockedUsersAddRequest

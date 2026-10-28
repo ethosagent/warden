@@ -20,8 +20,13 @@
 # Prereq (run from the repo root): generate the bake-once CA into ./certs:
 #   OUT_DIR=deploy/compose/certs ./scripts/gen-certs.sh
 #
+# Per-worker tokens (docs/control-plane.md#worker-token-cli): the worker holds its
+# OWN revocable wwt_ token and the control plane runs strict (--require-worker-tokens).
+# The one-shot cp-bootstrap service registers it before the control plane starts.
+# The defaults are public dev placeholders (see .env.example); set real values
+# anywhere that is not a laptop (WARDEN_WORKER_1_TOKEN, WARDEN_CP_ADMIN_TOKEN).
+#
 # Run (from the repo root):
-#   WARDEN_CP_TOKEN=dev-token \
 #   docker compose -f deploy/compose/docker-compose.hermes.yml up
 #
 # Hermes API: http://localhost:8642   ·   Hermes dashboard: http://localhost:9119 (login: admin / warden)
@@ -29,13 +34,36 @@
 # Worker-local dashboard:          http://localhost:9090/dashboard/
 
 services:
+  # One-shot: registers the worker's per-worker token (--from-env, so the plaintext
+  # never appears on a command line or in a log) on the control plane's state
+  # volume as the image's warden user, then exits. Re-running is a no-op (same
+  # name and value), so every `up` is safe. See docs/control-plane.md#worker-token-cli.
+  cp-bootstrap:
+    image: ethosagent/warden:${WARDEN_VERSION:-0.3.0}
+    restart: "no"
+    network_mode: none
+    environment:
+      - WARDEN_WORKER_1_TOKEN=${WARDEN_WORKER_1_TOKEN:-wwt_devonlyworkeronetokennotarealsecretxxxxxxxxxxxxxxxxx}
+    volumes:
+      - hermes-cp-data:/data
+    entrypoint:
+      - sh
+      - -c
+      - |
+        set -e
+        warden control-plane token create --from-env WARDEN_WORKER_1_TOKEN --name w1 --proxy-id hermes-worker --state-dir=/data
+
   control-plane:
     image: ethosagent/warden:${WARDEN_VERSION:-0.3.0}
+    depends_on:
+      cp-bootstrap:
+        condition: service_completed_successfully
     networks: [cp-net]
     ports:
       - "127.0.0.1:7070:7070"                  # fleet dashboard + /policy + /central/ingest
     environment:
-      - WARDEN_CP_TOKEN=${WARDEN_CP_TOKEN:-dev-token}
+      # The CP's own bearer for dashboard writes (policy, secrets). Not a worker credential.
+      - WARDEN_CP_ADMIN_TOKEN=${WARDEN_CP_ADMIN_TOKEN:-dev-cp-admin-token}
     volumes:
       - ../../configs/config.cp-served.yaml:/etc/warden/config.yaml:ro   # served policy
       - ./certs:/etc/warden/certs:ro
@@ -45,7 +73,8 @@ services:
       - "--config=/etc/warden/config.yaml"
       - "--state-dir=/data"
       - "--listen=0.0.0.0:7070"
-      - "--token-env=WARDEN_CP_TOKEN"
+      - "--require-worker-tokens"   # strict: wwt_ worker tokens only (needs --state-dir and TLS)
+      - "--admin-token-env=WARDEN_CP_ADMIN_TOKEN"
       - "--ca-cert=/etc/warden/certs/proxy-ca.crt"   # mint the CP server cert from the proxy CA
       - "--ca-key=/etc/warden/certs/proxy-ca.key"
       - "--tls-host=control-plane,localhost,127.0.0.1"
@@ -55,11 +84,15 @@ services:
     depends_on:
       control-plane:
         condition: service_started
+      cp-bootstrap:
+        condition: service_completed_successfully
     networks: [hermes-internal, egress, cp-net]
     ports:
       - "127.0.0.1:9090:9090"                 # dashboard + /metrics (host-only; NOT reachable by Hermes)
     environment:
-      - WARDEN_CP_TOKEN=${WARDEN_CP_TOKEN:-dev-token}
+      # This worker's own token, under the in-container name the worker config
+      # reads (controlPlane.tokenEnv and central.tokenEnv).
+      - WARDEN_WORKER_TOKEN=${WARDEN_WORKER_1_TOKEN:-wwt_devonlyworkeronetokennotarealsecretxxxxxxxxxxxxxxxxx}
       - WARDEN_ADMIN_TOKEN=${WARDEN_ADMIN_TOKEN:-dev-admin-token}
       - WARDEN_PROXY_ID=hermes-worker   # labels this worker in the fleet view
     volumes:

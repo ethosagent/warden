@@ -59,6 +59,10 @@ func loginFailure(code string) (reason, outcome string) {
 		return failBadToken, adminaudit.OutcomeDenied
 	case loginStateInvalid:
 		return failStateInvalid, adminaudit.OutcomeDenied
+	case loginUserBlocked:
+		return failUserBlocked, adminaudit.OutcomeDenied
+	case loginBlockUnavailable:
+		return failBlockUnavailable, adminaudit.OutcomeError
 	case loginIDPError, loginIDPUnavailable:
 		return failIDPError, adminaudit.OutcomeError
 	}
@@ -85,6 +89,12 @@ func (s *Server) recordLogin(r *http.Request, res loginResult) {
 		}
 		reason, outcome := loginFailure(res.reason)
 		in.Action, in.Outcome = actionLoginFailed, outcome
+		if res.reason == loginUserBlocked {
+			in.Action, in.HTTPStatus = actionBlockedLogin, http.StatusForbidden
+		}
+		if res.reason == loginBlockUnavailable {
+			in.HTTPStatus = http.StatusServiceUnavailable
+		}
 		in.Details = map[string]string{detailReason: reason}
 	}
 	s.recordAuth(r.Context(), in)

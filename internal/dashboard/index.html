@@ -794,7 +794,7 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
       <div class="card" style="margin-top:16px">
         <div class="card-head"><h3>Top users</h3><span class="sub" id="topUsersSub">by request count</span></div>
         <table id="topUsersTable">
-          <thead><tr><th>User</th><th class="num">Requests</th><th class="num">Denied</th></tr></thead>
+          <thead><tr><th>User</th><th class="num">Requests</th><th class="num">Denied</th><th></th></tr></thead>
           <tbody id="topUsersBody"></tbody>
         </table>
       </div>
@@ -933,7 +933,7 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
               <h3><span class="pill p-allow" style="margin-right:6px">allow</span>Allowlist</h3>
               <span style="display:flex;align-items:center;gap:8px"><button data-min-role="editor" class="btn sm" id="allowAddBtn" onclick="event.stopPropagation();addPolicyEntry('allow')">+ Add domain</button><span class="caret">▾</span></span>
             </div>
-            <div class="collapse-body"><table><tbody id="allowList"></tbody></table></div>
+            <div class="collapse-body"><div id="policyLint" role="status" hidden style="margin:8px 14px; padding:8px 12px; border-radius:6px; font-size:12px; color:var(--amber); border:1px solid var(--amber)"></div><table><tbody id="allowList"></tbody></table></div>
           </div>
           <div class="card collapse-card open" id="egressDenyCard">
             <div class="card-head clickable" onclick="toggleCollapse('egressDenyCard','warden.egDenyOpen')">
@@ -1174,6 +1174,26 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
 
       <div class="empty-only" id="es-fleet"></div>
 
+      <!-- Worker tokens (W-P1-WTOK-10): outside demo-only so it shows before the first worker connects.
+           loadWorkerTokens hides it when the API answers 404 (no state dir, or a worker dashboard). -->
+      <div class="card" id="wtok-card" style="margin-bottom:16px; display:none">
+        <div class="card-head"><h3>Worker tokens</h3><span style="display:flex;align-items:center;gap:8px"><span class="sub" id="wtok-status"></span><button data-min-role="admin" class="btn primary sm" id="wtok-new" style="display:none" onclick="toggleWorkerTokenForm()">+ New token</button></span></div>
+        <div class="card-pad">
+          <div class="note" style="margin-bottom:10px">Each worker authenticates with its own token, bound to one proxy id. A token is shown once when created and only its hash is stored. Revoke a token to cut that worker off.</div>
+          <div class="note" id="wtok-cli" style="margin-bottom:10px; display:none">This console has no sign-in (console.auth: none), so tokens are listed here but created and revoked on the control plane host with <span class="mono">warden control-plane token create</span> (and <span class="mono">revoke</span>).</div>
+          <div id="wtok-form" data-min-role="admin" style="display:none; margin-bottom:12px">
+            <div class="form-row">
+              <div class="field"><label for="wtok-name">Name</label><input type="text" id="wtok-name" maxlength="128" autocomplete="off" placeholder="e.g. worker-eu-1" /></div>
+              <div class="field"><label for="wtok-proxy">Proxy id</label><input type="text" id="wtok-proxy" maxlength="128" autocomplete="off" placeholder="the worker's proxy id" /></div>
+              <div class="field"><label for="wtok-exp">Expires in (optional)</label><input type="text" id="wtok-exp" maxlength="16" autocomplete="off" placeholder="e.g. 720h" /></div>
+              <div class="field" style="justify-content:flex-end"><button data-min-role="admin" class="btn primary sm" id="wtok-create" onclick="createWorkerToken()">Create token</button></div>
+            </div>
+          </div>
+          <div id="wtok-list"></div>
+          <div id="wtok-msg" class="note" style="margin-top:8px; display:none"></div>
+        </div>
+      </div>
+
       <div class="demo-only">
       <div class="kpi-row">
         <div class="card stat"><div class="k"><span class="health-dot" style="background:var(--green)"></span>Online</div><div class="v">—</div><div class="delta"></div></div>
@@ -1182,9 +1202,10 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
         <div class="card stat"><div class="k">Events forwarded</div><div class="v">—</div><div class="delta"></div></div>
       </div>
 
+      <div id="fleet-block-banner" class="note" style="display:none; margin-bottom:12px; color:var(--amber)"></div>
       <div class="card">
         <table id="fleetTable"><thead><tr>
-          <th>Worker</th><th>Status</th><th>Policy ETag</th><th>Pending</th><th>Last heartbeat</th><th>Last policy pull</th><th class="num">Events fwd</th>
+          <th>Worker</th><th>Auth</th><th>Status</th><th>Policy ETag</th><th>Pending</th><th>Last heartbeat</th><th>Last policy pull</th><th class="num">Events fwd</th><th>Caps</th>
         </tr></thead><tbody id="fleetBody"></tbody></table>
       </div>
       </div><!-- /demo-only -->
@@ -1337,6 +1358,25 @@ LIMIT 8;</textarea>
           <div id="sess-msg" class="note" style="margin-top:8px; display:none"></div>
         </div>
       </div>
+
+      <!-- Blocked users (W-P1-BLOCK-04): admin only (data-min-role); loadBlockedUsers hides it unless
+           the role allows admin and the API is wired (a worker answers 404). -->
+      <div class="card" id="blockedusers-card" data-min-role="admin" style="margin-bottom:16px; display:none">
+        <div class="card-head"><h3>Blocked users</h3><span style="display:flex;align-items:center;gap:8px"><span class="sub" id="bu-status"></span><button data-min-role="admin" class="btn sm" id="bu-refresh" onclick="loadBlockedUsers()">Refresh</button></span></div>
+        <div class="card-pad">
+          <div class="note" style="margin-bottom:10px">A blocked person is denied on every connected worker within one policy poll. Block by sub and email together: the sub is authoritative, and the email match still holds if an identity provider connector change gives the user a new sub.</div>
+          <div id="bu-banner" class="note" style="display:none; margin-bottom:10px; color:var(--amber)"></div>
+          <div class="note" id="bu-prefill-note" style="display:none; margin-bottom:8px"><b>Keep both</b> the sub and the email filled in: the sub is authoritative, the email is the fallback.</div>
+          <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;margin-bottom:10px">
+            <div class="field"><label for="bu-sub">Sub</label><input type="text" id="bu-sub" maxlength="256" autocomplete="off" /></div>
+            <div class="field"><label for="bu-email">Email</label><input type="text" id="bu-email" maxlength="320" autocomplete="off" /></div>
+            <div class="field"><label for="bu-reason">Reason</label><input type="text" id="bu-reason" maxlength="512" autocomplete="off" /></div>
+            <button data-min-role="admin" class="btn primary sm" id="bu-add">Block user</button>
+          </div>
+          <div id="bu-list"></div>
+          <div id="bu-msg" class="note" style="margin-top:8px; display:none"></div>
+        </div>
+      </div>
     </section>
 
   </main>
@@ -1352,6 +1392,19 @@ LIMIT 8;</textarea>
     <div style="display:flex;justify-content:flex-end;gap:8px">
       <button class="btn sm" value="cancel">Cancel</button>
       <button class="btn primary sm" value="ok" id="pmd-ok">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- One-time worker token dialog (W-P1-WTOK-10); showWorkerToken fills it with textContent and clearWorkerToken empties it on close. -->
+<dialog id="wtokDialog">
+  <form method="dialog">
+    <h3 style="margin:0 0 6px">Worker token created</h3>
+    <div class="note" style="color:var(--amber)"><b>Copy this token now.</b> It is shown only once and cannot be shown again. Anyone holding it can act as that worker.</div>
+    <code class="mono" id="wtok-value" style="display:block;margin:12px 0;padding:8px;word-break:break-all;user-select:all"></code>
+    <div style="display:flex;justify-content:flex-end;gap:8px">
+      <button type="button" class="btn sm" id="wtok-copy">Copy</button>
+      <button class="btn primary sm" value="close">Close</button>
     </div>
   </form>
 </dialog>
@@ -1742,7 +1795,7 @@ function renderTopUsers(users){
   while(body.firstChild) body.removeChild(body.firstChild);
   if(!users.length){
     const tr=document.createElement('tr'), td=document.createElement('td');
-    td.colSpan=3; td.className='muted'; td.style.cssText='text-align:center;padding:18px';
+    td.colSpan=4; td.className='muted'; td.style.cssText='text-align:center;padding:18px';
     td.textContent='No verified users in this window.';
     tr.appendChild(td); body.appendChild(tr); return;
   }
@@ -1754,6 +1807,14 @@ function renderTopUsers(users){
     const n=document.createElement('td'); n.className='num'; n.textContent=fmtNum(u.count||0);
     const dn=document.createElement('td'); dn.className='num'; dn.textContent=fmtNum(u.denied||0);
     tr.appendChild(who); tr.appendChild(n); tr.appendChild(dn);
+    const act=document.createElement('td'); act.className='num';
+    if(!u.unattributed&&(u.sub||u.email)){
+      const a=document.createElement('a'); a.className='btn sm'; a.textContent='Block';
+      a.setAttribute('data-min-role','admin'); a.title='Block this user';
+      a.href=blockUserHref(u.sub, u.email);
+      act.appendChild(a);
+    }
+    tr.appendChild(act);
     body.appendChild(tr);
   });
 }
@@ -2007,6 +2068,7 @@ document.querySelectorAll('#actSubtabs button').forEach(b=>{
    Fleet (/dashboard/api/workers)
    ============================================================ */
 async function loadFleet(){
+  loadWorkerTokens();
   let ws;
   try{ ws=await jget('/dashboard/api/workers'); }catch(e){ ws=[]; }
   ws=Array.isArray(ws)?ws:[];
@@ -2016,6 +2078,14 @@ async function loadFleet(){
   renderFleet(ws);
 }
 function fleetStat(k,v,delta){ return '<div class="card stat"><div class="k">'+k+'</div><div class="v">'+v+'</div><div class="delta">'+esc(delta)+'</div></div>'; }
+/* fleetAuthBadge: how the worker authenticates. A shared-token (legacy) or open (none) worker's
+   proxy id is self-reported, so it is flagged; a token worker shows its token's name. */
+function fleetAuthBadge(w){
+  const k=w.authKind;
+  if(k==='legacy'||k==='none') return '<span class="pill p-redact" title="the proxy id is self-reported, not verified">legacy / unverified</span>';
+  if(k==='token') return '<span class="pill p-allow">token</span> <span class="mono" style="font-size:12px">'+esc(w.tokenName||'')+'</span>';
+  return '<span class="muted">—</span>';
+}
 function renderFleet(ws){
   const online=ws.filter(w=>w.online).length;
   const stale=ws.length-online;
@@ -2036,13 +2106,110 @@ function renderFleet(ws){
       : '<span class="pill p-redact"><span class="d" style="background:var(--amber)"></span>stale</span>';
     const etag=(w.policyVersion?'v'+w.policyVersion+' · ':'')+(w.policyETag||'—');
     const etagPill=w.behind?'<span class="pill p-redact">behind</span>':'<span class="pill p-allow">up-to-date</span>';
-    const pending=w.behind?'<span class="pill p-high">policy behind</span>':'<span class="muted">—</span>';
-    return '<tr><td class="mono">'+esc(w.proxyID||'—')+'</td><td>'+status+'</td>'
+    let pending=w.behind?'<span class="pill p-high">policy behind</span>':'';
+    if(w.noGroupPolicy) pending+=(pending?' ':'')+'<span class="pill p-high" title="Denies group-scoped rules until upgraded">no groupPolicy</span>';
+    if(!pending) pending='<span class="muted">—</span>';
+    return '<tr><td class="mono">'+esc(w.proxyID||'—')+'</td><td>'+fleetAuthBadge(w)+'</td><td>'+status+'</td>'
       +'<td class="mono" style="font-size:12px">'+esc(etag)+' '+etagPill+'</td>'
       +'<td>'+pending+'</td><td class="muted">'+relTime(w.lastSeen)+'</td>'
-      +'<td class="muted">'+relTime(w.lastPolicyPull)+'</td><td class="num">'+fmtNum(w.eventsForwarded||0)+'</td></tr>';
+      +'<td class="muted">'+relTime(w.lastPolicyPull)+'</td><td class="num">'+fmtNum(w.eventsForwarded||0)+'</td>'
+      +'<td class="mono" style="font-size:12px">'+esc((w.caps||[]).join(', ')||'none')+(w.online&&!hasBlockCap(w)?' <span class="pill p-high">no block list</span>':'')+'</td></tr>';
   }).join('');
+  showFleetBlockBanner(ws.filter(w=>w.online&&!hasBlockCap(w)).length);
 }
+/* A worker enforces the block list only when its heartbeat advertised blocklist/v1. */
+function hasBlockCap(w){ return Array.isArray(w.caps)&&w.caps.indexOf('blocklist/v1')>=0; }
+function blockBannerText(n){ return n+' connected worker'+(n===1?'':'s')+' do not enforce the block list'; }
+function showFleetBlockBanner(n){
+  const el=document.getElementById('fleet-block-banner'); if(!el) return;
+  el.textContent=n>0?blockBannerText(n):'';
+  el.style.display=n>0?'':'none';
+}
+
+/* ---------- Worker tokens (W-P1-WTOK-10): GET / POST / DELETE /dashboard/api/worker-tokens through api() ----------
+   The list is open to every role; create and revoke are rendered only for an oidc admin (the server
+   enforces it, and answers 403 use_cli in console.auth none). The plaintext token exists only in the
+   201 body of a create: it goes straight to showWorkerToken, which sets it with textContent, and the
+   dialog's close event empties it. It is never put in storage, a URL, a log or innerHTML. */
+async function loadWorkerTokens(){
+  const card=document.getElementById('wtok-card'); if(!card) return;
+  await authInit();
+  const list=document.getElementById('wtok-list'), st=document.getElementById('wtok-status');
+  let r=null, rows=null;
+  try{ r=await api('GET','/dashboard/api/worker-tokens'); if(r.ok) rows=await r.json(); }catch(e){ rows=null; }
+  if(r&&r.status===404){ card.style.display='none'; return; }
+  card.style.display='';
+  const canWrite=authMode==='oidc'&&roleAllows('admin');
+  document.getElementById('wtok-new').style.display=canWrite?'':'none';
+  document.getElementById('wtok-cli').style.display=authMode==='oidc'?'none':'';
+  if(!canWrite) document.getElementById('wtok-form').style.display='none';
+  if(!Array.isArray(rows)){ list.innerHTML='<div class="note" style="padding:8px 0">Worker tokens unavailable.</div>'; st.textContent=''; return; }
+  const active=rows.filter(x=>!x.revokedAt).length;
+  st.textContent=active+' active';
+  if(!rows.length){ list.innerHTML='<div class="note" style="padding:8px 0">No worker tokens yet.</div>'; return; }
+  list.innerHTML='<table><thead><tr><th>Name</th><th>Proxy id</th><th>Created</th><th>Last used</th><th>Expires</th><th>Revoked</th><th></th></tr></thead><tbody>'+
+    rows.map(x=>'<tr><td><b>'+esc(x.name)+'</b></td>'
+      +'<td class="mono" style="font-size:12px">'+esc(x.proxyID)+'</td>'
+      +'<td style="font-size:12px">'+esc(x.createdAt?relTime(x.createdAt):'—')+'</td>'
+      +'<td style="font-size:12px">'+esc(x.lastUsedAt?relTime(x.lastUsedAt):'never')+'</td>'
+      +'<td style="font-size:12px">'+esc(x.expiresAt||'never')+'</td>'
+      +'<td style="font-size:12px">'+(x.revokedAt?esc(x.revokedAt):'—')+'</td>'
+      +'<td style="text-align:right">'+(canWrite&&!x.revokedAt?'<button data-min-role="admin" class="btn sm wtok-revoke" data-id="'+esc(x.id)+'" data-name="'+esc(x.name)+'" style="color:#ff8098">Revoke</button>':'')+'</td></tr>').join('')+'</tbody></table>';
+  list.querySelectorAll('.wtok-revoke').forEach(b=>b.addEventListener('click',()=>revokeWorkerToken(b.dataset.id,b.dataset.name)));
+}
+function toggleWorkerTokenForm(){
+  const f=document.getElementById('wtok-form'); f.style.display=f.style.display==='none'?'':'none';
+}
+function workerTokenMsg(text){
+  const m=document.getElementById('wtok-msg'); m.style.display=text?'':'none'; m.textContent=text||'';
+}
+async function createWorkerToken(){
+  const name=document.getElementById('wtok-name').value.trim();
+  const proxyID=document.getElementById('wtok-proxy').value.trim();
+  const exp=document.getElementById('wtok-exp').value.trim();
+  if(!name||!proxyID){ workerTokenMsg('Name and proxy id are required.'); return; }
+  const body={name:name,proxyID:proxyID};
+  if(exp) body.expiresIn=exp;
+  const btn=document.getElementById('wtok-create'); btn.disabled=true;
+  let r=null, d=null;
+  try{ r=await api('POST','/dashboard/api/worker-tokens',body); if(r.status===201) d=await r.json(); }catch(e){ r=null; d=null; }
+  btn.disabled=false;
+  const tok=d&&d.token; d=null;
+  if(!tok){
+    let why=r?('status '+r.status):'network error';
+    if(r&&r.status!==201){ try{ const e=await r.json(); if(e&&e.error) why=e.error; }catch(x){} }
+    workerTokenMsg('Create failed: '+why+'.'); return;
+  }
+  workerTokenMsg('');
+  document.getElementById('wtok-name').value=''; document.getElementById('wtok-proxy').value=''; document.getElementById('wtok-exp').value='';
+  document.getElementById('wtok-form').style.display='none';
+  showWorkerToken(tok);
+  loadWorkerTokens();
+}
+async function revokeWorkerToken(id,name){
+  if(!window.confirm('Revoke worker token "'+name+'"? That worker is cut off at once and cannot be re-enabled.')) return;
+  let r=null;
+  try{ r=await api('DELETE','/dashboard/api/worker-tokens/'+encodeURIComponent(id)); }catch(e){ r=null; }
+  workerTokenMsg(r&&r.status===204 ? 'Revoked "'+name+'".' : 'Revoke failed'+(r?(': status '+r.status):'')+'.');
+  loadWorkerTokens();
+}
+function showWorkerToken(tok){
+  document.getElementById('wtok-value').textContent=tok;
+  const dlg=document.getElementById('wtokDialog');
+  if(typeof dlg.showModal==='function') dlg.showModal(); else dlg.setAttribute('open','');
+}
+function clearWorkerToken(){
+  document.getElementById('wtok-value').textContent='';
+  const b=document.getElementById('wtok-copy'); if(b) b.textContent='Copy';
+}
+(function(){
+  const dlg=document.getElementById('wtokDialog'), cp=document.getElementById('wtok-copy');
+  if(dlg) dlg.addEventListener('close',clearWorkerToken);
+  if(cp) cp.addEventListener('click',async()=>{
+    try{ await navigator.clipboard.writeText(document.getElementById('wtok-value').textContent); cp.textContent='Copied'; }
+    catch(e){ cp.textContent='Copy failed: select the token and copy it'; }
+  });
+})();
 
 /* ============================================================
    Explore (/dashboard/api/query + /query/schema)
@@ -2335,6 +2502,7 @@ async function loadSettings(){
   loadIntegrations();
   loadLLMProviders();
   loadSessions();
+  loadBlockedUsers();
 }
 function renderPolicyLine(p){
   const el=document.getElementById('rt-policy'); if(!el) return;
@@ -2738,6 +2906,107 @@ async function revokeSessions(kind,value,what){
   loadSessions();
 }
 
+/* blockedusers:begin */
+/* ============================================================
+   Blocked users (W-P1-BLOCK-04): GET / POST /dashboard/api/blocked-users and
+   DELETE .../{id}, all through api() (CSRF header). Shown only to an admin
+   (roleAllows; none mode leaves it to the server) and only when the API is wired
+   (a worker answers 404). Sub, email and reason come from admins and an IdP, so they
+   reach the DOM only through esc() or textContent. Server error text is shown only
+   for a 400 (request wording that never carries an entry value).
+   ============================================================ */
+function blockUserHref(sub,email){
+  return '#blocked-users?sub='+encodeURIComponent(sub||'')+'&email='+encodeURIComponent(email||'');
+}
+function buMsg(text,bad){
+  const m=document.getElementById('bu-msg'); if(!m) return;
+  m.style.display=text?'':'none'; m.textContent=text||''; m.style.color=bad?'#ff8098':'';
+}
+async function loadBlockedUsers(){
+  const card=document.getElementById('blockedusers-card'); if(!card) return;
+  await authInit();
+  if(!roleAllows('admin')){ card.style.display='none'; return; }
+  const list=document.getElementById('bu-list'), st=document.getElementById('bu-status');
+  let d=null;
+  try{ const r=await api('GET','/dashboard/api/blocked-users'); if(r.ok) d=await r.json(); }catch(e){ d=null; }
+  if(!d||!Array.isArray(d.entries)){ card.style.display='none'; return; }
+  card.style.display='';
+  st.textContent=d.entries.length+' blocked';
+  const n=d.workersWithoutEnforcement||0, ban=document.getElementById('bu-banner');
+  if(ban){
+    const ids=(d.workersWithoutEnforcementIDs||[]).join(', ');
+    ban.textContent=n>0?blockBannerText(n)+(ids?': '+ids:'')+'. Upgrade them; until then they ignore this list.':'';
+    ban.style.display=n>0?'':'none';
+  }
+  if(!d.entries.length){ list.innerHTML='<div class="note" style="padding:8px 0">No blocked users.</div>'; return; }
+  list.innerHTML='<table><thead><tr><th>Sub</th><th>Email</th><th>Reason</th><th>Added by</th><th>Added</th><th></th></tr></thead><tbody>'+
+    d.entries.map(e=>'<tr><td class="mono" style="font-size:12px">'+esc(e.sub||'—')+'</td>'
+      +'<td>'+esc(e.email||'—')+'</td>'
+      +'<td style="font-size:12px">'+esc(e.reason)+'</td>'
+      +'<td class="mono" style="font-size:12px">'+esc(e.createdBy)+'</td>'
+      +'<td style="font-size:12px">'+esc(relTime(e.createdAt))+'</td>'
+      +'<td style="text-align:right"><button data-min-role="admin" class="btn sm bu-rm" data-id="'+esc(e.id)+'" data-label="'+esc(e.email||e.sub)+'" style="color:#ff8098">Unblock</button></td></tr>').join('')+'</tbody></table>';
+  list.querySelectorAll('.bu-rm').forEach(b=>b.addEventListener('click',()=>removeBlockedUser(b.dataset.id,b.dataset.label)));
+}
+async function removeBlockedUser(id,label){
+  if(!window.confirm('Unblock '+label+'? They can use Warden again within one policy poll.')) return;
+  let r=null;
+  try{ r=await api('DELETE','/dashboard/api/blocked-users/'+encodeURIComponent(id)); }catch(e){ r=null; }
+  if(r&&r.status===204) buMsg('Unblocked.',false);
+  else buMsg(await blockErrorText(r,'Unblock'),true);
+  loadBlockedUsers();
+}
+async function blockErrorText(r,what){
+  if(!r) return what+' failed: the control plane is unreachable.';
+  let d=null; try{ d=await r.json(); }catch(e){ d=null; }
+  const code=d&&d.error;
+  if(r.status===403&&code==='self_unblock_forbidden') return 'You cannot unblock yourself; ask another admin.';
+  if(r.status===403) return what+' failed: admin role required.';
+  if(r.status===409) return 'That user is already blocked.';
+  if(r.status===422) return 'The block list is full.';
+  if(r.status===404) return what+' failed: entry not found.';
+  if(r.status===503) return what+' failed: the control plane has no --state-dir.';
+  if(r.status===400&&code) return what+' failed: '+code;
+  return what+' failed (status '+r.status+').';
+}
+async function addBlockedUser(){
+  const sub=document.getElementById('bu-sub'), em=document.getElementById('bu-email'), rs=document.getElementById('bu-reason');
+  const subV=sub.value.trim(), emailV=em.value.trim();
+  if(!subV&&!emailV){ buMsg('Enter a sub, an email or both.',true); return; }
+  const body={sub:subV, email:emailV, reason:rs.value.trim()};
+  let r=null;
+  try{ r=await api('POST','/dashboard/api/blocked-users',body); }catch(e){ r=null; }
+  if(!r||r.status!==201){ buMsg(await blockErrorText(r,'Block'),true); return; }
+  let d=null; try{ d=await r.json(); }catch(e){ d=null; }
+  buMsg('Blocked.',false);
+  document.getElementById('bu-msg').textContent='Blocked.'+(d&&d.hint?' '+d.hint+'.':'');
+  sub.value=''; em.value=''; rs.value='';
+  const pn=document.getElementById('bu-prefill-note'); if(pn) pn.style.display='none';
+  loadBlockedUsers();
+}
+/* applyBlockHash: '#blocked-users?sub=..&email=..' opens Settings with the form prefilled with both. */
+async function applyBlockHash(){
+  const h=location.hash||'';
+  if(h.indexOf('#blocked-users')!==0) return;
+  const q=new URLSearchParams(h.indexOf('?')>=0?h.slice(h.indexOf('?')+1):'');
+  go('settings');
+  await loadBlockedUsers();
+  const pre={sub:q.get('sub')||'', email:q.get('email')||''};
+  document.getElementById('bu-sub').value=pre.sub;
+  document.getElementById('bu-email').value=pre.email;
+  const pn=document.getElementById('bu-prefill-note'); if(pn) pn.style.display='';
+  const card=document.getElementById('blockedusers-card'); if(card&&card.scrollIntoView) card.scrollIntoView();
+}
+(function(){
+  const add=document.getElementById('bu-add'); if(add) add.addEventListener('click',addBlockedUser);
+  window.addEventListener('hashchange',applyBlockHash);
+  document.addEventListener('click',ev=>{
+    const a=ev.target.closest&&ev.target.closest('a[href^="#blocked-users"]'); if(!a) return;
+    ev.preventDefault(); history.replaceState(null,'',a.getAttribute('href')); applyBlockHash();
+  });
+})();
+/* blockedusers:end */
+
 /* ============================================================
    Guardrails (Egress /policy · DLP+Judge /settings · matrix /analytics)
    MCP has its own page (loadMCPPage below) but shares the gr state + the same
@@ -2804,6 +3073,7 @@ async function putSettings(merged){
 /* ---------- Egress (/policy) ---------- */
 function renderEgress(){
   const ed=gr.policyEditable;
+  renderPolicyLint(gr.policy.lint);
   renderPolicyList('allowList','allow',gr.policy.allowlist,'#bcd',ed);
   renderPolicyList('denyList','deny',gr.policy.denylist,'#ff8098',ed);
   ['allowAddBtn','denyAddBtn'].forEach(id=>{ const b=document.getElementById(id); if(b) b.style.display=ed?'':'none'; });
@@ -2821,9 +3091,61 @@ function renderPolicyList(id,list,entries,color,ed){
     if(e.paths&&e.paths.length) cons.push('paths: '+e.paths.join(' '));
     const consHtml=cons.length? '<div class="muted" style="font-size:11px;margin-top:2px">'+esc(cons.join(' · '))+'</div>':'';
     const rm= ed? '<button data-min-role="editor" class="btn sm pol-rm" data-list="'+list+'" data-idx="'+i+'" style="color:#ff8098">Remove</button>':'';
-    return '<tr><td class="mono" style="color:'+color+'">'+esc(dom)+consHtml+'</td><td style="text-align:right">'+rm+'</td></tr>';
+    // W-P1-GPOL-08: groups/users chips on an allow entry. The server marks
+    // `scoped`; an editable entry always shows the inputs so one can be added.
+    let scopeHtml='';
+    if(list==='allow' && (ed || e.scoped)){
+      scopeHtml='<div style="margin-top:4px;font-size:11px"><span class="muted">groups</span> '+chipsHTML('allow:'+i,'groups',e.groups,ed)
+        +' <span class="muted">users</span> '+chipsHTML('allow:'+i,'users',e.users,ed)+'</div>';
+    }
+    return '<tr><td class="mono" style="color:'+color+'">'+esc(dom)+(list==='allow'?scopedBadge(e.scoped):'')+consHtml+scopeHtml+'</td><td style="text-align:right">'+rm+'</td></tr>';
   }).join('');
   el.querySelectorAll('.pol-rm').forEach(b=>b.addEventListener('click',()=>removePolicyEntry(b.dataset.list,+b.dataset.idx)));
+  bindChips(el,editAllowChip);
+}
+/* ---- group/user chips (W-P1-GPOL-08) ----
+   Every chip value goes through esc() before it reaches markup; scope/field
+   ride in data-* attributes (esc()-ed / fixed words) and are read back with
+   dataset, never evaluated. */
+function scopedBadge(scoped){
+  return scoped? ' <span class="pill p-monitor" title="limited to the listed groups/users; never allows an anonymous request">scoped</span>' : '';
+}
+function chipsHTML(scope,field,values,ed){
+  let h=(values||[]).map((v,i)=>'<span class="tag" style="font-size:11.5px">'+esc(v)
+    +(ed?' <a class="chip-rm" data-scope="'+esc(scope)+'" data-field="'+esc(field)+'" data-idx="'+i+'" title="remove" style="cursor:pointer;color:#ff8098">✕</a>':'')+'</span> ').join('');
+  if(ed) h+='<input class="chip-add" data-scope="'+esc(scope)+'" data-field="'+esc(field)+'" type="text" maxlength="256" placeholder="+ '+esc(field.replace(/s$/,''))
+    +'" style="background:var(--surface-2);border:1px solid var(--border);color:var(--text);padding:2px 6px;border-radius:6px;font:inherit;font-size:11px;width:110px"/>';
+  return h;
+}
+// bindChips wires the chip inputs/removers inside el; edit(scope, field, idx, value)
+// gets idx for a removal and value for an addition.
+function bindChips(el,edit){
+  el.querySelectorAll('.chip-rm').forEach(a=>a.addEventListener('click',()=>edit(a.dataset.scope,a.dataset.field,+a.dataset.idx,null)));
+  el.querySelectorAll('.chip-add').forEach(inp=>{
+    const commit=()=>{ const v=inp.value.trim(); if(v){ inp.value=''; edit(inp.dataset.scope,inp.dataset.field,-1,v); } };
+    inp.addEventListener('keydown',ev=>{ if(ev.key==='Enter'||ev.key===','){ ev.preventDefault(); commit(); } });
+    inp.addEventListener('change',commit);
+  });
+}
+function chipEdit(list,idx,value){
+  const cur=(list||[]).slice();
+  if(value!==null){ if(cur.indexOf(value)===-1) cur.push(value); }
+  else if(idx>=0&&idx<cur.length) cur.splice(idx,1);
+  return cur;
+}
+async function editAllowChip(scope,field,idx,value){
+  if(!gr.policyEditable) return;
+  const e=gr.policy.allowlist[+scope.split(':')[1]];
+  if(!e||(field!=='groups'&&field!=='users')) return;
+  const next=chipEdit(e[field],idx,value);
+  if(next.length) e[field]=next; else delete e[field];
+  await savePolicy();
+}
+function renderPolicyLint(lint){
+  const b=document.getElementById('policyLint'); if(!b) return;
+  const l=lint||[];
+  b.hidden=!l.length;
+  b.innerHTML=l.map(w=>'<div>⚠ '+esc(w)+'</div>').join('');
 }
 async function addPolicyEntry(list){
   if(!gr.policyEditable) return;
@@ -3005,13 +3327,15 @@ function renderMCP(){
     schema:{ pin:!!(m.schema&&m.schema.pin) },
     scan:{ toolArgs:!!(m.scan&&m.scan.toolArgs), toolResults:!!(m.scan&&m.scan.toolResults) },
     chain:{ enabled:!!(m.chain&&m.chain.enabled) },
-    tools:{ allow:((m.tools&&m.tools.allow)||[]).slice(), deny:((m.tools&&m.tools.deny)||[]).slice() }
+    tools:{ allow:((m.tools&&m.tools.allow)||[]).slice(), deny:((m.tools&&m.tools.deny)||[]).slice() },
+    cond:mcpConds(m)
   } : (gr.settingsEditable ? {
     enabled:false, mode:'monitor', failClosedOnError:false,
     schema:{ pin:false },
     scan:{ toolArgs:false, toolResults:false },
     chain:{ enabled:false },
-    tools:{ allow:[], deny:[] }
+    tools:{ allow:[], deny:[] },
+    cond:{}
   } : null);
   renderMCPConfig();
   renderMCPToolPolicy();
@@ -3046,8 +3370,38 @@ function renderMCPToolPolicy(){
   const offNote = (ed && !gr.mcp.enabled)
     ? '<div class="note" style="margin-bottom:8px">MCP inspection is <b>off</b> — add tools here, then enable it in the MCP policy card above and Save MCP for the policy to take effect.</div>'
     : '';
-  el.innerHTML = offNote + mcpListBlock('allow', gr.mcp.tools.allow, ed) + '<div class="divider"></div>' + mcpListBlock('deny', gr.mcp.tools.deny, ed);
+  el.innerHTML = offNote + mcpListBlock('allow', gr.mcp.tools.allow, ed) + mcpCondBlock(ed) + '<div class="divider"></div>' + mcpListBlock('deny', gr.mcp.tools.deny, ed);
   el.querySelectorAll('.mcp-tool-rm').forEach(b=>b.addEventListener('click',()=>removeMcpTool(b.dataset.list,+b.dataset.idx)));
+  bindChips(el,editMcpChip);
+}
+/* Per-tool allowWhen groups/users (W-P1-GPOL-08). Edited locally and saved by
+   Save MCP with the rest of the settings document; the server marks a tool
+   `scoped` (settings.mcp.tools.constraints[tool].scoped). */
+function mcpConds(m){
+  const out={}, cons=(m&&m.tools&&m.tools.constraints)||{};
+  Object.keys(cons).forEach(t=>{ const aw=cons[t]&&cons[t].AllowWhen; if(aw&&((aw.Groups&&aw.Groups.length)||(aw.Users&&aw.Users.length))) out[t]={groups:(aw.Groups||[]).slice(),users:(aw.Users||[]).slice()}; });
+  return out;
+}
+function mcpCondBlock(ed){
+  const tools=gr.mcp.tools.allow, cond=gr.mcp.cond||{};
+  const rows=tools.filter(t=>ed||cond[t]);
+  if(!rows.length) return '';
+  const h=rows.map(t=>{
+    const c=cond[t]||{groups:[],users:[]};
+    const scoped=(c.groups.length||c.users.length)>0;
+    return '<div style="padding:4px 0;font-size:12px"><span class="mono">'+esc(t)+'</span>'+scopedBadge(scoped)+' <span class="muted">groups</span> '+chipsHTML('mcp:'+t,'groups',c.groups,ed)
+      +' <span class="muted">users</span> '+chipsHTML('mcp:'+t,'users',c.users,ed)+'</div>';
+  }).join('');
+  return '<div class="divider"></div><div class="note" style="margin-bottom:6px">Limit an allowed tool to IdP groups or users (needs a verified identity); saved with Save MCP.</div>'+h;
+}
+function editMcpChip(scope,field,idx,value){
+  if(!gr.settingsEditable||!gr.mcp||(field!=='groups'&&field!=='users')) return;
+  const tool=scope.slice(scope.indexOf(':')+1);
+  if(gr.mcp.tools.allow.indexOf(tool)===-1) return;
+  const c=gr.mcp.cond[tool]||(gr.mcp.cond[tool]={groups:[],users:[]});
+  c[field]=chipEdit(c[field],idx,value);
+  if(!c.groups.length&&!c.users.length) delete gr.mcp.cond[tool];
+  renderMCPToolPolicy();
 }
 function mcpListBlock(list,arr,ed){
   const pill = list==='allow'?'<span class="pill p-allow">allow</span>':'<span class="pill p-deny">deny</span>';
@@ -3217,7 +3571,21 @@ async function saveMCP(){
     scan: Object.assign({}, base.scan||{}, {toolArgs: chk('mcpScanArgs'), toolResults: chk('mcpScanResults')}),
     chain: Object.assign({}, base.chain||{}, {enabled: chk('mcpChain')}),
   });
-  if(gr.mcp){ mcpBlock.tools=Object.assign({}, base.tools||{}, {allow:gr.mcp.tools.allow, deny:gr.mcp.tools.deny}); }
+  if(gr.mcp){
+    mcpBlock.tools=Object.assign({}, base.tools||{}, {allow:gr.mcp.tools.allow, deny:gr.mcp.tools.deny});
+    // Fold the chip edits into the constraints' allowWhen (other fields kept).
+    const cons=Object.assign({}, mcpBlock.tools.constraints||{});
+    Object.keys(cons).concat(Object.keys(gr.mcp.cond)).forEach(t=>{
+      const c=gr.mcp.cond[t]||{groups:[],users:[]};
+      const cur=Object.assign({}, cons[t]||{}); delete cur.scoped;
+      const aw=Object.assign({}, cur.AllowWhen||{}); delete aw.Groups; delete aw.Users;
+      if(c.groups.length) aw.Groups=c.groups;
+      if(c.users.length) aw.Users=c.users;
+      if(aw.AgentID||aw.TimeWindow||aw.Groups||aw.Users) cur.AllowWhen=aw; else delete cur.AllowWhen;
+      if(Object.keys(cur).length) cons[t]=cur; else delete cons[t];
+    });
+    if(Object.keys(cons).length) mcpBlock.tools.constraints=cons; else delete mcpBlock.tools.constraints;
+  }
   const merged=Object.assign({}, gr.settings, {mcp:mcpBlock});
   try{ await putSettings(merged); renderMCP(); flashBtn('mcpSaveBtn','Saved ✓'); }
   catch(err){ window.alert('MCP save failed: '+err.message); }
@@ -4179,6 +4547,7 @@ adminLogProbe();      // show the Admin log tab only where it is wired and allow
 const savedTab = (function(){ try{ return localStorage.getItem('warden.tab'); }catch(e){ return null; } })();
 const startTab = (savedTab && document.getElementById('page-'+savedTab)) ? savedTab : 'overview';
 go(startTab);
+applyBlockHash(); // a #blocked-users?sub=&email= link opens the prefilled form
 
 // state-preserving auto-refresh of the active data tab
 setInterval(()=>{

@@ -1,7 +1,6 @@
 package controlplane
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -9,8 +8,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
-	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,16 +19,22 @@ import (
 	"github.com/ethosagent/warden/internal/cpstate"
 )
 
-// checkpointLoopRunning reports whether any goroutine is in the admin audit
-// checkpoint loop.
-func checkpointLoopRunning() bool {
-	buf := make([]byte, 1<<16)
-	for {
-		n := runtime.Stack(buf, true)
-		if n < len(buf) {
-			return bytes.Contains(buf[:n], []byte("controlplane.runCheckpointLoop"))
-		}
-		buf = make([]byte, 2*len(buf))
+// loopProbe records the checkpoint loop's lifecycle through the
+// checkpointLoopHooks seam, so the tests need no goroutine-stack inspection or
+// timing.
+type loopProbe struct {
+	started chan struct{} // closed on the first start
+	once    sync.Once
+	starts  atomic.Int32
+	exits   atomic.Int32
+}
+
+func newLoopProbe() *loopProbe { return &loopProbe{started: make(chan struct{})} }
+
+func (p *loopProbe) hooks() checkpointLoopHooks {
+	return checkpointLoopHooks{
+		started: func() { p.starts.Add(1); p.once.Do(func() { close(p.started) }) },
+		exited:  func() { p.exits.Add(1) },
 	}
 }
 
@@ -75,11 +81,11 @@ func runCPWhile(t *testing.T, p Params, during func()) string {
 
 func TestCheckpointLifecycle(t *testing.T) {
 	t.Run("disabled starts no loop and logs nothing", func(t *testing.T) {
-		logs := runCPWhile(t, Params{ConfigPath: writeAuditPolicy(t, "false"), StateDir: t.TempDir()}, func() {
-			if checkpointLoopRunning() {
-				t.Error("checkpoint goroutine running with admin audit disabled")
-			}
-		})
+		probe := newLoopProbe()
+		logs := runCPWhile(t, Params{ConfigPath: writeAuditPolicy(t, "false"), StateDir: t.TempDir(), checkpointHooks: probe.hooks()}, func() {})
+		if n := probe.starts.Load(); n != 0 {
+			t.Errorf("checkpoint goroutine started %d times with admin audit disabled", n)
+		}
 		if strings.Contains(logs, "admin_audit") || strings.Contains(logs, adminaudit.SchemaV1) {
 			t.Errorf("admin audit disabled but the CP logged admin_audit lines:\n%s", logs)
 		}
@@ -88,16 +94,21 @@ func TestCheckpointLifecycle(t *testing.T) {
 	t.Run("enabled runs until cancel with startup and shutdown checkpoints", func(t *testing.T) {
 		stateDir := t.TempDir()
 		clk := clocktest.NewFake(time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC))
+		probe := newLoopProbe()
 		logs := runCPWhile(t, Params{
 			ConfigPath: writeAuditPolicy(t, "true"), StateDir: stateDir, Clock: clk,
+			checkpointHooks: probe.hooks(),
 		}, func() {
-			if !checkpointLoopRunning() {
+			select {
+			case <-probe.started:
+			case <-time.After(10 * time.Second):
 				t.Error("no checkpoint goroutine with admin audit enabled")
 			}
 		})
 		// Run returns only after the loop has stopped.
-		if checkpointLoopRunning() {
-			t.Fatal("checkpoint goroutine still running after Run returned")
+		if probe.starts.Load() != 1 || probe.exits.Load() != 1 {
+			t.Fatalf("checkpoint goroutine starts=%d exits=%d after Run returned, want 1 and 1",
+				probe.starts.Load(), probe.exits.Load())
 		}
 		lines := jsonLines(t, logs, "admin_audit.checkpoint")
 		if len(lines) != 2 {

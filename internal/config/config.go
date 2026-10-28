@@ -591,9 +591,15 @@ func validate(p Policy) error {
 		// enforces them per request (and the wire projects them fail-closed),
 		// so an allow entry may carry groups/users (MCP allowWhen too, W-P1-GPOL-11).
 		path := fmt.Sprintf("policy.allowlist[%d]", i)
-		if _, _, err := normalizePrincipals(path, e.Groups, e.Users); err != nil {
+		g, u, err := normalizePrincipals(path, e.Groups, e.Users)
+		if err != nil {
 			return err
 		}
+		// Store the trimmed, lowercased, sorted lists (as the MCP condition
+		// does) so the served body, its ETag and the policy-history diff do not
+		// depend on how the operator or the dashboard spelled the values. The
+		// slice shares its backing array with the caller's Policy.
+		p.Allowlist[i].Groups, p.Allowlist[i].Users = g, u
 		// Regex domain: ~<pattern>
 		if strings.HasPrefix(e.Domain, "~") {
 			if _, err := regexp.Compile(e.Domain[1:]); err != nil {

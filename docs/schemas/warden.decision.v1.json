@@ -80,7 +80,8 @@
           "transparent_loop_guard",
           "transparent_no_sni",
           "unspecified",
-          "unsupported_protocol"
+          "unsupported_protocol",
+          "user_blocked"
           ]
         },
         { "pattern": "^mcp_chain_[a-z0-9_]+$" }

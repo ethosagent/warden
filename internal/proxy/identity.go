@@ -300,6 +300,7 @@ func (p *Proxy) identityStage(s *requestScope) (endSession bool) {
 				// even next to a live CONNECT identity.
 				r = hr
 			case hr.status == identity.StatusValid && hr.claims.Sub != ci.Claims.Sub:
+				s.idHeaderClaims = hr.claims
 				r = idResult{status: identity.StatusConflict}
 				p.recordIdentity(identity.StatusConflict, "")
 			}

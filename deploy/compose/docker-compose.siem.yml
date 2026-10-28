@@ -1,0 +1,51 @@
+# Warden: ship the JSON audit stream to a SIEM shipper (Vector), compose override.
+#
+# Use with the base file (the proxy, control-plane and agent come from it):
+#   OUT_DIR=deploy/compose/certs ./scripts/gen-certs.sh   # once, from the repo root
+#   WARDEN_VERSION=<a release with audit.jsonLog> \
+#   docker compose -f deploy/compose/docker-compose.yml \
+#                  -f deploy/compose/docker-compose.siem.yml up
+#
+# What it does:
+#   - proxy (the worker) gets deploy/compose/siem/worker.yaml, the example worker
+#     config plus audit.jsonLog (output: file, /data/audit/decisions.jsonl);
+#   - the volume warden-audit is the worker's /data and is mounted READ-ONLY into
+#     the vector service at /var/log/warden, so the shipper can read the stream
+#     and cannot change it;
+#   - vector tails the stream (docs/siem/vector.yaml), routes it on the schema
+#     field and writes each stream to a file on the siem-out volume.
+#
+# Watch it:   docker compose ... exec vector tail -f /var/lib/siem-out/decisions.jsonl
+# Guide: docs/siem.md. The control plane's admin stream (warden.admin.v1) needs
+# console.adminAudit and its own audit.jsonLog block; see "Admin stream" there.
+
+services:
+  proxy:
+    volumes:
+      - ./siem/worker.yaml:/etc/warden/config.yaml:ro   # replaces the base file's mount of the same target
+      - warden-audit:/data                              # image's /data is owned by the warden user, so the volume is writable
+
+  vector:
+    image: timberio/vector:0.43.1-alpine
+    depends_on:
+      - proxy
+    network_mode: none                                  # a file-to-file pipeline needs no network
+    environment:
+      - WARDEN_AUDIT_GLOB=/var/log/warden/audit/*.jsonl
+      - WARDEN_VECTOR_DATA_DIR=/var/lib/vector
+    volumes:
+      - warden-audit:/var/log/warden:ro                 # read-only: the shipper never writes the stream
+      - ../../docs/siem/vector.yaml:/etc/vector/vector.yaml:ro
+      - ./siem/vector-file.yaml:/etc/vector/vector-file.yaml:ro
+      - vector-data:/var/lib/vector                     # file offsets, so a restart does not re-ship
+      - siem-out:/var/lib/siem-out
+    command:
+      - "--config"
+      - "/etc/vector/vector.yaml"
+      - "--config"
+      - "/etc/vector/vector-file.yaml"
+
+volumes:
+  warden-audit:
+  vector-data:
+  siem-out:

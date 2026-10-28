@@ -26,7 +26,7 @@
 
 controlPlane:
   endpoint: https://control-plane:7070/policy
-  tokenEnv: WARDEN_CP_TOKEN
+  tokenEnv: WARDEN_WORKER_TOKEN
   caCert: /etc/warden/certs/proxy-ca.crt
   longPollWait: 30s        # how long the CP holds the poll open before 304
   heartbeatInterval: 10s
@@ -67,6 +67,6 @@ mcp:
 central:
   mode: worker
   endpoint: https://control-plane:7070/central/ingest
-  tokenEnv: WARDEN_CP_TOKEN
+  tokenEnv: WARDEN_WORKER_TOKEN
   proxyID: ${WARDEN_PROXY_ID}
   caCert: /etc/warden/certs/proxy-ca.crt
