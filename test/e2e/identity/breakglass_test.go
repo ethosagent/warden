@@ -196,7 +196,7 @@ func policyETag(t testing.TB) string {
 	if err != nil {
 		t.Fatalf("identity: %v", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+devEnvOr("WARDEN_CP_TOKEN", cpTokenDefault))
+	req.Header.Set("Authorization", "Bearer "+(&compose.Target{}).WorkerToken(1))
 	resp, err := c.Do(req)
 	if err != nil {
 		t.Fatalf("identity: GET /policy: %v", redactURLError(err))
@@ -206,13 +206,6 @@ func policyETag(t testing.TB) string {
 		t.Fatalf("GET /policy: status %d etag %q, want 200 with an ETag", resp.StatusCode, resp.Header.Get("ETag"))
 	}
 	return resp.Header.Get("ETag")
-}
-
-func devEnvOr(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
 }
 
 type workerRow struct {
