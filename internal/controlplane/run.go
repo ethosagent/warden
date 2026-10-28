@@ -25,6 +25,7 @@ import (
 	"github.com/ethosagent/warden/internal/clock"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/cpstate"
+	"github.com/ethosagent/warden/internal/dashboard"
 	"github.com/ethosagent/warden/internal/detect"
 	"github.com/ethosagent/warden/internal/integration"
 	"github.com/ethosagent/warden/internal/observability"
@@ -119,6 +120,23 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	policyStore, err := resolvePolicyStore(p.PolicyStore, stateDir)
 	if err != nil {
 		return fail(err)
+	}
+	// With a state dir, hold the instance lock before any database is opened or
+	// the served config is seeded. Registered first, so it is released last,
+	// after the servers and stores below have closed. No state dir, no lock.
+	if stateDir != "" {
+		if err := os.MkdirAll(stateDir, 0o700); err != nil {
+			return fail(fmt.Errorf("control-plane: create state dir %s: %w", stateDir, err))
+		}
+		release, lerr := cpstate.AcquireDirLock(stateDir)
+		if errors.Is(lerr, cpstate.ErrLocked) {
+			return fail(fmt.Errorf("control plane: state dir %s is in use by another control plane (lock %s)",
+				stateDir, filepath.Join(stateDir, cpstate.LockFileName)))
+		}
+		if lerr != nil {
+			return fail(fmt.Errorf("control plane: %w", lerr))
+		}
+		defer func() { _ = release() }()
 	}
 	if p.Backup.Enabled() {
 		if err := p.Backup.Validate(stateDir); err != nil {
@@ -476,6 +494,15 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		bk.Start(bkCtx)
 		staleDone := make(chan struct{})
 		go health.runStale(bkCtx, staleDone)
+		// POST /dashboard/api/backup: the run is bound to the CP context, not
+		// the request's, and Wait covers it before the stores close.
+		srv.dash.SetBackup(func() error {
+			err := bk.StartOnDemand(bkCtx)
+			if errors.Is(err, ErrBackupInProgress) {
+				return dashboard.ErrBackupInProgress
+			}
+			return err
+		})
 		defer func() {
 			bkCancel()
 			bk.Wait()

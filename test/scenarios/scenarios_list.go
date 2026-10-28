@@ -90,6 +90,14 @@ var All = slices.Concat(
 		{Name: "backup_failure_findings", Opts: []harness.Option{harness.WithBackupUnwritable()}, Run: backupFailureFindings},
 		{Name: "backup_status_admin_only", Opts: []harness.Option{harness.WithConsoleOIDC(), harness.WithBackup()}, Run: backupStatusAdminOnly},
 		{Name: "backup_status_disabled", Opts: consoleOpts(), Run: backupStatusDisabled},
+		// On-demand backup (W-P1-OPS1-11): POST /dashboard/api/backup is an
+		// audited admin action; 404 without --backup-dir. In-process only.
+		{Name: "backup_trigger_admin", Opts: backupTriggerOpts(), Run: backupTriggerAdmin},
+		{Name: "backup_trigger_disabled", Opts: backupTriggerDisabledOpts(), Run: backupTriggerDisabled},
+		// Verified restore (W-P1-OPS1-04): the control plane's own backup set
+		// restores into an empty state dir; a running control plane's state dir
+		// and a tampered set are refused. In-process only.
+		{Name: "restore_verified", Opts: restoreOpts(), Run: restoreVerified},
 
 		{Name: "policy_store_versioned", Opts: policyStoreOpts(), Run: policyStoreVersioned},
 		// Initial import (W-P1-PVER-07): version 1 by system:import plus one

@@ -132,6 +132,8 @@ func authzTable() map[routeKey]authzRow {
 		{get, "/dashboard/api/blocked-users", readRow(admin, "blocked_users.read")},
 		{post, "/dashboard/api/blocked-users", auditedRow(admin, "blocked_users.add", blockedUsersTarget)},
 		{del, "/dashboard/api/blocked-users/{id}", auditedRow(admin, "blocked_users.remove", blockedUsersTarget)},
+		// On-demand backup (W-P1-OPS1-11); 404 unless --backup-dir is set.
+		{post, "/dashboard/api/backup", auditedRow(admin, "backup.run", "backup")},
 		// Served by the control plane itself, ahead of dash.Handler (cpDashboardRoutes).
 		{get, "/dashboard/api/sessions", readRow(admin, "sessions.read")},
 		{del, "/dashboard/api/sessions", auditedRow(admin, "sessions.revoke", "sessions")},

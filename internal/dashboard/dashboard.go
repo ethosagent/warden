@@ -154,6 +154,9 @@ type Server struct {
 	// blockList, when set (control plane), serves the block list admin API; nil
 	// makes those routes 404.
 	blockList BlockListStore
+	// backup, when set (control plane with --backup-dir), starts an on-demand
+	// backup; nil makes POST /dashboard/api/backup 404.
+	backup BackupStarter
 }
 
 // analyticsCacheTTL is how long a computed analytics/MCP payload is reused
@@ -584,6 +587,7 @@ func Routes() []Route {
 		{get, "/dashboard/api/blocked-users", "blocked_users.read"},
 		{post, "/dashboard/api/blocked-users", "blocked_users.add"},
 		{del, "/dashboard/api/blocked-users/{id}", "blocked_users.remove"},
+		{post, "/dashboard/api/backup", "backup.run"},
 	}
 }
 

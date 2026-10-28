@@ -130,6 +130,12 @@ worker requires HTTPS for the policy pull.
   > `:ro` mount) the dashboard surfaces a `permission denied` error and editing
   > is effectively disabled. The control plane logs a clear warning at startup
   > when its served-config directory is not writable.
+  >
+  > **One control plane per state dir.** With `--state-dir` the control plane holds
+  > an exclusive lock on `<state-dir>/warden-cp.lock` (mode 0600, holds the PID for
+  > operators) for as long as it runs; a second control plane on the same dir fails
+  > with `state dir ... is in use by another control plane`. A crash drops the lock
+  > automatically, so there is no stale lock to clear. Unix only.
 - **Connected workers** — a live list of every worker the control plane has heard
   from (via policy pulls and analytics ingest): online/offline status, last-seen,
   last policy pull, and events forwarded. Hidden on a single-node dashboard.
@@ -635,6 +641,7 @@ fails when the two differ.
 | `/dashboard/api/blocked-users` | GET | admin | `blocked_users.read` |
 | `/dashboard/api/blocked-users` | POST | admin | `blocked_users.add` |
 | `/dashboard/api/blocked-users/{id}` | DELETE | admin | `blocked_users.remove` |
+| `/dashboard/api/backup` | POST | admin | `backup.run` |
 | `/dashboard/api/detection` | GET | viewer | `detection.read` |
 | `/dashboard/api/detection` | POST | editor | `detection.write` |
 | `/dashboard/api/detection` | PUT | editor | `detection.write` |
@@ -1003,6 +1010,30 @@ store's change callbacks. A connected worker then receives the new list within
 The CLI has no console identity, so the self-unblock check of the admin API does
 not apply. Write access to the state dir already allows policy changes, so
 this adds no new authority.
+### On-demand backups
+
+With `--backup-dir` set, `POST /dashboard/api/backup` (admin role, audited as
+`backup.run` on target `backup`) starts one backup in the background and answers
+`202 {"started":true}`. It answers `409 {"error":"backup_in_progress"}` while a
+run is active and `404` when `--backup-dir` is unset. The body is ignored. In
+`console.auth: none` the write guard applies as for every dashboard write (the
+admin bearer; no token configured means `403`). The outcome is the scheduled
+runner's: a failed run is logged and reported, not returned to the caller.
+
+For a stopped control plane use the offline command, which takes the state-dir
+lock, opens the databases directly and writes one set in the same layout:
+
+```sh
+warden control-plane backup --state-dir /data --backup-dir /backups \
+  [--backup-include cp,alerts,config,fleet] [--analytics-db PATH] [--alerts-db PATH]
+```
+
+It prints the set path and exits 0, or prints the error and exits 1. While a
+control plane holds the state dir it exits 1 with `control plane is running; use
+POST /dashboard/api/backup or stop it`. It never opens the admin audit store (the
+manifest has no `audit_key_fingerprint`), never starts a server and never prunes
+older sets. A database that does not exist (for example no fleet database) is
+listed under `skipped`; a missing `warden-cp.db` is an error.
 
 ## Worker admin token
 
