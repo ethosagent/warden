@@ -157,10 +157,25 @@ func (s *Server) publishFinding(f integration.Finding) {
 	m.Bus().PublishFinding(f)
 }
 
+// checkpointLoopHooks lets a test observe the checkpoint loop's lifecycle
+// without inspecting goroutine stacks. Both fields are optional.
+type checkpointLoopHooks struct {
+	// started is called when the loop goroutine begins.
+	started func()
+	// exited is called as the loop returns, before done is closed, so it has
+	// run by the time Run's shutdown wait on done completes.
+	exited func()
+}
+
 // runCheckpointLoop runs the admin audit checkpoint loop until ctx is
-// cancelled, then closes done. It is a named function so a goroutine dump
-// shows whether the loop is running.
-func runCheckpointLoop(ctx context.Context, done chan<- struct{}, s *adminaudit.Store, e adminaudit.Emitter, interval time.Duration, clk clock.Clock) {
+// cancelled, then closes done.
+func runCheckpointLoop(ctx context.Context, done chan<- struct{}, s *adminaudit.Store, e adminaudit.Emitter, interval time.Duration, clk clock.Clock, hooks checkpointLoopHooks) {
 	defer close(done)
+	if hooks.started != nil {
+		hooks.started()
+	}
+	if hooks.exited != nil {
+		defer hooks.exited()
+	}
 	adminaudit.RunCheckpoints(ctx, s, e, interval, clk)
 }
