@@ -198,7 +198,7 @@ type Config struct {
 // v.Action/v.Tool/v.Reason/v.Findings — so the interface deliberately reuses
 // gateway.Verdict rather than introducing a second verdict type.
 type MCPGateway interface {
-	OnRequest(sessionKey, method, url string, hdr http.Header, body []byte) gateway.Verdict
+	OnRequest(sessionKey, method, url string, hdr http.Header, body []byte, meta gateway.RequestMeta) gateway.Verdict
 	OnResponse(sessionKey string, status int, hdr http.Header, body []byte) gateway.Verdict
 	MaxResponseScanBytes() int
 	Close() error
@@ -216,7 +216,7 @@ type MCPGateway interface {
 // logged-downgrade (monitor/off) branch instead of silently passing frames
 // through unscanned. This is the ONE WS-scanning seam the plan permits.
 type WSScanner interface {
-	OnRequest(sessionKey, method, url string, hdr http.Header, body []byte) gateway.Verdict
+	OnRequest(sessionKey, method, url string, hdr http.Header, body []byte, meta gateway.RequestMeta) gateway.Verdict
 	OnResponse(sessionKey string, status int, hdr http.Header, body []byte) gateway.Verdict
 	ScansWSFrames()
 }

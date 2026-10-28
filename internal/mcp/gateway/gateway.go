@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/ethosagent/warden/internal/config"
+	"github.com/ethosagent/warden/internal/identity"
 	"github.com/ethosagent/warden/internal/mcp"
 	"github.com/ethosagent/warden/internal/scan"
 )
@@ -649,8 +650,17 @@ func (s *session) recordID(id, tool string) {
 	s.idToTool[id] = tool
 }
 
+// RequestMeta carries per-request context that is not part of the JSON-RPC
+// body. Subject is the verified identity of the caller (nil unless the
+// identity stage found status valid, and always nil over stdio, where group-
+// gated tools are therefore denied). The gateway ignores it today; it is the
+// seam W-P1-GPOL-11 and the grant tickets build on.
+type RequestMeta struct {
+	Subject *identity.Subject
+}
+
 // OnRequest analyzes one outbound MCP request body and returns a Verdict.
-func (g *Gateway) OnRequest(sessionKey, method, url string, hdr http.Header, body []byte) (v Verdict) {
+func (g *Gateway) OnRequest(sessionKey, method, url string, hdr http.Header, body []byte, meta RequestMeta) (v Verdict) {
 	if g.disabled() {
 		return Verdict{Action: Pass}
 	}

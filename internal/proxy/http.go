@@ -629,7 +629,7 @@ func (p *Proxy) mcpRequestScan(s *requestScope) (endSession bool) {
 	fullURL := s.eventURL()
 	s.mcpSessKey = p.cfg.AgentID + ":" + s.domain
 	start := time.Now()
-	v := s.gw.OnRequest(s.mcpSessKey, s.req.Method, fullURL, s.req.Header, body)
+	v := s.gw.OnRequest(s.mcpSessKey, s.req.Method, fullURL, s.req.Header, body, gateway.RequestMeta{Subject: s.subject})
 	p.cfg.Metrics.ObserveAddedLatency("mcp_scan", time.Since(start))
 	p.recordMCPFindings(v)
 	s.mcpTool = v.Tool

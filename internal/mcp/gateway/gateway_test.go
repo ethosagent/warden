@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ethosagent/warden/internal/config"
+	"github.com/ethosagent/warden/internal/identity"
 	"github.com/ethosagent/warden/internal/scan"
 )
 
@@ -63,7 +64,7 @@ func TestDeniedTool(t *testing.T) {
 
 	// enforce: blocked with reason.
 	gw := newGW(t, baseCfg(modeEnforce))
-	v := gw.OnRequest("s1", "tools/call", "", nil, body)
+	v := gw.OnRequest("s1", "tools/call", "", nil, body, RequestMeta{})
 	if v.Action != Deny {
 		t.Fatalf("enforce: want Deny, got %v", v.Action)
 	}
@@ -76,7 +77,7 @@ func TestDeniedTool(t *testing.T) {
 
 	// monitor: pass but finding present.
 	gw2 := newGW(t, baseCfg(modeMonitor))
-	v2 := gw2.OnRequest("s1", "tools/call", "", nil, body)
+	v2 := gw2.OnRequest("s1", "tools/call", "", nil, body, RequestMeta{})
 	if v2.Action != Pass {
 		t.Fatalf("monitor: want Pass, got %v", v2.Action)
 	}
@@ -87,7 +88,7 @@ func TestDeniedTool(t *testing.T) {
 
 func TestAllowedBenign(t *testing.T) {
 	gw := newGW(t, baseCfg(modeEnforce))
-	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "read_file", `{"path":"/tmp/x"}`))
+	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "read_file", `{"path":"/tmp/x"}`), RequestMeta{})
 	if v.Action != Pass {
 		t.Fatalf("want Pass, got %v findings=%v", v.Action, v.Findings)
 	}
@@ -104,7 +105,7 @@ func TestAllowedBenign(t *testing.T) {
 func TestArgsPII(t *testing.T) {
 	gw := newGW(t, baseCfg(modeEnforce))
 	// Luhn-valid Visa test number.
-	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "read_file", `{"card":"4111111111111111"}`))
+	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "read_file", `{"card":"4111111111111111"}`), RequestMeta{})
 	f, ok := hasFinding(v.Findings, "mcp_args_pii")
 	if !ok {
 		t.Fatalf("missing mcp_args_pii finding: %v", v.Findings)
@@ -120,7 +121,7 @@ func TestArgsPII(t *testing.T) {
 
 func TestArgsHighSeverityLeakBlocks(t *testing.T) {
 	gw := newGW(t, baseCfg(modeEnforce))
-	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "read_file", `{"key":"AKIAIOSFODNN7EXAMPLE"}`))
+	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "read_file", `{"key":"AKIAIOSFODNN7EXAMPLE"}`), RequestMeta{})
 	if _, ok := hasFinding(v.Findings, "mcp_args_leak"); !ok {
 		t.Fatalf("missing mcp_args_leak finding: %v", v.Findings)
 	}
@@ -133,7 +134,7 @@ func TestArgsHighSeverityLeakBlocks(t *testing.T) {
 
 	// monitor never blocks.
 	gw2 := newGW(t, baseCfg(modeMonitor))
-	v2 := gw2.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "read_file", `{"key":"AKIAIOSFODNN7EXAMPLE"}`))
+	v2 := gw2.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "read_file", `{"key":"AKIAIOSFODNN7EXAMPLE"}`), RequestMeta{})
 	if v2.Action != Pass {
 		t.Fatalf("monitor must Pass, got %v", v2.Action)
 	}
@@ -210,7 +211,7 @@ func TestSchemaDrift(t *testing.T) {
 func TestResponseCorrelationPII(t *testing.T) {
 	gw := newGW(t, baseCfg(modeMonitor))
 	// Request establishes id -> tool.
-	gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"42"`, "get_user", `{"id":"u1"}`))
+	gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"42"`, "get_user", `{"id":"u1"}`), RequestMeta{})
 	// Result for the same id carries an email.
 	resp := []byte(`{"jsonrpc":"2.0","id":"42","result":{"email":"alice@example.com"}}`)
 	v := gw.OnResponse("s1", 200, nil, resp)
@@ -228,8 +229,8 @@ func TestResponseCorrelationPII(t *testing.T) {
 
 func TestChainReadThenSend(t *testing.T) {
 	gw := newGW(t, baseCfg(modeEnforce))
-	gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "read_file", `{"path":"/x"}`))
-	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"2"`, "send_email", `{"to":"x@y.com"}`))
+	gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "read_file", `{"path":"/x"}`), RequestMeta{})
+	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"2"`, "send_email", `{"to":"x@y.com"}`), RequestMeta{})
 	f, ok := hasFinding(v.Findings, "mcp_chain_read_then_send")
 	if !ok {
 		t.Fatalf("missing mcp_chain_read_then_send finding: %v", v.Findings)
@@ -245,7 +246,7 @@ func TestFailOpenAndClosed(t *testing.T) {
 	malformed := []byte(`{not json`)
 
 	gw := newGW(t, baseCfg(modeEnforce))
-	v := gw.OnRequest("s1", "", "", nil, malformed)
+	v := gw.OnRequest("s1", "", "", nil, malformed, RequestMeta{})
 	if v.Action != Pass {
 		t.Fatalf("malformed should fail-open Pass, got %v", v.Action)
 	}
@@ -253,7 +254,7 @@ func TestFailOpenAndClosed(t *testing.T) {
 	cfg := baseCfg(modeEnforce)
 	cfg.FailClosedOnError = true
 	gw2 := newGW(t, cfg)
-	v2 := gw2.OnRequest("s1", "", "", nil, malformed)
+	v2 := gw2.OnRequest("s1", "", "", nil, malformed, RequestMeta{})
 	if v2.Action != Deny {
 		t.Fatalf("malformed with FailClosedOnError should Deny, got %v", v2.Action)
 	}
@@ -262,7 +263,7 @@ func TestFailOpenAndClosed(t *testing.T) {
 	cfg3 := baseCfg(modeMonitor)
 	cfg3.FailClosedOnError = true
 	gw3 := newGW(t, cfg3)
-	v3 := gw3.OnRequest("s1", "", "", nil, malformed)
+	v3 := gw3.OnRequest("s1", "", "", nil, malformed, RequestMeta{})
 	if v3.Action != Pass {
 		t.Fatalf("monitor fail-closed should still Pass, got %v", v3.Action)
 	}
@@ -272,7 +273,7 @@ func TestPanicRecovery(t *testing.T) {
 	gw := newGW(t, baseCfg(modeEnforce))
 	gw.now = func() time.Time { panic("boom") }
 	// Force the panic path: a valid tools/call reaches the clock.
-	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "read_file", `{}`))
+	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "read_file", `{}`), RequestMeta{})
 	if v.Action != Pass {
 		t.Fatalf("panic should be recovered as fail-open Pass, got %v", v.Action)
 	}
@@ -283,7 +284,7 @@ func TestModes(t *testing.T) {
 
 	// off: noop Pass, no findings.
 	gwOff := newGW(t, baseCfg(modeOff))
-	vOff := gwOff.OnRequest("s1", "tools/call", "", nil, body)
+	vOff := gwOff.OnRequest("s1", "tools/call", "", nil, body, RequestMeta{})
 	if vOff.Action != Pass || len(vOff.Findings) != 0 {
 		t.Fatalf("off: want Pass noop, got %v findings=%v", vOff.Action, vOff.Findings)
 	}
@@ -292,13 +293,13 @@ func TestModes(t *testing.T) {
 	cfgDis := baseCfg(modeEnforce)
 	cfgDis.Enabled = false
 	gwDis := newGW(t, cfgDis)
-	if v := gwDis.OnRequest("s1", "tools/call", "", nil, body); v.Action != Pass || len(v.Findings) != 0 {
+	if v := gwDis.OnRequest("s1", "tools/call", "", nil, body, RequestMeta{}); v.Action != Pass || len(v.Findings) != 0 {
 		t.Fatalf("disabled: want Pass noop, got %v findings=%v", v.Action, v.Findings)
 	}
 
 	// monitor: Pass + findings.
 	gwMon := newGW(t, baseCfg(modeMonitor))
-	vMon := gwMon.OnRequest("s1", "tools/call", "", nil, body)
+	vMon := gwMon.OnRequest("s1", "tools/call", "", nil, body, RequestMeta{})
 	if vMon.Action != Pass {
 		t.Fatalf("monitor: want Pass, got %v", vMon.Action)
 	}
@@ -308,7 +309,7 @@ func TestModes(t *testing.T) {
 
 	// enforce: Deny.
 	gwEnf := newGW(t, baseCfg(modeEnforce))
-	if v := gwEnf.OnRequest("s1", "tools/call", "", nil, body); v.Action != Deny {
+	if v := gwEnf.OnRequest("s1", "tools/call", "", nil, body, RequestMeta{}); v.Action != Deny {
 		t.Fatalf("enforce: want Deny, got %v", v.Action)
 	}
 }
@@ -316,7 +317,7 @@ func TestModes(t *testing.T) {
 func TestNonToolCallPasses(t *testing.T) {
 	gw := newGW(t, baseCfg(modeEnforce))
 	body := []byte(`{"jsonrpc":"2.0","id":"1","method":"initialize","params":{}}`)
-	v := gw.OnRequest("s1", "initialize", "", nil, body)
+	v := gw.OnRequest("s1", "initialize", "", nil, body, RequestMeta{})
 	if v.Action != Pass {
 		t.Fatalf("non-tools/call should Pass, got %v", v.Action)
 	}
@@ -340,7 +341,7 @@ func TestSessionIsolationAndCap(t *testing.T) {
 
 	// Registry stays bounded under churn.
 	for i := 0; i < maxSessions+50; i++ {
-		gw.OnRequest(strconv.Itoa(i), "tools/call", "", nil, toolCall(`"1"`, "read_file", `{}`))
+		gw.OnRequest(strconv.Itoa(i), "tools/call", "", nil, toolCall(`"1"`, "read_file", `{}`), RequestMeta{})
 	}
 	gw.mu.Lock()
 	n := len(gw.sessions)
@@ -353,7 +354,7 @@ func TestSessionIsolationAndCap(t *testing.T) {
 func TestIDToToolBounded(t *testing.T) {
 	gw := newGW(t, baseCfg(modeMonitor))
 	for i := 0; i < maxIDToToolSize+100; i++ {
-		gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"`+strconv.Itoa(i)+`"`, "read_file", `{}`))
+		gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"`+strconv.Itoa(i)+`"`, "read_file", `{}`), RequestMeta{})
 	}
 	gw.mu.Lock()
 	s := gw.sessions["s1"]
@@ -405,7 +406,7 @@ func assertNoValueLeak(t *testing.T, findings []Finding, value string) {
 
 func TestArgConstraintPass(t *testing.T) {
 	gw := newGW(t, constraintCfg(modeEnforce))
-	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "read_file", `{"path":"/workspace/a"}`))
+	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "read_file", `{"path":"/workspace/a"}`), RequestMeta{})
 	if v.Action != Pass {
 		t.Fatalf("conforming args should Pass, got %v findings=%v", v.Action, v.Findings)
 	}
@@ -418,7 +419,7 @@ func TestArgConstraintMatchViolation(t *testing.T) {
 	const badPath = "/etc/passwd"
 	// enforce: blocking Deny.
 	gw := newGW(t, constraintCfg(modeEnforce))
-	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "read_file", `{"path":"`+badPath+`"}`))
+	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "read_file", `{"path":"`+badPath+`"}`), RequestMeta{})
 	f, ok := hasFinding(v.Findings, "mcp_args_constraint")
 	if !ok {
 		t.Fatalf("missing mcp_args_constraint finding: %v", v.Findings)
@@ -437,7 +438,7 @@ func TestArgConstraintMatchViolation(t *testing.T) {
 
 	// monitor: Pass but finding present.
 	gw2 := newGW(t, constraintCfg(modeMonitor))
-	v2 := gw2.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "read_file", `{"path":"`+badPath+`"}`))
+	v2 := gw2.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "read_file", `{"path":"`+badPath+`"}`), RequestMeta{})
 	if v2.Action != Pass {
 		t.Fatalf("monitor must Pass, got %v", v2.Action)
 	}
@@ -450,7 +451,7 @@ func TestArgConstraintMatchViolation(t *testing.T) {
 func TestArgConstraintRequiredMissing(t *testing.T) {
 	gw := newGW(t, constraintCfg(modeEnforce))
 	// path required but absent.
-	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "read_file", `{"other":"x"}`))
+	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "read_file", `{"other":"x"}`), RequestMeta{})
 	f, ok := hasFinding(v.Findings, "mcp_args_constraint")
 	if !ok {
 		t.Fatalf("missing mcp_args_constraint finding: %v", v.Findings)
@@ -465,7 +466,7 @@ func TestArgConstraintRequiredMissing(t *testing.T) {
 
 func TestArgConstraintForbiddenPresent(t *testing.T) {
 	gw := newGW(t, constraintCfg(modeEnforce))
-	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "read_file", `{"path":"/workspace/a","recursive":true}`))
+	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "read_file", `{"path":"/workspace/a","recursive":true}`), RequestMeta{})
 	var found bool
 	for _, f := range v.Findings {
 		if f.Kind == "mcp_args_constraint" && f.Path == "recursive" && f.Detail == "forbidden field present" {
@@ -484,7 +485,7 @@ func TestArgConstraintMaxLen(t *testing.T) {
 	gw := newGW(t, constraintCfg(modeEnforce))
 	// matches ^/workspace/ but exceeds maxLen 16.
 	const longPath = "/workspace/aaaaaaaaaaaaaaaaaaaa"
-	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "read_file", `{"path":"`+longPath+`"}`))
+	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "read_file", `{"path":"`+longPath+`"}`), RequestMeta{})
 	f, ok := hasFinding(v.Findings, "mcp_args_constraint")
 	if !ok {
 		t.Fatalf("missing mcp_args_constraint finding: %v", v.Findings)
@@ -502,7 +503,7 @@ func TestArgConstraintMaxArgsBytes(t *testing.T) {
 	gw := newGW(t, constraintCfg(modeEnforce))
 	// arguments object well over the 64-byte cap (and path conforms).
 	big := strings.Repeat("a", 200)
-	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "read_file", `{"path":"/workspace/a","pad":"`+big+`"}`))
+	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "read_file", `{"path":"/workspace/a","pad":"`+big+`"}`), RequestMeta{})
 	if _, ok := hasFinding(v.Findings, "mcp_args_too_large"); !ok {
 		t.Fatalf("missing mcp_args_too_large finding: %v", v.Findings)
 	}
@@ -515,7 +516,7 @@ func TestArgConstraintMaxArgsBytes(t *testing.T) {
 func TestArgConstraintUnconstrainedToolUnaffected(t *testing.T) {
 	gw := newGW(t, constraintCfg(modeEnforce))
 	// search has no constraints; arbitrary args pass.
-	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "search", `{"q":"/etc/passwd"}`))
+	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "search", `{"q":"/etc/passwd"}`), RequestMeta{})
 	if _, ok := hasFinding(v.Findings, "mcp_args_constraint"); ok {
 		t.Fatalf("unconstrained tool should have no constraint finding: %v", v.Findings)
 	}
@@ -593,7 +594,7 @@ func TestArgsScanWithoutProfiler(t *testing.T) {
 	if gw.profiler != nil {
 		t.Fatal("precondition: profiler should be nil")
 	}
-	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "read_file", `{"key":"`+awsKey+`"}`))
+	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "read_file", `{"key":"`+awsKey+`"}`), RequestMeta{})
 	f, ok := hasFinding(v.Findings, "mcp_args_leak")
 	if !ok {
 		t.Fatalf("missing mcp_args_leak finding with profiler off: %v", v.Findings)
@@ -609,7 +610,7 @@ func TestArgsScanWithoutProfiler(t *testing.T) {
 
 	// monitor never blocks but still reports.
 	gw2 := newGW(t, noProfilerCfg(modeMonitor))
-	v2 := gw2.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "read_file", `{"key":"`+awsKey+`"}`))
+	v2 := gw2.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "read_file", `{"key":"`+awsKey+`"}`), RequestMeta{})
 	if v2.Action != Pass {
 		t.Fatalf("monitor must Pass, got %v", v2.Action)
 	}
@@ -625,7 +626,7 @@ func TestResultScanWithoutProfiler(t *testing.T) {
 	const awsKey = "AKIAIOSFODNN7EXAMPLE"
 	gw := newGW(t, noProfilerCfg(modeEnforce))
 	// Establish id -> tool.
-	gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"7"`, "get_user", `{"id":"u1"}`))
+	gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"7"`, "get_user", `{"id":"u1"}`), RequestMeta{})
 	resp := []byte(`{"jsonrpc":"2.0","id":"7","result":{"token":"` + awsKey + `"}}`)
 	v := gw.OnResponse("s1", 200, nil, resp)
 	f, ok := hasFinding(v.Findings, "mcp_result_leak")
@@ -653,7 +654,7 @@ func TestArgsScanProfilerNoDoubleCount(t *testing.T) {
 	if gw.profiler == nil {
 		t.Fatal("precondition: profiler should be on")
 	}
-	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "read_file", `{"key":"`+awsKey+`"}`))
+	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "read_file", `{"key":"`+awsKey+`"}`), RequestMeta{})
 	var leaks []Finding
 	for _, f := range v.Findings {
 		if f.Kind == "mcp_args_leak" {
@@ -682,7 +683,7 @@ func TestArgsCrossFieldOnlyDetection(t *testing.T) {
 		t.Fatal("precondition: profiler should be on")
 	}
 	v := gw.OnRequest("s1", "tools/call", "", nil,
-		toolCall(`"1"`, "read_file", `{"a":"token=","b":"`+blob+`"}`))
+		toolCall(`"1"`, "read_file", `{"a":"token=","b":"`+blob+`"}`), RequestMeta{})
 	var leaks []Finding
 	for _, f := range v.Findings {
 		if f.Kind == "mcp_args_leak" {
@@ -722,7 +723,7 @@ func newGWAgent(t *testing.T, cfg config.MCPConfig, agentID string) *Gateway {
 func TestConditionAgentIDMatchAllows(t *testing.T) {
 	cfg := conditionCfg(modeEnforce, &config.MCPToolCondition{AgentID: "ci-agent"})
 	gw := newGWAgent(t, cfg, "ci-agent")
-	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "deploy", `{}`))
+	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "deploy", `{}`), RequestMeta{})
 	if v.Action != Pass {
 		t.Fatalf("matching agent should Pass, got %v findings=%v", v.Action, v.Findings)
 	}
@@ -734,7 +735,7 @@ func TestConditionAgentIDMatchAllows(t *testing.T) {
 func TestConditionAgentIDMismatchDenies(t *testing.T) {
 	cfg := conditionCfg(modeEnforce, &config.MCPToolCondition{AgentID: "ci-agent"})
 	gw := newGWAgent(t, cfg, "other")
-	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "deploy", `{}`))
+	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "deploy", `{}`), RequestMeta{})
 	f, ok := hasFinding(v.Findings, "mcp_tool_condition")
 	if !ok {
 		t.Fatalf("missing mcp_tool_condition finding: %v", v.Findings)
@@ -747,7 +748,7 @@ func TestConditionAgentIDMismatchDenies(t *testing.T) {
 	}
 	// monitor records the finding but never blocks.
 	gw2 := newGWAgent(t, conditionCfg(modeMonitor, &config.MCPToolCondition{AgentID: "ci-agent"}), "other")
-	v2 := gw2.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "deploy", `{}`))
+	v2 := gw2.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "deploy", `{}`), RequestMeta{})
 	if v2.Action != Pass {
 		t.Fatalf("monitor must Pass, got %v", v2.Action)
 	}
@@ -761,7 +762,7 @@ func TestConditionAgentIDMismatchDenies(t *testing.T) {
 func TestConditionScopedDeniesUntilEnforced(t *testing.T) {
 	cfg := conditionCfg(modeEnforce, &config.MCPToolCondition{Groups: []string{"eng"}})
 	gw := newGWAgent(t, cfg, "ci-agent")
-	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "deploy", `{}`))
+	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "deploy", `{}`), RequestMeta{})
 	if v.Action != Deny || v.Reason != "mcp_tool_condition" {
 		t.Fatalf("scoped condition must Deny, got action=%v reason=%q findings=%v", v.Action, v.Reason, v.Findings)
 	}
@@ -773,7 +774,7 @@ func TestConditionWireSentinelDenies(t *testing.T) {
 	cfg := conditionCfg(modeEnforce, &config.MCPToolCondition{AgentID: config.ReservedScopedAgentID})
 	for _, agent := range []string{"ci-agent", ""} {
 		gw := newGWAgent(t, cfg, agent)
-		v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "deploy", `{}`))
+		v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "deploy", `{}`), RequestMeta{})
 		if v.Action != Deny {
 			t.Fatalf("agent %q: sentinel must Deny, got %v", agent, v.Action)
 		}
@@ -786,7 +787,7 @@ func TestConditionTimeWindow(t *testing.T) {
 	// 10:00 is inside [09,17) -> allowed.
 	gw := newGWAgent(t, cfg, "ci-agent")
 	gw.now = func() time.Time { return time.Date(2026, 6, 30, 10, 0, 0, 0, time.Local) }
-	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "deploy", `{}`))
+	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "deploy", `{}`), RequestMeta{})
 	if v.Action != Pass {
 		t.Fatalf("10:00 inside window should Pass, got %v findings=%v", v.Action, v.Findings)
 	}
@@ -797,7 +798,7 @@ func TestConditionTimeWindow(t *testing.T) {
 	// 20:00 is outside [09,17) -> denied.
 	gw2 := newGWAgent(t, cfg, "ci-agent")
 	gw2.now = func() time.Time { return time.Date(2026, 6, 30, 20, 0, 0, 0, time.Local) }
-	v2 := gw2.OnRequest("s2", "tools/call", "", nil, toolCall(`"1"`, "deploy", `{}`))
+	v2 := gw2.OnRequest("s2", "tools/call", "", nil, toolCall(`"1"`, "deploy", `{}`), RequestMeta{})
 	f, ok := hasFinding(v2.Findings, "mcp_tool_condition")
 	if !ok {
 		t.Fatalf("20:00: missing mcp_tool_condition finding: %v", v2.Findings)
@@ -816,14 +817,14 @@ func TestConditionWrapAroundWindow(t *testing.T) {
 	// 23:00 falls inside 22-06 -> allowed.
 	gw := newGWAgent(t, cfg, "ci-agent")
 	gw.now = func() time.Time { return time.Date(2026, 6, 30, 23, 0, 0, 0, time.Local) }
-	if v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "deploy", `{}`)); v.Action != Pass {
+	if v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "deploy", `{}`), RequestMeta{}); v.Action != Pass {
 		t.Fatalf("23:00 inside wrap window should Pass, got %v findings=%v", v.Action, v.Findings)
 	}
 
 	// 12:00 is outside 22-06 -> denied.
 	gw2 := newGWAgent(t, cfg, "ci-agent")
 	gw2.now = func() time.Time { return time.Date(2026, 6, 30, 12, 0, 0, 0, time.Local) }
-	if v := gw2.OnRequest("s2", "tools/call", "", nil, toolCall(`"1"`, "deploy", `{}`)); v.Action != Deny {
+	if v := gw2.OnRequest("s2", "tools/call", "", nil, toolCall(`"1"`, "deploy", `{}`), RequestMeta{}); v.Action != Deny {
 		t.Fatalf("12:00 outside wrap window should Deny, got %v", v.Action)
 	}
 }
@@ -835,21 +836,21 @@ func TestConditionAgentAndWindowCombined(t *testing.T) {
 	// Right agent + in window -> Pass.
 	gw := newGWAgent(t, cfg, "ci-agent")
 	gw.now = func() time.Time { return time.Date(2026, 6, 30, 10, 0, 0, 0, time.Local) }
-	if v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "deploy", `{}`)); v.Action != Pass {
+	if v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "deploy", `{}`), RequestMeta{}); v.Action != Pass {
 		t.Fatalf("right agent + in window should Pass, got %v findings=%v", v.Action, v.Findings)
 	}
 
 	// Right agent but outside window -> Deny.
 	gw2 := newGWAgent(t, cfg, "ci-agent")
 	gw2.now = func() time.Time { return time.Date(2026, 6, 30, 20, 0, 0, 0, time.Local) }
-	if v := gw2.OnRequest("s2", "tools/call", "", nil, toolCall(`"1"`, "deploy", `{}`)); v.Action != Deny {
+	if v := gw2.OnRequest("s2", "tools/call", "", nil, toolCall(`"1"`, "deploy", `{}`), RequestMeta{}); v.Action != Deny {
 		t.Fatalf("right agent outside window should Deny, got %v", v.Action)
 	}
 
 	// Wrong agent (agent checked first) -> Deny even if in window.
 	gw3 := newGWAgent(t, cfg, "other")
 	gw3.now = func() time.Time { return time.Date(2026, 6, 30, 10, 0, 0, 0, time.Local) }
-	v3 := gw3.OnRequest("s3", "tools/call", "", nil, toolCall(`"1"`, "deploy", `{}`))
+	v3 := gw3.OnRequest("s3", "tools/call", "", nil, toolCall(`"1"`, "deploy", `{}`), RequestMeta{})
 	if v3.Action != Deny {
 		t.Fatalf("wrong agent should Deny, got %v", v3.Action)
 	}
@@ -862,7 +863,7 @@ func TestConditionUnconditionalToolUnaffected(t *testing.T) {
 	// read_file is allowlisted with no AllowWhen: condition never fires.
 	cfg := conditionCfg(modeEnforce, &config.MCPToolCondition{AgentID: "ci-agent"})
 	gw := newGWAgent(t, cfg, "other") // mismatching agent
-	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "read_file", `{"path":"/tmp/x"}`))
+	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "read_file", `{"path":"/tmp/x"}`), RequestMeta{})
 	if v.Action != Pass {
 		t.Fatalf("unconditional tool should Pass, got %v findings=%v", v.Action, v.Findings)
 	}
@@ -876,11 +877,27 @@ func TestConditionDoesNotOverrideDeniedTool(t *testing.T) {
 	// allowed, so the condition is never consulted) does not change the reason.
 	cfg := conditionCfg(modeEnforce, &config.MCPToolCondition{AgentID: "ci-agent"})
 	gw := newGWAgent(t, cfg, "ci-agent")
-	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "delete_everything", `{}`))
+	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "delete_everything", `{}`), RequestMeta{})
 	if v.Action != Deny || v.Reason != "mcp_tool_denied" {
 		t.Fatalf("non-allowlisted tool should Deny with mcp_tool_denied, got action=%v reason=%q", v.Action, v.Reason)
 	}
 	if _, ok := hasFinding(v.Findings, "mcp_tool_condition"); ok {
 		t.Fatalf("denied tool should not get a condition finding: %v", v.Findings)
+	}
+}
+
+// W-P1-GPOL-04: the gateway ignores RequestMeta, so verdicts are identical with
+// and without a subject.
+func TestOnRequest_SubjectDoesNotChangeVerdict(t *testing.T) {
+	sub := &identity.Subject{Sub: "alice", Groups: []string{"eng"}}
+	for _, tool := range []string{"read_file", "delete_everything"} {
+		gw := newGW(t, baseCfg(modeEnforce))
+		body := toolCall(`"1"`, tool, `{"path":"/tmp/x"}`)
+		without := gw.OnRequest("s1", "tools/call", "", nil, body, RequestMeta{})
+		gw2 := newGW(t, baseCfg(modeEnforce))
+		with := gw2.OnRequest("s1", "tools/call", "", nil, body, RequestMeta{Subject: sub})
+		if without.Action != with.Action || without.Reason != with.Reason || without.Tool != with.Tool {
+			t.Errorf("%s: verdict changed with a subject: %+v vs %+v", tool, without, with)
+		}
 	}
 }
