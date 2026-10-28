@@ -321,6 +321,9 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		// Announce this worker's id on each pull/heartbeat so the control plane
 		// lists it as connected even before it forwards analytics.
 		rp.SetProxyID(expandEnv(pol.Central.ProxyID))
+		// Advertise the capabilities this binary implements so the control plane
+		// can flag workers that would silently ignore newer policy fields.
+		rp.SetCaps(config.WorkerCaps())
 		// Shutdown hygiene: drop the pooled keep-alive conns when Run returns, so
 		// a hosted worker leaves no open connections to the control plane.
 		defer rp.CloseIdleConnections()
@@ -679,7 +682,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	switch pol.Central.Mode {
 	case "aggregator":
 		centralStore = analytics.NewCentralStore(pol.Central.MaxEvents)
-		ingestHandler = analytics.NewIngestHandler(centralStore, os.Getenv(pol.Central.TokenEnv))
+		ingestHandler = analytics.NewIngestHandler(centralStore, analytics.StaticTokenAuthorizer(os.Getenv(pol.Central.TokenEnv)))
 		logger.Info("central aggregator enabled", "ingest", "/central/ingest")
 	case "worker":
 		// The control plane is the worker's own trusted, operator-configured
