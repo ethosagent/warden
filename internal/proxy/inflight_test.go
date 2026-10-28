@@ -377,7 +377,7 @@ func TestProxy_NewPathsLeaveTrackerAfterBookkeeping(t *testing.T) {
 		r.Host = parityHost
 		r.Header.Set(":protocol", "websocket")
 		w := httptest.NewRecorder()
-		p.serveGRPCStream(w, r, nil, parityHost, 443, false, connIdentity{}) // refused before any forward: no transport needed
+		p.serveGRPCStream(w, r, nil, parityHost, 443, deferNone, connIdentity{}) // refused before any forward: no transport needed
 		if w.Code != http.StatusNotImplemented {
 			t.Fatalf("status = %d, want 501", w.Code)
 		}

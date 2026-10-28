@@ -44,7 +44,7 @@ type requestScope struct {
 	br         *bufio.Reader
 	domain     string
 	port       int
-	needsJudge bool
+	deferred   deferred
 	// scheme is this connection's UPSTREAM scheme: https on every terminated
 	// tunnel, http only on the transparent plain-HTTP listener. It selects the
 	// constraint-gate evaluation, the event URL prefix and the upstream dial
@@ -299,7 +299,7 @@ func (s *requestScope) addEvidence(dets []scan.Detection) {
 // Connection: close, a deny/502 terminal, an SSE stream, a client EOF, or a
 // stale-conn redial's fresh conn. It is nil (nothing to close) before the first
 // forward and after a handoff, so there is no double close and no leak.
-func (p *Proxy) handleHTTP(clientConn net.Conn, br *bufio.Reader, domain string, port int, needsJudge bool, scheme policy.Scheme, firstReq *http.Request, ci connIdentity) {
+func (p *Proxy) handleHTTP(clientConn net.Conn, br *bufio.Reader, domain string, port int, d deferred, scheme policy.Scheme, firstReq *http.Request, ci connIdentity) {
 	if scheme == policy.SchemeHTTPS {
 		p.reach(PathHTTP1)
 	} else {
@@ -313,7 +313,7 @@ func (p *Proxy) handleHTTP(clientConn net.Conn, br *bufio.Reader, domain string,
 		}
 	}()
 	for {
-		end, up, upBR := p.serveHTTPRequest(clientConn, br, domain, port, needsJudge, scheme, firstReq, upstream, upstreamBR, ci)
+		end, up, upBR := p.serveHTTPRequest(clientConn, br, domain, port, d, scheme, firstReq, upstream, upstreamBR, ci)
 		// The pre-read first request is served exactly once; later iterations
 		// read from the wire like every keep-alive request.
 		firstReq = nil
@@ -334,7 +334,7 @@ func (p *Proxy) handleHTTP(clientConn net.Conn, br *bufio.Reader, domain string,
 // scope's upstream on every non-handoff path (the session closes it on exit or
 // reuses it next iteration), or nil after a WebSocket handoff so the session does
 // not double-close the pump-owned conn.
-func (p *Proxy) serveHTTPRequest(clientConn net.Conn, br *bufio.Reader, domain string, port int, needsJudge bool, scheme policy.Scheme, firstReq *http.Request, upstream net.Conn, upstreamBR *bufio.Reader, ci connIdentity) (endSession bool, carryUpstream net.Conn, carryBR *bufio.Reader) {
+func (p *Proxy) serveHTTPRequest(clientConn net.Conn, br *bufio.Reader, domain string, port int, d deferred, scheme policy.Scheme, firstReq *http.Request, upstream net.Conn, upstreamBR *bufio.Reader, ci connIdentity) (endSession bool, carryUpstream net.Conn, carryBR *bufio.Reader) {
 	req := firstReq
 	if req == nil {
 		var err error
@@ -362,7 +362,7 @@ func (p *Proxy) serveHTTPRequest(clientConn net.Conn, br *bufio.Reader, domain s
 		br:         br,
 		domain:     domain,
 		port:       port,
-		needsJudge: needsJudge,
+		deferred:   d,
 		req:        req,
 		reqStart:   reqStart,
 		gw:         p.mcpGateway(),
@@ -534,12 +534,12 @@ func (p *Proxy) constraintGate(s *requestScope) (endSession bool) {
 // audit event per request; on deny the request terminates here with its own
 // event.
 func (p *Proxy) judgeGate(s *requestScope) (endSession bool) {
-	if !s.needsJudge {
+	if s.deferred != deferJudge {
 		return false
 	}
 	fullURL := s.eventURL()
 	_, hasAuth := s.req.Header["Authorization"]
-	// needsJudge was decided at CONNECT time. If a concurrent control-plane swap
+	// deferJudge was decided at CONNECT time. If a concurrent control-plane swap
 	// disabled the judge between then and now, liveJudge is nil: this request
 	// matched no static rule and there is no judge to allow it, so it must fail
 	// closed (deny) — the exact default-deny semantics a NoMatch request gets

@@ -238,6 +238,8 @@ type mcpModeReader interface{ Enforcing() bool }
 // seam.
 type PolicyEvaluator interface {
 	EvaluateRequest(domain string, port int, scheme policy.Scheme, method, path string) policy.RequestVerdict
+	// EvaluateFor is the subject-aware form the connection-level gates use.
+	EvaluateFor(rc policy.RequestContext) policy.RequestVerdict
 	Replace(p config.Policy)
 }
 
