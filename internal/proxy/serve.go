@@ -258,6 +258,10 @@ func (p *Proxy) handleConn(conn net.Conn) {
 	// line's value is kept; a second line makes the identity malformed.
 	var proxyAuth string
 	proxyAuthLines := 0
+	// X-Warden-Challenge asks for the sign-in challenge inside the tunnel
+	// (#621). Bounded like Proxy-Authorization: the first line wins.
+	var challengeAsk string
+	challengeLines := 0
 	for {
 		hdr, err := readBoundedLine(br, maxConnectHeaderBytes-total)
 		if err != nil {
@@ -277,6 +281,12 @@ func (p *Proxy) handleConn(conn net.Conn) {
 			}
 			proxyAuthLines++
 		}
+		if isHeaderLine(hdr, ChallengeHeader) {
+			if challengeLines == 0 {
+				challengeAsk = strings.TrimSpace(hdr[len(ChallengeHeader)+1:])
+			}
+			challengeLines++
+		}
 	}
 	// Preamble complete — lift the deadline so it cannot cut off the tunnel or
 	// the TLS handshake, either of which may idle far longer than the preamble
@@ -290,9 +300,10 @@ func (p *Proxy) handleConn(conn net.Conn) {
 	// here; one with a token is bounded by identityVerifyTimeout.
 	ci := p.resolveConnIdentity(proxyAuthLines, proxyAuth)
 
-	// Challenge mode: no valid identity gets a 407 with a sign-in URL, before
-	// the block-list check, the policy and any dial.
-	if p.challengeConnect(conn, ci, domain, port) {
+	// Challenge mode: no valid identity gets a 407 with a sign-in URL (or, when
+	// the client asked and the worker terminates TLS, a tunnel that answers 403
+	// with the link), before the block-list check, the policy and any dial.
+	if p.challengeConnect(conn, br, ci, domain, port, challengeAsk) {
 		return
 	}
 
