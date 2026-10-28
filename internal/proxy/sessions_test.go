@@ -400,3 +400,58 @@ func TestBlocklistMetrics(t *testing.T) {
 		t.Errorf("after unblock: closed = %d entries = %d, want 2 and 0", closed, entries)
 	}
 }
+
+// With a CA configured (every worker with TLS termination) a CONNECT whose
+// first byte is not a TLS hello is piped through handleTLS, not tunnel: it must
+// register for a block-list cut all the same.
+func TestBlockList_NonTLSPassthroughTunnelCut(t *testing.T) {
+	e := newBlockEnv(t, IdentityModeAttribute)
+	e.p.dialFunc = func(string, string) (net.Conn, error) {
+		c, up := net.Pipe()
+		go func() {
+			defer func() { _ = up.Close() }()
+			_, _ = io.Copy(io.Discard, up)
+		}()
+		return c, nil
+	}
+	conn, err := net.Dial("tcp", e.p.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	_ = conn.SetDeadline(time.Now().Add(15 * time.Second))
+	_, _ = io.WriteString(conn, "CONNECT "+idHost+":443 HTTP/1.1\r\nHost: "+idHost+":443\r\nProxy-Authorization: "+basicAuth("tok-u1")+"\r\n\r\n")
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodConnect})
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("CONNECT: %v %v", resp, err)
+	}
+	_, _ = io.WriteString(conn, "G") // not 0x16: passthrough
+	waitAllowEvents(t, e.store, 1)
+	e.applyBlock(config.BlockedUser{Sub: "u1"})
+	assertConnCut(t, conn, br)
+	evs := waitBlockedEvents(t, e.store, 1)
+	if len(evs) != 1 || evs[0].UserSub != "u1" || evs[0].Protocol != "tcp" || evs[0].Domain != idHost {
+		t.Fatalf("events = %+v", e.store.snapshot())
+	}
+}
+
+// waitAllowEvents waits until n allow events are recorded (the passthrough has
+// dialled and is piping).
+func waitAllowEvents(t *testing.T, st *syncStore, n int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		got := 0
+		for _, ev := range st.snapshot() {
+			if ev.Decision == "allow" {
+				got++
+			}
+		}
+		if got >= n {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("no allow event: %+v", st.snapshot())
+}

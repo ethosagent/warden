@@ -31,6 +31,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -187,6 +188,9 @@ type H struct {
 	// wantCPAdmin (WithControlPlaneAdminToken) boots the control plane with its
 	// own admin bearer (--admin-token-env), separate from the worker token.
 	wantCPAdmin bool
+	// wantCentral (WithCentralForwarding) makes every worker forward its events
+	// to the control plane's /central/ingest.
+	wantCentral bool
 	// wantBackup (WithBackup) boots the control plane with --backup-dir.
 	wantBackup bool
 
@@ -513,7 +517,15 @@ func (h *H) ConnectStatusWithAuth(hostPort, proxyAuthorization string) int {
 
 func (h *H) connectStatus(hostPort, proxyAuthorization string) int {
 	h.tb.Helper()
-	conn, err := net.DialTimeout("tcp", h.ProxyAddr(), 5*time.Second)
+	status, _ := h.connectReply(h.ProxyAddr(), hostPort, proxyAuthorization)
+	return status
+}
+
+// connectReply sends one CONNECT to the proxy at addr and returns the reply's
+// status and (up to 4 KiB of) body.
+func (h *H) connectReply(addr, hostPort, proxyAuthorization string) (int, string) {
+	h.tb.Helper()
+	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
 	if err != nil {
 		h.tb.Fatalf("dial the worker proxy: %v", err)
 	}
@@ -530,8 +542,13 @@ func (h *H) connectStatus(hostPort, proxyAuthorization string) int {
 	if err != nil {
 		h.tb.Fatalf("read the CONNECT %s reply: %v", hostPort, err)
 	}
-	_ = resp.Body.Close()
-	return resp.StatusCode
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode/100 == 2 {
+		// A tunnel is open: what follows the reply is the tunnel, not a body.
+		return resp.StatusCode, ""
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+	return resp.StatusCode, string(body)
 }
 
 // Issuer returns the in-process OIDC issuer started by WithOIDCIssuer.
@@ -822,6 +839,19 @@ func (h *H) workerParams(i int) worker.Params {
 			HeartbeatInterval: time.Second,
 		},
 		Central: config.CentralConfig{ProxyID: fmt.Sprintf("worker-%d", i)},
+	}
+	if h.wantCentral {
+		policy.Central = config.CentralConfig{
+			Mode:     "worker",
+			Endpoint: "https://" + h.ControlPlaneAddr() + "/central/ingest",
+			TokenEnv: cpTokenEnv,
+			ProxyID:  fmt.Sprintf("worker-%d", i),
+			CACert:   h.proxyCACertDst,
+			// The config loader's defaults, which this in-process build bypasses.
+			BatchSize: 100,
+			BufferCap: 10000,
+			Interval:  100 * time.Millisecond,
+		}
 	}
 	if h.identityMode != "" {
 		policy.Identity = h.identitySettings()

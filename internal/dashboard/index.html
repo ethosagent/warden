@@ -791,7 +791,7 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
       <div class="card" style="margin-top:16px">
         <div class="card-head"><h3>Top users</h3><span class="sub" id="topUsersSub">by request count</span></div>
         <table id="topUsersTable">
-          <thead><tr><th>User</th><th class="num">Requests</th><th class="num">Denied</th></tr></thead>
+          <thead><tr><th>User</th><th class="num">Requests</th><th class="num">Denied</th><th></th></tr></thead>
           <tbody id="topUsersBody"></tbody>
         </table>
       </div>
@@ -1199,9 +1199,10 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
         <div class="card stat"><div class="k">Events forwarded</div><div class="v">—</div><div class="delta"></div></div>
       </div>
 
+      <div id="fleet-block-banner" class="note" style="display:none; margin-bottom:12px; color:var(--amber)"></div>
       <div class="card">
         <table id="fleetTable"><thead><tr>
-          <th>Worker</th><th>Auth</th><th>Status</th><th>Policy ETag</th><th>Pending</th><th>Last heartbeat</th><th>Last policy pull</th><th class="num">Events fwd</th>
+          <th>Worker</th><th>Auth</th><th>Status</th><th>Policy ETag</th><th>Pending</th><th>Last heartbeat</th><th>Last policy pull</th><th class="num">Events fwd</th><th>Caps</th>
         </tr></thead><tbody id="fleetBody"></tbody></table>
       </div>
       </div><!-- /demo-only -->
@@ -1352,6 +1353,25 @@ LIMIT 8;</textarea>
           <div class="note" style="margin-bottom:10px">Signed-in console users. A role comes from the IdP groups captured at sign-in, so removing someone from a group takes effect only when their session ends (idle or absolute timeout). Revoke a session here to end it now.</div>
           <div id="sess-list"></div>
           <div id="sess-msg" class="note" style="margin-top:8px; display:none"></div>
+        </div>
+      </div>
+
+      <!-- Blocked users (W-P1-BLOCK-04): admin only (data-min-role); loadBlockedUsers hides it unless
+           the role allows admin and the API is wired (a worker answers 404). -->
+      <div class="card" id="blockedusers-card" data-min-role="admin" style="margin-bottom:16px; display:none">
+        <div class="card-head"><h3>Blocked users</h3><span style="display:flex;align-items:center;gap:8px"><span class="sub" id="bu-status"></span><button data-min-role="admin" class="btn sm" id="bu-refresh" onclick="loadBlockedUsers()">Refresh</button></span></div>
+        <div class="card-pad">
+          <div class="note" style="margin-bottom:10px">A blocked person is denied on every connected worker within one policy poll. Block by sub and email together: the sub is authoritative, and the email match still holds if an identity provider connector change gives the user a new sub.</div>
+          <div id="bu-banner" class="note" style="display:none; margin-bottom:10px; color:var(--amber)"></div>
+          <div class="note" id="bu-prefill-note" style="display:none; margin-bottom:8px"><b>Keep both</b> the sub and the email filled in: the sub is authoritative, the email is the fallback.</div>
+          <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;margin-bottom:10px">
+            <div class="field"><label for="bu-sub">Sub</label><input type="text" id="bu-sub" maxlength="256" autocomplete="off" /></div>
+            <div class="field"><label for="bu-email">Email</label><input type="text" id="bu-email" maxlength="320" autocomplete="off" /></div>
+            <div class="field"><label for="bu-reason">Reason</label><input type="text" id="bu-reason" maxlength="512" autocomplete="off" /></div>
+            <button data-min-role="admin" class="btn primary sm" id="bu-add">Block user</button>
+          </div>
+          <div id="bu-list"></div>
+          <div id="bu-msg" class="note" style="margin-top:8px; display:none"></div>
         </div>
       </div>
     </section>
@@ -1759,7 +1779,7 @@ function renderTopUsers(users){
   while(body.firstChild) body.removeChild(body.firstChild);
   if(!users.length){
     const tr=document.createElement('tr'), td=document.createElement('td');
-    td.colSpan=3; td.className='muted'; td.style.cssText='text-align:center;padding:18px';
+    td.colSpan=4; td.className='muted'; td.style.cssText='text-align:center;padding:18px';
     td.textContent='No verified users in this window.';
     tr.appendChild(td); body.appendChild(tr); return;
   }
@@ -1771,6 +1791,14 @@ function renderTopUsers(users){
     const n=document.createElement('td'); n.className='num'; n.textContent=fmtNum(u.count||0);
     const dn=document.createElement('td'); dn.className='num'; dn.textContent=fmtNum(u.denied||0);
     tr.appendChild(who); tr.appendChild(n); tr.appendChild(dn);
+    const act=document.createElement('td'); act.className='num';
+    if(!u.unattributed&&(u.sub||u.email)){
+      const a=document.createElement('a'); a.className='btn sm'; a.textContent='Block';
+      a.setAttribute('data-min-role','admin'); a.title='Block this user';
+      a.href=blockUserHref(u.sub, u.email);
+      act.appendChild(a);
+    }
+    tr.appendChild(act);
     body.appendChild(tr);
   });
 }
@@ -2068,8 +2096,18 @@ function renderFleet(ws){
     return '<tr><td class="mono">'+esc(w.proxyID||'—')+'</td><td>'+fleetAuthBadge(w)+'</td><td>'+status+'</td>'
       +'<td class="mono" style="font-size:12px">'+esc(etag)+' '+etagPill+'</td>'
       +'<td>'+pending+'</td><td class="muted">'+relTime(w.lastSeen)+'</td>'
-      +'<td class="muted">'+relTime(w.lastPolicyPull)+'</td><td class="num">'+fmtNum(w.eventsForwarded||0)+'</td></tr>';
+      +'<td class="muted">'+relTime(w.lastPolicyPull)+'</td><td class="num">'+fmtNum(w.eventsForwarded||0)+'</td>'
+      +'<td class="mono" style="font-size:12px">'+esc((w.caps||[]).join(', ')||'none')+(w.online&&!hasBlockCap(w)?' <span class="pill p-high">no block list</span>':'')+'</td></tr>';
   }).join('');
+  showFleetBlockBanner(ws.filter(w=>w.online&&!hasBlockCap(w)).length);
+}
+/* A worker enforces the block list only when its heartbeat advertised blocklist/v1. */
+function hasBlockCap(w){ return Array.isArray(w.caps)&&w.caps.indexOf('blocklist/v1')>=0; }
+function blockBannerText(n){ return n+' connected worker'+(n===1?'':'s')+' do not enforce the block list'; }
+function showFleetBlockBanner(n){
+  const el=document.getElementById('fleet-block-banner'); if(!el) return;
+  el.textContent=n>0?blockBannerText(n):'';
+  el.style.display=n>0?'':'none';
 }
 
 /* ---------- Worker tokens (W-P1-WTOK-10): GET / POST / DELETE /dashboard/api/worker-tokens through api() ----------
@@ -2448,6 +2486,7 @@ async function loadSettings(){
   loadIntegrations();
   loadLLMProviders();
   loadSessions();
+  loadBlockedUsers();
 }
 function renderPolicyLine(p){
   const el=document.getElementById('rt-policy'); if(!el) return;
@@ -2850,6 +2889,107 @@ async function revokeSessions(kind,value,what){
   msg.textContent= r&&r.ok ? ('Revoked '+((d&&d.revoked)||0)+' session(s).') : ('Revoke failed'+(r?(': status '+r.status):'')+'.');
   loadSessions();
 }
+
+/* blockedusers:begin */
+/* ============================================================
+   Blocked users (W-P1-BLOCK-04): GET / POST /dashboard/api/blocked-users and
+   DELETE .../{id}, all through api() (CSRF header). Shown only to an admin
+   (roleAllows; none mode leaves it to the server) and only when the API is wired
+   (a worker answers 404). Sub, email and reason come from admins and an IdP, so they
+   reach the DOM only through esc() or textContent. Server error text is shown only
+   for a 400 (request wording that never carries an entry value).
+   ============================================================ */
+function blockUserHref(sub,email){
+  return '#blocked-users?sub='+encodeURIComponent(sub||'')+'&email='+encodeURIComponent(email||'');
+}
+function buMsg(text,bad){
+  const m=document.getElementById('bu-msg'); if(!m) return;
+  m.style.display=text?'':'none'; m.textContent=text||''; m.style.color=bad?'#ff8098':'';
+}
+async function loadBlockedUsers(){
+  const card=document.getElementById('blockedusers-card'); if(!card) return;
+  await authInit();
+  if(!roleAllows('admin')){ card.style.display='none'; return; }
+  const list=document.getElementById('bu-list'), st=document.getElementById('bu-status');
+  let d=null;
+  try{ const r=await api('GET','/dashboard/api/blocked-users'); if(r.ok) d=await r.json(); }catch(e){ d=null; }
+  if(!d||!Array.isArray(d.entries)){ card.style.display='none'; return; }
+  card.style.display='';
+  st.textContent=d.entries.length+' blocked';
+  const n=d.workersWithoutEnforcement||0, ban=document.getElementById('bu-banner');
+  if(ban){
+    const ids=(d.workersWithoutEnforcementIDs||[]).join(', ');
+    ban.textContent=n>0?blockBannerText(n)+(ids?': '+ids:'')+'. Upgrade them; until then they ignore this list.':'';
+    ban.style.display=n>0?'':'none';
+  }
+  if(!d.entries.length){ list.innerHTML='<div class="note" style="padding:8px 0">No blocked users.</div>'; return; }
+  list.innerHTML='<table><thead><tr><th>Sub</th><th>Email</th><th>Reason</th><th>Added by</th><th>Added</th><th></th></tr></thead><tbody>'+
+    d.entries.map(e=>'<tr><td class="mono" style="font-size:12px">'+esc(e.sub||'—')+'</td>'
+      +'<td>'+esc(e.email||'—')+'</td>'
+      +'<td style="font-size:12px">'+esc(e.reason)+'</td>'
+      +'<td class="mono" style="font-size:12px">'+esc(e.createdBy)+'</td>'
+      +'<td style="font-size:12px">'+esc(relTime(e.createdAt))+'</td>'
+      +'<td style="text-align:right"><button data-min-role="admin" class="btn sm bu-rm" data-id="'+esc(e.id)+'" data-label="'+esc(e.email||e.sub)+'" style="color:#ff8098">Unblock</button></td></tr>').join('')+'</tbody></table>';
+  list.querySelectorAll('.bu-rm').forEach(b=>b.addEventListener('click',()=>removeBlockedUser(b.dataset.id,b.dataset.label)));
+}
+async function removeBlockedUser(id,label){
+  if(!window.confirm('Unblock '+label+'? They can use Warden again within one policy poll.')) return;
+  let r=null;
+  try{ r=await api('DELETE','/dashboard/api/blocked-users/'+encodeURIComponent(id)); }catch(e){ r=null; }
+  if(r&&r.status===204) buMsg('Unblocked.',false);
+  else buMsg(await blockErrorText(r,'Unblock'),true);
+  loadBlockedUsers();
+}
+async function blockErrorText(r,what){
+  if(!r) return what+' failed: the control plane is unreachable.';
+  let d=null; try{ d=await r.json(); }catch(e){ d=null; }
+  const code=d&&d.error;
+  if(r.status===403&&code==='self_unblock_forbidden') return 'You cannot unblock yourself; ask another admin.';
+  if(r.status===403) return what+' failed: admin role required.';
+  if(r.status===409) return 'That user is already blocked.';
+  if(r.status===422) return 'The block list is full.';
+  if(r.status===404) return what+' failed: entry not found.';
+  if(r.status===503) return what+' failed: the control plane has no --state-dir.';
+  if(r.status===400&&code) return what+' failed: '+code;
+  return what+' failed (status '+r.status+').';
+}
+async function addBlockedUser(){
+  const sub=document.getElementById('bu-sub'), em=document.getElementById('bu-email'), rs=document.getElementById('bu-reason');
+  const subV=sub.value.trim(), emailV=em.value.trim();
+  if(!subV&&!emailV){ buMsg('Enter a sub, an email or both.',true); return; }
+  const body={sub:subV, email:emailV, reason:rs.value.trim()};
+  let r=null;
+  try{ r=await api('POST','/dashboard/api/blocked-users',body); }catch(e){ r=null; }
+  if(!r||r.status!==201){ buMsg(await blockErrorText(r,'Block'),true); return; }
+  let d=null; try{ d=await r.json(); }catch(e){ d=null; }
+  buMsg('Blocked.',false);
+  document.getElementById('bu-msg').textContent='Blocked.'+(d&&d.hint?' '+d.hint+'.':'');
+  sub.value=''; em.value=''; rs.value='';
+  const pn=document.getElementById('bu-prefill-note'); if(pn) pn.style.display='none';
+  loadBlockedUsers();
+}
+/* applyBlockHash: '#blocked-users?sub=..&email=..' opens Settings with the form prefilled with both. */
+async function applyBlockHash(){
+  const h=location.hash||'';
+  if(h.indexOf('#blocked-users')!==0) return;
+  const q=new URLSearchParams(h.indexOf('?')>=0?h.slice(h.indexOf('?')+1):'');
+  go('settings');
+  await loadBlockedUsers();
+  const pre={sub:q.get('sub')||'', email:q.get('email')||''};
+  document.getElementById('bu-sub').value=pre.sub;
+  document.getElementById('bu-email').value=pre.email;
+  const pn=document.getElementById('bu-prefill-note'); if(pn) pn.style.display='';
+  const card=document.getElementById('blockedusers-card'); if(card&&card.scrollIntoView) card.scrollIntoView();
+}
+(function(){
+  const add=document.getElementById('bu-add'); if(add) add.addEventListener('click',addBlockedUser);
+  window.addEventListener('hashchange',applyBlockHash);
+  document.addEventListener('click',ev=>{
+    const a=ev.target.closest&&ev.target.closest('a[href^="#blocked-users"]'); if(!a) return;
+    ev.preventDefault(); history.replaceState(null,'',a.getAttribute('href')); applyBlockHash();
+  });
+})();
+/* blockedusers:end */
 
 /* ============================================================
    Guardrails (Egress /policy · DLP+Judge /settings · matrix /analytics)
@@ -4391,6 +4531,7 @@ adminLogProbe();      // show the Admin log tab only where it is wired and allow
 const savedTab = (function(){ try{ return localStorage.getItem('warden.tab'); }catch(e){ return null; } })();
 const startTab = (savedTab && document.getElementById('page-'+savedTab)) ? savedTab : 'overview';
 go(startTab);
+applyBlockHash(); // a #blocked-users?sub=&email= link opens the prefilled form
 
 // state-preserving auto-refresh of the active data tab
 setInterval(()=>{

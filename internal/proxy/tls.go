@@ -88,6 +88,15 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 			return
 		}
 		p.reach(PathTunnel)
+		// Only an attributed tunnel registers (see tunnel): a block-list cut must
+		// reach this opaque passthrough, the form a CONNECT takes on a worker
+		// with TLS termination, as well as the CA-less one.
+		var sess *session
+		if ci.Claims.Sub != "" || ci.Claims.Email != "" {
+			sess = p.sessions.newSession("tcp", domain, port, true, clientConn)
+			sess.bind(ci)
+			defer sess.release()
+		}
 		remote, dialErr := p.dialFunc("tcp", net.JoinHostPort(domain, fmt.Sprintf("%d", port)))
 		if dialErr != nil {
 			// A dial the SSRF-safe dialer refused is a policy decision: audit it
@@ -96,6 +105,7 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 			p.storeSSRFDeny(ci, domain, port, "tcp", dialErr)
 			return
 		}
+		sess.addCloser(remote)
 		p.recordEvent(ci, analytics.Event{
 			Timestamp: time.Now(),
 			Domain:    domain,
