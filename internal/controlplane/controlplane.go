@@ -213,6 +213,12 @@ type Server struct {
 	// audit is the admin audit middleware's state; nil when cfg.AdminAudit is
 	// (admin audit disabled), in which case no route is wrapped.
 	audit *adminAuditor
+	// breakGlass is the break-glass login (POST /auth/breakglass); nil unless
+	// console.breakGlass.enabled (W-P1-OPS1-08).
+	breakGlass *breakGlass
+	// findings, when set, receives every Finding instead of the alert pipeline.
+	// Tests inject a fake here.
+	findings FindingPublisher
 	// auditRec is cfg.AdminAudit as a Recorder (nil with admin audit off) and ext
 	// tracks the served file's hashes for the file-mode external-edit audit
 	// (adminaudit_external.go).
@@ -278,6 +284,7 @@ func New(cfg Config) *Server {
 	s.policy.Refresh() // initial load so /policy and the dashboard have policy immediately
 	s.initSessions()
 	s.initAuth()
+	s.initBreakGlass()
 	s.warnAdminToken()
 	if cfg.AdminAudit != nil {
 		s.enableAdminAudit(cfg.AdminAudit, cfg.AdminAudit.Probe, cfg.AdminAudit.StateHash)

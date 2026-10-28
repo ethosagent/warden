@@ -66,6 +66,14 @@ var All = slices.Concat(
 		// human route, and workers keep pulling /policy with it.
 		{Name: "console_oidc_bearer_rejected", Opts: consoleOpts(), Run: consoleOIDCBearerRejected},
 
+		// Break-glass login (W-P1-OPS1-08): a real argon2id login opens a Secure
+		// admin session with a signed row, an ERROR line and a Finding per
+		// attempt; five failures lock an address out; disabled it is a 404.
+		// In-process only (fake clock, state db).
+		{Name: "breakglass_login", Opts: breakGlassOpts(), Run: breakGlassLogin},
+		{Name: "breakglass_rate_limit", Opts: breakGlassOpts(), Run: breakGlassRateLimit},
+		{Name: "breakglass_disabled", Opts: adminAuditOIDCOpts(), Run: breakGlassDisabled},
+
 		// Versioned policy store (W-P1-PVER-01): the first start imports the YAML
 		// as version 1; a head written out of process reaches workers. In-process
 		// only (it writes the control plane's state database).

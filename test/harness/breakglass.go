@@ -1,0 +1,56 @@
+package harness
+
+import (
+	"crypto/rand"
+	"os"
+	"path/filepath"
+
+	"github.com/ethosagent/warden/internal/controlplane"
+	"github.com/ethosagent/warden/internal/integration"
+)
+
+// The break-glass login (W-P1-OPS1-08): the control plane boots with
+// console.breakGlass enabled over a real argon2id hash file, so a scenario
+// signs in at POST /auth/breakglass exactly as an operator would.
+
+const (
+	// BreakGlassUsername and BreakGlassPassword are the credentials the hash
+	// file holds. They are test values, not secrets.
+	BreakGlassUsername = "harness-operator"
+	BreakGlassPassword = "harness break-glass passphrase"
+)
+
+// WithBreakGlass enables console.breakGlass (username BreakGlassUsername,
+// password BreakGlassPassword, a hash file under the harness root). It needs
+// WithConsoleOIDC and combines with WithAdminAudit.
+func WithBreakGlass() Option {
+	return func(h *H) { h.wantBreakGlass = true }
+}
+
+func (h *H) writeBreakGlassHash() {
+	hash, err := controlplane.HashPassword(BreakGlassPassword, rand.Reader)
+	if err != nil {
+		h.tb.Fatalf("harness: hash the break-glass password: %v", err)
+	}
+	h.breakGlassHash = filepath.Join(h.root, "breakglass.hash")
+	if err := os.WriteFile(h.breakGlassHash, []byte(hash+"\n"), 0o600); err != nil {
+		h.tb.Fatalf("harness: write the break-glass hash: %v", err)
+	}
+}
+
+// Alerts reads the control plane's alert store (cp-alerts.db), newest first:
+// what the alert pipeline persisted for the Findings the control plane
+// published.
+func (h *H) Alerts() []integration.Alert {
+	h.tb.Helper()
+	st, err := integration.NewStore(filepath.Join(h.root, "cp-alerts.db"))
+	if err != nil {
+		h.tb.Fatalf("harness: open the alert store: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+	alerts, err := st.ListAlerts(100)
+	if err != nil {
+		h.tb.Fatalf("harness: list alerts: %v", err)
+	}
+	return alerts
+}

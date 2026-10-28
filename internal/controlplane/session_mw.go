@@ -138,8 +138,12 @@ func withSessionRefuse(next, refuse http.Handler, store sessionReader, cookie Se
 			next.ServeHTTP(w, r)
 			return
 		}
+		kind := PrincipalSession
+		if sess.AuthMethod == AuthMethodBreakglass {
+			kind = PrincipalBreakglass
+		}
 		p := Principal{
-			Kind: PrincipalSession, Iss: sess.Iss, Sub: sess.Sub, Email: sess.Email,
+			Kind: kind, Iss: sess.Iss, Sub: sess.Sub, Email: sess.Email,
 			Groups: sess.Groups, AuthMethod: sess.AuthMethod, SessionHash: sess.IDHash,
 		}
 		if !csrfOK(r, rawID, cookie.origin) {

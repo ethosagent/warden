@@ -167,7 +167,7 @@ type auditActor struct {
 // unauthenticated request. The bearer is never recorded.
 func (s *Server) resolveActor(r *http.Request) (auditActor, bool) {
 	if p, ok := PrincipalFrom(r.Context()); ok {
-		role, _ := s.cfg.Console.RoleFor(p.Groups)
+		role := principalRole(s.cfg.Console, p)
 		method := adminaudit.AuthMethodOIDC
 		if p.Kind == PrincipalBreakglass {
 			method = adminaudit.AuthMethodBreakglass

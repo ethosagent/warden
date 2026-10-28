@@ -4,12 +4,14 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/ethosagent/warden/internal/controlplane"
 	"github.com/ethosagent/warden/internal/cpstate"
@@ -50,6 +52,9 @@ func (h *H) prepareConsole() {
 		h.tb.Fatal("harness: WithConsoleOIDC boots an in-process control plane; it cannot combine with WithTarget")
 	}
 	h.tb.Setenv(consoleSecretEnv, consoleSecretValue)
+	if h.wantBreakGlass {
+		h.writeBreakGlassHash()
+	}
 	h.issuer.RegisterClient(ConsoleClientID, consoleSecretValue)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -78,8 +83,11 @@ func (h *H) applyConsole(p *controlplane.Params, addr *string) {
 // consoleYAML renders the console block for the control plane's config file.
 func (h *H) consoleYAML() string {
 	audit := ""
+	if h.wantBreakGlass && h.wantConsole {
+		audit += fmt.Sprintf("  breakGlass:\n    enabled: true\n    username: %s\n    passwordHashFile: %s\n", BreakGlassUsername, h.breakGlassHash)
+	}
 	if h.wantAdminAudit {
-		audit = "  adminAudit:\n    enabled: true\n"
+		audit += "  adminAudit:\n    enabled: true\n"
 	}
 	if !h.wantConsole {
 		if audit == "" {
@@ -146,10 +154,19 @@ type Browser struct {
 // Do sends one request with the browser's cookies. url is absolute, or a path
 // on the console. The response body is read by the caller, who closes it.
 func (b *Browser) Do(method, target string, hdr http.Header) (*http.Response, error) {
+	return b.DoBody(method, target, hdr, "")
+}
+
+// DoBody is Do with a request body.
+func (b *Browser) DoBody(method, target string, hdr http.Header, body string) (*http.Response, error) {
 	if len(target) > 0 && target[0] == '/' {
 		target = b.base + target
 	}
-	req, err := http.NewRequestWithContext(context.Background(), method, target, nil)
+	var rd io.Reader
+	if body != "" {
+		rd = strings.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(context.Background(), method, target, rd)
 	if err != nil {
 		return nil, err
 	}

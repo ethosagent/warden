@@ -165,6 +165,10 @@ type H struct {
 	// wantAdminAudit (WithAdminAudit) boots the control plane with
 	// console.adminAudit.enabled and a state dir.
 	wantAdminAudit bool
+	// wantBreakGlass (WithBreakGlass) enables console.breakGlass with a hash
+	// file under the harness root; breakGlassHash is that file's path.
+	wantBreakGlass bool
+	breakGlassHash string
 	// wantCPAdmin (WithControlPlaneAdminToken) boots the control plane with its
 	// own admin bearer (--admin-token-env), separate from the worker token.
 	wantCPAdmin bool
