@@ -28,6 +28,7 @@
           "enum": [
           "dlp_block",
           "dlp_redact",
+          "group_not_allowed",
           "grpc_body_placeholder",
           "grpc_frame_compressed",
           "grpc_frame_malformed",
@@ -37,6 +38,8 @@
           "host_mismatch",
           "http_response_injection",
           "http_response_leak",
+          "identity_groups_truncated",
+          "identity_required",
           "judge",
           "malformed_connect",
           "malformed_request",

@@ -148,6 +148,9 @@ type Server struct {
 	// adminAuditVerifying admits one verify run at a time.
 	adminAudit          AdminAuditSource
 	adminAuditVerifying atomic.Bool
+	// blockList, when set (control plane), serves the block list admin API; nil
+	// makes those routes 404.
+	blockList BlockListStore
 }
 
 // analyticsCacheTTL is how long a computed analytics/MCP payload is reused
@@ -575,6 +578,9 @@ func Routes() []Route {
 		{get, "/dashboard/api/policy/versions/{v}", "policy.version.read"},
 		{get, "/dashboard/api/policy/versions/{v}/diff", "policy.diff"},
 		{post, "/dashboard/api/policy/versions/{v}/rollback", "policy.rollback"},
+		{get, "/dashboard/api/blocked-users", "blocked_users.read"},
+		{post, "/dashboard/api/blocked-users", "blocked_users.add"},
+		{del, "/dashboard/api/blocked-users/{id}", "blocked_users.remove"},
 	}
 }
 

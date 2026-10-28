@@ -147,6 +147,11 @@ type policyWire struct {
 	// stay on the CP). Omitempty keeps the wire and ETag unchanged when empty.
 	BlockedUsers []config.BlockedUser `json:"blockedUsers,omitempty"`
 	Settings     *config.SettingsWire `json:"settings,omitempty"`
+	// ScopedAllowlist and ScopedAllowPos are filled only by projectScoped, at
+	// serve time: identity-scoped allow entries move out of Allowlist so a
+	// worker that decodes leniently cannot read one as global. Never stored.
+	ScopedAllowlist []config.AllowlistEntry `json:"scopedAllowlist,omitempty"`
+	ScopedAllowPos  []int                   `json:"scopedAllowPos,omitempty"`
 }
 
 // Long-poll bounds and the external-edit re-read cadence.
@@ -178,7 +183,11 @@ type Server struct {
 	// versions is the versioned policy store; nil in file mode. Its Create
 	// refreshes the policy server, so long-poll waiters wake at once.
 	versions PolicyVersionStore
-	writeMu  sync.Mutex // serializes policy + integrations edits
+
+	// blocks is the user block list store; nil without State (and then no
+	// blocked_users overlay is registered).
+	blocks  *BlockStore
+	writeMu sync.Mutex // serializes policy + integrations edits
 	// pipeline is the embeddable alert-delivery assembly (manager + engine + tick +
 	// bridge). Nil when no alert DB path is configured (or when its store/manager
 	// failed to build — fail-open: a broken alert config never stops policy
@@ -281,6 +290,7 @@ func New(cfg Config) *Server {
 	// initial load, so they apply to the first served wire. Versioned mode
 	// registers credential; W-P1-BLOCK-03 adds blocked_users.
 	s.initPolicyStore()
+	s.initBlockStore()
 	s.policy.Refresh() // initial load so /policy and the dashboard have policy immediately
 	s.initSessions()
 	s.initAuth()
@@ -541,6 +551,10 @@ func (s *Server) Handler() http.Handler {
 	// and llmProviders GETs report the shared head and writes read If-Match
 	// into WriteMeta.ExpectedHead; file mode reports no version.
 	dash.SetPolicyVersion(s.policyVersionHead)
+	// Block list admin API (W-P1-BLOCK-11). Without a state DB the stub answers
+	// 503 state_dir_required; the hasher is a no-op without admin audit.
+	dash.SetBlockListStore(s.blockListStore())
+	s.RegisterStateHasher(blockedUsersTarget, s.blockedUsersHash)
 	if s.versions != nil {
 		// HTTP saves record before and after as v<N>:<doc_sha256>, replacing
 		// the built-in hasher of the served allow/deny. A no-op without admin
