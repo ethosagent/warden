@@ -275,16 +275,18 @@ func TestBlockedUsers_APIValidation(t *testing.T) {
 		t.Errorf("PUT = %d, want a refusal", rec.Code)
 	}
 
-	// Self-unblock: an entry matching the caller's email (any case) or sub.
+	// Self-unblock: an entry matching the caller's email (any case) or sub
+	// ends the caller's session (W-P1-BLOCK-07), so the caller cannot lift it.
 	ctx := context.Background()
 	for _, entry := range []BlockEntry{{Email: "U1@Example.com"}, {Sub: "u1"}} {
+		admin = e.session(t, groupAdmin)
 		id, err := e.srv.blocks.Add(ctx, entry, "cli:t")
 		if err != nil {
 			t.Fatal(err)
 		}
 		rec := e.send(admin, "", http.MethodDelete, blockAPIPath+"/"+id, "")
-		if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), `"self_unblock_forbidden"`) {
-			t.Errorf("self DELETE = %d %s, want 403 self_unblock_forbidden", rec.Code, rec.Body)
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("self DELETE = %d %s, want 401 (the blocked caller's session is revoked)", rec.Code, rec.Body)
 		}
 		if l, _ := e.srv.blocks.List(ctx); !hasBlockID(l, id) {
 			t.Error("the caller's own block was removed")

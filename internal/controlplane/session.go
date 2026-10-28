@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/ethosagent/warden/internal/cpstate"
@@ -62,6 +63,18 @@ type Session struct {
 	ExpiresAt  time.Time
 }
 
+// AuthMethodBreakglass is the auth_method of a break-glass session. Such a
+// session has no idle timeout: its absolute expiry is its only limit, so
+// activity never extends it.
+const AuthMethodBreakglass = "breakglass"
+
+// CreateOptions tune one Create call. The zero value is the store's defaults.
+type CreateOptions struct {
+	// AbsoluteTTL, when positive, replaces the store's absolute lifetime for
+	// this session.
+	AbsoluteTTL time.Duration
+}
+
 // SessionInput is what Create records about the signed-in user.
 type SessionInput struct {
 	Iss, Sub, Email string
@@ -105,7 +118,7 @@ func CSRFToken(rawID string) string {
 
 // Create mints a session with a fresh 32-byte random id and returns the raw id
 // for the cookie. The id is never taken from a request.
-func (s *SessionStore) Create(ctx context.Context, in SessionInput) (string, Session, error) {
+func (s *SessionStore) Create(ctx context.Context, in SessionInput, opts ...CreateOptions) (string, Session, error) {
 	var b [32]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", Session{}, fmt.Errorf("sessions: random id: %w", err)
@@ -120,10 +133,16 @@ func (s *SessionStore) Create(ctx context.Context, in SessionInput) (string, Ses
 		return "", Session{}, fmt.Errorf("sessions: encode groups: %w", err)
 	}
 	now := s.now()
+	absolute := s.absolute
+	for _, o := range opts {
+		if o.AbsoluteTTL > 0 {
+			absolute = o.AbsoluteTTL
+		}
+	}
 	sess := Session{
 		IDHash: hashID(rawID), Iss: in.Iss, Sub: in.Sub, Email: in.Email,
 		Groups: groups, AuthMethod: in.AuthMethod,
-		CreatedAt: now, LastSeenAt: now, ExpiresAt: now.Add(s.absolute),
+		CreatedAt: now, LastSeenAt: now, ExpiresAt: now.Add(absolute),
 	}
 	_, err = s.db.ExecContext(ctx,
 		`INSERT INTO sessions (id_hash, iss, sub, email, groups_json, auth_method, created_at, last_seen_at, expires_at)
@@ -141,7 +160,10 @@ func (s *SessionStore) Now() time.Time { return s.now() }
 
 // expired reports whether sess is past its idle or absolute limit at now.
 func (s *SessionStore) expired(sess Session, now time.Time) bool {
-	return !now.Before(sess.ExpiresAt) || !now.Before(sess.LastSeenAt.Add(s.idle))
+	if !now.Before(sess.ExpiresAt) {
+		return true
+	}
+	return sess.AuthMethod != AuthMethodBreakglass && !now.Before(sess.LastSeenAt.Add(s.idle))
 }
 
 // Lookup returns the live session for rawID. An unknown or expired id returns
@@ -228,6 +250,33 @@ func (s *SessionStore) DeleteBySub(ctx context.Context, sub string) (int, error)
 	return int(n), err
 }
 
+// DeleteByEmail removes every session whose login email equals email,
+// compared case-insensitively, and returns how many it removed. It serves a
+// block-list entry that has an email and no sub.
+func (s *SessionStore) DeleteByEmail(ctx context.Context, email string) (int, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	if email == "" {
+		return 0, nil
+	}
+	res, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE lower(email) = ?`, email)
+	if err != nil {
+		return 0, fmt.Errorf("sessions: delete by email: %w", err)
+	}
+	n, err := res.RowsAffected()
+	return int(n), err
+}
+
+// DeleteBySubExcept removes every session of sub except the one whose id hash
+// is keepHash and returns how many it removed.
+func (s *SessionStore) DeleteBySubExcept(ctx context.Context, sub, keepHash string) (int, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE sub = ? AND id_hash <> ?`, sub, keepHash)
+	if err != nil {
+		return 0, fmt.Errorf("sessions: delete by sub: %w", err)
+	}
+	n, err := res.RowsAffected()
+	return int(n), err
+}
+
 // List returns the live sessions, newest first. Rows carry only the id hash.
 func (s *SessionStore) List(ctx context.Context) ([]Session, error) {
 	rows, err := s.db.QueryContext(ctx,
@@ -256,8 +305,8 @@ func (s *SessionStore) List(ctx context.Context) ([]Session, error) {
 func (s *SessionStore) SweepExpired(ctx context.Context) (int, error) {
 	now := s.now()
 	res, err := s.db.ExecContext(ctx,
-		`DELETE FROM sessions WHERE expires_at <= ? OR last_seen_at <= ?`,
-		now.Unix(), now.Add(-s.idle).Unix())
+		`DELETE FROM sessions WHERE expires_at <= ? OR (last_seen_at <= ? AND auth_method <> ?)`,
+		now.Unix(), now.Add(-s.idle).Unix(), AuthMethodBreakglass)
 	if err != nil {
 		return 0, fmt.Errorf("sessions: sweep: %w", err)
 	}

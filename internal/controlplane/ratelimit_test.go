@@ -97,3 +97,45 @@ func TestLimitQueryGenerateKeys(t *testing.T) {
 		}
 	}
 }
+
+func TestFailureLimiter(t *testing.T) {
+	clk := clocktest.NewFake(time.Unix(1_800_000_000, 0))
+	l := newFailureLimiter(clk, 15*time.Minute, 2, 3, 2)
+	if limited, _ := l.limited("a"); limited {
+		t.Fatal("fresh key limited")
+	}
+	l.fail("a")
+	l.fail("a")
+	limited, wait := l.limited("a")
+	if !limited || wait != 15*time.Minute {
+		t.Fatalf("a after 2 failures: limited=%v wait=%v", limited, wait)
+	}
+	if !l.firstLimited("a") || l.firstLimited("a") {
+		t.Fatal("firstLimited must be true exactly once per window")
+	}
+	clk.Advance(10 * time.Minute)
+	if _, wait := l.limited("a"); wait != 5*time.Minute {
+		t.Errorf("wait after 10m = %v, want 5m", wait)
+	}
+	// Global ceiling: a third failure from b trips every key.
+	l.fail("b")
+	if limited, _ := l.limited("c"); !limited {
+		t.Fatal("global ceiling not applied")
+	}
+	// Past the table size a new key still counts globally but takes no slot.
+	l.fail("d")
+	l.fail("e")
+	if len(l.keys) > 2 {
+		t.Fatalf("keys = %d, want at most 2", len(l.keys))
+	}
+	if l.firstLimited("zzz") {
+		t.Error("firstLimited allocated past maxKeys")
+	}
+	clk.Advance(15 * time.Minute)
+	if limited, _ := l.limited("a"); limited {
+		t.Fatal("still limited after every window ended")
+	}
+	if len(l.keys) != 0 {
+		t.Fatalf("expired keys not swept: %d", len(l.keys))
+	}
+}

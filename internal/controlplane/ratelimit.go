@@ -115,3 +115,116 @@ func (s *Server) limitQueryGenerate(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
+
+// The break-glass failure limiter (W-P1-OPS1-08). Failures are counted per
+// client address and across all addresses in fixed windows; a limited request
+// never reaches argon2.
+const (
+	breakGlassWindow       = 15 * time.Minute
+	breakGlassPerAddr      = 5
+	breakGlassGlobal       = 20
+	breakGlassLimiterAddrs = 4096
+)
+
+// failureLimiter counts login failures in fixed windows. Each address has its
+// own window (started by its first failure) and one global window bounds the
+// failures of all addresses together. Time comes from the injected clock;
+// expired entries are swept on every call, so memory is bounded by the number
+// of addresses that failed within one window (and by maxKeys).
+type failureLimiter struct {
+	clk     clock.Clock
+	window  time.Duration
+	perKey  int
+	global  int
+	maxKeys int
+
+	mu          sync.Mutex
+	keys        map[string]*failureEntry
+	globalStart time.Time
+	globalN     int
+}
+
+type failureEntry struct {
+	start time.Time
+	n     int
+	// noted is set once the limited state of this address was reported for
+	// audit in this window, so rate-limited requests add one row per window.
+	noted bool
+}
+
+func newFailureLimiter(clk clock.Clock, window time.Duration, perKey, global, maxKeys int) *failureLimiter {
+	return &failureLimiter{clk: clk, window: window, perKey: perKey, global: global, maxKeys: maxKeys, keys: map[string]*failureEntry{}}
+}
+
+// sweepLocked drops every window that has ended.
+func (l *failureLimiter) sweepLocked(now time.Time) {
+	for k, e := range l.keys {
+		if !now.Before(e.start.Add(l.window)) {
+			delete(l.keys, k)
+		}
+	}
+	if l.globalN > 0 && !now.Before(l.globalStart.Add(l.window)) {
+		l.globalN = 0
+	}
+}
+
+// limited reports whether key may not try now, and how long until the limiting
+// window ends.
+func (l *failureLimiter) limited(key string) (bool, time.Duration) {
+	now := l.clk.Now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.sweepLocked(now)
+	var wait time.Duration
+	if e, ok := l.keys[key]; ok && e.n >= l.perKey {
+		wait = e.start.Add(l.window).Sub(now)
+	}
+	if l.globalN >= l.global {
+		wait = max(wait, l.globalStart.Add(l.window).Sub(now))
+	}
+	return wait > 0, wait
+}
+
+// fail counts one failure for key.
+func (l *failureLimiter) fail(key string) {
+	now := l.clk.Now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.sweepLocked(now)
+	if l.globalN == 0 {
+		l.globalStart = now
+	}
+	l.globalN++
+	e, ok := l.keys[key]
+	if !ok {
+		if len(l.keys) >= l.maxKeys {
+			return // the global ceiling still counts it
+		}
+		e = &failureEntry{start: now}
+		l.keys[key] = e
+	}
+	e.n++
+}
+
+// firstLimited reports true once per address and window: the first limited
+// request of a window is the one that may write an audit row. With the table
+// full, no further address is noted.
+func (l *failureLimiter) firstLimited(key string) bool {
+	now := l.clk.Now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.sweepLocked(now)
+	e, ok := l.keys[key]
+	if !ok {
+		if len(l.keys) >= l.maxKeys {
+			return false
+		}
+		e = &failureEntry{start: now}
+		l.keys[key] = e
+	}
+	if e.noted {
+		return false
+	}
+	e.noted = true
+	return true
+}

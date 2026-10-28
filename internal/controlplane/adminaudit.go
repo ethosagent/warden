@@ -143,18 +143,28 @@ func verifyFailedFinding(res adminaudit.Result, verifyErr error, now time.Time) 
 	}
 }
 
-// publishFinding publishes f on the current alert manager's bus. Nil-safe: a
-// CP without an alert pipeline (or whose manager failed to build) drops it;
-// the caller has already logged the event.
+// FindingPublisher is how the control plane publishes a Finding. The alert
+// pipeline's bus satisfies it; tests inject a fake through Server.findings.
+type FindingPublisher interface {
+	PublishFinding(f integration.Finding)
+}
+
+// publishFinding publishes f through the control plane's FindingPublisher: the
+// test override when set, else the current alert manager's bus. A control
+// plane with no alert pipeline (or whose manager failed to build) cannot
+// deliver it, so the Finding is logged at ERROR by rule id and severity only.
 func (s *Server) publishFinding(f integration.Finding) {
-	if s.pipeline == nil {
+	if s.findings != nil {
+		s.findings.PublishFinding(f)
 		return
 	}
-	m := s.pipeline.CurrentManager()
-	if m == nil {
-		return
+	if s.pipeline != nil {
+		if m := s.pipeline.CurrentManager(); m != nil {
+			m.Bus().PublishFinding(f)
+			return
+		}
 	}
-	m.Bus().PublishFinding(f)
+	s.cfg.Logger.Error("finding_not_published", "rule", f.RuleID, "severity", f.Severity.String())
 }
 
 // checkpointLoopHooks lets a test observe the checkpoint loop's lifecycle

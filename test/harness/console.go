@@ -52,6 +52,9 @@ func (h *H) prepareConsole() {
 		h.tb.Fatal("harness: WithConsoleOIDC boots an in-process control plane; it cannot combine with WithTarget")
 	}
 	h.tb.Setenv(consoleSecretEnv, consoleSecretValue)
+	if h.wantBreakGlass {
+		h.writeBreakGlassHash()
+	}
 	h.issuer.RegisterClient(ConsoleClientID, consoleSecretValue)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -86,8 +89,11 @@ func (h *H) applyConsole(p *controlplane.Params, addr *string) {
 // consoleYAML renders the console block for the control plane's config file.
 func (h *H) consoleYAML() string {
 	audit := ""
+	if h.wantBreakGlass && h.wantConsole {
+		audit += fmt.Sprintf("  breakGlass:\n    enabled: true\n    username: %s\n    passwordHashFile: %s\n", BreakGlassUsername, h.breakGlassHash)
+	}
 	if h.wantAdminAudit {
-		audit = "  adminAudit:\n    enabled: true\n"
+		audit += "  adminAudit:\n    enabled: true\n"
 	}
 	if !h.wantConsole {
 		if audit == "" {

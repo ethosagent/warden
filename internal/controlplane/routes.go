@@ -67,6 +67,8 @@ func cpDashboardRoutes() []dashboard.Route {
 //	POST /auth/logout   any live session, CSRF-checked by withSession
 //	GET  /auth/login    no session (it is how one is obtained)
 //	GET  /auth/callback no session; guards itself (state, browser cookie, PKCE, nonce)
+//	POST /auth/breakglass no session, no CSRF; only with console.breakGlass.enabled
+//	                     (W-P1-OPS1-08); guards itself with a rate limit and argon2id
 //
 // The login routes also need a state DB (s.auth is nil otherwise), so without
 // one they stay 404 as well.
@@ -81,6 +83,9 @@ func (s *Server) registerAuthRoutes(mux *http.ServeMux) {
 	}
 	mux.Handle("/auth/me", s.sessionWrap(http.HandlerFunc(s.handleAuthMe)))
 	mux.Handle("/auth/logout", s.requestIDWrap(s.sessionWrap(http.HandlerFunc(s.handleLogout))))
+	if s.breakGlass != nil {
+		mux.Handle(breakGlassPath, s.requestIDWrap(http.HandlerFunc(s.handleBreakGlass)))
+	}
 	if s.auth == nil {
 		return
 	}

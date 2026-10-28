@@ -28,7 +28,7 @@ func (s *Server) writeSettingsAs(ctx context.Context, in config.SettingsWire, me
 	var role config.Role
 	p, ok := PrincipalFrom(ctx)
 	if ok {
-		role, _ = s.cfg.Console.RoleFor(p.Groups)
+		role = principalRole(s.cfg.Console, p)
 	}
 	if role < config.RoleEditor {
 		return &dashboard.RoleRequiredError{Need: config.RoleEditor.String()}

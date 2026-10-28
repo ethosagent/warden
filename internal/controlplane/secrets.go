@@ -102,7 +102,7 @@ func (s *Server) secretsAuthOK(w http.ResponseWriter, r *http.Request) bool {
 		writeAuthzJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthenticated"})
 		return false
 	}
-	role, _ := s.cfg.Console.RoleFor(p.Groups)
+	role := principalRole(s.cfg.Console, p)
 	if role < row.MinRole {
 		logDenied(s.cfg.Logger, row, role, p, r)
 		writeAuthzJSON(w, http.StatusForbidden, map[string]string{"error": "role_required", "need": row.MinRole.String()})

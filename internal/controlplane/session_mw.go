@@ -114,14 +114,19 @@ type sessionReader interface {
 // is CSRF: a state-changing request that carries a live session must present a
 // matching X-Warden-CSRF and, if it sends Origin, the console's own origin.
 func withSession(next http.Handler, store sessionReader, cookie SessionCookie, logger *slog.Logger) http.Handler {
-	return withSessionRefuse(next, csrfRefusal, store, cookie, logger)
+	return withSessionRefuse(next, csrfRefusal, store, cookie, logger, nil)
 }
+
+// sessionGuard may refuse a request that carries a live, non-break-glass
+// session. It returns true when it has already written the response, so the
+// request goes no further.
+type sessionGuard func(w http.ResponseWriter, r *http.Request, p Principal) bool
 
 // withSessionRefuse is withSession with the CSRF refusal handler given. The
 // refusal runs with the session's Principal in its context (and csrfRefused
 // set), so the admin audit middleware wrapped around it records the refused
 // write as denied. next never runs for a refused request.
-func withSessionRefuse(next, refuse http.Handler, store sessionReader, cookie SessionCookie, logger *slog.Logger) http.Handler {
+func withSessionRefuse(next, refuse http.Handler, store sessionReader, cookie SessionCookie, logger *slog.Logger, guard sessionGuard) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rawID, ok := cookie.From(r)
 		if !ok {
@@ -138,9 +143,18 @@ func withSessionRefuse(next, refuse http.Handler, store sessionReader, cookie Se
 			next.ServeHTTP(w, r)
 			return
 		}
+		kind := PrincipalSession
+		if sess.AuthMethod == AuthMethodBreakglass {
+			kind = PrincipalBreakglass
+		}
 		p := Principal{
-			Kind: PrincipalSession, Iss: sess.Iss, Sub: sess.Sub, Email: sess.Email,
+			Kind: kind, Iss: sess.Iss, Sub: sess.Sub, Email: sess.Email,
 			Groups: sess.Groups, AuthMethod: sess.AuthMethod, SessionHash: sess.IDHash,
+		}
+		// A break-glass session is exempt: it is how a locked-out console is
+		// recovered.
+		if guard != nil && kind != PrincipalBreakglass && guard(w, r, p) {
+			return
 		}
 		if !csrfOK(r, rawID, cookie.origin) {
 			logger.Warn("console csrf check failed", "session", shortHash(sess.IDHash), "method", r.Method, "path", r.URL.Path)
@@ -195,6 +209,9 @@ func (s *Server) initSessions() {
 	s.sessionCookie = cookie
 	s.sessions = NewSessionStore(s.cfg.State.SQL(), cc.Session.Idle, cc.Session.Absolute, s.cfg.Now)
 	s.sessionReader = s.sessions
+	if s.blocks != nil {
+		s.blocks.SetSessionRevoker(s.sessions)
+	}
 }
 
 // sessionWrap applies withSession when sessions are enabled and is the identity
@@ -203,7 +220,7 @@ func (s *Server) sessionWrap(h http.Handler) http.Handler {
 	if s.sessionReader == nil {
 		return h
 	}
-	return withSession(h, s.sessionReader, s.sessionCookie, s.cfg.Logger)
+	return withSessionRefuse(h, csrfRefusal, s.sessionReader, s.sessionCookie, s.cfg.Logger, s.blockedSessionGuard())
 }
 
 // sessionAuditWrap is sessionWrap for an admin route: h runs behind the
@@ -214,7 +231,7 @@ func (s *Server) sessionAuditWrap(classify func(*http.Request) (authzRow, bool),
 	if s.sessionReader == nil {
 		return inner
 	}
-	return withSessionRefuse(inner, s.auditWrap(classify, csrfRefusal), s.sessionReader, s.sessionCookie, s.cfg.Logger)
+	return withSessionRefuse(inner, s.auditWrap(classify, csrfRefusal), s.sessionReader, s.sessionCookie, s.cfg.Logger, s.blockedSessionGuard())
 }
 
 // sweepSessions deletes expired sessions every minute until ctx is done.

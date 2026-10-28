@@ -423,7 +423,10 @@ their own rows (the middleware never wraps `/auth/*`), all with target `session`
 |---|---|---|---|---|
 | `auth.login` | `GET /auth/callback` created a session | the verified ID token's `sub` and `email`, role from `console.roles` | `ok` (status 302) | `{role}` |
 | `auth.login_failed` | `GET /auth/callback` failed after its pending `state` was consumed | the verified token's subject when there is one (`no_role`), otherwise `anonymous` | `denied` or `error` (status 302) | `{reason}` |
+| `auth.blocked_login` | `GET /auth/callback` refused a verified principal who is on the user block list | the verified token's `sub` and `email` | `denied` (status 403) | `{reason: user_blocked}` |
+| `auth.blocked_session` | the session middleware refused a request from a blocked principal (at most one row a minute per principal) | the session's `sub` and `email` | `denied` (status 403) | `{reason: user_blocked}` |
 | `auth.logout` | `POST /auth/logout` ended a live session | the session's user, captured before the row is deleted | `ok` (status 204) | none |
+| `auth.breakglass` | `POST /auth/breakglass` (only with `console.breakGlass.enabled`) | `breakglass:<configured username>` on a username match, `breakglass:unknown` otherwise; `auth_method` `breakglass` | `ok` (200), `denied` (401), `error` (503); a rate-limited request adds at most one `denied` row (`{reason: rate_limited}`) per address per 15 minutes | none |
 
 `target_ref` of `auth.login` and `auth.logout` is the first 8 hex characters of the
 session's id hash (the `console_login`/`console logout` log lines use the same value),
@@ -436,6 +439,18 @@ so a sign-in and its sign-out can be matched. `details.reason` is a closed set:
 | `state_invalid` | `denied` | the state was valid but the browser-binding login cookie was missing or wrong (`state_invalid`) |
 | `idp_error` | `error` | the IdP answered with an error, or its keys could not be fetched (`idp_error`, `idp_unavailable`) |
 | `exchange_failed` | `error` | no code, the token exchange failed, or the session could not be stored (`exchange_failed`) |
+
+A principal on the user block list is refused at the callback with `403 {"error":"user_blocked"}`
+and no session cookie, recorded as `auth.blocked_login` (it shares the 20-a-minute per-address
+cap with `auth.login_failed`). While no block list has loaded (the first read of the state
+database failed) `/auth/login` and the callback answer `503 {"error":"block_list_unavailable"}`
+and a callback that got that far is recorded as `auth.login_failed` with reason
+`block_list_unavailable`; `/policy` is not affected by the console check. The session
+middleware also answers `403 {"error":"user_blocked"}` to a live session whose principal is
+blocked, from an in-memory snapshot (no query per request). Blocking a principal deletes
+their sessions (by sub, and by lowercased email), and lifting the block does not bring them back.
+A block written by the offline CLI is picked up by the control plane's watcher and does the same.
+Break-glass sessions are exempt from both checks.
 
 A callback with a missing, unknown or expired `state` consumed nothing and writes no
 row, and neither does a logout without a live session or one refused for CSRF. At most
@@ -581,6 +596,25 @@ The console has two modes, chosen by `console.auth`:
 | Writes | gated by the CP admin bearer (`Authorization: Bearer`, [above](#dashboard-writes-need-the-control-plane-token)) | need a session, the role in the matrix below and the session's CSRF token (`X-Warden-CSRF`, from `GET /auth/me`) |
 | Shared tokens | the bearer is the write credential | the shared tokens never open a human route, the bearer included |
 | `/auth/me`, `/auth/logout` | absent (`404`) | any live session; logout is CSRF-checked and ends only the console session, not the IdP's |
+
+**Break-glass login.** With `console.breakGlass.enabled` (and `console.auth: oidc`),
+`POST /auth/breakglass` with `{"username","password"}` (JSON, at most 4 KiB, same-origin)
+opens an admin session for when the IdP is down. It is not CSRF-checked (there is no
+session yet) and answers `404` when break-glass is off. Failures are limited to 5 per
+client address (`RemoteAddr`, never `X-Forwarded-For`) and 20 in total per 15 minutes;
+a limited request answers `429 {"error":"rate_limited"}` with `Retry-After` and never
+runs argon2id, and at most two verifications run at once (`429 {"error":"busy"}`). A
+wrong username and a wrong password are indistinguishable (`401
+{"error":"invalid_credentials"}`, one argon2id run each). The session has role `admin`,
+`auth_method` `breakglass`, an absolute expiry of `sessionTTL` that activity never
+extends, and a `Secure` cookie even behind a TLS terminator; a new login revokes the
+earlier break-glass session. The hash is re-read on every attempt (`503
+breakglass_unavailable` when it cannot be read). Every attempt logs one ERROR line
+`breakglass_login` (outcome, client address and, on success, the 8-character session
+hash), and publishes a `breakglass_login` Finding: critical per login, high for
+failures. With admin audit on, a row that cannot be written fails the login closed (`503
+audit_unavailable`). The limiter is in memory: its windows reset when the control plane
+restarts. The password and the submitted username are never stored or logged.
 
 Moving a deployment from `none` to `oidc` is covered in
 [Migrating from none to oidc](#migrating-from-none-to-oidc).

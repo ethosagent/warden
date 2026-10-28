@@ -179,6 +179,7 @@ func cpRouteTable() map[routeKey]authzRow {
 		{get, "/auth/login", handler("auth.login")},
 		{get, "/auth/callback", handler("auth.callback")},
 		{post, "/auth/logout", handler("auth.logout")},
+		{post, "/auth/breakglass", handler("auth.breakglass")},
 	}
 	t := make(map[routeKey]authzRow, len(rows))
 	for _, r := range rows {
@@ -213,7 +214,7 @@ func requireRole(next http.Handler, table map[routeKey]authzRow, console config.
 			http.Redirect(w, r, "/auth/login?next="+url.QueryEscape(r.URL.RequestURI()), http.StatusFound)
 			return
 		}
-		role, _ := console.RoleFor(p.Groups) // zero (no role) when no group matches
+		role := principalRole(console, p) // zero (no role) when no group matches
 		row, listed := table[routeKey{r.Method, dashboard.RoutePath(r.URL.Path)}]
 		if !listed {
 			logDenied(logger, row, role, p, r)

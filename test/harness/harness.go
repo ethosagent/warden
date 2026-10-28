@@ -182,6 +182,10 @@ type H struct {
 	// wantAdminAudit (WithAdminAudit) boots the control plane with
 	// console.adminAudit.enabled and a state dir.
 	wantAdminAudit bool
+	// wantBreakGlass (WithBreakGlass) enables console.breakGlass with a hash
+	// file under the harness root; breakGlassHash is that file's path.
+	wantBreakGlass bool
+	breakGlassHash string
 	// wantAdminJSONLog (WithAdminAuditJSONLog) also writes the admin stream as
 	// warden.admin.v1 lines to a file under the harness root (audit.jsonLog).
 	wantAdminJSONLog bool
