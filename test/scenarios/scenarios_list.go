@@ -82,6 +82,13 @@ var All = slices.Concat(
 		// audit row, enforcement unchanged, nothing more after a restart.
 		// In-process only (it reads the CP state dir).
 		{Name: "policy_store_initial_import", Opts: policyImportOpts(), Run: policyStoreInitialImport},
+		// Block-list store (W-P1-BLOCK-03): a block written through BlockStore by
+		// another process reaches the served policy (sub/email only) and leaves on
+		// removal. In-process only (it writes the CP state dir).
+		{Name: "block_list_served", Opts: blockListOpts(), Run: blockListServed},
+		// Block-list admin API (W-P1-BLOCK-11).
+		{Name: "block_api_bearer", Opts: blockAPIBearerOpts(), Run: blockAPIBearer},
+		{Name: "block_api_roles", Opts: blockAPIOIDCOpts(), Run: blockAPIRoles},
 		// Versioned publish (W-P1-PVER-02): dashboard policy and llmProviders
 		// saves create versions authored anonymous that workers enforce.
 		// In-process only (it reads the CP state dir).
@@ -93,6 +100,9 @@ var All = slices.Concat(
 		// every h2 stream, is decided with its own verified subject; members are
 		// forwarded, non-members and anonymous callers are denied.
 		{Name: "scoped_policy_deferred_identity", Opts: identityOpts(), Run: scopedPolicyDeferredIdentity},
+		// Replay of recorded identities (W-P1-GPOL-05): a candidate narrowing a
+		// scoped rule names the affected user and counts anonymous apart.
+		{Name: "scoped_policy_replay_affected_users", Opts: identityOpts(), Run: scopedPolicyReplayAffectedUsers},
 		// MCP subject seam (W-P1-GPOL-04): the verified subject reaches the MCP
 		// gateway through RequestMeta without changing any verdict.
 		{Name: "mcp_subject_seam_unchanged", Opts: mcpSubjectOpts(), Run: mcpSubjectSeamUnchanged},
@@ -124,6 +134,15 @@ var All = slices.Concat(
 		{Name: "policy_save_if_match_required", Opts: policySaveIfMatchOpts(), Run: policySaveIfMatchRequired},
 		// File mode saves without If-Match as before.
 		{Name: "policy_file_mode_save_without_if_match", Run: policyFileModeSaveWithoutIfMatch},
+
+		// Per-worker tokens (W-P1-WTOK-02): a bound token authenticates /policy,
+		// heartbeat and ingest, its bound id is what the CP records, an
+		// out-of-process revoke takes effect, and it opens no human route.
+		// In-process only (it writes the CP state dir, fake clock).
+		{Name: "worker_token_auth", Opts: workerTokenOpts(), Run: workerTokenAuth},
+		// Held long-poll (W-P1-WTOK-09): a revoke out of process returns that
+		// token's held /policy with 401 while another token's stays parked.
+		{Name: "worker_token_longpoll_revoke", Opts: workerTokenOpts(), Run: workerTokenLongPollRevoke},
 
 		// Admin audit gate (W-P1-AAUD-05): enabled, the control plane writes the
 		// genesis entry and logs its key_id before serving. In-process only (it

@@ -148,6 +148,9 @@ type Server struct {
 	// adminAuditVerifying admits one verify run at a time.
 	adminAudit          AdminAuditSource
 	adminAuditVerifying atomic.Bool
+	// blockList, when set (control plane), serves the block list admin API; nil
+	// makes those routes 404.
+	blockList BlockListStore
 }
 
 // analyticsCacheTTL is how long a computed analytics/MCP payload is reused
@@ -243,6 +246,9 @@ type WorkerView struct {
 	PolicyVersion int64 `json:"policyVersion,omitempty"`
 	Behind        bool  `json:"behind"`
 	Online        bool  `json:"online"`
+	// Caps are the capabilities the worker advertised on its latest heartbeat
+	// (display only; the control plane never acts on them in P1).
+	Caps []string `json:"caps,omitempty"`
 }
 
 // NewServer constructs a dashboard Server. The policy argument is the static
@@ -572,6 +578,9 @@ func Routes() []Route {
 		{get, "/dashboard/api/policy/versions/{v}", "policy.version.read"},
 		{get, "/dashboard/api/policy/versions/{v}/diff", "policy.diff"},
 		{post, "/dashboard/api/policy/versions/{v}/rollback", "policy.rollback"},
+		{get, "/dashboard/api/blocked-users", "blocked_users.read"},
+		{post, "/dashboard/api/blocked-users", "blocked_users.add"},
+		{del, "/dashboard/api/blocked-users/{id}", "blocked_users.remove"},
 	}
 }
 

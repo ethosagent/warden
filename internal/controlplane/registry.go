@@ -1,6 +1,7 @@
 package controlplane
 
 import (
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -27,7 +28,14 @@ type workerState struct {
 	lastSeen        time.Time
 	lastPolicyPull  time.Time
 	eventsForwarded int64
-	policyETag      string // the worker's current policy version (from heartbeat)
+	policyETag      string   // the worker's current policy version (from heartbeat)
+	caps            []string // capabilities of the latest heartbeat (replaced, not merged)
+
+	// How the worker last authenticated (recordAuth). tokenID/tokenName are set
+	// only for kind token; legacy and none ids are unverified headers.
+	authKind  WorkerKind
+	tokenID   string
+	tokenName string
 }
 
 // NewWorkerRegistry returns an empty registry.
@@ -63,8 +71,9 @@ func (r *WorkerRegistry) SeenIngest(proxyID string, n int) {
 }
 
 // SeenHeartbeat records a heartbeat and the worker's current policy ETag, so the
-// dashboard can flag workers that are a policy version behind.
-func (r *WorkerRegistry) SeenHeartbeat(proxyID, policyETag string) {
+// dashboard can flag workers that are a policy version behind. caps replaces the
+// stored set: a worker that stops advertising a capability loses it.
+func (r *WorkerRegistry) SeenHeartbeat(proxyID, policyETag string, caps []string) {
 	if proxyID == "" {
 		return
 	}
@@ -74,6 +83,43 @@ func (r *WorkerRegistry) SeenHeartbeat(proxyID, policyETag string) {
 	if policyETag != "" {
 		w.policyETag = policyETag
 	}
+	w.caps = append([]string(nil), caps...)
+}
+
+// maxWorkersWithoutCap bounds the WorkersWithoutCap result.
+const maxWorkersWithoutCap = 100
+
+// WorkersWithoutCap returns the ids of connected (online) workers that do not
+// advertise cap, sorted and capped at 100.
+func (r *WorkerRegistry) WorkersWithoutCap(cap string) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := r.now()
+	var out []string
+	for id, w := range r.workers {
+		if now.Sub(w.lastSeen) >= staleAfter || slices.Contains(w.caps, cap) {
+			continue
+		}
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	if len(out) > maxWorkersWithoutCap {
+		out = out[:maxWorkersWithoutCap]
+	}
+	return out
+}
+
+// recordAuth notes how the worker behind p last authenticated. A principal
+// without a proxy id (a legacy or anonymous caller with no header) is ignored,
+// like the Seen* methods.
+func (r *WorkerRegistry) recordAuth(p WorkerPrincipal) {
+	if p.ProxyID == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	w := r.touch(p.ProxyID, r.now())
+	w.authKind, w.tokenID, w.tokenName = p.Kind, p.TokenID, p.TokenName
 }
 
 // touch returns the worker's state, creating it on first contact. Caller holds mu.
@@ -101,6 +147,7 @@ func (r *WorkerRegistry) Views() []dashboard.WorkerView {
 			LastSeen:        w.lastSeen.UTC().Format(time.RFC3339),
 			EventsForwarded: w.eventsForwarded,
 			PolicyETag:      w.policyETag,
+			Caps:            append([]string(nil), w.caps...),
 			Online:          now.Sub(w.lastSeen) < staleAfter,
 		}
 		if !w.lastPolicyPull.IsZero() {

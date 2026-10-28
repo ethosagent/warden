@@ -52,7 +52,9 @@ a worker. There are exactly three calls:
    changes**, or **304** at the timeout; the worker re-polls immediately. Policy
    edits reach workers in ~one round-trip, not after a fixed interval.
 2. **Heartbeat** — `POST /control/heartbeat` (~every 10s) so the CP lists the
-   worker as online even when idle, and knows its current policy version.
+   worker as online even when idle, and knows its current policy version and the
+   capabilities it advertises (`caps`, e.g. `blocklist/v1`), so the console can flag
+   workers that would silently ignore newer policy fields.
 3. **Analytics** — `POST /central/ingest` (worker → CP).
 
 The dashboard shows only what the CP already has (pushed analytics + the
@@ -617,6 +619,9 @@ fails when the two differ.
 | `/dashboard/api/analytics` | GET | viewer | `analytics.read` |
 | `/dashboard/api/audit` | GET | viewer | `audit.read` |
 | `/dashboard/api/audit/verify` | POST | viewer | `audit.verify` |
+| `/dashboard/api/blocked-users` | GET | admin | `blocked_users.read` |
+| `/dashboard/api/blocked-users` | POST | admin | `blocked_users.add` |
+| `/dashboard/api/blocked-users/{id}` | DELETE | admin | `blocked_users.remove` |
 | `/dashboard/api/detection` | GET | viewer | `detection.read` |
 | `/dashboard/api/detection` | POST | editor | `detection.write` |
 | `/dashboard/api/detection` | PUT | editor | `detection.write` |
@@ -711,9 +716,10 @@ append is logged at ERROR and does not stop startup.
   the served YAML `secretStore` block and is merged in when `/policy` is built,
   so workers get the same bytes as before. In history responses and diffs a
   credential appears only as its fingerprint, never the value.
-- Serve-time overlay data is not stored either. The credential is the only
-  overlay today; the block list will be one when it ships. A rollback therefore
-  never restores an old credential or block list.
+- Serve-time overlay data is not stored either. The credential
+  (versioned mode) and the user block list (whenever a state dir is set) are the
+  overlays today. A rollback therefore never restores an old credential or
+  block list.
 - CP-local blocks (integrations, detection, `central`, `controlPlane`, ...)
   are not versioned; their editors keep rewriting the served YAML.
 
@@ -903,6 +909,48 @@ YAML if the mirror is lost.
   removed, the served YAML is only the write-through mirror of head, and hand
   edits are never served (they come in through `warden policy import`).
 
+## Block list: offline CLI
+
+The user block list lives in `<state-dir>/warden-cp.db`, outside policy
+versions. When the console or the IdP is unavailable, or a script needs to
+block someone without a browser session, use the command line. It works with
+the control plane running or stopped.
+
+```sh
+warden control-plane block add --state-dir D [--sub S] [--email E] --reason R
+warden control-plane block remove --state-dir D --id ID
+warden control-plane block list --state-dir D [--json]
+```
+
+- `add` needs `--sub`, `--email` or both, and prints the new id. It uses the
+  same store and validator as the admin API: the email is lowercased, a
+  duplicate sub or email is refused, the reason is at most 512 bytes with no
+  control characters, and the count and size limits apply. A validation error
+  exits 1 with the API's message.
+- `remove` exits 2 for an id that is not on the list.
+- `list` opens the database read-only.
+- `--admin-audit-key-file` (add and remove) defaults to `<state-dir>/cp-audit.key`.
+
+**Audit.** With admin audit enabled in the state dir, each add and remove
+appends one `blocked_users.add` or `blocked_users.remove` row (actor
+`cli:<os user>`, auth_method `cli`, target `blocked_users`, target_ref
+`block:<id>`). The reason text is not recorded in the row or logged. The
+audit key is checked first: with audit rows present and the key missing or not
+matching, the command exits non-zero and writes nothing. If the audit append
+still fails, an add is rolled back and a remove deletes nothing. The block and
+its audit row are two commits, not one transaction, so a crash between them
+(or two concurrent removes of one id) can leave one without the other. A state dir where audit was never enabled
+gets a one-line notice and no row.
+
+**Pickup.** A running control plane polls `PRAGMA data_version` every 2 s and,
+when another process wrote, refreshes the served policy and runs the block
+store's change callbacks. A connected worker then receives the new list within
+2 s plus one long-poll round trip.
+
+The CLI has no console identity, so the self-unblock check of the admin API does
+not apply. Write access to the state dir already allows policy changes, so
+this adds no new authority.
+
 ## Worker admin token
 
 The worker's admin listener (`:9090`, default `127.0.0.1:9090`) serves the same
@@ -1023,6 +1071,32 @@ agents:
   the agent**: whoever holds a valid token can present it. P2 adds binding and
   bundle-distributed JWKS.
 
+### Block list enforcement
+
+A worker denies every request from a user on the block list (`policy.blockedUsers`,
+by IdP `sub` and/or email). The list lives in the worker's policy evaluator and is
+swapped with allow/deny, at boot, on every long-poll update and for standalone
+YAML. It is checked at `CONNECT` (a `403` with `{"error":"user_blocked"}` before any
+dial, TLS or raw tunnel) and again on every request (HTTP/1.1 keep-alive, h2, gRPC
+streams and WebSocket upgrades, before any policy gate, judge or secret swap). Each
+deny records reason `user_blocked` and ends the session. `sub` is an exact match;
+email is matched case-insensitively.
+
+Matching uses the claims of any token the worker parsed, verified or not (valid,
+expired, bad signature): a match can only deny. Gaps:
+
+- A request that carries **no token** is anonymous in attribute mode and is not
+  matched (P2 require mode closes this).
+- With `identity` mode off the worker parses no token, so there are no claims to
+  match: the block list needs attribute mode.
+- In transparent mode there is no `CONNECT` and no `Proxy-Authorization`, so the
+  `CONNECT` check cannot run; only requests carrying `X-Warden-Identity` on
+  terminated traffic are matched.
+- Every policy update also resets rate-limit windows, so each block or unblock
+  resets them on every worker.
+- Sessions that are already open are cut at their next request; a user who is
+  blocked is cut at once (see [Block list](#block-list)).
+
 ### Deployment and rollout
 
 Workers need egress to the issuer. `deploy/k8s/networkpolicy.yaml` carries an
@@ -1034,6 +1108,66 @@ Roll out **control plane first**: upgrade the control plane so it accepts and se
 the `identity` block, then upgrade workers, then set `identity.defaultMode` or a
 per-agent `identity` value. Workers on an older build ignore the block, and a worker
 on this build with no block stays off, so every step is safe to pause at.
+
+## Block list
+
+An admin blocks a person by Dex `sub` or email. The list ships to workers on the
+policy wire as `blockedUsers`; a worker denies any request whose identity claims
+match with `403 {"error":"user_blocked"}` and a deny event with reason
+`user_blocked`. Matching uses the claims of any token the worker parsed, verified
+or not (an expired or bad-signature token still names its user), because a match
+can only deny.
+
+### Open sessions are cut
+
+A request that **arrived** under the old policy completes under it. A **session**
+that the new list matches is **cut when the change is applied**, not drained:
+
+- a raw CONNECT tunnel, an HTTP/2 connection and a WebSocket are closed at once,
+  and the close interrupts active streams, not only new ones;
+- an idle HTTP/1 keep-alive connection is closed without another request;
+- an HTTP/1 connection that is mid-request finishes that request, delivers its
+  full response, and is then closed. An HTTP/1 streaming response (for example
+  SSE) that began before the block runs to its end; the same stream over h2, a
+  tunnel or a WebSocket is cut at once.
+
+After each applied policy change the worker closes the matching sessions and
+writes **one** `user_blocked` deny event per closed session (its protocol, domain
+and the user's sub). Sessions with no identity are not tracked, so anonymous
+traffic pays nothing. Two metrics report it, neither labelled with identity:
+`warden_blocklist_entries` (users on the list after the last applied change) and
+`warden_blocklist_sessions_closed_total`.
+
+### How fast a block applies
+
+`BlockStore.Add` refreshes the served policy, which wakes held long-polls at
+once, so a connected worker applies a block within about 1 s. The offline CLI
+(`warden control-plane block add --state-dir`) adds at most one 2 s `data_version`
+poll. A worker backing off after control-plane errors applies it after at most the
+15 s backoff plus one long-poll round trip; `controlPlane.longPollWait` (default
+30 s) does not delay a changed policy.
+
+### Known gaps
+
+- **No token, no match.** In identity `attribute` mode a request or session that
+  carries no token at all has no claims to match and is not blocked. P2 `require`
+  mode closes this gap.
+- **Identity off.** With identity mode off the worker parses no token, so nothing
+  is matched; turn identity on (`attribute`) for the block list to bite.
+- **Transparent mode.** There is no CONNECT, so only an `X-Warden-Identity` header
+  on terminated traffic identifies a user; a transparent connection is tracked
+  only once such a header resolves.
+- **Rate limits restart.** Every policy replace resets the rate-limit windows, so a
+  block change resets them fleet-wide.
+
+### Degraded modes
+
+- **Control plane unreachable:** a worker keeps its last list and never unblocks
+  on its own; new blocks apply when it reconnects.
+- **Dex down:** admins cannot sign in to the console; use break-glass to block or
+  unblock.
+- **No `--state-dir`:** the control plane has no block-list store, so the
+  block-list API answers 503 `state_dir_required` and `/policy` is unchanged.
 
 ## What's deliberately not here (yet)
 

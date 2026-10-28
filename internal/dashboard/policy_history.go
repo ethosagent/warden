@@ -286,9 +286,13 @@ func splitVersionPath(p string) (seg, action string, ok bool) {
 // RoutePath maps a request path to the Routes() path it is served under: a
 // concrete version path (/dashboard/api/policy/versions/3/diff) becomes its
 // template (/dashboard/api/policy/versions/{v}/diff), whatever the segment
-// holds; every other path is returned unchanged. The control plane keys its
-// authz table and audit classification on the result.
+// holds, and a block list entry path becomes /dashboard/api/blocked-users/{id};
+// every other path is returned unchanged. The control plane keys its authz
+// table and audit classification on the result.
 func RoutePath(p string) string {
+	if _, ok := blockedUserID(p); ok {
+		return blockedUsersPath + "/{id}"
+	}
 	if _, action, ok := splitVersionPath(p); ok {
 		t := policyVersionsPath + "/{v}"
 		if action != "" {

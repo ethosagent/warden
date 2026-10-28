@@ -336,6 +336,82 @@ func (c *CPClient) IngestEvents(proxyID string, evs []analytics.Event) error {
 	return nil
 }
 
+// RawResponse is a control-plane reply as DoWorker returns it.
+type RawResponse struct {
+	Status int
+	Header http.Header
+	Body   string
+}
+
+// DoWorker sends one request to the control plane with the credential the caller
+// chooses (bearer "" sends no Authorization header; a non-empty proxyID sets
+// X-Warden-Proxy-ID), so a scenario can play a worker or an intruder. A
+// transport error fails the test; any HTTP status is returned as is.
+func (c *CPClient) DoWorker(method, path, bearer, proxyID, body string) RawResponse {
+	c.h.tb.Helper()
+	req, err := http.NewRequest(method, "https://"+c.addr+path, strings.NewReader(body))
+	if err != nil {
+		c.h.tb.Fatalf("harness: build request: %v", err)
+	}
+	return c.doWorkerReq(req, bearer, proxyID, body)
+}
+
+// HoldWorker sends one request with the credential and extra headers the
+// caller chooses (a held GET /policy?wait=30s with If-None-Match, say) from a
+// goroutine and returns the channel its reply arrives on. A transport error is
+// reported as Status 0 with the error in Body, because the scenario's test
+// goroutine, not this one, owns the testing.TB.
+func (c *CPClient) HoldWorker(method, path, bearer string, hdr http.Header) <-chan RawResponse {
+	out := make(chan RawResponse, 1)
+	go func() {
+		req, err := http.NewRequest(method, "https://"+c.addr+path, nil)
+		if err != nil {
+			out <- RawResponse{Body: err.Error()}
+			return
+		}
+		for k, vs := range hdr {
+			for _, v := range vs {
+				req.Header.Add(k, v)
+			}
+		}
+		resp, err := c.sendWorker(req, bearer, "", "")
+		if err != nil {
+			out <- RawResponse{Body: err.Error()}
+			return
+		}
+		out <- resp
+	}()
+	return out
+}
+
+func (c *CPClient) doWorkerReq(req *http.Request, bearer, proxyID, body string) RawResponse {
+	c.h.tb.Helper()
+	resp, err := c.sendWorker(req, bearer, proxyID, body)
+	if err != nil {
+		c.h.tb.Fatalf("harness: control plane %s %s: %v", req.Method, req.URL.Path, err)
+	}
+	return resp
+}
+
+func (c *CPClient) sendWorker(req *http.Request, bearer, proxyID, body string) (RawResponse, error) {
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
+	if proxyID != "" {
+		req.Header.Set(analytics.ProxyIDHeader, proxyID)
+	}
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := c.cl.Do(req)
+	if err != nil {
+		return RawResponse{}, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+	return RawResponse{Status: resp.StatusCode, Header: resp.Header, Body: string(b)}, nil
+}
+
 // Workers lists the fleet view: every worker that has pulled policy or
 // heartbeated, with its online state.
 func (c *CPClient) Workers() ([]dashboard.WorkerView, error) {

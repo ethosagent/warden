@@ -300,6 +300,27 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	if clk == nil {
 		clk = clock.Real()
 	}
+	// Per-worker tokens live in the state DB: without --state-dir no store is
+	// built and only the shared token (or none) authenticates workers. The loop
+	// polls for tokens other processes revoke and flushes last-used times; it
+	// stops with Run (the final flush happens in it), before the DB closes.
+	var workerTokens *WorkerTokenStore
+	if state != nil {
+		workerTokens, err = NewWorkerTokenStore(state, StoreOptions{Clock: clk, Logger: logger})
+		if err != nil {
+			return fail(fmt.Errorf("control-plane: worker tokens: %w", err))
+		}
+		tokCtx, tokCancel := context.WithCancel(ctx)
+		tokDone := make(chan struct{})
+		go func() {
+			defer close(tokDone)
+			workerTokens.Run(tokCtx)
+		}()
+		defer func() {
+			tokCancel()
+			<-tokDone
+		}()
+	}
 	var clientSecret string
 	if consoleCfg.Auth == config.ConsoleAuthOIDC {
 		// resolveConsole already proved the variable is non-empty.
@@ -312,6 +333,8 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		AdminAudit:   adminAudit,
 		PolicyPath:   servedPath,
 		Token:        token,
+		WorkerTokens: workerTokens,
+		TLS:          caCert != "" && caKey != "",
 		MaxEvents:    maxEvents,
 		Store:        store,
 		Logger:       logger,
@@ -402,6 +425,22 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 
 	// Periodic re-read so external edits to the policy file propagate to workers.
 	srv.Start(ctx)
+
+	// Block list: pick up writes by the offline CLI (`control-plane block`)
+	// within BlockWatchInterval. Run waits for the loop before the state DB
+	// closes.
+	if srv.blocks != nil {
+		wCtx, wCancel := context.WithCancel(ctx)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			srv.blocks.Watch(wCtx, BlockWatchInterval)
+		}()
+		defer func() {
+			wCancel()
+			<-done
+		}()
+	}
 
 	// Admin audit checkpoints: the chain head is logged at startup, every
 	// interval and at shutdown. Run waits for the loop before the state DB

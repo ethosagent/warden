@@ -1,17 +1,23 @@
 package controlplane
 
 import (
+	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
+	"io"
+	"log/slog"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -1546,5 +1552,207 @@ func TestControlPlane_QueryEngineWiring(t *testing.T) {
 	memCP.ServeHTTP(rr2, httptest.NewRequest(http.MethodGet, "/dashboard/api/query/schema", nil))
 	if rr2.Code != http.StatusNotFound {
 		t.Fatalf("memory CP: want 404 query schema (no SQL engine), got %d", rr2.Code)
+	}
+}
+
+// TestPolicyWireBlockedUsersOmittedWhenEmpty pins the /policy body and ETag
+// captured before blockedUsers existed: with no list the wire is byte-identical.
+func TestPolicyWireBlockedUsersOmittedWhenEmpty(t *testing.T) {
+	const (
+		goldenBody = `{"allowlist":[{"domain":"api.openai.com","port":0}],"denylist":[{"domain":"evil.example.com","port":0}]}` + "\n"
+		goldenETag = "50bfeb002edec514"
+	)
+	srv := New(Config{PolicyPath: writePolicyFile(t, "api.openai.com")})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/policy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != goldenBody {
+		t.Errorf("body = %q, want %q", b, goldenBody)
+	}
+	if got := strings.Trim(resp.Header.Get("ETag"), `"`); got != goldenETag {
+		t.Errorf("ETag = %q, want %q", got, goldenETag)
+	}
+}
+
+// TestWritePolicyKeepsBlockedUsers verifies a dashboard policy edit carrying a
+// block list keeps policy.blockedUsers in the file (it is not dropped).
+func TestWritePolicyKeepsBlockedUsers(t *testing.T) {
+	path := writePolicyFile(t, "api.openai.com")
+	srv := New(Config{PolicyPath: path})
+
+	if err := srv.writePolicy(config.Policy{
+		Allowlist:    []config.AllowlistEntry{{Domain: "api.anthropic.com"}},
+		BlockedUsers: []config.BlockedUser{{Sub: "u1"}, {Email: "alice@corp.com"}},
+	}); err != nil {
+		t.Fatalf("writePolicy: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "blockedUsers:") {
+		t.Fatalf("policy.blockedUsers dropped from file:\n%s", data)
+	}
+	prov, err := config.NewLocalYAMLProvider(path)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	p, _ := prov.GetPolicy()
+	want := []config.BlockedUser{{Email: "alice@corp.com"}, {Sub: "u1"}}
+	if !reflect.DeepEqual(p.BlockedUsers, want) {
+		t.Errorf("BlockedUsers = %+v, want %+v", p.BlockedUsers, want)
+	}
+}
+
+// TestLoadPolicyIgnoresYAMLBlockedUsers verifies a CP policy file carrying a
+// blockedUsers list is not served (the console API is the only source) and
+// logs a warning that never names an entry value.
+func TestLoadPolicyIgnoresYAMLBlockedUsers(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "policy.yaml")
+	body := "policy:\n  allowlist:\n    - domain: api.openai.com\n  blockedUsers:\n    - sub: secret-sub-value\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	logs := &bytes.Buffer{}
+	ps := newPolicyServer(path, "", slog.New(slog.NewJSONHandler(logs, nil)), NewWorkerRegistry())
+	wire, _, _, err := ps.loadPolicy(context.Background())
+	if err != nil {
+		t.Fatalf("loadPolicy: %v", err)
+	}
+	if len(wire.BlockedUsers) != 0 {
+		t.Errorf("wire.BlockedUsers = %+v, want none", wire.BlockedUsers)
+	}
+	if !strings.Contains(logs.String(), "blockedUsers") {
+		t.Errorf("expected a blockedUsers warning, logs: %s", logs)
+	}
+	if strings.Contains(logs.String(), "secret-sub-value") {
+		t.Errorf("warning leaked an entry value: %s", logs)
+	}
+}
+
+func postHeartbeat(t *testing.T, url, id, body string) int {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodPost, url+"/control/heartbeat", strings.NewReader(body))
+	req.Header.Set("X-Warden-Proxy-ID", id)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	return resp.StatusCode
+}
+
+func workerCaps(t *testing.T, url, id string) []string {
+	t.Helper()
+	resp, err := http.Get(url + "/dashboard/api/workers")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var ws []struct {
+		ProxyID string   `json:"proxyID"`
+		Caps    []string `json:"caps"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&ws); err != nil {
+		t.Fatal(err)
+	}
+	for _, w := range ws {
+		if w.ProxyID == id {
+			return w.Caps
+		}
+	}
+	t.Fatalf("worker %s not listed", id)
+	return nil
+}
+
+func TestHeartbeatCaps(t *testing.T) {
+	srv := New(Config{PolicyPath: writePolicyFile(t, "api.openai.com")})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	if c := postHeartbeat(t, ts.URL, "new", `{"policyETag":"v1","caps":["blocklist/v1"]}`); c != http.StatusNoContent {
+		t.Fatalf("status %d", c)
+	}
+	if c := postHeartbeat(t, ts.URL, "old", `{"policyETag":"v1"}`); c != http.StatusNoContent {
+		t.Fatalf("old worker status %d, want 204", c)
+	}
+	if got := workerCaps(t, ts.URL, "new"); len(got) != 1 || got[0] != "blocklist/v1" {
+		t.Errorf("new caps = %v", got)
+	}
+	if got := workerCaps(t, ts.URL, "old"); len(got) != 0 {
+		t.Errorf("old caps = %v, want none", got)
+	}
+	if got := srv.registry.WorkersWithoutCap("blocklist/v1"); len(got) != 1 || got[0] != "old" {
+		t.Errorf("WorkersWithoutCap = %v, want [old]", got)
+	}
+}
+
+func TestHeartbeatCapsBounded(t *testing.T) {
+	srv := New(Config{PolicyPath: writePolicyFile(t, "api.openai.com")})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	// invalid shapes, duplicates and a too-long string are dropped.
+	body := `{"caps":["b/v1","a/v1","b/v1","Bad","-x","has space","","` + strings.Repeat("a", 33) + `"]}`
+	postHeartbeat(t, ts.URL, "w", body)
+	if got := workerCaps(t, ts.URL, "w"); strings.Join(got, ",") != "a/v1,b/v1" {
+		t.Errorf("caps = %v, want [a/v1 b/v1]", got)
+	}
+
+	// more than 16 valid caps are truncated to 16 (sorted order).
+	var caps []string
+	for i := 0; i < 20; i++ {
+		caps = append(caps, fmt.Sprintf(`"c%02d"`, i))
+	}
+	postHeartbeat(t, ts.URL, "w", `{"caps":[`+strings.Join(caps, ",")+`]}`)
+	got := workerCaps(t, ts.URL, "w")
+	if len(got) != 16 || got[0] != "c00" || got[15] != "c15" {
+		t.Errorf("caps = %v, want c00..c15", got)
+	}
+}
+
+func TestHeartbeatCapsReplace(t *testing.T) {
+	srv := New(Config{PolicyPath: writePolicyFile(t, "api.openai.com")})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	postHeartbeat(t, ts.URL, "w", `{"caps":["blocklist/v1"]}`)
+	postHeartbeat(t, ts.URL, "w", `{"caps":["other/v1"]}`)
+	if got := workerCaps(t, ts.URL, "w"); strings.Join(got, ",") != "other/v1" {
+		t.Errorf("caps = %v, want replaced by [other/v1]", got)
+	}
+	postHeartbeat(t, ts.URL, "w", `{"policyETag":"v2"}`)
+	if got := workerCaps(t, ts.URL, "w"); len(got) != 0 {
+		t.Errorf("caps = %v, want none after a heartbeat without caps", got)
+	}
+	if got := srv.registry.WorkersWithoutCap("blocklist/v1"); len(got) != 1 || got[0] != "w" {
+		t.Errorf("WorkersWithoutCap = %v", got)
+	}
+}
+
+func TestWorkersWithoutCapOnlineSortedCapped(t *testing.T) {
+	r := NewWorkerRegistry()
+	now := time.Now()
+	r.now = func() time.Time { return now }
+	for i := 0; i < 120; i++ {
+		r.SeenHeartbeat(fmt.Sprintf("w%03d", i), "", nil)
+	}
+	r.SeenHeartbeat("has", "", []string{"blocklist/v1"})
+	got := r.WorkersWithoutCap("blocklist/v1")
+	if len(got) != 100 || got[0] != "w000" || got[99] != "w099" {
+		t.Fatalf("len=%d first=%s last=%s", len(got), got[0], got[len(got)-1])
+	}
+	now = now.Add(2 * staleAfter) // everyone offline
+	if got := r.WorkersWithoutCap("blocklist/v1"); len(got) != 0 {
+		t.Errorf("offline workers listed: %d", len(got))
 	}
 }
