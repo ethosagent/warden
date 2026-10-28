@@ -51,10 +51,17 @@ const CapBlocklistV1 = "blocklist/v1"
 // control plane's capPattern or it is dropped.
 const CapGroupPolicyV1 = "grouppolicy/v1"
 
+// CapIdentityChallengeV1 is the capability a worker advertises when it
+// understands identity challenge mode (407 with a sign-in URL). An old worker
+// rejects the unknown mode and keeps its previous config, so it would keep
+// allowing callers it should challenge; the control plane uses this to flag it
+// while challenge mode is served.
+const CapIdentityChallengeV1 = "identity/challenge-v1"
+
 // WorkerCaps returns the sorted capabilities this binary implements. Later
 // features append their own constant here.
 func WorkerCaps() []string {
-	caps := []string{CapBlocklistV1, CapGroupPolicyV1}
+	caps := []string{CapBlocklistV1, CapGroupPolicyV1, CapIdentityChallengeV1}
 	sort.Strings(caps)
 	return caps
 }

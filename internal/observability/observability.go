@@ -27,6 +27,7 @@
 //	                              mcp_chain_rapid_repeat
 //	ObserveAddedLatency(stage):  mcp_scan, identity
 //	RecordIdentityVerify:         result is an identity status, reason an identity.Reason
+//	RecordSignInStarted(outcome): started, reused, rate_limited, issuer_unreachable
 //	RecordBlocklist*:             unlabelled (an entry count and a closed-session count)
 //
 // Disabled mode is free: when Config.Enabled is false (or the *Metrics is nil)
@@ -96,6 +97,7 @@ type Metrics struct {
 	judge          metric.Int64Counter
 	scoped         metric.Int64Counter
 	identityVerify metric.Int64Counter
+	signInStarted  metric.Int64Counter
 	auditLines     metric.Int64Counter
 	auditErrors    metric.Int64Counter
 	auditDropped   metric.Int64Counter
@@ -275,6 +277,12 @@ func newMetrics(provider *sdkmetric.MeterProvider, serviceVersion string) (*Metr
 	); err != nil {
 		return nil, fmt.Errorf("observability: identity verify counter: %w", err)
 	}
+	if m.signInStarted, err = meter.Int64Counter(
+		"warden.identity.signin.started.total",
+		metric.WithDescription("Challenge-mode sign-in requests by outcome (started, reused, rate_limited, issuer_unreachable)."),
+	); err != nil {
+		return nil, fmt.Errorf("observability: identity sign-in counter: %w", err)
+	}
 	if m.blocklistSize, err = meter.Int64Gauge(
 		"warden.blocklist.entries",
 		metric.WithDescription("Users on the admin block list after the last applied policy change."),
@@ -443,6 +451,18 @@ func (m *Metrics) RecordIdentityVerify(result, reason string) {
 	m.identityVerify.Add(context.Background(), 1, metric.WithAttributes(
 		attribute.String("result", result),
 		attribute.String("reason", reason),
+	))
+}
+
+// RecordSignInStarted increments warden.identity.signin.started.total{outcome}.
+// outcome is a bounded enum (started|reused|rate_limited|issuer_unreachable);
+// there is deliberately no agent, user or code label.
+func (m *Metrics) RecordSignInStarted(outcome string) {
+	if m == nil {
+		return
+	}
+	m.signInStarted.Add(context.Background(), 1, metric.WithAttributes(
+		attribute.String("outcome", outcome),
 	))
 }
 

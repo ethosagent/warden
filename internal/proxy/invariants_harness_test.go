@@ -106,6 +106,9 @@ func (m *metricSink) RecordSecretSwap(ref string)   { m.add("secret_swap ref=%s"
 func (m *metricSink) RecordScanFinding(kind string) { m.add("scan_finding kind=%s", kind) }
 func (m *metricSink) RecordJudge(outcome string)    { m.add("judge outcome=%s", outcome) }
 func (m *metricSink) RecordScoped(result string)    { m.add("scoped result=%s", result) }
+func (m *metricSink) RecordSignInStarted(outcome string) {
+	m.add("signin_started outcome=%s", outcome)
+}
 func (m *metricSink) ObserveAddedLatency(stage string, _ time.Duration) {
 	m.add("latency stage=%s", stage)
 }

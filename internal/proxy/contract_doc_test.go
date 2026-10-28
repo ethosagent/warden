@@ -169,8 +169,8 @@ func TestContractDocMatchesConstants(t *testing.T) {
 	})
 
 	t.Run("modes", func(t *testing.T) {
-		cfgModes := sortedStrings(config.IdentityModeOff, config.IdentityModeAttribute)
-		if px := sortedStrings(IdentityModeOff, IdentityModeAttribute); !slices.Equal(px, cfgModes) {
+		cfgModes := sortedStrings(config.IdentityModeOff, config.IdentityModeAttribute, config.IdentityModeChallenge)
+		if px := sortedStrings(IdentityModeOff, IdentityModeAttribute, IdentityModeChallenge); !slices.Equal(px, cfgModes) {
 			t.Fatalf("proxy modes %v differ from config modes %v", px, cfgModes)
 		}
 		got := docTableKeys(t, doc, "### Modes")
@@ -189,6 +189,41 @@ func TestContractDocMatchesConstants(t *testing.T) {
 		}
 		if !strings.Contains(doc, "`require` is rejected") {
 			t.Error("doc no longer says `require` is rejected")
+		}
+	})
+
+	// The challenge 407 (#558): the body's keys, the reason values, the sign-in
+	// errors and the three deny reasons are the ones the code writes.
+	t.Run("challenge", func(t *testing.T) {
+		section := doc[strings.Index(doc, "### Challenge mode"):]
+		section = section[:strings.Index(section, "\n## ")]
+		var want []string
+		for _, f := range []any{SignInOffer{}} {
+			rt := reflect.TypeOf(f)
+			for i := 0; i < rt.NumField(); i++ {
+				name, _, _ := strings.Cut(rt.Field(i).Tag.Get("json"), ",")
+				want = append(want, `"`+name+`"`)
+			}
+		}
+		want = append(want, `"error"`, `"reason"`, `"sign_in"`, `"sign_in_error"`)
+		for _, w := range want {
+			if !strings.Contains(section, w) {
+				t.Errorf("the challenge section does not show the body key %s", w)
+			}
+		}
+		for _, w := range []string{
+			string(identity.StatusNone), string(identity.StatusExpired), string(identity.StatusInvalid), string(identity.StatusUnverified),
+			string(SignInStarted), string(SignInReused), string(SignInRateLimited), string(SignInIssuerUnreachable),
+			string(denyreason.IdentityRequired), string(denyreason.IdentityExpired), string(denyreason.IdentityConflict),
+			"Proxy-Authenticate: Basic realm=\"warden\"", "Cache-Control: no-store", "Connection: close",
+			"WARDEN_SIGNIN_URL", "WARDEN_SIGNIN_CODE", "device_code", "untrusted_offer",
+		} {
+			if !strings.Contains(section, "`"+w+"`") && !strings.Contains(section, w) {
+				t.Errorf("the challenge section does not mention %q", w)
+			}
+		}
+		if got := challengeReason(identity.StatusConflict); got != string(identity.StatusInvalid) {
+			t.Errorf("challengeReason maps an unexpected status to %q, want invalid", got)
 		}
 	})
 

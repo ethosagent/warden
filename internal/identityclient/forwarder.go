@@ -100,6 +100,14 @@ type Forwarder struct {
 	// Log receives one line per tunnel; nil discards.
 	Log *slog.Logger
 
+	// Challenge, when set, turns on sign-in challenge handling (#558): with no
+	// usable login (Token returns ErrLoginRequired) the forwarder still dials
+	// the worker, WITHOUT Proxy-Authorization, and a 407 identity_required from
+	// it is answered by the Challenger and relayed to the agent without the
+	// device code. When nil, no login means 503 login_required and nothing is
+	// dialled, as before.
+	Challenge *Challenger
+
 	// preambleTimeout overrides connectPreambleTimeout in tests.
 	preambleTimeout time.Duration
 }
@@ -142,6 +150,14 @@ func (f *Forwarder) Serve(ctx context.Context, ln net.Listener) error {
 
 	var wg sync.WaitGroup
 	defer wg.Wait()
+	if f.Challenge != nil {
+		// On return: cancel the context the poll is bound to, wait for the poll,
+		// then for the handlers (defers run in reverse).
+		defer f.Challenge.Wait()
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
+		defer cancel()
+	}
 	var delay time.Duration
 	for {
 		conn, err := ln.Accept()
@@ -277,7 +293,14 @@ func (f *Forwarder) handle(ctx context.Context, conn net.Conn) {
 	}
 
 	token, err := f.Token(ctx)
-	if err != nil || token == "" {
+	anonymous := false
+	if (err != nil || token == "") && f.Challenge != nil && errors.Is(err, ErrLoginRequired) {
+		// No usable login and the sign-in challenge is on: ask the worker. It
+		// either challenges (407) or, when it does not enforce identity, lets
+		// the request through unattributed, which is what that mode means.
+		anonymous, token, err = true, "", nil
+	}
+	if !anonymous && (err != nil || token == "") {
 		reason := reasonTokenUnavailable
 		switch {
 		case errors.Is(err, ErrLoginRequired):
@@ -289,7 +312,10 @@ func (f *Forwarder) handle(ctx context.Context, conn net.Conn) {
 		rejectAndClose(conn, br, "503 Service Unavailable", "Content-Type: text/plain\r\n", "warden forwarder: "+reason+"\n")
 		return
 	}
-	fp := Fingerprint(token)
+	fp := "none"
+	if !anonymous {
+		fp = Fingerprint(token)
+	}
 
 	dialer := net.Dialer{Timeout: workerDialTimeout}
 	wc, err := dialer.DialContext(ctx, "tcp", f.WorkerAddr)
@@ -300,10 +326,13 @@ func (f *Forwarder) handle(ctx context.Context, conn net.Conn) {
 	}
 	defer func() { _ = wc.Close() }()
 
-	// A fresh CONNECT: the request target, Host and the injected identity.
-	creds := base64.StdEncoding.EncodeToString([]byte(workerUser + ":" + token))
-	if _, err := fmt.Fprintf(wc, "CONNECT %s HTTP/1.1\r\nHost: %s\r\nProxy-Authorization: Basic %s\r\n\r\n",
-		target, target, creds); err != nil {
+	// A fresh CONNECT: the request target, Host and the injected identity (none
+	// when the sign-in challenge is being asked for).
+	authLine := ""
+	if !anonymous {
+		authLine = "Proxy-Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte(workerUser+":"+token)) + "\r\n"
+	}
+	if _, err := fmt.Fprintf(wc, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n%s\r\n", target, target, authLine); err != nil {
 		rejectAndClose(conn, br, "502 Bad Gateway", "Content-Type: text/plain\r\n", "warden forwarder: worker_unreachable\n")
 		return
 	}
@@ -312,6 +341,10 @@ func (f *Forwarder) handle(ctx context.Context, conn net.Conn) {
 	if err != nil {
 		f.log().Warn("identity forwarder: bad worker reply", "token_fp", fp)
 		rejectAndClose(conn, br, "502 Bad Gateway", "Content-Type: text/plain\r\n", "warden forwarder: worker_bad_reply\n")
+		return
+	}
+	if status == 407 && f.Challenge != nil {
+		f.relayChallenge(ctx, conn, br, wc, wbr, head, fp)
 		return
 	}
 	if _, err := io.WriteString(conn, head); err != nil {
@@ -324,6 +357,25 @@ func (f *Forwarder) handle(ctx context.Context, conn net.Conn) {
 		return
 	}
 	splice(conn, br, wc, wbr)
+}
+
+// relayChallenge answers the agent for a worker 407. The worker's body is read
+// (capped), handed to the Challenger, which shows the user where to sign in and
+// starts the poll, and what it returns, without the device code, is relayed in a
+// fresh 407. The worker's Content-Length and any other framing are not reused.
+func (f *Forwarder) relayChallenge(ctx context.Context, conn net.Conn, br *bufio.Reader, wc net.Conn, wbr *bufio.Reader, head, fp string) {
+	var raw []byte
+	if n, err := strconv.Atoi(headerValue(head, "Content-Length")); err == nil && n > 0 {
+		_ = wc.SetReadDeadline(f.now().Add(f.preamble()))
+		raw = readLimited(wbr, min(n, maxWorkerReplyBody))
+	}
+	body := f.Challenge.Handle(ctx, raw)
+	f.log().Info("identity forwarder: sign-in challenge relayed", "token_fp", fp, "status", 407)
+	extra := "Content-Type: application/json\r\nCache-Control: no-store\r\n"
+	if pa := headerValue(head, "Proxy-Authenticate"); pa != "" && !strings.ContainsAny(pa, "\r\n") {
+		extra = "Proxy-Authenticate: " + pa + "\r\n" + extra
+	}
+	rejectAndClose(conn, br, "407 Proxy Authentication Required", extra, string(body))
 }
 
 // validTarget accepts host:port with a non-empty host, a numeric port and no

@@ -49,6 +49,7 @@ var probedEnv = []string{
 //	env      print the probedEnv variables that are set and argv, one line each
 //	wait     print READY and block until killed
 //	connect  CONNECT through HTTPS_PROXY the way a client would and print the status line
+//	connect-retry  like connect, repeated every 200 ms until the status is 200 (at most 100 tries)
 func execHelper(mode string) int {
 	switch mode {
 	case "env":
@@ -63,6 +64,16 @@ func execHelper(mode string) int {
 	case "wait":
 		fmt.Println("READY")
 		select {}
+	case "connect-retry":
+		for range 100 {
+			line := connectOnce()
+			fmt.Println("STATUS " + line)
+			if strings.Contains(line, " 200") {
+				return 0
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+		return 1
 	case "connect":
 		u, err := url.Parse(os.Getenv("HTTPS_PROXY"))
 		if err != nil {
@@ -82,6 +93,24 @@ func execHelper(mode string) int {
 		fmt.Println("STATUS " + strings.TrimSpace(line))
 	}
 	return 0
+}
+
+// connectOnce CONNECTs through HTTPS_PROXY and returns the status line.
+func connectOnce() string {
+	u, err := url.Parse(os.Getenv("HTTPS_PROXY"))
+	if err != nil {
+		return "BAD " + err.Error()
+	}
+	pw, _ := u.User.Password()
+	conn, err := net.Dial("tcp", u.Host)
+	if err != nil {
+		return "BAD " + err.Error()
+	}
+	defer func() { _ = conn.Close() }()
+	auth := base64.StdEncoding.EncodeToString([]byte(u.User.Username() + ":" + pw))
+	fmt.Fprintf(conn, "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\nProxy-Authorization: Basic %s\r\n\r\n", auth)
+	line, _ := bufio.NewReader(conn).ReadString('\n')
+	return strings.TrimSpace(line)
 }
 
 // syncBuf is a bytes.Buffer safe for the copier goroutine and the test.

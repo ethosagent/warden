@@ -45,6 +45,13 @@ const (
 	// IdentityRequired: the destination is only reachable with a verified
 	// identity and the request carries none (W-P1-GPOL-02).
 	IdentityRequired Reason = "identity_required"
+	// IdentityExpired: in identity challenge mode, the token that admitted a
+	// terminated tunnel expired while it was open; the client reconnects and
+	// is challenged again (#558).
+	IdentityExpired Reason = "identity_expired"
+	// IdentityConflict: in identity challenge mode, an X-Warden-Identity header
+	// named a different subject than the tunnel's CONNECT token (#558).
+	IdentityConflict Reason = "identity_conflict"
 	// GroupNotAllowed: a verified subject matched the destination only through
 	// scoped allow entries that do not name it (W-P1-GPOL-02).
 	GroupNotAllowed Reason = "group_not_allowed"
@@ -180,7 +187,7 @@ const (
 var declared = []Reason{
 	PolicyNoMatch, PolicyDenylist, RateLimited, TimeWindow,
 	PathNotCanonical, MethodNotAllowed, PathNotAllowed,
-	IdentityRequired, GroupNotAllowed, IdentityGroupsTruncated,
+	IdentityRequired, IdentityExpired, IdentityConflict, GroupNotAllowed, IdentityGroupsTruncated,
 	H2RequestTrailersUnsupported, H2ExtendedConnectUnsupported,
 	TransformNeedsBufferedBody, HostMismatch, RequestTrailersUnsupported,
 	GRPCBodyPlaceholder, GRPCFrameTooLarge, GRPCFrameMalformed, GRPCFrameCompressed,

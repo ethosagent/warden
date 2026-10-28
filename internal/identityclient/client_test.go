@@ -310,3 +310,71 @@ func TestLoginWarnsOnExpiredToken(t *testing.T) {
 		t.Fatalf("warnings = %q", w)
 	}
 }
+
+// TestRefreshFailureDeletesCache: when the issuer rejects the refresh token (or
+// there is none), the cache entry is deleted, not kept, so the next use meets a
+// fresh sign-in instead of retrying a dead refresh. An unreachable issuer is
+// not a rejection and keeps the entry.
+func TestRefreshFailureDeletesCache(t *testing.T) {
+	r := newRig(t)
+	r.login(t)
+	path := r.cl.Store().Path()
+
+	// The issuer is down: the expired entry stays for when it is back.
+	r.idp.setDown(true)
+	r.clock.Advance(tokenTTL)
+	if _, err := r.cl.Token(context.Background()); !errors.Is(err, identityclient.ErrIssuerUnreachable) {
+		t.Fatalf("issuer down: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("an unreachable issuer deleted the cache: %v", err)
+	}
+	r.idp.setDown(false)
+
+	// Revoked refresh token: login required, entry deleted.
+	r.idp.mu.Lock()
+	r.idp.refresh = "revoked-elsewhere"
+	r.idp.mu.Unlock()
+	if _, err := r.cl.Token(context.Background()); !errors.Is(err, identityclient.ErrLoginRequired) {
+		t.Fatalf("revoked: %v", err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the dead entry was kept: %v", err)
+	}
+	if _, err := r.cl.Token(context.Background()); !errors.Is(err, identityclient.ErrLoginRequired) {
+		t.Fatalf("after the delete: %v", err)
+	}
+
+	// An entry with no refresh token and an expired ID token is dead too.
+	r.login(t)
+	e, _ := r.cl.Store().Load()
+	e.RefreshToken = ""
+	if err := r.cl.Store().Save(e); err != nil {
+		t.Fatal(err)
+	}
+	r.clock.Advance(tokenTTL)
+	if _, err := r.cl.Token(context.Background()); !errors.Is(err, identityclient.ErrLoginRequired) {
+		t.Fatalf("no refresh token: %v", err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the entry without a refresh token was kept: %v", err)
+	}
+}
+
+// TestCompleteDevicePollsConfiguredIssuer: CompleteDevice discovers the token
+// endpoint from the client's own issuer and stores the login; a device code the
+// issuer does not know fails without leaking it.
+func TestCompleteDevicePollsConfiguredIssuer(t *testing.T) {
+	r := newRig(t)
+	if _, err := r.cl.CompleteDevice(context.Background(), deviceCode, 1, 600); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	if _, err := r.cl.Token(context.Background()); err != nil {
+		t.Fatalf("no login after CompleteDevice: %v", err)
+	}
+	_ = r.cl.Logout()
+	_, err := r.cl.CompleteDevice(context.Background(), "unknown-device-code-XYZ", 1, 600)
+	if err == nil || strings.Contains(err.Error(), "unknown-device-code-XYZ") {
+		t.Fatalf("want an error without the code, got %v", err)
+	}
+}

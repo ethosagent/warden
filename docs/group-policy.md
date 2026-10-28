@@ -143,6 +143,8 @@ event, the decision log and `warden_blocked_total{reason}`.
 | Reason | When |
 |---|---|
 | `identity_required` | The destination is only reachable with a verified identity and the request has none (anonymous, invalid, expired, conflicting), or the connection cannot be decided per request (see below). |
+| `identity_expired` | Identity challenge mode only: the token that admitted a terminated tunnel expired while it was open (see [identity-contract.md](identity-contract.md)). |
+| `identity_conflict` | Identity challenge mode only: an `X-Warden-Identity` header named a different subject than the tunnel's CONNECT token. |
 | `group_not_allowed` | A verified subject reached the destination only through scoped entries that do not name it. |
 | `identity_groups_truncated` | As `group_not_allowed`, but the subject's group list was truncated and the entry has `groups`. |
 <!-- group-policy-reasons:end -->

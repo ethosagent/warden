@@ -63,6 +63,11 @@ staticClients:
     public: true
     redirectURIs:
       - http://localhost:5556/dex/device/callback
+      # Dex v2.41 sends the browser to the RELATIVE /device/callback once the user
+      # code is entered; with a path in the issuer it must be registered too, or the
+      # connector step answers 400 "Unregistered redirect_uri". The redirect after
+      # login uses the full URI above.
+      - /device/callback
 
 connectors:
   - type: ldap

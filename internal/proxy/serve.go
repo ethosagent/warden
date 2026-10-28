@@ -290,6 +290,12 @@ func (p *Proxy) handleConn(conn net.Conn) {
 	// here; one with a token is bounded by identityVerifyTimeout.
 	ci := p.resolveConnIdentity(proxyAuthLines, proxyAuth)
 
+	// Challenge mode: no valid identity gets a 407 with a sign-in URL, before
+	// the block-list check, the policy and any dial.
+	if p.challengeConnect(conn, ci, domain, port) {
+		return
+	}
+
 	// A blocked user is refused before the policy check, any dial and the 200,
 	// on both the TLS-terminating and the raw-tunnel path.
 	if p.connectBlocked(conn, ci, domain, port) {

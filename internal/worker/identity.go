@@ -25,6 +25,12 @@ type identityWiring struct {
 	// count rebuilds. It does no network I/O, so boot and a hot reload never
 	// contact the issuer.
 	build func(oidc.Config) (identity.Verifier, error)
+	// buildSignIn builds the challenge-mode sign-in starter; a test
+	// substitutes it. It does no network I/O.
+	buildSignIn func(config.IdentitySettings) (proxy.SignInStarter, error)
+	// canChallenge reports whether the proxy has a CONNECT listener (nil means
+	// ask the proxy); a test substitutes it for a transparent-only worker.
+	canChallenge func() bool
 
 	// live is the identity config the proxy is serving: the verifier (nil when
 	// off), the inputs it was built from, and the mode.
@@ -41,6 +47,10 @@ type liveIdentity struct {
 	v    identity.Verifier
 	key  verifierKey
 	mode proxy.IdentityMode
+	// starter and signInKey are the challenge-mode sign-in starter and the
+	// settings it was built from (nil/"" until challenge was applied).
+	starter   proxy.SignInStarter
+	signInKey string
 }
 
 // verifierKey is every setting that changes what the verifier accepts. The
@@ -62,7 +72,28 @@ func keyOf(s config.IdentitySettings) verifierKey {
 }
 
 func newIdentityWiring(p *proxy.Proxy, agentID string, logger *slog.Logger) *identityWiring {
-	return &identityWiring{p: p, agentID: agentID, logger: logger, build: oidc.NewOIDCVerifier}
+	return &identityWiring{p: p, agentID: agentID, logger: logger, build: oidc.NewOIDCVerifier, buildSignIn: newSignInStarter}
+}
+
+// newSignInStarter builds the device-authorization starter for challenge mode.
+// Its HTTP client rewrites the issuer's origin to internalIssuerURL, like the
+// verifier's, so a split-horizon issuer is reached from the worker's network.
+func newSignInStarter(s config.IdentitySettings) (proxy.SignInStarter, error) {
+	hc, err := oidc.NewHTTPClient(oidc.HTTPClientConfig{Issuer: s.Issuer, InternalIssuerURL: s.InternalIssuerURL})
+	if err != nil {
+		return nil, err
+	}
+	si := s.SignIn.Effective()
+	return proxy.NewDeviceStarter(proxy.DeviceStarterConfig{
+		Issuer: s.Issuer, ClientID: si.ClientID, Scopes: si.Scopes,
+		MaxPending: si.MaxPending, StartsPerMinute: si.StartsPerMinute, HTTP: hc,
+	})
+}
+
+// signInKey is every sign-in setting that changes the starter it builds.
+func signInKey(s config.IdentitySettings) string {
+	si := s.SignIn.Effective()
+	return fmt.Sprintf("%s|%s|%q|%q|%d|%d", s.Issuer, s.InternalIssuerURL, si.ClientID, si.Scopes, si.MaxPending, si.StartsPerMinute)
 }
 
 // resolveIdentityMode picks this agent's mode: its own Agents entry, then the
@@ -95,11 +126,28 @@ func (w *identityWiring) apply(s config.IdentitySettings, agents []config.AgentP
 		w.warnScopedWithoutIdentity()
 	case config.IdentityModeAttribute:
 		w.warned = 0
-		w.applyAttribute(s)
+		w.applyVerified(s, proxy.IdentityModeAttribute)
+	case config.IdentityModeChallenge:
+		w.warned = 0
+		if !w.supportsChallenge() {
+			// A transparent-only worker has no CONNECT to answer a 407 on: keep
+			// the previous config rather than silently allow everyone.
+			w.logger.Warn("identity settings ignored; keeping previous identity config",
+				"reason", "challenge mode needs a CONNECT listener (proxy.mode forward or both)", "mode", mode)
+			return
+		}
+		w.applyVerified(s, proxy.IdentityModeChallenge)
 	default:
 		w.logger.Warn("identity settings ignored; keeping previous identity config",
 			"reason", "unknown identity mode", "mode", mode)
 	}
+}
+
+func (w *identityWiring) supportsChallenge() bool {
+	if w.canChallenge != nil {
+		return w.canChallenge()
+	}
+	return w.p.SupportsChallenge()
 }
 
 // warnScopedWithoutIdentity logs one WARN per agent and scoped-entry count when
@@ -134,7 +182,10 @@ func countScoped(p config.Policy) int {
 	return n
 }
 
-func (w *identityWiring) applyAttribute(s config.IdentitySettings) {
+// applyVerified moves the proxy to attribute or challenge mode with a verifier
+// built from s, reusing the live verifier (and sign-in starter) while their
+// inputs did not change. A failed rebuild keeps the previous config.
+func (w *identityWiring) applyVerified(s config.IdentitySettings, mode proxy.IdentityMode) {
 	key := keyOf(s)
 	v := w.live.v
 	if v == nil || key != w.live.key {
@@ -145,14 +196,28 @@ func (w *identityWiring) applyAttribute(s config.IdentitySettings) {
 			return
 		}
 		v = nv
-	} else if w.live.mode == proxy.IdentityModeAttribute {
+	}
+	starter, signKey := w.live.starter, w.live.signInKey
+	if mode == proxy.IdentityModeChallenge {
+		if k := signInKey(s); starter == nil || k != signKey {
+			ns, err := w.buildSignIn(s)
+			if err != nil {
+				w.logger.Warn("identity sign-in starter rebuild failed; keeping previous identity config", "error", err)
+				return
+			}
+			starter, signKey = ns, k
+		}
+	} else {
+		starter, signKey = nil, ""
+	}
+	if w.live.v == v && w.live.mode == mode && w.live.starter == starter {
 		return // nothing relevant changed
 	}
-	w.p.SetIdentity(v, proxy.IdentityModeAttribute)
-	if w.live.mode != proxy.IdentityModeAttribute {
-		w.logger.Info("identity verification enabled", "mode", config.IdentityModeAttribute)
+	w.p.SetIdentityWithSignIn(v, mode, starter)
+	if w.live.mode != mode {
+		w.logger.Info("identity verification enabled", "mode", string(mode))
 	}
-	w.live = liveIdentity{v: v, key: key, mode: proxy.IdentityModeAttribute}
+	w.live = liveIdentity{v: v, key: key, mode: mode, starter: starter, signInKey: signKey}
 }
 
 // verifierConfig maps the settings onto the OIDC verifier's config.

@@ -1322,8 +1322,10 @@ curl -X POST http://127.0.0.1:9090/admin/refresh-secrets \
 A worker can attribute traffic to the person behind an agent by verifying a user
 token from an OIDC issuer (for example the reference Dex, see
 [identity-dex.md](identity-dex.md)). It is **off unless
-configured** and, in P1, only **attributes**: it records who made a request and
-never blocks one.
+configured** and, in `attribute` mode, only **attributes**: it records who made a
+request and never blocks one. `challenge` mode additionally refuses a caller with
+no valid identity and tells it where to sign in (see
+[Challenge mode](#challenge-mode)).
 
 ### The `identity` block
 
@@ -1332,7 +1334,7 @@ from local YAML by standalone workers. It holds no secrets.
 
 ```yaml
 identity:
-  defaultMode: attribute        # off (default) | attribute
+  defaultMode: attribute        # off (default) | attribute | challenge
   issuer: https://dex.example.com/dex
   audience: warden
   allowedAZP: [agent-harness, warden-cli]
@@ -1342,10 +1344,14 @@ identity:
   # groupsClaim: groups
   # clockSkewSeconds: 60                 # 0..300
   # maxTokenTTLSeconds: 3600
+  # signIn:                              # challenge mode only, see below
+  #   clientID: warden-cli
+  #   maxPending: 32
+  #   startsPerMinute: 30
 
 agents:
   - id: research-bot
-    identity: attribute          # per-agent override of defaultMode
+    identity: attribute          # per-agent override of defaultMode (admin-only field)
 ```
 
 - A worker resolves its mode from the `agents` entry whose `id` matches the
@@ -1353,7 +1359,7 @@ agents:
   `agent:<port>`), then `identity.defaultMode`, then off. `require` is a Phase 2
   mode: config validation rejects it, and a worker that is served it (a newer
   control plane) keeps its previous identity config and logs one warning.
-- `issuer` and `audience` are required once any mode is `attribute`. An `http`
+- `issuer` and `audience` are required once any mode is `attribute` or `challenge`. An `http`
   issuer is rejected unless `internalIssuerURL` is set; use `internalIssuerURL`
   when workers reach the issuer on a container network (`http://dex:5556`) while
   tokens carry the public issuer.
@@ -1368,6 +1374,53 @@ agents:
   mode and keeps the verifier. A failed rebuild keeps the previous config and logs
   one warning (no token data).
 
+### Challenge mode
+
+`defaultMode: challenge` (or `agents[].identity: challenge`) makes the worker
+refuse a CONNECT that has no `valid` identity with `407` and a sign-in URL: the
+worker starts an RFC 8628 device authorization at the issuer and returns the
+verification URL and user code; the **client** shows them, polls the issuer,
+stores the token and retries (`warden identity exec --challenge` does this; the
+wire contract is in [identity-contract.md](identity-contract.md#challenge-mode-407-with-a-sign-in-url)).
+The worker stores no user token and no refresh token (ADR 0002). The `407` comes
+before the block list, the policy check and any dial. `unverified` (the issuer's
+keys could not be fetched in time) fails **closed** in this mode, unlike
+`attribute`.
+
+```yaml
+identity:
+  defaultMode: challenge
+  issuer: http://localhost:5556/dex      # what tokens, the browser URL and the token endpoint use
+  internalIssuerURL: http://dex:5556     # how the worker reaches the issuer
+  audience: warden
+  allowedAZP: [agent-harness, warden-cli]
+  signIn:                                # optional, no secrets
+    clientID: warden-cli                 # default warden-cli: a PUBLIC client; must be in allowedAZP when that is set
+    scopes: [openid, email, profile, groups, offline_access, "audience:server:client_id:warden"]  # default shown
+    maxPending: 32                       # open device authorizations per worker
+    startsPerMinute: 30                  # device_authorization calls per worker
+```
+
+- With `allowedAZP` set, `signIn.clientID` must be in it, or every token from the
+  flow would fail with `wrong_azp`; config validation rejects that. The block
+  holds no secrets, and the client must be public (no secret on workers).
+- The worker reaches the issuer through `internalIssuerURL` when set, and the
+  `device_authorization_endpoint` and token endpoint it learns must be on the
+  issuer's origin, as must the verification URLs it returns; anything else is
+  dropped with `sign_in_error: issuer_unreachable`.
+- A worker with no CONNECT listener (`proxy.mode: transparent`) cannot answer a
+  `407`: it keeps its previous identity config and logs one warning. In `both`
+  mode the transparent leg is not challenged.
+
+**Rollout order (fail-open guard).** A worker that does not know `challenge`
+rejects the settings and **keeps its previous config, so it keeps allowing**.
+Upgrade the control plane first, then every worker, then set `challenge`. Workers
+advertise the capability `identity/challenge-v1` on every heartbeat; while the
+served settings turn challenge mode on, the fleet view marks each connected
+worker without it with *identity: challenge not supported, still allowing*, and
+the control plane logs `worker_lacks_identity_challenge` once per worker per
+policy version. Do not rely on challenge mode until no worker carries that mark.
+
 ### Where the token travels
 
 - `Proxy-Authorization` on `CONNECT` works everywhere, with or without TLS
@@ -1379,6 +1432,9 @@ agents:
 - In transparent mode there is no `CONNECT`, so only `X-Warden-Identity` on
   terminated traffic attributes. A worker in that mode logs a startup warning, as
   does attribute mode without a CA.
+- Challenge mode on a raw tunnel (no CA) checks the token at `CONNECT` only; the
+  tunnel is not cut when the token expires. With a CA, an expired token gets `403`
+  `identity_expired` on the next request and the client is challenged again.
 
 ### Trust rules
 

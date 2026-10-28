@@ -29,7 +29,7 @@ var identityAllowedAZP = []string{IdentityAZP, "warden-cli"}
 // WithIdentity turns on user-token verification (W-P1-VRFY-05): the policy
 // gains an `identity` block whose issuer is the in-process OIDC fake (so it
 // implies WithOIDCIssuer), audience "warden", allowedAZP [agent-harness,
-// warden-cli] and defaultMode = mode ("attribute" or "off"). The fake is plain
+// warden-cli] and defaultMode = mode ("attribute", "challenge" or "off"). The fake is plain
 // http on loopback, so internalIssuerURL is set to its own origin, which is
 // what the http-issuer rule requires of a development issuer.
 //
@@ -43,6 +43,13 @@ func WithIdentity(mode string) Option {
 		h.wantIssuer = true
 		h.identityMode = mode
 	}
+}
+
+// WithSignIn sets the identity.signIn block (challenge mode) distributed with
+// the WithIdentity block: the pending-login and start-rate bounds, the client
+// id and the scopes. Without it the defaults apply.
+func WithSignIn(s config.SignInSettings) Option {
+	return func(h *H) { h.signIn = &s }
 }
 
 // MintUserToken mints a token the WithIdentity block accepts: the issuer
@@ -62,13 +69,19 @@ func (h *H) identitySettings() config.IdentitySettings {
 	if h.identityMode == "" {
 		return config.IdentitySettings{}
 	}
-	return config.IdentitySettings{
+	s := config.IdentitySettings{
 		DefaultMode:       h.identityMode,
 		Issuer:            h.issuer.Issuer(),
 		Audience:          IdentityAudience,
 		AllowedAZP:        append([]string(nil), identityAllowedAZP...),
 		InternalIssuerURL: h.issuer.Issuer(),
 	}
+	if h.signIn != nil {
+		si := *h.signIn
+		si.Scopes = append([]string(nil), si.Scopes...)
+		s.SignIn = &si
+	}
+	return s
 }
 
 // identityYAML renders the identity block for the control plane's config file

@@ -122,6 +122,19 @@ func FlagNoGroupPolicy(views []dashboard.WorkerView, scopedEntries int) {
 	}
 }
 
+// FlagNoIdentityChallenge sets NoIdentityChallenge on every view whose caps lack
+// identity/challenge-v1 while the served settings turn challenge mode on. Such
+// a worker rejects the unknown mode and keeps allowing; a legacy worker (no
+// caps) is flagged too.
+func FlagNoIdentityChallenge(views []dashboard.WorkerView, challengeServed bool) {
+	if !challengeServed {
+		return
+	}
+	for i := range views {
+		views[i].NoIdentityChallenge = !slices.Contains(views[i].Caps, config.CapIdentityChallengeV1)
+	}
+}
+
 // recordAuth notes how the worker behind p last authenticated. A principal
 // without a proxy id (a legacy or anonymous caller with no header) is ignored,
 // like the Seen* methods.

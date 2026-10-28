@@ -205,6 +205,8 @@ type Server struct {
 	// gp holds the scoped-rule count of the served ETag and the per-worker
 	// "lacks grouppolicy" log marks (W-P1-GPOL-07).
 	gp groupPolicyFlags
+	// cf is the fail-open guard state of identity challenge mode (challengeflags.go).
+	cf challengeFlags
 	// pipeline is the embeddable alert-delivery assembly (manager + engine + tick +
 	// bridge). Nil when no alert DB path is configured (or when its store/manager
 	// failed to build — fail-open: a broken alert config never stops policy
@@ -613,6 +615,7 @@ func (s *Server) Handler() http.Handler {
 		cur := s.policy.currentETag()
 		views := tracker.Views()
 		FlagNoGroupPolicy(views, s.scopedEntries())
+		FlagNoIdentityChallenge(views, s.challengeServed())
 		for i := range views {
 			views[i].Behind = views[i].PolicyETag != "" && views[i].PolicyETag != cur
 		}
@@ -694,6 +697,7 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	caps := normalizeCaps(body.Caps)
 	s.registry.SeenHeartbeat(principal.ProxyID, trimETag(body.PolicyETag), caps)
 	s.noteGroupPolicy(principal.ProxyID, caps)
+	s.noteIdentityChallenge(principal.ProxyID, caps)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -1126,7 +1130,7 @@ func renderSettingsBlocks(root map[string]yaml.Node, in config.SettingsWire) err
 	identityEdit := blockEdit{key: "identity"}
 	if in.Identity != nil {
 		var node yaml.Node
-		if err := node.Encode(identityYAML(*in.Identity)); err != nil {
+		if err := node.Encode(newIdentityYAML(*in.Identity)); err != nil {
 			return fmt.Errorf("controlplane: encode identity settings: %w", err)
 		}
 		identityEdit.node, identityEdit.present = &node, true
@@ -1487,15 +1491,38 @@ type agentYAML struct {
 // yaml keys) with omitempty so unset tuning stays absent and the loader
 // applies its defaults.
 type identityYAML struct {
-	DefaultMode        string   `yaml:"defaultMode,omitempty"`
-	Issuer             string   `yaml:"issuer,omitempty"`
-	Audience           string   `yaml:"audience,omitempty"`
-	AllowedAZP         []string `yaml:"allowedAZP,omitempty"`
-	JWKSURL            string   `yaml:"jwksURL,omitempty"`
-	GroupsClaim        string   `yaml:"groupsClaim,omitempty"`
-	ClockSkewSeconds   int      `yaml:"clockSkewSeconds,omitempty"`
-	MaxTokenTTLSeconds int      `yaml:"maxTokenTTLSeconds,omitempty"`
-	InternalIssuerURL  string   `yaml:"internalIssuerURL,omitempty"`
+	DefaultMode        string      `yaml:"defaultMode,omitempty"`
+	Issuer             string      `yaml:"issuer,omitempty"`
+	Audience           string      `yaml:"audience,omitempty"`
+	AllowedAZP         []string    `yaml:"allowedAZP,omitempty"`
+	JWKSURL            string      `yaml:"jwksURL,omitempty"`
+	GroupsClaim        string      `yaml:"groupsClaim,omitempty"`
+	ClockSkewSeconds   int         `yaml:"clockSkewSeconds,omitempty"`
+	MaxTokenTTLSeconds int         `yaml:"maxTokenTTLSeconds,omitempty"`
+	InternalIssuerURL  string      `yaml:"internalIssuerURL,omitempty"`
+	SignIn             *signInYAML `yaml:"signIn,omitempty"`
+}
+
+// signInYAML mirrors config.SignInSettings (challenge-mode sign-in tuning).
+type signInYAML struct {
+	ClientID        string   `yaml:"clientID,omitempty"`
+	Scopes          []string `yaml:"scopes,omitempty"`
+	MaxPending      int      `yaml:"maxPending,omitempty"`
+	StartsPerMinute int      `yaml:"startsPerMinute,omitempty"`
+}
+
+// newIdentityYAML projects the wire block onto its on-disk mirror.
+func newIdentityYAML(in config.IdentitySettings) identityYAML {
+	out := identityYAML{
+		DefaultMode: in.DefaultMode, Issuer: in.Issuer, Audience: in.Audience,
+		AllowedAZP: in.AllowedAZP, JWKSURL: in.JWKSURL, GroupsClaim: in.GroupsClaim,
+		ClockSkewSeconds: in.ClockSkewSeconds, MaxTokenTTLSeconds: in.MaxTokenTTLSeconds,
+		InternalIssuerURL: in.InternalIssuerURL,
+	}
+	if si := in.SignIn; si != nil {
+		out.SignIn = &signInYAML{ClientID: si.ClientID, Scopes: si.Scopes, MaxPending: si.MaxPending, StartsPerMinute: si.StartsPerMinute}
+	}
+	return out
 }
 
 // secondsToDuration renders a positive whole-second count as a Go duration string

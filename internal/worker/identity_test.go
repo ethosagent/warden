@@ -388,3 +388,77 @@ func TestCountScoped(t *testing.T) {
 		t.Errorf("countScoped = %d, want 2", got)
 	}
 }
+
+type stubStarter struct{ n int }
+
+func (*stubStarter) Start(context.Context, string) (proxy.SignInOffer, proxy.SignInOutcome) {
+	return proxy.SignInOffer{}, proxy.SignInIssuerUnreachable
+}
+func (*stubStarter) Forget(string) {}
+
+// TestSettingsApplierChallenge: challenge mode applies live, reuses the
+// verifier and the sign-in starter until their inputs change, and a
+// transparent-only worker (no CONNECT to answer a 407 on) keeps its previous
+// identity config and logs one warning.
+func TestSettingsApplierChallenge(t *testing.T) {
+	a, fake, builds, _, buf := identityApplier(t)
+	starters := 0
+	a.identity.buildSignIn = func(config.IdentitySettings) (proxy.SignInStarter, error) {
+		starters++
+		return &stubStarter{n: starters}, nil
+	}
+
+	fake.settings = identityWire("http://idp.test")
+	fake.settings.Agents[0].Identity = "challenge"
+	a.Apply()
+	w := a.identity
+	if w.live.mode != proxy.IdentityModeChallenge || w.live.v == nil || w.live.starter == nil || *builds != 1 || starters != 1 {
+		t.Fatalf("live = mode %q verifier %v starter %v builds %d starters %d", w.live.mode, w.live.v, w.live.starter, *builds, starters)
+	}
+	first := w.live.starter
+
+	// Unrelated settings and a repeat Apply rebuild nothing.
+	fake.settings.CacheTTLSeconds = intPtr(120)
+	a.Apply()
+	if w.live.starter != first || starters != 1 || *builds != 1 {
+		t.Errorf("unrelated change rebuilt something (starters %d, builds %d)", starters, *builds)
+	}
+
+	// A signIn change replaces the starter and keeps the verifier.
+	fake.settings.Identity.SignIn = &config.SignInSettings{MaxPending: 4}
+	a.Apply()
+	if w.live.starter == first || starters != 2 || *builds != 1 {
+		t.Errorf("signIn change: starters %d builds %d", starters, *builds)
+	}
+
+	// Back to attribute drops the starter; challenge again builds a new one.
+	fake.settings.Agents[0].Identity = "attribute"
+	a.Apply()
+	if w.live.mode != proxy.IdentityModeAttribute || w.live.starter != nil {
+		t.Errorf("attribute: mode %q starter %v", w.live.mode, w.live.starter)
+	}
+	fake.settings.Agents[0].Identity = "challenge"
+	a.Apply()
+	if w.live.mode != proxy.IdentityModeChallenge || starters != 3 {
+		t.Errorf("challenge again: mode %q starters %d", w.live.mode, starters)
+	}
+
+	// A transparent-only worker keeps the previous config (here: attribute).
+	fake.settings.Agents[0].Identity = "attribute"
+	a.Apply()
+	before := w.live
+	w.canChallenge = func() bool { return false }
+	buf.Reset()
+	fake.settings.Agents[0].Identity = "challenge"
+	a.Apply()
+	a.Apply()
+	if w.live.mode != before.mode || w.live.v != before.v || w.live.starter != nil {
+		t.Errorf("transparent-only worker changed identity: mode %q", w.live.mode)
+	}
+	if n := strings.Count(buf.String(), "challenge mode needs a CONNECT listener"); n != 2 {
+		t.Errorf("want the warning on each rejected apply, got %d:\n%s", n, buf.String())
+	}
+	if strings.Contains(buf.String(), "token") {
+		t.Errorf("warning mentions a token:\n%s", buf.String())
+	}
+}

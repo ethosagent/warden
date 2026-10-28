@@ -177,6 +177,8 @@ Alert on `unspecified`: it should never occur, and seeing it means a deny path s
 | `method_not_allowed` | denyreason | The method is not in the matched entry's `methods`. |
 | `path_not_allowed` | denyreason | The path matches no pattern in the matched entry's `paths`. |
 | `identity_required` | denyreason | The destination is reachable only with a verified identity and the request carried none. |
+| `identity_expired` | denyreason | In identity challenge mode, the token that admitted a terminated tunnel expired while it was open; the client reconnects and is challenged again. |
+| `identity_conflict` | denyreason | In identity challenge mode, an `X-Warden-Identity` header named a different subject than the tunnel's CONNECT token. |
 | `group_not_allowed` | denyreason | A verified subject matched the destination only through identity-scoped allow entries that do not name it. |
 | `identity_groups_truncated` | denyreason | Like `group_not_allowed`, but the subject's group list was cut at the cap, so the miss may come from the cut; it fails closed under its own name. |
 | `user_blocked` | denyreason | The request's identity claims (verified or not) match an entry on the user block list. |

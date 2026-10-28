@@ -774,3 +774,27 @@ func TestFleetNoGroupPolicyBadge(t *testing.T) {
 		}
 	}
 }
+
+// TestFleetNoIdentityChallengeBadge: the fleet JSON carries noIdentityChallenge
+// and the served dashboard renders the "challenge not supported" badge from it.
+func TestFleetNoIdentityChallengeBadge(t *testing.T) {
+	srv := NewServer(&fakeDataSource{}, config.Policy{}, emptyProvider())
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
+	srv.SetWorkers(func() []WorkerView {
+		return []WorkerView{{ProxyID: "old", NoIdentityChallenge: true}, {ProxyID: "new"}}
+	})
+	var rows []map[string]any
+	rr := doGet(t, srv.Handler(), "/dashboard/api/workers")
+	if err := json.Unmarshal(rr.Body.Bytes(), &rows); err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || rows[0]["noIdentityChallenge"] != true || rows[1]["noIdentityChallenge"] != false {
+		t.Fatalf("fleet JSON = %s", rr.Body.String())
+	}
+	page := doGet(t, srv.Handler(), "/dashboard/").Body.String()
+	for _, want := range []string{"w.noIdentityChallenge", "identity: challenge not supported, still allowing"} {
+		if !strings.Contains(page, want) {
+			t.Errorf("served dashboard lacks %q", want)
+		}
+	}
+}

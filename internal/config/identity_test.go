@@ -182,3 +182,94 @@ func TestIdentityNoInsecureKey(t *testing.T) {
 		t.Fatalf("want unknown-field error naming %s, got %v", key, err)
 	}
 }
+
+func TestIdentityChallengeMode(t *testing.T) {
+	const block = "  defaultMode: challenge\n  issuer: http://localhost:5556/dex\n  internalIssuerURL: http://dex:5556\n  audience: warden\n  allowedAZP: [agent-harness, warden-cli]\n"
+
+	t.Run("accepted in YAML with a signIn block", func(t *testing.T) {
+		lp, err := parse([]byte(identityBlock(block + "  signIn:\n    clientID: warden-cli\n    scopes: [openid, email]\n    maxPending: 8\n    startsPerMinute: 4\n")))
+		if err != nil {
+			t.Fatalf("challenge must be accepted: %v", err)
+		}
+		si := lp.policy.Identity.SignIn
+		if lp.policy.Identity.DefaultMode != IdentityModeChallenge || si == nil || si.MaxPending != 8 || si.StartsPerMinute != 4 || si.ClientID != "warden-cli" {
+			t.Fatalf("identity = %+v signIn = %+v", lp.policy.Identity, si)
+		}
+		if !reflect.DeepEqual(lp.policy.DeepCopy().Identity, lp.policy.Identity) {
+			t.Fatal("Policy.DeepCopy lost the signIn block")
+		}
+	})
+	t.Run("accepted per agent", func(t *testing.T) {
+		_, err := parse([]byte(baseAllow + "\nagents:\n  - id: a\n    identity: challenge\nidentity:\n  issuer: https://i.example.com\n  audience: warden\n"))
+		if err != nil {
+			t.Fatalf("agents[].identity challenge must be accepted: %v", err)
+		}
+	})
+	t.Run("signIn defaults", func(t *testing.T) {
+		var none *SignInSettings
+		e := none.Effective()
+		if e.ClientID != "warden-cli" || e.MaxPending != 32 || e.StartsPerMinute != 30 || !reflect.DeepEqual(e.Scopes, DefaultSignInScopes) {
+			t.Fatalf("defaults = %+v", e)
+		}
+		e.Scopes[0] = "mutated"
+		if DefaultSignInScopes[0] != "openid" {
+			t.Fatal("Effective aliased the default scopes")
+		}
+	})
+	t.Run("rejections", func(t *testing.T) {
+		cases := []struct{ name, yaml, want string }{
+			{"missing issuer", identityBlock("  defaultMode: challenge\n  audience: warden\n"), "identity.issuer is required"},
+			{"missing audience", identityBlock("  defaultMode: challenge\n  issuer: https://i.example.com\n"), "identity.audience is required"},
+			{"clientID not in allowedAZP", identityBlock(block + "  signIn:\n    clientID: other-cli\n"), "wrong_azp"},
+			{"default clientID not in allowedAZP", identityBlock("  defaultMode: challenge\n  issuer: https://i.example.com\n  audience: warden\n  allowedAZP: [agent-harness]\n"), "identity.signIn.clientID"},
+			{"negative maxPending", identityBlock(block + "  signIn:\n    maxPending: -1\n"), "maxPending"},
+			{"huge startsPerMinute", identityBlock(block + "  signIn:\n    startsPerMinute: 100000\n"), "startsPerMinute"},
+			{"scope with a space", identityBlock(block + "  signIn:\n    scopes: [\"a b\"]\n"), "scopes"},
+			{"require still rejected", identityBlock("  defaultMode: require\n  issuer: https://i.example.com\n  audience: warden\n"), "Phase 2"},
+			{"unknown signIn key", identityBlock(block + "  signIn:\n    clientSecret: x\n"), "clientSecret"},
+		}
+		for _, tc := range cases {
+			_, err := parse([]byte(tc.yaml))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("%s: want error containing %q, got %v", tc.name, tc.want, err)
+			}
+		}
+	})
+	t.Run("azp unchecked when allowedAZP is empty", func(t *testing.T) {
+		_, err := parse([]byte(identityBlock("  defaultMode: challenge\n  issuer: https://i.example.com\n  audience: warden\n  signIn:\n    clientID: anything\n")))
+		if err != nil {
+			t.Fatalf("empty allowedAZP means no azp check: %v", err)
+		}
+	})
+	t.Run("wire round trip and deep copy", func(t *testing.T) {
+		w := &SettingsWire{Identity: &IdentitySettings{
+			DefaultMode: "challenge", Issuer: "http://localhost:5556/dex", Audience: "warden",
+			InternalIssuerURL: "http://dex:5556",
+			SignIn:            &SignInSettings{ClientID: "warden-cli", Scopes: []string{"openid"}, MaxPending: 3, StartsPerMinute: 5},
+		}, Agents: []AgentSettings{{ID: "a", Identity: "challenge"}}}
+		first, err := json.Marshal(w)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var back SettingsWire
+		if err := json.Unmarshal(first, &back); err != nil {
+			t.Fatal(err)
+		}
+		second, _ := json.Marshal(back.DeepCopy())
+		if string(first) != string(second) {
+			t.Fatalf("not byte-identical:\n%s\n%s", first, second)
+		}
+		cp := w.DeepCopy()
+		cp.Identity.SignIn.Scopes[0] = "mutated"
+		cp.Identity.SignIn.MaxPending = 99
+		if w.Identity.SignIn.Scopes[0] != "openid" || w.Identity.SignIn.MaxPending != 3 {
+			t.Fatal("DeepCopy aliased the signIn block")
+		}
+		if !reflect.DeepEqual(IdentityFromSettings(w.Identity), *w.Identity) {
+			t.Fatal("IdentityFromSettings changed the block")
+		}
+		if got := SettingsWireFromPolicy(Policy{Identity: IdentityFromSettings(w.Identity), Agents: AgentsFromSettings(w.Agents)}); !reflect.DeepEqual(got, w) {
+			t.Fatalf("SettingsWireFromPolicy = %+v", got)
+		}
+	})
+}

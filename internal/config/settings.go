@@ -147,7 +147,7 @@ type JudgeCircuitBreakerSettings struct {
 type AgentSettings struct {
 	ID     string `json:"id"`
 	Policy string `json:"policy,omitempty"`
-	// Identity is the per-agent identity mode override (off|attribute).
+	// Identity is the per-agent identity mode override (off, attribute or challenge).
 	Identity string `json:"identity,omitempty"`
 }
 

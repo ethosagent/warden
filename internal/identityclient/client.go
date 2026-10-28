@@ -163,6 +163,39 @@ func (c *Client) Login(ctx context.Context, prompt io.Writer) ([]string, error) 
 	if err != nil {
 		return nil, err
 	}
+	return c.storeDeviceLogin(tok)
+}
+
+// CompleteDevice finishes a device authorization someone else started (the
+// worker's sign-in challenge): it polls the token endpoint of the client's OWN
+// configured issuer, never a URL the caller or the worker names, honouring the
+// interval, slow_down and expiresIn (seconds), then stores the login like Login
+// does. The device code goes to the issuer only; it is never logged or returned.
+func (c *Client) CompleteDevice(ctx context.Context, deviceCode string, interval, expiresIn int) ([]string, error) {
+	ep, err := Discover(ctx, c.http(), c.Config.Issuer)
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := c.oauthConfig(ep)
+	if err != nil {
+		return nil, err
+	}
+	ctx = c.withHTTP(ctx)
+	da := &oauth2.DeviceAuthResponse{DeviceCode: deviceCode, Interval: int64(interval)}
+	if expiresIn > 0 {
+		da.Expiry = time.Now().Add(time.Duration(expiresIn) * time.Second)
+	}
+	tok, err := c.pollDevice(ctx, cfg, da)
+	if err != nil {
+		return nil, err
+	}
+	return c.storeDeviceLogin(tok)
+}
+
+// storeDeviceLogin checks the ID token of a finished device login and writes it
+// to the cache. The returned warnings name a missing groups claim, an aud
+// without the configured audience, a missing refresh token or a stale token.
+func (c *Client) storeDeviceLogin(tok *oauth2.Token) ([]string, error) {
 	idToken, _ := tok.Extra("id_token").(string)
 	if idToken == "" {
 		return nil, errors.New("identityclient: the token response has no id_token (is the openid scope granted?)")
@@ -314,6 +347,15 @@ func (c *Client) Token(ctx context.Context) (TokenResult, error) {
 			return nil
 		}
 		res, err = c.refresh(ctx, store, e)
+		if errors.Is(err, ErrLoginRequired) {
+			// The refresh token is expired, revoked or missing: this entry can
+			// never produce a token again. Delete it (not keep it), so the next
+			// CONNECT meets a fresh sign-in challenge instead of retrying a dead
+			// refresh on every request.
+			if rerr := store.removeEntry(); rerr != nil {
+				c.log().Warn("could not delete the dead login cache", "issuer", c.Config.Issuer, "error", rerr)
+			}
+		}
 		return err
 	})
 	return res, err

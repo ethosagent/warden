@@ -2121,6 +2121,7 @@ function renderFleet(ws){
     const etagPill=w.behind?'<span class="pill p-redact">behind</span>':'<span class="pill p-allow">up-to-date</span>';
     let pending=w.behind?'<span class="pill p-high">policy behind</span>':'';
     if(w.noGroupPolicy) pending+=(pending?' ':'')+'<span class="pill p-high" title="Denies group-scoped rules until upgraded">no groupPolicy</span>';
+    if(w.noIdentityChallenge) pending+=(pending?' ':'')+'<span class="pill p-high" title="This worker cannot apply identity challenge mode and keeps allowing callers it should challenge. Upgrade it.">identity: challenge not supported, still allowing</span>';
     if(!pending) pending='<span class="muted">—</span>';
     return '<tr><td class="mono">'+esc(w.proxyID||'—')+'</td><td>'+fleetAuthBadge(w)+'</td><td>'+status+'</td>'
       +'<td class="mono" style="font-size:12px">'+esc(etag)+' '+etagPill+'</td>'

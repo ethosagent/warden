@@ -65,7 +65,7 @@ The recipe registers four static clients (`deploy/compose/dex/config.yaml`):
 | `warden-console` | confidential | `WARDEN_CONSOLE_DEX_CLIENT_SECRET` | `https://localhost:7070/auth/callback` (dev), `https://<cp-host>/auth/callback` (prod) | Admin SSO login to the control-plane console (browser code flow). |
 | `warden` | confidential | `WARDEN_DEX_CLIENT_SECRET` | none | The data-plane audience. It never logs anyone in; it only appears in `aud`. |
 | `agent-harness` | confidential | `HARNESS_DEX_CLIENT_SECRET` | none | A harness platform's login client (and the dev token script). |
-| `warden-cli` | public | none | `<issuer>/device/callback` | Human CLI login with the device-code grant. A CLI cannot keep a secret. |
+| `warden-cli` | public | none | `<issuer>/device/callback` and `/device/callback` | Human CLI login with the device-code grant. A CLI cannot keep a secret. |
 
 Redirect URIs are written **as the browser sees them**, not as a container sees
 them: the console redirect is the public URL of the control plane, and the CLI

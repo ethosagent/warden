@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -11,7 +12,9 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -73,9 +76,9 @@ func loopbackListenAddr(addr string) error {
 
 func (r *identityRunner) execCmd() *cobra.Command {
 	var (
-		worker, listen, ca string
-		includeHTTP        bool
-		passEnv            []string
+		worker, listen, ca, signInNotify string
+		includeHTTP, challenge           bool
+		passEnv                          []string
 	)
 	cmd := &cobra.Command{
 		Use:   "exec --worker host:port [flags] -- COMMAND [ARGS...]",
@@ -90,12 +93,19 @@ func (r *identityRunner) execCmd() *cobra.Command {
 			"its value is read from this environment, never from the command line. --env refuses the proxy " +
 			"variables and WARDEN_IDENTITY_*.\n\n" +
 			"Without a login, a terminal runs the device-code login on stderr; otherwise exec exits 2 without " +
-			"starting the command. The exit code is the command's, or 128+N when signal N killed it. A command " +
+			"starting the command. With --challenge (or --signin-notify) exec starts without a login and lets the " +
+			"worker ask for one: a worker in identity challenge mode answers the first request with a 407 and a " +
+			"sign-in URL, which exec prints on stderr as `warden: sign in at URL (code CODE)`; exec then waits for the " +
+			"sign-in at the issuer, stores the login and sends the token on later requests. The agent sees the 407 " +
+			"without the device code. --signin-notify COMMAND also runs COMMAND (through sh -c) with the URL in " +
+			"WARDEN_SIGNIN_URL and the code in WARDEN_SIGNIN_CODE, for a chat message or a desktop notification; it " +
+			"never gets a token. The exit code is the command's, or 128+N when signal N killed it. A command " +
 			"running as the same user can still read the identity cache file; use another user for the command.",
 		SilenceUsage: true, SilenceErrors: true,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return r.runExec(cmd, args, worker, listen, ca, includeHTTP, passEnv)
+			return r.runExec(cmd, args, execOpts{worker: worker, listen: listen, ca: ca, includeHTTP: includeHTTP,
+				passEnv: passEnv, challenge: challenge || signInNotify != "", signInNotify: signInNotify})
 		},
 	}
 	cmd.Flags().SetInterspersed(false) // flags after COMMAND belong to the command
@@ -105,11 +115,25 @@ func (r *identityRunner) execCmd() *cobra.Command {
 	fl.StringVar(&listen, "listen", "127.0.0.1:0", "loopback address of the forwarder")
 	fl.StringVar(&ca, "ca", "", "CA bundle `PATH` to export as SSL_CERT_FILE, CURL_CA_BUNDLE, REQUESTS_CA_BUNDLE and NODE_EXTRA_CA_CERTS")
 	fl.BoolVar(&includeHTTP, "include-http", false, "also set HTTP_PROXY and http_proxy (the worker denies plain http)")
+	fl.BoolVar(&challenge, "challenge", false, "start without a login and sign in through the worker's 407 sign-in challenge (identity.defaultMode: challenge)")
+	fl.StringVar(&signInNotify, "signin-notify", "", "run `COMMAND` (sh -c) when a sign-in is needed, with WARDEN_SIGNIN_URL and WARDEN_SIGNIN_CODE set; implies --challenge")
 	fl.StringArrayVar(&passEnv, "env", nil, "pass the environment variable `NAME` to the command as well (repeatable; name only, the value is read from the environment)")
 	return cmd
 }
 
-func (r *identityRunner) runExec(cmd *cobra.Command, args []string, worker, listen, ca string, includeHTTP bool, passEnv []string) error {
+// execOpts are the resolved flags of `identity exec`.
+type execOpts struct {
+	worker, listen, ca string
+	includeHTTP        bool
+	passEnv            []string
+	// challenge starts without a login and lets the worker's 407 drive it;
+	// signInNotify is the hook command run when a sign-in is needed.
+	challenge    bool
+	signInNotify string
+}
+
+func (r *identityRunner) runExec(cmd *cobra.Command, args []string, o execOpts) error {
+	worker, listen, ca, includeHTTP, passEnv := o.worker, o.listen, o.ca, o.includeHTTP, o.passEnv
 	if _, _, err := net.SplitHostPort(worker); err != nil || strings.ContainsAny(worker, "/@ ") {
 		return errors.New("--worker must be host:port")
 	}
@@ -133,6 +157,10 @@ func (r *identityRunner) runExec(cmd *cobra.Command, args []string, worker, list
 	terminal := stdinIsTerminal(r.deps.stdin)
 
 	_, err = c.Token(ctx)
+	if errors.Is(err, identityclient.ErrLoginRequired) && o.challenge {
+		// No login yet: the worker's sign-in challenge will ask for one.
+		err = nil
+	}
 	if errors.Is(err, identityclient.ErrLoginRequired) && terminal {
 		warnings, lerr := c.Login(ctx, errw)
 		if lerr != nil {
@@ -157,23 +185,31 @@ func (r *identityRunner) runExec(cmd *cobra.Command, args []string, worker, list
 	if r.f.verbose {
 		level = slog.LevelInfo
 	}
+	lookup := os.LookupEnv
+	if r.deps.lookupEnv != nil {
+		lookup = r.deps.lookupEnv
+	}
+	fwLog := slog.New(slog.NewTextHandler(errw, &slog.HandlerOptions{Level: level}))
 	fw := &identityclient.Forwarder{
 		WorkerAddr: worker, ClientCredential: credential,
 		Token: func(ctx context.Context) (string, error) {
 			res, err := c.Token(ctx)
 			return res.IDToken, err
 		},
-		Log: slog.New(slog.NewTextHandler(errw, &slog.HandlerOptions{Level: level})),
+		Log: fwLog,
 	}
 	fctx, stopFwd := context.WithCancel(ctx)
+	var hooks sync.WaitGroup
+	if o.challenge {
+		fw.Challenge = &identityclient.Challenger{
+			Client: c, Log: fwLog,
+			Notify: signInNotifier(fctx, errw, o.signInNotify, lookup, &hooks),
+		}
+	}
 	fwdDone := make(chan error, 1)
 	go func() { fwdDone <- fw.Serve(fctx, ln) }()
-	defer func() { stopFwd(); <-fwdDone }()
+	defer func() { stopFwd(); <-fwdDone; hooks.Wait() }()
 
-	lookup := os.LookupEnv
-	if r.deps.lookupEnv != nil {
-		lookup = r.deps.lookupEnv
-	}
 	env, warnings, err := identityclient.BuildChildEnv(lookup, identityclient.LoopbackProxyURL(ln.Addr(), credential),
 		identityclient.ChildEnvOptions{IncludeHTTP: includeHTTP, CA: ca, Passthrough: passEnv})
 	if err != nil {
@@ -208,6 +244,42 @@ func (r *identityRunner) runExec(cmd *cobra.Command, args []string, worker, list
 		return &exitError{code: code}
 	}
 	return nil
+}
+
+// signInHookTimeout bounds one --signin-notify command.
+const signInHookTimeout = 30 * time.Second
+
+// signInNotifier returns the Challenger's Notify: it prints the sign-in line on
+// errw and, when hook is set, starts it in the background (tracked by wg, bound
+// by ctx and a timeout). The hook runs through `sh -c` with the same small
+// environment as the supervised child plus WARDEN_SIGNIN_URL and
+// WARDEN_SIGNIN_CODE; it never gets a token, a device code or any
+// WARDEN_IDENTITY_* setting.
+func signInNotifier(ctx context.Context, errw io.Writer, hook string, lookup func(string) (string, bool), wg *sync.WaitGroup) func(url, code string) {
+	return func(url, code string) {
+		_, _ = fmt.Fprintf(errw, "warden: sign in at %s (code %s)\n", url, code)
+		if hook == "" {
+			return
+		}
+		var env []string
+		for _, n := range identityclient.ChildEnvAllowlist {
+			if v, ok := lookup(n); ok {
+				env = append(env, n+"="+v)
+			}
+		}
+		env = append(env, "WARDEN_SIGNIN_URL="+url, "WARDEN_SIGNIN_CODE="+code)
+		hctx, cancel := context.WithTimeout(ctx, signInHookTimeout)
+		c := exec.CommandContext(hctx, "sh", "-c", hook)
+		c.Env, c.Stdout, c.Stderr = env, errw, errw
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer cancel()
+			if err := c.Run(); err != nil {
+				_, _ = fmt.Fprintf(errw, "warden: the --signin-notify command failed: %v\n", err)
+			}
+		}()
+	}
 }
 
 // notifySignals subscribes to the signals exec forwards.

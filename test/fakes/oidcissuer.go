@@ -54,6 +54,7 @@ type OIDCIssuer struct {
 	// (WithPublicIssuer); the listener stays on addr.
 	public string
 	flow   flowState
+	device deviceState
 
 	mu      sync.Mutex
 	srv     *httptest.Server // nil while stopped
@@ -201,6 +202,8 @@ func (i *OIDCIssuer) route(w http.ResponseWriter, r *http.Request) {
 		i.handleAuthorize(w, r)
 	case "/token":
 		i.handleToken(w, r)
+	case "/device/code":
+		i.handleDevice(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -213,6 +216,7 @@ func (i *OIDCIssuer) handleDiscovery(w http.ResponseWriter, _ *http.Request) {
 		"jwks_uri":                              i.JWKSURL(),
 		"authorization_endpoint":                i.Issuer() + "/auth",
 		"token_endpoint":                        i.Issuer() + "/token",
+		"device_authorization_endpoint":         i.Issuer() + "/device/code",
 		"response_types_supported":              []string{"code"},
 		"subject_types_supported":               []string{"public"},
 		"id_token_signing_alg_values_supported": []string{"RS256", "ES256"},
