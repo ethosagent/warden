@@ -340,6 +340,9 @@ type Proxy struct {
 	// exists only so white-box tests can drive the stalled-handshake path
 	// without a real 10 s sleep; production leaves it zero-valued.
 	handshakeTimeout time.Duration
+	// challengeTimeout is the injectable bound of a whole challenge tunnel
+	// (0 = challengeTunnelTimeout). Tests shrink it to drive the stall cutoff.
+	challengeTimeout time.Duration
 	// certCacheCap is the injectable leaf-cache entry cap (0 =
 	// maxCertCacheEntries). Like leafTTL it exists only so white-box tests can
 	// drive the eviction path without minting 10k certificates; production

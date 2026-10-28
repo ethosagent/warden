@@ -46,7 +46,13 @@ var invCanaryScenarios = []invScenario{scAllow, scDeny, scUpstreamErr, scTimeout
 
 // invNotApplicable records, with a reason, the (path, scenario) pairs that
 // cannot exist. An empty cell is a bug; a documented gap is a decision.
-var invNotApplicable = map[Path]map[invScenario]string{}
+var invNotApplicable = map[Path]map[invScenario]string{
+	PathChallenge: {
+		scAllow:       "the challenge tunnel admits nothing: every request is refused, so there is no allow",
+		scUpstreamErr: "the challenge tunnel never dials upstream, so no upstream can fail",
+		scTimeout:     "the challenge tunnel never dials upstream; its own stall bound is TestChallengeInTunnelStallIsCut",
+	},
+}
 
 type invRow struct {
 	name     string
@@ -74,6 +80,10 @@ type invRow struct {
 	wantDenyEvent   bool
 	agentMustNot    string
 	upstreamMustNot string
+
+	// noLogs lists strings that may reach the agent but must never appear in the
+	// logs, analytics events or metric labels (the challenge's user code).
+	noLogs []string
 
 	// knownIssue is the tracker ref of an open bug this row reproduces; knownWhere
 	// lists the places (violationPlace) it is expected to show (each must appear,
@@ -388,6 +398,24 @@ func invRows() []invRow {
 			setup: func(e *invEnv) { e.startRawTLS(true) }, run: rawTLS(invHost)},
 	)
 
+	// ---- challenge (#621) -----------------------------------------------------
+	// The in-tunnel sign-in challenge: no identity, so nothing may be dialled and
+	// nothing swapped. The offer's device code is the canary: it rides the 200 head
+	// (which the forwarder strips) but must not reach the agent's response, the
+	// logs, the events or the metrics. The user code is shown to the agent on
+	// purpose and must stay out of the logs, events and metrics.
+	challengeAsk := func(e *invEnv) { e.connectExtra = ChallengeHeader + ": " + ChallengeInTunnel + "\r\n" }
+	add(
+		invRow{name: "challenge/deny", path: PathChallenge, scenario: scDeny, opts: invOpts{challenge: true},
+			setup: challengeAsk, mustReach: true, wantNoUpstream: true, wantDenyEvent: true,
+			noLogs: []string{invUserCode},
+			run:    h1(invReq{path: "/ok", header: invBearer()})},
+		invRow{name: "challenge/deny-h2", path: PathChallenge, scenario: scDeny, opts: invOpts{challenge: true},
+			setup: challengeAsk, mustReach: true, wantNoUpstream: true, wantDenyEvent: true,
+			noLogs: []string{invUserCode},
+			run:    h2(invReq{method: "POST", path: "/ok", header: invBearer(), body: "token=" + invPlaceholder})},
+	)
+
 	// ---- upstream echo (#389, fixed) ---------------------------------------
 	// An upstream that reflects the request it received must never hand the
 	// swapped secret back to the agent: the echo guard blocks the response on
@@ -519,6 +547,11 @@ func invViolations(e *invEnv, row invRow) []string {
 	if row.wantNoUpstream && len(e.backend.requests()) > 0 {
 		violations = append(violations, "denied request reached the upstream")
 	}
+	for _, s := range row.noLogs {
+		if where := e.sinkHolding(s); where != "" {
+			violations = append(violations, fmt.Sprintf("a code that must stay out of the logs is in the %s", where))
+		}
+	}
 	if row.wantNoTLSUpstream && e.tlsUpstreams.Load() > 0 {
 		violations = append(violations, "plain-HTTP session dialled the TLS upstream")
 	}
@@ -627,6 +660,9 @@ func TestInvariants_UncoveredPathIsReported(t *testing.T) {
 	}
 	// And a documented N/A silences exactly that cell.
 	na := map[Path]map[invScenario]string{"quic": {scTimeout: "datagram, no stream to stall"}}
+	for path, cells := range invNotApplicable {
+		na[path] = cells // the real registry's documented gaps stay documented
+	}
 	if got := uncoveredPaths(paths, invRows(), na); len(got) != len(invCanaryScenarios)-1 {
 		t.Fatalf("N/A entry should remove one gap, got %v", got)
 	}

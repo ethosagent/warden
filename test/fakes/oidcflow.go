@@ -148,6 +148,10 @@ func (i *OIDCIssuer) handleToken(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
+	if r.PostForm.Get("grant_type") == deviceGrant {
+		i.handleDeviceToken(w, r)
+		return
+	}
 	id, secret, ok := r.BasicAuth()
 	if ok {
 		id, _ = url.QueryUnescape(id)

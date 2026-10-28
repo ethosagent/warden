@@ -1,7 +1,9 @@
 package proxy
 
 import (
+	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,6 +22,22 @@ import (
 // signs in with its own provider and retries with the token. The worker starts
 // the device authorization but never polls for it and never holds a user token
 // or refresh token (ADR 0002).
+
+// The in-tunnel challenge (#621, docs/identity-contract.md "In-tunnel
+// challenge"). A client that can hide the offer from its agent asks for it with
+// ChallengeHeader on the CONNECT; the worker then accepts the tunnel, puts the
+// offer in SignInHeader on the 200 and answers every request inside with a 403
+// that names the link (challenge_tunnel.go).
+const (
+	// ChallengeHeader is the CONNECT request header that asks for the challenge
+	// inside the tunnel.
+	ChallengeHeader = "X-Warden-Challenge"
+	// ChallengeInTunnel is its only value.
+	ChallengeInTunnel = "in-tunnel"
+	// SignInHeader carries the offer (base64url JSON of the SignInOffer, no
+	// padding) on the 200 of an in-tunnel challenge. The client strips it.
+	SignInHeader = "X-Warden-Sign-In"
+)
 
 // The JSON bodies of a 403 on a request of a terminated tunnel whose connection
 // identity has expired, or that names a second subject, in challenge mode.
@@ -58,7 +76,11 @@ func challengeReason(st identity.Status) string {
 // fetch keys within its bound) fails closed here. A valid identity ends the
 // agent's pending sign-in and returns false. In every other mode it does
 // nothing.
-func (p *Proxy) challengeConnect(conn net.Conn, ci connIdentity, domain string, port int) bool {
+//
+// When the client asked for the in-tunnel challenge (ask) and the worker
+// terminates TLS, the CONNECT is accepted instead and served by the
+// challenge-only handler; otherwise, and always on a raw tunnel, it is the 407.
+func (p *Proxy) challengeConnect(conn net.Conn, br *bufio.Reader, ci connIdentity, domain string, port int, ask string) bool {
 	h := p.identity()
 	if h == nil || h.mode != IdentityModeChallenge {
 		return false
@@ -81,6 +103,7 @@ func (p *Proxy) challengeConnect(conn net.Conn, ci connIdentity, domain string, 
 	if body.SignIn == nil {
 		body.SignInError = outcome
 	}
+	inTunnel := ask == ChallengeInTunnel && p.caCert != nil
 	p.cfg.Metrics.RecordSignInStarted(string(outcome))
 	// The agent id and the outcome only: never the offer, its codes or a token.
 	p.logSignIn(outcome)
@@ -92,8 +115,22 @@ func (p *Proxy) challengeConnect(conn net.Conn, ci connIdentity, domain string, 
 		Protocol:  "tcp",
 		Reason:    string(denyreason.IdentityRequired),
 	})
+	if inTunnel {
+		p.serveChallengeTunnel(conn, br, domain, body)
+		return true
+	}
 	writeChallenge(conn, body)
 	return true
+}
+
+// offerHeader is the X-Warden-Sign-In value: base64url (no padding) of the
+// offer as JSON.
+func offerHeader(o SignInOffer) string {
+	b, err := json.Marshal(o)
+	if err != nil { // strings and ints: cannot fail
+		return ""
+	}
+	return base64.RawURLEncoding.EncodeToString(b)
 }
 
 func (p *Proxy) logSignIn(outcome SignInOutcome) {

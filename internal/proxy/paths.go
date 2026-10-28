@@ -35,6 +35,10 @@ const (
 	PathSSE Path = "sse"
 	// PathMCP is an MCP JSON-RPC request classified by the gateway.
 	PathMCP Path = "mcp"
+	// PathChallenge is the in-tunnel sign-in challenge (#621): a CONNECT with no
+	// valid identity in challenge mode, accepted and served by the
+	// challenge-only handler (a 403 naming the link). It never dials upstream.
+	PathChallenge Path = "challenge"
 )
 
 // protocolPaths is the registry of every path above. Keep it in step with the
@@ -42,7 +46,7 @@ const (
 // path that is missing here, or a registered path has no dispatch site.
 var protocolPaths = []Path{
 	PathTunnel, PathRawTLS, PathHTTP1, PathTransparentTLS, PathTransparentHTTP,
-	PathH2, PathGRPC, PathWebSocket, PathSSE, PathMCP,
+	PathH2, PathGRPC, PathWebSocket, PathSSE, PathMCP, PathChallenge,
 }
 
 // ProtocolPaths returns the registered protocol paths, in a stable order.

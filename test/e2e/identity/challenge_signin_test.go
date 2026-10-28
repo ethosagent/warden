@@ -273,6 +273,141 @@ func approveDevice(t testing.TB, verificationURL, user string) {
 	t.Fatalf("identity: dex did not reach the success page within %d steps (last %s)", 3*maxHops, noQuery(cur))
 }
 
+// inTunnelScript is signInScript for the in-tunnel challenge: curl prints the
+// response body (the worker's 403 JSON, one line) followed by
+// "HTTPSTATUS:<code> CONNECT:<connect code>", so the test reads the link from
+// what the agent's own request received.
+const inTunnelScript = `i=0; while [ "$i" -lt 60 ]; do i=$((i+1)); ` +
+	`out=$(curl -sS -w ' HTTPSTATUS:%{http_code} CONNECT:%{http_connect}' --max-time 10 https://` + allowedHost + `/ 2>/dev/null); ` +
+	`echo "attempt $i: $out"; case "$out" in *HTTPSTATUS:200*) exit 0;; esac; sleep 1; done; exit 1`
+
+// inTunnelAttempt is one printed attempt of inTunnelScript.
+var inTunnelAttempt = regexp.MustCompile(`(?m)^attempt \d+: (.*) HTTPSTATUS:(\d+) CONNECT:(\d+)$`)
+
+// TestChallengeInTunnel is the in-tunnel sign-in loop (#621) on the Dex stack: a
+// curl agent behind `exec --challenge-in-tunnel`. Its FIRST request gets the
+// CONNECT 200 and then a 403 whose body names the sign-in link, the one the
+// client also prints on stderr; the test signs in as alice on Dex's device page;
+// the retry is allowed and attributed to alice. After logout the next call is
+// challenged again, in the tunnel, with a new code. A client that does not ask
+// still gets the 407 (waitAnonymous). The worker never gives the agent the
+// device_code, and no token, device code or user code is logged.
+func TestChallengeInTunnel(t *testing.T) {
+	requireStack(t)
+	admin := loginAs(t, "alice")
+	cid := signInContainer(t)
+	cache := fmt.Sprintf("/tmp/warden-intunnel-%d", time.Now().UnixNano())
+	t.Cleanup(func() { compose.Run(".", compose.ComposeDeadline, "docker", "exec", cid, "rm", "-rf", cache) })
+
+	setIdentityMode(t, admin, "challenge")
+	// A client that does not ask for the in-tunnel challenge still gets the 407.
+	waitAnonymous(t, "000 407")
+
+	validBefore := len(validEventsFor(t, allowedHost, smokeEmail))
+	denyBefore := len(denyEvents(t, allowedHost, "identity_required"))
+
+	// 1. No login: the first call gets a CONNECT 200 and a 403 that names the link.
+	first := startClient(t, clientArgs(cid, cache, execTail([]string{"--challenge-in-tunnel"}, "sh", "-c", inTunnelScript)...))
+	signInURL, signInCode := first.waitSignIn(t)
+	if !strings.HasPrefix(signInURL, dexURL+"/device?user_code=") || !strings.HasSuffix(signInURL, signInCode) {
+		t.Fatalf("the sign-in URL is not Dex's device page with the code (%s)", noQuery(mustParse(t, signInURL)))
+	}
+	waitDeny(t, allowedHost, "identity_required", denyBefore)
+
+	// 2. The user signs in as alice on Dex's device page.
+	approveDevice(t, signInURL, smokeUser)
+
+	// 3. The poll stores the token and the retry is allowed.
+	if code := first.wait(t); code != 0 {
+		t.Fatalf("the retrying child exited %d; stdout: %s", code, first.stdout.String())
+	}
+	attempts := inTunnelAttempt.FindAllStringSubmatch(first.stdout.String(), -1)
+	if len(attempts) < 2 {
+		t.Fatalf("want a challenged first call and an allowed retry, got %d attempts", len(attempts))
+	}
+	body, status, connect := attempts[0][1], attempts[0][2], attempts[0][3]
+	if status != "403" || connect != "200" {
+		t.Errorf("the first call read HTTP %s over CONNECT %s, want 403 over 200 (the challenge inside the tunnel)", status, connect)
+	}
+	var tb struct {
+		Type  string `json:"type"`
+		Error struct{ Type, Code, Message string }
+	}
+	if err := json.Unmarshal([]byte(body), &tb); err != nil {
+		t.Fatalf("the first call's body is not the challenge JSON: %v", err)
+	}
+	if tb.Type != "error" || tb.Error.Type != "identity_required" || tb.Error.Code != "identity_required" {
+		t.Errorf("the first call's error = %s/%s/%s, want error/identity_required/identity_required", tb.Type, tb.Error.Type, tb.Error.Code)
+	}
+	if !strings.Contains(tb.Error.Message, signInURL) || !strings.Contains(tb.Error.Message, signInCode) {
+		t.Errorf("the 403 message does not show the sign-in link and code the client printed")
+	}
+	if strings.Contains(body, "device_code") || strings.Contains(body, "token_endpoint") {
+		t.Errorf("the agent's 403 body names a device_code or token_endpoint")
+	}
+	// The allowed upstream's body may span lines, so the last attempt is read from
+	// the tail of stdout (the child exits 0 only on a 200).
+	if tail := strings.TrimSpace(first.stdout.String()); !strings.HasSuffix(tail, "HTTPSTATUS:200 CONNECT:200") {
+		t.Errorf("the last call did not end with HTTP 200 over CONNECT 200")
+	}
+	ev := waitEvent(t, "a new valid event for "+smokeEmail+" after the sign-in", func() (e analytics.Event, ok bool) {
+		if evs := validEventsFor(t, allowedHost, smokeEmail); len(evs) > validBefore {
+			return evs[0], true
+		}
+		return e, false
+	})
+	if ev.UserEmail != smokeEmail || ev.UserSub == "" || ev.Decision != "allow" {
+		t.Errorf("the allowed call is attributed to %q (sub set: %v, decision %q), want %s", ev.UserEmail, ev.UserSub != "", ev.Decision, smokeEmail)
+	}
+
+	// 4. Nothing printed, logged or stored holds a token, a device code or the user code.
+	entry := readLogin(t, cid, cache)
+	surfaces := map[string]string{
+		"client stderr": first.stderr.String(),
+		"worker-1 logs": workerLogs(t),
+		"control plane events": func() string {
+			b, _ := json.Marshal(cpTraffic(t, "limit=1000"))
+			return string(b)
+		}(),
+	}
+	for name, text := range surfaces {
+		sweep(t, name, text, entry.IDToken)
+		if entry.RefreshToken != "" && strings.Contains(text, entry.RefreshToken) {
+			t.Errorf("%s contains the refresh token", name)
+		}
+		if strings.Contains(text, "device_code") {
+			t.Errorf("%s contains a device_code", name)
+		}
+	}
+	for _, name := range []string{"worker-1 logs", "control plane events"} {
+		if strings.Contains(surfaces[name], signInCode) {
+			t.Errorf("%s contains the user code", name)
+		}
+	}
+
+	// 5. After logout the next call is challenged again, in the tunnel, with a new code.
+	if res := compose.Run(".", compose.AgentTimeout, "docker", clientArgs(cid, cache, "logout")...); res.Exit != 0 {
+		t.Fatalf("identity: logout: exit %d: %s", res.Exit, firstLine(res.Stderr))
+	}
+	second := compose.Run(".", compose.AgentTimeout, "docker", clientArgs(cid, cache, execTail([]string{"--challenge-in-tunnel"},
+		"curl", "-sS", "-w", " HTTPSTATUS:%{http_code} CONNECT:%{http_connect}", "--max-time", "10", "https://"+allowedHost+"/")...)...)
+	m := inTunnelAttempt.FindStringSubmatch("attempt 1: " + strings.TrimSpace(second.Stdout))
+	if m == nil || m[2] != "403" || m[3] != "200" {
+		t.Fatalf("the call after logout read %q, want a 403 over a CONNECT 200", firstLine(second.Stdout))
+	}
+	sm := signInLine.FindStringSubmatch(second.Stderr)
+	if sm == nil {
+		t.Fatalf("the call after logout printed no sign-in line; stderr: %s", firstLine(second.Stderr))
+	}
+	if sm[2] == signInCode || sm[1] == signInURL {
+		t.Errorf("the call after logout got the old sign-in code, want a new one")
+	}
+	if !strings.Contains(m[1], sm[1]) {
+		t.Errorf("the 403 after logout does not show the new link")
+	}
+	sweep(t, "second client stderr", second.Stderr, entry.IDToken)
+}
+
 // TestChallengeSignInFlow is the whole sign-in loop on the Dex stack.
 func TestChallengeSignInFlow(t *testing.T) {
 	requireStack(t)

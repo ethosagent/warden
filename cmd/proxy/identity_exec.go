@@ -77,7 +77,7 @@ func loopbackListenAddr(addr string) error {
 func (r *identityRunner) execCmd() *cobra.Command {
 	var (
 		worker, listen, ca, signInNotify string
-		includeHTTP, challenge           bool
+		includeHTTP, challenge, inTunnel bool
 		passEnv                          []string
 	)
 	cmd := &cobra.Command{
@@ -97,7 +97,10 @@ func (r *identityRunner) execCmd() *cobra.Command {
 			"worker ask for one: a worker in identity challenge mode answers the first request with a 407 and a " +
 			"sign-in URL, which exec prints on stderr as `warden: sign in at URL (code CODE)`; exec then waits for the " +
 			"sign-in at the issuer, stores the login and sends the token on later requests. The agent sees the 407 " +
-			"without the device code. --signin-notify COMMAND also runs COMMAND (through sh -c) with the URL in " +
+			"without the device code. With --challenge-in-tunnel exec asks a TLS-terminating worker to send the challenge " +
+			"inside the tunnel instead: the CONNECT succeeds and the agent's first request gets a 403 whose " +
+			"error.message holds the link, which an agent that never reads a 407 body shows in its chat. " +
+			"--signin-notify COMMAND also runs COMMAND (through sh -c) with the URL in " +
 			"WARDEN_SIGNIN_URL and the code in WARDEN_SIGNIN_CODE, for a chat message or a desktop notification; it " +
 			"never gets a token. The exit code is the command's, or 128+N when signal N killed it. A command " +
 			"running as the same user can still read the identity cache file; use another user for the command.",
@@ -105,7 +108,8 @@ func (r *identityRunner) execCmd() *cobra.Command {
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return r.runExec(cmd, args, execOpts{worker: worker, listen: listen, ca: ca, includeHTTP: includeHTTP,
-				passEnv: passEnv, challenge: challenge || signInNotify != "", signInNotify: signInNotify})
+				passEnv: passEnv, challenge: challenge || inTunnel || signInNotify != "", inTunnel: inTunnel,
+				signInNotify: signInNotify})
 		},
 	}
 	cmd.Flags().SetInterspersed(false) // flags after COMMAND belong to the command
@@ -116,6 +120,7 @@ func (r *identityRunner) execCmd() *cobra.Command {
 	fl.StringVar(&ca, "ca", "", "CA bundle `PATH` to export as SSL_CERT_FILE, CURL_CA_BUNDLE, REQUESTS_CA_BUNDLE and NODE_EXTRA_CA_CERTS")
 	fl.BoolVar(&includeHTTP, "include-http", false, "also set HTTP_PROXY and http_proxy (the worker denies plain http)")
 	fl.BoolVar(&challenge, "challenge", false, "start without a login and sign in through the worker's 407 sign-in challenge (identity.defaultMode: challenge)")
+	fl.BoolVar(&inTunnel, "challenge-in-tunnel", false, "with --challenge, ask the worker to send the sign-in challenge inside the tunnel, so the agent's own request gets a 403 that names the link (needs a TLS-terminating worker); implies --challenge")
 	fl.StringVar(&signInNotify, "signin-notify", "", "run `COMMAND` (sh -c) when a sign-in is needed, with WARDEN_SIGNIN_URL and WARDEN_SIGNIN_CODE set; implies --challenge")
 	fl.StringArrayVar(&passEnv, "env", nil, "pass the environment variable `NAME` to the command as well (repeatable; name only, the value is read from the environment)")
 	return cmd
@@ -130,6 +135,8 @@ type execOpts struct {
 	// signInNotify is the hook command run when a sign-in is needed.
 	challenge    bool
 	signInNotify string
+	// inTunnel asks the worker for the challenge inside the tunnel (#621).
+	inTunnel bool
 }
 
 func (r *identityRunner) runExec(cmd *cobra.Command, args []string, o execOpts) error {
@@ -196,7 +203,7 @@ func (r *identityRunner) runExec(cmd *cobra.Command, args []string, o execOpts) 
 			res, err := c.Token(ctx)
 			return res.IDToken, err
 		},
-		Log: fwLog,
+		Log: fwLog, InTunnel: o.inTunnel && o.challenge,
 	}
 	fctx, stopFwd := context.WithCancel(ctx)
 	var hooks sync.WaitGroup

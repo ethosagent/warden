@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net"
@@ -18,6 +19,9 @@ import (
 type challengeWorker struct {
 	ln     net.Listener
 	issuer string
+	// tunnel answers an anonymous CONNECT that asks for the in-tunnel challenge
+	// with a 200 and the offer in X-Warden-Sign-In (#621).
+	tunnel bool
 	mu     sync.Mutex
 	heads  []string
 }
@@ -63,9 +67,15 @@ func (w *challengeWorker) serve(c net.Conn) {
 		_, _ = io.WriteString(c, "HTTP/1.1 200 Connection Established\r\n\r\n")
 		return
 	}
-	body := fmt.Sprintf(`{"error":"identity_required","reason":"none","sign_in":{"issuer":%q,"verification_uri":%q,`+
-		`"verification_uri_complete":%q,"user_code":%q,"device_code":%q,"token_endpoint":%q,"client_id":"warden-cli","interval":1,"expires_in":600}}`,
+	signIn := fmt.Sprintf(`{"issuer":%q,"verification_uri":%q,`+
+		`"verification_uri_complete":%q,"user_code":%q,"device_code":%q,"token_endpoint":%q,"client_id":"warden-cli","interval":1,"expires_in":600}`,
 		w.issuer, w.issuer+"/activate", w.issuer+"/activate?user_code="+testUserCode, testUserCode, testDeviceCode, w.issuer+"/token")
+	if w.tunnel && strings.Contains(head.String(), "X-Warden-Challenge: in-tunnel\r\n") {
+		_, _ = io.WriteString(c, "HTTP/1.1 200 Connection Established\r\nX-Warden-Sign-In: "+
+			base64.RawURLEncoding.EncodeToString([]byte(signIn))+"\r\n\r\n")
+		return
+	}
+	body := `{"error":"identity_required","reason":"none","sign_in":` + signIn + `}`
 	_, _ = fmt.Fprintf(c, "HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"warden\"\r\n"+
 		"Content-Type: application/json\r\nConnection: close\r\nContent-Length: %d\r\n\r\n%s", len(body), body)
 }
@@ -144,5 +154,53 @@ func TestIdentityExecChallengeNeedsTheFlag(t *testing.T) {
 	defer w.mu.Unlock()
 	if len(w.heads) != 0 {
 		t.Errorf("the worker was dialled %d times", len(w.heads))
+	}
+}
+
+// TestIdentityExecChallengeInTunnel: --challenge-in-tunnel (which implies
+// --challenge) makes the anonymous CONNECT ask for the in-tunnel challenge, the
+// child gets a 200 with no offer header, and the user is still told where to
+// sign in. Plain --challenge never sends the ask.
+func TestIdentityExecChallengeInTunnel(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := newIdP(t)
+	w := newChallengeWorker(t, p.srv.URL)
+	w.tunnel = true
+	r := newRig(t, p.srv.URL)
+	res := r.runExec("connect-retry", nil, "--worker", w.ln.Addr().String(), "--challenge-in-tunnel", "--", self, "-test.run=NONE")
+	if res.err != nil {
+		t.Fatalf("exec: %v\n%s", res.err, res.stderr)
+	}
+	wantURL := p.srv.URL + "/activate?user_code=" + testUserCode
+	if !strings.Contains(res.stderr, "warden: sign in at "+wantURL+" (code "+testUserCode+")") {
+		t.Errorf("stderr lacks the sign-in line:\n%s", res.stderr)
+	}
+	if strings.Contains(res.stdout, "407") || !strings.Contains(res.stdout, "STATUS HTTP/1.1 200") ||
+		strings.Contains(strings.ToLower(res.stdout), "x-warden-sign-in") || strings.Contains(res.stdout, testDeviceCode) {
+		t.Errorf("the child saw a 407, or the offer:\n%s", res.stdout)
+	}
+	w.mu.Lock()
+	first := w.heads[0]
+	w.mu.Unlock()
+	if !strings.Contains(first, "X-Warden-Challenge: in-tunnel\r\n") || strings.Contains(first, "Proxy-Authorization") {
+		t.Errorf("the first CONNECT = %q, want an anonymous one asking for in-tunnel", first)
+	}
+
+	// Plain --challenge never asks.
+	w2 := newChallengeWorker(t, p.srv.URL)
+	w2.tunnel = true
+	r2 := newRig(t, p.srv.URL)
+	if res := r2.runExec("connect-retry", nil, "--worker", w2.ln.Addr().String(), "--challenge", "--", self, "-test.run=NONE"); res.err != nil {
+		t.Fatalf("exec --challenge: %v\n%s", res.err, res.stderr)
+	}
+	w2.mu.Lock()
+	defer w2.mu.Unlock()
+	for _, h := range w2.heads {
+		if strings.Contains(h, "X-Warden-Challenge") {
+			t.Errorf("plain --challenge sent the in-tunnel ask: %q", h)
+		}
 	}
 }

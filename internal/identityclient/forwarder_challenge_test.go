@@ -27,6 +27,9 @@ import (
 type challengeWorker struct {
 	ln    net.Listener
 	offer func() string // the JSON body of the 407
+	// tunnel, when set, answers an anonymous CONNECT that asks for the
+	// in-tunnel challenge with a 200 whose X-Warden-Sign-In is tunnel().
+	tunnel func() string
 
 	mu    sync.Mutex
 	heads []string
@@ -69,6 +72,12 @@ func (w *challengeWorker) serve(c net.Conn) {
 	w.mu.Lock()
 	w.heads = append(w.heads, head.String())
 	w.mu.Unlock()
+	if !strings.Contains(head.String(), "Proxy-Authorization:") && w.tunnel != nil &&
+		strings.Contains(head.String(), "X-Warden-Challenge: in-tunnel\r\n") {
+		_, _ = io.WriteString(c, "HTTP/1.1 200 Connection Established\r\nX-Warden-Sign-In: "+w.tunnel()+"\r\n\r\n")
+		_, _ = io.Copy(c, br)
+		return
+	}
 	if !strings.Contains(head.String(), "Proxy-Authorization:") {
 		body := w.offer()
 		_, _ = fmt.Fprintf(c, "HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"warden\"\r\n"+
@@ -140,12 +149,21 @@ func (n *notifications) all() [][2]string {
 // challengeWorker whose offer is offer(rig).
 func startChallengeForwarder(t *testing.T, r *rig, offer func() string) *challengeRig {
 	t.Helper()
+	return startChallengeForwarderT(t, r, offer, nil)
+}
+
+// startChallengeForwarderT is startChallengeForwarder with a worker that serves
+// the in-tunnel challenge, its X-Warden-Sign-In value being tunnel().
+func startChallengeForwarderT(t *testing.T, r *rig, offer, tunnel func() string) *challengeRig {
+	t.Helper()
 	w := newChallengeWorker(t, offer)
+	w.tunnel = tunnel
 	cr := &challengeRig{rig: r, worker: w, notes: &notifications{}, logs: &safeBuf{}}
 	log := slog.New(slog.NewTextHandler(cr.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	cr.chal = &identityclient.Challenger{Client: r.cl, Notify: cr.notes.add, Log: log}
 	fwd := &identityclient.Forwarder{
 		WorkerAddr: w.ln.Addr().String(), ClientCredential: fwdCred, Challenge: cr.chal, Log: log,
+		InTunnel: tunnel != nil,
 		Token: func(ctx context.Context) (string, error) {
 			res, err := r.cl.Token(ctx)
 			return res.IDToken, err
@@ -215,8 +233,8 @@ func TestForwarderChallenge(t *testing.T) {
 	}
 	// The worker was dialled with no Proxy-Authorization at all.
 	heads := cr.worker.Heads()
-	if len(heads) != 1 || strings.Contains(heads[0], "Proxy-Authorization") {
-		t.Fatalf("worker heads = %q, want one CONNECT without credentials", heads)
+	if len(heads) != 1 || strings.Contains(heads[0], "Proxy-Authorization") || strings.Contains(heads[0], "X-Warden-Challenge") {
+		t.Fatalf("worker heads = %q, want one CONNECT without credentials and without the in-tunnel ask", heads)
 	}
 	// The agent's body: the contract fields, no device code anywhere.
 	if strings.Contains(string(body), deviceCode) || strings.Contains(string(body), "device_code") {
@@ -401,5 +419,152 @@ func TestForwarderRelaysOtherProxyAuth407(t *testing.T) {
 				t.Errorf("the user was told to sign in at %v", n)
 			}
 		})
+	}
+}
+
+// offerHeaderValue is the X-Warden-Sign-In value for an offer: the sign_in
+// object of offerJSON, base64url without padding.
+func offerHeaderValue(issuer, clientID, device string) string {
+	var body struct {
+		SignIn json.RawMessage `json:"sign_in"`
+	}
+	if err := json.Unmarshal([]byte(offerJSON(issuer, clientID, device)), &body); err != nil {
+		panic(err)
+	}
+	return base64.RawURLEncoding.EncodeToString(body.SignIn)
+}
+
+// TestForwarderInTunnelChallenge: an anonymous CONNECT asks for the in-tunnel
+// challenge; the worker's 200 with X-Warden-Sign-In reaches the agent WITHOUT
+// that header, the Challenger gets the offer (one notification, one poll) and
+// the tunnel is spliced.
+func TestForwarderInTunnelChallenge(t *testing.T) {
+	r := newRig(t)
+	cr := startChallengeForwarderT(t, r,
+		func() string { return offerJSON(r.idp.URL(), identityclient.DefaultClientID, deviceCode) },
+		func() string { return offerHeaderValue(r.idp.URL(), identityclient.DefaultClientID, deviceCode) })
+
+	conn, err := net.DialTimeout("tcp", cr.addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	_, _ = io.WriteString(conn, connectReq("api.example.com:443", goodAuth()))
+	br := bufio.NewReader(conn)
+	head := readHead(t, br)
+	if statusOf(head) != 200 {
+		t.Fatalf("head %q, want 200", head)
+	}
+	if strings.Contains(strings.ToLower(head), "x-warden-sign-in") || strings.Contains(head, deviceCode) {
+		t.Fatalf("the agent's head carries the offer: %q", head)
+	}
+	// The tunnel is spliced: bytes echo through it.
+	_, _ = io.WriteString(conn, "ping\n")
+	if line, err := br.ReadString('\n'); err != nil || line != "ping\n" {
+		t.Fatalf("echo = %q, %v", line, err)
+	}
+
+	heads := cr.worker.Heads()
+	if len(heads) != 1 || strings.Contains(heads[0], "Proxy-Authorization") || !strings.Contains(heads[0], "X-Warden-Challenge: in-tunnel\r\n") {
+		t.Fatalf("worker heads = %q, want one anonymous CONNECT asking for in-tunnel", heads)
+	}
+	if n := cr.notes.all(); len(n) != 1 || n[0][0] != r.idp.URL()+"/activate?user_code="+userCode || n[0][1] != userCode {
+		t.Fatalf("notifications = %v, want one with the complete URL and the code", n)
+	}
+	waitFor(t, "the login to be stored", func() bool { _, err := r.cl.Status(); return err == nil })
+
+	// With a login the CONNECT is authenticated and does not ask again.
+	head, _ = cr.connect(t)
+	if statusOf(head) != 200 {
+		t.Fatalf("CONNECT after sign-in: %q", head)
+	}
+	heads = cr.worker.Heads()
+	if len(heads) != 2 || strings.Contains(heads[1], "X-Warden-Challenge") || !strings.Contains(heads[1], "Proxy-Authorization") {
+		t.Fatalf("the signed-in CONNECT = %q, want a token and no challenge header", heads)
+	}
+	if s := contains(cr.logs.String(), deviceCode, userCode); s != "" {
+		t.Errorf("the forwarder log holds a code")
+	}
+}
+
+// TestForwarderInTunnelUntrustedOffer: an offer for another issuer or client,
+// or one that is not decodable, is removed from the head and not polled; the
+// agent still gets its 200, and the log says untrusted_offer.
+func TestForwarderInTunnelUntrustedOffer(t *testing.T) {
+	for name, val := range map[string]func(r *rig) string{
+		"issuer": func(r *rig) string {
+			return offerHeaderValue("http://evil.example.test/dex", identityclient.DefaultClientID, deviceCode)
+		},
+		"client id": func(r *rig) string { return offerHeaderValue(r.idp.URL(), "someone-elses-client", deviceCode) },
+		"no device code": func(r *rig) string {
+			return offerHeaderValue(r.idp.URL(), identityclient.DefaultClientID, "")
+		},
+		"not base64":     func(r *rig) string { return "!!!not-base64!!!" },
+		"not json":       func(r *rig) string { return base64.RawURLEncoding.EncodeToString([]byte("device_code=" + deviceCode)) },
+		"oversize value": func(r *rig) string { return strings.Repeat("A", 20<<10) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newRig(t)
+			var sleeps atomic.Int64
+			r.cl.Sleep = func(ctx context.Context, d time.Duration) error { sleeps.Add(1); return ctx.Err() }
+			cr := startChallengeForwarderT(t, r, func() string { return "" }, func() string { return val(r) })
+			head, _ := cr.connect(t)
+			if statusOf(head) != 200 || strings.Contains(strings.ToLower(head), "x-warden-sign-in") {
+				t.Fatalf("head %q, want a 200 without the offer header", head)
+			}
+			// Notify and the poll start run before the head is relayed, so there is
+			// nothing left to wait for.
+			if n := cr.notes.all(); len(n) != 0 {
+				t.Errorf("the user was told to sign in at %v", n)
+			}
+			if sleeps.Load() != 0 || r.idp.deviceCalls.Load() != 0 {
+				t.Errorf("the client polled for an untrusted offer")
+			}
+			if !strings.Contains(cr.logs.String(), "untrusted_offer") {
+				t.Errorf("the log does not say untrusted_offer: %s", cr.logs.String())
+			}
+			if s := contains(cr.logs.String(), deviceCode, "evil"); s != "" {
+				t.Errorf("the log holds offer content")
+			}
+		})
+	}
+}
+
+// TestForwarderStripsOfferHeaderWithoutChallenge: a worker that sends the offer
+// header to a forwarder with no Challenger gets it removed too.
+func TestForwarderStripsOfferHeaderWithoutChallenge(t *testing.T) {
+	r := startForwarder(t, "HTTP/1.1 200 Connection Established\r\nX-Warden-Sign-In: abc\r\n\r\n", nil)
+	_, _, head := r.send(t, connectReq("api.example.com:443", goodAuth()))
+	if statusOf(head) != 200 || strings.Contains(strings.ToLower(head), "x-warden-sign-in") {
+		t.Fatalf("head %q", head)
+	}
+}
+
+// TestInTunnelNamesMatchWorker pins the three in-tunnel names to the worker's
+// constants in internal/proxy/challenge.go.
+func TestInTunnelNamesMatchWorker(t *testing.T) {
+	src, err := os.ReadFile("../proxy/challenge.go")
+	if err != nil {
+		t.Fatalf("read the worker source: %v", err)
+	}
+	for name, want := range map[string]string{
+		"ChallengeHeader":   identityclient.TestChallengeAskHeader,
+		"ChallengeInTunnel": identityclient.TestChallengeAskValue,
+		"SignInHeader":      identityclient.TestSignInHeader,
+	} {
+		if !strings.Contains(string(src), name+` = "`+want+`"`) {
+			t.Errorf("the worker's %s is not %q", name, want)
+		}
+	}
+}
+
+// TestForwarderStripsOfferHeaderOnAnyStatus: a worker that puts the offer header
+// on a non-200 head does not get it to the agent either.
+func TestForwarderStripsOfferHeaderOnAnyStatus(t *testing.T) {
+	r := startForwarder(t, "HTTP/1.1 403 Forbidden\r\nX-Warden-Sign-In: abc\r\n\r\n", nil)
+	_, _, head := r.send(t, connectReq("api.example.com:443", goodAuth()))
+	if statusOf(head) != 403 || strings.Contains(strings.ToLower(head), "x-warden-sign-in") {
+		t.Fatalf("head %q", head)
 	}
 }

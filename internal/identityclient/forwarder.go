@@ -107,6 +107,15 @@ type Forwarder struct {
 	// device code. When nil, no login means 503 login_required and nothing is
 	// dialled, as before.
 	Challenge *Challenger
+	// InTunnel, with Challenge set, asks the worker to put the sign-in challenge
+	// inside the tunnel (#621) instead of refusing the CONNECT with a 407: the
+	// anonymous CONNECT carries X-Warden-Challenge: in-tunnel, and a worker that
+	// terminates TLS answers 200 with the offer in X-Warden-Sign-In (removed here
+	// before the agent sees the head); the agent's first request then gets a 403
+	// that names the link. A worker that cannot (no CA, an older build) still
+	// sends the 407, which is handled as before. Without InTunnel the CONNECT is
+	// byte for byte what it was.
+	InTunnel bool
 
 	// preambleTimeout overrides connectPreambleTimeout in tests.
 	preambleTimeout time.Duration
@@ -332,6 +341,11 @@ func (f *Forwarder) handle(ctx context.Context, conn net.Conn) {
 	if !anonymous {
 		authLine = "Proxy-Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte(workerUser+":"+token)) + "\r\n"
 	}
+	// An anonymous CONNECT asks the worker to put the challenge inside the tunnel
+	// (#621): the worker's 200 then carries the offer, which is removed below.
+	if anonymous && f.InTunnel {
+		authLine = challengeAskHeader + ": " + challengeAskValue + "\r\n"
+	}
 	if _, err := fmt.Fprintf(wc, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n%s\r\n", target, target, authLine); err != nil {
 		rejectAndClose(conn, br, "502 Bad Gateway", "Content-Type: text/plain\r\n", "warden forwarder: worker_unreachable\n")
 		return
@@ -346,6 +360,14 @@ func (f *Forwarder) handle(ctx context.Context, conn net.Conn) {
 	if status == 407 && f.Challenge != nil {
 		f.relayChallenge(ctx, conn, br, wc, wbr, head, fp)
 		return
+	}
+	// The offer header never reaches the agent, whoever sent it and on whatever
+	// status; it is only acted on for the 200 of an in-tunnel challenge.
+	var offer string
+	offer, head = stripHeader(head, signInHeader)
+	if status == 200 && anonymous && f.InTunnel && f.Challenge != nil && offer != "" {
+		f.Challenge.HandleOffer(ctx, offer)
+		f.log().Info("identity forwarder: in-tunnel sign-in challenge", "token_fp", fp)
 	}
 	if _, err := io.WriteString(conn, head); err != nil {
 		return
