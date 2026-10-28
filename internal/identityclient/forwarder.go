@@ -361,14 +361,13 @@ func (f *Forwarder) handle(ctx context.Context, conn net.Conn) {
 		f.relayChallenge(ctx, conn, br, wc, wbr, head, fp)
 		return
 	}
-	if status == 200 {
-		// The offer header never reaches the agent, whoever sent it.
-		var offer string
-		offer, head = stripHeader(head, signInHeader)
-		if anonymous && f.InTunnel && f.Challenge != nil && offer != "" {
-			f.Challenge.HandleOffer(ctx, offer)
-			f.log().Info("identity forwarder: in-tunnel sign-in challenge", "token_fp", fp)
-		}
+	// The offer header never reaches the agent, whoever sent it and on whatever
+	// status; it is only acted on for the 200 of an in-tunnel challenge.
+	var offer string
+	offer, head = stripHeader(head, signInHeader)
+	if status == 200 && anonymous && f.InTunnel && f.Challenge != nil && offer != "" {
+		f.Challenge.HandleOffer(ctx, offer)
+		f.log().Info("identity forwarder: in-tunnel sign-in challenge", "token_fp", fp)
 	}
 	if _, err := io.WriteString(conn, head); err != nil {
 		return

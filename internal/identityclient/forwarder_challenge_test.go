@@ -513,7 +513,8 @@ func TestForwarderInTunnelUntrustedOffer(t *testing.T) {
 			if statusOf(head) != 200 || strings.Contains(strings.ToLower(head), "x-warden-sign-in") {
 				t.Fatalf("head %q, want a 200 without the offer header", head)
 			}
-			time.Sleep(50 * time.Millisecond)
+			// Notify and the poll start run before the head is relayed, so there is
+			// nothing left to wait for.
 			if n := cr.notes.all(); len(n) != 0 {
 				t.Errorf("the user was told to sign in at %v", n)
 			}
@@ -555,5 +556,15 @@ func TestInTunnelNamesMatchWorker(t *testing.T) {
 		if !strings.Contains(string(src), name+` = "`+want+`"`) {
 			t.Errorf("the worker's %s is not %q", name, want)
 		}
+	}
+}
+
+// TestForwarderStripsOfferHeaderOnAnyStatus: a worker that puts the offer header
+// on a non-200 head does not get it to the agent either.
+func TestForwarderStripsOfferHeaderOnAnyStatus(t *testing.T) {
+	r := startForwarder(t, "HTTP/1.1 403 Forbidden\r\nX-Warden-Sign-In: abc\r\n\r\n", nil)
+	_, _, head := r.send(t, connectReq("api.example.com:443", goodAuth()))
+	if statusOf(head) != 403 || strings.Contains(strings.ToLower(head), "x-warden-sign-in") {
+		t.Fatalf("head %q", head)
 	}
 }
