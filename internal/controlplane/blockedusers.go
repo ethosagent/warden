@@ -107,6 +107,9 @@ type BlockStore struct {
 	// swapped whole, so no request runs a query. It is nil until the first load
 	// succeeds; a failed refresh keeps the previous one.
 	snap atomic.Pointer[blockSnapshot]
+	// refreshMu serializes read-build-swap, so refreshes apply in the order they
+	// read the database and an older read cannot replace a newer snapshot.
+	refreshMu sync.Mutex
 	// revoker ends a blocked principal's console sessions; nil when the console
 	// has no sessions.
 	revoker atomic.Pointer[sessionRevokerBox]
@@ -184,6 +187,8 @@ func (b *BlockStore) IsBlocked(sub, email string) bool {
 // entries that were not in the previous one. On a failure it keeps the
 // previous snapshot and logs (the error text carries no entry value).
 func (b *BlockStore) refreshSnapshot(ctx context.Context) []config.BlockedUser {
+	b.refreshMu.Lock()
+	defer b.refreshMu.Unlock()
 	list, err := b.Wire(ctx)
 	if err != nil {
 		b.logger.Error("blocklist: snapshot refresh failed; keeping the previous block list", "error", err)
