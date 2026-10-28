@@ -1,9 +1,12 @@
 package alertpipeline
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 
 	"github.com/ethosagent/warden/internal/analytics"
+	"github.com/ethosagent/warden/internal/denyreason"
 	"github.com/ethosagent/warden/internal/integration"
 )
 
@@ -20,13 +23,18 @@ import (
 // Evidence here carry ONLY bounded enum fields — Domain, Tool, Decision, Reason,
 // Method. They NEVER include e.URL (may carry query params), request/response
 // bodies, or e.JudgeReason (free-text). This preserves Warden's egress-hygiene
-// invariant; do not add free-text or value-bearing fields here.
+// invariant; do not add free-text or value-bearing fields here. The one
+// identity exception is user_blocked, which carries the opaque UserSub (never
+// the email) on Subject.User and only a hash of it in Summary and DedupKey.
 
 // reasonSeverity escalates the most dangerous bounded MCP/scan reasons to
 // SevHigh; every other reason stays SevMedium. It is a tiny, bounded escalation
 // map (substring match on the bounded reason enum), NOT a general classifier.
 func reasonSeverity(reason string) integration.Severity {
 	r := strings.ToLower(reason)
+	if r == string(denyreason.UserBlocked) {
+		return integration.SevHigh
+	}
 	if strings.Contains(r, "poison") || strings.Contains(r, "exfil") {
 		return integration.SevHigh
 	}
@@ -47,6 +55,28 @@ func bridgeEvent(proxyID string, e analytics.Event) (integration.Finding, bool) 
 	// "block" is accepted too for compatibility with external event producers.
 	denied := strings.EqualFold(e.Decision, "deny") || strings.EqualFold(e.Decision, "block")
 	switch {
+	case e.Reason == string(denyreason.UserBlocked):
+		// One Finding per blocked user across every domain: Domain is left empty
+		// and the key hashes the sub, so the alert names a stable pseudonym, not
+		// an email. With no sub the finding still alerts on one fleet-wide key.
+		key := "user_blocked:unknown"
+		summary := "user blocked: unknown denied"
+		if e.UserSub != "" {
+			h := sha256.Sum256([]byte(e.UserSub))
+			full := hex.EncodeToString(h[:])
+			key = "user_blocked:" + full[:16]
+			summary = "user blocked: " + full[:8] + " denied"
+		}
+		return integration.Finding{
+			RuleID:   e.Reason,
+			Category: "security",
+			Severity: reasonSeverity(e.Reason),
+			Subject:  integration.Subject{Worker: proxyID, User: e.UserSub},
+			Summary:  summary,
+			Evidence: integration.Evidence("reason=" + e.Reason),
+			DedupKey: key,
+			Ts:       e.Timestamp,
+		}, true
 	case e.Reason != "":
 		// A bounded MCP/scan reason (e.g. "mcp_poisoning", "dlp_credit_card"). The
 		// reason enum IS the rule id — checked BEFORE the deny branch so
