@@ -24,7 +24,8 @@ entries are evaluated and every regression lists the users it affects (email,
 else sub; never tokens or group lists). Events without a valid recorded identity
 replay as anonymous and are counted separately. The recorded groups are a
 point-in-time snapshot: they are what the token carried then, not the user's
-current IdP membership. --user limits the replay to one user (sub or email).`,
+current IdP membership, and a recorded email replays as verified (the
+event does not record email_verified). --user limits the replay to one user (sub or email).`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			candidatePath, _ := cmd.Flags().GetString("candidate")
 			sinceStr, _ := cmd.Flags().GetString("since")

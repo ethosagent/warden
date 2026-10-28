@@ -99,3 +99,16 @@ func TestEvaluate_ScopedWithConstraints(t *testing.T) {
 		t.Fatalf("NewDenies = %+v, want GET (bob) and POST (alice)", r.NewDenies)
 	}
 }
+
+func TestEvaluate_ScopedWithPaths(t *testing.T) {
+	pol := config.Policy{Allowlist: []config.AllowlistEntry{{
+		Domain: "api.github.com", Groups: []string{"eng"}, Paths: []string{"/repos/*"},
+	}}}
+	in := userEvent("u-a", "a@corp.example", "valid", "allow", "eng") // /repos/x: inside
+	out := userEvent("u-a", "a@corp.example", "valid", "allow", "eng")
+	out.URL = "https://api.github.com/admin/x"
+	r := Evaluate([]analytics.Event{in, out}, pol)
+	if r.Agreed != 1 || len(r.NewDenies) != 1 || r.NewDenies[0].AffectedUsersTotal != 1 {
+		t.Fatalf("result = %+v, want the out-of-path request denied for a member", r)
+	}
+}
