@@ -73,6 +73,10 @@ var All = slices.Concat(
 		{Name: "breakglass_login", Opts: breakGlassOpts(), Run: breakGlassLogin},
 		{Name: "breakglass_rate_limit", Opts: breakGlassOpts(), Run: breakGlassRateLimit},
 		{Name: "breakglass_disabled", Opts: adminAuditOIDCOpts(), Run: breakGlassDisabled},
+		// Degraded mode (W-P1-OPS1-09): with the issuer down at start the control
+		// plane still serves workers, sign-in is 503 idp_unavailable and the
+		// break-glass login works, loudly, with no integration configured.
+		{Name: "breakglass_idp_down", Opts: append(breakGlassOpts(), harness.WithOIDCIssuerDown()), Run: breakGlassIdPDown},
 
 		// Versioned policy store (W-P1-PVER-01): the first start imports the YAML
 		// as version 1; a head written out of process reaches workers. In-process

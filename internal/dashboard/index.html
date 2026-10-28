@@ -77,6 +77,8 @@
   html[data-role="viewer"] [data-min-role="editor"],
   html[data-role="viewer"] [data-min-role="admin"],
   html[data-role="editor"] [data-min-role="admin"] { display:none !important; }
+  .bg-banner { position:sticky; top:0; z-index:1000; padding:8px 16px; text-align:center; font-size:13px; font-weight:600;
+               background:var(--red); color:#fff; }
   .whoami { display:flex; align-items:center; gap:8px; font-size:12.5px; color:var(--muted); }
   .whoami .who { color:var(--text); max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .whoami .role { font-size:11px; font-weight:600; letter-spacing:.4px; text-transform:uppercase; padding:2px 8px;
@@ -427,6 +429,7 @@
 </style>
 </head>
 <body>
+<div class="bg-banner" id="breakglass-banner" role="alert" style="display:none"></div>
 <div class="app">
   <!-- ================= TOPBAR ================= -->
   <header class="topbar">
@@ -1410,7 +1413,7 @@ function authInit(){
     catch(e){ authMode='unknown'; return; }
     if(r.ok){
       try{ me=await r.json(); }catch(e){ me=null; }
-      if(me&&me.csrf){ authMode='oidc'; csrfToken=me.csrf; applyRole(me); } else { authMode='unknown'; }
+      if(me&&me.csrf){ authMode='oidc'; csrfToken=me.csrf; applyRole(me); applyBreakGlassBanner(me); } else { authMode='unknown'; }
       return;
     }
     if(r.status===404){ authMode='none'; return; }
@@ -1473,6 +1476,16 @@ function applyRole(m){
   document.getElementById('whoamiEmail').textContent=(m&&(m.email||m.sub))||'';
   document.getElementById('whoamiRole').textContent=role;
   box.style.display='';
+}
+/* Break-glass banner: shown for the whole life of an emergency (local password) session. The
+   time goes in through textContent, never markup. */
+function applyBreakGlassBanner(m){
+  const el=document.getElementById('breakglass-banner');
+  if(!el) return;
+  if(!m||m.authMethod!=='breakglass'){ el.style.display='none'; return; }
+  const d=new Date(m.expiresAt);
+  el.textContent='Break-glass session, expires at '+(isNaN(d.getTime())?String(m.expiresAt||''):d.toLocaleString());
+  el.style.display='';
 }
 /* roleAllows(min): false only when /auth/me named a role below min. In none mode, or when
    /auth/me failed, there is no role to compare and the server decides. */

@@ -108,3 +108,16 @@ func matchAny(clauses []MatchClause, a Alert) bool {
 func expandEnv(s string) string {
 	return os.Expand(s, os.Getenv)
 }
+
+// RoutesFinding reports whether any clause in match accepts the Alert the
+// AlertManager would derive from f: the same matcher the Router uses, so a
+// startup check can tell an operator that no configured integration would be
+// told about a Finding. An empty match routes nothing.
+func RoutesFinding(match []MatchClause, f Finding) bool {
+	return matchAny(match, Alert{
+		DedupKey: f.DedupKey,
+		Category: f.Category,
+		Severity: f.Severity,
+		Subject:  f.Subject,
+	})
+}
