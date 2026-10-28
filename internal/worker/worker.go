@@ -766,6 +766,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// block and this agent's mode. Construction does no network I/O, so a worker
 	// whose issuer is down still starts. Mode stays off unless configured.
 	idWiring := newIdentityWiring(pxy, agentID, logger)
+	idWiring.scoped = func() int { return countScoped(evaluator.CurrentPolicy()) }
 	idWiring.apply(pol.Identity, pol.Agents)
 
 	// liveMCPGW tracks the gateway currently swapped into the proxy so shutdown

@@ -256,12 +256,21 @@ func (r *RemoteProvider) clearErr() {
 // fields plus the optional behavioral settings document. Decoding into a
 // separate envelope keeps Policy free of a wire-only field while letting both be
 // parsed in one pass.
+//
+// ScopedAllowlist / ScopedAllowPos (W-P1-GPOL-06) carry the identity-scoped
+// allow entries the control plane moves out of "allowlist" so a worker that does
+// not know them cannot read a scoped entry as a global one; parseRemotePolicy
+// merges them back.
 type remoteWire struct {
 	Policy
 	// BlockedUsers is decoded here, not through Policy (whose field is
 	// json:"-" for rule X2), then copied onto the policy in parseRemotePolicy.
-	BlockedUsers []BlockedUser `json:"blockedUsers,omitempty"`
-	Settings     *SettingsWire `json:"settings,omitempty"`
+	BlockedUsers    []BlockedUser    `json:"blockedUsers,omitempty"`
+	Settings        *SettingsWire    `json:"settings,omitempty"`
+	ScopedAllowlist []AllowlistEntry `json:"scopedAllowlist,omitempty"`
+	// ScopedAllowPos[i] is the index ScopedAllowlist[i] had in the full
+	// allowlist, strictly ascending. Absent: the entries are appended.
+	ScopedAllowPos []int `json:"scopedAllowPos,omitempty"`
 }
 
 // parseRemotePolicy decodes a control-plane policy response, applies the same
@@ -289,10 +298,131 @@ func parseRemotePolicy(body []byte) (*Policy, *SettingsWire, error) {
 		p.Denylist[i].Domain = strings.ToLower(p.Denylist[i].Domain)
 	}
 	p.BlockedUsers = normalizeBlockedUsers(w.BlockedUsers)
-	if err := validate(p); err != nil {
+	// The wire carries scoped entries only in scopedAllowlist: a plain entry
+	// with principals is what an older worker would read as global, so it is
+	// refused here even though validate (W-P1-GPOL-10) now accepts principals.
+	for i, e := range p.Allowlist {
+		if len(e.Groups) > 0 || len(e.Users) > 0 {
+			return nil, nil, fmt.Errorf("config: remote: policy.allowlist[%d]: groups/users belong in scopedAllowlist", i)
+		}
+	}
+	// validate sees the merged list with principals stripped; the real
+	// principals are validated by mergeScopedAllow.
+	merged, scoped, err := mergeScopedAllow(p.Allowlist, w.ScopedAllowlist, w.ScopedAllowPos)
+	if err != nil {
+		return nil, nil, err
+	}
+	checked := p
+	checked.Allowlist = make([]AllowlistEntry, len(merged))
+	for i, e := range merged {
+		if scoped[i] {
+			e.Groups, e.Users = nil, nil
+		}
+		checked.Allowlist[i] = e
+	}
+	if err := validate(checked); err != nil {
+		return nil, nil, err
+	}
+	p.Allowlist = merged
+	if err := restoreScopedConditions(w.Settings); err != nil {
 		return nil, nil, err
 	}
 	return &p, w.Settings, nil
+}
+
+// mergeScopedAllow re-inserts the scoped allow entries into the plain list at
+// their original positions (appended when the control plane sent none) and
+// returns the merged list plus which entries came from the scoped list. Every
+// scoped entry must carry groups or users, which are normalized here; a
+// malformed position list fails the pull so the worker keeps its last good
+// policy.
+func mergeScopedAllow(plain, scopedIn []AllowlistEntry, pos []int) ([]AllowlistEntry, []bool, error) {
+	n := len(plain) + len(scopedIn)
+	if len(scopedIn) == 0 {
+		if len(pos) != 0 {
+			return nil, nil, fmt.Errorf("config: remote: scopedAllowPos without scopedAllowlist")
+		}
+		return plain, make([]bool, n), nil
+	}
+	if len(pos) == 0 {
+		for i := range scopedIn {
+			pos = append(pos, len(plain)+i)
+		}
+	}
+	if len(pos) != len(scopedIn) {
+		return nil, nil, fmt.Errorf("config: remote: scopedAllowPos has %d values for %d scoped entries", len(pos), len(scopedIn))
+	}
+	for i, v := range pos {
+		if v < 0 || v >= n || (i > 0 && v <= pos[i-1]) {
+			return nil, nil, fmt.Errorf("config: remote: scopedAllowPos[%d]=%d out of range or not ascending", i, v)
+		}
+	}
+	merged := make([]AllowlistEntry, 0, n)
+	scoped := make([]bool, 0, n)
+	next := 0 // next scoped entry to place
+	for i := 0; i < n; i++ {
+		if next < len(scopedIn) && pos[next] == i {
+			e := scopedIn[next]
+			path := fmt.Sprintf("policy.scopedAllowlist[%d]", next)
+			if len(e.Groups) == 0 && len(e.Users) == 0 {
+				return nil, nil, fmt.Errorf("config: remote: %s has no groups or users", path)
+			}
+			var err error
+			if e.Groups, e.Users, err = normalizePrincipals(path, e.Groups, e.Users); err != nil {
+				return nil, nil, err
+			}
+			e.Domain = strings.ToLower(e.Domain)
+			merged = append(merged, e)
+			scoped = append(scoped, true)
+			next++
+			continue
+		}
+		merged = append(merged, plain[len(merged)-next])
+		scoped = append(scoped, false)
+	}
+	return merged, scoped, nil
+}
+
+// restoreScopedConditions merges each AllowWhenScoped back into AllowWhen. A
+// sentinel AllowWhen without a scoped condition (or the reverse) fails the
+// pull: the worker keeps its last good policy rather than run a tool whose
+// real condition it cannot see.
+func restoreScopedConditions(s *SettingsWire) error {
+	if s == nil || s.MCP == nil || s.MCP.Tools == nil {
+		return nil
+	}
+	for tool, tc := range s.MCP.Tools.Constraints {
+		sentinel := tc.AllowWhen != nil && tc.AllowWhen.AgentID == ReservedScopedAgentID
+		switch {
+		case sentinel && tc.AllowWhenScoped == nil:
+			return fmt.Errorf("config: remote: mcp tool %q allowWhen is identity-scoped but carries no scoped condition", tool)
+		case !sentinel && tc.AllowWhenScoped != nil:
+			return fmt.Errorf("config: remote: mcp tool %q has a scoped condition without the identity-scoped marker", tool)
+		case !sentinel:
+			continue
+		}
+		path := fmt.Sprintf("mcp.tools.constraints[%q].allowWhen", tool)
+		sc := tc.AllowWhenScoped
+		if sc.AgentID == ReservedScopedAgentID {
+			return fmt.Errorf("config: remote: %s.agentId %q is reserved", path, sc.AgentID)
+		}
+		if len(sc.Groups) == 0 && len(sc.Users) == 0 {
+			return fmt.Errorf("config: remote: %s: scoped condition has no groups or users", path)
+		}
+		if sc.TimeWindow != "" {
+			if err := validateTimeWindow(path, sc.TimeWindow); err != nil {
+				return err
+			}
+		}
+		g, u, err := normalizePrincipals(path, sc.Groups, sc.Users)
+		if err != nil {
+			return err
+		}
+		sc.Groups, sc.Users = g, u
+		tc.AllowWhen, tc.AllowWhenScoped = sc, nil
+		s.MCP.Tools.Constraints[tool] = tc
+	}
+	return nil
 }
 
 // GetPolicy returns the last known good policy. If no successful pull has

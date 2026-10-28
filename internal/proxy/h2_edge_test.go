@@ -169,7 +169,7 @@ func TestH2_ExtendedConnectRefused(t *testing.T) {
 	r.Host = parityHost
 	r.Header.Set(":protocol", "websocket")
 	w := httptest.NewRecorder()
-	p.serveGRPCStream(w, r, &http2.Transport{}, parityHost, 443, false, connIdentity{}) //nolint:staticcheck // SA1019: same transport type the production path uses
+	p.serveGRPCStream(w, r, &http2.Transport{}, parityHost, 443, deferNone, connIdentity{}) //nolint:staticcheck // SA1019: same transport type the production path uses
 
 	if w.Code != http.StatusNotImplemented {
 		t.Fatalf("status = %d, want 501", w.Code)

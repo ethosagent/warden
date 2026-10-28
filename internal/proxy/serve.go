@@ -14,6 +14,7 @@ import (
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/denyreason"
+	"github.com/ethosagent/warden/internal/identity"
 	"github.com/ethosagent/warden/internal/policy"
 )
 
@@ -292,31 +293,25 @@ func (p *Proxy) handleConn(conn net.Conn) {
 	// Destination-only evaluation (#371): no method/path exists yet at CONNECT,
 	// so constraints could-match here and the rate limit is peeked, not
 	// consumed. The per-request check on the terminated tunnel is authoritative
-	// and counts each request exactly once.
-	verdict := p.cfg.Policy.EvaluateRequest(domain, port, policy.SchemeHTTPS, "", "")
-	// Tri-state gate:
-	//   Allow   -> proceed.
-	//   Deny    -> 403 (denylist hit, or an allowlisted destination rejected by
-	//              a constraint / rate-limit / time-window guard). The verdict
-	//              names WHY (#409): policy_denylist, rate_limited, time_window.
-	//   NoMatch -> if the judge is enabled, let CONNECT proceed to TLS
-	//              termination so the judge can inspect the full request;
-	//              otherwise default-deny exactly as before (403) as
-	//              policy_no_match.
-	judgeEnabled := p.judge() != nil
-	if verdict.Decision == policy.Deny || (verdict.Decision == policy.NoMatch && !judgeEnabled) {
-		// A NoMatch default-deny is named here, at the gate: policy itself does
-		// not consider NoMatch a deny (it is judge-eligible).
-		reason := verdict.Reason
-		if verdict.Decision == policy.NoMatch {
-			reason = denyreason.PolicyNoMatch
-		}
+	// and counts each request exactly once. The subject is the connection's
+	// verified identity (nil unless the token was valid), so a scoped entry can
+	// admit a member here; everything it leaves open is deferred (see admit).
+	g := p.admit(policy.RequestContext{
+		Domain:  domain,
+		Port:    port,
+		Scheme:  policy.SchemeHTTPS,
+		Subject: p.connSubject(ci),
+	})
+	if g.deny {
+		// Deny (denylist hit, or an allowlisted destination rejected by a
+		// constraint / rate-limit / time-window guard) names its reason (#409);
+		// a NoMatch with no judge is the policy_no_match default-deny.
 		p.emitDenyEvent(ci, analytics.Event{
 			Timestamp: time.Now(),
 			Domain:    domain,
 			Port:      port,
 			Protocol:  "tcp",
-			Reason:    string(reason),
+			Reason:    string(g.reason),
 		})
 		_, _ = fmt.Fprint(conn, "HTTP/1.1 403 Forbidden\r\n\r\n")
 		return
@@ -324,27 +319,59 @@ func (p *Proxy) handleConn(conn net.Conn) {
 
 	if p.caCert != nil {
 		_, _ = fmt.Fprint(conn, "HTTP/1.1 200 Connection Established\r\n\r\n")
-		p.handleTLS(conn, br, domain, port, verdict.Decision == policy.NoMatch, ci)
+		p.handleTLS(conn, br, domain, port, g.defers, ci)
 		return
 	}
 
-	// No TLS termination: the judge cannot inspect an opaque tunnel, so a
-	// NoMatch request must fail closed here — only statically Allowed
-	// destinations may be raw-tunneled.
-	if verdict.Decision == policy.NoMatch {
-		p.emitDenyEvent(ci, analytics.Event{
-			Timestamp: time.Now(),
-			Domain:    domain,
-			Port:      port,
-			Protocol:  "tcp",
-			Reason:    string(denyreason.PolicyNoMatch),
-		})
-		_, _ = fmt.Fprint(conn, "HTTP/1.1 403 Forbidden\r\n\r\n")
+	// No TLS termination: neither the judge nor a per-request subject check can
+	// inspect an opaque tunnel, so a deferred request must fail closed here —
+	// only statically Allowed destinations may be raw-tunneled, with one
+	// exception: a scoped Allow for a verified member, tunneled only until the
+	// token expires.
+	var tunnelUntil time.Time
+	switch g.defers {
+	case deferNone:
+	case deferIdentity:
+		if g.verdict.Decision != policy.Allow || ci.Expiry.IsZero() {
+			p.denyConnect(conn, ci, domain, port, denyreason.IdentityRequired)
+			return
+		}
+		d := ci.Expiry.Sub(p.clock())
+		if d <= 0 {
+			p.denyConnect(conn, ci, domain, port, denyreason.IdentityRequired)
+			return
+		}
+		tunnelUntil = time.Now().Add(d)
+	default:
+		p.denyConnect(conn, ci, domain, port, denyreason.PolicyNoMatch)
 		return
 	}
 
 	_, _ = fmt.Fprint(conn, "HTTP/1.1 200 Connection Established\r\n\r\n")
-	p.tunnel(conn, br, domain, port, ci)
+	p.tunnel(conn, br, domain, port, ci, tunnelUntil)
+}
+
+// connSubject is the policy subject of the connection's verified identity: nil
+// unless the CONNECT token verified (status valid), so a missing, invalid,
+// expired or unverified token never counts as a member.
+func (p *Proxy) connSubject(ci connIdentity) *identity.Subject {
+	s := identity.SubjectFrom(ci.Claims, ci.status())
+	if s != nil {
+		s.AgentID = p.cfg.AgentID
+	}
+	return s
+}
+
+// denyConnect refuses a CONNECT with a 403 and one deny event.
+func (p *Proxy) denyConnect(conn net.Conn, ci connIdentity, domain string, port int, reason denyreason.Reason) {
+	p.emitDenyEvent(ci, analytics.Event{
+		Timestamp: time.Now(),
+		Domain:    domain,
+		Port:      port,
+		Protocol:  "tcp",
+		Reason:    string(reason),
+	})
+	_, _ = fmt.Fprint(conn, "HTTP/1.1 403 Forbidden\r\n\r\n")
 }
 
 // isHeaderLine reports whether the raw header line starts with "<name>:",
@@ -431,7 +458,7 @@ func (p *Proxy) storeAllow(ci connIdentity, domain string, port int, protocol st
 //
 // The connection's identity is accepted but unused here: a raw tunnel is opaque
 // and records no per-request identity (stamping events is W-P1-VRFY-09).
-func (p *Proxy) tunnel(client net.Conn, br *bufio.Reader, domain string, port int, ci connIdentity) {
+func (p *Proxy) tunnel(client net.Conn, br *bufio.Reader, domain string, port int, ci connIdentity, until time.Time) {
 	p.reach(PathTunnel)
 	remote, err := p.dialFunc("tcp", net.JoinHostPort(domain, fmt.Sprintf("%d", port)))
 	if err != nil {
@@ -441,6 +468,18 @@ func (p *Proxy) tunnel(client net.Conn, br *bufio.Reader, domain string, port in
 		return
 	}
 	p.storeAllow(ci, domain, port, "tcp")
+
+	// A tunnel admitted through a scoped entry cannot be re-checked per request,
+	// so it lives only as long as the token: both ends are cut at until. A
+	// policy swap does not cut it (documented limitation).
+	if !until.IsZero() {
+		_ = client.SetDeadline(until)
+		t := time.AfterFunc(time.Until(until), func() {
+			_ = client.Close()
+			_ = remote.Close()
+		})
+		defer t.Stop()
+	}
 
 	var wg sync.WaitGroup
 	wg.Add(2)

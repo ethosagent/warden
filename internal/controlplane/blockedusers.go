@@ -46,6 +46,9 @@ const blockedUsersOverlayName = "blocked_users"
 // block-list load.
 const blockLoadFailedMsg = "blocklist_load_failed"
 
+// blockMigrationID is the cpstate migration that creates blocked_users.
+const blockMigrationID = "blocklist/0001"
+
 const blockMigration0001 = `
 CREATE TABLE blocked_users (
     id         TEXT PRIMARY KEY,
@@ -63,7 +66,7 @@ CREATE UNIQUE INDEX idx_blocked_users_email ON blocked_users (email);
 // BlockMigrations returns the cpstate migrations the block list needs, for a
 // caller that opens the state DB itself. StateMigrations includes them.
 func BlockMigrations() []cpstate.Migration {
-	return []cpstate.Migration{{ID: "blocklist/0001", SQL: blockMigration0001}}
+	return []cpstate.Migration{{ID: blockMigrationID, SQL: blockMigration0001}}
 }
 
 // BlockEntry is one stored block-list entry. Sub and Email are stored trimmed
@@ -85,6 +88,8 @@ type BlockStoreOptions struct {
 	// OnChange callbacks. The control plane sets it to the policy server's
 	// Refresh so held long-polls wake at once. Nil for the offline CLI.
 	OnRefresh func()
+	// Logger receives Watch's errors; nil means slog.Default.
+	Logger *slog.Logger
 }
 
 // BlockStore reads and writes the block list on the control-plane state DB. It
@@ -93,6 +98,7 @@ type BlockStore struct {
 	db        *cpstate.DB
 	clock     clock.Clock
 	onRefresh func()
+	logger    *slog.Logger
 
 	mu        sync.Mutex
 	callbacks []func()
@@ -105,11 +111,71 @@ func NewBlockStore(db *cpstate.DB, opts BlockStoreOptions) *BlockStore {
 	if clk == nil {
 		clk = clock.Real()
 	}
-	return &BlockStore{db: db, clock: clk, onRefresh: opts.OnRefresh}
+	lg := opts.Logger
+	if lg == nil {
+		lg = slog.Default()
+	}
+	return &BlockStore{db: db, clock: clk, onRefresh: opts.OnRefresh, logger: lg}
 }
 
-// OnChange registers fn to run after every successful in-process mutation, after
-// the policy refresh. A mutation made by another process does not run it.
+// BlockWatchInterval is how often the control plane polls for a block-list
+// write by another process (the offline CLI).
+const BlockWatchInterval = 2 * time.Second
+
+// Watch polls PRAGMA data_version every interval until ctx is done. The pragma
+// changes only when another connection (in practice another process: cpstate
+// holds one connection per handle) commits to the database, so it catches the
+// offline CLI's writes without a table scan. On a change it runs the policy
+// refresh and the OnChange callbacks, as an in-process mutation does. It also
+// runs them once at start, so a write between the control plane's first load
+// and the first poll is not missed. A poll error is logged once per episode
+// and the previous state is kept.
+func (b *BlockStore) Watch(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = BlockWatchInterval
+	}
+	last, err := b.dataVersion(ctx)
+	failing := err != nil
+	if failing {
+		b.logger.Warn("blocklist watch: data_version unreadable; keeping the previous block list", "error", err)
+	}
+	b.changed()
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		v, err := b.dataVersion(ctx)
+		if err != nil {
+			if ctx.Err() == nil && !failing {
+				b.logger.Warn("blocklist watch: data_version unreadable; keeping the previous block list", "error", err)
+			}
+			failing = true
+			continue
+		}
+		failing = false
+		if v != last {
+			last = v
+			b.changed()
+		}
+	}
+}
+
+// dataVersion reads PRAGMA data_version on the store's connection.
+func (b *BlockStore) dataVersion(ctx context.Context) (int64, error) {
+	var v int64
+	if err := b.db.SQL().QueryRowContext(ctx, "PRAGMA data_version").Scan(&v); err != nil {
+		return 0, fmt.Errorf("blocklist: data_version: %w", err)
+	}
+	return v, nil
+}
+
+// OnChange registers fn to run after every successful in-process mutation and
+// after Watch sees another process write, in both cases after the policy refresh.
+// fn may run concurrently with itself, so it must be safe for that.
 func (b *BlockStore) OnChange(fn func()) {
 	if fn == nil {
 		return
@@ -415,7 +481,7 @@ func (s *Server) initBlockStore() {
 	if s.cfg.State == nil {
 		return
 	}
-	s.blocks = NewBlockStore(s.cfg.State, BlockStoreOptions{Clock: s.cfg.Clock, OnRefresh: s.policy.Refresh})
+	s.blocks = NewBlockStore(s.cfg.State, BlockStoreOptions{Clock: s.cfg.Clock, OnRefresh: s.policy.Refresh, Logger: s.cfg.Logger})
 	rep := &blockLoadReporter{logger: s.cfg.Logger, now: s.cfg.Clock.Now, publish: s.publishFindingOK}
 	if err := s.policy.addOverlay(blockedUsersOverlay(s.blocks, rep)); err != nil {
 		// Unreachable: registration precedes the first Refresh and the name is

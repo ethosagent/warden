@@ -144,6 +144,11 @@ type policyWire struct {
 	// stay on the CP). Omitempty keeps the wire and ETag unchanged when empty.
 	BlockedUsers []config.BlockedUser `json:"blockedUsers,omitempty"`
 	Settings     *config.SettingsWire `json:"settings,omitempty"`
+	// ScopedAllowlist and ScopedAllowPos are filled only by projectScoped, at
+	// serve time: identity-scoped allow entries move out of Allowlist so a
+	// worker that decodes leniently cannot read one as global. Never stored.
+	ScopedAllowlist []config.AllowlistEntry `json:"scopedAllowlist,omitempty"`
+	ScopedAllowPos  []int                   `json:"scopedAllowPos,omitempty"`
 }
 
 // Long-poll bounds and the external-edit re-read cadence.
