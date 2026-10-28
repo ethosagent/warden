@@ -64,3 +64,30 @@ console:
     admin: [warden-admins]
     editor: [warden-editors]
     viewer: [warden-viewers]
+
+# Group-gated MCP tool (W-P1-GPOL-14, test/e2e/identity/group_policy_test.go):
+# the worker pulls this block as CP settings and enforces it. The poisoned MCP
+# server at mcp.example.test answers any tools/call, so "deploy" needs no
+# server-side tool: allowWhen.groups limits it to eng (alice and dave).
+# list_files is ungated. Nothing else in this stack calls MCP tools.
+mcp:
+  enabled: true
+  mode: enforce
+  tools:
+    allow: [list_files, deploy]
+    constraints:
+      deploy:
+        allowWhen:
+          groups: [eng]
+
+# The identity block rides the control-plane settings to every managed worker,
+# and a settings apply (any dashboard policy save) replaces the worker's local
+# block with this one: without it a policy edit would switch identity off and
+# every scoped destination would be denied (identity_required). Keep it equal to
+# the worker copy's (configs/config.e2e-identity-worker.yaml); W-P1-GPOL-14.
+identity:
+  defaultMode: attribute
+  issuer: http://localhost:5556/dex
+  internalIssuerURL: http://dex:5556
+  audience: warden
+  allowedAZP: [agent-harness, warden-cli]

@@ -109,6 +109,13 @@ request is terminated and the judge decides (fail-closed on any judge error). Ju
 consulted **only** for `NoMatch` — allowlisted traffic never pays for it. Non-HTTP or
 non-TLS traffic under judge is denied; statically-allowed opaque traffic is raw-tunnelled.
 
+**Group-scoped rules.** An allow entry (or an MCP tool `allowWhen`) with `groups`/`users`
+makes `policy.EvaluateFor` subject-aware: the request's verified subject must be named,
+no subject yields `Conditional` (denied), a non-member is an explicit `Deny`
+that never reaches the judge, and anything that cannot be decided per request (no CA,
+non-TLS) fails closed. The control plane projects scoped rules into a wire shape old
+workers deny. Details: [group-policy.md](group-policy.md).
+
 **Analytics events and the JSON audit stream.** Each decision becomes one analytics event
 in the worker's SQLite store. Every deny event carries a `Reason` from the single closed set
 declared in `internal/denyreason` (MCP gateway reasons are declared by `internal/mcp/gateway`),

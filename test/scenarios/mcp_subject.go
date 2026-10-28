@@ -95,7 +95,7 @@ func mcpGroupCondition(t *testing.T, h *harness.H) {
 	eng := h.MintUserToken(fakes.Valid("alice", "alice@example.com", "eng"))
 	expired := h.MintUserToken(fakes.Valid("erin", "erin@example.com", "finance"), fakes.Expired())
 
-	call := func(cl *http.Client, tool, token string) int {
+	call := func(cl *http.Client, tool, token string) (status int, closes bool) {
 		body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"` + tool + `","arguments":{}}}`
 		req, err := http.NewRequest(http.MethodPost, "https://"+host+"/mcp", strings.NewReader(body))
 		if err != nil {
@@ -111,7 +111,7 @@ func mcpGroupCondition(t *testing.T, h *harness.H) {
 		}
 		defer func() { _ = resp.Body.Close() }()
 		_, _ = io.Copy(io.Discard, resp.Body)
-		return resp.StatusCode
+		return resp.StatusCode, resp.Close
 	}
 
 	allowed, denied := 0, 0
@@ -131,8 +131,14 @@ func mcpGroupCondition(t *testing.T, h *harness.H) {
 			{"expired", "pay", expired, http.StatusForbidden},
 			{"eng ungated", "lookup", eng, http.StatusOK},
 		} {
-			if got := call(tc.cl(), c.tool, c.token); got != c.want {
+			got, closes := call(tc.cl(), c.tool, c.token)
+			if got != c.want {
 				t.Errorf("%s %s: status = %d, want %d", tc.name, c.who, got, c.want)
+			}
+			// A deny ends the h1 session, so the response must say so or the
+			// agent pools the dying conn and its next call fails with EOF (#602).
+			if tc.name == "h1" && c.want == http.StatusForbidden && !closes {
+				t.Errorf("%s %s: deny response lacks Connection: close", tc.name, c.who)
 			}
 			if c.want == http.StatusOK {
 				allowed++

@@ -37,6 +37,9 @@ import (
 // them from parsed flags (rule C1: cmd/ holds only flag parsing and wiring);
 // tests pass a Listener on port 0 to run a real control plane in-process.
 type Params struct {
+	// checkpointHooks is a test seam over the admin audit checkpoint loop.
+	checkpointHooks checkpointLoopHooks
+
 	ConfigPath, ListenAddr string
 	// TokenEnv is the deprecated --token-env, an alias of LegacyTokenEnv.
 	TokenEnv                         string
@@ -547,7 +550,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	if adminAudit != nil {
 		cpCtx, cpCancel := context.WithCancel(ctx)
 		done := make(chan struct{})
-		go runCheckpointLoop(cpCtx, done, adminAudit, auditEmitter, p.AdminAuditCheckpointInterval, clk)
+		go runCheckpointLoop(cpCtx, done, adminAudit, auditEmitter, p.AdminAuditCheckpointInterval, clk, p.checkpointHooks)
 		defer func() {
 			cpCancel()
 			<-done

@@ -930,7 +930,7 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
               <h3><span class="pill p-allow" style="margin-right:6px">allow</span>Allowlist</h3>
               <span style="display:flex;align-items:center;gap:8px"><button data-min-role="editor" class="btn sm" id="allowAddBtn" onclick="event.stopPropagation();addPolicyEntry('allow')">+ Add domain</button><span class="caret">▾</span></span>
             </div>
-            <div class="collapse-body"><table><tbody id="allowList"></tbody></table></div>
+            <div class="collapse-body"><div id="policyLint" role="status" hidden style="margin:8px 14px; padding:8px 12px; border-radius:6px; font-size:12px; color:var(--amber); border:1px solid var(--amber)"></div><table><tbody id="allowList"></tbody></table></div>
           </div>
           <div class="card collapse-card open" id="egressDenyCard">
             <div class="card-head clickable" onclick="toggleCollapse('egressDenyCard','warden.egDenyOpen')">
@@ -2090,7 +2090,9 @@ function renderFleet(ws){
       : '<span class="pill p-redact"><span class="d" style="background:var(--amber)"></span>stale</span>';
     const etag=(w.policyVersion?'v'+w.policyVersion+' · ':'')+(w.policyETag||'—');
     const etagPill=w.behind?'<span class="pill p-redact">behind</span>':'<span class="pill p-allow">up-to-date</span>';
-    const pending=w.behind?'<span class="pill p-high">policy behind</span>':'<span class="muted">—</span>';
+    let pending=w.behind?'<span class="pill p-high">policy behind</span>':'';
+    if(w.noGroupPolicy) pending+=(pending?' ':'')+'<span class="pill p-high" title="Denies group-scoped rules until upgraded">no groupPolicy</span>';
+    if(!pending) pending='<span class="muted">—</span>';
     return '<tr><td class="mono">'+esc(w.proxyID||'—')+'</td><td>'+fleetAuthBadge(w)+'</td><td>'+status+'</td>'
       +'<td class="mono" style="font-size:12px">'+esc(etag)+' '+etagPill+'</td>'
       +'<td>'+pending+'</td><td class="muted">'+relTime(w.lastSeen)+'</td>'
@@ -3055,6 +3057,7 @@ async function putSettings(merged){
 /* ---------- Egress (/policy) ---------- */
 function renderEgress(){
   const ed=gr.policyEditable;
+  renderPolicyLint(gr.policy.lint);
   renderPolicyList('allowList','allow',gr.policy.allowlist,'#bcd',ed);
   renderPolicyList('denyList','deny',gr.policy.denylist,'#ff8098',ed);
   ['allowAddBtn','denyAddBtn'].forEach(id=>{ const b=document.getElementById(id); if(b) b.style.display=ed?'':'none'; });
@@ -3072,9 +3075,61 @@ function renderPolicyList(id,list,entries,color,ed){
     if(e.paths&&e.paths.length) cons.push('paths: '+e.paths.join(' '));
     const consHtml=cons.length? '<div class="muted" style="font-size:11px;margin-top:2px">'+esc(cons.join(' · '))+'</div>':'';
     const rm= ed? '<button data-min-role="editor" class="btn sm pol-rm" data-list="'+list+'" data-idx="'+i+'" style="color:#ff8098">Remove</button>':'';
-    return '<tr><td class="mono" style="color:'+color+'">'+esc(dom)+consHtml+'</td><td style="text-align:right">'+rm+'</td></tr>';
+    // W-P1-GPOL-08: groups/users chips on an allow entry. The server marks
+    // `scoped`; an editable entry always shows the inputs so one can be added.
+    let scopeHtml='';
+    if(list==='allow' && (ed || e.scoped)){
+      scopeHtml='<div style="margin-top:4px;font-size:11px"><span class="muted">groups</span> '+chipsHTML('allow:'+i,'groups',e.groups,ed)
+        +' <span class="muted">users</span> '+chipsHTML('allow:'+i,'users',e.users,ed)+'</div>';
+    }
+    return '<tr><td class="mono" style="color:'+color+'">'+esc(dom)+(list==='allow'?scopedBadge(e.scoped):'')+consHtml+scopeHtml+'</td><td style="text-align:right">'+rm+'</td></tr>';
   }).join('');
   el.querySelectorAll('.pol-rm').forEach(b=>b.addEventListener('click',()=>removePolicyEntry(b.dataset.list,+b.dataset.idx)));
+  bindChips(el,editAllowChip);
+}
+/* ---- group/user chips (W-P1-GPOL-08) ----
+   Every chip value goes through esc() before it reaches markup; scope/field
+   ride in data-* attributes (esc()-ed / fixed words) and are read back with
+   dataset, never evaluated. */
+function scopedBadge(scoped){
+  return scoped? ' <span class="pill p-monitor" title="limited to the listed groups/users; never allows an anonymous request">scoped</span>' : '';
+}
+function chipsHTML(scope,field,values,ed){
+  let h=(values||[]).map((v,i)=>'<span class="tag" style="font-size:11.5px">'+esc(v)
+    +(ed?' <a class="chip-rm" data-scope="'+esc(scope)+'" data-field="'+esc(field)+'" data-idx="'+i+'" title="remove" style="cursor:pointer;color:#ff8098">✕</a>':'')+'</span> ').join('');
+  if(ed) h+='<input class="chip-add" data-scope="'+esc(scope)+'" data-field="'+esc(field)+'" type="text" maxlength="256" placeholder="+ '+esc(field.replace(/s$/,''))
+    +'" style="background:var(--surface-2);border:1px solid var(--border);color:var(--text);padding:2px 6px;border-radius:6px;font:inherit;font-size:11px;width:110px"/>';
+  return h;
+}
+// bindChips wires the chip inputs/removers inside el; edit(scope, field, idx, value)
+// gets idx for a removal and value for an addition.
+function bindChips(el,edit){
+  el.querySelectorAll('.chip-rm').forEach(a=>a.addEventListener('click',()=>edit(a.dataset.scope,a.dataset.field,+a.dataset.idx,null)));
+  el.querySelectorAll('.chip-add').forEach(inp=>{
+    const commit=()=>{ const v=inp.value.trim(); if(v){ inp.value=''; edit(inp.dataset.scope,inp.dataset.field,-1,v); } };
+    inp.addEventListener('keydown',ev=>{ if(ev.key==='Enter'||ev.key===','){ ev.preventDefault(); commit(); } });
+    inp.addEventListener('change',commit);
+  });
+}
+function chipEdit(list,idx,value){
+  const cur=(list||[]).slice();
+  if(value!==null){ if(cur.indexOf(value)===-1) cur.push(value); }
+  else if(idx>=0&&idx<cur.length) cur.splice(idx,1);
+  return cur;
+}
+async function editAllowChip(scope,field,idx,value){
+  if(!gr.policyEditable) return;
+  const e=gr.policy.allowlist[+scope.split(':')[1]];
+  if(!e||(field!=='groups'&&field!=='users')) return;
+  const next=chipEdit(e[field],idx,value);
+  if(next.length) e[field]=next; else delete e[field];
+  await savePolicy();
+}
+function renderPolicyLint(lint){
+  const b=document.getElementById('policyLint'); if(!b) return;
+  const l=lint||[];
+  b.hidden=!l.length;
+  b.innerHTML=l.map(w=>'<div>⚠ '+esc(w)+'</div>').join('');
 }
 async function addPolicyEntry(list){
   if(!gr.policyEditable) return;
@@ -3256,13 +3311,15 @@ function renderMCP(){
     schema:{ pin:!!(m.schema&&m.schema.pin) },
     scan:{ toolArgs:!!(m.scan&&m.scan.toolArgs), toolResults:!!(m.scan&&m.scan.toolResults) },
     chain:{ enabled:!!(m.chain&&m.chain.enabled) },
-    tools:{ allow:((m.tools&&m.tools.allow)||[]).slice(), deny:((m.tools&&m.tools.deny)||[]).slice() }
+    tools:{ allow:((m.tools&&m.tools.allow)||[]).slice(), deny:((m.tools&&m.tools.deny)||[]).slice() },
+    cond:mcpConds(m)
   } : (gr.settingsEditable ? {
     enabled:false, mode:'monitor', failClosedOnError:false,
     schema:{ pin:false },
     scan:{ toolArgs:false, toolResults:false },
     chain:{ enabled:false },
-    tools:{ allow:[], deny:[] }
+    tools:{ allow:[], deny:[] },
+    cond:{}
   } : null);
   renderMCPConfig();
   renderMCPToolPolicy();
@@ -3297,8 +3354,38 @@ function renderMCPToolPolicy(){
   const offNote = (ed && !gr.mcp.enabled)
     ? '<div class="note" style="margin-bottom:8px">MCP inspection is <b>off</b> — add tools here, then enable it in the MCP policy card above and Save MCP for the policy to take effect.</div>'
     : '';
-  el.innerHTML = offNote + mcpListBlock('allow', gr.mcp.tools.allow, ed) + '<div class="divider"></div>' + mcpListBlock('deny', gr.mcp.tools.deny, ed);
+  el.innerHTML = offNote + mcpListBlock('allow', gr.mcp.tools.allow, ed) + mcpCondBlock(ed) + '<div class="divider"></div>' + mcpListBlock('deny', gr.mcp.tools.deny, ed);
   el.querySelectorAll('.mcp-tool-rm').forEach(b=>b.addEventListener('click',()=>removeMcpTool(b.dataset.list,+b.dataset.idx)));
+  bindChips(el,editMcpChip);
+}
+/* Per-tool allowWhen groups/users (W-P1-GPOL-08). Edited locally and saved by
+   Save MCP with the rest of the settings document; the server marks a tool
+   `scoped` (settings.mcp.tools.constraints[tool].scoped). */
+function mcpConds(m){
+  const out={}, cons=(m&&m.tools&&m.tools.constraints)||{};
+  Object.keys(cons).forEach(t=>{ const aw=cons[t]&&cons[t].AllowWhen; if(aw&&((aw.Groups&&aw.Groups.length)||(aw.Users&&aw.Users.length))) out[t]={groups:(aw.Groups||[]).slice(),users:(aw.Users||[]).slice()}; });
+  return out;
+}
+function mcpCondBlock(ed){
+  const tools=gr.mcp.tools.allow, cond=gr.mcp.cond||{};
+  const rows=tools.filter(t=>ed||cond[t]);
+  if(!rows.length) return '';
+  const h=rows.map(t=>{
+    const c=cond[t]||{groups:[],users:[]};
+    const scoped=(c.groups.length||c.users.length)>0;
+    return '<div style="padding:4px 0;font-size:12px"><span class="mono">'+esc(t)+'</span>'+scopedBadge(scoped)+' <span class="muted">groups</span> '+chipsHTML('mcp:'+t,'groups',c.groups,ed)
+      +' <span class="muted">users</span> '+chipsHTML('mcp:'+t,'users',c.users,ed)+'</div>';
+  }).join('');
+  return '<div class="divider"></div><div class="note" style="margin-bottom:6px">Limit an allowed tool to IdP groups or users (needs a verified identity); saved with Save MCP.</div>'+h;
+}
+function editMcpChip(scope,field,idx,value){
+  if(!gr.settingsEditable||!gr.mcp||(field!=='groups'&&field!=='users')) return;
+  const tool=scope.slice(scope.indexOf(':')+1);
+  if(gr.mcp.tools.allow.indexOf(tool)===-1) return;
+  const c=gr.mcp.cond[tool]||(gr.mcp.cond[tool]={groups:[],users:[]});
+  c[field]=chipEdit(c[field],idx,value);
+  if(!c.groups.length&&!c.users.length) delete gr.mcp.cond[tool];
+  renderMCPToolPolicy();
 }
 function mcpListBlock(list,arr,ed){
   const pill = list==='allow'?'<span class="pill p-allow">allow</span>':'<span class="pill p-deny">deny</span>';
@@ -3468,7 +3555,21 @@ async function saveMCP(){
     scan: Object.assign({}, base.scan||{}, {toolArgs: chk('mcpScanArgs'), toolResults: chk('mcpScanResults')}),
     chain: Object.assign({}, base.chain||{}, {enabled: chk('mcpChain')}),
   });
-  if(gr.mcp){ mcpBlock.tools=Object.assign({}, base.tools||{}, {allow:gr.mcp.tools.allow, deny:gr.mcp.tools.deny}); }
+  if(gr.mcp){
+    mcpBlock.tools=Object.assign({}, base.tools||{}, {allow:gr.mcp.tools.allow, deny:gr.mcp.tools.deny});
+    // Fold the chip edits into the constraints' allowWhen (other fields kept).
+    const cons=Object.assign({}, mcpBlock.tools.constraints||{});
+    Object.keys(cons).concat(Object.keys(gr.mcp.cond)).forEach(t=>{
+      const c=gr.mcp.cond[t]||{groups:[],users:[]};
+      const cur=Object.assign({}, cons[t]||{}); delete cur.scoped;
+      const aw=Object.assign({}, cur.AllowWhen||{}); delete aw.Groups; delete aw.Users;
+      if(c.groups.length) aw.Groups=c.groups;
+      if(c.users.length) aw.Users=c.users;
+      if(aw.AgentID||aw.TimeWindow||aw.Groups||aw.Users) cur.AllowWhen=aw; else delete cur.AllowWhen;
+      if(Object.keys(cur).length) cons[t]=cur; else delete cons[t];
+    });
+    if(Object.keys(cons).length) mcpBlock.tools.constraints=cons; else delete mcpBlock.tools.constraints;
+  }
   const merged=Object.assign({}, gr.settings, {mcp:mcpBlock});
   try{ await putSettings(merged); renderMCP(); flashBtn('mcpSaveBtn','Saved ✓'); }
   catch(err){ window.alert('MCP save failed: '+err.message); }

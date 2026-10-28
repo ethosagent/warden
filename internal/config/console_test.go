@@ -261,3 +261,79 @@ func TestConsoleTrustedProxies(t *testing.T) {
 		t.Error("a bare address in trustedProxies must fail in oidc mode too")
 	}
 }
+
+func TestConsoleBreakGlassValidation(t *testing.T) {
+	const hashLike = "$argon2id$v=19$m=65536,t=3,p=2$c2FsdHNhbHRzYWx0c2FsdA$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g"
+	bg := func(auth, body string) string {
+		if auth == "oidc" {
+			return validOIDC + "  breakGlass:\n" + body
+		}
+		return "console:\n  auth: none\n  breakGlass:\n" + body
+	}
+	const user = "    username: ops\n"
+	const env = "    passwordHashEnv: BG_HASH\n"
+	tests := []struct {
+		name, yaml, wantErr string
+	}{
+		{"valid env", bg("oidc", "    enabled: true\n"+user+env), ""},
+		{"valid file with ttl", bg("oidc", "    enabled: true\n"+user+"    passwordHashFile: /run/secrets/bg\n    sessionTTL: 4h\n"), ""},
+		{"auth none", bg("none", "    enabled: true\n"+user+env), "console.breakGlass.enabled"},
+		{"both sources", bg("oidc", "    enabled: true\n"+user+env+"    passwordHashFile: /f\n"), "console.breakGlass.passwordHashEnv"},
+		{"no source", bg("oidc", "    enabled: true\n"+user), "console.breakGlass.passwordHashEnv"},
+		{"ttl 5h", bg("oidc", "    enabled: true\n"+user+env+"    sessionTTL: 5h\n"), "console.breakGlass.sessionTTL"},
+		{"ttl zero", bg("oidc", "    enabled: true\n"+user+env+"    sessionTTL: 0s\n"), "console.breakGlass.sessionTTL"},
+		{"ttl garbage", bg("oidc", "    enabled: true\n"+user+env+"    sessionTTL: soon\n"), "console.breakGlass.sessionTTL"},
+		{"empty username", bg("oidc", "    enabled: true\n    username: \"  \"\n"+env), "console.breakGlass.username"},
+		{"username 129 bytes", bg("oidc", "    enabled: true\n    username: "+strings.Repeat("a", 129)+"\n"+env), "console.breakGlass.username"},
+		{"username 128 bytes", bg("oidc", "    enabled: true\n    username: "+strings.Repeat("a", 128)+"\n"+env), ""},
+		{"disabled needs nothing", bg("none", "    enabled: false\n    sessionTTL: 99h\n"), ""},
+		{"hash in env name field", bg("oidc", "    enabled: true\n    passwordHashEnv: x\n    passwordHashFile: "+hashLike+"\n"+user), "console.breakGlass.passwordHashEnv"},
+		{"unknown key", bg("oidc", "    enabled: true\n    password: x\n"), "field password not found"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parse(consoleYAML(tc.yaml))
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Fatalf("want accepted, got %v", err)
+			case tc.wantErr != "" && err == nil:
+				t.Fatalf("want error containing %q, got nil", tc.wantErr)
+			case tc.wantErr != "":
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("error %q does not contain %q", err, tc.wantErr)
+				}
+				if strings.Contains(err.Error(), "argon2id") {
+					t.Fatalf("error leaks a hash: %q", err)
+				}
+			}
+		})
+	}
+}
+
+func TestConsoleBreakGlassDefaultsAndLocality(t *testing.T) {
+	prov, err := parse(consoleYAML(validOIDC + "  breakGlass:\n    enabled: true\n    username: \" ops \"\n    passwordHashEnv: BG_HASH\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, _ := prov.GetPolicy()
+	b := p.Console.BreakGlass
+	if !b.Enabled || b.Username != "ops" || b.PasswordHashEnv != "BG_HASH" || b.SessionTTL != time.Hour || b.AllowBehindTLSTerminator {
+		t.Errorf("BreakGlass = %+v", b)
+	}
+	// Absent block: disabled, default TTL, and never in the served JSON.
+	prov, err = parse(consoleYAML(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, _ = prov.GetPolicy()
+	if p.Console.BreakGlass != (ConsoleBreakGlass{SessionTTL: time.Hour}) {
+		t.Errorf("absent BreakGlass = %+v", p.Console.BreakGlass)
+	}
+	raw, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.ToLower(string(raw)), "breakglass") {
+		t.Errorf("served policy JSON mentions breakGlass: %s", raw)
+	}
+}
