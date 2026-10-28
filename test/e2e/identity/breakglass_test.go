@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -27,8 +28,9 @@ import (
 const (
 	breakGlassUser    = "breakglass-e2e"
 	breakGlassHashEnv = "WARDEN_BREAKGLASS_HASH"
-	// breakGlassConfigBlock is appended to configs/config.e2e-identity-cp.yaml,
-	// whose last top-level key is `console:`, so these keys land inside it.
+	// breakGlassConfigBlock is inserted right after the top-level `console:`
+	// line of configs/config.e2e-identity-cp.yaml, so these keys land inside
+	// it whatever top-level blocks follow.
 	breakGlassConfigBlock = `
   adminAudit:
     enabled: true
@@ -129,8 +131,9 @@ func breakGlassOverrideFiles(t *testing.T) string {
 		t.Fatalf("identity: %v", err)
 	}
 	cfg := filepath.Join(dir, "config.yaml")
-	body := append(bytes.TrimRight(base, "\n"), '\n')
-	if err := os.WriteFile(cfg, append(body, breakGlassConfigBlock[1:]...), 0o644); err != nil {
+	head, tail, _ := bytes.Cut(base, []byte("\nconsole:\n"))
+	body := slices.Concat(head, []byte("\nconsole:\n"), []byte(breakGlassConfigBlock[1:]), tail)
+	if err := os.WriteFile(cfg, body, 0o644); err != nil {
 		t.Fatalf("identity: %v", err)
 	}
 	override := filepath.Join(dir, "override.yml")
