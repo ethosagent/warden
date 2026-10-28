@@ -269,7 +269,9 @@ Connection: close
   and `identity.signIn.startsPerMinute`, so a retry loop cannot flood the issuer.
   Every URL in it is on the issuer's origin; anything else is dropped.
 - When the worker cannot start one it still answers `407`, with no `sign_in`
-  and `"sign_in_error": "issuer_unreachable"` or `"rate_limited"`.
+  and `"sign_in_error": "issuer_unreachable"` or `"rate_limited"`. (A forwarder
+  that drops an offer it does not trust relays `"sign_in_error":
+  "untrusted_offer"`; see the client duties below. The worker never writes it.)
 - A `401` and `WWW-Authenticate` are never written.
 - Terminated tunnels: past the CONNECT token's `exp` plus skew, the next request
   gets `403` `{"error":"identity_expired"}` with `Connection: close` (an h2
@@ -292,7 +294,8 @@ Deny reasons: `identity_required` (the `407`), `identity_expired` and
 
 1. checks that `sign_in.issuer` and `sign_in.client_id` equal its own issuer and
    client, and ignores the challenge otherwise (a compromised worker must not
-   make it poll a foreign issuer);
+   make it poll a foreign issuer; the `warden` forwarder then relays the `407`
+   without `sign_in` and with `sign_in_error` `untrusted_offer`);
 2. shows `verification_uri_complete` (or `verification_uri` and `user_code`) to
    the user;
 3. polls the token endpoint **of its own configured issuer** with the

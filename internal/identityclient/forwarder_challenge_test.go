@@ -368,3 +368,38 @@ func TestForwarderRefreshFailureThenChallenge(t *testing.T) {
 		t.Errorf("%d notifications, want 1", len(n))
 	}
 }
+
+// TestForwarderRelaysOtherProxyAuth407: a 407 that is not a Warden challenge is
+// relayed as the worker wrote it (nothing is invented), and one that even
+// mentions a device code is replaced, never passed on.
+func TestForwarderRelaysOtherProxyAuth407(t *testing.T) {
+	for name, tc := range map[string]struct {
+		body       string
+		wantBody   string
+		wantNoCode bool
+	}{
+		"foreign body":        {body: `{"error":"something_else","detail":"proxy says no"}`, wantBody: `{"error":"something_else","detail":"proxy says no"}`},
+		"empty body":          {body: ``, wantBody: ``},
+		"half a challenge":    {body: `{"error":"identity_required","sign_in":{"device_code":"` + deviceCode + `"`, wantNoCode: true},
+		"not json with codes": {body: `device_code=` + deviceCode, wantNoCode: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newRig(t)
+			cr := startChallengeForwarder(t, r, func() string { return tc.body })
+			head, body := cr.connect(t)
+			if statusOf(head) != 407 {
+				t.Fatalf("head %q, want 407", head)
+			}
+			if tc.wantNoCode {
+				if strings.Contains(string(body), deviceCode) || strings.Contains(string(body), "device_code") {
+					t.Errorf("the device code was relayed: %s", body)
+				}
+			} else if string(body) != tc.wantBody {
+				t.Errorf("body %q, want the worker's %q", body, tc.wantBody)
+			}
+			if n := cr.notes.all(); len(n) != 0 {
+				t.Errorf("the user was told to sign in at %v", n)
+			}
+		})
+	}
+}

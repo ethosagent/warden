@@ -83,12 +83,20 @@ func (c *Challenger) log() *slog.Logger {
 
 // Handle processes the body of a worker 407. It returns the body to relay to
 // the agent: the worker's own with the device code removed, or, when the offer
-// is not trusted, with the whole sign_in object removed. ctx bounds the
+// is not trusted, with the whole sign_in object removed and sign_in_error set to
+// untrusted_offer. A body that is not an identity_required challenge is relayed
+// unchanged. ctx bounds the
 // background poll (the forwarder's Serve context).
 func (c *Challenger) Handle(ctx context.Context, body []byte) []byte {
 	cb, ok := parseChallenge(body)
 	if !ok {
-		return mustJSON(challengeBody{Error: challengeError})
+		// Not a Warden challenge (a foreign 407, an empty body): relay it as it
+		// is, so the agent sees what the worker said. Anything that even
+		// mentions a device code is replaced, never passed on.
+		if bytes.Contains(body, []byte("device_code")) {
+			return mustJSON(challengeBody{Error: challengeError})
+		}
+		return body
 	}
 	si := cb.SignIn
 	if si == nil {

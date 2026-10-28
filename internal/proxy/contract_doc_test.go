@@ -216,7 +216,7 @@ func TestContractDocMatchesConstants(t *testing.T) {
 			string(SignInStarted), string(SignInReused), string(SignInRateLimited), string(SignInIssuerUnreachable),
 			string(denyreason.IdentityRequired), string(denyreason.IdentityExpired), string(denyreason.IdentityConflict),
 			"Proxy-Authenticate: Basic realm=\"warden\"", "Cache-Control: no-store", "Connection: close",
-			"WARDEN_SIGNIN_URL", "WARDEN_SIGNIN_CODE", "device_code",
+			"WARDEN_SIGNIN_URL", "WARDEN_SIGNIN_CODE", "device_code", "untrusted_offer",
 		} {
 			if !strings.Contains(section, "`"+w+"`") && !strings.Contains(section, w) {
 				t.Errorf("the challenge section does not mention %q", w)
