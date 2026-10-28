@@ -3,14 +3,12 @@
 package identity
 
 import (
-	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -25,14 +23,12 @@ import (
 // plain net/http client with a cookie jar (consoleLogin in helpers_test.go).
 
 const (
-	// cpTokenDefault is the shared bearer the compose files hand the CP and the
-	// workers (WARDEN_CP_TOKEN, default dev-token).
-	cpTokenDefault = "dev-token"
 	// restoreDeadline bounds bringing Dex and the CP back after TestConsoleSSODexDown.
 	restoreDeadline = 90 * time.Second
 )
 
-// bearerGet GETs a CP path with only the shared bearer: no cookie, no session.
+// bearerGet GETs a CP path with only worker-1's own token (the compose stack
+// runs strict, W-P1-WTOK-06): no cookie, no session.
 func bearerGet(t testing.TB, path string) (int, []byte) {
 	t.Helper()
 	c, err := newBrowser()
@@ -43,10 +39,10 @@ func bearerGet(t testing.TB, path string) (int, []byte) {
 	if err != nil {
 		t.Fatalf("identity: %v", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+cmp.Or(os.Getenv("WARDEN_CP_TOKEN"), cpTokenDefault))
+	req.Header.Set("Authorization", "Bearer "+(&compose.Target{}).WorkerToken(1))
 	resp, err := c.Do(req)
 	if err != nil {
-		t.Fatalf("identity: GET %s with the shared bearer: %v", path, redactURLError(err))
+		t.Fatalf("identity: GET %s with the worker token: %v", path, redactURLError(err))
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
@@ -56,7 +52,7 @@ func bearerGet(t testing.TB, path string) (int, []byte) {
 // TestConsoleSSORoleMatrix proves the role checks and the split horizon with
 // real Dex tokens: alice signs in through the public issuer while the CP talks
 // to Dex only on its internal origin, a viewer reads but cannot write, the
-// shared bearer opens the worker route but no human route, and a user with no
+// worker token opens the worker route but no human route, and a user with no
 // mapped group gets no session.
 func TestConsoleSSORoleMatrix(t *testing.T) {
 	requireStack(t)
@@ -115,7 +111,7 @@ func TestConsoleSSORoleMatrix(t *testing.T) {
 		if !found {
 			t.Errorf("the sessions list has no current session for alice")
 		}
-		// The admin session opens the human route the shared bearer cannot.
+		// The admin session opens the human route a worker token cannot.
 		if code, _ := alice.mustDo(t, http.MethodGet, "/central/secrets", nil, false); code != http.StatusOK {
 			t.Errorf("GET /central/secrets as admin: status %d, want 200", code)
 		}
@@ -149,14 +145,14 @@ func TestConsoleSSORoleMatrix(t *testing.T) {
 		}
 	})
 
-	t.Run("shared bearer opens the worker route only", func(t *testing.T) {
+	t.Run("worker token opens the worker route only", func(t *testing.T) {
 		for _, path := range []string{"/dashboard/api/settings", "/central/secrets"} {
 			if code, _ := bearerGet(t, path); code != http.StatusUnauthorized {
-				t.Errorf("GET %s with only the shared bearer: status %d, want 401", path, code)
+				t.Errorf("GET %s with only the worker token: status %d, want 401", path, code)
 			}
 		}
 		if code, _ := bearerGet(t, "/policy"); code != http.StatusOK {
-			t.Errorf("GET /policy with the shared bearer: status %d, want 200", code)
+			t.Errorf("GET /policy with the worker token: status %d, want 200", code)
 		}
 	})
 
