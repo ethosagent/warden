@@ -3,7 +3,6 @@ package controlplane
 import (
 	"context"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -16,7 +15,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/config"
 )
 
@@ -39,7 +37,7 @@ type PolicyServer interface {
 // against the worker registry, exactly as before.
 type policyServer struct {
 	policyPath string
-	token      string
+	auth       *WorkerAuthenticator
 	logger     *slog.Logger
 	registry   *WorkerRegistry
 	watch      *policyWatch
@@ -60,7 +58,19 @@ type policyServer struct {
 	headMu  sync.Mutex
 	headVer int64
 	headDoc []byte
+	// pubMu guards pubVer/pubETag: the head version and served ETag last
+	// confirmed in the publish log, so a Refresh that serves the same pair
+	// again skips the store.
+	pubMu   sync.Mutex
+	pubVer  int64
+	pubETag string
 }
+
+// Publish-log values of an ETag change without a new version.
+const (
+	publishActorSystem    = "system"
+	publishReasonExternal = "external"
+)
 
 // wireOverlay merges serve-time data into the served wire: data that must reach
 // workers but must never be stored in a policy version, because a rollback
@@ -80,11 +90,13 @@ const maxOverlayErrLen = 256
 // newPolicyServer constructs the policy-serving component. It does not load:
 // the owner registers overlays (addOverlay) and then calls Refresh once, so
 // /policy and the dashboard have policy immediately. registry receives
-// SeenPolicyPull on each poll; token gates access when non-empty.
+// SeenPolicyPull on each poll; token is the shared token the default
+// authenticator checks (empty = open). New replaces the authenticator with the
+// control plane's own (worker tokens, mode, counters) before serving.
 func newPolicyServer(policyPath, token string, logger *slog.Logger, registry *WorkerRegistry) *policyServer {
 	return &policyServer{
 		policyPath: policyPath,
-		token:      token,
+		auth:       NewWorkerAuthenticator(WorkerAuthConfig{Legacy: token, Registry: registry, Logger: logger}),
 		logger:     logger,
 		registry:   registry,
 		watch:      newPolicyWatch(),
@@ -178,9 +190,12 @@ func (w *policyWatch) fingerprints() map[string]string {
 
 // Refresh re-reads the policy file and updates the watch. On a read/parse error
 // it logs and keeps the last good policy, so a mid-edit malformed file never
-// breaks workers.
+// breaks workers. In versioned mode it first records a served-ETag change
+// without a new version in the publish log, so a worker on the new ETag maps
+// to a version from the moment it can fetch it.
 func (ps *policyServer) Refresh() {
-	wire, fps, err := ps.loadPolicy(context.Background())
+	ctx := context.Background()
+	wire, fps, head, err := ps.loadPolicy(ctx)
 	if err != nil {
 		var oe *overlayError
 		if errors.As(err, &oe) {
@@ -191,7 +206,51 @@ func (ps *policyServer) Refresh() {
 		ps.logger.Warn("control plane: policy reload failed; keeping last-known-good", "error", err)
 		return
 	}
-	ps.watch.set(wire, etagFor(wire), fps)
+	etag := etagFor(wire)
+	ps.recordPublish(ctx, head, etag, fps)
+	ps.watch.set(wire, etag, fps)
+}
+
+// recordPublish appends a publish-log row when the served ETag of head (0 =
+// file mode or an empty store: nothing to map) is not the newest row. A Create
+// has already appended its own row, so after a head move this appends
+// nothing; the store re-checks under its transaction. A store error is logged
+// and retried on the next Refresh; serving never waits on it.
+func (ps *policyServer) recordPublish(ctx context.Context, head int64, etag string, fps map[string]string) {
+	if ps.versions == nil || head == 0 {
+		return
+	}
+	ps.pubMu.Lock()
+	defer ps.pubMu.Unlock()
+	if head == ps.pubVer && etag == ps.pubETag {
+		return
+	}
+	reason := ps.publishReason(fps)
+	appended, err := ps.versions.AppendPublish(ctx, head, etag, reason, publishActorSystem)
+	if err != nil {
+		ps.logger.Warn("control plane: policy publish log append failed", "version", head, "error", boundedErr(err))
+		return
+	}
+	ps.pubVer, ps.pubETag = head, etag
+	if appended {
+		ps.logger.Info("policy publish logged", "version", head, "etag", etag, "reason", reason)
+	}
+}
+
+// publishReason names the first overlay, in registration order, whose
+// fingerprint differs from the last load's, or "external" when none does or
+// nothing has loaded yet (a restart cannot tell what changed while down).
+func (ps *policyServer) publishReason(fps map[string]string) string {
+	if _, _, ok, _ := ps.watch.snapshot(); !ok {
+		return publishReasonExternal
+	}
+	prev := ps.watch.fingerprints()
+	for _, o := range ps.sealOverlays() {
+		if fps[o.name] != prev[o.name] {
+			return o.name
+		}
+	}
+	return publishReasonExternal
 }
 
 // overlayError names the overlay whose apply failed a load.
@@ -216,8 +275,11 @@ func boundedErr(err error) string {
 // etagFor is a short, stable content hash of the served policy. Because Settings
 // is part of policyWire, the ETag automatically covers behavioral settings too:
 // any settings change alters the marshaled bytes → a new ETag → long-poll wake.
+//
+// It hashes the projected wire (projectScoped), the exact shape served, so the
+// ETag of a stored doc equals the ETag of the body workers receive.
 func etagFor(wire policyWire) string {
-	b, _ := json.Marshal(wire)
+	b, _ := json.Marshal(projectScoped(wire))
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:8]) // 16 hex chars
 }
@@ -234,21 +296,21 @@ func (ps *policyServer) snapshot() (policyWire, string, bool, <-chan struct{}) {
 	return ps.watch.snapshot()
 }
 
-// loadPolicy builds the served wire: the base wire from the policy file, then
-// every overlay in registration order. It returns each overlay's fingerprint;
-// any overlay error fails the load (an *overlayError). It seals overlay
-// registration.
-func (ps *policyServer) loadPolicy(ctx context.Context) (policyWire, map[string]string, error) {
+// loadPolicy builds the served wire: the base wire, then every overlay in
+// registration order. It returns each overlay's fingerprint and the head
+// version the base came from (0 = the policy file); any overlay error fails
+// the load (an *overlayError). It seals overlay registration.
+func (ps *policyServer) loadPolicy(ctx context.Context) (policyWire, map[string]string, int64, error) {
 	ps.sealOverlays() // even a failed first load ends registration
-	wire, err := ps.loadBase(ctx)
+	wire, head, err := ps.loadBaseHead(ctx)
 	if err != nil {
-		return policyWire{}, nil, err
+		return policyWire{}, nil, 0, err
 	}
 	fps, err := ps.applyOverlays(ctx, &wire)
 	if err != nil {
-		return policyWire{}, nil, err
+		return policyWire{}, nil, 0, err
 	}
-	return wire, fps, nil
+	return wire, fps, head, nil
 }
 
 // applyOverlays runs every overlay on wire in registration order and returns
@@ -289,48 +351,56 @@ func (ps *policyServer) servedETag(ctx context.Context, doc policyWire) (string,
 // versioned store when it has one, otherwise the policy file, re-read and
 // validated per call so served policy stays fresh without a watcher.
 func (ps *policyServer) loadBase(ctx context.Context) (policyWire, error) {
-	if ps.versions != nil {
-		wire, ok, err := ps.loadHead(ctx)
-		if err != nil {
-			return policyWire{}, err
-		}
-		if ok {
-			return wire, nil
-		}
-	}
-	return ps.loadFile()
+	wire, _, err := ps.loadBaseHead(ctx)
+	return wire, err
 }
 
-// loadHead returns the head doc of the versioned store, or ok=false when the
-// store is empty (head 0). It reads only the head version unless the head
+// loadBaseHead is loadBase plus the head version the wire came from (0 = the
+// policy file).
+func (ps *policyServer) loadBaseHead(ctx context.Context) (policyWire, int64, error) {
+	if ps.versions != nil {
+		wire, head, err := ps.loadHead(ctx)
+		if err != nil {
+			return policyWire{}, 0, err
+		}
+		if head > 0 {
+			return wire, head, nil
+		}
+	}
+	wire, err := ps.loadFile()
+	return wire, 0, err
+}
+
+// loadHead returns the head doc of the versioned store and its version, or
+// version 0 when the store is empty. It reads only the head version unless the head
 // moved, in which case it fetches the new doc (checked against doc_sha256).
 // Each call decodes a fresh copy, so overlays can modify it freely.
-func (ps *policyServer) loadHead(ctx context.Context) (policyWire, bool, error) {
+func (ps *policyServer) loadHead(ctx context.Context) (policyWire, int64, error) {
 	head, err := ps.versions.Head(ctx)
 	if err != nil {
-		return policyWire{}, false, err
+		return policyWire{}, 0, err
 	}
 	if head == 0 {
-		return policyWire{}, false, nil
+		return policyWire{}, 0, nil
 	}
 	ps.headMu.Lock()
 	defer ps.headMu.Unlock()
 	if head != ps.headVer {
 		v, err := ps.versions.Get(ctx, head)
 		if err != nil {
-			return policyWire{}, false, err
+			return policyWire{}, 0, err
 		}
 		b, err := json.Marshal(v.Doc)
 		if err != nil {
-			return policyWire{}, false, fmt.Errorf("policy store: encode head v%d: %w", head, err)
+			return policyWire{}, 0, fmt.Errorf("policy store: encode head v%d: %w", head, err)
 		}
 		ps.headVer, ps.headDoc = head, b
 	}
 	var wire policyWire
 	if err := json.Unmarshal(ps.headDoc, &wire); err != nil {
-		return policyWire{}, false, fmt.Errorf("policy store: decode head v%d: %w", head, err)
+		return policyWire{}, 0, fmt.Errorf("policy store: decode head v%d: %w", head, err)
 	}
-	return wire, true, nil
+	return wire, head, nil
 }
 
 // loadFile re-reads and validates the policy file, returning the allow/deny
@@ -343,6 +413,12 @@ func (ps *policyServer) loadFile() (policyWire, error) {
 	p, err := prov.GetPolicy()
 	if err != nil {
 		return policyWire{}, err
+	}
+	// The console API is the only source of the served block list (merged from
+	// the CP store); a YAML list is ignored, loudly, and never echoed.
+	if len(p.BlockedUsers) > 0 {
+		ps.logger.Warn("control plane: policy file contains blockedUsers; ignored (manage the block list from the console)",
+			"entries", len(p.BlockedUsers))
 	}
 	// SettingsWireFromPolicy projects only the secret-free behavioral blocks and
 	// returns nil when the config is pure allow/deny, so the "settings" key stays
@@ -367,21 +443,26 @@ func (ps *policyServer) ServePolicy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if ps.token != "" {
-		want := "Bearer " + ps.token
-		if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte(want)) != 1 {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
+	principal, err := ps.auth.Authenticate(r)
+	if err != nil {
+		WriteWorkerAuthError(w, err)
+		return
 	}
 	if !ps.sealed.Load() {
 		ps.sealOverlays() // first request ends overlay registration
 	}
-	// Register the worker as connected (it announces its id on the pull).
-	ps.registry.SeenPolicyPull(r.Header.Get(analytics.ProxyIDHeader))
+	// Register the worker as connected under the authenticated id: a token's
+	// bound proxy id, never the raw header.
+	ps.registry.SeenPolicyPull(principal.ProxyID)
 
 	inm := trimETag(r.Header.Get("If-None-Match"))
 	wait := parseWait(r.URL.Query().Get("wait"))
+
+	// A token's held request registers lazily when it first parks and is
+	// released when the handler returns.
+	var revoked <-chan struct{}
+	release := func() {}
+	defer func() { release() }()
 
 	for {
 		wire, etag, ok, ch := ps.watch.snapshot()
@@ -391,9 +472,16 @@ func (ps *policyServer) ServePolicy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if etag != inm {
+			// Re-authenticate before any write: a token revoked while this
+			// request waited never receives the new policy.
+			if !ps.stillAuthorized(w, principal) {
+				return
+			}
 			w.Header().Set("ETag", `"`+etag+`"`)
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(wire)
+			// The watch holds the real rules (dashboard, audit and diff read
+			// them); the fail-closed projection happens here, on the way out.
+			_ = json.NewEncoder(w).Encode(projectScoped(wire))
 			return
 		}
 		if wait <= 0 {
@@ -401,11 +489,26 @@ func (ps *policyServer) ServePolicy(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNotModified)
 			return
 		}
+		if revoked == nil {
+			revoked, release = ps.auth.WatchRevoke(principal)
+		}
+		// Register first, then check: a revoke between the initial
+		// authentication and the park is seen here, never missed.
+		if !ps.stillAuthorized(w, principal) {
+			return
+		}
 		timer := time.NewTimer(wait)
 		select {
 		case <-ch:
 			timer.Stop() // policy changed — loop re-evaluates and serves it
+		case <-revoked:
+			timer.Stop()
+			WriteWorkerAuthError(w, ErrUnauthorized)
+			return
 		case <-timer.C:
+			if !ps.stillAuthorized(w, principal) {
+				return
+			}
 			w.Header().Set("ETag", `"`+etag+`"`)
 			w.WriteHeader(http.StatusNotModified)
 			return
@@ -414,6 +517,16 @@ func (ps *policyServer) ServePolicy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+// stillAuthorized re-authenticates p from the in-memory index and writes 401
+// when its credential is no longer valid.
+func (ps *policyServer) stillAuthorized(w http.ResponseWriter, p WorkerPrincipal) bool {
+	if err := ps.auth.Reauthenticate(p); err != nil {
+		WriteWorkerAuthError(w, err)
+		return false
+	}
+	return true
 }
 
 // parseWait parses the ?wait= long-poll duration, clamped to [min,max]; an

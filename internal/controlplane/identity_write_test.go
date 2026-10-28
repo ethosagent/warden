@@ -52,7 +52,7 @@ func TestWriteSettingsIdentity(t *testing.T) {
 		Identity: testIdentity(),
 		Agents:   []config.AgentSettings{{ID: "agent-a", Policy: "p", Identity: "attribute"}, {ID: "agent-b", Identity: "off"}},
 	}
-	if err := srv.WriteSettings(in); err != nil {
+	if err := srv.writeSettings(in); err != nil {
 		t.Fatalf("WriteSettings: %v", err)
 	}
 	prov, err := config.NewLocalYAMLProvider(path)
@@ -71,7 +71,7 @@ func TestWriteSettingsIdentity(t *testing.T) {
 	}
 
 	// A nil identity removes the block.
-	if err := srv.WriteSettings(config.SettingsWire{}); err != nil {
+	if err := srv.writeSettings(config.SettingsWire{}); err != nil {
 		t.Fatalf("WriteSettings(nil identity): %v", err)
 	}
 	if got := identityNode(t, path); got != "" {
@@ -83,7 +83,7 @@ func TestWritersPreserveIdentityBlock(t *testing.T) {
 	cfg := detectionEditorConfig(t)
 	path := cfg.PolicyPath
 	srv := New(cfg)
-	if err := srv.WriteSettings(config.SettingsWire{Identity: testIdentity()}); err != nil {
+	if err := srv.writeSettings(config.SettingsWire{Identity: testIdentity()}); err != nil {
 		t.Fatal(err)
 	}
 	before := identityNode(t, path)
@@ -101,7 +101,7 @@ func TestWritersPreserveIdentityBlock(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			return srv.WritePolicy(p)
+			return srv.writePolicy(p)
 		},
 		"WriteIntegrations": func() error {
 			return srv.WriteIntegrations([]config.IntegrationInstance{{
@@ -160,7 +160,7 @@ func TestWriteSettingsIdentityRejectsInvalid(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = srv.WriteSettings(config.SettingsWire{Identity: &config.IdentitySettings{
+	err = srv.writeSettings(config.SettingsWire{Identity: &config.IdentitySettings{
 		DefaultMode: "require", Issuer: "https://idp.example.com", Audience: "warden",
 	}})
 	if err == nil || !strings.Contains(err.Error(), "Phase 2") {

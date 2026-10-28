@@ -15,10 +15,10 @@ type BearerGuardConfig struct {
 	Logger *slog.Logger
 	// Component names the host in the log line ("control plane", "worker").
 	Component string
-	// TokenName names the token in messages ("control-plane token").
+	// TokenName names the token in messages ("control-plane admin token").
 	TokenName string
 	// ConfigHint tells an operator how to configure the token; it appears in the
-	// 403 body, e.g. "Start it with --token-env <ENV>".
+	// 403 body, e.g. "Start it with --admin-token-env <ENV>".
 	ConfigHint string
 }
 

@@ -340,3 +340,51 @@ func TestWorkerIdentityUnreachableIssuer(t *testing.T) {
 		t.Errorf("unverified verifications = %d, want 1", got)
 	}
 }
+
+// TestScopedEntriesIdentityOffWarns: with identity-scoped allow entries and the
+// agent's mode off the worker logs exactly one WARN (no group names), again
+// only when the scoped count changes, and none once identity is on.
+func TestScopedEntriesIdentityOffWarns(t *testing.T) {
+	a, fake, _, _, buf := identityApplier(t)
+	scoped := 1
+	a.identity.scoped = func() int { return scoped }
+	warns := func() int { return strings.Count(buf.String(), "level=WARN msg=\"identity-scoped allow entries") }
+
+	off := &config.SettingsWire{Identity: &config.IdentitySettings{DefaultMode: "off"}}
+	fake.settings = off
+	a.Apply()
+	a.Apply()
+	if got := warns(); got != 1 {
+		t.Fatalf("WARNs after two applies with identity off = %d, want 1\n%s", got, buf.String())
+	}
+	if !strings.Contains(buf.String(), "scopedEntries=1") || !strings.Contains(buf.String(), "agent=default") {
+		t.Errorf("WARN lacks the count and agent: %s", buf.String())
+	}
+	if strings.Contains(buf.String(), "eng") {
+		t.Errorf("WARN names a group: %s", buf.String())
+	}
+
+	scoped = 2
+	a.Apply()
+	if got := warns(); got != 2 {
+		t.Errorf("WARNs after the count changed = %d, want 2", got)
+	}
+
+	fake.settings = identityWire("http://idp.test")
+	a.Apply()
+	scoped = 0
+	fake.settings = off
+	a.Apply()
+	if got := warns(); got != 2 {
+		t.Errorf("WARNs with identity on or no scoped entries = %d, want still 2", got)
+	}
+}
+
+func TestCountScoped(t *testing.T) {
+	p := config.Policy{Allowlist: []config.AllowlistEntry{
+		{Domain: "a"}, {Domain: "b", Groups: []string{"g"}}, {Domain: "c", Users: []string{"u"}},
+	}}
+	if got := countScoped(p); got != 2 {
+		t.Errorf("countScoped = %d, want 2", got)
+	}
+}

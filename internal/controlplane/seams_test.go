@@ -1,6 +1,7 @@
 package controlplane
 
 import (
+	"context"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -26,17 +27,23 @@ var (
 // prove a consumer (the dashboard's write endpoints) depends only on the
 // ConfigEditor seam, not on the concrete Server.
 type fakeConfigEditor struct {
-	gotPolicy   *config.Policy
-	gotSettings *config.SettingsWire
+	gotPolicy    *config.Policy
+	gotSettings  *config.SettingsWire
+	gotProviders []config.LLMProvider
 }
 
-func (f *fakeConfigEditor) WritePolicy(p config.Policy) error {
+func (f *fakeConfigEditor) WritePolicy(_ context.Context, p config.Policy, _ dashboard.WriteMeta) error {
 	f.gotPolicy = &p
 	return nil
 }
 
-func (f *fakeConfigEditor) WriteSettings(s config.SettingsWire) error {
+func (f *fakeConfigEditor) WriteSettings(_ context.Context, s config.SettingsWire, _ dashboard.WriteMeta) error {
 	f.gotSettings = &s
+	return nil
+}
+
+func (f *fakeConfigEditor) WriteLLMProviders(_ context.Context, ps []config.LLMProvider, _ dashboard.WriteMeta) error {
+	f.gotProviders = ps
 	return nil
 }
 
@@ -46,9 +53,9 @@ type fakeWorkerTracker struct {
 	views []dashboard.WorkerView
 }
 
-func (f *fakeWorkerTracker) SeenPolicyPull(string)        {}
-func (f *fakeWorkerTracker) SeenIngest(string, int)       {}
-func (f *fakeWorkerTracker) SeenHeartbeat(string, string) {}
+func (f *fakeWorkerTracker) SeenPolicyPull(string)                  {}
+func (f *fakeWorkerTracker) SeenIngest(string, int)                 {}
+func (f *fakeWorkerTracker) SeenHeartbeat(string, string, []string) {}
 func (f *fakeWorkerTracker) Views() []dashboard.WorkerView {
 	return f.views
 }

@@ -412,6 +412,18 @@
   .cp-note { margin-top:6px; padding:12px 15px; border-radius:10px; border:1px dashed var(--border); background:var(--surface-2);
     font-size:12.5px; color:var(--muted); }
   .cp-note b { color:var(--text); }
+  /* ---------- Policy history (W-P1-PVER-04) ---------- */
+  .ph-row { display:flex; align-items:center; gap:10px; padding:9px 14px; border-top:1px solid var(--border); cursor:pointer; font-size:13px; }
+  .ph-row:hover, .ph-row.sel { background:var(--surface-2); }
+  .ph-row .ph-msg { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .ph-diff ul { list-style:none; margin:6px 0 12px; padding:0; }
+  .ph-diff li { padding:6px 0; border-top:1px solid var(--border); font-size:12px; }
+  .ph-diff .mono { word-break:break-all; }
+  #policyMsgDialog { background:var(--surface); color:var(--text); border:1px solid var(--border); border-radius:var(--radius);
+    padding:18px; width:min(460px,92vw); box-shadow:var(--shadow); }
+  #policyMsgDialog::backdrop { background:rgba(0,0,0,.55); }
+  #policyMsgDialog input { width:100%; box-sizing:border-box; background:var(--surface-2); border:1px solid var(--border); color:var(--text);
+    padding:7px 11px; border-radius:9px; font:inherit; font-size:13px; margin:6px 0 14px; }
 </style>
 </head>
 <body>
@@ -484,6 +496,10 @@
     <div class="nav-item" data-page="audit">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 11l3 3 8-8"/><path d="M20 12v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9"/></svg>
       Audit</div>
+    <!-- Admin log (W-P1-AAUD-03): hidden until adminLogProbe sees an admin (or none mode) and a wired API. -->
+    <div class="nav-item" data-page="adminlog" data-min-role="admin" id="adminLogNav" style="display:none">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6z"/><path d="M9 12h6M9 15.5h4M9 8.5h6"/></svg>
+      Admin log</div>
 
     <div class="nav-group-label">Operate</div>
     <div class="nav-item" data-page="fleet">
@@ -894,6 +910,9 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
         <div class="actions"><span class="note" id="grEditNote"></span></div>
       </div>
 
+      <!-- --policy-store=versioned: the served YAML's policy was edited by hand (drift, W-P1-PVER-05). Shown from /dashboard/api/policy drift. -->
+      <div id="policyDriftBanner" role="status" hidden style="margin:0 0 12px; padding:8px 12px; border-radius:6px; font-size:12.5px; color:var(--amber); border:1px solid var(--amber)">⚠ The served config file's policy was edited by hand and differs from the head version. Workers are still served the head version; the edit is ignored. To use it, bring it in with <code>warden policy import</code>; putting the file back clears this.</div>
+
       <div class="empty-only" id="es-guardrails"></div>
 
       <div class="demo-only">
@@ -922,6 +941,16 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
           </div>
         </div>
         <div class="note" id="egressReadonly" style="margin-top:12px; display:none">Egress policy is read-only on this node — it is managed by the control plane.</div>
+        <!-- Policy history (W-P1-PVER-04): shown only when GET /dashboard/api/policy reports a version (--policy-store=versioned). -->
+        <div class="card" id="policyHistory" style="display:none;margin-top:16px">
+          <div class="card-head"><h3>History</h3><span class="sub" id="ph-head"></span></div>
+          <div id="ph-list"></div>
+          <div class="card-pad" style="display:flex;gap:8px;align-items:center">
+            <button data-min-role="viewer" class="btn sm" id="ph-more" style="display:none">Load more</button>
+            <span class="sub" id="ph-status"></span>
+          </div>
+          <div class="card-pad ph-diff" id="ph-diff" style="display:none;border-top:1px solid var(--border)"></div>
+        </div>
       </div>
 
       <!-- DLP matrix + rules -->
@@ -1099,6 +1128,41 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
       </div><!-- /demo-only -->
     </section>
 
+    <!-- ============ ADMIN LOG (W-P1-AAUD-03) ============ -->
+    <section class="page" id="page-adminlog">
+      <div class="page-head">
+        <div><h1>Admin log</h1><div class="desc">Who changed what on the control plane: signed, hash-chained admin audit entries (read-only)</div></div>
+      </div>
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-head"><h3>Chain verification</h3>
+          <span style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <input type="text" id="al-anchor-seq" maxlength="20" placeholder="Anchor seq (optional)" aria-label="Anchor seq" style="width:150px" />
+            <input type="text" id="al-anchor-hash" maxlength="64" placeholder="Anchor entry hash, hex (optional)" aria-label="Anchor entry hash" style="width:260px" />
+            <button class="btn primary sm" id="al-verify">Verify chain</button>
+          </span></div>
+        <div class="card-pad"><div class="note" id="al-verify-result">Checks every entry's hash link and Ed25519 signature. An anchor (a head seen earlier, for example in an emitted log line) also detects a deleted tail.</div></div>
+      </div>
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-head"><h3>Signing keys</h3><span class="sub">every key the chain declares, oldest first</span></div>
+        <div class="card-pad" id="al-keys"><div class="note">Loading…</div></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h3>Entries</h3>
+          <span style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <input type="text" id="al-actor" maxlength="320" placeholder="Actor (sub or actor id)" aria-label="Filter by actor" />
+            <input type="text" id="al-action" maxlength="128" placeholder="Action (e.g. policy.write)" aria-label="Filter by action" />
+            <select class="btn sm" id="al-outcome" aria-label="Filter by outcome"><option value="">any outcome</option><option value="ok">ok</option><option value="denied">denied</option><option value="rejected">rejected</option><option value="error">error</option></select>
+            <button class="btn sm" id="al-apply">Apply</button>
+          </span></div>
+        <div id="al-list"><div class="card-pad note">Loading…</div></div>
+        <div class="card-pad" style="display:flex;gap:8px;align-items:center">
+          <button class="btn sm" id="al-newer" disabled>← Newer</button>
+          <button class="btn sm" id="al-older" disabled>Older →</button>
+          <span class="sub" id="al-page"></span>
+        </div>
+      </div>
+    </section>
+
     <!-- ============ FLEET ============ -->
     <section class="page" id="page-fleet">
       <div class="page-head">
@@ -1106,6 +1170,26 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
       </div>
 
       <div class="empty-only" id="es-fleet"></div>
+
+      <!-- Worker tokens (W-P1-WTOK-10): outside demo-only so it shows before the first worker connects.
+           loadWorkerTokens hides it when the API answers 404 (no state dir, or a worker dashboard). -->
+      <div class="card" id="wtok-card" style="margin-bottom:16px; display:none">
+        <div class="card-head"><h3>Worker tokens</h3><span style="display:flex;align-items:center;gap:8px"><span class="sub" id="wtok-status"></span><button data-min-role="admin" class="btn primary sm" id="wtok-new" style="display:none" onclick="toggleWorkerTokenForm()">+ New token</button></span></div>
+        <div class="card-pad">
+          <div class="note" style="margin-bottom:10px">Each worker authenticates with its own token, bound to one proxy id. A token is shown once when created and only its hash is stored. Revoke a token to cut that worker off.</div>
+          <div class="note" id="wtok-cli" style="margin-bottom:10px; display:none">This console has no sign-in (console.auth: none), so tokens are listed here but created and revoked on the control plane host with <span class="mono">warden control-plane token create</span> (and <span class="mono">revoke</span>).</div>
+          <div id="wtok-form" data-min-role="admin" style="display:none; margin-bottom:12px">
+            <div class="form-row">
+              <div class="field"><label for="wtok-name">Name</label><input type="text" id="wtok-name" maxlength="128" autocomplete="off" placeholder="e.g. worker-eu-1" /></div>
+              <div class="field"><label for="wtok-proxy">Proxy id</label><input type="text" id="wtok-proxy" maxlength="128" autocomplete="off" placeholder="the worker's proxy id" /></div>
+              <div class="field"><label for="wtok-exp">Expires in (optional)</label><input type="text" id="wtok-exp" maxlength="16" autocomplete="off" placeholder="e.g. 720h" /></div>
+              <div class="field" style="justify-content:flex-end"><button data-min-role="admin" class="btn primary sm" id="wtok-create" onclick="createWorkerToken()">Create token</button></div>
+            </div>
+          </div>
+          <div id="wtok-list"></div>
+          <div id="wtok-msg" class="note" style="margin-top:8px; display:none"></div>
+        </div>
+      </div>
 
       <div class="demo-only">
       <div class="kpi-row">
@@ -1117,7 +1201,7 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
 
       <div class="card">
         <table id="fleetTable"><thead><tr>
-          <th>Worker</th><th>Status</th><th>Policy ETag</th><th>Pending</th><th>Last heartbeat</th><th>Last policy pull</th><th class="num">Events fwd</th>
+          <th>Worker</th><th>Auth</th><th>Status</th><th>Policy ETag</th><th>Pending</th><th>Last heartbeat</th><th>Last policy pull</th><th class="num">Events fwd</th>
         </tr></thead><tbody id="fleetBody"></tbody></table>
       </div>
       </div><!-- /demo-only -->
@@ -1275,6 +1359,33 @@ LIMIT 8;</textarea>
   </main>
 </div>
 
+<!-- Save message and rollback confirm dialog (W-P1-PVER-04); askPolicyDialog fills it with textContent. -->
+<dialog id="policyMsgDialog">
+  <form method="dialog">
+    <h3 id="pmd-title" style="margin:0 0 6px"></h3>
+    <div class="note" id="pmd-desc"></div>
+    <label for="pmd-input" class="sub" style="display:block;margin-top:12px">Message (optional, up to 512 characters)</label>
+    <input type="text" id="pmd-input" maxlength="512" autocomplete="off" />
+    <div style="display:flex;justify-content:flex-end;gap:8px">
+      <button class="btn sm" value="cancel">Cancel</button>
+      <button class="btn primary sm" value="ok" id="pmd-ok">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- One-time worker token dialog (W-P1-WTOK-10); showWorkerToken fills it with textContent and clearWorkerToken empties it on close. -->
+<dialog id="wtokDialog">
+  <form method="dialog">
+    <h3 style="margin:0 0 6px">Worker token created</h3>
+    <div class="note" style="color:var(--amber)"><b>Copy this token now.</b> It is shown only once and cannot be shown again. Anyone holding it can act as that worker.</div>
+    <code class="mono" id="wtok-value" style="display:block;margin:12px 0;padding:8px;word-break:break-all;user-select:all"></code>
+    <div style="display:flex;justify-content:flex-end;gap:8px">
+      <button type="button" class="btn sm" id="wtok-copy">Copy</button>
+      <button class="btn primary sm" value="close">Close</button>
+    </div>
+  </form>
+</dialog>
+
 <script>
 "use strict";
 /* ============================================================
@@ -1314,6 +1425,7 @@ function hhmmss(iso){ if(!iso) return "—"; const d=new Date(iso); if(isNaN(d.g
    - 404: console.auth none (or a worker dashboard). Writes take the bearer path, authFetch.
    - anything else (network error, 5xx): no CSRF, no prompt; requests go out as they are.
    body is JSON-encoded unless it is already a string; either way it is sent as application/json.
+   hdrs (optional) are extra request headers, e.g. If-Match on a versioned policy write.
    The returned Response is fetch()'s, so callers check r.ok / r.status and read r.json(). */
 const SAFE_METHODS={GET:1,HEAD:1,OPTIONS:1};
 let authMode='';     // 'oidc' | 'none' | 'unknown', set by authInit
@@ -1340,9 +1452,9 @@ function authInit(){
   })();
   return authReady;
 }
-async function api(method,url,body){
+async function api(method,url,body,hdrs){
   await authInit();
-  const h=new Headers();
+  const h=new Headers(hdrs||{});
   const o={method:method,headers:h,credentials:'same-origin'};
   if(body!==undefined){
     h.set('Content-Type','application/json');
@@ -1419,7 +1531,11 @@ async function logout(){
   main.append(h,p,a);
   document.body.replaceChildren(main);
 }
-async function jget(url){ const r=await api('GET',url); if(!r.ok) throw new Error("status "+r.status); return r.json(); }
+async function jget(url){
+  const r=await api('GET',url); if(!r.ok) throw new Error("status "+r.status);
+  if(POLICY_DOC_GET.test(url)) notePolicyHead(r); // the head a later save names in If-Match
+  return r.json();
+}
 
 /* ---------- shared pill/chip renderers (used by live + preview) ---------- */
 const CLASS_CHIP = { credentials:'c-cred','pii.contact':'c-pii','pii.identity':'c-pii','pii.financial':'c-pii', source_code:'c-code', infrastructure:'c-infra' };
@@ -1462,6 +1578,7 @@ function loadTab(page){
     case 'mcp':         loadMCPPage(); break;
     case 'alerts':      loadAlerts(); loadDetection(); break;
     case 'audit':       loadAudit(); break;
+    case 'adminlog':    loadAdminLog(); break;
     case 'get-started': refreshOnboarding(); break;
   }
 }
@@ -1524,7 +1641,7 @@ async function onModeToggleClick(mode){
   if(act.dlp) merged.dlp=Object.assign({}, s.dlp, {mode});
   if(act.mcp) merged.mcp=Object.assign({}, s.mcp, {mode});
   try{
-    const r=await api('PUT','/dashboard/api/settings',merged);
+    const r=await policyWrite('PUT','/dashboard/api/settings',merged,'settings');
     if(!r.ok){ let m='status '+r.status; try{ const e=await r.json(); if(e&&e.error) m=e.error; }catch(_e){} throw new Error(m); }
     applyMode(mode);
     if(currentTab()==='guardrails') loadGuardrails();
@@ -1907,6 +2024,7 @@ document.querySelectorAll('#actSubtabs button').forEach(b=>{
    Fleet (/dashboard/api/workers)
    ============================================================ */
 async function loadFleet(){
+  loadWorkerTokens();
   let ws;
   try{ ws=await jget('/dashboard/api/workers'); }catch(e){ ws=[]; }
   ws=Array.isArray(ws)?ws:[];
@@ -1916,6 +2034,14 @@ async function loadFleet(){
   renderFleet(ws);
 }
 function fleetStat(k,v,delta){ return '<div class="card stat"><div class="k">'+k+'</div><div class="v">'+v+'</div><div class="delta">'+esc(delta)+'</div></div>'; }
+/* fleetAuthBadge: how the worker authenticates. A shared-token (legacy) or open (none) worker's
+   proxy id is self-reported, so it is flagged; a token worker shows its token's name. */
+function fleetAuthBadge(w){
+  const k=w.authKind;
+  if(k==='legacy'||k==='none') return '<span class="pill p-redact" title="the proxy id is self-reported, not verified">legacy / unverified</span>';
+  if(k==='token') return '<span class="pill p-allow">token</span> <span class="mono" style="font-size:12px">'+esc(w.tokenName||'')+'</span>';
+  return '<span class="muted">—</span>';
+}
 function renderFleet(ws){
   const online=ws.filter(w=>w.online).length;
   const stale=ws.length-online;
@@ -1934,15 +2060,100 @@ function renderFleet(ws){
     const status=w.online
       ? '<span class="pill p-green"><span class="d" style="background:var(--green)"></span>online</span>'
       : '<span class="pill p-redact"><span class="d" style="background:var(--amber)"></span>stale</span>';
-    const etag=w.policyETag||'—';
+    const etag=(w.policyVersion?'v'+w.policyVersion+' · ':'')+(w.policyETag||'—');
     const etagPill=w.behind?'<span class="pill p-redact">behind</span>':'<span class="pill p-allow">up-to-date</span>';
     const pending=w.behind?'<span class="pill p-high">policy behind</span>':'<span class="muted">—</span>';
-    return '<tr><td class="mono">'+esc(w.proxyID||'—')+'</td><td>'+status+'</td>'
+    return '<tr><td class="mono">'+esc(w.proxyID||'—')+'</td><td>'+fleetAuthBadge(w)+'</td><td>'+status+'</td>'
       +'<td class="mono" style="font-size:12px">'+esc(etag)+' '+etagPill+'</td>'
       +'<td>'+pending+'</td><td class="muted">'+relTime(w.lastSeen)+'</td>'
       +'<td class="muted">'+relTime(w.lastPolicyPull)+'</td><td class="num">'+fmtNum(w.eventsForwarded||0)+'</td></tr>';
   }).join('');
 }
+
+/* ---------- Worker tokens (W-P1-WTOK-10): GET / POST / DELETE /dashboard/api/worker-tokens through api() ----------
+   The list is open to every role; create and revoke are rendered only for an oidc admin (the server
+   enforces it, and answers 403 use_cli in console.auth none). The plaintext token exists only in the
+   201 body of a create: it goes straight to showWorkerToken, which sets it with textContent, and the
+   dialog's close event empties it. It is never put in storage, a URL, a log or innerHTML. */
+async function loadWorkerTokens(){
+  const card=document.getElementById('wtok-card'); if(!card) return;
+  await authInit();
+  const list=document.getElementById('wtok-list'), st=document.getElementById('wtok-status');
+  let r=null, rows=null;
+  try{ r=await api('GET','/dashboard/api/worker-tokens'); if(r.ok) rows=await r.json(); }catch(e){ rows=null; }
+  if(r&&r.status===404){ card.style.display='none'; return; }
+  card.style.display='';
+  const canWrite=authMode==='oidc'&&roleAllows('admin');
+  document.getElementById('wtok-new').style.display=canWrite?'':'none';
+  document.getElementById('wtok-cli').style.display=authMode==='oidc'?'none':'';
+  if(!canWrite) document.getElementById('wtok-form').style.display='none';
+  if(!Array.isArray(rows)){ list.innerHTML='<div class="note" style="padding:8px 0">Worker tokens unavailable.</div>'; st.textContent=''; return; }
+  const active=rows.filter(x=>!x.revokedAt).length;
+  st.textContent=active+' active';
+  if(!rows.length){ list.innerHTML='<div class="note" style="padding:8px 0">No worker tokens yet.</div>'; return; }
+  list.innerHTML='<table><thead><tr><th>Name</th><th>Proxy id</th><th>Created</th><th>Last used</th><th>Expires</th><th>Revoked</th><th></th></tr></thead><tbody>'+
+    rows.map(x=>'<tr><td><b>'+esc(x.name)+'</b></td>'
+      +'<td class="mono" style="font-size:12px">'+esc(x.proxyID)+'</td>'
+      +'<td style="font-size:12px">'+esc(x.createdAt?relTime(x.createdAt):'—')+'</td>'
+      +'<td style="font-size:12px">'+esc(x.lastUsedAt?relTime(x.lastUsedAt):'never')+'</td>'
+      +'<td style="font-size:12px">'+esc(x.expiresAt||'never')+'</td>'
+      +'<td style="font-size:12px">'+(x.revokedAt?esc(x.revokedAt):'—')+'</td>'
+      +'<td style="text-align:right">'+(canWrite&&!x.revokedAt?'<button data-min-role="admin" class="btn sm wtok-revoke" data-id="'+esc(x.id)+'" data-name="'+esc(x.name)+'" style="color:#ff8098">Revoke</button>':'')+'</td></tr>').join('')+'</tbody></table>';
+  list.querySelectorAll('.wtok-revoke').forEach(b=>b.addEventListener('click',()=>revokeWorkerToken(b.dataset.id,b.dataset.name)));
+}
+function toggleWorkerTokenForm(){
+  const f=document.getElementById('wtok-form'); f.style.display=f.style.display==='none'?'':'none';
+}
+function workerTokenMsg(text){
+  const m=document.getElementById('wtok-msg'); m.style.display=text?'':'none'; m.textContent=text||'';
+}
+async function createWorkerToken(){
+  const name=document.getElementById('wtok-name').value.trim();
+  const proxyID=document.getElementById('wtok-proxy').value.trim();
+  const exp=document.getElementById('wtok-exp').value.trim();
+  if(!name||!proxyID){ workerTokenMsg('Name and proxy id are required.'); return; }
+  const body={name:name,proxyID:proxyID};
+  if(exp) body.expiresIn=exp;
+  const btn=document.getElementById('wtok-create'); btn.disabled=true;
+  let r=null, d=null;
+  try{ r=await api('POST','/dashboard/api/worker-tokens',body); if(r.status===201) d=await r.json(); }catch(e){ r=null; d=null; }
+  btn.disabled=false;
+  const tok=d&&d.token; d=null;
+  if(!tok){
+    let why=r?('status '+r.status):'network error';
+    if(r&&r.status!==201){ try{ const e=await r.json(); if(e&&e.error) why=e.error; }catch(x){} }
+    workerTokenMsg('Create failed: '+why+'.'); return;
+  }
+  workerTokenMsg('');
+  document.getElementById('wtok-name').value=''; document.getElementById('wtok-proxy').value=''; document.getElementById('wtok-exp').value='';
+  document.getElementById('wtok-form').style.display='none';
+  showWorkerToken(tok);
+  loadWorkerTokens();
+}
+async function revokeWorkerToken(id,name){
+  if(!window.confirm('Revoke worker token "'+name+'"? That worker is cut off at once and cannot be re-enabled.')) return;
+  let r=null;
+  try{ r=await api('DELETE','/dashboard/api/worker-tokens/'+encodeURIComponent(id)); }catch(e){ r=null; }
+  workerTokenMsg(r&&r.status===204 ? 'Revoked "'+name+'".' : 'Revoke failed'+(r?(': status '+r.status):'')+'.');
+  loadWorkerTokens();
+}
+function showWorkerToken(tok){
+  document.getElementById('wtok-value').textContent=tok;
+  const dlg=document.getElementById('wtokDialog');
+  if(typeof dlg.showModal==='function') dlg.showModal(); else dlg.setAttribute('open','');
+}
+function clearWorkerToken(){
+  document.getElementById('wtok-value').textContent='';
+  const b=document.getElementById('wtok-copy'); if(b) b.textContent='Copy';
+}
+(function(){
+  const dlg=document.getElementById('wtokDialog'), cp=document.getElementById('wtok-copy');
+  if(dlg) dlg.addEventListener('close',clearWorkerToken);
+  if(cp) cp.addEventListener('click',async()=>{
+    try{ await navigator.clipboard.writeText(document.getElementById('wtok-value').textContent); cp.textContent='Copied'; }
+    catch(e){ cp.textContent='Copy failed: select the token and copy it'; }
+  });
+})();
 
 /* ============================================================
    Explore (/dashboard/api/query + /query/schema)
@@ -1995,7 +2206,7 @@ async function saveExploreProvider(){
   const merged=Object.assign({}, cur, {explore:{llmProvider:sel.value}});
   const note=document.getElementById('exploreProviderNote');
   try{
-    const r=await api('PUT','/dashboard/api/settings',merged);
+    const r=await policyWrite('PUT','/dashboard/api/settings',merged,'settings');
     if(!r.ok){ let m='status '+r.status; try{ const e=await r.json(); if(e&&e.error) m=e.error; }catch(_e){} throw new Error(m); }
     const d=await r.json().catch(()=>({})); window.__exploreSettings=(d&&d.settings)||merged;
     if(note){ note.textContent='saved ✓ — takes effect now'; note.style.color='var(--teal)'; setTimeout(()=>{ note.textContent=''; note.style.color=''; },2500); }
@@ -2333,7 +2544,7 @@ async function saveSettings(btnId, statusId){
   else if(sbb==='echo'){ body.secrets={ backend:'echo' }; }
   else { delete body.secrets; }
   try{
-    const r=await api('POST','/dashboard/api/settings',body);
+    const r=await policyWrite('POST','/dashboard/api/settings',body,'settings');
     if(!r.ok){ const e=await r.json().catch(()=>({error:'status '+r.status})); throw new Error(e.error||('status '+r.status)); }
     const d=await r.json(); lastSettings=(d&&d.settings)||body; settingsEditable=!!(d&&d.editable);
     renderSettings();
@@ -2658,6 +2869,7 @@ async function loadGuardrails(){
   gr.policy.allowlist = gr.policy.allowlist||[];
   gr.policy.denylist = gr.policy.denylist||[];
   gr.policyEditable = !!(pol&&pol.editable);
+  renderPolicyDrift(pol);
   gr.settings = (setres&&setres.settings) || {};
   gr.settingsEditable = !!(setres&&setres.editable);
   gr.analytics = an || {dlp:{}};
@@ -2666,6 +2878,7 @@ async function loadGuardrails(){
   const note=document.getElementById('grEditNote');
   if(note) note.textContent = gr.settingsEditable ? '' : 'read-only (managed by control plane)';
   renderEgress();
+  showPolicyHistory(pol);
   renderDLP();
   renderJudge();   // the /llmproviders fetch above feeds the judge selector's name list;
                    // the registry CARD itself lives on Settings (renderLLMProviders there)
@@ -2692,7 +2905,7 @@ function flashBtn(id,txt){
   setTimeout(()=>{ b.textContent=old; b.disabled=false; }, 1800);
 }
 async function putSettings(merged){
-  const r=await api('PUT','/dashboard/api/settings',merged);
+  const r=await policyWrite('PUT','/dashboard/api/settings',merged,'settings');
   if(!r.ok){ let m='status '+r.status; try{ const e=await r.json(); if(e&&e.error) m=e.error; }catch(_e){} throw new Error(m); }
   const d=await r.json().catch(()=>({}));
   gr.settings=(d&&d.settings)||merged; gr.settingsEditable=!!(d&&d.editable);
@@ -2739,12 +2952,24 @@ async function removePolicyEntry(list,idx){
 }
 async function savePolicy(){
   try{
-    const r=await api('PUT','/dashboard/api/policy',{allowlist:gr.policy.allowlist,denylist:gr.policy.denylist});
+    const r=await policyWrite('PUT','/dashboard/api/policy',{allowlist:gr.policy.allowlist,denylist:gr.policy.denylist},'policy');
     if(!r.ok){ let m='status '+r.status; try{ const e=await r.json(); if(e&&e.error) m=e.error; }catch(_e){} throw new Error(m); }
     const p=await r.json();
     gr.policy=p; gr.policy.allowlist=p.allowlist||[]; gr.policy.denylist=p.denylist||[]; gr.policyEditable=!!p.editable;
+    renderPolicyDrift(p);
     renderEgress();
-  }catch(err){ window.alert('Policy save failed: '+err.message); loadGuardrails(); }
+  }catch(err){
+    // A 409 keeps the unsaved edit on screen (policyWrite already took the new head), so the
+    // next change saves it on top of that head. Anything else reloads the live policy.
+    if(err.conflict){ renderEgress(); window.alert('Policy save failed: '+err.message+'. Your edit is kept here but not saved; the next change saves it on top of v'+err.head+'. Reload the page to discard it.'); return; }
+    if(!err.cancelled) window.alert('Policy save failed: '+err.message);
+    loadGuardrails();
+  }
+}
+// renderPolicyDrift shows the drift banner while /dashboard/api/policy reports
+// that the served YAML differs from the head version (versioned store only).
+function renderPolicyDrift(p){
+  const b=document.getElementById('policyDriftBanner'); if(b) b.hidden=!(p&&p.drift===true);
 }
 
 /* ---------- DLP (observed matrix /analytics · rules /settings.dlp) ---------- */
@@ -3202,7 +3427,7 @@ async function saveLLMProviders(){
   const body=gr.llmp.providers.map(p=>({ name:p.name, baseURL:p.baseURL, model:p.model, apiKeyEnv:p.apiKeyEnv, timeoutSeconds:p.timeoutSeconds||0 }));
   llmpMsg('saving…',true);
   try{
-    const r=await api('PUT','/dashboard/api/llmproviders',body);
+    const r=await policyWrite('PUT','/dashboard/api/llmproviders',body,'LLM providers');
     if(!r.ok){ let m='status '+r.status; try{ const e=await r.json(); if(e&&e.error) m=e.error; }catch(_e){} throw new Error(m); }
     gr.llmp=await r.json(); gr.llmp.providers=gr.llmp.providers||[];
     renderLLMProviders();
@@ -3708,6 +3933,321 @@ async function deleteIntegration(name){
   }catch(err){ alert('Delete failed: '+err.message); }
 }
 
+/* adminlog:begin */
+/* ============================================================
+   Admin log (W-P1-AAUD-03): GET /dashboard/api/admin-audit, POST .../verify,
+   GET .../pubkey, all through api(). Read-only: nothing here writes to the chain.
+   The nav item shows only to an admin (roleAllows; none mode leaves it to the server)
+   and only when the API is wired (a worker or a CP with admin audit off answers 404).
+   Every rendered field goes through esc(); errors are generic messages.
+   ============================================================ */
+const AL_LIMIT=50;
+const AL_OUTCOME={ok:'p-allow',denied:'p-deny',rejected:'p-med',error:'p-high'};
+const al={cursors:[0], next:0, filter:{actor:'',action:'',outcome:''}, verifying:false};
+async function adminLogProbe(){
+  const nav=document.getElementById('adminLogNav'); if(!nav) return;
+  await authInit();
+  if(!roleAllows('admin')){ nav.style.display='none'; return; }
+  let r=null;
+  try{ r=await api('GET','/dashboard/api/admin-audit/pubkey'); }catch(e){ r=null; }
+  nav.style.display= r&&r.ok ? '' : 'none';
+}
+function alQS(){
+  const p=new URLSearchParams();
+  p.set('limit',String(AL_LIMIT));
+  const c=al.cursors[al.cursors.length-1]; if(c>0) p.set('cursor',String(c));
+  if(al.filter.actor) p.set('actor',al.filter.actor);
+  if(al.filter.action) p.set('action',al.filter.action);
+  if(al.filter.outcome) p.set('outcome',al.filter.outcome);
+  return p.toString();
+}
+async function loadAdminLog(){ loadAdminLogKeys(); loadAdminLogEntries(); }
+async function loadAdminLogEntries(){
+  const list=document.getElementById('al-list'); if(!list) return;
+  let r=null, d=null;
+  try{ r=await api('GET','/dashboard/api/admin-audit?'+alQS()); if(r.ok) d=await r.json(); }catch(e){ d=null; }
+  const older=document.getElementById('al-older'), newer=document.getElementById('al-newer'), pg=document.getElementById('al-page');
+  newer.disabled=al.cursors.length<=1;
+  if(!d||!Array.isArray(d.entries)){
+    al.next=0; older.disabled=true; pg.textContent='';
+    list.innerHTML='<div class="card-pad note">'+(r&&r.status===400?'Check the filters: one of them is not valid.':'The admin log is unavailable.')+'</div>';
+    return;
+  }
+  al.next=d.nextCursor||0; older.disabled=!al.next;
+  pg.textContent='page '+al.cursors.length;
+  if(!d.entries.length){ list.innerHTML='<div class="card-pad note">No entries match.</div>'; return; }
+  list.innerHTML='<table><thead><tr><th>Seq</th><th>Time</th><th>Actor</th><th>Action</th><th>Target</th><th>Outcome</th><th>Key</th></tr></thead><tbody>'+
+    d.entries.map(x=>'<tr><td class="mono">'+esc(x.seq)+'</td>'
+      +'<td style="font-size:12px">'+esc(x.time)+'</td>'
+      +'<td><b>'+esc(x.actorEmail||x.actorSub||x.actorId)+'</b>'
+        +'<div class="muted" style="font-size:11px">'+esc(x.actorRole)+' · '+esc(x.authMethod)+'</div></td>'
+      +'<td class="mono" style="font-size:12px">'+esc(x.action)+'</td>'
+      +'<td style="font-size:12px">'+esc(x.target)+'<div class="mono muted" style="font-size:11px">'+esc(x.targetRef)+'</div></td>'
+      +'<td><span class="pill '+esc(AL_OUTCOME[x.outcome]||'p-low')+'">'+esc(x.outcome)+'</span> <span class="muted" style="font-size:11px">'+esc(x.httpStatus)+'</span></td>'
+      +'<td class="mono muted" style="font-size:11px">'+esc(x.keyId)+'</td></tr>').join('')+'</tbody></table>';
+}
+async function loadAdminLogKeys(){
+  const box=document.getElementById('al-keys'); if(!box) return;
+  let d=null;
+  try{ const r=await api('GET','/dashboard/api/admin-audit/pubkey'); if(r.ok) d=await r.json(); }catch(e){ d=null; }
+  if(!d||!Array.isArray(d.keys)){ box.innerHTML='<div class="note">Signing keys are unavailable.</div>'; return; }
+  if(!d.keys.length){ box.innerHTML='<div class="note">No signing key yet.</div>'; return; }
+  box.innerHTML=d.keys.map(k=>'<div style="display:flex;align-items:center;gap:10px;padding:6px 0;flex-wrap:wrap">'
+    +'<span class="tag">'+esc(d.alg)+'</span><span class="mono" style="font-size:12px">key '+esc(k.keyId)+'</span>'
+    +'<span class="muted" style="font-size:11px">from seq '+esc(k.firstSeq)+'</span>'
+    +'<code class="mono" style="font-size:11px;word-break:break-all">'+esc(k.publicKey)+'</code>'
+    +'<button class="btn sm al-copy" data-key="'+esc(k.publicKey)+'">Copy</button></div>').join('');
+  box.querySelectorAll('.al-copy').forEach(b=>b.addEventListener('click',async()=>{
+    try{ await navigator.clipboard.writeText(b.dataset.key); b.textContent='Copied'; }catch(e){ b.textContent='Copy failed'; }
+  }));
+}
+/* verifyAdminLog runs POST .../verify and, while the server reports a partial run (its per-call
+   row cap), resumes from lastVerifiedSeq+1, so a long chain is checked in bounded requests. */
+async function verifyAdminLog(){
+  if(al.verifying) return;
+  const out=document.getElementById('al-verify-result'), btn=document.getElementById('al-verify');
+  const aSeq=document.getElementById('al-anchor-seq').value.trim(), aHash=document.getElementById('al-anchor-hash').value.trim();
+  let anchor=null;
+  if(aSeq||aHash){
+    if(!/^[1-9][0-9]*$/.test(aSeq)||!/^[0-9a-fA-F]{64}$/.test(aHash)){ out.textContent='An anchor needs a positive seq and a 64-character hex entry hash.'; return; }
+    anchor={seq:Number(aSeq),hash:aHash.toLowerCase()};
+  }
+  al.verifying=true; btn.disabled=true; out.textContent='Verifying…';
+  let checked=0, from=0, res=null, status=0;
+  try{
+    for(let i=0;i<1000;i++){
+      const body={fromSeq:from}; if(anchor) body.anchor=anchor;
+      const r=await api('POST','/dashboard/api/admin-audit/verify',body);
+      status=r.status;
+      if(!r.ok){ res=null; break; }
+      res=await r.json();
+      checked+=res.checked||0;
+      if(!res.ok||!res.partial) break;
+      from=(res.lastVerifiedSeq||0)+1;
+    }
+  }catch(e){ res=null; }
+  al.verifying=false; btn.disabled=false;
+  if(!res){
+    out.textContent= status===429 ? 'A verification is already running. Try again in a moment.' : 'Verification could not run. Try again.';
+    return;
+  }
+  if(res.ok&&res.partial){ out.textContent='Verified '+checked+' entries so far; the run stopped early. Verify again to continue.'; return; }
+  out.innerHTML= res.ok
+    ? '<b style="color:var(--teal)">Chain intact.</b> '+esc(checked)+' entries verified; head seq '+esc(res.headSeq)+' <span class="mono muted" style="font-size:11px">'+esc(res.headHash)+'</span>'
+    : '<b style="color:var(--red)">Chain broken at seq '+esc(res.firstBadSeq)+'</b> ('+esc(res.reason||'failed check')+'). Last verified seq '+esc(res.lastVerifiedSeq)+'.';
+}
+(function(){
+  const g=id=>document.getElementById(id);
+  const apply=()=>{ al.filter={actor:g('al-actor').value.trim(),action:g('al-action').value.trim(),outcome:g('al-outcome').value}; al.cursors=[0]; loadAdminLogEntries(); };
+  if(g('al-apply')) g('al-apply').addEventListener('click',apply);
+  ['al-actor','al-action'].forEach(id=>{ const el=g(id); if(el) el.addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); apply(); } }); });
+  if(g('al-older')) g('al-older').addEventListener('click',()=>{ if(al.next){ al.cursors.push(al.next); loadAdminLogEntries(); } });
+  if(g('al-newer')) g('al-newer').addEventListener('click',()=>{ if(al.cursors.length>1){ al.cursors.pop(); loadAdminLogEntries(); } });
+  if(g('al-verify')) g('al-verify').addEventListener('click',verifyAdminLog);
+})();
+/* adminlog:end */
+/* policyhistory:begin */
+/* ============================================================
+   Policy history (W-P1-PVER-04). In --policy-store=versioned the policy, settings and
+   llmProviders panels edit one versioned document:
+   - policyWrite sends every save of the three with If-Match: "v<head>" (the head from the last
+     GET of one of them) and the optional message from the save dialog, percent-encoded in
+     X-Warden-Policy-Message. A 409 says who moved the head, takes the new head and leaves the
+     user's unsaved edits where they are. File mode (no version) sends neither header.
+   - The History card on the Egress tab lists versions (GET /dashboard/api/policy/versions,
+     cursor 'load more'), renders the server's structural diff of a selected version against
+     head (GET .../{v}/diff; nothing is diffed here) and rolls back (POST .../{v}/rollback with
+     If-Match, after a confirm dialog naming the target) for editor and admin.
+   Author and message are whatever the saver typed: this block sets every server value with
+   textContent and builds no markup from strings. Credentials only ever arrive as fingerprints.
+   ============================================================ */
+const PH_VERSIONS='/dashboard/api/policy/versions';
+const PH_LIMIT=20;
+const POLICY_MSG_MAX=512;
+const POLICY_DOC_GET=/^\/dashboard\/api\/(policy|settings|llmproviders)(\?|$)/;
+let policyHead=0;   // head version from the last policy/settings/llmProviders response; 0 = file mode
+const ph={seq:0, next:0, head:0, selected:0};
+function notePolicyHead(r){
+  const v=r&&r.headers?r.headers.get('X-Warden-Policy-Version'):null;
+  if(v&&/^[1-9][0-9]*$/.test(v)) policyHead=Number(v);
+}
+function phEl(tag,cls,text){
+  const e=document.createElement(tag);
+  if(cls) e.className=cls;
+  if(text!=null) e.textContent=String(text);
+  return e;
+}
+function phClip(s){ return Array.from(String(s||'')).slice(0,POLICY_MSG_MAX).join(''); }
+/* askPolicyDialog(title,desc,okLabel): the save message / rollback confirm dialog. Resolves to
+   the typed message ('' for none) or null when cancelled (Cancel, Escape). */
+function askPolicyDialog(title,desc,okLabel){
+  const d=document.getElementById('policyMsgDialog');
+  if(!d||typeof d.showModal!=='function'){
+    const t=window.prompt(title+'\n'+desc+'\n\nMessage (optional):','');
+    return Promise.resolve(t===null?null:phClip(t));
+  }
+  document.getElementById('pmd-title').textContent=title;
+  document.getElementById('pmd-desc').textContent=desc;
+  document.getElementById('pmd-ok').textContent=okLabel;
+  const input=document.getElementById('pmd-input'); input.value='';
+  return new Promise(res=>{
+    d.returnValue='';
+    d.addEventListener('close',()=>res(d.returnValue==='ok'?phClip(input.value):null),{once:true});
+    d.showModal(); input.focus();
+  });
+}
+/* conflictError turns a 409 policy_conflict body into the error the save flows show. */
+function conflictError(body){
+  const a=(body&&body.author)||{};
+  const head=Number(body&&body.head)||0;
+  const e=new Error('policy changed by '+(a.email||a.sub||'someone else')+' (v'+head+')');
+  e.conflict=true; e.head=head;
+  return e;
+}
+/* policyWrite(method,url,body,what): a policy, settings or llmProviders save. Returns api()'s
+   Response; throws a conflict error on 409 and a cancelled error when the dialog is dismissed. */
+async function policyWrite(method,url,body,what){
+  const hdrs={};
+  if(policyHead>0){
+    const msg=await askPolicyDialog('Save '+what,'This save creates a new policy version on top of v'+policyHead+'.','Save');
+    if(msg===null){ const e=new Error('save cancelled'); e.cancelled=true; throw e; }
+    hdrs['If-Match']='"v'+policyHead+'"';
+    if(msg) hdrs['X-Warden-Policy-Message']=encodeURIComponent(msg);
+  }
+  const r=await api(method,url,body,hdrs);
+  if(r.status===409){
+    let b=null; try{ b=await r.json(); }catch(_e){ b=null; }
+    const e=conflictError(b);
+    if(e.head>0) policyHead=e.head;   // the next save is based on the new head; the edit stays local
+    loadPolicyHistory(true);
+    throw e;
+  }
+  notePolicyHead(r);
+  if(r.ok) loadPolicyHistory(true);
+  return r;
+}
+function showPolicyHistory(pol){
+  const card=document.getElementById('policyHistory'); if(!card) return;
+  const v=Number(pol&&pol.version)||0;
+  card.style.display=v>0?'':'none';
+  if(v>0) loadPolicyHistory(true);
+}
+async function loadPolicyHistory(reset){
+  const card=document.getElementById('policyHistory'), list=document.getElementById('ph-list'), more=document.getElementById('ph-more');
+  if(!card||!list||card.style.display==='none') return;
+  const seq=++ph.seq;
+  const cursor=reset?0:ph.next;
+  let d=null;
+  try{ d=await jget(PH_VERSIONS+'?limit='+PH_LIMIT+(cursor?'&cursor='+cursor:'')); }catch(e){ d=null; }
+  if(seq!==ph.seq) return;   // a newer load replaced this one
+  if(!d||!Array.isArray(d.versions)){
+    if(reset) list.replaceChildren(phEl('div','card-pad note','The policy history is unavailable.'));
+    more.style.display='none';
+    return;
+  }
+  if(reset){ list.replaceChildren(); document.getElementById('ph-diff').style.display='none'; ph.selected=0; }
+  ph.head=Number(d.head)||0;
+  document.getElementById('ph-head').textContent=ph.head?('head v'+ph.head):'';
+  d.versions.forEach(x=>list.appendChild(phRow(x)));
+  if(reset&&!d.versions.length) list.appendChild(phEl('div','card-pad note','No versions yet.'));
+  ph.next=Number(d.next_cursor)||0;
+  more.style.display=ph.next?'':'none';
+}
+function phRow(x){
+  const v=Number(x.version)||0;
+  const row=phEl('div','ph-row'); row.dataset.version=String(v);
+  const ver=phEl('span','mono','v'+x.version);
+  const who=phEl('b');
+  who.textContent=x.author_email||x.author_sub||'';
+  const when=phEl('span','muted');
+  when.textContent=relTime(x.created_at); when.title=String(x.created_at||'');
+  const src=phEl('span','tag',x.source||'');
+  const msg=phEl('span','ph-msg');
+  msg.textContent=x.message||''; msg.title=msg.textContent;
+  row.append(ver,who,when,src,msg);
+  if(v===ph.head){
+    row.appendChild(phEl('span','pill p-allow','head'));
+  }else{
+    const b=phEl('button','btn sm','Roll back');
+    b.setAttribute('data-min-role','editor');
+    b.disabled=!roleAllows('editor');
+    b.addEventListener('click',ev=>{ ev.stopPropagation(); rollbackTo(v); });
+    row.appendChild(b);
+  }
+  row.addEventListener('click',()=>showPolicyDiff(v));
+  return row;
+}
+function phVal(v){ try{ return JSON.stringify(v); }catch(e){ return String(v); } }
+/* phChangeList renders one section of the server's diff: each change's kind, its key (an entry's
+   DiffKey or a settings path) and the old and new values. */
+function phChangeList(title,changes,keyOf){
+  const wrap=phEl('div');
+  wrap.appendChild(phEl('h4',null,title+' ('+changes.length+')'));
+  const ul=phEl('ul');
+  changes.forEach(c=>{
+    const li=phEl('li');
+    const kind=String(c.kind||'');
+    li.appendChild(phEl('span','pill '+(kind==='added'?'p-allow':kind==='removed'?'p-deny':'p-med'),kind));
+    li.appendChild(phEl('span','mono',' '+keyOf(c)));
+    if(kind!=='added') li.appendChild(phEl('div','mono muted','old: '+phVal(c.before)));
+    if(kind!=='removed') li.appendChild(phEl('div','mono','new: '+phVal(c.after)));
+    ul.appendChild(li);
+  });
+  wrap.appendChild(ul);
+  return wrap;
+}
+async function showPolicyDiff(v){
+  const box=document.getElementById('ph-diff'); if(!box) return;
+  ph.selected=v;
+  document.querySelectorAll('#ph-list .ph-row').forEach(r=>r.classList.toggle('sel',r.dataset.version===String(v)));
+  box.style.display='';
+  box.replaceChildren(phEl('div','note','Loading the diff of v'+v+'…'));
+  let d=null;
+  try{ d=await jget(PH_VERSIONS+'/'+encodeURIComponent(v)+'/diff'); }catch(e){ d=null; }
+  if(ph.selected!==v) return;
+  if(!d||!d.diff){ box.replaceChildren(phEl('div','note','The diff of v'+v+' is unavailable.')); return; }
+  const allow=d.diff.allow||[], deny=d.diff.deny||[], settings=d.diff.settings||[];
+  const parts=[phEl('div','sub','Diff v'+d.from+' (head) → v'+d.to+': what rolling back to v'+d.to+' changes')];
+  if(!allow.length&&!deny.length&&!settings.length) parts.push(phEl('div','note','No differences: v'+d.to+' has the same policy and settings as head.'));
+  if(allow.length) parts.push(phChangeList('Allowlist',allow,c=>c.key));
+  if(deny.length) parts.push(phChangeList('Denylist',deny,c=>c.key));
+  if(settings.length) parts.push(phChangeList('Settings',settings,c=>c.path));
+  box.replaceChildren(...parts);
+}
+async function rollbackTo(v){
+  if(!roleAllows('editor')) return;
+  const head=policyHead;
+  if(!head||v===head) return;
+  const note=await askPolicyDialog('Roll back to v'+v+'?','This publishes the policy and settings of v'+v+' as a new version on top of v'+head+'. History is kept; credentials and the block list stay as they are now.','Roll back to v'+v);
+  if(note===null) return;
+  const st=document.getElementById('ph-status');
+  st.textContent='rolling back to v'+v+'…';
+  let r=null, b=null;
+  try{ r=await api('POST',PH_VERSIONS+'/'+encodeURIComponent(v)+'/rollback',note?{note:note}:undefined,{'If-Match':'"v'+head+'"'}); }catch(e){ r=null; }
+  if(!r){ st.textContent='✕ rollback failed: the control plane did not answer'; return; }
+  try{ b=await r.json(); }catch(_e){ b=null; }
+  if(r.status===409){
+    const e=conflictError(b);
+    if(e.head>0) policyHead=e.head;
+    st.textContent='✕ '+e.message+'. Check the history, then roll back again.';
+    loadPolicyHistory(true);
+    return;
+  }
+  if(r.status===422){ st.textContent='✕ v'+v+' no longer passes validation'+(b&&b.detail?(': '+b.detail):''); return; }
+  if(!r.ok){ st.textContent='✕ rollback failed: '+((b&&b.error)||('status '+r.status)); return; }
+  notePolicyHead(r);
+  st.textContent=(b&&b.changed===false)?('v'+v+' matches head: nothing changed.'):('rolled back: head is now v'+((b&&b.head)||policyHead)+'.');
+  loadGuardrails();
+}
+(function(){
+  const more=document.getElementById('ph-more');
+  if(more) more.addEventListener('click',()=>loadPolicyHistory(false));
+  // Enter in the message field confirms (the form's first button is Cancel).
+  const input=document.getElementById('pmd-input'), d=document.getElementById('policyMsgDialog');
+  if(input&&d&&typeof d.close==='function') input.addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); d.close('ok'); } });
+})();
+/* policyhistory:end */
+
 /* ============================================================
    Init
    ============================================================ */
@@ -3746,6 +4286,7 @@ syncCollapse('mcpToolsCard','warden.mcpToolsOpen',false);
 // initial data
 loadSetup();
 refreshAlertBadge();  // seed the sidebar Alerts badge without opening the tab
+adminLogProbe();      // show the Admin log tab only where it is wired and allowed
 const savedTab = (function(){ try{ return localStorage.getItem('warden.tab'); }catch(e){ return null; } })();
 const startTab = (savedTab && document.getElementById('page-'+savedTab)) ? savedTab : 'overview';
 go(startTab);

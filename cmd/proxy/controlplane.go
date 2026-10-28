@@ -6,6 +6,65 @@ import (
 	"github.com/ethosagent/warden/internal/controlplane"
 )
 
+// controlPlaneParams parses the control-plane flags into controlplane.Params.
+func controlPlaneParams(cmd *cobra.Command) (controlplane.Params, error) {
+	configPath, err := cmd.Flags().GetString("config")
+	if err != nil {
+		return controlplane.Params{}, err
+	}
+	listenAddr, _ := cmd.Flags().GetString("listen")
+	tokenEnv, _ := cmd.Flags().GetString("token-env")
+	legacyTokenEnv, _ := cmd.Flags().GetString("legacy-token-env")
+	requireWorkerTokens, _ := cmd.Flags().GetBool("require-worker-tokens")
+	allowInsecure, _ := cmd.Flags().GetBool("allow-insecure-worker-auth")
+	adminTokenEnv, _ := cmd.Flags().GetString("admin-token-env")
+	caCert, _ := cmd.Flags().GetString("ca-cert")
+	caKey, _ := cmd.Flags().GetString("ca-key")
+	tlsHost, _ := cmd.Flags().GetString("tls-host")
+	stateDir, _ := cmd.Flags().GetString("state-dir")
+	maxEvents, _ := cmd.Flags().GetInt("central-max-events")
+	aProvider, _ := cmd.Flags().GetString("analytics-provider")
+	aDB, _ := cmd.Flags().GetString("analytics-db")
+	aRetention, _ := cmd.Flags().GetInt("analytics-retention-days")
+	alertsDB, _ := cmd.Flags().GetString("alerts-db")
+	requireConsoleAuth, _ := cmd.Flags().GetBool("require-console-auth")
+	policyStore, _ := cmd.Flags().GetString("policy-store")
+	auditKeyFile, _ := cmd.Flags().GetString("admin-audit-key-file")
+	auditNewSegment, _ := cmd.Flags().GetString("admin-audit-new-segment")
+	backup, err := backupConfig(cmd)
+	if err != nil {
+		return controlplane.Params{}, err
+	}
+	if err := backup.Validate(stateDir); err != nil {
+		return controlplane.Params{}, err
+	}
+	return controlplane.Params{
+		Backup: backup, Version: version,
+		ConfigPath: configPath, ListenAddr: listenAddr,
+		TokenEnv: tokenEnv, LegacyTokenEnv: legacyTokenEnv, AdminTokenEnv: adminTokenEnv,
+		RequireWorkerTokens: requireWorkerTokens, AllowInsecureWorkerAuth: allowInsecure,
+		CACert: caCert, CAKey: caKey, TLSHost: tlsHost, StateDir: stateDir,
+		MaxEvents: maxEvents, AnalyticsProvider: aProvider, AnalyticsDB: aDB,
+		RetentionDays: aRetention, AlertsDB: alertsDB,
+		RequireConsoleAuth: requireConsoleAuth,
+		PolicyStore:        policyStore,
+		AdminAuditKeyFile:  auditKeyFile, AdminAuditNewSegment: auditNewSegment,
+	}, nil
+}
+
+// backupConfig reads the --backup-* flags. Validation (and so the error that
+// names the flag) is BackupConfig.Validate's.
+func backupConfig(cmd *cobra.Command) (controlplane.BackupConfig, error) {
+	dir, err := cmd.Flags().GetString("backup-dir")
+	if err != nil {
+		return controlplane.BackupConfig{}, err
+	}
+	interval, _ := cmd.Flags().GetDuration("backup-interval")
+	keep, _ := cmd.Flags().GetInt("backup-keep")
+	include, _ := cmd.Flags().GetStringSlice("backup-include")
+	return controlplane.BackupConfig{Dir: dir, Interval: interval, Keep: keep, Include: include}, nil
+}
+
 // newControlPlaneCmd builds the `control-plane` subcommand. The control plane
 // serves allow/deny policy to data-plane workers and aggregates their analytics
 // for a fleet dashboard. It is the same binary as the worker but a distinct
@@ -26,38 +85,20 @@ func newControlPlaneCmd() *cobra.Command {
 			"this boundary. Provide --ca-cert/--ca-key to serve HTTPS with a cert " +
 			"minted from that CA (workers trust it via controlPlane.caCert).",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			configPath, err := cmd.Flags().GetString("config")
+			p, err := controlPlaneParams(cmd)
 			if err != nil {
 				return err
 			}
-			listenAddr, _ := cmd.Flags().GetString("listen")
-			tokenEnv, _ := cmd.Flags().GetString("token-env")
-			caCert, _ := cmd.Flags().GetString("ca-cert")
-			caKey, _ := cmd.Flags().GetString("ca-key")
-			tlsHost, _ := cmd.Flags().GetString("tls-host")
-			stateDir, _ := cmd.Flags().GetString("state-dir")
-			maxEvents, _ := cmd.Flags().GetInt("central-max-events")
-			aProvider, _ := cmd.Flags().GetString("analytics-provider")
-			aDB, _ := cmd.Flags().GetString("analytics-db")
-			aRetention, _ := cmd.Flags().GetInt("analytics-retention-days")
-			alertsDB, _ := cmd.Flags().GetString("alerts-db")
-			requireConsoleAuth, _ := cmd.Flags().GetBool("require-console-auth")
-			policyStore, _ := cmd.Flags().GetString("policy-store")
-			auditKeyFile, _ := cmd.Flags().GetString("admin-audit-key-file")
-			auditNewSegment, _ := cmd.Flags().GetString("admin-audit-new-segment")
-			return controlplane.Run(cmd.Context(), cmd.OutOrStdout(), controlplane.Params{
-				ConfigPath: configPath, ListenAddr: listenAddr, TokenEnv: tokenEnv,
-				CACert: caCert, CAKey: caKey, TLSHost: tlsHost, StateDir: stateDir,
-				MaxEvents: maxEvents, AnalyticsProvider: aProvider, AnalyticsDB: aDB,
-				RetentionDays: aRetention, AlertsDB: alertsDB,
-				RequireConsoleAuth: requireConsoleAuth,
-				PolicyStore:        policyStore,
-				AdminAuditKeyFile:  auditKeyFile, AdminAuditNewSegment: auditNewSegment,
-			})
+			return controlplane.Run(cmd.Context(), cmd.OutOrStdout(), p)
 		},
 	}
 	cmd.Flags().String("listen", "0.0.0.0:7070", "control-plane HTTP(S) listen address")
-	cmd.Flags().String("token-env", "", "env var holding the bearer token workers must present")
+	cmd.Flags().String("legacy-token-env", "", "env var holding the shared bearer token workers may present next to their own worker tokens (the migration path off WARDEN_CP_TOKEN; unset = no shared token)")
+	cmd.Flags().String("token-env", "", "deprecated alias of --legacy-token-env")
+	_ = cmd.Flags().MarkDeprecated("token-env", "use --legacy-token-env")
+	cmd.Flags().Bool("require-worker-tokens", false, "strict worker auth: accept per-worker wwt_ tokens only and reject the shared token (needs --state-dir, TLS unless --allow-insecure-worker-auth, and no --legacy-token-env)")
+	cmd.Flags().Bool("allow-insecure-worker-auth", false, "let --require-worker-tokens run without TLS (development only: tokens travel in clear text)")
+	cmd.Flags().String("admin-token-env", "", "env var holding the control plane's own admin bearer for dashboard writes and /central/secrets (unset = they fall back to --legacy-token-env)")
 	cmd.Flags().String("ca-cert", "", "CA cert to mint the server TLS cert from (enables HTTPS)")
 	cmd.Flags().String("ca-key", "", "CA key to mint the server TLS cert from")
 	cmd.Flags().String("tls-host", "localhost,127.0.0.1", "comma-separated SANs for the minted server cert")
@@ -71,5 +112,12 @@ func newControlPlaneCmd() *cobra.Command {
 	cmd.Flags().Bool("require-console-auth", false, "refuse to start unless console.auth is oidc (no open dashboard)")
 	cmd.Flags().String("admin-audit-key-file", "", "admin audit signing key (default <state-dir>/cp-audit.key; the HMAC key sits beside it); used when console.adminAudit.enabled")
 	cmd.Flags().String("admin-audit-new-segment", "", "key_id of a new admin audit signing key: start a new chain segment for it (manual rotation; no-op once the chain head is on that key)")
+	cmd.Flags().String("backup-dir", "", "write scheduled backup sets of the CP state and served config here (empty = backups off; requires --state-dir; must not be inside it)")
+	cmd.Flags().Duration("backup-interval", controlplane.DefaultBackupInterval, "time between scheduled backups (minimum 1h)")
+	cmd.Flags().Int("backup-keep", controlplane.DefaultBackupKeep, "complete backup sets to keep (minimum 1)")
+	cmd.Flags().StringSlice("backup-include", controlplane.DefaultBackupInclude, "what a backup set contains, from cp,alerts,config,fleet (fleet is opt-in)")
+	// Offline subcommands over the CP state dir (admin-audit is read-only; backup
+	// takes the state-dir lock and writes only under --backup-dir).
+	cmd.AddCommand(newAdminAuditCmd(), newBackupCmd(), newControlPlaneTokenCmd(), newControlPlaneBlockCmd())
 	return cmd
 }

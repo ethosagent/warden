@@ -82,14 +82,19 @@ func newChainVerifier(hmacKey []byte) *chainVerifier {
 	return &chainVerifier{keys: map[string]ed25519.PublicKey{}, hmacKey: hmacKey}
 }
 
+// nextSeq is the seq the chain expects next.
+func (v *chainVerifier) nextSeq() int64 {
+	if v.havePrev {
+		return v.prev.Seq + 1
+	}
+	return 1
+}
+
 // check verifies r against the chain so far. It returns the bad seq and the
 // reason, or 0 and "" when r verifies (and becomes the new previous entry).
 func (v *chainVerifier) check(r storedRow) (int64, string) {
 	e := &r.entry
-	want := int64(1)
-	if v.havePrev {
-		want = v.prev.Seq + 1
-	}
+	want := v.nextSeq()
 	if e.Seq != want {
 		return want, ReasonSeqGap
 	}
@@ -226,6 +231,15 @@ func (s *Store) Verify(ctx context.Context, opts VerifyOptions) (Result, error) 
 	}
 	res.OK = true
 	return res, nil
+}
+
+// VerifyWithStoreKey is Verify with the store's own HMAC key in place of
+// opts.HMACKey, so rows that have a side row are also checked for actor_id =
+// HMAC(sub) without the key leaving the store. The control plane's dashboard
+// verify (W-P1-AAUD-03) uses it.
+func (s *Store) VerifyWithStoreKey(ctx context.Context, opts VerifyOptions) (Result, error) {
+	opts.HMACKey = s.hmacKey
+	return s.Verify(ctx, opts)
 }
 
 // readPage returns up to n rows with after < seq <= upper, in seq order.
