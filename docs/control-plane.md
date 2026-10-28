@@ -52,7 +52,9 @@ a worker. There are exactly three calls:
    changes**, or **304** at the timeout; the worker re-polls immediately. Policy
    edits reach workers in ~one round-trip, not after a fixed interval.
 2. **Heartbeat** — `POST /control/heartbeat` (~every 10s) so the CP lists the
-   worker as online even when idle, and knows its current policy version.
+   worker as online even when idle, and knows its current policy version and the
+   capabilities it advertises (`caps`, e.g. `blocklist/v1`), so the console can flag
+   workers that would silently ignore newer policy fields.
 3. **Analytics** — `POST /central/ingest` (worker → CP).
 
 The dashboard shows only what the CP already has (pushed analytics + the
@@ -78,10 +80,33 @@ local-only/standalone worker still requires one.
 # 1. Generate the bake-once proxy CA (the control plane mints its cert from it).
 OUT_DIR=deploy/compose/certs ./scripts/gen-certs.sh
 
-# 2. Bring up the control plane + two workers + two synthetic agents.
-WARDEN_CP_TOKEN=dev-token \
-  docker compose -f deploy/compose/docker-compose.control-plane.yml up
+# 2. Bring up the control plane + two workers + two synthetic agents. The compose
+#    defaults are public dev placeholders (deploy/compose/.env.example); for
+#    anything but a laptop, set your own values first (see below).
+docker compose -f deploy/compose/docker-compose.control-plane.yml up
 ```
+
+The recipe runs on [per-worker tokens](#worker-token-cli). A one-shot `cp-bootstrap` service
+registers each worker's token with `warden control-plane token create --from-env` on the control
+plane's state volume (`cp-data`) before the control plane and the workers start; running `up` again
+changes nothing. The control plane runs strict (`--require-worker-tokens`) with its own admin token
+(`--admin-token-env=WARDEN_CP_ADMIN_TOKEN`), TLS stays on, and no shared `WARDEN_CP_TOKEN` exists.
+Each worker container reads its own token (`WARDEN_WORKER_1_TOKEN`, `WARDEN_WORKER_2_TOKEN`)
+under the in-container name `WARDEN_WORKER_TOKEN`, which `configs/config.worker.yaml` names in both
+`controlPlane.tokenEnv` and `central.tokenEnv`, so the two workers share one config file and still
+hold different tokens.
+
+To use your own values, generate a token per worker and export it (or put it in a git-ignored
+`deploy/compose/.env`) before `up`:
+
+```sh
+echo wwt_$(head -c32 /dev/urandom | base32 | tr -d = | tr A-Z a-z | head -c52)   # one per worker
+export WARDEN_WORKER_1_TOKEN=wwt_...  WARDEN_WORKER_2_TOKEN=wwt_...  WARDEN_CP_ADMIN_TOKEN=...
+```
+
+Never commit a real value. [`deploy/compose/.env.example`](../deploy/compose/.env.example) lists the
+variables with obviously fake dev placeholders. Dashboard writes (policy edits) need
+`Authorization: Bearer $WARDEN_CP_ADMIN_TOKEN`; a worker token never opens them.
 
 - Fleet dashboard: **https://localhost:7070/dashboard/** (cert signed by the
   proxy CA — trust it in your browser, or `curl --cacert deploy/compose/certs/proxy-ca.crt`).
@@ -98,7 +123,7 @@ the change — no restart.
 ```sh
 # Control plane (HTTPS, minted from the proxy CA):
 warden control-plane --config configs/config.control-plane.yaml \
-  --listen 0.0.0.0:7070 --token-env WARDEN_CP_TOKEN \
+  --listen 0.0.0.0:7070 --legacy-token-env WARDEN_CP_TOKEN \
   --admin-token-env WARDEN_CP_ADMIN_TOKEN \
   --ca-cert certs/proxy-ca.crt --ca-key certs/proxy-ca.key --tls-host control-plane
 
@@ -128,6 +153,12 @@ worker requires HTTPS for the policy pull.
   > `:ro` mount) the dashboard surfaces a `permission denied` error and editing
   > is effectively disabled. The control plane logs a clear warning at startup
   > when its served-config directory is not writable.
+  >
+  > **One control plane per state dir.** With `--state-dir` the control plane holds
+  > an exclusive lock on `<state-dir>/warden-cp.lock` (mode 0600, holds the PID for
+  > operators) for as long as it runs; a second control plane on the same dir fails
+  > with `state dir ... is in use by another control plane`. A crash drops the lock
+  > automatically, so there is no stale lock to clear. Unix only.
 - **Connected workers** — a live list of every worker the control plane has heard
   from (via policy pulls and analytics ingest): online/offline status, last-seen,
   last policy pull, and events forwarded. Hidden on a single-node dashboard.
@@ -182,7 +213,7 @@ on every human route (see [Migrating from none to oidc](#migrating-from-none-to-
 
 - **The admin token.** Start the control plane with `--admin-token-env <ENV>`
   (for example `--admin-token-env WARDEN_CP_ADMIN_TOKEN`) naming the env var that
-  holds its own admin bearer. It is separate from the `--token-env` token workers
+  holds its own admin bearer. It is separate from the `--legacy-token-env` token workers
   present: once it is set, the worker token gets `401` on dashboard writes and on
   `/central/secrets`, and the admin token gets `401` on the worker routes
   (`/policy`, `/control/heartbeat`, `/central/ingest`). Use different values; the
@@ -191,7 +222,7 @@ on every human route (see [Migrating from none to oidc](#migrating-from-none-to-
   Giving the control plane its own admin token means retiring the shared worker
   token (per-worker tokens) never disables dashboard writes.
 - **Fallback.** Without `--admin-token-env`, the admin bearer is the shared
-  `--token-env` token, exactly as before, and startup logs one warning:
+  `--legacy-token-env` token, exactly as before, and startup logs one warning:
   `dashboard writes use the shared worker token; set --admin-token-env`. With no
   token of either kind, `/central/secrets` keeps the development pass-through of
   the worker routes, and dashboard writes are refused (below).
@@ -202,7 +233,7 @@ on every human route (see [Migrating from none to oidc](#migrating-from-none-to-
   `--require-console-auth` to make none mode a startup error instead.
 
 - **Fail closed.** A control plane started with no admin bearer (neither
-  `--admin-token-env` nor `--token-env`, or their variables empty) refuses every
+  `--admin-token-env` nor `--legacy-token-env`, or their variables empty) refuses every
   dashboard write with `403` and a message (`dashboard writes are disabled`) that
   names `--admin-token-env`. There is no open mode for dashboard writes. A
   whitespace-only token counts as not configured. When `--admin-token-env` names
@@ -261,6 +292,8 @@ needs a restart. It holds the *name* of the client-secret env var, never the sec
 | `adminAudit.enabled` | `false` | Turns on the signed admin audit log; needs `--state-dir`. See [Admin audit log](#admin-audit-log). |
 | `trustedProxies` | none | CIDRs of reverse proxies in front of the control plane. Only a peer inside one may set the client address the admin audit log records, through `X-Forwarded-For`. A bare address or anything that is not a CIDR is a startup error. |
 
+Running the identity provider itself (Dex clients, connectors, the split-horizon issuer, failure modes and the production checklist) is covered in [Running Dex as Warden's identity provider](identity-dex.md).
+
 In `oidc` mode the control plane also needs a non-empty value in the client-secret env
 var and `--state-dir`; without either it refuses to start. See
 `configs/config.control-plane.yaml` for commented examples.
@@ -269,7 +302,7 @@ In `oidc` mode every human route needs a session: each `/dashboard/*` route need
 least the viewer role, writes need the CSRF header, and `/central/secrets` (GET, POST
 and `DELETE /central/secrets/{key}`) needs an admin session plus CSRF. An
 `Authorization` header is ignored on those routes, so neither the shared
-`--token-env` token, the `--admin-token-env` token nor any other bearer opens them (401 without a session, 403 for a
+`--legacy-token-env` token, the `--admin-token-env` token nor any other bearer opens them (401 without a session, 403 for a
 role below admin). The worker routes (`/policy`, `/control/heartbeat`,
 `/central/ingest`) keep the shared bearer in both modes.
 
@@ -482,6 +515,10 @@ chain still verifies. To catch that, the control plane also writes the chain to 
 - `msg=admin_audit.checkpoint`, the chain head (`head_seq`, `head_entry_hash`,
   `key_id`) at startup, every 5 minutes and at shutdown.
 
+For a closed, versioned JSON copy of the same entries (and these checkpoints) that a shipper
+can read without parsing the operational log, enable `audit.jsonLog`; see
+[siem.md](siem.md#admin-stream).
+
 Ship these lines off-host (your log collector or SIEM) where the control plane's state
 dir cannot reach them. The newest `admin_audit.checkpoint` or `admin_audit` line you
 hold is an anchor: verify the chain with `admin-audit verify --anchor <seq>:<entry_hash>`
@@ -597,6 +634,10 @@ fails when the two differ.
 | `/dashboard/api/analytics` | GET | viewer | `analytics.read` |
 | `/dashboard/api/audit` | GET | viewer | `audit.read` |
 | `/dashboard/api/audit/verify` | POST | viewer | `audit.verify` |
+| `/dashboard/api/backup` | POST | admin | `backup.run` |
+| `/dashboard/api/blocked-users` | GET | admin | `blocked_users.read` |
+| `/dashboard/api/blocked-users` | POST | admin | `blocked_users.add` |
+| `/dashboard/api/blocked-users/{id}` | DELETE | admin | `blocked_users.remove` |
 | `/dashboard/api/detection` | GET | viewer | `detection.read` |
 | `/dashboard/api/detection` | POST | editor | `detection.write` |
 | `/dashboard/api/detection` | PUT | editor | `detection.write` |
@@ -629,6 +670,9 @@ fails when the two differ.
 | `/dashboard/api/settings` | PUT | editor | `settings.write` |
 | `/dashboard/api/setup` | GET | viewer | `setup.read` |
 | `/dashboard/api/traffic` | GET | viewer | `traffic.read` |
+| `/dashboard/api/worker-tokens` | GET | viewer | `worker_token.read` |
+| `/dashboard/api/worker-tokens` | POST | admin | `worker_token.create` |
+| `/dashboard/api/worker-tokens/{id}` | DELETE | admin | `worker_token.revoke` |
 | `/dashboard/api/workers` | GET | viewer | `workers.read` |
 
 A method and path with no row is refused (`403`) for every role, `GET` included.
@@ -691,9 +735,10 @@ append is logged at ERROR and does not stop startup.
   the served YAML `secretStore` block and is merged in when `/policy` is built,
   so workers get the same bytes as before. In history responses and diffs a
   credential appears only as its fingerprint, never the value.
-- Serve-time overlay data is not stored either. The credential is the only
-  overlay today; the block list will be one when it ships. A rollback therefore
-  never restores an old credential or block list.
+- Serve-time overlay data is not stored either. The credential
+  (versioned mode) and the user block list (whenever a state dir is set) are the
+  overlays today. A rollback therefore never restores an old credential or
+  block list.
 - CP-local blocks (integrations, detection, `central`, `controlPlane`, ...)
   are not versioned; their editors keep rewriting the served YAML.
 
@@ -883,6 +928,285 @@ YAML if the mirror is lost.
   removed, the served YAML is only the write-through mirror of head, and hand
   edits are never served (they come in through `warden policy import`).
 
+## Scheduled backups (`--backup-dir`)
+
+Off by default. With `--backup-dir` (which needs `--state-dir` and must not be
+inside it) the control plane writes a backup set at startup when none is newer
+than the interval, then every `--backup-interval` (default 24h, minimum 1h)
+after the newest set, on one background goroutine; a restart does not skip a
+due backup. `--backup-keep` (default 7, minimum 1) newest complete sets are
+kept; `--backup-include` picks from `cp`, `alerts`, `config` and `fleet`
+(default `cp,alerts,config`; `fleet` is opt-in).
+
+Each set is a directory named `<UTC time>Z` (`20060102T150405Z`) holding a
+consistent copy of each database (`warden-cp.db`, `warden-alerts.db`,
+`warden-fleet.db`), the served `config.yaml` and a `manifest.json` written last.
+It is built in `.tmp-<time>` and renamed into place, so a set directory exists
+only when complete. Directories are 0700 and files 0600. Each database copy is
+consistent on its own; the set is not one snapshot across databases. The
+manifest's sha256 values check integrity, not authenticity.
+
+A set never holds `cp-audit.key` (or its HMAC key), the identity provider's
+storage or the secret backend (`not_included` in the manifest). A store that is
+not running (no alert store, `--analytics-provider=memory`) is listed under
+`skipped`. A run needs 1.2x the source sizes free on the backup filesystem or it
+fails with `insufficient free space` and writes nothing. Each copy logs
+`msg=cp_backup` with `db`, `bytes`, `duration_ms` and `outcome`.
+
+### On-demand backups
+
+With `--backup-dir` set, `POST /dashboard/api/backup` (admin role, audited as
+`backup.run` on target `backup`) starts one backup in the background and answers
+`202 {"started":true}`. It answers `409 {"error":"backup_in_progress"}` while a
+run is active and `404` when `--backup-dir` is unset. The body is ignored. In
+`console.auth: none` the write guard applies as for every dashboard write (the
+admin bearer; no token configured means `403`). The outcome is the scheduled
+runner's: a failed run is logged and reported, not returned to the caller.
+
+For a stopped control plane use the offline command, which takes the state-dir
+lock, opens the databases directly and writes one set in the same layout:
+
+```sh
+warden control-plane backup --state-dir /data --backup-dir /backups \
+  [--backup-include cp,alerts,config,fleet] [--analytics-db PATH] [--alerts-db PATH]
+```
+
+It prints the set path and exits 0, or prints the error and exits 1. While a
+control plane holds the state dir it exits 1 with `control plane is running; use
+POST /dashboard/api/backup or stop it`. It never opens the admin audit store (the
+manifest has no `audit_key_fingerprint`), never starts a server and never prunes
+older sets. A database that does not exist (for example no fleet database) is
+listed under `skipped`; a missing `warden-cp.db` is an error.
+
+## Worker tokens API
+
+With a state dir (`--state-dir`) the control plane keeps per-worker tokens (a worker
+presents `wwt_...` on `/policy`, `/control/heartbeat` and `/central/ingest`; the token's bound
+proxy id is the identity the control plane records). Admins manage them under
+`/dashboard/api/worker-tokens`:
+
+| Request | Role | Result |
+|---|---|---|
+| `GET /dashboard/api/worker-tokens` | viewer | 200, every token (revoked included): `id`, `name`, `proxyID`, `createdBy`, `createdAt`, `expiresAt`, `lastUsedAt`, `revokedAt`. Never the token or its hash. |
+| `POST /dashboard/api/worker-tokens` `{name, proxyID, expiresIn?}` | admin | 201 with the metadata and `token`, the only time the plaintext is shown (`Cache-Control: no-store`). `expiresIn` is a duration such as `720h`. 400 for invalid input or an unknown field, 409 for a taken name or a proxy id that already has two active tokens, 413 over 8 KiB. |
+| `DELETE /dashboard/api/worker-tokens/{id}` | admin | 204, soft revoke: the token's next request is a 401. 404 for an unknown id. |
+
+With `console.auth: none` a mint or revoke answers 403 `{"error":"use_cli"}` (there is no identity to
+attribute it to); use `warden control-plane token` on the control plane host. Listing still works.
+With admin audit on, create and revoke are rows (`worker_token.create`, `worker_token.revoke`,
+target `worker_tokens`, `target_ref` `token:<id>`); no row, log line or later response holds the token.
+A `wwt_` bearer never opens these routes. `GET /dashboard/api/workers` adds `authKind`
+(`token`, `legacy` or `none`), `tokenName`, `tokenLastUsed` and `legacyRequests` per worker.
+
+## Worker token CLI
+
+`warden control-plane token` creates, lists and revokes worker tokens straight on
+`<state-dir>/warden-cp.db`, with the control plane running or stopped. It needs no admin login, so it
+bootstraps the first tokens, and it is the only way to mint or revoke with `console.auth: none`. A
+running control plane sees a change within about 2 seconds, with no restart. Every subcommand
+takes a required `--state-dir`.
+
+```sh
+# Mint a token: the plaintext is printed once to stdout (the id and a note go to stderr).
+warden control-plane token create --name worker-2 --proxy-id worker-2 --state-dir /var/lib/warden-cp
+
+# Write it to a new file (mode 0600) instead; only the id is printed.
+warden control-plane token create --name worker-2 --proxy-id worker-2 --state-dir D --out worker-2.token
+
+# Register a value you generated (a wwt_ token, 4 + 52 characters), for compose or Kubernetes Secrets.
+WARDEN_WORKER_1_TOKEN=wwt_... warden control-plane token create --name worker-1 --proxy-id worker-1 \
+  --from-env WARDEN_WORKER_1_TOKEN --state-dir D
+
+warden control-plane token list --state-dir D [--json]
+warden control-plane token revoke --id wt_... --state-dir D
+```
+
+| Flag (create) | Meaning |
+|---|---|
+| `--name`, `--proxy-id` | required; the name is unique (1-64 characters), the token is bound to exactly one proxy id |
+| `--expires-in` | lifetime such as `720h`; default never |
+| `--from-env VAR`, `--from-file F` | register the `wwt_` value instead of minting one; the plaintext is never printed. Re-running with the same name and value changes nothing and exits 0; the same name with a different value fails |
+| `--out F` | write a minted token to the new file `F` (mode 0600); an existing file is never overwritten |
+| `--admin-audit-key-file` | admin audit signing key (default `<state-dir>/cp-audit.key`) |
+
+At most two tokens per proxy id may be active, so a rotation can overlap old and new. Exit codes: 1
+for any failure (invalid input, a taken name, a bad key), 2 for `revoke` of an unknown id.
+`list` opens the database read-only and never shows a token or its hash.
+
+When admin audit is on in the state dir, `create` and `revoke` append `worker_token.create` and
+`worker_token.revoke` rows (target `worker_tokens`, `target_ref` `token:<id>`, `auth_method` `cli`,
+actor `cli:<os user>`, details holding the id, name and proxy id only). With audit rows present and
+the signing key missing or not matching, the command exits non-zero and writes nothing. When audit
+was never enabled, a one-line notice says no row was appended. A no-op (an identical import, a
+repeat revoke) appends nothing.
+
+## Migrating from WARDEN_CP_TOKEN
+
+Until now every worker and the control plane shared one bearer token (`WARDEN_CP_TOKEN` in the
+compose recipes, named by `--token-env`). Per-worker tokens replace it: one revocable `wwt_...`
+token per worker, bound to one proxy id. The control-plane compose recipe and the e2e stack have
+already moved (see [Run it](#run-it)); the other recipes still use the shared token until they follow.
+The control plane has three auth modes, resolved once at
+startup and logged as `auth_mode=...`:
+
+| `auth_mode` | When | Workers authenticate with |
+|---|---|---|
+| `open` | no shared token, not strict | any caller without a `wwt_` token (development; a warning is logged). A `wwt_` bearer is always validated |
+| `mixed` | `--legacy-token-env` set (or its deprecated alias `--token-env`) | a worker token or the shared token |
+| `strict` | `--require-worker-tokens` | a worker token only: the shared token and anonymous callers get `401` |
+
+The startup line `control plane worker auth` also carries `legacy_token` (whether a shared token is
+configured, never its value), `tls` and `active_worker_tokens`. Worker tokens over plain HTTP log a
+warning, since the bearer then travels in clear text.
+
+The flags only change how **workers** authenticate. Dashboard writes and `/central/secrets` take
+the control plane's own admin bearer (`--admin-token-env`), so removing the shared token never
+disables them. The shared token reaches the write guard only as the fallback while
+`--admin-token-env` is unset.
+
+| Flag | Meaning |
+|---|---|
+| `--legacy-token-env <ENV>` | env var holding the shared worker token. Unset (the default) means there is none. `--token-env` is a deprecated alias: it still works and logs a deprecation notice; naming two different variables with the two flags is a startup error. |
+| `--require-worker-tokens` | strict mode (default off). Needs `--state-dir` (tokens live in its database), TLS (`--ca-cert` and `--ca-key`) unless `--allow-insecure-worker-auth` is set, and no legacy token. |
+| `--allow-insecure-worker-auth` | lets `--require-worker-tokens` run without TLS (development only). |
+
+A violation exits non-zero before the control plane listens, with an error that names the flag
+(`--require-worker-tokens requires --state-dir`, `--require-worker-tokens cannot be combined with
+--legacy-token-env`, `--require-worker-tokens requires TLS (--ca-cert and --ca-key) or
+--allow-insecure-worker-auth`).
+
+### Migration steps
+
+1. **Upgrade with `--legacy-token-env` and set `--admin-token-env`.** Rename `--token-env` to
+   `--legacy-token-env` (the old name keeps working) and add `--admin-token-env
+   WARDEN_CP_ADMIN_TOKEN` with a value different from the shared token, so dashboard writes no
+   longer depend on it. Add `--state-dir` if the control plane has none. The control plane starts
+   in `mixed` mode: nothing changes for the workers.
+2. **Create one token per worker.** Use `POST /dashboard/api/worker-tokens` (see [Worker tokens
+   API](#worker-tokens-api)) with `{"name": "...", "proxyID": "..."}`. The plaintext is shown once
+   in the response and never again. Minting through the API needs `console.auth: oidc` and an admin session; with
+   `console.auth: none` the API answers `403 use_cli`. Use the offline `warden control-plane token
+   create` command instead (see [Worker token CLI](#worker-token-cli)), which needs no login and
+   works before the first start. Give every worker (or replica) its own token and its own
+   `proxyID`.
+3. **Point the worker at its token.** Put the token in an env var of the worker and name that var
+   in both `controlPlane.tokenEnv` and `central.tokenEnv` (policy pull and heartbeat use the first,
+   analytics ingest the second). Set `central.proxyID` to the same value the token is bound to:
+   the control plane answers `403 proxy id mismatch` for any other `X-Warden-Proxy-ID`. Without
+   `central.proxyID` the worker sends no id and the control plane records the token's bound id.
+   Restart the worker. No code or image change is needed.
+4. **Confirm no legacy badge.** `GET /dashboard/api/workers` shows `authKind` per worker (`token`,
+   `legacy` or `none`) and, for `legacy` workers, `legacyRequests`. While any worker still
+   presents the shared token the control plane logs `legacy worker token in use` once per proxy id
+   per hour (never the token). The control plane has no metrics endpoint in P1, so the fleet view and
+   this warning are the signals. Move on only when every worker shows `authKind: token`.
+5. **Restart with `--require-worker-tokens`** and without `--legacy-token-env`. The startup line now
+   says `auth_mode=strict`. The shared token, an anonymous caller or any non-`wwt_` bearer gets
+   `401` on `/policy`, `/control/heartbeat` and `/central/ingest`.
+6. **Unset the shared env var** (`WARDEN_CP_TOKEN`) everywhere it was distributed.
+
+Strict mode with `console.auth: none` and no `--admin-token-env` (and so no admin token at all)
+fails closed: dashboard writes are refused with `403`, `/central/secrets` is not mounted (`404`),
+and the control plane logs an ERROR, `dashboard writes are disabled: set --admin-token-env`. With
+`--admin-token-env` set, both keep working. In `console.auth: oidc` sessions replace the admin
+bearer and strict mode needs no admin token.
+
+### Rotation
+
+A proxy id can hold at most two active tokens at once, so a rotation overlaps old and new:
+
+1. Create a second token for the same `proxyID` (a third active one is refused with `409`).
+2. Restart the worker with the new token in its env var.
+3. Check the old token's `lastUsedAt` stops moving, then revoke it
+   (`DELETE /dashboard/api/worker-tokens/{id}`).
+
+### Compromised-token runbook
+
+A worker token is suspected leaked (a log, a ticket, a laptop, a container image). The aim is to
+stop the token working at once and give the worker a new one, with the worker never running open.
+
+1. **Revoke the token.** From the console, `DELETE /dashboard/api/worker-tokens/{id}` (an admin
+   session; `GET /dashboard/api/worker-tokens` lists the ids), or on the host that holds the state
+   volume, `warden control-plane token revoke --id wt_... --state-dir <dir>`. The control plane sees
+   the revocation within about 2 seconds, with no restart.
+2. **Watch the worker fail.** Its next `/policy` and `/control/heartbeat` calls get `401`, and
+   ingest stops. The worker keeps enforcing the last-known-good policy it pulled, which is still
+   default-deny, but receives no updates, and the fleet view shows it offline. A worker that
+   restarts while revoked boots fail-closed and denies all egress until a pull succeeds.
+3. **Re-bootstrap a replacement.** Mint a new token for the same proxy id with `warden control-plane
+   token create --name <new-name> --proxy-id <id> --state-dir <dir>` (or `--from-env` with a value
+   you generated), put it in the worker's env var and restart the worker. At most 2 tokens may be
+   active per proxy id, so a replacement can be created before the old one is revoked: step 3 may
+   come before step 1 when the worker must keep updating, at the cost of a longer exposure.
+   Token names are unique and a revoked name stays taken. In the compose recipe, generate a new
+   value, set `WARDEN_WORKER_N_TOKEN` to it, give that worker a new `--name` in the `cp-bootstrap`
+   command (for example `w1-2`), then run `docker compose up -d`: `cp-bootstrap` registers the new
+   token and recreates the worker with it. Reusing the old name with a new value makes
+   `cp-bootstrap` fail, by design.
+4. **Look for misuse.** In `GET /dashboard/api/workers` and the console fleet view, `tokenLastUsed`
+   per worker (the token's `last_used_at`) shows when a token was last presented. Use at an
+   unexpected time, or after the worker was stopped, means someone else holds the token. Check it
+   before revoking (to see whether it is being used) and after (it must stop moving).
+
+### One token per replica
+
+P1 has no prefix binding: a token is bound to exactly one proxy id, compared exactly. Run each
+replica with its own token and its own stable `central.proxyID`. Autoscaled pools whose replicas
+cannot carry a stable id move to per-pod certificates with worker enrollment in P2 (W-P2-WCA).
+
+### A revoked worker
+
+A revoked (or expired) token gets `401` on its next request, with the same generic body as any
+other bad credential. The worker keeps enforcing the last policy it pulled, which stays
+default-deny (anything not on that allowlist is still blocked), and it can no longer heartbeat or
+ingest, so the fleet view shows it offline. A worker that restarts while revoked boots fail-closed
+and denies all egress until a pull succeeds. A long-poll already held when the token is revoked is
+answered `401` as soon as the control plane sees the revocation (at once for a console revoke,
+within about 2 seconds for the CLI), and a held poll is re-authenticated before it is answered, so
+it never receives a policy after the revoke.
+
+## Block list: offline CLI
+
+The user block list lives in `<state-dir>/warden-cp.db`, outside policy
+versions. When the console or the IdP is unavailable, or a script needs to
+block someone without a browser session, use the command line. It works with
+the control plane running or stopped.
+
+```sh
+warden control-plane block add --state-dir D [--sub S] [--email E] --reason R
+warden control-plane block remove --state-dir D --id ID
+warden control-plane block list --state-dir D [--json]
+```
+
+- `add` needs `--sub`, `--email` or both, and prints the new id. It uses the
+  same store and validator as the admin API: the email is lowercased, a
+  duplicate sub or email is refused, the reason is at most 512 bytes with no
+  control characters, and the count and size limits apply. A validation error
+  exits 1 with the API's message.
+- `remove` exits 2 for an id that is not on the list.
+- `list` opens the database read-only.
+- `--admin-audit-key-file` (add and remove) defaults to `<state-dir>/cp-audit.key`.
+
+**Audit.** With admin audit enabled in the state dir, each add and remove
+appends one `blocked_users.add` or `blocked_users.remove` row (actor
+`cli:<os user>`, auth_method `cli`, target `blocked_users`, target_ref
+`block:<id>`). The reason text is not recorded in the row or logged. The
+audit key is checked first: with audit rows present and the key missing or not
+matching, the command exits non-zero and writes nothing. If the audit append
+still fails, an add is rolled back and a remove deletes nothing. The block and
+its audit row are two commits, not one transaction, so a crash between them
+(or two concurrent removes of one id) can leave one without the other. A state dir where audit was never enabled
+gets a one-line notice and no row.
+
+**Pickup.** A running control plane polls `PRAGMA data_version` every 2 s and,
+when another process wrote, refreshes the served policy and runs the block
+store's change callbacks. A connected worker then receives the new list within
+2 s plus one long-poll round trip.
+
+The CLI has no console identity, so the self-unblock check of the admin API does
+not apply. Write access to the state dir already allows policy changes, so
+this adds no new authority.
+
 ## Worker admin token
 
 The worker's admin listener (`:9090`, default `127.0.0.1:9090`) serves the same
@@ -925,7 +1249,8 @@ curl -X POST http://127.0.0.1:9090/admin/refresh-secrets \
 ## Identity verification
 
 A worker can attribute traffic to the person behind an agent by verifying a user
-token from an OIDC issuer (for example the reference Dex). It is **off unless
+token from an OIDC issuer (for example the reference Dex, see
+[identity-dex.md](identity-dex.md)). It is **off unless
 configured** and, in P1, only **attributes**: it records who made a request and
 never blocks one.
 
@@ -1003,6 +1328,32 @@ agents:
   the agent**: whoever holds a valid token can present it. P2 adds binding and
   bundle-distributed JWKS.
 
+### Block list enforcement
+
+A worker denies every request from a user on the block list (`policy.blockedUsers`,
+by IdP `sub` and/or email). The list lives in the worker's policy evaluator and is
+swapped with allow/deny, at boot, on every long-poll update and for standalone
+YAML. It is checked at `CONNECT` (a `403` with `{"error":"user_blocked"}` before any
+dial, TLS or raw tunnel) and again on every request (HTTP/1.1 keep-alive, h2, gRPC
+streams and WebSocket upgrades, before any policy gate, judge or secret swap). Each
+deny records reason `user_blocked` and ends the session. `sub` is an exact match;
+email is matched case-insensitively.
+
+Matching uses the claims of any token the worker parsed, verified or not (valid,
+expired, bad signature): a match can only deny. Gaps:
+
+- A request that carries **no token** is anonymous in attribute mode and is not
+  matched (P2 require mode closes this).
+- With `identity` mode off the worker parses no token, so there are no claims to
+  match: the block list needs attribute mode.
+- In transparent mode there is no `CONNECT` and no `Proxy-Authorization`, so the
+  `CONNECT` check cannot run; only requests carrying `X-Warden-Identity` on
+  terminated traffic are matched.
+- Every policy update also resets rate-limit windows, so each block or unblock
+  resets them on every worker.
+- Sessions that are already open are cut at their next request; a user who is
+  blocked is cut at once (see [Block list](#block-list)).
+
 ### Deployment and rollout
 
 Workers need egress to the issuer. `deploy/k8s/networkpolicy.yaml` carries an
@@ -1014,6 +1365,66 @@ Roll out **control plane first**: upgrade the control plane so it accepts and se
 the `identity` block, then upgrade workers, then set `identity.defaultMode` or a
 per-agent `identity` value. Workers on an older build ignore the block, and a worker
 on this build with no block stays off, so every step is safe to pause at.
+
+## Block list
+
+An admin blocks a person by Dex `sub` or email. The list ships to workers on the
+policy wire as `blockedUsers`; a worker denies any request whose identity claims
+match with `403 {"error":"user_blocked"}` and a deny event with reason
+`user_blocked`. Matching uses the claims of any token the worker parsed, verified
+or not (an expired or bad-signature token still names its user), because a match
+can only deny.
+
+### Open sessions are cut
+
+A request that **arrived** under the old policy completes under it. A **session**
+that the new list matches is **cut when the change is applied**, not drained:
+
+- a raw CONNECT tunnel, an HTTP/2 connection and a WebSocket are closed at once,
+  and the close interrupts active streams, not only new ones;
+- an idle HTTP/1 keep-alive connection is closed without another request;
+- an HTTP/1 connection that is mid-request finishes that request, delivers its
+  full response, and is then closed. An HTTP/1 streaming response (for example
+  SSE) that began before the block runs to its end; the same stream over h2, a
+  tunnel or a WebSocket is cut at once.
+
+After each applied policy change the worker closes the matching sessions and
+writes **one** `user_blocked` deny event per closed session (its protocol, domain
+and the user's sub). Sessions with no identity are not tracked, so anonymous
+traffic pays nothing. Two metrics report it, neither labelled with identity:
+`warden_blocklist_entries` (users on the list after the last applied change) and
+`warden_blocklist_sessions_closed_total`.
+
+### How fast a block applies
+
+`BlockStore.Add` refreshes the served policy, which wakes held long-polls at
+once, so a connected worker applies a block within about 1 s. The offline CLI
+(`warden control-plane block add --state-dir`) adds at most one 2 s `data_version`
+poll. A worker backing off after control-plane errors applies it after at most the
+15 s backoff plus one long-poll round trip; `controlPlane.longPollWait` (default
+30 s) does not delay a changed policy.
+
+### Known gaps
+
+- **No token, no match.** In identity `attribute` mode a request or session that
+  carries no token at all has no claims to match and is not blocked. P2 `require`
+  mode closes this gap.
+- **Identity off.** With identity mode off the worker parses no token, so nothing
+  is matched; turn identity on (`attribute`) for the block list to bite.
+- **Transparent mode.** There is no CONNECT, so only an `X-Warden-Identity` header
+  on terminated traffic identifies a user; a transparent connection is tracked
+  only once such a header resolves.
+- **Rate limits restart.** Every policy replace resets the rate-limit windows, so a
+  block change resets them fleet-wide.
+
+### Degraded modes
+
+- **Control plane unreachable:** a worker keeps its last list and never unblocks
+  on its own; new blocks apply when it reconnects.
+- **Dex down:** admins cannot sign in to the console; use break-glass to block or
+  unblock.
+- **No `--state-dir`:** the control plane has no block-list store, so the
+  block-list API answers 503 `state_dir_required` and `/policy` is unchanged.
 
 ## What's deliberately not here (yet)
 

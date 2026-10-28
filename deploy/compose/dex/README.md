@@ -4,7 +4,8 @@ Reference config for the identity provider that Warden's identity features test
 against. Warden treats Dex as a generic OIDC issuer: nothing under `internal/`
 or `cmd/` names it, and every Dex-specific string lives in this directory.
 The pinned compose recipe is `../docker-compose.identity.yml`; `seed.ldif` seeds
-its LDAP directory.
+its LDAP directory. The operator guide (connectors, failure modes, production
+checklist) is [`docs/identity-dex.md`](../../../docs/identity-dex.md).
 
 ## Files
 

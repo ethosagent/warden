@@ -44,8 +44,9 @@ type WorkerTracker interface {
 	SeenPolicyPull(proxyID string)
 	// SeenIngest records that the named worker forwarded n analytics events.
 	SeenIngest(proxyID string, n int)
-	// SeenHeartbeat records a heartbeat and the worker's current policy ETag.
-	SeenHeartbeat(proxyID, policyETag string)
+	// SeenHeartbeat records a heartbeat, the worker's current policy ETag and the
+	// capabilities of that heartbeat (replacing the previous set).
+	SeenHeartbeat(proxyID, policyETag string, caps []string)
 	// Views returns the registry as dashboard rows, online-first then by id.
 	Views() []dashboard.WorkerView
 }
