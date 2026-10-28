@@ -77,3 +77,23 @@ func projectScopedMCP(s *config.SettingsWire) *config.SettingsWire {
 	}
 	return out
 }
+
+// scopedEntryCount counts the identity-scoped rules in w: scoped allow entries
+// (projected or not) plus MCP tools with a scoped allowWhen. It counts only, so
+// callers can log it without leaking group names.
+func scopedEntryCount(w policyWire) int {
+	n := len(w.ScopedAllowlist)
+	for _, e := range w.Allowlist {
+		if isScopedEntry(e) {
+			n++
+		}
+	}
+	if w.Settings != nil && w.Settings.MCP != nil && w.Settings.MCP.Tools != nil {
+		for _, tc := range w.Settings.MCP.Tools.Constraints {
+			if tc.AllowWhenScoped != nil || (tc.AllowWhen != nil && (len(tc.AllowWhen.Groups) > 0 || len(tc.AllowWhen.Users) > 0)) {
+				n++
+			}
+		}
+	}
+	return n
+}

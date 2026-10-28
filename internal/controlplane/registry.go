@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/dashboard"
 )
 
@@ -107,6 +108,18 @@ func (r *WorkerRegistry) WorkersWithoutCap(cap string) []string {
 		out = out[:maxWorkersWithoutCap]
 	}
 	return out
+}
+
+// FlagNoGroupPolicy sets NoGroupPolicy on every view whose caps lack
+// grouppolicy/v1 when the served policy has scopedEntries > 0. A legacy worker
+// (no caps) is flagged too.
+func FlagNoGroupPolicy(views []dashboard.WorkerView, scopedEntries int) {
+	if scopedEntries <= 0 {
+		return
+	}
+	for i := range views {
+		views[i].NoGroupPolicy = !slices.Contains(views[i].Caps, config.CapGroupPolicyV1)
+	}
 }
 
 // recordAuth notes how the worker behind p last authenticated. A principal

@@ -94,6 +94,10 @@ var All = slices.Concat(
 		{Name: "scoped_policy_deferred_identity", Opts: identityOpts(), Run: scopedPolicyDeferredIdentity},
 		// Replay of recorded identities (W-P1-GPOL-05): a candidate narrowing a
 		// scoped rule names the affected user and counts anonymous apart.
+		// Fleet flag (W-P1-GPOL-07): workers of this build advertise
+		// grouppolicy/v1; only a legacy worker is flagged noGroupPolicy while
+		// scoped rules are served.
+		{Name: "scoped_policy_fleet_flag", Opts: []harness.Option{harness.Fleet(1)}, Run: scopedPolicyFleetFlag},
 		{Name: "scoped_policy_replay_affected_users", Opts: identityOpts(), Run: scopedPolicyReplayAffectedUsers},
 		// MCP subject seam (W-P1-GPOL-04): the verified subject reaches the MCP
 		// gateway through RequestMeta without changing any verdict.

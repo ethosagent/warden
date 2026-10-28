@@ -717,3 +717,27 @@ func TestWorkerViewCaps(t *testing.T) {
 		t.Errorf("empty caps serialized: %s", without)
 	}
 }
+
+// TestFleetNoGroupPolicyBadge: the fleet JSON carries noGroupPolicy and the
+// served dashboard renders the "no groupPolicy" badge from it.
+func TestFleetNoGroupPolicyBadge(t *testing.T) {
+	srv := NewServer(&fakeDataSource{}, config.Policy{}, emptyProvider())
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
+	srv.SetWorkers(func() []WorkerView {
+		return []WorkerView{{ProxyID: "old", NoGroupPolicy: true}, {ProxyID: "new"}}
+	})
+	var rows []map[string]any
+	rr := doGet(t, srv.Handler(), "/dashboard/api/workers")
+	if err := json.Unmarshal(rr.Body.Bytes(), &rows); err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || rows[0]["noGroupPolicy"] != true || rows[1]["noGroupPolicy"] != false {
+		t.Fatalf("fleet JSON = %s", rr.Body.String())
+	}
+	page := doGet(t, srv.Handler(), "/dashboard/").Body.String()
+	for _, want := range []string{"w.noGroupPolicy", "no groupPolicy"} {
+		if !strings.Contains(page, want) {
+			t.Errorf("served dashboard lacks %q", want)
+		}
+	}
+}

@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/config"
@@ -218,4 +220,64 @@ func scopedPolicyReplayAffectedUsers(t *testing.T, h *harness.H) {
 	if got := fmt.Sprintf("%+v", res); strings.Contains(got, alice) || strings.Contains(got, "eng") {
 		t.Errorf("replay result carries a token or group list: %s", got)
 	}
+}
+
+// scopedPolicyFleetFlag (W-P1-GPOL-07): workers of this build advertise
+// grouppolicy/v1, so with scoped rules served the fleet view flags only the
+// legacy worker (a heartbeat without caps) as noGroupPolicy, and clears the
+// flag once the policy has no scoped rules.
+func scopedPolicyFleetFlag(t *testing.T, h *harness.H) {
+	const legacy = "legacy-old-worker"
+	if r := savePolicy(t, h, map[string]any{"domain": scopedHost, "groups": []string{"eng"}}, map[string]any{"domain": plainHost}); r.Status != http.StatusOK {
+		t.Fatalf("scoped save = %d %s, want 200", r.Status, r.Body)
+	}
+	flags := func() (map[string]bool, bool) {
+		// Workers heartbeat on the harness's fake clock: one beat per advance.
+		h.Clock().Advance(time.Second)
+		if r := h.CP().DoWorker(http.MethodPost, "/control/heartbeat", h.CP().Token(), legacy, `{"policyETag":"x"}`); r.Status != http.StatusNoContent {
+			t.Fatalf("legacy heartbeat = %d", r.Status)
+		}
+		ws, err := h.CP().Workers()
+		if err != nil {
+			return nil, false
+		}
+		out := map[string]bool{}
+		for _, w := range ws {
+			if w.ProxyID != legacy && !slices.Contains(w.Caps, config.CapGroupPolicyV1) {
+				return nil, false // the real worker has not heartbeated yet
+			}
+			out[w.ProxyID] = w.NoGroupPolicy
+		}
+		_, ok := out[legacy]
+		return out, ok && len(out) > 1
+	}
+	var got map[string]bool
+	h.Eventually("only the legacy worker is flagged noGroupPolicy", func() bool {
+		var ok bool
+		if got, ok = flags(); !ok {
+			return false
+		}
+		for id, flagged := range got {
+			if flagged != (id == legacy) {
+				return false
+			}
+		}
+		return true
+	})
+
+	if r := savePolicy(t, h, map[string]any{"domain": plainHost}); r.Status != http.StatusOK {
+		t.Fatalf("plain save = %d %s, want 200", r.Status, r.Body)
+	}
+	h.Eventually("the flag clears when no scoped rule is served", func() bool {
+		got, ok := flags()
+		if !ok {
+			return false
+		}
+		for _, flagged := range got {
+			if flagged {
+				return false
+			}
+		}
+		return true
+	})
 }
