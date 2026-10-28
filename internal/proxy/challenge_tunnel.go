@@ -6,12 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
-	"strings"
+	"sync"
 	"time"
-
-	"golang.org/x/net/http2"
 
 	"github.com/ethosagent/warden/internal/denyreason"
 )
@@ -21,11 +20,6 @@ const (
 	// request, the answer). The handler holds nothing upstream, so a short bound
 	// is the slowloris floor for a client that stalls after the 200.
 	challengeTunnelTimeout = 30 * time.Second
-	// challengeDrainBytes and challengeDrainTime bound how much of an unread
-	// request body is discarded after the 403, so the close does not reset the
-	// connection before the client has read the answer.
-	challengeDrainBytes = 4 << 20
-	challengeDrainTime  = 2 * time.Second
 	// challengeMaxHeaderBytes caps the request head read inside the tunnel.
 	challengeMaxHeaderBytes = 64 << 10
 )
@@ -119,49 +113,22 @@ func (p *Proxy) serveChallengeTunnel(conn net.Conn, br *bufio.Reader, domain str
 	}
 	defer func() { _ = tlsConn.Close() }()
 
-	body := challengeTunnelJSON(c)
-	if tlsConn.ConnectionState().NegotiatedProtocol == "h2" {
-		serveChallengeH2(tlsConn, body)
-		return
-	}
-	serveChallengeH1(tlsConn, body)
+	serveChallengeConn(tlsConn, challengeTunnelJSON(c))
 }
 
-// serveChallengeH1 reads one request head and answers it with the 403 and
-// Connection: close. A body the client is still sending is drained (bounded)
-// after the answer so the close is not a reset.
-func serveChallengeH1(tc *tls.Conn, body []byte) {
-	hbr := bufio.NewReaderSize(io.LimitReader(tc, challengeMaxHeaderBytes), 4096)
-	req, err := http.ReadRequest(hbr)
-	if err != nil {
-		return
-	}
-	resp := &http.Response{
-		StatusCode: http.StatusForbidden,
-		Status:     "403 Forbidden",
-		Proto:      "HTTP/1.1", ProtoMajor: 1, ProtoMinor: 1,
-		Header: http.Header{
-			"Content-Type":  {"application/json"},
-			"Cache-Control": {"no-store"},
+// serveChallengeConn answers every request on the one already-handshaken
+// connection with the 403 and Connection: close, over HTTP/1.1 or HTTP/2 as
+// negotiated: net/http closes an h1 connection after the answer and sends GOAWAY
+// on h2. It returns once the connection has ended.
+func serveChallengeConn(tc *tls.Conn, body []byte) {
+	ln := &oneConnListener{conn: tc, done: make(chan struct{})}
+	srv := &http.Server{
+		MaxHeaderBytes: challengeMaxHeaderBytes,
+		ConnState: func(_ net.Conn, st http.ConnState) {
+			if st == http.StateClosed || st == http.StateHijacked {
+				ln.finish()
+			}
 		},
-		Body:          io.NopCloser(strings.NewReader(string(body))),
-		ContentLength: int64(len(body)),
-		Close:         true,
-		Request:       req,
-	}
-	if err := resp.Write(tc); err != nil {
-		return
-	}
-	_ = tc.CloseWrite()
-	_ = tc.SetReadDeadline(time.Now().Add(challengeDrainTime))
-	_, _ = io.Copy(io.Discard, io.LimitReader(tc, challengeDrainBytes))
-}
-
-// serveChallengeH2 answers every stream with the 403 and asks for a GOAWAY
-// (Connection: close in the handler makes the h2 server send it after the
-// first answer).
-func serveChallengeH2(tc *tls.Conn, body []byte) {
-	(&http2.Server{}).ServeConn(tc, &http2.ServeConnOpts{
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			h := w.Header()
 			h.Set("Content-Type", "application/json")
@@ -170,5 +137,35 @@ func serveChallengeH2(tc *tls.Conn, body []byte) {
 			w.WriteHeader(http.StatusForbidden)
 			_, _ = w.Write(body)
 		}),
-	})
+		ErrorLog: log.New(io.Discard, "", 0),
+	}
+	_ = srv.Serve(ln)
+}
+
+// oneConnListener yields one connection, then blocks until that connection has
+// ended and reports the listener closed, so http.Server.Serve returns exactly
+// when the connection is done.
+type oneConnListener struct {
+	mu   sync.Mutex
+	conn net.Conn
+	done chan struct{}
+	once sync.Once
+}
+
+func (l *oneConnListener) Accept() (net.Conn, error) {
+	l.mu.Lock()
+	c := l.conn
+	l.conn = nil
+	l.mu.Unlock()
+	if c != nil {
+		return c, nil
+	}
+	<-l.done
+	return nil, net.ErrClosed
+}
+
+func (l *oneConnListener) finish()      { l.once.Do(func() { close(l.done) }) }
+func (l *oneConnListener) Close() error { l.finish(); return nil }
+func (l *oneConnListener) Addr() net.Addr {
+	return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)}
 }

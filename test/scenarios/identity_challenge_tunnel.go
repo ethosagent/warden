@@ -80,7 +80,7 @@ func newSignInAgent(t *testing.T, h *harness.H) *signInAgent {
 	}
 	const cred = "scenario-forwarder-credential"
 	fwd := &identityclient.Forwarder{
-		WorkerAddr: h.ProxyAddr(), ClientCredential: cred, Challenge: a.chal,
+		WorkerAddr: h.ProxyAddr(), ClientCredential: cred, Challenge: a.chal, InTunnel: true,
 		Token: func(ctx context.Context) (string, error) {
 			res, err := a.cli.Token(ctx)
 			return res.IDToken, err
