@@ -2,11 +2,15 @@ package scenarios
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
 
+	"github.com/ethosagent/warden/internal/analytics"
+	"github.com/ethosagent/warden/internal/config"
+	"github.com/ethosagent/warden/internal/policyeval"
 	"github.com/ethosagent/warden/test/fakes"
 	"github.com/ethosagent/warden/test/harness"
 )
@@ -149,5 +153,69 @@ func scopedPolicyDeferredIdentity(t *testing.T, h *harness.H) {
 				t.Errorf("scoped metric carries a user/group label: %s", k)
 			}
 		}
+	}
+}
+
+// scopedPolicyReplayAffectedUsers (W-P1-GPOL-05): real traffic from two users
+// is recorded with their verified identity, then replayed against a candidate
+// that narrows the scoped rule to sales. The replay names the one user the
+// change would cut off (alice, by email), counts the anonymous request apart
+// and keeps every group list and token out of the report.
+func scopedPolicyReplayAffectedUsers(t *testing.T, h *harness.H) {
+	h.Upstream(scopedHost)
+	h.Upstream(plainHost)
+	alice := h.MintUserToken(fakes.Valid("alice", "alice@example.com", "eng"))
+	sam := h.MintUserToken(fakes.Valid("sam", "sam@example.com", "sales"))
+
+	if r := savePolicy(t, h, map[string]any{"domain": scopedHost, "groups": []string{"eng", "sales"}}, map[string]any{"domain": plainHost}); r.Status != http.StatusOK {
+		t.Fatalf("scoped save = %d %s, want 200", r.Status, r.Body)
+	}
+	h.Eventually("workers enforce the save", func() bool {
+		return connectStatus(t, h, plainHost+":443") == http.StatusOK
+	})
+	for _, tok := range []string{alice, sam} {
+		if got := getStatus(t, h.Agent(), scopedHost, tok); got != http.StatusOK {
+			t.Fatalf("scoped request = %d, want 200", got)
+		}
+	}
+	if got := getStatus(t, h.Agent(), plainHost, ""); got != http.StatusOK {
+		t.Fatalf("anonymous plain request = %d, want 200", got)
+	}
+	h.Eventually("the identities are recorded", func() bool {
+		n := 0
+		for _, e := range h.Events() {
+			if e.Domain == scopedHost && e.IdentityStatus == "valid" {
+				n++
+			}
+		}
+		return n == 2
+	})
+
+	candidate := config.Policy{Allowlist: []config.AllowlistEntry{
+		{Domain: scopedHost, Groups: []string{"sales"}},
+		{Domain: plainHost, Groups: []string{"sales"}},
+	}}
+	// Replay the requests only; the readiness probe above left CONNECT events.
+	var recorded []analytics.Event
+	for _, e := range h.Events() {
+		if e.Method == http.MethodGet {
+			recorded = append(recorded, e)
+		}
+	}
+	res := policyeval.Evaluate(recorded, candidate)
+	var users []string
+	anon := 0
+	for _, d := range res.NewDenies {
+		users = append(users, d.AffectedUsers...)
+		anon += d.AnonymousCount
+	}
+	if len(users) != 1 || users[0] != "alice@example.com" {
+		t.Errorf("affected users = %v, want [alice@example.com]", users)
+	}
+	if anon != 1 || res.AnonymousCount != 1 {
+		t.Errorf("anonymous = %d (result %d), want 1: the unauthenticated plain request", anon, res.AnonymousCount)
+	}
+	if got := fmt.Sprintf("%+v", res); strings.Contains(got, alice) || strings.Contains(got, "eng") {
+		t.Errorf("replay result carries a token or group list: %s", got)
 	}
 }
