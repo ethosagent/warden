@@ -131,3 +131,22 @@ func TestLintScoped_TruncationKeepsValidUTF8(t *testing.T) {
 		t.Fatalf("invalid UTF-8 in warning: %q", got)
 	}
 }
+
+// TestLoad_NormalizesAllowPrincipals (W-P1-GPOL-08): the loader stores an allow
+// entry's groups/users trimmed, de-duplicated, sorted (emails lowercased), so
+// what the dashboard saves comes back identical however it was spelled.
+func TestLoad_NormalizesAllowPrincipals(t *testing.T) {
+	path := writeTemp(t, "policy:\n  allowlist:\n    - domain: api.github.com\n      groups: [sre, eng, eng]\n      users: ['Bob@Corp.Example', ' alice@corp.example ']\n")
+	prov, err := NewLocalYAMLProvider(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, _ := prov.GetPolicy()
+	e := p.Allowlist[0]
+	if got := strings.Join(e.Groups, ","); got != "eng,sre" {
+		t.Errorf("groups = %s, want eng,sre", got)
+	}
+	if got := strings.Join(e.Users, ","); got != "alice@corp.example,bob@corp.example" {
+		t.Errorf("users = %s", got)
+	}
+}
