@@ -1522,8 +1522,15 @@ func (p *Proxy) recordAllowEvent(s *requestScope) {
 	})
 }
 
+// writeErrorResponse writes an HTTP/1.1 error response. Every caller ends the
+// keep-alive session right after (a deny or 502 is terminal and the deferred
+// cleanup closes the conn), so the response announces it with Connection:
+// close. Without the header the agent sees a keep-alive response, parks the
+// conn for reuse and races the proxy's close: its next request fails with EOF
+// or "server closed idle connection" (#602).
 func writeErrorResponse(w io.Writer, statusCode int, statusText string) {
 	resp := &http.Response{
+		Close:         true,
 		StatusCode:    statusCode,
 		Status:        fmt.Sprintf("%d %s", statusCode, statusText),
 		Proto:         "HTTP/1.1",
