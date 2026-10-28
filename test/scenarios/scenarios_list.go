@@ -113,6 +113,22 @@ var All = slices.Concat(
 		// /dashboard/api/policy come back normalized and scoped, an empty chip is a
 		// 400, the worker enforces the rule and the GET lints a shadowing entry.
 		{Name: "scoped_policy_dashboard_editor", Opts: identityOpts(), Run: scopedPolicyDashboardEditor},
+		// Group-aware policy on the L1 harness (W-P1-GPOL-09): a {domain, groups}
+		// entry and a group-gated MCP tool, served by the control plane and
+		// decided per request. Every deny leaves the judge fake and the upstream
+		// untouched; no allow lets an identity header reach the upstream.
+		{Name: "groups_member_allowed", Opts: groupsOpts(), Run: groupsMemberAllowed},
+		{Name: "groups_nonmember_denied", Opts: groupsOpts(), Run: groupsNonMemberDenied},
+		{Name: "groups_anonymous_denied", Opts: groupsOpts(), Run: groupsAnonymousDenied},
+		{Name: "groups_expired_denied", Opts: groupsOpts(), Run: groupsExpiredDenied},
+		{Name: "groups_keepalive_mixed_users", Opts: groupsOpts(), Run: groupsKeepaliveMixedUsers},
+		{Name: "groups_h2_per_stream", Opts: groupsOpts(), Run: groupsH2PerStream},
+		{Name: "groups_no_ca_conditional", Opts: append(groupsOpts(), harness.WithoutProxyCA()), Run: groupsNoCAConditional},
+		{Name: "groups_raw_bytes_conditional", Opts: groupsOpts(), Run: groupsRawBytesConditional},
+		{Name: "groups_truncated", Opts: groupsOpts(), Run: groupsTruncated},
+		{Name: "groups_mcp_tool_gated", Opts: groupsMCPOpts(), Run: groupsMCPToolGated},
+		{Name: "groups_old_worker_denies", Opts: groupsMCPOpts(), Run: groupsOldWorkerDenies},
+		{Name: "groups_policy_eval_affected_users", Opts: groupsOpts(), Run: groupsPolicyEvalAffectedUsers},
 		// Version contract (W-P1-PVER-08): GET reports the head, If-Match names
 		// it, a stale save is a 409 naming the author and is audited rejected.
 		// In-process only (it reads the CP state dir).
