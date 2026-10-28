@@ -30,8 +30,9 @@ const blockedUsersCreatedByBearer = actorCPAdminToken
 
 // blockListAPI adapts a BlockStore to the dashboard's BlockListStore.
 type blockListAPI struct {
-	store  *BlockStore
-	logger *slog.Logger
+	store    *BlockStore
+	registry *WorkerRegistry
+	logger   *slog.Logger
 }
 
 var _ dashboard.BlockListStore = blockListAPI{}
@@ -126,6 +127,20 @@ func (a blockListAPI) Add(ctx context.Context, in dashboard.BlockListAdd) (dashb
 	return toBlockView(stored), nil
 }
 
+// WorkersWithoutEnforcement counts the online workers that do not advertise
+// blocklist/v1 (capped at the registry's bound) and names the first 50.
+func (a blockListAPI) WorkersWithoutEnforcement(context.Context) (int, []string) {
+	if a.registry == nil {
+		return 0, nil
+	}
+	ids := a.registry.WorkersWithoutCap(config.CapBlocklistV1)
+	n := len(ids)
+	if len(ids) > 50 {
+		ids = ids[:50]
+	}
+	return n, ids
+}
+
 func (a blockListAPI) Remove(ctx context.Context, id string) error {
 	entries, err := a.store.List(ctx)
 	if err != nil {
@@ -198,6 +213,10 @@ func (blockListNoState) Add(context.Context, dashboard.BlockListAdd) (dashboard.
 	return dashboard.BlockListEntry{}, dashboard.ErrBlockStateRequired
 }
 
+func (blockListNoState) WorkersWithoutEnforcement(context.Context) (int, []string) {
+	return 0, nil
+}
+
 func (blockListNoState) Remove(context.Context, string) error {
 	return dashboard.ErrBlockStateRequired
 }
@@ -207,7 +226,7 @@ func (s *Server) blockListStore() dashboard.BlockListStore {
 	if s.blocks == nil {
 		return blockListNoState{}
 	}
-	return blockListAPI{store: s.blocks, logger: s.cfg.Logger}
+	return blockListAPI{store: s.blocks, registry: s.registry, logger: s.cfg.Logger}
 }
 
 // blockedUsersHash is the keyed hash of the block list's canonical sub/email

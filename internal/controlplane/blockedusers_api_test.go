@@ -431,3 +431,34 @@ func (e *auditEnv) sessionAs(t *testing.T, group, sub, email string) string {
 	}
 	return raw
 }
+
+// TestWorkersMissingBlocklistCap: the list response counts the connected
+// workers that did not advertise blocklist/v1 (one with the cap, one without)
+// and names them.
+func TestWorkersMissingBlocklistCap(t *testing.T) {
+	_, ts := noneAPI(t, nil)
+	if c := postHeartbeat(t, ts.URL, "new-worker", `{"policyETag":"v1","caps":["blocklist/v1"]}`); c != http.StatusNoContent {
+		t.Fatalf("new worker heartbeat = %d", c)
+	}
+	if c := postHeartbeat(t, ts.URL, "old-worker", `{"policyETag":"v1"}`); c != http.StatusNoContent {
+		t.Fatalf("old worker heartbeat = %d", c)
+	}
+	code, body := doJSON(t, http.MethodGet, ts.URL+blockAPIPath, dashTestToken, "")
+	if code != http.StatusOK {
+		t.Fatalf("GET = %d %s", code, body)
+	}
+	var got struct {
+		Entries []json.RawMessage `json:"entries"`
+		N       int               `json:"workersWithoutEnforcement"`
+		IDs     []string          `json:"workersWithoutEnforcementIDs"`
+	}
+	if err := json.Unmarshal([]byte(body), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.N != 1 || len(got.IDs) != 1 || got.IDs[0] != "old-worker" {
+		t.Errorf("workersWithoutEnforcement = %d %v, want 1 [old-worker]", got.N, got.IDs)
+	}
+	if got.Entries == nil {
+		t.Error("entries field missing")
+	}
+}
