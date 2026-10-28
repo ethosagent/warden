@@ -144,7 +144,7 @@ func TestRunRestoreAllFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !res.Audited || res.WardenVersion != "v-test" || res.PreRestoreDir != "" || len(res.Files) != 4 {
+	if res.KeyChecked || !res.Audited || res.WardenVersion != "v-test" || res.PreRestoreDir != "" || len(res.Files) != 4 {
 		t.Errorf("result = %+v", res)
 	}
 	for _, p := range []string{
@@ -395,7 +395,7 @@ func TestRunRestoreAuditKeyFingerprint(t *testing.T) {
 	// The matching key restores and appends.
 	dst := fresh()
 	res, err := RunRestore(context.Background(), RestoreParams{From: withFP(audit.KeyID(signer.PubKey())), StateDir: dst, AuditKeyFile: keyFile})
-	if err != nil || !res.Audited {
+	if err != nil || !res.Audited || !res.KeyChecked {
 		t.Fatalf("matching key: %+v, %v", res, err)
 	}
 	// With --new-audit-key a key that does not own the chain restores but
@@ -495,5 +495,42 @@ func TestRunRestoreRollsBack(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A set written by an older binary (fewer migrations) restores and is brought
+// up to this binary's schema.
+func TestRunRestoreOlderSet(t *testing.T) {
+	ctx := context.Background()
+	state := t.TempDir()
+	all := StateMigrations()
+	old, err := cpstate.Open(ctx, filepath.Join(state, "warden-cp.db"), all[:len(all)-1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := old.SchemaVersion(ctx); v != len(all)-1 {
+		t.Fatalf("old schema version = %d", v)
+	}
+	_ = old.Close()
+	if err := os.WriteFile(filepath.Join(state, "config.yaml"), []byte("policy:\n  allowlist: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res, err := RunOfflineBackup(ctx, OfflineBackupParams{
+		StateDir: state, Backup: BackupConfig{Dir: filepath.Join(t.TempDir(), "b"), Include: []string{BackupCP, BackupConfigKey}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dst := t.TempDir()
+	if _, err := RunRestore(ctx, RestoreParams{From: res.Path, StateDir: dst}); err != nil {
+		t.Fatal(err)
+	}
+	db, err := cpstate.OpenReadOnly(ctx, filepath.Join(dst, "warden-cp.db"), all)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	if v, _ := db.SchemaVersion(ctx); v != len(all) {
+		t.Errorf("restored schema version = %d, want %d", v, len(all))
 	}
 }

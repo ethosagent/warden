@@ -656,7 +656,7 @@ func TestControlPlaneRestore_Output(t *testing.T) {
 	}
 	all := stdout + stderr
 	created := readManifest(t, f.set).CreatedAt.UTC().Format(time.RFC3339)
-	for _, want := range []string{created, "WARNING", "worker-token revocations", "user blocks", "policy versions", "admin_audit", "warden-cp.db", "config.yaml"} {
+	for _, want := range []string{created, "WARNING", "worker-token revocations", "user blocks", "policy versions", "admin_audit", "warden-cp.db", "config.yaml", "fingerprint check was skipped"} {
 		if !strings.Contains(all, want) {
 			t.Errorf("output lacks %q:\n%s", want, all)
 		}

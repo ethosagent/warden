@@ -75,8 +75,12 @@ func printRestoreSummary(cmd *cobra.Command, res controlplane.RestoreResult) {
 	if res.PreRestoreDir != "" {
 		_, _ = fmt.Fprintf(w, "replaced files kept in: %s\n", res.PreRestoreDir)
 	}
-	if res.NewAuditKey {
-		_, _ = fmt.Fprintln(w, "the audit key fingerprint check was skipped (--new-audit-key)")
+	if !res.KeyChecked {
+		why := "the backup records no audit key fingerprint"
+		if res.NewAuditKey {
+			why = "--new-audit-key"
+		}
+		_, _ = fmt.Fprintf(w, "the audit key fingerprint check was skipped (%s)\n", why)
 	}
 	_, _ = fmt.Fprintf(w, "WARNING: worker-token revocations, user blocks and policy versions made after %s "+
 		"are not in this backup; re-apply them from the admin_audit JSON log.\n", res.CreatedAt.UTC().Format(time.RFC3339))

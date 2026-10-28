@@ -89,6 +89,10 @@ type RestoreResult struct {
 	Files         []string  // restored file names, in manifest order
 	PreRestoreDir string    // where replaced files went; "" when nothing was replaced
 	NewAuditKey   bool
+	// KeyChecked is false when the audit key fingerprint was not compared: the
+	// manifest records none (an offline backup never opens the audit store) or
+	// NewAuditKey was set.
+	KeyChecked bool
 	// Audited is false when the restored state has no admin audit chain
 	// (so no cp.restore row was appended).
 	Audited bool
@@ -177,7 +181,8 @@ func RunRestore(ctx context.Context, p RestoreParams) (RestoreResult, error) {
 			return RestoreResult{}, err
 		}
 	}
-	if m.AuditKeyFingerprint != "" && !p.NewAuditKey {
+	keyChecked := m.AuditKeyFingerprint != "" && !p.NewAuditKey
+	if keyChecked {
 		if err := checkAuditKeyFingerprint(keyFile, m.AuditKeyFingerprint); err != nil {
 			return RestoreResult{}, err
 		}
@@ -202,7 +207,7 @@ func RunRestore(ctx context.Context, p RestoreParams) (RestoreResult, error) {
 		return RestoreResult{}, err
 	}
 
-	res := RestoreResult{CreatedAt: m.CreatedAt, WardenVersion: m.WardenVersion, PreRestoreDir: pre, NewAuditKey: p.NewAuditKey}
+	res := RestoreResult{CreatedAt: m.CreatedAt, WardenVersion: m.WardenVersion, PreRestoreDir: pre, NewAuditKey: p.NewAuditKey, KeyChecked: keyChecked}
 	for _, t := range targets {
 		res.Files = append(res.Files, t.name)
 	}
