@@ -2,7 +2,6 @@ package controlplane
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -77,7 +76,7 @@ type auditEnv struct {
 	srv *Server
 	h   http.Handler
 	rec *fakeRecorder
-	log *bytes.Buffer
+	log *syncBuf
 }
 
 type auditEnvOpts struct {
@@ -199,6 +198,7 @@ var auditedRequests = map[routeKey]auditedRequest{
 	{http.MethodPost, "/dashboard/api/llmproviders"}:   {"/dashboard/api/llmproviders", `[{"name":"p1","baseURL":"https://api.openai.com/v1","model":"gpt-4o-mini","apiKeyEnv":"OPENAI_API_KEY"}]`},
 	{http.MethodPut, "/dashboard/api/llmproviders"}:    {"/dashboard/api/llmproviders", `[]`},
 	{http.MethodDelete, "/dashboard/api/sessions"}:     {"/dashboard/api/sessions?sub=nobody", ""},
+	{http.MethodPost, "/dashboard/api/backup"}:         {"/dashboard/api/backup", ""},
 	// The POST adds the entry the DELETE removes ({id} is filled in from the list).
 	{http.MethodPost, "/dashboard/api/blocked-users"}:        {"/dashboard/api/blocked-users", `{"email":"audit@corp.com","reason":"r"}`},
 	{http.MethodDelete, "/dashboard/api/blocked-users/{id}"}: {"/dashboard/api/blocked-users/{id}", ""},
@@ -246,6 +246,7 @@ func auditRow(k routeKey) authzRow {
 func TestAdminAuditAllAuditedRoutes(t *testing.T) {
 	e := newOIDCAuditEnv(t)
 	e.srv.dash.SetPolicyHistory(stubHistory{})
+	e.srv.dash.SetBackup(func() error { return nil })
 	admin := e.session(t, groupAdmin)
 	hashed := map[string]bool{"policy": true, "settings": true, "integrations": true, "detection": true, "llmproviders": true, "worker_tokens": true, "blocked_users": true}
 	routes := allAuditedRoutes()
@@ -480,7 +481,7 @@ func TestAdminAuditOpenWrites(t *testing.T) {
 
 func TestAdminAuditNoSecretLeak(t *testing.T) {
 	const canary = "s3cr3t-canary-123"
-	var global bytes.Buffer
+	var global syncBuf
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&global, nil)))
 	t.Cleanup(func() { slog.SetDefault(prev) })

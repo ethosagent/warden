@@ -22,9 +22,11 @@ import (
 	"github.com/ethosagent/warden/internal/adminaudit"
 	"github.com/ethosagent/warden/internal/alertpipeline"
 	"github.com/ethosagent/warden/internal/analytics"
+	"github.com/ethosagent/warden/internal/auditlog"
 	"github.com/ethosagent/warden/internal/clock"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/cpstate"
+	"github.com/ethosagent/warden/internal/dashboard"
 	"github.com/ethosagent/warden/internal/detect"
 	"github.com/ethosagent/warden/internal/integration"
 	"github.com/ethosagent/warden/internal/observability"
@@ -35,6 +37,9 @@ import (
 // them from parsed flags (rule C1: cmd/ holds only flag parsing and wiring);
 // tests pass a Listener on port 0 to run a real control plane in-process.
 type Params struct {
+	// checkpointHooks is a test seam over the admin audit checkpoint loop.
+	checkpointHooks checkpointLoopHooks
+
 	ConfigPath, ListenAddr string
 	// TokenEnv is the deprecated --token-env, an alias of LegacyTokenEnv.
 	TokenEnv                         string
@@ -99,6 +104,18 @@ type Params struct {
 	// logged as an admin_audit.checkpoint line (0 = every 5 minutes). Tests
 	// drive it with Clock.
 	AdminAuditCheckpointInterval time.Duration
+
+	// ErrOut receives the operational log while audit.jsonLog writes to
+	// stdout (the log moves off stdout so it carries only warden.admin.v1
+	// lines). Nil means os.Stderr. Tests pass a buffer.
+	ErrOut io.Writer
+	// Backup is the --backup-* settings; Backup.Dir == "" (the default) turns
+	// backups off. Run validates it against StateDir and the stores it opens.
+	Backup BackupConfig
+	// BackupReporter receives each backup run's outcome (nil = none).
+	BackupReporter BackupReporter
+	// Version is the warden version recorded in backup manifests.
+	Version string
 }
 
 // Run boots a control plane from Params and serves until ctx is cancelled. It
@@ -128,6 +145,28 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	if err != nil {
 		return fail(err)
 	}
+	// With a state dir, hold the instance lock before any database is opened or
+	// the served config is seeded. Registered first, so it is released last,
+	// after the servers and stores below have closed. No state dir, no lock.
+	if stateDir != "" {
+		if err := os.MkdirAll(stateDir, 0o700); err != nil {
+			return fail(fmt.Errorf("control-plane: create state dir %s: %w", stateDir, err))
+		}
+		release, lerr := cpstate.AcquireDirLock(stateDir)
+		if errors.Is(lerr, cpstate.ErrLocked) {
+			return fail(fmt.Errorf("control plane: state dir %s is in use by another control plane (lock %s)",
+				stateDir, filepath.Join(stateDir, cpstate.LockFileName)))
+		}
+		if lerr != nil {
+			return fail(fmt.Errorf("control plane: %w", lerr))
+		}
+		defer func() { _ = release() }()
+	}
+	if p.Backup.Enabled() {
+		if err := p.Backup.Validate(stateDir); err != nil {
+			return fail(fmt.Errorf("control-plane: %w", err))
+		}
+	}
 	// Resolve the SERVED path. With no --state-dir we serve+edit --config in place
 	// (unchanged behavior). With --state-dir we serve+edit a writable copy seeded
 	// once from --config, so the dashboard can persist edits even when --config is
@@ -154,7 +193,20 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	if err != nil {
 		return fail(err)
 	}
-	logger, _ := observability.NewLogger(out, pol.LogLevel, pol.LogFormat)
+	// audit.jsonLog on stdout reserves stdout for the warden.admin.v1 lines:
+	// the operational log moves to stderr.
+	jsonLog := pol.Audit.JSONLog
+	logOut := out
+	if jsonLogOnStdout(jsonLog) {
+		logOut = p.ErrOut
+		if logOut == nil {
+			logOut = os.Stderr
+		}
+	}
+	logger, _ := observability.NewLogger(logOut, pol.LogLevel, pol.LogFormat)
+	if jsonLogOnStdout(jsonLog) {
+		logger.Info("audit.jsonLog.output is stdout: operational logs moved to stderr so stdout carries only warden.admin.v1 lines")
+	}
 
 	if stateDir != "" {
 		if seeded {
@@ -240,6 +292,29 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		logger.Info("control plane policy store", "mode", policyStore, "head", head)
 	}
 
+	// The JSON admin stream (audit.jsonLog): off by default, in which case no
+	// file or directory is created. It is closed after the checkpoint loop's
+	// shutdown checkpoint (defers run last-in first-out).
+	var sink *auditlog.Sink
+	if jsonLog.Enabled {
+		var sinkOpts []auditlog.Option
+		if jsonLogOnStdout(jsonLog) {
+			sinkOpts = append(sinkOpts, auditlog.WithWriter(out))
+		}
+		sink, err = newAuditSink(jsonLog, logger, sinkOpts...)
+		if err != nil {
+			return fail(fmt.Errorf("control-plane: audit.jsonLog: %w", err))
+		}
+		defer func() {
+			cctx, cancel := context.WithTimeout(context.Background(), jsonLogCloseTimeout)
+			defer cancel()
+			_ = sink.Close(cctx)
+		}()
+		if !consoleCfg.AdminAudit.Enabled {
+			logger.Warn("audit.jsonLog is enabled but console.adminAudit is not: no admin lines will be written")
+		}
+	}
+
 	// Admin audit (console.adminAudit.enabled): off by default, in which case no
 	// key file, store or rows exist. On, a key that does not match the chain
 	// stops startup here, before anything is served.
@@ -252,8 +327,8 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		if auditClk == nil {
 			auditClk = clock.Real()
 		}
-		// One emitter for entries and checkpoints: W-P1-JAUD-03 swaps it here.
-		auditEmitter = adminaudit.NewSlogEmitter(logger)
+		// One emitter for entries and checkpoints (slog anchor, plus the JSON line).
+		auditEmitter = newAdminAuditEmitter(logger, sink)
 		adminAudit, err = openAdminAudit(context.WithoutCancel(ctx), logger, state, stateDir, p, auditClk, auditEmitter)
 		if err != nil {
 			return fail(err)
@@ -475,10 +550,31 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	if adminAudit != nil {
 		cpCtx, cpCancel := context.WithCancel(ctx)
 		done := make(chan struct{})
-		go runCheckpointLoop(cpCtx, done, adminAudit, auditEmitter, p.AdminAuditCheckpointInterval, clk)
+		go runCheckpointLoop(cpCtx, done, adminAudit, auditEmitter, p.AdminAuditCheckpointInterval, clk, p.checkpointHooks)
 		defer func() {
 			cpCancel()
 			<-done
+		}()
+	}
+
+	// Scheduled backups (--backup-dir): one goroutine on the CP context, never
+	// on a request path. Run waits for it before the stores close.
+	if p.Backup.Enabled() {
+		bk := newRunBackupRunner(p, clk, logger, state, srv.integrationsStore, store, servedPath, dbPath, alertDBPath, adminAudit)
+		bkCtx, bkCancel := context.WithCancel(ctx)
+		bk.Start(bkCtx)
+		// POST /dashboard/api/backup: the run is bound to the CP context, not
+		// the request's, and Wait covers it before the stores close.
+		srv.dash.SetBackup(func() error {
+			err := bk.StartOnDemand(bkCtx)
+			if errors.Is(err, ErrBackupInProgress) {
+				return dashboard.ErrBackupInProgress
+			}
+			return err
+		})
+		defer func() {
+			bkCancel()
+			bk.Wait()
 		}()
 	}
 

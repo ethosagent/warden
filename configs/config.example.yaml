@@ -546,3 +546,41 @@ audit:
 #  audience: warden
 #  allowedAZP: [agent-harness, warden-cli] # empty = no azp check
 #  groupsClaim: groups
+
+# Group-scoped policy (docs/group-policy.md). The block below is a complete,
+# standalone config: uncomment it as a whole in a file of its own, or copy the
+# parts into the sections above (do not repeat a top-level key). A scoped rule
+# needs identity.defaultMode: attribute (a verified user token), else every scoped
+# destination is denied (identity_required). It also needs a CA (tls.caCert +
+# tls.caKey) to decide HTTPS requests one by one. The denylist stays global and has
+# no groups/users.
+# --- group-policy example ---
+# identity:
+#   defaultMode: attribute
+#   issuer: https://idp.example.com
+#   audience: warden
+#   groupsClaim: groups
+# policy:
+#   allowlist:
+#     - domain: api.openai.com              # unscoped: everyone
+#     - domain: api.github.com              # only members of eng or sre ...
+#       groups: ["eng", "sre"]              # exact, case-sensitive IdP group names
+#     - domain: billing.example.com         # ... or these users
+#       users: ["alice@corp.example", "u-123"]  # verified email (lowercased) or exact sub
+#     - domain: admin.example.com           # groups and users together: either matches
+#       groups: ["ops"]
+#       users: ["carol@corp.example"]
+#       methods: ["GET"]                    # constraints apply after the principal check
+#   denylist:
+#     - domain: evil.example.com            # global: applies to everyone, never scoped
+# mcp:
+#   enabled: true
+#   mode: enforce
+#   tools:
+#     allow: ["deploy"]
+#     constraints:
+#       deploy:
+#         allowWhen:                        # every clause must hold (AND)
+#           groups: ["finance"]
+#           users: ["dave@corp.example"]
+# --- end group-policy example ---
