@@ -195,6 +195,14 @@ curl -x http://127.0.0.1:8080 --cacert certs/proxy-ca.crt \
 sqlite3 warden.db "SELECT domain, decision, method, secret_ref FROM events ORDER BY id DESC LIMIT 5;"
 ```
 
+## Per-user identity (optional)
+
+To attribute each request to the person behind the agent, point the worker at an
+OIDC issuer with the `identity:` block. Running that issuer (the reference Dex,
+its connectors, the issuer rules and a production checklist) is covered in
+[docs/identity-dex.md](identity-dex.md); what a harness sends is in
+[docs/identity-contract.md](identity-contract.md).
+
 ## Stopping
 
 Press `Ctrl-C`. The proxy shuts down gracefully on SIGINT/SIGTERM.

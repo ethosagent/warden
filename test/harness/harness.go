@@ -167,6 +167,12 @@ type H struct {
 	// versionedPolicy (WithVersionedPolicyStore) boots the control plane with
 	// --policy-store=versioned and a state dir.
 	versionedPolicy bool
+	// wantWorkerTokens (WithWorkerTokens) boots the control plane with a state
+	// dir, so it builds the worker token store, on the harness's fake clock.
+	wantWorkerTokens bool
+	// wantStrict (WithStrictWorkerAuth) boots the control plane with
+	// --require-worker-tokens and no shared token.
+	wantStrict bool
 	// wantAdminAudit (WithAdminAudit) boots the control plane with
 	// console.adminAudit.enabled and a state dir.
 	wantAdminAudit bool
@@ -174,6 +180,9 @@ type H struct {
 	// file under the harness root; breakGlassHash is that file's path.
 	wantBreakGlass bool
 	breakGlassHash string
+	// wantAdminJSONLog (WithAdminAuditJSONLog) also writes the admin stream as
+	// warden.admin.v1 lines to a file under the harness root (audit.jsonLog).
+	wantAdminJSONLog bool
 	// wantCPAdmin (WithControlPlaneAdminToken) boots the control plane with its
 	// own admin bearer (--admin-token-env), separate from the worker token.
 	wantCPAdmin bool
@@ -650,6 +659,9 @@ func (h *H) boot() {
 	}
 
 	if h.suppliedTarget != nil {
+		if h.wantWorkerTokens {
+			h.tb.Fatalf("harness: WithWorkerTokens boots an in-process control plane; it cannot combine with WithTarget")
+		}
 		if h.versionedPolicy {
 			h.tb.Fatalf("harness: WithVersionedPolicyStore boots an in-process control plane; it cannot combine with WithTarget")
 		}
@@ -735,6 +747,7 @@ func (h *H) buildInprocessTarget() *inprocess {
 	h.applyPolicyStore(&ip.cp.params)
 	h.applyCPAdmin(&ip.cp.params)
 	h.applyBackup(&ip.cp.params)
+	h.applyStrict(&ip.cp.params)
 	return ip
 }
 
@@ -749,6 +762,8 @@ func (h *H) writeCPConfig() string {
 	}
 	b.WriteString(h.identityYAML())
 	b.WriteString(h.consoleYAML())
+	b.WriteString(h.auditJSONLogYAML())
+	b.WriteString(h.strictYAML())
 	path := filepath.Join(h.root, "cp-config.yaml")
 	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
 		h.tb.Fatalf("harness: write control-plane config: %v", err)

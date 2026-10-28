@@ -72,6 +72,9 @@ type Server struct {
 	liveSettings   func() *config.SettingsWire
 	settingsWriter func(context.Context, config.SettingsWire, WriteMeta) error
 	workersFn      func() []WorkerView // nil = no fleet worker registry
+	// workerTokens serves the worker token admin routes; nil = they answer 404
+	// (a worker, or a control plane without a state dir).
+	workerTokens WorkerTokenAdmin
 	// mcpFleet, when set (control plane), returns the inventory + observed schema
 	// for a given worker (empty proxyID = most-recent worker). It takes precedence
 	// over the single-node mcp gateway.
@@ -151,12 +154,12 @@ type Server struct {
 	// adminAuditVerifying admits one verify run at a time.
 	adminAudit          AdminAuditSource
 	adminAuditVerifying atomic.Bool
-	// blockList, when set (control plane), serves the block list admin API; nil
-	// makes those routes 404.
-	blockList BlockListStore
 	// backup, when set (control plane with --backup-dir), starts an on-demand
 	// backup; nil makes POST /dashboard/api/backup 404.
 	backup BackupStarter
+	// blockList, when set (control plane), serves the block list admin API; nil
+	// makes those routes 404.
+	blockList BlockListStore
 }
 
 // analyticsCacheTTL is how long a computed analytics/MCP payload is reused
@@ -252,6 +255,19 @@ type WorkerView struct {
 	PolicyVersion int64 `json:"policyVersion,omitempty"`
 	Behind        bool  `json:"behind"`
 	Online        bool  `json:"online"`
+	// AuthKind is how the worker last authenticated: token (a per-worker
+	// token; ProxyID is the token's bound id), legacy (the shared token; the
+	// id is the worker's unverified header) or none (open control plane).
+	// Empty until the worker has made an authenticated request.
+	AuthKind string `json:"authKind,omitempty"`
+	// TokenName and TokenLastUsed describe the token behind a token worker;
+	// TokenLastUsed is the token's last-use time, flushed to the store at most
+	// once a minute, so it can trail LastSeen.
+	TokenName     string `json:"tokenName,omitempty"`
+	TokenLastUsed string `json:"tokenLastUsed,omitempty"`
+	// LegacyRequests counts the worker's requests authenticated with the shared
+	// token since the control plane started (in memory; a restart resets it).
+	LegacyRequests int64 `json:"legacyRequests"`
 	// Caps are the capabilities the worker advertised on its latest heartbeat
 	// (display only; the control plane never acts on them in P1).
 	Caps []string `json:"caps,omitempty"`
@@ -584,10 +600,13 @@ func Routes() []Route {
 		{get, "/dashboard/api/policy/versions/{v}", "policy.version.read"},
 		{get, "/dashboard/api/policy/versions/{v}/diff", "policy.diff"},
 		{post, "/dashboard/api/policy/versions/{v}/rollback", "policy.rollback"},
+		{post, "/dashboard/api/backup", "backup.run"},
+		{get, "/dashboard/api/worker-tokens", "worker_token.read"},
+		{post, "/dashboard/api/worker-tokens", "worker_token.create"},
+		{del, "/dashboard/api/worker-tokens/{id}", "worker_token.revoke"},
 		{get, "/dashboard/api/blocked-users", "blocked_users.read"},
 		{post, "/dashboard/api/blocked-users", "blocked_users.add"},
 		{del, "/dashboard/api/blocked-users/{id}", "blocked_users.remove"},
-		{post, "/dashboard/api/backup", "backup.run"},
 	}
 }
 

@@ -111,7 +111,7 @@ func TestSyncIdentityFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	fleet := newFleetStore(t, 0, 0)
-	srv := newIngestServer(t, NewIngestHandler(fleet, ""))
+	srv := newIngestServer(t, NewIngestHandler(fleet, StaticTokenAuthorizer("")))
 	rs, err := NewHTTPRemoteStore(srv.URL, "", "proxy-1", srv.Client())
 	if err != nil {
 		t.Fatal(err)
@@ -144,7 +144,7 @@ func TestSyncIdentityFields(t *testing.T) {
 // user fields without error.
 func TestFleetEventWithoutIdentity(t *testing.T) {
 	fleet := newFleetStore(t, 0, 0)
-	srv := newIngestServer(t, NewIngestHandler(fleet, ""))
+	srv := newIngestServer(t, NewIngestHandler(fleet, StaticTokenAuthorizer("")))
 	rs, err := NewHTTPRemoteStore(srv.URL, "", "proxy-a", srv.Client())
 	if err != nil {
 		t.Fatal(err)

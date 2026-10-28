@@ -67,6 +67,12 @@ func (h *H) prepareConsole() {
 }
 
 func (h *H) applyConsole(p *controlplane.Params, addr *string) {
+	if h.wantWorkerTokens {
+		p.StateDir = filepath.Join(h.root, "cp-state")
+		// The token store polls for out-of-process revokes on the CP's clock:
+		// h.Clock().Advance drives it.
+		p.Clock = h.fake
+	}
 	if h.wantAdminAudit {
 		p.StateDir = filepath.Join(h.root, "cp-state")
 		// The checkpoint loop runs on the CP's clock: h.Clock().Advance drives it.
