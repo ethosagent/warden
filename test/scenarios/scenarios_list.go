@@ -78,6 +78,12 @@ var All = slices.Concat(
 		// another process reaches the served policy (sub/email only) and leaves on
 		// removal. In-process only (it writes the CP state dir).
 		{Name: "block_list_served", Opts: blockListOpts(), Run: blockListServed},
+		// Block-list worker path (W-P1-BLOCK-09): a block made over the CP API
+		// denies new CONNECTs on both workers, cuts open sessions and raises one
+		// Finding per user. In-process only (issuer fake, fake clock).
+		{Name: "block_list_connect", Opts: blockListFleetOpts(), Run: blockListConnect},
+		{Name: "block_list_sessions", Opts: blockListSessionsOpts(), Run: blockListSessions},
+		{Name: "block_list_finding", Opts: blockListFindingOpts(), Run: blockListFinding},
 		// Block-list admin API (W-P1-BLOCK-11).
 		{Name: "block_api_bearer", Opts: blockAPIBearerOpts(), Run: blockAPIBearer},
 		{Name: "block_api_roles", Opts: blockAPIOIDCOpts(), Run: blockAPIRoles},
