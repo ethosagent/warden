@@ -17,17 +17,25 @@ package dashboard
 //	POST   /dashboard/api/blocked-users                 admin, audited blocked_users.add
 //	DELETE /dashboard/api/blocked-users/{id}            admin, audited blocked_users.remove
 //
+//	GET  /dashboard/api/worker-tokens                   viewer  (W-P1-WTOK-03)
+//	POST /dashboard/api/worker-tokens                   admin, audited worker_token.create
+//	DELETE /dashboard/api/worker-tokens/{id}            admin, audited worker_token.revoke
+//
 // The admin audit log routes are distinct from the receipts
 // /dashboard/api/audit routes and answer 404 unless the control plane set an
-// AdminAuditSource. The policy history routes answer 404 unless
-// SetPolicyHistory was called (a control plane in --policy-store=versioned). The
-// block list routes answer 404 unless SetBlockListStore was called.
+// AdminAuditSource. The worker token routes answer 404 unless SetWorkerTokens
+// was called, and refuse a mint or revoke outside console.auth oidc (use_cli).
+// The policy history routes answer 404 unless SetPolicyHistory was called
+// (a control plane in --policy-store=versioned). The block list routes answer
+// 404 unless SetBlockListStore was called.
 func (s *Server) registerRoutes(mux *routeMux) {
 	mux.HandleFunc("/dashboard/api/admin-audit", s.handleAdminAudit)
 	mux.HandleFunc("/dashboard/api/admin-audit/verify", s.handleAdminAuditVerify)
 	mux.HandleFunc("/dashboard/api/admin-audit/pubkey", s.handleAdminAuditPubKey)
 	mux.HandleFunc("/dashboard/api/policy/versions", s.handlePolicyVersions)
 	mux.HandleFunc("/dashboard/api/policy/versions/", s.handlePolicyVersion)
+	mux.HandleFunc("/dashboard/api/worker-tokens", s.handleWorkerTokens)
+	mux.HandleFunc("/dashboard/api/worker-tokens/", s.handleWorkerTokenByID)
 	mux.HandleFunc("/dashboard/api/blocked-users", s.handleBlockedUsers)
 	mux.HandleFunc("/dashboard/api/blocked-users/", s.handleBlockedUser)
 }

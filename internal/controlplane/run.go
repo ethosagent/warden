@@ -35,15 +35,30 @@ import (
 // them from parsed flags (rule C1: cmd/ holds only flag parsing and wiring);
 // tests pass a Listener on port 0 to run a real control plane in-process.
 type Params struct {
-	ConfigPath, ListenAddr, TokenEnv string
+	ConfigPath, ListenAddr string
+	// TokenEnv is the deprecated --token-env, an alias of LegacyTokenEnv.
+	TokenEnv                         string
 	CACert, CAKey, TLSHost, StateDir string
 	MaxEvents, RetentionDays         int
 	AnalyticsProvider, AnalyticsDB   string
 	AlertsDB                         string
 
+	// LegacyTokenEnv names the env var holding the shared worker token
+	// (--legacy-token-env). Unset (with TokenEnv) = no shared token. It feeds
+	// worker authentication and, while AdminTokenEnv is unset, the dashboard
+	// write guard.
+	LegacyTokenEnv string
+	// RequireWorkerTokens (--require-worker-tokens) is strict worker auth:
+	// wwt_ tokens only. It needs StateDir and no legacy token, and TLS unless
+	// AllowInsecureWorkerAuth is set; Run checks all three before listening.
+	RequireWorkerTokens bool
+	// AllowInsecureWorkerAuth (--allow-insecure-worker-auth) lets strict mode
+	// run without TLS (development; tokens then travel in clear text).
+	AllowInsecureWorkerAuth bool
+
 	// AdminTokenEnv names the env var holding the CP's own admin bearer
 	// (--admin-token-env) for dashboard writes and /central/secrets. Empty =
-	// unset: they fall back to the TokenEnv token.
+	// unset: they fall back to the legacy token.
 	AdminTokenEnv string
 
 	// Listener, when set, replaces ListenAddr. Tests pass a loopback listener on
@@ -91,7 +106,7 @@ type Params struct {
 // config resolution, stores, and server wiring, now callable in-process — the
 // seam the L1 harness (parent #350) starts a real control plane through.
 func Run(ctx context.Context, out io.Writer, p Params) error {
-	configPath, listenAddr, tokenEnv := p.ConfigPath, p.ListenAddr, p.TokenEnv
+	configPath, listenAddr := p.ConfigPath, p.ListenAddr
 	caCert, caKey, tlsHost, stateDir := p.CACert, p.CAKey, p.TLSHost, p.StateDir
 	maxEvents := p.MaxEvents
 	// fail closes an injected listener on a boot error. httpSrv.Shutdown only
@@ -106,6 +121,10 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		return err
 	}
 	policyStore, err := resolvePolicyStore(p.PolicyStore, stateDir)
+	if err != nil {
+		return fail(err)
+	}
+	tokenEnv, err := validateWorkerAuth(p)
 	if err != nil {
 		return fail(err)
 	}
@@ -175,13 +194,19 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	}
 
 	var token string
-	if tokenEnv != "" {
+	if p.TokenEnv != "" {
+		logger.Warn("control-plane: --token-env is deprecated; use --legacy-token-env", "env", p.TokenEnv)
+	}
+	switch {
+	case p.RequireWorkerTokens:
+		// strict: validateWorkerAuth proved there is no shared token
+	case tokenEnv != "":
 		token = strings.TrimSpace(os.Getenv(tokenEnv))
 		if token == "" {
-			logger.Warn("control-plane: token-env set but empty; serving WITHOUT auth", "env", tokenEnv)
+			logger.Warn("control-plane: legacy token env set but empty; serving WITHOUT shared-token auth", "env", tokenEnv)
 		}
-	} else {
-		logger.Warn("control-plane: no token configured; serving WITHOUT auth (set --token-env for production)")
+	default:
+		logger.Warn("control-plane: no token configured; serving WITHOUT auth (issue worker tokens, or set --legacy-token-env)")
 	}
 	adminToken := resolveAdminToken(logger, p.AdminTokenEnv, consoleCfg.Auth, os.Getenv)
 
@@ -334,16 +359,18 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		PolicyPath:   servedPath,
 		Token:        token,
 		WorkerTokens: workerTokens,
-		TLS:          caCert != "" && caKey != "",
-		MaxEvents:    maxEvents,
-		Store:        store,
-		Logger:       logger,
-		Integrations: integrations,
-		AlertDBPath:  alertDBPath,
-		SecretStore:  secretStore,
-		Console:      consoleCfg,
-		ClientSecret: clientSecret,
-		Now:          clk.Now,
+
+		RequireWorkerTokens: p.RequireWorkerTokens,
+		TLS:                 caCert != "" && caKey != "",
+		MaxEvents:           maxEvents,
+		Store:               store,
+		Logger:              logger,
+		Integrations:        integrations,
+		AlertDBPath:         alertDBPath,
+		SecretStore:         secretStore,
+		Console:             consoleCfg,
+		ClientSecret:        clientSecret,
+		Now:                 clk.Now,
 
 		// The CP's own admin bearer. An explicit --admin-token-env never falls
 		// back to the worker token, even when its variable is empty.
@@ -523,6 +550,32 @@ func seedServedConfig(servedPath, seedPath string) (bool, error) {
 		return false, fmt.Errorf("write served config %s: %w", servedPath, err)
 	}
 	return true, nil
+}
+
+// validateWorkerAuth resolves the shared-token env var name from the
+// --legacy-token-env flag and its deprecated alias --token-env, and checks the
+// strict-mode combinations before anything is bound. Every error names the flag
+// at fault. Two different names are an error rather than a silent pick.
+func validateWorkerAuth(p Params) (legacyEnv string, err error) {
+	legacyEnv = p.LegacyTokenEnv
+	if p.TokenEnv != "" {
+		if legacyEnv != "" && legacyEnv != p.TokenEnv {
+			return "", errors.New("control-plane: --token-env and --legacy-token-env name different variables; --token-env is a deprecated alias, set only --legacy-token-env")
+		}
+		legacyEnv = p.TokenEnv
+	}
+	if !p.RequireWorkerTokens {
+		return legacyEnv, nil
+	}
+	switch {
+	case p.StateDir == "":
+		return "", errors.New("control-plane: --require-worker-tokens requires --state-dir (worker tokens live in its database)")
+	case legacyEnv != "":
+		return "", errors.New("control-plane: --require-worker-tokens cannot be combined with --legacy-token-env (or its alias --token-env): strict mode retires the shared token")
+	case (p.CACert == "" || p.CAKey == "") && !p.AllowInsecureWorkerAuth:
+		return "", errors.New("control-plane: --require-worker-tokens requires TLS (--ca-cert and --ca-key) or --allow-insecure-worker-auth")
+	}
+	return "", nil
 }
 
 // resolveAdminToken reads the CP admin bearer from the env var --admin-token-env

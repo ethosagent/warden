@@ -149,6 +149,8 @@ func (r *WorkerRegistry) Views() []dashboard.WorkerView {
 			PolicyETag:      w.policyETag,
 			Caps:            append([]string(nil), w.caps...),
 			Online:          now.Sub(w.lastSeen) < staleAfter,
+			AuthKind:        string(w.authKind),
+			TokenName:       w.tokenName,
 		}
 		if !w.lastPolicyPull.IsZero() {
 			v.LastPolicyPull = w.lastPolicyPull.UTC().Format(time.RFC3339)

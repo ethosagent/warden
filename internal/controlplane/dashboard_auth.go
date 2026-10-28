@@ -82,3 +82,19 @@ func (s *Server) warnAdminToken() {
 			"hint", "the admin token separates dashboard writes from worker credentials; set --admin-token-env to a different value")
 	}
 }
+
+// failClosedWithoutAdminToken handles strict mode with no CP admin token in
+// console.auth none (oidc sessions need none): there is nothing left to
+// authenticate a human write, so the dashboard write guard already refuses
+// every write (dashboardWriteToken is empty and the guard fails closed), and
+// here the secret-write API is unmounted too, so it never falls back to open.
+// It logs one ERROR naming the flag.
+func (s *Server) failClosedWithoutAdminToken() {
+	if !s.cfg.RequireWorkerTokens || s.cfg.Console.Auth == config.ConsoleAuthOIDC || s.dashboardWriteToken() != "" {
+		return
+	}
+	s.cfg.Logger.Error("control-plane: dashboard writes are disabled: set --admin-token-env",
+		"hint", "strict worker auth (--require-worker-tokens) retires the shared token; give the control plane its own admin bearer (e.g. WARDEN_CP_ADMIN_TOKEN). /central/secrets is not mounted until then")
+	s.secretStore = nil
+	s.cfg.SecretStoreBackend = ""
+}

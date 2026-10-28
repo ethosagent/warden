@@ -277,11 +277,11 @@ poll with a deadline. The helpers (`agentExec`, `recorded`, `resetRecorded`,
 `events`, `logs`, `AssertCanaryNeverLeaked`) are reused by the later L2 suites.
 
 The fleet suite (`fleet_test.go`) changes policy through the route the dashboard
-uses (`PUT /dashboard/api/policy` on the control plane, with the control-plane bearer token; an unauthenticated PUT is refused) and checks that both workers
+uses (`PUT /dashboard/api/policy` on the control plane, with the control-plane admin token `WARDEN_CP_ADMIN_TOKEN`, default `dev-cp-admin-token`; an unauthenticated PUT is refused) and checks that both workers
 pick it up within one long-poll; that with the control plane stopped the workers keep
 the last policy and stay fail-closed (an allowed host works, a denied host and a host
 nobody allowed stay refused); that a restarted control plane resyncs the workers;
-that a restarted worker decides by policy on its first request; and that each
+that a restarted worker decides by policy on its first request; that every worker authenticates with its own `wwt_` token (the stack runs `--require-worker-tokens`; a one-shot `cp-bootstrap` registers the dev tokens from `deploy/compose/.env.example`), the old shared token is refused (401) and a second `up` registers nothing new (`TestFleetPerWorkerTokens`); and that each
 agent's request is attributed to its own worker in the fleet view. Each test puts the
 stack back as it found it, so the order does not matter.
 
