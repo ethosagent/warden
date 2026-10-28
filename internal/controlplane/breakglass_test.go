@@ -1,6 +1,7 @@
 package controlplane
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -64,13 +65,31 @@ func (p *fakePublisher) all() []integration.Finding {
 	return append([]integration.Finding(nil), p.fs...)
 }
 
+// bgLogBuf is a goroutine-safe log sink for the break-glass tests.
+type bgLogBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *bgLogBuf) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *bgLogBuf) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
 type bgRig struct {
 	srv   *Server
 	h     http.Handler
 	clk   *clocktest.Fake
 	pub   *fakePublisher
 	rec   *fakeRecorder // nil with audit off
-	logs  *syncBuf
+	logs  *bgLogBuf
 	calls atomic.Int64 // argon2 verifications
 	hash  string       // the hash file's path
 }
@@ -83,7 +102,7 @@ type bgOpts struct {
 
 func newBGRig(t *testing.T, o bgOpts) *bgRig {
 	t.Helper()
-	r := &bgRig{clk: clocktest.NewFake(time.Unix(1_800_000_000, 0)), pub: &fakePublisher{}, logs: &syncBuf{}}
+	r := &bgRig{clk: clocktest.NewFake(time.Unix(1_800_000_000, 0)), pub: &fakePublisher{}, logs: &bgLogBuf{}}
 	r.hash = filepath.Join(t.TempDir(), "hash")
 	if err := os.WriteFile(r.hash, []byte(bgHash(t)+"\n"), 0o600); err != nil {
 		t.Fatal(err)

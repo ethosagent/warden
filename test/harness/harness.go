@@ -31,6 +31,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -130,6 +131,14 @@ type H struct {
 	// against an endpoint that is never called.
 	auditLogs        bool
 	unreachableJudge bool
+	// fakeJudge (WithFakeJudge) is the counting judge endpoint; noProxyCA
+	// (WithoutProxyCA) boots the workers without a TLS-termination CA.
+	fakeJudge *FakeJudge
+	noProxyCA bool
+	// scopedAllow (WithScopedAllow) extends the control plane's boot YAML;
+	// closers run at cleanup, before the leak check.
+	scopedAllow []scopedAllowSpec
+	closers     []func()
 
 	// inflights is one quiescence tracker per worker (the assembly-only
 	// worker.Overrides.Inflight seam): every request scope enters at request-read
@@ -186,6 +195,9 @@ type H struct {
 	// wantCPAdmin (WithControlPlaneAdminToken) boots the control plane with its
 	// own admin bearer (--admin-token-env), separate from the worker token.
 	wantCPAdmin bool
+	// wantCentral (WithCentralForwarding) makes every worker forward its events
+	// to the control plane's /central/ingest.
+	wantCentral bool
 	// wantBackup (WithBackup) boots the control plane with --backup-dir.
 	wantBackup bool
 	// backupUnwritable (WithBackupUnwritable) makes every backup run fail.
@@ -514,7 +526,15 @@ func (h *H) ConnectStatusWithAuth(hostPort, proxyAuthorization string) int {
 
 func (h *H) connectStatus(hostPort, proxyAuthorization string) int {
 	h.tb.Helper()
-	conn, err := net.DialTimeout("tcp", h.ProxyAddr(), 5*time.Second)
+	status, _ := h.connectReply(h.ProxyAddr(), hostPort, proxyAuthorization)
+	return status
+}
+
+// connectReply sends one CONNECT to the proxy at addr and returns the reply's
+// status and (up to 4 KiB of) body.
+func (h *H) connectReply(addr, hostPort, proxyAuthorization string) (int, string) {
+	h.tb.Helper()
+	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
 	if err != nil {
 		h.tb.Fatalf("dial the worker proxy: %v", err)
 	}
@@ -531,8 +551,13 @@ func (h *H) connectStatus(hostPort, proxyAuthorization string) int {
 	if err != nil {
 		h.tb.Fatalf("read the CONNECT %s reply: %v", hostPort, err)
 	}
-	_ = resp.Body.Close()
-	return resp.StatusCode
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode/100 == 2 {
+		// A tunnel is open: what follows the reply is the tunnel, not a body.
+		return resp.StatusCode, ""
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+	return resp.StatusCode, string(body)
 }
 
 // Issuer returns the in-process OIDC issuer started by WithOIDCIssuer.
@@ -760,8 +785,12 @@ func (h *H) writeCPConfig() string {
 	for _, d := range h.allowDomains() {
 		fmt.Fprintf(&b, "    - domain: %s\n", d)
 	}
+	for _, sc := range h.scopedAllow {
+		fmt.Fprintf(&b, "    - domain: %s\n      groups: [%s]\n", sc.domain, strings.Join(sc.groups, ", "))
+	}
 	b.WriteString(h.identityYAML())
 	b.WriteString(h.consoleYAML())
+	b.WriteString(h.fakeJudgeYAML())
 	b.WriteString(h.auditJSONLogYAML())
 	b.WriteString(h.strictYAML())
 	path := filepath.Join(h.root, "cp-config.yaml")
@@ -823,6 +852,19 @@ func (h *H) workerParams(i int) worker.Params {
 		},
 		Central: config.CentralConfig{ProxyID: fmt.Sprintf("worker-%d", i)},
 	}
+	if h.wantCentral {
+		policy.Central = config.CentralConfig{
+			Mode:     "worker",
+			Endpoint: "https://" + h.ControlPlaneAddr() + "/central/ingest",
+			TokenEnv: cpTokenEnv,
+			ProxyID:  fmt.Sprintf("worker-%d", i),
+			CACert:   h.proxyCACertDst,
+			// The config loader's defaults, which this in-process build bypasses.
+			BatchSize: 100,
+			BufferCap: 10000,
+			Interval:  100 * time.Millisecond,
+		}
+	}
 	if h.identityMode != "" {
 		policy.Identity = h.identitySettings()
 		policy.Audit.SignedReceipts = config.SignedReceiptsConfig{Enabled: true, Log: h.receiptLogPath(i)}
@@ -849,14 +891,19 @@ func (h *H) workerParams(i int) worker.Params {
 		}
 	}
 	h.applyAuditLogs(i, &policy)
+	h.applyFakeJudge(&policy)
 	// The local allowlist mirrors the CP's. A managed worker ignores it (policy
 	// comes only from the control plane) but keeping the two in sync means a
 	// scenario's intent reads the same whichever mode boots.
+	caCert, caKey := h.proxyCACertDst, h.proxyCAKeyDst
+	if h.noProxyCA {
+		caCert, caKey = "", ""
+	}
 	return worker.Params{
 		Config:        &fakes.FakeConfigProvider{Policy: policy},
 		DBPath:        h.workerDBPath(i),
-		CACert:        h.proxyCACertDst,
-		CAKey:         h.proxyCAKeyDst,
+		CACert:        caCert,
+		CAKey:         caKey,
 		Version:       "harness",
 		AdminTokenEnv: adminTokenEnv,
 		Overrides: &worker.Overrides{
@@ -1009,6 +1056,9 @@ func (h *H) cleanup() {
 		h.mu.Unlock()
 		for _, u := range ups {
 			u.close()
+		}
+		for _, c := range h.closers {
+			c()
 		}
 		if h.agentCl != nil {
 			h.agentCl.CloseIdleConnections()

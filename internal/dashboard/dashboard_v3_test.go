@@ -707,17 +707,6 @@ func TestIndexHTML_AuthNoneBanner(t *testing.T) {
 	}
 }
 
-func TestWorkerViewCaps(t *testing.T) {
-	with, _ := json.Marshal(WorkerView{ProxyID: "a", Caps: []string{"blocklist/v1"}})
-	if !strings.Contains(string(with), `"caps":["blocklist/v1"]`) {
-		t.Errorf("caps missing: %s", with)
-	}
-	without, _ := json.Marshal(WorkerView{ProxyID: "a"})
-	if strings.Contains(string(without), "caps") {
-		t.Errorf("empty caps serialized: %s", without)
-	}
-}
-
 // TestSetup_BackupStatus: backup is absent until SetBackupStatus is given a
 // closure that returns a status, and follows that closure per request.
 func TestSetup_BackupStatus(t *testing.T) {
@@ -748,5 +737,40 @@ func TestIndexHTML_BackupBadge(t *testing.T) {
 	i := strings.Index(html, "function applyBackupBadge")
 	if i < 0 || strings.Contains(html[i:i+900], "innerHTML") {
 		t.Error("applyBackupBadge must not use innerHTML")
+	}
+}
+
+func TestWorkerViewCaps(t *testing.T) {
+	with, _ := json.Marshal(WorkerView{ProxyID: "a", Caps: []string{"blocklist/v1"}})
+	if !strings.Contains(string(with), `"caps":["blocklist/v1"]`) {
+		t.Errorf("caps missing: %s", with)
+	}
+	without, _ := json.Marshal(WorkerView{ProxyID: "a"})
+	if strings.Contains(string(without), "caps") {
+		t.Errorf("empty caps serialized: %s", without)
+	}
+}
+
+// TestFleetNoGroupPolicyBadge: the fleet JSON carries noGroupPolicy and the
+// served dashboard renders the "no groupPolicy" badge from it.
+func TestFleetNoGroupPolicyBadge(t *testing.T) {
+	srv := NewServer(&fakeDataSource{}, config.Policy{}, emptyProvider())
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
+	srv.SetWorkers(func() []WorkerView {
+		return []WorkerView{{ProxyID: "old", NoGroupPolicy: true}, {ProxyID: "new"}}
+	})
+	var rows []map[string]any
+	rr := doGet(t, srv.Handler(), "/dashboard/api/workers")
+	if err := json.Unmarshal(rr.Body.Bytes(), &rows); err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || rows[0]["noGroupPolicy"] != true || rows[1]["noGroupPolicy"] != false {
+		t.Fatalf("fleet JSON = %s", rr.Body.String())
+	}
+	page := doGet(t, srv.Handler(), "/dashboard/").Body.String()
+	for _, want := range []string{"w.noGroupPolicy", "no groupPolicy"} {
+		if !strings.Contains(page, want) {
+			t.Errorf("served dashboard lacks %q", want)
+		}
 	}
 }

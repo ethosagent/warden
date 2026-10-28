@@ -275,16 +275,18 @@ func TestBlockedUsers_APIValidation(t *testing.T) {
 		t.Errorf("PUT = %d, want a refusal", rec.Code)
 	}
 
-	// Self-unblock: an entry matching the caller's email (any case) or sub.
+	// Self-unblock: an entry matching the caller's email (any case) or sub
+	// ends the caller's session (W-P1-BLOCK-07), so the caller cannot lift it.
 	ctx := context.Background()
 	for _, entry := range []BlockEntry{{Email: "U1@Example.com"}, {Sub: "u1"}} {
+		admin = e.session(t, groupAdmin)
 		id, err := e.srv.blocks.Add(ctx, entry, "cli:t")
 		if err != nil {
 			t.Fatal(err)
 		}
 		rec := e.send(admin, "", http.MethodDelete, blockAPIPath+"/"+id, "")
-		if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), `"self_unblock_forbidden"`) {
-			t.Errorf("self DELETE = %d %s, want 403 self_unblock_forbidden", rec.Code, rec.Body)
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("self DELETE = %d %s, want 401 (the blocked caller's session is revoked)", rec.Code, rec.Body)
 		}
 		if l, _ := e.srv.blocks.List(ctx); !hasBlockID(l, id) {
 			t.Error("the caller's own block was removed")
@@ -430,4 +432,35 @@ func (e *auditEnv) sessionAs(t *testing.T, group, sub, email string) string {
 		t.Fatal(err)
 	}
 	return raw
+}
+
+// TestWorkersMissingBlocklistCap: the list response counts the connected
+// workers that did not advertise blocklist/v1 (one with the cap, one without)
+// and names them.
+func TestWorkersMissingBlocklistCap(t *testing.T) {
+	_, ts := noneAPI(t, nil)
+	if c := postHeartbeat(t, ts.URL, "new-worker", `{"policyETag":"v1","caps":["blocklist/v1"]}`); c != http.StatusNoContent {
+		t.Fatalf("new worker heartbeat = %d", c)
+	}
+	if c := postHeartbeat(t, ts.URL, "old-worker", `{"policyETag":"v1"}`); c != http.StatusNoContent {
+		t.Fatalf("old worker heartbeat = %d", c)
+	}
+	code, body := doJSON(t, http.MethodGet, ts.URL+blockAPIPath, dashTestToken, "")
+	if code != http.StatusOK {
+		t.Fatalf("GET = %d %s", code, body)
+	}
+	var got struct {
+		Entries []json.RawMessage `json:"entries"`
+		N       int               `json:"workersWithoutEnforcement"`
+		IDs     []string          `json:"workersWithoutEnforcementIDs"`
+	}
+	if err := json.Unmarshal([]byte(body), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.N != 1 || len(got.IDs) != 1 || got.IDs[0] != "old-worker" {
+		t.Errorf("workersWithoutEnforcement = %d %v, want 1 [old-worker]", got.N, got.IDs)
+	}
+	if got.Entries == nil {
+		t.Error("entries field missing")
+	}
 }

@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/ethosagent/warden/internal/cpstate"
@@ -244,6 +245,22 @@ func (s *SessionStore) DeleteBySub(ctx context.Context, sub string) (int, error)
 	res, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE sub = ?`, sub)
 	if err != nil {
 		return 0, fmt.Errorf("sessions: delete by sub: %w", err)
+	}
+	n, err := res.RowsAffected()
+	return int(n), err
+}
+
+// DeleteByEmail removes every session whose login email equals email,
+// compared case-insensitively, and returns how many it removed. It serves a
+// block-list entry that has an email and no sub.
+func (s *SessionStore) DeleteByEmail(ctx context.Context, email string) (int, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	if email == "" {
+		return 0, nil
+	}
+	res, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE lower(email) = ?`, email)
+	if err != nil {
+		return 0, fmt.Errorf("sessions: delete by email: %w", err)
 	}
 	n, err := res.RowsAffected()
 	return int(n), err

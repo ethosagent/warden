@@ -108,9 +108,28 @@ var All = slices.Concat(
 		// another process reaches the served policy (sub/email only) and leaves on
 		// removal. In-process only (it writes the CP state dir).
 		{Name: "block_list_served", Opts: blockListOpts(), Run: blockListServed},
+		// Block-list worker path (W-P1-BLOCK-09): a block made over the CP API
+		// denies new CONNECTs on both workers, cuts open sessions and raises one
+		// Finding per user. In-process only (issuer fake, fake clock).
+		{Name: "block_list_connect", Opts: blockListFleetOpts(), Run: blockListConnect},
+		{Name: "block_list_sessions", Opts: blockListSessionsOpts(), Run: blockListSessions},
+		{Name: "block_list_finding", Opts: blockListFindingOpts(), Run: blockListFinding},
+		// Block survival (W-P1-BLOCK-12): a block outlives a policy rollback, a
+		// worker restart and a control-plane outage; an offline block lands once
+		// the control plane returns; unblocking restores the pre-block ETag.
+		// In-process only (state dir, issuer fake, fake clock, worker restart).
+		{Name: "block_list_survives_rollback", Opts: blockSurvivalOpts(), Run: blockListSurvivesRollback},
+		{Name: "block_list_survives_restart", Opts: blockSurvivalOpts(), Run: blockListSurvivesRestart},
+		{Name: "block_list_survives_cp_outage", Opts: blockSurvivalOpts(), Run: blockListSurvivesCPOutage},
+		{Name: "block_list_unblock_restores", Opts: blockSurvivalOpts(), Run: blockListUnblockRestores},
 		// Block-list admin API (W-P1-BLOCK-11).
 		{Name: "block_api_bearer", Opts: blockAPIBearerOpts(), Run: blockAPIBearer},
 		{Name: "block_api_roles", Opts: blockAPIOIDCOpts(), Run: blockAPIRoles},
+		// Console denial for blocked principals (W-P1-BLOCK-07): a block ends the
+		// admin's session and refuses their next login (403, one audit row);
+		// break-glass still opens the console. In-process only (it writes the CP
+		// state dir and reads the session table).
+		{Name: "blocked_principal_denied", Opts: breakGlassOpts(), Run: blockedPrincipalDenied},
 		// Versioned publish (W-P1-PVER-02): dashboard policy and llmProviders
 		// saves create versions authored anonymous that workers enforce.
 		// In-process only (it reads the CP state dir).
@@ -124,6 +143,10 @@ var All = slices.Concat(
 		{Name: "scoped_policy_deferred_identity", Opts: identityOpts(), Run: scopedPolicyDeferredIdentity},
 		// Replay of recorded identities (W-P1-GPOL-05): a candidate narrowing a
 		// scoped rule names the affected user and counts anonymous apart.
+		// Fleet flag (W-P1-GPOL-07): workers of this build advertise
+		// grouppolicy/v1; only a legacy worker is flagged noGroupPolicy while
+		// scoped rules are served.
+		{Name: "scoped_policy_fleet_flag", Opts: []harness.Option{harness.Fleet(1)}, Run: scopedPolicyFleetFlag},
 		{Name: "scoped_policy_replay_affected_users", Opts: identityOpts(), Run: scopedPolicyReplayAffectedUsers},
 		// MCP subject seam (W-P1-GPOL-04): the verified subject reaches the MCP
 		// gateway through RequestMeta without changing any verdict.
@@ -131,6 +154,26 @@ var All = slices.Concat(
 		// Group-gated MCP tools (W-P1-GPOL-11): allowWhen.groups is decided with
 		// the request's verified subject; non-members are denied mcp_tool_condition.
 		{Name: "mcp_group_condition", Opts: mcpGroupOpts(), Run: mcpGroupCondition},
+		// Dashboard editor round trip (W-P1-GPOL-08): groups/users saved through
+		// /dashboard/api/policy come back normalized and scoped, an empty chip is a
+		// 400, the worker enforces the rule and the GET lints a shadowing entry.
+		{Name: "scoped_policy_dashboard_editor", Opts: identityOpts(), Run: scopedPolicyDashboardEditor},
+		// Group-aware policy on the L1 harness (W-P1-GPOL-09): a {domain, groups}
+		// entry and a group-gated MCP tool, served by the control plane and
+		// decided per request. Every deny leaves the judge fake and the upstream
+		// untouched; no allow lets an identity header reach the upstream.
+		{Name: "groups_member_allowed", Opts: groupsOpts(), Run: groupsMemberAllowed},
+		{Name: "groups_nonmember_denied", Opts: groupsOpts(), Run: groupsNonMemberDenied},
+		{Name: "groups_anonymous_denied", Opts: groupsOpts(), Run: groupsAnonymousDenied},
+		{Name: "groups_expired_denied", Opts: groupsOpts(), Run: groupsExpiredDenied},
+		{Name: "groups_keepalive_mixed_users", Opts: groupsOpts(), Run: groupsKeepaliveMixedUsers},
+		{Name: "groups_h2_per_stream", Opts: groupsOpts(), Run: groupsH2PerStream},
+		{Name: "groups_no_ca_conditional", Opts: append(groupsOpts(), harness.WithoutProxyCA()), Run: groupsNoCAConditional},
+		{Name: "groups_raw_bytes_conditional", Opts: groupsOpts(), Run: groupsRawBytesConditional},
+		{Name: "groups_truncated", Opts: groupsOpts(), Run: groupsTruncated},
+		{Name: "groups_mcp_tool_gated", Opts: groupsMCPOpts(), Run: groupsMCPToolGated},
+		{Name: "groups_old_worker_denies", Opts: groupsMCPOpts(), Run: groupsOldWorkerDenies},
+		{Name: "groups_policy_eval_affected_users", Opts: groupsOpts(), Run: groupsPolicyEvalAffectedUsers},
 		// Version contract (W-P1-PVER-08): GET reports the head, If-Match names
 		// it, a stale save is a 409 naming the author and is audited rejected.
 		// In-process only (it reads the CP state dir).
