@@ -26,20 +26,24 @@ import (
 // DELETE) and requireRole (admin) here. In none mode they are mounted as 404,
 // because the dashboard would otherwise serve its index page for the path.
 func (s *Server) mountDashboard(mux *http.ServeMux, dash *dashboard.Server) {
+	table := authzTable()
+	// With admin audit on, every mount below runs behind the request-id and
+	// audit middleware (sessionAuditWrap), outside the write guard and authz,
+	// so their refusals are recorded; with it off the wrapping is the identity.
+	classify := dashboardRoute(table)
 	if s.cfg.Console.Auth != config.ConsoleAuthOIDC {
 		dash.SetWriteGuard(s.dashboardWriteGuard())
-		mux.Handle("/dashboard/", s.sessionWrap(dash.Handler()))
+		mux.Handle("/dashboard/", s.sessionAuditWrap(classify, dash.Handler()))
 		mux.Handle(sessionsAdminPath, http.NotFoundHandler())
 		return
 	}
-	table := authzTable()
 	dash.SetWriteGuard(s.sessionWriteGuard())
 	guarded := requireRole(s.limitQueryGenerate(dash.Handler()), table, s.cfg.Console, s.cfg.Logger)
-	mux.Handle("/dashboard/", s.sessionWrap(guarded))
-	// GET lists, DELETE revokes (?handle= or ?sub=); admin only.
-	// TODO(#39, #38): audit record per revoke once the admin audit chain lands; a
-	// per-session rate limit arrives with the shared console limiter.
-	mux.Handle(sessionsAdminPath, s.sessionWrap(requireRole(http.HandlerFunc(s.handleSessions), table, s.cfg.Console, s.cfg.Logger)))
+	mux.Handle("/dashboard/", s.sessionAuditWrap(classify, guarded))
+	// GET lists, DELETE revokes (?handle= or ?sub=); admin only. A revoke is an
+	// audited admin change.
+	// TODO(#39): a per-session rate limit arrives with the shared console limiter.
+	mux.Handle(sessionsAdminPath, s.sessionAuditWrap(classify, requireRole(http.HandlerFunc(s.handleSessions), table, s.cfg.Console, s.cfg.Logger)))
 }
 
 // sessionsAdminPath is the admin session list and revoke route (W-P1-SSO-08).
@@ -67,19 +71,21 @@ func cpDashboardRoutes() []dashboard.Route {
 // The login routes also need a state DB (s.auth is nil otherwise), so without
 // one they stay 404 as well.
 //
-// TODO(#39, #38): audit record for logout once the admin audit chain lands;
-// a per-session rate limit arrives with the shared console limiter.
+// With admin audit on, the callback and logout get a request id and record
+// their own rows (W-P1-AAUD-07); off, they are mounted exactly as before.
+//
+// TODO(#39): a per-session rate limit arrives with the shared console limiter.
 func (s *Server) registerAuthRoutes(mux *http.ServeMux) {
 	if s.cfg.Console.Auth != config.ConsoleAuthOIDC {
 		return
 	}
 	mux.Handle("/auth/me", s.sessionWrap(http.HandlerFunc(s.handleAuthMe)))
-	mux.Handle("/auth/logout", s.sessionWrap(http.HandlerFunc(s.handleLogout)))
+	mux.Handle("/auth/logout", s.requestIDWrap(s.sessionWrap(http.HandlerFunc(s.handleLogout))))
 	if s.auth == nil {
 		return
 	}
 	mux.HandleFunc("/auth/login", s.auth.handleLogin)
-	mux.HandleFunc("/auth/callback", s.auth.handleCallback)
+	mux.Handle("/auth/callback", s.requestIDWrap(http.HandlerFunc(s.auth.handleCallback)))
 }
 
 // authMode is the console sign-in mode the dashboard reports as authMode:

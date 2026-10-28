@@ -52,7 +52,7 @@ func FuzzMCPMessage(f *testing.F) {
 		_ = mcp.ScanToolArgs(body, scanner)
 		_ = mcp.ScanToolResult(body, scanner)
 
-		v := gw.OnRequest("fuzz:session", http.MethodPost, "https://mcp.test/mcp", http.Header{}, body)
+		v := gw.OnRequest("fuzz:session", http.MethodPost, "https://mcp.test/mcp", http.Header{}, body, gateway.RequestMeta{})
 		if err == nil && tc != nil && tc.Name != "read_file" && v.Action != gateway.Deny {
 			t.Fatalf("enforce mode let tools/call %q through: %q", tc.Name, body)
 		}

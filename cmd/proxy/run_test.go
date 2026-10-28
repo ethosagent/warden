@@ -101,3 +101,29 @@ func TestRunParams_AdminTokenEnvFlag(t *testing.T) {
 		}
 	}
 }
+
+// TestControlPlaneAdminTokenFlag: the control plane's --admin-token-env reaches
+// controlplane.Params.AdminTokenEnv; unset is empty, and --token-env stays a
+// separate field.
+func TestControlPlaneAdminTokenFlag(t *testing.T) {
+	for args, want := range map[string]string{"": "", "WARDEN_CP_ADMIN_TOKEN": "WARDEN_CP_ADMIN_TOKEN"} {
+		root := &cobra.Command{Use: "warden"}
+		root.PersistentFlags().String("config", "x.yaml", "")
+		cp := newControlPlaneCmd()
+		root.AddCommand(cp)
+		argv := []string{"--token-env", "WARDEN_CP_TOKEN"}
+		if args != "" {
+			argv = append(argv, "--admin-token-env", args)
+		}
+		if err := cp.ParseFlags(argv); err != nil {
+			t.Fatal(err)
+		}
+		p, err := controlPlaneParams(cp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p.AdminTokenEnv != want || p.TokenEnv != "WARDEN_CP_TOKEN" {
+			t.Errorf("flag %q: AdminTokenEnv = %q, TokenEnv = %q; want %q, WARDEN_CP_TOKEN", args, p.AdminTokenEnv, p.TokenEnv, want)
+		}
+	}
+}

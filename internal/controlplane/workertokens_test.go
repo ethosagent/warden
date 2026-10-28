@@ -178,17 +178,6 @@ func TestWorkerTokenStoreCrossProcessReload(t *testing.T) {
 	}
 }
 
-func waitFor(t *testing.T, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for !cond() {
-		if time.Now().After(deadline) {
-			t.Fatal("condition not met within 2s")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-}
-
 func TestWorkerTokenStoreRunLoopOnFakeClock(t *testing.T) {
 	e := newWT(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -327,7 +316,7 @@ func TestWorkerTokenStoreRevoke(t *testing.T) {
 	if len(fired) != 1 || fired[0] != tok.ID {
 		t.Fatalf("OnRevoked calls = %v, want one", fired)
 	}
-	if err := e.store.Revoke(ctx, "wt_nope", "x"); !errors.Is(err, ErrNotFound) {
+	if err := e.store.Revoke(ctx, "wt_nope", "x"); !errors.Is(err, ErrWorkerTokenNotFound) {
 		t.Fatalf("unknown id: %v", err)
 	}
 	if err := e.store.Revoke(ctx, tok.ID, ""); !errors.Is(err, ErrInvalidInput) {

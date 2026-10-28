@@ -6,6 +6,40 @@ import (
 	"github.com/ethosagent/warden/internal/controlplane"
 )
 
+// controlPlaneParams parses the control-plane flags into controlplane.Params.
+func controlPlaneParams(cmd *cobra.Command) (controlplane.Params, error) {
+	configPath, err := cmd.Flags().GetString("config")
+	if err != nil {
+		return controlplane.Params{}, err
+	}
+	listenAddr, _ := cmd.Flags().GetString("listen")
+	tokenEnv, _ := cmd.Flags().GetString("token-env")
+	adminTokenEnv, _ := cmd.Flags().GetString("admin-token-env")
+	caCert, _ := cmd.Flags().GetString("ca-cert")
+	caKey, _ := cmd.Flags().GetString("ca-key")
+	tlsHost, _ := cmd.Flags().GetString("tls-host")
+	stateDir, _ := cmd.Flags().GetString("state-dir")
+	maxEvents, _ := cmd.Flags().GetInt("central-max-events")
+	aProvider, _ := cmd.Flags().GetString("analytics-provider")
+	aDB, _ := cmd.Flags().GetString("analytics-db")
+	aRetention, _ := cmd.Flags().GetInt("analytics-retention-days")
+	alertsDB, _ := cmd.Flags().GetString("alerts-db")
+	requireConsoleAuth, _ := cmd.Flags().GetBool("require-console-auth")
+	policyStore, _ := cmd.Flags().GetString("policy-store")
+	auditKeyFile, _ := cmd.Flags().GetString("admin-audit-key-file")
+	auditNewSegment, _ := cmd.Flags().GetString("admin-audit-new-segment")
+	return controlplane.Params{
+		ConfigPath: configPath, ListenAddr: listenAddr,
+		TokenEnv: tokenEnv, AdminTokenEnv: adminTokenEnv,
+		CACert: caCert, CAKey: caKey, TLSHost: tlsHost, StateDir: stateDir,
+		MaxEvents: maxEvents, AnalyticsProvider: aProvider, AnalyticsDB: aDB,
+		RetentionDays: aRetention, AlertsDB: alertsDB,
+		RequireConsoleAuth: requireConsoleAuth,
+		PolicyStore:        policyStore,
+		AdminAuditKeyFile:  auditKeyFile, AdminAuditNewSegment: auditNewSegment,
+	}, nil
+}
+
 // newControlPlaneCmd builds the `control-plane` subcommand. The control plane
 // serves allow/deny policy to data-plane workers and aggregates their analytics
 // for a fleet dashboard. It is the same binary as the worker but a distinct
@@ -26,38 +60,16 @@ func newControlPlaneCmd() *cobra.Command {
 			"this boundary. Provide --ca-cert/--ca-key to serve HTTPS with a cert " +
 			"minted from that CA (workers trust it via controlPlane.caCert).",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			configPath, err := cmd.Flags().GetString("config")
+			p, err := controlPlaneParams(cmd)
 			if err != nil {
 				return err
 			}
-			listenAddr, _ := cmd.Flags().GetString("listen")
-			tokenEnv, _ := cmd.Flags().GetString("token-env")
-			caCert, _ := cmd.Flags().GetString("ca-cert")
-			caKey, _ := cmd.Flags().GetString("ca-key")
-			tlsHost, _ := cmd.Flags().GetString("tls-host")
-			stateDir, _ := cmd.Flags().GetString("state-dir")
-			maxEvents, _ := cmd.Flags().GetInt("central-max-events")
-			aProvider, _ := cmd.Flags().GetString("analytics-provider")
-			aDB, _ := cmd.Flags().GetString("analytics-db")
-			aRetention, _ := cmd.Flags().GetInt("analytics-retention-days")
-			alertsDB, _ := cmd.Flags().GetString("alerts-db")
-			requireConsoleAuth, _ := cmd.Flags().GetBool("require-console-auth")
-			policyStore, _ := cmd.Flags().GetString("policy-store")
-			auditKeyFile, _ := cmd.Flags().GetString("admin-audit-key-file")
-			auditNewSegment, _ := cmd.Flags().GetString("admin-audit-new-segment")
-			return controlplane.Run(cmd.Context(), cmd.OutOrStdout(), controlplane.Params{
-				ConfigPath: configPath, ListenAddr: listenAddr, TokenEnv: tokenEnv,
-				CACert: caCert, CAKey: caKey, TLSHost: tlsHost, StateDir: stateDir,
-				MaxEvents: maxEvents, AnalyticsProvider: aProvider, AnalyticsDB: aDB,
-				RetentionDays: aRetention, AlertsDB: alertsDB,
-				RequireConsoleAuth: requireConsoleAuth,
-				PolicyStore:        policyStore,
-				AdminAuditKeyFile:  auditKeyFile, AdminAuditNewSegment: auditNewSegment,
-			})
+			return controlplane.Run(cmd.Context(), cmd.OutOrStdout(), p)
 		},
 	}
 	cmd.Flags().String("listen", "0.0.0.0:7070", "control-plane HTTP(S) listen address")
 	cmd.Flags().String("token-env", "", "env var holding the bearer token workers must present")
+	cmd.Flags().String("admin-token-env", "", "env var holding the control plane's own admin bearer for dashboard writes and /central/secrets (unset = they fall back to --token-env)")
 	cmd.Flags().String("ca-cert", "", "CA cert to mint the server TLS cert from (enables HTTPS)")
 	cmd.Flags().String("ca-key", "", "CA key to mint the server TLS cert from")
 	cmd.Flags().String("tls-host", "localhost,127.0.0.1", "comma-separated SANs for the minted server cert")
@@ -71,5 +83,7 @@ func newControlPlaneCmd() *cobra.Command {
 	cmd.Flags().Bool("require-console-auth", false, "refuse to start unless console.auth is oidc (no open dashboard)")
 	cmd.Flags().String("admin-audit-key-file", "", "admin audit signing key (default <state-dir>/cp-audit.key; the HMAC key sits beside it); used when console.adminAudit.enabled")
 	cmd.Flags().String("admin-audit-new-segment", "", "key_id of a new admin audit signing key: start a new chain segment for it (manual rotation; no-op once the chain head is on that key)")
+	// Offline subcommands over the CP state dir.
+	cmd.AddCommand(newAdminAuditCmd(), newControlPlaneBlockCmd())
 	return cmd
 }

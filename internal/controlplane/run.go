@@ -41,6 +41,11 @@ type Params struct {
 	AnalyticsProvider, AnalyticsDB   string
 	AlertsDB                         string
 
+	// AdminTokenEnv names the env var holding the CP's own admin bearer
+	// (--admin-token-env) for dashboard writes and /central/secrets. Empty =
+	// unset: they fall back to the TokenEnv token.
+	AdminTokenEnv string
+
 	// Listener, when set, replaces ListenAddr. Tests pass a loopback listener on
 	// port 0. Run closes it on a boot error and, on the serving path, on
 	// shutdown (via httpSrv.Shutdown, which closes listeners Serve registered).
@@ -75,6 +80,10 @@ type Params struct {
 	// signing key to start a chain segment for; it must equal the loaded key's
 	// key_id and is a no-op once the head is on that key.
 	AdminAuditNewSegment string
+	// AdminAuditCheckpointInterval is how often the admin audit chain head is
+	// logged as an admin_audit.checkpoint line (0 = every 5 minutes). Tests
+	// drive it with Clock.
+	AdminAuditCheckpointInterval time.Duration
 }
 
 // Run boots a control plane from Params and serves until ctx is cancelled. It
@@ -174,6 +183,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	} else {
 		logger.Warn("control-plane: no token configured; serving WITHOUT auth (set --token-env for production)")
 	}
+	adminToken := resolveAdminToken(logger, p.AdminTokenEnv, consoleCfg.Auth, os.Getenv)
 
 	// Durable CP state (sessions, audit, tokens, ... register migrations here as
 	// they land). Only with --state-dir; a corrupt file stops startup so state is
@@ -208,13 +218,18 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// Admin audit (console.adminAudit.enabled): off by default, in which case no
 	// key file, store or rows exist. On, a key that does not match the chain
 	// stops startup here, before anything is served.
-	var adminAudit *adminaudit.Store
+	var (
+		adminAudit   *adminaudit.Store
+		auditEmitter adminaudit.Emitter
+	)
 	if consoleCfg.AdminAudit.Enabled {
 		auditClk := p.Clock
 		if auditClk == nil {
 			auditClk = clock.Real()
 		}
-		adminAudit, err = openAdminAudit(context.WithoutCancel(ctx), logger, state, stateDir, p, auditClk)
+		// One emitter for entries and checkpoints: W-P1-JAUD-03 swaps it here.
+		auditEmitter = adminaudit.NewSlogEmitter(logger)
+		adminAudit, err = openAdminAudit(context.WithoutCancel(ctx), logger, state, stateDir, p, auditClk, auditEmitter)
 		if err != nil {
 			return fail(err)
 		}
@@ -306,6 +321,11 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		Console:      consoleCfg,
 		ClientSecret: clientSecret,
 		Now:          clk.Now,
+
+		// The CP's own admin bearer. An explicit --admin-token-env never falls
+		// back to the worker token, even when its variable is empty.
+		AdminToken:        adminToken,
+		RequireAdminToken: p.AdminTokenEnv != "",
 		// Report the backend name to the dashboard only when a writable store was
 		// actually built (echo/aws); env/none leaves it empty → tab reports "none".
 		SecretStoreBackend: secretStoreBackendName(secretStore, pol.SecretStore),
@@ -321,6 +341,10 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		// The CP's time port (nil = clock.Real() inside New).
 		Clock: p.Clock,
 	})
+
+	// Bounded chain check (newest rows + head signature) once the alert
+	// pipeline exists to carry its Finding. A failure is reported, never fatal.
+	srv.verifyAdminAuditAtStartup(context.WithoutCancel(ctx))
 
 	if policyStore == PolicyStoreVersioned {
 		if _, _, ok, _ := srv.policy.snapshot(); !ok {
@@ -378,6 +402,35 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 
 	// Periodic re-read so external edits to the policy file propagate to workers.
 	srv.Start(ctx)
+
+	// Block list: pick up writes by the offline CLI (`control-plane block`)
+	// within BlockWatchInterval. Run waits for the loop before the state DB
+	// closes.
+	if srv.blocks != nil {
+		wCtx, wCancel := context.WithCancel(ctx)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			srv.blocks.Watch(wCtx, BlockWatchInterval)
+		}()
+		defer func() {
+			wCancel()
+			<-done
+		}()
+	}
+
+	// Admin audit checkpoints: the chain head is logged at startup, every
+	// interval and at shutdown. Run waits for the loop before the state DB
+	// closes. With admin audit disabled no goroutine starts.
+	if adminAudit != nil {
+		cpCtx, cpCancel := context.WithCancel(ctx)
+		done := make(chan struct{})
+		go runCheckpointLoop(cpCtx, done, adminAudit, auditEmitter, p.AdminAuditCheckpointInterval, clk)
+		defer func() {
+			cpCancel()
+			<-done
+		}()
+	}
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -447,6 +500,26 @@ func seedServedConfig(servedPath, seedPath string) (bool, error) {
 		return false, fmt.Errorf("write served config %s: %w", servedPath, err)
 	}
 	return true, nil
+}
+
+// resolveAdminToken reads the CP admin bearer from the env var --admin-token-env
+// names ("" = flag unset). A named but empty variable is logged by name, never
+// value: in console.auth none dashboard writes are then refused (the fallback to
+// the worker token is off), in oidc sessions replace the bearer and the token is
+// simply unused.
+func resolveAdminToken(logger *slog.Logger, env, consoleAuth string, getenv func(string) string) string {
+	if env == "" {
+		return ""
+	}
+	token := strings.TrimSpace(getenv(env))
+	if token == "" {
+		if consoleAuth == config.ConsoleAuthOIDC {
+			logger.Warn("control-plane: admin-token-env set but empty; the admin token is unused in console.auth oidc", "env", env)
+		} else {
+			logger.Warn("control-plane: admin-token-env set but empty; dashboard writes will be refused", "env", env)
+		}
+	}
+	return token
 }
 
 // resolveConsole loads the console block from configPath (the operator-owned

@@ -105,12 +105,16 @@ func (m *metricSink) RecordBlocked(reason string)   { m.add("blocked reason=%s",
 func (m *metricSink) RecordSecretSwap(ref string)   { m.add("secret_swap ref=%s", ref) }
 func (m *metricSink) RecordScanFinding(kind string) { m.add("scan_finding kind=%s", kind) }
 func (m *metricSink) RecordJudge(outcome string)    { m.add("judge outcome=%s", outcome) }
+func (m *metricSink) RecordScoped(result string)    { m.add("scoped result=%s", result) }
 func (m *metricSink) ObserveAddedLatency(stage string, _ time.Duration) {
 	m.add("latency stage=%s", stage)
 }
 func (m *metricSink) RecordIdentityVerify(result, reason string) {
 	m.add("identity_verify result=%s reason=%s", result, reason)
 }
+
+func (m *metricSink) RecordBlocklistEntries(n int)        { m.add("blocklist_entries n=%d", n) }
+func (m *metricSink) RecordBlocklistSessionsClosed(n int) { m.add("blocklist_closed n=%d", n) }
 
 // seenReq is one request the upstream received.
 type seenReq struct {

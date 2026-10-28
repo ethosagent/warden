@@ -321,6 +321,9 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		// Announce this worker's id on each pull/heartbeat so the control plane
 		// lists it as connected even before it forwards analytics.
 		rp.SetProxyID(expandEnv(pol.Central.ProxyID))
+		// Advertise the capabilities this binary implements so the control plane
+		// can flag workers that would silently ignore newer policy fields.
+		rp.SetCaps(config.WorkerCaps())
 		// Shutdown hygiene: drop the pooled keep-alive conns when Run returns, so
 		// a hosted worker leaves no open connections to the control plane.
 		defer rp.CloseIdleConnections()
@@ -766,6 +769,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// block and this agent's mode. Construction does no network I/O, so a worker
 	// whose issuer is down still starts. Mode stays off unless configured.
 	idWiring := newIdentityWiring(pxy, agentID, logger)
+	idWiring.scoped = func() int { return countScoped(evaluator.CurrentPolicy()) }
 	idWiring.apply(pol.Identity, pol.Agents)
 
 	// liveMCPGW tracks the gateway currently swapped into the proxy so shutdown
@@ -975,7 +979,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 			liveCompliance:   liveCompliance,
 			liveCacheTTL:     liveCacheTTL,
 		}
-		go longPollControlPlane(ctx, clk, controlPlane, evaluator, pol.ControlPlane.LongPollWait, logger, applier.Apply)
+		go longPollControlPlane(ctx, clk, controlPlane, evaluator, pol.ControlPlane.LongPollWait, logger, onPolicyApplied(applier.Apply, pxy.CloseBlockedSessions))
 		go heartbeatControlPlane(ctx, clk, controlPlane, pol.ControlPlane.HeartbeatInterval, logger)
 	}
 	if syncWorker != nil {

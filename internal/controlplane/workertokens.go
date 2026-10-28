@@ -51,8 +51,8 @@ var (
 )
 
 var (
-	// ErrNotFound: Revoke named an id that does not exist.
-	ErrNotFound = errors.New("worker token: not found")
+	// ErrWorkerTokenNotFound: Revoke named an id that does not exist.
+	ErrWorkerTokenNotFound = errors.New("worker token: not found")
 	// ErrTooManyActive: the proxy_id already has the maximum active tokens.
 	ErrTooManyActive = errors.New("worker token: proxy id already has the maximum number of active tokens")
 	// ErrNameTaken: a token (active or revoked) already has this name.
@@ -395,7 +395,7 @@ func (s *WorkerTokenStore) rowByName(ctx context.Context, name string) (tokenRow
 }
 
 // Revoke soft-deletes a token. It is idempotent: revoking a revoked token
-// keeps the first revoked_at and revoked_by. An unknown id is ErrNotFound.
+// keeps the first revoked_at and revoked_by. An unknown id is ErrWorkerTokenNotFound.
 func (s *WorkerTokenStore) Revoke(ctx context.Context, id, actor string) error {
 	if actor == "" {
 		return fmt.Errorf("%w: actor is required", ErrInvalidInput)
@@ -414,7 +414,7 @@ func (s *WorkerTokenStore) Revoke(ctx context.Context, id, actor string) error {
 		var one int
 		err := s.db.QueryRowContext(ctx, `SELECT 1 FROM worker_tokens WHERE id = ?`, id).Scan(&one)
 		if errors.Is(err, sql.ErrNoRows) {
-			return ErrNotFound
+			return ErrWorkerTokenNotFound
 		}
 		if err != nil {
 			return fmt.Errorf("worker tokens: revoke: %w", err)
