@@ -37,6 +37,7 @@ func StateMigrations() []cpstate.Migration {
 	migs = append(migs, PolicyStoreMigrations()...)
 	migs = append(migs, adminaudit.Migrations()...)
 	migs = append(migs, BlockMigrations()...)
+	migs = append(migs, WorkerTokenMigrations()...)
 	return migs
 }
 
