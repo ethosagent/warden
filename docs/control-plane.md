@@ -929,6 +929,21 @@ not running (no alert store, `--analytics-provider=memory`) is listed under
 fails with `insufficient free space` and writes nothing. Each copy logs
 `msg=cp_backup` with `db`, `bytes`, `duration_ms` and `outcome`.
 
+**Health.** A backup that fails or goes quiet is not silent. A failed run logs
+ERROR `msg=cp_backup_failed` (`db`, error cut to 200 bytes) and publishes one
+`backup_failed` Finding (severity high, dedup key `backup_failed:<db>`, where
+`<db>` is the failing source or `run`). A check every max(1m, interval/4)
+publishes one `backup_stale` Finding (high, dedup key `backup_stale`) when the
+last success is older than twice `--backup-interval`; with no success since
+start, the start time counts as the last one. A success ends the episode.
+Findings carry the db name and the bounded error text, never row contents. With
+no alert pipeline the Finding is logged at ERROR as `finding_not_published`.
+
+`GET /dashboard/api/setup` gains `backup` (`enabled`, `lastSuccessAt`,
+`lastError`, `lastSet`, `sizeBytes`) for an admin session, or for any caller when
+`console.auth` is `none`. Viewers and editors never see it, and it is absent when
+`--backup-dir` is unset. The dashboard header shows a green or red badge from it.
+
 ## Block list: offline CLI
 
 The user block list lives in `<state-dir>/warden-cp.db`, outside policy

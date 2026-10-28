@@ -80,6 +80,12 @@ var All = slices.Concat(
 		// Scheduled backups (W-P1-OPS1-06): a startup set, the next one past the
 		// interval on the fake clock, pruning, no key files. In-process only.
 		{Name: "backup_scheduled", Opts: backupOpts(), Run: backupScheduled},
+		// Backup health (W-P1-OPS1-07): a failing runner raises backup_failed and
+		// backup_stale Findings in the alert store while /policy keeps serving, and
+		// /dashboard/api/setup shows the status to admins only.
+		{Name: "backup_failure_findings", Opts: []harness.Option{harness.WithBackupUnwritable()}, Run: backupFailureFindings},
+		{Name: "backup_status_admin_only", Opts: []harness.Option{harness.WithConsoleOIDC(), harness.WithBackup()}, Run: backupStatusAdminOnly},
+		{Name: "backup_status_disabled", Opts: consoleOpts(), Run: backupStatusDisabled},
 
 		{Name: "policy_store_versioned", Opts: policyStoreOpts(), Run: policyStoreVersioned},
 		// Initial import (W-P1-PVER-07): version 1 by system:import plus one

@@ -447,6 +447,9 @@
     <!-- console.auth none: persistent open-console banner (shown from /dashboard/api/setup authMode) -->
     <span id="authNoneBanner" role="status" hidden style="padding:4px 10px; border-radius:6px; font-size:12px; font-weight:600; color:var(--amber); border:1px solid var(--amber)" title="console.auth is none: anyone who can reach the console can read it, and writes need the admin bearer. Set console.auth: oidc to require sign-in.">⚠ Open console: no sign-in (console.auth none)</span>
 
+    <!-- Scheduled backups (admin only; /dashboard/api/setup backup) -->
+    <span id="backupBadge" role="status" hidden style="padding:4px 10px; border-radius:6px; font-size:12px; font-weight:600; border:1px solid var(--line, #888)"></span>
+
     <div class="spacer"></div>
 
     <span id="updatedLabel" class="note" style="font-size:11.5px">connecting…</span>
@@ -1663,6 +1666,18 @@ async function loadSetup(){
   catch(e){ setupData=null; }
   applySetup();
 }
+// applyBackupBadge shows the scheduled-backup state when the server sent it
+// (admins only). Values go in through textContent / title, never innerHTML.
+function applyBackupBadge(b){
+  const el=document.getElementById('backupBadge'); if(!el) return;
+  if(!b||!b.enabled){ el.hidden=true; return; }
+  const bad=!!b.lastError;
+  el.hidden=false;
+  el.style.color=bad?'var(--red)':'var(--green)';
+  el.style.borderColor=bad?'var(--red)':'var(--green)';
+  el.textContent=bad?'Backup failing':(b.lastSuccessAt?'Backup ok '+b.lastSuccessAt.slice(0,16).replace('T',' ')+'Z':'Backup pending');
+  el.title=bad?('Last backup error: '+b.lastError):('Last set: '+(b.lastSet||'none'));
+}
 function applySetup(){
   const s=setupData||{};
   const wc=s.workersConnected||0;
@@ -1671,6 +1686,7 @@ function applySetup(){
   const cp=document.getElementById('cpLabel'); if(cp) cp.textContent='connected';
   if(s.mode) applyMode(s.mode);
   const nb=document.getElementById('authNoneBanner'); if(nb) nb.hidden=(s.authMode!=='none');
+  applyBackupBadge(s.backup);
   renderStepper();
   // Overview: onboarding hero replaces stat blocks until a first event is seen.
   const ov=document.getElementById('page-overview');

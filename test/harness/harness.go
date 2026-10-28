@@ -176,6 +176,8 @@ type H struct {
 	wantCPAdmin bool
 	// wantBackup (WithBackup) boots the control plane with --backup-dir.
 	wantBackup bool
+	// backupUnwritable (WithBackupUnwritable) makes every backup run fail.
+	backupUnwritable bool
 
 	// tokenClients are the AgentWithProxyToken / AgentH2WithProxyToken clients,
 	// kept so cleanup can close their idle tunnels.

@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -231,6 +232,9 @@ type Server struct {
 	// findings, when set, receives every Finding instead of the alert pipeline.
 	// Tests inject a fake here.
 	findings FindingPublisher
+	// backupRunner is the scheduled backup runner (nil with --backup-dir unset);
+	// Run stores it after New so /dashboard/api/setup can report its status.
+	backupRunner atomic.Pointer[BackupRunner]
 	// auditRec is cfg.AdminAudit as a Recorder (nil with admin audit off) and ext
 	// tracks the served file's hashes for the file-mode external-edit audit
 	// (adminaudit_external.go).
@@ -589,6 +593,7 @@ func (s *Server) Handler() http.Handler {
 	//     receipts source is wired and the receipts block stays zeroed.
 	dash.SetSecretStore(s.secretStore, s.cfg.SecretStoreBackend)
 	dash.SetAuthMode(s.authMode())
+	dash.SetBackupStatus(s.backupStatusFor)
 	// Admin audit log API (W-P1-AAUD-03): only with console.adminAudit on;
 	// without a source the dashboard answers 404 and hides the tab.
 	if s.cfg.AdminAudit != nil {

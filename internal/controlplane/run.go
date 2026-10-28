@@ -88,6 +88,9 @@ type Params struct {
 	// Backup is the --backup-* settings; Backup.Dir == "" (the default) turns
 	// backups off. Run validates it against StateDir and the stores it opens.
 	Backup BackupConfig
+	// Findings, when set, receives every Finding instead of the alert pipeline
+	// (tests and the harness inject a fake; nil = the pipeline).
+	Findings FindingPublisher
 	// BackupReporter receives each backup run's outcome (nil = none).
 	BackupReporter BackupReporter
 	// Version is the warden version recorded in backup manifests.
@@ -355,6 +358,10 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		Clock: p.Clock,
 	})
 
+	if p.Findings != nil {
+		srv.findings = p.Findings
+	}
+
 	// Bounded chain check (newest rows + head signature) once the alert
 	// pipeline exists to carry its Finding. A failure is reported, never fatal.
 	srv.verifyAdminAuditAtStartup(context.WithoutCancel(ctx))
@@ -448,12 +455,22 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// Scheduled backups (--backup-dir): one goroutine on the CP context, never
 	// on a request path. Run waits for it before the stores close.
 	if p.Backup.Enabled() {
-		bk := newRunBackupRunner(p, clk, logger, state, srv.integrationsStore, store, servedPath, dbPath, alertDBPath, adminAudit)
+		// The health reporter raises backup_failed / backup_stale Findings; a
+		// caller's own reporter (tests) is told of every outcome too.
+		var bk *BackupRunner
+		health := newBackupHealth(srv.publishFinding, logger, clk, p.Backup.withDefaults().Interval,
+			func() BackupStatus { return bk.Status() }, p.BackupReporter)
+		p.BackupReporter = health
+		bk = newRunBackupRunner(p, clk, logger, state, srv.integrationsStore, store, servedPath, dbPath, alertDBPath, adminAudit)
 		bkCtx, bkCancel := context.WithCancel(ctx)
+		srv.setBackupStatus(bk)
 		bk.Start(bkCtx)
+		staleDone := make(chan struct{})
+		go health.runStale(bkCtx, staleDone)
 		defer func() {
 			bkCancel()
 			bk.Wait()
+			<-staleDone
 		}()
 	}
 
