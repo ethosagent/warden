@@ -283,9 +283,11 @@ linters:
         - module: go.opentelemetry.io/otel/metric
         - module: go.opentelemetry.io/otel/sdk
         - module: go.opentelemetry.io/otel/sdk/metric
+        - module: golang.org/x/crypto
         - module: golang.org/x/net
         - module: golang.org/x/oauth2
         - module: golang.org/x/sync
+        - module: golang.org/x/term
         - module: gopkg.in/natefinch/lumberjack.v2
         - module: gopkg.in/yaml.v3
         - module: modernc.org/sqlite

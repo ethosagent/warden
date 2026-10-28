@@ -35,7 +35,20 @@ type headerBackend struct {
 	// as the response body.
 	trailer http.Header
 	echo    string
-	srv     *httptest.Server
+	// reqs counts the requests the handler served.
+	reqs int
+	srv  *httptest.Server
+	// hold, when set, parks every handler after it counted the request until the
+	// channel is closed; arrived (buffered by the test) is signalled on arrival.
+	hold    chan struct{}
+	arrived chan struct{}
+}
+
+// requests returns how many requests reached the backend.
+func (b *headerBackend) requests() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.reqs
 }
 
 func newHeaderBackend(t *testing.T, grpc bool) *headerBackend {
@@ -45,8 +58,18 @@ func newHeaderBackend(t *testing.T, grpc bool) *headerBackend {
 		_, _ = io.Copy(io.Discard, r.Body)
 		b.mu.Lock()
 		b.got = r.Header.Clone()
+		b.reqs++
 		b.trailer = r.Trailer.Clone()
 		b.mu.Unlock()
+		if b.arrived != nil {
+			select {
+			case b.arrived <- struct{}{}:
+			default:
+			}
+		}
+		if b.hold != nil {
+			<-b.hold
+		}
 		if grpc {
 			w.Header().Set("Content-Type", "application/grpc")
 			w.Header().Set("Trailer", "Grpc-Status")

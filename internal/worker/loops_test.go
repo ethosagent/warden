@@ -85,6 +85,8 @@ func (e *recordingEvaluator) EvaluateRequest(string, int, policy.Scheme, string,
 	return policy.RequestVerdict{}
 }
 
+func (e *recordingEvaluator) IsBlocked(string, string) bool { return false }
+
 func (e *recordingEvaluator) EvaluateFor(policy.RequestContext) policy.RequestVerdict {
 	return policy.RequestVerdict{}
 }
@@ -152,6 +154,46 @@ func TestLongPollControlPlane_DrivesReloadViaInterface(t *testing.T) {
 	if ev.replaced[0].LogLevel != want.LogLevel {
 		t.Errorf("evaluator got policy %+v, want %+v (fetched via GetPolicy)", ev.replaced[0], want)
 	}
+}
+
+// TestLongPollAppliesBlockList proves a managed worker enforces blockedUsers as
+// soon as the long-poll loop has called Replace: the real evaluator (the one the
+// proxy consults) starts blocking the fetched sub and email, and blocks nobody
+// before the first pull.
+func TestLongPollAppliesBlockList(t *testing.T) {
+	fake := &fakeControlPlaneClient{policy: config.Policy{
+		BlockedUsers: []config.BlockedUser{{Sub: "u1"}, {Email: "alice@corp.com"}},
+	}}
+	ev := policy.NewEvaluator(config.Policy{})
+	if ev.IsBlocked("u1", "alice@corp.com") {
+		t.Fatal("blocked before the first pull")
+	}
+
+	applied := make(chan struct{}, 1)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		longPollControlPlane(ctx, clock.Real(), fake, ev, 10*time.Millisecond, logger, func() { applied <- struct{}{} })
+		close(done)
+	}()
+	select {
+	case <-applied:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the policy was never applied")
+	}
+	if !ev.IsBlocked("u1", "") {
+		t.Error("sub u1 not blocked after Replace")
+	}
+	if !ev.IsBlocked("", "alice@corp.com") {
+		t.Error("email alice@corp.com not blocked after Replace")
+	}
+	if ev.IsBlocked("u2", "bob@corp.com") {
+		t.Error("an unlisted user is blocked")
+	}
+	cancel()
+	<-done
 }
 
 // TestHeartbeatControlPlane_TicksViaInterface proves the heartbeat loop pings the
@@ -390,4 +432,49 @@ func (f *failingControlPlaneClient) polls() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.poll
+}
+
+// TestLongPollClosesBlockedSessions proves the hook worker.go passes to the
+// long-poll loop: a policy update runs the settings applier and then the session
+// cut, in that order, once per applied change.
+func TestLongPollClosesBlockedSessions(t *testing.T) {
+	fake := &fakeControlPlaneClient{policy: config.Policy{BlockedUsers: []config.BlockedUser{{Sub: "u1"}}}}
+	ev := &recordingEvaluator{}
+
+	var mu sync.Mutex
+	var calls []string
+	record := func(name string) func() {
+		return func() {
+			mu.Lock()
+			calls = append(calls, name)
+			mu.Unlock()
+		}
+	}
+	hook := onPolicyApplied(record("apply"), record("close"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		longPollControlPlane(ctx, clock.Real(), fake, ev, 10*time.Millisecond, slog.New(slog.NewTextHandler(io.Discard, nil)), hook)
+		close(done)
+	}()
+	await(t, 2*time.Second, "the composed hook", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(calls) >= 2
+	})
+	cancel()
+	<-done
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(calls) != 2 || calls[0] != "apply" || calls[1] != "close" {
+		t.Errorf("hook calls = %v, want [apply close]", calls)
+	}
+	ev.mu.Lock()
+	defer ev.mu.Unlock()
+	if len(ev.replaced) != 1 || len(ev.replaced[0].BlockedUsers) != 1 {
+		t.Errorf("evaluator replaced = %+v, want the one policy with its block list", ev.replaced)
+	}
 }

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 )
 
 // responseSink is the seam between the shared per-request stage pipeline
@@ -15,6 +16,9 @@ import (
 type responseSink interface {
 	// errorResponse writes a terminal status + one-line text body.
 	errorResponse(status int, text string)
+	// errorJSON writes a terminal status with a JSON body (Content-Type
+	// application/json, Content-Length set).
+	errorJSON(status int, body string)
 	// relay writes the whole upstream response (status, headers, body, and any
 	// trailers) to the client. A non-nil error means the client leg is broken.
 	relay(resp *http.Response) error
@@ -27,6 +31,8 @@ type responseSink interface {
 type connSink struct{ w io.Writer }
 
 func (c connSink) errorResponse(status int, text string) { writeErrorResponse(c.w, status, text) }
+
+func (c connSink) errorJSON(status int, body string) { writeJSONResponse(c.w, status, body) }
 
 func (c connSink) relay(resp *http.Response) error { return resp.Write(c.w) }
 
@@ -54,6 +60,14 @@ func (c connSink) stream(resp *http.Response) (io.Writer, error) {
 type h2Sink struct{ w http.ResponseWriter }
 
 func (h h2Sink) errorResponse(status int, text string) { http.Error(h.w, text, status) }
+
+func (h h2Sink) errorJSON(status int, body string) {
+	hdr := h.w.Header()
+	hdr.Set("Content-Type", "application/json")
+	hdr.Set("Content-Length", strconv.Itoa(len(body)))
+	h.w.WriteHeader(status)
+	_, _ = io.WriteString(h.w, body)
+}
 
 // grpcStatus answers with a trailers-only gRPC response (HTTP 200, the status in
 // the headers), the shape a gRPC client reads as a call that failed with r.

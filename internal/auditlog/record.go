@@ -25,7 +25,8 @@ import (
 // Schema identifiers carried on every line.
 const (
 	SchemaDecisionV1 = "warden.decision.v1"
-	SchemaRev        = 1
+	// SchemaRev 2 adds the user_blocked reason (W-P1-BLOCK-02).
+	SchemaRev = 2
 )
 
 // QueryMode says what FromEvent may record of the request query.

@@ -128,7 +128,11 @@ type requestScope struct {
 	idStatus     identity.Status
 	idReason     identity.Reason
 	idClaims     identity.Claims
-	subject      *identity.Subject
+	// idHeaderClaims keeps the verified header claims when they conflict with
+	// the CONNECT identity (the result then carries no claims), so the
+	// block-list check still sees both users. Deny-only, like idClaims.
+	idHeaderClaims identity.Claims
+	subject        *identity.Subject
 
 	// Decision state threaded between stages.
 	judgeReason string
@@ -137,6 +141,10 @@ type requestScope struct {
 	mcpReason   string
 	mcpSessKey  string
 	closeAfter  bool
+
+	// sess is the connection's registry session (nil for none): blockStage binds
+	// the request's identities to it.
+	sess *session
 
 	// reqStart is the wall-clock instant this request was read off the wire
 	// (captured in serveHTTPRequest right after http.ReadRequest). Every event the
@@ -307,13 +315,16 @@ func (p *Proxy) handleHTTP(clientConn net.Conn, br *bufio.Reader, domain string,
 	}
 	var upstream net.Conn
 	var upstreamBR *bufio.Reader
+	sess := p.sessions.newSession(schemeProto(scheme), domain, port, false, clientConn)
+	sess.bind(ci)
+	defer sess.release()
 	defer func() {
 		if upstream != nil {
 			_ = upstream.Close()
 		}
 	}()
 	for {
-		end, up, upBR := p.serveHTTPRequest(clientConn, br, domain, port, d, scheme, firstReq, upstream, upstreamBR, ci)
+		end, up, upBR := p.serveHTTPRequest(clientConn, br, domain, port, d, scheme, firstReq, upstream, upstreamBR, ci, sess)
 		// The pre-read first request is served exactly once; later iterations
 		// read from the wire like every keep-alive request.
 		firstReq = nil
@@ -334,7 +345,7 @@ func (p *Proxy) handleHTTP(clientConn net.Conn, br *bufio.Reader, domain string,
 // scope's upstream on every non-handoff path (the session closes it on exit or
 // reuses it next iteration), or nil after a WebSocket handoff so the session does
 // not double-close the pump-owned conn.
-func (p *Proxy) serveHTTPRequest(clientConn net.Conn, br *bufio.Reader, domain string, port int, d deferred, scheme policy.Scheme, firstReq *http.Request, upstream net.Conn, upstreamBR *bufio.Reader, ci connIdentity) (endSession bool, carryUpstream net.Conn, carryBR *bufio.Reader) {
+func (p *Proxy) serveHTTPRequest(clientConn net.Conn, br *bufio.Reader, domain string, port int, d deferred, scheme policy.Scheme, firstReq *http.Request, upstream net.Conn, upstreamBR *bufio.Reader, ci connIdentity, sess *session) (endSession bool, carryUpstream net.Conn, carryBR *bufio.Reader) {
 	req := firstReq
 	if req == nil {
 		var err error
@@ -345,6 +356,10 @@ func (p *Proxy) serveHTTPRequest(clientConn net.Conn, br *bufio.Reader, domain s
 			return true, upstream, upstreamBR
 		}
 	}
+	// From here the request has arrived: a block applied now cuts the session
+	// after this request completes, never in the middle of it.
+	sess.beginRequest()
+
 	// Mediation-latency clock starts at the request-read point and stops where each
 	// event is written (see requestScope.latencyMs). time.Now (not the injectable
 	// leaf-cert clock) so latency is real wall time on every event.
@@ -371,6 +386,7 @@ func (p *Proxy) serveHTTPRequest(clientConn net.Conn, br *bufio.Reader, domain s
 		upstreamBR: upstreamBR,
 		reused:     upstream != nil,
 		ci:         ci,
+		sess:       sess,
 	}
 	// The quiescence tracker is entered by runRequestStages — the ONE pipeline
 	// both h1 requests and h2/gRPC streams run — so this h1 path and serveGRPCStream
@@ -379,6 +395,11 @@ func (p *Proxy) serveHTTPRequest(clientConn net.Conn, br *bufio.Reader, domain s
 	defer s.cleanup()
 
 	end := p.runRequestStages(s)
+	// A block that matched while the request ran ends the session now that the
+	// response is out (a WebSocket upgrade was cut by its own closer instead).
+	if sess.endRequest() {
+		end = true
+	}
 	if s.handoff {
 		// The frame pump owns and closes s.upstream; the session must not.
 		return true, nil, nil
@@ -421,6 +442,9 @@ func (p *Proxy) runRequestStages(s *requestScope) (endSession bool) {
 		return true
 	}
 	if p.identityStage(s) {
+		return true
+	}
+	if p.blockStage(s) {
 		return true
 	}
 	if p.constraintGate(s) {
@@ -1522,6 +1546,9 @@ func (p *Proxy) recordAllowEvent(s *requestScope) {
 	})
 }
 
+// writeErrorResponse writes a terminal HTTP/1.1 error. Every caller ends the
+// session after it, so the response says Connection: close: a keep-alive client
+// then does not race the close by sending its next request on this conn.
 func writeErrorResponse(w io.Writer, statusCode int, statusText string) {
 	resp := &http.Response{
 		StatusCode:    statusCode,
@@ -1532,6 +1559,7 @@ func writeErrorResponse(w io.Writer, statusCode int, statusText string) {
 		Header:        http.Header{},
 		Body:          io.NopCloser(strings.NewReader(statusText + "\n")),
 		ContentLength: int64(len(statusText) + 1),
+		Close:         true,
 	}
 	_ = resp.Write(w)
 }

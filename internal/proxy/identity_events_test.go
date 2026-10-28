@@ -40,6 +40,33 @@ func waitEvent(t *testing.T, st *syncStore, what string, pred func(analytics.Eve
 	}
 }
 
+// waitDecisions polls the store until it holds at least want[decision] events
+// for every decision, and returns that snapshot.
+func waitDecisions(t *testing.T, st *syncStore, want map[string]int) []analytics.Event {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		evs := st.snapshot()
+		have := map[string]int{}
+		for _, ev := range evs {
+			have[ev.Decision]++
+		}
+		done := true
+		for d, n := range want {
+			if have[d] < n {
+				done = false
+			}
+		}
+		if done {
+			return evs
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("want events %v, have %v: %+v", want, have, evs)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func wantAlice(t *testing.T, what string, ev analytics.Event) {
 	t.Helper()
 	if ev.UserSub != "alice" || ev.UserEmail != "alice@example.test" || !reflect.DeepEqual(ev.UserGroups, []string{"eng"}) ||
@@ -297,11 +324,9 @@ func TestNoIdentityEventsUnchanged(t *testing.T) {
 		t.Fatalf("status = %d", st)
 	}
 	e.connectDenied("")
-	waitEvent(t, e.store, "deny", func(ev analytics.Event) bool { return ev.Decision == "deny" })
-	evs := e.store.snapshot()
-	if len(evs) < 3 {
-		t.Fatalf("got %d events, want at least 3", len(evs))
-	}
+	// Each event is written after its response, so the deny arriving says
+	// nothing about the two allows: wait for the whole expected set.
+	evs := waitDecisions(t, e.store, map[string]int{"allow": 2, "deny": 1})
 	for _, ev := range evs {
 		wantNoUser(t, ev.Decision, ev)
 		if ev.IdentityStatus != "" || ev.IdentityReason != "" {

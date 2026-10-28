@@ -49,6 +49,12 @@ type Policy struct {
 	Allowlist []AllowlistEntry `json:"allowlist"`
 	// Denylist is checked before the allowlist; deny wins on conflict.
 	Denylist []DenylistEntry `json:"denylist"`
+	// BlockedUsers is the admin user block list (IdP sub and/or email),
+	// normalized and validated at load. json:"-" satisfies architecture rule
+	// X2 (Policy's only declared wire fields are Allowlist/Denylist); the list
+	// still rides the wire through remoteWire.BlockedUsers (worker decode) and
+	// controlplane.policyWire.BlockedUsers (CP encode).
+	BlockedUsers []BlockedUser `json:"-"`
 	// Secrets maps placeholder tokens to their source env var (phase 1).
 	Secrets []SecretMapping `json:"-"`
 	// SecretStore selects the backend the worker resolves placeholders through
@@ -163,6 +169,7 @@ func (p Policy) DeepCopy() Policy {
 		cp.Allowlist[i].Users = append([]string(nil), p.Allowlist[i].Users...)
 	}
 	cp.Denylist = append([]DenylistEntry(nil), p.Denylist...)
+	cp.BlockedUsers = append([]BlockedUser(nil), p.BlockedUsers...)
 	cp.Secrets = append([]SecretMapping(nil), p.Secrets...)
 	for i := range cp.Secrets {
 		cp.Secrets[i].MatchHosts = append([]string(nil), p.Secrets[i].MatchHosts...)
@@ -335,6 +342,8 @@ type rawConfig struct {
 	Policy struct {
 		Allowlist []AllowlistEntry `yaml:"allowlist"`
 		Denylist  []DenylistEntry  `yaml:"denylist"`
+		// BlockedUsers: the user block list (see BlockedUser).
+		BlockedUsers []BlockedUser `yaml:"blockedUsers"`
 	} `yaml:"policy"`
 	Secrets     []SecretMapping `yaml:"secrets"`
 	SecretStore *rawSecretStore `yaml:"secretStore"`
@@ -402,6 +411,7 @@ func parse(data []byte) (*LocalYAMLProvider, error) {
 	policy := Policy{
 		Allowlist:       raw.Policy.Allowlist,
 		Denylist:        raw.Policy.Denylist,
+		BlockedUsers:    normalizeBlockedUsers(raw.Policy.BlockedUsers),
 		Secrets:         raw.Secrets,
 		SecretStore:     parseSecretStore(raw.SecretStore),
 		CacheTTLSeconds: raw.Cache.TTL,
@@ -524,6 +534,9 @@ func parseDurationField(name, raw string, dst *time.Duration) error {
 // the core allow/deny policy inline and delegates each feature domain to its own
 // validate helper (defined alongside that domain's types).
 func validate(p Policy) error {
+	if err := ValidateBlockedUsers(p.BlockedUsers); err != nil {
+		return err
+	}
 	// A control-plane-managed worker (controlPlane configured, not local-only)
 	// gets its policy from the CP and boots fail-closed, so it needs no local
 	// allowlist. Every other mode must declare at least one allow entry.

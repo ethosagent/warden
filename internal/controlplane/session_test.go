@@ -41,7 +41,7 @@ func (c *fakeClock) Advance(d time.Duration) {
 
 func openSessionDB(t *testing.T) *cpstate.DB {
 	t.Helper()
-	db, err := cpstate.Open(context.Background(), filepath.Join(t.TempDir(), "warden-cp.db"), SessionMigrations())
+	db, err := cpstate.Open(context.Background(), filepath.Join(t.TempDir(), "warden-cp.db"), StateMigrations())
 	if err != nil {
 		t.Fatalf("cpstate.Open: %v", err)
 	}

@@ -3,7 +3,6 @@ package controlplane
 import (
 	"context"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -16,7 +15,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/config"
 )
 
@@ -39,7 +37,7 @@ type PolicyServer interface {
 // against the worker registry, exactly as before.
 type policyServer struct {
 	policyPath string
-	token      string
+	auth       *WorkerAuthenticator
 	logger     *slog.Logger
 	registry   *WorkerRegistry
 	watch      *policyWatch
@@ -92,11 +90,13 @@ const maxOverlayErrLen = 256
 // newPolicyServer constructs the policy-serving component. It does not load:
 // the owner registers overlays (addOverlay) and then calls Refresh once, so
 // /policy and the dashboard have policy immediately. registry receives
-// SeenPolicyPull on each poll; token gates access when non-empty.
+// SeenPolicyPull on each poll; token is the shared token the default
+// authenticator checks (empty = open). New replaces the authenticator with the
+// control plane's own (worker tokens, mode, counters) before serving.
 func newPolicyServer(policyPath, token string, logger *slog.Logger, registry *WorkerRegistry) *policyServer {
 	return &policyServer{
 		policyPath: policyPath,
-		token:      token,
+		auth:       NewWorkerAuthenticator(WorkerAuthConfig{Legacy: token, Registry: registry, Logger: logger}),
 		logger:     logger,
 		registry:   registry,
 		watch:      newPolicyWatch(),
@@ -414,6 +414,12 @@ func (ps *policyServer) loadFile() (policyWire, error) {
 	if err != nil {
 		return policyWire{}, err
 	}
+	// The console API is the only source of the served block list (merged from
+	// the CP store); a YAML list is ignored, loudly, and never echoed.
+	if len(p.BlockedUsers) > 0 {
+		ps.logger.Warn("control plane: policy file contains blockedUsers; ignored (manage the block list from the console)",
+			"entries", len(p.BlockedUsers))
+	}
 	// SettingsWireFromPolicy projects only the secret-free behavioral blocks and
 	// returns nil when the config is pure allow/deny, so the "settings" key stays
 	// absent in that case (back-compat).
@@ -437,21 +443,26 @@ func (ps *policyServer) ServePolicy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if ps.token != "" {
-		want := "Bearer " + ps.token
-		if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte(want)) != 1 {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
+	principal, err := ps.auth.Authenticate(r)
+	if err != nil {
+		WriteWorkerAuthError(w, err)
+		return
 	}
 	if !ps.sealed.Load() {
 		ps.sealOverlays() // first request ends overlay registration
 	}
-	// Register the worker as connected (it announces its id on the pull).
-	ps.registry.SeenPolicyPull(r.Header.Get(analytics.ProxyIDHeader))
+	// Register the worker as connected under the authenticated id: a token's
+	// bound proxy id, never the raw header.
+	ps.registry.SeenPolicyPull(principal.ProxyID)
 
 	inm := trimETag(r.Header.Get("If-None-Match"))
 	wait := parseWait(r.URL.Query().Get("wait"))
+
+	// A token's held request registers lazily when it first parks and is
+	// released when the handler returns.
+	var revoked <-chan struct{}
+	release := func() {}
+	defer func() { release() }()
 
 	for {
 		wire, etag, ok, ch := ps.watch.snapshot()
@@ -461,6 +472,11 @@ func (ps *policyServer) ServePolicy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if etag != inm {
+			// Re-authenticate before any write: a token revoked while this
+			// request waited never receives the new policy.
+			if !ps.stillAuthorized(w, principal) {
+				return
+			}
 			w.Header().Set("ETag", `"`+etag+`"`)
 			w.Header().Set("Content-Type", "application/json")
 			// The watch holds the real rules (dashboard, audit and diff read
@@ -473,11 +489,26 @@ func (ps *policyServer) ServePolicy(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNotModified)
 			return
 		}
+		if revoked == nil {
+			revoked, release = ps.auth.WatchRevoke(principal)
+		}
+		// Register first, then check: a revoke between the initial
+		// authentication and the park is seen here, never missed.
+		if !ps.stillAuthorized(w, principal) {
+			return
+		}
 		timer := time.NewTimer(wait)
 		select {
 		case <-ch:
 			timer.Stop() // policy changed — loop re-evaluates and serves it
+		case <-revoked:
+			timer.Stop()
+			WriteWorkerAuthError(w, ErrUnauthorized)
+			return
 		case <-timer.C:
+			if !ps.stillAuthorized(w, principal) {
+				return
+			}
 			w.Header().Set("ETag", `"`+etag+`"`)
 			w.WriteHeader(http.StatusNotModified)
 			return
@@ -486,6 +517,16 @@ func (ps *policyServer) ServePolicy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+// stillAuthorized re-authenticates p from the in-memory index and writes 401
+// when its credential is no longer valid.
+func (ps *policyServer) stillAuthorized(w http.ResponseWriter, p WorkerPrincipal) bool {
+	if err := ps.auth.Reauthenticate(p); err != nil {
+		WriteWorkerAuthError(w, err)
+		return false
+	}
+	return true
 }
 
 // parseWait parses the ?wait= long-poll duration, clamped to [min,max]; an

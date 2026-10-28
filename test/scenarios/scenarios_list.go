@@ -69,11 +69,26 @@ var All = slices.Concat(
 		// Versioned policy store (W-P1-PVER-01): the first start imports the YAML
 		// as version 1; a head written out of process reaches workers. In-process
 		// only (it writes the control plane's state database).
+		// Scheduled backups (W-P1-OPS1-06): a startup set, the next one past the
+		// interval on the fake clock, pruning, no key files. In-process only.
+		{Name: "backup_scheduled", Opts: backupOpts(), Run: backupScheduled},
+		// On-demand backup (W-P1-OPS1-11): POST /dashboard/api/backup is an
+		// audited admin action; 404 without --backup-dir. In-process only.
+		{Name: "backup_trigger_admin", Opts: backupTriggerOpts(), Run: backupTriggerAdmin},
+		{Name: "backup_trigger_disabled", Opts: backupTriggerDisabledOpts(), Run: backupTriggerDisabled},
+
 		{Name: "policy_store_versioned", Opts: policyStoreOpts(), Run: policyStoreVersioned},
 		// Initial import (W-P1-PVER-07): version 1 by system:import plus one
 		// audit row, enforcement unchanged, nothing more after a restart.
 		// In-process only (it reads the CP state dir).
 		{Name: "policy_store_initial_import", Opts: policyImportOpts(), Run: policyStoreInitialImport},
+		// Block-list store (W-P1-BLOCK-03): a block written through BlockStore by
+		// another process reaches the served policy (sub/email only) and leaves on
+		// removal. In-process only (it writes the CP state dir).
+		{Name: "block_list_served", Opts: blockListOpts(), Run: blockListServed},
+		// Block-list admin API (W-P1-BLOCK-11).
+		{Name: "block_api_bearer", Opts: blockAPIBearerOpts(), Run: blockAPIBearer},
+		{Name: "block_api_roles", Opts: blockAPIOIDCOpts(), Run: blockAPIRoles},
 		// Versioned publish (W-P1-PVER-02): dashboard policy and llmProviders
 		// saves create versions authored anonymous that workers enforce.
 		// In-process only (it reads the CP state dir).
@@ -85,15 +100,15 @@ var All = slices.Concat(
 		// every h2 stream, is decided with its own verified subject; members are
 		// forwarded, non-members and anonymous callers are denied.
 		{Name: "scoped_policy_deferred_identity", Opts: identityOpts(), Run: scopedPolicyDeferredIdentity},
+		// Replay of recorded identities (W-P1-GPOL-05): a candidate narrowing a
+		// scoped rule names the affected user and counts anonymous apart.
+		{Name: "scoped_policy_replay_affected_users", Opts: identityOpts(), Run: scopedPolicyReplayAffectedUsers},
 		// MCP subject seam (W-P1-GPOL-04): the verified subject reaches the MCP
 		// gateway through RequestMeta without changing any verdict.
 		{Name: "mcp_subject_seam_unchanged", Opts: mcpSubjectOpts(), Run: mcpSubjectSeamUnchanged},
 		// Group-gated MCP tools (W-P1-GPOL-11): allowWhen.groups is decided with
 		// the request's verified subject; non-members are denied mcp_tool_condition.
 		{Name: "mcp_group_condition", Opts: mcpGroupOpts(), Run: mcpGroupCondition},
-		// Replay of recorded identities (W-P1-GPOL-05): a candidate narrowing a
-		// scoped rule names the affected user and counts anonymous apart.
-		{Name: "scoped_policy_replay_affected_users", Opts: identityOpts(), Run: scopedPolicyReplayAffectedUsers},
 		// Dashboard editor round trip (W-P1-GPOL-08): groups/users saved through
 		// /dashboard/api/policy come back normalized and scoped, an empty chip is a
 		// 400, the worker enforces the rule and the GET lints a shadowing entry.
@@ -124,6 +139,29 @@ var All = slices.Concat(
 		// File mode saves without If-Match as before.
 		{Name: "policy_file_mode_save_without_if_match", Run: policyFileModeSaveWithoutIfMatch},
 
+		// Per-worker tokens (W-P1-WTOK-02): a bound token authenticates /policy,
+		// heartbeat and ingest, its bound id is what the CP records, an
+		// out-of-process revoke takes effect, and it opens no human route.
+		// In-process only (it writes the CP state dir, fake clock).
+		{Name: "worker_token_auth", Opts: workerTokenOpts(), Run: workerTokenAuth},
+		// Worker token admin API (W-P1-WTOK-03): an admin mints (shown once),
+		// lists and revokes tokens from the console; the fleet view shows how each
+		// worker authenticates; create and revoke are audited. In-process only.
+		{Name: "worker_token_admin_api", Opts: workerTokenAdminOpts(), Run: workerTokenAdminAPI},
+		// Without console sign-in the API is read-only: writes answer use_cli.
+		{Name: "worker_token_admin_use_cli", Opts: workerTokenOpts(), Run: workerTokenAdminUseCLI},
+		// Strict worker auth (W-P1-WTOK-04): --require-worker-tokens refuses the
+		// shared token on the worker routes while the admin token keeps dashboard
+		// and secret writes working; with no admin token both fail closed. Mixed
+		// mode marks shared-token workers legacy and warns once per proxy id.
+		// In-process only (state dir, fake clock).
+		{Name: "strict_worker_auth", Opts: strictAuthOpts(), Run: strictWorkerAuth},
+		{Name: "strict_worker_auth_no_admin_token", Opts: strictNoAdminOpts(), Run: strictNoAdminTokenFailsClosed},
+		{Name: "legacy_worker_token_warning", Run: legacyWorkerWarning},
+		// Held long-poll (W-P1-WTOK-09): a revoke out of process returns that
+		// token's held /policy with 401 while another token's stays parked.
+		{Name: "worker_token_longpoll_revoke", Opts: workerTokenOpts(), Run: workerTokenLongPollRevoke},
+
 		// Admin audit gate (W-P1-AAUD-05): enabled, the control plane writes the
 		// genesis entry and logs its key_id before serving. In-process only (it
 		// reads the CP state dir).
@@ -134,6 +172,9 @@ var All = slices.Concat(
 		// traffic write none. In-process only (it reads the CP state dir).
 		{Name: "admin_audit_records_bearer_write", Opts: adminAuditBearerOpts(), Run: adminAuditRecordsBearerWrite},
 		// In oidc mode a viewer's refused write is one denied row; no session, no row.
+		// JSON admin stream (W-P1-JAUD-03): the checkpoint and an admin write are
+		// warden.admin.v1 lines equal to the stored row. In-process only.
+		{Name: "admin_audit_json_log_writes_lines", Opts: adminAuditJSONLogOpts(), Run: adminAuditJSONLogWritesLines},
 		{Name: "admin_audit_records_viewer_denied", Opts: adminAuditOIDCOpts(), Run: adminAuditRecordsViewerDenied},
 		// Login and logout events (W-P1-AAUD-07): a sign-in, a no-role sign-in and a
 		// logout are one row each, for the verified user. In-process only (issuer

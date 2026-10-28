@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -34,6 +35,35 @@ type RemoteProvider struct {
 	settings   *SettingsWire // behavioral config from the CP (stored, not yet applied)
 	etag       string        // last ETag seen, sent as If-None-Match on the next long-poll
 	lastErr    error
+	// caps are the capabilities advertised on every heartbeat (see WorkerCaps).
+	caps []string
+}
+
+// CapBlocklistV1 is the capability a worker advertises when it enforces
+// policy.blockedUsers. An old worker decodes the policy wire without error but
+// ignores the list, so the control plane uses this to flag it.
+const CapBlocklistV1 = "blocklist/v1"
+
+// WorkerCaps returns the sorted capabilities this binary implements. Later
+// features append their own constant here.
+func WorkerCaps() []string {
+	caps := []string{CapBlocklistV1}
+	sort.Strings(caps)
+	return caps
+}
+
+// heartbeatBody is the JSON a worker POSTs to /control/heartbeat. It carries no
+// secret, token or request data.
+type heartbeatBody struct {
+	PolicyETag string   `json:"policyETag"`
+	Caps       []string `json:"caps,omitempty"`
+}
+
+// SetCaps sets the capabilities advertised on each heartbeat. Pass WorkerCaps().
+func (r *RemoteProvider) SetCaps(caps []string) {
+	r.mu.Lock()
+	r.caps = append([]string(nil), caps...)
+	r.mu.Unlock()
 }
 
 // SetProxyID sets the worker identifier sent on each policy pull (header
@@ -211,8 +241,9 @@ func (r *RemoteProvider) Heartbeat(ctx context.Context) error {
 
 	r.mu.RLock()
 	etag := r.etag
+	caps := r.caps
 	r.mu.RUnlock()
-	body, _ := json.Marshal(map[string]string{"policyETag": etag})
+	body, _ := json.Marshal(heartbeatBody{PolicyETag: etag, Caps: caps})
 
 	reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
@@ -263,6 +294,9 @@ func (r *RemoteProvider) clearErr() {
 // merges them back.
 type remoteWire struct {
 	Policy
+	// BlockedUsers is decoded here, not through Policy (whose field is
+	// json:"-" for rule X2), then copied onto the policy in parseRemotePolicy.
+	BlockedUsers    []BlockedUser    `json:"blockedUsers,omitempty"`
 	Settings        *SettingsWire    `json:"settings,omitempty"`
 	ScopedAllowlist []AllowlistEntry `json:"scopedAllowlist,omitempty"`
 	// ScopedAllowPos[i] is the index ScopedAllowlist[i] had in the full
@@ -294,6 +328,7 @@ func parseRemotePolicy(body []byte) (*Policy, *SettingsWire, error) {
 	for i := range p.Denylist {
 		p.Denylist[i].Domain = strings.ToLower(p.Denylist[i].Domain)
 	}
+	p.BlockedUsers = normalizeBlockedUsers(w.BlockedUsers)
 	// The wire carries scoped entries only in scopedAllowlist: a plain entry
 	// with principals is what an older worker would read as global, so it is
 	// refused here even though validate (W-P1-GPOL-10) now accepts principals.
