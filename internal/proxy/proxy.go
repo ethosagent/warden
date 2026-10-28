@@ -258,6 +258,9 @@ type MetricsRecorder interface {
 	RecordJudge(outcome string)
 	ObserveAddedLatency(stage string, d time.Duration)
 	RecordIdentityVerify(result, reason string)
+	// RecordSignInStarted counts a challenge-mode sign-in request by outcome
+	// (started|reused|rate_limited|issuer_unreachable). No agent, user or code label.
+	RecordSignInStarted(outcome string)
 	// RecordBlocklistEntries sets the block-list size gauge; RecordBlocklistSessionsClosed
 	// adds to the closed-sessions counter. Neither carries identity.
 	RecordBlocklistEntries(n int)
@@ -286,6 +289,7 @@ func (nopMetrics) RecordScanFinding(kind string)                     {}
 func (nopMetrics) RecordJudge(outcome string)                        {}
 func (nopMetrics) ObserveAddedLatency(stage string, d time.Duration) {}
 func (nopMetrics) RecordIdentityVerify(result, reason string)        {}
+func (nopMetrics) RecordSignInStarted(outcome string)                {}
 func (nopMetrics) RecordBlocklistEntries(n int)                      {}
 func (nopMetrics) RecordBlocklistSessionsClosed(n int)               {}
 func (nopMetrics) RecordScoped(result string)                        {}
@@ -388,7 +392,7 @@ type Proxy struct {
 	identityP atomic.Pointer[identityHolder]
 	// warnNoCA / warnTransparentOnly make each startup warning fire once per
 	// process, however often SetIdentity runs.
-	warnNoCA, warnTransparentOnly sync.Once
+	warnNoCA, warnTransparentOnly, warnChallengeTransparent, warnChallengeNoCA sync.Once
 	// identityTimeout overrides identityVerifyTimeout (0 = the const). White-box,
 	// like preambleTimeout: tests shrink it to pin the bound.
 	identityTimeout time.Duration
@@ -585,7 +589,7 @@ func New(cfg Config) (*Proxy, error) {
 	// non-nil) cfg values so an unmanaged worker reads exactly what it did before;
 	// a managed worker's apply loop replaces them on cache.ttl / compliance changes.
 	p.secretsP.Store(&secretsHolder{s: cfg.Secrets})
-	p.identityP.Store(newIdentityHolder(cfg.Identity.Verifier, cfg.Identity.Mode))
+	p.identityP.Store(newIdentityHolder(cfg.Identity.Verifier, cfg.Identity.Mode, cfg.Identity.SignIn))
 	p.analyticsP.Store(&analyticsHolder{a: cfg.Analytics})
 	// Seed the swappable DLP scanner from cfg.DLP (may be nil = disabled). A nil
 	// *DLPScanner stores and loads back as nil, so dlp() reads exactly what a

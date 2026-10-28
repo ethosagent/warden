@@ -340,3 +340,32 @@ func TestScopedCounterScrape(t *testing.T) {
 	var nilM *Metrics
 	nilM.RecordScoped("allow") // nil-safe
 }
+
+func TestSignInStartedCounterScrape(t *testing.T) {
+	m, h, shutdown := newWithHandler(t)
+	defer func() { _ = shutdown(context.Background()) }()
+
+	outcomes := []string{"started", "reused", "rate_limited", "issuer_unreachable"}
+	for _, o := range outcomes {
+		m.RecordSignInStarted(o)
+	}
+	body := scrape(t, h)
+	for _, o := range outcomes {
+		found := false
+		for _, line := range strings.Split(body, "\n") {
+			if strings.HasPrefix(line, "warden_identity_signin_started_total{") && strings.Contains(line, `outcome="`+o+`"`) {
+				found = true
+				for _, bad := range []string{"agent=", "agent_id=", "user_code=", "device_code=", "sub=", "email="} {
+					if strings.Contains(strings.SplitN(line, " ", 2)[0], bad) {
+						t.Errorf("sign-in series carries a %q label: %s", bad, line)
+					}
+				}
+			}
+		}
+		if !found {
+			t.Errorf("scrape lacks warden_identity_signin_started_total{outcome=%q}:\n%s", o, body)
+		}
+	}
+	var nilM *Metrics
+	nilM.RecordSignInStarted("started") // nil-safe
+}

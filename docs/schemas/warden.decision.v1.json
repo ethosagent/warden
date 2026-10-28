@@ -38,6 +38,8 @@
           "host_mismatch",
           "http_response_injection",
           "http_response_leak",
+          "identity_conflict",
+          "identity_expired",
           "identity_groups_truncated",
           "identity_required",
           "judge",

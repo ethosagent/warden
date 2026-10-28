@@ -9,7 +9,7 @@ import (
 type AgentPolicy struct {
 	ID     string
 	Policy string
-	// Identity is this agent's identity mode override: "", off or attribute.
+	// Identity is this agent's identity mode override: "", off, attribute or challenge.
 	Identity string
 }
 

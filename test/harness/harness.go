@@ -168,6 +168,9 @@ type H struct {
 	// identityMode (WithIdentity) is the default identity mode distributed to
 	// the workers; "" means no identity block at all.
 	identityMode string
+	// signIn (WithSignIn) is the identity.signIn block distributed with the
+	// identity block; nil means the defaults.
+	signIn *config.SignInSettings
 	// wantConsole (WithConsoleOIDC) boots the control plane with console.auth
 	// oidc against the issuer fake; consoleAddr is the control plane's reserved
 	// listen address (its https origin is the registered redirect URL).
@@ -534,6 +537,21 @@ func (h *H) connectStatus(hostPort, proxyAuthorization string) int {
 // status and (up to 4 KiB of) body.
 func (h *H) connectReply(addr, hostPort, proxyAuthorization string) (int, string) {
 	h.tb.Helper()
+	status, _, body := h.connectReplyFull(addr, hostPort, proxyAuthorization)
+	return status, body
+}
+
+// ConnectReplyFull sends one CONNECT to worker-1's proxy listener, optionally
+// with a Proxy-Authorization value, and returns the reply's status, its headers
+// and (up to 4 KiB of) body. A 2xx reply has no body: what follows it is the
+// tunnel.
+func (h *H) ConnectReplyFull(hostPort, proxyAuthorization string) (int, http.Header, string) {
+	h.tb.Helper()
+	return h.connectReplyFull(h.ProxyAddr(), hostPort, proxyAuthorization)
+}
+
+func (h *H) connectReplyFull(addr, hostPort, proxyAuthorization string) (int, http.Header, string) {
+	h.tb.Helper()
 	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
 	if err != nil {
 		h.tb.Fatalf("dial the worker proxy: %v", err)
@@ -554,10 +572,10 @@ func (h *H) connectReply(addr, hostPort, proxyAuthorization string) (int, string
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode/100 == 2 {
 		// A tunnel is open: what follows the reply is the tunnel, not a body.
-		return resp.StatusCode, ""
+		return resp.StatusCode, resp.Header, ""
 	}
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-	return resp.StatusCode, string(body)
+	return resp.StatusCode, resp.Header, string(body)
 }
 
 // Issuer returns the in-process OIDC issuer started by WithOIDCIssuer.

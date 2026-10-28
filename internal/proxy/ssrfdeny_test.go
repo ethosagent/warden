@@ -81,6 +81,7 @@ type fakeMetrics struct {
 	requests map[[2]string]int
 	identity map[[2]string]int
 	scoped   map[string]int
+	signin   map[string]int
 	log      []string
 	// blocklistEntries is the last RecordBlocklistEntries value (-1: never set);
 	// blocklistClosed sums RecordBlocklistSessionsClosed.
@@ -89,7 +90,7 @@ type fakeMetrics struct {
 }
 
 func newFakeMetrics() *fakeMetrics {
-	return &fakeMetrics{blocked: map[string]int{}, requests: map[[2]string]int{}, identity: map[[2]string]int{}, scoped: map[string]int{}, blocklistEntries: -1}
+	return &fakeMetrics{blocked: map[string]int{}, requests: map[[2]string]int{}, identity: map[[2]string]int{}, scoped: map[string]int{}, signin: map[string]int{}, blocklistEntries: -1}
 }
 
 func (m *fakeMetrics) record(format string, args ...any) {
@@ -139,6 +140,20 @@ func (m *fakeMetrics) RecordBlocklistSessionsClosed(n int) {
 	m.blocklistClosed += n
 	m.mu.Unlock()
 	m.record("RecordBlocklistSessionsClosed(%d)", n)
+}
+
+func (m *fakeMetrics) RecordSignInStarted(outcome string) {
+	m.mu.Lock()
+	m.signin[outcome]++
+	m.mu.Unlock()
+	m.record("RecordSignInStarted(%q)", outcome)
+}
+
+// signInCount returns how often RecordSignInStarted saw the outcome.
+func (m *fakeMetrics) signInCount(outcome string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.signin[outcome]
 }
 
 func (m *fakeMetrics) RecordScoped(result string) {

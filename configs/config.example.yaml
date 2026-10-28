@@ -526,10 +526,14 @@ audit:
 # Identity verification (OFF when this block is absent: no token is read or
 # verified and behavior is byte-identical to before). Attribute mode verifies a
 # user token and records who made the request; it never blocks. The block holds
-# no secrets. Phase 1 modes: off | attribute ("require" arrives in Phase 2).
-# Per-agent override: `identity: off|attribute` on an agents[] entry.
+# no secrets. Phase 1 modes: off | attribute | challenge ("require" arrives in
+# Phase 2). Challenge mode refuses a CONNECT with no valid token with a 407 that
+# carries a sign-in URL (docs/identity-contract.md); it needs a worker with a CONNECT
+# listener, and the control plane and workers must be upgraded before it is set
+# (docs/control-plane.md, "Identity verification").
+# Per-agent override: `identity: off|attribute|challenge` on an agents[] entry.
 #identity:
-#  defaultMode: attribute                  # off | attribute (default off)
+#  defaultMode: attribute                  # off | attribute | challenge (default off)
 #  issuer: http://localhost:5556/dex       # dev only: plain http needs internalIssuerURL
 #  internalIssuerURL: http://dex:5556      # dev-only split-horizon: origin containers use to reach the issuer
 #  audience: warden
@@ -537,6 +541,12 @@ audit:
 #  groupsClaim: groups
 #  clockSkewSeconds: 60                    # 0..300 (0 = default 60)
 #  maxTokenTTLSeconds: 3600                # >0 overrides the default 3600
+#  # Challenge mode only (all optional; no secrets):
+#  signIn:
+#    clientID: warden-cli                  # default warden-cli; a PUBLIC client, and in allowedAZP when that is set
+#    scopes: [openid, email, profile, groups, offline_access, "audience:server:client_id:warden"]  # default shown
+#    maxPending: 32                        # open device authorizations per worker (default 32)
+#    startsPerMinute: 30                   # device_authorization calls per worker (default 30)
 
 # Production form: an
 # https issuer and no internalIssuerURL. The block holds no secrets.

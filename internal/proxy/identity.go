@@ -31,41 +31,53 @@ const (
 	identityVerifyTimeout = 2 * time.Second
 )
 
-// IdentityMode is an agent's identity mode. Only off and attribute exist in
-// P1; any other value is treated as off, so an unknown mode never verifies.
+// IdentityMode is an agent's identity mode. Only off, attribute and challenge
+// exist in P1; any other value is treated as off, so an unknown mode never
+// verifies.
 type IdentityMode string
 
 const (
 	IdentityModeOff       IdentityMode = "off"
 	IdentityModeAttribute IdentityMode = "attribute"
+	// IdentityModeChallenge verifies like attribute and refuses a CONNECT with
+	// no valid identity with a 407 that carries a sign-in URL (challenge.go).
+	IdentityModeChallenge IdentityMode = "challenge"
 )
 
 // IdentityConfig seeds the identity holder from proxy.Config. The zero value
-// is mode off.
+// is mode off. SignIn is used in challenge mode only; nil there means a 407
+// with sign_in_error and no sign_in object.
 type IdentityConfig struct {
 	Verifier identity.Verifier
 	Mode     IdentityMode
+	SignIn   SignInStarter
 }
 
 // identityHolder is the immutable value behind Proxy.identityP. It exists only
-// in attribute mode: a nil pointer means off.
+// in attribute and challenge mode: a nil pointer means off.
 type identityHolder struct {
-	v identity.Verifier
+	v    identity.Verifier
+	mode IdentityMode
+	// signin starts device authorizations in challenge mode (may be nil).
+	signin SignInStarter
 	// skew is the verifier's exp tolerance, used to re-check a CONNECT
 	// identity's expiry on each later request. Verifiers expose it through
 	// ClockSkew(); one that does not gets the default.
 	skew time.Duration
 }
 
-func newIdentityHolder(v identity.Verifier, mode IdentityMode) *identityHolder {
-	if v == nil || mode != IdentityModeAttribute {
+func newIdentityHolder(v identity.Verifier, mode IdentityMode, signin SignInStarter) *identityHolder {
+	if v == nil || (mode != IdentityModeAttribute && mode != IdentityModeChallenge) {
 		return nil
+	}
+	if mode != IdentityModeChallenge {
+		signin = nil
 	}
 	skew := identity.DefaultClockSkew
 	if sk, ok := v.(interface{ ClockSkew() time.Duration }); ok {
 		skew = sk.ClockSkew()
 	}
-	return &identityHolder{v: v, skew: skew}
+	return &identityHolder{v: v, mode: mode, signin: signin, skew: skew}
 }
 
 // identity loads the live holder; nil means mode off. One snapshot per use keeps
@@ -73,19 +85,43 @@ func newIdentityHolder(v identity.Verifier, mode IdentityMode) *identityHolder {
 func (p *Proxy) identity() *identityHolder { return p.identityP.Load() }
 
 // SetIdentity atomically swaps the identity verifier and mode. A nil verifier
-// or any mode but attribute turns identity off. It is race-free against the
-// hot path; connections already open keep the identity they resolved at CONNECT.
-// The mode is the agent's resolved mode, decided by the caller.
+// or any mode but attribute or challenge turns identity off. It is race-free
+// against the hot path; connections already open keep the identity they
+// resolved at CONNECT. The mode is the agent's resolved mode, decided by the
+// caller. Challenge mode has no sign-in starter here: use SetIdentityWithSignIn.
 func (p *Proxy) SetIdentity(v identity.Verifier, mode IdentityMode) {
-	p.identityP.Store(newIdentityHolder(v, mode))
+	p.SetIdentityWithSignIn(v, mode, nil)
+}
+
+// SetIdentityWithSignIn is SetIdentity plus the starter challenge mode uses to
+// put a sign-in URL in its 407. The starter is ignored in other modes.
+func (p *Proxy) SetIdentityWithSignIn(v identity.Verifier, mode IdentityMode, signin SignInStarter) {
+	p.identityP.Store(newIdentityHolder(v, mode, signin))
 	p.warnIdentityCoverage()
 }
+
+// SupportsChallenge reports whether this worker can answer a 407: it needs a
+// CONNECT listener, which a transparent-only worker does not have.
+func (p *Proxy) SupportsChallenge() bool { return p.cfg.Mode != config.ProxyModeTransparent }
 
 // warnIdentityCoverage logs, once each, the two places attribute mode cannot
 // see a token: raw tunnels (no CA) and a transparent-only worker (no CONNECT).
 func (p *Proxy) warnIdentityCoverage() {
-	if p.identity() == nil {
+	h := p.identity()
+	if h == nil {
 		return
+	}
+	if h.mode == IdentityModeChallenge {
+		if p.cfg.Mode == config.ProxyModeBoth {
+			p.warnChallengeTransparent.Do(func() {
+				p.cfg.Logger.Warn("identity challenge mode on a worker with a transparent listener: the transparent leg has no CONNECT, so it cannot be challenged and is not refused for a missing identity")
+			})
+		}
+		if p.caCert == nil {
+			p.warnChallengeNoCA.Do(func() {
+				p.cfg.Logger.Warn("identity challenge mode without a CA: a raw tunnel is checked at CONNECT only and is not cut when the token expires")
+			})
+		}
 	}
 	if p.caCert == nil {
 		p.warnNoCA.Do(func() {
@@ -231,10 +267,11 @@ func (p *Proxy) captureIdentityHeader(s *requestScope) {
 	}
 }
 
-// identityStage resolves who made this request and sets s.subject. It never
-// ends the request: in attribute mode identity is recorded, not enforced
-// (a 403 identity_conflict is reserved for require mode in P2). The raw header
-// value is dropped here, so no later stage (judge, DLP, MCP) can see it.
+// identityStage resolves who made this request and sets s.subject. In attribute
+// mode it never ends the request: identity is recorded, not enforced. In
+// challenge mode an expired connection identity or a conflicting header ends it
+// with a 403 (challenge.go). The raw header value is dropped here, so no later
+// stage (judge, DLP, MCP) can see it.
 //
 // Rules, in order:
 //   - mode off: a token (CONNECT or header) gives status off, with no Verify;
@@ -314,7 +351,7 @@ func (p *Proxy) identityStage(s *requestScope) (endSession bool) {
 		s.subject.AgentID = p.cfg.AgentID
 	}
 	p.cfg.Metrics.ObserveAddedLatency("identity", time.Since(start))
-	return false
+	return p.challengeTerminated(s, h)
 }
 
 // headerResult verifies a header presented next to a live CONNECT identity.

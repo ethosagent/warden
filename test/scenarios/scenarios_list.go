@@ -58,6 +58,20 @@ var All = slices.Concat(
 		{Name: "identity_transparent", Opts: append(identityOpts(), harness.TransparentIntercept()), Run: identityTransparent},
 		{Name: "identity_hot_reload", Opts: identityOpts(), Run: identityHotReload},
 
+		// Identity challenge mode (#558): a CONNECT with no valid identity gets a
+		// 407 with a sign-in URL from the issuer fake's device endpoint.
+		{Name: "challenge_no_token", Opts: challengeOpts(), Run: challengeNoToken},
+		{Name: "challenge_valid_token", Opts: challengeOpts(), Run: challengeValidToken},
+		{Name: "challenge_expired_token", Opts: challengeOpts(), Run: challengeExpiredToken},
+		{Name: "challenge_invalid_token", Opts: challengeOpts(), Run: challengeInvalidToken},
+		{Name: "challenge_unverified", Opts: challengeOpts(), Run: challengeUnverified},
+		{Name: "challenge_issuer_down", Opts: challengeOpts(), Run: challengeIssuerDown},
+		{Name: "challenge_singleflight", Opts: challengeOpts(), Run: challengeSingleflight},
+		{Name: "challenge_rate_limit", Opts: challengeOpts(harness.WithSignIn(config.SignInSettings{StartsPerMinute: 1})), Run: challengeRateLimit},
+		{Name: "challenge_foreign_url", Opts: challengeOpts(), Run: challengeForeignURL},
+		{Name: "challenge_signed_in_next", Opts: challengeOpts(), Run: challengeSignedInNext},
+		{Name: "attribute_unchanged", Opts: identityOpts(), Run: attributeUnchanged},
+
 		// Console OIDC login (W-P1-SSO-03): a real login through the issuer fake
 		// creates a session with the right cookie flags, and the session expires
 		// by the control plane's clock. In-process only (issuer fake, fake clock).
