@@ -154,3 +154,21 @@ func TestBackupRouteIsAuditedAdminMutation(t *testing.T) {
 		t.Fatalf("row = %+v", row)
 	}
 }
+
+func TestBackupStartOnDemand(t *testing.T) {
+	r := NewBackupRunner(testBackupConfig(t), fakeDeps(t, clocktest.NewFake(testBackupT0)))
+	if err := r.StartOnDemand(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	r.Wait() // covers the on-demand run
+	if r.Status().LastSet == "" {
+		t.Fatal("Wait returned before the on-demand run finished")
+	}
+	if err := r.StartOnDemand(context.Background()); !errors.Is(err, ErrBackupStopped) {
+		t.Fatalf("StartOnDemand after Wait = %v, want ErrBackupStopped", err)
+	}
+	// The refusal released the run lock: RunOnce still works.
+	if _, err := r.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce after a refused StartOnDemand: %v", err)
+	}
+}
