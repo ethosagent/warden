@@ -96,6 +96,13 @@ func (p *Proxy) handleWSUpgrade(s *requestScope) {
 		})
 	}
 
+	// From the 101 the pump owns the connection and a block must interrupt it:
+	// the session becomes a WebSocket one, closing both legs. A block that
+	// already matched this session abandons the upgrade (nothing was written).
+	if !s.sess.upgrade("websocket", upstream) {
+		return
+	}
+
 	// Write the 101 status line + headers verbatim (mirrors the SSE manual
 	// write). resp.Write cannot be used: there is no body and the connection is
 	// then handed to the raw frame pump.

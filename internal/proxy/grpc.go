@@ -53,11 +53,15 @@ func (p *Proxy) handleGRPC(clientConn net.Conn, domain string, port int, needsJu
 	}
 	defer rt.CloseIdleConnections()
 
+	sess := p.sessions.newSession("http2", domain, port, true, clientConn)
+	sess.bind(ci)
+	defer sess.release()
+
 	// ServeConn blocks until the client connection closes and dispatches each
 	// HTTP/2 stream concurrently to the handler.
 	(&http2.Server{}).ServeConn(clientConn, &http2.ServeConnOpts{
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			p.serveGRPCStream(w, r, rt, domain, port, needsJudge, ci)
+			p.serveGRPCStream(w, r, rt, domain, port, needsJudge, ci, sess)
 		}),
 	})
 }
@@ -77,7 +81,7 @@ func (p *Proxy) handleGRPC(clientConn net.Conn, domain string, port int, needsJu
 // body. The scope's quiescence-tracker slot is entered/exited by the shared
 // pipeline (runRequestStages), so an h2 stream is tracked exactly like an h1
 // request: one unit from stream start until its terminal bookkeeping.
-func (p *Proxy) serveGRPCStream(w http.ResponseWriter, r *http.Request, rt *http2.Transport, domain string, port int, needsJudge bool, ci connIdentity) {
+func (p *Proxy) serveGRPCStream(w http.ResponseWriter, r *http.Request, rt *http2.Transport, domain string, port int, needsJudge bool, ci connIdentity, sess *session) {
 	isGRPC := strings.HasPrefix(r.Header.Get("Content-Type"), "application/grpc")
 	proto := "http2"
 	path := PathH2
@@ -100,6 +104,7 @@ func (p *Proxy) serveGRPCStream(w http.ResponseWriter, r *http.Request, rt *http
 		gw:         p.mcpGateway(),
 		liveJudge:  p.judge(),
 		ci:         ci,
+		sess:       sess,
 	}
 	defer s.cleanup()
 	if isGRPC {

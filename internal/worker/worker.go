@@ -978,7 +978,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 			liveCompliance:   liveCompliance,
 			liveCacheTTL:     liveCacheTTL,
 		}
-		go longPollControlPlane(ctx, clk, controlPlane, evaluator, pol.ControlPlane.LongPollWait, logger, applier.Apply)
+		go longPollControlPlane(ctx, clk, controlPlane, evaluator, pol.ControlPlane.LongPollWait, logger, onPolicyApplied(applier.Apply, pxy.CloseBlockedSessions))
 		go heartbeatControlPlane(ctx, clk, controlPlane, pol.ControlPlane.HeartbeatInterval, logger)
 	}
 	if syncWorker != nil {

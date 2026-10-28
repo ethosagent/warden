@@ -435,10 +435,17 @@ func (p *Proxy) storeAllow(ci connIdentity, domain string, port int, protocol st
 // failure is not a policy decision: it keeps the allow audit the CONNECT has
 // always gotten, unchanged from before #391.
 //
-// The connection's identity is accepted but unused here: a raw tunnel is opaque
-// and records no per-request identity (stamping events is W-P1-VRFY-09).
+// A raw tunnel is opaque and records no per-request identity (stamping events
+// is W-P1-VRFY-09); the CONNECT identity only registers it for a block-list cut.
 func (p *Proxy) tunnel(client net.Conn, br *bufio.Reader, domain string, port int, ci connIdentity) {
 	p.reach(PathTunnel)
+	// Only an attributed tunnel registers: an anonymous one costs nothing here.
+	var sess *session
+	if ci.Claims.Sub != "" || ci.Claims.Email != "" {
+		sess = p.sessions.newSession("tcp", domain, port, true, client)
+		sess.bind(ci)
+		defer sess.release()
+	}
 	remote, err := p.dialFunc("tcp", net.JoinHostPort(domain, fmt.Sprintf("%d", port)))
 	if err != nil {
 		if !p.storeSSRFDeny(ci, domain, port, "tcp", err) {
@@ -447,6 +454,7 @@ func (p *Proxy) tunnel(client net.Conn, br *bufio.Reader, domain string, port in
 		return
 	}
 	p.storeAllow(ci, domain, port, "tcp")
+	sess.addCloser(remote)
 
 	var wg sync.WaitGroup
 	wg.Add(2)
