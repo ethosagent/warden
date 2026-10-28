@@ -460,6 +460,12 @@ The flow, with Ethos at http://localhost:3000 and Dex at http://localhost:5556:
 3. Say **hello**. The new CONNECT carries the token, so it is allowed and attributed to
    alice (the fleet dashboard's User column shows her).
 
+A worker builds its identity config at boot from its own file and applies the control plane's
+identity settings only when they change later, so the overlay mounts
+`configs/config.ethos-sso-worker.yaml` (the worker config plus the same `identity:` block) next to
+the served `configs/config.ethos-sso.yaml`. Without it the worker would start in `off` and allow
+everyone.
+
 How it is wired: Ethos keeps its internal-only network. The sign-in client runs inside the
 Ethos container (`warden-bin` copies the binary into a volume) and must reach Dex at its
 public issuer URL `http://localhost:5556/dex`, because that string is in every token and in
