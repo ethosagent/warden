@@ -103,7 +103,11 @@ func (p *Proxy) serveChallengeTunnel(conn net.Conn, br *bufio.Reader, domain str
 		return
 	}
 
-	_ = conn.SetDeadline(time.Now().Add(challengeTunnelTimeout))
+	limit := challengeTunnelTimeout
+	if p.challengeTimeout > 0 {
+		limit = p.challengeTimeout
+	}
+	_ = conn.SetDeadline(time.Now().Add(limit))
 	tlsConn := tls.Server(bufferedConn{Reader: br, Conn: conn}, &tls.Config{
 		Certificates: []tls.Certificate{*leaf},
 		NextProtos:   []string{"h2", "http/1.1"},
@@ -113,17 +117,24 @@ func (p *Proxy) serveChallengeTunnel(conn net.Conn, br *bufio.Reader, domain str
 	}
 	defer func() { _ = tlsConn.Close() }()
 
-	serveChallengeConn(tlsConn, challengeTunnelJSON(c))
+	serveChallengeConn(tlsConn, challengeTunnelJSON(c), limit)
 }
 
 // serveChallengeConn answers every request on the one already-handshaken
 // connection with the 403 and Connection: close, over HTTP/1.1 or HTTP/2 as
 // negotiated: net/http closes an h1 connection after the answer and sends GOAWAY
 // on h2. It returns once the connection has ended.
-func serveChallengeConn(tc *tls.Conn, body []byte) {
+func serveChallengeConn(tc *tls.Conn, body []byte, limit time.Duration) {
 	ln := &oneConnListener{conn: tc, done: make(chan struct{})}
+	// net/http clears the connection deadline before it reads a request head, so
+	// the bound must be set here too: a client that handshakes and then stalls
+	// (h1: no request; h2: no frames) is cut at limit, not held open.
 	srv := &http.Server{
-		MaxHeaderBytes: challengeMaxHeaderBytes,
+		MaxHeaderBytes:    challengeMaxHeaderBytes,
+		ReadHeaderTimeout: limit,
+		ReadTimeout:       limit,
+		WriteTimeout:      limit,
+		IdleTimeout:       limit,
 		ConnState: func(_ net.Conn, st http.ConnState) {
 			if st == http.StateClosed || st == http.StateHijacked {
 				ln.finish()

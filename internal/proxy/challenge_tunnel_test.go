@@ -288,3 +288,36 @@ func TestChallengeInTunnelNotTLS(t *testing.T) {
 		t.Errorf("%d dials, want 0", n)
 	}
 }
+
+// TestChallengeInTunnelStallIsCut: a client that completes the handshake and
+// then sends nothing (h1) or no frames (h2) is cut at the tunnel bound; it does
+// not hold the connection open.
+func TestChallengeInTunnelStallIsCut(t *testing.T) {
+	for _, proto := range []string{"http/1.1", "h2"} {
+		t.Run(proto, func(t *testing.T) {
+			e := newChallengeEnv(t, &fakeStarter{offer: testOffer(), outcome: SignInStarted})
+			e.p.challengeTimeout = 300 * time.Millisecond
+			conn, br, head := e.inTunnelHead(idHost, askInTunnel)
+			if head.StatusCode != 200 {
+				t.Fatalf("status %d", head.StatusCode)
+			}
+			tc := e.tlsOver(conn, br, proto)
+			if proto == "h2" {
+				// The client preface and an empty SETTINGS, then silence: the
+				// connection is idle with no stream (the server's own 10 s preface
+				// wait is not what is under test).
+				_, _ = io.WriteString(tc, "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\x00\x00\x00\x04\x00\x00\x00\x00\x00")
+			}
+			_ = tc.SetReadDeadline(time.Now().Add(5 * time.Second))
+			start := time.Now()
+			if _, err := io.Copy(io.Discard, tc); err != nil && !strings.Contains(err.Error(), "EOF") && !strings.Contains(err.Error(), "reset") {
+				if ne, ok := err.(net.Error); ok && ne.Timeout() {
+					t.Fatalf("the worker still held the stalled %s tunnel after 5 s", proto)
+				}
+			}
+			if d := time.Since(start); d > 4*time.Second {
+				t.Errorf("the stalled %s tunnel closed after %s, want about 300 ms", proto, d)
+			}
+		})
+	}
+}

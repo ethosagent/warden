@@ -50,7 +50,7 @@ var invNotApplicable = map[Path]map[invScenario]string{
 	PathChallenge: {
 		scAllow:       "the challenge tunnel admits nothing: every request is refused, so there is no allow",
 		scUpstreamErr: "the challenge tunnel never dials upstream, so no upstream can fail",
-		scTimeout:     "the challenge tunnel never dials upstream; its own bound is covered by TestChallengeInTunnelNotTLS and the 30 s tunnel deadline",
+		scTimeout:     "the challenge tunnel never dials upstream; its own stall bound is TestChallengeInTunnelStallIsCut",
 	},
 }
 

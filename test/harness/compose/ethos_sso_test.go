@@ -14,9 +14,10 @@ import (
 // The Ethos sign-in overlay (#621): Ethos runs under `warden identity exec
 // --challenge-in-tunnel`, the control plane serves challenge mode against Dex,
 // and a two-hop relay gives Ethos's client the issuer's port 5556 and nothing
-// else. These tests parse the files, so they run without Docker; `docker compose
-// config -q` over the three files is the other half of the check (see the
-// overlay's header).
+// else. These tests parse the files, so they run without Docker. The merge of the
+// three compose files (ethos, identity, ethos-sso) is checked by hand with
+// `docker compose -f ... -f ... -f ... config -q`, and the live flow is the manual
+// one in docs/docker-end-to-end.md.
 
 const (
 	ethosSSOFile   = "docker-compose.ethos-sso.yml"
