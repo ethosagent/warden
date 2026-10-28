@@ -922,6 +922,46 @@ YAML if the mirror is lost.
   removed, the served YAML is only the write-through mirror of head, and hand
   edits are never served (they come in through `warden policy import`).
 
+## Scheduled backups (`--backup-dir`)
+
+Off by default. With `--backup-dir` (which needs `--state-dir` and must not be
+inside it) the control plane writes a backup set at startup when none is newer
+than the interval, then every `--backup-interval` (default 24h, minimum 1h)
+after the newest set, on one background goroutine; a restart does not skip a
+due backup. `--backup-keep` (default 7, minimum 1) newest complete sets are
+kept; `--backup-include` picks from `cp`, `alerts`, `config` and `fleet`
+(default `cp,alerts,config`; `fleet` is opt-in).
+
+Each set is a directory named `<UTC time>Z` (`20060102T150405Z`) holding a
+consistent copy of each database (`warden-cp.db`, `warden-alerts.db`,
+`warden-fleet.db`), the served `config.yaml` and a `manifest.json` written last.
+It is built in `.tmp-<time>` and renamed into place, so a set directory exists
+only when complete. Directories are 0700 and files 0600. Each database copy is
+consistent on its own; the set is not one snapshot across databases. The
+manifest's sha256 values check integrity, not authenticity.
+
+A set never holds `cp-audit.key` (or its HMAC key), the identity provider's
+storage or the secret backend (`not_included` in the manifest). A store that is
+not running (no alert store, `--analytics-provider=memory`) is listed under
+`skipped`. A run needs 1.2x the source sizes free on the backup filesystem or it
+fails with `insufficient free space` and writes nothing. Each copy logs
+`msg=cp_backup` with `db`, `bytes`, `duration_ms` and `outcome`.
+
+**Health.** A backup that fails or goes quiet is not silent. A failed run logs
+ERROR `msg=cp_backup_failed` (`db`, error cut to 200 bytes) and publishes one
+`backup_failed` Finding (severity high, dedup key `backup_failed:<db>`, where
+`<db>` is the failing source or `run`). A check every max(1m, interval/4)
+publishes one `backup_stale` Finding (high, dedup key `backup_stale`) when the
+last success is older than twice `--backup-interval`; with no success since
+start, the start time counts as the last one. A success ends the episode.
+Findings carry the db name and the bounded error text, never row contents. With
+no alert pipeline the Finding is logged at ERROR as `finding_not_published`.
+
+`GET /dashboard/api/setup` gains `backup` (`enabled`, `lastSuccessAt`,
+`lastError`, `lastSet`, `sizeBytes`) for an admin session, or for any caller when
+`console.auth` is `none`. Viewers and editors never see it, and it is absent when
+`--backup-dir` is unset. The dashboard header shows a green or red badge from it.
+
 ## Block list: offline CLI
 
 The user block list lives in `<state-dir>/warden-cp.db`, outside policy

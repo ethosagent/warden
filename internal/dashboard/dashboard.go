@@ -105,6 +105,9 @@ type Server struct {
 	// authMode is the console sign-in mode reported by /dashboard/api/setup
 	// (SetAuthMode); empty on a worker.
 	authMode string
+	// backupFn reports the scheduled-backup status for /dashboard/api/setup (nil
+	// off the control plane); set through SetBackupStatus.
+	backupFn func(*http.Request) *BackupStatus
 	// alertsFn returns integration alerts (bounded, egress-safe metadata) for the
 	// alerts endpoint; nil (a worker with no integrations) = [].
 	alertsFn func(limit int) []integration.Alert

@@ -84,6 +84,17 @@ type Params struct {
 	// logged as an admin_audit.checkpoint line (0 = every 5 minutes). Tests
 	// drive it with Clock.
 	AdminAuditCheckpointInterval time.Duration
+
+	// Backup is the --backup-* settings; Backup.Dir == "" (the default) turns
+	// backups off. Run validates it against StateDir and the stores it opens.
+	Backup BackupConfig
+	// Findings, when set, receives every Finding instead of the alert pipeline
+	// (tests and the harness inject a fake; nil = the pipeline).
+	Findings FindingPublisher
+	// BackupReporter receives each backup run's outcome (nil = none).
+	BackupReporter BackupReporter
+	// Version is the warden version recorded in backup manifests.
+	Version string
 }
 
 // Run boots a control plane from Params and serves until ctx is cancelled. It
@@ -108,6 +119,11 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	policyStore, err := resolvePolicyStore(p.PolicyStore, stateDir)
 	if err != nil {
 		return fail(err)
+	}
+	if p.Backup.Enabled() {
+		if err := p.Backup.Validate(stateDir); err != nil {
+			return fail(fmt.Errorf("control-plane: %w", err))
+		}
 	}
 	// Resolve the SERVED path. With no --state-dir we serve+edit --config in place
 	// (unchanged behavior). With --state-dir we serve+edit a writable copy seeded
@@ -351,6 +367,10 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 
 	srv.warnBreakGlassSetup(integrations)
 
+	if p.Findings != nil {
+		srv.findings = p.Findings
+	}
+
 	// Bounded chain check (newest rows + head signature) once the alert
 	// pipeline exists to carry its Finding. A failure is reported, never fatal.
 	srv.verifyAdminAuditAtStartup(context.WithoutCancel(ctx))
@@ -438,6 +458,28 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		defer func() {
 			cpCancel()
 			<-done
+		}()
+	}
+
+	// Scheduled backups (--backup-dir): one goroutine on the CP context, never
+	// on a request path. Run waits for it before the stores close.
+	if p.Backup.Enabled() {
+		// The health reporter raises backup_failed / backup_stale Findings; a
+		// caller's own reporter (tests) is told of every outcome too.
+		var bk *BackupRunner
+		health := newBackupHealth(srv.publishFinding, logger, clk, p.Backup.withDefaults().Interval,
+			func() BackupStatus { return bk.Status() }, p.BackupReporter)
+		p.BackupReporter = health
+		bk = newRunBackupRunner(p, clk, logger, state, srv.integrationsStore, store, servedPath, dbPath, alertDBPath, adminAudit)
+		bkCtx, bkCancel := context.WithCancel(ctx)
+		srv.setBackupStatus(bk)
+		bk.Start(bkCtx)
+		staleDone := make(chan struct{})
+		go health.runStale(bkCtx, staleDone)
+		defer func() {
+			bkCancel()
+			bk.Wait()
+			<-staleDone
 		}()
 	}
 

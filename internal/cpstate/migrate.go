@@ -119,3 +119,16 @@ func (d *DB) apply(ctx context.Context, m Migration) error {
 	}
 	return nil
 }
+
+// SchemaVersion reports the schema version of the open database: the number of
+// migrations recorded in schema_migrations. Migrations are append-only and
+// identified by ID, so the count grows by one per applied migration and a
+// restore can compare it with the binary's StateMigrations. A file with no
+// migrations reports 0.
+func (d *DB) SchemaVersion(ctx context.Context) (int, error) {
+	ids, err := d.appliedIDs(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return len(ids), nil
+}
