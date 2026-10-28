@@ -128,6 +128,12 @@ worker requires HTTPS for the policy pull.
   > `:ro` mount) the dashboard surfaces a `permission denied` error and editing
   > is effectively disabled. The control plane logs a clear warning at startup
   > when its served-config directory is not writable.
+  >
+  > **One control plane per state dir.** With `--state-dir` the control plane holds
+  > an exclusive lock on `<state-dir>/warden-cp.lock` (mode 0600, holds the PID for
+  > operators) for as long as it runs; a second control plane on the same dir fails
+  > with `state dir ... is in use by another control plane`. A crash drops the lock
+  > automatically, so there is no stale lock to clear. Unix only.
 - **Connected workers** — a live list of every worker the control plane has heard
   from (via policy pulls and analytics ingest): online/offline status, last-seen,
   last policy pull, and events forwarded. Hidden on a single-node dashboard.
