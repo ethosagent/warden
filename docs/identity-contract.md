@@ -289,6 +289,72 @@ Deny reasons: `identity_required` (the `407`), `identity_expired` and
 `warden.identity.signin.started.total{outcome}` (`started`, `reused`,
 `rate_limited`, `issuer_unreachable`) counts sign-in requests.
 
+#### In-tunnel challenge
+
+Most agent runtimes never read the body of a `407` to a CONNECT (Node `fetch`
+says `fetch failed`; Python `httpx` and `requests` raise a `ProxyError`), so the
+user would not see the link in the agent's chat. A client that can hide the
+offer from the agent asks the worker to send the challenge **inside the
+tunnel** instead:
+
+- **Request.** The CONNECT carries `X-Warden-Challenge: in-tunnel`. The worker
+  reads it in the CONNECT header loop under the same bounds as
+  `Proxy-Authorization` (the first line wins; the preamble limits apply). Any
+  other value, or no header, means the `407` above, byte for byte.
+- **When.** Challenge mode, a CONNECT whose identity is not `valid`, the header
+  present, and a worker that terminates TLS (a CA is configured). A worker with
+  no CA cannot answer inside a raw tunnel and sends the `407`.
+- **Response head.** The worker starts or reuses the device authorization as
+  for the `407` (same limits, same `warden.identity.signin.started.total`
+  counter, one `identity_required` deny event), then answers
+  `HTTP/1.1 200 Connection Established` with one extra header,
+  `X-Warden-Sign-In: <base64url JSON of the sign_in object>` (RFC 4648 section 5,
+  unpadded; the object is the one shown above, `device_code` included). When no
+  authorization could be started (`issuer_unreachable`, `rate_limited`) the
+  header is absent.
+- **The tunnel.** The worker does the TLS handshake with the minted leaf for the
+  CONNECT host (ALPN `h2` and `http/1.1`) and serves a challenge-only handler.
+  It never dials upstream, never evaluates the policy and never swaps a secret.
+  Every request gets the same answer, then the connection closes:
+
+```http
+HTTP/1.1 403 Forbidden
+Content-Type: application/json
+Cache-Control: no-store
+Connection: close
+
+{
+  "type": "error",
+  "error": {
+    "type": "identity_required",
+    "code": "identity_required",
+    "message": "Sign in to continue: http://localhost:5556/dex/device?user_code=ABCD-EFGH (code ABCD-EFGH). Then send your message again."
+  },
+  "sign_in": {
+    "verification_uri": "http://localhost:5556/dex/device",
+    "verification_uri_complete": "http://localhost:5556/dex/device?user_code=ABCD-EFGH",
+    "user_code": "ABCD-EFGH",
+    "expires_in": 300
+  }
+}
+```
+
+- `error.type` and `error.message` follow the OpenAI and Anthropic error shape,
+  so an SDK or agent puts the message in front of the user. The status is `403`,
+  never `401` (a `401` makes some SDKs refresh their own provider key).
+- The body never holds `device_code`, `token_endpoint`, `client_id` or a token.
+  The user code is shown on purpose: it is not a credential. Without an offer the
+  message reads `Sign-in is not available right now (<outcome>). Try again in a
+  moment.`, the `sign_in` object is absent and `sign_in_error` carries the
+  outcome.
+- HTTP/1.1: `Connection: close`. HTTP/2: the same `403` on each stream, then
+  `GOAWAY` and close.
+- Logs, events and metric labels never hold the offer, either code or a token;
+  the deny event is the same `identity_required` as for the `407`.
+- After the sign-in the next CONNECT carries the token and is admitted as usual.
+  Retries before then reuse the pending authorization (30 s before it
+  expires), so they start no new one.
+
 **Client duties.** A client that follows the contract, on a `407` with a
 `sign_in` object:
 
@@ -311,6 +377,13 @@ credentials when there is no login, prints `warden: sign in at <url> (code
 URL in `WARDEN_SIGNIN_URL` and the code in `WARDEN_SIGNIN_CODE`, never a token),
 polls once at a time, and relays the `407` to the agent **without the
 `device_code`**.
+
+A client that sends `X-Warden-Challenge: in-tunnel` also reads `X-Warden-Sign-In`
+from the `200` head, **removes it before the agent sees the head**, runs the same
+checks 1 to 5 on the decoded offer (bounded size; an offer it does not trust is
+dropped, with no poll), and then splices the tunnel, where the agent reads the
+`403` above. `warden identity exec --challenge` asks for the in-tunnel challenge
+on every anonymous CONNECT. A direct client without that header keeps the `407`.
 
 **Phase 1 trade-off.** An agent that talks to the worker directly, with no
 forwarder, receives the whole body including `device_code`, and may implement
