@@ -55,8 +55,12 @@ func groupsServe(t *testing.T, h *harness.H, scopedGroups ...string) {
 	if r := savePolicy(t, h, map[string]any{"domain": scopedHost, "groups": scopedGroups}, map[string]any{"domain": plainHost}); r.Status != http.StatusOK {
 		t.Fatalf("scoped save = %d %s, want 200", r.Status, r.Body)
 	}
-	h.Eventually("workers enforce the save", func() bool {
-		return connectStatus(t, h, plainHost+":443") == http.StatusOK
+	// Wait on the worker's own view of the policy, not on a CONNECT: with the
+	// judge on, a CONNECT to an unlisted host is admitted (and the request
+	// judged), so a probe would both pass early and cost a judge call.
+	h.Eventually("the worker holds the scoped entry", func() bool {
+		code, body := adminDo(t, h, http.MethodGet, "/dashboard/api/policy")
+		return code == http.StatusOK && strings.Contains(string(body), scopedHost)
 	})
 }
 
@@ -273,6 +277,8 @@ func groupsAnonymousDenied(t *testing.T, h *harness.H) {
 		t.Fatalf("anonymous h2 = %d, want 403", got)
 	}
 	// A token for another audience is no identity at all, even in the right group.
+	// The h1 denial above closed that tunnel; start on a fresh connection.
+	h.Agent().CloseIdleConnections()
 	if got := getStatus(t, h.Agent(), scopedHost, invalid); got != http.StatusForbidden {
 		t.Fatalf("wrong-audience token = %d, want 403", got)
 	}
@@ -548,6 +554,9 @@ func mcpGatedBody(tool string) string {
 
 // groupsPostMCP POSTs one tools/call to the fake MCP server.
 func groupsPostMCP(cl *http.Client, host, tool, token string) (int, error) {
+	// A denied h1 request ends its tunnel; never reuse a connection the worker
+	// may be closing.
+	cl.CloseIdleConnections()
 	req, err := http.NewRequest(http.MethodPost, "https://"+host+"/mcp", strings.NewReader(mcpGatedBody(tool)))
 	if err != nil {
 		return 0, err
@@ -656,7 +665,7 @@ func groupsMCPToolGated(t *testing.T, h *harness.H) {
 			t.Errorf("MCP upstream request %d carried an identity header", i)
 		}
 	}
-	groupsClean(t, h, []string{fin, eng, expired})
+	groupsClean(t, h, []string{fin, eng, expired}, up)
 	groupsJudgeLive(t, h)
 }
 
@@ -750,6 +759,7 @@ func groupsOldWorkerDenies(t *testing.T, h *harness.H) {
 	if got := call("lookup"); got != gateway.Pass {
 		t.Errorf("old worker action for the ungated tool = %v, want Pass", got)
 	}
+	groupsJudgeIdle(t, h)
 }
 
 // groupsPolicyEvalAffectedUsers: real traffic from three verified users (two in
@@ -758,7 +768,7 @@ func groupsOldWorkerDenies(t *testing.T, h *harness.H) {
 // exactly the two eng users it would cut off, by email and sorted, never the
 // sales user, and carries no token or group.
 func groupsPolicyEvalAffectedUsers(t *testing.T, h *harness.H) {
-	h.Upstream(scopedHost)
+	up := h.Upstream(scopedHost)
 	h.Upstream(plainHost)
 	alice := h.MintUserToken(fakes.Valid("alice", "alice@example.com", "eng"))
 	bob := h.MintUserToken(fakes.Valid("bob", "bob@example.com", "eng"))
@@ -782,6 +792,8 @@ func groupsPolicyEvalAffectedUsers(t *testing.T, h *harness.H) {
 		}
 		return n == 3
 	})
+
+	groupsClean(t, h, []string{alice, bob, sam}, up)
 
 	candidate := config.Policy{Allowlist: []config.AllowlistEntry{
 		{Domain: scopedHost, Groups: []string{"sales"}},
