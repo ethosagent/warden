@@ -10,6 +10,7 @@ import (
 	"sync"
 	"unicode/utf8"
 
+	"github.com/ethosagent/warden/internal/identity"
 	"github.com/ethosagent/warden/internal/mcp/gateway"
 )
 
@@ -29,7 +30,7 @@ const ClosePolicyViolation uint16 = 1008
 // gateway) drives WS frame scanning. *gateway.Gateway satisfies it, as does the
 // proxy's WSScanner capability (a structural superset of this interface).
 type Scanner interface {
-	OnRequest(sessionKey, method, url string, hdr http.Header, body []byte) gateway.Verdict
+	OnRequest(sessionKey, method, url string, hdr http.Header, body []byte, meta gateway.RequestMeta) gateway.Verdict
 	OnResponse(sessionKey string, status int, hdr http.Header, body []byte) gateway.Verdict
 }
 
@@ -63,6 +64,10 @@ type Pump struct {
 	GW         Scanner
 	SessionKey string
 	Log        *slog.Logger
+	// Subject is the identity verified on the upgrade request (nil unless
+	// valid), passed with every client->server frame. It is fixed for the
+	// connection: a token that expires later does not change it.
+	Subject *identity.Subject
 	// Hold (enforce mode) withholds every data message (text or binary), all
 	// fragments of it, until the gateway has scanned the complete message: it is
 	// forwarded only on allow. A binary message that is not valid UTF-8 JSON cannot
@@ -396,7 +401,7 @@ func (p *Pump) scan(dir direction, msg []byte, overCap bool) (deny bool) {
 	if dir == dirRequest {
 		// WS framing carries no HTTP headers/status; the gateway is
 		// transport-agnostic on the JSON-RPC body, so neutral values are passed.
-		v = p.GW.OnRequest(p.SessionKey, "", "", nil, msg)
+		v = p.GW.OnRequest(p.SessionKey, "", "", nil, msg, gateway.RequestMeta{Subject: p.Subject})
 	} else {
 		v = p.GW.OnResponse(p.SessionKey, 0, nil, msg)
 	}

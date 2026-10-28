@@ -88,6 +88,12 @@ var All = slices.Concat(
 		// Replay of recorded identities (W-P1-GPOL-05): a candidate narrowing a
 		// scoped rule names the affected user and counts anonymous apart.
 		{Name: "scoped_policy_replay_affected_users", Opts: identityOpts(), Run: scopedPolicyReplayAffectedUsers},
+		// MCP subject seam (W-P1-GPOL-04): the verified subject reaches the MCP
+		// gateway through RequestMeta without changing any verdict.
+		{Name: "mcp_subject_seam_unchanged", Opts: mcpSubjectOpts(), Run: mcpSubjectSeamUnchanged},
+		// Group-gated MCP tools (W-P1-GPOL-11): allowWhen.groups is decided with
+		// the request's verified subject; non-members are denied mcp_tool_condition.
+		{Name: "mcp_group_condition", Opts: mcpGroupOpts(), Run: mcpGroupCondition},
 		// Version contract (W-P1-PVER-08): GET reports the head, If-Match names
 		// it, a stale save is a 409 naming the author and is audited rejected.
 		// In-process only (it reads the CP state dir).

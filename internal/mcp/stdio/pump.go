@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
 	"sync"
 
 	"github.com/ethosagent/warden/internal/mcp/gateway"
@@ -17,6 +18,15 @@ import (
 // to this cap rather than panicking on bufio.Scanner's default 64 KiB token.
 const maxLineBytes = 8 << 20 // 8 MiB
 
+// Gateway is the narrow gateway surface the pump consumes; *gateway.Gateway
+// satisfies it. Requests carry the zero RequestMeta: a stdio session has no
+// verified identity, so group-gated tools are denied over stdio
+// (W-P1-GPOL-11).
+type Gateway interface {
+	OnRequest(sessionKey, method, url string, hdr http.Header, body []byte, meta gateway.RequestMeta) gateway.Verdict
+	OnResponse(sessionKey string, status int, hdr http.Header, body []byte) gateway.Verdict
+}
+
 // Pump fronts a single MCP stdio session: it reads newline-delimited JSON-RPC
 // from the client, runs each message through the gateway, and forwards allowed
 // messages to the server subprocess (and the server's responses back to the
@@ -24,7 +34,7 @@ const maxLineBytes = 8 << 20 // 8 MiB
 // JSON-RPC error instead. A Pump value is single-session; Run owns its
 // goroutines and the clientOut mutex.
 type Pump struct {
-	GW         *gateway.Gateway
+	GW         Gateway
 	SessionKey string // gateway session key for this connection (e.g. "stdio")
 	Log        *slog.Logger
 
@@ -51,7 +61,7 @@ func (p *Pump) PumpRequests(clientIn io.Reader, serverIn io.Writer, clientOut io
 	for {
 		line, err := readLine(r)
 		if len(line) > 0 {
-			v := p.GW.OnRequest(p.SessionKey, "", "stdio", nil, line)
+			v := p.GW.OnRequest(p.SessionKey, "", "stdio", nil, line, gateway.RequestMeta{})
 			p.logFindings("request", v)
 			if v.Action == gateway.Deny {
 				p.writeClient(clientOut, blockError(line, v.Reason))

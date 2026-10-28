@@ -25,6 +25,8 @@ import (
 	"time"
 
 	"github.com/ethosagent/warden/internal/config"
+	"github.com/ethosagent/warden/internal/denyreason"
+	"github.com/ethosagent/warden/internal/identity"
 	"github.com/ethosagent/warden/internal/mcp"
 	"github.com/ethosagent/warden/internal/scan"
 )
@@ -128,13 +130,14 @@ type compiledToolConstraints struct {
 // A zero value (hasWindow false, agentID "") imposes no extra restriction.
 type compiledCondition struct {
 	agentID string
-	// scoped marks a groups/users condition. The gateway cannot evaluate those
-	// yet (W-P1-GPOL-04/-11), so it denies the tool rather than run it as if
-	// the condition were global.
-	scoped    bool
-	hasWindow bool
-	startHour int
-	endHour   int
+	// scoped marks a groups/users condition; principals is its compiled list,
+	// matched with the same matcher as HTTP policy against the request's
+	// verified subject.
+	scoped     bool
+	principals identity.Principals
+	hasWindow  bool
+	startHour  int
+	endHour    int
 }
 
 // compiledScope is one task scope precompiled at New: the allowed tool-set as a
@@ -464,6 +467,9 @@ func compileConditions(cs map[string]config.MCPToolConstraints) map[string]compi
 			agentID: tc.AllowWhen.AgentID,
 			scoped:  len(tc.AllowWhen.Groups) > 0 || len(tc.AllowWhen.Users) > 0,
 		}
+		if cc.scoped {
+			cc.principals = identity.CompilePrincipals(tc.AllowWhen.Groups, tc.AllowWhen.Users)
+		}
 		if tc.AllowWhen.TimeWindow != "" {
 			if start, end, ok := parseConditionWindow(tc.AllowWhen.TimeWindow); ok {
 				cc.hasWindow = true
@@ -649,8 +655,17 @@ func (s *session) recordID(id, tool string) {
 	s.idToTool[id] = tool
 }
 
+// RequestMeta carries per-request context that is not part of the JSON-RPC
+// body. Subject is the verified identity of the caller (nil unless the
+// identity stage found status valid, and always nil over stdio, where group-
+// gated tools are therefore denied). The gateway ignores it today; it is the
+// seam W-P1-GPOL-11 and the grant tickets build on.
+type RequestMeta struct {
+	Subject *identity.Subject
+}
+
 // OnRequest analyzes one outbound MCP request body and returns a Verdict.
-func (g *Gateway) OnRequest(sessionKey, method, url string, hdr http.Header, body []byte) (v Verdict) {
+func (g *Gateway) OnRequest(sessionKey, method, url string, hdr http.Header, body []byte, meta RequestMeta) (v Verdict) {
 	if g.disabled() {
 		return Verdict{Action: Pass}
 	}
@@ -702,7 +717,7 @@ func (g *Gateway) OnRequest(sessionKey, method, url string, hdr http.Header, bod
 	// analyzer sees the request the same way the policy decision did.
 	if allowed {
 		if cc, ok := g.conditions[tool]; ok {
-			if detail, deny := g.conditionDenies(cc, now); deny {
+			if detail, reason, deny := g.conditionDenies(cc, now, meta.Subject); deny {
 				findings = append(findings, Finding{
 					Kind:     "mcp_tool_condition",
 					Severity: "high",
@@ -712,6 +727,9 @@ func (g *Gateway) OnRequest(sessionKey, method, url string, hdr http.Header, bod
 				blocking = true
 				if dominant == "" {
 					dominant = "mcp_tool_condition"
+					if reason != "" {
+						dominant = reason
+					}
 				}
 				allowed = false
 			}
@@ -1130,19 +1148,30 @@ func hashSchema(raw json.RawMessage) string {
 }
 
 // conditionDenies reports whether an allowed tool's AllowWhen condition fails
-// for the current agent / time. detail is a short, value-free phrase suitable
-// for a Finding.Detail. now is server local time (the injectable clock).
-func (g *Gateway) conditionDenies(cc compiledCondition, now time.Time) (detail string, deny bool) {
-	if cc.scoped {
-		return "identity-scoped condition not supported", true
-	}
+// for the current agent / time / subject. detail is a short, value-free phrase
+// suitable for a Finding.Detail (never a group, email or user id). reason is
+// non-empty only when the dominant deny reason is more specific than
+// mcp_tool_condition (a truncated group list). now is server local time (the
+// injectable clock). Every clause must hold (AND).
+func (g *Gateway) conditionDenies(cc compiledCondition, now time.Time, subject *identity.Subject) (detail, reason string, deny bool) {
 	if cc.agentID != "" && g.agentID != cc.agentID {
-		return "agent not permitted", true
+		return "agent not permitted", "", true
 	}
 	if cc.hasWindow && !hourInWindow(now.Hour(), cc.startHour, cc.endHour) {
-		return "outside allowed time window", true
+		return "outside allowed time window", "", true
 	}
-	return "", false
+	if cc.scoped {
+		switch cc.principals.Match(subject) {
+		case identity.Member:
+		case identity.NoIdentity:
+			return "no verified identity", "", true
+		case identity.TruncatedMiss:
+			return "groups truncated", string(denyreason.IdentityGroupsTruncated), true
+		default:
+			return "user not permitted", "", true
+		}
+	}
+	return "", "", false
 }
 
 // constraintFinding builds a value-free mcp_args_constraint Finding. detail is

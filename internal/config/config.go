@@ -576,8 +576,7 @@ func validate(p Policy) error {
 		}
 		// W-P1-GPOL-01/-10: validate the principal values. The evaluator
 		// enforces them per request (and the wire projects them fail-closed),
-		// so an allow entry may carry groups/users; the MCP allowWhen guard
-		// stays until the gateway enforces them.
+		// so an allow entry may carry groups/users (MCP allowWhen too, W-P1-GPOL-11).
 		path := fmt.Sprintf("policy.allowlist[%d]", i)
 		if _, _, err := normalizePrincipals(path, e.Groups, e.Users); err != nil {
 			return err
