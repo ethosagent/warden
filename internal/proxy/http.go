@@ -44,7 +44,7 @@ type requestScope struct {
 	br         *bufio.Reader
 	domain     string
 	port       int
-	needsJudge bool
+	deferred   deferred
 	// scheme is this connection's UPSTREAM scheme: https on every terminated
 	// tunnel, http only on the transparent plain-HTTP listener. It selects the
 	// constraint-gate evaluation, the event URL prefix and the upstream dial
@@ -307,7 +307,7 @@ func (s *requestScope) addEvidence(dets []scan.Detection) {
 // Connection: close, a deny/502 terminal, an SSE stream, a client EOF, or a
 // stale-conn redial's fresh conn. It is nil (nothing to close) before the first
 // forward and after a handoff, so there is no double close and no leak.
-func (p *Proxy) handleHTTP(clientConn net.Conn, br *bufio.Reader, domain string, port int, needsJudge bool, scheme policy.Scheme, firstReq *http.Request, ci connIdentity) {
+func (p *Proxy) handleHTTP(clientConn net.Conn, br *bufio.Reader, domain string, port int, d deferred, scheme policy.Scheme, firstReq *http.Request, ci connIdentity) {
 	if scheme == policy.SchemeHTTPS {
 		p.reach(PathHTTP1)
 	} else {
@@ -324,7 +324,7 @@ func (p *Proxy) handleHTTP(clientConn net.Conn, br *bufio.Reader, domain string,
 		}
 	}()
 	for {
-		end, up, upBR := p.serveHTTPRequest(clientConn, br, domain, port, needsJudge, scheme, firstReq, upstream, upstreamBR, ci, sess)
+		end, up, upBR := p.serveHTTPRequest(clientConn, br, domain, port, d, scheme, firstReq, upstream, upstreamBR, ci, sess)
 		// The pre-read first request is served exactly once; later iterations
 		// read from the wire like every keep-alive request.
 		firstReq = nil
@@ -345,7 +345,7 @@ func (p *Proxy) handleHTTP(clientConn net.Conn, br *bufio.Reader, domain string,
 // scope's upstream on every non-handoff path (the session closes it on exit or
 // reuses it next iteration), or nil after a WebSocket handoff so the session does
 // not double-close the pump-owned conn.
-func (p *Proxy) serveHTTPRequest(clientConn net.Conn, br *bufio.Reader, domain string, port int, needsJudge bool, scheme policy.Scheme, firstReq *http.Request, upstream net.Conn, upstreamBR *bufio.Reader, ci connIdentity, sess *session) (endSession bool, carryUpstream net.Conn, carryBR *bufio.Reader) {
+func (p *Proxy) serveHTTPRequest(clientConn net.Conn, br *bufio.Reader, domain string, port int, d deferred, scheme policy.Scheme, firstReq *http.Request, upstream net.Conn, upstreamBR *bufio.Reader, ci connIdentity, sess *session) (endSession bool, carryUpstream net.Conn, carryBR *bufio.Reader) {
 	req := firstReq
 	if req == nil {
 		var err error
@@ -377,7 +377,7 @@ func (p *Proxy) serveHTTPRequest(clientConn net.Conn, br *bufio.Reader, domain s
 		br:         br,
 		domain:     domain,
 		port:       port,
-		needsJudge: needsJudge,
+		deferred:   d,
 		req:        req,
 		reqStart:   reqStart,
 		gw:         p.mcpGateway(),
@@ -538,17 +538,55 @@ func (p *Proxy) recordSSRFDeny(s *requestScope, err error) {
 // be what the origin sees. A NoMatch falls through unchanged (judge-eligible
 // exactly as before); an explicit Deny is terminal — a constraint violation is
 // never judge-eligible, by construction of the evaluator.
+//
+// W-P1-GPOL-10: the same single evaluation carries the request's verified
+// subject (s.subject, nil unless identityStage found status valid), so an
+// identity-scoped entry is decided per request on every protocol. It is the
+// only per-request policy evaluation, so a rate limit is charged once.
 func (p *Proxy) constraintGate(s *requestScope) (endSession bool) {
-	verdict := p.cfg.Policy.EvaluateRequest(s.domain, s.port, s.scheme, s.req.Method, s.req.URL.EscapedPath())
-	if verdict.Decision != policy.Deny {
+	verdict := p.cfg.Policy.EvaluateFor(policy.RequestContext{
+		Domain: s.domain, Port: s.port, Scheme: s.scheme,
+		Method: s.req.Method, Path: s.req.URL.EscapedPath(),
+		Subject: s.subject,
+	})
+	p.recordScoped(verdict)
+	switch verdict.Decision {
+	case policy.Allow, policy.NoMatch:
 		return false
 	}
+	// Deny and Conditional are terminal, and anything else fails closed here.
 	// Every explicit Deny names itself from the declared set (#409): a
 	// constraint violation (method_not_allowed / path_not_allowed /
-	// path_not_canonical), a denylist hit, or an exhausted guard.
-	p.emitDeny(s, verdict.Reason, denyExtra{LatencyMs: s.latencyMs()})
+	// path_not_canonical), a denylist hit, an exhausted guard, or a scoped
+	// entry the subject is not in (group_not_allowed /
+	// identity_groups_truncated). A Conditional means a scoped entry needs an
+	// identity this request does not carry (identity_required).
+	reason := verdict.Reason
+	if verdict.Decision != policy.Deny && verdict.Decision != policy.Conditional {
+		p.cfg.Logger.Error("unhandled policy decision", "decision", int(verdict.Decision), "domain", s.domain, "port", s.port)
+		reason = denyreason.PolicyNoMatch
+	}
+	p.emitDeny(s, reason, denyExtra{LatencyMs: s.latencyMs()})
 	s.out.errorResponse(403, "Forbidden")
 	return true
+}
+
+// recordScoped counts a decision on a destination that has identity-scoped
+// entries (the verdict's Scoped flag), on the bounded result label only: never
+// a user, group, token or email. An allow is counted even when an unscoped
+// sibling entry admitted the request, so allow is an upper bound.
+func (p *Proxy) recordScoped(v policy.RequestVerdict) {
+	if !v.Scoped {
+		return
+	}
+	switch {
+	case v.Decision == policy.Allow:
+		p.cfg.Metrics.RecordScoped("allow")
+	case v.Decision == policy.Conditional:
+		p.cfg.Metrics.RecordScoped("no_identity")
+	case v.Reason == denyreason.GroupNotAllowed || v.Reason == denyreason.IdentityGroupsTruncated:
+		p.cfg.Metrics.RecordScoped("not_member")
+	}
 }
 
 // judgeGate runs the inline judge for requests that matched no static rule. The
@@ -558,12 +596,12 @@ func (p *Proxy) constraintGate(s *requestScope) (endSession bool) {
 // audit event per request; on deny the request terminates here with its own
 // event.
 func (p *Proxy) judgeGate(s *requestScope) (endSession bool) {
-	if !s.needsJudge {
+	if s.deferred != deferJudge {
 		return false
 	}
 	fullURL := s.eventURL()
 	_, hasAuth := s.req.Header["Authorization"]
-	// needsJudge was decided at CONNECT time. If a concurrent control-plane swap
+	// deferJudge was decided at CONNECT time. If a concurrent control-plane swap
 	// disabled the judge between then and now, liveJudge is nil: this request
 	// matched no static rule and there is no judge to allow it, so it must fail
 	// closed (deny) — the exact default-deny semantics a NoMatch request gets
@@ -615,7 +653,7 @@ func (p *Proxy) mcpRequestScan(s *requestScope) (endSession bool) {
 	fullURL := s.eventURL()
 	s.mcpSessKey = p.cfg.AgentID + ":" + s.domain
 	start := time.Now()
-	v := s.gw.OnRequest(s.mcpSessKey, s.req.Method, fullURL, s.req.Header, body)
+	v := s.gw.OnRequest(s.mcpSessKey, s.req.Method, fullURL, s.req.Header, body, gateway.RequestMeta{Subject: s.subject})
 	p.cfg.Metrics.ObserveAddedLatency("mcp_scan", time.Since(start))
 	p.recordMCPFindings(v)
 	s.mcpTool = v.Tool
@@ -1508,6 +1546,9 @@ func (p *Proxy) recordAllowEvent(s *requestScope) {
 	})
 }
 
+// writeErrorResponse writes a terminal HTTP/1.1 error. Every caller ends the
+// session after it, so the response says Connection: close: a keep-alive client
+// then does not race the close by sending its next request on this conn.
 func writeErrorResponse(w io.Writer, statusCode int, statusText string) {
 	resp := &http.Response{
 		StatusCode:    statusCode,
@@ -1518,6 +1559,7 @@ func writeErrorResponse(w io.Writer, statusCode int, statusText string) {
 		Header:        http.Header{},
 		Body:          io.NopCloser(strings.NewReader(statusText + "\n")),
 		ContentLength: int64(len(statusText) + 1),
+		Close:         true,
 	}
 	_ = resp.Write(w)
 }

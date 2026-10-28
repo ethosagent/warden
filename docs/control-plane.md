@@ -382,6 +382,40 @@ raised, and further audited changes answer 503 `{"error":"admin_audit_unavailabl
 before they run, until the database accepts writes again. Reads, `/policy`, ingest
 and heartbeats never depend on the audit log.
 
+**Sign-ins and sign-outs.** In `oidc` mode the login and logout handlers record
+their own rows (the middleware never wraps `/auth/*`), all with target `session`,
+`auth_method` `oidc` (`breakglass` for the logout of a break-glass session), a `request_id` (echoed as `X-Request-Id`) and `client_ip`:
+
+| Action | When | Actor | Outcome | Details |
+|---|---|---|---|---|
+| `auth.login` | `GET /auth/callback` created a session | the verified ID token's `sub` and `email`, role from `console.roles` | `ok` (status 302) | `{role}` |
+| `auth.login_failed` | `GET /auth/callback` failed after its pending `state` was consumed | the verified token's subject when there is one (`no_role`), otherwise `anonymous` | `denied` or `error` (status 302) | `{reason}` |
+| `auth.logout` | `POST /auth/logout` ended a live session | the session's user, captured before the row is deleted | `ok` (status 204) | none |
+
+`target_ref` of `auth.login` and `auth.logout` is the first 8 hex characters of the
+session's id hash (the `console_login`/`console logout` log lines use the same value),
+so a sign-in and its sign-out can be matched. `details.reason` is a closed set:
+
+| `reason` | Outcome | Cause (`login_error` code) |
+|---|---|---|
+| `no_role` | `denied` | the verified user matches no `console.roles` group (`no_role`) |
+| `bad_token` | `denied` | the ID token failed verification or its nonce did not match (`token_invalid`, `nonce_mismatch`) |
+| `state_invalid` | `denied` | the state was valid but the browser-binding login cookie was missing or wrong (`state_invalid`) |
+| `idp_error` | `error` | the IdP answered with an error, or its keys could not be fetched (`idp_error`, `idp_unavailable`) |
+| `exchange_failed` | `error` | no code, the token exchange failed, or the session could not be stored (`exchange_failed`) |
+
+A callback with a missing, unknown or expired `state` consumed nothing and writes no
+row, and neither does a logout without a live session or one refused for CSRF. At most
+20 `auth.login_failed` rows per client address are written per minute. At most 4,096
+addresses are tracked at once; while all of them are inside their minute, a new
+address writes no row either. Further attempts only increment an in-memory counter and
+log `admin_audit_login_failed_rate_limited`, at most once a minute per address.
+Successful logins are never rate-limited. The authorization code, `state`, PKCE
+verifier, nonce, tokens and cookie values never appear in a row or a log line. If a
+row cannot be appended, the entry is logged at ERROR with `persist_failed=true` and
+the `admin_audit_degraded` alert is raised as above, but the sign-in or sign-out
+itself still succeeds: it changes no admin state.
+
 **Reading and verifying in the dashboard.** With the log on, the control plane
 serves three read-only routes and an **Admin log** tab (separate from the receipts
 **Audit** tab and its `/dashboard/api/audit*` routes). Off, or on a worker, all three
@@ -563,6 +597,9 @@ fails when the two differ.
 | `/dashboard/api/analytics` | GET | viewer | `analytics.read` |
 | `/dashboard/api/audit` | GET | viewer | `audit.read` |
 | `/dashboard/api/audit/verify` | POST | viewer | `audit.verify` |
+| `/dashboard/api/blocked-users` | GET | admin | `blocked_users.read` |
+| `/dashboard/api/blocked-users` | POST | admin | `blocked_users.add` |
+| `/dashboard/api/blocked-users/{id}` | DELETE | admin | `blocked_users.remove` |
 | `/dashboard/api/detection` | GET | viewer | `detection.read` |
 | `/dashboard/api/detection` | POST | editor | `detection.write` |
 | `/dashboard/api/detection` | PUT | editor | `detection.write` |
@@ -657,9 +694,10 @@ append is logged at ERROR and does not stop startup.
   the served YAML `secretStore` block and is merged in when `/policy` is built,
   so workers get the same bytes as before. In history responses and diffs a
   credential appears only as its fingerprint, never the value.
-- Serve-time overlay data is not stored either. The credential is the only
-  overlay today; the block list will be one when it ships. A rollback therefore
-  never restores an old credential or block list.
+- Serve-time overlay data is not stored either. The credential
+  (versioned mode) and the user block list (whenever a state dir is set) are the
+  overlays today. A rollback therefore never restores an old credential or
+  block list.
 - CP-local blocks (integrations, detection, `central`, `controlPlane`, ...)
   are not versioned; their editors keep rewriting the served YAML.
 
@@ -848,6 +886,48 @@ YAML if the mirror is lost.
 - **Release N+2** removes YAML as a policy source: `--policy-store=file` is
   removed, the served YAML is only the write-through mirror of head, and hand
   edits are never served (they come in through `warden policy import`).
+
+## Block list: offline CLI
+
+The user block list lives in `<state-dir>/warden-cp.db`, outside policy
+versions. When the console or the IdP is unavailable, or a script needs to
+block someone without a browser session, use the command line. It works with
+the control plane running or stopped.
+
+```sh
+warden control-plane block add --state-dir D [--sub S] [--email E] --reason R
+warden control-plane block remove --state-dir D --id ID
+warden control-plane block list --state-dir D [--json]
+```
+
+- `add` needs `--sub`, `--email` or both, and prints the new id. It uses the
+  same store and validator as the admin API: the email is lowercased, a
+  duplicate sub or email is refused, the reason is at most 512 bytes with no
+  control characters, and the count and size limits apply. A validation error
+  exits 1 with the API's message.
+- `remove` exits 2 for an id that is not on the list.
+- `list` opens the database read-only.
+- `--admin-audit-key-file` (add and remove) defaults to `<state-dir>/cp-audit.key`.
+
+**Audit.** With admin audit enabled in the state dir, each add and remove
+appends one `blocked_users.add` or `blocked_users.remove` row (actor
+`cli:<os user>`, auth_method `cli`, target `blocked_users`, target_ref
+`block:<id>`). The reason text is not recorded in the row or logged. The
+audit key is checked first: with audit rows present and the key missing or not
+matching, the command exits non-zero and writes nothing. If the audit append
+still fails, an add is rolled back and a remove deletes nothing. The block and
+its audit row are two commits, not one transaction, so a crash between them
+(or two concurrent removes of one id) can leave one without the other. A state dir where audit was never enabled
+gets a one-line notice and no row.
+
+**Pickup.** A running control plane polls `PRAGMA data_version` every 2 s and,
+when another process wrote, refreshes the served policy and runs the block
+store's change callbacks. A connected worker then receives the new list within
+2 s plus one long-poll round trip.
+
+The CLI has no console identity, so the self-unblock check of the admin API does
+not apply. Write access to the state dir already allows policy changes, so
+this adds no new authority.
 
 ## Worker admin token
 

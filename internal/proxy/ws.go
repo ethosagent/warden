@@ -135,7 +135,7 @@ func (p *Proxy) handleWSUpgrade(s *requestScope) {
 	if gw != nil {
 		hold = p.holdMCP(gw)
 	}
-	pump := &ws.Pump{GW: scanner, SessionKey: s.mcpSessKey, Log: p.cfg.Logger, Hold: hold}
+	pump := &ws.Pump{GW: scanner, SessionKey: s.mcpSessKey, Log: p.cfg.Logger, Hold: hold, Subject: s.subject}
 	// The frame guard arms only on a swap (#399): no swapped value in the
 	// upgrade request means no needle set and no per-frame work — the frames are
 	// forwarded exactly as before.
