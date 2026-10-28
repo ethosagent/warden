@@ -151,6 +151,9 @@ type Server struct {
 	// adminAuditVerifying admits one verify run at a time.
 	adminAudit          AdminAuditSource
 	adminAuditVerifying atomic.Bool
+	// backup, when set (control plane with --backup-dir), starts an on-demand
+	// backup; nil makes POST /dashboard/api/backup 404.
+	backup BackupStarter
 	// blockList, when set (control plane), serves the block list admin API; nil
 	// makes those routes 404.
 	blockList BlockListStore
@@ -594,6 +597,7 @@ func Routes() []Route {
 		{get, "/dashboard/api/policy/versions/{v}", "policy.version.read"},
 		{get, "/dashboard/api/policy/versions/{v}/diff", "policy.diff"},
 		{post, "/dashboard/api/policy/versions/{v}/rollback", "policy.rollback"},
+		{post, "/dashboard/api/backup", "backup.run"},
 		{get, "/dashboard/api/worker-tokens", "worker_token.read"},
 		{post, "/dashboard/api/worker-tokens", "worker_token.create"},
 		{del, "/dashboard/api/worker-tokens/{id}", "worker_token.revoke"},

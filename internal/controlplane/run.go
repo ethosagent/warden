@@ -25,6 +25,7 @@ import (
 	"github.com/ethosagent/warden/internal/clock"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/cpstate"
+	"github.com/ethosagent/warden/internal/dashboard"
 	"github.com/ethosagent/warden/internal/detect"
 	"github.com/ethosagent/warden/internal/integration"
 	"github.com/ethosagent/warden/internal/observability"
@@ -99,6 +100,14 @@ type Params struct {
 	// logged as an admin_audit.checkpoint line (0 = every 5 minutes). Tests
 	// drive it with Clock.
 	AdminAuditCheckpointInterval time.Duration
+
+	// Backup is the --backup-* settings; Backup.Dir == "" (the default) turns
+	// backups off. Run validates it against StateDir and the stores it opens.
+	Backup BackupConfig
+	// BackupReporter receives each backup run's outcome (nil = none).
+	BackupReporter BackupReporter
+	// Version is the warden version recorded in backup manifests.
+	Version string
 }
 
 // Run boots a control plane from Params and serves until ctx is cancelled. It
@@ -127,6 +136,28 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	tokenEnv, err := validateWorkerAuth(p)
 	if err != nil {
 		return fail(err)
+	}
+	// With a state dir, hold the instance lock before any database is opened or
+	// the served config is seeded. Registered first, so it is released last,
+	// after the servers and stores below have closed. No state dir, no lock.
+	if stateDir != "" {
+		if err := os.MkdirAll(stateDir, 0o700); err != nil {
+			return fail(fmt.Errorf("control-plane: create state dir %s: %w", stateDir, err))
+		}
+		release, lerr := cpstate.AcquireDirLock(stateDir)
+		if errors.Is(lerr, cpstate.ErrLocked) {
+			return fail(fmt.Errorf("control plane: state dir %s is in use by another control plane (lock %s)",
+				stateDir, filepath.Join(stateDir, cpstate.LockFileName)))
+		}
+		if lerr != nil {
+			return fail(fmt.Errorf("control plane: %w", lerr))
+		}
+		defer func() { _ = release() }()
+	}
+	if p.Backup.Enabled() {
+		if err := p.Backup.Validate(stateDir); err != nil {
+			return fail(fmt.Errorf("control-plane: %w", err))
+		}
 	}
 	// Resolve the SERVED path. With no --state-dir we serve+edit --config in place
 	// (unchanged behavior). With --state-dir we serve+edit a writable copy seeded
@@ -479,6 +510,27 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		defer func() {
 			cpCancel()
 			<-done
+		}()
+	}
+
+	// Scheduled backups (--backup-dir): one goroutine on the CP context, never
+	// on a request path. Run waits for it before the stores close.
+	if p.Backup.Enabled() {
+		bk := newRunBackupRunner(p, clk, logger, state, srv.integrationsStore, store, servedPath, dbPath, alertDBPath, adminAudit)
+		bkCtx, bkCancel := context.WithCancel(ctx)
+		bk.Start(bkCtx)
+		// POST /dashboard/api/backup: the run is bound to the CP context, not
+		// the request's, and Wait covers it before the stores close.
+		srv.dash.SetBackup(func() error {
+			err := bk.StartOnDemand(bkCtx)
+			if errors.Is(err, ErrBackupInProgress) {
+				return dashboard.ErrBackupInProgress
+			}
+			return err
+		})
+		defer func() {
+			bkCancel()
+			bk.Wait()
 		}()
 	}
 
