@@ -173,9 +173,14 @@ type H struct {
 	// wantAdminAudit (WithAdminAudit) boots the control plane with
 	// console.adminAudit.enabled and a state dir.
 	wantAdminAudit bool
+	// wantAdminJSONLog (WithAdminAuditJSONLog) also writes the admin stream as
+	// warden.admin.v1 lines to a file under the harness root (audit.jsonLog).
+	wantAdminJSONLog bool
 	// wantCPAdmin (WithControlPlaneAdminToken) boots the control plane with its
 	// own admin bearer (--admin-token-env), separate from the worker token.
 	wantCPAdmin bool
+	// wantBackup (WithBackup) boots the control plane with --backup-dir.
+	wantBackup bool
 
 	// tokenClients are the AgentWithProxyToken / AgentH2WithProxyToken clients,
 	// kept so cleanup can close their idle tunnels.
@@ -648,6 +653,9 @@ func (h *H) boot() {
 		if h.versionedPolicy {
 			h.tb.Fatalf("harness: WithVersionedPolicyStore boots an in-process control plane; it cannot combine with WithTarget")
 		}
+		if h.wantBackup {
+			h.tb.Fatalf("harness: WithBackup boots an in-process control plane; it cannot combine with WithTarget")
+		}
 		if h.cpDownAtBoot {
 			h.tb.Fatalf("harness: ControlPlaneDownAtBoot is an in-process fault; it cannot combine with WithTarget")
 		}
@@ -726,6 +734,7 @@ func (h *H) buildInprocessTarget() *inprocess {
 	h.applyConsole(&ip.cp.params, &ip.cp.addr)
 	h.applyPolicyStore(&ip.cp.params)
 	h.applyCPAdmin(&ip.cp.params)
+	h.applyBackup(&ip.cp.params)
 	h.applyStrict(&ip.cp.params)
 	return ip
 }
@@ -741,6 +750,7 @@ func (h *H) writeCPConfig() string {
 	}
 	b.WriteString(h.identityYAML())
 	b.WriteString(h.consoleYAML())
+	b.WriteString(h.auditJSONLogYAML())
 	b.WriteString(h.strictYAML())
 	path := filepath.Join(h.root, "cp-config.yaml")
 	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {

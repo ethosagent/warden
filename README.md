@@ -184,6 +184,7 @@ Policy evaluation details and edge cases: [docs/protocol-details.md](docs/protoc
 ### Observability
 
 - **SQLite analytics** — every decision logged locally (domain, port, method, URL, decision, status, secret-ref — no bodies)
+- **JSON audit stream for a SIEM** — optional `audit.jsonLog`: one JSON line per decision (and per control-plane admin change), to stdout or a rotating file, with Vector and Fluent Bit examples ([docs/siem.md](docs/siem.md))
 - **Dashboard** — built-in HTML UI at `/dashboard/` with auto-refresh, traffic table, policy view, secret references, blocked list, stats
 - **JSON APIs** — `/dashboard/api/traffic`, `/dashboard/api/policy`, `/dashboard/api/secrets`, `/dashboard/api/blocked`, `/dashboard/api/stats`
 - **Cost tracking** — estimated spend per LLM provider (OpenAI, Anthropic, Google, Cohere)

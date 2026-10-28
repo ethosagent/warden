@@ -116,6 +116,15 @@ that never reaches the judge, and anything that cannot be decided per request (n
 non-TLS) fails closed. The control plane projects scoped rules into a wire shape old
 workers deny. Details: [group-policy.md](group-policy.md).
 
+**Analytics events and the JSON audit stream.** Each decision becomes one analytics event
+in the worker's SQLite store. Every deny event carries a `Reason` from the single closed set
+declared in `internal/denyreason` (MCP gateway reasons are declared by `internal/mcp/gateway`),
+the same value that labels `warden_blocked_total`. With `audit.jsonLog` on, the same events are
+also written as `warden.decision.v1` JSON lines (and the control plane's admin audit entries as
+`warden.admin.v1`) for a SIEM shipper. The reason values, both schemas' fields, rotation and
+shipper examples are in **[docs/siem.md](siem.md)**; the reasons are listed in
+[Deny reasons](siem.md#deny-reasons) and nowhere else.
+
 ---
 
 ## 3. Control plane & config plane

@@ -69,6 +69,14 @@ var All = slices.Concat(
 		// Versioned policy store (W-P1-PVER-01): the first start imports the YAML
 		// as version 1; a head written out of process reaches workers. In-process
 		// only (it writes the control plane's state database).
+		// Scheduled backups (W-P1-OPS1-06): a startup set, the next one past the
+		// interval on the fake clock, pruning, no key files. In-process only.
+		{Name: "backup_scheduled", Opts: backupOpts(), Run: backupScheduled},
+		// On-demand backup (W-P1-OPS1-11): POST /dashboard/api/backup is an
+		// audited admin action; 404 without --backup-dir. In-process only.
+		{Name: "backup_trigger_admin", Opts: backupTriggerOpts(), Run: backupTriggerAdmin},
+		{Name: "backup_trigger_disabled", Opts: backupTriggerDisabledOpts(), Run: backupTriggerDisabled},
+
 		{Name: "policy_store_versioned", Opts: policyStoreOpts(), Run: policyStoreVersioned},
 		// Initial import (W-P1-PVER-07): version 1 by system:import plus one
 		// audit row, enforcement unchanged, nothing more after a restart.
@@ -164,6 +172,9 @@ var All = slices.Concat(
 		// traffic write none. In-process only (it reads the CP state dir).
 		{Name: "admin_audit_records_bearer_write", Opts: adminAuditBearerOpts(), Run: adminAuditRecordsBearerWrite},
 		// In oidc mode a viewer's refused write is one denied row; no session, no row.
+		// JSON admin stream (W-P1-JAUD-03): the checkpoint and an admin write are
+		// warden.admin.v1 lines equal to the stored row. In-process only.
+		{Name: "admin_audit_json_log_writes_lines", Opts: adminAuditJSONLogOpts(), Run: adminAuditJSONLogWritesLines},
 		{Name: "admin_audit_records_viewer_denied", Opts: adminAuditOIDCOpts(), Run: adminAuditRecordsViewerDenied},
 		// Login and logout events (W-P1-AAUD-07): a sign-in, a no-role sign-in and a
 		// logout are one row each, for the verified user. In-process only (issuer

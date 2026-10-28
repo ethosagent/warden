@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/ethosagent/warden/internal/cpstate"
+
 	_ "modernc.org/sqlite" // pure-Go SQLite driver (no CGo)
 )
 
@@ -425,4 +427,11 @@ func (s *FleetSQLiteStore) Query(ctx context.Context, sqlText string, maxRows in
 // covers only the events table, read via PRAGMA table_info(events).
 func (s *FleetSQLiteStore) Schema() SchemaInfo {
 	return eventsTableSchema(s.db)
+}
+
+// BackupTo writes a consistent copy of the fleet database to dst (see
+// cpstate.VacuumInto for the destination rules). It runs on the read/write
+// connection, so concurrent ingest queues behind it rather than failing.
+func (s *FleetSQLiteStore) BackupTo(ctx context.Context, dst string) error {
+	return cpstate.VacuumInto(ctx, s.db, dst)
 }
