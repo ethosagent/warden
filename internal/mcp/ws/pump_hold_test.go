@@ -267,7 +267,7 @@ func TestPumpHold_OffForwardsBinary(t *testing.T) {
 // overhead from the (dominant) gateway scan cost.
 type allowScanner struct{}
 
-func (allowScanner) OnRequest(string, string, string, http.Header, []byte) gateway.Verdict {
+func (allowScanner) OnRequest(string, string, string, http.Header, []byte, gateway.RequestMeta) gateway.Verdict {
 	return gateway.Verdict{}
 }
 

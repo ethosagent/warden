@@ -74,9 +74,13 @@ Point the control plane at it by overriding the served-config mount in
 Then bring the stack up (control plane + worker + an isolated agent container):
 
 ```sh
-WARDEN_CP_TOKEN=dev-token \
 docker compose -f deploy/compose/docker-compose.yml up -d
 ```
+
+The stack runs on per-worker tokens: a one-shot `cp-bootstrap` registers the worker's token and the
+control plane runs strict. The compose defaults are public dev placeholders
+([`deploy/compose/.env.example`](../deploy/compose/.env.example)); export your own
+`WARDEN_WORKER_1_TOKEN` and `WARDEN_CP_ADMIN_TOKEN` for anything but a laptop.
 
 - Fleet dashboard (control plane): https://localhost:7070/dashboard/ (trust the proxy CA)
 - Worker-local dashboard: http://localhost:9090/dashboard/

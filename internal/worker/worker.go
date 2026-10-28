@@ -682,7 +682,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	switch pol.Central.Mode {
 	case "aggregator":
 		centralStore = analytics.NewCentralStore(pol.Central.MaxEvents)
-		ingestHandler = analytics.NewIngestHandler(centralStore, os.Getenv(pol.Central.TokenEnv))
+		ingestHandler = analytics.NewIngestHandler(centralStore, analytics.StaticTokenAuthorizer(os.Getenv(pol.Central.TokenEnv)))
 		logger.Info("central aggregator enabled", "ingest", "/central/ingest")
 	case "worker":
 		// The control plane is the worker's own trusted, operator-configured
@@ -769,6 +769,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// block and this agent's mode. Construction does no network I/O, so a worker
 	// whose issuer is down still starts. Mode stays off unless configured.
 	idWiring := newIdentityWiring(pxy, agentID, logger)
+	idWiring.scoped = func() int { return countScoped(evaluator.CurrentPolicy()) }
 	idWiring.apply(pol.Identity, pol.Agents)
 
 	// liveMCPGW tracks the gateway currently swapped into the proxy so shutdown

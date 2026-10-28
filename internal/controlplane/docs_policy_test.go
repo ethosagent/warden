@@ -150,7 +150,8 @@ func blockListDoc(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("read %s: %v", authzDocPath, err)
 	}
-	const heading = "\n## Block list"
+	// The trailing newline keeps "## Block list: offline CLI" from matching.
+	const heading = "\n## Block list\n"
 	start := strings.Index(string(raw), heading)
 	if start < 0 {
 		t.Fatalf("%s has no Block list section", authzDocPath)

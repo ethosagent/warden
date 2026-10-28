@@ -34,11 +34,11 @@ func (fw *flushWriter) Write(b []byte) (int, error) {
 // connection and reverse-proxies each stream upstream over HTTP/2. Each stream
 // runs the shared request-stage pipeline (see serveGRPCStream), so it gets the
 // same controls as an HTTP/1.1 request, including the per-request judge when
-// needsJudge (a NoMatch destination).
+// deferJudge (a NoMatch destination).
 //
 // One *http2.Transport is built per client connection so all of that
 // connection's streams multiplex over a single upstream HTTP/2 connection.
-func (p *Proxy) handleGRPC(clientConn net.Conn, domain string, port int, needsJudge bool, ci connIdentity) {
+func (p *Proxy) handleGRPC(clientConn net.Conn, domain string, port int, d deferred, ci connIdentity) {
 	// DialTLSContext ignores the addr the transport would derive from the request
 	// URL and always dials the CONNECT-gated destination through the SSRF-safe
 	// dialer. The tls.Config comes from upstreamTLSConfig so the assembly-only
@@ -61,7 +61,7 @@ func (p *Proxy) handleGRPC(clientConn net.Conn, domain string, port int, needsJu
 	// HTTP/2 stream concurrently to the handler.
 	(&http2.Server{}).ServeConn(clientConn, &http2.ServeConnOpts{
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			p.serveGRPCStream(w, r, rt, domain, port, needsJudge, ci, sess)
+			p.serveGRPCStream(w, r, rt, domain, port, d, ci, sess)
 		}),
 	})
 }
@@ -81,7 +81,7 @@ func (p *Proxy) handleGRPC(clientConn net.Conn, domain string, port int, needsJu
 // body. The scope's quiescence-tracker slot is entered/exited by the shared
 // pipeline (runRequestStages), so an h2 stream is tracked exactly like an h1
 // request: one unit from stream start until its terminal bookkeeping.
-func (p *Proxy) serveGRPCStream(w http.ResponseWriter, r *http.Request, rt *http2.Transport, domain string, port int, needsJudge bool, ci connIdentity, sess *session) {
+func (p *Proxy) serveGRPCStream(w http.ResponseWriter, r *http.Request, rt *http2.Transport, domain string, port int, d deferred, ci connIdentity, sess *session) {
 	isGRPC := strings.HasPrefix(r.Header.Get("Content-Type"), "application/grpc")
 	proto := "http2"
 	path := PathH2
@@ -98,7 +98,7 @@ func (p *Proxy) serveGRPCStream(w http.ResponseWriter, r *http.Request, rt *http
 		streamBody: isGRPC,
 		domain:     domain,
 		port:       port,
-		needsJudge: needsJudge,
+		deferred:   d,
 		req:        r,
 		reqStart:   time.Now(),
 		gw:         p.mcpGateway(),

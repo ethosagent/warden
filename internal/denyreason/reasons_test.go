@@ -42,6 +42,7 @@ func TestRequiredReasonsDeclared(t *testing.T) {
 	for _, r := range []Reason{
 		PolicyNoMatch, PolicyDenylist, RateLimited, TimeWindow,
 		PathNotCanonical, MethodNotAllowed, PathNotAllowed,
+		IdentityRequired, GroupNotAllowed, IdentityGroupsTruncated,
 		H2RequestTrailersUnsupported, H2ExtendedConnectUnsupported,
 		TransformNeedsBufferedBody, HostMismatch,
 		RequestTrailersUnsupported,
