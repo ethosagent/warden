@@ -9,6 +9,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"log/slog"
 	"math/big"
@@ -1635,5 +1636,123 @@ func TestLoadPolicyIgnoresYAMLBlockedUsers(t *testing.T) {
 	}
 	if strings.Contains(logs.String(), "secret-sub-value") {
 		t.Errorf("warning leaked an entry value: %s", logs)
+	}
+}
+
+func postHeartbeat(t *testing.T, url, id, body string) int {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodPost, url+"/control/heartbeat", strings.NewReader(body))
+	req.Header.Set("X-Warden-Proxy-ID", id)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	return resp.StatusCode
+}
+
+func workerCaps(t *testing.T, url, id string) []string {
+	t.Helper()
+	resp, err := http.Get(url + "/dashboard/api/workers")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var ws []struct {
+		ProxyID string   `json:"proxyID"`
+		Caps    []string `json:"caps"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&ws); err != nil {
+		t.Fatal(err)
+	}
+	for _, w := range ws {
+		if w.ProxyID == id {
+			return w.Caps
+		}
+	}
+	t.Fatalf("worker %s not listed", id)
+	return nil
+}
+
+func TestHeartbeatCaps(t *testing.T) {
+	srv := New(Config{PolicyPath: writePolicyFile(t, "api.openai.com")})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	if c := postHeartbeat(t, ts.URL, "new", `{"policyETag":"v1","caps":["blocklist/v1"]}`); c != http.StatusNoContent {
+		t.Fatalf("status %d", c)
+	}
+	if c := postHeartbeat(t, ts.URL, "old", `{"policyETag":"v1"}`); c != http.StatusNoContent {
+		t.Fatalf("old worker status %d, want 204", c)
+	}
+	if got := workerCaps(t, ts.URL, "new"); len(got) != 1 || got[0] != "blocklist/v1" {
+		t.Errorf("new caps = %v", got)
+	}
+	if got := workerCaps(t, ts.URL, "old"); len(got) != 0 {
+		t.Errorf("old caps = %v, want none", got)
+	}
+	if got := srv.registry.WorkersWithoutCap("blocklist/v1"); len(got) != 1 || got[0] != "old" {
+		t.Errorf("WorkersWithoutCap = %v, want [old]", got)
+	}
+}
+
+func TestHeartbeatCapsBounded(t *testing.T) {
+	srv := New(Config{PolicyPath: writePolicyFile(t, "api.openai.com")})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	// invalid shapes, duplicates and a too-long string are dropped.
+	body := `{"caps":["b/v1","a/v1","b/v1","Bad","-x","has space","","` + strings.Repeat("a", 33) + `"]}`
+	postHeartbeat(t, ts.URL, "w", body)
+	if got := workerCaps(t, ts.URL, "w"); strings.Join(got, ",") != "a/v1,b/v1" {
+		t.Errorf("caps = %v, want [a/v1 b/v1]", got)
+	}
+
+	// more than 16 valid caps are truncated to 16 (sorted order).
+	var caps []string
+	for i := 0; i < 20; i++ {
+		caps = append(caps, fmt.Sprintf(`"c%02d"`, i))
+	}
+	postHeartbeat(t, ts.URL, "w", `{"caps":[`+strings.Join(caps, ",")+`]}`)
+	got := workerCaps(t, ts.URL, "w")
+	if len(got) != 16 || got[0] != "c00" || got[15] != "c15" {
+		t.Errorf("caps = %v, want c00..c15", got)
+	}
+}
+
+func TestHeartbeatCapsReplace(t *testing.T) {
+	srv := New(Config{PolicyPath: writePolicyFile(t, "api.openai.com")})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	postHeartbeat(t, ts.URL, "w", `{"caps":["blocklist/v1"]}`)
+	postHeartbeat(t, ts.URL, "w", `{"caps":["other/v1"]}`)
+	if got := workerCaps(t, ts.URL, "w"); strings.Join(got, ",") != "other/v1" {
+		t.Errorf("caps = %v, want replaced by [other/v1]", got)
+	}
+	postHeartbeat(t, ts.URL, "w", `{"policyETag":"v2"}`)
+	if got := workerCaps(t, ts.URL, "w"); len(got) != 0 {
+		t.Errorf("caps = %v, want none after a heartbeat without caps", got)
+	}
+	if got := srv.registry.WorkersWithoutCap("blocklist/v1"); len(got) != 1 || got[0] != "w" {
+		t.Errorf("WorkersWithoutCap = %v", got)
+	}
+}
+
+func TestWorkersWithoutCapOnlineSortedCapped(t *testing.T) {
+	r := NewWorkerRegistry()
+	now := time.Now()
+	r.now = func() time.Time { return now }
+	for i := 0; i < 120; i++ {
+		r.SeenHeartbeat(fmt.Sprintf("w%03d", i), "", nil)
+	}
+	r.SeenHeartbeat("has", "", []string{"blocklist/v1"})
+	got := r.WorkersWithoutCap("blocklist/v1")
+	if len(got) != 100 || got[0] != "w000" || got[99] != "w099" {
+		t.Fatalf("len=%d first=%s last=%s", len(got), got[0], got[len(got)-1])
+	}
+	now = now.Add(2 * staleAfter) // everyone offline
+	if got := r.WorkersWithoutCap("blocklist/v1"); len(got) != 0 {
+		t.Errorf("offline workers listed: %d", len(got))
 	}
 }

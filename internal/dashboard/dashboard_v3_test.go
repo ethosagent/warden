@@ -706,3 +706,14 @@ func TestIndexHTML_AuthNoneBanner(t *testing.T) {
 		t.Error("applySetup does not drive authNoneBanner from authMode")
 	}
 }
+
+func TestWorkerViewCaps(t *testing.T) {
+	with, _ := json.Marshal(WorkerView{ProxyID: "a", Caps: []string{"blocklist/v1"}})
+	if !strings.Contains(string(with), `"caps":["blocklist/v1"]`) {
+		t.Errorf("caps missing: %s", with)
+	}
+	without, _ := json.Marshal(WorkerView{ProxyID: "a"})
+	if strings.Contains(string(without), "caps") {
+		t.Errorf("empty caps serialized: %s", without)
+	}
+}
