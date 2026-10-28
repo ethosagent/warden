@@ -11,7 +11,9 @@
 #
 # What it changes:
 #   - The control plane serves configs/config.ethos-sso.yaml: the Ethos policy plus
-#     identity.defaultMode: challenge against Dex.
+#     identity.defaultMode: challenge against Dex. The worker's own file
+#     (configs/config.ethos-sso-worker.yaml) carries the same identity block,
+#     because a worker applies the served identity only when it changes after boot.
 #   - Ethos runs under `warden identity exec --challenge-in-tunnel`. Ethos's own
 #     requests go to a loopback forwarder; with no login the worker accepts the
 #     tunnel and answers the request with a 403 that holds the sign-in link, so
@@ -54,6 +56,10 @@ services:
     depends_on:
       dex:
         condition: service_healthy
+    volumes:
+      # The worker builds its identity config at boot from its own file (see the
+      # header of that file); same container target as the recipe's mount.
+      - ../../configs/config.ethos-sso-worker.yaml:/etc/warden/config.yaml:ro
 
   cp-bootstrap:
     image: ${WARDEN_SSO_IMAGE:-warden:local}

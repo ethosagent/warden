@@ -2,6 +2,7 @@ package compose
 
 import (
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -137,6 +138,27 @@ func TestEthosSSOOverlayServesChallengeMode(t *testing.T) {
 	cp := svc["control-plane"]
 	if !hasVolume(cp.Volumes, "../../configs/config.ethos-sso.yaml:/etc/warden/config.yaml:ro") {
 		t.Errorf("the control plane does not serve configs/config.ethos-sso.yaml: %v", cp.Volumes)
+	}
+	if !hasVolume(svc["worker"].Volumes, "../../configs/config.ethos-sso-worker.yaml:/etc/warden/config.yaml:ro") {
+		t.Errorf("the worker does not boot from configs/config.ethos-sso-worker.yaml: %v", svc["worker"].Volumes)
+	}
+	// The worker boots from its own identity block, so it must equal the served one.
+	wraw, err := os.ReadFile("../../../configs/config.ethos-sso-worker.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wcfg, scfg struct {
+		Identity config.IdentitySettings `yaml:"identity"`
+	}
+	sraw, _ := os.ReadFile(ethosSSOConfig)
+	if err := yaml.Unmarshal(wraw, &wcfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := yaml.Unmarshal(sraw, &scfg); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(wcfg.Identity, scfg.Identity) || wcfg.Identity.DefaultMode != config.IdentityModeChallenge {
+		t.Errorf("worker identity block differs from the served one (or is not challenge mode)")
 	}
 	// The feature is in this build only: every Warden service uses one overridable
 	// image, never the published 0.3.0 default that predates challenge mode.
