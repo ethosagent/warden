@@ -65,3 +65,46 @@ func TestOIDCIssuerDeviceAuthorization(t *testing.T) {
 		t.Errorf("GET status %d, want 405", gr.StatusCode)
 	}
 }
+
+// TestOIDCIssuerDeviceToken: the device-code grant answers authorization_pending
+// for an issued code, hands out the supplied tokens once after ApproveDevice,
+// and invalid_grant for a code it never issued or already redeemed.
+func TestOIDCIssuerDeviceToken(t *testing.T) {
+	iss := NewOIDCIssuer(t)
+	resp, err := http.PostForm(iss.URL()+"/device/code", url.Values{"client_id": {"warden-cli"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var da map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&da)
+	_ = resp.Body.Close()
+	code, _ := da["device_code"].(string)
+
+	poll := func(c string) (int, map[string]any) {
+		t.Helper()
+		resp, err := http.PostForm(iss.URL()+"/token", url.Values{
+			"grant_type": {deviceGrant}, "device_code": {c}, "client_id": {"warden-cli"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		var out map[string]any
+		_ = json.NewDecoder(resp.Body).Decode(&out)
+		return resp.StatusCode, out
+	}
+	if st, out := poll(code); st != 400 || out["error"] != "authorization_pending" {
+		t.Fatalf("before approval: %d %v", st, out)
+	}
+	if st, out := poll("device-code-unknown-to-the-fake"); st != 400 || out["error"] != "invalid_grant" {
+		t.Fatalf("a code that was never issued: %d %v", st, out)
+	}
+	iss.ApproveDevice(code, "id-token-value", "refresh-token-value")
+	st, out := poll(code)
+	if st != 200 || out["id_token"] != "id-token-value" || out["refresh_token"] != "refresh-token-value" {
+		t.Fatalf("after approval: %d %v", st, out)
+	}
+	if st, out := poll(code); st != 400 || out["error"] == nil {
+		t.Fatalf("a redeemed code: %d %v", st, out)
+	}
+}

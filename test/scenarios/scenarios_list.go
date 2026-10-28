@@ -70,6 +70,9 @@ var All = slices.Concat(
 		{Name: "challenge_rate_limit", Opts: challengeOpts(harness.WithSignIn(config.SignInSettings{StartsPerMinute: 1})), Run: challengeRateLimit},
 		{Name: "challenge_foreign_url", Opts: challengeOpts(), Run: challengeForeignURL},
 		{Name: "challenge_signed_in_next", Opts: challengeOpts(), Run: challengeSignedInNext},
+		// The challenge inside the tunnel (#621): the agent's own chat shows the
+		// link. In-process only: the forwarder and the issuer fake are.
+		{Name: "challenge_in_tunnel", Opts: challengeOpts(), Run: challengeInTunnel},
 		{Name: "attribute_unchanged", Opts: identityOpts(), Run: attributeUnchanged},
 		{Name: "challenge_hot_reload", Opts: identityOpts(), Run: challengeHotReload},
 		// Fail-open guard: only a worker without identity/challenge-v1 is flagged
