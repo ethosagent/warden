@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/ethosagent/warden/internal/controlplane"
 	"github.com/ethosagent/warden/internal/integration"
@@ -43,7 +44,16 @@ func (h *H) writeBreakGlassHash() {
 // published.
 func (h *H) Alerts() []integration.Alert {
 	h.tb.Helper()
-	st, err := integration.NewStore(filepath.Join(h.root, "cp-alerts.db"))
+	// Opening migrates, which can meet the control plane's own write lock under
+	// load (SQLITE_BUSY): retry briefly before failing.
+	var st *integration.Store
+	var err error
+	for i := 0; i < 50; i++ {
+		if st, err = integration.NewStore(filepath.Join(h.root, "cp-alerts.db")); err == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 	if err != nil {
 		h.tb.Fatalf("harness: open the alert store: %v", err)
 	}
