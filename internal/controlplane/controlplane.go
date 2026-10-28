@@ -17,6 +17,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -621,7 +624,7 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
-// handleHeartbeat records a worker liveness ping. Body: {"policyETag": "..."}.
+// handleHeartbeat records a worker liveness ping. Body: {"policyETag": "...", "caps": ["blocklist/v1"]}.
 // It is one of the three worker→CP interactions; the CP never calls the worker.
 func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -633,12 +636,36 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		PolicyETag string `json:"policyETag"`
+		PolicyETag string   `json:"policyETag"`
+		Caps       []string `json:"caps"`
 	}
 	// Body is optional/tiny; ignore decode errors (heartbeat is best-effort).
 	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body)
-	s.registry.SeenHeartbeat(r.Header.Get(analytics.ProxyIDHeader), trimETag(body.PolicyETag))
+	s.registry.SeenHeartbeat(r.Header.Get(analytics.ProxyIDHeader), trimETag(body.PolicyETag), normalizeCaps(body.Caps))
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// capPattern is the shape of an accepted worker capability string.
+var capPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._/-]{0,31}$`)
+
+// maxCaps bounds the capabilities kept per heartbeat.
+const maxCaps = 16
+
+// normalizeCaps drops capability strings that do not match capPattern, removes
+// duplicates, sorts, and keeps at most maxCaps. It never trusts the worker.
+func normalizeCaps(in []string) []string {
+	var out []string
+	for _, c := range in {
+		if capPattern.MatchString(c) {
+			out = append(out, c)
+		}
+	}
+	sort.Strings(out)
+	out = slices.Compact(out)
+	if len(out) > maxCaps {
+		out = out[:maxCaps]
+	}
+	return out
 }
 
 // policyYAML is the policy sub-block written back when policy is edited from the

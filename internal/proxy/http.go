@@ -128,7 +128,11 @@ type requestScope struct {
 	idStatus     identity.Status
 	idReason     identity.Reason
 	idClaims     identity.Claims
-	subject      *identity.Subject
+	// idHeaderClaims keeps the verified header claims when they conflict with
+	// the CONNECT identity (the result then carries no claims), so the
+	// block-list check still sees both users. Deny-only, like idClaims.
+	idHeaderClaims identity.Claims
+	subject        *identity.Subject
 
 	// Decision state threaded between stages.
 	judgeReason string
@@ -421,6 +425,9 @@ func (p *Proxy) runRequestStages(s *requestScope) (endSession bool) {
 		return true
 	}
 	if p.identityStage(s) {
+		return true
+	}
+	if p.blockStage(s) {
 		return true
 	}
 	if p.constraintGate(s) {

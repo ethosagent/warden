@@ -150,6 +150,11 @@ const (
 	// injection in enforce mode.
 	HTTPResponseInjection Reason = "http_response_injection"
 
+	// UserBlocked: the requesting user's verified or unverified token claims
+	// (sub or email) match the admin user block list. The match can only deny,
+	// so an expired or badly signed token is matched too.
+	UserBlocked Reason = "user_blocked"
+
 	// Unspecified: the never-in-practice fallback the proxy's emitDeny
 	// substitutes when a deny reaches it without a reason. The deny path is one
 	// chokepoint (internal/proxy emitDeny/emitDenyEvent), so this label on a
@@ -177,6 +182,7 @@ var declared = []Reason{
 	DLPBlock, DLPRedact,
 	MCPWS, MCPWSUnscannable, MCPSSEEventTooLarge, MCPGatewayDeny,
 	HTTPResponseLeak, HTTPResponseInjection,
+	UserBlocked,
 	Unspecified,
 }
 

@@ -51,7 +51,7 @@ func TestRequiredReasonsDeclared(t *testing.T) {
 		TransparentNoSNI, TransparentBadClientHello,
 		TransparentH2PriorKnowledge, TransparentLoopGuard,
 		MalformedRequest,
-		MCPGatewayDeny, Unspecified,
+		MCPGatewayDeny, UserBlocked, Unspecified,
 	} {
 		if !r.Declared() {
 			t.Errorf("required reason %q is not declared", r)

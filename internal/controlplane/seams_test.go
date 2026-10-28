@@ -53,9 +53,9 @@ type fakeWorkerTracker struct {
 	views []dashboard.WorkerView
 }
 
-func (f *fakeWorkerTracker) SeenPolicyPull(string)        {}
-func (f *fakeWorkerTracker) SeenIngest(string, int)       {}
-func (f *fakeWorkerTracker) SeenHeartbeat(string, string) {}
+func (f *fakeWorkerTracker) SeenPolicyPull(string)                  {}
+func (f *fakeWorkerTracker) SeenIngest(string, int)                 {}
+func (f *fakeWorkerTracker) SeenHeartbeat(string, string, []string) {}
 func (f *fakeWorkerTracker) Views() []dashboard.WorkerView {
 	return f.views
 }

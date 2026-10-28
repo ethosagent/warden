@@ -115,6 +115,11 @@ type Evaluator struct {
 	allowlist  []config.AllowlistEntry
 	denylist   []config.DenylistEntry
 	regexCache map[string]*regexp.Regexp
+	// blockedSubs and blockedEmails are the user block list (IdP sub exact,
+	// email lowercase). They live under swapMu so Replace swaps them in the same
+	// critical section as allow/deny.
+	blockedSubs   map[string]struct{}
+	blockedEmails map[string]struct{}
 
 	// Rate limiting (fixed-window).
 	mu         sync.Mutex
@@ -229,8 +234,21 @@ func (e *Evaluator) load(p config.Policy) {
 		}
 	}
 
+	blockedSubs := make(map[string]struct{}, len(p.BlockedUsers))
+	blockedEmails := make(map[string]struct{}, len(p.BlockedUsers))
+	for _, u := range p.BlockedUsers {
+		if sub := strings.TrimSpace(u.Sub); sub != "" {
+			blockedSubs[sub] = struct{}{}
+		}
+		if email := strings.ToLower(strings.TrimSpace(u.Email)); email != "" {
+			blockedEmails[email] = struct{}{}
+		}
+	}
+
 	e.allowlist = allowlist
 	e.denylist = denylist
+	e.blockedSubs = blockedSubs
+	e.blockedEmails = blockedEmails
 	e.regexCache = regexCache
 	e.rateLimits = rateLimits
 	e.timeWindows = timeWindows
@@ -238,6 +256,29 @@ func (e *Evaluator) load(p config.Policy) {
 	e.mu.Lock()
 	e.counters = make(map[string]*rateState)
 	e.mu.Unlock()
+}
+
+// IsBlocked reports whether a user's claims match the admin block list: sub is
+// an exact match, email must already be lowercase (the proxy lowercases it once
+// when identity is resolved). It takes one read lock and does at most two map
+// lookups, allocating nothing. It reads the same snapshot Replace swaps, so a
+// block or unblock lands atomically with the allow/deny set. Empty claims never
+// match. Every Replace also resets the rate-limit windows, so a block change
+// resets them fleet-wide (documented, left to a follow-up).
+func (e *Evaluator) IsBlocked(sub, email string) bool {
+	e.swapMu.RLock()
+	defer e.swapMu.RUnlock()
+	if sub != "" {
+		if _, ok := e.blockedSubs[sub]; ok {
+			return true
+		}
+	}
+	if email != "" {
+		if _, ok := e.blockedEmails[email]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // Evaluate returns Allow if (domain, port) matches an allowlist entry under the
