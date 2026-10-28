@@ -751,12 +751,8 @@ func copyToolConstraints(in map[string]MCPToolConstraints) map[string]MCPToolCon
 			}
 			ctc.Fields = fields
 		}
-		if tc.AllowWhen != nil {
-			aw := *tc.AllowWhen
-			aw.Groups = append([]string(nil), tc.AllowWhen.Groups...)
-			aw.Users = append([]string(nil), tc.AllowWhen.Users...)
-			ctc.AllowWhen = &aw
-		}
+		ctc.AllowWhen = cloneCondition(tc.AllowWhen)
+		ctc.AllowWhenScoped = cloneCondition(tc.AllowWhenScoped)
 		out[tool] = ctc
 	}
 	return out
