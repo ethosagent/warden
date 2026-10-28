@@ -27,6 +27,14 @@ func WithBreakGlass() Option {
 	return func(h *H) { h.wantBreakGlass = true }
 }
 
+// WithOIDCIssuerDown stops the issuer fake before the control plane boots, the
+// state break-glass exists for: the control plane starts, its discovery keeps
+// failing and /auth/login answers 503 until h.Issuer().Start(). Combine with
+// WithConsoleOIDC.
+func WithOIDCIssuerDown() Option {
+	return func(h *H) { h.wantIssuerDown = true }
+}
+
 func (h *H) writeBreakGlassHash() {
 	hash, err := controlplane.HashPassword(BreakGlassPassword, rand.Reader)
 	if err != nil {

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ethosagent/warden/internal/adminaudit"
+	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/integration"
 	"github.com/ethosagent/warden/test/harness"
 )
@@ -167,6 +168,56 @@ func breakGlassDisabled(t *testing.T, h *harness.H) {
 	}
 	if rows := h.AdminAuditRows(); len(rows) != 1 {
 		t.Fatalf("admin_audit = %+v, want only genesis", rows)
+	}
+}
+
+// breakGlassIdPDown: the issuer is unreachable when the control plane starts.
+// It still serves policy and ingest to workers, /auth/login is 503
+// idp_unavailable, and the break-glass login opens an admin session with one
+// signed row, one ERROR line and a critical Finding, with zero integrations.
+func breakGlassIdPDown(t *testing.T, h *harness.H) {
+	var pol map[string]any
+	if err := h.CP().GetJSON("/policy", &pol); err != nil {
+		t.Fatalf("/policy with the issuer down: %v", err)
+	}
+	if err := h.CP().IngestEvents("idp-down-proxy", []analytics.Event{}); err != nil {
+		t.Fatalf("ingest with the issuer down: %v", err)
+	}
+
+	b := h.ConsoleBrowser()
+	if resp, body := consoleDo(t, b, http.MethodGet, "/auth/login", nil); resp.StatusCode != http.StatusServiceUnavailable || !strings.Contains(body, `"idp_unavailable"`) {
+		t.Fatalf("/auth/login = %d %s, want 503 idp_unavailable", resp.StatusCode, body)
+	}
+
+	resp, body := breakGlassPost(t, b, harness.BreakGlassUsername, harness.BreakGlassPassword)
+	if resp.StatusCode != http.StatusOK || cookieIn(resp, consoleSessionCookie) == nil {
+		t.Fatalf("break-glass login = %d %s, want 200 with a session cookie", resp.StatusCode, body)
+	}
+	resp, body = consoleDo(t, b, http.MethodGet, "/auth/me", nil)
+	var me map[string]string
+	if err := json.Unmarshal([]byte(body), &me); err != nil || resp.StatusCode != http.StatusOK ||
+		me["role"] != "admin" || me["authMethod"] != "breakglass" {
+		t.Fatalf("/auth/me = %d %s, want an admin break-glass session", resp.StatusCode, body)
+	}
+
+	rows := h.AdminAuditRows()
+	if len(rows) != 2 || rows[1].Action != "auth.breakglass" || rows[1].Outcome != adminaudit.OutcomeOK {
+		t.Fatalf("admin_audit = %+v, want genesis and one auth.breakglass row", rows)
+	}
+	if n := strings.Count(h.Logs(), `"level":"ERROR","msg":"breakglass_login"`); n != 1 {
+		t.Fatalf("breakglass_login ERROR lines = %d, want 1", n)
+	}
+	h.Eventually("the critical Finding is in the alert store", func() bool {
+		for _, a := range h.Alerts() {
+			if strings.HasPrefix(a.DedupKey, "breakglass_login:success:") && a.Severity == integration.SevCritical {
+				return true
+			}
+		}
+		return false
+	})
+	// The warnings an operator needs when no route exists are in the log too.
+	if !strings.Contains(h.Logs(), "no integration's alerts.match routes a critical breakglass_login Finding") {
+		t.Error("the no-alert-route startup WARN is missing")
 	}
 }
 

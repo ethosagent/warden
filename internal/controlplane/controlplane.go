@@ -386,6 +386,9 @@ func New(cfg Config) *Server {
 func (s *Server) Start(ctx context.Context) {
 	if s.sessions != nil {
 		go s.sweepSessions(ctx)
+		if s.breakGlass != nil {
+			go s.runBreakGlassSessionWarn(ctx)
+		}
 	}
 	if s.auth != nil {
 		go s.auth.discover(ctx)

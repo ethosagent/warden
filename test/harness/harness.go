@@ -162,6 +162,9 @@ type H struct {
 	// boot; issuer is it.
 	wantIssuer bool
 	issuer     *fakes.OIDCIssuer
+	// wantIssuerDown (WithOIDCIssuerDown) stops the issuer fake before the
+	// control plane starts, so its discovery fails until h.Issuer().Start().
+	wantIssuerDown bool
 	// identityMode (WithIdentity) is the default identity mode distributed to
 	// the workers; "" means no identity block at all.
 	identityMode string
@@ -641,6 +644,9 @@ func (h *H) boot() {
 	h.fake = clocktest.NewFake(time.Now())
 	if h.wantIssuer {
 		h.issuer = fakes.NewOIDCIssuer(h.tb, fakes.WithIssuerClock(h.fake.Now))
+		if h.wantIssuerDown {
+			h.issuer.Stop()
+		}
 	}
 	h.metricReaders = make([]*sdkmetric.ManualReader, h.workers)
 	for i := range h.metricReaders {
