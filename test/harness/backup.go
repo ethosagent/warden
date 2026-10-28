@@ -45,3 +45,12 @@ func (h *H) BackupDir() string {
 	}
 	return filepath.Join(h.root, "cp-backups")
 }
+
+// StateDir is the control plane's --state-dir. It needs WithBackup.
+func (h *H) StateDir() string {
+	h.tb.Helper()
+	if !h.wantBackup {
+		h.tb.Fatal("harness: StateDir needs the WithBackup option")
+	}
+	return filepath.Join(h.root, "cp-state")
+}
