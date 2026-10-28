@@ -336,6 +336,21 @@ make e2e-identity-down                                # down -v
 - **The warden CLI in agent-1.** A one-shot `warden-bin` service copies the
   static `warden` binary from the warden image into a volume that agent-1 mounts
   read-only at `/opt/warden`; no extra image is built.
+- **The sign-in client** (`signin-client`, `TestChallengeSignInFlow`). Identity
+  challenge mode makes the client poll Dex's token endpoint itself, so it needs
+  two routes agent-1 deliberately lacks (and `hermeticity.sh` checks it lacks):
+  worker-1's proxy port and Dex at its public issuer `http://localhost:5556/dex`.
+  The parked `signin-client` container (the curl image plus the same `warden`
+  volume) joins **dex's network namespace** (`network_mode: service:dex`):
+  `localhost:5556` is Dex and dex's `cp-net` attachment reaches `worker-1:8080`.
+  It adds no network, no published port and no route out, and agent-1 stays on
+  `w1-internal` only. The test switches worker-1 to `challenge` through the
+  settings API as admin alice (undone at the end), runs `warden identity exec
+  --challenge` in the client, signs the printed code in as alice through Dex's
+  device page with a cookie-jar HTTP client, and checks the retry, the
+  attribution, a new URL after `warden identity logout` and the leak sweep. A Dex
+  restart strands the client's network, so the test restarts it when it cannot
+  reach Dex.
 
 The Go package `test/e2e/identity` (build tag `e2e`) holds the helpers the later
 suites share: `dexURL` and a plain `hostClient` for the host side;

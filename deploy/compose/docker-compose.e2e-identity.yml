@@ -27,6 +27,8 @@
 #   - the Dex client secrets reach the CP (console + data-plane) and worker-1
 #     (data-plane) as env, from deploy/compose/dex/.env.example unless the
 #     caller exports others (the Makefile does that).
+#   - signin-client is the parked client of the challenge sign-in test (#558); see
+#     its comment below for why it shares dex's network namespace.
 #   - agent-1 can run the warden CLI: `warden-bin` copies the static binary
 #     from the warden image into a volume that agent-1 mounts read-only at
 #     /opt/warden (no new image). agent-1 stays on w1-internal only.
@@ -82,6 +84,39 @@ services:
         condition: service_completed_successfully
     volumes:
       - warden-bin:/opt/warden:ro
+
+  # The sign-in client of the challenge L2 test (#558): a parked container the
+  # test runs `warden identity exec --challenge` in. The forwarder must poll the
+  # issuer's token endpoint, so the client needs two routes agent-1 deliberately
+  # lacks (test/e2e/hermeticity.sh checks that): the worker's proxy port, and Dex
+  # at its PUBLIC issuer URL http://localhost:5556/dex (tokens carry that issuer,
+  # and the client only trusts an offer for its own issuer). It therefore joins
+  # dex's network namespace: localhost:5556 is Dex, and dex's cp-net attachment
+  # reaches worker-1:8080. It adds no network, no published port and no route out
+  # (dex's own hermeticity is what test/e2e/hermeticity.sh already proves). agent-1
+  # stays on w1-internal only. If dex restarts, restart this service too.
+  signin-client:
+    image: curlimages/curl:8.22.0@sha256:58adaa4e8dca9c988bae2aba4ab3434a0bb2da16bbe3f92dec39ec7785166777
+    network_mode: "service:dex"
+    depends_on:
+      dex:
+        condition: service_healthy
+      worker-1:
+        condition: service_healthy
+      warden-bin:
+        condition: service_completed_successfully
+    entrypoint: ["sh", "-c", "exec sleep 1000000000"]   # parked; the test runs the client with `docker compose exec`
+    volumes:
+      - warden-bin:/opt/warden:ro
+      - ../../test/e2e/certs/proxy-ca.crt:/etc/warden/certs/proxy-ca.crt:ro
+    healthcheck:
+      # Ready = Dex answers on the public issuer URL and the worker's admin
+      # listener answers over cp-net.
+      test: ["CMD-SHELL", "curl -fsS http://localhost:5556/dex/.well-known/openid-configuration >/dev/null && curl -fsS http://worker-1:9090/healthz >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
 
 volumes:
   warden-bin: {}

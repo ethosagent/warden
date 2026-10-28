@@ -42,7 +42,10 @@ trusted peers, which lets those two clients request the scope
 **Why `warden-cli` is public.** A CLI on a developer's machine cannot keep a
 secret, so it has none (no `secretEnv`, no `secret:`). The device-code grant
 needs no secret and no local listener. Dex derives the device callback from the
-issuer (`<issuer>/device/callback`), which is why that URI differs per file.
+issuer (`<issuer>/device/callback`), which is why that URI differs per file. It
+also registers the relative `/device/callback`: Dex v2.41 redirects the browser to
+it after the user code is entered, and without it the login step answers
+`Unregistered redirect_uri` (the same value in both files).
 
 ## Required scopes
 
