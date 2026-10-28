@@ -13,15 +13,18 @@ package dashboard
 //	GET  /dashboard/api/policy/versions/{v}             viewer
 //	GET  /dashboard/api/policy/versions/{v}/diff        viewer
 //	POST /dashboard/api/policy/versions/{v}/rollback    editor, audited policy.rollback
+//	POST /dashboard/api/backup                          admin, audited backup.run (W-P1-OPS1-11)
 //
 // The admin audit log routes are distinct from the receipts
 // /dashboard/api/audit routes and answer 404 unless the control plane set an
 // AdminAuditSource. The policy history routes answer 404 unless
 // SetPolicyHistory was called (a control plane in --policy-store=versioned).
+// The backup route answers 404 unless SetBackup was called (--backup-dir).
 func (s *Server) registerRoutes(mux *routeMux) {
 	mux.HandleFunc("/dashboard/api/admin-audit", s.handleAdminAudit)
 	mux.HandleFunc("/dashboard/api/admin-audit/verify", s.handleAdminAuditVerify)
 	mux.HandleFunc("/dashboard/api/admin-audit/pubkey", s.handleAdminAuditPubKey)
 	mux.HandleFunc("/dashboard/api/policy/versions", s.handlePolicyVersions)
 	mux.HandleFunc("/dashboard/api/policy/versions/", s.handlePolicyVersion)
+	mux.HandleFunc("/dashboard/api/backup", s.handleBackup)
 }

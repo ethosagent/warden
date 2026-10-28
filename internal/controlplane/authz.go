@@ -127,6 +127,8 @@ func authzTable() map[routeKey]authzRow {
 		{get, "/dashboard/api/policy/versions/{v}", readRow(viewer, "policy.version.read")},
 		{get, "/dashboard/api/policy/versions/{v}/diff", readRow(viewer, "policy.diff")},
 		{post, "/dashboard/api/policy/versions/{v}/rollback", auditedRow(editor, "policy.rollback", "policy")},
+		// On-demand backup (W-P1-OPS1-11); 404 unless --backup-dir is set.
+		{post, "/dashboard/api/backup", auditedRow(admin, "backup.run", "backup")},
 		// Served by the control plane itself, ahead of dash.Handler (cpDashboardRoutes).
 		{get, "/dashboard/api/sessions", readRow(admin, "sessions.read")},
 		{del, "/dashboard/api/sessions", auditedRow(admin, "sessions.revoke", "sessions")},

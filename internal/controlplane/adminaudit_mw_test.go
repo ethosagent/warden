@@ -193,6 +193,7 @@ var auditedRequests = map[routeKey]auditedRequest{
 	{http.MethodPost, "/dashboard/api/llmproviders"}:   {"/dashboard/api/llmproviders", `[{"name":"p1","baseURL":"https://api.openai.com/v1","model":"gpt-4o-mini","apiKeyEnv":"OPENAI_API_KEY"}]`},
 	{http.MethodPut, "/dashboard/api/llmproviders"}:    {"/dashboard/api/llmproviders", `[]`},
 	{http.MethodDelete, "/dashboard/api/sessions"}:     {"/dashboard/api/sessions?sub=nobody", ""},
+	{http.MethodPost, "/dashboard/api/backup"}:         {"/dashboard/api/backup", ""},
 	// Served by the stub history TestAdminAuditAllAuditedRoutes installs.
 	{http.MethodPost, "/dashboard/api/policy/versions/{v}/rollback"}: {"/dashboard/api/policy/versions/1/rollback", `{}`},
 	{http.MethodPost, "/central/secrets"}:                            {"/central/secrets", `{"key":"CP_KEY","value":"v2"}`},
@@ -234,6 +235,7 @@ func auditRow(k routeKey) authzRow {
 func TestAdminAuditAllAuditedRoutes(t *testing.T) {
 	e := newOIDCAuditEnv(t)
 	e.srv.dash.SetPolicyHistory(stubHistory{})
+	e.srv.dash.SetBackup(func() error { return nil })
 	admin := e.session(t, groupAdmin)
 	hashed := map[string]bool{"policy": true, "settings": true, "integrations": true, "detection": true, "llmproviders": true}
 	routes := allAuditedRoutes()

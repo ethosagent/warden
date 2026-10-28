@@ -603,6 +603,7 @@ fails when the two differ.
 | `/dashboard/api/analytics` | GET | viewer | `analytics.read` |
 | `/dashboard/api/audit` | GET | viewer | `audit.read` |
 | `/dashboard/api/audit/verify` | POST | viewer | `audit.verify` |
+| `/dashboard/api/backup` | POST | admin | `backup.run` |
 | `/dashboard/api/detection` | GET | viewer | `detection.read` |
 | `/dashboard/api/detection` | POST | editor | `detection.write` |
 | `/dashboard/api/detection` | PUT | editor | `detection.write` |
@@ -913,6 +914,31 @@ not running (no alert store, `--analytics-provider=memory`) is listed under
 `skipped`. A run needs 1.2x the source sizes free on the backup filesystem or it
 fails with `insufficient free space` and writes nothing. Each copy logs
 `msg=cp_backup` with `db`, `bytes`, `duration_ms` and `outcome`.
+
+### On-demand backups
+
+With `--backup-dir` set, `POST /dashboard/api/backup` (admin role, audited as
+`backup.run` on target `backup`) starts one backup in the background and answers
+`202 {"started":true}`. It answers `409 {"error":"backup_in_progress"}` while a
+run is active and `404` when `--backup-dir` is unset. The body is ignored. In
+`console.auth: none` the write guard applies as for every dashboard write (the
+admin bearer; no token configured means `403`). The outcome is the scheduled
+runner's: a failed run is logged and reported, not returned to the caller.
+
+For a stopped control plane use the offline command, which takes the state-dir
+lock, opens the databases directly and writes one set in the same layout:
+
+```sh
+warden control-plane backup --state-dir /data --backup-dir /backups \
+  [--backup-include cp,alerts,config,fleet] [--analytics-db PATH] [--alerts-db PATH]
+```
+
+It prints the set path and exits 0, or prints the error and exits 1. While a
+control plane holds the state dir it exits 1 with `control plane is running; use
+POST /dashboard/api/backup or stop it`. It never opens the admin audit store (the
+manifest has no `audit_key_fingerprint`), never starts a server and never prunes
+older sets. A database that does not exist (for example no fleet database) is
+listed under `skipped`; a missing `warden-cp.db` is an error.
 
 ## Worker admin token
 

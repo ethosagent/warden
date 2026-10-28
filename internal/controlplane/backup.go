@@ -275,8 +275,9 @@ type BackupRunner struct {
 	clk  clock.Clock
 	log  *slog.Logger
 
-	run  sync.Mutex // held for the length of a RunOnce
-	mu   sync.Mutex // guards status
+	run  sync.Mutex     // held for the length of a RunOnce
+	od   sync.WaitGroup // on-demand runs started by StartOnDemand
+	mu   sync.Mutex     // guards status
 	stat BackupStatus
 	done chan struct{}
 
@@ -319,12 +320,14 @@ func (r *BackupRunner) Start(ctx context.Context) {
 	}()
 }
 
-// Wait blocks until the goroutine Start launched has returned (after its ctx
-// is cancelled). It is a no-op if Start was never called.
+// Wait blocks until the goroutine Start launched and any run StartOnDemand
+// started have returned (after their ctx is cancelled). It is a no-op if
+// neither was started.
 func (r *BackupRunner) Wait() {
 	if r.done != nil {
 		<-r.done
 	}
+	r.od.Wait()
 }
 
 func (r *BackupRunner) loop(ctx context.Context) {
@@ -402,7 +405,29 @@ func (r *BackupRunner) RunOnce(ctx context.Context) (BackupResult, error) {
 		return BackupResult{}, ErrBackupInProgress
 	}
 	defer r.run.Unlock()
+	return r.runLocked(ctx)
+}
 
+// StartOnDemand starts one run in a goroutine bound to ctx and returns at once:
+// ErrBackupInProgress when a run is already active, nil when this one has
+// started. The run's outcome reaches Status and the reporter, as for RunOnce.
+// The admin trigger (POST /dashboard/api/backup) uses it so a busy runner
+// answers synchronously.
+func (r *BackupRunner) StartOnDemand(ctx context.Context) error {
+	if !r.run.TryLock() {
+		return ErrBackupInProgress
+	}
+	r.od.Add(1)
+	go func() {
+		defer r.od.Done()
+		defer r.run.Unlock()
+		_, _ = r.runLocked(ctx)
+	}()
+	return nil
+}
+
+// runLocked is RunOnce's body; the caller holds r.run.
+func (r *BackupRunner) runLocked(ctx context.Context) (BackupResult, error) {
 	res, db, err := r.write(ctx)
 	if err != nil {
 		r.fail(ctx, db, err)

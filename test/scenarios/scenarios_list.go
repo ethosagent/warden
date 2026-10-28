@@ -72,6 +72,10 @@ var All = slices.Concat(
 		// Scheduled backups (W-P1-OPS1-06): a startup set, the next one past the
 		// interval on the fake clock, pruning, no key files. In-process only.
 		{Name: "backup_scheduled", Opts: backupOpts(), Run: backupScheduled},
+		// On-demand backup (W-P1-OPS1-11): POST /dashboard/api/backup is an
+		// audited admin action; 404 without --backup-dir. In-process only.
+		{Name: "backup_trigger_admin", Opts: backupTriggerOpts(), Run: backupTriggerAdmin},
+		{Name: "backup_trigger_disabled", Opts: backupTriggerDisabledOpts(), Run: backupTriggerDisabled},
 
 		{Name: "policy_store_versioned", Opts: policyStoreOpts(), Run: policyStoreVersioned},
 		// Initial import (W-P1-PVER-07): version 1 by system:import plus one

@@ -25,6 +25,7 @@ import (
 	"github.com/ethosagent/warden/internal/clock"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/cpstate"
+	"github.com/ethosagent/warden/internal/dashboard"
 	"github.com/ethosagent/warden/internal/detect"
 	"github.com/ethosagent/warden/internal/integration"
 	"github.com/ethosagent/warden/internal/observability"
@@ -452,6 +453,15 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		bk := newRunBackupRunner(p, clk, logger, state, srv.integrationsStore, store, servedPath, dbPath, alertDBPath, adminAudit)
 		bkCtx, bkCancel := context.WithCancel(ctx)
 		bk.Start(bkCtx)
+		// POST /dashboard/api/backup: the run is bound to the CP context, not
+		// the request's, and Wait covers it before the stores close.
+		srv.dash.SetBackup(func() error {
+			err := bk.StartOnDemand(bkCtx)
+			if errors.Is(err, ErrBackupInProgress) {
+				return dashboard.ErrBackupInProgress
+			}
+			return err
+		})
 		defer func() {
 			bkCancel()
 			bk.Wait()
