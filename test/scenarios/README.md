@@ -63,6 +63,14 @@ workers forward events to `/central/ingest`, so a Finding the control plane
 derives is readable at `/dashboard/api/alerts`; it also drains each worker's
 local event store, so count events before forwarding or not at all.
 
+Survival (`block_list_survives_*`, `block_list_unblock_restores`): add
+`WithVersionedPolicyStore()` for the rollback and the offline `BlockStore`
+write (`h.ControlPlaneStateDB()`), and `h.RestartWorker(i)` to restart worker
+`i` (0-based) in process. It returns the worker on a new proxy address and
+fail-closed until it pulls policy; the `*At` helpers follow it, a client or
+connection made before the restart does not. Dashboard writes need the admin
+bearer: `h.CP().SendBearer(h.ControlPlaneAdminToken(), ...)`.
+
 ## Identity scenarios
 
 `harness.WithIdentity("attribute"|"off")` boots the worker with the `identity`

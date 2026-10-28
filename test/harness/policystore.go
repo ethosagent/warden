@@ -57,6 +57,12 @@ type CPResponse struct {
 // the extra headers hdr (for example If-Match), and returns the reply whatever
 // its status, so a scenario can assert on a 4xx and on response headers.
 func (c *CPClient) Send(method, path string, hdr http.Header, body []byte) (CPResponse, error) {
+	return c.SendBearer(c.token, method, path, hdr, body)
+}
+
+// SendBearer is Send with an explicit bearer ("" = none), for the routes that
+// need the control plane's admin token (WithControlPlaneAdminToken).
+func (c *CPClient) SendBearer(bearer, method, path string, hdr http.Header, body []byte) (CPResponse, error) {
 	var r io.Reader
 	if body != nil {
 		r = bytes.NewReader(body)
@@ -70,7 +76,9 @@ func (c *CPClient) Send(method, path string, hdr http.Header, body []byte) (CPRe
 			req.Header.Add(k, v)
 		}
 	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}

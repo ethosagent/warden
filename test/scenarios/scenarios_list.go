@@ -92,6 +92,14 @@ var All = slices.Concat(
 		{Name: "block_list_connect", Opts: blockListFleetOpts(), Run: blockListConnect},
 		{Name: "block_list_sessions", Opts: blockListSessionsOpts(), Run: blockListSessions},
 		{Name: "block_list_finding", Opts: blockListFindingOpts(), Run: blockListFinding},
+		// Block survival (W-P1-BLOCK-12): a block outlives a policy rollback, a
+		// worker restart and a control-plane outage; an offline block lands once
+		// the control plane returns; unblocking restores the pre-block ETag.
+		// In-process only (state dir, issuer fake, fake clock, worker restart).
+		{Name: "block_list_survives_rollback", Opts: blockSurvivalOpts(), Run: blockListSurvivesRollback},
+		{Name: "block_list_survives_restart", Opts: blockSurvivalOpts(), Run: blockListSurvivesRestart},
+		{Name: "block_list_survives_cp_outage", Opts: blockSurvivalOpts(), Run: blockListSurvivesCPOutage},
+		{Name: "block_list_unblock_restores", Opts: blockSurvivalOpts(), Run: blockListUnblockRestores},
 		// Block-list admin API (W-P1-BLOCK-11).
 		{Name: "block_api_bearer", Opts: blockAPIBearerOpts(), Run: blockAPIBearer},
 		{Name: "block_api_roles", Opts: blockAPIOIDCOpts(), Run: blockAPIRoles},
