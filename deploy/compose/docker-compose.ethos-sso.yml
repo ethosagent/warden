@@ -1,0 +1,110 @@
+# Ethos behind Warden WITH USER SIGN-IN IN THE CHAT (#621). Merge it over the
+# Ethos recipe and the reference identity provider:
+#
+#   OUT_DIR=deploy/compose/certs ./scripts/gen-certs.sh        # once
+#   docker build -t warden:local .                              # this build has the in-tunnel challenge
+#   set -a; . deploy/compose/dex/.env.example; set +a
+#   WARDEN_SSO_IMAGE=warden:local docker compose \
+#     -f deploy/compose/docker-compose.ethos.yml \
+#     -f deploy/compose/docker-compose.identity.yml \
+#     -f deploy/compose/docker-compose.ethos-sso.yml up
+#
+# What it changes:
+#   - The control plane serves configs/config.ethos-sso.yaml: the Ethos policy plus
+#     identity.defaultMode: challenge against Dex.
+#   - Ethos runs under `warden identity exec --challenge-in-tunnel`. Ethos's own
+#     requests go to a loopback forwarder; with no login the worker accepts the
+#     tunnel and answers the request with a 403 that holds the sign-in link, so
+#     Ethos puts "Sign in to continue: <link>" in the chat. The forwarder (not
+#     Ethos) polls Dex and stores the login; Ethos never sees a token or a device code.
+#   - The client must reach Dex at its PUBLIC issuer URL, http://localhost:5556/dex
+#     (the issuer string is in every token and in the sign-in link). Ethos has no
+#     network to Dex, so a two-hop socat relay carries ONLY that one port: idp-relay-in
+#     listens on the loopback of Ethos's own network namespace and writes to a unix
+#     socket on a shared volume; idp-relay-out reads the socket and connects to
+#     dex:5556. Ethos still has no route to anything else, including other Dex ports.
+#
+# Try it: open http://localhost:3000, say "hi". The chat shows the sign-in link.
+# Open it, sign in as alice (password: DEX_TEST_PASSWORD in dex/.env.example), and
+# say "hello". See docs/docker-end-to-end.md, "Ethos with sign-in in the chat".
+
+services:
+  # One-shot: copy the static warden binary into a volume Ethos mounts read-only
+  # (the Ethos image has no warden CLI). Root only to write the fresh volume; no network.
+  warden-bin:
+    image: ${WARDEN_SSO_IMAGE:-warden:local}
+    user: "0:0"
+    network_mode: none
+    restart: "no"
+    entrypoint: ["sh", "-c", "cp /usr/local/bin/warden /opt/warden/warden && chmod 0755 /opt/warden/warden"]
+    volumes:
+      - warden-bin:/opt/warden
+
+  control-plane:
+    image: ${WARDEN_SSO_IMAGE:-warden:local}
+    depends_on:
+      dex:
+        condition: service_healthy
+    volumes:
+      # Same container target as the Ethos recipe's mount: swaps in the SSO copy.
+      - ../../configs/config.ethos-sso.yaml:/etc/warden/config.yaml:ro
+
+  worker:
+    image: ${WARDEN_SSO_IMAGE:-warden:local}
+    depends_on:
+      dex:
+        condition: service_healthy
+
+  cp-bootstrap:
+    image: ${WARDEN_SSO_IMAGE:-warden:local}
+
+  ethos:
+    depends_on:
+      warden-bin:
+        condition: service_completed_successfully
+    entrypoint:
+      - /opt/warden/warden
+      - identity
+      - --issuer=http://localhost:5556/dex
+      - --client-id=warden-cli
+    # The child gets only a small environment plus what --env names; the proxy
+    # variables above are replaced by the forwarder's. Everything Ethos needs is
+    # passed by name.
+    command:
+      - exec
+      - --worker=worker:8080
+      - --ca=/etc/warden/certs/proxy-ca.crt
+      - --challenge-in-tunnel
+      - --env=ETHOS_MODE
+      - --env=ETHOS_WEB_HOST
+      - --env=NODE_USE_ENV_PROXY
+      - --
+      - docker-entrypoint.sh
+    volumes:
+      - warden-bin:/opt/warden:ro
+
+  # Relay, inside hop: shares Ethos's network namespace, so localhost:5556 there is
+  # this socat. It forwards to a unix socket, not to a network.
+  idp-relay-in:
+    image: alpine/socat:1.8.1.3
+    network_mode: "service:ethos"
+    depends_on: [ethos, idp-relay-out]
+    command: ["TCP-LISTEN:5556,bind=127.0.0.1,fork,reuseaddr", "UNIX-CONNECT:/relay/idp.sock"]
+    volumes:
+      - idp-relay:/relay
+
+  # Relay, outside hop: the only container that connects to Dex for Ethos, and only
+  # to dex:5556, and only for what the inside hop sends it.
+  idp-relay-out:
+    image: alpine/socat:1.8.1.3
+    depends_on:
+      dex:
+        condition: service_healthy
+    networks: [cp-net]
+    command: ["UNIX-LISTEN:/relay/idp.sock,fork,mode=0666,unlink-early", "TCP:dex:5556"]
+    volumes:
+      - idp-relay:/relay
+
+volumes:
+  warden-bin: {}
+  idp-relay: {}

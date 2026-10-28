@@ -345,8 +345,10 @@ func TestChallengeInTunnel(t *testing.T) {
 	if strings.Contains(body, "device_code") || strings.Contains(body, "token_endpoint") {
 		t.Errorf("the agent's 403 body names a device_code or token_endpoint")
 	}
-	if last := attempts[len(attempts)-1]; last[2] != "200" {
-		t.Errorf("the last call read HTTP %s, want 200", last[2])
+	// The allowed upstream's body may span lines, so the last attempt is read from
+	// the tail of stdout (the child exits 0 only on a 200).
+	if tail := strings.TrimSpace(first.stdout.String()); !strings.HasSuffix(tail, "HTTPSTATUS:200 CONNECT:200") {
+		t.Errorf("the last call did not end with HTTP 200 over CONNECT 200")
 	}
 	ev := waitEvent(t, "a new valid event for "+smokeEmail+" after the sign-in", func() (e analytics.Event, ok bool) {
 		if evs := validEventsFor(t, allowedHost, smokeEmail); len(evs) > validBefore {

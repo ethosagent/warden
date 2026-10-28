@@ -1,0 +1,41 @@
+# Control-plane served config for Ethos behind Warden WITH USER SIGN-IN
+# (deploy/compose/docker-compose.ethos-sso.yml): configs/config.ethos.yaml plus
+# an identity block in `challenge` mode.
+#
+# A CONNECT with no valid identity is accepted and answered inside the tunnel:
+# the agent's first request gets a 403 whose error.message holds the sign-in link,
+# which Ethos shows in its chat. The user signs in on Dex, sends the message again
+# and it is allowed and attributed to them. See docs/identity-contract.md ("In-tunnel
+# challenge") and docs/docker-end-to-end.md ("Ethos with sign-in in the chat").
+
+policy:
+  allowlist:
+    - domain: "~.*"            # allow every host (HTTPS/443) once the user is signed in. Visibility-first.
+
+secretStore:
+  # echo is non-production (persists nothing; value=key) — demo only; use `aws` for real secrets.
+  backend: echo
+
+cache:
+  ttl: 3600
+
+logging:
+  level: info
+  format: json                 # structured JSON decision logs (one per call)
+
+observability:
+  enabled: true
+  metrics:
+    enabled: true              # Prometheus /metrics on the admin listener
+
+# The reference Dex (deploy/compose/docker-compose.identity.yml). The issuer string
+# is the public one Dex puts in every token and in the sign-in link; the worker
+# reaches Dex at internalIssuerURL. Keep both in step with deploy/compose/dex/config.dev.yaml.
+identity:
+  defaultMode: challenge
+  issuer: http://localhost:5556/dex
+  internalIssuerURL: http://dex:5556
+  audience: warden
+  allowedAZP: [agent-harness, warden-cli]
+  signIn:
+    clientID: warden-cli

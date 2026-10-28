@@ -1387,6 +1387,15 @@ before the block list, the policy check and any dial. `unverified` (the issuer's
 keys could not be fetched in time) fails **closed** in this mode, unlike
 `attribute`.
 
+A client that sends `X-Warden-Challenge: in-tunnel` (`warden identity exec
+--challenge-in-tunnel`) and a worker that terminates TLS (a CA is configured)
+get the challenge **inside the tunnel** instead: the CONNECT is accepted, the offer
+rides a response header the client strips, and the agent's first request gets a
+`403` whose `error.message` holds the sign-in link, so an agent that never reads a
+`407` body still shows it. No upstream is dialled and no policy runs. A worker
+with no CA, an older worker, or a client that does not ask sends the `407`. See
+[identity-contract.md](identity-contract.md#in-tunnel-challenge).
+
 ```yaml
 identity:
   defaultMode: challenge

@@ -75,11 +75,16 @@ the client retries with their token). The reference identity provider is in
    open it, sign in as `alice` (the seeded user), and the next request is attributed
    to her.
 
-**Honest limit:** Ethos itself does not yet show the sign-in link in its chat. Its
-requests through the worker get the `407`, but nothing turns the link into a message
-to the user. Showing it needs a change in Ethos, or the Phase 2
-`warden identity forward` sidecar (#118) in front of it; until then use the client
-above (or `--signin-notify` to send the link somewhere) for the user who is signing in.
+**Sign-in link in the chat.** A plain `407` does not reach the chat: Ethos's Node
+`fetch` throws `fetch failed` and never reads the body. Run the client with
+`--challenge-in-tunnel` and the worker answers inside the tunnel instead: the agent's
+request gets a `403` whose error message holds the link, and Ethos shows a provider's
+HTTP error body in the chat ("Sign in to continue: http://localhost:5556/dex/device?...").
+The overlay [`docker-compose.ethos-sso.yml`](../../deploy/compose/docker-compose.ethos-sso.yml)
+wires this up (Ethos under `warden identity exec --challenge-in-tunnel`, a
+challenge-mode control plane config, and a relay that gives the client Dex's port
+5556 and nothing else); the flow is in
+[docker-end-to-end.md](../docker-end-to-end.md#ethos-with-sign-in-in-the-chat).
 
 ## Secrets: placeholders only
 
