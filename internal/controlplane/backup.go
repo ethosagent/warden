@@ -289,6 +289,8 @@ type BackupRunner struct {
 	// beforeRename, when set (tests), runs after the manifest is written and
 	// before the set is renamed into place; an error aborts the run.
 	beforeRename func() error
+	// pruneRemove, when set (tests), replaces os.RemoveAll for a pruned set.
+	pruneRemove func(string) error
 }
 
 // NewBackupRunner builds a runner for cfg (zero fields take their defaults).
@@ -750,7 +752,19 @@ func (r *BackupRunner) prune(justWritten string) {
 		if i < r.cfg.Keep || i == 0 || s.name == justWritten {
 			continue
 		}
-		if err := os.RemoveAll(filepath.Join(dir, s.name)); err != nil {
+		// Rename the set out of the visible namespace first, so a reader never
+		// sees a set-named directory whose manifest RemoveAll already deleted.
+		// A leftover .tmp- directory is swept like any stale one.
+		hidden := filepath.Join(dir, backupTmpPrefix+s.name)
+		if err := os.Rename(filepath.Join(dir, s.name), hidden); err != nil {
+			r.log.Warn("cp_backup", "db", "run", "outcome", "prune_failed", "set", s.name, "error", err.Error())
+			continue
+		}
+		remove := os.RemoveAll
+		if r.pruneRemove != nil {
+			remove = r.pruneRemove
+		}
+		if err := remove(hidden); err != nil {
 			r.log.Warn("cp_backup", "db", "run", "outcome", "prune_failed", "set", s.name, "error", err.Error())
 		}
 	}

@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -308,6 +309,41 @@ func TestBackup_PruneNeverDeletesNewest(t *testing.T) {
 	}
 	if sets, _ := listBackupSets(cfg.Dir); len(sets) != 1 || sets[0].name != res.Set {
 		t.Fatalf("sets = %v", sets)
+	}
+}
+
+// A pruned set leaves the visible namespace before its files are removed, so
+// a concurrent reader never sees a set-named directory without its manifest.
+func TestBackup_PruneHidesSetBeforeRemoving(t *testing.T) {
+	cfg := testBackupConfig(t)
+	cfg.Keep = 1
+	if err := os.MkdirAll(cfg.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := testBackupT0.Add(-48 * time.Hour).Format(BackupSetLayout)
+	if err := os.MkdirAll(filepath.Join(cfg.Dir, old), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfg.Dir, old, BackupManifestName), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := NewBackupRunner(cfg, fakeDeps(t, clocktest.NewFake(testBackupT0)))
+	var removed []string
+	r.pruneRemove = func(path string) error {
+		removed = append(removed, filepath.Base(path))
+		if _, err := os.Stat(filepath.Join(cfg.Dir, old)); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("set %s still visible while its files are removed: %v", old, err)
+		}
+		return errors.New("simulated partial removal")
+	}
+	if _, err := r.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{backupTmpPrefix + old}; !slices.Equal(removed, want) {
+		t.Fatalf("removed = %v, want %v", removed, want)
+	}
+	if sets, _ := listBackupSets(cfg.Dir); len(sets) != 1 || sets[0].name == old {
+		t.Fatalf("sets = %v, want only the new set", sets)
 	}
 }
 
