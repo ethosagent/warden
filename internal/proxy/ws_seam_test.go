@@ -34,9 +34,9 @@ type scanningDecorator struct {
 	reqN  atomic.Int64
 }
 
-func (d *scanningDecorator) OnRequest(sessionKey, method, url string, hdr http.Header, body []byte) gateway.Verdict {
+func (d *scanningDecorator) OnRequest(sessionKey, method, url string, hdr http.Header, body []byte, meta gateway.RequestMeta) gateway.Verdict {
 	d.reqN.Add(1)
-	return d.inner.OnRequest(sessionKey, method, url, hdr, body)
+	return d.inner.OnRequest(sessionKey, method, url, hdr, body, meta)
 }
 
 func (d *scanningDecorator) OnResponse(sessionKey string, status int, hdr http.Header, body []byte) gateway.Verdict {
@@ -54,7 +54,7 @@ func (d *scanningDecorator) Enforcing() bool           { return d.inner.Enforcin
 // (enforce) and logged-downgrade (monitor/off) branches.
 type nonScanningGateway struct{ enforcing bool }
 
-func (g nonScanningGateway) OnRequest(string, string, string, http.Header, []byte) gateway.Verdict {
+func (g nonScanningGateway) OnRequest(string, string, string, http.Header, []byte, gateway.RequestMeta) gateway.Verdict {
 	return gateway.Verdict{Action: gateway.Pass}
 }
 

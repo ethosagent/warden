@@ -119,6 +119,8 @@ type H struct {
 	// mcpEnabled (WithMCP) boots the workers with the MCP gateway in monitor
 	// mode, so WebSocket/SSE scenarios ride the worker's real stream paths.
 	mcpEnabled bool
+	// mcpConfig (WithMCPConfig) replaces the monitor-mode default.
+	mcpConfig *config.MCPConfig
 	// transparent (TransparentIntercept) boots the workers in interception mode
 	// `both` (#376): the CONNECT proxy keeps working AND the transparent
 	// listeners bind on loopback port 0 (addresses via TransparentAddrs).
@@ -359,6 +361,15 @@ func withBeforeTerminal(f func()) Option {
 // never blocks: egress behaves exactly as without MCP.
 func WithMCP() Option {
 	return func(h *H) { h.mcpEnabled = true }
+}
+
+// WithMCPConfig is WithMCP with an explicit gateway config (mode, tool policy,
+// allowWhen conditions), for scenarios that need enforce mode.
+func WithMCPConfig(cfg config.MCPConfig) Option {
+	return func(h *H) {
+		h.mcpEnabled = true
+		h.mcpConfig = &cfg
+	}
 }
 
 // WithOIDCIssuer starts the in-process OIDC issuer fake (fakes.OIDCIssuer) for
@@ -791,6 +802,10 @@ func (h *H) workerParams(i int) worker.Params {
 		// Monitor mode: the worker's streaming paths (WS upgrade, SSE relay)
 		// run with the real gateway in front, which never blocks.
 		policy.MCP = config.MCPConfig{Enabled: true, Mode: "monitor"}
+		if h.mcpConfig != nil {
+			policy.MCP = *h.mcpConfig
+			policy.MCP.Enabled = true
+		}
 	}
 	if h.transparent {
 		// Interception mode `both` (#376): port-0 loopback listeners, so a

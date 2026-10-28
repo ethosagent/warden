@@ -42,6 +42,17 @@ const (
 	// `paths` (#371).
 	PathNotAllowed Reason = "path_not_allowed"
 
+	// IdentityRequired: the destination is only reachable with a verified
+	// identity and the request carries none (W-P1-GPOL-02).
+	IdentityRequired Reason = "identity_required"
+	// GroupNotAllowed: a verified subject matched the destination only through
+	// scoped allow entries that do not name it (W-P1-GPOL-02).
+	GroupNotAllowed Reason = "group_not_allowed"
+	// IdentityGroupsTruncated: like GroupNotAllowed, but the subject's group
+	// list was cut at the cap, so the miss may be an artifact of the cut; it
+	// fails closed under its own name (W-P1-GPOL-02).
+	IdentityGroupsTruncated Reason = "identity_groups_truncated"
+
 	// H2RequestTrailersUnsupported: an h2 stream declared request trailers,
 	// which the h2 forward path does not relay (#388).
 	H2RequestTrailersUnsupported Reason = "h2_request_trailers_unsupported"
@@ -164,6 +175,7 @@ const (
 var declared = []Reason{
 	PolicyNoMatch, PolicyDenylist, RateLimited, TimeWindow,
 	PathNotCanonical, MethodNotAllowed, PathNotAllowed,
+	IdentityRequired, GroupNotAllowed, IdentityGroupsTruncated,
 	H2RequestTrailersUnsupported, H2ExtendedConnectUnsupported,
 	TransformNeedsBufferedBody, HostMismatch, RequestTrailersUnsupported,
 	GRPCBodyPlaceholder, GRPCFrameTooLarge, GRPCFrameMalformed, GRPCFrameCompressed,

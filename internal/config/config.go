@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -158,6 +159,8 @@ func (p Policy) DeepCopy() Policy {
 		// slice, so mutating a copy cannot retarget the live policy.
 		cp.Allowlist[i].Methods = append([]string(nil), p.Allowlist[i].Methods...)
 		cp.Allowlist[i].Paths = append([]string(nil), p.Allowlist[i].Paths...)
+		cp.Allowlist[i].Groups = append([]string(nil), p.Allowlist[i].Groups...)
+		cp.Allowlist[i].Users = append([]string(nil), p.Allowlist[i].Users...)
 	}
 	cp.Denylist = append([]DenylistEntry(nil), p.Denylist...)
 	cp.Secrets = append([]SecretMapping(nil), p.Secrets...)
@@ -253,6 +256,14 @@ type AllowlistEntry struct {
 	Methods []string `yaml:"methods,omitempty" json:"methods,omitempty"`
 	Paths   []string `yaml:"paths,omitempty" json:"paths,omitempty"`
 
+	// W-P1-GPOL-01 identity scope: limit the entry to IdP groups (exact,
+	// case-sensitive) and/or named users (email, lowercased, or exact sub).
+	// Empty = global, as before. Enforced per request with the verified
+	// subject: a scoped entry never allows an anonymous request, and a
+	// non-member is denied outright (never sent to the judge).
+	Groups []string `yaml:"groups,omitempty" json:"groups,omitempty"`
+	Users  []string `yaml:"users,omitempty" json:"users,omitempty"`
+
 	// Reserved (M2): parsed but not enforced in phase 1.
 	RateLimit  string `yaml:"rateLimit,omitempty" json:"rateLimit,omitempty"`
 	TimeWindow string `yaml:"timeWindow,omitempty" json:"timeWindow,omitempty"`
@@ -261,8 +272,31 @@ type AllowlistEntry struct {
 // DiffKey identifies an allow entry for the structural policy diff: today
 // domain|port. Methods, paths, rateLimit and timeWindow are compared
 // attributes, not part of the key, so changing one on the same destination
-// shows as "changed". W-P1-GPOL-01 extends the key with groups/users.
-func (e AllowlistEntry) DiffKey() string { return diffKey(e.Domain, e.Port) }
+// shows as "changed". Groups and users are part of the key (only when set, so
+// unscoped keys are unchanged): a rule scoped to different principals is a
+// different rule, not an edit of the global one.
+func (e AllowlistEntry) DiffKey() string {
+	k := diffKey(e.Domain, e.Port)
+	if len(e.Groups) > 0 {
+		k += "|groups=" + joinSorted(e.Groups)
+	}
+	if len(e.Users) > 0 {
+		k += "|users=" + joinSorted(e.Users)
+	}
+	return k
+}
+
+// joinSorted joins a sorted copy of vs (the receiver stays as is). Each value
+// is quoted so a value containing "," or "|" cannot collide with another list
+// or forge a key segment.
+func joinSorted(vs []string) string {
+	c := append([]string(nil), vs...)
+	sort.Strings(c)
+	for i, v := range c {
+		c[i] = strconv.Quote(v)
+	}
+	return strings.Join(c, ",")
+}
 
 // SecretMapping ties a placeholder the agent holds to the env var that carries
 // the real value (phase 1 ENV provider).
@@ -539,6 +573,13 @@ func validate(p Policy) error {
 			if err := validatePathPattern(fmt.Sprintf("policy.allowlist[%d].paths", i), pat); err != nil {
 				return err
 			}
+		}
+		// W-P1-GPOL-01/-10: validate the principal values. The evaluator
+		// enforces them per request (and the wire projects them fail-closed),
+		// so an allow entry may carry groups/users (MCP allowWhen too, W-P1-GPOL-11).
+		path := fmt.Sprintf("policy.allowlist[%d]", i)
+		if _, _, err := normalizePrincipals(path, e.Groups, e.Users); err != nil {
+			return err
 		}
 		// Regex domain: ~<pattern>
 		if strings.HasPrefix(e.Domain, "~") {
