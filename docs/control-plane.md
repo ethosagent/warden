@@ -292,6 +292,8 @@ needs a restart. It holds the *name* of the client-secret env var, never the sec
 | `adminAudit.enabled` | `false` | Turns on the signed admin audit log; needs `--state-dir`. See [Admin audit log](#admin-audit-log). |
 | `trustedProxies` | none | CIDRs of reverse proxies in front of the control plane. Only a peer inside one may set the client address the admin audit log records, through `X-Forwarded-For`. A bare address or anything that is not a CIDR is a startup error. |
 
+Running the identity provider itself (Dex clients, connectors, the split-horizon issuer, failure modes and the production checklist) is covered in [Running Dex as Warden's identity provider](identity-dex.md).
+
 In `oidc` mode the control plane also needs a non-empty value in the client-secret env
 var and `--state-dir`; without either it refuses to start. See
 `configs/config.control-plane.yaml` for commented examples.
@@ -512,6 +514,10 @@ chain still verifies. To catch that, the control plane also writes the chain to 
   request body, bearer token or secret value.
 - `msg=admin_audit.checkpoint`, the chain head (`head_seq`, `head_entry_hash`,
   `key_id`) at startup, every 5 minutes and at shutdown.
+
+For a closed, versioned JSON copy of the same entries (and these checkpoints) that a shipper
+can read without parsing the operational log, enable `audit.jsonLog`; see
+[siem.md](siem.md#admin-stream).
 
 Ship these lines off-host (your log collector or SIEM) where the control plane's state
 dir cannot reach them. The newest `admin_audit.checkpoint` or `admin_audit` line you
@@ -1243,7 +1249,8 @@ curl -X POST http://127.0.0.1:9090/admin/refresh-secrets \
 ## Identity verification
 
 A worker can attribute traffic to the person behind an agent by verifying a user
-token from an OIDC issuer (for example the reference Dex). It is **off unless
+token from an OIDC issuer (for example the reference Dex, see
+[identity-dex.md](identity-dex.md)). It is **off unless
 configured** and, in P1, only **attributes**: it records who made a request and
 never blocks one.
 

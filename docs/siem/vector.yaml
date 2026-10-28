@@ -1,0 +1,86 @@
+# Vector (https://vector.dev) pipeline for Warden's JSON audit streams.
+# Guide: docs/siem.md. Validate: vector validate --no-environment docs/siem/vector.yaml
+#
+# It tails the files audit.jsonLog writes (output: file), parses each line, and
+# routes on the top-level "schema" field so the worker's decision lines
+# (warden.decision.v1) and the control plane's admin lines (warden.admin.v1) can
+# go to different indexes. Paths come from environment variables so the same
+# file runs in a container, on a host and in the test.
+#
+# The live sinks below print to the console so the file works with no SIEM
+# attached. Swap them for the http or splunk_hec_logs sink (docs/siem.md).
+
+data_dir: ${WARDEN_VECTOR_DATA_DIR:-/var/lib/vector}
+
+sources:
+  warden_files:
+    type: file
+    # Matches the live file and, with the default maxBackups, its rotated
+    # siblings. Use one glob per node: every worker (and the control plane)
+    # writes its own file.
+    include:
+      - ${WARDEN_AUDIT_GLOB:-/var/log/warden/*.jsonl}
+    read_from: beginning
+    # Vector remembers its offset per file (fingerprint, not name), so a
+    # rotation by lumberjack loses and repeats nothing.
+
+transforms:
+  parse:
+    type: remap
+    inputs: [warden_files]
+    drop_on_error: true
+    reroute_dropped: true
+    source: |
+      parsed = object!(parse_json!(string!(.message)))
+      # ts is the producer's wall clock: use it as the event time and sort by
+      # it in the SIEM; never rely on arrival order.
+      parsed.timestamp = parse_timestamp!(string!(parsed.ts), format: "%+")
+      . = parsed
+
+  by_schema:
+    type: route
+    inputs: [parse]
+    route:
+      decision: '.schema == "warden.decision.v1"'
+      admin: '.schema == "warden.admin.v1"'
+
+  tag_decision:
+    type: remap
+    inputs: [by_schema.decision]
+    source: |
+      .siem_stream = "decision"
+
+  tag_admin:
+    type: remap
+    inputs: [by_schema.admin]
+    source: |
+      .siem_stream = "admin"
+
+sinks:
+  out_decision:
+    type: console
+    inputs: [tag_decision]
+    target: stdout
+    encoding:
+      codec: json
+
+  out_admin:
+    type: console
+    inputs: [tag_admin]
+    target: stdout
+    encoding:
+      codec: json
+
+  # A line that is not JSON, or a schema this file does not know (for example a
+  # future warden.decision.v2), lands here instead of vanishing.
+  out_unrouted:
+    type: console
+    inputs: [parse.dropped, by_schema._unmatched]
+    target: stderr
+    encoding:
+      codec: json
+
+# Production sinks (http and splunk_hec_logs) are in docs/siem.md, "Vector".
+# Add them as extra sinks next to these, or replace out_decision and out_admin.
+# Vector expands environment-variable references everywhere in this file,
+# comments included, so none are written in comments here.
