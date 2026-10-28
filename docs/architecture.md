@@ -111,7 +111,7 @@ non-TLS traffic under judge is denied; statically-allowed opaque traffic is raw-
 
 **Group-scoped rules.** An allow entry (or an MCP tool `allowWhen`) with `groups`/`users`
 makes `policy.EvaluateFor` subject-aware: the request's verified subject must be named,
-no subject yields `Conditional` (`identity_required`), a non-member is an explicit `Deny`
+no subject yields `Conditional` (denied), a non-member is an explicit `Deny`
 that never reaches the judge, and anything that cannot be decided per request (no CA,
 non-TLS) fails closed. The control plane projects scoped rules into a wire shape old
 workers deny. Details: [group-policy.md](group-policy.md).
