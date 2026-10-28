@@ -1222,10 +1222,55 @@ type mcpYAML struct {
 }
 
 type mcpToolsYAML struct {
-	Allow       []string                             `yaml:"allow,omitempty"`
-	Deny        []string                             `yaml:"deny,omitempty"`
-	RateLimit   map[string]string                    `yaml:"rateLimit,omitempty"`
-	Constraints map[string]config.MCPToolConstraints `yaml:"constraints,omitempty"`
+	Allow       []string                     `yaml:"allow,omitempty"`
+	Deny        []string                     `yaml:"deny,omitempty"`
+	RateLimit   map[string]string            `yaml:"rateLimit,omitempty"`
+	Constraints map[string]mcpConstraintYAML `yaml:"constraints,omitempty"`
+}
+
+// mcpConstraintYAML mirrors the on-disk constraint (config.rawMCPToolConstraint).
+// config.MCPToolConstraints has no yaml tags, so encoding it directly would write
+// lowercased keys the loader rejects (W-P1-GPOL-08: a groups allowWhen saved from
+// the dashboard must reload).
+type mcpConstraintYAML struct {
+	MaxArgsBytes int                     `yaml:"maxArgsBytes,omitempty"`
+	Fields       map[string]mcpFieldYAML `yaml:"fields,omitempty"`
+	AllowWhen    *mcpConditionYAML       `yaml:"allowWhen,omitempty"`
+}
+
+type mcpFieldYAML struct {
+	Match     string `yaml:"match,omitempty"`
+	MaxLen    int    `yaml:"maxLen,omitempty"`
+	Required  bool   `yaml:"required,omitempty"`
+	Forbidden bool   `yaml:"forbidden,omitempty"`
+}
+
+type mcpConditionYAML struct {
+	AgentID    string   `yaml:"agentId,omitempty"`
+	TimeWindow string   `yaml:"timeWindow,omitempty"`
+	Groups     []string `yaml:"groups,omitempty"`
+	Users      []string `yaml:"users,omitempty"`
+}
+
+func mcpConstraintsYAML(in map[string]config.MCPToolConstraints) map[string]mcpConstraintYAML {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]mcpConstraintYAML, len(in))
+	for tool, c := range in {
+		y := mcpConstraintYAML{MaxArgsBytes: c.MaxArgsBytes}
+		if len(c.Fields) > 0 {
+			y.Fields = make(map[string]mcpFieldYAML, len(c.Fields))
+			for name, f := range c.Fields {
+				y.Fields[name] = mcpFieldYAML{Match: f.Match, MaxLen: f.MaxLen, Required: f.Required, Forbidden: f.Forbidden}
+			}
+		}
+		if aw := c.AllowWhen; aw != nil {
+			y.AllowWhen = &mcpConditionYAML{AgentID: aw.AgentID, TimeWindow: aw.TimeWindow, Groups: aw.Groups, Users: aw.Users}
+		}
+		out[tool] = y
+	}
+	return out
 }
 
 type mcpSchemaYAML struct {
@@ -1294,13 +1339,13 @@ func mcpSettingsNode(s *config.MCPSettings) (*yaml.Node, error) {
 		(len(s.Tools.Allow) > 0 || len(s.Tools.Deny) > 0 ||
 			len(s.Tools.RateLimit) > 0 || len(s.Tools.Constraints) > 0) {
 		// Reuse the wire→config tool mapping so allow/deny/rate/constraints stay in
-		// one place; the on-disk constraint shape matches config.MCPToolConstraints.
+		// one place; mcpConstraintsYAML gives them the on-disk key names.
 		tools := config.MCPConfigFromSettings(s).Tools
 		raw.Tools = &mcpToolsYAML{
 			Allow:       tools.Allow,
 			Deny:        tools.Deny,
 			RateLimit:   tools.RateLimit,
-			Constraints: tools.Constraints,
+			Constraints: mcpConstraintsYAML(tools.Constraints),
 		}
 	}
 	var node yaml.Node
