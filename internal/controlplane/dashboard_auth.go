@@ -23,26 +23,40 @@ func (s *Server) dashboardWriteToken() string {
 }
 
 // dashboardWriteGuard gates every state-changing dashboard API call on the CP
-// admin bearer (dashboardWriteToken). Unlike the worker-facing routes (bearerOK
-// passes when no token is configured, for development), it fails closed: with
+// admin bearer (dashboardWriteToken). Unlike the worker-facing routes (open
+// mode passes when no token is configured, for development), it fails closed: with
 // no token configured a write is refused outright. It is the dashboard
 // package's shared bearer guard (also used by the worker admin listener), so
 // the constant-time compare and the no-token-in-logs rule are defined once.
+//
+// A wwt_ worker token never passes, even when it equals the configured token.
 func (s *Server) dashboardWriteGuard() dashboard.WriteGuard {
-	return dashboard.NewBearerWriteGuard(dashboard.BearerGuardConfig{
+	inner := dashboard.NewBearerWriteGuard(dashboard.BearerGuardConfig{
 		Token: s.dashboardWriteToken(), Logger: s.cfg.Logger,
 		Component: "control plane", TokenName: "control-plane admin token",
 		ConfigHint: "Start it with --admin-token-env <ENV> (e.g. WARDEN_CP_ADMIN_TOKEN)",
 	})
+	return func(r *http.Request) (int, string) {
+		if hasWorkerTokenBearer(r) {
+			s.cfg.Logger.Warn("control plane dashboard write refused",
+				"method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr, "reason", "worker token on a human route")
+			return http.StatusUnauthorized, "unauthorized: worker tokens cannot change dashboard state"
+		}
+		return inner(r)
+	}
 }
 
 // adminBearerOK reports whether the request presents the CP admin bearer
 // (dashboardWriteToken), compared in constant time. It gates the human
-// /central/secrets routes in console.auth none; bearerOK keeps gating the
+// /central/secrets routes in console.auth none; WorkerAuthenticator gates the
 // worker routes. With no token of either kind it passes (development only,
-// matching bearerOK), but an explicit --admin-token-env naming an empty
+// matching open mode), but an explicit --admin-token-env naming an empty
 // variable fails closed.
 func (s *Server) adminBearerOK(r *http.Request) bool {
+	// A worker token never opens a human route, whatever the configured token.
+	if hasWorkerTokenBearer(r) {
+		return false
+	}
 	token := s.dashboardWriteToken()
 	if token == "" {
 		return !s.cfg.RequireAdminToken

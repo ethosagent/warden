@@ -30,6 +30,12 @@ type workerState struct {
 	eventsForwarded int64
 	policyETag      string   // the worker's current policy version (from heartbeat)
 	caps            []string // capabilities of the latest heartbeat (replaced, not merged)
+
+	// How the worker last authenticated (recordAuth). tokenID/tokenName are set
+	// only for kind token; legacy and none ids are unverified headers.
+	authKind  WorkerKind
+	tokenID   string
+	tokenName string
 }
 
 // NewWorkerRegistry returns an empty registry.
@@ -101,6 +107,19 @@ func (r *WorkerRegistry) WorkersWithoutCap(cap string) []string {
 		out = out[:maxWorkersWithoutCap]
 	}
 	return out
+}
+
+// recordAuth notes how the worker behind p last authenticated. A principal
+// without a proxy id (a legacy or anonymous caller with no header) is ignored,
+// like the Seen* methods.
+func (r *WorkerRegistry) recordAuth(p WorkerPrincipal) {
+	if p.ProxyID == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	w := r.touch(p.ProxyID, r.now())
+	w.authKind, w.tokenID, w.tokenName = p.Kind, p.TokenID, p.TokenName
 }
 
 // touch returns the worker's state, creating it on first contact. Caller holds mu.

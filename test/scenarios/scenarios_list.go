@@ -127,6 +127,15 @@ var All = slices.Concat(
 		// File mode saves without If-Match as before.
 		{Name: "policy_file_mode_save_without_if_match", Run: policyFileModeSaveWithoutIfMatch},
 
+		// Per-worker tokens (W-P1-WTOK-02): a bound token authenticates /policy,
+		// heartbeat and ingest, its bound id is what the CP records, an
+		// out-of-process revoke takes effect, and it opens no human route.
+		// In-process only (it writes the CP state dir, fake clock).
+		{Name: "worker_token_auth", Opts: workerTokenOpts(), Run: workerTokenAuth},
+		// Held long-poll (W-P1-WTOK-09): a revoke out of process returns that
+		// token's held /policy with 401 while another token's stays parked.
+		{Name: "worker_token_longpoll_revoke", Opts: workerTokenOpts(), Run: workerTokenLongPollRevoke},
+
 		// Admin audit gate (W-P1-AAUD-05): enabled, the control plane writes the
 		// genesis entry and logs its key_id before serving. In-process only (it
 		// reads the CP state dir).
