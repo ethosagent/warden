@@ -91,6 +91,7 @@ func challengeTunnelJSON(c challengeBody) []byte {
 // and a close. It never dials upstream, never evaluates the policy and never
 // swaps a secret: the connection has no identity, so nothing is reachable.
 func (p *Proxy) serveChallengeTunnel(conn net.Conn, br *bufio.Reader, domain string, c challengeBody) {
+	p.reach(PathChallenge)
 	leaf, err := p.getOrCreateCert(domain)
 	if err != nil {
 		// Same as before this feature: the client sees the tunnel close. Say so

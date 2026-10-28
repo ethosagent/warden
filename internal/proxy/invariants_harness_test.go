@@ -320,6 +320,9 @@ type invEnv struct {
 
 	hitMu sync.Mutex
 	hit   map[Path]bool
+	// connectExtra is CRLF-terminated header lines added to every CONNECT (the
+	// in-tunnel challenge rows send X-Warden-Challenge).
+	connectExtra string
 
 	// rawTLSAddr/rawTCPAddr redirect the non-HTTP upstream dials (raw TLS, tunnel).
 	rawTLSAddr string
@@ -355,7 +358,15 @@ type invOpts struct {
 	secrets *fakes.FakeSecretProvider
 	// noPlaceholders runs the proxy with no swap configured.
 	noPlaceholders bool
+	// challenge runs identity challenge mode with a starter whose offer carries
+	// invCanary as its device code, so the suite sweeps every sink for it. The
+	// user code (invUserCode) is shown to the agent on purpose; rows that need it
+	// out of the logs, events and metrics say so with noLogs.
+	challenge bool
 }
+
+// invUserCode is the user code of the challenge offer.
+const invUserCode = "ABCD-EFGH"
 
 func newInvEnv(t *testing.T, o invOpts) *invEnv {
 	t.Helper()
@@ -392,6 +403,15 @@ func newInvEnv(t *testing.T, o invOpts) *invEnv {
 	}
 	if !o.noPlaceholders {
 		cfg.PlaceholderNames = []string{invPlaceholder}
+	}
+	if o.challenge {
+		offer := testOffer()
+		offer.DeviceCode = invCanary
+		offer.UserCode = invUserCode
+		cfg.Identity = IdentityConfig{
+			Verifier: fakes.NewVerifier(), Mode: IdentityModeChallenge,
+			SignIn: &fakeStarter{offer: offer, outcome: SignInStarted},
+		}
 	}
 	if o.mcp {
 		mc := enforceMCPConfig()
@@ -541,7 +561,7 @@ func (e *invEnv) connectRaw(target string) (net.Conn, *bufio.Reader, string, err
 	}
 	e.t.Cleanup(func() { _ = conn.Close() })
 	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
-	_, _ = fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
+	_, _ = fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n%s\r\n", target, target, e.connectExtra)
 	br := bufio.NewReader(conn)
 	status, err := br.ReadString('\n')
 	if err != nil {
@@ -793,4 +813,23 @@ func (e *invEnv) leaks(agentView string) []string {
 		add("metric labels", m)
 	}
 	return out
+}
+
+// sinkHolding names the first operator-readable sink (logs, analytics events,
+// metric labels) that contains s, or "". It never prints s.
+func (e *invEnv) sinkHolding(s string) string {
+	if strings.Contains(e.logs.String(), s) {
+		return "logs"
+	}
+	for _, ev := range e.store.snapshot() {
+		if strings.Contains(fmt.Sprintf("%#v", ev), s) {
+			return "analytics events"
+		}
+	}
+	for _, m := range e.metrics.snapshot() {
+		if strings.Contains(m, s) {
+			return "metric labels"
+		}
+	}
+	return ""
 }
