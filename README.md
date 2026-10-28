@@ -120,7 +120,9 @@ WARDEN_VERSION=0.3.0 docker compose -f deploy/compose/docker-compose.ethos.yml u
 
 Every recipe also runs a **control-plane** that serves policy and aggregates the agent's traffic into a fleet dashboard at **https://localhost:7070/dashboard/** (served with the proxy CA — trust it). Full per-recipe details (ports, the Node `fetch` proxy workaround, and how to prove isolation) are in **[docs/recipes/](docs/recipes/)**.
 
-**Per-user identity.** To record which user each agent request was made for, a harness sends the user's OIDC ID token to the worker. The **[agent identity contract](docs/identity-contract.md)** says exactly what token to send, how to send it (`Proxy-Authorization` on CONNECT, or `warden identity exec`), what the worker records, and what a harness must never do.
+**Per-user identity.** To record which user each agent request was made for, a harness sends the user's OIDC ID token to the worker. The **[agent identity contract](docs/identity-contract.md)** says exactly what token to send, how to send it (`Proxy-Authorization` on CONNECT, or `warden identity exec`), what the worker records, and what a harness must never do. To run the identity provider (Dex: clients, connectors, issuer rules, failure modes, production checklist), see the **[Dex operator guide](docs/identity-dex.md)**.
+
+**Group-scoped policy.** An allow entry or an MCP tool `allowWhen` can be limited to IdP `groups` or named `users`; a non-member, or a request with no verified identity, is denied and never sent to the judge. Rules, fail-closed cases, deny reasons, `policy eval` replay and metrics: **[docs/group-policy.md](docs/group-policy.md)**.
 
 #### How a recipe works
 
@@ -182,6 +184,7 @@ Policy evaluation details and edge cases: [docs/protocol-details.md](docs/protoc
 ### Observability
 
 - **SQLite analytics** — every decision logged locally (domain, port, method, URL, decision, status, secret-ref — no bodies)
+- **JSON audit stream for a SIEM** — optional `audit.jsonLog`: one JSON line per decision (and per control-plane admin change), to stdout or a rotating file, with Vector and Fluent Bit examples ([docs/siem.md](docs/siem.md))
 - **Dashboard** — built-in HTML UI at `/dashboard/` with auto-refresh, traffic table, policy view, secret references, blocked list, stats
 - **JSON APIs** — `/dashboard/api/traffic`, `/dashboard/api/policy`, `/dashboard/api/secrets`, `/dashboard/api/blocked`, `/dashboard/api/stats`
 - **Cost tracking** — estimated spend per LLM provider (OpenAI, Anthropic, Google, Cohere)

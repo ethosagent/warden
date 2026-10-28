@@ -57,8 +57,9 @@ type Config struct {
 	// PolicyPath is the YAML file whose allow/deny policy is served to workers.
 	// It is re-read on each /policy request so edits propagate on the next poll.
 	PolicyPath string
-	// Token is the bearer token workers must present on /policy and
-	// /central/ingest. Empty disables auth (development only).
+	// Token is the shared (legacy) bearer token workers may present on /policy,
+	// /control/heartbeat and /central/ingest, next to per-worker tokens. Empty
+	// selects open mode: anonymous callers are accepted (development only).
 	Token string
 	// AdminToken is the CP's own admin bearer (--admin-token-env): the token
 	// dashboard writes and /central/secrets take in console.auth none. It never
@@ -69,6 +70,10 @@ type Config struct {
 	// fallback to Token off, so a flag naming an empty variable refuses writes
 	// instead of reopening them to the shared worker token.
 	RequireAdminToken bool
+	// RequireWorkerTokens is --require-worker-tokens: the worker routes accept
+	// wwt_ tokens only (strict mode). Run refuses it together with a shared
+	// token, without a state dir, or without TLS.
+	RequireWorkerTokens bool
 	// MaxEvents caps the central analytics store (0 = default).
 	MaxEvents int
 	// Store is the fleet analytics backend (persistent SQLite or in-memory). When
@@ -132,6 +137,12 @@ type Config struct {
 	// Clock is the control plane's time port (nil = clock.Real()). The console
 	// query/generate rate limit ticks on it.
 	Clock clock.Clock
+	// WorkerTokens is the per-worker token store. Run builds it when State is
+	// open; nil means no wwt_ token is accepted and behaviour is unchanged.
+	WorkerTokens *WorkerTokenStore
+	// TLS reports that the control plane serves TLS; without it, token auth logs
+	// a clear-text warning at startup.
+	TLS bool
 }
 
 // policyWire is the shape sent to workers: allow/deny policy plus the optional
@@ -180,6 +191,8 @@ type Server struct {
 	registry *WorkerRegistry
 	mcp      *mcpStore
 	policy   *policyServer
+	// workerAuth authenticates /policy, /control/heartbeat and /central/ingest.
+	workerAuth *WorkerAuthenticator
 	// versions is the versioned policy store; nil in file mode. Its Create
 	// refreshes the policy server, so long-poll waiters wake at once.
 	versions PolicyVersionStore
@@ -188,6 +201,9 @@ type Server struct {
 	// blocked_users overlay is registered).
 	blocks  *BlockStore
 	writeMu sync.Mutex // serializes policy + integrations edits
+	// gp holds the scoped-rule count of the served ETag and the per-worker
+	// "lacks grouppolicy" log marks (W-P1-GPOL-07).
+	gp groupPolicyFlags
 	// pipeline is the embeddable alert-delivery assembly (manager + engine + tick +
 	// bridge). Nil when no alert DB path is configured (or when its store/manager
 	// failed to build — fail-open: a broken alert config never stops policy
@@ -292,6 +308,14 @@ func New(cfg Config) *Server {
 		detectionConfig: cfg.DetectionConfig,
 		generateLimit:   newSessionLimiter(cfg.Clock, queryGenerateLimit, time.Minute),
 	}
+	// One authenticator for the three worker routes; the policy server was built
+	// with a default one, replaced here by the configured one.
+	s.workerAuth = NewWorkerAuthenticator(WorkerAuthConfig{
+		Legacy: cfg.Token, Tokens: cfg.WorkerTokens, Registry: registry,
+		Logger: cfg.Logger, Clock: cfg.Clock, TLS: cfg.TLS, Strict: cfg.RequireWorkerTokens,
+	})
+	s.policy.auth = s.workerAuth
+	s.workerAuth.LogMode()
 	// Register serve-time wire overlays (s.policy.addOverlay) here, before the
 	// initial load, so they apply to the first served wire. Versioned mode
 	// registers credential; W-P1-BLOCK-03 adds blocked_users.
@@ -302,6 +326,7 @@ func New(cfg Config) *Server {
 	s.initAuth()
 	s.initBreakGlass()
 	s.warnAdminToken()
+	s.failClosedWithoutAdminToken()
 	if cfg.AdminAudit != nil {
 		s.enableAdminAudit(cfg.AdminAudit, cfg.AdminAudit.Probe, cfg.AdminAudit.StateHash)
 		s.auditRec = cfg.AdminAudit
@@ -447,8 +472,8 @@ func (s *Server) writeSettings(in config.SettingsWire) error {
 
 // Handler returns the control plane's HTTP routes:
 //
-//	GET  /policy          — allow/deny policy for workers (bearer-auth)
-//	POST /central/ingest  — fleet analytics ingest (bearer-auth)
+//	GET  /policy          — allow/deny policy for workers (worker token or shared bearer)
+//	POST /control/heartbeat, /central/ingest — worker heartbeat and fleet analytics ingest (same auth)
 //	     /dashboard/      — fleet dashboard over the aggregated store (writes bearer-auth; sessions in oidc mode)
 //	     /central/secrets — secret store writes, when one is configured (bearer; admin session in oidc mode)
 //	GET  /healthz         — liveness
@@ -462,7 +487,7 @@ func (s *Server) Handler() http.Handler {
 	var policyServe PolicyServer = s.policy
 	mux.HandleFunc("/policy", policyServe.ServePolicy)
 	mux.HandleFunc("/control/heartbeat", s.handleHeartbeat)
-	ingest := analytics.NewIngestHandler(s.central, s.cfg.Token)
+	ingest := analytics.NewIngestHandler(s.central, s.workerAuth.IngestAuthorizer())
 	// Central ingest lands in the IngestSink seam: tag worker activity in the
 	// registry and store each worker's MCP snapshot. Wiring the seam's methods (vs
 	// reaching into fields) documents the ingest surface; behavior is unchanged.
@@ -480,7 +505,7 @@ func (s *Server) Handler() http.Handler {
 			s.pipeline.Observe(proxyID, events)
 		})
 	}
-	mux.Handle("/central/ingest", ingest)
+	mux.Handle("/central/ingest", ingestAuthErrors(ingest))
 
 	// Secret write path (/central/secrets), mounted ONLY when a writable store is
 	// configured (echo now; aws in Phase 5). A nil store means the routes are
@@ -583,12 +608,16 @@ func (s *Server) Handler() http.Handler {
 	dash.SetWorkers(func() []dashboard.WorkerView {
 		cur := s.policy.currentETag()
 		views := tracker.Views()
+		FlagNoGroupPolicy(views, s.scopedEntries())
 		for i := range views {
 			views[i].Behind = views[i].PolicyETag != "" && views[i].PolicyETag != cur
 		}
 		fillPolicyVersions(s.versions, views)
+		s.fillWorkerAuth(views)
 		return views
 	})
+	// Worker token admin routes and their audit hasher (W-P1-WTOK-03).
+	s.wireWorkerTokens(dash)
 	// Dashboard-V3 read tabs. Each source EXISTS on the control plane:
 	//   - secretstore: the CP's WRITE store lists KEY metadata (never values). Nil
 	//     store (env/none backend) → the tab reports backend "none".
@@ -646,8 +675,9 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !s.bearerOK(r) {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	principal, err := s.workerAuth.Authenticate(r)
+	if err != nil {
+		WriteWorkerAuthError(w, err)
 		return
 	}
 	var body struct {
@@ -656,7 +686,9 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	}
 	// Body is optional/tiny; ignore decode errors (heartbeat is best-effort).
 	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body)
-	s.registry.SeenHeartbeat(r.Header.Get(analytics.ProxyIDHeader), trimETag(body.PolicyETag), normalizeCaps(body.Caps))
+	caps := normalizeCaps(body.Caps)
+	s.registry.SeenHeartbeat(principal.ProxyID, trimETag(body.PolicyETag), caps)
+	s.noteGroupPolicy(principal.ProxyID, caps)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -1273,10 +1305,55 @@ type mcpYAML struct {
 }
 
 type mcpToolsYAML struct {
-	Allow       []string                             `yaml:"allow,omitempty"`
-	Deny        []string                             `yaml:"deny,omitempty"`
-	RateLimit   map[string]string                    `yaml:"rateLimit,omitempty"`
-	Constraints map[string]config.MCPToolConstraints `yaml:"constraints,omitempty"`
+	Allow       []string                     `yaml:"allow,omitempty"`
+	Deny        []string                     `yaml:"deny,omitempty"`
+	RateLimit   map[string]string            `yaml:"rateLimit,omitempty"`
+	Constraints map[string]mcpConstraintYAML `yaml:"constraints,omitempty"`
+}
+
+// mcpConstraintYAML mirrors the on-disk constraint (config.rawMCPToolConstraint).
+// config.MCPToolConstraints has no yaml tags, so encoding it directly would write
+// lowercased keys the loader rejects (W-P1-GPOL-08: a groups allowWhen saved from
+// the dashboard must reload).
+type mcpConstraintYAML struct {
+	MaxArgsBytes int                     `yaml:"maxArgsBytes,omitempty"`
+	Fields       map[string]mcpFieldYAML `yaml:"fields,omitempty"`
+	AllowWhen    *mcpConditionYAML       `yaml:"allowWhen,omitempty"`
+}
+
+type mcpFieldYAML struct {
+	Match     string `yaml:"match,omitempty"`
+	MaxLen    int    `yaml:"maxLen,omitempty"`
+	Required  bool   `yaml:"required,omitempty"`
+	Forbidden bool   `yaml:"forbidden,omitempty"`
+}
+
+type mcpConditionYAML struct {
+	AgentID    string   `yaml:"agentId,omitempty"`
+	TimeWindow string   `yaml:"timeWindow,omitempty"`
+	Groups     []string `yaml:"groups,omitempty"`
+	Users      []string `yaml:"users,omitempty"`
+}
+
+func mcpConstraintsYAML(in map[string]config.MCPToolConstraints) map[string]mcpConstraintYAML {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]mcpConstraintYAML, len(in))
+	for tool, c := range in {
+		y := mcpConstraintYAML{MaxArgsBytes: c.MaxArgsBytes}
+		if len(c.Fields) > 0 {
+			y.Fields = make(map[string]mcpFieldYAML, len(c.Fields))
+			for name, f := range c.Fields {
+				y.Fields[name] = mcpFieldYAML{Match: f.Match, MaxLen: f.MaxLen, Required: f.Required, Forbidden: f.Forbidden}
+			}
+		}
+		if aw := c.AllowWhen; aw != nil {
+			y.AllowWhen = &mcpConditionYAML{AgentID: aw.AgentID, TimeWindow: aw.TimeWindow, Groups: aw.Groups, Users: aw.Users}
+		}
+		out[tool] = y
+	}
+	return out
 }
 
 type mcpSchemaYAML struct {
@@ -1345,13 +1422,13 @@ func mcpSettingsNode(s *config.MCPSettings) (*yaml.Node, error) {
 		(len(s.Tools.Allow) > 0 || len(s.Tools.Deny) > 0 ||
 			len(s.Tools.RateLimit) > 0 || len(s.Tools.Constraints) > 0) {
 		// Reuse the wire→config tool mapping so allow/deny/rate/constraints stay in
-		// one place; the on-disk constraint shape matches config.MCPToolConstraints.
+		// one place; mcpConstraintsYAML gives them the on-disk key names.
 		tools := config.MCPConfigFromSettings(s).Tools
 		raw.Tools = &mcpToolsYAML{
 			Allow:       tools.Allow,
 			Deny:        tools.Deny,
 			RateLimit:   tools.RateLimit,
-			Constraints: tools.Constraints,
+			Constraints: mcpConstraintsYAML(tools.Constraints),
 		}
 	}
 	var node yaml.Node

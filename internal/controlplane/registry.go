@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/dashboard"
 )
 
@@ -30,6 +31,12 @@ type workerState struct {
 	eventsForwarded int64
 	policyETag      string   // the worker's current policy version (from heartbeat)
 	caps            []string // capabilities of the latest heartbeat (replaced, not merged)
+
+	// How the worker last authenticated (recordAuth). tokenID/tokenName are set
+	// only for kind token; legacy and none ids are unverified headers.
+	authKind  WorkerKind
+	tokenID   string
+	tokenName string
 }
 
 // NewWorkerRegistry returns an empty registry.
@@ -103,6 +110,31 @@ func (r *WorkerRegistry) WorkersWithoutCap(cap string) []string {
 	return out
 }
 
+// FlagNoGroupPolicy sets NoGroupPolicy on every view whose caps lack
+// grouppolicy/v1 when the served policy has scopedEntries > 0. A legacy worker
+// (no caps) is flagged too.
+func FlagNoGroupPolicy(views []dashboard.WorkerView, scopedEntries int) {
+	if scopedEntries <= 0 {
+		return
+	}
+	for i := range views {
+		views[i].NoGroupPolicy = !slices.Contains(views[i].Caps, config.CapGroupPolicyV1)
+	}
+}
+
+// recordAuth notes how the worker behind p last authenticated. A principal
+// without a proxy id (a legacy or anonymous caller with no header) is ignored,
+// like the Seen* methods.
+func (r *WorkerRegistry) recordAuth(p WorkerPrincipal) {
+	if p.ProxyID == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	w := r.touch(p.ProxyID, r.now())
+	w.authKind, w.tokenID, w.tokenName = p.Kind, p.TokenID, p.TokenName
+}
+
 // touch returns the worker's state, creating it on first contact. Caller holds mu.
 func (r *WorkerRegistry) touch(proxyID string, now time.Time) *workerState {
 	w, ok := r.workers[proxyID]
@@ -130,6 +162,8 @@ func (r *WorkerRegistry) Views() []dashboard.WorkerView {
 			PolicyETag:      w.policyETag,
 			Caps:            append([]string(nil), w.caps...),
 			Online:          now.Sub(w.lastSeen) < staleAfter,
+			AuthKind:        string(w.authKind),
+			TokenName:       w.tokenName,
 		}
 		if !w.lastPolicyPull.IsZero() {
 			v.LastPolicyPull = w.lastPolicyPull.UTC().Format(time.RFC3339)

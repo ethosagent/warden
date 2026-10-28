@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -397,7 +398,7 @@ func TestHeartbeatCaps(t *testing.T) {
 	if strings.Contains(string(raw), "caps") {
 		t.Errorf("body without caps = %s, want no caps field", raw)
 	}
-	if got := WorkerCaps(); len(got) != 1 || got[0] != CapBlocklistV1 {
+	if got := WorkerCaps(); len(got) != 2 || got[0] != CapBlocklistV1 || got[1] != CapGroupPolicyV1 {
 		t.Fatalf("WorkerCaps() = %v", got)
 	}
 	rp.SetCaps(WorkerCaps())
@@ -411,7 +412,50 @@ func TestHeartbeatCaps(t *testing.T) {
 	if err := json.Unmarshal(raw, &b); err != nil {
 		t.Fatal(err)
 	}
-	if len(b.Caps) != 1 || b.Caps[0] != "blocklist/v1" {
-		t.Errorf("caps = %v, want [blocklist/v1]; body %s", b.Caps, raw)
+	if !slices.Equal(b.Caps, []string{"blocklist/v1", "grouppolicy/v1"}) {
+		t.Errorf("caps = %v, want [blocklist/v1 grouppolicy/v1]; body %s", b.Caps, raw)
+	}
+}
+
+// TestHeartbeat_AdvertisesGroupPolicy: the heartbeat body carries
+// grouppolicy/v1 next to blocklist/v1 and stays well under the CP's 4096-byte
+// body limit.
+func TestHeartbeat_AdvertisesGroupPolicy(t *testing.T) {
+	var raw []byte
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	caPath := filepath.Join(t.TempDir(), "ca.pem")
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw})
+	if err := os.WriteFile(caPath, certPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rp, err := NewRemoteProvider(srv.URL+"/policy", "tok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rp.SetCACert(caPath); err != nil {
+		t.Fatal(err)
+	}
+	rp.SetCaps(WorkerCaps())
+	if err := rp.Heartbeat(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var b struct {
+		Caps []string `json:"caps"`
+	}
+	if err := json.Unmarshal(raw, &b); err != nil {
+		t.Fatalf("body %s: %v", raw, err)
+	}
+	if !slices.Contains(b.Caps, "grouppolicy/v1") || !slices.Contains(b.Caps, CapBlocklistV1) {
+		t.Errorf("caps = %v, want grouppolicy/v1 and %s", b.Caps, CapBlocklistV1)
+	}
+	if len(raw) >= 4096 {
+		t.Errorf("heartbeat body is %d bytes, want < 4096", len(raw))
+	}
+	if CapGroupPolicyV1 != "grouppolicy/v1" {
+		t.Errorf("CapGroupPolicyV1 = %q", CapGroupPolicyV1)
 	}
 }
