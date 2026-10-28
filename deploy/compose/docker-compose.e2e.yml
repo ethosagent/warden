@@ -59,6 +59,26 @@
 name: warden-e2e
 
 services:
+  # Registers all three workers' tokens (see the base recipe). Built from the
+  # same source image as everything else, so harness and code cannot drift.
+  cp-bootstrap:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: ${WARDEN_IMAGE:-warden-e2e:local}
+    environment:
+      - WARDEN_WORKER_1_TOKEN=${WARDEN_WORKER_1_TOKEN:-wwt_devonlyworkeronetokennotarealsecretxxxxxxxxxxxxxxxxx}
+      - WARDEN_WORKER_2_TOKEN=${WARDEN_WORKER_2_TOKEN:-wwt_devonlyworkertwotokennotarealsecretxxxxxxxxxxxxxxxxx}
+      - WARDEN_WORKER_3_TOKEN=${WARDEN_WORKER_3_TOKEN:-wwt_devonlyworkerthreetokennotarealsecretxxxxxxxxxxxxxxx}
+    entrypoint:
+      - sh
+      - -c
+      - |
+        set -e
+        warden control-plane token create --from-env WARDEN_WORKER_1_TOKEN --name w1 --proxy-id worker-1 --state-dir=/data
+        warden control-plane token create --from-env WARDEN_WORKER_2_TOKEN --name w2 --proxy-id worker-2 --state-dir=/data
+        warden control-plane token create --from-env WARDEN_WORKER_3_TOKEN --name w3 --proxy-id worker-3 --state-dir=/data
+
   control-plane:
     build:
       context: ../..           # repo root (the Dockerfile copies the module)
@@ -92,6 +112,8 @@ services:
     depends_on:
       control-plane:
         condition: service_healthy
+      cp-bootstrap:
+        condition: service_completed_successfully
     ports: !override
       - "127.0.0.1:9091:9090"
     networks: !override
@@ -100,7 +122,7 @@ services:
       w1-internal: {}          # agent-1's ONLY neighbor network
       published: {}            # host → 9091 (no outbound NAT)
     environment: !override
-      - WARDEN_CP_TOKEN=${WARDEN_CP_TOKEN:-dev-token}
+      - WARDEN_WORKER_TOKEN=${WARDEN_WORKER_1_TOKEN:-wwt_devonlyworkeronetokennotarealsecretxxxxxxxxxxxxxxxxx}
       - WARDEN_ADMIN_TOKEN=${WARDEN_ADMIN_TOKEN:-dev-admin-token}
       - WARDEN_PROXY_ID=worker-1
       # The canary the worker swaps in for example_secret_001. FIXED value so
@@ -128,6 +150,8 @@ services:
     depends_on:
       control-plane:
         condition: service_healthy
+      cp-bootstrap:
+        condition: service_completed_successfully
     ports: !override
       - "127.0.0.1:9092:9090"
     networks: !override
@@ -136,7 +160,7 @@ services:
       w2-internal: {}          # agent-2's ONLY neighbor network
       published: {}
     environment: !override
-      - WARDEN_CP_TOKEN=${WARDEN_CP_TOKEN:-dev-token}
+      - WARDEN_WORKER_TOKEN=${WARDEN_WORKER_2_TOKEN:-wwt_devonlyworkertwotokennotarealsecretxxxxxxxxxxxxxxxxx}
       - WARDEN_ADMIN_TOKEN=${WARDEN_ADMIN_TOKEN:-dev-admin-token}
       - WARDEN_PROXY_ID=worker-2
       - EXAMPLE_SECRET=CANARY-e2e-0123456789abcdef0123456789abcdef
@@ -254,6 +278,8 @@ services:
     depends_on:
       control-plane:
         condition: service_healthy
+      cp-bootstrap:
+        condition: service_completed_successfully
     # Binds :443/:80 as the image's non-root warden user — same per-netns
     # sysctl trick fakeupstream uses.
     sysctls:
@@ -267,7 +293,7 @@ services:
         ipv4_address: 10.201.0.5   # pinned; the agent's host entries depend on it
       published: {}            # host → 9093 (no outbound NAT)
     environment: !override
-      - WARDEN_CP_TOKEN=${WARDEN_CP_TOKEN:-dev-token}
+      - WARDEN_WORKER_TOKEN=${WARDEN_WORKER_3_TOKEN:-wwt_devonlyworkerthreetokennotarealsecretxxxxxxxxxxxxxxx}
       - WARDEN_PROXY_ID=worker-3
       - EXAMPLE_SECRET=CANARY-e2e-0123456789abcdef0123456789abcdef
       - SSL_CERT_FILE=/etc/warden/certs/upstream-ca-bundle.crt
