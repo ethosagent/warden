@@ -147,6 +147,16 @@ func (r *rig) run(args ...string) (string, string, error) {
 
 func noSleep(ctx context.Context, _ time.Duration) error { return ctx.Err() }
 
+// cacheEntry loads the cached login of the rig's issuer and client.
+func (r *rig) cacheEntry() (identityclient.Entry, error) {
+	cfg, err := identityclient.LoadConfig(identityclient.Flags{}, func(k string) string { return r.env[k] },
+		func(string) ([]byte, error) { return nil, fs.ErrNotExist })
+	if err != nil {
+		return identityclient.Entry{}, err
+	}
+	return identityclient.NewFileStore(cfg).Load()
+}
+
 // loggedIn runs `login` against the fake issuer and returns the cached entry.
 func (r *rig) loggedIn() identityclient.Entry {
 	r.t.Helper()

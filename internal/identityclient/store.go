@@ -126,6 +126,16 @@ func (s *FileStore) Remove() error {
 	return errors.Join(errs...)
 }
 
+// removeEntry deletes the cache file only. The lock file stays: the caller holds
+// the lock, and removing it under a holder would let a second process lock a
+// new file at once.
+func (s *FileStore) removeEntry() error {
+	if err := os.Remove(s.Path()); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
 // WithLock runs fn holding an exclusive lock on the cache's lock file, so two
 // processes (or goroutines) never refresh at once.
 func (s *FileStore) WithLock(fn func() error) error {
