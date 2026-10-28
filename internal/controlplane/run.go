@@ -22,6 +22,7 @@ import (
 	"github.com/ethosagent/warden/internal/adminaudit"
 	"github.com/ethosagent/warden/internal/alertpipeline"
 	"github.com/ethosagent/warden/internal/analytics"
+	"github.com/ethosagent/warden/internal/auditlog"
 	"github.com/ethosagent/warden/internal/clock"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/cpstate"
@@ -101,6 +102,10 @@ type Params struct {
 	// drive it with Clock.
 	AdminAuditCheckpointInterval time.Duration
 
+	// ErrOut receives the operational log while audit.jsonLog writes to
+	// stdout (the log moves off stdout so it carries only warden.admin.v1
+	// lines). Nil means os.Stderr. Tests pass a buffer.
+	ErrOut io.Writer
 	// Backup is the --backup-* settings; Backup.Dir == "" (the default) turns
 	// backups off. Run validates it against StateDir and the stores it opens.
 	Backup BackupConfig
@@ -185,7 +190,20 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	if err != nil {
 		return fail(err)
 	}
-	logger, _ := observability.NewLogger(out, pol.LogLevel, pol.LogFormat)
+	// audit.jsonLog on stdout reserves stdout for the warden.admin.v1 lines:
+	// the operational log moves to stderr.
+	jsonLog := pol.Audit.JSONLog
+	logOut := out
+	if jsonLogOnStdout(jsonLog) {
+		logOut = p.ErrOut
+		if logOut == nil {
+			logOut = os.Stderr
+		}
+	}
+	logger, _ := observability.NewLogger(logOut, pol.LogLevel, pol.LogFormat)
+	if jsonLogOnStdout(jsonLog) {
+		logger.Info("audit.jsonLog.output is stdout: operational logs moved to stderr so stdout carries only warden.admin.v1 lines")
+	}
 
 	if stateDir != "" {
 		if seeded {
@@ -271,6 +289,29 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		logger.Info("control plane policy store", "mode", policyStore, "head", head)
 	}
 
+	// The JSON admin stream (audit.jsonLog): off by default, in which case no
+	// file or directory is created. It is closed after the checkpoint loop's
+	// shutdown checkpoint (defers run last-in first-out).
+	var sink *auditlog.Sink
+	if jsonLog.Enabled {
+		var sinkOpts []auditlog.Option
+		if jsonLogOnStdout(jsonLog) {
+			sinkOpts = append(sinkOpts, auditlog.WithWriter(out))
+		}
+		sink, err = newAuditSink(jsonLog, logger, sinkOpts...)
+		if err != nil {
+			return fail(fmt.Errorf("control-plane: audit.jsonLog: %w", err))
+		}
+		defer func() {
+			cctx, cancel := context.WithTimeout(context.Background(), jsonLogCloseTimeout)
+			defer cancel()
+			_ = sink.Close(cctx)
+		}()
+		if !consoleCfg.AdminAudit.Enabled {
+			logger.Warn("audit.jsonLog is enabled but console.adminAudit is not: no admin lines will be written")
+		}
+	}
+
 	// Admin audit (console.adminAudit.enabled): off by default, in which case no
 	// key file, store or rows exist. On, a key that does not match the chain
 	// stops startup here, before anything is served.
@@ -283,8 +324,8 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		if auditClk == nil {
 			auditClk = clock.Real()
 		}
-		// One emitter for entries and checkpoints: W-P1-JAUD-03 swaps it here.
-		auditEmitter = adminaudit.NewSlogEmitter(logger)
+		// One emitter for entries and checkpoints (slog anchor, plus the JSON line).
+		auditEmitter = newAdminAuditEmitter(logger, sink)
 		adminAudit, err = openAdminAudit(context.WithoutCancel(ctx), logger, state, stateDir, p, auditClk, auditEmitter)
 		if err != nil {
 			return fail(err)

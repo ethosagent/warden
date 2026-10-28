@@ -513,6 +513,10 @@ chain still verifies. To catch that, the control plane also writes the chain to 
 - `msg=admin_audit.checkpoint`, the chain head (`head_seq`, `head_entry_hash`,
   `key_id`) at startup, every 5 minutes and at shutdown.
 
+For a closed, versioned JSON copy of the same entries (and these checkpoints) that a shipper
+can read without parsing the operational log, enable `audit.jsonLog`; see
+[siem.md](siem.md#admin-stream).
+
 Ship these lines off-host (your log collector or SIEM) where the control plane's state
 dir cannot reach them. The newest `admin_audit.checkpoint` or `admin_audit` line you
 hold is an anchor: verify the chain with `admin-audit verify --anchor <seq>:<entry_hash>`
