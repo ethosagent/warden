@@ -1529,6 +1529,9 @@ func (p *Proxy) recordAllowEvent(s *requestScope) {
 	})
 }
 
+// writeErrorResponse writes a terminal HTTP/1.1 error. Every caller ends the
+// session after it, so the response says Connection: close: a keep-alive client
+// then does not race the close by sending its next request on this conn.
 func writeErrorResponse(w io.Writer, statusCode int, statusText string) {
 	resp := &http.Response{
 		StatusCode:    statusCode,
@@ -1539,6 +1542,7 @@ func writeErrorResponse(w io.Writer, statusCode int, statusText string) {
 		Header:        http.Header{},
 		Body:          io.NopCloser(strings.NewReader(statusText + "\n")),
 		ContentLength: int64(len(statusText) + 1),
+		Close:         true,
 	}
 	_ = resp.Write(w)
 }
