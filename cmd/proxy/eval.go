@@ -48,6 +48,11 @@ event does not record email_verified). --user limits the replay to one user (sub
 				return err
 			}
 
+			// Shadow lint: warnings only, never a failure.
+			for _, w := range config.LintScoped(candidate) {
+				fmt.Fprintf(cmd.OutOrStdout(), "warning: %s\n", w)
+			}
+
 			// Open analytics DB.
 			store, err := analytics.NewSQLiteStore(dbPath, 0)
 			if err != nil {
