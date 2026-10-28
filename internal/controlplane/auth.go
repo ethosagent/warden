@@ -15,6 +15,7 @@ import (
 
 	"golang.org/x/oauth2"
 
+	"github.com/ethosagent/warden/internal/adminaudit"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/identity"
 	"github.com/ethosagent/warden/internal/identity/adapters/oidc"
@@ -64,6 +65,10 @@ type authService struct {
 
 	loginCookieName string
 	endpoints       atomic.Pointer[oidc.Endpoints]
+
+	// audit records a callback's outcome in the admin audit log
+	// (Server.recordLogin); nil when admin audit is disabled.
+	audit func(*http.Request, loginResult)
 
 	backoffMin, backoffMax time.Duration
 }
@@ -211,10 +216,19 @@ func (a *authService) handleLogin(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, oc.AuthCodeURL(state, oauth2.S256ChallengeOption(verifier), oauth2.SetAuthURLParam("nonce", nonce)), http.StatusFound)
 }
 
-// loginResult carries what the callback logs.
+// loginResult carries what the callback logs and records.
 type loginResult struct {
 	reason string
-	sub    string
+	// sub is the token's subject for the log line, verified or not.
+	sub string
+	// consumed is true once a pending state was taken: only then is a failure
+	// recorded in the admin audit log.
+	consumed bool
+	// actor and role come only from a verified ID token; sessionHash is the
+	// new session's id hash (never the raw id).
+	actor       adminaudit.Actor
+	role        string
+	sessionHash string
 }
 
 // handleCallback finishes a login. Every outcome redirects to the dashboard;
@@ -240,6 +254,9 @@ func (a *authService) handleCallback(w http.ResponseWriter, r *http.Request) {
 	a.logger.Info("console_login",
 		"result", map[bool]string{true: "ok", false: "failed"}[res.reason == ""],
 		"reason", res.reason, "sub", res.sub, "duration_ms", time.Since(start).Milliseconds())
+	if a.audit != nil && (res.reason == "" || res.consumed) {
+		a.audit(r, res)
+	}
 	if res.reason != "" {
 		http.Redirect(w, r, dashboardHome+"?login_error="+url.QueryEscape(res.reason), http.StatusFound)
 		return
@@ -265,35 +282,38 @@ func (a *authService) finishLogin(w http.ResponseWriter, r *http.Request, oc oau
 	bc, err := r.Cookie(a.loginCookieName)
 	if err != nil || bc.Value == "" ||
 		subtle.ConstantTimeCompare([]byte(sha256Hex(bc.Value)), []byte(p.BrowserHash)) != 1 {
-		return "", loginResult{reason: loginStateInvalid}
+		return "", loginResult{consumed: true, reason: loginStateInvalid}
 	}
 	if q.Get("error") != "" {
-		return "", loginResult{reason: loginIDPError}
+		return "", loginResult{consumed: true, reason: loginIDPError}
 	}
 	code := q.Get("code")
 	if code == "" {
-		return "", loginResult{reason: loginExchangeFailed}
+		return "", loginResult{consumed: true, reason: loginExchangeFailed}
 	}
 	ectx := oidc.WithHTTPClient(ctx, a.client)
 	tok, err := oc.Exchange(ectx, code, oauth2.VerifierOption(p.Verifier))
 	if err != nil {
-		return "", loginResult{reason: loginExchangeFailed}
+		return "", loginResult{consumed: true, reason: loginExchangeFailed}
 	}
 	raw, _ := tok.Extra("id_token").(string)
 	if raw == "" {
-		return "", loginResult{reason: loginTokenInvalid}
+		return "", loginResult{consumed: true, reason: loginTokenInvalid}
 	}
 	claims, status, reason := a.verifier.Verify(ectx, raw, identity.WithNonce(p.Nonce))
 	switch {
 	case status == identity.StatusUnverified:
-		return "", loginResult{reason: loginIDPUnavailable}
+		return "", loginResult{consumed: true, reason: loginIDPUnavailable}
 	case status != identity.StatusValid && reason == identity.ReasonWrongNonce:
-		return "", loginResult{reason: loginNonceMismatch, sub: claims.Sub}
+		return "", loginResult{consumed: true, reason: loginNonceMismatch, sub: claims.Sub}
 	case status != identity.StatusValid || claims.Sub == "":
-		return "", loginResult{reason: loginTokenInvalid, sub: claims.Sub}
+		return "", loginResult{consumed: true, reason: loginTokenInvalid, sub: claims.Sub}
 	}
-	if _, ok := a.cfg.RoleFor(claims.Groups); !ok {
-		return "", loginResult{reason: loginNoRole, sub: claims.Sub}
+	// From here the token is verified, so the attempt has a known actor.
+	actor := adminaudit.Actor{Sub: claims.Sub, Email: claims.Email}
+	role, ok := a.cfg.RoleFor(claims.Groups)
+	if !ok {
+		return "", loginResult{consumed: true, reason: loginNoRole, sub: claims.Sub, actor: actor}
 	}
 	rawID, _, err := a.sessions.Create(ctx, SessionInput{
 		Iss: claims.Issuer, Sub: claims.Sub, Email: claims.Email,
@@ -301,7 +321,7 @@ func (a *authService) finishLogin(w http.ResponseWriter, r *http.Request, oc oau
 	})
 	if err != nil {
 		a.logger.Error("console login: session create failed", "error", err)
-		return "", loginResult{reason: loginExchangeFailed, sub: claims.Sub}
+		return "", loginResult{consumed: true, reason: loginExchangeFailed, sub: claims.Sub, actor: actor, role: role.String()}
 	}
 	// A session cookie the request carried is never reused: its row is dropped
 	// and the new id is minted server-side.
@@ -311,7 +331,7 @@ func (a *authService) finishLogin(w http.ResponseWriter, r *http.Request, oc oau
 		}
 	}
 	http.SetCookie(w, a.cookie.New(rawID, a.sessions.absolute))
-	return p.Next, loginResult{sub: claims.Sub}
+	return p.Next, loginResult{consumed: true, sub: claims.Sub, actor: actor, role: role.String(), sessionHash: hashID(rawID)}
 }
 
 // sanitizeNext keeps a post-login path only when it is a plain absolute path

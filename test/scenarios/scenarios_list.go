@@ -127,6 +127,10 @@ var All = slices.Concat(
 		{Name: "admin_audit_records_bearer_write", Opts: adminAuditBearerOpts(), Run: adminAuditRecordsBearerWrite},
 		// In oidc mode a viewer's refused write is one denied row; no session, no row.
 		{Name: "admin_audit_records_viewer_denied", Opts: adminAuditOIDCOpts(), Run: adminAuditRecordsViewerDenied},
+		// Login and logout events (W-P1-AAUD-07): a sign-in, a no-role sign-in and a
+		// logout are one row each, for the verified user. In-process only (issuer
+		// fake, CP state dir).
+		{Name: "admin_audit_records_login_logout", Opts: adminAuditOIDCOpts(), Run: adminAuditRecordsLoginLogout},
 		// Admin audit dashboard API (W-P1-AAUD-03): list, verify and pubkey over the
 		// real chain, read-only (no row added); verify needs the admin bearer in none
 		// mode and admin in oidc, where a viewer may read only the keys; with admin
