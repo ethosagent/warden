@@ -53,6 +53,34 @@ docker compose -f deploy/compose/docker-compose.ethos.yml \
   exec ethos sh -c 'curl -sS --noproxy "*" --max-time 5 https://example.com' ; echo "exit: $?"
 ```
 
+## User sign-in (optional)
+
+Warden can ask each user to sign in before their agent reaches anything: a worker
+in identity **challenge** mode refuses a request that has no valid identity with a
+`407` and a sign-in URL (the user opens it, signs in with their own provider, and
+the client retries with their token). The reference identity provider is in
+[`deploy/compose/docker-compose.identity.yml`](../../deploy/compose/docker-compose.identity.yml)
+(Dex in front of a seeded LDAP; [identity-dex.md](../identity-dex.md)):
+
+1. Bring the stack up with the identity file merged in
+   (`docker compose -f deploy/compose/docker-compose.ethos.yml -f deploy/compose/docker-compose.identity.yml up`,
+   after `set -a; . deploy/compose/dex/.env.example; set +a`). Dex is on
+   http://localhost:5556 for you and `http://dex:5556` for the containers.
+2. Serve an identity block with `defaultMode: challenge` from the control plane,
+   as in [control-plane.md](../control-plane.md#challenge-mode) (upgrade the
+   control plane and the worker before you set it).
+3. Run the sign-in client where it can reach both the worker and Dex, for example
+   `warden identity exec --worker <worker>:8080 --challenge -- <command>`. Its first
+   request prints `warden: sign in at http://localhost:5556/dex/device?user_code=...`;
+   open it, sign in as `alice` (the seeded user), and the next request is attributed
+   to her.
+
+**Honest limit:** Ethos itself does not yet show the sign-in link in its chat. Its
+requests through the worker get the `407`, but nothing turns the link into a message
+to the user. Showing it needs a change in Ethos, or the Phase 2
+`warden identity forward` sidecar (#118) in front of it; until then use the client
+above (or `--signin-notify` to send the link somewhere) for the user who is signing in.
+
 ## Secrets: placeholders only
 
 Hand Ethos **placeholder** tokens (e.g. `openai_secret_001`), never real keys.

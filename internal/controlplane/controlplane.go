@@ -205,6 +205,8 @@ type Server struct {
 	// gp holds the scoped-rule count of the served ETag and the per-worker
 	// "lacks grouppolicy" log marks (W-P1-GPOL-07).
 	gp groupPolicyFlags
+	// cf is the fail-open guard state of identity challenge mode (challengeflags.go).
+	cf challengeFlags
 	// pipeline is the embeddable alert-delivery assembly (manager + engine + tick +
 	// bridge). Nil when no alert DB path is configured (or when its store/manager
 	// failed to build — fail-open: a broken alert config never stops policy
@@ -613,6 +615,7 @@ func (s *Server) Handler() http.Handler {
 		cur := s.policy.currentETag()
 		views := tracker.Views()
 		FlagNoGroupPolicy(views, s.scopedEntries())
+		FlagNoIdentityChallenge(views, s.challengeServed())
 		for i := range views {
 			views[i].Behind = views[i].PolicyETag != "" && views[i].PolicyETag != cur
 		}
@@ -694,6 +697,7 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	caps := normalizeCaps(body.Caps)
 	s.registry.SeenHeartbeat(principal.ProxyID, trimETag(body.PolicyETag), caps)
 	s.noteGroupPolicy(principal.ProxyID, caps)
+	s.noteIdentityChallenge(principal.ProxyID, caps)
 	w.WriteHeader(http.StatusNoContent)
 }
 

@@ -145,8 +145,9 @@ original token, so long-lived clients must recycle connections after a refresh.
 
 **Conflict.** If a tunnel has a valid CONNECT identity and a request inside it
 also carries a valid `X-Warden-Identity` for a different `sub`, the request gets
-identity_status `conflict` and no user. In Phase 1 the request still proceeds; a
-403 is reserved for the Phase 2 `require` mode.
+identity_status `conflict` and no user. In `attribute` mode the request still
+proceeds; in `challenge` mode it is refused with `403` `identity_conflict` and
+`Connection: close`.
 
 **Only https through CONNECT.** The explicit-proxy listener speaks CONNECT
 only. A plain `HTTP_PROXY` request (`GET http://...`) is not CONNECT and is
@@ -189,6 +190,7 @@ The mode is set per worker in `identity.defaultMode` and per agent in
 |---|---|
 | `off` | Default. No token is read or verified. Events, logs and metrics are byte-identical to a worker without identity. |
 | `attribute` | A presented token is verified and the result recorded on every event. Nothing is ever blocked. Needs `identity.issuer` and `identity.audience`. |
+| `challenge` | Like `attribute`, but a CONNECT without a valid token is refused with a `407` that carries a sign-in URL (see [Challenge mode](#challenge-mode-407-with-a-sign-in-url)). Needs `identity.issuer` and `identity.audience`; `identity.signIn.clientID` must be in `identity.allowedAZP` when that list is set. |
 
 `require` is rejected at config load until Phase 2.
 
@@ -204,7 +206,7 @@ In `attribute` mode every event carries one of these `identity_status` values.
 | `valid` | The token passed every worker check. The event carries the user fields. | User column shows the email (sub on hover); the request counts in Top users |
 | `invalid` | The token failed a check; `identity_reason` says which. | `—` |
 | `expired` | The token (or the tunnel's CONNECT token) is past `exp` plus skew. | `—` |
-| `unverified` | The worker could not check the token in time (key set unavailable or the 2 s bound hit). It fails open to this status, never to a hang or a block. | `—` |
+| `unverified` | The worker could not check the token in time (key set unavailable or the 2 s bound hit). In `attribute` mode it fails open to this status, never to a hang or a block; in `challenge` mode it fails closed (`407`, reason `unverified`). | `—` |
 | `conflict` | Two valid identities with different `sub` on one request. | `—` |
 
 ### Reasons
@@ -226,13 +228,100 @@ strings never become a reason.
 | `jwks_unavailable` | The issuer's key set could not be fetched (status `unverified`) |
 | `wrong_nonce` | Console login only: the nonce does not match. Never seen on proxied traffic |
 
+### Challenge mode: 407 with a sign-in URL
+
+In `challenge` mode the worker does not just record who is asking, it asks. A
+CONNECT whose identity is not `valid` (no token, `expired`, `invalid`, or
+`unverified`) is answered with `407` **before** the block list, the policy check
+and any dial, so nothing is reached and one deny event with reason
+`identity_required` is recorded:
+
+```http
+HTTP/1.1 407 Proxy Authentication Required
+Proxy-Authenticate: Basic realm="warden"
+Content-Type: application/json
+Cache-Control: no-store
+Connection: close
+
+{
+  "error": "identity_required",
+  "reason": "none",
+  "sign_in": {
+    "issuer": "http://localhost:5556/dex",
+    "verification_uri": "http://localhost:5556/dex/device",
+    "verification_uri_complete": "http://localhost:5556/dex/device?user_code=ABCD-EFGH",
+    "user_code": "ABCD-EFGH",
+    "device_code": "<opaque>",
+    "token_endpoint": "http://localhost:5556/dex/token",
+    "client_id": "warden-cli",
+    "interval": 5,
+    "expires_in": 300
+  }
+}
+```
+
+- `reason` is the status that was refused: `none`, `expired`, `invalid` or
+  `unverified`. It is never token text or a library error.
+- The `sign_in` object is an RFC 8628 device authorization the worker started at
+  the issuer. The worker never polls for it and never holds a user token or
+  refresh token. Concurrent CONNECTs from one agent share one authorization
+  until 30 s before it expires, and starts are bounded by `identity.signIn.maxPending`
+  and `identity.signIn.startsPerMinute`, so a retry loop cannot flood the issuer.
+  Every URL in it is on the issuer's origin; anything else is dropped.
+- When the worker cannot start one it still answers `407`, with no `sign_in`
+  and `"sign_in_error": "issuer_unreachable"` or `"rate_limited"`.
+- A `401` and `WWW-Authenticate` are never written.
+- Terminated tunnels: past the CONNECT token's `exp` plus skew, the next request
+  gets `403` `{"error":"identity_expired"}` with `Connection: close` (an h2
+  stream gets the `403` on the stream), and a second subject in
+  `X-Warden-Identity` gets `403` `{"error":"identity_conflict"}`. The client
+  reconnects and is challenged again. Without a CA (a raw tunnel) only the
+  CONNECT check applies: the tunnel is not cut at `exp`.
+- A transparent-only worker has no CONNECT to answer on, so it refuses to apply
+  `challenge` and keeps its previous identity config (one warning). A `both`
+  worker does not challenge its transparent leg.
+
+Deny reasons: `identity_required` (the `407`), `identity_expired` and
+`identity_conflict` (the `403`s above); they count in
+`warden.blocked.total{reason}`. The counter
+`warden.identity.signin.started.total{outcome}` (`started`, `reused`,
+`rate_limited`, `issuer_unreachable`) counts sign-in requests.
+
+**Client duties.** A client that follows the contract, on a `407` with a
+`sign_in` object:
+
+1. checks that `sign_in.issuer` and `sign_in.client_id` equal its own issuer and
+   client, and ignores the challenge otherwise (a compromised worker must not
+   make it poll a foreign issuer);
+2. shows `verification_uri_complete` (or `verification_uri` and `user_code`) to
+   the user;
+3. polls the token endpoint **of its own configured issuer** with the
+   `device_code` (the worker's address for it may be an internal one), honouring
+   `interval`, `slow_down` and `expires_in`;
+4. stores the tokens and sends the ID token on every later CONNECT;
+5. when a refresh fails with `invalid_grant`, deletes the cached login so the
+   next CONNECT is challenged again.
+
+`warden identity exec --challenge` does all of this. It dials the worker without
+credentials when there is no login, prints `warden: sign in at <url> (code
+<code>)` on stderr, runs the `--signin-notify` command (through `sh -c`, with the
+URL in `WARDEN_SIGNIN_URL` and the code in `WARDEN_SIGNIN_CODE`, never a token),
+polls once at a time, and relays the `407` to the agent **without the
+`device_code`**.
+
+**Phase 1 trade-off.** An agent that talks to the worker directly, with no
+forwarder, receives the whole body including `device_code`, and may implement
+the same poll; any process that can read that `407` can also claim the login.
+The ID token is a bearer token, not bound to the agent: whoever holds it can use
+it until `exp` (at most 1 h). Phase 2's `require` mode closes this.
+
 ## Observability
 
 Event fields (on `/dashboard/api/traffic` and in the fleet view):
 
 | Field | Set when |
 |---|---|
-| `identity_status` | Every event, in `attribute` mode |
+| `identity_status` | Every event, in `attribute` and `challenge` mode |
 | `identity_reason` | With a non-valid status that has a reason |
 | `user_sub` | Status `valid` |
 | `user_email` | Status `valid` and a verified email |
@@ -312,6 +401,8 @@ warden identity env --worker 127.0.0.1:8080 --token-stdin --format dotenv
 ```sh
 warden identity exec --worker 127.0.0.1:8080 --ca certs/proxy-ca.crt -- curl -sS https://api.example.com/
 warden identity exec --worker 127.0.0.1:8080 --env OPENAI_API_KEY -- my-agent
+warden identity exec --worker 127.0.0.1:8080 --ca certs/proxy-ca.crt --challenge -- my-agent
+warden identity exec --worker 127.0.0.1:8080 --ca certs/proxy-ca.crt --signin-notify ./notify-signin.sh -- my-agent
 ```
 
 `exec` starts a forwarder on loopback and runs the command with `HTTPS_PROXY`
@@ -349,7 +440,11 @@ is refused so a value never sits in argv, and the proxy variables and
 `HTTPS_PROXY` is replaced, with a warning.
 
 Without a login, `exec` runs the device-code login when stdin is a terminal;
-otherwise it exits 2 without starting the command. Its exit code is the
+otherwise it exits 2 without starting the command. With `--challenge` (implied by
+`--signin-notify`) it starts without a login instead and lets a worker in
+`challenge` mode ask for one, as described under
+[Challenge mode](#challenge-mode-407-with-a-sign-in-url); against a worker that
+does not enforce identity, such a request goes through unattributed. Its exit code is the
 command's, or 128+N when signal N killed it.
 
 **Same-uid limit.** A command that runs as the same user can still read the
@@ -399,7 +494,8 @@ log, write it as `eyJ...redacted`.
 Phase 2 adds agent-bound tokens, mTLS workers and the `require` mode. It adds to
 Contract v1 and changes none of it: the `Proxy-Authorization` and
 `X-Warden-Identity` headers, the `session` user name, the claims above and the
-status and reason values keep their v1 meaning. v1 Dex tokens must stay accepted
+status and reason values keep their v1 meaning. `require` reuses the `407` body
+and the three `identity_*` deny reasons of `challenge` mode. v1 Dex tokens must stay accepted
 for workers that already set `identity.issuer`, so a harness that follows this
 page keeps attributing after the upgrade. The planned `require` mode turns
 `conflict` and the non-valid statuses into a 403, and only for agents an

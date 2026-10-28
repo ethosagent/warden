@@ -275,6 +275,11 @@ type WorkerView struct {
 	// and the worker does not advertise grouppolicy/v1: it denies those
 	// destinations (fail closed). Set by the control plane per snapshot.
 	NoGroupPolicy bool `json:"noGroupPolicy"`
+	// NoIdentityChallenge is true when the served settings turn identity
+	// challenge mode on and the worker does not advertise identity/challenge-v1:
+	// it cannot apply the mode and keeps allowing callers it should challenge.
+	// Set by the control plane per snapshot.
+	NoIdentityChallenge bool `json:"noIdentityChallenge"`
 }
 
 // NewServer constructs a dashboard Server. The policy argument is the static

@@ -398,7 +398,7 @@ func TestHeartbeatCaps(t *testing.T) {
 	if strings.Contains(string(raw), "caps") {
 		t.Errorf("body without caps = %s, want no caps field", raw)
 	}
-	if got := WorkerCaps(); len(got) != 2 || got[0] != CapBlocklistV1 || got[1] != CapGroupPolicyV1 {
+	if got := WorkerCaps(); !slices.Equal(got, []string{CapBlocklistV1, CapGroupPolicyV1, CapIdentityChallengeV1}) {
 		t.Fatalf("WorkerCaps() = %v", got)
 	}
 	rp.SetCaps(WorkerCaps())
@@ -412,8 +412,8 @@ func TestHeartbeatCaps(t *testing.T) {
 	if err := json.Unmarshal(raw, &b); err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(b.Caps, []string{"blocklist/v1", "grouppolicy/v1"}) {
-		t.Errorf("caps = %v, want [blocklist/v1 grouppolicy/v1]; body %s", b.Caps, raw)
+	if !slices.Equal(b.Caps, []string{"blocklist/v1", "grouppolicy/v1", "identity/challenge-v1"}) {
+		t.Errorf("caps = %v, want [blocklist/v1 grouppolicy/v1 identity/challenge-v1]; body %s", b.Caps, raw)
 	}
 }
 

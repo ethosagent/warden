@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -533,4 +534,98 @@ func rawConnectBytes(t *testing.T, h *harness.H, hostPort, auth string) string {
 	_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 	b, _ := io.ReadAll(conn)
 	return string(b)
+}
+
+// challengeFleetFlag: workers of this build advertise identity/challenge-v1, so
+// with challenge mode served the fleet view flags only the legacy worker (a
+// heartbeat without caps), the one that would silently keep allowing, and clears
+// the flag once the control plane serves another mode.
+func challengeFleetFlag(t *testing.T, h *harness.H) {
+	const legacy = "legacy-old-worker"
+	flags := func() (map[string]bool, bool) {
+		// Workers heartbeat on the harness's fake clock: one beat per advance.
+		h.Clock().Advance(time.Second)
+		if r := h.CP().DoWorker(http.MethodPost, "/control/heartbeat", h.CP().Token(), legacy, `{"policyETag":"x"}`); r.Status != http.StatusNoContent {
+			t.Fatalf("legacy heartbeat = %d", r.Status)
+		}
+		ws, err := h.CP().Workers()
+		if err != nil {
+			return nil, false
+		}
+		out := map[string]bool{}
+		for _, w := range ws {
+			if w.ProxyID != legacy && !slices.Contains(w.Caps, config.CapIdentityChallengeV1) {
+				return nil, false // the real worker has not heartbeated yet
+			}
+			out[w.ProxyID] = w.NoIdentityChallenge
+		}
+		_, ok := out[legacy]
+		return out, ok && len(out) > 1
+	}
+	h.Eventually("only the legacy worker is flagged noIdentityChallenge", func() bool {
+		got, ok := flags()
+		if !ok {
+			return false
+		}
+		for id, flagged := range got {
+			if flagged != (id == legacy) {
+				return false
+			}
+		}
+		return true
+	})
+	if err := editIdentity(t, h, func(s *config.IdentitySettings) { s.DefaultMode = config.IdentityModeAttribute }); err != nil {
+		t.Fatalf("switch to attribute: %v", err)
+	}
+	h.Eventually("the flag clears when challenge is no longer served", func() bool {
+		got, ok := flags()
+		if !ok {
+			return false
+		}
+		for _, flagged := range got {
+			if flagged {
+				return false
+			}
+		}
+		return true
+	})
+}
+
+// challengeHotReload: the control plane accepts challenge mode and the signIn
+// block through its settings API and the worker applies them live. A worker in
+// attribute mode tunnels an anonymous CONNECT; after the edit the same CONNECT
+// gets the 407 and a sign-in offer, with no restart.
+func challengeHotReload(t *testing.T, h *harness.H) {
+	h.Upstream(identityHost)
+	if r := rawConnectBytes(t, h, challengeTarget, ""); !strings.HasPrefix(r, "HTTP/1.1 200 ") {
+		t.Fatalf("attribute mode: reply %q, want the plain 200", r)
+	}
+	err := editIdentity(t, h, func(s *config.IdentitySettings) {
+		s.DefaultMode = config.IdentityModeChallenge
+		s.SignIn = &config.SignInSettings{ClientID: "warden-cli", MaxPending: 4, StartsPerMinute: 10, Scopes: []string{"openid", "email"}}
+	})
+	if err != nil {
+		t.Fatalf("the control plane refused challenge mode: %v", err)
+	}
+	var r challengeReply
+	h.Eventually("the worker to apply challenge mode", func() bool {
+		var err error
+		r, err = rawConnect(h.ProxyAddr(), challengeTarget, "")
+		return err == nil && r.status == http.StatusProxyAuthRequired
+	})
+	assertChallenge(t, "after the edit", r, "none")
+	assertOffer(t, h, "after the edit", r)
+	if reqs := h.Issuer().DeviceRequests(); len(reqs) != 1 || reqs[0].Scope != "openid email" {
+		t.Errorf("device authorizations = %+v, want one with the configured scopes", reqs)
+	}
+	var cur struct {
+		Settings *config.SettingsWire `json:"settings"`
+	}
+	if err := h.CP().GetJSON("/dashboard/api/settings", &cur); err != nil {
+		t.Fatal(err)
+	}
+	if id := cur.Settings.Identity; id == nil || id.DefaultMode != config.IdentityModeChallenge || id.SignIn == nil || id.SignIn.MaxPending != 4 {
+		t.Errorf("the control plane does not serve what was saved: %+v", id)
+	}
+	assertNoSignInSecrets(t, h, offerSecrets(r)...)
 }

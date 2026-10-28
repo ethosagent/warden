@@ -45,8 +45,9 @@ func (l *lockedBuf) String() string {
 }
 
 type fleetRow struct {
-	ProxyID       string `json:"proxyID"`
-	NoGroupPolicy bool   `json:"noGroupPolicy"`
+	ProxyID             string `json:"proxyID"`
+	NoGroupPolicy       bool   `json:"noGroupPolicy"`
+	NoIdentityChallenge bool   `json:"noIdentityChallenge"`
 }
 
 func fleetRows(t *testing.T, url string) map[string]bool {

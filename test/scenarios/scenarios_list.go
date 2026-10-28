@@ -71,6 +71,10 @@ var All = slices.Concat(
 		{Name: "challenge_foreign_url", Opts: challengeOpts(), Run: challengeForeignURL},
 		{Name: "challenge_signed_in_next", Opts: challengeOpts(), Run: challengeSignedInNext},
 		{Name: "attribute_unchanged", Opts: identityOpts(), Run: attributeUnchanged},
+		{Name: "challenge_hot_reload", Opts: identityOpts(), Run: challengeHotReload},
+		// Fail-open guard: only a worker without identity/challenge-v1 is flagged
+		// while challenge mode is served.
+		{Name: "challenge_fleet_flag", Opts: challengeOpts(harness.Fleet(1)), Run: challengeFleetFlag},
 
 		// Console OIDC login (W-P1-SSO-03): a real login through the issuer fake
 		// creates a session with the right cookie flags, and the session expires
