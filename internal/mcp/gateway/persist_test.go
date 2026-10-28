@@ -84,7 +84,7 @@ func exercise(t *testing.T, gw *Gateway) {
 	if v := gw.OnResponse("s1", 200, nil, toolListResp(`"1"`, "reads a file", "")); len(v.Inventory) != 1 {
 		t.Fatalf("expected tools/list to yield 1 inventory item, got %d", len(v.Inventory))
 	}
-	gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"2"`, "read_file", `{"path":"/etc/hosts"}`))
+	gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"2"`, "read_file", `{"path":"/etc/hosts"}`), RequestMeta{})
 }
 
 // TestPersist_FlushOnCloseSavesData exercises the gateway, closes it, and

@@ -110,6 +110,9 @@ type Subject struct {
 	Agent  string `json:"agent,omitempty"`
 	// Worker is an optional fleet dimension; empty in single-node deployments.
 	Worker string `json:"worker,omitempty"`
+	// User is the opaque identity-provider sub of a user a finding is about
+	// (user_blocked). It never carries an email address.
+	User string `json:"user,omitempty"`
 }
 
 // Evidence is masked/bounded supporting detail (e.g. "rate=7.2% window=5m").

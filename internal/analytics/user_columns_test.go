@@ -151,7 +151,7 @@ func TestSyncWorkerCarriesIdentity(t *testing.T) {
 
 	// Over the wire: worker HTTP remote -> ingest handler.
 	cs := NewCentralStore(0)
-	h := NewIngestHandler(cs, "")
+	h := NewIngestHandler(cs, StaticTokenAuthorizer(""))
 	var seen []Event
 	h.SetOnEvents(func(_ string, evs []Event) { seen = evs })
 	srv := newIngestServer(t, h)

@@ -176,6 +176,10 @@ Alert on `unspecified`: it should never occur, and seeing it means a deny path s
 | `path_not_canonical` | denyreason | The raw path has a dot segment, an encoded separator or a matrix parameter, so the matched bytes and the served resource could differ. |
 | `method_not_allowed` | denyreason | The method is not in the matched entry's `methods`. |
 | `path_not_allowed` | denyreason | The path matches no pattern in the matched entry's `paths`. |
+| `identity_required` | denyreason | The destination is reachable only with a verified identity and the request carried none. |
+| `group_not_allowed` | denyreason | A verified subject matched the destination only through identity-scoped allow entries that do not name it. |
+| `identity_groups_truncated` | denyreason | Like `group_not_allowed`, but the subject's group list was cut at the cap, so the miss may come from the cut; it fails closed under its own name. |
+| `user_blocked` | denyreason | The request's identity claims (verified or not) match an entry on the user block list. |
 | `h2_request_trailers_unsupported` | denyreason | An HTTP/2 stream declared request trailers, which the h2 forward path does not relay. |
 | `h2_extended_connect_unsupported` | denyreason | An RFC 8441 extended CONNECT (WebSocket over h2) the stream path cannot relay faithfully. |
 | `transform_needs_buffered_body` | denyreason | An auth transform needed the body but it could not be buffered (streaming or unknown length). |

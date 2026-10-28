@@ -123,6 +123,12 @@ type MCPToolConstraints struct {
 	// AllowWhen, when non-nil, further gates an already-allowed tool to a
 	// specific agent id and/or server-local time window. nil = no extra condition.
 	AllowWhen *MCPToolCondition
+	// AllowWhenScoped is wire-only (W-P1-GPOL-06): when the control plane serves
+	// a groups/users allowWhen, it puts the real condition here and replaces
+	// AllowWhen with the ReservedScopedAgentID sentinel, so a worker that does
+	// not know this field denies the tool. A worker merges it back into
+	// AllowWhen on pull. Never read from YAML and never set on a loaded Policy.
+	AllowWhenScoped *MCPToolCondition `yaml:"-" json:",omitempty"`
 }
 
 // MCPToolCondition further restricts an allowed tool. It only narrows: a tool
@@ -133,6 +139,11 @@ type MCPToolCondition struct {
 	// TimeWindow, if set ("HH-HH", server local, 0-23), permits the tool only
 	// within the window.
 	TimeWindow string
+	// Groups and Users limit the tool to IdP groups / named users (W-P1-GPOL-01
+	// schema; see normalizePrincipals). Rejected at load until the MCP gateway
+	// enforces them.
+	Groups []string `json:",omitempty" yaml:",omitempty"`
+	Users  []string `json:",omitempty" yaml:",omitempty"`
 }
 
 // MCPFieldConstraint constrains one top-level param field. All checks are
@@ -242,8 +253,10 @@ type rawMCPToolConstraint struct {
 }
 
 type rawMCPToolCondition struct {
-	AgentID    string `yaml:"agentId"`
-	TimeWindow string `yaml:"timeWindow"`
+	AgentID    string   `yaml:"agentId"`
+	TimeWindow string   `yaml:"timeWindow"`
+	Groups     []string `yaml:"groups"`
+	Users      []string `yaml:"users"`
 }
 
 type rawMCPFieldConstraint struct {
@@ -408,6 +421,8 @@ func parseToolConstraints(raw map[string]rawMCPToolConstraint) map[string]MCPToo
 			tc.AllowWhen = &MCPToolCondition{
 				AgentID:    rc.AllowWhen.AgentID,
 				TimeWindow: rc.AllowWhen.TimeWindow,
+				Groups:     append([]string(nil), rc.AllowWhen.Groups...),
+				Users:      append([]string(nil), rc.AllowWhen.Users...),
 			}
 		}
 		out[tool] = tc
@@ -432,13 +447,22 @@ func cloneToolConstraints(in map[string]MCPToolConstraints) map[string]MCPToolCo
 			}
 			ctc.Fields = fields
 		}
-		if tc.AllowWhen != nil {
-			aw := *tc.AllowWhen
-			ctc.AllowWhen = &aw
-		}
+		ctc.AllowWhen = cloneCondition(tc.AllowWhen)
+		ctc.AllowWhenScoped = cloneCondition(tc.AllowWhenScoped)
 		out[tool] = ctc
 	}
 	return out
+}
+
+// cloneCondition deep-copies an allowWhen condition (nil-safe).
+func cloneCondition(in *MCPToolCondition) *MCPToolCondition {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	out.Groups = append([]string(nil), in.Groups...)
+	out.Users = append([]string(nil), in.Users...)
+	return &out
 }
 
 // validateMCP enforces the MCP block's requirements only when it is enabled, so
@@ -484,7 +508,7 @@ func validateMCP(m MCPConfig) error {
 			return fmt.Errorf("config: mcp.tools.deny[%d]: tool name must not be empty", i)
 		}
 	}
-	if err := validateToolConstraints("mcp.tools.constraints", m.Tools.Constraints); err != nil {
+	if err := validateToolConstraints("mcp.tools.constraints", m.Tools.Constraints, false); err != nil {
 		return err
 	}
 	if err := validateScopes(m.Scopes); err != nil {
@@ -522,7 +546,7 @@ func validateMCPServers(servers []MCPServerConfig) error {
 // policy and every task scope so the rules are identical. prefix names the config
 // path for error messages (e.g. "mcp.tools.constraints" or
 // "mcp.scopes.list[\"triage\"].constraints").
-func validateToolConstraints(prefix string, cs map[string]MCPToolConstraints) error {
+func validateToolConstraints(prefix string, cs map[string]MCPToolConstraints, taskScope bool) error {
 	for tool, tc := range cs {
 		if strings.TrimSpace(tool) == "" {
 			return fmt.Errorf("config: %s: tool name is required", prefix)
@@ -530,8 +554,8 @@ func validateToolConstraints(prefix string, cs map[string]MCPToolConstraints) er
 		if tc.MaxArgsBytes < 0 {
 			return fmt.Errorf("config: %s[%q].maxArgsBytes must not be negative", prefix, tool)
 		}
-		if tc.AllowWhen != nil && tc.AllowWhen.TimeWindow != "" {
-			if err := validateTimeWindow(fmt.Sprintf("%s[%q].allowWhen", prefix, tool), tc.AllowWhen.TimeWindow); err != nil {
+		if tc.AllowWhen != nil {
+			if err := validateAllowWhen(fmt.Sprintf("%s[%q].allowWhen", prefix, tool), tc.AllowWhen, taskScope); err != nil {
 				return err
 			}
 		}
@@ -552,6 +576,36 @@ func validateToolConstraints(prefix string, cs map[string]MCPToolConstraints) er
 			}
 		}
 	}
+	return nil
+}
+
+// validateAllowWhen validates one allowWhen condition. Groups/users are
+// normalized-checked and accepted on the tool policy (the gateway matches them
+// against the request subject, W-P1-GPOL-11) but rejected in a task scope,
+// which has no per-user meaning. The agent id "!identity-scoped" is reserved
+// for the W-P1-GPOL-06 wire sentinel.
+func validateAllowWhen(path string, aw *MCPToolCondition, taskScope bool) error {
+	if aw.AgentID == ReservedScopedAgentID {
+		return fmt.Errorf("config: %s.agentId %q is reserved and cannot be used as an agent id", path, aw.AgentID)
+	}
+	if aw.TimeWindow != "" {
+		if err := validateTimeWindow(path, aw.TimeWindow); err != nil {
+			return err
+		}
+	}
+	if len(aw.Groups) == 0 && len(aw.Users) == 0 {
+		return nil
+	}
+	if taskScope {
+		return fmt.Errorf("config: %s: groups/users are not supported in a task-scope allowWhen", path)
+	}
+	g, u, err := normalizePrincipals(path, aw.Groups, aw.Users)
+	if err != nil {
+		return err
+	}
+	// Store the trimmed, de-duplicated lists (as the wire path does) so a
+	// padded value cannot compile into a principal that never matches.
+	aw.Groups, aw.Users = g, u
 	return nil
 }
 
@@ -586,7 +640,7 @@ func validateScopes(s *MCPScopesConfig) error {
 				return fmt.Errorf("config: mcp.scopes.list[%q].tools[%d]: tool name must not be empty", sc.ID, j)
 			}
 		}
-		if err := validateToolConstraints(fmt.Sprintf("mcp.scopes.list[%q].constraints", sc.ID), sc.Constraints); err != nil {
+		if err := validateToolConstraints(fmt.Sprintf("mcp.scopes.list[%q].constraints", sc.ID), sc.Constraints, true); err != nil {
 			return err
 		}
 	}

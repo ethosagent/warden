@@ -1,11 +1,15 @@
 package alertpipeline
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/ethosagent/warden/internal/analytics"
+	"github.com/ethosagent/warden/internal/denyreason"
 	"github.com/ethosagent/warden/internal/integration"
 )
 
@@ -212,5 +216,79 @@ func TestBridgeEvent_AllowedMCPSessionNoFinding(t *testing.T) {
 	}
 	if _, ok := bridgeEvent("w1", e); ok {
 		t.Fatal("an allowed MCP WebSocket session (no Reason) must not produce a finding")
+	}
+}
+
+func blockedEvent(sub, email, domain string) analytics.Event {
+	return analytics.Event{
+		Timestamp: time.Now(),
+		Domain:    domain,
+		Decision:  "deny",
+		Reason:    string(denyreason.UserBlocked),
+		UserSub:   sub,
+		UserEmail: email,
+		URL:       "https://" + domain + "/x?token=SECRET123",
+	}
+}
+
+func TestBridgeUserBlocked(t *testing.T) {
+	a1, ok1 := bridgeEvent("w1", blockedEvent("sub-alice", "alice@corp.example", "a.example.com"))
+	a2, ok2 := bridgeEvent("w1", blockedEvent("sub-alice", "alice@corp.example", "b.example.com"))
+	b1, ok3 := bridgeEvent("w1", blockedEvent("sub-bob", "bob@corp.example", "a.example.com"))
+	if !ok1 || !ok2 || !ok3 {
+		t.Fatal("user_blocked events must produce findings")
+	}
+	if a1.DedupKey != a2.DedupKey {
+		t.Errorf("one user on two domains must share a key: %q vs %q", a1.DedupKey, a2.DedupKey)
+	}
+	if a1.DedupKey == b1.DedupKey {
+		t.Errorf("two users on one domain must differ: %q", a1.DedupKey)
+	}
+	sum := sha256.Sum256([]byte("sub-alice"))
+	if want := "user_blocked:" + hex.EncodeToString(sum[:])[:16]; a1.DedupKey != want {
+		t.Errorf("DedupKey = %q, want %q", a1.DedupKey, want)
+	}
+	if a1.Severity != integration.SevHigh || a1.Category != "security" || a1.RuleID != "user_blocked" {
+		t.Errorf("got severity=%v category=%q rule=%q", a1.Severity, a1.Category, a1.RuleID)
+	}
+	if a1.Subject.Domain != "" || a1.Subject.User != "sub-alice" || a1.Subject.Worker != "w1" {
+		t.Errorf("Subject = %+v", a1.Subject)
+	}
+	if want := "user blocked: " + hex.EncodeToString(sum[:])[:8] + " denied"; a1.Summary != want {
+		t.Errorf("Summary = %q, want %q", a1.Summary, want)
+	}
+	if a1.Evidence != "reason=user_blocked" {
+		t.Errorf("Evidence = %q", a1.Evidence)
+	}
+}
+
+func TestBridgeUserBlockedNoEmail(t *testing.T) {
+	f, ok := bridgeEvent("w1", blockedEvent("sub-alice", "alice@corp.example", "secret.example.com"))
+	if !ok {
+		t.Fatal("expected finding")
+	}
+	raw, err := json.Marshal(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(raw)
+	if !strings.Contains(s, f.DedupKey) || !strings.Contains(s, `"User":"sub-alice"`) && !strings.Contains(s, `"user":"sub-alice"`) {
+		t.Errorf("marshalled finding missing dedup key or Subject.User: %s", s)
+	}
+	if leak := containsAny(s, "alice@corp.example", "corp.example", "SECRET123", "secret.example.com"); leak != "" {
+		t.Errorf("finding leaks %q: %s", leak, s)
+	}
+}
+
+func TestBridgeUserBlockedNoSub(t *testing.T) {
+	f, ok := bridgeEvent("w1", blockedEvent("", "", "a.example.com"))
+	if !ok {
+		t.Fatal("expected finding")
+	}
+	if f.DedupKey != "user_blocked:unknown" || f.Severity != integration.SevHigh {
+		t.Errorf("DedupKey=%q severity=%v", f.DedupKey, f.Severity)
+	}
+	if f.Subject.User != "" || f.Subject.Domain != "" {
+		t.Errorf("Subject = %+v", f.Subject)
 	}
 }

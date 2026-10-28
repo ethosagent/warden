@@ -69,15 +69,46 @@ var All = slices.Concat(
 		// Versioned policy store (W-P1-PVER-01): the first start imports the YAML
 		// as version 1; a head written out of process reaches workers. In-process
 		// only (it writes the control plane's state database).
+		// Scheduled backups (W-P1-OPS1-06): a startup set, the next one past the
+		// interval on the fake clock, pruning, no key files. In-process only.
+		{Name: "backup_scheduled", Opts: backupOpts(), Run: backupScheduled},
+		// On-demand backup (W-P1-OPS1-11): POST /dashboard/api/backup is an
+		// audited admin action; 404 without --backup-dir. In-process only.
+		{Name: "backup_trigger_admin", Opts: backupTriggerOpts(), Run: backupTriggerAdmin},
+		{Name: "backup_trigger_disabled", Opts: backupTriggerDisabledOpts(), Run: backupTriggerDisabled},
+
 		{Name: "policy_store_versioned", Opts: policyStoreOpts(), Run: policyStoreVersioned},
 		// Initial import (W-P1-PVER-07): version 1 by system:import plus one
 		// audit row, enforcement unchanged, nothing more after a restart.
 		// In-process only (it reads the CP state dir).
 		{Name: "policy_store_initial_import", Opts: policyImportOpts(), Run: policyStoreInitialImport},
+		// Block-list store (W-P1-BLOCK-03): a block written through BlockStore by
+		// another process reaches the served policy (sub/email only) and leaves on
+		// removal. In-process only (it writes the CP state dir).
+		{Name: "block_list_served", Opts: blockListOpts(), Run: blockListServed},
+		// Block-list admin API (W-P1-BLOCK-11).
+		{Name: "block_api_bearer", Opts: blockAPIBearerOpts(), Run: blockAPIBearer},
+		{Name: "block_api_roles", Opts: blockAPIOIDCOpts(), Run: blockAPIRoles},
 		// Versioned publish (W-P1-PVER-02): dashboard policy and llmProviders
 		// saves create versions authored anonymous that workers enforce.
 		// In-process only (it reads the CP state dir).
 		{Name: "policy_store_dashboard_publish", Opts: policyStorePublishOpts(), Run: policyStoreDashboardPublish},
+		// Scoped policy (W-P1-GPOL-10): with identity off a scoped entry loads
+		// but allows nobody (identity_required); an unscoped entry still applies.
+		{Name: "scoped_policy_fail_closed", Run: scopedPolicyFailClosed},
+		// Per-request scoped decisions (W-P1-GPOL-10): each request, on h1 and
+		// every h2 stream, is decided with its own verified subject; members are
+		// forwarded, non-members and anonymous callers are denied.
+		{Name: "scoped_policy_deferred_identity", Opts: identityOpts(), Run: scopedPolicyDeferredIdentity},
+		// Replay of recorded identities (W-P1-GPOL-05): a candidate narrowing a
+		// scoped rule names the affected user and counts anonymous apart.
+		{Name: "scoped_policy_replay_affected_users", Opts: identityOpts(), Run: scopedPolicyReplayAffectedUsers},
+		// MCP subject seam (W-P1-GPOL-04): the verified subject reaches the MCP
+		// gateway through RequestMeta without changing any verdict.
+		{Name: "mcp_subject_seam_unchanged", Opts: mcpSubjectOpts(), Run: mcpSubjectSeamUnchanged},
+		// Group-gated MCP tools (W-P1-GPOL-11): allowWhen.groups is decided with
+		// the request's verified subject; non-members are denied mcp_tool_condition.
+		{Name: "mcp_group_condition", Opts: mcpGroupOpts(), Run: mcpGroupCondition},
 		// Version contract (W-P1-PVER-08): GET reports the head, If-Match names
 		// it, a stale save is a 409 naming the author and is audited rejected.
 		// In-process only (it reads the CP state dir).
@@ -103,6 +134,29 @@ var All = slices.Concat(
 		{Name: "policy_save_if_match_required", Opts: policySaveIfMatchOpts(), Run: policySaveIfMatchRequired},
 		// File mode saves without If-Match as before.
 		{Name: "policy_file_mode_save_without_if_match", Run: policyFileModeSaveWithoutIfMatch},
+
+		// Per-worker tokens (W-P1-WTOK-02): a bound token authenticates /policy,
+		// heartbeat and ingest, its bound id is what the CP records, an
+		// out-of-process revoke takes effect, and it opens no human route.
+		// In-process only (it writes the CP state dir, fake clock).
+		{Name: "worker_token_auth", Opts: workerTokenOpts(), Run: workerTokenAuth},
+		// Worker token admin API (W-P1-WTOK-03): an admin mints (shown once),
+		// lists and revokes tokens from the console; the fleet view shows how each
+		// worker authenticates; create and revoke are audited. In-process only.
+		{Name: "worker_token_admin_api", Opts: workerTokenAdminOpts(), Run: workerTokenAdminAPI},
+		// Without console sign-in the API is read-only: writes answer use_cli.
+		{Name: "worker_token_admin_use_cli", Opts: workerTokenOpts(), Run: workerTokenAdminUseCLI},
+		// Strict worker auth (W-P1-WTOK-04): --require-worker-tokens refuses the
+		// shared token on the worker routes while the admin token keeps dashboard
+		// and secret writes working; with no admin token both fail closed. Mixed
+		// mode marks shared-token workers legacy and warns once per proxy id.
+		// In-process only (state dir, fake clock).
+		{Name: "strict_worker_auth", Opts: strictAuthOpts(), Run: strictWorkerAuth},
+		{Name: "strict_worker_auth_no_admin_token", Opts: strictNoAdminOpts(), Run: strictNoAdminTokenFailsClosed},
+		{Name: "legacy_worker_token_warning", Run: legacyWorkerWarning},
+		// Held long-poll (W-P1-WTOK-09): a revoke out of process returns that
+		// token's held /policy with 401 while another token's stays parked.
+		{Name: "worker_token_longpoll_revoke", Opts: workerTokenOpts(), Run: workerTokenLongPollRevoke},
 
 		// Admin audit gate (W-P1-AAUD-05): enabled, the control plane writes the
 		// genesis entry and logs its key_id before serving. In-process only (it

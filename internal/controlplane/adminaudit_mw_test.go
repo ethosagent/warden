@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -97,6 +98,11 @@ func newAuditEnv(t *testing.T, o auditEnvOpts) *auditEnv {
 	cfg.Token, cfg.AdminToken = o.token, o.adminToken
 	cfg.State, cfg.Console, cfg.Logger = o.db, o.console, logger
 	cfg.Clock = clocktest.NewFake(time.Unix(1_800_000_000, 0))
+	tokens, err := NewWorkerTokenStore(o.db, StoreOptions{Clock: cfg.Clock, Logger: logger})
+	if err != nil {
+		t.Fatalf("NewWorkerTokenStore: %v", err)
+	}
+	cfg.WorkerTokens = tokens
 	cfg.SecretStore, cfg.SecretStoreBackend = secrets.NewEchoStore(), "echo"
 	if o.store != nil {
 		cfg.AdminAudit = o.store
@@ -193,10 +199,17 @@ var auditedRequests = map[routeKey]auditedRequest{
 	{http.MethodPost, "/dashboard/api/llmproviders"}:   {"/dashboard/api/llmproviders", `[{"name":"p1","baseURL":"https://api.openai.com/v1","model":"gpt-4o-mini","apiKeyEnv":"OPENAI_API_KEY"}]`},
 	{http.MethodPut, "/dashboard/api/llmproviders"}:    {"/dashboard/api/llmproviders", `[]`},
 	{http.MethodDelete, "/dashboard/api/sessions"}:     {"/dashboard/api/sessions?sub=nobody", ""},
+	{http.MethodPost, "/dashboard/api/backup"}:         {"/dashboard/api/backup", ""},
+	// The POST adds the entry the DELETE removes ({id} is filled in from the list).
+	{http.MethodPost, "/dashboard/api/blocked-users"}:        {"/dashboard/api/blocked-users", `{"email":"audit@corp.com","reason":"r"}`},
+	{http.MethodDelete, "/dashboard/api/blocked-users/{id}"}: {"/dashboard/api/blocked-users/{id}", ""},
 	// Served by the stub history TestAdminAuditAllAuditedRoutes installs.
 	{http.MethodPost, "/dashboard/api/policy/versions/{v}/rollback"}: {"/dashboard/api/policy/versions/1/rollback", `{}`},
 	{http.MethodPost, "/central/secrets"}:                            {"/central/secrets", `{"key":"CP_KEY","value":"v2"}`},
 	{http.MethodDelete, "/central/secrets/"}:                         {"/central/secrets/CP_KEY", ""},
+	// The revoke targets the token the create just minted ({tokid}).
+	{http.MethodPost, "/dashboard/api/worker-tokens"}:        {"/dashboard/api/worker-tokens", `{"name":"audit-tok","proxyID":"audit-worker"}`},
+	{http.MethodDelete, "/dashboard/api/worker-tokens/{id}"}: {"/dashboard/api/worker-tokens/{tokid}", ""},
 }
 
 // allAuditedRoutes lists every audited row of both route tables in a stable
@@ -234,9 +247,11 @@ func auditRow(k routeKey) authzRow {
 func TestAdminAuditAllAuditedRoutes(t *testing.T) {
 	e := newOIDCAuditEnv(t)
 	e.srv.dash.SetPolicyHistory(stubHistory{})
+	e.srv.dash.SetBackup(func() error { return nil })
 	admin := e.session(t, groupAdmin)
-	hashed := map[string]bool{"policy": true, "settings": true, "integrations": true, "detection": true, "llmproviders": true}
+	hashed := map[string]bool{"policy": true, "settings": true, "integrations": true, "detection": true, "llmproviders": true, "worker_tokens": true, "blocked_users": true}
 	routes := allAuditedRoutes()
+	var tokID string
 	if len(routes) != len(auditedRequests) {
 		t.Fatalf("%d audited routes but %d test requests; add the new route to auditedRequests", len(routes), len(auditedRequests))
 	}
@@ -247,9 +262,24 @@ func TestAdminAuditAllAuditedRoutes(t *testing.T) {
 		}
 		row := auditRow(k)
 		before := len(e.rec.inputs())
+		req.target = strings.ReplaceAll(req.target, "{tokid}", tokID)
+		if strings.Contains(req.target, "{id}") {
+			entries, err := e.srv.blocks.List(context.Background())
+			if err != nil || len(entries) == 0 {
+				t.Fatalf("no block entry to delete: %v", err)
+			}
+			req.target = strings.Replace(req.target, "{id}", entries[0].ID, 1)
+		}
 		rec := e.send(admin, "", k.Method, req.target, req.body, auditedHeaders[k]...)
 		if rec.Code/100 != 2 {
 			t.Fatalf("%s %s = %d %s, want 2xx", k.Method, req.target, rec.Code, rec.Body.String())
+		}
+		if k.Path == "/dashboard/api/worker-tokens" {
+			var made struct{ ID string }
+			if err := json.Unmarshal(rec.Body.Bytes(), &made); err != nil || made.ID == "" {
+				t.Fatalf("worker token create body has no id: %v", err)
+			}
+			tokID = made.ID
 		}
 		rows := e.rec.inputs()
 		if len(rows) != before+1 {
