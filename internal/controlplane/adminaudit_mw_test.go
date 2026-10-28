@@ -2,7 +2,6 @@ package controlplane
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -77,7 +76,7 @@ type auditEnv struct {
 	srv *Server
 	h   http.Handler
 	rec *fakeRecorder
-	log *bytes.Buffer
+	log *syncBuf
 }
 
 type auditEnvOpts struct {
@@ -482,7 +481,7 @@ func TestAdminAuditOpenWrites(t *testing.T) {
 
 func TestAdminAuditNoSecretLeak(t *testing.T) {
 	const canary = "s3cr3t-canary-123"
-	var global bytes.Buffer
+	var global syncBuf
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&global, nil)))
 	t.Cleanup(func() { slog.SetDefault(prev) })

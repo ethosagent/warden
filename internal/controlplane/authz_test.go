@@ -1,7 +1,6 @@
 package controlplane
 
 import (
-	"bytes"
 	"context"
 	"go/ast"
 	"go/parser"
@@ -33,7 +32,7 @@ const (
 type authzEnv struct {
 	srv    *Server
 	h      http.Handler
-	log    *bytes.Buffer
+	log    *syncBuf
 	policy string
 	clk    *clocktest.Fake // the CP clock port (rate limits)
 }
