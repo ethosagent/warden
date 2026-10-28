@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ethosagent/warden/internal/analytics"
 )
 
 // minimalConfig is a valid default-deny worker/control-plane config with every
@@ -328,4 +330,70 @@ func TestAdviseSubcommand_Errors(t *testing.T) {
 			t.Fatal("expected an error when judge/advisor is not configured")
 		}
 	})
+}
+
+// TestEvalCmd_AffectedUsers replays recorded identities against a candidate
+// that scopes api.github.com to sales: the affected users and the anonymous
+// count print, --user filters, and no token or group list reaches the output.
+func TestEvalCmd_AffectedUsers(t *testing.T) {
+	candidate := writeTempConfig(t, `
+policy:
+  allowlist:
+    - domain: api.github.com
+      groups: [sales]
+logging:
+  level: error
+  format: json
+`)
+	db := filepath.Join(t.TempDir(), "warden.db")
+	store, err := analytics.NewSQLiteStore(db, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev := func(sub, email, status string, groups ...string) analytics.Event {
+		return analytics.Event{
+			Domain: "api.github.com", Port: 443, Protocol: "https", Method: "GET",
+			URL: "https://api.github.com/x", Decision: "allow",
+			UserSub: sub, UserEmail: email, UserGroups: groups, IdentityStatus: status,
+		}
+	}
+	for _, e := range []analytics.Event{
+		ev("u-alice", "alice@corp.example", "valid", "eng"),
+		ev("u-bob", "bob@corp.example", "valid", "eng"),
+		ev("", "", "none"),
+	} {
+		if err := store.StoreEvent(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	run := func(extra ...string) string {
+		var out bytes.Buffer
+		root := newRootCmd()
+		root.SetArgs(append([]string{"policy", "eval", "--candidate", candidate, "--db", db}, extra...))
+		root.SetOut(&out)
+		root.SetErr(&out)
+		if err := root.Execute(); err != nil {
+			t.Fatalf("eval: %v", err)
+		}
+		return out.String()
+	}
+
+	out := run()
+	for _, want := range []string{"Affected users: alice@corp.example, bob@corp.example", "Anonymous events: 1"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "eng") || strings.Contains(out, "eyJ") {
+		t.Errorf("output leaks groups or a token:\n%s", out)
+	}
+
+	out = run("--user", "ALICE@corp.example")
+	if !strings.Contains(out, "alice@corp.example") || strings.Contains(out, "bob@corp.example") {
+		t.Errorf("--user did not filter to alice:\n%s", out)
+	}
 }
