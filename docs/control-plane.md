@@ -153,6 +153,12 @@ worker requires HTTPS for the policy pull.
   > `:ro` mount) the dashboard surfaces a `permission denied` error and editing
   > is effectively disabled. The control plane logs a clear warning at startup
   > when its served-config directory is not writable.
+  >
+  > **One control plane per state dir.** With `--state-dir` the control plane holds
+  > an exclusive lock on `<state-dir>/warden-cp.lock` (mode 0600, holds the PID for
+  > operators) for as long as it runs; a second control plane on the same dir fails
+  > with `state dir ... is in use by another control plane`. A crash drops the lock
+  > automatically, so there is no stale lock to clear. Unix only.
 - **Connected workers** — a live list of every worker the control plane has heard
   from (via policy pulls and analytics ingest): online/offline status, last-seen,
   last policy pull, and events forwarded. Hidden on a single-node dashboard.
@@ -285,6 +291,8 @@ needs a restart. It holds the *name* of the client-secret env var, never the sec
 | `session.idle`, `session.absolute` | `1h`, `12h` | `0 < idle <= absolute <= 168h`. |
 | `adminAudit.enabled` | `false` | Turns on the signed admin audit log; needs `--state-dir`. See [Admin audit log](#admin-audit-log). |
 | `trustedProxies` | none | CIDRs of reverse proxies in front of the control plane. Only a peer inside one may set the client address the admin audit log records, through `X-Forwarded-For`. A bare address or anything that is not a CIDR is a startup error. |
+
+Running the identity provider itself (Dex clients, connectors, the split-horizon issuer, failure modes and the production checklist) is covered in [Running Dex as Warden's identity provider](identity-dex.md).
 
 In `oidc` mode the control plane also needs a non-empty value in the client-secret env
 var and `--state-dir`; without either it refuses to start. See
@@ -507,6 +515,10 @@ chain still verifies. To catch that, the control plane also writes the chain to 
 - `msg=admin_audit.checkpoint`, the chain head (`head_seq`, `head_entry_hash`,
   `key_id`) at startup, every 5 minutes and at shutdown.
 
+For a closed, versioned JSON copy of the same entries (and these checkpoints) that a shipper
+can read without parsing the operational log, enable `audit.jsonLog`; see
+[siem.md](siem.md#admin-stream).
+
 Ship these lines off-host (your log collector or SIEM) where the control plane's state
 dir cannot reach them. The newest `admin_audit.checkpoint` or `admin_audit` line you
 hold is an anchor: verify the chain with `admin-audit verify --anchor <seq>:<entry_hash>`
@@ -622,6 +634,7 @@ fails when the two differ.
 | `/dashboard/api/analytics` | GET | viewer | `analytics.read` |
 | `/dashboard/api/audit` | GET | viewer | `audit.read` |
 | `/dashboard/api/audit/verify` | POST | viewer | `audit.verify` |
+| `/dashboard/api/backup` | POST | admin | `backup.run` |
 | `/dashboard/api/blocked-users` | GET | admin | `blocked_users.read` |
 | `/dashboard/api/blocked-users` | POST | admin | `blocked_users.add` |
 | `/dashboard/api/blocked-users/{id}` | DELETE | admin | `blocked_users.remove` |
@@ -915,6 +928,56 @@ YAML if the mirror is lost.
   removed, the served YAML is only the write-through mirror of head, and hand
   edits are never served (they come in through `warden policy import`).
 
+## Scheduled backups (`--backup-dir`)
+
+Off by default. With `--backup-dir` (which needs `--state-dir` and must not be
+inside it) the control plane writes a backup set at startup when none is newer
+than the interval, then every `--backup-interval` (default 24h, minimum 1h)
+after the newest set, on one background goroutine; a restart does not skip a
+due backup. `--backup-keep` (default 7, minimum 1) newest complete sets are
+kept; `--backup-include` picks from `cp`, `alerts`, `config` and `fleet`
+(default `cp,alerts,config`; `fleet` is opt-in).
+
+Each set is a directory named `<UTC time>Z` (`20060102T150405Z`) holding a
+consistent copy of each database (`warden-cp.db`, `warden-alerts.db`,
+`warden-fleet.db`), the served `config.yaml` and a `manifest.json` written last.
+It is built in `.tmp-<time>` and renamed into place, so a set directory exists
+only when complete. Directories are 0700 and files 0600. Each database copy is
+consistent on its own; the set is not one snapshot across databases. The
+manifest's sha256 values check integrity, not authenticity.
+
+A set never holds `cp-audit.key` (or its HMAC key), the identity provider's
+storage or the secret backend (`not_included` in the manifest). A store that is
+not running (no alert store, `--analytics-provider=memory`) is listed under
+`skipped`. A run needs 1.2x the source sizes free on the backup filesystem or it
+fails with `insufficient free space` and writes nothing. Each copy logs
+`msg=cp_backup` with `db`, `bytes`, `duration_ms` and `outcome`.
+
+### On-demand backups
+
+With `--backup-dir` set, `POST /dashboard/api/backup` (admin role, audited as
+`backup.run` on target `backup`) starts one backup in the background and answers
+`202 {"started":true}`. It answers `409 {"error":"backup_in_progress"}` while a
+run is active and `404` when `--backup-dir` is unset. The body is ignored. In
+`console.auth: none` the write guard applies as for every dashboard write (the
+admin bearer; no token configured means `403`). The outcome is the scheduled
+runner's: a failed run is logged and reported, not returned to the caller.
+
+For a stopped control plane use the offline command, which takes the state-dir
+lock, opens the databases directly and writes one set in the same layout:
+
+```sh
+warden control-plane backup --state-dir /data --backup-dir /backups \
+  [--backup-include cp,alerts,config,fleet] [--analytics-db PATH] [--alerts-db PATH]
+```
+
+It prints the set path and exits 0, or prints the error and exits 1. While a
+control plane holds the state dir it exits 1 with `control plane is running; use
+POST /dashboard/api/backup or stop it`. It never opens the admin audit store (the
+manifest has no `audit_key_fingerprint`), never starts a server and never prunes
+older sets. A database that does not exist (for example no fleet database) is
+listed under `skipped`; a missing `warden-cp.db` is an error.
+
 ## Worker tokens API
 
 With a state dir (`--state-dir`) the control plane keeps per-worker tokens (a worker
@@ -1186,7 +1249,8 @@ curl -X POST http://127.0.0.1:9090/admin/refresh-secrets \
 ## Identity verification
 
 A worker can attribute traffic to the person behind an agent by verifying a user
-token from an OIDC issuer (for example the reference Dex). It is **off unless
+token from an OIDC issuer (for example the reference Dex, see
+[identity-dex.md](identity-dex.md)). It is **off unless
 configured** and, in P1, only **attributes**: it records who made a request and
 never blocks one.
 

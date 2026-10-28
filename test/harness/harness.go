@@ -130,6 +130,14 @@ type H struct {
 	// against an endpoint that is never called.
 	auditLogs        bool
 	unreachableJudge bool
+	// fakeJudge (WithFakeJudge) is the counting judge endpoint; noProxyCA
+	// (WithoutProxyCA) boots the workers without a TLS-termination CA.
+	fakeJudge *FakeJudge
+	noProxyCA bool
+	// scopedAllow (WithScopedAllow) extends the control plane's boot YAML;
+	// closers run at cleanup, before the leak check.
+	scopedAllow []scopedAllowSpec
+	closers     []func()
 
 	// inflights is one quiescence tracker per worker (the assembly-only
 	// worker.Overrides.Inflight seam): every request scope enters at request-read
@@ -173,9 +181,14 @@ type H struct {
 	// wantAdminAudit (WithAdminAudit) boots the control plane with
 	// console.adminAudit.enabled and a state dir.
 	wantAdminAudit bool
+	// wantAdminJSONLog (WithAdminAuditJSONLog) also writes the admin stream as
+	// warden.admin.v1 lines to a file under the harness root (audit.jsonLog).
+	wantAdminJSONLog bool
 	// wantCPAdmin (WithControlPlaneAdminToken) boots the control plane with its
 	// own admin bearer (--admin-token-env), separate from the worker token.
 	wantCPAdmin bool
+	// wantBackup (WithBackup) boots the control plane with --backup-dir.
+	wantBackup bool
 
 	// tokenClients are the AgentWithProxyToken / AgentH2WithProxyToken clients,
 	// kept so cleanup can close their idle tunnels.
@@ -648,6 +661,9 @@ func (h *H) boot() {
 		if h.versionedPolicy {
 			h.tb.Fatalf("harness: WithVersionedPolicyStore boots an in-process control plane; it cannot combine with WithTarget")
 		}
+		if h.wantBackup {
+			h.tb.Fatalf("harness: WithBackup boots an in-process control plane; it cannot combine with WithTarget")
+		}
 		if h.cpDownAtBoot {
 			h.tb.Fatalf("harness: ControlPlaneDownAtBoot is an in-process fault; it cannot combine with WithTarget")
 		}
@@ -726,6 +742,7 @@ func (h *H) buildInprocessTarget() *inprocess {
 	h.applyConsole(&ip.cp.params, &ip.cp.addr)
 	h.applyPolicyStore(&ip.cp.params)
 	h.applyCPAdmin(&ip.cp.params)
+	h.applyBackup(&ip.cp.params)
 	h.applyStrict(&ip.cp.params)
 	return ip
 }
@@ -739,8 +756,13 @@ func (h *H) writeCPConfig() string {
 	for _, d := range h.allowDomains() {
 		fmt.Fprintf(&b, "    - domain: %s\n", d)
 	}
+	for _, sc := range h.scopedAllow {
+		fmt.Fprintf(&b, "    - domain: %s\n      groups: [%s]\n", sc.domain, strings.Join(sc.groups, ", "))
+	}
 	b.WriteString(h.identityYAML())
 	b.WriteString(h.consoleYAML())
+	b.WriteString(h.fakeJudgeYAML())
+	b.WriteString(h.auditJSONLogYAML())
 	b.WriteString(h.strictYAML())
 	path := filepath.Join(h.root, "cp-config.yaml")
 	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
@@ -827,14 +849,19 @@ func (h *H) workerParams(i int) worker.Params {
 		}
 	}
 	h.applyAuditLogs(i, &policy)
+	h.applyFakeJudge(&policy)
 	// The local allowlist mirrors the CP's. A managed worker ignores it (policy
 	// comes only from the control plane) but keeping the two in sync means a
 	// scenario's intent reads the same whichever mode boots.
+	caCert, caKey := h.proxyCACertDst, h.proxyCAKeyDst
+	if h.noProxyCA {
+		caCert, caKey = "", ""
+	}
 	return worker.Params{
 		Config:        &fakes.FakeConfigProvider{Policy: policy},
 		DBPath:        h.workerDBPath(i),
-		CACert:        h.proxyCACertDst,
-		CAKey:         h.proxyCAKeyDst,
+		CACert:        caCert,
+		CAKey:         caKey,
 		Version:       "harness",
 		AdminTokenEnv: adminTokenEnv,
 		Overrides: &worker.Overrides{
@@ -987,6 +1014,9 @@ func (h *H) cleanup() {
 		h.mu.Unlock()
 		for _, u := range ups {
 			u.close()
+		}
+		for _, c := range h.closers {
+			c()
 		}
 		if h.agentCl != nil {
 			h.agentCl.CloseIdleConnections()

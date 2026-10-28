@@ -31,7 +31,15 @@ func controlPlaneParams(cmd *cobra.Command) (controlplane.Params, error) {
 	policyStore, _ := cmd.Flags().GetString("policy-store")
 	auditKeyFile, _ := cmd.Flags().GetString("admin-audit-key-file")
 	auditNewSegment, _ := cmd.Flags().GetString("admin-audit-new-segment")
+	backup, err := backupConfig(cmd)
+	if err != nil {
+		return controlplane.Params{}, err
+	}
+	if err := backup.Validate(stateDir); err != nil {
+		return controlplane.Params{}, err
+	}
 	return controlplane.Params{
+		Backup: backup, Version: version,
 		ConfigPath: configPath, ListenAddr: listenAddr,
 		TokenEnv: tokenEnv, LegacyTokenEnv: legacyTokenEnv, AdminTokenEnv: adminTokenEnv,
 		RequireWorkerTokens: requireWorkerTokens, AllowInsecureWorkerAuth: allowInsecure,
@@ -42,6 +50,19 @@ func controlPlaneParams(cmd *cobra.Command) (controlplane.Params, error) {
 		PolicyStore:        policyStore,
 		AdminAuditKeyFile:  auditKeyFile, AdminAuditNewSegment: auditNewSegment,
 	}, nil
+}
+
+// backupConfig reads the --backup-* flags. Validation (and so the error that
+// names the flag) is BackupConfig.Validate's.
+func backupConfig(cmd *cobra.Command) (controlplane.BackupConfig, error) {
+	dir, err := cmd.Flags().GetString("backup-dir")
+	if err != nil {
+		return controlplane.BackupConfig{}, err
+	}
+	interval, _ := cmd.Flags().GetDuration("backup-interval")
+	keep, _ := cmd.Flags().GetInt("backup-keep")
+	include, _ := cmd.Flags().GetStringSlice("backup-include")
+	return controlplane.BackupConfig{Dir: dir, Interval: interval, Keep: keep, Include: include}, nil
 }
 
 // newControlPlaneCmd builds the `control-plane` subcommand. The control plane
@@ -91,7 +112,13 @@ func newControlPlaneCmd() *cobra.Command {
 	cmd.Flags().Bool("require-console-auth", false, "refuse to start unless console.auth is oidc (no open dashboard)")
 	cmd.Flags().String("admin-audit-key-file", "", "admin audit signing key (default <state-dir>/cp-audit.key; the HMAC key sits beside it); used when console.adminAudit.enabled")
 	cmd.Flags().String("admin-audit-new-segment", "", "key_id of a new admin audit signing key: start a new chain segment for it (manual rotation; no-op once the chain head is on that key)")
-	// Offline subcommands over the CP state dir.
-	cmd.AddCommand(newAdminAuditCmd(), newControlPlaneTokenCmd(), newControlPlaneBlockCmd())
+	cmd.Flags().String("backup-dir", "", "write scheduled backup sets of the CP state and served config here (empty = backups off; requires --state-dir; must not be inside it)")
+	cmd.Flags().Duration("backup-interval", controlplane.DefaultBackupInterval, "time between scheduled backups (minimum 1h)")
+	cmd.Flags().Int("backup-keep", controlplane.DefaultBackupKeep, "complete backup sets to keep (minimum 1)")
+	cmd.Flags().StringSlice("backup-include", controlplane.DefaultBackupInclude, "what a backup set contains, from cp,alerts,config,fleet (fleet is opt-in)")
+	// Offline subcommands (admin-audit is read-only over the CP state dir; backup
+	// takes the state-dir lock and writes only under --backup-dir; hash-password
+	// touches no state).
+	cmd.AddCommand(newAdminAuditCmd(), newHashPasswordCmd(), newBackupCmd(), newControlPlaneTokenCmd(), newControlPlaneBlockCmd())
 	return cmd
 }

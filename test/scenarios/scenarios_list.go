@@ -69,6 +69,14 @@ var All = slices.Concat(
 		// Versioned policy store (W-P1-PVER-01): the first start imports the YAML
 		// as version 1; a head written out of process reaches workers. In-process
 		// only (it writes the control plane's state database).
+		// Scheduled backups (W-P1-OPS1-06): a startup set, the next one past the
+		// interval on the fake clock, pruning, no key files. In-process only.
+		{Name: "backup_scheduled", Opts: backupOpts(), Run: backupScheduled},
+		// On-demand backup (W-P1-OPS1-11): POST /dashboard/api/backup is an
+		// audited admin action; 404 without --backup-dir. In-process only.
+		{Name: "backup_trigger_admin", Opts: backupTriggerOpts(), Run: backupTriggerAdmin},
+		{Name: "backup_trigger_disabled", Opts: backupTriggerDisabledOpts(), Run: backupTriggerDisabled},
+
 		{Name: "policy_store_versioned", Opts: policyStoreOpts(), Run: policyStoreVersioned},
 		// Initial import (W-P1-PVER-07): version 1 by system:import plus one
 		// audit row, enforcement unchanged, nothing more after a restart.
@@ -94,6 +102,10 @@ var All = slices.Concat(
 		{Name: "scoped_policy_deferred_identity", Opts: identityOpts(), Run: scopedPolicyDeferredIdentity},
 		// Replay of recorded identities (W-P1-GPOL-05): a candidate narrowing a
 		// scoped rule names the affected user and counts anonymous apart.
+		// Fleet flag (W-P1-GPOL-07): workers of this build advertise
+		// grouppolicy/v1; only a legacy worker is flagged noGroupPolicy while
+		// scoped rules are served.
+		{Name: "scoped_policy_fleet_flag", Opts: []harness.Option{harness.Fleet(1)}, Run: scopedPolicyFleetFlag},
 		{Name: "scoped_policy_replay_affected_users", Opts: identityOpts(), Run: scopedPolicyReplayAffectedUsers},
 		// MCP subject seam (W-P1-GPOL-04): the verified subject reaches the MCP
 		// gateway through RequestMeta without changing any verdict.
@@ -101,6 +113,26 @@ var All = slices.Concat(
 		// Group-gated MCP tools (W-P1-GPOL-11): allowWhen.groups is decided with
 		// the request's verified subject; non-members are denied mcp_tool_condition.
 		{Name: "mcp_group_condition", Opts: mcpGroupOpts(), Run: mcpGroupCondition},
+		// Dashboard editor round trip (W-P1-GPOL-08): groups/users saved through
+		// /dashboard/api/policy come back normalized and scoped, an empty chip is a
+		// 400, the worker enforces the rule and the GET lints a shadowing entry.
+		{Name: "scoped_policy_dashboard_editor", Opts: identityOpts(), Run: scopedPolicyDashboardEditor},
+		// Group-aware policy on the L1 harness (W-P1-GPOL-09): a {domain, groups}
+		// entry and a group-gated MCP tool, served by the control plane and
+		// decided per request. Every deny leaves the judge fake and the upstream
+		// untouched; no allow lets an identity header reach the upstream.
+		{Name: "groups_member_allowed", Opts: groupsOpts(), Run: groupsMemberAllowed},
+		{Name: "groups_nonmember_denied", Opts: groupsOpts(), Run: groupsNonMemberDenied},
+		{Name: "groups_anonymous_denied", Opts: groupsOpts(), Run: groupsAnonymousDenied},
+		{Name: "groups_expired_denied", Opts: groupsOpts(), Run: groupsExpiredDenied},
+		{Name: "groups_keepalive_mixed_users", Opts: groupsOpts(), Run: groupsKeepaliveMixedUsers},
+		{Name: "groups_h2_per_stream", Opts: groupsOpts(), Run: groupsH2PerStream},
+		{Name: "groups_no_ca_conditional", Opts: append(groupsOpts(), harness.WithoutProxyCA()), Run: groupsNoCAConditional},
+		{Name: "groups_raw_bytes_conditional", Opts: groupsOpts(), Run: groupsRawBytesConditional},
+		{Name: "groups_truncated", Opts: groupsOpts(), Run: groupsTruncated},
+		{Name: "groups_mcp_tool_gated", Opts: groupsMCPOpts(), Run: groupsMCPToolGated},
+		{Name: "groups_old_worker_denies", Opts: groupsMCPOpts(), Run: groupsOldWorkerDenies},
+		{Name: "groups_policy_eval_affected_users", Opts: groupsOpts(), Run: groupsPolicyEvalAffectedUsers},
 		// Version contract (W-P1-PVER-08): GET reports the head, If-Match names
 		// it, a stale save is a 409 naming the author and is audited rejected.
 		// In-process only (it reads the CP state dir).
@@ -160,6 +192,9 @@ var All = slices.Concat(
 		// traffic write none. In-process only (it reads the CP state dir).
 		{Name: "admin_audit_records_bearer_write", Opts: adminAuditBearerOpts(), Run: adminAuditRecordsBearerWrite},
 		// In oidc mode a viewer's refused write is one denied row; no session, no row.
+		// JSON admin stream (W-P1-JAUD-03): the checkpoint and an admin write are
+		// warden.admin.v1 lines equal to the stored row. In-process only.
+		{Name: "admin_audit_json_log_writes_lines", Opts: adminAuditJSONLogOpts(), Run: adminAuditJSONLogWritesLines},
 		{Name: "admin_audit_records_viewer_denied", Opts: adminAuditOIDCOpts(), Run: adminAuditRecordsViewerDenied},
 		// Login and logout events (W-P1-AAUD-07): a sign-in, a no-role sign-in and a
 		// logout are one row each, for the verified user. In-process only (issuer
