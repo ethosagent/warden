@@ -78,13 +78,12 @@ var All = slices.Concat(
 		// saves create versions authored anonymous that workers enforce.
 		// In-process only (it reads the CP state dir).
 		{Name: "policy_store_dashboard_publish", Opts: policyStorePublishOpts(), Run: policyStoreDashboardPublish},
-		// Scoped policy (W-P1-GPOL-02): the evaluator is subject-aware but the
-		// load guard still refuses groups/users, so a scoped save is a 400 and
-		// the destination stays denied; an unscoped save still applies.
+		// Scoped policy (W-P1-GPOL-10): with identity off a scoped entry loads
+		// but allows nobody (identity_required); an unscoped entry still applies.
 		{Name: "scoped_policy_fail_closed", Run: scopedPolicyFailClosed},
-		// Deferred identity (W-P1-GPOL-03): the CONNECT gate decides with the
-		// verified subject; a member's token still does not open a scoped host
-		// while the load guard keeps scoped rules out.
+		// Per-request scoped decisions (W-P1-GPOL-10): each request, on h1 and
+		// every h2 stream, is decided with its own verified subject; members are
+		// forwarded, non-members and anonymous callers are denied.
 		{Name: "scoped_policy_deferred_identity", Opts: identityOpts(), Run: scopedPolicyDeferredIdentity},
 		// Version contract (W-P1-PVER-08): GET reports the head, If-Match names
 		// it, a stale save is a 409 naming the author and is audited rejected.

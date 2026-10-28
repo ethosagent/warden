@@ -258,9 +258,9 @@ type AllowlistEntry struct {
 
 	// W-P1-GPOL-01 identity scope: limit the entry to IdP groups (exact,
 	// case-sensitive) and/or named users (email, lowercased, or exact sub).
-	// Empty = global, as before. Rejected at load until the evaluator
-	// enforces them ("not yet enforced"), so a scoped rule is never parsed and
-	// then treated as global.
+	// Empty = global, as before. Enforced per request with the verified
+	// subject: a scoped entry never allows an anonymous request, and a
+	// non-member is denied outright (never sent to the judge).
 	Groups []string `yaml:"groups,omitempty" json:"groups,omitempty"`
 	Users  []string `yaml:"users,omitempty" json:"users,omitempty"`
 
@@ -574,12 +574,12 @@ func validate(p Policy) error {
 				return err
 			}
 		}
-		// W-P1-GPOL-01: validate the values, then fail closed until enforced.
+		// W-P1-GPOL-01/-10: validate the principal values. The evaluator
+		// enforces them per request (and the wire projects them fail-closed),
+		// so an allow entry may carry groups/users; the MCP allowWhen guard
+		// stays until the gateway enforces them.
 		path := fmt.Sprintf("policy.allowlist[%d]", i)
 		if _, _, err := normalizePrincipals(path, e.Groups, e.Users); err != nil {
-			return err
-		}
-		if err := rejectUnenforcedPrincipals(path, e.Groups, e.Users); err != nil {
 			return err
 		}
 		// Regex domain: ~<pattern>

@@ -66,19 +66,34 @@ func loadErr(t *testing.T, y string) error {
 	return err
 }
 
-func TestAllowlistGroupsRejectedUntilEnforced(t *testing.T) {
-	for _, field := range []string{"groups: [eng]", "users: [alice@corp.example]"} {
+func TestAllowlistGroupsAccepted(t *testing.T) {
+	for _, field := range []string{"groups: [eng]", "users: [Alice@Corp.Example]"} {
 		y := "policy:\n  allowlist:\n    - domain: a.com\n    - domain: b.com\n      " + field + "\n"
-		err := loadErr(t, y)
-		if err == nil || !strings.Contains(err.Error(), "policy.allowlist[1]") || !strings.Contains(err.Error(), "not yet enforced") {
-			t.Errorf("%s: err = %v", field, err)
+		prov, err := NewLocalYAMLProvider(writeTemp(t, y))
+		if err != nil {
+			t.Fatalf("%s: %v", field, err)
+		}
+		pol, err := prov.GetPolicy()
+		if err != nil {
+			t.Fatal(err)
+		}
+		e := pol.Allowlist[1]
+		if len(e.Groups)+len(e.Users) != 1 {
+			t.Errorf("%s: entry lost its principals: %+v", field, e)
 		}
 	}
-	// Bad values report their own path before the guard.
+	// Bad values still report their own path.
 	err := loadErr(t, "policy:\n  allowlist:\n    - domain: a.com\n      groups: [ok, '']\n")
 	if err == nil || !strings.Contains(err.Error(), "policy.allowlist[0].groups[1]") {
 		t.Errorf("empty group: %v", err)
 	}
+}
+
+// TestGuardStillRejectsOtherPaths: only the allow-entry guard was lifted.
+func TestGuardStillRejectsOtherPaths(t *testing.T) {
+	t.Run("mcp allowWhen", func(t *testing.T) { TestMCPAllowWhenGroupsRejectedUntilEnforced(t) })
+	t.Run("denylist", func(t *testing.T) { TestDenylistGroupsRejected(t) })
+	t.Run("task scope", func(t *testing.T) { TestScopeConstraintGroupsRejected(t) })
 }
 
 const mcpHead = "policy: { allowlist: [ { domain: a.com } ] }\nmcp:\n  enabled: true\n  mode: enforce\n"

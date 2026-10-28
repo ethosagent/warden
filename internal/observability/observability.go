@@ -93,6 +93,7 @@ type Metrics struct {
 	secretSwaps    metric.Int64Counter
 	scanFindings   metric.Int64Counter
 	judge          metric.Int64Counter
+	scoped         metric.Int64Counter
 	identityVerify metric.Int64Counter
 	auditLines     metric.Int64Counter
 	auditErrors    metric.Int64Counter
@@ -240,6 +241,12 @@ func newMetrics(provider *sdkmetric.MeterProvider, serviceVersion string) (*Metr
 		metric.WithDescription("Total LLM judge decisions by outcome."),
 	); err != nil {
 		return nil, fmt.Errorf("observability: judge counter: %w", err)
+	}
+	if m.scoped, err = meter.Int64Counter(
+		"warden.policy.scoped.total",
+		metric.WithDescription("Per-request decisions on identity-scoped allow entries by result (allow, not_member, no_identity)."),
+	); err != nil {
+		return nil, fmt.Errorf("observability: policy scoped counter: %w", err)
 	}
 	if m.auditLines, err = meter.Int64Counter(
 		"warden.auditlog.lines.total",
@@ -393,6 +400,18 @@ func (m *Metrics) RecordJudge(outcome string) {
 	}
 	m.judge.Add(context.Background(), 1, metric.WithAttributes(
 		attribute.String("outcome", outcome),
+	))
+}
+
+// RecordScoped increments warden.policy.scoped.total{result}. result is a
+// bounded enum (allow|not_member|no_identity); there is deliberately no user,
+// group or token label.
+func (m *Metrics) RecordScoped(result string) {
+	if m == nil {
+		return
+	}
+	m.scoped.Add(context.Background(), 1, metric.WithAttributes(
+		attribute.String("result", result),
 	))
 }
 

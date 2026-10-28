@@ -1,93 +1,153 @@
 package scenarios
 
 import (
-	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/ethosagent/warden/test/fakes"
 	"github.com/ethosagent/warden/test/harness"
 )
 
-// The scoped-policy fail-closed scenario (W-P1-GPOL-02): the evaluator can now
-// decide a request for a subject (policy.EvaluateFor), but the proxy does not
-// use it yet and the load guard still refuses identity-scoped allow entries.
-// Pushing a rule with groups through the policy API is therefore a 400, the
-// scoped destination stays denied at the proxy (never allowed as if global),
-// and an ordinary unscoped save afterwards still applies.
+// The scoped-policy scenarios (W-P1-GPOL-10). A scoped allow entry
+// ({domain, groups}) now loads and is decided on every request with that
+// request's verified subject; entries without groups/users behave as before.
 
 const (
 	scopedHost = "scoped.example.com"
 	plainHost  = "plain.example.com"
 )
 
-func scopedPolicyFailClosed(t *testing.T, h *harness.H) {
-	h.Upstream(scopedHost)
-	h.Upstream(plainHost)
-	cp := h.CP()
-
-	save := func(entry map[string]any) harness.CPResponse {
-		t.Helper()
-		raw, err := json.Marshal(map[string]any{"allowlist": []map[string]any{entry}, "denylist": []map[string]any{}})
-		if err != nil {
-			t.Fatal(err)
-		}
-		r, err := cp.Send(http.MethodPost, "/dashboard/api/policy", nil, raw)
-		if err != nil {
-			t.Fatalf("POST policy: %v", err)
-		}
-		return r
-	}
-
-	if r := save(map[string]any{"domain": scopedHost, "groups": []string{"eng"}}); r.Status != http.StatusBadRequest {
-		t.Fatalf("scoped save = %d %s, want 400 (not yet enforced)", r.Status, r.Body)
-	}
-	if got := connectStatus(t, h, scopedHost+":443"); got != http.StatusForbidden {
-		t.Fatalf("CONNECT %s = %d, want 403: a scoped rule must never load as a global one", scopedHost, got)
-	}
-	if r := save(map[string]any{"domain": plainHost}); r.Status != http.StatusOK {
-		t.Fatalf("unscoped save = %d %s, want 200", r.Status, r.Body)
-	}
-	h.Eventually("workers enforce the unscoped save", func() bool {
-		return connectStatus(t, h, plainHost+":443") == http.StatusOK
-	})
-	if got := connectStatus(t, h, scopedHost+":443"); got != http.StatusForbidden {
-		t.Errorf("CONNECT %s = %d, want 403 after the unscoped save", scopedHost, got)
-	}
-}
-
-// The deferred-identity scenario (W-P1-GPOL-03): the CONNECT gate now decides
-// with the connection's verified subject and fails closed on identity-
-// conditional results, but the load guard still keeps scoped rules out, so a
-// member's token must not open a scoped host. A verified member of the group
-// presents a token on CONNECT: the scoped save is refused (400), the scoped
-// host stays 403 with and without the token, and each refusal is audited.
-func scopedPolicyDeferredIdentity(t *testing.T, h *harness.H) {
-	h.Upstream(scopedHost)
-	cp := h.CP()
-	member := h.MintUserToken(fakes.Valid("alice", "alice@example.com", "eng"))
-	auth := "Basic " + base64.StdEncoding.EncodeToString([]byte("session:"+member))
-
-	raw, err := json.Marshal(map[string]any{"allowlist": []map[string]any{{"domain": scopedHost, "groups": []string{"eng"}}}, "denylist": []map[string]any{}})
+// savePolicy POSTs an allowlist through the dashboard policy API.
+func savePolicy(t *testing.T, h *harness.H, entries ...map[string]any) harness.CPResponse {
+	t.Helper()
+	raw, err := json.Marshal(map[string]any{"allowlist": entries, "denylist": []map[string]any{}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r, err := cp.Send(http.MethodPost, "/dashboard/api/policy", nil, raw); err != nil || r.Status != http.StatusBadRequest {
-		t.Fatalf("scoped save = %v %v, want 400 (not yet enforced)", r.Status, err)
+	r, err := h.CP().Send(http.MethodPost, "/dashboard/api/policy", nil, raw)
+	if err != nil {
+		t.Fatalf("POST policy: %v", err)
 	}
-	for _, a := range []string{auth, ""} {
-		if got := h.ConnectStatusWithAuth(scopedHost+":443", a); got != http.StatusForbidden {
-			t.Fatalf("CONNECT %s (token=%t) = %d, want 403", scopedHost, a != "", got)
+	return r
+}
+
+// getStatus sends one GET to host through cl, optionally with the identity
+// header, and returns the status.
+func getStatus(t *testing.T, cl *http.Client, host, token string) int {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, "https://"+host+"/x", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token != "" {
+		req.Header.Set("X-Warden-Identity", "Bearer "+token)
+	}
+	resp, err := cl.Do(req)
+	if err != nil {
+		t.Fatalf("GET %s: %v", host, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return resp.StatusCode
+}
+
+func denyCount(h *harness.H, host, reason string) int {
+	n := 0
+	for _, e := range h.Events() {
+		if e.Decision == "deny" && e.Domain == host && e.Reason == reason {
+			n++
 		}
 	}
-	h.Eventually("every scoped CONNECT is audited as a deny", func() bool {
-		n := 0
-		for _, e := range h.Events() {
-			if e.Decision == "deny" && e.Domain == scopedHost {
-				n++
+	return n
+}
+
+// scopedPolicyFailClosed: the worker's identity mode is off, so no request has
+// a subject. The scoped save loads (200), the scoped host is denied with
+// identity_required and never reaches the upstream, and the plain entry saved
+// beside it still works.
+func scopedPolicyFailClosed(t *testing.T, h *harness.H) {
+	scoped := h.Upstream(scopedHost)
+	h.Upstream(plainHost)
+
+	if r := savePolicy(t, h, map[string]any{"domain": scopedHost, "groups": []string{"eng"}}, map[string]any{"domain": plainHost}); r.Status != http.StatusOK {
+		t.Fatalf("scoped save = %d %s, want 200", r.Status, r.Body)
+	}
+	h.Eventually("workers enforce the save", func() bool {
+		return connectStatus(t, h, plainHost+":443") == http.StatusOK
+	})
+	if got := getStatus(t, h.Agent(), scopedHost, ""); got != http.StatusForbidden {
+		t.Fatalf("GET %s = %d, want 403: a scoped rule never allows a request without identity", scopedHost, got)
+	}
+	h.Eventually("the deny is audited as identity_required", func() bool {
+		return denyCount(h, scopedHost, "identity_required") == 1
+	})
+	if n := len(scoped.Requests()); n != 0 {
+		t.Errorf("scoped upstream saw %d requests, want 0", n)
+	}
+	if got := getStatus(t, h.Agent(), plainHost, ""); got != http.StatusOK {
+		t.Errorf("GET %s = %d, want 200", plainHost, got)
+	}
+}
+
+// scopedPolicyDeferredIdentity: with identity on, one tunnel carries requests
+// from different users and each is decided by its own subject, on HTTP/1.1 and
+// on every h2 stream. A member is forwarded, a non-member and an anonymous
+// caller get 403 (group_not_allowed / identity_required) and the upstream never
+// sees them, and warden_policy_scoped_total counts the three outcomes with no
+// user or group label.
+func scopedPolicyDeferredIdentity(t *testing.T, h *harness.H) {
+	up := h.Upstream(scopedHost)
+	member := h.MintUserToken(fakes.Valid("alice", "alice@example.com", "eng"))
+	other := h.MintUserToken(fakes.Valid("sam", "sam@example.com", "sales"))
+
+	if r := savePolicy(t, h, map[string]any{"domain": scopedHost, "groups": []string{"eng"}}, map[string]any{"domain": plainHost}); r.Status != http.StatusOK {
+		t.Fatalf("scoped save = %d %s, want 200", r.Status, r.Body)
+	}
+	h.Eventually("workers enforce the save", func() bool {
+		return connectStatus(t, h, plainHost+":443") == http.StatusOK
+	})
+
+	for _, tc := range []struct {
+		name string
+		cl   func() *http.Client
+	}{{"h1", h.Agent}, {"h2", h.AgentH2}} {
+		cl := tc.cl()
+		if got := getStatus(t, cl, scopedHost, member); got != http.StatusOK {
+			t.Fatalf("%s: member request = %d, want 200", tc.name, got)
+		}
+		// On h1 a deny ends the tunnel, so each refusal gets a fresh client.
+		if got := getStatus(t, tc.cl(), scopedHost, other); got != http.StatusForbidden {
+			t.Fatalf("%s: non-member request = %d, want 403", tc.name, got)
+		}
+		if got := getStatus(t, tc.cl(), scopedHost, ""); got != http.StatusForbidden {
+			t.Fatalf("%s: anonymous request = %d, want 403", tc.name, got)
+		}
+	}
+	// A member's token on CONNECT is verified there too.
+	if got := getStatus(t, h.AgentWithProxyToken(member), scopedHost, ""); got != http.StatusOK {
+		t.Fatalf("member via Proxy-Authorization = %d, want 200", got)
+	}
+
+	h.Eventually("every refusal is audited with its reason", func() bool {
+		return denyCount(h, scopedHost, "group_not_allowed") == 2 && denyCount(h, scopedHost, "identity_required") == 2
+	})
+	if n := len(up.Requests()); n != 3 {
+		t.Errorf("upstream saw %d requests, want 3 (members only)", n)
+	}
+	if h.MetricsAvailable() {
+		m := h.Metrics()
+		for result, want := range map[string]float64{"allow": 3, "not_member": 2, "no_identity": 2} {
+			if got := m[harness.MetricKey("warden.policy.scoped.total", map[string]string{"result": result})]; got != want {
+				t.Errorf("warden.policy.scoped.total{result=%s} = %v, want %v", result, got, want)
 			}
 		}
-		return n == 2
-	})
+		for k := range m {
+			if strings.HasPrefix(k, "warden.policy.scoped.total") && (strings.Contains(k, "user") || strings.Contains(k, "group")) {
+				t.Errorf("scoped metric carries a user/group label: %s", k)
+			}
+		}
+	}
 }

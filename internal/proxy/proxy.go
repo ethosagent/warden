@@ -254,6 +254,9 @@ type MetricsRecorder interface {
 	RecordJudge(outcome string)
 	ObserveAddedLatency(stage string, d time.Duration)
 	RecordIdentityVerify(result, reason string)
+	// RecordScoped counts a decision that depended on the request subject
+	// (result: allow|not_member|no_identity). No user or group label.
+	RecordScoped(result string)
 }
 
 // CostEstimator is the consumer-side seam for the optional LLM cost estimator.
@@ -275,6 +278,7 @@ func (nopMetrics) RecordScanFinding(kind string)                     {}
 func (nopMetrics) RecordJudge(outcome string)                        {}
 func (nopMetrics) ObserveAddedLatency(stage string, d time.Duration) {}
 func (nopMetrics) RecordIdentityVerify(result, reason string)        {}
+func (nopMetrics) RecordScoped(result string)                        {}
 
 // Judge renders an allow/deny verdict for a request that matched no static
 // rule. It is defined here (consumer-side) so the proxy does not depend on the

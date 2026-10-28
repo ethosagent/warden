@@ -65,9 +65,10 @@ func normalizePrincipalList(path string, in []string, users bool) ([]string, err
 	return out, nil
 }
 
-// rejectUnenforcedPrincipals is the fail-closed guard: until the evaluator
-// (allow entries) and the MCP gateway (allowWhen) enforce groups/users, a rule
-// that sets them is refused at load rather than parsed and treated as global.
+// rejectUnenforcedPrincipals is the fail-closed guard: until the MCP gateway
+// enforces groups/users on allowWhen, a rule that sets them is refused at load
+// rather than parsed and treated as global. Allow entries no longer use it
+// (W-P1-GPOL-10: the proxy decides them per request).
 func rejectUnenforcedPrincipals(path string, groups, users []string) error {
 	if len(groups) > 0 {
 		return fmt.Errorf("config: %s.groups: not yet enforced; remove it (a scoped rule must never load as a global one)", path)

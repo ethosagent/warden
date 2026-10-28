@@ -294,8 +294,15 @@ func parseRemotePolicy(body []byte) (*Policy, *SettingsWire, error) {
 	for i := range p.Denylist {
 		p.Denylist[i].Domain = strings.ToLower(p.Denylist[i].Domain)
 	}
-	// validate refuses scoped entries in the plain allowlist (the fail-closed
-	// guard), so it sees the merged list with principals stripped; the real
+	// The wire carries scoped entries only in scopedAllowlist: a plain entry
+	// with principals is what an older worker would read as global, so it is
+	// refused here even though validate (W-P1-GPOL-10) now accepts principals.
+	for i, e := range p.Allowlist {
+		if len(e.Groups) > 0 || len(e.Users) > 0 {
+			return nil, nil, fmt.Errorf("config: remote: policy.allowlist[%d]: groups/users belong in scopedAllowlist", i)
+		}
+	}
+	// validate sees the merged list with principals stripped; the real
 	// principals are validated by mergeScopedAllow.
 	merged, scoped, err := mergeScopedAllow(p.Allowlist, w.ScopedAllowlist, w.ScopedAllowPos)
 	if err != nil {
