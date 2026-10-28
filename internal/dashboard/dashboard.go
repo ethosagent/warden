@@ -268,6 +268,10 @@ type WorkerView struct {
 	// Caps are the capabilities the worker advertised on its latest heartbeat
 	// (display only; the control plane never acts on them in P1).
 	Caps []string `json:"caps,omitempty"`
+	// NoGroupPolicy is true when the served policy has identity-scoped rules
+	// and the worker does not advertise grouppolicy/v1: it denies those
+	// destinations (fail closed). Set by the control plane per snapshot.
+	NoGroupPolicy bool `json:"noGroupPolicy"`
 }
 
 // NewServer constructs a dashboard Server. The policy argument is the static

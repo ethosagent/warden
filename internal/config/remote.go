@@ -44,10 +44,17 @@ type RemoteProvider struct {
 // ignores the list, so the control plane uses this to flag it.
 const CapBlocklistV1 = "blocklist/v1"
 
+// CapGroupPolicyV1 is the capability a worker advertises when it understands
+// identity-scoped policy rules (scopedAllowlist, scoped MCP conditions). An old
+// worker denies scoped destinations (fail closed), so the control plane uses
+// this to flag it while scoped rules are served. The value must match the
+// control plane's capPattern or it is dropped.
+const CapGroupPolicyV1 = "grouppolicy/v1"
+
 // WorkerCaps returns the sorted capabilities this binary implements. Later
 // features append their own constant here.
 func WorkerCaps() []string {
-	caps := []string{CapBlocklistV1}
+	caps := []string{CapBlocklistV1, CapGroupPolicyV1}
 	sort.Strings(caps)
 	return caps
 }

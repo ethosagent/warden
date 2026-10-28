@@ -201,6 +201,9 @@ type Server struct {
 	// blocked_users overlay is registered).
 	blocks  *BlockStore
 	writeMu sync.Mutex // serializes policy + integrations edits
+	// gp holds the scoped-rule count of the served ETag and the per-worker
+	// "lacks grouppolicy" log marks (W-P1-GPOL-07).
+	gp groupPolicyFlags
 	// pipeline is the embeddable alert-delivery assembly (manager + engine + tick +
 	// bridge). Nil when no alert DB path is configured (or when its store/manager
 	// failed to build — fail-open: a broken alert config never stops policy
@@ -595,6 +598,7 @@ func (s *Server) Handler() http.Handler {
 	dash.SetWorkers(func() []dashboard.WorkerView {
 		cur := s.policy.currentETag()
 		views := tracker.Views()
+		FlagNoGroupPolicy(views, s.scopedEntries())
 		for i := range views {
 			views[i].Behind = views[i].PolicyETag != "" && views[i].PolicyETag != cur
 		}
@@ -672,7 +676,9 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	}
 	// Body is optional/tiny; ignore decode errors (heartbeat is best-effort).
 	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body)
-	s.registry.SeenHeartbeat(principal.ProxyID, trimETag(body.PolicyETag), normalizeCaps(body.Caps))
+	caps := normalizeCaps(body.Caps)
+	s.registry.SeenHeartbeat(principal.ProxyID, trimETag(body.PolicyETag), caps)
+	s.noteGroupPolicy(principal.ProxyID, caps)
 	w.WriteHeader(http.StatusNoContent)
 }
 
