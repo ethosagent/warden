@@ -14,6 +14,7 @@ import (
 
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/denyreason"
+	"github.com/ethosagent/warden/internal/identity"
 )
 
 // Scheme identifies the request scheme, used to infer the default port when an
@@ -61,6 +62,12 @@ const (
 	// Allow still default-deny on NoMatch (NoMatch != Allow), so behaviour is
 	// unchanged when the judge is disabled.
 	NoMatch
+	// Conditional means the destination is only reachable with a verified
+	// identity and the request has none (or none that qualifies yet): a scoped
+	// allow entry matched but its principals could not be checked. It is never
+	// judge-eligible, and a caller that does not know it must treat it as Deny
+	// (it is != Allow). Appended last so existing numeric values are unchanged.
+	Conditional
 )
 
 // String renders a decision for logging.
@@ -70,6 +77,8 @@ func (d Decision) String() string {
 		return "allow"
 	case NoMatch:
 		return "no-match"
+	case Conditional:
+		return "conditional"
 	default:
 		return "deny"
 	}
@@ -83,6 +92,23 @@ func (d Decision) String() string {
 type RequestVerdict struct {
 	Decision Decision
 	Reason   denyreason.Reason
+	// Scoped is true when at least one identity-scoped (groups/users) entry
+	// matched the destination, so the decision depends on who is asking.
+	Scoped bool
+}
+
+// RequestContext is everything the evaluator needs to decide one request for
+// one subject. Method == "" is the CONNECT / destination-only form (constraints
+// could-match, the rate limit is peeked); a non-empty Method is per-request
+// enforcement (constraints enforced, the rate limit counted). Subject is nil
+// when the caller has no verified identity.
+type RequestContext struct {
+	Domain  string
+	Port    int
+	Scheme  Scheme
+	Method  string
+	Path    string
+	Subject *identity.Subject
 }
 
 // evalMode selects how evaluate treats #371 constraints and rate-limit
@@ -124,10 +150,15 @@ type Evaluator struct {
 	// Rate limiting (fixed-window).
 	mu         sync.Mutex
 	rateLimits map[int]parsedRateLimit // index into allowlist -> parsed limit
-	counters   map[string]*rateState   // key: "pattern:port" -> state
+	counters   map[string]*rateState   // key: "pattern:port" (scoped: "#<index>|pattern:port") -> state
 
 	// Time-window rules.
 	timeWindows map[int]parsedTimeWindow // index into allowlist -> parsed window
+
+	// Identity scoping: one compiled Principals per scoped entry (nil for an
+	// unscoped entry, which admits everyone), and whether any entry is scoped.
+	principals []*identity.Principals
+	hasScoped  bool
 
 	// For testability.
 	now func() time.Time
@@ -188,6 +219,8 @@ func cloneAllowlist(entries []config.AllowlistEntry) []config.AllowlistEntry {
 	for i := range out {
 		out[i].Methods = append([]string(nil), entries[i].Methods...)
 		out[i].Paths = append([]string(nil), entries[i].Paths...)
+		out[i].Groups = append([]string(nil), entries[i].Groups...)
+		out[i].Users = append([]string(nil), entries[i].Users...)
 	}
 	return out
 }
@@ -200,6 +233,8 @@ func (e *Evaluator) load(p config.Policy) {
 	regexCache := make(map[string]*regexp.Regexp)
 	rateLimits := make(map[int]parsedRateLimit)
 	timeWindows := make(map[int]parsedTimeWindow)
+	var principals []*identity.Principals
+	hasScoped := false
 
 	// Pre-compile regexes from allowlist and denylist. The cache is keyed by the
 	// RAW pattern: in a "~regex" a trailing '.' is a regex metacharacter, not a
@@ -222,6 +257,14 @@ func (e *Evaluator) load(p config.Policy) {
 
 	// Parse rate limits and time windows (indexed into allowlist).
 	for i, entry := range allowlist {
+		if len(entry.Groups) > 0 || len(entry.Users) > 0 {
+			if principals == nil {
+				principals = make([]*identity.Principals, len(allowlist))
+			}
+			pr := identity.CompilePrincipals(entry.Groups, entry.Users)
+			principals[i] = &pr
+			hasScoped = true
+		}
 		if entry.RateLimit != "" {
 			if rl, err := parseRateLimit(entry.RateLimit); err == nil {
 				rateLimits[i] = rl
@@ -252,6 +295,8 @@ func (e *Evaluator) load(p config.Policy) {
 	e.regexCache = regexCache
 	e.rateLimits = rateLimits
 	e.timeWindows = timeWindows
+	e.principals = principals
+	e.hasScoped = hasScoped
 	// Reset rate-limit counters: a policy swap starts fresh fixed windows.
 	e.mu.Lock()
 	e.counters = make(map[string]*rateState)
@@ -292,14 +337,21 @@ func (e *Evaluator) IsBlocked(sub, email string) bool {
 // the destination admits it) and the rate limit counts per tunnel, exactly as
 // before #371. Per-request enforcement is EvaluateRequest's job.
 func (e *Evaluator) Evaluate(domain string, port int, scheme Scheme) Decision {
-	return e.evaluate(domain, port, scheme, "", "", evalTunnel).Decision
+	v := e.evaluate(RequestContext{Domain: domain, Port: port, Scheme: scheme}, evalTunnel, false)
+	if v.Decision == Conditional {
+		return Deny
+	}
+	return v.Decision
 }
 
-// EvaluateRequest evaluates ONE request against the policy (#371). method/path
-// must be exactly what goes upstream: the method as sent (case-sensitive;
-// entries were uppercased at config load) and the RAW percent-encoded path —
-// URL.EscapedPath() on HTTP/1.1, the :path pseudo-header on HTTP/2 — with no
-// decoding on either side.
+// EvaluateRequest evaluates ONE request against the policy (#371) with no
+// subject: EvaluateFor with a nil Subject, where a Conditional result (a
+// scoped destination) collapses to Deny/identity_required, so every caller
+// that does not know about identity stays default-deny for scoped
+// destinations. method/path must be exactly what goes upstream: the method as
+// sent (case-sensitive; entries were uppercased at config load) and the RAW
+// percent-encoded path — URL.EscapedPath() on HTTP/1.1, the :path
+// pseudo-header on HTTP/2 — with no decoding on either side.
 //
 //   - method != "" (request mode): entries with `methods`/`paths` enforce them;
 //     a destination match that violates them is an explicit Deny (never
@@ -309,18 +361,53 @@ func (e *Evaluator) Evaluate(domain string, port int, scheme Scheme) Decision {
 //     could-match and the rate limit is peeked, not consumed; the per-request
 //     evaluation is authoritative and counts exactly once.
 //
-// Constraint order inside an entry is time window → method → path → rate
-// limit, so a constraint-violating request never consumes rate-limit budget.
+// Constraint order inside an entry is principal → time window → method → path
+// → rate limit, so a constraint-violating request never consumes rate-limit
+// budget.
 func (e *Evaluator) EvaluateRequest(domain string, port int, scheme Scheme, method, path string) RequestVerdict {
-	mode := evalRequest
-	if method == "" {
-		mode = evalConnect
+	v := e.EvaluateFor(RequestContext{Domain: domain, Port: port, Scheme: scheme, Method: method, Path: path})
+	if v.Decision == Conditional {
+		return RequestVerdict{Decision: Deny, Reason: denyreason.IdentityRequired}
 	}
-	return e.evaluate(domain, port, scheme, method, path, mode)
+	return v
 }
 
-// evaluate is the single core behind Evaluate and EvaluateRequest.
-func (e *Evaluator) evaluate(domain string, port int, scheme Scheme, method, path string, mode evalMode) RequestVerdict {
+// EvaluateFor decides one request for rc.Subject (W-P1-GPOL-02). Per entry the
+// order is port and domain, principal, time window, method, path, rate limit:
+// a non-member never consumes a scoped entry's rate budget, and a method/path
+// constraint is only judged for a principal the entry admits. Unscoped entries
+// admit everyone, including a nil subject.
+//
+// Outcome: Allow if any entry admits the request. Otherwise Conditional with
+// identity_required when a scoped entry was skipped because the subject is nil
+// (identity could still satisfy it, so this outranks other rejections).
+// Otherwise the existing guard reason of a principal-admitted entry that was
+// rejected. Otherwise, for scoped entries only, Deny with
+// identity_groups_truncated when a truncated group list may explain the miss,
+// else group_not_allowed. A destination that matched an entry by domain and
+// port never returns NoMatch, so it can never reach the judge.
+func (e *Evaluator) EvaluateFor(rc RequestContext) RequestVerdict {
+	mode := evalRequest
+	if rc.Method == "" {
+		mode = evalConnect
+	}
+	return e.evaluate(rc, mode, false)
+}
+
+// PeekFor runs EvaluateFor's walk but never charges a rate-limit counter, in
+// any mode — for explain tooling and callers that decide before charging.
+func (e *Evaluator) PeekFor(rc RequestContext) RequestVerdict {
+	mode := evalRequest
+	if rc.Method == "" {
+		mode = evalConnect
+	}
+	return e.evaluate(rc, mode, true)
+}
+
+// evaluate is the single core behind Evaluate, EvaluateRequest, EvaluateFor
+// and PeekFor. peek forces the rate limit to be peeked in every mode.
+func (e *Evaluator) evaluate(rc RequestContext, mode evalMode, peek bool) RequestVerdict {
+	domain, port, scheme, method, path := rc.Domain, rc.Port, rc.Scheme, rc.Method, rc.Path
 	// Read-lock the policy-derived state so a concurrent Replace can't swap it
 	// mid-evaluation. This is a read lock: concurrent Evaluate calls do not
 	// contend with each other, only with a (rare) Replace.
@@ -328,7 +415,7 @@ func (e *Evaluator) evaluate(domain string, port int, scheme Scheme, method, pat
 	defer e.swapMu.RUnlock()
 
 	enforce := mode == evalRequest
-	count := mode != evalConnect
+	count := mode != evalConnect && !peek
 
 	// ONE host normalisation for the whole evaluation (#397): everything below
 	// — deny, the canonical-path pre-pass, allow, rate-limit keys — sees this
@@ -369,6 +456,7 @@ func (e *Evaluator) evaluate(domain string, port int, scheme Scheme, method, pat
 	// must not reach the judge.
 	matchedEntry := false
 	var methodViolated, pathViolated, timeWindowExcluded, rateLimited bool
+	var scoped, identitySkipped, notMember, truncatedMiss bool
 	for i, entry := range e.allowlist {
 		if inferredPort(entry.Port, scheme) != port {
 			continue
@@ -377,6 +465,27 @@ func (e *Evaluator) evaluate(domain string, port int, scheme Scheme, method, pat
 			continue
 		}
 		matchedEntry = true
+
+		// Principal check: a scoped entry admits only a subject it names.
+		// Unscoped entries (nil principals) admit everyone, nil subject too.
+		entryScoped := false
+		if e.hasScoped {
+			if pr := e.principals[i]; pr != nil {
+				entryScoped = true
+				scoped = true
+				switch pr.Match(rc.Subject) {
+				case identity.NoIdentity:
+					identitySkipped = true
+					continue
+				case identity.NotMember:
+					notMember = true
+					continue
+				case identity.TruncatedMiss:
+					truncatedMiss = true
+					continue
+				}
+			}
+		}
 
 		// Time window check (hours in server local time).
 		// If this entry fails, try next entry.
@@ -418,6 +527,11 @@ func (e *Evaluator) evaluate(domain string, port int, scheme Scheme, method, pat
 		// is exhausted, try next entry.
 		if rl, ok := e.rateLimits[i]; ok {
 			key := fmt.Sprintf("%s:%d", rateLimitPattern(entry.Domain), inferredPort(entry.Port, scheme))
+			if entryScoped {
+				// Scoped entries get their own bucket per entry, never shared
+				// with an unscoped entry (or another scoped one) for the host.
+				key = fmt.Sprintf("#%d|%s", i, key)
+			}
 			if count {
 				if !e.checkRateLimit(key, rl) {
 					rateLimited = true
@@ -429,24 +543,31 @@ func (e *Evaluator) evaluate(domain string, port int, scheme Scheme, method, pat
 			}
 		}
 
-		return RequestVerdict{Decision: Allow}
+		return RequestVerdict{Decision: Allow, Scoped: scoped}
 	}
 	if matchedEntry {
+		if identitySkipped {
+			return RequestVerdict{Decision: Conditional, Reason: denyreason.IdentityRequired, Scoped: true}
+		}
 		// Destination is allowlisted but every matching entry rejected it: an
 		// explicit Deny — not judge-eligible. A constraint violation names
 		// itself; a guard rejection names its guard (#409). Order mirrors the
 		// per-entry check order: path, method, then the guards.
 		switch {
 		case pathViolated:
-			return RequestVerdict{Decision: Deny, Reason: denyreason.PathNotAllowed}
+			return RequestVerdict{Decision: Deny, Reason: denyreason.PathNotAllowed, Scoped: scoped}
 		case methodViolated:
-			return RequestVerdict{Decision: Deny, Reason: denyreason.MethodNotAllowed}
+			return RequestVerdict{Decision: Deny, Reason: denyreason.MethodNotAllowed, Scoped: scoped}
 		case timeWindowExcluded:
-			return RequestVerdict{Decision: Deny, Reason: denyreason.TimeWindow}
+			return RequestVerdict{Decision: Deny, Reason: denyreason.TimeWindow, Scoped: scoped}
 		case rateLimited:
-			return RequestVerdict{Decision: Deny, Reason: denyreason.RateLimited}
+			return RequestVerdict{Decision: Deny, Reason: denyreason.RateLimited, Scoped: scoped}
+		case truncatedMiss:
+			return RequestVerdict{Decision: Deny, Reason: denyreason.IdentityGroupsTruncated, Scoped: true}
+		case notMember:
+			return RequestVerdict{Decision: Deny, Reason: denyreason.GroupNotAllowed, Scoped: true}
 		}
-		return RequestVerdict{Decision: Deny}
+		return RequestVerdict{Decision: Deny, Scoped: scoped}
 	}
 	return RequestVerdict{Decision: NoMatch}
 }

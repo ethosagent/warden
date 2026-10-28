@@ -127,6 +127,11 @@ func authzTable() map[routeKey]authzRow {
 		{get, "/dashboard/api/policy/versions/{v}", readRow(viewer, "policy.version.read")},
 		{get, "/dashboard/api/policy/versions/{v}/diff", readRow(viewer, "policy.diff")},
 		{post, "/dashboard/api/policy/versions/{v}/rollback", auditedRow(editor, "policy.rollback", "policy")},
+		// The user block list (W-P1-BLOCK-11). Requests are matched on their
+		// template ({id} is any entry id; dashboard.RoutePath).
+		{get, "/dashboard/api/blocked-users", readRow(admin, "blocked_users.read")},
+		{post, "/dashboard/api/blocked-users", auditedRow(admin, "blocked_users.add", blockedUsersTarget)},
+		{del, "/dashboard/api/blocked-users/{id}", auditedRow(admin, "blocked_users.remove", blockedUsersTarget)},
 		// Served by the control plane itself, ahead of dash.Handler (cpDashboardRoutes).
 		{get, "/dashboard/api/sessions", readRow(admin, "sessions.read")},
 		{del, "/dashboard/api/sessions", auditedRow(admin, "sessions.revoke", "sessions")},

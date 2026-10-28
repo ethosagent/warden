@@ -282,3 +282,32 @@ func TestRecordIdentityVerify(t *testing.T) {
 		t.Errorf("identity counter did not reach 2\n---\n%s", body)
 	}
 }
+
+func TestScopedCounterScrape(t *testing.T) {
+	m, h, shutdown := newWithHandler(t)
+	defer func() { _ = shutdown(context.Background()) }()
+
+	for _, r := range []string{"allow", "not_member", "no_identity"} {
+		m.RecordScoped(r)
+	}
+	body := scrape(t, h)
+	for _, r := range []string{"allow", "not_member", "no_identity"} {
+		want := `warden_policy_scoped_total{`
+		found := false
+		for _, line := range strings.Split(body, "\n") {
+			if strings.HasPrefix(line, want) && strings.Contains(line, `result="`+r+`"`) {
+				found = true
+				for _, bad := range []string{"user", "group", "sub", "email"} {
+					if strings.Contains(strings.SplitN(line, " ", 2)[0], bad) {
+						t.Errorf("scoped series carries a %q label: %s", bad, line)
+					}
+				}
+			}
+		}
+		if !found {
+			t.Errorf("scrape lacks warden_policy_scoped_total{result=%q}:\n%s", r, body)
+		}
+	}
+	var nilM *Metrics
+	nilM.RecordScoped("allow") // nil-safe
+}

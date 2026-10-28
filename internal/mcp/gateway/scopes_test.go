@@ -38,7 +38,7 @@ func scopeCfg(mode, outOfScope string) config.MCPConfig {
 // TestScopeInScopeAllows: a tool in the active scope with conforming args passes.
 func TestScopeInScopeAllows(t *testing.T) {
 	gw := newGW(t, scopeCfg(modeEnforce, "deny"))
-	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "get_user", `{"id":"42"}`))
+	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "get_user", `{"id":"42"}`), RequestMeta{})
 	if v.Action != Pass {
 		t.Fatalf("in-scope call must Pass, got %v (%q)", v.Action, v.Reason)
 	}
@@ -51,7 +51,7 @@ func TestScopeInScopeAllows(t *testing.T) {
 // base policy) is denied in enforce with a bounded mcp_out_of_scope reason.
 func TestScopeOutOfScopeDenies(t *testing.T) {
 	gw := newGW(t, scopeCfg(modeEnforce, "deny"))
-	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "send_email", `{"to":"x@y.com"}`))
+	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "send_email", `{"to":"x@y.com"}`), RequestMeta{})
 	if v.Action != Deny || v.Reason != "mcp_out_of_scope" {
 		t.Fatalf("want Deny/mcp_out_of_scope, got action=%v reason=%q", v.Action, v.Reason)
 	}
@@ -72,7 +72,7 @@ func TestScopeOutOfScopeDenies(t *testing.T) {
 // never blocks.
 func TestScopeMonitorLogsButAllows(t *testing.T) {
 	gw := newGW(t, scopeCfg(modeMonitor, "deny"))
-	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "send_email", `{"to":"x@y.com"}`))
+	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "send_email", `{"to":"x@y.com"}`), RequestMeta{})
 	if v.Action != Pass {
 		t.Fatalf("monitor must Pass, got %v", v.Action)
 	}
@@ -87,7 +87,7 @@ func TestScopeRestrictionOverridesScope(t *testing.T) {
 	cfg := scopeCfg(modeEnforce, "deny")
 	cfg.Tools.Deny = []string{"read_file"} // read_file is IN the scope, but restricted
 	gw := newGW(t, cfg)
-	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "read_file", `{"path":"/a"}`))
+	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "read_file", `{"path":"/a"}`), RequestMeta{})
 	if v.Action != Deny || v.Reason != "mcp_tool_denied" {
 		t.Fatalf("restriction must win: want Deny/mcp_tool_denied, got action=%v reason=%q", v.Action, v.Reason)
 	}
@@ -101,7 +101,7 @@ func TestScopeRestrictionOverridesScope(t *testing.T) {
 func TestScopeConstraintsEnforced(t *testing.T) {
 	gw := newGW(t, scopeCfg(modeEnforce, "deny"))
 	// get_user is in scope, but its id must match ^[0-9]+$; "abc" violates it.
-	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "get_user", `{"id":"abc"}`))
+	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "get_user", `{"id":"abc"}`), RequestMeta{})
 	if v.Action != Deny || v.Reason != "mcp_args_constraint" {
 		t.Fatalf("want Deny/mcp_args_constraint, got action=%v reason=%q", v.Action, v.Reason)
 	}
@@ -118,7 +118,7 @@ func TestScopeConstraintsEnforced(t *testing.T) {
 // channel configured, an out-of-scope call still denies (never silently allowed).
 func TestScopeEscalateDegradesToDeny(t *testing.T) {
 	gw := newGW(t, scopeCfg(modeEnforce, "escalate"))
-	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "send_email", `{"to":"x@y.com"}`))
+	v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "send_email", `{"to":"x@y.com"}`), RequestMeta{})
 	if v.Action != Deny || v.Reason != "mcp_out_of_scope" {
 		t.Fatalf("escalate w/o channel must degrade to Deny, got action=%v reason=%q", v.Action, v.Reason)
 	}
@@ -137,12 +137,12 @@ func TestScopePerAgentOverride(t *testing.T) {
 
 	// triage-bot -> triage-readonly: send_email is out of scope.
 	gwTriage := newGWAgent(t, cfg, "triage-bot")
-	if v := gwTriage.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "send_email", `{}`)); v.Action != Deny {
+	if v := gwTriage.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "send_email", `{}`), RequestMeta{}); v.Action != Deny {
 		t.Fatalf("triage-bot: send_email must be out-of-scope Deny, got %v", v.Action)
 	}
 	// An agent with no PerAgent entry and no global ActiveScope is unscoped.
 	gwOther := newGWAgent(t, cfg, "other")
-	if v := gwOther.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "send_email", `{}`)); v.Action != Pass {
+	if v := gwOther.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "send_email", `{}`), RequestMeta{}); v.Action != Pass {
 		t.Fatalf("unscoped agent: send_email must Pass, got %v (%q)", v.Action, v.Reason)
 	}
 }
@@ -151,7 +151,7 @@ func TestScopePerAgentOverride(t *testing.T) {
 // any base-allowed tool passes.
 func TestScopeAbsentUnchanged(t *testing.T) {
 	gw := newGW(t, baseCfg(modeEnforce))
-	if v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "send_email", `{}`)); v.Action != Pass {
+	if v := gw.OnRequest("s1", "tools/call", "", nil, toolCall(`"1"`, "send_email", `{}`), RequestMeta{}); v.Action != Pass {
 		t.Fatalf("no scoping: base-allowed tool must Pass, got %v", v.Action)
 	}
 }

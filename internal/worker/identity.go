@@ -29,6 +29,12 @@ type identityWiring struct {
 	// live is the identity config the proxy is serving: the verifier (nil when
 	// off), the inputs it was built from, and the mode.
 	live liveIdentity
+
+	// scoped returns how many live allow entries are identity-scoped (nil =
+	// unknown, no warning). warned is the count already warned about while the
+	// mode is off, so the WARN repeats only when that count changes.
+	scoped func() int
+	warned int
 }
 
 type liveIdentity struct {
@@ -86,12 +92,46 @@ func (w *identityWiring) apply(s config.IdentitySettings, agents []config.AgentP
 		// The verifier and its key stay, so turning attribute back on with the
 		// same inputs reuses it.
 		w.live.mode = proxy.IdentityModeOff
+		w.warnScopedWithoutIdentity()
 	case config.IdentityModeAttribute:
+		w.warned = 0
 		w.applyAttribute(s)
 	default:
 		w.logger.Warn("identity settings ignored; keeping previous identity config",
 			"reason", "unknown identity mode", "mode", mode)
 	}
+}
+
+// warnScopedWithoutIdentity logs one WARN per agent and scoped-entry count when
+// identity-scoped allow entries exist but this agent's identity mode is off:
+// without verification no request has a subject, so every scoped destination is
+// denied (identity_required). It logs the count only, never group names.
+func (w *identityWiring) warnScopedWithoutIdentity() {
+	n := 0
+	if w.scoped != nil {
+		n = w.scoped()
+	}
+	if n == 0 {
+		w.warned = 0
+		return
+	}
+	if n == w.warned {
+		return
+	}
+	w.warned = n
+	w.logger.Warn("identity-scoped allow entries exist but identity verification is off for this agent; scoped destinations are denied (identity_required)",
+		"agent", w.agentID, "scopedEntries", n)
+}
+
+// countScoped counts allow entries limited to groups or users.
+func countScoped(p config.Policy) int {
+	n := 0
+	for _, e := range p.Allowlist {
+		if len(e.Groups) > 0 || len(e.Users) > 0 {
+			n++
+		}
+	}
+	return n
 }
 
 func (w *identityWiring) applyAttribute(s config.IdentitySettings) {

@@ -91,7 +91,7 @@ func TestProxy_SetMCPGateway_RaceFree(t *testing.T) {
 				default:
 					if gw := p.mcpGateway(); gw != nil {
 						_ = gw.OnRequest("agent:host", "POST",
-							"https://host/mcp", http.Header{}, []byte(mcpReadFileBody))
+							"https://host/mcp", http.Header{}, []byte(mcpReadFileBody), gateway.RequestMeta{})
 					}
 				}
 			}

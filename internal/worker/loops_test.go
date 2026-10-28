@@ -87,6 +87,10 @@ func (e *recordingEvaluator) EvaluateRequest(string, int, policy.Scheme, string,
 
 func (e *recordingEvaluator) IsBlocked(string, string) bool { return false }
 
+func (e *recordingEvaluator) EvaluateFor(policy.RequestContext) policy.RequestVerdict {
+	return policy.RequestVerdict{}
+}
+
 func (e *recordingEvaluator) Replace(p config.Policy) {
 	e.mu.Lock()
 	e.replaced = append(e.replaced, p)
