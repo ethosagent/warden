@@ -73,7 +73,9 @@ func TestControlPlaneStateDirLock(t *testing.T) {
 	}
 
 	// A second CP on the same state dir is refused and does not disturb the first.
-	err = controlplane.Run(context.Background(), &cpSyncBuffer{}, controlplane.Params{
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel2() // a regressed lock would serve; the timeout fails the test instead of hanging
+	err = controlplane.Run(ctx2, &cpSyncBuffer{}, controlplane.Params{
 		ConfigPath: writeTempConfig(t, minimalConfig), StateDir: stateDir,
 		ListenAddr: "127.0.0.1:0", AnalyticsProvider: "memory",
 	})

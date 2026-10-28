@@ -65,16 +65,15 @@ func TestAcquireDirLock_MissingDir(t *testing.T) {
 // TestAcquireDirLock_HelperProcess is the re-executed child: it takes the lock,
 // tells the parent, then blocks until killed.
 func TestAcquireDirLock_HelperProcess(t *testing.T) {
-	dir := os.Getenv("CPSTATE_LOCK_HELPER_DIR")
-	if dir == "" {
-		t.Skip("helper process only")
+	if dir := os.Getenv("CPSTATE_LOCK_HELPER_DIR"); dir != "" {
+		if _, err := AcquireDirLock(dir); err != nil {
+			os.Stdout.WriteString("ERR " + err.Error() + "\n")
+			os.Exit(2)
+		}
+		os.Stdout.WriteString("LOCKED\n")
+		time.Sleep(time.Minute)
+		os.Exit(0)
 	}
-	if _, err := AcquireDirLock(dir); err != nil {
-		os.Stdout.WriteString("ERR " + err.Error() + "\n")
-		os.Exit(2)
-	}
-	os.Stdout.WriteString("LOCKED\n")
-	time.Sleep(time.Minute)
 }
 
 func TestAcquireDirLock_ReleasedOnProcessDeath(t *testing.T) {
