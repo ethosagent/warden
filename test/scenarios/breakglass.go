@@ -31,7 +31,7 @@ func breakGlassPost(t *testing.T, b *harness.Browser, user, password string) (*h
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := b.DoBody(http.MethodPost, "/auth/breakglass", jsonHeader, string(body))
+	resp, err := b.DoBody(http.MethodPost, "/auth/breakglass", jsonHeader, body)
 	if err != nil {
 		t.Fatalf("POST /auth/breakglass: %v", err)
 	}
