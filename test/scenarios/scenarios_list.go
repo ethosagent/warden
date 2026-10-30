@@ -281,14 +281,16 @@ var All = slices.Concat(
 		// warden.admin.v1 checkpoint at startup and every 5 minutes of the CP's
 		// clock. In-process only (fake clock, CP state dir).
 		{Name: "admin_audit_checkpoint", Opts: adminAuditOpts(), Run: adminAuditCheckpoint},
-		// Signing keys (W-P2-KEYS-02): keys.enabled creates an active and a next
-		// key per purpose in the file store and keeps them across a restart; a
-		// key store that is down at startup never stops the control plane and
-		// signing recovers with the store; a control plane without keys keeps no
-		// key table. In-process only (they stop and start the CP and read its
-		// state dir).
+		// Signing keys (W-P2-KEYS-02, W-P2-KEYS-07): keys.enabled creates an
+		// active and a next key per purpose in the file store or the AWS
+		// Secrets Manager backend and keeps them across a restart; a key store
+		// that is down at startup never stops the control plane and signing
+		// recovers with the store; the worker namespace cannot resolve a key
+		// secret; a control plane without keys keeps no key table. In-process
+		// only (they stop and start the CP and read its state dir).
 		{Name: "keys_file_store_restart", Opts: keysOpts(), Run: keysFileStoreRestart},
 		{Name: "keys_backend_down_recovers", Opts: keysFlakyOpts(), Run: keysBackendDownRecovers},
+		{Name: "keys_aws_store_restart", Opts: keysAWSOpts(), Run: keysAWSStoreRestart},
 		{Name: "keys_disabled_creates_nothing", Opts: []harness.Option{harness.WithBackup()}, Run: keysDisabledCreatesNothing},
 	},
 	// Canary across protocols x allow/deny; see canary.go.

@@ -9,6 +9,7 @@ import (
 	"github.com/ethosagent/warden/internal/cpstate"
 	"github.com/ethosagent/warden/internal/integration"
 	"github.com/ethosagent/warden/internal/keys"
+	"github.com/ethosagent/warden/internal/secrets"
 	"github.com/ethosagent/warden/test/fakes"
 )
 
@@ -51,6 +52,35 @@ func WithFlakyKeyStore() Option {
 	}
 }
 
+// The AWS Secrets Manager namespaces of WithAWSKeyStore: the control plane's
+// role sees only the CP-local keys prefix; AWSWorkerNamePrefix stands in for
+// secretStore.aws.namePrefix, the prefix a worker's role is scoped to.
+const (
+	// AWSRegion is the region the harness config names (a fixture value, safe
+	// to log).
+	AWSRegion = "eu-central-1"
+	// AWSKeysNamePrefix is the CP-local keys namespace the harness config
+	// names. The worker namespace needs no literal: it is the secretStore
+	// default, secrets.DefaultAWSNamePrefix.
+	AWSKeysNamePrefix = "warden-cp-keys/"
+)
+
+// AWSWorkerNamePrefix is secretStore.aws.namePrefix, the prefix a worker's
+// role is scoped to (the secretStore default).
+var AWSWorkerNamePrefix = secrets.DefaultAWSNamePrefix
+
+// WithAWSKeyStore is WithKeys with the private-key store on the AWS Secrets
+// Manager backend (keys.store.backend: aws) over a fake account. The control
+// plane gets only the CP-scoped role of that account; scenarios inspect the
+// account itself (any role) via h.AWSKeysAccount(). The file backend is left
+// untouched, so the CP state dir keeps no keys/ directory.
+func WithAWSKeyStore() Option {
+	return func(h *H) {
+		h.wantKeys = true
+		h.awsAccount = fakes.NewFakeAWSSecretsClient()
+	}
+}
+
 func (h *H) applyKeys(p *controlplane.Params) {
 	if !h.wantKeys {
 		return
@@ -61,6 +91,9 @@ func (h *H) applyKeys(p *controlplane.Params) {
 	p.Clock = h.fake
 	if h.keyStore != nil {
 		p.KeyStore = h.keyStore
+	}
+	if h.awsAccount != nil {
+		p.KeysAWSClient = h.awsAccount.View(AWSKeysNamePrefix)
 	}
 	p.Findings = &h.keyState
 	p.KeysReady = func(m *keys.Manager) {
@@ -75,6 +108,9 @@ func (h *H) keysYAML() string {
 	if !h.wantKeys {
 		return ""
 	}
+	if h.awsAccount != nil {
+		return "\nkeys:\n  enabled: true\n  store:\n    backend: aws\n    aws:\n      region: " + AWSRegion + "\n      namePrefix: " + AWSKeysNamePrefix + "\n"
+	}
 	return "\nkeys:\n  enabled: true\n"
 }
 
@@ -85,6 +121,17 @@ func (h *H) KeyStore() *fakes.FakeKeyStore {
 		h.tb.Fatal("harness: KeyStore needs the WithFlakyKeyStore option")
 	}
 	return h.keyStore
+}
+
+// AWSKeysAccount is the fake Secrets Manager account of WithAWSKeyStore,
+// reached with an unrestricted role: a scenario seeds orphans or reads
+// whatever role-scoped view it needs from it.
+func (h *H) AWSKeysAccount() *fakes.FakeAWSSecretsClient {
+	h.tb.Helper()
+	if h.awsAccount == nil {
+		h.tb.Fatal("harness: AWSKeysAccount needs the WithAWSKeyStore option")
+	}
+	return h.awsAccount
 }
 
 // KeyManager is the key manager of the control plane's latest start.
