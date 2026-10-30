@@ -84,4 +84,10 @@ func printRestoreSummary(cmd *cobra.Command, res controlplane.RestoreResult) {
 	}
 	_, _ = fmt.Fprintf(w, "WARNING: worker-token revocations, user blocks and policy versions made after %s "+
 		"are not in this backup; re-apply them from the admin_audit JSON log.\n", res.CreatedAt.UTC().Format(time.RFC3339))
+	if len(res.KeysMissingMaterial) > 0 {
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
+			"WARNING: the restored %s signing keys have no key material (a backup set never contains the key store); "+
+				"regenerate each with `warden control-plane keys reset --purpose <purpose> --yes` (docs/runbooks/key-rotation.md)\n",
+			strings.Join(res.KeysMissingMaterial, ", "))
+	}
 }

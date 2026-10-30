@@ -72,7 +72,9 @@ var ErrBackupStopped = errors.New("backup runner is stopping")
 var errBackupSpace = errors.New("insufficient free space")
 
 // backupNotIncluded is what a set never contains, recorded in every manifest.
-var backupNotIncluded = []string{"cp-audit.key", "IdP storage", "secret backend"}
+// The signing key material is not restorable from a set: after a restore the
+// operator regenerates the purposes with `warden control-plane keys reset`.
+var backupNotIncluded = []string{"cp-audit.key", "signing key material", "IdP storage", "secret backend"}
 
 var (
 	backupSetRe = regexp.MustCompile(`^\d{8}T\d{6}Z$`)

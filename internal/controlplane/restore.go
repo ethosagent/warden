@@ -18,7 +18,9 @@ import (
 	"github.com/ethosagent/warden/internal/adminaudit"
 	"github.com/ethosagent/warden/internal/audit"
 	"github.com/ethosagent/warden/internal/clock"
+	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/cpstate"
+	"github.com/ethosagent/warden/internal/keys/adapters/filestore"
 )
 
 // The verified restore (W-P1-OPS1-04) loads a backup set written by the runner
@@ -96,6 +98,11 @@ type RestoreResult struct {
 	// Audited is false when the restored state has no admin audit chain
 	// (so no cp.restore row was appended).
 	Audited bool
+	// KeysMissingMaterial names the purposes whose next or active signing key
+	// has no readable private material after the restore: a backup set never
+	// contains the key store (the manifest lists it under not_included), so
+	// the operator regenerates each named purpose with `keys reset`.
+	KeysMissingMaterial []string
 }
 
 // restoreTarget is one file the restore places.
@@ -211,6 +218,11 @@ func RunRestore(ctx context.Context, p RestoreParams) (RestoreResult, error) {
 	for _, t := range targets {
 		res.Files = append(res.Files, t.name)
 	}
+	// The key store is never in a set, so a restored control plane may hold
+	// signing keys whose material is gone. Name the purposes that cannot sign
+	// until the operator resets them; a state dir without signing keys (the
+	// feature was never enabled) reports nothing.
+	res.KeysMissingMaterial = checkKeyMaterial(ctx, p.StateDir)
 	if !slices.Contains(res.Files, restoreCPDB) {
 		return res, nil
 	}
@@ -220,6 +232,55 @@ func RunRestore(ctx context.Context, p RestoreParams) (RestoreResult, error) {
 	}
 	res.Audited = audited
 	return res, nil
+}
+
+// checkKeyMaterial returns the sorted purposes whose next or active signing
+// key has no readable private material in the state dir's key dir — the
+// situation after a restore, because a backup set never contains the key
+// store. Retired, revoked and destroyed keys have no material by design (it
+// was deleted when the key left the signing slot), so only the two states
+// that must sign are checked. A state dir whose control plane never ran with
+// keys enabled has no signing_keys table and reports nothing.
+func checkKeyMaterial(ctx context.Context, stateDir string) []string {
+	db, err := cpstate.OpenReadOnly(ctx, filepath.Join(stateDir, adminaudit.StateDBFileName), StateMigrations())
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = db.Close() }()
+	var n int
+	if err := db.SQL().QueryRowContext(ctx,
+		`SELECT count(*) FROM sqlite_master WHERE type='table' AND name='signing_keys'`).Scan(&n); err != nil || n == 0 {
+		return nil
+	}
+	kc, err := config.DefaultKeys().Resolve(stateDir)
+	if err != nil {
+		return nil
+	}
+	store, err := filestore.New(kc.Store.File.Dir)
+	if err != nil {
+		return nil
+	}
+	rows, err := db.SQL().QueryContext(ctx, `SELECT purpose, kid FROM signing_keys WHERE state IN ('next','active')`)
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = rows.Close() }()
+	missing := map[string]bool{}
+	for rows.Next() {
+		var purpose, kid string
+		if err := rows.Scan(&purpose, &kid); err != nil {
+			return nil
+		}
+		if _, err := store.Get(ctx, purpose, kid); err != nil {
+			missing[purpose] = true
+		}
+	}
+	out := make([]string, 0, len(missing))
+	for p := range missing {
+		out = append(out, p)
+	}
+	slices.Sort(out)
+	return out
 }
 
 // readRestoreManifest reads and validates <from>/manifest.json: the format,
