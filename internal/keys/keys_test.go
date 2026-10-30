@@ -135,6 +135,11 @@ func TestParseJWKRejects(t *testing.T) {
 		want error
 	}{
 		{"okp with private d", fmt.Sprintf(`{"kty":"OKP","crv":"Ed25519","x":%q,"d":%q}`, rfc8037X, rfc8037SeedB64), ErrInvalidKey},
+		{"okp with d null", fmt.Sprintf(`{"kty":"OKP","crv":"Ed25519","x":%q,"d":null}`, rfc8037X), ErrInvalidKey},
+		{"d null before value", `{"d":null,"kty":"OKP","crv":"Ed25519","x":"AAAA"}`, ErrInvalidKey},
+		{"duplicate d last null", fmt.Sprintf(`{"kty":"OKP","crv":"Ed25519","x":%q,"d":%q,"d":null}`, rfc8037X, rfc8037SeedB64), ErrInvalidKey},
+		{"duplicate kty", fmt.Sprintf(`{"kty":"OKP","kty":"EC","crv":"Ed25519","x":%q}`, rfc8037X), ErrInvalidKey},
+		{"duplicate x", fmt.Sprintf(`{"kty":"OKP","crv":"Ed25519","x":%q,"x":%q}`, rfc8037X, rfc8037X), ErrInvalidKey},
 		{"ec with private d", fmt.Sprintf(`{"kty":"EC","crv":"P-256","x":%q,"y":%q,"d":%q}`, p256GoldenX, p256GoldenY, p256GoldenX), ErrInvalidKey},
 		{"kty rsa", `{"kty":"RSA","n":"aaa","e":"AQAB"}`, ErrUnsupportedAlg},
 		{"kty oct", `{"kty":"oct","k":"AAAA"}`, ErrUnsupportedAlg},
@@ -160,6 +165,10 @@ func TestParseJWKRejects(t *testing.T) {
 		{"alg mismatches okp", fmt.Sprintf(`{"kty":"OKP","crv":"Ed25519","x":%q,"alg":"ES256"}`, rfc8037X), ErrAlgMismatch},
 		{"alg mismatches ec", fmt.Sprintf(`{"kty":"EC","crv":"P-256","x":%q,"y":%q,"alg":"EdDSA"}`, p256GoldenX, p256GoldenY), ErrAlgMismatch},
 		{"alg rs256 on okp", fmt.Sprintf(`{"kty":"OKP","crv":"Ed25519","x":%q,"alg":"RS256"}`, rfc8037X), ErrAlgMismatch},
+		{"alg hs256 on okp", fmt.Sprintf(`{"kty":"OKP","crv":"Ed25519","x":%q,"alg":"HS256"}`, rfc8037X), ErrAlgMismatch},
+		{"alg none on okp", fmt.Sprintf(`{"kty":"OKP","crv":"Ed25519","x":%q,"alg":"none"}`, rfc8037X), ErrAlgMismatch},
+		{"alg hs256 on ec", fmt.Sprintf(`{"kty":"EC","crv":"P-256","x":%q,"y":%q,"alg":"HS256"}`, p256GoldenX, p256GoldenY), ErrAlgMismatch},
+		{"alg none on ec", fmt.Sprintf(`{"kty":"EC","crv":"P-256","x":%q,"y":%q,"alg":"none"}`, p256GoldenX, p256GoldenY), ErrAlgMismatch},
 		{"truncated json", `{"kty":"OKP","crv"`, ErrInvalidKey},
 		{"trailing garbage", okpOK + "}", ErrInvalidKey},
 		{"top-level array", `[{"kty":"OKP"}]`, ErrInvalidKey},

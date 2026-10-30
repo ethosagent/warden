@@ -1,6 +1,7 @@
 package keys
 
 import (
+	"bytes"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/ed25519"
@@ -10,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 )
 
 // JWK member values this package understands.
@@ -202,14 +204,21 @@ func Thumbprint(jwk JWK) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(sum[:]), nil
 }
 
-// ParseJWK decodes one public JWK document. It rejects: a private "d" member
-// (ErrInvalidKey); a kty other than OKP/EC or a crv other than Ed25519/P-256
-// (ErrUnsupportedAlg); a coordinate that is not unpadded base64url, has the
-// wrong length, or is not on the curve (ErrInvalidKey); and an alg member
-// that does not match the key type (ErrAlgMismatch). An absent alg is
-// accepted — the caller states the algorithm when verifying. kid is kept as
-// given: per RFC 7517 it is an opaque hint, not something to recompute.
+// ParseJWK decodes one public JWK document. It rejects: a private "d" member,
+// whatever its value — "d":null leaves a pointer field indistinguishable from
+// absent, so presence is decided by a token walk, not by decoding — and any
+// duplicate member name, which encoding/json resolves by last wins
+// (ErrInvalidKey for both); a kty other than OKP/EC or a crv other than
+// Ed25519/P-256 (ErrUnsupportedAlg); a coordinate that is not unpadded
+// base64url, has the wrong length, or is not on the curve (ErrInvalidKey);
+// and an alg member that does not match the key type (ErrAlgMismatch). An
+// absent alg is accepted — the caller states the algorithm when verifying.
+// kid is kept as given: per RFC 7517 it is an opaque hint, not something to
+// recompute.
 func ParseJWK(data []byte) (JWK, error) {
+	if err := rejectHazardousMembers(data); err != nil {
+		return JWK{}, err
+	}
 	// Pointer members so a non-string value surfaces as a decode error
 	// rather than silently zeroing a field.
 	raw := struct {
@@ -217,16 +226,12 @@ func ParseJWK(data []byte) (JWK, error) {
 		Crv *string `json:"crv"`
 		X   *string `json:"x"`
 		Y   *string `json:"y"`
-		D   *string `json:"d"`
 		Kid *string `json:"kid"`
 		Alg *string `json:"alg"`
 		Use *string `json:"use"`
 	}{}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return JWK{}, fmt.Errorf("%w: not a jwk object: %v", ErrInvalidKey, redactJSONErr(err))
-	}
-	if raw.D != nil {
-		return JWK{}, fmt.Errorf("%w: private member \"d\" in a public jwk", ErrInvalidKey)
 	}
 	if raw.Kty == nil {
 		return JWK{}, fmt.Errorf("%w: missing member \"kty\"", ErrInvalidKey)
@@ -272,6 +277,56 @@ func ParseJWK(data []byte) (JWK, error) {
 		return JWK{}, fmt.Errorf("%w: alg %q does not match kty %q", ErrAlgMismatch, j.Alg, j.Kty)
 	}
 	return j, nil
+}
+
+// rejectHazardousMembers walks the top-level object's member names with a
+// json.Decoder: it rejects a "d" member whatever its value (a null still
+// means a private member is present) and any duplicate member name, which a
+// plain Unmarshal would resolve by last wins — the attacker picks the value
+// that survives. Everything it reports is ErrInvalidKey; the walk's own
+// decode errors become "malformed json" without the cause, which can quote
+// the input.
+func rejectHazardousMembers(data []byte) error {
+	invalid := func(what string) error {
+		return fmt.Errorf("%w: %s", ErrInvalidKey, what)
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	tok, err := dec.Token()
+	if err != nil {
+		return invalid("not a jwk object")
+	}
+	if d, ok := tok.(json.Delim); !ok || d != '{' {
+		return invalid("not a jwk object")
+	}
+	seen := map[string]bool{}
+	for dec.More() {
+		nameTok, err := dec.Token()
+		if err != nil {
+			return invalid("malformed json")
+		}
+		name, ok := nameTok.(string)
+		if !ok {
+			return invalid("malformed json")
+		}
+		if name == "d" {
+			return invalid(`private member "d" in a public jwk`)
+		}
+		if seen[name] {
+			return invalid(fmt.Sprintf("duplicate member %q", name))
+		}
+		seen[name] = true
+		var value json.RawMessage
+		if err := dec.Decode(&value); err != nil {
+			return invalid("malformed json")
+		}
+	}
+	if _, err := dec.Token(); err != nil { // the closing brace
+		return invalid("malformed json")
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return invalid("trailing data after the jwk object")
+	}
+	return nil
 }
 
 // redactJSONErr keeps json decode errors — which can quote a fragment of the
