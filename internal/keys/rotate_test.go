@@ -911,6 +911,80 @@ func TestEmergencyRotationVacantNext(t *testing.T) {
 	})
 }
 
+// TestEmergencyRotationPublishFailure: an emergency rotation whose promotion
+// commits but whose fresh next key cannot be published — the store went down
+// — stands: the compromised key is revoked, the next key signs at once, the
+// empty next slot is left to the scheduler's heal pass, and the error and the
+// Finding say the rotation happened rather than nothing.
+func TestEmergencyRotationPublishFailure(t *testing.T) {
+	e := newEnv(t)
+	e.timings = fastTimings()
+	ctx := context.Background()
+	m := e.manager()
+	m.Init(ctx)
+	rows := e.rows()
+	a0 := kidInState(t, rows, keys.PurposeToken, keys.StateActive)
+	n0 := kidInState(t, rows, keys.PurposeToken, keys.StateNext)
+
+	e.store.failPut.Store(true)
+	cli := keys.Actor{Subject: "ops@example.com", AuthMethod: "cli"}
+	err := m.Rotate(ctx, keys.PurposeToken, keys.RotateOpts{Emergency: true, Actor: cli})
+	if err == nil {
+		t.Fatal("the emergency rotation reported success although its next key could not be published")
+	}
+	for _, want := range []string{"revoked " + a0, "activated " + n0} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the error does not state what the emergency did (missing %q): %v", want, err)
+		}
+	}
+
+	// The rotation stood: revoked old, promoted next, no next key yet.
+	after := e.rows()
+	if r := rowFor(t, after, a0); r.State != keys.StateRevoked {
+		t.Fatalf("the compromised key = %s, want revoked although publishing failed", r.State)
+	}
+	if got := kidInState(t, after, keys.PurposeToken, keys.StateActive); got != n0 {
+		t.Fatalf("active = %s, want the promoted next %s", got, n0)
+	}
+	if kids := kidsByState(after, keys.PurposeToken, keys.StateNext); len(kids) != 0 {
+		t.Errorf("next rows = %v, want none until the heal pass", kids)
+	}
+	if _, err := e.store.Get(ctx, keys.PurposeToken, a0); !errors.Is(err, keys.ErrKeyNotFound) {
+		t.Errorf("the revoked key's material survived: %v", err)
+	}
+	// The snapshot switched at once: signing is the new key, and the JWKS no
+	// longer holds the revoked one.
+	if got := activeKID(t, m, keys.PurposeToken); got != n0 {
+		t.Fatalf("KeySet active = %s, want %s", got, n0)
+	}
+	if got := kidsInSet(m.KeySet().JWKS(keys.PurposeToken)); !sameKids(got, []string{n0}) {
+		t.Errorf("JWKS = %v, want the new active key only", got)
+	}
+	// One Finding for the episode, stating what stood.
+	al := e.alerts.alerts()
+	if got := alertsByRule(al, keys.AlertKeyRotationFailed); got != 1 {
+		t.Fatalf("key_rotation_failed alerts = %d, want 1", got)
+	}
+	var detail string
+	for _, a := range al {
+		if a.Rule == keys.AlertKeyRotationFailed && a.Purpose == keys.PurposeToken {
+			detail = a.Detail
+		}
+	}
+	if !strings.Contains(detail, "revoked "+a0) {
+		t.Errorf("the finding does not state what the emergency did: %q", detail)
+	}
+
+	// The store returns; the heal pass publishes the next key and the episode
+	// does not re-raise.
+	e.store.failPut.Store(false)
+	mustSchedule(t, m)
+	kidInState(t, e.rows(), keys.PurposeToken, keys.StateNext)
+	if got := alertsByRule(e.alerts.alerts(), keys.AlertKeyRotationFailed); got != 1 {
+		t.Errorf("the healed episode re-raised: %d alerts", got)
+	}
+}
+
 // TestRotationAudit: every transition is one audit event and one counted
 // transition, with the actor; the counters and gauges are labelled by purpose
 // and state only, and a signing failure is counted per purpose.

@@ -119,11 +119,13 @@ type RotateOpts struct {
 // publish_at + prepublish unless opts.Emergency is set. An emergency with no
 // next key to promote revokes the compromised key anyway — no signing is
 // better than signing with a leaked key — and generates a fresh one into the
-// vacant slot. The new key's material is written before any state changes, so
-// a failing backend leaves the current key signing; the retire and the
-// promotion are one compare-and-swap transaction, so the scheduler, the
-// console and the CLI cannot fork the lifecycle, and a peer reading between
-// the writes never sees the purpose without an active key.
+// vacant slot. A scheduled rotation writes the new next key's material before
+// any state changes, so a failing backend leaves the current key signing; an
+// emergency promotes first, and a publishing failure afterwards leaves the
+// rotation standing with an empty next slot, which the error says plainly.
+// The retire and the promotion are one compare-and-swap transaction, so the
+// scheduler, the console and the CLI cannot fork the lifecycle, and a peer
+// reading between the writes never sees the purpose without an active key.
 func (m *Manager) Rotate(ctx context.Context, purpose string, opts RotateOpts) error {
 	if purpose != PurposeToken && purpose != PurposeBundle {
 		return fmt.Errorf("%w: %q is not rotated through the manager", ErrInvalidPurpose, purpose)
@@ -205,26 +207,38 @@ func (m *Manager) rotateLocked(ctx context.Context, purpose string, actor Actor,
 // compare-and-swap transaction, so a peer polling between the writes never
 // sees the purpose without an active key, and a transaction somebody else beat
 // us to (ErrConflict) leaves the work to the winner with nothing half-applied.
+//
+// A scheduled rotation writes the fresh next key's material before anything
+// changes, so a failing store leaves the current key signing and nothing
+// half-rotated. An emergency cannot afford that: the compromised key must stop
+// signing at the earliest instant, so the promotion transaction runs first and
+// the fresh next key is published only after it — a publishing failure there
+// leaves an active key and an empty next slot (the scheduler's heal pass
+// republishes one), never a leaked key still signing.
 func (m *Manager) promoteLocked(ctx context.Context, purpose string, next, old Record, hasOld bool, retireTo State, actor Actor, emergency bool) error {
 	now := m.cfg.Now()
-	// The new next key's material is written before anything changes, so a
-	// store failure leaves the current key signing and nothing half-rotated.
-	// Its row is inserted only once the next slot is free; if we never get
-	// there, the material is discarded (the startup sweep would catch it too).
-	rec, err := m.generateKeyLocked(ctx, purpose, now, actor)
-	if err != nil {
-		return err
-	}
-	abandon := func(err error) error {
-		m.discard(ctx, purpose, rec.KID)
-		return err
-	}
 	oldKID := ""
 	if hasOld {
 		oldKID = old.KID
 	}
-	// One transaction: old retires and next activates together, or not at all
-	// — a lost race wrote nothing, and an error rolled everything back.
+	var rec Record
+	generated := false
+	if !emergency {
+		r, err := m.generateKeyLocked(ctx, purpose, now, actor)
+		if err != nil {
+			return err
+		}
+		rec, generated = r, true
+	}
+	abandon := func(err error) error {
+		if generated {
+			m.discard(ctx, purpose, rec.KID)
+		}
+		return err
+	}
+	// One transaction: old retires (is revoked) and next activates together,
+	// or not at all — a lost race wrote nothing, and an error rolled
+	// everything back.
 	changed, err := m.cfg.Meta.Promote(ctx, purpose, oldKID, retireTo, next.KID, now)
 	if err != nil {
 		return abandon(err)
@@ -240,6 +254,16 @@ func (m *Manager) promoteLocked(ctx context.Context, purpose string, next, old R
 		m.noteTransition(ctx, purpose, old.KID, retireTo, actor, emergencyReason(emergency))
 	}
 	m.noteTransition(ctx, purpose, next.KID, StateActive, actor, emergencyReason(emergency))
+	if !generated {
+		// The emergency's fresh next key. A failure here undoes nothing: the
+		// rows are adopted so the snapshot switches at once, and the error
+		// says the rotation stood.
+		if err := m.publishNextLocked(ctx, purpose, actor); err != nil {
+			_ = m.adoptLocked(ctx, purpose)
+			return rotationStoodErr(purpose, oldKID, next.KID, err)
+		}
+		return nil
+	}
 	if err := m.cfg.Meta.Insert(ctx, rec); err != nil {
 		// The rotation stands; the purpose has no next key until the scheduler
 		// heals it. Nothing is left half-written: the material is gone and the
@@ -248,6 +272,19 @@ func (m *Manager) promoteLocked(ctx context.Context, purpose string, next, old R
 	}
 	m.noteGenerated(ctx, rec, actor)
 	return nil
+}
+
+// rotationStoodErr reports an emergency rotation whose promotion committed but
+// whose fresh next key could not be published: the compromised key is revoked
+// and the next key signs, so the error must not read as an emergency that did
+// not happen. The empty next slot is the scheduler's heal pass's to fill.
+func rotationStoodErr(purpose, oldKID, nextKID string, err error) error {
+	if oldKID == "" {
+		return fmt.Errorf("keys: the %s emergency rotation activated %s, but publishing its next key failed; the scheduler's heal pass republishes one: %w",
+			purpose, nextKID, err)
+	}
+	return fmt.Errorf("keys: the %s emergency rotation revoked %s and activated %s, but publishing its next key failed; the scheduler's heal pass republishes one: %w",
+		purpose, oldKID, nextKID, err)
 }
 
 // emergencyVacantLocked is an emergency rotation of a purpose whose next slot
