@@ -218,11 +218,18 @@ func validateKeysTiming(field string, p KeysPurpose, scheduled bool) error {
 }
 
 // Resolve returns c with the file key directory filled in from stateDir, or an
-// error when the subsystem is enabled without one. A disabled block is
-// returned unchanged: no directory is derived and nothing is checked, so a
-// control plane without keys is not affected by the flag.
+// error when the subsystem is enabled without one. The directory is derived
+// for a disabled block too when stateDir is set (the keys CLI reads a state
+// dir whose own config may not carry the block); a control plane without keys
+// never uses it.
 func (c KeysConfig) Resolve(stateDir string) (KeysConfig, error) {
 	if !c.Enabled {
+		if stateDir == "" {
+			return c, nil
+		}
+		if c.Store.File.Dir == "" {
+			c.Store.File.Dir = filepath.Join(stateDir, keysDirName)
+		}
 		return c, nil
 	}
 	if stateDir == "" {
@@ -232,6 +239,14 @@ func (c KeysConfig) Resolve(stateDir string) (KeysConfig, error) {
 		c.Store.File.Dir = filepath.Join(stateDir, keysDirName)
 	}
 	return c, nil
+}
+
+// DefaultKeys returns the `keys:` block with every default applied and
+// enabled false: what a caller resolves when the operator's config carries no
+// keys block at all.
+func DefaultKeys() KeysConfig {
+	c, _ := parseKeys(nil)
+	return c
 }
 
 // LoadKeys reads only the `keys:` block of the YAML file at path, with the

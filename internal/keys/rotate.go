@@ -96,6 +96,14 @@ var (
 	// for its prepublish window, so promoting it would hand verifiers a key
 	// they may not hold yet.
 	ErrNotPrepublished = errors.New("keys: next key has not been published long enough")
+	// ErrRotationStood is wrapped by every rotation error that struck after
+	// the promotion committed: the old key left the signing slot for good
+	// (revoked in an emergency, retired otherwise) and only the fresh next
+	// key is missing. Callers check errors.Is(err, ErrRotationStood) to tell
+	// that apart from a refused rotation, which changed nothing and wraps no
+	// sentinel. The vacant-slot failure without an old key wraps nothing
+	// either: nothing was revoked, because nothing was signing.
+	ErrRotationStood = errors.New("keys: the rotation stands")
 )
 
 // RotateOpts is how a rotation is requested.
@@ -260,31 +268,42 @@ func (m *Manager) promoteLocked(ctx context.Context, purpose string, next, old R
 		// says the rotation stood.
 		if err := m.publishNextLocked(ctx, purpose, actor); err != nil {
 			_ = m.adoptLocked(ctx, purpose)
-			return rotationStoodErr(purpose, oldKID, next.KID, err)
+			return rotationStoodErr(purpose, oldKID, next.KID, emergency, err)
 		}
 		return nil
 	}
 	if err := m.cfg.Meta.Insert(ctx, rec); err != nil {
-		// The rotation stands; the purpose has no next key until the scheduler
-		// heals it. Nothing is left half-written: the material is gone and the
-		// row was never inserted.
-		return abandon(err)
+		// The promotion committed, so this rotation stands too — scheduled or
+		// not: the old key left the slot and the next key signs, and only the
+		// fresh next is missing until the scheduler heals it. The generated
+		// material goes (a key with no row must not linger) and the snapshot
+		// switches to the committed rows at once.
+		m.discard(ctx, purpose, rec.KID)
+		_ = m.adoptLocked(ctx, purpose)
+		return rotationStoodErr(purpose, oldKID, next.KID, emergency, err)
 	}
 	m.noteGenerated(ctx, rec, actor)
 	return nil
 }
 
-// rotationStoodErr reports an emergency rotation whose promotion committed but
-// whose fresh next key could not be published: the compromised key is revoked
-// and the next key signs, so the error must not read as an emergency that did
-// not happen. The empty next slot is the scheduler's heal pass's to fill.
-func rotationStoodErr(purpose, oldKID, nextKID string, err error) error {
-	if oldKID == "" {
-		return fmt.Errorf("keys: the %s emergency rotation activated %s, but publishing its next key failed; the scheduler's heal pass republishes one: %w",
-			purpose, nextKID, err)
+// rotationStoodErr reports a rotation whose promotion committed but whose
+// fresh next key could not be published: the old key left the signing slot
+// (revoked under --emergency, retired otherwise) and the next key signs, so
+// the error must not read as a rotation that did not happen. It wraps
+// ErrRotationStood so callers can tell a standing rotation from a refused one,
+// and names what the rotation did change. The empty next slot is the
+// scheduler's heal pass's to fill.
+func rotationStoodErr(purpose, oldKID, nextKID string, emergency bool, err error) error {
+	left, kind := "retired", "rotation"
+	if emergency {
+		left, kind = "revoked", "emergency rotation"
 	}
-	return fmt.Errorf("keys: the %s emergency rotation revoked %s and activated %s, but publishing its next key failed; the scheduler's heal pass republishes one: %w",
-		purpose, oldKID, nextKID, err)
+	if oldKID == "" {
+		return fmt.Errorf("keys: the %s %s activated %s, but publishing its next key failed; the scheduler's heal pass republishes one: %w (%w)",
+			purpose, kind, nextKID, err, ErrRotationStood)
+	}
+	return fmt.Errorf("keys: the %s %s %s %s and activated %s, but publishing its next key failed; the scheduler's heal pass republishes one: %w (%w)",
+		purpose, kind, left, oldKID, nextKID, err, ErrRotationStood)
 }
 
 // emergencyVacantLocked is an emergency rotation of a purpose whose next slot
@@ -294,8 +313,10 @@ func rotationStoodErr(purpose, oldKID, nextKID string, err error) error {
 // purpose activates at once — createInitial's precedent). If the replacement
 // cannot be written the purpose is left with no active key — the snapshot is
 // installed without a signer, so signing stops at once — and the returned
-// error names the empty slot; it is not a request error, so Rotate reports it
-// as a rotation failure. The caller holds mu.
+// error names the empty slot, wrapping ErrRotationStood when an old key was
+// revoked (never when the purpose was already not signing: nothing changed).
+// It is not a request error, so Rotate reports it as a rotation failure. The
+// caller holds mu.
 func (m *Manager) emergencyVacantLocked(ctx context.Context, purpose string, rows []Record, actor Actor) error {
 	now := m.cfg.Now()
 	old, hasOld := activeRow(rows)
@@ -325,8 +346,10 @@ func (m *Manager) emergencyVacantLocked(ctx context.Context, purpose string, row
 			m.set.install(purpose, nil, fresh, m.cfg.Timings[purpose].Overlap)
 		}
 		if hasOld {
-			return fmt.Errorf("keys: %s has no active key: the emergency rotation revoked %s and could not write a replacement: %w",
-				purpose, old.KID, err)
+			// The revocation committed, so this is a standing rotation however
+			// the replacement failed: the sentinel says so.
+			return fmt.Errorf("keys: %s has no active key: the emergency rotation revoked %s and could not write a replacement: %w (%w)",
+				purpose, old.KID, err, ErrRotationStood)
 		}
 		return fmt.Errorf("keys: %s has no active key and the emergency rotation could not write one: %w", purpose, err)
 	}

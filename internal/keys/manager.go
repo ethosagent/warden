@@ -354,7 +354,7 @@ func (m *Manager) loadLocked(ctx context.Context, purpose string) error {
 		return err
 	}
 	if len(rows) == 0 {
-		if err := m.createInitial(ctx, purpose); err != nil {
+		if err := m.createInitial(ctx, purpose, SystemActor); err != nil {
 			return err
 		}
 		// Re-read: another process may have won the insert, and its rows are
@@ -515,13 +515,13 @@ func (m *Manager) discard(ctx context.Context, purpose, kid string) {
 // createInitial generates a purpose's first active key and its next key, in
 // the write order generate, Put, Get back and compare, then INSERT. When the
 // INSERT loses to a concurrent creator, or fails, the material is deleted.
-func (m *Manager) createInitial(ctx context.Context, purpose string) error {
+func (m *Manager) createInitial(ctx context.Context, purpose string, actor Actor) error {
 	now := m.cfg.Now()
-	next, err := m.generateKeyLocked(ctx, purpose, now, SystemActor)
+	next, err := m.generateKeyLocked(ctx, purpose, now, actor)
 	if err != nil {
 		return err
 	}
-	active, err := m.generateKeyLocked(ctx, purpose, now, SystemActor)
+	active, err := m.generateKeyLocked(ctx, purpose, now, actor)
 	if err != nil {
 		m.discard(ctx, purpose, next.KID)
 		return err
@@ -539,8 +539,8 @@ func (m *Manager) createInitial(ctx context.Context, purpose string) error {
 		}
 		return nil // lost the race: the winner's rows are loaded next
 	}
-	m.noteGenerated(ctx, active, SystemActor)
-	m.noteGenerated(ctx, next, SystemActor)
+	m.noteGenerated(ctx, active, actor)
+	m.noteGenerated(ctx, next, actor)
 	return nil
 }
 
@@ -1049,19 +1049,7 @@ func (ks *KeySet) JWKS(purpose string) JWKS {
 	if l == nil {
 		return JWKS{}
 	}
-	now := ks.now()
-	var out JWKS
-	for _, r := range l.rows {
-		switch r.State {
-		case StateNext, StateActive:
-			out.Keys = append(out.Keys, r.PublicJWK)
-		case StateRetired:
-			if !r.RetireAt.IsZero() && now.Before(r.RetireAt.Add(l.overlap)) {
-				out.Keys = append(out.Keys, r.PublicJWK)
-			}
-		}
-	}
-	return out
+	return PublishedJWKS(l.rows, ks.now(), l.overlap)
 }
 
 // countingSigner wraps the snapshot's active signer so a signing failure is

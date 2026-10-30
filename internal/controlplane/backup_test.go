@@ -584,7 +584,7 @@ func TestBackup_Manifest(t *testing.T) {
 	if !m.CreatedAt.Equal(testBackupT0) || !m.FinishedAt.Equal(testBackupT0.Add(3*time.Second)) || m.CreatedAt.Location() != time.UTC {
 		t.Errorf("created %v finished %v", m.CreatedAt, m.FinishedAt)
 	}
-	if got := fmt.Sprint(m.NotIncluded); got != "[cp-audit.key IdP storage secret backend]" {
+	if got := fmt.Sprint(m.NotIncluded); got != "[cp-audit.key signing key material IdP storage secret backend]" {
 		t.Errorf("not_included = %s", got)
 	}
 	names := []string{}

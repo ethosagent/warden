@@ -25,10 +25,15 @@ const keysEvidenceMax = 200
 
 // resolveKeys reads the keys block from the operator-owned --config file (the
 // served copy is never consulted, like console:) and resolves its directory
-// against --state-dir. Enabled without a state dir is a startup error.
+// against --state-dir. An empty configPath means the defaults — the keys CLI
+// accepts a state dir without a --config. Enabled without a state dir is a
+// startup error.
 func resolveKeys(configPath, stateDir string) (config.KeysConfig, error) {
-	kc, err := config.LoadKeys(configPath)
-	if err != nil {
+	var kc config.KeysConfig
+	var err error
+	if configPath == "" {
+		kc = config.DefaultKeys()
+	} else if kc, err = config.LoadKeys(configPath); err != nil {
 		return config.KeysConfig{}, fmt.Errorf("control-plane: %w", err)
 	}
 	kc, err = kc.Resolve(stateDir)

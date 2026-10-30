@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethosagent/warden/internal/controlplane"
 	"github.com/ethosagent/warden/internal/keys"
 	"github.com/ethosagent/warden/test/harness"
 )
@@ -465,4 +466,104 @@ func keysJWKSUnavailableUntilLoaded(t *testing.T, h *harness.H) {
 		return jwksBody(h).Status == http.StatusOK &&
 			h.CP().DoWorker(http.MethodGet, "/readyz", "", "", "").Status == http.StatusOK
 	})
+}
+
+// keysCLIRotatesAndResets (W-P2-KEYS-05): the offline keys CLI rotates a
+// purpose straight on a running control plane's state dir — the running
+// manager adopts the change within its 2-second data-version poll, the bundle
+// purpose is refused with the next kid to pin, reset refuses while the
+// control plane holds the instance lock and replaces the purpose once it is
+// stopped, and the restarted control plane signs with the fresh key.
+func keysCLIRotatesAndResets(t *testing.T, h *harness.H) {
+	ctx := context.Background()
+	first := keyKIDs(h.KeyRows())
+
+	// One prepublish window in, the CLI's non-emergency rotation may promote
+	// the published next key. The CLI shares the harness clock, so its
+	// prepublish and overlap windows are measured on the same time as the
+	// rows.
+	h.Clock().Advance(time.Hour + 10*time.Minute)
+	o, err := controlplane.OpenKeysOffline(ctx, h.KeyStateDir(), controlplane.KeysCLIOptions{Clock: h.Clock()})
+	if err != nil {
+		t.Fatalf("open the keys CLI: %v", err)
+	}
+	defer func() { _ = o.Close() }()
+	res, err := o.Rotate(ctx, keys.PurposeToken, false)
+	if err != nil {
+		t.Fatalf("cli rotate: %v", err)
+	}
+	if res.KID != first["token/next"] {
+		t.Errorf("cli rotate = %s, want the published next key %s", res.KID, first["token/next"])
+	}
+	rows := h.KeyRows()
+	got := keyKIDs(rows)
+	if got["token/active"] != res.KID || got["token/retired"] != first["token/active"] ||
+		got["token/next"] == "" || got["token/next"] == res.KID {
+		t.Fatalf("token rows after the cli rotation = %+v, want promote, retire and a fresh next", rows)
+	}
+	// The CLI rebuilds the same published set the control plane serves: next,
+	// active and the retired key inside its overlap.
+	set, err := o.JWKS(ctx, keys.PurposeToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kids []string
+	for _, k := range set.Keys {
+		kids = append(kids, k.Kid)
+	}
+	if !sameKeySet(kids, got["token/active"], got["token/next"], got["token/retired"]) {
+		t.Errorf("cli jwks = %v, want the three published kids of %+v", kids, rows)
+	}
+
+	// The running manager adopts the CLI's write through the data-version
+	// poll: drive the clock in small ticks, since a big Advance returns
+	// before the poll's goroutine finishes.
+	h.Eventually("the running manager signs with the promoted key", func() bool {
+		h.Clock().Advance(2 * time.Second)
+		sg, err := h.KeyManager().KeySet().Active(keys.PurposeToken)
+		return err == nil && sg.KID() == res.KID
+	})
+
+	// The bundle purpose is staged, never rotated through the CLI: the
+	// refusal names the kid workers must pin.
+	_, err = o.Rotate(ctx, keys.PurposeBundle, false)
+	var staged *controlplane.StagedRotationError
+	if !errors.As(err, &staged) || staged.NextKID != first["bundle/next"] {
+		t.Errorf("cli bundle rotate = %v, want a staged refusal pinning %s", err, first["bundle/next"])
+	}
+
+	// Reset refuses while the control plane holds the state dir's lock.
+	if _, err := o.Reset(ctx, keys.PurposeToken); err == nil || !strings.Contains(err.Error(), "control plane is running") {
+		t.Errorf("cli reset under a running control plane = %v, want the running refusal", err)
+	}
+
+	h.CP().Stop()
+	out, err := o.Reset(ctx, keys.PurposeToken)
+	if err != nil {
+		t.Fatalf("cli reset: %v", err)
+	}
+	if out.Removed != 3 || out.KID == "" {
+		t.Fatalf("reset result = %+v, want the purpose's 3 rows replaced by a fresh active key", out)
+	}
+	after := keyKIDs(h.KeyRows())
+	for _, s := range []string{"token/active", "token/next", "token/retired"} {
+		if old := first[s]; old != "" && after[s] == old {
+			t.Errorf("%s kid survived the reset: %s", s, old)
+		}
+	}
+	pem := filepath.Join(h.KeyStateDir(), "keys", keys.PurposeToken, out.KID+".pem")
+	if _, err := os.Stat(pem); err != nil {
+		t.Errorf("no material for the fresh active key: %v", err)
+	}
+
+	// The restarted control plane loads the fresh purpose and signs with it.
+	h.CP().Start()
+	h.Eventually("the restarted control plane signs with the fresh key", func() bool {
+		h.Clock().Advance(time.Minute)
+		sg, err := h.KeyManager().KeySet().Active(keys.PurposeToken)
+		return err == nil && sg.KID() == out.KID
+	})
+	if strings.Contains(h.Logs(), "PRIVATE KEY") {
+		t.Error("logs contain PEM key material")
+	}
 }
