@@ -1248,9 +1248,12 @@ control-plane-local — read from `--config` only, never served to workers.
 keys:
   enabled: true            # needs --state-dir
   store:
-    backend: file          # the only backend today; echo and env are refused
+    backend: file          # file (default) or aws
     file:
       dir: ""              # default <state-dir>/keys; may be a separate secret mount
+    aws:                   # with store.backend: aws only
+      region: eu-central-1
+      namePrefix: warden-cp-keys/   # the default; must stay disjoint from secretStore.aws.namePrefix
   token:  { alg: EdDSA }   # EdDSA (default) or ES256
   bundle: { alg: EdDSA }   # must be EdDSA: workers pin bundle keys
 ```
@@ -1275,9 +1278,79 @@ keys:
   purpose only.
 - **Backups.** The P1 backup set holds the database (public metadata) but not
   the key directory. Back the directory up separately, or restoring will leave
-  rows without material.
+  rows without material. With `store.backend: aws` there is no key directory:
+  the material lives in Secrets Manager and a restored database re-resolves
+  against it.
 
 Key material never appears in the database, logs, errors or audit entries.
+
+### AWS Secrets Manager backend (`store.backend: aws`)
+
+With `store.backend: aws` the private keys live in AWS Secrets Manager, one
+secret per key at `<namePrefix><purpose>/<kid>` (default prefix
+`warden-cp-keys/`), the PKCS#8 PEM as the secret value. Everything else behaves
+like the file store: a generation is written, read back and compared before its
+row is inserted; a restart loads the same kids; the startup sweep deletes
+secrets with no row; deleting a key deletes its secret at once.
+
+- **Credentials.** The control plane resolves credentials from its own
+  environment or instance role (explicit → env → IMDS) — never from config:
+  the `keys.store.aws` block has only `region` and `namePrefix`, and the strict
+  YAML parser rejects a credential field there.
+- **Isolation from workers.** Workers reach Secrets Manager only through their
+  own `secretStore.aws` block — their own region, prefix and role. Startup
+  fails when `keys.store.aws.namePrefix` equals, starts with, or is a prefix of
+  `secretStore.aws.namePrefix` (or the reverse), naming both fields: a worker
+  scoped to the secretStore namespace must not be able to name a key secret.
+  The defaults (`warden-cp-keys/` and `warden/`) are disjoint. The startup log
+  names the region and prefix only — values and credentials are never logged.
+- **IAM.** Give the control plane's role rights on the CP prefix only:
+
+  ```json
+  {
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Sid": "WardenControlPlaneKeys",
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:CreateSecret",
+        "secretsmanager:PutSecretValue",
+        "secretsmanager:GetSecretValue",
+        "secretsmanager:DeleteSecret",
+        "secretsmanager:ListSecrets"
+      ],
+      "Resource": "arn:aws:secretsmanager:*:ACCOUNT_ID:secret:warden-cp-keys/*"
+    }]
+  }
+  ```
+
+  A worker role keeps the same shape over its own prefix and **cannot** read
+  the keys namespace — the deny is structural (the policy names no
+  `warden-cp-keys/*` resource), and an explicit Deny makes it hold even if a
+  later `warden/*` grant is widened:
+
+  ```json
+  {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Sid": "WardenWorkerSecrets",
+        "Effect": "Allow",
+        "Action": [
+          "secretsmanager:GetSecretValue",
+          "secretsmanager:ListSecrets"
+        ],
+        "Resource": "arn:aws:secretsmanager:*:ACCOUNT_ID:secret:warden/*"
+      },
+      {
+        "Sid": "NeverTheControlPlaneKeys",
+        "Effect": "Deny",
+        "Action": "secretsmanager:GetSecretValue",
+        "Resource": "arn:aws:secretsmanager:*:ACCOUNT_ID:secret:warden-cp-keys/*"
+      }
+    ]
+  }
+  ```
 
 ## Block list: offline CLI
 
