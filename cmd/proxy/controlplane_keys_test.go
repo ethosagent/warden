@@ -349,6 +349,50 @@ func TestKeysRotateEmergencyStood(t *testing.T) {
 	}
 }
 
+// TestKeysRotateStoodScheduled: a manual rotation whose promotion commits but
+// whose fresh next key cannot be inserted (every new signing_keys row fails)
+// exits exitKeysRotationStood, says the old key was retired — never that it
+// was revoked — and appends its audit row with outcome error.
+func TestKeysRotateStoodScheduled(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "state")
+	_, stop := startKeysCP(t, stateDir)
+	before := keyStates(t, stateDir, "token")
+	oldActive, oldNext := stateKid(before, "active"), stateKid(before, "next")
+	if oldActive == "" || oldNext == "" {
+		t.Fatalf("token rows = %v, want an active and a next key", before)
+	}
+	backdateNextPublish(t, stateDir, "token")
+	// Stopped, so nothing refills the empty next slot under the assertions.
+	if err := stop(); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	// The promotion's UPDATEs commit; every INSERT INTO signing_keys aborts.
+	execInDB(t, stateDir,
+		`CREATE TRIGGER keys_next_insert_fails BEFORE INSERT ON signing_keys BEGIN SELECT RAISE(ABORT, 'injected'); END`)
+
+	stdout, stderr, code := runWarden(t, "control-plane", "keys", "rotate", "--purpose", "token",
+		"--state-dir", stateDir, "--config", writeTempConfig(t, keysCLIConfig))
+	if code != exitKeysRotationStood {
+		t.Fatalf("stood scheduled exit = %d, want %d (stderr %q)", code, exitKeysRotationStood, stderr)
+	}
+	if !strings.Contains(stderr, "was retired") {
+		t.Errorf("the stood message does not say the old key was retired:\n%s", stderr)
+	}
+	if strings.Contains(stderr, "revoked") {
+		t.Errorf("a scheduled rotation's message claims a revocation:\n%s", stderr)
+	}
+	after := keyStates(t, stateDir, "token")
+	if stateKid(after, "active") != oldNext || stateKid(after, "retired") != oldActive || stateKid(after, "next") != "" {
+		t.Errorf("token rows = %v, want %s retired and %s active with no next", after, oldActive, oldNext)
+	}
+	if n := auditOutcomeCount(t, stateDir, "keys.rotate_requested", adminaudit.OutcomeError); n != 1 {
+		t.Errorf("stood rotate audit rows = %d, want the one error row", n)
+	}
+	if stdout != "" {
+		t.Errorf("a stood rotation printed to stdout: %q", stdout)
+	}
+}
+
 // TestKeysListExportOffline: list --json prints public metadata only — no `d`
 // member and no PEM block — and export prints the published JWKS, or one
 // key's public JWK with --state, with the control plane stopped and without a

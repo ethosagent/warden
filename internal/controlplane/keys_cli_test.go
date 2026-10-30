@@ -505,6 +505,51 @@ func TestKeysCLIAuditsAPartialReset(t *testing.T) {
 	}
 }
 
+// failListMeta wraps a MetaStore and can fail the rows read-back: the
+// injection point of a rotation that applied but whose result could not be
+// read.
+type failListMeta struct {
+	keys.MetaStore
+	failList bool
+}
+
+func (f *failListMeta) List(ctx context.Context) ([]keys.Record, error) {
+	if f.failList {
+		return nil, errors.New("injected: the rows could not be read")
+	}
+	return f.MetaStore.List(ctx)
+}
+
+// TestKeysCLIRotateRecordsBeforeReadBackFailure: a rotation whose rows cannot
+// be read back after the commit still appends its audit row — the request
+// applied — before the read-back error is returned.
+func TestKeysCLIRotateRecordsBeforeReadBackFailure(t *testing.T) {
+	ctx := context.Background()
+	stateDir := openKeysStateDir(t)
+	backdateNextPublish(t, stateDir, keys.PurposeToken)
+	o, err := OpenKeysOffline(ctx, stateDir, KeysCLIOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = o.Close() }()
+	o.meta = &failListMeta{MetaStore: o.meta, failList: true}
+
+	res, err := o.Rotate(ctx, keys.PurposeToken, false)
+	if err == nil || !strings.Contains(err.Error(), "read back") {
+		t.Fatalf("rotate with a failing read-back = (%+v, %v), want a read-back failure", res, err)
+	}
+	if res.KID != "" || res.Purpose != "" {
+		t.Errorf("result = %+v, want it empty: the rows could not be read", res)
+	}
+	events := keyAuditEvents(t, stateDir, actionKeysRotate)
+	if len(events) != 1 {
+		t.Fatalf("keys.rotate_requested rows = %d, want the one row the applied rotation owes", len(events))
+	}
+	if events[0].outcome != adminaudit.OutcomeOK {
+		t.Errorf("audit outcome = %q, want ok: the rotation itself applied", events[0].outcome)
+	}
+}
+
 // TestKeysCLIMissingAuditKeyRefuses: a state dir with an audit chain but a
 // lost signing key fails at open, before anything is written.
 func TestKeysCLIMissingAuditKeyRefuses(t *testing.T) {

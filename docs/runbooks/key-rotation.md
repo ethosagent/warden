@@ -50,6 +50,15 @@ All four take a required `--state-dir` and an optional `--config` naming the
 file that carries the `keys:` block (without it the keys defaults apply). No
 output ever contains private material: no `d` JWK member, no PEM block.
 
+Exit codes, so a drill script can tell the outcomes apart:
+
+| Code | Meaning |
+|---|---|
+| 0 | Applied. |
+| 1 | Nothing changed — a refusal: no or too-young `next` key, missing `--yes`, a staged bundle rotation, or `reset` while the control plane holds the state-dir lock. A reset that partially applied also exits 1: its rows are gone and its audit row has outcome `error` with the removed count. |
+| 2 | Usage error: a bad flag, a missing or unopenable state dir or audit key. |
+| 3 | A stood rotation: the promotion committed, so the old key is out of the signing slot — revoked under `--emergency`, retired otherwise — and only the fresh `next` key is missing. |
+
 When the state dir has an admin audit chain, each `rotate` and `reset` appends
 one row (`keys.rotate_requested`, `keys.reset`; `auth_method` `cli`, actor
 `cli:<os user>`) and the transitions the request causes carry the same actor.

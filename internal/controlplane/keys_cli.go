@@ -74,7 +74,7 @@ type KeysCLIOptions struct {
 // control plane holds it.
 type OfflineKeys struct {
 	db         *cpstate.DB
-	meta       *metastore.Store
+	meta       keys.MetaStore
 	mgr        *keys.Manager
 	rec        adminaudit.Recorder // nil: admin audit was never enabled here
 	closeAudit func() error
@@ -231,11 +231,13 @@ type OfflineRotateResult struct {
 // that races the running control plane's own scheduler loses cleanly instead
 // of forking the lifecycle. The bundle purpose is always refused: its rotation
 // is staged (StagedRotationError). One admin audit row names the request; the
-// manager's own rows name each transition. An emergency whose revocation
+// manager's own rows name each transition. A rotation whose promotion
 // committed but whose fresh next key could not be published (ErrRotationStood)
-// stands anyway: the result still says what the rotation changed, and the
+// stands anyway — the old key left the slot (revoked under --emergency,
+// retired otherwise): the result still says what the rotation changed, and the
 // audit row is appended with outcome error and the failure text — a refused
-// rotation, which changed nothing, appends none.
+// rotation, which changed nothing, appends none. The row is also appended when
+// the post-commit read-back of the rows fails, before that error is returned.
 func (o *OfflineKeys) Rotate(ctx context.Context, purpose string, emergency bool) (OfflineRotateResult, error) {
 	if purpose == keys.PurposeBundle {
 		rows, err := o.Rows(ctx, purpose)
@@ -267,22 +269,23 @@ func (o *OfflineKeys) Rotate(ctx context.Context, purpose string, emergency bool
 		}
 		return OfflineRotateResult{}, err
 	}
-	rows, err := o.Rows(ctx, purpose)
-	if err != nil {
-		return OfflineRotateResult{}, err
-	}
+	rows, readErr := o.Rows(ctx, purpose)
 	res := OfflineRotateResult{Purpose: purpose, Emergency: emergency}
-	for _, r := range rows {
+	for _, r := range rows { // nil when the read-back failed
 		if r.State == keys.StateActive {
 			res.KID = r.KID
 		}
 	}
 	// The rotation stands; a failed audit append is reported, not rolled back
-	// (a rotation cannot be un-rotated).
+	// (a rotation cannot be un-rotated). The row is appended even when the
+	// read-back above failed: the request applied, whatever the rows say now.
 	if err := o.record(ctx, actionKeysRotate, purpose, map[string]string{
 		"purpose": purpose, "kid": res.KID, "emergency": fmt.Sprintf("%t", emergency),
 	}); err != nil {
 		return res, fmt.Errorf("keys: %s rotation to %s is applied but the admin audit append failed: %w", purpose, res.KID, err)
+	}
+	if readErr != nil {
+		return OfflineRotateResult{}, fmt.Errorf("keys: the %s rotation is applied but its rows could not be read back: %w", purpose, readErr)
 	}
 	return res, nil
 }

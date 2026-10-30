@@ -1440,3 +1440,77 @@ func TestOverdueFinding(t *testing.T) {
 		t.Errorf("key_overdue alerts after recovery = %d, want the original one only", got)
 	}
 }
+
+// failNextInsertMeta wraps a MetaStore and can fail the fresh next key's
+// Insert: the injection point of a rotation whose promotion commits but whose
+// trailing write does not. (failInsertMeta, the InsertIfEmpty one, is the
+// startup's.)
+type failNextInsertMeta struct {
+	keys.MetaStore
+	failNextInsert bool
+}
+
+func (f *failNextInsertMeta) Insert(ctx context.Context, rec keys.Record) error {
+	if f.failNextInsert {
+		return errors.New("injected: the fresh next key could not be inserted")
+	}
+	return f.MetaStore.Insert(ctx, rec)
+}
+
+// TestScheduledRotationPublishFailure: a scheduled rotation whose promotion
+// commits but whose fresh next key cannot be inserted stands too — the old key
+// is retired (not revoked), the next key signs at once, the error carries the
+// stood sentinel, and the scheduler's heal pass refills the empty slot.
+func TestScheduledRotationPublishFailure(t *testing.T) {
+	e := newEnv(t)
+	e.timings = fastTimings()
+	ctx := context.Background()
+	meta := &failNextInsertMeta{MetaStore: e.anotherMeta()}
+	m := e.managerWith(meta, e.store)
+	m.Init(ctx)
+	cli := keys.Actor{Subject: "ops@example.com", AuthMethod: "cli"}
+	rows := e.rows()
+	a0 := kidInState(t, rows, keys.PurposeToken, keys.StateActive)
+	n0 := kidInState(t, rows, keys.PurposeToken, keys.StateNext)
+
+	// Past the prepublish window, with the trailing Insert failing.
+	e.clk.Advance(2 * time.Hour)
+	meta.failNextInsert = true
+	err := m.Rotate(ctx, keys.PurposeToken, keys.RotateOpts{Actor: cli})
+	if err == nil {
+		t.Fatal("the rotation reported success although its next key could not be inserted")
+	}
+	if !errors.Is(err, keys.ErrRotationStood) {
+		t.Fatalf("the error does not carry the stood sentinel although the promotion committed: %v", err)
+	}
+	for _, want := range []string{"retired " + a0, "activated " + n0} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the error does not state what the rotation did (missing %q): %v", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), "revoked") {
+		t.Errorf("a scheduled rotation's error claims a revocation: %v", err)
+	}
+
+	after := e.rows()
+	if r := rowFor(t, after, a0); r.State != keys.StateRetired {
+		t.Fatalf("the old key = %s, want retired although the insert failed", r.State)
+	}
+	if got := kidInState(t, after, keys.PurposeToken, keys.StateActive); got != n0 {
+		t.Fatalf("active = %s, want the promoted next %s", got, n0)
+	}
+	if kids := kidsByState(after, keys.PurposeToken, keys.StateNext); len(kids) != 0 {
+		t.Errorf("next rows = %v, want none until the heal pass", kids)
+	}
+	if got := alertsByRule(e.alerts.alerts(), keys.AlertKeyRotationFailed); got != 1 {
+		t.Fatalf("key_rotation_failed alerts = %d, want 1", got)
+	}
+
+	// The heal pass publishes the missing next key and the episode is over.
+	meta.failNextInsert = false
+	mustSchedule(t, m)
+	kidInState(t, e.rows(), keys.PurposeToken, keys.StateNext)
+	if got := alertsByRule(e.alerts.alerts(), keys.AlertKeyRotationFailed); got != 1 {
+		t.Errorf("the healed episode re-raised: %d alerts", got)
+	}
+}

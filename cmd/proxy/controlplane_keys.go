@@ -192,13 +192,19 @@ func newKeysRotateCmd() *cobra.Command {
 			res, err := o.Rotate(cmd.Context(), purpose, emergency)
 			if err != nil {
 				if errors.Is(err, keys.ErrRotationStood) {
-					// The revocation committed, so this is not a failed
-					// emergency but a standing one with recovery left: say so
-					// plainly, and exit 3 so a script can tell it from a
+					// The promotion committed, so this is not a failed
+					// rotation but a standing one with recovery left: say
+					// what stands, and exit 3 so a script can tell it from a
 					// refusal that changed nothing.
-					_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
-						"the %s emergency rotation stood: the compromised key IS revoked and its signatures stop verifying as verifiers refresh; "+
-							"only the fresh next key is missing — the control plane's scheduler republishes one, `keys list` shows when it is there\n", purpose)
+					if emergency {
+						_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
+							"the %s emergency rotation stood: the compromised key IS revoked and its signatures stop verifying as verifiers refresh; "+
+								"only the fresh next key is missing — the control plane's scheduler republishes one, `keys list` shows when it is there\n", purpose)
+					} else {
+						_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
+							"the %s rotation stood: the old key was retired and the next key signs, but the fresh next key is missing — "+
+								"the control plane's scheduler republishes one, `keys list` shows when it is there\n", purpose)
+					}
 					return &exitError{code: exitKeysRotationStood, err: err}
 				}
 				// The staged bundle refusal is a clean outcome, not a failure of
