@@ -27,6 +27,11 @@ const KeyFileFlag = "--admin-audit-key-file"
 // NewSegmentFlag is the flag that starts a new chain segment for a new key.
 const NewSegmentFlag = "--admin-audit-new-segment"
 
+// RotateKeyUsage names the offline rotation command in messages: the
+// supported way to change the signing key (NewSegmentFlag is recovery for a
+// lost key).
+const RotateKeyUsage = "control-plane admin-audit rotate-key"
+
 // detailPreviousKeyID is the segment_start detail naming the key it replaces.
 const detailPreviousKeyID = "previous_key_id"
 
@@ -54,37 +59,30 @@ func (s *Store) PublicKey() ed25519.PublicKey {
 // DefaultKeyPath returns <stateDir>/cp-audit.key.
 func DefaultKeyPath(stateDir string) string { return filepath.Join(stateDir, DefaultKeyFileName) }
 
-// CheckKey is the startup key check. With no rows it passes. Otherwise the
-// store must hold a signer whose key_id is the chain head's and an HMAC key
+// CheckKey is the startup key check (AAUD-01). With no rows it passes.
+// Otherwise the store must hold a signer whose key_id is the chain head's —
+// or, when the head is an audit.key_rotated entry, the key it hands the chain
+// to, so the take-up of a signed rotation starts cleanly — and an HMAC key
 // that reproduces the genesis actor_key_check; any other state fails closed
 // with an error naming the expected key_id and KeyFileFlag.
 func (s *Store) CheckKey(ctx context.Context) error {
-	seq, _, headKey, err := s.Head(ctx)
-	if err != nil || seq == 0 {
+	head, found, err := readHeadFrom(ctx, s.db.SQL())
+	if err != nil || !found {
 		return err
 	}
 	if s.signer == nil || len(s.hmacKey) == 0 {
-		return missingKeyErr(headKey, "the signing or HMAC key")
+		return missingKeyErr(head.KeyID, "the signing or HMAC key")
 	}
-	if err := s.checkHMAC(ctx, headKey); err != nil {
+	if err := s.checkHMAC(ctx, head.KeyID); err != nil {
 		return err
 	}
-	if headKey != s.keyID {
-		return keyMismatchErr(seq, headKey, s.keyID)
-	}
-	return nil
+	return appendKeyErr(head, s.keyID)
 }
 
 func missingKeyErr(headKey, what string) error {
 	return fmt.Errorf("%w: the admin audit chain has rows signed by key_id %s but %s is missing; "+
 		"restore the key file for key_id %s and point %s at it (a missing key file is never replaced silently)",
 		ErrKeyFileMissing, headKey, what, headKey, KeyFileFlag)
-}
-
-func keyMismatchErr(seq int64, headKey, loaded string) error {
-	return fmt.Errorf("%w: the chain head (seq %d) is signed by key_id %s but the loaded key is key_id %s; "+
-		"point %s at the key for key_id %s, or start a new segment for this key with %s=%s",
-		ErrKeyIDMismatch, seq, headKey, loaded, KeyFileFlag, headKey, NewSegmentFlag, loaded)
 }
 
 // checkHMAC compares the HMAC key's check value with the genesis entry's.
@@ -218,8 +216,14 @@ func Open(ctx context.Context, db *cpstate.DB, o OpenOptions) (*Store, error) {
 				return nil, err
 			}
 		}
-		if _, err := s.StartSegment(ctx, o.NewSegment); err != nil {
+		added, err := s.StartSegment(ctx, o.NewSegment)
+		if err != nil {
 			return nil, err
+		}
+		if added {
+			s.logger.Warn("admin audit key changed with "+NewSegmentFlag+
+				"; "+RotateKeyUsage+" is the supported way to rotate the key ("+NewSegmentFlag+" is for recovery after a lost key)",
+				"key_id", s.keyID)
 		}
 	}
 	if err := s.CheckKey(ctx); err != nil {

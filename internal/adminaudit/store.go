@@ -142,10 +142,8 @@ func (s *Store) Record(ctx context.Context, in Input) (Entry, error) {
 		side = &a
 	}
 	return s.appendTx(ctx, func(head headRow) (*Entry, *Actor, error) {
-		if head.KeyID != s.keyID {
-			return nil, nil, fmt.Errorf("%w: the chain head (seq %d) is signed by key_id %s but the loaded key is key_id %s; "+
-				"load the signing key for key_id %s, or start a new segment for the new key",
-				ErrKeyIDMismatch, head.Seq, head.KeyID, s.keyID, head.KeyID)
+		if err := appendKeyErr(head, s.keyID); err != nil {
+			return nil, nil, err
 		}
 		return &e, side, nil
 	})
@@ -193,11 +191,16 @@ func actorKeyCheck(key []byte) string {
 	return hmacHex(key, actorKeyCheckLabel)[:16]
 }
 
-// headRow is the newest row of the chain as an append sees it.
+// headRow is the newest row of the chain as an append or the key check sees
+// it. rotate is set when Action is audit.key_rotated and the handover it
+// declares parses; the key discipline (appendKeyErr) then lets only the named
+// key extend the chain.
 type headRow struct {
-	Seq   int64
-	Hash  []byte
-	KeyID string
+	Seq    int64
+	Hash   []byte
+	KeyID  string
+	Action string
+	rotate *keyRotation
 }
 
 // buildFunc decides the next entry given the current head (after genesis on an
@@ -240,7 +243,7 @@ func (s *Store) commitTx(ctx context.Context, build buildFunc) (out Entry, rows 
 		}
 	}()
 
-	head, found, err := readHead(ctx, conn)
+	head, found, err := readHeadFrom(ctx, conn)
 	if err != nil {
 		return Entry{}, nil, err
 	}
@@ -251,7 +254,7 @@ func (s *Store) commitTx(ctx context.Context, build buildFunc) (out Entry, rows 
 		if err := s.signAndInsert(ctx, conn, &g, nil); err != nil {
 			return Entry{}, nil, err
 		}
-		head = headRow{Seq: g.Seq, Hash: g.EntryHash, KeyID: g.KeyID}
+		head = headRow{Seq: g.Seq, Hash: g.EntryHash, KeyID: g.KeyID, Action: g.Action}
 		rows = append(rows, emitted{entry: g})
 	}
 	e, side, err := build(head)
@@ -310,15 +313,33 @@ func (s *Store) genesis(now time.Time) Entry {
 	}
 }
 
-func readHead(ctx context.Context, conn *sql.Conn) (headRow, bool, error) {
-	var h headRow
-	err := conn.QueryRowContext(ctx,
-		"SELECT seq, entry_hash, key_id FROM admin_audit ORDER BY seq DESC LIMIT 1").Scan(&h.Seq, &h.Hash, &h.KeyID)
+// headQuerier is the one SQL method reading the head needs; both *sql.DB and
+// *sql.Conn satisfy it.
+type headQuerier interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// readHeadFrom reads the chain head on q, with the head's action and, for a
+// key_rotated head, the handover it declares (readHead in commitTx and the
+// startup key check must agree on the key discipline).
+func readHeadFrom(ctx context.Context, q headQuerier) (h headRow, found bool, err error) {
+	var dj sql.NullString
+	err = q.QueryRowContext(ctx,
+		"SELECT seq, entry_hash, key_id, action, details_json FROM admin_audit ORDER BY seq DESC LIMIT 1").
+		Scan(&h.Seq, &h.Hash, &h.KeyID, &h.Action, &dj)
 	if errors.Is(err, sql.ErrNoRows) {
 		return headRow{}, false, nil
 	}
 	if err != nil {
 		return headRow{}, false, fmt.Errorf("adminaudit: read chain head: %w", err)
+	}
+	if h.Action == ActionKeyRotated && dj.Valid {
+		var d map[string]string
+		if json.Unmarshal([]byte(dj.String), &d) == nil {
+			if rot, _, ok := rotationChangeOf(h.KeyID, d); ok {
+				h.rotate = &rot
+			}
+		}
 	}
 	return h, true, nil
 }
@@ -458,12 +479,13 @@ type KeyInfo struct {
 }
 
 // PubKeys returns every key declared by a key-defining entry (audit.genesis,
-// audit.segment_start, and the reserved audit.key_rotated), oldest first, so
-// keys of earlier segments stay available after a key change. It lists what
-// the chain declares; Verify is what checks those declarations.
+// audit.segment_start, audit.key_rotated), oldest first, so keys of earlier
+// segments stay available after a key change: for a key_rotated entry the key
+// its details declare. It lists what the chain declares; Verify is what
+// checks those declarations.
 func (s *Store) PubKeys(ctx context.Context) ([]KeyInfo, error) {
 	rows, err := s.db.SQL().QueryContext(ctx,
-		"SELECT seq, key_id, details_json FROM admin_audit WHERE action IN (?,?,?) ORDER BY seq",
+		"SELECT seq, key_id, action, details_json FROM admin_audit WHERE action IN (?,?,?) ORDER BY seq",
 		ActionGenesis, ActionSegmentStart, ActionKeyRotated)
 	if err != nil {
 		return nil, fmt.Errorf("adminaudit: read keys: %w", err)
@@ -471,17 +493,20 @@ func (s *Store) PubKeys(ctx context.Context) ([]KeyInfo, error) {
 	defer func() { _ = rows.Close() }()
 	var out []KeyInfo
 	for rows.Next() {
-		var k KeyInfo
-		var dj string
-		if err := rows.Scan(&k.FirstSeq, &k.KeyID, &dj); err != nil {
+		var (
+			seq int64
+			kid string
+			act string
+			dj  string
+		)
+		if err := rows.Scan(&seq, &kid, &act, &dj); err != nil {
 			return nil, fmt.Errorf("adminaudit: read keys: %w", err)
 		}
 		var d map[string]string
 		if err := json.Unmarshal([]byte(dj), &d); err != nil {
-			return nil, fmt.Errorf("adminaudit: entry %d has malformed details", k.FirstSeq)
+			return nil, fmt.Errorf("adminaudit: entry %d has malformed details", seq)
 		}
-		k.PublicKey = d[detailPublicKey]
-		out = append(out, k)
+		out = append(out, keyInfoOf(&Entry{Seq: seq, KeyID: kid, Action: act, Details: d}))
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("adminaudit: read keys: %w", err)

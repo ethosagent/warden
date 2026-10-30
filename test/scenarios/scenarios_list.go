@@ -281,6 +281,11 @@ var All = slices.Concat(
 		// warden.admin.v1 checkpoint at startup and every 5 minutes of the CP's
 		// clock. In-process only (fake clock, CP state dir).
 		{Name: "admin_audit_checkpoint", Opts: adminAuditOpts(), Run: adminAuditCheckpoint},
+		// Key rotation (W-P2-KEYS-06): rotate-key is refused while the control
+		// plane runs, rotates offline once it is stopped (signed handover, new
+		// key in place, old retired), and the control plane starts on the new
+		// key and signs with it. In-process only (CP state dir, dir lock).
+		{Name: "admin_audit_key_rotation", Opts: adminAuditOpts(), Run: adminAuditKeyRotation},
 	},
 	// Canary across protocols x allow/deny; see canary.go.
 	canaryScenarios(),
