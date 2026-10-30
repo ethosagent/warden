@@ -16,12 +16,22 @@ import (
 
 // The signing-key gate (W-P2-KEYS-02): with keys.enabled the control plane
 // creates an active and a next key per purpose, a restart keeps them, and a
-// key store that is down never takes the control plane with it. Workers keep
-// pulling policy throughout: keys are CP-local.
+// key store that is down never takes the control plane with it. The rotation
+// gate (W-P2-KEYS-03): a token key past its interval is retired and replaced
+// by the prepublished next key without a verify gap, and a restart after a
+// downtime catches up on the missed rotation. Workers keep pulling policy
+// throughout: keys are CP-local.
 
 func keysOpts() []harness.Option { return []harness.Option{harness.WithKeys()} }
 
 func keysFlakyOpts() []harness.Option { return []harness.Option{harness.WithFlakyKeyStore()} }
+
+// keysRotationOpts drives rotation on the harness clock: a 4h interval with a
+// 1h prepublish and a 2h overlap, so a scenario advances hours and watches the
+// lifecycle move. The bundle purpose stays manual.
+func keysRotationOpts() []harness.Option {
+	return []harness.Option{harness.WithKeyRotation(4*time.Hour, time.Hour, 2*time.Hour)}
+}
 
 // keyKIDs maps "purpose/state" to the kid of the row in that state.
 func keyKIDs(rows []harness.KeyRow) map[string]string {
@@ -30,6 +40,45 @@ func keyKIDs(rows []harness.KeyRow) map[string]string {
 		out[r.Purpose+"/"+r.State] = r.KID
 	}
 	return out
+}
+
+// keyStateCount counts the rows of one purpose in each state: the lifecycle
+// holds exactly one active and one next key per purpose.
+func keyStateCount(rows []harness.KeyRow, purpose string) map[string]int {
+	out := map[string]int{}
+	for _, r := range rows {
+		if r.Purpose == purpose {
+			out[r.State]++
+		}
+	}
+	return out
+}
+
+// keyJWKSKids returns the kids of the token purpose's JWKS.
+func keyJWKSKids(h *harness.H) []string {
+	set := h.KeyManager().KeySet().JWKS(keys.PurposeToken)
+	out := make([]string, 0, len(set.Keys))
+	for _, k := range set.Keys {
+		out = append(out, k.Kid)
+	}
+	return out
+}
+
+// sameKeySet reports whether got holds exactly the wanted kids.
+func sameKeySet(got []string, want ...string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	have := make(map[string]bool, len(want))
+	for _, k := range want {
+		have[k] = true
+	}
+	for _, k := range got {
+		if !have[k] {
+			return false
+		}
+	}
+	return true
 }
 
 func cpPolicyStatus(h *harness.H) int {
@@ -158,5 +207,151 @@ func keysDisabledCreatesNothing(t *testing.T, h *harness.H) {
 	}
 	if h.KeysTablePresent() {
 		t.Error("signing_keys exists with keys disabled")
+	}
+}
+
+// keysRotateOnSchedule (W-P2-KEYS-03): at the end of a 4h interval the
+// scheduler retires the signing key, promotes the next key that has been
+// published since boot, and publishes a fresh next key. The retired key keeps
+// verifying through its 2h overlap — no verify gap — while its private
+// material is gone the moment it stops signing; past the overlap it is
+// destroyed and leaves the JWKS. The manual bundle purpose never moves, and
+// nothing pages: this is the schedule working, not failing.
+func keysRotateOnSchedule(t *testing.T, h *harness.H) {
+	first := keyKIDs(h.KeyRows())
+
+	// 5h in: the rotation was due at 4h and the minute scheduler applies it on
+	// its goroutine, so the scenario drives the clock in ticks until the
+	// lifecycle has moved — retire, promote, publish — and the JWKS still holds
+	// the retired key until 6h.
+	h.Clock().Advance(5 * time.Hour)
+	h.Eventually("the scheduler applies the due rotation", func() bool {
+		h.Clock().Advance(time.Minute)
+		st := keyStateCount(h.KeyRows(), keys.PurposeToken)
+		return st[string(keys.StateActive)] == 1 && st[string(keys.StateNext)] == 1 &&
+			st[string(keys.StateRetired)] == 1
+	})
+
+	rows := h.KeyRows()
+	got := keyKIDs(rows)
+	if states := keyStateCount(rows, keys.PurposeToken); states[string(keys.StateActive)] != 1 || states[string(keys.StateNext)] != 1 ||
+		states[string(keys.StateRetired)] != 1 {
+		t.Fatalf("token rows after the rotation = %+v, want one active, one next, one retired", rows)
+	}
+	if got["token/active"] != first["token/next"] {
+		t.Errorf("the prepublished next key did not take over: %s -> %s", first["token/next"], got["token/active"])
+	}
+	if got["token/next"] == "" || got["token/next"] == got["token/active"] {
+		t.Errorf("no fresh next key published: %+v", rows)
+	}
+	if got["token/retired"] != first["token/active"] {
+		t.Errorf("the key that signed for the interval was not retired: %+v", rows)
+	}
+	if got["bundle/active"] != first["bundle/active"] || got["bundle/next"] != first["bundle/next"] {
+		t.Errorf("the manual bundle purpose rotated: %+v", rows)
+	}
+
+	mgr := h.KeyManager()
+	sg, err := mgr.KeySet().Active(keys.PurposeToken)
+	if err != nil {
+		t.Fatalf("token signer after the rotation: %v", err)
+	}
+	if sg.KID() != got["token/active"] {
+		t.Errorf("the manager signs with %s, want the row's active %s", sg.KID(), got["token/active"])
+	}
+	if _, err := sg.Sign(context.Background(), []byte("header.payload")); err != nil {
+		t.Errorf("Sign with the promoted key: %v", err)
+	}
+	// The verifier's set: next, active and the retired key inside its overlap.
+	if kids := keyJWKSKids(h); !sameKeySet(kids, got["token/active"], got["token/next"], got["token/retired"]) {
+		t.Errorf("token JWKS after the rotation = %v, want active, next and the retired key", kids)
+	}
+	// The retired key stopped signing, so its material is gone at once.
+	if _, err := os.Stat(filepath.Join(h.KeyStateDir(), "keys", keys.PurposeToken, got["token/retired"]+".pem")); !os.IsNotExist(err) {
+		t.Errorf("the retired key kept its material: %v", err)
+	}
+
+	// Past the overlap the retired key is destroyed and leaves the JWKS; the
+	// active key (promoted at 4h) is not due again until 8h.
+	h.Clock().Advance(2*time.Hour + time.Minute)
+	h.Eventually("the retired key is destroyed past its overlap", func() bool {
+		h.Clock().Advance(time.Minute)
+		return keyKIDs(h.KeyRows())["token/destroyed"] != ""
+	})
+
+	rows = h.KeyRows()
+	got = keyKIDs(rows)
+	if got["token/destroyed"] != first["token/active"] {
+		t.Errorf("the retired key was not destroyed past its overlap: %+v", rows)
+	}
+	if kids := keyJWKSKids(h); !sameKeySet(kids, got["token/active"], got["token/next"]) {
+		t.Errorf("token JWKS past the overlap = %v, want active and next only", kids)
+	}
+	if status := cpPolicyStatus(h); status != http.StatusOK {
+		t.Errorf("GET /policy after the rotation = %d, want 200", status)
+	}
+	for _, rule := range []string{keys.AlertKeyRotationFailed, keys.AlertKeyOverdue, keys.AlertSigningKeyUnavailable} {
+		if got := h.KeyFindings(rule); got != nil {
+			t.Errorf("a working schedule raised %s: %+v", rule, got)
+		}
+	}
+}
+
+// keysRotateAfterDowntime (W-P2-KEYS-03): the control plane is down for 13h —
+// three missed rotations on a 4h interval. The rows freeze while it is away,
+// and the first pass after the restart catches up: the boot key retired, the
+// prepublished next key promoted, a fresh next published — one rotation, never
+// two active keys, and no page for what it healed.
+func keysRotateAfterDowntime(t *testing.T, h *harness.H) {
+	before := keyKIDs(h.KeyRows())
+
+	h.CP().Stop()
+	h.Clock().Advance(13 * time.Hour)
+	if got := keyKIDs(h.KeyRows()); got["token/active"] != before["token/active"] {
+		t.Fatalf("rows moved while the control plane was down: %+v", got)
+	}
+
+	h.CP().Start()
+	// The catch-up pass runs on the manager's goroutine as the control plane
+	// boots; the ticks that drive it move the fake clock in turn.
+	h.Eventually("the catch-up pass rotates the overdue key", func() bool {
+		h.Clock().Advance(time.Minute)
+		st := keyStateCount(h.KeyRows(), keys.PurposeToken)
+		return st[string(keys.StateActive)] == 1 && st[string(keys.StateNext)] == 1 &&
+			keyKIDs(h.KeyRows())["token/active"] != before["token/active"]
+	})
+
+	rows := h.KeyRows()
+	got := keyKIDs(rows)
+	if states := keyStateCount(rows, keys.PurposeToken); states[string(keys.StateActive)] != 1 || states[string(keys.StateNext)] != 1 {
+		t.Fatalf("token rows after the catch-up = %+v, want exactly one active and one next", rows)
+	}
+	if got["token/retired"] != before["token/active"] {
+		t.Errorf("the key that signed through the downtime was not retired: %+v", rows)
+	}
+	if got["token/active"] != before["token/next"] {
+		t.Errorf("the prepublished next key did not take over: %s -> %s", before["token/next"], got["token/active"])
+	}
+	if got["bundle/active"] != before["bundle/active"] || got["bundle/next"] != before["bundle/next"] {
+		t.Errorf("the manual bundle purpose rotated across the downtime: %+v", rows)
+	}
+	mgr := h.KeyManager()
+	sg, err := mgr.KeySet().Active(keys.PurposeToken)
+	if err != nil {
+		t.Fatalf("token signer after the catch-up: %v", err)
+	}
+	if sg.KID() != got["token/active"] {
+		t.Errorf("the manager signs with %s, want the row's active %s", sg.KID(), got["token/active"])
+	}
+	if _, err := sg.Sign(context.Background(), []byte("header.payload")); err != nil {
+		t.Errorf("Sign with the promoted key: %v", err)
+	}
+	if status := cpPolicyStatus(h); status != http.StatusOK {
+		t.Errorf("GET /policy after the catch-up = %d, want 200", status)
+	}
+	for _, rule := range []string{keys.AlertKeyRotationFailed, keys.AlertKeyOverdue, keys.AlertSigningKeyUnavailable} {
+		if got := h.KeyFindings(rule); got != nil {
+			t.Errorf("a caught-up restart raised %s: %+v", rule, got)
+		}
 	}
 }

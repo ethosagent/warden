@@ -205,12 +205,16 @@ type H struct {
 	wantBackup bool
 	// backupUnwritable (WithBackupUnwritable) makes every backup run fail.
 	backupUnwritable bool
-	// wantKeys (WithKeys, WithFlakyKeyStore) boots the control plane with
-	// keys.enabled and a state dir; keyStore is the injected fake private-key
-	// store of WithFlakyKeyStore (nil = the real file backend).
-	wantKeys bool
-	keyStore *fakes.FakeKeyStore
-	keyState keysState
+	// wantKeys (WithKeys, WithFlakyKeyStore, WithKeyRotation) boots the control
+	// plane with keys.enabled and a state dir; keyStore is the injected fake
+	// private-key store of WithFlakyKeyStore (nil = the real file backend);
+	// keyTiming, when set (WithKeyRotation), replaces the token purpose's
+	// rotation timing in the config so a scenario can drive rotations with the
+	// harness clock.
+	wantKeys  bool
+	keyTiming keyTiming
+	keyStore  *fakes.FakeKeyStore
+	keyState  keysState
 
 	// tokenClients are the AgentWithProxyToken / AgentH2WithProxyToken clients,
 	// kept so cleanup can close their idle tunnels.

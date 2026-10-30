@@ -285,10 +285,14 @@ var All = slices.Concat(
 		// key per purpose in the file store and keeps them across a restart; a
 		// key store that is down at startup never stops the control plane and
 		// signing recovers with the store; a control plane without keys keeps no
-		// key table. In-process only (they stop and start the CP and read its
-		// state dir).
+		// key table. Rotation (W-P2-KEYS-03): a token key past its interval is
+		// retired and replaced without a verify gap, and a restart after a
+		// downtime catches up on the missed rotation. In-process only (they stop
+		// and start the CP and read its state dir).
 		{Name: "keys_file_store_restart", Opts: keysOpts(), Run: keysFileStoreRestart},
 		{Name: "keys_backend_down_recovers", Opts: keysFlakyOpts(), Run: keysBackendDownRecovers},
+		{Name: "keys_rotate_on_schedule", Opts: keysRotationOpts(), Run: keysRotateOnSchedule},
+		{Name: "keys_rotate_after_downtime", Opts: keysRotationOpts(), Run: keysRotateAfterDowntime},
 		{Name: "keys_disabled_creates_nothing", Opts: []harness.Option{harness.WithBackup()}, Run: keysDisabledCreatesNothing},
 	},
 	// Canary across protocols x allow/deny; see canary.go.
