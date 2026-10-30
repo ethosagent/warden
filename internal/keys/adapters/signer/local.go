@@ -48,19 +48,31 @@ var (
 // returns a LocalSigner over it. Any other algorithm is
 // keys.ErrUnsupportedAlg.
 func GenerateLocal(alg string) (*LocalSigner, error) {
+	priv, err := GenerateKey(alg)
+	if err != nil {
+		return nil, err
+	}
+	return newLocalSigner(priv)
+}
+
+// GenerateKey generates a fresh private key for alg (AlgEdDSA or AlgES256):
+// an ed25519.PrivateKey or a P-256 *ecdsa.PrivateKey. Any other algorithm is
+// keys.ErrUnsupportedAlg. Callers that persist the key use it with
+// MarshalPKCS8PEM; callers that only sign use GenerateLocal.
+func GenerateKey(alg string) (crypto.Signer, error) {
 	switch alg {
 	case keys.AlgEdDSA:
 		_, priv, err := ed25519.GenerateKey(rand.Reader)
 		if err != nil {
 			return nil, fmt.Errorf("keys: generate ed25519 key: %w", err)
 		}
-		return newLocalSigner(priv)
+		return priv, nil
 	case keys.AlgES256:
 		priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 		if err != nil {
 			return nil, fmt.Errorf("keys: generate p-256 key: %w", err)
 		}
-		return newLocalSigner(priv)
+		return priv, nil
 	default:
 		return nil, fmt.Errorf("%w: %q", keys.ErrUnsupportedAlg, alg)
 	}
