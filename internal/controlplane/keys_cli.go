@@ -2,17 +2,21 @@ package controlplane
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"text/tabwriter"
 	"time"
 
 	"github.com/ethosagent/warden/internal/adminaudit"
 	"github.com/ethosagent/warden/internal/clock"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/cpstate"
+	"github.com/ethosagent/warden/internal/dashboard"
 	"github.com/ethosagent/warden/internal/keys"
 	"github.com/ethosagent/warden/internal/keys/adapters/filestore"
 	"github.com/ethosagent/warden/internal/keys/adapters/metastore"
@@ -316,4 +320,46 @@ func (o *OfflineKeys) record(ctx context.Context, action, purpose string, detail
 		Outcome:   adminaudit.OutcomeOK,
 	})
 	return err
+}
+
+// WriteKeysList renders signing-key rows for the CLI: the console API's
+// KeyView shape as JSON, or a table. Public metadata only, never key material.
+func WriteKeysList(w io.Writer, rows []keys.Record, asJSON bool) error {
+	views := make([]dashboard.KeyView, 0, len(rows))
+	for _, r := range rows {
+		views = append(views, keyView(r))
+	}
+	if asJSON {
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(views)
+	}
+	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "KID\tPURPOSE\tSTATE\tALG\tCREATED\tPUBLISHED\tACTIVATED\tCREATED BY")
+	dash := func(s string) string {
+		if s == "" {
+			return "-"
+		}
+		return s
+	}
+	for _, r := range rows {
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", r.KID, r.Purpose, string(r.State), r.Alg,
+			dash(rfc3339(r.CreatedAt)), dash(rfc3339(r.PublishAt)), dash(rfc3339(r.ActivateAt)), r.CreatedBy)
+	}
+	return tw.Flush()
+}
+
+// WriteKeysJWKS writes published JWKS documents: the one document for purpose
+// when it names one, otherwise a document per purpose that has keys.
+func WriteKeysJWKS(w io.Writer, docs map[string]keys.JWKS, purpose string) error {
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	if purpose != "" {
+		doc, ok := docs[purpose]
+		if !ok {
+			return fmt.Errorf("keys: no published keys for %s", purpose)
+		}
+		return enc.Encode(doc)
+	}
+	return enc.Encode(docs)
 }

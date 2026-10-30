@@ -1,6 +1,7 @@
 package controlplane
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -363,5 +364,45 @@ func TestKeysCLIMissingAuditKeyRefuses(t *testing.T) {
 	}
 	if _, err := OpenKeysOffline(ctx, stateDir, KeysCLIOptions{}); err == nil || !strings.Contains(err.Error(), "admin audit") {
 		t.Errorf("open without the audit key = %v, want an admin audit failure", err)
+	}
+}
+
+// TestWriteKeysListTable: the non-JSON list renders one line per row, public
+// metadata only.
+func TestWriteKeysListTable(t *testing.T) {
+	o, err := OpenKeysOfflineReadOnly(context.Background(), openKeysStateDir(t), KeysCLIOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = o.Close() }()
+	rows, err := o.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := WriteKeysList(&buf, rows, false); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	if len(lines) != len(rows)+1 {
+		t.Fatalf("table lines = %d, want a header and %d rows:\n%s", len(lines), len(rows), buf.String())
+	}
+	if !strings.Contains(lines[0], "KID") || !strings.Contains(buf.String(), "system") {
+		t.Errorf("table =\n%s", buf.String())
+	}
+	if strings.Contains(buf.String(), "PRIVATE") {
+		t.Errorf("table leaks private material:\n%s", buf.String())
+	}
+	// The JWKS writer prints purpose's own document when one is named.
+	docs := map[string]keys.JWKS{"token": {Keys: []keys.JWK{{Kid: "k1"}}}}
+	var jbuf bytes.Buffer
+	if err := WriteKeysJWKS(&jbuf, docs, "token"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(jbuf.String(), `"kid": "k1"`) {
+		t.Errorf("jwks output = %s", jbuf.String())
+	}
+	if err := WriteKeysJWKS(&jbuf, docs, "ca"); err == nil {
+		t.Error("jwks for an absent purpose = nil error")
 	}
 }
