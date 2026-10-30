@@ -330,26 +330,45 @@ rows and:
 
 - the key file (or the HMAC key file beside it) is missing. A missing key is never
   replaced silently; restore it from backup.
-- the key's `key_id` is not the chain head's `key_id`. The error names the expected
-  `key_id` and `--admin-audit-key-file`.
+- the key's `key_id` is not the chain head's `key_id` — except right after a signed
+  rotation: when the head is an `audit.key_rotated` entry, the key it hands the
+  chain to is accepted, and a retired key copied back is refused with the expected
+  `key_id` named. The error names the expected `key_id` and `--admin-audit-key-file`.
 - the HMAC key does not match the one the chain was started with.
 
 Turning the feature off again keeps the rows and the tables; the control plane always
 registers the admin audit migration, so the state database never trips the
 downgrade guard.
 
-**Manual key change (new segment).** To move to a new signing key, stop the control
-plane, check and archive the old segment with `admin-audit verify` and `admin-audit
-export` (below), put the new key at `--admin-audit-key-file` with the
-same `cp-audit-hmac.key` beside it, and start once with
-`--admin-audit-new-segment=<new key_id>`. The control plane appends one
+**Key rotation.** `warden control-plane admin-audit rotate-key --state-dir <dir>`
+(W-P2-KEYS-06) is the supported way to change the signing key, run offline with the
+control plane stopped (it takes the state-dir lock and exits 1 with `control plane
+is running` otherwise). It generates a new Ed25519 key, appends one
+`audit.key_rotated` entry signed by the old key — linked to the head and carrying
+`old_key_id`, `new_key_id` and the new public key — then replaces the key file and
+keeps the old key beside it as `<key>.<old_key_id>.key.retired` (mode 0600). The
+HMAC key does not change. The next start accepts the new key because the chain
+names it; verification learns keys from the chain itself, so a `key_id` change is
+legal only as the take-up of a `key_rotated` entry, `admin-audit verify` and
+`admin-audit export` list every key of the rotation history in their `keys` record,
+and `GET /dashboard/api/admin-audit/pubkey` serves the same list. Restores accept a
+backup whose manifest fingerprint names any key in that history. A run interrupted
+between the entry and the file swap is completed by re-running `rotate-key`. The
+step-by-step procedure is
+[docs/runbooks/admin-audit-key.md](runbooks/admin-audit-key.md).
+
+**Manual key change (new segment).** `--admin-audit-new-segment` is recovery for a
+lost key, when no one can sign a handover entry: stop the control plane, check and
+archive the chain with `admin-audit verify` and `admin-audit export`, put the new
+key at `--admin-audit-key-file` with the same `cp-audit-hmac.key` beside it, and
+start once with `--admin-audit-new-segment=<new key_id>`. The control plane logs a
+WARN naming `admin-audit rotate-key` as the supported path, appends one
 `audit.segment_start` entry signed by the new key, linked to the old head and naming
 the previous `key_id`; every later row carries the new `key_id`, and verification
 reads each segment's public key from the chain. The flag must equal the loaded key's
 `key_id` (anything else stops startup) and is a no-op once the head is on that key,
 so leaving it set can never rotate twice. The flag without
-`console.adminAudit.enabled` is a startup error. The step-by-step procedure is
-[docs/runbooks/admin-audit-key.md](runbooks/admin-audit-key.md). Automatic rotation is W-P2-KEYS-06.
+`console.adminAudit.enabled` is a startup error.
 
 **Startup verification.** After the key check, every enabled start verifies the
 newest 1000 rows and the head signature. A failure logs
