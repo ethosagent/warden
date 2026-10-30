@@ -5,6 +5,7 @@ import (
 	"crypto"
 	"errors"
 	"fmt"
+	"regexp"
 )
 
 // Key purposes. Each key belongs to exactly one, so a token key can never
@@ -76,6 +77,16 @@ type PrivateKeyStore interface {
 	// particular order.
 	List(ctx context.Context, purpose string) ([]string, error)
 }
+
+// kidRe admits exactly what an RFC 7638 thumbprint is (unpadded base64url), so
+// a kid can never address anything outside its purpose's namespace — a path
+// for the file backend, a secret name for the AWS one.
+var kidRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
+
+// ValidKID reports whether kid is shaped like an RFC 7638 thumbprint. Every
+// PrivateKeyStore implementation must refuse anything else, so a purpose/kid
+// ref stays inside its namespace whatever the backend.
+func ValidKID(kid string) bool { return kidRe.MatchString(kid) }
 
 // KeyCodec is the private-key side of the Signer: generating a key, encoding
 // it for a PrivateKeyStore and decoding it again. It is a port so that this

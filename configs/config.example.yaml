@@ -340,9 +340,17 @@ responseScan:
 keys:
   enabled: false                  # master switch (default false)
   store:
-    backend: file                 # file is the only backend today (echo and env are rejected)
+    backend: file                 # file (default) | aws
     file:
       dir: ""                     # default <state-dir>/keys; may point at a separate secret mount
+    aws:                          # only read with backend: aws. Control plane's own
+                                  # AWS namespace for signing keys — credentials come
+                                  # from the control plane's environment or instance
+                                  # role, NEVER from config. Must stay disjoint from
+                                  # secretStore.aws.namePrefix in BOTH directions or
+                                  # startup fails.
+      region: eu-central-1
+      namePrefix: warden-cp-keys/ # default; the CP prefix the worker role cannot read
   token:
     alg: EdDSA                    # EdDSA (default) | ES256
   bundle:

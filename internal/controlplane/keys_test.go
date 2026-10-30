@@ -17,6 +17,7 @@ import (
 	"github.com/ethosagent/warden/internal/cpstate"
 	"github.com/ethosagent/warden/internal/integration"
 	"github.com/ethosagent/warden/internal/keys"
+	"github.com/ethosagent/warden/internal/keys/adapters/awsstore"
 	"github.com/ethosagent/warden/test/fakes"
 )
 
@@ -323,5 +324,80 @@ func TestKeysFindingMapping(t *testing.T) {
 	}
 	if len(string(f.Evidence)) > keysEvidenceMax+64 {
 		t.Errorf("evidence not bounded: %d bytes", len(string(f.Evidence)))
+	}
+}
+
+// TestKeysAWSBackendWiring: with keys.store.backend: aws the control plane
+// builds its private-key store over the AWS Secrets Manager client at the
+// CP-local prefix — rows record store_backend aws, the secrets land under
+// keys.store.aws.namePrefix and nowhere near the file dir, the startup log
+// names region and prefix, and no key material or credential reaches the logs.
+func TestKeysAWSBackendWiring(t *testing.T) {
+	account := fakes.NewFakeAWSSecretsClient()
+	stateDir := filepath.Join(t.TempDir(), "state")
+	cfg := writeKeysPolicy(t, "keys:\n  enabled: true\n  store:\n    backend: aws\n    aws:\n      region: eu-central-1\n")
+	_, logs := runCP(t, Params{
+		ConfigPath:    cfg,
+		StateDir:      stateDir,
+		KeysAWSClient: account.View("warden-cp-keys/"),
+	})
+
+	rows := keyRows(t, stateDir)
+	if len(rows) != 4 {
+		t.Fatalf("signing_keys rows = %d, want an active and a next for token and bundle", len(rows))
+	}
+	for _, r := range rows {
+		if !account.Has("warden-cp-keys/" + r.Purpose + "/" + r.KID) {
+			t.Errorf("no secret for %s/%s under warden-cp-keys/", r.Purpose, r.KID)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, "keys")); !os.IsNotExist(err) {
+		t.Errorf("the aws backend created the file key directory: %v", err)
+	}
+	for _, want := range []string{"control plane AWS key store active", `"region":"eu-central-1"`, `"namePrefix":"warden-cp-keys/"`} {
+		if !strings.Contains(logs, want) {
+			t.Errorf("startup log does not name %q:\n%s", want, logs)
+		}
+	}
+	for _, banned := range []string{"PRIVATE KEY", "AKIA", "secretAccessKey"} {
+		if strings.Contains(logs, banned) {
+			t.Errorf("logs contain %q", banned)
+		}
+	}
+}
+
+// TestSecretStoreBackend: the awsstore.Backend glue over a SecretStore maps
+// the not-found sentinels onto each other and never invents values.
+func TestSecretStoreBackend(t *testing.T) {
+	ctx := context.Background()
+	ss := fakes.NewFakeSecretStore()
+	b := secretStoreBackend{ss}
+	if _, err := b.Get(ctx, "token/kid"); !errors.Is(err, awsstore.ErrNotFound) {
+		t.Fatalf("Get(absent) = %v, want awsstore.ErrNotFound", err)
+	}
+	if err := b.Put(ctx, "token/kid", "pem"); err != nil {
+		t.Fatal(err)
+	}
+	if v, err := b.Get(ctx, "token/kid"); err != nil || v != "pem" {
+		t.Fatalf("Get = %q, %v", v, err)
+	}
+	if _, err := b.Get(ctx, "bundle/other"); !errors.Is(err, awsstore.ErrNotFound) {
+		t.Errorf("Get(other key) = %v, want ErrNotFound", err)
+	}
+	if err := b.Delete(ctx, "token/never-there"); err != nil {
+		t.Errorf("Delete(absent) = %v, want nil", err)
+	}
+	if err := b.Delete(ctx, "token/kid"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Get(ctx, "token/kid"); !errors.Is(err, awsstore.ErrNotFound) {
+		t.Errorf("Get after Delete = %v, want ErrNotFound", err)
+	}
+	if err := b.Put(ctx, "token/kid", "pem2"); err != nil {
+		t.Fatal(err)
+	}
+	refs, err := b.List(ctx)
+	if err != nil || len(refs) != 1 || refs[0] != "token/kid" {
+		t.Fatalf("List = %v, %v; want [token/kid]", refs, err)
 	}
 }

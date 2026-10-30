@@ -262,3 +262,179 @@ func (f *FakeKeyStore) List(_ context.Context, purpose string) ([]string, error)
 	sort.Strings(kids)
 	return kids, nil
 }
+
+// FakeAWSSecretsClient is an in-memory secrets.AWSSecretsClient over one AWS
+// account's Secrets Manager secrets, with the IAM resource scope of the role
+// that uses it: every operation on a secret name outside the scope is denied
+// exactly as AWS would deny it, and ListSecrets never returns a name the role
+// cannot see. Views (View) share the one account, so a test can hold the
+// control plane's role and the worker's role side by side and prove a worker
+// role scoped to the secretStore namespace cannot reach the control plane's
+// signing keys. Values are returned by GetSecretValue only.
+type FakeAWSSecretsClient struct {
+	acct  *awsAccount
+	scope string // IAM resource prefix; "" = the account's admin role
+}
+
+// awsAccount is the shared state of every view of one account. The mutex is
+// shared with the maps, so views are safe for concurrent use.
+type awsAccount struct {
+	mu   sync.Mutex
+	vals map[string]string // secret name → value
+	vers map[string]int    // secret name → version counter
+	down error
+}
+
+var _ secrets.AWSSecretsClient = (*FakeAWSSecretsClient)(nil)
+
+// NewFakeAWSSecretsClient returns an empty account seen by an unrestricted
+// role. Use View to scope further roles down (a worker role to warden/*, the
+// control plane's keys role to warden-cp-keys/*).
+func NewFakeAWSSecretsClient() *FakeAWSSecretsClient {
+	return &FakeAWSSecretsClient{acct: &awsAccount{
+		vals: map[string]string{},
+		vers: map[string]int{},
+	}}
+}
+
+// View returns the same account as the role scoped to scope sees: operations
+// on names outside the scope are denied, ListSecrets filters to it.
+func (f *FakeAWSSecretsClient) View(scope string) *FakeAWSSecretsClient {
+	return &FakeAWSSecretsClient{acct: f.acct, scope: scope}
+}
+
+// SetDown makes every call from every view fail with err (nil restores).
+func (f *FakeAWSSecretsClient) SetDown(err error) {
+	f.acct.mu.Lock()
+	defer f.acct.mu.Unlock()
+	f.acct.down = err
+}
+
+// Seed plants a secret as an operator or a previous run of the control plane
+// would have, bypassing the scope (the data is in the account either way).
+func (f *FakeAWSSecretsClient) Seed(name, value string) {
+	f.acct.mu.Lock()
+	defer f.acct.mu.Unlock()
+	f.acct.vals[name] = value
+	f.acct.vers[name]++
+}
+
+// Has reports whether the account holds a secret under name — what the tests
+// use to prove a delete really deleted.
+func (f *FakeAWSSecretsClient) Has(name string) bool {
+	f.acct.mu.Lock()
+	defer f.acct.mu.Unlock()
+	_, ok := f.acct.vals[name]
+	return ok
+}
+
+// denied is the error AWS returns for an operation a role is not scoped for.
+func denied(action, name string) error {
+	return fmt.Errorf("secrets: aws %s failed: AccessDeniedException: User is not authorized to perform: secretsmanager:%s on resource: %s", action, action, name)
+}
+
+// allowed reports whether the role's scope covers name.
+func (f *FakeAWSSecretsClient) allowed(name string) bool {
+	return f.scope == "" || strings.HasPrefix(name, f.scope)
+}
+
+// GetSecretValue returns the current value for name, or ErrSecretNotFound.
+func (f *FakeAWSSecretsClient) GetSecretValue(name string) (string, error) {
+	a := f.acct
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.down != nil {
+		return "", a.down
+	}
+	if !f.allowed(name) {
+		return "", denied("GetSecretValue", name)
+	}
+	v, ok := a.vals[name]
+	if !ok {
+		return "", fmt.Errorf("%w: GetSecretValue", secrets.ErrSecretNotFound)
+	}
+	return v, nil
+}
+
+// PutSecretValue stores a new version of an existing secret (ErrSecretNotFound
+// when absent, like the real API).
+func (f *FakeAWSSecretsClient) PutSecretValue(name, value string) (string, error) {
+	a := f.acct
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.down != nil {
+		return "", a.down
+	}
+	if !f.allowed(name) {
+		return "", denied("PutSecretValue", name)
+	}
+	if _, ok := a.vals[name]; !ok {
+		return "", fmt.Errorf("%w: PutSecretValue", secrets.ErrSecretNotFound)
+	}
+	a.vals[name] = value
+	a.vers[name]++
+	return fmt.Sprintf("v%d", a.vers[name]), nil
+}
+
+// CreateSecret creates a new secret. An existing name is the real API's
+// ResourceExistsException, surfaced verbatim (never a value).
+func (f *FakeAWSSecretsClient) CreateSecret(name, value string) (string, error) {
+	a := f.acct
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.down != nil {
+		return "", a.down
+	}
+	if !f.allowed(name) {
+		return "", denied("CreateSecret", name)
+	}
+	if _, ok := a.vals[name]; ok {
+		return "", fmt.Errorf("secrets: aws CreateSecret failed: ResourceExistsException: The operation failed because the secret %s already exists", name)
+	}
+	a.vals[name] = value
+	a.vers[name]++
+	return fmt.Sprintf("v%d", a.vers[name]), nil
+}
+
+// DeleteSecret removes the secret immediately (ForceDeleteWithoutRecovery);
+// deleting an absent secret is the real API's ResourceNotFoundException.
+func (f *FakeAWSSecretsClient) DeleteSecret(name string) error {
+	a := f.acct
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.down != nil {
+		return a.down
+	}
+	if !f.allowed(name) {
+		return denied("DeleteSecret", name)
+	}
+	if _, ok := a.vals[name]; !ok {
+		return fmt.Errorf("%w: DeleteSecret", secrets.ErrSecretNotFound)
+	}
+	delete(a.vals, name)
+	delete(a.vers, name)
+	return nil
+}
+
+// ListSecrets returns value-free entries for the secrets under namePrefix the
+// role can see, sorted by name. It never reads a value.
+func (f *FakeAWSSecretsClient) ListSecrets(namePrefix string) ([]secrets.AWSSecretEntry, error) {
+	a := f.acct
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.down != nil {
+		return nil, a.down
+	}
+	names := make([]string, 0, len(a.vals))
+	for n := range a.vals {
+		if strings.HasPrefix(n, namePrefix) && f.allowed(n) {
+			names = append(names, n)
+		}
+	}
+	sort.Strings(names)
+	out := make([]secrets.AWSSecretEntry, 0, len(names))
+	for _, n := range names {
+		out = append(out, secrets.AWSSecretEntry{Name: n, Version: fmt.Sprintf("v%d", a.vers[n])})
+	}
+	return out, nil
+}

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ethosagent/warden/internal/keys"
+	"github.com/ethosagent/warden/internal/secrets"
 	"github.com/ethosagent/warden/test/harness"
 )
 
@@ -22,6 +23,8 @@ import (
 func keysOpts() []harness.Option { return []harness.Option{harness.WithKeys()} }
 
 func keysFlakyOpts() []harness.Option { return []harness.Option{harness.WithFlakyKeyStore()} }
+
+func keysAWSOpts() []harness.Option { return []harness.Option{harness.WithAWSKeyStore()} }
 
 // keyKIDs maps "purpose/state" to the kid of the row in that state.
 func keyKIDs(rows []harness.KeyRow) map[string]string {
@@ -158,5 +161,70 @@ func keysDisabledCreatesNothing(t *testing.T, h *harness.H) {
 	}
 	if h.KeysTablePresent() {
 		t.Error("signing_keys exists with keys disabled")
+	}
+}
+
+// keysAWSStoreRestart (W-P2-KEYS-07): with keys.store.backend: aws the control
+// plane keeps its key material in Secrets Manager under its own CP-local
+// prefix — nothing on disk, nothing the worker namespace can resolve. A
+// restart keeps the same kids against the backend, and the role the served
+// secretStore block implies (scoped to secretStore.aws.namePrefix) can name no
+// key secret.
+func keysAWSStoreRestart(t *testing.T, h *harness.H) {
+	account := h.AWSKeysAccount()
+	first := h.KeyRows()
+	if len(first) != 4 {
+		t.Fatalf("signing_keys rows = %+v, want an active and a next for token and bundle", first)
+	}
+	want := keyKIDs(first)
+	for _, r := range first {
+		if r.Backend != "aws" || r.Alg != keys.AlgEdDSA || strings.Contains(r.PublicJWK, `"d"`) {
+			t.Errorf("row = %+v, want an aws-backend EdDSA row with a public-only JWK", r)
+		}
+		if !account.Has(harness.AWSKeysNamePrefix + r.Purpose + "/" + r.KID) {
+			t.Errorf("no secret for %s/%s under %s", r.Purpose, r.KID, harness.AWSKeysNamePrefix)
+		}
+	}
+	// The worker's view of the shared account: its store is built the way a
+	// worker builds it from the served secretStore block, over its own prefix.
+	worker := secrets.NewAWSSecretStore(account.View(harness.AWSWorkerNamePrefix), harness.AWSRegion, harness.AWSWorkerNamePrefix)
+	for _, k := range []string{"token/active", "token/next", "bundle/active", "bundle/next"} {
+		if v, err := worker.Get(context.Background(), want[k]); err == nil || strings.Contains(v, "PRIVATE KEY") {
+			t.Errorf("worker store resolved %s to %q (%v); keys must not resolve in the secretStore namespace", k, v, err)
+		}
+	}
+	if status := cpPolicyStatus(h); status != http.StatusOK {
+		t.Fatalf("GET /policy = %d, want 200", status)
+	}
+
+	h.CP().Stop()
+	h.CP().Start()
+	second := h.KeyRows()
+	if len(second) != len(first) {
+		t.Fatalf("restart changed the row count: %d -> %d", len(first), len(second))
+	}
+	got := keyKIDs(second)
+	for k, kid := range want {
+		if got[k] != kid {
+			t.Errorf("%s kid changed across a restart: %s -> %s", k, kid, got[k])
+		}
+	}
+	for _, r := range second {
+		if !account.Has(harness.AWSKeysNamePrefix + r.Purpose + "/" + r.KID) {
+			t.Errorf("secret for %s/%s missing after the restart", r.Purpose, r.KID)
+		}
+	}
+	if _, err := h.KeyManager().KeySet().Active(keys.PurposeToken); err != nil {
+		t.Errorf("token signer after the restart: %v", err)
+	}
+	if status := cpPolicyStatus(h); status != http.StatusOK {
+		t.Errorf("GET /policy after the restart = %d, want 200", status)
+	}
+	logs := h.Logs()
+	if !strings.Contains(logs, "control plane AWS key store active") {
+		t.Error("the control plane did not log the AWS key store coming up")
+	}
+	if strings.Contains(logs, "PRIVATE KEY") {
+		t.Error("logs contain PEM key material")
 	}
 }

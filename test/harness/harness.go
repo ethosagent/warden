@@ -210,7 +210,10 @@ type H struct {
 	// store of WithFlakyKeyStore (nil = the real file backend).
 	wantKeys bool
 	keyStore *fakes.FakeKeyStore
-	keyState keysState
+	// awsAccount is the fake AWS Secrets Manager account of WithAWSKeyStore;
+	// the control plane's injected role is scoped to keysAWSNamePrefix.
+	awsAccount *fakes.FakeAWSSecretsClient
+	keyState   keysState
 
 	// tokenClients are the AgentWithProxyToken / AgentH2WithProxyToken clients,
 	// kept so cleanup can close their idle tunnels.

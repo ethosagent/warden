@@ -13,7 +13,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 
 	"github.com/ethosagent/warden/internal/keys"
@@ -24,10 +23,6 @@ const (
 	fileMode os.FileMode = 0o600
 	ext                  = ".pem"
 )
-
-// kidRe admits exactly what an RFC 7638 thumbprint is (unpadded base64url), so
-// a kid can never address a path outside its purpose directory.
-var kidRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 
 // Store implements keys.PrivateKeyStore over a directory.
 type Store struct {
@@ -52,7 +47,7 @@ func (s *Store) path(purpose, kid string) (string, error) {
 	if !keys.ValidPurpose(purpose) {
 		return "", fmt.Errorf("%w: %q", keys.ErrInvalidPurpose, purpose)
 	}
-	if !kidRe.MatchString(kid) {
+	if !keys.ValidKID(kid) {
 		return "", fmt.Errorf("%w: kid is not a thumbprint", keys.ErrInvalidKey)
 	}
 	return filepath.Join(s.dir, purpose, kid+ext), nil
@@ -162,7 +157,7 @@ func (s *Store) List(ctx context.Context, purpose string) ([]string, error) {
 	for _, e := range entries {
 		name := e.Name()
 		kid, ok := strings.CutSuffix(name, ext)
-		if !ok || e.IsDir() || !kidRe.MatchString(kid) {
+		if !ok || e.IsDir() || !keys.ValidKID(kid) {
 			continue
 		}
 		kids = append(kids, kid)
