@@ -287,9 +287,7 @@ func VerifyExport(path string, o VerifyExportOptions) (Result, error) {
 			anchorHash = r.entry.EntryHash
 		}
 		if isKeyDefining(r.entry.Action) {
-			declared = append(declared, KeyInfo{
-				KeyID: r.entry.KeyID, PublicKey: r.entry.Details[detailPublicKey], FirstSeq: r.entry.Seq,
-			})
+			declared = append(declared, keyInfoOf(&r.entry))
 		}
 	}
 	if err := sc.Err(); err != nil {

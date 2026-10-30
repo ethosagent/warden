@@ -69,13 +69,15 @@ type Result struct {
 }
 
 // chainVerifier holds the state carried from one row to the next: the keys
-// declared so far and the previous entry. VerifyExport (W-P1-AAUD-04) reuses
-// it over an export stream.
+// declared so far, the previous entry and, when that entry is a key_rotated,
+// the key it handed the chain to (the take-up must be the very next entry).
+// VerifyExport (W-P1-AAUD-04) reuses it over an export stream.
 type chainVerifier struct {
 	keys     map[string]ed25519.PublicKey
 	hmacKey  []byte
 	havePrev bool
 	prev     headRow
+	pending  string
 }
 
 func newChainVerifier(hmacKey []byte) *chainVerifier {
@@ -117,7 +119,19 @@ func (v *chainVerifier) check(r storedRow) (int64, string) {
 	if err != nil || !equalHash(h, e.EntryHash) {
 		return e.Seq, ReasonEntryHash
 	}
-	if isKeyDefining(e.Action) {
+	if e.Action == ActionKeyRotated {
+		// Signed by the old key and declaring the new one: learn the new key
+		// and let only it sign the next entry.
+		rot, npub, ok := rotationChangeOf(e.KeyID, e.Details)
+		if !ok {
+			return e.Seq, ReasonDeclaredKey
+		}
+		if known, dup := v.keys[rot.newID]; dup && !known.Equal(npub) {
+			return e.Seq, ReasonDeclaredKey
+		}
+		v.keys[rot.newID] = npub
+		v.pending = rot.newID
+	} else if isKeyDefining(e.Action) {
 		pub, ok := declaredKey(e)
 		if !ok {
 			return e.Seq, ReasonDeclaredKey
@@ -126,8 +140,21 @@ func (v *chainVerifier) check(r storedRow) (int64, string) {
 			return e.Seq, ReasonDeclaredKey
 		}
 		v.keys[e.KeyID] = pub
-	} else if v.havePrev && e.KeyID != v.prev.KeyID {
-		return e.Seq, ReasonKeyChange
+		v.pending = ""
+	} else {
+		// The key discipline: a key change is legal only as the take-up of a
+		// key_rotated entry — and the take-up is mandatory: the entry right
+		// after a key_rotated must carry the new key_id, so the old key stops
+		// with its handover.
+		switch {
+		case v.pending != "":
+			if e.KeyID != v.pending {
+				return e.Seq, ReasonKeyChange
+			}
+		case v.havePrev && e.KeyID != v.prev.KeyID:
+			return e.Seq, ReasonKeyChange
+		}
+		v.pending = ""
 	}
 	pub, ok := v.keys[e.KeyID]
 	if !ok {
@@ -265,8 +292,10 @@ func (s *Store) readPage(ctx context.Context, after, upper int64, n int) ([]stor
 }
 
 // primeVerifier prepares a resumed Verify: it loads the keys declared before
-// from and the entry at from-1 (both verified by the earlier call). It
-// returns from-1 as the bad seq when that entry is gone.
+// from (learning the take-up key of a key_rotated entry, so the first entry
+// of the window may change the key_id) and the entry at from-1 (both verified
+// by the earlier call). It returns from-1 as the bad seq when that entry is
+// gone.
 func (s *Store) primeVerifier(ctx context.Context, v *chainVerifier, from int64) (int64, error) {
 	rows, err := s.db.SQL().QueryContext(ctx,
 		selectRowsSQL+" WHERE a.seq < ? AND a.action IN (?,?,?) ORDER BY a.seq",
@@ -279,6 +308,13 @@ func (s *Store) primeVerifier(ctx context.Context, v *chainVerifier, from int64)
 		if err != nil {
 			_ = rows.Close()
 			return 0, fmt.Errorf("adminaudit: verify: read keys: %w", err)
+		}
+		if r.entry.Action == ActionKeyRotated {
+			if rot, npub, ok := rotationChangeOf(r.entry.KeyID, r.entry.Details); ok {
+				v.keys[rot.newID] = npub
+				v.pending = rot.newID
+			}
+			continue
 		}
 		if pub, ok := declaredKey(&r.entry); ok {
 			v.keys[r.entry.KeyID] = pub
