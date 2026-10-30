@@ -107,6 +107,20 @@ func (failInsertMeta) InsertIfEmpty(context.Context, string, []keys.Record) (boo
 	return false, errors.New("database is locked")
 }
 
+// waitOn adapts the fake clock to ManagerConfig.Wait.
+func waitOn(clk *clocktest.Fake) func(context.Context, time.Duration) bool {
+	return func(ctx context.Context, d time.Duration) bool {
+		t := clk.NewTimer(d)
+		defer t.Stop()
+		select {
+		case <-ctx.Done():
+			return false
+		case <-t.C():
+			return true
+		}
+	}
+}
+
 type env struct {
 	t      *testing.T
 	dir    string // key directory
@@ -159,8 +173,8 @@ func (e *env) manager() *keys.Manager {
 	e.t.Helper()
 	m, err := keys.NewManager(keys.ManagerConfig{
 		Store: e.store, Meta: e.meta, Codec: signer.Codec{}, Backend: "file",
-		Algs:  map[string]string{keys.PurposeToken: keys.AlgEdDSA, keys.PurposeBundle: keys.AlgEdDSA},
-		Clock: e.clk, Logger: slog.New(slog.NewTextHandler(e.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		Algs: map[string]string{keys.PurposeToken: keys.AlgEdDSA, keys.PurposeBundle: keys.AlgEdDSA},
+		Now:  e.clk.Now, Wait: waitOn(e.clk), Logger: slog.New(slog.NewTextHandler(e.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 		Audit: e.audit, Alerts: e.alerts,
 	})
 	if err != nil {
@@ -570,6 +584,7 @@ func TestKeysCreationFailuresLeaveNothing(t *testing.T) {
 		e := newEnv(t)
 		m, err := keys.NewManager(keys.ManagerConfig{
 			Store: e.store, Meta: failInsertMeta{e.meta}, Codec: signer.Codec{}, Backend: "file",
+			Now: e.clk.Now, Wait: waitOn(e.clk),
 			Algs: map[string]string{keys.PurposeToken: keys.AlgEdDSA, keys.PurposeBundle: keys.AlgEdDSA},
 		})
 		if err != nil {
@@ -719,7 +734,7 @@ func TestKeysCAPurpose(t *testing.T) {
 func TestNewManagerValidation(t *testing.T) {
 	e := newEnv(t)
 	good := map[string]string{keys.PurposeToken: keys.AlgES256, keys.PurposeBundle: keys.AlgEdDSA}
-	base := keys.ManagerConfig{Store: e.store, Meta: e.meta, Codec: signer.Codec{}, Algs: good}
+	base := keys.ManagerConfig{Store: e.store, Meta: e.meta, Codec: signer.Codec{}, Algs: good, Now: e.clk.Now, Wait: waitOn(e.clk)}
 	if _, err := keys.NewManager(base); err != nil {
 		t.Fatalf("valid config: %v", err)
 	}

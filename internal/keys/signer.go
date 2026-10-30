@@ -1,13 +1,15 @@
-// Package keys provides the JOSE signing primitives behind Warden's key
-// management: the Signer port, Ed25519 (EdDSA) and P-256 (ES256) algorithms,
-// the public JWK format with RFC 7638 thumbprint kids, and JWS signature
-// verification. The package is pure computation — it holds no state, does no
-// I/O and never logs — and it never touches a private key's signing
-// operations: concrete signers live in internal/keys/adapters/signer (built
-// by GenerateLocal/NewLocalSigner there) and the later key stores do file
-// I/O under internal/keys/adapters; assembly constructs those and injects
-// them (W-P2-KEYS-02, #77). Workers will import this package to verify
-// control-plane-issued tokens (#111), so it must stay pure.
+// Package keys provides Warden's key management domain: the JOSE signing
+// primitives (the Signer port, Ed25519 (EdDSA) and P-256 (ES256) algorithms,
+// the public JWK format with RFC 7638 thumbprint kids, JWS signature
+// verification) and the Manager that creates, loads and serves signing keys
+// (W-P2-KEYS-02). The package does no I/O and never touches a private key's
+// signing operations: concrete signers and the PEM encoding live in
+// internal/keys/adapters/signer, the private-key store (PrivateKeyStore) and
+// the signing_keys metadata (MetaStore) are ports implemented by
+// internal/keys/adapters/filestore and .../metastore, and assembly constructs
+// those and injects them. Workers import this package to verify
+// control-plane-issued tokens (#111), so it must stay free of control-plane
+// dependencies.
 //
 // Nothing in this package lets private key material escape: errors name
 // algorithms and member names, never bytes, and a signer's string and log

@@ -1236,6 +1236,49 @@ answered `401` as soon as the control plane sees the revocation (at once for a c
 within about 2 seconds for the CLI), and a held poll is re-authenticated before it is answered, so
 it never receives a policy after the revoke.
 
+## Signing keys (`keys:`)
+
+The control plane can own the signing keys it uses for Warden tokens and policy
+bundles, and store the worker CA key. The subsystem is **off by default**: with
+`keys.enabled: false` (or no `keys:` block) no key directory, `signing_keys`
+table or goroutine exists and the control plane is unchanged. The block is
+control-plane-local — read from `--config` only, never served to workers.
+
+```yaml
+keys:
+  enabled: true            # needs --state-dir
+  store:
+    backend: file          # the only backend today; echo and env are refused
+    file:
+      dir: ""              # default <state-dir>/keys; may be a separate secret mount
+  token:  { alg: EdDSA }   # EdDSA (default) or ES256
+  bundle: { alg: EdDSA }   # must be EdDSA: workers pin bundle keys
+```
+
+- **Where keys live.** Private keys are PKCS#8 PEM files at
+  `<dir>/<purpose>/<kid>.pem` (directories 0700, files 0600, created exclusively
+  and fsynced). `warden-cp.db` holds only public metadata (the `signing_keys`
+  table: kid, purpose, algorithm, state, public JWK, timestamps). The kid is the
+  RFC 7638 thumbprint of the public key.
+- **First start.** For each of `token` and `bundle` with no rows the control
+  plane creates an active key and a next key, writes a `keys.generated` admin
+  audit entry for each (when admin audit is on) and logs `keys_loaded`. A restart
+  keeps the same kids. The `ca` purpose is never generated: it is filled by
+  importing the worker CA key.
+- **Store unavailable.** If rows exist but the active key cannot be read, the
+  control plane starts anyway: `/policy` and `/healthz` keep serving, signing
+  returns `ErrNoActiveKey`, a `signing_key_unavailable` finding is raised once
+  per outage, and loading is retried with 1 s to 60 s backoff until it works. It
+  never generates a replacement key while rows exist.
+- **Orphans.** At startup, key files with no `signing_keys` row (a crash between
+  writing the file and the insert) are deleted; the log names the kid and
+  purpose only.
+- **Backups.** The P1 backup set holds the database (public metadata) but not
+  the key directory. Back the directory up separately, or restoring will leave
+  rows without material.
+
+Key material never appears in the database, logs, errors or audit entries.
+
 ## Block list: offline CLI
 
 The user block list lives in `<state-dir>/warden-cp.db`, outside policy

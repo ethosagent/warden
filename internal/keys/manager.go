@@ -9,8 +9,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/ethosagent/warden/internal/clock"
 )
 
 // Reload backoff bounds: a purpose whose active key cannot be loaded is
@@ -86,8 +84,11 @@ type ManagerConfig struct {
 	Backend string
 	// Algs maps each loadable purpose (token, bundle) to its algorithm.
 	Algs map[string]string
-	// Clock is the time port; nil means clock.Real().
-	Clock  clock.Clock
+	// Now is the time source and Wait the sleep the reload backoff uses: it
+	// returns false if ctx ended first. Both are required (assembly adapts the
+	// control plane's clock), so key timing is deterministic in tests.
+	Now    func() time.Time
+	Wait   func(ctx context.Context, d time.Duration) bool
 	Logger *slog.Logger
 	// Audit and Alerts are optional.
 	Audit  AuditSink
@@ -100,7 +101,6 @@ type ManagerConfig struct {
 // database holds public metadata only.
 type Manager struct {
 	cfg ManagerConfig
-	clk clock.Clock
 	log *slog.Logger
 	set *KeySet
 
@@ -119,6 +119,9 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 	if cfg.Store == nil || cfg.Meta == nil || cfg.Codec == nil {
 		return nil, errors.New("keys: manager needs a Store, Meta and Codec")
 	}
+	if cfg.Now == nil || cfg.Wait == nil {
+		return nil, errors.New("keys: manager needs Now and Wait")
+	}
 	for _, p := range loadPurposes {
 		switch cfg.Algs[p] {
 		case AlgEdDSA, AlgES256:
@@ -129,10 +132,7 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 	if cfg.Algs[PurposeBundle] != AlgEdDSA {
 		return nil, fmt.Errorf("%w: bundle keys must be %s", ErrUnsupportedAlg, AlgEdDSA)
 	}
-	m := &Manager{cfg: cfg, clk: cfg.Clock, log: cfg.Logger, set: newKeySet(), degraded: map[string]string{}}
-	if m.clk == nil {
-		m.clk = clock.Real()
-	}
+	m := &Manager{cfg: cfg, log: cfg.Logger, set: newKeySet(), degraded: map[string]string{}}
 	if m.log == nil {
 		m.log = slog.Default()
 	}
@@ -207,17 +207,8 @@ func (m *Manager) Run(ctx context.Context) {
 	}
 }
 
-// wait sleeps d on the manager's clock and reports false if ctx ended first.
-func (m *Manager) wait(ctx context.Context, d time.Duration) bool {
-	t := m.clk.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return false
-	case <-t.C():
-		return true
-	}
-}
+// wait sleeps d and reports false if ctx ended first.
+func (m *Manager) wait(ctx context.Context, d time.Duration) bool { return m.cfg.Wait(ctx, d) }
 
 // LoadKeySet loads purpose (token or bundle) into the KeySet. A purpose with
 // no rows gets its first active key and a next key. A purpose with rows never
@@ -378,7 +369,7 @@ func (m *Manager) discard(ctx context.Context, purpose, kid string) {
 // INSERT loses to a concurrent creator, or fails, the material is deleted.
 func (m *Manager) createInitial(ctx context.Context, purpose string) error {
 	alg := m.cfg.Algs[purpose]
-	now := m.clk.Now()
+	now := m.cfg.Now()
 	states := []State{StateActive, StateNext}
 	recs := make([]Record, 0, len(states))
 	for _, st := range states {
@@ -496,7 +487,7 @@ func (m *Manager) ImportKey(ctx context.Context, purpose string, priv crypto.Sig
 		m.discard(ctx, purpose, sg.KID())
 		return "", err
 	}
-	now := m.clk.Now()
+	now := m.cfg.Now()
 	rec := Record{
 		KID: sg.KID(), Purpose: purpose, Alg: sg.Alg(), State: StateActive, PublicJWK: jwk,
 		StoreBackend: m.cfg.Backend, CreatedAt: now, PublishAt: now, ActivateAt: now, CreatedBy: actor.Subject,

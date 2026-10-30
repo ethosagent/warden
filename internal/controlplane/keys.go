@@ -70,7 +70,8 @@ func newKeyManager(kc config.KeysConfig, state *cpstate.DB, store keys.PrivateKe
 		Codec:   signer.Codec{},
 		Backend: kc.Store.Backend,
 		Algs:    map[string]string{keys.PurposeToken: kc.Token.Alg, keys.PurposeBundle: kc.Bundle.Alg},
-		Clock:   clk,
+		Now:     clk.Now,
+		Wait:    func(ctx context.Context, d time.Duration) bool { return waitOn(ctx, clk, d) },
 		Logger:  logger,
 		Alerts:  alerts,
 	}
@@ -82,6 +83,18 @@ func newKeyManager(kc config.KeysConfig, state *cpstate.DB, store keys.PrivateKe
 		return nil, fmt.Errorf("control-plane: keys: %w", err)
 	}
 	return m, nil
+}
+
+// waitOn sleeps d on clk and reports false if ctx ended first.
+func waitOn(ctx context.Context, clk clock.Clock, d time.Duration) bool {
+	t := clk.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C():
+		return true
+	}
 }
 
 // keysAudit adapts the admin audit Recorder to the key manager's AuditSink.

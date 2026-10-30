@@ -232,7 +232,7 @@ func TestKeysBackendDownAtStartup(t *testing.T) {
 		errCh <- Run(ctx, &out, Params{
 			ConfigPath: cfg, StateDir: stateDir, KeyStore: store, Clock: clk, Findings: findings,
 			ListenAddr: "127.0.0.1:0", AnalyticsProvider: "memory",
-			OnReady:    func(a string) { ready <- a },
+			OnReady:   func(a string) { ready <- a },
 			KeysReady: func(m *keys.Manager) { mgrCh <- m },
 		})
 	}()
