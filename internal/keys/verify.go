@@ -50,14 +50,15 @@ func Verify(jwk JWK, alg string, signingInput, sig []byte) error {
 		}
 		return nil
 	case ec != nil:
-		if len(sig) != es256SigSize {
-			return fmt.Errorf("%w: signature is %d bytes, want %d (is it DER?)", ErrBadSignature, len(sig), es256SigSize)
+		if len(sig) != ES256SignatureSize {
+			return fmt.Errorf("%w: signature is %d bytes, want %d (is it DER?)", ErrBadSignature, len(sig), ES256SignatureSize)
 		}
 		// RFC 7518 section 3.4: verify over the SHA-256 digest, with the two
 		// halves read as fixed-width big-endian integers.
 		digest := sha256.Sum256(signingInput)
-		r := new(big.Int).SetBytes(sig[:es256ScalarSize])
-		s := new(big.Int).SetBytes(sig[es256ScalarSize:])
+		half := ES256SignatureSize / 2
+		r := new(big.Int).SetBytes(sig[:half])
+		s := new(big.Int).SetBytes(sig[half:])
 		if !ecdsa.Verify(ec, digest[:], r, s) {
 			return ErrBadSignature
 		}

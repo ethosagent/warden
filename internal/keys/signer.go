@@ -1,12 +1,16 @@
 // Package keys provides the JOSE signing primitives behind Warden's key
-// management: local signers for Ed25519 (EdDSA) and P-256 (ES256), the
-// public JWK format with RFC 7638 thumbprint kids, and JWS signature
+// management: the Signer port, Ed25519 (EdDSA) and P-256 (ES256) algorithms,
+// the public JWK format with RFC 7638 thumbprint kids, and JWS signature
 // verification. The package is pure computation — it holds no state, does no
-// I/O and never logs — so persistence, rotation and the JWKS endpoint are
-// built on top of it by the key manager (W-P2-KEYS-02) and its consumers.
+// I/O and never logs — and it never touches a private key's signing
+// operations: concrete signers live in internal/keys/adapters/signer (built
+// by GenerateLocal/NewLocalSigner there) and the later key stores do file
+// I/O under internal/keys/adapters; assembly constructs those and injects
+// them (W-P2-KEYS-02, #77). Workers will import this package to verify
+// control-plane-issued tokens (#111), so it must stay pure.
 //
 // Nothing in this package lets private key material escape: errors name
-// algorithms and member names, never bytes, and LocalSigner's string and log
+// algorithms and member names, never bytes, and a signer's string and log
 // forms carry only the kid and algorithm.
 package keys
 
@@ -28,6 +32,12 @@ const (
 	// DER.
 	AlgES256 = "ES256"
 )
+
+// ES256SignatureSize is the length of an ES256 JWS signature on the wire:
+// two fixed-width 32-byte big-endian integers, r||s — the encoding Sign
+// produces and the only length Verify accepts, so an ASN.1 DER signature
+// never parses as one.
+const ES256SignatureSize = 64
 
 // Errors returned by this package. Every failure is one of these (possibly
 // wrapped with fmt.Errorf("%w: ...") naming only public facts — algorithms,
