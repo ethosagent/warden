@@ -203,6 +203,26 @@ func (s *Store) UpdateState(ctx context.Context, kid string, from, to keys.State
 	return changed, nil
 }
 
+// DeletePurpose removes every row of purpose in one transaction and reports
+// how many it deleted; a purpose with no rows deletes none.
+func (s *Store) DeletePurpose(ctx context.Context, purpose string) (int, error) {
+	var deleted int64
+	err := s.immediate(ctx, func(conn *sql.Conn) error {
+		res, err := conn.ExecContext(ctx, `DELETE FROM signing_keys WHERE purpose = ?`, purpose)
+		if err != nil {
+			return fmt.Errorf("metastore: delete %s rows: %w", purpose, err)
+		}
+		if deleted, err = res.RowsAffected(); err != nil {
+			return fmt.Errorf("metastore: delete %s rows: %w", purpose, err)
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return int(deleted), nil
+}
+
 // stampColumn is the timestamp column each target state writes.
 var stampColumn = map[keys.State]string{
 	keys.StateNext:      "publish_at",

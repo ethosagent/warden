@@ -314,6 +314,42 @@ func listAll(t *testing.T, s *Store) []keys.Record {
 	return rows
 }
 
+// TestDeletePurpose: reset's first step removes exactly one purpose's rows in
+// one transaction and leaves the other purposes alone.
+func TestDeletePurpose(t *testing.T) {
+	db := openDB(t, true)
+	s := New(db)
+	for _, tc := range []struct {
+		purpose string
+		st      keys.State
+	}{
+		{keys.PurposeToken, keys.StateActive},
+		{keys.PurposeToken, keys.StateRetired},
+		{keys.PurposeBundle, keys.StateActive},
+	} {
+		if err := s.Insert(context.Background(), rec(t, tc.purpose, tc.st)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	n, err := s.DeletePurpose(context.Background(), keys.PurposeToken)
+	if err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("deleted = %d, want the purpose's 2 rows", n)
+	}
+	rows, err := s.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Purpose != keys.PurposeBundle {
+		t.Errorf("rows after the delete = %+v, want the bundle row only", rows)
+	}
+	if n, err := s.DeletePurpose(context.Background(), keys.PurposeCA); err != nil || n != 0 {
+		t.Errorf("deleting an empty purpose = %d, %v; want 0, nil", n, err)
+	}
+}
+
 // TestPromoteCAS: the retire and the activate commit as one pair, both
 // stamped. Either side of the pair not being where the caller expects is a
 // lost race that writes nothing at all — in particular a next key that is no
