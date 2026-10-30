@@ -1374,8 +1374,8 @@ Exit codes:
 | Code | Meaning |
 |---|---|
 | 0 | Applied. |
-| 1 | Nothing changed — a refusal: no or too-young `next` key, missing `--yes`, a staged bundle rotation, or `reset` under the running control plane's state-dir lock. A reset that partially applied also exits 1: its rows are gone and its audit row has outcome `error` with the removed count. |
-| 2 | Usage error: a bad flag, a missing or unopenable state dir or audit key. |
+| 1 | Nothing changed — a refusal: no or too-young `next` key, a staged bundle rotation, or `reset` under the running control plane's state-dir lock. A reset that partially applied also exits 1: its rows are gone and its audit row has outcome `error` with the removed count. |
+| 2 | Usage error: a bad flag, a missing or unopenable state dir or audit key, a missing `--yes` or a declined confirmation, or `rotate --purpose ca`. |
 | 3 | A stood rotation: the promotion committed, so the old key is out of the signing slot — revoked under `--emergency`, retired otherwise — and only the fresh `next` key is missing. |
 
 Key material never appears in the database, logs, errors or audit entries.
