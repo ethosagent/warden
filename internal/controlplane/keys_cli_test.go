@@ -14,6 +14,7 @@ import (
 	"github.com/ethosagent/warden/internal/adminaudit"
 	"github.com/ethosagent/warden/internal/cpstate"
 	"github.com/ethosagent/warden/internal/keys"
+	"github.com/ethosagent/warden/test/fakes"
 )
 
 // openKeysStateDir runs a control plane with keys and the admin audit enabled
@@ -600,5 +601,81 @@ func TestWriteKeysListTable(t *testing.T) {
 	}
 	if err := WriteKeysJWKS(&jbuf, docs, "ca"); err == nil {
 		t.Error("jwks for an absent purpose = nil error")
+	}
+}
+
+// TestKeysCLIAWSBackend: the CLI drives the aws backend through the same
+// adapter the control plane builds — reset deletes the old secrets from the
+// account and regenerates rows that record store_backend aws, and the read-only
+// open never touches a key directory.
+func TestKeysCLIAWSBackend(t *testing.T) {
+	ctx := context.Background()
+	account := fakes.NewFakeAWSSecretsClient()
+	const cpPrefix = "warden-cp-keys/"
+	stateDir := filepath.Join(t.TempDir(), "state")
+	cfg := writeKeysPolicy(t, "keys:\n  enabled: true\n  store:\n    backend: aws\n    aws:\n      region: eu-central-1\n")
+	runCP(t, Params{ConfigPath: cfg, StateDir: stateDir, KeysAWSClient: account.View(cpPrefix)})
+	before := keyRows(t, stateDir)
+	if len(before) != 4 {
+		t.Fatalf("rows after the first start = %d, want 4", len(before))
+	}
+
+	opt := KeysCLIOptions{ConfigPath: cfg, KeysAWSClient: account.View(cpPrefix)}
+	o, err := OpenKeysOfflineReadOnly(ctx, stateDir, opt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	all, err := o.List(ctx)
+	if err != nil || len(all) != 4 {
+		t.Fatalf("offline list = %d rows, %v; want 4", len(all), err)
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, "keys")); !os.IsNotExist(err) {
+		t.Errorf("the aws CLI open created a key directory: %v", err)
+	}
+	if err := o.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	ro, err := OpenKeysOffline(ctx, stateDir, opt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := ro.Reset(ctx, keys.PurposeToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Removed != 2 {
+		t.Fatalf("reset removed %d rows, want the purpose's 2", res.Removed)
+	}
+	for _, r := range before {
+		if r.Purpose == keys.PurposeToken && account.Has(cpPrefix+r.Purpose+"/"+r.KID) {
+			t.Errorf("the reset left the old secret %s/%s in the account", r.Purpose, r.KID)
+		}
+		if r.Purpose == keys.PurposeBundle && !account.Has(cpPrefix+r.Purpose+"/"+r.KID) {
+			t.Errorf("the reset disturbed %s/%s", r.Purpose, r.KID)
+		}
+	}
+	after, err := ro.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok := 0
+	for _, r := range after {
+		if r.Purpose != keys.PurposeToken {
+			continue
+		}
+		tok++
+		if r.StoreBackend != "aws" {
+			t.Errorf("fresh row records store_backend %q, want aws", r.StoreBackend)
+		}
+		if !account.Has(cpPrefix + r.Purpose + "/" + r.KID) {
+			t.Errorf("no secret for the fresh key %s", r.KID)
+		}
+	}
+	if tok != 2 || res.KID == "" {
+		t.Fatalf("reset left %d token rows (kid %q), want 2 and a fresh active kid", tok, res.KID)
+	}
+	if err := ro.Close(); err != nil {
+		t.Fatal(err)
 	}
 }

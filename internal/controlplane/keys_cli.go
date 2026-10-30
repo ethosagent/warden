@@ -19,8 +19,8 @@ import (
 	"github.com/ethosagent/warden/internal/cpstate"
 	"github.com/ethosagent/warden/internal/dashboard"
 	"github.com/ethosagent/warden/internal/keys"
-	"github.com/ethosagent/warden/internal/keys/adapters/filestore"
 	"github.com/ethosagent/warden/internal/keys/adapters/metastore"
+	"github.com/ethosagent/warden/internal/secrets"
 )
 
 // Admin audit actions of the keys CLI; the console's rotate route records the
@@ -63,6 +63,11 @@ type KeysCLIOptions struct {
 	// AuditKeyFile is the admin audit signing key ("" =
 	// <state-dir>/cp-audit.key).
 	AuditKeyFile string
+	// KeysAWSClient replaces the Secrets Manager client the aws backend would
+	// build from the control plane's environment (env → IMDS). A real CLI run
+	// leaves it nil — the operator runs it where the control plane's role is;
+	// tests inject a fake.
+	KeysAWSClient secrets.AWSSecretsClient
 }
 
 // OfflineKeys is the signing-key CLI's handle on a state dir: the state
@@ -109,8 +114,8 @@ func openKeys(ctx context.Context, stateDir string, opt KeysCLIOptions, readOnly
 	if err != nil {
 		return nil, err
 	}
-	if kc.Store.Backend != config.KeysBackendFile {
-		return nil, fmt.Errorf("keys: the CLI supports the %q store backend, not %q", config.KeysBackendFile, kc.Store.Backend)
+	if kc.Store.Backend != config.KeysBackendFile && kc.Store.Backend != config.KeysBackendAWS {
+		return nil, fmt.Errorf("keys: the CLI supports the %q and %q store backends, not %q", config.KeysBackendFile, config.KeysBackendAWS, kc.Store.Backend)
 	}
 	var db *cpstate.DB
 	var rec adminaudit.Recorder
@@ -143,15 +148,13 @@ func openKeys(ctx context.Context, stateDir string, opt KeysCLIOptions, readOnly
 	if !tableExists(ctx, db.SQL(), "signing_keys") {
 		return nil, fail(errors.New("keys: the state database has no signing_keys table (the control plane has not run here with keys.enabled)"))
 	}
-	store, err := filestore.New(kc.Store.File.Dir)
-	if err != nil {
-		return nil, fail(err)
-	}
 	clk := opt.Clock
 	if clk == nil {
 		clk = clock.Real()
 	}
-	mgr, err := newKeyManager(kc, db, store, clk, slog.New(slog.DiscardHandler), rec, nil)
+	// The store is nil: newKeyManager builds the configured backend — the file
+	// store, or the aws adapter over opt.KeysAWSClient (nil: the environment).
+	mgr, err := newKeyManager(kc, db, nil, opt.KeysAWSClient, clk, slog.New(slog.DiscardHandler), rec, nil)
 	if err != nil {
 		return nil, fail(err)
 	}
