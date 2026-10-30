@@ -10,6 +10,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -187,17 +188,11 @@ func (s *Store) UpdateState(ctx context.Context, kid string, from, to keys.State
 	}
 	changed := false
 	err := s.immediate(ctx, func(conn *sql.Conn) error {
-		res, err := conn.ExecContext(ctx, `UPDATE signing_keys SET state = ?, `+col+` = ? WHERE kid = ? AND state = ?`,
-			string(to), at.Unix(), kid, string(from))
+		n, err := execCAS(ctx, conn,
+			`UPDATE signing_keys SET state = ?, `+col+` = ? WHERE kid = ? AND state = ?`,
+			kid, string(to), at.Unix(), kid, string(from))
 		if err != nil {
-			if strings.Contains(err.Error(), "UNIQUE constraint failed") {
-				return fmt.Errorf("%w: %s", keys.ErrConflict, to)
-			}
-			return fmt.Errorf("metastore: update %s: %w", kid, err)
-		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return fmt.Errorf("metastore: update %s: %w", kid, err)
+			return err
 		}
 		changed = n == 1
 		return nil
@@ -215,6 +210,87 @@ var stampColumn = map[keys.State]string{
 	keys.StateRetired:   "retire_at",
 	keys.StateRevoked:   "retire_at",
 	keys.StateDestroyed: "destroyed_at",
+}
+
+// errLostRace is Promote's internal signal that a row was not in the state the
+// caller expected; immediate rolls the whole transaction back and Promote
+// reports the loss as (false, nil).
+var errLostRace = errors.New("metastore: the row moved first")
+
+// Promote retires the active key oldKID and activates the next key nextKID in
+// one BEGIN IMMEDIATE transaction. A reader between the two writes sees
+// neither — under WAL a read transaction pins the last committed snapshot — so
+// a peer polling the table can never observe the purpose with no active key.
+// An empty oldKID skips the retire (the slot is vacant). Either row not in its
+// expected state, or absent, writes nothing and reports false; the whole
+// transaction rolls back, the old key staying active.
+func (s *Store) Promote(ctx context.Context, purpose, oldKID string, oldTo keys.State, nextKID string, at time.Time) (bool, error) {
+	retireCol, ok := stampColumn[oldTo]
+	if !ok {
+		return false, fmt.Errorf("metastore: no timestamp for state %q", oldTo)
+	}
+	changed := false
+	err := s.immediate(ctx, func(conn *sql.Conn) error {
+		if oldKID != "" {
+			n, err := execCAS(ctx, conn,
+				`UPDATE signing_keys SET state = ?, `+retireCol+` = ? WHERE kid = ? AND purpose = ? AND state = ?`,
+				oldKID, string(oldTo), at.Unix(), oldKID, purpose, string(keys.StateActive))
+			if err != nil {
+				return err
+			}
+			if n != 1 {
+				return errLostRace
+			}
+		}
+		n, err := execCAS(ctx, conn,
+			`UPDATE signing_keys SET state = ?, activate_at = ? WHERE kid = ? AND purpose = ? AND state = ?`,
+			nextKID, string(keys.StateActive), at.Unix(), nextKID, purpose, string(keys.StateNext))
+		if err != nil {
+			return err
+		}
+		if n != 1 {
+			return errLostRace
+		}
+		changed = true
+		return nil
+	})
+	if errors.Is(err, errLostRace) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return changed, nil
+}
+
+// execCAS runs one compare-and-swap UPDATE named by kid and returns how many
+// rows it changed. A change that would break the one-active / one-next
+// invariant is keys.ErrConflict.
+func execCAS(ctx context.Context, conn *sql.Conn, query, kid string, args ...any) (int64, error) {
+	res, err := conn.ExecContext(ctx, query, args...)
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return 0, fmt.Errorf("%w: %s collides with an existing row", keys.ErrConflict, kid)
+		}
+		return 0, fmt.Errorf("metastore: update %s: %w", kid, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("metastore: update %s: %w", kid, err)
+	}
+	return n, nil
+}
+
+// DataVersion returns the database's data version: a counter SQLite bumps on
+// every committed write, including writes made by other processes through their
+// own connections. The key manager polls it to notice the keys CLI's writes
+// without re-reading the table every two seconds.
+func (s *Store) DataVersion(ctx context.Context) (int64, error) {
+	var v int64
+	if err := s.db.QueryRowContext(ctx, `PRAGMA data_version`).Scan(&v); err != nil {
+		return 0, fmt.Errorf("metastore: data_version: %w", err)
+	}
+	return v, nil
 }
 
 // immediate runs fn in a BEGIN IMMEDIATE transaction on one connection, so its

@@ -2,8 +2,11 @@ package harness
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/ethosagent/warden/internal/controlplane"
 	"github.com/ethosagent/warden/internal/cpstate"
@@ -51,6 +54,23 @@ func WithFlakyKeyStore() Option {
 	}
 }
 
+// keyTiming is the token purpose's rotation timing as WithKeyRotation set it.
+type keyTiming struct {
+	interval, prepublish, overlap time.Duration
+}
+
+// WithKeyRotation is WithKeys with the token purpose's rotation timing set in
+// the keys config (keys.token.rotationInterval and friends), so a scenario
+// drives rotations with the harness clock instead of the 720h default. The
+// bundle purpose stays manual: its interval must be 0. The floors still apply
+// (prepublish 10m, overlap 20m, interval prepublish+overlap or 0).
+func WithKeyRotation(interval, prepublish, overlap time.Duration) Option {
+	return func(h *H) {
+		h.wantKeys = true
+		h.keyTiming = keyTiming{interval: interval, prepublish: prepublish, overlap: overlap}
+	}
+}
+
 func (h *H) applyKeys(p *controlplane.Params) {
 	if !h.wantKeys {
 		return
@@ -75,7 +95,13 @@ func (h *H) keysYAML() string {
 	if !h.wantKeys {
 		return ""
 	}
-	return "\nkeys:\n  enabled: true\n"
+	var b strings.Builder
+	b.WriteString("\nkeys:\n  enabled: true\n")
+	if h.keyTiming != (keyTiming{}) {
+		fmt.Fprintf(&b, "  token:\n    rotationInterval: %s\n    prepublish: %s\n    overlap: %s\n",
+			h.keyTiming.interval, h.keyTiming.prepublish, h.keyTiming.overlap)
+	}
+	return b.String()
 }
 
 // KeyStore is the fake private-key store of WithFlakyKeyStore.

@@ -59,4 +59,17 @@ type MetaStore interface {
 	// it changes the row only if it is still in from, stamps the timestamp
 	// column that belongs to to with at, and reports whether it changed it.
 	UpdateState(ctx context.Context, kid string, from, to State, at time.Time) (bool, error)
+	// Promote moves purpose's signing slot in ONE transaction: the active key
+	// oldKID to oldTo, then the next key nextKID to active, both stamped with
+	// at. A peer reading between the two writes sees either both changes or
+	// neither, so the purpose is never observable without an active key. An
+	// empty oldKID skips the retire (the slot is already vacant). Either row
+	// not where the caller expects it is a lost race: nothing is written and
+	// Promote reports false.
+	Promote(ctx context.Context, purpose, oldKID string, oldTo State, nextKID string, at time.Time) (bool, error)
+	// DataVersion returns the database's data version, a counter that changes
+	// on every write from any process using the same database file. The manager
+	// polls it to pick up another process's writes (the keys CLI) without
+	// re-reading the table every second.
+	DataVersion(ctx context.Context) (int64, error)
 }
