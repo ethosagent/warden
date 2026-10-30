@@ -33,9 +33,6 @@ import (
 // revoked key stops verifying at once, and no JWS that should verify ever
 // fails.
 func TestKeysRotationDrill(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping the rotation drill in short mode")
-	}
 	bin := buildWarden(t)
 	ctx := context.Background()
 
