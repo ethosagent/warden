@@ -128,6 +128,7 @@ classes:
       - internal/alertpipeline
       - internal/policybuilder
       - internal/policyeval
+      - internal/keys             # the Signer port, JWK/JWKS and JWS verification: pure, no private-key signing (#76)
 
   # DEVTOOL — developer tooling; no Warden package may import it. Exempt from
   # layering but not from the global X rules.
@@ -181,9 +182,11 @@ zones:
     - internal/detect
     - internal/policybuilder
     - internal/policyeval
+    - internal/keys/adapters/**   # the local signer adapter: control plane signs, workers only verify (#76)
   shared:
     - internal/config
     - internal/denyreason
+    - internal/keys               # the JOSE port both planes share: workers verify CP-issued tokens (#76, #111)
     - internal/identity
     - internal/clock
     - internal/clock/clocktest
