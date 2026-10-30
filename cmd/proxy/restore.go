@@ -94,4 +94,8 @@ func printRestoreSummary(cmd *cobra.Command, res controlplane.RestoreResult) {
 			"WARNING: the signing key material check could not run (%s); verify %s holds the key files before starting the control plane\n",
 			res.KeysCheckError, res.KeysDir)
 	}
+	if res.KeysAWSStore {
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
+			"NOTE: some signing keys record the aws backend: their material lives in AWS Secrets Manager under the keys.store.aws prefix, not in a local key directory — verify the control plane can read it when it starts.\n")
+	}
 }

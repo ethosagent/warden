@@ -18,6 +18,7 @@ import (
 	"github.com/ethosagent/warden/internal/audit"
 	"github.com/ethosagent/warden/internal/cpstate"
 	"github.com/ethosagent/warden/internal/integration"
+	"github.com/ethosagent/warden/test/fakes"
 )
 
 // restoreSrc builds a stopped CP state dir (cp db, alert db, fleet db and
@@ -587,5 +588,27 @@ func TestRestoreCheckKeyMaterial(t *testing.T) {
 	}
 	if kmc.dir != filepath.Join(broken, "keys") || len(kmc.missing) != 0 {
 		t.Errorf("check = dir %q missing %v, want the default dir named and nothing missing", kmc.dir, kmc.missing)
+	}
+}
+
+// TestRestoreCheckKeyMaterialAWS: rows recording the aws backend carry their
+// material in Secrets Manager, so the check claims no key directory and
+// reports nothing missing even with no <state-dir>/keys on disk.
+func TestRestoreCheckKeyMaterialAWS(t *testing.T) {
+	ctx := context.Background()
+	account := fakes.NewFakeAWSSecretsClient()
+	stateDir := filepath.Join(t.TempDir(), "state")
+	cfg := writeKeysPolicy(t, "keys:\n  enabled: true\n  store:\n    backend: aws\n    aws:\n      region: eu-central-1\n")
+	runCP(t, Params{ConfigPath: cfg, StateDir: stateDir, KeysAWSClient: account.View("warden-cp-keys/")})
+	if _, err := os.Stat(filepath.Join(stateDir, "keys")); !os.IsNotExist(err) {
+		t.Fatalf("the aws control plane created a key directory: %v", err)
+	}
+
+	kmc := checkKeyMaterial(ctx, stateDir)
+	if kmc.err != nil {
+		t.Fatalf("check over aws rows = err %v, want none", kmc.err)
+	}
+	if !kmc.aws || kmc.dir != "" || len(kmc.missing) != 0 {
+		t.Errorf("check over aws rows = dir %q aws %v missing %v, want no directory claimed and nothing missing", kmc.dir, kmc.aws, kmc.missing)
 	}
 }

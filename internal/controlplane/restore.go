@@ -105,8 +105,15 @@ type RestoreResult struct {
 	// with `keys reset` only when the material is truly lost.
 	KeysMissingMaterial []string
 	// KeysDir is the key directory the material check looked in — the default
-	// <state-dir>/keys: restore takes no --config naming another one.
+	// <state-dir>/keys: restore takes no --config naming another one. Empty
+	// when every next/active key records the aws backend: there is no key
+	// directory to look in.
 	KeysDir string
+	// KeysAWSStore reports that at least one next or active signing key
+	// records store_backend aws: its material lives in AWS Secrets Manager
+	// under the keys.store.aws prefix, not in any local directory — the
+	// material check neither covers nor claims it.
+	KeysAWSStore bool
 	// KeysCheckError is why the material check could not run, when it could
 	// not. The operator verifies KeysDir themselves instead of trusting a
 	// silent pass; it is empty when the check ran.
@@ -232,7 +239,7 @@ func RunRestore(ctx context.Context, p RestoreParams) (RestoreResult, error) {
 	// checked; a state dir without signing keys (the feature was never
 	// enabled) reports nothing.
 	kmc := checkKeyMaterial(ctx, p.StateDir)
-	res.KeysDir, res.KeysMissingMaterial = kmc.dir, kmc.missing
+	res.KeysDir, res.KeysMissingMaterial, res.KeysAWSStore = kmc.dir, kmc.missing, kmc.aws
 	if kmc.err != nil {
 		res.KeysCheckError = kmc.err.Error()
 	}
@@ -248,12 +255,15 @@ func RunRestore(ctx context.Context, p RestoreParams) (RestoreResult, error) {
 }
 
 // keyMaterialCheck is what the restore's material check found: the key
-// directory it looked in, the purposes whose next or active key has no
-// readable private material there, and the error that stopped the check, when
-// one did — a check that could not run is reported, never swallowed.
+// directory it looked in (empty when the keys live in the aws backend — there
+// is no directory to look in), the purposes whose next or active key has no
+// readable private material there, the aws flag when rows record the aws
+// backend, and the error that stopped the check, when one did — a check that
+// could not run is reported, never swallowed.
 type keyMaterialCheck struct {
 	dir     string
 	missing []string
+	aws     bool
 	err     error
 }
 
@@ -263,9 +273,11 @@ type keyMaterialCheck struct {
 // the key store. Restore takes no --config, so the keys defaults decide the
 // directory (<state-dir>/keys). Retired, revoked and destroyed keys have no
 // material by design (it was deleted when the key left the signing slot), so
-// only the two states that must sign are checked. A state dir whose control
-// plane never ran with keys enabled has no signing_keys table and reports
-// nothing.
+// only the two states that must sign are checked. Rows recording the aws
+// backend carry their material in AWS Secrets Manager, not in any local
+// directory: they are not file-checked, the result says so, and no directory
+// is claimed for them. A state dir whose control plane never ran with keys
+// enabled has no signing_keys table and reports nothing.
 func checkKeyMaterial(ctx context.Context, stateDir string) keyMaterialCheck {
 	out := keyMaterialCheck{dir: filepath.Join(stateDir, "keys")}
 	db, err := cpstate.OpenReadOnly(ctx, filepath.Join(stateDir, adminaudit.StateDBFileName), StateMigrations())
@@ -283,6 +295,35 @@ func checkKeyMaterial(ctx context.Context, stateDir string) keyMaterialCheck {
 	if n == 0 {
 		return out
 	}
+	rows, err := db.SQL().QueryContext(ctx,
+		`SELECT purpose, kid, store_backend FROM signing_keys WHERE state IN ('next','active')`)
+	if err != nil {
+		out.err = fmt.Errorf("list the signing keys: %w", err)
+		return out
+	}
+	defer func() { _ = rows.Close() }()
+	type fileKey struct{ purpose, kid string }
+	var onDisk []fileKey
+	for rows.Next() {
+		var purpose, kid, backend string
+		if err := rows.Scan(&purpose, &kid, &backend); err != nil {
+			out.err = fmt.Errorf("read a signing key row: %w", err)
+			return out
+		}
+		if backend == config.KeysBackendAWS {
+			out.aws = true // material in Secrets Manager: no directory to check
+			continue
+		}
+		onDisk = append(onDisk, fileKey{purpose, kid})
+	}
+	if err := rows.Err(); err != nil {
+		out.err = fmt.Errorf("list the signing keys: %w", err)
+		return out
+	}
+	if len(onDisk) == 0 {
+		out.dir = "" // nothing to look for in <state-dir>/keys
+		return out
+	}
 	kc, err := config.DefaultKeys().Resolve(stateDir)
 	if err != nil {
 		out.err = fmt.Errorf("resolve the key directory: %w", err)
@@ -294,26 +335,11 @@ func checkKeyMaterial(ctx context.Context, stateDir string) keyMaterialCheck {
 		out.err = err
 		return out
 	}
-	rows, err := db.SQL().QueryContext(ctx, `SELECT purpose, kid FROM signing_keys WHERE state IN ('next','active')`)
-	if err != nil {
-		out.err = fmt.Errorf("list the signing keys: %w", err)
-		return out
-	}
-	defer func() { _ = rows.Close() }()
 	missing := map[string]bool{}
-	for rows.Next() {
-		var purpose, kid string
-		if err := rows.Scan(&purpose, &kid); err != nil {
-			out.err = fmt.Errorf("read a signing key row: %w", err)
-			return out
+	for _, k := range onDisk {
+		if _, err := store.Get(ctx, k.purpose, k.kid); err != nil {
+			missing[k.purpose] = true
 		}
-		if _, err := store.Get(ctx, purpose, kid); err != nil {
-			missing[purpose] = true
-		}
-	}
-	if err := rows.Err(); err != nil {
-		out.err = fmt.Errorf("list the signing keys: %w", err)
-		return out
 	}
 	for p := range missing {
 		out.missing = append(out.missing, p)
