@@ -1319,8 +1319,52 @@ keys:
   writing the file and the insert) are deleted; the log names the kid and
   purpose only.
 - **Backups.** The P1 backup set holds the database (public metadata) but not
-  the key directory. Back the directory up separately, or restoring will leave
-  rows without material.
+  the key directory (the manifest lists it under `not_included`). Back the
+  directory up separately, or restoring will leave rows without material; the
+  restore says which purposes are missing material and prints the reset hint.
+  Rotation procedures, the staged bundle rollout and the emergency drill are in
+  the [key rotation runbook](runbooks/key-rotation.md).
+
+### Keys CLI
+
+`warden control-plane keys` lists, rotates, exports and resets signing keys
+straight on the state dir, with the control plane running or stopped. A running
+control plane sees a rotation within about 2 seconds, with no restart. `reset`
+refuses while the control plane holds the state-dir lock. Every subcommand
+takes a required `--state-dir` and an optional `--config` naming the file with
+the `keys:` block.
+
+```sh
+warden control-plane keys list --state-dir /var/lib/warden-cp [--purpose token] [--jwks] [--json]
+warden control-plane keys rotate --purpose token --state-dir /var/lib/warden-cp [--config F] \
+  [--emergency --yes]
+warden control-plane keys export --purpose bundle --state-dir /var/lib/warden-cp [--state next]
+warden control-plane keys reset --purpose token --yes --state-dir /var/lib/warden-cp
+```
+
+- **list** prints one row per key (kid, purpose, state, algorithm, timestamps,
+  creator) — public metadata only; `--jwks` prints the published key set
+  instead. The export path prints public JWKs only, never a `d` member or a
+  PEM block.
+- **rotate** promotes `next` to active, retires (or, with `--emergency`,
+  revokes) the old active — deleting its private material at once — and
+  publishes a fresh `next`. It refuses while the `next` key is younger than
+  `prepublish`, and `--emergency` requires `--yes` on a non-interactive stdin.
+  The `bundle` purpose refuses here: it rotates only through the staged
+  rollout of [the key rotation runbook](runbooks/key-rotation.md), and the
+  refusal names the `next` kid to pin.
+- **export** prints one key's public JWK (`--state next` or `active`) or, by
+  default, the active + next JWKS — the exact document a worker pins in
+  `controlPlane.bundleKeysFile`.
+- **reset** deletes every key of the purpose (rows and PEM files) and
+  regenerates `token`/`bundle`; `--purpose ca` only clears, the CA key is
+  imported, not generated. It needs `--yes`.
+
+When admin audit is on in the state dir, `rotate` and `reset` append one row
+(`keys.rotate_requested`, `keys.reset`; `auth_method` `cli`, actor
+`cli:<os user>`) and the transitions the request causes carry the same actor.
+With no audit table a log line names the action instead; with rows present and
+the audit key missing or mismatched the command refuses and changes nothing.
 
 Key material never appears in the database, logs, errors or audit entries.
 
