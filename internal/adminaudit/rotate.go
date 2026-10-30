@@ -164,8 +164,10 @@ type RotateKeyResult struct {
 // between the committed entry and the swap, the head is a key_rotated entry
 // naming the new key while the key file still holds the old one, and the next
 // run detects that, loads the parked key and completes the swap (Recovered).
-// Once the handover has been taken up (the key file holds the new key) the
-// same command simply rotates again.
+// A run that dies between the two renames of the swap itself leaves no key
+// file at all (the old key is already retired); the parked key completes that
+// state the same way. Once the handover has been taken up (the key file holds
+// the new key) the same command simply rotates again.
 func RotateKeyFile(ctx context.Context, stateDir, keyFile string, migs []cpstate.Migration) (res RotateKeyResult, err error) {
 	release, err := cpstate.AcquireDirLock(stateDir)
 	if errors.Is(err, cpstate.ErrLocked) {
@@ -199,6 +201,15 @@ func RotateKeyFile(ctx context.Context, stateDir, keyFile string, migs []cpstate
 	}
 	if keyFile == "" {
 		keyFile = DefaultKeyPath(stateDir)
+	}
+
+	if head.rotate != nil {
+		if _, err := os.Stat(keyFile); errors.Is(err, os.ErrNotExist) {
+			// A crash between the two renames of the swap: the handover entry
+			// is committed, the old key is already at the retired path and the
+			// key file is gone. The parked key finishes the swap.
+			return completeRotation(ctx, keyFile, head)
+		}
 	}
 
 	loaded, err := loadKeyFile(keyFile)
@@ -244,8 +255,11 @@ func RotateKeyFile(ctx context.Context, stateDir, keyFile string, migs []cpstate
 }
 
 // completeRotation finishes an interrupted rotation: the handover entry is
-// committed and the new key is parked at its temp path, but the files were
-// never swapped. The parked key must parse to the key the head names.
+// committed and the new key is parked at its temp path, but the file swap
+// never finished — either not started (the key file still holds the old key)
+// or left half done by a crash between the two renames (the key file is gone,
+// the old key already retired). The parked key must parse to the key the head
+// names.
 func completeRotation(ctx context.Context, keyFile string, head headRow) (RotateKeyResult, error) {
 	tmp := rotatingKeyPath(keyFile, head.rotate.newID)
 	next, err := loadKeyFile(tmp)
@@ -303,9 +317,12 @@ func createNextKey(keyFile string) (next *audit.Signer, path string, err error) 
 }
 
 // swapKeys retires the old key file and moves the new key into place, both
-// renames on one directory so each is atomic.
+// renames on one directory so each is atomic. A missing key file is the crash
+// between the two renames (the old key is already at the retired path) and
+// only completes the recovery; on a fresh run the key file was just loaded,
+// so it always exists.
 func swapKeys(keyFile, nextPath, retired string) error {
-	if err := os.Rename(keyFile, retired); err != nil {
+	if err := os.Rename(keyFile, retired); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("adminaudit: retire the old key at %s: %w", retired, err)
 	}
 	if err := os.Rename(nextPath, keyFile); err != nil {

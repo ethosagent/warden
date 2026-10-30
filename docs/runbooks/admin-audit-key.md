@@ -116,11 +116,13 @@ signed with it.
 
 **Interrupted rotations.** The entry and the file swap are two steps. If the run
 died in between, the head is a `key_rotated` entry naming the new key while the key
-file still holds the old one; re-running `rotate-key` completes the swap (the
-output says `"recovered":true`). Without the parked new key it fails closed naming
-the pending `key_id`; restore the parked `<key>.rotate-<new_key_id>.tmp` file (or
-re-generate the rotation) from your secret store, or recover with a new segment
-(below).
+file still holds the old one; if it died between the two renames of the swap
+itself, there is no key file at all and the old key sits at the retired path.
+Re-running `rotate-key` completes the swap from the parked new key in either
+state (the output says `"recovered":true`). Without the parked new key it fails
+closed naming the pending `key_id`; restore the parked
+`<key>.rotate-<new_key_id>.tmp` file (or re-generate the rotation) from your
+secret store, or recover with a new segment (below).
 
 ## New key without the old key (recovery only)
 

@@ -70,8 +70,10 @@ type Result struct {
 
 // chainVerifier holds the state carried from one row to the next: the keys
 // declared so far, the previous entry and, when that entry is a key_rotated,
-// the key it handed the chain to (the take-up must be the very next entry).
-// VerifyExport (W-P1-AAUD-04) reuses it over an export stream.
+// the key it handed the chain to (every entry up to and including the
+// take-up — a plain row, a segment_start or a further key_rotated — must be
+// signed by that key, and a key_rotated is always signed by the key the
+// chain is on). VerifyExport (W-P1-AAUD-04) reuses it over an export stream.
 type chainVerifier struct {
 	keys     map[string]ed25519.PublicKey
 	hmacKey  []byte
@@ -120,8 +122,18 @@ func (v *chainVerifier) check(r storedRow) (int64, string) {
 		return e.Seq, ReasonEntryHash
 	}
 	if e.Action == ActionKeyRotated {
-		// Signed by the old key and declaring the new one: learn the new key
-		// and let only it sign the next entry.
+		// Signed by the key the chain is on and declaring the new one: learn
+		// the new key and let only it sign the next entry. Right after a
+		// key_rotated that is the take-up key it names; otherwise the head's
+		// key — so a retired key can sign its own handover and nothing after
+		// it, not even a further handover.
+		want := v.pending
+		if want == "" && v.havePrev {
+			want = v.prev.KeyID
+		}
+		if want != "" && e.KeyID != want {
+			return e.Seq, ReasonKeyChange
+		}
 		rot, npub, ok := rotationChangeOf(e.KeyID, e.Details)
 		if !ok {
 			return e.Seq, ReasonDeclaredKey
@@ -132,6 +144,12 @@ func (v *chainVerifier) check(r storedRow) (int64, string) {
 		v.keys[rot.newID] = npub
 		v.pending = rot.newID
 	} else if isKeyDefining(e.Action) {
+		// A key-defining entry right after a key_rotated is only legal as the
+		// take-up itself (a segment_start started with the key the handover
+		// named): the old key may not sign past its own handover.
+		if v.pending != "" && e.KeyID != v.pending {
+			return e.Seq, ReasonKeyChange
+		}
 		pub, ok := declaredKey(e)
 		if !ok {
 			return e.Seq, ReasonDeclaredKey
@@ -190,8 +208,10 @@ func isZero(b []byte) bool {
 // the start) and checks seq continuity, prev_hash links, the recomputed
 // entry_hash, each signature under the key its key_id names (keys come from
 // the chain's key-defining entries, and a declared key must hash to its own
-// key_id), that key_id changes only at a segment_start or key_rotated entry,
-// and, with HMACKey, actor_id against the side row. It stops at the first bad
+// key_id), that key_id changes only at a segment_start or key_rotated entry —
+// a key_rotated is signed by the key the chain is on and the next entry is
+// signed by the key it names — and, with HMACKey, actor_id against the side
+// row. It stops at the first bad
 // row. Verify only reads: it takes no write lock and reads in pages, so it
 // never holds off an Append for longer than one page.
 func (s *Store) Verify(ctx context.Context, opts VerifyOptions) (Result, error) {
@@ -318,6 +338,7 @@ func (s *Store) primeVerifier(ctx context.Context, v *chainVerifier, from int64)
 		}
 		if pub, ok := declaredKey(&r.entry); ok {
 			v.keys[r.entry.KeyID] = pub
+			v.pending = "" // a segment_start ends the pending take-up, as in check
 		}
 	}
 	if err := rows.Err(); err != nil {

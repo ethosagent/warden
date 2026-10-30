@@ -173,6 +173,84 @@ func TestKeyRotationChain(t *testing.T) {
 			t.Fatalf("Verify = %+v, want key_change at %d", res, e.Seq)
 		}
 	})
+
+	t.Run("key_defining_entries_obey_the_pending_key", func(t *testing.T) {
+		// The old key signs its handover and nothing after it: a segment_start
+		// or a second key_rotated signed by the old key right after the
+		// handover fails at that seq. The shapes a writer produces still
+		// verify: a segment_start started with the key the handover named, and
+		// a back-to-back rotation signed by the pending key.
+
+		// A segment_start signed by the old key right after its handover.
+		a, db := freshStore(t)
+		record(t, a, 3)
+		b := newStore(t, db, newSigner(t))
+		if _, err := a.RotateKey(ctx, b.signer); err != nil {
+			t.Fatalf("RotateKey: %v", err)
+		}
+		e := appendSegmentStart(t, a)
+		res := verify(t, a, VerifyOptions{HMACKey: testHMACKey})
+		if res.OK || res.FirstBadSeq != e.Seq || res.Reason != ReasonKeyChange {
+			t.Fatalf("segment_start by the old key after the handover = %+v, want key_change at %d", res, e.Seq)
+		}
+
+		// A second key_rotated signed by the old key right after its handover.
+		a, db = freshStore(t)
+		record(t, a, 3)
+		b = newStore(t, db, newSigner(t))
+		c := newSigner(t)
+		if _, err := a.RotateKey(ctx, b.signer); err != nil {
+			t.Fatalf("RotateKey: %v", err)
+		}
+		kr := appendRawKeyRotated(t, a, map[string]string{
+			detailAlg:          algEd25519,
+			detailOldKeyID:     a.KeyID(),
+			detailNewKeyID:     audit.KeyID(c.PubKey()),
+			detailNewPublicKey: pubB64(c.PubKey()),
+		})
+		res = verify(t, a, VerifyOptions{HMACKey: testHMACKey})
+		if res.OK || res.FirstBadSeq != kr.Seq || res.Reason != ReasonKeyChange {
+			t.Fatalf("second key_rotated by the old key = %+v, want key_change at %d", res, kr.Seq)
+		}
+
+		// A segment_start started with the key the handover named — the
+		// take-up as --admin-audit-new-segment writes it — verifies, and the
+		// chain stays on that key.
+		a, db = freshStore(t)
+		record(t, a, 3)
+		b = newStore(t, db, newSigner(t))
+		if _, err := a.RotateKey(ctx, b.signer); err != nil {
+			t.Fatalf("RotateKey: %v", err)
+		}
+		appendSegmentStart(t, b)
+		record(t, b, 2)
+		if res := verify(t, a, VerifyOptions{HMACKey: testHMACKey}); !res.OK || res.Checked != 8 {
+			t.Fatalf("segment_start by the pending key after the handover = %+v, want ok with 8 checked", res)
+		}
+
+		// A back-to-back rotation is signed by the pending key, and resuming
+		// onto it (the window starts at the second handover) verifies too.
+		a, db = freshStore(t)
+		record(t, a, 2)
+		b = newStore(t, db, newSigner(t))
+		c = newSigner(t)
+		if _, err := a.RotateKey(ctx, b.signer); err != nil {
+			t.Fatalf("RotateKey: %v", err)
+		}
+		appendRawKeyRotated(t, b, map[string]string{
+			detailAlg:          algEd25519,
+			detailOldKeyID:     b.KeyID(),
+			detailNewKeyID:     audit.KeyID(c.PubKey()),
+			detailNewPublicKey: pubB64(c.PubKey()),
+		})
+		record(t, newStore(t, db, c), 1)
+		if res := verify(t, a, VerifyOptions{HMACKey: testHMACKey}); !res.OK || res.Checked != 6 {
+			t.Fatalf("back-to-back rotation signed by the pending key = %+v, want ok with 6 checked", res)
+		}
+		if res := verify(t, a, VerifyOptions{FromSeq: 5, HMACKey: testHMACKey}); !res.OK || res.Checked != 2 {
+			t.Fatalf("resume onto a back-to-back rotation = %+v, want ok with 2 checked", res)
+		}
+	})
 }
 
 // TestRotateKey covers the store method: the entry is signed by the old key
@@ -394,6 +472,76 @@ func TestRotateKeyFile(t *testing.T) {
 		_, err := RotateKeyFile(ctx, dir, "", Migrations())
 		if err == nil || !strings.Contains(err.Error(), audit.KeyID(next.PubKey())) {
 			t.Fatalf("RotateKeyFile with the new key lost = %v, want an error naming the pending key_id", err)
+		}
+	})
+
+	t.Run("crash_between_the_renames_completed", func(t *testing.T) {
+		// Simulate a crash between the two renames of the swap: the handover
+		// entry is committed, the old key sits at the retired path, the key
+		// file is gone and the new key is parked at the temp path. The next
+		// run finishes the swap from the parked key and writes nothing.
+		dir, keyFile, db := seededDir(t, 2)
+		oldID := keyIDOf(t, keyFile)
+		first, err := RotateKeyFile(ctx, dir, "", Migrations())
+		if err != nil {
+			t.Fatal(err)
+		}
+		parked, err := os.ReadFile(keyFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tmp := rotatingKeyPath(keyFile, first.NewKeyID)
+		if err := os.WriteFile(tmp, parked, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(keyFile); err != nil {
+			t.Fatal(err)
+		}
+
+		res, err := RotateKeyFile(ctx, dir, "", Migrations())
+		if err != nil {
+			t.Fatalf("RotateKeyFile after a crash between the renames: %v", err)
+		}
+		if !res.Recovered || res.NewKeyID != first.NewKeyID || res.OldKeyID != oldID || res.Seq != first.Seq || res.RetiredPath != first.RetiredPath {
+			t.Fatalf("result = %+v, want the swap completed for %+v", res, first)
+		}
+		if got := keyIDOf(t, keyFile); got != first.NewKeyID {
+			t.Errorf("key file now holds %s, want %s", got, first.NewKeyID)
+		}
+		if n := rowCount(t, db, "admin_audit"); n != 4 {
+			t.Errorf("rows = %d, want 4 (the recovery writes nothing)", n)
+		}
+		if left, _ := filepath.Glob(filepath.Join(dir, "*.tmp")); len(left) != 0 {
+			t.Errorf("the recovery left %v behind", left)
+		}
+		if res := verify(t, mustOpenKeyed(t, db, keyFile, ""), VerifyOptions{}); !res.OK {
+			t.Errorf("Verify after the recovery = %+v, want ok", res)
+		}
+	})
+
+	t.Run("crash_between_the_renames_without_parked_key", func(t *testing.T) {
+		// The same crash layout without the parked key: fail closed naming the
+		// pending key_id, and never fabricate a key file.
+		dir, keyFile, db := seededDir(t, 2)
+		first, err := RotateKeyFile(ctx, dir, "", Migrations())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(keyFile); err != nil {
+			t.Fatal(err)
+		}
+		_, err = RotateKeyFile(ctx, dir, "", Migrations())
+		if !errors.Is(err, ErrKeyIDMismatch) || !strings.Contains(err.Error(), first.NewKeyID) {
+			t.Fatalf("RotateKeyFile with the parked key lost = %v, want ErrKeyIDMismatch naming %s", err, first.NewKeyID)
+		}
+		if _, err := os.Stat(keyFile); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("the refused run left a key file behind: %v", err)
+		}
+		if _, err := os.Stat(first.RetiredPath); err != nil {
+			t.Errorf("the retired key is gone: %v", err)
+		}
+		if n := rowCount(t, db, "admin_audit"); n != 4 {
+			t.Errorf("rows = %d, want 4 (nothing written)", n)
 		}
 	})
 
