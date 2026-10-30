@@ -18,12 +18,6 @@ import (
 // Nothing here can carry private material: KeyView has no field for it, and
 // the public JWK is the same document the JWKS serves.
 
-// keysPath is the list; rotation is keysRotatePath.
-const (
-	keysPath       = "/dashboard/api/keys"
-	keysRotatePath = "/dashboard/api/keys/rotate"
-)
-
 // maxKeysRotateBody caps a rotate body ({purpose, emergency, confirmPinned}).
 const maxKeysRotateBody = 1 << 10
 
