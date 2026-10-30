@@ -162,6 +162,7 @@ type awsEnv struct {
 	meta    keys.MetaStore
 	clk     *clocktest.Fake
 	logs    *syncBuffer
+	timings map[string]keys.Timing
 }
 
 func newAWSEnv(t *testing.T) *awsEnv {
@@ -171,6 +172,10 @@ func newAWSEnv(t *testing.T) *awsEnv {
 		account: fakes.NewFakeAWSSecretsClient(),
 		clk:     clocktest.NewFake(time.Unix(1_800_000_000, 0)),
 		logs:    &syncBuffer{},
+		timings: map[string]keys.Timing{
+			keys.PurposeToken:  {Interval: 24 * time.Hour, Prepublish: time.Hour, Overlap: 2 * time.Hour},
+			keys.PurposeBundle: {Prepublish: time.Hour, Overlap: 2 * time.Hour},
+		},
 	}
 	db, err := cpstate.Open(context.Background(), t.TempDir()+"/warden-cp.db", cpstate.Enable(metastore.Migrations(), metastore.MigrationID))
 	if err != nil {
@@ -187,8 +192,9 @@ func (e *awsEnv) manager() *keys.Manager {
 	e.t.Helper()
 	m, err := keys.NewManager(keys.ManagerConfig{
 		Store: e.store, Meta: e.meta, Codec: signer.Codec{}, Backend: "aws",
-		Algs: map[string]string{keys.PurposeToken: keys.AlgEdDSA, keys.PurposeBundle: keys.AlgEdDSA},
-		Now:  e.clk.Now, Wait: waitOn(e.clk), Logger: slog.New(slog.NewTextHandler(e.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		Algs:    map[string]string{keys.PurposeToken: keys.AlgEdDSA, keys.PurposeBundle: keys.AlgEdDSA},
+		Timings: e.timings,
+		Now:     e.clk.Now, Wait: waitOn(e.clk), Logger: slog.New(slog.NewTextHandler(e.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 	})
 	if err != nil {
 		e.t.Fatal(err)
@@ -297,6 +303,67 @@ func TestAWSStoreLifecycle(t *testing.T) {
 	for _, banned := range []string{"PRIVATE KEY", "AKIA", "aws_secret_access_key", "wJalr"} {
 		if strings.Contains(logs, banned) {
 			t.Errorf("logs contain %q", banned)
+		}
+	}
+}
+
+// TestAWSStoreRotationDeletesMaterial: a scheduled rotation through the
+// manager force-deletes the retired key's secret from the account the moment
+// it stops signing (the discard through the adapter), and the terminal reaper
+// keeps the account clean past the overlap. The material never outlives the
+// signing slot.
+func TestAWSStoreRotationDeletesMaterial(t *testing.T) {
+	ctx := context.Background()
+	e := newAWSEnv(t)
+	m := e.manager()
+	m.Init(ctx)
+	if !m.Ready() {
+		t.Fatalf("first start not ready: token=%q", m.LastError(keys.PurposeToken))
+	}
+	tokenState := func() map[keys.State]keys.Record {
+		out := map[keys.State]keys.Record{}
+		for _, r := range e.rows() {
+			if r.Purpose == keys.PurposeToken {
+				out[r.State] = r
+			}
+		}
+		return out
+	}
+
+	// The 24h interval elapses: the pass retires the signing key, promotes the
+	// prepublished next key and publishes a fresh next.
+	e.clk.Advance(25 * time.Hour)
+	mustSchedule(t, m)
+	st := tokenState()
+	retired, ok := st[keys.StateRetired]
+	if !ok {
+		t.Fatalf("no retired token row after the interval elapsed: %+v", st)
+	}
+	if e.account.Has(secretName(keys.PurposeToken, retired.KID)) {
+		t.Errorf("the retired key %s kept its secret; the discard must force-delete it", retired.KID)
+	}
+	if st[keys.StateActive].KID == retired.KID {
+		t.Errorf("the retired key is still the active one: %+v", st)
+	}
+
+	// Past the overlap the retired row is destroyed. Its material is already
+	// gone (the discard deleted it); the account stays clean while the rows
+	// that must sign keep theirs.
+	e.clk.Advance(3 * time.Hour)
+	mustSchedule(t, m)
+	st = tokenState()
+	if _, ok := st[keys.StateDestroyed]; !ok {
+		t.Fatalf("the retired row was not destroyed past its overlap: %+v", st)
+	}
+	for s, r := range st {
+		if s == keys.StateActive || s == keys.StateNext {
+			if !e.account.Has(secretName(keys.PurposeToken, r.KID)) {
+				t.Errorf("the %s key %s lost its secret", s, r.KID)
+			}
+			continue
+		}
+		if e.account.Has(secretName(keys.PurposeToken, r.KID)) {
+			t.Errorf("the %s key %s still has a secret in the account", s, r.KID)
 		}
 	}
 }
