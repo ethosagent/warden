@@ -498,23 +498,23 @@ func TestKeysBackendDownWithRows(t *testing.T) {
 	go func() { defer close(done); m.Run(runCtx) }()
 	t.Cleanup(func() { cancel(); <-done })
 
-	// Still down: the retry fails, backs off to 2s, and raises nothing new.
-	waitTimer(t, e.clk)
-	e.clk.Advance(time.Second)
-	waitTimer(t, e.clk)
+	// Still down: the retry fails and raises nothing new. The clock is driven
+	// until the retry has actually run — Run's scheduler and data-version poll
+	// arm timers of their own, so PendingTimers can no longer mean "the retry
+	// timer is armed" and a fixed advance cannot target it (the flake that
+	// taught us: the advance fired the other loops' timers, the reload loop
+	// re-armed past the frozen clock, and the retry never ran).
+	loadFailures := func() int { return strings.Count(e.logs.String(), "keys_load_failed") }
+	failures := loadFailures()
+	e.pollAdvance(t, func() bool { return loadFailures() > failures })
 	if len(e.alerts.alerts()) != 2 {
 		t.Errorf("retry re-raised the alert: %+v", e.alerts.alerts())
 	}
 
+	// The store returns; the next retry adopts the rows and the manager
+	// recovers without a restart.
 	e.store.failGet.Store(false)
-	e.clk.Advance(2 * time.Second)
-	deadline := time.Now().Add(5 * time.Second)
-	for !m.Ready() {
-		if time.Now().After(deadline) {
-			t.Fatal("manager did not recover after the store came back")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	e.pollAdvance(t, func() bool { return m.Ready() })
 	if _, err := m.KeySet().Active(keys.PurposeToken); err != nil {
 		t.Errorf("Active after recovery: %v", err)
 	}
@@ -537,18 +537,6 @@ func listPEMs(t *testing.T, dir string) []string {
 	})
 	sort.Strings(out)
 	return out
-}
-
-// waitTimer blocks until the manager's retry loop has armed its timer.
-func waitTimer(t *testing.T, clk *clocktest.Fake) {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for clk.PendingTimers() == 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("retry loop never armed a timer")
-		}
-		time.Sleep(time.Millisecond)
-	}
 }
 
 // TestKeysNoActiveRowNeverGenerates: rows exist but none is active — nothing is
