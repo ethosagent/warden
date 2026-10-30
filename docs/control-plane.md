@@ -1369,7 +1369,11 @@ secrets with no row; deleting a key deletes its secret at once.
           "secretsmanager:GetSecretValue",
           "secretsmanager:PutSecretValue",
           "secretsmanager:CreateSecret",
-          "secretsmanager:DeleteSecret"
+          "secretsmanager:DeleteSecret",
+          "secretsmanager:UpdateSecret",
+          "secretsmanager:RestoreSecret",
+          "secretsmanager:TagResource",
+          "secretsmanager:PutResourcePolicy"
         ],
         "Resource": "arn:aws:secretsmanager:*:ACCOUNT_ID:secret:warden-cp-keys/*"
       }
