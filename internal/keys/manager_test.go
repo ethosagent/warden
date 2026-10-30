@@ -506,7 +506,10 @@ func TestKeysBackendDownWithRows(t *testing.T) {
 	// re-armed past the frozen clock, and the retry never ran).
 	loadFailures := func() int { return strings.Count(e.logs.String(), "keys_load_failed") }
 	failures := loadFailures()
-	e.pollAdvance(t, func() bool { return loadFailures() > failures })
+	// One reload pass logs and then alerts for each purpose in turn, on one
+	// goroutine. Seeing the first line of the next pass (two purposes + 1)
+	// means the whole first retry pass, alerts included, has finished.
+	e.pollAdvance(t, func() bool { return loadFailures() >= failures+3 })
 	if len(e.alerts.alerts()) != 2 {
 		t.Errorf("retry re-raised the alert: %+v", e.alerts.alerts())
 	}
