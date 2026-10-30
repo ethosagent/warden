@@ -107,6 +107,20 @@ func (failInsertMeta) InsertIfEmpty(context.Context, string, []keys.Record) (boo
 	return false, errors.New("database is locked")
 }
 
+// failPromoteMeta fails Promote: a database that cannot run the promotion
+// transaction.
+type failPromoteMeta struct {
+	keys.MetaStore
+	fail atomic.Bool
+}
+
+func (f *failPromoteMeta) Promote(ctx context.Context, purpose, oldKID string, oldTo keys.State, nextKID string, at time.Time) (bool, error) {
+	if f.fail.Load() {
+		return false, errors.New("database is locked")
+	}
+	return f.MetaStore.Promote(ctx, purpose, oldKID, oldTo, nextKID, at)
+}
+
 // waitOn adapts the fake clock to ManagerConfig.Wait.
 func waitOn(clk *clocktest.Fake) func(context.Context, time.Duration) bool {
 	return func(ctx context.Context, d time.Duration) bool {

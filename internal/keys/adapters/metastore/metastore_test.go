@@ -280,3 +280,199 @@ func TestStateCheckConstraint(t *testing.T) {
 		t.Error("state outside next|active|retired|revoked|destroyed accepted")
 	}
 }
+
+// insertPair inserts an active and a next row for a purpose.
+func insertPair(t *testing.T, s *Store, purpose string) (active, next keys.Record) {
+	t.Helper()
+	active, next = rec(t, purpose, keys.StateActive), rec(t, purpose, keys.StateNext)
+	for _, r := range []keys.Record{active, next} {
+		if err := s.Insert(context.Background(), r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return active, next
+}
+
+// rowOf finds one row by kid.
+func rowOf(t *testing.T, s *Store, kid string) keys.Record {
+	t.Helper()
+	for _, r := range listAll(t, s) {
+		if r.KID == kid {
+			return r
+		}
+	}
+	t.Fatalf("no row for kid %s", kid)
+	return keys.Record{}
+}
+
+func listAll(t *testing.T, s *Store) []keys.Record {
+	t.Helper()
+	rows, err := s.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rows
+}
+
+// TestPromoteCAS: the retire and the activate commit as one pair, both
+// stamped. Either side of the pair not being where the caller expects is a
+// lost race that writes nothing at all — in particular a next key that is no
+// longer next leaves the old key active, which is the state a two-write
+// promotion used to strand.
+func TestPromoteCAS(t *testing.T) {
+	s := New(openDB(t, true))
+	ctx := context.Background()
+	active, next := insertPair(t, s, keys.PurposeToken)
+	t1 := t0.Add(time.Hour)
+
+	// Lost race on the second write: the next key moved on. Nothing commits —
+	// the old key stays active with no retire_at.
+	if ok, err := s.UpdateState(ctx, next.KID, keys.StateNext, keys.StateDestroyed, t0); err != nil || !ok {
+		t.Fatalf("destroy the next key = %v, %v", ok, err)
+	}
+	if ok, err := s.Promote(ctx, keys.PurposeToken, active.KID, keys.StateRetired, next.KID, t1); err != nil || ok {
+		t.Fatalf("promote a destroyed next = %v, %v; want false, nil", ok, err)
+	}
+	if r := rowOf(t, s, active.KID); r.State != keys.StateActive || !r.RetireAt.IsZero() {
+		t.Errorf("a failed second write left the old key %+v, want still active", r)
+	}
+
+	// Lost race on the first write: the old key moved on. Again nothing.
+	if ok, err := s.UpdateState(ctx, active.KID, keys.StateActive, keys.StateRetired, t0); err != nil || !ok {
+		t.Fatalf("retire the old key = %v, %v", ok, err)
+	}
+	fresh, freshNext := rec(t, keys.PurposeToken, keys.StateActive), rec(t, keys.PurposeToken, keys.StateNext)
+	for _, r := range []keys.Record{fresh, freshNext} {
+		if err := s.Insert(ctx, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if ok, err := s.Promote(ctx, keys.PurposeToken, active.KID, keys.StateRetired, freshNext.KID, t1); err != nil || ok {
+		t.Fatalf("promote a retired old = %v, %v; want false, nil", ok, err)
+	}
+	if r := rowOf(t, s, freshNext.KID); r.State != keys.StateNext {
+		t.Errorf("a lost race moved the next key: %+v", r)
+	}
+	if r := rowOf(t, s, fresh.KID); r.State != keys.StateActive {
+		t.Errorf("a lost race moved the active key: %+v", r)
+	}
+
+	// The pair commits: both rows stamped, one transaction.
+	if ok, err := s.Promote(ctx, keys.PurposeToken, fresh.KID, keys.StateRetired, freshNext.KID, t1); err != nil || !ok {
+		t.Fatalf("promote = %v, %v; want true, nil", ok, err)
+	}
+	if r := rowOf(t, s, fresh.KID); r.State != keys.StateRetired || !r.RetireAt.Equal(t1) {
+		t.Errorf("the old key after promote = %+v, want retired at t1", r)
+	}
+	if r := rowOf(t, s, freshNext.KID); r.State != keys.StateActive || !r.ActivateAt.Equal(t1) {
+		t.Errorf("the next key after promote = %+v, want active at t1", r)
+	}
+
+	// An empty oldKID skips the retire: the vacant-slot promotion.
+	vacantNext := rec(t, keys.PurposeToken, keys.StateNext)
+	if err := s.Insert(ctx, vacantNext); err != nil {
+		t.Fatal(err)
+	}
+	t2 := t1.Add(time.Hour)
+	if ok, err := s.UpdateState(ctx, freshNext.KID, keys.StateActive, keys.StateRevoked, t2); err != nil || !ok {
+		t.Fatalf("revoke to vacate = %v, %v", ok, err)
+	}
+	if ok, err := s.Promote(ctx, keys.PurposeToken, "", keys.StateRetired, vacantNext.KID, t2); err != nil || !ok {
+		t.Fatalf("vacant promote = %v, %v; want true, nil", ok, err)
+	}
+	if r := rowOf(t, s, vacantNext.KID); r.State != keys.StateActive || !r.ActivateAt.Equal(t2) {
+		t.Errorf("the vacant-slot promotion = %+v, want active at t2", r)
+	}
+}
+
+// TestPromoteRespectsUniqueIndex: activating the next key while another key is
+// still active — an empty-oldKID promotion whose retire the caller skipped —
+// is a conflict, and the transaction rolls back leaving both rows as they
+// were.
+func TestPromoteRespectsUniqueIndex(t *testing.T) {
+	s := New(openDB(t, true))
+	ctx := context.Background()
+	active, next := insertPair(t, s, keys.PurposeToken)
+	if _, err := s.Promote(ctx, keys.PurposeToken, "", keys.StateRetired, next.KID, t0); !errors.Is(err, keys.ErrConflict) {
+		t.Fatalf("promoting into an occupied slot = %v, want ErrConflict", err)
+	}
+	if r := rowOf(t, s, next.KID); r.State != keys.StateNext {
+		t.Errorf("the conflicted promotion wrote anyway: %+v", r)
+	}
+	if r := rowOf(t, s, active.KID); r.State != keys.StateActive {
+		t.Errorf("the active key moved: %+v", r)
+	}
+}
+
+// TestPromoteAtomicToAPeer: while a promotion commits, a peer reading on
+// another connection sees either both changes or neither — never the purpose
+// with no active key. A read transaction opened before the promotion pins the
+// pre-promotion snapshot for its lifetime, which is exactly what a poller
+// caught between the two writes when they were two transactions.
+func TestPromoteAtomicToAPeer(t *testing.T) {
+	db := openDB(t, true)
+	s := New(db)
+	ctx := context.Background()
+	active, next := insertPair(t, s, keys.PurposeToken)
+
+	peerDB, err := cpstate.Open(ctx, db.Path(), cpstate.Enable(Migrations(), MigrationID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = peerDB.Close() })
+
+	// The peer's read transaction pins the snapshot at its first read. The
+	// pool holds exactly one connection (cpstate pins MaxOpenConns), so the
+	// conn must go back before anything else queries this handle.
+	conn, err := peerDB.SQL().Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if conn != nil {
+			_ = conn.Close()
+		}
+	}()
+	if _, err := conn.ExecContext(ctx, "BEGIN"); err != nil {
+		t.Fatal(err)
+	}
+	var activeKID string
+	if err := conn.QueryRowContext(ctx,
+		`SELECT kid FROM signing_keys WHERE purpose = 'token' AND state = 'active'`).Scan(&activeKID); err != nil || activeKID != active.KID {
+		t.Fatalf("the peer's pinned read = %q, %v; want the old active", activeKID, err)
+	}
+
+	// The promotion commits while that snapshot is pinned.
+	if ok, err := s.Promote(ctx, keys.PurposeToken, active.KID, keys.StateRetired, next.KID, t0); err != nil || !ok {
+		t.Fatalf("promote = %v, %v", ok, err)
+	}
+
+	// Still inside its read transaction the peer sees the old state whole: the
+	// old key active — the purpose was never observable without an active key.
+	if err := conn.QueryRowContext(ctx,
+		`SELECT kid FROM signing_keys WHERE purpose = 'token' AND state = 'active'`).Scan(&activeKID); err != nil || activeKID != active.KID {
+		t.Fatalf("the peer saw a mid-promotion state: %q, %v", activeKID, err)
+	}
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	conn = nil
+
+	// Past the read transaction, both changes are there at once.
+	rows := listAll(t, New(peerDB))
+	for _, r := range rows {
+		switch r.KID {
+		case active.KID:
+			if r.State != keys.StateRetired {
+				t.Errorf("the old key = %s, want retired", r.State)
+			}
+		case next.KID:
+			if r.State != keys.StateActive {
+				t.Errorf("the new key = %s, want active", r.State)
+			}
+		}
+	}
+}

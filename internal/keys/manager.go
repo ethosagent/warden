@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -158,10 +159,10 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 		cfg: cfg, log: cfg.Logger,
 		degraded: map[string]string{}, episodes: map[string]string{},
 	}
-	m.set = newKeySet(cfg.Now, m.metrics.signError)
 	if m.log == nil {
 		m.log = slog.Default()
 	}
+	m.set = newKeySet(cfg.Now, m.metrics.signError, m.log)
 	return m, nil
 }
 
@@ -820,8 +821,10 @@ type KeySet struct {
 	ver atomic.Uint64
 	// subMu guards subs.
 	subMu sync.Mutex
-	// subs are the Subscribe callbacks, run after a purpose's snapshot changed.
-	subs []func(purpose string)
+	// subs are the subscriptions, signalled after a purpose's snapshot changed.
+	subs []*subscription
+	// log reports subscriber panics.
+	log *slog.Logger
 }
 
 // loaded is one purpose's immutable snapshot.
@@ -833,8 +836,11 @@ type loaded struct {
 	overlap time.Duration
 }
 
-func newKeySet(now func() time.Time, onSignErr func(string)) *KeySet {
-	ks := &KeySet{zero: map[string]*loaded{}, now: now, onSignErr: onSignErr}
+func newKeySet(now func() time.Time, onSignErr func(string), log *slog.Logger) *KeySet {
+	if log == nil {
+		log = slog.Default()
+	}
+	ks := &KeySet{zero: map[string]*loaded{}, now: now, onSignErr: onSignErr, log: log}
 	ks.cur.Store(&ks.zero)
 	return ks
 }
@@ -899,23 +905,94 @@ func sameRecords(a, b []Record) bool {
 	return true
 }
 
-// notify runs the Subscribe callbacks for purpose, after its snapshot changed.
+// notify signals every subscription for purpose, after its snapshot changed.
+// It never runs subscriber code: install's callers hold Manager.mu (a load, a
+// rotation, the scheduler), and a subscriber that blocks or panics there would
+// stall the whole manager. Signalling is non-blocking, so a wedged mailbox
+// delays only its own subscriber.
 func (ks *KeySet) notify(purpose string) {
 	ks.subMu.Lock()
-	subs := append([]func(string){}, ks.subs...)
-	ks.subMu.Unlock()
-	for _, fn := range subs {
-		fn(purpose)
+	defer ks.subMu.Unlock()
+	for _, s := range ks.subs {
+		s.signal(purpose)
 	}
 }
 
+// subscription is one Subscribe callback with its own delivery goroutine and
+// mailbox, so subscribers are isolated from each other and from the manager:
+// neither a blocking nor a panicking subscriber can reach the scheduler.
+type subscription struct {
+	fn func(purpose string)
+	// log reports a contained panic.
+	log *slog.Logger
+	// wake is the coalescing signal: capacity 1, because a delivery already
+	// pending will pick this change up too.
+	wake chan struct{}
+	// mu guards pend.
+	mu sync.Mutex
+	// pend is the purposes that changed but were not delivered yet. A set, not
+	// a queue: while fn is busy, further transitions of the same purpose
+	// coalesce into the one delivery that is still to come, but a different
+	// purpose's signal is never dropped.
+	pend map[string]bool
+}
+
+// signal marks purpose as changed and wakes the delivery goroutine. It never
+// blocks: a wake already queued carries this change too.
+func (s *subscription) signal(purpose string) {
+	s.mu.Lock()
+	s.pend[purpose] = true
+	s.mu.Unlock()
+	select {
+	case s.wake <- struct{}{}:
+	default:
+	}
+}
+
+// deliver is the subscription's goroutine: it swaps out the pending purposes
+// and hands each to fn. A panic in fn is contained here — logged, and delivery
+// continues — because the goroutine that changed the snapshot must never see
+// it.
+func (s *subscription) deliver() {
+	for range s.wake {
+		s.mu.Lock()
+		pending := s.pend
+		s.pend = map[string]bool{}
+		s.mu.Unlock()
+		var purposes []string
+		for p := range pending {
+			purposes = append(purposes, p)
+		}
+		sort.Strings(purposes)
+		for _, p := range purposes {
+			s.call(p)
+		}
+	}
+}
+
+func (s *subscription) call(purpose string) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.log.Error("keys_subscriber_panicked", "purpose", purpose, "panic", fmt.Sprint(r))
+		}
+	}()
+	s.fn(purpose)
+}
+
 // Subscribe registers fn, called with the purpose after every change to that
-// purpose's snapshot: once per transition. Subscribers run synchronously on the
-// installing goroutine and must not call back into the KeySet.
+// purpose's snapshot. Delivery is asynchronous, on a goroutine of the
+// subscription's own: fn is called once per transition, but transitions that
+// land while a delivery is still pending coalesce into one call, so fn must
+// re-read the KeySet (JWKS, Version) instead of assuming it saw each change.
+// fn may block — a slow subscriber delays only itself — and may panic, which
+// is contained and logged. Subscribe returns at once; deliveries never run on
+// the caller's goroutine.
 func (ks *KeySet) Subscribe(fn func(purpose string)) {
+	s := &subscription{fn: fn, log: ks.log, wake: make(chan struct{}, 1), pend: map[string]bool{}}
 	ks.subMu.Lock()
-	defer ks.subMu.Unlock()
-	ks.subs = append(ks.subs, fn)
+	ks.subs = append(ks.subs, s)
+	ks.subMu.Unlock()
+	go s.deliver()
 }
 
 // Version returns how many times a purpose's snapshot changed. It never

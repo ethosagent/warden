@@ -255,50 +255,123 @@ func TestRotationSchedule(t *testing.T) {
 // interval before it signs, and a retired key stays in it for its overlap;
 // only past the overlap does the old key's signature stop verifying.
 func TestRotationNoVerifyGap(t *testing.T) {
-	e := newEnv(t)
-	e.timings = fastTimings()
-	m := e.manager()
-	m.Init(context.Background())
+	t.Run("4h timings", func(t *testing.T) {
+		e := newEnv(t)
+		e.timings = fastTimings()
+		m := e.manager()
+		m.Init(context.Background())
 
-	payload0 := []byte("header.payload0")
-	setAtStart := m.KeySet().JWKS(keys.PurposeToken)
-	kid0, sig0 := signWithActive(t, m, keys.PurposeToken, payload0)
-	if err := verifyInSet(setAtStart, kid0, payload0, sig0); err != nil {
-		t.Fatalf("a token does not verify against the set it was signed under: %v", err)
-	}
+		payload0 := []byte("header.payload0")
+		setAtStart := m.KeySet().JWKS(keys.PurposeToken)
+		kid0, sig0 := signWithActive(t, m, keys.PurposeToken, payload0)
+		if err := verifyInSet(setAtStart, kid0, payload0, sig0); err != nil {
+			t.Fatalf("a token does not verify against the set it was signed under: %v", err)
+		}
 
-	// 4h: rotation.
-	e.clk.Advance(4 * time.Hour)
-	mustSchedule(t, m)
+		// 4h: rotation.
+		e.clk.Advance(4 * time.Hour)
+		mustSchedule(t, m)
 
-	// The token signed before the rotation still verifies against the set
-	// served now: its key is retired, not unpublished.
-	payload1 := []byte("header.payload1")
-	kid1, sig1 := signWithActive(t, m, keys.PurposeToken, payload1)
-	if err := verifyInSet(m.KeySet().JWKS(keys.PurposeToken), kid0, payload0, sig0); err != nil {
-		t.Fatalf("the pre-rotation token stopped verifying inside the overlap: %v", err)
-	}
-	// The no-gap property: the key that signs now was already in the set a
-	// verifier fetched before the rotation, because it was published as the
-	// next key when the previous key took over.
-	if err := verifyInSet(setAtStart, kid1, payload1, sig1); err != nil {
-		t.Fatalf("the new active key was not prepublished: %v", err)
-	}
+		// The token signed before the rotation still verifies against the set
+		// served now: its key is retired, not unpublished.
+		payload1 := []byte("header.payload1")
+		kid1, sig1 := signWithActive(t, m, keys.PurposeToken, payload1)
+		if err := verifyInSet(m.KeySet().JWKS(keys.PurposeToken), kid0, payload0, sig0); err != nil {
+			t.Fatalf("the pre-rotation token stopped verifying inside the overlap: %v", err)
+		}
+		// The no-gap property: the key that signs now was already in the set a
+		// verifier fetched before the rotation, because it was published as the
+		// next key when the previous key took over.
+		if err := verifyInSet(setAtStart, kid1, payload1, sig1); err != nil {
+			t.Fatalf("the new active key was not prepublished: %v", err)
+		}
 
-	// 5h: still inside the overlap; 6h: past it, the old key is gone.
-	e.clk.Advance(time.Hour)
-	mustSchedule(t, m)
-	if err := verifyInSet(m.KeySet().JWKS(keys.PurposeToken), kid0, payload0, sig0); err != nil {
-		t.Fatalf("the old key left the JWKS before its overlap ended: %v", err)
-	}
-	e.clk.Advance(time.Hour)
-	mustSchedule(t, m)
-	if err := verifyInSet(m.KeySet().JWKS(keys.PurposeToken), kid0, payload0, sig0); err == nil {
-		t.Error("a destroyed key is still in the JWKS")
-	}
-	if err := verifyInSet(m.KeySet().JWKS(keys.PurposeToken), kid1, payload1, sig1); err != nil {
-		t.Fatalf("the current key left the JWKS: %v", err)
-	}
+		// 5h: still inside the overlap; 6h: past it, the old key is gone.
+		e.clk.Advance(time.Hour)
+		mustSchedule(t, m)
+		if err := verifyInSet(m.KeySet().JWKS(keys.PurposeToken), kid0, payload0, sig0); err != nil {
+			t.Fatalf("the old key left the JWKS before its overlap ended: %v", err)
+		}
+		e.clk.Advance(time.Hour)
+		mustSchedule(t, m)
+		if err := verifyInSet(m.KeySet().JWKS(keys.PurposeToken), kid0, payload0, sig0); err == nil {
+			t.Error("a destroyed key is still in the JWKS")
+		}
+		if err := verifyInSet(m.KeySet().JWKS(keys.PurposeToken), kid1, payload1, sig1); err != nil {
+			t.Fatalf("the current key left the JWKS: %v", err)
+		}
+	})
+
+	// The real minimum windows the config accepts — a 30m interval with a 10m
+	// prepublish and a 20m overlap — walked one minute at a time: the finest
+	// granularity the scheduler runs at, so an off-by-one anywhere in the
+	// windows shows as a minute where a token stops verifying early or a
+	// destroyed key lingers.
+	t.Run("minimum timings", func(t *testing.T) {
+		e := newEnv(t)
+		e.timings = map[string]keys.Timing{
+			keys.PurposeToken:  {Interval: 30 * time.Minute, Prepublish: 10 * time.Minute, Overlap: 20 * time.Minute},
+			keys.PurposeBundle: {Prepublish: time.Hour, Overlap: 2 * time.Hour},
+		}
+		ctx := context.Background()
+		t0 := e.clk.Now()
+		m := e.manager()
+		m.Init(ctx)
+		a0 := kidInState(t, e.rows(), keys.PurposeToken, keys.StateActive)
+
+		// One minute before the rotation is due, a token is signed and a
+		// verifier fetches the set.
+		e.clk.Advance(29 * time.Minute)
+		payload := []byte("header.payload")
+		kid, sig := signWithActive(t, m, keys.PurposeToken, payload)
+		if kid != a0 {
+			t.Fatalf("the token was signed by %s, want the active key %s", kid, a0)
+		}
+		setBefore := m.KeySet().JWKS(keys.PurposeToken)
+
+		// Minute 30: the rotation lands on the first pass past the interval.
+		e.clk.Advance(time.Minute)
+		mustSchedule(t, m)
+		set := m.KeySet().JWKS(keys.PurposeToken)
+		newActive := kidInState(t, e.rows(), keys.PurposeToken, keys.StateActive)
+		if newActive == a0 {
+			t.Fatal("the rotation did not land on the first pass past the interval")
+		}
+		if r := rowFor(t, e.rows(), a0); r.State != keys.StateRetired || !r.RetireAt.Equal(t0.Add(30*time.Minute)) {
+			t.Fatalf("the old key = %+v, want retired at t0+30m", r)
+		}
+		// The key that signs now was in the set fetched one minute before.
+		payload2 := []byte("header.payload2")
+		kid2, sig2 := signWithActive(t, m, keys.PurposeToken, payload2)
+		if err := verifyInSet(setBefore, kid2, payload2, sig2); err != nil {
+			t.Fatalf("the new active key was not prepublished: %v", err)
+		}
+		if got, want := len(kidsInSet(set)), 3; got != want {
+			t.Fatalf("JWKS at the rotation = %d keys, want %d (retired, active, next)", got, want)
+		}
+
+		// Minute by minute to past the overlap: the pre-rotation token verifies
+		// until retire_at+overlap (t0+50m) and the key leaves the set right
+		// after, while the current key stays.
+		for minute := 31; minute <= 51; minute++ {
+			e.clk.Advance(time.Minute)
+			mustSchedule(t, m)
+			set = m.KeySet().JWKS(keys.PurposeToken)
+			err := verifyInSet(set, kid, payload, sig)
+			switch {
+			case minute <= 49 && err != nil:
+				t.Fatalf("minute %d: the token stopped verifying before retire_at+overlap: %v", minute, err)
+			case minute >= 50 && err == nil:
+				t.Fatalf("minute %d: the key is in the JWKS past retire_at+overlap", minute)
+			}
+			if err := verifyInSet(set, kid2, payload2, sig2); err != nil {
+				t.Fatalf("minute %d: the current key left the JWKS: %v", minute, err)
+			}
+		}
+		if r := rowFor(t, e.rows(), a0); r.State != keys.StateDestroyed {
+			t.Errorf("the old key = %s past its overlap, want destroyed", r.State)
+		}
+	})
 }
 
 // TestBundleManualRotation: the bundle purpose never rotates on a schedule, a
@@ -716,6 +789,128 @@ func TestEmergencyRotation(t *testing.T) {
 	}
 }
 
+// TestEmergencyRotationVacantNext: an emergency rotation with no next key to
+// promote still refuses to keep signing with the compromised key — it is
+// revoked and a fresh key is generated straight into the signing slot — and
+// when even that fails the purpose is left with no active key, fail closed,
+// with a Finding naming the empty slot.
+func TestEmergencyRotationVacantNext(t *testing.T) {
+	cli := keys.Actor{Subject: "ops@example.com", AuthMethod: "cli"}
+	destroyNext := func(t *testing.T, e *env, ctx context.Context) string {
+		t.Helper()
+		next := kidInState(t, e.rows(), keys.PurposeToken, keys.StateNext)
+		if ok, err := e.meta.UpdateState(ctx, next, keys.StateNext, keys.StateDestroyed, e.clk.Now()); err != nil || !ok {
+			t.Fatalf("destroy the next row: %v %v", ok, err)
+		}
+		return kidInState(t, e.rows(), keys.PurposeToken, keys.StateActive)
+	}
+
+	t.Run("fresh key into the vacant slot", func(t *testing.T) {
+		e := newEnv(t)
+		e.timings = fastTimings()
+		ctx := context.Background()
+		m := e.manager()
+		m.Init(ctx)
+		a0 := destroyNext(t, e, ctx)
+
+		if err := m.Rotate(ctx, keys.PurposeToken, keys.RotateOpts{Emergency: true, Actor: cli}); err != nil {
+			t.Fatalf("emergency rotation with an empty next slot: %v", err)
+		}
+		rows := e.rows()
+		fresh := kidInState(t, rows, keys.PurposeToken, keys.StateActive)
+		if fresh == a0 {
+			t.Fatal("no fresh key took the vacant signing slot")
+		}
+		if r := rowFor(t, rows, a0); r.State != keys.StateRevoked {
+			t.Errorf("the compromised key = %s, want revoked", r.State)
+		}
+		if _, err := e.store.Get(ctx, keys.PurposeToken, a0); !errors.Is(err, keys.ErrKeyNotFound) {
+			t.Errorf("the revoked key's material survived: %v", err)
+		}
+		// The slot switched at once and the revoked key is out of the JWKS.
+		if got := activeKID(t, m, keys.PurposeToken); got != fresh {
+			t.Errorf("KeySet active = %s, want the fresh %s", got, fresh)
+		}
+		set := m.KeySet().JWKS(keys.PurposeToken)
+		if got := len(set.Keys); got != 1 {
+			t.Fatalf("JWKS = %d keys, want the fresh active only (the next slot is empty)", got)
+		}
+		kid, sig := signWithActive(t, m, keys.PurposeToken, []byte("header.payload"))
+		if err := verifyInSet(set, kid, []byte("header.payload"), sig); err != nil {
+			t.Errorf("the fresh key does not verify against the set: %v", err)
+		}
+		// The revocation and the fresh key are the operator's, reason emergency.
+		if got := actionsFor(e.audit.events(), keys.PurposeToken); strings.Join(got[len(got)-2:], ",") !=
+			strings.Join([]string{keys.ActionRevoked, keys.ActionGenerated}, ",") {
+			t.Errorf("emergency audit tail = %v, want revoked then generated", got)
+		}
+		// The scheduler's next pass heals the empty next slot.
+		mustSchedule(t, m)
+		kidInState(t, e.rows(), keys.PurposeToken, keys.StateNext)
+	})
+
+	t.Run("no replacement: fail closed, finding names the slot", func(t *testing.T) {
+		e := newEnv(t)
+		e.timings = fastTimings()
+		ctx := context.Background()
+		m := e.manager()
+		m.Init(ctx)
+		a0 := destroyNext(t, e, ctx)
+
+		e.store.failPut.Store(true)
+		if err := m.Rotate(ctx, keys.PurposeToken, keys.RotateOpts{Emergency: true, Actor: cli}); err == nil {
+			t.Fatal("the emergency rotation succeeded although the replacement could not be written")
+		}
+		// Fail closed: the compromised key is revoked, its material deleted, and
+		// the purpose signs with nothing rather than with it.
+		if r := rowFor(t, e.rows(), a0); r.State != keys.StateRevoked {
+			t.Fatalf("the compromised key = %s, want revoked although the replacement failed", r.State)
+		}
+		if _, err := e.store.Get(ctx, keys.PurposeToken, a0); !errors.Is(err, keys.ErrKeyNotFound) {
+			t.Errorf("the revoked key's material survived: %v", err)
+		}
+		if _, err := m.KeySet().Active(keys.PurposeToken); !errors.Is(err, keys.ErrNoActiveKey) {
+			t.Fatalf("the purpose kept signing: Active = %v, want ErrNoActiveKey", err)
+		}
+		if got := len(m.KeySet().JWKS(keys.PurposeToken).Keys); got != 0 {
+			t.Errorf("JWKS = %d keys, want none", got)
+		}
+		al := e.alerts.alerts()
+		if got := alertsByRule(al, keys.AlertKeyRotationFailed); got != 1 {
+			t.Fatalf("key_rotation_failed alerts = %d, want 1", got)
+		}
+		var detail string
+		for _, a := range al {
+			if a.Rule == keys.AlertKeyRotationFailed && a.Purpose == keys.PurposeToken {
+				detail = a.Detail
+			}
+		}
+		if !strings.Contains(detail, keys.PurposeToken) || !strings.Contains(detail, "no active key") {
+			t.Errorf("the finding does not name the empty slot: %q", detail)
+		}
+		if got := actionsFor(e.audit.events(), keys.PurposeToken); got[len(got)-1] != keys.ActionRevoked {
+			t.Errorf("audit tail = %v, want the revocation last", got)
+		}
+
+		// The store returns; another emergency rotation writes a fresh active
+		// key into the empty slot — there is no old key to revoke this time.
+		e.store.failPut.Store(false)
+		if err := m.Rotate(ctx, keys.PurposeToken, keys.RotateOpts{Emergency: true, Actor: cli}); err != nil {
+			t.Fatalf("the recovery rotation: %v", err)
+		}
+		fresh := kidInState(t, e.rows(), keys.PurposeToken, keys.StateActive)
+		if fresh == a0 {
+			t.Fatal("the recovery rotation did not write a fresh active key")
+		}
+		if got := activeKID(t, m, keys.PurposeToken); got != fresh {
+			t.Errorf("KeySet active after recovery = %s, want %s", got, fresh)
+		}
+		if got := alertsByRule(e.alerts.alerts(), keys.AlertKeyRotationFailed); got != 1 {
+			t.Errorf("recovery changed the episode's alert count: %d", got)
+		}
+	})
+}
+
 // TestRotationAudit: every transition is one audit event and one counted
 // transition, with the actor; the counters and gauges are labelled by purpose
 // and state only, and a signing failure is counted per purpose.
@@ -799,6 +994,20 @@ func TestRotationAudit(t *testing.T) {
 	}
 }
 
+// waitUntil polls cond until it holds, failing on timeout. Subscriber delivery
+// is asynchronous, so a test waits for it in real time; everything else in
+// these tests is driven by the fake clock.
+func waitUntil(t *testing.T, cond func() bool, what string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
 // TestKeySetJWKSAndSubscribe: the version moves and the subscribers fire once
 // per transition, not once per load; the JWKS holds the next and active keys
 // always and a retired key inside its overlap, and nothing for a purpose that
@@ -819,7 +1028,9 @@ func TestKeySetJWKSAndSubscribe(t *testing.T) {
 		fired = append(fired, purpose)
 	})
 
-	// A quiet pass and a reload of unchanged rows change nothing.
+	// A quiet pass and a reload of unchanged rows change nothing: install
+	// reported no change, so no signal was ever queued — the negative assert
+	// needs no wait.
 	mustSchedule(t, m)
 	if err := m.LoadKeySet(ctx, keys.PurposeToken); err != nil {
 		t.Fatal(err)
@@ -834,18 +1045,18 @@ func TestKeySetJWKSAndSubscribe(t *testing.T) {
 		t.Errorf("subscribers fired %d times without a transition", n)
 	}
 
-	// One rotation is one transition: one bump, one notification.
+	// One rotation is one transition: one bump, one notification, delivered on
+	// the subscriber's own goroutine.
 	e.clk.Advance(4 * time.Hour)
 	mustSchedule(t, m)
 	if got := m.KeySet().Version(); got != v0+1 {
 		t.Errorf("version = %d after one transition, want %d", got, v0+1)
 	}
-	mu.Lock()
-	got := append([]string(nil), fired...)
-	mu.Unlock()
-	if strings.Join(got, ",") != keys.PurposeToken {
-		t.Errorf("subscribers fired %v, want exactly [%s]", got, keys.PurposeToken)
-	}
+	waitUntil(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(fired) == 1 && fired[0] == keys.PurposeToken
+	}, "the subscriber to be notified of the transition")
 
 	// JWKS membership: next and active always, retired inside its overlap.
 	set := m.KeySet().JWKS(keys.PurposeToken)
@@ -862,6 +1073,80 @@ func TestKeySetJWKSAndSubscribe(t *testing.T) {
 	if got := m.KeySet().JWKS(keys.PurposeCA); got.Keys != nil {
 		t.Errorf("JWKS(ca) = %v, want empty: the purpose is never loaded", got.Keys)
 	}
+}
+
+// TestSubscribeIsolated: deliveries run on their own goroutines, never on the
+// manager's — a subscriber that blocks forever cannot stall a rotation or a
+// scheduler pass, a subscriber that panics cannot reach them, and in both
+// cases the healthy subscriber is still notified.
+func TestSubscribeIsolated(t *testing.T) {
+	t.Run("blocked subscriber", func(t *testing.T) {
+		e := newEnv(t)
+		e.timings = fastTimings()
+		ctx := context.Background()
+		m := e.manager()
+		m.Init(ctx)
+
+		release := make(chan struct{})
+		t.Cleanup(func() { close(release) })
+		m.KeySet().Subscribe(func(string) { <-release }) // never returns
+
+		var mu sync.Mutex
+		fired := 0
+		m.KeySet().Subscribe(func(string) {
+			mu.Lock()
+			defer mu.Unlock()
+			fired++
+		})
+
+		e.clk.Advance(4 * time.Hour)
+		done := make(chan error, 1)
+		go func() { done <- m.Rotate(ctx, keys.PurposeToken, keys.RotateOpts{}) }()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("Rotate with a blocked subscriber: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("a blocked subscriber stalled the rotation")
+		}
+		mustSchedule(t, m) // the scheduler pass completes too
+		waitUntil(t, func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			return fired == 1
+		}, "the healthy subscriber to be notified")
+		if got := kidInState(t, e.rows(), keys.PurposeToken, keys.StateActive); got == "" {
+			t.Fatal("no active key after the rotation")
+		}
+	})
+	t.Run("panicking subscriber", func(t *testing.T) {
+		e := newEnv(t)
+		e.timings = fastTimings()
+		m := e.manager()
+		m.Init(context.Background())
+
+		m.KeySet().Subscribe(func(string) { panic("subscriber bug") })
+		var mu sync.Mutex
+		fired := 0
+		m.KeySet().Subscribe(func(string) {
+			mu.Lock()
+			defer mu.Unlock()
+			fired++
+		})
+
+		e.clk.Advance(4 * time.Hour)
+		mustSchedule(t, m) // the panic must not reach this pass
+		waitUntil(t, func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			return fired == 1
+		}, "the healthy subscriber to be notified")
+		waitUntil(t, func() bool {
+			return strings.Contains(e.logs.String(), "keys_subscriber_panicked")
+		}, "the contained panic to be logged")
+		kidInState(t, e.rows(), keys.PurposeToken, keys.StateActive)
+	})
 }
 
 // TestRotationFailedFinding: a rotation that cannot be applied — the key store
@@ -911,6 +1196,75 @@ func TestRotationFailedFinding(t *testing.T) {
 	}
 	if got := alertsByRule(e.alerts.alerts(), keys.AlertSigningKeyUnavailable); got != 0 {
 		t.Errorf("a failing rotation raised signing_key_unavailable: %+v", e.alerts.alerts())
+	}
+}
+
+// TestRotationPromoteFails: a database that cannot run the promotion
+// transaction leaves every row exactly as it was — the old key active, its
+// material intact — discards the fresh next key's material, keeps the purpose
+// signing and pages once for the episode. The promotion is one transaction, so
+// there is no half-rotated state to clean up.
+func TestRotationPromoteFails(t *testing.T) {
+	e := newEnv(t)
+	e.timings = fastTimings()
+	ctx := context.Background()
+	m := e.manager()
+	m.Init(ctx)
+	before := e.rows()
+	active := kidInState(t, before, keys.PurposeToken, keys.StateActive)
+	auditsBefore := len(e.audit.events())
+
+	meta := &failPromoteMeta{MetaStore: e.meta}
+	meta.fail.Store(true)
+	m2 := e.managerOn(meta)
+	e.clk.Advance(4 * time.Hour) // the rotation is due
+	if err := m2.Rotate(ctx, keys.PurposeToken, keys.RotateOpts{}); err == nil {
+		t.Fatal("Rotate succeeded although the promotion transaction failed")
+	} else if errors.Is(err, keys.ErrConflict) {
+		t.Fatalf("a database failure was reported as a lost race: %v", err)
+	}
+	// Nothing moved and nothing was half-applied.
+	if after := e.rows(); len(after) != len(before) {
+		t.Fatalf("rows %d -> %d across a failed promotion", len(before), len(after))
+	}
+	if got := kidInState(t, e.rows(), keys.PurposeToken, keys.StateActive); got != active {
+		t.Fatalf("the failed promotion moved the signing slot: %s -> %s", active, got)
+	}
+	if _, err := e.store.Get(ctx, keys.PurposeToken, active); err != nil {
+		t.Fatalf("the active key's material did not survive the failed promotion: %v", err)
+	}
+	// The fresh next key's material was discarded, not left orphaned.
+	files := map[string]bool{}
+	for _, p := range listPEMs(t, filepath.Join(e.dir, keys.PurposeToken)) {
+		files[strings.TrimSuffix(filepath.Base(p), ".pem")] = true
+	}
+	if len(files) != 2 {
+		t.Errorf("token material after the failed promotion = %v, want the active and next keys only", files)
+	}
+	// A database failure is a Finding, not a caller error; the abandoned
+	// generation wrote no audit event.
+	if got := alertsByRule(e.alerts.alerts(), keys.AlertKeyRotationFailed); got != 1 {
+		t.Fatalf("key_rotation_failed alerts = %d, want 1", got)
+	}
+	if got := len(e.audit.events()); got != auditsBefore {
+		t.Errorf("the failed promotion wrote %d audit events, want none", got-auditsBefore)
+	}
+	if got := activeKID(t, m, keys.PurposeToken); got != active {
+		t.Errorf("signing moved to %s, want %s", got, active)
+	}
+
+	// The database returns; the same rotation applies in one transaction.
+	meta.fail.Store(false)
+	if err := m2.Rotate(ctx, keys.PurposeToken, keys.RotateOpts{}); err != nil {
+		t.Fatalf("Rotate after the database returned: %v", err)
+	}
+	rows := e.rows()
+	if got := kidInState(t, rows, keys.PurposeToken, keys.StateActive); got == active {
+		t.Fatal("the rotation was not applied once the database returned")
+	}
+	kidInState(t, rows, keys.PurposeToken, keys.StateNext)
+	if got := alertsByRule(e.alerts.alerts(), keys.AlertKeyRotationFailed); got != 1 {
+		t.Errorf("recovery changed the episode's alert count: %d", got)
 	}
 }
 

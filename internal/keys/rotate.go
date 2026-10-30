@@ -116,10 +116,14 @@ type RotateOpts struct {
 // Rotate promotes purpose's next key to active, moves the old active key to
 // retired (revoked in an emergency) with its private material deleted, and
 // publishes a fresh next key. The next key is never promoted before
-// publish_at + prepublish unless opts.Emergency is set. The new key's material
-// is written before any state changes, so a failing backend leaves the current
-// key signing; every state change is one compare-and-swap write, so the
-// scheduler, the console and the CLI cannot fork the lifecycle.
+// publish_at + prepublish unless opts.Emergency is set. An emergency with no
+// next key to promote revokes the compromised key anyway — no signing is
+// better than signing with a leaked key — and generates a fresh one into the
+// vacant slot. The new key's material is written before any state changes, so
+// a failing backend leaves the current key signing; the retire and the
+// promotion are one compare-and-swap transaction, so the scheduler, the
+// console and the CLI cannot fork the lifecycle, and a peer reading between
+// the writes never sees the purpose without an active key.
 func (m *Manager) Rotate(ctx context.Context, purpose string, opts RotateOpts) error {
 	if purpose != PurposeToken && purpose != PurposeBundle {
 		return fmt.Errorf("%w: %q is not rotated through the manager", ErrInvalidPurpose, purpose)
@@ -176,6 +180,11 @@ func (m *Manager) rotateLocked(ctx context.Context, purpose string, actor Actor,
 	now := m.cfg.Now()
 	next, hasNext := nextRow(rows)
 	if !hasNext {
+		if emergency {
+			// Fail closed: with no next key to promote, the compromised key is
+			// revoked anyway and a fresh key is generated into the vacant slot.
+			return m.emergencyVacantLocked(ctx, purpose, rows, actor)
+		}
 		return fmt.Errorf("%w: %s", ErrNoNextKey, purpose)
 	}
 	if !emergency && !publishedLongEnough(now, next, m.cfg.Timings[purpose]) {
@@ -192,9 +201,10 @@ func (m *Manager) rotateLocked(ctx context.Context, purpose string, actor Actor,
 
 // promoteLocked moves purpose's next key into the signing slot and publishes a
 // fresh next key. old is the key that leaves the slot (hasOld false when it is
-// already empty — an interrupted rotation). Each state change is one
-// compare-and-swap write in its own transaction; a write somebody else beat us
-// to is ErrConflict and leaves the rest of the work to the winner.
+// already empty — an interrupted rotation). The retire and the promote are one
+// compare-and-swap transaction, so a peer polling between the writes never
+// sees the purpose without an active key, and a transaction somebody else beat
+// us to (ErrConflict) leaves the work to the winner with nothing half-applied.
 func (m *Manager) promoteLocked(ctx context.Context, purpose string, next, old Record, hasOld bool, retireTo State, actor Actor, emergency bool) error {
 	now := m.cfg.Now()
 	// The new next key's material is written before anything changes, so a
@@ -209,25 +219,25 @@ func (m *Manager) promoteLocked(ctx context.Context, purpose string, next, old R
 		m.discard(ctx, purpose, rec.KID)
 		return err
 	}
+	oldKID := ""
 	if hasOld {
-		changed, err := m.cfg.Meta.UpdateState(ctx, old.KID, StateActive, retireTo, now)
-		if err != nil {
-			return abandon(err)
-		}
-		if !changed {
-			return abandon(fmt.Errorf("%w: %s key %s is no longer active", ErrConflict, purpose, old.KID))
-		}
-		// It no longer signs: the material goes at once. Its public key stays
-		// published until the overlap ends (retired) or now (revoked).
-		m.discard(ctx, purpose, old.KID)
-		m.noteTransition(ctx, purpose, old.KID, retireTo, actor, emergencyReason(emergency))
+		oldKID = old.KID
 	}
-	changed, err := m.cfg.Meta.UpdateState(ctx, next.KID, StateNext, StateActive, now)
+	// One transaction: old retires and next activates together, or not at all
+	// — a lost race wrote nothing, and an error rolled everything back.
+	changed, err := m.cfg.Meta.Promote(ctx, purpose, oldKID, retireTo, next.KID, now)
 	if err != nil {
 		return abandon(err)
 	}
 	if !changed {
-		return abandon(fmt.Errorf("%w: %s key %s is no longer next", ErrConflict, purpose, next.KID))
+		return abandon(fmt.Errorf("%w: the %s keys moved before the promotion committed", ErrConflict, purpose))
+	}
+	if hasOld {
+		// The pair committed, so the old key no longer signs: its material goes
+		// at once. Its public key stays published until the overlap ends
+		// (retired) or never again (revoked).
+		m.discard(ctx, purpose, old.KID)
+		m.noteTransition(ctx, purpose, old.KID, retireTo, actor, emergencyReason(emergency))
 	}
 	m.noteTransition(ctx, purpose, next.KID, StateActive, actor, emergencyReason(emergency))
 	if err := m.cfg.Meta.Insert(ctx, rec); err != nil {
@@ -235,6 +245,53 @@ func (m *Manager) promoteLocked(ctx context.Context, purpose string, next, old R
 		// heals it. Nothing is left half-written: the material is gone and the
 		// row was never inserted.
 		return abandon(err)
+	}
+	m.noteGenerated(ctx, rec, actor)
+	return nil
+}
+
+// emergencyVacantLocked is an emergency rotation of a purpose whose next slot
+// is empty: nothing can be promoted, but no signing is better than signing
+// with a leaked key, so the active key is revoked regardless and a fresh key
+// is generated straight into the vacant signing slot (the first key of a
+// purpose activates at once — createInitial's precedent). If the replacement
+// cannot be written the purpose is left with no active key — the snapshot is
+// installed without a signer, so signing stops at once — and the returned
+// error names the empty slot; it is not a request error, so Rotate reports it
+// as a rotation failure. The caller holds mu.
+func (m *Manager) emergencyVacantLocked(ctx context.Context, purpose string, rows []Record, actor Actor) error {
+	now := m.cfg.Now()
+	old, hasOld := activeRow(rows)
+	if hasOld {
+		changed, err := m.cfg.Meta.UpdateState(ctx, old.KID, StateActive, StateRevoked, now)
+		if err != nil {
+			return err
+		}
+		if !changed {
+			return fmt.Errorf("%w: the %s active key moved before it could be revoked", ErrConflict, purpose)
+		}
+		// The revocation stands whatever happens next: a compromised key never
+		// signs again, even when its replacement cannot be written.
+		m.discard(ctx, purpose, old.KID)
+		m.noteTransition(ctx, purpose, old.KID, StateRevoked, actor, "emergency")
+	}
+	rec, err := m.generateKeyLocked(ctx, purpose, now, actor)
+	if err == nil {
+		rec.State = StateActive
+		rec.ActivateAt = now
+		if err = m.cfg.Meta.Insert(ctx, rec); err != nil {
+			m.discard(ctx, purpose, rec.KID)
+		}
+	}
+	if err != nil {
+		if fresh, rerr := m.rows(ctx, purpose); rerr == nil {
+			m.set.install(purpose, nil, fresh, m.cfg.Timings[purpose].Overlap)
+		}
+		if hasOld {
+			return fmt.Errorf("keys: %s has no active key: the emergency rotation revoked %s and could not write a replacement: %w",
+				purpose, old.KID, err)
+		}
+		return fmt.Errorf("keys: %s has no active key and the emergency rotation could not write one: %w", purpose, err)
 	}
 	m.noteGenerated(ctx, rec, actor)
 	return nil
