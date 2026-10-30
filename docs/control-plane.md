@@ -1251,8 +1251,14 @@ keys:
     backend: file          # the only backend today; echo and env are refused
     file:
       dir: ""              # default <state-dir>/keys; may be a separate secret mount
-  token:  { alg: EdDSA }   # EdDSA (default) or ES256
-  bundle: { alg: EdDSA }   # must be EdDSA: workers pin bundle keys
+  token:                   # EdDSA (default) or ES256
+    rotationInterval: 720h # 0 = rotate only by hand; else >= prepublish+overlap
+    prepublish: 1h         # min 10m: a next key is published before it activates
+    overlap: 48h           # min 20m: a retired key stays in the JWKS this long
+  bundle:                  # must be EdDSA: workers pin bundle keys
+    rotationInterval: 0    # must be 0: bundle rotates only by hand
+    prepublish: 1h
+    overlap: 48h
 ```
 
 - **Where keys live.** Private keys are PKCS#8 PEM files at
@@ -1270,6 +1276,19 @@ keys:
   returns `ErrNoActiveKey`, a `signing_key_unavailable` finding is raised once
   per outage, and loading is retried with 1 s to 60 s backoff until it works. It
   never generates a replacement key while rows exist.
+- **Rotation.** Token keys rotate on `rotationInterval` (default 720 h;
+  `0` rotates only by hand). Bundle keys must be `rotationInterval: 0`, because
+  workers pin them out of band — rotating a bundle key is a staged operator
+  action. A rotation promotes the published next key to active (never before
+  `publish_at + prepublish`, so verifiers already hold it), retires the old key
+  — whose private material is deleted at once — and publishes a fresh next key.
+  The retired key stays in the JWKS for `overlap` (default 48 h, min 20 m), so
+  tokens it signed keep verifying, and its row is then destroyed. Every
+  transition is a compare-and-swap write, so the scheduler, the console and the
+  CLI cannot fork the lifecycle, and a restart applies the transitions a
+  downtime made due. A rotation that fails keeps the current key and raises
+  `key_rotation_failed`; an active token key older than twice its interval
+  raises `key_overdue`.
 - **Orphans.** At startup, key files with no `signing_keys` row (a crash between
   writing the file and the insert) are deleted; the log names the kid and
   purpose only.

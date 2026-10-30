@@ -345,8 +345,14 @@ keys:
       dir: ""                     # default <state-dir>/keys; may point at a separate secret mount
   token:
     alg: EdDSA                    # EdDSA (default) | ES256
+    rotationInterval: 720h        # how long a token key signs; 0 = rotate only by hand
+    prepublish: 1h                # min time a next key is published before it activates (min 10m)
+    overlap: 48h                  # how long a retired key stays in the JWKS (min 20m)
   bundle:
     alg: EdDSA                    # must be EdDSA: workers pin bundle keys
+    rotationInterval: 0           # must be 0: bundle keys rotate only by hand (workers pin them)
+    prepublish: 1h
+    overlap: 48h
 
 # Echo guard: stops an upstream that copies the request into its response (an echo
 # endpoint, an error quoting the request, a reflected header) from handing the agent
