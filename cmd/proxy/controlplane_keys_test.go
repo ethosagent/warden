@@ -360,7 +360,7 @@ func TestKeysRotateBundleAndResetRefusals(t *testing.T) {
 
 	bundle := keyStates(t, stateDir, "bundle")
 	next := stateKid(bundle, "next")
-	stdout, stderr, code := runWarden(t, "control-plane", "keys", "rotate", "--purpose", "bundle", "--state-dir", stateDir)
+	_, stderr, code := runWarden(t, "control-plane", "keys", "rotate", "--purpose", "bundle", "--state-dir", stateDir)
 	if code == 0 {
 		t.Fatalf("bundle rotate exit = 0, want a staged refusal")
 	}
@@ -371,14 +371,14 @@ func TestKeysRotateBundleAndResetRefusals(t *testing.T) {
 		t.Errorf("a refused bundle rotation changed the rows: %v -> %v", bundle, after)
 	}
 
-	stdout, stderr, code = runWarden(t, "control-plane", "keys", "reset", "--purpose", "token", "--state-dir", stateDir)
+	_, stderr, code = runWarden(t, "control-plane", "keys", "reset", "--purpose", "token", "--state-dir", stateDir)
 	if code == 0 {
 		t.Fatalf("reset without --yes exit = 0")
 	}
 	if !strings.Contains(stderr, "--yes") {
 		t.Errorf("reset refusal %q does not name --yes", stderr)
 	}
-	stdout, stderr, code = runWarden(t, "control-plane", "keys", "reset", "--purpose", "token", "--yes", "--state-dir", stateDir)
+	_, stderr, code = runWarden(t, "control-plane", "keys", "reset", "--purpose", "token", "--yes", "--state-dir", stateDir)
 	if code == 0 {
 		t.Fatalf("reset under the running control plane exit = 0")
 	}
@@ -395,7 +395,7 @@ func TestKeysRotateBundleAndResetRefusals(t *testing.T) {
 	// Stopped: the reset replaces the purpose, printing the fresh kid, and the
 	// old kids are gone from the rows and the published set.
 	before := keyStates(t, stateDir, "token")
-	stdout, stderr, code = runWarden(t, "control-plane", "keys", "reset", "--purpose", "token",
+	stdout, stderr, code := runWarden(t, "control-plane", "keys", "reset", "--purpose", "token",
 		"--yes", "--state-dir", stateDir, "--config", writeTempConfig(t, keysCLIConfig))
 	if code != 0 {
 		t.Fatalf("reset exit = %d, stderr %q", code, stderr)
