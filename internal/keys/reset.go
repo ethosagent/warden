@@ -7,7 +7,10 @@ import (
 
 // ResetResult is what a reset did.
 type ResetResult struct {
-	// Removed is how many rows the purpose had; they are all gone.
+	// Removed is how many rows the purpose had; they are all gone. It is set
+	// even on an error that struck after the delete committed (a material
+	// delete or the regeneration failed), so callers can tell a reset that
+	// partially applied from one that changed nothing.
 	Removed int
 	// ActiveKID is the fresh active key's kid, set for token and bundle (the
 	// ca purpose only clears: its key is imported, never generated).

@@ -41,6 +41,11 @@ func newControlPlaneKeysCmd() *cobra.Command {
 	return cmd
 }
 
+// Exit codes of the keys commands: a failure that changed nothing exits 1
+// (the default), a usage error exits 2 (usageErr), and a standing emergency
+// rotation exits exitKeysRotationStood.
+const exitKeysRotationStood = 3
+
 // keysFlags adds the flags every keys subcommand shares. --config is the
 // operator-owned file carrying the keys: block; without it the keys defaults
 // apply (the file store under <state-dir>/keys and the default timings).
@@ -186,6 +191,16 @@ func newKeysRotateCmd() *cobra.Command {
 			noticeNoAudit(cmd, o, stateDir)
 			res, err := o.Rotate(cmd.Context(), purpose, emergency)
 			if err != nil {
+				if errors.Is(err, keys.ErrRotationStood) {
+					// The revocation committed, so this is not a failed
+					// emergency but a standing one with recovery left: say so
+					// plainly, and exit 3 so a script can tell it from a
+					// refusal that changed nothing.
+					_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
+						"the %s emergency rotation stood: the compromised key IS revoked and its signatures stop verifying as verifiers refresh; "+
+							"only the fresh next key is missing — the control plane's scheduler republishes one, `keys list` shows when it is there\n", purpose)
+					return &exitError{code: exitKeysRotationStood, err: err}
+				}
 				// The staged bundle refusal is a clean outcome, not a failure of
 				// the command: main prints its next-kid-to-pin message and exits 1.
 				return err

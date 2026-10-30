@@ -471,8 +471,12 @@ func TestRotateGuards(t *testing.T) {
 	if ok, err := e.meta.UpdateState(ctx, next, keys.StateNext, keys.StateDestroyed, e.clk.Now()); err != nil || !ok {
 		t.Fatalf("destroy the next row: %v %v", ok, err)
 	}
-	if err := m.Rotate(ctx, keys.PurposeToken, keys.RotateOpts{}); !errors.Is(err, keys.ErrNoNextKey) {
+	err := m.Rotate(ctx, keys.PurposeToken, keys.RotateOpts{})
+	if !errors.Is(err, keys.ErrNoNextKey) {
 		t.Fatalf("Rotate with no next key = %v, want ErrNoNextKey", err)
+	}
+	if errors.Is(err, keys.ErrRotationStood) {
+		t.Errorf("a refused rotation claims to stand: %v", err)
 	}
 	if n := len(e.alerts.alerts()); n != 0 {
 		t.Errorf("the refusals raised %d alerts: %+v", n, e.alerts.alerts())
@@ -860,8 +864,12 @@ func TestEmergencyRotationVacantNext(t *testing.T) {
 		a0 := destroyNext(t, e, ctx)
 
 		e.store.failPut.Store(true)
-		if err := m.Rotate(ctx, keys.PurposeToken, keys.RotateOpts{Emergency: true, Actor: cli}); err == nil {
+		err := m.Rotate(ctx, keys.PurposeToken, keys.RotateOpts{Emergency: true, Actor: cli})
+		if err == nil {
 			t.Fatal("the emergency rotation succeeded although the replacement could not be written")
+		}
+		if !errors.Is(err, keys.ErrRotationStood) {
+			t.Errorf("the fail-closed error does not carry the stood sentinel although the compromised key was revoked: %v", err)
 		}
 		// Fail closed: the compromised key is revoked, its material deleted, and
 		// the purpose signs with nothing rather than with it.
@@ -933,6 +941,9 @@ func TestEmergencyRotationPublishFailure(t *testing.T) {
 	err := m.Rotate(ctx, keys.PurposeToken, keys.RotateOpts{Emergency: true, Actor: cli})
 	if err == nil {
 		t.Fatal("the emergency rotation reported success although its next key could not be published")
+	}
+	if !errors.Is(err, keys.ErrRotationStood) {
+		t.Errorf("the error does not carry the stood sentinel although the revocation committed: %v", err)
 	}
 	for _, want := range []string{"revoked " + a0, "activated " + n0} {
 		if !strings.Contains(err.Error(), want) {

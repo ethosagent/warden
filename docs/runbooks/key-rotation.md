@@ -107,6 +107,9 @@ warden control-plane keys rotate --purpose token --emergency --yes \
   refilled by the next scheduler pass. With no `next` key at all the emergency
   still revokes, and a fresh key is generated straight into the vacant slot:
   fail closed — no signing at all is preferred to signing with a leaked key.
+  Both failures exit **3**, not 1, and say so in their own line before the
+  error: the compromised key **is** revoked, and the error names only what is
+  still missing.
 - **In-flight tokens die with it.** Tokens signed by the revoked kid stop
   verifying as soon as workers refresh their key set — workers poll the
   control plane's data version and pick a change up within about 2 seconds —
@@ -120,7 +123,8 @@ warden control-plane keys rotate --purpose token --emergency --yes \
 - `--emergency` on a non-interactive stdin (a script, CI) also requires
   `--yes`; without it the command exits non-zero and changes nothing. On a
   terminal it asks for confirmation instead. One audit row is appended either
-  way — the refusal appends none.
+  way — with outcome `error` when the rotation stood, none at all for a
+  refusal.
 
 ## 5. Checking propagation
 
@@ -173,11 +177,14 @@ A backup set holds `warden-cp.db` — public metadata — and never the key
 directory: the manifest lists it under `not_included` (`signing key
 material`, alongside `cp-audit.key`). Restoring into a directory without
 `<state-dir>/keys` therefore leaves every `next`/`active` row without
-material. `warden control-plane restore` says so, per purpose, and prints the
-reset hint; the control plane still starts (the store-unavailable behaviour in
-[control-plane.md](../control-plane.md#signing-keys-keys)) but signing fails
-and a `signing_key_unavailable` finding is raised until the keys are
-regenerated. The drill is `go test ./cmd/proxy -run TestKeysRestoreHint`.
+material. `warden control-plane restore` names the key directory it checked
+(`<state-dir>/keys` — restore takes no `--config`) and, per purpose, that its
+material is not there; verify the directory holds the key files first (the
+store may simply live elsewhere), and reach for the reset hint only when the
+material is truly lost. The control plane still starts (the store-unavailable
+behaviour in [control-plane.md](../control-plane.md#signing-keys-keys)) but
+signing fails and a `signing_key_unavailable` finding is raised until the keys
+are regenerated. The drill is `go test ./cmd/proxy -run TestKeysRestoreHint`.
 
 Regenerate with the control plane stopped:
 

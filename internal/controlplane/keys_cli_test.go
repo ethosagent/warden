@@ -78,6 +78,44 @@ func keyAuditRows(t *testing.T, stateDir, action string) []cliAuditRow {
 	return out
 }
 
+// cliAuditEvent is one admin_audit row's outcome and public details — what
+// the audit-on-partial-failure tests assert.
+type cliAuditEvent struct {
+	outcome string
+	details map[string]string
+}
+
+// keyAuditEvents returns the admin audit rows with action, seq order.
+func keyAuditEvents(t *testing.T, stateDir, action string) []cliAuditEvent {
+	t.Helper()
+	db, err := cpstate.OpenReadOnly(context.Background(), filepath.Join(stateDir, adminaudit.StateDBFileName), StateMigrations())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	rows, err := db.SQL().Query(`SELECT outcome, details_json FROM admin_audit WHERE action = ? ORDER BY seq`, action)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []cliAuditEvent
+	for rows.Next() {
+		var ev cliAuditEvent
+		var raw []byte
+		if err := rows.Scan(&ev.outcome, &raw); err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(raw, &ev.details); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, ev)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
 // systemActorID returns the boot generation's actor id: what the system's own
 // key events are pseudonymized to.
 func systemActorID(t *testing.T, stateDir string) string {
@@ -351,6 +389,119 @@ func TestKeysCLIReset(t *testing.T) {
 	}
 	if cliGenerated != 2 {
 		t.Errorf("keys.generated rows by the operator = %d, want the fresh active and next", cliGenerated)
+	}
+}
+
+// TestKeysCLIAuditsAStoodRotation: an emergency rotation whose fresh next key
+// cannot be written (the key dir is read-only; the metadata database still
+// is) still revokes the compromised key, and the CLI still appends its audit
+// row — outcome error, the promoted kid and the failure in the details — so
+// the record says the key is out even though the command failed.
+func TestKeysCLIAuditsAStoodRotation(t *testing.T) {
+	ctx := context.Background()
+	stateDir := openKeysStateDir(t)
+	o, err := OpenKeysOffline(ctx, stateDir, KeysCLIOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = o.Close() }()
+	before, err := o.Rows(ctx, keys.PurposeToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var oldActive, oldNext keys.Record
+	for _, r := range before {
+		switch r.State {
+		case keys.StateActive:
+			oldActive = r
+		case keys.StateNext:
+			oldNext = r
+		}
+	}
+	pdir := filepath.Join(stateDir, "keys", "token")
+	if err := os.Chmod(pdir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(pdir, 0o700) })
+
+	res, err := o.Rotate(ctx, keys.PurposeToken, true)
+	if !errors.Is(err, keys.ErrRotationStood) {
+		t.Fatalf("stood emergency rotate = %v, want an ErrRotationStood failure", err)
+	}
+	if !res.Emergency || res.KID != oldNext.KID {
+		t.Errorf("result = %+v, want the promoted %s as active", res, oldNext.KID)
+	}
+	after, err := o.Rows(ctx, keys.PurposeToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	states := map[keys.State]string{}
+	for _, r := range after {
+		states[r.State] = r.KID
+	}
+	if states[keys.StateActive] != oldNext.KID || states[keys.StateRevoked] != oldActive.KID || states[keys.StateNext] != "" {
+		t.Errorf("rows after the stood rotation = %v, want %s revoked, %s active and no next", states, oldActive.KID, oldNext.KID)
+	}
+	events := keyAuditEvents(t, stateDir, actionKeysRotate)
+	if len(events) != 1 {
+		t.Fatalf("keys.rotate_requested rows = %d, want the one error row", len(events))
+	}
+	if events[0].outcome != adminaudit.OutcomeError {
+		t.Errorf("audit outcome = %q, want error", events[0].outcome)
+	}
+	if events[0].details["stood"] != "true" || events[0].details["kid"] != oldNext.KID || events[0].details["error"] == "" {
+		t.Errorf("audit details = %v, want stood, the promoted kid and the failure", events[0].details)
+	}
+	if !strings.Contains(events[0].details["error"], oldActive.KID) {
+		t.Errorf("the audit's error detail does not name the revoked kid: %q", events[0].details["error"])
+	}
+}
+
+// TestKeysCLIAuditsAPartialReset: a reset whose row delete committed but
+// whose material delete failed (the key dir is read-only) partially applied —
+// the rows are gone — and the CLI still appends its audit row with outcome
+// error before returning the failure.
+func TestKeysCLIAuditsAPartialReset(t *testing.T) {
+	ctx := context.Background()
+	stateDir := openKeysStateDir(t)
+	o, err := OpenKeysOffline(ctx, stateDir, KeysCLIOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = o.Close() }()
+	before, err := o.Rows(ctx, keys.PurposeToken)
+	if err != nil || len(before) != 2 {
+		t.Fatalf("token rows = %v err %v, want 2", before, err)
+	}
+	pdir := filepath.Join(stateDir, "keys", "token")
+	if err := os.Chmod(pdir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(pdir, 0o700) })
+
+	out, err := o.Reset(ctx, keys.PurposeToken)
+	if err == nil {
+		t.Fatal("the reset succeeded although the key dir refuses deletes")
+	}
+	if !strings.Contains(err.Error(), before[0].KID) && !strings.Contains(err.Error(), before[1].KID) {
+		t.Errorf("the failure does not name the key it could not delete: %v", err)
+	}
+	if out.Removed != 2 || out.KID != "" {
+		t.Errorf("result = %+v, want the two rows removed and no fresh key", out)
+	}
+	after, err := o.Rows(ctx, keys.PurposeToken)
+	if err != nil || len(after) != 0 {
+		t.Fatalf("token rows after the partial reset = %v err %v, want none: the delete committed", after, err)
+	}
+	events := keyAuditEvents(t, stateDir, actionKeysReset)
+	if len(events) != 1 {
+		t.Fatalf("keys.reset rows = %d, want the one error row", len(events))
+	}
+	if events[0].outcome != adminaudit.OutcomeError {
+		t.Errorf("audit outcome = %q, want error", events[0].outcome)
+	}
+	if events[0].details["removed"] != "2" || events[0].details["error"] == "" {
+		t.Errorf("audit details = %v, want the removal count and the failure", events[0].details)
 	}
 }
 

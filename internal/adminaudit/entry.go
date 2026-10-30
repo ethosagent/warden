@@ -70,6 +70,10 @@ const (
 	actorIDSystem    = "system"
 )
 
+// MaxDetailValueLen is the largest detail value an entry accepts, exported for
+// writers that fit free-form text (an error's own words) into one.
+const MaxDetailValueLen = maxDetailValLen
+
 // ErrInvalidEntry is returned (wrapped, naming the field but never its value)
 // when an entry fails validation. Nothing is written.
 var ErrInvalidEntry = errors.New("adminaudit: invalid entry")

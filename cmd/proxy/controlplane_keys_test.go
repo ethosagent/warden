@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -186,6 +187,22 @@ func auditActionCount(t *testing.T, stateDir, action, authMethod string) int {
 	return n
 }
 
+// auditOutcomeCount counts admin audit rows with action and outcome.
+func auditOutcomeCount(t *testing.T, stateDir, action, outcome string) int {
+	t.Helper()
+	db, err := cpstate.OpenReadOnly(context.Background(), filepath.Join(stateDir, adminaudit.StateDBFileName), controlplane.StateMigrations())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	var n int
+	if err := db.SQL().QueryRow(`SELECT count(*) FROM admin_audit WHERE action = ? AND outcome = ?`,
+		action, outcome).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
 // extractJWKSKids parses a JWKS document and returns its kids.
 func extractJWKSKids(t *testing.T, jwks string) []string {
 	t.Helper()
@@ -286,6 +303,49 @@ func TestKeysRotateEmergency(t *testing.T) {
 	}
 	if err := stop(); err != nil {
 		t.Fatalf("stop: %v", err)
+	}
+}
+
+// TestKeysRotateEmergencyStood: an --emergency whose fresh next key cannot be
+// written (a read-only key dir; the metadata database stays writable) still
+// revokes: the command exits exitKeysRotationStood, says the compromised key
+// IS revoked, and its audit row is outcome error — the rotation stands, only
+// the next slot is empty.
+func TestKeysRotateEmergencyStood(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "state")
+	_, stop := startKeysCP(t, stateDir)
+	before := keyStates(t, stateDir, "token")
+	oldActive, oldNext := stateKid(before, "active"), stateKid(before, "next")
+	if oldActive == "" || oldNext == "" {
+		t.Fatalf("token rows = %v, want an active and a next key", before)
+	}
+	// Stopped, so nothing refills the empty next slot under the assertions.
+	if err := stop(); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	pdir := filepath.Join(stateDir, "keys", "token")
+	if err := os.Chmod(pdir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(pdir, 0o700) })
+
+	stdout, stderr, code := runWarden(t, "control-plane", "keys", "rotate", "--purpose", "token",
+		"--emergency", "--yes", "--state-dir", stateDir)
+	if code != exitKeysRotationStood {
+		t.Fatalf("stood emergency exit = %d, want %d (stderr %q)", code, exitKeysRotationStood, stderr)
+	}
+	if !strings.Contains(stderr, "IS revoked") {
+		t.Errorf("the stood message does not say the old key is revoked:\n%s", stderr)
+	}
+	after := keyStates(t, stateDir, "token")
+	if stateKid(after, "active") != oldNext || stateKid(after, "revoked") != oldActive || stateKid(after, "next") != "" {
+		t.Errorf("token rows = %v, want %s revoked and %s active with no next", after, oldActive, oldNext)
+	}
+	if n := auditOutcomeCount(t, stateDir, "keys.rotate_requested", adminaudit.OutcomeError); n != 1 {
+		t.Errorf("stood rotate audit rows = %d, want the one error row", n)
+	}
+	if stdout != "" {
+		t.Errorf("a stood rotation printed to stdout: %q", stdout)
 	}
 }
 

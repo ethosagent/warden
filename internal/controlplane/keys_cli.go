@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"text/tabwriter"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ethosagent/warden/internal/adminaudit"
 	"github.com/ethosagent/warden/internal/clock"
@@ -230,7 +231,11 @@ type OfflineRotateResult struct {
 // that races the running control plane's own scheduler loses cleanly instead
 // of forking the lifecycle. The bundle purpose is always refused: its rotation
 // is staged (StagedRotationError). One admin audit row names the request; the
-// manager's own rows name each transition.
+// manager's own rows name each transition. An emergency whose revocation
+// committed but whose fresh next key could not be published (ErrRotationStood)
+// stands anyway: the result still says what the rotation changed, and the
+// audit row is appended with outcome error and the failure text — a refused
+// rotation, which changed nothing, appends none.
 func (o *OfflineKeys) Rotate(ctx context.Context, purpose string, emergency bool) (OfflineRotateResult, error) {
 	if purpose == keys.PurposeBundle {
 		rows, err := o.Rows(ctx, purpose)
@@ -247,6 +252,19 @@ func (o *OfflineKeys) Rotate(ctx context.Context, purpose string, emergency bool
 	}
 	actor := keys.Actor{Subject: adminaudit.CLIActor(), AuthMethod: adminaudit.AuthMethodCLI}
 	if err := o.mgr.Rotate(ctx, purpose, keys.RotateOpts{Emergency: emergency, Actor: actor}); err != nil {
+		// A standing rotation changed the rows, so its audit row must exist
+		// even though the command fails: it is the operator's record that the
+		// compromised key was revoked, with the error as the outcome.
+		if errors.Is(err, keys.ErrRotationStood) {
+			res := o.activeResult(ctx, purpose, emergency)
+			if recErr := o.recordOutcome(ctx, actionKeysRotate, purpose, map[string]string{
+				"purpose": purpose, "kid": res.KID, "emergency": fmt.Sprintf("%t", emergency),
+				"stood": "true", "error": boundDetail(err.Error()),
+			}, adminaudit.OutcomeError); recErr != nil {
+				return res, fmt.Errorf("%w (the admin audit append failed too: %v)", err, recErr)
+			}
+			return res, err
+		}
 		return OfflineRotateResult{}, err
 	}
 	rows, err := o.Rows(ctx, purpose)
@@ -269,6 +287,20 @@ func (o *OfflineKeys) Rotate(ctx context.Context, purpose string, emergency bool
 	return res, nil
 }
 
+// activeResult reads the purpose's active kid after a write. Best effort: an
+// empty KID says only that the rows could not be read back.
+func (o *OfflineKeys) activeResult(ctx context.Context, purpose string, emergency bool) OfflineRotateResult {
+	res := OfflineRotateResult{Purpose: purpose, Emergency: emergency}
+	if rows, err := o.Rows(ctx, purpose); err == nil {
+		for _, r := range rows {
+			if r.State == keys.StateActive {
+				res.KID = r.KID
+			}
+		}
+	}
+	return res
+}
+
 // OfflineResetResult is the outcome of a reset: how many rows the purpose had
 // and the fresh active key, when one was generated.
 type OfflineResetResult struct {
@@ -281,7 +313,10 @@ type OfflineResetResult struct {
 // takes the state dir's instance lock first and refuses while a control plane
 // holds it: a live control plane must never see a purpose half-reset. One
 // admin audit row names the request; the manager's own rows name the fresh
-// keys.
+// keys. A reset whose row delete committed but whose material delete or
+// regeneration failed partially applied: the result still says how many rows
+// were removed, and the audit row is appended with outcome error and the
+// failure text.
 func (o *OfflineKeys) Reset(ctx context.Context, purpose string) (OfflineResetResult, error) {
 	release, err := cpstate.AcquireDirLock(o.stateDir)
 	if errors.Is(err, cpstate.ErrLocked) {
@@ -294,6 +329,18 @@ func (o *OfflineKeys) Reset(ctx context.Context, purpose string) (OfflineResetRe
 	actor := keys.Actor{Subject: adminaudit.CLIActor(), AuthMethod: adminaudit.AuthMethodCLI}
 	res, err := o.mgr.Reset(ctx, purpose, actor)
 	if err != nil {
+		// Removed > 0 is the manager's evidence the row delete committed: the
+		// reset partially applied, so its audit row must exist even though the
+		// command fails, with the error as the outcome.
+		if res.Removed > 0 {
+			out := OfflineResetResult{Purpose: purpose, Removed: res.Removed}
+			if recErr := o.recordOutcome(ctx, actionKeysReset, purpose, map[string]string{
+				"purpose": purpose, "removed": fmt.Sprintf("%d", out.Removed), "error": boundDetail(err.Error()),
+			}, adminaudit.OutcomeError); recErr != nil {
+				return out, fmt.Errorf("%w (the admin audit append failed too: %v)", err, recErr)
+			}
+			return out, err
+		}
 		return OfflineResetResult{}, err
 	}
 	out := OfflineResetResult{Purpose: purpose, Removed: res.Removed, KID: res.ActiveKID}
@@ -305,10 +352,32 @@ func (o *OfflineKeys) Reset(ctx context.Context, purpose string) (OfflineResetRe
 	return out, nil
 }
 
-// record appends one audit row; the details name the purpose and kid only,
-// never key material. Without an admin audit chain the caller prints a notice
-// instead.
+// boundDetail fits a detail value inside the chain's per-value limit: the row
+// keeps the head of a free-form text (an error's own words, whole runes only —
+// a split one would not be valid UTF-8), the command's output the whole text.
+func boundDetail(s string) string {
+	if len(s) <= adminaudit.MaxDetailValueLen {
+		return s
+	}
+	for len(s) > adminaudit.MaxDetailValueLen-3 {
+		_, size := utf8.DecodeLastRuneInString(s)
+		s = s[:len(s)-size]
+	}
+	return s + "..."
+}
+
+// record appends one audit row with outcome ok; the details name the purpose
+// and kid only, never key material. Without an admin audit chain the caller
+// prints a notice instead.
 func (o *OfflineKeys) record(ctx context.Context, action, purpose string, details map[string]string) error {
+	return o.recordOutcome(ctx, action, purpose, details, adminaudit.OutcomeOK)
+}
+
+// recordOutcome is record with an explicit outcome: the ok rows name completed
+// requests, the error rows name one that partially applied. The details are
+// public metadata — a purpose, a kid, a count, an error's own text — never key
+// material.
+func (o *OfflineKeys) recordOutcome(ctx context.Context, action, purpose string, details map[string]string, outcome string) error {
 	if o.rec == nil {
 		return nil
 	}
@@ -317,7 +386,7 @@ func (o *OfflineKeys) record(ctx context.Context, action, purpose string, detail
 		Target:    auditTargetKeys,
 		TargetRef: "keys:" + purpose,
 		Details:   details,
-		Outcome:   adminaudit.OutcomeOK,
+		Outcome:   outcome,
 	})
 	return err
 }

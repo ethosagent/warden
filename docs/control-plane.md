@@ -1350,9 +1350,12 @@ warden control-plane keys reset --purpose token --yes --state-dir /var/lib/warde
   revokes) the old active — deleting its private material at once — and
   publishes a fresh `next`. It refuses while the `next` key is younger than
   `prepublish`, and `--emergency` requires `--yes` on a non-interactive stdin.
-  The `bundle` purpose refuses here: it rotates only through the staged
-  rollout of [the key rotation runbook](runbooks/key-rotation.md), and the
-  refusal names the `next` kid to pin.
+  An emergency whose revocation committed but whose fresh `next` could not be
+  written still stands: the command exits **3** and says the old key is
+  revoked — the error names only the missing `next` — and its audit row has
+  outcome `error`. The `bundle` purpose refuses here: it rotates only through
+  the staged rollout of [the key rotation runbook](runbooks/key-rotation.md),
+  and the refusal names the `next` kid to pin.
 - **export** prints one key's public JWK (`--state next` or `active`) or, by
   default, the active + next JWKS — the exact document a worker pins in
   `controlPlane.bundleKeysFile`.

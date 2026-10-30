@@ -96,6 +96,14 @@ var (
 	// for its prepublish window, so promoting it would hand verifiers a key
 	// they may not hold yet.
 	ErrNotPrepublished = errors.New("keys: next key has not been published long enough")
+	// ErrRotationStood is wrapped by every emergency-rotation error that struck
+	// after the revocation (and promotion) committed: the compromised key IS
+	// revoked and never signs again, and only the fresh next key is missing.
+	// Callers check errors.Is(err, ErrRotationStood) to tell that apart from a
+	// refused rotation, which changed nothing and wraps no sentinel. The
+	// vacant-slot failure without an old key wraps nothing either: nothing was
+	// revoked, because nothing was signing.
+	ErrRotationStood = errors.New("keys: the emergency rotation stands")
 )
 
 // RotateOpts is how a rotation is requested.
@@ -277,14 +285,16 @@ func (m *Manager) promoteLocked(ctx context.Context, purpose string, next, old R
 // rotationStoodErr reports an emergency rotation whose promotion committed but
 // whose fresh next key could not be published: the compromised key is revoked
 // and the next key signs, so the error must not read as an emergency that did
-// not happen. The empty next slot is the scheduler's heal pass's to fill.
+// not happen. It wraps ErrRotationStood so callers can tell a standing
+// rotation from a refused one, and names what the emergency did change. The
+// empty next slot is the scheduler's heal pass's to fill.
 func rotationStoodErr(purpose, oldKID, nextKID string, err error) error {
 	if oldKID == "" {
-		return fmt.Errorf("keys: the %s emergency rotation activated %s, but publishing its next key failed; the scheduler's heal pass republishes one: %w",
-			purpose, nextKID, err)
+		return fmt.Errorf("keys: the %s emergency rotation activated %s, but publishing its next key failed; the scheduler's heal pass republishes one: %w (%w)",
+			purpose, nextKID, err, ErrRotationStood)
 	}
-	return fmt.Errorf("keys: the %s emergency rotation revoked %s and activated %s, but publishing its next key failed; the scheduler's heal pass republishes one: %w",
-		purpose, oldKID, nextKID, err)
+	return fmt.Errorf("keys: the %s emergency rotation revoked %s and activated %s, but publishing its next key failed; the scheduler's heal pass republishes one: %w (%w)",
+		purpose, oldKID, nextKID, err, ErrRotationStood)
 }
 
 // emergencyVacantLocked is an emergency rotation of a purpose whose next slot
@@ -294,8 +304,10 @@ func rotationStoodErr(purpose, oldKID, nextKID string, err error) error {
 // purpose activates at once — createInitial's precedent). If the replacement
 // cannot be written the purpose is left with no active key — the snapshot is
 // installed without a signer, so signing stops at once — and the returned
-// error names the empty slot; it is not a request error, so Rotate reports it
-// as a rotation failure. The caller holds mu.
+// error names the empty slot, wrapping ErrRotationStood when an old key was
+// revoked (never when the purpose was already not signing: nothing changed).
+// It is not a request error, so Rotate reports it as a rotation failure. The
+// caller holds mu.
 func (m *Manager) emergencyVacantLocked(ctx context.Context, purpose string, rows []Record, actor Actor) error {
 	now := m.cfg.Now()
 	old, hasOld := activeRow(rows)
@@ -325,8 +337,10 @@ func (m *Manager) emergencyVacantLocked(ctx context.Context, purpose string, row
 			m.set.install(purpose, nil, fresh, m.cfg.Timings[purpose].Overlap)
 		}
 		if hasOld {
-			return fmt.Errorf("keys: %s has no active key: the emergency rotation revoked %s and could not write a replacement: %w",
-				purpose, old.KID, err)
+			// The revocation committed, so this is a standing rotation however
+			// the replacement failed: the sentinel says so.
+			return fmt.Errorf("keys: %s has no active key: the emergency rotation revoked %s and could not write a replacement: %w (%w)",
+				purpose, old.KID, err, ErrRotationStood)
 		}
 		return fmt.Errorf("keys: %s has no active key and the emergency rotation could not write one: %w", purpose, err)
 	}

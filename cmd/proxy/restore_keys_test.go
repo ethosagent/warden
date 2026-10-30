@@ -56,7 +56,7 @@ func TestKeysRestoreHint(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("restore exit %d: %s", code, stderr)
 	}
-	for _, want := range []string{"token", "bundle", "keys reset"} {
+	for _, want := range []string{"token", "bundle", "keys reset", filepath.Join(state, "keys")} {
 		if !strings.Contains(stderr, want) {
 			t.Errorf("restore stderr lacks %q:\n%s", want, stderr)
 		}
