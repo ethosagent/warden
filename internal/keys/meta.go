@@ -59,4 +59,9 @@ type MetaStore interface {
 	// it changes the row only if it is still in from, stamps the timestamp
 	// column that belongs to to with at, and reports whether it changed it.
 	UpdateState(ctx context.Context, kid string, from, to State, at time.Time) (bool, error)
+	// DataVersion returns the database's data version, a counter that changes
+	// on every write from any process using the same database file. The manager
+	// polls it to pick up another process's writes (the keys CLI) without
+	// re-reading the table every second.
+	DataVersion(ctx context.Context) (int64, error)
 }

@@ -132,6 +132,9 @@ type env struct {
 	logs   *syncBuffer
 	audit  *recAudit
 	alerts *recAlerts
+	// timings is what e.manager() wires; rotation tests shrink the windows so
+	// a schedule fits in a few clock advances.
+	timings map[string]keys.Timing
 }
 
 func newEnv(t *testing.T) *env {
@@ -145,6 +148,10 @@ func newEnv(t *testing.T) *env {
 		logs:   &syncBuffer{},
 		audit:  &recAudit{},
 		alerts: &recAlerts{},
+		timings: map[string]keys.Timing{
+			keys.PurposeToken:  {Interval: 24 * time.Hour, Prepublish: time.Hour, Overlap: 2 * time.Hour},
+			keys.PurposeBundle: {Prepublish: time.Hour, Overlap: 2 * time.Hour},
+		},
 	}
 	e.openDB()
 	fs, err := filestore.New(e.dir)
@@ -171,16 +178,43 @@ func (e *env) openDB() {
 
 func (e *env) manager() *keys.Manager {
 	e.t.Helper()
+	return e.managerOn(e.meta)
+}
+
+// managerOn builds a manager over another metadata store handle — a second
+// process on the same database file, with its own lock and its own snapshot.
+func (e *env) managerOn(meta keys.MetaStore) *keys.Manager {
+	e.t.Helper()
+	return e.managerWith(meta, e.store)
+}
+
+// managerWith is managerOn with the private-key store named too: a peer
+// process holds its own handles on both.
+func (e *env) managerWith(meta keys.MetaStore, store keys.PrivateKeyStore) *keys.Manager {
+	e.t.Helper()
 	m, err := keys.NewManager(keys.ManagerConfig{
-		Store: e.store, Meta: e.meta, Codec: signer.Codec{}, Backend: "file",
-		Algs: map[string]string{keys.PurposeToken: keys.AlgEdDSA, keys.PurposeBundle: keys.AlgEdDSA},
-		Now:  e.clk.Now, Wait: waitOn(e.clk), Logger: slog.New(slog.NewTextHandler(e.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		Store: store, Meta: meta, Codec: signer.Codec{}, Backend: "file",
+		Algs:    map[string]string{keys.PurposeToken: keys.AlgEdDSA, keys.PurposeBundle: keys.AlgEdDSA},
+		Timings: e.timings,
+		Now:     e.clk.Now, Wait: waitOn(e.clk), Logger: slog.New(slog.NewTextHandler(e.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 		Audit: e.audit, Alerts: e.alerts,
 	})
 	if err != nil {
 		e.t.Fatal(err)
 	}
 	return m
+}
+
+// anotherMeta opens a second connection to the same database file: what the
+// keys CLI holds while the control plane runs.
+func (e *env) anotherMeta() keys.MetaStore {
+	e.t.Helper()
+	db, err := cpstate.Open(context.Background(), e.dbPath, cpstate.Enable(metastore.Migrations(), metastore.MigrationID))
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	e.t.Cleanup(func() { _ = db.Close() })
+	return metastore.New(db)
 }
 
 func (e *env) rows() []keys.Record {
@@ -585,7 +619,8 @@ func TestKeysCreationFailuresLeaveNothing(t *testing.T) {
 		m, err := keys.NewManager(keys.ManagerConfig{
 			Store: e.store, Meta: failInsertMeta{e.meta}, Codec: signer.Codec{}, Backend: "file",
 			Now: e.clk.Now, Wait: waitOn(e.clk),
-			Algs: map[string]string{keys.PurposeToken: keys.AlgEdDSA, keys.PurposeBundle: keys.AlgEdDSA},
+			Algs:    map[string]string{keys.PurposeToken: keys.AlgEdDSA, keys.PurposeBundle: keys.AlgEdDSA},
+			Timings: e.timings,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -734,7 +769,7 @@ func TestKeysCAPurpose(t *testing.T) {
 func TestNewManagerValidation(t *testing.T) {
 	e := newEnv(t)
 	good := map[string]string{keys.PurposeToken: keys.AlgES256, keys.PurposeBundle: keys.AlgEdDSA}
-	base := keys.ManagerConfig{Store: e.store, Meta: e.meta, Codec: signer.Codec{}, Algs: good, Now: e.clk.Now, Wait: waitOn(e.clk)}
+	base := keys.ManagerConfig{Store: e.store, Meta: e.meta, Codec: signer.Codec{}, Algs: good, Timings: e.timings, Now: e.clk.Now, Wait: waitOn(e.clk)}
 	if _, err := keys.NewManager(base); err != nil {
 		t.Fatalf("valid config: %v", err)
 	}
@@ -748,6 +783,21 @@ func TestNewManagerValidation(t *testing.T) {
 		"missing alg": func(c *keys.ManagerConfig) { c.Algs = map[string]string{keys.PurposeToken: keys.AlgEdDSA} },
 		"unknown alg": func(c *keys.ManagerConfig) {
 			c.Algs = map[string]string{keys.PurposeToken: "RS256", keys.PurposeBundle: keys.AlgEdDSA}
+		},
+		"missing timing": func(c *keys.ManagerConfig) {
+			c.Timings = map[string]keys.Timing{keys.PurposeBundle: e.timings[keys.PurposeBundle]}
+		},
+		"negative window": func(c *keys.ManagerConfig) {
+			c.Timings = map[string]keys.Timing{
+				keys.PurposeToken:  {Interval: 24 * time.Hour, Prepublish: -time.Hour, Overlap: time.Hour},
+				keys.PurposeBundle: e.timings[keys.PurposeBundle],
+			}
+		},
+		"interval shorter than windows": func(c *keys.ManagerConfig) {
+			c.Timings = map[string]keys.Timing{
+				keys.PurposeToken:  {Interval: 30 * time.Minute, Prepublish: 20 * time.Minute, Overlap: 20 * time.Minute},
+				keys.PurposeBundle: e.timings[keys.PurposeBundle],
+			}
 		},
 	} {
 		cfg := base

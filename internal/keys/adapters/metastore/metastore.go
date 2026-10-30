@@ -217,6 +217,18 @@ var stampColumn = map[keys.State]string{
 	keys.StateDestroyed: "destroyed_at",
 }
 
+// DataVersion returns the database's data version: a counter SQLite bumps on
+// every committed write, including writes made by other processes through their
+// own connections. The key manager polls it to notice the keys CLI's writes
+// without re-reading the table every two seconds.
+func (s *Store) DataVersion(ctx context.Context) (int64, error) {
+	var v int64
+	if err := s.db.QueryRowContext(ctx, `PRAGMA data_version`).Scan(&v); err != nil {
+		return 0, fmt.Errorf("metastore: data_version: %w", err)
+	}
+	return v, nil
+}
+
 // immediate runs fn in a BEGIN IMMEDIATE transaction on one connection, so its
 // reads and writes see no other writer. It commits when fn returns nil and
 // rolls back otherwise.
