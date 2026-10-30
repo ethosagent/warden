@@ -77,9 +77,17 @@ func appendKeyErr(head headRow, loaded string) error {
 		if head.rotate.newID == loaded {
 			return nil
 		}
+		if loaded == head.rotate.oldID {
+			return fmt.Errorf("%w: the chain head (seq %d) is a key rotation naming key_id %s but the loaded key is key_id %s; "+
+				"point %s at the key for key_id %s (restore the retired key for key_id %s to finish an interrupted rotation)",
+				ErrKeyIDMismatch, head.Seq, head.rotate.newID, loaded, KeyFileFlag, head.rotate.newID, head.rotate.oldID)
+		}
+		// A third key: the handover's take-up key may be lost. The recovery is
+		// a new segment started with it (Open appends the audit.segment_start
+		// before this check would matter).
 		return fmt.Errorf("%w: the chain head (seq %d) is a key rotation naming key_id %s but the loaded key is key_id %s; "+
-			"point %s at the key for key_id %s (restore the retired key for key_id %s to finish an interrupted rotation)",
-			ErrKeyIDMismatch, head.Seq, head.rotate.newID, loaded, KeyFileFlag, head.rotate.newID, head.rotate.oldID)
+			"point %s at the key for key_id %s, or start a new segment for the key you hold with %s=%s",
+			ErrKeyIDMismatch, head.Seq, head.rotate.newID, loaded, KeyFileFlag, head.rotate.newID, NewSegmentFlag, loaded)
 	}
 	if head.KeyID == loaded {
 		return nil

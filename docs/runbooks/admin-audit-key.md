@@ -124,10 +124,12 @@ closed naming the pending `key_id`; restore the parked
 `<key>.rotate-<new_key_id>.tmp` file (or re-generate the rotation) from your
 secret store, or recover with a new segment (below).
 
-## New key without the old key (recovery only)
+## Lost key recovery (new segment)
 
-`--admin-audit-new-segment` exists for the case `rotate-key` cannot cover: the old
-signing key is lost or destroyed, so no one can sign the handover. It starts a new
+`--admin-audit-new-segment` exists for the cases `rotate-key` cannot cover: a key
+the chain is waiting on is lost or destroyed — the old signing key before its
+handover was signed (no one can sign the rotation), or the parked new key of a
+committed rotation entry (the handover names a key nobody holds). It starts a new
 chain segment with an `audit.segment_start` entry signed by the new key that links
 to the old head and names the previous `key_id`; the old key keeps verifying its
 segment, and every later row carries the new `key_id`. The control plane logs a

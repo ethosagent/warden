@@ -251,6 +251,76 @@ func TestKeyRotationChain(t *testing.T) {
 			t.Fatalf("resume onto a back-to-back rotation = %+v, want ok with 2 checked", res)
 		}
 	})
+
+	t.Run("segment_start_recovers_a_lost_pending_key", func(t *testing.T) {
+		// B's parked key is lost before the take-up: the recovery start with a
+		// fresh key C (--admin-audit-new-segment=C) appends the segment_start
+		// and takes the chain over, and the chain verifies on from there.
+		db, _, keyA, sA := seededChain(t, 2)
+		hk, err := os.ReadFile(DefaultHMACKeyPath(keyA))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, signerB := otherKey(t, keyA)
+		keyC, signerC := otherKey(t, keyA)
+		if _, err := sA.RotateKey(ctx, signerB); err != nil {
+			t.Fatalf("RotateKey: %v", err)
+		}
+		// Without the flag the third key is still refused, with the new
+		// segment named as the way out.
+		_, err = openKeyed(t, db, keyC, "")
+		if !errors.Is(err, ErrKeyIDMismatch) || !strings.Contains(err.Error(), NewSegmentFlag) {
+			t.Fatalf("Open C on a key_rotated head without the flag = %v, want ErrKeyIDMismatch naming %s", err, NewSegmentFlag)
+		}
+		// The recovery start with the flag: the segment_start is appended, the
+		// head moves to C, and the chain verifies across the whole story.
+		sC := mustOpenKeyed(t, db, keyC, audit.KeyID(signerC.PubKey()))
+		if got := headKeyID(t, sC); got != audit.KeyID(signerC.PubKey()) {
+			t.Fatalf("head key_id after the recovery start = %s, want %s", got, audit.KeyID(signerC.PubKey()))
+		}
+		record(t, sC, 1)
+		if res := verify(t, sA, VerifyOptions{HMACKey: hk}); !res.OK {
+			t.Fatalf("Verify across the recovery = %+v, want ok", res)
+		}
+
+		// The one shape the verifier still refuses: the old key signing a
+		// segment_start right after its own handover.
+		_, _, keyA2, sA2 := seededChain(t, 1)
+		hk2, err := os.ReadFile(DefaultHMACKeyPath(keyA2))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, signerB2 := otherKey(t, keyA2)
+		if _, err := sA2.RotateKey(ctx, signerB2); err != nil {
+			t.Fatalf("RotateKey: %v", err)
+		}
+		e := appendSegmentStart(t, sA2)
+		if res := verify(t, sA2, VerifyOptions{HMACKey: hk2}); res.OK || res.FirstBadSeq != e.Seq || res.Reason != ReasonKeyChange {
+			t.Fatalf("segment_start by the old key after the handover = %+v, want key_change at %d", res, e.Seq)
+		}
+	})
+
+	t.Run("resume_at_the_recovery_segment_start", func(t *testing.T) {
+		// A key_rotated, its take-up, then the lost-key recovery: resuming
+		// exactly at the segment_start primes pending from the row before the
+		// window (the take-up), not from the handover.
+		a, db := freshStore(t)
+		record(t, a, 3) // seqs 1..4
+		b := newStore(t, db, newSigner(t))
+		if _, err := a.RotateKey(ctx, b.signer); err != nil {
+			t.Fatalf("RotateKey: %v", err)
+		}
+		record(t, b, 1) // seq 5, the take-up
+		c := newStore(t, db, newSigner(t))
+		seg := appendSegmentStart(t, c) // seq 6, the recovery
+		record(t, c, 1)                 // seq 7
+		if res := verify(t, a, VerifyOptions{FromSeq: seg.Seq, HMACKey: testHMACKey}); !res.OK || res.Checked != 2 {
+			t.Fatalf("resume at the recovery segment_start = %+v, want ok with 2 checked", res)
+		}
+		if res := verify(t, a, VerifyOptions{HMACKey: testHMACKey}); !res.OK || res.Checked != 8 {
+			t.Fatalf("full verify across the recovery = %+v, want ok with 8 checked", res)
+		}
+	})
 }
 
 // TestRotateKey covers the store method: the entry is signed by the old key

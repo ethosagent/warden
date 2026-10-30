@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -70,10 +71,11 @@ type Result struct {
 
 // chainVerifier holds the state carried from one row to the next: the keys
 // declared so far, the previous entry and, when that entry is a key_rotated,
-// the key it handed the chain to (every entry up to and including the
-// take-up — a plain row, a segment_start or a further key_rotated — must be
-// signed by that key, and a key_rotated is always signed by the key the
-// chain is on). VerifyExport (W-P1-AAUD-04) reuses it over an export stream.
+// the key it handed the chain to — a plain row must be signed by that key,
+// and a key-defining entry by it or by a new key starting its own segment
+// (never by the old key, whose handover it was). A key_rotated is always
+// signed by the key the chain is on. VerifyExport (W-P1-AAUD-04) reuses it
+// over an export stream.
 type chainVerifier struct {
 	keys     map[string]ed25519.PublicKey
 	hmacKey  []byte
@@ -144,10 +146,11 @@ func (v *chainVerifier) check(r storedRow) (int64, string) {
 		v.keys[rot.newID] = npub
 		v.pending = rot.newID
 	} else if isKeyDefining(e.Action) {
-		// A key-defining entry right after a key_rotated is only legal as the
-		// take-up itself (a segment_start started with the key the handover
-		// named): the old key may not sign past its own handover.
-		if v.pending != "" && e.KeyID != v.pending {
+		// Right after a key_rotated the entry is legal as the take-up — signed
+		// by the key the handover named — or as the lost-key recovery: a
+		// segment_start that self-declares another key. The one key that may
+		// sign nothing after its handover is the old one.
+		if v.pending != "" && e.KeyID == v.prev.KeyID {
 			return e.Seq, ReasonKeyChange
 		}
 		pub, ok := declaredKey(e)
@@ -209,11 +212,11 @@ func isZero(b []byte) bool {
 // entry_hash, each signature under the key its key_id names (keys come from
 // the chain's key-defining entries, and a declared key must hash to its own
 // key_id), that key_id changes only at a segment_start or key_rotated entry —
-// a key_rotated is signed by the key the chain is on and the next entry is
-// signed by the key it names — and, with HMACKey, actor_id against the side
-// row. It stops at the first bad
-// row. Verify only reads: it takes no write lock and reads in pages, so it
-// never holds off an Append for longer than one page.
+// a key_rotated is signed by the key the chain is on, and the entry after it
+// by the key it names or by a new key starting its own segment, never by the
+// old key — and, with HMACKey, actor_id against the side row. It stops at the
+// first bad row. Verify only reads: it takes no write lock and reads in
+// pages, so it never holds off an Append for longer than one page.
 func (s *Store) Verify(ctx context.Context, opts VerifyOptions) (Result, error) {
 	headSeq, headHash, _, err := s.Head(ctx)
 	if err != nil {
@@ -312,10 +315,10 @@ func (s *Store) readPage(ctx context.Context, after, upper int64, n int) ([]stor
 }
 
 // primeVerifier prepares a resumed Verify: it loads the keys declared before
-// from (learning the take-up key of a key_rotated entry, so the first entry
-// of the window may change the key_id) and the entry at from-1 (both verified
-// by the earlier call). It returns from-1 as the bad seq when that entry is
-// gone.
+// from (verified by the earlier call) and the entry at from-1, whose post-row
+// state is the window's starting state — a take-up is pending only when that
+// entry is itself a key_rotated, exactly as check leaves it. It returns
+// from-1 as the bad seq when that entry is gone.
 func (s *Store) primeVerifier(ctx context.Context, v *chainVerifier, from int64) (int64, error) {
 	rows, err := s.db.SQL().QueryContext(ctx,
 		selectRowsSQL+" WHERE a.seq < ? AND a.action IN (?,?,?) ORDER BY a.seq",
@@ -332,13 +335,11 @@ func (s *Store) primeVerifier(ctx context.Context, v *chainVerifier, from int64)
 		if r.entry.Action == ActionKeyRotated {
 			if rot, npub, ok := rotationChangeOf(r.entry.KeyID, r.entry.Details); ok {
 				v.keys[rot.newID] = npub
-				v.pending = rot.newID
 			}
 			continue
 		}
 		if pub, ok := declaredKey(&r.entry); ok {
 			v.keys[r.entry.KeyID] = pub
-			v.pending = "" // a segment_start ends the pending take-up, as in check
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -348,8 +349,10 @@ func (s *Store) primeVerifier(ctx context.Context, v *chainVerifier, from int64)
 	_ = rows.Close()
 
 	var p headRow
+	var dj sql.NullString
 	err = s.db.SQL().QueryRowContext(ctx,
-		"SELECT seq, entry_hash, key_id FROM admin_audit WHERE seq = ?", from-1).Scan(&p.Seq, &p.Hash, &p.KeyID)
+		"SELECT seq, entry_hash, key_id, action, details_json FROM admin_audit WHERE seq = ?", from-1).
+		Scan(&p.Seq, &p.Hash, &p.KeyID, &p.Action, &dj)
 	if errors.Is(err, sql.ErrNoRows) {
 		return from - 1, nil
 	}
@@ -357,6 +360,14 @@ func (s *Store) primeVerifier(ctx context.Context, v *chainVerifier, from int64)
 		return 0, fmt.Errorf("adminaudit: verify: read entry %d: %w", from-1, err)
 	}
 	v.prev, v.havePrev = p, true
+	if p.Action == ActionKeyRotated && dj.Valid {
+		var d map[string]string
+		if json.Unmarshal([]byte(dj.String), &d) == nil {
+			if rot, _, ok := rotationChangeOf(p.KeyID, d); ok {
+				v.pending = rot.newID
+			}
+		}
+	}
 	return 0, nil
 }
 
