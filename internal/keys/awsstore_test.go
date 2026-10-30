@@ -33,8 +33,10 @@ const (
 
 // secretBackend adapts a secrets.SecretStore — what assembly builds with
 // secrets.NewAWSSecretStore from the keys.store.aws block — onto the
-// awsstore.Backend port. It is the same mapping
-// internal/controlplane installs in newKeyManager.
+// awsstore.Backend port. It is a local copy of the mapping
+// internal/controlplane installs in newKeyManager (the real glue is
+// controlplane.secretStoreBackend, covered by TestSecretStoreBackend there);
+// this copy is a sanity check of the adapter contract end to end.
 type secretBackend struct{ ss secrets.SecretStore }
 
 func (b secretBackend) Get(ctx context.Context, key string) (string, error) {

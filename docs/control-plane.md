@@ -1304,30 +1304,47 @@ secrets with no row; deleting a key deletes its secret at once.
   scoped to the secretStore namespace must not be able to name a key secret.
   The defaults (`warden-cp-keys/` and `warden/`) are disjoint. The startup log
   names the region and prefix only — values and credentials are never logged.
-- **IAM.** Give the control plane's role rights on the CP prefix only:
+- **IAM.** Give the control plane's role rights on the CP prefix only.
+  `ListSecrets` needs its own statement: AWS does not support resource-level
+  permissions for it (scoping it to the prefixed ARN makes every list fail with
+  `AccessDenied` and breaks the orphan sweep). It is account-wide by design but
+  carries secret **names only, never values**, and the client sends the
+  name-prefix filter (`Filters: [{Key: "name", Values: ["warden-cp-keys/"]}]`)
+  and filters the response again itself, so the sweep sees only the CP
+  namespace:
 
   ```json
   {
     "Version": "2012-10-17",
-    "Statement": [{
-      "Sid": "WardenControlPlaneKeys",
-      "Effect": "Allow",
-      "Action": [
-        "secretsmanager:CreateSecret",
-        "secretsmanager:PutSecretValue",
-        "secretsmanager:GetSecretValue",
-        "secretsmanager:DeleteSecret",
-        "secretsmanager:ListSecrets"
-      ],
-      "Resource": "arn:aws:secretsmanager:*:ACCOUNT_ID:secret:warden-cp-keys/*"
-    }]
+    "Statement": [
+      {
+        "Sid": "WardenControlPlaneKeys",
+        "Effect": "Allow",
+        "Action": [
+          "secretsmanager:CreateSecret",
+          "secretsmanager:PutSecretValue",
+          "secretsmanager:GetSecretValue",
+          "secretsmanager:DeleteSecret"
+        ],
+        "Resource": "arn:aws:secretsmanager:*:ACCOUNT_ID:secret:warden-cp-keys/*"
+      },
+      {
+        "Sid": "WardenControlPlaneKeyList",
+        "Effect": "Allow",
+        "Action": "secretsmanager:ListSecrets",
+        "Resource": "*"
+      }
+    ]
   }
   ```
 
-  A worker role keeps the same shape over its own prefix and **cannot** read
-  the keys namespace — the deny is structural (the policy names no
+  A worker role keeps the same shape over its own prefix and **cannot read** the
+  keys namespace — the deny is structural (the value actions name no
   `warden-cp-keys/*` resource), and an explicit Deny makes it hold even if a
-  later `warden/*` grant is widened:
+  later `warden/*` grant is widened. `ListSecrets` is again a `Resource: "*"`
+  statement of its own; it can surface key secret *names* to the account, but
+  no value is reachable without `GetSecretValue`, which the Deny withholds for
+  every read/write action on the keys prefix:
 
   ```json
   {
@@ -1336,16 +1353,24 @@ secrets with no row; deleting a key deletes its secret at once.
       {
         "Sid": "WardenWorkerSecrets",
         "Effect": "Allow",
-        "Action": [
-          "secretsmanager:GetSecretValue",
-          "secretsmanager:ListSecrets"
-        ],
+        "Action": "secretsmanager:GetSecretValue",
         "Resource": "arn:aws:secretsmanager:*:ACCOUNT_ID:secret:warden/*"
+      },
+      {
+        "Sid": "WardenWorkerSecretList",
+        "Effect": "Allow",
+        "Action": "secretsmanager:ListSecrets",
+        "Resource": "*"
       },
       {
         "Sid": "NeverTheControlPlaneKeys",
         "Effect": "Deny",
-        "Action": "secretsmanager:GetSecretValue",
+        "Action": [
+          "secretsmanager:GetSecretValue",
+          "secretsmanager:PutSecretValue",
+          "secretsmanager:CreateSecret",
+          "secretsmanager:DeleteSecret"
+        ],
         "Resource": "arn:aws:secretsmanager:*:ACCOUNT_ID:secret:warden-cp-keys/*"
       }
     ]
