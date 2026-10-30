@@ -100,8 +100,13 @@ warden control-plane keys rotate --purpose token --emergency --yes \
 ```
 
 - The current active key is **revoked**: it leaves `/.well-known/jwks.json`
-  immediately and its private material is deleted. The published `next` is
-  promoted and a fresh `next` appears, so the control plane keeps signing.
+  immediately and its private material is deleted. The revocation and the
+  promotion of the published `next` commit as one transaction, so no observer
+  ever sees the purpose without a signing key; a fresh `next` is published
+  after, and if that write fails the rotation still stands — the empty slot is
+  refilled by the next scheduler pass. With no `next` key at all the emergency
+  still revokes, and a fresh key is generated straight into the vacant slot:
+  fail closed — no signing at all is preferred to signing with a leaked key.
 - **In-flight tokens die with it.** Tokens signed by the revoked kid stop
   verifying as soon as workers refresh their key set — workers poll the
   control plane's data version and pick a change up within about 2 seconds —
