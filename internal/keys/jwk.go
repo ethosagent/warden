@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 )
 
 // JWK member values this package understands.
@@ -205,10 +206,11 @@ func Thumbprint(jwk JWK) (string, error) {
 }
 
 // ParseJWK decodes one public JWK document. It rejects: a private "d" member,
-// whatever its value — "d":null leaves a pointer field indistinguishable from
-// absent, so presence is decided by a token walk, not by decoding — and any
-// duplicate member name, which encoding/json resolves by last wins
-// (ErrInvalidKey for both); a kty other than OKP/EC or a crv other than
+// whatever its value or case — "d":null leaves a pointer field
+// indistinguishable from absent, so presence is decided by a token walk, not
+// by decoding — and any duplicate member name, case-folded, which
+// encoding/json resolves by last wins (ErrInvalidKey for both); a kty other
+// than OKP/EC or a crv other than
 // Ed25519/P-256 (ErrUnsupportedAlg); a coordinate that is not unpadded
 // base64url, has the wrong length, or is not on the curve (ErrInvalidKey);
 // and an alg member that does not match the key type (ErrAlgMismatch). An
@@ -280,12 +282,14 @@ func ParseJWK(data []byte) (JWK, error) {
 }
 
 // rejectHazardousMembers walks the top-level object's member names with a
-// json.Decoder: it rejects a "d" member whatever its value (a null still
-// means a private member is present) and any duplicate member name, which a
-// plain Unmarshal would resolve by last wins — the attacker picks the value
-// that survives. Everything it reports is ErrInvalidKey; the walk's own
-// decode errors become "malformed json" without the cause, which can quote
-// the input.
+// json.Decoder: it rejects a "d" member whatever its value or case (a null
+// still means a private member is present, and "D" is the same member to
+// encoding/json, which matches struct fields case-insensitively) and any
+// duplicate member name, compared case-folded for the same reason — a plain
+// Unmarshal resolves duplicates by last wins, so the attacker picks the
+// value that survives. Everything it reports is ErrInvalidKey; the walk's
+// own decode errors become "malformed json" without the cause, which can
+// quote the input.
 func rejectHazardousMembers(data []byte) error {
 	invalid := func(what string) error {
 		return fmt.Errorf("%w: %s", ErrInvalidKey, what)
@@ -308,13 +312,17 @@ func rejectHazardousMembers(data []byte) error {
 		if !ok {
 			return invalid("malformed json")
 		}
-		if name == "d" {
+		// encoding/json matches struct fields case-insensitively, so names
+		// must be compared folded: "D" is the private member, and "KTY" is a
+		// second "kty" whose value would win.
+		if strings.EqualFold(name, "d") {
 			return invalid(`private member "d" in a public jwk`)
 		}
-		if seen[name] {
+		folded := strings.ToLower(name)
+		if seen[folded] {
 			return invalid(fmt.Sprintf("duplicate member %q", name))
 		}
-		seen[name] = true
+		seen[folded] = true
 		var value json.RawMessage
 		if err := dec.Decode(&value); err != nil {
 			return invalid("malformed json")
