@@ -36,6 +36,7 @@ linters:
             - ${base-path}/internal/alertpipeline/**
             - ${base-path}/internal/policybuilder/**
             - ${base-path}/internal/policyeval/**
+            - ${base-path}/internal/keys/**
             - ${base-path}/internal/policy/**
             - ${base-path}/internal/scan/**
             - ${base-path}/internal/dlp/**
@@ -104,6 +105,7 @@ linters:
             - ${base-path}/internal/alertpipeline/**
             - ${base-path}/internal/policybuilder/**
             - ${base-path}/internal/policyeval/**
+            - ${base-path}/internal/keys/**
             - '!${base-path}/cmd/**'
             - '!${base-path}/internal/worker/**'
             - '!${base-path}/internal/controlplane/**'
@@ -148,6 +150,7 @@ linters:
             - '!${base-path}/internal/identity/adapters/oidc/**'
             - '!${base-path}/internal/config/**'
             - '!${base-path}/internal/denyreason/**'
+            - '!${base-path}/internal/keys/**'
             - '!${base-path}/internal/identity/**'
             - '!**/*_test.go'
           deny:
@@ -199,6 +202,7 @@ linters:
             - '!${base-path}/internal/alertpipeline/**'
             - '!${base-path}/internal/policybuilder/**'
             - '!${base-path}/internal/policyeval/**'
+            - '!${base-path}/internal/keys/**'
             - '!${base-path}/tools/**'
             - '!${base-path}/internal/archtest/**'
             - '!${base-path}/internal/dnstest/**'
