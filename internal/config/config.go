@@ -657,6 +657,12 @@ func validate(p Policy) error {
 	if err := validateSecretStore(p.SecretStore); err != nil {
 		return err
 	}
+	// The signing-key namespace must stay disjoint from the worker secretStore
+	// namespace (W-P2-KEYS-07): this needs both blocks, so it lives here and not
+	// in validateKeys.
+	if err := validateKeysSecretStoreOverlap(p.Keys, p.SecretStore); err != nil {
+		return err
+	}
 	// envVar is REQUIRED only for the env backend (the placeholder→envVar mapping
 	// is how env resolves a value — today's implicit rule, made explicit here).
 	// For echo/aws the placeholder IS the store key, so envVar is optional and
