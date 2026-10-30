@@ -388,17 +388,36 @@ func copyHashing(dst string, src io.Reader) (int64, string, error) {
 	return n, hex.EncodeToString(h.Sum(nil)), nil
 }
 
+// supportedSchemaVersion is the schema version a state database holding the
+// applied migration IDs could have on this binary: every always-on migration
+// plus the feature-gated (Optional) ones the file has applied. An Optional
+// migration the file never applied does not count, or one unregistered
+// future migration would hide behind it.
+func supportedSchemaVersion(applied []string) int {
+	have := make(map[string]bool, len(applied))
+	for _, id := range applied {
+		have[id] = true
+	}
+	n := 0
+	for _, m := range StateMigrations() {
+		if !m.Optional || have[m.ID] {
+			n++
+		}
+	}
+	return n
+}
+
 // checkStagedState vets the staged warden-cp.db: its schema version must not
 // exceed this binary's, every migration it holds must be one this binary
 // knows, and a non-empty admin audit chain must verify (the keys come from the
 // chain itself).
 func checkStagedState(ctx context.Context, staged string, m BackupManifest) error {
-	known := len(StateMigrations())
 	lenient, err := cpstate.OpenReadOnlyWith(ctx, staged, StateMigrations(), cpstate.ReadOnlyOptions{AllowNewer: func(string) bool { return true }})
 	if err != nil {
 		return fmt.Errorf("backup warden-cp.db: %w", err)
 	}
 	got, err := lenient.SchemaVersion(ctx)
+	known := supportedSchemaVersion(lenient.Applied())
 	_ = lenient.Close()
 	if err != nil {
 		return fmt.Errorf("backup warden-cp.db: %w", err)

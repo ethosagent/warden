@@ -503,7 +503,14 @@ func TestRunRestoreRollsBack(t *testing.T) {
 func TestRunRestoreOlderSet(t *testing.T) {
 	ctx := context.Background()
 	state := t.TempDir()
-	all := StateMigrations()
+	// Feature-gated (Optional) migrations are not applied by a plain Open, so
+	// the version a restore reaches is the count of the always-on ones.
+	var all []cpstate.Migration
+	for _, m := range StateMigrations() {
+		if !m.Optional {
+			all = append(all, m)
+		}
+	}
 	old, err := cpstate.Open(ctx, filepath.Join(state, "warden-cp.db"), all[:len(all)-1])
 	if err != nil {
 		t.Fatal(err)
@@ -525,7 +532,7 @@ func TestRunRestoreOlderSet(t *testing.T) {
 	if _, err := RunRestore(ctx, RestoreParams{From: res.Path, StateDir: dst}); err != nil {
 		t.Fatal(err)
 	}
-	db, err := cpstate.OpenReadOnly(ctx, filepath.Join(dst, "warden-cp.db"), all)
+	db, err := cpstate.OpenReadOnly(ctx, filepath.Join(dst, "warden-cp.db"), StateMigrations())
 	if err != nil {
 		t.Fatal(err)
 	}

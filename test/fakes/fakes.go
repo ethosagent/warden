@@ -1,6 +1,6 @@
 // Package fakes provides hand-written in-memory test doubles for the three core
 // interfaces (ConfigProvider, SecretProvider, AnalyticsStore) and the
-// SecretStore write port so higher layers
+// SecretStore write port, and the keys.PrivateKeyStore port, so higher layers
 // are testable without real backends.
 package fakes
 
@@ -14,6 +14,7 @@ import (
 
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/config"
+	"github.com/ethosagent/warden/internal/keys"
 	"github.com/ethosagent/warden/internal/secrets"
 )
 
@@ -167,4 +168,97 @@ func (f *FakeSecretStore) List(_ context.Context) ([]secrets.SecretMeta, error) 
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
 	return out, nil
+}
+
+// FakeKeyStore is an in-memory keys.PrivateKeyStore with switchable outages,
+// for the control plane's degraded-mode tests: SetDown(true) makes every call
+// fail, as an unreachable backend would, and SetDown(false) restores it. It
+// follows the port's contract: Put never overwrites, Get of absent material is
+// keys.ErrKeyNotFound, Delete of absent material is not an error.
+type FakeKeyStore struct {
+	mu   sync.Mutex
+	down error
+	m    map[string][]byte
+}
+
+var _ keys.PrivateKeyStore = (*FakeKeyStore)(nil)
+
+// NewFakeKeyStore returns an empty, reachable store.
+func NewFakeKeyStore() *FakeKeyStore { return &FakeKeyStore{m: map[string][]byte{}} }
+
+// SetDown makes every call fail with err (nil restores the store).
+func (f *FakeKeyStore) SetDown(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.down = err
+}
+
+func (f *FakeKeyStore) check(purpose, kid string) (string, error) {
+	if f.down != nil {
+		return "", f.down
+	}
+	if !keys.ValidPurpose(purpose) {
+		return "", fmt.Errorf("%w: %q", keys.ErrInvalidPurpose, purpose)
+	}
+	return purpose + "/" + kid, nil
+}
+
+// Put stores a copy of pem; existing material is keys.ErrKeyExists.
+func (f *FakeKeyStore) Put(_ context.Context, purpose, kid string, pem []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	k, err := f.check(purpose, kid)
+	if err != nil {
+		return err
+	}
+	if _, ok := f.m[k]; ok {
+		return keys.ErrKeyExists
+	}
+	f.m[k] = append([]byte(nil), pem...)
+	return nil
+}
+
+// Get returns a copy of the material, or keys.ErrKeyNotFound.
+func (f *FakeKeyStore) Get(_ context.Context, purpose, kid string) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	k, err := f.check(purpose, kid)
+	if err != nil {
+		return nil, err
+	}
+	b, ok := f.m[k]
+	if !ok {
+		return nil, keys.ErrKeyNotFound
+	}
+	return append([]byte(nil), b...), nil
+}
+
+// Delete removes the material; absent material is not an error.
+func (f *FakeKeyStore) Delete(_ context.Context, purpose, kid string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	k, err := f.check(purpose, kid)
+	if err != nil {
+		return err
+	}
+	delete(f.m, k)
+	return nil
+}
+
+// List returns the kids stored under purpose.
+func (f *FakeKeyStore) List(_ context.Context, purpose string) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, err := f.check(purpose, ""); err != nil {
+		return nil, err
+	}
+	var kids []string
+	prefix := purpose + "/"
+	for k := range f.m {
+		if kid, ok := strings.CutPrefix(k, prefix); ok {
+			kids = append(kids, kid)
+		}
+	}
+	sort.Strings(kids)
+	return kids, nil
 }
