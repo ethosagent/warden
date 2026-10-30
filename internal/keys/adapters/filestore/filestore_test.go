@@ -222,3 +222,24 @@ func TestGetReadErrorIsNotNotFound(t *testing.T) {
 		t.Errorf("Get on a directory = %v, want a non-NotFound error", err)
 	}
 }
+
+// TestRestrictiveDirIsNotLoosened: a directory that is already private (a
+// read-only 0500 mount) is accepted unchanged, not chmodded to 0700.
+func TestRestrictiveDirIsNotLoosened(t *testing.T) {
+	s := newStore(t)
+	for _, sub := range []string{"token", "bundle"} {
+		if err := os.MkdirAll(filepath.Join(s.Dir(), sub), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chmod(s.Dir(), 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(s.Dir(), 0o700) })
+	if err := ensureDir(s.Dir()); err != nil {
+		t.Fatalf("ensureDir on a 0500 directory: %v", err)
+	}
+	if fi, _ := os.Stat(s.Dir()); fi.Mode().Perm() != 0o500 {
+		t.Errorf("mode = %v, want 0500 left alone", fi.Mode().Perm())
+	}
+}

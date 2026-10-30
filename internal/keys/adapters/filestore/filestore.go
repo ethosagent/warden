@@ -170,10 +170,10 @@ func (s *Store) List(ctx context.Context, purpose string) ([]string, error) {
 	return kids, nil
 }
 
-// ensureDir creates dir (and parents) and makes its mode exactly 0700. A
-// directory that already exists is tightened only if it is ours to change; the
-// error from a read-only secret mount is ignored when the mode is already
-// restrictive.
+// ensureDir creates dir (and parents) and makes sure it is private. A directory
+// that already has no group or other access (0700, or a read-only secret mount
+// at 0500) is accepted as is, never loosened; anything more open is tightened
+// to 0700, and an error there is returned.
 func ensureDir(dir string) error {
 	if err := os.MkdirAll(dir, dirMode); err != nil {
 		return fmt.Errorf("filestore: create key directory: %w", pathless(err))
@@ -182,7 +182,7 @@ func ensureDir(dir string) error {
 	if err != nil {
 		return fmt.Errorf("filestore: stat key directory: %w", pathless(err))
 	}
-	if info.Mode().Perm() == dirMode {
+	if info.Mode().Perm()&0o077 == 0 {
 		return nil
 	}
 	if err := os.Chmod(dir, dirMode); err != nil {
