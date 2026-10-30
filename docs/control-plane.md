@@ -698,6 +698,8 @@ fails when the two differ.
 | `/dashboard/api/integrations` | GET | viewer | `integrations.read` |
 | `/dashboard/api/integrations` | POST | admin | `integrations.write` |
 | `/dashboard/api/integrations` | DELETE | admin | `integrations.delete` |
+| `/dashboard/api/keys` | GET | admin | `keys.read` |
+| `/dashboard/api/keys/rotate` | POST | admin | `keys.rotate_requested` |
 | `/dashboard/api/llmproviders` | GET | viewer | `llmproviders.read` |
 | `/dashboard/api/llmproviders` | POST | admin | `llmproviders.write` |
 | `/dashboard/api/llmproviders` | PUT | admin | `llmproviders.write` |
@@ -1272,8 +1274,9 @@ keys:
   keeps the same kids. The `ca` purpose is never generated: it is filled by
   importing the worker CA key.
 - **Store unavailable.** If rows exist but the active key cannot be read, the
-  control plane starts anyway: `/policy` and `/healthz` keep serving, signing
-  returns `ErrNoActiveKey`, a `signing_key_unavailable` finding is raised once
+  control plane starts anyway: `/policy` and `/healthz` keep serving, `/readyz`
+  answers 503 and `/.well-known/jwks.json` answers 503 `signing_unavailable`
+  until a key loads, signing returns `ErrNoActiveKey`, a `signing_key_unavailable` finding is raised once
   per outage, and loading is retried with 1 s to 60 s backoff until it works. It
   never generates a replacement key while rows exist.
 - **Rotation.** Token keys rotate on `rotationInterval` (default 720 h;
@@ -1289,6 +1292,29 @@ keys:
   downtime made due. A rotation that fails keeps the current key and raises
   `key_rotation_failed`; an active token key older than twice its interval
   raises `key_overdue`.
+- **Token JWKS.** `GET /.well-known/jwks.json` (GET and HEAD only; other methods
+  405) is public: it sits outside sessions, the role table, the admin audit and
+  worker auth, and exists only with `keys.enabled` (else 404). It serves
+  `{"keys":[...]}` with the token purpose's next, active and in-overlap retired
+  keys, members `kty`, `crv`, `x`, `y`, `kid`, `alg`, `use` only (bundle keys are
+  never served here). The bytes are built from the in-memory key set, so a request
+  does no store or database I/O. Headers: `Content-Type: application/jwk-set+json`,
+  `Cache-Control: public, max-age=300`, and an `ETag` that is the quoted base64url
+  sha256 of the body; a matching `If-None-Match` gets 304. With no published token
+  key it answers 503 `{"error":"signing_unavailable"}` with `Cache-Control: no-store`.
+- **Readiness.** `GET /readyz` is 200, or 503 `{"keys":"no_active_key"}` when keys
+  are enabled and any purpose has no loaded active key. `/healthz` stays plain
+  liveness and is unaffected, so a key outage does not restart the process.
+- **Admin key API.** `GET /dashboard/api/keys` (admin) lists each key's kid,
+  purpose, algorithm, state, timestamps, backend and public JWK, and per purpose
+  whether a key is loaded and the last load error; it never returns private
+  material. `POST /dashboard/api/keys/rotate` (admin, CSRF, audited as
+  `keys.rotate_requested`, target ref `keys:<purpose>`) takes
+  `{"purpose":"token","emergency":false}`. It answers 403 `use_cli` under
+  `console.auth: none` (there is no identity to attribute the rotation to) and 409
+  `use_cli` for the `bundle` purpose (its rotation is staged on the host); both
+  point at `warden control-plane keys rotate`. A next key not yet published long
+  enough, or a lost race, is 409. Both routes are 404 without `keys.enabled`.
 - **Orphans.** At startup, key files with no `signing_keys` row (a crash between
   writing the file and the insert) are deleted; the log names the kid and
   purpose only.

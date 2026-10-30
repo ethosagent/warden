@@ -293,6 +293,8 @@ var All = slices.Concat(
 		{Name: "keys_backend_down_recovers", Opts: keysFlakyOpts(), Run: keysBackendDownRecovers},
 		{Name: "keys_rotate_on_schedule", Opts: keysRotationOpts(), Run: keysRotateOnSchedule},
 		{Name: "keys_rotate_after_downtime", Opts: keysRotationOpts(), Run: keysRotateAfterDowntime},
+		{Name: "keys_jwks_served_and_rotates", Opts: keysRotationOpts(), Run: keysJWKSServedAndRotates},
+		{Name: "keys_jwks_unavailable_until_loaded", Opts: keysFlakyOpts(), Run: keysJWKSUnavailableUntilLoaded},
 		{Name: "keys_disabled_creates_nothing", Opts: []harness.Option{harness.WithBackup()}, Run: keysDisabledCreatesNothing},
 	},
 	// Canary across protocols x allow/deny; see canary.go.

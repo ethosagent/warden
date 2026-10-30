@@ -2,6 +2,7 @@ package scenarios
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"os"
@@ -208,6 +209,13 @@ func keysDisabledCreatesNothing(t *testing.T, h *harness.H) {
 	if h.KeysTablePresent() {
 		t.Error("signing_keys exists with keys disabled")
 	}
+	// The key routes do not exist: the JWKS is 404, readiness is plain 200.
+	if res := jwksBody(h); res.Status != http.StatusNotFound {
+		t.Errorf("GET /.well-known/jwks.json with keys disabled = %d, want 404", res.Status)
+	}
+	if res := h.CP().DoWorker(http.MethodGet, "/readyz", "", "", ""); res.Status != http.StatusOK {
+		t.Errorf("GET /readyz with keys disabled = %d, want 200", res.Status)
+	}
 }
 
 // keysRotateOnSchedule (W-P2-KEYS-03): at the end of a 4h interval the
@@ -354,4 +362,107 @@ func keysRotateAfterDowntime(t *testing.T, h *harness.H) {
 			t.Errorf("a caught-up restart raised %s: %+v", rule, got)
 		}
 	}
+}
+
+// The JWKS and readiness gate (W-P2-KEYS-04): the public token JWKS and
+// /readyz need no credential, answer from memory and follow the key lifecycle.
+
+// jwksBody fetches the public JWKS with no credential.
+func jwksBody(h *harness.H) harness.RawResponse {
+	return h.CP().DoWorker(http.MethodGet, "/.well-known/jwks.json", "", "", "")
+}
+
+// jwksResponseKids returns the kids in a JWKS body, failing if a member carries
+// private material.
+func jwksResponseKids(t *testing.T, body string) []string {
+	t.Helper()
+	if strings.Contains(body, `"d"`) {
+		t.Fatalf("JWKS carries a private parameter: %s", body)
+	}
+	var doc struct {
+		Keys []keys.JWK `json:"keys"`
+	}
+	if err := json.Unmarshal([]byte(body), &doc); err != nil {
+		t.Fatalf("JWKS is not JSON: %v", err)
+	}
+	out := make([]string, 0, len(doc.Keys))
+	for _, k := range doc.Keys {
+		out = append(out, k.Kid)
+	}
+	return out
+}
+
+// keysJWKSServedAndRotates: an unauthenticated verifier fetches the active and
+// the next token key (never the bundle's), revalidates with the ETag, and a
+// rotation moves the document: new ETag, the retired key still published.
+func keysJWKSServedAndRotates(t *testing.T, h *harness.H) {
+	rows := keyKIDs(h.KeyRows())
+	res := jwksBody(h)
+	if res.Status != http.StatusOK || res.Header.Get("Content-Type") != "application/jwk-set+json" {
+		t.Fatalf("GET /.well-known/jwks.json = %d %q, want 200 application/jwk-set+json", res.Status, res.Header.Get("Content-Type"))
+	}
+	if got := res.Header.Get("Cache-Control"); got != "public, max-age=300" {
+		t.Errorf("Cache-Control = %q", got)
+	}
+	if kids := jwksResponseKids(t, res.Body); !sameKeySet(kids, rows["token/active"], rows["token/next"]) {
+		t.Errorf("JWKS kids = %v, want the token active and next (never bundle keys): %+v", kids, rows)
+	}
+	etag := res.Header.Get("ETag")
+	cond := <-h.CP().HoldWorker(http.MethodGet, "/.well-known/jwks.json", "", http.Header{"If-None-Match": {etag}})
+	if cond.Status != http.StatusNotModified {
+		t.Errorf("If-None-Match %s = %d, want 304", etag, cond.Status)
+	}
+	if post := h.CP().DoWorker(http.MethodPost, "/.well-known/jwks.json", "", "", "{}"); post.Status != http.StatusMethodNotAllowed {
+		t.Errorf("POST jwks = %d, want 405", post.Status)
+	}
+	if ready := h.CP().DoWorker(http.MethodGet, "/readyz", "", "", ""); ready.Status != http.StatusOK {
+		t.Errorf("/readyz with keys loaded = %d, want 200", ready.Status)
+	}
+
+	h.Clock().Advance(5 * time.Hour)
+	h.Eventually("the JWKS follows the scheduled rotation", func() bool {
+		h.Clock().Advance(time.Minute)
+		next := jwksBody(h)
+		return next.Status == http.StatusOK && next.Header.Get("ETag") != etag
+	})
+	after := keyKIDs(h.KeyRows())
+	kids := jwksResponseKids(t, jwksBody(h).Body)
+	if !sameKeySet(kids, after["token/active"], after["token/next"], after["token/retired"]) {
+		t.Errorf("JWKS after the rotation = %v, want active, next and the retired key inside its overlap: %+v", kids, after)
+	}
+	if strings.Contains(h.Logs(), "PRIVATE KEY") {
+		t.Error("logs contain PEM key material")
+	}
+}
+
+// keysJWKSUnavailableUntilLoaded: with the key store down at startup the JWKS
+// answers 503 signing_unavailable and /readyz 503, while /healthz and policy
+// keep serving; both recover when the store returns.
+func keysJWKSUnavailableUntilLoaded(t *testing.T, h *harness.H) {
+	h.CP().Stop()
+	h.KeyStore().SetDown(errors.New("secret backend unreachable"))
+	h.CP().Start()
+
+	// The JWKS can still be built from the persisted rows only once a signer
+	// loaded, so it is unavailable, not stale.
+	if res := jwksBody(h); res.Status != http.StatusServiceUnavailable || !strings.Contains(res.Body, "signing_unavailable") {
+		t.Errorf("JWKS with the store down = %d %s, want 503 signing_unavailable", res.Status, res.Body)
+	}
+	ready := h.CP().DoWorker(http.MethodGet, "/readyz", "", "", "")
+	if ready.Status != http.StatusServiceUnavailable || !strings.Contains(ready.Body, "no_active_key") {
+		t.Errorf("/readyz with the store down = %d %s, want 503 no_active_key", ready.Status, ready.Body)
+	}
+	if health := h.CP().DoWorker(http.MethodGet, "/healthz", "", "", ""); health.Status != http.StatusOK {
+		t.Errorf("/healthz with the store down = %d, want 200", health.Status)
+	}
+	if status := cpPolicyStatus(h); status != http.StatusOK {
+		t.Errorf("GET /policy with the store down = %d, want 200", status)
+	}
+
+	h.KeyStore().SetDown(nil)
+	h.Eventually("the JWKS and /readyz recover with the store", func() bool {
+		h.Clock().Advance(time.Minute)
+		return jwksBody(h).Status == http.StatusOK &&
+			h.CP().DoWorker(http.MethodGet, "/readyz", "", "", "").Status == http.StatusOK
+	})
 }
