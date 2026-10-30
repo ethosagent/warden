@@ -214,14 +214,17 @@ func TestKeysBackendDownAtStartup(t *testing.T) {
 	stateDir := filepath.Join(t.TempDir(), "state")
 	cfg := writeKeysPolicy(t, keysEnabledYAML)
 	store := fakes.NewFakeKeyStore()
-	runCP(t, Params{ConfigPath: cfg, StateDir: stateDir, KeyStore: store})
+	// One clock for both runs, so the rows the setup creates and the recovery
+	// loop's advances share a timeline: with the default 720h interval nothing
+	// rotates during the test, on either side of the outage.
+	clk := clocktest.NewFake(time.Unix(1_800_000_000, 0))
+	runCP(t, Params{ConfigPath: cfg, StateDir: stateDir, KeyStore: store, Clock: clk})
 	rowsBefore := keyRows(t, stateDir)
 	if len(rowsBefore) != 4 {
 		t.Fatalf("setup rows = %d", len(rowsBefore))
 	}
 
 	store.SetDown(errors.New("secret backend unreachable"))
-	clk := clocktest.NewFake(time.Unix(1_800_000_000, 0))
 	findings := &recFindings{}
 	mgrCh := make(chan *keys.Manager, 1)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -323,5 +326,16 @@ func TestKeysFindingMapping(t *testing.T) {
 	}
 	if len(string(f.Evidence)) > keysEvidenceMax+64 {
 		t.Errorf("evidence not bounded: %d bytes", len(string(f.Evidence)))
+	}
+	// Rotation rules (W-P2-KEYS-03): a failed rotation keeps the current key
+	// signing (high, the schedule is broken), an overdue key has been signing
+	// past twice its interval (medium, it still verifies and the retry stands).
+	rot := keysFinding(keys.Alert{Rule: keys.AlertKeyRotationFailed, Purpose: keys.PurposeToken, Detail: "backend unavailable"}, time.Unix(5, 0))
+	if rot.Severity != integration.SevHigh || rot.DedupKey != "key_rotation_failed:token" {
+		t.Errorf("rotation-failed finding = %+v", rot)
+	}
+	over := keysFinding(keys.Alert{Rule: keys.AlertKeyOverdue, Purpose: keys.PurposeToken, Detail: "signing for more than 2x"}, time.Unix(5, 0))
+	if over.Severity != integration.SevMedium || over.DedupKey != "key_overdue:token" {
+		t.Errorf("overdue finding = %+v", over)
 	}
 }

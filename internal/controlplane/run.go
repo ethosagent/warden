@@ -516,10 +516,12 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		srv.findings = p.Findings
 	}
 
-	// Load (or, on first start, create) the signing keys now that a Finding can
-	// be delivered. A key that cannot be loaded never stops the control plane:
-	// /policy and /healthz keep serving, signing returns ErrNoActiveKey, and
-	// Run retries with backoff. The retry loop stops before the state DB closes.
+	// Load (or, on first start, create) the signing keys and catch up on any
+	// transitions a downtime made due, now that a Finding can be delivered. A
+	// key that cannot be loaded never stops the control plane: /policy and
+	// /healthz keep serving, signing returns ErrNoActiveKey, and Run retries
+	// with backoff. Run also schedules rotation; both loops stop before the
+	// state DB closes.
 	if keyMgr != nil {
 		keyAlerts.srv.Store(srv)
 		keyMgr.Init(context.WithoutCancel(ctx))
