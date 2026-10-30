@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -350,9 +351,10 @@ func TestRotationNoVerifyGap(t *testing.T) {
 			t.Fatalf("JWKS at the rotation = %d keys, want %d (retired, active, next)", got, want)
 		}
 
-		// Minute by minute to past the overlap: the pre-rotation token verifies
-		// until retire_at+overlap (t0+50m) and the key leaves the set right
-		// after, while the current key stays.
+		// Minute by minute past the overlap: the pre-rotation token verifies
+		// through t0+49m — the last minute before retire_at+overlap — and the
+		// key leaves the set at t0+50m, the minute the overlap ends, while the
+		// current key stays.
 		for minute := 31; minute <= 51; minute++ {
 			e.clk.Advance(time.Minute)
 			mustSchedule(t, m)
@@ -1146,6 +1148,54 @@ func TestKeySetJWKSAndSubscribe(t *testing.T) {
 	}
 	if got := m.KeySet().JWKS(keys.PurposeCA); got.Keys != nil {
 		t.Errorf("JWKS(ca) = %v, want empty: the purpose is never loaded", got.Keys)
+	}
+}
+
+// TestSubscribeGoroutineLifecycle: each subscription's delivery goroutine ends
+// at its unsubscribe (idempotently), and every remaining one ends when Run's
+// context does — a stopped manager leaves none behind.
+func TestSubscribeGoroutineLifecycle(t *testing.T) {
+	e := newEnv(t)
+	e.timings = fastTimings()
+	ctx := context.Background()
+	m := e.manager()
+	m.Init(ctx)
+	baseline := runtime.NumGoroutine()
+
+	unsub := m.KeySet().Subscribe(func(string) {})
+	m.KeySet().Subscribe(func(string) {})
+	m.KeySet().Subscribe(func(string) {})
+	if got := runtime.NumGoroutine(); got < baseline+3 {
+		t.Fatalf("goroutines = %d after three subscribes, want at least %d", got, baseline+3)
+	}
+	// Unsubscribing is idempotent and ends only its own goroutine.
+	unsub()
+	unsub()
+	waitGoroutines(t, baseline+2)
+
+	// The rest end when Run returns with its context.
+	runCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		m.Run(runCtx)
+	}()
+	cancel()
+	<-done
+	waitGoroutines(t, baseline)
+}
+
+// waitGoroutines polls until the goroutine count has fallen to want: a
+// delivery goroutine exits shortly after its channel closes, not inline with
+// the call that closed it.
+func waitGoroutines(t *testing.T, want int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for runtime.NumGoroutine() > want {
+		if time.Now().After(deadline) {
+			t.Fatalf("goroutine count = %d, want it to fall to %d", runtime.NumGoroutine(), want)
+		}
+		time.Sleep(2 * time.Millisecond)
 	}
 }
 

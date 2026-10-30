@@ -213,13 +213,15 @@ func (m *Manager) Ready() bool {
 // rotation pass every ScheduleInterval (plus the data-version poll that
 // reloads another process's writes within DataVersionInterval). Nothing here
 // is required for correctness on a quiet system: the keys are loaded, and a
-// rotation is due only when the clock reaches it.
+// rotation is due only when the clock reaches it. Returning also ends every
+// subscriber's delivery goroutine.
 func (m *Manager) Run(ctx context.Context) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() { defer wg.Done(); m.runReload(ctx) }()
 	go func() { defer wg.Done(); m.runSchedule(ctx) }()
 	wg.Wait()
+	m.set.stopSubscriptions()
 }
 
 // runReload retries, with 1s to 60s backoff, every purpose whose active key is
@@ -926,7 +928,8 @@ type subscription struct {
 	// log reports a contained panic.
 	log *slog.Logger
 	// wake is the coalescing signal: capacity 1, because a delivery already
-	// pending will pick this change up too.
+	// pending will pick this change up too. Closing it ends the delivery
+	// goroutine.
 	wake chan struct{}
 	// mu guards pend.
 	mu sync.Mutex
@@ -935,6 +938,9 @@ type subscription struct {
 	// coalesce into the one delivery that is still to come, but a different
 	// purpose's signal is never dropped.
 	pend map[string]bool
+	// once makes shutdown idempotent: the holder's unsubscribe and the KeySet's
+	// own shutdown can both run.
+	once sync.Once
 }
 
 // signal marks purpose as changed and wakes the delivery goroutine. It never
@@ -979,6 +985,12 @@ func (s *subscription) call(purpose string) {
 	s.fn(purpose)
 }
 
+// shutdown closes wake, ending the delivery goroutine once it has drained the
+// mailbox. The caller has already removed the subscription from the KeySet's
+// list under subMu — signal only sends inside that lock — so no signal can
+// meet the closed channel. Idempotent.
+func (s *subscription) shutdown() { s.once.Do(func() { close(s.wake) }) }
+
 // Subscribe registers fn, called with the purpose after every change to that
 // purpose's snapshot. Delivery is asynchronous, on a goroutine of the
 // subscription's own: fn is called once per transition, but transitions that
@@ -986,13 +998,39 @@ func (s *subscription) call(purpose string) {
 // re-read the KeySet (JWKS, Version) instead of assuming it saw each change.
 // fn may block — a slow subscriber delays only itself — and may panic, which
 // is contained and logged. Subscribe returns at once; deliveries never run on
-// the caller's goroutine.
-func (ks *KeySet) Subscribe(fn func(purpose string)) {
+// the caller's goroutine. The returned function unsubscribes — removes the
+// subscription and ends its goroutine — and is safe to call more than once;
+// every subscription also ends when the manager's Run returns.
+func (ks *KeySet) Subscribe(fn func(purpose string)) (unsubscribe func()) {
 	s := &subscription{fn: fn, log: ks.log, wake: make(chan struct{}, 1), pend: map[string]bool{}}
 	ks.subMu.Lock()
 	ks.subs = append(ks.subs, s)
 	ks.subMu.Unlock()
 	go s.deliver()
+	return func() {
+		ks.subMu.Lock()
+		for i, cur := range ks.subs {
+			if cur == s {
+				ks.subs = append(ks.subs[:i], ks.subs[i+1:]...)
+				break
+			}
+		}
+		ks.subMu.Unlock()
+		s.shutdown()
+	}
+}
+
+// stopSubscriptions ends every subscription's goroutine; Run calls it when its
+// context ends, so a stopped manager leaves no delivery goroutines behind. A
+// Subscribe after this one still delivers until its own unsubscribe.
+func (ks *KeySet) stopSubscriptions() {
+	ks.subMu.Lock()
+	subs := ks.subs
+	ks.subs = nil
+	ks.subMu.Unlock()
+	for _, s := range subs {
+		s.shutdown()
+	}
 }
 
 // Version returns how many times a purpose's snapshot changed. It never
