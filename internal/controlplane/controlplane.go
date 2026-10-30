@@ -36,6 +36,7 @@ import (
 	"github.com/ethosagent/warden/internal/dashboard"
 	"github.com/ethosagent/warden/internal/detect"
 	"github.com/ethosagent/warden/internal/integration"
+	"github.com/ethosagent/warden/internal/keys"
 	"github.com/ethosagent/warden/internal/secrets"
 )
 
@@ -52,6 +53,10 @@ type Config struct {
 	// an empty store (head 0) versioned mode serves PolicyPath exactly as file
 	// mode does.
 	PolicyStore string
+	// Keys is the signing-key manager (token and bundle keys, the worker CA key
+	// store). Nil unless keys.enabled, in which case no key code runs, no table,
+	// key file or goroutine exists, and the control plane behaves as before.
+	Keys *keys.Manager
 	// AdminAudit is the signed admin audit chain on State. Nil means admin
 	// audit is disabled (console.adminAudit.enabled false, the default).
 	AdminAudit *adminaudit.Store

@@ -428,3 +428,42 @@ func TestOpenReadOnlyAllowNewer(t *testing.T) {
 		t.Error("database bytes changed")
 	}
 }
+
+// TestOptionalMigrationAppliedOnlyWhenEnabled: an Optional migration is known
+// to the downgrade guard but creates nothing until Enable'd; once applied it
+// stays valid for an Open that no longer enables it.
+func TestOptionalMigrationAppliedOnlyWhenEnabled(t *testing.T) {
+	opt := Migration{ID: "t/opt", SQL: "CREATE TABLE topt (id INTEGER PRIMARY KEY)", Optional: true}
+	path := dbPath(t)
+
+	d := openT(t, path, mig1, opt, mig2)
+	if tableExists(t, d, "topt") {
+		t.Fatal("optional migration applied without Enable")
+	}
+	if !tableExists(t, d, "t2") {
+		t.Fatal("migration after the optional one was skipped")
+	}
+	if got, _ := d.SchemaVersion(context.Background()); got != 2 {
+		t.Errorf("SchemaVersion = %d, want 2", got)
+	}
+	_ = d.Close()
+
+	migs := []Migration{mig1, opt, mig2}
+	d = openT(t, path, Enable(migs, "t/opt")...)
+	if !tableExists(t, d, "topt") {
+		t.Fatal("Enable did not apply the optional migration")
+	}
+	if !opt.Optional || !migs[1].Optional {
+		t.Error("Enable modified its input")
+	}
+	_ = d.Close()
+
+	// Disabled again: the file holds it, the guard knows it, nothing breaks.
+	d = openT(t, path, mig1, opt, mig2)
+	if !tableExists(t, d, "topt") {
+		t.Error("table vanished")
+	}
+	if got, _ := d.SchemaVersion(context.Background()); got != 3 {
+		t.Errorf("SchemaVersion = %d, want 3", got)
+	}
+}

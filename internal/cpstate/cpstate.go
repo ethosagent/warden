@@ -38,6 +38,28 @@ const corruptHint = "restore warden-cp.db from backup or move the file aside to 
 type Migration struct {
 	ID  string
 	SQL string
+	// Optional marks a feature-gated migration: the downgrade guard knows its
+	// ID (a file that holds it opens fine) but Open does not apply it, so a
+	// feature that is off creates no table. The feature turns it on for its
+	// own Open with Enable. Applying is forward-only: once applied, the
+	// migration stays recorded whatever a later Open passes.
+	Optional bool
+}
+
+// Enable returns migs with the Optional flag cleared on the migrations whose
+// IDs are given, so Open applies them. migs is not modified; an ID that matches
+// nothing is ignored.
+func Enable(migs []Migration, ids ...string) []Migration {
+	out := make([]Migration, len(migs))
+	copy(out, migs)
+	for i := range out {
+		for _, id := range ids {
+			if out[i].ID == id {
+				out[i].Optional = false
+			}
+		}
+	}
+	return out
 }
 
 // DB is an open control-plane state database. It wraps a single-connection

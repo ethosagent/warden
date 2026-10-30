@@ -29,6 +29,7 @@ import (
 	"github.com/ethosagent/warden/internal/dashboard"
 	"github.com/ethosagent/warden/internal/detect"
 	"github.com/ethosagent/warden/internal/integration"
+	"github.com/ethosagent/warden/internal/keys"
 	"github.com/ethosagent/warden/internal/observability"
 	"github.com/ethosagent/warden/internal/secrets"
 )
@@ -39,6 +40,9 @@ import (
 type Params struct {
 	// checkpointHooks is a test seam over the admin audit checkpoint loop.
 	checkpointHooks checkpointLoopHooks
+	// KeysReady, when set, is called with the key manager once Init has run, for
+	// tests and the harness (keys.enabled only).
+	KeysReady func(*keys.Manager)
 
 	ConfigPath, ListenAddr string
 	// TokenEnv is the deprecated --token-env, an alias of LegacyTokenEnv.
@@ -104,6 +108,11 @@ type Params struct {
 	// logged as an admin_audit.checkpoint line (0 = every 5 minutes). Tests
 	// drive it with Clock.
 	AdminAuditCheckpointInterval time.Duration
+
+	// KeyStore, when set, replaces the file private-key store (tests and the
+	// harness inject a fake; nil = the file backend at keys.store.file.dir).
+	// It is only used when keys.enabled is true.
+	KeyStore keys.PrivateKeyStore
 
 	// ErrOut receives the operational log while audit.jsonLog writes to
 	// stdout (the log moves off stdout so it carries only warden.admin.v1
@@ -247,6 +256,12 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	if err := checkAdminAuditFlags(consoleCfg, stateDir, p); err != nil {
 		return fail(err)
 	}
+	// The keys block, like console:, comes from --config only. Disabled (the
+	// default) means nothing below creates a table, file, goroutine or route.
+	keysCfg, err := resolveKeys(configPath, stateDir)
+	if err != nil {
+		return fail(err)
+	}
 	bindAddr := listenAddr
 	if p.Listener != nil {
 		bindAddr = p.Listener.Addr().String()
@@ -284,7 +299,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		// --policy-store or console.adminAudit never trips the downgrade guard.
 		// The open is not cancellable: a shutdown signal must not abandon a
 		// migration half way through boot.
-		state, err = cpstate.Open(context.WithoutCancel(ctx), statePath, StateMigrations())
+		state, err = cpstate.Open(context.WithoutCancel(ctx), statePath, stateMigrationsFor(keysCfg))
 		if err != nil {
 			return fail(fmt.Errorf("control-plane: state db: %w", err))
 		}
@@ -431,6 +446,23 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 			<-tokDone
 		}()
 	}
+	// Signing keys (keys.enabled): the manager is built here and loads after
+	// the server exists, so a load failure can be published as a Finding.
+	var (
+		keyMgr    *keys.Manager
+		keyAlerts *keysAlerts
+	)
+	if keysCfg.Enabled {
+		keyAlerts = &keysAlerts{logger: logger, clk: clk}
+		var rec adminaudit.Recorder
+		if adminAudit != nil {
+			rec = adminAudit
+		}
+		keyMgr, err = newKeyManager(keysCfg, state, p.KeyStore, clk, logger, rec, keyAlerts)
+		if err != nil {
+			return fail(err)
+		}
+	}
 	var clientSecret string
 	if consoleCfg.Auth == config.ConsoleAuthOIDC {
 		// resolveConsole already proved the variable is non-empty.
@@ -440,6 +472,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	srv := New(Config{
 		State:        state,
 		PolicyStore:  policyStore,
+		Keys:         keyMgr,
 		AdminAudit:   adminAudit,
 		PolicyPath:   servedPath,
 		Token:        token,
@@ -481,6 +514,28 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 
 	if p.Findings != nil {
 		srv.findings = p.Findings
+	}
+
+	// Load (or, on first start, create) the signing keys now that a Finding can
+	// be delivered. A key that cannot be loaded never stops the control plane:
+	// /policy and /healthz keep serving, signing returns ErrNoActiveKey, and
+	// Run retries with backoff. The retry loop stops before the state DB closes.
+	if keyMgr != nil {
+		keyAlerts.srv.Store(srv)
+		keyMgr.Init(context.WithoutCancel(ctx))
+		if p.KeysReady != nil {
+			p.KeysReady(keyMgr)
+		}
+		keyCtx, keyCancel := context.WithCancel(ctx)
+		keyDone := make(chan struct{})
+		go func() {
+			defer close(keyDone)
+			keyMgr.Run(keyCtx)
+		}()
+		defer func() {
+			keyCancel()
+			<-keyDone
+		}()
 	}
 
 	// Bounded chain check (newest rows + head signature) once the alert
