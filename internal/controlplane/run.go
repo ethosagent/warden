@@ -109,10 +109,17 @@ type Params struct {
 	// drive it with Clock.
 	AdminAuditCheckpointInterval time.Duration
 
-	// KeyStore, when set, replaces the file private-key store (tests and the
-	// harness inject a fake; nil = the file backend at keys.store.file.dir).
+	// KeyStore, when set, replaces the configured private-key store (tests and
+	// the harness inject a fake; nil = the keys.store backend: the file
+	// backend, or AWS Secrets Manager with keys.store.backend: aws).
 	// It is only used when keys.enabled is true.
 	KeyStore keys.PrivateKeyStore
+
+	// KeysAWSClient, when set, is the AWS Secrets Manager client the keys
+	// store uses instead of one built from the environment or the instance
+	// role (tests and the harness inject a fake). It is only read when
+	// keys.enabled is true and keys.store.backend is aws, and KeyStore is nil.
+	KeysAWSClient secrets.AWSSecretsClient
 
 	// ErrOut receives the operational log while audit.jsonLog writes to
 	// stdout (the log moves off stdout so it carries only warden.admin.v1
@@ -458,7 +465,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		if adminAudit != nil {
 			rec = adminAudit
 		}
-		keyMgr, err = newKeyManager(keysCfg, state, p.KeyStore, clk, logger, rec, keyAlerts)
+		keyMgr, err = newKeyManager(keysCfg, state, p.KeyStore, p.KeysAWSClient, clk, logger, rec, keyAlerts)
 		if err != nil {
 			return fail(err)
 		}

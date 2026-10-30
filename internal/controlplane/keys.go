@@ -14,9 +14,11 @@ import (
 	"github.com/ethosagent/warden/internal/cpstate"
 	"github.com/ethosagent/warden/internal/integration"
 	"github.com/ethosagent/warden/internal/keys"
+	"github.com/ethosagent/warden/internal/keys/adapters/awsstore"
 	"github.com/ethosagent/warden/internal/keys/adapters/filestore"
 	"github.com/ethosagent/warden/internal/keys/adapters/metastore"
 	"github.com/ethosagent/warden/internal/keys/adapters/signer"
+	"github.com/ethosagent/warden/internal/secrets"
 )
 
 // keysEvidenceMax bounds the error text a signing_key_unavailable Finding
@@ -49,20 +51,49 @@ func stateMigrationsFor(kc config.KeysConfig) []cpstate.Migration {
 	return migs
 }
 
-// newKeyManager builds the signing-key manager on the open state database. The
-// private key store is the file backend at keys.store.file.dir unless store is
+// newKeyManager builds the signing-key manager on the open state database.
+// The private key store is the configured backend at keys.store (file by
+// default, AWS Secrets Manager with keys.store.backend: aws) unless store is
 // injected (tests and the harness). Nothing is loaded or created yet: Init
 // does that once the alert pipeline can carry a Finding.
-func newKeyManager(kc config.KeysConfig, state *cpstate.DB, store keys.PrivateKeyStore, clk clock.Clock, logger *slog.Logger, rec adminaudit.Recorder, alerts keys.AlertSink) (*keys.Manager, error) {
+func newKeyManager(kc config.KeysConfig, state *cpstate.DB, store keys.PrivateKeyStore, keysAWSClient secrets.AWSSecretsClient, clk clock.Clock, logger *slog.Logger, rec adminaudit.Recorder, alerts keys.AlertSink) (*keys.Manager, error) {
 	if state == nil {
 		return nil, errors.New("control-plane: keys need the state database")
 	}
 	if store == nil {
-		fs, err := filestore.New(kc.Store.File.Dir)
-		if err != nil {
-			return nil, fmt.Errorf("control-plane: keys: %w", err)
+		switch kc.Store.Backend {
+		case config.KeysBackendAWS:
+			awsCfg := kc.Store.AWS
+			if awsCfg == nil {
+				return nil, errors.New("control-plane: keys.store.backend aws needs keys.store.aws")
+			}
+			client := keysAWSClient
+			if client == nil {
+				// Credentials come from the control plane's environment or its
+				// instance role only (env → IMDS), never from config: the keys
+				// block has no credential fields to read.
+				var err error
+				if client, err = secrets.NewAWSSecretsClient(awsCfg.Region, "", ""); err != nil {
+					return nil, fmt.Errorf("control-plane: keys.store.aws: %w", err)
+				}
+			}
+			// The CP-local prefix, logged by name only (never a credential):
+			// this is the namespace that must stay disjoint from the workers'
+			// secretStore.aws.namePrefix (validateKeysSecretStoreOverlap).
+			logger.Info("control plane AWS key store active",
+				"region", awsCfg.Region, "namePrefix", awsCfg.NamePrefix)
+			ks, err := awsstore.New(secretStoreBackend{secrets.NewAWSSecretStore(client, awsCfg.Region, awsCfg.NamePrefix)})
+			if err != nil {
+				return nil, fmt.Errorf("control-plane: keys.store.aws: %w", err)
+			}
+			store = ks
+		default:
+			fs, err := filestore.New(kc.Store.File.Dir)
+			if err != nil {
+				return nil, fmt.Errorf("control-plane: keys: %w", err)
+			}
+			store = fs
 		}
-		store = fs
 	}
 	cfg := keys.ManagerConfig{
 		Store:   store,
@@ -83,6 +114,42 @@ func newKeyManager(kc config.KeysConfig, state *cpstate.DB, store keys.PrivateKe
 		return nil, fmt.Errorf("control-plane: keys: %w", err)
 	}
 	return m, nil
+}
+
+// secretStoreBackend adapts the SecretStore assembly builds with
+// secrets.NewAWSSecretStore onto the awsstore.Backend port — the only glue
+// between the keys adapter and the secrets domain, and the only place the
+// two not-found sentinels are mapped onto each other.
+type secretStoreBackend struct{ ss secrets.SecretStore }
+
+func (b secretStoreBackend) Get(ctx context.Context, key string) (string, error) {
+	v, err := b.ss.Get(ctx, key)
+	if errors.Is(err, secrets.ErrSecretNotFound) {
+		return "", awsstore.ErrNotFound
+	}
+	return v, err
+}
+
+func (b secretStoreBackend) Put(ctx context.Context, key, value string) error {
+	return b.ss.Put(ctx, key, value)
+}
+
+func (b secretStoreBackend) Delete(ctx context.Context, key string) error {
+	return b.ss.Delete(ctx, key)
+}
+
+// List projects the metadata-only listing to its refs; the values are never
+// read.
+func (b secretStoreBackend) List(ctx context.Context) ([]string, error) {
+	metas, err := b.ss.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	refs := make([]string, 0, len(metas))
+	for _, m := range metas {
+		refs = append(refs, m.Key)
+	}
+	return refs, nil
 }
 
 // waitOn sleeps d on clk and reports false if ctx ended first.
