@@ -158,7 +158,7 @@ func (s *Server) handleKeysRotate(w http.ResponseWriter, r *http.Request) {
 	case keyPurposeBundle:
 		writeJSONStatus(w, http.StatusConflict, map[string]string{
 			"error":   "use_cli",
-			"message": "bundle keys are pinned on workers, so their rotation is staged: use `warden keys rotate --purpose bundle` on the control plane host",
+			"message": "bundle keys are pinned on workers, so their rotation is staged: use `warden control-plane keys rotate --purpose bundle` on the control plane host",
 		})
 		return
 	default:
@@ -181,7 +181,7 @@ func (s *Server) keyWritesAllowed(w http.ResponseWriter) bool {
 	}
 	writeJSONStatus(w, http.StatusForbidden, map[string]string{
 		"error":   "use_cli",
-		"message": "keys are not rotated from the console without sign-in (console.auth: none); use `warden keys rotate` on the control plane host",
+		"message": "keys are not rotated from the console without sign-in (console.auth: none); use `warden control-plane keys rotate --purpose token` on the control plane host",
 	})
 	return false
 }

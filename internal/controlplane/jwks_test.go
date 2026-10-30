@@ -76,6 +76,11 @@ func (c *countingKeyMeta) UpdateState(ctx context.Context, kid string, from, to 
 	return c.MetaStore.UpdateState(ctx, kid, from, to, at)
 }
 
+func (c *countingKeyMeta) Promote(ctx context.Context, purpose, oldKID string, oldTo keys.State, nextKID string, at time.Time) (bool, error) {
+	c.n.Add(1)
+	return c.MetaStore.Promote(ctx, purpose, oldKID, oldTo, nextKID, at)
+}
+
 func (c *countingKeyMeta) DataVersion(ctx context.Context) (int64, error) {
 	c.n.Add(1)
 	return c.MetaStore.DataVersion(ctx)
