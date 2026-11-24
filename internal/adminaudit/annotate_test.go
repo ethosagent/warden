@@ -57,3 +57,16 @@ func TestAnnotateConcurrent(t *testing.T) {
 		t.Fatalf("ref = %q", ref)
 	}
 }
+
+func TestFilterDetails(t *testing.T) {
+	got := FilterDetails(map[string]string{
+		DetailSource: "approval", DetailAppliedVersion: "3", "unknown": "x",
+		DetailOp: "bad\nvalue", DetailEtag: strings.Repeat("e", maxDetailValLen+1),
+	})
+	if len(got) != 2 || got[DetailSource] != "approval" || got[DetailAppliedVersion] != "3" {
+		t.Errorf("FilterDetails = %v, want only source and applied_version", got)
+	}
+	if got := FilterDetails(nil); got == nil || len(got) != 0 {
+		t.Errorf("FilterDetails(nil) = %v, want an empty map", got)
+	}
+}

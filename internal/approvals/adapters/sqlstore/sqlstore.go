@@ -411,7 +411,18 @@ func (st *Store) step(ctx context.Context, conn *sql.Conn, id string, revision i
 		args = append(args, e.val)
 	}
 	args = append(args, id, string(cur.State), cur.Revision)
-	res, err := conn.ExecContext(ctx, "UPDATE change_drafts SET "+strings.Join(cols, ", ")+" WHERE id = ? AND state = ? AND revision = ?", args...)
+	where := " WHERE id = ? AND state = ? AND revision = ?"
+	// Expiry is part of the compare-and-swap: an expired draft can neither be
+	// approved nor claimed for publishing, whatever the caller read earlier.
+	if ev == approvals.EventApprove || ev == approvals.EventBeginApply {
+		now := ms(st.now())
+		if ms(cur.ExpiresAt) <= now {
+			return approvals.Draft{}, transitionLog{}, approvals.ErrDraftExpired
+		}
+		where += " AND expires_at > ?"
+		args = append(args, now)
+	}
+	res, err := conn.ExecContext(ctx, "UPDATE change_drafts SET "+strings.Join(cols, ", ")+where, args...)
 	if err != nil {
 		return approvals.Draft{}, transitionLog{}, fmt.Errorf("approvals store: %s draft %s: %w", ev, id, err)
 	}

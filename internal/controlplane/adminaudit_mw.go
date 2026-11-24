@@ -284,17 +284,7 @@ func (s *Server) adminAuditMiddleware(classify func(*http.Request) (authzRow, bo
 			return
 		}
 		a.degraded.Store(false)
-		// Rows a handler asked for after this one (a change draft that applied
-		// also records the policy change it made), in order.
-		for _, follow := range auditFollowUps(actx) {
-			next := follow(in)
-			if _, err := a.rec.Record(context.WithoutCancel(ctx), next); err != nil {
-				a.degraded.Store(true)
-				s.logPersistFailed(next, err)
-				s.publishAuditDegraded("append_failed")
-				return
-			}
-		}
+		s.recordFollowUps(ctx, in, auditFollowUps(actx))
 	})
 }
 
@@ -582,4 +572,36 @@ func (s *statusWriter) writer() http.ResponseWriter {
 		return hijackStatusWriter{s}
 	}
 	return s
+}
+
+// recordFollowUps records the extra rows a handler asked for after the
+// request's own row (a change draft that applied also records the policy change
+// it made). A handler supplies only what happened; who did it, from where and
+// the status come from the primary row, the outcome is always ok, nothing is
+// recorded when the primary outcome is not ok, details pass the closed set and
+// at most maxAuditFollowUps rows are written.
+func (s *Server) recordFollowUps(ctx context.Context, primary adminaudit.Input, follows []auditFollowUp) {
+	if primary.Outcome != adminaudit.OutcomeOK || len(follows) == 0 {
+		return
+	}
+	if len(follows) > maxAuditFollowUps {
+		s.cfg.Logger.Warn("admin_audit_followups_dropped", "action", primary.Action, "dropped", len(follows)-maxAuditFollowUps)
+		follows = follows[:maxAuditFollowUps]
+	}
+	for _, f := range follows {
+		next := adminaudit.Input{
+			Actor: primary.Actor, ActorRole: primary.ActorRole, AuthMethod: primary.AuthMethod,
+			Action: f.Action, Target: f.Target, TargetRef: f.TargetRef,
+			Details: adminaudit.FilterDetails(f.Details),
+			Outcome: adminaudit.OutcomeOK, HTTPStatus: primary.HTTPStatus,
+			BeforeHash: f.BeforeHash, AfterHash: f.AfterHash,
+			ClientIP: primary.ClientIP, RequestID: primary.RequestID,
+		}
+		if _, err := s.audit.rec.Record(context.WithoutCancel(ctx), next); err != nil {
+			s.audit.degraded.Store(true)
+			s.logPersistFailed(next, err)
+			s.publishAuditDegraded("append_failed")
+			return
+		}
+	}
 }

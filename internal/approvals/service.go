@@ -113,13 +113,7 @@ func (s *Service) queueReplay(ctx context.Context, d Draft) {
 		s.cfg.Logger.Warn("approvals: cannot queue a replay", "draft_id", d.ID, "revision", d.Revision, "error", err)
 		// Record the failure as an unavailable replay, so "no evidence" is an
 		// explicit state the approver can acknowledge, never an absent row.
-		code := "queue_failed"
-		switch {
-		case errors.Is(err, ErrReplayBusy):
-			code = "queue_busy"
-		case errors.Is(err, ErrReplayRateLimited):
-			code = "queue_rate_limited"
-		}
+		const code = "queue_failed"
 		now := s.cfg.Now()
 		if _, ierr := s.replayer.cfg.Store.Insert(ctx, Replay{
 			DraftID: d.ID, Revision: d.Revision, BaseVersion: d.BaseVersion,

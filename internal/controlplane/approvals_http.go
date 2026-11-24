@@ -635,21 +635,33 @@ func (s *Server) changeDraftHash(ctx context.Context) (string, error) {
 type auditScope struct {
 	path    string
 	draftID string
-	// followUps build rows recorded after the request's own row.
-	followUps []func(adminaudit.Input) adminaudit.Input
+	// followUps are extra rows requested after the request's own row.
+	followUps []auditFollowUp
+}
+
+// maxAuditFollowUps caps the extra rows one request may add.
+const maxAuditFollowUps = 2
+
+// auditFollowUp is what a handler may ask for: the what, never the who. The
+// middleware takes the actor, role, auth method, client, request id and status
+// from the request's own row and records the follow-up only when that row's
+// outcome is ok. Details are filtered through the closed detail set.
+type auditFollowUp struct {
+	Action, Target, TargetRef string
+	Details                   map[string]string
+	BeforeHash, AfterHash     string
 }
 
 // addAuditFollowUp asks the admin audit middleware for one more row after the
-// request's own: fn receives that row (actor, method, client, request id) and
-// returns the extra one.
-func addAuditFollowUp(ctx context.Context, fn func(adminaudit.Input) adminaudit.Input) {
+// request's own.
+func addAuditFollowUp(ctx context.Context, f auditFollowUp) {
 	if sc, ok := ctx.Value(auditScopeKey{}).(*auditScope); ok {
-		sc.followUps = append(sc.followUps, fn)
+		sc.followUps = append(sc.followUps, f)
 	}
 }
 
 // auditFollowUps are the rows a handler asked for after its own.
-func auditFollowUps(ctx context.Context) []func(adminaudit.Input) adminaudit.Input {
+func auditFollowUps(ctx context.Context) []auditFollowUp {
 	if sc, ok := ctx.Value(auditScopeKey{}).(*auditScope); ok {
 		return sc.followUps
 	}
@@ -675,17 +687,13 @@ func (a changeDraftAPI) recordPolicyApply(ctx context.Context, before string, d 
 	}
 	after := a.s.policyHashNow(ctx)
 	ref := "policy@" + a.s.policy.currentETag()
-	addAuditFollowUp(ctx, func(base adminaudit.Input) adminaudit.Input {
-		return adminaudit.Input{
-			Actor: base.Actor, ActorRole: base.ActorRole, AuthMethod: base.AuthMethod,
-			Action: "policy.write", Target: auditTargetPolicy, TargetRef: ref,
-			Details: map[string]string{
-				adminaudit.DetailAppliedVersion: strconv.FormatInt(d.AppliedVersion, 10),
-				"source":                        SourceApproval,
-			},
-			Outcome: adminaudit.OutcomeOK, HTTPStatus: base.HTTPStatus,
-			BeforeHash: before, AfterHash: after, ClientIP: base.ClientIP, RequestID: base.RequestID,
-		}
+	addAuditFollowUp(ctx, auditFollowUp{
+		Action: "policy.write", Target: auditTargetPolicy, TargetRef: ref,
+		Details: map[string]string{
+			adminaudit.DetailAppliedVersion: strconv.FormatInt(d.AppliedVersion, 10),
+			adminaudit.DetailSource:         SourceApproval,
+		},
+		BeforeHash: before, AfterHash: after,
 	})
 }
 

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethosagent/warden/internal/adminaudit"
 	"github.com/ethosagent/warden/internal/approvals"
 	"github.com/ethosagent/warden/internal/approvals/adapters/sqlstore"
 	"github.com/ethosagent/warden/internal/clock/clocktest"
@@ -243,8 +244,8 @@ func TestExpiredDraftDoesNotApply(t *testing.T) {
 	if e.head(t) != 1 {
 		t.Errorf("an expired draft published version %d", e.head(t))
 	}
-	if got := e.view(t, n.ID); got.State != "pending" {
-		t.Errorf("the self-apply of an expired draft left it %s, want pending", got.State)
+	if got := e.view(t, n.ID); got.State != "draft" || len(got.ApprovalRows) != 0 {
+		t.Errorf("submit of an expired narrowing draft left it %s with %d decisions, want draft and none", got.State, len(got.ApprovalRows))
 	}
 }
 
@@ -286,5 +287,62 @@ func (e *draftEnv) seedEvents(t *testing.T) {
 	t.Helper()
 	if err := e.srv.central.StoreAggregatedEvent(replayEvent("api.openai.com", "allow", "/v1")); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// followUpEnv is an audit-enabled control plane whose recorder a test reads.
+func followUpEnv(t *testing.T) *auditEnv { return newOIDCAuditEnv(t) }
+
+func primaryRow() adminaudit.Input {
+	return adminaudit.Input{
+		Actor: adminaudit.Actor{Sub: "approver", Email: "a@example.com"}, ActorRole: "editor",
+		AuthMethod: adminaudit.AuthMethodOIDC, Action: "change.draft.approve", Target: "change_draft",
+		Outcome: adminaudit.OutcomeOK, HTTPStatus: 200, ClientIP: "192.0.2.7", RequestID: "req-1",
+	}
+}
+
+// A follow-up row names what happened, never who: the actor, role, method,
+// client, request id and status come from the primary row, the outcome is ok,
+// and only closed detail keys survive.
+func TestAuditFollowUpsAreConstrained(t *testing.T) {
+	e := followUpEnv(t)
+	e.srv.recordFollowUps(context.Background(), primaryRow(), []auditFollowUp{{
+		Action: "policy.write", Target: "policy", TargetRef: "policy@abc",
+		Details: map[string]string{
+			adminaudit.DetailSource: "approval", adminaudit.DetailAppliedVersion: "2",
+			"actor": "mallory", "outcome": "denied", "free_text": "x", adminaudit.DetailOp: "bad\nvalue",
+		},
+		BeforeHash: "b", AfterHash: "a",
+	}})
+	rows := e.rec.inputs()
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	r := rows[0]
+	if r.Actor.Sub != "approver" || r.ActorRole != "editor" || r.AuthMethod != adminaudit.AuthMethodOIDC ||
+		r.Outcome != adminaudit.OutcomeOK || r.HTTPStatus != 200 || r.ClientIP != "192.0.2.7" || r.RequestID != "req-1" {
+		t.Errorf("follow-up identity = %+v, want the primary row's", r)
+	}
+	if len(r.Details) != 2 || r.Details[adminaudit.DetailSource] != "approval" || r.Details[adminaudit.DetailAppliedVersion] != "2" {
+		t.Errorf("details = %v, want only source and applied_version", r.Details)
+	}
+}
+
+// Nothing is recorded behind a primary row that is not ok, and at most two rows
+// follow one request.
+func TestAuditFollowUpsOnlyAfterOKAndCapped(t *testing.T) {
+	e := followUpEnv(t)
+	f := auditFollowUp{Action: "policy.write", Target: "policy"}
+	for _, outcome := range []string{adminaudit.OutcomeDenied, adminaudit.OutcomeRejected, adminaudit.OutcomeError} {
+		p := primaryRow()
+		p.Outcome = outcome
+		e.srv.recordFollowUps(context.Background(), p, []auditFollowUp{f})
+	}
+	if n := len(e.rec.inputs()); n != 0 {
+		t.Fatalf("%d follow-up rows behind a non-ok primary, want none", n)
+	}
+	e.srv.recordFollowUps(context.Background(), primaryRow(), []auditFollowUp{f, f, f, f})
+	if n := len(e.rec.inputs()); n != maxAuditFollowUps {
+		t.Errorf("%d follow-up rows, want the cap of %d", n, maxAuditFollowUps)
 	}
 }

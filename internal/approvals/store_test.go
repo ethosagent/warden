@@ -735,3 +735,28 @@ func TestDraftStoreMigrationOptional(t *testing.T) {
 		t.Errorf("indexes = %v", idx)
 	}
 }
+
+// Expiry is part of the compare-and-swap: once a pending draft is past its
+// expires_at it can neither be approved, nor claimed for publishing, nor
+// self-applied; rejecting it is still allowed.
+func TestDraftStoreExpiryInTheCAS(t *testing.T) {
+	e := newEnv(t, 10)
+	ctx := context.Background()
+	d := e.pending("late.example.com")
+	e.nowMS.Store(d.ExpiresAt.UnixMilli())
+	if _, _, err := e.store.RecordDecision(ctx, d.ID, decision(d, "bob", approvals.DecisionApprove)); !errors.Is(err, approvals.ErrDraftExpired) {
+		t.Errorf("approve of an expired draft = %v, want ErrDraftExpired", err)
+	}
+	if _, _, err := e.store.RecordDecision(ctx, d.ID, decision(d, "ada", approvals.DecisionSelf)); !errors.Is(err, approvals.ErrDraftExpired) {
+		t.Errorf("self decision on an expired draft = %v, want ErrDraftExpired", err)
+	}
+	if _, err := e.store.BeginApply(ctx, d.ID, d.Revision, "bob"); !errors.Is(err, approvals.ErrDraftExpired) {
+		t.Errorf("BeginApply of an expired draft = %v, want ErrDraftExpired", err)
+	}
+	if rows, err := e.store.Approvals(ctx, d.ID); err != nil || len(rows) != 0 {
+		t.Errorf("approval rows = %d (%v), want none recorded", len(rows), err)
+	}
+	if _, _, err := e.store.RecordDecision(ctx, d.ID, decision(d, "bob", approvals.DecisionReject)); err != nil {
+		t.Errorf("reject of an expired draft = %v, want it allowed", err)
+	}
+}

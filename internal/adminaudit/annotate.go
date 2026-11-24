@@ -25,10 +25,26 @@ const (
 	DetailAckNoReplay    = "acknowledge_no_replay"
 )
 
+// DetailSource is where a change came from (for example approval).
+const DetailSource = "source"
+
 var annotationKeys = map[string]bool{
 	DetailOp: true, DetailEtag: true, DetailHasSub: true, DetailHasEmail: true,
 	DetailBaseVersion: true, DetailAppliedVersion: true, DetailWidening: true,
-	DetailReasons: true, DetailReplayStatus: true, DetailAckNoReplay: true,
+	DetailReasons: true, DetailReplayStatus: true, DetailAckNoReplay: true, DetailSource: true,
+}
+
+// FilterDetails returns the entries of d whose key is in the closed detail set
+// and whose value is printable ASCII within the value cap. Everything else is
+// dropped.
+func FilterDetails(d map[string]string) map[string]string {
+	out := map[string]string{}
+	for k, v := range d {
+		if annotationKeys[k] && len(v) <= maxDetailValLen && printableASCII(v) {
+			out[k] = v
+		}
+	}
+	return out
 }
 
 // Annotation is the per-request carrier the admin audit middleware puts in
@@ -64,10 +80,7 @@ func Annotate(ctx context.Context, targetRef string, details map[string]string) 
 	if targetRef != "" && len(targetRef) <= maxTargetRefLen && printableASCII(targetRef) {
 		a.targetRef = targetRef
 	}
-	for k, v := range details {
-		if !annotationKeys[k] || len(v) > maxDetailValLen || !printableASCII(v) {
-			continue
-		}
+	for k, v := range FilterDetails(details) {
 		if a.details == nil {
 			a.details = map[string]string{}
 		}

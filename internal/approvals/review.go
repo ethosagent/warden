@@ -131,6 +131,15 @@ type SubmitResult struct {
 // replay queued. When the self-apply cannot publish, the error is Apply's and
 // the draft is left pending (validation) or needs_rebase (moved head).
 func (s *Service) SubmitOrApply(ctx context.Context, id string, revision int, author Author) (SubmitResult, error) {
+	// An expired draft is not submitted at all, so no self decision is recorded
+	// for a change that can no longer apply.
+	cur, err := s.cfg.Store.Get(ctx, id)
+	if err != nil {
+		return SubmitResult{}, err
+	}
+	if s.expired(cur) {
+		return SubmitResult{}, ErrDraftExpired
+	}
 	d, err := s.cfg.Store.Submit(ctx, id, revision, author.Sub)
 	if err != nil {
 		return SubmitResult{}, err
@@ -244,9 +253,6 @@ func (s *Service) Approve(ctx context.Context, in ApproveInput) (ApproveResult, 
 	if count < need {
 		return res, nil
 	}
-	if err := s.reclassifyForApply(ctx, d); err != nil {
-		return res, err
-	}
 	nd, err := s.applyClassified(ctx, d, in.Approver.Sub)
 	if err != nil {
 		res.Draft = nd
@@ -337,31 +343,6 @@ func (s *Service) freshClassification(ctx context.Context, d Draft) (Classificat
 		return Classification{}, false
 	}
 	return Classify(hd, doc), true
-}
-
-// reclassifyForApply is the re-run of Classify against the live head when the
-// last approval arrives: a draft whose fresh verdict needs a role above what
-// every approver held when they approved is refused instead of published.
-func (s *Service) reclassifyForApply(ctx context.Context, d Draft) error {
-	fresh, ok := s.freshClassification(ctx, d)
-	if !ok {
-		return nil
-	}
-	rows, err := s.cfg.Store.Approvals(ctx, d.ID)
-	if err != nil {
-		return err
-	}
-	for _, a := range rows {
-		if a.Revision != d.Revision || a.Decision != DecisionApprove {
-			continue
-		}
-		var r config.Role
-		if r.UnmarshalText([]byte(a.ApproverRole)) == nil && r >= fresh.RequiredRole {
-			return nil
-		}
-	}
-	c, _ := DecodeClassification(d)
-	return &RoleRequiredError{Need: fresh.RequiredRole, Fields: adminFields(c)}
 }
 
 // checkEvidence enforces the replay rule: a done replay of this revision, no
