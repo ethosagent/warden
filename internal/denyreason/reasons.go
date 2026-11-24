@@ -173,6 +173,12 @@ const (
 	// so an expired or badly signed token is matched too.
 	UserBlocked Reason = "user_blocked"
 
+	// AgentDisabled: the agent this worker is bound to is disabled in the
+	// control plane's agent registry. It is a deny-only kill switch: every
+	// CONNECT, request and h2 stream is refused in every identity mode, and
+	// open sessions are closed (W-P2-AREG-05).
+	AgentDisabled Reason = "agent_disabled"
+
 	// Unspecified: the never-in-practice fallback the proxy's emitDeny
 	// substitutes when a deny reaches it without a reason. The deny path is one
 	// chokepoint (internal/proxy emitDeny/emitDenyEvent), so this label on a
@@ -201,7 +207,7 @@ var declared = []Reason{
 	DLPBlock, DLPRedact,
 	MCPWS, MCPWSUnscannable, MCPSSEEventTooLarge, MCPGatewayDeny,
 	HTTPResponseLeak, HTTPResponseInjection,
-	UserBlocked,
+	UserBlocked, AgentDisabled,
 	Unspecified,
 }
 

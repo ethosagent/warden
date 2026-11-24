@@ -14,13 +14,11 @@ import (
 )
 
 // buildJudge constructs the inline judge when judge.enabled, returning the
-// judge and the agent id derived from the listen port. When the judge is
+// judge and the agent id it was given (resolveAgentID's result). When the judge is
 // disabled it returns (nil, "", nil) and the proxy default-denies NoMatch as
 // before. Config has already validated cross-field requirements; here we only
 // resolve the API key from its env var.
-func buildJudge(pol config.Policy, listenAddr string, logger *slog.Logger) (proxy.Judge, string, error) {
-	// Resolve the agent id from the listen port (one proxy per agent).
-	agentID := defaultAgentID(pol, listenAddr)
+func buildJudge(pol config.Policy, agentID string, logger *slog.Logger) (proxy.Judge, string, error) {
 
 	// Build the named-provider client map ONCE from THIS node's env. Per-name
 	// errors (empty key env, bad client) are logged (metadata only, never a key)
@@ -241,6 +239,24 @@ type judgeAdapter struct{ j *llmpolicy.Judge }
 func (a judgeAdapter) Evaluate(agentID, method, url, host, contentType string, hasAuth bool) proxy.Verdict {
 	v := a.j.Evaluate(agentID, method, url, host, contentType, hasAuth)
 	return proxy.Verdict{Decision: v.Decision, Reason: v.Reason}
+}
+
+// resolveAgentID picks the agent id this worker is bound to: the --agent-id
+// flag, then central.agentID, then defaultAgentID. An explicit value that fails
+// agentid.ValidID is an error (startup stops); the derived default is never
+// validated, because "agent:<port>" and a single configured agent's id are what
+// workers used before the registry. The error never carries the value.
+func resolveAgentID(flag, central string, pol config.Policy, listenAddr string) (string, error) {
+	for _, c := range []struct{ src, id string }{{"--agent-id", flag}, {"central.agentID", central}} {
+		if c.id == "" {
+			continue
+		}
+		if err := agentid.ValidID(c.id); err != nil {
+			return "", fmt.Errorf("worker: %s is not a valid agent id: %w", c.src, err)
+		}
+		return c.id, nil
+	}
+	return defaultAgentID(pol, listenAddr), nil
 }
 
 // defaultAgentID derives the agent identity. When exactly one agent policy is

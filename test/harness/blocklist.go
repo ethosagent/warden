@@ -23,6 +23,13 @@ func WithCentralForwarding() Option {
 	return func(h *H) { h.wantCentral = true }
 }
 
+// WithWorkerAgent binds every worker to the registered agent id, as the
+// --agent-id flag does (W-P2-AREG-05). In-process only: a supplied target
+// wires its own flags.
+func WithWorkerAgent(id string) Option {
+	return func(h *H) { h.workerAgentID = id }
+}
+
 // BlockUser blocks a user through POST /dashboard/api/blocked-users with the
 // control plane's admin bearer and returns the entry id. Give a sub, an email or
 // both. It needs WithControlPlaneAdminToken and fails the test on any answer

@@ -109,3 +109,13 @@ func TestIndexAgentsTab(t *testing.T) {
 		t.Error("agEl must set text with textContent")
 	}
 }
+
+// TestIndexAgentsCapLiterals pins the capability strings the Agents tab compares
+// heartbeats against to the constants workers advertise, so a rename cannot
+// leave the console flagging every worker.
+func TestIndexAgentsCapLiterals(t *testing.T) {
+	want := "const AG_REQUIRE_CAP='" + config.CapIdentityRequireV1 + "', AG_REG_CAP='" + config.CapAgentRegV1 + "';"
+	if block := agentsBlock(t, servedIndex(t)); !strings.Contains(block, want) {
+		t.Errorf("the Agents script lacks %q", want)
+	}
+}

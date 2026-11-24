@@ -426,6 +426,11 @@ type Proxy struct {
 
 	// sessions is the open-session registry CloseBlockedSessions cuts from.
 	sessions *sessionRegistry
+	// agentDisabled is the agent kill switch (agent.go): set while the bound
+	// agent is disabled in the control plane's registry. trackAll makes every
+	// session, anonymous ones included, register so the switch can cut them.
+	agentDisabled atomic.Bool
+	trackAll      atomic.Bool
 	// mcpModeUnknownOnce guards a single WARN when a scanning gateway does not
 	// report its mode and Warden holds its traffic (fail safe).
 	mcpModeUnknownOnce sync.Once

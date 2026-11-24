@@ -100,6 +100,16 @@ func (p *Proxy) SetIdentityWithSignIn(v identity.Verifier, mode IdentityMode, si
 	p.warnIdentityCoverage()
 }
 
+// IdentityModeName is the effective identity mode this proxy enforces now: off
+// when no verifier is installed, else attribute or challenge. The heartbeat
+// reports it, so the control plane sees what runs, not what was requested.
+func (p *Proxy) IdentityModeName() string {
+	if h := p.identity(); h != nil {
+		return string(h.mode)
+	}
+	return string(IdentityModeOff)
+}
+
 // SupportsChallenge reports whether this worker can answer a 407: it needs a
 // CONNECT listener, which a transparent-only worker does not have.
 func (p *Proxy) SupportsChallenge() bool { return p.cfg.Mode != config.ProxyModeTransparent }

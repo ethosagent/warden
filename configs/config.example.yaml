@@ -460,6 +460,7 @@ central:
   maxEvents: 0                    # aggregator: central retention cap (0 = default)
   endpoint: ""                    # worker: aggregator ingest URL
   proxyID: ""                     # worker: label this proxy's events
+  # agentID: claude-code         # worker: bind to a registered agent (--agent-id overrides); a disabled agent is denied agent_disabled
   batchSize: 100                  # worker: events per forward batch
   bufferCap: 10000                # worker: local buffer cap before dropping oldest
   interval: 10s                   # worker: forward cadence

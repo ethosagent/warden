@@ -295,6 +295,12 @@ func (p *Proxy) handleConn(conn net.Conn) {
 		return
 	}
 
+	// A disabled agent refuses every CONNECT first, in every identity mode:
+	// before identity resolution, the block list, the policy and any dial.
+	if p.connectAgentDisabled(conn, domain, port) {
+		return
+	}
+
 	// Resolve who is asking before the policy check, so a CONNECT deny is
 	// attributable too. A CONNECT with no token (the common case) does no work
 	// here; one with a token is bounded by identityVerifyTimeout.
@@ -483,9 +489,10 @@ func (p *Proxy) storeAllow(ci connIdentity, domain string, port int, protocol st
 // is W-P1-VRFY-09); the CONNECT identity only registers it for a block-list cut.
 func (p *Proxy) tunnel(client net.Conn, br *bufio.Reader, domain string, port int, ci connIdentity, until time.Time) {
 	p.reach(PathTunnel)
-	// Only an attributed tunnel registers: an anonymous one costs nothing here.
+	// Only an attributed tunnel registers, unless every session is tracked
+	// (agent kill switch): an anonymous one costs nothing here otherwise.
 	var sess *session
-	if ci.Claims.Sub != "" || ci.Claims.Email != "" {
+	if p.trackSession(ci) {
 		sess = p.sessions.newSession("tcp", domain, port, true, client)
 		sess.bind(ci)
 		defer sess.release()

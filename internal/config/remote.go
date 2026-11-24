@@ -37,6 +37,10 @@ type RemoteProvider struct {
 	lastErr    error
 	// caps are the capabilities advertised on every heartbeat (see WorkerCaps).
 	caps []string
+	// agentID is the registered agent id this worker is bound to, and
+	// identityMode returns the effective identity mode; both ride the heartbeat.
+	agentID      string
+	identityMode func() string
 }
 
 // CapBlocklistV1 is the capability a worker advertises when it enforces
@@ -61,16 +65,45 @@ const CapIdentityChallengeV1 = "identity/challenge-v1"
 // WorkerCaps returns the sorted capabilities this binary implements. Later
 // features append their own constant here.
 func WorkerCaps() []string {
-	caps := []string{CapBlocklistV1, CapGroupPolicyV1, CapIdentityChallengeV1}
+	caps := []string{CapAgentRegV1, CapBlocklistV1, CapGroupPolicyV1, CapIdentityChallengeV1}
 	sort.Strings(caps)
 	return caps
 }
+
+// CapAgentRegV1 is the capability a worker advertises when it enforces the
+// agent registry: it selects its own registeredAgents entry on every apply and
+// denies all traffic (agent_disabled) while that agent is disabled. An old
+// worker decodes the list and ignores it, so the control plane flags it. Any
+// widening of the registeredAgents wire (a third status, more than two keys)
+// must be gated on this cap, because a worker rejects the whole policy wire on
+// a list it cannot validate and would freeze on its last-known-good policy.
+const CapAgentRegV1 = "agentreg/v1"
+
+// CapIdentityRequireV1 is the capability a worker advertises when it enforces
+// identity require mode (W-P2-WBND-03). No worker advertises it yet; the
+// constant exists so the console and the control plane agree on the literal.
+const CapIdentityRequireV1 = "identity/require-v1"
 
 // heartbeatBody is the JSON a worker POSTs to /control/heartbeat. It carries no
 // secret, token or request data.
 type heartbeatBody struct {
 	PolicyETag string   `json:"policyETag"`
 	Caps       []string `json:"caps,omitempty"`
+	// AgentID and IdentityMode (W-P2-AREG-05) say which agent the worker is
+	// bound to and the identity mode it enforces now. Both are self-asserted,
+	// like caps, and omitted when unknown so an old control plane sees the old
+	// body.
+	AgentID      string `json:"agentID,omitempty"`
+	IdentityMode string `json:"identityMode,omitempty"`
+}
+
+// SetAgent sets the resolved agent id and the source of the effective identity
+// mode reported on each heartbeat. mode may be nil (no mode reported).
+func (r *RemoteProvider) SetAgent(agentID string, mode func() string) {
+	r.mu.Lock()
+	r.agentID = agentID
+	r.identityMode = mode
+	r.mu.Unlock()
 }
 
 // SetCaps sets the capabilities advertised on each heartbeat. Pass WorkerCaps().
@@ -255,9 +288,13 @@ func (r *RemoteProvider) Heartbeat(ctx context.Context) error {
 
 	r.mu.RLock()
 	etag := r.etag
-	caps := r.caps
+	hb := heartbeatBody{PolicyETag: etag, Caps: r.caps, AgentID: r.agentID}
+	modeFn := r.identityMode
 	r.mu.RUnlock()
-	body, _ := json.Marshal(heartbeatBody{PolicyETag: etag, Caps: caps})
+	if modeFn != nil {
+		hb.IdentityMode = modeFn()
+	}
+	body, _ := json.Marshal(hb)
 
 	reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()

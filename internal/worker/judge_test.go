@@ -12,7 +12,7 @@ func TestBuildJudge_DisabledReturnsNil(t *testing.T) {
 		Judge:  config.JudgeConfig{Enabled: false},
 		Agents: []config.AgentPolicy{{ID: "default", Policy: "x"}},
 	}
-	judge, agentID, err := buildJudge(pol, "127.0.0.1:8080", nil)
+	judge, agentID, err := buildJudge(pol, defaultAgentID(pol, "127.0.0.1:8080"), nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -34,7 +34,7 @@ func TestBuildJudge_EnabledMissingKeyErrors(t *testing.T) {
 		},
 		Agents: []config.AgentPolicy{{ID: "default", Policy: "x"}},
 	}
-	if _, _, err := buildJudge(pol, "127.0.0.1:8080", nil); err == nil {
+	if _, _, err := buildJudge(pol, defaultAgentID(pol, "127.0.0.1:8080"), nil); err == nil {
 		t.Fatal("expected error when API key env is empty")
 	}
 }
@@ -50,7 +50,7 @@ func TestBuildJudge_EnabledConstructs(t *testing.T) {
 		},
 		Agents: []config.AgentPolicy{{ID: "default", Policy: "allow reads"}},
 	}
-	judge, agentID, err := buildJudge(pol, "127.0.0.1:8080", nil)
+	judge, agentID, err := buildJudge(pol, defaultAgentID(pol, "127.0.0.1:8080"), nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -262,7 +262,7 @@ func TestBuildJudge_NamedProviderUnresolvedFailsSoft(t *testing.T) {
 		},
 		Agents: []config.AgentPolicy{{ID: "default", Policy: "x"}},
 	}
-	judge, agentID, err := buildJudge(pol, "127.0.0.1:8080", nil)
+	judge, agentID, err := buildJudge(pol, defaultAgentID(pol, "127.0.0.1:8080"), nil)
 	if err != nil {
 		t.Fatalf("named-unresolved judge must fail SOFT (no boot error), got %v", err)
 	}

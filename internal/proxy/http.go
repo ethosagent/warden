@@ -441,6 +441,9 @@ func (p *Proxy) runRequestStages(s *requestScope) (endSession bool) {
 	if p.stripHopHeaders(s) {
 		return true
 	}
+	if p.agentStage(s) {
+		return true
+	}
 	if p.identityStage(s) {
 		return true
 	}

@@ -329,6 +329,7 @@ var All = slices.Concat(
 		// with a new ETag each time, and the wire carries only id, status and
 		// thumbprints. In-process only (CP state dir).
 		{Name: "agent_registry_policy_wire", Opts: agentRegistryPolicyWireOpts(), Run: agentRegistryPolicyWire},
+		{Name: "agent_binding_kill_switch", Opts: agentBindingOpts(), Run: agentBindingKillSwitch},
 	},
 	// Canary across protocols x allow/deny; see canary.go.
 	canaryScenarios(),

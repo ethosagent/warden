@@ -92,7 +92,7 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 		// reach this opaque passthrough, the form a CONNECT takes on a worker
 		// with TLS termination, as well as the CA-less one.
 		var sess *session
-		if ci.Claims.Sub != "" || ci.Claims.Email != "" {
+		if p.trackSession(ci) {
 			sess = p.sessions.newSession("tcp", domain, port, true, clientConn)
 			sess.bind(ci)
 			defer sess.release()
