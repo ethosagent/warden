@@ -310,3 +310,18 @@ func BenchmarkPumpDir(b *testing.B) {
 		}
 	}
 }
+
+// TestPumpDefaultMessageCap pins the production cap: a Pump with no
+// MaxMessage override fails closed above 8 MiB, the limit the over-cap test
+// exercises with a small override.
+func TestPumpDefaultMessageCap(t *testing.T) {
+	if maxReassembledMessage != 8<<20 {
+		t.Fatalf("maxReassembledMessage = %d, want 8 MiB", maxReassembledMessage)
+	}
+	if got := (&Pump{}).msgCap(); got != maxReassembledMessage {
+		t.Fatalf("default message cap = %d, want maxReassembledMessage", got)
+	}
+	if got := (&Pump{MaxMessage: 4 << 10}).msgCap(); got != 4<<10 {
+		t.Fatalf("overridden message cap = %d, want 4 KiB", got)
+	}
+}
