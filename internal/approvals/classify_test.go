@@ -1,6 +1,7 @@
 package approvals
 
 import (
+	"encoding/json"
 	"fmt"
 	"math/rand"
 	"reflect"
@@ -292,6 +293,111 @@ func FuzzClassify(f *testing.F) {
 		}
 		if got.RequiredRole != config.RoleEditor {
 			t.Fatalf("role = %v", got.RequiredRole)
+		}
+	})
+}
+
+func TestClassifyRateLimitSplitting(t *testing.T) {
+	r10 := func(e config.AllowlistEntry) config.AllowlistEntry { return withRate(e, "10/minute") }
+	eng := scopedAllow("a.com", []string{"eng"}, nil)
+	ops := scopedAllow("a.com", []string{"ops"}, nil)
+	get := func(e config.AllowlistEntry, m ...string) config.AllowlistEntry { e.Methods = m; return e }
+
+	tests := []struct {
+		name        string
+		base, draft Doc
+		widening    bool
+	}{
+		{"one rated entry split by methods", docA(r10(eng)), docA(r10(get(eng, "GET")), r10(get(eng, "GET", "POST"))), true},
+		{"unscoped rated split by groups", docA(r10(allow("a.com", 443))), docA(r10(eng), r10(ops)), true},
+		{"unscoped rated gains one scope", docA(r10(allow("a.com", 443))), docA(r10(eng)), true},
+		{"one rated entry narrowed 1:1", docA(r10(eng)), docA(r10(get(eng, "GET"))), false},
+		{"two rated entries each narrowed 1:1", docA(r10(eng), r10(ops)), docA(r10(get(eng, "GET")), r10(get(ops, "GET"))), false},
+		{"unlimited base split into rated entries", docA(allow("a.com", 443)), docA(r10(eng), r10(ops)), false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Classify(tc.base, tc.draft)
+			if got.Widening != tc.widening {
+				t.Fatalf("widening = %v: %+v", got.Widening, got)
+			}
+			if tc.widening && !slicesContains(codes(got), CodeAllowRateRelaxed) {
+				t.Fatalf("want %s: %+v", CodeAllowRateRelaxed, got.Reasons)
+			}
+		})
+	}
+}
+
+func slicesContains(vs []string, s string) bool {
+	for _, v := range vs {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+func TestClassifyRemovedToJudge(t *testing.T) {
+	constrained := []struct {
+		name string
+		e    config.AllowlistEntry
+	}{
+		{"groups", scopedAllow("a.com", []string{"eng"}, nil)},
+		{"users", scopedAllow("a.com", nil, []string{"a@x.com"})},
+		{"methods", config.AllowlistEntry{Domain: "a.com", Port: 443, Methods: []string{"GET"}}},
+		{"paths", config.AllowlistEntry{Domain: "a.com", Port: 443, Paths: []string{"/v1/*"}}},
+		{"rateLimit", withRate(allow("a.com", 443), "10/minute")},
+		{"timeWindow", withTime(allow("a.com", 443), "9-17")},
+	}
+	for _, tc := range constrained {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Classify(docA(tc.e), Doc{})
+			if !got.Widening || !slicesContains(codes(got), CodeAllowRemovedToJudge) {
+				t.Fatalf("not flagged: %+v", got)
+			}
+			if got.RequiredRole != config.RoleEditor {
+				t.Fatalf("role = %v", got.RequiredRole)
+			}
+			// Still narrowing in effect when another entry keeps the destination.
+			if got := Classify(docA(tc.e, allow("a.com", 443)), docA(allow("a.com", 443))); slicesContains(codes(got), CodeAllowRemovedToJudge) {
+				t.Fatalf("flagged though destination remains: %+v", got)
+			}
+		})
+	}
+	if got := Classify(docA(allow("a.com", 443)), Doc{}); got.Widening {
+		t.Fatalf("plain entry removal widening: %+v", got)
+	}
+}
+
+func TestClassificationJSONStable(t *testing.T) {
+	raw, err := json.Marshal(Classify(Doc{}, Doc{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != `{"widening":false,"reasons":[],"requiredRole":"editor"}` {
+		t.Fatalf("json = %s", raw)
+	}
+	adm := Classify(Doc{}, Doc{Settings: &config.SettingsWire{Secrets: &config.SecretsSettings{Backend: "aws"}}})
+	raw, _ = json.Marshal(adm)
+	var back Classification
+	if err := json.Unmarshal(raw, &back); err != nil || back.RequiredRole != config.RoleAdmin || !strings.Contains(string(raw), `"requiredRole":"admin"`) {
+		t.Fatalf("round trip %s: %+v %v", raw, back, err)
+	}
+}
+
+func FuzzClassifyNewKeyWidens(f *testing.F) {
+	f.Add([]byte("new.example.com"), uint8(1), []byte("10/minute"), []byte("9-17"))
+	f.Add([]byte("~^x$"), uint8(7), []byte(""), []byte(""))
+	f.Fuzz(func(t *testing.T, domain []byte, flags uint8, rate, tw []byte) {
+		base := bigDoc(3, 0)
+		e := config.AllowlistEntry{Domain: "fuzz-" + string(domain), Port: int(flags % 4), RateLimit: string(rate), TimeWindow: string(tw)}
+		if flags&4 != 0 {
+			e.Groups = []string{"g"}
+		}
+		draft := Doc{Allowlist: append(append([]config.AllowlistEntry(nil), base.Allowlist...), e), Denylist: base.Denylist}
+		got := Classify(base, draft)
+		if !got.Widening || !slicesContains(codes(got), CodeAllowAdded) {
+			t.Fatalf("new key not widening: %+v", got)
 		}
 	})
 }

@@ -67,6 +67,30 @@ func (r Role) String() string {
 	}
 }
 
+// MarshalText encodes the role as its name so stored JSON never depends on the
+// enum's numbers. An unknown value fails rather than writing "none".
+func (r Role) MarshalText() ([]byte, error) {
+	if r.String() == "none" {
+		return nil, fmt.Errorf("config: cannot encode role %d", int(r))
+	}
+	return []byte(r.String()), nil
+}
+
+// UnmarshalText decodes a role name written by MarshalText.
+func (r *Role) UnmarshalText(b []byte) error {
+	switch string(b) {
+	case "viewer":
+		*r = RoleViewer
+	case "editor":
+		*r = RoleEditor
+	case "admin":
+		*r = RoleAdmin
+	default:
+		return fmt.Errorf("config: unknown role %q", string(b))
+	}
+	return nil
+}
+
 // ConsoleConfig is the control-plane-local `console:` block: how humans sign in
 // to the dashboard. It is read by the control plane only, from the
 // operator-owned --config file (Policy tags it json:"-", so it never reaches a

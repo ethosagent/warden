@@ -25,13 +25,7 @@ func TimeWindowHours(s string) (uint32, error) {
 	}
 	var mask uint32
 	for h := 0; h < 24; h++ {
-		var in bool
-		if tw.startHour <= tw.endHour {
-			in = h >= tw.startHour && h < tw.endHour
-		} else {
-			in = h >= tw.startHour || h < tw.endHour
-		}
-		if in {
+		if tw.admits(h) {
 			mask |= 1 << uint(h)
 		}
 	}

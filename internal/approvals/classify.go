@@ -1,3 +1,7 @@
+// Package approvals decides which policy changes need a second person
+// (W-P2-APPR-02 onward). Classify is a pure function over two canonical policy
+// docs: it never reads a clock, a store or the network, so the draft API, the
+// single clearance check and the apply path can all call it and agree.
 package approvals
 
 import (
@@ -12,13 +16,14 @@ import (
 
 // Reason codes. A change is widening exactly when it has at least one reason.
 const (
-	CodeAllowAdded       = "allow.added"              // an allow entry with no narrower base counterpart
-	CodeAllowScopeWide   = "allow.scope_widened"      // same domain and port, groups/users no longer a subset
-	CodeAllowRateRelaxed = "allow.rate_relaxed"       // same domain and port, rateLimit looser, removed or unparseable
-	CodeAllowTimeRelaxed = "allow.time_relaxed"       // same domain and port, timeWindow wider, removed or unparseable
-	CodeAllowConstraint  = "allow.constraint_widened" // same domain and port, methods or paths less restricted
-	CodeDenyRemoved      = "deny.removed"             // a deny entry removed or changed
-	CodeSettingsChanged  = "settings.changed"
+	CodeAllowAdded          = "allow.added"              // an allow entry with no narrower base counterpart
+	CodeAllowScopeWide      = "allow.scope_widened"      // same domain and port, groups/users no longer a subset
+	CodeAllowRateRelaxed    = "allow.rate_relaxed"       // same domain and port, rateLimit looser, removed, unparseable or split
+	CodeAllowTimeRelaxed    = "allow.time_relaxed"       // same domain and port, timeWindow wider, removed or unparseable
+	CodeAllowConstraint     = "allow.constraint_widened" // same domain and port, methods or paths less restricted
+	CodeAllowRemovedToJudge = "allow.removed_to_judge"   // a constrained entry removed: its explicit deny becomes a judge-eligible no-match
+	CodeDenyRemoved         = "deny.removed"             // a deny entry removed or changed
+	CodeSettingsChanged     = "settings.changed"
 )
 
 // Reason says why a change counts as widening. Path and Detail hold only a
@@ -81,6 +86,9 @@ func Classify(base, draft Doc) Classification {
 		return a.Detail < b.Detail
 	})
 	reasons = slices.Compact(reasons)
+	if reasons == nil {
+		reasons = []Reason{} // marshal as [], never null
+	}
 	return Classification{Widening: len(reasons) > 0, Reasons: reasons, RequiredRole: role}
 }
 
@@ -162,10 +170,35 @@ func classifyAllow(base, draft []config.AllowlistEntry) []Reason {
 			removed[k] = append(removed[k], sigEntry{sig, g.e})
 		}
 	}
+	inDraft := make(map[string]bool, len(draft))
+	for _, e := range draft {
+		inDraft[e.Domain+"|"+strconv.Itoa(e.Port)] = true
+	}
+
 	var reasons []Reason
+	for k, rs := range removed {
+		// An entry with a deny-producing attribute (groups, users, methods,
+		// paths, rateLimit, timeWindow) answers an explicit Deny for a request
+		// it does not admit, which is not judge-eligible. Once no entry for the
+		// destination is left that becomes no-match, which the proxy defers to
+		// the judge (workers may configure one locally whatever settings.judge
+		// says). The same removal also drops the canonical-path pre-pass a
+		// paths constraint triggers. A plain unconstrained entry removed stays
+		// narrowing.
+		if inDraft[k] {
+			continue
+		}
+		for _, r := range rs {
+			if constrained(r.e) {
+				reasons = append(reasons, Reason{CodeAllowRemovedToJudge, destPath("allowlist", r.e.Domain, r.e.Port), destDetail(r.e.Domain, r.e.Port)})
+			}
+		}
+	}
 	for k, as := range added {
 		rs := removed[k]
 		slices.SortFunc(rs, func(a, b sigEntry) int { return strings.Compare(a.sig, b.sig) })
+		slices.SortFunc(as, func(a, b sigEntry) int { return strings.Compare(a.sig, b.sig) })
+		used := make([]bool, len(rs))
 		for _, a := range as {
 			path := destPath("allowlist", a.e.Domain, a.e.Port)
 			detail := destDetail(a.e.Domain, a.e.Port)
@@ -173,18 +206,37 @@ func classifyAllow(base, draft []config.AllowlistEntry) []Reason {
 				reasons = append(reasons, Reason{CodeAllowAdded, path, detail})
 				continue
 			}
-			// Narrowing when some removed entry on the same destination is at
-			// least as wide; otherwise report the closest one's reasons.
+			// Each scoped entry owns a rate bucket and an exhausted one falls
+			// through to the next entry, so one removed rate-limited entry may
+			// justify only ONE added rate-limited entry: pair 1:1.
+			needsOwn := a.e.RateLimit != ""
+			match := -1
 			var best []string
 			for i, r := range rs {
 				codes := widenedBy(a.e, r.e)
 				if len(codes) == 0 {
-					best = nil
-					break
+					if needsOwn && r.e.RateLimit != "" && used[i] {
+						codes = []string{CodeAllowRateRelaxed}
+					} else {
+						if !needsOwn || r.e.RateLimit == "" {
+							match = i
+							break // an unlimited base entry needs no consuming
+						}
+						if match < 0 {
+							match = i
+						}
+						continue
+					}
 				}
-				if i == 0 || len(codes) < len(best) {
+				if match < 0 && (best == nil || len(codes) < len(best)) {
 					best = codes
 				}
+			}
+			if match >= 0 {
+				if needsOwn && rs[match].e.RateLimit != "" {
+					used[match] = true
+				}
+				continue
 			}
 			for _, c := range best {
 				reasons = append(reasons, Reason{c, path, detail})
@@ -194,10 +246,21 @@ func classifyAllow(base, draft []config.AllowlistEntry) []Reason {
 	return reasons
 }
 
+// constrained reports whether the entry can answer an explicit Deny for a
+// request on its destination.
+func constrained(e config.AllowlistEntry) bool {
+	return scoped(e) || len(e.Methods) > 0 || len(e.Paths) > 0 || e.RateLimit != "" || e.TimeWindow != ""
+}
+
 // widenedBy returns the reason codes for which the new entry a is wider than
 // the removed entry r on the same domain and port; none means a is no wider.
 func widenedBy(a, r config.AllowlistEntry) []string {
 	var codes []string
+	// A rate-limited entry that gains a scope gets a bucket of its own, so a
+	// new scope can multiply the effective rate: report it as relaxed.
+	if a.RateLimit != "" && r.RateLimit != "" && scoped(a) && !scoped(r) {
+		codes = append(codes, CodeAllowRateRelaxed)
+	}
 	if !scopeNoWider(a, r) {
 		codes = append(codes, CodeAllowScopeWide)
 	}
