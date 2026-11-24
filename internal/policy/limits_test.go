@@ -45,3 +45,15 @@ func TestTimeWindowHours(t *testing.T) {
 		}
 	}
 }
+
+func TestRateBucketKeys(t *testing.T) {
+	if got := RateBucketKeys("D.com.", 443); len(got) != 1 || got[0] != "d.com:443" {
+		t.Fatalf("got %v", got)
+	}
+	if got := RateBucketKeys("d.com", 0); len(got) != 2 || got[0] != "d.com:443" || got[1] != "d.com:80" {
+		t.Fatalf("got %v", got)
+	}
+	if got := RateBucketKeys("~^A.$", 80); got[0] != "~^A.$:80" {
+		t.Fatalf("regex pattern must stay raw: %v", got)
+	}
+}

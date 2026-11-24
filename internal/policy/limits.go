@@ -31,3 +31,20 @@ func TimeWindowHours(s string) (uint32, error) {
 	}
 	return mask, nil
 }
+
+// RateBucketKeys returns the rate bucket key(s) an unscoped rate-limited
+// allow entry draws on, normalised exactly as the evaluator does (case and
+// trailing dots on non-regex patterns; the scheme default port when the entry
+// has none, which is both 443 and 80). Unscoped entries with equal keys share
+// ONE bucket and whichever opens it sets the window; scoped entries each own a
+// bucket and never share. The approvals classifier uses this to tell when a
+// change to one entry can change another's effective rate.
+func RateBucketKeys(domain string, port int) []string {
+	if port != 0 {
+		return []string{rateBucketKey(domain, port)}
+	}
+	return []string{
+		rateBucketKey(domain, inferredPort(0, SchemeHTTPS)),
+		rateBucketKey(domain, inferredPort(0, SchemeHTTP)),
+	}
+}

@@ -170,12 +170,12 @@ func classifyAllow(base, draft []config.AllowlistEntry) []Reason {
 			removed[k] = append(removed[k], sigEntry{sig, g.e})
 		}
 	}
+	reasons := sharedBucketReasons(base, draft)
 	inDraft := make(map[string]bool, len(draft))
 	for _, e := range draft {
 		inDraft[e.Domain+"|"+strconv.Itoa(e.Port)] = true
 	}
 
-	var reasons []Reason
 	for k, rs := range removed {
 		// An entry with a deny-producing attribute (groups, users, methods,
 		// paths, rateLimit, timeWindow) answers an explicit Deny for a request
@@ -326,8 +326,9 @@ func rateNoWider(a, r string) bool {
 	if err != nil {
 		return false
 	}
-	// al/aw <= rl/rw  <=>  al*rw <= rl*aw
-	return int64(al)*int64(rw) <= int64(rl)*int64(aw)
+	// No wider only when neither the count nor the burst grows: 2/minute to
+	// 120/hour has a lower average but admits a 120-request burst.
+	return al <= rl && aw >= rw
 }
 
 // timeNoWider reports whether the hours admitted by a are a subset of those
@@ -375,4 +376,54 @@ func classifyDeny(base, draft []config.DenylistEntry) []Reason {
 		}
 	}
 	return reasons
+}
+
+// sharedBucketReasons covers the unscoped rate buckets. Unscoped entries with
+// the same normalised domain and effective port (port 0 draws on both 443 and
+// 80; "D.com" and "d.com" are one) share ONE bucket: whichever entry opens it
+// sets the window, and a request that fails one entry and falls through to
+// the next is charged again. So when such a bucket holds two or more
+// rate-limited entries on either side, any change to the bucket's set of
+// entries can change every member's effective rate, and entries cannot be
+// judged one at a time: report allow.rate_relaxed. The evaluator's semantics
+// are not changed; this errs on the side of a second person.
+func sharedBucketReasons(base, draft []config.AllowlistEntry) []Reason {
+	group := func(es []config.AllowlistEntry) map[string][]string {
+		m := map[string][]string{}
+		for _, e := range es {
+			if e.RateLimit == "" || scoped(e) {
+				continue
+			}
+			for _, k := range policy.RateBucketKeys(e.Domain, e.Port) {
+				m[k] = append(m[k], allowSig(e))
+			}
+		}
+		for k := range m {
+			slices.Sort(m[k])
+		}
+		return m
+	}
+	bg, dg := group(base), group(draft)
+	var reasons []Reason
+	for k := range union(bg, dg) {
+		b, d := bg[k], dg[k]
+		if (len(b) < 2 && len(d) < 2) || slices.Equal(b, d) {
+			continue
+		}
+		i := strings.LastIndex(k, ":")
+		port, _ := strconv.Atoi(k[i+1:])
+		reasons = append(reasons, Reason{CodeAllowRateRelaxed, destPath("allowlist", k[:i], port), destDetail(k[:i], port)})
+	}
+	return reasons
+}
+
+func union(a, b map[string][]string) map[string]struct{} {
+	out := make(map[string]struct{}, len(a)+len(b))
+	for k := range a {
+		out[k] = struct{}{}
+	}
+	for k := range b {
+		out[k] = struct{}{}
+	}
+	return out
 }

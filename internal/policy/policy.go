@@ -544,7 +544,7 @@ func (e *Evaluator) evaluate(rc RequestContext, mode evalMode, peek bool) Reques
 		// any) passed, so a denied request never consumes budget. If this entry
 		// is exhausted, try next entry.
 		if rl, ok := e.rateLimits[i]; ok {
-			key := fmt.Sprintf("%s:%d", rateLimitPattern(entry.Domain), inferredPort(entry.Port, scheme))
+			key := rateBucketKey(entry.Domain, inferredPort(entry.Port, scheme))
 			if entryScoped {
 				// Scoped entries get their own bucket per entry, never shared
 				// with an unscoped entry (or another scoped one) for the host.
@@ -628,6 +628,11 @@ func pathMatchesAny(patterns []string, path string) bool {
 // against the normalised host.
 func NormalizeHost(host string) string {
 	return strings.ToLower(strings.TrimRight(host, "."))
+}
+
+// rateBucketKey is the shared bucket key of an UNSCOPED rate-limited entry.
+func rateBucketKey(pattern string, port int) string {
+	return fmt.Sprintf("%s:%d", rateLimitPattern(pattern), port)
 }
 
 // rateLimitPattern returns the pattern that names an allowlist entry's
