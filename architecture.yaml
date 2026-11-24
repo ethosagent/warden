@@ -129,6 +129,7 @@ classes:
       - internal/policybuilder
       - internal/policyeval
       - internal/keys             # the Signer port, JWK/JWKS and JWS verification: pure, no private-key signing (#76)
+      - internal/approvals   # change drafts, the approval state machine, the Store port and Service (APPR-01)
 
   # DEVTOOL — developer tooling; no Warden package may import it. Exempt from
   # layering but not from the global X rules.
@@ -183,6 +184,8 @@ zones:
     - internal/policybuilder
     - internal/policyeval
     - internal/keys/adapters/**   # the local signer adapter: control plane signs, workers only verify (#76)
+    - internal/approvals
+    - internal/approvals/adapters/**   # the SQLite change-draft store (APPR-01)
   shared:
     - internal/config
     - internal/denyreason
