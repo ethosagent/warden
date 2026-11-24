@@ -1534,14 +1534,18 @@ reach it. The rule is unconditional and applies to every backend:
 - `GET /central/secrets` and `GET /dashboard/api/secretstore` leave `cp/` keys
   out. `POST` and `DELETE` on a `cp/` key (on `/central/secrets` and on
   `/dashboard/api/secretstore`) return `403` with `{"error":"reserved_key"}`
-  and touch neither the store nor the admin audit log.
+  and never reach the store. The attempt is recorded as a denied admin-audit
+  row that does not name the key.
 - A refused attempt logs `reserved secret key refused` with the route (or
   `worker-cache`) and the key prefix `cp/` only, at most once a minute per
   source.
 
-With the default `secretStore.aws.namePrefix` of `warden/`, the reserved names
-are `warden/cp/*`. Add an explicit deny to every worker role, so it holds even
-if a later `warden/*` grant is widened:
+The reserved names are `<secretStore.aws.namePrefix>cp/*` plus the bare key
+`<secretStore.aws.namePrefix>cp`; with the default prefix `warden/` that is
+`warden/cp/*` and `warden/cp-??????` (Secrets Manager appends a six-character
+suffix to a secret ARN). Add an explicit deny to every worker role, using your
+own prefix if you changed it, so it holds even if a later `warden/*` grant is
+widened:
 
 ```json
 {
@@ -1554,9 +1558,16 @@ if a later `warden/*` grant is widened:
     "secretsmanager:DeleteSecret",
     "secretsmanager:UpdateSecret"
   ],
-  "Resource": "arn:aws:secretsmanager:*:ACCOUNT_ID:secret:warden/cp/*"
+  "Resource": [
+    "arn:aws:secretsmanager:*:ACCOUNT_ID:secret:warden/cp/*",
+    "arn:aws:secretsmanager:*:ACCOUNT_ID:secret:warden/cp-??????"
+  ]
 }
 ```
+
+Upgrade note: rename any existing `cp` or `cp/...` placeholder, `auth[]`
+credential value or stored secret before upgrading. The control plane and the
+workers refuse to load a config that names the reserved namespace.
 
 ## Block list: offline CLI
 

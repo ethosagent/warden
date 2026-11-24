@@ -190,6 +190,7 @@ func (a *SettingsApplier) Apply() {
 				// cache and retry on the next apply.
 				a.logger.Warn("secret cache rebuild from control-plane settings failed; keeping current cache", "error", cErr)
 			} else {
+				newCache.SetReservedKeyLog(secrets.NewReservedKeyLog(a.logger, nil))
 				a.p.SetSecrets(newCache)
 				a.liveCacheTTL = newTTL
 				a.logger.Info("secret cache TTL applied from control-plane settings", "ttlSeconds", *settings.CacheTTLSeconds)

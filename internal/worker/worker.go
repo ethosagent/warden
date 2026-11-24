@@ -388,6 +388,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	if err != nil {
 		return err
 	}
+	secretProvider.SetReservedKeyLog(secrets.NewReservedKeyLog(logger, nil))
 
 	// OTel metrics emitter (off by default). New returns a nil *Metrics + nil
 	// handler when disabled, and record calls are nil-safe no-ops. OTel providers
