@@ -1,10 +1,16 @@
 package controlplane
 
 import (
+	"bufio"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -17,8 +23,11 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/ethosagent/warden/internal/agentreg"
+	agentregsqlite "github.com/ethosagent/warden/internal/agentreg/adapters/sqlite"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/keys"
+	"github.com/ethosagent/warden/internal/keys/adapters/signer"
 	"github.com/ethosagent/warden/internal/tokensvc"
 )
 
@@ -469,50 +478,180 @@ func TestTokenIssuerValidatorsAgree(t *testing.T) {
 	}
 }
 
+func newGuard(e *keysEnv) servedSigners {
+	return servedSigners{inner: e.mgr.KeySet(), records: e.mgr.KeySet().Records, now: e.clk.Now, served: e.srv.servesTokenKID}
+}
+
+// TestServedSigners: the active token key mints only once it has been
+// published for tokenKeyPublishWindow, judged from the persisted metadata.
 func TestServedSigners(t *testing.T) {
+	ctx := context.Background()
+	actor := keys.Actor{Subject: "test", AuthMethod: "test"}
 	e := newKeysEnv(t, keysEnvOpts{})
-	// newKeysEnv already called Handler, which mounted the JWKS.
-	guard := servedSigners{inner: e.mgr.KeySet(), served: e.srv.servesTokenKID}
+	guard := newGuard(e)
 
-	sg, err := guard.Active(keys.PurposeToken)
-	if err != nil || sg.KID() == "" {
-		t.Fatalf("active key behind the served JWKS: %v", err)
-	}
-	active := sg.KID()
-
-	// Rotated: the new key is minted from only once the JWKS holds it.
-	if err := e.mgr.Rotate(context.Background(), keys.PurposeToken, keys.RotateOpts{Emergency: true, Actor: keys.Actor{Subject: "test", AuthMethod: "test"}}); err != nil {
-		t.Fatal(err)
-	}
-	sg, err = guard.Active(keys.PurposeToken)
-	if err != nil || sg.KID() == active {
-		t.Fatalf("after an emergency rotation: %v kid %q (was %q)", err, kidOrEmpty(sg), active)
-	}
-
-	t.Run("a kid the served JWKS lacks is not mintable", func(t *testing.T) {
-		none := servedSigners{inner: e.mgr.KeySet(), served: func(string) bool { return false }}
-		if _, err := none.Active(keys.PurposeToken); !errors.Is(err, keys.ErrNoActiveKey) {
+	t.Run("a first key does not mint until the window passes", func(t *testing.T) {
+		if _, err := guard.Active(keys.PurposeToken); !errors.Is(err, keys.ErrNoActiveKey) {
+			t.Fatalf("fresh key: err = %v, want ErrNoActiveKey", err)
+		}
+		e.clk.Advance(tokenKeyPublishWindow - time.Second)
+		if _, err := guard.Active(keys.PurposeToken); !errors.Is(err, keys.ErrNoActiveKey) {
+			t.Fatalf("a second early: err = %v, want ErrNoActiveKey", err)
+		}
+		e.clk.Advance(time.Second)
+		if sg, err := guard.Active(keys.PurposeToken); err != nil || sg.KID() == "" {
+			t.Fatalf("after the window: %v", err)
+		}
+	})
+	t.Run("an emergency promotion of a barely published key waits", func(t *testing.T) {
+		// The first emergency rotation promotes the old next key, published
+		// with the first one; the second promotes the key the first just
+		// published.
+		for i := 0; i < 2; i++ {
+			if err := e.mgr.Rotate(ctx, keys.PurposeToken, keys.RotateOpts{Emergency: true, Actor: actor}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := guard.Active(keys.PurposeToken); !errors.Is(err, keys.ErrNoActiveKey) {
+			t.Fatalf("barely published key: err = %v, want ErrNoActiveKey", err)
+		}
+		e.clk.Advance(tokenKeyPublishWindow)
+		if _, err := guard.Active(keys.PurposeToken); err != nil {
+			t.Fatalf("after the window: %v", err)
+		}
+	})
+	t.Run("a normal rotation never waits", func(t *testing.T) {
+		e.clk.Advance(721 * time.Hour)
+		before, _ := guard.Active(keys.PurposeToken)
+		if err := e.mgr.Rotate(ctx, keys.PurposeToken, keys.RotateOpts{Actor: actor}); err != nil {
+			t.Fatal(err)
+		}
+		sg, err := guard.Active(keys.PurposeToken)
+		if err != nil || sg.KID() == before.KID() {
+			t.Fatalf("after a normal rotation: %v kid %q (was %q)", err, kidOrEmpty(sg), before.KID())
+		}
+	})
+	t.Run("the JWKS hook still gates", func(t *testing.T) {
+		g := guard
+		g.served = func(string) bool { return false }
+		if _, err := g.Active(keys.PurposeToken); !errors.Is(err, keys.ErrNoActiveKey) {
 			t.Fatalf("err = %v, want ErrNoActiveKey", err)
 		}
 		// Only the token purpose is guarded.
-		if _, err := none.Active(keys.PurposeBundle); err != nil {
+		if _, err := g.Active(keys.PurposeBundle); err != nil {
 			t.Fatalf("bundle purpose: %v", err)
 		}
 	})
 	t.Run("before the JWKS is mounted", func(t *testing.T) {
-		s := &Server{}
-		g := servedSigners{inner: e.mgr.KeySet(), served: s.servesTokenKID}
+		g := guard
+		g.served = (&Server{}).servesTokenKID
+		if _, err := g.Active(keys.PurposeToken); !errors.Is(err, keys.ErrNoActiveKey) {
+			t.Fatalf("err = %v, want ErrNoActiveKey", err)
+		}
+	})
+	t.Run("a key with no metadata row is not mintable", func(t *testing.T) {
+		g := guard
+		g.records = func(string) []keys.Record { return nil }
 		if _, err := g.Active(keys.PurposeToken); !errors.Is(err, keys.ErrNoActiveKey) {
 			t.Fatalf("err = %v, want ErrNoActiveKey", err)
 		}
 	})
 	t.Run("a signing failure passes through", func(t *testing.T) {
 		boom := errors.New("boom")
-		g := servedSigners{inner: failingSigners{err: boom}, served: func(string) bool { return true }}
+		g := servedSigners{inner: failingSigners{err: boom}, now: e.clk.Now}
 		if _, err := g.Active(keys.PurposeToken); !errors.Is(err, boom) {
 			t.Fatalf("err = %v", err)
 		}
 	})
+}
+
+// TestTokenServiceSharedAgentStore: the service reads agents through the one
+// Store it is given, so a disable through that Store (what a dashboard write
+// will do) refuses the very next exchange: no restart, no Watch tick.
+func TestTokenServiceSharedAgentStore(t *testing.T) {
+	ctx := context.Background()
+	e := newKeysEnv(t, keysEnvOpts{tokens: true})
+	db := e.srv.cfg.State
+	agents := agentregsqlite.New(db, agentregsqlite.WithClock(e.clk))
+	logger, _ := testLogger()
+	tc := config.DefaultTokenService()
+	tc.Enabled, tc.Issuer = true, testTokenIssuer
+	ts, err := newTokenService(tc, config.IdentitySettings{Issuer: "http://127.0.0.1:9", InternalIssuerURL: "http://127.0.0.1:9", Audience: "warden"},
+		db, agents, e.srv, e.mgr, e.clk, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ts.Agents != agents || ts.Sessions == nil {
+		t.Fatal("the assembly does not expose the store it was given and the session store")
+	}
+
+	priv, err := signer.GenerateLocal(keys.AlgEdDSA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jwk, _ := json.Marshal(map[string]string{"kty": "OKP", "crv": "Ed25519", "kid": "a-key",
+		"x": base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey))})
+	created, err := agents.Create(ctx, agentreg.Agent{ID: "agent-a", Keys: []agentreg.Key{{KID: "a-key", JWK: jwk}}, AllowedGroups: []string{"eng"}}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	exchange := func() *tokensvc.Error {
+		now := e.clk.Now().Unix()
+		jti := make([]byte, 8)
+		_, _ = rand.Read(jti)
+		claims := map[string]any{"iss": "agent-a", "sub": "agent-a", "aud": testTokenIssuer + "/oauth2/token",
+			"iat": now, "exp": now + 60, "jti": hex.EncodeToString(jti)}
+		assertion, err := keys.SignCompact(ctx, priv, keys.Header{Alg: keys.AlgEdDSA, Kid: "a-key", Typ: "JWT"}, claims)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = ts.Service.Exchange(ctx, tokensvc.ExchangeRequest{
+			ClientAssertion: assertion, SubjectToken: "not.a.jwt", SubjectTokenType: tokensvc.TokenTypeIDToken,
+		})
+		var te *tokensvc.Error
+		if !errors.As(err, &te) {
+			t.Fatalf("err = %v, want a tokensvc error", err)
+		}
+		return te
+	}
+	// Active: the assertion authenticates and the exchange fails later, at the
+	// subject token.
+	if te := exchange(); te.Code != tokensvc.CodeInvalidGrant {
+		t.Fatalf("active agent: %v, want to get as far as the subject token", te)
+	}
+	if _, err := agents.SetStatus(ctx, "agent-a", agentreg.StatusDisabled, created.Revision, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if te := exchange(); te.Code != tokensvc.CodeInvalidClient {
+		t.Fatalf("disabled agent: %v, want invalid_client at once", te)
+	}
+}
+
+// TestTokenEndpointSlowBody: a body that trickles in is cut at the read
+// deadline instead of holding the connection.
+func TestTokenEndpointSlowBody(t *testing.T) {
+	old := tokenReadTimeout
+	tokenReadTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { tokenReadTimeout = old })
+	fake := &fakeExchanger{issued: okIssued()}
+	e := newTokenEnv(t, fake)
+	ts := httptest.NewServer(e.h)
+	t.Cleanup(ts.Close)
+	conn, err := net.Dial("tcp", ts.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	_, _ = conn.Write([]byte("POST /oauth2/token HTTP/1.1\r\nHost: x\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 1000\r\n\r\ngrant_type="))
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatalf("no response to a stalled body: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest || fake.count() != 0 {
+		t.Fatalf("status = %d, calls %d, want 400 and no exchange", resp.StatusCode, fake.count())
+	}
 }
 
 type failingSigners struct{ err error }

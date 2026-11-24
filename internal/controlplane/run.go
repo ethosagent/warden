@@ -532,14 +532,15 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// key that is not loaded yet does not (the service answers
 	// signer_unavailable and /readyz reports it, like every key consumer).
 	if tokenCfg.Enabled {
-		svc, agents, terr := newTokenService(tokenCfg, pol.Identity, state, srv, keyMgr, clk, logger)
+		agents := agentregsqlite.New(state, agentregsqlite.WithClock(clk), agentregsqlite.WithLogger(logger))
+		ts, terr := newTokenService(tokenCfg, pol.Identity, state, agents, srv, keyMgr, clk, logger)
 		if terr != nil {
 			return fail(terr)
 		}
-		srv.EnableTokens(svc, tokenCfg.Issuer)
+		srv.EnableTokens(ts.Service, tokenCfg.Issuer)
 		logTokenService(logger, tokenCfg)
-		// The registry caches its snapshot; Watch drops it when another
-		// process (the offline CLI) commits, so a disabled agent stops
+		// Exactly one Watch on the one Store. It drops the snapshot when
+		// another process (the offline CLI) commits, so a disabled agent stops
 		// authenticating within one interval. Run waits for the loop before
 		// the state DB closes.
 		aCtx, aCancel := context.WithCancel(ctx)

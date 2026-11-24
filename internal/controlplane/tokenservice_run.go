@@ -54,14 +54,28 @@ func resolveTokenService(logger *slog.Logger, configPath, stateDir string, id co
 	return tc, nil
 }
 
-// servedSigners hands out the token key only when the control plane already
-// publishes it in the JWKS it serves. A key created or rotated this instant
-// (first start, emergency rotation) may not be in any verifier's cache yet;
-// until the JWKS rendering holds its kid the service answers
-// signer_unavailable instead of minting a token no worker can verify.
+// tokenKeyPublishWindow is how long a token key must have been published
+// before the service mints with it: the longest policy long-poll wait (a
+// worker that polled just before the key appeared learns of it one wait later)
+// plus the worker's clock skew. Normal rotations never wait on it, because
+// keys.token.prepublish (min 10m) already covers the window; only a first key
+// and an emergency promotion of a barely published key do.
+const tokenKeyPublishWindow = maxLongPollWait + time.Minute
+
+// servedSigners hands out the token key only once verifiers can be expected to
+// hold it: the active key must have been published (its persisted PublishAt)
+// for tokenKeyPublishWindow. Until then the service answers signer_unavailable
+// with Retry-After instead of minting a token no worker can verify yet. The
+// window comes from the persisted key metadata, so a restart does not reset it.
+//
+// served is the second hook: the kid must also be in the JWKS this server
+// serves. TODO(#96): also require the kid to be in the policy server's
+// last-served bundle tokenJWKS.
 type servedSigners struct {
-	inner  tokensvc.Signers
-	served func(kid string) bool
+	inner   tokensvc.Signers
+	records func(purpose string) []keys.Record
+	now     func() time.Time
+	served  func(kid string) bool
 }
 
 // Active implements tokensvc.Signers.
@@ -70,10 +84,22 @@ func (g servedSigners) Active(purpose string) (keys.Signer, error) {
 	if err != nil {
 		return nil, err
 	}
-	if purpose == keys.PurposeToken && !g.served(sg.KID()) {
+	if purpose != keys.PurposeToken {
+		return sg, nil
+	}
+	if g.served != nil && !g.served(sg.KID()) {
 		return nil, keys.ErrNoActiveKey
 	}
-	return sg, nil
+	for _, r := range g.records(purpose) {
+		if r.KID == sg.KID() {
+			if g.now().Before(r.PublishAt.Add(tokenKeyPublishWindow)) {
+				return nil, keys.ErrNoActiveKey
+			}
+			return sg, nil
+		}
+	}
+	// No metadata row for the active key: unknown, so not mintable.
+	return nil, keys.ErrNoActiveKey
 }
 
 // servesTokenKID reports whether the token JWKS this server serves holds kid.
@@ -92,12 +118,11 @@ func (s *Server) EnableTokens(ex TokenExchanger, issuer string) {
 // newTokenService assembles the token service on the open state database:
 // the agent registry, the replay and session tables, the block list, the IdP
 // verifier of the served identity block (narrowed to tokenService.allowedAZP)
-// and the token signing keys behind the served-JWKS guard. It also returns the
-// registry store: its reads come from a cached snapshot, so Run must start its
-// Watch to see an agent the offline CLI disabled.
-func newTokenService(tc config.TokenServiceConfig, id config.IdentitySettings, state *cpstate.DB, srv *Server, km *keys.Manager, clk clock.Clock, logger *slog.Logger) (*tokensvc.Service, *agentregsqlite.Store, error) {
-	if state == nil || km == nil || srv.blocks == nil {
-		return nil, nil, errors.New("control-plane: the token service needs the state database, the signing keys and the block list")
+// and the token signing keys behind the publish-window guard. agents is the
+// process's one registry Store; Run starts its single Watch.
+func newTokenService(tc config.TokenServiceConfig, id config.IdentitySettings, state *cpstate.DB, agents *agentregsqlite.Store, srv *Server, km *keys.Manager, clk clock.Clock, logger *slog.Logger) (*tokenService, error) {
+	if state == nil || km == nil || agents == nil || srv.blocks == nil {
+		return nil, errors.New("control-plane: the token service needs the state database, the agent registry, the signing keys and the block list")
 	}
 	idp, err := oidc.NewOIDCVerifier(oidc.Config{
 		Issuer:            id.Issuer,
@@ -111,9 +136,9 @@ func newTokenService(tc config.TokenServiceConfig, id config.IdentitySettings, s
 		Now:               clk.Now,
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("control-plane: tokenService: identity verifier: %w", err)
+		return nil, fmt.Errorf("control-plane: tokenService: identity verifier: %w", err)
 	}
-	agents := agentregsqlite.New(state, agentregsqlite.WithClock(clk), agentregsqlite.WithLogger(logger))
+	sessions := tokensvcsqlite.NewSessions(state)
 	// One issuer value feeds both the assertion audience and the iss of every
 	// issued token.
 	assertions := &tokensvc.AssertionVerifier{
@@ -128,16 +153,30 @@ func newTokenService(tc config.TokenServiceConfig, id config.IdentitySettings, s
 		Clients:         assertions,
 		Agents:          agents,
 		Blocks:          NewTokenBlockChecker(srv.blocks),
-		Signers:         servedSigners{inner: km.KeySet(), served: srv.servesTokenKID},
-		Sessions:        tokensvcsqlite.NewSessions(state),
+		Signers:         servedSigners{inner: km.KeySet(), records: km.KeySet().Records, now: clk.Now, served: srv.servesTokenKID},
+		Sessions:        sessions,
 		Resolvers:       map[string]tokensvc.SubjectResolver{tokensvc.TokenTypeIDToken: tokensvc.NewIDTokenResolver(idp)},
 		Now:             clk.Now,
 		Rand:            rand.Reader,
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("control-plane: tokenService: %w", err)
+		return nil, fmt.Errorf("control-plane: tokenService: %w", err)
 	}
-	return svc, agents, nil
+	return &tokenService{Service: svc, Sessions: sessions, Agents: agents}, nil
+}
+
+// tokenService is the assembled token service and the stores around it, so
+// later tickets (session revoke #254, purge #85) reach them without rebuilding.
+type tokenService struct {
+	Service  *tokensvc.Service
+	Sessions *tokensvcsqlite.Sessions
+	// Agents is the one agent registry Store of the process. Its reads come
+	// from a snapshot that its own writes invalidate directly and that Watch
+	// refreshes for other processes' writes.
+	// TODO: when #72 lands, Server.initAgentStore must reuse this Store (one
+	// Store, one Watch): a second Store on the single cpstate connection would
+	// never see this one's writes, and a disabled agent would keep minting.
+	Agents *agentregsqlite.Store
 }
 
 // logTokenService reports the enabled service: one INFO line, plus a WARN for

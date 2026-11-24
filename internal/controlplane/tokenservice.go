@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"time"
 
 	"github.com/ethosagent/warden/internal/tokensvc"
 )
@@ -26,6 +27,10 @@ import (
 //
 // The handler only parses and maps. Every decision, and every error code and
 // reason, comes from tokensvc.Service.Exchange.
+
+// tokenReadTimeout bounds reading the request body. A variable so a test can
+// shorten it.
+var tokenReadTimeout = 10 * time.Second
 
 const (
 	// tokenPath is the token endpoint; tokensvc.TokenPath is the same path
@@ -89,6 +94,10 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		writeOAuthError(w, http.StatusMethodNotAllowed, tokensvc.CodeInvalidRequest, reqMethodNotAllowed)
 		return
 	}
+	// The server has only a header timeout, so bound the body read here: a
+	// trickled body must not hold a goroutine. Unsupported writers (a test
+	// recorder) just skip it.
+	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(tokenReadTimeout))
 	form, status, code, reason := readTokenForm(w, r)
 	if reason != "" {
 		s.tokenDenied(r, code, reason, "")
@@ -236,7 +245,18 @@ func (s *Server) tokenDenied(r *http.Request, code tokensvc.OAuthCode, reason, a
 	if code == tokensvc.CodeTemporarilyUnavailable {
 		level = slog.LevelWarn
 	}
-	s.cfg.Logger.Log(r.Context(), level, "token_exchange_denied", "code", string(code), "reason", reason, "agent", agent)
+	// The id is the caller's claim until the assertion verified: an
+	// invalid_client, or a failure of the stores the verification itself uses,
+	// leaves it unproven, and a made-up id must not look like a real agent.
+	key := "agent"
+	switch {
+	case code == tokensvc.CodeInvalidClient,
+		reason == string(tokensvc.ReasonAgentStoreUnavailable),
+		reason == string(tokensvc.ReasonReplayStoreUnavailable),
+		reason == string(tokensvc.ReasonVerifierMisconfigured):
+		key = "claimed_agent"
+	}
+	s.cfg.Logger.Log(r.Context(), level, "token_exchange_denied", "code", string(code), "reason", reason, key, agent)
 }
 
 // errorKind names an error's dynamic type without its text, which may carry
@@ -264,7 +284,11 @@ func writeTokenJSON(w http.ResponseWriter, status int, v any) {
 
 // handleASMetadata serves GET /.well-known/oauth-authorization-server (RFC
 // 8414) so harnesses do not hard-code the token endpoint. Every URL derives
-// from the configured issuer, never from the request's Host.
+// from the configured issuer, never from the request's Host. The document is
+// served at the bare well-known path only: RFC 8414 section 3 inserts the path
+// of an issuer that has one after the well-known segment, which is not mounted,
+// so tokenService.issuer must have no path component for discovery to work
+// (token exchange itself is unaffected).
 func (s *Server) handleASMetadata(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET, HEAD")

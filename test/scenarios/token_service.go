@@ -37,6 +37,14 @@ func tokenUser(h *harness.H, sub string, groups ...string) string {
 		fakes.WithIAT(h.Clock().Now()), fakes.WithExp(h.Clock().Now().Add(30*time.Minute)))
 }
 
+// publishWindow is longer than the control plane's mint window after a key is
+// published (one policy long-poll plus worker skew).
+const publishWindow = 2*time.Minute + time.Second
+
+// waitTokenKeyPublished moves the harness clock past the window in which a
+// freshly created token key may not mint yet.
+func waitTokenKeyPublished(h *harness.H) { h.Clock().Advance(publishWindow) }
+
 // exchangeForm posts form to the token endpoint.
 func exchangeForm(h *harness.H, form url.Values) harness.RawResponse {
 	return h.CP().Exchange(form.Encode(), nil)
@@ -157,6 +165,10 @@ func requireNoCredentialsInLogs(t *testing.T, h *harness.H, secrets ...string) {
 // discovery document names the endpoint; no credential reaches the log.
 func tokenExchangeIssuesToken(t *testing.T, h *harness.H) {
 	agent := h.RegisterTokenAgent("harness-agent", []string{"eng"}, []string{"read", "write"})
+	// The first key was created a moment ago: until verifiers can hold it the
+	// endpoint refuses to mint, then it does.
+	requireRefusal(t, "first key not yet published", exchangeForm(h, agent.Form(tokenUser(h, "user-0", "eng"), nil)), 503, "temporarily_unavailable", "signer_unavailable")
+	waitTokenKeyPublished(h)
 	user := tokenUser(h, "user-42", "eng", "ops")
 	form := agent.Form(user, url.Values{"scope": {"write read"}})
 	assertion := form.Get("client_assertion")
@@ -218,6 +230,7 @@ func tokenExchangeIssuesToken(t *testing.T, h *harness.H) {
 // with a closed reason and no token; the four causes of a failed client
 // authentication are indistinguishable.
 func tokenExchangeRefusals(t *testing.T, h *harness.H) {
+	waitTokenKeyPublished(h)
 	agent := h.RegisterTokenAgent("harness-agent", []string{"eng"}, []string{"read", "write"})
 	other := h.RegisterTokenAgent("second-agent", []string{"eng"}, []string{"read"})
 	user := tokenUser(h, "user-1", "eng")
@@ -333,6 +346,7 @@ func tokenServiceDisabledByDefault(t *testing.T, h *harness.H) {
 // Retry-After and mints nothing, and exchanges work again once the store
 // returns.
 func tokenExchangeSignerUnavailable(t *testing.T, h *harness.H) {
+	waitTokenKeyPublished(h)
 	agent := h.RegisterTokenAgent("harness-agent", []string{"eng"}, []string{"read"})
 	user := tokenUser(h, "user-1", "eng")
 	decodeToken(t, exchangeForm(h, agent.Form(user, nil)))

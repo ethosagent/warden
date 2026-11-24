@@ -1548,11 +1548,20 @@ commented block in `configs/config.example.yaml` for every key and default.
   `invalid_client` answers the same `client_authentication_failed`, so an unknown agent, an
   unknown key, a bad signature, a replay and a disabled agent cannot be told apart. Every reply
   carries `Cache-Control: no-store` and `Pragma: no-cache`.
-- **Served-key guard.** A token is minted only with a key the control plane already publishes
-  in `/.well-known/jwks.json`; until the JWKS holds the active kid (first key creation, an
-  emergency rotation) the endpoint answers 503 `signer_unavailable`.
-- **Agent registry cache.** The registry store serves reads from a snapshot that a 2 s watch
-  refreshes, so an agent disabled with the offline CLI stops authenticating within about 2 s.
+- **Publish-window guard.** A token is minted only with a key that has been published for at
+  least one policy long-poll wait plus worker skew (2 minutes), judged from the key's persisted
+  `publish_at`, so a restart does not reset it. Normal rotations never wait (the prepublish
+  window covers it); the first key after creation, and an emergency promotion of a barely
+  published key, answer 503 `signer_unavailable` with `Retry-After` for about one long-poll.
+  The key must also be in the JWKS the control plane serves. Once signed bundles land (#96)
+  the kid must also be in the last-served bundle token JWKS.
+- **Agent registry cache.** The control plane has one registry store; it serves reads from a
+  snapshot that its own writes invalidate at once and that a 2 s watch refreshes for other
+  processes, so an agent disabled with the offline CLI stops authenticating within about 2 s.
+- **Discovery and the issuer path.** The metadata is served at the bare
+  `/.well-known/oauth-authorization-server` path only. RFC 8414 section 3 puts the path of an
+  issuer that has one after that segment, which is not mounted, so use an issuer with no path
+  component if clients rely on discovery (token exchange itself works with any path).
 - **Not yet.** Rate limits, issuance records and metrics arrive with W-P2-TOKX-04 (#85) and
   token-session admin revocation with #254; the `tokenService.rateLimit` and `eventRetention`
   keys are validated now and enforced then.
