@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -419,13 +420,20 @@ func TestAPIKeysList(t *testing.T) {
 	if got := e.list(ed, ""); got[0].Status != "expired" {
 		t.Errorf("status after expiry = %q", got[0].Status)
 	}
-	// A key cannot list keys.
+	// A key cannot list keys, even a live one.
+	live, _ := e.mint("eve", groupEditor, "policy:read")
+	rec := e.do(live, http.MethodGet, keysPath, "")
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), `"need":"none"`) {
+		t.Errorf("live key listing = %d %s, want 403 insufficient_scope", rec.Code, rec.Body.String())
+	}
 	wantStatus(t, e.do(mineTok, http.MethodGet, keysPath, ""), http.StatusUnauthorized, "expired key listing")
 	// A role downgrade shows in effectiveScopes: eve's group moves to viewer.
 	e.srv.cfg.Console.Roles.Editor = nil
 	e.srv.cfg.Console.Roles.Viewer = append(e.srv.cfg.Console.Roles.Viewer, groupEditor)
-	if all := e.list(admin, "?owner_sub=eve"); len(all) != 1 || strings.Join(all[0].EffectiveScopes, ",") != "policy:read" {
-		t.Errorf("effective scopes after a downgrade to viewer = %+v, want only policy:read", all)
+	for _, k := range e.list(admin, "?owner_sub=eve") {
+		if strings.Join(k.EffectiveScopes, ",") != "policy:read" {
+			t.Errorf("effective scopes after a downgrade to viewer = %+v, want only policy:read", k)
+		}
 	}
 }
 
@@ -529,5 +537,107 @@ func TestAPIKeysAdminAudit(t *testing.T) {
 	rows = e.rec.inputs()
 	if last := rows[len(rows)-1]; last.Action != "api_key.create" || last.Outcome != adminaudit.OutcomeDenied {
 		t.Errorf("denied create row = %+v", last)
+	}
+}
+
+func TestRevokeAPIKeysForOwnerInput(t *testing.T) {
+	e := newKeyEnv(t, keyEnvOpts{})
+	for _, c := range [][3]string{{"", "", "by"}, {keyOwnerIss, "", "by"}, {keyOwnerIss, "sub", ""}} {
+		if n, err := e.srv.RevokeAPIKeysForOwner(context.Background(), c[0], c[1], c[2]); n != 0 || !errors.Is(err, apikeys.ErrInvalidInput) {
+			t.Errorf("RevokeAPIKeysForOwner(%q,%q,%q) = %d, %v, want ErrInvalidInput", c[0], c[1], c[2], n, err)
+		}
+	}
+	// An issuer whose keys have all expired is still swept (and counted).
+	tok, id := e.mint("exp", groupEditor, "policy:read")
+	e.clk.Advance(48 * time.Hour)
+	n, err := e.srv.RevokeAPIKeysForOwner(context.Background(), "", "exp", "off")
+	if err != nil || n != 1 {
+		t.Fatalf("revoking an owner with only expired keys = %d, %v, want 1", n, err)
+	}
+	if k, _ := e.store.Get(context.Background(), id); k.RevokedAt.IsZero() {
+		t.Error("the expired key stayed unrevoked")
+	}
+	_ = tok
+}
+
+// TestAuditSkipIsVerified: a handler's Skip is honoured only when the target's
+// state provably did not move.
+func TestAuditSkipIsVerified(t *testing.T) {
+	e := newKeyEnv(t, keyEnvOpts{})
+	state := 0
+	e.srv.RegisterStateHasher("skiptest", func(context.Context) (string, error) { return fmt.Sprint(state), nil })
+	row := authzRow{Action: "skip.test", Target: "skiptest", Audited: true, Class: classAudited}
+	run := func(target string, h http.HandlerFunc) *httptest.ResponseRecorder {
+		r := row
+		r.Target = target
+		mw := e.srv.adminAuditMiddleware(func(*http.Request) (authzRow, bool) { return r, true }, h)
+		req := httptest.NewRequest(http.MethodPost, "/x", nil)
+		req = req.WithContext(WithPrincipal(req.Context(), Principal{Kind: PrincipalSession, Iss: keyOwnerIss, Sub: "ada", Groups: []string{groupAdmin}, AuthMethod: "oidc"}))
+		rec := httptest.NewRecorder()
+		mw.ServeHTTP(rec, req)
+		return rec
+	}
+	rows := func() int { return len(e.rec.inputs()) }
+
+	// Verified no-op: no row.
+	before := rows()
+	run("skiptest", func(w http.ResponseWriter, r *http.Request) {
+		adminaudit.Skip(r.Context())
+		w.WriteHeader(http.StatusNoContent)
+	})
+	if rows() != before {
+		t.Error("a verified idempotent repeat wrote a row")
+	}
+	// Skip while mutating hashed state: row written, claim refused.
+	run("skiptest", func(w http.ResponseWriter, r *http.Request) {
+		state++
+		adminaudit.Skip(r.Context())
+		w.WriteHeader(http.StatusNoContent)
+	})
+	in := e.rec.inputs()
+	if len(in) != before+1 || in[before].Details[detailSkipRefused] != "true" || in[before].BeforeHash == in[before].AfterHash {
+		t.Fatalf("a Skip over a real change = %+v", in)
+	}
+	// Skip on a target with no hasher cannot be verified: row written.
+	before = rows()
+	run("unhashed", func(w http.ResponseWriter, r *http.Request) {
+		adminaudit.Skip(r.Context())
+		w.WriteHeader(http.StatusNoContent)
+	})
+	if in = e.rec.inputs(); len(in) != before+1 || in[before].Details[detailSkipRefused] != "true" {
+		t.Fatalf("a Skip with no hasher = %+v", in[before:])
+	}
+	// Skip with a non-ok outcome: row written.
+	before = rows()
+	run("skiptest", func(w http.ResponseWriter, r *http.Request) {
+		adminaudit.Skip(r.Context())
+		w.WriteHeader(http.StatusConflict)
+	})
+	if in = e.rec.inputs(); len(in) != before+1 || in[before].Outcome != adminaudit.OutcomeRejected {
+		t.Fatalf("a Skip on a 409 = %+v", in[before:])
+	}
+	// A hasher error cannot verify either.
+	e.srv.RegisterStateHasher("broken", func(context.Context) (string, error) { return "", errors.New("boom") })
+	before = rows()
+	run("broken", func(w http.ResponseWriter, r *http.Request) {
+		adminaudit.Skip(r.Context())
+		w.WriteHeader(http.StatusNoContent)
+	})
+	if rows() != before+1 {
+		t.Error("a Skip with a failing hasher wrote no row")
+	}
+}
+
+// TestAPIKeysSessionRevokeAudit: the sessions row says keys were revoked too.
+func TestAPIKeysSessionRevokeAudit(t *testing.T) {
+	e := newKeyEnv(t, keyEnvOpts{})
+	e.mint("sally", groupEditor, "policy:read")
+	e.mint("sally", groupEditor, "policy:write")
+	admin := e.session("ada", groupAdmin, "oidc")
+	wantStatus(t, e.as(admin, http.MethodDelete, "/dashboard/api/sessions?sub=sally", ""), http.StatusOK, "revoke by sub")
+	rows := e.rec.inputs()
+	last := rows[len(rows)-1]
+	if last.Action != "sessions.revoke" || last.Details[adminaudit.DetailOp] != "revoke_sub_and_api_keys" || last.Details[adminaudit.DetailAPIKeysRevoked] != "2" {
+		t.Errorf("sessions row = %+v", last)
 	}
 }

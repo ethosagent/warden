@@ -22,9 +22,12 @@ const (
 	// describe a key an API key create or revoke row is about (W-P2-APIK-03).
 	DetailScopes    = "scopes"
 	DetailExpiresAt = "expires_at"
+	// DetailAPIKeysRevoked is how many API keys a session revoke-by-subject also
+	// revoked.
+	DetailAPIKeysRevoked = "api_keys_revoked"
 )
 
-var annotationKeys = map[string]bool{DetailOp: true, DetailEtag: true, DetailHasSub: true, DetailHasEmail: true, DetailAPIKeyID: true, DetailScopes: true, DetailExpiresAt: true}
+var annotationKeys = map[string]bool{DetailOp: true, DetailEtag: true, DetailHasSub: true, DetailHasEmail: true, DetailAPIKeyID: true, DetailScopes: true, DetailExpiresAt: true, DetailAPIKeysRevoked: true}
 
 // Annotation is the per-request carrier the admin audit middleware puts in
 // the request context. Handlers fill it through Annotate; the middleware reads

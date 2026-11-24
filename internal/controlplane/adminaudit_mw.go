@@ -56,6 +56,9 @@ const (
 	// Details the middleware itself sets (never a value from the request).
 	detailHashError = "hash_error"
 	detailReason    = "reason"
+	// detailSkipRefused marks a row whose handler asked for no row (Skip) but
+	// whose claim the middleware could not verify.
+	detailSkipRefused = "skip_refused"
 )
 
 var requestIDPattern = regexp.MustCompile(`^[A-Za-z0-9-]{1,64}$`)
@@ -252,8 +255,18 @@ func (s *Server) adminAuditMiddleware(classify func(*http.Request) (authzRow, bo
 		next.ServeHTTP(sw.writer(), r.WithContext(actx))
 		status := sw.code()
 		outcome := outcomeFor(status)
-		if ann.Skipped() && outcome == adminaudit.OutcomeOK {
-			return // an idempotent repeat that changed nothing: no row
+		// A handler's Skip is a claim, not a command: it is honoured only when the
+		// middleware can verify that nothing changed (the target has a state
+		// hasher, both hashes were computed, and they are equal). Otherwise the
+		// row is written as usual and says the claim was refused.
+		skipRefused := false
+		if ann.Skipped() {
+			if outcome == adminaudit.OutcomeOK && beforeErr == nil && a.hasHasher(row.Target) {
+				if after, afterErr := a.stateHash(ctx, row.Target); afterErr == nil && after == before {
+					return // an idempotent repeat that changed nothing: no row
+				}
+			}
+			skipRefused = true
 		}
 		if !authed && outcome != adminaudit.OutcomeOK {
 			// Only an anonymous request that changed state needs a row; anything
@@ -275,6 +288,9 @@ func (s *Server) adminAuditMiddleware(classify func(*http.Request) (authzRow, bo
 		if beforeErr != nil || afterErr != nil {
 			before, after = "", ""
 			details[detailHashError] = "true"
+		}
+		if skipRefused {
+			details[detailSkipRefused] = "true"
 		}
 		if csrfRefused(ctx) {
 			details[detailReason] = "csrf"

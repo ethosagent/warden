@@ -398,16 +398,20 @@ func (s *Server) revokeAPIKeysOfOwner(w http.ResponseWriter, r *http.Request, p 
 }
 
 // RevokeAPIKeysForOwner revokes every unrevoked key owned by (iss, sub) and
-// returns how many. An empty iss means every issuer that has a key for sub. It
+// returns how many (the count includes keys that expired without being revoked,
+// which RevokeByOwner also marks). An empty iss means every issuer that has a key for sub. It
 // is the one call offboarding paths use (the session revoke-by-sub route and a
 // later Offboard(sub)); it goes through Store.RevokeByOwner so the Index stops
 // accepting the keys before it returns. With API keys disabled it does nothing.
 func (s *Server) RevokeAPIKeysForOwner(ctx context.Context, iss, sub, by string) (int, error) {
 	st := s.cfg.APIKeyStore
-	if st == nil || sub == "" || by == "" {
-		return 0, nil
+	if st == nil {
+		return 0, nil // API keys are disabled
 	}
-	keys, err := st.List(ctx, apikeys.ListFilter{OwnerSub: sub, ActiveOnly: true})
+	if sub == "" || by == "" {
+		return 0, apikeys.ErrInvalidInput
+	}
+	keys, err := st.List(ctx, apikeys.ListFilter{OwnerSub: sub})
 	if err != nil {
 		return 0, err
 	}
