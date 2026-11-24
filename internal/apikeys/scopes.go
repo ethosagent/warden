@@ -71,19 +71,28 @@ func NewP2Registry() *Registry {
 	return r
 }
 
-// reserved scopes are names later features will register. Until they do they
-// are unknown to ParseScopes, so a key cannot be minted for a capability that
-// does not exist yet; reserving the name stops another feature from claiming
-// it with a different meaning.
-// Reserved reports whether s is a name held for a later feature: mcp:read and
-// mcp:write (P4 MCP registry), grants:read (viewer, W-P4-DGR-06) and
-// grants:write (admin, W-P4-DGR-07).
-func Reserved(s Scope) bool {
+// ReservedRole returns the minimum role a reserved scope must be registered
+// at: mcp:read viewer and mcp:write editor (P4 MCP registry), grants:read
+// viewer (W-P4-DGR-06) and grants:write admin (W-P4-DGR-07). The names are
+// unknown to ParseScopes until their feature registers them, so a key cannot be
+// minted for a capability that does not exist yet; reserving the name and role
+// stops another feature claiming it with a different meaning.
+func ReservedRole(s Scope) (config.Role, bool) {
 	switch s {
-	case "mcp:read", "mcp:write", "grants:read", "grants:write":
-		return true
+	case "mcp:read", "grants:read":
+		return config.RoleViewer, true
+	case "mcp:write":
+		return config.RoleEditor, true
+	case "grants:write":
+		return config.RoleAdmin, true
 	}
-	return false
+	return 0, false
+}
+
+// Reserved reports whether s is a name held for a later feature.
+func Reserved(s Scope) bool {
+	_, ok := ReservedRole(s)
+	return ok
 }
 
 // Register adds s to the registry with the minimum console role a key owner
@@ -95,6 +104,9 @@ func (r *Registry) Register(s Scope, minRole config.Role) error {
 	}
 	if minRole < config.RoleViewer || minRole > config.RoleAdmin {
 		return fmt.Errorf("%w: role for %q", ErrInvalidScope, string(s))
+	}
+	if want, ok := ReservedRole(s); ok && want != minRole {
+		return fmt.Errorf("%w: %q is reserved at role %s", ErrInvalidScope, string(s), want)
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()

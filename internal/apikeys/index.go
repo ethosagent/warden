@@ -9,8 +9,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/ethosagent/warden/internal/clock"
 )
 
 // Default polling and flush intervals.
@@ -36,12 +34,26 @@ const (
 	ReasonBadSecret Reason = "bad_secret"
 	ReasonExpired   Reason = "expired"
 	ReasonRevoked   Reason = "revoked"
+	// ReasonIndexStale: the Index has not been able to confirm it is current
+	// for longer than the staleness ceiling, so it refuses every key rather
+	// than risk accepting one revoked elsewhere.
+	ReasonIndexStale Reason = "index_stale"
 )
 
-// IndexOptions configures an Index. Zero values use the real clock, a 2 s poll
-// interval, a 60 s flush interval and slog.Default.
+// staleAfterPolls is the staleness ceiling in poll intervals (30s at the
+// default 2s): the longest Run may go without a successful data_version check
+// or reload before Authenticate fails closed.
+const staleAfterPolls = 15
+
+// IndexOptions configures an Index. Now and After are required: this is a
+// domain package, which reads no clock of its own, so assembly injects the
+// clock port's methods (clk.Now, clk.After). Zero intervals mean a 2 s poll and
+// a 60 s flush; a nil Logger means slog.Default.
 type IndexOptions struct {
-	Clock         clock.Clock
+	// Now returns the current instant.
+	Now func() time.Time
+	// After returns a channel that receives once d has elapsed.
+	After         func(d time.Duration) <-chan time.Time
 	PollInterval  time.Duration
 	FlushInterval time.Duration
 	Logger        *slog.Logger
@@ -57,17 +69,26 @@ type IndexOptions struct {
 // poll even though the database version did not move.
 type Index struct {
 	store         Store
-	clk           clock.Clock
+	now           func() time.Time
+	after         func(time.Duration) <-chan time.Time
 	log           *slog.Logger
 	pollInterval  time.Duration
 	flushInterval time.Duration
 
 	snap atomic.Pointer[indexSnapshot]
 
-	// loadMu serialises rebuilds and guards version.
+	// loadMu serialises rebuilds and revocation overlays and guards version.
 	loadMu  sync.Mutex
 	version int64
 	stale   atomic.Bool
+
+	// running is set once Run starts; the staleness ceiling only applies then,
+	// because without a poll loop nothing could refresh lastOK. lastOK is the
+	// clock time (unix nanos) of the last successful data_version check or
+	// reload. staleLogged makes the stale log line fire once per episode.
+	running     atomic.Bool
+	lastOK      atomic.Int64
+	staleLogged atomic.Bool
 
 	// usedMu guards last-use values waiting for a flush.
 	usedMu sync.Mutex
@@ -81,8 +102,8 @@ type indexSnapshot struct {
 // NewIndex loads the Store's keys into a new Index and subscribes it to the
 // Store's own writes. An error here means no Index, never an empty one.
 func NewIndex(ctx context.Context, store Store, opts IndexOptions) (*Index, error) {
-	if opts.Clock == nil {
-		opts.Clock = clock.Real()
+	if opts.Now == nil || opts.After == nil {
+		return nil, errors.New("apikeys: IndexOptions.Now and After are required")
 	}
 	if opts.PollInterval <= 0 {
 		opts.PollInterval = DefaultPollInterval
@@ -94,26 +115,56 @@ func NewIndex(ctx context.Context, store Store, opts IndexOptions) (*Index, erro
 		opts.Logger = slog.Default()
 	}
 	ix := &Index{
-		store: store, clk: opts.Clock, log: opts.Logger,
+		store: store, now: opts.Now, after: opts.After, log: opts.Logger,
 		pollInterval: opts.PollInterval, flushInterval: opts.FlushInterval,
 		used: map[string]Use{},
 	}
 	if err := ix.Rebuild(ctx); err != nil {
 		return nil, fmt.Errorf("apikeys: load index: %w", err)
 	}
+	ix.lastOK.Store(ix.now().UnixNano())
 	store.OnChange(ix.onLocalChange)
 	return ix, nil
 }
 
-func (ix *Index) onLocalChange() {
+// onLocalChange handles a write this process just committed. A revocation is
+// first applied to the in-memory snapshot, a step that cannot fail, so the key
+// stops authenticating at once even if the full reload below does not work.
+func (ix *Index) onLocalChange(c Change) {
+	if c.revokes() {
+		ix.applyRevocation(c)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), rebuildTimeout)
 	defer cancel()
 	if err := ix.Rebuild(ctx); err != nil {
-		// The write is committed but the snapshot is behind. The database
-		// version will not move for our own write, so force the next poll.
+		// The write is committed but the snapshot may be behind (a new key is
+		// missing). The database version will not move for our own write, so
+		// force the next poll to reload.
 		ix.stale.Store(true)
 		ix.log.Warn("apikeys: index rebuild failed after a local write; will retry at the next poll", "err", err)
 	}
+}
+
+// applyRevocation swaps in a copy of the snapshot with the revoked keys marked.
+func (ix *Index) applyRevocation(c Change) {
+	ix.loadMu.Lock()
+	defer ix.loadMu.Unlock()
+	cur := ix.snap.Load()
+	next := &indexSnapshot{byID: make(map[string]entry, len(cur.byID))}
+	byID := make(map[string]struct{}, len(c.RevokedIDs))
+	for _, id := range c.RevokedIDs {
+		byID[id] = struct{}{}
+	}
+	for id, e := range cur.byID {
+		_, hit := byID[id]
+		if hit || (c.OwnerSub != "" && e.key.OwnerIss == c.OwnerIss && e.key.OwnerSub == c.OwnerSub) {
+			if e.key.RevokedAt.IsZero() {
+				e.key.RevokedAt, e.key.RevokedBy = c.RevokedAt, c.RevokedBy
+			}
+		}
+		next.byID[id] = e
+	}
+	ix.snap.Store(next)
 }
 
 // Rebuild replaces the snapshot with the Store's current rows. On error the
@@ -132,17 +183,45 @@ func (ix *Index) Rebuild(ctx context.Context) error {
 	ix.snap.Store(next)
 	ix.version = snap.version
 	ix.stale.Store(false)
+	ix.touch()
 	return nil
 }
 
+// touch records that the index was confirmed current just now.
+func (ix *Index) touch() {
+	ix.lastOK.Store(ix.now().UnixNano())
+	ix.staleLogged.Store(false)
+}
+
+// tooStale reports whether Run has gone past the staleness ceiling without a
+// successful check, logging once per episode.
+func (ix *Index) tooStale() bool {
+	if !ix.running.Load() {
+		return false
+	}
+	age := ix.now().Sub(time.Unix(0, ix.lastOK.Load()))
+	if age <= staleAfterPolls*ix.pollInterval {
+		return false
+	}
+	if ix.staleLogged.CompareAndSwap(false, true) {
+		ix.log.Error("apikeys: index not refreshed within the staleness ceiling; refusing all keys until it is",
+			"age", age.Round(time.Second), "ceiling", staleAfterPolls*ix.pollInterval)
+	}
+	return true
+}
+
 // Authenticate resolves a presented key: Parse, a map lookup by id, a
-// constant-time compare of sha256(secret), then expiry and revocation against
-// now. Every failure returns ErrUnauthorized; the Reason is for logs and the
+// constant-time compare of sha256(secret), then revocation and expiry against
+// now. While Run is active, a snapshot that could not be confirmed current for
+// 15 poll intervals refuses every key with ReasonIndexStale. Every failure returns ErrUnauthorized; the Reason is for logs and the
 // counter. The returned Key shares slices with the snapshot: do not modify it.
 func (ix *Index) Authenticate(token string, now time.Time) (Key, Reason, error) {
 	id, hash, err := parse(token)
 	if err != nil {
 		return Key{}, ReasonMalformed, ErrUnauthorized
+	}
+	if ix.tooStale() {
+		return Key{}, ReasonIndexStale, ErrUnauthorized
 	}
 	e, ok := ix.snap.Load().byID[id]
 	if !ok {
@@ -151,11 +230,11 @@ func (ix *Index) Authenticate(token string, now time.Time) (Key, Reason, error) 
 	if subtle.ConstantTimeCompare(hash[:], e.hash[:]) != 1 {
 		return Key{}, ReasonBadSecret, ErrUnauthorized
 	}
-	if !now.Before(e.key.ExpiresAt) {
-		return Key{}, ReasonExpired, ErrUnauthorized
-	}
 	if !e.key.RevokedAt.IsZero() {
 		return Key{}, ReasonRevoked, ErrUnauthorized
+	}
+	if !now.Before(e.key.ExpiresAt) {
+		return Key{}, ReasonExpired, ErrUnauthorized
 	}
 	return e.key, "", nil
 }
@@ -203,10 +282,11 @@ func (ix *Index) Flush(ctx context.Context) error {
 // Run polls for changes made by other processes and flushes last-use values
 // until ctx ends, then flushes once more.
 func (ix *Index) Run(ctx context.Context) {
-	poll := ix.clk.NewTimer(ix.pollInterval)
-	flush := ix.clk.NewTimer(ix.flushInterval)
-	defer poll.Stop()
-	defer flush.Stop()
+	ix.touch()
+	ix.running.Store(true)
+	defer ix.running.Store(false)
+	pollCh := ix.after(ix.pollInterval)
+	flushCh := ix.after(ix.flushInterval)
 	for {
 		select {
 		case <-ctx.Done():
@@ -216,14 +296,14 @@ func (ix *Index) Run(ctx context.Context) {
 			}
 			cancel()
 			return
-		case <-poll.C():
+		case <-pollCh:
 			ix.poll(ctx)
-			poll.Reset(ix.pollInterval)
-		case <-flush.C():
+			pollCh = ix.after(ix.pollInterval)
+		case <-flushCh:
 			if err := ix.Flush(ctx); err != nil && ctx.Err() == nil {
 				ix.log.Warn("apikeys: last-use flush failed", "err", err)
 			}
-			flush.Reset(ix.flushInterval)
+			flushCh = ix.after(ix.flushInterval)
 		}
 	}
 }
@@ -242,6 +322,7 @@ func (ix *Index) poll(ctx context.Context) {
 	changed := v != ix.version || ix.stale.Load()
 	ix.loadMu.Unlock()
 	if !changed {
+		ix.touch()
 		return
 	}
 	if err := ix.Rebuild(ctx); err != nil && ctx.Err() == nil {

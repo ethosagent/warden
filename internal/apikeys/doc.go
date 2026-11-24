@@ -12,14 +12,20 @@
 // Layout:
 //   - format.go: Generate, Parse, LooksLikeKey and the Pattern egress
 //     detection builds on.
-//   - scopes.go: the scope registry (Register, Lookup, ParseScopes).
-//   - store.go: the Store interface, SQLiteStore and the api_keys/0001
-//     migration.
-//   - index.go: Index, the request-path authenticator that is rebuilt after
-//     in-process writes and reloaded when another process changes the file.
+//   - scopes.go: the scope Registry (Register, Lookup, ParseScopes).
+//   - store.go: Key, CreateParams, Snapshot, Change and the Store port.
+//   - index.go: Index, the request-path authenticator that applies local
+//     revocations at once and reloads when another process changes the file.
+//   - adapters/sqlitestore: SQLiteStore and the api_keys/0001 migration.
 //
 // A key is stored only as the sha256 of its 32 secret bytes (a 256-bit random
-// secret needs no slow hash). No exported method or String/LogValue in this
-// package returns or prints the plaintext, the secret or the stored hash; the
-// one place the plaintext leaves is the return value of Store.Create, once.
+// secret needs no slow hash). No String, GoString or LogValue in this package
+// prints the plaintext, the secret or the stored hash, and Authenticate and
+// Parse never return them. The plaintext leaves once, as the return value of
+// Store.Create; the hash is reachable only through Generated.StorageHash, which
+// Store implementations use to persist it and nothing else may.
+//
+// Layering (as internal/keys): this package is the domain, with the format,
+// the scope Registry, the Store port and the Index, and does no I/O. The SQLite
+// implementation lives in adapters/sqlitestore.
 package apikeys

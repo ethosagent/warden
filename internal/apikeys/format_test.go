@@ -1,14 +1,25 @@
 package apikeys
 
 import (
+	"bytes"
 	"fmt"
+	"io"
+	mrand "math/rand/v2"
 	"regexp"
 	"strings"
 	"testing"
 )
 
+// testRand is a deterministic entropy source for tests.
+func testRand(seed byte) io.Reader {
+	var key [32]byte
+	key[0] = seed
+	return mrand.NewChaCha8(key)
+}
+
 func TestParse(t *testing.T) {
-	g, err := Generate(nil)
+	rd := testRand(1)
+	g, err := Generate(rd, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +52,7 @@ func TestParse(t *testing.T) {
 	}
 
 	for range 200 {
-		g, err := Generate(nil)
+		g, err := Generate(rd, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -62,7 +73,7 @@ func TestParse(t *testing.T) {
 }
 
 func TestLooksLikeKey(t *testing.T) {
-	g, _ := Generate(nil)
+	g, _ := Generate(testRand(2), nil)
 	for in, want := range map[string]bool{
 		g.Plaintext:       true,
 		"wak_":            true, // prefix only: a truncated key still routes to the key path
@@ -80,22 +91,64 @@ func TestLooksLikeKey(t *testing.T) {
 
 func TestGenerateRetriesOnCollision(t *testing.T) {
 	calls := 0
-	g, err := Generate(func(string) bool { calls++; return calls <= 3 })
+	g, err := Generate(testRand(3), func(string) bool { calls++; return calls <= 3 })
 	if err != nil || calls != 4 {
 		t.Fatalf("Generate: err %v after %d probes, want success on the 4th", err, calls)
 	}
-	if _, err := Generate(func(string) bool { return true }); err == nil {
+	if _, err := Generate(testRand(3), func(string) bool { return true }); err == nil {
 		t.Fatal("Generate with every id taken returned no error")
 	}
 	_ = g
 }
 
 func TestGeneratedNeverPrintsPlaintext(t *testing.T) {
-	g, _ := Generate(nil)
+	g, _ := Generate(testRand(4), nil)
 	secret := g.Plaintext[sepOffset+1:]
 	for _, s := range []string{fmt.Sprint(g), fmt.Sprintf("%v %+v %#v", g, g, g)} {
 		if strings.Contains(s, secret) || strings.Contains(s, g.Plaintext) {
 			t.Fatalf("formatted Generated leaks the key: %s", s)
 		}
 	}
+}
+
+func TestGenerateRandomSourceFailure(t *testing.T) {
+	if _, err := Generate(bytes.NewReader([]byte{1, 2, 3}), nil); err == nil {
+		t.Fatal("Generate with a short entropy source returned no error")
+	}
+}
+
+func TestStorageHashMatchesParse(t *testing.T) {
+	g, _ := Generate(testRand(5), nil)
+	if _, h, err := parse(g.Plaintext); err != nil || h != g.StorageHash() {
+		t.Fatalf("StorageHash differs from the hash Parse derives: %v", err)
+	}
+}
+
+// FuzzParse: Parse never panics, and an input it accepts is exactly a key
+// shape (length, prefix, alphabet) whose id and hash are stable.
+func FuzzParse(f *testing.F) {
+	g, _ := Generate(testRand(6), nil)
+	for _, seed := range []string{"", Prefix, g.Plaintext, g.Plaintext[:Length-1], g.Plaintext + "a",
+		"WAK_" + g.Plaintext[len(Prefix):], Prefix + "0000000000000000_" + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, in string) {
+		id, h, err := parse(in)
+		if err != nil {
+			if err != ErrMalformed {
+				t.Fatalf("parse error = %v, want ErrMalformed", err)
+			}
+			return
+		}
+		if len(in) != Length || !LooksLikeKey(in) || in[len(Prefix):sepOffset] != id {
+			t.Fatalf("accepted a non-key %q", in)
+		}
+		id2, err := Parse(in)
+		if err != nil || id2 != id {
+			t.Fatalf("Parse disagrees with parse: %q %v", id2, err)
+		}
+		if _, h2, _ := parse(in); h2 != h {
+			t.Fatal("hash not stable")
+		}
+	})
 }

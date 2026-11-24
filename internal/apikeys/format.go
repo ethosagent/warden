@@ -1,12 +1,12 @@
 package apikeys
 
 import (
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base32"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 )
 
@@ -66,17 +66,24 @@ type Generated struct {
 	hash [sha256.Size]byte
 }
 
+// StorageHash returns the sha256 of the key's secret bytes, the only form a
+// Store may persist. It exists for Store implementations alone: never log it,
+// return it from an API or put it in an audit row.
+func (g Generated) StorageHash() [sha256.Size]byte { return g.hash }
+
 // String and GoString never print the plaintext.
 func (g Generated) String() string   { return "apikeys.Generated{id=" + g.ID + "}" }
 func (g Generated) GoString() string { return g.String() }
 
-// Generate mints a key whose id taken does not report as already used. A nil
-// taken accepts every id. It retries with a fresh id on a collision and fails
-// after a few attempts rather than loop forever.
-func Generate(taken func(id string) bool) (Generated, error) {
+// Generate mints a key from random bytes read from r (crypto/rand.Reader in
+// production; a domain package does no I/O of its own, so the adapter or
+// assembly injects it). It skips any id taken reports as already used (a nil
+// taken accepts every id), retrying with a fresh id, and fails after a few
+// attempts rather than loop forever.
+func Generate(r io.Reader, taken func(id string) bool) (Generated, error) {
 	for range maxIDAttempts {
 		var idb [idLen / 2]byte
-		if _, err := rand.Read(idb[:]); err != nil {
+		if _, err := io.ReadFull(r, idb[:]); err != nil {
 			return Generated{}, fmt.Errorf("apikeys: random id: %w", err)
 		}
 		id := hex.EncodeToString(idb[:])
@@ -84,7 +91,7 @@ func Generate(taken func(id string) bool) (Generated, error) {
 			continue
 		}
 		var secret [secretRaw]byte
-		if _, err := rand.Read(secret[:]); err != nil {
+		if _, err := io.ReadFull(r, secret[:]); err != nil {
 			return Generated{}, fmt.Errorf("apikeys: random secret: %w", err)
 		}
 		return Generated{

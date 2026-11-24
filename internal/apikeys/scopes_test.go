@@ -3,6 +3,7 @@ package apikeys
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/ethosagent/warden/internal/config"
 )
@@ -90,5 +91,45 @@ func TestReservedAndMaxRole(t *testing.T) {
 	}
 	if got := reg.MaxRole(nil); got != 0 {
 		t.Errorf("reg.MaxRole(nil) = %v", got)
+	}
+}
+
+func TestReservedScopesCarryTheirRole(t *testing.T) {
+	for s, want := range map[Scope]config.Role{
+		"mcp:read": config.RoleViewer, "mcp:write": config.RoleEditor,
+		"grants:read": config.RoleViewer, "grants:write": config.RoleAdmin,
+	} {
+		if got, ok := ReservedRole(s); !ok || got != want {
+			t.Errorf("ReservedRole(%s) = %v, %v; want %v", s, got, ok, want)
+		}
+		reg := NewRegistry()
+		for _, wrong := range []config.Role{config.RoleViewer, config.RoleEditor, config.RoleAdmin} {
+			if wrong == want {
+				continue
+			}
+			if err := reg.Register(s, wrong); !errors.Is(err, ErrInvalidScope) {
+				t.Errorf("Register(%s, %v) = %v, want ErrInvalidScope", s, wrong, err)
+			}
+		}
+		if err := reg.Register(s, want); err != nil {
+			t.Errorf("Register(%s, %v) = %v", s, want, err)
+		}
+		if got, ok := reg.Lookup(s); !ok || got != want {
+			t.Errorf("Lookup(%s) after Register = %v, %v", s, got, ok)
+		}
+	}
+	if _, ok := ReservedRole("policy:read"); ok {
+		t.Error("policy:read reported as reserved")
+	}
+}
+
+func TestValidateRequiresRegistry(t *testing.T) {
+	p := CreateParams{Name: "a", OwnerIss: "i", OwnerSub: "s", Scopes: []Scope{"policy:read"},
+		TTL: time.Hour, MaxTTL: time.Hour, MaxActive: 1}
+	if err := p.Validate(nil); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("Validate(nil) = %v, want ErrInvalidInput", err)
+	}
+	if err := p.Validate(NewP2Registry()); err != nil {
+		t.Fatalf("Validate = %v", err)
 	}
 }
