@@ -21,8 +21,6 @@ import (
 )
 
 const (
-	// workerCAKeyPurpose is the key-manager purpose of the intermediate key.
-	workerCAKeyPurpose = keys.PurposeCA // documented use of the ca purpose
 	// workerCARetryInterval is how often a degraded worker CA retries loading
 	// its key.
 	workerCARetryInterval = 30 * time.Second

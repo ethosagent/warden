@@ -605,10 +605,11 @@ func TestWorkerCAPlanPrintsNoKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	der, _ := x509.MarshalPKCS8PrivateKey(f.interKey)
+	rawKey, _ := f.interKey.Bytes()
 	for _, v := range []any{p, ca} {
 		for _, form := range []string{"%v", "%+v", "%#v", "%s"} {
 			out := fmt.Sprintf(form, v)
-			if strings.Contains(out, fmt.Sprint(f.interKey.D)) || strings.Contains(out, string(der)) {
+			if strings.Contains(out, fmt.Sprintf("%v", rawKey)) || strings.Contains(out, string(der)) {
 				t.Errorf("%s prints key material: %s", form, out)
 			}
 		}
@@ -691,7 +692,10 @@ func TestCAInitKeysSourceLeavesNoKeyInTheDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := sg.(*ecdsa.PrivateKey).D.Bytes()
+	d, err := sg.(*ecdsa.PrivateKey).Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, name := range []string{"warden-cp.db", "warden-cp.db-wal"} {
 		b, err := os.ReadFile(filepath.Join(stateDir, name))
 		if err != nil {

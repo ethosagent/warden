@@ -442,10 +442,10 @@ func TestCAPrintableFormsCarryNoKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	seed := fmt.Sprint([]byte(priv))
+	seed, seedOnly := fmt.Sprintf("%v", []byte(priv)), fmt.Sprintf("%v", []byte(priv.Seed()))
 	for _, f := range []string{"%v", "%+v", "%#v", "%s"} {
 		out := fmt.Sprintf(f, ca)
-		if strings.Contains(out, seed[1:20]) || strings.Contains(out, fmt.Sprint([]byte(priv.Seed()))[1:20]) {
+		if strings.Contains(out, seed[1:20]) || strings.Contains(out, seedOnly[1:20]) {
 			t.Errorf("%s of a CA prints key bytes: %s", f, out)
 		}
 		if !strings.Contains(out, trustDomain) {

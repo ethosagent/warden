@@ -105,7 +105,7 @@ func NewVerifier(o Options) (*Verifier, error) {
 // String, GoString and LogValue keep a CA's printable forms to the trust
 // domain and expiry: the signer inside may be a bare Ed25519 key whose bytes
 // fmt would otherwise print.
-func (ca *CA) String() string   { return "workerca.CA{" + ca.Verifier.describe() + "}" }
+func (ca *CA) String() string   { return "workerca.CA{" + ca.describe() + "}" }
 func (ca *CA) GoString() string { return ca.String() }
 func (ca *CA) LogValue() slog.Value {
 	return slog.GroupValue(slog.String("trust_domain", ca.trustDomain),
