@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"unicode/utf8"
 
 	"github.com/ethosagent/warden/internal/keys"
 )
@@ -51,6 +52,14 @@ func Sign(ctx context.Context, b Bundle, creds *Credentials, signers ...keys.Sig
 	}
 	if b.CPID == "" {
 		return nil, errors.New("bundle: cpID is required")
+	}
+	if !utf8.ValidString(b.CPID) {
+		return nil, errors.New("bundle: cpID is not valid UTF-8")
+	}
+	for name := range b.Sections {
+		if !utf8.ValidString(name) {
+			return nil, errors.New("bundle: a section name is not valid UTF-8")
+		}
 	}
 	if b.IssuedAt.IsZero() || !b.ExpiresAt.After(b.IssuedAt) {
 		return nil, errors.New("bundle: expiresAt must be after issuedAt")

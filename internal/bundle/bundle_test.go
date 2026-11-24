@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -530,5 +531,83 @@ func BenchmarkVerify1MiB(b *testing.B) {
 				}
 			}
 		})
+	}
+}
+
+// TestBundleFieldCoverage signs a bundle with every field set and checks the
+// decoded result equals it, so a Bundle field without a setMember case fails.
+func TestBundleFieldCoverage(t *testing.T) {
+	s, pin := newKey(t, keys.AlgEdDSA)
+	in := base(5)
+	in.Policy = json.RawMessage(`{"a":1}`)
+	in.Sections = map[string]json.RawMessage{"tokenJWKS": json.RawMessage(`{"keys":[]}`), "other": json.RawMessage(`[1]`)}
+	creds := &bundle.Credentials{AccessKeyID: "AKIAEXAMPLE", SecretAccessKey: secretValue}
+	v, err := bundle.Verify(mustSign(t, in, creds, s), []keys.JWK{pin}, bundle.State{}, opts())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := in
+	want.Typ = bundle.TypV1
+	want.ContentSHA256 = v.Bundle.ContentSHA256
+	want.CredentialsSHA256 = v.Bundle.CredentialsSHA256
+	if !reflect.DeepEqual(v.Bundle, want) {
+		t.Fatalf("decoded bundle differs:\n got %+v\nwant %+v", v.Bundle, want)
+	}
+	rv := reflect.ValueOf(v.Bundle)
+	for i := 0; i < rv.NumField(); i++ {
+		if rv.Field(i).IsZero() {
+			t.Errorf("field %s is zero: set it in this test and in Bundle.setMember", rv.Type().Field(i).Name)
+		}
+	}
+}
+
+func TestVerifyAllowMissingCredentials(t *testing.T) {
+	s, pin := newKey(t, keys.AlgEdDSA)
+	raw := mustSign(t, base(2), &bundle.Credentials{AccessKeyID: "AKIAEXAMPLE", SecretAccessKey: secretValue}, s)
+	stripped := mutateEnv(t, raw, func(e *bundle.Envelope) { e.Credentials = nil })
+	o := opts()
+	o.AllowMissingCredentials = true
+	v, err := bundle.Verify(stripped, []keys.JWK{pin}, bundle.State{}, o)
+	if err != nil || v.Credentials != nil {
+		t.Fatalf("missing sidecar: %+v %v", v, err)
+	}
+	wrong := mutateEnv(t, raw, func(e *bundle.Envelope) { e.Credentials.SecretAccessKey += "X" })
+	if _, err := bundle.Verify(wrong, []keys.JWK{pin}, bundle.State{}, o); !errors.Is(err, bundle.ErrCredentialMismatch) {
+		t.Fatalf("wrong sidecar: %v", err)
+	}
+	if _, err := bundle.Verify(stripped, []keys.JWK{pin}, bundle.State{}, opts()); !errors.Is(err, bundle.ErrCredentialMismatch) {
+		t.Fatalf("default must still require the sidecar: %v", err)
+	}
+	if v, err := bundle.Verify(raw, []keys.JWK{pin}, bundle.State{}, o); err != nil || v.Credentials == nil {
+		t.Fatalf("present matching sidecar: %+v %v", v, err)
+	}
+}
+
+func TestVerifyTriesEachKidOnce(t *testing.T) {
+	s, pin := newKey(t, keys.AlgEdDSA)
+	raw := mustSign(t, base(1), nil, s)
+	dup := mutateEnv(t, raw, func(e *bundle.Envelope) {
+		bad := e.Signatures[0]
+		bad.Sig = flipB64(t, bad.Sig, 0)
+		e.Signatures = []bundle.Signature{bad, bad, bad, e.Signatures[0]}
+	})
+	// The first attempt for the kid fails and repeats are skipped, so the
+	// good signature listed last is never consulted.
+	if _, err := bundle.Verify(dup, []keys.JWK{pin}, bundle.State{}, opts()); !errors.Is(err, bundle.ErrBadSignature) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestSignRejectsInvalidUTF8(t *testing.T) {
+	s, _ := newKey(t, keys.AlgEdDSA)
+	b := base(1)
+	b.CPID = "cp-\xff"
+	if _, err := bundle.Sign(context.Background(), b, nil, s); err == nil {
+		t.Error("cpID with invalid UTF-8 must be rejected")
+	}
+	b = base(1)
+	b.Sections = map[string]json.RawMessage{"bad\xff": json.RawMessage(`1`)}
+	if _, err := bundle.Sign(context.Background(), b, nil, s); err == nil {
+		t.Error("section name with invalid UTF-8 must be rejected")
 	}
 }

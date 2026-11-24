@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
+	"strings"
 
 	"github.com/ethosagent/warden/internal/keys"
 )
@@ -63,7 +64,7 @@ func Verify(raw []byte, pins []keys.JWK, applied State, opt Options) (Verified, 
 	if opt.Issuer != "" && b.CPID != opt.Issuer {
 		return Verified{}, f.wrap(ErrIssuerMismatch)
 	}
-	creds, err := checkCredentials(env.Credentials, b.CredentialsSHA256)
+	creds, err := checkCredentials(env.Credentials, b.CredentialsSHA256, opt.AllowMissingCredentials)
 	if err != nil {
 		return Verified{}, f.wrap(err)
 	}
@@ -106,11 +107,13 @@ func checkSignatures(sigs []Signature, payload []byte, pins []keys.JWK) (string,
 	in := signingInput(payload)
 	failedKID := ""
 	pinnedSeen := false
+	tried := make(map[string]bool, len(sigs))
 	for _, s := range sigs {
 		jwk, ok := byKID[s.KID]
-		if !ok {
-			continue
+		if !ok || tried[s.KID] {
+			continue // unpinned, or this kid already had its one attempt
 		}
+		tried[s.KID] = true
 		pinnedSeen = true
 		sig, err := base64.RawURLEncoding.Strict().DecodeString(s.Sig)
 		if err == nil {
@@ -147,9 +150,9 @@ func algOf(j keys.JWK) string {
 // checkCredentials accepts the sidecar only when it hashes to what the signed
 // payload committed to; a sidecar the payload did not commit to, and a
 // committed hash with no sidecar, are both mismatches.
-func checkCredentials(sidecar *Credentials, want string) (*Credentials, error) {
+func checkCredentials(sidecar *Credentials, want string, allowMissing bool) (*Credentials, error) {
 	if sidecar == nil || sidecar.empty() {
-		if want != "" {
+		if want != "" && !allowMissing {
 			return nil, ErrCredentialMismatch
 		}
 		return nil, nil
@@ -161,7 +164,21 @@ func checkCredentials(sidecar *Credentials, want string) (*Credentials, error) {
 	return &c, nil
 }
 
-// parseEnvelope decodes the envelope. The payload member is megabytes of
+// isCaseVariant reports a member name that encoding/json would match to one of
+// names case-insensitively without being spelled exactly like it; the fast
+// path leaves those to the json.Unmarshal fallback, so both agree.
+func isCaseVariant(key string, names ...string) bool {
+	for _, n := range names {
+		if key != n && strings.EqualFold(key, n) {
+			return true
+		}
+	}
+	return false
+}
+
+// parseEnvelope decodes the envelope. The json.Unmarshal fallback matches
+// member names case-insensitively (encoding/json's rule), which is harmless:
+// the signature covers the payload bytes, not the envelope's member names. The payload member is megabytes of
 // base64url, which encoding/json would scan three times; base64url never
 // contains a backslash, so a plain string is cut out with a byte search and
 // only the small members go through the decoder. Anything the fast path is
@@ -204,7 +221,7 @@ func fastEnvelope(raw []byte) (rawEnvelope, bool) {
 		}
 		kb, next, ok := plainBytes(raw, i)
 		key := string(kb)
-		if !ok || seen[key] {
+		if !ok || seen[key] || isCaseVariant(key, "payload", "signatures", "credentials") {
 			return env, false
 		}
 		seen[key] = true
@@ -271,6 +288,11 @@ func plainBytes(b []byte, i int) ([]byte, int, bool) {
 	body := b[i+1 : i+1+n]
 	if bytes.IndexByte(body, '\\') >= 0 {
 		return nil, 0, false
+	}
+	for _, c := range body {
+		if c < 0x20 || c >= 0x80 { // control characters are invalid in a JSON string; non-ASCII is left to encoding/json
+			return nil, 0, false
+		}
 	}
 	return body, i + n + 2, true
 }

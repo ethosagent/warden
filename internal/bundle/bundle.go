@@ -33,6 +33,12 @@ const (
 
 // Bundle is the signed payload. Policy and Sections carry already-serialized
 // JSON so the bytes the CP served are the bytes that were hashed and signed.
+//
+// Adding a top-level field (W-P2-WBND-06 adds tokenIssuer) takes three steps:
+// decode it in Bundle.setMember (payload.go), which the field-coverage test
+// enforces; cover it in contentSHA256, or carry it inside a section, so a
+// change to it changes the content hash; and compare it with the applied
+// state where it matters.
 type Bundle struct {
 	Typ               string                     `json:"typ"`
 	Seq               int64                      `json:"seq"`
@@ -87,11 +93,15 @@ type State struct {
 
 // Options tune Verify. Now is required: a zero Now makes every bundle
 // "future", so a forgotten clock fails closed. Issuer, when set, must equal
-// the payload cpID.
+// the payload cpID. AllowMissingCredentials lets a bundle whose payload
+// commits to a credentials hash verify without the sidecar (the cached
+// envelope, which is stored without it): Verified.Credentials is then nil.
+// A sidecar that is present must still match.
 type Options struct {
-	Now    time.Time
-	Skew   time.Duration
-	Issuer string
+	Now                     time.Time
+	Skew                    time.Duration
+	Issuer                  string
+	AllowMissingCredentials bool
 }
 
 // Verified is an accepted bundle.
