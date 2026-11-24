@@ -300,6 +300,11 @@ var All = slices.Concat(
 		{Name: "keys_jwks_unavailable_until_loaded", Opts: keysFlakyOpts(), Run: keysJWKSUnavailableUntilLoaded},
 		{Name: "keys_cli_rotates_and_resets", Opts: keysRotationOpts(), Run: keysCLIRotatesAndResets},
 		{Name: "keys_disabled_creates_nothing", Opts: []harness.Option{harness.WithBackup()}, Run: keysDisabledCreatesNothing},
+		// Key rotation (W-P2-KEYS-06): rotate-key is refused while the control
+		// plane runs, rotates offline once it is stopped (signed handover, new
+		// key in place, old retired), and the control plane starts on the new
+		// key and signs with it. In-process only (CP state dir, dir lock).
+		{Name: "admin_audit_key_rotation", Opts: adminAuditOpts(), Run: adminAuditKeyRotation},
 	},
 	// Canary across protocols x allow/deny; see canary.go.
 	canaryScenarios(),

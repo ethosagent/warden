@@ -302,10 +302,11 @@ func TestRunbookMentionsCommands(t *testing.T) {
 		"admin-audit rotate-key", "W-P2-KEYS-06",
 	}
 	flagRE := regexp.MustCompile(`--[a-z][a-z-]*`)
-	for _, c := range []string{newAdminAuditVerifyCmd().Flags().FlagUsages(), newAdminAuditExportCmd().Flags().FlagUsages()} {
+	for _, c := range []string{newAdminAuditVerifyCmd().Flags().FlagUsages(), newAdminAuditExportCmd().Flags().FlagUsages(),
+		newAdminAuditRotateKeyCmd().Flags().FlagUsages()} {
 		want = append(want, flagRE.FindAllString(c, -1)...)
 	}
-	if len(want) < 6+5 {
+	if len(want) < 6+8 {
 		t.Fatalf("found too few flags in the command definitions: %v", want)
 	}
 	for _, w := range want {
