@@ -362,6 +362,35 @@ keys:
     prepublish: 1h
     overlap: 48h
 
+# Token service (CONTROL PLANE ONLY, read from the operator's --config file, never served to
+# workers). OFF by default: with the block absent or enabled false, POST /oauth2/token and
+# GET /.well-known/oauth-authorization-server answer 404, no tokensvc table is created and
+# /policy is byte-identical. There is no CLI flag; this block is the only switch. When enabled
+# an agent exchanges a user's ID token (RFC 8693) plus its own private_key_jwt assertion for a
+# short-lived Warden token signed with the token key. Startup fails, naming the setting, unless
+# --state-dir is set, the served `identity:` block has an issuer and audience, keys.enabled is
+# true and keys.token.overlap is at least ttl + 2m.
+tokenService:
+  enabled: false                  # master switch (default false)
+  issuer: https://warden.example.com  # this service's own issuer: the iss of issued tokens and the base of
+                                  # the accepted assertion audience (issuer or issuer/oauth2/token). Absolute
+                                  # https URL, no trailing slash, query or fragment; http only for a loopback
+                                  # host (a warning is logged, there is no insecure flag). Required when enabled.
+  ttl: 15m                        # lifetime of an issued token (1m-15m); never longer than the user's ID token
+  assertionMaxAge: 5m             # longest exp-iat of a client assertion
+  clockSkew: 60s                  # leeway on assertion times
+  allowedAZP: [agent-harness]     # only ID tokens minted for these OIDC clients can be exchanged
+                                  # (narrows identity.allowedAZP for this endpoint)
+  session:
+    idle: 12h                     # a token session idle this long ends
+    absolute: 168h                # a token session ends this long after it began
+  rateLimit:                      # N/second | N/minute | N/hour; enforced by the abuse-limit ticket (#85)
+    perIP: 120/minute
+    perAgent: 300/minute
+    perUser: 30/minute
+    maxInFlight: 64
+  eventRetention: 720h            # how long issuance records are kept (#85)
+
 # Echo guard: stops an upstream that copies the request into its response (an echo
 # endpoint, an error quoting the request, a reflected header) from handing the agent
 # the real secret Warden swapped in. It checks every response of a request for the
