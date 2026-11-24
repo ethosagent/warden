@@ -206,6 +206,11 @@ func (s *Service) Apply(ctx context.Context, id string, revision int, actorSub s
 	}
 	nd, err := s.cfg.Store.MarkApplied(octx, id, revision, version, actorSub)
 	if err != nil {
+		// Once more: the version is already live. A persistent failure leaves
+		// the draft applying until the startup Reconcile settles it.
+		nd, err = s.cfg.Store.MarkApplied(octx, id, revision, version, actorSub)
+	}
+	if err != nil {
 		s.cfg.Logger.Error("approvals: draft was published but could not be marked applied; reconcile will repair it",
 			"draft_id", id, "revision", revision, "applied_version", version, "error", err)
 		return Draft{}, err
