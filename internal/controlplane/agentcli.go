@@ -193,11 +193,11 @@ func (h *agentCLI) setStatus(ctx context.Context, id string, status agentreg.Sta
 	if err != nil {
 		return agentreg.Agent{}, err
 	}
-	action := AgentActionEnable
+	action, op := AgentActionEnable, agentActionEnable
 	if status == agentreg.StatusDisabled {
-		action = AgentActionDisable
+		action, op = AgentActionDisable, agentActionDisable
 	}
-	auditErr := h.record(ctx, action, got.ID, AgentAuditDetails(&cur, got))
+	auditErr := h.record(ctx, action, got.ID, AgentStatusAuditDetails(cur, op))
 	if auditErr == nil {
 		return got, nil
 	}
