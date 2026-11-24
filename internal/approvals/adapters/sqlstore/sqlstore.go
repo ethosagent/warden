@@ -29,10 +29,14 @@ import (
 const (
 	MigrationID       = "approvals/0001"
 	ReplayMigrationID = "approvals/0002"
+	// MetaMigrationID adds approvals_meta (W-P2-APPR-06): the single row the
+	// control plane writes at startup so the offline CLI knows whether approvals
+	// are enabled.
+	MetaMigrationID = "approvals/0003"
 )
 
 // EnabledMigrationIDs lists every approvals migration, for cpstate.Enable.
-func EnabledMigrationIDs() []string { return []string{MigrationID, ReplayMigrationID} }
+func EnabledMigrationIDs() []string { return []string{MigrationID, ReplayMigrationID, MetaMigrationID} }
 
 // Migrations returns the approvals migration. It is Optional: the control plane
 // registers it always (so the downgrade guard knows it) and applies it only
@@ -113,6 +117,16 @@ BEGIN SELECT RAISE(ABORT, 'change_approvals is append-only'); END;`,
   finished_at    INTEGER NOT NULL
 );
 CREATE INDEX draft_replays_draft ON draft_replays (draft_id, revision);`,
+	}, {
+		ID:       MetaMigrationID,
+		Optional: true,
+		SQL: `CREATE TABLE approvals_meta (
+  id              INTEGER PRIMARY KEY CHECK (id = 1),
+  enabled         INTEGER NOT NULL,
+  draft_ttl_ms    INTEGER NOT NULL,
+  max_open_drafts INTEGER NOT NULL,
+  updated_at      INTEGER NOT NULL
+);`,
 	}}
 }
 

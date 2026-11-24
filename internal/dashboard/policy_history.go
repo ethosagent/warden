@@ -249,12 +249,14 @@ func writeHistoryError(w http.ResponseWriter, err error) {
 	var ie *InvalidPolicyError
 	var ce *ConflictError
 	var re *RoleRequiredError
+	var held *HeldForApproval
+	var cerr *ChangeError
 	switch {
 	case errors.Is(err, ErrPolicyVersionNotFound):
 		writeError(w, http.StatusNotFound, "policy version not found")
 	case errors.As(err, &ie):
 		writeJSONStatus(w, http.StatusUnprocessableEntity, map[string]string{"error": "invalid_policy", "detail": ie.Error()})
-	case errors.As(err, &ce), errors.As(err, &re):
+	case errors.As(err, &ce), errors.As(err, &re), errors.As(err, &held), errors.As(err, &cerr):
 		writeWriterError(w, err)
 	default:
 		writeError(w, http.StatusInternalServerError, "policy history error")

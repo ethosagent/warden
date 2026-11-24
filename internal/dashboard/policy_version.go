@@ -56,6 +56,33 @@ func (e *ConflictError) Error() string {
 
 func (e *ConflictError) Unwrap() error { return e.Err }
 
+// HeldForApproval is returned by a versioned writer when approvals are enabled
+// and the edit would widen access: the edit was stored as a pending change
+// draft instead of a policy version, and head is unchanged. The dashboard
+// answers it 202 {draft_id, revision, state, widening, reasons} with a Location
+// header naming the draft. Reasons hold a destination or settings path, never a
+// value.
+type HeldForApproval struct {
+	DraftID  string
+	Revision int
+	State    string
+	Widening bool
+	Reasons  []ChangeReason
+}
+
+func (e *HeldForApproval) Error() string {
+	return "held for approval: draft " + e.DraftID
+}
+
+// heldResponse is the 202 body for a HeldForApproval.
+type heldResponse struct {
+	DraftID  string         `json:"draft_id"`
+	Revision int            `json:"revision"`
+	State    string         `json:"state"`
+	Widening bool           `json:"widening"`
+	Reasons  []ChangeReason `json:"reasons"`
+}
+
 // conflictResponse is the 409 body for a ConflictError. It names the head and
 // its author only, never doc content.
 type conflictResponse struct {
@@ -180,9 +207,28 @@ func parseIfMatch(values []string) (int64, bool) {
 }
 
 // writeWriterError answers a versioned writer's error: 403 for a
-// *RoleRequiredError, 409 for a *ConflictError, else 400 with the error text
+// *RoleRequiredError, 409 for a *ConflictError, 202 for a *HeldForApproval,
+// a *ChangeError's own status, else 400 with the error text
 // (the writers' validation errors).
 func writeWriterError(w http.ResponseWriter, err error) {
+	var held *HeldForApproval
+	if errors.As(err, &held) {
+		reasons := held.Reasons
+		if reasons == nil {
+			reasons = []ChangeReason{}
+		}
+		w.Header().Set("Location", changesPath+"/"+held.DraftID)
+		w.Header().Set("ETag", changeETag(held.Revision))
+		writeJSONStatus(w, http.StatusAccepted, heldResponse{
+			DraftID: held.DraftID, Revision: held.Revision, State: held.State, Widening: held.Widening, Reasons: reasons,
+		})
+		return
+	}
+	var cerr *ChangeError
+	if errors.As(err, &cerr) {
+		writeChangeError(w, err)
+		return
+	}
 	var re *RoleRequiredError
 	if errors.As(err, &re) {
 		writeJSONStatus(w, http.StatusForbidden, roleRequiredResponse{Error: "role_required", Need: re.Need, Fields: re.Fields})
