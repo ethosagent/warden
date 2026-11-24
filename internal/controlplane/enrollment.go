@@ -64,6 +64,9 @@ var (
 	ErrEnrollInUse = errors.New("enrollment token: value already registered")
 	// ErrCertNotFound is RevokeCert naming a serial that does not exist.
 	ErrCertNotFound = errors.New("worker cert: not found")
+	// ErrWorkerNotFound is RevokeWorker naming a worker id that never held a
+	// certificate. It wraps ErrCertNotFound.
+	ErrWorkerNotFound = fmt.Errorf("worker not found: %w", ErrCertNotFound)
 	// ErrCertNoIssuer is a worker_certs row with no issuer key id: the row could
 	// not later tell which intermediate signed it.
 	ErrCertNoIssuer = errors.New("worker cert: issuer key id is empty")
@@ -89,6 +92,12 @@ const (
 	// was issued but never seen in use. Presenting it later proves a second
 	// holder of its key, so it is a lineage conflict, not a plain revocation.
 	RevokeReasonSuperseded = "superseded"
+	// RevokeReasonAdmin is a revocation an admin asked for (console or CLI).
+	RevokeReasonAdmin = "admin_revoked"
+
+	// certRetention is how long a worker_certs row outlives its not_after before
+	// the pruner deletes it.
+	certRetention = 30 * 24 * time.Hour
 
 	// renewGrace is how long after a successor was issued its predecessor may
 	// still renew, when this control plane has not seen the successor used (the
@@ -312,6 +321,15 @@ type WorkerCertStore interface {
 	// the serials it revoked. It is idempotent; ErrCertNotFound for a worker id
 	// that never held a certificate.
 	RevokeWorker(ctx context.Context, workerID, actor, reason string) ([]string, error)
+	// RevokeWorkerSerial revokes one certificate of the worker, returning its
+	// serial, or nil when it was already revoked or expired (idempotent).
+	// ErrCertNotFound for a serial that is not this worker's.
+	RevokeWorkerSerial(ctx context.Context, workerID, serial, actor, reason string) ([]string, error)
+	// PruneCerts deletes the rows whose not_after is before cutoff and returns
+	// how many. A row that is not yet expired is never deleted, so a revoked
+	// certificate stays until it expires; the row a surviving certificate names
+	// as its predecessor is kept too.
+	PruneCerts(ctx context.Context, cutoff time.Time) (int, error)
 	// LatestCert is the worker's latest certificate under the lineage rule (rows
 	// revoked as failed issuances are skipped), or ErrCertNotFound.
 	LatestCert(ctx context.Context, workerID string) (CertRecord, error)
@@ -821,7 +839,7 @@ func (s *EnrollmentStore) RevokeWorker(ctx context.Context, workerID, actor, rea
 	}()
 	var one int
 	if err := conn.QueryRowContext(ctx, `SELECT 1 FROM worker_certs WHERE worker_id = ? LIMIT 1`, workerID).Scan(&one); errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrCertNotFound
+		return nil, ErrWorkerNotFound
 	} else if err != nil {
 		return nil, fmt.Errorf("worker certs: revoke worker: %w", err)
 	}
@@ -869,6 +887,45 @@ func (s *EnrollmentStore) RevokeWorker(ctx context.Context, workerID, actor, rea
 		s.log.Warn("enrollment tokens: index reload failed after revoking a worker", "err", err)
 	}
 	return serials, nil
+}
+
+// RevokeWorkerSerial implements WorkerCertStore.
+func (s *EnrollmentStore) RevokeWorkerSerial(ctx context.Context, workerID, serial, actor, reason string) ([]string, error) {
+	if actor == "" || reason == "" {
+		return nil, fmt.Errorf("%w: actor and reason are required", ErrInvalidInput)
+	}
+	now := s.clk.Now().Unix()
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE worker_certs SET revoked_at = ?, revoked_by = ?, revoke_reason = ? WHERE serial = ? AND worker_id = ? AND revoked_at IS NULL AND not_after > ?`,
+		now, actor, reason, serial, workerID, now)
+	if err != nil {
+		return nil, fmt.Errorf("worker certs: revoke serial: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		return []string{serial}, nil
+	}
+	var one int
+	err = s.db.QueryRowContext(ctx, `SELECT 1 FROM worker_certs WHERE serial = ? AND worker_id = ?`, serial, workerID).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrCertNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("worker certs: revoke serial: %w", err)
+	}
+	return nil, nil
+}
+
+// PruneCerts implements WorkerCertStore.
+func (s *EnrollmentStore) PruneCerts(ctx context.Context, cutoff time.Time) (int, error) {
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM worker_certs WHERE not_after < ?
+		   AND serial NOT IN (SELECT prev_serial FROM worker_certs WHERE prev_serial IS NOT NULL AND not_after >= ?)`,
+		cutoff.Unix(), cutoff.Unix())
+	if err != nil {
+		return 0, fmt.Errorf("worker certs: prune: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
 }
 
 // RevokedCerts implements WorkerCertStore.

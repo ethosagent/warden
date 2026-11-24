@@ -131,6 +131,9 @@ func authzTable() map[routeKey]authzRow {
 		{post, "/dashboard/api/backup", auditedRow(admin, "backup.run", "backup")},
 		// Worker tokens (W-P1-WTOK-03): viewers may list; minting and revoking are
 		// admin only, and the handler also refuses them outside console.auth oidc.
+		// Worker certificate revoke (W-P2-WCA-05): admin only; 404 unless
+		// workerCA is enabled, and refused outside console.auth oidc (use_cli).
+		{post, "/dashboard/api/workers/{id}/revoke", auditedRow(admin, actionWorkerRevoked, auditTargetWorkerCerts)},
 		{get, "/dashboard/api/worker-tokens", readRow(viewer, "worker_token.read")},
 		{post, "/dashboard/api/worker-tokens", auditedRow(admin, "worker_token.create", "worker_tokens")},
 		{del, "/dashboard/api/worker-tokens/{id}", auditedRow(admin, "worker_token.revoke", "worker_tokens")},

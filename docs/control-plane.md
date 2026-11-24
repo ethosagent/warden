@@ -748,6 +748,7 @@ fails when the two differ.
 | `/dashboard/api/worker-tokens` | POST | admin | `worker_token.create` |
 | `/dashboard/api/worker-tokens/{id}` | DELETE | admin | `worker_token.revoke` |
 | `/dashboard/api/workers` | GET | viewer | `workers.read` |
+| `/dashboard/api/workers/{id}/revoke` | POST | admin | `worker.revoked` |
 
 A method and path with no row is refused (`403`) for every role, `GET` included.
 
@@ -1704,6 +1705,33 @@ and counted (`warden_cp_worker_renew_total{outcome}`), not admin-audited. At mos
 one renewal per worker per 10 minutes (429 with `Retry-After`; only a committed
 renewal spends it), 30 requests a minute per remote address, 503 `ca_unavailable`
 while the CA is degraded.
+
+#### Revoking a worker
+
+An admin revokes a worker's certificates from the fleet view (Revoke button, with
+`console.auth: oidc`), by `POST /dashboard/api/workers/{id}/revoke` (optional body
+`{"serial": "<hex>"}` to revoke one certificate; 200 `{"revoked": n}`, 404 for an unknown
+worker or a serial that is not its own, 403 for a viewer), or offline:
+
+```sh
+warden control-plane worker revoke --id worker-1 [--serial S] --state-dir D
+```
+
+It sets `revoked_at`, `revoked_by` and `revoke_reason=admin_revoked` on every unexpired
+certificate of the worker and revokes its unused id-bound enrollment tokens, so a later
+renewal is refused and the worker must re-enroll with a new token. It is idempotent
+(`revoked: 0` the second time). Revocation is enforced on the control plane only, through
+the in-memory index: the worker's next `/policy`, `/control/heartbeat`, `/central/ingest`
+or `/control/renew` is a 401 and its held `/policy` long-poll ends at once; it keeps its
+last-known-good policy. The console route refreshes the index synchronously; the CLI is
+picked up by a running control plane within its 2 s `data_version` poll. Each revoke writes
+one admin audit row (`worker.revoked`, target `worker_certs`, target_ref `worker:<id>`,
+details `worker_id` and `count`; auth_method `cli` for the CLI) and logs `worker certs
+revoked`. `warden_cp_worker_cert_revoked_total` counts certificates revoked by this process.
+
+Rows are pruned by the control plane: a revoked certificate stays in the index until its
+`not_after`, and its `worker_certs` row is deleted 30 days after `not_after` (a row that a
+surviving certificate names as `prev_serial` stays with it).
 
 `workerCA.enabled` requires `--ca-cert` and `--ca-key`: enrollment tokens and
 certificates never travel over plain HTTP, and the control plane exits before

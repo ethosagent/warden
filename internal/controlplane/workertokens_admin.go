@@ -158,6 +158,9 @@ func (s *Server) fillWorkerAuth(views []dashboard.WorkerView) {
 	for i := range views {
 		v := &views[i]
 		v.LegacyRequests = s.workerAuth.LegacyRequests(v.ProxyID)
+		if v.AuthKind == string(KindCert) && s.certIdx != nil {
+			v.CertRevoked, _ = s.certIdx.Revoked(v.CertSerial)
+		}
 		if v.AuthKind != string(KindToken) || s.cfg.WorkerTokens == nil || v.TokenName == "" {
 			continue
 		}

@@ -14,6 +14,10 @@ import (
 // so serials of certificates that have expired leave it.
 const certIndexMaxAge = 10 * time.Minute
 
+// certPruneInterval is how often expired worker_certs rows are deleted; a row
+// goes certRetention after its not_after.
+const certPruneInterval = time.Hour
+
 // certIndex is the in-memory set of revoked worker certificate serials that
 // WorkerAuthenticator consults on every request, so authentication does no DB
 // I/O. Rebuild loads it from the WorkerCertStore; Run reloads it when another
@@ -33,6 +37,10 @@ type certIndex struct {
 	mu      sync.Mutex // serialises rebuilds; guards version and builtAt
 	version int64
 	builtAt time.Time
+
+	// lastPrune is when the pruner last ran (zero: not yet). Only Run's loop
+	// touches it.
+	lastPrune time.Time
 
 	// onRevoked is called, outside mu, with each serial that became revoked
 	// since the previous load (the authenticator cancels its held long-polls).
@@ -119,6 +127,7 @@ func (x *certIndex) Run(ctx context.Context) {
 			return
 		case <-t.C():
 			x.tick(ctx)
+			x.prune(ctx)
 			t.Reset(x.poll)
 		}
 	}
@@ -137,5 +146,28 @@ func (x *certIndex) tick(ctx context.Context) {
 	}
 	if err != nil && ctx.Err() == nil {
 		x.log.Warn("worker certs: revoked index reload failed; keeping the last good index", "err", err)
+	}
+}
+
+// prune deletes the worker_certs rows that expired more than certRetention ago,
+// at most once per certPruneInterval (the first call runs at once). A row that
+// has not expired is never touched, so a revoked certificate stays in the
+// store, and in the index, until its not_after. The index is rebuilt after a
+// delete so serials that expired leave it with their rows.
+func (x *certIndex) prune(ctx context.Context) {
+	now := x.clk.Now()
+	if !x.lastPrune.IsZero() && now.Sub(x.lastPrune) < certPruneInterval {
+		return
+	}
+	x.lastPrune = now
+	n, err := x.store.PruneCerts(ctx, now.Add(-certRetention))
+	if err != nil {
+		if ctx.Err() == nil {
+			x.log.Warn("worker certs: pruning expired rows failed", "error", err.Error())
+		}
+		return
+	}
+	if n > 0 {
+		x.log.Info("worker certs: pruned expired rows", "count", n)
 	}
 }

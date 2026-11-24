@@ -75,6 +75,8 @@ type Server struct {
 	// workerTokens serves the worker token admin routes; nil = they answer 404
 	// (a worker, or a control plane without a state dir).
 	workerTokens WorkerTokenAdmin
+	// workerCerts backs the worker certificate revoke route (nil: 404).
+	workerCerts WorkerCertAdmin
 	// keys serves the signing-key admin routes; nil = they answer 404 (a
 	// worker, or a control plane without keys.enabled).
 	keys KeysSource
@@ -272,9 +274,11 @@ type WorkerView struct {
 	TokenName     string `json:"tokenName,omitempty"`
 	TokenLastUsed string `json:"tokenLastUsed,omitempty"`
 	// CertSerial (lowercase hex) and CertNotAfter (RFC 3339) describe the worker
-	// certificate behind an authKind=cert worker.
+	// certificate behind an authKind=cert worker. CertRevoked is true when that
+	// certificate is revoked: the worker is cut off until it re-enrolls.
 	CertSerial   string `json:"certSerial,omitempty"`
 	CertNotAfter string `json:"certNotAfter,omitempty"`
+	CertRevoked  bool   `json:"certRevoked,omitempty"`
 	// LegacyRequests counts the worker's requests authenticated with the shared
 	// token since the control plane started (in memory; a restart resets it).
 	LegacyRequests int64 `json:"legacyRequests"`
@@ -679,6 +683,7 @@ func Routes() []Route {
 		{get, "/dashboard/api/policy/versions/{v}/diff", "policy.diff"},
 		{post, "/dashboard/api/policy/versions/{v}/rollback", "policy.rollback"},
 		{post, "/dashboard/api/backup", "backup.run"},
+		{post, "/dashboard/api/workers/{id}/revoke", "worker.revoked"},
 		{get, "/dashboard/api/worker-tokens", "worker_token.read"},
 		{post, "/dashboard/api/worker-tokens", "worker_token.create"},
 		{del, "/dashboard/api/worker-tokens/{id}", "worker_token.revoke"},
