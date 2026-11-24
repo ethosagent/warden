@@ -210,6 +210,7 @@ func (s *Server) initApprovals() {
 		MinApprovals:              ac.MinApprovals,
 		AllowSelfApproveNarrowing: ac.AllowSelfApproveNarrowing,
 		AllowEmergencyApply:       ac.AllowEmergencyApply,
+		OnEmergencyRepaired:       s.noteRepairedBypass,
 		ReplayMaxAge:              ac.ReplayMaxAge,
 		BaseDoc: func(ctx context.Context, version int64) (approvals.Doc, error) {
 			v, err := s.versions.Get(ctx, version)

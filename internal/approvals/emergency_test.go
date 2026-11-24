@@ -3,6 +3,10 @@ package approvals_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,7 +25,8 @@ var (
 	bgActor = approvals.Author{Iss: "warden-breakglass", Sub: "breakglass:ops", Email: "ops@example.com", Kind: approvals.AuthorKindBreakglass}
 	oidcAdm = approvals.Author{Iss: "https://idp", Sub: "root", Email: "root@example.com", Kind: "oidc"}
 
-	reason = "dex is down and the payments vendor is blocked"
+	reason     = "dex is down and the payments vendor is blocked"
+	reviewNote = "checked with the vendor"
 )
 
 // emApplier is an Applier and EmergencyApplier that records every call and the
@@ -77,6 +82,8 @@ type emEnv struct {
 	em     *emApplier
 	events []string
 	hook   func(ctx context.Context, d approvals.Draft) error
+	// repaired receives Reconcile's emergency repair callbacks.
+	repaired func(d approvals.Draft, actorSub string)
 }
 
 func newEmEnv(t *testing.T, allow bool) *emEnv {
@@ -94,7 +101,12 @@ func newEmEnv(t *testing.T, allow bool) *emEnv {
 		Appliers: map[approvals.Target]approvals.Applier{approvals.TargetPolicy: x.em},
 		Redact:   redact, Now: now, DraftTTL: 24 * time.Hour, MaxOpenDrafts: 50,
 		AllowEmergencyApply: allow,
-		BaseDoc:             func(context.Context, int64) (approvals.Doc, error) { return approvals.Doc{}, nil },
+		OnEmergencyRepaired: func(d approvals.Draft, a string) {
+			if x.repaired != nil {
+				x.repaired(d, a)
+			}
+		},
+		BaseDoc: func(context.Context, int64) (approvals.Doc, error) { return approvals.Doc{}, nil },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -473,7 +485,7 @@ func TestEmergencyReview(t *testing.T) {
 	x := newEmEnv(t, true)
 	ctx := context.Background()
 	d := x.pendingClassified("rv.example.com")
-	if _, err := x.svc.Review(ctx, approvals.ReviewInput{ID: d.ID, Reviewer: oidcAdm, Role: config.RoleAdmin}); !errors.Is(err, approvals.ErrIllegalTransition) {
+	if _, err := x.svc.Review(ctx, approvals.ReviewInput{ID: d.ID, Reviewer: oidcAdm, Role: config.RoleAdmin, Comment: reviewNote}); !errors.Is(err, approvals.ErrIllegalTransition) {
 		t.Errorf("review of a pending draft = %v, want ErrIllegalTransition", err)
 	}
 	if _, err := x.gate.EmergencyApply(ctx, x.input(d)); err != nil {
@@ -484,11 +496,11 @@ func TestEmergencyReview(t *testing.T) {
 		in   approvals.ReviewInput
 		want any
 	}{
-		{"a break-glass session", approvals.ReviewInput{ID: d.ID, Reviewer: bgActor, Role: config.RoleAdmin}, approvals.ErrBreakglassReviewer},
-		{"an editor", approvals.ReviewInput{ID: d.ID, Reviewer: oidcAdm, Role: config.RoleEditor}, &approvals.RoleRequiredError{}},
-		{"no reviewer", approvals.ReviewInput{ID: d.ID, Role: config.RoleAdmin}, nil},
-		{"a stale revision", approvals.ReviewInput{ID: d.ID, Revision: 9, Reviewer: oidcAdm, Role: config.RoleAdmin}, approvals.ErrRevisionChanged},
-		{"another doc digest", approvals.ReviewInput{ID: d.ID, DocSHA256: "x", Reviewer: oidcAdm, Role: config.RoleAdmin}, approvals.ErrRevisionChanged},
+		{"a break-glass session", approvals.ReviewInput{ID: d.ID, Reviewer: bgActor, Role: config.RoleAdmin, Comment: reviewNote}, approvals.ErrBreakglassReviewer},
+		{"an editor", approvals.ReviewInput{ID: d.ID, Reviewer: oidcAdm, Role: config.RoleEditor, Comment: reviewNote}, &approvals.RoleRequiredError{}},
+		{"no reviewer", approvals.ReviewInput{ID: d.ID, Role: config.RoleAdmin, Comment: reviewNote}, nil},
+		{"a stale revision", approvals.ReviewInput{ID: d.ID, Revision: 9, Reviewer: oidcAdm, Role: config.RoleAdmin, Comment: reviewNote}, approvals.ErrRevisionChanged},
+		{"another doc digest", approvals.ReviewInput{ID: d.ID, DocSHA256: "x", Reviewer: oidcAdm, Role: config.RoleAdmin, Comment: reviewNote}, approvals.ErrRevisionChanged},
 	} {
 		_, err := x.svc.Review(ctx, c.in)
 		var rr *approvals.RoleRequiredError
@@ -519,7 +531,7 @@ func TestEmergencyReview(t *testing.T) {
 		rows[1].Comment != "checked the change with the vendor" || rows[1].ApproverRole != "admin" {
 		t.Errorf("rows = %+v, want the emergency row then a post_review row", rows)
 	}
-	if _, err := x.svc.Review(ctx, approvals.ReviewInput{ID: d.ID, Reviewer: oidcAdm, Role: config.RoleAdmin}); !errors.Is(err, approvals.ErrIllegalTransition) {
+	if _, err := x.svc.Review(ctx, approvals.ReviewInput{ID: d.ID, Reviewer: oidcAdm, Role: config.RoleAdmin, Comment: reviewNote}); !errors.Is(err, approvals.ErrIllegalTransition) {
 		t.Errorf("a second review = %v, want ErrIllegalTransition", err)
 	}
 	// An emergency apply cannot be repeated on a reviewed draft either.
@@ -599,33 +611,232 @@ func TestStoreEmergencyGuards(t *testing.T) {
 	}
 }
 
+// mintSites maps each Clearance kind to the one function in gate.go that may
+// mint it. A Clearance literal with fields, or an assignment to a .kind
+// selector, anywhere else (or for another kind) is a new route to a Clearance
+// and fails TestClearanceMintedOnlyInGate.
+var mintSites = map[string]string{
+	"clearDisabled":  "Clear",
+	"clearNarrowing": "Clear",
+	"clearApplied":   "ClearApplied",
+	"clearEmergency": "clearEmergency",
+}
+
+// mintViolations parses src files (name -> source) and reports every
+// Clearance literal with fields or .kind assignment outside its allowed
+// gate.go function.
+func mintViolations(t *testing.T, srcs map[string]string) []string {
+	t.Helper()
+	fset := token.NewFileSet()
+	var out []string
+	for name, src := range srcs {
+		f, err := parser.ParseFile(fset, name, src, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, decl := range f.Decls {
+			fd, ok := decl.(*ast.FuncDecl)
+			if !ok {
+				// Package-level literals and assignments have no function.
+				ast.Inspect(decl, func(n ast.Node) bool {
+					if isMint(n) {
+						out = append(out, fmt.Sprintf("%s: a Clearance is minted outside any function", name))
+					}
+					return true
+				})
+				continue
+			}
+			ast.Inspect(fd, func(n ast.Node) bool {
+				switch x := n.(type) {
+				case *ast.CompositeLit:
+					if !isClearanceLit(x) || len(x.Elts) == 0 {
+						return true
+					}
+					kind := litKind(x)
+					if name != "gate.go" || mintSites[kind] != fd.Name.Name {
+						out = append(out, fmt.Sprintf("%s: %s mints Clearance kind %q", name, fd.Name.Name, kind))
+					}
+				case *ast.AssignStmt:
+					for _, l := range x.Lhs {
+						if sel, ok := l.(*ast.SelectorExpr); ok && sel.Sel.Name == "kind" {
+							out = append(out, fmt.Sprintf("%s: %s assigns a .kind", name, fd.Name.Name))
+						}
+					}
+				}
+				return true
+			})
+		}
+	}
+	return out
+}
+
+func isMint(n ast.Node) bool {
+	switch x := n.(type) {
+	case *ast.CompositeLit:
+		return isClearanceLit(x) && len(x.Elts) > 0
+	case *ast.AssignStmt:
+		for _, l := range x.Lhs {
+			if sel, ok := l.(*ast.SelectorExpr); ok && sel.Sel.Name == "kind" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isClearanceLit(x *ast.CompositeLit) bool {
+	id, ok := x.Type.(*ast.Ident)
+	return ok && id.Name == "Clearance"
+}
+
+func litKind(x *ast.CompositeLit) string {
+	for _, e := range x.Elts {
+		if kv, ok := e.(*ast.KeyValueExpr); ok {
+			if k, ok := kv.Key.(*ast.Ident); ok && k.Name == "kind" {
+				if v, ok := kv.Value.(*ast.Ident); ok {
+					return v.Name
+				}
+			}
+		}
+	}
+	return "?"
+}
+
 // TestClearanceMintedOnlyInGate is the source-level pin of the narrowness of
-// every mint path: a non-zero Clearance literal appears in gate.go and nowhere
-// else in the package, so a new route to a Clearance has to be written in the
-// Gate where review sees it.
+// every mint path, on the AST: a non-zero Clearance literal, or an assignment
+// to a Clearance's kind, appears only in the one gate.go function allowed for
+// that kind, so a new route to a Clearance has to be written in the Gate where
+// review sees it.
 func TestClearanceMintedOnlyInGate(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
 	}
+	srcs := map[string]string{}
 	for _, f := range files {
-		if strings.HasSuffix(f, "_test.go") || f == "gate.go" {
+		if strings.HasSuffix(f, "_test.go") {
 			continue
 		}
 		b, err := os.ReadFile(f)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if strings.Contains(string(b), "Clearance{kind") {
-			t.Errorf("%s mints a Clearance; only gate.go may", f)
-		}
+		srcs[f] = string(b)
 	}
-	b, err := os.ReadFile("gate.go")
+	if v := mintViolations(t, srcs); len(v) != 0 {
+		t.Fatalf("Clearance minted outside the allow list:\n%s", strings.Join(v, "\n"))
+	}
+	// Every kind is still minted exactly where the map says (the guard is not
+	// vacuous, and a renamed function cannot silently drop one).
+	seen := map[string]bool{}
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "gate.go", srcs["gate.go"], 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Exactly one emergency mint, in clearEmergency.
-	if n := strings.Count(string(b), "Clearance{kind: clearEmergency"); n != 1 {
-		t.Errorf("gate.go mints an emergency Clearance %d times, want 1", n)
+	ast.Inspect(f, func(n ast.Node) bool {
+		if x, ok := n.(*ast.CompositeLit); ok && isClearanceLit(x) && len(x.Elts) > 0 {
+			seen[litKind(x)] = true
+		}
+		return true
+	})
+	for kind := range mintSites {
+		if !seen[kind] {
+			t.Errorf("gate.go no longer mints %s; update mintSites", kind)
+		}
+	}
+}
+
+// TestClearanceMintGuardCatchesScratchMints proves the guard fails on a mint in
+// another file, in the wrong gate.go function, by assignment, and at package
+// level.
+func TestClearanceMintGuardCatchesScratchMints(t *testing.T) {
+	for name, srcs := range map[string]map[string]string{
+		"another file":   {"scratch.go": "package approvals\nfunc Sneak() Clearance { return Clearance{kind: clearEmergency, docSHA: \"x\"} }\n"},
+		"wrong function": {"gate.go": "package approvals\nfunc Hold() Clearance { return Clearance{kind: clearEmergency} }\n"},
+		"wrong kind":     {"gate.go": "package approvals\nfunc ClearApplied() Clearance { return Clearance{kind: clearEmergency} }\n"},
+		"assignment":     {"scratch.go": "package approvals\nfunc Sneak(c Clearance) Clearance { c.kind = clearApplied; return c }\n"},
+		"package level":  {"scratch.go": "package approvals\nvar Sneaky = Clearance{kind: clearApplied}\n"},
+	} {
+		if v := mintViolations(t, srcs); len(v) == 0 {
+			t.Errorf("%s: the guard did not flag the scratch mint", name)
+		}
+	}
+	ok := map[string]string{"gate.go": "package approvals\nfunc ClearApplied() Clearance { return Clearance{kind: clearApplied} }\nfunc Other() Clearance { return Clearance{} }\n"}
+	if v := mintViolations(t, ok); len(v) != 0 {
+		t.Errorf("the guard flagged a legal mint: %v", v)
+	}
+}
+
+// TestEmergencyReviewIndependence: the draft's author cannot review it, and the
+// comment is the closing record of the bypass (10 characters or more).
+func TestEmergencyReviewIndependence(t *testing.T) {
+	x := newEmEnv(t, true)
+	ctx := context.Background()
+	d := x.pendingClassified("ind.example.com")
+	if _, err := x.gate.EmergencyApply(ctx, x.input(d)); err != nil {
+		t.Fatal(err)
+	}
+	author := approvals.Author{Iss: ada.Iss, Sub: ada.Sub, Kind: "oidc"}
+	if _, err := x.svc.Review(ctx, approvals.ReviewInput{ID: d.ID, Reviewer: author, Role: config.RoleAdmin, Comment: reviewNote}); !errors.Is(err, approvals.ErrSelfReview) {
+		t.Errorf("review by the author = %v, want ErrSelfReview", err)
+	}
+	// Same sub under another issuer is a different person.
+	other := approvals.Author{Iss: "https://other-idp", Sub: ada.Sub, Kind: "oidc"}
+	for _, c := range []string{"", "too short", strings.Repeat(" ", 20) + "x"} {
+		if _, err := x.svc.Review(ctx, approvals.ReviewInput{ID: d.ID, Reviewer: other, Role: config.RoleAdmin, Comment: c}); !errors.Is(err, approvals.ErrReviewComment) {
+			t.Errorf("comment %q = %v, want ErrReviewComment", c, err)
+		}
+	}
+	if got := x.stored(d); got.State != approvals.StateAppliedUnreviewed {
+		t.Fatalf("state = %s, want applied_unreviewed", got.State)
+	}
+	if _, err := x.svc.Review(ctx, approvals.ReviewInput{ID: d.ID, Reviewer: other, Role: config.RoleAdmin, Comment: "  0123456789  "}); err != nil {
+		t.Errorf("a trimmed 10 character comment = %v", err)
+	}
+}
+
+// breakOutcomeWrite makes every move of a draft into applied_unreviewed fail,
+// as a store that went away right after the publish would.
+func breakOutcomeWrite(t *testing.T, x *emEnv) {
+	t.Helper()
+	if _, err := x.db.SQL().Exec(`CREATE TRIGGER no_unreviewed BEFORE UPDATE OF state ON change_drafts
+		WHEN NEW.state = 'applied_unreviewed' BEGIN SELECT RAISE(ABORT, 'store gone'); END`); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestEmergencyPublishedButNotRecorded: when the version is live but the outcome
+// cannot be written, the caller still learns the version (to alert on), and
+// Reconcile then settles the draft as applied_unreviewed and reports the bypass.
+func TestEmergencyPublishedButNotRecorded(t *testing.T) {
+	x := newEmEnv(t, true)
+	ctx := context.Background()
+	d := x.pendingClassified("lost.example.com")
+	breakOutcomeWrite(t, x)
+	got, err := x.gate.EmergencyApply(ctx, x.input(d))
+	var pub *approvals.EmergencyPublishedError
+	if !errors.As(err, &pub) || pub.Version != 1 || got.ID != d.ID || got.AppliedVersion != 1 {
+		t.Fatalf("EmergencyApply = %+v, %v; want the draft and an EmergencyPublishedError at v1", got, err)
+	}
+	if x.stored(d).State != approvals.StateApplying {
+		t.Fatalf("state = %s, want applying until reconcile", x.stored(d).State)
+	}
+	if _, err := x.db.SQL().Exec("DROP TRIGGER no_unreviewed"); err != nil {
+		t.Fatal(err)
+	}
+	var repaired []string
+	x.repaired = func(rd approvals.Draft, actor string) {
+		repaired = append(repaired, rd.ID+":"+actor+":"+string(rd.State))
+	}
+	n, err := x.svc.Reconcile(ctx, func(context.Context, string, int) (int64, bool, error) { return 1, true, nil })
+	if err != nil || n != 1 {
+		t.Fatalf("Reconcile = %d, %v", n, err)
+	}
+	if want := d.ID + ":" + bgActor.Sub + ":applied_unreviewed"; len(repaired) != 1 || repaired[0] != want {
+		t.Errorf("repair callbacks = %v, want [%s]", repaired, want)
+	}
+	if st := x.stored(d); st.State != approvals.StateAppliedUnreviewed {
+		t.Errorf("state = %s", st.State)
 	}
 }

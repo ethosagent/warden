@@ -291,7 +291,8 @@ func (g *Gate) EmergencyApply(ctx context.Context, in EmergencyInput) (Draft, er
 	if err != nil {
 		s.cfg.Logger.Error("approvals: emergency draft was published but could not be marked applied_unreviewed; reconcile will repair it",
 			"draft_id", claimed.ID, "revision", claimed.Revision, "applied_version", version, "error", err)
-		return Draft{}, err
+		claimed.AppliedVersion = version
+		return claimed, &EmergencyPublishedError{Version: version, Err: err}
 	}
 	return nd, nil
 }

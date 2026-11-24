@@ -1059,6 +1059,26 @@ Not gated, stated plainly for production use:
 - `/central/secrets` and `/dashboard/api/secretstore` write secret values into the
   managed secret store, not into a policy version.
 
+### Emergency apply and its review
+
+With `approvals.allowEmergencyApply: true`, a break-glass session (and only one) may
+`POST /dashboard/api/changes/{id}/emergency-apply {"reason": "..."}` (10 to 512
+characters) on a pending or needs_rebase draft. It publishes with `expectedHead` still
+checked (`409 rebase_required` on a moved head), at most 5 times in 10 minutes. The
+claim and an `emergency` approval row holding the reason are written together, and the
+`change.draft.emergency_begin` admin audit row is written before anything publishes
+(if it cannot be written nothing publishes). Every success raises one critical
+`approval_bypassed` Finding and one ERROR log line; the draft is then `applied_unreviewed`.
+If the version published but the draft could not be updated, the request fails with
+`500 emergency_apply_unrecorded` and still alerts, and startup repairs the draft and
+alerts again.
+
+`POST /dashboard/api/changes/{id}/review {"comment": "..."}` (at least 10 characters)
+closes it as `applied`. It needs an OIDC admin who is not a break-glass session and
+who is not the draft's author (`403 self_review_forbidden`): in a single-admin
+deployment the author's own bypass stays `applied_unreviewed`, because the alert has
+already gone out and the review is meant to be independent.
+
 A draft created by `warden policy import` is authored `cli:<os user>` and carries no
 issuer. Anyone with host access to the state database already has full trust over the
 control plane, so this is a limitation of what the offline CLI can prove, not a bypass

@@ -10,7 +10,9 @@ package controlplane
 import (
 	"context"
 	"errors"
+	"net/http"
 	"strconv"
+	"sync"
 
 	"github.com/ethosagent/warden/internal/adminaudit"
 	"github.com/ethosagent/warden/internal/approvals"
@@ -47,10 +49,23 @@ func (a changeDraftAPI) EmergencyApply(ctx context.Context, id string, in dashbo
 		a.annotate(ctx, d, nil)
 	}
 	if err != nil {
+		var pub *approvals.EmergencyPublishedError
+		if errors.As(err, &pub) {
+			// The version is live whatever happened to the record of it: audit and
+			// alert on it, then fail the request loudly.
+			a.recordPolicyApplyOp(ctx, policyBefore, d, "emergency_apply")
+			a.s.reportBypass(au.Sub, d, false)
+			a.s.cfg.Logger.Error("control plane: emergency apply published but the draft could not be recorded; startup reconcile will settle it",
+				"draft_id", d.ID, "version", pub.Version, "error", pub.Err)
+			return dashboard.ChangeResult{}, &dashboard.ChangeError{
+				Status: http.StatusInternalServerError, Code: "emergency_apply_unrecorded",
+				Fields: map[string]any{"version": pub.Version}, Err: err,
+			}
+		}
 		return dashboard.ChangeResult{}, a.changeErr(ctx, a.s.gateError(err))
 	}
-	a.recordPolicyApply(ctx, policyBefore, d)
-	a.reportBypass(au, d)
+	a.recordPolicyApplyOp(ctx, policyBefore, d, "emergency_apply")
+	a.s.reportBypass(au.Sub, d, false)
 	return a.result(ctx, d, true), nil
 }
 
@@ -95,17 +110,63 @@ func (a changeDraftAPI) recordEmergencyBegin(ctx context.Context, d approvals.Dr
 var errAuditUnavailable = errors.New("controlplane: admin audit is not available")
 
 // reportBypass logs the one ERROR line and raises the critical Finding of an
-// emergency apply. Neither carries the reason text or the doc.
-func (a changeDraftAPI) reportBypass(au approvals.Author, d approvals.Draft) {
-	a.s.cfg.Logger.Error("approval_bypassed", "draft_id", d.ID, "actor_sub", au.Sub)
-	a.s.publishFinding(integration.Finding{
+// emergency apply. Neither carries the reason text or the doc. repaired marks a
+// bypass settled by startup reconcile after a crash.
+func (s *Server) reportBypass(actorSub string, d approvals.Draft, repaired bool) {
+	s.logBypass(actorSub, d, repaired)
+	s.publishBypassFinding(actorSub, d)
+}
+
+func (s *Server) logBypass(actorSub string, d approvals.Draft, repaired bool) {
+	attrs := []any{"draft_id", d.ID, "actor_sub", actorSub}
+	if repaired {
+		attrs = append(attrs, "repaired", true)
+	}
+	s.cfg.Logger.Error("approval_bypassed", attrs...)
+}
+
+func (s *Server) publishBypassFinding(actorSub string, d approvals.Draft) {
+	s.publishFinding(integration.Finding{
 		RuleID: findingApprovalBypassed, Category: "security", Severity: integration.SevCritical,
 		Summary: "a policy change was applied by a break-glass emergency apply without a second approver",
 		Evidence: integration.Evidence("draft=" + d.ID + " revision=" + strconv.Itoa(d.Revision) +
-			" applied_version=" + strconv.FormatInt(d.AppliedVersion, 10) + " actor=" + au.Sub),
+			" applied_version=" + strconv.FormatInt(d.AppliedVersion, 10) + " actor=" + actorSub),
 		DedupKey: findingApprovalBypassed + ":" + d.ID,
-		Ts:       a.s.cfg.Clock.Now(),
+		Ts:       s.cfg.Clock.Now(),
 	})
+}
+
+// repairedBypasses are the emergency applies startup reconcile settled. Their
+// ERROR line is logged at once; their Finding waits for flushRepairedBypasses,
+// because reconcile runs inside New, before the alert pipeline exists.
+type repairedBypasses struct {
+	mu    sync.Mutex
+	items []repairedBypass
+}
+
+type repairedBypass struct {
+	actorSub string
+	draft    approvals.Draft
+}
+
+// noteRepairedBypass is the approvals Service's OnEmergencyRepaired hook.
+func (s *Server) noteRepairedBypass(d approvals.Draft, actorSub string) {
+	s.logBypass(actorSub, d, true)
+	s.repaired.mu.Lock()
+	defer s.repaired.mu.Unlock()
+	s.repaired.items = append(s.repaired.items, repairedBypass{actorSub: actorSub, draft: d})
+}
+
+// flushRepairedBypasses publishes the Findings of the bypasses reconcile
+// repaired. Run calls it once Findings can be delivered.
+func (s *Server) flushRepairedBypasses() {
+	s.repaired.mu.Lock()
+	items := s.repaired.items
+	s.repaired.items = nil
+	s.repaired.mu.Unlock()
+	for _, it := range items {
+		s.publishBypassFinding(it.actorSub, it.draft)
+	}
 }
 
 // Review implements dashboard.ChangeDrafts: an OIDC admin's post-hoc review of

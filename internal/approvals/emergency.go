@@ -28,11 +28,15 @@ import (
 const (
 	MinEmergencyReason = 10
 	MaxEmergencyReason = 512
+	// MinReviewComment is the shortest post-hoc review comment.
+	MinReviewComment = 10
 )
 
 // The emergency apply rate limit: at most emergencyMaxPerWindow claims in any
-// emergencyWindow, counted across every break-glass session. A refused claim
-// (limited, disabled, wrong caller) does not count.
+// emergencyWindow, counted across every break-glass session. A refusal
+// before the slot is taken (disabled, wrong caller, bad reason, wrong state,
+// limited) does not count; one refused after it (a failed audit write, a
+// refused or conflicting publish) does.
 const (
 	emergencyWindow       = 10 * time.Minute
 	emergencyMaxPerWindow = 5
@@ -53,6 +57,11 @@ var (
 	ErrEmergencyAudit = errors.New("approvals: the emergency apply audit record could not be written")
 	// ErrBreakglassReviewer: a break-glass session cannot review its own bypass.
 	ErrBreakglassReviewer = errors.New("approvals: a break-glass session cannot review an emergency apply")
+	// ErrSelfReview: the reviewer is the draft's author. The closing record of a
+	// bypass must come from someone who did not write the change.
+	ErrSelfReview = errors.New("approvals: the author of a draft cannot review its emergency apply")
+	// ErrReviewComment: the review comment is under 10 characters.
+	ErrReviewComment = errors.New("approvals: a review needs a comment of at least 10 characters")
 )
 
 // EmergencyApplier is the Applier extension an emergency apply needs: it
@@ -109,20 +118,20 @@ func (s *Service) takeEmergencySlot() bool {
 	return true
 }
 
-// hasEmergencyRow reports whether d's current revision has an `emergency`
-// change_approvals row, which is how Reconcile tells an interrupted emergency
+// emergencyRow returns the `emergency` change_approvals row of d's current
+// revision, if any, which is how Reconcile tells an interrupted emergency
 // apply from an interrupted ordinary one.
-func (s *Service) hasEmergencyRow(ctx context.Context, d Draft) (bool, error) {
+func (s *Service) emergencyRow(ctx context.Context, d Draft) (Approval, bool, error) {
 	rows, err := s.cfg.Store.Approvals(ctx, d.ID)
 	if err != nil {
-		return false, err
+		return Approval{}, false, err
 	}
 	for _, a := range rows {
 		if a.Revision == d.Revision && a.DocSHA256 == d.DocSHA256 && a.Decision == DecisionEmergency {
-			return true, nil
+			return a, true, nil
 		}
 	}
-	return false, nil
+	return Approval{}, false, nil
 }
 
 // ReviewInput is one post-hoc review. Revision and DocSHA256 are what the
@@ -149,10 +158,15 @@ func (s *Service) Review(ctx context.Context, in ReviewInput) (Draft, error) {
 		return Draft{}, errors.New("approvals: a review has no reviewer")
 	case in.Role < config.RoleAdmin:
 		return Draft{}, &RoleRequiredError{Need: config.RoleAdmin}
+	case utf8.RuneCountInString(strings.TrimSpace(in.Comment)) < MinReviewComment:
+		return Draft{}, ErrReviewComment
 	}
 	d, err := s.cfg.Store.Get(ctx, in.ID)
 	if err != nil {
 		return Draft{}, err
+	}
+	if d.Author.Sub == in.Reviewer.Sub && d.Author.Iss == in.Reviewer.Iss {
+		return Draft{}, ErrSelfReview
 	}
 	if d.State != StateAppliedUnreviewed {
 		return Draft{}, fmt.Errorf("%w: a %s draft has no emergency apply to review", ErrIllegalTransition, d.State)
@@ -162,10 +176,25 @@ func (s *Service) Review(ctx context.Context, in ReviewInput) (Draft, error) {
 	}
 	nd, err := s.cfg.Store.MarkReviewed(ctx, d.ID, DecisionInput{
 		Revision: d.Revision, DocSHA256: d.DocSHA256, Decision: DecisionPostReview,
-		Approver: in.Reviewer, ApproverRole: in.Role.String(), Comment: in.Comment,
+		Approver: in.Reviewer, ApproverRole: in.Role.String(), Comment: strings.TrimSpace(in.Comment),
 	})
 	if errors.Is(err, ErrStateChanged) {
 		return Draft{}, fmt.Errorf("%w: %w", ErrRevisionChanged, err)
 	}
 	return nd, err
 }
+
+// EmergencyPublishedError is returned with the draft when an emergency apply
+// published a version but could not record the outcome (the draft is left
+// applying until Reconcile settles it). The bypass happened, so the caller must
+// still alert and audit it, using Version.
+type EmergencyPublishedError struct {
+	Version int64
+	Err     error
+}
+
+func (e *EmergencyPublishedError) Error() string {
+	return fmt.Sprintf("approvals: emergency apply published version %d but could not record it: %v", e.Version, e.Err)
+}
+
+func (e *EmergencyPublishedError) Unwrap() error { return e.Err }

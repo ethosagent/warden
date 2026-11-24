@@ -166,8 +166,8 @@ func TestEmergencyApply(t *testing.T) {
 		}
 	}
 	policyRow := e.auditRows("policy.write")
-	if len(policyRow) == 0 || policyRow[len(policyRow)-1].Details[adminaudit.DetailSource] != SourceApproval {
-		t.Errorf("no policy.write follow-up row with the approval source: %+v", policyRow)
+	if len(policyRow) == 0 || policyRow[len(policyRow)-1].Details[adminaudit.DetailSource] != SourceApproval || policyRow[len(policyRow)-1].Details[adminaudit.DetailOp] != "emergency_apply" {
+		t.Errorf("no policy.write follow-up row with the approval source and op emergency_apply: %+v", policyRow)
 	}
 
 	// One critical Finding, keyed by the draft, and one ERROR line without the
@@ -357,7 +357,7 @@ func TestEmergencyReview(t *testing.T) {
 			t.Errorf("review as %q = %d, want %d", who, rec.Code, want)
 		}
 	}
-	e.wantErr(t, e.do("admin", http.MethodPost, review, `{"comment":"x","revision":7}`), http.StatusConflict, "revision_changed")
+	e.wantErr(t, e.do("admin", http.MethodPost, review, `{"comment":"long enough comment","revision":7}`), http.StatusConflict, "revision_changed")
 	if got := e.view(t, d.ID); got.State != "applied_unreviewed" {
 		t.Fatalf("state after refusals = %s", got.State)
 	}
@@ -474,4 +474,83 @@ func okRows(rows []adminaudit.Input) []adminaudit.Input {
 		}
 	}
 	return out
+}
+
+// TestEmergencyReviewIndependent: the draft's author cannot review its
+// emergency apply, a second admin can, and the comment (10 or more characters)
+// is required.
+func TestEmergencyReviewIndependent(t *testing.T) {
+	e := emergencyEnv(t)
+	d := e.create(t, "admin", docWith(`{"domain":"own.example.com"}`))
+	if rec := e.submit(t, "admin", d.ID); rec.Code != http.StatusOK {
+		t.Fatalf("submit = %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := e.do("breakglass", http.MethodPost, draftsPath+"/"+d.ID+"/emergency-apply", emergencyBody(emergencyReason)); rec.Code != http.StatusOK {
+		t.Fatalf("emergency-apply = %d %s", rec.Code, rec.Body.String())
+	}
+	review := draftsPath + "/" + d.ID + "/review"
+	e.wantErr(t, e.do("admin", http.MethodPost, review, `{"comment":"i checked my own change"}`), http.StatusForbidden, "self_review_forbidden")
+	for _, body := range []string{`{}`, `{"comment":"too short"}`, `{"comment":"          x         "}`} {
+		e.wantErr(t, e.do("admin2", http.MethodPost, review, body), http.StatusBadRequest, "invalid_comment")
+	}
+	if got := e.view(t, d.ID); got.State != "applied_unreviewed" {
+		t.Fatalf("state after refusals = %s", got.State)
+	}
+	if rec := e.do("admin2", http.MethodPost, review, `{"comment":"reviewed by a second admin"}`); rec.Code != http.StatusOK {
+		t.Fatalf("review by another admin = %d %s", rec.Code, rec.Body.String())
+	}
+	if got := e.view(t, d.ID); got.State != "applied" {
+		t.Errorf("state = %s, want applied", got.State)
+	}
+}
+
+// TestEmergencyPublishedButNotRecorded: a bypass that published always alerts,
+// even when the draft's outcome cannot be written (and again when startup
+// reconcile settles it after a crash).
+func TestEmergencyPublishedButNotRecorded(t *testing.T) {
+	e := emergencyEnv(t)
+	d := e.heldDraft(t, "lost.example.com")
+	sqlDB := e.srv.cfg.State.SQL()
+	if _, err := sqlDB.Exec(`CREATE TRIGGER no_unreviewed BEFORE UPDATE OF state ON change_drafts
+		WHEN NEW.state = 'applied_unreviewed' BEGIN SELECT RAISE(ABORT, 'store gone'); END`); err != nil {
+		t.Fatal(err)
+	}
+	rec := e.do("breakglass", http.MethodPost, draftsPath+"/"+d.ID+"/emergency-apply", emergencyBody(emergencyReason))
+	e.wantErr(t, rec, http.StatusInternalServerError, "emergency_apply_unrecorded")
+	e.wantHead(t, 2) // the version is live
+	fs := e.pub.byRule("approval_bypassed")
+	if len(fs) != 1 || fs[0].Severity != integration.SevCritical || fs[0].DedupKey != "approval_bypassed:"+d.ID ||
+		!strings.Contains(string(fs[0].Evidence), "applied_version=2") {
+		t.Fatalf("Findings = %+v, want the bypass alerted at v2", fs)
+	}
+	if n := countLines(e.logs.String(), "msg=approval_bypassed"); n != 1 {
+		t.Errorf("approval_bypassed lines = %d, want 1", n)
+	}
+
+	// Startup reconcile repairs the draft and alerts again, marked repaired.
+	if _, err := sqlDB.Exec("DROP TRIGGER no_unreviewed"); err != nil {
+		t.Fatal(err)
+	}
+	n, err := e.srv.Approvals().Reconcile(context.Background(), e.srv.findDraftVersion)
+	if err != nil || n != 1 {
+		t.Fatalf("Reconcile = %d, %v", n, err)
+	}
+	if got := e.view(t, d.ID); got.State != "applied_unreviewed" || got.AppliedVersion != 2 {
+		t.Fatalf("draft after reconcile = %s v%d", got.State, got.AppliedVersion)
+	}
+	if got := countLines(e.logs.String(), "repaired=true"); got != 1 {
+		t.Errorf("repaired approval_bypassed lines = %d, want 1\n%s", got, e.logs.String())
+	}
+	if len(e.pub.byRule("approval_bypassed")) != 1 {
+		t.Error("the repair Finding was published before the pipeline was up")
+	}
+	e.srv.flushRepairedBypasses()
+	fs = e.pub.byRule("approval_bypassed")
+	if len(fs) != 2 || fs[1].DedupKey != "approval_bypassed:"+d.ID || fs[1].Severity != integration.SevCritical {
+		t.Errorf("Findings after the flush = %+v", fs)
+	}
+	e.srv.flushRepairedBypasses()
+	if len(e.pub.byRule("approval_bypassed")) != 2 {
+		t.Error("a second flush re-published")
+	}
 }
