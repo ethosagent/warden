@@ -1,7 +1,6 @@
 package controlplane
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"net/http"
@@ -80,6 +79,25 @@ func seedEvent(t *testing.T, e *draftEnv) {
 	t.Helper()
 	if err := e.srv.central.StoreAggregatedEvent(replayEvent("api.openai.com", "allow", "/v1")); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// approveHeld has a second admin approve the held draft and asserts the head
+// moved to wantHead: the apply path must accept the doc the Gate cleared.
+func (e *draftEnv) approveHeld(t *testing.T, id string, wantHead int64) {
+	t.Helper()
+	rp := e.settledReplay(t, id)
+	d := e.view(t, id)
+	body := approveBody(d.ChangeDraftView, rp.ID, "")
+	if rp.Status != approvals.ReplayDone {
+		body = approveBody(d.ChangeDraftView, "", "")
+	}
+	if rec := e.do("admin2", http.MethodPost, draftsPath+"/"+id+"/approve", body); rec.Code != http.StatusOK {
+		t.Fatalf("approve held draft = %d %s", rec.Code, rec.Body.String())
+	}
+	e.wantHead(t, wantHead)
+	if got := e.view(t, id); got.State != "applied" || got.AppliedVersion != wantHead {
+		t.Errorf("draft after approval = %s at v%d, want applied at v%d", got.State, got.AppliedVersion, wantHead)
 	}
 }
 
@@ -175,7 +193,8 @@ func TestApprovalsWritePaths(t *testing.T) {
 		e := newDraftEnv(t, nil)
 		const judge = `{"observability":{"enabled":true,"serviceName":"svc-gpt4omini"}}`
 		// A judge edit is widening and admin-only.
-		_, d := e.wantHeld(t, e.put("admin", settingsPath, judge, "1"), approvals.CodeSettingsChanged)
+		seedEvent(t, e)
+		h, d := e.wantHeld(t, e.put("admin", settingsPath, judge, "1"), approvals.CodeSettingsChanged)
 		if d.RequiredRole != "admin" {
 			t.Errorf("required role = %s, want admin", d.RequiredRole)
 		}
@@ -184,19 +203,23 @@ func TestApprovalsWritePaths(t *testing.T) {
 		if rec := e.put("u1", settingsPath, judge, "1"); rec.Code != http.StatusForbidden {
 			t.Errorf("editor judge save = %d %s, want 403", rec.Code, rec.Body.String())
 		}
+		// A second admin approves it and the head advances.
+		e.approveHeld(t, h.DraftID, 2)
 		// A narrowing toggle publishes at once.
-		rec := e.put("u1", settingsPath, `{"compliance":{"enabled":true}}`, "1")
+		rec := e.put("u1", settingsPath, `{"observability":{"enabled":true,"serviceName":"svc-gpt4omini"},"compliance":{"enabled":true}}`, "2")
 		if rec.Code != http.StatusOK {
 			t.Fatalf("narrowing settings save = %d %s, want 200", rec.Code, rec.Body.String())
 		}
-		e.wantHead(t, 2)
+		e.wantHead(t, 3)
 	})
 
 	t.Run("llmProviders", func(t *testing.T) {
 		e := newDraftEnv(t, nil)
+		seedEvent(t, e)
 		rec := e.put("admin", providersPath, `[{"name":"p","baseURL":"https://api.openai.com/v1","model":"gpt-4o-mini","apiKeyEnv":"OPENAI_API_KEY","timeoutSeconds":5}]`, "1")
-		e.wantHeld(t, rec, approvals.CodeSettingsChanged)
+		h, _ := e.wantHeld(t, rec, approvals.CodeSettingsChanged)
 		e.wantHead(t, 1)
+		e.approveHeld(t, h.DraftID, 2)
 	})
 
 	t.Run("a new raw credential is refused, never held", func(t *testing.T) {
@@ -471,7 +494,12 @@ func TestVersionedWritesAreGated(t *testing.T) {
 func TestVersionedStoreCreateCallers(t *testing.T) {
 	createCall := regexp.MustCompile(`\.Create\(ctx, `)
 	publishCall := regexp.MustCompile(`\.(publish|publishLocked)\(ctx, `)
+	// wantCreate call the policy version store's Create; otherCreate call other
+	// stores' Create (sessions, worker tokens). Any other file with a
+	// `.Create(ctx, ` call fails: classify it here after routing a version write
+	// through Server.writeVersioned.
 	wantCreate := map[string]bool{"policy_publish.go": true, "policycli.go": true, "policystore.go": true}
+	otherCreate := map[string]bool{"auth.go": true, "breakglass.go": true, "workertokens_admin.go": true, "workertokens_cli.go": true}
 	wantPublish := map[string]bool{"policy_publish.go": true, "approvals_apply.go": true}
 	files, err := filepath.Glob("*.go")
 	if err != nil {
@@ -485,8 +513,8 @@ func TestVersionedStoreCreateCallers(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if createCall.Match(b) && bytes.Contains(b, []byte("PolicyVersionStore")) && !wantCreate[f] {
-			t.Errorf("%s calls the policy store's Create; route the write through Server.writeVersioned", f)
+		if createCall.Match(b) && !wantCreate[f] && !otherCreate[f] {
+			t.Errorf("%s calls a store Create; if it creates a policy version, route the write through Server.writeVersioned", f)
 		}
 		if publishCall.Match(b) && !wantPublish[f] {
 			t.Errorf("%s calls Server.publish; only the Gate-aware paths may", f)

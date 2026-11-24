@@ -80,7 +80,7 @@ func newDraftEnvAt(t *testing.T, mutate func(*config.ConsoleApprovals), clk *clo
 	e.h = srv.Handler()
 	for _, s := range []struct{ name, group, method string }{
 		{"u1", groupEditor, "oidc"}, {"u2", groupEditor, "oidc"}, {"u3", groupEditor, "oidc"},
-		{"viewer", groupViewer, "oidc"}, {"admin", groupAdmin, "oidc"}, {"breakglass", "", AuthMethodBreakglass},
+		{"viewer", groupViewer, "oidc"}, {"admin", groupAdmin, "oidc"}, {"admin2", groupAdmin, "oidc"}, {"breakglass", "", AuthMethodBreakglass},
 	} {
 		in := testSessionInput()
 		in.Sub, in.Email, in.AuthMethod = s.name, s.name+"@example.com", s.method
