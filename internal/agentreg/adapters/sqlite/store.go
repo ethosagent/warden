@@ -7,7 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"sync/atomic"
+	"strconv"
+	"sync"
 	"time"
 
 	"golang.org/x/sync/singleflight"
@@ -35,11 +36,21 @@ type Store struct {
 
 	// The read path serves an immutable snapshot of the whole registry (at
 	// most config.MaxRegisteredAgents small rows). Every local write and every
-	// data_version change drops it; the next read reloads it once
-	// (singleflight), so a burst of readers after a write costs one query.
-	snap  atomic.Pointer[snapshot]
-	gen   atomic.Uint64 // bumped by invalidate; a load that raced it is not kept
+	// data_version change drops it. gen counts those drops; a snapshot carries
+	// the generation it was loaded under and is cached only while that is still
+	// current, with the check and the store (and invalidate) under one mutex, so
+	// a load that raced a write can never be cached. Loads are coalesced per
+	// generation (singleflight), so a burst of readers after a write costs one
+	// query, and a reader never joins a load that began before a write it
+	// follows.
+	mu    sync.Mutex
+	gen   uint64
+	snap  *snapshot
 	group singleflight.Group
+
+	// Test seams (export_test.go); nil in production.
+	afterRead func()                               // after a load's reads, before it is cached
+	version   func(context.Context) (int64, error) // replaces dataVersion
 }
 
 var _ agentreg.Store = (*Store)(nil)
@@ -79,48 +90,72 @@ func New(db *cpstate.DB, opts ...Option) *Store {
 	return s
 }
 
-// snapshot is an immutable view of every agent. Callers clone what they
-// return.
+// snapshot is an immutable view of every agent, loaded under generation gen.
+// Callers clone what they return.
 type snapshot struct {
 	byID map[string]agentreg.Agent
 	list []agentreg.Agent
+	gen  uint64
 }
 
+// invalidate drops the cached snapshot and starts a new generation. Every
+// write calls it after its commit and before it returns.
 func (s *Store) invalidate() {
-	s.gen.Add(1)
-	s.snap.Store(nil)
+	s.mu.Lock()
+	s.gen++
+	s.snap = nil
+	s.mu.Unlock()
 }
 
-// load returns the current snapshot, reading through to the database at most
-// once for any number of concurrent callers.
+func (s *Store) generation() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.gen
+}
+
+// load returns a snapshot at least as new as the generation current when it
+// was called: one loaded after every write that finished before the call. It
+// reads through to the database at most once per generation for any number
+// of concurrent callers.
 func (s *Store) load(ctx context.Context) (*snapshot, error) {
-	if p := s.snap.Load(); p != nil {
-		return p, nil
-	}
-	v, err, _ := s.group.Do("load", func() (any, error) {
-		if p := s.snap.Load(); p != nil {
+	entry := s.generation()
+	for {
+		s.mu.Lock()
+		p, g := s.snap, s.gen
+		s.mu.Unlock()
+		if p != nil {
 			return p, nil
 		}
-		gen := s.gen.Load()
-		// A shared load must not die with the first caller's context.
-		list, err := loadAll(context.WithoutCancel(ctx), s.db)
+		v, err, _ := s.group.Do(strconv.FormatUint(g, 10), func() (any, error) {
+			// A shared load must not die with the first caller's context. The
+			// reads begin after the invalidate that produced generation g,
+			// hence after the commit of every write that finished before it.
+			list, err := loadAll(context.WithoutCancel(ctx), s.db)
+			if err != nil {
+				return nil, err
+			}
+			if s.afterRead != nil {
+				s.afterRead()
+			}
+			p := &snapshot{byID: make(map[string]agentreg.Agent, len(list)), list: list, gen: g}
+			for _, a := range list {
+				p.byID[a.ID] = a
+			}
+			s.mu.Lock()
+			if s.gen == g {
+				s.snap = p
+			}
+			s.mu.Unlock()
+			return p, nil
+		})
 		if err != nil {
 			return nil, err
 		}
-		p := &snapshot{byID: make(map[string]agentreg.Agent, len(list)), list: list}
-		for _, a := range list {
-			p.byID[a.ID] = a
+		if p := v.(*snapshot); p.gen >= entry {
+			return p, nil
 		}
-		// Keep it only if no write invalidated the cache while it was read.
-		if s.gen.Load() == gen {
-			s.snap.Store(p)
-		}
-		return p, nil
-	})
-	if err != nil {
-		return nil, err
+		// Joined a load from before a write this call follows: go again.
 	}
-	return v.(*snapshot), nil
 }
 
 // Watch polls PRAGMA data_version every interval until ctx is done and drops
@@ -135,12 +170,14 @@ func (s *Store) Watch(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
 		interval = DataVersionInterval
 	}
-	last, err := s.dataVersion(ctx)
+	last, err := s.readVersion(ctx)
 	failing := err != nil
 	if failing {
 		s.logger.Warn("agent registry watch: data_version unreadable", "error", err)
-		s.invalidate()
 	}
+	// A write between the first load and this read is not covered by the
+	// baseline, so start from a cold cache.
+	s.invalidate()
 	for {
 		t := s.clock.NewTimer(interval)
 		select {
@@ -149,7 +186,7 @@ func (s *Store) Watch(ctx context.Context, interval time.Duration) {
 			return
 		case <-t.C():
 		}
-		v, err := s.dataVersion(ctx)
+		v, err := s.readVersion(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -167,6 +204,13 @@ func (s *Store) Watch(ctx context.Context, interval time.Duration) {
 			s.invalidate()
 		}
 	}
+}
+
+func (s *Store) readVersion(ctx context.Context) (int64, error) {
+	if s.version != nil {
+		return s.version(ctx)
+	}
+	return s.dataVersion(ctx)
 }
 
 func (s *Store) dataVersion(ctx context.Context) (int64, error) {
@@ -484,8 +528,19 @@ func loadOne(ctx context.Context, q conn, id string) (agentreg.Agent, error) {
 	return list[0], nil
 }
 
-func loadAll(ctx context.Context, q conn) ([]agentreg.Agent, error) {
-	rows, err := q.QueryContext(ctx, `SELECT `+agentColumns+` FROM agents ORDER BY id`)
+// loadAll reads the whole registry in one read transaction on one connection,
+// so the agents and their keys come from the same database snapshot.
+func loadAll(ctx context.Context, db *sql.DB) ([]agentreg.Agent, error) {
+	c, err := db.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("agentreg: list: connection: %w", err)
+	}
+	defer func() { _ = c.Close() }()
+	if _, err := c.ExecContext(ctx, "BEGIN"); err != nil {
+		return nil, fmt.Errorf("agentreg: list: begin: %w", err)
+	}
+	defer func() { _, _ = c.ExecContext(context.WithoutCancel(ctx), "ROLLBACK") }()
+	rows, err := c.QueryContext(ctx, `SELECT `+agentColumns+` FROM agents ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("agentreg: list: %w", err)
 	}
@@ -493,7 +548,7 @@ func loadAll(ctx context.Context, q conn) ([]agentreg.Agent, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := attachKeys(ctx, q, list, ""); err != nil {
+	if err := attachKeys(ctx, c, list, ""); err != nil {
 		return nil, err
 	}
 	if list == nil {

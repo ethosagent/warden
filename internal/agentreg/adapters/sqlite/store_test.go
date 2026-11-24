@@ -3,12 +3,13 @@ package sqlite_test
 import (
 	"context"
 	"errors"
-	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -64,6 +65,11 @@ func TestStore_WatchSeesAnotherProcessWithinOneInterval(t *testing.T) {
 	done := make(chan struct{})
 	go func() { defer close(done); a.Watch(ctx, interval) }()
 	defer func() { cancel(); <-done }()
+	// The watch has taken its baseline and dropped the cache once its first
+	// timer is armed; only then is the stale-before-the-poll check meaningful.
+	for clk.PendingTimers() == 0 {
+		runtime.Gosched()
+	}
 
 	if _, err := a.Create(ctx, newAgent(t, "w1"), actor); err != nil {
 		t.Fatal(err)
@@ -100,40 +106,165 @@ func TestStore_WatchSeesAnotherProcessWithinOneInterval(t *testing.T) {
 func TestStore_ConcurrentReadersAfterWriteAreCoalesced(t *testing.T) {
 	ctx := context.Background()
 	s := sqlite.New(openDB(t))
+	const readers = 32
+	var loads, started atomic.Int32
+	sqlite.SetAfterRead(s, func() {
+		loads.Add(1)
+		// Hold the leader until every reader has reached Get, so they all
+		// arrive while the load is in flight or already cached.
+		for started.Load() < readers {
+			runtime.Gosched()
+		}
+	})
 	if _, err := s.Create(ctx, newAgent(t, "sf-1"), actor); err != nil {
 		t.Fatal(err)
 	}
 	var wg sync.WaitGroup
-	for i := 0; i < 32; i++ {
+	for i := 0; i < readers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			started.Add(1)
 			if _, err := s.Get(ctx, "sf-1"); err != nil {
 				t.Errorf("Get: %v", err)
 			}
 		}()
 	}
 	wg.Wait()
+	if n := loads.Load(); n != 1 {
+		t.Fatalf("%d readers after one write caused %d reloads, want 1", readers, n)
+	}
 }
 
-func TestStore_WatchLogsAndRecoversFromUnreadableVersion(t *testing.T) {
+// Read-your-writes: a read that starts after a write returned never sees
+// state from before it, even when a load that began earlier is still in
+// flight; and that late load is not left in the cache.
+func TestStore_ReadAfterWriteNeverSeesAnOlderLoad(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// readBeforeRelease: the post-write read happens while the old load is
+		// still blocked (it starts its own load); otherwise only after the old
+		// load has finished and tried to cache its stale snapshot.
+		readBeforeRelease bool
+	}{{"read while stale load is in flight", true}, {"read after stale load finished", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			s := sqlite.New(openDB(t))
+			made, err := s.Create(ctx, newAgent(t, "ryw"), actor)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var calls atomic.Int32
+			reached, release := make(chan struct{}), make(chan struct{})
+			sqlite.SetAfterRead(s, func() {
+				if calls.Add(1) == 1 { // only the first load blocks, after it has read
+					close(reached)
+					<-release
+				}
+			})
+			stale := make(chan agentreg.Status, 1)
+			go func() {
+				a, err := s.Get(ctx, "ryw")
+				if err != nil {
+					t.Errorf("stale Get: %v", err)
+				}
+				stale <- a.Status
+			}()
+			<-reached // the load has read "active" and is held before caching it
+			if _, err := s.SetStatus(ctx, "ryw", agentreg.StatusDisabled, made.Revision, actor); err != nil {
+				t.Fatal(err)
+			}
+			if tc.readBeforeRelease {
+				if got, _ := s.Get(ctx, "ryw"); got.Status != agentreg.StatusDisabled {
+					t.Fatalf("read after SetStatus saw %s", got.Status)
+				}
+			}
+			close(release)
+			<-stale // the old load has finished and tried to cache what it read
+			if got, _ := s.Get(ctx, "ryw"); got.Status != agentreg.StatusDisabled {
+				t.Fatalf("after the stale load finished, a read saw %s: the stale snapshot is cached", got.Status)
+			}
+			loadsBefore := calls.Load()
+			if got, _ := s.Get(ctx, "ryw"); got.Status != agentreg.StatusDisabled || calls.Load() != loadsBefore {
+				t.Fatalf("a fresh snapshot should be cached: status %s, loads %d -> %d", got.Status, loadsBefore, calls.Load())
+			}
+		})
+	}
+}
+
+// A failing data_version poll is logged once per episode and drops the cache;
+// when the poll recovers the watch carries on and sees later changes.
+func TestStore_WatchLogsOncePerFailureEpisodeAndRecovers(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	db := openDB(t)
 	clk := clocktest.NewFake(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
-	s := sqlite.New(db, sqlite.WithClock(clk), sqlite.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
-	_ = db.Close() // every poll now fails
+	logs := &captureHandler{}
+	s := sqlite.New(db, sqlite.WithClock(clk), sqlite.WithLogger(slog.New(logs)))
+
+	// Scripted poll: call 1 is the baseline, calls 2-4 fail, then it recovers
+	// and reports a new version on call 6.
+	var calls atomic.Int32
+	sqlite.SetVersionReader(s, func(context.Context) (int64, error) {
+		switch n := calls.Add(1); {
+		case n == 1:
+			return 1, nil
+		case n <= 4:
+			return 0, errors.New("boom")
+		case n == 5:
+			return 1, nil
+		default:
+			return 2, nil
+		}
+	})
+	if _, err := s.Create(ctx, newAgent(t, "wl"), actor); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Get(ctx, "wl"); err != nil { // warm the cache
+		t.Fatal(err)
+	}
 	done := make(chan struct{})
 	go func() { defer close(done); s.Watch(ctx, time.Second) }()
-	for i := 0; i < 5; i++ {
+	deadline := time.Now().Add(10 * time.Second)
+	for calls.Load() < 7 {
 		clk.Advance(time.Second)
-		time.Sleep(5 * time.Millisecond)
+		runtime.Gosched()
+		if time.Now().After(deadline) {
+			t.Fatalf("watch stalled after %d polls", calls.Load())
+		}
 	}
 	cancel()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("Watch did not stop on cancel")
+	<-done
+	if warns := logs.count(slog.LevelWarn); warns != 1 {
+		t.Fatalf("%d warnings for one failure episode, want exactly 1", warns)
 	}
+}
+
+type captureHandler struct {
+	mu     sync.Mutex
+	levels []slog.Level
+}
+
+func (h *captureHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *captureHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.levels = append(h.levels, r.Level)
+	return nil
+}
+func (h *captureHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *captureHandler) WithGroup(string) slog.Handler      { return h }
+
+func (h *captureHandler) count(l slog.Level) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	n := 0
+	for _, got := range h.levels {
+		if got == l {
+			n++
+		}
+	}
+	return n
 }
 
 func TestStore_RowsSurviveReopen(t *testing.T) {
