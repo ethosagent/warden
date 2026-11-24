@@ -81,6 +81,8 @@ var Excluded = map[string]string{
 	"keys.MetaStore":                  "the control plane's own signing_keys table on the cpstate SQLite DB (keys/adapters/metastore); the harness runs the real one, a fake would hide the compare-and-swap and unique-index behaviour that keeps the key lifecycle from forking",
 	"agentreg.Store":                  "the control plane's own agent registry on the cpstate SQLite DB (agentreg.SQLiteStore); the harness runs the real one, a fake would hide the revision compare-and-swap, key-uniqueness and cap behaviour that agentregtest.Run pins for every implementation",
 	"tokensvc.ReplayStore":            "the control plane's own token_assertion_jti table on the cpstate SQLite DB (tokensvc/adapters/sqlite); the harness runs the real one, a fake would hide the INSERT ... ON CONFLICT DO NOTHING single-use semantics that stop a replayed assertion",
+	"tokensvc.SessionStore":           "the control plane's own token_sessions table on the cpstate SQLite DB (tokensvc/adapters/sqlite); the harness runs the real one, a fake would hide the unique live-session index and the revoked-at ordering that decide session_revoked",
+	"tokensvc.SubjectResolver":        "an in-process dispatch seam from subject_token_type to a verifier; the id_token resolver wraps identity.Verifier, which has a harness fake (fakes.NewVerifier), so the IdP boundary is already faked and nothing external sits behind this port",
 	"keys.Signer":                     "local CPU-only signing over stdlib crypto (GenerateLocal/NewLocalSigner); no external system behind the port, and a fake would hide the JOSE wire encodings (r||s, RFC 7638 kids) the verifiers pin",
 }
 
