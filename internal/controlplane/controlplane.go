@@ -207,6 +207,9 @@ type Server struct {
 	// approvals is the change-approval service; nil unless
 	// console.approvals.enabled (approvals_apply.go).
 	approvals *approvals.Service
+	// approvalsErr is why an enabled approvals gate was not built; Run refuses
+	// to start on it.
+	approvalsErr error
 
 	// blocks is the user block list store; nil without State (and then no
 	// blocked_users overlay is registered).

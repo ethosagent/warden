@@ -10,6 +10,10 @@ const (
 	StateDraft State = "draft"
 	// StatePending: submitted, waiting for approvals.
 	StatePending State = "pending"
+	// StateApplying: claimed by an Apply that is publishing it. Only the
+	// publish outcome (or startup reconcile) leaves it: withdraw, update, reject
+	// and expiry are illegal here, so an Apply cannot race them.
+	StateApplying State = "applying"
 	// StateApplied: published as a policy version. Terminal.
 	StateApplied State = "applied"
 	// StateRejected: a reviewer refused it. Terminal.
@@ -27,7 +31,7 @@ const (
 
 // States lists every state, in lifecycle order.
 func States() []State {
-	return []State{StateDraft, StatePending, StateApplied, StateRejected, StateNeedsRebase, StateWithdrawn, StateExpired, StateAppliedUnreviewed}
+	return []State{StateDraft, StatePending, StateApplying, StateApplied, StateRejected, StateNeedsRebase, StateWithdrawn, StateExpired, StateAppliedUnreviewed}
 }
 
 // Open reports whether the state counts against maxOpenDrafts and is swept by
@@ -55,11 +59,16 @@ const (
 	// The state does not change, but the write races withdraw, reject and
 	// expiry through the same compare-and-swap.
 	EventApprove Event = "approve"
-	// EventApply: pending -> applied (the publish succeeded).
+	// EventBeginApply: pending -> applying (claims the draft before publishing).
+	EventBeginApply Event = "begin_apply"
+	// EventApply: applying -> applied (the publish succeeded).
 	EventApply Event = "apply"
+	// EventApplyFailed: applying -> pending (the publish was refused, for
+	// example by validation; last_error says why).
+	EventApplyFailed Event = "apply_failed"
 	// EventReject: pending -> rejected.
 	EventReject Event = "reject"
-	// EventConflict: pending -> needs_rebase (the publish found a moved head).
+	// EventConflict: applying -> needs_rebase (the publish found a moved head).
 	EventConflict Event = "conflict"
 	// EventRebase: needs_rebase -> pending at revision n+1.
 	EventRebase Event = "rebase"
@@ -84,12 +93,16 @@ var transitions = map[State]map[Event]State{
 	StatePending: {
 		EventUpdate:         StatePending,
 		EventApprove:        StatePending,
-		EventApply:          StateApplied,
+		EventBeginApply:     StateApplying,
 		EventReject:         StateRejected,
-		EventConflict:       StateNeedsRebase,
 		EventWithdraw:       StateWithdrawn,
 		EventExpire:         StateExpired,
 		EventEmergencyApply: StateAppliedUnreviewed,
+	},
+	StateApplying: {
+		EventApply:       StateApplied,
+		EventApplyFailed: StatePending,
+		EventConflict:    StateNeedsRebase,
 	},
 	StateNeedsRebase: {
 		EventRebase:         StatePending,

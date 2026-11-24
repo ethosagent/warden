@@ -8,7 +8,7 @@ import (
 )
 
 var allEvents = []approvals.Event{
-	approvals.EventSubmit, approvals.EventUpdate, approvals.EventApprove, approvals.EventApply, approvals.EventReject,
+	approvals.EventSubmit, approvals.EventUpdate, approvals.EventApprove, approvals.EventBeginApply, approvals.EventApply, approvals.EventApplyFailed, approvals.EventReject,
 	approvals.EventConflict, approvals.EventRebase, approvals.EventWithdraw, approvals.EventExpire,
 	approvals.EventEmergencyApply, approvals.EventReview,
 }
@@ -28,12 +28,15 @@ func TestDraftTransitions(t *testing.T) {
 
 		{approvals.StatePending, approvals.EventUpdate}:         approvals.StatePending,
 		{approvals.StatePending, approvals.EventApprove}:        approvals.StatePending,
-		{approvals.StatePending, approvals.EventApply}:          approvals.StateApplied,
+		{approvals.StatePending, approvals.EventBeginApply}:     approvals.StateApplying,
 		{approvals.StatePending, approvals.EventReject}:         approvals.StateRejected,
-		{approvals.StatePending, approvals.EventConflict}:       approvals.StateNeedsRebase,
 		{approvals.StatePending, approvals.EventWithdraw}:       approvals.StateWithdrawn,
 		{approvals.StatePending, approvals.EventExpire}:         approvals.StateExpired,
 		{approvals.StatePending, approvals.EventEmergencyApply}: approvals.StateAppliedUnreviewed,
+
+		{approvals.StateApplying, approvals.EventApply}:       approvals.StateApplied,
+		{approvals.StateApplying, approvals.EventApplyFailed}: approvals.StatePending,
+		{approvals.StateApplying, approvals.EventConflict}:    approvals.StateNeedsRebase,
 
 		{approvals.StateNeedsRebase, approvals.EventRebase}:         approvals.StatePending,
 		{approvals.StateNeedsRebase, approvals.EventWithdraw}:       approvals.StateWithdrawn,
@@ -69,6 +72,9 @@ func TestDraftTransitionsTerminalAndOpen(t *testing.T) {
 			t.Errorf("%s: Terminal=%v Open=%v, want open", s, s.Terminal(), s.Open())
 		}
 	}
+	if approvals.StateApplying.Terminal() || approvals.StateApplying.Open() {
+		t.Error("applying is neither terminal nor open: only the publish outcome leaves it")
+	}
 	if approvals.StateAppliedUnreviewed.Terminal() || approvals.StateAppliedUnreviewed.Open() {
 		t.Error("applied_unreviewed is neither terminal nor open (it awaits review but holds no draft slot)")
 	}
@@ -97,5 +103,24 @@ func TestDraftValidEnums(t *testing.T) {
 		if !d.Valid() {
 			t.Errorf("decision %s invalid", d)
 		}
+	}
+}
+
+func TestDraftRequireClassified(t *testing.T) {
+	d := approvals.Draft{ID: "cd_x", Revision: 2}
+	if err := approvals.RequireClassified(d); !errors.Is(err, approvals.ErrUnclassified) {
+		t.Errorf("unclassified draft = %v, want ErrUnclassified", err)
+	}
+	d.RequiredRole = "editor"
+	if err := approvals.RequireClassified(d); !errors.Is(err, approvals.ErrUnclassified) {
+		t.Errorf("role without classification = %v, want ErrUnclassified", err)
+	}
+	d.Classification = []byte(`{"widening":false}`)
+	if err := approvals.RequireClassified(d); err != nil {
+		t.Errorf("classified draft = %v", err)
+	}
+	d.RequiredRole = ""
+	if err := approvals.RequireClassified(d); !errors.Is(err, approvals.ErrUnclassified) {
+		t.Errorf("empty role = %v, want ErrUnclassified (not editor)", err)
 	}
 }

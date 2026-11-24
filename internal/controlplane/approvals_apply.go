@@ -8,6 +8,7 @@ package controlplane
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"time"
@@ -68,6 +69,20 @@ type policyApplier struct{ s *Server }
 
 var _ approvals.Applier = policyApplier{}
 
+// draftVersionPrefix starts the message of every version a draft publishes. It
+// names the draft and revision, which is how Reconcile finds the version of an
+// interrupted apply.
+func draftVersionPrefix(id string, revision int) string {
+	return fmt.Sprintf("draft %s@r%d: ", id, revision)
+}
+
+// errDraftCredential is the validation-class refusal of a credential change.
+func errDraftCredential(draftFP, headFP string) error {
+	return &dashboard.InvalidPolicyError{Err: fmt.Errorf(
+		"credential changes cannot go through a draft; change the served credential first (draft secretAccessKey %s, current %s)",
+		fingerprintOrNone(draftFP), fingerprintOrNone(headFP))}
+}
+
 // Apply implements approvals.Applier. A moved head is approvals.ErrRebaseRequired
 // and creates no version; a validation failure is the loader's
 // *dashboard.InvalidPolicyError, also with no version.
@@ -91,12 +106,19 @@ func (a policyApplier) Apply(ctx context.Context, d approvals.Draft) (int64, err
 		if head != d.BaseVersion {
 			return fmt.Errorf("%w: head is v%d, the draft is based on v%d", approvals.ErrRebaseRequired, head, d.BaseVersion)
 		}
+		// A version keeps only the credential fingerprint and the CP serves the
+		// served config's value for it, so a draft that changes the credential
+		// would publish a fingerprint nothing serves. Only fingerprints are named.
+		if got, cur := credentialOf(policyWire{Settings: doc.Settings}), credentialOf(*w); got != cur {
+			return errDraftCredential(got, cur)
+		}
 		// The draft doc is the whole canonical doc; the block list is a serve-time
 		// overlay and stays as the head has it.
 		w.Allowlist, w.Denylist, w.Settings = doc.Allowlist, doc.Denylist, doc.Settings
 		return nil
 	}
-	version, _, err := a.s.publishVersionAs(ctx, author, mutate, dashboard.WriteMeta{ExpectedHead: d.BaseVersion, Message: d.Message}, SourceApproval)
+	msg := draftVersionPrefix(d.ID, d.Revision) + d.Message
+	version, _, err := a.s.publishVersionAs(ctx, author, mutate, dashboard.WriteMeta{ExpectedHead: d.BaseVersion, Message: msg}, SourceApproval)
 	switch {
 	case err == nil:
 		return version, nil
@@ -106,6 +128,23 @@ func (a policyApplier) Apply(ctx context.Context, d approvals.Draft) (int64, err
 		return 0, fmt.Errorf("%w: %s", approvals.ErrRebaseRequired, err)
 	}
 	return 0, err
+}
+
+// findDraftVersion is the approvals.VersionFinder: the `approval` version whose
+// message starts with the draft's prefix.
+func (s *Server) findDraftVersion(ctx context.Context, id string, revision int) (int64, bool, error) {
+	prefix := draftVersionPrefix(id, revision)
+	var v int64
+	err := s.cfg.State.SQL().QueryRowContext(ctx,
+		"SELECT version FROM policy_versions WHERE source = ? AND substr(message, 1, ?) = ? ORDER BY version DESC LIMIT 1",
+		SourceApproval, len([]rune(prefix)), prefix).Scan(&v)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("controlplane: find the version of draft %s: %w", id, err)
+	}
+	return v, true, nil
 }
 
 // draftDoc and policyWireDoc convert between the approvals doc and the policy
@@ -125,7 +164,11 @@ func redactDraftDoc(d approvals.Doc) approvals.Doc {
 // guarantee those; a Server built without them (a test) simply has no gate.
 func (s *Server) initApprovals() {
 	ac := s.cfg.Console.Approvals
-	if !ac.Enabled || s.versions == nil || s.cfg.State == nil {
+	if !ac.Enabled {
+		return
+	}
+	if s.versions == nil || s.cfg.State == nil {
+		s.approvalsErr = errors.New("control-plane: console.approvals.enabled needs the versioned policy store and the state database")
 		return
 	}
 	store := sqlstore.New(s.cfg.State.SQL(), s.cfg.Clock.Now, s.cfg.Logger)
@@ -139,9 +182,15 @@ func (s *Server) initApprovals() {
 		Logger:        s.cfg.Logger,
 	})
 	if err != nil {
-		// Unreachable: the config layer validated every input.
-		s.cfg.Logger.Error("control plane: approvals service not built", "error", err)
+		s.approvalsErr = fmt.Errorf("control-plane: approvals service: %w", err)
 		return
+	}
+	// A crash mid-apply leaves a draft in applying: settle it from the versions.
+	if n, err := svc.Reconcile(context.WithoutCancel(context.Background()), s.findDraftVersion); err != nil {
+		s.approvalsErr = fmt.Errorf("control-plane: approvals reconcile: %w", err)
+		return
+	} else if n > 0 {
+		s.cfg.Logger.Warn("control plane: settled change drafts interrupted mid-apply", "count", n)
 	}
 	s.approvals = svc
 }

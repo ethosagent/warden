@@ -15,6 +15,7 @@ package approvals
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/ethosagent/warden/internal/config"
@@ -142,7 +143,9 @@ type Draft struct {
 	// Classification is the widening classification of this revision
 	// (W-P2-APPR-02), opaque to this package. Empty until classified.
 	Classification json.RawMessage
-	// RequiredRole is the lowest console role that may approve ("" = editor).
+	// RequiredRole is the lowest console role that may approve, by name
+	// (viewer, editor, admin). "" means UNCLASSIFIED, never editor: a revision
+	// nobody classified cannot be approved or applied (RequireClassified).
 	RequiredRole   string
 	LastError      string
 	CreatedAt      time.Time
@@ -196,6 +199,19 @@ var (
 	ErrRebaseRequired = errors.New("approvals: base version is stale; rebase the draft")
 	// ErrDuplicateDecision: the same approver already decided this revision.
 	ErrDuplicateDecision = errors.New("approvals: approver already decided this revision")
+	// ErrUnclassified: the revision has no classification or required role, so
+	// it fails closed (W-P2-APPR-02 sets them).
+	ErrUnclassified = errors.New("approvals: draft revision is not classified")
 	// ErrUnsupportedTarget: no Applier or doc codec for the target yet.
 	ErrUnsupportedTarget = errors.New("approvals: unsupported target")
 )
+
+// RequireClassified is the fail-closed guard approve and apply paths call
+// (W-P2-APPR-04, -06): a revision whose classification or required role is
+// empty was never classified and must not be approved or applied.
+func RequireClassified(d Draft) error {
+	if d.RequiredRole == "" || len(d.Classification) == 0 {
+		return fmt.Errorf("%w: draft %s revision %d", ErrUnclassified, d.ID, d.Revision)
+	}
+	return nil
+}

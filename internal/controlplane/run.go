@@ -519,6 +519,11 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		// The CP's time port (nil = clock.Real() inside New).
 		Clock: p.Clock,
 	})
+	// Fail closed: an enabled approvals gate that could not be built must not
+	// leave a control plane that serves writes ungated.
+	if err := srv.approvalsErr; err != nil {
+		return fail(err)
+	}
 
 	srv.warnBreakGlassSetup(integrations)
 

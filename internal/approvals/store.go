@@ -92,13 +92,19 @@ type Store interface {
 	// the draft and the number of distinct approve decisions the current
 	// revision now has. The same approver twice returns ErrDuplicateDecision.
 	RecordDecision(ctx context.Context, id string, in DecisionInput) (Draft, int, error)
-	// MarkApplied moves a pending draft to applied at policy version version.
+	// BeginApply claims a pending draft for publishing (pending -> applying).
+	// Exactly one caller wins; withdraw, update, reject and expiry are illegal
+	// from applying.
+	BeginApply(ctx context.Context, id string, revision int, actorSub string) (Draft, error)
+	// MarkApplied moves an applying draft to applied at policy version version.
 	MarkApplied(ctx context.Context, id string, revision int, version int64, actorSub string) (Draft, error)
-	// MarkNeedsRebase moves a pending draft to needs_rebase with lastError.
+	// MarkNeedsRebase moves an applying draft to needs_rebase with lastError.
 	MarkNeedsRebase(ctx context.Context, id string, revision int, lastError, actorSub string) (Draft, error)
-	// RecordError stores lastError on a pending draft without changing its
-	// state (a failed validation leaves the draft pending).
-	RecordError(ctx context.Context, id string, revision int, lastError string) error
+	// FailApply returns an applying draft to pending with lastError (the
+	// publish was refused, or startup found no version for an interrupted one).
+	FailApply(ctx context.Context, id string, revision int, lastError, actorSub string) (Draft, error)
+	// Applying returns the drafts left in state applying, for startup reconcile.
+	Applying(ctx context.Context) ([]Draft, error)
 	// Withdraw moves an open draft to withdrawn.
 	Withdraw(ctx context.Context, id string, revision int, actorSub string) (Draft, error)
 	// ExpireDue moves every open draft whose expires_at is not after now to

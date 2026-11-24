@@ -13,8 +13,22 @@ import (
 	"time"
 )
 
-// maxLastError caps the error text stored on a draft, in bytes.
-const maxLastError = 512
+// maxLastError caps the error text stored on a draft, in bytes; maxMessage caps
+// a change message, in runes (a policy version message has the same cap).
+//
+// A draft's doc is bounded by the caller: APPR-04's request body cap (1 MiB)
+// is what limits doc_json, this package does not re-measure it.
+const (
+	maxLastError = 512
+	maxMessage   = 512
+)
+
+func capMessage(m string) string {
+	if r := []rune(m); len(r) > maxMessage {
+		return string(r[:maxMessage])
+	}
+	return m
+}
 
 // ServiceConfig wires a Service.
 type ServiceConfig struct {
@@ -106,7 +120,7 @@ func (s *Service) CreateDraft(ctx context.Context, target Target, doc Doc, autho
 	}
 	return s.cfg.Store.Create(ctx, NewDraft{
 		Target: target, BaseVersion: baseVersion, Author: author,
-		Source: prov.Source, Provenance: prov, Message: prov.Message,
+		Source: prov.Source, Provenance: prov, Message: capMessage(prov.Message),
 		DocJSON: raw, DocSHA256: sha,
 		ExpiresAt: s.cfg.Now().Add(s.cfg.DraftTTL),
 	}, s.cfg.MaxOpenDrafts)
@@ -119,7 +133,7 @@ func (s *Service) UpdateDraft(ctx context.Context, id string, expectedRevision i
 	if err != nil {
 		return Draft{}, err
 	}
-	return s.cfg.Store.Update(ctx, id, UpdateInput{ExpectedRevision: expectedRevision, Message: message, DocJSON: raw, DocSHA256: sha}, actorSub)
+	return s.cfg.Store.Update(ctx, id, UpdateInput{ExpectedRevision: expectedRevision, Message: capMessage(message), DocJSON: raw, DocSHA256: sha}, actorSub)
 }
 
 // RebaseDraft is Store.Rebase with the doc redacted and hashed here: doc is the
@@ -133,18 +147,24 @@ func (s *Service) RebaseDraft(ctx context.Context, id string, expectedRevision i
 	if err != nil {
 		return Draft{}, err
 	}
-	return s.cfg.Store.Rebase(ctx, id, UpdateInput{ExpectedRevision: expectedRevision, BaseVersion: newBase, Message: message, DocJSON: raw, DocSHA256: sha}, actorSub)
+	return s.cfg.Store.Rebase(ctx, id, UpdateInput{ExpectedRevision: expectedRevision, BaseVersion: newBase, Message: capMessage(message), DocJSON: raw, DocSHA256: sha}, actorSub)
 }
 
 // Apply publishes a pending draft at revision through its target's Applier and
 // marks it applied. Whoever calls it has already counted the approvals (the
 // two-person rule is APPR-04's).
 //
+// The draft is first claimed with pending -> applying (one compare-and-swap),
+// so a concurrent withdraw, edit, reject or expiry is refused instead of racing
+// the publish. Then:
+//
 //   - A moved base returns ErrRebaseRequired and the draft becomes needs_rebase.
 //   - Any other Applier error (a validation failure) is returned as is and the
-//     draft stays pending with last_error set.
+//     draft returns to pending with last_error set.
 //   - A draft that is not pending returns ErrIllegalTransition and no version
 //     is created, so a second Apply of an applied draft is harmless.
+//
+// A crash between the claim and the outcome is repaired by Reconcile.
 func (s *Service) Apply(ctx context.Context, id string, revision int, actorSub string) (Draft, error) {
 	s.applyMu.Lock()
 	defer s.applyMu.Unlock()
@@ -156,36 +176,73 @@ func (s *Service) Apply(ctx context.Context, id string, revision int, actorSub s
 	if d.Revision != revision {
 		return Draft{}, fmt.Errorf("%w: draft is at revision %d, not %d", ErrStateChanged, d.Revision, revision)
 	}
-	if _, err := Transition(d.State, EventApply); err != nil {
+	if _, err := Transition(d.State, EventBeginApply); err != nil {
 		return Draft{}, err
 	}
 	ap, ok := s.cfg.Appliers[d.Target]
 	if !ok {
 		return Draft{}, fmt.Errorf("%w: %s", ErrUnsupportedTarget, d.Target)
 	}
-	version, err := ap.Apply(ctx, d)
+	d, err = s.cfg.Store.BeginApply(ctx, id, revision, actorSub)
+	if err != nil {
+		return Draft{}, err
+	}
+	version, aerr := ap.Apply(ctx, d)
+	// The outcome must be recorded even if the caller's context ended: the
+	// publish may already have happened.
+	octx := context.WithoutCancel(ctx)
 	switch {
-	case errors.Is(err, ErrRebaseRequired):
-		nd, merr := s.cfg.Store.MarkNeedsRebase(ctx, id, revision, truncate(err.Error()), actorSub)
+	case errors.Is(aerr, ErrRebaseRequired):
+		nd, merr := s.cfg.Store.MarkNeedsRebase(octx, id, revision, truncate(aerr.Error()), actorSub)
 		if merr != nil {
 			return Draft{}, merr
 		}
 		return nd, ErrRebaseRequired
-	case err != nil:
-		if rerr := s.cfg.Store.RecordError(ctx, id, revision, truncate(err.Error())); rerr != nil {
-			s.cfg.Logger.Warn("approvals: cannot record the apply error on the draft", "draft_id", id, "error", rerr)
+	case aerr != nil:
+		if _, ferr := s.cfg.Store.FailApply(octx, id, revision, truncate(aerr.Error()), actorSub); ferr != nil {
+			s.cfg.Logger.Error("approvals: cannot return the draft to pending after a refused apply", "draft_id", id, "error", ferr)
 		}
-		return Draft{}, err
+		return Draft{}, aerr
 	}
-	nd, err := s.cfg.Store.MarkApplied(ctx, id, revision, version, actorSub)
+	nd, err := s.cfg.Store.MarkApplied(octx, id, revision, version, actorSub)
 	if err != nil {
-		// The version is already published; the draft row is what lost (for
-		// example a concurrent withdraw). Say so loudly rather than hide it.
-		s.cfg.Logger.Error("approvals: draft was published but could not be marked applied",
+		s.cfg.Logger.Error("approvals: draft was published but could not be marked applied; reconcile will repair it",
 			"draft_id", id, "revision", revision, "applied_version", version, "error", err)
 		return Draft{}, err
 	}
 	return nd, nil
+}
+
+// VersionFinder reports the version a draft revision published, if any. The
+// control plane implements it by finding the `approval`-source policy version
+// whose message names the draft id and revision.
+type VersionFinder func(ctx context.Context, draftID string, revision int) (version int64, found bool, err error)
+
+// Reconcile repairs drafts a crash left in applying: one with a published
+// version becomes applied at it, one without returns to pending with a
+// last_error. It returns how many it moved.
+func (s *Service) Reconcile(ctx context.Context, find VersionFinder) (int, error) {
+	ds, err := s.cfg.Store.Applying(ctx)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, d := range ds {
+		version, found, err := find(ctx, d.ID, d.Revision)
+		if err != nil {
+			return n, err
+		}
+		if found {
+			_, err = s.cfg.Store.MarkApplied(ctx, d.ID, d.Revision, version, "system")
+		} else {
+			_, err = s.cfg.Store.FailApply(ctx, d.ID, d.Revision, "apply was interrupted before a version was published; approve again", "system")
+		}
+		if err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, nil
 }
 
 // Sweep moves open drafts past their expiry to expired and returns how many.

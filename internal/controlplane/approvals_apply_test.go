@@ -1,6 +1,7 @@
 package controlplane
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -51,6 +52,18 @@ func newApprovalsServer(t *testing.T, console config.ConsoleConfig, clk *clockte
 		t.Fatal(err)
 	}
 	return srv
+}
+
+// newApprovalsServerRaw builds the Server without asserting the gate exists.
+func newApprovalsServerRaw(t *testing.T, console config.ConsoleConfig) *Server {
+	t.Helper()
+	db, err := cpstate.Open(context.Background(), filepath.Join(t.TempDir(), "warden-cp.db"),
+		stateMigrationsWithApprovals(StateMigrations(), console.Approvals))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return New(Config{PolicyPath: writePolicyFile(t, "api.openai.com"), Token: dashTestToken, State: db, PolicyStore: PolicyStoreVersioned, Console: console})
 }
 
 var draftAuthor = approvals.Author{Iss: "https://idp", Sub: "ada", Email: "ada@example.com", Kind: AuthorKindOIDC}
@@ -107,7 +120,7 @@ func TestDraftApplyPublish(t *testing.T) {
 		t.Fatalf("%d versions after Apply, want 2 (import + one)", n)
 	}
 	v := headVersion(t, srv)
-	if v.Version != 2 || v.Source != SourceApproval || v.Author.Sub != "ada" || v.Author.Email != "ada@example.com" || v.Author.Kind != AuthorKindOIDC || v.Message != "allow new.example.com" {
+	if v.Version != 2 || v.Source != SourceApproval || v.Author.Sub != "ada" || v.Author.Email != "ada@example.com" || v.Author.Kind != AuthorKindOIDC || v.Message != draftVersionPrefix(d.ID, d.Revision)+"allow new.example.com" {
 		t.Fatalf("head = v%d source %q author %+v message %q", v.Version, v.Source, v.Author, v.Message)
 	}
 	if v.DocSHA256 != d.DocSHA256 {
@@ -219,6 +232,120 @@ func TestDraftApplyRedactsCredential(t *testing.T) {
 	}
 	if strings.Contains(stored, "raw-key-value") {
 		t.Fatalf("change_drafts holds the raw credential: %s", stored)
+	}
+	// Neither the database file nor its WAL holds the value, after a checkpoint
+	// or before one.
+	for _, ckpt := range []bool{false, true} {
+		if ckpt {
+			if _, err := srv.cfg.State.SQL().Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, f := range []string{srv.cfg.State.Path(), srv.cfg.State.Path() + "-wal"} {
+			b, err := os.ReadFile(f)
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(b, []byte("raw-key-value")) {
+				t.Errorf("%s holds the raw credential (checkpointed=%v)", filepath.Base(f), ckpt)
+			}
+		}
+	}
+}
+
+// TestDraftApplyRefusesCredentialChange: a draft whose credential differs from
+// the served one cannot publish (the version would keep a fingerprint nothing
+// serves); it stays pending with last_error naming fingerprints only.
+func TestDraftApplyRefusesCredentialChange(t *testing.T) {
+	srv := newApprovalsServer(t, approvalsConsole(), nil)
+	ctx := context.Background()
+	_, hd, err := srv.headDoc(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := draftDoc(hd)
+	doc.Settings = &config.SettingsWire{Secrets: &config.SecretsSettings{Backend: "aws", Region: "us-east-1", SecretAccessKey: "rotated-raw-value"}}
+	d, err := srv.Approvals().CreateDraft(ctx, approvals.TargetPolicy, doc, draftAuthor, approvals.Provenance{}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d, err = srv.Approvals().Store().Submit(ctx, d.ID, d.Revision, "ada"); err != nil {
+		t.Fatal(err)
+	}
+	_, err = srv.Approvals().Apply(ctx, d.ID, d.Revision, "bob")
+	var inv *dashboard.InvalidPolicyError
+	if !errors.As(err, &inv) || !strings.Contains(err.Error(), "credential changes cannot go through a draft") {
+		t.Fatalf("Apply = %v, want the credential InvalidPolicyError", err)
+	}
+	if strings.Contains(err.Error(), "rotated-raw-value") {
+		t.Error("the error names the raw credential")
+	}
+	got, _ := srv.Approvals().Store().Get(ctx, d.ID)
+	if got.State != approvals.StatePending || !strings.Contains(got.LastError, redactCredential("rotated-raw-value")) {
+		t.Errorf("draft = %s %q, want pending with the fingerprint in last_error", got.State, got.LastError)
+	}
+	if n := versionCount(t, srv); n != 1 {
+		t.Errorf("%d versions, want only the import", n)
+	}
+}
+
+// TestDraftApplyReconcile: a draft left in applying is settled at startup from
+// the policy versions: applied when an approval version names it at that
+// revision, pending again otherwise.
+func TestDraftApplyReconcile(t *testing.T) {
+	srv := newApprovalsServer(t, approvalsConsole(), nil)
+	ctx := context.Background()
+	st := srv.Approvals().Store()
+
+	// The publish happened, the outcome write did not.
+	published := pendingDraft(t, srv, 1, "pub.example.com")
+	if _, err := st.BeginApply(ctx, published.ID, published.Revision, "bob"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (policyApplier{s: srv}).Apply(ctx, published); err != nil {
+		t.Fatal(err)
+	}
+	if v := headVersion(t, srv); v.Message != draftVersionPrefix(published.ID, published.Revision)+"allow pub.example.com" {
+		t.Fatalf("version message = %q, want the draft id and revision first", v.Message)
+	}
+	// The process died before publishing.
+	lost := pendingDraft(t, srv, 2, "lost.example.com")
+	if _, err := st.BeginApply(ctx, lost.ID, lost.Revision, "bob"); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := srv.Approvals().Reconcile(ctx, srv.findDraftVersion)
+	if err != nil || n != 2 {
+		t.Fatalf("Reconcile = %d, %v; want 2", n, err)
+	}
+	if got, _ := st.Get(ctx, published.ID); got.State != approvals.StateApplied || got.AppliedVersion != 2 {
+		t.Errorf("published draft = %s v%d, want applied v2", got.State, got.AppliedVersion)
+	}
+	if got, _ := st.Get(ctx, lost.ID); got.State != approvals.StatePending || got.LastError == "" {
+		t.Errorf("unpublished draft = %s %q, want pending with last_error", got.State, got.LastError)
+	}
+	// A restart runs it from New too.
+	if n := versionCount(t, srv); n != 2 {
+		t.Errorf("%d versions, want import + the one published", n)
+	}
+}
+
+// TestDraftApplyServiceFailureIsFatal: an enabled gate that cannot be built is
+// an error Run refuses to start on, never a silently ungated control plane.
+func TestDraftApplyServiceFailureIsFatal(t *testing.T) {
+	console := approvalsConsole()
+	console.Approvals.DraftTTL = 0 // NewService refuses it; config validation normally prevents it
+	srv := newApprovalsServerRaw(t, console)
+	if srv.approvalsErr == nil || srv.Approvals() != nil {
+		t.Fatalf("approvalsErr = %v, service = %v; want an error and no service", srv.approvalsErr, srv.Approvals())
+	}
+	// Not versioned: also an error rather than a silent no-gate.
+	srv = New(Config{PolicyPath: writePolicyFile(t, "api.openai.com"), Token: dashTestToken, Console: approvalsConsole()})
+	if srv.approvalsErr == nil {
+		t.Error("enabled approvals without the versioned store left no error")
 	}
 }
 

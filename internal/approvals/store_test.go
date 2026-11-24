@@ -55,6 +55,10 @@ type env struct {
 
 // fakeApplier stands in for the control plane's policy Applier.
 type fakeApplier struct {
+	// enter and release, when set, pause Apply mid-publish: it signals enter,
+	// then waits for release.
+	enter   chan struct{}
+	release chan struct{}
 	mu      sync.Mutex
 	calls   int
 	version int64
@@ -62,6 +66,10 @@ type fakeApplier struct {
 }
 
 func (f *fakeApplier) Apply(_ context.Context, _ approvals.Draft) (int64, error) {
+	if f.enter != nil {
+		f.enter <- struct{}{}
+		<-f.release
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
@@ -398,9 +406,97 @@ func TestDraftStoreRecordErrorKeepsPending(t *testing.T) {
 	if got.State != approvals.StatePending || got.LastError != "invalid policy: bad entry" {
 		t.Fatalf("after a failed apply = %s %q, want pending with last_error", got.State, got.LastError)
 	}
-	// A stale revision cannot write the error.
-	if err := e.store.RecordError(ctx, d.ID, 99, "x"); !errors.Is(err, approvals.ErrStateChanged) {
-		t.Errorf("RecordError(stale) = %v", err)
+	// Outside applying, FailApply is illegal.
+	if _, err := e.store.FailApply(ctx, d.ID, d.Revision, "x", "bob"); !errors.Is(err, approvals.ErrIllegalTransition) {
+		t.Errorf("FailApply on a pending draft = %v, want ErrIllegalTransition", err)
+	}
+}
+
+// TestDraftStoreWithdrawRacesApply: while an Apply is publishing, withdraw,
+// update, reject and expiry are all refused, so the draft cannot be withdrawn
+// after its version went out.
+func TestDraftStoreWithdrawRacesApply(t *testing.T) {
+	e := newEnv(t, 10)
+	ctx := context.Background()
+	d := e.pending("a.example.com")
+	e.apply.enter, e.apply.release = make(chan struct{}), make(chan struct{})
+	done := make(chan error, 1)
+	go func() { _, err := e.svc.Apply(ctx, d.ID, d.Revision, "bob"); done <- err }()
+	<-e.apply.enter // the Applier is running: the draft is claimed
+
+	got, _ := e.store.Get(ctx, d.ID)
+	if got.State != approvals.StateApplying {
+		t.Fatalf("state during the publish = %s, want applying", got.State)
+	}
+	in := approvals.UpdateInput{ExpectedRevision: d.Revision, DocJSON: json.RawMessage(`{}`), DocSHA256: "x"}
+	_, errW := e.store.Withdraw(ctx, d.ID, d.Revision, "ada")
+	_, errU := e.store.Update(ctx, d.ID, in, "ada")
+	_, _, errR := e.store.RecordDecision(ctx, d.ID, decision(d, "cy", approvals.DecisionReject))
+	_, errB := e.store.BeginApply(ctx, d.ID, d.Revision, "bob")
+	e.advance(48 * time.Hour)
+	expired, errE := e.store.ExpireDue(ctx, time.UnixMilli(e.nowMS.Load()))
+	for name, err := range map[string]error{"withdraw": errW, "update": errU, "reject": errR, "second apply": errB} {
+		if !errors.Is(err, approvals.ErrIllegalTransition) {
+			t.Errorf("%s during apply = %v, want ErrIllegalTransition", name, err)
+		}
+	}
+	if errE != nil || len(expired) != 0 {
+		t.Errorf("expiry during apply = %d drafts, %v; want none", len(expired), errE)
+	}
+	close(e.apply.release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	got, _ = e.store.Get(ctx, d.ID)
+	if got.State != approvals.StateApplied || got.AppliedVersion != 1 || e.apply.Calls() != 1 {
+		t.Errorf("after the publish = %s v%d, %d calls", got.State, got.AppliedVersion, e.apply.Calls())
+	}
+}
+
+// TestDraftStoreReconcile: drafts a crash left in applying become applied when
+// a version names them and return to pending when none does.
+func TestDraftStoreReconcile(t *testing.T) {
+	e := newEnv(t, 10)
+	ctx := context.Background()
+	published := e.pending("p.example.com")
+	lost := e.pending("l.example.com")
+	for _, d := range []approvals.Draft{published, lost} {
+		if _, err := e.store.BeginApply(ctx, d.ID, d.Revision, "bob"); err != nil { // then the process "dies"
+			t.Fatal(err)
+		}
+	}
+	find := func(_ context.Context, id string, rev int) (int64, bool, error) {
+		return 7, id == published.ID && rev == published.Revision, nil
+	}
+	n, err := e.svc.Reconcile(ctx, find)
+	if err != nil || n != 2 {
+		t.Fatalf("Reconcile = %d, %v; want 2", n, err)
+	}
+	if got, _ := e.store.Get(ctx, published.ID); got.State != approvals.StateApplied || got.AppliedVersion != 7 {
+		t.Errorf("published draft = %s v%d, want applied v7", got.State, got.AppliedVersion)
+	}
+	got, _ := e.store.Get(ctx, lost.ID)
+	if got.State != approvals.StatePending || got.LastError == "" || got.AppliedVersion != 0 {
+		t.Errorf("unpublished draft = %s %q v%d, want pending with last_error", got.State, got.LastError, got.AppliedVersion)
+	}
+	if n, err := e.svc.Reconcile(ctx, find); err != nil || n != 0 {
+		t.Errorf("second Reconcile = %d, %v; want 0", n, err)
+	}
+}
+
+func TestDraftServiceMessageCap(t *testing.T) {
+	e := newEnv(t, 10)
+	long := strings.Repeat("é", 600)
+	d, err := e.svc.CreateDraft(context.Background(), approvals.TargetPolicy, doc("a.example.com"), ada, approvals.Provenance{Message: long}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len([]rune(d.Message)); n != 512 {
+		t.Errorf("message = %d runes, want capped at 512", n)
+	}
+	d, err = e.svc.UpdateDraft(context.Background(), d.ID, d.Revision, doc("b.example.com"), long, "ada")
+	if err != nil || len([]rune(d.Message)) != 512 {
+		t.Errorf("updated message = %d runes, %v", len([]rune(d.Message)), err)
 	}
 }
 
@@ -586,12 +682,12 @@ func TestDraftStoreTransitionLog(t *testing.T) {
 		t.Fatal(err)
 	}
 	logs := e.logs.String()
-	if n := strings.Count(logs, "msg=change_draft_transition"); n != 3 {
-		t.Fatalf("%d transition lines, want 3 (create, submit, apply):\n%s", n, logs)
+	if n := strings.Count(logs, "msg=change_draft_transition"); n != 4 {
+		t.Fatalf("%d transition lines, want 4 (create, submit, claim, apply):\n%s", n, logs)
 	}
 	for _, want := range []string{
 		"draft_id=" + d.ID, "revision=1", "target=policy", "state_from=draft", "state_to=pending",
-		"state_from=pending", "state_to=applied", "actor_sub=bob",
+		"state_from=pending", "state_to=applying", "state_from=applying", "state_to=applied", "actor_sub=bob",
 	} {
 		if !strings.Contains(logs, want) {
 			t.Errorf("logs lack %q:\n%s", want, logs)

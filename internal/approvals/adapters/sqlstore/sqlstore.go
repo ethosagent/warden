@@ -46,7 +46,7 @@ func Migrations() []cpstate.Migration {
   target_ref          TEXT NOT NULL,
   revision            INTEGER NOT NULL CHECK (revision >= 1),
   base_version        INTEGER NOT NULL,
-  state               TEXT NOT NULL CHECK (state IN ('draft','pending','applied','rejected','needs_rebase','withdrawn','expired','applied_unreviewed')),
+  state               TEXT NOT NULL CHECK (state IN ('draft','pending','applying','applied','rejected','needs_rebase','withdrawn','expired','applied_unreviewed')),
   author_iss          TEXT NOT NULL,
   author_sub          TEXT NOT NULL,
   author_email        TEXT NOT NULL,
@@ -253,7 +253,7 @@ func (st *Store) Create(ctx context.Context, nd approvals.NewDraft, maxOpen int)
 		if maxOpen > 0 {
 			var n int
 			if err := conn.QueryRowContext(ctx,
-				"SELECT count(*) FROM change_drafts WHERE state IN ('draft','pending','needs_rebase')").Scan(&n); err != nil {
+				"SELECT count(*) FROM change_drafts WHERE state IN ('draft','pending','applying','needs_rebase')").Scan(&n); err != nil {
 				return fmt.Errorf("approvals store: count open drafts: %w", err)
 			}
 			if n >= maxOpen {
@@ -470,18 +470,32 @@ func (st *Store) MarkNeedsRebase(ctx context.Context, id string, revision int, l
 	return st.transition(ctx, id, revision, approvals.EventConflict, actorSub, set{"last_error", lastError})
 }
 
-// RecordError implements approvals.Store.
-func (st *Store) RecordError(ctx context.Context, id string, revision int, lastError string) error {
-	res, err := st.db.ExecContext(ctx,
-		"UPDATE change_drafts SET last_error = ?, updated_at = ? WHERE id = ? AND state = 'pending' AND revision = ?",
-		lastError, ms(st.now()), id, revision)
+// BeginApply implements approvals.Store.
+func (st *Store) BeginApply(ctx context.Context, id string, revision int, actorSub string) (approvals.Draft, error) {
+	return st.transition(ctx, id, revision, approvals.EventBeginApply, actorSub)
+}
+
+// FailApply implements approvals.Store.
+func (st *Store) FailApply(ctx context.Context, id string, revision int, lastError, actorSub string) (approvals.Draft, error) {
+	return st.transition(ctx, id, revision, approvals.EventApplyFailed, actorSub, set{"last_error", lastError})
+}
+
+// Applying implements approvals.Store.
+func (st *Store) Applying(ctx context.Context) ([]approvals.Draft, error) {
+	rows, err := st.db.QueryContext(ctx, "SELECT "+draftCols("doc_json")+" FROM change_drafts WHERE state = 'applying' ORDER BY created_at, id")
 	if err != nil {
-		return fmt.Errorf("approvals store: record error on draft %s: %w", id, err)
+		return nil, fmt.Errorf("approvals store: list applying drafts: %w", err)
 	}
-	if n, err := res.RowsAffected(); err != nil || n != 1 {
-		return fmt.Errorf("%w: %s", approvals.ErrStateChanged, id)
+	defer func() { _ = rows.Close() }()
+	var out []approvals.Draft
+	for rows.Next() {
+		d, err := scanDraft(rows)
+		if err != nil {
+			return nil, fmt.Errorf("approvals store: list applying drafts: %w", err)
+		}
+		out = append(out, d)
 	}
-	return nil
+	return out, rows.Err()
 }
 
 // RecordDecision implements approvals.Store.
