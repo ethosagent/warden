@@ -406,6 +406,10 @@ func New(cfg Config) *Server {
 func (s *Server) Start(ctx context.Context) {
 	if s.approvals != nil {
 		go s.sweepApprovals(ctx)
+		if rp := s.approvals.Replayer(); rp != nil {
+			// Running replays end as interrupted when the control plane stops.
+			go func() { <-ctx.Done(); rp.Close() }()
+		}
 	}
 	if s.sessions != nil {
 		go s.sweepSessions(ctx)

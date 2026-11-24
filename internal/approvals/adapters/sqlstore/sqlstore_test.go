@@ -19,11 +19,13 @@ import (
 
 func TestMigrationsAreOptional(t *testing.T) {
 	migs := sqlstore.Migrations()
-	if len(migs) != 1 || migs[0].ID != sqlstore.MigrationID || !migs[0].Optional {
-		t.Fatalf("Migrations() = %+v, want one Optional %s", migs, sqlstore.MigrationID)
+	if len(migs) != 2 || migs[0].ID != sqlstore.MigrationID || migs[1].ID != sqlstore.ReplayMigrationID || !migs[0].Optional || !migs[1].Optional {
+		t.Fatalf("Migrations() = %+v, want Optional %s and %s", migs, sqlstore.MigrationID, sqlstore.ReplayMigrationID)
 	}
-	if on := cpstate.Enable(migs, sqlstore.MigrationID); on[0].Optional {
-		t.Error("Enable left the migration optional")
+	for i, m := range cpstate.Enable(migs, sqlstore.EnabledMigrationIDs()...) {
+		if m.Optional {
+			t.Errorf("Enable left migration %d (%s) optional", i, m.ID)
+		}
 	}
 }
 

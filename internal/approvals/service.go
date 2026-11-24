@@ -55,6 +55,8 @@ type Service struct {
 	cfg ServiceConfig
 	// applyMu serialises Apply so two callers cannot publish the same draft.
 	applyMu sync.Mutex
+	// replayer is set once at startup (SetReplayer), before the Service serves.
+	replayer *Replayer
 }
 
 // NewService validates cfg and returns a Service.
@@ -75,6 +77,70 @@ func NewService(cfg ServiceConfig) (*Service, error) {
 		cfg.Logger = slog.Default()
 	}
 	return &Service{cfg: cfg}, nil
+}
+
+// SetReplayer turns on replays (W-P2-APPR-03): submit and every new revision
+// then queue one. Call it once at startup.
+func (s *Service) SetReplayer(r *Replayer) { s.replayer = r }
+
+// Replayer returns the replayer, or nil when replays are not wired.
+func (s *Service) Replayer() *Replayer { return s.replayer }
+
+// queueReplay queues a replay of d's current revision. A failure to queue never
+// fails the caller (Submit never waits on a replay): the draft then has no
+// replay, which the approve path reports as replay_required.
+func (s *Service) queueReplay(ctx context.Context, d Draft) {
+	if s.replayer == nil {
+		return
+	}
+	if _, err := s.replayer.Queue(context.WithoutCancel(ctx), d); err != nil {
+		s.cfg.Logger.Warn("approvals: cannot queue a replay", "draft_id", d.ID, "revision", d.Revision, "error", err)
+	}
+}
+
+// Submit moves a draft to pending and queues a replay of the revision; it
+// returns without waiting for it.
+func (s *Service) Submit(ctx context.Context, id string, revision int, actorSub string) (Draft, error) {
+	d, err := s.cfg.Store.Submit(ctx, id, revision, actorSub)
+	if err != nil {
+		return Draft{}, err
+	}
+	s.queueReplay(ctx, d)
+	return d, nil
+}
+
+// Replay re-runs the replay of a draft's current revision, at most once a
+// minute per draft. It returns ErrReplayBusy while the one replay slot is in
+// use and ErrReplayRateLimited inside the minute; the replay then runs in the
+// background and the returned row is pending.
+func (s *Service) Replay(ctx context.Context, id string) (Replay, error) {
+	if s.replayer == nil {
+		return Replay{}, errors.New("approvals: replays are not enabled")
+	}
+	d, err := s.cfg.Store.Get(ctx, id)
+	if err != nil {
+		return Replay{}, err
+	}
+	if !d.State.Open() {
+		return Replay{}, fmt.Errorf("%w: a %s draft cannot be replayed", ErrIllegalTransition, d.State)
+	}
+	return s.replayer.Rerun(ctx, d)
+}
+
+// GetReplay returns one replay.
+func (s *Service) GetReplay(ctx context.Context, replayID string) (Replay, error) {
+	if s.replayer == nil {
+		return Replay{}, ErrReplayNotFound
+	}
+	return s.replayer.cfg.Store.Get(ctx, replayID)
+}
+
+// LatestReplay returns the newest replay of the draft at revision (0 = any).
+func (s *Service) LatestReplay(ctx context.Context, draftID string, revision int) (Replay, bool, error) {
+	if s.replayer == nil {
+		return Replay{}, false, nil
+	}
+	return s.replayer.cfg.Store.Latest(ctx, draftID, revision)
 }
 
 // Store returns the underlying store, for the read and transition paths the
@@ -133,7 +199,12 @@ func (s *Service) UpdateDraft(ctx context.Context, id string, expectedRevision i
 	if err != nil {
 		return Draft{}, err
 	}
-	return s.cfg.Store.Update(ctx, id, UpdateInput{ExpectedRevision: expectedRevision, Message: capMessage(message), DocJSON: raw, DocSHA256: sha}, actorSub)
+	d, err := s.cfg.Store.Update(ctx, id, UpdateInput{ExpectedRevision: expectedRevision, Message: capMessage(message), DocJSON: raw, DocSHA256: sha}, actorSub)
+	if err != nil {
+		return Draft{}, err
+	}
+	s.queueReplay(ctx, d)
+	return d, nil
 }
 
 // RebaseDraft is Store.Rebase with the doc redacted and hashed here: doc is the
@@ -147,7 +218,12 @@ func (s *Service) RebaseDraft(ctx context.Context, id string, expectedRevision i
 	if err != nil {
 		return Draft{}, err
 	}
-	return s.cfg.Store.Rebase(ctx, id, UpdateInput{ExpectedRevision: expectedRevision, BaseVersion: newBase, Message: capMessage(message), DocJSON: raw, DocSHA256: sha}, actorSub)
+	d, err := s.cfg.Store.Rebase(ctx, id, UpdateInput{ExpectedRevision: expectedRevision, BaseVersion: newBase, Message: capMessage(message), DocJSON: raw, DocSHA256: sha}, actorSub)
+	if err != nil {
+		return Draft{}, err
+	}
+	s.queueReplay(ctx, d)
+	return d, nil
 }
 
 // Apply publishes a pending draft at revision through its target's Applier and

@@ -30,12 +30,12 @@ const approvalsSweepInterval = time.Minute
 // refuses to start with it rather than pretend to enforce.
 var errApprovalsEnforcementUnavailable = errors.New("control-plane: console.approvals.enabled: approvals enforcement is not available in this build")
 
-// stateMigrationsWithApprovals applies approvals/0001 when the gate is on, so a
+// stateMigrationsWithApprovals applies approvals/0001 and 0002 when the gate is on, so a
 // control plane without approvals creates no table (the migration is Optional
 // and always registered for the downgrade guard).
 func stateMigrationsWithApprovals(migs []cpstate.Migration, ac config.ConsoleApprovals) []cpstate.Migration {
 	if ac.Enabled {
-		return cpstate.Enable(migs, sqlstore.MigrationID)
+		return cpstate.Enable(migs, sqlstore.EnabledMigrationIDs()...)
 	}
 	return migs
 }
@@ -191,6 +191,10 @@ func (s *Server) initApprovals() {
 		return
 	} else if n > 0 {
 		s.cfg.Logger.Warn("control plane: settled change drafts interrupted mid-apply", "count", n)
+	}
+	if err := s.initReplays(svc); err != nil {
+		s.approvalsErr = err
+		return
 	}
 	s.approvals = svc
 }

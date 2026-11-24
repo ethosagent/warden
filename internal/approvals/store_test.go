@@ -104,7 +104,7 @@ func newEnv(t *testing.T, maxOpen int) *env {
 	e := &env{t: t, logs: &syncBuf{}, apply: &fakeApplier{}, maxOpn: maxOpen}
 	e.nowMS.Store(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC).UnixMilli())
 	e.path = filepath.Join(t.TempDir(), "warden-cp.db")
-	db, err := cpstate.Open(context.Background(), e.path, cpstate.Enable(sqlstore.Migrations(), sqlstore.MigrationID))
+	db, err := cpstate.Open(context.Background(), e.path, cpstate.Enable(sqlstore.Migrations(), sqlstore.EnabledMigrationIDs()...))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -713,7 +713,7 @@ func TestDraftStoreMigrationOptional(t *testing.T) {
 		t.Fatalf("tables without Enable = %d, %v; want none", n, err)
 	}
 	_ = db.Close()
-	db, err = cpstate.Open(context.Background(), path, cpstate.Enable(sqlstore.Migrations(), sqlstore.MigrationID))
+	db, err = cpstate.Open(context.Background(), path, cpstate.Enable(sqlstore.Migrations(), sqlstore.EnabledMigrationIDs()...))
 	if err != nil {
 		t.Fatal(err)
 	}
