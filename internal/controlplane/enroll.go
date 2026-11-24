@@ -224,8 +224,9 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res, err := e.tokens.Redeem(r.Context(), req.Token, req.WorkerIDSuffix, func(workerID string) (*x509.Certificate, error) {
-		return ca.Issue(csr, workerID, e.ttl)
+	res, err := e.tokens.Redeem(r.Context(), req.Token, req.WorkerIDSuffix, func(workerID string) (*x509.Certificate, *x509.Certificate, error) {
+		cert, err := ca.Issue(csr, workerID, e.ttl)
+		return cert, ca.Intermediate(), err
 	})
 	switch {
 	case errors.Is(err, ErrEnrollUnknown), errors.Is(err, ErrEnrollRevoked), errors.Is(err, ErrEnrollExpired), errors.Is(err, ErrEnrollExhausted):

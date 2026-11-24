@@ -74,11 +74,22 @@ func (e *enrollEnv) create(t *testing.T, o EnrollCreateOpts) (string, EnrollToke
 	return pt, tok
 }
 
+// issuerFor is issuer for a given CSR.
+func (e *enrollEnv) issuerFor(csr *x509.CertificateRequest) IssueFunc {
+	return func(id string) (*x509.Certificate, *x509.Certificate, error) {
+		c, err := e.ca.Issue(csr, id, time.Hour)
+		return c, e.ca.Intermediate(), err
+	}
+}
+
 // issuer is the Redeem callback: an issue of the env's CA for a fresh key.
-func (e *enrollEnv) issuer(t *testing.T) func(string) (*x509.Certificate, error) {
+func (e *enrollEnv) issuer(t *testing.T) IssueFunc {
 	t.Helper()
 	csr := mustCSR(t)
-	return func(id string) (*x509.Certificate, error) { return e.ca.Issue(csr, id, time.Hour) }
+	return func(id string) (*x509.Certificate, *x509.Certificate, error) {
+		c, err := e.ca.Issue(csr, id, time.Hour)
+		return c, e.ca.Intermediate(), err
+	}
 }
 
 func csrPEM(t *testing.T) string {
@@ -217,7 +228,7 @@ func TestEnrollmentTokensIssueFailureConsumesNothing(t *testing.T) {
 	e := newEnrollEnv(t)
 	pt, tok := e.create(t, EnrollCreateOpts{Name: "n", WorkerID: "worker-1"})
 	boom := errors.New("boom")
-	if _, err := e.store.Redeem(context.Background(), pt, "", func(string) (*x509.Certificate, error) { return nil, boom }); !errors.Is(err, boom) {
+	if _, err := e.store.Redeem(context.Background(), pt, "", func(string) (*x509.Certificate, *x509.Certificate, error) { return nil, nil, boom }); !errors.Is(err, boom) {
 		t.Fatalf("issue failure: %v", err)
 	}
 	toks, _ := e.store.List(context.Background())
@@ -264,7 +275,7 @@ func TestEnrollmentTokensConcurrentRedeem(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, err := e.store.Redeem(context.Background(), pt, "", func(id string) (*x509.Certificate, error) { return e.ca.Issue(csr, id, time.Hour) })
+			_, err := e.store.Redeem(context.Background(), pt, "", e.issuerFor(csr))
 			switch {
 			case err == nil:
 				ok.Add(1)
@@ -437,7 +448,7 @@ func TestWorkerCertStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rec := RecordFor(cert, "worker-1", CertIssuedViaRenew, e.clk.Now())
+	rec := RecordFor(cert, e.ca.Intermediate(), "worker-1", CertIssuedViaRenew, e.clk.Now())
 	rec.PrevSerial = "abc"
 	if err := e.store.RecordCert(ctx, rec); err != nil {
 		t.Fatal(err)
@@ -526,16 +537,45 @@ func TestRecordForIssuerKID(t *testing.T) {
 	}
 	withAKI := *cert
 	withAKI.AuthorityKeyId = []byte{1, 2, 3}
-	if got := RecordFor(&withAKI, "w", CertIssuedViaEnroll, e.clk.Now()).IssuerKID; got != "010203" {
+	if got := RecordFor(&withAKI, e.ca.Intermediate(), "w", CertIssuedViaEnroll, e.clk.Now()).IssuerKID; got != "010203" {
 		t.Errorf("kid with an authority key id = %q", got)
 	}
 	// An intermediate without a SubjectKeyId leaves no AuthorityKeyId: the kid
 	// falls back to a hash of the issuer, never empty.
 	noAKI := *cert
 	noAKI.AuthorityKeyId = nil
-	kid := RecordFor(&noAKI, "w", CertIssuedViaEnroll, e.clk.Now()).IssuerKID
-	sum := sha256.Sum256(cert.RawIssuer)
+	kid := RecordFor(&noAKI, e.ca.Intermediate(), "w", CertIssuedViaEnroll, e.clk.Now()).IssuerKID
+	sum := sha256.Sum256(e.ca.Intermediate().RawSubjectPublicKeyInfo)
 	if kid == "" || kid != hex.EncodeToString(sum[:]) {
 		t.Errorf("fallback kid = %q", kid)
+	}
+}
+
+// TestRecordForKIDTellsRotatedIntermediatesApart: two intermediates with the
+// same subject name but different keys (a rotation) get different issuer kids
+// even without key identifiers.
+func TestRecordForKIDTellsRotatedIntermediatesApart(t *testing.T) {
+	e := newEnrollEnv(t)
+	key2, err := wcasigner.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	inter2, err := wcasigner.NewIntermediate(e.fix.root, e.fix.rootKey, &key2.PublicKey, wcaTrustDomain, e.clk.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inter2.Subject.String() != e.fix.inter.Subject.String() {
+		t.Fatalf("subjects differ: %q vs %q", inter2.Subject, e.fix.inter.Subject)
+	}
+	cert, err := e.ca.Issue(mustCSR(t), "w", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := *cert
+	c.AuthorityKeyId = nil
+	a := RecordFor(&c, e.fix.inter, "w", CertIssuedViaEnroll, e.clk.Now()).IssuerKID
+	b := RecordFor(&c, inter2, "w", CertIssuedViaEnroll, e.clk.Now()).IssuerKID
+	if a == "" || b == "" || a == b {
+		t.Fatalf("kids %q and %q must differ", a, b)
 	}
 }

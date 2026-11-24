@@ -191,14 +191,16 @@ type CertRecord struct {
 	RevokedAt     time.Time
 }
 
-// RecordFor describes cert as a worker_certs row.
-func RecordFor(cert *x509.Certificate, workerID, via string, at time.Time) CertRecord {
+// RecordFor describes cert, issued by the intermediate issuer, as a
+// worker_certs row.
+func RecordFor(cert, issuer *x509.Certificate, workerID, via string, at time.Time) CertRecord {
 	spki := sha256.Sum256(cert.RawSubjectPublicKeyInfo)
-	// The issuer's key id: the AuthorityKeyId the issuer's SubjectKeyId gave the
-	// certificate, else (an intermediate without SKI) sha256 of the issuer name.
+	// The issuer's key id: the AuthorityKeyId the intermediate's SubjectKeyId
+	// gave the certificate, else sha256 of the intermediate's public key. A
+	// rotated intermediate keeps its name, so the name cannot tell them apart.
 	kid := hex.EncodeToString(cert.AuthorityKeyId)
-	if kid == "" {
-		h := sha256.Sum256(cert.RawIssuer)
+	if kid == "" && issuer != nil {
+		h := sha256.Sum256(issuer.RawSubjectPublicKeyInfo)
 		kid = hex.EncodeToString(h[:])
 	}
 	return CertRecord{
@@ -206,6 +208,11 @@ func RecordFor(cert *x509.Certificate, workerID, via string, at time.Time) CertR
 		IssuerKID: kid, IssuedVia: via, IssuedAt: at, NotAfter: cert.NotAfter,
 	}
 }
+
+// IssueFunc signs the certificate for workerID and returns it with the
+// intermediate that signed it (workerca Chain[0]), which RecordFor needs to
+// name the issuer.
+type IssueFunc func(workerID string) (cert, issuer *x509.Certificate, err error)
 
 // Redeemed is the outcome of a successful Redeem.
 type Redeemed struct {
@@ -229,7 +236,7 @@ type EnrollmentTokenStore interface {
 	// final worker id and records the certificate it returns. issue runs inside
 	// the transaction and must not touch the database; if it fails nothing is
 	// consumed.
-	Redeem(ctx context.Context, plaintext, suffix string, issue func(workerID string) (*x509.Certificate, error)) (Redeemed, error)
+	Redeem(ctx context.Context, plaintext, suffix string, issue IssueFunc) (Redeemed, error)
 	// Revoke soft-deletes a token; it is idempotent.
 	Revoke(ctx context.Context, id, actor string) error
 	// List returns every token's metadata, oldest first.
@@ -469,7 +476,7 @@ func scanEnroll(sc interface{ Scan(...any) error }) (EnrollToken, [sha256.Size]b
 // looks the token up by hash, checks revocation, expiry and uses, counts the
 // use, runs issue and inserts the worker_certs row. Two redemptions of a
 // single-use token can never both commit.
-func (s *EnrollmentStore) Redeem(ctx context.Context, plaintext, suffix string, issue func(workerID string) (*x509.Certificate, error)) (Redeemed, error) {
+func (s *EnrollmentStore) Redeem(ctx context.Context, plaintext, suffix string, issue IssueFunc) (Redeemed, error) {
 	if !enrollWellFormed(plaintext) {
 		return Redeemed{}, ErrEnrollUnknown
 	}
@@ -487,7 +494,7 @@ func (s *EnrollmentStore) Redeem(ctx context.Context, plaintext, suffix string, 
 // transaction, so issue must be quick and local: a remote or KMS-backed key
 // source must sign outside the transaction (sign first, then record) before it
 // is plugged in here.
-func (s *EnrollmentStore) redeemTx(ctx context.Context, plaintext, suffix string, issue func(string) (*x509.Certificate, error)) (res Redeemed, err error) {
+func (s *EnrollmentStore) redeemTx(ctx context.Context, plaintext, suffix string, issue IssueFunc) (res Redeemed, err error) {
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		return Redeemed{}, fmt.Errorf("enrollment tokens: redeem: %w", err)
@@ -526,11 +533,11 @@ func (s *EnrollmentStore) redeemTx(ctx context.Context, plaintext, suffix string
 		return Redeemed{}, fmt.Errorf("enrollment tokens: redeem: %w", err)
 	}
 	t.Uses++
-	cert, err := issue(workerID)
+	cert, issuer, err := issue(workerID)
 	if err != nil {
 		return Redeemed{}, err
 	}
-	rec := RecordFor(cert, workerID, CertIssuedViaEnroll, now)
+	rec := RecordFor(cert, issuer, workerID, CertIssuedViaEnroll, now)
 	rec.EnrollTokenID = t.ID
 	if err = insertCert(ctx, conn, rec); err != nil {
 		return Redeemed{}, err
