@@ -87,6 +87,70 @@ type ConsoleConfig struct {
 	// BreakGlass is the emergency local admin login for when the IdP is down
 	// (default off). CP-local like the rest of this block.
 	BreakGlass ConsoleBreakGlass
+	// Approvals is the change-approval gate (default off). CP-local like the
+	// rest of this block: read only from --config, never on a wire, so a
+	// settings save can never turn the gate off.
+	Approvals ConsoleApprovals
+}
+
+// Approvals defaults and bounds (console.approvals). Out-of-range values are
+// startup errors, never clamped.
+const (
+	DefaultApprovalsMin           = 1
+	MaxApprovalsMin               = 3
+	DefaultApprovalsReplayWindow  = 168 * time.Hour
+	MinApprovalsReplayWindow      = time.Hour
+	MaxApprovalsReplayWindow      = 720 * time.Hour
+	DefaultApprovalsReplayEvents  = 100000
+	MaxApprovalsReplayEvents      = 100000
+	DefaultApprovalsReplayTimeout = 60 * time.Second
+	MaxApprovalsReplayTimeout     = time.Hour
+	DefaultApprovalsReplayMaxAge  = 24 * time.Hour
+	MaxApprovalsReplayMaxAge      = 720 * time.Hour
+	DefaultApprovalsDraftTTL      = 168 * time.Hour
+	MaxApprovalsDraftTTL          = 8760 * time.Hour
+	DefaultApprovalsMaxOpenDrafts = 200
+	MaxApprovalsMaxOpenDrafts     = 100000
+)
+
+// ConsoleApprovals is the `console.approvals` sub-block (W-P2-APPR-01). Off
+// (the default) means no migration, no table, no goroutine and byte-identical
+// P1 behaviour. A change needs a control-plane restart.
+type ConsoleApprovals struct {
+	Enabled bool
+	// MinApprovals is how many distinct approvers a held change needs (1..3).
+	MinApprovals int
+	// AllowSelfApproveNarrowing lets a narrowing change apply at submit with
+	// no second person.
+	AllowSelfApproveNarrowing bool
+	// AllowEmergencyApply enables the audited break-glass apply (W-P2-APPR-07).
+	AllowEmergencyApply bool
+	// ReplayWindow is how far back a replay reads fleet events.
+	ReplayWindow time.Duration
+	// ReplayMaxEvents caps the events one replay evaluates.
+	ReplayMaxEvents int
+	// ReplayTimeout bounds one replay run.
+	ReplayTimeout time.Duration
+	// ReplayMaxAge is how old a done replay may be and still back an approval.
+	ReplayMaxAge time.Duration
+	// DraftTTL is how long an open draft lives before the sweeper expires it.
+	DraftTTL time.Duration
+	// MaxOpenDrafts caps drafts in draft, pending or needs_rebase.
+	MaxOpenDrafts int
+}
+
+// DefaultConsoleApprovals is the block with every default applied (disabled).
+func DefaultConsoleApprovals() ConsoleApprovals {
+	return ConsoleApprovals{
+		MinApprovals:              DefaultApprovalsMin,
+		AllowSelfApproveNarrowing: true,
+		ReplayWindow:              DefaultApprovalsReplayWindow,
+		ReplayMaxEvents:           DefaultApprovalsReplayEvents,
+		ReplayTimeout:             DefaultApprovalsReplayTimeout,
+		ReplayMaxAge:              DefaultApprovalsReplayMaxAge,
+		DraftTTL:                  DefaultApprovalsDraftTTL,
+		MaxOpenDrafts:             DefaultApprovalsMaxOpenDrafts,
+	}
 }
 
 // Break-glass bounds. SessionTTL defaults to DefaultBreakGlassSessionTTL and
@@ -210,6 +274,19 @@ type rawConsole struct {
 		SessionTTL               string `yaml:"sessionTTL"`
 		AllowBehindTLSTerminator bool   `yaml:"allowBehindTLSTerminator"`
 	} `yaml:"breakGlass"`
+	// Pointers tell an absent key (default) from an explicit zero (an error).
+	Approvals struct {
+		Enabled                   bool   `yaml:"enabled"`
+		MinApprovals              *int   `yaml:"minApprovals"`
+		AllowSelfApproveNarrowing *bool  `yaml:"allowSelfApproveNarrowing"`
+		AllowEmergencyApply       bool   `yaml:"allowEmergencyApply"`
+		ReplayWindow              string `yaml:"replayWindow"`
+		ReplayMaxEvents           *int   `yaml:"replayMaxEvents"`
+		ReplayTimeout             string `yaml:"replayTimeout"`
+		ReplayMaxAge              string `yaml:"replayMaxAge"`
+		DraftTTL                  string `yaml:"draftTTL"`
+		MaxOpenDrafts             *int   `yaml:"maxOpenDrafts"`
+	} `yaml:"approvals"`
 }
 
 // parseConsole converts the raw block and applies defaults. An absent block is
@@ -222,6 +299,7 @@ func parseConsole(r *rawConsole) (ConsoleConfig, error) {
 			Idle: DefaultConsoleIdle, Absolute: DefaultConsoleAbsolute,
 		},
 		BreakGlass: ConsoleBreakGlass{SessionTTL: DefaultBreakGlassSessionTTL},
+		Approvals:  DefaultConsoleApprovals(),
 	}
 	if r == nil {
 		return c, nil
@@ -272,7 +350,85 @@ func parseConsole(r *rawConsole) (ConsoleConfig, error) {
 		}
 		c.BreakGlass.SessionTTL = d
 	}
+	a, err := parseApprovals(r)
+	if err != nil {
+		return ConsoleConfig{}, err
+	}
+	c.Approvals = a
 	return c, nil
+}
+
+// parseApprovals converts the raw console.approvals block, applying defaults.
+func parseApprovals(r *rawConsole) (ConsoleApprovals, error) {
+	ra := r.Approvals
+	a := DefaultConsoleApprovals()
+	a.Enabled = ra.Enabled
+	a.AllowEmergencyApply = ra.AllowEmergencyApply
+	if ra.MinApprovals != nil {
+		a.MinApprovals = *ra.MinApprovals
+	}
+	if ra.AllowSelfApproveNarrowing != nil {
+		a.AllowSelfApproveNarrowing = *ra.AllowSelfApproveNarrowing
+	}
+	if ra.ReplayMaxEvents != nil {
+		a.ReplayMaxEvents = *ra.ReplayMaxEvents
+	}
+	if ra.MaxOpenDrafts != nil {
+		a.MaxOpenDrafts = *ra.MaxOpenDrafts
+	}
+	for _, d := range []struct {
+		key string
+		raw string
+		dst *time.Duration
+	}{
+		{"replayWindow", ra.ReplayWindow, &a.ReplayWindow},
+		{"replayTimeout", ra.ReplayTimeout, &a.ReplayTimeout},
+		{"replayMaxAge", ra.ReplayMaxAge, &a.ReplayMaxAge},
+		{"draftTTL", ra.DraftTTL, &a.DraftTTL},
+	} {
+		s := strings.TrimSpace(d.raw)
+		if s == "" {
+			continue
+		}
+		v, err := time.ParseDuration(s)
+		if err != nil {
+			return ConsoleApprovals{}, fmt.Errorf("config: console.approvals.%s %q is not a valid duration: %w", d.key, s, err)
+		}
+		*d.dst = v
+	}
+	return a, nil
+}
+
+// validateApprovals range-checks console.approvals. It runs whether or not the
+// gate is enabled, so a bad value never waits for the day it is switched on.
+func validateApprovals(a ConsoleApprovals) error {
+	if a == (ConsoleApprovals{}) {
+		// A ConsoleConfig built by hand (not parsed) has no defaults filled;
+		// parseConsole always fills them, so a parsed block is never zero.
+		return nil
+	}
+	if a.MinApprovals < 1 || a.MinApprovals > MaxApprovalsMin {
+		return fmt.Errorf("config: console.approvals.minApprovals %d must be between 1 and %d", a.MinApprovals, MaxApprovalsMin)
+	}
+	if a.ReplayWindow < MinApprovalsReplayWindow || a.ReplayWindow > MaxApprovalsReplayWindow {
+		return fmt.Errorf("config: console.approvals.replayWindow %s must be between %s and %s", a.ReplayWindow, MinApprovalsReplayWindow, MaxApprovalsReplayWindow)
+	}
+	if a.ReplayMaxEvents < 1 || a.ReplayMaxEvents > MaxApprovalsReplayEvents {
+		return fmt.Errorf("config: console.approvals.replayMaxEvents %d must be between 1 and %d", a.ReplayMaxEvents, MaxApprovalsReplayEvents)
+	}
+	if a.ReplayTimeout <= 0 || a.ReplayTimeout > MaxApprovalsReplayTimeout {
+		return fmt.Errorf("config: console.approvals.replayTimeout %s must be > 0 and at most %s", a.ReplayTimeout, MaxApprovalsReplayTimeout)
+	}
+	if a.ReplayMaxAge <= 0 || a.ReplayMaxAge > MaxApprovalsReplayMaxAge {
+		return fmt.Errorf("config: console.approvals.replayMaxAge %s must be > 0 and at most %s", a.ReplayMaxAge, MaxApprovalsReplayMaxAge)
+	}
+	if a.DraftTTL <= 0 || a.DraftTTL > MaxApprovalsDraftTTL {
+		return fmt.Errorf("config: console.approvals.draftTTL %s must be > 0 and at most %s", a.DraftTTL, MaxApprovalsDraftTTL)
+	}
+	if a.MaxOpenDrafts < 1 || a.MaxOpenDrafts > MaxApprovalsMaxOpenDrafts {
+		return fmt.Errorf("config: console.approvals.maxOpenDrafts %d must be between 1 and %d", a.MaxOpenDrafts, MaxApprovalsMaxOpenDrafts)
+	}
+	return nil
 }
 
 // validateBreakGlass checks console.breakGlass when it is enabled. Errors name
@@ -307,6 +463,9 @@ func validateConsole(c ConsoleConfig) error {
 		return err
 	}
 	if err := validateBreakGlass(c); err != nil {
+		return err
+	}
+	if err := validateApprovals(c.Approvals); err != nil {
 		return err
 	}
 	switch c.Auth {
