@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ethosagent/warden/internal/adminaudit"
+	"github.com/ethosagent/warden/internal/approvals/adapters/sqlstore"
 	"github.com/ethosagent/warden/internal/clock"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/cpstate"
@@ -42,6 +43,9 @@ func StateMigrations() []cpstate.Migration {
 	// Feature-gated: known to the downgrade guard, applied only with
 	// keys.enabled (stateMigrationsFor).
 	migs = append(migs, metastore.Migrations()...)
+	// Feature-gated like the keys one: applied only with
+	// console.approvals.enabled (stateMigrationsWithApprovals).
+	migs = append(migs, sqlstore.Migrations()...)
 	return migs
 }
 
