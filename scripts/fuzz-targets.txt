@@ -10,3 +10,4 @@ FuzzGRPCFrames     ./internal/proxy
 FuzzSniffClientHello ./internal/proxy
 FuzzParseToken ./internal/identity/adapters/oidc
 FuzzParseJWK ./internal/keys
+FuzzValidate ./internal/agentreg

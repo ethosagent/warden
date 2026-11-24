@@ -37,6 +37,7 @@ linters:
             - ${base-path}/internal/policybuilder/**
             - ${base-path}/internal/policyeval/**
             - ${base-path}/internal/keys/**
+            - ${base-path}/internal/agentreg/**
             - ${base-path}/internal/policy/**
             - ${base-path}/internal/scan/**
             - ${base-path}/internal/dlp/**
@@ -78,6 +79,7 @@ linters:
             - '!${base-path}/internal/clock/clocktest/**'
             - '!${base-path}/internal/identity/identitytest/**'
             - '!${base-path}/test/**'
+            - '!${base-path}/internal/agentreg/agentregtest/**'
             - '!**/*_test.go'
           deny:
             - pkg: net
@@ -106,6 +108,7 @@ linters:
             - ${base-path}/internal/policybuilder/**
             - ${base-path}/internal/policyeval/**
             - ${base-path}/internal/keys/**
+            - ${base-path}/internal/agentreg/**
             - '!${base-path}/cmd/**'
             - '!${base-path}/internal/worker/**'
             - '!${base-path}/internal/controlplane/**'
@@ -147,6 +150,7 @@ linters:
             - '!${base-path}/internal/clock/clocktest/**'
             - '!${base-path}/internal/identity/identitytest/**'
             - '!${base-path}/test/**'
+            - '!${base-path}/internal/agentreg/agentregtest/**'
             - '!${base-path}/internal/identity/adapters/oidc/**'
             - '!${base-path}/internal/config/**'
             - '!${base-path}/internal/denyreason/**'
@@ -203,12 +207,14 @@ linters:
             - '!${base-path}/internal/policybuilder/**'
             - '!${base-path}/internal/policyeval/**'
             - '!${base-path}/internal/keys/**'
+            - '!${base-path}/internal/agentreg/**'
             - '!${base-path}/tools/**'
             - '!${base-path}/internal/archtest/**'
             - '!${base-path}/internal/dnstest/**'
             - '!${base-path}/internal/clock/clocktest/**'
             - '!${base-path}/internal/identity/identitytest/**'
             - '!${base-path}/test/**'
+            - '!${base-path}/internal/agentreg/agentregtest/**'
             - '!**/*_test.go'
           deny:
             - pkg: database/sql
