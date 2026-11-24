@@ -1,7 +1,7 @@
 // Package apikeys implements Warden's scoped control-plane API keys: the
-// "wak_" key format, the scope registry, a SQLite store on the cpstate
-// database and an in-memory index that authenticates a presented key without
-// any DB I/O.
+// "wak_" key format, the scope registry, the Store port and an in-memory index
+// that authenticates a presented key without any DB I/O. The SQLite store on
+// the cpstate database is in adapters/sqlitestore.
 //
 // These are credentials a human owner hands to a script or CI job so it can
 // call the control plane's admin API on the owner's behalf, limited to the

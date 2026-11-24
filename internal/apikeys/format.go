@@ -29,7 +29,9 @@ const (
 	// Pattern is a regular expression (RE2) matching exactly the shape of a
 	// key, for scanners that look for keys inside larger text (egress
 	// detection). It is an over-approximation of what Parse accepts: Parse also
-	// requires the secret to be canonical base32.
+	// requires the secret to be canonical base32. Data-plane scanners
+	// (internal/scan) may not import this package (zone Z2), so they copy this
+	// literal; a test on their side keeps the copy in step.
 	Pattern = `wak_[0-9a-f]{16}_[a-z2-7]{52}`
 
 	// maxIDAttempts bounds Generate's retries on an id collision. A 64-bit id

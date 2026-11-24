@@ -82,11 +82,12 @@ type Index struct {
 	version int64
 	stale   atomic.Bool
 
-	// running is set once Run starts; the staleness ceiling only applies then,
-	// because without a poll loop nothing could refresh lastOK. lastOK is the
-	// clock time (unix nanos) of the last successful data_version check or
-	// reload. staleLogged makes the stale log line fire once per episode.
-	running     atomic.Bool
+	// lastOK is the clock time (unix nanos) of the last successful
+	// data_version check or reload, starting at NewIndex's initial load, so an
+	// Index whose Run never starts fails closed after the ceiling. polls counts
+	// completed poll cycles (tests wait on it). staleLogged makes the stale log
+	// line fire once per episode.
+	polls       atomic.Int64
 	lastOK      atomic.Int64
 	staleLogged atomic.Bool
 
@@ -193,12 +194,9 @@ func (ix *Index) touch() {
 	ix.staleLogged.Store(false)
 }
 
-// tooStale reports whether Run has gone past the staleness ceiling without a
-// successful check, logging once per episode.
+// tooStale reports whether the Index has gone past the staleness ceiling
+// without a successful check, logging once per episode.
 func (ix *Index) tooStale() bool {
-	if !ix.running.Load() {
-		return false
-	}
 	age := ix.now().Sub(time.Unix(0, ix.lastOK.Load()))
 	if age <= staleAfterPolls*ix.pollInterval {
 		return false
@@ -212,8 +210,7 @@ func (ix *Index) tooStale() bool {
 
 // Authenticate resolves a presented key: Parse, a map lookup by id, a
 // constant-time compare of sha256(secret), then revocation and expiry against
-// now. While Run is active, a snapshot that could not be confirmed current for
-// 15 poll intervals refuses every key with ReasonIndexStale. Every failure returns ErrUnauthorized; the Reason is for logs and the
+// now. A snapshot that could not be confirmed current for 15 poll intervals refuses every key with ReasonIndexStale. Every failure returns ErrUnauthorized; the Reason is for logs and the
 // counter. The returned Key shares slices with the snapshot: do not modify it.
 func (ix *Index) Authenticate(token string, now time.Time) (Key, Reason, error) {
 	id, hash, err := parse(token)
@@ -283,8 +280,6 @@ func (ix *Index) Flush(ctx context.Context) error {
 // until ctx ends, then flushes once more.
 func (ix *Index) Run(ctx context.Context) {
 	ix.touch()
-	ix.running.Store(true)
-	defer ix.running.Store(false)
 	pollCh := ix.after(ix.pollInterval)
 	flushCh := ix.after(ix.flushInterval)
 	for {
@@ -308,9 +303,14 @@ func (ix *Index) Run(ctx context.Context) {
 	}
 }
 
+// Polls returns how many poll cycles Run has completed. Tests wait on it
+// instead of sleeping; it is also a liveness signal for metrics.
+func (ix *Index) Polls() int64 { return ix.polls.Load() }
+
 // poll reloads the snapshot when the database version moved or an earlier
 // local rebuild failed.
 func (ix *Index) poll(ctx context.Context) {
+	defer ix.polls.Add(1)
 	v, err := ix.store.DataVersion(ctx)
 	if err != nil {
 		if ctx.Err() == nil {

@@ -311,11 +311,18 @@ func (s *SQLiteStore) Revoke(ctx context.Context, id, by string) error {
 	if err != nil {
 		return fmt.Errorf("apikeys: revoke: %w", err)
 	}
+	// The UPDATE committed: tell the Index before anything else can fail, so a
+	// revocation is never reported as an error without having been applied
+	// in memory. The same notice for an already-revoked key is harmless (the
+	// Index keeps the first revoked_at) and repairs an Index that missed it.
+	ch := apikeys.Change{RevokedIDs: []string{id}, RevokedAt: time.Unix(at.Unix(), 0), RevokedBy: by}
 	n, err := res.RowsAffected()
 	if err != nil {
+		s.changed(ch)
 		return fmt.Errorf("apikeys: revoke: %w", err)
 	}
 	if n == 0 {
+		s.changed(ch)
 		var one int
 		err := s.db.QueryRowContext(ctx, `SELECT 1 FROM api_keys WHERE id = ?`, id).Scan(&one)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -326,7 +333,7 @@ func (s *SQLiteStore) Revoke(ctx context.Context, id, by string) error {
 		}
 		return nil // already revoked
 	}
-	s.changed(apikeys.Change{RevokedIDs: []string{id}, RevokedAt: time.Unix(at.Unix(), 0), RevokedBy: by})
+	s.changed(ch)
 	return nil
 }
 
@@ -343,12 +350,14 @@ func (s *SQLiteStore) RevokeByOwner(ctx context.Context, iss, sub, by string) (i
 	if err != nil {
 		return 0, fmt.Errorf("apikeys: revoke by owner: %w", err)
 	}
+	ch := apikeys.Change{OwnerIss: iss, OwnerSub: sub, RevokedAt: time.Unix(at.Unix(), 0), RevokedBy: by}
 	n, err := res.RowsAffected()
 	if err != nil {
+		s.changed(ch) // the UPDATE committed; see Revoke
 		return 0, fmt.Errorf("apikeys: revoke by owner: %w", err)
 	}
 	if n > 0 {
-		s.changed(apikeys.Change{OwnerIss: iss, OwnerSub: sub, RevokedAt: time.Unix(at.Unix(), 0), RevokedBy: by})
+		s.changed(ch)
 	}
 	return int(n), nil
 }

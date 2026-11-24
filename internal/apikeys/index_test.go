@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"runtime"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -27,6 +28,11 @@ type memStore struct {
 	version int64
 	hooks   []func(Change)
 	uses    map[string]Use
+
+	// gate, when set, blocks the next Snapshot after it read its rows until the
+	// channel is closed; readSignal is closed once the rows were read.
+	gate       chan struct{}
+	readSignal chan struct{}
 
 	failSnapshot atomic.Bool
 	failVersion  atomic.Bool
@@ -132,7 +138,6 @@ func (m *memStore) Snapshot(context.Context) (Snapshot, error) {
 		return Snapshot{}, errors.New("injected snapshot failure")
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	var snap Snapshot
 	snap.SetVersion(m.version)
 	ids := make([]string, 0, len(m.rows))
@@ -143,7 +148,20 @@ func (m *memStore) Snapshot(context.Context) (Snapshot, error) {
 	for _, id := range ids {
 		snap.Add(m.rows[id].key, m.rows[id].hash)
 	}
+	gate, signal := m.gate, m.readSignal
+	m.gate = nil
+	m.mu.Unlock()
+	if gate != nil {
+		close(signal)
+		<-gate
+	}
 	return snap, nil
+}
+
+func (m *memStore) isRevoked(id string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return !m.rows[id].key.RevokedAt.IsZero()
 }
 
 func (m *memStore) DataVersion(context.Context) (int64, error) {
@@ -188,16 +206,30 @@ func runIndex(t *testing.T, ix *Index) {
 	t.Cleanup(func() { cancel(); wg.Wait() })
 }
 
-// drive advances the fake clock one poll interval at a time until cond holds.
-func drive(t *testing.T, clk *clocktest.Fake, cond func() bool) {
+// drive advances the fake clock one poll interval at a time, waiting for Run
+// to complete a poll after each step, until cond holds. The real-time deadline
+// is only a safety net against a hung test.
+func drive(t *testing.T, clk *clocktest.Fake, ix *Index, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(20 * time.Second)
 	for !cond() {
 		if time.Now().After(deadline) {
 			t.Fatal("condition not reached")
 		}
+		step(clk, ix)
+	}
+}
+
+// step advances one poll interval and waits until a poll completes. If Run had
+// not armed its timer yet the advance is repeated.
+func step(clk *clocktest.Fake, ix *Index) {
+	before := ix.Polls()
+	for ix.Polls() == before {
 		clk.Advance(DefaultPollInterval)
-		time.Sleep(2 * time.Millisecond)
+		end := time.Now().Add(50 * time.Millisecond)
+		for ix.Polls() == before && time.Now().Before(end) {
+			runtime.Gosched()
+		}
 	}
 }
 
@@ -298,7 +330,7 @@ func TestIndexLocalRebuildFailureIsRetried(t *testing.T) {
 	m.failSnapshot.Store(false)
 	// Local writes do not move the version, so only the stale flag can trigger
 	// the reload.
-	drive(t, clk, func() bool { _, _, err := ix.Authenticate(pt, clk.Now()); return err == nil })
+	drive(t, clk, ix, func() bool { _, _, err := ix.Authenticate(pt, clk.Now()); return err == nil })
 }
 
 func TestIndexExternalRevokeReload(t *testing.T) {
@@ -309,12 +341,12 @@ func TestIndexExternalRevokeReload(t *testing.T) {
 	ok := func(pt string) bool { _, _, err := ix.Authenticate(pt, clk.Now()); return err == nil }
 
 	m.extRevoke(k1.ID)
-	drive(t, clk, func() bool { return !ok(pt1) })
+	drive(t, clk, ix, func() bool { return !ok(pt1) })
 
 	m.failSnapshot.Store(true)
 	m.extRevoke(k2.ID)
 	before := m.calls.Load()
-	drive(t, clk, func() bool { return m.calls.Load() >= before+6 })
+	drive(t, clk, ix, func() bool { return m.calls.Load() >= before+6 })
 	if ok(pt1) {
 		t.Fatal("a failed reload re-admitted a revoked key")
 	}
@@ -322,24 +354,24 @@ func TestIndexExternalRevokeReload(t *testing.T) {
 		t.Fatal("expected the last good snapshot to still hold key two")
 	}
 	m.failSnapshot.Store(false)
-	drive(t, clk, func() bool { return !ok(pt2) })
+	drive(t, clk, ix, func() bool { return !ok(pt2) })
 }
 
 func TestIndexStalenessCeiling(t *testing.T) {
 	m, clk, ix := setup(t)
 	runIndex(t, ix)
 	pt, _, _ := m.Create(context.Background(), mkParams("alice", "ci"))
-	ok := func() bool { _, _, err := ix.Authenticate(pt, clk.Now()); return err == nil }
-	drive(t, clk, ok) // healthy polls keep it fresh far beyond 30s of fake time
+	// Healthy polls keep the index fresh well past 30s of fake time.
 	for range 40 {
-		clk.Advance(DefaultPollInterval)
-		time.Sleep(time.Millisecond)
+		step(clk, ix)
+		if _, r, err := ix.Authenticate(pt, clk.Now()); err != nil {
+			t.Fatalf("healthy index refused a key: reason %q", r)
+		}
 	}
-	drive(t, clk, ok)
 
 	m.failVersion.Store(true)
 	var reason Reason
-	drive(t, clk, func() bool {
+	drive(t, clk, ix, func() bool {
 		_, reason, _ = ix.Authenticate(pt, clk.Now())
 		return reason == ReasonIndexStale
 	})
@@ -348,15 +380,55 @@ func TestIndexStalenessCeiling(t *testing.T) {
 	}
 
 	m.failVersion.Store(false)
-	drive(t, clk, ok) // a successful check clears the ceiling
+	drive(t, clk, ix, func() bool { _, _, err := ix.Authenticate(pt, clk.Now()); return err == nil })
 }
 
-func TestIndexNoStaleCeilingWithoutRun(t *testing.T) {
+// The ceiling counts from NewIndex's initial load, so an Index nobody runs
+// fails closed too.
+func TestIndexStaleCeilingWithoutRun(t *testing.T) {
 	m, clk, ix := setup(t)
 	pt, _, _ := m.Create(context.Background(), mkParams("alice", "ci"))
-	clk.Advance(time.Hour / 2)
+	clk.Advance(staleAfterPolls * DefaultPollInterval)
 	if _, _, err := ix.Authenticate(pt, clk.Now()); err != nil {
-		t.Fatalf("ceiling applied without a poll loop: %v", err)
+		t.Fatalf("refused exactly at the ceiling: %v", err)
+	}
+	clk.Advance(time.Second)
+	if _, r, err := ix.Authenticate(pt, clk.Now()); err == nil || r != ReasonIndexStale {
+		t.Fatalf("past the ceiling without Run: reason %q err %v, want index_stale", r, err)
+	}
+	if err := ix.Rebuild(context.Background()); err != nil { // a successful reload clears it
+		t.Fatal(err)
+	}
+	if _, _, err := ix.Authenticate(pt, clk.Now()); err != nil {
+		t.Fatalf("still stale after a successful rebuild: %v", err)
+	}
+}
+
+// A Rebuild that read the rows before a revoke committed must not be able to
+// undo the revoke when it finishes afterwards.
+func TestIndexRebuildCannotUndoConcurrentRevoke(t *testing.T) {
+	m, clk, ix := setup(t)
+	ctx := context.Background()
+	pt, k, _ := m.Create(ctx, mkParams("alice", "ci"))
+
+	gate, signal := make(chan struct{}), make(chan struct{})
+	m.mu.Lock()
+	m.gate, m.readSignal = gate, signal
+	m.mu.Unlock()
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); _ = ix.Rebuild(ctx) }() // reads the old rows, then blocks
+	<-signal
+	go func() { defer wg.Done(); _ = m.Revoke(ctx, k.ID, "admin") }()
+	for !m.isRevoked(k.ID) { // the revoke committed; its hook now waits on the rebuild
+		runtime.Gosched()
+	}
+	close(gate)
+	wg.Wait()
+
+	if _, r, err := ix.Authenticate(pt, clk.Now()); err == nil || r != ReasonRevoked {
+		t.Fatalf("reason %q err %v: a stale rebuild undid a revoke", r, err)
 	}
 }
 
@@ -409,7 +481,7 @@ func TestIndexRunFlushes(t *testing.T) {
 	_, k, _ := m.Create(context.Background(), mkParams("alice", "ci"))
 	ix.MarkUsed(k.ID, t0, "3.3.3.3")
 	runIndex(t, ix)
-	drive(t, clk, func() bool { return m.lastUse(k.ID).IP == "3.3.3.3" }) // the 60 s timer
+	drive(t, clk, ix, func() bool { return m.lastUse(k.ID).IP == "3.3.3.3" }) // the 60 s timer
 }
 
 func TestIndexRunFlushesOnShutdown(t *testing.T) {

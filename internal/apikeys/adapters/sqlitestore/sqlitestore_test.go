@@ -11,6 +11,7 @@ import (
 	mrand "math/rand/v2"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -242,8 +243,10 @@ func TestStoreRevoke(t *testing.T) {
 	if !again.RevokedAt.Equal(first.RevokedAt) || again.RevokedBy != "admin1" || first.RevokedAt.IsZero() {
 		t.Fatalf("second revoke changed the row: %+v vs %+v", first, again)
 	}
-	if changes != 4 {
-		t.Fatalf("an idempotent revoke fired OnChange: %d", changes)
+	// An already-revoked key still notifies (repairs an Index that missed the
+	// first notice); the row itself is untouched, as checked above.
+	if changes != 5 || len(changeLog[4].RevokedIDs) != 1 || changeLog[4].RevokedIDs[0] != k.ID {
+		t.Fatalf("idempotent revoke notice: %d changes, last %+v", changes, changeLog[len(changeLog)-1])
 	}
 	if err := s.Revoke(ctx, "missing", "x"); !errors.Is(err, apikeys.ErrNotFound) {
 		t.Fatalf("Revoke unknown = %v", err)
@@ -474,15 +477,23 @@ func startIndex(t *testing.T, st apikeys.Store, clk *clocktest.Fake) *apikeys.In
 	return ix
 }
 
-func drive(t *testing.T, clk *clocktest.Fake, cond func() bool) {
+// drive advances one poll interval at a time, waiting for Run to finish a poll
+// after each step, until cond holds. The deadline is only a safety net.
+func drive(t *testing.T, clk *clocktest.Fake, ix *apikeys.Index, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(20 * time.Second)
 	for !cond() {
 		if time.Now().After(deadline) {
 			t.Fatal("condition not reached")
 		}
-		clk.Advance(apikeys.DefaultPollInterval)
-		time.Sleep(2 * time.Millisecond)
+		before := ix.Polls()
+		for ix.Polls() == before {
+			clk.Advance(apikeys.DefaultPollInterval)
+			end := time.Now().Add(50 * time.Millisecond)
+			for ix.Polls() == before && time.Now().Before(end) {
+				runtime.Gosched()
+			}
+		}
 	}
 }
 
@@ -506,12 +517,12 @@ func TestIndexCrossProcessReload(t *testing.T) {
 	ptTwo, k2, _ := storeB.Create(ctx, params("alice", "two"))
 	ptThree, _, _ := storeB.Create(ctx, params("alice", "three"))
 	ok := func(pt string) bool { _, _, err := ix.Authenticate(pt, clk.Now()); return err == nil }
-	drive(t, clk, func() bool { return ok(ptOne) && ok(ptTwo) && ok(ptThree) })
+	drive(t, clk, ix, func() bool { return ok(ptOne) && ok(ptTwo) && ok(ptThree) })
 
 	if err := storeB.Revoke(ctx, k1.ID, "cli"); err != nil {
 		t.Fatal(err)
 	}
-	drive(t, clk, func() bool { return !ok(ptOne) })
+	drive(t, clk, ix, func() bool { return !ok(ptOne) })
 	if _, r, _ := ix.Authenticate(ptOne, clk.Now()); r != apikeys.ReasonRevoked {
 		t.Fatalf("reason = %q", r)
 	}
@@ -523,7 +534,7 @@ func TestIndexCrossProcessReload(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := fs.calls.Load()
-	drive(t, clk, func() bool { return fs.calls.Load() >= before+4 })
+	drive(t, clk, ix, func() bool { return fs.calls.Load() >= before+4 })
 	if ok(ptOne) {
 		t.Fatal("a failed reload re-admitted a revoked key")
 	}
@@ -531,7 +542,7 @@ func TestIndexCrossProcessReload(t *testing.T) {
 		t.Fatal("expected the last good index to still hold key two")
 	}
 	fs.fail.Store(false)
-	drive(t, clk, func() bool { return !ok(ptTwo) })
+	drive(t, clk, ix, func() bool { return !ok(ptTwo) })
 	if ok(ptOne) || !ok(ptThree) {
 		t.Fatal("recovered index is wrong")
 	}
