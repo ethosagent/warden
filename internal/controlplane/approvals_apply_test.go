@@ -48,6 +48,9 @@ func newApprovalsServer(t *testing.T, console config.ConsoleConfig, clk *clockte
 	if srv.Approvals() == nil {
 		t.Fatal("approvals service not built")
 	}
+	// Registered after the DB's cleanup, so it runs first: no replay worker
+	// outlives the test or touches a closed DB.
+	t.Cleanup(srv.Approvals().Replayer().Close)
 	if err := srv.importInitialVersion(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +66,11 @@ func newApprovalsServerRaw(t *testing.T, console config.ConsoleConfig) *Server {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	return New(Config{PolicyPath: writePolicyFile(t, "api.openai.com"), Token: dashTestToken, State: db, PolicyStore: PolicyStoreVersioned, Console: console})
+	srv := New(Config{PolicyPath: writePolicyFile(t, "api.openai.com"), Token: dashTestToken, State: db, PolicyStore: PolicyStoreVersioned, Console: console})
+	if svc := srv.Approvals(); svc != nil && svc.Replayer() != nil {
+		t.Cleanup(svc.Replayer().Close)
+	}
+	return srv
 }
 
 var draftAuthor = approvals.Author{Iss: "https://idp", Sub: "ada", Email: "ada@example.com", Kind: AuthorKindOIDC}

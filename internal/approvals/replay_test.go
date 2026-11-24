@@ -171,6 +171,7 @@ func TestReplayTimeoutFailsAndDiscardsLateResult(t *testing.T) {
 	runner := &fakeRunner{gate: make(chan struct{}), out: doneOutcome, returned: make(chan struct{}, 1)} // ignores ctx on purpose
 	e, _ := replayEnv(t, runner, 100*time.Millisecond)
 	d := e.create("a.example.com")
+	begin := time.Now()
 	if _, err := e.svc.Submit(context.Background(), d.ID, 1, "ada"); err != nil {
 		t.Fatal(err)
 	}
@@ -178,6 +179,11 @@ func TestReplayTimeoutFailsAndDiscardsLateResult(t *testing.T) {
 	r := waitReplay(t, e, id, settled)
 	if r.Status != approvals.ReplayFailed || r.ErrorCode != approvals.ReplayErrTimeout {
 		t.Fatalf("replay = %+v, want failed/timeout", r)
+	}
+	// Acceptance: failed `timeout` within 200ms of a 100ms replayTimeout, measured
+	// from Submit. 500ms here leaves room for a loaded CI machine.
+	if took := time.Since(begin); took > 500*time.Millisecond {
+		t.Errorf("replay settled %v after Submit, want about 100ms (criterion: within 200ms)", took)
 	}
 	close(runner.gate) // the late result
 	select {
@@ -465,4 +471,148 @@ func TestReplayQueueFull(t *testing.T) {
 		t.Errorf("third replay = %+v, want failed/queue_full", rs[2])
 	}
 	close(runner.gate)
+}
+
+// flakyStore wraps a ReplayStore and fails chosen calls.
+type flakyStore struct {
+	approvals.ReplayStore
+	mu             sync.Mutex
+	finishFailures int // the next n Finish calls fail
+	failRunning    bool
+}
+
+func (f *flakyStore) Finish(ctx context.Context, id string, fin approvals.ReplayFinish) (bool, error) {
+	f.mu.Lock()
+	if f.finishFailures > 0 {
+		f.finishFailures--
+		f.mu.Unlock()
+		return false, errors.New("disk full")
+	}
+	f.mu.Unlock()
+	return f.ReplayStore.Finish(ctx, id, fin)
+}
+
+func (f *flakyStore) MarkRunning(ctx context.Context, id string, at time.Time) (bool, error) {
+	f.mu.Lock()
+	fail := f.failRunning
+	f.mu.Unlock()
+	if fail {
+		return false, errors.New("disk full")
+	}
+	return f.ReplayStore.MarkRunning(ctx, id, at)
+}
+
+func flakyEnv(t *testing.T, runner approvals.ReplayRunner, cur func(context.Context, string) (int, error), closeTimeout time.Duration) (*env, *approvals.Replayer, *flakyStore) {
+	t.Helper()
+	e := newEnv(t, 10)
+	fs := &flakyStore{ReplayStore: sqlstore.NewReplayStore(e.db.SQL())}
+	rp, err := approvals.NewReplayer(approvals.ReplayerConfig{
+		Store: fs, Runner: runner, Now: func() time.Time { return time.UnixMilli(e.nowMS.Load()) },
+		CurrentRevision: cur, Window: time.Hour, MaxEvents: 10, Timeout: time.Minute, CloseTimeout: closeTimeout,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(rp.Close)
+	e.svc.SetReplayer(rp)
+	return e, rp, fs
+}
+
+// A failed outcome write is retried once as failed `internal`; when that fails
+// too the row stays running for the next start's Recover.
+func TestReplaySettleRetriesFinish(t *testing.T) {
+	e, _, fs := flakyEnv(t, &fakeRunner{out: doneOutcome}, nil, 0)
+	ctx := context.Background()
+	fs.finishFailures = 1
+	d := e.create("a.example.com")
+	if _, err := e.svc.Submit(ctx, d.ID, 1, "ada"); err != nil {
+		t.Fatal(err)
+	}
+	r := waitReplay(t, e, latest(t, e, d.ID, 1).ID, settled)
+	if r.Status != approvals.ReplayFailed || r.ErrorCode != approvals.ReplayErrInternal {
+		t.Errorf("after one failed Finish = %+v, want failed/internal", r)
+	}
+
+	fs.mu.Lock()
+	fs.finishFailures = 2
+	fs.mu.Unlock()
+	d2 := e.create("b.example.com")
+	if _, err := e.svc.Submit(ctx, d2.ID, 1, "ada"); err != nil {
+		t.Fatal(err)
+	}
+	id := latest(t, e, d2.ID, 1).ID
+	waitReplay(t, e, id, func(r approvals.Replay) bool { return r.Status == approvals.ReplayRunning })
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		fs.mu.Lock()
+		left := fs.finishFailures
+		fs.mu.Unlock()
+		if left == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("Finish was never retried")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if r, _ := e.svc.GetReplay(ctx, id); r.Status.Settled() {
+		t.Errorf("double failure settled the row: %+v", r)
+	}
+}
+
+func TestReplayMarkRunningErrorFailsInternal(t *testing.T) {
+	runner := &fakeRunner{out: doneOutcome}
+	e, _, fs := flakyEnv(t, runner, nil, 0)
+	fs.failRunning = true
+	d := e.create("a.example.com")
+	if _, err := e.svc.Submit(context.Background(), d.ID, 1, "ada"); err != nil {
+		t.Fatal(err)
+	}
+	r := waitReplay(t, e, latest(t, e, d.ID, 1).ID, settled)
+	if r.Status != approvals.ReplayFailed || r.ErrorCode != approvals.ReplayErrInternal || runner.Calls() != 0 {
+		t.Errorf("replay = %+v (runner calls %d), want failed/internal without running", r, runner.Calls())
+	}
+}
+
+// A CurrentRevision lookup that fails does not run the replay.
+func TestReplayCurrentRevisionErrorFailsClosed(t *testing.T) {
+	runner := &fakeRunner{out: doneOutcome}
+	e, _, _ := flakyEnv(t, runner, func(context.Context, string) (int, error) { return 0, errors.New("db gone") }, 0)
+	d := e.create("a.example.com")
+	if _, err := e.svc.Submit(context.Background(), d.ID, 1, "ada"); err != nil {
+		t.Fatal(err)
+	}
+	r := waitReplay(t, e, latest(t, e, d.ID, 1).ID, settled)
+	if r.Status != approvals.ReplayFailed || r.ErrorCode != approvals.ReplayErrInternal || runner.Calls() != 0 {
+		t.Errorf("replay = %+v (runner calls %d), want failed/internal without running", r, runner.Calls())
+	}
+}
+
+// Close does not wait forever for a runner that ignores its context, and the
+// replays still waiting end interrupted.
+func TestReplayCloseDeadlineAndWaitingInterrupted(t *testing.T) {
+	runner := &fakeRunner{gate: make(chan struct{}), out: doneOutcome} // ignores ctx
+	e, rp, _ := flakyEnv(t, runner, nil, 100*time.Millisecond)
+	t.Cleanup(func() { close(runner.gate) }) // runs before rp.Close (LIFO)
+	ctx := context.Background()
+	d1, d2 := e.create("a.example.com"), e.create("b.example.com")
+	for _, d := range []approvals.Draft{d1, d2} {
+		if _, err := e.svc.Submit(ctx, d.ID, 1, "ada"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	waitReplay(t, e, latest(t, e, d1.ID, 1).ID, func(r approvals.Replay) bool { return r.Status == approvals.ReplayRunning })
+	begin := time.Now()
+	rp.Close()
+	if took := time.Since(begin); took > 3*time.Second {
+		t.Errorf("Close took %v with a stuck runner, want about its 100ms deadline", took)
+	}
+	if r := latest(t, e, d2.ID, 1); r.Status != approvals.ReplayFailed || r.ErrorCode != approvals.ReplayErrInterrupted {
+		t.Errorf("waiting replay after Close = %+v, want failed/interrupted", r)
+	}
+	// The running one is settled interrupted as soon as its context ends, even
+	// though its runner is still stuck.
+	if r := latest(t, e, d1.ID, 1); r.Status != approvals.ReplayFailed || r.ErrorCode != approvals.ReplayErrInterrupted {
+		t.Errorf("stuck replay = %+v, want failed/interrupted", r)
+	}
 }

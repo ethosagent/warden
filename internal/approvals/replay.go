@@ -192,8 +192,14 @@ type ReplayerConfig struct {
 	// MaxWaiting caps replays waiting for the slot (0 = DefaultMaxWaitingReplays);
 	// extras fail with queue_full.
 	MaxWaiting int
-	Logger     *slog.Logger
+	// CloseTimeout bounds how long Close waits for a running replay to unwind
+	// (0 = DefaultReplayCloseTimeout).
+	CloseTimeout time.Duration
+	Logger       *slog.Logger
 }
+
+// DefaultReplayCloseTimeout is how long Close waits for the worker.
+const DefaultReplayCloseTimeout = 10 * time.Second
 
 // Replayer queues and runs replays: one at a time on one worker goroutine,
 // each bounded by Timeout. A draft has at most one waiting replay (a newer
@@ -239,6 +245,9 @@ func NewReplayer(cfg ReplayerConfig) (*Replayer, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
+	if cfg.CloseTimeout <= 0 {
+		cfg.CloseTimeout = DefaultReplayCloseTimeout
+	}
 	if cfg.MaxWaiting <= 0 {
 		cfg.MaxWaiting = DefaultMaxWaitingReplays
 	}
@@ -265,7 +274,17 @@ func (r *Replayer) Close() {
 	r.closed = true
 	r.mu.Unlock()
 	r.cancel()
-	r.wg.Wait()
+	done := make(chan struct{})
+	go func() { r.wg.Wait(); close(done) }()
+	timer := time.NewTimer(r.cfg.CloseTimeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		// A runner that ignores its context is still unwinding; the row it
+		// holds stays running and the next start's Recover settles it.
+		r.cfg.Logger.Warn("replay_close_timeout", "timeout_ms", r.cfg.CloseTimeout.Milliseconds())
+	}
 	r.mu.Lock()
 	rest := r.drainLocked()
 	r.mu.Unlock()
@@ -432,17 +451,30 @@ type replayRun struct {
 // context cannot pile up behind its successors.
 func (r *Replayer) run(q queuedReplay) {
 	rp, d := q.rp, q.d
+	// settleFree frees the slot before the outcome is visible, so a caller that
+	// sees the replay settled never finds the replayer still busy.
+	settleFree := func(f ReplayFinish, started time.Time, out ReplayOutcome, cause error) {
+		r.clearRunning()
+		r.settle(rp, f, started, out, cause)
+	}
 	ctx0 := context.WithoutCancel(r.baseCtx)
 	if r.cfg.CurrentRevision != nil {
-		if cur, err := r.cfg.CurrentRevision(ctx0, d.ID); err == nil && cur != d.Revision {
-			r.settle(rp, ReplayFinish{Status: ReplayFailed, ErrorCode: ReplayErrSuperseded}, time.Time{}, ReplayOutcome{}, nil)
+		cur, err := r.cfg.CurrentRevision(ctx0, d.ID)
+		switch {
+		case err != nil:
+			// Fail closed: without the current revision a stale replay could
+			// pass for the draft's evidence.
+			settleFree(ReplayFinish{Status: ReplayFailed, ErrorCode: ReplayErrInternal}, time.Time{}, ReplayOutcome{}, err)
+			return
+		case cur != d.Revision:
+			settleFree(ReplayFinish{Status: ReplayFailed, ErrorCode: ReplayErrSuperseded}, time.Time{}, ReplayOutcome{}, nil)
 			return
 		}
 	}
 	started := r.cfg.Now()
 	ok, err := r.cfg.Store.MarkRunning(ctx0, rp.ID, started)
 	if err != nil {
-		r.settle(rp, ReplayFinish{Status: ReplayFailed, ErrorCode: ReplayErrInternal}, started, ReplayOutcome{}, err)
+		settleFree(ReplayFinish{Status: ReplayFailed, ErrorCode: ReplayErrInternal}, started, ReplayOutcome{}, err)
 		return
 	}
 	if !ok {
@@ -468,7 +500,7 @@ func (r *Replayer) run(q queuedReplay) {
 		<-ch // hold the slot until the runner unwinds
 		return
 	}
-	r.settle(rp, r.finishFor(res), started, res.out, res.err)
+	settleFree(r.finishFor(res), started, res.out, res.err)
 }
 
 // finishFor maps a run result to how the replay ended.
