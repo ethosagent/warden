@@ -1111,9 +1111,14 @@ func (p *Proxy) forward(s *requestScope) (endSession bool) {
 	if _, err := s.upstream.Write(raw); err == nil && p.readUpstreamResponse(s) {
 		return false
 	}
-	// Stale half-closed keep-alive conn: drop it and redial exactly once.
+	// Stale half-closed keep-alive conn: drop it and redial exactly once. A cut
+	// that closed the upstream on purpose (agent kill switch, block list) is
+	// not stale: fail the request instead of dialing a fresh upstream.
 	_ = s.upstream.Close()
 	s.upstream, s.upstreamBR, s.reused = nil, nil, false
+	if p.agentDisabled.Load() || s.sess.isClosing() {
+		return p.badGateway(s)
+	}
 	if err := p.dialUpstream(s); err != nil {
 		return p.badGateway(s)
 	}

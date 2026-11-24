@@ -343,3 +343,13 @@ func (p *Proxy) CloseBlockedSessions() {
 // wasRefused reports whether the registry closed this session at creation
 // (the bound agent is disabled). The caller must not dial or forward.
 func (s *session) wasRefused() bool { return s != nil && s.refused }
+
+// isClosing reports whether a cut already matched this session.
+func (s *session) isClosing() bool {
+	if s == nil {
+		return false
+	}
+	s.reg.mu.Lock()
+	defer s.reg.mu.Unlock()
+	return s.closing
+}

@@ -91,8 +91,7 @@ func TestAgentDisabledGate(t *testing.T) {
 }
 
 // TestAgentGateFirstApplyDisabled: a fresh gate whose first apply is a disabled
-// entry (the first pull after a fail-closed boot) disables the proxy and the
-// registry refuses a session opened afterwards.
+// entry (the first pull after a fail-closed boot) disables the proxy.
 func TestAgentGateFirstApplyDisabled(t *testing.T) {
 	a, _, _ := newTestApplier(t)
 	g := newAgentGate(a.p, "claude-code", slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -113,6 +112,25 @@ type spyEvaluator struct {
 
 func (s *spyEvaluator) Replace(config.Policy) {
 	s.disabledAtSwap, s.swapped = s.p.AgentDisabled(), true
+}
+
+// TestGatedEvaluatorEnableSwapsFirst: when a pull re-enables the agent the
+// policy is swapped while the switch is still on, so traffic never runs on the
+// old policy once enabled.
+func TestGatedEvaluatorEnableSwapsFirst(t *testing.T) {
+	a, _, _ := newTestApplier(t)
+	g := newAgentGate(a.p, "claude-code", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	g.apply(config.Policy{RegisteredAgents: []config.RegisteredAgent{registered("claude-code", config.RegisteredAgentDisabled)}})
+	spy := &spyEvaluator{p: a.p}
+	gatedEvaluator{PolicyEvaluator: spy, gate: g}.Replace(config.Policy{
+		RegisteredAgents: []config.RegisteredAgent{registered("claude-code", config.RegisteredAgentActive)},
+	})
+	if !spy.swapped || !spy.disabledAtSwap {
+		t.Fatalf("swapped=%v, switch on at swap=%v; want the swap while still disabled", spy.swapped, spy.disabledAtSwap)
+	}
+	if a.p.AgentDisabled() {
+		t.Fatal("the agent is still disabled after the enabling pull")
+	}
 }
 
 // TestGatedEvaluatorAppliesGateBeforeSwap: a pull that both allows traffic and

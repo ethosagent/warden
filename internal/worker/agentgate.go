@@ -57,16 +57,23 @@ func (g *agentGate) apply(pol config.Policy) {
 	}
 }
 
-// gatedEvaluator applies the agent gate before every policy swap: a pull that
-// both allows a destination and disables the bound agent (the first pull after
-// a fail-closed boot included) never has a moment where the destination is
-// reachable.
+// gatedEvaluator orders the agent gate around every policy swap. A pull that
+// disables the bound agent flips the switch BEFORE the new allow policy is live
+// (the first pull after a fail-closed boot included), so no destination is
+// reachable in between. A pull that leaves the agent enabled or re-enables it
+// swaps first and gates after, so a re-enable that also narrows the allowlist
+// never runs on the old, wider policy.
 type gatedEvaluator struct {
 	proxy.PolicyEvaluator
 	gate *agentGate
 }
 
 func (g gatedEvaluator) Replace(p config.Policy) {
-	g.gate.apply(p)
+	if agentDisabled(p, g.gate.agentID) {
+		g.gate.apply(p)
+		g.PolicyEvaluator.Replace(p)
+		return
+	}
 	g.PolicyEvaluator.Replace(p)
+	g.gate.apply(p)
 }
