@@ -39,6 +39,7 @@ func StateMigrations() []cpstate.Migration {
 	migs = append(migs, adminaudit.Migrations()...)
 	migs = append(migs, BlockMigrations()...)
 	migs = append(migs, WorkerTokenMigrations()...)
+	migs = append(migs, EnrollmentMigrations()...)
 	// Feature-gated: known to the downgrade guard, applied only with
 	// keys.enabled (stateMigrationsFor).
 	migs = append(migs, metastore.Migrations()...)

@@ -487,3 +487,28 @@ func TestIssueRefusesNonPositiveSerial(t *testing.T) {
 		}
 	}
 }
+
+// TestCheckCSRAndChain: CheckCSR is the pre-flight Issue runs, and Chain returns
+// a copy of the pinned chain, intermediate first.
+func TestCheckCSRAndChain(t *testing.T) {
+	p := newPKI(t, t0)
+	ca := p.ca(t, t0)
+	if err := workerca.CheckCSR(csrFor(t, p256(t), &x509.CertificateRequest{})); err != nil {
+		t.Errorf("good csr: %v", err)
+	}
+	if err := workerca.CheckCSR(nil); !errors.Is(err, workerca.ErrBadCSR) {
+		t.Errorf("nil: %v", err)
+	}
+	rsaKey, _ := rsa.GenerateKey(rand.Reader, 2048)
+	if err := workerca.CheckCSR(csrFor(t, rsaKey, &x509.CertificateRequest{})); !errors.Is(err, workerca.ErrUnsupportedKey) {
+		t.Errorf("rsa: %v", err)
+	}
+	chain := ca.Chain()
+	if len(chain) != 2 || !chain[0].Equal(p.inter) || !chain[1].Equal(p.root) || chain[0].CheckSignatureFrom(chain[1]) != nil {
+		t.Fatal("chain is not intermediate then root")
+	}
+	chain[0] = nil // a caller cannot reorder the pinned chain
+	if !ca.Chain()[0].Equal(p.inter) {
+		t.Error("Chain returned the internal slice")
+	}
+}

@@ -180,6 +180,9 @@ func cpRouteTable() map[routeKey]authzRow {
 		{get, jwksPath, worker},
 		{get, "/policy", worker},
 		{post, "/control/heartbeat", worker},
+		// Credential is the enrollment token; mounted only with workerCA enabled
+		// and a state dir (W-P2-WCA-02).
+		{post, enrollPath, worker},
 		{post, "/central/ingest", worker},
 		{get, "/central/secrets", readRow(config.RoleAdmin, "secrets.read")},
 		{post, "/central/secrets", auditedRow(config.RoleAdmin, "secrets.write", "secrets")},

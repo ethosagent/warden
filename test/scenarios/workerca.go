@@ -30,16 +30,7 @@ func workerCADegradedThenReady(t *testing.T, h *harness.H) {
 	if status := cpPolicyStatus(h); status != http.StatusOK {
 		t.Fatalf("GET /policy while the worker CA is degraded = %d, want 200", status)
 	}
-	actor := keys.Actor{Subject: "scenario", AuthMethod: "cli"}
-	if _, err := h.KeyManager().ImportKey(context.Background(), keys.PurposeCA, h.WorkerCAKey(), actor); err != nil {
-		t.Fatalf("import the ca key: %v", err)
-	}
-	// The retry timer is armed on the harness clock next to the key loops, so
-	// the scenario advances 30s per poll until the CA is installed.
-	h.Eventually("the worker CA to load its key", func() bool {
-		h.Clock().Advance(30 * time.Second)
-		return workerCAHealthz(h) == "ok\n"
-	})
+	workerCAMakeReady(t, h)
 
 	// A restart finds the key already imported: healthy with no retry needed.
 	h.CP().Stop()
@@ -56,4 +47,19 @@ func workerCADegradedThenReady(t *testing.T, h *harness.H) {
 			t.Errorf("control plane log carries %q", marker)
 		}
 	}
+}
+
+// workerCAMakeReady imports the intermediate key and drives the harness clock
+// until the 30s retry loop has installed the CA. The retry timer is armed on
+// the harness clock next to the key loops, so the clock advances 30s per poll.
+func workerCAMakeReady(t *testing.T, h *harness.H) {
+	t.Helper()
+	actor := keys.Actor{Subject: "scenario", AuthMethod: "cli"}
+	if _, err := h.KeyManager().ImportKey(context.Background(), keys.PurposeCA, h.WorkerCAKey(), actor); err != nil {
+		t.Fatalf("import the ca key: %v", err)
+	}
+	h.Eventually("the worker CA to load its key", func() bool {
+		h.Clock().Advance(30 * time.Second)
+		return workerCAHealthz(h) == "ok\n"
+	})
 }

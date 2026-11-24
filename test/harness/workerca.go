@@ -1,12 +1,17 @@
 package harness
 
 import (
+	"context"
 	"crypto/ecdsa"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
+	"github.com/ethosagent/warden/internal/controlplane"
 	"github.com/ethosagent/warden/internal/workerca"
 	wcasigner "github.com/ethosagent/warden/internal/workerca/adapters/signer"
 )
@@ -82,4 +87,50 @@ func (h *H) WorkerCAKey() *ecdsa.PrivateKey {
 		h.tb.Fatal("harness: WorkerCAKey needs the WithWorkerCA option")
 	}
 	return h.workerCAFixture().key
+}
+
+// WorkerCAStateDir is the control plane's state dir under WithWorkerCA (it
+// holds warden-cp.db, the audit keys and the key store).
+func (h *H) WorkerCAStateDir() string {
+	h.tb.Helper()
+	if !h.wantWorkerCA {
+		h.tb.Fatal("harness: WorkerCAStateDir needs the WithWorkerCA option")
+	}
+	return filepath.Join(h.root, "cp-state")
+}
+
+// CreateEnrollToken mints a wet_ token the way `warden control-plane
+// enroll-token create` does: straight on the running control plane's state
+// database through the offline opener, audited as cli when admin audit is on.
+// The control plane picks it up within about 2 seconds (its data_version
+// poll, which runs on the harness clock). Give workerID or prefix.
+func (h *H) CreateEnrollToken(workerID, prefix string, maxUses int, ttl time.Duration) string {
+	h.tb.Helper()
+	ctx := context.Background()
+	o, err := controlplane.OpenEnrollTokensOffline(ctx, h.WorkerCAStateDir(), "", 0, 0)
+	if err != nil {
+		h.tb.Fatalf("harness: open the enrollment tokens: %v", err)
+	}
+	defer func() { _ = o.Close() }()
+	res, err := o.Create(ctx, controlplane.OfflineEnrollCreate{WorkerID: workerID, WorkerIDPrefix: prefix, MaxUses: maxUses, ExpiresIn: ttl})
+	if err != nil {
+		h.tb.Fatalf("harness: create an enrollment token: %v", err)
+	}
+	return res.Plaintext
+}
+
+// Enroll posts to /control/enroll the way a worker's enroller does: no
+// credential at all, a JSON body with the token, the CSR (PEM) and the
+// optional suffix.
+func (c *CPClient) Enroll(token, csrPEM, suffix string) (int, string) {
+	c.h.tb.Helper()
+	body, err := json.Marshal(map[string]string{"token": token, "csr": csrPEM, "workerIdSuffix": suffix})
+	if err != nil {
+		c.h.tb.Fatalf("harness: encode the enroll request: %v", err)
+	}
+	status, resp, err := c.Do(http.MethodPost, "/control/enroll", "", body)
+	if err != nil {
+		c.h.tb.Fatalf("harness: POST /control/enroll: %v", err)
+	}
+	return status, resp
 }

@@ -459,6 +459,26 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 			<-tokDone
 		}()
 	}
+	// Enrollment tokens and the issued-cert table (W-P2-WCA-02) exist only with
+	// workerCA.enabled and a state dir; their index follows the same 2 s poll.
+	var enrollStore *EnrollmentStore
+	if state != nil && wcaPlan != nil {
+		enrollStore, err = NewEnrollmentStore(state, EnrollmentOptions{Clock: clk, Logger: logger,
+			DefaultTTL: wcaPlan.cfg.EnrollTokenTTL, MaxTTL: wcaPlan.cfg.EnrollTokenMaxTTL})
+		if err != nil {
+			return fail(fmt.Errorf("control-plane: enrollment tokens: %w", err))
+		}
+		enrollCtx, enrollCancel := context.WithCancel(ctx)
+		enrollDone := make(chan struct{})
+		go func() {
+			defer close(enrollDone)
+			enrollStore.Run(enrollCtx)
+		}()
+		defer func() {
+			enrollCancel()
+			<-enrollDone
+		}()
+	}
 	// Signing keys (keys.enabled): the manager is built here and loads after
 	// the server exists, so a load failure can be published as a Finding.
 	var (
@@ -482,6 +502,15 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		clientSecret = strings.TrimSpace(os.Getenv(consoleCfg.OIDC.ClientSecretEnv))
 	}
 
+	// Interfaces stay nil (not a typed nil) when the stores were not built.
+	var (
+		enrollTokens EnrollmentTokenStore
+		workerCerts  WorkerCertStore
+	)
+	if enrollStore != nil {
+		enrollTokens, workerCerts = enrollStore, enrollStore
+	}
+
 	srv := New(Config{
 		State:       state,
 		PolicyStore: policyStore,
@@ -489,6 +518,9 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		// The CA itself is installed after the key manager loaded (below).
 		WorkerCAEnabled:  wcaPlan != nil,
 		WorkerCAVerifier: wcaPlan.verifierOrNil(),
+		WorkerCertTTL:    wcaPlan.certTTL(),
+		Enrollment:       enrollTokens,
+		WorkerCerts:      workerCerts,
 		AdminAudit:       adminAudit,
 		PolicyPath:       servedPath,
 		Token:            token,

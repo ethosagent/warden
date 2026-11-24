@@ -1617,6 +1617,33 @@ retried every 30 seconds. One startup line carries `worker_ca=enabled`,
 `trust_domain`, `intermediate_subject`, `not_after` and `key_source`; keys, PEM
 blocks and CSRs never appear in logs.
 
+### Worker enrollment (`enroll-token`, `POST /control/enroll`)
+
+With `workerCA.enabled` and `--state-dir`, a worker trades a one-time `wet_`
+enrollment token and a CSR for a worker certificate at `POST /control/enroll`.
+The route needs no session or client certificate (the token is the credential)
+and does not exist (404) otherwise. Mint tokens offline, with the control plane
+running or stopped (a running one sees them within about 2 seconds):
+
+```sh
+warden control-plane enroll-token create --worker-id worker-1 --state-dir D          # printed once
+warden control-plane enroll-token create --worker-id-prefix pool-a- --max-uses 3 --out tok --state-dir D
+warden control-plane enroll-token create --worker-id worker-2 --from-env WARDEN_WORKER_2_ENROLL --state-dir D
+warden control-plane enroll-token list [--json] --state-dir D
+warden control-plane enroll-token revoke --id et_... --state-dir D
+```
+
+A token is bound to one worker id (single use) or to an id prefix (up to 100
+uses, for replica pools): the worker sends `workerIdSuffix` and its id is
+prefix+suffix, which must match `^[A-Za-z0-9._-]{1,128}$`. The lifetime defaults
+to `workerCA.enrollTokenTTL` and is capped by `enrollTokenMaxTTL` (pass
+`--config` so the CLI reads them). Only the sha256 of a token is stored. Create
+and revoke are admin-audited as `cli`; each enrollment appends a
+`worker.enrolled` row (actor `enroll:<token id>`). An unknown, used-up, expired
+or revoked token is the same `401 unauthorized`; a bad CSR or suffix is a 400
+that leaves the token unused; more than 10 requests a minute per address or per
+token is a 429; a degraded CA is a 503 before the token is touched.
+
 ## Block list: offline CLI
 
 The user block list lives in `<state-dir>/warden-cp.db`, outside policy

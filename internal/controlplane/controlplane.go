@@ -70,6 +70,14 @@ type Config struct {
 	// authentication. It needs no key, so it is set whenever workerCA is
 	// enabled, even while WorkerCA is still degraded.
 	WorkerCAVerifier *workerca.Verifier
+	// WorkerCertTTL is the lifetime of an issued worker certificate
+	// (workerCA.certTTL).
+	WorkerCertTTL time.Duration
+	// Enrollment and WorkerCerts back POST /control/enroll (W-P2-WCA-02). The
+	// route is mounted only when workerCA is enabled and both are set (Run sets
+	// them when State is open).
+	Enrollment  EnrollmentTokenStore
+	WorkerCerts WorkerCertStore
 	// AdminAudit is the signed admin audit chain on State. Nil means admin
 	// audit is disabled (console.adminAudit.enabled false, the default).
 	AdminAudit *adminaudit.Store
@@ -263,6 +271,8 @@ type Server struct {
 	// generateLimit is the per-session token bucket on POST
 	// /dashboard/api/query/generate in oidc mode (it spends LLM tokens).
 	generateLimit *sessionLimiter
+	// enroll is the /control/enroll state; nil when the route is not mounted.
+	enroll *enrollState
 	// auth is the console OIDC login (/auth/login, /auth/callback); set only when
 	// sessions are.
 	auth *authService
@@ -338,6 +348,7 @@ func New(cfg Config) *Server {
 		generateLimit:   newSessionLimiter(cfg.Clock, queryGenerateLimit, time.Minute),
 	}
 	s.workerCA.Store(cfg.WorkerCA)
+	s.enroll = newEnrollState(cfg)
 	// One authenticator for the three worker routes; the policy server was built
 	// with a default one, replaced here by the configured one.
 	s.workerAuth = NewWorkerAuthenticator(WorkerAuthConfig{
@@ -530,6 +541,11 @@ func (s *Server) Handler() http.Handler {
 	var policyServe PolicyServer = s.policy
 	mux.HandleFunc("/policy", policyServe.ServePolicy)
 	mux.HandleFunc("/control/heartbeat", s.handleHeartbeat)
+	if s.enroll != nil {
+		// Outside the session, CSRF and admin-audit middleware: the token is the
+		// credential and the handler records its own audit row.
+		mux.HandleFunc(enrollPath, s.handleEnroll)
+	}
 	ingest := analytics.NewIngestHandler(s.central, s.workerAuth.IngestAuthorizer())
 	// Central ingest lands in the IngestSink seam: tag worker activity in the
 	// registry and store each worker's MCP snapshot. Wiring the seam's methods (vs

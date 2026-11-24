@@ -318,6 +318,14 @@ func (p *workerCAPlan) logReady(ca *workerca.CA) {
 		"not_after", ca.NotAfter().UTC().Format(time.RFC3339))
 }
 
+// certTTL is the lifetime of an issued certificate (0 for a disabled worker CA).
+func (p *workerCAPlan) certTTL() time.Duration {
+	if p == nil {
+		return 0
+	}
+	return p.cfg.CertTTL
+}
+
 // verifierOrNil is the plan's verifier, nil for a disabled worker CA (a nil
 // plan).
 func (p *workerCAPlan) verifierOrNil() *workerca.Verifier {
