@@ -42,7 +42,11 @@ func GenerateKey() (*ecdsa.PrivateKey, error) {
 }
 
 func serial() (*big.Int, error) {
-	return rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	n, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return nil, err
+	}
+	return n.Add(n, big.NewInt(1)), nil // never 0
 }
 
 // NewRoot creates a self-signed P-256 root valid for ten years from now.

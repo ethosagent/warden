@@ -133,7 +133,7 @@ func (s *LocalSigner) Public() crypto.PublicKey {
 }
 
 // CryptoSigner returns the private key as a crypto.Signer, for the worker CA's
-// certificate signing (see controlplane.workerCAPlan.loadSigner). The zero value returns nil.
+// certificate signing (keys.Manager.CertSigner). The zero value returns nil.
 func (s *LocalSigner) CryptoSigner() crypto.Signer {
 	switch {
 	case s.ed != nil:

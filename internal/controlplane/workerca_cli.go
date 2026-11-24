@@ -13,6 +13,7 @@ import (
 	"github.com/ethosagent/warden/internal/adminaudit"
 	"github.com/ethosagent/warden/internal/clock"
 	"github.com/ethosagent/warden/internal/config"
+	"github.com/ethosagent/warden/internal/cpstate"
 	"github.com/ethosagent/warden/internal/keys"
 	keysigner "github.com/ethosagent/warden/internal/keys/adapters/signer"
 	"github.com/ethosagent/warden/internal/secrets"
@@ -117,16 +118,13 @@ func CAInit(ctx context.Context, o CAInitOptions) error {
 			}
 		}
 	}
-	var ok *OfflineKeys
-	if o.KeySource == config.WorkerCAKeySourceKeys {
-		var err error
-		if ok, err = o.openKeys(ctx); err != nil {
-			return err
-		}
+	ok, release, err := o.prepareKeys(ctx)
+	if err != nil {
+		return err
+	}
+	if ok != nil {
 		defer func() { _ = ok.Close() }()
-		if err := ok.requireNoCAKey(ctx, o.Force); err != nil {
-			return err
-		}
+		defer release()
 	}
 
 	now := o.clk().Now()
@@ -151,31 +149,37 @@ func CAInit(ctx context.Context, o CAInitOptions) error {
 	if err := os.MkdirAll(o.OutDir, caOutDirMode); err != nil {
 		return fmt.Errorf("ca: create --out-dir: %w", err)
 	}
-	if err := writeCAFile(filepath.Join(o.OutDir, caRootKeyFile), rootPEM, caKeyFileMode, o.Force); err != nil {
+	// Nothing is destructive until the key is stored: every file is staged at
+	// 0600 beside its target and renamed into place only afterwards.
+	st := &staged{}
+	defer st.abort()
+	if err := st.add(filepath.Join(o.OutDir, caRootKeyFile), rootPEM, caKeyFileMode); err != nil {
 		return err
 	}
-	if err := writeCAFile(filepath.Join(o.OutDir, caRootCertFile), workerca.EncodeCertsPEM(root), caCertFileMode, o.Force); err != nil {
+	if err := st.add(filepath.Join(o.OutDir, caRootCertFile), workerca.EncodeCertsPEM(root), caCertFileMode); err != nil {
 		return err
 	}
-	if err := writeCAFile(filepath.Join(o.OutDir, caChainFile), workerca.EncodeCertsPEM(inter, root), caCertFileMode, o.Force); err != nil {
+	if err := st.add(filepath.Join(o.OutDir, caChainFile), workerca.EncodeCertsPEM(inter, root), caCertFileMode); err != nil {
 		return err
 	}
-	switch o.KeySource {
-	case config.WorkerCAKeySourceFile:
+	if o.KeySource == config.WorkerCAKeySourceFile {
 		interPEM, err := keysigner.MarshalPKCS8PEM(interKey)
 		if err != nil {
 			return err
 		}
 		defer clear(interPEM)
-		if err := writeCAFile(filepath.Join(o.OutDir, caIntermediateKey), interPEM, caKeyFileMode, o.Force); err != nil {
+		if err := st.add(filepath.Join(o.OutDir, caIntermediateKey), interPEM, caKeyFileMode); err != nil {
 			return err
 		}
-	default:
+	} else {
 		kid, err := ok.importCA(ctx, interKey, o.Force)
 		if err != nil {
 			return err
 		}
 		_, _ = fmt.Fprintf(o.Out, "intermediate key stored in the key manager (purpose ca, kid %s)\n", kid)
+	}
+	if err := st.commit(); err != nil {
+		return err
 	}
 	_, _ = fmt.Fprintf(o.ErrOut, caRootKeyWarning, filepath.Join(o.OutDir, caRootKeyFile))
 	_, _ = fmt.Fprintf(o.Out, "wrote %s (intermediate first, then root), %s\n", filepath.Join(o.OutDir, caChainFile), filepath.Join(o.OutDir, caRootCertFile))
@@ -189,14 +193,15 @@ func CAInit(ctx context.Context, o CAInitOptions) error {
 
 // CACSR generates the intermediate key in the key source and prints a PEM CSR
 // for an offline root to sign. The CSR is public; the key never leaves the
-// key source.
+// key source. With keySource=keys the order is: stop the control plane, run
+// csr, have the root sign the CSR, install the chain at workerCA.certFile,
+// start the control plane (a running one only imports a missing key; --force
+// needs it stopped).
 func CACSR(ctx context.Context, o CACSROptions) error {
 	if err := o.validateSource(); err != nil {
 		return err
 	}
-	var ok *OfflineKeys
-	switch o.KeySource {
-	case config.WorkerCAKeySourceFile:
+	if o.KeySource == config.WorkerCAKeySourceFile {
 		if o.KeyFile == "" {
 			return errors.New("ca: --key-file is required with --key-source file")
 		}
@@ -208,15 +213,14 @@ func CACSR(ctx context.Context, o CACSROptions) error {
 		if _, err := os.Lstat(o.KeyFile); err == nil && !o.Force {
 			return fmt.Errorf("ca: %s already exists; pass --force to replace it", o.KeyFile)
 		}
-	default:
-		var err error
-		if ok, err = o.openKeys(ctx); err != nil {
-			return err
-		}
+	}
+	ok, release, err := o.prepareKeys(ctx)
+	if err != nil {
+		return err
+	}
+	if ok != nil {
 		defer func() { _ = ok.Close() }()
-		if err := ok.requireNoCAKey(ctx, o.Force); err != nil {
-			return err
-		}
+		defer release()
 	}
 	key, err := wcasigner.GenerateKey()
 	if err != nil {
@@ -232,7 +236,12 @@ func CACSR(ctx context.Context, o CACSROptions) error {
 			return err
 		}
 		defer clear(keyPEM)
-		if err := writeCAFile(o.KeyFile, keyPEM, caKeyFileMode, o.Force); err != nil {
+		st := &staged{}
+		defer st.abort()
+		if err := st.add(o.KeyFile, keyPEM, caKeyFileMode); err != nil {
+			return err
+		}
+		if err := st.commit(); err != nil {
 			return err
 		}
 		_, _ = fmt.Fprintf(o.ErrOut, caCSRKeyFileNotice, o.KeyFile)
@@ -244,6 +253,40 @@ func CACSR(ctx context.Context, o CACSROptions) error {
 		_, _ = fmt.Fprintf(o.ErrOut, "intermediate key stored in the key manager (purpose ca, kid %s)\n", kid)
 	}
 	return pem.Encode(o.Out, &pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der})
+}
+
+// prepareKeys makes every refusal of the keys source before anything is
+// written: it opens the key manager, takes the state dir's instance lock when
+// --force will replace a key (a running control plane refuses here, not after
+// files changed), and fails on an existing ca key without --force. For the
+// file source it returns nils.
+func (o CAOptions) prepareKeys(ctx context.Context) (*OfflineKeys, func(), error) {
+	if o.KeySource != config.WorkerCAKeySourceKeys {
+		return nil, func() {}, nil
+	}
+	ok, err := o.openKeys(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	release := func() {}
+	if o.Force {
+		rel, lerr := cpstate.AcquireDirLock(o.StateDir)
+		if errors.Is(lerr, cpstate.ErrLocked) {
+			_ = ok.Close()
+			return nil, nil, errors.New("ca: the control plane is running; stop it before --force replaces the ca key")
+		}
+		if lerr != nil {
+			_ = ok.Close()
+			return nil, nil, fmt.Errorf("ca: %w", lerr)
+		}
+		release = func() { _ = rel() }
+	}
+	if err := ok.requireNoCAKey(ctx, o.Force); err != nil {
+		release()
+		_ = ok.Close()
+		return nil, nil, err
+	}
+	return ok, release, nil
 }
 
 func (o CAOptions) openKeys(ctx context.Context) (*OfflineKeys, error) {
@@ -269,7 +312,7 @@ func (o *OfflineKeys) requireNoCAKey(ctx context.Context, force bool) error {
 }
 
 // importCA stores priv as the active ca key, replacing an existing one only
-// with force (which needs the control plane stopped, like keys reset).
+// with force; the caller holds the state dir lock then (prepareKeys).
 func (o *OfflineKeys) importCA(ctx context.Context, priv crypto.Signer, force bool) (string, error) {
 	if force {
 		rows, err := o.Rows(ctx, keys.PurposeCA)
@@ -277,7 +320,7 @@ func (o *OfflineKeys) importCA(ctx context.Context, priv crypto.Signer, force bo
 			return "", fmt.Errorf("ca: %w", err)
 		}
 		if len(rows) > 0 {
-			if _, err := o.Reset(ctx, keys.PurposeCA); err != nil {
+			if _, err := o.resetLocked(ctx, keys.PurposeCA); err != nil {
 				return "", fmt.Errorf("ca: replace the existing ca key: %w", err)
 			}
 		}
@@ -289,27 +332,51 @@ func (o *OfflineKeys) importCA(ctx context.Context, priv crypto.Signer, force bo
 	return kid, nil
 }
 
-// writeCAFile writes data to path with mode: exclusively unless force, so an
-// existing file is never silently replaced. The mode is set after the write so
-// a umask cannot widen it.
-func writeCAFile(path string, data []byte, mode os.FileMode, force bool) error {
-	flags := os.O_WRONLY | os.O_CREATE | os.O_EXCL
-	if force {
-		flags = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
-	}
-	f, err := os.OpenFile(path, flags, mode)
+// staged collects files written at 0600 beside their targets; commit renames
+// them into place (after fsync), abort removes what is left. A target is never
+// truncated in place, so a refusal or crash leaves the old file byte-identical
+// and no key byte ever sits in a wider-mode file.
+type staged struct {
+	tmps, targets []string
+	modes         []os.FileMode
+}
+
+func (s *staged) add(target string, data []byte, mode os.FileMode) error {
+	f, err := os.CreateTemp(filepath.Dir(target), ".ca-*.tmp")
 	if err != nil {
-		if errors.Is(err, os.ErrExist) {
-			return fmt.Errorf("ca: %s already exists; pass --force to replace it", path)
-		}
-		return fmt.Errorf("ca: write %s: %w", path, err)
+		return fmt.Errorf("ca: stage %s: %w", target, err)
 	}
+	s.tmps, s.targets, s.modes = append(s.tmps, f.Name()), append(s.targets, target), append(s.modes, mode)
 	if _, err := f.Write(data); err != nil {
 		_ = f.Close()
-		return fmt.Errorf("ca: write %s: %w", path, err)
+		return fmt.Errorf("ca: stage %s: %w", target, err)
 	}
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("ca: write %s: %w", path, err)
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("ca: stage %s: %w", target, err)
 	}
-	return os.Chmod(path, mode)
+	return f.Close()
+}
+
+func (s *staged) commit() error {
+	for i, tmp := range s.tmps {
+		if err := os.Chmod(tmp, s.modes[i]); err != nil {
+			return fmt.Errorf("ca: write %s: %w", s.targets[i], err)
+		}
+	}
+	for i, tmp := range s.tmps {
+		if err := os.Rename(tmp, s.targets[i]); err != nil {
+			return fmt.Errorf("ca: write %s: %w", s.targets[i], err)
+		}
+		s.tmps[i] = ""
+	}
+	return nil
+}
+
+func (s *staged) abort() {
+	for _, tmp := range s.tmps {
+		if tmp != "" {
+			_ = os.Remove(tmp)
+		}
+	}
 }

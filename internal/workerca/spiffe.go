@@ -18,7 +18,10 @@ var (
 )
 
 // ValidWorkerID reports whether id matches the P1 proxy_id rule.
-func ValidWorkerID(id string) bool { return workerIDRe.MatchString(id) }
+// "." and ".." match the character class but are path segments SPIFFE forbids.
+func ValidWorkerID(id string) bool {
+	return id != "." && id != ".." && workerIDRe.MatchString(id)
+}
 
 // ValidTrustDomain reports whether td is a lowercase DNS-style host.
 func ValidTrustDomain(td string) bool {

@@ -9,7 +9,9 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/asn1"
 	"errors"
+	"fmt"
 	"net"
 	"net/url"
 	"strings"
@@ -130,8 +132,7 @@ func TestIssueIgnoresCSRContentAndVerifies(t *testing.T) {
 	if id, err := workerca.WorkerIDFromCert(cert, trustDomain); err != nil || id != "worker-1" {
 		t.Fatalf("WorkerIDFromCert = %q, %v", id, err)
 	}
-	// The root is not pinned: a pool of only the root does not verify via the
-	// intermediate's name constraint violation check, but must verify with it.
+	// A certificate of another trust domain is not a worker certificate here.
 	if _, err := workerca.WorkerIDFromCert(cert, "other.local"); !errors.Is(err, workerca.ErrNotWorkerCert) {
 		t.Fatalf("other trust domain: %v", err)
 	}
@@ -355,5 +356,100 @@ func TestCAAccessors(t *testing.T) {
 	}
 	if _, err := workerca.SPIFFEID("bad domain", "w"); !errors.Is(err, workerca.ErrInvalidTrustDomain) {
 		t.Errorf("spiffe td: %v", err)
+	}
+}
+
+func TestWorkerIDRejectsDotSegments(t *testing.T) {
+	for _, id := range []string{".", ".."} {
+		if workerca.ValidWorkerID(id) {
+			t.Errorf("ValidWorkerID(%q) = true", id)
+		}
+		if _, err := workerca.SPIFFEID(trustDomain, id); !errors.Is(err, workerca.ErrInvalidWorkerID) {
+			t.Errorf("SPIFFEID(%q): %v", id, err)
+		}
+	}
+	for _, id := range []string{"a.b", "...", ".a", "a..b"} {
+		if !workerca.ValidWorkerID(id) {
+			t.Errorf("ValidWorkerID(%q) = false", id)
+		}
+	}
+}
+
+// TestIssueIgnoresCSRExtensions: a CSR asking for CA:true and serverAuth via
+// extension requests gets neither.
+func TestIssueIgnoresCSRExtensions(t *testing.T) {
+	p := newPKI(t, t0)
+	bc, _ := asn1.Marshal(struct{ IsCA bool }{true})
+	eku, _ := asn1.Marshal([]asn1.ObjectIdentifier{{1, 3, 6, 1, 5, 5, 7, 3, 1}})
+	csr := csrFor(t, p256(t), &x509.CertificateRequest{ExtraExtensions: []pkix.Extension{
+		{Id: asn1.ObjectIdentifier{2, 5, 29, 19}, Critical: true, Value: bc},
+		{Id: asn1.ObjectIdentifier{2, 5, 29, 37}, Value: eku},
+	}})
+	cert, err := p.ca(t, t0).Issue(csr, "w", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cert.IsCA || len(cert.ExtKeyUsage) != 1 || cert.ExtKeyUsage[0] != x509.ExtKeyUsageClientAuth {
+		t.Fatalf("isCA=%v eku=%v", cert.IsCA, cert.ExtKeyUsage)
+	}
+}
+
+// TestIntermediateChecksChainAndVerifier: the next certificate of the chain
+// must have signed the intermediate, an expired previous is pinned harmlessly,
+// and a Verifier needs no key.
+func TestIntermediateChecksChainAndVerifier(t *testing.T) {
+	p := newPKI(t, t0)
+	stranger := newPKI(t, t0)
+	_, err := workerca.NewVerifier(workerca.Options{Chain: []*x509.Certificate{p.inter, stranger.root}, TrustDomain: trustDomain, Clock: func() time.Time { return t0 }})
+	if !errors.Is(err, workerca.ErrIntermediate) {
+		t.Errorf("wrong next certificate: %v", err)
+	}
+	old := newPKI(t, t0.AddDate(-3, 0, 0))
+	v, err := workerca.NewVerifier(workerca.Options{
+		Chain: p.chain(), Previous: []*x509.Certificate{old.inter}, TrustDomain: trustDomain, Clock: func() time.Time { return t0 },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := p.ca(t, t0).Issue(csrFor(t, p256(t), &x509.CertificateRequest{}), "w", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id, err := v.Verify(cert); err != nil || id != "w" {
+		t.Fatalf("verifier: %q %v", id, err)
+	}
+	if _, err := workerca.NewVerifier(workerca.Options{Chain: p.chain(), Previous: []*x509.Certificate{p.root}, TrustDomain: trustDomain}); !errors.Is(err, workerca.ErrIntermediate) {
+		t.Errorf("structurally wrong previous: %v", err)
+	}
+}
+
+// TestCAPrintableFormsCarryNoKey: %v, %+v, %#v and %s of a CA built on a bare
+// Ed25519 key show the trust domain and expiry, never key bytes.
+func TestCAPrintableFormsCarryNoKey(t *testing.T) {
+	root, rootKey, err := signer.NewRoot(t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	inter, err := signer.NewIntermediate(root, rootKey, pub, trustDomain, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca, err := workerca.New(workerca.Options{
+		Chain: []*x509.Certificate{inter}, Signer: priv, Create: signer.CreateCertificate,
+		TrustDomain: trustDomain, Clock: func() time.Time { return t0 },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := fmt.Sprint([]byte(priv))
+	for _, f := range []string{"%v", "%+v", "%#v", "%s"} {
+		out := fmt.Sprintf(f, ca)
+		if strings.Contains(out, seed[1:20]) || strings.Contains(out, fmt.Sprint([]byte(priv.Seed()))[1:20]) {
+			t.Errorf("%s of a CA prints key bytes: %s", f, out)
+		}
+		if !strings.Contains(out, trustDomain) {
+			t.Errorf("%s of a CA lacks the trust domain: %s", f, out)
+		}
 	}
 }

@@ -487,11 +487,12 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		PolicyStore: policyStore,
 		Keys:        keyMgr,
 		// The CA itself is installed after the key manager loaded (below).
-		WorkerCAEnabled: wcaPlan != nil,
-		AdminAudit:      adminAudit,
-		PolicyPath:      servedPath,
-		Token:           token,
-		WorkerTokens:    workerTokens,
+		WorkerCAEnabled:  wcaPlan != nil,
+		WorkerCAVerifier: wcaPlan.verifierOrNil(),
+		AdminAudit:       adminAudit,
+		PolicyPath:       servedPath,
+		Token:            token,
+		WorkerTokens:     workerTokens,
 
 		RequireWorkerTokens: p.RequireWorkerTokens,
 		TLS:                 caCert != "" && caKey != "",
@@ -560,7 +561,11 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// the control plane degraded (enroll and renew answer 503, /healthz says
 	// so) and a retry loop loads it every 30s.
 	if wcaPlan != nil {
-		ca, werr := wcaPlan.Load(context.WithoutCancel(ctx), keyMgr)
+		// Bounded: a hung key backend must delay startup by seconds, not
+		// forever; a timeout is the degraded state.
+		loadCtx, loadCancel := context.WithTimeout(context.WithoutCancel(ctx), workerCALoadTimeout)
+		ca, werr := wcaPlan.Load(loadCtx, keyMgr)
+		loadCancel()
 		switch {
 		case werr == nil:
 			srv.SetWorkerCA(ca)

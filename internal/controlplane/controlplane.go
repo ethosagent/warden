@@ -66,6 +66,10 @@ type Config struct {
 	// WorkerCAEnabled says workerCA.enabled is true, so a nil WorkerCA means
 	// degraded rather than off.
 	WorkerCAEnabled bool
+	// WorkerCAVerifier pins the worker intermediates for certificate
+	// authentication. It needs no key, so it is set whenever workerCA is
+	// enabled, even while WorkerCA is still degraded.
+	WorkerCAVerifier *workerca.Verifier
 	// AdminAudit is the signed admin audit chain on State. Nil means admin
 	// audit is disabled (console.adminAudit.enabled false, the default).
 	AdminAudit *adminaudit.Store

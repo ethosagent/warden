@@ -4,11 +4,12 @@ import (
 	"bytes"
 	"fmt"
 	"os"
-	"regexp"
 	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/ethosagent/warden/internal/workerca"
 )
 
 // Worker CA key sources (workerCA.keySource).
@@ -30,11 +31,6 @@ const (
 	workerCADefaultEnrollTokenMaxTTL = 24 * time.Hour
 	workerCAMaxEnrollTokenMaxTTL     = 7 * 24 * time.Hour
 )
-
-// workerCATrustDomainRe is a lowercase DNS-style name: the trust domain is the
-// host of every worker SPIFFE ID and the URI name constraint of the
-// intermediate, so it must be a plain host (no port, no path, no wildcard).
-var workerCATrustDomainRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$`)
 
 // WorkerCAConfig is the control-plane-local `workerCA:` block (W-P2-WCA-01): a
 // CP-held intermediate CA that issues short-lived worker client certificates.
@@ -117,11 +113,6 @@ func parseWorkerCA(r *rawWorkerCA) (WorkerCAConfig, error) {
 	return c, nil
 }
 
-// ValidWorkerCATrustDomain reports whether s is usable as a trust domain.
-func ValidWorkerCATrustDomain(s string) bool {
-	return len(s) <= 253 && workerCATrustDomainRe.MatchString(s)
-}
-
 // validateWorkerCA enforces the block's invariants. Value checks run whether or
 // not the block is enabled, so a typo surfaces when the file is written; the
 // required keys only when enabled.
@@ -131,7 +122,7 @@ func validateWorkerCA(c WorkerCAConfig) error {
 	default:
 		return fmt.Errorf("config: workerCA.keySource %q is not supported; use %q or %q", c.KeySource, WorkerCAKeySourceKeys, WorkerCAKeySourceFile)
 	}
-	if c.TrustDomain != "" && !ValidWorkerCATrustDomain(c.TrustDomain) {
+	if c.TrustDomain != "" && !workerca.ValidTrustDomain(c.TrustDomain) {
 		return fmt.Errorf("config: workerCA.trustDomain %q must be a lowercase DNS name (no scheme, port, path or wildcard)", c.TrustDomain)
 	}
 	if c.CertTTL < workerCAMinCertTTL || c.CertTTL > workerCAMaxCertTTL {

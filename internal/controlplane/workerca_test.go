@@ -1,6 +1,7 @@
 package controlplane
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/ecdsa"
@@ -200,7 +201,7 @@ func TestWorkerCALoad(t *testing.T) {
 	now := time.Now()
 	f := newWCAFixture(t, now)
 	mkPlan := func(g wcaFixture) *workerCAPlan {
-		p, err := resolveWorkerCA(wcaConfig(t, g.yaml("file")), "", "", config.DefaultKeys(), clock.Real(), discardLogger())
+		p, err := resolveWorkerCA(wcaConfig(t, g.yaml("file")), "", "", config.DefaultKeys(), clocktest.NewFake(now), discardLogger())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -342,14 +343,7 @@ func TestWorkerCADegradedUntilTheKeyArrives(t *testing.T) {
 	_ = ok.Close()
 	// Drive the fake clock by condition: other loops share it, so a fixed
 	// advance could skip the retry timer being armed.
-	deadline := time.Now().Add(10 * time.Second)
-	for healthzBody(t, base) != "ok\n" {
-		if time.Now().After(deadline) {
-			t.Fatalf("worker CA never recovered:\n%s", logs.String())
-		}
-		clk.Advance(workerCARetryInterval)
-		time.Sleep(20 * time.Millisecond)
-	}
+	pollAdvance(t, clk, "the worker CA to recover", func() bool { return healthzBody(t, base) == "ok\n" })
 	if !strings.Contains(logs.String(), `"worker_ca":"ready"`) {
 		t.Fatalf("no ready line:\n%s", logs.String())
 	}
@@ -547,4 +541,164 @@ func keyStatesOf(t *testing.T, stateDir, purpose string) map[string]string {
 		t.Fatal(err)
 	}
 	return out
+}
+
+// pollAdvance advances clk by the retry interval until cond holds or the
+// deadline passes; it never sleeps a fixed time.
+func pollAdvance(t *testing.T, clk *clocktest.Fake, desc string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", desc)
+		}
+		clk.Advance(workerCARetryInterval)
+		<-time.After(5 * time.Millisecond)
+	}
+}
+
+func TestResolveWorkerCAPrevious(t *testing.T) {
+	now := time.Now()
+	f := newWCAFixture(t, now)
+	keysOn := config.DefaultKeys()
+	keysOn.Enabled = true
+	withPrev := func(prev string) string {
+		return f.yaml("keys") + "  previousCertFile: " + prev + "\n"
+	}
+	// An expired previous intermediate is dropped with one WARN, startup goes on.
+	old := newWCAFixture(t, now.AddDate(-3, 0, 0))
+	var logs strings.Builder
+	lg := slog.New(slog.NewTextHandler(&logs, nil))
+	p, err := resolveWorkerCA(wcaConfig(t, withPrev(old.chain)), "", "", keysOn, clock.Real(), lg)
+	if err != nil || p == nil || len(p.previous) != 0 {
+		t.Fatalf("expired previous: plan=%v err=%v", p, err)
+	}
+	if n := strings.Count(logs.String(), "previousCertFile"); n != 1 {
+		t.Errorf("WARN count = %d\n%s", n, logs.String())
+	}
+	// A valid previous is pinned.
+	cur := newWCAFixture(t, now)
+	p, err = resolveWorkerCA(wcaConfig(t, withPrev(cur.chain)), "", "", keysOn, clock.Real(), discardLogger())
+	if err != nil || len(p.previous) == 0 {
+		t.Fatalf("valid previous: %v", err)
+	}
+	// A structurally wrong one (the root: path length 1) is fatal.
+	rootOnly := writeCert(t, filepath.Join(t.TempDir(), "root.pem"), f.root)
+	if _, err := resolveWorkerCA(wcaConfig(t, withPrev(rootOnly)), "", "", keysOn, clock.Real(), discardLogger()); err == nil ||
+		!strings.Contains(err.Error(), "previousCertFile") {
+		t.Fatalf("wrong previous: %v", err)
+	}
+	// The verifier exists with no key: it is what keeps cert auth alive while degraded.
+	if p.verifier == nil {
+		t.Fatal("plan has no verifier")
+	}
+}
+
+func TestWorkerCAPlanPrintsNoKey(t *testing.T) {
+	f := newWCAFixture(t, time.Now())
+	p, err := resolveWorkerCA(wcaConfig(t, f.yaml("file")), "", "", config.DefaultKeys(), clock.Real(), discardLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca, err := p.build(p.fileSigner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, _ := x509.MarshalPKCS8PrivateKey(f.interKey)
+	for _, v := range []any{p, ca} {
+		for _, form := range []string{"%v", "%+v", "%#v", "%s"} {
+			out := fmt.Sprintf(form, v)
+			if strings.Contains(out, fmt.Sprint(f.interKey.D)) || strings.Contains(out, string(der)) {
+				t.Errorf("%s prints key material: %s", form, out)
+			}
+		}
+	}
+}
+
+// TestCAInitForceRefusesBeforeWriting: with the state dir locked (a running
+// control plane), `ca init --force` fails before touching any file, and a
+// plain re-run fails without changes too.
+func TestCAInitForceRefusesBeforeWriting(t *testing.T) {
+	stateDir := openKeysStateDir(t)
+	out := filepath.Join(t.TempDir(), "ca")
+	o := CAInitOptions{
+		CAOptions:   CAOptions{KeySource: "keys", StateDir: stateDir, Out: io.Discard, ErrOut: io.Discard},
+		OutDir:      out,
+		TrustDomain: wcaTrustDomain,
+	}
+	if err := CAInit(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	snap := func() map[string]string {
+		m := map[string]string{}
+		ents, _ := os.ReadDir(out)
+		for _, e := range ents {
+			m[e.Name()] = string(mustRead(t, filepath.Join(out, e.Name())))
+		}
+		return m
+	}
+	before := snap()
+	if len(before) != 3 {
+		t.Fatalf("files = %d, want 3", len(before))
+	}
+	release, err := cpstate.AcquireDirLock(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o.Force = true
+	err = CAInit(context.Background(), o)
+	_ = release()
+	if err == nil || !strings.Contains(err.Error(), "running") {
+		t.Fatalf("--force under the lock: %v", err)
+	}
+	after := snap()
+	if len(after) != len(before) {
+		t.Fatalf("stray files after a refusal: %v", after)
+	}
+	for name, content := range before {
+		if after[name] != content {
+			t.Errorf("%s changed by a refused --force", name)
+		}
+	}
+	// And the key manager still holds the original key: one active ca row.
+	if got := keyStatesOf(t, stateDir, keys.PurposeCA); len(got) != 1 {
+		t.Fatalf("ca rows = %v", got)
+	}
+}
+
+// TestCAInitKeysSourceLeavesNoKeyInTheDatabase: the intermediate key is in
+// the key store, never in warden-cp.db (or its WAL).
+func TestCAInitKeysSourceLeavesNoKeyInTheDatabase(t *testing.T) {
+	stateDir := openKeysStateDir(t)
+	o := CAInitOptions{
+		CAOptions:   CAOptions{KeySource: "keys", StateDir: stateDir, Out: io.Discard, ErrOut: io.Discard},
+		OutDir:      filepath.Join(t.TempDir(), "ca"),
+		TrustDomain: wcaTrustDomain,
+	}
+	if err := CAInit(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	ok, err := OpenKeysOffline(context.Background(), stateDir, KeysCLIOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sg, err := ok.mgr.CertSigner(context.Background())
+	_ = ok.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(sg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := sg.(*ecdsa.PrivateKey).D.Bytes()
+	for _, name := range []string{"warden-cp.db", "warden-cp.db-wal"} {
+		b, err := os.ReadFile(filepath.Join(stateDir, name))
+		if err != nil {
+			continue
+		}
+		if bytes.Contains(b, der) || bytes.Contains(b, d) {
+			t.Errorf("%s holds the intermediate key", name)
+		}
+	}
 }

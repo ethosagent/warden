@@ -22,13 +22,20 @@ import (
 
 const (
 	// workerCAKeyPurpose is the key-manager purpose of the intermediate key.
-	workerCAKeyPurpose = keys.PurposeCA
+	workerCAKeyPurpose = keys.PurposeCA // documented use of the ca purpose
 	// workerCARetryInterval is how often a degraded worker CA retries loading
 	// its key.
 	workerCARetryInterval = 30 * time.Second
 	// workerCAExpiryWarn is how close to NotAfter the intermediate logs a WARN.
 	workerCAExpiryWarn = 30 * 24 * time.Hour
+	// workerCALoadTimeout bounds the startup key load.
+	workerCALoadTimeout = 10 * time.Second
 )
+
+// WorkerCAVerifier returns the verifier of the pinned worker intermediates, or
+// nil when workerCA is disabled. Unlike WorkerCA it is available while the key
+// backend is down, so certificate authentication keeps working in an outage.
+func (s *Server) WorkerCAVerifier() *workerca.Verifier { return s.cfg.WorkerCAVerifier }
 
 // SetWorkerCA installs the worker CA once the retry loop has loaded it.
 func (s *Server) SetWorkerCA(ca *workerca.CA) { s.workerCA.Store(ca) }
@@ -50,8 +57,21 @@ type workerCAPlan struct {
 	previous []*x509.Certificate
 	// fileSigner is the key of keySource=file, loaded eagerly.
 	fileSigner crypto.Signer
-	clk        clock.Clock
-	logger     *slog.Logger
+	// verifier pins the intermediates; it needs no key, so it is live from
+	// startup even while the issuing CA is degraded.
+	verifier *workerca.Verifier
+	clk      clock.Clock
+	logger   *slog.Logger
+}
+
+// String, GoString and LogValue keep the plan's printable forms free of the
+// file signer's key bytes.
+func (p *workerCAPlan) String() string {
+	return "controlplane.workerCAPlan{trust_domain=" + p.cfg.TrustDomain + "}"
+}
+func (p *workerCAPlan) GoString() string { return p.String() }
+func (p *workerCAPlan) LogValue() slog.Value {
+	return slog.GroupValue(slog.String("trust_domain", p.cfg.TrustDomain), slog.String("key_source", p.cfg.KeySource))
 }
 
 // resolveWorkerCA reads the workerCA block from the operator-owned --config
@@ -88,8 +108,15 @@ func resolveWorkerCA(configPath, stateDir, caCertPath string, keysCfg config.Key
 	if err := workerca.CheckIntermediate(p.chain[0], now); err != nil {
 		return nil, fmt.Errorf("control-plane: workerCA.certFile: %w", err)
 	}
+	// A previous intermediate that is no longer valid is dropped with a WARN, so
+	// the rotation runbook (leave previousCertFile set until the next rotation)
+	// cannot brick startup; a structurally wrong one is still a startup error.
 	if len(p.previous) > 0 {
-		if err := workerca.CheckIntermediate(p.previous[0], now); err != nil {
+		if err := workerca.CheckIntermediate(p.previous[0], now); errors.Is(err, workerca.ErrIntermediateExpired) {
+			logger.Warn("workerCA.previousCertFile is outside its validity window and is ignored: remove it from the config",
+				"not_after", p.previous[0].NotAfter.UTC().Format(time.RFC3339))
+			p.previous = nil
+		} else if err != nil {
 			return nil, fmt.Errorf("control-plane: workerCA.previousCertFile: %w", err)
 		}
 	}
@@ -104,6 +131,9 @@ func resolveWorkerCA(configPath, stateDir, caCertPath string, keysCfg config.Key
 		if err := workerca.CheckSeparateRoot(p.previous, proxyCAs); err != nil {
 			return nil, fmt.Errorf("control-plane: workerCA.previousCertFile vs --ca-cert: %w", err)
 		}
+	}
+	if p.verifier, err = workerca.NewVerifier(p.options(nil)); err != nil {
+		return nil, fmt.Errorf("control-plane: workerCA.certFile: %w", err)
 	}
 	if wc.KeySource == config.WorkerCAKeySourceFile {
 		if p.fileSigner, err = loadWorkerCAKeyFile(wc.KeyFile, stateDir); err != nil {
@@ -201,10 +231,14 @@ func resolveAbs(p string) (string, error) {
 
 // build constructs the CA from the plan and a signer.
 func (p *workerCAPlan) build(sg crypto.Signer) (*workerca.CA, error) {
-	return workerca.New(workerca.Options{
+	return workerca.New(p.options(sg))
+}
+
+func (p *workerCAPlan) options(sg crypto.Signer) workerca.Options {
+	return workerca.Options{
 		Chain: p.chain, Previous: p.previous, Signer: sg, Create: wcasigner.CreateCertificate,
 		TrustDomain: p.cfg.TrustDomain, Clock: p.clk.Now,
-	})
+	}
 }
 
 // loadSigner returns the CA key: the eagerly loaded file key, or the key
@@ -215,22 +249,8 @@ func (p *workerCAPlan) loadSigner(ctx context.Context, mgr *keys.Manager) (crypt
 	if p.fileSigner != nil {
 		return p.fileSigner, nil
 	}
-	sg, err := mgr.Signer(ctx, workerCAKeyPurpose)
-	if err != nil {
-		return nil, err
-	}
-	// A local signer exposes its key for certificate signing; a backend
-	// that keeps keys private does not, and cannot back the worker CA.
-	x, ok := sg.(interface{ CryptoSigner() crypto.Signer })
-	if !ok || x.CryptoSigner() == nil {
-		return nil, errNoCertSigner
-	}
-	return x.CryptoSigner(), nil
+	return mgr.CertSigner(ctx)
 }
-
-// errNoCertSigner marks the one permanent load failure: retrying cannot make
-// the keys backend expose a key it keeps private.
-var errNoCertSigner = errors.New("the keys backend does not expose the ca key for certificate signing")
 
 // errWorkerCADegraded is Load's answer when the key backend could not supply
 // the ca key yet.
@@ -243,7 +263,7 @@ var errWorkerCADegraded = errors.New("worker CA degraded")
 func (p *workerCAPlan) Load(ctx context.Context, mgr *keys.Manager) (*workerca.CA, error) {
 	p.logStart()
 	sg, err := p.loadSigner(ctx, mgr)
-	if errors.Is(err, errNoCertSigner) {
+	if errors.Is(err, keys.ErrNoCertSigner) {
 		return nil, fmt.Errorf("control-plane: workerCA: %w", err)
 	}
 	if err != nil {
@@ -263,7 +283,9 @@ func (p *workerCAPlan) Load(ctx context.Context, mgr *keys.Manager) (*workerca.C
 // hands the CA to install. It runs only for a degraded start.
 func (p *workerCAPlan) Retry(ctx context.Context, mgr *keys.Manager, install func(*workerca.CA)) {
 	for waitOn(ctx, p.clk, workerCARetryInterval) {
-		sg, err := p.loadSigner(ctx, mgr)
+		lctx, cancel := context.WithTimeout(ctx, workerCALoadTimeout)
+		sg, err := p.loadSigner(lctx, mgr)
+		cancel()
 		if err != nil {
 			p.logger.Warn("worker CA still degraded", "error", err.Error())
 			continue
@@ -296,4 +318,13 @@ func (p *workerCAPlan) logStart() {
 func (p *workerCAPlan) logReady(ca *workerca.CA) {
 	p.logger.Info("worker CA ready", "worker_ca", "ready", "trust_domain", ca.TrustDomain(),
 		"not_after", ca.NotAfter().UTC().Format(time.RFC3339))
+}
+
+// verifierOrNil is the plan's verifier, nil for a disabled worker CA (a nil
+// plan).
+func (p *workerCAPlan) verifierOrNil() *workerca.Verifier {
+	if p == nil {
+		return nil
+	}
+	return p.verifier
 }
