@@ -580,7 +580,7 @@ func TestChangeDraftRebase(t *testing.T) {
 	if rec := e.do("u2", http.MethodPost, path+"/approve", approveBody(d.ChangeDraftView, "", "")); rec.Code != http.StatusOK {
 		t.Fatalf("approve = %d %s", rec.Code, rec.Body.String())
 	}
-	if err := e.srv.WritePolicy(ctx, plusAllow(t, e.srv, "theirs.example.com"), dashboard.WriteMeta{}); err != nil {
+	if err := writePolicyUngated(ctx, e.srv, plusAllow(t, e.srv, "theirs.example.com")); err != nil {
 		t.Fatal(err)
 	}
 	b := e.wantErr(t, e.do("u3", http.MethodPost, path+"/approve", approveBody(d.ChangeDraftView, "", "")), http.StatusConflict, "rebase_required")
@@ -623,10 +623,10 @@ func TestChangeDraftRebase(t *testing.T) {
 	// A conflict: head and the draft both change the entry for one domain.
 	c := e.create2(t, "u1", `{"domain":"clash.example.com","methods":["GET"]}`)
 	e.submit(t, "u1", c.ID)
-	if err := e.srv.WritePolicy(ctx, config.Policy{
+	if err := writePolicyUngated(ctx, e.srv, config.Policy{
 		Allowlist: append(plusAllow(t, e.srv, "x").Allowlist[:len(plusAllow(t, e.srv, "x").Allowlist)-1], config.AllowlistEntry{Domain: "clash.example.com", Methods: []string{"POST"}}),
 		Denylist:  plusAllow(t, e.srv, "x").Denylist,
-	}, dashboard.WriteMeta{}); err != nil {
+	}); err != nil {
 		t.Fatal(err)
 	}
 	e.settledReplay(t, c.ID)

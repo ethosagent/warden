@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ethosagent/warden/internal/adminaudit"
+	"github.com/ethosagent/warden/internal/approvals/adapters/sqlstore"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/controlplane"
 	"github.com/ethosagent/warden/internal/cpstate"
@@ -623,5 +624,59 @@ func TestPolicyImportNoAuditTable(t *testing.T) {
 	}
 	if versions, head := readStore(t, stateDir); head != 1 || len(versions) != 1 || versions[0].msg != "first" {
 		t.Errorf("store head v%d with %+v, want v1 with message first", head, versions)
+	}
+}
+
+// enableApprovalsMeta records approvals as enabled in the state dir's database,
+// as a control plane started with console.approvals.enabled does.
+func enableApprovalsMeta(t *testing.T, stateDir string) {
+	t.Helper()
+	db, err := cpstate.Open(context.Background(), filepath.Join(stateDir, "warden-cp.db"),
+		cpstate.Enable(controlplane.StateMigrations(), sqlstore.EnabledMigrationIDs()...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	if err := sqlstore.WriteMeta(context.Background(), db.SQL(), sqlstore.Meta{Enabled: true, DraftTTL: time.Hour, MaxOpenDrafts: 5}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestPolicyImportApprovals: with approvals enabled, import creates one pending
+// draft authored cli:<user> and one admin audit row, and the head is unchanged.
+func TestPolicyImportApprovals(t *testing.T) {
+	stateDir := seedStateDir(t, importBaseConfig+auditConfig)
+	enableApprovalsMeta(t, stateDir)
+	file := writeTempConfig(t, importNewConfig)
+	stdout, stderr, err := runPolicy(t, "import", "--state-dir", stateDir, "--file", file, "--message", "m")
+	if err != nil {
+		t.Fatalf("import: %v\nstdout: %s\nstderr: %s", err, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "pending change draft") {
+		t.Errorf("stdout = %q, want it to name the draft", stdout)
+	}
+	if versions, head := readStore(t, stateDir); head != 1 || len(versions) != 1 {
+		t.Fatalf("head %d with %d versions, want the single version 1", head, len(versions))
+	}
+	db, err := cpstate.OpenReadOnly(context.Background(), filepath.Join(stateDir, "warden-cp.db"), controlplane.StateMigrations())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	var n int
+	var state, sub, kind, source string
+	var base int64
+	if err := db.SQL().QueryRow("SELECT count(*) FROM change_drafts").Scan(&n); err != nil || n != 1 {
+		t.Fatalf("drafts = %d, %v; want 1", n, err)
+	}
+	if err := db.SQL().QueryRow("SELECT state, author_sub, author_kind, source, base_version FROM change_drafts").Scan(&state, &sub, &kind, &source, &base); err != nil {
+		t.Fatal(err)
+	}
+	if state != "pending" || sub != cliUser(t) || kind != "cli" || source != "cli" || base != 1 {
+		t.Errorf("draft = %s %s %s %s base %d", state, sub, kind, source, base)
+	}
+	rows := readAudit(t, stateDir, "policy.import")
+	if len(rows) != 1 || rows[0].actor != cliUser(t) || rows[0].outcome != "ok" || rows[0].before != rows[0].after {
+		t.Errorf("audit rows = %+v", rows)
 	}
 }

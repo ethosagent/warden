@@ -158,6 +158,10 @@ func (o *OfflinePolicyStore) Head(ctx context.Context) (int64, error) { return o
 type PolicyImportResult struct {
 	Version, Parent int64
 	Changed         bool
+	// Held is true when approvals are enabled: the file was stored as the
+	// pending change draft DraftID and no version was created.
+	Held    bool
+	DraftID string
 }
 
 // Import stores doc as a new version authored adminaudit.CLIActor() (kind
@@ -185,6 +189,15 @@ func (o *OfflinePolicyStore) Import(ctx context.Context, doc PolicyDoc, msg stri
 	}
 	if msg == "" {
 		msg = "import from " + doc.path
+	}
+	// With approvals enabled the CLI cannot publish: it holds the file as a
+	// pending draft and the control plane's gate decides the rest.
+	meta, enabled, err := o.approvalsMeta(ctx)
+	if err != nil {
+		return PolicyImportResult{}, err
+	}
+	if enabled {
+		return o.holdImport(ctx, meta, doc, msg, expectedHead, rec)
 	}
 	author := PolicyAuthor{Sub: adminaudit.CLIActor(), Kind: AuthorKindCLI}
 	version, changed, err := o.st.Create(ctx, doc.wire, author, msg, SourceImport, expectedHead)

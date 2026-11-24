@@ -57,6 +57,10 @@ func newPolicyImportCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if res.Held {
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "approvals are enabled: created pending change draft %s from %s; the head is unchanged and a second person must approve it in the console\n", res.DraftID, file)
+				return nil
+			}
 			if !res.Changed {
 				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "no change: %s equals the head, version %d\n", file, res.Version)
 				return nil

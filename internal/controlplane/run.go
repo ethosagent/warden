@@ -43,12 +43,6 @@ type Params struct {
 	// KeysReady, when set, is called with the key manager once Init has run, for
 	// tests and the harness (keys.enabled only).
 	KeysReady func(*keys.Manager)
-	// ApprovalsEnforcementShipped lifts the startup refusal of
-	// console.approvals.enabled. Until W-P2-APPR-06 gates every versioned write
-	// path through one clearance check, an enabled gate would still let a direct
-	// write skip it, so only the harness (which exercises the draft API) sets it;
-	// cmd/proxy never does.
-	ApprovalsEnforcementShipped bool
 
 	ConfigPath, ListenAddr string
 	// TokenEnv is the deprecated --token-env, an alias of LegacyTokenEnv.
@@ -269,7 +263,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	if err := checkAdminAuditFlags(consoleCfg, stateDir, p); err != nil {
 		return fail(err)
 	}
-	if err := checkApprovalsStartup(consoleCfg, policyStore, stateDir, p.ApprovalsEnforcementShipped); err != nil {
+	if err := checkApprovalsStartup(consoleCfg, policyStore, stateDir); err != nil {
 		return fail(err)
 	}
 	// The keys block, like console:, comes from --config only. Disabled (the

@@ -175,3 +175,54 @@ func approvalsTwoPerson(t *testing.T, h *harness.H) {
 		t.Fatalf("change draft audit rows = %v, want %v", got, want)
 	}
 }
+
+// A console policy save with approvals enabled (W-P2-APPR-06): a widening save is
+// held as a draft (202) and workers keep denying the host until a second person
+// approves it; no write path publishes past the gate.
+func approvalsHeldSave(t *testing.T, h *harness.H) {
+	h.Upstream(approvalsHost)
+	ana, anaCSRF := consoleLogin(t, h, fakes.Valid("ana", "ana@example.com", harness.ConsoleEditorGroup))
+	ben, benCSRF := consoleLogin(t, h, fakes.Valid("ben", "ben@example.com", harness.ConsoleEditorGroup))
+	var cur struct {
+		Allowlist []map[string]any `json:"allowlist"`
+		Denylist  []map[string]any `json:"denylist"`
+	}
+	if resp, body := consoleDo(t, ana, http.MethodGet, "/dashboard/api/policy", nil); resp.StatusCode != http.StatusOK || json.Unmarshal([]byte(body), &cur) != nil {
+		t.Fatalf("GET policy = %d %s", resp.StatusCode, body)
+	}
+	doc := map[string]any{
+		"allowlist": append(append([]map[string]any{}, cur.Allowlist...), map[string]any{"domain": approvalsHost}),
+		"denylist":  cur.Denylist,
+	}
+	status, raw := draftCall(t, ana, anaCSRF, http.MethodPut, "/dashboard/api/policy", `"v1"`, doc)
+	var held struct {
+		DraftID  string `json:"draft_id"`
+		State    string `json:"state"`
+		Widening bool   `json:"widening"`
+	}
+	if status != http.StatusAccepted || json.Unmarshal(raw, &held) != nil || held.DraftID == "" || held.State != "pending" || !held.Widening {
+		t.Fatalf("widening save = %d %s, want 202 with a pending widening draft", status, raw)
+	}
+	if got := connectStatus(t, h, approvalsHost+":443"); got != http.StatusForbidden {
+		t.Fatalf("CONNECT %s after the held save = %d, want 403", approvalsHost, got)
+	}
+
+	path := "/dashboard/api/changes/" + held.DraftID
+	var d dashboard.ChangeDraftDetail
+	h.Eventually("the held draft's replay settles", func() bool {
+		if resp, body := consoleDo(t, ana, http.MethodGet, path, nil); resp.StatusCode != http.StatusOK || json.Unmarshal([]byte(body), &d) != nil {
+			return false
+		}
+		return d.LatestReplay != nil && d.LatestReplay.Status != "pending" && d.LatestReplay.Status != "running"
+	})
+	approve := map[string]any{"revision": d.Revision, "doc_sha256": d.DocSHA256, "acknowledgeNoReplay": d.LatestReplay.Status != "done"}
+	if d.LatestReplay.Status == "done" {
+		approve["replay_id"] = d.LatestReplay.ID
+	}
+	if status, raw = draftCall(t, ben, benCSRF, http.MethodPost, path+"/approve", "", approve); status != http.StatusOK {
+		t.Fatalf("second person approves = %d %s", status, raw)
+	}
+	h.Eventually("workers enforce the approved save", func() bool {
+		return connectStatus(t, h, approvalsHost+":443") == http.StatusOK
+	})
+}
