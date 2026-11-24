@@ -216,7 +216,9 @@ type H struct {
 	// wantTokenSvc (WithTokenService) boots the control plane with
 	// tokenService.enabled over the WithKeys state.
 	wantTokenSvc bool
-	keyStore     *fakes.FakeKeyStore
+	// tokenLimits are the token service's rate limit and retention overrides.
+	tokenLimits tokenLimits
+	keyStore    *fakes.FakeKeyStore
 	// awsAccount is the fake AWS Secrets Manager account of WithAWSKeyStore;
 	// the control plane's injected role is scoped to keysAWSNamePrefix.
 	awsAccount *fakes.FakeAWSSecretsClient

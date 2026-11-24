@@ -307,6 +307,11 @@ var All = slices.Concat(
 		// clock, CP state dir, issuer fake).
 		{Name: "token_exchange_issues_token", Opts: tokenServiceOpts(), Run: tokenExchangeIssuesToken},
 		{Name: "token_exchange_refusals", Opts: tokenServiceOpts(), Run: tokenExchangeRefusals},
+		// Token endpoint limits, records and retention (W-P2-TOKX-04).
+		{Name: "token_exchange_rate_limited_per_agent", Opts: tokenLimitsOpts(harness.WithTokenRateLimit("", "5/minute", "")), Run: tokenExchangeRateLimitedPerAgent},
+		{Name: "token_exchange_forged_agent_no_dos", Opts: tokenLimitsOpts(harness.WithTokenRateLimit("20/minute", "5/minute", ""), harness.WithTokenTrustedLoopbackProxy()), Run: tokenExchangeForgedAgentNoDoS},
+		{Name: "token_exchange_events_recorded", Opts: tokenLimitsOpts(harness.WithAdminAudit()), Run: tokenExchangeEventsRecorded},
+		{Name: "token_retention_purges", Opts: tokenLimitsOpts(harness.WithTokenEventRetention("24h")), Run: tokenRetentionPurges},
 		{Name: "token_service_disabled_by_default", Opts: tokenServiceDisabledOpts(), Run: tokenServiceDisabledByDefault},
 		{Name: "token_exchange_signer_unavailable", Opts: tokenServiceOpts(harness.WithFlakyKeyStore()), Run: tokenExchangeSignerUnavailable},
 		{Name: "token_exchange_idp_unavailable", Opts: tokenServiceOpts(harness.WithOIDCIssuerDown()), Run: tokenExchangeIdPUnavailable},

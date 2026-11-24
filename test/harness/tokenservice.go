@@ -55,6 +55,40 @@ func WithTokenService() Option {
 	}
 }
 
+// tokenLimits are the tokenService.rateLimit and eventRetention overrides of a
+// scenario. The harness default is a limit no scenario reaches by accident, so
+// the many exchanges of a scenario from one loopback address and one test user
+// do not trip the production defaults; a scenario about the limits sets its own.
+type tokenLimits struct {
+	perIP, perAgent, perUser string
+	maxInFlight              int
+	eventRetention           string
+	trustLoopbackProxy       bool
+}
+
+const harnessTokenRate = "100000/minute"
+
+// WithTokenRateLimit sets tokenService.rateLimit.perIP, perAgent and perUser
+// (each "N/second|minute|hour"; "" keeps the harness default).
+func WithTokenRateLimit(perIP, perAgent, perUser string) Option {
+	return func(h *H) {
+		h.tokenLimits.perIP, h.tokenLimits.perAgent, h.tokenLimits.perUser = perIP, perAgent, perUser
+	}
+}
+
+// WithTokenEventRetention sets tokenService.eventRetention (at least 24h).
+func WithTokenEventRetention(d string) Option {
+	return func(h *H) { h.tokenLimits.eventRetention = d }
+}
+
+// WithTokenTrustedLoopbackProxy sets console.trustedProxies to the loopback
+// host, so a scenario can stand in for a reverse proxy by sending
+// X-Forwarded-For: the token endpoint then keys its per-IP limit on the
+// forwarded client address instead of 127.0.0.1.
+func WithTokenTrustedLoopbackProxy() Option {
+	return func(h *H) { h.tokenLimits.trustLoopbackProxy = true }
+}
+
 // tokenServiceYAML renders the tokenService block of the control plane's
 // config file (empty without the option).
 func (h *H) tokenServiceYAML() string {
@@ -64,7 +98,19 @@ func (h *H) tokenServiceYAML() string {
 	if h.identityMode == "" {
 		h.tb.Fatal("harness: WithTokenService needs WithIdentity (the user's ID token is verified against the served identity block)")
 	}
-	return "\ntokenService:\n  enabled: true\n  issuer: " + TokenServiceIssuer + "\n"
+	pick := func(v string) string {
+		if v == "" {
+			return harnessTokenRate
+		}
+		return v
+	}
+	out := "\ntokenService:\n  enabled: true\n  issuer: " + TokenServiceIssuer + "\n" +
+		"  rateLimit:\n    perIP: " + pick(h.tokenLimits.perIP) + "\n    perAgent: " + pick(h.tokenLimits.perAgent) +
+		"\n    perUser: " + pick(h.tokenLimits.perUser) + "\n"
+	if h.tokenLimits.eventRetention != "" {
+		out += "  eventRetention: " + h.tokenLimits.eventRetention + "\n"
+	}
+	return out
 }
 
 // TokenAgent is an agent registered with the control plane's registry, with
@@ -279,4 +325,68 @@ func TokenOAuthError(tb interface{ Fatalf(string, ...any) }, r RawResponse) (cod
 		tb.Fatalf("harness: the reply %d is not an OAuth error: %v", r.Status, err)
 	}
 	return e.Error, e.Desc
+}
+
+// TokenEventRow is one row of the control plane's token_events table.
+type TokenEventRow struct {
+	ID      int64
+	TS      int64
+	Outcome string
+	Reason  string
+	AgentID string
+	SubHMAC string
+	SID     string
+	JTI     string
+	KID     string
+	Exp     int64
+	Scope   string
+}
+
+// TokenEvents reads token_events (oldest first) from the control plane's state
+// database, read-only: what was stored, independent of the API.
+func (h *H) TokenEvents() []TokenEventRow {
+	h.tb.Helper()
+	db := h.openStateReadOnly()
+	defer func() { _ = db.Close() }()
+	rows, err := db.SQL().Query(`SELECT id, ts, outcome, reason, agent_id, sub_hmac, sid, jti, kid, exp, scope FROM token_events ORDER BY id`)
+	if err != nil {
+		h.tb.Fatalf("harness: read token_events: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []TokenEventRow
+	for rows.Next() {
+		var r TokenEventRow
+		if err := rows.Scan(&r.ID, &r.TS, &r.Outcome, &r.Reason, &r.AgentID, &r.SubHMAC, &r.SID, &r.JTI, &r.KID, &r.Exp, &r.Scope); err != nil {
+			h.tb.Fatalf("harness: scan a token_events row: %v", err)
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		h.tb.Fatalf("harness: read token_events: %v", err)
+	}
+	return out
+}
+
+// TokenReplayRows counts the rows of token_assertion_jti, the replay table.
+func (h *H) TokenReplayRows() int {
+	h.tb.Helper()
+	db := h.openStateReadOnly()
+	defer func() { _ = db.Close() }()
+	var n int
+	if err := db.SQL().QueryRow(`SELECT COUNT(*) FROM token_assertion_jti`).Scan(&n); err != nil {
+		h.tb.Fatalf("harness: count token_assertion_jti: %v", err)
+	}
+	return n
+}
+
+func (h *H) openStateReadOnly() *cpstate.DB {
+	h.tb.Helper()
+	if !h.wantTokenSvc {
+		h.tb.Fatal("harness: the token table helpers need the WithTokenService option")
+	}
+	db, err := cpstate.OpenReadOnly(context.Background(), filepath.Join(h.root, "cp-state", "warden-cp.db"), controlplane.StateMigrations())
+	if err != nil {
+		h.tb.Fatalf("harness: open the state db: %v", err)
+	}
+	return db
 }

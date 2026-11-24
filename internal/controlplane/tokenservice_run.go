@@ -1,10 +1,12 @@
 package controlplane
 
 import (
+	"context"
 	"crypto/rand"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -12,8 +14,10 @@ import (
 	"github.com/ethosagent/warden/internal/clock"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/cpstate"
+	"github.com/ethosagent/warden/internal/identity"
 	"github.com/ethosagent/warden/internal/identity/adapters/oidc"
 	"github.com/ethosagent/warden/internal/keys"
+	"github.com/ethosagent/warden/internal/policy"
 	"github.com/ethosagent/warden/internal/tokensvc"
 	tokensvcsqlite "github.com/ethosagent/warden/internal/tokensvc/adapters/sqlite"
 )
@@ -109,10 +113,127 @@ func (s *Server) servesTokenKID(kid string) bool {
 	return j != nil && j.serves(kid)
 }
 
-// EnableTokens installs the token service on the server. Run calls it before
-// Handler; once Handler has built the mux the routes are fixed.
-func (s *Server) EnableTokens(ex TokenExchanger, issuer string) {
-	s.cfg.Tokens, s.cfg.TokenIssuer = ex, issuer
+// EnableTokens installs the token service and its edge (the pre-authentication
+// limits, the metrics and the retention purge) on the server. Run calls it
+// before Handler; once Handler has built the mux the routes are fixed.
+func (s *Server) EnableTokens(ex TokenExchanger, issuer string, edge TokenEdge) {
+	s.cfg.Tokens, s.cfg.TokenIssuer, s.cfg.TokenEdge = ex, issuer, edge
+}
+
+// tokenRetentionInterval is how often expired token rows are purged.
+const tokenRetentionInterval = time.Hour
+
+// TokenEdge is what surrounds the token endpoint outside tokensvc.Service. The
+// zero value limits nothing, counts nothing and purges nothing (unit tests
+// that mount a fake exchanger).
+type TokenEdge struct {
+	// IP limits requests per client IP before the body is parsed. nil allows
+	// everything.
+	IP tokensvc.RateLimiter
+	// MaxInFlight caps concurrent requests; 0 means no cap.
+	MaxInFlight int
+	// Metrics is the service's Metrics, so a refusal before the service is
+	// counted in the same place. nil is fine.
+	Metrics *tokensvc.Metrics
+	// Retention purges expired token rows; nil purges nothing.
+	Retention *TokenRetention
+}
+
+// EventPurger deletes issuance records older than a cutoff.
+type EventPurger interface {
+	Purge(ctx context.Context, cutoff time.Time) (int64, error)
+}
+
+// TokenRetention is the retention work of the token tables: expired assertion
+// replay rows, idle and long-revoked sessions, and old issuance records. It
+// runs on the control plane's clock from Server.Start whenever the tables
+// exist (tokenService.enabled), not only while the endpoint is mounted.
+type TokenRetention struct {
+	Sessions tokensvc.SessionStore
+	Replay   tokensvc.ReplayStore
+	Events   EventPurger
+	// SessionIdle is tokenService.session.idle: a live session unused for this
+	// long would not be continued anyway.
+	SessionIdle time.Duration
+	// SubjectMax is the longest a subject token can still verify after it was
+	// issued: the identity maxTokenTTL plus its clock skew. A revoked session
+	// row is the only thing that refuses a subject token issued before the
+	// revoke, so it is kept at least this long.
+	SubjectMax time.Duration
+	// EventRetention is tokenService.eventRetention.
+	EventRetention time.Duration
+	Logger         *slog.Logger
+}
+
+// subjectLifetimeBound is identity max token TTL plus clock skew, with the
+// IdP verifier's defaults for unset values.
+func subjectLifetimeBound(id config.IdentitySettings) time.Duration {
+	ttl := time.Duration(id.MaxTokenTTLSeconds) * time.Second
+	if ttl <= 0 {
+		ttl = identity.DefaultMaxTokenTTL
+	}
+	skew := time.Duration(id.ClockSkewSeconds) * time.Second
+	if skew <= 0 {
+		skew = identity.DefaultClockSkew
+	}
+	return ttl + skew
+}
+
+// Purge runs one retention pass at now. Each table is purged on its own: one
+// failing store does not stop the others, and the error is logged without any
+// row content.
+func (r *TokenRetention) Purge(ctx context.Context, now time.Time) {
+	if r == nil {
+		return
+	}
+	if r.Replay != nil {
+		if _, err := r.Replay.Purge(ctx, now); err != nil && ctx.Err() == nil {
+			r.Logger.Warn("control plane: token replay purge failed", "error_type", errorKind(err))
+		}
+	}
+	if r.Sessions != nil {
+		if _, err := r.Sessions.Purge(ctx, now.Add(-r.SessionIdle), now.Add(-r.SubjectMax)); err != nil && ctx.Err() == nil {
+			r.Logger.Warn("control plane: token session purge failed", "error_type", errorKind(err))
+		}
+	}
+	if r.Events != nil {
+		if _, err := r.Events.Purge(ctx, now.Add(-r.EventRetention)); err != nil && ctx.Err() == nil {
+			r.Logger.Warn("control plane: token event purge failed", "error_type", errorKind(err))
+		}
+	}
+}
+
+// runTokenRetention purges once at start and then every tokenRetentionInterval
+// on the control plane's clock until ctx is done.
+func (s *Server) runTokenRetention(ctx context.Context) {
+	r := s.cfg.TokenEdge.Retention
+	if r == nil {
+		return
+	}
+	go func() {
+		for {
+			r.Purge(ctx, s.cfg.Clock.Now())
+			t := s.cfg.Clock.NewTimer(tokenRetentionInterval)
+			select {
+			case <-ctx.Done():
+				t.Stop()
+				return
+			case <-t.C():
+			}
+		}
+	}()
+}
+
+// trustedPrefixes parses console.trustedProxies; an entry that does not parse
+// (config validation already refused it) is skipped, never trusted.
+func trustedPrefixes(cidrs []string) []netip.Prefix {
+	var out []netip.Prefix
+	for _, c := range cidrs {
+		if p, err := netip.ParsePrefix(c); err == nil {
+			out = append(out, p.Masked())
+		}
+	}
+	return out
 }
 
 // newTokenService assembles the token service on the open state database:
@@ -139,10 +260,32 @@ func newTokenService(tc config.TokenServiceConfig, id config.IdentitySettings, s
 		return nil, fmt.Errorf("control-plane: tokenService: identity verifier: %w", err)
 	}
 	sessions := tokensvcsqlite.NewSessions(state)
+	replay := tokensvcsqlite.New(state)
+	events := tokensvcsqlite.NewEvents(state, logger)
+	metrics := tokensvc.NewMetrics()
+	limiter := func(name, rate string) (*tokensvc.Limiter, error) {
+		rl, err := policy.ParseRateLimit(rate)
+		if err != nil {
+			return nil, fmt.Errorf("control-plane: tokenService.rateLimit.%s: %w", name, err)
+		}
+		return tokensvc.NewLimiter(rl.Limit, rl.Window), nil
+	}
+	ipLim, err := limiter("perIP", tc.RateLimit.PerIP)
+	if err != nil {
+		return nil, err
+	}
+	agentLim, err := limiter("perAgent", tc.RateLimit.PerAgent)
+	if err != nil {
+		return nil, err
+	}
+	userLim, err := limiter("perUser", tc.RateLimit.PerUser)
+	if err != nil {
+		return nil, err
+	}
 	// One issuer value feeds both the assertion audience and the iss of every
 	// issued token.
 	assertions := &tokensvc.AssertionVerifier{
-		Agents: agents, Replay: tokensvcsqlite.New(state),
+		Agents: agents, Replay: replay,
 		Issuer: tc.Issuer, Now: clk.Now, Skew: tc.ClockSkew, MaxAge: tc.AssertionMaxAge,
 	}
 	svc, err := tokensvc.New(tokensvc.Config{
@@ -155,6 +298,10 @@ func newTokenService(tc config.TokenServiceConfig, id config.IdentitySettings, s
 		Blocks:          NewTokenBlockChecker(srv.blocks),
 		Signers:         servedSigners{inner: km.KeySet(), records: km.KeySet().Records, now: clk.Now, served: srv.servesTokenKID},
 		Sessions:        sessions,
+		AgentLimiter:    agentLim,
+		UserLimiter:     userLim,
+		Recorder:        events,
+		Metrics:         metrics,
 		Resolvers:       map[string]tokensvc.SubjectResolver{tokensvc.TokenTypeIDToken: tokensvc.NewIDTokenResolver(idp)},
 		Now:             clk.Now,
 		Rand:            rand.Reader,
@@ -162,7 +309,15 @@ func newTokenService(tc config.TokenServiceConfig, id config.IdentitySettings, s
 	if err != nil {
 		return nil, fmt.Errorf("control-plane: tokenService: %w", err)
 	}
-	return &tokenService{Service: svc, Sessions: sessions, Agents: agents}, nil
+	edge := TokenEdge{
+		IP: ipLim, MaxInFlight: tc.RateLimit.MaxInFlight, Metrics: metrics,
+		Retention: &TokenRetention{
+			Sessions: sessions, Replay: replay, Events: events,
+			SessionIdle: tc.Session.Idle, SubjectMax: subjectLifetimeBound(id),
+			EventRetention: tc.EventRetention, Logger: logger,
+		},
+	}
+	return &tokenService{Service: svc, Sessions: sessions, Agents: agents, Edge: edge}, nil
 }
 
 // tokenService is the assembled token service and the stores around it, so
@@ -170,6 +325,9 @@ func newTokenService(tc config.TokenServiceConfig, id config.IdentitySettings, s
 type tokenService struct {
 	Service  *tokensvc.Service
 	Sessions *tokensvcsqlite.Sessions
+	// Edge is the pre-authentication limits, metrics and retention that Run
+	// hands to Server.EnableTokens.
+	Edge TokenEdge
 	// Agents is the one agent registry Store of the process. Its reads come
 	// from a snapshot that its own writes invalidate directly and that Watch
 	// refreshes for other processes' writes.

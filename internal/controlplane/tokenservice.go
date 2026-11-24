@@ -8,9 +8,12 @@ import (
 	"io"
 	"log/slog"
 	"mime"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ethosagent/warden/internal/tokensvc"
@@ -68,7 +71,11 @@ const (
 	reqUnsupportedGrant = "unsupported_grant_type"
 	reqClientAuthFailed = "client_authentication_failed"
 	reqServiceUnavail   = "service_unavailable"
+	reqRateLimited      = "rate_limited"
 )
+
+// tokenWarnMaxKeys bounds the unauthenticated-failure log limiter.
+const tokenWarnMaxKeys = 4096
 
 // TokenExchanger is what the endpoint needs from the token service;
 // *tokensvc.Service is the implementation and tests pass a fake.
@@ -96,9 +103,17 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	}
 	// The server has only a header timeout, so bound the body read here: a
 	// trickled body must not hold a goroutine. Unsupported writers (a test
-	// recorder) just skip it.
+	// recorder) just skip it. This comes before the in-flight slot is taken, so
+	// a slot is never held longer than the deadline by a stalled body.
 	rc := http.NewResponseController(w)
 	_ = rc.SetReadDeadline(time.Now().Add(tokenReadTimeout))
+	// The two limits that need nothing from the request but its peer address
+	// run before anything is parsed: a flood spends no more than a map lookup.
+	release, ok := s.admitToken(w, r)
+	if !ok {
+		return
+	}
+	defer release()
 	form, status, code, reason := readTokenForm(w, r)
 	if reason == "" {
 		// The body is read: clear the deadline, or net/http's background read
@@ -109,7 +124,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		_ = rc.SetReadDeadline(time.Time{})
 	}
 	if reason != "" {
-		s.tokenDenied(r, code, reason, "")
+		s.tokenRefused(r, code, reason)
 		writeOAuthError(w, status, code, reason)
 		return
 	}
@@ -118,12 +133,12 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	// caller without an assertion (a browser with a session cookie, a worker
 	// with a bearer) learns only that it is not authenticated.
 	if form["client_assertion_type"] != clientAssertionJWT || form["client_assertion"] == "" {
-		s.tokenDenied(r, tokensvc.CodeInvalidClient, reqClientAuthFailed, "")
+		s.tokenRefused(r, tokensvc.CodeInvalidClient, reqClientAuthFailed)
 		writeOAuthError(w, http.StatusUnauthorized, tokensvc.CodeInvalidClient, reqClientAuthFailed)
 		return
 	}
 	if form["subject_token"] == "" || form["subject_token_type"] == "" {
-		s.tokenDenied(r, tokensvc.CodeInvalidRequest, reqMissingParameter, "")
+		s.tokenRefused(r, tokensvc.CodeInvalidRequest, reqMissingParameter)
 		writeOAuthError(w, http.StatusBadRequest, tokensvc.CodeInvalidRequest, reqMissingParameter)
 		return
 	}
@@ -148,9 +163,17 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.tokenDenied(r, te.Code, string(te.Reason), te.AgentID)
+		if !te.Verified {
+			// Counted by the service; no row, so a rate-limited log line is
+			// the only trace of a caller that did not authenticate.
+			s.warnUnauthenticated(r, string(te.Reason))
+		}
 		status, desc := tokenErrorResponse(te)
-		if status == http.StatusServiceUnavailable {
+		switch status {
+		case http.StatusServiceUnavailable:
 			w.Header().Set("Retry-After", strconv.Itoa(tokenRetryAfterSeconds))
+		case http.StatusTooManyRequests:
+			w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds(te.RetryAfter)))
 		}
 		writeOAuthError(w, status, te.Code, desc)
 		return
@@ -240,6 +263,8 @@ func tokenErrorResponse(te *tokensvc.Error) (int, string) {
 		return http.StatusBadRequest, string(te.Reason)
 	case tokensvc.CodeTemporarilyUnavailable:
 		return http.StatusServiceUnavailable, string(te.Reason)
+	case tokensvc.CodeRateLimited:
+		return http.StatusTooManyRequests, string(te.Reason)
 	default:
 		// A code this table does not know is a refusal, never a success.
 		return http.StatusServiceUnavailable, reqServiceUnavail
@@ -248,7 +273,7 @@ func tokenErrorResponse(te *tokensvc.Error) (int, string) {
 
 // tokenDenied logs a refusal. It carries the code, the closed reason and the
 // agent id when the assertion authenticated; never a token, assertion, subject
-// or request value. Issuance records and metrics are W-P2-TOKX-04.
+// or request value. Issuance records are written by the service (W-P2-TOKX-04).
 func (s *Server) tokenDenied(r *http.Request, code tokensvc.OAuthCode, reason, agent string) {
 	level := slog.LevelDebug
 	if code == tokensvc.CodeTemporarilyUnavailable {
@@ -320,4 +345,146 @@ func (s *Server) handleASMetadata(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		_ = json.NewEncoder(w).Encode(doc)
 	}
+}
+
+// tokenEdgeState is the endpoint's runtime state, built once by Handler.
+type tokenEdgeState struct {
+	sem     chan struct{}
+	trusted []netip.Prefix
+	warn    *addrLimiter
+}
+
+func (s *Server) newTokenEdgeState() *tokenEdgeState {
+	st := &tokenEdgeState{
+		trusted: trustedPrefixes(s.cfg.Console.TrustedProxies),
+		warn:    newAddrLimiter(s.cfg.Clock, time.Minute, tokenWarnMaxKeys),
+	}
+	if n := s.cfg.TokenEdge.MaxInFlight; n > 0 {
+		st.sem = make(chan struct{}, n)
+	}
+	return st
+}
+
+// admitToken applies the per-client-IP limit and the in-flight cap. It
+// returns false after writing the 429; otherwise release must be called when
+// the request is done.
+func (s *Server) admitToken(w http.ResponseWriter, r *http.Request) (release func(), ok bool) {
+	edge := s.tokenEdge
+	if edge == nil {
+		return func() {}, true
+	}
+	if lim := s.cfg.TokenEdge.IP; lim != nil {
+		if allowed, wait := lim.Allow(tokenClientKey(r, edge.trusted), s.cfg.Clock.Now()); !allowed {
+			s.tokenThrottled(w, r, wait)
+			return nil, false
+		}
+	}
+	if edge.sem == nil {
+		return func() {}, true
+	}
+	select {
+	case edge.sem <- struct{}{}:
+		return func() { <-edge.sem }, true
+	default:
+		s.tokenThrottled(w, r, time.Second)
+		return nil, false
+	}
+}
+
+// tokenThrottled answers 429 rate_limited with a whole-second Retry-After
+// (RFC 6585 section 4). The request body is not read.
+func (s *Server) tokenThrottled(w http.ResponseWriter, r *http.Request, wait time.Duration) {
+	s.cfg.TokenEdge.Metrics.Denied(tokensvc.ReasonRateLimited)
+	s.warnUnauthenticated(r, reqRateLimited)
+	w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds(wait)))
+	writeOAuthError(w, http.StatusTooManyRequests, tokensvc.CodeRateLimited, reqRateLimited)
+}
+
+// retryAfterSeconds rounds a wait up to whole seconds, at least one.
+func retryAfterSeconds(d time.Duration) int {
+	secs := int((d + time.Second - 1) / time.Second)
+	if secs < 1 {
+		return 1
+	}
+	return secs
+}
+
+// tokenRefused handles a refusal the handler itself makes (request shape,
+// missing client authentication): the debug line, the counter under the closed
+// reason enum, and the rate-limited warning. The caller is unauthenticated, so
+// there is no row and no agent id.
+func (s *Server) tokenRefused(r *http.Request, code tokensvc.OAuthCode, reason string) {
+	s.tokenDenied(r, code, reason, "")
+	s.cfg.TokenEdge.Metrics.Denied(handlerReason(reason))
+	s.warnUnauthenticated(r, reason)
+}
+
+// handlerReason maps the handler's request-shape words onto the closed
+// tokensvc.Reason enum, which is the only label set of the denied counter.
+func handlerReason(reason string) tokensvc.Reason {
+	if reason == reqBodyTooLarge {
+		return tokensvc.ReasonTooLarge
+	}
+	return tokensvc.ReasonMalformed
+}
+
+// warnUnauthenticated logs a refusal of a caller that did not authenticate, at
+// most once per reason and client IP per minute. It carries the closed reason
+// and the client IP, nothing the caller sent.
+func (s *Server) warnUnauthenticated(r *http.Request, reason string) {
+	edge := s.tokenEdge
+	if edge == nil {
+		return
+	}
+	ip := tokenClientKey(r, edge.trusted)
+	if !edge.warn.allow(reason + "|" + ip) {
+		return
+	}
+	s.cfg.Logger.Warn("token_exchange_unauthenticated", "reason", reason, "client_ip", ip)
+}
+
+// tokenClientKey is the rate-limit key of the request's client: the peer
+// address, unless the peer is a trusted proxy, in which case the nearest
+// X-Forwarded-For hop that is not itself a trusted proxy (walking from the
+// right, where the trusted proxies append). X-Forwarded-For from any other
+// peer is ignored, and so is everything left of the first untrusted hop,
+// which the client controls. An IPv6 address is keyed by its /64, so a client
+// cannot mint keys by rotating the host part. An unparsable peer shares one
+// key.
+func tokenClientKey(r *http.Request, trusted []netip.Prefix) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	peer, err := netip.ParseAddr(host)
+	if err != nil {
+		return "-"
+	}
+	peer = peer.Unmap()
+	if !inPrefixes(trusted, peer) {
+		return addrKey(peer)
+	}
+	var hops []string
+	for _, v := range r.Header.Values("X-Forwarded-For") {
+		hops = append(hops, strings.Split(v, ",")...)
+	}
+	for i := len(hops) - 1; i >= 0; i-- {
+		a, err := netip.ParseAddr(strings.TrimSpace(hops[i]))
+		if err != nil {
+			break
+		}
+		a = a.Unmap()
+		if !inPrefixes(trusted, a) {
+			return addrKey(a)
+		}
+	}
+	return addrKey(peer)
+}
+
+// addrKey is the textual key of an address: IPv4 as is, IPv6 as its /64.
+func addrKey(a netip.Addr) string {
+	if a.Is6() {
+		return netip.PrefixFrom(a, 64).Masked().String()
+	}
+	return a.String()
 }

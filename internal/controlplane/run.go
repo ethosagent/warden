@@ -537,7 +537,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		if terr != nil {
 			return fail(terr)
 		}
-		srv.EnableTokens(ts.Service, tokenCfg.Issuer)
+		srv.EnableTokens(ts.Service, tokenCfg.Issuer, ts.Edge)
 		logTokenService(logger, tokenCfg)
 		// Exactly one Watch on the one Store. It drops the snapshot when
 		// another process (the offline CLI) commits, so a disabled agent stops

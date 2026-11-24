@@ -65,6 +65,9 @@ type Config struct {
 	// TokenIssuer is tokenService.issuer: the base of the discovery document's
 	// URLs. Set together with Tokens.
 	TokenIssuer string
+	// TokenEdge is the token endpoint's pre-authentication limits, metrics and
+	// the retention of the token tables. Set with Tokens by EnableTokens.
+	TokenEdge TokenEdge
 	// AdminAudit is the signed admin audit chain on State. Nil means admin
 	// audit is disabled (console.adminAudit.enabled false, the default).
 	AdminAudit *adminaudit.Store
@@ -203,11 +206,14 @@ type Server struct {
 	cfg Config
 	// jwks is the public token JWKS handler, set by Handler when keys are
 	// enabled; the token service mints only with a key it publishes.
-	jwks     atomic.Pointer[jwksServer]
-	central  analytics.FleetStore
-	registry *WorkerRegistry
-	mcp      *mcpStore
-	policy   *policyServer
+	jwks atomic.Pointer[jwksServer]
+	// tokenEdge is the token endpoint's runtime state (in-flight slots, trusted
+	// proxies, the unauthenticated-failure log limiter); set by Handler.
+	tokenEdge *tokenEdgeState
+	central   analytics.FleetStore
+	registry  *WorkerRegistry
+	mcp       *mcpStore
+	policy    *policyServer
 	// workerAuth authenticates /policy, /control/heartbeat and /central/ingest.
 	workerAuth *WorkerAuthenticator
 	// versions is the versioned policy store; nil in file mode. Its Create
@@ -438,6 +444,9 @@ func (s *Server) Start(ctx context.Context) {
 		}()
 	}
 
+	// Token table retention (tokenService.enabled), on the control plane's clock.
+	s.runTokenRetention(ctx)
+
 	go func() {
 		t := time.NewTicker(policyReloadInterval)
 		defer t.Stop()
@@ -519,6 +528,7 @@ func (s *Server) Handler() http.Handler {
 	// The RFC 8693 token endpoint and its RFC 8414 metadata, only when the
 	// token service was built (tokenService.enabled); otherwise 404.
 	if s.cfg.Tokens != nil {
+		s.tokenEdge = s.newTokenEdgeState()
 		mux.HandleFunc(tokenPath, s.handleToken)
 		mux.HandleFunc(asMetadataPath, s.handleASMetadata)
 	}
