@@ -194,9 +194,16 @@ type CertRecord struct {
 // RecordFor describes cert as a worker_certs row.
 func RecordFor(cert *x509.Certificate, workerID, via string, at time.Time) CertRecord {
 	spki := sha256.Sum256(cert.RawSubjectPublicKeyInfo)
+	// The issuer's key id: the AuthorityKeyId the issuer's SubjectKeyId gave the
+	// certificate, else (an intermediate without SKI) sha256 of the issuer name.
+	kid := hex.EncodeToString(cert.AuthorityKeyId)
+	if kid == "" {
+		h := sha256.Sum256(cert.RawIssuer)
+		kid = hex.EncodeToString(h[:])
+	}
 	return CertRecord{
 		Serial: cert.SerialNumber.Text(16), WorkerID: workerID, SPKISHA256: hex.EncodeToString(spki[:]),
-		IssuerKID: hex.EncodeToString(cert.AuthorityKeyId), IssuedVia: via, IssuedAt: at, NotAfter: cert.NotAfter,
+		IssuerKID: kid, IssuedVia: via, IssuedAt: at, NotAfter: cert.NotAfter,
 	}
 }
 
@@ -387,14 +394,16 @@ func (s *EnrollmentStore) Create(ctx context.Context, o EnrollCreateOpts) (strin
 	now := s.clk.Now()
 
 	if imported {
-		// Same name, value and binding as a live row: nothing to do. Any other
-		// row of that name is a conflict, never a silent overwrite.
+		// Same name, value and binding as an existing row: nothing to do, whatever
+		// its state (used up, expired or revoked rows are never revived or
+		// extended, so a bootstrap that re-runs on every start stays a no-op).
+		// Any other row of that name is a conflict, never a silent overwrite.
 		t, h, err := scanEnroll(s.db.QueryRowContext(ctx, `SELECT `+enrollColumns+` FROM worker_enroll_tokens WHERE name = ?`, o.Name))
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
 		case err != nil:
 			return "", EnrollToken{}, false, fmt.Errorf("enrollment tokens: lookup: %w", err)
-		case subtle.ConstantTimeCompare(h[:], hash[:]) == 1 && t.Usable(now) == nil &&
+		case subtle.ConstantTimeCompare(h[:], hash[:]) == 1 &&
 			t.WorkerID == o.WorkerID && t.WorkerIDPrefix == o.WorkerIDPrefix:
 			return plaintext, t, false, nil
 		default:
@@ -474,6 +483,10 @@ func (s *EnrollmentStore) Redeem(ctx context.Context, plaintext, suffix string, 
 	return res, nil
 }
 
+// redeemTx runs issue while the single cpstate connection is held inside the
+// transaction, so issue must be quick and local: a remote or KMS-backed key
+// source must sign outside the transaction (sign first, then record) before it
+// is plugged in here.
 func (s *EnrollmentStore) redeemTx(ctx context.Context, plaintext, suffix string, issue func(string) (*x509.Certificate, error)) (res Redeemed, err error) {
 	conn, err := s.db.Conn(ctx)
 	if err != nil {

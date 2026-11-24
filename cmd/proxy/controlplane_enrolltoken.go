@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -93,7 +94,7 @@ func newEnrollTokenCreateCmd() *cobra.Command {
 			w := cmd.OutOrStdout()
 			switch {
 			case res.Unchanged:
-				_, _ = fmt.Fprintf(w, "no change: enrollment token %s (%s) already registered\n", res.Token.ID, res.Token.Name)
+				_, _ = fmt.Fprintf(w, "no change: enrollment token %s (%s) already registered (%s)\n", res.Token.ID, res.Token.Name, controlplane.EnrollStatus(res.Token, time.Now()))
 			case res.Plaintext != "":
 				// The plaintext alone on stdout, so $(...) captures it; the id goes to stderr.
 				_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "created enrollment token "+res.Token.ID+" ("+res.Token.Name+"); the value below is shown once")

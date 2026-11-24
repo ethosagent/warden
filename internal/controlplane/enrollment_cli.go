@@ -3,6 +3,7 @@ package controlplane
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -150,13 +151,13 @@ func (o *OfflineEnrollTokens) Create(ctx context.Context, c OfflineEnrollCreate)
 	}
 	name := c.Name
 	if name == "" {
-		name = "enroll-" + strings.TrimSuffix(c.WorkerID+c.WorkerIDPrefix, "-")
+		name = defaultEnrollName(c.WorkerID, c.WorkerIDPrefix)
 		if !imported {
 			var b [3]byte
 			if _, err := rand.Read(b[:]); err != nil {
 				return OfflineEnrollResult{}, err
 			}
-			name += "-" + hex.EncodeToString(b[:])
+			name = truncName(name, maxWorkerTokenName-7) + "-" + hex.EncodeToString(b[:])
 		}
 	}
 	// Reserve the output file first, so a path that cannot be written never
@@ -258,6 +259,34 @@ func (o *OfflineEnrollTokens) record(ctx context.Context, action string, t Enrol
 		Details: d, Outcome: adminaudit.OutcomeOK,
 	})
 	return err
+}
+
+// defaultEnrollName is enroll-id-<id> or enroll-prefix-<prefix>, so an id and a
+// prefix that spell alike never collide. A binding too long for the 64
+// character name limit is cut and followed by a hash of the whole binding.
+func defaultEnrollName(workerID, prefix string) string {
+	kind, v := "id", workerID
+	if workerID == "" {
+		kind, v = "prefix", prefix
+	}
+	name := "enroll-" + kind + "-" + v
+	if len(name) <= maxWorkerTokenName {
+		return name
+	}
+	sum := sha256.Sum256([]byte(kind + "\x00" + v))
+	return truncName(name, maxWorkerTokenName-9) + "-" + hex.EncodeToString(sum[:4])
+}
+
+func truncName(s string, n int) string {
+	if len(s) > n {
+		return s[:n]
+	}
+	return s
+}
+
+// EnrollStatus is active, used up, expired or revoked at now.
+func EnrollStatus(t EnrollToken, now time.Time) string {
+	return enrollStatus(t, now)
 }
 
 func enrollStatus(t EnrollToken, now time.Time) string {

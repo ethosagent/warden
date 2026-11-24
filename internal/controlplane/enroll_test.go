@@ -11,13 +11,13 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -184,27 +184,31 @@ func TestEnrollUniform401(t *testing.T) {
 func TestEnrollConcurrentSingleUse(t *testing.T) {
 	r := newEnrollRig(t)
 	pt, _ := r.create(t, EnrollCreateOpts{Name: "once", WorkerID: "worker-1"})
-	body := map[string]string{"token": pt, "csr": csrPEM(t)}
-	var created, other atomic.Int32
+	body, _ := json.Marshal(map[string]string{"token": pt, "csr": csrPEM(t)})
+	// Fifty clients at distinct addresses (so the per-address limit is out of
+	// the way). The per-token limit lets ten through to the store: exactly one
+	// of them wins the use, the other nine are 401, the rest are 429.
+	var codes [50]int
 	var wg sync.WaitGroup
-	for range 50 {
+	for i := range codes {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			got := r.post(t, body)
-			switch got.status {
-			case http.StatusCreated:
-				created.Add(1)
-			case http.StatusUnauthorized, http.StatusTooManyRequests:
-				other.Add(1)
-			default:
-				t.Errorf("status %d: %s", got.status, got.body)
-			}
+			req := httptest.NewRequest(http.MethodPost, enrollPath, bytes.NewReader(body))
+			req.RemoteAddr = fmt.Sprintf("10.1.%d.%d:4000", i/200, i%200+1)
+			rr := httptest.NewRecorder()
+			r.srv.handleEnroll(rr, req)
+			codes[i] = rr.Code
 		}()
 	}
 	wg.Wait()
-	if created.Load() != 1 || other.Load() != 49 {
-		t.Fatalf("201s = %d, others = %d", created.Load(), other.Load())
+	count := map[int]int{}
+	for _, c := range codes {
+		count[c]++
+	}
+	if count[http.StatusCreated] != 1 || count[http.StatusUnauthorized] != enrollPerMinute-1 ||
+		count[http.StatusTooManyRequests] != 50-enrollPerMinute {
+		t.Fatalf("status counts = %v, want 1x201, %dx401, %dx429", count, enrollPerMinute-1, 50-enrollPerMinute)
 	}
 	if len(r.rec.inputs()) != 1 {
 		t.Fatalf("audit rows = %d", len(r.rec.inputs()))

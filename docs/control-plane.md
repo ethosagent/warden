@@ -1644,6 +1644,14 @@ or revoked token is the same `401 unauthorized`; a bad CSR or suffix is a 400
 that leaves the token unused; more than 10 requests a minute per address or per
 token is a 429; a degraded CA is a 503 before the token is touched.
 
+The per-address limit keys on the TCP peer address and never trusts
+`X-Forwarded-For`, so behind a load balancer or ingress the whole fleet shares
+one 10 per minute budget per address. TODO: key it on the client IP resolved
+through `console.trustedProxies` (the resolver in `adminaudit_mw.go`).
+Re-running `create` with the same name, value and binding is always a no-op,
+even after the token was used up, expired or revoked: it is never revived or
+extended, and the command prints its state.
+
 ## Block list: offline CLI
 
 The user block list lives in `<state-dir>/warden-cp.db`, outside policy

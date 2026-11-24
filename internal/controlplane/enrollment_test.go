@@ -352,12 +352,25 @@ func TestEnrollmentTokensImport(t *testing.T) {
 	if _, _, _, err := e.store.Create(ctx, o4); !errors.Is(err, ErrEnrollInUse) {
 		t.Errorf("same value, other name: %v", err)
 	}
-	// A used-up token is no longer an idempotent hit.
+	// A used-up, expired or revoked row is still an idempotent hit, never revived.
 	if _, err := e.store.Redeem(ctx, val, "", e.issuer(t)); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, err := e.store.Create(ctx, o); !errors.Is(err, ErrEnrollNameTaken) {
-		t.Errorf("re-import of a used token: %v", err)
+	if _, got, created, err := e.store.Create(ctx, o); err != nil || created || got.Uses != 1 {
+		t.Errorf("re-import of a used token: %+v created=%v err=%v", got, created, err)
+	}
+	e.clk.Advance(2 * time.Hour)
+	if _, got, created, err := e.store.Create(ctx, o); err != nil || created || got.Usable(e.clk.Now()) == nil {
+		t.Errorf("re-import of an expired token: %+v created=%v err=%v", got, created, err)
+	}
+	if err := e.store.Revoke(ctx, tok.ID, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if _, got, created, err := e.store.Create(ctx, o); err != nil || created || got.RevokedAt.IsZero() {
+		t.Errorf("re-import of a revoked token: %+v created=%v err=%v", got, created, err)
+	}
+	if toks, _ := e.store.List(ctx); len(toks) != 1 {
+		t.Errorf("rows = %d, want 1", len(toks))
 	}
 }
 
@@ -478,4 +491,51 @@ func TestEnrollmentMigrationsInStateMigrations(t *testing.T) {
 		}
 	}
 	t.Fatal("StateMigrations lacks workerenroll/0001")
+}
+
+func TestDefaultEnrollName(t *testing.T) {
+	seen := map[string]string{}
+	for _, c := range []struct{ id, prefix string }{
+		{"pool-a", ""}, {"", "pool-a"}, {"", "pool-a-"},
+		{strings.Repeat("a", 128), ""}, {strings.Repeat("a", 127) + "b", ""},
+		{"", strings.Repeat("a", 127)}, {"", strings.Repeat("a", 126) + "b"},
+	} {
+		n := defaultEnrollName(c.id, c.prefix)
+		if len(n) > maxWorkerTokenName || validateTokenName(n) != nil {
+			t.Errorf("%q: name %q is not a valid token name", c, n)
+		}
+		key := c.id + "|" + c.prefix
+		if prev, dup := seen[n]; dup {
+			t.Errorf("%q and %q share the name %q", key, prev, n)
+		}
+		seen[n] = key
+	}
+	if got := defaultEnrollName("worker-2", ""); got != "enroll-id-worker-2" {
+		t.Errorf("short id: %q", got)
+	}
+	if got := defaultEnrollName("", "pool-a-"); got != "enroll-prefix-pool-a-" {
+		t.Errorf("short prefix: %q", got)
+	}
+}
+
+func TestRecordForIssuerKID(t *testing.T) {
+	e := newEnrollEnv(t)
+	cert, err := e.ca.Issue(mustCSR(t), "w", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withAKI := *cert
+	withAKI.AuthorityKeyId = []byte{1, 2, 3}
+	if got := RecordFor(&withAKI, "w", CertIssuedViaEnroll, e.clk.Now()).IssuerKID; got != "010203" {
+		t.Errorf("kid with an authority key id = %q", got)
+	}
+	// An intermediate without a SubjectKeyId leaves no AuthorityKeyId: the kid
+	// falls back to a hash of the issuer, never empty.
+	noAKI := *cert
+	noAKI.AuthorityKeyId = nil
+	kid := RecordFor(&noAKI, "w", CertIssuedViaEnroll, e.clk.Now()).IssuerKID
+	sum := sha256.Sum256(cert.RawIssuer)
+	if kid == "" || kid != hex.EncodeToString(sum[:]) {
+		t.Errorf("fallback kid = %q", kid)
+	}
 }
