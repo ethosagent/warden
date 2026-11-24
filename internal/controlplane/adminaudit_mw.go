@@ -255,12 +255,12 @@ func (s *Server) adminAuditMiddleware(classify func(*http.Request) (authzRow, bo
 		next.ServeHTTP(sw.writer(), r.WithContext(actx))
 		status := sw.code()
 		outcome := outcomeFor(status)
-		// A handler's Skip is a claim, not a command: it is honoured only when the
+		// A handler's NoChange is a claim, not a command: it is honoured only when the
 		// middleware can verify that nothing changed (the target has a state
 		// hasher, both hashes were computed, and they are equal). Otherwise the
 		// row is written as usual and says the claim was refused.
 		skipRefused := false
-		if ann.Skipped() {
+		if ann.NoChangeClaimed() {
 			if outcome == adminaudit.OutcomeOK && beforeErr == nil && a.hasHasher(row.Target) {
 				if after, afterErr := a.stateHash(ctx, row.Target); afterErr == nil && after == before {
 					return // an idempotent repeat that changed nothing: no row

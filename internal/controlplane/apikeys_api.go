@@ -358,7 +358,7 @@ func (s *Server) revokeAPIKey(w http.ResponseWriter, r *http.Request, p Principa
 		adminaudit.DetailExpiresAt: rfc3339(k.ExpiresAt),
 	})
 	if !k.RevokedAt.IsZero() {
-		adminaudit.Skip(r.Context()) // already revoked: nothing changed, no second row
+		adminaudit.NoChange(r.Context()) // already revoked: nothing changed, no second row
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}

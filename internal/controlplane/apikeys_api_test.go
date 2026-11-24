@@ -582,7 +582,7 @@ func TestAuditSkipIsVerified(t *testing.T) {
 	// Verified no-op: no row.
 	before := rows()
 	run("skiptest", func(w http.ResponseWriter, r *http.Request) {
-		adminaudit.Skip(r.Context())
+		adminaudit.NoChange(r.Context())
 		w.WriteHeader(http.StatusNoContent)
 	})
 	if rows() != before {
@@ -591,7 +591,7 @@ func TestAuditSkipIsVerified(t *testing.T) {
 	// Skip while mutating hashed state: row written, claim refused.
 	run("skiptest", func(w http.ResponseWriter, r *http.Request) {
 		state++
-		adminaudit.Skip(r.Context())
+		adminaudit.NoChange(r.Context())
 		w.WriteHeader(http.StatusNoContent)
 	})
 	in := e.rec.inputs()
@@ -601,7 +601,7 @@ func TestAuditSkipIsVerified(t *testing.T) {
 	// Skip on a target with no hasher cannot be verified: row written.
 	before = rows()
 	run("unhashed", func(w http.ResponseWriter, r *http.Request) {
-		adminaudit.Skip(r.Context())
+		adminaudit.NoChange(r.Context())
 		w.WriteHeader(http.StatusNoContent)
 	})
 	if in = e.rec.inputs(); len(in) != before+1 || in[before].Details[detailSkipRefused] != "true" {
@@ -610,7 +610,7 @@ func TestAuditSkipIsVerified(t *testing.T) {
 	// Skip with a non-ok outcome: row written.
 	before = rows()
 	run("skiptest", func(w http.ResponseWriter, r *http.Request) {
-		adminaudit.Skip(r.Context())
+		adminaudit.NoChange(r.Context())
 		w.WriteHeader(http.StatusConflict)
 	})
 	if in = e.rec.inputs(); len(in) != before+1 || in[before].Outcome != adminaudit.OutcomeRejected {
@@ -620,7 +620,7 @@ func TestAuditSkipIsVerified(t *testing.T) {
 	e.srv.RegisterStateHasher("broken", func(context.Context) (string, error) { return "", errors.New("boom") })
 	before = rows()
 	run("broken", func(w http.ResponseWriter, r *http.Request) {
-		adminaudit.Skip(r.Context())
+		adminaudit.NoChange(r.Context())
 		w.WriteHeader(http.StatusNoContent)
 	})
 	if rows() != before+1 {
