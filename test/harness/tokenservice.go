@@ -17,6 +17,8 @@ import (
 	agentregsqlite "github.com/ethosagent/warden/internal/agentreg/adapters/sqlite"
 	"github.com/ethosagent/warden/internal/controlplane"
 	"github.com/ethosagent/warden/internal/cpstate"
+	"github.com/ethosagent/warden/internal/keys"
+	"github.com/ethosagent/warden/internal/keys/adapters/signer"
 )
 
 // The token endpoint gate (W-P2-TOKX-03): the control plane boots with
@@ -74,7 +76,7 @@ type TokenAgent struct {
 	KID string
 
 	h    *H
-	priv ed25519.PrivateKey
+	priv *signer.LocalSigner
 }
 
 // RegisterTokenAgent registers an agent with a fresh Ed25519 key, the given
@@ -84,9 +86,13 @@ type TokenAgent struct {
 // the clock). Needs WithTokenService.
 func (h *H) RegisterTokenAgent(id string, groups, scopes []string) *TokenAgent {
 	h.tb.Helper()
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	priv, err := signer.GenerateLocal(keys.AlgEdDSA)
 	if err != nil {
 		h.tb.Fatalf("harness: generate an agent key: %v", err)
+	}
+	pub, ok := priv.Public().(ed25519.PublicKey)
+	if !ok {
+		h.tb.Fatal("harness: the agent key is not Ed25519")
 	}
 	kid := id + tokenAssertionKeyID
 	jwk, err := json.Marshal(map[string]string{
@@ -190,7 +196,11 @@ func (a *TokenAgent) Assertion(opts ...AssertionOption) string {
 		a.h.tb.Fatalf("harness: encode the assertion claims: %v", err)
 	}
 	in := base64.RawURLEncoding.EncodeToString(hb) + "." + base64.RawURLEncoding.EncodeToString(cb)
-	return in + "." + base64.RawURLEncoding.EncodeToString(ed25519.Sign(a.priv, []byte(in)))
+	sig, err := a.priv.Sign(context.Background(), []byte(in))
+	if err != nil {
+		a.h.tb.Fatalf("harness: sign the assertion: %v", err)
+	}
+	return in + "." + base64.RawURLEncoding.EncodeToString(sig)
 }
 
 // Form is a complete token exchange request body for subjectToken: the grant,
