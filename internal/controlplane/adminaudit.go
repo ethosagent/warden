@@ -44,7 +44,7 @@ func StateMigrations() []cpstate.Migration {
 	migs = append(migs, agentregsqlite.Migrations()...)
 	// Feature-gated: known to the downgrade guard, applied only with
 	// keys.enabled or tokenService.enabled (stateMigrationsFor).
-	migs = append(migs, optionalMigrations(tokensvcsqlite.Migrations(), tokensvcsqlite.SessionMigrations())...)
+	migs = append(migs, optionalMigrations(tokensvcsqlite.Migrations(), tokensvcsqlite.SessionMigrations(), tokensvcsqlite.EventMigrations())...)
 	migs = append(migs, metastore.Migrations()...)
 	return migs
 }

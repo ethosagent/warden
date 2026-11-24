@@ -56,7 +56,7 @@ func stateMigrationsFor(kc config.KeysConfig, tc config.TokenServiceConfig) []cp
 		migs = cpstate.Enable(migs, metastore.MigrationID)
 	}
 	if tc.Enabled {
-		migs = cpstate.Enable(migs, tokensvcsqlite.MigrationID, tokensvcsqlite.SessionsMigrationID)
+		migs = cpstate.Enable(migs, tokensvcsqlite.MigrationID, tokensvcsqlite.SessionsMigrationID, tokensvcsqlite.EventsMigrationID)
 	}
 	return migs
 }

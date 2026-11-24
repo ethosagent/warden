@@ -131,7 +131,11 @@ func fixedSigner(t *testing.T, label string) *signer.LocalSigner {
 
 // newSvcEnv builds a service over fakes, with one active agent "agent-1"
 // (allowed group eng, scopes read and write) that signs with a fixed key.
-func newSvcEnv(t *testing.T) *svcEnv {
+func newSvcEnv(t *testing.T) *svcEnv { return newSvcEnvWith(t, nil) }
+
+// newSvcEnvWith is newSvcEnv with a last look at the service Config, for the
+// limiter, recorder and metrics hooks.
+func newSvcEnvWith(t *testing.T, mod func(*tokensvc.Config)) *svcEnv {
 	t.Helper()
 	e := &svcEnv{
 		env:      newEnv(t),
@@ -150,13 +154,17 @@ func newSvcEnv(t *testing.T) *svcEnv {
 	e.signers = &fakeSigners{s: e.mint}
 	e.setAgent(func(a *agentreg.Agent) {})
 	e.verifier.Set(subjectToken, e.claims(), identity.StatusValid, "")
-	svc, err := tokensvc.New(tokensvc.Config{
+	cfg := tokensvc.Config{
 		Issuer:  issuer,
 		Clients: e.v, Agents: e.agents, Blocks: e.blocks, Signers: e.signers, Sessions: e.sessions,
 		Resolvers: map[string]tokensvc.SubjectResolver{tokensvc.TokenTypeIDToken: tokensvc.NewIDTokenResolver(e.verifier)},
 		Now:       func() time.Time { return e.now },
 		Rand:      &detRand{},
-	})
+	}
+	if mod != nil {
+		mod(&cfg)
+	}
+	svc, err := tokensvc.New(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
