@@ -132,6 +132,21 @@ func (failingSigner) Sign(context.Context, []byte) ([]byte, error) {
 	return nil, errors.New("backend unavailable")
 }
 
+// btEventually polls cond every few milliseconds until it holds or 10s pass.
+func btEventually(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.After(10 * time.Second)
+	tick := time.NewTicker(2 * time.Millisecond)
+	defer tick.Stop()
+	for !cond() {
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for: %s", what)
+		case <-tick.C:
+		}
+	}
+}
+
 type btHarness struct {
 	s    *Server
 	ps   *policyServer
@@ -522,7 +537,8 @@ func TestBundleServeLongPollWakes(t *testing.T) {
 	}
 	envWait := hold(BundleMediaType, etag)
 	legacyWait := hold("", legacy.hdr.Get("ETag"))
-	time.Sleep(50 * time.Millisecond) // both parked (a wake before the park is served by the re-check anyway)
+	// A change that lands before a waiter parks is served by its re-check, so
+	// no wait for the park is needed.
 	start := time.Now()
 	btCreateAllow(t, h, "new.example.com")
 	for name, ch := range map[string]chan result{"envelope": envWait, "legacy": legacyWait} {
@@ -607,7 +623,6 @@ func TestBundleSeqFromPublishLog(t *testing.T) {
 		h.ps.ServePolicy(rec, req)
 		held <- btResp{rec.Code, rec.Header(), rec.Body.Bytes()}
 	}()
-	time.Sleep(50 * time.Millisecond)
 	h.fk.rotateToken(t)
 	start := time.Now()
 	h.fk.fire(keys.PurposeToken)
@@ -802,17 +817,15 @@ func TestBundleResign(t *testing.T) {
 	go func() { h.ps.resignLoop(ctx, clk); close(done) }()
 	defer func() { cancel(); <-done }()
 
-	// Drive the loop by condition: advance an hour until the envelope changes.
-	deadline := time.Now().Add(10 * time.Second)
-	for h.bundleResp(t).hdr.Get("ETag") == firstETag {
-		if time.Now().After(deadline) {
-			t.Fatal("the ticker never re-signed")
-		}
-		if clk.PendingTimers() > 0 {
-			clk.Advance(time.Hour)
-		}
-		time.Sleep(5 * time.Millisecond)
+	// The loop arms its timer for max-age/4 = 1h. Just short of it nothing is
+	// re-signed; the last minute re-signs.
+	btEventually(t, "the re-sign timer is armed", func() bool { return clk.PendingTimers() > 0 })
+	clk.Advance(59 * time.Minute)
+	if got := h.bundleResp(t).hdr.Get("ETag"); got != firstETag {
+		t.Fatal("re-signed before max-age/4")
 	}
+	clk.Advance(time.Minute)
+	btEventually(t, "the ticker re-signs", func() bool { return h.bundleResp(t).hdr.Get("ETag") != firstETag })
 	next := h.verify(t, h.bundleResp(t).body, btState(first))
 	if next.Seq != first.Seq || next.ContentSHA256 != first.ContentSHA256 || !next.Refresh {
 		t.Errorf("re-sign: seq %d -> %d refresh=%v, want the same seq as a refresh", first.Seq, next.Seq, next.Refresh)
@@ -939,5 +952,212 @@ func TestBundlePayloadDigestIsPrefixOnly(t *testing.T) {
 	}
 	if b := btPayload(t, r.body); b.Seq < 1 {
 		t.Errorf("decoded seq = %d", b.Seq)
+	}
+}
+
+// publishNow runs publishBundle under the refresh lock with the server's last
+// loaded wire, but with head and etag overridden (0 / "" keep the real ones).
+func (h *btHarness) publishNow(wireMod func(*policyWire), head int64, etag string, force bool) {
+	h.ps.refreshMu.Lock()
+	defer h.ps.refreshMu.Unlock()
+	wire := h.ps.lastWire
+	if wireMod != nil {
+		wireMod(&wire)
+	}
+	if head == 0 {
+		head = h.ps.lastHead
+	}
+	if etag == "" {
+		etag = h.ps.lastETag
+	}
+	h.ps.publishBundle(context.Background(), wire, etag, head, force)
+}
+
+// TestBundleGuardLogBehind: content whose head or ETag the newest publish_log
+// row does not describe is never signed, and that is not a failure.
+func TestBundleGuardLogBehind(t *testing.T) {
+	h := newBundleHarness(t, BundlesOffer, writePolicyFile(t, "api.openai.com"), nil, nil, nil, nil)
+	first := h.bundleResp(t)
+	for name, c := range map[string]struct {
+		head int64
+		etag string
+	}{
+		"etag ahead of the log": {0, "deadbeefdeadbeef"},
+		"head ahead of the log": {mustHead(t, h.ps.versions) + 1, ""},
+	} {
+		h.publishNow(func(w *policyWire) {
+			w.Allowlist = append(w.Allowlist, config.AllowlistEntry{Domain: "ahead.example.com"})
+		}, c.head, c.etag, true)
+		if got := h.bundleResp(t); !bytes.Equal(got.body, first.body) {
+			t.Errorf("%s: a new envelope was published", name)
+		}
+		if h.ps.bundleDegraded() {
+			t.Errorf("%s: the publisher is degraded", name)
+		}
+	}
+	if !strings.Contains(h.logs.String(), "publish log is behind the served policy") {
+		t.Error("the skipped sign was not logged")
+	}
+}
+
+// TestBundleGuardContentChangedUnderSeq: a build whose content differs from
+// what the seq already signed is refused, the old envelope stays and the
+// publisher reports degraded; across a restart the persisted fingerprint
+// still refuses it, and a legitimate change under a new row still signs.
+func TestBundleGuardContentChangedUnderSeq(t *testing.T) {
+	db := openPolicyState(t)
+	fk := newFakeBundleKeys(t)
+	path := writePolicyFile(t, "api.openai.com")
+	h := newBundleHarness(t, BundlesOffer, path, db, fk, nil, nil)
+	first := h.bundleResp(t)
+	tamper := func(w *policyWire) {
+		w.Allowlist = append(w.Allowlist, config.AllowlistEntry{Domain: "sneaky.example.com"})
+	}
+
+	h.publishNow(tamper, 0, "", true)
+	if got := h.bundleResp(t); !bytes.Equal(got.body, first.body) {
+		t.Error("same-seq different content replaced the envelope")
+	}
+	if !h.ps.bundleDegraded() || !strings.Contains(h.logs.String(), "content changed under an unchanged seq") {
+		t.Errorf("not reported: degraded=%v", h.ps.bundleDegraded())
+	}
+
+	// Simulated restart: a fresh server on the same state starts from the
+	// persisted (seq, fingerprint), not from memory.
+	h2 := newBundleHarness(t, BundlesOffer, path, db, fk, nil, nil)
+	second := h2.bundleResp(t)
+	h2.publishNow(tamper, 0, "", true)
+	if got := h2.bundleResp(t); !bytes.Equal(got.body, second.body) {
+		t.Error("after a restart, same-seq different content replaced the envelope")
+	}
+	if !h2.ps.bundleDegraded() {
+		t.Error("after a restart the refusal did not mark the publisher degraded")
+	}
+
+	// A real change takes its own row, so it signs under a higher seq, and the
+	// flag clears.
+	btCreateAllow(t, h2, "legit.example.com")
+	if v := h2.verify(t, h2.bundleResp(t).body, bundle.State{}); v.Seq != h2.latest(t).Seq || h2.ps.bundleDegraded() {
+		t.Errorf("a legitimate change did not sign cleanly: seq %d degraded=%v", v.Seq, h2.ps.bundleDegraded())
+	}
+}
+
+// TestBundleStateWriteFailureIsSignFailure: if the JWKS baseline cannot be
+// stored after its token_jwks row, nothing is signed, so a restart can never
+// forget the change.
+func TestBundleStateWriteFailureIsSignFailure(t *testing.T) {
+	h := newBundleHarness(t, BundlesOffer, writePolicyFile(t, "api.openai.com"), nil, nil, nil, nil)
+	first := h.bundleResp(t)
+	if _, err := h.db.SQL().Exec(`DROP TABLE bundle_state`); err != nil {
+		t.Fatal(err)
+	}
+	h.fk.rotateToken(t)
+	h.fk.fire(keys.PurposeToken)
+	if got := h.bundleResp(t); !bytes.Equal(got.body, first.body) {
+		t.Error("a bundle was signed although its state could not be stored")
+	}
+	if !h.ps.bundleDegraded() || !strings.Contains(h.logs.String(), "bundle sign failed") {
+		t.Errorf("not reported: degraded=%v", h.ps.bundleDegraded())
+	}
+}
+
+// TestBundleSeqFloorMustApply: a positive floor that cannot be applied stops
+// startup, and an absurd floor is refused up front.
+func TestBundleSeqFloorMustApply(t *testing.T) {
+	db := openPolicyState(t)
+	s := New(Config{
+		PolicyPath: writePolicyFile(t, "api.openai.com"), State: db, PolicyStore: PolicyStoreVersioned,
+		Bundles: BundlesConfig{Mode: BundlesOffer, SeqFloor: 100}, bundleKeys: newFakeBundleKeys(t),
+		Clock: clocktest.NewFake(btStart),
+	})
+	// No importInitialVersion: the store has no head, so the floor has no row to hang on.
+	if err := s.policy.startBundles(context.Background()); err == nil || !strings.Contains(err.Error(), "--bundle-seq-floor") {
+		t.Errorf("startBundles with an unappliable floor = %v, want an error naming --bundle-seq-floor", err)
+	}
+	if _, err := resolveBundles(Params{Bundles: BundlesOffer, BundleSeqFloor: MaxBundleSeqFloor + 1}, "/s", PolicyStoreVersioned, config.KeysConfig{Enabled: true}); err == nil {
+		t.Error("a floor above the cap was accepted")
+	}
+	if _, err := resolveBundles(Params{Bundles: BundlesOffer, BundleSeqFloor: MaxBundleSeqFloor}, "/s", PolicyStoreVersioned, config.KeysConfig{Enabled: true}); err != nil {
+		t.Errorf("a floor at the cap was refused: %v", err)
+	}
+}
+
+// TestBundleConcurrentSeqsOneContent: Refresh, key transitions and policy
+// saves racing each other never put two contents under one seq.
+func TestBundleConcurrentSeqsOneContent(t *testing.T) {
+	h := newBundleHarness(t, BundlesOffer, writePolicyFile(t, "api.openai.com"), nil, nil, nil, nil)
+	var (
+		mu   sync.Mutex
+		seen = map[int64]map[string]bool{}
+	)
+	record := func(raw []byte) {
+		b := btPayload(t, raw)
+		mu.Lock()
+		defer mu.Unlock()
+		if seen[b.Seq] == nil {
+			seen[b.Seq] = map[string]bool{}
+		}
+		seen[b.Seq][b.ContentSHA256] = true
+	}
+	stop := make(chan struct{})
+	var readers sync.WaitGroup
+	for range 2 {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				req := httptest.NewRequest(http.MethodGet, "/policy", nil)
+				req.Header.Set("Accept", BundleMediaType)
+				rec := httptest.NewRecorder()
+				h.ps.ServePolicy(rec, req)
+				if rec.Code == http.StatusOK {
+					record(rec.Body.Bytes())
+				}
+			}
+		}()
+	}
+	var writers sync.WaitGroup
+	for g := range 6 {
+		writers.Add(1)
+		go func() {
+			defer writers.Done()
+			for i := range 15 {
+				switch (g + i) % 4 {
+				case 0:
+					h.ps.Refresh()
+				case 1:
+					h.fk.rotateToken(t)
+					h.fk.fire(keys.PurposeToken)
+				case 2:
+					h.fk.fire(keys.PurposeBundle)
+				default:
+					head := mustHead(t, h.ps.versions)
+					doc := docWithAllow(baseDoc(t, h.s), "c"+strings.Repeat("x", g)+string(rune('a'+i))+".example.com")
+					// Losing the head race to another writer is expected here.
+					if _, _, err := h.ps.versions.Create(context.Background(), doc, testAuthor, "", SourcePolicy, head); err != nil && !errors.Is(err, ErrConflict) {
+						t.Error(err)
+					}
+				}
+			}
+		}()
+	}
+	writers.Wait()
+	close(stop)
+	readers.Wait()
+	record(h.bundleResp(t).body)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) < 2 {
+		t.Fatalf("only %d seqs observed; the test did not exercise changes", len(seen))
+	}
+	for seq, contents := range seen {
+		if len(contents) != 1 {
+			t.Errorf("seq %d maps to %d different contents", seq, len(contents))
+		}
 	}
 }

@@ -65,6 +65,14 @@ const (
 	// stateCPID and stateJWKSSHA are the bundle_state names.
 	stateCPID    = "cp_id"
 	stateJWKSSHA = "jwks_sha256"
+	// stateSigned is "<seq>:<content fingerprint>" of the newest envelope
+	// signed. It outlives a restart, so a seq can never be signed twice with
+	// different content, whatever changed while the control plane was down.
+	stateSigned = "signed"
+
+	// MaxBundleSeqFloor bounds --bundle-seq-floor far below the int64 range,
+	// so a typo cannot exhaust the seq space.
+	MaxBundleSeqFloor = 1 << 53
 )
 
 // BundlesConfig is the --bundles, --bundle-max-age and --bundle-seq-floor
@@ -104,8 +112,8 @@ func resolveBundles(p Params, stateDir, policyStore string, kc config.KeysConfig
 	if cfg.MaxAge != 0 && cfg.MaxAge < MinBundleMaxAge {
 		return BundlesConfig{}, fmt.Errorf("control-plane: --bundle-max-age %s is below the minimum %s", cfg.MaxAge, MinBundleMaxAge)
 	}
-	if cfg.SeqFloor < 0 {
-		return BundlesConfig{}, fmt.Errorf("control-plane: --bundle-seq-floor %d must not be negative", cfg.SeqFloor)
+	if cfg.SeqFloor < 0 || cfg.SeqFloor > MaxBundleSeqFloor {
+		return BundlesConfig{}, fmt.Errorf("control-plane: --bundle-seq-floor %d must be between 0 and %d", cfg.SeqFloor, int64(MaxBundleSeqFloor))
 	}
 	if !cfg.On() {
 		return cfg, nil
@@ -218,6 +226,10 @@ type bundlePublisher struct {
 	cpID      string
 	jwksSHA   string // hash of the token JWKS the publish log last covered
 	jwksKnown bool
+	// signedSeq and signedFP are the persisted newest signed (seq, content
+	// fingerprint); signedSeq 0 = nothing signed yet.
+	signedSeq int64
+	signedFP  string
 	cur       *signedBundle
 	unsub     func()
 
@@ -266,11 +278,23 @@ func (ps *policyServer) startBundles(ctx context.Context) error {
 	} else if ok {
 		b.jwksSHA, b.jwksKnown = sha, true
 	}
+	if v, ok, err := b.state.get(ctx, stateSigned); err != nil {
+		return fmt.Errorf("control-plane: %w", err)
+	} else if ok {
+		seq, fp, found := strings.Cut(v, ":")
+		n, perr := strconv.ParseInt(seq, 10, 64)
+		if !found || perr != nil || n < 1 || fp == "" {
+			return errors.New("control-plane: bundle_state has an unreadable signed record; refusing to start")
+		}
+		b.signedSeq, b.signedFP = n, fp
+	}
 	if !ps.loaded {
 		return errors.New("control-plane: --bundles needs a loaded policy")
 	}
 	if b.cfg.SeqFloor > 0 {
-		ps.applySeqFloor(ctx)
+		if err := ps.applySeqFloor(ctx); err != nil {
+			return err
+		}
 	}
 	b.active = true
 	b.unsub = b.keys.Subscribe(ps.onKeysChanged)
@@ -279,21 +303,22 @@ func (ps *policyServer) startBundles(ctx context.Context) error {
 	return nil
 }
 
-// applySeqFloor appends the restore row when the log is below the floor.
-func (ps *policyServer) applySeqFloor(ctx context.Context) {
+// applySeqFloor appends the restore row when the log is below the floor. A
+// floor that cannot be applied stops startup: pinned workers would reject
+// every new bundle as a rollback.
+func (ps *policyServer) applySeqFloor(ctx context.Context) error {
 	b := ps.bundles
 	if ps.lastHead == 0 {
-		b.logger.Warn("control plane: --bundle-seq-floor not applied: no policy head yet", "floor", b.cfg.SeqFloor)
-		return
+		return fmt.Errorf("control-plane: --bundle-seq-floor %d cannot be applied: no policy head yet", b.cfg.SeqFloor)
 	}
 	appended, err := ps.versions.AppendRestore(ctx, b.cfg.SeqFloor, ps.lastHead, ps.lastETag, publishActorBundle)
 	if err != nil {
-		b.logger.Error("control plane: --bundle-seq-floor restore row failed", "floor", b.cfg.SeqFloor, "error", boundedErr(err))
-		return
+		return fmt.Errorf("control-plane: --bundle-seq-floor %d cannot be applied: %s", b.cfg.SeqFloor, boundedErr(err))
 	}
 	if appended {
 		b.logger.Info("bundle seq floor applied", "seq", b.cfg.SeqFloor, "reason", publishReasonRestore)
 	}
+	return nil
 }
 
 // stopBundles ends the key subscription.
@@ -366,8 +391,11 @@ func (ps *policyServer) publishBundle(ctx context.Context, wire policyWire, etag
 	if !b.jwksKnown || jsha != b.jwksSHA {
 		// Row first, then the stored hash: a crash in between costs one extra
 		// row at the next start, never an uncovered change.
+		// A failed put is a sign failure: signing on would let a restart
+		// forget the change this row covered.
 		if err := b.state.put(ctx, stateJWKSSHA, jsha); err != nil {
-			b.logger.Warn("control plane: bundle JWKS baseline not stored", "error", boundedErr(err))
+			b.fail(ctx, 0, signer.KID(), err)
+			return
 		}
 		b.jwksSHA, b.jwksKnown = jsha, true
 	}
@@ -391,12 +419,17 @@ func (ps *policyServer) publishBundle(ctx context.Context, wire policyWire, etag
 	fp := contentFingerprint(policy, creds, jwks)
 	cur := b.cur
 	switch {
-	case cur != nil && cur.seq > last.Seq:
-		return // an older build lost a race; the newer envelope stays
-	case cur != nil && cur.seq == last.Seq && cur.fp != fp:
+	case b.signedSeq > last.Seq:
+		b.logger.Error("control plane: the publish log is behind the newest signed bundle; refusing to sign (set --bundle-seq-floor)",
+			"seq", last.Seq, "signedSeq", b.signedSeq)
+		b.degraded.Store(true)
+		return
+	case b.signedSeq == last.Seq && b.signedFP != fp:
 		b.logger.Error("control plane: bundle content changed under an unchanged seq; refusing to sign", "seq", last.Seq)
 		b.degraded.Store(true)
 		return
+	case cur != nil && cur.seq > last.Seq:
+		return // an older build lost a race; the newer envelope stays
 	case cur != nil && cur.seq == last.Seq && !force:
 		return
 	}
@@ -412,6 +445,9 @@ func (ps *policyServer) publishBundle(ctx context.Context, wire policyWire, etag
 		CPID:          b.cpID,
 		Policy:        policy,
 	}
+	// One section today. The ticket that adds a second one (for example the
+	// registry section, W-P4-MREG-05) should turn jwks into a section list, so
+	// each section is fingerprinted and each owns a publish-log reason.
 	if jwks != nil {
 		bd.Sections = map[string]json.RawMessage{sectionTokenJWKS: jwks}
 	}
@@ -430,6 +466,13 @@ func (ps *policyServer) publishBundle(ctx context.Context, wire policyWire, etag
 		env: env, etag: hex.EncodeToString(sum[:8]), seq: last.Seq, kid: signer.KID(),
 		issuedAt: now, expiresAt: bd.ExpiresAt, fp: fp,
 	}
+	// Persist before publishing: an envelope nobody can prove was recorded is
+	// never served.
+	if err := b.state.put(ctx, stateSigned, strconv.FormatInt(sb.seq, 10)+":"+fp); err != nil {
+		b.fail(ctx, last.Seq, signer.KID(), err)
+		return
+	}
+	b.signedSeq, b.signedFP = sb.seq, fp
 	b.cur = sb
 	b.degraded.Store(false)
 	ps.watch.setBundle(sb)
