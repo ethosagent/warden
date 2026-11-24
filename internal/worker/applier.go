@@ -61,8 +61,12 @@ type SettingsApplier struct {
 
 	// Live-state trackers. mcpMu guards liveMCPGW against the shutdown defer; the
 	// others are touched only from the single apply goroutine.
-	mcpMu          *sync.Mutex
-	liveMCPGW      **gateway.Gateway
+	mcpMu     *sync.Mutex
+	liveMCPGW **gateway.Gateway
+	// mcpClosed is set (under mcpMu) by the shutdown defer once it has taken the
+	// final liveMCPGW. An Apply still in flight past that point must not install
+	// a new gateway: nothing would ever Close it and its flusher would leak.
+	mcpClosed      *bool
 	liveCompliance bool
 	liveCacheTTL   time.Duration
 }
@@ -86,8 +90,17 @@ func (a *SettingsApplier) Apply() {
 			gateway.WithStore(a.mcpStore), gateway.WithAgentID(a.agentID))
 		swapGW = newGW
 	}
-	a.p.SetMCPGateway(swapGW)
 	a.mcpMu.Lock()
+	if a.mcpClosed != nil && *a.mcpClosed {
+		// Shutdown already took the live gateway; installing newGW would orphan it.
+		a.mcpMu.Unlock()
+		if newGW != nil {
+			_ = newGW.Close()
+		}
+		a.logger.Debug("control-plane settings arrived during shutdown; MCP gateway left as is")
+		return
+	}
+	a.p.SetMCPGateway(swapGW)
 	old := *a.liveMCPGW
 	*a.liveMCPGW = newGW
 	a.mcpMu.Unlock()

@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -237,4 +238,29 @@ func (f *fakeStore) mustSchemas(t *testing.T) map[string]mcp.ToolProfileView {
 		t.Fatalf("LoadMCPSchemas: %v", err)
 	}
 	return s
+}
+
+// TestClose_FlusherGoneOnReturn pins that Close is synchronous: once it
+// returns, the flushLoop goroutine has exited (a leaked flusher also races the
+// final flush and trips the harness leak check).
+func TestClose_FlusherGoneOnReturn(t *testing.T) {
+	buf := make([]byte, 1<<20)
+	for i := 0; i < 300; i++ {
+		gw := newGWWithStore(t, newFakeStore())
+		_ = gw.Close()
+		// Close returns after flushLoop's deferred close(stopped); the goroutine
+		// then needs only a few instructions to unwind. Allow a handful of
+		// yields for that, never a sleep: an unsynchronised Close stays visible.
+		gone := false
+		for y := 0; y < 20 && !gone; y++ {
+			n := runtime.Stack(buf, true)
+			gone = !strings.Contains(string(buf[:n]), "(*Gateway).flushLoop")
+			if !gone {
+				runtime.Gosched()
+			}
+		}
+		if !gone {
+			t.Fatalf("iteration %d: flushLoop still running after Close returned", i)
+		}
+	}
 }
