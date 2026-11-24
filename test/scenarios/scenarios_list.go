@@ -249,6 +249,10 @@ var All = slices.Concat(
 		// whose scope it holds and never a worker route. In-process only.
 		{Name: "apikey_offline_revoke", Opts: apiKeyOpts(), Run: apiKeyOfflineRevoke},
 		{Name: "apikey_scopes", Opts: apiKeyOpts(), Run: apiKeyScopes},
+		// Scoped API keys (W-P2-APIK-03): a console admin creates a key (the
+		// plaintext once), the key reads, introspects and is refused a write,
+		// then the admin revokes it and its next request is a 401.
+		{Name: "apikey_management", Opts: apiKeyOpts(), Run: apiKeyManagement},
 
 		// Admin audit gate (W-P1-AAUD-05): enabled, the control plane writes the
 		// genesis entry and logs its key_id before serving. In-process only (it

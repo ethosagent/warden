@@ -2,6 +2,8 @@ package scenarios
 
 import (
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -12,6 +14,7 @@ import (
 	"github.com/ethosagent/warden/internal/apikeys/adapters/sqlitestore"
 	"github.com/ethosagent/warden/internal/controlplane"
 	"github.com/ethosagent/warden/internal/cpstate"
+	"github.com/ethosagent/warden/test/fakes"
 	"github.com/ethosagent/warden/test/harness"
 )
 
@@ -187,5 +190,107 @@ func apiKeyScopes(t *testing.T, h *harness.H) {
 	}
 	if status, _ := keyStatus(t, h, all, http.MethodPost, "/dashboard/api/worker-tokens", `{}`); status != http.StatusForbidden {
 		t.Errorf("POST worker-tokens with every scope = %d, want 403", status)
+	}
+}
+
+// apiKeyManagement is the management API end to end (W-P2-APIK-03): a console
+// admin creates a key (the plaintext is in the 201 only), the key reads the
+// policy, introspects itself on /self, is refused a write, and is listed
+// without its secret. The admin revokes it and the key's very next request is
+// refused, with no clock advance and no poll. Create and revoke are admin audit
+// rows that never carry the key.
+func apiKeyManagement(t *testing.T, h *harness.H) {
+	admin, csrf := consoleLogin(t, h, fakes.Valid("ada", "ada@example.com", harness.ConsoleAdminGroup))
+	hdr := http.Header{controlplane.CSRFHeader: {csrf}, "Content-Type": {"application/json"}}
+	do := func(method, path, body string) (*http.Response, string) {
+		t.Helper()
+		var rb []byte
+		if body != "" {
+			rb = []byte(body)
+		}
+		resp, err := admin.DoBody(method, path, hdr, rb)
+		if err != nil {
+			t.Fatalf("%s %s: %v", method, path, err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		return resp, string(data)
+	}
+
+	// Create: 201, the key once, never cached.
+	resp, body := do(http.MethodPost, "/dashboard/api/api-keys", `{"name":"ci","scopes":["policy:read"],"expiresIn":"24h"}`)
+	if resp.StatusCode != http.StatusCreated || resp.Header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("POST api-keys = %d, Cache-Control %q, want 201 no-store", resp.StatusCode, resp.Header.Get("Cache-Control"))
+	}
+	var made struct {
+		ID  string `json:"id"`
+		Key string `json:"key"`
+	}
+	if err := json.Unmarshal([]byte(body), &made); err != nil || !apikeys.LooksLikeKey(made.Key) || made.ID == "" {
+		t.Fatalf("201 body has no key and id (err %v)", err)
+	}
+
+	// Use: the key reads, introspects itself and is refused a write.
+	if status, _ := keyStatus(t, h, made.Key, http.MethodGet, "/dashboard/api/policy", ""); status != http.StatusOK {
+		t.Fatalf("GET policy with the new key = %d, want 200", status)
+	}
+	status, self := keyStatus(t, h, made.Key, http.MethodGet, "/dashboard/api/api-keys/self", "")
+	if status != http.StatusOK || !strings.Contains(self, `"id":"`+made.ID+`"`) || !strings.Contains(self, `"scopes":["policy:read"]`) {
+		t.Fatalf("GET /self = %d %s, want the key's id and scopes", status, self)
+	}
+	if status, body := keyStatus(t, h, made.Key, http.MethodPost, "/dashboard/api/policy", `{"allowlist":[],"denylist":[]}`); status != http.StatusForbidden || !strings.Contains(body, "insufficient_scope") {
+		t.Fatalf("POST policy with a read key = %d %s, want 403 insufficient_scope", status, body)
+	}
+	if status, body := keyStatus(t, h, made.Key, http.MethodPost, "/dashboard/api/api-keys", `{"name":"x","scopes":["policy:read"]}`); status != http.StatusForbidden || !strings.Contains(body, "session_required") {
+		t.Fatalf("a key minting a key = %d %s, want 403 session_required", status, body)
+	}
+
+	// List: the admin sees the key, with no secret in it.
+	if resp, list := do(http.MethodGet, "/dashboard/api/api-keys", ""); resp.StatusCode != http.StatusOK ||
+		!strings.Contains(list, made.ID) || strings.Contains(list, made.Key) || strings.Contains(list, "secret") {
+		t.Fatalf("GET api-keys = %d %s", resp.StatusCode, list)
+	}
+
+	// Revoke: 204, and the key's next request is refused at once.
+	if resp, _ := do(http.MethodDelete, "/dashboard/api/api-keys/"+made.ID, ""); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("DELETE api-keys/{id} = %d, want 204", resp.StatusCode)
+	}
+	for _, path := range []string{"/dashboard/api/policy", "/dashboard/api/api-keys/self"} {
+		if status, _ := keyStatus(t, h, made.Key, http.MethodGet, path, ""); status != http.StatusUnauthorized {
+			t.Errorf("GET %s with the revoked key = %d, want 401", path, status)
+		}
+	}
+	if resp, _ := do(http.MethodDelete, "/dashboard/api/api-keys/"+made.ID, ""); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("a repeated revoke = %d, want 204", resp.StatusCode)
+	}
+
+	// Audit: one ok create row and one ok revoke row (the repeat wrote none), neither
+	// carrying the key.
+	var create, revoke int
+	for _, r := range h.AdminAuditRows() {
+		if r.Outcome != adminaudit.OutcomeOK {
+			continue // the refused key-minted create is a denied row, by design
+		}
+		switch r.Action {
+		case "api_key.create":
+			create++
+			if r.TargetRef != "api_key:"+made.ID || r.Target != "api_keys" || r.AuthMethod != adminaudit.AuthMethodOIDC {
+				t.Errorf("create row = %+v", r)
+			}
+		case "api_key.revoke":
+			revoke++
+			if r.TargetRef != "api_key:"+made.ID || r.Outcome != adminaudit.OutcomeOK {
+				t.Errorf("revoke row = %+v", r)
+			}
+		}
+		if strings.Contains(r.Details, made.Key) || strings.Contains(r.TargetRef, made.Key) {
+			t.Errorf("audit row %d carries the key", r.Seq)
+		}
+	}
+	if create != 1 || revoke != 1 {
+		t.Fatalf("audit has %d create and %d revoke rows, want 1 and 1", create, revoke)
+	}
+	if strings.Contains(h.Logs(), made.Key) {
+		t.Fatal("the API key is in the control plane's logs")
 	}
 }

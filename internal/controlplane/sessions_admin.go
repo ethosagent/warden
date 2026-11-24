@@ -124,6 +124,16 @@ func (s *Server) handleSessionsRevoke(w http.ResponseWriter, r *http.Request, p 
 			return
 		}
 		count = n
+		// Offboarding: the subject's API keys die with their sessions, so a key
+		// minted by a person who just lost access does not outlive them.
+		keys, err := s.RevokeAPIKeysForOwner(r.Context(), "", sub, p.Sub)
+		if err != nil {
+			s.revokeFailed(w, err)
+			return
+		}
+		if keys > 0 {
+			s.cfg.Logger.Info("console_session_revoke_api_keys", "by_sub", p.Sub, "target_sub", sub, "api_keys", keys)
+		}
 	}
 	attrs := []any{"by_sub", p.Sub, "target_sub", target, "count", count}
 	if handle != "" {

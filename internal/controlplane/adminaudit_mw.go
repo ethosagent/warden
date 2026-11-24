@@ -252,6 +252,9 @@ func (s *Server) adminAuditMiddleware(classify func(*http.Request) (authzRow, bo
 		next.ServeHTTP(sw.writer(), r.WithContext(actx))
 		status := sw.code()
 		outcome := outcomeFor(status)
+		if ann.Skipped() && outcome == adminaudit.OutcomeOK {
+			return // an idempotent repeat that changed nothing: no row
+		}
 		if !authed && outcome != adminaudit.OutcomeOK {
 			// Only an anonymous request that changed state needs a row; anything
 			// else is counted like other unauthenticated traffic, so open mode

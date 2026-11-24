@@ -252,7 +252,14 @@ func TestAdminAuditAllAuditedRoutes(t *testing.T) {
 	e.srv.dash.SetKeysSource(stubKeys{})
 	admin := e.session(t, groupAdmin)
 	hashed := map[string]bool{"policy": true, "settings": true, "integrations": true, "detection": true, "llmproviders": true, "worker_tokens": true, "blocked_users": true}
-	routes := allAuditedRoutes()
+	// The API key routes exist only with console.apiKeys on, which this env
+	// does not enable: TestAPIKeysAdminAudit drives them with keys enabled.
+	var routes []routeKey
+	for _, k := range allAuditedRoutes() {
+		if !strings.HasPrefix(k.Path, apiKeysPath) {
+			routes = append(routes, k)
+		}
+	}
 	var tokID string
 	if len(routes) != len(auditedRequests) {
 		t.Fatalf("%d audited routes but %d test requests; add the new route to auditedRequests", len(routes), len(auditedRequests))
