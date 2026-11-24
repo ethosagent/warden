@@ -105,7 +105,8 @@ func TestAgents_RolesAndAudit(t *testing.T) {
 	}
 	r := lastRow(t, e, rows)
 	if r.Action != "agent.create" || r.Target != "agents" || r.TargetRef != "agent:claude-code" || r.Outcome != adminaudit.OutcomeOK ||
-		r.Details[adminaudit.DetailKidsAdded] != created.Keys[0].KID || r.Details[adminaudit.DetailGroupsAdded] != "warden-agents" ||
+		r.Details[adminaudit.DetailKidsAdded] != created.Keys[0].KID || r.Details[adminaudit.DetailJktsAdded] != created.Keys[0].JKT ||
+		r.Details[adminaudit.DetailGroupsAdded] != "warden-agents" || r.Details[adminaudit.DetailGroupsRemoved+adminaudit.DetailCountSuffix] != "0" ||
 		r.Details[adminaudit.DetailStatusTo] != "active" || r.BeforeHash == r.AfterHash {
 		t.Fatalf("create row = %+v", r)
 	}
@@ -138,7 +139,8 @@ func TestAgents_RolesAndAudit(t *testing.T) {
 	}
 	r = lastRow(t, e, rows)
 	if r.Action != "agent.update" || r.TargetRef != "agent:claude-code" || r.Details[adminaudit.DetailChanged] != "displayName,keys,allowedGroups" ||
-		r.Details[adminaudit.DetailGroupsAdded] != "extra" || r.Details[adminaudit.DetailKidsAdded] == "" || r.Details[adminaudit.DetailKidsRemoved] != "" {
+		r.Details[adminaudit.DetailGroupsAdded] != "extra" || r.Details[adminaudit.DetailKidsAdded] == "" || r.Details[adminaudit.DetailKidsRemoved] != "" ||
+		r.Details[adminaudit.DetailJktsAdded] == "" {
 		t.Fatalf("update row = %+v", r)
 	}
 
@@ -334,8 +336,9 @@ func (f *fakeAgentStore) Update(ctx context.Context, a agentreg.Agent, actor str
 	return f.Store.Update(ctx, a, actor)
 }
 
-// TestAgents_UpdateUsesClientRevision: the compare-and-swap token is the
-// revision the client sent in If-Match, never one the handler read, and a
+// TestAgents_UpdateUsesClientRevision: a row newer than the client's If-Match
+// is a conflict before any write; the compare-and-swap token is the client's
+// revision, never one the handler read; and a
 // successful write refreshes the policy server.
 func TestAgents_UpdateUsesClientRevision(t *testing.T) {
 	db := openAuditDB(t)
@@ -358,8 +361,8 @@ func TestAgents_UpdateUsesClientRevision(t *testing.T) {
 	if _, err := api.Update(context.Background(), "a1", 1, in); err != dashboard.ErrAgentConflict {
 		t.Fatalf("stale update err = %v, want ErrAgentConflict", err)
 	}
-	if fake.updateRev != 1 {
-		t.Errorf("Store.Update got revision %d, want the client's 1", fake.updateRev)
+	if fake.updateRev != 0 {
+		t.Errorf("Store.Update was called (revision %d) for a row newer than the client saw", fake.updateRev)
 	}
 	if refreshes != 0 {
 		t.Errorf("a failed write refreshed %d times", refreshes)
@@ -367,29 +370,13 @@ func TestAgents_UpdateUsesClientRevision(t *testing.T) {
 	if _, err := api.Update(context.Background(), "a1", 2, in); err != nil {
 		t.Fatalf("current update: %v", err)
 	}
+	if fake.updateRev != 2 {
+		t.Errorf("Store.Update got revision %d, want the client's 2", fake.updateRev)
+	}
 	if refreshes != 1 {
 		t.Errorf("a successful write refreshed %d times, want 1", refreshes)
 	}
 	if _, err := api.SetEnabled(context.Background(), "a1", false, 3); err != nil || refreshes != 2 {
 		t.Errorf("SetEnabled err %v, refreshes %d, want nil and 2", err, refreshes)
-	}
-}
-
-// TestAgents_AuditDetailsAreBounded: names that Annotate would drop whole are
-// made printable, and a long list is cut at an element.
-func TestAgents_AuditDetailsAreBounded(t *testing.T) {
-	if got := joinAudit([]string{"a", "bé"}); got != "a,b?" {
-		t.Errorf("joinAudit = %q, want a,b?", got)
-	}
-	var many []string
-	for range 100 {
-		many = append(many, "group-name-0123456789")
-	}
-	got := joinAudit(many)
-	if len(got) > adminaudit.MaxDetailValueLen || !strings.HasSuffix(got, ",...") {
-		t.Errorf("joinAudit of a long list = %d bytes %q, want <= %d ending in ,...", len(got), got[len(got)-10:], adminaudit.MaxDetailValueLen)
-	}
-	if got := joinAudit(nil); got != "" {
-		t.Errorf("joinAudit(nil) = %q", got)
 	}
 }

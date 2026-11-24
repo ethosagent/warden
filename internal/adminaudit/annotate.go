@@ -17,25 +17,43 @@ const (
 	DetailHasEmail = "has_email"
 )
 
-// The agent registry's keys (W-P2-AREG-02): which fields a write changed, the
-// key ids and groups it added and removed (comma separated) and the status
-// before and after. They name fields, key ids and groups; never key material.
+// The agent registry's keys (W-P2-AREG-02), camelCase like the JSON API.
+// changed lists the edited fields; the *Added and *Removed lists name key ids,
+// RFC 7638 thumbprints and groups, each element percent-encoded and the list
+// cut at an element when it would not fit one value. Every list also has a
+// <key>Count (the full number of elements) and, when it was cut, a
+// <key>Sha256 (of the full sorted, encoded, comma-joined list) and
+// DetailTruncated "true". They name fields, ids and groups; never key material.
 const (
 	DetailChanged       = "changed"
-	DetailKidsAdded     = "kids_added"
-	DetailKidsRemoved   = "kids_removed"
-	DetailGroupsAdded   = "groups_added"
-	DetailGroupsRemoved = "groups_removed"
-	DetailStatusFrom    = "status_from"
-	DetailStatusTo      = "status_to"
+	DetailKidsAdded     = "kidsAdded"
+	DetailKidsRemoved   = "kidsRemoved"
+	DetailJktsAdded     = "jktsAdded"
+	DetailJktsRemoved   = "jktsRemoved"
+	DetailGroupsAdded   = "groupsAdded"
+	DetailGroupsRemoved = "groupsRemoved"
+	DetailStatusFrom    = "statusFrom"
+	DetailStatusTo      = "statusTo"
+	DetailTruncated     = "truncated"
+
+	// DetailCountSuffix and DetailSha256Suffix are appended to a list key.
+	DetailCountSuffix  = "Count"
+	DetailSha256Suffix = "Sha256"
 )
 
-var annotationKeys = map[string]bool{
-	DetailOp: true, DetailEtag: true, DetailHasSub: true, DetailHasEmail: true,
-	DetailChanged: true, DetailKidsAdded: true, DetailKidsRemoved: true,
-	DetailGroupsAdded: true, DetailGroupsRemoved: true,
-	DetailStatusFrom: true, DetailStatusTo: true,
-}
+// annotationKeys is the closed set of keys Annotate keeps.
+var annotationKeys = func() map[string]bool {
+	m := map[string]bool{
+		DetailOp: true, DetailEtag: true, DetailHasSub: true, DetailHasEmail: true,
+		DetailChanged: true, DetailStatusFrom: true, DetailStatusTo: true, DetailTruncated: true,
+	}
+	for _, k := range []string{DetailKidsAdded, DetailKidsRemoved, DetailJktsAdded, DetailJktsRemoved, DetailGroupsAdded, DetailGroupsRemoved} {
+		m[k] = true
+		m[k+DetailCountSuffix] = true
+		m[k+DetailSha256Suffix] = true
+	}
+	return m
+}()
 
 // Annotation is the per-request carrier the admin audit middleware puts in
 // the request context. Handlers fill it through Annotate; the middleware reads
@@ -58,8 +76,8 @@ func WithAnnotation(ctx context.Context) (context.Context, *Annotation) {
 // policy@<etag>) and details to the audit entry of the request ctx belongs
 // to. It is a no-op when the request is not audited. A later call replaces
 // the target_ref when it is non-empty and merges details. Only the closed
-// detail keys (DetailOp, DetailEtag, DetailHasSub, DetailHasEmail) are kept, and a target_ref or value that
-// would fail entry validation is dropped rather than failing the row.
+// Detail* keys are kept, and a target_ref or value that would fail entry
+// validation is dropped rather than failing the row.
 func Annotate(ctx context.Context, targetRef string, details map[string]string) {
 	a, ok := ctx.Value(annotationKey{}).(*Annotation)
 	if !ok || a == nil {

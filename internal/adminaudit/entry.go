@@ -61,7 +61,7 @@ const (
 	maxRequestIDLen  = 64
 	maxStateHashLen  = 128
 	maxActorRoleLen  = 64
-	maxDetails       = 16
+	maxDetails       = 24
 	maxDetailKeyLen  = 32
 	maxDetailValLen  = 256
 	maxHTTPStatus    = 599
@@ -232,7 +232,7 @@ func (e *Entry) validate() error {
 
 func validateDetails(d map[string]string) error {
 	if len(d) > maxDetails {
-		return invalid("details", "must have at most 16 keys")
+		return invalid("details", "must have at most 24 keys")
 	}
 	for k, v := range d {
 		if k == "" || len(k) > maxDetailKeyLen || !utf8.ValidString(k) {

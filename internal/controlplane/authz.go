@@ -148,12 +148,12 @@ func authzTable() map[routeKey]authzRow {
 		// 404 unless the control plane set the seam. There is no DELETE row: an
 		// unlisted method is refused for every role. TODO(W-P2-APIK-02): add the
 		// agents:read and agents:write scopes when authzRow gains one.
-		{get, "/dashboard/api/agents", readRow(viewer, "agent.list")},
-		{post, "/dashboard/api/agents", auditedRow(admin, "agent.create", auditTargetAgents)},
-		{get, "/dashboard/api/agents/{id}", readRow(viewer, "agent.read")},
-		{put, "/dashboard/api/agents/{id}", auditedRow(admin, "agent.update", auditTargetAgents)},
-		{post, "/dashboard/api/agents/{id}/disable", auditedRow(admin, "agent.disable", auditTargetAgents)},
-		{post, "/dashboard/api/agents/{id}/enable", auditedRow(admin, "agent.enable", auditTargetAgents)},
+		{get, "/dashboard/api/agents", readRow(viewer, AgentActionList)},
+		{post, "/dashboard/api/agents", auditedRow(admin, AgentActionCreate, AgentAuditTarget)},
+		{get, "/dashboard/api/agents/{id}", readRow(viewer, AgentActionRead)},
+		{put, "/dashboard/api/agents/{id}", auditedRow(admin, AgentActionUpdate, AgentAuditTarget)},
+		{post, "/dashboard/api/agents/{id}/disable", auditedRow(admin, AgentActionDisable, AgentAuditTarget)},
+		{post, "/dashboard/api/agents/{id}/enable", auditedRow(admin, AgentActionEnable, AgentAuditTarget)},
 		// Served by the control plane itself, ahead of dash.Handler (cpDashboardRoutes).
 		{get, "/dashboard/api/sessions", readRow(admin, "sessions.read")},
 		{del, "/dashboard/api/sessions", auditedRow(admin, "sessions.revoke", "sessions")},

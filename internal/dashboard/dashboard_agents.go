@@ -144,12 +144,12 @@ func agentPath(p string) (id, action string, ok bool) {
 
 // handleAgents serves GET (list) and POST (register) on /dashboard/api/agents.
 func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet && r.Method != http.MethodPost {
-		methodNotAllowed(w, http.MethodGet, http.MethodPost)
-		return
-	}
 	if s.agents == nil {
 		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		methodNotAllowed(w, http.MethodGet, http.MethodPost)
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
@@ -194,16 +194,16 @@ func (s *Server) handleAgent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
+	if s.agents == nil {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
 	switch {
 	case action == "" && r.Method != http.MethodGet && r.Method != http.MethodPut:
 		methodNotAllowed(w, http.MethodGet, http.MethodPut)
 		return
 	case action != "" && r.Method != http.MethodPost:
 		methodNotAllowed(w, http.MethodPost)
-		return
-	}
-	if s.agents == nil {
-		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")

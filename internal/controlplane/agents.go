@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -22,13 +20,6 @@ import (
 // W-P5-RETN-06. Roles, CSRF and the audit row itself are the authz table and
 // the audit middleware (authz.go). Nothing here logs, annotates or hashes a
 // JWK: the audit details carry field names, key ids, groups and the status.
-
-// auditTargetAgents is the admin audit target (and state hasher name) of the
-// registry.
-const auditTargetAgents = "agents"
-
-// agentRef is the admin audit target_ref of an agent.
-func agentRef(id string) string { return "agent:" + id }
 
 // Registry write actions and outcomes, the labels of
 // warden_cp_agent_registry_writes_total{action,outcome}.
@@ -149,7 +140,7 @@ func (a agentRegistryAPI) Get(ctx context.Context, id string) (dashboard.AgentVi
 }
 
 func (a agentRegistryAPI) Create(ctx context.Context, in dashboard.AgentInput) (dashboard.AgentView, error) {
-	adminaudit.Annotate(ctx, agentRef(in.ID), map[string]string{adminaudit.DetailOp: agentActionCreate})
+	adminaudit.Annotate(ctx, AgentAuditRef(in.ID), map[string]string{adminaudit.DetailOp: agentActionCreate})
 	ag := agentFromInput(in)
 	// The caller owns what they register. The owner is informational: it is
 	// never an authorization input.
@@ -161,24 +152,32 @@ func (a agentRegistryAPI) Create(ctx context.Context, in dashboard.AgentInput) (
 		return dashboard.AgentView{}, a.failed(agentActionCreate, in.ID, err)
 	}
 	a.metrics.inc(agentActionCreate, agentOutcomeOK)
-	adminaudit.Annotate(ctx, agentRef(out.ID), map[string]string{
-		adminaudit.DetailOp:          agentActionCreate,
-		adminaudit.DetailKidsAdded:   joinAudit(kids(out)),
-		adminaudit.DetailGroupsAdded: joinAudit(out.AllowedGroups),
-		adminaudit.DetailStatusTo:    string(out.Status),
-	})
+	adminaudit.Annotate(ctx, AgentAuditRef(out.ID), AgentAuditDetails(nil, out))
 	a.refresh()
 	return agentView(out), nil
 }
 
-func (a agentRegistryAPI) Update(ctx context.Context, id string, revision int64, in dashboard.AgentInput) (dashboard.AgentView, error) {
-	adminaudit.Annotate(ctx, agentRef(id), map[string]string{adminaudit.DetailOp: agentActionUpdate})
-	// The current row is read for the owner (an edit keeps it) and the audit
-	// diff only. The compare-and-swap token is the revision the client sent,
-	// never this read's: Store.Update refuses a stale one.
+// current reads id for the owner, the audit diff and the status the change
+// starts from. A row newer than the revision the client saw is a conflict
+// before anything is written, so none of those come from a row the client did
+// not see. The compare-and-swap token stays the client's revision: the store
+// refuses a stale one itself.
+func (a agentRegistryAPI) current(ctx context.Context, action, id string, revision int64) (agentreg.Agent, error) {
 	cur, err := a.store.Get(ctx, id)
+	if err == nil && cur.Revision != revision {
+		err = agentreg.ErrConflict
+	}
 	if err != nil {
-		return dashboard.AgentView{}, a.failed(agentActionUpdate, id, err)
+		return agentreg.Agent{}, a.failed(action, id, err)
+	}
+	return cur, nil
+}
+
+func (a agentRegistryAPI) Update(ctx context.Context, id string, revision int64, in dashboard.AgentInput) (dashboard.AgentView, error) {
+	adminaudit.Annotate(ctx, AgentAuditRef(id), map[string]string{adminaudit.DetailOp: agentActionUpdate})
+	cur, err := a.current(ctx, agentActionUpdate, id, revision)
+	if err != nil {
+		return dashboard.AgentView{}, err
 	}
 	ag := agentFromInput(in)
 	ag.ID = id
@@ -189,16 +188,7 @@ func (a agentRegistryAPI) Update(ctx context.Context, id string, revision int64,
 		return dashboard.AgentView{}, a.failed(agentActionUpdate, id, err)
 	}
 	a.metrics.inc(agentActionUpdate, agentOutcomeOK)
-	addedK, removedK := diffSets(kids(cur), kids(out))
-	addedG, removedG := diffSets(cur.AllowedGroups, out.AllowedGroups)
-	adminaudit.Annotate(ctx, agentRef(id), map[string]string{
-		adminaudit.DetailOp:            agentActionUpdate,
-		adminaudit.DetailChanged:       strings.Join(changedFields(cur, out), ","),
-		adminaudit.DetailKidsAdded:     joinAudit(addedK),
-		adminaudit.DetailKidsRemoved:   joinAudit(removedK),
-		adminaudit.DetailGroupsAdded:   joinAudit(addedG),
-		adminaudit.DetailGroupsRemoved: joinAudit(removedG),
-	})
+	adminaudit.Annotate(ctx, AgentAuditRef(id), AgentAuditDetails(&cur, out))
 	a.refresh()
 	return agentView(out), nil
 }
@@ -208,21 +198,20 @@ func (a agentRegistryAPI) SetEnabled(ctx context.Context, id string, enabled boo
 	if enabled {
 		action, to = agentActionEnable, agentreg.StatusActive
 	}
-	adminaudit.Annotate(ctx, agentRef(id), map[string]string{adminaudit.DetailOp: action})
-	cur, err := a.store.Get(ctx, id)
+	adminaudit.Annotate(ctx, AgentAuditRef(id), map[string]string{adminaudit.DetailOp: action})
+	cur, err := a.current(ctx, action, id, revision)
 	if err != nil {
-		return dashboard.AgentView{}, a.failed(action, id, err)
+		return dashboard.AgentView{}, err
 	}
 	out, err := a.store.SetStatus(ctx, id, to, revision, blockActor(ctx))
 	if err != nil {
 		return dashboard.AgentView{}, a.failed(action, id, err)
 	}
 	a.metrics.inc(action, agentOutcomeOK)
-	adminaudit.Annotate(ctx, agentRef(id), map[string]string{
-		adminaudit.DetailOp:         action,
-		adminaudit.DetailStatusFrom: string(cur.Status),
-		adminaudit.DetailStatusTo:   string(out.Status),
-	})
+	details := AgentAuditDetails(&cur, out)
+	// Setting the status an agent already has is still this action.
+	details[adminaudit.DetailOp] = action
+	adminaudit.Annotate(ctx, AgentAuditRef(id), details)
 	a.refresh()
 	return agentView(out), nil
 }
@@ -313,7 +302,7 @@ func (s *Server) wireAgents(dash *dashboard.Server) {
 		return
 	}
 	dash.SetAgentRegistry(agentRegistryAPI{store: s.agents, logger: s.cfg.Logger, refresh: s.refresh, metrics: &s.agentMetrics})
-	s.RegisterStateHasher(auditTargetAgents, s.agentsStateHash)
+	s.RegisterStateHasher(AgentAuditTarget, s.agentsStateHash)
 }
 
 // agentsStateHash is the keyed hash of every agent's identity-relevant state:
@@ -340,7 +329,7 @@ func (s *Server) agentsStateHash(ctx context.Context) (string, error) {
 			JKTs: agentreg.Thumbprints(a), Groups: a.AllowedGroups, Scopes: a.AllowedScopes,
 		})
 	}
-	return s.stateHashJSON(auditTargetAgents, rows)
+	return s.stateHashJSON(AgentAuditTarget, rows)
 }
 
 func agentFromInput(in dashboard.AgentInput) agentreg.Agent {
@@ -378,83 +367,4 @@ func nonNilStrings(in []string) []string {
 		return []string{}
 	}
 	return in
-}
-
-func kids(a agentreg.Agent) []string {
-	out := make([]string, 0, len(a.Keys))
-	for _, k := range a.Keys {
-		out = append(out, k.KID)
-	}
-	return out
-}
-
-// diffSets returns what is in after and not before (added) and in before and
-// not after (removed), each sorted.
-func diffSets(before, after []string) (added, removed []string) {
-	in := func(set []string, v string) bool {
-		for _, s := range set {
-			if s == v {
-				return true
-			}
-		}
-		return false
-	}
-	for _, v := range after {
-		if !in(before, v) {
-			added = append(added, v)
-		}
-	}
-	for _, v := range before {
-		if !in(after, v) {
-			removed = append(removed, v)
-		}
-	}
-	sort.Strings(added)
-	sort.Strings(removed)
-	return added, removed
-}
-
-// changedFields names, in the API's member names, the editable fields whose
-// value differs between before and after.
-func changedFields(before, after agentreg.Agent) []string {
-	var out []string
-	if before.DisplayName != after.DisplayName {
-		out = append(out, "displayName")
-	}
-	if a, r := diffSets(agentreg.Thumbprints(before), agentreg.Thumbprints(after)); len(a)+len(r) > 0 {
-		out = append(out, "keys")
-	} else if strings.Join(kids(before), ",") != strings.Join(kids(after), ",") {
-		out = append(out, "keys")
-	}
-	if a, r := diffSets(before.AllowedGroups, after.AllowedGroups); len(a)+len(r) > 0 {
-		out = append(out, "allowedGroups")
-	}
-	if a, r := diffSets(before.AllowedScopes, after.AllowedScopes); len(a)+len(r) > 0 {
-		out = append(out, "allowedScopes")
-	}
-	return out
-}
-
-// joinAudit renders a list as one audit detail value: comma separated, with
-// anything outside printable ASCII replaced (Annotate drops a value that has
-// it) and cut at a whole element when the list would not fit one detail.
-func joinAudit(in []string) string {
-	var b strings.Builder
-	for i, s := range in {
-		s = strings.Map(func(r rune) rune {
-			if r < 0x20 || r > 0x7e {
-				return '?'
-			}
-			return r
-		}, s)
-		if b.Len()+len(s)+1 > adminaudit.MaxDetailValueLen-8 {
-			b.WriteString(",...")
-			break
-		}
-		if i > 0 {
-			b.WriteByte(',')
-		}
-		b.WriteString(s)
-	}
-	return b.String()
 }

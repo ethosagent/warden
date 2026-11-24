@@ -88,7 +88,8 @@ const agentBodyNoID = `{"displayName":"Claude Code","keys":[{"kty":"OKP","crv":"
 
 const agentBody = `{"id":"claude-code","displayName":"Claude Code","keys":[{"kty":"OKP","crv":"Ed25519","x":"AAAA"}],"allowedGroups":["g"]}`
 
-// TestAgents_NotWired: on a worker dashboard (no seam) every agent route is 404.
+// TestAgents_NotWired: on a worker dashboard (no seam) every agent route is
+// 404, whatever the method.
 func TestAgents_NotWired(t *testing.T) {
 	h := agentsHandler(nil, "oidc")
 	for _, c := range []struct{ method, path string }{
@@ -103,10 +104,9 @@ func TestAgents_NotWired(t *testing.T) {
 			t.Errorf("%s %s = %d, want 404", c.method, c.path, rec.Code)
 		}
 	}
-	// A method the route does not have is 405 even with no seam, so a worker
-	// does not claim to serve it (TestRoutesMatchHandler).
-	if rec := agentsDo(h, http.MethodDelete, "/dashboard/api/agents/a", ""); rec.Code != http.StatusMethodNotAllowed {
-		t.Errorf("DELETE with no seam = %d, want 405", rec.Code)
+	// A worker does not claim any method on these paths, DELETE included.
+	if rec := agentsDo(h, http.MethodDelete, "/dashboard/api/agents/a", ""); rec.Code != http.StatusNotFound {
+		t.Errorf("DELETE with no seam = %d, want 404", rec.Code)
 	}
 }
 
