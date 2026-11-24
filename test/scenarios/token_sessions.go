@@ -219,8 +219,8 @@ func tokenSessionRevokeAll(t *testing.T, h *harness.H) {
 	if r := rows[auditBefore]; r.Action != "token_sessions.revoke_all" || r.TargetRef != "filter:agent=agent-a" {
 		t.Errorf("by-agent audit row = %+v", r)
 	}
-	if r := rows[auditBefore+2]; !strings.HasPrefix(r.TargetRef, "filter:sub_sha256=") || strings.Contains(r.TargetRef, "user-1") {
-		t.Errorf("by-sub audit row target_ref = %q, want a hash and not the subject", r.TargetRef)
+	if r := rows[auditBefore+2]; r.TargetRef != "filter" || strings.Contains(r.Details, "user-1") || !strings.Contains(r.Details, `"has_sub":"true"`) {
+		t.Errorf("by-sub audit row = %+v, want no subject, only has_sub", r)
 	}
 	requireNoCredentialsInLogs(t, h, user1, user2)
 }

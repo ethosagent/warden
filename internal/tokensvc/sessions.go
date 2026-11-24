@@ -65,7 +65,8 @@ type SessionStore interface {
 const MaxSessionPage = 200
 
 // SessionQuery selects sessions for List. Empty AgentID and Sub match
-// anything. Limit is capped at MaxSessionPage (0 means MaxSessionPage). A
+// anything. Limit is capped at MaxSessionPage+1 (0 means that too: a page plus
+// one row, so a caller can tell whether another page follows). A
 // non-empty AfterSID continues after the row (AfterCreated, AfterSID) that
 // ended the previous page.
 type SessionQuery struct {

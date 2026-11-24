@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -187,11 +188,12 @@ func TestTokenSessionRevokeAll(t *testing.T) {
 		t.Errorf("repeat = %s, want revoked 0", rec.Body.String())
 	}
 
-	// By sub: the target_ref carries a hash, never the subject.
+	// By sub: the row says a sub and an issuer were named, never which.
 	rec = e.send(admin, "", http.MethodPost, route, `{"sub":"u1@corp.example","idp_iss":"`+testIdP+`"}`)
 	row = e.rec.inputs()[len(e.rec.inputs())-1]
-	if rec.Code != http.StatusOK || !strings.HasPrefix(row.TargetRef, "filter:sub_sha256=") || strings.Contains(row.TargetRef, "corp.example") ||
-		!strings.Contains(row.TargetRef, "iss_sha256=") {
+	if b, _ := json.Marshal(row); rec.Code != http.StatusOK || row.TargetRef != "filter" ||
+		row.Details[adminaudit.DetailHasSub] != "true" || row.Details[adminaudit.DetailHasIss] != "true" ||
+		strings.Contains(string(b), "corp.example") {
 		t.Errorf("revoke by sub = %d, ref %q", rec.Code, row.TargetRef)
 	}
 	rec = e.send(admin, "", http.MethodPost, route, `{"sub":"u1"}`)
@@ -353,12 +355,50 @@ func TestFilterTargetRef(t *testing.T) {
 		want string
 	}{
 		{tokensvc.SessionFilter{AgentID: "agent-a"}, "filter:agent=agent-a"},
-		{tokensvc.SessionFilter{AgentID: "a b\n"}, "filter:agent=sha256:"},
-		{tokensvc.SessionFilter{AgentID: long, Sub: long, IdPIss: long}, "filter:agent=sha256:"},
+		{tokensvc.SessionFilter{AgentID: "a b\n"}, "filter:agent=other"},
+		{tokensvc.SessionFilter{AgentID: long, Sub: long, IdPIss: long}, "filter:agent=other"},
+		{tokensvc.SessionFilter{Sub: "u@corp.example"}, "filter"},
 	} {
 		got := filterTargetRef(c.f)
-		if !strings.HasPrefix(got, c.want) || len(got) > 256 || strings.ContainsAny(got, "\n ") {
-			t.Errorf("filterTargetRef(%+v) = %q, want prefix %q within 256 bytes", c.f, got, c.want)
+		if got != c.want {
+			t.Errorf("filterTargetRef(%+v) = %q, want %q", c.f, got, c.want)
 		}
+	}
+}
+
+// TestTokenSessionsListPagesPast200: with 201 sessions the default page holds
+// 200 rows and a cursor, and the second page holds the last row and no cursor.
+func TestTokenSessionsListPagesPast200(t *testing.T) {
+	e := newOIDCAuditEnv(t)
+	admin := e.session(t, groupAdmin)
+	for i := range tokensvc.MaxSessionPage + 1 {
+		touchTokenSession(t, e, fmt.Sprintf("u%03d", i), "agent-a", fmt.Sprintf("wts_%022d", i))
+	}
+	type page struct {
+		Sessions []tokenSessionView
+		Next     string
+	}
+	get := func(q string) page {
+		rec := e.send(admin, "", http.MethodGet, "/dashboard/api/token-sessions"+q, "")
+		var p page
+		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &p) != nil {
+			t.Fatalf("list %s = %d", q, rec.Code)
+		}
+		return p
+	}
+	p1 := get("")
+	if len(p1.Sessions) != tokensvc.MaxSessionPage || p1.Next == "" {
+		t.Fatalf("default page = %d rows, next %q; want 200 and a cursor", len(p1.Sessions), p1.Next)
+	}
+	p2 := get("?cursor=" + p1.Next)
+	if len(p2.Sessions) != 1 || p2.Next != "" {
+		t.Fatalf("page 2 = %d rows, next %q; want 1 and no cursor", len(p2.Sessions), p2.Next)
+	}
+	seen := map[string]bool{}
+	for _, s := range append(p1.Sessions, p2.Sessions...) {
+		seen[s.SID] = true
+	}
+	if len(seen) != tokensvc.MaxSessionPage+1 {
+		t.Errorf("pages cover %d distinct sessions, want 201", len(seen))
 	}
 }

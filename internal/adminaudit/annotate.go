@@ -15,9 +15,11 @@ const (
 	// holds ("true" or "false"), never the identifiers themselves.
 	DetailHasSub   = "has_sub"
 	DetailHasEmail = "has_email"
+	// DetailHasIss says a token session revoke filter named an IdP issuer.
+	DetailHasIss = "has_iss"
 )
 
-var annotationKeys = map[string]bool{DetailOp: true, DetailEtag: true, DetailHasSub: true, DetailHasEmail: true}
+var annotationKeys = map[string]bool{DetailOp: true, DetailEtag: true, DetailHasSub: true, DetailHasEmail: true, DetailHasIss: true}
 
 // Annotation is the per-request carrier the admin audit middleware puts in
 // the request context. Handlers fill it through Annotate; the middleware reads

@@ -1577,15 +1577,17 @@ commented block in `configs/config.example.yaml` for every key and default.
   field) answers `{"revoked": n}`, counting the live sessions it revoked. All three are
   admin-only, are 404 without `tokenService.enabled`, and in `console.auth none` need the admin
   bearer. The revokes are audited (`token_sessions.revoke` with target_ref `sid:<sid>`,
-  `token_sessions.revoke_all` with target_ref `filter:agent=<id>,sub_sha256=<16 hex>,iss_sha256=<16 hex>`;
-  a subject or issuer is written as a hash, never as itself).
+  `token_sessions.revoke_all` with target_ref `filter:agent=<id>` (or `filter` without an agent) and
+  details `has_sub` and `has_iss`; like the block list, a subject or issuer is never recorded,
+  not even hashed).
   A revoke sets `revoked_at` and keeps the row. The service reads the session table on every
   exchange, so the **next exchange takes effect at once**: one whose subject token was issued at
   or before `revoked_at` gets 400 `invalid_grant`/`session_revoked`, and the user must sign in
   again (a subject token issued after the revoke starts a new session). A revoked row is kept
   until the identity max token TTL plus clock skew has passed, so it is never pruned while a
   subject token issued before it could still verify. **A revoke does not recall tokens already
-  minted.** Workers verify a Warden token offline against signed JWKS and have no revocation
+  minted**, and an exchange whose session check committed just before the revoke can still
+  return its token after the revoke answers; it is the same as any already-minted token. Workers verify a Warden token offline against signed JWKS and have no revocation
   list, so a token issued before the revoke stays valid until its `exp` (at most
   `tokenService.ttl`, default 15m, and never past the user's own proof). To stop traffic sooner,
   also block the user (block list), disable the agent, or rotate the token key. A user-wide

@@ -164,8 +164,8 @@ func (s *Sessions) Purge(ctx context.Context, liveCutoff, revokedCutoff time.Tim
 // paged by that key.
 func (s *Sessions) List(ctx context.Context, q tokensvc.SessionQuery) ([]tokensvc.SessionInfo, error) {
 	limit := q.Limit
-	if limit <= 0 || limit > tokensvc.MaxSessionPage {
-		limit = tokensvc.MaxSessionPage
+	if limit <= 0 || limit > tokensvc.MaxSessionPage+1 {
+		limit = tokensvc.MaxSessionPage + 1
 	}
 	args := []any{q.AgentID, q.AgentID, q.Sub, q.Sub}
 	query := `SELECT sid, idp_iss, sub, agent_id, created_at, last_used_at, revoked_at FROM token_sessions

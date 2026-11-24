@@ -2,8 +2,6 @@ package controlplane
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -208,7 +206,7 @@ func (s *Server) handleTokenSessionsRevokeAll(w http.ResponseWriter, r *http.Req
 		writeAuthJSON(w, http.StatusBadRequest, map[string]string{"error": "filter is too long"})
 		return
 	}
-	adminaudit.Annotate(r.Context(), filterTargetRef(filter), map[string]string{adminaudit.DetailOp: "revoke_all"})
+	adminaudit.Annotate(r.Context(), filterTargetRef(filter), filterDetails(filter))
 	n, err := s.cfg.TokenEdge.Sessions.RevokeAll(r.Context(), filter, s.cfg.Clock.Now())
 	if err != nil {
 		s.cfg.Logger.Error("token session revoke failed", "error_type", errorKind(err))
@@ -220,35 +218,28 @@ func (s *Server) handleTokenSessionsRevokeAll(w http.ResponseWriter, r *http.Req
 	writeAuthJSON(w, http.StatusOK, map[string]int64{"revoked": n})
 }
 
-// filterTargetRef is the audit target_ref of a revoke-by-filter: the fields
-// that were set. The agent id is a registry identifier and is written as is
-// when it is a plain one; a subject and an issuer are written as short SHA-256
-// prefixes, so the row names whom without carrying a person's identifier.
+// filterTargetRef is the audit target_ref of a revoke-by-filter. Like the block
+// list it never records a subject or issuer, not even hashed (an unkeyed hash
+// of an email is dictionary-recoverable): only the agent id, a registry
+// identifier, written as is when plain, and which other fields were set
+// (has_sub, has_iss in the row's details).
 func filterTargetRef(f tokensvc.SessionFilter) string {
-	var parts []string
-	if f.AgentID != "" {
-		parts = append(parts, "agent="+refValue(f.AgentID))
+	if f.AgentID == "" {
+		return "filter"
 	}
-	if f.Sub != "" {
-		parts = append(parts, "sub_sha256="+shortSHA(f.Sub))
+	if len(f.AgentID) > 64 || !plainChars(f.AgentID, "-_.:") {
+		return "filter:agent=other"
 	}
-	if f.IdPIss != "" {
-		parts = append(parts, "iss_sha256="+shortSHA(f.IdPIss))
-	}
-	return "filter:" + strings.Join(parts, ",")
+	return "filter:agent=" + f.AgentID
 }
 
-// refValue returns v when it is a short plain identifier, else its hash.
-func refValue(v string) string {
-	if len(v) > 64 || !plainChars(v, "-_.:") {
-		return "sha256:" + shortSHA(v)
+// filterDetails are the details of a revoke-by-filter row.
+func filterDetails(f tokensvc.SessionFilter) map[string]string {
+	return map[string]string{
+		adminaudit.DetailOp:     "revoke_all",
+		adminaudit.DetailHasSub: boolStr(f.Sub != ""),
+		adminaudit.DetailHasIss: boolStr(f.IdPIss != ""),
 	}
-	return v
-}
-
-func shortSHA(v string) string {
-	sum := sha256.Sum256([]byte(v))
-	return hex.EncodeToString(sum[:8])
 }
 
 // tokenSessionActor names the admin for the log line: the console subject, or
