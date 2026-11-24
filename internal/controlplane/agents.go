@@ -101,6 +101,20 @@ func (s *Server) initAgentStore() {
 	s.agents = agentregsqlite.New(s.cfg.State, agentregsqlite.WithClock(s.cfg.Clock), agentregsqlite.WithLogger(s.cfg.Logger))
 }
 
+// registerAgentOverlay adds the registered_agents wire overlay when there is a
+// registry. It runs before the first Refresh; without a registry nothing is
+// registered and /policy is byte-identical to a build without the feature.
+func (s *Server) registerAgentOverlay() {
+	if s.agents == nil {
+		return
+	}
+	if err := s.policy.addOverlay(agentRegistryOverlay(s.agents, &agentLoadReporter{logger: s.cfg.Logger})); err != nil {
+		// Unreachable: registration precedes the first Refresh and the name is
+		// unique. Logged rather than ignored so a wiring change shows up.
+		s.cfg.Logger.Error("control plane: agent_registry overlay not registered", "error", err)
+	}
+}
+
 // agentWatcher is the optional part of a Store that notices another process's
 // writes (the SQLite store's data_version poll); Run starts it.
 type agentWatcher interface {

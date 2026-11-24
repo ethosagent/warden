@@ -168,7 +168,11 @@ type policyWire struct {
 	// BlockedUsers is the user block list (sub and email only; reason and actor
 	// stay on the CP). Omitempty keeps the wire and ETag unchanged when empty.
 	BlockedUsers []config.BlockedUser `json:"blockedUsers,omitempty"`
-	Settings     *config.SettingsWire `json:"settings,omitempty"`
+	// RegisteredAgents is the agent registry as workers need it: id, status and
+	// key thumbprints only (W-P2-AREG-04). Omitempty keeps the wire and ETag
+	// byte-identical when the registry is empty or absent.
+	RegisteredAgents []config.RegisteredAgent `json:"registeredAgents,omitempty"`
+	Settings         *config.SettingsWire     `json:"settings,omitempty"`
 	// ScopedAllowlist and ScopedAllowPos are filled only by projectScoped, at
 	// serve time: identity-scoped allow entries move out of Allowlist so a
 	// worker that decodes leniently cannot read one as global. Never stored.
@@ -342,6 +346,7 @@ func New(cfg Config) *Server {
 	s.initPolicyStore()
 	s.initBlockStore()
 	s.initAgentStore()
+	s.registerAgentOverlay()
 	s.policy.Refresh() // initial load so /policy and the dashboard have policy immediately
 	s.initSessions()
 	s.initAuth()

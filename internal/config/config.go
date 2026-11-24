@@ -55,6 +55,11 @@ type Policy struct {
 	// still rides the wire through remoteWire.BlockedUsers (worker decode) and
 	// controlplane.policyWire.BlockedUsers (CP encode).
 	BlockedUsers []BlockedUser `json:"-"`
+	// RegisteredAgents is the control plane's agent registry as workers see it
+	// (id, status, key thumbprints), sorted by id. Never set from YAML. json:"-"
+	// for rule X2 like BlockedUsers; it rides the wire through
+	// remoteWire.RegisteredAgents and controlplane.policyWire.RegisteredAgents.
+	RegisteredAgents []RegisteredAgent `json:"-"`
 	// Secrets maps placeholder tokens to their source env var (phase 1).
 	Secrets []SecretMapping `json:"-"`
 	// SecretStore selects the backend the worker resolves placeholders through
@@ -175,6 +180,13 @@ func (p Policy) DeepCopy() Policy {
 	}
 	cp.Denylist = append([]DenylistEntry(nil), p.Denylist...)
 	cp.BlockedUsers = append([]BlockedUser(nil), p.BlockedUsers...)
+	if p.RegisteredAgents != nil {
+		cp.RegisteredAgents = make([]RegisteredAgent, len(p.RegisteredAgents))
+		for i, a := range p.RegisteredAgents {
+			a.JKT = append([]string(nil), a.JKT...)
+			cp.RegisteredAgents[i] = a
+		}
+	}
 	cp.Secrets = append([]SecretMapping(nil), p.Secrets...)
 	for i := range cp.Secrets {
 		cp.Secrets[i].MatchHosts = append([]string(nil), p.Secrets[i].MatchHosts...)
