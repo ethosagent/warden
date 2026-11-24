@@ -76,6 +76,7 @@ var Excluded = map[string]string{
 	"controlplane.PolicyVersionStore": "the control plane's own versioned policy store on the cpstate SQLite DB; the harness runs the real one (--policy-store=versioned), a fake would hide the compare-and-swap and transaction behaviour",
 	"dashboard.BlockListStore":        "the dashboard's view of the control plane's own block list on the cpstate SQLite DB (controlplane.BlockStore); the harness runs the real one, a fake would hide the limits and uniqueness the store enforces",
 	"worker.ControlPlaneClient":       "the worker's view of the control plane; the harness runs the real control plane (*config.RemoteProvider) rather than a fake",
+	"keys.Signer":                     "local CPU-only signing over stdlib crypto (GenerateLocal/NewLocalSigner); no external system behind the port, and a fake would hide the JOSE wire encodings (r||s, RFC 7638 kids) the verifiers pin",
 }
 
 // --- identity.Verifier ---
