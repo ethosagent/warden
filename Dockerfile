@@ -18,7 +18,7 @@ ARG TARGETOS
 ARG TARGETARCH
 RUN VERSION="${VERSION}" GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" sh scripts/build.sh /warden
 
-FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
+FROM alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
 RUN apk add --no-cache ca-certificates
 RUN addgroup -S warden && adduser -S warden -G warden
 # Writable data dir for the analytics db when a volume is mounted at /data.
