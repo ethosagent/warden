@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ethosagent/warden/internal/adminaudit"
+	"github.com/ethosagent/warden/internal/agentreg"
 	"github.com/ethosagent/warden/internal/clock"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/cpstate"
@@ -39,6 +40,7 @@ func StateMigrations() []cpstate.Migration {
 	migs = append(migs, adminaudit.Migrations()...)
 	migs = append(migs, BlockMigrations()...)
 	migs = append(migs, WorkerTokenMigrations()...)
+	migs = append(migs, agentreg.Migrations()...)
 	// Feature-gated: known to the downgrade guard, applied only with
 	// keys.enabled (stateMigrationsFor).
 	migs = append(migs, metastore.Migrations()...)
