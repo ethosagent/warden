@@ -22,7 +22,7 @@ const (
 // Token types for the identity verify metric's token_type label. A request
 // without a token (or with one that never reached a verifier) is TokenNone.
 const (
-	TokenDex    = "dex"
+	TokenIdP    = "idp"
 	TokenWarden = "warden"
 	TokenNone   = "none"
 )

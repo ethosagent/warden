@@ -208,7 +208,7 @@ func (p *Proxy) verifyToken(h *identityHolder, tok string) idResult {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	c, st, r := h.v.Verify(ctx, tok)
 	cancel()
-	p.recordIdentity(st, r, identity.TokenDex)
+	p.recordIdentity(st, r, identity.TokenIdP)
 	return idResult{claims: c, status: st, reason: r}
 }
 
@@ -309,7 +309,7 @@ func (p *Proxy) identityStage(s *requestScope) (endSession bool) {
 		// Past exp plus skew (or no exp at all, which a valid token always has:
 		// fail closed). The connection's identity is spent.
 		connLive, cs = false, identity.StatusExpired
-		p.recordIdentity(identity.StatusExpired, "", identity.TokenDex)
+		p.recordIdentity(identity.StatusExpired, "", identity.TokenIdP)
 	}
 	switch {
 	case cs == identity.StatusNone || cs == identity.StatusOff:
@@ -339,7 +339,7 @@ func (p *Proxy) identityStage(s *requestScope) (endSession bool) {
 			case hr.status == identity.StatusValid && hr.claims.Sub != ci.Claims.Sub:
 				s.idHeaderClaims = hr.claims
 				r = idResult{status: identity.StatusConflict}
-				p.recordIdentity(identity.StatusConflict, "", identity.TokenDex)
+				p.recordIdentity(identity.StatusConflict, "", identity.TokenIdP)
 			}
 		}
 	default:

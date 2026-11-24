@@ -160,7 +160,7 @@ func identityMatrix(tr idTransport) func(*testing.T, *harness.H) {
 			{"none", "none"}:         1,
 		})
 		assertVerifyTokenTypes(t, h, map[string]string{
-			"valid": "dex", "expired": "dex", "invalid": "dex", "none": "none",
+			"valid": "idp", "expired": "idp", "invalid": "idp", "none": "none",
 		})
 		assertUpstreamClean(t, up, len(cases))
 		assertNoTokenLeak(t, h, cases, up)

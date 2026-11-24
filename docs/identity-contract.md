@@ -415,7 +415,7 @@ Filter by user with `/dashboard/api/traffic?user=<sub or email>` (an exact
 The worker counts every verification in the metric
 `warden.identity.verify.total{result,reason,token_type}`, exported to Prometheus
 as `warden_identity_verify_total`. `result` is the status and `reason` the reason
-(`none` when there is none); `token_type` is `dex`, `warden` or `none` (see
+(`none` when there is none); `token_type` is `idp`, `warden` or `none` (see
 [Identity metrics](control-plane.md#identity-metrics)). Alert on the share of non-valid results per worker
 (one worker serves one agent), for example:
 

@@ -62,13 +62,13 @@ func identitySeries(t *testing.T, rd *sdkmetric.ManualReader) map[string]int64 {
 
 func TestRecordIdentityVerifyTokenType(t *testing.T) {
 	m, rd := newWithReader(t)
-	m.RecordIdentityVerify("valid", "none", "dex")
+	m.RecordIdentityVerify("valid", "none", "idp")
 	for _, reason := range []string{"agent_mismatch", "cnf_mismatch", "agent_disabled", "agent_unregistered", "unbound_token", "missing_claim"} {
 		m.RecordIdentityVerify("invalid", reason, "warden")
 	}
 	got := identitySeries(t, rd)
 	want := map[string]int64{
-		"valid|none|dex":                    1,
+		"valid|none|idp":                    1,
 		"invalid|agent_mismatch|warden":     1,
 		"invalid|cnf_mismatch|warden":       1,
 		"invalid|agent_disabled|warden":     1,
@@ -88,19 +88,19 @@ func TestRecordIdentityVerifyTokenType(t *testing.T) {
 
 func TestRecordIdentityVerifyBounded(t *testing.T) {
 	var nilm *Metrics
-	nilm.RecordIdentityVerify("valid", "none", "dex") // nil-safe
+	nilm.RecordIdentityVerify("valid", "none", "idp") // nil-safe
 	nilm.RecordControlPlaneClockSkew(time.Second)
 
 	m, rd := newWithReader(t)
 	m.RecordIdentityVerify("valid", "none", "none")
-	m.RecordIdentityVerify("sub=alice", "none", "dex")
-	m.RecordIdentityVerify("invalid", "kid-123", "dex")
+	m.RecordIdentityVerify("sub=alice", "none", "idp")
+	m.RecordIdentityVerify("invalid", "kid-123", "idp")
 	m.RecordIdentityVerify("invalid", "bad_signature", "eyJhbGciOi")
 	got := identitySeries(t, rd)
 	want := map[string]int64{
 		"valid|none|none":             1,
-		"other|none|dex":              1,
-		"invalid|other|dex":           1,
+		"other|none|idp":              1,
+		"invalid|other|idp":           1,
 		"invalid|bad_signature|other": 1,
 	}
 	if len(got) != len(want) {

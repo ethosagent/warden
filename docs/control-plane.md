@@ -1754,7 +1754,7 @@ three bounded labels. There is no separate failure or success counter.
 |---|---|
 | `result` | `off`, `none`, `valid`, `invalid`, `expired`, `unverified`, `conflict` |
 | `reason` | `none` (no reason), `bad_signature`, `wrong_iss`, `wrong_aud`, `wrong_azp`, `unknown_kid`, `alg_not_allowed`, `malformed`, `too_large`, `ttl_too_long`, `jwks_unavailable`, `wrong_nonce`, and the binding reasons `agent_mismatch`, `cnf_mismatch`, `agent_disabled`, `agent_unregistered`, `unbound_token`, `missing_claim` |
-| `token_type` | `dex`, `warden`, `none` (no token, or one that never reached a verifier) |
+| `token_type` | `idp`, `warden`, `none` (no token, or one that never reached a verifier) |
 
 A value outside these sets is recorded as `other`, so a bug or hostile input can
 never create a new series. Labels never carry `sub`, email, `sid`, `jti`, `kid`,
@@ -1777,7 +1777,7 @@ Recommended alerts:
 
 - The non-valid share per worker, for example
   `sum by (instance) (rate(warden_identity_verify_total{result!="valid"}[15m])) / sum by (instance) (rate(warden_identity_verify_total[15m])) > 0.2`.
-- `warden_identity_verify_total{token_type="dex"}` for deprecation tracking: it
+- `warden_identity_verify_total{token_type="idp"}` for deprecation tracking: it
   should fall to zero once every harness uses Warden tokens.
 - `warden_identity_verify_total{result="expired"}` rising during a control plane
   outage (tokens cannot be renewed); check `warden_controlplane_clock_skew_seconds`

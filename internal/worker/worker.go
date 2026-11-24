@@ -956,9 +956,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		// warden.controlplane.clock_skew_seconds: the CP's Date header from each
 		// long-poll minus this worker's clock. A nil *Metrics (observability off)
 		// makes the record a no-op.
-		controlPlane.SetDateObserver(func(cpNow time.Time) {
-			metrics.RecordControlPlaneClockSkew(cpNow.Sub(clk.Now()))
-		})
+		controlPlane.SetDateObserver(clockSkewObserver(metrics, clk))
 		// applier rebuilds + atomically swaps the proxy's MCP gateway AND its
 		// inline judge from the control-plane-distributed settings. It runs only for
 		// MANAGED workers (this branch), so a local-only worker's seeded pol.MCP

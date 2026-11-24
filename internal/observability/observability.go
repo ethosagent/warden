@@ -27,7 +27,7 @@
 //	                              mcp_chain_rapid_repeat
 //	ObserveAddedLatency(stage):  mcp_scan, identity
 //	RecordIdentityVerify:         result an identity status, reason a bounded identity reason (the
-//	                              allowlist in this file), token_type (an IdP token, warden or none); any other
+//	                              allowlist in this file), token_type (idp, warden or none); any other
 //	                              value is recorded as "other"
 //	RecordBlocked(reason) also takes identity_required, identity_expired, identity_conflict
 //	                              (declared in internal/denyreason)
@@ -463,7 +463,7 @@ var (
 		"agent_mismatch", "cnf_mismatch", "agent_disabled", "agent_unregistered",
 		"unbound_token", "missing_claim",
 	)
-	identityTokenTypes = setOf("dex", "warden", "none")
+	identityTokenTypes = setOf("idp", "warden", "none")
 )
 
 func setOf(v ...string) map[string]struct{} {
