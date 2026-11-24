@@ -717,6 +717,17 @@ fails when the two differ.
 | `/dashboard/api/blocked-users` | GET | admin | `blocked_users.read` |
 | `/dashboard/api/blocked-users` | POST | admin | `blocked_users.add` |
 | `/dashboard/api/blocked-users/{id}` | DELETE | admin | `blocked_users.remove` |
+| `/dashboard/api/changes` | GET | viewer | `change.draft.list` |
+| `/dashboard/api/changes` | POST | editor | `change.draft.create` |
+| `/dashboard/api/changes/{id}` | GET | viewer | `change.draft.read` |
+| `/dashboard/api/changes/{id}` | PUT | editor | `change.draft.update` |
+| `/dashboard/api/changes/{id}/approve` | POST | editor | `change.draft.approve` |
+| `/dashboard/api/changes/{id}/diff` | GET | viewer | `change.draft.diff` |
+| `/dashboard/api/changes/{id}/rebase` | POST | editor | `change.draft.rebase` |
+| `/dashboard/api/changes/{id}/reject` | POST | editor | `change.draft.reject` |
+| `/dashboard/api/changes/{id}/replay` | POST | editor | `change.draft.replay` |
+| `/dashboard/api/changes/{id}/submit` | POST | editor | `change.draft.submit` |
+| `/dashboard/api/changes/{id}/withdraw` | POST | editor | `change.draft.withdraw` |
 | `/dashboard/api/detection` | GET | viewer | `detection.read` |
 | `/dashboard/api/detection` | POST | editor | `detection.write` |
 | `/dashboard/api/detection` | PUT | editor | `detection.write` |
@@ -1008,6 +1019,50 @@ YAML if the mirror is lost.
 - **Release N+2** removes YAML as a policy source: `--policy-store=file` is
   removed, the served YAML is only the write-through mirror of head, and hand
   edits are never served (they come in through `warden policy import`).
+
+## Change drafts and the two-person rule (`console.approvals`)
+
+With `console.approvals.enabled` (off by default; it needs `console.auth: oidc`, the
+versioned policy store and the admin audit log) the control plane serves the change
+draft API under `/dashboard/api/changes`. A draft is a proposed policy doc based on a
+policy version. A change that widens what agents can reach, or where credentials go, is
+published only after a second person approves it. Workers never serve these routes
+(`404`). The startup refusal of `console.approvals.enabled` stays until
+W-P2-APPR-06 routes every existing write path through the same check.
+
+| Route | Who |
+|---|---|
+| `GET /dashboard/api/changes?target=&state=&cursor=&limit=` | viewer |
+| `GET /dashboard/api/changes/{id}`, `GET .../{id}/diff` | viewer |
+| `POST /dashboard/api/changes` (`If-Match: "v<base>"`) | editor |
+| `PUT .../{id}` (`If-Match: "r<rev>"`), `POST .../{id}/submit`, `withdraw`, `rebase` | the draft's author (editor) |
+| `POST .../{id}/approve`, `POST .../{id}/reject` | editor; approve also needs the draft's required role |
+| `POST .../{id}/replay` | editor |
+
+- **Revisions.** Every edit is a new revision (`ETag: "r<N>"`) and voids the earlier
+  revisions' approvals. A body is capped at 1 MiB and a comment at 1024 characters
+  (control characters are stripped).
+- **Approve** takes `{revision, doc_sha256, replay_id | acknowledgeNoReplay, comment}`.
+  `409 revision_changed` when the revision or digest differ from the draft;
+  `409 replay_required` unless `replay_id` names a done replay of this revision no older
+  than `replayMaxAge`, or `acknowledgeNoReplay` is true and the revision's latest replay
+  failed, was unavailable or never ran.
+- **Two-person rule.** The approver's subject must differ from the author's
+  (`403 self_approval_forbidden`); a break-glass session never approves
+  (`403 breakglass_cannot_approve`); the approver must hold the draft's required role now
+  (`403 role_required`, naming the settings fields that need admin). With
+  `minApprovals > 1` the approvers must be distinct.
+- **Apply.** The approval that completes the set publishes the draft in the same
+  request: `200 {state: applied, version}`. A moved head is `409 rebase_required {head}`
+  (the draft becomes `needs_rebase`); a doc the loader refuses is `422` and the draft
+  stays pending. A narrowing draft with `allowSelfApproveNarrowing` applies at submit
+  with decision `self` (no replay is queued for it).
+- **Rebase** replays the draft's change (base version to doc) onto the live head as
+  revision n+1, or answers `409 rebase_conflict` naming the keys changed on both sides.
+- **Audit.** Every mutation is an admin audit row (`change.draft.<verb>`, target
+  `change_draft`, target_ref `draft:<id>@r<rev>`, details: base and applied version,
+  widening, reason codes, replay status), never doc content. Submitting a widening draft
+  publishes an info Finding `policy_approval_requested`.
 
 ## Scheduled backups (`--backup-dir`)
 

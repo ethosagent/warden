@@ -15,9 +15,21 @@ const (
 	// holds ("true" or "false"), never the identifiers themselves.
 	DetailHasSub   = "has_sub"
 	DetailHasEmail = "has_email"
+	// The change draft details (W-P2-APPR-04): versions and codes only, never
+	// doc content.
+	DetailBaseVersion    = "base_version"
+	DetailAppliedVersion = "applied_version"
+	DetailWidening       = "widening"
+	DetailReasons        = "reasons" // reason codes, comma separated
+	DetailReplayStatus   = "replay_status"
+	DetailAckNoReplay    = "acknowledge_no_replay"
 )
 
-var annotationKeys = map[string]bool{DetailOp: true, DetailEtag: true, DetailHasSub: true, DetailHasEmail: true}
+var annotationKeys = map[string]bool{
+	DetailOp: true, DetailEtag: true, DetailHasSub: true, DetailHasEmail: true,
+	DetailBaseVersion: true, DetailAppliedVersion: true, DetailWidening: true,
+	DetailReasons: true, DetailReplayStatus: true, DetailAckNoReplay: true,
+}
 
 // Annotation is the per-request carrier the admin audit middleware puts in
 // the request context. Handlers fill it through Annotate; the middleware reads

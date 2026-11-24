@@ -298,6 +298,13 @@ func RoutePath(p string) string {
 	if _, ok := blockedUserID(p); ok {
 		return blockedUsersPath + "/{id}"
 	}
+	if _, action, ok := splitChangePath(p); ok {
+		t := changesPath + "/{id}"
+		if action != "" {
+			t += "/" + action
+		}
+		return t
+	}
 	if _, action, ok := splitVersionPath(p); ok {
 		t := policyVersionsPath + "/{v}"
 		if action != "" {

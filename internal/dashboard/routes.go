@@ -49,4 +49,6 @@ func (s *Server) registerRoutes(mux *routeMux) {
 	mux.HandleFunc("/dashboard/api/blocked-users/", s.handleBlockedUser)
 	mux.HandleFunc("/dashboard/api/keys", s.handleKeys)
 	mux.HandleFunc("/dashboard/api/keys/rotate", s.handleKeysRotate)
+	mux.HandleFunc("/dashboard/api/changes", s.handleChanges)
+	mux.HandleFunc("/dashboard/api/changes/", s.handleChange)
 }

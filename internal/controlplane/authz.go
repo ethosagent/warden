@@ -121,6 +121,26 @@ func authzTable() map[routeKey]authzRow {
 		{post, "/dashboard/api/admin-audit/verify", readRow(admin, "adminaudit.verify")},
 		{get, "/dashboard/api/admin-audit/pubkey", readRow(viewer, "adminaudit.pubkey")},
 		{get, "/dashboard/api/setup", readRow(viewer, "setup.read")},
+		// Change drafts and the two-person rule (W-P2-APPR-04); 404 unless
+		// console.approvals.enabled. Requests are matched on their template
+		// ({id} is any draft id; dashboard.RoutePath). The author-only routes
+		// (PUT, submit, withdraw, rebase) and the approver's role (the draft's
+		// RequiredRole) are checked by the handler, not by this table.
+		// TODO(W-P2-APIK-02): add the API-key scopes (policy:read for GET,
+		// policy:draft for create, policy:write for PUT, submit, withdraw,
+		// rebase and replay, none for approve and reject) when #108's Scope
+		// field lands.
+		{get, "/dashboard/api/changes", readRow(viewer, "change.draft.list")},
+		{post, "/dashboard/api/changes", auditedRow(editor, "change.draft.create", auditTargetChangeDraft)},
+		{get, "/dashboard/api/changes/{id}", readRow(viewer, "change.draft.read")},
+		{put, "/dashboard/api/changes/{id}", auditedRow(editor, "change.draft.update", auditTargetChangeDraft)},
+		{get, "/dashboard/api/changes/{id}/diff", readRow(viewer, "change.draft.diff")},
+		{post, "/dashboard/api/changes/{id}/submit", auditedRow(editor, "change.draft.submit", auditTargetChangeDraft)},
+		{post, "/dashboard/api/changes/{id}/withdraw", auditedRow(editor, "change.draft.withdraw", auditTargetChangeDraft)},
+		{post, "/dashboard/api/changes/{id}/rebase", auditedRow(editor, "change.draft.rebase", auditTargetChangeDraft)},
+		{post, "/dashboard/api/changes/{id}/approve", auditedRow(editor, "change.draft.approve", auditTargetChangeDraft)},
+		{post, "/dashboard/api/changes/{id}/reject", auditedRow(editor, "change.draft.reject", auditTargetChangeDraft)},
+		{post, "/dashboard/api/changes/{id}/replay", auditedRow(editor, "change.draft.replay", auditTargetChangeDraft)},
 		// Policy history (W-P1-PVER-03). Requests are matched on their template
 		// ({v} is any version segment; dashboard.RoutePath).
 		{get, "/dashboard/api/policy/versions", readRow(viewer, "policy.versions.read")},

@@ -159,6 +159,11 @@ var All = slices.Concat(
 		// migration without console.approvals.enabled. In-process only (it reads
 		// the CP state dir).
 		{Name: "approvals_off_by_default", Opts: approvalsOffOpts(), Run: approvalsOffByDefault},
+		// The two-person rule (W-P2-APPR-04): a widening draft is submitted by
+		// one editor, replayed against fleet traffic, refused for its author and
+		// applied by a second editor's approval; workers enforce the new
+		// version. In-process only (console, admin audit and state dir).
+		{Name: "approvals_two_person_rule", Opts: approvalsTwoPersonOpts(), Run: approvalsTwoPerson},
 		// Scoped policy (W-P1-GPOL-10): with identity off a scoped entry loads
 		// but allows nobody (identity_required); an unscoped entry still applies.
 		{Name: "scoped_policy_fail_closed", Run: scopedPolicyFailClosed},

@@ -179,6 +179,8 @@ type auditedRequest struct{ target, body string }
 // entry needs.
 var auditedHeaders = map[routeKey][]string{
 	{http.MethodPost, "/dashboard/api/policy/versions/{v}/rollback"}: {"If-Match", `"v1"`},
+	{http.MethodPost, "/dashboard/api/changes"}:                      {"If-Match", `"v1"`},
+	{http.MethodPut, "/dashboard/api/changes/{id}"}:                  {"If-Match", `"r1"`},
 }
 
 // auditedRequests maps every audited route to a request an admin can make
@@ -211,6 +213,15 @@ var auditedRequests = map[routeKey]auditedRequest{
 	{http.MethodDelete, "/dashboard/api/worker-tokens/{id}"}: {"/dashboard/api/worker-tokens/{tokid}", ""},
 	// Served by the stub key source TestAdminAuditAllAuditedRoutes installs.
 	{http.MethodPost, "/dashboard/api/keys/rotate"}: {"/dashboard/api/keys/rotate", `{"purpose":"token"}`},
+	// Served by the stub change drafts TestAdminAuditAllAuditedRoutes installs.
+	{http.MethodPost, "/dashboard/api/changes"}:               {"/dashboard/api/changes", `{"target":"policy","doc":{}}`},
+	{http.MethodPut, "/dashboard/api/changes/{id}"}:           {"/dashboard/api/changes/cd_1", `{"doc":{}}`},
+	{http.MethodPost, "/dashboard/api/changes/{id}/submit"}:   {"/dashboard/api/changes/cd_1/submit", ``},
+	{http.MethodPost, "/dashboard/api/changes/{id}/withdraw"}: {"/dashboard/api/changes/cd_1/withdraw", ``},
+	{http.MethodPost, "/dashboard/api/changes/{id}/rebase"}:   {"/dashboard/api/changes/cd_1/rebase", ``},
+	{http.MethodPost, "/dashboard/api/changes/{id}/approve"}:  {"/dashboard/api/changes/cd_1/approve", `{"revision":1,"doc_sha256":"x"}`},
+	{http.MethodPost, "/dashboard/api/changes/{id}/reject"}:   {"/dashboard/api/changes/cd_1/reject", `{"revision":1,"doc_sha256":"x"}`},
+	{http.MethodPost, "/dashboard/api/changes/{id}/replay"}:   {"/dashboard/api/changes/cd_1/replay", ``},
 }
 
 // allAuditedRoutes lists every audited row of both route tables in a stable
@@ -250,6 +261,7 @@ func TestAdminAuditAllAuditedRoutes(t *testing.T) {
 	e.srv.dash.SetPolicyHistory(stubHistory{})
 	e.srv.dash.SetBackup(func() error { return nil })
 	e.srv.dash.SetKeysSource(stubKeys{})
+	e.srv.dash.SetChangeDrafts(stubChanges{})
 	admin := e.session(t, groupAdmin)
 	hashed := map[string]bool{"policy": true, "settings": true, "integrations": true, "detection": true, "llmproviders": true, "worker_tokens": true, "blocked_users": true}
 	routes := allAuditedRoutes()

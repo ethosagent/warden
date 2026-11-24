@@ -236,8 +236,11 @@ func (s *Server) adminAuditMiddleware(classify func(*http.Request) (authzRow, bo
 		}
 		defer release()
 
-		before, beforeErr := a.stateHash(ctx, row.Target)
 		actx, ann := adminaudit.WithAnnotation(ctx)
+		// The scope lets a per-object state hasher (change_draft) find the
+		// object the request names, before and after the handler runs.
+		actx = withAuditScope(actx, r.URL.Path)
+		before, beforeErr := a.stateHash(actx, row.Target)
 		sw := wrapStatus(w)
 		next.ServeHTTP(sw.writer(), r.WithContext(actx))
 		status := sw.code()
@@ -253,7 +256,7 @@ func (s *Server) adminAuditMiddleware(classify func(*http.Request) (authzRow, bo
 		// error may have partly applied), so the state is hashed again.
 		after, afterErr := before, beforeErr
 		if outcome != adminaudit.OutcomeDenied {
-			after, afterErr = a.stateHash(ctx, row.Target)
+			after, afterErr = a.stateHash(actx, row.Target)
 		}
 		ref, details := ann.Snapshot()
 		if details == nil {
