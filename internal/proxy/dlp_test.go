@@ -445,7 +445,7 @@ func dlpWardenRun(t *testing.T, cfg config.DLPConfig) (*analytics.Event, bool) {
 		t.Fatalf("monitor must forward; got %d", status)
 	}
 	identical := backendBody(rb) == wardenTokenBody
-	time.Sleep(50 * time.Millisecond)
+	waitForEvents(t, ss, 1)
 	ev := findEvent(ss.snapshot(), "https", "allow")
 	if ev == nil {
 		t.Fatalf("expected https allow event, got %+v", ss.snapshot())

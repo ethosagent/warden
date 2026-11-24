@@ -76,3 +76,19 @@ func TestWardenTokenPatterns_NearMisses(t *testing.T) {
 		}
 	}
 }
+
+// Appending or prepending characters must not evade detection: the patterns are
+// unanchored on purpose, so a longer run still flags on its valid prefix.
+func TestWardenTokenPatterns_LongerStillFlags(t *testing.T) {
+	s := NewScanner(WithWardenTokens(true))
+	for name, tc := range map[string]struct{ v, pattern string }{
+		"wak 53 chars": {testWAK + "a", "warden_api_key"},
+		"wwt 53 chars": {testWWT + "b", "warden_worker_token"},
+		"xwak prefix":  {"x" + testWAK, "warden_api_key"},
+		"xwwt prefix":  {"x" + testWWT, "warden_worker_token"},
+	} {
+		if _, ok := wardenPatternNames(s.ScanResponse([]byte(tc.v)))[tc.pattern]; !ok {
+			t.Errorf("%s: %s not flagged", name, tc.pattern)
+		}
+	}
+}

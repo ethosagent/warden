@@ -3,6 +3,7 @@ package scenarios
 import (
 	"crypto/rand"
 	"encoding/base32"
+	"encoding/json"
 	"io"
 	"net/http"
 	"slices"
@@ -26,7 +27,10 @@ func wardenTokenOpts(cfg config.DLPConfig) []harness.Option {
 }
 
 // mintWardenCredentials returns a freshly generated wak_ key and a wwt_ token.
-// They are real in shape but registered nowhere, and never printed.
+// The key comes from apikeys.Generate. The worker token is SHAPE ONLY: random
+// bytes built the way generateWorkerToken does it (the real generator is
+// unexported); controlplane's TestWorkerTokenPatternMatchesGenerator ties the
+// pattern to the real generator. Neither is registered anywhere or printed.
 func mintWardenCredentials(t *testing.T) (apiKey, workerToken string) {
 	t.Helper()
 	g, err := apikeys.Generate(rand.Reader, func(string) bool { return false })
@@ -62,7 +66,8 @@ func postWardenCredentials(t *testing.T, h *harness.H) (status int, apiKey, work
 }
 
 // assertNoTokenInObservables fails if either credential value shows up in the
-// worker's logs or recorded events.
+// worker's logs or anywhere in a recorded event (each event is marshalled whole,
+// so no field is skipped).
 func assertNoTokenInObservables(t *testing.T, h *harness.H, vals ...string) {
 	t.Helper()
 	logs := h.Logs()
@@ -70,8 +75,14 @@ func assertNoTokenInObservables(t *testing.T, h *harness.H, vals ...string) {
 		if strings.Contains(logs, v) {
 			t.Error("a Warden credential value appears in the worker's logs")
 		}
-		for _, e := range h.Events() {
-			if strings.Contains(e.URL, v) || strings.Contains(e.Reason, v) {
+	}
+	for _, e := range h.Events() {
+		b, err := json.Marshal(e)
+		if err != nil {
+			t.Fatalf("marshal event: %v", err)
+		}
+		for _, v := range vals {
+			if strings.Contains(string(b), v) {
 				t.Error("a Warden credential value appears in a recorded event")
 			}
 		}

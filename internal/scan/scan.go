@@ -225,9 +225,11 @@ func NewScanner(opts ...Option) Scanner {
 		},
 	}
 
-	// Warden's own credentials, opt-in (WithWardenTokens). Both are exact-shape
-	// matches (fixed prefix, fixed length, lowercase base32 alphabet), so a string
-	// that differs by one character in length or uses uppercase does not match.
+	// Warden's own credentials, opt-in (WithWardenTokens). The patterns are
+	// deliberately UNANCHORED: a value that is too short, uses uppercase or leaves
+	// the lowercase base32 alphabet does not match, but a longer run (or one with
+	// a leading prefix such as "xwak_...") still flags on its valid prefix, so
+	// appending or prepending a character cannot be used to evade detection.
 	if cfg.wardenTokens {
 		s.credentialPatterns = append(s.credentialPatterns,
 			compiledPattern{
