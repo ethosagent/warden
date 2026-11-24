@@ -20,6 +20,7 @@ import (
 	_ "github.com/ethosagent/warden/internal/integration/webhook" // register the webhook sink
 
 	"github.com/ethosagent/warden/internal/adminaudit"
+	agentregsqlite "github.com/ethosagent/warden/internal/agentreg/adapters/sqlite"
 	"github.com/ethosagent/warden/internal/alertpipeline"
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/auditlog"
@@ -617,6 +618,21 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		go func() {
 			defer close(done)
 			srv.blocks.Watch(wCtx, BlockWatchInterval)
+		}()
+		defer func() {
+			wCancel()
+			<-done
+		}()
+	}
+
+	// Agent registry: pick up writes by the offline CLI within the store's own
+	// poll interval. Run waits for the loop before the state DB closes.
+	if w, ok := srv.agents.(agentWatcher); ok {
+		wCtx, wCancel := context.WithCancel(ctx)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			w.Watch(wCtx, agentregsqlite.DataVersionInterval)
 		}()
 		defer func() {
 			wCancel()

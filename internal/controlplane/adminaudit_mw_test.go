@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/ethosagent/warden/internal/adminaudit"
+	"github.com/ethosagent/warden/internal/agentreg/agentregtest"
 	"github.com/ethosagent/warden/internal/clock/clocktest"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/cpstate"
@@ -179,6 +180,10 @@ type auditedRequest struct{ target, body string }
 // entry needs.
 var auditedHeaders = map[routeKey][]string{
 	{http.MethodPost, "/dashboard/api/policy/versions/{v}/rollback"}: {"If-Match", `"v1"`},
+	// The agent writes run in the order create (r1), update, disable, enable.
+	{http.MethodPut, "/dashboard/api/agents/{id}"}:          {"If-Match", `"r1"`},
+	{http.MethodPost, "/dashboard/api/agents/{id}/disable"}: {"If-Match", `"r2"`},
+	{http.MethodPost, "/dashboard/api/agents/{id}/enable"}:  {"If-Match", `"r3"`},
 }
 
 // auditedRequests maps every audited route to a request an admin can make
@@ -211,6 +216,11 @@ var auditedRequests = map[routeKey]auditedRequest{
 	{http.MethodDelete, "/dashboard/api/worker-tokens/{id}"}: {"/dashboard/api/worker-tokens/{tokid}", ""},
 	// Served by the stub key source TestAdminAuditAllAuditedRoutes installs.
 	{http.MethodPost, "/dashboard/api/keys/rotate"}: {"/dashboard/api/keys/rotate", `{"purpose":"token"}`},
+	// {jwk} is a public Ed25519 key the test fills in.
+	{http.MethodPost, "/dashboard/api/agents"}:              {"/dashboard/api/agents", `{"id":"audit-agent","keys":[{jwk}],"allowedGroups":["g"]}`},
+	{http.MethodPut, "/dashboard/api/agents/{id}"}:          {"/dashboard/api/agents/audit-agent", `{"displayName":"Audit","keys":[{jwk}],"allowedGroups":["g","h"]}`},
+	{http.MethodPost, "/dashboard/api/agents/{id}/disable"}: {"/dashboard/api/agents/audit-agent/disable", ""},
+	{http.MethodPost, "/dashboard/api/agents/{id}/enable"}:  {"/dashboard/api/agents/audit-agent/enable", ""},
 }
 
 // allAuditedRoutes lists every audited row of both route tables in a stable
@@ -251,7 +261,7 @@ func TestAdminAuditAllAuditedRoutes(t *testing.T) {
 	e.srv.dash.SetBackup(func() error { return nil })
 	e.srv.dash.SetKeysSource(stubKeys{})
 	admin := e.session(t, groupAdmin)
-	hashed := map[string]bool{"policy": true, "settings": true, "integrations": true, "detection": true, "llmproviders": true, "worker_tokens": true, "blocked_users": true}
+	hashed := map[string]bool{"policy": true, "settings": true, "integrations": true, "detection": true, "llmproviders": true, "worker_tokens": true, "blocked_users": true, "agents": true}
 	routes := allAuditedRoutes()
 	var tokID string
 	if len(routes) != len(auditedRequests) {
@@ -265,6 +275,7 @@ func TestAdminAuditAllAuditedRoutes(t *testing.T) {
 		row := auditRow(k)
 		before := len(e.rec.inputs())
 		req.target = strings.ReplaceAll(req.target, "{tokid}", tokID)
+		req.body = strings.ReplaceAll(req.body, "{jwk}", string(agentregtest.Ed25519JWK(t, "audit-agent")))
 		if strings.Contains(req.target, "{id}") {
 			entries, err := e.srv.blocks.List(context.Background())
 			if err != nil || len(entries) == 0 {
