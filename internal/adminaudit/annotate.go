@@ -17,7 +17,25 @@ const (
 	DetailHasEmail = "has_email"
 )
 
-var annotationKeys = map[string]bool{DetailOp: true, DetailEtag: true, DetailHasSub: true, DetailHasEmail: true}
+// The agent registry's keys (W-P2-AREG-02): which fields a write changed, the
+// key ids and groups it added and removed (comma separated) and the status
+// before and after. They name fields, key ids and groups; never key material.
+const (
+	DetailChanged       = "changed"
+	DetailKidsAdded     = "kids_added"
+	DetailKidsRemoved   = "kids_removed"
+	DetailGroupsAdded   = "groups_added"
+	DetailGroupsRemoved = "groups_removed"
+	DetailStatusFrom    = "status_from"
+	DetailStatusTo      = "status_to"
+)
+
+var annotationKeys = map[string]bool{
+	DetailOp: true, DetailEtag: true, DetailHasSub: true, DetailHasEmail: true,
+	DetailChanged: true, DetailKidsAdded: true, DetailKidsRemoved: true,
+	DetailGroupsAdded: true, DetailGroupsRemoved: true,
+	DetailStatusFrom: true, DetailStatusTo: true,
+}
 
 // Annotation is the per-request carrier the admin audit middleware puts in
 // the request context. Handlers fill it through Annotate; the middleware reads
