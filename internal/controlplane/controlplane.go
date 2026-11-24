@@ -57,6 +57,14 @@ type Config struct {
 	// store). Nil unless keys.enabled, in which case no key code runs, no table,
 	// key file or goroutine exists, and the control plane behaves as before.
 	Keys *keys.Manager
+	// Tokens is the RFC 8693 token service behind POST /oauth2/token. Nil
+	// (tokenService absent or disabled, the default) leaves both token routes
+	// unmounted: 404, and every other response is unchanged. Run builds it
+	// after New (it needs the block store) and installs it with EnableTokens.
+	Tokens TokenExchanger
+	// TokenIssuer is tokenService.issuer: the base of the discovery document's
+	// URLs. Set together with Tokens.
+	TokenIssuer string
 	// AdminAudit is the signed admin audit chain on State. Nil means admin
 	// audit is disabled (console.adminAudit.enabled false, the default).
 	AdminAudit *adminaudit.Store
@@ -192,7 +200,10 @@ const (
 // ConfigEditor seam (writePolicy/writeSettings); the fleet is tracked by the
 // WorkerTracker seam; and central ingest lands in the IngestSink seam.
 type Server struct {
-	cfg      Config
+	cfg Config
+	// jwks is the public token JWKS handler, set by Handler when keys are
+	// enabled; the token service mints only with a key it publishes.
+	jwks     atomic.Pointer[jwksServer]
 	central  analytics.FleetStore
 	registry *WorkerRegistry
 	mcp      *mcpStore
@@ -490,6 +501,8 @@ func (s *Server) writeSettings(in config.SettingsWire) error {
 //	GET  /healthz         — liveness
 //	GET  /readyz          — readiness (503 when keys are enabled and one has no active key)
 //	GET  /.well-known/jwks.json — public token JWKS, when keys are enabled (no credential)
+//	POST /oauth2/token    — RFC 8693 token exchange, when tokenService.enabled (client assertion only)
+//	GET  /.well-known/oauth-authorization-server — RFC 8414 metadata, when tokenService.enabled
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -499,7 +512,15 @@ func (s *Server) Handler() http.Handler {
 	// Readiness always; the public token JWKS only with keys.enabled (else 404).
 	mux.HandleFunc(readyzPath, s.readyz)
 	if s.cfg.Keys != nil {
-		mux.Handle(jwksPath, newJWKSServer(s.cfg.Keys.KeySet(), s.cfg.Clock.Now))
+		j := newJWKSServer(s.cfg.Keys.KeySet(), s.cfg.Clock.Now)
+		s.jwks.Store(j)
+		mux.Handle(jwksPath, j)
+	}
+	// The RFC 8693 token endpoint and its RFC 8414 metadata, only when the
+	// token service was built (tokenService.enabled); otherwise 404.
+	if s.cfg.Tokens != nil {
+		mux.HandleFunc(tokenPath, s.handleToken)
+		mux.HandleFunc(asMetadataPath, s.handleASMetadata)
 	}
 	// /policy is served by the composed PolicyServer seam (serve + ETag long-poll).
 	var policyServe PolicyServer = s.policy

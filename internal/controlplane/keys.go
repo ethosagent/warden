@@ -19,6 +19,7 @@ import (
 	"github.com/ethosagent/warden/internal/keys/adapters/metastore"
 	"github.com/ethosagent/warden/internal/keys/adapters/signer"
 	"github.com/ethosagent/warden/internal/secrets"
+	tokensvcsqlite "github.com/ethosagent/warden/internal/tokensvc/adapters/sqlite"
 )
 
 // keysEvidenceMax bounds the error text a signing_key_unavailable Finding
@@ -46,12 +47,16 @@ func resolveKeys(configPath, stateDir string) (config.KeysConfig, error) {
 }
 
 // stateMigrationsFor returns StateMigrations with the feature-gated ones the
-// config turns on: signing_keys/0001 is applied only with keys.enabled, so a
-// control plane without keys creates no table.
-func stateMigrationsFor(kc config.KeysConfig) []cpstate.Migration {
+// config turns on: signing_keys/0001 is applied only with keys.enabled and the
+// tokensvc tables only with tokenService.enabled, so a control plane without
+// them creates no table.
+func stateMigrationsFor(kc config.KeysConfig, tc config.TokenServiceConfig) []cpstate.Migration {
 	migs := StateMigrations()
 	if kc.Enabled {
 		migs = cpstate.Enable(migs, metastore.MigrationID)
+	}
+	if tc.Enabled {
+		migs = cpstate.Enable(migs, tokensvcsqlite.MigrationID, tokensvcsqlite.SessionsMigrationID)
 	}
 	return migs
 }

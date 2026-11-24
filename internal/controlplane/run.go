@@ -20,6 +20,7 @@ import (
 	_ "github.com/ethosagent/warden/internal/integration/webhook" // register the webhook sink
 
 	"github.com/ethosagent/warden/internal/adminaudit"
+	agentregsqlite "github.com/ethosagent/warden/internal/agentreg/adapters/sqlite"
 	"github.com/ethosagent/warden/internal/alertpipeline"
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/auditlog"
@@ -269,6 +270,12 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	if err != nil {
 		return fail(err)
 	}
+	// The tokenService block, like keys:, comes from --config only. Disabled
+	// (the default) means no table, migration, route or goroutine below.
+	tokenCfg, err := resolveTokenService(logger, configPath, stateDir, pol.Identity, keysCfg)
+	if err != nil {
+		return fail(err)
+	}
 	bindAddr := listenAddr
 	if p.Listener != nil {
 		bindAddr = p.Listener.Addr().String()
@@ -306,7 +313,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		// --policy-store or console.adminAudit never trips the downgrade guard.
 		// The open is not cancellable: a shutdown signal must not abandon a
 		// migration half way through boot.
-		state, err = cpstate.Open(context.WithoutCancel(ctx), statePath, stateMigrationsFor(keysCfg))
+		state, err = cpstate.Open(context.WithoutCancel(ctx), statePath, stateMigrationsFor(keysCfg, tokenCfg))
 		if err != nil {
 			return fail(fmt.Errorf("control-plane: state db: %w", err))
 		}
@@ -518,6 +525,34 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	})
 
 	srv.warnBreakGlassSetup(integrations)
+
+	// The token service (tokenService.enabled): built once the server exists,
+	// because the block checker reads the server's block store, and installed
+	// before Handler mounts the routes. A build failure stops startup; a token
+	// key that is not loaded yet does not (the service answers
+	// signer_unavailable and /readyz reports it, like every key consumer).
+	if tokenCfg.Enabled {
+		svc, agents, terr := newTokenService(tokenCfg, pol.Identity, state, srv, keyMgr, clk, logger)
+		if terr != nil {
+			return fail(terr)
+		}
+		srv.EnableTokens(svc, tokenCfg.Issuer)
+		logTokenService(logger, tokenCfg)
+		// The registry caches its snapshot; Watch drops it when another
+		// process (the offline CLI) commits, so a disabled agent stops
+		// authenticating within one interval. Run waits for the loop before
+		// the state DB closes.
+		aCtx, aCancel := context.WithCancel(ctx)
+		aDone := make(chan struct{})
+		go func() {
+			defer close(aDone)
+			agents.Watch(aCtx, agentregsqlite.DataVersionInterval)
+		}()
+		defer func() {
+			aCancel()
+			<-aDone
+		}()
+	}
 
 	if p.Findings != nil {
 		srv.findings = p.Findings

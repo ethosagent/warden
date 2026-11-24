@@ -466,7 +466,7 @@ func TestOIDCWithoutSessionsFailsClosed(t *testing.T) {
 // inconsistent: an unknown Class, Audited disagreeing with Class, or an
 // audited row without Action or Target.
 func unclassified(table map[routeKey]authzRow) []string {
-	valid := map[routeClass]bool{classAudited: true, classReadOnly: true, classWorkerPlane: true, classHandlerRecorded: true}
+	valid := map[routeClass]bool{classAudited: true, classReadOnly: true, classWorkerPlane: true, classAssertionAuth: true, classHandlerRecorded: true}
 	var out []string
 	for k, r := range table {
 		name := k.Method + " " + k.Path

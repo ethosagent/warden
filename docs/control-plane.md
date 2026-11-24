@@ -1516,6 +1516,47 @@ secrets with no row; deleting a key deletes its secret at once.
   }
   ```
 
+
+## Token endpoint (RFC 8693)
+
+`tokenService.enabled: true` mounts `POST /oauth2/token` and
+`GET /.well-known/oauth-authorization-server` (RFC 8414) on the control plane. With the block
+absent or disabled both answer 404, no `tokensvc` table is created and `/policy` is
+byte-identical; the block is the only switch (no flag) and never reaches a worker. See the
+commented block in `configs/config.example.yaml` for every key and default.
+
+- **Startup checks.** Enabling needs `--state-dir`, a served `identity:` block with an issuer
+  and audience (subject tokens are verified against the same IdP as workers, narrowed to
+  `tokenService.allowedAZP`), `keys.enabled: true`, and `keys.token.overlap` of at least
+  `ttl + 2m`. The issuer must be an absolute https URL without trailing slash, query or
+  fragment (http only for a loopback host, logged as a warning). One INFO line reports
+  enabled, issuer and ttl. A token key that has not loaded yet does not stop startup: the
+  endpoint answers 503 `signer_unavailable` and `/readyz` reports it.
+- **Request.** `application/x-www-form-urlencoded` only, body at most 32 KiB, no query string,
+  no duplicate parameters, no `Authorization` header of any scheme (a session cookie, a `wwt_`
+  worker token or a `wak_` API key is never client authentication), no `actor_token` or
+  `resource`. `grant_type` must be `urn:ietf:params:oauth:grant-type:token-exchange` and the
+  client authenticates with `client_assertion_type`
+  `urn:ietf:params:oauth:client-assertion-type:jwt-bearer` plus `client_assertion`; an optional
+  form `client_id` must equal the assertion's `iss`.
+- **Response.** 200 `{access_token, issued_token_type, token_type: "Bearer", expires_in,
+  scope?}` with `expires_in` equal to `exp - iat`. Errors are RFC 6749 section 5.2 JSON
+  `{error, error_description}`: 400 for `invalid_request`, `invalid_grant`,
+  `unauthorized_client`, `invalid_scope`, `invalid_target` and `unsupported_grant_type`, 401
+  `invalid_client`, 503 `temporarily_unavailable` with `Retry-After`. `error_description` is a
+  fixed word from a closed set and never echoes a token, assertion or claim; every
+  `invalid_client` answers the same `client_authentication_failed`, so an unknown agent, an
+  unknown key, a bad signature, a replay and a disabled agent cannot be told apart. Every reply
+  carries `Cache-Control: no-store` and `Pragma: no-cache`.
+- **Served-key guard.** A token is minted only with a key the control plane already publishes
+  in `/.well-known/jwks.json`; until the JWKS holds the active kid (first key creation, an
+  emergency rotation) the endpoint answers 503 `signer_unavailable`.
+- **Agent registry cache.** The registry store serves reads from a snapshot that a 2 s watch
+  refreshes, so an agent disabled with the offline CLI stops authenticating within about 2 s.
+- **Not yet.** Rate limits, issuance records and metrics arrive with W-P2-TOKX-04 (#85) and
+  token-session admin revocation with #254; the `tokenService.rateLimit` and `eventRetention`
+  keys are validated now and enforced then.
+
 ## Block list: offline CLI
 
 The user block list lives in `<state-dir>/warden-cp.db`, outside policy

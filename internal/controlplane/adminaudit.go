@@ -42,9 +42,9 @@ func StateMigrations() []cpstate.Migration {
 	migs = append(migs, BlockMigrations()...)
 	migs = append(migs, WorkerTokenMigrations()...)
 	migs = append(migs, agentregsqlite.Migrations()...)
-	migs = append(migs, tokensvcsqlite.Migrations()...)
 	// Feature-gated: known to the downgrade guard, applied only with
-	// keys.enabled (stateMigrationsFor).
+	// keys.enabled or tokenService.enabled (stateMigrationsFor).
+	migs = append(migs, optionalMigrations(tokensvcsqlite.Migrations(), tokensvcsqlite.SessionMigrations())...)
 	migs = append(migs, metastore.Migrations()...)
 	return migs
 }
@@ -196,4 +196,18 @@ func runCheckpointLoop(ctx context.Context, done chan<- struct{}, s *adminaudit.
 		defer hooks.exited()
 	}
 	adminaudit.RunCheckpoints(ctx, s, e, interval, clk)
+}
+
+// optionalMigrations returns the migrations of every group marked Optional, so
+// the downgrade guard knows them while Open applies them only when a feature
+// turns them on with cpstate.Enable. The groups are not modified.
+func optionalMigrations(groups ...[]cpstate.Migration) []cpstate.Migration {
+	var out []cpstate.Migration
+	for _, g := range groups {
+		for _, m := range g {
+			m.Optional = true
+			out = append(out, m)
+		}
+	}
+	return out
 }

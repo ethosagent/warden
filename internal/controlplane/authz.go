@@ -28,6 +28,11 @@ const (
 	// classWorkerPlane routes serve workers (/policy, heartbeat, ingest,
 	// healthz). They are never wrapped in the audit chain.
 	classWorkerPlane routeClass = "worker-plane"
+	// classAssertionAuth routes authenticate the caller with a signed client
+	// assertion in the request body (POST /oauth2/token, W-P2-TOKX-03): no
+	// session, no CSRF, no bearer. They are never wrapped in the admin audit
+	// chain (machine issuance has its own records, W-P2-TOKX-04).
+	classAssertionAuth routeClass = "assertion-authenticated"
 	// classHandlerRecorded routes record their own entries (login, callback,
 	// logout: W-P1-AAUD-07). The middleware never wraps them.
 	classHandlerRecorded routeClass = "handler-recorded"
@@ -167,6 +172,7 @@ func cpRouteTable() map[routeKey]authzRow {
 		del  = http.MethodDelete
 	)
 	worker := authzRow{Class: classWorkerPlane}
+	assertion := authzRow{Action: "token.exchange", Class: classAssertionAuth}
 	handler := func(action string) authzRow { return authzRow{Action: action, Class: classHandlerRecorded} }
 	rows := []struct {
 		method, path string
@@ -178,6 +184,11 @@ func cpRouteTable() map[routeKey]authzRow {
 		// only with keys.enabled.
 		{get, "/readyz", worker},
 		{get, jwksPath, worker},
+		// The RFC 8693 token endpoint authenticates with a client assertion
+		// in the body and is Audited:false; its RFC 8414 metadata is public
+		// like the JWKS. Both are mounted only with tokenService.enabled.
+		{post, tokenPath, assertion},
+		{get, asMetadataPath, worker},
 		{get, "/policy", worker},
 		{post, "/control/heartbeat", worker},
 		{post, "/central/ingest", worker},

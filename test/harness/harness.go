@@ -213,7 +213,10 @@ type H struct {
 	// with the harness clock.
 	wantKeys  bool
 	keyTiming keyTiming
-	keyStore  *fakes.FakeKeyStore
+	// wantTokenSvc (WithTokenService) boots the control plane with
+	// tokenService.enabled over the WithKeys state.
+	wantTokenSvc bool
+	keyStore     *fakes.FakeKeyStore
 	// awsAccount is the fake AWS Secrets Manager account of WithAWSKeyStore;
 	// the control plane's injected role is scoped to keysAWSNamePrefix.
 	awsAccount *fakes.FakeAWSSecretsClient
@@ -823,6 +826,7 @@ func (h *H) writeCPConfig() string {
 	b.WriteString(h.identityYAML())
 	b.WriteString(h.consoleYAML())
 	b.WriteString(h.keysYAML())
+	b.WriteString(h.tokenServiceYAML())
 	b.WriteString(h.fakeJudgeYAML())
 	b.WriteString(h.auditJSONLogYAML())
 	b.WriteString(h.strictYAML())
