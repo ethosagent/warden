@@ -110,6 +110,14 @@ func TestValidate_KeyTable(t *testing.T) {
 		{"not an object", json.RawMessage(`[1]`), "keys[0]"},
 		{"null", json.RawMessage(`null`), "keys[0]"},
 		{"empty", nil, "keys[0].jwk"},
+		{"identity point", json.RawMessage(`{"kty":"OKP","crv":"Ed25519","x":"AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}`), "keys[0]"},
+		{"all-zero x", json.RawMessage(`{"kty":"OKP","crv":"Ed25519","x":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}`), "keys[0]"},
+		{"non-canonical y=p", json.RawMessage(`{"kty":"OKP","crv":"Ed25519","x":"7f_______________________________________38"}`), "keys[0]"},
+		{"upper-case D", edJWK(`,"D":"AAAA"`), "keys[0].d"},
+		{"upper-case X5U", edJWK(`,"X5U":"https://x"`), "keys[0].x5u"},
+		{"upper-case ALG mismatch", edJWK(`,"ALG":"ES256"`), "keys[0].alg"},
+		{"upper-case USE", edJWK(`,"USE":"enc"`), "keys[0].use"},
+		{"upper-case KEY_OPS", edJWK(`,"KEY_OPS":["sign"]`), "keys[0].key_ops"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -185,8 +193,12 @@ func TestValidate_Fields(t *testing.T) {
 		{"empty id", mod(func(a *Agent) { a.ID = "" }), "id"},
 		{"bad status", mod(func(a *Agent) { a.Status = "paused" }), "status"},
 		{"no groups when active", mod(func(a *Agent) { a.AllowedGroups = nil }), "allowed_groups"},
-		{"blank group", mod(func(a *Agent) { a.AllowedGroups = []string{"eng", " "} }), "allowed_groups"},
-		{"long group", mod(func(a *Agent) { a.AllowedGroups = []string{strings.Repeat("g", 257)} }), "allowed_groups"},
+		{"blank group", mod(func(a *Agent) { a.AllowedGroups = []string{"eng", " "} }), "allowed_groups[1]"},
+		{"long group", mod(func(a *Agent) { a.AllowedGroups = []string{strings.Repeat("g", 257)} }), "allowed_groups[0]"},
+		{"too many groups", mod(func(a *Agent) { a.AllowedGroups = make([]string, 257) }), "allowed_groups"},
+		{"zero-width in name", mod(func(a *Agent) { a.DisplayName = "a\u200bb" }), "display_name"},
+		{"bidi override in name", mod(func(a *Agent) { a.DisplayName = "a\u202eb" }), "display_name"},
+		{"format char in owner", mod(func(a *Agent) { a.OwnerSub = "s\ufeff" }), "owner_sub"},
 		{"upper scope", mod(func(a *Agent) { a.AllowedScopes = []string{"ok", "Bad"} }), "allowed_scopes[1]"},
 		{"space scope", mod(func(a *Agent) { a.AllowedScopes = []string{"a b"} }), "allowed_scopes[0]"},
 		{"empty scope", mod(func(a *Agent) { a.AllowedScopes = []string{""} }), "allowed_scopes[0]"},
@@ -251,10 +263,10 @@ func TestKeyPublicJWK_BadDocument(t *testing.T) {
 }
 
 func TestThumbprintPrefixOf(t *testing.T) {
-	if got := thumbprintPrefixOf("abcdefghijkl"); got != "abcdefgh" {
+	if got := ThumbprintPrefix("abcdefghijkl"); got != "abcdefgh" {
 		t.Errorf("got %q", got)
 	}
-	if got := thumbprintPrefixOf("abc"); got != "abc" {
+	if got := ThumbprintPrefix("abc"); got != "abc" {
 		t.Errorf("got %q", got)
 	}
 }

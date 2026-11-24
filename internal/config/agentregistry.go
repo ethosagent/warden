@@ -5,6 +5,13 @@ package config
 // and the cost of every list read. Create returns an error at the cap.
 const MaxRegisteredAgents = 1000
 
+// MaxPrincipals and MaxPrincipalBytes are the limits a group list obeys: at
+// most MaxPrincipals values of at most MaxPrincipalBytes bytes each.
+const (
+	MaxPrincipals     = maxPrincipals
+	MaxPrincipalBytes = maxPrincipalBytes
+)
+
 // NormalizeGroups canonicalizes a group list exactly as the policy rule
 // groups are (W-P1-GPOL-01): values are trimmed, empty ones rejected, the list
 // is deduplicated and sorted, and group names stay exact and case-sensitive.

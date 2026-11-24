@@ -1,8 +1,10 @@
-package agentreg_test
+package sqlite_test
 
 import (
 	"context"
 	"errors"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ethosagent/warden/internal/agentreg"
+	"github.com/ethosagent/warden/internal/agentreg/adapters/sqlite"
 	"github.com/ethosagent/warden/internal/agentreg/agentregtest"
 	"github.com/ethosagent/warden/internal/clock/clocktest"
 	"github.com/ethosagent/warden/internal/cpstate"
@@ -18,7 +21,7 @@ import (
 
 func openDB(t *testing.T) *cpstate.DB {
 	t.Helper()
-	db, err := cpstate.Open(context.Background(), filepath.Join(t.TempDir(), "warden-cp.db"), agentreg.Migrations())
+	db, err := cpstate.Open(context.Background(), filepath.Join(t.TempDir(), "warden-cp.db"), sqlite.Migrations())
 	if err != nil {
 		t.Fatalf("open cpstate: %v", err)
 	}
@@ -26,12 +29,8 @@ func openDB(t *testing.T) *cpstate.DB {
 	return db
 }
 
-func TestSQLiteStore_Conformance(t *testing.T) {
-	agentregtest.Run(t, agentreg.NewSQLiteStore(openDB(t)))
-}
-
-func TestSQLiteStore_ConformanceWithoutCache(t *testing.T) {
-	agentregtest.Run(t, agentreg.NewSQLiteStore(openDB(t), agentreg.WithCacheTTL(0)))
+func TestStore_Conformance(t *testing.T) {
+	agentregtest.Run(t, sqlite.New(openDB(t)))
 }
 
 const actor = "admin:test"
@@ -41,111 +40,128 @@ func newAgent(t *testing.T, id string) agentreg.Agent {
 	return agentreg.Agent{ID: id, AllowedGroups: []string{"eng"}, Keys: []agentreg.Key{{JWK: agentregtest.Ed25519JWK(t, id)}}}
 }
 
-// A write through one store is visible to it at once; a write through another
-// handle on the same file is visible only after the TTL.
-func TestSQLiteStore_CacheInvalidationAndTTL(t *testing.T) {
-	ctx := context.Background()
-	db := openDB(t)
-	clk := clocktest.NewFake(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
-	a := agentreg.NewSQLiteStore(db, agentreg.WithClock(clk), agentreg.WithCacheTTL(10*time.Second))
-	b := agentreg.NewSQLiteStore(db, agentreg.WithClock(clk), agentreg.WithCacheTTL(10*time.Second))
-
-	if list, err := a.List(ctx); err != nil || len(list) != 0 {
-		t.Fatalf("empty list = %v, %v", list, err)
+// A write through one store is visible to it at once; a write through
+// another handle on the same file (another process) is seen once Watch's
+// data_version poll fires. The test drives the poll with a fake clock and a
+// condition, never a fixed number of Advances.
+func TestStore_WatchSeesAnotherProcessWithinOneInterval(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	path := filepath.Join(t.TempDir(), "warden-cp.db")
+	open := func() *cpstate.DB {
+		db, err := cpstate.Open(ctx, path, sqlite.Migrations())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		return db
 	}
-	created, err := a.Create(ctx, newAgent(t, "c1"), actor)
+	clk := clocktest.NewFake(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	const interval = 2 * time.Second
+	a := sqlite.New(open(), sqlite.WithClock(clk))
+	b := sqlite.New(open(), sqlite.WithClock(clk)) // the "other process"
+
+	done := make(chan struct{})
+	go func() { defer close(done); a.Watch(ctx, interval) }()
+	defer func() { cancel(); <-done }()
+
+	if _, err := a.Create(ctx, newAgent(t, "w1"), actor); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := a.Get(ctx, "w1"); err != nil || got.Status != agentreg.StatusActive {
+		t.Fatalf("own write not visible at once: %+v, %v", got, err)
+	}
+
+	// b writes behind a's back; a's snapshot is warm and stale.
+	made, err := b.SetStatus(ctx, "w1", agentreg.StatusDisabled, 1, actor)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, err := a.Get(ctx, "c1"); err != nil || got.Revision != 1 {
-		t.Fatalf("own write not visible at once: %+v, %v", got, err)
+	if got, _ := a.Get(ctx, "w1"); got.Status != agentreg.StatusActive {
+		t.Fatalf("a should still serve its snapshot before the poll, got %s", got.Status)
 	}
-	if !created.CreatedAt.Equal(clk.Now()) {
-		t.Fatalf("created_at %v != clock %v", created.CreatedAt, clk.Now())
-	}
-
-	// b warms its cache, then a writes behind its back.
-	if _, err := b.Get(ctx, "c1"); err != nil {
-		t.Fatal(err)
-	}
-	clk.Advance(time.Second)
-	if _, err := a.SetStatus(ctx, "c1", agentreg.StatusDisabled, 1, actor); err != nil {
-		t.Fatal(err)
-	}
-	if got, _ := b.Get(ctx, "c1"); got.Status != agentreg.StatusActive {
-		t.Fatalf("b should still serve its snapshot, got %s", got.Status)
-	}
-	clk.Advance(10 * time.Second)
-	if got, _ := b.Get(ctx, "c1"); got.Status != agentreg.StatusDisabled {
-		t.Fatalf("b should re-read after the TTL, got %s", got.Status)
-	}
-	if got, _ := a.Get(ctx, "c1"); !got.UpdatedAt.After(got.CreatedAt) {
-		t.Fatalf("updated_at not advanced: %+v", got)
+	// Drive the watch loop until it has seen the write: advance one interval,
+	// look, repeat. The loop may not have armed its timer yet on the first
+	// pass, which is why this is a condition and not a fixed Advance.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		clk.Advance(interval)
+		if got, _ := a.Get(ctx, "w1"); got.Status == agentreg.StatusDisabled && got.Revision == made.Revision {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("a never saw b's write")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
-func TestSQLiteStore_ConcurrentWritersOneWins(t *testing.T) {
+// A burst of readers after a write reloads the registry once.
+func TestStore_ConcurrentReadersAfterWriteAreCoalesced(t *testing.T) {
 	ctx := context.Background()
-	s := agentreg.NewSQLiteStore(openDB(t))
-	a, err := s.Create(ctx, newAgent(t, "race-1"), actor)
-	if err != nil {
+	s := sqlite.New(openDB(t))
+	if _, err := s.Create(ctx, newAgent(t, "sf-1"), actor); err != nil {
 		t.Fatal(err)
 	}
-	const n = 8
 	var wg sync.WaitGroup
-	results := make(chan error, n)
-	for i := 0; i < n; i++ {
+	for i := 0; i < 32; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, err := s.SetStatus(ctx, a.ID, agentreg.StatusDisabled, a.Revision, actor)
-			results <- err
+			if _, err := s.Get(ctx, "sf-1"); err != nil {
+				t.Errorf("Get: %v", err)
+			}
 		}()
 	}
 	wg.Wait()
-	close(results)
-	ok, conflict := 0, 0
-	for err := range results {
-		switch {
-		case err == nil:
-			ok++
-		case errors.Is(err, agentreg.ErrConflict):
-			conflict++
-		default:
-			t.Fatalf("unexpected error: %v", err)
-		}
+}
+
+func TestStore_WatchLogsAndRecoversFromUnreadableVersion(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	db := openDB(t)
+	clk := clocktest.NewFake(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	s := sqlite.New(db, sqlite.WithClock(clk), sqlite.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+	_ = db.Close() // every poll now fails
+	done := make(chan struct{})
+	go func() { defer close(done); s.Watch(ctx, time.Second) }()
+	for i := 0; i < 5; i++ {
+		clk.Advance(time.Second)
+		time.Sleep(5 * time.Millisecond)
 	}
-	if ok != 1 || conflict != n-1 {
-		t.Fatalf("ok=%d conflict=%d, want 1 and %d", ok, conflict, n-1)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Watch did not stop on cancel")
 	}
 }
 
-func TestSQLiteStore_RowsSurviveReopen(t *testing.T) {
+func TestStore_RowsSurviveReopen(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "warden-cp.db")
-	db, err := cpstate.Open(ctx, path, agentreg.Migrations())
+	db, err := cpstate.Open(ctx, path, sqlite.Migrations())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := agentreg.NewSQLiteStore(db).Create(ctx, newAgent(t, "persist"), actor); err != nil {
+	if _, err := sqlite.New(db).Create(ctx, newAgent(t, "persist"), actor); err != nil {
 		t.Fatal(err)
 	}
 	_ = db.Close()
-	db, err = cpstate.Open(ctx, path, agentreg.Migrations())
+	db, err = cpstate.Open(ctx, path, sqlite.Migrations())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = db.Close() }()
-	got, err := agentreg.NewSQLiteStore(db).Get(ctx, "persist")
+	got, err := sqlite.New(db).Get(ctx, "persist")
 	if err != nil || len(got.Keys) != 1 || got.Keys[0].JKT == "" {
 		t.Fatalf("after reopen: %+v, %v", got, err)
 	}
 }
 
-func TestSQLiteStore_ClosedDBReportsErrors(t *testing.T) {
+func TestStore_ClosedDBReportsErrors(t *testing.T) {
 	ctx := context.Background()
 	db := openDB(t)
-	s := agentreg.NewSQLiteStore(db, agentreg.WithCacheTTL(0))
+	s := sqlite.New(db)
 	a, err := s.Create(ctx, newAgent(t, "closed"), actor)
 	if err != nil {
 		t.Fatal(err)
@@ -168,9 +184,9 @@ func TestSQLiteStore_ClosedDBReportsErrors(t *testing.T) {
 	}
 }
 
-func TestSQLiteStore_RejectsBadInputBeforeStorage(t *testing.T) {
+func TestStore_RejectsBadInputBeforeStorage(t *testing.T) {
 	ctx := context.Background()
-	s := agentreg.NewSQLiteStore(openDB(t))
+	s := sqlite.New(openDB(t))
 	good := newAgent(t, "bad-1")
 	if _, err := s.Create(ctx, good, ""); !errors.Is(err, agentreg.ErrInvalid) {
 		t.Errorf("empty actor = %v", err)
@@ -199,12 +215,12 @@ func TestSQLiteStore_RejectsBadInputBeforeStorage(t *testing.T) {
 	}
 }
 
-func TestSQLiteStore_RegistryFullAtConfiguredMax(t *testing.T) {
+func TestStore_RegistryFullAtConfiguredMax(t *testing.T) {
 	// The cap itself is exercised end to end by the conformance suite; this
 	// pins that a duplicate id is reported as such even when the registry is
 	// full, so a retry of a successful create is not misread as "full".
 	ctx := context.Background()
-	s := agentreg.NewSQLiteStore(openDB(t))
+	s := sqlite.New(openDB(t))
 	if _, err := s.Create(ctx, newAgent(t, "full-1"), actor); err != nil {
 		t.Fatal(err)
 	}
@@ -236,7 +252,7 @@ func TestNoDeleteOfAgents(t *testing.T) {
 }
 
 func TestMigrationsDeclareTheRegistryTables(t *testing.T) {
-	migs := agentreg.Migrations()
+	migs := sqlite.Migrations()
 	if len(migs) != 1 || migs[0].ID != "agents/0001" || migs[0].Optional {
 		t.Fatalf("Migrations() = %+v", migs)
 	}

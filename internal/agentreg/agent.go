@@ -1,8 +1,10 @@
-// Package agentreg is the control plane's registry of agents: which agents
-// exist, which public keys authenticate them and which user groups may
-// delegate to them. It holds the Agent type, the Store port, the validators
-// every consumer shares (the admin API, the policy wire, the token service)
-// and a SQLite store on the cpstate DB.
+// Package agentreg is the domain of the control plane's registry of agents:
+// which agents exist, which public keys authenticate them and which user
+// groups may delegate to them. It holds the Agent type, the Store port and the
+// validators every consumer shares (the admin API, the policy wire, the token
+// service). It does no I/O: the SQLite implementation lives in
+// internal/agentreg/adapters/sqlite and the conformance suite in
+// internal/agentreg/agentregtest.
 //
 // Rows are never deleted and ids are never reused, so audit rows and token
 // references stay resolvable; an agent is switched off with SetStatus. Key
@@ -143,7 +145,10 @@ func (e *InvalidError) Error() string {
 // Is makes errors.Is(err, ErrInvalid) true.
 func (e *InvalidError) Is(target error) bool { return target == ErrInvalid }
 
-func invalid(field, reason string) error { return &InvalidError{Field: field, Reason: reason} }
+// Invalid builds the *InvalidError for field with a fixed reason phrase. A
+// Store implementation uses it for the failures only it can see; the reason
+// must never contain a submitted value.
+func Invalid(field, reason string) error { return &InvalidError{Field: field, Reason: reason} }
 
 // Store is the agent registry port. Implementations are safe for concurrent
 // use. The SQLite store is the P2 implementation; agentregtest.Run is the
@@ -163,8 +168,10 @@ type Store interface {
 	List(ctx context.Context) ([]Agent, error)
 	// Update replaces a.ID's display name, owner, keys, groups and scopes
 	// (the whole mutable document; Status is not touched) if a.Revision is
-	// still the stored revision. Errors: ErrInvalid, ErrNotFound, ErrConflict,
-	// ErrKeyInUse.
+	// still the stored revision. a.Revision is the compare-and-swap token: a
+	// caller must set it from what the client saw (the admin API, AREG-02,
+	// from If-Match), never from a fresh read of its own, or the check is
+	// void. Errors: ErrInvalid, ErrNotFound, ErrConflict, ErrKeyInUse.
 	Update(ctx context.Context, a Agent, actor string) (Agent, error)
 	// SetStatus changes only the status, if revision is still the stored one.
 	// Enabling an agent with no allowed groups is ErrInvalid. Setting the

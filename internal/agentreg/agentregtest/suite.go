@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/ethosagent/warden/internal/agentreg"
@@ -35,6 +36,7 @@ func Run(t *testing.T, s agentreg.Store) {
 		{"DisableKeepsRow", disableKeepsRow},
 		{"NotFound", notFound},
 		{"ResultsAreCopies", resultsAreCopies},
+		{"ConcurrentWritersOneWins", concurrentWriters},
 		{"RegistryCap", registryCap}, // last: it fills the store
 	} {
 		t.Run(tc.name, func(t *testing.T) { tc.fn(t, ctx, s) })
@@ -284,13 +286,88 @@ func resultsAreCopies(t *testing.T, ctx context.Context, s agentreg.Store) {
 	}
 }
 
+// concurrentWriters pins that the revision compare-and-swap holds under
+// contention: of N writers holding the same revision exactly one wins.
+func concurrentWriters(t *testing.T, ctx context.Context, s agentreg.Store) {
+	const n = 8
+	for name, write := range map[string]func(a agentreg.Agent) error{
+		"SetStatus": func(a agentreg.Agent) error {
+			_, err := s.SetStatus(ctx, a.ID, agentreg.StatusDisabled, a.Revision, actor)
+			return err
+		},
+		"Update": func(a agentreg.Agent) error {
+			a.DisplayName = "contended"
+			_, err := s.Update(ctx, a, actor)
+			return err
+		},
+	} {
+		a := mustCreate(t, ctx, s, base(t, "race-"+strings.ToLower(name)))
+		results := make(chan error, n)
+		var wg sync.WaitGroup
+		for i := 0; i < n; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				results <- write(a)
+			}()
+		}
+		wg.Wait()
+		close(results)
+		ok, conflict := 0, 0
+		for err := range results {
+			switch {
+			case err == nil:
+				ok++
+			case errors.Is(err, agentreg.ErrConflict):
+				conflict++
+			default:
+				t.Fatalf("%s: unexpected error: %v", name, err)
+			}
+		}
+		if ok != 1 || conflict != n-1 {
+			t.Fatalf("%s: ok=%d conflict=%d, want 1 and %d", name, ok, conflict, n-1)
+		}
+		if got, _ := s.Get(ctx, a.ID); got.Revision != 2 {
+			t.Fatalf("%s: revision = %d, want 2", name, got.Revision)
+		}
+	}
+}
+
 func registryCap(t *testing.T, ctx context.Context, s agentreg.Store) {
 	list, err := s.List(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i := len(list); i < config.MaxRegisteredAgents; i++ {
+	for i := len(list); i < config.MaxRegisteredAgents-1; i++ {
 		mustCreate(t, ctx, s, base(t, fmt.Sprintf("cap-%04d", i)))
+	}
+	// One slot left: of N parallel Creates exactly one gets it.
+	const racers = 8
+	errs := make(chan error, racers)
+	var wg sync.WaitGroup
+	for i := 0; i < racers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := s.Create(ctx, base(t, fmt.Sprintf("cap-race-%d", i)), actor)
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	won, full := 0, 0
+	for err := range errs {
+		switch {
+		case err == nil:
+			won++
+		case errors.Is(err, agentreg.ErrRegistryFull):
+			full++
+		default:
+			t.Fatalf("parallel Create at the cap: %v", err)
+		}
+	}
+	if won != 1 || full != racers-1 {
+		t.Fatalf("parallel Creates at cap-1: %d succeeded, %d full; want 1 and %d", won, full, racers-1)
 	}
 	over := base(t, "cap-over")
 	if _, err := s.Create(ctx, over, actor); !errors.Is(err, agentreg.ErrRegistryFull) {

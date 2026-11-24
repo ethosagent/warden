@@ -1,4 +1,6 @@
-package agentreg
+// Package sqlite is the SQLite implementation of agentreg.Store on the
+// control plane's cpstate database.
+package sqlite
 
 import "github.com/ethosagent/warden/internal/cpstate"
 
