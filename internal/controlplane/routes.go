@@ -38,14 +38,14 @@ func (s *Server) mountDashboard(mux *http.ServeMux, dash *dashboard.Server) {
 		return
 	}
 	dash.SetWriteGuard(s.sessionWriteGuard())
-	guarded := requireRoleKeys(s.limitQueryGenerate(dash.Handler()), table, s.cfg.Console, s.cfg.Logger, s.apiKeyCounts)
+	guarded := requireRoleKeys(s.limitQueryGenerate(dash.Handler()), table, s.cfg.Console, s.cfg.Logger, s.apiKeyCounts, s.keyOwnerBlocked)
 	// With API keys on, apiKeyWrap is outermost: a key request is decided before
 	// the session, audit and authz layers see it (apikey_auth.go).
 	mux.Handle("/dashboard/", s.apiKeyWrap(s.sessionAuditWrap(classify, guarded)))
 	// GET lists, DELETE revokes (?handle= or ?sub=); admin only. A revoke is an
 	// audited admin change.
 	// TODO(#39): a per-session rate limit arrives with the shared console limiter.
-	mux.Handle(sessionsAdminPath, s.apiKeyWrap(s.sessionAuditWrap(classify, requireRoleKeys(http.HandlerFunc(s.handleSessions), table, s.cfg.Console, s.cfg.Logger, s.apiKeyCounts))))
+	mux.Handle(sessionsAdminPath, s.apiKeyWrap(s.sessionAuditWrap(classify, requireRoleKeys(http.HandlerFunc(s.handleSessions), table, s.cfg.Console, s.cfg.Logger, s.apiKeyCounts, s.keyOwnerBlocked))))
 }
 
 // sessionsAdminPath is the admin session list and revoke route (W-P1-SSO-08).

@@ -155,6 +155,11 @@ type Config struct {
 	// control plane's whole life before serving: an Index without Run refuses
 	// every key once its staleness ceiling passes. Nil means API keys are off.
 	APIKeyIndex *apikeys.Index
+	// APIKeyStore and APIKeyRegistry are the store behind APIKeyIndex and the
+	// control plane's single scope registry; the key management API (W-P2-APIK-03)
+	// and later features that register scopes use these, never their own.
+	APIKeyStore    apikeys.Store
+	APIKeyRegistry *apikeys.Registry
 }
 
 // policyWire is the shape sent to workers: allow/deny policy plus the optional

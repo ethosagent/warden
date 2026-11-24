@@ -102,14 +102,33 @@ func apiKeyOfflineRevoke(t *testing.T, h *harness.H) {
 		return status == http.StatusOK
 	})
 
+	// Let Index.Run re-arm its poll timer after the load above: the count of
+	// pending timers on the control plane's clock is unchanged across a short
+	// real-time gap.
+	prev := -1
+	h.Eventually("the control plane's timers to settle", func() bool {
+		n := h.Clock().PendingTimers()
+		settled := n == prev
+		prev = n
+		time.Sleep(20 * time.Millisecond)
+		return settled
+	})
 	if err := st.Revoke(context.Background(), id, "scenario-cli"); err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
 	rows := len(h.AdminAuditRows())
-	pollUntil(h, "the control plane to refuse the revoked key", func() bool {
+	// One poll interval is enough: a single Advance, then wait for the refusal
+	// without moving the clock again.
+	before := h.APIKeyAuthCounts()
+	h.Clock().Advance(apiKeyPoll)
+	h.Eventually("the control plane to refuse the revoked key within one poll", func() bool {
 		status, _ := keyStatus(t, h, key, http.MethodGet, "/dashboard/api/policy", "")
 		return status == http.StatusUnauthorized
 	})
+	after := h.APIKeyAuthCounts()
+	if after["revoked"] <= before["revoked"] || after["index_stale"] != before["index_stale"] {
+		t.Fatalf("counters before %v after %v: want revoked up and index_stale unchanged", before, after)
+	}
 	resp, err := h.CP().SendBearer(key, http.MethodPost, "/dashboard/api/policy", nil, []byte(`{"allowlist":[],"denylist":[]}`))
 	if err != nil {
 		t.Fatal(err)

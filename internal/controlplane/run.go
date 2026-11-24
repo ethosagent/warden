@@ -44,6 +44,10 @@ type Params struct {
 	// KeysReady, when set, is called with the key manager once Init has run, for
 	// tests and the harness (keys.enabled only).
 	KeysReady func(*keys.Manager)
+	// APIKeysReady, when set, is called once the server is built with the
+	// reader of warden_cp_apikey_auth_total by outcome, for tests and the
+	// harness (console.apiKeys.enabled only).
+	APIKeysReady func(counts func() map[string]int64)
 
 	ConfigPath, ListenAddr string
 	// TokenEnv is the deprecated --token-env, an alias of LegacyTokenEnv.
@@ -462,13 +466,18 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// values, and without it the Index refuses every key once its staleness
 	// ceiling passes. The deferred stop waits for Run (and its final flush)
 	// before the state DB closes. Disabled, nothing here runs.
-	var apiKeyIndex *apikeys.Index
+	var (
+		apiKeyIndex    *apikeys.Index
+		apiKeyStore    apikeys.Store
+		apiKeyRegistry *apikeys.Registry
+	)
 	if consoleCfg.APIKeys.Enabled {
-		ix, stop, err := startAPIKeys(ctx, state, clk, logger)
+		apiKeyRegistry = newAPIKeyRegistry() // the one registry of this control plane
+		store, ix, stop, err := startAPIKeys(ctx, state, apiKeyRegistry, clk, logger)
 		if err != nil {
 			return fail(err)
 		}
-		apiKeyIndex = ix
+		apiKeyIndex, apiKeyStore = ix, store
 		defer stop()
 	}
 	// Signing keys (keys.enabled): the manager is built here and loads after
@@ -503,6 +512,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		Token:        token,
 		WorkerTokens: workerTokens,
 		APIKeyIndex:  apiKeyIndex,
+		APIKeyStore:  apiKeyStore, APIKeyRegistry: apiKeyRegistry,
 
 		RequireWorkerTokens: p.RequireWorkerTokens,
 		TLS:                 caCert != "" && caKey != "",
@@ -536,6 +546,9 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		Clock: p.Clock,
 	})
 
+	if apiKeyIndex != nil && p.APIKeysReady != nil {
+		p.APIKeysReady(srv.APIKeyAuthCounts)
+	}
 	srv.warnBreakGlassSetup(integrations)
 
 	if p.Findings != nil {

@@ -622,7 +622,9 @@ goroutine exists and a `wak_` bearer is just an unrecognised bearer.
 
 Present a key as `Authorization: Bearer wak_...` on `/dashboard/api/*` only:
 
-- A key in the query string is `400 api_key_in_query`; a key together with the console
+- Any query parameter whose name or value starts with `wak_` is `400 api_key_in_query`
+  (a URL lands in logs); more than one `Authorization` header is `400
+  multiple_authorization`; a key together with the console
   session cookie is `400 ambiguous_credentials`. A failed key (malformed, unknown,
   wrong secret, expired, revoked) is the same `401 {"error":"unauthorized"}` with
   `WWW-Authenticate: Bearer`, and never falls back to a session.
@@ -637,6 +639,8 @@ Present a key as `Authorization: Bearer wak_...` on `/dashboard/api/*` only:
   every route classified `none`. `/policy`, `/control/heartbeat` and `/central/ingest`
   refuse a `wak_` bearer with 401 whatever the worker auth mode, and `/dashboard/` and
   `/auth/me` answer a key 401.
+- A key whose owner is on the [block list](#block-list) is refused at once with the same
+  403 (reads and writes), like the owner's sessions; lifting the block restores it.
 - A key may make `ratePerKey` requests per second (burst 2x); over that is `429` with
   `Retry-After`. A throttled request writes no audit row.
 

@@ -245,7 +245,7 @@ func ActionFrom(ctx context.Context) (string, bool) {
 // console.roles applies to live sessions after a restart. It never reads the
 // Authorization header, so a shared or admin bearer cannot open a human route.
 func requireRole(next http.Handler, table map[routeKey]authzRow, console config.ConsoleConfig, logger *slog.Logger) http.Handler {
-	return requireRoleKeys(next, table, console, logger, nil)
+	return requireRoleKeys(next, table, console, logger, nil, nil)
 }
 
 // requireRoleKeys is requireRole that decides API key Principals too, counting
@@ -255,7 +255,7 @@ func requireRole(next http.Handler, table map[routeKey]authzRow, console config.
 // ("none" for a route no key may reach), so a refusal says nothing about the
 // owner's role. The refusal is chained as denied by the audit middleware
 // outside this one.
-func requireRoleKeys(next http.Handler, table map[routeKey]authzRow, console config.ConsoleConfig, logger *slog.Logger, counts *apiKeyCounters) http.Handler {
+func requireRoleKeys(next http.Handler, table map[routeKey]authzRow, console config.ConsoleConfig, logger *slog.Logger, counts *apiKeyCounters, ownerBlocked func(Principal) bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p, ok := PrincipalFrom(r.Context())
 		if !ok {
@@ -275,7 +275,10 @@ func requireRoleKeys(next http.Handler, table map[routeKey]authzRow, console con
 			return
 		}
 		if p.Kind == PrincipalAPIKey {
-			if ok, need := keyAuthorized(p, row, role); !ok {
+			if ok, need := keyAuthorized(p, row, role); !ok || (ownerBlocked != nil && ownerBlocked(p)) {
+				if ok {
+					need = apikeys.ScopeNone // refused for who the owner is, not for a scope
+				}
 				counts.inc(APIKeyOutcomeInsufficientScope)
 				logDenied(logger, row, role, p, r)
 				writeAuthzJSON(w, http.StatusForbidden, map[string]string{"error": "insufficient_scope", "need": string(need)})

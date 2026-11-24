@@ -287,7 +287,7 @@ func (a *WorkerAuthenticator) resolve(r *http.Request) (p WorkerPrincipal, reaso
 	// An API key is a human credential for the admin API: refused here whatever
 	// the mode (open included) and before any comparison, so it can never match
 	// the shared token or pass as no credential.
-	if has && apikeys.LooksLikeKey(tok) {
+	if hasAPIKeyBearer(r) || (has && apikeys.LooksLikeKey(tok)) {
 		return WorkerPrincipal{Kind: KindNone}, "api_key_bearer", "", ErrUnauthorized
 	}
 	if has && strings.HasPrefix(tok, workerTokenPrefix) {

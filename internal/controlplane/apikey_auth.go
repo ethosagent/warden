@@ -172,12 +172,29 @@ func (s *Server) apiKeyWrap(h http.Handler) http.Handler {
 // bearerToken returns the bearer credential of a request. The scheme is
 // case-insensitive (RFC 7235).
 func bearerToken(r *http.Request) (string, bool) {
-	h := r.Header.Get("Authorization")
+	return bearerOf(r.Header.Get("Authorization"))
+}
+
+func bearerOf(h string) (string, bool) {
 	const scheme = "bearer "
+	h = strings.TrimSpace(h)
 	if len(h) <= len(scheme) || !strings.EqualFold(h[:len(scheme)], scheme) {
 		return "", false
 	}
 	return strings.TrimSpace(h[len(scheme):]), true
+}
+
+// hasAPIKeyBearer reports whether ANY Authorization header value is a bearer
+// that starts with wak_ (scheme matched case-insensitively, whitespace
+// trimmed). The worker authenticator uses it so a key can never be hidden in a
+// second header value or behind odd spacing.
+func hasAPIKeyBearer(r *http.Request) bool {
+	for _, h := range r.Header.Values("Authorization") {
+		if tok, ok := bearerOf(h); ok && apikeys.LooksLikeKey(tok) {
+			return true
+		}
+	}
+	return false
 }
 
 // queryHasKey reports whether any query key or value looks like an API key. A
@@ -200,6 +217,12 @@ func (a *apiKeyAuth) wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if queryHasKey(r) {
 			writeAuthzJSON(w, http.StatusBadRequest, map[string]string{"error": "api_key_in_query"})
+			return
+		}
+		// One credential only: with several Authorization values a key could ride
+		// next to something another layer would honour.
+		if len(r.Header.Values("Authorization")) > 1 {
+			writeAuthzJSON(w, http.StatusBadRequest, map[string]string{"error": "multiple_authorization"})
 			return
 		}
 		tok, has := bearerToken(r)
@@ -292,7 +315,8 @@ func keyAuthorized(p Principal, row authzRow, role config.Role) (ok bool, need a
 	case "", apikeys.ScopeNone:
 		return false, apikeys.ScopeNone
 	case apikeys.ScopeSelf:
-		return true, need
+		// Any valid key, but the owner's current role must still cover the row.
+		return role >= row.MinRole, need
 	}
 	return p.hasScope(need) && role >= row.MinRole, need
 }
@@ -324,13 +348,13 @@ func newAPIKeyRegistry() *apikeys.Registry { return apikeys.NewP2Registry() }
 // for it, including its final last-use flush, so call it before the state DB
 // closes. The Index is returned only after Run has started: nothing can
 // authenticate against an Index nobody is refreshing.
-func startAPIKeys(ctx context.Context, state *cpstate.DB, clk clock.Clock, logger *slog.Logger) (*apikeys.Index, func(), error) {
+func startAPIKeys(ctx context.Context, state *cpstate.DB, reg *apikeys.Registry, clk clock.Clock, logger *slog.Logger) (apikeys.Store, *apikeys.Index, func(), error) {
 	if state == nil {
-		return nil, nil, errors.New("control-plane: console.apiKeys.enabled needs --state-dir (API keys live in its database)")
+		return nil, nil, nil, errors.New("control-plane: console.apiKeys.enabled needs --state-dir (API keys live in its database)")
 	}
-	store, err := sqlitestore.New(state, sqlitestore.Options{Registry: newAPIKeyRegistry(), Clock: clk})
+	store, err := sqlitestore.New(state, sqlitestore.Options{Registry: reg, Clock: clk})
 	if err != nil {
-		return nil, nil, fmt.Errorf("control-plane: api keys: %w", err)
+		return nil, nil, nil, fmt.Errorf("control-plane: api keys: %w", err)
 	}
 	// Loading is not cancellable: a shutdown signal during boot must not read as
 	// a broken key table.
@@ -338,13 +362,38 @@ func startAPIKeys(ctx context.Context, state *cpstate.DB, clk clock.Clock, logge
 		Now: clk.Now, After: clk.After, Logger: logger,
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("control-plane: api keys: %w", err)
+		return nil, nil, nil, fmt.Errorf("control-plane: api keys: %w", err)
 	}
-	runCtx, cancel := context.WithCancel(ctx)
+	// Run is cancelled only by the returned stop, never by ctx: stop is deferred,
+	// so it runs after the HTTP server has drained, and last-use marks from
+	// requests still in flight at shutdown reach Run's final flush.
+	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		ix.Run(runCtx)
 	}()
-	return ix, func() { cancel(); <-done }, nil
+	return store, ix, func() { cancel(); <-done }, nil
 }
+
+// keyOwnerBlocked reports whether an API key's owner is on the user block list.
+// A blocked person's keys stop working at once, as their sessions do. It is an
+// atomic snapshot read (no database I/O); a block list that has not loaded
+// refuses, because the control plane cannot tell.
+func (s *Server) keyOwnerBlocked(p Principal) bool {
+	if s.blocks == nil {
+		return false
+	}
+	if !s.blocks.Ready() {
+		return true
+	}
+	return s.blocks.IsBlocked(p.OwnerSub, p.Email)
+}
+
+// APIKeyStore returns the API key store (nil with API keys disabled). Writes
+// through it notify the Index, so they take effect on this process at once.
+func (s *Server) APIKeyStore() apikeys.Store { return s.cfg.APIKeyStore }
+
+// APIKeyRegistry returns the control plane's one scope registry (nil with API
+// keys disabled).
+func (s *Server) APIKeyRegistry() *apikeys.Registry { return s.cfg.APIKeyRegistry }

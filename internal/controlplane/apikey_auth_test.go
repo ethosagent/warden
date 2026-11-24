@@ -5,12 +5,14 @@ import (
 	"crypto/sha256"
 	"encoding/base32"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -50,6 +52,7 @@ type keyEnvOpts struct {
 	policy     string
 	ratePerKey int
 	noAudit    bool
+	versioned  bool
 }
 
 func openKeysDB(t *testing.T) *cpstate.DB {
@@ -93,10 +96,19 @@ func newKeyEnv(t *testing.T, o keyEnvOpts) *keyEnv {
 		Enabled: true, DefaultTTL: config.DefaultAPIKeyTTL, MaxTTL: config.DefaultAPIKeyMaxTTL,
 		MaxPerOwner: config.DefaultAPIKeysMaxPerOwner, RatePerKey: o.ratePerKey,
 	}
-	srv := New(Config{
+	cfg := Config{
 		PolicyPath: o.policy, Token: dashTestToken, State: o.db, Console: cc, Logger: logger, Clock: clk,
 		APIKeyIndex: ix, SecretStore: secrets.NewEchoStore(),
-	})
+	}
+	if o.versioned {
+		cfg.PolicyStore = PolicyStoreVersioned
+	}
+	srv := New(cfg)
+	if o.versioned {
+		if err := srv.importInitialVersion(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if srv.apiKeys == nil {
 		t.Fatal("API keys enabled with an index and sessions must build the authenticator")
 	}
@@ -770,8 +782,9 @@ func TestRunStartsAPIKeyIndex(t *testing.T) {
 			if got, _ := get(); got == want {
 				return
 			}
+			// Each iteration is a real HTTP round trip, which gives Run's goroutine
+			// the time to react; no sleep, the condition is the wait.
 			clk.Advance(apiKeyPollForTest)
-			time.Sleep(2 * time.Millisecond)
 		}
 		t.Fatalf("timed out waiting for %s", desc)
 	}
@@ -831,9 +844,10 @@ func TestStartAPIKeysStopFlushes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ix, stop, err := startAPIKeys(context.Background(), db, clk, logger)
-	if err != nil {
-		t.Fatal(err)
+	reg := newAPIKeyRegistry()
+	st, ix, stop, err := startAPIKeys(context.Background(), db, reg, clk, logger)
+	if err != nil || st == nil {
+		t.Fatalf("startAPIKeys = %v, %v", st, err)
 	}
 	ix.MarkUsed(k.ID, clk.Now(), "192.0.2.1")
 	stop()
@@ -841,7 +855,171 @@ func TestStartAPIKeysStopFlushes(t *testing.T) {
 	if err != nil || got.LastUsedIP != "192.0.2.1" {
 		t.Fatalf("after stop: %+v %v, want the last use flushed", got, err)
 	}
-	if _, _, err := startAPIKeys(context.Background(), nil, clk, logger); err == nil || !strings.Contains(err.Error(), "--state-dir") {
+	if _, _, _, err := startAPIKeys(context.Background(), nil, reg, clk, logger); err == nil || !strings.Contains(err.Error(), "--state-dir") {
 		t.Errorf("startAPIKeys without a state db = %v, want an error naming --state-dir", err)
+	}
+}
+
+// TestAPIKeyBlockedOwner: blocking a key's owner refuses the key at once, on
+// reads and writes, with the policy untouched; the refusal is a counted
+// insufficient_scope and a chained denied row. Unblocking restores it.
+func TestAPIKeyBlockedOwner(t *testing.T) {
+	e := newKeyEnv(t, keyEnvOpts{})
+	tok, _ := e.mint("alice", groupEditor, "policy:read", "policy:write")
+	wantStatus(t, e.do(tok, http.MethodGet, "/dashboard/api/policy", ""), http.StatusOK, "before the block")
+	if e.srv.blocks == nil || !e.srv.blocks.Ready() {
+		t.Fatal("the block list must be loaded")
+	}
+	id, err := e.srv.blocks.Add(context.Background(), BlockEntry{Sub: "alice"}, "cli:test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := e.policyBytes()
+	rows := len(e.rec.inputs())
+	wantStatus(t, e.do(tok, http.MethodGet, "/dashboard/api/policy", ""), http.StatusForbidden, "GET policy, owner blocked")
+	rec := e.do(tok, http.MethodPost, "/dashboard/api/policy", policyBody)
+	wantStatus(t, rec, http.StatusForbidden, "POST policy, owner blocked")
+	if !strings.Contains(rec.Body.String(), "insufficient_scope") {
+		t.Errorf("body = %s", rec.Body.String())
+	}
+	if e.policyBytes() != before {
+		t.Error("policy changed by a blocked owner's key")
+	}
+	got := e.rec.inputs()
+	if len(got) != rows+1 || got[rows].Outcome != adminaudit.OutcomeDenied || got[rows].AuthMethod != adminaudit.AuthMethodAPIKey {
+		t.Errorf("rows = %+v, want one new denied apikey row", got[rows:])
+	}
+	if c := e.srv.APIKeyAuthCounts()[APIKeyOutcomeInsufficientScope]; c != 2 {
+		t.Errorf("insufficient_scope = %d, want 2", c)
+	}
+	// Blocked by email alone as well.
+	if err := e.srv.blocks.Remove(context.Background(), id, "cli:test"); err != nil {
+		t.Fatal(err)
+	}
+	wantStatus(t, e.do(tok, http.MethodGet, "/dashboard/api/policy", ""), http.StatusOK, "after the unblock")
+	if _, err := e.srv.blocks.Add(context.Background(), BlockEntry{Email: "ALICE@example.com"}, "cli:test"); err != nil {
+		t.Fatal(err)
+	}
+	wantStatus(t, e.do(tok, http.MethodGet, "/dashboard/api/policy", ""), http.StatusForbidden, "owner blocked by email")
+}
+
+// TestAPIKeyAuthorsUnderOwner: a key-made policy version is authored by the
+// owner with kind apikey, and a key-made block list entry is created_by
+// oidc:<owner>; the owner's own key cannot block the owner (isSelf).
+func TestAPIKeyAuthorsUnderOwner(t *testing.T) {
+	e := newKeyEnv(t, keyEnvOpts{versioned: true})
+	tok, _ := e.mint("alice", groupAdmin, "policy:write")
+	rec := e.doReq(tok, http.MethodPost, "/dashboard/api/policy", policyBody, func(r *http.Request) { r.Header.Set("If-Match", `"v1"`) })
+	wantStatus(t, rec, http.StatusOK, "versioned key write")
+	v := headVersion(t, e.srv)
+	if v.Version != 2 || v.Author.Sub != "alice" || v.Author.Kind != AuthorKindAPIKey || v.Author.Email != "alice@example.com" {
+		t.Errorf("head = v%d by %+v, want v2 by alice, kind apikey", v.Version, v.Author)
+	}
+
+	rec = e.do(tok, http.MethodPost, blockAPIPath, `{"sub":"someone-else","email":"x@corp.com"}`)
+	wantStatus(t, rec, http.StatusCreated, "key block add")
+	var created blockPostResp
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil || created.CreatedBy != "oidc:alice" {
+		t.Errorf("created_by = %q (%v), want oidc:alice", created.CreatedBy, err)
+	}
+	// isSelf (the guard against lifting one's own block) sees the owner, not the
+	// key's "apikey:<id>" subject.
+	ctx := WithPrincipal(context.Background(), keyPrincipal(apikeys.Key{ID: "k1", OwnerIss: keyOwnerIss, OwnerSub: "alice", OwnerEmail: "alice@example.com"}))
+	if !isSelf(ctx, BlockEntry{Sub: "alice"}) || !isSelf(ctx, BlockEntry{Email: "ALICE@example.com"}) {
+		t.Error("isSelf does not recognise the key's owner")
+	}
+	if isSelf(ctx, BlockEntry{Sub: "apikey:k1"}) || isSelf(ctx, BlockEntry{Sub: "someone-else"}) {
+		t.Error("isSelf matched something that is not the owner")
+	}
+}
+
+// TestAPIKeyHeaderRobustness: a key is recognised however the header is
+// spelled, and several Authorization values are refused.
+func TestAPIKeyHeaderRobustness(t *testing.T) {
+	e := newKeyEnv(t, keyEnvOpts{ratePerKey: 10000})
+	tok, _ := e.mint("alice", groupEditor, "policy:read")
+	for name, hdr := range map[string]string{
+		"lowercase scheme": "bearer " + tok, "mixed scheme": "BeArEr " + tok, "extra spaces": "Bearer   " + tok + "  ",
+	} {
+		rec := e.doReq("", http.MethodGet, "/dashboard/api/policy", "", func(r *http.Request) { r.Header.Set("Authorization", hdr) })
+		wantStatus(t, rec, http.StatusOK, name)
+	}
+	rec := e.doReq("", http.MethodGet, "/dashboard/api/policy", "", func(r *http.Request) {
+		r.Header.Add("Authorization", "Bearer "+tok)
+		r.Header.Add("Authorization", "Bearer other")
+	})
+	wantStatus(t, rec, http.StatusBadRequest, "two Authorization values")
+	rec = e.doReq("", http.MethodGet, "/dashboard/api/policy", "", func(r *http.Request) {
+		r.Header.Add("Authorization", "Bearer other")
+		r.Header.Add("Authorization", "Bearer "+tok)
+	})
+	wantStatus(t, rec, http.StatusBadRequest, "a key in the second value")
+
+	// The worker routes refuse a key in any Authorization value or spelling.
+	srv := New(Config{PolicyPath: writePolicyFile(t, "api.openai.com")})
+	h := srv.Handler()
+	for name, vals := range map[string][]string{
+		"lowercase":    {"bearer " + tok},
+		"padded":       {"Bearer    " + tok},
+		"second value": {"Bearer other", "Bearer " + tok},
+		"first value":  {"Bearer " + tok, "Bearer other"},
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/policy", nil)
+		for _, v := range vals {
+			req.Header.Add("Authorization", v)
+		}
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusUnauthorized {
+			t.Errorf("/policy with %s = %d, want 401", name, rr.Code)
+		}
+	}
+}
+
+// TestAPIKeySelfScopeKeepsRole: a ScopeSelf row still needs the owner's role.
+func TestAPIKeySelfScopeKeepsRole(t *testing.T) {
+	p := Principal{Kind: PrincipalAPIKey}
+	row := authzRow{MinRole: config.RoleEditor, Scope: apikeys.ScopeSelf}
+	if ok, _ := keyAuthorized(p, row, config.RoleViewer); ok {
+		t.Error("a viewer-owned key passed an editor ScopeSelf row")
+	}
+	if ok, _ := keyAuthorized(p, row, config.RoleEditor); !ok {
+		t.Error("an editor-owned key was refused a ScopeSelf row")
+	}
+}
+
+// TestStartAPIKeysRunOutlivesParent: Index.Run is stopped only by stop(), not
+// by cancelling the context it was started with, so last-use marks from
+// requests still in flight at shutdown reach the final flush.
+func TestStartAPIKeysRunOutlivesParent(t *testing.T) {
+	db := openKeysDB(t)
+	clk := clocktest.NewFake(time.Unix(1_800_000_000, 0))
+	logger, _ := testLogger()
+	ctx, cancel := context.WithCancel(context.Background())
+	st, ix, stop, err := startAPIKeys(ctx, db, newAPIKeyRegistry(), clk, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	base := ix.Polls()
+	deadline := time.Now().Add(10 * time.Second)
+	for ix.Polls() <= base {
+		if time.Now().After(deadline) {
+			t.Fatal("Run stopped polling when its parent context was cancelled")
+		}
+		clk.Advance(apikeys.DefaultPollInterval)
+		runtime.Gosched()
+	}
+	_, k, err := st.Create(context.Background(), apikeys.CreateParams{
+		Name: "late", OwnerIss: keyOwnerIss, OwnerSub: "alice", OwnerGroups: []string{"g"},
+		Scopes: []apikeys.Scope{"policy:read"}, TTL: 24 * time.Hour, MaxTTL: config.DefaultAPIKeyMaxTTL, MaxActive: 5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ix.MarkUsed(k.ID, clk.Now(), "192.0.2.9")
+	stop()
+	if got, err := st.Get(context.Background(), k.ID); err != nil || got.LastUsedIP != "192.0.2.9" {
+		t.Fatalf("after stop: %+v %v, want the in-flight use flushed", got, err)
 	}
 }
