@@ -208,9 +208,7 @@ func (a agentRegistryAPI) SetEnabled(ctx context.Context, id string, enabled boo
 		return dashboard.AgentView{}, a.failed(action, id, err)
 	}
 	a.metrics.inc(action, agentOutcomeOK)
-	details := AgentAuditDetails(&cur, out)
-	// Setting the status an agent already has is still this action.
-	details[adminaudit.DetailOp] = action
+	details := AgentStatusAuditDetails(cur, action)
 	adminaudit.Annotate(ctx, AgentAuditRef(id), details)
 	a.refresh()
 	return agentView(out), nil

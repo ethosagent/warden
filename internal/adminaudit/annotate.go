@@ -22,7 +22,7 @@ const (
 // RFC 7638 thumbprints and groups, each element percent-encoded and the list
 // cut at an element when it would not fit one value. Every list also has a
 // <key>Count (the full number of elements) and, when it was cut, a
-// <key>Sha256 (of the full sorted, encoded, comma-joined list) and
+// <key>Sha256 (of the full list, sorted by raw value before encoding, then percent-encoded and comma-joined) and
 // DetailTruncated "true". They name fields, ids and groups; never key material.
 const (
 	DetailChanged       = "changed"

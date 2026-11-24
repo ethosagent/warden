@@ -74,6 +74,10 @@ const (
 // writers that fit free-form text (an error's own words) into one.
 const MaxDetailValueLen = maxDetailValLen
 
+// MaxDetails is the most detail keys an entry accepts, exported so a writer can
+// budget its keys against it.
+const MaxDetails = maxDetails
+
 // ErrInvalidEntry is returned (wrapped, naming the field but never its value)
 // when an entry fails validation. Nothing is written.
 var ErrInvalidEntry = errors.New("adminaudit: invalid entry")

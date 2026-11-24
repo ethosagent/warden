@@ -48,8 +48,8 @@ func AgentAuditRef(id string) string { return "agent:" + id }
 //     survives, so a comma or a non-ASCII name stays distinct) and joined with
 //     a comma. A list that would not fit one 256-byte value is cut at an
 //     element; the full number is always in <key>Count, and a cut list also
-//     sets truncated "true" and <key>Sha256, the sha256 of the full sorted,
-//     encoded, comma-joined list, so a padded list cannot hide an addition.
+//     sets truncated "true" and <key>Sha256, the lowercase hex sha256 of the full
+//     list sorted by raw value before encoding, then encoded and comma-joined, so a padded list cannot hide an addition.
 //   - Empty values are omitted. A create and an update always carry the six
 //     counts; a status change carries no list.
 func AgentAuditDetails(before *agentreg.Agent, after agentreg.Agent) map[string]string {
@@ -82,6 +82,31 @@ func AgentAuditDetails(before *agentreg.Agent, after agentreg.Agent) map[string]
 	}
 	return d
 }
+
+// AgentStatusAuditDetails builds the audit details of a disable or enable: op
+// (disable or enable), the status the agent had and the one it was asked to
+// have, and nothing else. Setting the status an agent already has is still
+// this op, and no key or group list is emitted. before is the agent as the
+// client saw it.
+func AgentStatusAuditDetails(before agentreg.Agent, op string) map[string]string {
+	to := agentreg.StatusActive
+	if op == "disable" {
+		to = agentreg.StatusDisabled
+	}
+	return map[string]string{
+		adminaudit.DetailOp:         op,
+		adminaudit.DetailStatusFrom: string(before.Status),
+		adminaudit.DetailStatusTo:   string(to),
+	}
+}
+
+// middlewareReservedKeys is what the audit middleware may add to a row's
+// details (hash_error and reason), so a handler's own keys never push an entry
+// past adminaudit.MaxDetails and get the row dropped.
+const middlewareReservedKeys = 2
+
+// agentAuditMaxKeys is the most keys AgentAuditDetails may emit.
+const agentAuditMaxKeys = adminaudit.MaxDetails - middlewareReservedKeys
 
 func auditOp(before *agentreg.Agent, after agentreg.Agent) string {
 	switch {
