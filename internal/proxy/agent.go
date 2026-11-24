@@ -40,8 +40,9 @@ func (p *Proxy) AgentDisabled() bool { return p.agentDisabled.Load() }
 
 // SetSessionTracking makes every session register, anonymous tunnels included,
 // so CloseAgentSessions can cut them. A worker managed by a control plane turns
-// it on; a standalone worker never has a registry and pays nothing. Call it
-// before Serve.
+// it on; a standalone worker never has a registry and does not register
+// anonymous tunnels. (Every h1/h2 session already costs one map insert and
+// delete on the registry.) Call it before Serve.
 func (p *Proxy) SetSessionTracking(on bool) { p.trackAll.Store(on) }
 
 // trackSession reports whether a session for a connection with this identity
@@ -103,4 +104,21 @@ func (p *Proxy) CloseAgentSessions() {
 			_ = c.Close()
 		}
 	}
+}
+
+// refusedAtCreate writes the agent_disabled deny event for a session the
+// registry closed at creation and reports true: the caller returns without
+// dialing or forwarding a byte.
+func (p *Proxy) refusedAtCreate(sess *session, ci connIdentity, domain string, port int, proto string) bool {
+	if !sess.wasRefused() {
+		return false
+	}
+	p.emitDenyEvent(ci, analytics.Event{
+		Timestamp: time.Now(),
+		Domain:    domain,
+		Port:      port,
+		Protocol:  proto,
+		Reason:    string(denyreason.AgentDisabled),
+	})
+	return true
 }

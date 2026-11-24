@@ -96,6 +96,9 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 			sess = p.sessions.newSession("tcp", domain, port, true, clientConn)
 			sess.bind(ci)
 			defer sess.release()
+			if p.refusedAtCreate(sess, ci, domain, port, "tcp") {
+				return
+			}
 		}
 		remote, dialErr := p.dialFunc("tcp", net.JoinHostPort(domain, fmt.Sprintf("%d", port)))
 		if dialErr != nil {
@@ -215,6 +218,17 @@ func (p *Proxy) terminateAndDispatch(clientConn net.Conn, firstBytes io.Reader, 
 		proto = "raw"
 	}
 	p.reach(PathRawTLS)
+	// Register like a tunnel so a block-list or agent cut reaches this path, and
+	// never dial for a session the registry already refused.
+	var sess *session
+	if p.trackSession(ci) {
+		sess = p.sessions.newSession(proto, domain, port, true, tlsConn)
+		sess.bind(ci)
+		defer sess.release()
+		if p.refusedAtCreate(sess, ci, domain, port, proto) {
+			return
+		}
+	}
 	remote, dialErr := p.dialTLS("tcp", net.JoinHostPort(domain, fmt.Sprintf("%d", port)), p.upstreamTLSConfig(domain))
 	if dialErr != nil {
 		// A dial the SSRF-safe dialer refused is a policy decision: audit it
@@ -224,6 +238,7 @@ func (p *Proxy) terminateAndDispatch(clientConn net.Conn, firstBytes io.Reader, 
 		return
 	}
 	defer remote.Close()
+	sess.addCloser(remote)
 	p.recordEvent(ci, analytics.Event{
 		Timestamp: time.Now(),
 		Domain:    domain,

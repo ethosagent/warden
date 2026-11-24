@@ -1005,14 +1005,9 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 			liveCompliance:   liveCompliance,
 			liveCacheTTL:     liveCacheTTL,
 		}
-		go longPollControlPlane(ctx, clk, controlPlane, evaluator, pol.ControlPlane.LongPollWait, logger, onPolicyApplied(func() {
-			// The agent switch runs first: it flips the flag and cuts every
-			// session before the settings rebuild below can take any time.
-			if remote, gErr := controlPlane.GetPolicy(); gErr == nil {
-				gate.apply(remote)
-			}
-			applier.Apply()
-		}, pxy.CloseBlockedSessions))
+		// The long-poll swaps the evaluator through gatedEvaluator, so the agent
+		// switch flips (and cuts sessions) BEFORE the new allow policy is live.
+		go longPollControlPlane(ctx, clk, controlPlane, gatedEvaluator{PolicyEvaluator: evaluator, gate: gate}, pol.ControlPlane.LongPollWait, logger, onPolicyApplied(applier.Apply, pxy.CloseBlockedSessions))
 		go heartbeatControlPlane(ctx, clk, controlPlane, pol.ControlPlane.HeartbeatInterval, logger)
 	}
 	if syncWorker != nil {

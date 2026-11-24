@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"crypto/tls"
 	"io"
 	"net"
 	"net/http"
@@ -322,5 +323,121 @@ func TestAgentDisabledTransparentMode(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodGet, "https://"+invHost+"/ok", nil)
 	if _, st, err := e.doH1(invHost, req); err != nil || st != 200 {
 		t.Fatalf("after enable: status %d err %v", st, err)
+	}
+}
+
+// rawTLSUpstream makes e's TLS dial return a TLS conn to an in-memory server
+// that swallows what it is sent: an upstream for non-HTTP bytes.
+func rawTLSUpstream(e *idEnv) {
+	e.p.dialTLS = func(_, _ string, c *tls.Config) (*tls.Conn, error) {
+		e.dials.Add(1)
+		cc, sc := net.Pipe()
+		go func() {
+			srv := tls.Server(sc, e.be.srv.TLS)
+			defer func() { _ = srv.Close() }()
+			if srv.Handshake() == nil {
+				_, _ = io.Copy(io.Discard, srv)
+			}
+		}()
+		tc := tls.Client(cc, &tls.Config{InsecureSkipVerify: true, NextProtos: c.NextProtos})
+		return tc, tc.Handshake()
+	}
+}
+
+// openRawTLS opens a CONNECT, handshakes TLS and sends bytes that are neither
+// HTTP nor h2, so the worker forwards them raw; it waits for the upstream dial.
+func openRawTLS(t *testing.T, e *idEnv, connectExtra string) *tls.Conn {
+	t.Helper()
+	conn, br, status := e.connect(connectExtra)
+	if !strings.Contains(status, "200") {
+		t.Fatalf("CONNECT = %q", status)
+	}
+	tc := e.tlsOver(conn, br)
+	_, _ = io.WriteString(tc, "\x01\x02\x03\x04 not http at all\n")
+	deadline := time.Now().Add(5 * time.Second)
+	for e.dials.Load() < 1 && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if e.dials.Load() < 1 {
+		t.Fatal("the raw TLS upstream was never dialed")
+	}
+	return tc
+}
+
+// TestAgentDisabledCutsRawTLS: a raw TLS forward (non-HTTP bytes inside a
+// terminated CONNECT) is registered, so the agent cut closes it, and so does
+// the block-list cut (same registry).
+func TestAgentDisabledCutsRawTLS(t *testing.T) {
+	t.Run("agent", func(t *testing.T) {
+		e := newBlockEnv(t, IdentityModeOff)
+		e.p.SetSessionTracking(true)
+		rawTLSUpstream(e.idEnv)
+		tc := openRawTLS(t, e.idEnv, "")
+		e.p.SetAgentDisabled(true)
+		e.p.CloseAgentSessions()
+		assertConnCut(t, tc.NetConn(), tc)
+		evs := waitAgentDisabledEvents(t, e.store, 1)
+		if len(evs) != 1 || evs[0].Domain != idHost {
+			t.Fatalf("events = %+v", e.store.snapshot())
+		}
+	})
+	t.Run("blocklist", func(t *testing.T) {
+		e := newBlockEnv(t, IdentityModeAttribute)
+		rawTLSUpstream(e.idEnv)
+		tc := openRawTLS(t, e.idEnv, "Proxy-Authorization: "+basicAuth("tok-u1")+"\r\n")
+		e.applyBlock(config.BlockedUser{Sub: "u1"})
+		assertConnCut(t, tc.NetConn(), tc)
+		if n := len(waitBlockedEvents(t, e.store, 1)); n != 1 {
+			t.Fatalf("user_blocked events = %d, want 1", n)
+		}
+	})
+}
+
+// TestAgentDisabledCutsBusyRequest: a request in flight on an HTTP/1 session
+// (a long upload or download) is cut at once by the agent switch, unlike the
+// block-list cut which lets it finish.
+func TestAgentDisabledCutsBusyRequest(t *testing.T) {
+	e := newBlockEnv(t, IdentityModeOff)
+	e.be.hold = make(chan struct{})
+	e.be.arrived = make(chan struct{}, 1)
+	defer close(e.be.hold)
+	c := e.h1("")
+	_, _ = io.WriteString(c.tc, "GET /x HTTP/1.1\r\nHost: "+idHost+"\r\n\r\n")
+	select {
+	case <-e.be.arrived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("request never reached the backend")
+	}
+	e.p.SetAgentDisabled(true)
+	e.p.CloseAgentSessions()
+	assertConnCut(t, c.tc.NetConn(), c.br)
+	if n := len(waitAgentDisabledEvents(t, e.store, 1)); n != 1 {
+		t.Fatalf("agent_disabled events = %d, want 1", n)
+	}
+}
+
+// TestAgentDisabledRefusedSessionNeverDials: a tunnel whose session the
+// registry refused at creation (it passed the CONNECT check just before the
+// flip) is closed with a deny event and no upstream dial.
+func TestAgentDisabledRefusedSessionNeverDials(t *testing.T) {
+	e := newRawTunnelEnv(t, func(c net.Conn) { _, _ = io.Copy(io.Discard, c) })
+	e.p.SetSessionTracking(true)
+	e.p.sessions.refuseNew() // the flag itself is still off: the race window
+	var dials int
+	inner := e.p.dialFunc
+	e.p.dialFunc = func(a, b string) (net.Conn, error) { dials++; return inner(a, b) }
+	conn, err := net.Dial("tcp", e.p.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	_, _ = io.WriteString(conn, "CONNECT tunnel.test:443 HTTP/1.1\r\nHost: tunnel.test:443\r\n\r\n")
+	_, _ = io.Copy(io.Discard, conn)
+	if evs := waitAgentDisabledEvents(t, e.store, 1); len(evs) != 1 {
+		t.Fatalf("events = %+v", e.store.snapshot())
+	}
+	if dials != 0 {
+		t.Errorf("dials = %d, want 0", dials)
 	}
 }

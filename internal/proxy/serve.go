@@ -496,6 +496,9 @@ func (p *Proxy) tunnel(client net.Conn, br *bufio.Reader, domain string, port in
 		sess = p.sessions.newSession("tcp", domain, port, true, client)
 		sess.bind(ci)
 		defer sess.release()
+		if p.refusedAtCreate(sess, ci, domain, port, "tcp") {
+			return
+		}
 	}
 	remote, err := p.dialFunc("tcp", net.JoinHostPort(domain, fmt.Sprintf("%d", port)))
 	if err != nil {

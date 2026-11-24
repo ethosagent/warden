@@ -2,11 +2,13 @@ package worker
 
 import (
 	"bytes"
+	"io"
 	"log/slog"
 	"strings"
 	"testing"
 
 	"github.com/ethosagent/warden/internal/config"
+	"github.com/ethosagent/warden/internal/proxy"
 )
 
 func registered(id, status string) config.RegisteredAgent {
@@ -85,5 +87,47 @@ func TestAgentDisabledGate(t *testing.T) {
 	}
 	if strings.Contains(buf.String(), strings.Repeat("a", 43)) {
 		t.Error("a thumbprint reached the logs")
+	}
+}
+
+// TestAgentGateFirstApplyDisabled: a fresh gate whose first apply is a disabled
+// entry (the first pull after a fail-closed boot) disables the proxy and the
+// registry refuses a session opened afterwards.
+func TestAgentGateFirstApplyDisabled(t *testing.T) {
+	a, _, _ := newTestApplier(t)
+	g := newAgentGate(a.p, "claude-code", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	g.apply(config.Policy{RegisteredAgents: []config.RegisteredAgent{registered("claude-code", config.RegisteredAgentDisabled)}})
+	if !a.p.AgentDisabled() {
+		t.Fatal("AgentDisabled = false after a first apply with a disabled entry")
+	}
+}
+
+// spyEvaluator records whether the agent switch was already on when the policy
+// swap happened.
+type spyEvaluator struct {
+	proxy.PolicyEvaluator
+	p              *proxy.Proxy
+	disabledAtSwap bool
+	swapped        bool
+}
+
+func (s *spyEvaluator) Replace(config.Policy) {
+	s.disabledAtSwap, s.swapped = s.p.AgentDisabled(), true
+}
+
+// TestGatedEvaluatorAppliesGateBeforeSwap: a pull that both allows traffic and
+// disables the bound agent flips the switch before the new policy is live, so
+// there is no moment where the destination is reachable.
+func TestGatedEvaluatorAppliesGateBeforeSwap(t *testing.T) {
+	a, _, _ := newTestApplier(t)
+	g := newAgentGate(a.p, "claude-code", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	spy := &spyEvaluator{p: a.p}
+	ev := gatedEvaluator{PolicyEvaluator: spy, gate: g}
+	ev.Replace(config.Policy{
+		Allowlist:        []config.AllowlistEntry{{Domain: "api.example.com"}},
+		RegisteredAgents: []config.RegisteredAgent{registered("claude-code", config.RegisteredAgentDisabled)},
+	})
+	if !spy.swapped || !spy.disabledAtSwap {
+		t.Fatalf("swapped=%v, switch on at swap=%v; want the switch on before the swap", spy.swapped, spy.disabledAtSwap)
 	}
 }

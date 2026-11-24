@@ -56,3 +56,17 @@ func (g *agentGate) apply(pol config.Policy) {
 		g.logger.Info("bound agent is enabled in the registry; traffic resumes", "agent", g.agentID)
 	}
 }
+
+// gatedEvaluator applies the agent gate before every policy swap: a pull that
+// both allows a destination and disables the bound agent (the first pull after
+// a fail-closed boot included) never has a moment where the destination is
+// reachable.
+type gatedEvaluator struct {
+	proxy.PolicyEvaluator
+	gate *agentGate
+}
+
+func (g gatedEvaluator) Replace(p config.Policy) {
+	g.gate.apply(p)
+	g.PolicyEvaluator.Replace(p)
+}

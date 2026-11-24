@@ -14,9 +14,9 @@ import (
 )
 
 // buildJudge constructs the inline judge when judge.enabled, returning the
-// judge and the agent id it was given (resolveAgentID's result). When the judge is
-// disabled it returns (nil, "", nil) and the proxy default-denies NoMatch as
-// before. Config has already validated cross-field requirements; here we only
+// judge and the agent id it was given (resolveAgentID's result; it derives
+// nothing itself). When the judge is disabled it returns (nil, agentID, nil)
+// and the proxy default-denies NoMatch as before. Config has already validated cross-field requirements; here we only
 // resolve the API key from its env var.
 func buildJudge(pol config.Policy, agentID string, logger *slog.Logger) (proxy.Judge, string, error) {
 

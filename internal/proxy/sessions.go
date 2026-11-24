@@ -67,6 +67,7 @@ type session struct {
 	closing       bool // a block matched: the deny event is written, the cut is done or pending
 	closed        bool // the closers have run
 	released      bool
+	refused       bool // created while the registry refused sessions: already closed
 }
 
 // newSession builds an unregistered session; it joins the registry when bind
@@ -77,7 +78,7 @@ func (r *sessionRegistry) newSession(proto, domain string, port int, interruptib
 	r.all[s] = struct{}{}
 	refused := r.refuse
 	if refused {
-		s.closing, s.closed = true, true
+		s.closing, s.closed, s.refused = true, true, true
 	}
 	r.mu.Unlock()
 	if refused {
@@ -250,14 +251,15 @@ func (r *sessionRegistry) takeBlocked(subBlocked, emailBlocked func(string) bool
 			}
 		}
 	}
-	return r.markLocked(hit, func(id connIdentity) bool { return claimsBlocked(id.Claims) })
+	return r.markLocked(hit, false, func(id connIdentity) bool { return claimsBlocked(id.Claims) })
 }
 
 // markLocked marks every not-yet-closing session in hit as closing and returns
 // what the caller needs to write its deny event and close it. pick chooses,
 // among a session's bound identities, the one the event names (the first when
-// none matches). r.mu must be held.
-func (r *sessionRegistry) markLocked(hit map[*session]struct{}, pick func(connIdentity) bool) []closedSession {
+// none matches). With force a busy HTTP/1 session is cut at once too, so a
+// streaming upload or download stops with it. r.mu must be held.
+func (r *sessionRegistry) markLocked(hit map[*session]struct{}, force bool, pick func(connIdentity) bool) []closedSession {
 	var out []closedSession
 	for s := range hit {
 		if s.closing {
@@ -274,7 +276,7 @@ func (r *sessionRegistry) markLocked(hit map[*session]struct{}, pick func(connId
 				break
 			}
 		}
-		if s.interruptible || !s.busy {
+		if force || s.interruptible || !s.busy {
 			s.closed = true
 			cs.closers = append(cs.closers, s.closers...)
 		}
@@ -290,7 +292,7 @@ func (r *sessionRegistry) takeAll() []closedSession {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.refuse = true
-	return r.markLocked(r.all, func(connIdentity) bool { return false })
+	return r.markLocked(r.all, true, func(connIdentity) bool { return false })
 }
 
 // refuseNew makes the registry close every session created from now on, until
@@ -337,3 +339,7 @@ func (p *Proxy) CloseBlockedSessions() {
 		p.cfg.Metrics.RecordBlocklistSessionsClosed(len(cut))
 	}
 }
+
+// wasRefused reports whether the registry closed this session at creation
+// (the bound agent is disabled). The caller must not dial or forward.
+func (s *session) wasRefused() bool { return s != nil && s.refused }
