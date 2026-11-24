@@ -1,9 +1,11 @@
 package tokensvc_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
@@ -323,5 +325,29 @@ func TestExchangeCountsEveryRefusal(t *testing.T) {
 	}
 	if m.Duration().Count != 2 {
 		t.Errorf("duration observations = %d, want 2", m.Duration().Count)
+	}
+}
+
+// A denial whose record cannot be written is still a denial, and is logged
+// once per reason per minute with the error's type and never its text.
+func TestDeniedRecordFailureIsLogged(t *testing.T) {
+	var buf bytes.Buffer
+	rec := &memRecorder{err: errors.New("disk-secret-text")}
+	e := newSvcEnvWith(t, func(c *tokensvc.Config) {
+		c.Recorder, c.Logger = rec, slog.New(slog.NewTextHandler(&buf, nil))
+	})
+	e.blocks.subs["user-1"] = true
+	for i := 0; i < 3; i++ {
+		_, err := e.svc.Exchange(context.Background(), e.req())
+		wantErr(t, err, tokensvc.CodeInvalidGrant, tokensvc.ReasonUserBlocked)
+	}
+	out := buf.String()
+	if strings.Count(out, "token_event_record_failed") != 1 || !strings.Contains(out, "user_blocked") || strings.Contains(out, "disk-secret-text") {
+		t.Fatalf("log = %q, want one warning with the reason and no error text", out)
+	}
+	e.now = e.now.Add(time.Minute)
+	_, _ = e.svc.Exchange(context.Background(), e.req())
+	if strings.Count(buf.String(), "token_event_record_failed") != 2 {
+		t.Errorf("no new warning after a minute: %q", buf.String())
 	}
 }

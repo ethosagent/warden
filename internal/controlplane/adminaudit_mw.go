@@ -112,12 +112,7 @@ func newAdminAuditor(rec adminaudit.Recorder, probe func(context.Context) error,
 		clock:          clk,
 		logger:         logger,
 	}
-	for _, c := range cc.TrustedProxies {
-		// Validated at config load; a bad entry here is skipped, never trusted.
-		if p, err := netip.ParsePrefix(c); err == nil {
-			a.trusted = append(a.trusted, p.Masked())
-		}
-	}
+	a.trusted = trustedPrefixes(cc.TrustedProxies)
 	return a
 }
 
@@ -401,6 +396,23 @@ func newRequestID() string {
 }
 
 // --- client ip ---
+
+// trustedPrefixes parses console.trustedProxies. Config validation already
+// refused a bad entry; one that still does not parse is skipped, never trusted.
+// The admin audit (clientIP below) and the token endpoint's rate limiter
+// (tokenClientKey) share this list but apply different client-IP rules on
+// purpose: the audit records the left-most X-Forwarded-For hop as the client's
+// claim, while the limiter walks from the right past trusted hops, because a
+// limit key must not be something the client can choose.
+func trustedPrefixes(cidrs []string) []netip.Prefix {
+	var out []netip.Prefix
+	for _, c := range cidrs {
+		if p, err := netip.ParsePrefix(c); err == nil {
+			out = append(out, p.Masked())
+		}
+	}
+	return out
+}
 
 // clientIP is the request's peer address, unless the peer is inside a
 // trusted proxy CIDR: then it is the left-most valid X-Forwarded-For address

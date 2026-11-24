@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -95,6 +96,9 @@ type Config struct {
 	// answers event_store_unavailable and no token is released. nil records
 	// nothing (tests); the control plane always sets it.
 	Recorder Recorder
+	// Logger receives the warning for a denial whose record could not be
+	// written. nil logs nothing.
+	Logger *slog.Logger
 	// Metrics counts issued tokens, denials and durations. nil is a no-op.
 	Metrics *Metrics
 	// Now is the clock. Rand is the randomness source for jti and sid ids;
@@ -107,6 +111,9 @@ type Config struct {
 // It is safe for concurrent use.
 type Service struct {
 	cfg Config
+
+	warnMu   sync.Mutex
+	warnLast map[Reason]time.Time
 }
 
 // New validates cfg and returns the service.
@@ -263,11 +270,13 @@ func (s *Service) Exchange(ctx context.Context, req ExchangeRequest) (*Issued, e
 			err = &cp
 			if st.verified {
 				// A failed write of a denial changes nothing for the caller,
-				// who gets the denial either way; the store's own errors are
-				// logged by the recorder.
-				_ = s.record(ctx, &st, Event{
+				// who gets the denial either way; the failure is logged here,
+				// without the store's error text, once per reason per minute.
+				if rerr := s.record(ctx, &st, Event{
 					Outcome: OutcomeDenied, Reason: te.Reason, AgentID: verifiedAgent(&st), IdPIss: st.idpIss, Sub: st.sub,
-				})
+				}); rerr != nil {
+					s.warnRecordFailed(te.Reason, rerr)
+				}
 			}
 		}
 	}
@@ -283,6 +292,27 @@ func (s *Service) Exchange(ctx context.Context, req ExchangeRequest) (*Issued, e
 	}
 	s.cfg.Metrics.Observe(s.cfg.Now().Sub(start))
 	return issued, err
+}
+
+// warnRecordFailed logs a failed denial record: the closed reason and the
+// error's type, never its text. At most once per reason per minute (the
+// reason set is closed, so the map is bounded).
+func (s *Service) warnRecordFailed(r Reason, err error) {
+	if s.cfg.Logger == nil {
+		return
+	}
+	now := s.cfg.Now()
+	s.warnMu.Lock()
+	if last, ok := s.warnLast[r]; ok && now.Sub(last) < time.Minute {
+		s.warnMu.Unlock()
+		return
+	}
+	if s.warnLast == nil {
+		s.warnLast = map[Reason]time.Time{}
+	}
+	s.warnLast[r] = now
+	s.warnMu.Unlock()
+	s.cfg.Logger.Warn("token_event_record_failed", "reason", string(r), "error_type", fmt.Sprintf("%T", err))
 }
 
 // exchangeState is what the exchange learns on the way, for recording.

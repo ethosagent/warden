@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/netip"
 	"strings"
 	"time"
 
@@ -224,18 +223,6 @@ func (s *Server) runTokenRetention(ctx context.Context) {
 	}()
 }
 
-// trustedPrefixes parses console.trustedProxies; an entry that does not parse
-// (config validation already refused it) is skipped, never trusted.
-func trustedPrefixes(cidrs []string) []netip.Prefix {
-	var out []netip.Prefix
-	for _, c := range cidrs {
-		if p, err := netip.ParsePrefix(c); err == nil {
-			out = append(out, p.Masked())
-		}
-	}
-	return out
-}
-
 // newTokenService assembles the token service on the open state database:
 // the agent registry, the replay and session tables, the block list, the IdP
 // verifier of the served identity block (narrowed to tokenService.allowedAZP)
@@ -302,6 +289,7 @@ func newTokenService(tc config.TokenServiceConfig, id config.IdentitySettings, s
 		UserLimiter:     userLim,
 		Recorder:        events,
 		Metrics:         metrics,
+		Logger:          logger,
 		Resolvers:       map[string]tokensvc.SubjectResolver{tokensvc.TokenTypeIDToken: tokensvc.NewIDTokenResolver(idp)},
 		Now:             clk.Now,
 		Rand:            rand.Reader,

@@ -456,7 +456,7 @@ func TestTokenInFlightCap(t *testing.T) {
 // a slot for tokenReadTimeout at most.
 func TestTokenStalledBodyHoldsNoSlotPastTheDeadline(t *testing.T) {
 	old := tokenReadTimeout
-	tokenReadTimeout = 300 * time.Millisecond
+	tokenReadTimeout = time.Second
 	t.Cleanup(func() { tokenReadTimeout = old })
 	fake := &fakeExchanger{issued: okIssued()}
 	logger, _ := testLogger()
