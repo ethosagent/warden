@@ -311,17 +311,17 @@ func TestControlPlaneAgentAudit(t *testing.T) {
 		t.Fatalf("audit rows = %v, want %v", rows, want)
 	}
 	for i, r := range rows {
-		if r[0] != want[i] || r[1] != "agent:a1" {
+		if r[0] != want[i] || r[1] != controlplane.AgentAuditRef("a1") {
 			t.Errorf("row %d = %v", i, r)
 		}
 		if strings.Contains(r[2], x1) || strings.Contains(r[2], x2) || strings.Contains(r[2], `"x"`) {
 			t.Errorf("row %d details leak key material: %s", i, r[2])
 		}
 	}
-	if !strings.Contains(rows[1][2], "groups_added") || !strings.Contains(rows[1][2], "kids_added") {
+	if !strings.Contains(rows[1][2], "groupsAdded") || !strings.Contains(rows[1][2], "kidsAdded") || !strings.Contains(rows[1][2], "jktsAdded") {
 		t.Errorf("update details = %s", rows[1][2])
 	}
-	if !strings.Contains(rows[2][2], "status_from") || !strings.Contains(rows[2][2], "disabled") {
+	if !strings.Contains(rows[2][2], "statusFrom") || !strings.Contains(rows[2][2], "disabled") {
 		t.Errorf("disable details = %s", rows[2][2])
 	}
 	db, err := cpstate.Open(context.Background(), filepath.Join(stateDir, adminaudit.StateDBFileName), controlplane.StateMigrations())

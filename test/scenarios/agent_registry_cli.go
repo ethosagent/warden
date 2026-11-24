@@ -110,7 +110,7 @@ func agentRegistryCLI(t *testing.T, h *harness.H) {
 			t.Errorf("audit details carry a key coordinate: %s", r.Details)
 		}
 	}
-	if !strings.Contains(rows[1].Details, `"status_to":"disabled"`) {
+	if !strings.Contains(rows[1].Details, `"statusTo":"disabled"`) {
 		t.Errorf("disable details = %s", rows[1].Details)
 	}
 }

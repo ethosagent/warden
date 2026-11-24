@@ -6,6 +6,8 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"maps"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,6 +15,7 @@ import (
 	"github.com/ethosagent/warden/internal/adminaudit"
 	"github.com/ethosagent/warden/internal/agentreg"
 	agentregsqlite "github.com/ethosagent/warden/internal/agentreg/adapters/sqlite"
+	"github.com/ethosagent/warden/internal/agentreg/agentregtest"
 	"github.com/ethosagent/warden/internal/cpstate"
 	"github.com/ethosagent/warden/internal/keys"
 )
@@ -113,5 +116,46 @@ func TestAgentCLIUndoFailureReportsBoth(t *testing.T) {
 	_, err := h.register(context.Background(), agentreg.Agent{ID: "a1", Keys: []agentreg.Key{agentKey(t)}, AllowedGroups: []string{"g1"}})
 	if err == nil || !errors.Is(err, agentreg.ErrConflict) || !strings.Contains(err.Error(), "audit store unavailable") {
 		t.Fatalf("err = %v, want both the audit failure and the conflict", err)
+	}
+}
+
+type capturingRecorder struct{ in []adminaudit.Input }
+
+func (c *capturingRecorder) Record(_ context.Context, in adminaudit.Input) (adminaudit.Entry, error) {
+	c.in = append(c.in, in)
+	return adminaudit.Entry{}, nil
+}
+
+// TestAgentCLIRowMatchesAPIRow: a create through the CLI and one through the
+// admin API for the same input record the same action, target, target_ref and
+// details; only the actor and auth method (stamped by the recorder) differ.
+func TestAgentCLIRowMatchesAPIRow(t *testing.T) {
+	e := newOIDCAuditEnv(t)
+	admin := e.session(t, groupAdmin)
+	rec := e.send(admin, "", http.MethodPost, agentsAPIPath, agentJSON(t, "claude-code", "k1", "warden-agents"))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("API create = %d %s", rec.Code, rec.Body)
+	}
+	api := lastRow(t, e, 1)
+
+	h, _ := failingAgentCLI(t)
+	cap := &capturingRecorder{}
+	h.rec = cap
+	if _, err := h.register(context.Background(), agentreg.Agent{
+		ID: "claude-code", DisplayName: "Agent claude-code",
+		Keys:          []agentreg.Key{{JWK: agentregtest.Ed25519JWK(t, "k1")}},
+		AllowedGroups: []string{"warden-agents"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(cap.in) != 1 {
+		t.Fatalf("CLI recorded %d rows, want 1", len(cap.in))
+	}
+	cli := cap.in[0]
+	if cli.Action != api.Action || cli.Target != api.Target || cli.TargetRef != api.TargetRef || cli.Outcome != api.Outcome {
+		t.Errorf("CLI row %+v != API row %+v", cli, api)
+	}
+	if !maps.Equal(cli.Details, api.Details) {
+		t.Errorf("details differ:\nCLI %v\nAPI %v", cli.Details, api.Details)
 	}
 }

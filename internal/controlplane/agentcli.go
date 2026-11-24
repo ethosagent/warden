@@ -9,26 +9,11 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"sort"
-	"strings"
 
 	"github.com/ethosagent/warden/internal/adminaudit"
 	"github.com/ethosagent/warden/internal/agentreg"
 	agentregsqlite "github.com/ethosagent/warden/internal/agentreg/adapters/sqlite"
 	"github.com/ethosagent/warden/internal/cpstate"
-)
-
-// Admin audit vocabulary of the agent registry's writes: one target, one
-// action per kind of write, and a details allowlist (changed field names, kids
-// and groups added or removed, status from/to) that never carries a JWK
-// coordinate. Local for now: once the admin API (W-P2-AREG-02) lands its
-// shared helper, this file switches to it.
-const (
-	auditTargetAgents  = "agents"
-	actionAgentCreate  = "agent.create"
-	actionAgentUpdate  = "agent.update"
-	actionAgentDisable = "agent.disable"
-	actionAgentEnable  = "agent.enable"
 )
 
 // maxAgentJWKFileBytes bounds a --jwk-file read: a JWKS of two keys is well
@@ -127,7 +112,7 @@ func (h *agentCLI) register(ctx context.Context, a agentreg.Agent) (agentreg.Age
 	if err != nil {
 		return agentreg.Agent{}, err
 	}
-	auditErr := h.record(ctx, actionAgentCreate, got.ID, agentAuditDetails(agentreg.Agent{}, got))
+	auditErr := h.record(ctx, AgentActionCreate, got.ID, AgentAuditDetails(nil, got))
 	if auditErr == nil {
 		return got, nil
 	}
@@ -174,7 +159,7 @@ func (h *agentCLI) update(ctx context.Context, id string, revision int64, change
 	if err != nil {
 		return agentreg.Agent{}, err
 	}
-	auditErr := h.record(ctx, actionAgentUpdate, got.ID, agentAuditDetails(cur, got))
+	auditErr := h.record(ctx, AgentActionUpdate, got.ID, AgentAuditDetails(&cur, got))
 	if auditErr == nil {
 		return got, nil
 	}
@@ -208,11 +193,11 @@ func (h *agentCLI) setStatus(ctx context.Context, id string, status agentreg.Sta
 	if err != nil {
 		return agentreg.Agent{}, err
 	}
-	action := actionAgentEnable
+	action := AgentActionEnable
 	if status == agentreg.StatusDisabled {
-		action = actionAgentDisable
+		action = AgentActionDisable
 	}
-	auditErr := h.record(ctx, action, got.ID, agentAuditDetails(cur, got))
+	auditErr := h.record(ctx, action, got.ID, AgentAuditDetails(&cur, got))
 	if auditErr == nil {
 		return got, nil
 	}
@@ -252,7 +237,7 @@ func (h *agentCLI) record(ctx context.Context, action, id string, details map[st
 		return nil
 	}
 	_, err := h.rec.Record(ctx, adminaudit.Input{
-		Action: action, Target: auditTargetAgents, TargetRef: "agent:" + id,
+		Action: action, Target: AgentAuditTarget, TargetRef: AgentAuditRef(id),
 		Details: details, Outcome: adminaudit.OutcomeOK,
 	})
 	return err
@@ -293,81 +278,4 @@ func openAgentCLI(ctx context.Context, stateDir, keyFile string, notice io.Write
 			_ = closeAudit()
 		}
 	}}, nil
-}
-
-// agentAuditDetails is the details allowlist of an agent write: the names of
-// the changed fields, the kids and groups added and removed, and the status
-// from/to. before is the zero Agent for a create. Nothing from a JWK but its
-// kid appears.
-func agentAuditDetails(before, after agentreg.Agent) map[string]string {
-	d := map[string]string{}
-	var changed []string
-	if before.DisplayName != after.DisplayName {
-		changed = append(changed, "display_name")
-	}
-	bk, ak := agentKIDs(before), agentKIDs(after)
-	if !slices.Equal(bk, ak) || !slices.Equal(agentJKTs(before), agentJKTs(after)) {
-		changed = append(changed, "keys")
-	}
-	if added, removed := diffSets(bk, ak); len(added) > 0 || len(removed) > 0 {
-		setDetail(d, "kids_added", added)
-		setDetail(d, "kids_removed", removed)
-	}
-	bg, ag := sortedCopy(before.AllowedGroups), sortedCopy(after.AllowedGroups)
-	if added, removed := diffSets(bg, ag); len(added) > 0 || len(removed) > 0 {
-		changed = append(changed, "allowed_groups")
-		setDetail(d, "groups_added", added)
-		setDetail(d, "groups_removed", removed)
-	}
-	if !slices.Equal(sortedCopy(before.AllowedScopes), sortedCopy(after.AllowedScopes)) {
-		changed = append(changed, "allowed_scopes")
-	}
-	if before.Status != after.Status {
-		changed = append(changed, "status")
-		d["status_from"] = string(before.Status)
-		d["status_to"] = string(after.Status)
-	}
-	if len(changed) > 0 {
-		d["fields"] = strings.Join(changed, ",")
-	}
-	return d
-}
-
-func agentKIDs(a agentreg.Agent) []string {
-	out := make([]string, 0, len(a.Keys))
-	for _, k := range a.Keys {
-		out = append(out, k.KID)
-	}
-	sort.Strings(out)
-	return out
-}
-
-func agentJKTs(a agentreg.Agent) []string { return agentreg.Thumbprints(a) }
-
-func sortedCopy(in []string) []string {
-	out := slices.Clone(in)
-	sort.Strings(out)
-	return out
-}
-
-// diffSets returns the members only in after (added) and only in before
-// (removed); both inputs are sorted.
-func diffSets(before, after []string) (added, removed []string) {
-	for _, v := range after {
-		if !slices.Contains(before, v) {
-			added = append(added, v)
-		}
-	}
-	for _, v := range before {
-		if !slices.Contains(after, v) {
-			removed = append(removed, v)
-		}
-	}
-	return added, removed
-}
-
-func setDetail(d map[string]string, name string, vals []string) {
-	if len(vals) > 0 {
-		d[name] = strings.Join(vals, ",")
-	}
 }
