@@ -112,10 +112,10 @@ INSERT INTO events (ts, domain, port, protocol, method, decision) SELECT ?+i, 'h
 }
 
 // A 100k-event scan never holds up ingest. The proof is ordering, not latency:
-// the scan is parked inside its callback (mid-scan, on page boundaries) while
-// the test ingests on the read/write handle. Those ingests must all complete,
-// with no SQLITE_BUSY, before the scan is allowed to resume. If a scan blocked
-// writers, an ingest would hang here and the test would time out.
+// the scan is parked (via replayScanRowHook) while its page's rows are still
+// open on the read-only handle, and the test ingests on the read/write handle.
+// Those ingests must all complete, with no SQLITE_BUSY, before the scan is
+// released. If an open read blocked writers, an ingest would error or hang here.
 func TestScanReplayEvents_DoesNotBlockIngest(t *testing.T) {
 	s, err := NewFleetSQLiteStore(filepath.Join(t.TempDir(), "fleet.db"), 0, 1_000_000)
 	if err != nil {
@@ -125,25 +125,29 @@ func TestScanReplayEvents_DoesNotBlockIngest(t *testing.T) {
 	const total = 100_000
 	seedEvents(t, s, total)
 
-	// The scan parks at these delivered-event counts: the very first event and
-	// the first event of the third page.
-	parkAt := map[int]bool{0: true, 2 * replayPageSize: true}
-	parked := make(chan int)
+	// Park on the first and third page (hook calls 1 and 3).
+	parked := make(chan struct{})
 	resume := make(chan struct{})
+	calls := 0
+	replayScanRowHook = func() {
+		calls++
+		if calls == 1 || calls == 3 {
+			parked <- struct{}{}
+			<-resume
+		}
+	}
+	t.Cleanup(func() { replayScanRowHook = nil })
+
 	done := make(chan error, 1)
-	var delivered int
+	delivered := 0
 	go func() {
 		done <- s.ScanReplayEvents(context.Background(), time.Time{}, total, func(Event) error {
-			if parkAt[delivered] {
-				parked <- delivered
-				<-resume
-			}
 			delivered++
 			return nil
 		})
 	}()
 
-	for range parkAt {
+	for range 2 {
 		select {
 		case <-parked:
 		case err := <-done:
@@ -161,14 +165,14 @@ func TestScanReplayEvents_DoesNotBlockIngest(t *testing.T) {
 			}
 			ingested <- nil
 		}()
-		// The scan is still parked and has not resumed: ingest must finish first.
+		// The scan is parked with its read open: ingest must finish first.
 		select {
 		case err := <-ingested:
 			if err != nil {
-				t.Fatalf("ingest while the scan is mid-flight: %v", err)
+				t.Fatalf("ingest while the scan's read is open: %v", err)
 			}
 		case <-time.After(30 * time.Second):
-			t.Fatal("ingest blocked while the scan was mid-flight")
+			t.Fatal("ingest blocked while the scan's read was open")
 		}
 		resume <- struct{}{}
 	}
