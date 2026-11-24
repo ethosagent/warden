@@ -305,6 +305,11 @@ var All = slices.Concat(
 		// key in place, old retired), and the control plane starts on the new
 		// key and signs with it. In-process only (CP state dir, dir lock).
 		{Name: "admin_audit_key_rotation", Opts: adminAuditOpts(), Run: adminAuditKeyRotation},
+		// Offline agent registry CLI (W-P2-AREG-06): register and disable made
+		// with the control plane running reach a second store handle within the
+		// reload interval, each appends one cli audit row without key material,
+		// a stale revision changes nothing. In-process only (CP state dir).
+		{Name: "agent_registry_cli", Opts: agentRegistryCLIOpts(), Run: agentRegistryCLI},
 	},
 	// Canary across protocols x allow/deny; see canary.go.
 	canaryScenarios(),
