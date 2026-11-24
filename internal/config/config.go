@@ -123,6 +123,10 @@ type Policy struct {
 	// --config only (LoadKeys) and json:"-" keeps it off the worker wire.
 	// Disabled by default.
 	Keys KeysConfig `json:"-"`
+	// WorkerCA is the control-plane-local worker intermediate CA (W-P2-WCA-01):
+	// trust domain, chain and key source. Read from --config only (LoadWorkerCA);
+	// json:"-" keeps it off the worker wire. Disabled by default.
+	WorkerCA WorkerCAConfig `json:"-"`
 	// LLMProviders is the shared, named LLM-provider registry (name + baseURL +
 	// model + apiKeyEnv NAME + optional timeout). It carries no secret VALUE, so
 	// it RIDES the secret-free settings wire (unlike the CP-local blocks above):
@@ -376,6 +380,7 @@ type rawConfig struct {
 	Detection     *rawDetection     `yaml:"detection"`
 	Console       *rawConsole       `yaml:"console"`
 	Keys          *rawKeys          `yaml:"keys"`
+	WorkerCA      *rawWorkerCA      `yaml:"workerCA"`
 	LLMProviders  []rawLLMProvider  `yaml:"llmProviders"`
 	Explore       *rawExplore       `yaml:"explore"`
 	DNS           *rawDNS           `yaml:"dns"`
@@ -502,6 +507,14 @@ func parse(data []byte) (*LocalYAMLProvider, error) {
 		return nil, err
 	}
 	policy.Keys = keysCfg
+	workerCA, err := parseWorkerCA(raw.WorkerCA)
+	if err != nil {
+		return nil, err
+	}
+	policy.WorkerCA = workerCA
+	if err := validateWorkerCA(policy.WorkerCA); err != nil {
+		return nil, err
+	}
 	if err := validateKeys(policy.Keys); err != nil {
 		return nil, err
 	}

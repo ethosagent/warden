@@ -132,6 +132,18 @@ func (s *LocalSigner) Public() crypto.PublicKey {
 	return nil
 }
 
+// CryptoSigner returns the private key as a crypto.Signer, for the worker CA's
+// certificate signing (see controlplane.workerCAPlan.loadSigner). The zero value returns nil.
+func (s *LocalSigner) CryptoSigner() crypto.Signer {
+	switch {
+	case s.ed != nil:
+		return s.ed
+	case s.ec != nil:
+		return s.ec
+	}
+	return nil
+}
+
 // Sign returns the JWS signature over signingInput. A cancelled context is
 // honoured before signing starts; the signing itself is CPU-only. The zero
 // value fails closed with keys.ErrNoActiveKey.

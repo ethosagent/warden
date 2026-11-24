@@ -432,6 +432,12 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	if clk == nil {
 		clk = clock.Real()
 	}
+	// The workerCA block, like keys:, comes from --config only. Disabled (the
+	// default) means nothing below is loaded.
+	wcaPlan, err := resolveWorkerCA(configPath, stateDir, caCert, keysCfg, clk, logger)
+	if err != nil {
+		return fail(err)
+	}
 	// Per-worker tokens live in the state DB: without --state-dir no store is
 	// built and only the shared token (or none) authenticates workers. The loop
 	// polls for tokens other processes revoke and flushes last-used times; it
@@ -477,13 +483,15 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	}
 
 	srv := New(Config{
-		State:        state,
-		PolicyStore:  policyStore,
-		Keys:         keyMgr,
-		AdminAudit:   adminAudit,
-		PolicyPath:   servedPath,
-		Token:        token,
-		WorkerTokens: workerTokens,
+		State:       state,
+		PolicyStore: policyStore,
+		Keys:        keyMgr,
+		// The CA itself is installed after the key manager loaded (below).
+		WorkerCAEnabled: wcaPlan != nil,
+		AdminAudit:      adminAudit,
+		PolicyPath:      servedPath,
+		Token:           token,
+		WorkerTokens:    workerTokens,
 
 		RequireWorkerTokens: p.RequireWorkerTokens,
 		TLS:                 caCert != "" && caKey != "",
@@ -545,6 +553,31 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 			keyCancel()
 			<-keyDone
 		}()
+	}
+
+	// The worker CA key: loaded once the key manager did. A key that does not
+	// match its intermediate stops startup; an unreachable key backend starts
+	// the control plane degraded (enroll and renew answer 503, /healthz says
+	// so) and a retry loop loads it every 30s.
+	if wcaPlan != nil {
+		ca, werr := wcaPlan.Load(context.WithoutCancel(ctx), keyMgr)
+		switch {
+		case werr == nil:
+			srv.SetWorkerCA(ca)
+		case errors.Is(werr, errWorkerCADegraded):
+			wcaCtx, wcaCancel := context.WithCancel(ctx)
+			wcaDone := make(chan struct{})
+			go func() {
+				defer close(wcaDone)
+				wcaPlan.Retry(wcaCtx, keyMgr, srv.SetWorkerCA)
+			}()
+			defer func() {
+				wcaCancel()
+				<-wcaDone
+			}()
+		default:
+			return fail(werr)
+		}
 	}
 
 	// Bounded chain check (newest rows + head signature) once the alert

@@ -1569,6 +1569,45 @@ Upgrade note: rename any existing `cp` or `cp/...` placeholder, `auth[]`
 credential value or stored secret before upgrading. The control plane and the
 workers refuse to load a config that names the reserved namespace.
 
+## Worker CA (`workerCA:`)
+
+The worker CA is a CP-held intermediate that issues short-lived worker client
+certificates (W-P2-WCA-01; enrollment and renewal arrive in the follow-up
+tickets). It is a separate trust root from the proxy MITM CA: compose workers
+hold `proxy-ca.key`, so an intermediate under it would let any worker mint
+certificates for any other. The block is CP-local like `keys:` (read from
+`--config` only, never served to workers) and off by default; without it
+nothing is loaded. See `configs/config.example.yaml` for every key.
+
+Create the CA once:
+
+```sh
+warden control-plane ca init --out-dir ./worker-ca --trust-domain warden.local \
+  --state-dir /var/lib/warden-cp [--config F] [--key-source keys|file] [--force]
+warden control-plane ca csr --state-dir /var/lib/warden-cp   # intermediate key + CSR for an offline root
+```
+
+`ca init` writes a P-256 root (10 years) and an intermediate (1 year, path
+length 0, restricted to URI names in the trust domain) to `--out-dir`:
+`root.key` (0600, **move it offline and delete it from this host**),
+`root.crt` and `intermediate-chain.pem` (what `workerCA.certFile` points at).
+The intermediate key goes to the key manager (`--key-source keys`, purpose
+`ca`; needs the state dir to have run once with `keys.enabled`) or, for
+development, to `intermediate.key` in `--out-dir` (`--key-source file`, mode
+0600, point `workerCA.keyFile` at it from outside `--state-dir`). It never reads
+the proxy CA, and refuses to overwrite files or an existing `ca` key without
+`--force` (which needs the control plane stopped when it replaces a key).
+
+At startup the control plane checks the intermediate (CA, path length 0,
+certSign, not expired, key matches) and that it neither equals nor chains to
+`--ca-cert`, and exits before listening otherwise. An intermediate under 30 days
+from expiry logs a WARN with `not_after`. If the key backend is unreachable the
+control plane starts degraded: `/healthz` reports `degraded: worker_ca key
+unavailable` (still 200), enrollment and renewal answer 503, and the load is
+retried every 30 seconds. One startup line carries `worker_ca=enabled`,
+`trust_domain`, `intermediate_subject`, `not_after` and `key_source`; keys, PEM
+blocks and CSRs never appear in logs.
+
 ## Block list: offline CLI
 
 The user block list lives in `<state-dir>/warden-cp.db`, outside policy

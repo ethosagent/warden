@@ -213,7 +213,11 @@ type H struct {
 	// with the harness clock.
 	wantKeys  bool
 	keyTiming keyTiming
-	keyStore  *fakes.FakeKeyStore
+	// wantWorkerCA (WithWorkerCA) boots the control plane with workerCA
+	// enabled; workerCA is the fixture minted on first use.
+	wantWorkerCA bool
+	workerCA     *workerCAFixture
+	keyStore     *fakes.FakeKeyStore
 	// awsAccount is the fake AWS Secrets Manager account of WithAWSKeyStore;
 	// the control plane's injected role is scoped to keysAWSNamePrefix.
 	awsAccount *fakes.FakeAWSSecretsClient
@@ -823,6 +827,7 @@ func (h *H) writeCPConfig() string {
 	b.WriteString(h.identityYAML())
 	b.WriteString(h.consoleYAML())
 	b.WriteString(h.keysYAML())
+	b.WriteString(h.workerCAYAML())
 	b.WriteString(h.fakeJudgeYAML())
 	b.WriteString(h.auditJSONLogYAML())
 	b.WriteString(h.strictYAML())
