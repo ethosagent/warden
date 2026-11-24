@@ -1,8 +1,8 @@
 # Multi-stage build: compile in a Go builder, ship a single static binary.
 # Base images are pinned by digest for reproducible, tamper-evident builds —
 # bump the digest deliberately when upgrading. Match GO_VERSION to go.mod.
-ARG GO_VERSION=1.26.10
-FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine@sha256:27f2d3b83cfc5803c8078f8e730af0f7c431bf067afaec8f60a36fb763187cba AS builder
+ARG GO_VERSION=1.26.11
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine@sha256:ecb67f987aa1a57794c91d19ade7ae0209f2f0f5496aaef9e6ae85ddf92d02ab AS builder
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -18,7 +18,7 @@ ARG TARGETOS
 ARG TARGETARCH
 RUN VERSION="${VERSION}" GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" sh scripts/build.sh /warden
 
-FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
+FROM alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
 RUN apk add --no-cache ca-certificates
 RUN addgroup -S warden && adduser -S warden -G warden
 # Writable data dir for the analytics db when a volume is mounted at /data.
