@@ -108,6 +108,8 @@ type Server struct {
 	// secretBackend names the active backend (echo/aws/env) for display.
 	secretStore   secrets.SecretStore
 	secretBackend string
+	// reservedLog is the once-a-minute-per-route log of refused cp/ keys.
+	reservedLog *secrets.ReservedKeyLog
 	// authMode is the console sign-in mode reported by /dashboard/api/setup
 	// (SetAuthMode); empty on a worker.
 	authMode string

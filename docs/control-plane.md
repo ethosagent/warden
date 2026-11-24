@@ -1516,6 +1516,48 @@ secrets with no row; deleting a key deletes its secret at once.
   }
   ```
 
+### Reserved `cp/` secret namespace
+
+The logical key `cp` and every key under `cp/` are reserved for control-plane
+material (the worker CA keeps its material there). The signing keys and the
+worker CA key live in the separate key store above, which no placeholder can
+reach; reserving `cp/` in the shared secret store is defense in depth, so
+nothing control-plane only can ever sit where a worker or a human route could
+reach it. The rule is unconditional and applies to every backend:
+
+- A worker refuses a `cp/` placeholder with `ErrReservedKey` before it calls the
+  backend, and the request is denied like any placeholder that cannot be
+  resolved.
+- Config validation rejects a `secrets[]` placeholder, or an `auth[]` credential
+  field, that names `cp/`. The error names the entry and the field, never the
+  value.
+- `GET /central/secrets` and `GET /dashboard/api/secretstore` leave `cp/` keys
+  out. `POST` and `DELETE` on a `cp/` key (on `/central/secrets` and on
+  `/dashboard/api/secretstore`) return `403` with `{"error":"reserved_key"}`
+  and touch neither the store nor the admin audit log.
+- A refused attempt logs `reserved secret key refused` with the route (or
+  `worker-cache`) and the key prefix `cp/` only, at most once a minute per
+  source.
+
+With the default `secretStore.aws.namePrefix` of `warden/`, the reserved names
+are `warden/cp/*`. Add an explicit deny to every worker role, so it holds even
+if a later `warden/*` grant is widened:
+
+```json
+{
+  "Sid": "NeverTheReservedCpNamespace",
+  "Effect": "Deny",
+  "Action": [
+    "secretsmanager:GetSecretValue",
+    "secretsmanager:PutSecretValue",
+    "secretsmanager:CreateSecret",
+    "secretsmanager:DeleteSecret",
+    "secretsmanager:UpdateSecret"
+  ],
+  "Resource": "arn:aws:secretsmanager:*:ACCOUNT_ID:secret:warden/cp/*"
+}
+```
+
 ## Block list: offline CLI
 
 The user block list lives in `<state-dir>/warden-cp.db`, outside policy

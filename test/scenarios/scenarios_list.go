@@ -237,6 +237,9 @@ var All = slices.Concat(
 		// and secret writes working; with no admin token both fail closed. Mixed
 		// mode marks shared-token workers legacy and warns once per proxy id.
 		// In-process only (state dir, fake clock).
+		// cp/ secret namespace reserved (W-P2-WCA-07): hidden from the list,
+		// POST and DELETE refused with 403 reserved_key.
+		{Name: "reserved_secret_namespace", Opts: strictAuthOpts(), Run: reservedSecretNamespace},
 		{Name: "strict_worker_auth", Opts: strictAuthOpts(), Run: strictWorkerAuth},
 		{Name: "strict_worker_auth_no_admin_token", Opts: strictNoAdminOpts(), Run: strictNoAdminTokenFailsClosed},
 		{Name: "legacy_worker_token_warning", Run: legacyWorkerWarning},
