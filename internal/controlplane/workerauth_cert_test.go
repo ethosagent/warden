@@ -573,6 +573,17 @@ func TestCentralSecretsRejectsWorkerCert(t *testing.T) {
 // openDevSecrets: even a development control plane with no admin token at all
 // (everything on /central/secrets passes) refuses a request that carries only
 // a worker certificate.
+func TestCentralSecretsOpenDevRefusesCertWithJunkBearer(t *testing.T) {
+	c := newCertEnv(t, func(cfg *Config) { cfg.SecretStore = secrets.NewEchoStore() })
+	w := c.issue(t, "worker-1")
+	if rec := c.do(http.MethodGet, "/central/secrets", w.cert, "junk", ""); rec.Code != http.StatusUnauthorized {
+		t.Errorf("worker cert plus a junk bearer on an open dev control plane = %d, want 401", rec.Code)
+	}
+	if rec := c.do(http.MethodGet, "/central/secrets", nil, "junk", ""); rec.Code != http.StatusOK {
+		t.Errorf("no cert, open dev control plane = %d, want 200 (unchanged development behaviour)", rec.Code)
+	}
+}
+
 func TestCentralSecretsOpenDevRefusesBareWorkerCert(t *testing.T) {
 	c := newCertEnv(t, func(cfg *Config) { cfg.SecretStore = secrets.NewEchoStore() })
 	w := c.issue(t, "worker-1")

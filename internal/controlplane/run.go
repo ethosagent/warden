@@ -444,6 +444,11 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	if err != nil {
 		return fail(err)
 	}
+	// Enrollment tokens and certificates cross the wire, and a client certificate
+	// needs a TLS handshake: workerCA over plain HTTP is a startup error.
+	if wcaPlan != nil && (caCert == "" || caKey == "") {
+		return fail(errors.New("control-plane: workerCA.enabled requires --ca-cert and --ca-key (enrollment tokens and certificates must not travel over plain HTTP)"))
+	}
 	if p.RequireWorkerCerts && wcaPlan == nil {
 		return fail(errors.New("control-plane: --require-worker-certs requires workerCA.enabled in --config (worker certificates come from the worker CA)"))
 	}

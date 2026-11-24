@@ -54,12 +54,15 @@ func (s *Server) dashboardWriteGuard() dashboard.WriteGuard {
 // variable fails closed.
 func (s *Server) adminBearerOK(r *http.Request) bool {
 	// A worker token never opens a human route, whatever the configured token,
-	// and neither does a worker certificate: a request that presents one and no
-	// bearer of its own is refused even on an open (development) control plane.
+	// and neither does a worker certificate: a request that presents one is
+	// refused on an open (development) control plane, and otherwise needs the
+	// configured admin bearer.
 	if hasWorkerTokenBearer(r) {
 		return false
 	}
-	if r.Header.Get("Authorization") == "" && s.workerAuth != nil && s.workerAuth.hasWorkerCert(r) {
+	if s.workerAuth != nil && s.workerAuth.hasWorkerCert(r) && s.dashboardWriteToken() == "" {
+		// With a certificate presented there is no development-mode pass: only
+		// the configured admin bearer (checked below) opens the route.
 		return false
 	}
 	token := s.dashboardWriteToken()

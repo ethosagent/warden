@@ -98,11 +98,14 @@ func (a *WorkerAuthenticator) resolveCert(r *http.Request, v *workerca.Verifier,
 		a.certCache.put(key, ent)
 	}
 	p.CertSerial = ent.serial
-	revoked, loaded := a.certs.Revoked(ent.serial)
+	entry, revoked, loaded := a.certs.Entry(ent.serial)
 	switch {
 	case !loaded:
 		return p, "revocation_unavailable", "", ErrUnauthorized
 	case revoked:
+		if entry.Reason == RevokeReasonSuperseded && a.onSuperseded != nil {
+			a.onSuperseded(ent.workerID, ent.serial, remoteHost(r))
+		}
 		return p, "revoked", "", ErrUnauthorized
 	}
 	// The certificate's id is authoritative: a header that differs in any way is

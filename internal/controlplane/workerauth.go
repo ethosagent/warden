@@ -141,6 +141,10 @@ type WorkerAuthenticator struct {
 	verifier  atomic.Pointer[workerca.Verifier]
 	certs     *certIndex
 	certCache certCache
+	// onSuperseded is called when a certificate revoked as superseded is
+	// presented: a second holder of its key exists (set by the Server, which
+	// revokes the worker and audits the conflict).
+	onSuperseded func(workerID, serial, remote string)
 
 	mu         sync.Mutex
 	counters   map[[2]string]int64 // {kind, outcome}: bounded labels, no proxy id

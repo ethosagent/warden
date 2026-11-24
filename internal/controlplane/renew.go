@@ -3,7 +3,9 @@ package controlplane
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -32,7 +34,6 @@ const (
 	// renewPerMinute is the request budget per remote address.
 	renewPerMinute = 30
 
-	actionWorkerRenewed   = "worker.renewed"
 	actionLineageConflict = "worker.cert_lineage_conflict"
 	// lineageActor is the actor of the revocation a lineage conflict triggers.
 	lineageActor = "system:cert_lineage"
@@ -92,9 +93,37 @@ type renewLimiter struct {
 	grace map[string][]time.Time
 }
 
-// admit records a renewal of worker and reports whether it is within budget;
-// when it is not, wait is how long until it would be.
-func (l *renewLimiter) admit(worker string, grace bool) (ok bool, wait time.Duration) {
+// check reports whether a renewal of worker is within budget without spending
+// it; when it is not, wait is how long until it would be.
+func (l *renewLimiter) check(worker string, grace bool) (ok bool, wait time.Duration) {
+	now := l.clk.Now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if grace {
+		recent := 0
+		var oldest time.Time
+		for _, t := range l.grace[worker] {
+			if now.Sub(t) < renewMinInterval {
+				if recent == 0 {
+					oldest = t
+				}
+				recent++
+			}
+		}
+		if recent >= renewGraceMax {
+			return false, renewMinInterval - now.Sub(oldest)
+		}
+		return true, 0
+	}
+	if t, seen := l.last[worker]; seen && now.Sub(t) < renewMinInterval {
+		return false, renewMinInterval - now.Sub(t)
+	}
+	return true, 0
+}
+
+// record spends one renewal of worker. It is called only after the renewal
+// committed, so a CA or database error never leaves the worker rate limited.
+func (l *renewLimiter) record(worker string, grace bool) {
 	now := l.clk.Now()
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -113,19 +142,9 @@ func (l *renewLimiter) admit(worker string, grace bool) (ok bool, wait time.Dura
 				recent = append(recent, t)
 			}
 		}
-		if len(recent) >= renewGraceMax {
-			l.grace[worker] = recent
-			return false, renewMinInterval - now.Sub(recent[0])
-		}
 		l.grace[worker] = append(recent, now)
-		l.last[worker] = now
-		return true, 0
-	}
-	if t, seen := l.last[worker]; seen && now.Sub(t) < renewMinInterval {
-		return false, renewMinInterval - now.Sub(t)
 	}
 	l.last[worker] = now
-	return true, 0
 }
 
 type renewRequest struct {
@@ -214,12 +233,18 @@ func (s *Server) handleRenew(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var wait time.Duration
-	rec, cert, err := e.certs.RenewCert(r.Context(), p.ProxyID, p.CertSerial,
+	var (
+		wait  time.Duration
+		grace bool
+	)
+	spki := sha256.Sum256(csr.RawSubjectPublicKeyInfo)
+	rec, cert, err := e.certs.RenewCert(r.Context(), p.ProxyID, p.CertSerial, hex.EncodeToString(spki[:]),
 		func(serial string) bool { return s.workerAuth.SeenCertSerial(p.ProxyID, serial) },
-		func(grace bool) bool {
-			ok, w := e.renew.lim.admit(p.ProxyID, grace)
-			wait = w
+		func(g bool) bool {
+			// Checked before issuing; spent only once the renewal committed.
+			var ok bool
+			ok, wait = e.renew.lim.check(p.ProxyID, g)
+			grace = g
 			return ok
 		},
 		func(workerID string) (*x509.Certificate, *x509.Certificate, error) {
@@ -230,6 +255,10 @@ func (s *Server) handleRenew(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, ErrRenewRateLimited):
 		s.renewReject(RenewOutcomeRateLimited, "rate_limited_worker", p.ProxyID, p.CertSerial, addr)
 		tooMany(w, wait)
+		return
+	case errors.Is(err, ErrSameKey):
+		s.renewReject(RenewOutcomeBadCSR, "same_key", p.ProxyID, p.CertSerial, addr)
+		writeEnrollError(w, http.StatusBadRequest, "same_key")
 		return
 	case errors.Is(err, ErrLineageConflict):
 		s.lineageConflict(r.Context(), p, addr)
@@ -255,7 +284,12 @@ func (s *Server) handleRenew(w http.ResponseWriter, r *http.Request) {
 		writeEnrollError(w, http.StatusInternalServerError, "internal_error")
 		return
 	}
-	if err := s.finishRenew(r.Context(), ca, cert, p, addr); err != nil {
+	e.renew.lim.record(p.ProxyID, grace)
+	if grace {
+		// The unused successor was revoked as superseded: cut off its long-polls now.
+		s.syncCertIndex(r.Context())
+	}
+	if err := s.finishRenew(r.Context(), ca, cert, p); err != nil {
 		e.renew.counts[RenewOutcomeError].Add(1)
 		s.cfg.Logger.Error("worker renew failed", "worker_id", p.ProxyID, "serial", rec.Serial, "remote_addr", addr, "error", err.Error())
 		writeEnrollError(w, http.StatusInternalServerError, "internal_error")
@@ -279,12 +313,12 @@ func unauthorizedRenew(w http.ResponseWriter) {
 	http.Error(w, "unauthorized", http.StatusUnauthorized)
 }
 
-// finishRenew checks what the control plane is about to hand out and records
-// the worker.renewed audit row, like finishEnroll: the certificate must verify
-// for the worker it was issued to, and when a check or the audit append fails
-// the certificate is revoked again, so no credential leaves without its audit
-// entry.
-func (s *Server) finishRenew(ctx context.Context, ca *workerca.CA, cert *x509.Certificate, p WorkerPrincipal, addr string) error {
+// finishRenew checks what the control plane is about to hand out: the
+// certificate must verify for the worker it was issued to, signed by the
+// intermediate. When it does not, the certificate is revoked again. Renewals
+// are logged and counted, not admin-audited (the worker presented a live
+// certificate; only a lineage conflict is a security event).
+func (s *Server) finishRenew(ctx context.Context, ca *workerca.CA, cert *x509.Certificate, p WorkerPrincipal) error {
 	serial := cert.SerialNumber.Text(16)
 	id, err := ca.Verify(cert)
 	if err == nil && id != p.ProxyID {
@@ -293,25 +327,13 @@ func (s *Server) finishRenew(ctx context.Context, ca *workerca.CA, cert *x509.Ce
 	if err == nil {
 		err = cert.CheckSignatureFrom(ca.Intermediate())
 	}
-	if err == nil && s.auditRec != nil {
-		_, err = s.auditRec.Record(ctx, adminaudit.Input{
-			Actor:      adminaudit.Actor{Sub: "worker:" + p.ProxyID},
-			AuthMethod: adminaudit.AuthMethodSystem,
-			Action:     actionWorkerRenewed,
-			Target:     auditTargetWorkerCerts,
-			TargetRef:  "worker:" + p.ProxyID,
-			Details:    map[string]string{"serial": serial, "prev_serial": p.CertSerial},
-			Outcome:    adminaudit.OutcomeOK,
-			HTTPStatus: http.StatusCreated,
-			ClientIP:   addr,
-		})
-	}
 	if err == nil {
 		return nil
 	}
 	if rerr := s.enroll.certs.RevokeCert(context.WithoutCancel(ctx), serial, "worker:"+p.ProxyID, RevokeReasonRenewFailed); rerr != nil {
-		s.cfg.Logger.Error("worker renew: revoking the unrecorded certificate failed", "serial", serial, "error", rerr.Error())
+		s.cfg.Logger.Error("worker renew: revoking the unverified certificate failed", "serial", serial, "error", rerr.Error())
 	}
+	s.syncCertIndex(ctx)
 	return err
 }
 
@@ -328,6 +350,12 @@ func (s *Server) lineageConflict(ctx context.Context, p WorkerPrincipal, addr st
 		s.cfg.Logger.Error("worker cert lineage conflict: revoking the worker failed", "worker_id", p.ProxyID, "serial", p.CertSerial, "error", err.Error())
 	}
 	s.syncCertIndex(ctx)
+	if err == nil && len(serials) == 0 {
+		// Already revoked by an earlier conflict: count, but do not repeat the
+		// ERROR line and audit row for every further use of a dead key.
+		s.enroll.renew.counts[RenewOutcomeLineageConflict].Add(1)
+		return
+	}
 	s.renewReject(RenewOutcomeLineageConflict, "lineage_conflict", p.ProxyID, p.CertSerial, addr)
 	s.cfg.Logger.Error("worker cert lineage conflict: the worker was revoked", "worker_id", p.ProxyID, "serial", p.CertSerial, "revoked", len(serials))
 	if s.auditRec == nil {

@@ -28,7 +28,7 @@ type certIndex struct {
 	log   *slog.Logger
 	poll  time.Duration
 
-	set atomic.Pointer[map[string]string] // serial -> worker id; nil until loaded
+	set atomic.Pointer[map[string]RevokedCert] // serial -> entry; nil until loaded
 
 	mu      sync.Mutex // serialises rebuilds; guards version and builtAt
 	version int64
@@ -46,12 +46,19 @@ func newCertIndex(store WorkerCertStore, clk clock.Clock, log *slog.Logger) *cer
 // Revoked reports whether serial is revoked, and whether the index is loaded at
 // all (false: the answer is unknown, treat the certificate as unusable).
 func (x *certIndex) Revoked(serial string) (revoked, loaded bool) {
+	e, revoked, loaded := x.Entry(serial)
+	_ = e
+	return revoked, loaded
+}
+
+// Entry is Revoked plus the revoked row (worker id and reason).
+func (x *certIndex) Entry(serial string) (e RevokedCert, revoked, loaded bool) {
 	set := x.set.Load()
 	if set == nil {
-		return false, false
+		return RevokedCert{}, false, false
 	}
-	_, revoked = (*set)[serial]
-	return revoked, true
+	e, revoked = (*set)[serial]
+	return e, revoked, true
 }
 
 // Len is the number of revoked serials held (0 before the first load).
@@ -77,9 +84,9 @@ func (x *certIndex) Rebuild(ctx context.Context) error {
 		x.mu.Unlock()
 		return err
 	}
-	next := make(map[string]string, len(rows))
+	next := make(map[string]RevokedCert, len(rows))
 	for _, r := range rows {
-		next[r.Serial] = r.WorkerID
+		next[r.Serial] = r
 	}
 	var fresh []string
 	if old := x.set.Load(); old != nil {

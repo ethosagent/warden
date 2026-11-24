@@ -203,11 +203,11 @@ func workerCARenew(t *testing.T, h *harness.H) {
 	if got := certStatus(h, other, 0, "", ""); got != http.StatusOK {
 		t.Errorf("an unrelated worker after the conflict = %d, want 200", got)
 	}
-	var renewed, conflicts int
+	var conflicts int
 	for _, r := range h.AdminAuditRows() {
 		switch r.Action {
 		case "worker.renewed":
-			renewed++
+			t.Errorf("a renewal was admin-audited: %+v", r)
 		case "worker.cert_lineage_conflict":
 			conflicts++
 			if r.TargetRef != "worker:worker-1" || r.Outcome != "denied" {
@@ -215,8 +215,8 @@ func workerCARenew(t *testing.T, h *harness.H) {
 			}
 		}
 	}
-	if renewed != 1 || conflicts != 1 {
-		t.Errorf("audit rows: worker.renewed=%d worker.cert_lineage_conflict=%d, want 1 and 1", renewed, conflicts)
+	if conflicts != 1 {
+		t.Errorf("worker.cert_lineage_conflict rows = %d, want 1", conflicts)
 	}
 	if logs := h.Logs(); strings.Contains(logs, "CERTIFICATE REQUEST") || strings.Contains(logs, "PRIVATE KEY") {
 		t.Errorf("control plane log carries CSR or key material")

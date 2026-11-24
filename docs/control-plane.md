@@ -1690,14 +1690,24 @@ bearer is a 401). It needs a P-256 or Ed25519 CSR for a new public key (400
 `same_key` otherwise) and a lineage head: the worker's latest certificate (rows
 revoked as `enroll_failed` or `renew_failed` do not count), or its predecessor
 within 10 minutes when this control plane has not seen the successor used (a lost
-response; up to 3 retries). A renewal from any other serial revokes the worker (all
-its certificates and its unused id-bound enrollment tokens), cuts off its held
-long-polls and appends `worker.cert_lineage_conflict`; the worker must re-enroll
-with a new token. A successful renewal inserts `worker_certs` with
-`issued_via=renew` and `prev_serial`, returns 201 with the enrollment response
-shape plus `prevSerial`, and appends `worker.renewed`. At most one renewal per
-worker per 10 minutes (429 with `Retry-After`), 30 requests a minute per remote
-address, 503 `ca_unavailable` while the CA is degraded.
+response; up to 3 retries). A grace renewal revokes that unused successor
+(`revoke_reason=superseded`), so only one descendant of the predecessor stays valid;
+presenting a superseded serial later, or a renewal from any other serial, revokes the
+worker (all its certificates and its unused id-bound enrollment tokens), cuts off its
+held long-polls and appends `worker.cert_lineage_conflict`; the worker must re-enroll
+with a new token. "Seen" is kept in memory: a control plane restart clears it, which
+widens the grace (a successor that was in use looks unseen for the first 10 minutes).
+The new key must differ from the presented certificate's and the three before it.
+A successful renewal inserts `worker_certs` with `issued_via=renew` and `prev_serial`
+and returns 201 with the enrollment response shape plus `prevSerial`; it is logged
+and counted (`warden_cp_worker_renew_total{outcome}`), not admin-audited. At most
+one renewal per worker per 10 minutes (429 with `Retry-After`; only a committed
+renewal spends it), 30 requests a minute per remote address, 503 `ca_unavailable`
+while the CA is degraded.
+
+`workerCA.enabled` requires `--ca-cert` and `--ca-key`: enrollment tokens and
+certificates never travel over plain HTTP, and the control plane exits before
+listening otherwise.
 
 ## Block list: offline CLI
 

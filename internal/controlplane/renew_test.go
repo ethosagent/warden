@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"context"
+	"crypto"
 	crand "crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/ethosagent/warden/internal/adminaudit"
 	"github.com/ethosagent/warden/internal/workerca"
+	wcasigner "github.com/ethosagent/warden/internal/workerca/adapters/signer"
 )
 
 // renewReply is a /control/renew response.
@@ -102,13 +104,12 @@ func TestRenewIssuesNewCertificate(t *testing.T) {
 	if err != nil || row.IssuedVia != CertIssuedViaRenew || row.PrevSerial != a.serial() || row.WorkerID != "worker-1" || row.IssuerKID == "" {
 		t.Fatalf("worker_certs row %+v, %v", row, err)
 	}
-	rows := c.rec.inputs()
-	if len(rows) != 1 {
-		t.Fatalf("audit rows = %d, want 1", len(rows))
+	// Renewals are logged and counted, not admin-audited.
+	if n := len(c.rec.inputs()); n != 0 {
+		t.Fatalf("audit rows = %d, want 0", n)
 	}
-	if r := rows[0]; r.Action != "worker.renewed" || r.Target != "worker_certs" || r.TargetRef != "worker:worker-1" ||
-		r.Details["serial"] != got.out.Serial || r.Details["prev_serial"] != a.serial() || r.Outcome != adminaudit.OutcomeOK {
-		t.Fatalf("audit row %+v", r)
+	if !strings.Contains(c.logs.String(), "worker certificate renewed") {
+		t.Errorf("no INFO log for the renewal")
 	}
 	// The new cert authenticates and the old one keeps working until it expires.
 	for _, w := range []workerCert{got.key, a} {
@@ -385,21 +386,98 @@ func TestRenewLineageSkipsFailedIssuances(t *testing.T) {
 	}
 }
 
-func TestRenewAuditFailureRevokesTheNewCertificate(t *testing.T) {
+// TestRenewCAErrorDoesNotSpendTheBudget: a failed issuance leaves the worker
+// able to retry at once; only a committed renewal is rate limited.
+func TestRenewCAErrorDoesNotSpendTheBudget(t *testing.T) {
 	c := newCertEnv(t)
 	a := c.issue(t, "worker-1")
-	c.rec.set(errors.New("audit down"), nil)
+	broken, err := workerca.New(workerca.Options{
+		Chain: []*x509.Certificate{c.fix.inter, c.fix.root}, Signer: c.fix.interKey, Serial: wcasigner.NewSerial,
+		Create: func(_, _ *x509.Certificate, _ crypto.PublicKey, _ crypto.Signer) ([]byte, error) {
+			return nil, errors.New("kms down")
+		},
+		TrustDomain: wcaTrustDomain, Clock: c.clk.Now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.srv.SetWorkerCA(broken)
 	if got := c.renew(t, a.cert); got.status != http.StatusInternalServerError {
-		t.Fatalf("renew with the audit log down = %d, want 500", got.status)
+		t.Fatalf("renew with a failing signer = %d, want 500", got.status)
 	}
-	latest, err := c.store.LatestCert(context.Background(), "worker-1")
-	if err != nil || latest.Serial != a.serial() {
-		t.Fatalf("the unrecorded certificate counts as the latest: %+v, %v", latest, err)
-	}
-	c.rec.set(nil, nil)
-	c.clk.Advance(renewMinInterval)
+	c.srv.SetWorkerCA(c.ca)
 	if got := c.renew(t, a.cert); got.status != http.StatusCreated {
-		t.Fatalf("renew once the audit log is back = %d %s", got.status, got.body)
+		t.Fatalf("renew after a failed issuance = %d %s, want 201 (budget unspent)", got.status, got.body)
+	}
+}
+
+// TestRenewGraceRevokesTheUnusedSuccessor: an attacker holding A's key renews
+// first and keeps C unused; the real worker's retry gets D, which revokes C as
+// superseded. Using C afterwards is a lineage conflict that revokes the worker.
+func TestRenewGraceRevokesTheUnusedSuccessor(t *testing.T) {
+	c := newCertEnv(t)
+	a := c.issue(t, "worker-1")
+	atk := c.renew(t, a.cert) // C
+	if atk.status != http.StatusCreated {
+		t.Fatalf("first renew = %d", atk.status)
+	}
+	c.clk.Advance(time.Minute)
+	d := c.renew(t, a.cert) // the legitimate worker's retry, inside the grace
+	if d.status != http.StatusCreated {
+		t.Fatalf("grace renew = %d %s", d.status, d.body)
+	}
+	row, err := c.store.Cert(context.Background(), atk.out.Serial)
+	if err != nil || row.RevokeReason != RevokeReasonSuperseded || row.RevokedAt.IsZero() {
+		t.Fatalf("C after the grace renewal: %+v, %v", row, err)
+	}
+	// The legitimate branch works; the attacker's C does not, and using it
+	// revokes the worker, D included, and is audited once.
+	if rec := c.do(http.MethodGet, "/policy", d.cert, "", ""); rec.Code != http.StatusOK {
+		t.Fatalf("D /policy = %d", rec.Code)
+	}
+	if rec := c.do(http.MethodGet, "/policy", atk.cert, "", ""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("C /policy = %d, want 401", rec.Code)
+	}
+	if rec := c.do(http.MethodGet, "/policy", d.cert, "", ""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("D /policy after C was used = %d, want 401 (worker revoked)", rec.Code)
+	}
+	c.do(http.MethodGet, "/policy", atk.cert, "", "")
+	n := 0
+	for _, in := range c.rec.inputs() {
+		if in.Action == actionLineageConflict {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("worker.cert_lineage_conflict rows = %d, want 1", n)
+	}
+	// Renewing with the superseded serial is the same conflict.
+	c2 := newCertEnv(t)
+	a2 := c2.issue(t, "worker-1")
+	atk2 := c2.renew(t, a2.cert)
+	c2.clk.Advance(time.Minute)
+	d2 := c2.renew(t, a2.cert)
+	if got := c2.renew(t, atk2.cert); got.status != http.StatusUnauthorized {
+		t.Fatalf("renew from the superseded C = %d, want 401", got.status)
+	}
+	if rec := c2.do(http.MethodGet, "/policy", d2.cert, "", ""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("worker survived: %d", rec.Code)
+	}
+}
+
+func TestRenewRefusesRecentLineageKeys(t *testing.T) {
+	c := newCertEnv(t)
+	a := c.issue(t, "worker-1")
+	b := c.renew(t, a.cert)
+	c.clk.Advance(renewMinInterval)
+	// B's CSR reusing A's key (the predecessor's) is refused.
+	der, err := x509.CreateCertificateRequest(crand.Reader, &x509.CertificateRequest{}, a.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der}))
+	if got := c.renewCSR(t, b.cert, old, ""); got.status != http.StatusBadRequest || !strings.Contains(got.body, "same_key") {
+		t.Fatalf("CSR with the predecessor's key = %d %s, want 400 same_key", got.status, got.body)
 	}
 }
 
@@ -447,17 +525,17 @@ func TestRenewStoreRenewCertDirect(t *testing.T) {
 	}
 	always, never := func(bool) bool { return true }, func(bool) bool { return false }
 	unseen := func(string) bool { return false }
-	if _, _, err := c.store.RenewCert(ctx, "worker-1", a.serial(), unseen, never, issue); !errors.Is(err, ErrRenewRateLimited) {
+	if _, _, err := c.store.RenewCert(ctx, "worker-1", a.serial(), "x", unseen, never, issue); !errors.Is(err, ErrRenewRateLimited) {
 		t.Fatalf("admit=false: %v", err)
 	}
-	if _, _, err := c.store.RenewCert(ctx, "worker-2", a.serial(), unseen, always, issue); !errors.Is(err, ErrCertNotFound) {
+	if _, _, err := c.store.RenewCert(ctx, "worker-2", a.serial(), "x", unseen, always, issue); !errors.Is(err, ErrCertNotFound) {
 		t.Fatalf("a serial of another worker: %v", err)
 	}
-	if _, _, err := c.store.RenewCert(ctx, "worker-1", "ff", unseen, always, issue); !errors.Is(err, ErrCertNotFound) {
+	if _, _, err := c.store.RenewCert(ctx, "worker-1", "ff", "x", unseen, always, issue); !errors.Is(err, ErrCertNotFound) {
 		t.Fatalf("an unknown serial: %v", err)
 	}
 	failing := func(string) (*x509.Certificate, *x509.Certificate, error) { return nil, nil, errors.New("sign failed") }
-	if _, _, err := c.store.RenewCert(ctx, "worker-1", a.serial(), unseen, always, failing); err == nil {
+	if _, _, err := c.store.RenewCert(ctx, "worker-1", a.serial(), "x", unseen, always, failing); err == nil {
 		t.Fatal("an issue error was swallowed")
 	}
 	// A failed issue leaves nothing behind.
@@ -470,7 +548,7 @@ func TestRenewStoreRenewCertDirect(t *testing.T) {
 		cert.AuthorityKeyId = nil
 		return cert, nil, err
 	}
-	if _, _, err := c.store.RenewCert(ctx, "worker-1", a.serial(), unseen, always, noIssuer); !errors.Is(err, ErrCertNoIssuer) {
+	if _, _, err := c.store.RenewCert(ctx, "worker-1", a.serial(), "x", unseen, always, noIssuer); !errors.Is(err, ErrCertNoIssuer) {
 		t.Fatalf("no issuer: %v", err)
 	}
 }

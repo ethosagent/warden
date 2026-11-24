@@ -375,6 +375,11 @@ func New(cfg Config) *Server {
 		Logger: cfg.Logger, Clock: cfg.Clock, TLS: cfg.TLS, Strict: cfg.RequireWorkerTokens,
 		StrictCerts: cfg.RequireWorkerCerts, Verifier: cfg.WorkerCAVerifier, Certs: s.certIdx,
 	})
+	s.workerAuth.onSuperseded = func(workerID, serial, remote string) {
+		if s.enroll != nil {
+			s.lineageConflict(context.Background(), WorkerPrincipal{ProxyID: workerID, CertSerial: serial}, remote)
+		}
+	}
 	s.policy.auth = s.workerAuth
 	s.workerAuth.LogMode()
 	// Register serve-time wire overlays (s.policy.addOverlay) here, before the
