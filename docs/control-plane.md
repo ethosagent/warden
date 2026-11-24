@@ -1598,7 +1598,7 @@ development, to `intermediate.key` in `--out-dir` (`--key-source file`, mode
 the proxy CA, and refuses to overwrite files or an existing `ca` key without
 `--force` (which needs the control plane stopped when it replaces a key, and
 checks that before it writes any file; files are staged and renamed into place
-only after the key is stored).
+only after the key is stored, the chain file last; leftover `.ca-*.tmp` files of an interrupted run are removed at the next start).
 
 For an offline root: stop the control plane, run `ca csr` (the key goes to the
 key source, the CSR to stdout), have the root sign it, install the chain at

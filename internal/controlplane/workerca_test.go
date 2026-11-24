@@ -706,3 +706,48 @@ func TestCAInitKeysSourceLeavesNoKeyInTheDatabase(t *testing.T) {
 		}
 	}
 }
+
+// TestCAInitClearsStaleTempFiles: staging files an interrupted run left behind
+// are removed (and counted) at the next start; other files stay.
+func TestCAInitClearsStaleTempFiles(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "ca")
+	if err := os.MkdirAll(out, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stale := []string{".ca-111.tmp", ".ca-222.tmp"}
+	for _, n := range stale {
+		if err := os.WriteFile(filepath.Join(out, n), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	keep := filepath.Join(out, "notes.txt")
+	if err := os.WriteFile(keep, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var se strings.Builder
+	err := CAInit(context.Background(), CAInitOptions{
+		CAOptions:   CAOptions{KeySource: "file", Out: io.Discard, ErrOut: &se},
+		OutDir:      out,
+		TrustDomain: wcaTrustDomain,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range stale {
+		if _, err := os.Stat(filepath.Join(out, n)); err == nil {
+			t.Errorf("%s survived", n)
+		}
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Errorf("unrelated file removed: %v", err)
+	}
+	if !strings.Contains(se.String(), "removed 2 stale") {
+		t.Errorf("no count reported: %q", se.String())
+	}
+	ents, _ := os.ReadDir(out)
+	for _, e := range ents {
+		if strings.HasSuffix(e.Name(), ".tmp") {
+			t.Errorf("temp file left: %s", e.Name())
+		}
+	}
+}

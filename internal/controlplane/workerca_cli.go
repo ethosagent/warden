@@ -149,6 +149,9 @@ func CAInit(ctx context.Context, o CAInitOptions) error {
 	if err := os.MkdirAll(o.OutDir, caOutDirMode); err != nil {
 		return fmt.Errorf("ca: create --out-dir: %w", err)
 	}
+	if n := clearStaleTemps(o.OutDir); n > 0 {
+		_, _ = fmt.Fprintf(o.ErrOut, "removed %d stale temporary file(s) from %s\n", n, o.OutDir)
+	}
 	// Nothing is destructive until the key is stored: every file is staged at
 	// 0600 beside its target and renamed into place only afterwards.
 	st := &staged{}
@@ -236,6 +239,9 @@ func CACSR(ctx context.Context, o CACSROptions) error {
 			return err
 		}
 		defer clear(keyPEM)
+		if n := clearStaleTemps(filepath.Dir(o.KeyFile)); n > 0 {
+			_, _ = fmt.Fprintf(o.ErrOut, "removed %d stale temporary file(s) from %s\n", n, filepath.Dir(o.KeyFile))
+		}
 		st := &staged{}
 		defer st.abort()
 		if err := st.add(o.KeyFile, keyPEM, caKeyFileMode); err != nil {
@@ -332,6 +338,20 @@ func (o *OfflineKeys) importCA(ctx context.Context, priv crypto.Signer, force bo
 	return kid, nil
 }
 
+// clearStaleTemps removes leftover .ca-*.tmp staging files of an interrupted
+// run from dir and returns how many it removed (only the count is reported,
+// never contents).
+func clearStaleTemps(dir string) int {
+	matches, _ := filepath.Glob(filepath.Join(dir, ".ca-*.tmp"))
+	n := 0
+	for _, m := range matches {
+		if fi, err := os.Lstat(m); err == nil && fi.Mode().IsRegular() && os.Remove(m) == nil {
+			n++
+		}
+	}
+	return n
+}
+
 // staged collects files written at 0600 beside their targets; commit renames
 // them into place (after fsync), abort removes what is left. A target is never
 // truncated in place, so a refusal or crash leaves the old file byte-identical
@@ -364,8 +384,23 @@ func (s *staged) commit() error {
 			return fmt.Errorf("ca: write %s: %w", s.targets[i], err)
 		}
 	}
-	for i, tmp := range s.tmps {
-		if err := os.Rename(tmp, s.targets[i]); err != nil {
+	// The chain file is what workerCA.certFile points at, so it is renamed
+	// last: a partial commit never leaves a control plane a chain whose root
+	// key or sibling files are missing.
+	order := make([]int, 0, len(s.tmps))
+	chain := -1
+	for i, t := range s.targets {
+		if filepath.Base(t) == caChainFile {
+			chain = i
+			continue
+		}
+		order = append(order, i)
+	}
+	if chain >= 0 {
+		order = append(order, chain)
+	}
+	for _, i := range order {
+		if err := os.Rename(s.tmps[i], s.targets[i]); err != nil {
 			return fmt.Errorf("ca: write %s: %w", s.targets[i], err)
 		}
 		s.tmps[i] = ""
