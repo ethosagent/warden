@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -74,6 +75,42 @@ func agentRegistryConsole(t *testing.T, h *harness.H) {
 		len(list.Agents[0].AllowedGroups) != 1 || list.Agents[0].AllowedGroups[0] != "g1" ||
 		len(list.Agents[0].Keys) != 1 || list.Agents[0].Keys[0].KID == "" {
 		t.Fatalf("list = %+v, %v", list, err)
+	}
+
+	// The tab's keep-key edit: GET the agent, PUT its stored public JWK back
+	// unchanged with the revision as If-Match; the key (same jkt) survives.
+	var one struct {
+		Revision int64 `json:"revision"`
+		Keys     []struct {
+			JKT string          `json:"jkt"`
+			JWK json.RawMessage `json:"jwk"`
+		} `json:"keys"`
+	}
+	if err := json.Unmarshal([]byte(get(agentsPathScn+"/a1")), &one); err != nil || len(one.Keys) != 1 {
+		t.Fatalf("GET a1 = %+v, %v", one, err)
+	}
+	put := `{"id":"a1","displayName":"renamed","keys":[` + string(one.Keys[0].JWK) + `],"allowedGroups":["g1"],"allowedScopes":[]}`
+	resp, err = admin.DoBody(http.MethodPut, agentsPathScn+"/a1", http.Header{
+		controlplane.CSRFHeader: {csrf}, "Content-Type": {"application/json"}, "If-Match": {`"r` + strconv.FormatInt(one.Revision, 10) + `"`},
+	}, []byte(put))
+	if err != nil {
+		t.Fatal(err)
+	}
+	putBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("keep-key PUT = %d %s, want 200", resp.StatusCode, putBody)
+	}
+	var after struct {
+		DisplayName string `json:"displayName"`
+		Revision    int64  `json:"revision"`
+		Keys        []struct {
+			JKT string `json:"jkt"`
+		} `json:"keys"`
+	}
+	if err := json.Unmarshal(putBody, &after); err != nil || len(after.Keys) != 1 || after.Keys[0].JKT != one.Keys[0].JKT ||
+		after.DisplayName != "renamed" || after.Revision != one.Revision+1 {
+		t.Fatalf("after keep-key PUT = %+v, %v; want the same jkt %s, renamed, revision %d", after, err, one.Keys[0].JKT, one.Revision+1)
 	}
 
 	// Worker heartbeats: the first names the agent, the second sends garbage.

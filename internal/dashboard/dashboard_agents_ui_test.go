@@ -90,6 +90,9 @@ func TestIndexAgentsTab(t *testing.T) {
 		`window.confirm(`,
 		`agent_conflict`,
 		`String(k.jkt||'').slice(0,8)`,
+		`workers.filter(w=>w.agentID===a.id&&w.online)`,
+		`if(w.online&&w.agentID&&!known[w.agentID])`,
+		`if(!ag.settings) return 'unknown'`,
 	} {
 		if !strings.Contains(js, want) {
 			t.Errorf("agents script lacks %q", want)

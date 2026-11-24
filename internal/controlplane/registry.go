@@ -76,7 +76,11 @@ func (r *WorkerRegistry) SeenIngest(proxyID string, n int) {
 // SeenHeartbeat records a heartbeat and the worker's current policy ETag, so the
 // dashboard can flag workers that are a policy version behind. caps replaces the
 // stored set: a worker that stops advertising a capability loses it.
-func (r *WorkerRegistry) SeenHeartbeat(proxyID, policyETag string, caps []string) {
+//
+// agentID and identityMode (W-P2-AREG-03) replace the stored values too, under
+// the same lock, so a view never pairs new caps with an old agent binding. The
+// caller has already validated them (validAgentBinding); a worker is never trusted.
+func (r *WorkerRegistry) SeenHeartbeat(proxyID, policyETag string, caps []string, agentID, identityMode string) {
 	if proxyID == "" {
 		return
 	}
@@ -87,19 +91,6 @@ func (r *WorkerRegistry) SeenHeartbeat(proxyID, policyETag string, caps []string
 		w.policyETag = policyETag
 	}
 	w.caps = append([]string(nil), caps...)
-}
-
-// SeenAgentBinding records the agent a worker serves and the identity mode it
-// runs, from its latest heartbeat. Both replace the stored values: a worker
-// that stops reporting them loses them. The caller has already validated them
-// (validAgentBinding); a worker is never trusted.
-func (r *WorkerRegistry) SeenAgentBinding(proxyID, agentID, identityMode string) {
-	if proxyID == "" {
-		return
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	w := r.touch(proxyID, r.now())
 	w.agentID = agentID
 	w.identityMode = identityMode
 }

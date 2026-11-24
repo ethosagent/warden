@@ -2290,7 +2290,8 @@ function agFormErr(text){ const m=document.getElementById('ag-form-err'); m.styl
 function agSplit(v){ return v.split(',').map(x=>x.trim()).filter(x=>x); }
 /* The identity mode served for an agent: its own settings agents[].identity, else identity.defaultMode, else off. */
 function agMode(id){
-  const s=ag.settings||{};
+  if(!ag.settings) return 'unknown'; // settings could not be read: do not claim off
+  const s=ag.settings;
   const a=(Array.isArray(s.agents)?s.agents:[]).find(x=>x&&x.id===id);
   if(a&&a.identity) return a.identity;
   return (s.identity&&s.identity.defaultMode)||'off';
@@ -2303,7 +2304,7 @@ function agWarnings(rows,workers){
   const out=[], known={};
   rows.forEach(a=>{ known[a.id]=a; });
   rows.forEach(a=>{
-    const bound=workers.filter(w=>w.agentID===a.id);
+    const bound=workers.filter(w=>w.agentID===a.id&&w.online);
     if(a.status==='disabled'){
       const old=bound.filter(w=>w.online&&!agHasCap(w,AG_REG_CAP));
       if(old.length) out.push('Disabled agent "'+a.id+'" is still served by '+old.length+' worker'+(old.length===1?'':'s')+' without '+AG_REG_CAP+': '+old.map(w=>w.proxyID).join(', ')+'.');
@@ -2315,7 +2316,7 @@ function agWarnings(rows,workers){
       if(weak.length) out.push(weak.length+' connected worker'+(weak.length===1?'':'s')+' for agent "'+a.id+'" do not enforce require mode.');
     }
   });
-  workers.forEach(w=>{ if(w.agentID&&!known[w.agentID]) out.push('Worker "'+w.proxyID+'" reports unregistered agent "'+w.agentID+'".'); });
+  workers.forEach(w=>{ if(w.online&&w.agentID&&!known[w.agentID]) out.push('Worker "'+w.proxyID+'" reports unregistered agent "'+w.agentID+'".'); });
   return out;
 }
 function agRenderWarnings(list){
@@ -2366,7 +2367,7 @@ function agRenderList(){
     tr.appendChild(agEl('td',agMode(a.id),'mono'));
     const cw=agEl('td'); const bound=agBound(a.id);
     if(!bound.length) cw.appendChild(agEl('span','none','muted'));
-    bound.forEach(w=>{ cw.appendChild(agEl('div',w.proxyID+(w.identityMode?' · '+w.identityMode:''),'mono')); });
+    bound.forEach(w=>{ cw.appendChild(agEl('div',w.proxyID+(w.identityMode?' · '+w.identityMode:'')+(w.online?'':' · offline'),'mono')); });
     tr.appendChild(cw);
     const ca=agEl('td'); ca.style.textAlign='right';
     if(ag.canWrite){

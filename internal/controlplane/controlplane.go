@@ -732,9 +732,8 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	// Body is optional/tiny; ignore decode errors (heartbeat is best-effort).
 	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body)
 	caps := normalizeCaps(body.Caps)
-	s.registry.SeenHeartbeat(principal.ProxyID, trimETag(body.PolicyETag), caps)
 	agentID, mode := validAgentBinding(body.AgentID, body.IdentityMode)
-	s.registry.SeenAgentBinding(principal.ProxyID, agentID, mode)
+	s.registry.SeenHeartbeat(principal.ProxyID, trimETag(body.PolicyETag), caps, agentID, mode)
 	s.noteGroupPolicy(principal.ProxyID, caps)
 	s.noteIdentityChallenge(principal.ProxyID, caps)
 	w.WriteHeader(http.StatusNoContent)
@@ -748,7 +747,7 @@ func validAgentBinding(agentID, mode string) (string, string) {
 		agentID = ""
 	}
 	switch mode {
-	case config.IdentityModeOff, config.IdentityModeAttribute, config.IdentityModeChallenge, "require":
+	case config.IdentityModeOff, config.IdentityModeAttribute, config.IdentityModeChallenge, config.IdentityModeRequire:
 	default:
 		mode = ""
 	}
