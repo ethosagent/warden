@@ -61,7 +61,6 @@ func WithTokenService() Option {
 // do not trip the production defaults; a scenario about the limits sets its own.
 type tokenLimits struct {
 	perIP, perAgent, perUser string
-	maxInFlight              int
 	eventRetention           string
 	trustLoopbackProxy       bool
 }
