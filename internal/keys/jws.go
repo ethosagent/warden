@@ -57,7 +57,8 @@ func ParseCompact(raw string) (h Header, payload, signingInput, sig []byte, err 
 	}
 	var seg [3][]byte
 	for i, p := range parts {
-		if p == "" || len(p) > maxSegment {
+		// Strict decoding still skips CR and LF, so refuse them first.
+		if p == "" || len(p) > maxSegment || strings.ContainsAny(p, "\r\n") {
 			return Header{}, nil, nil, nil, fmt.Errorf("%w: segment %d is empty or too long", ErrMalformedJWS, i)
 		}
 		b, derr := base64.RawURLEncoding.Strict().DecodeString(p)
@@ -99,11 +100,13 @@ func parseHeader(data []byte) (Header, error) {
 			return Header{}, bad("has a duplicate member")
 		}
 		seen[folded] = true
-		switch folded {
-		case "crit", "jku", "jwk", "x5u", "x5c":
-			return Header{}, fmt.Errorf("%w: %q", ErrForbiddenHeader, folded)
-		case "alg", "kid", "typ":
-			if name != folded {
+		for _, known := range []string{"crit", "jku", "jwk", "x5u", "x5c"} {
+			if strings.EqualFold(name, known) {
+				return Header{}, fmt.Errorf("%w: %q", ErrForbiddenHeader, known)
+			}
+		}
+		for _, known := range []string{"alg", "kid", "typ"} {
+			if name != known && strings.EqualFold(name, known) {
 				return Header{}, bad("has a mis-cased member")
 			}
 		}

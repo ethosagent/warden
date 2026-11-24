@@ -169,7 +169,8 @@ func wantReason(t *testing.T, err error, want tokensvc.Reason) {
 		t.Fatalf("reason = %s, want %s", te.Reason, want)
 	}
 	wantCode := tokensvc.CodeInvalidClient
-	if want == tokensvc.ReasonStoreUnavailable {
+	switch want {
+	case tokensvc.ReasonAgentStoreUnavailable, tokensvc.ReasonReplayStoreUnavailable, tokensvc.ReasonVerifierMisconfigured:
 		wantCode = tokensvc.CodeTemporarilyUnavailable
 	}
 	if te.Code != wantCode {
@@ -323,11 +324,11 @@ func TestVerifyClientAssertion(t *testing.T) {
 		s := e.register("a1", keys.AlgEdDSA, agentreg.StatusActive)
 		e.replay.err = errors.New("db down")
 		_, err := e.v.VerifyClientAssertion(ctx, e.sign(s, e.claimsFor("a1")))
-		wantReason(t, err, tokensvc.ReasonStoreUnavailable)
+		wantReason(t, err, tokensvc.ReasonReplayStoreUnavailable)
 		e.replay.err = nil
 		e.agents.err = errors.New("db down")
 		_, err = e.v.VerifyClientAssertion(ctx, e.sign(s, e.claimsFor("a1")))
-		wantReason(t, err, tokensvc.ReasonStoreUnavailable)
+		wantReason(t, err, tokensvc.ReasonAgentStoreUnavailable)
 	})
 
 	t.Run("a misconfigured verifier fails closed", func(t *testing.T) {
@@ -342,7 +343,7 @@ func TestVerifyClientAssertion(t *testing.T) {
 			{Agents: e.agents, Replay: e.replay, Issuer: issuer},
 		} {
 			_, err := v.VerifyClientAssertion(ctx, raw)
-			wantReason(t, err, tokensvc.ReasonStoreUnavailable)
+			wantReason(t, err, tokensvc.ReasonVerifierMisconfigured)
 		}
 	})
 }
@@ -546,5 +547,82 @@ func TestAssertionJTIPurge(t *testing.T) {
 	e.now = e.now.Add(time.Second)
 	if n, _ := e.replay.Purge(ctx, e.now); n != 1 || e.replay.count() != 0 {
 		t.Fatalf("purged %d, rows left %d", n, e.replay.count())
+	}
+}
+
+// Unknown agents, unknown and missing kids and alg mismatches each spend one
+// dummy verification, so timing does not tell them from a real agent.
+func TestAssertionDummyVerify(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	ed := e.register("agent-ed", keys.AlgEdDSA, agentreg.StatusActive)
+	stranger, _ := signer.GenerateLocal(keys.AlgEdDSA)
+	cases := []struct {
+		name string
+		raw  string
+		want tokensvc.Reason
+	}{
+		{"unknown agent", e.sign(stranger, e.claimsFor("ghost")), tokensvc.ReasonAgentUnknown},
+		{"unknown kid", forge(`{"alg":"EdDSA","kid":"nope"}`, e.claimsFor("agent-ed"), make([]byte, 64)), tokensvc.ReasonUnknownKID},
+		{"missing kid", forge(`{"alg":"EdDSA"}`, e.claimsFor("agent-ed"), make([]byte, 64)), tokensvc.ReasonUnknownKID},
+		{"alg mismatch", forge(`{"alg":"ES256","kid":"`+ed.KID()+`"}`, e.claimsFor("agent-ed"), make([]byte, 64)), tokensvc.ReasonAlgNotAllowed},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var calls int
+			restore := tokensvc.SetDummyHook(func() { calls++ })
+			defer restore()
+			_, err := e.v.VerifyClientAssertion(ctx, c.raw)
+			wantReason(t, err, c.want)
+			if calls != 1 {
+				t.Fatalf("dummy verifications = %d, want 1", calls)
+			}
+		})
+	}
+	t.Run("a real agent's bad signature does not take the dummy path", func(t *testing.T) {
+		var calls int
+		defer tokensvc.SetDummyHook(func() { calls++ })()
+		_, err := e.v.VerifyClientAssertion(ctx, forge(`{"alg":"EdDSA","kid":"`+ed.KID()+`"}`, e.claimsFor("agent-ed"), make([]byte, 64)))
+		wantReason(t, err, tokensvc.ReasonBadSignature)
+		if calls != 0 {
+			t.Fatalf("dummy verifications = %d, want 0", calls)
+		}
+	})
+}
+
+func TestAssertionStrictClaimMembers(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	s := e.register("agent-1", keys.AlgEdDSA, agentreg.StatusActive)
+	good := e.claimsFor("agent-1")
+	gb, _ := json.Marshal(good)
+	enc := base64.RawURLEncoding.EncodeToString
+	signRaw := func(payload string) string {
+		hb, _ := json.Marshal(keys.Header{Alg: keys.AlgEdDSA, Kid: s.KID()})
+		in := enc(hb) + "." + enc([]byte(payload))
+		sig, err := s.Sign(ctx, []byte(in))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return in + "." + enc(sig)
+	}
+	body := string(gb)
+	cases := map[string]string{
+		"duplicate sub":       strings.Replace(body, `{`, `{"sub":"agent-1",`, 1),
+		"duplicate iss":       strings.Replace(body, `{`, `{"iss":"agent-1",`, 1),
+		"long-s sub":          strings.Replace(body, `{`, `{"ſub":"agent-1",`, 1),
+		"upper-case aud":      strings.Replace(body, `{`, `{"AUD":"x",`, 1),
+		"case-folded dup jti": strings.Replace(body, `{`, `{"JTI":"x",`, 1),
+		"trailing data":       body + `{}`,
+		"not an object":       `["iss"]`,
+	}
+	for name, payload := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := e.v.VerifyClientAssertion(ctx, signRaw(payload))
+			wantReason(t, err, tokensvc.ReasonMalformed)
+		})
+	}
+	if _, err := e.v.VerifyClientAssertion(ctx, signRaw(body)); err != nil {
+		t.Fatalf("the unmodified payload must pass: %v", err)
 	}
 }

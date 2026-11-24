@@ -12,9 +12,11 @@ import (
 // dummyKey returns a verification key of the type alg selects, used to spend
 // the same work on an assertion whose agent or kid is unknown as on one whose
 // key is real, so response time does not reveal which agent ids exist. The
-// keys are fixed public constants: no private half exists in this process and
-// nothing can ever verify against them (the P-256 key is the curve's base
-// point, the Ed25519 key is derived from a fixed label).
+// keys are fixed public constants and both private keys are public knowledge
+// (the P-256 key is the curve base point, whose private scalar is 1; the
+// Ed25519 seed comes from a public label). A signature made with them would
+// verify, so the result of a dummy verification must always be discarded and
+// never used to authenticate anything.
 func dummyKey(alg string) (keys.JWK, bool) {
 	switch alg {
 	case keys.AlgEdDSA:

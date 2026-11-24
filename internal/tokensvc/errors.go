@@ -26,20 +26,22 @@ type Reason string
 
 // The closed reason set.
 const (
-	ReasonAgentUnknown     Reason = "agent_unknown"
-	ReasonUnknownKID       Reason = "unknown_kid"
-	ReasonBadSignature     Reason = "bad_signature"
-	ReasonAgentDisabled    Reason = "agent_disabled"
-	ReasonReplay           Reason = "replay"
-	ReasonWrongAud         Reason = "wrong_aud"
-	ReasonWrongIss         Reason = "wrong_iss"
-	ReasonExpired          Reason = "expired"
-	ReasonNotYetValid      Reason = "not_yet_valid"
-	ReasonLifetimeTooLong  Reason = "lifetime_too_long"
-	ReasonAlgNotAllowed    Reason = "alg_not_allowed"
-	ReasonMalformed        Reason = "malformed"
-	ReasonTooLarge         Reason = "too_large"
-	ReasonStoreUnavailable Reason = "store_unavailable"
+	ReasonAgentUnknown           Reason = "agent_unknown"
+	ReasonUnknownKID             Reason = "unknown_kid"
+	ReasonBadSignature           Reason = "bad_signature"
+	ReasonAgentDisabled          Reason = "agent_disabled"
+	ReasonReplay                 Reason = "replay"
+	ReasonWrongAud               Reason = "wrong_aud"
+	ReasonWrongIss               Reason = "wrong_iss"
+	ReasonExpired                Reason = "expired"
+	ReasonNotYetValid            Reason = "not_yet_valid"
+	ReasonLifetimeTooLong        Reason = "lifetime_too_long"
+	ReasonAlgNotAllowed          Reason = "alg_not_allowed"
+	ReasonMalformed              Reason = "malformed"
+	ReasonTooLarge               Reason = "too_large"
+	ReasonAgentStoreUnavailable  Reason = "agent_store_unavailable"
+	ReasonReplayStoreUnavailable Reason = "replay_store_unavailable"
+	ReasonVerifierMisconfigured  Reason = "verifier_misconfigured"
 )
 
 // Error is a token endpoint failure. Code is what the client sees; Reason,

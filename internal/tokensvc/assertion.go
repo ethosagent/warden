@@ -13,10 +13,13 @@
 package tokensvc
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/ethosagent/warden/internal/agentid"
@@ -80,6 +83,70 @@ type claims struct {
 	ClientID *string         `json:"client_id"`
 }
 
+// dummyHook is a test seam (export_test.go); nil in production.
+var dummyHook func()
+
+// claimNames are the members the verifier reads. A member whose name matches
+// one of them under Unicode case folding but not exactly (for example "ſub")
+// is rejected, because encoding/json would otherwise fold it onto the claim.
+var claimNames = []string{"iss", "sub", "aud", "exp", "iat", "nbf", "jti", "client_id"}
+
+// parseClaims decodes the payload's top level strictly: one JSON object, no
+// duplicate member (case-folded), no mis-cased claim name.
+func parseClaims(payload []byte) (*claims, error) {
+	errBad := errors.New("tokensvc: malformed claims")
+	dec := json.NewDecoder(bytes.NewReader(payload))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return nil, errBad
+	}
+	members := map[string]json.RawMessage{}
+	seen := map[string]bool{}
+	for dec.More() {
+		tok, err := dec.Token()
+		name, ok := tok.(string)
+		if err != nil || !ok {
+			return nil, errBad
+		}
+		folded := strings.ToLower(name)
+		if seen[folded] || seen[name] {
+			return nil, errBad
+		}
+		seen[folded], seen[name] = true, true
+		for _, known := range claimNames {
+			if name != known && strings.EqualFold(name, known) {
+				return nil, errBad
+			}
+		}
+		var v json.RawMessage
+		if err := dec.Decode(&v); err != nil {
+			return nil, errBad
+		}
+		members[name] = v
+	}
+	if _, err := dec.Token(); err != nil {
+		return nil, errBad
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return nil, errBad
+	}
+	// Re-encode only the claims we read into the typed struct.
+	picked := map[string]json.RawMessage{}
+	for _, k := range claimNames {
+		if v, ok := members[k]; ok {
+			picked[k] = v
+		}
+	}
+	b, err := json.Marshal(picked)
+	if err != nil {
+		return nil, errBad
+	}
+	var c claims
+	if err := json.Unmarshal(b, &c); err != nil {
+		return nil, errBad
+	}
+	return &c, nil
+}
+
 // VerifyClientAssertion authenticates raw, a compact JWS client assertion. See
 // VerifyClientAssertionFor.
 func (v *AssertionVerifier) VerifyClientAssertion(ctx context.Context, raw string) (Client, error) {
@@ -99,7 +166,7 @@ func (v *AssertionVerifier) VerifyClientAssertion(ctx context.Context, raw strin
 // code, message and (by a dummy verification) timing.
 func (v *AssertionVerifier) VerifyClientAssertionFor(ctx context.Context, raw, formClientID string) (Client, error) {
 	if v == nil || v.Agents == nil || v.Replay == nil || v.Now == nil || v.Issuer == "" {
-		return Client{}, fail(ReasonStoreUnavailable, "", "")
+		return Client{}, fail(ReasonVerifierMisconfigured, "", "")
 	}
 	if len(raw) > MaxAssertionSize {
 		return Client{}, fail(ReasonTooLarge, "", "")
@@ -111,8 +178,8 @@ func (v *AssertionVerifier) VerifyClientAssertionFor(ctx context.Context, raw, f
 		}
 		return Client{}, fail(ReasonMalformed, "", "")
 	}
-	var c claims
-	if err := json.Unmarshal(payload, &c); err != nil || c.Iss == nil {
+	c, err := parseClaims(payload)
+	if err != nil || c.Iss == nil {
 		return Client{}, fail(ReasonMalformed, "", "")
 	}
 	// Every failure from here until the signature check spends a dummy
@@ -120,6 +187,9 @@ func (v *AssertionVerifier) VerifyClientAssertionFor(ctx context.Context, raw, f
 	// made-up one.
 	unknown := func(r Reason, agent string) (Client, error) {
 		dummyVerify(h.Alg, input, sig)
+		if dummyHook != nil {
+			dummyHook()
+		}
 		return Client{}, fail(r, agent, "")
 	}
 	if agentid.ValidID(*c.Iss) != nil {
@@ -134,7 +204,7 @@ func (v *AssertionVerifier) VerifyClientAssertionFor(ctx context.Context, raw, f
 	case errors.Is(err, agentreg.ErrNotFound):
 		return unknown(ReasonAgentUnknown, agentID)
 	case err != nil:
-		return Client{}, fail(ReasonStoreUnavailable, agentID, "")
+		return Client{}, fail(ReasonAgentStoreUnavailable, agentID, "")
 	}
 	key, ok := selectKey(agent, h.Kid)
 	if !ok {
@@ -145,7 +215,7 @@ func (v *AssertionVerifier) VerifyClientAssertionFor(ctx context.Context, raw, f
 	}
 	jwk, err := key.PublicJWK()
 	if err != nil {
-		return Client{}, fail(ReasonStoreUnavailable, agentID, "")
+		return Client{}, fail(ReasonAgentStoreUnavailable, agentID, "")
 	}
 	if err := keys.Verify(jwk, h.Alg, input, sig); err != nil {
 		if errors.Is(err, keys.ErrAlgMismatch) || errors.Is(err, keys.ErrUnsupportedAlg) {
@@ -155,11 +225,11 @@ func (v *AssertionVerifier) VerifyClientAssertionFor(ctx context.Context, raw, f
 	}
 	jkt, err := keys.Thumbprint(jwk)
 	if err != nil {
-		return Client{}, fail(ReasonStoreUnavailable, agentID, "")
+		return Client{}, fail(ReasonAgentStoreUnavailable, agentID, "")
 	}
 
 	now := v.Now()
-	exp, jtiHash, reason := v.checkClaims(&c, agentID, formClientID, now)
+	exp, jtiHash, reason := v.checkClaims(c, agentID, formClientID, now)
 	if reason != "" {
 		return Client{}, fail(reason, agentID, jtiHash)
 	}
@@ -168,7 +238,7 @@ func (v *AssertionVerifier) VerifyClientAssertionFor(ctx context.Context, raw, f
 	}
 	first, err := v.Replay.Consume(ctx, agentID, jtiHash, exp.Add(v.skew()))
 	if err != nil {
-		return Client{}, fail(ReasonStoreUnavailable, agentID, jtiHash)
+		return Client{}, fail(ReasonReplayStoreUnavailable, agentID, jtiHash)
 	}
 	if !first {
 		return Client{}, fail(ReasonReplay, agentID, jtiHash)
@@ -308,7 +378,8 @@ func dummyVerify(alg string, input, sig []byte) {
 // invalid_client; jtiHash is the full hash and only an 8-hex prefix is kept.
 func fail(r Reason, agentID, jtiHash string) *Error {
 	code := CodeInvalidClient
-	if r == ReasonStoreUnavailable {
+	switch r {
+	case ReasonAgentStoreUnavailable, ReasonReplayStoreUnavailable, ReasonVerifierMisconfigured:
 		code = CodeTemporarilyUnavailable
 	}
 	e := &Error{Code: code, Reason: r, AgentID: agentID}

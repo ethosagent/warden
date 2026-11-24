@@ -69,6 +69,8 @@ func TestParseCompact_Rejects(t *testing.T) {
 		{"four segments", tok(`{"alg":"EdDSA"}`) + ".x", keys.ErrMalformedJWS},
 		{"empty payload", b64(`{"alg":"EdDSA"}`) + ".." + s, keys.ErrMalformedJWS},
 		{"empty signature", b64(`{"alg":"EdDSA"}`) + "." + p + ".", keys.ErrMalformedJWS},
+		{"newline in segment", b64(`{"alg":"EdDSA"}`)[:4] + "\n" + b64(`{"alg":"EdDSA"}`)[4:] + "." + p + "." + s, keys.ErrMalformedJWS},
+		{"carriage return in segment", b64(`{"alg":"EdDSA"}`) + "." + p[:2] + "\r" + p[2:] + "." + s, keys.ErrMalformedJWS},
 		{"padded segment", tok(`{"alg":"EdDSA"}`) + "=", keys.ErrMalformedJWS},
 		{"standard alphabet", b64(`{"alg":"EdDSA","kid":"???>>>"}`) + "." + strings.NewReplacer("-", "+", "_", "/").Replace(base64.RawURLEncoding.EncodeToString([]byte{0xfb, 0xff})) + "." + s, keys.ErrMalformedJWS},
 		{"header not an object", tok(`["alg"]`), keys.ErrMalformedJWS},

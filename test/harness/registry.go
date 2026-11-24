@@ -80,6 +80,7 @@ var Excluded = map[string]string{
 	"worker.ControlPlaneClient":       "the worker's view of the control plane; the harness runs the real control plane (*config.RemoteProvider) rather than a fake",
 	"keys.MetaStore":                  "the control plane's own signing_keys table on the cpstate SQLite DB (keys/adapters/metastore); the harness runs the real one, a fake would hide the compare-and-swap and unique-index behaviour that keeps the key lifecycle from forking",
 	"agentreg.Store":                  "the control plane's own agent registry on the cpstate SQLite DB (agentreg.SQLiteStore); the harness runs the real one, a fake would hide the revision compare-and-swap, key-uniqueness and cap behaviour that agentregtest.Run pins for every implementation",
+	"tokensvc.ReplayStore":            "the control plane's own token_assertion_jti table on the cpstate SQLite DB (tokensvc/adapters/sqlite); the harness runs the real one, a fake would hide the INSERT ... ON CONFLICT DO NOTHING single-use semantics that stop a replayed assertion",
 	"keys.Signer":                     "local CPU-only signing over stdlib crypto (GenerateLocal/NewLocalSigner); no external system behind the port, and a fake would hide the JOSE wire encodings (r||s, RFC 7638 kids) the verifiers pin",
 }
 
