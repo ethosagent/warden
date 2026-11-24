@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"github.com/ethosagent/warden/internal/audit"
 	"github.com/ethosagent/warden/internal/cpstate"
 	"github.com/ethosagent/warden/internal/integration"
+	"github.com/ethosagent/warden/test/fakes"
 )
 
 // restoreSrc builds a stopped CP state dir (cp db, alert db, fleet db and
@@ -146,6 +148,12 @@ func TestRunRestoreAllFiles(t *testing.T) {
 	}
 	if res.KeyChecked || !res.Audited || res.WardenVersion != "v-test" || res.PreRestoreDir != "" || len(res.Files) != 4 {
 		t.Errorf("result = %+v", res)
+	}
+	// No signing_keys table here: the check ran, named the directory it
+	// looked in and found nothing to report.
+	if res.KeysDir != filepath.Join(dst, "keys") || res.KeysCheckError != "" || len(res.KeysMissingMaterial) != 0 {
+		t.Errorf("key material check = dir %q missing %v err %q, want the default dir, nothing missing, no error",
+			res.KeysDir, res.KeysMissingMaterial, res.KeysCheckError)
 	}
 	for _, p := range []string{
 		filepath.Join(dst, "warden-cp.db"), filepath.Join(dst, "config.yaml"),
@@ -503,7 +511,14 @@ func TestRunRestoreRollsBack(t *testing.T) {
 func TestRunRestoreOlderSet(t *testing.T) {
 	ctx := context.Background()
 	state := t.TempDir()
-	all := StateMigrations()
+	// Feature-gated (Optional) migrations are not applied by a plain Open, so
+	// the version a restore reaches is the count of the always-on ones.
+	var all []cpstate.Migration
+	for _, m := range StateMigrations() {
+		if !m.Optional {
+			all = append(all, m)
+		}
+	}
 	old, err := cpstate.Open(ctx, filepath.Join(state, "warden-cp.db"), all[:len(all)-1])
 	if err != nil {
 		t.Fatal(err)
@@ -525,13 +540,76 @@ func TestRunRestoreOlderSet(t *testing.T) {
 	if _, err := RunRestore(ctx, RestoreParams{From: res.Path, StateDir: dst}); err != nil {
 		t.Fatal(err)
 	}
-	db, err := cpstate.OpenReadOnly(ctx, filepath.Join(dst, "warden-cp.db"), all)
+	db, err := cpstate.OpenReadOnly(ctx, filepath.Join(dst, "warden-cp.db"), StateMigrations())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = db.Close() }()
 	if v, _ := db.SchemaVersion(ctx); v != len(all) {
 		t.Errorf("restored schema version = %d, want %d", v, len(all))
+	}
+}
+
+// TestRestoreCheckKeyMaterial: the check names the key directory it looked
+// in, reports the purposes whose material is gone, and reports a check that
+// could not run as an error — never as a silent pass.
+func TestRestoreCheckKeyMaterial(t *testing.T) {
+	ctx := context.Background()
+	stateDir := openKeysStateDir(t)
+
+	kmc := checkKeyMaterial(ctx, stateDir)
+	if kmc.err != nil {
+		t.Fatalf("check with the key store in place = err %v, want none", kmc.err)
+	}
+	if kmc.dir != filepath.Join(stateDir, "keys") {
+		t.Errorf("checked dir = %q, want %q", kmc.dir, filepath.Join(stateDir, "keys"))
+	}
+	if len(kmc.missing) != 0 {
+		t.Errorf("missing = %v with the key store in place", kmc.missing)
+	}
+
+	if err := os.RemoveAll(filepath.Join(stateDir, "keys")); err != nil {
+		t.Fatal(err)
+	}
+	kmc = checkKeyMaterial(ctx, stateDir)
+	if kmc.err != nil || !slices.Equal(kmc.missing, []string{"bundle", "token"}) {
+		t.Errorf("check without the key dir = missing %v err %v, want bundle and token, no error", kmc.missing, kmc.err)
+	}
+
+	// The database cannot be opened: the check says so instead of reporting
+	// nothing, and still names the directory the operator must verify.
+	broken := filepath.Join(t.TempDir(), "state")
+	if err := os.MkdirAll(filepath.Join(broken, adminaudit.StateDBFileName), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	kmc = checkKeyMaterial(ctx, broken)
+	if kmc.err == nil {
+		t.Fatal("a check over an unreadable state database reported nothing")
+	}
+	if kmc.dir != filepath.Join(broken, "keys") || len(kmc.missing) != 0 {
+		t.Errorf("check = dir %q missing %v, want the default dir named and nothing missing", kmc.dir, kmc.missing)
+	}
+}
+
+// TestRestoreCheckKeyMaterialAWS: rows recording the aws backend carry their
+// material in Secrets Manager, so the check claims no key directory and
+// reports nothing missing even with no <state-dir>/keys on disk.
+func TestRestoreCheckKeyMaterialAWS(t *testing.T) {
+	ctx := context.Background()
+	account := fakes.NewFakeAWSSecretsClient()
+	stateDir := filepath.Join(t.TempDir(), "state")
+	cfg := writeKeysPolicy(t, "keys:\n  enabled: true\n  store:\n    backend: aws\n    aws:\n      region: eu-central-1\n")
+	runCP(t, Params{ConfigPath: cfg, StateDir: stateDir, KeysAWSClient: account.View("warden-cp-keys/")})
+	if _, err := os.Stat(filepath.Join(stateDir, "keys")); !os.IsNotExist(err) {
+		t.Fatalf("the aws control plane created a key directory: %v", err)
+	}
+
+	kmc := checkKeyMaterial(ctx, stateDir)
+	if kmc.err != nil {
+		t.Fatalf("check over aws rows = err %v, want none", kmc.err)
+	}
+	if !kmc.aws || kmc.dir != "" || len(kmc.missing) != 0 {
+		t.Errorf("check over aws rows = dir %q aws %v missing %v, want no directory claimed and nothing missing", kmc.dir, kmc.aws, kmc.missing)
 	}
 }
 

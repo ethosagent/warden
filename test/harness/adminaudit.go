@@ -183,7 +183,7 @@ func (h *H) ReadControlPlaneConfig() string {
 // controlPlaneConfigPath is the served YAML: the seeded copy in the state dir
 // when the control plane has one, otherwise the config it was started with.
 func (h *H) controlPlaneConfigPath() string {
-	if h.wantAdminAudit || h.wantConsole || h.versionedPolicy {
+	if h.wantAdminAudit || h.wantConsole || h.versionedPolicy || h.wantKeys {
 		return filepath.Join(h.root, "cp-state", "config.yaml")
 	}
 	return filepath.Join(h.root, "cp-config.yaml")

@@ -18,7 +18,9 @@ import (
 	"github.com/ethosagent/warden/internal/adminaudit"
 	"github.com/ethosagent/warden/internal/audit"
 	"github.com/ethosagent/warden/internal/clock"
+	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/cpstate"
+	"github.com/ethosagent/warden/internal/keys/adapters/filestore"
 )
 
 // The verified restore (W-P1-OPS1-04) loads a backup set written by the runner
@@ -96,6 +98,26 @@ type RestoreResult struct {
 	// Audited is false when the restored state has no admin audit chain
 	// (so no cp.restore row was appended).
 	Audited bool
+	// KeysMissingMaterial names the purposes whose next or active signing key
+	// has no readable private material after the restore: a backup set never
+	// contains the key store (the manifest lists it under not_included). The
+	// operator verifies KeysDir holds the key files and regenerates a purpose
+	// with `keys reset` only when the material is truly lost.
+	KeysMissingMaterial []string
+	// KeysDir is the key directory the material check looked in — the default
+	// <state-dir>/keys: restore takes no --config naming another one. Empty
+	// when every next/active key records the aws backend: there is no key
+	// directory to look in.
+	KeysDir string
+	// KeysAWSStore reports that at least one next or active signing key
+	// records store_backend aws: its material lives in AWS Secrets Manager
+	// under the keys.store.aws prefix, not in any local directory — the
+	// material check neither covers nor claims it.
+	KeysAWSStore bool
+	// KeysCheckError is why the material check could not run, when it could
+	// not. The operator verifies KeysDir themselves instead of trusting a
+	// silent pass; it is empty when the check ran.
+	KeysCheckError string
 }
 
 // restoreTarget is one file the restore places.
@@ -211,6 +233,16 @@ func RunRestore(ctx context.Context, p RestoreParams) (RestoreResult, error) {
 	for _, t := range targets {
 		res.Files = append(res.Files, t.name)
 	}
+	// The key store is never in a set, so a restored control plane may hold
+	// signing keys whose material is gone. Name the purposes that cannot sign
+	// until the operator replaces their material, and say which directory was
+	// checked; a state dir without signing keys (the feature was never
+	// enabled) reports nothing.
+	kmc := checkKeyMaterial(ctx, p.StateDir)
+	res.KeysDir, res.KeysMissingMaterial, res.KeysAWSStore = kmc.dir, kmc.missing, kmc.aws
+	if kmc.err != nil {
+		res.KeysCheckError = kmc.err.Error()
+	}
 	if !slices.Contains(res.Files, restoreCPDB) {
 		return res, nil
 	}
@@ -220,6 +252,100 @@ func RunRestore(ctx context.Context, p RestoreParams) (RestoreResult, error) {
 	}
 	res.Audited = audited
 	return res, nil
+}
+
+// keyMaterialCheck is what the restore's material check found: the key
+// directory it looked in (empty when the keys live in the aws backend — there
+// is no directory to look in), the purposes whose next or active key has no
+// readable private material there, the aws flag when rows record the aws
+// backend, and the error that stopped the check, when one did — a check that
+// could not run is reported, never swallowed.
+type keyMaterialCheck struct {
+	dir     string
+	missing []string
+	aws     bool
+	err     error
+}
+
+// checkKeyMaterial names the state dir's key directory and the sorted
+// purposes whose next or active signing key has no readable private material
+// in it — the situation after a restore, because a backup set never contains
+// the key store. Restore takes no --config, so the keys defaults decide the
+// directory (<state-dir>/keys). Retired, revoked and destroyed keys have no
+// material by design (it was deleted when the key left the signing slot), so
+// only the two states that must sign are checked. Rows recording the aws
+// backend carry their material in AWS Secrets Manager, not in any local
+// directory: they are not file-checked, the result says so, and no directory
+// is claimed for them. A state dir whose control plane never ran with keys
+// enabled has no signing_keys table and reports nothing.
+func checkKeyMaterial(ctx context.Context, stateDir string) keyMaterialCheck {
+	out := keyMaterialCheck{dir: filepath.Join(stateDir, "keys")}
+	db, err := cpstate.OpenReadOnly(ctx, filepath.Join(stateDir, adminaudit.StateDBFileName), StateMigrations())
+	if err != nil {
+		out.err = fmt.Errorf("open the restored state database: %w", err)
+		return out
+	}
+	defer func() { _ = db.Close() }()
+	var n int
+	if err := db.SQL().QueryRowContext(ctx,
+		`SELECT count(*) FROM sqlite_master WHERE type='table' AND name='signing_keys'`).Scan(&n); err != nil {
+		out.err = fmt.Errorf("look for the signing_keys table: %w", err)
+		return out
+	}
+	if n == 0 {
+		return out
+	}
+	rows, err := db.SQL().QueryContext(ctx,
+		`SELECT purpose, kid, store_backend FROM signing_keys WHERE state IN ('next','active')`)
+	if err != nil {
+		out.err = fmt.Errorf("list the signing keys: %w", err)
+		return out
+	}
+	defer func() { _ = rows.Close() }()
+	type fileKey struct{ purpose, kid string }
+	var onDisk []fileKey
+	for rows.Next() {
+		var purpose, kid, backend string
+		if err := rows.Scan(&purpose, &kid, &backend); err != nil {
+			out.err = fmt.Errorf("read a signing key row: %w", err)
+			return out
+		}
+		if backend == config.KeysBackendAWS {
+			out.aws = true // material in Secrets Manager: no directory to check
+			continue
+		}
+		onDisk = append(onDisk, fileKey{purpose, kid})
+	}
+	if err := rows.Err(); err != nil {
+		out.err = fmt.Errorf("list the signing keys: %w", err)
+		return out
+	}
+	if len(onDisk) == 0 {
+		out.dir = "" // nothing to look for in <state-dir>/keys
+		return out
+	}
+	kc, err := config.DefaultKeys().Resolve(stateDir)
+	if err != nil {
+		out.err = fmt.Errorf("resolve the key directory: %w", err)
+		return out
+	}
+	out.dir = kc.Store.File.Dir
+	store, err := filestore.New(kc.Store.File.Dir)
+	if err != nil {
+		out.err = err
+		return out
+	}
+	missing := map[string]bool{}
+	for _, k := range onDisk {
+		if _, err := store.Get(ctx, k.purpose, k.kid); err != nil {
+			missing[k.purpose] = true
+		}
+	}
+	for p := range missing {
+		out.missing = append(out.missing, p)
+	}
+	slices.Sort(out.missing)
+	return out
 }
 
 // readRestoreManifest reads and validates <from>/manifest.json: the format,
@@ -388,17 +514,36 @@ func copyHashing(dst string, src io.Reader) (int64, string, error) {
 	return n, hex.EncodeToString(h.Sum(nil)), nil
 }
 
+// supportedSchemaVersion is the schema version a state database holding the
+// applied migration IDs could have on this binary: every always-on migration
+// plus the feature-gated (Optional) ones the file has applied. An Optional
+// migration the file never applied does not count, or one unregistered
+// future migration would hide behind it.
+func supportedSchemaVersion(applied []string) int {
+	have := make(map[string]bool, len(applied))
+	for _, id := range applied {
+		have[id] = true
+	}
+	n := 0
+	for _, m := range StateMigrations() {
+		if !m.Optional || have[m.ID] {
+			n++
+		}
+	}
+	return n
+}
+
 // checkStagedState vets the staged warden-cp.db: its schema version must not
 // exceed this binary's, every migration it holds must be one this binary
 // knows, and a non-empty admin audit chain must verify (the keys come from the
 // chain itself).
 func checkStagedState(ctx context.Context, staged string, m BackupManifest) error {
-	known := len(StateMigrations())
 	lenient, err := cpstate.OpenReadOnlyWith(ctx, staged, StateMigrations(), cpstate.ReadOnlyOptions{AllowNewer: func(string) bool { return true }})
 	if err != nil {
 		return fmt.Errorf("backup warden-cp.db: %w", err)
 	}
 	got, err := lenient.SchemaVersion(ctx)
+	known := supportedSchemaVersion(lenient.Applied())
 	_ = lenient.Close()
 	if err != nil {
 		return fmt.Errorf("backup warden-cp.db: %w", err)

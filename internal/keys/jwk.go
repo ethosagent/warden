@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 )
 
 // JWK member values this package understands.
@@ -48,6 +49,29 @@ type JWK struct {
 // serves so workers and peers can fetch verification keys.
 type JWKS struct {
 	Keys []JWK `json:"keys"`
+}
+
+// PublishedJWKS builds the JWKS a verifier of rows needs — the one definition
+// of which public keys are published for a purpose: the next and active keys
+// always (the next one so the prepublish window works: a verifier that fetches
+// now already holds the key that signs next), and a retired key until
+// retire_at + overlap, so the tokens it signed keep verifying. Revoked and
+// destroyed keys are never returned: an emergency rotation takes the key out
+// of the set at once. KeySet.JWKS serves it from the loaded snapshot; the keys
+// CLI rebuilds it from stored rows. rows must all be one purpose's.
+func PublishedJWKS(rows []Record, now time.Time, overlap time.Duration) JWKS {
+	var out JWKS
+	for _, r := range rows {
+		switch r.State {
+		case StateNext, StateActive:
+			out.Keys = append(out.Keys, r.PublicJWK)
+		case StateRetired:
+			if !r.RetireAt.IsZero() && now.Before(r.RetireAt.Add(overlap)) {
+				out.Keys = append(out.Keys, r.PublicJWK)
+			}
+		}
+	}
+	return out
 }
 
 // PublicJWK builds the public JWK for pub under alg, with kid set to the RFC

@@ -205,6 +205,19 @@ type H struct {
 	wantBackup bool
 	// backupUnwritable (WithBackupUnwritable) makes every backup run fail.
 	backupUnwritable bool
+	// wantKeys (WithKeys, WithFlakyKeyStore, WithKeyRotation, WithAWSKeyStore)
+	// boots the control plane with keys.enabled and a state dir; keyStore is
+	// the injected fake private-key store of WithFlakyKeyStore (nil = the real
+	// backend); keyTiming, when set (WithKeyRotation), replaces the token
+	// purpose's rotation timing in the config so a scenario can drive rotations
+	// with the harness clock.
+	wantKeys  bool
+	keyTiming keyTiming
+	keyStore  *fakes.FakeKeyStore
+	// awsAccount is the fake AWS Secrets Manager account of WithAWSKeyStore;
+	// the control plane's injected role is scoped to keysAWSNamePrefix.
+	awsAccount *fakes.FakeAWSSecretsClient
+	keyState   keysState
 
 	// tokenClients are the AgentWithProxyToken / AgentH2WithProxyToken clients,
 	// kept so cleanup can close their idle tunnels.
@@ -790,6 +803,7 @@ func (h *H) buildInprocessTarget() *inprocess {
 	h.applyPolicyStore(&ip.cp.params)
 	h.applyCPAdmin(&ip.cp.params)
 	h.applyBackup(&ip.cp.params)
+	h.applyKeys(&ip.cp.params)
 	h.applyStrict(&ip.cp.params)
 	return ip
 }
@@ -808,6 +822,7 @@ func (h *H) writeCPConfig() string {
 	}
 	b.WriteString(h.identityYAML())
 	b.WriteString(h.consoleYAML())
+	b.WriteString(h.keysYAML())
 	b.WriteString(h.fakeJudgeYAML())
 	b.WriteString(h.auditJSONLogYAML())
 	b.WriteString(h.strictYAML())

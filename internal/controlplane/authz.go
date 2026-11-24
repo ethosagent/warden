@@ -139,6 +139,10 @@ func authzTable() map[routeKey]authzRow {
 		{get, "/dashboard/api/blocked-users", readRow(admin, "blocked_users.read")},
 		{post, "/dashboard/api/blocked-users", auditedRow(admin, "blocked_users.add", blockedUsersTarget)},
 		{del, "/dashboard/api/blocked-users/{id}", auditedRow(admin, "blocked_users.remove", blockedUsersTarget)},
+		// Signing keys (W-P2-KEYS-04): admin only; 404 unless keys.enabled. A
+		// rotation is refused outside console.auth oidc (use_cli).
+		{get, "/dashboard/api/keys", readRow(admin, "keys.read")},
+		{post, "/dashboard/api/keys/rotate", auditedRow(admin, "keys.rotate_requested", auditTargetKeys)},
 		// Served by the control plane itself, ahead of dash.Handler (cpDashboardRoutes).
 		{get, "/dashboard/api/sessions", readRow(admin, "sessions.read")},
 		{del, "/dashboard/api/sessions", auditedRow(admin, "sessions.revoke", "sessions")},
@@ -169,6 +173,11 @@ func cpRouteTable() map[routeKey]authzRow {
 		row          authzRow
 	}{
 		{get, "/healthz", worker},
+		// Public by design: a verifier fetches the JWKS and a load balancer
+		// probes /readyz with no credential (W-P2-KEYS-04). The JWKS is mounted
+		// only with keys.enabled.
+		{get, "/readyz", worker},
+		{get, jwksPath, worker},
 		{get, "/policy", worker},
 		{post, "/control/heartbeat", worker},
 		{post, "/central/ingest", worker},

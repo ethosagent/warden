@@ -45,6 +45,13 @@ func NewAWSSecretStore(client AWSSecretsClient, region, namePrefix string) Secre
 // dependency; the value is the single documented convention "warden/".
 const defaultAWSNamePrefix = "warden/"
 
+// DefaultAWSNamePrefix is the default secretStore.aws.namePrefix ("warden/"):
+// the namespace a worker's secretStore role is scoped to, and the one
+// keys.store.aws.namePrefix must stay disjoint from. Callers outside this
+// package name the prefix through it instead of formatting the reserved
+// literal by hand.
+const DefaultAWSNamePrefix = defaultAWSNamePrefix
+
 // name returns the backend secret name for a logical key.
 func (s *awsSecretStore) name(key string) string {
 	return s.namePrefix + encodeKey(key)

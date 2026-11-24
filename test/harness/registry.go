@@ -15,6 +15,7 @@ import (
 	"github.com/ethosagent/warden/internal/denyreason"
 	"github.com/ethosagent/warden/internal/dnstest"
 	"github.com/ethosagent/warden/internal/identity/identitytest"
+	"github.com/ethosagent/warden/internal/keys"
 	"github.com/ethosagent/warden/internal/proxy"
 	"github.com/ethosagent/warden/internal/secrets"
 	"github.com/ethosagent/warden/test/fakes"
@@ -53,6 +54,7 @@ var Fakes = map[string]FakeEntry{
 	"proxy.Dialer":             entry("harness mappingDialer (via New)", newDialerFake, dialerConformance),
 	"proxy.NameResolver":       entry("dnstest.New + proxy.NewUpstreamResolver", newNameResolverFake, nameResolverConformance),
 	"identity.Verifier":        entry("fakes.NewVerifier", func(testing.TB) *fakes.Verifier { return fakes.NewVerifier() }, verifierConformance),
+	"keys.PrivateKeyStore":     entry("fakes.NewFakeKeyStore", func(testing.TB) *fakes.FakeKeyStore { return fakes.NewFakeKeyStore() }, keyStoreConformance),
 	"clock.Clock":              entry("clocktest.NewFake", func(testing.TB) *clocktest.Fake { return clocktest.NewFake(time.Unix(1_700_000_000, 0)) }, clockConformance),
 }
 
@@ -76,7 +78,58 @@ var Excluded = map[string]string{
 	"controlplane.PolicyVersionStore": "the control plane's own versioned policy store on the cpstate SQLite DB; the harness runs the real one (--policy-store=versioned), a fake would hide the compare-and-swap and transaction behaviour",
 	"dashboard.BlockListStore":        "the dashboard's view of the control plane's own block list on the cpstate SQLite DB (controlplane.BlockStore); the harness runs the real one, a fake would hide the limits and uniqueness the store enforces",
 	"worker.ControlPlaneClient":       "the worker's view of the control plane; the harness runs the real control plane (*config.RemoteProvider) rather than a fake",
+	"keys.MetaStore":                  "the control plane's own signing_keys table on the cpstate SQLite DB (keys/adapters/metastore); the harness runs the real one, a fake would hide the compare-and-swap and unique-index behaviour that keeps the key lifecycle from forking",
 	"keys.Signer":                     "local CPU-only signing over stdlib crypto (GenerateLocal/NewLocalSigner); no external system behind the port, and a fake would hide the JOSE wire encodings (r||s, RFC 7638 kids) the verifiers pin",
+}
+
+// --- keys.PrivateKeyStore ---
+
+func keyStoreConformance(t *testing.T, f *fakes.FakeKeyStore) {
+	var s keys.PrivateKeyStore = f
+	ctx := context.Background()
+	const kid = "kid-one"
+	if _, err := s.Get(ctx, keys.PurposeToken, kid); !errors.Is(err, keys.ErrKeyNotFound) {
+		t.Fatalf("Get(absent) = %v, want ErrKeyNotFound", err)
+	}
+	if err := s.Put(ctx, keys.PurposeToken, kid, []byte("v1")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Put(ctx, keys.PurposeToken, kid, []byte("v2")); !errors.Is(err, keys.ErrKeyExists) {
+		t.Fatalf("second Put = %v, want ErrKeyExists (a Put never overwrites)", err)
+	}
+	if b, err := s.Get(ctx, keys.PurposeToken, kid); err != nil || string(b) != "v1" {
+		t.Fatalf("Get = %q, %v; want v1", b, err)
+	}
+	if _, err := s.Get(ctx, keys.PurposeBundle, kid); !errors.Is(err, keys.ErrKeyNotFound) {
+		t.Errorf("the same kid under another purpose must be absent, got %v", err)
+	}
+	if err := s.Put(ctx, keys.PurposeBundle, "kid-two", []byte("b")); err != nil {
+		t.Fatal(err)
+	}
+	if kids, _ := s.List(ctx, keys.PurposeToken); len(kids) != 1 || kids[0] != kid {
+		t.Errorf("List(token) = %v, want [%s]", kids, kid)
+	}
+	if err := s.Delete(ctx, keys.PurposeToken, kid); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Delete(ctx, keys.PurposeToken, kid); err != nil {
+		t.Errorf("Delete of absent material = %v, want nil", err)
+	}
+	if _, err := s.Get(ctx, keys.PurposeToken, kid); !errors.Is(err, keys.ErrKeyNotFound) {
+		t.Errorf("Get after Delete = %v", err)
+	}
+	if err := s.Put(ctx, "audit", kid, nil); !errors.Is(err, keys.ErrInvalidPurpose) {
+		t.Errorf("Put with the reserved purpose audit = %v, want ErrInvalidPurpose", err)
+	}
+	outage := errors.New("backend unreachable")
+	f.SetDown(outage)
+	if _, err := s.Get(ctx, keys.PurposeBundle, "kid-two"); !errors.Is(err, outage) {
+		t.Errorf("Get during an outage = %v, want the outage error", err)
+	}
+	f.SetDown(nil)
+	if b, err := s.Get(ctx, keys.PurposeBundle, "kid-two"); err != nil || string(b) != "b" {
+		t.Errorf("Get after the outage = %q, %v; material must survive it", b, err)
+	}
 }
 
 // --- identity.Verifier ---

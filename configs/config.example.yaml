@@ -328,6 +328,40 @@ responseScan:
   pii:
     phone: false                  # email/card(Luhn)/SSN always on; phone opt-in (noisy)
 
+# Signing keys (CONTROL PLANE ONLY, read from the operator's --config file, never served to
+# workers). OFF by default: when keys.enabled is false no key file, table or goroutine is
+# created and the control plane behaves exactly as before. When enabled it needs --state-dir
+# and creates one active and one next key per purpose ("token" and "bundle") on first start;
+# a restart keeps the same keys. Private keys live ONLY in the key store (PKCS#8 PEM files,
+# directory 0700, files 0600); warden-cp.db holds public metadata. If the store cannot be read
+# the control plane still serves /policy and /healthz, signing is refused, and a
+# signing_key_unavailable finding is raised until the store returns. Back the directory up
+# separately: the P1 backup set does not include it.
+keys:
+  enabled: false                  # master switch (default false)
+  store:
+    backend: file                 # file (default) | aws
+    file:
+      dir: ""                     # default <state-dir>/keys; may point at a separate secret mount
+    aws:                          # only read with backend: aws. Control plane's own
+                                  # AWS namespace for signing keys — credentials come
+                                  # from the control plane's environment or instance
+                                  # role, NEVER from config. Must stay disjoint from
+                                  # secretStore.aws.namePrefix in BOTH directions or
+                                  # startup fails.
+      region: eu-central-1
+      namePrefix: warden-cp-keys/ # default; the CP prefix the worker role cannot read
+  token:
+    alg: EdDSA                    # EdDSA (default) | ES256
+    rotationInterval: 720h        # how long a token key signs; 0 = rotate only by hand
+    prepublish: 1h                # min time a next key is published before it activates (min 10m)
+    overlap: 48h                  # how long a retired key stays in the JWKS (min 20m)
+  bundle:
+    alg: EdDSA                    # must be EdDSA: workers pin bundle keys
+    rotationInterval: 0           # must be 0: bundle keys rotate only by hand (workers pin them)
+    prepublish: 1h
+    overlap: 48h
+
 # Echo guard: stops an upstream that copies the request into its response (an echo
 # endpoint, an error quoting the request, a reflected header) from handing the agent
 # the real secret Warden swapped in. It checks every response of a request for the

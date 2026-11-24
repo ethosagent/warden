@@ -281,6 +281,25 @@ var All = slices.Concat(
 		// warden.admin.v1 checkpoint at startup and every 5 minutes of the CP's
 		// clock. In-process only (fake clock, CP state dir).
 		{Name: "admin_audit_checkpoint", Opts: adminAuditOpts(), Run: adminAuditCheckpoint},
+		// Signing keys (W-P2-KEYS-02, W-P2-KEYS-07): keys.enabled creates an
+		// active and a next key per purpose in the file store or the AWS
+		// Secrets Manager backend and keeps them across a restart; a key store
+		// that is down at startup never stops the control plane and signing
+		// recovers with the store; the worker namespace cannot resolve a key
+		// secret; a control plane without keys keeps no key table. Rotation
+		// (W-P2-KEYS-03): a token key past its interval is retired and replaced
+		// without a verify gap, and a restart after a downtime catches up on the
+		// missed rotation. In-process only (they stop and start the CP and read
+		// its state dir).
+		{Name: "keys_file_store_restart", Opts: keysOpts(), Run: keysFileStoreRestart},
+		{Name: "keys_backend_down_recovers", Opts: keysFlakyOpts(), Run: keysBackendDownRecovers},
+		{Name: "keys_aws_store_restart", Opts: keysAWSOpts(), Run: keysAWSStoreRestart},
+		{Name: "keys_rotate_on_schedule", Opts: keysRotationOpts(), Run: keysRotateOnSchedule},
+		{Name: "keys_rotate_after_downtime", Opts: keysRotationOpts(), Run: keysRotateAfterDowntime},
+		{Name: "keys_jwks_served_and_rotates", Opts: keysRotationOpts(), Run: keysJWKSServedAndRotates},
+		{Name: "keys_jwks_unavailable_until_loaded", Opts: keysFlakyOpts(), Run: keysJWKSUnavailableUntilLoaded},
+		{Name: "keys_cli_rotates_and_resets", Opts: keysRotationOpts(), Run: keysCLIRotatesAndResets},
+		{Name: "keys_disabled_creates_nothing", Opts: []harness.Option{harness.WithBackup()}, Run: keysDisabledCreatesNothing},
 		// Key rotation (W-P2-KEYS-06): rotate-key is refused while the control
 		// plane runs, rotates offline once it is stopped (signed handover, new
 		// key in place, old retired), and the control plane starts on the new

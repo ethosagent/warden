@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/ethosagent/warden/internal/analytics"
+	"github.com/ethosagent/warden/internal/controlplane"
+	"github.com/ethosagent/warden/internal/cpstate"
 )
 
 // minimalConfig is a valid default-deny worker/control-plane config with every
@@ -395,5 +397,39 @@ logging:
 	out = run("--user", "ALICE@corp.example")
 	if !strings.Contains(out, "alice@corp.example") || strings.Contains(out, "bob@corp.example") {
 		t.Errorf("--user did not filter to alice:\n%s", out)
+	}
+}
+
+// TestControlPlaneSubcommand_KeysDisabled: with no keys block the control
+// plane creates neither a key directory nor a signing_keys table; with
+// keys.enabled and no --state-dir it refuses to start naming the field.
+func TestControlPlaneSubcommand_KeysDisabled(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "state")
+	cfg := writeTempConfig(t, minimalConfig)
+	if err := executeRoot(t, "control-plane",
+		"--config", cfg, "--listen", "127.0.0.1:0", "--state-dir", stateDir,
+		"--token-env", "WARDEN_CP_TOKEN_UNSET",
+	); err != nil {
+		t.Fatalf("control-plane (keys disabled) = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, "keys")); !os.IsNotExist(err) {
+		t.Errorf("keys directory exists with keys disabled: %v", err)
+	}
+	db, err := cpstate.OpenReadOnly(context.Background(), filepath.Join(stateDir, "warden-cp.db"), controlplane.StateMigrations())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	var n int
+	if err := db.SQL().QueryRow(`SELECT count(*) FROM sqlite_master WHERE name = 'signing_keys'`).Scan(&n); err != nil || n != 0 {
+		t.Errorf("signing_keys tables = %d, %v; want none", n, err)
+	}
+
+	err = executeRoot(t, "control-plane",
+		"--config", writeTempConfig(t, minimalConfig+"keys:\n  enabled: true\n"),
+		"--listen", "127.0.0.1:0", "--token-env", "WARDEN_CP_TOKEN_UNSET",
+	)
+	if err == nil || !strings.Contains(err.Error(), "keys.enabled") || !strings.Contains(err.Error(), "--state-dir") {
+		t.Errorf("keys.enabled without --state-dir = %v, want an error naming both", err)
 	}
 }

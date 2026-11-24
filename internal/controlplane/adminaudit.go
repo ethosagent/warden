@@ -14,6 +14,7 @@ import (
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/cpstate"
 	"github.com/ethosagent/warden/internal/integration"
+	"github.com/ethosagent/warden/internal/keys/adapters/metastore"
 )
 
 // startupVerifyRows is how many of the newest chain rows the CP verifies at
@@ -38,6 +39,9 @@ func StateMigrations() []cpstate.Migration {
 	migs = append(migs, adminaudit.Migrations()...)
 	migs = append(migs, BlockMigrations()...)
 	migs = append(migs, WorkerTokenMigrations()...)
+	// Feature-gated: known to the downgrade guard, applied only with
+	// keys.enabled (stateMigrationsFor).
+	migs = append(migs, metastore.Migrations()...)
 	return migs
 }
 

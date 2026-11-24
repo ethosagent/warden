@@ -75,6 +75,9 @@ type Server struct {
 	// workerTokens serves the worker token admin routes; nil = they answer 404
 	// (a worker, or a control plane without a state dir).
 	workerTokens WorkerTokenAdmin
+	// keys serves the signing-key admin routes; nil = they answer 404 (a
+	// worker, or a control plane without keys.enabled).
+	keys KeysSource
 	// mcpFleet, when set (control plane), returns the inventory + observed schema
 	// for a given worker (empty proxyID = most-recent worker). It takes precedence
 	// over the single-node mcp gateway.
@@ -675,6 +678,8 @@ func Routes() []Route {
 		{get, "/dashboard/api/blocked-users", "blocked_users.read"},
 		{post, "/dashboard/api/blocked-users", "blocked_users.add"},
 		{del, "/dashboard/api/blocked-users/{id}", "blocked_users.remove"},
+		{get, "/dashboard/api/keys", "keys.read"},
+		{post, "/dashboard/api/keys/rotate", "keys.rotate_requested"},
 	}
 }
 

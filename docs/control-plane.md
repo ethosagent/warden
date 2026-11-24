@@ -717,6 +717,8 @@ fails when the two differ.
 | `/dashboard/api/integrations` | GET | viewer | `integrations.read` |
 | `/dashboard/api/integrations` | POST | admin | `integrations.write` |
 | `/dashboard/api/integrations` | DELETE | admin | `integrations.delete` |
+| `/dashboard/api/keys` | GET | admin | `keys.read` |
+| `/dashboard/api/keys/rotate` | POST | admin | `keys.rotate_requested` |
 | `/dashboard/api/llmproviders` | GET | viewer | `llmproviders.read` |
 | `/dashboard/api/llmproviders` | POST | admin | `llmproviders.write` |
 | `/dashboard/api/llmproviders` | PUT | admin | `llmproviders.write` |
@@ -1254,6 +1256,265 @@ and denies all egress until a pull succeeds. A long-poll already held when the t
 answered `401` as soon as the control plane sees the revocation (at once for a console revoke,
 within about 2 seconds for the CLI), and a held poll is re-authenticated before it is answered, so
 it never receives a policy after the revoke.
+
+## Signing keys (`keys:`)
+
+The control plane can own the signing keys it uses for Warden tokens and policy
+bundles, and store the worker CA key. The subsystem is **off by default**: with
+`keys.enabled: false` (or no `keys:` block) no key directory, `signing_keys`
+table or goroutine exists and the control plane is unchanged. The block is
+control-plane-local — read from `--config` only, never served to workers.
+
+```yaml
+keys:
+  enabled: true            # needs --state-dir
+  store:
+    backend: file          # file (default) or aws
+    file:
+      dir: ""              # default <state-dir>/keys; may be a separate secret mount
+    aws:                   # with store.backend: aws only
+      region: eu-central-1
+      namePrefix: warden-cp-keys/   # the default; must stay disjoint from secretStore.aws.namePrefix
+  token:                   # EdDSA (default) or ES256
+    rotationInterval: 720h # 0 = rotate only by hand; else >= prepublish+overlap
+    prepublish: 1h         # min 10m: a next key is published before it activates
+    overlap: 48h           # min 20m: a retired key stays in the JWKS this long
+  bundle:                  # must be EdDSA: workers pin bundle keys
+    rotationInterval: 0    # must be 0: bundle rotates only by hand
+    prepublish: 1h
+    overlap: 48h
+```
+
+- **Where keys live.** Private keys are PKCS#8 PEM files at
+  `<dir>/<purpose>/<kid>.pem` (directories 0700, files 0600, created exclusively
+  and fsynced). `warden-cp.db` holds only public metadata (the `signing_keys`
+  table: kid, purpose, algorithm, state, public JWK, timestamps). The kid is the
+  RFC 7638 thumbprint of the public key.
+- **First start.** For each of `token` and `bundle` with no rows the control
+  plane creates an active key and a next key, writes a `keys.generated` admin
+  audit entry for each (when admin audit is on) and logs `keys_loaded`. A restart
+  keeps the same kids. The `ca` purpose is never generated: it is filled by
+  importing the worker CA key.
+- **Store unavailable.** If rows exist but the active key cannot be read, the
+  control plane starts anyway: `/policy` and `/healthz` keep serving, `/readyz`
+  answers 503 and `/.well-known/jwks.json` answers 503 `signing_unavailable`
+  until a key loads, signing returns `ErrNoActiveKey`, a `signing_key_unavailable` finding is raised once
+  per outage, and loading is retried with 1 s to 60 s backoff until it works. It
+  never generates a replacement key while rows exist.
+- **Rotation.** Token keys rotate on `rotationInterval` (default 720 h;
+  `0` rotates only by hand). Bundle keys must be `rotationInterval: 0`, because
+  workers pin them out of band — rotating a bundle key is a staged operator
+  action. A rotation promotes the published next key to active (never before
+  `publish_at + prepublish`, so verifiers already hold it), retires the old key
+  — whose private material is deleted at once — and publishes a fresh next key.
+  The retired key stays in the JWKS for `overlap` (default 48 h, min 20 m), so
+  tokens it signed keep verifying, and its row is then destroyed. Every
+  transition is a compare-and-swap write, so the scheduler, the console and the
+  CLI cannot fork the lifecycle, and a restart applies the transitions a
+  downtime made due. A rotation that fails keeps the current key and raises
+  `key_rotation_failed`; an active token key older than twice its interval
+  raises `key_overdue`.
+- **Token JWKS.** `GET /.well-known/jwks.json` (GET and HEAD only; other methods
+  405) is public: it sits outside sessions, the role table, the admin audit and
+  worker auth, and exists only with `keys.enabled` (else 404). It serves
+  `{"keys":[...]}` with the token purpose's next, active and in-overlap retired
+  keys, members `kty`, `crv`, `x`, `y`, `kid`, `alg`, `use` only (bundle keys are
+  never served here). The bytes are built from the in-memory key set, so a request
+  does no store or database I/O. Headers: `Content-Type: application/jwk-set+json`,
+  `Cache-Control: public, max-age=300`, and an `ETag` that is the quoted base64url
+  sha256 of the body; a matching `If-None-Match` gets 304. With no published token
+  key it answers 503 `{"error":"signing_unavailable"}` with `Cache-Control: no-store`.
+- **Readiness.** `GET /readyz` is 200, or 503 `{"keys":"no_active_key"}` when keys
+  are enabled and any purpose has no loaded active key. `/healthz` stays plain
+  liveness and is unaffected, so a key outage does not restart the process.
+- **Admin key API.** `GET /dashboard/api/keys` (admin) lists each key's kid,
+  purpose, algorithm, state, timestamps, backend and public JWK, and per purpose
+  whether a key is loaded and the last load error; it never returns private
+  material. `POST /dashboard/api/keys/rotate` (admin, CSRF, audited as
+  `keys.rotate_requested`, target ref `keys:<purpose>`) takes
+  `{"purpose":"token","emergency":false}`. It answers 403 `use_cli` under
+  `console.auth: none` (there is no identity to attribute the rotation to) and 409
+  `use_cli` for the `bundle` purpose (its rotation is staged on the host); both
+  point at `warden control-plane keys rotate`. A next key not yet published long
+  enough, or a lost race, is 409. Both routes are 404 without `keys.enabled`.
+- **Orphans.** At startup, key files with no `signing_keys` row (a crash between
+  writing the file and the insert) are deleted; the log names the kid and
+  purpose only.
+- **Backups.** The P1 backup set holds the database (public metadata) but not
+  the key directory (the manifest lists it under `not_included`). Back the
+  directory up separately, or restoring will leave rows without material; the
+  restore says which purposes are missing material and prints the reset hint.
+  With `store.backend: aws` there is no key directory: the manifest names none,
+  the material lives in AWS Secrets Manager under the keys prefix, and a
+  restored database re-resolves against it. Rotation procedures, the staged
+  bundle rollout and the emergency drill are in
+  the [key rotation runbook](runbooks/key-rotation.md).
+
+### Keys CLI
+
+`warden control-plane keys` lists, rotates, exports and resets signing keys
+straight on the state dir, with the control plane running or stopped. A running
+control plane sees a rotation within about 2 seconds, with no restart. `reset`
+refuses while the control plane holds the state-dir lock. Every subcommand
+takes a required `--state-dir` and an optional `--config` naming the file with
+the `keys:` block. With `store.backend: aws` the CLI builds the same Secrets
+Manager store the control plane does — region and prefix from that config's
+`keys.store.aws`, credentials from the environment or instance role — so run it
+where the control plane's role is; `reset` deletes the old secrets from the
+account.
+
+```sh
+warden control-plane keys list --state-dir /var/lib/warden-cp [--purpose token] [--jwks] [--json]
+warden control-plane keys rotate --purpose token --state-dir /var/lib/warden-cp [--config F] \
+  [--emergency --yes]
+warden control-plane keys export --purpose bundle --state-dir /var/lib/warden-cp [--state next]
+warden control-plane keys reset --purpose token --yes --state-dir /var/lib/warden-cp
+```
+
+- **list** prints one row per key (kid, purpose, state, algorithm, timestamps,
+  creator) — public metadata only; `--jwks` prints the published key set
+  instead. The export path prints public JWKs only, never a `d` member or a
+  PEM block.
+- **rotate** promotes `next` to active, retires (or, with `--emergency`,
+  revokes) the old active — deleting its private material at once — and
+  publishes a fresh `next`. It refuses while the `next` key is younger than
+  `prepublish`, and `--emergency` requires `--yes` on a non-interactive stdin.
+  An emergency whose revocation committed but whose fresh `next` could not be
+  written still stands: the command exits **3** and says the old key is
+  revoked — the error names only the missing `next` — and its audit row has
+  outcome `error`. The `bundle` purpose refuses here: it rotates only through
+  the staged rollout of [the key rotation runbook](runbooks/key-rotation.md),
+  and the refusal names the `next` kid to pin.
+- **export** prints one key's public JWK (`--state next` or `active`) or, by
+  default, the active + next JWKS — the exact document a worker pins in
+  `controlPlane.bundleKeysFile`.
+- **reset** deletes every key of the purpose (rows and PEM files) and
+  regenerates `token`/`bundle`; `--purpose ca` only clears, the CA key is
+  imported, not generated. It needs `--yes`.
+
+When admin audit is on in the state dir, `rotate` and `reset` append one row
+(`keys.rotate_requested`, `keys.reset`; `auth_method` `cli`, actor
+`cli:<os user>`) and the transitions the request causes carry the same actor.
+With no audit table a log line names the action instead; with rows present and
+the audit key missing or mismatched the command refuses and changes nothing.
+
+Exit codes:
+
+| Code | Meaning |
+|---|---|
+| 0 | Applied. |
+| 1 | Nothing changed — a refusal: no or too-young `next` key, a staged bundle rotation, or `reset` under the running control plane's state-dir lock. A reset that partially applied also exits 1: its rows are gone and its audit row has outcome `error` with the removed count. |
+| 2 | Usage error: a bad flag, a missing or unopenable state dir or audit key, a missing `--yes` or a declined confirmation, or `rotate --purpose ca`. |
+| 3 | A stood rotation: the promotion committed, so the old key is out of the signing slot — revoked under `--emergency`, retired otherwise — and only the fresh `next` key is missing. |
+
+Key material never appears in the database, logs, errors or audit entries.
+
+### AWS Secrets Manager backend (`store.backend: aws`)
+
+With `store.backend: aws` the private keys live in AWS Secrets Manager, one
+secret per key at `<namePrefix><purpose>/<kid>` (default prefix
+`warden-cp-keys/`), the PKCS#8 PEM as the secret value. Everything else behaves
+like the file store: a generation is written, read back and compared before its
+row is inserted; a restart loads the same kids; the startup sweep deletes
+secrets with no row; deleting a key deletes its secret at once.
+
+- **Credentials.** The control plane resolves credentials from its own
+  environment or instance role (explicit → env → IMDS) — never from config:
+  the `keys.store.aws` block has only `region` and `namePrefix`, and the strict
+  YAML parser rejects a credential field there.
+- **Isolation from workers.** Workers reach Secrets Manager only through their
+  own `secretStore.aws` block — their own region, prefix and role. Startup
+  fails when `keys.store.aws.namePrefix` equals, starts with, or is a prefix of
+  `secretStore.aws.namePrefix` (or the reverse), naming both fields: a worker
+  scoped to the secretStore namespace must not be able to name a key secret.
+  The defaults (`warden-cp-keys/` and `warden/`) are disjoint. The startup log
+  names the region and prefix only — values and credentials are never logged.
+- **Backups, restore and the CLI.** A backup set still never contains the key
+  material — Secrets Manager values are not in it any more than PEM files are
+  (`not_included` names signing key material either way). A restore of rows
+  that record the aws backend claims no key directory and reports nothing
+  missing; it prints a note that the material lives in AWS Secrets Manager
+  under the keys prefix, and the operator verifies the control plane can read
+  it at the next start. `warden control-plane keys` drives the same backend:
+  rotate, export and reset read and delete Secrets Manager values with the
+  credentials of the environment the command runs in — run it where the control
+  plane's role is.
+- **IAM.** Give the control plane's role rights on the CP prefix only.
+  `ListSecrets` needs its own statement: AWS does not support resource-level
+  permissions for it (scoping it to the prefixed ARN makes every list fail with
+  `AccessDenied` and breaks the orphan sweep). It is account-wide by design but
+  carries secret **names only, never values**, and the client sends the
+  name-prefix filter (`Filters: [{Key: "name", Values: ["warden-cp-keys/"]}]`)
+  and filters the response again itself, so the sweep sees only the CP
+  namespace:
+
+  ```json
+  {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Sid": "WardenControlPlaneKeys",
+        "Effect": "Allow",
+        "Action": [
+          "secretsmanager:CreateSecret",
+          "secretsmanager:PutSecretValue",
+          "secretsmanager:GetSecretValue",
+          "secretsmanager:DeleteSecret"
+        ],
+        "Resource": "arn:aws:secretsmanager:*:ACCOUNT_ID:secret:warden-cp-keys/*"
+      },
+      {
+        "Sid": "WardenControlPlaneKeyList",
+        "Effect": "Allow",
+        "Action": "secretsmanager:ListSecrets",
+        "Resource": "*"
+      }
+    ]
+  }
+  ```
+
+  A worker role keeps the same shape over its own prefix and **cannot read** the
+  keys namespace — the deny is structural (the value actions name no
+  `warden-cp-keys/*` resource), and an explicit Deny makes it hold even if a
+  later `warden/*` grant is widened. `ListSecrets` is again a `Resource: "*"`
+  statement of its own; it can surface key secret *names* to the account, but
+  no value is reachable without `GetSecretValue`, which the Deny withholds for
+  every read/write action on the keys prefix:
+
+  ```json
+  {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Sid": "WardenWorkerSecrets",
+        "Effect": "Allow",
+        "Action": "secretsmanager:GetSecretValue",
+        "Resource": "arn:aws:secretsmanager:*:ACCOUNT_ID:secret:warden/*"
+      },
+      {
+        "Sid": "WardenWorkerSecretList",
+        "Effect": "Allow",
+        "Action": "secretsmanager:ListSecrets",
+        "Resource": "*"
+      },
+      {
+        "Sid": "NeverTheControlPlaneKeys",
+        "Effect": "Deny",
+        "Action": [
+          "secretsmanager:GetSecretValue",
+          "secretsmanager:PutSecretValue",
+          "secretsmanager:CreateSecret",
+          "secretsmanager:DeleteSecret",
+          "secretsmanager:UpdateSecret",
+          "secretsmanager:RestoreSecret",
+          "secretsmanager:TagResource",
+          "secretsmanager:PutResourcePolicy"
+        ],
+        "Resource": "arn:aws:secretsmanager:*:ACCOUNT_ID:secret:warden-cp-keys/*"
+      }
+    ]
+  }
+  ```
 
 ## Block list: offline CLI
 

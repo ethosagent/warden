@@ -36,6 +36,7 @@ import (
 	"github.com/ethosagent/warden/internal/dashboard"
 	"github.com/ethosagent/warden/internal/detect"
 	"github.com/ethosagent/warden/internal/integration"
+	"github.com/ethosagent/warden/internal/keys"
 	"github.com/ethosagent/warden/internal/secrets"
 )
 
@@ -52,6 +53,10 @@ type Config struct {
 	// an empty store (head 0) versioned mode serves PolicyPath exactly as file
 	// mode does.
 	PolicyStore string
+	// Keys is the signing-key manager (token and bundle keys, the worker CA key
+	// store). Nil unless keys.enabled, in which case no key code runs, no table,
+	// key file or goroutine exists, and the control plane behaves as before.
+	Keys *keys.Manager
 	// AdminAudit is the signed admin audit chain on State. Nil means admin
 	// audit is disabled (console.adminAudit.enabled false, the default).
 	AdminAudit *adminaudit.Store
@@ -483,12 +488,19 @@ func (s *Server) writeSettings(in config.SettingsWire) error {
 //	     /dashboard/      — fleet dashboard over the aggregated store (writes bearer-auth; sessions in oidc mode)
 //	     /central/secrets — secret store writes, when one is configured (bearer; admin session in oidc mode)
 //	GET  /healthz         — liveness
+//	GET  /readyz          — readiness (503 when keys are enabled and one has no active key)
+//	GET  /.well-known/jwks.json — public token JWKS, when keys are enabled (no credential)
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok\n"))
 	})
+	// Readiness always; the public token JWKS only with keys.enabled (else 404).
+	mux.HandleFunc(readyzPath, s.readyz)
+	if s.cfg.Keys != nil {
+		mux.Handle(jwksPath, newJWKSServer(s.cfg.Keys.KeySet(), s.cfg.Clock.Now))
+	}
 	// /policy is served by the composed PolicyServer seam (serve + ETag long-poll).
 	var policyServe PolicyServer = s.policy
 	mux.HandleFunc("/policy", policyServe.ServePolicy)
@@ -625,6 +637,8 @@ func (s *Server) Handler() http.Handler {
 	})
 	// Worker token admin routes and their audit hasher (W-P1-WTOK-03).
 	s.wireWorkerTokens(dash)
+	// Signing key admin routes and their audit hasher (W-P2-KEYS-04).
+	s.wireKeys(dash)
 	// Dashboard-V3 read tabs. Each source EXISTS on the control plane:
 	//   - secretstore: the CP's WRITE store lists KEY metadata (never values). Nil
 	//     store (env/none backend) → the tab reports backend "none".

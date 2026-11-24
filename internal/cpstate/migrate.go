@@ -89,7 +89,7 @@ func (d *DB) migrate(ctx context.Context, migs []Migration, applied []string) er
 	}
 	d.applied = nil
 	for _, m := range migs {
-		if _, ok := have[m.ID]; ok {
+		if _, ok := have[m.ID]; ok || m.Optional {
 			continue
 		}
 		if err := d.apply(ctx, m); err != nil {

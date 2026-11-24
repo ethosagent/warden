@@ -118,6 +118,11 @@ type Policy struct {
 	// client, role groups, session bounds). It is read by the control plane from
 	// --config only and never leaves it: json:"-" keeps it off the worker wire.
 	Console ConsoleConfig `json:"-"`
+	// Keys is the control-plane-local signing-key subsystem (token and bundle
+	// signing keys, the worker CA key store). Like Console it is read from
+	// --config only (LoadKeys) and json:"-" keeps it off the worker wire.
+	// Disabled by default.
+	Keys KeysConfig `json:"-"`
 	// LLMProviders is the shared, named LLM-provider registry (name + baseURL +
 	// model + apiKeyEnv NAME + optional timeout). It carries no secret VALUE, so
 	// it RIDES the secret-free settings wire (unlike the CP-local blocks above):
@@ -370,6 +375,7 @@ type rawConfig struct {
 	Integrations  []rawIntegration  `yaml:"integrations"`
 	Detection     *rawDetection     `yaml:"detection"`
 	Console       *rawConsole       `yaml:"console"`
+	Keys          *rawKeys          `yaml:"keys"`
 	LLMProviders  []rawLLMProvider  `yaml:"llmProviders"`
 	Explore       *rawExplore       `yaml:"explore"`
 	DNS           *rawDNS           `yaml:"dns"`
@@ -491,6 +497,14 @@ func parse(data []byte) (*LocalYAMLProvider, error) {
 		return nil, err
 	}
 	policy.Console = console
+	keysCfg, err := parseKeys(raw.Keys)
+	if err != nil {
+		return nil, err
+	}
+	policy.Keys = keysCfg
+	if err := validateKeys(policy.Keys); err != nil {
+		return nil, err
+	}
 	llmProviders, err := parseLLMProviders(raw.LLMProviders)
 	if err != nil {
 		return nil, err
@@ -645,6 +659,12 @@ func validate(p Policy) error {
 		}
 	}
 	if err := validateSecretStore(p.SecretStore); err != nil {
+		return err
+	}
+	// The signing-key namespace must stay disjoint from the worker secretStore
+	// namespace (W-P2-KEYS-07): this needs both blocks, so it lives here and not
+	// in validateKeys.
+	if err := validateKeysSecretStoreOverlap(p.Keys, p.SecretStore); err != nil {
 		return err
 	}
 	// envVar is REQUIRED only for the env backend (the placeholder→envVar mapping

@@ -209,6 +209,8 @@ var auditedRequests = map[routeKey]auditedRequest{
 	// The revoke targets the token the create just minted ({tokid}).
 	{http.MethodPost, "/dashboard/api/worker-tokens"}:        {"/dashboard/api/worker-tokens", `{"name":"audit-tok","proxyID":"audit-worker"}`},
 	{http.MethodDelete, "/dashboard/api/worker-tokens/{id}"}: {"/dashboard/api/worker-tokens/{tokid}", ""},
+	// Served by the stub key source TestAdminAuditAllAuditedRoutes installs.
+	{http.MethodPost, "/dashboard/api/keys/rotate"}: {"/dashboard/api/keys/rotate", `{"purpose":"token"}`},
 }
 
 // allAuditedRoutes lists every audited row of both route tables in a stable
@@ -247,6 +249,7 @@ func TestAdminAuditAllAuditedRoutes(t *testing.T) {
 	e := newOIDCAuditEnv(t)
 	e.srv.dash.SetPolicyHistory(stubHistory{})
 	e.srv.dash.SetBackup(func() error { return nil })
+	e.srv.dash.SetKeysSource(stubKeys{})
 	admin := e.session(t, groupAdmin)
 	hashed := map[string]bool{"policy": true, "settings": true, "integrations": true, "detection": true, "llmproviders": true, "worker_tokens": true, "blocked_users": true}
 	routes := allAuditedRoutes()
