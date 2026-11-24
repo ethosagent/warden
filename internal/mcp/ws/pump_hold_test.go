@@ -117,10 +117,15 @@ func TestPumpHold_FragmentedAllowedForwardedInOrderWithControl(t *testing.T) {
 func TestPumpHold_OverCapFailsClosed(t *testing.T) {
 	clientA, clientB := pipePair()
 	serverA, serverB := pipePair()
-	p := &Pump{GW: enforceGW(t), SessionKey: "s", Hold: true}
+	// A small cap keeps the test off the 8 MiB production size: moving that much
+	// through the race detector took longer than the read guard under load. The
+	// property under test (two fragments that together exceed the cap fail
+	// closed, nothing forwarded) is independent of the cap's magnitude.
+	const capBytes = 4 << 10
+	p := &Pump{GW: enforceGW(t), SessionKey: "s", Hold: true, MaxMessage: capBytes}
 	res := startPump(t, p, clientA, serverA)
 
-	chunk := bytes.Repeat([]byte("a"), maxReassembledMessage/2+1)
+	chunk := bytes.Repeat([]byte("a"), capBytes/2+1)
 	go func() {
 		_, _ = clientB.Write(buildWireFrame(false, OpcodeText, chunk, []byte{1, 2, 3, 4}))
 		_, _ = clientB.Write(buildWireFrame(true, OpcodeContinuation, chunk, []byte{1, 2, 3, 4}))
