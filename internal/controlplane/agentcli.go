@@ -21,7 +21,8 @@ import (
 // Admin audit vocabulary of the agent registry's writes: one target, one
 // action per kind of write, and a details allowlist (changed field names, kids
 // and groups added or removed, status from/to) that never carries a JWK
-// coordinate. The admin API (W-P2-AREG-02) uses the same names.
+// coordinate. Local for now: once the admin API (W-P2-AREG-02) lands its
+// shared helper, this file switches to it.
 const (
 	auditTargetAgents  = "agents"
 	actionAgentCreate  = "agent.create"
@@ -37,8 +38,9 @@ const maxAgentJWKFileBytes = 64 << 10
 // The offline agent registry commands (`warden control-plane agent ...`).
 // cmd/proxy only parses flags and maps errors to exit codes (rule C1); the
 // logic is here. Writes go through the same agentreg.Store and validator as
-// the admin API, so a running control plane serves them as soon as its store's
-// data_version watch sees the commit (about 2 seconds).
+// the admin API. A write is visible to a running control plane within one
+// data_version poll of its store (2 seconds); how fast policy serving then
+// carries it to workers is the policy wire's (W-P2-AREG-04).
 
 // AgentChange is the operator's requested edit of an agent. Nil pointer and
 // nil slice mean "leave as it is" (update); register takes them as given.
@@ -99,34 +101,57 @@ func readAgentJWKFile(path string) ([]json.RawMessage, error) {
 	return members, nil
 }
 
+// An agent write that cannot be audited is undone, like RunBlockAdd: no agent
+// change stands without its audit entry. The store has no Delete, so the undo
+// is the closest state it can reach: a registered agent is disabled, an update
+// is reverted to the previous fields and a status change is flipped back, each
+// as a further revision. The undo runs on context.WithoutCancel so an
+// interrupt cannot leave the change standing.
+
 // RunAgentRegister creates the agent and appends one agent.create admin audit
 // row. The audit recorder opens first, so a missing or mismatching audit key
-// aborts before anything is written.
+// aborts before anything is written. If the append still fails the agent is
+// disabled again (ids are never reused, so the row stays).
 func RunAgentRegister(ctx context.Context, stateDir, keyFile string, a agentreg.Agent, notice io.Writer) (agentreg.Agent, error) {
-	h, err := openAgentCLI(ctx, stateDir, keyFile, notice)
+	h, err := openAgentCLI(ctx, stateDir, keyFile, notice, false)
 	if err != nil {
 		return agentreg.Agent{}, err
 	}
 	defer h.close()
-	got, err := h.store.Create(ctx, a, adminaudit.CLIActor())
+	return h.register(ctx, a)
+}
+
+func (h *agentCLI) register(ctx context.Context, a agentreg.Agent) (agentreg.Agent, error) {
+	actor := adminaudit.CLIActor()
+	got, err := h.store.Create(ctx, a, actor)
 	if err != nil {
 		return agentreg.Agent{}, err
 	}
-	if err := h.record(ctx, actionAgentCreate, got.ID, agentAuditDetails(agentreg.Agent{}, got)); err != nil {
-		return agentreg.Agent{}, fmt.Errorf("agent %s was registered but its admin audit row was not appended: %w", got.ID, err)
+	auditErr := h.record(ctx, actionAgentCreate, got.ID, agentAuditDetails(agentreg.Agent{}, got))
+	if auditErr == nil {
+		return got, nil
 	}
-	return got, nil
+	if _, undoErr := h.store.SetStatus(context.WithoutCancel(ctx), got.ID, agentreg.StatusDisabled, got.Revision, actor); undoErr != nil {
+		return agentreg.Agent{}, fmt.Errorf("agent %s was registered but its admin audit row was not appended (%v) and it could not be disabled again: %w", got.ID, auditErr, undoErr)
+	}
+	return agentreg.Agent{}, fmt.Errorf("admin audit: %w; agent %s was registered then disabled again (ids are never reused: pick a new id)", auditErr, got.ID)
 }
 
 // RunAgentUpdate applies change to the agent id if revision is still the stored
 // one, and appends one agent.update admin audit row. revision is the one the
-// operator read (the compare-and-swap token), not a fresh read.
+// operator read (the compare-and-swap token), not a fresh read. If the append
+// fails the previous fields and keys are restored.
 func RunAgentUpdate(ctx context.Context, stateDir, keyFile, id string, revision int64, change AgentChange, notice io.Writer) (agentreg.Agent, error) {
-	h, err := openAgentCLI(ctx, stateDir, keyFile, notice)
+	h, err := openAgentCLI(ctx, stateDir, keyFile, notice, true)
 	if err != nil {
 		return agentreg.Agent{}, err
 	}
 	defer h.close()
+	return h.update(ctx, id, revision, change)
+}
+
+func (h *agentCLI) update(ctx context.Context, id string, revision int64, change AgentChange) (agentreg.Agent, error) {
+	actor := adminaudit.CLIActor()
 	cur, err := h.store.Get(ctx, id)
 	if err != nil {
 		return agentreg.Agent{}, err
@@ -145,29 +170,41 @@ func RunAgentUpdate(ctx context.Context, stateDir, keyFile, id string, revision 
 		next.Keys = change.Keys
 	}
 	next.Revision = revision
-	got, err := h.store.Update(ctx, next, adminaudit.CLIActor())
+	got, err := h.store.Update(ctx, next, actor)
 	if err != nil {
 		return agentreg.Agent{}, err
 	}
-	if err := h.record(ctx, actionAgentUpdate, got.ID, agentAuditDetails(cur, got)); err != nil {
-		return agentreg.Agent{}, fmt.Errorf("agent %s was updated but its admin audit row was not appended: %w", got.ID, err)
+	auditErr := h.record(ctx, actionAgentUpdate, got.ID, agentAuditDetails(cur, got))
+	if auditErr == nil {
+		return got, nil
 	}
-	return got, nil
+	back := cur
+	back.Revision = got.Revision
+	if _, undoErr := h.store.Update(context.WithoutCancel(ctx), back, actor); undoErr != nil {
+		return agentreg.Agent{}, fmt.Errorf("agent %s was updated but its admin audit row was not appended (%v) and the update could not be reverted: %w", got.ID, auditErr, undoErr)
+	}
+	return agentreg.Agent{}, fmt.Errorf("admin audit: %w; the update was reverted", auditErr)
 }
 
 // RunAgentSetStatus disables or enables the agent id if revision is still the
-// stored one, and appends one agent.disable or agent.enable admin audit row.
+// stored one, and appends one agent.disable or agent.enable admin audit row. If
+// the append fails the previous status is restored.
 func RunAgentSetStatus(ctx context.Context, stateDir, keyFile, id string, status agentreg.Status, revision int64, notice io.Writer) (agentreg.Agent, error) {
-	h, err := openAgentCLI(ctx, stateDir, keyFile, notice)
+	h, err := openAgentCLI(ctx, stateDir, keyFile, notice, true)
 	if err != nil {
 		return agentreg.Agent{}, err
 	}
 	defer h.close()
+	return h.setStatus(ctx, id, status, revision)
+}
+
+func (h *agentCLI) setStatus(ctx context.Context, id string, status agentreg.Status, revision int64) (agentreg.Agent, error) {
+	actor := adminaudit.CLIActor()
 	cur, err := h.store.Get(ctx, id)
 	if err != nil {
 		return agentreg.Agent{}, err
 	}
-	got, err := h.store.SetStatus(ctx, id, status, revision, adminaudit.CLIActor())
+	got, err := h.store.SetStatus(ctx, id, status, revision, actor)
 	if err != nil {
 		return agentreg.Agent{}, err
 	}
@@ -175,10 +212,14 @@ func RunAgentSetStatus(ctx context.Context, stateDir, keyFile, id string, status
 	if status == agentreg.StatusDisabled {
 		action = actionAgentDisable
 	}
-	if err := h.record(ctx, action, got.ID, agentAuditDetails(cur, got)); err != nil {
-		return agentreg.Agent{}, fmt.Errorf("agent %s was changed but its admin audit row was not appended: %w", got.ID, err)
+	auditErr := h.record(ctx, action, got.ID, agentAuditDetails(cur, got))
+	if auditErr == nil {
+		return got, nil
 	}
-	return got, nil
+	if _, undoErr := h.store.SetStatus(context.WithoutCancel(ctx), id, cur.Status, got.Revision, actor); undoErr != nil {
+		return agentreg.Agent{}, fmt.Errorf("agent %s was changed to %s but its admin audit row was not appended (%v) and the change could not be reverted: %w", got.ID, status, auditErr, undoErr)
+	}
+	return agentreg.Agent{}, fmt.Errorf("admin audit: %w; the status change was reverted", auditErr)
 }
 
 // ListAgentsOffline returns every agent, ordered by id, opening the database
@@ -217,12 +258,20 @@ func (h *agentCLI) record(ctx context.Context, action, id string, details map[st
 	return err
 }
 
-func openAgentCLI(ctx context.Context, stateDir, keyFile string, notice io.Writer) (*agentCLI, error) {
+// openAgentCLI opens the audit recorder and the registry store. mustExist
+// refuses a state dir with no database (update, disable, enable) instead of
+// creating one, as RunBlockRemove does.
+func openAgentCLI(ctx context.Context, stateDir, keyFile string, notice io.Writer, mustExist bool) (*agentCLI, error) {
 	if stateDir == "" {
 		return nil, errors.New("agent: --state-dir is required")
 	}
 	if fi, err := os.Stat(stateDir); err != nil || !fi.IsDir() {
 		return nil, fmt.Errorf("agent: --state-dir %s is not a directory", stateDir)
+	}
+	if mustExist {
+		if _, err := os.Stat(filepath.Join(stateDir, adminaudit.StateDBFileName)); err != nil {
+			return nil, fmt.Errorf("%w: no control-plane state db in %s", agentreg.ErrNotFound, stateDir)
+		}
 	}
 	rec, closeAudit, err := adminaudit.OpenForCLI(ctx, stateDir, keyFile, StateMigrations())
 	if err != nil {

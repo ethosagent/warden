@@ -16,7 +16,7 @@ import (
 // newControlPlaneAgentCmd builds `warden control-plane agent`: register,
 // update, list, disable and enable agents of a state dir's registry directly
 // on its database, with the control plane running or stopped (a running one
-// picks a change up within about 2 seconds). It stays thin (rule C1): flag
+// sees a change within one data_version poll, 2 seconds). It stays thin (rule C1): flag
 // parsing and exit codes only; the store, the validator and the audit rows
 // live in internal/agentreg and internal/controlplane. Exit codes: 0 done, 1 a
 // refusal that changed nothing (validation, conflict, key in use, unknown
@@ -27,7 +27,7 @@ func newControlPlaneAgentCmd() *cobra.Command {
 		Short: "Register, update, list, disable and enable agents offline.",
 		Long: "Manage the agent registry in <state-dir>/warden-cp.db without the console, " +
 			"with the control plane running or stopped (a running one serves a change " +
-			"within about 2 seconds). Only public keys are accepted; a file with a private " +
+			"within one data_version poll, 2 seconds). Only public keys are accepted; a file with a private " +
 			"member is refused naming the field path. Output never includes JWK " +
 			"coordinates. Each write is recorded as cli:<os user> in the admin audit log " +
 			"when admin audit is enabled in the state dir.",

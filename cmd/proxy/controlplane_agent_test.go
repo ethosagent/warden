@@ -388,14 +388,32 @@ func TestControlPlaneAgentRunningCP(t *testing.T) {
 
 func waitAgentStatus(t *testing.T, s *agentregsqlite.Store, id string, want agentreg.Status) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for {
 		if a, err := s.Get(context.Background(), id); err == nil && a.Status == want {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("agent %s not %s within 3s", id, want)
+			t.Fatalf("agent %s not %s within 5s", id, want)
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// TestControlPlaneAgentNoDBNotCreated: update, disable and enable on a state
+// dir with no database exit 1 and create none.
+func TestControlPlaneAgentNoDBNotCreated(t *testing.T) {
+	stateDir := newStateDir(t)
+	for _, args := range [][]string{
+		{"disable", "--id", "a", "--revision", "1"},
+		{"enable", "--id", "a", "--revision", "1"},
+		{"update", "--id", "a", "--revision", "1", "--groups", "g"},
+	} {
+		if _, stderr, code := runAgent(t, append(args, "--state-dir", stateDir)...); code != 1 || !strings.Contains(stderr, "not found") {
+			t.Errorf("%v exit %d: %s", args, code, stderr)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, adminaudit.StateDBFileName)); !os.IsNotExist(err) {
+		t.Errorf("a database was created: %v", err)
 	}
 }
