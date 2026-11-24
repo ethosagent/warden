@@ -281,8 +281,9 @@ type Server struct {
 	// certIdx is the revoked worker certificate index behind certificate
 	// authentication; nil without a certificate store.
 	certIdx *certIndex
-	// certsRevoked counts the certificates revoked in this process through the
-	// console (warden_cp_worker_cert_revoked_total).
+	// certsRevoked counts the certificates revoked in this process, by the
+	// console and by a lineage conflict (warden_cp_worker_cert_revoked_total); a
+	// CLI revoke is another process.
 	certsRevoked atomic.Int64
 	// auth is the console OIDC login (/auth/login, /auth/callback); set only when
 	// sessions are.

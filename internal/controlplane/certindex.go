@@ -41,6 +41,8 @@ type certIndex struct {
 	// lastPrune is when the pruner last ran (zero: not yet). Only Run's loop
 	// touches it.
 	lastPrune time.Time
+	// pruneRuns counts finished prune attempts (a test seam).
+	pruneRuns atomic.Int64
 
 	// onRevoked is called, outside mu, with each serial that became revoked
 	// since the previous load (the authenticator cancels its held long-polls).
@@ -152,14 +154,16 @@ func (x *certIndex) tick(ctx context.Context) {
 // prune deletes the worker_certs rows that expired more than certRetention ago,
 // at most once per certPruneInterval (the first call runs at once). A row that
 // has not expired is never touched, so a revoked certificate stays in the
-// store, and in the index, until its not_after. The index is rebuilt after a
-// delete so serials that expired leave it with their rows.
+// store, and in the index, until its not_after. The index never holds a row
+// the pruner can delete (it lists revoked, unexpired serials only); expired
+// serials leave it on its max-age rebuild.
 func (x *certIndex) prune(ctx context.Context) {
 	now := x.clk.Now()
 	if !x.lastPrune.IsZero() && now.Sub(x.lastPrune) < certPruneInterval {
 		return
 	}
 	x.lastPrune = now
+	defer x.pruneRuns.Add(1)
 	n, err := x.store.PruneCerts(ctx, now.Add(-certRetention))
 	if err != nil {
 		if ctx.Err() == nil {

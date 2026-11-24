@@ -36,9 +36,10 @@ var (
 // records as the actor.
 type WorkerCertAdmin interface {
 	// Revoke revokes the worker's unexpired certificates (only serial when it
-	// is not empty) and returns how many it revoked; 0 when they were all
-	// revoked already.
-	Revoke(ctx context.Context, workerID, serial string) (int, error)
+	// is not empty) and returns how many it revoked (0 when they were all
+	// revoked already) and how many unused id-bound enrollment tokens it
+	// revoked with them.
+	Revoke(ctx context.Context, workerID, serial string) (certs, enrollTokens int, err error)
 }
 
 // SetWorkerCertAdmin enables the revoke route. Only the control plane calls
@@ -101,10 +102,10 @@ func (s *Server) handleWorkerRevoke(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	n, err := s.workerCerts.Revoke(r.Context(), id, req.Serial)
+	n, tokens, err := s.workerCerts.Revoke(r.Context(), id, req.Serial)
 	switch {
 	case err == nil:
-		writeJSON(w, map[string]int{"revoked": n})
+		writeJSON(w, map[string]int{"revoked": n, "enrollTokensRevoked": tokens})
 	case errors.Is(err, ErrWorkerCertNotFound):
 		writeError(w, http.StatusNotFound, "worker not found")
 	case errors.Is(err, ErrWorkerCertInvalid):

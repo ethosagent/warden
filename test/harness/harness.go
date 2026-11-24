@@ -41,6 +41,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -100,6 +101,9 @@ const defaultQuiescenceDeadline = 10 * time.Second
 // upstream registry, the fake clock and the oracles. Create it with New; every
 // resource it starts is torn down by the t.Cleanup it registers.
 type H struct {
+	// cpSrv is the in-process control plane Server, set by its OnServer seam.
+	cpSrv atomic.Pointer[controlplane.Server]
+
 	tb   testing.TB
 	root string // t.TempDir(); CP config, proxy CA pair, worker DBs
 
@@ -812,6 +816,7 @@ func (h *H) buildInprocessTarget() *inprocess {
 	h.applyKeys(&ip.cp.params)
 	h.applyStrict(&ip.cp.params)
 	h.applyStrictCerts(&ip.cp.params)
+	ip.cp.params.OnServer = func(s *controlplane.Server) { h.cpSrv.Store(s) }
 	return ip
 }
 

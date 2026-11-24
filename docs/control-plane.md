@@ -1710,7 +1710,7 @@ while the CA is degraded.
 
 An admin revokes a worker's certificates from the fleet view (Revoke button, with
 `console.auth: oidc`), by `POST /dashboard/api/workers/{id}/revoke` (optional body
-`{"serial": "<hex>"}` to revoke one certificate; 200 `{"revoked": n}`, 404 for an unknown
+`{"serial": "<hex>"}` to revoke one certificate; 200 `{"revoked": n, "enrollTokensRevoked": m}`, 404 for an unknown
 worker or a serial that is not its own, 403 for a viewer), or offline:
 
 ```sh
@@ -1720,7 +1720,7 @@ warden control-plane worker revoke --id worker-1 [--serial S] --state-dir D
 It sets `revoked_at`, `revoked_by` and `revoke_reason=admin_revoked` on every unexpired
 certificate of the worker and revokes its unused id-bound enrollment tokens, so a later
 renewal is refused and the worker must re-enroll with a new token. It is idempotent
-(`revoked: 0` the second time). Revocation is enforced on the control plane only, through
+(`revoked: 0` the second time; `enrollTokensRevoked` counts the unused id-bound tokens it revoked, and the audit row records `enroll_tokens_revoked`). Revocation is enforced on the control plane only, through
 the in-memory index: the worker's next `/policy`, `/control/heartbeat`, `/central/ingest`
 or `/control/renew` is a 401 and its held `/policy` long-poll ends at once; it keeps its
 last-known-good policy. The console route refreshes the index synchronously; the CLI is

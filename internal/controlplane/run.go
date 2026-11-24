@@ -86,6 +86,9 @@ type Params struct {
 	// listener's accept backlog and Serve drains them the moment it starts, so
 	// nothing is refused. Nil is allowed (production never sets it).
 	OnReady func(addr string)
+	// OnServer, when set, is called once with the built Server before it
+	// serves: a test seam (the in-process harness reads counters through it).
+	OnServer func(*Server)
 
 	// Clock is the CP's time port (nil = clock.Real()). The console
 	// query/generate rate limit ticks on it; the detection engine migrates in its
@@ -572,6 +575,9 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		// The CP's time port (nil = clock.Real() inside New).
 		Clock: p.Clock,
 	})
+	if p.OnServer != nil {
+		p.OnServer(srv)
+	}
 
 	srv.warnBreakGlassSetup(integrations)
 

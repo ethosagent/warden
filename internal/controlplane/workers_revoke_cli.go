@@ -77,34 +77,35 @@ func (o *OfflineWorkerCerts) Close() error {
 
 // Revoke revokes the worker's unexpired certificates (only serial when it is
 // not empty) and appends the worker.revoked audit row. It returns how many it
-// revoked; 0 when they were all revoked already (still one audit row, as the
+// revoked and how many unused id-bound enrollment tokens went with them; 0 when they were all revoked already (still one audit row, as the
 // console does). An unknown worker or serial is ErrCertNotFound.
-func (o *OfflineWorkerCerts) Revoke(ctx context.Context, workerID, serial string) (int, error) {
+func (o *OfflineWorkerCerts) Revoke(ctx context.Context, workerID, serial string) (int, int, error) {
 	serial = strings.ToLower(serial)
 	if serial != "" && !serialRe.MatchString(serial) {
-		return 0, fmt.Errorf("%w: --serial must be lowercase hex", ErrInvalidInput)
+		return 0, 0, fmt.Errorf("%w: --serial must be lowercase hex", ErrInvalidInput)
 	}
 	var (
 		serials []string
+		tokens  int
 		err     error
 	)
 	if serial == "" {
-		serials, err = o.st.RevokeWorker(ctx, workerID, o.actor, RevokeReasonAdmin)
+		serials, tokens, err = o.st.RevokeWorkerAll(ctx, workerID, o.actor, RevokeReasonAdmin)
 	} else {
 		serials, err = o.st.RevokeWorkerSerial(ctx, workerID, serial, o.actor, RevokeReasonAdmin)
 	}
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	if o.rec != nil {
 		_, aerr := o.rec.Record(ctx, adminaudit.Input{
 			Action: actionWorkerRevoked, Target: auditTargetWorkerCerts, TargetRef: workerRef(workerID),
-			Details: map[string]string{adminaudit.DetailWorkerID: workerID, adminaudit.DetailCount: strconv.Itoa(len(serials))},
+			Details: map[string]string{adminaudit.DetailWorkerID: workerID, adminaudit.DetailCount: strconv.Itoa(len(serials)), adminaudit.DetailEnrollTokens: strconv.Itoa(tokens)},
 			Outcome: adminaudit.OutcomeOK,
 		})
 		if aerr != nil {
-			return len(serials), fmt.Errorf("worker certs: %d certificate(s) of %s revoked but the admin audit append failed: %w", len(serials), workerID, aerr)
+			return len(serials), tokens, fmt.Errorf("worker certs: %d certificate(s) of %s revoked but the admin audit append failed: %w", len(serials), workerID, aerr)
 		}
 	}
-	return len(serials), nil
+	return len(serials), tokens, nil
 }

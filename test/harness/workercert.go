@@ -248,3 +248,26 @@ func CSRFor(tb testing.TB, key *ecdsa.PrivateKey) string {
 	}
 	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der}))
 }
+
+// ParkedWorkerPolls is how many held /policy long-polls the in-process control
+// plane has parked for the certificate serial. A scenario waits on it before it
+// revokes, so the revoke provably cuts a parked request.
+func (c *CPClient) ParkedWorkerPolls(serial string) int {
+	c.h.tb.Helper()
+	s := c.h.cpSrv.Load()
+	if s == nil {
+		c.h.tb.Fatal("harness: ParkedWorkerPolls needs the in-process control plane")
+	}
+	return s.ParkedWorkerPolls(serial)
+}
+
+// CertPruneRuns is how many times the in-process control plane's expired
+// certificate pruner has run.
+func (c *CPClient) CertPruneRuns() int64 {
+	c.h.tb.Helper()
+	s := c.h.cpSrv.Load()
+	if s == nil {
+		c.h.tb.Fatal("harness: CertPruneRuns needs the in-process control plane")
+	}
+	return s.CertPruneRuns()
+}

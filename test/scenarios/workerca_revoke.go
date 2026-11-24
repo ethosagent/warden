@@ -40,7 +40,7 @@ func wcrHold(t *testing.T, h *harness.H, w harness.WorkerCert) <-chan harness.Ra
 		t.Fatalf("/policy before the hold = %d, ETag %q", first.Status, etag)
 	}
 	held := cp.HoldWorker(http.MethodGet, "/policy?wait=30s", "", http.Header{"If-None-Match": {etag}})
-	time.Sleep(200 * time.Millisecond) // let it park; the assertions hold either way
+	h.Eventually("the long-poll to park", func() bool { return h.CP().ParkedWorkerPolls(w.Serial()) == 1 })
 	return held
 }
 
@@ -108,8 +108,8 @@ func workerCARevokeAPI(t *testing.T, h *harness.H) {
 
 	held := wcrHold(t, h, w1)
 	code, body := post(admin, csrf, wcrPath+"cert-a/revoke", "")
-	if code != http.StatusOK || strings.ReplaceAll(body, " ", "") != "{\"revoked\":1}\n" {
-		t.Fatalf("revoke = %d %q, want 200 {revoked:1}", code, body)
+	if code != http.StatusOK || strings.ReplaceAll(body, " ", "") != "{\"enrollTokensRevoked\":0,\"revoked\":1}\n" {
+		t.Fatalf("revoke = %d %q, want 200 revoked 1", code, body)
 	}
 	// The held long-poll is cut, the next requests are 401, and so is a renewal.
 	wcrExpect401(t, h, held, "cert-a's held /policy")
@@ -138,9 +138,14 @@ func workerCARevokeAPI(t *testing.T, h *harness.H) {
 		return false
 	})
 
-	// Idempotent: a second revoke is 200 {revoked:0}.
-	if code, body := post(admin, csrf, wcrPath+"cert-a/revoke", ""); code != http.StatusOK || !strings.Contains(body, `"revoked":0`) {
-		t.Errorf("second revoke = %d %q, want 200 revoked 0", code, body)
+	// Idempotent: a second revoke is 200 {revoked:0}. A new unused id-bound
+	// token for the worker is revoked by it and reported (and moves the audit hash).
+	h.CreateEnrollToken("cert-a", "", 0, 0)
+	if code, body := post(admin, csrf, wcrPath+"cert-a/revoke", ""); code != http.StatusOK || !strings.Contains(body, `"revoked":0`) || !strings.Contains(body, `"enrollTokensRevoked":1`) {
+		t.Errorf("second revoke = %d %q, want 200 revoked 0, enrollTokensRevoked 1", code, body)
+	}
+	if code, body := post(admin, csrf, wcrPath+"cert-a/revoke", ""); code != http.StatusOK || !strings.Contains(body, `"enrollTokensRevoked":0`) {
+		t.Errorf("third revoke = %d %q, want enrollTokensRevoked 0", code, body)
 	}
 
 	// One serial only: cert-b keeps its other certificate? It has one, so
@@ -174,8 +179,19 @@ func workerCARevokeAPI(t *testing.T, h *harness.H) {
 			}
 		}
 	}
-	if okRows != 3 {
-		t.Errorf("worker.revoked ok rows = %d, want 3 (rows %+v)", okRows, revoked)
+	if okRows != 4 {
+		t.Errorf("worker.revoked ok rows = %d, want 4 (rows %+v)", okRows, revoked)
+	}
+	// The revoke that changed only an enrollment token moved the audit hash and
+	// recorded the token count.
+	var tokenRow *harness.AdminAuditRow
+	for i, r := range revoked {
+		if strings.Contains(r.Details, `"enroll_tokens_revoked":"1"`) {
+			tokenRow = &revoked[i]
+		}
+	}
+	if tokenRow == nil || tokenRow.BeforeHash == tokenRow.AfterHash || !strings.Contains(tokenRow.Details, `"count":"0"`) {
+		t.Errorf("the token-only revoke row = %+v", tokenRow)
 	}
 }
 
@@ -192,7 +208,7 @@ func workerCARevokeCLI(t *testing.T, h *harness.H) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	n, err := o.Revoke(ctx, "cert-a", "")
+	n, _, err := o.Revoke(ctx, "cert-a", "")
 	if cerr := o.Close(); err == nil {
 		err = cerr
 	}
@@ -221,7 +237,7 @@ func workerCARevokeCLI(t *testing.T, h *harness.H) {
 		t.Fatal(err)
 	}
 	defer func() { _ = o.Close() }()
-	if _, err := o.Revoke(ctx, "nobody", ""); err == nil {
+	if _, _, err := o.Revoke(ctx, "nobody", ""); err == nil {
 		t.Error("revoking an unknown worker succeeded")
 	}
 }
@@ -259,8 +275,13 @@ func workerCAPrune(t *testing.T, h *harness.H) {
 		return n == 1
 	}
 	// Just before old's not_after + 30 days nothing is pruned, revoked or not.
-	h.Clock().Advance(old.Cert.NotAfter.Sub(h.Clock().Now()) + 29*24*time.Hour)
-	h.Clock().Advance(time.Hour)
+	// Wait for a prune that really ran at that time first.
+	h.Clock().Advance(old.Cert.NotAfter.Sub(h.Clock().Now()) + 29*24*time.Hour + time.Hour)
+	runs := h.CP().CertPruneRuns()
+	h.Eventually("a prune to run before the retention ends", func() bool {
+		h.Clock().Advance(time.Minute)
+		return h.CP().CertPruneRuns() > runs
+	})
 	if !has(old.Serial()) || !has(first.Serial()) || !has(second.Serial()) {
 		t.Fatal("a row was pruned before 30 days past its not_after")
 	}

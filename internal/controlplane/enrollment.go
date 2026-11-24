@@ -321,6 +321,9 @@ type WorkerCertStore interface {
 	// the serials it revoked. It is idempotent; ErrCertNotFound for a worker id
 	// that never held a certificate.
 	RevokeWorker(ctx context.Context, workerID, actor, reason string) ([]string, error)
+	// RevokeWorkerAll is RevokeWorker that also reports how many unused
+	// id-bound enrollment tokens it revoked.
+	RevokeWorkerAll(ctx context.Context, workerID, actor, reason string) (serials []string, tokens int, err error)
 	// RevokeWorkerSerial revokes one certificate of the worker, returning its
 	// serial, or nil when it was already revoked or expired (idempotent).
 	// ErrCertNotFound for a serial that is not this worker's.
@@ -824,12 +827,18 @@ func (s *EnrollmentStore) RenewCert(ctx context.Context, workerID, presented, sp
 
 // RevokeWorker implements WorkerCertStore.
 func (s *EnrollmentStore) RevokeWorker(ctx context.Context, workerID, actor, reason string) ([]string, error) {
+	serials, _, err := s.RevokeWorkerAll(ctx, workerID, actor, reason)
+	return serials, err
+}
+
+// RevokeWorkerAll implements WorkerCertStore.
+func (s *EnrollmentStore) RevokeWorkerAll(ctx context.Context, workerID, actor, reason string) ([]string, int, error) {
 	if actor == "" || reason == "" {
-		return nil, fmt.Errorf("%w: actor and reason are required", ErrInvalidInput)
+		return nil, 0, fmt.Errorf("%w: actor and reason are required", ErrInvalidInput)
 	}
 	conn, finish, err := s.beginImmediate(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("worker certs: revoke worker: %w", err)
+		return nil, 0, fmt.Errorf("worker certs: revoke worker: %w", err)
 	}
 	committed := false
 	defer func() {
@@ -839,32 +848,32 @@ func (s *EnrollmentStore) RevokeWorker(ctx context.Context, workerID, actor, rea
 	}()
 	var one int
 	if err := conn.QueryRowContext(ctx, `SELECT 1 FROM worker_certs WHERE worker_id = ? LIMIT 1`, workerID).Scan(&one); errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrWorkerNotFound
+		return nil, 0, ErrWorkerNotFound
 	} else if err != nil {
-		return nil, fmt.Errorf("worker certs: revoke worker: %w", err)
+		return nil, 0, fmt.Errorf("worker certs: revoke worker: %w", err)
 	}
 	now := s.clk.Now()
 	rows, err := conn.QueryContext(ctx,
 		`SELECT serial FROM worker_certs WHERE worker_id = ? AND revoked_at IS NULL AND not_after > ?`, workerID, now.Unix())
 	if err != nil {
-		return nil, fmt.Errorf("worker certs: revoke worker: %w", err)
+		return nil, 0, fmt.Errorf("worker certs: revoke worker: %w", err)
 	}
 	var serials []string
 	for rows.Next() {
 		var sn string
 		if err := rows.Scan(&sn); err != nil {
 			_ = rows.Close()
-			return nil, fmt.Errorf("worker certs: revoke worker: %w", err)
+			return nil, 0, fmt.Errorf("worker certs: revoke worker: %w", err)
 		}
 		serials = append(serials, sn)
 	}
 	if err := rows.Close(); err != nil {
-		return nil, fmt.Errorf("worker certs: revoke worker: %w", err)
+		return nil, 0, fmt.Errorf("worker certs: revoke worker: %w", err)
 	}
 	if _, err := conn.ExecContext(ctx,
 		`UPDATE worker_certs SET revoked_at = ?, revoked_by = ?, revoke_reason = ? WHERE worker_id = ? AND revoked_at IS NULL AND not_after > ?`,
 		now.Unix(), actor, reason, workerID, now.Unix()); err != nil {
-		return nil, fmt.Errorf("worker certs: revoke worker: %w", err)
+		return nil, 0, fmt.Errorf("worker certs: revoke worker: %w", err)
 	}
 	// A certificate revoked as superseded re-fires a lineage conflict on every
 	// use; the worker is revoked now, so its reason becomes the plain one and
@@ -872,21 +881,23 @@ func (s *EnrollmentStore) RevokeWorker(ctx context.Context, workerID, actor, rea
 	if _, err := conn.ExecContext(ctx,
 		`UPDATE worker_certs SET revoke_reason = ? WHERE worker_id = ? AND revoked_at IS NOT NULL AND revoke_reason = ?`,
 		reason, workerID, RevokeReasonSuperseded); err != nil {
-		return nil, fmt.Errorf("worker certs: revoke worker: %w", err)
+		return nil, 0, fmt.Errorf("worker certs: revoke worker: %w", err)
 	}
-	if _, err := conn.ExecContext(ctx,
+	tres, err := conn.ExecContext(ctx,
 		`UPDATE worker_enroll_tokens SET revoked_at = ?, revoked_by = ? WHERE worker_id = ? AND uses = 0 AND revoked_at IS NULL`,
-		now.Unix(), actor, workerID); err != nil {
-		return nil, fmt.Errorf("worker certs: revoke worker: %w", err)
+		now.Unix(), actor, workerID)
+	if err != nil {
+		return nil, 0, fmt.Errorf("worker certs: revoke worker: %w", err)
 	}
+	tokens, _ := tres.RowsAffected()
 	if err := finish(true); err != nil {
-		return nil, fmt.Errorf("worker certs: revoke worker: commit: %w", err)
+		return nil, 0, fmt.Errorf("worker certs: revoke worker: commit: %w", err)
 	}
 	committed = true
 	if err := s.reload(ctx); err != nil {
 		s.log.Warn("enrollment tokens: index reload failed after revoking a worker", "err", err)
 	}
-	return serials, nil
+	return serials, int(tokens), nil
 }
 
 // RevokeWorkerSerial implements WorkerCertStore.
@@ -917,6 +928,10 @@ func (s *EnrollmentStore) RevokeWorkerSerial(ctx context.Context, workerID, seri
 
 // PruneCerts implements WorkerCertStore.
 func (s *EnrollmentStore) PruneCerts(ctx context.Context, cutoff time.Time) (int, error) {
+	// Never delete a row that has not expired, whatever the caller asks.
+	if now := s.clk.Now(); cutoff.After(now) {
+		cutoff = now
+	}
 	res, err := s.db.ExecContext(ctx,
 		`DELETE FROM worker_certs WHERE not_after < ?
 		   AND serial NOT IN (SELECT prev_serial FROM worker_certs WHERE prev_serial IS NOT NULL AND not_after >= ?)`,

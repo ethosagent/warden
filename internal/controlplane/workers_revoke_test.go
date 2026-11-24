@@ -19,7 +19,7 @@ import (
 // test reach the revoke route without a certificate store.
 type stubWorkerCerts struct{}
 
-func (stubWorkerCerts) Revoke(context.Context, string, string) (int, error) { return 1, nil }
+func (stubWorkerCerts) Revoke(context.Context, string, string) (int, int, error) { return 1, 0, nil }
 
 // TestWorkerCertRevoke covers the store (by worker and by serial, idempotence,
 // the not-found errors, the renewal refusal) and the console adapter: the index
@@ -77,13 +77,13 @@ func TestWorkerCertRevokeAdapter(t *testing.T) {
 	admin := WithPrincipal(context.Background(), Principal{Sub: "ada"})
 
 	// No console identity: refused, nothing revoked.
-	if _, err := adm.Revoke(context.Background(), "worker-1", ""); !errors.Is(err, dashboard.ErrWorkerCertNoActor) {
+	if _, _, err := adm.Revoke(context.Background(), "worker-1", ""); !errors.Is(err, dashboard.ErrWorkerCertNoActor) {
 		t.Fatalf("Revoke without a principal = %v, want ErrWorkerCertNoActor", err)
 	}
-	if _, err := adm.Revoke(admin, "worker-1", "not hex!"); !errors.Is(err, dashboard.ErrWorkerCertInvalid) {
+	if _, _, err := adm.Revoke(admin, "worker-1", "not hex!"); !errors.Is(err, dashboard.ErrWorkerCertInvalid) {
 		t.Fatalf("Revoke with a bad serial = %v, want ErrWorkerCertInvalid", err)
 	}
-	if _, err := adm.Revoke(admin, "nobody", ""); !errors.Is(err, dashboard.ErrWorkerCertNotFound) {
+	if _, _, err := adm.Revoke(admin, "nobody", ""); !errors.Is(err, dashboard.ErrWorkerCertNotFound) {
 		t.Fatalf("Revoke(unknown) = %v, want ErrWorkerCertNotFound", err)
 	}
 	if rec := c.do(http.MethodGet, "/policy", a.cert, "", ""); rec.Code != http.StatusOK {
@@ -113,7 +113,7 @@ func TestWorkerCertRevokeAdapter(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	// Uppercase hex is accepted, and the write needs no poll to take effect.
-	n, err := adm.Revoke(admin, "worker-1", strings.ToUpper(a.serial()))
+	n, _, err := adm.Revoke(admin, "worker-1", strings.ToUpper(a.serial()))
 	if err != nil || n != 1 {
 		t.Fatalf("Revoke = %d, %v, want 1", n, err)
 	}
@@ -138,7 +138,7 @@ func TestWorkerCertRevokeAdapter(t *testing.T) {
 		t.Errorf("no `worker certs revoked` log line: %s", c.logs.String())
 	}
 	// Repeat: 0, still no error.
-	if n, err := adm.Revoke(admin, "worker-1", ""); err != nil || n != 0 {
+	if n, tk, err := adm.Revoke(admin, "worker-1", ""); err != nil || n != 0 || tk != 0 {
 		t.Errorf("repeat Revoke = %d, %v, want 0", n, err)
 	}
 }
@@ -199,7 +199,9 @@ func TestWorkerCertPruneKeepsPredecessors(t *testing.T) {
 	if err := c.store.RecordCert(ctx, rec); err != nil {
 		t.Fatal(err)
 	}
-	cutoff := first.cert.NotAfter.Add(time.Hour) // first is past it, the renewal is not
+	// first is past the cutoff, the renewal is not.
+	c.clk.Advance(first.cert.NotAfter.Add(time.Hour).Sub(c.clk.Now()))
+	cutoff := c.clk.Now()
 	if n, err := c.store.PruneCerts(ctx, cutoff); err != nil || n != 0 {
 		t.Fatalf("PruneCerts = %d, %v, want 0 (first is the renewal's predecessor)", n, err)
 	}
@@ -207,7 +209,8 @@ func TestWorkerCertPruneKeepsPredecessors(t *testing.T) {
 		t.Errorf("predecessor row: %v", err)
 	}
 	// Once the renewal is past the cutoff too, both go.
-	if n, err := c.store.PruneCerts(ctx, cert.NotAfter.Add(time.Hour)); err != nil || n != 2 {
+	c.clk.Advance(cert.NotAfter.Add(time.Hour).Sub(c.clk.Now()))
+	if n, err := c.store.PruneCerts(ctx, c.clk.Now()); err != nil || n != 2 {
 		t.Fatalf("PruneCerts = %d, %v, want 2", n, err)
 	}
 }
@@ -227,5 +230,46 @@ func TestCertIndexPrunesOnItsLoop(t *testing.T) {
 	idx.prune(ctx)
 	if _, err := c.store.Cert(ctx, a.serial()); !errors.Is(err, ErrCertNotFound) {
 		t.Fatalf("the expired row survived the prune: %v", err)
+	}
+}
+
+// TestWorkerCertPruneClampsFutureCutoff: PruneCerts never deletes a row that has
+// not expired, even when the caller's cutoff lies in the future.
+func TestWorkerCertPruneClampsFutureCutoff(t *testing.T) {
+	ctx := context.Background()
+	c := newCertEnv(t)
+	live := c.issue(t, "worker-1")
+	revoked := c.issue(t, "worker-2")
+	if _, err := c.store.RevokeWorker(ctx, "worker-2", "admin", RevokeReasonAdmin); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := c.store.PruneCerts(ctx, c.clk.Now().Add(1000*24*time.Hour)); err != nil || n != 0 {
+		t.Fatalf("PruneCerts with a future cutoff = %d, %v, want 0", n, err)
+	}
+	for _, w := range []workerCert{live, revoked} {
+		if _, err := c.store.Cert(ctx, w.serial()); err != nil {
+			t.Errorf("row %s: %v", w.serial()[:6], err)
+		}
+	}
+}
+
+// TestWorkerCertRevokeCountsEnrollTokens: a revoke that changes no certificate
+// but revokes an unused id-bound token says so (the audit hash is checked in the workerca_revoke_api scenario).
+func TestWorkerCertRevokeCountsEnrollTokens(t *testing.T) {
+	ctx := context.Background()
+	c := newCertEnv(t)
+	c.issue(t, "worker-1")
+	if _, err := c.store.RevokeWorker(ctx, "worker-1", "admin", RevokeReasonAdmin); err != nil {
+		t.Fatal(err)
+	}
+	// A new admin-issued id-bound token for the already-revoked worker.
+	c.create(t, EnrollCreateOpts{Name: "again", WorkerID: "worker-1"})
+	adm := workerCertAdmin{s: c.srv}
+	n, tokens, err := adm.Revoke(WithPrincipal(ctx, Principal{Sub: "ada"}), "worker-1", "")
+	if err != nil || n != 0 || tokens != 1 {
+		t.Fatalf("Revoke = %d certs, %d tokens, %v; want 0, 1", n, tokens, err)
+	}
+	if _, tokens, err := adm.Revoke(WithPrincipal(ctx, Principal{Sub: "ada"}), "worker-1", ""); err != nil || tokens != 0 {
+		t.Errorf("repeat Revoke tokens = %d, %v, want 0", tokens, err)
 	}
 }

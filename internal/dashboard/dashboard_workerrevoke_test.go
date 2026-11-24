@@ -12,16 +12,17 @@ import (
 
 type fakeWorkerCerts struct {
 	n      int
+	tokens int
 	err    error
 	worker string
 	serial string
 	calls  int
 }
 
-func (f *fakeWorkerCerts) Revoke(_ context.Context, w, s string) (int, error) {
+func (f *fakeWorkerCerts) Revoke(_ context.Context, w, s string) (int, int, error) {
 	f.calls++
 	f.worker, f.serial = w, s
-	return f.n, f.err
+	return f.n, f.tokens, f.err
 }
 
 func wcServer(t *testing.T, adm WorkerCertAdmin, mode string) http.Handler {
@@ -36,10 +37,10 @@ func wcServer(t *testing.T, adm WorkerCertAdmin, mode string) http.Handler {
 }
 
 func TestWorkerRevokeAPI(t *testing.T) {
-	f := &fakeWorkerCerts{n: 2}
+	f := &fakeWorkerCerts{n: 2, tokens: 1}
 	h := wcServer(t, f, "oidc")
 	rec := wtDo(h, http.MethodPost, "/dashboard/api/workers/worker-1/revoke", "")
-	if rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != `{"revoked":2}` || rec.Header().Get("Cache-Control") != "no-store" {
+	if rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != `{"enrollTokensRevoked":1,"revoked":2}` || rec.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("POST = %d %q", rec.Code, rec.Body.String())
 	}
 	if f.worker != "worker-1" || f.serial != "" {

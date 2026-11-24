@@ -2140,7 +2140,11 @@ async function revokeWorkerCerts(id){
   if(!window.confirm('Revoke the certificates of worker "'+id+'"? It is cut off at once and must re-enroll with a new token.')) return;
   let r=null;
   try{ r=await api('POST','/dashboard/api/workers/'+encodeURIComponent(id)+'/revoke',{}); }catch(e){ r=null; }
-  if(!(r&&r.ok)) window.alert('Revoke failed'+(r?(': status '+r.status):'')+'.');
+  if(!(r&&r.ok)){
+    let why=r?('status '+r.status):'no response';
+    if(r){ try{ const d=await r.json(); if(d&&d.message) why=d.message; }catch(e){} }
+    window.alert('Revoke failed: '+why);
+  }
   loadFleet();
 }
 /* A worker enforces the block list only when its heartbeat advertised blocklist/v1. */

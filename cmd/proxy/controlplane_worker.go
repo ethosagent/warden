@@ -49,16 +49,16 @@ func newWorkerRevokeCmd() *cobra.Command {
 			if !o.AuditEnabled() {
 				_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "admin audit is not enabled in "+stateDir+"; no audit row appended")
 			}
-			n, err := o.Revoke(cmd.Context(), id, serial)
+			n, tokens, err := o.Revoke(cmd.Context(), id, serial)
 			switch {
 			case errors.Is(err, controlplane.ErrCertNotFound):
 				return &exitError{code: 2, err: fmt.Errorf("no worker %q (or no such serial) in %s", id, stateDir)}
 			case err != nil:
 				return err
-			case n == 0:
-				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "no change: no unexpired, unrevoked certificate of %s\n", id)
+			case n == 0 && tokens == 0:
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "no change: no unexpired, unrevoked certificate or unused enrollment token of %s\n", id)
 			default:
-				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "revoked %d certificate(s) of %s\n", n, id)
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "revoked %d certificate(s) and %d unused enrollment token(s) of %s\n", n, tokens, id)
 			}
 			return nil
 		},

@@ -31,55 +31,58 @@ var serialRe = regexp.MustCompile(`^[0-9a-f]{1,64}$`)
 type workerCertAdmin struct{ s *Server }
 
 // Revoke implements dashboard.WorkerCertAdmin.
-func (a workerCertAdmin) Revoke(ctx context.Context, workerID, serial string) (int, error) {
+func (a workerCertAdmin) Revoke(ctx context.Context, workerID, serial string) (int, int, error) {
 	p, ok := PrincipalFrom(ctx)
 	if !ok || p.Sub == "" {
-		return 0, dashboard.ErrWorkerCertNoActor
+		return 0, 0, dashboard.ErrWorkerCertNoActor
 	}
 	serial = strings.ToLower(serial)
 	if serial != "" && !serialRe.MatchString(serial) {
-		return 0, fmt.Errorf("%w: serial must be lowercase hex", dashboard.ErrWorkerCertInvalid)
+		return 0, 0, fmt.Errorf("%w: serial must be lowercase hex", dashboard.ErrWorkerCertInvalid)
 	}
-	adminaudit.Annotate(ctx, workerRef(workerID), map[string]string{adminaudit.DetailWorkerID: workerID, adminaudit.DetailCount: "0"})
-	n, err := a.s.revokeWorkerCerts(ctx, workerID, serial, p.Sub)
+	adminaudit.Annotate(ctx, workerRef(workerID), map[string]string{adminaudit.DetailWorkerID: workerID, adminaudit.DetailCount: "0", adminaudit.DetailEnrollTokens: "0"})
+	n, tokens, err := a.s.revokeWorkerCerts(ctx, workerID, serial, p.Sub)
 	switch {
 	case errors.Is(err, ErrCertNotFound):
-		return 0, dashboard.ErrWorkerCertNotFound
+		return 0, 0, dashboard.ErrWorkerCertNotFound
 	case err != nil:
 		a.s.cfg.Logger.Error("worker certs: revoke failed", "worker_id", workerID, "error", err.Error())
-		return 0, err
+		return 0, 0, err
 	}
-	adminaudit.Annotate(ctx, "", map[string]string{adminaudit.DetailCount: strconv.Itoa(n)})
-	return n, nil
+	adminaudit.Annotate(ctx, "", map[string]string{adminaudit.DetailCount: strconv.Itoa(n), adminaudit.DetailEnrollTokens: strconv.Itoa(tokens)})
+	return n, tokens, nil
 }
 
 // revokeWorkerCerts revokes the unexpired certificates of workerID (only
-// serial when it is not empty) and syncs the revoked index after the write.
-func (s *Server) revokeWorkerCerts(ctx context.Context, workerID, serial, actor string) (int, error) {
+// serial when it is not empty) and syncs the revoked index after the write. It
+// returns the certificates revoked and the unused id-bound enrollment tokens
+// revoked with them (only a whole-worker revoke touches tokens).
+func (s *Server) revokeWorkerCerts(ctx context.Context, workerID, serial, actor string) (int, int, error) {
 	var (
 		serials []string
+		tokens  int
 		err     error
 	)
 	if serial == "" {
-		serials, err = s.cfg.WorkerCerts.RevokeWorker(ctx, workerID, actor, RevokeReasonAdmin)
+		serials, tokens, err = s.cfg.WorkerCerts.RevokeWorkerAll(ctx, workerID, actor, RevokeReasonAdmin)
 	} else {
 		serials, err = s.cfg.WorkerCerts.RevokeWorkerSerial(ctx, workerID, serial, actor, RevokeReasonAdmin)
 	}
 	// The row may be committed even when the call reports an error after it.
 	s.syncCertIndex(context.WithoutCancel(ctx))
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	if n := len(serials); n > 0 {
+	if n := len(serials); n > 0 || tokens > 0 {
 		s.certsRevoked.Add(int64(n))
-		s.cfg.Logger.Info("worker certs revoked", "worker_id", workerID, "count", n)
+		s.cfg.Logger.Info("worker certs revoked", "worker_id", workerID, "count", n, "enroll_tokens", tokens)
 	}
-	return len(serials), nil
+	return len(serials), tokens, nil
 }
 
 // CertRevokedCount is the in-memory warden_cp_worker_cert_revoked_total
-// counter: certificates revoked through the console since the process started
-// (a CLI revoke is another process).
+// counter: certificates revoked by the console or a lineage conflict since the
+// process started (a CLI revoke is another process).
 func (s *Server) CertRevokedCount() int64 { return s.certsRevoked.Load() }
 
 // workerCertsStateHash is the keyed hash of the revoked certificates' ids and
@@ -99,7 +102,29 @@ func (s *Server) workerCertsStateHash(ctx context.Context) (string, error) {
 	for _, r := range rows {
 		out = append(out, meta{r.Serial, r.WorkerID, r.Reason})
 	}
-	return s.stateHashJSON(auditTargetWorkerCerts, out)
+	// The id-bound enrollment tokens a worker revoke also revokes: without them
+	// a revoke that only revoked a token would hash as no change.
+	type tokMeta struct {
+		ID      string `json:"id"`
+		Worker  string `json:"worker_id"`
+		Revoked bool   `json:"revoked"`
+	}
+	var toks []tokMeta
+	if s.cfg.Enrollment != nil {
+		all, err := s.cfg.Enrollment.List(ctx)
+		if err != nil {
+			return "", err
+		}
+		for _, t := range all {
+			if t.WorkerID != "" {
+				toks = append(toks, tokMeta{t.ID, t.WorkerID, !t.RevokedAt.IsZero()})
+			}
+		}
+	}
+	return s.stateHashJSON(auditTargetWorkerCerts, struct {
+		Certs  []meta    `json:"certs"`
+		Tokens []tokMeta `json:"enroll_tokens"`
+	}{out, toks})
 }
 
 // wireWorkerCerts mounts the revoke route and its audit hasher when the control
@@ -110,4 +135,24 @@ func (s *Server) wireWorkerCerts(dash *dashboard.Server) {
 	}
 	dash.SetWorkerCertAdmin(workerCertAdmin{s: s})
 	s.RegisterStateHasher(auditTargetWorkerCerts, s.workerCertsStateHash)
+}
+
+// ParkedWorkerPolls is how many held /policy long-polls are parked for the
+// certificate serial (a test seam: a scenario waits on it before revoking).
+func (s *Server) ParkedWorkerPolls(serial string) int {
+	a := s.workerAuth
+	a.cancelMu.Lock()
+	defer a.cancelMu.Unlock()
+	if e := a.cancels[certCancelKey(serial)]; e != nil {
+		return e.waiters
+	}
+	return 0
+}
+
+// CertPruneRuns is how many times the expired-row pruner has run (a test seam).
+func (s *Server) CertPruneRuns() int64 {
+	if s.certIdx == nil {
+		return 0
+	}
+	return s.certIdx.pruneRuns.Load()
 }

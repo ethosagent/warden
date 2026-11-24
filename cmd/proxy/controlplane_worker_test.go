@@ -71,7 +71,7 @@ func TestControlPlaneWorkerRevokeCmd(t *testing.T) {
 	base := []string{"control-plane", "worker", "revoke", "--state-dir", stateDir}
 
 	stdout, stderr, code := runWarden(t, append(base, "--id", "worker-1", "--serial", "AA01")...)
-	if code != 0 || !strings.Contains(stdout, "revoked 1 certificate(s) of worker-1") {
+	if code != 0 || !strings.Contains(stdout, "revoked 1 certificate(s) and 0 unused enrollment token(s) of worker-1") {
 		t.Fatalf("revoke --serial = %d %q %q", code, stdout, stderr)
 	}
 	if got := revokedSerials(t, stateDir); got != "aa01" {
