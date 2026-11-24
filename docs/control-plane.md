@@ -294,6 +294,13 @@ needs a restart. It holds the *name* of the client-secret env var, never the sec
 | `session.idle`, `session.absolute` | `1h`, `12h` | `0 < idle <= absolute <= 168h`. |
 | `adminAudit.enabled` | `false` | Turns on the signed admin audit log; needs `--state-dir`. See [Admin audit log](#admin-audit-log). |
 | `trustedProxies` | none | CIDRs of reverse proxies in front of the control plane. Only a peer inside one may set the client address the admin audit log records, through `X-Forwarded-For`. A bare address or anything that is not a CIDR is a startup error. |
+| `approvals.enabled` | `false` | Change approvals (W-P2-APPR-01). **Not available yet:** this build refuses `true` at startup (`approvals enforcement is not available in this build`) until every versioned write path is gated. Off, no table, migration or goroutine exists and `/policy` is unchanged. When on it will need `console.auth: oidc`, `--policy-store=versioned`, `--state-dir` and `adminAudit.enabled: true`; startup names the first one missing. Read from `--config` only and never sent to workers. |
+| `approvals.minApprovals` | `1` | Distinct approvers a held change needs, `1..3`. |
+| `approvals.allowSelfApproveNarrowing` | `true` | A narrowing change applies at submit with no second person. |
+| `approvals.allowEmergencyApply` | `false` | Allows the audited break-glass apply. |
+| `approvals.replayWindow` | `168h` | How far back a replay reads fleet events, `1h..720h`. |
+| `approvals.replayMaxEvents`, `approvals.replayTimeout`, `approvals.replayMaxAge` | `100000`, `60s`, `24h` | Replay event cap (`1..100000`), run timeout and the age a replay may have and still back an approval. |
+| `approvals.draftTTL`, `approvals.maxOpenDrafts` | `168h`, `200` | An open draft expires after the TTL; creating a draft past the cap is refused. Out-of-range values are startup errors even while disabled. |
 
 Running the identity provider itself (Dex clients, connectors, the split-horizon issuer, failure modes and the production checklist) is covered in [Running Dex as Warden's identity provider](identity-dex.md).
 
