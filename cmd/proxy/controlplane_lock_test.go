@@ -21,6 +21,13 @@ import (
 // error.
 func startLockCP(t *testing.T, stateDir string) (addr string, stop func() error) {
 	t.Helper()
+	return startLockCPWithConfig(t, stateDir, minimalConfig)
+}
+
+// startLockCPWithConfig is startLockCP with a config body (minimalConfig plus
+// extra blocks).
+func startLockCPWithConfig(t *testing.T, stateDir, cfg string) (addr string, stop func() error) {
+	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -31,7 +38,7 @@ func startLockCP(t *testing.T, stateDir string) (addr string, stop func() error)
 	var out cpSyncBuffer
 	go func() {
 		errCh <- controlplane.Run(ctx, &out, controlplane.Params{
-			ConfigPath: writeTempConfig(t, minimalConfig), StateDir: stateDir, Listener: ln,
+			ConfigPath: writeTempConfig(t, cfg), StateDir: stateDir, Listener: ln,
 			AnalyticsProvider: "memory",
 			OnReady:           func(a string) { ready <- a },
 		})

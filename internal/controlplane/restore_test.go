@@ -534,3 +534,51 @@ func TestRunRestoreOlderSet(t *testing.T) {
 		t.Errorf("restored schema version = %d, want %d", v, len(all))
 	}
 }
+
+// TestRestorePreRotationBackup (W-P2-KEYS-06): a backup taken before an
+// offline key rotation still restores into the rotated state dir without
+// --new-audit-key. The fingerprint check accepts the manifest's fingerprint
+// because the chain's rotation history declares it, and with the retired key
+// back in place (as the runbook has the operator do) the restored CP appends
+// its cp.restore row.
+func TestRestorePreRotationBackup(t *testing.T) {
+	ctx := context.Background()
+	state, set := restoreSrc(t, true)
+	keyFile := adminaudit.DefaultKeyPath(state)
+	signer, err := audit.LoadOrCreateSigner(keyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := audit.KeyID(signer.PubKey())
+
+	// Rotate the live dir's key after the backup was taken. The offline
+	// backup records no fingerprint itself (that is a scheduled backup's job);
+	// set the one the running control plane would have written.
+	if _, err := adminaudit.RotateKeyFile(ctx, state, "", StateMigrations()); err != nil {
+		t.Fatal(err)
+	}
+	restoreManifestEdit(t, set, false, func(m *BackupManifest) { m.AuditKeyFingerprint = want })
+
+	// The check alone accepts the pre-rotation fingerprint with the new key
+	// in place (the chain declares it) and still refuses an unknown one.
+	if err := checkAuditKeyFingerprint(ctx, state, keyFile, want); err != nil {
+		t.Errorf("fingerprint of the pre-rotation key = %v, want nil", err)
+	}
+	if err := checkAuditKeyFingerprint(ctx, state, keyFile, "00ff00ff00ff00ff"); !errors.Is(err, ErrRestoreKey) {
+		t.Errorf("fingerprint of an unknown key = %v, want ErrRestoreKey", err)
+	}
+
+	// The runbook flow: put the retired key back, restore the pre-rotation
+	// backup, no --new-audit-key.
+	retired, err := os.ReadFile(adminaudit.RetiredKeyPath(keyFile, want))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyFile, retired, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res, err := RunRestore(ctx, RestoreParams{From: set, StateDir: state, Force: true})
+	if err != nil || !res.KeyChecked || !res.Audited {
+		t.Fatalf("restore of a pre-rotation backup = %+v, %v; want checked and audited", res, err)
+	}
+}

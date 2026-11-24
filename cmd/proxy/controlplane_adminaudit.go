@@ -11,32 +11,36 @@ import (
 	"github.com/ethosagent/warden/internal/controlplane"
 )
 
-// Exit codes of the admin-audit commands: a chain that does not verify exits
-// 1; a usage or I/O error (bad flag, missing state dir or database) exits 2.
+// Exit codes of the admin-audit commands: a refused operation (a chain that
+// does not verify, a rotation while the control plane runs) exits 1; a usage
+// or I/O error (bad flag, missing state dir or database) exits 2.
 const (
-	exitAuditVerifyFailed = 1
-	exitAuditUsage        = 2
+	exitAuditFailed = 1
+	exitAuditUsage  = 2
 )
 
 // newAdminAuditCmd builds `warden control-plane admin-audit`: offline
-// commands over the admin audit chain in <state-dir>/warden-cp.db. Both open
-// the database read-only, read public keys from the chain itself, never load
-// the signing key and write no audit row. It stays thin (rule C1): the logic
-// lives in internal/adminaudit.
+// commands over the admin audit chain in <state-dir>/warden-cp.db. verify and
+// export open the database read-only, read public keys from the chain itself,
+// never load the signing key and write no audit row; rotate-key signs with
+// the current key and takes the state-dir lock. They stay thin (rule C1):
+// the logic lives in internal/adminaudit.
 func newAdminAuditCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "admin-audit",
-		Short: "Verify or export the control plane's admin audit chain offline.",
+		Short: "Verify, export or rotate the control plane's admin audit chain offline.",
 		Long: "Offline commands over the signed, hash-chained admin audit log in " +
-			"<state-dir>/warden-cp.db. They open the database read-only, take public keys " +
-			"from the chain (so they work after a key change without any key file) and " +
-			"never load the signing key. Safe to run with the control plane stopped or running.",
+			"<state-dir>/warden-cp.db. verify and export open the database read-only, take " +
+			"public keys from the chain (so they work after a key change without any key " +
+			"file) and never load the signing key: safe to run with the control plane " +
+			"stopped or running. rotate-key changes the signing key and needs the control " +
+			"plane stopped.",
 		Args: usageArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return usageErr(fmt.Errorf("admin-audit needs a subcommand: verify or export"))
+			return usageErr(fmt.Errorf("admin-audit needs a subcommand: verify, export or rotate-key"))
 		},
 	}
-	cmd.AddCommand(newAdminAuditVerifyCmd(), newAdminAuditExportCmd())
+	cmd.AddCommand(newAdminAuditVerifyCmd(), newAdminAuditExportCmd(), newAdminAuditRotateKeyCmd())
 	quiet(cmd)
 	return cmd
 }
@@ -83,7 +87,7 @@ func newAdminAuditVerifyCmd() *cobra.Command {
 				return usageErr(err)
 			}
 			if !res.OK {
-				return &exitError{code: exitAuditVerifyFailed,
+				return &exitError{code: exitAuditFailed,
 					err: fmt.Errorf("admin audit chain verification failed at seq %d (%s)", res.FirstBadSeq, res.Reason)}
 			}
 			return nil
@@ -130,6 +134,48 @@ func newAdminAuditExportCmd() *cobra.Command {
 	cmd.Flags().String("state-dir", "", "control-plane state dir holding warden-cp.db (required)")
 	cmd.Flags().String("out", "", "export file to create (required; must not exist)")
 	cmd.Flags().Bool("include-identity", false, "also write each entry's actor sub and email (personal data; off by default)")
+	quiet(cmd)
+	return cmd
+}
+
+// newAdminAuditRotateKeyCmd builds `... admin-audit rotate-key`: the offline
+// signing-key rotation (W-P2-KEYS-06). It signs the handover with the current
+// key and takes the state-dir lock, so a running control plane is refused
+// with exit 1; every other failure (bad path, chain not on the loaded key)
+// is a usage error with exit 2.
+func newAdminAuditRotateKeyCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "rotate-key",
+		Short: "Rotate the admin audit signing key (the control plane must be stopped).",
+		Long: "Generate a new Ed25519 signing key and append one audit.key_rotated entry " +
+			"signed by the current key handing the admin audit chain to it, then replace " +
+			"--admin-audit-key-file with the new key and keep the old one beside it as " +
+			"<key>.<old_key_id>.key.retired (0600), so backups taken before the rotation " +
+			"still have their key. The HMAC key beside the key file does not change. " +
+			"Prints {oldKeyID, newKeyID, seq, retiredPath, recovered}; exits 1 when the " +
+			"control plane is running (the state-dir lock is held) and 2 on a usage or " +
+			"I/O error. A run interrupted between the entry and the file swap is " +
+			"completed by re-running the command.",
+		Args: usageArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			stateDir, _ := cmd.Flags().GetString("state-dir")
+			keyFile, _ := cmd.Flags().GetString(adminaudit.KeyFileFlag[2:])
+			if stateDir == "" {
+				return usageErr(errors.New("--state-dir is required"))
+			}
+			res, err := adminaudit.RotateKeyFile(cmd.Context(), stateDir, keyFile, controlplane.StateMigrations())
+			if err != nil {
+				if errors.Is(err, adminaudit.ErrControlPlaneRunning) {
+					return &exitError{code: exitAuditFailed, err: err}
+				}
+				return usageErr(err)
+			}
+			return printJSON(cmd, res)
+		},
+	}
+	cmd.Flags().String("state-dir", "", "control-plane state dir holding warden-cp.db (required)")
+	cmd.Flags().String(adminaudit.KeyFileFlag[2:], "",
+		"the signing key to rotate (default <state-dir>/"+adminaudit.DefaultKeyFileName+"; the retired key is kept beside it)")
 	quiet(cmd)
 	return cmd
 }

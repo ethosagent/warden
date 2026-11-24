@@ -183,7 +183,7 @@ func RunRestore(ctx context.Context, p RestoreParams) (RestoreResult, error) {
 	}
 	keyChecked := m.AuditKeyFingerprint != "" && !p.NewAuditKey
 	if keyChecked {
-		if err := checkAuditKeyFingerprint(keyFile, m.AuditKeyFingerprint); err != nil {
+		if err := checkAuditKeyFingerprint(ctx, p.StateDir, keyFile, m.AuditKeyFingerprint); err != nil {
 			return RestoreResult{}, err
 		}
 	}
@@ -448,8 +448,12 @@ func tableExists(ctx context.Context, db *sql.DB, name string) bool {
 }
 
 // checkAuditKeyFingerprint compares the key file's fingerprint (its key_id)
-// with the manifest's. The file is only read: a missing one is never created.
-func checkAuditKeyFingerprint(keyFile, want string) error {
+// with the manifest's. A fingerprint the target state dir's chain declares in
+// its rotation history is also accepted: a backup taken before an
+// audit.key_rotated entry restores without --new-audit-key (the old key lives
+// on as the retired key file beside the key file). The file is only read: a
+// missing one is never created.
+func checkAuditKeyFingerprint(ctx context.Context, stateDir, keyFile, want string) error {
 	if _, err := os.Stat(keyFile); err != nil {
 		return fmt.Errorf("%w: cannot read the audit key file %s; put the key with fingerprint %s there or pass --new-audit-key",
 			ErrRestoreKey, keyFile, want)
@@ -458,11 +462,32 @@ func checkAuditKeyFingerprint(keyFile, want string) error {
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrRestoreKey, err)
 	}
-	if got := audit.KeyID(s.PubKey()); got != want {
-		return fmt.Errorf("%w: the key at %s has fingerprint %s but the backup was taken with %s; restore that key or pass --new-audit-key",
+	if got := audit.KeyID(s.PubKey()); got != want && !chainDeclaresKey(ctx, stateDir, want) {
+		return fmt.Errorf("%w: the key at %s has fingerprint %s but the backup was taken with %s; restore that key (the retired key file beside it, if the state dir rotated) or pass --new-audit-key",
 			ErrRestoreKey, keyFile, got, want)
 	}
 	return nil
+}
+
+// chainDeclaresKey reports whether the admin audit chain in the state dir's
+// current warden-cp.db declares keyID somewhere in its rotation history. A
+// chain that cannot be read declares nothing.
+func chainDeclaresKey(ctx context.Context, stateDir, keyID string) bool {
+	db, err := cpstate.OpenReadOnly(ctx, filepath.Join(stateDir, restoreCPDB), StateMigrations())
+	if err != nil {
+		return false
+	}
+	defer func() { _ = db.Close() }()
+	keys, err := adminaudit.NewStore(db, adminaudit.Options{}).PubKeys(ctx)
+	if err != nil {
+		return false
+	}
+	for _, k := range keys {
+		if k.KeyID == keyID {
+			return true
+		}
+	}
+	return false
 }
 
 // clearConsoleSessions empties sessions and oidc_pending in the staged
