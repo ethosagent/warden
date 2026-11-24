@@ -234,7 +234,7 @@ func (p *workerCAPlan) build(sg crypto.Signer) (*workerca.CA, error) {
 
 func (p *workerCAPlan) options(sg crypto.Signer) workerca.Options {
 	return workerca.Options{
-		Chain: p.chain, Previous: p.previous, Signer: sg, Create: wcasigner.CreateCertificate,
+		Chain: p.chain, Previous: p.previous, Signer: sg, Create: wcasigner.CreateCertificate, Serial: wcasigner.NewSerial,
 		TrustDomain: p.cfg.TrustDomain, Clock: p.clk.Now,
 	}
 }

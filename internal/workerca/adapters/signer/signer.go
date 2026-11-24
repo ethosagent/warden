@@ -41,7 +41,9 @@ func GenerateKey() (*ecdsa.PrivateKey, error) {
 	return k, nil
 }
 
-func serial() (*big.Int, error) {
+// NewSerial returns a random 128-bit serial, never 0 (RFC 5280 wants a
+// positive serial). It satisfies workerca.Options.Serial.
+func NewSerial() (*big.Int, error) {
 	n, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {
 		return nil, err
@@ -55,7 +57,7 @@ func NewRoot(now time.Time) (*x509.Certificate, *ecdsa.PrivateKey, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	sn, err := serial()
+	sn, err := NewSerial()
 	if err != nil {
 		return nil, nil, fmt.Errorf("workerca: serial: %w", err)
 	}
@@ -84,7 +86,7 @@ func NewRoot(now time.Time) (*x509.Certificate, *ecdsa.PrivateKey, error) {
 // MaxPathLen 0, certSign, valid one year, and permitted to issue only URI
 // names in trustDomain.
 func NewIntermediate(root *x509.Certificate, rootKey crypto.Signer, pub crypto.PublicKey, trustDomain string, now time.Time) (*x509.Certificate, error) {
-	sn, err := serial()
+	sn, err := NewSerial()
 	if err != nil {
 		return nil, fmt.Errorf("workerca: serial: %w", err)
 	}

@@ -14,8 +14,8 @@ import (
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
@@ -44,6 +44,10 @@ type Options struct {
 	Signer crypto.Signer
 	// Create performs the certificate signing (the adapter).
 	Create CertCreator
+	// Serial returns a fresh random positive 128-bit serial (the adapter's
+	// NewSerial: randomness is I/O, so the domain does not draw it). Required;
+	// Issue refuses a zero or negative serial.
+	Serial func() (*big.Int, error)
 	// TrustDomain is the SPIFFE trust domain of issued identities.
 	TrustDomain string
 	// Clock returns the current time; nil means time.Now.
@@ -56,6 +60,7 @@ type CA struct {
 	chain  []*x509.Certificate
 	signer crypto.Signer
 	create CertCreator
+	serial func() (*big.Int, error)
 }
 
 // Verifier checks worker client certificates against the pinned intermediates.
@@ -125,8 +130,8 @@ func (v *Verifier) GoString() string { return v.String() }
 // and it must be valid now. It does not compare against the proxy CA: that is
 // CheckSeparateRoot, which needs the --ca-cert the control plane was given.
 func New(o Options) (*CA, error) {
-	if o.Signer == nil || o.Create == nil {
-		return nil, fmt.Errorf("%w: a signer and a certificate creator are required", ErrIntermediate)
+	if o.Signer == nil || o.Create == nil || o.Serial == nil {
+		return nil, fmt.Errorf("%w: a signer, a certificate creator and a serial source are required", ErrIntermediate)
 	}
 	v, err := NewVerifier(o)
 	if err != nil {
@@ -135,7 +140,7 @@ func New(o Options) (*CA, error) {
 	if !publicKeyMatches(o.Chain[0], o.Signer.Public()) {
 		return nil, fmt.Errorf("%w: the signing key does not match the intermediate certificate", ErrIntermediate)
 	}
-	return &CA{Verifier: v, chain: o.Chain, signer: o.Signer, create: o.Create}, nil
+	return &CA{Verifier: v, chain: o.Chain, signer: o.Signer, create: o.Create, serial: o.Serial}, nil
 }
 
 // CheckIntermediate enforces what a worker intermediate must be, at now.
@@ -203,11 +208,13 @@ func (ca *CA) Issue(csr *x509.CertificateRequest, workerID string, ttl time.Dura
 	if err != nil {
 		return nil, err
 	}
-	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	serial, err := ca.serial()
 	if err != nil {
 		return nil, fmt.Errorf("workerca: serial: %w", err)
 	}
-	serial.Add(serial, big.NewInt(1)) // never 0 (RFC 5280 wants a positive serial)
+	if serial == nil || serial.Sign() <= 0 {
+		return nil, errors.New("workerca: serial source returned a non-positive serial") // RFC 5280: positive
+	}
 	now := ca.clock()
 	notAfter := now.Add(ttl)
 	if inter := ca.chain[0].NotAfter; notAfter.After(inter) {

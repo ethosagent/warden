@@ -12,6 +12,7 @@ import (
 	"encoding/asn1"
 	"errors"
 	"fmt"
+	"math/big"
 	"net"
 	"net/url"
 	"strings"
@@ -53,7 +54,7 @@ func newPKI(t *testing.T, now time.Time) pki {
 func (p pki) ca(t *testing.T, now time.Time) *workerca.CA {
 	t.Helper()
 	ca, err := workerca.New(workerca.Options{
-		Chain: []*x509.Certificate{p.inter, p.root}, Signer: p.interKey, Create: signer.CreateCertificate,
+		Chain: []*x509.Certificate{p.inter, p.root}, Signer: p.interKey, Create: signer.CreateCertificate, Serial: signer.NewSerial,
 		TrustDomain: trustDomain, Clock: func() time.Time { return now },
 	})
 	if err != nil {
@@ -203,7 +204,7 @@ func TestIntermediateChecks(t *testing.T) {
 	p := newPKI(t, t0)
 	opts := func() workerca.Options {
 		return workerca.Options{
-			Chain: []*x509.Certificate{p.inter}, Signer: p.interKey, Create: signer.CreateCertificate,
+			Chain: []*x509.Certificate{p.inter}, Signer: p.interKey, Create: signer.CreateCertificate, Serial: signer.NewSerial,
 			TrustDomain: trustDomain, Clock: func() time.Time { return t0 },
 		}
 	}
@@ -241,6 +242,11 @@ func TestIntermediateChecks(t *testing.T) {
 	o.Create = nil
 	if _, err := workerca.New(o); !errors.Is(err, workerca.ErrIntermediate) {
 		t.Errorf("no creator: %v", err)
+	}
+	o = opts()
+	o.Serial = nil
+	if _, err := workerca.New(o); !errors.Is(err, workerca.ErrIntermediate) {
+		t.Errorf("no serial source: %v", err)
 	}
 	// Previous intermediate is pinned for verification.
 	prev := newPKI(t, t0)
@@ -436,7 +442,7 @@ func TestCAPrintableFormsCarryNoKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	ca, err := workerca.New(workerca.Options{
-		Chain: []*x509.Certificate{inter}, Signer: priv, Create: signer.CreateCertificate,
+		Chain: []*x509.Certificate{inter}, Signer: priv, Create: signer.CreateCertificate, Serial: signer.NewSerial,
 		TrustDomain: trustDomain, Clock: func() time.Time { return t0 },
 	})
 	if err != nil {
@@ -450,6 +456,34 @@ func TestCAPrintableFormsCarryNoKey(t *testing.T) {
 		}
 		if !strings.Contains(out, trustDomain) {
 			t.Errorf("%s of a CA lacks the trust domain: %s", f, out)
+		}
+	}
+}
+
+// TestIssueRefusesNonPositiveSerial: a serial source that returns 0 (or
+// nothing) never yields a certificate; the adapter's source is never 0.
+func TestIssueRefusesNonPositiveSerial(t *testing.T) {
+	p := newPKI(t, t0)
+	for name, src := range map[string]func() (*big.Int, error){
+		"zero": func() (*big.Int, error) { return new(big.Int), nil },
+		"nil":  func() (*big.Int, error) { return nil, nil },
+		"err":  func() (*big.Int, error) { return nil, errors.New("no entropy") },
+	} {
+		ca, err := workerca.New(workerca.Options{
+			Chain: p.chain(), Signer: p.interKey, Create: signer.CreateCertificate, Serial: src,
+			TrustDomain: trustDomain, Clock: func() time.Time { return t0 },
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ca.Issue(csrFor(t, p256(t), &x509.CertificateRequest{}), "w", time.Hour); err == nil {
+			t.Errorf("%s serial issued a certificate", name)
+		}
+	}
+	for i := 0; i < 200; i++ {
+		n, err := signer.NewSerial()
+		if err != nil || n.Sign() <= 0 || n.BitLen() > 129 {
+			t.Fatalf("NewSerial = %v, %v", n, err)
 		}
 	}
 }

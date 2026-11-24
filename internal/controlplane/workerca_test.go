@@ -392,7 +392,7 @@ func TestCAInit(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		ca, err := workerca.New(workerca.Options{Chain: chain, Signer: key, Create: wcasigner.CreateCertificate, TrustDomain: wcaTrustDomain})
+		ca, err := workerca.New(workerca.Options{Chain: chain, Signer: key, Create: wcasigner.CreateCertificate, Serial: wcasigner.NewSerial, TrustDomain: wcaTrustDomain})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -456,7 +456,7 @@ func TestCAInit(t *testing.T) {
 		if !isX {
 			t.Fatal("local ca signer exposes no CryptoSigner")
 		}
-		if _, err := workerca.New(workerca.Options{Chain: chain, Signer: x.CryptoSigner(), Create: wcasigner.CreateCertificate, TrustDomain: wcaTrustDomain}); err != nil {
+		if _, err := workerca.New(workerca.Options{Chain: chain, Signer: x.CryptoSigner(), Create: wcasigner.CreateCertificate, Serial: wcasigner.NewSerial, TrustDomain: wcaTrustDomain}); err != nil {
 			t.Fatalf("manager key does not match the chain: %v", err)
 		}
 		_ = ok.Close()
