@@ -188,6 +188,8 @@ type H struct {
 	// wantAdminAudit (WithAdminAudit) boots the control plane with
 	// console.adminAudit.enabled and a state dir.
 	wantAdminAudit bool
+	// wantAPIKeys (WithAPIKeys) enables console.apiKeys on the oidc console.
+	wantAPIKeys bool
 	// wantBreakGlass (WithBreakGlass) enables console.breakGlass with a hash
 	// file under the harness root; breakGlassHash is that file's path.
 	wantBreakGlass bool

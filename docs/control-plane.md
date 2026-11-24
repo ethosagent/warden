@@ -294,6 +294,9 @@ needs a restart. It holds the *name* of the client-secret env var, never the sec
 | `session.idle`, `session.absolute` | `1h`, `12h` | `0 < idle <= absolute <= 168h`. |
 | `adminAudit.enabled` | `false` | Turns on the signed admin audit log; needs `--state-dir`. See [Admin audit log](#admin-audit-log). |
 | `trustedProxies` | none | CIDRs of reverse proxies in front of the control plane. Only a peer inside one may set the client address the admin audit log records, through `X-Forwarded-For`. A bare address or anything that is not a CIDR is a startup error. |
+| `apiKeys.enabled` | `false` | Turns on scoped `wak_` API keys on `/dashboard/api/*`; needs `auth: oidc` and `--state-dir`. See [API keys](#api-keys-consoleapikeys). |
+| `apiKeys.defaultTTL`, `apiKeys.maxTTL` | `2160h`, `8760h` | Default and maximum key lifetime; `maxTTL` is also a hard ceiling and `defaultTTL <= maxTTL`. |
+| `apiKeys.maxPerOwner`, `apiKeys.ratePerKey` | `25`, `10` | Active keys one owner may hold; requests per second one key may make (burst 2x). |
 
 Running the identity provider itself (Dex clients, connectors, the split-horizon issuer, failure modes and the production checklist) is covered in [Running Dex as Warden's identity provider](identity-dex.md).
 
@@ -607,6 +610,55 @@ runs in the background with backoff, so an unreachable IdP never blocks startup 
 one `console_login` line (`result`, `reason`, `sub`, `duration_ms`), never a code, state,
 verifier, nonce or token.
 
+## API keys (`console.apiKeys`)
+
+Scripts and CI can call the admin API with a scoped, expiring `wak_` key instead of
+the shared `WARDEN_CP_TOKEN`. Each key acts for a human owner, holds only the scopes it
+was created with, and is limited to the owner's *current* console role: the role is
+recomputed on every request from the groups saved with the key and the live
+`console.roles`, so moving the owner's group to a lower role takes effect at the next
+restart. With `console.apiKeys.enabled: false` (the default) no table, middleware or
+goroutine exists and a `wak_` bearer is just an unrecognised bearer.
+
+Present a key as `Authorization: Bearer wak_...` on `/dashboard/api/*` only:
+
+- A key in the query string is `400 api_key_in_query`; a key together with the console
+  session cookie is `400 ambiguous_credentials`. A failed key (malformed, unknown,
+  wrong secret, expired, revoked) is the same `401 {"error":"unauthorized"}` with
+  `WWW-Authenticate: Bearer`, and never falls back to a session.
+- A key request with no cookie skips the CSRF header and Origin checks.
+- Each route's scope is the **API key scope** column of the [role matrix](#console-roles-and-the-role-matrix).
+  A route whose scope the key lacks, whose scope is `none`, or whose minimum role the
+  owner no longer holds answers `403 {"error":"insufficient_scope","need":"<scope>"}`.
+  A route with no table row is never reachable by a key, so a new route stays closed
+  until it is classified.
+- Never keyable: `/central/secrets*` (403), settings, integrations, llmproviders and
+  secretstore writes, sessions, setup, backup, `query/generate`, worker-token create and
+  every route classified `none`. `/policy`, `/control/heartbeat` and `/central/ingest`
+  refuse a `wak_` bearer with 401 whatever the worker auth mode, and `/dashboard/` and
+  `/auth/me` answer a key 401.
+- A key may make `ratePerKey` requests per second (burst 2x); over that is `429` with
+  `Retry-After`. A throttled request writes no audit row.
+
+With admin audit on, a key-made change is one row with `auth_method` `apikey`: the
+actor is the key's owner (`actor_id` is the HMAC of the owner's sub, the side row holds
+their sub and email, `actor_role` is the owner's current role) and `details.api_key_id`
+names the key. A valid key that is refused is chained as `denied`. An invalid key writes
+no row: it is counted, and logged as `apikey_auth_rejected` (the parsed key id or
+`malformed`, the reason and `client_ip`, at most once a minute per address). Neither the
+token nor its hash is ever logged or recorded. The in-memory counter
+`warden_cp_apikey_auth_total{outcome}` (`ok`, `malformed`, `unknown`, `bad_secret`,
+`expired`, `revoked`, `insufficient_scope`, `rate_limited`, plus `index_stale`) has no
+per-key label.
+
+Keys live in `<state-dir>/warden-cp.db` (table `api_keys`, created only when the feature
+is on). The control plane authenticates from an in-memory index that it reloads within
+2 seconds of a change another process makes, so a key revoked with the offline CLI is
+refused by the running control plane at the next poll. If the index cannot confirm it is
+current for 30 seconds it refuses every key (fail closed) rather than risk accepting one
+revoked elsewhere. Last-use time and address are kept in memory and written every 60
+seconds and at shutdown.
+
 ## Console roles and the role matrix
 
 The console has two modes, chosen by `console.auth`:
@@ -696,58 +748,58 @@ fails when the two differ.
 <!-- Generated from authzTable() and internal/config/settings_roles.go; do not edit by hand.
      Regenerate: go test ./internal/controlplane -run TestAuthzMatrixDoc -update -->
 
-| Route | Method | Minimum role | Action |
-|---|---|---|---|
-| `/dashboard/` | GET | viewer | `ui.read` |
-| `/dashboard/api/admin-audit` | GET | admin | `adminaudit.read` |
-| `/dashboard/api/admin-audit/pubkey` | GET | viewer | `adminaudit.pubkey` |
-| `/dashboard/api/admin-audit/verify` | POST | admin | `adminaudit.verify` |
-| `/dashboard/api/alerts` | GET | viewer | `alerts.read` |
-| `/dashboard/api/analytics` | GET | viewer | `analytics.read` |
-| `/dashboard/api/audit` | GET | viewer | `audit.read` |
-| `/dashboard/api/audit/verify` | POST | viewer | `audit.verify` |
-| `/dashboard/api/backup` | POST | admin | `backup.run` |
-| `/dashboard/api/blocked-users` | GET | admin | `blocked_users.read` |
-| `/dashboard/api/blocked-users` | POST | admin | `blocked_users.add` |
-| `/dashboard/api/blocked-users/{id}` | DELETE | admin | `blocked_users.remove` |
-| `/dashboard/api/detection` | GET | viewer | `detection.read` |
-| `/dashboard/api/detection` | POST | editor | `detection.write` |
-| `/dashboard/api/detection` | PUT | editor | `detection.write` |
-| `/dashboard/api/endpoints` | GET | viewer | `endpoints.read` |
-| `/dashboard/api/integrations` | GET | viewer | `integrations.read` |
-| `/dashboard/api/integrations` | POST | admin | `integrations.write` |
-| `/dashboard/api/integrations` | DELETE | admin | `integrations.delete` |
-| `/dashboard/api/keys` | GET | admin | `keys.read` |
-| `/dashboard/api/keys/rotate` | POST | admin | `keys.rotate_requested` |
-| `/dashboard/api/llmproviders` | GET | viewer | `llmproviders.read` |
-| `/dashboard/api/llmproviders` | POST | admin | `llmproviders.write` |
-| `/dashboard/api/llmproviders` | PUT | admin | `llmproviders.write` |
-| `/dashboard/api/mcp` | GET | viewer | `mcp.read` |
-| `/dashboard/api/policy` | GET | viewer | `policy.read` |
-| `/dashboard/api/policy` | POST | editor | `policy.write` |
-| `/dashboard/api/policy` | PUT | editor | `policy.write` |
-| `/dashboard/api/policy/versions` | GET | viewer | `policy.versions.read` |
-| `/dashboard/api/policy/versions/{v}` | GET | viewer | `policy.version.read` |
-| `/dashboard/api/policy/versions/{v}/diff` | GET | viewer | `policy.diff` |
-| `/dashboard/api/policy/versions/{v}/rollback` | POST | editor | `policy.rollback` |
-| `/dashboard/api/query` | POST | viewer | `query.run` |
-| `/dashboard/api/query/generate` | POST | editor | `query.generate` |
-| `/dashboard/api/query/schema` | GET | viewer | `query.schema` |
-| `/dashboard/api/secrets` | GET | viewer | `secrets.read` |
-| `/dashboard/api/secretstore` | GET | viewer | `secretstore.read` |
-| `/dashboard/api/secretstore` | POST | admin | `secretstore.write` |
-| `/dashboard/api/secretstore` | DELETE | admin | `secretstore.delete` |
-| `/dashboard/api/sessions` | GET | admin | `sessions.read` |
-| `/dashboard/api/sessions` | DELETE | admin | `sessions.revoke` |
-| `/dashboard/api/settings` | GET | viewer | `settings.read` |
-| `/dashboard/api/settings` | POST | editor | `settings.write` |
-| `/dashboard/api/settings` | PUT | editor | `settings.write` |
-| `/dashboard/api/setup` | GET | viewer | `setup.read` |
-| `/dashboard/api/traffic` | GET | viewer | `traffic.read` |
-| `/dashboard/api/worker-tokens` | GET | viewer | `worker_token.read` |
-| `/dashboard/api/worker-tokens` | POST | admin | `worker_token.create` |
-| `/dashboard/api/worker-tokens/{id}` | DELETE | admin | `worker_token.revoke` |
-| `/dashboard/api/workers` | GET | viewer | `workers.read` |
+| Route | Method | Minimum role | Action | API key scope |
+|---|---|---|---|---|
+| `/dashboard/` | GET | viewer | `ui.read` | `none` |
+| `/dashboard/api/admin-audit` | GET | admin | `adminaudit.read` | `adminaudit:read` |
+| `/dashboard/api/admin-audit/pubkey` | GET | viewer | `adminaudit.pubkey` | `adminaudit:read` |
+| `/dashboard/api/admin-audit/verify` | POST | admin | `adminaudit.verify` | `adminaudit:read` |
+| `/dashboard/api/alerts` | GET | viewer | `alerts.read` | `traffic:read` |
+| `/dashboard/api/analytics` | GET | viewer | `analytics.read` | `traffic:read` |
+| `/dashboard/api/audit` | GET | viewer | `audit.read` | `audit:read` |
+| `/dashboard/api/audit/verify` | POST | viewer | `audit.verify` | `audit:read` |
+| `/dashboard/api/backup` | POST | admin | `backup.run` | `none` |
+| `/dashboard/api/blocked-users` | GET | admin | `blocked_users.read` | `policy:read` |
+| `/dashboard/api/blocked-users` | POST | admin | `blocked_users.add` | `policy:write` |
+| `/dashboard/api/blocked-users/{id}` | DELETE | admin | `blocked_users.remove` | `policy:write` |
+| `/dashboard/api/detection` | GET | viewer | `detection.read` | `policy:read` |
+| `/dashboard/api/detection` | POST | editor | `detection.write` | `policy:write` |
+| `/dashboard/api/detection` | PUT | editor | `detection.write` | `none` |
+| `/dashboard/api/endpoints` | GET | viewer | `endpoints.read` | `traffic:read` |
+| `/dashboard/api/integrations` | GET | viewer | `integrations.read` | `none` |
+| `/dashboard/api/integrations` | POST | admin | `integrations.write` | `none` |
+| `/dashboard/api/integrations` | DELETE | admin | `integrations.delete` | `none` |
+| `/dashboard/api/keys` | GET | admin | `keys.read` | `none` |
+| `/dashboard/api/keys/rotate` | POST | admin | `keys.rotate_requested` | `none` |
+| `/dashboard/api/llmproviders` | GET | viewer | `llmproviders.read` | `none` |
+| `/dashboard/api/llmproviders` | POST | admin | `llmproviders.write` | `none` |
+| `/dashboard/api/llmproviders` | PUT | admin | `llmproviders.write` | `none` |
+| `/dashboard/api/mcp` | GET | viewer | `mcp.read` | `traffic:read` |
+| `/dashboard/api/policy` | GET | viewer | `policy.read` | `policy:read` |
+| `/dashboard/api/policy` | POST | editor | `policy.write` | `policy:write` |
+| `/dashboard/api/policy` | PUT | editor | `policy.write` | `none` |
+| `/dashboard/api/policy/versions` | GET | viewer | `policy.versions.read` | `policy:read` |
+| `/dashboard/api/policy/versions/{v}` | GET | viewer | `policy.version.read` | `policy:read` |
+| `/dashboard/api/policy/versions/{v}/diff` | GET | viewer | `policy.diff` | `policy:read` |
+| `/dashboard/api/policy/versions/{v}/rollback` | POST | editor | `policy.rollback` | `none` |
+| `/dashboard/api/query` | POST | viewer | `query.run` | `traffic:read` |
+| `/dashboard/api/query/generate` | POST | editor | `query.generate` | `none` |
+| `/dashboard/api/query/schema` | GET | viewer | `query.schema` | `traffic:read` |
+| `/dashboard/api/secrets` | GET | viewer | `secrets.read` | `none` |
+| `/dashboard/api/secretstore` | GET | viewer | `secretstore.read` | `none` |
+| `/dashboard/api/secretstore` | POST | admin | `secretstore.write` | `none` |
+| `/dashboard/api/secretstore` | DELETE | admin | `secretstore.delete` | `none` |
+| `/dashboard/api/sessions` | GET | admin | `sessions.read` | `none` |
+| `/dashboard/api/sessions` | DELETE | admin | `sessions.revoke` | `none` |
+| `/dashboard/api/settings` | GET | viewer | `settings.read` | `settings:read` |
+| `/dashboard/api/settings` | POST | editor | `settings.write` | `none` |
+| `/dashboard/api/settings` | PUT | editor | `settings.write` | `none` |
+| `/dashboard/api/setup` | GET | viewer | `setup.read` | `none` |
+| `/dashboard/api/traffic` | GET | viewer | `traffic.read` | `traffic:read` |
+| `/dashboard/api/worker-tokens` | GET | viewer | `worker_token.read` | `none` |
+| `/dashboard/api/worker-tokens` | POST | admin | `worker_token.create` | `none` |
+| `/dashboard/api/worker-tokens/{id}` | DELETE | admin | `worker_token.revoke` | `none` |
+| `/dashboard/api/workers` | GET | viewer | `workers.read` | `traffic:read` |
 
 A method and path with no row is refused (`403`) for every role, `GET` included.
 

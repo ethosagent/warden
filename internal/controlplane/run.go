@@ -22,6 +22,7 @@ import (
 	"github.com/ethosagent/warden/internal/adminaudit"
 	"github.com/ethosagent/warden/internal/alertpipeline"
 	"github.com/ethosagent/warden/internal/analytics"
+	"github.com/ethosagent/warden/internal/apikeys"
 	"github.com/ethosagent/warden/internal/auditlog"
 	"github.com/ethosagent/warden/internal/clock"
 	"github.com/ethosagent/warden/internal/config"
@@ -306,7 +307,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		// --policy-store or console.adminAudit never trips the downgrade guard.
 		// The open is not cancellable: a shutdown signal must not abandon a
 		// migration half way through boot.
-		state, err = cpstate.Open(context.WithoutCancel(ctx), statePath, stateMigrationsFor(keysCfg))
+		state, err = cpstate.Open(context.WithoutCancel(ctx), statePath, stateMigrationsFor(keysCfg, consoleCfg))
 		if err != nil {
 			return fail(fmt.Errorf("control-plane: state db: %w", err))
 		}
@@ -453,6 +454,23 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 			<-tokDone
 		}()
 	}
+	// API keys (console.apiKeys.enabled): the store and the in-memory Index are
+	// built on the state DB, and Index.Run starts here, before the HTTP server
+	// exists and so before the authenticator can serve its first request. It runs
+	// for the control plane's whole life: it picks up revocations other
+	// processes commit (the offline CLI) within one poll and flushes last-use
+	// values, and without it the Index refuses every key once its staleness
+	// ceiling passes. The deferred stop waits for Run (and its final flush)
+	// before the state DB closes. Disabled, nothing here runs.
+	var apiKeyIndex *apikeys.Index
+	if consoleCfg.APIKeys.Enabled {
+		ix, stop, err := startAPIKeys(ctx, state, clk, logger)
+		if err != nil {
+			return fail(err)
+		}
+		apiKeyIndex = ix
+		defer stop()
+	}
 	// Signing keys (keys.enabled): the manager is built here and loads after
 	// the server exists, so a load failure can be published as a Finding.
 	var (
@@ -484,6 +502,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		PolicyPath:   servedPath,
 		Token:        token,
 		WorkerTokens: workerTokens,
+		APIKeyIndex:  apiKeyIndex,
 
 		RequireWorkerTokens: p.RequireWorkerTokens,
 		TLS:                 caCert != "" && caKey != "",
@@ -801,6 +820,11 @@ func resolveConsole(logger *slog.Logger, configPath, servedPath, stateDir string
 			logger.Warn("control-plane: the served config copy holds a different console block; ignoring it and using --config",
 				"served", servedPath, "config", configPath)
 		}
+	}
+	if cc.APIKeys.Enabled && stateDir == "" {
+		// Auth oidc is already proved by the config loader. API keys live in the
+		// state database, so without --state-dir there is nowhere to keep them.
+		return config.ConsoleConfig{}, errors.New("control-plane: console.apiKeys.enabled requires --state-dir (API keys are stored in its database)")
 	}
 	if cc.Auth != config.ConsoleAuthOIDC {
 		return cc, nil
