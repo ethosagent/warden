@@ -160,3 +160,25 @@ func TestScanReplayEvents_DoesNotBlockIngest(t *testing.T) {
 		}
 	}
 }
+
+// A store without ReplayScanner falls back to GetEvents, but delivers what the
+// SQLite scan does: no MCP rows and no URL.
+func TestScanReplayFallbackMatchesScanner(t *testing.T) {
+	s := NewCentralStore(100)
+	now := time.Now()
+	for _, e := range []Event{
+		{Timestamp: now, Domain: "a.example.com", Port: 443, Protocol: "https", Method: "GET", URL: "https://a.example.com/x?y=1", Decision: "allow"},
+		{Timestamp: now, Domain: "mcp.example.com", Protocol: "mcp", Decision: "allow"},
+	} {
+		if err := s.StoreAggregatedEvent(AggregatedEvent{Event: e}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var got []Event
+	if err := ScanReplay(context.Background(), s, now.Add(-time.Hour), 10, func(e Event) error { got = append(got, e); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Domain != "a.example.com" || got[0].URL != "" {
+		t.Errorf("fallback delivered %+v, want one event without a URL", got)
+	}
+}

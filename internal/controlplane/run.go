@@ -525,6 +525,12 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		return fail(err)
 	}
 
+	// Running and waiting replays end as interrupted before the state and fleet
+	// stores close (defers run last-in first-out).
+	if svc := srv.Approvals(); svc != nil && svc.Replayer() != nil {
+		defer svc.Replayer().Close()
+	}
+
 	srv.warnBreakGlassSetup(integrations)
 
 	if p.Findings != nil {

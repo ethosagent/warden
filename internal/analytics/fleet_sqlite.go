@@ -37,24 +37,13 @@ var (
 // the fleet schema. retentionDays <= 0 keeps events forever; maxEvents <= 0 uses
 // the default cap.
 func NewFleetSQLiteStore(path string, retentionDays, maxEvents int) (*FleetSQLiteStore, error) {
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", fleetRWDSN(path))
 	if err != nil {
 		return nil, fmt.Errorf("analytics: open fleet sqlite: %w", err)
 	}
 	// A single connection avoids cross-connection visibility issues for an
 	// in-memory DSN and is sufficient for a single-writer control plane.
 	db.SetMaxOpenConns(1)
-	if !isMemoryDSN(path) {
-		// WAL lets the read-only handle (Query, ScanReplayEvents) read while
-		// ingest commits, and busy_timeout makes a rare collision wait instead
-		// of failing. The journal mode is stored in the file, so it is set once.
-		for _, pragma := range []string{`PRAGMA busy_timeout = 5000`, `PRAGMA journal_mode = WAL`} {
-			if _, err := db.Exec(pragma); err != nil {
-				_ = db.Close()
-				return nil, fmt.Errorf("analytics: fleet sqlite %s: %w", pragma, err)
-			}
-		}
-	}
 
 	if maxEvents <= 0 {
 		maxEvents = defaultMaxEvents
@@ -71,13 +60,6 @@ func NewFleetSQLiteStore(path string, retentionDays, maxEvents int) (*FleetSQLit
 	if err != nil {
 		_ = db.Close()
 		return nil, err
-	}
-	if !shared {
-		if _, err := ro.Exec(`PRAGMA busy_timeout = 5000`); err != nil {
-			_ = ro.Close()
-			_ = db.Close()
-			return nil, fmt.Errorf("analytics: fleet sqlite (ro) busy_timeout: %w", err)
-		}
 	}
 	s.ro = ro
 	s.sharedRO = shared

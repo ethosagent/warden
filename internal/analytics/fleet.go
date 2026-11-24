@@ -103,6 +103,11 @@ func ScanReplay(ctx context.Context, s FleetStore, since time.Time, limit int, f
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		// Match ScanReplayEvents: MCP rows are not replayed and no URL is read.
+		if e.Protocol == "mcp" {
+			continue
+		}
+		e.URL = ""
 		if err := fn(e); err != nil {
 			return err
 		}

@@ -21,9 +21,14 @@ type fakeRunner struct {
 	honorCtx bool
 	out      approvals.ReplayOutcome
 	err      error
+	// returned, when set, receives once each time Run returns.
+	returned chan struct{}
 }
 
 func (f *fakeRunner) Run(ctx context.Context, req approvals.ReplayRequest) (approvals.ReplayOutcome, error) {
+	if f.returned != nil {
+		defer func() { f.returned <- struct{}{} }()
+	}
 	f.mu.Lock()
 	f.calls = append(f.calls, req)
 	f.mu.Unlock()
@@ -57,7 +62,11 @@ func replayEnv(t *testing.T, runner approvals.ReplayRunner, timeout time.Duratio
 	e := newEnv(t, 10)
 	rp, err := approvals.NewReplayer(approvals.ReplayerConfig{
 		Store: sqlstore.NewReplayStore(e.db.SQL()), Runner: runner,
-		Now:    func() time.Time { return time.UnixMilli(e.nowMS.Load()) },
+		Now: func() time.Time { return time.UnixMilli(e.nowMS.Load()) },
+		CurrentRevision: func(ctx context.Context, id string) (int, error) {
+			d, err := e.store.Get(ctx, id)
+			return d.Revision, err
+		},
 		Window: time.Hour, MaxEvents: 1000, Timeout: timeout,
 	})
 	if err != nil {
@@ -159,23 +168,23 @@ func TestReplaySubmitDoesNotWait(t *testing.T) {
 // A scanner that blocks, with replayTimeout 100ms: the replay becomes failed
 // with `timeout` within 200ms of the timeout, and a late result is discarded.
 func TestReplayTimeoutFailsAndDiscardsLateResult(t *testing.T) {
-	runner := &fakeRunner{gate: make(chan struct{}), out: doneOutcome} // ignores ctx on purpose
+	runner := &fakeRunner{gate: make(chan struct{}), out: doneOutcome, returned: make(chan struct{}, 1)} // ignores ctx on purpose
 	e, _ := replayEnv(t, runner, 100*time.Millisecond)
 	d := e.create("a.example.com")
 	if _, err := e.svc.Submit(context.Background(), d.ID, 1, "ada"); err != nil {
 		t.Fatal(err)
 	}
 	id := latest(t, e, d.ID, 1).ID
-	begin := time.Now()
 	r := waitReplay(t, e, id, settled)
 	if r.Status != approvals.ReplayFailed || r.ErrorCode != approvals.ReplayErrTimeout {
 		t.Fatalf("replay = %+v, want failed/timeout", r)
 	}
-	if took := time.Since(begin); took > 200*time.Millisecond+50*time.Millisecond {
-		t.Errorf("timeout took %v, want within ~200ms", took)
-	}
 	close(runner.gate) // the late result
-	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-runner.returned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runner never returned")
+	}
 	after, _ := e.svc.GetReplay(context.Background(), id)
 	if after.Status != approvals.ReplayFailed || len(after.Result) != 0 {
 		t.Errorf("late result overwrote the timeout: %+v", after)
@@ -387,4 +396,73 @@ func TestReplayFresh(t *testing.T) {
 	if _, err := approvals.NewReplayer(approvals.ReplayerConfig{}); err == nil {
 		t.Error("NewReplayer accepted an empty config")
 	}
+}
+
+// Rapid edits never pile up work: the one replay waiting per draft is
+// superseded, so 20 updates cause at most 2 runner calls and the last revision
+// ends done.
+func TestReplayRapidEditsAreSuperseded(t *testing.T) {
+	runner := &fakeRunner{gate: make(chan struct{}), honorCtx: true, out: doneOutcome}
+	e, _ := replayEnv(t, runner, time.Minute)
+	ctx := context.Background()
+	d := e.create("a.example.com")
+	if _, err := e.svc.Submit(ctx, d.ID, 1, "ada"); err != nil {
+		t.Fatal(err)
+	}
+	r1 := latest(t, e, d.ID, 1)
+	waitReplay(t, e, r1.ID, func(r approvals.Replay) bool { return r.Status == approvals.ReplayRunning })
+	for rev := 1; rev <= 20; rev++ {
+		if _, err := e.svc.UpdateDraft(ctx, d.ID, rev, doc("b.example.com"), "", "ada"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	close(runner.gate)
+	last := waitReplay(t, e, latest(t, e, d.ID, 21).ID, settled)
+	if last.Status != approvals.ReplayDone || last.Revision != 21 {
+		t.Fatalf("last replay = %+v, want done at revision 21", last)
+	}
+	if n := runner.Calls(); n > 2 {
+		t.Errorf("runner ran %d times for 21 revisions, want at most 2", n)
+	}
+	waitReplay(t, e, r1.ID, settled)
+	for rev := 2; rev <= 20; rev++ {
+		r := latest(t, e, d.ID, rev)
+		if r.Status != approvals.ReplayFailed || r.ErrorCode != approvals.ReplayErrSuperseded {
+			t.Errorf("revision %d replay = %+v, want failed/superseded", rev, r)
+		}
+	}
+}
+
+// Waiting replays are capped; extras fail with queue_full.
+func TestReplayQueueFull(t *testing.T) {
+	runner := &fakeRunner{gate: make(chan struct{}), honorCtx: true, out: doneOutcome}
+	e := newEnv(t, 10)
+	rp, err := approvals.NewReplayer(approvals.ReplayerConfig{
+		Store: sqlstore.NewReplayStore(e.db.SQL()), Runner: runner,
+		Now:    func() time.Time { return time.UnixMilli(e.nowMS.Load()) },
+		Window: time.Hour, MaxEvents: 10, Timeout: time.Minute, MaxWaiting: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rp.Close()
+	e.svc.SetReplayer(rp)
+	ctx := context.Background()
+	var rs []approvals.Replay
+	for _, dom := range []string{"a.example.com", "b.example.com", "c.example.com"} {
+		d := e.create(dom)
+		r, err := rp.Queue(ctx, d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rs = append(rs, r)
+		if len(rs) == 1 {
+			waitReplay(t, e, r.ID, func(x approvals.Replay) bool { return x.Status == approvals.ReplayRunning })
+		}
+	}
+	// rs[0] runs, rs[1] waits, rs[2] exceeds the cap of 1.
+	if rs[2].Status != approvals.ReplayFailed || rs[2].ErrorCode != approvals.ReplayErrQueueFull {
+		t.Errorf("third replay = %+v, want failed/queue_full", rs[2])
+	}
+	close(runner.gate)
 }

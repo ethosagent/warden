@@ -114,7 +114,12 @@ func (s *Server) initReplays(svc *approvals.Service) error {
 	}
 	rp, err := approvals.NewReplayer(approvals.ReplayerConfig{
 		Store: sqlstore.NewReplayStore(s.cfg.State.SQL()), Runner: runner, Now: s.cfg.Clock.Now,
-		Window: ac.ReplayWindow, MaxEvents: ac.ReplayMaxEvents, Timeout: ac.ReplayTimeout, Logger: s.cfg.Logger,
+		CurrentRevision: func(ctx context.Context, id string) (int, error) {
+			d, err := svc.Store().Get(ctx, id)
+			return d.Revision, err
+		},
+		MaxWaiting: ac.MaxOpenDrafts,
+		Window:     ac.ReplayWindow, MaxEvents: ac.ReplayMaxEvents, Timeout: ac.ReplayTimeout, Logger: s.cfg.Logger,
 	})
 	if err != nil {
 		return fmt.Errorf("control-plane: approvals replayer: %w", err)
