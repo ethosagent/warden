@@ -101,6 +101,11 @@ type Config struct {
 	// wwt_ tokens only (strict mode). Run refuses it together with a shared
 	// token, without a state dir, or without TLS.
 	RequireWorkerTokens bool
+	// RequireWorkerCerts is --require-worker-certs: the worker routes accept
+	// worker certificates only (strict-certs mode). Run refuses it without
+	// workerCA, a state dir or TLS, and together with a shared token or
+	// --require-worker-tokens.
+	RequireWorkerCerts bool
 	// MaxEvents caps the central analytics store (0 = default).
 	MaxEvents int
 	// Store is the fleet analytics backend (persistent SQLite or in-memory). When
@@ -273,6 +278,9 @@ type Server struct {
 	generateLimit *sessionLimiter
 	// enroll is the /control/enroll state; nil when the route is not mounted.
 	enroll *enrollState
+	// certIdx is the revoked worker certificate index behind certificate
+	// authentication; nil without a certificate store.
+	certIdx *certIndex
 	// auth is the console OIDC login (/auth/login, /auth/callback); set only when
 	// sessions are.
 	auth *authService
@@ -351,9 +359,21 @@ func New(cfg Config) *Server {
 	s.enroll = newEnrollState(cfg)
 	// One authenticator for the three worker routes; the policy server was built
 	// with a default one, replaced here by the configured one.
+	// Certificate authentication uses the startup verifier, which exists whenever
+	// workerCA is enabled and so keeps working while the CA key is degraded; it
+	// never goes through the late-installed issuing CA.
+	if cfg.WorkerCAVerifier != nil && cfg.WorkerCerts != nil {
+		s.certIdx = newCertIndex(cfg.WorkerCerts, cfg.Clock, cfg.Logger)
+		if err := s.certIdx.Rebuild(context.Background()); err != nil {
+			// Left unloaded: certificates are refused (revocation unknowable)
+			// until the poll loads it.
+			cfg.Logger.Error("worker certs: the revoked index could not be loaded; worker certificates are refused until it is", "error", err.Error())
+		}
+	}
 	s.workerAuth = NewWorkerAuthenticator(WorkerAuthConfig{
 		Legacy: cfg.Token, Tokens: cfg.WorkerTokens, Registry: registry,
 		Logger: cfg.Logger, Clock: cfg.Clock, TLS: cfg.TLS, Strict: cfg.RequireWorkerTokens,
+		StrictCerts: cfg.RequireWorkerCerts, Verifier: cfg.WorkerCAVerifier, Certs: s.certIdx,
 	})
 	s.policy.auth = s.workerAuth
 	s.workerAuth.LogMode()
@@ -545,6 +565,10 @@ func (s *Server) Handler() http.Handler {
 		// Outside the session, CSRF and admin-audit middleware: the token is the
 		// credential and the handler records its own audit row.
 		mux.HandleFunc(enrollPath, s.handleEnroll)
+		// Authenticated by the worker certificate itself (per request, in the
+		// authenticator), so also outside the session, CSRF and audit middleware;
+		// the handler records its own audit rows.
+		mux.HandleFunc(renewPath, s.handleRenew)
 	}
 	ingest := analytics.NewIngestHandler(s.central, s.workerAuth.IngestAuthorizer())
 	// Central ingest lands in the IngestSink seam: tag worker activity in the

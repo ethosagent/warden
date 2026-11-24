@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -61,6 +62,11 @@ type Params struct {
 	// wwt_ tokens only. It needs StateDir and no legacy token, and TLS unless
 	// AllowInsecureWorkerAuth is set; Run checks all three before listening.
 	RequireWorkerTokens bool
+	// RequireWorkerCerts (--require-worker-certs) is strict-certs worker auth:
+	// worker certificates only. It needs workerCA.enabled, StateDir and TLS (the
+	// insecure escape hatch does not apply), and no legacy token and no
+	// RequireWorkerTokens; Run checks all of them before listening.
+	RequireWorkerCerts bool
 	// AllowInsecureWorkerAuth (--allow-insecure-worker-auth) lets strict mode
 	// run without TLS (development; tokens then travel in clear text).
 	AllowInsecureWorkerAuth bool
@@ -282,7 +288,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		logger.Warn("control-plane: --token-env is deprecated; use --legacy-token-env", "env", p.TokenEnv)
 	}
 	switch {
-	case p.RequireWorkerTokens:
+	case p.RequireWorkerTokens || p.RequireWorkerCerts:
 		// strict: validateWorkerAuth proved there is no shared token
 	case tokenEnv != "":
 		token = strings.TrimSpace(os.Getenv(tokenEnv))
@@ -438,6 +444,9 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	if err != nil {
 		return fail(err)
 	}
+	if p.RequireWorkerCerts && wcaPlan == nil {
+		return fail(errors.New("control-plane: --require-worker-certs requires workerCA.enabled in --config (worker certificates come from the worker CA)"))
+	}
 	// Per-worker tokens live in the state DB: without --state-dir no store is
 	// built and only the shared token (or none) authenticates workers. The loop
 	// polls for tokens other processes revoke and flushes last-used times; it
@@ -527,6 +536,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		WorkerTokens:     workerTokens,
 
 		RequireWorkerTokens: p.RequireWorkerTokens,
+		RequireWorkerCerts:  p.RequireWorkerCerts,
 		TLS:                 caCert != "" && caKey != "",
 		MaxEvents:           maxEvents,
 		Store:               store,
@@ -659,6 +669,14 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		if tErr != nil {
 			return fail(tErr)
 		}
+		if wcaPlan != nil {
+			// Ask for a client certificate and verify nothing in the handshake: the
+			// authenticator judges it per request (uniform 401, expiry seen on
+			// keep-alive connections, pool swappable). The handshake still proves
+			// the client holds the certificate's private key. A client that sends
+			// none (every human route, bearer workers) connects as before.
+			tlsCfg.ClientAuth = tls.RequestClientCert
+		}
 		httpSrv.TLSConfig = tlsCfg
 	} else {
 		logger.Warn("control-plane: serving plain HTTP; workers require HTTPS for the policy pull (provide --ca-cert/--ca-key)")
@@ -677,6 +695,22 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 
 	// Periodic re-read so external edits to the policy file propagate to workers.
 	srv.Start(ctx)
+
+	// Worker certificate revocations: pick up writes by the offline CLI within
+	// the 2 s data_version poll. Run waits for the loop before the state DB
+	// closes.
+	if srv.certIdx != nil {
+		cCtx, cCancel := context.WithCancel(ctx)
+		cDone := make(chan struct{})
+		go func() {
+			defer close(cDone)
+			srv.certIdx.Run(cCtx)
+		}()
+		defer func() {
+			cCancel()
+			<-cDone
+		}()
+	}
 
 	// Block list: pick up writes by the offline CLI (`control-plane block`)
 	// within BlockWatchInterval. Run waits for the loop before the state DB
@@ -819,6 +853,19 @@ func validateWorkerAuth(p Params) (legacyEnv string, err error) {
 			return "", errors.New("control-plane: --token-env and --legacy-token-env name different variables; --token-env is a deprecated alias, set only --legacy-token-env")
 		}
 		legacyEnv = p.TokenEnv
+	}
+	if p.RequireWorkerCerts {
+		switch {
+		case p.RequireWorkerTokens:
+			return "", errors.New("control-plane: --require-worker-certs cannot be combined with --require-worker-tokens: strict-certs accepts certificates only")
+		case legacyEnv != "":
+			return "", errors.New("control-plane: --require-worker-certs cannot be combined with --legacy-token-env (or its alias --token-env): strict-certs retires the shared token")
+		case p.StateDir == "":
+			return "", errors.New("control-plane: --require-worker-certs requires --state-dir (issued certificates and their revocations live in its database)")
+		case p.CACert == "" || p.CAKey == "":
+			return "", errors.New("control-plane: --require-worker-certs requires TLS (--ca-cert and --ca-key): a client certificate needs a TLS handshake")
+		}
+		return "", nil
 	}
 	if !p.RequireWorkerTokens {
 		return legacyEnv, nil

@@ -53,8 +53,13 @@ func (s *Server) dashboardWriteGuard() dashboard.WriteGuard {
 // matching open mode), but an explicit --admin-token-env naming an empty
 // variable fails closed.
 func (s *Server) adminBearerOK(r *http.Request) bool {
-	// A worker token never opens a human route, whatever the configured token.
+	// A worker token never opens a human route, whatever the configured token,
+	// and neither does a worker certificate: a request that presents one and no
+	// bearer of its own is refused even on an open (development) control plane.
 	if hasWorkerTokenBearer(r) {
+		return false
+	}
+	if r.Header.Get("Authorization") == "" && s.workerAuth != nil && s.workerAuth.hasWorkerCert(r) {
 		return false
 	}
 	token := s.dashboardWriteToken()

@@ -42,7 +42,7 @@ type wcaFixture struct {
 	interKey *ecdsa.PrivateKey
 }
 
-func newWCAFixture(t *testing.T, now time.Time) wcaFixture {
+func newWCAFixture(t testing.TB, now time.Time) wcaFixture {
 	t.Helper()
 	f := wcaFixture{dir: t.TempDir()}
 	var err error

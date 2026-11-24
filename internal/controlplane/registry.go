@@ -37,6 +37,10 @@ type workerState struct {
 	authKind  WorkerKind
 	tokenID   string
 	tokenName string
+	// certSerial and certNotAfter describe the certificate of the latest cert
+	// authentication (kind cert only).
+	certSerial   string
+	certNotAfter time.Time
 }
 
 // NewWorkerRegistry returns an empty registry.
@@ -146,6 +150,18 @@ func (r *WorkerRegistry) recordAuth(p WorkerPrincipal) {
 	defer r.mu.Unlock()
 	w := r.touch(p.ProxyID, r.now())
 	w.authKind, w.tokenID, w.tokenName = p.Kind, p.TokenID, p.TokenName
+	w.certSerial, w.certNotAfter = p.CertSerial, p.NotAfter
+}
+
+// certSerial is the serial of the certificate the worker last authenticated
+// with ("" when it used another credential or has not been seen).
+func (r *WorkerRegistry) certSerial(proxyID string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if w, ok := r.workers[proxyID]; ok && w.authKind == KindCert {
+		return w.certSerial
+	}
+	return ""
 }
 
 // touch returns the worker's state, creating it on first contact. Caller holds mu.
@@ -177,6 +193,10 @@ func (r *WorkerRegistry) Views() []dashboard.WorkerView {
 			Online:          now.Sub(w.lastSeen) < staleAfter,
 			AuthKind:        string(w.authKind),
 			TokenName:       w.tokenName,
+		}
+		if w.authKind == KindCert {
+			v.CertSerial = w.certSerial
+			v.CertNotAfter = w.certNotAfter.UTC().Format(time.RFC3339)
 		}
 		if !w.lastPolicyPull.IsZero() {
 			v.LastPolicyPull = w.lastPolicyPull.UTC().Format(time.RFC3339)
