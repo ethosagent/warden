@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -462,6 +463,63 @@ func TestRenewGraceRevokesTheUnusedSuccessor(t *testing.T) {
 	}
 	if rec := c2.do(http.MethodGet, "/policy", d2.cert, "", ""); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("worker survived: %d", rec.Code)
+	}
+}
+
+// countingCerts counts RevokeWorker calls.
+type countingCerts struct {
+	WorkerCertStore
+	revokes atomic.Int64
+}
+
+func (c *countingCerts) RevokeWorker(ctx context.Context, id, actor, reason string) ([]string, error) {
+	c.revokes.Add(1)
+	return c.WorkerCertStore.RevokeWorker(ctx, id, actor, reason)
+}
+
+// TestLineageConflictFiresOnce: after the conflict, the dead superseded key is
+// an ordinary revoked cert; using it again neither revokes the re-enrolled
+// worker nor touches the database.
+func TestLineageConflictFiresOnce(t *testing.T) {
+	var cc *countingCerts
+	c := newCertEnv(t, func(cfg *Config) {
+		cc = &countingCerts{WorkerCertStore: cfg.WorkerCerts}
+		cfg.WorkerCerts = cc
+	})
+	a := c.issue(t, "worker-1")
+	cCert := c.renew(t, a.cert)
+	c.clk.Advance(time.Minute)
+	d := c.renew(t, a.cert) // grace: C is superseded
+	if d.status != http.StatusCreated {
+		t.Fatalf("grace renew = %d", d.status)
+	}
+	if rec := c.do(http.MethodGet, "/policy", cCert.cert, "", ""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("C = %d", rec.Code)
+	}
+	if rec := c.do(http.MethodGet, "/policy", d.cert, "", ""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("D after the conflict = %d, want 401", rec.Code)
+	}
+	revokes := cc.revokes.Load()
+	e := c.issue(t, "worker-1") // re-enrolled with a new admin-issued token
+	for i := 0; i < 3; i++ {
+		if rec := c.do(http.MethodGet, "/policy", cCert.cert, "", ""); rec.Code != http.StatusUnauthorized {
+			t.Fatalf("C again = %d", rec.Code)
+		}
+	}
+	if rec := c.do(http.MethodGet, "/policy", e.cert, "", ""); rec.Code != http.StatusOK {
+		t.Fatalf("re-enrolled E = %d, want 200", rec.Code)
+	}
+	if got := cc.revokes.Load(); got != revokes {
+		t.Errorf("RevokeWorker called %d more times by a dead key", got-revokes)
+	}
+	n := 0
+	for _, in := range c.rec.inputs() {
+		if in.Action == actionLineageConflict {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("worker.cert_lineage_conflict rows = %d, want 1", n)
 	}
 }
 

@@ -848,6 +848,14 @@ func (s *EnrollmentStore) RevokeWorker(ctx context.Context, workerID, actor, rea
 		now.Unix(), actor, reason, workerID, now.Unix()); err != nil {
 		return nil, fmt.Errorf("worker certs: revoke worker: %w", err)
 	}
+	// A certificate revoked as superseded re-fires a lineage conflict on every
+	// use; the worker is revoked now, so its reason becomes the plain one and
+	// later uses of that dead key are ordinary 401s.
+	if _, err := conn.ExecContext(ctx,
+		`UPDATE worker_certs SET revoke_reason = ? WHERE worker_id = ? AND revoked_at IS NOT NULL AND revoke_reason = ?`,
+		reason, workerID, RevokeReasonSuperseded); err != nil {
+		return nil, fmt.Errorf("worker certs: revoke worker: %w", err)
+	}
 	if _, err := conn.ExecContext(ctx,
 		`UPDATE worker_enroll_tokens SET revoked_at = ?, revoked_by = ? WHERE worker_id = ? AND uses = 0 AND revoked_at IS NULL`,
 		now.Unix(), actor, workerID); err != nil {
