@@ -1552,8 +1552,10 @@ commented block in `configs/config.example.yaml` for every key and default.
   least one policy long-poll wait plus worker skew (2 minutes), judged from the key's persisted
   `publish_at`, so a restart does not reset it. Normal rotations never wait (the prepublish
   window covers it); the first key after creation, and an emergency promotion of a barely
-  published key, answer 503 `signer_unavailable` with `Retry-After` for about one long-poll.
-  The key must also be in the JWKS the control plane serves. Once signed bundles land (#96)
+  published key, answer 503 `signer_unavailable` with `Retry-After` for about 2 minutes.
+  Consumers of `/.well-known/jwks.json` must refetch on an unknown kid (rate-limited); Warden
+  workers never use it (they take token keys from signed bundles). The key must also be in the
+  JWKS the control plane serves. Once signed bundles land (#96)
   the kid must also be in the last-served bundle token JWKS.
 - **Agent registry cache.** The control plane has one registry store; it serves reads from a
   snapshot that its own writes invalidate at once and that a 2 s watch refreshes for other

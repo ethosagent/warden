@@ -97,8 +97,17 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	// The server has only a header timeout, so bound the body read here: a
 	// trickled body must not hold a goroutine. Unsupported writers (a test
 	// recorder) just skip it.
-	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(tokenReadTimeout))
+	rc := http.NewResponseController(w)
+	_ = rc.SetReadDeadline(time.Now().Add(tokenReadTimeout))
 	form, status, code, reason := readTokenForm(w, r)
+	if reason == "" {
+		// The body is read: clear the deadline, or net/http's background read
+		// times out later and cancels r.Context() in the middle of the
+		// exchange (a slow IdP fetch), which would answer a misleading 503 and
+		// could burn the assertion's jti. On a refusal it stays, so the server
+		// does not wait on the rest of a stalled body.
+		_ = rc.SetReadDeadline(time.Time{})
+	}
 	if reason != "" {
 		s.tokenDenied(r, code, reason, "")
 		writeOAuthError(w, status, code, reason)

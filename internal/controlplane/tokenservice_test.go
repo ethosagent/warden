@@ -875,3 +875,48 @@ func TestPolicyUnchangedByTokenService(t *testing.T) {
 		}
 	}
 }
+
+// slowExchanger blocks past the body read timeout and reports whether the
+// request context was cancelled meanwhile.
+type slowExchanger struct {
+	delay     time.Duration
+	cancelled bool
+}
+
+func (f *slowExchanger) Exchange(ctx context.Context, _ tokensvc.ExchangeRequest) (*tokensvc.Issued, error) {
+	select {
+	case <-time.After(f.delay):
+	case <-ctx.Done():
+	}
+	f.cancelled = ctx.Err() != nil
+	return okIssued(), nil
+}
+
+// TestTokenEndpointSlowExchangeKeepsContext: an exchange that runs past the
+// body read timeout still completes with its context alive.
+func TestTokenEndpointSlowExchangeKeepsContext(t *testing.T) {
+	old := tokenReadTimeout
+	tokenReadTimeout = 150 * time.Millisecond
+	t.Cleanup(func() { tokenReadTimeout = old })
+	logger, _ := testLogger()
+	cfg := detectionEditorConfig(t)
+	cfg.Logger = logger
+	slow := &slowExchanger{delay: 600 * time.Millisecond}
+	cfg.Tokens, cfg.TokenIssuer = slow, testTokenIssuer
+	srv := New(cfg)
+	t.Cleanup(func() {
+		if srv.integrationsStore != nil {
+			_ = srv.integrationsStore.Close()
+		}
+	})
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+	resp, err := http.Post(ts.URL+tokenPath, "application/x-www-form-urlencoded", strings.NewReader(validForm().Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK || slow.cancelled {
+		t.Fatalf("status %d, context cancelled %v; want 200 with a live context", resp.StatusCode, slow.cancelled)
+	}
+}
