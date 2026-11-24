@@ -317,6 +317,23 @@ func TestDraftApplyReconcile(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Decoys that must never match the lost draft: an approval version for an
+	// id with a longer suffix, one for a longer revision, and a non-approval
+	// version carrying the real prefix.
+	for i, dc := range []struct{ source, msg string }{
+		{SourceApproval, draftVersionPrefix(lost.ID+"0", lost.Revision) + "x"},
+		{SourceApproval, draftVersionPrefix(lost.ID, lost.Revision*10) + "x"},
+		{SourcePolicy, draftVersionPrefix(lost.ID, lost.Revision) + "x"},
+	} {
+		if _, err := srv.cfg.State.SQL().Exec(`INSERT INTO policy_versions (version, parent_version, created_at, author_sub, author_email, author_kind, message, source, doc_json, doc_sha256)
+			VALUES (?, 2, 0, 'x', '', 'oidc', ?, ?, '{}', 'decoy')`, 100+i, dc.msg, dc.source); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if v, found, err := srv.findDraftVersion(ctx, lost.ID, lost.Revision); err != nil || found {
+		t.Fatalf("findDraftVersion matched a decoy: v%d found=%v err=%v", v, found, err)
+	}
+
 	n, err := srv.Approvals().Reconcile(ctx, srv.findDraftVersion)
 	if err != nil || n != 2 {
 		t.Fatalf("Reconcile = %d, %v; want 2", n, err)
@@ -328,8 +345,8 @@ func TestDraftApplyReconcile(t *testing.T) {
 		t.Errorf("unpublished draft = %s %q, want pending with last_error", got.State, got.LastError)
 	}
 	// A restart runs it from New too.
-	if n := versionCount(t, srv); n != 2 {
-		t.Errorf("%d versions, want import + the one published", n)
+	if n := versionCount(t, srv); n != 5 {
+		t.Errorf("%d versions, want import + the one published + 3 decoys", n)
 	}
 }
 
@@ -472,5 +489,42 @@ func TestApprovalsRunTemporaryGuard(t *testing.T) {
 	}
 	if _, serr := os.Stat(filepath.Join(stateDir, "warden-cp.db")); serr == nil {
 		t.Error("the refused start opened the state database")
+	}
+}
+
+// TestDraftApplySameCredential: a draft carrying the head's own non-empty
+// credential fingerprint is not a credential change and applies.
+func TestDraftApplySameCredential(t *testing.T) {
+	srv := newApprovalsServer(t, approvalsConsole(), nil)
+	ctx := context.Background()
+	_, hd, err := srv.headDoc(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fp := redactCredential("served-raw-value")
+	hd.Settings = &config.SettingsWire{Secrets: &config.SecretsSettings{Backend: "aws", Region: "us-east-1", SecretAccessKey: fp}}
+	if _, _, err := srv.versions.Create(ctx, hd, PolicyAuthor{Sub: "ops", Kind: AuthorKindCLI}, "with credential", SourceImport, 1); err != nil {
+		t.Fatal(err)
+	}
+	head := mustHead(t, srv.versions)
+	_, cur, err := srv.headDoc(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := draftDoc(cur)
+	doc.Allowlist = append(slices.Clone(doc.Allowlist), config.AllowlistEntry{Domain: "same-cred.example.com"})
+	d, err := srv.Approvals().CreateDraft(ctx, approvals.TargetPolicy, doc, draftAuthor, approvals.Provenance{}, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d, err = srv.Approvals().Store().Submit(ctx, d.ID, d.Revision, "ada"); err != nil {
+		t.Fatal(err)
+	}
+	applied, err := srv.Approvals().Apply(ctx, d.ID, d.Revision, "bob")
+	if err != nil {
+		t.Fatalf("Apply with an unchanged credential = %v", err)
+	}
+	if applied.State != approvals.StateApplied || applied.AppliedVersion != head+1 {
+		t.Errorf("draft = %s v%d, want applied v%d", applied.State, applied.AppliedVersion, head+1)
 	}
 }

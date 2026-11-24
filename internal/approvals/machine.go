@@ -34,8 +34,9 @@ func States() []State {
 	return []State{StateDraft, StatePending, StateApplying, StateApplied, StateRejected, StateNeedsRebase, StateWithdrawn, StateExpired, StateAppliedUnreviewed}
 }
 
-// Open reports whether the state counts against maxOpenDrafts and is swept by
-// the expiry sweeper.
+// Open reports whether the state is swept by the expiry sweeper. The cap on
+// open drafts also counts applying (it holds a slot), but applying is never
+// swept: only the publish outcome or startup reconcile leaves it.
 func (s State) Open() bool {
 	return s == StateDraft || s == StatePending || s == StateNeedsRebase
 }
