@@ -84,7 +84,9 @@ func (a *Annotation) Snapshot() (string, map[string]string) {
 // Skip tells the middleware the request changed nothing worth recording, so it
 // writes no row for it (a repeated, idempotent revoke). It is a no-op when the
 // request is not audited. A refusal or a failure must not call it: only a
-// request that succeeded without effect may be skipped.
+// request that succeeded without effect may be skipped. The middleware verifies
+// the claim against the route's own target only (its state hash must not
+// move); a handler that also writes another target must not call Skip.
 func Skip(ctx context.Context) {
 	a, ok := ctx.Value(annotationKey{}).(*Annotation)
 	if !ok || a == nil {

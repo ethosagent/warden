@@ -134,11 +134,14 @@ func (s *Server) handleSessionsRevoke(w http.ResponseWriter, r *http.Request, p 
 			s.revokeFailed(w, err)
 			return
 		}
-		// The sessions row hashes sessions only: say in its details that keys went too.
-		adminaudit.Annotate(r.Context(), "", map[string]string{
-			adminaudit.DetailOp:             "revoke_sub_and_api_keys",
-			adminaudit.DetailAPIKeysRevoked: strconv.Itoa(keys),
-		})
+		// The sessions row hashes sessions only: say in its details that keys
+		// went too. With API keys off there is nothing to say.
+		if s.cfg.APIKeyStore != nil {
+			adminaudit.Annotate(r.Context(), "", map[string]string{
+				adminaudit.DetailOp:             "revoke_sub_and_api_keys",
+				adminaudit.DetailAPIKeysRevoked: strconv.Itoa(keys),
+			})
+		}
 		if keys > 0 {
 			s.cfg.Logger.Info("console_session_revoke_api_keys", "by_sub", p.Sub, "target_sub", sub, "api_keys", keys)
 		}
