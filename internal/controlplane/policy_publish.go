@@ -173,6 +173,10 @@ func (s *Server) publishLocked(ctx context.Context, clr approvals.Clearance, aut
 	if !clr.Valid() {
 		return 0, false, approvals.ErrNotCleared
 	}
+	// The clearance is for one doc: refuse any other.
+	if !clr.Covers(draftDoc(RedactCredentials(doc))) {
+		return 0, false, fmt.Errorf("%w: the clearance is for a different doc", approvals.ErrNotCleared)
+	}
 	var restore func()
 	var err error
 	if key := credentialOf(doc); key != "" && !isRedactedCredential(key) {

@@ -1,6 +1,7 @@
 package controlplane
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
@@ -307,16 +308,40 @@ func TestPublishRequiresClearance(t *testing.T) {
 	}
 	e.wantHead(t, 1)
 
-	// A draft clearance needs a draft in applying; a pending one is refused.
+	// A draft clearance is minted only for a stored draft that is applying.
 	d := pendingDraft(t, e.srv, 1, "pending.example.com")
-	if _, err := e.srv.gate.ClearApplied(d); !errors.Is(err, approvals.ErrNotCleared) {
+	if _, err := e.srv.gate.ClearApplied(ctx, d); !errors.Is(err, approvals.ErrNotCleared) {
 		t.Errorf("ClearApplied(pending draft) = %v, want ErrNotCleared", err)
 	}
-	d.State = approvals.StateApplying
-	clr, err := e.srv.gate.ClearApplied(d)
-	if err != nil || clr.Reason() != "applied_draft" {
-		t.Errorf("ClearApplied(applying draft) = %v, %v", clr, err)
+	forged := d
+	forged.ID, forged.State = "cd_forged", approvals.StateApplying
+	if _, err := e.srv.gate.ClearApplied(ctx, forged); !errors.Is(err, approvals.ErrNotCleared) {
+		t.Errorf("ClearApplied(forged draft with no stored row) = %v, want ErrNotCleared", err)
 	}
+	applying, err := e.srv.Approvals().Store().BeginApply(ctx, d.ID, d.Revision, "u2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := applying
+	stale.Revision++
+	if _, err := e.srv.gate.ClearApplied(ctx, stale); !errors.Is(err, approvals.ErrNotCleared) {
+		t.Errorf("ClearApplied(other revision) = %v, want ErrNotCleared", err)
+	}
+	other := applying
+	other.DocSHA256 = strings.Repeat("0", 64)
+	if _, err := e.srv.gate.ClearApplied(ctx, other); !errors.Is(err, approvals.ErrNotCleared) {
+		t.Errorf("ClearApplied(other doc digest) = %v, want ErrNotCleared", err)
+	}
+	clr, err := e.srv.gate.ClearApplied(ctx, applying)
+	if err != nil || clr.Reason() != "applied_draft" {
+		t.Fatalf("ClearApplied(applying draft) = %v, %v", clr, err)
+	}
+	// A clearance for doc A cannot publish doc B.
+	_, _, err = e.srv.publish(ctx, clr, PolicyAuthor{Sub: "u1", Kind: AuthorKindOIDC}, mutate, dashboard.WriteMeta{}, SourcePolicy)
+	if !errors.Is(err, approvals.ErrNotCleared) {
+		t.Errorf("publish of another doc with a draft's clearance = %v, want ErrNotCleared", err)
+	}
+	e.wantHead(t, 1)
 	if (approvals.Clearance{}).Valid() {
 		t.Error("the zero Clearance is valid")
 	}
@@ -361,8 +386,10 @@ var notVersionedWriteRoutes = map[routeKey]string{
 	{http.MethodPost, "/dashboard/api/changes/{id}/replay"}:   "runs a replay",
 	// CP-local blocks and stores that are not part of a policy version
 	// (docs/control-plane.md).
-	{http.MethodPost, "/dashboard/api/secretstore"}:          "served YAML secretStore block, not a version",
-	{http.MethodDelete, "/dashboard/api/secretstore"}:        "served YAML secretStore block, not a version",
+	{http.MethodPost, "/dashboard/api/secretstore"}:          "writes secret values into the managed secret store, not a version",
+	{http.MethodDelete, "/dashboard/api/secretstore"}:        "deletes secret values from the managed secret store, not a version",
+	{http.MethodPost, "/central/secrets"}:                    "writes secret values into the managed secret store, not a version",
+	{http.MethodDelete, "/central/secrets/"}:                 "deletes secret values from the managed secret store, not a version",
 	{http.MethodPost, "/dashboard/api/integrations"}:         "CP-local integrations block",
 	{http.MethodDelete, "/dashboard/api/integrations"}:       "CP-local integrations block",
 	{http.MethodPost, "/dashboard/api/detection"}:            "CP-local detection block",
@@ -382,6 +409,9 @@ var notVersionedWriteRoutes = map[routeKey]string{
 // A new audited write route fails here until it is classified.
 func TestVersionedWritesAreGated(t *testing.T) {
 	table := authzTable()
+	for key, row := range cpRouteTable() {
+		table[key] = row
+	}
 	for key, row := range table {
 		if !row.Audited || key.Method == http.MethodGet {
 			continue
@@ -439,7 +469,7 @@ func TestVersionedWritesAreGated(t *testing.T) {
 // funnel, the offline CLI import and the initial import call the policy store's
 // Create, and only the Gate-aware files call publish. A new caller fails here.
 func TestVersionedStoreCreateCallers(t *testing.T) {
-	createCall := regexp.MustCompile(`\b(versions|st|store)\.Create\(ctx, (doc\b|w\b|d\b)`)
+	createCall := regexp.MustCompile(`\.Create\(ctx, `)
 	publishCall := regexp.MustCompile(`\.(publish|publishLocked)\(ctx, `)
 	wantCreate := map[string]bool{"policy_publish.go": true, "policycli.go": true, "policystore.go": true}
 	wantPublish := map[string]bool{"policy_publish.go": true, "approvals_apply.go": true}
@@ -455,7 +485,7 @@ func TestVersionedStoreCreateCallers(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if createCall.Match(b) && !wantCreate[f] {
+		if createCall.Match(b) && bytes.Contains(b, []byte("PolicyVersionStore")) && !wantCreate[f] {
 			t.Errorf("%s calls the policy store's Create; route the write through Server.writeVersioned", f)
 		}
 		if publishCall.Match(b) && !wantPublish[f] {

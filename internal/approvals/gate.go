@@ -7,6 +7,9 @@ package approvals
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 )
@@ -30,21 +33,46 @@ const (
 	clearDisabled
 	clearNarrowing
 	clearApplied
-	clearSystem
 )
 
 // Clearance is the right to publish one change. Only a Gate mints a non-zero
 // one; the zero value clears nothing.
+//
+// A Clearance is bound to the doc it was minted for: Covers reports whether a
+// doc is that one, and the control plane's publish refuses any other, so a
+// clearance for doc A can never publish doc B.
 type Clearance struct {
 	kind    clearanceKind
 	draftID string
+	docSHA  string
+}
+
+// DocSHA256 is the digest of doc's canonical JSON, the same one a draft stores
+// as doc_sha256 for a redacted doc. The caller redacts first.
+func DocSHA256(doc Doc) (string, error) {
+	b, err := json.Marshal(doc)
+	if err != nil {
+		return "", fmt.Errorf("approvals: encode doc: %w", err)
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// Covers reports whether c was minted for doc (already credential-redacted).
+// The zero Clearance covers nothing.
+func (c Clearance) Covers(doc Doc) bool {
+	if !c.Valid() {
+		return false
+	}
+	sha, err := DocSHA256(doc)
+	return err == nil && sha == c.docSHA
 }
 
 // Valid reports whether c was minted by a Gate.
 func (c Clearance) Valid() bool { return c.kind != clearNone }
 
 // Reason names why c was minted, for logs and tests: "", "disabled",
-// "narrowing", "applied_draft" or "system".
+// "narrowing" or "applied_draft".
 func (c Clearance) Reason() string {
 	switch c.kind {
 	case clearDisabled:
@@ -53,8 +81,6 @@ func (c Clearance) Reason() string {
 		return "narrowing"
 	case clearApplied:
 		return "applied_draft"
-	case clearSystem:
-		return "system"
 	}
 	return ""
 }
@@ -105,42 +131,47 @@ func (g *Gate) Service() *Service {
 // returns ErrApprovalRequired, and the caller holds the change with Hold. A nil
 // Gate, or an enabled one with no Service, returns ErrGateUnavailable.
 func (g *Gate) Clear(_ context.Context, ch Change) (Clearance, error) {
+	sha, err := DocSHA256(ch.Draft)
+	if err != nil {
+		return Clearance{}, err
+	}
 	switch {
 	case g == nil:
 		return Clearance{}, ErrGateUnavailable
 	case !g.enabled:
-		return Clearance{kind: clearDisabled}, nil
+		return Clearance{kind: clearDisabled, docSHA: sha}, nil
 	case g.svc == nil:
 		return Clearance{}, ErrGateUnavailable
 	case ch.Target != TargetPolicy:
 		return Clearance{}, fmt.Errorf("%w: %s", ErrUnsupportedTarget, ch.Target)
 	}
 	if !Classify(ch.BaseDoc, ch.Draft).Widening && g.svc.cfg.AllowSelfApproveNarrowing {
-		return Clearance{kind: clearNarrowing}, nil
+		return Clearance{kind: clearNarrowing, docSHA: sha}, nil
 	}
 	return Clearance{}, ErrApprovalRequired
 }
 
-// ClearApplied mints the Clearance of a draft the Service is applying: only a
-// draft in state applying and classified qualifies, which is what
-// Service.Apply hands an Applier after BeginApply.
-func (g *Gate) ClearApplied(d Draft) (Clearance, error) {
+// ClearApplied mints the Clearance of a draft the Service is applying. It does
+// not trust d: it re-reads the stored draft and requires it to be in state
+// applying, classified, and at the same revision and doc digest as d, so a
+// forged or stale Draft value is refused with ErrNotCleared. The Clearance
+// covers the stored doc only.
+func (g *Gate) ClearApplied(ctx context.Context, d Draft) (Clearance, error) {
 	if g == nil || g.svc == nil {
 		return Clearance{}, ErrGateUnavailable
 	}
-	if d.State != StateApplying {
-		return Clearance{}, fmt.Errorf("%w: draft %s is %s, not applying", ErrNotCleared, d.ID, d.State)
+	stored, err := g.svc.Store().Get(ctx, d.ID)
+	if err != nil {
+		return Clearance{}, fmt.Errorf("%w: draft %s: %v", ErrNotCleared, d.ID, err)
 	}
-	if err := RequireClassified(d); err != nil {
+	if stored.State != StateApplying || stored.Revision != d.Revision || stored.DocSHA256 != d.DocSHA256 || stored.DocSHA256 == "" {
+		return Clearance{}, fmt.Errorf("%w: draft %s is not the applying revision it claims", ErrNotCleared, d.ID)
+	}
+	if err := RequireClassified(stored); err != nil {
 		return Clearance{}, err
 	}
-	return Clearance{kind: clearApplied, draftID: d.ID}, nil
+	return Clearance{kind: clearApplied, draftID: stored.ID, docSHA: stored.DocSHA256}, nil
 }
-
-// ClearSystem mints the Clearance of a system write: the initial import of the
-// served YAML as version 1. It is for the control plane's own startup, never for
-// a request.
-func (g *Gate) ClearSystem() Clearance { return Clearance{kind: clearSystem} }
 
 // Hold stores ch as a draft and submits it, so a second person can approve it.
 // It is what a write path does on ErrApprovalRequired. A draft that cannot be

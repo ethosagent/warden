@@ -94,8 +94,8 @@ func TestApprovalsMeta(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = db.Close() }()
-	if _, found, _ := sqlstore.ReadMeta(ctx, db.SQL()); found {
-		t.Error("ReadMeta found a row before any write")
+	if _, found, err := sqlstore.ReadMeta(ctx, db.SQL()); err == nil || found {
+		t.Errorf("ReadMeta with the table but no row = %v, %v; want an error", found, err)
 	}
 	want := sqlstore.Meta{Enabled: true, DraftTTL: 90 * time.Minute, MaxOpenDrafts: 7}
 	if err := sqlstore.WriteMeta(ctx, db.SQL(), want, now); err != nil {
@@ -109,5 +109,9 @@ func TestApprovalsMeta(t *testing.T) {
 	}
 	if got, found, _ := sqlstore.ReadMeta(ctx, db.SQL()); !found || got.Enabled {
 		t.Errorf("after disable ReadMeta = %+v, %v", got, found)
+	}
+	// The table refuses an enabled value other than 0 or 1.
+	if _, err := db.SQL().ExecContext(ctx, "UPDATE approvals_meta SET enabled = 2 WHERE id = 1"); err == nil {
+		t.Error("approvals_meta accepted enabled = 2")
 	}
 }

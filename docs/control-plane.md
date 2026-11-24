@@ -1042,7 +1042,25 @@ save time and the draft's required role is checked again at approve time.
 
 | Gated | Not gated |
 |---|---|
-| `POST`/`PUT /dashboard/api/policy`, `POST`/`PUT /dashboard/api/settings`, `POST`/`PUT /dashboard/api/llmproviders`, `POST /dashboard/api/policy/versions/{v}/rollback` (the draft's doc is version `v`, source `rollback`), and `warden policy import` | integrations, detection, the secret store, the block list (until W-P2-APPR-08), worker tokens, signing keys, sessions, backups |
+| `POST`/`PUT /dashboard/api/policy`, `POST`/`PUT /dashboard/api/settings`, `POST`/`PUT /dashboard/api/llmproviders`, `POST /dashboard/api/policy/versions/{v}/rollback` (the draft's doc is version `v`, source `rollback`), and `warden policy import` | integrations, detection, the secret store (`/dashboard/api/secretstore`, `/central/secrets`; they write secret values, not a version), the block list, worker tokens, signing keys, sessions, backups, and the offline commands below |
+
+Not gated, stated plainly for production use:
+
+- The offline `warden control-plane block remove` removes a block entry with one
+  admin's host access and no second person. Holding block-list removals for approval
+  is W-P2-APPR-08; until it lands, treat unblocking as a single-admin action.
+- The offline `warden control-plane restore` can move the policy head back without
+  approval.
+- The first-start import of the served YAML as version 1 is not gated: it is proven
+  safe by checking that the served `/policy` ETag is unchanged, and it runs only on an
+  empty store.
+- `/central/secrets` and `/dashboard/api/secretstore` write secret values into the
+  managed secret store, not into a policy version.
+
+A draft created by `warden policy import` is authored `cli:<os user>` and carries no
+issuer. Anyone with host access to the state database already has full trust over the
+control plane, so this is a limitation of what the offline CLI can prove, not a bypass
+of the gate.
 
 A settings save that carries a new raw `secretAccessKey` is refused (`422`/`400`
 naming the credential) instead of becoming a draft: a draft holds only the

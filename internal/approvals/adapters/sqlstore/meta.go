@@ -8,6 +8,7 @@ package sqlstore
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -58,8 +59,10 @@ ON CONFLICT (id) DO UPDATE SET enabled = excluded.enabled, draft_ttl_ms = exclud
 	return nil
 }
 
-// ReadMeta returns the recorded Meta. found is false when no control plane ever
-// enabled approvals on this database (no table, or no row).
+// ReadMeta returns the recorded Meta. found is false only when no control
+// plane ever enabled approvals on this database (no table). It fails closed
+// otherwise: a table with no row, or an enabled value other than 0 or 1, is an
+// error, so the offline CLI refuses to import directly rather than guess.
 func ReadMeta(ctx context.Context, db *sql.DB) (m Meta, found bool, err error) {
 	ok, err := metaExists(ctx, db)
 	if err != nil || !ok {
@@ -67,11 +70,14 @@ func ReadMeta(ctx context.Context, db *sql.DB) (m Meta, found bool, err error) {
 	}
 	var enabled, ttlMS int64
 	err = db.QueryRowContext(ctx, "SELECT enabled, draft_ttl_ms, max_open_drafts FROM approvals_meta WHERE id = 1").Scan(&enabled, &ttlMS, &m.MaxOpenDrafts)
-	if err == sql.ErrNoRows {
-		return Meta{}, false, nil
+	if errors.Is(err, sql.ErrNoRows) {
+		return Meta{}, false, fmt.Errorf("approvals: approvals_meta exists but has no row; start the control plane once, or check the state database")
 	}
 	if err != nil {
 		return Meta{}, false, fmt.Errorf("approvals: read approvals_meta: %w", err)
+	}
+	if enabled != 0 && enabled != 1 {
+		return Meta{}, false, fmt.Errorf("approvals: approvals_meta.enabled is %d, want 0 or 1", enabled)
 	}
 	m.Enabled = enabled == 1
 	m.DraftTTL = time.Duration(ttlMS) * time.Millisecond

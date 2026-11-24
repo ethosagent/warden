@@ -89,7 +89,7 @@ func (a policyApplier) Apply(ctx context.Context, d approvals.Draft) (int64, err
 	}
 	// The Gate mints the clearance of a draft the Service is applying (state
 	// applying, classified); nothing else reaches publish through this path.
-	clr, err := a.s.gate.ClearApplied(d)
+	clr, err := a.s.gate.ClearApplied(ctx, d)
 	if err != nil {
 		return 0, err
 	}

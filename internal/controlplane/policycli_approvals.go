@@ -76,8 +76,13 @@ func (o *OfflinePolicyStore) holdImport(ctx context.Context, m sqlstore.Meta, do
 		}
 		return PolicyImportResult{}, err
 	}
-	if draft, err = svc.Submit(ctx, draft.ID, draft.Revision, author.Sub); err != nil {
-		return PolicyImportResult{}, fmt.Errorf("policy import: draft %s was created but could not be submitted: %w", draft.ID, err)
+	created := draft
+	if draft, err = svc.Submit(ctx, created.ID, created.Revision, author.Sub); err != nil {
+		// Leave nothing half-made: withdraw the draft, as Gate.Hold does.
+		if _, werr := svc.Store().Withdraw(ctx, created.ID, created.Revision, author.Sub); werr != nil {
+			return PolicyImportResult{}, fmt.Errorf("policy import: draft %s could not be submitted (%v) nor withdrawn: %w", created.ID, err, werr)
+		}
+		return PolicyImportResult{}, fmt.Errorf("policy import: could not submit the draft (it was withdrawn): %w", err)
 	}
 	res := PolicyImportResult{Parent: head, Held: true, DraftID: draft.ID}
 	if rec == nil {

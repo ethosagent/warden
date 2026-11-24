@@ -122,7 +122,7 @@ CREATE INDEX draft_replays_draft ON draft_replays (draft_id, revision);`,
 		Optional: true,
 		SQL: `CREATE TABLE approvals_meta (
   id              INTEGER PRIMARY KEY CHECK (id = 1),
-  enabled         INTEGER NOT NULL,
+  enabled         INTEGER NOT NULL CHECK (enabled IN (0, 1)),
   draft_ttl_ms    INTEGER NOT NULL,
   max_open_drafts INTEGER NOT NULL,
   updated_at      INTEGER NOT NULL
