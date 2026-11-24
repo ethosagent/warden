@@ -446,6 +446,39 @@ func TestPolicyVersionExcludesOverlays(t *testing.T) {
 	}
 }
 
+// TestPolicyVersionExcludesRegisteredAgents: a doc reaching Create with the
+// agent registry overlay already applied must not store it, or a rollback to
+// that version would carry stale agent status (W-P2-AREG-04).
+func TestPolicyVersionExcludesRegisteredAgents(t *testing.T) {
+	db := openPolicyState(t)
+	st := newSQLitePolicyStore(db.SQL(), time.Now, slog.New(slog.DiscardHandler))
+	ps := newPolicyServer(writePolicyFile(t, "api.openai.com"), "", slog.New(slog.DiscardHandler), NewWorkerRegistry())
+	ps.versions = st
+	st.etagOf = ps.servedETag
+	st.onCreated = ps.Refresh
+
+	doc, err := ps.loadBase(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc = docWithAllow(doc, "v1.example.com")
+	doc.RegisteredAgents = []config.RegisteredAgent{{
+		ID:     "stale-agent",
+		Status: config.RegisteredAgentDisabled,
+		JKT:    []string{strings.Repeat("A", 43)},
+	}}
+	if _, _, err := st.Create(context.Background(), doc, testAuthor, "", SourcePolicy, 0); err != nil {
+		t.Fatal(err)
+	}
+	var docJSON string
+	if err := db.SQL().QueryRow("SELECT doc_json FROM policy_versions WHERE version = 1").Scan(&docJSON); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(docJSON, "registeredAgents") || strings.Contains(docJSON, "stale-agent") {
+		t.Errorf("doc_json holds agent registry data: %s", docJSON)
+	}
+}
+
 // TestPolicyServerVersionedLongPoll: Create with changed content wakes a
 // long-poll waiter at once; Create with identical content writes nothing and
 // leaves the ETag alone.

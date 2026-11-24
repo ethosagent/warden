@@ -164,7 +164,7 @@ func (f *flakyAgents) List(ctx context.Context) ([]agentreg.Agent, error) {
 }
 
 // A registry read error keeps the last-known-good wire and ETag, and logs one
-// agentreg_load_failed line per episode with no error text from the store.
+// agentreg_load_failed line per episode that carries no entry values.
 func TestPolicyWireRegisteredAgents_StoreErrorKeepsETag(t *testing.T) {
 	s := blockServer(t, nil, nil)
 	registerAgent(t, s.agents, "claude-code")
