@@ -24,9 +24,10 @@ import (
 // the only thing that can surface the write is the reload tick re-checking the
 // registry. In-process only (CP state dir).
 
-// policyReloadBudget is one policyReloadInterval (3s) plus a second for the
-// request and CI jitter.
-const policyReloadBudget = 4 * time.Second
+// The reload tick is a real 3s ticker, so the waits use the standard
+// h.Eventually budget. The "within one reload interval" bound is proven
+// deterministically by controlplane's
+// TestPolicyWireRegisteredAgents_ReloadSeesOtherHandleWithoutWatch.
 
 func agentRegistryPolicyWireOpts() []harness.Option {
 	return []harness.Option{harness.WithAdminAudit()}
@@ -74,7 +75,7 @@ func agentRegistryPolicyWire(t *testing.T, h *harness.H) {
 	if _, err := controlplane.RunAgentSetStatus(ctx, stateDir, "", "claude-code", agentreg.StatusDisabled, 1, nil); err != nil {
 		t.Fatalf("disable: %v", err)
 	}
-	disabled := awaitAgentWithin(t, h, policyReloadBudget, "a CLI disable reaches /policy within one reload tick", func(a config.RegisteredAgent) bool {
+	disabled := awaitAgent(t, h, "a CLI disable reaches /policy on a reload tick", func(a config.RegisteredAgent) bool {
 		return a.Status == config.RegisteredAgentDisabled
 	})
 	t.Logf("CLI disable served after %s", time.Since(start))
@@ -86,7 +87,7 @@ func agentRegistryPolicyWire(t *testing.T, h *harness.H) {
 	if _, err := controlplane.RunAgentSetStatus(ctx, stateDir, "", "claude-code", agentreg.StatusActive, 2, nil); err != nil {
 		t.Fatalf("enable: %v", err)
 	}
-	enabled := awaitAgentWithin(t, h, policyReloadBudget, "a CLI enable reaches /policy", func(a config.RegisteredAgent) bool {
+	enabled := awaitAgent(t, h, "a CLI enable reaches /policy", func(a config.RegisteredAgent) bool {
 		return a.Status == config.RegisteredAgentActive
 	})
 	if enabled.etag == disabled.etag {
@@ -111,13 +112,8 @@ func fetchPolicy(t *testing.T, h *harness.H) (string, string) {
 
 func awaitAgent(t *testing.T, h *harness.H, desc string, ok func(config.RegisteredAgent) bool) policySeen {
 	t.Helper()
-	return awaitAgentWithin(t, h, 10*time.Second, desc, ok)
-}
-
-func awaitAgentWithin(t *testing.T, h *harness.H, d time.Duration, desc string, ok func(config.RegisteredAgent) bool) policySeen {
-	t.Helper()
 	var seen policySeen
-	h.EventuallyWithin(d, desc, func() bool {
+	h.Eventually(desc, func() bool {
 		body, etag := fetchPolicy(t, h)
 		var p struct {
 			RegisteredAgents []config.RegisteredAgent `json:"registeredAgents"`

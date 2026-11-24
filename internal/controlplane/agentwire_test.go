@@ -236,3 +236,11 @@ func TestPolicyWireRegisteredAgents_VersionedRollbackAndPublishLog(t *testing.T)
 		t.Errorf("registry data in a stored version: %s", b)
 	}
 }
+
+// config cannot import agentreg, so its jkt cap is a copy of agentreg.MaxKeys;
+// drift would make every Refresh fail validation.
+func TestPolicyWireRegisteredAgents_JKTCapMatchesMaxKeys(t *testing.T) {
+	if agentreg.MaxKeys != config.MaxRegisteredAgentJKT {
+		t.Fatalf("agentreg.MaxKeys = %d, config.MaxRegisteredAgentJKT = %d", agentreg.MaxKeys, config.MaxRegisteredAgentJKT)
+	}
+}

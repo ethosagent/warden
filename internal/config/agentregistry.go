@@ -31,9 +31,10 @@ func NormalizeGroups(in []string) ([]string, error) {
 
 // Limits on a RegisteredAgent's key thumbprints: an agent has at most two keys
 // (two during a rotation) and an RFC 7638 SHA-256 thumbprint is 43 base64url
-// characters.
+// characters. MaxRegisteredAgentJKT must equal agentreg.MaxKeys; config cannot
+// import agentreg, so a controlplane test pins the two together.
 const (
-	maxRegisteredAgentJKT = 2
+	MaxRegisteredAgentJKT = 2
 	registeredAgentJKTLen = 43
 )
 
@@ -79,8 +80,8 @@ func ValidateRegisteredAgents(list []RegisteredAgent) error {
 		if a.Status != RegisteredAgentActive && a.Status != RegisteredAgentDisabled {
 			return fmt.Errorf("config: registeredAgents[%d]: status must be active or disabled", i)
 		}
-		if len(a.JKT) == 0 || len(a.JKT) > maxRegisteredAgentJKT {
-			return fmt.Errorf("config: registeredAgents[%d]: jkt must hold 1 to %d thumbprints", i, maxRegisteredAgentJKT)
+		if len(a.JKT) == 0 || len(a.JKT) > MaxRegisteredAgentJKT {
+			return fmt.Errorf("config: registeredAgents[%d]: jkt must hold 1 to %d thumbprints", i, MaxRegisteredAgentJKT)
 		}
 		for j, t := range a.JKT {
 			if !validThumbprint(t) {

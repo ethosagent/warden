@@ -245,9 +245,10 @@ func (st *sqlitePolicyStore) Create(ctx context.Context, doc policyWire, author 
 	}
 	msg = sanitizeMessage(msg)
 	red := RedactCredentials(doc)
-	// The block list is served by the blocked_users overlay, never versioned: a
-	// rollback must not restore (or drop) it.
+	// The block list and the agent registry are served by overlays, never
+	// versioned: a rollback must not restore (or drop) them.
 	red.BlockedUsers = nil
+	red.RegisteredAgents = nil
 	docJSON, err := json.Marshal(red)
 	if err != nil {
 		return 0, false, fmt.Errorf("policy store: encode doc: %w", err)
