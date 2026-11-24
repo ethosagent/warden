@@ -116,11 +116,13 @@ func backupScheduled(t *testing.T, h *harness.H) {
 	}
 
 	// Past the interval the next set is written; retention keeps the newest two.
+	// RunOnce renames a new set into place before it prunes, so a poll can see
+	// one set over the limit; more than that means pruning is not keeping up.
 	seen := map[string]bool{first: true}
 	h.Eventually("two more sets past the interval", func() bool {
 		sets := completeSets(t, dir)
-		if len(sets) > harness.BackupKeep {
-			t.Fatalf("%d sets kept, want at most %d: %v", len(sets), harness.BackupKeep, sets)
+		if len(sets) > harness.BackupKeep+1 {
+			t.Fatalf("%d sets kept, want at most %d (+1 in flight): %v", len(sets), harness.BackupKeep, sets)
 		}
 		for _, s := range sets {
 			seen[s] = true
@@ -131,9 +133,10 @@ func backupScheduled(t *testing.T, h *harness.H) {
 		h.Clock().Advance(harness.BackupInterval + time.Hour)
 		return false
 	})
-	if sets := completeSets(t, dir); len(sets) != harness.BackupKeep || slices.Contains(sets, first) {
-		t.Errorf("sets after pruning = %v, want the newest %d without %s", sets, harness.BackupKeep, first)
-	}
+	h.Eventually("pruning to the newest sets", func() bool {
+		sets := completeSets(t, dir)
+		return len(sets) == harness.BackupKeep && !slices.Contains(sets, first)
+	})
 
 	logs := h.Logs()
 	if !strings.Contains(logs, `"msg":"cp_backup"`) || !strings.Contains(logs, `"outcome":"ok"`) {
