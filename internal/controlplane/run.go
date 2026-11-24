@@ -91,6 +91,22 @@ type Params struct {
 	// requires StateDir. Any other value is a startup error.
 	PolicyStore string
 
+	// Bundles is --bundles: "off" (or "", the default) leaves /policy exactly
+	// as it was; "offer" serves the signed bundle envelope to workers that ask
+	// for it with the bundle Accept header and the legacy policy to everyone
+	// else; "require" answers a request without that header with 406. Offer and
+	// require need StateDir, PolicyStore versioned and keys.enabled; Run
+	// refuses to start without them.
+	Bundles string
+	// BundleMaxAge is --bundle-max-age: how long a signed bundle is valid, and
+	// four times the re-sign interval (0 = DefaultBundleMaxAge, minimum
+	// MinBundleMaxAge).
+	BundleMaxAge time.Duration
+	// BundleSeqFloor is --bundle-seq-floor: with bundles on, a restore row is
+	// appended to the publish log at this seq at startup when the log is below
+	// it (0 = never).
+	BundleSeqFloor int64
+
 	// RequireConsoleAuth refuses to start when console.auth is none, so an
 	// operator can make an open console a startup error
 	// (--require-console-auth).
@@ -266,6 +282,10 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// The keys block, like console:, comes from --config only. Disabled (the
 	// default) means nothing below creates a table, file, goroutine or route.
 	keysCfg, err := resolveKeys(configPath, stateDir)
+	if err != nil {
+		return fail(err)
+	}
+	bundlesCfg, err := resolveBundles(p, stateDir, policyStore, keysCfg)
 	if err != nil {
 		return fail(err)
 	}
@@ -480,6 +500,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		State:        state,
 		PolicyStore:  policyStore,
 		Keys:         keyMgr,
+		Bundles:      bundlesCfg,
 		AdminAudit:   adminAudit,
 		PolicyPath:   servedPath,
 		Token:        token,
@@ -567,6 +588,17 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 			}
 			return fail(err)
 		}
+	}
+	// Signed bundles: the keys are loaded and the first head exists, so the
+	// publisher can sign. A mode it cannot honour stops the control plane.
+	if bundlesCfg.On() {
+		if err := srv.policy.startBundles(context.WithoutCancel(ctx)); err != nil {
+			if srv.integrationsStore != nil {
+				_ = srv.integrationsStore.Close() // Start never ran, so nothing else closes it
+			}
+			return fail(err)
+		}
+		logger.Info("control plane bundles mode", "mode", bundlesCfg.Mode)
 	}
 
 	httpSrv := &http.Server{

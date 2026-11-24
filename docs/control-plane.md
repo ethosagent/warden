@@ -1516,6 +1516,45 @@ secrets with no row; deleting a key deletes its secret at once.
   }
   ```
 
+## Signed bundles (`--bundles`)
+
+`warden control-plane --bundles=off|offer|require` (default `off`) lets the
+control plane sign what it serves on `GET /policy` with its `purpose=bundle`
+signing key (see Signing keys above). `off` keeps `/policy` byte-identical: same
+body, same ETag, no signing, no extra work. This section is the serving side;
+a worker that pins the key and verifies the envelope is a later ticket, so
+today the workers keep pulling the unsigned policy.
+
+- **Prerequisites.** `offer` and `require` need `--state-dir`,
+  `--policy-store=versioned` and `keys.enabled: true`; startup fails with an
+  error naming each missing piece, and also when no bundle key can be loaded.
+- **Negotiation.** A request with `Accept: application/vnd.warden.bundle.v1+json`
+  gets the envelope with that `Content-Type`. Other requests get the legacy
+  policy in `offer` and `406 {"error":"signed_bundle_required"}` in `require`.
+  Each format answers `If-None-Match` and the `?wait=` long poll against its own
+  ETag. The legacy ETag is unchanged; the envelope ETag is a 16-hex hash of the
+  envelope bytes, so a re-sign changes it.
+- **Sequence number.** `seq` is the newest `policy_publish_log` row, so a policy
+  save, a rollback, a block-list change and a credential change each move it
+  forward. A change to the token JWKS (a rotation or an emergency revocation)
+  appends a row with reason `token_jwks` first, then signs. A bundle key change
+  appends nothing: the same content is re-signed under the same seq, which a
+  verifier treats as a refresh. The signed content for a seq never changes.
+- **Credential.** `settings.secrets.accessKeyId` and `secretAccessKey` are not in
+  the signed payload. They travel in the envelope's unsigned `credentials`
+  sidecar and the payload carries their SHA-256. Nothing logs either.
+- **Freshness.** `--bundle-max-age` (default 24h, minimum 1h) sets `expiresAt`;
+  the control plane re-signs the current content every max-age/4 with the same
+  seq. `--bundle-seq-floor N` appends one `restore` row at seq N at startup when
+  the publish log is below it: set it above the highest seq any worker reports
+  after restoring a backup, or pinned workers reject new bundles as rollbacks.
+- **Failure.** If signing fails, the control plane keeps serving the last
+  envelope until it expires, logs `bundle sign failed` with the seq and kid, and
+  `/healthz` answers `200 degraded: bundle signing failed`. With no envelope,
+  a request for one gets `503 {"error":"signed_bundle_unavailable"}`. An
+  envelope over 4 MiB is not published and is logged at error. It never serves
+  unsigned data to a request that asked for the envelope.
+
 ## Block list: offline CLI
 
 The user block list lives in `<state-dir>/warden-cp.db`, outside policy

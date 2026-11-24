@@ -57,6 +57,13 @@ type Config struct {
 	// store). Nil unless keys.enabled, in which case no key code runs, no table,
 	// key file or goroutine exists, and the control plane behaves as before.
 	Keys *keys.Manager
+	// Bundles is the signed-bundle mode (--bundles). The zero value is off:
+	// no publisher is built and /policy is unchanged. Run validates the
+	// prerequisites; New builds the publisher only when they are present, and
+	// Run then starts it (policyServer.startBundles) once the keys are loaded.
+	Bundles BundlesConfig
+	// bundleKeys replaces Keys' KeySet as the publisher's key source (tests).
+	bundleKeys bundleKeys
 	// AdminAudit is the signed admin audit chain on State. Nil means admin
 	// audit is disabled (console.adminAudit.enabled false, the default).
 	AdminAudit *adminaudit.Store
@@ -326,11 +333,13 @@ func New(cfg Config) *Server {
 		Logger: cfg.Logger, Clock: cfg.Clock, TLS: cfg.TLS, Strict: cfg.RequireWorkerTokens,
 	})
 	s.policy.auth = s.workerAuth
+	s.policy.now = cfg.Clock.Now
 	s.workerAuth.LogMode()
 	// Register serve-time wire overlays (s.policy.addOverlay) here, before the
 	// initial load, so they apply to the first served wire. Versioned mode
 	// registers credential; W-P1-BLOCK-03 adds blocked_users.
 	s.initPolicyStore()
+	s.initBundles()
 	s.initBlockStore()
 	s.policy.Refresh() // initial load so /policy and the dashboard have policy immediately
 	s.initSessions()
@@ -427,6 +436,10 @@ func (s *Server) Start(ctx context.Context) {
 		}()
 	}
 
+	if s.policy.bundlesOn() {
+		go s.policy.resignLoop(ctx, s.cfg.Clock)
+	}
+
 	go func() {
 		t := time.NewTicker(policyReloadInterval)
 		defer t.Stop()
@@ -494,6 +507,13 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
+		if s.policy.bundleDegraded() {
+			// Still alive and serving the last signed bundle, but the newest
+			// content could not be signed. 200, so a liveness probe does not
+			// kill a control plane a restart would not fix.
+			_, _ = w.Write([]byte("degraded: bundle signing failed\n"))
+			return
+		}
 		_, _ = w.Write([]byte("ok\n"))
 	})
 	// Readiness always; the public token JWKS only with keys.enabled (else 404).

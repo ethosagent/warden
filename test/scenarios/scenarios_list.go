@@ -305,6 +305,14 @@ var All = slices.Concat(
 		// key in place, old retired), and the control plane starts on the new
 		// key and signs with it. In-process only (CP state dir, dir lock).
 		{Name: "admin_audit_key_rotation", Opts: adminAuditOpts(), Run: adminAuditKeyRotation},
+		// Signed bundles (W-P2-SBND-02): --bundles=off answers the envelope
+		// Accept header with the unchanged legacy policy; --bundles=offer signs
+		// the served policy with the bundle key, moves the seq forward on a save,
+		// a rollback and a token key rotation (which wakes a held long poll),
+		// keeps the id and seq across a restart, and leaves the workers on the
+		// legacy wire. In-process only (versioned store, keys, CP restart).
+		{Name: "bundles_off_legacy_wire", Opts: bundlesOffOpts(), Run: bundlesOffLegacyWire},
+		{Name: "bundles_offer_serves", Opts: bundlesOfferOpts(), Run: bundlesOfferServes},
 	},
 	// Canary across protocols x allow/deny; see canary.go.
 	canaryScenarios(),

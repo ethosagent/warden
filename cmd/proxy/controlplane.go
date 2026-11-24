@@ -29,6 +29,9 @@ func controlPlaneParams(cmd *cobra.Command) (controlplane.Params, error) {
 	alertsDB, _ := cmd.Flags().GetString("alerts-db")
 	requireConsoleAuth, _ := cmd.Flags().GetBool("require-console-auth")
 	policyStore, _ := cmd.Flags().GetString("policy-store")
+	bundles, _ := cmd.Flags().GetString("bundles")
+	bundleMaxAge, _ := cmd.Flags().GetDuration("bundle-max-age")
+	bundleSeqFloor, _ := cmd.Flags().GetInt64("bundle-seq-floor")
 	auditKeyFile, _ := cmd.Flags().GetString("admin-audit-key-file")
 	auditNewSegment, _ := cmd.Flags().GetString("admin-audit-new-segment")
 	backup, err := backupConfig(cmd)
@@ -48,7 +51,8 @@ func controlPlaneParams(cmd *cobra.Command) (controlplane.Params, error) {
 		RetentionDays: aRetention, AlertsDB: alertsDB,
 		RequireConsoleAuth: requireConsoleAuth,
 		PolicyStore:        policyStore,
-		AdminAuditKeyFile:  auditKeyFile, AdminAuditNewSegment: auditNewSegment,
+		Bundles:            bundles, BundleMaxAge: bundleMaxAge, BundleSeqFloor: bundleSeqFloor,
+		AdminAuditKeyFile: auditKeyFile, AdminAuditNewSegment: auditNewSegment,
 	}, nil
 }
 
@@ -109,6 +113,9 @@ func newControlPlaneCmd() *cobra.Command {
 	cmd.Flags().Int("analytics-retention-days", 30, "prune fleet analytics events older than N days (0 = keep forever)")
 	cmd.Flags().String("alerts-db", "", "sqlite alert store DB path (default: sibling of the analytics DB, named warden-alerts.db)")
 	cmd.Flags().String("policy-store", controlplane.PolicyStoreFile, "where served policy comes from: file (default, the served YAML) | versioned (append-only versions in <state-dir>/warden-cp.db; requires --state-dir)")
+	cmd.Flags().String("bundles", controlplane.BundlesOff, "signed policy bundles on GET /policy: off (default, byte-identical) | offer (envelope for workers that send Accept: "+controlplane.BundleMediaType+", legacy policy for the rest) | require (a request without that header gets 406); offer and require need --state-dir, --policy-store=versioned and keys.enabled")
+	cmd.Flags().Duration("bundle-max-age", controlplane.DefaultBundleMaxAge, "how long a signed bundle is valid; the control plane re-signs every quarter of it (minimum 1h; with --bundles offer|require)")
+	cmd.Flags().Int64("bundle-seq-floor", 0, "with --bundles offer|require, append a restore row at this seq at startup when the publish log is below it (after restoring a backup; 0 = never)")
 	cmd.Flags().Bool("require-console-auth", false, "refuse to start unless console.auth is oidc (no open dashboard)")
 	cmd.Flags().String("admin-audit-key-file", "", "admin audit signing key (default <state-dir>/cp-audit.key; the HMAC key sits beside it); used when console.adminAudit.enabled")
 	cmd.Flags().String("admin-audit-new-segment", "", "key_id of a new admin audit signing key: start a new chain segment for it (manual rotation; no-op once the chain head is on that key)")
