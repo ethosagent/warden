@@ -31,6 +31,8 @@ type workerState struct {
 	eventsForwarded int64
 	policyETag      string   // the worker's current policy version (from heartbeat)
 	caps            []string // capabilities of the latest heartbeat (replaced, not merged)
+	agentID         string   // the agent the worker says it serves (latest heartbeat; valid or empty)
+	identityMode    string   // the identity mode the worker says it runs (latest heartbeat; enum or empty)
 
 	// How the worker last authenticated (recordAuth). tokenID/tokenName are set
 	// only for kind token; legacy and none ids are unverified headers.
@@ -85,6 +87,21 @@ func (r *WorkerRegistry) SeenHeartbeat(proxyID, policyETag string, caps []string
 		w.policyETag = policyETag
 	}
 	w.caps = append([]string(nil), caps...)
+}
+
+// SeenAgentBinding records the agent a worker serves and the identity mode it
+// runs, from its latest heartbeat. Both replace the stored values: a worker
+// that stops reporting them loses them. The caller has already validated them
+// (validAgentBinding); a worker is never trusted.
+func (r *WorkerRegistry) SeenAgentBinding(proxyID, agentID, identityMode string) {
+	if proxyID == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	w := r.touch(proxyID, r.now())
+	w.agentID = agentID
+	w.identityMode = identityMode
 }
 
 // maxWorkersWithoutCap bounds the WorkersWithoutCap result.
@@ -174,6 +191,8 @@ func (r *WorkerRegistry) Views() []dashboard.WorkerView {
 			EventsForwarded: w.eventsForwarded,
 			PolicyETag:      w.policyETag,
 			Caps:            append([]string(nil), w.caps...),
+			AgentID:         w.agentID,
+			IdentityMode:    w.identityMode,
 			Online:          now.Sub(w.lastSeen) < staleAfter,
 			AuthKind:        string(w.authKind),
 			TokenName:       w.tokenName,

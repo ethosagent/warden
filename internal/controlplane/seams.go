@@ -47,6 +47,9 @@ type WorkerTracker interface {
 	// SeenHeartbeat records a heartbeat, the worker's current policy ETag and the
 	// capabilities of that heartbeat (replacing the previous set).
 	SeenHeartbeat(proxyID, policyETag string, caps []string)
+	// SeenAgentBinding records the agent id and identity mode of the latest
+	// heartbeat (replacing the previous values; both already validated).
+	SeenAgentBinding(proxyID, agentID, identityMode string)
 	// Views returns the registry as dashboard rows, online-first then by id.
 	Views() []dashboard.WorkerView
 }

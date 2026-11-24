@@ -57,7 +57,12 @@ a worker. There are exactly three calls:
 2. **Heartbeat** — `POST /control/heartbeat` (~every 10s) so the CP lists the
    worker as online even when idle, and knows its current policy version and the
    capabilities it advertises (`caps`, e.g. `blocklist/v1`), so the console can flag
-   workers that would silently ignore newer policy fields.
+   workers that would silently ignore newer policy fields. It may also carry
+   `agentID` (the registered agent the worker serves; dropped unless it is a valid
+   agent id) and `identityMode` (`off|attribute|challenge|require`; dropped otherwise),
+   which the console's **Agents** tab joins with the agent registry to show each
+   agent's bound workers and to warn about unregistered or unserved agents. The tab
+   appears only on a control plane with a state dir.
 3. **Analytics** — `POST /central/ingest` (worker → CP).
 
 The dashboard shows only what the CP already has (pushed analytics + the

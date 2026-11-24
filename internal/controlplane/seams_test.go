@@ -56,6 +56,8 @@ type fakeWorkerTracker struct {
 func (f *fakeWorkerTracker) SeenPolicyPull(string)                  {}
 func (f *fakeWorkerTracker) SeenIngest(string, int)                 {}
 func (f *fakeWorkerTracker) SeenHeartbeat(string, string, []string) {}
+
+func (f *fakeWorkerTracker) SeenAgentBinding(string, string, string) {}
 func (f *fakeWorkerTracker) Views() []dashboard.WorkerView {
 	return f.views
 }

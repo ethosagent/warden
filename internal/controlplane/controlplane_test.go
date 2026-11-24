@@ -1756,3 +1756,44 @@ func TestWorkersWithoutCapOnlineSortedCapped(t *testing.T) {
 		t.Errorf("offline workers listed: %d", len(got))
 	}
 }
+
+// TestHeartbeatAgentFields: a heartbeat's agentID and identityMode reach the
+// worker view; an invalid agentID or an unknown mode is dropped, an old
+// heartbeat without them still works, and a later heartbeat replaces them.
+func TestHeartbeatAgentFields(t *testing.T) {
+	srv := New(Config{PolicyPath: writePolicyFile(t, "api.openai.com")})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	bind := func(id string) (agentID, mode string) {
+		t.Helper()
+		for _, w := range srv.registry.Views() {
+			if w.ProxyID == id {
+				return w.AgentID, w.IdentityMode
+			}
+		}
+		t.Fatalf("worker %s not listed", id)
+		return "", ""
+	}
+	for _, c := range []struct {
+		worker, body, wantAgent, wantMode string
+	}{
+		{"ok", `{"agentID":"a1","identityMode":"attribute"}`, "a1", "attribute"},
+		{"bad-id", `{"agentID":"!identity-scoped","identityMode":"attribute"}`, "", "attribute"},
+		{"long-id", `{"agentID":"` + strings.Repeat("a", 65) + `"}`, "", ""},
+		{"bad-mode", `{"agentID":"a2","identityMode":"<img src=x>"}`, "a2", ""},
+		{"old", `{"policyETag":"v1"}`, "", ""},
+	} {
+		if code := postHeartbeat(t, ts.URL, c.worker, c.body); code != http.StatusNoContent {
+			t.Fatalf("%s: status %d", c.worker, code)
+		}
+		if a, m := bind(c.worker); a != c.wantAgent || m != c.wantMode {
+			t.Errorf("%s: agent %q mode %q, want %q %q", c.worker, a, m, c.wantAgent, c.wantMode)
+		}
+	}
+	// The latest heartbeat replaces: a worker that stops reporting loses them.
+	postHeartbeat(t, ts.URL, "ok", `{"policyETag":"v2"}`)
+	if a, m := bind("ok"); a != "" || m != "" {
+		t.Errorf("after a heartbeat without them: agent %q mode %q, want none", a, m)
+	}
+}

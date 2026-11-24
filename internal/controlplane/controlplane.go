@@ -28,6 +28,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/ethosagent/warden/internal/adminaudit"
+	"github.com/ethosagent/warden/internal/agentid"
 	"github.com/ethosagent/warden/internal/agentreg"
 	"github.com/ethosagent/warden/internal/alertpipeline"
 	"github.com/ethosagent/warden/internal/analytics"
@@ -707,7 +708,8 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
-// handleHeartbeat records a worker liveness ping. Body: {"policyETag": "...", "caps": ["blocklist/v1"]}.
+// handleHeartbeat records a worker liveness ping. Body: {"policyETag": "...", "caps": ["blocklist/v1"],
+// "agentID": "...", "identityMode": "attribute"}; agentID and identityMode are optional.
 // It is one of the three worker→CP interactions; the CP never calls the worker.
 func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -722,14 +724,35 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		PolicyETag string   `json:"policyETag"`
 		Caps       []string `json:"caps"`
+		// AgentID and IdentityMode (W-P2-AREG-03) say which registered agent the
+		// worker serves and the mode it runs. Old workers send neither.
+		AgentID      string `json:"agentID"`
+		IdentityMode string `json:"identityMode"`
 	}
 	// Body is optional/tiny; ignore decode errors (heartbeat is best-effort).
 	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body)
 	caps := normalizeCaps(body.Caps)
 	s.registry.SeenHeartbeat(principal.ProxyID, trimETag(body.PolicyETag), caps)
+	agentID, mode := validAgentBinding(body.AgentID, body.IdentityMode)
+	s.registry.SeenAgentBinding(principal.ProxyID, agentID, mode)
 	s.noteGroupPolicy(principal.ProxyID, caps)
 	s.noteIdentityChallenge(principal.ProxyID, caps)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// validAgentBinding drops a heartbeat's agentID that is not agentid.ValidID and
+// an identityMode outside the known enum, so neither a malformed id nor free
+// text from a worker reaches the registry or the console.
+func validAgentBinding(agentID, mode string) (string, string) {
+	if agentid.ValidID(agentID) != nil {
+		agentID = ""
+	}
+	switch mode {
+	case config.IdentityModeOff, config.IdentityModeAttribute, config.IdentityModeChallenge, "require":
+	default:
+		mode = ""
+	}
+	return agentID, mode
 }
 
 // capPattern is the shape of an accepted worker capability string.

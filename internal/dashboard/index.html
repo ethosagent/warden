@@ -511,6 +511,10 @@
     <div class="nav-item" data-page="fleet">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="4" width="18" height="5" rx="1"/><rect x="3" y="14" width="18" height="5" rx="1"/><circle cx="7" cy="6.5" r=".6"/><circle cx="7" cy="16.5" r=".6"/></svg>
       Fleet</div>
+    <!-- Agents (W-P2-AREG-03): hidden until /dashboard/api/setup says agentRegistry (a CP with a state dir). -->
+    <div class="nav-item" data-page="agents" id="agentsNav" style="display:none">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-7 8-7s8 3 8 7"/></svg>
+      Agents</div>
     <div class="nav-item" data-page="explore">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
       Explore</div>
@@ -1214,6 +1218,42 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
       </div><!-- /demo-only -->
     </section>
 
+    <!-- ============ AGENTS (W-P2-AREG-03) ============ -->
+    <section class="page" id="page-agents">
+      <div class="page-head">
+        <div><h1>Agents</h1><div class="desc">Registered agents: who may delegate to them, which public keys prove them, and which workers serve them</div></div>
+        <span style="display:flex;align-items:center;gap:8px"><span class="sub" id="ag-status"></span><button data-min-role="admin" class="btn primary sm" id="ag-new" style="display:none">+ New agent</button></span>
+      </div>
+      <div class="note" id="ag-cli" style="margin-bottom:10px; display:none">This console has no sign-in (console.auth: none), so agents are listed here but registered and changed on the control plane host with <span class="mono">warden control-plane agent</span>.</div>
+      <div class="note" id="ag-warnings" style="margin-bottom:12px; display:none; color:var(--amber)"></div>
+      <div class="card" id="ag-form" data-min-role="admin" style="margin-bottom:16px; display:none">
+        <div class="card-head"><h3 id="ag-form-title">New agent</h3></div>
+        <div class="card-pad">
+          <div class="form-row">
+            <div class="field"><label for="ag-id">Agent id</label><input type="text" id="ag-id" maxlength="64" autocomplete="off" placeholder="e.g. claude-code" /></div>
+            <div class="field"><label for="ag-name">Display name</label><input type="text" id="ag-name" maxlength="128" autocomplete="off" /></div>
+            <div class="field"><label for="ag-groups">Allowed groups (comma separated)</label><input type="text" id="ag-groups" maxlength="1024" autocomplete="off" placeholder="e.g. warden-agents, eng" /></div>
+            <div class="field"><label for="ag-scopes">Allowed scopes (comma separated)</label><input type="text" id="ag-scopes" maxlength="1024" autocomplete="off" /></div>
+          </div>
+          <div class="note" style="margin:8px 0">Paste the agent's PUBLIC key as a JWK (up to two, so a key can be rotated). A JWK with a private member (d) is refused. When editing, leave a slot empty to keep its registered key.</div>
+          <div class="form-row">
+            <div class="field"><label for="ag-key0">Public JWK 1</label><textarea id="ag-key0" rows="4" maxlength="8192" spellcheck="false" autocomplete="off" class="mono"></textarea><div class="note" id="ag-key0-cur"></div><label class="note" id="ag-key0-rm-wrap" style="display:none"><input type="checkbox" id="ag-key0-rm" /> remove this key</label></div>
+            <div class="field"><label for="ag-key1">Public JWK 2 (optional, for rotation)</label><textarea id="ag-key1" rows="4" maxlength="8192" spellcheck="false" autocomplete="off" class="mono"></textarea><div class="note" id="ag-key1-cur"></div><label class="note" id="ag-key1-rm-wrap" style="display:none"><input type="checkbox" id="ag-key1-rm" /> remove this key</label></div>
+          </div>
+          <div id="ag-form-err" class="note" role="alert" style="margin-top:8px; display:none; color:var(--red)"></div>
+          <div style="margin-top:10px; display:flex; gap:8px">
+            <button data-min-role="admin" class="btn primary sm" id="ag-save">Save agent</button>
+            <button data-min-role="admin" class="btn sm" id="ag-reload" style="display:none">Reload agent</button>
+            <button class="btn sm" id="ag-cancel">Cancel</button>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <div id="ag-list"><div class="card-pad note">Loading…</div></div>
+      </div>
+      <div id="ag-msg" class="note" style="margin-top:8px; display:none"></div>
+    </section>
+
     <!-- ============ EXPLORE ============ -->
     <section class="page" id="page-explore">
       <div class="page-head">
@@ -1615,6 +1655,7 @@ function loadTab(page){
     case 'alerts':      loadAlerts(); loadDetection(); break;
     case 'audit':       loadAudit(); break;
     case 'adminlog':    loadAdminLog(); break;
+    case 'agents':      loadAgents(); break;
     case 'get-started': refreshOnboarding(); break;
   }
 }
@@ -1753,6 +1794,7 @@ function applySetup(){
   if(s.mode) applyMode(s.mode);
   const nb=document.getElementById('authNoneBanner'); if(nb) nb.hidden=(s.authMode!=='none');
   applyBackupBadge(s.backup);
+  const an=document.getElementById('agentsNav'); if(an) an.style.display=s.agentRegistry===true?'':'none';
   renderStepper();
   // Overview: onboarding hero replaces stat blocks until a first event is seen.
   const ov=document.getElementById('page-overview');
@@ -2224,6 +2266,213 @@ function clearWorkerToken(){
     catch(e){ cp.textContent='Copy failed: select the token and copy it'; }
   });
 })();
+
+/* agents:begin */
+/* ============================================================
+   Agents (W-P2-AREG-03): GET/POST /dashboard/api/agents, GET/PUT .../agents/{id}, POST .../{id}/disable|enable,
+   all through api(). The nav item shows only when /dashboard/api/setup says agentRegistry. Writes are rendered
+   only for an oidc admin (the server enforces roles and answers 403 use_cli without sign-in); every write sends
+   If-Match "r<revision>" from the row it was read in. Public key coordinates are never rendered: a key shows its
+   kid, alg and an 8-character jkt prefix, and an edit that leaves a key slot empty re-sends the stored key. Every
+   value from the server or the operator is put in with textContent (agEl), never as markup.
+   ============================================================ */
+const AG_PRIVATE_MEMBERS=['d','p','q','dp','dq','qi','k','oth'];
+const AG_REQUIRE_CAP='identity/require-v1', AG_REG_CAP='agentreg/v1';
+const ag={rows:[], workers:[], settings:null, editing:null, canWrite:false};
+function agEl(tag,text,cls){
+  const e=document.createElement(tag);
+  if(text!=null) e.textContent=String(text);
+  if(cls) e.className=cls;
+  return e;
+}
+function agMsg(text){ const m=document.getElementById('ag-msg'); if(!m) return; m.style.display=text?'':'none'; m.textContent=text||''; }
+function agFormErr(text){ const m=document.getElementById('ag-form-err'); m.style.display=text?'':'none'; m.textContent=text||''; }
+function agSplit(v){ return v.split(',').map(x=>x.trim()).filter(x=>x); }
+/* The identity mode served for an agent: its own settings agents[].identity, else identity.defaultMode, else off. */
+function agMode(id){
+  const s=ag.settings||{};
+  const a=(Array.isArray(s.agents)?s.agents:[]).find(x=>x&&x.id===id);
+  if(a&&a.identity) return a.identity;
+  return (s.identity&&s.identity.defaultMode)||'off';
+}
+function agBound(id){ return ag.workers.filter(w=>w.agentID===id); }
+function agHasCap(w,c){ return Array.isArray(w.caps)&&w.caps.indexOf(c)>=0; }
+/* Warnings: a disabled agent still served by a worker that cannot enforce the disable, an active agent no worker
+   serves, a worker reporting an agent id nobody registered, and (require mode) workers that cannot enforce it. */
+function agWarnings(rows,workers){
+  const out=[], known={};
+  rows.forEach(a=>{ known[a.id]=a; });
+  rows.forEach(a=>{
+    const bound=workers.filter(w=>w.agentID===a.id);
+    if(a.status==='disabled'){
+      const old=bound.filter(w=>w.online&&!agHasCap(w,AG_REG_CAP));
+      if(old.length) out.push('Disabled agent "'+a.id+'" is still served by '+old.length+' worker'+(old.length===1?'':'s')+' without '+AG_REG_CAP+': '+old.map(w=>w.proxyID).join(', ')+'.');
+    } else if(!bound.length){
+      out.push('Agent "'+a.id+'" has no bound worker.');
+    }
+    if(agMode(a.id)==='require'){
+      const weak=bound.filter(w=>w.online&&!agHasCap(w,AG_REQUIRE_CAP));
+      if(weak.length) out.push(weak.length+' connected worker'+(weak.length===1?'':'s')+' for agent "'+a.id+'" do not enforce require mode.');
+    }
+  });
+  workers.forEach(w=>{ if(w.agentID&&!known[w.agentID]) out.push('Worker "'+w.proxyID+'" reports unregistered agent "'+w.agentID+'".'); });
+  return out;
+}
+function agRenderWarnings(list){
+  const box=document.getElementById('ag-warnings'); if(!box) return;
+  box.textContent='';
+  list.forEach(t=>{ box.appendChild(agEl('div',t)); });
+  box.style.display=list.length?'':'none';
+}
+async function loadAgents(){
+  const list=document.getElementById('ag-list'); if(!list) return;
+  await authInit();
+  ag.canWrite=authMode==='oidc'&&roleAllows('admin');
+  document.getElementById('ag-new').style.display=ag.canWrite?'':'none';
+  document.getElementById('ag-cli').style.display=authMode==='oidc'?'none':'';
+  if(!ag.canWrite) agHideForm();
+  let r=null, d=null;
+  try{ r=await api('GET','/dashboard/api/agents'); if(r.ok) d=await r.json(); }catch(e){ d=null; }
+  if(!d||!Array.isArray(d.agents)){
+    ag.rows=[]; list.textContent='';
+    list.appendChild(agEl('div',(r&&(r.status===404||r.status===503))?'The agent registry is not available on this server (it needs a control plane with a state dir).':'Agents unavailable.','card-pad note'));
+    document.getElementById('ag-status').textContent=''; agRenderWarnings([]); return;
+  }
+  ag.rows=d.agents;
+  try{ const w=await jget('/dashboard/api/workers'); ag.workers=Array.isArray(w)?w:[]; }catch(e){ ag.workers=[]; }
+  try{ const s=await jget('/dashboard/api/settings'); ag.settings=(s&&s.settings)||null; }catch(e){ ag.settings=null; }
+  document.getElementById('ag-status').textContent=ag.rows.filter(a=>a.status==='active').length+' active · '+ag.rows.length+' total';
+  agRenderWarnings(agWarnings(ag.rows,ag.workers));
+  agRenderList();
+}
+function agRenderList(){
+  const list=document.getElementById('ag-list'); list.textContent='';
+  if(!ag.rows.length){ list.appendChild(agEl('div','No agents registered yet.','card-pad note')); return; }
+  const table=agEl('table'), head=agEl('tr');
+  ['Agent','Owner','Groups','Scopes','Keys','Status','Rev','Identity mode','Bound workers',''].forEach(h=>head.appendChild(agEl('th',h)));
+  const thead=agEl('thead'); thead.appendChild(head); table.appendChild(thead);
+  const tb=agEl('tbody');
+  ag.rows.forEach(a=>{
+    const tr=agEl('tr');
+    const c0=agEl('td'); c0.appendChild(agEl('b',a.displayName||a.id)); c0.appendChild(agEl('div',a.id,'mono muted')); tr.appendChild(c0);
+    tr.appendChild(agEl('td',a.ownerEmail||'—'));
+    tr.appendChild(agEl('td',(a.allowedGroups||[]).join(', ')||'—'));
+    tr.appendChild(agEl('td',(a.allowedScopes||[]).join(', ')||'—'));
+    const ck=agEl('td');
+    (a.keys||[]).forEach(k=>{ ck.appendChild(agEl('div',k.kid+' · '+k.alg+' · '+String(k.jkt||'').slice(0,8),'mono')); });
+    tr.appendChild(ck);
+    const cs=agEl('td'); cs.appendChild(agEl('span',a.status,'pill '+(a.status==='active'?'p-allow':'p-redact'))); tr.appendChild(cs);
+    tr.appendChild(agEl('td',a.revision));
+    tr.appendChild(agEl('td',agMode(a.id),'mono'));
+    const cw=agEl('td'); const bound=agBound(a.id);
+    if(!bound.length) cw.appendChild(agEl('span','none','muted'));
+    bound.forEach(w=>{ cw.appendChild(agEl('div',w.proxyID+(w.identityMode?' · '+w.identityMode:''),'mono')); });
+    tr.appendChild(cw);
+    const ca=agEl('td'); ca.style.textAlign='right';
+    if(ag.canWrite){
+      const eb=agEl('button','Edit','btn sm'); eb.setAttribute('data-min-role','admin'); eb.addEventListener('click',()=>agShowForm(a)); ca.appendChild(eb);
+      const on=a.status==='active';
+      const tb2=agEl('button',on?'Disable':'Enable','btn sm'); tb2.setAttribute('data-min-role','admin');
+      if(on) tb2.style.color='#ff8098';
+      tb2.addEventListener('click',()=>agSetEnabled(a,!on)); ca.appendChild(tb2);
+    }
+    tr.appendChild(ca); tb.appendChild(tr);
+  });
+  table.appendChild(tb); list.appendChild(table);
+}
+function agHideForm(){ const f=document.getElementById('ag-form'); if(f) f.style.display='none'; ag.editing=null; agFormErr(''); }
+function agShowForm(a){
+  ag.editing=a||null; agFormErr('');
+  document.getElementById('ag-form-title').textContent=a?'Edit agent':'New agent';
+  const id=document.getElementById('ag-id'); id.value=a?a.id:''; id.disabled=!!a;
+  document.getElementById('ag-name').value=a?(a.displayName||''):'';
+  document.getElementById('ag-groups').value=a?(a.allowedGroups||[]).join(', '):'';
+  document.getElementById('ag-scopes').value=a?(a.allowedScopes||[]).join(', '):'';
+  for(let i=0;i<2;i++){
+    const k=a&&a.keys&&a.keys[i];
+    document.getElementById('ag-key'+i).value='';
+    document.getElementById('ag-key'+i+'-cur').textContent=k?('Registered: '+k.kid+' · '+k.alg+' · '+String(k.jkt||'').slice(0,8)+'. Paste a JWK to replace it.'):'';
+    document.getElementById('ag-key'+i+'-rm').checked=false;
+    document.getElementById('ag-key'+i+'-rm-wrap').style.display=k?'':'none';
+  }
+  document.getElementById('ag-reload').style.display='none';
+  document.getElementById('ag-save').disabled=false;
+  document.getElementById('ag-form').style.display='';
+}
+/* agParseKey: a pasted public JWK, or an error text. A private member is refused here and by the server. */
+function agParseKey(text){
+  let j;
+  try{ j=JSON.parse(text); }catch(e){ return {err:'is not valid JSON'}; }
+  if(!j||typeof j!=='object'||Array.isArray(j)) return {err:'must be a JSON object'};
+  for(const m of AG_PRIVATE_MEMBERS) if(Object.prototype.hasOwnProperty.call(j,m)) return {err:'has a private member ("'+m+'"): paste the public key only'};
+  return {jwk:j};
+}
+async function agSave(){
+  const e=ag.editing;
+  const id=e?e.id:document.getElementById('ag-id').value.trim();
+  if(!id){ agFormErr('Agent id is required.'); return; }
+  const keys=[];
+  for(let i=0;i<2;i++){
+    const text=document.getElementById('ag-key'+i).value.trim();
+    if(text){
+      const p=agParseKey(text);
+      if(p.err){ agFormErr('Public JWK '+(i+1)+' '+p.err+'.'); return; }
+      keys.push(p.jwk);
+    } else if(e&&e.keys&&e.keys[i]&&!document.getElementById('ag-key'+i+'-rm').checked){
+      keys.push(e.keys[i].jwk); // keep the registered key (never shown)
+    }
+  }
+  if(!keys.length){ agFormErr('At least one public JWK is required.'); return; }
+  const body={id:id,displayName:document.getElementById('ag-name').value.trim(),keys:keys,
+    allowedGroups:agSplit(document.getElementById('ag-groups').value),allowedScopes:agSplit(document.getElementById('ag-scopes').value)};
+  const btn=document.getElementById('ag-save'); btn.disabled=true;
+  let r=null;
+  try{
+    r=e?await api('PUT','/dashboard/api/agents/'+encodeURIComponent(id),body,{'If-Match':'"r'+e.revision+'"'})
+       :await api('POST','/dashboard/api/agents',body);
+  }catch(x){ r=null; }
+  btn.disabled=false;
+  if(r&&(r.status===200||r.status===201)){ agHideForm(); agMsg('Saved "'+id+'".'); loadAgents(); return; }
+  await agShowWriteError(r);
+}
+/* A 400 names the field inline; a 409 conflict offers a reload; anything else is a generic status. */
+async function agShowWriteError(r){
+  let why=r?('status '+r.status):'network error', code='', e=null;
+  if(r){ try{ e=await r.json(); }catch(x){ e=null; } }
+  if(e&&e.error) code=e.error;
+  if(r&&r.status===400&&e&&e.field) why=e.field+': '+(e.message||'invalid');
+  else if(code==='agent_conflict'){ why='this agent was changed elsewhere since you opened it. Reload it and apply your edit again.'; document.getElementById('ag-reload').style.display=''; }
+  else if(code==='agent_exists') why='an agent with this id already exists.';
+  else if(code==='key_in_use') why='a key is already bound to another agent.';
+  else if(code==='use_cli') why='this console has no sign-in; use warden control-plane agent on the control plane host.';
+  else if(code) why=code;
+  agFormErr('Save failed: '+why);
+}
+async function agReload(){
+  const e=ag.editing; if(!e) return;
+  let r=null, d=null;
+  try{ r=await api('GET','/dashboard/api/agents/'+encodeURIComponent(e.id)); if(r.ok) d=await r.json(); }catch(x){ d=null; }
+  if(!d){ agFormErr('Reload failed.'); return; }
+  const i=ag.rows.findIndex(x=>x.id===d.id); if(i>=0) ag.rows[i]=d;
+  agShowForm(d); agFormErr('Reloaded revision '+d.revision+'.');
+}
+async function agSetEnabled(a,enable){
+  const verb=enable?'Enable':'Disable';
+  if(!window.confirm(verb+' agent "'+a.id+'"? '+(enable?'Workers serve it again on their next policy pull.':'Workers deny all traffic for it on their next policy pull.'))) return;
+  let r=null;
+  try{ r=await api('POST','/dashboard/api/agents/'+encodeURIComponent(a.id)+'/'+(enable?'enable':'disable'),undefined,{'If-Match':'"r'+a.revision+'"'}); }catch(x){ r=null; }
+  if(r&&r.ok){ agMsg(verb+'d "'+a.id+'".'); }
+  else{
+    let code=''; try{ const e=await r.json(); code=e&&e.error||''; }catch(x){}
+    agMsg(verb+' failed: '+(code==='agent_conflict'?'the agent changed elsewhere; the list was reloaded.':(code||(r?'status '+r.status:'network error')))+'.');
+  }
+  loadAgents();
+}
+(function(){
+  const b=(id,fn)=>{ const e=document.getElementById(id); if(e) e.addEventListener('click',fn); };
+  b('ag-new',()=>agShowForm(null)); b('ag-save',agSave); b('ag-cancel',agHideForm); b('ag-reload',agReload);
+})();
+/* agents:end */
 
 /* ============================================================
    Explore (/dashboard/api/query + /query/schema)

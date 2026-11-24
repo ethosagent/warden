@@ -300,4 +300,11 @@ func agentRegistryNoState(t *testing.T, h *harness.H) {
 			t.Errorf("worker dashboard GET %s = %d, want 404", path, code)
 		}
 	}
+	// The console hides the Agents tab on both: no registry to serve.
+	if code, resp, err := cp.Do(http.MethodGet, "/dashboard/api/setup", cp.Token(), nil); err != nil || code != http.StatusOK || !strings.Contains(resp, `"agentRegistry":false`) {
+		t.Errorf("CP setup = %d %q, %v; want agentRegistry=false", code, resp, err)
+	}
+	if code, resp := adminDo(t, h, http.MethodGet, "/dashboard/api/setup"); code != http.StatusOK || !strings.Contains(string(resp), `"agentRegistry":false`) {
+		t.Errorf("worker setup = %d %q; want agentRegistry=false", code, resp)
+	}
 }

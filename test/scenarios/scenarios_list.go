@@ -238,6 +238,10 @@ var All = slices.Concat(
 		// without key coordinates, a CSRF-less write is a denied row, and an
 		// offline writer's agent shows up through the API. In-process only.
 		{Name: "agent_registry_api", Opts: agentRegistryAPIOpts(), Run: agentRegistryAPI},
+		// The Agents tab (W-P2-AREG-03): setup says agentRegistry, the console serves
+		// the tab, a registered agent lists with its display name as plain text and
+		// the worker whose heartbeat names it; a malformed agentID or mode is dropped.
+		{Name: "agent_registry_console", Opts: agentRegistryConsoleOpts(), Run: agentRegistryConsole},
 		// Without console sign-in the registry API is read-only (use_cli).
 		{Name: "agent_registry_use_cli", Opts: agentRegistryUseCLIOpts(), Run: agentRegistryUseCLI},
 		// No state dir: 503 state_dir_required; a worker dashboard answers 404.
