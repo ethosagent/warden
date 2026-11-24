@@ -42,6 +42,21 @@ const (
 	ReasonAgentStoreUnavailable  Reason = "agent_store_unavailable"
 	ReasonReplayStoreUnavailable Reason = "replay_store_unavailable"
 	ReasonVerifierMisconfigured  Reason = "verifier_misconfigured"
+
+	// Reasons of the exchange after the agent authenticated.
+	ReasonUnsupportedTokenType    Reason = "unsupported_token_type"
+	ReasonInvalidTarget           Reason = "invalid_target"
+	ReasonSubjectInvalid          Reason = "subject_invalid"
+	ReasonSubjectExpired          Reason = "subject_expired"
+	ReasonIdPUnavailable          Reason = "idp_unavailable"
+	ReasonUserBlocked             Reason = "user_blocked"
+	ReasonBlockStoreUnavailable   Reason = "block_store_unavailable"
+	ReasonGroupNotAllowed         Reason = "group_not_allowed"
+	ReasonScopeNotAllowed         Reason = "scope_not_allowed"
+	ReasonSessionRevoked          Reason = "session_revoked"
+	ReasonSessionStoreUnavailable Reason = "session_store_unavailable"
+	ReasonTokenTooLarge           Reason = "token_too_large"
+	ReasonSignerUnavailable       Reason = "signer_unavailable"
 )
 
 // Error is a token endpoint failure. Code is what the client sees; Reason,
