@@ -136,6 +136,9 @@ type TokenEdge struct {
 	Metrics *tokensvc.Metrics
 	// Retention purges expired token rows; nil purges nothing.
 	Retention *TokenRetention
+	// Sessions is the token session store behind the admin revoke and list
+	// routes (W-P2-TOKX-07); nil leaves them 404.
+	Sessions tokensvc.SessionStore
 }
 
 // EventPurger deletes issuance records older than a cutoff.
@@ -299,6 +302,7 @@ func newTokenService(tc config.TokenServiceConfig, id config.IdentitySettings, s
 	}
 	edge := TokenEdge{
 		IP: ipLim, MaxInFlight: tc.RateLimit.MaxInFlight, Metrics: metrics,
+		Sessions: sessions,
 		Retention: &TokenRetention{
 			Sessions: sessions, Replay: replay, Events: events,
 			SessionIdle: tc.Session.Idle, SubjectMax: subjectLifetimeBound(id),

@@ -151,6 +151,10 @@ func authzTable() map[routeKey]authzRow {
 		// Served by the control plane itself, ahead of dash.Handler (cpDashboardRoutes).
 		{get, "/dashboard/api/sessions", readRow(admin, "sessions.read")},
 		{del, "/dashboard/api/sessions", auditedRow(admin, "sessions.revoke", "sessions")},
+		// Token sessions (W-P2-TOKX-07): admin only; 404 unless tokenService.enabled.
+		{get, tokenSessionsListPath, readRow(admin, "token_sessions.read")},
+		{post, tokenSessionsRevokeAllPath, auditedRow(admin, "token_sessions.revoke_all", auditTargetTokenSessions)},
+		{post, tokenSessionRevokePath, auditedRow(admin, "token_sessions.revoke", auditTargetTokenSessions)},
 	}
 	t := make(map[routeKey]authzRow, len(rows))
 	for _, r := range rows {

@@ -743,6 +743,9 @@ fails when the two differ.
 | `/dashboard/api/settings` | POST | editor | `settings.write` |
 | `/dashboard/api/settings` | PUT | editor | `settings.write` |
 | `/dashboard/api/setup` | GET | viewer | `setup.read` |
+| `/dashboard/api/token-sessions` | GET | admin | `token_sessions.read` |
+| `/dashboard/api/token-sessions/revoke` | POST | admin | `token_sessions.revoke_all` |
+| `/dashboard/api/token-sessions/{sid}/revoke` | POST | admin | `token_sessions.revoke` |
 | `/dashboard/api/traffic` | GET | viewer | `traffic.read` |
 | `/dashboard/api/worker-tokens` | GET | viewer | `worker_token.read` |
 | `/dashboard/api/worker-tokens` | POST | admin | `worker_token.create` |
@@ -1564,9 +1567,30 @@ commented block in `configs/config.example.yaml` for every key and default.
   `/.well-known/oauth-authorization-server` path only. RFC 8414 section 3 puts the path of an
   issuer that has one after that segment, which is not mounted, so use an issuer with no path
   component if clients rely on discovery (token exchange itself works with any path).
-- **Not yet.** Rate limits, issuance records and metrics arrive with W-P2-TOKX-04 (#85) and
-  token-session admin revocation with #254; the `tokenService.rateLimit` and `eventRetention`
-  keys are validated now and enforced then.
+- **Revoking token sessions (admin).** A token session is one user at one IdP using one agent;
+  its `wts_` sid is carried in every issued token and is an identifier, not a credential.
+  `GET /dashboard/api/token-sessions?agent_id=&sub=&limit=&cursor=` lists sessions (sid,
+  agent_id, idp_iss, sub, created_at, last_used_at, revoked_at; newest first, at most 200 per
+  page, `next` is the cursor of the following page). `POST /dashboard/api/token-sessions/{sid}/revoke`
+  answers 204 (also for a session that was already revoked) or 404 for an unknown sid, and
+  `POST /dashboard/api/token-sessions/revoke` with `{sub?, idp_iss?, agent_id?}` (at least one
+  field) answers `{"revoked": n}`, counting the live sessions it revoked. All three are
+  admin-only, are 404 without `tokenService.enabled`, and in `console.auth none` need the admin
+  bearer. The revokes are audited (`token_sessions.revoke` with target_ref `sid:<sid>`,
+  `token_sessions.revoke_all` with target_ref `filter:agent=<id>,sub_sha256=<16 hex>,iss_sha256=<16 hex>`;
+  a subject or issuer is written as a hash, never as itself).
+  A revoke sets `revoked_at` and keeps the row. The service reads the session table on every
+  exchange, so the **next exchange takes effect at once**: one whose subject token was issued at
+  or before `revoked_at` gets 400 `invalid_grant`/`session_revoked`, and the user must sign in
+  again (a subject token issued after the revoke starts a new session). A revoked row is kept
+  until the identity max token TTL plus clock skew has passed, so it is never pruned while a
+  subject token issued before it could still verify. **A revoke does not recall tokens already
+  minted.** Workers verify a Warden token offline against signed JWKS and have no revocation
+  list, so a token issued before the revoke stays valid until its `exp` (at most
+  `tokenService.ttl`, default 15m, and never past the user's own proof). To stop traffic sooner,
+  also block the user (block list), disable the agent, or rotate the token key. A user-wide
+  revoke only touches sessions that exist: a user with no live session (never exchanged, or idle
+  past `session.idle`) has nothing to revoke, so block the user to also refuse a new one.
 
 ## Block list: offline CLI
 

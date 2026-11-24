@@ -53,6 +53,40 @@ type SessionStore interface {
 	// verifier accepts, plus its clock skew): then no pre-revoke subject
 	// token can still be valid when its revoke row goes.
 	Purge(ctx context.Context, liveCutoff, revokedCutoff time.Time) (int64, error)
+	// List returns sessions (live and revoked) matching q, newest first.
+	List(ctx context.Context, q SessionQuery) ([]SessionInfo, error)
+	// RevokedState summarises the revoked rows: how many there are and the
+	// latest revoked_at (zero when none). The admin audit hashes it before and
+	// after a revoke, so a revoke that changes nothing hashes the same.
+	RevokedState(ctx context.Context) (count int64, latest time.Time, err error)
+}
+
+// MaxSessionPage is the most rows List returns in one page.
+const MaxSessionPage = 200
+
+// SessionQuery selects sessions for List. Empty AgentID and Sub match
+// anything. Limit is capped at MaxSessionPage (0 means MaxSessionPage). A
+// non-empty AfterSID continues after the row (AfterCreated, AfterSID) that
+// ended the previous page.
+type SessionQuery struct {
+	AgentID      string
+	Sub          string
+	Limit        int
+	AfterCreated time.Time
+	AfterSID     string
+}
+
+// SessionInfo is one token session as an admin sees it. The sid is an
+// identifier, not a credential: nothing here can mint or continue a token.
+type SessionInfo struct {
+	SID        string
+	IdPIss     string
+	Sub        string
+	AgentID    string
+	CreatedAt  time.Time
+	LastUsedAt time.Time
+	// RevokedAt is zero for a live session.
+	RevokedAt time.Time
 }
 
 // SessionFilter selects sessions for RevokeAll. Empty fields match anything;

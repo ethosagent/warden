@@ -288,7 +288,8 @@ func splitVersionPath(p string) (seg, action string, ok bool) {
 // template (/dashboard/api/policy/versions/{v}/diff), whatever the segment
 // holds, a worker token path (/dashboard/api/worker-tokens/wt_x) becomes
 // /dashboard/api/worker-tokens/{id}, and a block list entry path becomes
-// /dashboard/api/blocked-users/{id}; every other path is returned unchanged.
+// /dashboard/api/blocked-users/{id}, and a token session revoke path becomes
+// /dashboard/api/token-sessions/{sid}/revoke; every other path is returned unchanged.
 // The control plane keys its authz table and audit classification on the
 // result.
 func RoutePath(p string) string {
@@ -297,6 +298,9 @@ func RoutePath(p string) string {
 	}
 	if _, ok := blockedUserID(p); ok {
 		return blockedUsersPath + "/{id}"
+	}
+	if _, ok := tokenSessionRevokeSID(p); ok {
+		return tokenSessionsPath + "/{sid}/revoke"
 	}
 	if _, action, ok := splitVersionPath(p); ok {
 		t := policyVersionsPath + "/{v}"
@@ -332,4 +336,23 @@ func stripControl(s string) string {
 		}
 		return r
 	}, s)
+}
+
+// tokenSessionsPath is the token session admin API (W-P2-TOKX-07), served by
+// the control plane itself.
+const tokenSessionsPath = "/dashboard/api/token-sessions"
+
+// tokenSessionRevokeSID extracts {sid} from
+// /dashboard/api/token-sessions/{sid}/revoke. ok is false for an empty sid or a
+// nested path; the bulk route /dashboard/api/token-sessions/revoke has no sid.
+func tokenSessionRevokeSID(p string) (string, bool) {
+	rest, found := strings.CutPrefix(p, tokenSessionsPath+"/")
+	if !found {
+		return "", false
+	}
+	sid, found := strings.CutSuffix(rest, "/revoke")
+	if !found || sid == "" || strings.Contains(sid, "/") {
+		return "", false
+	}
+	return sid, true
 }

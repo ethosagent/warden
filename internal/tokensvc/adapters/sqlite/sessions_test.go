@@ -274,3 +274,72 @@ func TestSessionsStoreErrors(t *testing.T) {
 		t.Error("Purge on a closed db")
 	}
 }
+
+// TestSessionsListAndRevokedState: List filters, orders newest first and pages
+// by (created_at, sid); RevokedState moves only when a revoke changes a row.
+func TestSessionsListAndRevokedState(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newSessions(t)
+	t0 := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	for i, c := range []struct{ sub, agent, sid string }{
+		{"u1", "a1", "wts_1"}, {"u2", "a1", "wts_2"}, {"u3", "a2", "wts_3"}, {"u4", "a1", "wts_4"},
+	} {
+		at := t0.Add(time.Duration(i/2) * time.Minute) // wts_1 and wts_2 share a second
+		if _, err := s.Touch(ctx, tokensvc.SessionKey{IdPIss: "https://idp", Sub: c.sub, AgentID: c.agent}, at, at, policy, c.sid); err != nil {
+			t.Fatal(err)
+		}
+	}
+	n, latest, err := s.RevokedState(ctx)
+	if err != nil || n != 0 || !latest.IsZero() {
+		t.Fatalf("empty RevokedState = %d %v %v", n, latest, err)
+	}
+	if _, err := s.Revoke(ctx, "wts_3", t0.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if n, latest, _ = s.RevokedState(ctx); n != 1 || !latest.Equal(t0.Add(time.Hour)) {
+		t.Fatalf("RevokedState = %d %v", n, latest)
+	}
+	if _, err := s.Revoke(ctx, "wts_3", t0.Add(2*time.Hour)); err != nil { // idempotent: first revoked_at stays
+		t.Fatal(err)
+	}
+	if n2, latest2, _ := s.RevokedState(ctx); n2 != n || !latest2.Equal(latest) {
+		t.Fatalf("a repeat revoke moved RevokedState to %d %v", n2, latest2)
+	}
+
+	sids := func(q tokensvc.SessionQuery) string {
+		out, err := s.List(ctx, q)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var ids string
+		for _, in := range out {
+			ids += in.SID + " "
+		}
+		return ids
+	}
+	if got := sids(tokensvc.SessionQuery{}); got != "wts_4 wts_3 wts_2 wts_1 " {
+		t.Errorf("all = %q", got)
+	}
+	if got := sids(tokensvc.SessionQuery{AgentID: "a1"}); got != "wts_4 wts_2 wts_1 " {
+		t.Errorf("agent a1 = %q", got)
+	}
+	if got := sids(tokensvc.SessionQuery{Sub: "u3"}); got != "wts_3 " {
+		t.Errorf("sub u3 = %q", got)
+	}
+	all, _ := s.List(ctx, tokensvc.SessionQuery{Sub: "u3"})
+	if len(all) != 1 || all[0].RevokedAt.IsZero() || !all[0].RevokedAt.Equal(t0.Add(time.Hour)) || all[0].IdPIss != "https://idp" {
+		t.Errorf("revoked row = %+v", all)
+	}
+	// Keyset paging across the shared created_at.
+	first, _ := s.List(ctx, tokensvc.SessionQuery{Limit: 3})
+	if len(first) != 3 {
+		t.Fatalf("page 1 has %d rows", len(first))
+	}
+	last := first[2]
+	if got := sids(tokensvc.SessionQuery{Limit: 3, AfterCreated: last.CreatedAt, AfterSID: last.SID}); got != "wts_1 " {
+		t.Errorf("page 2 = %q, want wts_1", got)
+	}
+	if got, _ := s.List(ctx, tokensvc.SessionQuery{Limit: 1000}); len(got) != 4 {
+		t.Errorf("limit above the cap returned %d rows", len(got))
+	}
+}

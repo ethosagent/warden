@@ -19,6 +19,7 @@ import (
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/cpstate"
 	"github.com/ethosagent/warden/internal/dashboard"
+	tokensvcsqlite "github.com/ethosagent/warden/internal/tokensvc/adapters/sqlite"
 )
 
 const (
@@ -60,6 +61,8 @@ func newAuthzEnvOn(t *testing.T, db *cpstate.DB, policy string, roles config.Con
 	}
 	srv.sessions = NewSessionStore(db.SQL(), time.Hour, 12*time.Hour, newFakeClock().Now)
 	srv.sessionReader = srv.sessions
+	// The token session routes are mounted whenever the token service is.
+	srv.EnableTokens(&fakeExchanger{}, testTokenIssuer, TokenEdge{Sessions: tokensvcsqlite.NewSessions(db)})
 	return &authzEnv{srv: srv, h: srv.Handler(), log: buf, policy: policy, clk: clk}
 }
 

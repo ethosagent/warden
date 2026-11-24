@@ -159,3 +159,60 @@ func (s *Sessions) Purge(ctx context.Context, liveCutoff, revokedCutoff time.Tim
 	}
 	return n, nil
 }
+
+// List implements tokensvc.SessionStore: newest first by (created_at, sid),
+// paged by that key.
+func (s *Sessions) List(ctx context.Context, q tokensvc.SessionQuery) ([]tokensvc.SessionInfo, error) {
+	limit := q.Limit
+	if limit <= 0 || limit > tokensvc.MaxSessionPage {
+		limit = tokensvc.MaxSessionPage
+	}
+	args := []any{q.AgentID, q.AgentID, q.Sub, q.Sub}
+	query := `SELECT sid, idp_iss, sub, agent_id, created_at, last_used_at, revoked_at FROM token_sessions
+		 WHERE (? = '' OR agent_id = ?) AND (? = '' OR sub = ?)`
+	if q.AfterSID != "" {
+		query += ` AND (created_at < ? OR (created_at = ? AND sid < ?))`
+		args = append(args, q.AfterCreated.Unix(), q.AfterCreated.Unix(), q.AfterSID)
+	}
+	query += ` ORDER BY created_at DESC, sid DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("tokensvc: list sessions: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []tokensvc.SessionInfo
+	for rows.Next() {
+		var (
+			in            tokensvc.SessionInfo
+			created, used int64
+			revoked       sql.NullInt64
+		)
+		if err := rows.Scan(&in.SID, &in.IdPIss, &in.Sub, &in.AgentID, &created, &used, &revoked); err != nil {
+			return nil, fmt.Errorf("tokensvc: list sessions: %w", err)
+		}
+		in.CreatedAt, in.LastUsedAt = time.Unix(created, 0).UTC(), time.Unix(used, 0).UTC()
+		if revoked.Valid {
+			in.RevokedAt = time.Unix(revoked.Int64, 0).UTC()
+		}
+		out = append(out, in)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("tokensvc: list sessions: %w", err)
+	}
+	return out, nil
+}
+
+// RevokedState implements tokensvc.SessionStore.
+func (s *Sessions) RevokedState(ctx context.Context) (int64, time.Time, error) {
+	var n int64
+	var latest sql.NullInt64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*), MAX(revoked_at) FROM token_sessions WHERE revoked_at IS NOT NULL`).Scan(&n, &latest); err != nil {
+		return 0, time.Time{}, fmt.Errorf("tokensvc: revoked state: %w", err)
+	}
+	if !latest.Valid {
+		return n, time.Time{}, nil
+	}
+	return n, time.Unix(latest.Int64, 0).UTC(), nil
+}
