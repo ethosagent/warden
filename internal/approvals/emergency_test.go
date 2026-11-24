@@ -658,7 +658,7 @@ func mintViolations(t *testing.T, srcs map[string]string) []string {
 					ast.Inspect(x.X, visit(fn))
 					return false
 				case *ast.Ident:
-					if _, isKind := mintSites[x.Name]; isKind && !(inGate && (fn == "Reason" || mintSites[x.Name] == fn)) {
+					if _, isKind := mintSites[x.Name]; isKind && (!inGate || (fn != "Reason" && mintSites[x.Name] != fn)) {
 						bad(name, fn, "references kind constant "+x.Name)
 					}
 				case *ast.CompositeLit:
@@ -700,7 +700,7 @@ func mintViolations(t *testing.T, srcs map[string]string) []string {
 							bad(name, fn, "calls clearEmergency")
 						}
 					case *ast.SelectorExpr:
-						if fun.Sel.Name == "clearEmergency" && !(inGate && fn == "EmergencyApply") {
+						if fun.Sel.Name == "clearEmergency" && (!inGate || fn != "EmergencyApply") {
 							bad(name, fn, "calls clearEmergency outside EmergencyApply")
 						}
 					}
