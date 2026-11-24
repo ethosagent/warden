@@ -49,10 +49,14 @@ type Classification struct {
 }
 
 // Classify decides whether going from base to draft widens access or changes
-// where credentials go. It is pure and deterministic: no I/O, and the order of
-// entries in either doc does not change the result. There is no regex or
-// wildcard containment analysis: an allow key that is new is widening however
-// narrow it looks. Anything it does not recognise counts as widening.
+// where credentials go. It is pure and deterministic: no I/O. The order of
+// entries in either doc does not change the result, except for a destination
+// with a shared rate bucket (two or more rate-limited unscoped entries on one
+// host and port), where the evaluator's entry order decides which entry opens
+// the bucket and so any reorder is reported (allow.rate_relaxed); #648 tracks
+// fixing that in the evaluator. There is no regex or wildcard containment
+// analysis: an allow key that is new is widening however narrow it looks.
+// Anything it does not recognise counts as widening.
 func Classify(base, draft Doc) Classification {
 	var reasons []Reason
 	reasons = append(reasons, classifyAllow(base.Allowlist, draft.Allowlist)...)
@@ -405,16 +409,69 @@ func sharedBucketReasons(base, draft []config.AllowlistEntry) []Reason {
 	}
 	bg, dg := group(base), group(draft)
 	var reasons []Reason
+	emit := func(k string) {
+		i := strings.LastIndex(k, ":")
+		port, _ := strconv.Atoi(k[i+1:])
+		reasons = append(reasons, Reason{CodeAllowRateRelaxed, destPath("allowlist", k[:i], port), destDetail(k[:i], port)})
+	}
 	for k := range union(bg, dg) {
 		b, d := bg[k], dg[k]
 		if (len(b) < 2 && len(d) < 2) || slices.Equal(b, d) {
 			continue
 		}
-		i := strings.LastIndex(k, ":")
-		port, _ := strconv.Atoi(k[i+1:])
-		reasons = append(reasons, Reason{CodeAllowRateRelaxed, destPath("allowlist", k[:i], port), destDetail(k[:i], port)})
+		emit(k)
 	}
-	return reasons
+	// The evaluator walks entries in order: a request that fails one entry
+	// falls through (and is charged) to the next, and the entry that opens a
+	// shared bucket sets its window. So for a host and port with a shared
+	// bucket the ordered sequence of every entry that could match it must be
+	// unchanged. Not modelled: any difference, including a reorder, is
+	// reported (#648 tracks fixing the evaluator so order stops mattering).
+	for k := range union(bg, dg) {
+		if len(bg[k]) < 2 && len(dg[k]) < 2 {
+			continue
+		}
+		if !slices.Equal(candidateSeq(base, k), candidateSeq(draft, k)) {
+			emit(k)
+		}
+	}
+	return slices.Compact(sortedReasons(reasons))
+}
+
+// candidateSeq returns, in doc order, the signature of every allow entry that
+// could match the bucket key k: same literal key, or a regex or wildcard entry
+// on that port (treated as possibly matching), or anything when k itself is a
+// regex or wildcard pattern.
+func candidateSeq(es []config.AllowlistEntry, k string) []string {
+	i := strings.LastIndex(k, ":")
+	host := k[:i]
+	port, _ := strconv.Atoi(k[i+1:])
+	patternKey := strings.HasPrefix(host, "~") || strings.HasPrefix(host, "*.")
+	var out []string
+	for _, e := range es {
+		if e.Port != 0 && e.Port != port {
+			continue
+		}
+		pattern := strings.HasPrefix(e.Domain, "~") || strings.HasPrefix(e.Domain, "*.")
+		if patternKey || pattern || slices.Contains(policy.RateBucketKeys(e.Domain, e.Port), k) {
+			out = append(out, allowSig(e))
+		}
+	}
+	return out
+}
+
+func sortedReasons(rs []Reason) []Reason {
+	sort.Slice(rs, func(i, j int) bool {
+		a, b := rs[i], rs[j]
+		if a.Code != b.Code {
+			return a.Code < b.Code
+		}
+		if a.Path != b.Path {
+			return a.Path < b.Path
+		}
+		return a.Detail < b.Detail
+	})
+	return rs
 }
 
 func union(a, b map[string][]string) map[string]struct{} {

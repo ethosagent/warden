@@ -32,8 +32,8 @@ func rated(domain string, port int, method, rl string) config.AllowlistEntry {
 // throughput counts the requests of method target the evaluator admits over
 // agreeSteps steps of agreeStepDur, after an optional opener request each step
 // (the opener may open the shared bucket and set its window).
-func throughput(entries []config.AllowlistEntry, opener, target string) int {
-	now := time.Date(2024, 1, 1, 10, 0, 0, 0, time.Local)
+func throughput(entries []config.AllowlistEntry, startHour int, opener, target string) int {
+	now := time.Date(2024, 1, 1, startHour, 0, 0, 0, time.Local)
 	start := now
 	e := policy.NewEvaluator(config.Policy{Allowlist: entries})
 	e.SetNowForTest(func() time.Time { return now })
@@ -57,10 +57,12 @@ func throughput(entries []config.AllowlistEntry, opener, target string) int {
 }
 
 func evaluatorWidens(base, draft []config.AllowlistEntry) bool {
-	for _, opener := range []string{"", "GET", "POST"} {
-		for _, target := range []string{"GET", "POST"} {
-			if throughput(draft, opener, target) > throughput(base, opener, target) {
-				return true
+	for _, hour := range []int{10, 23} { // inside and outside a 22-6 window
+		for _, opener := range []string{"", "GET", "POST"} {
+			for _, target := range []string{"GET", "POST"} {
+				if throughput(draft, hour, opener, target) > throughput(base, hour, opener, target) {
+					return true
+				}
 			}
 		}
 	}
@@ -93,6 +95,18 @@ func TestClassifyAgreesWithEvaluatorOnSharedBuckets(t *testing.T) {
 		{"domain case double charge removed",
 			[]config.AllowlistEntry{rated("D.com", 443, "", "1/minute"), rated("d.com", 443, "", "3/minute")},
 			[]config.AllowlistEntry{rated("d.com", 443, "", "3/minute")}},
+		{"unrated entry that absorbed requests removed",
+			[]config.AllowlistEntry{rated("d.com", 443, "POST", ""), rated("d.com", 443, "GET", "3/hour"), rated("d.com", 443, "", "1/minute")},
+			[]config.AllowlistEntry{rated("d.com", 443, "GET", "3/hour"), rated("d.com", 443, "", "1/minute")}},
+		{"unrated entry narrowed so requests fall through",
+			[]config.AllowlistEntry{rated("d.com", 443, "POST", ""), rated("d.com", 443, "GET", "3/hour"), rated("d.com", 443, "", "1/minute")},
+			[]config.AllowlistEntry{rated("d.com", 443, "PUT", ""), rated("d.com", 443, "GET", "3/hour"), rated("d.com", 443, "", "1/minute")}},
+		{"reorder alone changes which entry opens the bucket",
+			[]config.AllowlistEntry{rated("d.com", 443, "", "1/minute"), rated("d.com", 443, "GET", "3/minute")},
+			[]config.AllowlistEntry{rated("d.com", 443, "GET", "3/minute"), rated("d.com", 443, "", "1/minute")}},
+		{"reorder with port 0 and a time window",
+			[]config.AllowlistEntry{timed(rated("d.com", 0, "", "3/hour"), "22-6"), rated("d.com", 0, "POST", "2/minute")},
+			[]config.AllowlistEntry{rated("d.com", 0, "POST", "2/minute"), timed(rated("d.com", 0, "", "3/hour"), "22-6")}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -104,6 +118,19 @@ func TestClassifyAgreesWithEvaluatorOnSharedBuckets(t *testing.T) {
 				t.Fatalf("evaluator admits more but Classify says narrowing: %+v", got)
 			}
 		})
+	}
+}
+
+func timed(e config.AllowlistEntry, tw string) config.AllowlistEntry { e.TimeWindow = tw; return e }
+
+// A reorder with no shared bucket changes nothing the evaluator can see (at
+// most one rate-limited unscoped entry per bucket): the classifier must not
+// flag it. Order only matters where a bucket is shared (#648).
+func TestClassifyReorderWithoutSharedBucketIsNarrowing(t *testing.T) {
+	a := []config.AllowlistEntry{rated("d.com", 443, "GET", ""), rated("d.com", 443, "POST", "2/minute"), rated("e.com", 443, "", "5/hour")}
+	b := []config.AllowlistEntry{rated("e.com", 443, "", "5/hour"), rated("d.com", 443, "POST", "2/minute"), rated("d.com", 443, "GET", "")}
+	if got := approvals.Classify(approvals.Doc{Allowlist: a}, approvals.Doc{Allowlist: b}); got.Widening {
+		t.Fatalf("reorder without a shared bucket flagged: %+v", got)
 	}
 }
 
