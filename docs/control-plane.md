@@ -1162,9 +1162,20 @@ answers `403 use_cli` even with the admin bearer; reads still work. In oidc mode
 write is `403 role_required`. With admin audit on, each successful write is one row
 (`agent.create`, `agent.update`, `agent.disable`, `agent.enable`; target `agents`, `target_ref`
 `agent:<id>`). A refused or failed write is a row too (`denied`, `rejected` or `error`). The row
-details name what changed, never key material: `changed` (`displayName`, `keys`, `allowedGroups`,
-`allowedScopes`), `kids_added`, `kids_removed`, `groups_added`, `groups_removed`, `status_from` and
-`status_to`. No JWK coordinate appears in an audit row, a log line or an error. The control plane
+details name what changed, never key material, and use these keys only: `op` (`create`,
+`update`, `disable` or `enable`), `changed` (an update's edited fields: `displayName`, `keys`,
+`allowedGroups`, `allowedScopes`, `status`), `kidsAdded` and `kidsRemoved` (key ids), `jktsAdded`
+and `jktsRemoved` (full RFC 7638 thumbprints, so swapping key material under one kid is visible),
+`groupsAdded` and `groupsRemoved`, `statusFrom` (only when there was a previous row) and `statusTo`.
+A list holds its elements sorted by raw value, each percent-encoded (every byte outside
+`A-Za-z0-9-._~:` becomes `%XX` in uppercase hex, `%` and `,` included) and joined with `,`.
+A create and an update always carry a `<list>Count` (the full number of elements, for example
+`groupsAddedCount`) for each of the six lists; a disable or enable carries no list. A list that
+would not fit one 256-byte value is cut at an element, and only then the row also carries
+`truncated: "true"` and `<list>Sha256`: the lowercase hex sha256 of the full list in the canonical
+form above (elements sorted by raw byte value before encoding, then encoded, then joined with
+`,`), so a padded list cannot hide an addition. Empty values are omitted. No JWK coordinate appears
+in an audit row, a log line or an error. The control plane
 also keeps in-memory counters for retention reporting: `warden_cp_agent_registry_writes_total{action,outcome}`
 and `warden_cp_agents{status}`.
 

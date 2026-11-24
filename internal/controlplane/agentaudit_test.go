@@ -20,8 +20,8 @@ func auditKey(kid, jkt string) agentreg.Key { return agentreg.Key{KID: kid, JKT:
 
 func checkDetails(t *testing.T, d map[string]string) {
 	t.Helper()
-	if len(d) > 24 {
-		t.Errorf("%d detail keys, the entry limit is 24", len(d))
+	if len(d) > agentAuditMaxKeys {
+		t.Errorf("%d detail keys, the budget is %d", len(d), agentAuditMaxKeys)
 	}
 	for k, v := range d {
 		if v == "" {
@@ -186,7 +186,24 @@ func TestAgentAuditDetails_WorstCaseFitsAnEntry(t *testing.T) {
 	a := auditAgent(after, auditKey(strings.Repeat("c", 128), "J3"), auditKey(strings.Repeat("d", 128), "J4"))
 	d := AgentAuditDetails(&b, a)
 	checkDetails(t, d)
-	if len(d) > 24 {
-		t.Fatalf("%d keys", len(d))
+	if len(d) > agentAuditMaxKeys || len(d)+middlewareReservedKeys > adminaudit.MaxDetails {
+		t.Fatalf("%d keys, the budget is %d of %d", len(d), agentAuditMaxKeys, adminaudit.MaxDetails)
+	}
+}
+
+// Disabling an agent that is already disabled is still a disable, and carries
+// no list.
+func TestAgentStatusAuditDetails_SameStatus(t *testing.T) {
+	before := auditAgent([]string{"g"}, auditKey("k", "J"))
+	before.Status = agentreg.StatusDisabled
+	d := AgentStatusAuditDetails(before, "disable")
+	checkDetails(t, d)
+	want := map[string]string{"op": "disable", "statusFrom": "disabled", "statusTo": "disabled"}
+	if fmt.Sprint(d) != fmt.Sprint(want) {
+		t.Errorf("same-status disable = %v, want %v", d, want)
+	}
+	d = AgentStatusAuditDetails(auditAgent([]string{"g"}), "enable")
+	if d["op"] != "enable" || d["statusFrom"] != "active" || d["statusTo"] != "active" || len(d) != 3 {
+		t.Errorf("same-status enable = %v", d)
 	}
 }
