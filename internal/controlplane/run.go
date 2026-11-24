@@ -537,7 +537,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	if p.Findings != nil {
 		srv.findings = p.Findings
 	}
-	srv.flushRepairedBypasses()
+	srv.alertUnreviewedBypasses(ctx)
 
 	// Load (or, on first start, create) the signing keys and catch up on any
 	// transitions a downtime made due, now that a Finding can be delivered. A

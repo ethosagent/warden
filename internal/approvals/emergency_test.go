@@ -612,9 +612,10 @@ func TestStoreEmergencyGuards(t *testing.T) {
 }
 
 // mintSites maps each Clearance kind to the one function in gate.go that may
-// mint it. A Clearance literal with fields, or an assignment to a .kind
-// selector, anywhere else (or for another kind) is a new route to a Clearance
-// and fails TestClearanceMintedOnlyInGate.
+// mint it. Any other reference to a kind constant, a Clearance literal with
+// fields, an assignment or increment of a .kind, a conversion to or alias of
+// Clearance, or a new caller of clearEmergency is a new route to a Clearance and
+// fails TestClearanceMintedOnlyInGate.
 var mintSites = map[string]string{
 	"clearDisabled":  "Clear",
 	"clearNarrowing": "Clear",
@@ -622,63 +623,114 @@ var mintSites = map[string]string{
 	"clearEmergency": "clearEmergency",
 }
 
-// mintViolations parses src files (name -> source) and reports every
-// Clearance literal with fields or .kind assignment outside its allowed
-// gate.go function.
+// mintViolations parses src files (name -> source) and reports every way a
+// Clearance could be minted outside gate.go's allow list.
 func mintViolations(t *testing.T, srcs map[string]string) []string {
 	t.Helper()
 	fset := token.NewFileSet()
 	var out []string
+	bad := func(name, fn, what string) {
+		out = append(out, fmt.Sprintf("%s: %s: %s", name, fn, what))
+	}
 	for name, src := range srcs {
 		f, err := parser.ParseFile(fset, name, src, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, decl := range f.Decls {
-			fd, ok := decl.(*ast.FuncDecl)
-			if !ok {
-				// Package-level literals and assignments have no function.
-				ast.Inspect(decl, func(n ast.Node) bool {
-					if isMint(n) {
-						out = append(out, fmt.Sprintf("%s: a Clearance is minted outside any function", name))
-					}
-					return true
-				})
-				continue
+		for _, imp := range f.Imports {
+			// reflect is allowed only in settings_rules.go, and there only for
+			// reflect.DeepEqual (checked below); unsafe is never allowed.
+			if p := strings.Trim(imp.Path.Value, `"`); p == "unsafe" || (p == "reflect" && name != "settings_rules.go") {
+				bad(name, "imports", "imports "+p+", which could forge a Clearance")
 			}
-			ast.Inspect(fd, func(n ast.Node) bool {
+		}
+		inGate := name == "gate.go"
+		var visit func(fn string) func(ast.Node) bool
+		visit = func(fn string) func(ast.Node) bool {
+			return func(n ast.Node) bool {
 				switch x := n.(type) {
-				case *ast.CompositeLit:
-					if !isClearanceLit(x) || len(x.Elts) == 0 {
-						return true
+				case *ast.SelectorExpr:
+					if id, ok := x.X.(*ast.Ident); ok && id.Name == "reflect" && x.Sel.Name != "DeepEqual" {
+						bad(name, fn, "uses reflect."+x.Sel.Name+"; only reflect.DeepEqual is allowed")
 					}
-					kind := litKind(x)
-					if name != "gate.go" || mintSites[kind] != fd.Name.Name {
-						out = append(out, fmt.Sprintf("%s: %s mints Clearance kind %q", name, fd.Name.Name, kind))
+					// A selector's field or method name is not a reference to a
+					// package-level constant.
+					ast.Inspect(x.X, visit(fn))
+					return false
+				case *ast.Ident:
+					if _, isKind := mintSites[x.Name]; isKind && !(inGate && (fn == "Reason" || mintSites[x.Name] == fn)) {
+						bad(name, fn, "references kind constant "+x.Name)
+					}
+				case *ast.CompositeLit:
+					hasKind := false
+					for _, e := range x.Elts {
+						if kv, ok := e.(*ast.KeyValueExpr); ok {
+							if k, ok := kv.Key.(*ast.Ident); ok && k.Name == "kind" {
+								hasKind = true
+							}
+						}
+					}
+					if hasKind && x.Type == nil {
+						bad(name, fn, "an elided-type literal sets kind")
+					}
+					if isClearanceLit(x) && len(x.Elts) > 0 && (!inGate || !isMintFunc(fn)) {
+						bad(name, fn, "mints a Clearance literal")
 					}
 				case *ast.AssignStmt:
 					for _, l := range x.Lhs {
 						if sel, ok := l.(*ast.SelectorExpr); ok && sel.Sel.Name == "kind" {
-							out = append(out, fmt.Sprintf("%s: %s assigns a .kind", name, fd.Name.Name))
+							bad(name, fn, "assigns a .kind")
+						}
+					}
+				case *ast.IncDecStmt:
+					if sel, ok := x.X.(*ast.SelectorExpr); ok && sel.Sel.Name == "kind" {
+						bad(name, fn, "increments a .kind")
+					}
+				case *ast.TypeSpec:
+					if id, ok := x.Type.(*ast.Ident); ok && id.Name == "Clearance" {
+						bad(name, fn, "declares a type "+x.Name.Name+" of Clearance")
+					}
+				case *ast.CallExpr:
+					switch fun := x.Fun.(type) {
+					case *ast.Ident:
+						if fun.Name == "Clearance" && len(x.Args) > 0 {
+							bad(name, fn, "converts a value to Clearance")
+						}
+						if fun.Name == "clearEmergency" {
+							bad(name, fn, "calls clearEmergency")
+						}
+					case *ast.SelectorExpr:
+						if fun.Sel.Name == "clearEmergency" && !(inGate && fn == "EmergencyApply") {
+							bad(name, fn, "calls clearEmergency outside EmergencyApply")
 						}
 					}
 				}
 				return true
-			})
+			}
+		}
+		for _, decl := range f.Decls {
+			switch d := decl.(type) {
+			case *ast.FuncDecl:
+				if d.Type != nil {
+					ast.Inspect(d.Type, visit(d.Name.Name))
+				}
+				if d.Body != nil {
+					ast.Inspect(d.Body, visit(d.Name.Name))
+				}
+			case *ast.GenDecl:
+				if d.Tok != token.CONST { // the const block declares the kinds
+					ast.Inspect(d, visit(""))
+				}
+			}
 		}
 	}
 	return out
 }
 
-func isMint(n ast.Node) bool {
-	switch x := n.(type) {
-	case *ast.CompositeLit:
-		return isClearanceLit(x) && len(x.Elts) > 0
-	case *ast.AssignStmt:
-		for _, l := range x.Lhs {
-			if sel, ok := l.(*ast.SelectorExpr); ok && sel.Sel.Name == "kind" {
-				return true
-			}
+func isMintFunc(fn string) bool {
+	for _, f := range mintSites {
+		if f == fn {
+			return true
 		}
 	}
 	return false
@@ -703,10 +755,11 @@ func litKind(x *ast.CompositeLit) string {
 }
 
 // TestClearanceMintedOnlyInGate is the source-level pin of the narrowness of
-// every mint path, on the AST: a non-zero Clearance literal, or an assignment
-// to a Clearance's kind, appears only in the one gate.go function allowed for
-// that kind, so a new route to a Clearance has to be written in the Gate where
-// review sees it.
+// every mint path, on the AST: kind constants are referenced only by the one
+// gate.go function allowed for each (and Reason), Clearance literals appear
+// only there, nothing assigns, increments, converts or aliases a Clearance, the
+// package imports neither unsafe nor reflect, and clearEmergency is called only
+// from EmergencyApply.
 func TestClearanceMintedOnlyInGate(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	if err != nil {
@@ -727,16 +780,24 @@ func TestClearanceMintedOnlyInGate(t *testing.T) {
 		t.Fatalf("Clearance minted outside the allow list:\n%s", strings.Join(v, "\n"))
 	}
 	// Every kind is still minted exactly where the map says (the guard is not
-	// vacuous, and a renamed function cannot silently drop one).
+	// vacuous, and a renamed function cannot silently drop one), and
+	// clearEmergency has exactly one caller.
 	seen := map[string]bool{}
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "gate.go", srcs["gate.go"], 0)
+	callers := 0
+	f, err := parser.ParseFile(token.NewFileSet(), "gate.go", srcs["gate.go"], 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ast.Inspect(f, func(n ast.Node) bool {
-		if x, ok := n.(*ast.CompositeLit); ok && isClearanceLit(x) && len(x.Elts) > 0 {
-			seen[litKind(x)] = true
+		switch x := n.(type) {
+		case *ast.CompositeLit:
+			if isClearanceLit(x) && len(x.Elts) > 0 {
+				seen[litKind(x)] = true
+			}
+		case *ast.CallExpr:
+			if sel, ok := x.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "clearEmergency" {
+				callers++
+			}
 		}
 		return true
 	})
@@ -745,24 +806,39 @@ func TestClearanceMintedOnlyInGate(t *testing.T) {
 			t.Errorf("gate.go no longer mints %s; update mintSites", kind)
 		}
 	}
+	if callers != 1 {
+		t.Errorf("clearEmergency has %d callers, want 1 (EmergencyApply)", callers)
+	}
 }
 
-// TestClearanceMintGuardCatchesScratchMints proves the guard fails on a mint in
-// another file, in the wrong gate.go function, by assignment, and at package
-// level.
+// TestClearanceMintGuardCatchesScratchMints proves the guard fails on each way
+// of minting outside the allow list, and passes a legal one.
 func TestClearanceMintGuardCatchesScratchMints(t *testing.T) {
+	const pkg = "package approvals\n"
 	for name, srcs := range map[string]map[string]string{
-		"another file":   {"scratch.go": "package approvals\nfunc Sneak() Clearance { return Clearance{kind: clearEmergency, docSHA: \"x\"} }\n"},
-		"wrong function": {"gate.go": "package approvals\nfunc Hold() Clearance { return Clearance{kind: clearEmergency} }\n"},
-		"wrong kind":     {"gate.go": "package approvals\nfunc ClearApplied() Clearance { return Clearance{kind: clearEmergency} }\n"},
-		"assignment":     {"scratch.go": "package approvals\nfunc Sneak(c Clearance) Clearance { c.kind = clearApplied; return c }\n"},
-		"package level":  {"scratch.go": "package approvals\nvar Sneaky = Clearance{kind: clearApplied}\n"},
+		"another file":       {"scratch.go": pkg + "func Sneak() Clearance { return Clearance{kind: clearEmergency, docSHA: \"x\"} }\n"},
+		"wrong function":     {"gate.go": pkg + "func Hold() Clearance { return Clearance{kind: clearEmergency} }\n"},
+		"wrong kind":         {"gate.go": pkg + "func ClearApplied() Clearance { return Clearance{kind: clearEmergency} }\n"},
+		"assignment":         {"scratch.go": pkg + "func Sneak(c Clearance) Clearance { c.kind = clearApplied; return c }\n"},
+		"package level":      {"scratch.go": pkg + "var Sneaky = Clearance{kind: clearApplied}\n"},
+		"increment":          {"scratch.go": pkg + "func Sneak(c Clearance) Clearance { c.kind++; return c }\n"},
+		"type alias":         {"scratch.go": pkg + "type Forged = Clearance\n"},
+		"defined type":       {"scratch.go": pkg + "type Forged Clearance\n"},
+		"elided literal":     {"scratch.go": pkg + "func Sneak() []Clearance { return []Clearance{{kind: 3}} }\n"},
+		"conversion":         {"scratch.go": pkg + "func Sneak(x struct{ kind clearanceKind; draftID, docSHA string }) Clearance { return Clearance(x) }\n"},
+		"kind reference":     {"scratch.go": pkg + "func Sneak() clearanceKind { return clearEmergency }\n"},
+		"new caller":         {"scratch.go": pkg + "func Sneak(g *Gate) { _, _ = g.clearEmergency(nil, Draft{}, Author{}) }\n"},
+		"new caller in gate": {"gate.go": pkg + "func Hold(g *Gate) { _, _ = g.clearEmergency(nil, Draft{}, Author{}) }\n"},
+		"unsafe":             {"scratch.go": pkg + "import \"unsafe\"\nvar _ unsafe.Pointer\n"},
+		"reflect":            {"scratch.go": pkg + "import \"reflect\"\nvar _ = reflect.TypeOf\n"},
+		"reflect elsewhere":  {"gate.go": pkg + "import \"reflect\"\nvar _ = reflect.TypeOf\n"},
+		"reflect misuse":     {"settings_rules.go": pkg + "import \"reflect\"\nvar _ = reflect.ValueOf\n"},
 	} {
 		if v := mintViolations(t, srcs); len(v) == 0 {
 			t.Errorf("%s: the guard did not flag the scratch mint", name)
 		}
 	}
-	ok := map[string]string{"gate.go": "package approvals\nfunc ClearApplied() Clearance { return Clearance{kind: clearApplied} }\nfunc Other() Clearance { return Clearance{} }\n"}
+	ok := map[string]string{"gate.go": pkg + "func ClearApplied() Clearance { return Clearance{kind: clearApplied} }\nfunc Other() Clearance { return Clearance{} }\nfunc EmergencyApply(g *Gate) { _, _ = g.clearEmergency(nil, Draft{}, Author{}) }\nfunc (c Clearance) Reason() string { switch c.kind { case clearEmergency: return \"e\" }; return \"\" }\n"}
 	if v := mintViolations(t, ok); len(v) != 0 {
 		t.Errorf("the guard flagged a legal mint: %v", v)
 	}

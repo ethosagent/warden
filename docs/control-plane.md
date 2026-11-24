@@ -1070,8 +1070,13 @@ claim and an `emergency` approval row holding the reason are written together, a
 (if it cannot be written nothing publishes). Every success raises one critical
 `approval_bypassed` Finding and one ERROR log line; the draft is then `applied_unreviewed`.
 If the version published but the draft could not be updated, the request fails with
-`500 emergency_apply_unrecorded` and still alerts, and startup repairs the draft and
-alerts again.
+`500 emergency_apply_unrecorded`, still alerts and still writes its `policy.write` audit
+row (the 500 request row is kept). At every start the control plane raises the
+`approval_bypassed` Finding again for each draft still `applied_unreviewed` (repeats
+share the DedupKey `approval_bypassed:<draft id>`), and settles an interrupted draft.
+A crash between the publish and the draft update is different: no request row or
+`policy.write` row is written even after the repair, so look in policy history for a
+version authored by the break-glass actor (author kind `breakglass`).
 
 `POST /dashboard/api/changes/{id}/review {"comment": "..."}` (at least 10 characters)
 closes it as `applied`. It needs an OIDC admin who is not a break-glass session and

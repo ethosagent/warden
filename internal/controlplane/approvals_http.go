@@ -666,6 +666,11 @@ type auditFollowUp struct {
 	Action, Target, TargetRef string
 	Details                   map[string]string
 	BeforeHash, AfterHash     string
+	// Committed marks a row for a change that really happened although the
+	// request failed afterwards. It is recorded (as outcome ok) even when the
+	// request's own row is not ok. Only the emergency-apply handler, for a
+	// version that published but could not be recorded on its draft, sets it.
+	Committed bool
 }
 
 // addAuditFollowUp asks the admin audit middleware for one more row after the
@@ -704,8 +709,15 @@ func (a changeDraftAPI) recordPolicyApply(ctx context.Context, before string, d 
 // recordPolicyApplyOp is recordPolicyApply with the row's op detail set (an
 // emergency apply says so, so history and audit tell it from an approval).
 func (a changeDraftAPI) recordPolicyApplyOp(ctx context.Context, before string, d approvals.Draft, op string) {
+	if f, ok := a.policyApplyFollowUp(ctx, before, d, op); ok {
+		addAuditFollowUp(ctx, f)
+	}
+}
+
+// policyApplyFollowUp is the policy.write row of a draft that published.
+func (a changeDraftAPI) policyApplyFollowUp(ctx context.Context, before string, d approvals.Draft, op string) (auditFollowUp, bool) {
 	if a.s.audit == nil {
-		return
+		return auditFollowUp{}, false
 	}
 	after := a.s.policyHashNow(ctx)
 	ref := "policy@" + a.s.policy.currentETag()
@@ -716,11 +728,11 @@ func (a changeDraftAPI) recordPolicyApplyOp(ctx context.Context, before string, 
 	if op != "" {
 		details[adminaudit.DetailOp] = op
 	}
-	addAuditFollowUp(ctx, auditFollowUp{
+	return auditFollowUp{
 		Action: "policy.write", Target: auditTargetPolicy, TargetRef: ref,
 		Details:    details,
 		BeforeHash: before, AfterHash: after,
-	})
+	}, true
 }
 
 type auditScopeKey struct{}

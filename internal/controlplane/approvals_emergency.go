@@ -12,7 +12,6 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
-	"sync"
 
 	"github.com/ethosagent/warden/internal/adminaudit"
 	"github.com/ethosagent/warden/internal/approvals"
@@ -53,7 +52,11 @@ func (a changeDraftAPI) EmergencyApply(ctx context.Context, id string, in dashbo
 		if errors.As(err, &pub) {
 			// The version is live whatever happened to the record of it: audit and
 			// alert on it, then fail the request loudly.
-			a.recordPolicyApplyOp(ctx, policyBefore, d, "emergency_apply")
+			if f, ok := a.policyApplyFollowUp(ctx, policyBefore, d, "emergency_apply"); ok {
+				// The version is live although the request fails: record it anyway.
+				f.Committed = true
+				addAuditFollowUp(ctx, f)
+			}
 			a.s.reportBypass(au.Sub, d, false)
 			a.s.cfg.Logger.Error("control plane: emergency apply published but the draft could not be recorded; startup reconcile will settle it",
 				"draft_id", d.ID, "version", pub.Version, "error", pub.Err)
@@ -136,36 +139,47 @@ func (s *Server) publishBypassFinding(actorSub string, d approvals.Draft) {
 	})
 }
 
-// repairedBypasses are the emergency applies startup reconcile settled. Their
-// ERROR line is logged at once; their Finding waits for flushRepairedBypasses,
-// because reconcile runs inside New, before the alert pipeline exists.
-type repairedBypasses struct {
-	mu    sync.Mutex
-	items []repairedBypass
-}
-
-type repairedBypass struct {
-	actorSub string
-	draft    approvals.Draft
-}
-
-// noteRepairedBypass is the approvals Service's OnEmergencyRepaired hook.
+// noteRepairedBypass is the approvals Service's OnEmergencyRepaired hook: it
+// logs the ERROR line of a bypass startup reconcile settled. The Finding does
+// not wait in memory (Run could fail before it is sent); alertUnreviewedBypasses
+// raises it from the draft table at every start.
 func (s *Server) noteRepairedBypass(d approvals.Draft, actorSub string) {
 	s.logBypass(actorSub, d, true)
-	s.repaired.mu.Lock()
-	defer s.repaired.mu.Unlock()
-	s.repaired.items = append(s.repaired.items, repairedBypass{actorSub: actorSub, draft: d})
 }
 
-// flushRepairedBypasses publishes the Findings of the bypasses reconcile
-// repaired. Run calls it once Findings can be delivered.
-func (s *Server) flushRepairedBypasses() {
-	s.repaired.mu.Lock()
-	items := s.repaired.items
-	s.repaired.items = nil
-	s.repaired.mu.Unlock()
-	for _, it := range items {
-		s.publishBypassFinding(it.actorSub, it.draft)
+// alertUnreviewedBypasses publishes one critical approval_bypassed Finding for
+// every draft still applied_unreviewed. The state table is the source of truth,
+// so a bypass whose alert was lost (a crash before it was sent, a start that
+// failed before the alert pipeline was up) is raised again at the next start;
+// the DedupKey approval_bypassed:<draft id> keeps repeats from piling up. Run
+// calls it once the pipeline is ready.
+func (s *Server) alertUnreviewedBypasses(ctx context.Context) {
+	if s.approvals == nil {
+		return
+	}
+	store := s.approvals.Store()
+	cursor := ""
+	for {
+		ds, next, err := store.List(ctx, approvals.Filter{Target: approvals.TargetPolicy, State: approvals.StateAppliedUnreviewed}, cursor, 100)
+		if err != nil {
+			s.cfg.Logger.Warn("control plane: cannot list unreviewed emergency applies to alert on", "error", err)
+			return
+		}
+		for _, d := range ds {
+			actor := "unknown"
+			if rows, err := store.Approvals(ctx, d.ID); err == nil {
+				for _, r := range rows {
+					if r.Decision == approvals.DecisionEmergency && r.Revision == d.Revision {
+						actor = r.ApproverSub
+					}
+				}
+			}
+			s.publishBypassFinding(actor, d)
+		}
+		if next == "" {
+			return
+		}
+		cursor = next
 	}
 }
 

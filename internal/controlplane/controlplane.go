@@ -210,9 +210,6 @@ type Server struct {
 	// approvalsErr is why an enabled approvals gate was not built; Run refuses
 	// to start on it.
 	approvalsErr error
-	// repaired holds the emergency applies reconcile settled at startup, whose
-	// Findings are published once the alert pipeline is up.
-	repaired repairedBypasses
 	// gate is the one clearance check every versioned write goes through
 	// (W-P2-APPR-06). Built in New from console.approvals.enabled, so it exists
 	// on every Server; with approvals enabled and no service it refuses writes.

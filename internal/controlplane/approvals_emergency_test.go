@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -517,6 +519,15 @@ func TestEmergencyPublishedButNotRecorded(t *testing.T) {
 	}
 	rec := e.do("breakglass", http.MethodPost, draftsPath+"/"+d.ID+"/emergency-apply", emergencyBody(emergencyReason))
 	e.wantErr(t, rec, http.StatusInternalServerError, "emergency_apply_unrecorded")
+	// The request fails, but the version is live: its policy.write row is
+	// still recorded (outcome ok, op emergency_apply), beside the 500 primary row.
+	if p := e.auditRows("change.draft.emergency_apply"); len(p) == 0 || p[len(p)-1].Outcome != adminaudit.OutcomeError || p[len(p)-1].HTTPStatus != http.StatusInternalServerError {
+		t.Errorf("primary rows = %+v, want the 500 row kept", p)
+	}
+	if w := e.auditRows("policy.write"); len(w) == 0 || w[len(w)-1].Outcome != adminaudit.OutcomeOK || w[len(w)-1].Details[adminaudit.DetailOp] != "emergency_apply" ||
+		w[len(w)-1].Details[adminaudit.DetailAppliedVersion] != "2" {
+		t.Errorf("policy.write rows = %+v, want one ok row for v2 with op emergency_apply", w)
+	}
 	e.wantHead(t, 2) // the version is live
 	fs := e.pub.byRule("approval_bypassed")
 	if len(fs) != 1 || fs[0].Severity != integration.SevCritical || fs[0].DedupKey != "approval_bypassed:"+d.ID ||
@@ -544,13 +555,57 @@ func TestEmergencyPublishedButNotRecorded(t *testing.T) {
 	if len(e.pub.byRule("approval_bypassed")) != 1 {
 		t.Error("the repair Finding was published before the pipeline was up")
 	}
-	e.srv.flushRepairedBypasses()
-	fs = e.pub.byRule("approval_bypassed")
-	if len(fs) != 2 || fs[1].DedupKey != "approval_bypassed:"+d.ID || fs[1].Severity != integration.SevCritical {
-		t.Errorf("Findings after the flush = %+v", fs)
+	// The Finding is not held in memory: a Run that failed here would lose
+	// nothing, because the next Run's pass over the draft table raises it. A
+	// second control plane over the same state database stands for that Run.
+	e2 := New(e.srv.cfg)
+	t.Cleanup(e2.Approvals().Replayer().Close)
+	pub2 := &recFindings{}
+	e2.findings = pub2
+	e2.alertUnreviewedBypasses(context.Background())
+	fs = pub2.byRule("approval_bypassed")
+	if len(fs) != 1 || fs[0].DedupKey != "approval_bypassed:"+d.ID || fs[0].Severity != integration.SevCritical ||
+		!strings.Contains(string(fs[0].Evidence), "actor=breakglass:ops") {
+		t.Fatalf("Findings from the next run = %+v", fs)
 	}
-	e.srv.flushRepairedBypasses()
-	if len(e.pub.byRule("approval_bypassed")) != 2 {
-		t.Error("a second flush re-published")
+	// Reviewing the draft ends the alerts.
+	if rec := e.do("admin2", http.MethodPost, draftsPath+"/"+d.ID+"/review", `{"comment":"reviewed after the outage"}`); rec.Code != http.StatusOK {
+		t.Fatalf("review = %d %s", rec.Code, rec.Body.String())
+	}
+	e2.alertUnreviewedBypasses(context.Background())
+	if n := len(pub2.byRule("approval_bypassed")); n != 1 {
+		t.Errorf("a reviewed draft was alerted again (%d Findings)", n)
+	}
+}
+
+// TestCommittedFollowUpOnlyFromEmergencyPublish pins that the only code setting
+// auditFollowUp.Committed is the emergency-apply branch for a version that
+// published but could not be recorded: nothing else may write an audit row for
+// a request that failed.
+func TestCommittedFollowUpOnlyFromEmergencyPublish(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, pat := range []string{"Committed = true", "Committed: true", "Committed:true"} {
+			if c := strings.Count(string(b), pat); c > 0 {
+				n += c
+				if f != "approvals_emergency.go" {
+					t.Errorf("%s sets auditFollowUp.Committed; only approvals_emergency.go may", f)
+				}
+			}
+		}
+	}
+	if n != 1 {
+		t.Errorf("Committed is set in %d places, want exactly 1 (the EmergencyPublishedError branch)", n)
 	}
 }
