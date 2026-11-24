@@ -121,7 +121,7 @@ func (m *fakeMetrics) RecordJudge(outcome string)    { m.record("RecordJudge(%q)
 func (m *fakeMetrics) ObserveAddedLatency(stage string, d time.Duration) {
 	m.record("ObserveAddedLatency(%q)", stage)
 }
-func (m *fakeMetrics) RecordIdentityVerify(result, reason string) {
+func (m *fakeMetrics) RecordIdentityVerify(result, reason, tokenType string) {
 	m.mu.Lock()
 	m.identity[[2]string{result, reason}]++
 	m.mu.Unlock()

@@ -159,6 +159,9 @@ func identityMatrix(tr idTransport) func(*testing.T, *harness.H) {
 			{"invalid", "wrong_azp"}: 1,
 			{"none", "none"}:         1,
 		})
+		assertVerifyTokenTypes(t, h, map[string]string{
+			"valid": "dex", "expired": "dex", "invalid": "dex", "none": "none",
+		})
 		assertUpstreamClean(t, up, len(cases))
 		assertNoTokenLeak(t, h, cases, up)
 	}
@@ -273,9 +276,40 @@ func verifyCounts(h *harness.H) map[[2]string]float64 {
 			name, val, _ := strings.Cut(kv, "=")
 			labels[name] = val
 		}
-		out[[2]string{labels["result"], labels["reason"]}] = v
+		out[[2]string{labels["result"], labels["reason"]}] += v
 	}
 	return out
+}
+
+// assertVerifyTokenTypes checks the token_type label of every verify series:
+// wantByResult maps a result to the one token_type its series must carry, and
+// every series must have exactly the labels result, reason and token_type.
+func assertVerifyTokenTypes(t *testing.T, h *harness.H, wantByResult map[string]string) {
+	t.Helper()
+	if !h.MetricsAvailable() {
+		return
+	}
+	n := 0
+	for k := range h.Metrics() {
+		if !strings.HasPrefix(k, verifyMetric+"{") {
+			continue
+		}
+		n++
+		labels := map[string]string{}
+		for _, kv := range strings.Split(strings.TrimSuffix(strings.TrimPrefix(k, verifyMetric+"{"), "}"), ",") {
+			name, val, _ := strings.Cut(kv, "=")
+			labels[name] = val
+		}
+		if len(labels) != 3 {
+			t.Errorf("%s series %q: want exactly result, reason, token_type labels", verifyMetric, k)
+		}
+		if want, ok := wantByResult[labels["result"]]; ok && labels["token_type"] != want {
+			t.Errorf("%s series %q: token_type %q, want %q", verifyMetric, k, labels["token_type"], want)
+		}
+	}
+	if n == 0 {
+		t.Errorf("no %s series to check", verifyMetric)
+	}
 }
 
 // assertVerifyCounts compares the whole verify counter to want: every series
