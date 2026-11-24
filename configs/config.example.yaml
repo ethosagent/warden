@@ -454,7 +454,7 @@ controlPlane:
   # bundleKeys:                   # public JWKs that may sign bundles (OKP/Ed25519 or EC/P-256)
   #   - {kty: OKP, crv: Ed25519, x: "<base64url>", kid: "<RFC 7638 thumbprint>"}
   # bundleKeysFile: ""            # JWKS JSON file {"keys":[...]}, merged with bundleKeys (max 16 total)
-  # requireSignedBundles: false   # true = managed worker with no pins fails config load
+  # requireSignedBundles: false   # true = no pins fails config load (checked when endpoint is set and localOnly is not true, so --local-only workers too; fail-closed)
   # bundleIssuer: ""              # optional: required bundle cpId
   # bundleClockSkew: 5m           # tolerance on issuedAt/expiresAt, max 1h
   # bundleExpiry: keep            # keep = enforce last-known-good past expiry | deny

@@ -89,12 +89,14 @@ func TestControlPlaneRequireSignedBundles(t *testing.T) {
 func TestControlPlaneBundleKeysReject(t *testing.T) {
 	ed := edPin(t)
 	cases := map[string]string{
-		"private d":      fmt.Sprintf("{kty: OKP, crv: Ed25519, x: %s, kid: %s, d: %s}", ed.X, ed.Kid, pinEdD),
-		"private d null": fmt.Sprintf("{kty: OKP, crv: Ed25519, x: %s, kid: %s, d: null}", ed.X, ed.Kid),
-		"oct":            "{kty: oct, k: AAAA, kid: x}",
-		"rsa":            "{kty: RSA, n: AQAB, e: AQAB, kid: x}",
-		"missing kid":    fmt.Sprintf("{kty: OKP, crv: Ed25519, x: %s}", ed.X),
-		"wrong kid":      fmt.Sprintf("{kty: OKP, crv: Ed25519, x: %s, kid: not-the-thumbprint}", ed.X),
+		"private d":        fmt.Sprintf("{kty: OKP, crv: Ed25519, x: %s, kid: %s, d: %s}", ed.X, ed.Kid, pinEdD),
+		"private d null":   fmt.Sprintf("{kty: OKP, crv: Ed25519, x: %s, kid: %s, d: null}", ed.X, ed.Kid),
+		"private k on OKP": fmt.Sprintf("{kty: OKP, crv: Ed25519, x: %s, kid: %s, k: AAAA}", ed.X, ed.Kid),
+		"dp on EC":         fmt.Sprintf("{kty: EC, crv: P-256, x: %s, y: %s, kid: x, DP: AAAA}", pinECX, pinECY),
+		"oct":              "{kty: oct, k: AAAA, kid: x}",
+		"rsa":              "{kty: RSA, n: AQAB, e: AQAB, kid: x}",
+		"missing kid":      fmt.Sprintf("{kty: OKP, crv: Ed25519, x: %s}", ed.X),
+		"wrong kid":        fmt.Sprintf("{kty: OKP, crv: Ed25519, x: %s, kid: not-the-thumbprint}", ed.X),
 	}
 	for name, key := range cases {
 		t.Run(name, func(t *testing.T) {

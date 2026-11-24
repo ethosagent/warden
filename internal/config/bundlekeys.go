@@ -34,6 +34,20 @@ func parseBundleOptions(r *rawControlPlane, c *ControlPlaneConfig) error {
 		return fmt.Errorf("config: controlPlane.bundleExpiry %q must be %q or %q", r.BundleExpiry, BundleExpiryKeep, BundleExpiryDeny)
 	}
 
+	total := len(r.BundleKeys)
+	var fileDocs []json.RawMessage
+	if path := strings.TrimSpace(r.BundleKeysFile); path != "" {
+		docs, err := readPinFile(path)
+		if err != nil {
+			return err
+		}
+		fileDocs = docs
+		total += len(docs)
+	}
+	if total > maxBundleKeys {
+		return fmt.Errorf("config: controlPlane.bundleKeys and bundleKeysFile pin %d keys, the maximum is %d", total, maxBundleKeys)
+	}
+
 	var pins []keys.JWK
 	seen := map[string]string{} // kid -> where it was first declared
 	add := func(field string, i int, doc []byte) error {
@@ -58,19 +72,10 @@ func parseBundleOptions(r *rawControlPlane, c *ControlPlaneConfig) error {
 			return err
 		}
 	}
-	if path := strings.TrimSpace(r.BundleKeysFile); path != "" {
-		docs, err := readPinFile(path)
-		if err != nil {
+	for i, doc := range fileDocs {
+		if err := add("controlPlane.bundleKeysFile", i, doc); err != nil {
 			return err
 		}
-		for i, doc := range docs {
-			if err := add("controlPlane.bundleKeysFile", i, doc); err != nil {
-				return err
-			}
-		}
-	}
-	if len(pins) > maxBundleKeys {
-		return fmt.Errorf("config: controlPlane.bundleKeys and bundleKeysFile pin %d keys, the maximum is %d", len(pins), maxBundleKeys)
 	}
 	c.BundleKeys = pins
 	return nil
@@ -96,10 +101,22 @@ func readPinFile(path string) ([]json.RawMessage, error) {
 	return set.Keys, nil
 }
 
+// privateMembers are the JWK members that carry private key material for some
+// kty. keys.ParseJWK rejects "d"; the rest are rejected here on any kty.
+var privateMembers = map[string]bool{"d": true, "p": true, "q": true, "dp": true, "dq": true, "qi": true, "k": true}
+
 // parsePin parses one pin through keys.ParseJWK (public members only, valid
 // type and point) and requires kid to be its RFC 7638 thumbprint. Errors name
 // where and never carry key material.
 func parsePin(where string, doc []byte) (keys.JWK, error) {
+	var members map[string]json.RawMessage
+	if err := json.Unmarshal(doc, &members); err == nil {
+		for name := range members {
+			if m := strings.ToLower(name); privateMembers[m] {
+				return keys.JWK{}, fmt.Errorf("config: %s: private member %q is not allowed in a pinned key", where, m)
+			}
+		}
+	}
 	jwk, err := keys.ParseJWK(doc)
 	if err != nil {
 		return keys.JWK{}, fmt.Errorf("config: %s: %w", where, err)

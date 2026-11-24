@@ -88,7 +88,7 @@ before and logs one WARN, `bundle verification disabled (no controlPlane.bundleK
 |---|---|---|
 | `controlPlane.bundleKeys` | none | List of public JWKs (OKP/Ed25519 or EC/P-256). |
 | `controlPlane.bundleKeysFile` | none | JWKS JSON file `{"keys":[...]}`, merged with `bundleKeys`. |
-| `controlPlane.requireSignedBundles` | `false` | `true` makes a managed worker with no pins fail config load. |
+| `controlPlane.requireSignedBundles` | `false` | `true` makes config load fail when no keys are pinned (checked whenever the endpoint is set and `controlPlane.localOnly` is not true, so a worker started with `--local-only` is checked too, deliberately fail-closed). |
 | `controlPlane.bundleIssuer` | none | When set, a bundle's `cpId` must equal it. |
 | `controlPlane.bundleClockSkew` | `5m` | Tolerance on `issuedAt` and `expiresAt`, at most `1h`. |
 | `controlPlane.bundleExpiry` | `keep` | `keep` enforces the last-known-good past expiry, `deny` blocks. |
