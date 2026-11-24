@@ -19,12 +19,13 @@ import (
 // or key fails here instead of misleading an operator at 3 a.m.
 
 const (
-	runbookBackup     = "../../docs/runbooks/backup-restore.md"
-	runbookBreakGlass = "../../docs/runbooks/break-glass.md"
-	readinessDoc      = "../../docs/production-readiness.md"
-	controlPlaneDoc   = "../../docs/control-plane.md"
-	readmeFile        = "../../README.md"
-	composeCPFile     = "../../deploy/compose/docker-compose.control-plane.yml"
+	runbookBackup      = "../../docs/runbooks/backup-restore.md"
+	runbookBreakGlass  = "../../docs/runbooks/break-glass.md"
+	runbookKeyRotation = "../../docs/runbooks/key-rotation.md"
+	readinessDoc       = "../../docs/production-readiness.md"
+	controlPlaneDoc    = "../../docs/control-plane.md"
+	readmeFile         = "../../README.md"
+	composeCPFile      = "../../deploy/compose/docker-compose.control-plane.yml"
 )
 
 func readDoc(t testing.TB, path string) string {
@@ -130,7 +131,7 @@ func lintDocCommands(doc string) []string {
 }
 
 func TestRunbookCommandsMatchCLI(t *testing.T) {
-	for _, path := range []string{runbookBackup, runbookBreakGlass, readinessDoc} {
+	for _, path := range []string{runbookBackup, runbookBreakGlass, runbookKeyRotation, readinessDoc} {
 		t.Run(filepath.Base(path), func(t *testing.T) {
 			doc := readDoc(t, path)
 			if len(docInvocations(doc)) == 0 {
@@ -245,7 +246,7 @@ func TestProductionReadinessKeysExist(t *testing.T) {
 
 func TestRunbooksHaveNoRealSecrets(t *testing.T) {
 	jwt := regexp.MustCompile(`eyJ[A-Za-z0-9_-]{10,}`)
-	for _, path := range []string{runbookBackup, runbookBreakGlass, readinessDoc} {
+	for _, path := range []string{runbookBackup, runbookBreakGlass, runbookKeyRotation, readinessDoc} {
 		for n, line := range strings.Split(readDoc(t, path), "\n") {
 			low := strings.ToLower(line)
 			if (strings.Contains(line, "--password") || strings.Contains(line, "$argon2id$")) && !strings.Contains(low, "placeholder") {
@@ -292,7 +293,8 @@ func TestComposeControlPlaneBackupVolume(t *testing.T) {
 
 func TestControlPlaneDocLinksRunbooks(t *testing.T) {
 	doc := readDoc(t, controlPlaneDoc)
-	for _, link := range []string{"(runbooks/backup-restore.md", "(runbooks/break-glass.md", "(production-readiness.md"} {
+	for _, link := range []string{"(runbooks/backup-restore.md", "(runbooks/break-glass.md",
+		"(runbooks/key-rotation.md", "(production-readiness.md"} {
 		if !strings.Contains(doc, link) {
 			t.Errorf("docs/control-plane.md has no link %s...)", link)
 		}
@@ -309,6 +311,9 @@ func TestRunbooksNameDrillTests(t *testing.T) {
 		{runbookBackup, "TestControlPlaneRestore_RoundTrip", "restore_test.go"},
 		{runbookBreakGlass, "TestControlPlaneBreakGlassDegraded", "controlplane_breakglass_test.go"},
 		{runbookBreakGlass, "TestBreakGlassDexDown", "../../test/e2e/identity/breakglass_test.go"},
+		{runbookKeyRotation, "TestKeysRotateCLI", "controlplane_keys_test.go"},
+		{runbookKeyRotation, "TestKeysRotateEmergency", "controlplane_keys_test.go"},
+		{runbookKeyRotation, "TestKeysRotationDrill", "../../test/integration/keys_rotation_test.go"},
 	}
 	for _, c := range cases {
 		if !strings.Contains(readDoc(t, c.doc), c.name) {

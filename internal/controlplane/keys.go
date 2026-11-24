@@ -27,10 +27,15 @@ const keysEvidenceMax = 200
 
 // resolveKeys reads the keys block from the operator-owned --config file (the
 // served copy is never consulted, like console:) and resolves its directory
-// against --state-dir. Enabled without a state dir is a startup error.
+// against --state-dir. An empty configPath means the defaults — the keys CLI
+// accepts a state dir without a --config. Enabled without a state dir is a
+// startup error.
 func resolveKeys(configPath, stateDir string) (config.KeysConfig, error) {
-	kc, err := config.LoadKeys(configPath)
-	if err != nil {
+	var kc config.KeysConfig
+	var err error
+	if configPath == "" {
+		kc = config.DefaultKeys()
+	} else if kc, err = config.LoadKeys(configPath); err != nil {
 		return config.KeysConfig{}, fmt.Errorf("control-plane: %w", err)
 	}
 	kc, err = kc.Resolve(stateDir)
@@ -101,10 +106,15 @@ func newKeyManager(kc config.KeysConfig, state *cpstate.DB, store keys.PrivateKe
 		Codec:   signer.Codec{},
 		Backend: kc.Store.Backend,
 		Algs:    map[string]string{keys.PurposeToken: kc.Token.Alg, keys.PurposeBundle: kc.Bundle.Alg},
-		Now:     clk.Now,
-		Wait:    func(ctx context.Context, d time.Duration) bool { return waitOn(ctx, clk, d) },
-		Logger:  logger,
-		Alerts:  alerts,
+		Timings: map[string]keys.Timing{
+			// The config layer already validated and defaulted these.
+			keys.PurposeToken:  {Interval: kc.Token.RotationInterval, Prepublish: kc.Token.Prepublish, Overlap: kc.Token.Overlap},
+			keys.PurposeBundle: {Interval: kc.Bundle.RotationInterval, Prepublish: kc.Bundle.Prepublish, Overlap: kc.Bundle.Overlap},
+		},
+		Now:    clk.Now,
+		Wait:   func(ctx context.Context, d time.Duration) bool { return waitOn(ctx, clk, d) },
+		Logger: logger,
+		Alerts: alerts,
 	}
 	if rec != nil {
 		cfg.Audit = keysAudit{rec: rec}
@@ -206,14 +216,27 @@ func keysFinding(al keys.Alert, now time.Time) integration.Finding {
 	if len(detail) > keysEvidenceMax {
 		detail = detail[:keysEvidenceMax]
 	}
+	sev, summary := keysAlertText(al)
 	return integration.Finding{
 		RuleID:   al.Rule,
 		Category: "security",
-		Severity: integration.SevHigh,
+		Severity: sev,
 		Subject:  integration.Subject{Tool: "keys"},
-		Summary:  fmt.Sprintf("%s signing key is unavailable: the control plane cannot sign until it loads", al.Purpose),
+		Summary:  summary,
 		Evidence: integration.Evidence(fmt.Sprintf("purpose=%s reason=%s", al.Purpose, detail)),
 		DedupKey: al.Rule + ":" + al.Purpose,
 		Ts:       now,
+	}
+}
+
+// keysAlertText is each rule's severity and operator-facing summary.
+func keysAlertText(al keys.Alert) (integration.Severity, string) {
+	switch al.Rule {
+	case keys.AlertKeyRotationFailed:
+		return integration.SevHigh, fmt.Sprintf("%s key rotation failed: the current key keeps signing and the scheduler retries", al.Purpose)
+	case keys.AlertKeyOverdue:
+		return integration.SevMedium, fmt.Sprintf("%s signing key is overdue: rotation has not moved it for more than twice its interval", al.Purpose)
+	default:
+		return integration.SevHigh, fmt.Sprintf("%s signing key is unavailable: the control plane cannot sign until it loads", al.Purpose)
 	}
 }

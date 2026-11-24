@@ -107,6 +107,20 @@ func (failInsertMeta) InsertIfEmpty(context.Context, string, []keys.Record) (boo
 	return false, errors.New("database is locked")
 }
 
+// failPromoteMeta fails Promote: a database that cannot run the promotion
+// transaction.
+type failPromoteMeta struct {
+	keys.MetaStore
+	fail atomic.Bool
+}
+
+func (f *failPromoteMeta) Promote(ctx context.Context, purpose, oldKID string, oldTo keys.State, nextKID string, at time.Time) (bool, error) {
+	if f.fail.Load() {
+		return false, errors.New("database is locked")
+	}
+	return f.MetaStore.Promote(ctx, purpose, oldKID, oldTo, nextKID, at)
+}
+
 // waitOn adapts the fake clock to ManagerConfig.Wait.
 func waitOn(clk *clocktest.Fake) func(context.Context, time.Duration) bool {
 	return func(ctx context.Context, d time.Duration) bool {
@@ -132,6 +146,9 @@ type env struct {
 	logs   *syncBuffer
 	audit  *recAudit
 	alerts *recAlerts
+	// timings is what e.manager() wires; rotation tests shrink the windows so
+	// a schedule fits in a few clock advances.
+	timings map[string]keys.Timing
 }
 
 func newEnv(t *testing.T) *env {
@@ -145,6 +162,10 @@ func newEnv(t *testing.T) *env {
 		logs:   &syncBuffer{},
 		audit:  &recAudit{},
 		alerts: &recAlerts{},
+		timings: map[string]keys.Timing{
+			keys.PurposeToken:  {Interval: 24 * time.Hour, Prepublish: time.Hour, Overlap: 2 * time.Hour},
+			keys.PurposeBundle: {Prepublish: time.Hour, Overlap: 2 * time.Hour},
+		},
 	}
 	e.openDB()
 	fs, err := filestore.New(e.dir)
@@ -171,16 +192,43 @@ func (e *env) openDB() {
 
 func (e *env) manager() *keys.Manager {
 	e.t.Helper()
+	return e.managerOn(e.meta)
+}
+
+// managerOn builds a manager over another metadata store handle — a second
+// process on the same database file, with its own lock and its own snapshot.
+func (e *env) managerOn(meta keys.MetaStore) *keys.Manager {
+	e.t.Helper()
+	return e.managerWith(meta, e.store)
+}
+
+// managerWith is managerOn with the private-key store named too: a peer
+// process holds its own handles on both.
+func (e *env) managerWith(meta keys.MetaStore, store keys.PrivateKeyStore) *keys.Manager {
+	e.t.Helper()
 	m, err := keys.NewManager(keys.ManagerConfig{
-		Store: e.store, Meta: e.meta, Codec: signer.Codec{}, Backend: "file",
-		Algs: map[string]string{keys.PurposeToken: keys.AlgEdDSA, keys.PurposeBundle: keys.AlgEdDSA},
-		Now:  e.clk.Now, Wait: waitOn(e.clk), Logger: slog.New(slog.NewTextHandler(e.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		Store: store, Meta: meta, Codec: signer.Codec{}, Backend: "file",
+		Algs:    map[string]string{keys.PurposeToken: keys.AlgEdDSA, keys.PurposeBundle: keys.AlgEdDSA},
+		Timings: e.timings,
+		Now:     e.clk.Now, Wait: waitOn(e.clk), Logger: slog.New(slog.NewTextHandler(e.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 		Audit: e.audit, Alerts: e.alerts,
 	})
 	if err != nil {
 		e.t.Fatal(err)
 	}
 	return m
+}
+
+// anotherMeta opens a second connection to the same database file: what the
+// keys CLI holds while the control plane runs.
+func (e *env) anotherMeta() keys.MetaStore {
+	e.t.Helper()
+	db, err := cpstate.Open(context.Background(), e.dbPath, cpstate.Enable(metastore.Migrations(), metastore.MigrationID))
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	e.t.Cleanup(func() { _ = db.Close() })
+	return metastore.New(db)
 }
 
 func (e *env) rows() []keys.Record {
@@ -450,23 +498,26 @@ func TestKeysBackendDownWithRows(t *testing.T) {
 	go func() { defer close(done); m.Run(runCtx) }()
 	t.Cleanup(func() { cancel(); <-done })
 
-	// Still down: the retry fails, backs off to 2s, and raises nothing new.
-	waitTimer(t, e.clk)
-	e.clk.Advance(time.Second)
-	waitTimer(t, e.clk)
+	// Still down: the retry fails and raises nothing new. The clock is driven
+	// until the retry has actually run — Run's scheduler and data-version poll
+	// arm timers of their own, so PendingTimers can no longer mean "the retry
+	// timer is armed" and a fixed advance cannot target it (the flake that
+	// taught us: the advance fired the other loops' timers, the reload loop
+	// re-armed past the frozen clock, and the retry never ran).
+	loadFailures := func() int { return strings.Count(e.logs.String(), "keys_load_failed") }
+	failures := loadFailures()
+	// One reload pass logs and then alerts for each purpose in turn, on one
+	// goroutine. Seeing the first line of the next pass (two purposes + 1)
+	// means the whole first retry pass, alerts included, has finished.
+	e.pollAdvance(t, func() bool { return loadFailures() >= failures+3 })
 	if len(e.alerts.alerts()) != 2 {
 		t.Errorf("retry re-raised the alert: %+v", e.alerts.alerts())
 	}
 
+	// The store returns; the next retry adopts the rows and the manager
+	// recovers without a restart.
 	e.store.failGet.Store(false)
-	e.clk.Advance(2 * time.Second)
-	deadline := time.Now().Add(5 * time.Second)
-	for !m.Ready() {
-		if time.Now().After(deadline) {
-			t.Fatal("manager did not recover after the store came back")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	e.pollAdvance(t, func() bool { return m.Ready() })
 	if _, err := m.KeySet().Active(keys.PurposeToken); err != nil {
 		t.Errorf("Active after recovery: %v", err)
 	}
@@ -489,18 +540,6 @@ func listPEMs(t *testing.T, dir string) []string {
 	})
 	sort.Strings(out)
 	return out
-}
-
-// waitTimer blocks until the manager's retry loop has armed its timer.
-func waitTimer(t *testing.T, clk *clocktest.Fake) {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for clk.PendingTimers() == 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("retry loop never armed a timer")
-		}
-		time.Sleep(time.Millisecond)
-	}
 }
 
 // TestKeysNoActiveRowNeverGenerates: rows exist but none is active — nothing is
@@ -585,7 +624,8 @@ func TestKeysCreationFailuresLeaveNothing(t *testing.T) {
 		m, err := keys.NewManager(keys.ManagerConfig{
 			Store: e.store, Meta: failInsertMeta{e.meta}, Codec: signer.Codec{}, Backend: "file",
 			Now: e.clk.Now, Wait: waitOn(e.clk),
-			Algs: map[string]string{keys.PurposeToken: keys.AlgEdDSA, keys.PurposeBundle: keys.AlgEdDSA},
+			Algs:    map[string]string{keys.PurposeToken: keys.AlgEdDSA, keys.PurposeBundle: keys.AlgEdDSA},
+			Timings: e.timings,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -734,7 +774,7 @@ func TestKeysCAPurpose(t *testing.T) {
 func TestNewManagerValidation(t *testing.T) {
 	e := newEnv(t)
 	good := map[string]string{keys.PurposeToken: keys.AlgES256, keys.PurposeBundle: keys.AlgEdDSA}
-	base := keys.ManagerConfig{Store: e.store, Meta: e.meta, Codec: signer.Codec{}, Algs: good, Now: e.clk.Now, Wait: waitOn(e.clk)}
+	base := keys.ManagerConfig{Store: e.store, Meta: e.meta, Codec: signer.Codec{}, Algs: good, Timings: e.timings, Now: e.clk.Now, Wait: waitOn(e.clk)}
 	if _, err := keys.NewManager(base); err != nil {
 		t.Fatalf("valid config: %v", err)
 	}
@@ -748,6 +788,21 @@ func TestNewManagerValidation(t *testing.T) {
 		"missing alg": func(c *keys.ManagerConfig) { c.Algs = map[string]string{keys.PurposeToken: keys.AlgEdDSA} },
 		"unknown alg": func(c *keys.ManagerConfig) {
 			c.Algs = map[string]string{keys.PurposeToken: "RS256", keys.PurposeBundle: keys.AlgEdDSA}
+		},
+		"missing timing": func(c *keys.ManagerConfig) {
+			c.Timings = map[string]keys.Timing{keys.PurposeBundle: e.timings[keys.PurposeBundle]}
+		},
+		"negative window": func(c *keys.ManagerConfig) {
+			c.Timings = map[string]keys.Timing{
+				keys.PurposeToken:  {Interval: 24 * time.Hour, Prepublish: -time.Hour, Overlap: time.Hour},
+				keys.PurposeBundle: e.timings[keys.PurposeBundle],
+			}
+		},
+		"interval shorter than windows": func(c *keys.ManagerConfig) {
+			c.Timings = map[string]keys.Timing{
+				keys.PurposeToken:  {Interval: 30 * time.Minute, Prepublish: 20 * time.Minute, Overlap: 20 * time.Minute},
+				keys.PurposeBundle: e.timings[keys.PurposeBundle],
+			}
 		},
 	} {
 		cfg := base

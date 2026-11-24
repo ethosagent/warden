@@ -497,7 +497,11 @@ func parse(data []byte) (*LocalYAMLProvider, error) {
 		return nil, err
 	}
 	policy.Console = console
-	policy.Keys = parseKeys(raw.Keys)
+	keysCfg, err := parseKeys(raw.Keys)
+	if err != nil {
+		return nil, err
+	}
+	policy.Keys = keysCfg
 	if err := validateKeys(policy.Keys); err != nil {
 		return nil, err
 	}

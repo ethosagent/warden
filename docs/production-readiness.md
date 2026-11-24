@@ -104,7 +104,16 @@ The worker side of the same stream (`warden.decision.v1`) uses the same
   token, a scoped entry therefore allows nothing. Entries without `groups` or `users`
   stay global.
 
-## 7. Known limits in Phase 1
+## 7. Signing keys
+
+| # | Item | Set | How to check |
+|---|---|---|---|
+| 31 | Keys on, with a rotation cadence | `keys.enabled` = `true` (needs `--state-dir`), `keys.token.rotationInterval` = `720h`, `keys.token.prepublish` = `1h`, `keys.token.overlap` = `48h` | `warden control-plane keys list --state-dir /data --purpose token` shows an `active` and a `next` key; `GET /.well-known/jwks.json` lists both kids. |
+| 32 | The rotation drill has been run | [runbooks/key-rotation.md](runbooks/key-rotation.md) | `go test ./cmd/proxy -run 'TestKeysRotateCLI\|TestKeysRotateEmergency'` and `go test -tags integration ./test/integration -run TestKeysRotationDrill` pass. You have rotated once, on a copy, and watched the retired kid verify through its overlap. |
+| 33 | Keys survive a restore | the manifest's `not_included` names the key store, so a restore needs `warden control-plane keys reset --purpose token --yes` and the same for `bundle` | `go test ./cmd/proxy -run TestKeysRestoreHint` passes: the restore prints the reset hint when material is missing, and the reset regenerates. |
+| 34 | Key changes are audited | `console.adminAudit.enabled` = `true` | After a CLI rotation, `keys.rotate_requested` rows with `auth_method` `cli` appear in the admin audit (section 3). |
+
+## 8. Known limits in Phase 1
 
 - **One control plane per state dir.** The lock stops a second instance. There is no
   HA and no failover; restore from a set is the recovery path.
@@ -122,5 +131,6 @@ The worker side of the same stream (`warden.decision.v1`) uses the same
 
 Related: [break-glass runbook](runbooks/break-glass.md),
 [backup and restore runbook](runbooks/backup-restore.md),
+[key rotation runbook](runbooks/key-rotation.md),
 [admin audit key runbook](runbooks/admin-audit-key.md), [SIEM guide](siem.md),
 [control plane reference](control-plane.md).
