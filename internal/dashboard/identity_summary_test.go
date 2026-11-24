@@ -50,6 +50,7 @@ func TestIdentitySummary(t *testing.T) {
 		ds.events = append(ds.events, ev("invalid", "cnf_mismatch"))
 	}
 	ds.events = append(ds.events, ev("none", ""))
+	ds.events = append(ds.events, ev("from-the-future", ""), ev("also-unknown", ""))
 	// Six distinct reasons, so only the top five survive.
 	for i, r := range []string{"bad_signature", "wrong_iss", "wrong_aud", "unknown_kid", "malformed"} {
 		for n := 0; n <= i; n++ {
@@ -64,6 +65,9 @@ func TestIdentitySummary(t *testing.T) {
 	counts := map[string]int{}
 	for _, s := range b.Identity.ByStatus {
 		counts[s.Status] = s.Count
+	}
+	if counts["other"] != 2 || counts["from-the-future"] != 0 {
+		t.Errorf("unknown statuses not folded into other: %v", counts)
 	}
 	if counts["valid"] != 3 || counts["none"] != 1 || counts["invalid"] != 2+15 {
 		t.Errorf("byStatus = %v", counts)

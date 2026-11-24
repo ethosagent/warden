@@ -194,7 +194,7 @@ func (p *Proxy) malformedConn() connIdentity {
 // malformed is the result for a token that is not in an accepted form: it is
 // never sent to the verifier.
 func (p *Proxy) malformed() idResult {
-	p.cfg.Metrics.RecordIdentityVerify(string(identity.StatusInvalid), string(identity.ReasonMalformed), identity.TokenNone)
+	p.cfg.Metrics.RecordIdentityVerify(string(identity.StatusInvalid), string(identity.ReasonMalformed), string(identity.TokenNone))
 	return idResult{status: identity.StatusInvalid, reason: identity.ReasonMalformed}
 }
 
@@ -208,7 +208,7 @@ func (p *Proxy) verifyToken(h *identityHolder, tok string) idResult {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	c, st, r := h.v.Verify(ctx, tok)
 	cancel()
-	p.recordIdentity(st, r, identity.TokenIdP)
+	p.recordIdentity(st, r, string(identity.TokenIdP))
 	return idResult{claims: c, status: st, reason: r}
 }
 
@@ -309,14 +309,14 @@ func (p *Proxy) identityStage(s *requestScope) (endSession bool) {
 		// Past exp plus skew (or no exp at all, which a valid token always has:
 		// fail closed). The connection's identity is spent.
 		connLive, cs = false, identity.StatusExpired
-		p.recordIdentity(identity.StatusExpired, "", identity.TokenIdP)
+		p.recordIdentity(identity.StatusExpired, "", string(identity.TokenIdP))
 	}
 	switch {
 	case cs == identity.StatusNone || cs == identity.StatusOff:
 		switch {
 		case n == 0:
 			r = idResult{status: identity.StatusNone}
-			p.recordIdentity(identity.StatusNone, "", identity.TokenNone)
+			p.recordIdentity(identity.StatusNone, "", string(identity.TokenNone))
 		case n > 1:
 			r = p.malformed()
 		default:
@@ -339,7 +339,7 @@ func (p *Proxy) identityStage(s *requestScope) (endSession bool) {
 			case hr.status == identity.StatusValid && hr.claims.Sub != ci.Claims.Sub:
 				s.idHeaderClaims = hr.claims
 				r = idResult{status: identity.StatusConflict}
-				p.recordIdentity(identity.StatusConflict, "", identity.TokenIdP)
+				p.recordIdentity(identity.StatusConflict, "", string(identity.TokenIdP))
 			}
 		}
 	default:

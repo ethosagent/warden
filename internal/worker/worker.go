@@ -414,6 +414,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		defer cancel()
 		_ = shutdownObs(ctx)
 	}()
+
 	store, err := analytics.NewSQLiteStore(dbPath, 0)
 	if err != nil {
 		return err

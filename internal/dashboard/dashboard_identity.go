@@ -4,6 +4,7 @@ import (
 	"sort"
 
 	"github.com/ethosagent/warden/internal/analytics"
+	"github.com/ethosagent/warden/internal/identity"
 )
 
 // identityTopReasons is how many identity_reason values the summary lists.
@@ -27,6 +28,22 @@ type identityReasonCount struct {
 	Count  int    `json:"count"`
 }
 
+// knownIdentityStatuses is the closed identity.Status set. A stored status
+// outside it (a newer worker, a corrupt row) is folded into "other" so the
+// summary stays bounded.
+var knownIdentityStatuses = map[string]struct{}{
+	string(identity.StatusOff): {}, string(identity.StatusNone): {}, string(identity.StatusValid): {},
+	string(identity.StatusInvalid): {}, string(identity.StatusExpired): {},
+	string(identity.StatusUnverified): {}, string(identity.StatusConflict): {},
+}
+
+func boundedIdentityStatus(s string) string {
+	if _, ok := knownIdentityStatuses[s]; ok {
+		return s
+	}
+	return "other"
+}
+
 // summarizeIdentity counts events by identity_status and lists the top
 // identityTopReasons identity_reason values (count descending, then name). It
 // returns nil when no event carries identity fields.
@@ -35,7 +52,7 @@ func summarizeIdentity(events []analytics.Event) *identitySummary {
 	reasons := map[string]int{}
 	for _, e := range events {
 		if e.IdentityStatus != "" {
-			statuses[e.IdentityStatus]++
+			statuses[boundedIdentityStatus(e.IdentityStatus)]++
 		}
 		if e.IdentityReason != "" {
 			reasons[e.IdentityReason]++
