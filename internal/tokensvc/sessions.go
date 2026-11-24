@@ -45,9 +45,14 @@ type SessionStore interface {
 	// RevokeAll revokes every live session matching filter (at least one
 	// field must be set) and returns how many it revoked.
 	RevokeAll(ctx context.Context, filter SessionFilter, now time.Time) (int64, error)
-	// Purge deletes sessions that were last used or revoked before cutoff and
-	// returns how many it removed.
-	Purge(ctx context.Context, cutoff time.Time) (int64, error)
+	// Purge deletes sessions that are not revoked and were last used before
+	// liveCutoff, and revoked sessions whose revoked_at is before
+	// revokedCutoff; it returns how many it removed. A revoked row is what
+	// refuses a subject token issued before the revoke, so revokedCutoff must
+	// be at most now minus (the longest subject token lifetime the IdP
+	// verifier accepts, plus its clock skew): then no pre-revoke subject
+	// token can still be valid when its revoke row goes.
+	Purge(ctx context.Context, liveCutoff, revokedCutoff time.Time) (int64, error)
 }
 
 // SessionFilter selects sessions for RevokeAll. Empty fields match anything;

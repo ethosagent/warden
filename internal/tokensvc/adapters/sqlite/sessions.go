@@ -57,6 +57,19 @@ func (s *Sessions) Touch(ctx context.Context, key tokensvc.SessionKey, subjectIs
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// A subject token issued at or before any revoke of this key is dead,
+	// whether or not a newer live session exists: check before reusing or
+	// creating anything.
+	var revoked sql.NullInt64
+	if err := tx.QueryRowContext(ctx,
+		`SELECT MAX(revoked_at) FROM token_sessions WHERE idp_iss = ? AND sub = ? AND agent_id = ?`,
+		key.IdPIss, key.Sub, key.AgentID).Scan(&revoked); err != nil {
+		return "", fmt.Errorf("tokensvc: touch session: %w", err)
+	}
+	if revoked.Valid && subjectIssuedAt.Unix() <= revoked.Int64 {
+		return "", tokensvc.ErrSessionRevoked
+	}
+
 	var sid string
 	var created, used int64
 	err = tx.QueryRowContext(ctx,
@@ -83,15 +96,6 @@ func (s *Sessions) Touch(ctx context.Context, key tokensvc.SessionKey, subjectIs
 		return "", fmt.Errorf("tokensvc: touch session: %w", err)
 	}
 
-	var revoked sql.NullInt64
-	if err := tx.QueryRowContext(ctx,
-		`SELECT MAX(revoked_at) FROM token_sessions WHERE idp_iss = ? AND sub = ? AND agent_id = ?`,
-		key.IdPIss, key.Sub, key.AgentID).Scan(&revoked); err != nil {
-		return "", fmt.Errorf("tokensvc: touch session: %w", err)
-	}
-	if revoked.Valid && subjectIssuedAt.Unix() <= revoked.Int64 {
-		return "", tokensvc.ErrSessionRevoked
-	}
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO token_sessions (sid, idp_iss, sub, agent_id, created_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?)`,
 		newSID, key.IdPIss, key.Sub, key.AgentID, now.Unix(), now.Unix()); err != nil {
@@ -141,9 +145,11 @@ func (s *Sessions) RevokeAll(ctx context.Context, f tokensvc.SessionFilter, now 
 }
 
 // Purge implements tokensvc.SessionStore.
-func (s *Sessions) Purge(ctx context.Context, cutoff time.Time) (int64, error) {
+func (s *Sessions) Purge(ctx context.Context, liveCutoff, revokedCutoff time.Time) (int64, error) {
 	res, err := s.db.ExecContext(ctx,
-		`DELETE FROM token_sessions WHERE MAX(last_used_at, COALESCE(revoked_at, 0)) < ?`, cutoff.Unix())
+		`DELETE FROM token_sessions
+		 WHERE (revoked_at IS NULL AND last_used_at < ?) OR (revoked_at IS NOT NULL AND revoked_at < ?)`,
+		liveCutoff.Unix(), revokedCutoff.Unix())
 	if err != nil {
 		return 0, fmt.Errorf("tokensvc: purge sessions: %w", err)
 	}

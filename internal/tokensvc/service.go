@@ -3,6 +3,7 @@ package tokensvc
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -209,21 +210,15 @@ type Issued struct {
 }
 
 // String implements fmt.Stringer without the token.
-func (i *Issued) String() string {
-	if i == nil {
-		return "<nil>"
-	}
+func (i Issued) String() string {
 	return fmt.Sprintf("tokensvc.Issued{agent=%s sid=%s kid=%s exp=%s}", i.Agent, i.SID, i.KID, i.Exp.UTC().Format(time.RFC3339))
 }
 
 // GoString implements fmt.GoStringer without the token.
-func (i *Issued) GoString() string { return i.String() }
+func (i Issued) GoString() string { return i.String() }
 
 // LogValue implements slog.LogValuer without the token or the subject.
-func (i *Issued) LogValue() slog.Value {
-	if i == nil {
-		return slog.StringValue("<nil>")
-	}
+func (i Issued) LogValue() slog.Value {
 	return slog.GroupValue(slog.String("agent", i.Agent), slog.String("sid", i.SID),
 		slog.String("jti", i.JTI), slog.String("kid", i.KID), slog.Time("exp", i.Exp))
 }
@@ -322,16 +317,6 @@ func (s *Service) Exchange(ctx context.Context, req ExchangeRequest) (*Issued, e
 	if err != nil {
 		return deny(CodeTemporarilyUnavailable, ReasonSignerUnavailable)
 	}
-	sid, err := s.cfg.Sessions.Touch(ctx,
-		SessionKey{IdPIss: subj.IdPIss, Sub: user.Sub, AgentID: client.AgentID},
-		subj.IssuedAt, now, SessionPolicy{Idle: s.cfg.SessionIdle, Absolute: s.cfg.SessionAbsolute}, newSID)
-	switch {
-	case errors.Is(err, ErrSessionRevoked):
-		return deny(CodeInvalidGrant, ReasonSessionRevoked)
-	case err != nil:
-		return deny(CodeTemporarilyUnavailable, ReasonSessionStoreUnavailable)
-	}
-
 	jti, err := s.randomID("")
 	if err != nil {
 		return deny(CodeTemporarilyUnavailable, ReasonSignerUnavailable)
@@ -341,7 +326,7 @@ func (s *Service) Exchange(ctx context.Context, req ExchangeRequest) (*Issued, e
 		Sub: user.Sub, IdPIss: subj.IdPIss,
 		Groups: user.Groups, GroupsTruncated: user.GroupsTruncated,
 		Act: identity.WardenActor{Sub: client.AgentID},
-		SID: sid, IdPSID: subj.IdPSID, JTI: jti,
+		SID: newSID, IdPSID: subj.IdPSID, JTI: jti,
 		Iat: iat.Unix(), Nbf: iat.Unix(), Exp: exp.Unix(),
 		Scope: scope,
 		Cnf:   identity.WardenConfirmation{JKT: client.JKT},
@@ -349,7 +334,25 @@ func (s *Service) Exchange(ctx context.Context, req ExchangeRequest) (*Issued, e
 	if user.EmailVerified && user.Email != "" {
 		claims.Email, claims.EmailVerified = user.Email, true
 	}
-	token, err := keys.SignCompact(ctx, signer, keys.Header{Typ: identity.WardenTokenTyp}, claims)
+	header := keys.Header{Alg: signer.Alg(), Kid: signer.KID(), Typ: identity.WardenTokenTyp}
+	// Refuse an oversized token before the session is created or extended.
+	// The estimate uses the fresh sid, which has the same length as any sid
+	// this service issues; the exact size is checked again after signing.
+	if estimateSize(header, claims) > MaxTokenSize {
+		return deny(CodeInvalidRequest, ReasonTokenTooLarge)
+	}
+
+	sid, err := s.cfg.Sessions.Touch(ctx,
+		SessionKey{IdPIss: subj.IdPIss, Sub: user.Sub, AgentID: client.AgentID},
+		subj.IssuedAt, now, SessionPolicy{Idle: s.cfg.SessionIdle, Absolute: s.cfg.SessionAbsolute}, newSID)
+	switch {
+	case errors.Is(err, ErrSessionRevoked):
+		return deny(CodeInvalidGrant, ReasonSessionRevoked)
+	case err != nil:
+		return deny(CodeTemporarilyUnavailable, ReasonSessionStoreUnavailable)
+	}
+	claims.SID = sid
+	token, err := keys.SignCompact(ctx, signer, header, claims)
 	if err != nil {
 		return deny(CodeTemporarilyUnavailable, ReasonSignerUnavailable)
 	}
@@ -361,6 +364,18 @@ func (s *Service) Exchange(ctx context.Context, req ExchangeRequest) (*Issued, e
 		ExpiresIn: exp.Unix() - iat.Unix(), Scope: scope,
 		Sub: user.Sub, Agent: client.AgentID, SID: sid, JTI: jti, KID: signer.KID(), Exp: exp,
 	}, nil
+}
+
+// estimateSize returns the length of the compact JWS SignCompact would make
+// for header and claims, assuming a 64-byte signature (EdDSA and ES256).
+func estimateSize(h keys.Header, c identity.WardenClaims) int {
+	hb, err1 := json.Marshal(h)
+	cb, err2 := json.Marshal(c)
+	if err1 != nil || err2 != nil {
+		return MaxTokenSize + 1
+	}
+	enc := base64.RawURLEncoding
+	return enc.EncodedLen(len(hb)) + 1 + enc.EncodedLen(len(cb)) + 1 + enc.EncodedLen(64)
 }
 
 // hasKey reports whether the agent still has a key with thumbprint jkt.

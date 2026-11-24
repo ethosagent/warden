@@ -12,16 +12,19 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/ethosagent/warden/internal/agentreg"
+	"github.com/ethosagent/warden/internal/cpstate"
 	"github.com/ethosagent/warden/internal/identity"
 	"github.com/ethosagent/warden/internal/keys"
 	"github.com/ethosagent/warden/internal/keys/adapters/signer"
 	"github.com/ethosagent/warden/internal/tokensvc"
+	tokensqlite "github.com/ethosagent/warden/internal/tokensvc/adapters/sqlite"
 	"github.com/ethosagent/warden/test/fakes"
 )
 
@@ -32,73 +35,24 @@ const (
 	idpIssuer    = "https://idp.example.test"
 )
 
-// memSessions is an in-memory SessionStore with the semantics the SQLite store
-// implements (see adapters/sqlite/sessions_test.go for the same scenarios on
-// the real table).
-type memSessions struct {
-	mu   sync.Mutex
-	rows []*memSession
-	err  error
+// flakySessions wraps the real SQLite session store and fails Touch on demand.
+type flakySessions struct {
+	tokensvc.SessionStore
+	mu  sync.Mutex
+	err error
 }
 
-type memSession struct {
-	sid           string
-	key           tokensvc.SessionKey
-	created, used time.Time
-	revoked       time.Time
-	revokedSet    bool
-}
+func (f *flakySessions) setErr(err error) { f.mu.Lock(); f.err = err; f.mu.Unlock() }
 
-func (m *memSessions) Touch(_ context.Context, key tokensvc.SessionKey, issued, now time.Time, p tokensvc.SessionPolicy, newSID string) (string, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.err != nil {
-		return "", m.err
+func (f *flakySessions) Touch(ctx context.Context, k tokensvc.SessionKey, issued, now time.Time, p tokensvc.SessionPolicy, sid string) (string, error) {
+	f.mu.Lock()
+	err := f.err
+	f.mu.Unlock()
+	if err != nil {
+		return "", err
 	}
-	var newest time.Time
-	for _, r := range m.rows {
-		if r.key != key {
-			continue
-		}
-		if r.revokedSet {
-			if r.revoked.After(newest) {
-				newest = r.revoked
-			}
-			continue
-		}
-		if now.Sub(r.used) <= p.Idle && now.Sub(r.created) <= p.Absolute {
-			r.used = now
-			return r.sid, nil
-		}
-		r.revokedSet, r.revoked = false, time.Time{}
-		r.key = tokensvc.SessionKey{} // expired: forgotten, not revoked
-	}
-	if !newest.IsZero() && !issued.After(newest) {
-		return "", tokensvc.ErrSessionRevoked
-	}
-	m.rows = append(m.rows, &memSession{sid: newSID, key: key, created: now, used: now})
-	return newSID, nil
+	return f.SessionStore.Touch(ctx, k, issued, now, p, sid)
 }
-
-func (m *memSessions) Revoke(_ context.Context, sid string, now time.Time) (bool, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, r := range m.rows {
-		if r.sid == sid {
-			if !r.revokedSet {
-				r.revokedSet, r.revoked = true, now
-			}
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-func (m *memSessions) RevokeAll(context.Context, tokensvc.SessionFilter, time.Time) (int64, error) {
-	return 0, errors.New("unused")
-}
-
-func (m *memSessions) Purge(context.Context, time.Time) (int64, error) { return 0, nil }
 
 type fakeBlocks struct {
 	mu           sync.Mutex
@@ -159,7 +113,8 @@ type svcEnv struct {
 	verifier *fakes.Verifier
 	blocks   *fakeBlocks
 	signers  *fakeSigners
-	sessions *memSessions
+	sessions *flakySessions
+	db       *cpstate.DB
 	mint     *signer.LocalSigner
 	agent    *signer.LocalSigner
 }
@@ -182,10 +137,16 @@ func newSvcEnv(t *testing.T) *svcEnv {
 		env:      newEnv(t),
 		verifier: fakes.NewVerifier(),
 		blocks:   &fakeBlocks{subs: map[string]bool{}, emails: map[string]bool{}},
-		sessions: &memSessions{},
 		mint:     fixedSigner(t, "mint"),
 		agent:    fixedSigner(t, "agent"),
 	}
+	db, err := cpstate.Open(context.Background(), filepath.Join(t.TempDir(), "warden-cp.db"), tokensqlite.SessionMigrations())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	e.db = db
+	e.sessions = &flakySessions{SessionStore: tokensqlite.NewSessions(db)}
 	e.signers = &fakeSigners{s: e.mint}
 	e.setAgent(func(a *agentreg.Agent) {})
 	e.verifier.Set(subjectToken, e.claims(), identity.StatusValid, "")
@@ -585,7 +546,11 @@ func TestExchangeSubjectAndSignerFailures(t *testing.T) {
 		if got != nil {
 			t.Fatal("token released")
 		}
-		if len(e.sessions.rows) != 0 {
+		var n int
+		if err := e.db.SQL().QueryRow(`SELECT COUNT(*) FROM token_sessions`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 0 {
 			t.Fatal("a session was created although no token could be minted")
 		}
 	})
@@ -601,7 +566,7 @@ func TestExchangeSubjectAndSignerFailures(t *testing.T) {
 	})
 	t.Run("session store error", func(t *testing.T) {
 		e := newSvcEnv(t)
-		e.sessions.err = errors.New("db down")
+		e.sessions.setErr(errors.New("db down"))
 		_, err := e.svc.Exchange(ctx, e.req())
 		wantErr(t, err, tokensvc.CodeTemporarilyUnavailable, tokensvc.ReasonSessionStoreUnavailable)
 	})
@@ -618,6 +583,10 @@ func TestExchangeSubjectAndSignerFailures(t *testing.T) {
 		wantErr(t, err, tokensvc.CodeInvalidRequest, tokensvc.ReasonTokenTooLarge)
 		if got != nil {
 			t.Fatal("token released")
+		}
+		var n int
+		if err := e.db.SQL().QueryRow(`SELECT COUNT(*) FROM token_sessions`).Scan(&n); err != nil || n != 0 {
+			t.Fatalf("an oversized token created %d sessions (%v)", n, err)
 		}
 	})
 	t.Run("random source failure", func(t *testing.T) {
@@ -701,6 +670,19 @@ func TestExchangeSessionID(t *testing.T) {
 	if third.SID == second.SID || third.SID == first.SID {
 		t.Fatalf("sid after a later sign-in = %s, want a new one", third.SID)
 	}
+
+	// The pre-revoke subject token stays dead even though a newer live
+	// session now exists (a stolen ID token must not ride the new sign-in).
+	e.now = e.now.Add(time.Minute)
+	stale := e.claims()
+	stale.IssuedAt = e.now.Add(-10 * time.Minute)
+	stale.Expiry = e.now.Add(time.Hour)
+	e.verifier.Set(subjectToken, stale, identity.StatusValid, "")
+	stolen, err := e.svc.Exchange(ctx, e.req())
+	wantErr(t, err, tokensvc.CodeInvalidGrant, tokensvc.ReasonSessionRevoked)
+	if stolen != nil {
+		t.Fatal("token released for a pre-revoke subject token")
+	}
 }
 
 func TestNewValidation(t *testing.T) {
@@ -775,9 +757,18 @@ func TestIssuedNeverPrintsToken(t *testing.T) {
 	if !strings.Contains(buf.String(), got.SID) {
 		t.Fatalf("log line lacks the sid: %s", buf.String())
 	}
+	// By value, embedded and nil pointers never print the token either.
+	byValue := *got
+	type wrapper struct{ I tokensvc.Issued }
 	var nilIssued *tokensvc.Issued
-	_ = nilIssued.String()
-	_ = nilIssued.LogValue()
+	var vb bytes.Buffer
+	slog.New(slog.NewJSONHandler(&vb, nil)).Info("issued", "issued", byValue)
+	for _, s := range []string{fmt.Sprintf("%v", byValue), fmt.Sprintf("%+v", byValue), fmt.Sprintf("%#v", byValue),
+		fmt.Sprintf("%v", wrapper{byValue}), fmt.Sprintf("%v", nilIssued), vb.String()} {
+		if strings.Contains(s, got.AccessToken) || strings.Contains(s, "eyJ") {
+			t.Fatalf("by-value Issued leaked: %s", s)
+		}
+	}
 }
 
 func TestExchangeConcurrent(t *testing.T) {

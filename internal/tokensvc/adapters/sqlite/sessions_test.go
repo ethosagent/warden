@@ -117,8 +117,8 @@ func TestSessionsRevoke(t *testing.T) {
 	if err != nil || got != "wts_2" {
 		t.Fatalf("new sign-in: %q, %v", got, err)
 	}
-	// And that session is the live one for later exchanges, whatever their iat.
-	got, err = s.Touch(ctx, key, t0, now.Add(time.Minute), policy, "wts_3")
+	// And that session is the live one for later exchanges with a post-revoke subject token.
+	got, err = s.Touch(ctx, key, revokedAt.Add(time.Second), now.Add(time.Minute), policy, "wts_3")
 	if err != nil || got != "wts_2" {
 		t.Fatalf("reuse: %q, %v", got, err)
 	}
@@ -166,18 +166,61 @@ func TestSessionsPurge(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// u1 is used later; u2 is revoked later: both survive a purge at t0+1h.
+	// u1 is used later; u2 is revoked at t0+2h.
 	if _, err := s.Touch(ctx, tokensvc.SessionKey{IdPIss: "i", Sub: "u1", AgentID: "a"}, t0, t0.Add(2*time.Hour), policy, "x"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Revoke(ctx, "wts_2", t0.Add(2*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := s.Purge(ctx, t0.Add(time.Hour)); err != nil || n != 1 {
+	// Live rows go by last use; the revoked row survives while its cutoff is
+	// older than the revoke, even though its last use is old.
+	if n, err := s.Purge(ctx, t0.Add(time.Hour), t0.Add(time.Hour)); err != nil || n != 1 {
 		t.Fatalf("Purge = %d, %v, want 1 (wts_0)", n, err)
 	}
-	if n, err := s.Purge(ctx, t0.Add(3*time.Hour)); err != nil || n != 2 {
-		t.Fatalf("second Purge = %d, %v, want 2", n, err)
+	// A pre-revoke subject token is still refused: the revoke row is alive.
+	k2 := tokensvc.SessionKey{IdPIss: "i", Sub: "u2", AgentID: "a"}
+	if _, err := s.Touch(ctx, k2, t0, t0.Add(3*time.Hour), policy, "y"); !errors.Is(err, tokensvc.ErrSessionRevoked) {
+		t.Fatalf("revoked row purged too early: %v", err)
+	}
+	// Live cutoff far ahead removes the live row but not the revoked one.
+	if n, err := s.Purge(ctx, t0.Add(10*time.Hour), t0.Add(time.Hour)); err != nil || n != 1 {
+		t.Fatalf("live-only Purge = %d, %v, want 1 (wts_1)", n, err)
+	}
+	if _, err := s.Touch(ctx, k2, t0, t0.Add(3*time.Hour), policy, "y"); !errors.Is(err, tokensvc.ErrSessionRevoked) {
+		t.Fatalf("revoked row purged by the live cutoff: %v", err)
+	}
+	if n, err := s.Purge(ctx, t0.Add(10*time.Hour), t0.Add(3*time.Hour)); err != nil || n != 1 {
+		t.Fatalf("revoked Purge = %d, %v, want 1", n, err)
+	}
+}
+
+// A subject token issued before a revoke stays dead after the user signs in
+// again and a newer live session exists.
+func TestSessionsRevokedTokenAfterNewSession(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newSessions(t)
+	t0 := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	key := tokensvc.SessionKey{IdPIss: "i", Sub: "u", AgentID: "a"}
+	stolenIat := t0.Add(-time.Minute)
+	if _, err := s.Touch(ctx, key, stolenIat, t0, policy, "wts_1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Revoke(ctx, "wts_1", t0.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Touch(ctx, key, stolenIat, t0.Add(2*time.Minute), policy, "wts_x"); !errors.Is(err, tokensvc.ErrSessionRevoked) {
+		t.Fatalf("before the new sign-in: %v", err)
+	}
+	if sid, err := s.Touch(ctx, key, t0.Add(3*time.Minute), t0.Add(3*time.Minute), policy, "wts_2"); err != nil || sid != "wts_2" {
+		t.Fatalf("new sign-in: %q, %v", sid, err)
+	}
+	if sid, err := s.Touch(ctx, key, stolenIat, t0.Add(4*time.Minute), policy, "wts_y"); !errors.Is(err, tokensvc.ErrSessionRevoked) {
+		t.Fatalf("BYPASS: pre-revoke subject token accepted, sid=%s err=%v", sid, err)
+	}
+	// The new session is untouched by the refused attempt.
+	if sid, err := s.Touch(ctx, key, t0.Add(3*time.Minute), t0.Add(5*time.Minute), policy, "wts_z"); err != nil || sid != "wts_2" {
+		t.Fatalf("legit reuse: %q, %v", sid, err)
 	}
 }
 
@@ -227,7 +270,7 @@ func TestSessionsStoreErrors(t *testing.T) {
 	if _, err := s.RevokeAll(ctx, tokensvc.SessionFilter{Sub: "u"}, now); err == nil {
 		t.Error("RevokeAll on a closed db")
 	}
-	if _, err := s.Purge(ctx, now); err == nil {
+	if _, err := s.Purge(ctx, now, now); err == nil {
 		t.Error("Purge on a closed db")
 	}
 }
