@@ -428,7 +428,7 @@ func (st *Store) step(ctx context.Context, conn *sql.Conn, id string, revision i
 	where := " WHERE id = ? AND state = ? AND revision = ?"
 	// Expiry is part of the compare-and-swap: an expired draft can neither be
 	// approved nor claimed for publishing, whatever the caller read earlier.
-	if ev == approvals.EventApprove || ev == approvals.EventBeginApply {
+	if ev == approvals.EventApprove || ev == approvals.EventBeginApply || ev == approvals.EventEmergencyBegin {
 		now := ms(st.now())
 		if ms(cur.ExpiresAt) <= now {
 			return approvals.Draft{}, transitionLog{}, approvals.ErrDraftExpired
@@ -576,20 +576,8 @@ func (st *Store) RecordDecision(ctx context.Context, id string, in approvals.Dec
 		if d.DocSHA256 != in.DocSHA256 {
 			return fmt.Errorf("%w: the reviewed doc is not the draft's", approvals.ErrStateChanged)
 		}
-		ack := 0
-		if in.AcknowledgeNoReplay {
-			ack = 1
-		}
-		if _, err := conn.ExecContext(ctx,
-			`INSERT INTO change_approvals (draft_id, revision, doc_sha256, approver_iss, approver_sub, approver_email, approver_role,
-			   auth_method, decision, replay_id, acknowledge_no_replay, comment, at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			id, in.Revision, in.DocSHA256, in.Approver.Iss, in.Approver.Sub, in.Approver.Email, in.ApproverRole,
-			in.Approver.Kind, string(in.Decision), in.ReplayID, ack, in.Comment, ms(st.now())); err != nil {
-			if strings.Contains(err.Error(), "UNIQUE constraint failed") {
-				return fmt.Errorf("%w: %s at revision %d", approvals.ErrDuplicateDecision, in.Approver.Sub, in.Revision)
-			}
-			return fmt.Errorf("approvals store: record decision: %w", err)
+		if err := st.insertApproval(ctx, conn, id, in); err != nil {
+			return err
 		}
 		if err := conn.QueryRowContext(ctx,
 			"SELECT count(*) FROM change_approvals WHERE draft_id = ? AND revision = ? AND decision = 'approve'",
@@ -603,6 +591,100 @@ func (st *Store) RecordDecision(ctx context.Context, id string, in approvals.Dec
 	}
 	st.emit(l)
 	return d, n, nil
+}
+
+// insertApproval appends one change_approvals row inside the caller's
+// transaction. The same approver deciding the same revision twice is
+// ErrDuplicateDecision.
+func (st *Store) insertApproval(ctx context.Context, conn *sql.Conn, id string, in approvals.DecisionInput) error {
+	ack := 0
+	if in.AcknowledgeNoReplay {
+		ack = 1
+	}
+	if _, err := conn.ExecContext(ctx,
+		`INSERT INTO change_approvals (draft_id, revision, doc_sha256, approver_iss, approver_sub, approver_email, approver_role,
+		   auth_method, decision, replay_id, acknowledge_no_replay, comment, at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, in.Revision, in.DocSHA256, in.Approver.Iss, in.Approver.Sub, in.Approver.Email, in.ApproverRole,
+		in.Approver.Kind, string(in.Decision), in.ReplayID, ack, in.Comment, ms(st.now())); err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return fmt.Errorf("%w: %s at revision %d", approvals.ErrDuplicateDecision, in.Approver.Sub, in.Revision)
+		}
+		return fmt.Errorf("approvals store: record decision: %w", err)
+	}
+	return nil
+}
+
+// BeginEmergency implements approvals.Store.
+func (st *Store) BeginEmergency(ctx context.Context, id string, in approvals.DecisionInput) (approvals.Draft, error) {
+	if in.Decision != approvals.DecisionEmergency || in.Approver.Sub == "" {
+		return approvals.Draft{}, errors.New("approvals store: an emergency claim needs an emergency decision and an actor")
+	}
+	var (
+		d approvals.Draft
+		l transitionLog
+	)
+	err := st.immediateTx(ctx, func(conn *sql.Conn) error {
+		var serr error
+		if d, l, serr = st.step(ctx, conn, id, in.Revision, approvals.EventEmergencyBegin, in.Approver.Sub); serr != nil {
+			return serr
+		}
+		if d.DocSHA256 != in.DocSHA256 {
+			return fmt.Errorf("%w: the doc is not the draft's", approvals.ErrStateChanged)
+		}
+		// A retry after a refused publish by the same actor reuses its row; the
+		// original reason stays on file and the admin audit chain records the
+		// retry.
+		var prior string
+		err := conn.QueryRowContext(ctx,
+			"SELECT decision FROM change_approvals WHERE draft_id = ? AND revision = ? AND approver_iss = ? AND approver_sub = ?",
+			id, in.Revision, in.Approver.Iss, in.Approver.Sub).Scan(&prior)
+		switch {
+		case err == nil && prior == string(approvals.DecisionEmergency):
+			return nil
+		case err == nil:
+			return fmt.Errorf("%w: %s at revision %d", approvals.ErrDuplicateDecision, in.Approver.Sub, in.Revision)
+		case !errors.Is(err, sql.ErrNoRows):
+			return fmt.Errorf("approvals store: look up emergency decision: %w", err)
+		}
+		return st.insertApproval(ctx, conn, id, in)
+	})
+	if err != nil {
+		return approvals.Draft{}, err
+	}
+	st.emit(l)
+	return d, nil
+}
+
+// MarkEmergencyApplied implements approvals.Store.
+func (st *Store) MarkEmergencyApplied(ctx context.Context, id string, revision int, version int64, actorSub string) (approvals.Draft, error) {
+	return st.transition(ctx, id, revision, approvals.EventEmergencyApply, actorSub, set{"applied_version", version}, set{"last_error", ""})
+}
+
+// MarkReviewed implements approvals.Store.
+func (st *Store) MarkReviewed(ctx context.Context, id string, in approvals.DecisionInput) (approvals.Draft, error) {
+	if in.Decision != approvals.DecisionPostReview || in.Approver.Sub == "" {
+		return approvals.Draft{}, errors.New("approvals store: a review needs a post_review decision and a reviewer")
+	}
+	var (
+		d approvals.Draft
+		l transitionLog
+	)
+	err := st.immediateTx(ctx, func(conn *sql.Conn) error {
+		var serr error
+		if d, l, serr = st.step(ctx, conn, id, in.Revision, approvals.EventReview, in.Approver.Sub); serr != nil {
+			return serr
+		}
+		if d.DocSHA256 != in.DocSHA256 {
+			return fmt.Errorf("%w: the reviewed doc is not the draft's", approvals.ErrStateChanged)
+		}
+		return st.insertApproval(ctx, conn, id, in)
+	})
+	if err != nil {
+		return approvals.Draft{}, err
+	}
+	st.emit(l)
+	return d, nil
 }
 
 // ExpireDue implements approvals.Store.

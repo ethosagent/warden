@@ -83,10 +83,6 @@ func (a policyApplier) Apply(ctx context.Context, d approvals.Draft) (int64, err
 	if d.Target != approvals.TargetPolicy {
 		return 0, fmt.Errorf("%w: %s", approvals.ErrUnsupportedTarget, d.Target)
 	}
-	doc, err := d.PolicyDoc()
-	if err != nil {
-		return 0, fmt.Errorf("controlplane: decode draft %s doc: %w", d.ID, err)
-	}
 	// The Gate mints the clearance of a draft the Service is applying (state
 	// applying, classified); nothing else reaches publish through this path.
 	clr, err := a.s.gate.ClearApplied(ctx, d)
@@ -94,6 +90,31 @@ func (a policyApplier) Apply(ctx context.Context, d approvals.Draft) (int64, err
 		return 0, err
 	}
 	author := PolicyAuthor{Sub: d.Author.Sub, Email: d.Author.Email, Kind: d.Author.Kind}
+	return a.publishDraft(ctx, d, clr, author, draftVersionPrefix(d.ID, d.Revision)+d.Message)
+}
+
+var _ approvals.EmergencyApplier = policyApplier{}
+
+// ApplyEmergency implements approvals.EmergencyApplier. clr is the emergency
+// Clearance Gate.EmergencyApply minted for d; the version is authored by the
+// break-glass actor who bypassed the second person, not by the draft's author,
+// so the history names who published it. It keeps the draft's version prefix,
+// so a crash before the draft is marked is repaired by Reconcile.
+func (a policyApplier) ApplyEmergency(ctx context.Context, d approvals.Draft, clr approvals.Clearance, actor approvals.Author) (int64, error) {
+	if d.Target != approvals.TargetPolicy {
+		return 0, fmt.Errorf("%w: %s", approvals.ErrUnsupportedTarget, d.Target)
+	}
+	author := PolicyAuthor{Sub: actor.Sub, Email: actor.Email, Kind: AuthorKindBreakglass}
+	return a.publishDraft(ctx, d, clr, author, draftVersionPrefix(d.ID, d.Revision)+"emergency apply: "+d.Message)
+}
+
+// publishDraft publishes d's doc with clr as author, on expectedHead = the
+// draft's base version.
+func (a policyApplier) publishDraft(ctx context.Context, d approvals.Draft, clr approvals.Clearance, author PolicyAuthor, msg string) (int64, error) {
+	doc, err := d.PolicyDoc()
+	if err != nil {
+		return 0, fmt.Errorf("controlplane: decode draft %s doc: %w", d.ID, err)
+	}
 	mutate := func(w *policyWire) error {
 		// publish treats ExpectedHead 0 as "the head I read", which would let a
 		// draft based on an empty store overwrite a head that has since moved.
@@ -116,7 +137,6 @@ func (a policyApplier) Apply(ctx context.Context, d approvals.Draft) (int64, err
 		w.Allowlist, w.Denylist, w.Settings = doc.Allowlist, doc.Denylist, doc.Settings
 		return nil
 	}
-	msg := draftVersionPrefix(d.ID, d.Revision) + d.Message
 	version, _, err := a.s.publish(ctx, clr, author, mutate, dashboard.WriteMeta{ExpectedHead: d.BaseVersion, Message: msg}, SourceApproval)
 	switch {
 	case err == nil:
@@ -189,6 +209,7 @@ func (s *Server) initApprovals() {
 
 		MinApprovals:              ac.MinApprovals,
 		AllowSelfApproveNarrowing: ac.AllowSelfApproveNarrowing,
+		AllowEmergencyApply:       ac.AllowEmergencyApply,
 		ReplayMaxAge:              ac.ReplayMaxAge,
 		BaseDoc: func(ctx context.Context, version int64) (approvals.Doc, error) {
 			v, err := s.versions.Get(ctx, version)

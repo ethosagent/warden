@@ -89,6 +89,18 @@ func (a changeDraftAPI) changeErr(ctx context.Context, err error) error {
 		return fail(http.StatusForbidden, "author_only", nil)
 	case errors.Is(err, approvals.ErrSelfApproval):
 		return fail(http.StatusForbidden, "self_approval_forbidden", nil)
+	case errors.Is(err, approvals.ErrEmergencyDisabled):
+		return fail(http.StatusForbidden, "emergency_apply_disabled", nil)
+	case errors.Is(err, approvals.ErrBreakglassRequired):
+		return fail(http.StatusForbidden, "breakglass_required", nil)
+	case errors.Is(err, approvals.ErrBreakglassReviewer):
+		return fail(http.StatusForbidden, "breakglass_cannot_review", nil)
+	case errors.Is(err, approvals.ErrEmergencyReason):
+		return fail(http.StatusBadRequest, "invalid_reason", map[string]any{"min": approvals.MinEmergencyReason, "max": approvals.MaxEmergencyReason})
+	case errors.Is(err, approvals.ErrEmergencyRateLimited):
+		return fail(http.StatusTooManyRequests, "emergency_rate_limited", nil)
+	case errors.Is(err, approvals.ErrEmergencyAudit):
+		return fail(http.StatusServiceUnavailable, "admin_audit_unavailable", nil)
 	case errors.Is(err, approvals.ErrBreakglassApprover):
 		return fail(http.StatusForbidden, "breakglass_cannot_approve", nil)
 	case errors.As(err, &rr):

@@ -52,6 +52,9 @@ type ServiceConfig struct {
 	MinApprovals              int
 	AllowSelfApproveNarrowing bool
 	ReplayMaxAge              time.Duration
+	// AllowEmergencyApply is console.approvals.allowEmergencyApply: without it
+	// Gate.EmergencyApply refuses every call.
+	AllowEmergencyApply bool
 	// BaseDoc returns the redacted doc of a policy version, and Head the head
 	// version and its doc. Both feed Classify (a draft is classified against
 	// its base at every revision and again against the live head when the last
@@ -68,6 +71,10 @@ type Service struct {
 	cfg ServiceConfig
 	// applyMu serialises Apply so two callers cannot publish the same draft.
 	applyMu sync.Mutex
+	// emMu guards emTimes, the start times of the emergency applies still
+	// inside the rate-limit window.
+	emMu    sync.Mutex
+	emTimes []time.Time
 	// replayer is set once at startup (SetReplayer), before the Service serves.
 	replayer *Replayer
 }
@@ -394,7 +401,17 @@ func (s *Service) Reconcile(ctx context.Context, find VersionFinder) (int, error
 			return n, err
 		}
 		if found {
-			_, err = s.cfg.Store.MarkApplied(ctx, d.ID, d.Revision, version, "system")
+			// An interrupted emergency apply must come back as unreviewed, never
+			// as an ordinary applied draft.
+			emergency, eerr := s.hasEmergencyRow(ctx, d)
+			if eerr != nil {
+				return n, eerr
+			}
+			if emergency {
+				_, err = s.cfg.Store.MarkEmergencyApplied(ctx, d.ID, d.Revision, version, "system")
+			} else {
+				_, err = s.cfg.Store.MarkApplied(ctx, d.ID, d.Revision, version, "system")
+			}
 		} else {
 			_, err = s.cfg.Store.FailApply(ctx, d.ID, d.Revision, "apply was interrupted before a version was published; approve again", "system")
 		}

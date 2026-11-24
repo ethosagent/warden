@@ -165,6 +165,11 @@ var All = slices.Concat(
 		// version. In-process only (console, admin audit and state dir).
 		{Name: "approvals_two_person_rule", Opts: approvalsTwoPersonOpts(), Run: approvalsTwoPerson},
 		{Name: "approvals_held_save", Opts: approvalsTwoPersonOpts(), Run: approvalsHeldSave},
+		// The break-glass emergency apply (W-P2-APPR-07): a break-glass session
+		// publishes a pending widening draft past the two-person rule, audited
+		// before and after, with a critical approval_bypassed Finding; an OIDC
+		// admin then reviews it. In-process only (console, break-glass, state dir).
+		{Name: "approvals_emergency_apply", Opts: approvalsEmergencyOpts(), Run: approvalsEmergencyApply},
 		// Scoped policy (W-P1-GPOL-10): with identity off a scoped entry loads
 		// but allows nobody (identity_required); an unscoped entry still applies.
 		{Name: "scoped_policy_fail_closed", Run: scopedPolicyFailClosed},

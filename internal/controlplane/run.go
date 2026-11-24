@@ -532,6 +532,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	}
 
 	srv.warnBreakGlassSetup(integrations)
+	srv.warnEmergencyApplySetup(integrations)
 
 	if p.Findings != nil {
 		srv.findings = p.Findings

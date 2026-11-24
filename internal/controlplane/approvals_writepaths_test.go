@@ -407,6 +407,11 @@ var notVersionedWriteRoutes = map[routeKey]string{
 	{http.MethodPost, "/dashboard/api/changes/{id}/approve"}:  "applies only through Service.Apply (ClearApplied)",
 	{http.MethodPost, "/dashboard/api/changes/{id}/reject"}:   "ends a draft",
 	{http.MethodPost, "/dashboard/api/changes/{id}/replay"}:   "runs a replay",
+
+	// Break-glass emergency apply and its review (W-P2-APPR-07).
+	{http.MethodPost, "/dashboard/api/changes/{id}/emergency-apply"}: "publishes only through Gate.EmergencyApply (the emergency Clearance), break-glass sessions only",
+	{http.MethodPost, "/dashboard/api/changes/{id}/review"}:          "records a post-hoc review of an applied draft; creates no version",
+
 	// CP-local blocks and stores that are not part of a policy version
 	// (docs/control-plane.md).
 	{http.MethodPost, "/dashboard/api/secretstore"}:          "writes secret values into the managed secret store, not a version",

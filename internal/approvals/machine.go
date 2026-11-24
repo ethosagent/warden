@@ -77,7 +77,12 @@ const (
 	EventWithdraw Event = "withdraw"
 	// EventExpire: open -> expired (sweeper).
 	EventExpire Event = "expire"
-	// EventEmergencyApply: pending | needs_rebase -> applied_unreviewed.
+	// EventEmergencyBegin: pending | needs_rebase -> applying. An emergency
+	// apply claims the draft like an ordinary apply does, so a concurrent
+	// withdraw, edit or expiry cannot race its publish.
+	EventEmergencyBegin Event = "emergency_begin"
+	// EventEmergencyApply: applying -> applied_unreviewed (the emergency
+	// publish succeeded and awaits its post-hoc review).
 	EventEmergencyApply Event = "emergency_apply"
 	// EventReview: applied_unreviewed -> applied (post-hoc review).
 	EventReview Event = "review"
@@ -98,18 +103,19 @@ var transitions = map[State]map[Event]State{
 		EventReject:         StateRejected,
 		EventWithdraw:       StateWithdrawn,
 		EventExpire:         StateExpired,
-		EventEmergencyApply: StateAppliedUnreviewed,
+		EventEmergencyBegin: StateApplying,
 	},
 	StateApplying: {
-		EventApply:       StateApplied,
-		EventApplyFailed: StatePending,
-		EventConflict:    StateNeedsRebase,
+		EventApply:          StateApplied,
+		EventApplyFailed:    StatePending,
+		EventConflict:       StateNeedsRebase,
+		EventEmergencyApply: StateAppliedUnreviewed,
 	},
 	StateNeedsRebase: {
 		EventRebase:         StatePending,
 		EventWithdraw:       StateWithdrawn,
 		EventExpire:         StateExpired,
-		EventEmergencyApply: StateAppliedUnreviewed,
+		EventEmergencyBegin: StateApplying,
 	},
 	StateAppliedUnreviewed: {
 		EventReview: StateApplied,
