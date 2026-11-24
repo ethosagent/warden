@@ -267,13 +267,13 @@ func (a *WorkerAuthenticator) Reauthenticate(p WorkerPrincipal) error {
 	return nil
 }
 
-// SeenCertSerial reports whether the latest certificate the worker
-// authenticated with in this process has this serial. Renewal's lineage rule
-// uses it to tell a successor that was never used (the response was lost) from
-// one the worker already holds. A restart forgets everything, which is the
-// safe direction: an unseen successor only widens the 10-minute grace.
+// SeenCertSerial reports whether the worker authenticated with the certificate
+// of this serial in this process. Renewal's lineage rule uses it to tell a
+// successor that was never used (the response was lost) from one the worker
+// already holds. A restart forgets everything, which is the safe direction: an
+// unseen successor only widens the 10-minute grace.
 func (a *WorkerAuthenticator) SeenCertSerial(workerID, serial string) bool {
-	return a.registry != nil && a.registry.certSerial(workerID) == serial
+	return a.registry != nil && a.registry.certSeen(workerID, serial)
 }
 
 // LogMode logs the resolved mode once, with the open-mode and no-TLS warnings.

@@ -3,6 +3,7 @@ package harness
 import (
 	"context"
 	"crypto/ecdsa"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -39,6 +40,7 @@ const WorkerCATrustDomain = "warden.test"
 type workerCAFixture struct {
 	chainPath string
 	key       *ecdsa.PrivateKey
+	inter     *x509.Certificate
 }
 
 // workerCAFixtureOnce mints the fixture on first use, valid at the harness
@@ -64,7 +66,7 @@ func (h *H) workerCAFixture() *workerCAFixture {
 	if err := os.WriteFile(path, workerca.EncodeCertsPEM(inter, root), 0o600); err != nil {
 		h.tb.Fatalf("harness: write worker CA chain: %v", err)
 	}
-	h.workerCA = &workerCAFixture{chainPath: path, key: key}
+	h.workerCA = &workerCAFixture{chainPath: path, key: key, inter: inter}
 	return h.workerCA
 }
 
@@ -76,6 +78,11 @@ func (h *H) workerCAYAML() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "\nworkerCA:\n  enabled: true\n  trustDomain: %s\n  certFile: %s\n  keySource: keys\n",
 		WorkerCATrustDomain, h.workerCAFixture().chainPath)
+	if !h.wantStrict {
+		// An echo secret store mounts /central/secrets, which a scenario proves
+		// a worker certificate never opens.
+		b.WriteString("\nsecretStore:\n  backend: echo\n")
+	}
 	return b.String()
 }
 

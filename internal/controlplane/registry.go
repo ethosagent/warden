@@ -41,7 +41,15 @@ type workerState struct {
 	// authentication (kind cert only).
 	certSerial   string
 	certNotAfter time.Time
+	// seenSerials are the last few certificate serials the worker authenticated
+	// with, oldest first. Renewal's lineage rule asks whether a successor was
+	// ever used; the latest alone would be overwritten by the predecessor's own
+	// renewal request.
+	seenSerials []string
 }
+
+// maxSeenSerials bounds workerState.seenSerials.
+const maxSeenSerials = 8
 
 // NewWorkerRegistry returns an empty registry.
 func NewWorkerRegistry() *WorkerRegistry {
@@ -151,17 +159,21 @@ func (r *WorkerRegistry) recordAuth(p WorkerPrincipal) {
 	w := r.touch(p.ProxyID, r.now())
 	w.authKind, w.tokenID, w.tokenName = p.Kind, p.TokenID, p.TokenName
 	w.certSerial, w.certNotAfter = p.CertSerial, p.NotAfter
+	if p.Kind == KindCert && !slices.Contains(w.seenSerials, p.CertSerial) {
+		if len(w.seenSerials) >= maxSeenSerials {
+			w.seenSerials = w.seenSerials[1:]
+		}
+		w.seenSerials = append(w.seenSerials, p.CertSerial)
+	}
 }
 
-// certSerial is the serial of the certificate the worker last authenticated
-// with ("" when it used another credential or has not been seen).
-func (r *WorkerRegistry) certSerial(proxyID string) string {
+// certSeen reports whether the worker authenticated with the certificate of
+// this serial since the control plane started (among its last few).
+func (r *WorkerRegistry) certSeen(proxyID, serial string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if w, ok := r.workers[proxyID]; ok && w.authKind == KindCert {
-		return w.certSerial
-	}
-	return ""
+	w, ok := r.workers[proxyID]
+	return ok && slices.Contains(w.seenSerials, serial)
 }
 
 // touch returns the worker's state, creating it on first contact. Caller holds mu.
