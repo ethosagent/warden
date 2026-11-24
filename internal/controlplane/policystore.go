@@ -31,6 +31,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/ethosagent/warden/internal/adminaudit"
+	"github.com/ethosagent/warden/internal/approvals"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/cpstate"
 	"github.com/ethosagent/warden/internal/dashboard"
@@ -57,7 +58,7 @@ const (
 // Author kinds: the admin-audit auth_method set.
 const (
 	AuthorKindOIDC       = "oidc"
-	AuthorKindBreakglass = "breakglass"
+	AuthorKindBreakglass = approvals.AuthorKindBreakglass
 	AuthorKindCLI        = "cli"
 	AuthorKindBearer     = "bearer"
 	AuthorKindNone       = "none"

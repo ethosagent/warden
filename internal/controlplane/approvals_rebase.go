@@ -67,6 +67,13 @@ func encodeEntries[E diffKeyed](es []E) ([]string, error) {
 	return out, nil
 }
 
+// mergeEntries merges one list. Entries a side did not change keep head's
+// order; the entries of a key the draft changed are placed where head had the
+// key (or at the end, in the draft's order, when head had none). The order of
+// entries inside a key group is the draft's, and a key the draft changed is
+// replaced whole, so the merged order can differ from both docs. Order inside a
+// list is not significant to the diff (DiffKey multisets), only to rate-bucket
+// ties, which Classify already reports on any reorder.
 func mergeEntries[E diffKeyed](base, draft, head []E, list string) ([]E, []string, error) {
 	groups := map[string]*entryGroup[E]{}
 	group := func(k string) *entryGroup[E] {
@@ -211,9 +218,9 @@ func mergeTree(path string, base, draft, head map[string]any, conflicts *[]strin
 			hm, hIsMap := hv.(map[string]any)
 			bm, bIsMap := bv.(map[string]any)
 			if dIsMap && hIsMap && (bIsMap || !bok) {
-				if merged := mergeTree(path+pathSegment(k), bm, dm, hm, conflicts); len(merged) > 0 {
-					out[k] = merged
-				}
+				// Both sides have the key as an object: keep it even when empty
+				// (an empty block is a value, not an absence).
+				out[k] = mergeTree(path+pathSegment(k), bm, dm, hm, conflicts)
 				continue
 			}
 			*conflicts = append(*conflicts, path+pathSegment(k))

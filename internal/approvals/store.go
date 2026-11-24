@@ -112,6 +112,9 @@ type Store interface {
 	ExpireDue(ctx context.Context, now time.Time) ([]Draft, error)
 	// Approvals returns a draft's approval rows, oldest first.
 	Approvals(ctx context.Context, id string) ([]Approval, error)
+	// ApprovalCounts returns, for each draft, how many distinct approvers its
+	// current revision and doc have (one query, whatever len(ds)).
+	ApprovalCounts(ctx context.Context, ds []Draft) (map[string]int, error)
 }
 
 // Applier publishes a draft's doc to its target. The policy Applier lives in

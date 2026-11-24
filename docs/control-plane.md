@@ -1046,7 +1046,13 @@ W-P2-APPR-06 routes every existing write path through the same check.
   `409 revision_changed` when the revision or digest differ from the draft;
   `409 replay_required` unless `replay_id` names a done replay of this revision no older
   than `replayMaxAge`, or `acknowledgeNoReplay` is true and the revision's latest replay
-  failed, was unavailable or never ran.
+  failed or was unavailable. A revision whose replay never ran (queueing it failed) gets
+  an `unavailable` replay row; one with no row at all is `replay_required` (re-run it
+  with `POST .../replay`).
+- **Reject.** Rejecting needs editor only, not the draft's required role: rejecting can
+  only stop a change, so editor suffices.
+- **Expiry.** An open draft past its expiry cannot be approved or applied
+  (`409 illegal_transition`, `reason: expired`) even before the sweeper retires it.
 - **Two-person rule.** The approver's subject must differ from the author's
   (`403 self_approval_forbidden`); a break-glass session never approves
   (`403 breakglass_cannot_approve`); the approver must hold the draft's required role now
@@ -1062,7 +1068,12 @@ W-P2-APPR-06 routes every existing write path through the same check.
 - **Audit.** Every mutation is an admin audit row (`change.draft.<verb>`, target
   `change_draft`, target_ref `draft:<id>@r<rev>`, details: base and applied version,
   widening, reason codes, replay status), never doc content. Submitting a widening draft
-  publishes an info Finding `policy_approval_requested`.
+  publishes an info Finding `policy_approval_requested`. When an approval (or a
+  self-applied submit) publishes, a second row follows: `policy.write` on target `policy`
+  with `applied_version`, `source: approval` and the policy hashes before and after, the
+  actor being the approver.
+- **Validation.** A draft doc is dry-run through the config loader at create and edit
+  (`422 invalid_policy`), and again at apply.
 
 ## Scheduled backups (`--backup-dir`)
 

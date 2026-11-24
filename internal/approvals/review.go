@@ -198,8 +198,11 @@ func (s *Service) Approve(ctx context.Context, in ApproveInput) (ApproveResult, 
 	if d.State != StatePending {
 		return ApproveResult{}, fmt.Errorf("%w: a %s draft cannot be approved", ErrIllegalTransition, d.State)
 	}
+	if s.expired(d) {
+		return ApproveResult{}, ErrDraftExpired
+	}
 	switch {
-	case in.Approver.Kind == "breakglass":
+	case in.Approver.Kind == AuthorKindBreakglass:
 		return ApproveResult{}, ErrBreakglassApprover
 	case in.Approver.Sub == "" || (in.Approver.Sub == d.Author.Sub && in.Approver.Iss == d.Author.Iss):
 		return ApproveResult{}, ErrSelfApproval
@@ -386,10 +389,23 @@ func (s *Service) checkEvidence(ctx context.Context, d Draft, in ApproveInput) e
 	if err != nil {
 		return err
 	}
-	if ok && latest.Status != ReplayFailed && latest.Status != ReplayUnavailable {
+	switch {
+	case ok && latest.Status != ReplayFailed && latest.Status != ReplayUnavailable:
 		return fmt.Errorf("%w: the latest replay is %s; cite it or wait for it", ErrReplayRequired, latest.Status)
+	case !ok && s.replayer != nil && d.Target == TargetPolicy:
+		// Replays are on and none of this revision ever ran (or was recorded as
+		// unavailable): that is missing evidence, not "no evidence available".
+		return fmt.Errorf("%w: no replay of this revision has run; POST .../replay first", ErrReplayRequired)
 	}
 	return nil
+}
+
+// ErrDraftExpired: an open draft is past its expiry and no longer applies.
+var ErrDraftExpired = fmt.Errorf("%w: the draft expired", ErrIllegalTransition)
+
+// expired reports whether d is past its expiry.
+func (s *Service) expired(d Draft) bool {
+	return !d.ExpiresAt.IsZero() && !s.cfg.Now().Before(d.ExpiresAt)
 }
 
 // RejectInput is one reviewer's rejection.

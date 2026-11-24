@@ -104,6 +104,8 @@ func (a changeDraftAPI) changeErr(ctx context.Context, err error) error {
 	case errors.Is(err, approvals.ErrRebaseRequired):
 		head, _ := a.s.versions.Head(ctx)
 		return fail(http.StatusConflict, "rebase_required", map[string]any{"head": head})
+	case errors.Is(err, approvals.ErrDraftExpired):
+		return fail(http.StatusConflict, "illegal_transition", map[string]any{"reason": "expired"})
 	case errors.Is(err, approvals.ErrIllegalTransition):
 		return fail(http.StatusConflict, "illegal_transition", nil)
 	case errors.Is(err, approvals.ErrDuplicateDecision):
@@ -129,7 +131,9 @@ func (a changeDraftAPI) changeErr(ctx context.Context, err error) error {
 
 // --- views ---
 
-func (a changeDraftAPI) view(ctx context.Context, d approvals.Draft, count bool) dashboard.ChangeDraftView {
+// view is a draft without its doc; approvals is how many distinct approvers
+// its current revision has.
+func (a changeDraftAPI) view(d approvals.Draft, approved int) dashboard.ChangeDraftView {
 	v := dashboard.ChangeDraftView{
 		ID: d.ID, Target: string(d.Target), Revision: d.Revision, BaseVersion: d.BaseVersion,
 		State: string(d.State), Author: dashboard.ChangeActor{Sub: d.Author.Sub, Email: d.Author.Email},
@@ -146,16 +150,19 @@ func (a changeDraftAPI) view(ctx context.Context, d approvals.Draft, count bool)
 			v.Reasons = append(v.Reasons, dashboard.ChangeReason{Code: r.Code, Path: r.Path, Detail: r.Detail})
 		}
 	}
-	if count {
-		if n, err := a.svc().ApprovalCount(ctx, d); err == nil {
-			v.Approvals = n
-		}
-	}
+	v.Approvals = approved
 	return v
 }
 
+// approvalCount is the distinct approvers of d's current revision (0 on a
+// store error: the count is informational, the apply path counts for itself).
+func (a changeDraftAPI) approvalCount(ctx context.Context, d approvals.Draft) int {
+	n, _ := a.svc().ApprovalCount(ctx, d)
+	return n
+}
+
 func (a changeDraftAPI) result(ctx context.Context, d approvals.Draft, applied bool) dashboard.ChangeResult {
-	res := dashboard.ChangeResult{ChangeDraftView: a.view(ctx, d, true)}
+	res := dashboard.ChangeResult{ChangeDraftView: a.view(d, a.approvalCount(ctx, d))}
 	if applied {
 		res.Version = d.AppliedVersion
 	}
@@ -188,7 +195,7 @@ func (a changeDraftAPI) detail(ctx context.Context, d approvals.Draft) (dashboar
 		return dashboard.ChangeDraftDetail{}, err
 	}
 	out := dashboard.ChangeDraftDetail{
-		ChangeDraftView: a.view(ctx, d, true),
+		ChangeDraftView: a.view(d, a.approvalCount(ctx, d)),
 		// Stored docs are redacted; redact again on the way out.
 		Doc:          redactDraftDoc(doc),
 		ApprovalRows: []dashboard.ChangeApprovalView{},
@@ -250,9 +257,13 @@ func (a changeDraftAPI) List(ctx context.Context, f dashboard.ChangeFilter, curs
 	if err != nil {
 		return nil, "", a.changeErr(ctx, err)
 	}
+	counts, err := a.svc().Store().ApprovalCounts(ctx, ds)
+	if err != nil {
+		return nil, "", a.changeErr(ctx, err)
+	}
 	out := make([]dashboard.ChangeDraftView, len(ds))
 	for i, d := range ds {
-		out[i] = a.view(ctx, d, true)
+		out[i] = a.view(d, counts[d.ID])
 	}
 	return out, next, nil
 }
@@ -336,7 +347,7 @@ func (a changeDraftAPI) Create(ctx context.Context, in dashboard.ChangeCreateInp
 	if approvals.Target(in.Target) != approvals.TargetPolicy {
 		return dashboard.ChangeDraftDetail{}, a.changeErr(ctx, approvals.ErrUnsupportedTarget)
 	}
-	doc, err := decodeDoc(in.Doc)
+	doc, err := a.decodeAndValidate(ctx, in.Doc)
 	if err != nil {
 		return dashboard.ChangeDraftDetail{}, err
 	}
@@ -382,7 +393,7 @@ func (a changeDraftAPI) Update(ctx context.Context, id string, revision int, in 
 	if err != nil {
 		return dashboard.ChangeDraftDetail{}, err
 	}
-	doc, err := decodeDoc(in.Doc)
+	doc, err := a.decodeAndValidate(ctx, in.Doc)
 	if err != nil {
 		return dashboard.ChangeDraftDetail{}, err
 	}
@@ -414,6 +425,7 @@ func (a changeDraftAPI) Submit(ctx context.Context, id string, revision int) (da
 	if err != nil {
 		return dashboard.ChangeResult{}, err
 	}
+	policyBefore := a.s.policyHashNow(ctx)
 	res, err := a.svc().SubmitOrApply(ctx, id, revisionOrCurrent(revision, d), au)
 	if res.Draft.ID != "" {
 		a.annotate(ctx, res.Draft, map[string]string{adminaudit.DetailOp: "submit"})
@@ -421,7 +433,9 @@ func (a changeDraftAPI) Submit(ctx context.Context, id string, revision int) (da
 	if err != nil {
 		return dashboard.ChangeResult{}, a.changeErr(ctx, err)
 	}
-	if !res.Applied {
+	if res.Applied {
+		a.recordPolicyApply(ctx, policyBefore, res.Draft)
+	} else {
 		a.publishApprovalRequested(res.Draft)
 	}
 	return a.result(ctx, res.Draft, res.Applied), nil
@@ -526,6 +540,7 @@ func (a changeDraftAPI) Approve(ctx context.Context, id string, in dashboard.Cha
 			adminaudit.DetailReplayStatus: a.replayStatus(ctx, d, in.ReplayID),
 		})
 	}
+	policyBefore := a.s.policyHashNow(ctx)
 	res, err := a.svc().Approve(ctx, approvals.ApproveInput{
 		ID: id, Revision: in.Revision, DocSHA256: in.DocSHA256, Approver: au, Role: role,
 		ReplayID: in.ReplayID, AcknowledgeNoReplay: in.AcknowledgeNoReplay, Comment: in.Comment,
@@ -535,6 +550,9 @@ func (a changeDraftAPI) Approve(ctx context.Context, id string, in dashboard.Cha
 	}
 	if err != nil {
 		return dashboard.ChangeResult{}, a.changeErr(ctx, err)
+	}
+	if res.Applied {
+		a.recordPolicyApply(ctx, policyBefore, res.Draft)
 	}
 	out := a.result(ctx, res.Draft, res.Applied)
 	out.Approvals, out.ApprovalsRequired = res.Approvals, res.Required
@@ -617,6 +635,58 @@ func (s *Server) changeDraftHash(ctx context.Context) (string, error) {
 type auditScope struct {
 	path    string
 	draftID string
+	// followUps build rows recorded after the request's own row.
+	followUps []func(adminaudit.Input) adminaudit.Input
+}
+
+// addAuditFollowUp asks the admin audit middleware for one more row after the
+// request's own: fn receives that row (actor, method, client, request id) and
+// returns the extra one.
+func addAuditFollowUp(ctx context.Context, fn func(adminaudit.Input) adminaudit.Input) {
+	if sc, ok := ctx.Value(auditScopeKey{}).(*auditScope); ok {
+		sc.followUps = append(sc.followUps, fn)
+	}
+}
+
+// auditFollowUps are the rows a handler asked for after its own.
+func auditFollowUps(ctx context.Context) []func(adminaudit.Input) adminaudit.Input {
+	if sc, ok := ctx.Value(auditScopeKey{}).(*auditScope); ok {
+		return sc.followUps
+	}
+	return nil
+}
+
+// policyHashNow is the policy audit hash now ("" without admin audit).
+func (s *Server) policyHashNow(ctx context.Context) string {
+	if s.audit == nil {
+		return ""
+	}
+	h, _ := s.audit.stateHash(ctx, auditTargetPolicy)
+	return h
+}
+
+// recordPolicyApply asks for the policy row of a draft that just published:
+// the same action and target a console policy save records, with the version
+// and the `approval` source, the actor being whoever made the request and the
+// hashes the policy hash before and after the apply.
+func (a changeDraftAPI) recordPolicyApply(ctx context.Context, before string, d approvals.Draft) {
+	if a.s.audit == nil {
+		return
+	}
+	after := a.s.policyHashNow(ctx)
+	ref := "policy@" + a.s.policy.currentETag()
+	addAuditFollowUp(ctx, func(base adminaudit.Input) adminaudit.Input {
+		return adminaudit.Input{
+			Actor: base.Actor, ActorRole: base.ActorRole, AuthMethod: base.AuthMethod,
+			Action: "policy.write", Target: auditTargetPolicy, TargetRef: ref,
+			Details: map[string]string{
+				adminaudit.DetailAppliedVersion: strconv.FormatInt(d.AppliedVersion, 10),
+				"source":                        SourceApproval,
+			},
+			Outcome: adminaudit.OutcomeOK, HTTPStatus: base.HTTPStatus,
+			BeforeHash: before, AfterHash: after, ClientIP: base.ClientIP, RequestID: base.RequestID,
+		}
+	})
 }
 
 type auditScopeKey struct{}
@@ -644,4 +714,18 @@ func auditDraftID(ctx context.Context) string {
 	}
 	id, _ := dashboard.ChangeDraftID(sc.path)
 	return id
+}
+
+// decodeAndValidate reads a request doc and dry-runs it through the config
+// loader, so a doc that could never publish is a 422 now rather than at the
+// approval. The check is repeated at apply, against the head then.
+func (a changeDraftAPI) decodeAndValidate(ctx context.Context, raw json.RawMessage) (approvals.Doc, error) {
+	doc, err := decodeDoc(raw)
+	if err != nil {
+		return doc, err
+	}
+	if err := a.s.validateDoc(policyWire{Allowlist: doc.Allowlist, Denylist: doc.Denylist, Settings: doc.Settings}); err != nil {
+		return doc, a.changeErr(ctx, &dashboard.InvalidPolicyError{Err: err})
+	}
+	return doc, nil
 }

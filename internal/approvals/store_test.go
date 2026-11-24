@@ -524,7 +524,7 @@ func TestDraftStoreApplyOnce(t *testing.T) {
 	if _, err := e.svc.Apply(ctx, dd.ID, dd.Revision, "bob"); !errors.Is(err, approvals.ErrIllegalTransition) {
 		t.Errorf("apply of an unsubmitted draft = %v, want ErrIllegalTransition", err)
 	}
-	unsupported, err := approvals.NewService(approvals.ServiceConfig{Store: e.store, Redact: redact, Now: time.Now, DraftTTL: time.Hour, MaxOpenDrafts: 1})
+	unsupported, err := approvals.NewService(approvals.ServiceConfig{Store: e.store, Redact: redact, Now: func() time.Time { return time.UnixMilli(e.nowMS.Load()) }, DraftTTL: time.Hour, MaxOpenDrafts: 1})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -653,3 +653,44 @@ func (st *Store) Approvals(ctx context.Context, id string) ([]approvals.Approval
 	}
 	return out, nil
 }
+
+// ApprovalCounts implements approvals.Store: one grouped query counts the
+// distinct approvers of every given draft's current revision and doc.
+func (st *Store) ApprovalCounts(ctx context.Context, ds []approvals.Draft) (map[string]int, error) {
+	out := make(map[string]int, len(ds))
+	if len(ds) == 0 {
+		return out, nil
+	}
+	cur := make(map[string]approvals.Draft, len(ds))
+	marks := make([]string, 0, len(ds))
+	args := make([]any, 0, len(ds))
+	for _, d := range ds {
+		cur[d.ID] = d
+		marks = append(marks, "?")
+		args = append(args, d.ID)
+	}
+	rows, err := st.db.QueryContext(ctx,
+		`SELECT draft_id, revision, doc_sha256, count(DISTINCT approver_iss || char(0) || approver_sub)
+		 FROM change_approvals WHERE decision = 'approve' AND draft_id IN (`+strings.Join(marks, ",")+`)
+		 GROUP BY draft_id, revision, doc_sha256`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("approvals store: count approvals: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var (
+			id, sha string
+			rev, n  int
+		)
+		if err := rows.Scan(&id, &rev, &sha, &n); err != nil {
+			return nil, fmt.Errorf("approvals store: count approvals: %w", err)
+		}
+		if d, ok := cur[id]; ok && d.Revision == rev && d.DocSHA256 == sha {
+			out[id] = n
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("approvals store: count approvals: %w", err)
+	}
+	return out, nil
+}

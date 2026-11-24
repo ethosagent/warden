@@ -159,16 +159,17 @@ func approvalsTwoPerson(t *testing.T, h *harness.H) {
 		return connectStatus(t, h, approvalsHost+":443") == http.StatusOK
 	})
 
-	// Admin audit: create, submit, the refused self approval, the approval.
+	// Admin audit: create, submit, the refused self approval, the approval and
+	// the policy row it published.
 	var got []string
 	for _, r := range h.AdminAuditRows() {
-		if strings.HasPrefix(r.Action, "change.draft.") {
+		if strings.HasPrefix(r.Action, "change.draft.") || r.Action == "policy.write" {
 			got = append(got, r.Action+":"+r.Outcome+":"+r.Sub)
 		}
 	}
 	want := []string{
 		"change.draft.create:ok:ana", "change.draft.submit:ok:ana",
-		"change.draft.approve:denied:ana", "change.draft.approve:ok:ben",
+		"change.draft.approve:denied:ana", "change.draft.approve:ok:ben", "policy.write:ok:ben",
 	}
 	if strings.Join(got, " ") != strings.Join(want, " ") {
 		t.Fatalf("change draft audit rows = %v, want %v", got, want)

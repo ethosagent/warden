@@ -108,8 +108,25 @@ func (s *Service) queueReplay(ctx context.Context, d Draft) {
 	if s.replayer == nil || d.Target != TargetPolicy || (d.State == StateDraft && s.selfApplies(d)) {
 		return
 	}
-	if _, err := s.replayer.Queue(context.WithoutCancel(ctx), d); err != nil {
+	ctx = context.WithoutCancel(ctx)
+	if _, err := s.replayer.Queue(ctx, d); err != nil {
 		s.cfg.Logger.Warn("approvals: cannot queue a replay", "draft_id", d.ID, "revision", d.Revision, "error", err)
+		// Record the failure as an unavailable replay, so "no evidence" is an
+		// explicit state the approver can acknowledge, never an absent row.
+		code := "queue_failed"
+		switch {
+		case errors.Is(err, ErrReplayBusy):
+			code = "queue_busy"
+		case errors.Is(err, ErrReplayRateLimited):
+			code = "queue_rate_limited"
+		}
+		now := s.cfg.Now()
+		if _, ierr := s.replayer.cfg.Store.Insert(ctx, Replay{
+			DraftID: d.ID, Revision: d.Revision, BaseVersion: d.BaseVersion,
+			Status: ReplayUnavailable, ErrorCode: code, StartedAt: now, FinishedAt: now,
+		}); ierr != nil {
+			s.cfg.Logger.Warn("approvals: cannot record the unavailable replay", "draft_id", d.ID, "error", ierr)
+		}
 	}
 }
 
@@ -285,6 +302,11 @@ func (s *Service) Apply(ctx context.Context, id string, revision int, actorSub s
 	}
 	if _, err := Transition(d.State, EventBeginApply); err != nil {
 		return Draft{}, err
+	}
+	// An open draft past its expiry is retired by the sweeper; until then it
+	// must not publish.
+	if s.expired(d) {
+		return Draft{}, ErrDraftExpired
 	}
 	ap, ok := s.cfg.Appliers[d.Target]
 	if !ok {

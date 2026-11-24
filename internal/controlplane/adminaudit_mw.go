@@ -284,6 +284,17 @@ func (s *Server) adminAuditMiddleware(classify func(*http.Request) (authzRow, bo
 			return
 		}
 		a.degraded.Store(false)
+		// Rows a handler asked for after this one (a change draft that applied
+		// also records the policy change it made), in order.
+		for _, follow := range auditFollowUps(actx) {
+			next := follow(in)
+			if _, err := a.rec.Record(context.WithoutCancel(ctx), next); err != nil {
+				a.degraded.Store(true)
+				s.logPersistFailed(next, err)
+				s.publishAuditDegraded("append_failed")
+				return
+			}
+		}
 	})
 }
 

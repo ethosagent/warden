@@ -12,6 +12,7 @@ import (
 
 	"github.com/ethosagent/warden/internal/adminaudit"
 	"github.com/ethosagent/warden/internal/approvals"
+	"github.com/ethosagent/warden/internal/clock/clocktest"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/cpstate"
 	"github.com/ethosagent/warden/internal/dashboard"
@@ -35,6 +36,11 @@ type draftEnv struct {
 }
 
 func newDraftEnv(t *testing.T, mutate func(*config.ConsoleApprovals)) *draftEnv {
+	return newDraftEnvAt(t, mutate, nil)
+}
+
+// newDraftEnvAt is newDraftEnv on the fake clock clk (nil = the real clock).
+func newDraftEnvAt(t *testing.T, mutate func(*config.ConsoleApprovals), clk *clocktest.Fake) *draftEnv {
 	t.Helper()
 	ac := config.DefaultConsoleApprovals()
 	ac.Enabled = true
@@ -50,10 +56,14 @@ func newDraftEnv(t *testing.T, mutate func(*config.ConsoleApprovals)) *draftEnv 
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	logger, _ := testLogger()
-	srv := New(Config{
+	cfg := Config{
 		PolicyPath: writePolicyFile(t, "api.openai.com"), Token: dashTestToken, State: db,
 		PolicyStore: PolicyStoreVersioned, Console: console, Logger: logger,
-	})
+	}
+	if clk != nil {
+		cfg.Clock = clk
+	}
+	srv := New(cfg)
 	if srv.Approvals() == nil {
 		t.Fatal("approvals service not built")
 	}
@@ -253,6 +263,16 @@ func TestChangeDraftAPI(t *testing.T) {
 	}
 
 	// u2 approves, citing the replay, and the same request publishes.
+	// A worker long-polling /policy with the old ETag gets the new one.
+	polled := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		req := httptest.NewRequest(http.MethodGet, "/policy?wait=20s", nil)
+		req.Header.Set("Authorization", "Bearer "+dashTestToken)
+		req.Header.Set("If-None-Match", `"`+etagBefore+`"`)
+		rec := httptest.NewRecorder()
+		e.h.ServeHTTP(rec, req)
+		polled <- rec
+	}()
 	resp := e.do("u2", http.MethodPost, draftsPath+"/"+d.ID+"/approve", approveBody(d.ChangeDraftView, rp.ID, "looks right\x00\x07"))
 	if resp.Code != http.StatusOK {
 		t.Fatalf("approve = %d %s", resp.Code, resp.Body.String())
@@ -263,6 +283,15 @@ func TestChangeDraftAPI(t *testing.T) {
 	}
 	if e.head(t) != 2 || e.srv.policy.currentETag() == etagBefore {
 		t.Errorf("head %d / etag unchanged after the approval", e.head(t))
+	}
+	select {
+	case rec := <-polled:
+		if rec.Code != http.StatusOK || strings.Trim(rec.Header().Get("ETag"), `"`) != e.srv.policy.currentETag() ||
+			!strings.Contains(rec.Body.String(), "new.example.com") {
+			t.Errorf("long-polling worker got %d etag %q, want 200 with the new policy", rec.Code, rec.Header().Get("ETag"))
+		}
+	case <-time.After(15 * time.Second):
+		t.Error("the long-polling worker never received the new ETag")
 	}
 	v, err := e.srv.versions.Get(context.Background(), 2)
 	if err != nil || v.Source != SourceApproval || v.Author.Sub != "u1" || !strings.HasPrefix(v.Message, "draft "+d.ID+"@r1: ") {
@@ -276,8 +305,14 @@ func TestChangeDraftAPI(t *testing.T) {
 	// The admin audit holds create, submit, approve in order, with the draft
 	// ref and no doc content; the hashes move with the draft.
 	rows := e.rec.inputs()
-	if len(rows) != 3 || rows[0].Action != "change.draft.create" || rows[1].Action != "change.draft.submit" || rows[2].Action != "change.draft.approve" {
-		t.Fatalf("audit actions = %v", e.actions())
+	if len(rows) != 4 || rows[0].Action != "change.draft.create" || rows[1].Action != "change.draft.submit" || rows[2].Action != "change.draft.approve" || rows[3].Action != "policy.write" {
+		t.Fatalf("audit actions = %v, want create, submit, approve, policy.write", e.actions())
+	}
+	// The policy row follows the approval: the approver is the actor, the policy
+	// hash moved, and it names the version and the approval source.
+	if p := rows[3]; p.Target != "policy" || p.Actor.Sub != "u2" || p.Outcome != adminaudit.OutcomeOK || p.Details["applied_version"] != "2" ||
+		p.Details["source"] != "approval" || p.BeforeHash == "" || p.BeforeHash == p.AfterHash || p.RequestID != rows[2].RequestID || !strings.HasPrefix(p.TargetRef, "policy@") {
+		t.Errorf("policy row = %+v", p)
 	}
 	if rows[2].TargetRef != "draft:"+d.ID+"@r1" || rows[2].Target != "change_draft" || rows[2].Actor.Sub != "u2" || rows[2].Outcome != adminaudit.OutcomeOK {
 		t.Errorf("approve row = %+v", rows[2])
