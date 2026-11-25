@@ -262,6 +262,10 @@ var auditedRequests = map[routeKey]auditedRequest{
 	{http.MethodPost, "/dashboard/api/changes/{id}/approve"}:  {"/dashboard/api/changes/cd_1/approve", `{"revision":1,"doc_sha256":"x"}`},
 	{http.MethodPost, "/dashboard/api/changes/{id}/reject"}:   {"/dashboard/api/changes/cd_1/reject", `{"revision":1,"doc_sha256":"x"}`},
 	{http.MethodPost, "/dashboard/api/changes/{id}/replay"}:   {"/dashboard/api/changes/cd_1/replay", ``},
+
+	// Break-glass emergency apply and its review (W-P2-APPR-07).
+	{http.MethodPost, "/dashboard/api/changes/{id}/emergency-apply"}: {"/dashboard/api/changes/cd_1/emergency-apply", `{"reason":"the idp is down, applying"}`},
+	{http.MethodPost, "/dashboard/api/changes/{id}/review"}:          {"/dashboard/api/changes/cd_1/review", `{"comment":"reviewed"}`},
 }
 
 // allAuditedRoutes lists every audited row of both route tables in a stable

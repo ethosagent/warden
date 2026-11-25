@@ -520,3 +520,11 @@ func (stubChanges) Reject(context.Context, string, dashboard.ChangeRejectInput) 
 func (stubChanges) Replay(context.Context, string) (dashboard.ChangeReplayView, error) {
 	return dashboard.ChangeReplayView{}, nil
 }
+
+func (stubChanges) EmergencyApply(context.Context, string, dashboard.ChangeEmergencyInput) (dashboard.ChangeResult, error) {
+	return dashboard.ChangeResult{}, nil
+}
+
+func (stubChanges) Review(context.Context, string, dashboard.ChangeReviewInput) (dashboard.ChangeResult, error) {
+	return dashboard.ChangeResult{}, nil
+}

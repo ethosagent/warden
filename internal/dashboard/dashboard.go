@@ -719,6 +719,8 @@ func Routes() []Route {
 		{post, "/dashboard/api/changes/{id}/approve", "change.draft.approve"},
 		{post, "/dashboard/api/changes/{id}/reject", "change.draft.reject"},
 		{post, "/dashboard/api/changes/{id}/replay", "change.draft.replay"},
+		{post, "/dashboard/api/changes/{id}/emergency-apply", "change.draft.emergency_apply"},
+		{post, "/dashboard/api/changes/{id}/review", "change.draft.review"},
 	}
 }
 

@@ -669,6 +669,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		p.APIKeysReady(srv.APIKeyAuthCounts)
 	}
 	srv.warnBreakGlassSetup(integrations)
+	srv.warnEmergencyApplySetup(integrations)
 
 	// The token service (tokenService.enabled): built once the server exists,
 	// because the block checker reads the server's block store, and installed
@@ -692,6 +693,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	if p.Findings != nil {
 		srv.findings = p.Findings
 	}
+	srv.alertUnreviewedBypasses(ctx)
 
 	// Load (or, on first start, create) the signing keys and catch up on any
 	// transitions a downtime made due, now that a Finding can be delivered. A

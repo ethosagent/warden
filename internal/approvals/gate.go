@@ -12,6 +12,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
+
+	"github.com/ethosagent/warden/internal/config"
 )
 
 var (
@@ -33,6 +36,9 @@ const (
 	clearDisabled
 	clearNarrowing
 	clearApplied
+	// clearEmergency is minted only by Gate.EmergencyApply, for the one claimed
+	// draft it recorded an `emergency` row for.
+	clearEmergency
 )
 
 // Clearance is the right to publish one change. Only a Gate mints a non-zero
@@ -72,9 +78,11 @@ func (c Clearance) Covers(doc Doc) bool {
 func (c Clearance) Valid() bool { return c.kind != clearNone }
 
 // Reason names why c was minted, for logs and tests: "", "disabled",
-// "narrowing" or "applied_draft".
+// "narrowing", "applied_draft" or "emergency".
 func (c Clearance) Reason() string {
 	switch c.kind {
+	case clearEmergency:
+		return "emergency"
 	case clearDisabled:
 		return "disabled"
 	case clearNarrowing:
@@ -171,6 +179,158 @@ func (g *Gate) ClearApplied(ctx context.Context, d Draft) (Clearance, error) {
 		return Clearance{}, err
 	}
 	return Clearance{kind: clearApplied, draftID: stored.ID, docSHA: stored.DocSHA256}, nil
+}
+
+// EmergencyApply publishes a pending or needs_rebase draft past the two-person
+// rule for a break-glass session (W-P2-APPR-07), and is the only way an
+// emergency Clearance is minted. In order, and each step fails closed:
+//
+//  1. approvals are enabled with a Service and allowEmergencyApply is on
+//     (ErrGateUnavailable, ErrEmergencyDisabled);
+//  2. the caller is a break-glass session (ErrBreakglassRequired) and the
+//     reason is 10 to 512 characters (ErrEmergencyReason);
+//  3. the draft is a classified, unexpired policy draft in pending or
+//     needs_rebase, at the revision and doc the caller named;
+//  4. the rate limit has room (ErrEmergencyRateLimited);
+//  5. the draft is claimed (-> applying) and the `emergency` change_approvals
+//     row with the reason is written in the same transaction, BEFORE anything
+//     publishes;
+//  6. only then is the Clearance minted, bound to that draft's doc digest, and
+//     the Applier publishes with expectedHead = base version;
+//  7. the draft becomes applied_unreviewed until an admin reviews it.
+//
+// A moved head is ErrRebaseRequired and leaves the draft needs_rebase; any
+// other refused publish returns the draft to pending. The emergency row stays
+// either way: an attempt is on the record.
+func (g *Gate) EmergencyApply(ctx context.Context, in EmergencyInput) (Draft, error) {
+	if g == nil || !g.enabled || g.svc == nil {
+		return Draft{}, ErrGateUnavailable
+	}
+	s := g.svc
+	switch {
+	case !s.cfg.AllowEmergencyApply:
+		return Draft{}, ErrEmergencyDisabled
+	case in.Actor.Kind != AuthorKindBreakglass || strings.TrimSpace(in.Actor.Sub) == "":
+		return Draft{}, ErrBreakglassRequired
+	}
+	if in.BeforePublish == nil {
+		return Draft{}, fmt.Errorf("%w: no audit hook", ErrEmergencyAudit)
+	}
+	reason, err := cleanReason(in.Reason)
+	if err != nil {
+		return Draft{}, err
+	}
+
+	// Serialise with Apply: one publisher at a time.
+	s.applyMu.Lock()
+	defer s.applyMu.Unlock()
+
+	d, err := s.cfg.Store.Get(ctx, in.ID)
+	if err != nil {
+		return Draft{}, err
+	}
+	switch {
+	case d.State != StatePending && d.State != StateNeedsRebase:
+		return Draft{}, fmt.Errorf("%w: a %s draft cannot be emergency-applied", ErrIllegalTransition, d.State)
+	case (in.Revision != 0 && in.Revision != d.Revision) || (in.DocSHA256 != "" && in.DocSHA256 != d.DocSHA256):
+		return Draft{}, fmt.Errorf("%w: the draft is at revision %d", ErrRevisionChanged, d.Revision)
+	case s.expired(d):
+		return Draft{}, ErrDraftExpired
+	}
+	if err := RequireClassified(d); err != nil {
+		return Draft{}, err
+	}
+	ap, ok := s.cfg.Appliers[d.Target].(EmergencyApplier)
+	if !ok || d.Target != TargetPolicy {
+		return Draft{}, fmt.Errorf("%w: %s", ErrUnsupportedTarget, d.Target)
+	}
+	if !s.takeEmergencySlot() {
+		return Draft{}, ErrEmergencyRateLimited
+	}
+
+	claimed, err := s.cfg.Store.BeginEmergency(ctx, d.ID, DecisionInput{
+		Revision: d.Revision, DocSHA256: d.DocSHA256, Decision: DecisionEmergency,
+		Approver: in.Actor, ApproverRole: config.RoleAdmin.String(), Comment: reason,
+	})
+	if err != nil {
+		if errors.Is(err, ErrStateChanged) {
+			return Draft{}, fmt.Errorf("%w: %w", ErrRevisionChanged, err)
+		}
+		return Draft{}, err
+	}
+	// The outcome is recorded even when the caller's context ended: the publish
+	// may already have happened.
+	octx := context.WithoutCancel(ctx)
+	clr, err := g.clearEmergency(ctx, claimed, in.Actor)
+	if err != nil {
+		g.releaseEmergency(octx, claimed, in.Actor.Sub, err)
+		return Draft{}, err
+	}
+	// The audit record precedes the publish: if it cannot be written, nothing
+	// publishes.
+	if err := in.BeforePublish(ctx, claimed); err != nil {
+		g.releaseEmergency(octx, claimed, in.Actor.Sub, err)
+		return Draft{}, fmt.Errorf("%w: %v", ErrEmergencyAudit, err)
+	}
+	version, aerr := ap.ApplyEmergency(ctx, claimed, clr, in.Actor)
+	switch {
+	case errors.Is(aerr, ErrRebaseRequired):
+		nd, merr := s.cfg.Store.MarkNeedsRebase(octx, claimed.ID, claimed.Revision, truncate(aerr.Error()), in.Actor.Sub)
+		if merr != nil {
+			return Draft{}, merr
+		}
+		return nd, ErrRebaseRequired
+	case aerr != nil:
+		g.releaseEmergency(octx, claimed, in.Actor.Sub, aerr)
+		return Draft{}, aerr
+	}
+	nd, err := s.cfg.Store.MarkEmergencyApplied(octx, claimed.ID, claimed.Revision, version, in.Actor.Sub)
+	if err != nil {
+		nd, err = s.cfg.Store.MarkEmergencyApplied(octx, claimed.ID, claimed.Revision, version, in.Actor.Sub)
+	}
+	if err != nil {
+		s.cfg.Logger.Error("approvals: emergency draft was published but could not be marked applied_unreviewed; reconcile will repair it",
+			"draft_id", claimed.ID, "revision", claimed.Revision, "applied_version", version, "error", err)
+		claimed.AppliedVersion = version
+		return claimed, &EmergencyPublishedError{Version: version, Err: err}
+	}
+	return nd, nil
+}
+
+// releaseEmergency returns a claimed draft to pending after a refused publish.
+func (g *Gate) releaseEmergency(ctx context.Context, d Draft, actorSub string, cause error) {
+	if _, err := g.svc.Store().FailApply(ctx, d.ID, d.Revision, truncate(cause.Error()), actorSub); err != nil {
+		g.svc.cfg.Logger.Error("approvals: cannot return the draft to pending after a refused emergency apply", "draft_id", d.ID, "error", err)
+	}
+}
+
+// clearEmergency mints the emergency Clearance of d. It trusts nothing it is
+// handed: it re-reads the stored draft and requires state applying, the same
+// revision and doc digest, a classification, and the durable `emergency` row of
+// this break-glass actor for exactly this revision and doc. The Clearance
+// covers that doc only.
+func (g *Gate) clearEmergency(ctx context.Context, d Draft, actor Author) (Clearance, error) {
+	stored, err := g.svc.Store().Get(ctx, d.ID)
+	if err != nil {
+		return Clearance{}, fmt.Errorf("%w: draft %s: %v", ErrNotCleared, d.ID, err)
+	}
+	if stored.State != StateApplying || stored.Revision != d.Revision || stored.DocSHA256 != d.DocSHA256 || stored.DocSHA256 == "" {
+		return Clearance{}, fmt.Errorf("%w: draft %s is not the claimed revision it names", ErrNotCleared, d.ID)
+	}
+	if err := RequireClassified(stored); err != nil {
+		return Clearance{}, err
+	}
+	rows, err := g.svc.Store().Approvals(ctx, stored.ID)
+	if err != nil {
+		return Clearance{}, fmt.Errorf("%w: draft %s: %v", ErrNotCleared, d.ID, err)
+	}
+	for _, a := range rows {
+		if a.Decision == DecisionEmergency && a.Revision == stored.Revision && a.DocSHA256 == stored.DocSHA256 &&
+			a.ApproverIss == actor.Iss && a.ApproverSub == actor.Sub && a.AuthMethod == AuthorKindBreakglass && a.Comment != "" {
+			return Clearance{kind: clearEmergency, draftID: stored.ID, docSHA: stored.DocSHA256}, nil
+		}
+	}
+	return Clearance{}, fmt.Errorf("%w: draft %s has no recorded emergency decision", ErrNotCleared, d.ID)
 }
 
 // Hold stores ch as a draft and submits it, so a second person can approve it.

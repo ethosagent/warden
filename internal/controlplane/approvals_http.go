@@ -96,6 +96,22 @@ func (a changeDraftAPI) changeErr(ctx context.Context, err error) error {
 		return fail(http.StatusForbidden, "author_only", nil)
 	case errors.Is(err, approvals.ErrSelfApproval):
 		return fail(http.StatusForbidden, "self_approval_forbidden", nil)
+	case errors.Is(err, approvals.ErrSelfReview):
+		return fail(http.StatusForbidden, "self_review_forbidden", nil)
+	case errors.Is(err, approvals.ErrReviewComment):
+		return fail(http.StatusBadRequest, "invalid_comment", map[string]any{"min": approvals.MinReviewComment})
+	case errors.Is(err, approvals.ErrEmergencyDisabled):
+		return fail(http.StatusForbidden, "emergency_apply_disabled", nil)
+	case errors.Is(err, approvals.ErrBreakglassRequired):
+		return fail(http.StatusForbidden, "breakglass_required", nil)
+	case errors.Is(err, approvals.ErrBreakglassReviewer):
+		return fail(http.StatusForbidden, "breakglass_cannot_review", nil)
+	case errors.Is(err, approvals.ErrEmergencyReason):
+		return fail(http.StatusBadRequest, "invalid_reason", map[string]any{"min": approvals.MinEmergencyReason, "max": approvals.MaxEmergencyReason})
+	case errors.Is(err, approvals.ErrEmergencyRateLimited):
+		return fail(http.StatusTooManyRequests, "emergency_rate_limited", nil)
+	case errors.Is(err, approvals.ErrEmergencyAudit):
+		return fail(http.StatusServiceUnavailable, "admin_audit_unavailable", nil)
 	case errors.Is(err, approvals.ErrBreakglassApprover):
 		return fail(http.StatusForbidden, "breakglass_cannot_approve", nil)
 	case errors.As(err, &rr):
@@ -657,6 +673,11 @@ type auditFollowUp struct {
 	Action, Target, TargetRef string
 	Details                   map[string]string
 	BeforeHash, AfterHash     string
+	// Committed marks a row for a change that really happened although the
+	// request failed afterwards. It is recorded (as outcome ok) even when the
+	// request's own row is not ok. Only the emergency-apply handler, for a
+	// version that published but could not be recorded on its draft, sets it.
+	Committed bool
 }
 
 // addAuditFollowUp asks the admin audit middleware for one more row after the
@@ -689,19 +710,36 @@ func (s *Server) policyHashNow(ctx context.Context) string {
 // and the `approval` source, the actor being whoever made the request and the
 // hashes the policy hash before and after the apply.
 func (a changeDraftAPI) recordPolicyApply(ctx context.Context, before string, d approvals.Draft) {
+	a.recordPolicyApplyOp(ctx, before, d, "")
+}
+
+// recordPolicyApplyOp is recordPolicyApply with the row's op detail set (an
+// emergency apply says so, so history and audit tell it from an approval).
+func (a changeDraftAPI) recordPolicyApplyOp(ctx context.Context, before string, d approvals.Draft, op string) {
+	if f, ok := a.policyApplyFollowUp(ctx, before, d, op); ok {
+		addAuditFollowUp(ctx, f)
+	}
+}
+
+// policyApplyFollowUp is the policy.write row of a draft that published.
+func (a changeDraftAPI) policyApplyFollowUp(ctx context.Context, before string, d approvals.Draft, op string) (auditFollowUp, bool) {
 	if a.s.audit == nil {
-		return
+		return auditFollowUp{}, false
 	}
 	after := a.s.policyHashNow(ctx)
 	ref := "policy@" + a.s.policy.currentETag()
-	addAuditFollowUp(ctx, auditFollowUp{
+	details := map[string]string{
+		adminaudit.DetailAppliedVersion: strconv.FormatInt(d.AppliedVersion, 10),
+		adminaudit.DetailSource:         SourceApproval,
+	}
+	if op != "" {
+		details[adminaudit.DetailOp] = op
+	}
+	return auditFollowUp{
 		Action: "policy.write", Target: auditTargetPolicy, TargetRef: ref,
-		Details: map[string]string{
-			adminaudit.DetailAppliedVersion: strconv.FormatInt(d.AppliedVersion, 10),
-			adminaudit.DetailSource:         SourceApproval,
-		},
+		Details:    details,
 		BeforeHash: before, AfterHash: after,
-	})
+	}, true
 }
 
 type auditScopeKey struct{}

@@ -103,6 +103,18 @@ type Store interface {
 	// FailApply returns an applying draft to pending with lastError (the
 	// publish was refused, or startup found no version for an interrupted one).
 	FailApply(ctx context.Context, id string, revision int, lastError, actorSub string) (Draft, error)
+	// BeginEmergency claims a pending or needs_rebase draft for an emergency
+	// apply (-> applying) and appends the `emergency` change_approvals row with
+	// in.Comment as the reason, in ONE transaction: the audit record exists
+	// before anything publishes. in names the revision and doc digest the caller
+	// saw. A retry by the same actor after a refused publish reuses its row.
+	BeginEmergency(ctx context.Context, id string, in DecisionInput) (Draft, error)
+	// MarkEmergencyApplied moves an applying draft to applied_unreviewed at
+	// policy version version.
+	MarkEmergencyApplied(ctx context.Context, id string, revision int, version int64, actorSub string) (Draft, error)
+	// MarkReviewed moves an applied_unreviewed draft to applied and appends the
+	// `post_review` change_approvals row (one transaction).
+	MarkReviewed(ctx context.Context, id string, in DecisionInput) (Draft, error)
 	// Applying returns the drafts left in state applying, for startup reconcile.
 	Applying(ctx context.Context) ([]Draft, error)
 	// Withdraw moves an open draft to withdrawn.

@@ -10,7 +10,7 @@ import (
 var allEvents = []approvals.Event{
 	approvals.EventSubmit, approvals.EventUpdate, approvals.EventApprove, approvals.EventBeginApply, approvals.EventApply, approvals.EventApplyFailed, approvals.EventReject,
 	approvals.EventConflict, approvals.EventRebase, approvals.EventWithdraw, approvals.EventExpire,
-	approvals.EventEmergencyApply, approvals.EventReview,
+	approvals.EventEmergencyBegin, approvals.EventEmergencyApply, approvals.EventReview,
 }
 
 // TestDraftTransitions pins the whole table: every (state, event) pair is
@@ -32,16 +32,17 @@ func TestDraftTransitions(t *testing.T) {
 		{approvals.StatePending, approvals.EventReject}:         approvals.StateRejected,
 		{approvals.StatePending, approvals.EventWithdraw}:       approvals.StateWithdrawn,
 		{approvals.StatePending, approvals.EventExpire}:         approvals.StateExpired,
-		{approvals.StatePending, approvals.EventEmergencyApply}: approvals.StateAppliedUnreviewed,
+		{approvals.StatePending, approvals.EventEmergencyBegin}: approvals.StateApplying,
 
-		{approvals.StateApplying, approvals.EventApply}:       approvals.StateApplied,
-		{approvals.StateApplying, approvals.EventApplyFailed}: approvals.StatePending,
-		{approvals.StateApplying, approvals.EventConflict}:    approvals.StateNeedsRebase,
+		{approvals.StateApplying, approvals.EventApply}:          approvals.StateApplied,
+		{approvals.StateApplying, approvals.EventApplyFailed}:    approvals.StatePending,
+		{approvals.StateApplying, approvals.EventConflict}:       approvals.StateNeedsRebase,
+		{approvals.StateApplying, approvals.EventEmergencyApply}: approvals.StateAppliedUnreviewed,
 
 		{approvals.StateNeedsRebase, approvals.EventRebase}:         approvals.StatePending,
 		{approvals.StateNeedsRebase, approvals.EventWithdraw}:       approvals.StateWithdrawn,
 		{approvals.StateNeedsRebase, approvals.EventExpire}:         approvals.StateExpired,
-		{approvals.StateNeedsRebase, approvals.EventEmergencyApply}: approvals.StateAppliedUnreviewed,
+		{approvals.StateNeedsRebase, approvals.EventEmergencyBegin}: approvals.StateApplying,
 
 		{approvals.StateAppliedUnreviewed, approvals.EventReview}: approvals.StateApplied,
 	}

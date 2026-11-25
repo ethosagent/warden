@@ -30,7 +30,11 @@ func (h *H) approvalsYAML() string {
 	if !h.wantApprovals {
 		return ""
 	}
-	return "  approvals:\n    enabled: true\n"
+	y := "  approvals:\n    enabled: true\n"
+	if h.wantEmergencyApply {
+		y += "    allowEmergencyApply: true\n"
+	}
+	return y
 }
 
 func (h *H) applyApprovals(p *controlplane.Params) {
@@ -38,4 +42,12 @@ func (h *H) applyApprovals(p *controlplane.Params) {
 		return
 	}
 	p.StateDir = filepath.Join(h.root, "cp-state")
+}
+
+// WithEmergencyApply boots the control plane with
+// console.approvals.allowEmergencyApply: true (W-P2-APPR-07), so a break-glass
+// session may emergency-apply a pending draft. It needs WithApprovals and
+// WithBreakGlass. In-process only.
+func WithEmergencyApply() Option {
+	return func(h *H) { h.wantEmergencyApply = true }
 }

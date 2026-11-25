@@ -199,6 +199,9 @@ type H struct {
 	// console.approvals.enabled (implies the console, admin audit and the
 	// versioned policy store).
 	wantApprovals bool
+	// wantEmergencyApply (WithEmergencyApply) also sets
+	// console.approvals.allowEmergencyApply.
+	wantEmergencyApply bool
 	// wantAPIKeys (WithAPIKeys) enables console.apiKeys on the oidc console.
 	wantAPIKeys  bool
 	apiKeyMu     sync.Mutex

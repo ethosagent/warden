@@ -27,6 +27,8 @@ import (
 //	POST /dashboard/api/changes/{id}/submit|withdraw|rebase      editor (author)
 //	POST /dashboard/api/changes/{id}/approve|reject              editor, and the draft's required role
 //	POST /dashboard/api/changes/{id}/replay                      editor
+//	POST /dashboard/api/changes/{id}/emergency-apply             admin, break-glass session only (W-P2-APPR-07)
+//	POST /dashboard/api/changes/{id}/review                      admin, never a break-glass session (W-P2-APPR-07)
 
 // changesPath is the draft list; one draft and its actions live below it.
 const changesPath = "/dashboard/api/changes"
@@ -187,6 +189,28 @@ type ChangeApproveInput struct {
 	Comment             string `json:"comment"`
 }
 
+// ChangeEmergencyInput is POST .../emergency-apply: why the second person is
+// being bypassed (10 to 512 characters), and optionally the revision and doc
+// digest the operator saw (the draft's current ones when absent).
+type ChangeEmergencyInput struct {
+	Reason    string `json:"reason"`
+	Revision  int    `json:"revision"`
+	DocSHA256 string `json:"doc_sha256"`
+}
+
+// ChangeReviewInput is POST .../review: the post-hoc review of an emergency
+// apply, optionally pinned to the revision and doc digest the reviewer saw.
+type ChangeReviewInput struct {
+	Comment   string `json:"comment"`
+	Revision  int    `json:"revision"`
+	DocSHA256 string `json:"doc_sha256"`
+}
+
+// maxEmergencyReason caps the reason in characters (approvals.MaxEmergencyReason;
+// the dashboard does not import approvals). The 10 character floor is the
+// service's, so a caller that may not emergency-apply is refused before it.
+const maxEmergencyReason = 512
+
 // ChangeRejectInput is POST .../reject.
 type ChangeRejectInput struct {
 	Revision  int    `json:"revision"`
@@ -211,6 +235,10 @@ type ChangeDrafts interface {
 	Approve(ctx context.Context, id string, in ChangeApproveInput) (ChangeResult, error)
 	Reject(ctx context.Context, id string, in ChangeRejectInput) (ChangeResult, error)
 	Replay(ctx context.Context, id string) (ChangeReplayView, error)
+	// EmergencyApply publishes a pending draft past the two-person rule for a
+	// break-glass session (W-P2-APPR-07); Review closes it afterwards.
+	EmergencyApply(ctx context.Context, id string, in ChangeEmergencyInput) (ChangeResult, error)
+	Review(ctx context.Context, id string, in ChangeReviewInput) (ChangeResult, error)
 }
 
 // SetChangeDrafts enables the change draft routes. Set only on a control plane
@@ -226,6 +254,7 @@ type changeListResponse struct {
 var changeActions = map[string]string{
 	"diff": http.MethodGet, "submit": http.MethodPost, "withdraw": http.MethodPost, "rebase": http.MethodPost,
 	"approve": http.MethodPost, "reject": http.MethodPost, "replay": http.MethodPost,
+	"emergency-apply": http.MethodPost, "review": http.MethodPost,
 }
 
 // splitChangePath splits a path below changesPath into the draft id and the
@@ -366,6 +395,10 @@ func (s *Server) handleChange(w http.ResponseWriter, r *http.Request) {
 		s.approveChange(w, r, id)
 	case action == "reject":
 		s.rejectChange(w, r, id)
+	case action == "emergency-apply":
+		s.emergencyApplyChange(w, r, id)
+	case action == "review":
+		s.reviewChange(w, r, id)
 	case action == "replay":
 		rp, err := s.changeDrafts.Replay(ctx, id)
 		if err != nil {
@@ -457,6 +490,35 @@ func (s *Server) rejectChange(w http.ResponseWriter, r *http.Request, id string)
 		return
 	}
 	res, err := s.changeDrafts.Reject(r.Context(), id, in)
+	s.writeChangeResult(w, res, err)
+}
+
+// emergencyApplyChange serves POST .../emergency-apply. The reason is
+// required here; whether the caller may use it at all is the service's call.
+func (s *Server) emergencyApplyChange(w http.ResponseWriter, r *http.Request, id string) {
+	var in ChangeEmergencyInput
+	if !decodeChangeBody(w, r, &in) {
+		return
+	}
+	var ok bool
+	if in.Reason, ok = cleanChangeText(w, in.Reason, maxEmergencyReason, "reason"); !ok {
+		return
+	}
+	res, err := s.changeDrafts.EmergencyApply(r.Context(), id, in)
+	s.writeChangeResult(w, res, err)
+}
+
+// reviewChange serves POST .../review.
+func (s *Server) reviewChange(w http.ResponseWriter, r *http.Request, id string) {
+	var in ChangeReviewInput
+	if !decodeChangeBody(w, r, &in) {
+		return
+	}
+	var ok bool
+	if in.Comment, ok = cleanChangeText(w, in.Comment, maxChangeComment, "comment"); !ok {
+		return
+	}
+	res, err := s.changeDrafts.Review(r.Context(), id, in)
 	s.writeChangeResult(w, res, err)
 }
 

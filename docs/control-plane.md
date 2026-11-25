@@ -819,9 +819,11 @@ fails when the two differ.
 | `/dashboard/api/changes/{id}` | PUT | editor | `change.draft.update` | `policy:write` |
 | `/dashboard/api/changes/{id}/approve` | POST | editor | `change.draft.approve` | `none` |
 | `/dashboard/api/changes/{id}/diff` | GET | viewer | `change.draft.diff` | `policy:read` |
+| `/dashboard/api/changes/{id}/emergency-apply` | POST | admin | `change.draft.emergency_apply` | `none` |
 | `/dashboard/api/changes/{id}/rebase` | POST | editor | `change.draft.rebase` | `policy:write` |
 | `/dashboard/api/changes/{id}/reject` | POST | editor | `change.draft.reject` | `none` |
 | `/dashboard/api/changes/{id}/replay` | POST | editor | `change.draft.replay` | `policy:write` |
+| `/dashboard/api/changes/{id}/review` | POST | admin | `change.draft.review` | `none` |
 | `/dashboard/api/changes/{id}/submit` | POST | editor | `change.draft.submit` | `policy:write` |
 | `/dashboard/api/changes/{id}/withdraw` | POST | editor | `change.draft.withdraw` | `policy:write` |
 | `/dashboard/api/detection` | GET | viewer | `detection.read` | `policy:read` |
@@ -1156,6 +1158,31 @@ Not gated, stated plainly for production use:
   empty store.
 - `/central/secrets` and `/dashboard/api/secretstore` write secret values into the
   managed secret store, not into a policy version.
+
+### Emergency apply and its review
+
+With `approvals.allowEmergencyApply: true`, a break-glass session (and only one) may
+`POST /dashboard/api/changes/{id}/emergency-apply {"reason": "..."}` (10 to 512
+characters) on a pending or needs_rebase draft. It publishes with `expectedHead` still
+checked (`409 rebase_required` on a moved head), at most 5 times in 10 minutes. The
+claim and an `emergency` approval row holding the reason are written together, and the
+`change.draft.emergency_begin` admin audit row is written before anything publishes
+(if it cannot be written nothing publishes). Every success raises one critical
+`approval_bypassed` Finding and one ERROR log line; the draft is then `applied_unreviewed`.
+If the version published but the draft could not be updated, the request fails with
+`500 emergency_apply_unrecorded`, still alerts and still writes its `policy.write` audit
+row (the 500 request row is kept). At every start the control plane raises the
+`approval_bypassed` Finding again for each draft still `applied_unreviewed` (repeats
+share the DedupKey `approval_bypassed:<draft id>`), and settles an interrupted draft.
+A crash between the publish and the draft update is different: no request row or
+`policy.write` row is written even after the repair, so look in policy history for a
+version authored by the break-glass actor (author kind `breakglass`).
+
+`POST /dashboard/api/changes/{id}/review {"comment": "..."}` (at least 10 characters)
+closes it as `applied`. It needs an OIDC admin who is not a break-glass session and
+who is not the draft's author (`403 self_review_forbidden`): in a single-admin
+deployment the author's own bypass stays `applied_unreviewed`, because the alert has
+already gone out and the review is meant to be independent.
 
 A draft created by `warden policy import` is authored `cli:<os user>` and carries no
 issuer. Anyone with host access to the state database already has full trust over the

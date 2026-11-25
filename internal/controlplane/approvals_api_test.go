@@ -34,6 +34,8 @@ type draftEnv struct {
 	h   http.Handler
 	rec *fakeRecorder
 	pub *recFindings
+	// logs is the control plane's log output.
+	logs *syncBuf
 	// sessions by name: u1, u2, u3 (editors), viewer, admin, breakglass.
 	raw map[string]string
 	// keys is the API key store, set by newDraftEnvKeys only.
@@ -74,7 +76,7 @@ func newDraftEnvOpts(t *testing.T, mutate func(*config.ConsoleApprovals), clk *c
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	logger, _ := testLogger()
+	logger, logs := testLogger()
 	cfg := Config{
 		PolicyPath: writePolicyFile(t, "api.openai.com"), Token: dashTestToken, State: db,
 		PolicyStore: PolicyStoreVersioned, Console: console, Logger: logger,
@@ -110,7 +112,7 @@ func newDraftEnvOpts(t *testing.T, mutate func(*config.ConsoleApprovals), clk *c
 	}
 	srv.sessions = NewSessionStore(db.SQL(), time.Hour, 12*time.Hour, newFakeClock().Now)
 	srv.sessionReader = srv.sessions
-	e := &draftEnv{srv: srv, rec: &fakeRecorder{}, pub: &recFindings{}, raw: map[string]string{}, keys: keyStore}
+	e := &draftEnv{srv: srv, rec: &fakeRecorder{}, pub: &recFindings{}, raw: map[string]string{}, keys: keyStore, logs: logs}
 	srv.findings = e.pub
 	srv.enableAdminAudit(e.rec, e.rec.probe, fakeMAC)
 	e.h = srv.Handler()

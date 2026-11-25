@@ -633,8 +633,20 @@ func (s *statusWriter) writer() http.ResponseWriter {
 // recorded when the primary outcome is not ok, details pass the closed set and
 // at most maxAuditFollowUps rows are written.
 func (s *Server) recordFollowUps(ctx context.Context, primary adminaudit.Input, follows []auditFollowUp) {
-	if primary.Outcome != adminaudit.OutcomeOK || len(follows) == 0 {
+	if len(follows) == 0 {
 		return
+	}
+	if primary.Outcome != adminaudit.OutcomeOK {
+		// Only a change that really happened is recorded for a failed request.
+		var committed []auditFollowUp
+		for _, f := range follows {
+			if f.Committed {
+				committed = append(committed, f)
+			}
+		}
+		if follows = committed; len(follows) == 0 {
+			return
+		}
 	}
 	if len(follows) > maxAuditFollowUps {
 		s.cfg.Logger.Warn("admin_audit_followups_dropped", "action", primary.Action, "dropped", len(follows)-maxAuditFollowUps)

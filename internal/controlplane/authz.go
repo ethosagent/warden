@@ -181,6 +181,11 @@ func authzTable() map[routeKey]authzRow {
 		{post, "/dashboard/api/changes/{id}/approve", auditedRow(editor, "change.draft.approve", auditTargetChangeDraft, none)},
 		{post, "/dashboard/api/changes/{id}/reject", auditedRow(editor, "change.draft.reject", auditTargetChangeDraft, none)},
 		{post, "/dashboard/api/changes/{id}/replay", auditedRow(editor, "change.draft.replay", auditTargetChangeDraft, scopePolicyWrite)},
+		// Emergency apply and its review (W-P2-APPR-07): admin at the route; the
+		// handler then requires a break-glass session for the apply and refuses one
+		// for the review. ScopeNone: no API key may reach either.
+		{post, "/dashboard/api/changes/{id}/emergency-apply", auditedRow(admin, "change.draft.emergency_apply", auditTargetChangeDraft, none)},
+		{post, "/dashboard/api/changes/{id}/review", auditedRow(admin, "change.draft.review", auditTargetChangeDraft, none)},
 		// Policy history (W-P1-PVER-03). Requests are matched on their template
 		// ({v} is any version segment; dashboard.RoutePath).
 		{get, "/dashboard/api/policy/versions", readRow(viewer, "policy.versions.read", scopePolicyRead)},
