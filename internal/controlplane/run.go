@@ -293,6 +293,9 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	if err := checkAdminAuditFlags(consoleCfg, stateDir, p); err != nil {
 		return fail(err)
 	}
+	if err := checkApprovalsStartup(consoleCfg, policyStore, stateDir); err != nil {
+		return fail(err)
+	}
 	// The keys block, like console:, comes from --config only. Disabled (the
 	// default) means nothing below creates a table, file, goroutine or route.
 	keysCfg, err := resolveKeys(configPath, stateDir)
@@ -340,7 +343,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		// --policy-store or console.adminAudit never trips the downgrade guard.
 		// The open is not cancellable: a shutdown signal must not abandon a
 		// migration half way through boot.
-		state, err = cpstate.Open(context.WithoutCancel(ctx), statePath, stateMigrationsFor(keysCfg, consoleCfg))
+		state, err = cpstate.Open(context.WithoutCancel(ctx), statePath, stateMigrationsWithApprovals(stateMigrationsFor(keysCfg, consoleCfg), consoleCfg.Approvals))
 		if err != nil {
 			return fail(fmt.Errorf("control-plane: state db: %w", err))
 		}
@@ -625,6 +628,11 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		// The CP's time port (nil = clock.Real() inside New).
 		Clock: p.Clock,
 	})
+	// Fail closed: an enabled approvals gate that could not be built must not
+	// leave a control plane that serves writes ungated.
+	if err := srv.approvalsErr; err != nil {
+		return fail(err)
+	}
 	if p.OnServer != nil {
 		p.OnServer(srv)
 	}

@@ -80,6 +80,7 @@ var Excluded = map[string]string{
 	"worker.ControlPlaneClient":       "the worker's view of the control plane; the harness runs the real control plane (*config.RemoteProvider) rather than a fake",
 	"apikeys.Store":                   "the control plane's own api_keys table on the cpstate SQLite DB (sqlitestore.SQLiteStore in apikeys/adapters/sqlitestore); no external system behind it, the harness will run the real one once the CP wires API keys (W-P2-APIK-02), and a fake would hide the atomic cap check and the data_version reload",
 	"keys.MetaStore":                  "the control plane's own signing_keys table on the cpstate SQLite DB (keys/adapters/metastore); the harness runs the real one, a fake would hide the compare-and-swap and unique-index behaviour that keeps the key lifecycle from forking",
+	"approvals.Store":                 "the control plane's own change_drafts and change_approvals tables on the cpstate SQLite DB (approvals/adapters/sqlstore); the harness runs the real one, a fake would hide the compare-and-swap transitions and the unique and append-only constraints the approvals gate depends on",
 	"keys.Signer":                     "local CPU-only signing over stdlib crypto (GenerateLocal/NewLocalSigner); no external system behind the port, and a fake would hide the JOSE wire encodings (r||s, RFC 7638 kids) the verifiers pin",
 
 	// Worker CA enrollment (W-P2-WCA-02), on the cpstate SQLite DB like the stores above.

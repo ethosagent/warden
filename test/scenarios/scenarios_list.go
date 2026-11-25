@@ -155,6 +155,10 @@ var All = slices.Concat(
 		// saves create versions authored anonymous that workers enforce.
 		// In-process only (it reads the CP state dir).
 		{Name: "policy_store_dashboard_publish", Opts: policyStorePublishOpts(), Run: policyStoreDashboardPublish},
+		// Approvals default off (W-P2-APPR-01): no change_* table and no approvals
+		// migration without console.approvals.enabled. In-process only (it reads
+		// the CP state dir).
+		{Name: "approvals_off_by_default", Opts: approvalsOffOpts(), Run: approvalsOffByDefault},
 		// Scoped policy (W-P1-GPOL-10): with identity off a scoped entry loads
 		// but allows nobody (identity_required); an unscoped entry still applies.
 		{Name: "scoped_policy_fail_closed", Run: scopedPolicyFailClosed},

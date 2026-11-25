@@ -31,6 +31,7 @@ import (
 	"github.com/ethosagent/warden/internal/alertpipeline"
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/apikeys"
+	"github.com/ethosagent/warden/internal/approvals"
 	"github.com/ethosagent/warden/internal/clock"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/cpstate"
@@ -249,6 +250,13 @@ type Server struct {
 	// refreshes the policy server, so long-poll waiters wake at once.
 	versions PolicyVersionStore
 
+	// approvals is the change-approval service; nil unless
+	// console.approvals.enabled (approvals_apply.go).
+	approvals *approvals.Service
+	// approvalsErr is why an enabled approvals gate was not built; Run refuses
+	// to start on it.
+	approvalsErr error
+
 	// blocks is the user block list store; nil without State (and then no
 	// blocked_users overlay is registered).
 	blocks  *BlockStore
@@ -416,6 +424,7 @@ func New(cfg Config) *Server {
 	s.initPolicyStore()
 	s.initBundles()
 	s.initBlockStore()
+	s.initApprovals()
 	s.policy.Refresh() // initial load so /policy and the dashboard have policy immediately
 	s.initSessions()
 	s.initAuth()
@@ -480,6 +489,9 @@ func New(cfg Config) *Server {
 // policy file (editor edits refresh synchronously). It also starts the retention
 // prune loop when the store supports it. It returns when ctx is done.
 func (s *Server) Start(ctx context.Context) {
+	if s.approvals != nil {
+		go s.sweepApprovals(ctx)
+	}
 	if s.sessions != nil {
 		go s.sweepSessions(ctx)
 		if s.breakGlass != nil {

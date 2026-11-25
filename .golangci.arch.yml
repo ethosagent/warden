@@ -37,6 +37,7 @@ linters:
             - ${base-path}/internal/policybuilder/**
             - ${base-path}/internal/policyeval/**
             - ${base-path}/internal/keys/**
+            - ${base-path}/internal/approvals/**
             - ${base-path}/internal/bundle/**
             - ${base-path}/internal/workerca/**
             - ${base-path}/internal/apikeys/**
@@ -109,6 +110,7 @@ linters:
             - ${base-path}/internal/policybuilder/**
             - ${base-path}/internal/policyeval/**
             - ${base-path}/internal/keys/**
+            - ${base-path}/internal/approvals/**
             - ${base-path}/internal/bundle/**
             - ${base-path}/internal/workerca/**
             - ${base-path}/internal/apikeys/**
@@ -211,6 +213,7 @@ linters:
             - '!${base-path}/internal/policybuilder/**'
             - '!${base-path}/internal/policyeval/**'
             - '!${base-path}/internal/keys/**'
+            - '!${base-path}/internal/approvals/**'
             - '!${base-path}/internal/bundle/**'
             - '!${base-path}/internal/workerca/**'
             - '!${base-path}/internal/apikeys/**'

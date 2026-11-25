@@ -151,6 +151,12 @@ func (s *Server) publishVersion(ctx context.Context, mutate func(*policyWire) er
 	if err != nil {
 		return 0, false, err
 	}
+	return s.publishVersionAs(ctx, author, mutate, meta, source)
+}
+
+// publishVersionAs is publishVersion with an explicit author: an approved
+// change draft publishes as its draft author, not as the request's approver.
+func (s *Server) publishVersionAs(ctx context.Context, author PolicyAuthor, mutate func(*policyWire) error, meta dashboard.WriteMeta, source string) (int64, bool, error) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 

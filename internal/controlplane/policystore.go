@@ -49,6 +49,9 @@ const (
 	SourceLLMProviders = "llmproviders"
 	SourceRollback     = "rollback"
 	SourceImport       = "import"
+	// SourceApproval is a version published from an approved change draft
+	// (W-P2-APPR-01); its author is the draft author, not the approver.
+	SourceApproval = "approval"
 )
 
 // Author kinds: the admin-audit auth_method set.
@@ -96,7 +99,7 @@ var authorKinds = map[string]bool{
 
 var versionSources = map[string]bool{
 	SourcePolicy: true, SourceSettings: true, SourceLLMProviders: true,
-	SourceRollback: true, SourceImport: true,
+	SourceRollback: true, SourceImport: true, SourceApproval: true,
 }
 
 // PolicyStoreMigrations are the cpstate migrations of the versioned policy

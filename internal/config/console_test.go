@@ -338,6 +338,97 @@ func TestConsoleBreakGlassDefaultsAndLocality(t *testing.T) {
 	}
 }
 
+func TestConsoleApprovalsDefaults(t *testing.T) {
+	for _, body := range []string{"", "console:\n  approvals: {}\n"} {
+		c, err := LoadConsole(writeConsoleTemp(t, consoleYAML(body)))
+		if err != nil {
+			t.Fatalf("LoadConsole(%q): %v", body, err)
+		}
+		want := ConsoleApprovals{
+			MinApprovals: 1, AllowSelfApproveNarrowing: true,
+			ReplayWindow: 168 * time.Hour, ReplayMaxEvents: 100000, ReplayTimeout: 60 * time.Second,
+			ReplayMaxAge: 24 * time.Hour, DraftTTL: 168 * time.Hour, MaxOpenDrafts: 200,
+		}
+		if c.Approvals != want {
+			t.Errorf("approvals defaults = %+v, want %+v", c.Approvals, want)
+		}
+	}
+}
+
+func TestConsoleApprovalsExplicitValues(t *testing.T) {
+	c, err := LoadConsole(writeConsoleTemp(t, consoleYAML(`console:
+  approvals:
+    enabled: true
+    minApprovals: 3
+    allowSelfApproveNarrowing: false
+    allowEmergencyApply: true
+    replayWindow: 1h
+    replayMaxEvents: 5
+    replayTimeout: 5s
+    replayMaxAge: 2h
+    draftTTL: 48h
+    maxOpenDrafts: 7
+`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := ConsoleApprovals{
+		Enabled: true, MinApprovals: 3, AllowSelfApproveNarrowing: false, AllowEmergencyApply: true,
+		ReplayWindow: time.Hour, ReplayMaxEvents: 5, ReplayTimeout: 5 * time.Second,
+		ReplayMaxAge: 2 * time.Hour, DraftTTL: 48 * time.Hour, MaxOpenDrafts: 7,
+	}
+	if c.Approvals != want {
+		t.Errorf("approvals = %+v, want %+v", c.Approvals, want)
+	}
+}
+
+func TestConsoleApprovalsValidation(t *testing.T) {
+	tests := []struct{ name, body, wantErr string }{
+		{"minApprovals zero", "minApprovals: 0", "console.approvals.minApprovals"},
+		{"minApprovals four", "minApprovals: 4", "console.approvals.minApprovals"},
+		{"replayWindow short", "replayWindow: 30m", "console.approvals.replayWindow"},
+		{"replayWindow long", "replayWindow: 721h", "console.approvals.replayWindow"},
+		{"replayMaxEvents zero", "replayMaxEvents: 0", "console.approvals.replayMaxEvents"},
+		{"replayMaxEvents over", "replayMaxEvents: 100001", "console.approvals.replayMaxEvents"},
+		{"replayTimeout zero", "replayTimeout: 0s", "console.approvals.replayTimeout"},
+		{"replayMaxAge negative", "replayMaxAge: -1h", "console.approvals.replayMaxAge"},
+		{"draftTTL zero", "draftTTL: 0s", "console.approvals.draftTTL"},
+		{"maxOpenDrafts zero", "maxOpenDrafts: 0", "console.approvals.maxOpenDrafts"},
+		{"bad duration", "draftTTL: soon", "console.approvals.draftTTL"},
+		{"unknown key", "bogus: 1", "bogus"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Disabled blocks are checked too: a bad value never waits for
+			// the day the gate is switched on.
+			_, err := LoadConsole(writeConsoleTemp(t, consoleYAML("console:\n  approvals:\n    "+tc.body+"\n")))
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error = %v, want one naming %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestConsoleApprovalsNotOnPolicyWire: like the rest of console:, the block is
+// CP-local and never reaches the JSON policy wire.
+func TestConsoleApprovalsNotOnPolicyWire(t *testing.T) {
+	prov, err := parse(consoleYAML("console:\n  approvals:\n    enabled: true\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, _ := prov.GetPolicy()
+	if !p.Console.Approvals.Enabled {
+		t.Fatal("parse dropped console.approvals.enabled")
+	}
+	raw, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := strings.ToLower(string(raw)); strings.Contains(s, "approvals") || strings.Contains(s, "draftttl") {
+		t.Errorf("policy JSON carries the approvals block: %s", raw)
+	}
+}
+
 func TestConsoleAPIKeys(t *testing.T) {
 	// Defaults: disabled, with the documented limits.
 	prov, err := parse(consoleYAML(validOIDC))
