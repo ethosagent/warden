@@ -311,7 +311,7 @@ func (r *RemoteProvider) applyBundleBody(t *BundleTrust, resp *http.Response) (b
 		r.mu.Unlock()
 		// The refreshed issuedAt must reach the cache too, or a restart would
 		// see a stale one and age the bundle out early.
-		r.writeCache(t, body)
+		r.writeCache(t, v)
 		return false, nil
 	}
 	r.mu.Lock()
@@ -319,7 +319,7 @@ func (r *RemoteProvider) applyBundleBody(t *BundleTrust, resp *http.Response) (b
 	r.etag, r.pollETag = etag, etag
 	r.lastErr, r.lastReject = nil, ""
 	r.mu.Unlock()
-	r.writeCache(t, body)
+	r.writeCache(t, v)
 	if t.Logger != nil {
 		t.Logger.Info("bundle applied", "seq", v.Seq, "kid", v.KID)
 	}
