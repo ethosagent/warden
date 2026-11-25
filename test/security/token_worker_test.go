@@ -231,7 +231,7 @@ var idpCases = []Case{
 		WantStatus:       http.StatusForbidden,
 		WantBody:         "identity_conflict",
 		WantResult:       "conflict",
-		WantDeny:         "identity_required",
+		WantDeny:         "identity_conflict",
 		WantUpstreamHits: 0,
 	},
 }
