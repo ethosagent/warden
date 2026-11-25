@@ -47,22 +47,29 @@ func (s *Server) changeDraftsAPI() dashboard.ChangeDrafts {
 
 func (a changeDraftAPI) svc() *approvals.Service { return a.s.approvals }
 
-// actorSub is the identity the two-person rule compares: the signed-in user's
-// subject. (An API-key principal acts as its owner once W-P2-APIK-02 lands.)
-func actorSub(p Principal) string { return p.Sub }
-
 // caller resolves who is calling. A request with no signed-in identity is
 // refused: approvals need an author and an approver (startup requires
-// console.auth oidc, so a console request always has one).
+// console.auth oidc, so a console request always has one). The identity the
+// two-person rule compares is Principal.ActorSub: an API key acts as its
+// owner, so u1's key and u1's session are the same person and the key can
+// never be the second one (its Sub, apikey:<id>, is never used here).
 func (a changeDraftAPI) caller(ctx context.Context) (approvals.Author, config.Role, error) {
 	p, ok := PrincipalFrom(ctx)
 	if !ok || p.Sub == "" {
 		return approvals.Author{}, 0, &dashboard.ChangeError{Status: http.StatusUnauthorized, Code: "unauthenticated"}
 	}
-	au := approvals.Author{Iss: p.Iss, Sub: actorSub(p), Email: p.Email, Kind: AuthorKindOIDC}
-	if p.Kind == PrincipalBreakglass || p.AuthMethod == AuthorKindBreakglass {
+	au := approvals.Author{Iss: p.Iss, Sub: p.ActorSub(), Email: p.Email, Kind: AuthorKindOIDC}
+	switch {
+	case p.Kind == PrincipalBreakglass || p.AuthMethod == AuthorKindBreakglass:
 		au.Sub = breakglassSubPrefix + strings.TrimPrefix(p.Sub, breakglassSubPrefix)
 		au.Kind = AuthorKindBreakglass
+	case p.Kind == PrincipalAPIKey:
+		// A key without an owner has no person to attribute to: refuse it
+		// rather than record an empty author.
+		if p.OwnerSub == "" {
+			return approvals.Author{}, 0, &dashboard.ChangeError{Status: http.StatusUnauthorized, Code: "unauthenticated"}
+		}
+		au.Kind = AuthorKindAPIKey
 	}
 	return au, principalRole(a.s.cfg.Console, p), nil
 }

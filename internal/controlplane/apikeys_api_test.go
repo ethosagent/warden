@@ -628,6 +628,67 @@ func TestAuditSkipIsVerified(t *testing.T) {
 	}
 }
 
+// TestAuditNoChangeScopedHashAndFollowUps: the NoChange check hashes the after
+// state with the audit-scoped context (a per-object hasher such as
+// change_draft answers "" without it, so a create would look like a no-op),
+// and a request that queued follow-up rows is never silently skipped.
+func TestAuditNoChangeScopedHashAndFollowUps(t *testing.T) {
+	e := newKeyEnv(t, keyEnvOpts{})
+	// Like change_draft: "" until the request names its object (a create sets
+	// it during the handler), and "" with no audit scope at all.
+	e.srv.RegisterStateHasher("scoped", func(ctx context.Context) (string, error) {
+		if auditDraftID(ctx) == "" {
+			return "", nil
+		}
+		return "h:" + auditDraftID(ctx), nil
+	})
+	e.srv.RegisterStateHasher("steady", func(context.Context) (string, error) { return "same", nil })
+	run := func(target string, h http.HandlerFunc) {
+		row := authzRow{Action: "nochange.test", Target: target, Audited: true, Class: classAudited}
+		mw := e.srv.adminAuditMiddleware(func(*http.Request) (authzRow, bool) { return row, true }, h)
+		req := httptest.NewRequest(http.MethodPost, "/x", nil)
+		req = req.WithContext(WithPrincipal(req.Context(), Principal{Kind: PrincipalSession, Iss: keyOwnerIss, Sub: "ada", Groups: []string{groupAdmin}, AuthMethod: "oidc"}))
+		mw.ServeHTTP(httptest.NewRecorder(), req)
+	}
+	rows := func() int { return len(e.rec.inputs()) }
+
+	// A create that claims NoChange: before is "" (no object yet), after is
+	// the new object's hash, so the claim is refused and the row is written.
+	before := rows()
+	run("scoped", func(w http.ResponseWriter, r *http.Request) {
+		setAuditDraft(r.Context(), "cd_new")
+		adminaudit.NoChange(r.Context())
+		w.WriteHeader(http.StatusCreated)
+	})
+	in := e.rec.inputs()
+	if len(in) != before+1 || in[before].Details[detailSkipRefused] != "true" || in[before].AfterHash == "" {
+		t.Fatalf("a NoChange create = %+v, want a row with the claim refused and an after hash", in[before:])
+	}
+
+	// Follow-ups queued: the hashes match, but skipping would drop them, so
+	// the primary row and its follow-up are both written.
+	before = rows()
+	run("steady", func(w http.ResponseWriter, r *http.Request) {
+		addAuditFollowUp(r.Context(), auditFollowUp{Action: "policy.write", Target: auditTargetPolicy})
+		adminaudit.NoChange(r.Context())
+		w.WriteHeader(http.StatusOK)
+	})
+	in = e.rec.inputs()
+	if len(in) != before+2 || in[before].Details[detailSkipRefused] != "true" || in[before+1].Action != "policy.write" {
+		t.Fatalf("a NoChange with a follow-up = %+v, want the primary row and the follow-up", in[before:])
+	}
+
+	// Control: the same steady target with no follow-up is a verified no-op.
+	before = rows()
+	run("steady", func(w http.ResponseWriter, r *http.Request) {
+		adminaudit.NoChange(r.Context())
+		w.WriteHeader(http.StatusOK)
+	})
+	if rows() != before {
+		t.Error("a verified no-op without follow-ups wrote a row")
+	}
+}
+
 // TestAPIKeysSessionRevokeAudit: the sessions row says keys were revoked too.
 func TestAPIKeysSessionRevokeAudit(t *testing.T) {
 	e := newKeyEnv(t, keyEnvOpts{})

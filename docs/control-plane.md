@@ -1144,6 +1144,13 @@ W-P2-APPR-06 routes every existing write path through the same check.
   (`403 breakglass_cannot_approve`); the approver must hold the draft's required role now
   (`403 role_required`, naming the settings fields that need admin). With
   `minApprovals > 1` the approvers must be distinct.
+- **API keys.** A key reaches the draft routes with the scopes in the
+  [role matrix](#console-roles-and-the-role-matrix): `policy:read` to read,
+  `policy:draft` to create, `policy:write` to edit, submit, withdraw, rebase and
+  replay. No key can approve or reject (`403 insufficient_scope`): the second person is
+  always a signed-in human. A key acts as its owner, so a draft made with u1's key is
+  u1's draft (recorded with author kind `apikey`) and u1's own session cannot approve
+  it (`403 self_approval_forbidden`).
 - **Apply.** The approval that completes the set publishes the draft in the same
   request: `200 {state: applied, version}`. A moved head is `409 rebase_required {head}`
   (the draft becomes `needs_rebase`); a doc the loader refuses is `422` and the draft
