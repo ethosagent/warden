@@ -81,6 +81,26 @@ logging:
 #                                          # (exactly one; a file is re-read so it can rotate)
 #    sessionTTL: 1h                        # default 1h, max 4h
 #    allowBehindTLSTerminator: false
+#  approvals:                             # change approvals (W-P2-APPR-01). NOT available yet: this
+#                                          # build refuses enabled: true at startup. Off by default.
+#    enabled: false                        # will need auth: oidc, --policy-store=versioned,
+#                                          # --state-dir and adminAudit.enabled: true
+#    minApprovals: 1                       # 1..3
+#    allowSelfApproveNarrowing: true
+#    allowEmergencyApply: false
+#    replayWindow: 168h                    # 1h..720h
+#    replayMaxEvents: 100000               # 1..100000
+#    replayTimeout: 60s
+#    replayMaxAge: 24h
+#    draftTTL: 168h
+#    maxOpenDrafts: 200
+#  apiKeys:                                # scoped wak_ API keys on /dashboard/api/*; off by default;
+#                                          # needs auth: oidc and --state-dir (docs/control-plane.md)
+#    enabled: false
+#    defaultTTL: 2160h                     # default key lifetime; at most maxTTL
+#    maxTTL: 8760h                         # also the hard ceiling
+#    maxPerOwner: 25                       # active keys per owner
+#    ratePerKey: 10                        # requests per second per key (burst 2x)
 #
 # Compose dev profile (Dex): the CP runs in a container where `localhost` is
 # itself, so the browser-facing issuer stays public and internalIssuerURL names

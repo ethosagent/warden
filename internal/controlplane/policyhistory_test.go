@@ -472,3 +472,51 @@ func TestPolicyHistoryNotWiredFileMode(t *testing.T) {
 		}
 	}
 }
+
+// stubChanges is a ChangeDrafts whose every call succeeds; it lets a test
+// reach the draft routes without an approvals service.
+type stubChanges struct{}
+
+func (stubChanges) List(context.Context, dashboard.ChangeFilter, string, int) ([]dashboard.ChangeDraftView, string, error) {
+	return nil, "", nil
+}
+
+func (stubChanges) Get(context.Context, string) (dashboard.ChangeDraftDetail, error) {
+	return dashboard.ChangeDraftDetail{}, nil
+}
+
+func (stubChanges) Diff(context.Context, string) (dashboard.ChangeDiff, error) {
+	return dashboard.ChangeDiff{}, nil
+}
+
+func (stubChanges) Create(context.Context, dashboard.ChangeCreateInput) (dashboard.ChangeDraftDetail, error) {
+	return dashboard.ChangeDraftDetail{}, nil
+}
+
+func (stubChanges) Update(context.Context, string, int, dashboard.ChangeUpdateInput) (dashboard.ChangeDraftDetail, error) {
+	return dashboard.ChangeDraftDetail{}, nil
+}
+
+func (stubChanges) Submit(context.Context, string, int) (dashboard.ChangeResult, error) {
+	return dashboard.ChangeResult{}, nil
+}
+
+func (stubChanges) Withdraw(context.Context, string, int) (dashboard.ChangeResult, error) {
+	return dashboard.ChangeResult{}, nil
+}
+
+func (stubChanges) Rebase(context.Context, string, int) (dashboard.ChangeResult, error) {
+	return dashboard.ChangeResult{}, nil
+}
+
+func (stubChanges) Approve(context.Context, string, dashboard.ChangeApproveInput) (dashboard.ChangeResult, error) {
+	return dashboard.ChangeResult{}, nil
+}
+
+func (stubChanges) Reject(context.Context, string, dashboard.ChangeRejectInput) (dashboard.ChangeResult, error) {
+	return dashboard.ChangeResult{}, nil
+}
+
+func (stubChanges) Replay(context.Context, string) (dashboard.ChangeReplayView, error) {
+	return dashboard.ChangeReplayView{}, nil
+}

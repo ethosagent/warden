@@ -37,7 +37,7 @@ var (
 // the fleet schema. retentionDays <= 0 keeps events forever; maxEvents <= 0 uses
 // the default cap.
 func NewFleetSQLiteStore(path string, retentionDays, maxEvents int) (*FleetSQLiteStore, error) {
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", fleetRWDSN(path))
 	if err != nil {
 		return nil, fmt.Errorf("analytics: open fleet sqlite: %w", err)
 	}
@@ -434,4 +434,83 @@ func (s *FleetSQLiteStore) Schema() SchemaInfo {
 // connection, so concurrent ingest queues behind it rather than failing.
 func (s *FleetSQLiteStore) BackupTo(ctx context.Context, dst string) error {
 	return cpstate.VacuumInto(ctx, s.db, dst)
+}
+
+// replayPageSize is how many rows ScanReplayEvents reads per query. Each page is
+// read fully and its rows closed before fn runs, so the read-only connection is
+// free for other queries between pages.
+const replayPageSize = 5000
+
+var _ ReplayScanner = (*FleetSQLiteStore)(nil)
+
+// replayScanRowHook is a test seam: when non-nil it runs after the first row of
+// each page is scanned, while that page's rows are still open on the read-only
+// handle. It is nil in production.
+var replayScanRowHook func()
+
+// ScanReplayEvents implements ReplayScanner on the read-only handle, in pages of
+// replayPageSize rows by descending id. MCP rows are left out in SQL, so limit
+// counts only events a policy replay evaluates. Only ts, domain, port,
+// protocol, method, decision and the user columns are selected.
+func (s *FleetSQLiteStore) ScanReplayEvents(ctx context.Context, since time.Time, limit int, fn func(Event) error) error {
+	if limit <= 0 {
+		return nil
+	}
+	const q = `SELECT id, ts, domain, port, protocol, method, decision,
+                 user_sub, user_email, user_groups, user_groups_truncated, identity_status
+          FROM events WHERE id < ? AND ts >= ? AND protocol != 'mcp' ORDER BY id DESC LIMIT ?`
+	sinceNS := since.UnixNano()
+	if since.IsZero() {
+		sinceNS = 0
+	}
+	cursor := int64(1<<63 - 1)
+	for delivered := 0; delivered < limit; {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		n := min(replayPageSize, limit-delivered)
+		page := make([]Event, 0, n)
+		last := cursor
+		rows, err := s.ro.QueryContext(ctx, q, cursor, sinceNS, n)
+		if err != nil {
+			return fmt.Errorf("analytics: replay scan: %w", err)
+		}
+		for rows.Next() {
+			var (
+				e           Event
+				id, ts      int64
+				userGroups  string
+				groupsTrunc int
+			)
+			if err := rows.Scan(&id, &ts, &e.Domain, &e.Port, &e.Protocol, &e.Method, &e.Decision,
+				&e.UserSub, &e.UserEmail, &userGroups, &groupsTrunc, &e.IdentityStatus); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("analytics: replay scan: %w", err)
+			}
+			e.Timestamp = time.Unix(0, ts).UTC()
+			e.UserGroups = DecodeGroups(userGroups)
+			e.UserGroupsTruncated = groupsTrunc != 0
+			page = append(page, e)
+			last = id
+			if len(page) == 1 && replayScanRowHook != nil {
+				replayScanRowHook()
+			}
+		}
+		err = rows.Err()
+		_ = rows.Close()
+		if err != nil {
+			return fmt.Errorf("analytics: replay scan: %w", err)
+		}
+		for _, e := range page {
+			if err := fn(e); err != nil {
+				return err
+			}
+		}
+		delivered += len(page)
+		if len(page) < n {
+			return nil
+		}
+		cursor = last
+	}
+	return nil
 }
