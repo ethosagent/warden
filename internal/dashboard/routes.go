@@ -25,6 +25,10 @@ package dashboard
 //	POST /dashboard/api/worker-tokens                   admin, audited worker_token.create
 //	DELETE /dashboard/api/worker-tokens/{id}            admin, audited worker_token.revoke
 //
+//	GET  /dashboard/api/worker-enrollments              admin, workers:admin (W-P2-WCA-08)
+//	POST /dashboard/api/worker-enrollments              admin, audited worker_enroll_token.create
+//	DELETE /dashboard/api/worker-enrollments/{id}       admin, audited worker_enroll_token.revoke
+//
 //	GET  /dashboard/api/keys                            admin   (W-P2-KEYS-04)
 //	POST /dashboard/api/keys/rotate                     admin, audited keys.rotate_requested
 //
@@ -56,6 +60,8 @@ func (s *Server) registerRoutes(mux *routeMux) {
 	mux.HandleFunc("/dashboard/api/workers/", s.handleWorkerRevoke)
 	mux.HandleFunc("/dashboard/api/worker-tokens", s.handleWorkerTokens)
 	mux.HandleFunc("/dashboard/api/worker-tokens/", s.handleWorkerTokenByID)
+	mux.HandleFunc("/dashboard/api/worker-enrollments", s.handleWorkerEnrollments)
+	mux.HandleFunc("/dashboard/api/worker-enrollments/", s.handleWorkerEnrollment)
 	mux.HandleFunc("/dashboard/api/blocked-users", s.handleBlockedUsers)
 	mux.HandleFunc("/dashboard/api/blocked-users/", s.handleBlockedUser)
 	mux.HandleFunc("/dashboard/api/keys", s.handleKeys)

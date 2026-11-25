@@ -902,6 +902,9 @@ fails when the two differ.
 | `/dashboard/api/token-sessions/revoke` | POST | admin | `token_sessions.revoke_all` | `none` |
 | `/dashboard/api/token-sessions/{sid}/revoke` | POST | admin | `token_sessions.revoke` | `none` |
 | `/dashboard/api/traffic` | GET | viewer | `traffic.read` | `traffic:read` |
+| `/dashboard/api/worker-enrollments` | GET | admin | `worker_enroll_token.read` | `workers:admin` |
+| `/dashboard/api/worker-enrollments` | POST | admin | `worker_enroll_token.create` | `none` |
+| `/dashboard/api/worker-enrollments/{id}` | DELETE | admin | `worker_enroll_token.revoke` | `workers:admin` |
 | `/dashboard/api/worker-tokens` | GET | viewer | `worker_token.read` | `none` |
 | `/dashboard/api/worker-tokens` | POST | admin | `worker_token.create` | `none` |
 | `/dashboard/api/worker-tokens/{id}` | DELETE | admin | `worker_token.revoke` | `none` |
@@ -2037,6 +2040,25 @@ through `console.trustedProxies` (the resolver in `adminaudit_mw.go`).
 Re-running `create` with the same name, value and binding is always a no-op,
 even after the token was used up, expired or revoked: it is never revived or
 extended, and the command prints its state.
+
+#### Enrollment tokens API and console panel
+
+Admins can do the same without shell access to the state dir, under
+`/dashboard/api/worker-enrollments` (404 unless `workerCA.enabled` with a state
+dir; the console's Fleet page shows a "Worker enrollment tokens" panel for admins):
+
+| Request | Role, API key scope | Result |
+|---|---|---|
+| `GET /dashboard/api/worker-enrollments` | admin, `workers:admin` | 200, every token (revoked included): `id`, `name`, `workerId` or `workerIdPrefix`, `maxUses`, `uses`, `createdBy`, `createdAt`, `expiresAt`, `revokedAt`. Never the token or its hash. |
+| `POST /dashboard/api/worker-enrollments` `{name, workerId or workerIdPrefix, maxUses?, expiresIn?}` | admin, session only (`none`) | 201 with the metadata and `token`, the only time the plaintext is shown (`Cache-Control: no-store`). 400 for invalid input, an unknown field or an `expiresIn` above `workerCA.enrollTokenMaxTTL`, 409 for a taken name, 413 over 8 KiB. |
+| `DELETE /dashboard/api/worker-enrollments/{id}` | admin, `workers:admin` | 204, idempotent: the token's next `POST /control/enroll` is a 401. 404 for an unknown id. |
+
+Minting a credential is never available to an API key. With `console.auth: none`
+a POST or DELETE answers 403 `{"error":"use_cli"}` and GET still lists. Create
+and revoke are admin-audited as `worker_enroll_token.create` and
+`worker_enroll_token.revoke` (target `worker_enrollments`, target_ref
+`enroll_token:<id>`); the audit state hash covers token metadata only, so no row
+holds the token or its hash.
 
 ### Worker certificate authentication and `POST /control/renew`
 

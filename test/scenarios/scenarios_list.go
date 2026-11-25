@@ -391,6 +391,10 @@ var All = slices.Concat(
 		{Name: "workerca_revoke_api", Opts: workerCARevokeOpts(), Run: workerCARevokeAPI},
 		{Name: "workerca_revoke_cli", Opts: workerCARevokeOpts(), Run: workerCARevokeCLI},
 		{Name: "workerca_prune", Opts: workerCARevokeOpts(), Run: workerCAPrune},
+		// Enrollment token admin API (W-P2-WCA-08): an admin mints a wet_ token
+		// from the console, a worker enrolls once, and the token is never listed,
+		// audited or logged in plaintext. In-process only (CP state dir).
+		{Name: "workerca_enroll_admin", Opts: workerCAEnrollAdminOpts(), Run: workerCAEnrollAdmin},
 		{Name: "keys_disabled_creates_nothing", Opts: []harness.Option{harness.WithBackup()}, Run: keysDisabledCreatesNothing},
 		// Key rotation (W-P2-KEYS-06): rotate-key is refused while the control
 		// plane runs, rotates offline once it is stopped (signed handover, new

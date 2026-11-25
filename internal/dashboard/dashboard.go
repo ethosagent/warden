@@ -82,6 +82,8 @@ type Server struct {
 	workerTokens WorkerTokenAdmin
 	// workerCerts backs the worker certificate revoke route (nil: 404).
 	workerCerts WorkerCertAdmin
+	// enrollments serves the enrollment token admin routes (nil: 404).
+	enrollments EnrollmentAdmin
 	// keys serves the signing-key admin routes; nil = they answer 404 (a
 	// worker, or a control plane without keys.enabled).
 	keys KeysSource
@@ -731,6 +733,9 @@ func Routes() []Route {
 		{post, "/dashboard/api/policy/versions/{v}/rollback", "policy.rollback"},
 		{post, "/dashboard/api/backup", "backup.run"},
 		{post, "/dashboard/api/workers/{id}/revoke", "worker.revoked"},
+		{get, "/dashboard/api/worker-enrollments", "worker_enroll_token.read"},
+		{post, "/dashboard/api/worker-enrollments", "worker_enroll_token.create"},
+		{del, "/dashboard/api/worker-enrollments/{id}", "worker_enroll_token.revoke"},
 		{get, "/dashboard/api/worker-tokens", "worker_token.read"},
 		{post, "/dashboard/api/worker-tokens", "worker_token.create"},
 		{del, "/dashboard/api/worker-tokens/{id}", "worker_token.revoke"},
