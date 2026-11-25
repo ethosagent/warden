@@ -44,30 +44,42 @@ func (s *Stack) execState(tb testing.TB, db *sql.DB, stmt string) {
 // returns the function that brings the table back. Reads keep working. The
 // failure is a pair of triggers on the table: nothing in the control plane
 // knows about them, so the code that answers the failure is the shipped code.
+// The restore function is also registered as a cleanup and is idempotent.
 func (s *Stack) FailWrites(tb testing.TB, table string) (restore func()) {
 	tb.Helper()
 	db := s.stateSQL(tb)
-	s.execState(tb, db, `CREATE TRIGGER sect_down_ins BEFORE INSERT ON `+table+` BEGIN SELECT RAISE(ABORT, 'store down'); END`)
-	s.execState(tb, db, `CREATE TRIGGER sect_down_upd BEFORE UPDATE ON `+table+` BEGIN SELECT RAISE(ABORT, 'store down'); END`)
-	return func() {
+	ins, upd := "sect_down_ins_"+table, "sect_down_upd_"+table
+	s.execState(tb, db, `CREATE TRIGGER `+ins+` BEFORE INSERT ON `+table+` BEGIN SELECT RAISE(ABORT, 'store down'); END`)
+	s.execState(tb, db, `CREATE TRIGGER `+upd+` BEFORE UPDATE ON `+table+` BEGIN SELECT RAISE(ABORT, 'store down'); END`)
+	restore = func() {
 		tb.Helper()
-		s.execState(tb, db, `DROP TRIGGER IF EXISTS sect_down_ins`)
-		s.execState(tb, db, `DROP TRIGGER IF EXISTS sect_down_upd`)
+		s.execState(tb, db, `DROP TRIGGER IF EXISTS `+ins)
+		s.execState(tb, db, `DROP TRIGGER IF EXISTS `+upd)
 	}
+	tb.Cleanup(restore)
+	return restore
 }
 
 // HideTable renames table away in the control plane's state database, so every
 // read and write of it fails with "no such table", and returns the function that
 // renames it back. It works on a running control plane (the rename commits from
 // a second connection) and on a stopped one (the next boot finds it missing).
+// The restore function is also registered as a cleanup and renames only once.
 func (s *Stack) HideTable(tb testing.TB, table string) (restore func()) {
 	tb.Helper()
 	db := s.stateSQL(tb)
 	s.execState(tb, db, `ALTER TABLE `+table+` RENAME TO `+table+`_hidden`)
-	return func() {
+	done := false
+	restore = func() {
 		tb.Helper()
+		if done {
+			return
+		}
+		done = true
 		s.execState(tb, db, `ALTER TABLE `+table+`_hidden RENAME TO `+table)
 	}
+	tb.Cleanup(restore)
+	return restore
 }
 
 // CachePath is where w keeps its last-known-good bundle.

@@ -16,7 +16,7 @@ import (
 // normal exchange as soon as the dependency is back.
 //
 // The warden_cp_tokens_denied_total counter that counts these is not exposed by
-// the control plane yet (see doc.go): the row and the log line are what an
+// the control plane yet (see the doc.go section on degraded modes): the row and the log line are what an
 // operator reads today.
 
 // storeOutage describes one store of the token endpoint that is down and how
@@ -118,14 +118,18 @@ func recovered(t *testing.T, s *Stack, desc, sub string) {
 	}
 }
 
-// TestDegraded_IdPDown stops the OIDC issuer. A user token signed by a key the
-// control plane has not fetched cannot be verified: with a warm key cache it is
-// an unknown key (400 invalid_grant), with a cold one (a control plane that
-// restarted while the issuer is down) the issuer is unavailable (503
-// idp_unavailable, retryable). Either way no token is issued, the refusal is a
-// denied row, and running workers keep serving the Warden tokens they already
-// accept. The exchange works again when the issuer is back.
-func TestDegraded_IdPDown(t *testing.T) {
+// degradedIdPDown stops the OIDC issuer. A user token signed by a key the
+// control plane has not fetched cannot be verified, and the issuer cannot be
+// asked: the feature doc says that is 503 idp_unavailable (retryable) whether
+// the key cache is warm or cold (a control plane that restarted while the
+// issuer is down). No token is issued, the refusal is a denied row, and running
+// workers keep serving the Warden tokens they already accept. The exchange
+// works again when the issuer is back.
+//
+// The warm-cache case fails until the key set answers an unknown kid with
+// keysUnavailable while a refresh fails (it answers 400 subject_invalid today;
+// fix on fix/oidc-keyset-unknown-kid-outage).
+func degradedIdPDown(t *testing.T) {
 	s := degradedStack(t, StackOptions{})
 	a := agentOf(s, keyAgentA)
 	s.PositiveControl(t, "token", func(t *testing.T) {
@@ -139,15 +143,17 @@ func TestDegraded_IdPDown(t *testing.T) {
 	rotated := s.UserToken("user-5", []string{"eng"}, fakes.RotateKey())
 	s.Put(keyRotated, rotated)
 	s.Issuer.Stop()
-	workerStillServes := []Case{
-		workerAccept("IdP down: a valid token", "warden", TransportConnect,
-			func(t testing.TB, s *Stack) string { return scratchToken(s, keyDegU1) }),
-		workerRefusal("IdP down: a forged token", "invalid", "bad_signature", "warden", TransportConnect,
-			func(t testing.TB, s *Stack) string { return scratchToken(s, keyDegForged) }),
+	workerStillServes := func(prefix string) []Case {
+		return []Case{
+			workerAccept(prefix+"a valid token", "warden", TransportConnect,
+				func(t testing.TB, s *Stack) string { return scratchToken(s, keyDegU1) }),
+			workerRefusal(prefix+"a forged token", "invalid", "bad_signature", "warden", TransportConnect,
+				func(t testing.TB, s *Stack) string { return scratchToken(s, keyDegForged) }),
+		}
 	}
 
 	Run(t, s, "token", []Case{{
-		Name: "warm key cache: an unfetched key is an unknown key",
+		Name: "warm key cache: an unfetched key with the issuer down is unavailable",
 		Path: PathToken,
 		Attack: func(t testing.TB, s *Stack) Observed {
 			r := s.PostToken(t, s.ExchangeForm(a, rotated, nil))
@@ -156,16 +162,17 @@ func TestDegraded_IdPDown(t *testing.T) {
 			}
 			return SeenReply(r)
 		},
-		WantStatus: http.StatusBadRequest, WantBody: `"error":"invalid_grant"`,
-		WantResult: "denied", WantReason: "subject_invalid",
+		WantStatus: http.StatusServiceUnavailable, WantBody: `"error":"temporarily_unavailable"`,
+		WantHeader: map[string]string{"Retry-After": "*"},
+		WantResult: "denied", WantReason: "idp_unavailable",
 	}})
-	Run(t, s, "worker", workerStillServes)
+	Run(t, s, "worker", workerStillServes("IdP down, warm cache: "))
 
 	// A restart empties the key cache; the issuer is still down.
 	s.StopCP(t)
 	s.RestartCP(t)
 	Run(t, s, "token", []Case{idpUnavailable})
-	Run(t, s, "worker", workerStillServes)
+	Run(t, s, "worker", workerStillServes("IdP down, cold cache: "))
 
 	s.Issuer.Start()
 	var tok string
@@ -183,13 +190,13 @@ func TestDegraded_IdPDown(t *testing.T) {
 	s.AssertNoLeak(t, LeakCheck{AllowSwapUpTo: s.Upstream.Hits()})
 }
 
-// TestDegraded_TokenStores breaks, one at a time, each store the token
+// degradedTokenStores breaks, one at a time, each store the token
 // endpoint reads or writes: the endpoint refuses to issue (503, closed reason)
 // and issues again when the store is back. The stores are the control plane's
 // own state database, failed through a second connection to it (see FailWrites
 // and HideTable), so the refusal is the shipped code's answer to a real
 // storage fault.
-func TestDegraded_TokenStores(t *testing.T) {
+func degradedTokenStores(t *testing.T) {
 	s := degradedStack(t, StackOptions{})
 	a := agentOf(s, keyAgentA)
 	s.PositiveControl(t, "token", func(t *testing.T) {

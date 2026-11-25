@@ -336,12 +336,10 @@ func (s *Stack) Exchange(tb testing.TB, a *Agent, subjectToken string, extra url
 		r = s.PostToken(tb, s.ExchangeForm(a, subjectToken, extra, opts...))
 		return r.Status != http.StatusServiceUnavailable
 	})
-	var out struct {
-		AccessToken string `json:"access_token"`
-	}
-	if r.Status == http.StatusOK && json.Unmarshal([]byte(r.Body), &out) == nil && out.AccessToken != "" {
-		s.tracker.add("warden token", out.AccessToken)
-		return r, out.AccessToken
+	if r.Status == http.StatusOK {
+		if tok := decodeAccessToken(tb, s, r); tok != "" {
+			return r, tok
+		}
 	}
 	return r, ""
 }

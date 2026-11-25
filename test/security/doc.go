@@ -122,6 +122,9 @@
 // (Stack.WriteBundleCache, signed with the control plane's bundle key while it
 // is still up) show what a restarting worker refuses. Every case asserts the
 // refusal, the absence of an upstream hit or token, and the recovery.
+// The token endpoint's warden_cp_tokens_denied_total counter has no exposition
+// yet, so these cases pin a refusal through its token_events row or, when no row
+// can be written, the token_exchange_denied log line.
 // pending.go is empty; two token reasons are excluded with the unit tests that
 // cover them.
 //

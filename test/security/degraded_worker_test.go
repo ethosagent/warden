@@ -68,6 +68,50 @@ func deniesEverything(prefix string) []Case {
 	return []Case{one("a token that was valid", keyDegU1), one("a token of a blocked user", keyDegU2)}
 }
 
+// cachedStack is degradedStack with user-2 blocked and agent-b disabled, and
+// every worker's bundle cache holding the bundle that carries both. It returns
+// the stack and agent-a's worker.
+func cachedStack(t *testing.T) (*Stack, *Worker) {
+	t.Helper()
+	s := degradedStack(t, StackOptions{})
+	cutOff(t, s)
+	// The cache follows the applied bundle: wait until it holds the one that
+	// carries the block and the disabled agent.
+	for _, w := range s.Workers {
+		w := w
+		// The gauge follows the worker's clock, so the wait advances it.
+		s.EventuallyAdvance(w.Name+"'s cache to hold the applied bundle", time.Second, func() bool {
+			return float64(s.CachedBundleValue(t, w).Seq) == s.WorkerSeq(t, w)
+		})
+	}
+	return s, s.Worker("agent-a")
+}
+
+// degradedTamperedCache: a worker restarted with the CP down and a bundle cache
+// with one byte changed refuses it, starts fail-closed and denies all traffic;
+// the control plane's return heals it.
+func degradedTamperedCache(t *testing.T) {
+	s, wa := cachedStack(t)
+	s.StopCP(t)
+	s.StopWorker(t, wa)
+	s.WriteBundleCache(t, wa, flipPayloadByte(s.CachedBundle(t, wa)))
+	logs := workerBootLogs(t, s, wa)
+	if !strings.Contains(logs, "cached bundle rejected (bad_signature)") || !strings.Contains(logs, "FAIL-CLOSED") {
+		t.Errorf("the worker did not refuse the tampered cache and start fail-closed:\n%s", tail(logs, 1500))
+	}
+	if v, _ := s.TryMetric(wa, "warden_bundle_seq", nil); v != 0 {
+		t.Errorf("warden_bundle_seq = %v after refusing the cache, want 0", v)
+	}
+	Run(t, s, "worker", deniesEverything("tampered cache: "))
+
+	// The control plane's return heals the worker that refused its cache: it
+	// pulls the signed bundle and enforces it again, block and all.
+	s.RestartCP(t)
+	s.AwaitWorkerSeq(t, wa, 1)
+	Run(t, s, "worker", enforcedCases("healed: ")[:3])
+	s.AssertNoLeak(t, LeakCheck{AllowSwapUpTo: s.Upstream.Hits()})
+}
+
 // jwksUnavailable is a Warden token shown to a worker whose verified bundle
 // carries no token keys: the worker cannot verify any Warden token, so in
 // require mode it refuses every one.
@@ -85,24 +129,13 @@ var jwksUnavailable = Case{
 	WantDeny: "identity_required",
 }
 
-// TestDegraded_WorkerRestart restarts workers while the control plane is down,
+// degradedWorkerRestart restarts workers while the control plane is down,
 // with controlPlane.stateDir set: the bundle cache is the only thing a worker
 // has. A valid cache is re-verified against the pins and enforced; a cache with
 // one byte changed, one older than controlPlane.bundleCacheMaxAge, or none at
 // all leaves the worker denying everything. The control plane's return heals it.
-func TestDegraded_WorkerRestart(t *testing.T) {
-	s := degradedStack(t, StackOptions{})
-	cutOff(t, s)
-	wa := s.Worker("agent-a")
-	// The cache follows the applied bundle: wait until it holds the one that
-	// carries the block and the disabled agent.
-	for _, w := range s.Workers {
-		w := w
-		// The gauge follows the worker's clock, so the wait advances it.
-		s.EventuallyAdvance(w.Name+"'s cache to hold the applied bundle", time.Second, func() bool {
-			return float64(s.CachedBundleValue(t, w).Seq) == s.WorkerSeq(t, w)
-		})
-	}
+func degradedWorkerRestart(t *testing.T) {
+	s, wa := cachedStack(t)
 	// The bundle signing key lives in the control plane's state, so the stale
 	// cache is signed while the control plane is up: the same bundle as the
 	// worker's cache, issued 25 hours ago and still unexpired.
@@ -124,29 +157,6 @@ func TestDegraded_WorkerRestart(t *testing.T) {
 		Run(t, s, "worker", enforcedCases("valid cache: "))
 		terminatedAndMCPStillServe(t, s, "valid cache: ")
 		s.AssertNoLeak(t, LeakCheck{AllowSwapUpTo: s.Upstream.Hits()})
-	})
-
-	// A cache with one byte changed no longer verifies.
-	t.Run("a tampered cache is refused", func(t *testing.T) {
-		s.StopWorker(t, wa)
-		s.WriteBundleCache(t, wa, flipPayloadByte(s.CachedBundle(t, wa)))
-		logs := workerBootLogs(t, s, wa)
-		if !strings.Contains(logs, "cached bundle rejected (bad_signature)") || !strings.Contains(logs, "FAIL-CLOSED") {
-			t.Errorf("the worker did not refuse the tampered cache and start fail-closed:\n%s", tail(logs, 1500))
-		}
-		if v, _ := s.TryMetric(wa, "warden_bundle_seq", nil); v != 0 {
-			t.Errorf("warden_bundle_seq = %v after refusing the cache, want 0", v)
-		}
-		Run(t, s, "worker", deniesEverything("tampered cache: "))
-	})
-
-	// The control plane's return heals the worker that refused its cache: it
-	// pulls the signed bundle and enforces it again, block and all.
-	t.Run("the control plane's return heals a worker that refused its cache", func(t *testing.T) {
-		s.RestartCP(t)
-		s.AwaitWorkerSeq(t, wa, 1)
-		Run(t, s, "worker", enforcedCases("healed: ")[:3])
-		s.StopCP(t)
 	})
 
 	// A cache issued longer ago than controlPlane.bundleCacheMaxAge (24h) is
@@ -193,13 +203,13 @@ func TestDegraded_WorkerRestart(t *testing.T) {
 	})
 }
 
-// TestDegraded_RestartRollbackFloor: the last-known-good cache is also the
+// degradedRollbackFloor: the last-known-good cache is also the
 // boot rollback floor. A worker restarted with the control plane up, whose
 // cache is newer than what the control plane serves (a control plane restored
 // from an old backup, or an attacker's replay in front of it), refuses the
 // older bundle as a rollback and keeps enforcing the cached one: here a cache
 // that has dropped the upstream from the allowlist.
-func TestDegraded_RestartRollbackFloor(t *testing.T) {
+func degradedRollbackFloor(t *testing.T) {
 	s := degradedStack(t, StackOptions{})
 	wa := s.Worker("agent-a")
 	s.EventuallyAdvance("the cache to hold the applied bundle", time.Second, func() bool {

@@ -10,12 +10,12 @@ import (
 
 const blockedUsersPath = "/dashboard/api/blocked-users"
 
-// TestDegraded_CPRestart restarts the control plane on the same state
+// degradedCPRestart restarts the control plane on the same state
 // directory. What it persisted still refuses: a client assertion's jti used
 // before the restart is still a replay, a used wet_ enrollment token is still
 // spent, and the block list and the agent registry are what they were, both on
 // the token endpoint and on the workers.
-func TestDegraded_CPRestart(t *testing.T) {
+func degradedCPRestart(t *testing.T) {
 	s := degradedStack(t, StackOptions{})
 	a := agentOf(s, keyAgentA)
 	adm := s.AdminSession(t)

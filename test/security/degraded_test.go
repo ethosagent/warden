@@ -115,7 +115,7 @@ const tokenLifetime = 15*time.Minute + defaultSkew
 
 // noTokenFrom asserts that an exchange attempt cannot get a token because the
 // control plane is not there: the connection fails, nothing is issued.
-func noTokenFrom(t testing.TB, s *Stack, tokKey string) {
+func noTokenFrom(t testing.TB, s *Stack) {
 	t.Helper()
 	form := s.ExchangeForm(s.Agent("agent-a"), s.UserToken("user-1", []string{"eng"}), nil)
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, s.CP.URL+tokenPath, strings.NewReader(form.Encode()))
@@ -130,17 +130,17 @@ func noTokenFrom(t testing.TB, s *Stack, tokKey string) {
 	}
 }
 
-// TestDegraded_CPDown stops the control plane under running workers. Require
+// degradedCPDown stops the control plane under running workers. Require
 // mode keeps enforcing on the signed bundle each worker holds: it accepts valid
 // Warden tokens and refuses forged ones, a blocked user and a disabled agent
 // stay cut off, no new token can be issued, and once the tokens expire nothing
 // is accepted. The control plane's return restores new exchanges.
-func TestDegraded_CPDown(t *testing.T) {
+func degradedCPDown(t *testing.T) {
 	s := degradedStack(t, StackOptions{})
 	cutOff(t, s)
 
 	s.StopCP(t)
-	noTokenFrom(t, s, keyDegU1)
+	noTokenFrom(t, s)
 	Run(t, s, "worker", enforcedCases("CP down: "))
 	terminatedAndMCPStillServe(t, s, "CP down: ")
 
@@ -166,4 +166,17 @@ func TestDegraded_CPDown(t *testing.T) {
 	Run(t, s, "worker", []Case{workerAccept("CP back: a new token", "warden", TransportConnect,
 		func(t testing.TB, s *Stack) string { return fresh })})
 	s.AssertNoLeak(t, LeakCheck{AllowSwapUpTo: s.Upstream.Hits()})
+}
+
+// TestDegraded runs the degraded-mode and restart cases (W-P2-SECT-07). Each
+// subtest boots its own stack, so the ticket's acceptance commands select one
+// by name (-run TestDegraded/cp_down).
+func TestDegraded(t *testing.T) {
+	t.Run("cp_down", degradedCPDown)
+	t.Run("worker_restart", degradedWorkerRestart)
+	t.Run("tampered_cache", degradedTamperedCache)
+	t.Run("rollback_floor", degradedRollbackFloor)
+	t.Run("cp_restart_replay", degradedCPRestart)
+	t.Run("idp_down", degradedIdPDown)
+	t.Run("token_stores", degradedTokenStores)
 }
