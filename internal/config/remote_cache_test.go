@@ -523,3 +523,105 @@ func TestBundleCacheFloorExpires(t *testing.T) {
 		t.Fatalf("seq 3 after the floor expired: %v, want it accepted", err)
 	}
 }
+
+// TestBundleCacheNeverHoldsCredentialForAnySpelling is the regression test for
+// a parser differential: bundle.Verify matched the "credentials" member
+// case-insensitively (encoding/json's rule) while the cache writer deleted
+// only the exact key "credentials" from a map, so an envelope rewritten on the
+// wire to spell it "Credentials" applied the secret and also wrote it to the
+// last-known-good cache. Now a case variant or duplicate of an envelope
+// member is malformed, and the cache is re-marshalled from what Verify parsed
+// (payload and signatures only), so no spelling, escape or extra member can
+// put a credential on disk.
+func TestBundleCacheNeverHoldsCredentialForAnySpelling(t *testing.T) {
+	creds := &bundle.Credentials{AccessKeyID: "AKIAEXAMPLE", SecretAccessKey: "s3cr3t-value"}
+	pol := `{"allowlist":[{"domain":"a.example.com"}],"settings":{"secrets":{"backend":"aws","region":"us-east-1"}}}`
+	sidecar := `"credentials":{"accessKeyId":"AKIAEXAMPLE","secretAccessKey":"s3cr3t-value"}`
+	respell := func(name string) func(string) string {
+		return func(env string) string { return strings.Replace(env, `"credentials"`, `"`+name+`"`, 1) }
+	}
+	tests := []struct {
+		name   string
+		edit   func(env string) string
+		reject bool // Verify refuses it as malformed
+	}{
+		{"canonical", func(env string) string { return env }, false},
+		{"Credentials", respell("Credentials"), true},
+		{"CREDENTIALS", respell("CREDENTIALS"), true},
+		{"credentialS", respell("credentialS"), true},
+		{"long s fold", respell("credentiaL\u017f"), true},
+		// An escape that decodes to exactly "credentials" is the canonical name.
+		{"escaped exact name", respell(`cred\u0065ntials`), false},
+		{"duplicate credentials", func(env string) string {
+			return strings.Replace(env, `{"payload"`, `{`+sidecar+`,"payload"`, 1)
+		}, true},
+		{"case variant beside the sidecar", func(env string) string {
+			return strings.Replace(env, `{"payload"`, `{"Credentials":{"accessKeyId":"AKIAEXAMPLE","secretAccessKey":"s3cr3t-value"},"payload"`, 1)
+		}, true},
+		// An unknown member is ignored by Verify and must not be persisted.
+		{"secret in an unknown member", func(env string) string {
+			return strings.Replace(env, `{"payload"`, `{"x-credentials":{"accessKeyId":"AKIAEXAMPLE","secretAccessKey":"s3cr3t-value"},"payload"`, 1)
+		}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := newBundleEnv(t)
+			dir := e.withCache()
+			env := string(e.sign(e.bundle(1, pol), creds))
+			edited := tt.edit(env)
+			if tt.name != "canonical" && edited == env {
+				t.Fatal("the edit changed nothing")
+			}
+			e.cp.serve([]byte(edited), "c1")
+			err := e.rp.Pull()
+			if tt.reject {
+				var re *BundleRejectError
+				if !errors.As(err, &re) || re.Reason != bundle.Reason(bundle.ErrMalformed) {
+					t.Fatalf("pull = %v, want a malformed rejection", err)
+				}
+				if s := e.rp.Settings(); s != nil && s.Secrets != nil && s.Secrets.SecretAccessKey != "" {
+					t.Fatal("a rejected envelope's secret was applied in memory")
+				}
+			} else if err != nil {
+				t.Fatalf("pull: %v", err)
+			}
+			raw, err := os.ReadFile(BundleCachePath(dir))
+			if errors.Is(err, os.ErrNotExist) {
+				if !tt.reject {
+					t.Fatal("an accepted bundle was not cached")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.reject {
+				t.Fatal("a rejected envelope was cached")
+			}
+			for _, s := range []string{"s3cr3t-value", "AKIAEXAMPLE", "ccessKey"} {
+				if strings.Contains(strings.ToLower(string(raw)), strings.ToLower(s)) {
+					t.Fatalf("the cache file contains %q", s)
+				}
+			}
+			var members map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &members); err != nil {
+				t.Fatal(err)
+			}
+			if len(members) != 2 || members["payload"] == nil || members["signatures"] == nil {
+				t.Fatalf("cache members = %v, want exactly payload and signatures", keysOf(members))
+			}
+			rp, _ := e.restarted(dir, nil)
+			if _, err := rp.LoadCache(); err != nil {
+				t.Fatalf("the written cache does not load: %v", err)
+			}
+		})
+	}
+}
+
+func keysOf(m map[string]json.RawMessage) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}

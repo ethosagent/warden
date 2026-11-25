@@ -14,6 +14,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"sort"
 	"time"
@@ -123,6 +124,25 @@ type Verified struct {
 	// Credentials is the sidecar, present only when it matched the signed
 	// hash. Nil when the bundle carries none.
 	Credentials *Credentials
+
+	// payload (the base64url text, aliasing the verified bytes) and
+	// signatures are the envelope members Verify parsed, for
+	// WithoutCredentials.
+	payload    []byte
+	signatures []Signature
+}
+
+// WithoutCredentials returns the verified envelope re-marshalled in canonical
+// form with no credentials sidecar: only the payload and signatures that
+// Verify itself parsed, under the names Sign writes. It is what may be
+// persisted (the worker's last-known-good cache): no unknown member and no
+// secret can come along, whatever the received envelope looked like. Verify
+// accepts the result with Options.AllowMissingCredentials.
+func (v Verified) WithoutCredentials() ([]byte, error) {
+	if len(v.payload) == 0 || len(v.signatures) == 0 {
+		return nil, errors.New("bundle: not a verified envelope")
+	}
+	return json.Marshal(Envelope{Payload: string(v.payload), Signatures: v.signatures})
 }
 
 // contentSHA256 hashes what makes two bundles the same content: cpID, policy,
