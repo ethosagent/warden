@@ -46,14 +46,6 @@ func joinPending(parts ...[]Pending) []Pending {
 
 // pending is the list. Keep each ticket's block together.
 var pending = joinPending(
-	// W-P2-SECT-03: binding, cross-agent, issued-token lifetime.
-	pend(TicketBinding,
-		CoverToken("agent_disabled"), CoverToken("user_blocked"), CoverToken("group_not_allowed"),
-		CoverToken("scope_not_allowed"), CoverToken("session_revoked"),
-		// Identity reasons added by W-P2-WBND-02 (#112).
-		CoverIdentity("agent_unregistered"), CoverIdentity("agent_disabled"),
-		CoverIdentity("agent_mismatch"), CoverIdentity("cnf_mismatch"),
-	),
 	// W-P2-SECT-07: degraded and restart modes.
 	pend(TicketDegrade,
 		CoverIdentity("jwks_unavailable"),
@@ -63,3 +55,22 @@ var pending = joinPending(
 		CoverToken("session_store_unavailable"), CoverToken("event_store_unavailable"),
 	),
 )
+
+// Exclusion is an enum value the black-box suite cannot drive and says why: the
+// ticket that closes it names the unit tests that cover it. Unlike a Pending
+// entry it is final: the suite is complete with it.
+type Exclusion struct {
+	Item   string
+	Reason string
+}
+
+// exclusions lists the values no case covers by design. Every entry needs a
+// reason that names its covering tests.
+var exclusions = []Exclusion{{
+	Item: CoverIdentity("agent_disabled"),
+	Reason: "a disabled agent is refused by the agent kill switch (403 agent_disabled) before identity runs, " +
+		"and the gate flips ahead of the snapshot install in the same bundle apply (internal/worker/agentgate.go " +
+		"gatedEvaluator), so the binding's own agent_disabled reason is defence in depth that only a race " +
+		"between the two reaches; driving it needs a seam inside the applier. Covered by " +
+		"internal/proxy/identity_binding_test.go and internal/worker/binding_longpoll_test.go",
+}}

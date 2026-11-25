@@ -211,8 +211,14 @@ func (s *Stack) runCase(t testing.TB, c Case) {
 				if c.WantLog == "" {
 					t.Errorf("an Unverified case must pin its reason through WantLog")
 				}
-				if c.WantReason != "" && !strings.Contains(after.logs[before.logLen:], `"reason":"`+c.WantReason+`"`) {
-					t.Errorf("the logs written during the case do not carry reason %q", c.WantReason)
+				found := false
+				for _, line := range strings.Split(after.logs[before.logLen:], "\n") {
+					if strings.Contains(line, c.WantLog) && strings.Contains(line, `"reason":"`+c.WantReason+`"`) {
+						found = true
+					}
+				}
+				if !found {
+					t.Errorf("no log line written during the case carries both %q and reason %q", c.WantLog, c.WantReason)
 				}
 			} else if len(rows) != 1 || rows[0].Outcome != c.WantResult || rows[0].Reason != c.WantReason {
 				t.Errorf("new token_events rows = %+v, want exactly one with outcome %q reason %q", rows, c.WantResult, c.WantReason)
@@ -226,6 +232,11 @@ func (s *Stack) runCase(t testing.TB, c Case) {
 		}
 		if !contains(got, c.WantDeny) {
 			t.Errorf("new deny events carry reasons %v, want one with %q", got, c.WantDeny)
+		}
+		if c.Path == PathWorker {
+			if d := after.blocked - before.blocked; d != 1 {
+				t.Errorf("warden_blocked_total{reason=%q} rose by %v, want 1", c.WantDeny, d)
+			}
 		}
 	}
 	if c.WantAudit != "" {
@@ -259,6 +270,7 @@ type snap struct {
 	auditCount      int
 	logs            string
 	logLen          int
+	blocked         float64
 }
 
 type denyEvent struct{ Reason string }
@@ -289,6 +301,9 @@ func (s *Stack) snapshot(t testing.TB, w *Worker, c Case) snap {
 	if c.Path == PathToken && (c.WantResult != "" || c.WantReason != "" || c.Unverified) {
 		sn.tokenEvents = s.TokenEvents(t)
 		sn.tokenEventCount = len(sn.tokenEvents)
+	}
+	if c.WantDeny != "" && c.Path == PathWorker {
+		sn.blocked = s.Metric(t, w, "warden_blocked_total", map[string]string{"reason": c.WantDeny})
 	}
 	if c.WantDeny != "" {
 		for _, e := range s.DenyEvents(t, w) {
@@ -321,6 +336,9 @@ func validateCase(c Case) []string {
 	if c.WantStatus == 0 {
 		bad = append(bad, "WantStatus is not set")
 	}
+	if c.Unverified && (c.WantReason == "" || c.Path != PathToken) {
+		bad = append(bad, "Unverified needs Path token and a WantReason to read from the log line")
+	}
 	prefixes := map[string]Path{"identity.reason:": PathWorker, "token.reason:": PathToken, "bundle.reason:": PathBundle}
 	for _, cov := range c.Covers {
 		for prefix, path := range prefixes {
@@ -346,4 +364,14 @@ func validateCase(c Case) []string {
 		}
 	}
 	return bad
+}
+
+// Run1 runs one case built inline: base carries the expectations, name and
+// attack complete it. It is for a test that mixes an inline assertion with a
+// case and needs the same checks and leak invariant, without a package-level
+// case that the enum-completeness test would also see.
+func (s *Stack) Run1(t *testing.T, base Case, name string, attack func(t testing.TB, s *Stack) Observed) {
+	t.Helper()
+	base.Name, base.Attack, base.Covers = name, attack, nil
+	t.Run(name, func(t *testing.T) { s.runCase(t, base) })
 }
