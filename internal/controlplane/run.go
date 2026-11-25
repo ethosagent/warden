@@ -847,6 +847,18 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// Periodic re-read so external edits to the policy file propagate to workers.
 	srv.Start(ctx)
 
+	// API key expiry warnings: an hourly scan publishes api_key_expiring Findings
+	// (W-P2-APIK-05). Run waits for the loop before the state DB closes.
+	if apiKeyStore != nil {
+		eCtx, eCancel := context.WithCancel(ctx)
+		eDone := make(chan struct{})
+		go srv.runAPIKeyExpiry(eCtx, eDone)
+		defer func() {
+			eCancel()
+			<-eDone
+		}()
+	}
+
 	// Worker certificate revocations: pick up writes by the offline CLI within
 	// the 2 s data_version poll. Run waits for the loop before the state DB
 	// closes.

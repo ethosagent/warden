@@ -14,6 +14,7 @@ import (
 	"github.com/ethosagent/warden/internal/apikeys/adapters/sqlitestore"
 	"github.com/ethosagent/warden/internal/controlplane"
 	"github.com/ethosagent/warden/internal/cpstate"
+	"github.com/ethosagent/warden/internal/integration"
 	"github.com/ethosagent/warden/test/fakes"
 	"github.com/ethosagent/warden/test/harness"
 )
@@ -53,10 +54,15 @@ func apiKeyOfflineStore(t *testing.T, h *harness.H) *sqlitestore.SQLiteStore {
 
 func mintAPIKey(t *testing.T, st *sqlitestore.SQLiteStore, name string, scopes ...apikeys.Scope) (token, id string) {
 	t.Helper()
+	return mintAPIKeyTTL(t, st, name, 24*time.Hour, scopes...)
+}
+
+func mintAPIKeyTTL(t *testing.T, st *sqlitestore.SQLiteStore, name string, ttl time.Duration, scopes ...apikeys.Scope) (token, id string) {
+	t.Helper()
 	tok, k, err := st.Create(context.Background(), apikeys.CreateParams{
 		Name: name, OwnerIss: "https://idp.scenario", OwnerSub: apiKeyScenarioOwner, OwnerEmail: "owner@example.com",
 		OwnerGroups: []string{harness.ConsoleAdminGroup}, Scopes: scopes,
-		TTL: 24 * time.Hour, MaxTTL: 8760 * time.Hour, MaxActive: 25,
+		TTL: ttl, MaxTTL: 8760 * time.Hour, MaxActive: 25,
 	})
 	if err != nil {
 		t.Fatalf("mint %s: %v", name, err)
@@ -145,6 +151,138 @@ func apiKeyOfflineRevoke(t *testing.T, h *harness.H) {
 	}
 	if strings.Contains(h.Logs(), key) {
 		t.Fatal("the API key is in the control plane's logs")
+	}
+}
+
+// apiKeyCLIRevoke (W-P2-APIK-05): `warden control-plane api-key revoke` run in a
+// second process, here controlplane.RunAPIKeyRevoke on the live state dir, is
+// refused by the running control plane within one 2s poll of its Index. The CLI
+// uses the Store only (no Index, no Run), appends exactly one admin_audit row
+// with auth_method cli, and list shows the key without its secret.
+func apiKeyCLIRevoke(t *testing.T, h *harness.H) {
+	ctx := context.Background()
+	st := apiKeyOfflineStore(t, h)
+	key, id := mintAPIKey(t, st, "ci", "policy:read")
+	other, otherID := mintAPIKey(t, st, "other", "policy:read")
+	stateDir := h.AdminAuditStateDir()
+
+	pollUntil(h, "the control plane to load the new keys", func() bool {
+		a, _ := keyStatus(t, h, key, http.MethodGet, "/dashboard/api/policy", "")
+		b, _ := keyStatus(t, h, other, http.MethodGet, "/dashboard/api/policy", "")
+		return a == http.StatusOK && b == http.StatusOK
+	})
+	listed, err := controlplane.ListAPIKeysOffline(ctx, stateDir)
+	if err != nil || len(listed) != 2 {
+		t.Fatalf("offline list = %v, %v; want the two keys", listed, err)
+	}
+	for _, k := range listed {
+		if all := k.String() + k.OwnerEmail; strings.Contains(all, key) || strings.Contains(all, "wak_") {
+			t.Fatalf("offline list shows key material: %s", all)
+		}
+	}
+
+	// Let Index.Run re-arm its poll timer before the revoke (see apiKeyOfflineRevoke).
+	prev := -1
+	h.Eventually("the control plane's timers to settle", func() bool {
+		n := h.Clock().PendingTimers()
+		settled := n == prev
+		prev = n
+		time.Sleep(20 * time.Millisecond)
+		return settled
+	})
+	rows := len(h.AdminAuditRows())
+	res, err := controlplane.RunAPIKeyRevoke(ctx, stateDir, "", controlplane.APIKeyRevokeTarget{ID: id}, nil)
+	if err != nil || len(res.Revoked) != 1 || res.Revoked[0] != id || !res.Audited {
+		t.Fatalf("RunAPIKeyRevoke = %+v, %v", res, err)
+	}
+	h.Clock().Advance(apiKeyPoll)
+	h.Eventually("the control plane to refuse the CLI-revoked key within one poll", func() bool {
+		status, _ := keyStatus(t, h, key, http.MethodGet, "/dashboard/api/policy", "")
+		return status == http.StatusUnauthorized
+	})
+	if status, _ := keyStatus(t, h, other, http.MethodGet, "/dashboard/api/policy", ""); status != http.StatusOK {
+		t.Fatalf("an untouched key = %d, want 200", status)
+	}
+
+	all := h.AdminAuditRows()
+	if len(all) != rows+1 {
+		t.Fatalf("admin_audit has %d rows, want one new row for the revoke", len(all))
+	}
+	r := all[len(all)-1]
+	if r.AuthMethod != adminaudit.AuthMethodCLI || r.Action != "api_key.revoke" || r.Target != "api_keys" || r.TargetRef != "api_key:"+id {
+		t.Fatalf("audit row = %+v, want a cli api_key.revoke row for %s", r, id)
+	}
+	if k, err := st.Get(ctx, id); err != nil || !strings.HasPrefix(k.RevokedBy, "cli:") {
+		t.Fatalf("revoked_by = %q, %v; want cli:<os user>", k.RevokedBy, err)
+	}
+	if k, _ := st.Get(ctx, otherID); !k.RevokedAt.IsZero() {
+		t.Fatal("the CLI revoked a key it was not asked to")
+	}
+	if strings.Contains(h.Logs(), key) || strings.Contains(r.Details, key) {
+		t.Fatal("the API key is in the logs or the audit row")
+	}
+}
+
+// expiringAlerts returns the api_key_expiring alerts in the control plane's
+// alert store.
+func expiringAlerts(h *harness.H) (out []integration.Alert) {
+	for _, a := range h.Alerts() {
+		if strings.HasPrefix(a.DedupKey, "api_key_expiring:") {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// apiKeyExpiryWarning (W-P2-APIK-05): a key created behind the running control
+// plane's back that expires in 6 days becomes exactly one api_key_expiring alert
+// at the job's next hourly tick (proving Run starts the job on the control
+// plane's clock), later ticks do not re-deliver it, and the alert carries the
+// key id and owner but no key material.
+func apiKeyExpiryWarning(t *testing.T, h *harness.H) {
+	st := apiKeyOfflineStore(t, h)
+	tok, id := mintAPIKeyTTL(t, st, "ci", 6*24*time.Hour, "policy:read")
+
+	// The job's timer re-arms on its own goroutine: advance an hour at a time
+	// until the alert exists, never one big Advance.
+	h.Eventually("the hourly scan to raise the alert", func() bool {
+		if len(expiringAlerts(h)) > 0 {
+			return true
+		}
+		h.Clock().Advance(time.Hour)
+		return false
+	})
+	for i := 0; i < 5; i++ { // further ticks: nothing new
+		h.Clock().Advance(time.Hour)
+		time.Sleep(20 * time.Millisecond)
+	}
+	got := expiringAlerts(h)
+	if len(got) != 1 {
+		t.Fatalf("api_key_expiring alerts = %d, want exactly 1: %+v", len(got), got)
+	}
+	a := got[0]
+	if a.DedupKey != "api_key_expiring:"+id || a.Severity != integration.SevMedium || a.Count != 1 {
+		t.Fatalf("alert = %+v, want medium, count 1, dedup api_key_expiring:%s", a, id)
+	}
+	if !strings.Contains(string(a.Evidence), "key_id="+id) || !strings.Contains(string(a.Evidence), "owner@example.com") {
+		t.Errorf("evidence %q lacks the key id or owner email", a.Evidence)
+	}
+	if all := a.Summary + string(a.Evidence); strings.Contains(all, "wak_") || strings.Contains(all, tok) {
+		t.Fatalf("alert carries key material: %q", all)
+	}
+}
+
+// apiKeyExpiryOff: with console.apiKeys off the control plane runs no expiry
+// job, even when the database holds an expiring key.
+func apiKeyExpiryOff(t *testing.T, h *harness.H) {
+	st := apiKeyOfflineStore(t, h) // creates the table behind the control plane's back
+	mintAPIKeyTTL(t, st, "ci", 6*24*time.Hour, "policy:read")
+	for i := 0; i < 6; i++ {
+		h.Clock().Advance(time.Hour)
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := expiringAlerts(h); len(got) != 0 {
+		t.Fatalf("api_key_expiring alerts with api keys off = %+v, want none", got)
 	}
 }
 

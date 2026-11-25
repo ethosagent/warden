@@ -336,6 +336,14 @@ func methodNotAllowed(w http.ResponseWriter, allow ...string) {
 // field and its fixed reason are echoed; anything else stays server-side (the
 // control plane logs it).
 func writeAgentError(w http.ResponseWriter, err error) {
+	if writeHeld(w, err) {
+		return
+	}
+	var cerr *ChangeError
+	if errors.As(err, &cerr) {
+		writeChangeError(w, err)
+		return
+	}
 	switch {
 	case errors.Is(err, ErrAgentStateRequired):
 		writeError(w, http.StatusServiceUnavailable, "state_dir_required")
