@@ -206,22 +206,31 @@ func parseIfMatch(values []string) (int64, bool) {
 	return n, true
 }
 
+// writeHeld answers a *HeldForApproval with its 202 and reports whether err was
+// one. The block list and agent registry routes use it too (W-P2-APPR-08).
+func writeHeld(w http.ResponseWriter, err error) bool {
+	var held *HeldForApproval
+	if !errors.As(err, &held) {
+		return false
+	}
+	reasons := held.Reasons
+	if reasons == nil {
+		reasons = []ChangeReason{}
+	}
+	w.Header().Set("Location", changesPath+"/"+held.DraftID)
+	w.Header().Set("ETag", changeETag(held.Revision))
+	writeJSONStatus(w, http.StatusAccepted, heldResponse{
+		DraftID: held.DraftID, Revision: held.Revision, State: held.State, Widening: held.Widening, Reasons: reasons,
+	})
+	return true
+}
+
 // writeWriterError answers a versioned writer's error: 403 for a
 // *RoleRequiredError, 409 for a *ConflictError, 202 for a *HeldForApproval,
 // a *ChangeError's own status, else 400 with the error text
 // (the writers' validation errors).
 func writeWriterError(w http.ResponseWriter, err error) {
-	var held *HeldForApproval
-	if errors.As(err, &held) {
-		reasons := held.Reasons
-		if reasons == nil {
-			reasons = []ChangeReason{}
-		}
-		w.Header().Set("Location", changesPath+"/"+held.DraftID)
-		w.Header().Set("ETag", changeETag(held.Revision))
-		writeJSONStatus(w, http.StatusAccepted, heldResponse{
-			DraftID: held.DraftID, Revision: held.Revision, State: held.State, Widening: held.Widening, Reasons: reasons,
-		})
+	if writeHeld(w, err) {
 		return
 	}
 	var cerr *ChangeError

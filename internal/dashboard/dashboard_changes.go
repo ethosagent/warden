@@ -84,8 +84,11 @@ type ChangeReason struct {
 
 // ChangeDraftView is one draft without its document.
 type ChangeDraftView struct {
-	ID                string         `json:"id"`
-	Target            string         `json:"target"`
+	ID     string `json:"id"`
+	Target string `json:"target"`
+	// TargetRef names the entity of a target other than the policy: a block
+	// entry id, an agent id. Empty for the policy.
+	TargetRef         string         `json:"target_ref,omitempty"`
 	Revision          int            `json:"revision"`
 	BaseVersion       int64          `json:"base_version"`
 	State             string         `json:"state"`
@@ -146,6 +149,10 @@ type ChangeDraftDetail struct {
 
 // ChangeDiff is the structural diff of a draft's current revision against its
 // base version, with credential paths only as fingerprints.
+//
+// For a target other than the policy (W-P2-APPR-08) Diff is {current, proposed}:
+// the entity as it is now (null when it does not exist yet) and as the draft
+// would leave it, in the shape the detail's doc has.
 type ChangeDiff struct {
 	ID          string `json:"id"`
 	Revision    int    `json:"revision"`
