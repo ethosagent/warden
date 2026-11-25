@@ -34,6 +34,10 @@
 //	ControlPlaneClockSkew:        warden.controlplane.clock_skew_seconds gauge, no labels
 //	RecordWorkerCertRenewal:      warden.worker.cert_renewals.total{outcome}: ok, unauthorized, rate_limited, rejected, error
 //	RegisterWorkerCertExpiry:     warden.worker.cert_expiry_seconds gauge, no labels
+//	RecordBundleRejected(reason): warden.bundle.rejected.total{reason}: the twelve bundle rejection
+//	                              reasons and invalid_policy; any other value is recorded as "other"
+//	SetBundleState:               warden.bundle.seq, warden.bundle.age_seconds, warden.bundle.stale
+//	                              gauges, no labels (a kid is never a label)
 //	RecordSignInStarted(outcome): started, reused, rate_limited, issuer_unreachable
 //	RecordBlocklist*:             unlabelled (an entry count and a closed-session count)
 //
@@ -46,6 +50,7 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"sort"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -116,6 +121,10 @@ type Metrics struct {
 	blocklistCut   metric.Int64Counter
 	clockSkew      metric.Float64Gauge
 	certRenewals   metric.Int64Counter
+	bundleRejected metric.Int64Counter
+	bundleSeq      metric.Int64Gauge
+	bundleAge      metric.Float64Gauge
+	bundleStale    metric.Int64Gauge
 }
 
 // ShutdownFunc flushes and closes the meter provider. It is always non-nil; in
@@ -303,6 +312,31 @@ func newMetrics(provider *sdkmetric.MeterProvider, serviceVersion string) (*Metr
 		metric.WithDescription("Worker certificate renewal attempts by outcome (ok, unauthorized, rate_limited, rejected, error)."),
 	); err != nil {
 		return nil, fmt.Errorf("observability: worker cert renewals counter: %w", err)
+	}
+	if m.bundleRejected, err = meter.Int64Counter(
+		"warden.bundle.rejected.total",
+		metric.WithDescription("Signed policy bundles the worker rejected, by reason."),
+	); err != nil {
+		return nil, fmt.Errorf("observability: bundle rejected counter: %w", err)
+	}
+	if m.bundleSeq, err = meter.Int64Gauge(
+		"warden.bundle.seq",
+		metric.WithDescription("Seq of the signed bundle the worker enforces (0 before the first verified bundle)."),
+	); err != nil {
+		return nil, fmt.Errorf("observability: bundle seq gauge: %w", err)
+	}
+	if m.bundleAge, err = meter.Float64Gauge(
+		"warden.bundle.age_seconds",
+		metric.WithDescription("Seconds since the enforced signed bundle was issued."),
+		metric.WithUnit("s"),
+	); err != nil {
+		return nil, fmt.Errorf("observability: bundle age gauge: %w", err)
+	}
+	if m.bundleStale, err = meter.Int64Gauge(
+		"warden.bundle.stale",
+		metric.WithDescription("1 when the enforced signed bundle is past its expiry, else 0."),
+	); err != nil {
+		return nil, fmt.Errorf("observability: bundle stale gauge: %w", err)
 	}
 	if m.blocklistSize, err = meter.Int64Gauge(
 		"warden.blocklist.entries",
@@ -559,6 +593,56 @@ func (m *Metrics) RegisterWorkerCertExpiry(observe func() (seconds float64, ok b
 		return fmt.Errorf("observability: worker cert expiry gauge: %w", err)
 	}
 	return nil
+}
+
+// bundleRejectReasons is the allowlist of warden_bundle_rejected_total reasons:
+// the bundle.Reason values plus config.BundleReasonInvalidPolicy. It is spelled
+// out here (observability imports neither package); a test pins it to them.
+var bundleRejectReasons = setOf(
+	"malformed", "too_large", "unsupported_format", "unsigned", "unknown_kid",
+	"bad_signature", "issuer_mismatch", "credential_mismatch", "rollback",
+	"equivocation", "expired", "future", "invalid_policy",
+)
+
+// BundleRejectReasons returns the sorted allowlist of bundle rejection reasons
+// the counter accepts, for tests that pin it to the bundle package.
+func BundleRejectReasons() []string {
+	out := make([]string, 0, len(bundleRejectReasons))
+	for k := range bundleRejectReasons {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// RecordBundleRejected increments warden.bundle.rejected.total{reason}
+// (warden_bundle_rejected_total). reason is bounded (see bundleRejectReasons);
+// anything else is "other". Nil-safe.
+func (m *Metrics) RecordBundleRejected(reason string) {
+	if m == nil {
+		return
+	}
+	m.bundleRejected.Add(context.Background(), 1, metric.WithAttributes(
+		attribute.String("reason", boundedLabel(bundleRejectReasons, reason)),
+	))
+}
+
+// SetBundleState sets the signed-bundle gauges: warden.bundle.seq,
+// warden.bundle.age_seconds (age is clamped at 0) and warden.bundle.stale.
+// Call it with the applied bundle's state, so a rejected bundle leaves seq at
+// the one still enforced. Nil-safe.
+func (m *Metrics) SetBundleState(seq int64, age time.Duration, stale bool) {
+	if m == nil {
+		return
+	}
+	ctx := context.Background()
+	m.bundleSeq.Record(ctx, seq)
+	m.bundleAge.Record(ctx, max(age, 0).Seconds())
+	v := int64(0)
+	if stale {
+		v = 1
+	}
+	m.bundleStale.Record(ctx, v)
 }
 
 // RecordSignInStarted increments warden.identity.signin.started.total{outcome}.

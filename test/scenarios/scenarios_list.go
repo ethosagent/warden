@@ -395,6 +395,10 @@ var All = slices.Concat(
 		{Name: "workerca_revoke_api", Opts: workerCARevokeOpts(), Run: workerCARevokeAPI},
 		{Name: "workerca_revoke_cli", Opts: workerCARevokeOpts(), Run: workerCARevokeCLI},
 		{Name: "workerca_prune", Opts: workerCARevokeOpts(), Run: workerCAPrune},
+		// Enrollment token admin API (W-P2-WCA-08): an admin mints a wet_ token
+		// from the console, a worker enrolls once, and the token is never listed,
+		// audited or logged in plaintext. In-process only (CP state dir).
+		{Name: "workerca_enroll_admin", Opts: workerCAEnrollAdminOpts(), Run: workerCAEnrollAdmin},
 		{Name: "keys_disabled_creates_nothing", Opts: []harness.Option{harness.WithBackup()}, Run: keysDisabledCreatesNothing},
 		// Key rotation (W-P2-KEYS-06): rotate-key is refused while the control
 		// plane runs, rotates offline once it is stopped (signed handover, new
@@ -434,6 +438,10 @@ var All = slices.Concat(
 		{Name: "bundles_pinned_worker_unrelated_key_fails_closed", Opts: unrelatedPinsOpts(), Run: pinnedWorkerUnrelatedKeyFailsClosed},
 		{Name: "bundles_pinned_worker_expiry_deny", Opts: pinnedWorkerDenyOpts(), Run: pinnedWorkerExpiryDeny},
 		{Name: "bundles_pinned_worker_tampered_bundle", Opts: tamperedOpts(), Run: pinnedWorkerTamperedBundleKeepsLastKnownGood},
+		// Bundle state in the fleet view and the worker's metrics (W-P2-SBND-05):
+		// a pinned worker shows its bundle seq and pins and is not behind; a
+		// tampered bundle shows as a rejection reason with the seq unchanged.
+		{Name: "bundles_pinned_worker_fleet_state", Opts: tamperedOpts(), Run: pinnedWorkerFleetState},
 		// Warden credentials in agent egress (W-P2-APIK-06): a wak_ key or wwt_
 		// token in a request body is flagged as credentials only with
 		// dlp.wardenTokens on, and blocked only in enforce mode with a rule.
