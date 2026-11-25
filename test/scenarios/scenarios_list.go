@@ -373,6 +373,7 @@ var All = slices.Concat(
 		// renewal lineage rule, and --require-worker-certs. In-process only.
 		{Name: "workerca_cert_auth", Opts: workerCACertAuthOpts(), Run: workerCACertAuth},
 		{Name: "workerca_renew", Opts: workerCACertAuthOpts(), Run: workerCARenew},
+		{Name: "workerca_client", Opts: workerCACertAuthOpts(), Run: workerCAClient},
 		{Name: "workerca_strict_certs", Opts: workerCAStrictCertsOpts(), Run: workerCAStrictCerts},
 		// Worker certificate revocation (W-P2-WCA-05): the console route and the
 		// offline CLI cut a worker off (401 on every worker route and renew, held
