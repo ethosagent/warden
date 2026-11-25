@@ -30,6 +30,12 @@ type recipeService struct {
 	Environment map[string]*string         `json:"environment"`
 	Networks    map[string]json.RawMessage `json:"networks"`
 	NetworkMode string                     `json:"network_mode"`
+	Privileged  bool                       `json:"privileged"`
+	CapAdd      []string                   `json:"cap_add"`
+	ExtraHosts  json.RawMessage            `json:"extra_hosts"`
+	Pid         string                     `json:"pid"`
+	Ipc         string                     `json:"ipc"`
+	Devices     []json.RawMessage          `json:"devices"`
 	DependsOn   map[string]struct {
 		Condition string `json:"condition"`
 	} `json:"depends_on"`
@@ -75,18 +81,22 @@ func loadEnvFile(t *testing.T, path string) []string {
 // Code recipe, with the dev placeholders of deploy/compose/dex/.env.example and
 // the extra env, and returns the raw output and its parsed form. config needs no
 // daemon, only the compose plugin.
-func renderRecipe(t *testing.T, extraEnv ...string) ([]byte, recipeCompose) {
+func renderRecipe(t *testing.T, extraFiles []string, extraEnv ...string) ([]byte, recipeCompose) {
 	t.Helper()
 	if _, err := exec.LookPath("docker"); err != nil {
 		t.Fatal("BLOCKED: the recipe test renders the compose files with `docker compose config`; docker not on PATH")
 	}
 	root := repoRoot(t)
 	dir := filepath.Join(root, "deploy", "compose")
-	cmd := exec.Command("docker", "compose",
+	args := []string{"compose",
 		"-f", "docker-compose.control-plane.yml",
 		"-f", "docker-compose.identity.yml",
-		"-f", "docker-compose.claude-code.yml",
-		"config", "--format", "json")
+		"-f", "docker-compose.claude-code.yml"}
+	for _, f := range extraFiles {
+		args = append(args, "-f", f)
+	}
+	args = append(args, "config", "--format", "json")
+	cmd := exec.Command("docker", args...)
 	cmd.Dir = dir
 	// An explicit environment, not the process's: only what the docker CLI needs
 	// to run, so the render never depends on the caller's exported variables.
@@ -109,13 +119,17 @@ func renderRecipe(t *testing.T, extraEnv ...string) ([]byte, recipeCompose) {
 	return stdout.Bytes(), c
 }
 
+// realKeySentinel stands in for the operator's real Anthropic key: it must reach
+// the worker and no other service.
+const realKeySentinel = "sentinel-real-key-7f3a9c41d2"
+
 var digestPinned = regexp.MustCompile(`@sha256:[0-9a-f]{64}$`)
 
 // TestClaudeCodeRecipe pins the isolation shape of docker-compose.claude-code.yml:
 // the agent has one internal-only network and mounts nothing that holds identity
 // material, and the pieces that make the worker require a Warden token are wired.
 func TestClaudeCodeRecipe(t *testing.T) {
-	raw, c := renderRecipe(t, "ANTHROPIC_API_KEY=x")
+	raw, c := renderRecipe(t, nil, "ANTHROPIC_API_KEY="+realKeySentinel)
 	agent, ok := c.Services["claude-code"]
 	if !ok {
 		t.Fatal("service claude-code missing")
@@ -166,28 +180,57 @@ func TestClaudeCodeRecipe(t *testing.T) {
 		if len(identityVols) == 0 {
 			t.Fatal("warden-identity mounts no volume; the test would prove nothing")
 		}
+		wantVols := map[string]bool{"claude-code-home": true, "claude-code-workspace": true}
+		gotVols := map[string]bool{}
+		var caBinds int
 		for _, v := range agent.Volumes {
-			if v.Type == "volume" && (identityVols[v.Source] || strings.Contains(v.Source, "identity")) {
-				t.Errorf("claude-code mounts identity volume %q", v.Source)
-			}
 			switch v.Type {
 			case "bind":
-				if strings.Contains(v.Source, "proxy-ca.key") || strings.HasSuffix(v.Source, "/certs") || strings.Contains(v.Source, ".key") {
-					t.Errorf("claude-code bind-mounts %q: it may mount the CA certificate only", v.Source)
+				if !strings.HasSuffix(v.Source, "/certs/proxy-ca.crt") || v.Target != "/etc/warden/certs/proxy-ca.crt" {
+					t.Errorf("claude-code bind-mounts %q at %q: only the CA certificate is allowed", v.Source, v.Target)
 				}
-				if !strings.HasSuffix(v.Source, "/certs/proxy-ca.crt") {
-					t.Errorf("claude-code bind-mounts unexpected host path %q", v.Source)
-				}
+				caBinds++
 			case "volume":
+				gotVols[v.Source] = true
+				if identityVols[v.Source] {
+					t.Errorf("claude-code mounts the sidecar's volume %q", v.Source)
+				}
+				if !wantVols[v.Source] {
+					t.Errorf("claude-code mounts volume %q, not in the allowlist", v.Source)
+				}
 			default:
 				t.Errorf("claude-code mounts %s %q", v.Type, v.Source)
 			}
+		}
+		if caBinds != 1 || len(gotVols) != len(wantVols) {
+			t.Errorf("claude-code mounts %d CA binds and volumes %v, want 1 and exactly %v", caBinds, gotVols, wantVols)
 		}
 		// The sidecar gets the CA certificate, never the CA key.
 		for _, v := range c.Services["warden-identity"].Volumes {
 			if v.Type == "bind" && !strings.HasSuffix(v.Source, "/certs/proxy-ca.crt") {
 				t.Errorf("warden-identity bind-mounts %q", v.Source)
 			}
+		}
+	})
+
+	t.Run("agent has no privilege or side doors", func(t *testing.T) {
+		empty := func(name string, raw json.RawMessage) {
+			if r := strings.TrimSpace(string(raw)); r != "" && r != "null" && r != "{}" && r != "[]" {
+				t.Errorf("claude-code sets %s = %s", name, r)
+			}
+		}
+		if agent.Privileged {
+			t.Error("claude-code is privileged")
+		}
+		if len(agent.CapAdd) != 0 {
+			t.Errorf("claude-code cap_add = %v", agent.CapAdd)
+		}
+		empty("extra_hosts", agent.ExtraHosts)
+		if agent.Pid != "" || agent.Ipc != "" {
+			t.Errorf("claude-code pid = %q ipc = %q, want both unset", agent.Pid, agent.Ipc)
+		}
+		if len(agent.Devices) != 0 {
+			t.Errorf("claude-code devices = %v", agent.Devices)
 		}
 	})
 
@@ -228,13 +271,20 @@ func TestClaudeCodeRecipe(t *testing.T) {
 			}
 		}
 		// The real key reaches the worker only, through the caller's environment.
-		if got := c.Services["warden"].env("ANTHROPIC_API_KEY"); got != "x" {
+		if got := c.Services["warden"].env("ANTHROPIC_API_KEY"); got != realKeySentinel {
 			t.Errorf("worker ANTHROPIC_API_KEY = %q, want the caller's value", got)
 		}
 		for name, s := range c.Services {
-			if name != "warden" && strings.Contains(s.env("ANTHROPIC_API_KEY"), "x") && s.env("ANTHROPIC_API_KEY") == "x" {
-				t.Errorf("service %s receives the real ANTHROPIC_API_KEY", name)
+			if name == "warden" {
+				continue
 			}
+			sj, _ := json.Marshal(s)
+			if bytes.Contains(sj, []byte(realKeySentinel)) {
+				t.Errorf("service %s carries the real ANTHROPIC_API_KEY", name)
+			}
+		}
+		if n := bytes.Count(raw, []byte(realKeySentinel)); n != 1 {
+			t.Errorf("the real key appears %d times in the rendered config, want once (the worker)", n)
 		}
 	})
 
@@ -274,24 +324,19 @@ func TestClaudeCodeRecipe(t *testing.T) {
 		}
 	})
 
-	t.Run("sidecar listener is not anonymous", func(t *testing.T) {
-		sc := c.Services["warden-identity"]
-		listensWide := false
-		for _, a := range sc.Command {
-			if strings.HasPrefix(a, "--listen=0.0.0.0") {
-				listensWide = true
-			}
+	t.Run("sidecar listener is private and not anonymous", func(t *testing.T) {
+		checkSidecarListener(t, c.Services["warden-identity"])
+	})
+
+	t.Run("subject-token override keeps the listener rules", func(t *testing.T) {
+		_, o := renderRecipe(t, []string{"docker-compose.claude-code.subject-token.yml"}, "ANTHROPIC_API_KEY="+realKeySentinel)
+		sc := o.Services["warden-identity"]
+		if !contains(sc.Command, "--subject-token-file=/data/subject-token") {
+			t.Errorf("override sidecar command lacks --subject-token-file: %v", sc.Command)
 		}
-		// A non-loopback listener on a network shared with other services must
-		// demand a credential (carry-forward from the #118 review).
-		if listensWide && !contains(sc.Command, "--client-credential-env=WARDEN_FORWARDER_CREDENTIAL") {
-			t.Error("warden-identity listens on 0.0.0.0 without --client-credential-env")
-		}
-		if sc.env("WARDEN_FORWARDER_CREDENTIAL") == "" {
-			t.Error("warden-identity has no forwarder credential value")
-		}
-		if !contains(sc.Command, "--agent-id=claude-code") || !contains(sc.Command, "--worker=warden:8080") {
-			t.Errorf("warden-identity command = %v", sc.Command)
+		checkSidecarListener(t, sc)
+		if len(o.Services["claude-code"].Networks) != 1 {
+			t.Error("override changed the agent's networks")
 		}
 	})
 
@@ -417,4 +462,35 @@ func keysOf[V any](m map[string]V) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// checkSidecarListener asserts the forwarder listens on its static address on
+// the agent network (never 0.0.0.0, so cp-net cannot reach it) and still demands
+// the client credential (carry-forward from the #118 review).
+func checkSidecarListener(t *testing.T, sc recipeService) {
+	t.Helper()
+	var att struct {
+		IPv4 string `json:"ipv4_address"`
+	}
+	if err := json.Unmarshal(sc.Networks["claude-code-internal"], &att); err != nil || att.IPv4 == "" {
+		t.Fatalf("warden-identity has no static address on claude-code-internal: %v", err)
+	}
+	want := "--listen=" + att.IPv4 + ":3128"
+	if !contains(sc.Command, want) {
+		t.Errorf("warden-identity command lacks %s: %v", want, sc.Command)
+	}
+	for _, a := range sc.Command {
+		if strings.HasPrefix(a, "--listen=0.0.0.0") || strings.HasPrefix(a, "--listen=:") || strings.HasPrefix(a, "--listen=[::]") {
+			t.Errorf("warden-identity listens on every interface: %s", a)
+		}
+	}
+	if !contains(sc.Command, "--client-credential-env=WARDEN_FORWARDER_CREDENTIAL") {
+		t.Error("warden-identity lacks --client-credential-env")
+	}
+	if sc.env("WARDEN_FORWARDER_CREDENTIAL") == "" {
+		t.Error("warden-identity has no forwarder credential value")
+	}
+	if !contains(sc.Command, "--agent-id=claude-code") || !contains(sc.Command, "--worker=warden:8080") {
+		t.Errorf("warden-identity command = %v", sc.Command)
+	}
 }

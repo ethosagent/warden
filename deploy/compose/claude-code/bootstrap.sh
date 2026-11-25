@@ -15,29 +15,42 @@ BUNDLE=/var/tmp/bundle-jwks.json
 STATE=/cp-data
 CFG=/etc/warden/config.yaml
 
-# 1. Worker token for the recipe's worker (register-only: same name and value is
-#    a no-op). The value comes from the environment, never argv.
+# 1. Worker token for the recipe's worker (same name and value is a no-op). The
+#    value comes from the environment, never argv. Changing
+#    WARDEN_CLAUDE_CODE_WORKER_TOKEN later makes this step fail (same name,
+#    different value) and so the whole bootstrap: the stack fails closed instead of
+#    running two tokens. Rotate it with `warden control-plane token revoke/create`.
 warden control-plane token create --from-env WARDEN_CLAUDE_CODE_WORKER_TOKEN \
 	--name claude-code --proxy-id claude-code --state-dir "$STATE"
 
-# 2. Agent key: enroll only when the key is missing. A key without its public
-#    JWK file is a crash between the two writes; it was never registered, so it
-#    is replaced.
-if [ ! -f "$KEY" ]; then
-	warden identity enroll --agent-id "$AGENT_ID" --key-file "$KEY" >"$JWK.tmp"
-	mv "$JWK.tmp" "$JWK"
-elif [ ! -f "$JWK" ]; then
+# 2. Is the agent registered? Exact match on the id field of the JSON listing.
+registered() {
+	warden control-plane agent list --json --state-dir "$STATE" | grep -q "\"id\": \"$AGENT_ID\","
+}
+
+# 3. Agent key: enroll only when the key is missing. A key whose public JWK file
+#    is gone is replaced ONLY while the agent is unregistered (nothing trusts the
+#    old key yet). Once registered, replacing the key would leave the registry
+#    holding a key the sidecar no longer has (every token fails cnf_mismatch), so
+#    stop and say how to recover instead.
+if [ ! -f "$KEY" ] || [ ! -f "$JWK" ]; then
+	if registered; then
+		echo "bootstrap: agent $AGENT_ID is registered but its key or public JWK is missing from the sidecar volume." >&2
+		echo "bootstrap: recover with a NEW key: delete the agent (or run 'warden control-plane agent update' with the new JWK)," >&2
+		echo "bootstrap: remove the volume identity-claude-code, then run the bootstrap again. See docs/recipes/claude-code.md." >&2
+		exit 1
+	fi
 	warden identity enroll --agent-id "$AGENT_ID" --key-file "$KEY" --force >"$JWK.tmp"
 	mv "$JWK.tmp" "$JWK"
 fi
 
-# 3. Register the agent only when the registry does not hold it.
-if ! warden control-plane agent list --state-dir "$STATE" | awk 'NR > 1 { print $1 }' | grep -qx "$AGENT_ID"; then
+# 4. Register the agent only when the registry does not hold it.
+if ! registered; then
 	warden control-plane agent register --id "$AGENT_ID" --display-name "Claude Code" \
 		--jwk-file "$JWK" --groups eng --state-dir "$STATE"
 fi
 
-# 4. Export the bundle JWKS the worker pins. The control plane creates its keys
+# 5. Export the bundle JWKS the worker pins. The control plane creates its keys
 #    on first start, so wait for them (up to about 3 minutes). Written through a
 #    temp file so the worker never sees a partial document.
 i=0

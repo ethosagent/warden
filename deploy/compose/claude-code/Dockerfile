@@ -11,11 +11,29 @@
 FROM node:24.11.1-bookworm-slim@sha256:48abc13a19400ca3985071e287bd405a1d99306770eb81d61202fb6b65cf0b57
 
 # Exact version, at least two weeks old at the time of pinning (published
-# 2026-11-10). npm resolves the matching native binary package for this
-# platform from the optionalDependencies of this exact version.
+# 2026-11-10). The packages are fetched with `npm pack` and checked against the
+# registry's published dist.integrity (sha512) before anything is installed; the
+# native binary comes from the platform package of the same exact version, which
+# is pinned the same way (one value per CPU architecture).
+ARG TARGETARCH
 ARG CLAUDE_CODE_VERSION=2.1.322
-RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
- && npm cache clean --force
+ARG CLAUDE_CODE_INTEGRITY=sha512-oP7oW4vM5DREWfL1jn4JSGlmLcrJ5QmppgADrVNJBUPiC1mQ5YvRrke0on+YZ/3QhKIaCJtdr6jPvehcAQIHLQ==
+ARG CLAUDE_CODE_INTEGRITY_AMD64=sha512-0DoaNAXLWCYYIGachWBCkTUsS8dOOgvk4R2fFKdrLejO9XlRTwaWUMD9ONdDmv0csdpwxj4qLUN6zWMaG2Sz6g==
+ARG CLAUDE_CODE_INTEGRITY_ARM64=sha512-YYNp1op87WWcBEE6jC1neOjMDPdn4Iy+kUHyFcI1GsLl4IwH7EjZlwVKcpsZqVbE0IXEFaOldmyOHC1y3j18Ag==
+RUN set -eu; \
+    case "${TARGETARCH:-amd64}" in \
+      amd64) plat=linux-x64;   want_plat="$CLAUDE_CODE_INTEGRITY_AMD64" ;; \
+      arm64) plat=linux-arm64; want_plat="$CLAUDE_CODE_INTEGRITY_ARM64" ;; \
+      *) echo "unsupported arch ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    mkdir /tmp/cc && cd /tmp/cc; \
+    npm pack "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" "@anthropic-ai/claude-code-${plat}@${CLAUDE_CODE_VERSION}" >/dev/null; \
+    check() { got="sha512-$(node -e 'process.stdout.write(require("crypto").createHash("sha512").update(require("fs").readFileSync(process.argv[1])).digest("base64"))' "$1")"; \
+              [ "$got" = "$2" ] || { echo "integrity mismatch for $1" >&2; exit 1; }; }; \
+    check "anthropic-ai-claude-code-${CLAUDE_CODE_VERSION}.tgz" "$CLAUDE_CODE_INTEGRITY"; \
+    check "anthropic-ai-claude-code-${plat}-${CLAUDE_CODE_VERSION}.tgz" "$want_plat"; \
+    npm install -g --no-audit --no-fund "./anthropic-ai-claude-code-${CLAUDE_CODE_VERSION}.tgz" "./anthropic-ai-claude-code-${plat}-${CLAUDE_CODE_VERSION}.tgz"; \
+    cd /; rm -rf /tmp/cc; npm cache clean --force
 
 # curl for the isolation checks in docs/recipes/claude-code.md (and the proof script).
 RUN apt-get update \

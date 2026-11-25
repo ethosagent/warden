@@ -8,7 +8,7 @@ services:
       - identity
       - forward
       - "--agent-id=claude-code"
-      - "--listen=0.0.0.0:3128"
+      - "--listen=172.29.119.2:3128"
       - "--worker=warden:8080"
       - "--client-credential-env=WARDEN_FORWARDER_CREDENTIAL"
       - "--subject-token-file=/data/subject-token"

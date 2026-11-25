@@ -140,11 +140,11 @@ services:
   # The sidecar: holds the agent key and the user's identity cache (volume
   # identity-claude-code, which the agent never mounts), exchanges them for a
   # Warden token at the control plane and injects it into every CONNECT it
-  # forwards to the worker. It listens on both networks, so the listener demands
-  # a credential (--client-credential-env): an anonymous listener on cp-net would
-  # hand any container there (Dex, the other workers) the user's identity. The
+  # forwards to the worker. It listens on the agent network address only and, as
+  # defence in depth, demands a credential (--client-credential-env): an anonymous
+  # listener would hand any peer that reaches it the user's identity. The
   # WARDEN_IDENTITY_* variables are also what `identity login` reads when run as
-  # `docker compose run --rm warden-identity identity login`.
+  # `docker compose exec warden-identity warden identity login`.
   warden-identity:
     build: *warden-build
     image: warden-claude-code:local
@@ -153,7 +153,12 @@ services:
         condition: service_completed_successfully
       warden:
         condition: service_healthy
-    networks: [claude-code-internal, cp-net]
+    networks:
+      claude-code-internal:
+        # Static address so the forwarder can listen on the agent network only:
+        # a listener on 0.0.0.0 would also be reachable from cp-net.
+        ipv4_address: 172.29.119.2
+      cp-net: {}
     environment:
       - WARDEN_FORWARDER_CREDENTIAL=${WARDEN_FORWARDER_CREDENTIAL:-dev-only-forwarder-credential-change-me}
       - WARDEN_IDENTITY_ISSUER=http://localhost:5556/dex
@@ -172,7 +177,7 @@ services:
       - identity
       - forward
       - "--agent-id=claude-code"
-      - "--listen=0.0.0.0:3128"
+      - "--listen=172.29.119.2:3128"
       - "--worker=warden:8080"
       - "--client-credential-env=WARDEN_FORWARDER_CREDENTIAL"
 
@@ -208,6 +213,9 @@ networks:
   # The agent's only network: no default route, no host port.
   claude-code-internal:
     internal: true
+    ipam:
+      config:
+        - subnet: 172.29.119.0/24   # change it (and the sidecar's address) if it collides with a host network
 
 volumes:
   # Sidecar state: agent key, public JWK, identity cache. Never mounted by the agent.

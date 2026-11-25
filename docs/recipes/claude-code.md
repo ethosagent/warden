@@ -33,7 +33,8 @@ control-plane ◄──── policy, bundles ──── warden (worker, requi
 | `warden` | the worker: `warden run --agent-id claude-code`, identity `require`, signed bundles pinned, holds the real key | `cp-net`, `egress` |
 | `control-plane` | serves policy as signed bundles, runs the token endpoint | `cp-net` |
 | `identity-bootstrap` | one-shot: registers the worker token, enrolls the agent key, registers the agent, exports the bundle keys | none |
-| `dex`, `ldap` | the dev identity provider and its seeded users | `cp-net`, `idp-net` |
+| `dex` | the dev identity provider | `cp-net`, `idp-net` |
+| `ldap` | the seeded users behind Dex | `idp-net` only |
 
 `claude-code-internal` is `internal: true`: Docker gives it no route to the internet,
 the control plane, Dex or LDAP. The worker is deliberately **not** on it, so the agent
@@ -45,8 +46,11 @@ token that names a user, the agent `claude-code` and a registered key is refused
 
 ## Prerequisites
 
-- Docker with Compose v2.24 or later and a free `127.0.0.1:5556`, `:7070`, `:9091`,
-  `:9092` and `:9094`.
+- Docker Engine 26 or later with Compose v2.24 or later. Older engines forward external
+  DNS lookups for containers attached only to `internal: true` networks, which is a
+  DNS-tunnel exfiltration path out of the agent; Engine 26 closed it. Free host ports: `127.0.0.1:5556`, `:7070`, `:9091`,
+  `:9092` and `:9094`. The recipe also uses the subnet `172.29.119.0/24` for `claude-code-internal`
+  (change it in the compose file, with the sidecar's address, if it collides).
 - This repository checked out: the Warden services build from its `Dockerfile`,
   because the published `ethosagent/warden:0.3.0` image has no `identity forward`,
   `identity enroll` or `control-plane agent` commands.
@@ -65,8 +69,12 @@ host user, which the container's `warden` user (uid 100) cannot read, so for thi
 stack make it readable:
 
 ```sh
-chmod 644 deploy/compose/certs/proxy-ca.key   # dev only; real deployments mount the key as a secret
+sudo chown 100:101 deploy/compose/certs/proxy-ca.key   # the container's warden user; keeps mode 0600
 ```
+
+If you cannot use `sudo`, `chmod 644 deploy/compose/certs/proxy-ca.key` works as a
+**dev-only** fallback (any local user can then read the CA key). Real deployments mount
+the key as a secret.
 
 ## 2. Settings
 
@@ -83,7 +91,7 @@ export ANTHROPIC_API_KEY=                            # real key: worker only; em
 |---|---|---|
 | `ANTHROPIC_API_KEY` | empty | the worker only. The agent always gets `anthropic_secret_001`. |
 | `WARDEN_CLAUDE_CODE_WORKER_TOKEN` | dev placeholder | the worker's own `wwt_` token, registered by `identity-bootstrap` and bound to proxy id `claude-code`. Generate one with `echo wwt_$(head -c32 /dev/urandom \| base32 \| tr -d = \| tr A-Z a-z \| head -c52)`. |
-| `WARDEN_FORWARDER_CREDENTIAL` | dev placeholder | a password the agent must send to the sidecar (letters and digits only; it sits in a URL). It gates the listener, which is on two networks; it is not an identity or a vendor key. |
+| `WARDEN_FORWARDER_CREDENTIAL` | dev placeholder | a password the agent must send to the sidecar (URL-safe: no `@`, `:` or `/`). It gates the listener as defence in depth; it is not an identity or a vendor key. **Change it outside a laptop.** |
 | `WARDEN_CP_ADMIN_TOKEN`, `WARDEN_ADMIN_TOKEN` | dev placeholders | dashboard writes on the control plane and the worker. |
 
 ## 3. Bring it up
@@ -111,10 +119,21 @@ Claude Code, so allow a few minutes.
    bundle` into a volume the worker mounts read-only, which is how the worker pins
    them (`controlPlane.bundleKeysFile`).
 
-Running `up -d` again re-runs the bootstrap and changes nothing.
+Running `up -d` again re-runs the bootstrap and changes nothing. Two failure cases are
+deliberate:
 
-**Right after the first start, Warden-token exchange fails for a few minutes** (about
-three to four in a clean run). The control plane creates its first token key and holds
+- If you later change `WARDEN_CLAUDE_CODE_WORKER_TOKEN`, step 1 fails (same name,
+  different value) and the stack stays down rather than running with two tokens. Rotate
+  it with `warden control-plane token revoke` and `create`, then restart the worker.
+- If the agent is registered but its key file (or public JWK) is gone from the sidecar
+  volume, the bootstrap stops with instructions instead of enrolling a new key: a new
+  key the registry does not hold would make every token fail with `cnf_mismatch`. Recover
+  by registering the new key (`warden control-plane agent update`), or by deleting the
+  agent and the volume `identity-claude-code` and running `up` again.
+
+**Right after the first start, Warden-token exchange fails for a few minutes** (the
+publish window is two minutes plus the policy long-poll cycles that carry the key to the
+worker; three to four minutes in a clean run). The control plane creates its first token key and holds
 it back until every worker could have picked it up (`signer_unavailable`,
 `Retry-After`). The sidecar keeps retrying; a request in that window gets `503` from
 the sidecar (reason `cp_unreachable` in its log) and works on a retry. This happens
@@ -131,8 +150,11 @@ request names them.
 docker compose -f deploy/compose/docker-compose.control-plane.yml \
   -f deploy/compose/docker-compose.identity.yml \
   -f deploy/compose/docker-compose.claude-code.yml \
-  run --rm warden-identity identity login
+  exec warden-identity warden identity login
 ```
+
+(`exec` into the running sidecar: it has a fixed address on the agent network, so a second
+`run` container could not start beside it.)
 
 It prints a URL and a code; open it in a browser, sign in (the dev users are `alice`,
 `bob`, `carol`, `dave`; see `deploy/compose/dex/README.md`) and the login is cached on
@@ -153,10 +175,15 @@ put it on the sidecar's volume without passing it through a command line:
 COMPOSE="docker compose -f deploy/compose/docker-compose.control-plane.yml \
   -f deploy/compose/docker-compose.identity.yml \
   -f deploy/compose/docker-compose.claude-code.yml"
-scripts/dex-token.sh alice --raw | $COMPOSE run --rm -T --no-deps --entrypoint sh warden-identity \
-  -c 'umask 077; cat > /data/subject-token'
-$COMPOSE -f deploy/compose/docker-compose.claude-code.subject-token.yml up -d warden-identity
+scripts/dex-token.sh alice --raw | $COMPOSE exec -T warden-identity \
+  sh -c 'umask 077; cat > /data/subject-token'
+COMPOSE="$COMPOSE -f deploy/compose/docker-compose.claude-code.subject-token.yml"
+$COMPOSE up -d warden-identity
 ```
+
+Keep the four-file `$COMPOSE` from here on. A later `up -d` without the fourth `-f`
+recreates the sidecar without `--subject-token-file`, and it then answers
+`login_required`.
 
 `docker-compose.claude-code.subject-token.yml` only adds `--subject-token-file
 /data/subject-token` to the sidecar's command. The Dex ID token lives one hour
@@ -202,10 +229,16 @@ across workers:
 
 ```sh
 curl -ks -H "Authorization: Bearer $WARDEN_CP_ADMIN_TOKEN" \
-  'https://localhost:7070/dashboard/api/traffic?user=alice@example.test&act=claude-code'
+  'https://localhost:7070/dashboard/api/traffic?user=alice@example.org&act=claude-code'
 ```
 
-(The seeded users' emails are in `deploy/compose/dex/seed.ldif`.) With only the
+(The seeded users' emails, `alice@example.org` and so on, are in
+`deploy/compose/dex/seed.ldif`.) **Manual step, not verified end to end:** the worker
+log lines and `identity_status` were checked on a live stack, but the control-plane
+traffic query was not (it returned an empty list when run immediately after the
+request). Workers push events to the control plane on an interval, so wait a minute
+and retry; if it stays empty, read the same fields from the worker's own dashboard at
+`http://localhost:9094/dashboard/`. With only the
 placeholder the upstream `response_status` is 401. No token, user token, agent key or
 request body is logged.
 
@@ -234,7 +267,7 @@ needs `up -d --force-recreate`.
 |---|---|---|
 | `unbound_token` | an IdP (Dex) token was sent, not a Warden token | the sidecar must run with `--agent-id`; do not point the agent at the worker directly |
 | `none` | no token | the request did not go through the sidecar |
-| `agent_unregistered` | the worker's agent is not in the bundle it holds | `identity-bootstrap` failed or the worker has not taken the next bundle (a few seconds); `docker compose run --rm --no-deps --entrypoint warden control-plane control-plane agent list --state-dir /data` |
+| `agent_unregistered` | the worker's agent is not in the bundle it holds | `identity-bootstrap` failed or the worker has not taken the next bundle (a few seconds); `$COMPOSE run --rm --no-deps --entrypoint warden identity-bootstrap control-plane agent list --state-dir /cp-data` |
 | `agent_disabled` / `agent_mismatch` / `cnf_mismatch` | the agent is disabled, or the token is for another agent or key | enable the agent; re-enroll and register the key the sidecar holds |
 | `jwks_unavailable` | the worker has no verified bundle yet | wait for the first pull; check `controlPlane.bundleKeysFile` and the worker log for `bundle` warnings |
 | `expired` | the token expired and was not refreshed | check the clocks (`warden_controlplane_clock_skew_seconds`) |
@@ -246,12 +279,12 @@ needs `up -d --force-recreate`.
 | sidecar | `login_required` | no usable user login; see step 4 |
 | sidecar | `cp_unreachable` | the token endpoint did not answer; check `docker compose logs control-plane` |
 | sidecar | `exchange_denied` | the control plane refused the exchange: the user is not in a group the agent allows (`--groups eng`), the agent is disabled or unregistered, the ID token's client is not in `tokenService.allowedAZP`, or the token is expired |
-| control plane | `signer_unavailable` | the first token key is still in its publish window (about two minutes, once), or the signed bundle that carries it is not served yet |
+| control plane | `signer_unavailable` | the first token key is still in its publish window (a few minutes, once: two minutes of publish window plus the time to reach the worker), or the signed bundle that carries it is not served yet |
 | control plane | `temporarily_unavailable` (`Retry-After`) | transient; retry |
 
 **`HTTPS_PROXY` rejected, or the forwarder answers `407`.** The agent must send the
 forwarder credential: `HTTPS_PROXY=http://wx:<WARDEN_FORWARDER_CREDENTIAL>@warden-identity:3128`.
-A credential with `@`, `:` or `/` in it breaks the URL; use letters and digits.
+A credential with `@`, `:` or `/` in it breaks the URL; use URL-safe characters (letters, digits, `-`, `_`).
 
 **Claude Code hangs on start.** `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` keeps it
 from calling telemetry and update hosts that the policy denies; if you remove it,
@@ -285,9 +318,9 @@ What the recipe stops:
   the agent never mounts. The agent can still *use* the forwarder while it runs: it
   can make allowed calls as the logged-in user, which is the point, and is bounded by
   the policy, the token lifetime (15 minutes) and the user's group membership.
-- **A neighbour on `cp-net` cannot borrow the user's identity.** The sidecar's listener
-  is on `cp-net` too, so it demands the forwarder credential; Dex, LDAP and other
-  workers do not have it.
+- **A neighbour on `cp-net` cannot borrow the user's identity.** The sidecar listens on
+  its address on `claude-code-internal` only, not on `cp-net`, and it also demands the
+  forwarder credential; Dex and other workers have neither a route nor the credential.
 - **A stolen user token is not enough.** The worker refuses an IdP token, and a Warden
   token is bound to this agent and its registered key.
 
