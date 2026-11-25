@@ -421,6 +421,22 @@
   .ph-diff ul { list-style:none; margin:6px 0 12px; padding:0; }
   .ph-diff li { padding:6px 0; border-top:1px solid var(--border); font-size:12px; }
   .ph-diff .mono { word-break:break-all; }
+  /* ---------- Changes (W-P2-APPR-05) ---------- */
+  .ch-row { cursor:pointer; }
+  .ch-row:hover, .ch-row.sel { background:var(--surface-2); }
+  .ch-sec { margin-top:16px; }
+  .ch-sec h4 { margin:0 0 6px; }
+  .ch-sec ul { list-style:none; margin:6px 0 12px; padding:0; }
+  .ch-sec li { padding:6px 0; border-top:1px solid var(--border); font-size:12.5px; }
+  .ch-facts { display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:4px 16px; }
+  .ch-fact { display:flex; gap:8px; font-size:12.5px; align-items:center; }
+  .ch-cols { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  .ch-message { margin-top:10px; font-size:13px; }
+  .ch-warn { color:var(--amber); }
+  .ch-actions { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:10px; }
+  .ch-ack { display:block; margin-top:10px; font-size:12.5px; }
+  #ch-comment { width:100%; box-sizing:border-box; background:var(--surface-2); border:1px solid var(--border); color:var(--text);
+    padding:7px 11px; border-radius:9px; font:inherit; font-size:13px; }
   #policyMsgDialog { background:var(--surface); color:var(--text); border:1px solid var(--border); border-radius:var(--radius);
     padding:18px; width:min(460px,92vw); box-shadow:var(--shadow); }
   #policyMsgDialog::backdrop { background:rgba(0,0,0,.55); }
@@ -430,6 +446,7 @@
 </head>
 <body>
 <div class="bg-banner" id="breakglass-banner" role="alert" style="display:none"></div>
+<div class="bg-banner" id="held-notice" role="status" style="display:none"></div>
 <div class="app">
   <!-- ================= TOPBAR ================= -->
   <header class="topbar">
@@ -515,6 +532,10 @@
     <div class="nav-item" data-page="agents" id="agentsNav" style="display:none">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-7 8-7s8 3 8 7"/></svg>
       Agents</div>
+    <!-- Changes (W-P2-APPR-05): hidden until /dashboard/api/setup says approvalsEnabled. -->
+    <div class="nav-item" data-page="changes" id="changesNav" style="display:none">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 11l3 3 8-8"/><path d="M20 12v7a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h9"/></svg>
+      Changes</div>
     <div class="nav-item" data-page="explore">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
       Explore</div>
@@ -1241,6 +1262,43 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
       </div><!-- /demo-only -->
     </section>
 
+    <!-- ============ CHANGES (W-P2-APPR-05) ============ -->
+    <section class="page" id="page-changes">
+      <div class="page-head">
+        <div><h1>Changes</h1><div class="desc">Drafts held for a second person: the structural diff, why it is held, and the replay of recent traffic</div></div>
+        <span class="sub" id="ch-status"></span>
+      </div>
+      <div class="card" style="margin-bottom:12px">
+        <div class="card-pad" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <label for="ch-state" class="sub">State</label>
+          <select id="ch-state">
+            <option value="pending" selected>pending</option>
+            <option value="draft">draft</option>
+            <option value="needs_rebase">needs rebase</option>
+            <option value="applied_unreviewed">applied, unreviewed</option>
+            <option value="applied">applied</option>
+            <option value="rejected">rejected</option>
+            <option value="withdrawn">withdrawn</option>
+            <option value="expired">expired</option>
+            <option value="">all</option>
+          </select>
+          <label for="ch-target" class="sub">Target</label>
+          <select id="ch-target">
+            <option value="" selected>all</option>
+            <option value="policy">policy</option>
+            <option value="blocked_users">blocked users</option>
+            <option value="agents">agents</option>
+          </select>
+          <button class="btn sm" id="ch-refresh">Refresh</button>
+        </div>
+      </div>
+      <div class="card" style="margin-bottom:16px">
+        <div id="ch-list"><div class="card-pad note">Loading…</div></div>
+        <div class="card-pad"><button class="btn sm" id="ch-more" style="display:none">Load more</button></div>
+      </div>
+      <div class="card" id="ch-detail" style="display:none"></div>
+    </section>
+
     <!-- ============ AGENTS (W-P2-AREG-03) ============ -->
     <section class="page" id="page-agents">
       <div class="page-head">
@@ -1692,6 +1750,7 @@ function loadTab(page){
     case 'audit':       loadAudit(); break;
     case 'adminlog':    loadAdminLog(); break;
     case 'agents':      loadAgents(); break;
+    case 'changes':     loadChanges(); break;
     case 'get-started': refreshOnboarding(); break;
   }
 }
@@ -1760,7 +1819,7 @@ async function onModeToggleClick(mode){
     if(currentTab()==='guardrails') loadGuardrails();
     else if(currentTab()==='mcp') loadMCPPage();
   }catch(err){
-    window.alert('Mode switch failed: '+err.message);
+    if(!err.held) window.alert('Mode switch failed: '+err.message);
     const fresh=await fetchSettingsDoc();
     applyMode(fresh?postureFromSettings(fresh.settings):mode);
   }
@@ -1831,6 +1890,8 @@ function applySetup(){
   const nb=document.getElementById('authNoneBanner'); if(nb) nb.hidden=(s.authMode!=='none');
   applyBackupBadge(s.backup);
   const an=document.getElementById('agentsNav'); if(an) an.style.display=s.agentRegistry===true?'':'none';
+  const cn=document.getElementById('changesNav'); if(cn) cn.style.display=s.approvalsEnabled===true?'':'none';
+  if(s.approvalsEnabled===true) applyChangesHash();
   renderStepper();
   // Overview: onboarding hero replaces stat blocks until a first event is seen.
   const ov=document.getElementById('page-overview');
@@ -2623,6 +2684,7 @@ async function agSave(){
        :await api('POST','/dashboard/api/agents',body);
   }catch(x){ r=null; }
   btn.disabled=false;
+  if(r&&r.status===202){ agHideForm(); await noteHeldResponse(r); agMsg('Submitted for review: "'+id+'" is not saved until it is approved.'); loadAgents(); return; }
   if(r&&(r.status===200||r.status===201)){ agHideForm(); agMsg('Saved "'+id+'".'); loadAgents(); return; }
   await agShowWriteError(r);
 }
@@ -2652,7 +2714,8 @@ async function agSetEnabled(a,enable){
   if(!window.confirm(verb+' agent "'+a.id+'"? '+(enable?'Workers serve it again on their next policy pull.':'Workers deny all traffic for it on their next policy pull.'))) return;
   let r=null;
   try{ r=await api('POST','/dashboard/api/agents/'+encodeURIComponent(a.id)+'/'+(enable?'enable':'disable'),undefined,{'If-Match':'"r'+a.revision+'"'}); }catch(x){ r=null; }
-  if(r&&r.ok){ agMsg(verb+'d "'+a.id+'".'); }
+  if(r&&r.status===202){ await noteHeldResponse(r); agMsg(verb+' of "'+a.id+'" submitted for review: it is not done until it is approved.'); }
+  else if(r&&r.ok){ agMsg(verb+'d "'+a.id+'".'); }
   else{
     let code=''; try{ const e=await r.json(); code=e&&e.error||''; }catch(x){}
     agMsg(verb+' failed: '+(code==='agent_conflict'?'the agent changed elsewhere; the list was reloaded.':(code||(r?'status '+r.status:'network error')))+'.');
@@ -2720,7 +2783,7 @@ async function saveExploreProvider(){
     if(!r.ok){ let m='status '+r.status; try{ const e=await r.json(); if(e&&e.error) m=e.error; }catch(_e){} throw new Error(m); }
     const d=await r.json().catch(()=>({})); window.__exploreSettings=(d&&d.settings)||merged;
     if(note){ note.textContent='saved ✓ — takes effect now'; note.style.color='var(--teal)'; setTimeout(()=>{ note.textContent=''; note.style.color=''; },2500); }
-  }catch(err){ if(note){ note.textContent='✕ '+err.message; note.style.color='var(--amber)'; } }
+  }catch(err){ if(note){ note.textContent=heldText(err); note.style.color='var(--amber)'; } }
 }
 function qbSyncOptionsToSchema(){
   const cols=qbSchemaCols(); if(!cols.length) return;
@@ -3061,7 +3124,7 @@ async function saveSettings(btnId, statusId){
     renderSettings();
     if(btnId) flashBtn(btnId,'Saved ✓');
     if(st){ st.textContent='saved ✓ — workers apply on next poll'; st.style.color='var(--teal)'; setTimeout(()=>{ st.textContent=''; },3000); }
-  }catch(err){ if(st){ st.textContent='✕ '+err.message; st.style.color='var(--amber)'; } }
+  }catch(err){ if(st){ st.textContent=heldText(err); st.style.color='var(--amber)'; } }
 }
 
 /* ============================================================
@@ -3406,7 +3469,8 @@ async function removeBlockedUser(id,label){
   if(!window.confirm('Unblock '+label+'? They can use Warden again within one policy poll.')) return;
   let r=null;
   try{ r=await api('DELETE','/dashboard/api/blocked-users/'+encodeURIComponent(id)); }catch(e){ r=null; }
-  if(r&&r.status===204) buMsg('Unblocked.',false);
+  if(r&&r.status===202){ await noteHeldResponse(r); buMsg('Unblock submitted for review: the entry stays blocked until it is approved.',false); }
+  else if(r&&r.status===204) buMsg('Unblocked.',false);
   else buMsg(await blockErrorText(r,'Unblock'),true);
   loadBlockedUsers();
 }
@@ -3627,7 +3691,7 @@ async function savePolicy(){
     // A 409 keeps the unsaved edit on screen (policyWrite already took the new head), so the
     // next change saves it on top of that head. Anything else reloads the live policy.
     if(err.conflict){ renderEgress(); window.alert('Policy save failed: '+err.message+'. Your edit is kept here but not saved; the next change saves it on top of v'+err.head+'. Reload the page to discard it.'); return; }
-    if(!err.cancelled) window.alert('Policy save failed: '+err.message);
+    if(!err.cancelled&&!err.held) window.alert('Policy save failed: '+err.message);
     loadGuardrails();
   }
 }
@@ -3764,7 +3828,7 @@ async function saveDLP(){
     renderDLP();
     flashBtn('dlpSaveBtn','Saved ✓');
     const m2=document.getElementById('dlpMsg'); if(m2){ m2.textContent='saved ✓ — workers apply on next poll'; m2.style.color='var(--teal)'; }
-  }catch(err){ if(msg){ msg.textContent='✕ '+err.message; msg.style.color='var(--amber)'; } }
+  }catch(err){ if(msg){ msg.textContent=heldText(err); msg.style.color='var(--amber)'; } }
 }
 
 /* ---------- MCP page (config /settings.mcp · inventory /mcp) ---------- */
@@ -4042,7 +4106,7 @@ async function saveMCP(){
   }
   const merged=Object.assign({}, gr.settings, {mcp:mcpBlock});
   try{ await putSettings(merged); renderMCP(); flashBtn('mcpSaveBtn','Saved ✓'); }
-  catch(err){ window.alert('MCP save failed: '+err.message); }
+  catch(err){ if(!err.held) window.alert('MCP save failed: '+err.message); }
 }
 
 /* ---------- LLM Providers (/dashboard/api/llmproviders) ----------
@@ -4144,7 +4208,7 @@ async function saveLLMProviders(){
     renderLLMProviders();
     // (the judge selector re-reads the registry when Guardrails next loads)
     llmpMsg('saved ✓',true); setTimeout(()=>{ const m=document.getElementById('llmp-msg'); if(m) m.style.display='none'; },2500);
-  }catch(err){ llmpMsg('✕ '+err.message,false); }
+  }catch(err){ llmpMsg(heldText(err),!!err.held); }
 }
 function llmProviderNames(){ return ((gr.llmp&&gr.llmp.providers)||[]).map(p=>p.name).filter(Boolean); }
 
@@ -4217,7 +4281,7 @@ async function saveJudge(){
   });
   const merged=Object.assign({}, gr.settings, {judge:judgeBlock, advisory:{enabled: chk('judgeAdvisory')}});
   try{ await putSettings(merged); renderJudge(); flashBtn('judgeSaveBtn','Saved ✓'); }
-  catch(err){ window.alert('Judge save failed: '+err.message); }
+  catch(err){ if(!err.held) window.alert('Judge save failed: '+err.message); }
 }
 
 /* ============================================================
@@ -4833,6 +4897,11 @@ async function policyWrite(method,url,body,what){
     loadPolicyHistory(true);
     throw e;
   }
+  if(r.status===202){
+    // Held for a second person's approval (W-P2-APPR-05): the change is only a draft, so this is not a success.
+    await noteHeldResponse(r);
+    const e=new Error('submitted for review'); e.held=true; throw e;
+  }
   notePolicyHead(r);
   if(r.ok) loadPolicyHistory(true);
   return r;
@@ -4958,6 +5027,437 @@ async function rollbackTo(v){
   if(input&&d&&typeof d.close==='function') input.addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); d.close('ok'); } });
 })();
 /* policyhistory:end */
+/* changes:begin */
+/* ---------- Changes (W-P2-APPR-05): the change drafts of /dashboard/api/changes through api() ----------
+   Shown only when /dashboard/api/setup says approvalsEnabled. The list is GET ?state=&target=&limit=&cursor=;
+   a draft opens GET /{id} and GET /{id}/diff. The server is the only enforcement point: the data-min-role
+   attributes and the hidden buttons are a convenience, and every refusal is shown as the code the server gave.
+   - A policy draft's diff is the server's structural diff ({allow,deny,settings}), rendered by the PVER-04
+     renderer phChangeList; blocked_users and agents drafts have a {current,proposed} diff (current is null for a
+     new entity) that chShape renders field by field. Draft rows key on the draft's target. Credentials only
+     arrive as fingerprints, and the key material of an agent is never rendered.
+   - Approve sends revision, doc_sha256 and replay_id (the done replay the reviewer saw). With no usable replay
+     (failed, unavailable, none, or a target that has no replay) the acknowledge box must be ticked and
+     acknowledgeNoReplay is sent. A pending replay is polled every 2s up to the server's replayTimeout.
+   - The author never sees approve (the server refuses it as well) and a break-glass session never approves.
+   Every value from the server or a person (author, message, comment, domain, user, reason) goes in with
+   textContent through chEl or phEl; no markup is built from a string. */
+const CH_BASE='/dashboard/api/changes';
+const CH_LIMIT=20;
+const CH_POLL_MS=2000;
+const CH_REPLAY_DEFAULT_MS=60000;
+const CH_ID=/^[A-Za-z0-9_-]{1,64}$/;
+const ch={seq:0,next:'',filters:{state:'pending',target:''},open:'',last:null,diff:null,ui:{id:'',comment:'',ack:false},
+  pollTimer:0,pollSeq:0,timedOut:false,replayMs:CH_REPLAY_DEFAULT_MS,body:null};
+function chEl(tag,text,cls){
+  const e=document.createElement(tag);
+  if(text!=null) e.textContent=String(text);
+  if(cls) e.className=cls;
+  return e;
+}
+function chWho(a){ return (a&&(a.email||a.sub))||'unknown'; }
+function chStatePill(s){
+  const cls={pending:'p-med',draft:'p-low',needs_rebase:'p-high',applied:'p-allow',applied_unreviewed:'p-high',rejected:'p-deny',withdrawn:'p-low',expired:'p-low'};
+  return chEl('span',String(s||'').replace(/_/g,' '),'pill '+(cls[s]||'p-low'));
+}
+function chReqRole(d){ return Object.prototype.hasOwnProperty.call(ROLE_RANK,d.required_role)&&d.required_role!=='none'?d.required_role:'admin'; }
+function chIsAuthor(d){ return authMode==='oidc'&&!!me&&!!d.author&&d.author.sub===me.sub; }
+function chBreakGlass(){ return authMode==='oidc'&&!!me&&me.authMethod==='breakglass'; }
+function chCanApprove(d){ return d.state==='pending'&&!chIsAuthor(d)&&!chBreakGlass()&&roleAllows(chReqRole(d)); }
+function chMsg(text){
+  const m=document.getElementById('ch-msg'); if(!m) return;
+  m.style.display=text?'':'none'; m.textContent=text||'';
+}
+function chStopPoll(){
+  ch.pollSeq++;
+  if(ch.pollTimer){ clearTimeout(ch.pollTimer); ch.pollTimer=0; }
+}
+async function chErrText(r,what){
+  if(!r) return what+' failed: the control plane did not answer.';
+  let b=null; try{ b=await r.json(); }catch(e){ b=null; }
+  return what+' failed: '+((b&&b.error)||('status '+r.status))+(b&&b.detail?' ('+b.detail+')':'')+'.';
+}
+/* ---- list ---- */
+async function loadChanges(){
+  const list=document.getElementById('ch-list'); if(!list) return;
+  await authInit();
+  const f=document.getElementById('ch-state'), t=document.getElementById('ch-target');
+  ch.filters={state:f.value,target:t.value};
+  const sec=setupData&&Number(setupData.approvalsReplayTimeoutSec);
+  ch.replayMs=sec>0?sec*1000:CH_REPLAY_DEFAULT_MS;
+  await chLoadPage(true);
+  if(ch.open) chShow(ch.open);
+}
+async function chLoadPage(reset){
+  const list=document.getElementById('ch-list'), more=document.getElementById('ch-more'), st=document.getElementById('ch-status');
+  const seq=++ch.seq;
+  const q=new URLSearchParams();
+  q.set('limit',String(CH_LIMIT));
+  if(ch.filters.state) q.set('state',ch.filters.state);
+  if(ch.filters.target) q.set('target',ch.filters.target);
+  if(!reset&&ch.next) q.set('cursor',ch.next);
+  let r=null, d=null;
+  try{ r=await api('GET',CH_BASE+'?'+q.toString()); if(r.ok) d=await r.json(); }catch(e){ d=null; }
+  if(seq!==ch.seq) return;
+  if(!d||!Array.isArray(d.drafts)){
+    list.replaceChildren(chEl('div',(r&&r.status===404)?'Change approvals are not enabled on this server.':'Change drafts unavailable.','card-pad note'));
+    ch.body=null; ch.next=''; more.style.display='none'; st.textContent='';
+    return;
+  }
+  if(reset||!ch.body){
+    const tbl=chEl('table'), head=chEl('tr');
+    ['Target','State','Change','Required role','Author','Source','Base','Rev','Age','Approvals'].forEach(h=>head.appendChild(chEl('th',h)));
+    tbl.appendChild(chEl('thead')).appendChild(head);
+    ch.body=tbl.appendChild(chEl('tbody'));
+    list.replaceChildren(tbl);
+  }
+  d.drafts.forEach(x=>ch.body.appendChild(chRow(x)));
+  if(reset&&!d.drafts.length) list.appendChild(chEl('div','No drafts in this state.','card-pad note'));
+  ch.next=typeof d.next_cursor==='string'?d.next_cursor:'';
+  more.style.display=ch.next?'':'none';
+  st.textContent=ch.body.children.length+' shown';
+}
+function chRow(x){
+  const tr=chEl('tr','', 'ch-row'); tr.dataset.draft=String(x.id);
+  const tgt=chEl('td'); tgt.appendChild(chEl('b',x.target)); if(x.target_ref) tgt.appendChild(chEl('span',' '+x.target_ref,'mono muted'));
+  tr.appendChild(tgt);
+  tr.appendChild(chEl('td')).appendChild(chStatePill(x.state));
+  const w=chEl('td'); w.appendChild(chEl('span',x.widening?'widening':'narrowing','pill '+(x.widening?'p-high':'p-allow')));
+  const msg=chEl('span',' '+(x.message||''),'muted'); msg.title=msg.textContent; w.appendChild(msg);
+  tr.appendChild(w);
+  tr.appendChild(chEl('td',x.required_role||'','tag'));
+  tr.appendChild(chEl('td',chWho(x.author)));
+  tr.appendChild(chEl('td',x.source||'','tag'));
+  tr.appendChild(chEl('td','v'+x.base_version,'mono'));
+  tr.appendChild(chEl('td','r'+x.revision,'mono'));
+  const age=chEl('td',x.created_at?relTime(x.created_at):'—'); age.title=String(x.created_at||''); tr.appendChild(age);
+  tr.appendChild(chEl('td',(x.approvals||0)+'/'+(x.approvals_required||0)));
+  tr.addEventListener('click',()=>chShow(x.id));
+  return tr;
+}
+/* ---- detail ---- */
+async function chShow(id){
+  if(!CH_ID.test(String(id))) return;
+  const box=document.getElementById('ch-detail'); if(!box) return;
+  chStopPoll();
+  if(ch.ui.id!==id) ch.ui={id:id,comment:'',ack:false};
+  ch.open=id; ch.timedOut=false; chMsg('');
+  box.style.display='';
+  document.querySelectorAll('#ch-list .ch-row').forEach(r=>r.classList.toggle('sel',r.dataset.draft===id));
+  box.replaceChildren(chEl('div','Loading the draft…','card-pad note'));
+  const get=async p=>{ try{ const r=await api('GET',CH_BASE+'/'+encodeURIComponent(id)+p); return r.ok?await r.json():null; }catch(e){ return null; } };
+  const [d,df]=await Promise.all([get(''),get('/diff')]);
+  if(ch.open!==id) return;
+  if(!d){ ch.last=null; box.replaceChildren(chEl('div','The draft is unavailable.','card-pad note')); return; }
+  ch.last=d; ch.diff=df;
+  chRender();
+  chMaybePoll();
+}
+function chReplayPending(d){ const rp=d&&d.latest_replay; return !!rp&&(rp.status==='pending'||rp.status==='running'); }
+function chMaybePoll(){
+  const d=ch.last;
+  if(!d||!chReplayPending(d)||ch.timedOut) return;
+  const id=d.id, seq=++ch.pollSeq, start=Date.now();
+  const tick=async()=>{
+    ch.pollTimer=0;
+    if(seq!==ch.pollSeq||ch.open!==id) return;
+    let nd=null;
+    try{ const r=await api('GET',CH_BASE+'/'+encodeURIComponent(id)); if(r.ok) nd=await r.json(); }catch(e){ nd=null; }
+    if(seq!==ch.pollSeq||ch.open!==id) return;
+    if(nd) ch.last=nd;
+    if(!chReplayPending(ch.last)){ chRender(); return; }
+    if(Date.now()-start>=ch.replayMs){ ch.timedOut=true; chRender(); return; }
+    ch.pollTimer=setTimeout(tick,CH_POLL_MS);
+  };
+  ch.pollTimer=setTimeout(tick,CH_POLL_MS);
+}
+function chSection(title){
+  const s=chEl('div','', 'ch-sec'); s.appendChild(chEl('h4',title)); return s;
+}
+function chFact(label,value){
+  const row=chEl('div','', 'ch-fact'); row.appendChild(chEl('span',label,'muted')); row.appendChild(chEl('span',value==null||value===''?'—':value,'mono'));
+  return row;
+}
+/* chShape renders one {current|proposed} entity: the closed set of fields a block or agent entry has. */
+function chShape(obj){
+  const wrap=chEl('div','', 'ch-shape');
+  if(obj==null){ wrap.appendChild(chEl('div','none (a new entry)','note')); return wrap; }
+  ['id','display_name','status','sub','email','has_sub','has_email'].forEach(k=>{
+    if(Object.prototype.hasOwnProperty.call(obj,k)) wrap.appendChild(chFact(k,typeof obj[k]==='boolean'?String(obj[k]):obj[k]));
+  });
+  ['allowed_groups','allowed_scopes'].forEach(k=>{
+    if(Array.isArray(obj[k])) wrap.appendChild(chFact(k,obj[k].join(', ')));
+  });
+  if(Array.isArray(obj.keys)) obj.keys.forEach((k,i)=>{
+    wrap.appendChild(chFact('key '+(i+1),String(k.kid||'')+' '+String(k.alg||'')+' '+String(k.jkt||'').slice(0,8)));
+  });
+  return wrap;
+}
+function chDiffBox(d,df){
+  const sec=chSection('Changes against the base');
+  if(!df||df.diff==null){ sec.appendChild(chEl('div','The diff is unavailable.','note')); return sec; }
+  if(d.target==='policy'){
+    const allow=df.diff.allow||[], deny=df.diff.deny||[], settings=df.diff.settings||[];
+    sec.appendChild(chEl('div','Structural diff of v'+df.base_version+' (base) to revision '+df.revision+'. Credentials appear only as fingerprints.','note'));
+    if(!allow.length&&!deny.length&&!settings.length) sec.appendChild(chEl('div','No differences from the base.','note'));
+    const box=chEl('div','', 'ph-diff');
+    if(allow.length) box.appendChild(phChangeList('Allowlist',allow,c=>c.key));
+    if(deny.length) box.appendChild(phChangeList('Denylist',deny,c=>c.key));
+    if(settings.length) box.appendChild(phChangeList('Settings',settings,c=>c.path));
+    sec.appendChild(box);
+    return sec;
+  }
+  const cols=chEl('div','', 'ch-cols');
+  const cur=chEl('div'), pro=chEl('div');
+  cur.appendChild(chEl('h5','Current')); cur.appendChild(chShape(df.diff.current));
+  pro.appendChild(chEl('h5','Proposed')); pro.appendChild(chShape(df.diff.proposed));
+  cols.append(cur,pro);
+  sec.appendChild(cols);
+  return sec;
+}
+function chReasonsBox(d){
+  const sec=chSection('Why this is held ('+(d.widening?'widening':'narrowing')+', needs '+chReqRole(d)+')');
+  if(!Array.isArray(d.reasons)||!d.reasons.length){ sec.appendChild(chEl('div','No widening reasons recorded.','note')); return sec; }
+  const ul=chEl('ul');
+  d.reasons.forEach(x=>{
+    const li=chEl('li');
+    li.appendChild(chEl('span',x.code,'pill p-high'));
+    if(x.path) li.appendChild(chEl('span',' '+x.path,'mono'));
+    if(x.detail) li.appendChild(chEl('div',x.detail,'muted'));
+    ul.appendChild(li);
+  });
+  sec.appendChild(ul);
+  return sec;
+}
+function chGroupTable(title,groups){
+  const wrap=chEl('div');
+  wrap.appendChild(chEl('h5',title+' ('+groups.length+')'));
+  if(!groups.length){ wrap.appendChild(chEl('div','none','note')); return wrap; }
+  const tbl=chEl('table'), head=chEl('tr');
+  ['Destination','Method','Events','Affected users','To judge','Rate-limited'].forEach(h=>head.appendChild(chEl('th',h)));
+  tbl.appendChild(chEl('thead')).appendChild(head);
+  const body=tbl.appendChild(chEl('tbody'));
+  groups.forEach(g=>{
+    const tr=body.appendChild(chEl('tr'));
+    tr.appendChild(chEl('td',String(g.domain||'')+(g.port?':'+g.port:''),'mono'));
+    tr.appendChild(chEl('td',g.method||'','mono'));
+    tr.appendChild(chEl('td',g.count));
+    const users=Array.isArray(g.affected_users)?g.affected_users:[];
+    const more=(Number(g.affected_users_total)||users.length)-users.length;
+    tr.appendChild(chEl('td',users.join(', ')+(more>0?' and '+more+' more':'')));
+    tr.appendChild(chEl('td',g.judge_count||0));
+    tr.appendChild(chEl('td',g.limit_governed||0));
+  });
+  wrap.appendChild(tbl);
+  return wrap;
+}
+function chReplayBox(d){
+  const sec=chSection('Replay of recent traffic');
+  sec.appendChild(chEl('div','The replay compares allow and deny decisions only. Rate limits, time windows, the judge, DLP and the block list are not replayed.','note'));
+  const rp=d.latest_replay;
+  if(d.target!=='policy'){ sec.appendChild(chEl('div','This target has no replay: approving it needs the acknowledgement below.','note')); return sec; }
+  if(!rp){ sec.appendChild(chEl('div','No replay has run for this revision.','note')); return sec; }
+  const line=chEl('div','', 'ch-fact'); line.appendChild(chEl('span',rp.status,'pill '+(rp.status==='done'?'p-allow':rp.status==='failed'||rp.status==='unavailable'?'p-deny':'p-med')));
+  line.appendChild(chEl('span',' base v'+rp.base_version+', '+rp.events_scanned+' events, '+(rp.window_from?String(rp.window_from):'')+' to '+(rp.window_to?String(rp.window_to):''),'mono muted'));
+  sec.appendChild(line);
+  if(chReplayPending(d)){
+    sec.appendChild(chEl('div',ch.timedOut?'The replay is still running after the replay timeout. Re-run it.':'The replay is running; this page checks every 2 seconds.','note'));
+    return sec;
+  }
+  if(rp.status!=='done'){ sec.appendChild(chEl('div','Replay '+rp.status+(rp.error_code?': '+rp.error_code:'')+'. Approving needs the acknowledgement below.','note')); return sec; }
+  if(rp.truncated) sec.appendChild(chEl('div','Truncated: the event cap was reached, so this replay covers only part of the window.','note ch-warn'));
+  const res=rp.result||{};
+  sec.appendChild(chEl('div',(res.events||0)+' events compared, '+(res.agreed||0)+' decided the same.','note'));
+  sec.appendChild(chGroupTable('Changed to allow',Array.isArray(res.changed_to_allow)?res.changed_to_allow:[]));
+  sec.appendChild(chGroupTable('Changed to deny',Array.isArray(res.changed_to_deny)?res.changed_to_deny:[]));
+  if(res.groups_truncated>0) sec.appendChild(chEl('div',res.groups_truncated+' more groups are not shown.','note ch-warn'));
+  return sec;
+}
+function chApprovalsBox(d){
+  const rows=Array.isArray(d.approval_rows)?d.approval_rows:[];
+  const sec=chSection('Decisions ('+(d.approvals||0)+' of '+(d.approvals_required||0)+' approvals)');
+  if(!rows.length){ sec.appendChild(chEl('div','No decisions yet.','note')); return sec; }
+  const ul=chEl('ul');
+  rows.forEach(a=>{
+    const li=chEl('li');
+    li.appendChild(chEl('span',a.decision,'pill '+(a.decision==='approve'?'p-allow':'p-deny')));
+    li.appendChild(chEl('span',' '+chWho(a.approver)+' ('+(a.approver_role||'')+', '+(a.auth_method||'')+') on r'+a.revision+' '+(a.at?relTime(a.at):'')));
+    if(a.acknowledge_no_replay) li.appendChild(chEl('span',' no replay acknowledged','tag'));
+    if(a.comment) li.appendChild(chEl('div',a.comment,'muted'));
+    ul.appendChild(li);
+  });
+  sec.appendChild(ul);
+  return sec;
+}
+function chBtn(label,cls,minRole,fn){
+  const b=chEl('button',label,'btn sm '+cls);
+  b.setAttribute('data-min-role',minRole);
+  b.addEventListener('click',fn);
+  return b;
+}
+function chActionsBox(d){
+  const sec=chSection('Actions');
+  const rp=d.latest_replay;
+  const needAck=d.target!=='policy'||!rp||rp.status==='failed'||rp.status==='unavailable';
+  const acts=chEl('div','', 'ch-actions');
+  const comment=chEl('input'); comment.type='text'; comment.maxLength=1024; comment.id='ch-comment'; comment.placeholder='Comment (optional)';
+  comment.value=ch.ui.comment; comment.addEventListener('input',()=>{ ch.ui.comment=comment.value; });
+  let ack=null;
+  const st=d.state;
+  if(st==='pending'||st==='applied_unreviewed') sec.appendChild(comment);
+  if(st==='pending'&&chCanApprove(d)&&needAck){
+    const lab=chEl('label','', 'ch-ack');
+    ack=chEl('input'); ack.type='checkbox'; ack.id='ch-ack'; ack.checked=ch.ui.ack;
+    ack.addEventListener('change',()=>{ ch.ui.ack=ack.checked; });
+    lab.append(ack,chEl('span',' I approve without a usable replay (failed, unavailable or not run).'));
+    sec.appendChild(lab);
+  }
+  if(st==='draft'){
+    acts.appendChild(chBtn('Submit for review','primary','editor',()=>chTransition(d,'submit')));
+    acts.appendChild(chBtn('Withdraw','','editor',()=>chTransition(d,'withdraw')));
+  }else if(st==='pending'){
+    if(chCanApprove(d)){
+      acts.appendChild(chBtn('Approve','primary','editor',()=>chApprove(d,ack)));
+      acts.appendChild(chBtn('Reject','','editor',()=>chReject(d)));
+    }else if(chIsAuthor(d)){
+      acts.appendChild(chEl('span','You wrote this draft: a second person must approve it.','pill p-low'));
+    }
+    if(d.target==='policy') acts.appendChild(chBtn(rp?'Re-run replay':'Run replay','','editor',()=>chRunReplay(d)));
+    acts.appendChild(chBtn('Withdraw','','editor',()=>chTransition(d,'withdraw')));
+    if(chBreakGlass()&&roleAllows('admin')) acts.appendChild(chBtn('Emergency apply','','admin',()=>chEmergency(d)));
+  }else if(st==='needs_rebase'){
+    if(d.target==='policy') acts.appendChild(chBtn('Rebase onto the head','primary','editor',()=>chTransition(d,'rebase')));
+    else acts.appendChild(chEl('span','This draft cannot be rebased: withdraw it and make the change again.','note'));
+    acts.appendChild(chBtn('Withdraw','','editor',()=>chTransition(d,'withdraw')));
+  }else if(st==='applied_unreviewed'){
+    acts.appendChild(chEl('span','Applied by an emergency apply and not yet reviewed.','pill p-high'));
+    if(!chBreakGlass()) acts.appendChild(chBtn('Mark reviewed','primary','admin',()=>chReview(d)));
+  }else{
+    acts.appendChild(chEl('span','This draft is '+String(st).replace(/_/g,' ')+' and read only.','pill p-low'));
+  }
+  sec.appendChild(acts);
+  if(chReplayPending(d)&&!ch.timedOut) sec.appendChild(chEl('div','Approve is available once the replay finishes.','note'));
+  const m=chEl('div','', 'note'); m.id='ch-msg'; m.style.display='none'; sec.appendChild(m);
+  return sec;
+}
+function chRender(){
+  const d=ch.last, box=document.getElementById('ch-detail'); if(!d||!box) return;
+  const head=chEl('div','', 'card-head');
+  const h=chEl('h3','Draft '+d.id); head.appendChild(h);
+  const right=chEl('span'); right.style.cssText='display:flex;align-items:center;gap:8px';
+  right.appendChild(chStatePill(d.state));
+  const close=chEl('button','Close','btn sm'); close.addEventListener('click',chClose); right.appendChild(close);
+  head.appendChild(right);
+  const pad=chEl('div','', 'card-pad');
+  const facts=chEl('div','', 'ch-facts');
+  facts.append(
+    chFact('target',d.target+(d.target_ref?' / '+d.target_ref:'')),
+    chFact('author',chWho(d.author)),
+    chFact('source',d.source),
+    chFact('base version','v'+d.base_version),
+    chFact('revision','r'+d.revision),
+    chFact('age',d.created_at?relTime(d.created_at):''),
+    chFact('expires',d.expires_at?String(d.expires_at):''),
+    chFact('doc sha256',String(d.doc_sha256||'').slice(0,12)));
+  if(d.applied_version) facts.appendChild(chFact('applied as','v'+d.applied_version));
+  pad.appendChild(facts);
+  if(d.message) pad.appendChild(chEl('div',d.message,'ch-message'));
+  if(d.last_error) pad.appendChild(chEl('div','Last error: '+d.last_error,'note ch-warn'));
+  pad.append(chReasonsBox(d),chDiffBox(d,ch.diff),chReplayBox(d),chApprovalsBox(d),chActionsBox(d));
+  box.replaceChildren(head,pad);
+}
+function chClose(){
+  chStopPoll(); ch.open='';
+  const box=document.getElementById('ch-detail'); if(box){ box.style.display='none'; box.replaceChildren(); }
+  document.querySelectorAll('#ch-list .ch-row').forEach(r=>r.classList.remove('sel'));
+}
+/* ---- writes: api() adds X-Warden-CSRF; a transition names the revision it saw in If-Match ---- */
+async function chAfter(id,r,what){
+  if(r&&r.ok){ chLoadPage(true); await chShow(id); chMsg(what+' done.'); return; }
+  const text=await chErrText(r,what);
+  chLoadPage(true); await chShow(id); chMsg(text);
+}
+async function chTransition(d,action){
+  if(action==='withdraw'&&!window.confirm('Withdraw draft '+d.id+'? It can no longer be approved.')) return;
+  let r=null;
+  try{ r=await api('POST',CH_BASE+'/'+encodeURIComponent(d.id)+'/'+action,undefined,{'If-Match':'"r'+d.revision+'"'}); }catch(e){ r=null; }
+  await chAfter(d.id,r,action[0].toUpperCase()+action.slice(1));
+}
+async function chRunReplay(d){
+  let r=null;
+  try{ r=await api('POST',CH_BASE+'/'+encodeURIComponent(d.id)+'/replay'); }catch(e){ r=null; }
+  ch.timedOut=false;
+  await chAfter(d.id,r,'Replay');
+}
+async function chApprove(d,ack){
+  const rp=d.latest_replay;
+  const usable=d.target==='policy'&&!!rp&&rp.status==='done';
+  if(chReplayPending(d)&&!ch.timedOut){ chMsg('Wait for the replay to finish.'); return; }
+  if(!usable&&!(ack&&ack.checked)){ chMsg('Tick the acknowledgement to approve without a usable replay.'); return; }
+  const body={revision:d.revision,doc_sha256:d.doc_sha256,replay_id:usable?rp.id:'',acknowledgeNoReplay:!usable,comment:ch.ui.comment};
+  let r=null;
+  try{ r=await api('POST',CH_BASE+'/'+encodeURIComponent(d.id)+'/approve',body); }catch(e){ r=null; }
+  await chAfter(d.id,r,'Approve');
+}
+async function chReject(d){
+  if(!window.confirm('Reject draft '+d.id+'?')) return;
+  let r=null;
+  try{ r=await api('POST',CH_BASE+'/'+encodeURIComponent(d.id)+'/reject',{revision:d.revision,doc_sha256:d.doc_sha256,comment:ch.ui.comment}); }catch(e){ r=null; }
+  await chAfter(d.id,r,'Reject');
+}
+async function chEmergency(d){
+  const why=window.prompt('Why is the second person being bypassed? (10 to 512 characters; recorded in the audit log)');
+  if(why===null) return;
+  let r=null;
+  try{ r=await api('POST',CH_BASE+'/'+encodeURIComponent(d.id)+'/emergency-apply',{reason:why.trim(),revision:d.revision,doc_sha256:d.doc_sha256}); }catch(e){ r=null; }
+  await chAfter(d.id,r,'Emergency apply');
+}
+async function chReview(d){
+  let r=null;
+  try{ r=await api('POST',CH_BASE+'/'+encodeURIComponent(d.id)+'/review',{comment:ch.ui.comment,revision:d.revision,doc_sha256:d.doc_sha256}); }catch(e){ r=null; }
+  await chAfter(d.id,r,'Review');
+}
+/* ---- a held save: policy, settings, llmProviders, agents and block list answer 202 with the draft ----
+   noteHeldResponse shows 'submitted for review' with a link to the draft; the caller must not report the
+   change as saved. The id is checked against CH_ID before it becomes part of a link. */
+async function noteHeldResponse(r){
+  let b=null; try{ b=await r.json(); }catch(e){ b=null; }
+  const id=b&&typeof b.draft_id==='string'&&CH_ID.test(b.draft_id)?b.draft_id:'';
+  const el=document.getElementById('held-notice'); if(!el) return id;
+  const parts=[chEl('span','Submitted for review: the change is not saved until a second person approves it. ')];
+  if(id){ const a=chEl('a','Open draft '+id); a.setAttribute('href','#changes/'+id); parts.push(a); }
+  const x=chEl('button','Dismiss','btn sm'); x.style.marginLeft='12px'; x.addEventListener('click',()=>{ el.style.display='none'; });
+  parts.push(x);
+  el.replaceChildren(...parts);
+  el.style.display='';
+  return id;
+}
+function heldText(err){ return err&&err.held?err.message:'✕ '+(err&&err.message); }
+function applyChangesHash(){
+  const h=location.hash||'';
+  if(h.indexOf('#changes/')!==0) return;
+  const id=h.slice('#changes/'.length);
+  if(!CH_ID.test(id)) return;
+  ch.open=id;
+  try{ history.replaceState(null,'',location.pathname+location.search); }catch(e){}   // one-shot: a later setup refresh must not re-open it
+  const n=document.getElementById('held-notice'); if(n) n.style.display='none';
+  go('changes');
+}
+(function(){
+  const g=id=>document.getElementById(id);
+  if(g('ch-state')) g('ch-state').addEventListener('change',loadChanges);
+  if(g('ch-target')) g('ch-target').addEventListener('change',loadChanges);
+  if(g('ch-refresh')) g('ch-refresh').addEventListener('click',loadChanges);
+  if(g('ch-more')) g('ch-more').addEventListener('click',()=>chLoadPage(false));
+  window.addEventListener('hashchange',applyChangesHash);
+  document.addEventListener('click',ev=>{
+    const a=ev.target.closest&&ev.target.closest('#held-notice a[href^="#changes/"]'); if(!a) return;
+    ev.preventDefault();
+    const id=a.getAttribute('href').slice('#changes/'.length);
+    if(CH_ID.test(id)){ ch.open=id; g('held-notice').style.display='none'; go('changes'); }
+  });
+})();
+/* changes:end */
 
 /* ============================================================
    Init
