@@ -42,16 +42,50 @@ const (
 	DetailAckNoReplay    = "acknowledge_no_replay"
 )
 
+// The agent registry's keys (W-P2-AREG-02), camelCase like the JSON API.
+// changed lists the edited fields; the *Added and *Removed lists name key ids,
+// RFC 7638 thumbprints and groups, each element percent-encoded and the list
+// cut at an element when it would not fit one value. Every list also has a
+// <key>Count (the full number of elements) and, when it was cut, a
+// <key>Sha256 (of the full list, sorted by raw value before encoding, then percent-encoded and comma-joined) and
+// DetailTruncated "true". They name fields, ids and groups; never key material.
+const (
+	DetailChanged       = "changed"
+	DetailKidsAdded     = "kidsAdded"
+	DetailKidsRemoved   = "kidsRemoved"
+	DetailJktsAdded     = "jktsAdded"
+	DetailJktsRemoved   = "jktsRemoved"
+	DetailGroupsAdded   = "groupsAdded"
+	DetailGroupsRemoved = "groupsRemoved"
+	DetailStatusFrom    = "statusFrom"
+	DetailStatusTo      = "statusTo"
+	DetailTruncated     = "truncated"
+
+	// DetailCountSuffix and DetailSha256Suffix are appended to a list key.
+	DetailCountSuffix  = "Count"
+	DetailSha256Suffix = "Sha256"
+)
+
 // DetailSource is where a change came from (for example approval).
 const DetailSource = "source"
 
-var annotationKeys = map[string]bool{
-	DetailOp: true, DetailEtag: true, DetailHasSub: true, DetailHasEmail: true,
-	DetailAPIKeyID: true, DetailScopes: true, DetailExpiresAt: true, DetailAPIKeysRevoked: true,
-	DetailWorkerID: true, DetailCount: true, DetailEnrollTokens: true,
-	DetailBaseVersion: true, DetailAppliedVersion: true, DetailWidening: true,
-	DetailReasons: true, DetailReplayStatus: true, DetailAckNoReplay: true, DetailSource: true,
-}
+// annotationKeys is the closed set of keys Annotate keeps.
+var annotationKeys = func() map[string]bool {
+	m := map[string]bool{
+		DetailOp: true, DetailEtag: true, DetailHasSub: true, DetailHasEmail: true,
+		DetailAPIKeyID: true, DetailScopes: true, DetailExpiresAt: true, DetailAPIKeysRevoked: true,
+		DetailWorkerID: true, DetailCount: true, DetailEnrollTokens: true,
+		DetailBaseVersion: true, DetailAppliedVersion: true, DetailWidening: true,
+		DetailReasons: true, DetailReplayStatus: true, DetailAckNoReplay: true, DetailSource: true,
+		DetailChanged: true, DetailStatusFrom: true, DetailStatusTo: true, DetailTruncated: true,
+	}
+	for _, k := range []string{DetailKidsAdded, DetailKidsRemoved, DetailJktsAdded, DetailJktsRemoved, DetailGroupsAdded, DetailGroupsRemoved} {
+		m[k] = true
+		m[k+DetailCountSuffix] = true
+		m[k+DetailSha256Suffix] = true
+	}
+	return m
+}()
 
 // FilterDetails returns the entries of d whose key is in the closed detail set
 // and whose value is printable ASCII within the value cap. Everything else is

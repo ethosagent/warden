@@ -28,6 +28,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/ethosagent/warden/internal/adminaudit"
+	"github.com/ethosagent/warden/internal/agentreg"
 	"github.com/ethosagent/warden/internal/alertpipeline"
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/apikeys"
@@ -50,6 +51,10 @@ type Config struct {
 	// it and closes it after the HTTP server drains; feature stores build on
 	// State.SQL() and register their migrations through cpstate.Open.
 	State *cpstate.DB
+	// AgentStore is the agent registry (W-P2-AREG-02). Nil builds the SQLite
+	// store on State (and Run starts its Watch); with neither, the agent routes
+	// answer 503 state_dir_required. Tests inject a fake.
+	AgentStore agentreg.Store
 	// PolicyStore is the --policy-store mode: PolicyStoreFile ("" = file, the
 	// default) serves PolicyPath; PolicyStoreVersioned serves the head version
 	// of the versioned store in State (and needs State; Run enforces it). With
@@ -259,8 +264,12 @@ type Server struct {
 
 	// blocks is the user block list store; nil without State (and then no
 	// blocked_users overlay is registered).
-	blocks  *BlockStore
-	writeMu sync.Mutex // serializes policy + integrations edits
+	blocks *BlockStore
+	// agents is the agent registry; nil without State or Config.AgentStore, in
+	// which case the agent routes answer 503 state_dir_required.
+	agents       agentreg.Store
+	agentMetrics agentMetrics
+	writeMu      sync.Mutex // serializes policy + integrations edits
 	// gp holds the scoped-rule count of the served ETag and the per-worker
 	// "lacks grouppolicy" log marks (W-P1-GPOL-07).
 	gp groupPolicyFlags
@@ -424,6 +433,7 @@ func New(cfg Config) *Server {
 	s.initPolicyStore()
 	s.initBundles()
 	s.initBlockStore()
+	s.initAgentStore()
 	s.initApprovals()
 	s.policy.Refresh() // initial load so /policy and the dashboard have policy immediately
 	s.initSessions()
@@ -773,6 +783,8 @@ func (s *Server) Handler() http.Handler {
 	s.wireWorkerCerts(dash)
 	// Signing key admin routes and their audit hasher (W-P2-KEYS-04).
 	s.wireKeys(dash)
+	// Agent registry admin routes and their audit hasher (W-P2-AREG-02).
+	s.wireAgents(dash)
 	// Dashboard-V3 read tabs. Each source EXISTS on the control plane:
 	//   - secretstore: the CP's WRITE store lists KEY metadata (never values). Nil
 	//     store (env/none backend) → the tab reports backend "none".

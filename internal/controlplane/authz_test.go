@@ -707,6 +707,12 @@ func TestAuthzScopeClassification(t *testing.T) {
 		"GET /dashboard/api/admin-audit/pubkey":       "adminaudit:read",
 		"GET /dashboard/api/api-keys/self":            apikeys.ScopeSelf,
 		"POST /dashboard/api/workers/{id}/revoke":     "workers:admin",
+		"GET /dashboard/api/agents":                   "agents:read",
+		"GET /dashboard/api/agents/{id}":              "agents:read",
+		"POST /dashboard/api/agents":                  "agents:write",
+		"PUT /dashboard/api/agents/{id}":              "agents:write",
+		"POST /dashboard/api/agents/{id}/disable":     "agents:write",
+		"POST /dashboard/api/agents/{id}/enable":      "agents:write",
 		// Change drafts (W-P2-APPR-04): approve and reject stay none, so no
 		// API key can be the second person.
 		"GET /dashboard/api/changes":                "policy:read",

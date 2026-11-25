@@ -241,6 +241,16 @@ var All = slices.Concat(
 		{Name: "worker_token_admin_api", Opts: workerTokenAdminOpts(), Run: workerTokenAdminAPI},
 		// Without console sign-in the API is read-only: writes answer use_cli.
 		{Name: "worker_token_admin_use_cli", Opts: workerTokenOpts(), Run: workerTokenAdminUseCLI},
+		// Agent registry admin API (W-P2-AREG-02): an admin registers, edits,
+		// disables and enables agents from the console (If-Match revisions, 428
+		// and 409), viewers read and cannot write, every write is one audit row
+		// without key coordinates, a CSRF-less write is a denied row, and an
+		// offline writer's agent shows up through the API. In-process only.
+		{Name: "agent_registry_api", Opts: agentRegistryAPIOpts(), Run: agentRegistryAPI},
+		// Without console sign-in the registry API is read-only (use_cli).
+		{Name: "agent_registry_use_cli", Opts: agentRegistryUseCLIOpts(), Run: agentRegistryUseCLI},
+		// No state dir: 503 state_dir_required; a worker dashboard answers 404.
+		{Name: "agent_registry_no_state", Run: agentRegistryNoState},
 		// Strict worker auth (W-P1-WTOK-04): --require-worker-tokens refuses the
 		// shared token on the worker routes while the admin token keeps dashboard
 		// and secret writes working; with no admin token both fail closed. Mixed

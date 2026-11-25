@@ -170,6 +170,8 @@ type Server struct {
 	// blockList, when set (control plane), serves the block list admin API; nil
 	// makes those routes 404.
 	blockList BlockListStore
+	// agents is the agent registry admin API (W-P2-AREG-02); nil on a worker.
+	agents AgentRegistry
 }
 
 // analyticsCacheTTL is how long a computed analytics/MCP payload is reused
@@ -695,6 +697,12 @@ func Routes() []Route {
 		{del, "/dashboard/api/blocked-users/{id}", "blocked_users.remove"},
 		{get, "/dashboard/api/keys", "keys.read"},
 		{post, "/dashboard/api/keys/rotate", "keys.rotate_requested"},
+		{get, "/dashboard/api/agents", "agent.list"},
+		{post, "/dashboard/api/agents", "agent.create"},
+		{get, "/dashboard/api/agents/{id}", "agent.read"},
+		{put, "/dashboard/api/agents/{id}", "agent.update"},
+		{post, "/dashboard/api/agents/{id}/disable", "agent.disable"},
+		{post, "/dashboard/api/agents/{id}/enable", "agent.enable"},
 		{get, "/dashboard/api/changes", "change.draft.list"},
 		{post, "/dashboard/api/changes", "change.draft.create"},
 		{get, "/dashboard/api/changes/{id}", "change.draft.read"},

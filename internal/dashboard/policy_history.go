@@ -293,7 +293,8 @@ const APIKeysPath = "/dashboard/api/api-keys"
 // holds, a worker token path (/dashboard/api/worker-tokens/wt_x) becomes
 // /dashboard/api/worker-tokens/{id}, and a block list entry path becomes
 // /dashboard/api/blocked-users/{id}, a worker revoke path becomes
-// /dashboard/api/workers/{id}/revoke; every other path is returned unchanged.
+// /dashboard/api/workers/{id}/revoke, an agent path becomes
+// /dashboard/api/agents/{id}[/disable|/enable]; every other path is returned unchanged.
 // The control plane keys its authz table and audit classification on the
 // result.
 func RoutePath(p string) string {
@@ -305,6 +306,13 @@ func RoutePath(p string) string {
 	}
 	if _, ok := blockedUserID(p); ok {
 		return blockedUsersPath + "/{id}"
+	}
+	if _, action, ok := agentPath(p); ok {
+		t := agentsPath + "/{id}"
+		if action != "" {
+			t += "/" + action
+		}
+		return t
 	}
 	if _, action, ok := splitChangePath(p); ok {
 		t := changesPath + "/{id}"

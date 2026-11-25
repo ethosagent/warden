@@ -28,6 +28,13 @@ package dashboard
 //	GET  /dashboard/api/keys                            admin   (W-P2-KEYS-04)
 //	POST /dashboard/api/keys/rotate                     admin, audited keys.rotate_requested
 //
+//	GET  /dashboard/api/agents                          viewer  (W-P2-AREG-02)
+//	POST /dashboard/api/agents                          admin, audited agent.create
+//	GET  /dashboard/api/agents/{id}                     viewer
+//	PUT  /dashboard/api/agents/{id}                     admin, audited agent.update
+//	POST /dashboard/api/agents/{id}/disable             admin, audited agent.disable
+//	POST /dashboard/api/agents/{id}/enable              admin, audited agent.enable
+//
 // The admin audit log routes are distinct from the receipts
 // /dashboard/api/audit routes and answer 404 unless the control plane set an
 // AdminAuditSource. The worker token routes answer 404 unless SetWorkerTokens
@@ -37,7 +44,8 @@ package dashboard
 // 404 unless SetBlockListStore was called. The backup route answers 404 unless
 // SetBackup was called (--backup-dir). The key routes answer 404 unless
 // SetKeysSource was called (keys.enabled); a rotation outside console.auth oidc
-// is refused (use_cli), and so is the bundle purpose.
+// is refused (use_cli), and so is the bundle purpose. The agent routes answer
+// 404 unless SetAgentRegistry was called (the control plane only).
 func (s *Server) registerRoutes(mux *routeMux) {
 	mux.HandleFunc("/dashboard/api/admin-audit", s.handleAdminAudit)
 	mux.HandleFunc("/dashboard/api/admin-audit/verify", s.handleAdminAuditVerify)
@@ -52,6 +60,8 @@ func (s *Server) registerRoutes(mux *routeMux) {
 	mux.HandleFunc("/dashboard/api/blocked-users/", s.handleBlockedUser)
 	mux.HandleFunc("/dashboard/api/keys", s.handleKeys)
 	mux.HandleFunc("/dashboard/api/keys/rotate", s.handleKeysRotate)
+	mux.HandleFunc("/dashboard/api/agents", s.handleAgents)
+	mux.HandleFunc("/dashboard/api/agents/", s.handleAgent)
 	mux.HandleFunc("/dashboard/api/changes", s.handleChanges)
 	mux.HandleFunc("/dashboard/api/changes/", s.handleChange)
 }

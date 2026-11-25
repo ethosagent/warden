@@ -789,6 +789,12 @@ fails when the two differ.
 | `/dashboard/api/admin-audit` | GET | admin | `adminaudit.read` | `adminaudit:read` |
 | `/dashboard/api/admin-audit/pubkey` | GET | viewer | `adminaudit.pubkey` | `adminaudit:read` |
 | `/dashboard/api/admin-audit/verify` | POST | admin | `adminaudit.verify` | `adminaudit:read` |
+| `/dashboard/api/agents` | GET | viewer | `agent.list` | `agents:read` |
+| `/dashboard/api/agents` | POST | admin | `agent.create` | `agents:write` |
+| `/dashboard/api/agents/{id}` | GET | viewer | `agent.read` | `agents:read` |
+| `/dashboard/api/agents/{id}` | PUT | admin | `agent.update` | `agents:write` |
+| `/dashboard/api/agents/{id}/disable` | POST | admin | `agent.disable` | `agents:write` |
+| `/dashboard/api/agents/{id}/enable` | POST | admin | `agent.enable` | `agents:write` |
 | `/dashboard/api/alerts` | GET | viewer | `alerts.read` | `traffic:read` |
 | `/dashboard/api/analytics` | GET | viewer | `analytics.read` | `traffic:read` |
 | `/dashboard/api/api-keys` | GET | viewer | `api_key.list` | `none` |
@@ -1255,6 +1261,92 @@ With admin audit on, create and revoke are rows (`worker_token.create`, `worker_
 target `worker_tokens`, `target_ref` `token:<id>`); no row, log line or later response holds the token.
 A `wwt_` bearer never opens these routes. `GET /dashboard/api/workers` adds `authKind`
 (`token`, `legacy` or `none`), `tokenName`, `tokenLastUsed` and `legacyRequests` per worker.
+
+## Agent registry API
+
+With a state dir (`--state-dir`) the control plane keeps a registry of agents: which agents exist,
+which public keys authenticate them and which user groups may delegate to them. Rows are never
+deleted and ids are never reused (an agent is switched off, not removed), so there is no `DELETE`.
+Admins manage the registry under `/dashboard/api/agents`; viewers and editors may read it.
+
+| Request | Role | Result |
+|---|---|---|
+| `GET /dashboard/api/agents` | viewer | 200 `{"agents":[...]}`, every agent (disabled included) ordered by id. |
+| `POST /dashboard/api/agents` | admin | 201 with `Location` and `ETag: "r1"`; the body is the agent. |
+| `GET /dashboard/api/agents/{id}` | viewer | 200 with `ETag: "r<revision>"`, or 404. |
+| `PUT /dashboard/api/agents/{id}` | admin | 200 with the new `ETag`. Replaces `displayName`, `keys`, `allowedGroups`, `allowedScopes`; the status and the owner are kept. |
+| `POST /dashboard/api/agents/{id}/disable` and `/enable` | admin | 200 with the new `ETag`. Enabling an agent with no allowed groups is 400. |
+
+A create or edit body is one JSON object (unknown fields, including `ownerSub` and `status`, are
+`400 {"error":"invalid_json"}`; over 64 KiB is 413):
+
+```json
+{"id":"claude-code","displayName":"Claude Code",
+ "keys":[{"kty":"OKP","crv":"Ed25519","x":"<32-byte base64url>"}],
+ "allowedGroups":["warden-agents"],"allowedScopes":["read"]}
+```
+
+`keys` holds 1 or 2 public JWKs (two during a rotation): `OKP`/`Ed25519` or `EC`/`P-256`; a private
+member (`d`, `p`, ...) or a member that makes a verifier fetch something (`jku`, `x5u`, `x5c`) is
+refused. `id` matches `^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$` and is the path's id on a `PUT`.
+`allowedGroups` are normalized like policy rule groups and an active agent needs at least one.
+The owner (`ownerIss`, `ownerSub`, `ownerEmail`) is the signed-in admin who registered the agent;
+it is informational and never an authorization input.
+
+The agent view, the same in every response:
+
+```json
+{"id":"claude-code","displayName":"Claude Code","ownerIss":"https://idp.example","ownerSub":"u1",
+ "ownerEmail":"ada@example.com",
+ "keys":[{"kid":"<jkt>","alg":"EdDSA","jkt":"<jkt>","jwk":{"kty":"OKP","crv":"Ed25519","x":"...","kid":"<jkt>","alg":"EdDSA","use":"sig"}}],
+ "allowedGroups":["warden-agents"],"allowedScopes":[],"status":"active","revision":1,
+ "createdAt":"2026-01-01T00:00:00Z","createdBy":"oidc:u1","updatedAt":"2026-01-01T00:00:00Z","updatedBy":"oidc:u1"}
+```
+
+`kid` is the key id the agent puts in its JWT header (the key's own `kid` member, else the RFC 7638
+thumbprint `jkt`); `jkt` is unique across the whole registry, so a key authenticates exactly one
+agent. Views carry public JWKs only. Responses are `Cache-Control: no-store`.
+
+`PUT`, `disable` and `enable` need `If-Match: "r<revision>"`, the value of the `ETag` of a read.
+Missing is `428 {"error":"if_match_required"}`, malformed (there is no `*`) is
+`400 {"error":"invalid_if_match"}`, and a revision that is no longer the stored one is
+`409 {"error":"agent_conflict"}`: re-read and retry. Every successful edit and status change
+increments the revision.
+
+| Status and body | Meaning |
+|---|---|
+| 400 `{"error":"invalid_agent","field":"keys[0].crv","message":"..."}` | A validation failure; `field` names the member in the API's names (`displayName`, `keys[1].jwk`, `allowedGroups[0]`), `message` is a fixed phrase. The submitted value is never echoed. |
+| 404 `{"error":"not_found"}` | No agent has the id. |
+| 409 `{"error":"agent_exists"}` / `{"error":"key_in_use"}` / `{"error":"agent_conflict"}` | The id is registered, a key is bound to another agent, or the `If-Match` revision is stale. |
+| 422 `{"error":"registry_full"}` | The registry holds the maximum of 1000 agents. |
+| 403 `{"error":"use_cli"}` | Writes with `console.auth: none`. |
+| 503 `{"error":"state_dir_required"}` | The control plane has no `--state-dir`; every route answers it. |
+| 404 | A worker's dashboard: it never serves the routes. |
+
+With `console.auth: none` there is no identity to attribute a key or group change to, so a write
+answers `403 use_cli` even with the admin bearer; reads still work. In oidc mode a viewer or editor
+write is `403 role_required`. With admin audit on, each successful write is one row
+(`agent.create`, `agent.update`, `agent.disable`, `agent.enable`; target `agents`, `target_ref`
+`agent:<id>`). A refused or failed write is a row too (`denied`, `rejected` or `error`). The row
+details name what changed, never key material, and use these keys only: `op` (`create`,
+`update`, `disable` or `enable`), `changed` (an update's edited fields: `displayName`, `keys`,
+`allowedGroups`, `allowedScopes`, `status`), `kidsAdded` and `kidsRemoved` (key ids), `jktsAdded`
+and `jktsRemoved` (full RFC 7638 thumbprints, so swapping key material under one kid is visible),
+`groupsAdded` and `groupsRemoved`, `statusFrom` (only when there was a previous row) and `statusTo`.
+A list holds its elements sorted by raw value, each percent-encoded (every byte outside
+`A-Za-z0-9-._~:` becomes `%XX` in uppercase hex, `%` and `,` included) and joined with `,`.
+A create and an update always carry a `<list>Count` (the full number of elements, for example
+`groupsAddedCount`) for each of the six lists; a disable or enable carries no list. A list that
+would not fit one 256-byte value is cut at an element, and only then the row also carries
+`truncated: "true"` and `<list>Sha256`: the lowercase hex sha256 of the full list in the canonical
+form above (elements sorted by raw byte value before encoding, then encoded, then joined with
+`,`), so a padded list cannot hide an addition. Empty values are omitted. No JWK coordinate appears
+in an audit row, a log line or an error. The control plane
+also keeps in-memory counters for retention reporting: `warden_cp_agent_registry_writes_total{action,outcome}`
+and `warden_cp_agents{status}`.
+
+A write by another process (the offline registry CLI) is seen by the control plane within about
+2 seconds.
 
 ## Worker token CLI
 

@@ -251,7 +251,7 @@ func TestEntryValidation(t *testing.T) {
 		{"client_ip", func(in *Input) { in.ClientIP = "not-an-ip" }},
 		{"details", func(in *Input) {
 			in.Details = map[string]string{}
-			for i := range 17 {
+			for i := range 25 {
 				in.Details[strings.Repeat("k", i+1)] = "v"
 			}
 		}},

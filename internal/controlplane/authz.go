@@ -72,6 +72,9 @@ const (
 	scopeAdminAuditRead apikeys.Scope = "adminaudit:read"
 	// scopeWorkersAdmin guards workers/{id}/revoke (W-P2-WCA-05).
 	scopeWorkersAdmin apikeys.Scope = "workers:admin"
+	// The agent registry routes (W-P2-AREG-02).
+	scopeAgentsRead  apikeys.Scope = "agents:read"
+	scopeAgentsWrite apikeys.Scope = "agents:write"
 	// TODO(W-P2-AREG-02, #72): GET agents rows take agents:read, writes take
 	// agents:write. TODO(W-P2-WCA-08): worker-enrollments take workers:admin
 	// (POST enrollments stays none).
@@ -198,6 +201,16 @@ func authzTable() map[routeKey]authzRow {
 		// rotation is refused outside console.auth oidc (use_cli).
 		{get, "/dashboard/api/keys", readRow(admin, "keys.read", none)},
 		{post, "/dashboard/api/keys/rotate", auditedRow(admin, "keys.rotate_requested", auditTargetKeys, none)},
+		// The agent registry (W-P2-AREG-02): viewers read, every write is admin
+		// because a key or group change decides who can mint agent-bound tokens.
+		// 404 unless the control plane set the seam. There is no DELETE row: an
+		// unlisted method is refused for every role.
+		{get, "/dashboard/api/agents", readRow(viewer, AgentActionList, scopeAgentsRead)},
+		{post, "/dashboard/api/agents", auditedRow(admin, AgentActionCreate, AgentAuditTarget, scopeAgentsWrite)},
+		{get, "/dashboard/api/agents/{id}", readRow(viewer, AgentActionRead, scopeAgentsRead)},
+		{put, "/dashboard/api/agents/{id}", auditedRow(admin, AgentActionUpdate, AgentAuditTarget, scopeAgentsWrite)},
+		{post, "/dashboard/api/agents/{id}/disable", auditedRow(admin, AgentActionDisable, AgentAuditTarget, scopeAgentsWrite)},
+		{post, "/dashboard/api/agents/{id}/enable", auditedRow(admin, AgentActionEnable, AgentAuditTarget, scopeAgentsWrite)},
 		// Served by the control plane itself, ahead of dash.Handler (cpDashboardRoutes).
 		{get, "/dashboard/api/sessions", readRow(admin, "sessions.read", none)},
 		{del, "/dashboard/api/sessions", auditedRow(admin, "sessions.revoke", "sessions", none)},
