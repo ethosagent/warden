@@ -218,7 +218,7 @@ var requestRefusals = func() []Case {
 	refusal := func(name, reason string, status int, code string, attack func(t testing.TB, s *Stack) Observed) Case {
 		return Case{
 			Name: name, Path: PathToken, Attack: attack, Unverified: true,
-			WantStatus: status, WantBody: `"error":"` + code + `"`, WantLog: denied(code, reason),
+			WantStatus: status, WantBody: `"error":"` + code + `"`, WantReason: reason, WantLog: denied(code, reason),
 		}
 	}
 	return []Case{
