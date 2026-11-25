@@ -462,7 +462,7 @@ func (s *Server) transitionChange(w http.ResponseWriter, r *http.Request, id, ac
 	)
 	switch action {
 	case "submit":
-		res, err = s.changeDrafts.Submit(r.Context(), id, rev)
+		res, err = s.changeDrafts.Submit(withForce(r.Context(), r), id, rev)
 	case "withdraw":
 		res, err = s.changeDrafts.Withdraw(r.Context(), id, rev)
 	default:
@@ -484,7 +484,7 @@ func (s *Server) approveChange(w http.ResponseWriter, r *http.Request, id string
 		writeError(w, http.StatusBadRequest, "revision and doc_sha256 are required")
 		return
 	}
-	res, err := s.changeDrafts.Approve(r.Context(), id, in)
+	res, err := s.changeDrafts.Approve(withForce(r.Context(), r), id, in)
 	s.writeChangeResult(w, res, err)
 }
 
@@ -516,7 +516,7 @@ func (s *Server) emergencyApplyChange(w http.ResponseWriter, r *http.Request, id
 	if in.Reason, ok = cleanChangeText(w, in.Reason, maxEmergencyReason, "reason"); !ok {
 		return
 	}
-	res, err := s.changeDrafts.EmergencyApply(r.Context(), id, in)
+	res, err := s.changeDrafts.EmergencyApply(withForce(r.Context(), r), id, in)
 	s.writeChangeResult(w, res, err)
 }
 
