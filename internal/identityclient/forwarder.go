@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/ethosagent/warden/internal/clock"
 )
 
 // Forwarder limits. They equal the worker's own CONNECT preamble limits in
@@ -28,6 +30,8 @@ const (
 	// maxConnectHeaderBytes caps the whole preamble: request line, every header
 	// line and the blank line (431).
 	maxConnectHeaderBytes = 64 << 10 // 64 KiB
+	// maxConnectHeaderLines caps the header lines after the request line (431).
+	maxConnectHeaderLines = 100
 	// connectPreambleTimeout is how long a client may take to deliver the
 	// whole preamble.
 	connectPreambleTimeout = 10 * time.Second
@@ -54,6 +58,13 @@ const (
 	reasonLoginRequired     = "login_required"
 	reasonIssuerUnreachable = "issuer_unreachable"
 	reasonTokenUnavailable  = "token_unavailable"
+	// The reasons of the Warden-token path (also State reasons) and the tunnel cap.
+	reasonCPUnreachable  = "cp_unreachable"
+	reasonExchangeDenied = "exchange_denied"
+	reasonTunnelLimit    = "tunnel_limit"
+
+	// reasonHeader names the failure class of a 503 for programs.
+	reasonHeader = "X-Warden-Forwarder-Reason"
 )
 
 // Forwarder is a CONNECT-only HTTP proxy for loopback. A child process points
@@ -92,9 +103,30 @@ type Forwarder struct {
 	// WorkerAddr is the worker proxy's host:port, the only address dialled.
 	WorkerAddr string
 	// Token returns the current ID token; IDC-06 passes Client.Token's IDToken.
+	// Ignored when Source is set.
 	Token func(ctx context.Context) (string, error)
-	// ClientCredential is the per-run secret the child must present.
+	// Source, when set, supplies the Warden token of an agent (RCP-01) instead
+	// of Token: a worker 407 forces one Refresh and a retry, a rotation drains
+	// the tunnels opened with the old token, and a 503 carries the failure
+	// class in X-Warden-Forwarder-Reason.
+	Source TokenSource
+	// ClientCredential is the per-run secret the child must present. It may be
+	// empty only with AllowAnonymousClients.
 	ClientCredential string
+	// AllowAnonymousClients lets clients connect without a credential
+	// (`identity forward` when --client-credential-env is not given): the
+	// forwarder is then reachable by anything that can reach its listener. Any
+	// Proxy-Authorization a client sends is still dropped.
+	AllowAnonymousClients bool
+	// MaxTunnels caps the CONNECTs being served at once; above it a CONNECT gets
+	// 503. Zero selects 512.
+	MaxTunnels int
+	// DialContext opens the one connection to WorkerAddr; nil uses a net.Dialer
+	// with the 10s dial timeout. Tests pass a recording dialer.
+	DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
+	// Clock times the tunnel drain (idle for 2s, token exp); nil is the real
+	// clock. The preamble and dial deadlines use Now and real time.
+	Clock clock.Clock
 	// Now is the clock for the preamble deadline; nil selects time.Now.
 	Now func() time.Time
 	// Log receives one line per tunnel; nil discards.
@@ -119,6 +151,9 @@ type Forwarder struct {
 
 	// preambleTimeout overrides connectPreambleTimeout in tests.
 	preambleTimeout time.Duration
+
+	// tunnels is set by Serve.
+	tunnels *tunnelRegistry
 }
 
 func (f *Forwarder) now() time.Time {
@@ -149,16 +184,28 @@ func (f *Forwarder) Serve(ctx context.Context, ln net.Listener) error {
 	switch {
 	case f.WorkerAddr == "":
 		return errors.New("identityclient: forwarder needs a worker address")
-	case f.Token == nil:
+	case f.Token == nil && f.Source == nil:
 		return errors.New("identityclient: forwarder needs a token source")
-	case f.ClientCredential == "":
+	case f.ClientCredential == "" && !f.AllowAnonymousClients:
 		return errors.New("identityclient: forwarder needs a client credential")
 	}
 	stop := context.AfterFunc(ctx, func() { _ = ln.Close() })
 	defer stop()
 
+	f.tunnels = newTunnelRegistry(f.Clock, f.MaxTunnels, f.currentFingerprint)
+	var loops sync.WaitGroup
+	loopCtx, stopLoops := context.WithCancel(ctx)
+	// The drain loop outlives the handlers (they are waited for first), so a
+	// token's exp is enforced while the tunnels wind down.
+	defer loops.Wait()
+	defer stopLoops()
+	loops.Add(1)
+	go func() { defer loops.Done(); f.tunnels.run(loopCtx) }()
 	var wg sync.WaitGroup
 	defer wg.Wait()
+	if f.Source != nil {
+		f.Source.OnRotate(f.onRotate)
+	}
 	if f.Challenge != nil {
 		// On return: cancel the context the poll is bound to, wait for the poll,
 		// then for the handlers (defers run in reverse).
@@ -272,7 +319,7 @@ func (f *Forwarder) handle(ctx context.Context, conn net.Conn) {
 	// read (to bound it and find the end) and dropped.
 	total := len(line)
 	var auth string
-	authLines := 0
+	authLines, lines := 0, 0
 	for {
 		hdr, err := readBoundedLine(br, maxConnectHeaderBytes-total)
 		if err != nil {
@@ -285,6 +332,10 @@ func (f *Forwarder) handle(ctx context.Context, conn net.Conn) {
 		if hdr == "\r\n" || hdr == "\n" {
 			break
 		}
+		if lines++; lines > maxConnectHeaderLines {
+			rejectAndClose(conn, br, "431 Request Header Fields Too Large", "", "")
+			return
+		}
 		if name, value, ok := strings.Cut(hdr, ":"); ok && strings.EqualFold(name, "Proxy-Authorization") {
 			if authLines == 0 {
 				auth = strings.TrimSpace(value)
@@ -296,12 +347,19 @@ func (f *Forwarder) handle(ctx context.Context, conn net.Conn) {
 		return
 	}
 
-	if authLines != 1 || !f.credentialOK(auth) {
+	if f.ClientCredential != "" && (authLines != 1 || !f.credentialOK(auth)) {
 		rejectAndClose(conn, br, "407 Proxy Authentication Required", "Proxy-Authenticate: Basic realm=\"warden-forwarder\"\r\n", "")
 		return
 	}
 
-	token, err := f.Token(ctx)
+	if !f.tunnels.reserve() {
+		f.log().Warn("identity forwarder: tunnel limit reached", "max_tunnels", f.tunnels.max)
+		rejectAndClose(conn, br, "503 Service Unavailable", "Content-Type: text/plain\r\n"+reasonHeader+": "+reasonTunnelLimit+"\r\n", "warden forwarder: "+reasonTunnelLimit+"\n")
+		return
+	}
+	defer f.tunnels.release()
+
+	token, exp, err := f.acquire(ctx)
 	anonymous := false
 	if (err != nil || token == "") && f.Challenge != nil && errors.Is(err, ErrLoginRequired) {
 		// No usable login and the sign-in challenge is on: ask the worker. It
@@ -310,15 +368,9 @@ func (f *Forwarder) handle(ctx context.Context, conn net.Conn) {
 		anonymous, token, err = true, "", nil
 	}
 	if !anonymous && (err != nil || token == "") {
-		reason := reasonTokenUnavailable
-		switch {
-		case errors.Is(err, ErrLoginRequired):
-			reason = reasonLoginRequired
-		case errors.Is(err, ErrIssuerUnreachable):
-			reason = reasonIssuerUnreachable
-		}
+		reason := f.failureReason(err)
 		f.log().Warn("identity forwarder: no token for CONNECT", "reason", reason)
-		rejectAndClose(conn, br, "503 Service Unavailable", "Content-Type: text/plain\r\n", "warden forwarder: "+reason+"\n")
+		rejectAndClose(conn, br, "503 Service Unavailable", "Content-Type: text/plain\r\n"+reasonHeader+": "+reason+"\r\n", "warden forwarder: "+reason+"\n")
 		return
 	}
 	fp := "none"
@@ -326,37 +378,41 @@ func (f *Forwarder) handle(ctx context.Context, conn net.Conn) {
 		fp = Fingerprint(token)
 	}
 
-	dialer := net.Dialer{Timeout: workerDialTimeout}
-	wc, err := dialer.DialContext(ctx, "tcp", f.WorkerAddr)
-	if err != nil {
-		f.log().Warn("identity forwarder: worker unreachable", "token_fp", fp)
-		rejectAndClose(conn, br, "502 Bad Gateway", "Content-Type: text/plain\r\n", "warden forwarder: worker_unreachable\n")
-		return
-	}
-	defer func() { _ = wc.Close() }()
-
 	// A fresh CONNECT: the request target, Host and the injected identity (none
-	// when the sign-in challenge is being asked for).
+	// when the sign-in challenge is being asked for). An anonymous CONNECT asks
+	// the worker to put the challenge inside the tunnel (#621): the worker's 200
+	// then carries the offer, which is removed below.
 	authLine := ""
-	if !anonymous {
-		authLine = "Proxy-Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte(workerUser+":"+token)) + "\r\n"
-	}
-	// An anonymous CONNECT asks the worker to put the challenge inside the tunnel
-	// (#621): the worker's 200 then carries the offer, which is removed below.
-	if anonymous && f.InTunnel {
+	switch {
+	case !anonymous:
+		authLine = workerAuthLine(token)
+	case f.InTunnel:
 		authLine = challengeAskHeader + ": " + challengeAskValue + "\r\n"
 	}
-	if _, err := fmt.Fprintf(wc, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n%s\r\n", target, target, authLine); err != nil {
-		rejectAndClose(conn, br, "502 Bad Gateway", "Content-Type: text/plain\r\n", "warden forwarder: worker_unreachable\n")
+	rep, kind := f.connectWorker(ctx, target, authLine)
+	if kind != "" {
+		f.log().Warn("identity forwarder: "+kind, "token_fp", fp)
+		rejectAndClose(conn, br, "502 Bad Gateway", "Content-Type: text/plain\r\n", "warden forwarder: "+kind+"\n")
 		return
 	}
+	if rep.status == 407 && !anonymous && f.Source != nil {
+		// The worker did not accept the token (revoked, or rotated at the CP):
+		// force one exchange and try once more. The refreshed token is used even
+		// when the exchange was held back by a cooldown and failed, as long as a
+		// valid one is held.
+		fresh, rerr := f.Source.Refresh(ctx)
+		if fresh.AccessToken != "" {
+			f.log().Info("identity forwarder: worker answered 407, retrying once", "token_fp", fp,
+				"refreshed_fp", Fingerprint(fresh.AccessToken), "refresh_error", rerr != nil)
+			if rep2, kind2 := f.connectWorker(ctx, target, workerAuthLine(fresh.AccessToken)); kind2 == "" {
+				_ = rep.wc.Close()
+				rep, exp, fp = rep2, fresh.Expiry, Fingerprint(fresh.AccessToken)
+			}
+		}
+	}
+	wc, wbr, status, head := rep.wc, rep.br, rep.status, rep.head
+	defer func() { _ = wc.Close() }()
 
-	status, head, wbr, err := readWorkerHead(wc, f.now, f.preamble())
-	if err != nil {
-		f.log().Warn("identity forwarder: bad worker reply", "token_fp", fp)
-		rejectAndClose(conn, br, "502 Bad Gateway", "Content-Type: text/plain\r\n", "warden forwarder: worker_bad_reply\n")
-		return
-	}
 	if status == 407 && f.Challenge != nil {
 		f.relayChallenge(ctx, conn, br, wc, wbr, head, fp)
 		return
@@ -372,13 +428,102 @@ func (f *Forwarder) handle(ctx context.Context, conn net.Conn) {
 	if _, err := io.WriteString(conn, head); err != nil {
 		return
 	}
-	f.log().Info("identity forwarder: CONNECT relayed", "token_fp", fp, "status", status)
 	if status != 200 {
+		f.log().Info("identity forwarder: CONNECT relayed", "token_fp", fp, "status", status)
 		_ = wc.SetReadDeadline(f.now().Add(f.preamble()))
 		relayErrorBody(conn, wbr, head)
 		return
 	}
-	splice(conn, br, wc, wbr)
+	f.tunnels.serve(f.log(), target, status, fp, exp, conn, br, wc, wbr)
+}
+
+// workerReply is the worker's answer to one CONNECT.
+type workerReply struct {
+	wc     net.Conn
+	br     *bufio.Reader
+	status int
+	head   string
+}
+
+// connectWorker dials the worker, sends a fresh CONNECT to target carrying
+// authLine (empty, or one complete header line) and reads its status line and
+// headers. A non-empty kind names the failure; wc is then closed.
+func (f *Forwarder) connectWorker(ctx context.Context, target, authLine string) (workerReply, string) {
+	dial := f.DialContext
+	if dial == nil {
+		dial = (&net.Dialer{Timeout: workerDialTimeout}).DialContext
+	}
+	wc, err := dial(ctx, "tcp", f.WorkerAddr)
+	if err != nil {
+		return workerReply{}, "worker_unreachable"
+	}
+	if _, err := fmt.Fprintf(wc, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n%s\r\n", target, target, authLine); err != nil {
+		_ = wc.Close()
+		return workerReply{}, "worker_unreachable"
+	}
+	status, head, wbr, err := readWorkerHead(wc, f.now, f.preamble())
+	if err != nil {
+		_ = wc.Close()
+		return workerReply{}, "worker_bad_reply"
+	}
+	return workerReply{wc: wc, br: wbr, status: status, head: head}, ""
+}
+
+// workerAuthLine is the Proxy-Authorization header line that carries token.
+func workerAuthLine(token string) string {
+	return "Proxy-Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte(workerUser+":"+token)) + "\r\n"
+}
+
+// acquire returns the token to inject and its expiry (zero for the P1 ID token,
+// whose tunnels are not drained).
+func (f *Forwarder) acquire(ctx context.Context) (string, time.Time, error) {
+	if f.Source != nil {
+		tok, err := f.Source.Token(ctx)
+		return tok.AccessToken, tok.Expiry, err
+	}
+	tok, err := f.Token(ctx)
+	return tok, time.Time{}, err
+}
+
+// failureReason names why no token is available. The P1 path keeps its two
+// reasons; the Warden-token path reports the State reasons.
+func (f *Forwarder) failureReason(err error) string {
+	var de ErrExchangeDenied
+	switch {
+	case errors.Is(err, ErrLoginRequired):
+		return reasonLoginRequired
+	case errors.As(err, &de):
+		return reasonExchangeDenied
+	case errors.Is(err, ErrIssuerUnreachable):
+		if f.Source != nil {
+			return reasonLoginRequired
+		}
+		return reasonIssuerUnreachable
+	case f.Source != nil:
+		return reasonCPUnreachable
+	}
+	return reasonTokenUnavailable
+}
+
+// currentFingerprint is the fingerprint of the newest valid Warden token.
+func (f *Forwarder) currentFingerprint() (string, bool) {
+	if f.Source == nil {
+		return "", false
+	}
+	tok, ok := f.Source.Current()
+	if !ok {
+		return "", false
+	}
+	return Fingerprint(tok.AccessToken), true
+}
+
+// onRotate runs after every successful exchange: it logs the rotation and has
+// the drain loop look at the tunnels opened with an older token.
+func (f *Forwarder) onRotate() {
+	if tok, ok := f.Source.Current(); ok {
+		f.log().Info("token_rotated", "token_fp", Fingerprint(tok.AccessToken), "exp", tok.Expiry)
+	}
+	f.tunnels.wake()
 }
 
 // relayChallenge answers the agent for a worker 407. The worker's body is read
@@ -489,30 +634,4 @@ func relayErrorBody(client net.Conn, wbr *bufio.Reader, head string) {
 		_, _ = io.Copy(client, io.LimitReader(wbr, int64(min(n, maxWorkerReplyBody))))
 		return
 	}
-}
-
-// splice copies both ways. EOF on one side half-closes the other's write side
-// so a response can still finish; an error on either side, or both sides
-// ending, closes both connections. Bytes the readers had already buffered are
-// forwarded first.
-func splice(client net.Conn, cbr *bufio.Reader, worker net.Conn, wbr *bufio.Reader) {
-	var wg sync.WaitGroup
-	pipe := func(dst net.Conn, src io.Reader) {
-		defer wg.Done()
-		if _, err := io.Copy(dst, src); err != nil {
-			_ = client.Close()
-			_ = worker.Close()
-			return
-		}
-		if cw, ok := dst.(interface{ CloseWrite() error }); ok {
-			_ = cw.CloseWrite()
-			return
-		}
-		_ = client.Close()
-		_ = worker.Close()
-	}
-	wg.Add(2)
-	go pipe(worker, cbr)
-	go pipe(client, wbr)
-	wg.Wait()
 }
