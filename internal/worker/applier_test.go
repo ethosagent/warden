@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"errors"
 	"io"
 	"log/slog"
 	"runtime"
@@ -307,5 +308,128 @@ func TestApplier_NoMCPSwapAfterShutdown(t *testing.T) {
 	n := runtime.Stack(buf, true)
 	if strings.Contains(string(buf[:n]), "(*Gateway).flushLoop") {
 		t.Fatal("the gateway Apply built after shutdown was not closed: flushLoop leaked")
+	}
+}
+
+// TestApplier_ApplyBoot pins the boot apply: a distributed block is applied
+// exactly as a changed long-poll applies it, while a block the control plane
+// does not distribute keeps the local boot config (never less strict than the
+// local file), where Apply would turn it off. The MCP gateway is left to Run.
+func TestApplier_ApplyBoot(t *testing.T) {
+	t.Run("distributed blocks applied", func(t *testing.T) {
+		a, fake, _, _, _ := identityApplier(t)
+		fake.settings = &config.SettingsWire{
+			DLP:        &config.DLPSettings{Mode: config.DLPModeMonitor},
+			Compliance: &config.ToggleSetting{Enabled: true},
+			MCP:        &config.MCPSettings{Enabled: true, Mode: "monitor"},
+			Identity:   &config.IdentitySettings{DefaultMode: "attribute", Issuer: "http://idp.test", Audience: "warden", InternalIssuerURL: "http://idp.test"},
+		}
+		a.ApplyBoot()
+		if got := a.p.DLPMode(); got != config.DLPModeMonitor {
+			t.Errorf("DLP mode = %q, want monitor", got)
+		}
+		if !a.liveCompliance {
+			t.Error("compliance not enabled from the boot pull")
+		}
+		if a.identity.live.mode != proxy.IdentityModeAttribute {
+			t.Errorf("identity mode = %q, want attribute", a.identity.live.mode)
+		}
+		if *a.liveMCPGW != nil {
+			t.Error("ApplyBoot built an MCP gateway; Run builds the boot gateway")
+		}
+	})
+	t.Run("absent blocks keep the local config", func(t *testing.T) {
+		a, fake, _, _, _ := identityApplier(t)
+		// The local boot config: DLP enforce, compliance on, identity attribute.
+		fake.settings = &config.SettingsWire{
+			DLP:        &config.DLPSettings{Mode: config.DLPModeEnforce},
+			Compliance: &config.ToggleSetting{Enabled: true},
+			Identity:   &config.IdentitySettings{DefaultMode: "attribute", Issuer: "http://idp.test", Audience: "warden", InternalIssuerURL: "http://idp.test"},
+		}
+		a.Apply()
+		for _, s := range []*config.SettingsWire{nil, {}} {
+			fake.settings = s
+			a.ApplyBoot()
+			if got := a.p.DLPMode(); got != config.DLPModeEnforce {
+				t.Errorf("settings %+v: DLP mode = %q, want the local enforce", s, got)
+			}
+			if !a.liveCompliance {
+				t.Errorf("settings %+v: local compliance turned off", s)
+			}
+			if a.identity.live.mode != proxy.IdentityModeAttribute {
+				t.Errorf("settings %+v: identity mode = %q, want the local attribute", s, a.identity.live.mode)
+			}
+		}
+	})
+	t.Run("absent judge keeps the local judge", func(t *testing.T) {
+		a, fake, _ := newTestApplier(t)
+		a.p.SetJudge(stubJudge{}) // the judge Run built from the local file
+		fake.settings = &config.SettingsWire{DLP: &config.DLPSettings{Mode: config.DLPModeMonitor}}
+		a.ApplyBoot()
+		if !a.p.JudgeEnabled() {
+			t.Error("ApplyBoot with no distributed judge dropped the local judge")
+		}
+		// A changed long-poll with the same settings turns it off (Apply semantics).
+		a.Apply()
+		if a.p.JudgeEnabled() {
+			t.Error("Apply with no distributed judge kept the judge")
+		}
+	})
+	t.Run("cache TTL and log level", func(t *testing.T) {
+		a, fake, logCtrl := newTestApplier(t)
+		// Absent: the local TTL (1h) and level (info) stand.
+		fake.settings = &config.SettingsWire{DLP: &config.DLPSettings{Mode: config.DLPModeMonitor}}
+		a.ApplyBoot()
+		if a.liveCacheTTL != time.Hour {
+			t.Errorf("liveCacheTTL = %v, want the local 1h", a.liveCacheTTL)
+		}
+		if got := logCtrl.Level(); got != slog.LevelInfo {
+			t.Errorf("log level = %v, want the local info", got)
+		}
+		// Present: applied at boot, as a changed long-poll would.
+		fake.settings = &config.SettingsWire{
+			CacheTTLSeconds: intPtr(120),
+			Logging:         &config.LoggingSettings{Level: "debug"},
+		}
+		a.ApplyBoot()
+		if a.liveCacheTTL != 120*time.Second {
+			t.Errorf("liveCacheTTL = %v, want 120s from the boot pull", a.liveCacheTTL)
+		}
+		if got := logCtrl.Level(); got != slog.LevelDebug {
+			t.Errorf("log level = %v, want debug from the boot pull", got)
+		}
+	})
+}
+
+// stubJudge allows everything; only its presence matters.
+type stubJudge struct{}
+
+func (stubJudge) Evaluate(string, string, string, string, string, bool) proxy.Verdict {
+	return proxy.Verdict{Decision: "allow"}
+}
+
+// failingFetcher fails every fetch and counts them, like the no-credentials
+// fetcher of a cache boot.
+type failingFetcher struct{ calls int }
+
+func (f *failingFetcher) Fetch(string) (string, error) {
+	f.calls++
+	return "", errors.New("no credentials")
+}
+
+// TestApplier_CacheTTLSecretsUnavailable: on a worker booted from the bundle
+// cache with no AWS credentials, a distributed TTL change (the boot apply
+// included) builds another unhealthy cache: no prefetch, nothing resolved.
+func TestApplier_CacheTTLSecretsUnavailable(t *testing.T) {
+	a, fake, _ := newTestApplier(t)
+	f := &failingFetcher{}
+	a.secretFetcher, a.placeholders, a.secretsUnavailable = f, []string{"OPENAI_KEY"}, true
+	fake.settings = &config.SettingsWire{CacheTTLSeconds: intPtr(7200)}
+	a.ApplyBoot()
+	if a.liveCacheTTL != 7200*time.Second {
+		t.Errorf("liveCacheTTL = %v, want 7200s", a.liveCacheTTL)
+	}
+	if f.calls != 0 {
+		t.Errorf("%d fetches, want 0: the rebuilt cache must stay unhealthy, not prefetch", f.calls)
 	}
 }
