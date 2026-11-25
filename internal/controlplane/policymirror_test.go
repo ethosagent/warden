@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -491,5 +492,251 @@ func TestPolicyMirrorConcurrentTick(t *testing.T) {
 	}
 	if srv.mirror.drift.Load() || len(logLines(t, logs.String(), mirrorDriftMsg)) != 0 {
 		t.Fatalf("racing ticks reported the CP's own mirror writes as drift:\n%s", logs)
+	}
+}
+
+// writeMinimalPolicyFile writes a served config with no denylist key (and,
+// with identity, an identity block): the shape a fresh deployment and the
+// security harness use. renderDocToRoot writes "denylist: []" for it, so it is
+// the fixture that tells an absent list from an empty one.
+func writeMinimalPolicyFile(t *testing.T, identity bool) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "policy.yaml")
+	body := "logging:\n  level: info\n  format: json\n\npolicy:\n  allowlist:\n    - domain: api.example.com\n"
+	if identity {
+		body += "identity:\n  defaultMode: challenge\n  issuer: https://idp.example\n  audience: warden\n" +
+			"  allowedAZP: [agent-harness, warden-cli]\n"
+	}
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// externalRows is the config.external_change inputs rec holds.
+func externalRows(rec *fakeRecorder) []adminaudit.Input {
+	var out []adminaudit.Input
+	for _, in := range rec.inputs() {
+		if in.Action == actionConfigExternalChange {
+			out = append(out, in)
+		}
+	}
+	return out
+}
+
+// assertQuiet runs ticks drift checks on srv and fails if any reported drift,
+// warned about it or appended a config.external_change row.
+func assertQuiet(t *testing.T, srv *Server, rec *fakeRecorder, logs *bytes.Buffer, ticks int, when string) {
+	t.Helper()
+	ctx := context.Background()
+	for i := range ticks {
+		srv.reloadPolicy(ctx)
+		if srv.mirror.drift.Load() {
+			t.Fatalf("%s: tick %d reported drift on an untouched config:\n%s", when, i+1, logs)
+		}
+	}
+	if rows := externalRows(rec); len(rows) != 0 {
+		t.Fatalf("%s: %d config.external_change rows on an untouched config: %+v", when, len(rows), rows)
+	}
+	if n := len(logLines(t, logs.String(), mirrorDriftMsg)); n != 0 {
+		t.Fatalf("%s: %d drift warnings on an untouched config:\n%s", when, n, logs)
+	}
+}
+
+// TestPolicyDriftIdleNoExternalChange: an idle versioned control plane whose
+// served YAML has no denylist records no config.external_change across many
+// mirror ticks: after the initial import, after a restart over the existing
+// store, and after a save mirrored head into the file. Before the fix the
+// first tick compared the loaded file (denylist null) with head rendered into
+// a temp copy (denylist []) and audited a false drift.
+func TestPolicyDriftIdleNoExternalChange(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		identity bool
+	}{{"policy only", false}, {"with identity", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeMinimalPolicyFile(t, tc.identity)
+			srv, logs := newPublishServer(t, path, config.ConsoleConfig{})
+			rec := &fakeRecorder{}
+			srv.auditRec = rec
+			srv.primeExternalEdit()
+			assertQuiet(t, srv, rec, logs, 5, "after the initial import")
+
+			// A restart over the existing store primes the mirror again.
+			var rlogs bytes.Buffer
+			restarted := New(Config{
+				PolicyPath: path, Token: dashTestToken, State: srv.cfg.State,
+				PolicyStore: PolicyStoreVersioned, Logger: testJSONLogger(&rlogs),
+			})
+			rrec := &fakeRecorder{}
+			restarted.auditRec = rrec
+			restarted.primeExternalEdit()
+			assertQuiet(t, restarted, rrec, &rlogs, 5, "after a restart")
+
+			// A save moves head and mirrors it into the file.
+			if err := restarted.WritePolicy(context.Background(), plusAllow(t, restarted, "saved.example.com"), dashboard.WriteMeta{}); err != nil {
+				t.Fatal(err)
+			}
+			assertQuiet(t, restarted, rrec, &rlogs, 5, "after a save")
+		})
+	}
+}
+
+// TestPolicyDriftMinimalConfigAudited: on the same denylist-free YAML a real
+// hand edit is still drift, audited exactly once with before v<head>:<doc_sha>
+// and after file:<the edited file's blocks hash>, both on an edit made while
+// running and on one that lands during boot (before the first tick).
+func TestPolicyDriftMinimalConfigAudited(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		tickBefore bool
+	}{{"while running", true}, {"during boot", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeMinimalPolicyFile(t, true)
+			srv, logs := newPublishServer(t, path, config.ConsoleConfig{})
+			rec := &fakeRecorder{}
+			srv.auditRec = rec
+			srv.primeExternalEdit()
+			ctx := context.Background()
+			if tc.tickBefore {
+				srv.reloadPolicy(ctx)
+			}
+			idle, err := servedBlocksHash(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			addAllowToYAML(t, path, "hand.example.com")
+			edited, err := servedBlocksHash(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if edited == idle {
+				t.Fatal("the hand edit did not change the blocks hash")
+			}
+			for range 4 {
+				srv.reloadPolicy(ctx)
+			}
+
+			rows := externalRows(rec)
+			if len(rows) != 1 {
+				t.Fatalf("%d config.external_change rows, want 1: %+v\n%s", len(rows), rows, logs)
+			}
+			head := headVersion(t, srv)
+			if head.Version != 1 {
+				t.Fatalf("head = v%d, want v1: a hand edit must not move head", head.Version)
+			}
+			want := adminaudit.Input{
+				Actor:      adminaudit.Actor{Sub: "system"},
+				ActorRole:  "system",
+				AuthMethod: adminaudit.AuthMethodSystem,
+				Action:     "config.external_change",
+				Target:     "policy",
+				Outcome:    adminaudit.OutcomeOK,
+				BeforeHash: fmt.Sprintf("v1:%s", head.DocSHA256),
+				AfterHash:  "file:" + edited,
+			}
+			if !reflect.DeepEqual(rows[0], want) {
+				t.Fatalf("audit row = %+v\nwant        %+v", rows[0], want)
+			}
+			if !srv.mirror.drift.Load() {
+				t.Fatal("no drift reported after a hand edit")
+			}
+			if got := allowDomainsOf(servedWire(srv)); slices.Contains(got, "hand.example.com") {
+				t.Fatalf("served allowlist = %v: the hand edit is served", got)
+			}
+		})
+	}
+}
+
+// TestCanonicalBlocksJSON: an absent and an empty list encode alike; any
+// content, length or order change of a list still differs.
+func TestCanonicalBlocksJSON(t *testing.T) {
+	enc := func(w policyWire) string {
+		t.Helper()
+		b, err := canonicalBlocksJSON(w)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	a := config.AllowlistEntry{Domain: "a.example.com"}
+	b := config.AllowlistEntry{Domain: "b.example.com"}
+	base := policyWire{Allowlist: []config.AllowlistEntry{a}}
+	empty := policyWire{Allowlist: []config.AllowlistEntry{a}, Denylist: []config.DenylistEntry{}}
+	if enc(base) != enc(empty) {
+		t.Fatalf("absent and empty lists differ:\n %s\n %s", enc(base), enc(empty))
+	}
+	for name, w := range map[string]policyWire{
+		"deny added":    {Allowlist: []config.AllowlistEntry{a}, Denylist: []config.DenylistEntry{{Domain: "x.example.com"}}},
+		"allow added":   {Allowlist: []config.AllowlistEntry{a, b}},
+		"allow changed": {Allowlist: []config.AllowlistEntry{b}},
+		"port changed":  {Allowlist: []config.AllowlistEntry{{Domain: "a.example.com", Port: 8443}}},
+	} {
+		if enc(w) == enc(base) {
+			t.Errorf("%s: encodes like the base: %s", name, enc(w))
+		}
+	}
+	ab := policyWire{Allowlist: []config.AllowlistEntry{a, b}}
+	ba := policyWire{Allowlist: []config.AllowlistEntry{b, a}}
+	if enc(ab) == enc(ba) {
+		t.Error("list order does not count")
+	}
+
+	// Settings level: only a null or an empty list is an absence. A false, a
+	// 0, a "" and an empty block are values and stay distinct from absent.
+	zero := 0
+	withSettings := func(st config.SettingsWire) policyWire {
+		return policyWire{Allowlist: []config.AllowlistEntry{a}, Settings: &st}
+	}
+	identity := func(mode string) policyWire {
+		return withSettings(config.SettingsWire{Identity: &config.IdentitySettings{
+			DefaultMode: mode, Issuer: "https://idp.example", Audience: "warden",
+		}})
+	}
+	for name, w := range map[string]policyWire{
+		"empty settings block {}":   withSettings(config.SettingsWire{}),
+		"empty logging block {}":    withSettings(config.SettingsWire{Logging: &config.LoggingSettings{}}),
+		"advisory enabled false":    withSettings(config.SettingsWire{Advisory: &config.ToggleSetting{Enabled: false}}),
+		"cacheTTLSeconds pointer 0": withSettings(config.SettingsWire{CacheTTLSeconds: &zero}),
+		"agent with an empty id":    withSettings(config.SettingsWire{Agents: []config.AgentSettings{{ID: ""}}}),
+		"identity defaultMode off":  identity("off"),
+	} {
+		if enc(w) == enc(base) {
+			t.Errorf("%s: encodes like absent settings: %s", name, enc(w))
+		}
+	}
+	// A pointer to a zero value is not nil, at the same depth.
+	noSettings := enc(withSettings(config.SettingsWire{}))
+	if enc(withSettings(config.SettingsWire{CacheTTLSeconds: &zero})) == noSettings {
+		t.Error("cacheTTLSeconds: a pointer to 0 encodes like nil")
+	}
+	if enc(withSettings(config.SettingsWire{Advisory: &config.ToggleSetting{}})) == noSettings {
+		t.Error("advisory: a pointer to a false toggle encodes like nil")
+	}
+	if enc(identity("challenge")) == enc(identity("off")) {
+		t.Error("an identity defaultMode change does not count")
+	}
+	if enc(identity("challenge")) == enc(identity("")) {
+		t.Error("clearing identity defaultMode does not count")
+	}
+	// An empty settings list is an absence there too.
+	if enc(withSettings(config.SettingsWire{Agents: []config.AgentSettings{}})) != noSettings {
+		t.Error("settings: an empty and an absent agents list differ")
+	}
+
+	// dropEmpty on raw JSON: "", false, 0 and {} members survive.
+	for _, raw := range []string{`{"k":""}`, `{"k":false}`, `{"k":0}`, `{"k":{}}`} {
+		var v any
+		if err := json.Unmarshal([]byte(raw), &v); err != nil {
+			t.Fatal(err)
+		}
+		got, err := json.Marshal(dropEmpty(v))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != raw {
+			t.Errorf("dropEmpty(%s) = %s, want it unchanged", raw, got)
+		}
 	}
 }
