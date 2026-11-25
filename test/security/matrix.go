@@ -205,8 +205,13 @@ func (s *Stack) runCase(t testing.TB, c Case) {
 			if rows := after.tokenEvents[before.tokenEventCount:]; len(rows) != 0 {
 				t.Errorf("new token_events rows = %+v, want none for a caller that did not authenticate", rows)
 			}
-			logs := after.logs[before.logLen:]
-			if !strings.Contains(logs, "token_exchange_unauthenticated") || !strings.Contains(logs, `"reason":"`+c.WantReason+`"`) {
+			found := false
+			for _, line := range strings.Split(after.logs[before.logLen:], "\n") {
+				if strings.Contains(line, "token_exchange_unauthenticated") && strings.Contains(line, `"reason":"`+c.WantReason+`"`) {
+					found = true
+				}
+			}
+			if !found {
 				t.Errorf("the logs written during the case carry no token_exchange_unauthenticated warning with reason %q", c.WantReason)
 			}
 		} else if c.WantResult != "" || c.WantReason != "" {
@@ -223,6 +228,11 @@ func (s *Stack) runCase(t testing.TB, c Case) {
 		}
 		if !contains(got, c.WantDeny) {
 			t.Errorf("new deny events carry reasons %v, want one with %q", got, c.WantDeny)
+		}
+		if c.Path == PathWorker {
+			if d := after.blocked - before.blocked; d != 1 {
+				t.Errorf("warden_blocked_total{reason=%q} rose by %v, want 1", c.WantDeny, d)
+			}
 		}
 	}
 	if c.WantAudit != "" {
@@ -256,6 +266,7 @@ type snap struct {
 	auditCount      int
 	logs            string
 	logLen          int
+	blocked         float64
 }
 
 type denyEvent struct{ Reason string }
@@ -287,6 +298,9 @@ func (s *Stack) snapshot(t testing.TB, w *Worker, c Case) snap {
 		sn.tokenEvents = s.TokenEvents(t)
 		sn.tokenEventCount = len(sn.tokenEvents)
 	}
+	if c.WantDeny != "" && c.Path == PathWorker {
+		sn.blocked = s.Metric(t, w, "warden_blocked_total", map[string]string{"reason": c.WantDeny})
+	}
 	if c.WantDeny != "" {
 		for _, e := range s.DenyEvents(t, w) {
 			sn.deny = append(sn.deny, denyEvent{Reason: e.Reason})
@@ -317,6 +331,9 @@ func validateCase(c Case) []string {
 	var bad []string
 	if c.WantStatus == 0 {
 		bad = append(bad, "WantStatus is not set")
+	}
+	if c.Unauthenticated && (c.WantReason == "" || c.Path != PathToken) {
+		bad = append(bad, "Unauthenticated needs Path token and a WantReason to read from the warning")
 	}
 	prefixes := map[string]Path{"identity.reason:": PathWorker, "token.reason:": PathToken, "bundle.reason:": PathBundle}
 	for _, cov := range c.Covers {

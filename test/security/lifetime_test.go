@@ -216,24 +216,19 @@ func holdTunnel(t testing.TB, s *Stack, agent, tokKey, key string) *Tunnel {
 	return tun
 }
 
-// cutAndWait runs cut, then waits for w to apply the bundle that carries it.
-func cutAndWait(t testing.TB, s *Stack, w *Worker, cut func()) {
-	t.Helper()
-	seq := s.BundleSeq(t, w)
-	cut()
-	s.AwaitBundle(t, w, seq)
-}
-
 func TestLifetime(t *testing.T) {
 	t.Run("user_blocked", func(t *testing.T) {
 		s := lifetimeStack(t)
 		tun1 := holdTunnel(t, s, "agent-a", keyU1, keyT1)
 		tun2 := holdTunnel(t, s, "agent-a", keyU2, "lifetime.tunnel-user-2")
 
-		cutAndWait(t, s, s.Worker("agent-a"), func() { s.BlockUser(t, "user-1") })
+		cut := s.StartCut(t, s.Worker("agent-a"), func() { s.BlockUser(t, "user-1") })
 		// The block closes the user's open tunnels (W-P1-BLOCK-05); the closed
 		// tunnel is what the user sees instead of a 403 on it.
-		s.Eventually("the blocked user's tunnel to be closed by the worker", tun1.Closed)
+		cut.Within(t, cutBound, "close the blocked user's tunnel", tun1.Closed)
+		cut.Within(t, cutBound, "refuse the blocked user's next request", func() bool {
+			return s.Do(t, s.Worker("agent-a"), Via(TransportConnect, scratchToken(s, keyU1))).Status == http.StatusForbidden
+		})
 		Run(t, s, "worker", blockedUserCases)
 
 		// A second user is unaffected, on the open tunnel and on a new one.
@@ -251,8 +246,11 @@ func TestLifetime(t *testing.T) {
 		tun := holdTunnel(t, s, "agent-a", keyU1, keyT1)
 		tunB := holdTunnel(t, s, "agent-b", keyB1, keyTB)
 
-		cutAndWait(t, s, s.Worker("agent-a"), func() { s.SetAgentEnabled(t, "agent-a", false) })
-		s.Eventually("the disabled agent's tunnel to be closed by the worker", tun.Closed)
+		cut := s.StartCut(t, s.Worker("agent-a"), func() { s.SetAgentEnabled(t, "agent-a", false) })
+		cut.Within(t, cutBound, "close the disabled agent's tunnel", tun.Closed)
+		cut.Within(t, cutBound, "refuse a request with a valid token", func() bool {
+			return s.Do(t, s.Worker("agent-a"), Via(TransportConnect, scratchToken(s, keyU1))).Status == http.StatusForbidden
+		})
 		Run(t, s, "worker", disabledAgentCases)
 
 		// agent-b keeps working, on its open tunnel and on a new one.
@@ -269,7 +267,10 @@ func TestLifetime(t *testing.T) {
 		s := lifetimeStack(t)
 		holdTunnel(t, s, "agent-a", keyU1, keyT1)
 
-		cutAndWait(t, s, s.Worker("agent-a"), func() { s.RotateTokenKey(t, true) })
+		cut := s.StartCut(t, s.Worker("agent-a"), func() { s.RotateTokenKey(t, true) })
+		cut.Within(t, cutBound, "refuse the revoked key's token", func() bool {
+			return s.Do(t, s.Worker("agent-a"), Via(TransportConnect, scratchToken(s, keyU1))).Status == http.StatusProxyAuthRequired
+		})
 		Run(t, s, "worker", revokedKeyCases)
 
 		// A token signed by the new key works. The mint guard holds minting back
@@ -300,10 +301,7 @@ func TestLifetime(t *testing.T) {
 		s := lifetimeStack(t)
 		a := agentOf(s, keyAgentA)
 		// Groups are not in the bundle: only the token endpoint sees the change.
-		s.RotateAgentKey(t, a, a.Key, "ops")
-		if r := s.Do(t, s.Worker("agent-a"), Via(TransportConnect, scratchToken(s, keyU1))); r.Status != http.StatusOK {
-			t.Errorf("a token issued before allowed_groups shrank = %d, want 200 until it expires", r.Status)
-		}
+		s.UpdateAgent(t, a, "ops")
 		Run(t, s, "worker", []Case{{
 			Name: "a user outside the shrunk allowed_groups cannot exchange",
 			Path: PathToken,
@@ -318,6 +316,11 @@ func TestLifetime(t *testing.T) {
 			WantResult: "denied",
 			WantReason: "group_not_allowed",
 		}})
+		// The refusal proves the control plane holds the shrunk groups; the
+		// token issued before still serves.
+		if r := s.Do(t, s.Worker("agent-a"), Via(TransportConnect, scratchToken(s, keyU1))); r.Status != http.StatusOK {
+			t.Errorf("a token issued before allowed_groups shrank = %d, want 200 until it expires", r.Status)
+		}
 		s.AssertNoLeak(t, LeakCheck{AllowSwapUpTo: s.Upstream.Hits()})
 	})
 }

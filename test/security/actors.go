@@ -429,7 +429,11 @@ func (s *Stack) Do(tb testing.TB, w *Worker, r Request) Response {
 		tb.Fatalf("security: the proxy sent %d bytes after the CONNECT reply before the TLS handshake", br.Buffered())
 	}
 
-	tc := tls.Client(conn, &tls.Config{RootCAs: s.ProxyCA.Pool(), ServerName: host, MinVersion: tls.VersionTLS12})
+	pool := s.ProxyCA.Pool()
+	if s.opts.NoCA {
+		pool = s.UpstreamCA.Pool() // a raw tunnel: the client speaks TLS to the upstream itself
+	}
+	tc := tls.Client(conn, &tls.Config{RootCAs: pool, ServerName: host, MinVersion: tls.VersionTLS12})
 	if err := tc.Handshake(); err != nil {
 		tb.Fatalf("security: the worker's MITM handshake for %s failed: %v", host, err)
 	}

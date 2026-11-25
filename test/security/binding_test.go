@@ -188,7 +188,9 @@ func TestBinding(t *testing.T) {
 	// tunnel (a worker with no CA) is opaque, so the worker binds it at CONNECT
 	// only and it keeps running after the agent's key is rotated out, until the
 	// token's exp. Require mode's session closing must cut it; when that lands
-	// this test must flip to expect the tunnel closed. A new CONNECT with the
+	// this test must flip to expect the tunnel closed. That needs #270
+	// (WBND-09) AND a require-mode stack: StackOptions cannot start one until
+	// config validation accepts identity.defaultMode require (#113). A new CONNECT with the
 	// same token is refused, which proves the cut reached the worker.
 	t.Run("raw_tunnel_known_gap", func(t *testing.T) {
 		s, a, _ := bindingStack(t, StackOptions{NoCA: true})
@@ -213,30 +215,34 @@ func TestBinding(t *testing.T) {
 			return Seen(s.Do(t, w, Via(TransportConnect, scratchToken(s, keyTokA))))
 		})
 		if tun.Closed() {
-			t.Error("the raw tunnel was closed after the key rotation: W-P2-WBND-03 landed, so flip this test to expect the cut")
+			t.Error("the raw tunnel was closed after the key rotation: session closing landed: flip this test to expect the cut (needs #270 and a require-mode stack)")
 		} else if r, err := tun.Get(t); err != nil || r.Status != http.StatusOK {
 			t.Errorf("a request on the raw tunnel after the rotation = %v %v, want 200 until the tunnel is cut", r.Status, err)
 		}
 		s.AssertNoLeak(t, LeakCheck{AllowSwapUpTo: s.Upstream.Hits()})
 	})
+}
 
-	// KNOWN GAP, accepted in P2: a token is a bearer credential. cnf.jkt names
-	// the agent's registered key but nothing proves the presenter holds it, so a
-	// token replayed from another client on the same agent's port is accepted
-	// until it expires (W-P2-WBND-02, feature doc p2-worker-bound).
-	t.Run("TestStolenTokenSamePort_KnownGap", func(t *testing.T) {
-		s, _, _ := bindingStack(t, StackOptions{})
-		s.PositiveControl(t, "worker", workerControl(s))
-		stolen := scratchToken(s, keyTokA)
-		hits := s.Upstream.Hits()
-		for i := 0; i < 2; i++ {
-			if r := s.Do(t, s.Worker("agent-a"), Via(TransportConnect, stolen)); r.Status != http.StatusOK {
-				t.Errorf("replay %d of a token on its own agent's port = %d, want 200 (no proof of possession in P2)", i, r.Status)
-			}
+// TestStolenTokenSamePort_KnownGap records a known gap that is accepted in P2: a
+// token is a bearer credential. cnf.jkt names the agent's registered key but
+// nothing proves the presenter holds it, so a token replayed from another
+// client on the same agent's port is accepted until it expires. Proof of
+// possession is a P2 non-goal (docs/roadmap/features/identity-enforcement.md,
+// line 19). The test stays active and asserts today's behaviour; it flips to
+// expect a refusal when a proof-of-possession binding (DPoP or an mTLS-bound
+// cnf) lands and the worker verifies it.
+func TestStolenTokenSamePort_KnownGap(t *testing.T) {
+	s, _, _ := bindingStack(t, StackOptions{})
+	s.PositiveControl(t, "worker", workerControl(s))
+	stolen := scratchToken(s, keyTokA)
+	hits := s.Upstream.Hits()
+	for i := 0; i < 2; i++ {
+		if r := s.Do(t, s.Worker("agent-a"), Via(TransportConnect, stolen)); r.Status != http.StatusOK {
+			t.Errorf("replay %d of a token on its own agent's port = %d, want 200 (no proof of possession in P2)", i, r.Status)
 		}
-		if got := s.Upstream.Hits() - hits; got != 2 {
-			t.Errorf("%d upstream hits, want 2", got)
-		}
-		s.AssertNoLeak(t, LeakCheck{AllowSwapUpTo: s.Upstream.Hits()})
-	})
+	}
+	if got := s.Upstream.Hits() - hits; got != 2 {
+		t.Errorf("%d upstream hits, want 2", got)
+	}
+	s.AssertNoLeak(t, LeakCheck{AllowSwapUpTo: s.Upstream.Hits()})
 }

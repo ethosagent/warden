@@ -300,6 +300,19 @@ func TestHarness_RunnerIsNotVacuous(t *testing.T) {
 			t.Errorf("%s: RunCase passed or failed for another reason; want a failure containing %q, got %q", c.name, c.want, rec.text())
 		}
 	}
+	// A deny event an earlier case left behind is not this case's: the next
+	// case makes no request, yet expects the same deny reason, and must fail.
+	left := &recordingTB{TB: t}
+	s.RunCase(left, smokeWorker[0])
+	if left.Failed() {
+		t.Fatalf("the case that leaves a deny event failed: %s", left.text())
+	}
+	stale := &recordingTB{TB: t}
+	s.RunCase(stale, Case{Name: "x", Path: PathWorker, WantStatus: http.StatusProxyAuthRequired, WantDeny: "identity_required",
+		Attack: func(testing.TB, *Stack) Observed { return Observed{Status: http.StatusProxyAuthRequired} }})
+	if !stale.Failed() || !strings.Contains(stale.text(), "new deny events carry") {
+		t.Errorf("a case that makes no request passed on an earlier case's identity_required deny: %q", stale.text())
+	}
 	// And the same attack with the right expectations passes cleanly.
 	rec := &recordingTB{TB: t}
 	s.RunCase(rec, smokeWorker[0])

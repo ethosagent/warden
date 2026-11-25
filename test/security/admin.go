@@ -38,6 +38,18 @@ func ifMatch(rev int64) http.Header {
 // token a held before the call keeps its old cnf.jkt.
 func (s *Stack) RotateAgentKey(tb testing.TB, a *Agent, newKey *fakes.AgentKey, groups ...string) *Agent {
 	tb.Helper()
+	return s.putAgent(tb, a.ID, newKey, groups)
+}
+
+// UpdateAgent replaces agent a's allowed groups and keeps its registered key.
+func (s *Stack) UpdateAgent(tb testing.TB, a *Agent, groups ...string) *Agent {
+	tb.Helper()
+	return s.putAgent(tb, a.ID, a.Key, groups)
+}
+
+func (s *Stack) putAgent(tb testing.TB, id string, newKey *fakes.AgentKey, groups []string) *Agent {
+	tb.Helper()
+	a := &Agent{ID: id}
 	r := s.AdminSession(tb).DoWith(tb, http.MethodPut, agentsPath+"/"+a.ID, map[string]any{
 		"id": a.ID, "displayName": a.ID, "keys": []json.RawMessage{newKey.JWK()}, "allowedGroups": groups,
 	}, ifMatch(s.agentRevision(tb, a.ID)))
@@ -84,11 +96,58 @@ func (s *Stack) BundleSeq(tb testing.TB, w *Worker) float64 {
 	return s.Metric(tb, w, "warden_bundle_seq", nil)
 }
 
+// cutBound is how long a cut may take to reach a worker, in real time, from the
+// moment the admin call returned.
+const cutBound = 3 * time.Second
+
+// Cut is an admin cut that has been accepted by the control plane. The worker
+// learns it with the next signed bundle; Within asserts what the worker shows
+// by a real-time deadline measured from the moment the admin call returned.
+type Cut struct {
+	s       *Stack
+	w       *Worker
+	seq     float64
+	started time.Time
+}
+
+// StartCut reads w's bundle seq, runs apply (the admin call) and starts the
+// clock when it returns.
+func (s *Stack) StartCut(tb testing.TB, w *Worker, apply func()) *Cut {
+	tb.Helper()
+	c := &Cut{s: s, w: w, seq: s.BundleSeq(tb, w)}
+	apply()
+	c.started = time.Now()
+	return c
+}
+
+// Within polls cond every 100ms of real time, without moving the fake clock,
+// and fails unless it holds within bound of the cut. It returns the elapsed
+// time.
+func (c *Cut) Within(tb testing.TB, bound time.Duration, desc string, cond func() bool) time.Duration {
+	tb.Helper()
+	for {
+		if cond() {
+			return time.Since(c.started)
+		}
+		if time.Since(c.started) > bound {
+			tb.Fatalf("security: %s did not %s within %s of the cut\nlast log lines:\n%s", c.w.Name, desc, bound, tail(c.s.logs.String(), 1500))
+		}
+		<-time.After(100 * time.Millisecond)
+	}
+}
+
+// Applied waits, within cutBound, for the worker to hold a bundle newer than
+// the one it had before the cut.
+func (c *Cut) Applied(tb testing.TB) {
+	tb.Helper()
+	c.Within(tb, cutBound, "apply the bundle that carries the cut", func() bool {
+		v, ok := c.s.TryMetric(c.w, "warden_bundle_seq", nil)
+		return ok && v > c.seq
+	})
+}
+
 // AwaitBundle drives the shared clock until w has applied a bundle newer than
-// seq: a condition, never a fixed wait. A cut reaches a worker on the control
-// plane's real-time policy reload (3s) and the worker's long poll, so no
-// fake-time bound holds here; the wait is bounded by the stack's ready
-// deadline instead.
+// seq. Setup uses it for state the case does not assert a deadline on.
 func (s *Stack) AwaitBundle(tb testing.TB, w *Worker, seq float64) {
 	tb.Helper()
 	s.EventuallyAdvance(w.Name+" to apply a bundle newer than seq "+strconv.FormatFloat(seq, 'f', 0, 64), 100*time.Millisecond, func() bool {
