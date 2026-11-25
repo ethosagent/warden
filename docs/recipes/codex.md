@@ -1,19 +1,20 @@
 # Codex CLI behind Warden, as a proven user
 
-This recipe runs [Codex CLI](https://docs.anthropic.com/en/docs/codex) so that
+This recipe runs [Codex CLI](https://github.com/openai/codex) so that
 every request it makes is attributed to the person who started it, and the agent can
-reach nothing but OpenAI's API through Warden. It is the reference for the other
-identity recipes (Codex copies it).
+reach nothing but OpenAI's API through Warden.
 
 What the agent container holds: a **placeholder** API key (`openai_secret_001`),
 the public proxy CA certificate and the address of the forwarder. It holds no real
 OpenAI key, no Warden token, no Dex token, no agent key and no CA key.
 
-> **Claude.ai subscription sign-in is not supported.** Codex CLI must use an
-> OpenAI API key (the worker swaps in the real one). The `/login` flow for a
-> Claude.ai Pro/Max account sends the account's OAuth token from the agent
-> container, which this design deliberately keeps empty of credentials, and talks
-> to hosts other than `api.openai.com`, which the recipe's policy denies.
+> **ChatGPT sign-in is not supported.** Codex must use an OpenAI API key (the worker
+> swaps in the real one). `codex login` with a ChatGPT account sends that account's
+> OAuth token from the agent container, which this design deliberately keeps empty of
+> credentials, and talks to `auth.openai.com` and `chatgpt.com`, which the recipe's
+> policy denies. This recipe is the Claude Code recipe ([claude-code.md](claude-code.md))
+> with the agent image, host, placeholder and names changed, so the degraded-mode and
+> `407`/`503` tables there apply here unchanged (substitute `codex` for `claude-code`).
 
 ## How it fits together
 
@@ -49,12 +50,12 @@ token that names a user, the agent `codex` and a registered key is refused with
 - Docker Engine 26 or later with Compose v2.24 or later. Older engines forward external
   DNS lookups for containers attached only to `internal: true` networks, which is a
   DNS-tunnel exfiltration path out of the agent; Engine 26 closed it. Free host ports: `127.0.0.1:5556`, `:7070`, `:9091`,
-  `:9092` and `:9095`. The recipe also uses the subnet `172.29.120.0/24` for `codex-internal`
+  `:9092` and `:9095`. Do not run it beside the Claude Code recipe: both use the service names `warden`, `warden-identity` and `control-plane`. The recipe also uses the subnet `172.29.120.0/24` for `codex-internal`
   (change it in the compose file, with the sidecar's address, if it collides).
 - This repository checked out: the Warden services build from its `Dockerfile`,
   because the published `ethosagent/warden:0.3.0` image has no `identity forward`,
   `identity enroll` or `control-plane agent` commands.
-- Network access to pull the pinned images and to npm during the agent image build.
+- Network access to pull the pinned images and to npm during the agent image build (about 170 MB for the native binary).
 - For a real prompt: an OpenAI API key (it goes on the worker only).
 
 ## 1. Generate the CA (once)
@@ -190,29 +191,53 @@ recreates the sidecar without `--subject-token-file`, and it then answers
 (`expiry.idTokens` in the dev Dex): repeat the first command to refresh it; the
 sidecar re-reads the file.
 
-## 5. Run Codex CLI
+## 5. Run Codex
 
 Headless:
 
 ```sh
-$COMPOSE exec codex claude -p 'say ok'
+$COMPOSE exec codex codex exec --skip-git-repo-check 'say ok'
 ```
 
-Interactive (Codex CLI asks once whether to use the API key it finds in the
-environment; answer yes, it is the placeholder):
+`codex exec` reads `OPENAI_API_KEY` from the environment, so no `codex login` is
+needed (and none should be run: `codex login --with-api-key` would write the key, here
+the placeholder, to `~/.codex/auth.json` for no benefit).
+
+**Codex's own sandbox does not work in this container.** Its Linux sandbox (bubblewrap)
+needs unprivileged user namespaces, which Docker's default profile blocks: `codex
+sandbox linux -- echo hi` fails with `bwrap: No permissions to create a new namespace`.
+The recipe does not add `cap_add`, `privileged` or a relaxed seccomp profile to fix that
+(those would weaken the isolation the recipe exists for). A prompt that makes no tool
+call, like the one above, is unaffected. For a task that runs commands, tell Codex it
+is already inside a sandbox: the container is the sandbox, and Warden is the egress gate.
 
 ```sh
-$COMPOSE exec codex claude
+$COMPOSE exec codex codex exec --skip-git-repo-check --sandbox danger-full-access 'run the tests'
 ```
 
 With only the placeholder (`OPENAI_API_KEY` empty on the worker) the call reaches
 OpenAI and the answer is **401**: the request was allowed and attributed, and the
-upstream rejected the key. With a real key on the worker the prompt completes:
+upstream rejected the key. With a real key on the worker the prompt completes (manual
+step, not run in this repository's checks, which never hold a real key):
 
 ```sh
 OPENAI_API_KEY=<your real key> $COMPOSE up -d warden
-$COMPOSE exec codex claude -p 'say ok'
+$COMPOSE exec codex codex exec --skip-git-repo-check 'say ok'
 ```
+
+Codex also calls hosts the policy denies: `chatgpt.com` and `ab.chatgpt.com`
+(catalog, analytics), `github.com` and `api.github.com`. Those show up as `deny` lines
+in the worker log and do not stop a prompt.
+
+### Transport: WebSocket first, HTTPS fallback
+
+Checked against 0.167.2: `codex exec` first opens a WebSocket to
+`wss://api.openai.com/v1/responses` (a `CONNECT` to `api.openai.com:443`, then an HTTP
+upgrade) and, after its retries fail, falls back to `POST https://api.openai.com/v1/responses`
+over HTTP/2. Both go to the one allowed host, so the policy needs no change, and both
+appear in the worker log as `allow` decisions (the upgrade as `GET`). The WebSocket
+retries add several seconds before the fallback, and a prompt can therefore look slow
+before it answers.
 
 ## 6. Read the attribution
 
@@ -254,12 +279,12 @@ request body is logged.
 
 ## Troubleshooting
 
-**x509 errors from Codex CLI** (`unable to verify the first certificate`, `self signed
-certificate in certificate chain`). The agent does not trust the proxy CA. Check that
-`deploy/compose/certs/proxy-ca.crt` exists before `up` (otherwise Docker creates a
-directory there), and that `docker compose exec codex env` shows
-`NODE_EXTRA_CA_CERTS=/etc/warden/certs/proxy-ca.crt`. A CA regenerated after `up`
-needs `up -d --force-recreate`.
+**TLS errors from Codex** (`failed to connect to Responses WebSocket stage=Tls`, or an
+`invalid peer certificate` / `UnknownIssuer` message). The agent does not trust the proxy
+CA. Check that `deploy/compose/certs/proxy-ca.crt` exists before `up` (otherwise Docker
+creates a directory there), and that `docker compose exec codex env` shows
+`CODEX_CA_CERTIFICATE=/etc/warden/certs/proxy-ca.crt`. A CA regenerated after `up` needs
+`up -d --force-recreate`.
 
 **`407` from the worker** (`{"error":"identity_required","reason":...}`), by reason:
 
@@ -286,25 +311,32 @@ needs `up -d --force-recreate`.
 forwarder credential: `HTTPS_PROXY=http://wx:<WARDEN_FORWARDER_CREDENTIAL>@warden-identity:3128`.
 A credential with `@`, `:` or `/` in it breaks the URL; use URL-safe characters (letters, digits, `-`, `_`).
 
-**Codex CLI hangs on start.** `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` keeps it
-from calling telemetry and update hosts that the policy denies; if you remove it,
-expect denied requests in the worker log and slow starts.
+**Codex waits at `Reconnecting...`.** It retries the WebSocket five times and then the
+HTTPS call five times with backoff. If the sidecar answers `503` (no login yet, or the
+first-start token window) or the TLS check fails, it keeps retrying, so check the
+sidecar log first.
 
-### Environment variables, as confirmed against the pinned release
+### Trust and key mechanism, as verified against the pinned release
 
-The agent image pins `@anthropic-ai/codex` **2.1.322** (published 2026-11-10).
-Each name below was found in that release's binary; the release is a native executable,
-so `NODE_USE_ENV_PROXY` matters for the Node tools Codex CLI launches, not for Claude
-Code itself.
+The agent image pins `@openai/codex` **0.167.2** (published 2026-11-11; the package's
+`dist.integrity` is checked in the Dockerfile before install). The release is a static
+native binary started by a small Node launcher. Verified by running it in the recipe
+stack with a placeholder key:
+
+| Question | Result |
+|---|---|
+| CA trust | The binary reads `CODEX_CA_CERTIFICATE` and then `SSL_CERT_FILE` (its `custom_ca` module logs which it used). Each variable alone makes the handshake with the Warden-minted leaf succeed; with neither set the handshake fails (`stage=Tls`). The recipe sets both: `CODEX_CA_CERTIFICATE` is the documented mechanism, `SSL_CERT_FILE` also makes `curl` and other tools in the container trust the same CA. No system trust store change is needed. |
+| Proxy | `HTTPS_PROXY` / `NO_PROXY` are honoured, including a `user:password@` URL (the forwarder credential). |
+| API key | `codex exec` uses `OPENAI_API_KEY` from the environment (provider `openai`, no login). `CODEX_API_KEY` also exists; the recipe does not use it. |
+| Hosts | `api.openai.com` for the model. Also tried: `chatgpt.com`, `ab.chatgpt.com`, `github.com`, `api.github.com` (denied, harmless). |
+| Transport | WebSocket first, HTTPS fallback; see above. |
 
 | Variable | Value | Purpose |
 |---|---|---|
 | `HTTPS_PROXY` | `http://wx:<credential>@warden-identity:3128` | send all HTTPS through the forwarder |
 | `NO_PROXY` | `localhost,127.0.0.1,::1` | never proxy loopback |
-| `NODE_EXTRA_CA_CERTS` | `/etc/warden/certs/proxy-ca.crt` | trust the Warden CA |
-| `NODE_USE_ENV_PROXY` | `1` | Node tools the agent runs honour the proxy variables |
-| `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | `1` | no telemetry, updater or other non-model calls |
-| `DISABLE_AUTOUPDATER` | `1` | the version is pinned by the image |
+| `CODEX_CA_CERTIFICATE` | `/etc/warden/certs/proxy-ca.crt` | trust the Warden CA |
+| `SSL_CERT_FILE` | `/etc/warden/certs/proxy-ca.crt` | same, for other tools in the container |
 | `OPENAI_API_KEY` | `openai_secret_001` | the placeholder the worker swaps |
 
 ## Threat model
@@ -327,7 +359,7 @@ What the recipe stops:
 What it does not stop:
 
 - Anyone with access to the Docker host, the sidecar volume or the worker container.
-- Misuse within policy: Codex CLI can send anything to `api.openai.com`, including
+- Misuse within policy: Codex can send anything to `api.openai.com`, including
   content from the workspace you mount.
 - A Warden token is a bearer credential for up to 15 minutes; revoke access by
   disabling the agent (about two seconds on the control plane, then one policy cycle on
