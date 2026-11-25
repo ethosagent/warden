@@ -252,6 +252,7 @@ type Gateway struct {
 	store     Store
 	dirty     atomic.Bool
 	done      chan struct{}
+	stopped   chan struct{} // closed when flushLoop has returned; Close waits on it
 	closeOnce sync.Once
 
 	now func() time.Time // injectable clock for tests; default time.Now
@@ -293,6 +294,7 @@ func New(cfg config.MCPConfig, scanner scan.Scanner, log *slog.Logger, opts ...O
 	if g.store != nil {
 		g.loadFromStore()
 		g.done = make(chan struct{})
+		g.stopped = make(chan struct{})
 		go g.flushLoop()
 	}
 	return g
@@ -332,6 +334,7 @@ func (g *Gateway) markDirty() {
 // flushLoop writes dirty state back to the store on a fixed interval until Close
 // signals done. Started only when a store is attached.
 func (g *Gateway) flushLoop() {
+	defer close(g.stopped)
 	t := time.NewTicker(flushInterval)
 	defer t.Stop()
 	for {
@@ -365,13 +368,16 @@ func (g *Gateway) flush() {
 }
 
 // Close stops the background flusher and performs a final flush of any pending
-// changes. It is safe to call multiple times and is a no-op when no store is
+// changes, returning only once the flusher goroutine has exited. It is safe to call multiple times and is a no-op when no store is
 // attached (no goroutine was started). Always returns nil; flush errors are
 // logged, not surfaced, so shutdown never fails on a persistence hiccup.
 func (g *Gateway) Close() error {
 	g.closeOnce.Do(func() {
 		if g.done != nil {
 			close(g.done)
+			// Wait for the flusher to exit so Close is synchronous: no goroutine
+			// outlives it and no periodic flush races the final one below.
+			<-g.stopped
 		}
 		g.flush()
 	})
