@@ -54,6 +54,9 @@ a worker. There are exactly three calls:
    CP holds the request open and returns **200 + new policy the instant it
    changes**, or **304** at the timeout; the worker re-polls immediately. Policy
    edits reach workers in ~one round-trip, not after a fixed interval.
+   The same response carries `registeredAgents` (each registered agent's id, status and key
+   thumbprints), from which the worker takes the status of the agent it is bound to
+   ([the kill switch](#the-kill-switch)).
 2. **Heartbeat** — `POST /control/heartbeat` (~every 10s) so the CP lists the
    worker as online even when idle, and knows its current policy version and the
    capabilities it advertises (`caps`, e.g. `blocklist/v1`), so the console can flag
@@ -1565,6 +1568,129 @@ and `warden_cp_agents{status}`.
 
 A write by another process (the offline registry CLI) is seen by the control plane within about
 2 seconds.
+
+## Operating the agent registry
+
+The [API above](#agent-registry-api) is how agents are written; this section is how the registry
+behaves once workers depend on it.
+
+**What the registry holds.** Per agent: the id, a display name, one or two public keys, the user
+groups that may delegate to it, the scopes a delegation may carry, a status (`active` or
+`disabled`) and a revision. An id matches `^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$` and is never
+reused. A key is an `OKP`/`Ed25519` or `EC`/`P-256` public JWK; a private member, `jku`, `x5u`
+and `x5c` are refused. The registry holds at most 1000 agents. It does **not** hold the agent's
+identity mode: that stays in the settings field `agents[].identity` (and `identity.defaultMode`),
+so there is one source of truth for it and a registry write never changes how strictly a worker
+enforces identity.
+
+**Who may write it.** Every write is admin-only, because a key or group change decides who can
+mint tokens for the agent, and `PUT`, `disable` and `enable` need `If-Match: "r<revision>"`.
+The identity mode is admin-only as well: an editor may edit `agents` in the settings but not
+`agents[].identity` (see the [role matrix](#console-roles-and-the-role-matrix)). With
+`console.auth: none` a write through the API is `403 use_cli`; manage the registry with the
+offline CLI. With approvals on, registering an agent, adding a group, scope or key, and enabling
+an agent are held as `agents` change drafts, while disabling one and edits that only narrow apply
+at once (see [Change drafts](#change-drafts-and-the-two-person-rule-consoleapprovals)). The
+offline CLI is not held.
+
+### The offline CLI
+
+The CLI writes `<state-dir>/warden-cp.db` directly, with the control plane running or stopped; a
+running control plane serves the change within about 2 seconds. Only public keys are accepted, and
+output never includes a JWK coordinate. Each write is a `cli:<os user>` row in the admin audit
+log when admin audit is enabled.
+
+```sh
+warden control-plane agent register --state-dir /var/lib/warden-cp --id claude-code \
+  --display-name "Claude Code" --groups warden-agents --jwk-file claude-code.jwk.json
+warden control-plane agent list --state-dir /var/lib/warden-cp
+warden control-plane agent disable --state-dir /var/lib/warden-cp --id claude-code --revision 1
+warden control-plane agent enable --state-dir /var/lib/warden-cp --id claude-code --revision 2
+```
+
+`--revision` is the revision `agent list` shows; a stale one changes nothing and exits 1. Exit
+codes: 0 done, 1 refused with nothing changed (validation, conflict, key in use, unknown id),
+2 usage.
+
+### Rotating an agent's key
+
+An agent holds one or two keys, so a key is replaced without a gap. `agent update` replaces the
+agent's whole key set with the `--jwk-file` values it is given:
+
+1. Update to both keys (old and new) and restart the agent with the new private key. Both
+   thumbprints are accepted while the two are registered.
+2. When nothing signs with the old key any more, update to the new key alone.
+
+Removing a key is not only a registry edit. A Warden token carries the thumbprint of the key it
+was minted for (`cnf.jkt`); once a worker applies the policy that no longer lists it, that token
+fails with `cnf_mismatch` and the worker closes the identified sessions that were opened under it.
+Keep both keys registered until the agent has switched, and allow one policy-wire cycle after the
+final update. (This is the agent's key; the control plane's own signing keys rotate with
+[`keys rotate`](#signing-keys-keys).)
+
+### Binding a worker to an agent
+
+A worker serves exactly one agent. It takes the id from the first of these that is set:
+
+1. `--agent-id` on `warden run`;
+2. `central.agentID` in the worker config;
+3. the derived default (`defaultAgentID`): the id of the one configured agent policy when there is
+   exactly one, else `agent:<port>` from the listen port.
+
+An explicit id (1 or 2) that is not a valid agent id stops the worker at startup. The derived id
+is never validated, and a port-derived id never matches a registry entry, so a worker that the
+registry should govern must be named with `--agent-id` or `central.agentID`. The worker reports
+the id and its identity mode on every heartbeat so the Agents tab can join them with the registry.
+
+### The kill switch
+
+On every applied policy the worker finds its own agent in `registeredAgents` (id, status and key
+thumbprints, served on the `/policy` long-poll and inside signed bundles). While that agent is
+`disabled`, in **every** identity mode including `off`, the worker:
+
+- refuses each new CONNECT, request and HTTP/2 stream with `403 {"error":"agent_disabled"}`,
+  ahead of identity, the block list and policy, so nothing reaches a judge, a secret swap or an
+  upstream;
+- closes every open tunnel, keep-alive or HTTP/2 connection and WebSocket, and writes one
+  `agent_disabled` deny event for each (a request already in flight completes);
+- lifts all of it on the next applied policy after the agent is enabled again.
+
+An agent with no registry entry is not disabled: an unregistered id is not a registry agent (its
+Warden tokens fail the binding check with `agent_unregistered` instead). A disabled agent also
+cannot get a token: the token endpoint answers it `invalid_client`, the same as an unknown agent.
+
+### What survives what
+
+| Event | Effect on a disabled agent |
+|---|---|
+| A policy rollback or any settings save | None. The registry is overlaid on the served policy and is never part of a policy version, so a rollback can neither re-enable an agent nor restore a removed key. |
+| The control plane is down | Workers keep enforcing the last-known-good policy, so a disabled agent stays disabled. A worker that restarts during the outage uses its cached bundle (when it has a `controlPlane.stateDir` cache) or denies all until its first pull. |
+| The registry cannot be read | The control plane logs `agentreg_load_failed` once and keeps serving the last-known-good list. |
+| A bundle is rejected (bad signature, expired) | The worker keeps its last-known-good bundle, so the agent stays in the state that bundle had. |
+| An old worker without the `agentreg/v1` capability | It decodes the list and ignores it: **it does not enforce disable.** The Agents tab warns that the disabled agent is still served by workers without `agentreg/v1`. Upgrade it before relying on the switch. |
+
+A disable reaches a worker within one policy long-poll: the control plane serves it within a few
+seconds of the write and the worker applies it at once.
+
+### Require mode and the registry
+
+Identity `require` mode (settings `agents[].identity: require`) is what makes the registry
+mandatory: every request must carry a Warden token bound to the worker's agent. The guard on the
+switch to `require` (a connected worker without `identity/require-v1` blocks it unless an admin
+forces it) is in [Moving an agent from attribute to require](#moving-an-agent-from-attribute-to-require).
+It is advisory outside token or certificate worker auth, because the agent id a worker reports is
+self-asserted. When an agent is disabled or a key removed, the identified sessions armed under the
+old binding are closed after the next applied policy; see
+[Agent binding of Warden tokens](identity-contract.md#agent-binding-of-warden-tokens).
+
+### The Agents tab
+
+With a state dir the console has an **Agents** tab: the registry list, an admin form to register,
+edit, disable and enable (writes send `If-Match`, a private JWK is refused in the browser, and only
+public JWKs are shown), and each agent's bound workers from the heartbeat. Warnings name a disabled
+agent still served by a worker without `agentreg/v1`, an active agent no worker serves, a worker
+reporting an unregistered agent id, and workers that cannot enforce `require`. The tab is hidden on
+a control plane without a state dir.
 
 ## Worker token CLI
 
