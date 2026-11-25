@@ -425,3 +425,42 @@ func TestRotateExpectsTheCheckedNextKey(t *testing.T) {
 		t.Fatalf("rotation of the expected next key: %v", err)
 	}
 }
+
+// TestUnstageTransientStoreErrorKeepsTheKey: a key store that fails to answer is
+// not a key that is gone. The unstage refuses, changes no row and leaves the
+// material alone; once the store answers, it succeeds and keeps the key.
+func TestUnstageTransientStoreErrorKeepsTheKey(t *testing.T) {
+	e := newEnv(t)
+	e.timings = manualTimings()
+	ctx := context.Background()
+	m := e.manager()
+	m.Init(ctx)
+	st, err := m.StageBundle(ctx, opsActor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := e.rows()
+
+	e.store.failGet.Store(true)
+	cli := e.manager()
+	if _, err := cli.UnstageBundle(ctx, opsActor); err == nil || !strings.Contains(err.Error(), "retry") {
+		t.Fatalf("unstage with the store down = %v, want a retry refusal", err)
+	}
+	e.store.failGet.Store(false)
+	for i, r := range e.rows() {
+		if r != before[i] {
+			t.Errorf("a refused unstage changed a row: %+v -> %+v", before[i], r)
+		}
+	}
+	if _, err := e.store.Get(ctx, keys.PurposeBundle, st.NextKID); err != nil {
+		t.Fatalf("the staged key's material is gone after a refused unstage: %v", err)
+	}
+
+	res, err := cli.UnstageBundle(ctx, opsActor)
+	if err != nil || res.Dropped || res.NextKID != st.NextKID {
+		t.Fatalf("unstage once the store answers = %+v, %v, want the key kept", res, err)
+	}
+	if r := rowFor(t, e.rows(), st.NextKID); r.State != keys.StateNext {
+		t.Errorf("the key is %s after a clean unstage, want next", r.State)
+	}
+}

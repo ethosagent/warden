@@ -281,9 +281,12 @@ type UnstageResult struct {
 
 // UnstageBundle undoes StageBundle: the control plane signs with the active key
 // alone again. It is the recovery for a staged key whose material is lost, so it
-// never needs the material: when the key loads it is only unstaged (a plain next
-// key again, pinnable and stageable later); when it does not, its row is
-// destroyed so a fresh next key can be published. Unstaging adds no risk to a
+// does not need the material to be there: when the key loads it is only unstaged
+// (a plain next key again, pinnable and stageable later); when the store says
+// the material is gone (ErrKeyNotFound) or it is not the row's key
+// (ErrKeyMaterialMismatch) the row is destroyed so a fresh next key can be
+// published. Any other failure (a store outage, a read error) changes nothing
+// and is returned, so a transient fault never destroys a key. Unstaging adds no risk to a
 // worker that pins the active key, but a worker that pinned ONLY the staged key
 // verifies nothing the control plane then signs: re-pin it first.
 func (m *Manager) UnstageBundle(ctx context.Context, actor Actor) (UnstageResult, error) {
@@ -301,7 +304,15 @@ func (m *Manager) UnstageBundle(ctx context.Context, actor Actor) (UnstageResult
 		return UnstageResult{Already: true}, nil
 	}
 	res := UnstageResult{NextKID: st.KID}
-	if _, lerr := m.loadSigner(ctx, st); lerr != nil {
+	_, lerr := m.loadSigner(ctx, st)
+	if lerr != nil && !errors.Is(lerr, ErrKeyNotFound) && !errors.Is(lerr, ErrKeyMaterialMismatch) {
+		// The material may well be there: a store that is merely down or slow
+		// must not cost the operator a key (it may be the only one some workers
+		// pin). Nothing changes; retry when the store answers.
+		return UnstageResult{}, fmt.Errorf("keys: the key store did not answer for the staged %s key %s, nothing was changed; retry when it is back: %w",
+			PurposeBundle, st.KID, lerr)
+	}
+	if lerr != nil {
 		changed, err := m.cfg.Meta.UpdateState(ctx, st.KID, StateNext, StateDestroyed, m.cfg.Now())
 		if err != nil {
 			return UnstageResult{}, err

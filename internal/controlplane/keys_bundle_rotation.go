@@ -231,10 +231,11 @@ type OfflineUnstageResult struct {
 }
 
 // UnstageBundle takes the staged next key back out of signing, so the control
-// plane signs with the active key alone again. It never needs the staged key's
+// plane signs with the active key alone again. It does not need the staged key's
 // material, so it is the recovery when that material is lost and the control
 // plane cannot load the purpose (the staged_key_unavailable Finding): the key is
-// unstaged when it loads and destroyed when it does not. One admin audit row
+// unstaged when it loads and destroyed when the store says it is gone; a store
+// that merely fails to answer changes nothing and the error says to retry. One admin audit row
 // (op=unstage). A worker that pinned only the staged key verifies nothing after
 // it: re-pin it to the active key first.
 func (o *OfflineKeys) UnstageBundle(ctx context.Context) (OfflineUnstageResult, error) {

@@ -299,9 +299,12 @@ Recover with the control plane stopped or running:
 warden control-plane keys rotate --purpose bundle --unstage --state-dir /var/lib/warden-cp
 ```
 
-It never reads the lost material: a staged key that still loads is merely
-unstaged; one that does not is dropped, and the next `--stage` (or the scheduler)
-publishes a fresh next key. The control plane then signs with the active key
+It does not need the lost material: a staged key that still loads is merely
+unstaged. One the key store reports as gone (or whose material is not that key)
+is dropped, and the next `--stage` (or the scheduler) publishes a fresh next key.
+Any other failure — the key store down or slow, a read error — makes the command
+refuse, change nothing and say "retry when it is back": a transient outage never
+costs you a key, which in the emergency flow may be the only one some workers pin. The control plane then signs with the active key
 alone. **Risk:** a worker that pinned *only* the staged key (a new-key-only pin,
 as in the emergency flow below, where you re-pin before activating) verifies
 nothing the control plane signs after the unstage. Re-pin such workers to the

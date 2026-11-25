@@ -45,6 +45,9 @@ var (
 	// ErrKeyNotFound is returned by PrivateKeyStore.Get for a key the store
 	// does not hold.
 	ErrKeyNotFound = errors.New("keys: key material not found")
+	// ErrKeyMaterialMismatch is stored material that parses but is not the key
+	// its row describes (another kid or algorithm): it can never sign for the row.
+	ErrKeyMaterialMismatch = errors.New("keys: stored material does not match its row")
 	// ErrKeyExists is returned by PrivateKeyStore.Put when material is already
 	// stored under that purpose and kid. A Put never overwrites.
 	ErrKeyExists = errors.New("keys: key material already exists")

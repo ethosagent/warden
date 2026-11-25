@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -115,5 +116,32 @@ func TestBundlesOverlayConfigsLoad(t *testing.T) {
 	}
 	if got := pol.ControlPlane.BundleKeys; len(got) != 1 || got[0].Kid != jwk.Kid {
 		t.Errorf("pinned keys = %v, want the exported key %s", got, jwk.Kid)
+	}
+}
+
+// TestBundlesWorkerConfigOnlyAddsThePin: configs/config.worker.bundles.yaml is
+// the stock worker config plus controlPlane.bundleKeysFile and nothing else, so
+// the two cannot drift apart. Comments are ignored; the parsed documents compare.
+func TestBundlesWorkerConfigOnlyAddsThePin(t *testing.T) {
+	root := repoRoot(t)
+	load := func(name string) map[string]any {
+		raw, err := os.ReadFile(filepath.Join(root, "configs", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var doc map[string]any
+		if err := yaml.Unmarshal(raw, &doc); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		return doc
+	}
+	stock, bundles := load("config.worker.yaml"), load("config.worker.bundles.yaml")
+	cp, ok := bundles["controlPlane"].(map[string]any)
+	if !ok || cp["bundleKeysFile"] == nil {
+		t.Fatal("the bundles worker config has no controlPlane.bundleKeysFile")
+	}
+	delete(cp, "bundleKeysFile")
+	if !reflect.DeepEqual(stock, bundles) {
+		t.Errorf("configs/config.worker.bundles.yaml differs from configs/config.worker.yaml beyond controlPlane.bundleKeysFile; stock=%v bundles=%v", stock, bundles)
 	}
 }

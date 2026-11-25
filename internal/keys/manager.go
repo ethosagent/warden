@@ -513,8 +513,8 @@ func (m *Manager) loadSigner(ctx context.Context, row Record) (Signer, error) {
 		return nil, storeErr("parse", row.Purpose, row.KID, err)
 	}
 	if sg.KID() != row.KID || sg.Alg() != row.Alg {
-		return nil, fmt.Errorf("keys: %s key %s: stored material does not match its row (kid %s, alg %s)",
-			row.Purpose, row.KID, sg.KID(), sg.Alg())
+		return nil, fmt.Errorf("%w: %s key %s: stored material is kid %s, alg %s",
+			ErrKeyMaterialMismatch, row.Purpose, row.KID, sg.KID(), sg.Alg())
 	}
 	return sg, nil
 }
