@@ -38,7 +38,6 @@ type tokenSpec struct {
 	unsigned       bool
 	junkSignature  bool
 	flipSignature  bool
-	signed         bool
 }
 
 // TokenOption edits a forged token.
