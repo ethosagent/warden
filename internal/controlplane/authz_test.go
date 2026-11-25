@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethosagent/warden/internal/apikeys"
+	"github.com/ethosagent/warden/internal/apikeys/adapters/sqlitestore"
 	"github.com/ethosagent/warden/internal/clock/clocktest"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/cpstate"
@@ -55,7 +57,26 @@ func newAuthzEnvOn(t *testing.T, db *cpstate.DB, policy string, roles config.Con
 	t.Helper()
 	logger, buf := testLogger()
 	clk := clocktest.NewFake(time.Unix(1_800_000_000, 0))
-	srv := New(Config{PolicyPath: policy, Token: dashTestToken, State: db, Console: authzConsole(roles), Logger: logger, Clock: clk})
+	cfg := Config{PolicyPath: policy, Token: dashTestToken, State: db, Console: authzConsole(roles), Logger: logger, Clock: clk}
+	// A state db that carries the api_keys table runs with API keys on, so the
+	// matrix walks the management routes; one without it runs with them off.
+	var haveKeys int
+	_ = db.SQL().QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name='api_keys'`).Scan(&haveKeys)
+	if haveKeys > 0 {
+		reg := newAPIKeyRegistry()
+		store, err := sqlitestore.New(db, sqlitestore.Options{Registry: reg, Clock: clk})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ix, err := apikeys.NewIndex(context.Background(), store, apikeys.IndexOptions{Now: clk.Now, After: clk.After, Logger: logger})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg.Console.APIKeys = config.ConsoleAPIKeys{Enabled: true, DefaultTTL: config.DefaultAPIKeyTTL, MaxTTL: config.DefaultAPIKeyMaxTTL,
+			MaxPerOwner: config.DefaultAPIKeysMaxPerOwner, RatePerKey: config.DefaultAPIKeysRatePerKey}
+		cfg.APIKeyIndex, cfg.APIKeyStore, cfg.APIKeyRegistry = ix, store, reg
+	}
+	srv := New(cfg)
 	if srv.sessions == nil {
 		t.Fatal("oidc mode with a state db must enable sessions")
 	}
@@ -68,7 +89,7 @@ func newAuthzEnvOn(t *testing.T, db *cpstate.DB, policy string, roles config.Con
 
 func newAuthzEnv(t *testing.T) *authzEnv {
 	t.Helper()
-	return newAuthzEnvOn(t, openSessionDB(t), writePolicyFile(t, "api.openai.com"), defaultRoles())
+	return newAuthzEnvOn(t, openKeysDB(t), writePolicyFile(t, "api.openai.com"), defaultRoles())
 }
 
 // session creates a session in group and returns its raw id.
@@ -182,6 +203,30 @@ func TestAuthzRouteCoverage(t *testing.T) {
 	}
 	if miss := unclassifiedPatterns(t, table, cpRouteTable()); len(miss) != 0 {
 		t.Fatalf("mux patterns registered in Server.Handler with no classification: %v", miss)
+	}
+	// Every row declares its API key scope (a registered one, none or self), no
+	// route lives under /api/ and no route needs a higher role than its scope.
+	reg := newAPIKeyRegistry()
+	for name, tbl := range map[string]map[routeKey]authzRow{"authz": table, "control-plane": cpRouteTable()} {
+		if bad := scopeProblems(tbl, reg); len(bad) != 0 {
+			t.Fatalf("%s rows with a scope problem:\n%s", name, strings.Join(bad, "\n"))
+		}
+	}
+	if bad := apiPrefixPatterns(t); len(bad) != 0 {
+		t.Fatalf("routes registered under /api/ (reserved for a future public API): %v", bad)
+	}
+	// Red first: each kind of scope mistake is reported by route name.
+	scoped := authzTable()
+	scoped[routeKey{http.MethodGet, "/dashboard/api/traffic"}] = authzRow{MinRole: config.RoleViewer, Action: "traffic.read", Class: classReadOnly}
+	scoped[routeKey{http.MethodGet, "/dashboard/api/policy"}] = readRow(config.RoleViewer, "policy.read", "policy:reed")
+	scoped[routeKey{http.MethodGet, "/dashboard/api/settings"}] = readRow(config.RoleAdmin, "settings.read", scopeSettingsRead)
+	scoped[routeKey{http.MethodGet, "/api/v1/things"}] = readRow(config.RoleViewer, "things.read", apikeys.ScopeNone)
+	got := strings.Join(scopeProblems(scoped, reg), "\n")
+	for _, want := range []string{"GET /dashboard/api/traffic: no scope", "GET /dashboard/api/policy: scope \"policy:reed\" is not registered",
+		"GET /dashboard/api/settings: needs admin but scope settings:read", "GET /api/v1/things: under /api/"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("scope check did not report %q in:\n%s", want, got)
+		}
 	}
 	// Red first: a route added to the dashboard without a classification, or an
 	// audited row without its target, is reported by name.
@@ -548,7 +593,7 @@ func unclassifiedPatterns(t *testing.T, dash, cp map[routeKey]authzRow) []string
 			t.Fatalf("a mux registration uses a pattern the walk cannot resolve: %#v", arg)
 		}
 		seen++
-		if p != "/dashboard/" && !paths[p] {
+		if p != "/dashboard/" && p != apiKeysSubtree && !paths[p] {
 			out = append(out, p)
 		}
 	}
@@ -557,4 +602,168 @@ func unclassifiedPatterns(t *testing.T, dash, cp map[routeKey]authzRow) []string
 	}
 	sort.Strings(out)
 	return out
+}
+
+// scopeRoleExceptions are rows whose route needs a higher role than their
+// scope's registered minimum, on purpose: the ticket classifies the block list
+// as policy:read/policy:write although its routes are admin only. A key
+// owner below admin holds the scope and gets 403 at the route, which is the
+// safe direction (the route's own role is still enforced per request).
+var scopeRoleExceptions = map[routeKey]bool{
+	{Method: http.MethodGet, Path: "/dashboard/api/blocked-users"}:         true,
+	{Method: http.MethodPost, Path: "/dashboard/api/blocked-users"}:        true,
+	{Method: http.MethodDelete, Path: "/dashboard/api/blocked-users/{id}"}: true,
+}
+
+// scopeProblems names the rows whose API key classification is missing or
+// wrong: no scope, a scope the registry does not know, a route under /api/, or
+// a route whose minimum role is above its scope's.
+func scopeProblems(table map[routeKey]authzRow, reg *apikeys.Registry) []string {
+	var out []string
+	for k, r := range table {
+		name := k.Method + " " + k.Path
+		if strings.HasPrefix(k.Path, "/api/") {
+			out = append(out, name+": under /api/, which is reserved")
+		}
+		switch r.Scope {
+		case "":
+			out = append(out, name+": no scope (use a registered scope, apikeys.ScopeNone or apikeys.ScopeSelf)")
+		case apikeys.ScopeNone, apikeys.ScopeSelf:
+		default:
+			min, ok := reg.Lookup(r.Scope)
+			switch {
+			case !ok:
+				out = append(out, name+": scope "+strconv.Quote(string(r.Scope))+" is not registered")
+			case r.MinRole > min && !scopeRoleExceptions[k]:
+				out = append(out, name+": needs "+r.MinRole.String()+" but scope "+string(r.Scope)+" only needs "+min.String())
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// apiPrefixPatterns returns the mux patterns of the package's non-test sources
+// that start with /api/.
+func apiPrefixPatterns(t *testing.T) []string {
+	t.Helper()
+	files, err := filepath.Glob("*.go")
+	if err != nil || len(files) == 0 {
+		t.Fatalf("cannot list package sources: %v", err)
+	}
+	var out []string
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		af, err := parser.ParseFile(token.NewFileSet(), f, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ast.Inspect(af, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok || len(call.Args) == 0 {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || (sel.Sel.Name != "Handle" && sel.Sel.Name != "HandleFunc") {
+				return true
+			}
+			if lit, ok := call.Args[0].(*ast.BasicLit); ok && lit.Kind == token.STRING {
+				if p, _ := strconv.Unquote(lit.Value); strings.HasPrefix(p, "/api/") {
+					out = append(out, p)
+				}
+			}
+			return true
+		})
+	}
+	return out
+}
+
+// TestAuthzScopeClassification pins the ticket's classification: the scopes a
+// key needs per route, and that every other route is not keyable.
+func TestAuthzScopeClassification(t *testing.T) {
+	want := map[string]apikeys.Scope{
+		"GET /dashboard/api/policy":                   "policy:read",
+		"GET /dashboard/api/policy/versions":          "policy:read",
+		"GET /dashboard/api/policy/versions/{v}":      "policy:read",
+		"GET /dashboard/api/policy/versions/{v}/diff": "policy:read",
+		"GET /dashboard/api/detection":                "policy:read",
+		"GET /dashboard/api/blocked-users":            "policy:read",
+		"POST /dashboard/api/policy":                  "policy:write",
+		"POST /dashboard/api/detection":               "policy:write",
+		"POST /dashboard/api/blocked-users":           "policy:write",
+		"DELETE /dashboard/api/blocked-users/{id}":    "policy:write",
+		"GET /dashboard/api/settings":                 "settings:read",
+		"GET /dashboard/api/traffic":                  "traffic:read",
+		"GET /dashboard/api/analytics":                "traffic:read",
+		"GET /dashboard/api/endpoints":                "traffic:read",
+		"GET /dashboard/api/workers":                  "traffic:read",
+		"GET /dashboard/api/mcp":                      "traffic:read",
+		"GET /dashboard/api/alerts":                   "traffic:read",
+		"GET /dashboard/api/query/schema":             "traffic:read",
+		"POST /dashboard/api/query":                   "traffic:read",
+		"GET /dashboard/api/audit":                    "audit:read",
+		"POST /dashboard/api/audit/verify":            "audit:read",
+		"GET /dashboard/api/admin-audit":              "adminaudit:read",
+		"POST /dashboard/api/admin-audit/verify":      "adminaudit:read",
+		"GET /dashboard/api/admin-audit/pubkey":       "adminaudit:read",
+		"GET /dashboard/api/api-keys/self":            apikeys.ScopeSelf,
+		"POST /dashboard/api/workers/{id}/revoke":     "workers:admin",
+		"GET /dashboard/api/agents":                   "agents:read",
+		"GET /dashboard/api/agents/{id}":              "agents:read",
+		"POST /dashboard/api/agents":                  "agents:write",
+		"PUT /dashboard/api/agents/{id}":              "agents:write",
+		"POST /dashboard/api/agents/{id}/disable":     "agents:write",
+		"POST /dashboard/api/agents/{id}/enable":      "agents:write",
+		// Change drafts (W-P2-APPR-04): approve and reject stay none, so no
+		// API key can be the second person.
+		"GET /dashboard/api/changes":                "policy:read",
+		"GET /dashboard/api/changes/{id}":           "policy:read",
+		"GET /dashboard/api/changes/{id}/diff":      "policy:read",
+		"POST /dashboard/api/changes":               "policy:draft",
+		"PUT /dashboard/api/changes/{id}":           "policy:write",
+		"POST /dashboard/api/changes/{id}/submit":   "policy:write",
+		"POST /dashboard/api/changes/{id}/withdraw": "policy:write",
+		"POST /dashboard/api/changes/{id}/rebase":   "policy:write",
+		"POST /dashboard/api/changes/{id}/replay":   "policy:write",
+	}
+	for k, row := range authzTable() {
+		name := k.Method + " " + k.Path
+		exp, keyed := want[name]
+		if !keyed {
+			exp = apikeys.ScopeNone
+		}
+		if row.Scope != exp {
+			t.Errorf("%s scope = %q, want %q", name, row.Scope, exp)
+		}
+	}
+	for name := range want {
+		found := false
+		for k := range authzTable() {
+			found = found || k.Method+" "+k.Path == name
+		}
+		if !found {
+			t.Errorf("classified route %s has no authz row", name)
+		}
+	}
+	for k, row := range cpRouteTable() {
+		if row.Scope != apikeys.ScopeNone {
+			t.Errorf("%s %s scope = %q, want none: no key may reach a control-plane route", k.Method, k.Path, row.Scope)
+		}
+	}
+}
+
+// TestAuthzScopesRegistered: every scope the table names is registered, so a
+// key can actually be minted for it.
+func TestAuthzScopesRegistered(t *testing.T) {
+	reg := newAPIKeyRegistry()
+	for k, row := range authzTable() {
+		if row.Scope == apikeys.ScopeNone || row.Scope == apikeys.ScopeSelf {
+			continue
+		}
+		if _, ok := reg.Lookup(row.Scope); !ok {
+			t.Errorf("%s %s names scope %q which is not registered", k.Method, k.Path, row.Scope)
+		}
+	}
 }

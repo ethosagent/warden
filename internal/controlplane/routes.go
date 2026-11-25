@@ -36,16 +36,21 @@ func (s *Server) mountDashboard(mux *http.ServeMux, dash *dashboard.Server) {
 		mux.Handle("/dashboard/", s.sessionAuditWrap(classify, dash.Handler()))
 		mux.Handle(sessionsAdminPath, http.NotFoundHandler())
 		s.mountTokenSessions(mux, classify, false)
+		mux.Handle(apiKeysPath, http.NotFoundHandler())
+		mux.Handle(apiKeysSubtree, http.NotFoundHandler())
 		return
 	}
 	dash.SetWriteGuard(s.sessionWriteGuard())
-	guarded := requireRole(s.limitQueryGenerate(dash.Handler()), table, s.cfg.Console, s.cfg.Logger)
-	mux.Handle("/dashboard/", s.sessionAuditWrap(classify, guarded))
+	guarded := requireRoleKeys(s.limitQueryGenerate(dash.Handler()), table, s.cfg.Console, s.cfg.Logger, s.apiKeyCounts, s.keyOwnerBlocked)
+	// With API keys on, apiKeyWrap is outermost: a key request is decided before
+	// the session, audit and authz layers see it (apikey_auth.go).
+	mux.Handle("/dashboard/", s.apiKeyWrap(s.sessionAuditWrap(classify, guarded)))
 	// GET lists, DELETE revokes (?handle= or ?sub=); admin only. A revoke is an
 	// audited admin change.
 	// TODO(#39): a per-session rate limit arrives with the shared console limiter.
-	mux.Handle(sessionsAdminPath, s.sessionAuditWrap(classify, requireRole(http.HandlerFunc(s.handleSessions), table, s.cfg.Console, s.cfg.Logger)))
+	mux.Handle(sessionsAdminPath, s.apiKeyWrap(s.sessionAuditWrap(classify, requireRoleKeys(http.HandlerFunc(s.handleSessions), table, s.cfg.Console, s.cfg.Logger, s.apiKeyCounts, s.keyOwnerBlocked))))
 	s.mountTokenSessions(mux, classify, true)
+	s.mountAPIKeys(mux, classify, table)
 }
 
 // sessionsAdminPath is the admin session list and revoke route (W-P1-SSO-08).
@@ -61,6 +66,11 @@ func cpDashboardRoutes() []dashboard.Route {
 		{Method: http.MethodGet, Path: tokenSessionsListPath, Action: "token_sessions.read"},
 		{Method: http.MethodPost, Path: tokenSessionsRevokeAllPath, Action: "token_sessions.revoke_all"},
 		{Method: http.MethodPost, Path: tokenSessionRevokePath, Action: "token_sessions.revoke"},
+		{Method: http.MethodGet, Path: apiKeysPath, Action: "api_key.list"},
+		{Method: http.MethodPost, Path: apiKeysPath, Action: "api_key.create"},
+		{Method: http.MethodDelete, Path: apiKeysPath, Action: "api_key.revoke_owner"},
+		{Method: http.MethodDelete, Path: apiKeysPath + "/{id}", Action: "api_key.revoke"},
+		{Method: http.MethodGet, Path: apiKeysPath + "/self", Action: "api_key.self"},
 	}
 }
 
@@ -86,7 +96,7 @@ func (s *Server) registerAuthRoutes(mux *http.ServeMux) {
 	if s.cfg.Console.Auth != config.ConsoleAuthOIDC {
 		return
 	}
-	mux.Handle("/auth/me", s.sessionWrap(http.HandlerFunc(s.handleAuthMe)))
+	mux.Handle("/auth/me", s.apiKeyWrap(s.sessionWrap(http.HandlerFunc(s.handleAuthMe))))
 	mux.Handle("/auth/logout", s.requestIDWrap(s.sessionWrap(http.HandlerFunc(s.handleLogout))))
 	if s.breakGlass != nil {
 		mux.Handle(breakGlassPath, s.requestIDWrap(http.HandlerFunc(s.handleBreakGlass)))

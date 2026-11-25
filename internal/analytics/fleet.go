@@ -3,6 +3,7 @@ package analytics
 import (
 	"context"
 	"fmt"
+	"time"
 )
 
 // FleetStore is the control plane's persistent analytics store: it ingests
@@ -76,4 +77,40 @@ func NewFleetStore(cfg FleetConfig) (FleetStore, error) {
 	default:
 		return nil, fmt.Errorf("analytics: unknown provider %q", cfg.Provider)
 	}
+}
+
+// ReplayScanner is an optional FleetStore capability: it streams the events a
+// policy replay needs, newest first, in bounded pages on the store's read-only
+// handle, so a large replay never holds the ingest connection. Events carry only
+// ts, domain, port, protocol, method, decision and the user columns: no URL,
+// header or secret reference. At most limit events are delivered; fn returning
+// an error stops the scan with that error.
+type ReplayScanner interface {
+	ScanReplayEvents(ctx context.Context, since time.Time, limit int, fn func(Event) error) error
+}
+
+// ScanReplay delivers up to limit events at or after since, newest first, to
+// fn: through the store's ReplayScanner when it has one, else one GetEvents.
+func ScanReplay(ctx context.Context, s FleetStore, since time.Time, limit int, fn func(Event) error) error {
+	if rs, ok := s.(ReplayScanner); ok {
+		return rs.ScanReplayEvents(ctx, since, limit, fn)
+	}
+	events, err := s.GetEvents(EventFilter{Since: since, Limit: limit})
+	if err != nil {
+		return err
+	}
+	for _, e := range events {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		// Match ScanReplayEvents: MCP rows are not replayed and no URL is read.
+		if e.Protocol == "mcp" {
+			continue
+		}
+		e.URL = ""
+		if err := fn(e); err != nil {
+			return err
+		}
+	}
+	return nil
 }

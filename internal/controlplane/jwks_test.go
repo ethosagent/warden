@@ -123,7 +123,7 @@ func newKeysEnv(t *testing.T, o keysEnvOpts) *keysEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
-	db, err := cpstate.Open(context.Background(), t.TempDir()+"/warden-cp.db", stateMigrationsFor(kc, config.TokenServiceConfig{Enabled: o.tokens}))
+	db, err := cpstate.Open(context.Background(), t.TempDir()+"/warden-cp.db", stateMigrationsFor(kc, config.ConsoleConfig{}, config.TokenServiceConfig{Enabled: o.tokens}))
 	if err != nil {
 		t.Fatal(err)
 	}

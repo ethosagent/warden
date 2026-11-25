@@ -26,7 +26,12 @@
 //	                              mcp_chain_read_then_send, mcp_chain_permission_probing,
 //	                              mcp_chain_rapid_repeat
 //	ObserveAddedLatency(stage):  mcp_scan, identity
-//	RecordIdentityVerify:         result is an identity status, reason an identity.Reason
+//	RecordIdentityVerify:         result an identity status, reason a bounded identity reason (the
+//	                              allowlist in this file), token_type (idp, warden or none); any other
+//	                              value is recorded as "other"
+//	RecordBlocked(reason) also takes identity_required, identity_expired, identity_conflict
+//	                              (declared in internal/denyreason)
+//	ControlPlaneClockSkew:        warden.controlplane.clock_skew_seconds gauge, no labels
 //	RecordSignInStarted(outcome): started, reused, rate_limited, issuer_unreachable
 //	RecordBlocklist*:             unlabelled (an entry count and a closed-session count)
 //
@@ -107,6 +112,7 @@ type Metrics struct {
 	buildInfo      metric.Int64Gauge
 	blocklistSize  metric.Int64Gauge
 	blocklistCut   metric.Int64Counter
+	clockSkew      metric.Float64Gauge
 }
 
 // ShutdownFunc flushes and closes the meter provider. It is always non-nil; in
@@ -283,6 +289,12 @@ func newMetrics(provider *sdkmetric.MeterProvider, serviceVersion string) (*Metr
 	); err != nil {
 		return nil, fmt.Errorf("observability: identity sign-in counter: %w", err)
 	}
+	if m.clockSkew, err = meter.Float64Gauge(
+		"warden.controlplane.clock_skew_seconds",
+		metric.WithDescription("Control plane Date header minus the worker clock, in seconds (positive: the control plane is ahead). Diagnoses mass expired or nbf failures."),
+	); err != nil {
+		return nil, fmt.Errorf("observability: clock skew gauge: %w", err)
+	}
 	if m.blocklistSize, err = meter.Int64Gauge(
 		"warden.blocklist.entries",
 		metric.WithDescription("Users on the admin block list after the last applied policy change."),
@@ -438,20 +450,64 @@ func (m *Metrics) RecordScoped(result string) {
 	))
 }
 
-// RecordIdentityVerify increments warden.identity.verify.total{result,reason}.
-// result is the bounded identity status (none|valid|invalid|expired|
-// unverified|conflict) and reason the bounded identity.Reason set, "none" when
-// there is no reason. It is not incremented while identity is off, so no
-// result="off" series appears here (off is an event status, not a counter label).
-// Never pass token text or a claim value.
-func (m *Metrics) RecordIdentityVerify(result, reason string) {
+const identityOtherVal = "other"
+
+var (
+	identityResults = setOf("off", "none", "valid", "invalid", "expired", "unverified", "conflict")
+	// identityReasons is the P1 identity.Reason set, "none" (no reason) and the
+	// Phase 2 binding reasons (W-P2-WBND-01/02/03).
+	identityReasons = setOf(
+		"none", "bad_signature", "wrong_iss", "wrong_aud", "wrong_azp", "unknown_kid",
+		"alg_not_allowed", "malformed", "too_large", "ttl_too_long", "jwks_unavailable",
+		"wrong_nonce",
+		"agent_mismatch", "cnf_mismatch", "agent_disabled", "agent_unregistered",
+		"unbound_token", "missing_claim",
+	)
+	identityTokenTypes = setOf("idp", "warden", "none")
+)
+
+func setOf(v ...string) map[string]struct{} {
+	m := make(map[string]struct{}, len(v))
+	for _, s := range v {
+		m[s] = struct{}{}
+	}
+	return m
+}
+
+// boundedLabel returns v when it is in allowed and "other" otherwise, so a
+// caller bug or attacker-controlled string can never mint a new series.
+func boundedLabel(allowed map[string]struct{}, v string) string {
+	if _, ok := allowed[v]; ok {
+		return v
+	}
+	return identityOtherVal
+}
+
+// RecordIdentityVerify increments warden.identity.verify.total{result,reason,
+// token_type}. result is the bounded identity status, reason the bounded
+// identity reason ("none" when there is none, including the Phase 2 binding
+// reasons agent_mismatch, cnf_mismatch, agent_disabled, agent_unregistered,
+// unbound_token, missing_claim) and tokenType (an IdP token, a Warden token or none). Every label is
+// checked against a fixed allowlist and anything else is recorded as "other",
+// so cardinality stays bounded. Never pass token text or a claim value.
+func (m *Metrics) RecordIdentityVerify(result, reason, tokenType string) {
 	if m == nil {
 		return
 	}
 	m.identityVerify.Add(context.Background(), 1, metric.WithAttributes(
-		attribute.String("result", result),
-		attribute.String("reason", reason),
+		attribute.String("result", boundedLabel(identityResults, result)),
+		attribute.String("reason", boundedLabel(identityReasons, reason)),
+		attribute.String("token_type", boundedLabel(identityTokenTypes, tokenType)),
 	))
+}
+
+// RecordControlPlaneClockSkew sets warden.controlplane.clock_skew_seconds to
+// the control plane Date header minus the worker clock. No labels.
+func (m *Metrics) RecordControlPlaneClockSkew(d time.Duration) {
+	if m == nil {
+		return
+	}
+	m.clockSkew.Record(context.Background(), d.Seconds())
 }
 
 // RecordSignInStarted increments warden.identity.signin.started.total{outcome}.

@@ -638,7 +638,7 @@ func TestTokenRetentionPurge(t *testing.T) {
 // downgrade guard always and applied only with tokenService.enabled.
 func TestTokenStateMigrationsRegisterEvents(t *testing.T) {
 	for _, enabled := range []bool{false, true} {
-		db, err := cpstate.Open(context.Background(), filepath.Join(t.TempDir(), "warden-cp.db"), stateMigrationsFor(config.KeysConfig{}, config.TokenServiceConfig{Enabled: enabled}))
+		db, err := cpstate.Open(context.Background(), filepath.Join(t.TempDir(), "warden-cp.db"), stateMigrationsFor(config.KeysConfig{}, config.ConsoleConfig{}, config.TokenServiceConfig{Enabled: enabled}))
 		if err != nil {
 			t.Fatal(err)
 		}

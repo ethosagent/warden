@@ -290,7 +290,9 @@ func (s *Server) mountTokenSessions(mux *http.ServeMux, classify func(*http.Requ
 	table := authzTable()
 	guard := func(h http.HandlerFunc) http.Handler {
 		if oidc {
-			return s.sessionAuditWrap(classify, requireRole(h, table, s.cfg.Console, s.cfg.Logger))
+			// Like the console session routes: apiKeyWrap outermost, so a key
+			// is decided (ScopeNone: refused) before the session layers.
+			return s.apiKeyWrap(s.sessionAuditWrap(classify, requireRoleKeys(h, table, s.cfg.Console, s.cfg.Logger, s.apiKeyCounts, s.keyOwnerBlocked)))
 		}
 		return s.sessionAuditWrap(classify, s.bearerGate(h))
 	}
