@@ -98,6 +98,10 @@ func (s *Server) writeAuthor(ctx context.Context) (PolicyAuthor, error) {
 		return PolicyAuthor{Sub: breakglassSubPrefix + strings.TrimPrefix(p.Sub, breakglassSubPrefix), Email: p.Email, Kind: AuthorKindBreakglass}, nil
 	case p.Kind == PrincipalSession:
 		return PolicyAuthor{Sub: p.Sub, Email: p.Email, Kind: AuthorKindOIDC}, nil
+	case p.Kind == PrincipalAPIKey:
+		// Recorded under the owner (the human who answers for the key); the
+		// kind says a key made the change.
+		return PolicyAuthor{Sub: p.ActorSub(), Email: p.Email, Kind: AuthorKindAPIKey}, nil
 	default:
 		return PolicyAuthor{}, fmt.Errorf("controlplane: versioned write by an unsupported principal kind %q", p.Kind)
 	}

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ethosagent/warden/internal/adminaudit"
+	"github.com/ethosagent/warden/internal/apikeys/adapters/sqlitestore"
 	"github.com/ethosagent/warden/internal/approvals/adapters/sqlstore"
 	"github.com/ethosagent/warden/internal/clock"
 	"github.com/ethosagent/warden/internal/config"
@@ -37,12 +38,16 @@ func StateMigrations() []cpstate.Migration {
 	migs = append(migs, SessionMigrations()...)
 	migs = append(migs, OIDCPendingMigrations()...)
 	migs = append(migs, PolicyStoreMigrations()...)
+	migs = append(migs, BundleMigrations()...)
 	migs = append(migs, adminaudit.Migrations()...)
 	migs = append(migs, BlockMigrations()...)
 	migs = append(migs, WorkerTokenMigrations()...)
+	migs = append(migs, EnrollmentMigrations()...)
 	// Feature-gated: known to the downgrade guard, applied only with
 	// keys.enabled (stateMigrationsFor).
 	migs = append(migs, metastore.Migrations()...)
+	// Feature-gated: applied only with console.apiKeys.enabled.
+	migs = append(migs, sqlitestore.Migrations()...)
 	// Feature-gated like the keys one: applied only with
 	// console.approvals.enabled (stateMigrationsWithApprovals).
 	migs = append(migs, sqlstore.Migrations()...)
