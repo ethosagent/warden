@@ -27,6 +27,11 @@ type ControlPlaneClient interface {
 	// the expiry and rejection facts.
 	Bundle() (config.VerifiedBundle, bool)
 	BundleStatus() config.BundleStatus
+	// BindingInputs is the verified bundle's token issuer, token JWKS and
+	// registered agents in one atomic read (ok=false without pins or before
+	// the first verified bundle). Warden token verification takes its keys
+	// from nothing else.
+	BindingInputs() (config.BindingInputs, bool)
 }
 
 // Compile-time proof that the concrete control-plane provider satisfies the seam
