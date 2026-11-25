@@ -445,6 +445,115 @@ func TestBlockList_BlockBetweenConnectCheckAndRegister(t *testing.T) {
 	}
 }
 
+// blockAtPath makes the proxy apply a block (Replace, then
+// CloseBlockedSessions) the first time dispatch reaches path: after the
+// CONNECT-time checks and the 200, before the session registers.
+func blockAtPath(e *blockEnv, path Path, users ...config.BlockedUser) {
+	var once sync.Once
+	e.p.pathHook = func(got Path) {
+		if got == path {
+			once.Do(func() { e.applyBlock(users...) })
+		}
+	}
+}
+
+// waitSessionsReleased waits until every registry session is released: the
+// handler that owned it has returned, so its dials and events are final.
+func waitSessionsReleased(t *testing.T, p *Proxy) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		p.sessions.mu.Lock()
+		n := len(p.sessions.all)
+		p.sessions.mu.Unlock()
+		if n == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d sessions still open", n)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// assertNoAllowAfterBlocked fails when an allow event follows the user_blocked
+// one: a session cut at registration must never be dialed and audited.
+func assertNoAllowAfterBlocked(t *testing.T, st *syncStore) {
+	t.Helper()
+	seen := false
+	for _, ev := range st.snapshot() {
+		if ev.Reason == "user_blocked" {
+			seen = true
+		}
+		if seen && ev.Decision == "allow" {
+			t.Fatalf("allow event after user_blocked: %+v", st.snapshot())
+		}
+	}
+	if !seen {
+		t.Fatalf("no user_blocked event: %+v", st.snapshot())
+	}
+}
+
+// The window test for the opaque passthrough a CONNECT takes on a worker with
+// TLS termination when the first byte is not a TLS hello (tls.go handleTLS).
+func TestBlockList_PassthroughBlockBetweenConnectCheckAndRegister(t *testing.T) {
+	e := newBlockEnv(t, IdentityModeAttribute)
+	e.setRaw(func() (net.Conn, error) {
+		c, up := net.Pipe()
+		go func() {
+			defer func() { _ = up.Close() }()
+			_, _ = io.Copy(io.Discard, up)
+		}()
+		return c, nil
+	})
+	blockAtPath(e, PathTunnel, config.BlockedUser{Sub: "u1"})
+	conn, br, status := e.connect("Proxy-Authorization: " + basicAuth("tok-u1") + "\r\n")
+	if !strings.Contains(status, "200") {
+		t.Fatalf("CONNECT status = %q", status)
+	}
+	_, _ = io.WriteString(conn, "G") // not 0x16: passthrough
+	assertConnCut(t, conn, br)
+	evs := waitBlockedEvents(t, e.store, 1)
+	if len(evs) != 1 || evs[0].UserSub != "u1" || evs[0].Protocol != "tcp" || evs[0].Domain != idHost {
+		t.Fatalf("events = %+v", e.store.snapshot())
+	}
+	// The handler has returned: had it dialed, the dial and its allow are in.
+	waitSessionsReleased(t, e.p)
+	// blockEnv.dials counts the wrapped TLS dial; idEnv.dials the raw dial and
+	// the rawTLSUpstream dial.
+	if n := e.dials.Load() + e.idEnv.dials.Load(); n != 0 {
+		t.Errorf("upstream dials = %d, want 0", n)
+	}
+	assertNoAllowAfterBlocked(t, e.store)
+}
+
+// The window test for a raw TLS forward: non-HTTP bytes inside a terminated
+// CONNECT (tls.go, PathRawTLS).
+func TestBlockList_RawTLSBlockBetweenConnectCheckAndRegister(t *testing.T) {
+	e := newBlockEnv(t, IdentityModeAttribute)
+	rawTLSUpstream(e.idEnv)
+	blockAtPath(e, PathRawTLS, config.BlockedUser{Sub: "u1"})
+	conn, br, status := e.connect("Proxy-Authorization: " + basicAuth("tok-u1") + "\r\n")
+	if !strings.Contains(status, "200") {
+		t.Fatalf("CONNECT status = %q", status)
+	}
+	tc := e.tlsOver(conn, br)
+	_, _ = io.WriteString(tc, "\x01\x02\x03\x04 not http at all\n")
+	assertConnCut(t, tc.NetConn(), tc)
+	evs := waitBlockedEvents(t, e.store, 1)
+	if len(evs) != 1 || evs[0].UserSub != "u1" || evs[0].Protocol != "raw" || evs[0].Domain != idHost {
+		t.Fatalf("events = %+v", e.store.snapshot())
+	}
+	// The handler has returned: had it dialed, the dial and its allow are in.
+	waitSessionsReleased(t, e.p)
+	// blockEnv.dials counts the wrapped TLS dial; idEnv.dials the raw dial and
+	// the rawTLSUpstream dial.
+	if n := e.dials.Load() + e.idEnv.dials.Load(); n != 0 {
+		t.Errorf("upstream dials = %d, want 0", n)
+	}
+	assertNoAllowAfterBlocked(t, e.store)
+}
+
 // The same window for every other registration (h1, h2, raw TLS, a header
 // identity bound by blockStage): a bind that runs after the block's
 // CloseBlockedSessions cuts the session itself, with one deny event. A busy
