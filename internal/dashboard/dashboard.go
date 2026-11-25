@@ -21,6 +21,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/ethosagent/warden/internal/agentid"
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/integration"
@@ -920,6 +921,21 @@ func userParam(q url.Values) (user string, ok bool) {
 	return user, true
 }
 
+// actParam reads the optional ?act= filter (an agent id): trimmed, then
+// rejected (ok false, the caller answers 400) when non-empty and not a valid
+// agent id (agentid.ValidID, at most 64 characters). A NUL byte, the analytics
+// cache-key separator, is rejected the same way. Empty means no filter.
+func actParam(q url.Values) (act string, ok bool) {
+	act = strings.TrimSpace(q.Get("act"))
+	if act == "" {
+		return "", true
+	}
+	if strings.ContainsRune(act, 0) || agentid.ValidID(act) != nil {
+		return "", false
+	}
+	return act, true
+}
+
 // handleTraffic serves GET /dashboard/api/traffic.
 func (s *Server) handleTraffic(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -933,10 +949,16 @@ func (s *Server) handleTraffic(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid user parameter")
 		return
 	}
+	act, ok := actParam(q)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid act parameter")
+		return
+	}
 	filter := analytics.EventFilter{
 		Domain:   q.Get("domain"),
 		Decision: q.Get("decision"),
 		User:     user,
+		Act:      act,
 	}
 	if v := q.Get("since"); v != "" {
 		t, err := time.Parse(time.RFC3339, v)

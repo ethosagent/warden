@@ -340,25 +340,19 @@ func (s *Stack) State(tb testing.TB) State {
 			st.TokensRevoked++
 		}
 	}
-	st.Audit = len(s.auditExcludingDrift(tb, 0))
+	st.Audit = len(s.auditSince(tb, 0))
 	return st
 }
 
-// driftAction is the admin audit row an idle control plane writes about three
-// seconds (real time) after it boots, from the policy-mirror drift check on its
-// real-time reload ticker. It is background noise to a case that counts audit
-// rows, and the counting helpers here leave it out. It is a production bug
-// (a false config.external_change audit on an idle CP) tracked on branch
-// fix/policystore-false-external-change.
-//
-// TODO: remove this filter once fix/policystore-false-external-change lands.
-const driftAction = "config.external_change"
-
-func (s *Stack) auditExcludingDrift(tb testing.TB, since int64) []AuditRow {
+// auditSince returns every admin audit row newer than since. It filters
+// nothing: an idle control plane writes no background audit rows (#709 fixed
+// the false config.external_change row), so any extra row is a real event
+// and fails the case's exact count.
+func (s *Stack) auditSince(tb testing.TB, since int64) []AuditRow {
 	tb.Helper()
 	var out []AuditRow
 	for _, r := range s.AuditRows(tb, "") {
-		if r.Seq > since && r.Action != driftAction {
+		if r.Seq > since {
 			out = append(out, r)
 		}
 	}
@@ -380,7 +374,7 @@ func (s *Stack) AuditMark(tb testing.TB) int64 {
 // outcome given by outcome ("" skips the check).
 func (s *Stack) ExpectAudit(tb testing.TB, mark int64, outcome string, want ...string) []AuditRow {
 	tb.Helper()
-	rows := s.auditExcludingDrift(tb, mark)
+	rows := s.auditSince(tb, mark)
 	var got []string
 	for _, r := range rows {
 		got = append(got, r.Action)
