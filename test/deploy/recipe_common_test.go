@@ -32,6 +32,8 @@ type recipeService struct {
 	NetworkMode string                     `json:"network_mode"`
 	Privileged  bool                       `json:"privileged"`
 	CapAdd      []string                   `json:"cap_add"`
+	CapDrop     []string                   `json:"cap_drop"`
+	SecurityOpt []string                   `json:"security_opt"`
 	ExtraHosts  json.RawMessage            `json:"extra_hosts"`
 	Pid         string                     `json:"pid"`
 	Ipc         string                     `json:"ipc"`
@@ -239,6 +241,12 @@ func checkRecipe(t *testing.T, r recipeSpec) {
 		if agent.Privileged {
 			t.Error("agent is privileged")
 		}
+		if len(agent.CapDrop) != 1 || agent.CapDrop[0] != "ALL" {
+			t.Errorf("agent cap_drop = %v, want [ALL]", agent.CapDrop)
+		}
+		if !contains(agent.SecurityOpt, "no-new-privileges:true") {
+			t.Errorf("agent security_opt = %v, want no-new-privileges:true", agent.SecurityOpt)
+		}
 		if len(agent.CapAdd) != 0 {
 			t.Errorf("agent cap_add = %v", agent.CapAdd)
 		}
@@ -353,6 +361,24 @@ func checkRecipe(t *testing.T, r recipeSpec) {
 
 	t.Run("bootstrap is a one-shot with no network", func(t *testing.T) {
 		b := c.Services["identity-bootstrap"]
+		if got := b.env("AGENT_ID"); got != r.name {
+			t.Errorf("identity-bootstrap AGENT_ID = %q, want %q", got, r.name)
+		}
+		if got := b.env("WORKER_TOKEN_ENV"); got != r.workerToken {
+			t.Errorf("identity-bootstrap WORKER_TOKEN_ENV = %q, want %q", got, r.workerToken)
+		}
+		if tok := b.env(r.workerToken); tok == "" || tok != c.Services["warden"].env("WARDEN_WORKER_TOKEN") {
+			t.Errorf("identity-bootstrap %s must be non-empty and equal the worker's WARDEN_WORKER_TOKEN", r.workerToken)
+		}
+		var bootMount bool
+		for _, v := range b.Volumes {
+			if v.Type == "bind" && v.Target == "/bootstrap.sh" && strings.HasSuffix(v.Source, "/deploy/compose/recipe-bootstrap.sh") {
+				bootMount = true
+			}
+		}
+		if !bootMount {
+			t.Error("identity-bootstrap does not bind-mount recipe-bootstrap.sh at /bootstrap.sh")
+		}
 		if b.NetworkMode != "none" {
 			t.Errorf("identity-bootstrap network_mode = %q, want none", b.NetworkMode)
 		}

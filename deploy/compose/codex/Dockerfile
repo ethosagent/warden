@@ -35,7 +35,7 @@ RUN set -eu; \
     check "openai-codex-${CODEX_VERSION}.tgz" "$CODEX_INTEGRITY"; \
     check "openai-codex-${CODEX_VERSION}-${plat}.tgz" "$want_plat"; \
     npm install -g --no-audit --no-fund --omit=optional "./openai-codex-${CODEX_VERSION}.tgz"; \
-    tar -xzf "openai-codex-${CODEX_VERSION}-${plat}.tgz" -C "$(npm root -g)/@openai/codex" --strip-components=1 package/vendor; \
+    tar -xzf "openai-codex-${CODEX_VERSION}-${plat}.tgz" --no-same-owner --no-same-permissions -C "$(npm root -g)/@openai/codex" --strip-components=1 package/vendor; \
     cd /; rm -rf /tmp/cx; npm cache clean --force; \
     codex --version
 

@@ -44,7 +44,7 @@ if [ ! -f "$KEY" ] || [ ! -f "$JWK" ]; then
 	if registered; then
 		echo "bootstrap: agent $AGENT_ID is registered but its key or public JWK is missing from the sidecar volume." >&2
 		echo "bootstrap: recover with a NEW key: delete the agent (or run 'warden control-plane agent update' with the new JWK)," >&2
-		echo "bootstrap: remove the volume identity-$AGENT_ID, then run the bootstrap again. See docs/recipes/README.md." >&2
+		echo "bootstrap: remove the volume identity-$AGENT_ID, then run the bootstrap again. See docs/recipes/$AGENT_ID.md." >&2
 		exit 1
 	fi
 	warden identity enroll --agent-id "$AGENT_ID" --key-file "$KEY" --force >"$JWK.tmp"

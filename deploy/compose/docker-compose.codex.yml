@@ -193,6 +193,10 @@ services:
       dockerfile: Dockerfile
     image: warden-codex-agent:local
     init: true
+    # No Linux capability and no way to gain one: the agent needs neither, and a
+    # compromised process cannot escalate inside the container.
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
     depends_on:
       warden-identity:
         condition: service_started

@@ -215,6 +215,16 @@ is already inside a sandbox: the container is the sandbox, and Warden is the egr
 $COMPOSE exec codex codex exec --skip-git-repo-check --sandbox danger-full-access 'run the tests'
 ```
 
+This is a real trade-off. With `danger-full-access` the commands the model chooses run
+with no Codex sandbox, so they can write anywhere the `agent` user can, including
+`~/.codex` (config, history and any skills) on the persistent `codex-home` volume, which
+the next run reads back, and `/workspace`. They can also make every call the policy
+allows through the forwarder, as the logged-in user. What stays out of reach is the
+same as for the rest of the recipe: no vendor key, no Warden token, no agent key, no
+route to anything but `api.openai.com`. Run it only on workspaces and prompts you would
+run as that user, and reset the `codex-home` volume (`docker compose down -v` or
+`docker volume rm`) if you suspect it was altered.
+
 With only the placeholder (`OPENAI_API_KEY` empty on the worker) the call reaches
 OpenAI and the answer is **401**: the request was allowed and attributed, and the
 upstream rejected the key. With a real key on the worker the prompt completes (manual
@@ -231,7 +241,9 @@ in the worker log and do not stop a prompt.
 
 ### Transport: WebSocket first, HTTPS fallback
 
-Checked against 0.167.2: `codex exec` first opens a WebSocket to
+Observed against 0.167.2 with the placeholder key (the upstream answered 401, which
+may be what triggers the fallback; with a real key the WebSocket may succeed and no
+fallback occur): `codex exec` first opens a WebSocket to
 `wss://api.openai.com/v1/responses` (a `CONNECT` to `api.openai.com:443`, then an HTTP
 upgrade) and, after its retries fail, falls back to `POST https://api.openai.com/v1/responses`
 over HTTP/2. Both go to the one allowed host, so the policy needs no change, and both
@@ -370,5 +382,5 @@ What it does not stop:
 - Real deployments replace Dex with the organisation's IdP, use real secrets from a
   secret manager, and register the agent through the console (**Agents** tab) instead
   of the bootstrap.
-- The file `deploy/compose/recipe-bootstrap.sh` is the entire bootstrap (shared with the Codex recipe); read it
+- The file `deploy/compose/recipe-bootstrap.sh` is the entire bootstrap (shared with the Claude Code recipe); read it
   before you adapt it.
