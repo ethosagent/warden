@@ -521,6 +521,10 @@ func (p *Proxy) judge() Judge {
 	return nil
 }
 
+// JudgeEnabled reports whether an inline judge is live. Like DLPMode it reads
+// the hot path's atomic pointer, so apply tests can confirm a swap landed.
+func (p *Proxy) JudgeEnabled() bool { return p.judge() != nil }
+
 // SetJudge atomically swaps in a new inline judge (or nil to disable). It is
 // race-free against concurrent hot-path reads via the atomic pointer. The judge
 // is fail-safe advisory state, not a lifecycle-owning handle, so there is nothing

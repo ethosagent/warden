@@ -447,6 +447,12 @@ var All = slices.Concat(
 		{Name: "warden_agent_binding", Opts: wardenAgentBindingOpts(), Run: wardenAgentBinding},
 		{Name: "warden_agent_binding_challenge", Opts: wardenAgentBindingChallengeOpts(), Run: wardenAgentBindingChallenge},
 		{Name: "warden_agent_binding_disabled", Opts: wardenAgentBindingOpts(), Run: wardenAgentBindingDisabled},
+		// The boot pull's identity settings are in force from the first request
+		// after a restart (identity block and this agent's agents entry), with
+		// the boot bundle's token keys. In-process only (worker restart).
+		{Name: "identity_boot_distributed_mode", Opts: identityBootOpts(), Run: identityBootDistributedMode},
+		{Name: "identity_boot_distributed_agent", Opts: identityBootOpts(), Run: identityBootDistributedAgent},
+		{Name: "identity_boot_from_cache", Opts: identityBootCacheOpts(), Run: identityBootFromCache},
 		// Bundle state in the fleet view and the worker's metrics (W-P2-SBND-05):
 		// a pinned worker shows its bundle seq and pins and is not behind; a
 		// tampered bundle shows as a rejection reason with the seq unchanged.
