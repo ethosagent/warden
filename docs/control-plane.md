@@ -239,6 +239,8 @@ A pinned worker reports its bundle state three ways.
 ```sh
 # 1. Generate the bake-once proxy CA (the control plane mints its cert from it).
 OUT_DIR=deploy/compose/certs ./scripts/gen-certs.sh
+#    The key is mode 0600 for you; the container's warden user (uid 100) must read it.
+#    Dev only: chmod 644 deploy/compose/certs/proxy-ca.key  (or chown 100:101 it with sudo).
 
 # 2. Bring up the control plane + two workers + two synthetic agents. The compose
 #    defaults are public dev placeholders (deploy/compose/.env.example); for
