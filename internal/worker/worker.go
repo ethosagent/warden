@@ -918,8 +918,15 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	idWiring.now = clk.Now
 	idWiring.scoped = func() int { return countScoped(evaluator.CurrentPolicy()) }
 	idWiring.apply(pol.Identity, pol.Agents)
-	logger.Info("worker bound to agent", "agent", agentID, "source", agentIDSource(p.AgentID, pol.Central.AgentID),
-		"identityMode", pxy.IdentityModeName())
+	// The mode logged is the one the worker serves with: a managed worker logs
+	// it after ApplyBoot (below), since the boot pull may change it.
+	logBound := func() {
+		logger.Info("worker bound to agent", "agent", agentID, "source", agentIDSource(p.AgentID, pol.Central.AgentID),
+			"identityMode", pxy.IdentityModeName())
+	}
+	if controlPlane == nil {
+		logBound()
+	}
 	// Warden token keys from the bundle verified at boot (nothing to install
 	// without pins or a first verified bundle). Boot is single-goroutine: the
 	// apply loops start below.
@@ -1176,6 +1183,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		if remotePolicy != nil {
 			applier.ApplyBoot()
 		}
+		logBound()
 		go longPollControlPlane(ctx, clk, controlPlane, applyEv, pol.ControlPlane.LongPollWait, logger, onPolicyApplied(applier.Apply, pxy.CloseBlockedSessions))
 		go heartbeatControlPlane(ctx, clk, controlPlane, pol.ControlPlane.HeartbeatInterval, logger)
 		if pol.ControlPlane.BundleVerification() {

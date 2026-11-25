@@ -361,6 +361,51 @@ func TestApplier_ApplyBoot(t *testing.T) {
 			}
 		}
 	})
+	t.Run("absent judge keeps the local judge", func(t *testing.T) {
+		a, fake, _ := newTestApplier(t)
+		a.p.SetJudge(stubJudge{}) // the judge Run built from the local file
+		fake.settings = &config.SettingsWire{DLP: &config.DLPSettings{Mode: config.DLPModeMonitor}}
+		a.ApplyBoot()
+		if !a.p.JudgeEnabled() {
+			t.Error("ApplyBoot with no distributed judge dropped the local judge")
+		}
+		// A changed long-poll with the same settings turns it off (Apply semantics).
+		a.Apply()
+		if a.p.JudgeEnabled() {
+			t.Error("Apply with no distributed judge kept the judge")
+		}
+	})
+	t.Run("cache TTL and log level", func(t *testing.T) {
+		a, fake, logCtrl := newTestApplier(t)
+		// Absent: the local TTL (1h) and level (info) stand.
+		fake.settings = &config.SettingsWire{DLP: &config.DLPSettings{Mode: config.DLPModeMonitor}}
+		a.ApplyBoot()
+		if a.liveCacheTTL != time.Hour {
+			t.Errorf("liveCacheTTL = %v, want the local 1h", a.liveCacheTTL)
+		}
+		if got := logCtrl.Level(); got != slog.LevelInfo {
+			t.Errorf("log level = %v, want the local info", got)
+		}
+		// Present: applied at boot, as a changed long-poll would.
+		fake.settings = &config.SettingsWire{
+			CacheTTLSeconds: intPtr(120),
+			Logging:         &config.LoggingSettings{Level: "debug"},
+		}
+		a.ApplyBoot()
+		if a.liveCacheTTL != 120*time.Second {
+			t.Errorf("liveCacheTTL = %v, want 120s from the boot pull", a.liveCacheTTL)
+		}
+		if got := logCtrl.Level(); got != slog.LevelDebug {
+			t.Errorf("log level = %v, want debug from the boot pull", got)
+		}
+	})
+}
+
+// stubJudge allows everything; only its presence matters.
+type stubJudge struct{}
+
+func (stubJudge) Evaluate(string, string, string, string, string, bool) proxy.Verdict {
+	return proxy.Verdict{Decision: "allow"}
 }
 
 // failingFetcher fails every fetch and counts them, like the no-credentials

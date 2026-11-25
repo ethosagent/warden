@@ -88,10 +88,12 @@ func (a *SettingsApplier) Apply() { a.apply(false) }
 // a restarted worker never serves under its local config while the control
 // plane distributes another (the first long-poll answers 304: the boot pull
 // already set the ETag). It differs from Apply in one way: a block the control
-// plane does not distribute leaves the local boot config of that block in
-// place instead of turning it off, so boot is never less strict than the local
-// file; the first changed long-poll then applies the full Apply semantics. The
-// MCP gateway is skipped: Run builds the boot gateway from the distributed
+// plane does not distribute (judge, DLP, compliance) leaves the local boot
+// config of that block in place instead of turning it off. Identity and agents
+// go together: an absent identity block keeps the local identity and agents; a
+// present one is applied with the CP's agents (which may replace a stricter
+// local per-agent mode: that is the CP's intent). The first changed long-poll
+// then applies the full Apply semantics. The MCP gateway is skipped: Run builds the boot gateway from the distributed
 // block already, and rebuilding it here would orphan the handle the dashboard
 // and the MCP snapshot push hold.
 func (a *SettingsApplier) ApplyBoot() { a.apply(true) }
@@ -153,7 +155,8 @@ func (a *SettingsApplier) applyMCP(settings *config.SettingsWire) {
 }
 
 // applyRest applies every block but the MCP gateway. With boot set, a block
-// absent from settings keeps the local boot config (see ApplyBoot).
+// absent from settings keeps the local boot config; identity and agents are
+// gated together on the identity block (see ApplyBoot).
 func (a *SettingsApplier) applyRest(settings *config.SettingsWire, boot bool) {
 	// --- Judge swap ---
 	// The API key is resolved LOCALLY inside buildJudgeFrom (the distributed
@@ -290,8 +293,9 @@ func (a *SettingsApplier) applyRest(settings *config.SettingsWire, boot bool) {
 	// The wiring rebuilds the verifier only when an issuer, internalIssuerURL,
 	// audience, JWKS, azp, groupsClaim, skew or TTL input moved; a mode-only change swaps the mode. A rebuild
 	// failure or an unknown mode keeps the previous config.
-	// At boot an absent identity block keeps the local one (a missing block
-	// turns identity off on a changed long-poll, never at boot).
+	// At boot an absent identity block keeps the local identity and agents; a
+	// present one is applied with the CP's agents. (A missing block turns
+	// identity off on a changed long-poll, never at boot.)
 	if settings != nil && a.identity != nil && (!boot || settings.Identity != nil) {
 		a.identity.apply(config.IdentityFromSettings(settings.Identity), config.AgentsFromSettings(settings.Agents))
 	}
