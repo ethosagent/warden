@@ -472,6 +472,10 @@ var All = slices.Concat(
 		// a pinned worker shows its bundle seq and pins and is not behind; a
 		// tampered bundle shows as a rejection reason with the seq unchanged.
 		{Name: "bundles_pinned_worker_fleet_state", Opts: tamperedOpts(), Run: pinnedWorkerFleetState},
+		// Staged bundle key rotation (W-P2-SBND-07): stage, pin, activate and
+		// retire against two workers with no rejected bundle, a mid-rotation
+		// restart from the cache, and an activate gate that holds.
+		{Name: "bundles_key_rotation_staged", Opts: bundleKeyRotationOpts(), Run: bundleKeyRotationStaged},
 		// Last-known-good bundle cache (W-P2-SBND-06): a pinned worker restarted
 		// with the control plane down enforces its cached bundle; a tampered
 		// cache file leaves it fail-closed. In-process only.

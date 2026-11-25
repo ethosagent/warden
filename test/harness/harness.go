@@ -255,6 +255,10 @@ type H struct {
 	// bundlePins (WithBundlePins, WithUnrelatedBundlePins) are the bundle keys
 	// every worker pins; bundleExpiry (WithBundleExpiry) is its expiry mode.
 	bundlePins bundlePinSet
+	// workerPins are per-worker pin overrides by 1-based worker number
+	// (SetWorkerBundlePins), guarded by pinsMu.
+	pinsMu     sync.Mutex
+	workerPins map[int][]string
 	// bundleTamper (WithTamperingBundleProxy) is the proxy workers reach the
 	// control plane through; nil unless the option is set.
 	bundleTamper *tamperProxy
@@ -984,7 +988,7 @@ func (h *H) workerParams(i int) worker.Params {
 			},
 		}
 	}
-	h.applyBundlePins(&policy)
+	h.applyBundlePins(i, &policy)
 	h.applyBundleCache(i, &policy)
 	h.applyAuditLogs(i, &policy)
 	h.applyFakeJudge(&policy)
