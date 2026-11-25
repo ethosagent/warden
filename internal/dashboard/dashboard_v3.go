@@ -545,6 +545,10 @@ type setupResponse struct {
 	// Backup is the scheduled-backup status, present only when the control plane
 	// runs backups and the caller is an admin.
 	Backup *BackupStatus `json:"backup,omitempty"`
+	// AgentRegistry is true only on a control plane whose agent registry can
+	// serve (a state dir is configured); the console hides the Agents tab
+	// otherwise, a worker's dashboard included. Always present.
+	AgentRegistry bool `json:"agentRegistry"`
 }
 
 // BackupStatus is the value-free state of the control plane's scheduled backups.
@@ -565,6 +569,7 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := setupResponse{Mode: s.setupMode(), AuthMode: s.authMode}
+	resp.AgentRegistry = s.agents != nil && s.agents.Ready() == nil
 	if s.backupFn != nil {
 		resp.Backup = s.backupFn(r)
 	}

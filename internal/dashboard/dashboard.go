@@ -299,6 +299,11 @@ type WorkerView struct {
 	// it cannot apply the mode and keeps allowing callers it should challenge.
 	// Set by the control plane per snapshot.
 	NoIdentityChallenge bool `json:"noIdentityChallenge"`
+	// AgentID is the registered agent the worker's latest heartbeat says it
+	// serves, and IdentityMode the identity mode it says it runs. Both are
+	// validated by the control plane and empty for a worker that reports none.
+	AgentID      string `json:"agentID,omitempty"`
+	IdentityMode string `json:"identityMode,omitempty"`
 }
 
 // NewServer constructs a dashboard Server. The policy argument is the static

@@ -31,6 +31,8 @@ type workerState struct {
 	eventsForwarded int64
 	policyETag      string   // the worker's current policy version (from heartbeat)
 	caps            []string // capabilities of the latest heartbeat (replaced, not merged)
+	agentID         string   // the agent the worker says it serves (latest heartbeat; valid or empty)
+	identityMode    string   // the identity mode the worker says it runs (latest heartbeat; enum or empty)
 
 	// How the worker last authenticated (recordAuth). tokenID/tokenName are set
 	// only for kind token; legacy and none ids are unverified headers.
@@ -86,7 +88,11 @@ func (r *WorkerRegistry) SeenIngest(proxyID string, n int) {
 // SeenHeartbeat records a heartbeat and the worker's current policy ETag, so the
 // dashboard can flag workers that are a policy version behind. caps replaces the
 // stored set: a worker that stops advertising a capability loses it.
-func (r *WorkerRegistry) SeenHeartbeat(proxyID, policyETag string, caps []string) {
+//
+// agentID and identityMode (W-P2-AREG-03) replace the stored values too, under
+// the same lock, so a view never pairs new caps with an old agent binding. The
+// caller has already validated them (validAgentBinding); a worker is never trusted.
+func (r *WorkerRegistry) SeenHeartbeat(proxyID, policyETag string, caps []string, agentID, identityMode string) {
 	if proxyID == "" {
 		return
 	}
@@ -97,6 +103,8 @@ func (r *WorkerRegistry) SeenHeartbeat(proxyID, policyETag string, caps []string
 		w.policyETag = policyETag
 	}
 	w.caps = append([]string(nil), caps...)
+	w.agentID = agentID
+	w.identityMode = identityMode
 }
 
 // maxWorkersWithoutCap bounds the WorkersWithoutCap result.
@@ -202,6 +210,8 @@ func (r *WorkerRegistry) Views() []dashboard.WorkerView {
 			EventsForwarded: w.eventsForwarded,
 			PolicyETag:      w.policyETag,
 			Caps:            append([]string(nil), w.caps...),
+			AgentID:         w.agentID,
+			IdentityMode:    w.identityMode,
 			Online:          now.Sub(w.lastSeen) < staleAfter,
 			AuthKind:        string(w.authKind),
 			TokenName:       w.tokenName,
