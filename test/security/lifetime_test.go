@@ -1,6 +1,10 @@
 package security
 
 import (
+	"bufio"
+	"encoding/base64"
+	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"testing"
@@ -189,6 +193,29 @@ func lifetimeStack(t *testing.T) *Stack {
 // holdTunnel opens a terminated tunnel on agent's worker with the token kept
 // under tokKey, proves it serves (so the worker holds a verified identity for
 // it) and keeps it under key.
+// connectStatus sends one CONNECT with token and returns its status, reading no
+// reply through the tunnel.
+func connectStatus(t testing.TB, w *Worker, token string) int {
+	t.Helper()
+	conn, err := net.DialTimeout("tcp", w.ProxyAddr, 10*time.Second)
+	if err != nil {
+		t.Fatalf("security: dial %s: %v", w.Name, err)
+	}
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetDeadline(time.Now().Add(15 * time.Second))
+	req := "CONNECT " + UpstreamHost + ":443 HTTP/1.1\r\nHost: " + UpstreamHost + ":443\r\n" +
+		"Proxy-Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte("session:"+token)) + "\r\n\r\n"
+	if _, err := io.WriteString(conn, req); err != nil {
+		t.Fatalf("security: write CONNECT: %v", err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodConnect})
+	if err != nil {
+		t.Fatalf("security: read the CONNECT reply: %v", err)
+	}
+	_ = resp.Body.Close()
+	return resp.StatusCode
+}
+
 func holdTunnel(t testing.TB, s *Stack, agent, tokKey, key string) *Tunnel {
 	t.Helper()
 	tun := s.OpenTunnel(t, s.Worker(agent), TransportTerminated, scratchToken(s, tokKey))
@@ -257,8 +284,11 @@ func TestLifetime(t *testing.T) {
 		watch := Case{Path: PathWorker, WantResult: "invalid", WantReason: "unknown_kid", WantDeny: "identity_required"}
 		before := s.snapshot(t, w, watch)
 		cut := s.StartCut(t, w, func() { s.RotateTokenKey(t, true) })
+		// Only the CONNECT status is read: a CONNECT admitted just before the new
+		// bundle lands is closed by the post-apply re-check, so a request through
+		// it may see the close instead of a reply.
 		cut.Within(t, cutBound, "refuse the revoked key's token", func() bool {
-			return s.Do(t, s.Worker("agent-a"), Via(TransportConnect, scratchToken(s, keyU1))).Status == http.StatusProxyAuthRequired
+			return connectStatus(t, w, scratchToken(s, keyU1)) == http.StatusProxyAuthRequired
 		})
 		Run(t, s, "worker", revokedKeyCases)
 		s.Eventually("the tunnel opened with the revoked key's token to be closed by the post-apply re-check", tunnelOf(s, keyT1).Closed)
