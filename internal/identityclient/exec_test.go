@@ -211,14 +211,24 @@ type fakeProc struct {
 	exit     chan struct{}
 	code     int
 	killedBy os.Signal
+	// delivered, when set, gets one token per Signal call (never blocks).
+	delivered chan struct{}
 }
 
-func newFakeProc() *fakeProc { return &fakeProc{exit: make(chan struct{})} }
+func newFakeProc() *fakeProc {
+	return &fakeProc{exit: make(chan struct{}), delivered: make(chan struct{}, 64)}
+}
 
 func (p *fakeProc) Signal(s os.Signal) error {
 	p.mu.Lock()
 	p.got = append(p.got, s)
 	p.mu.Unlock()
+	if p.delivered != nil {
+		select {
+		case p.delivered <- struct{}{}:
+		default:
+		}
+	}
 	return nil
 }
 
@@ -233,16 +243,16 @@ func (p *fakeProc) signals() []os.Signal {
 	return append([]os.Signal(nil), p.got...)
 }
 
-// sentinelSeen is true once the forwarded list has the signals that were
-// expected to pass plus the SIGTERM sentinel.
-func sentinelSeen(p *fakeProc, send []os.Signal) bool {
+// forwardedWant is how many signals the child must have received once the
+// trailing SIGTERM sentinel is forwarded: every expected one plus the sentinel.
+func forwardedWant(send []os.Signal) int {
 	want := 1
 	for _, s := range send {
 		if s == syscall.SIGTERM || s == syscall.SIGHUP {
 			want++
 		}
 	}
-	return len(p.signals()) >= want
+	return want
 }
 
 func TestExecSignals(t *testing.T) {
@@ -265,12 +275,17 @@ func TestExecSignals(t *testing.T) {
 		for _, s := range append(send, syscall.SIGTERM) {
 			ch <- s
 		}
-		deadline := time.Now().Add(5 * time.Second)
-		for len(p.signals()) == 0 || p.signals()[len(p.signals())-1] != syscall.SIGTERM || !sentinelSeen(p, send) {
-			if time.Now().After(deadline) {
-				t.Fatal("signals not consumed")
+		// Wait on the child's own delivery notifications, reading the list
+		// once per wake-up: the supervisor appends concurrently, so two reads
+		// in one condition can disagree.
+		want := forwardedWant(send)
+		timeout := time.After(10 * time.Second)
+		for len(p.signals()) < want {
+			select {
+			case <-p.delivered:
+			case <-timeout:
+				t.Fatalf("signals not consumed: got %v, want %d", p.signals(), want)
 			}
-			time.Sleep(time.Millisecond)
 		}
 		close(p.exit)
 		<-done

@@ -285,8 +285,7 @@ func (wc *workerCert) enrollUntilDone(ctx context.Context) bool {
 				wc.logger.Error("worker certificate refused; staying FAIL-CLOSED", "error", perr.Error())
 				return false
 			}
-			wc.source.Set(cred)
-			wc.transport.Rotate()
+			wc.source.Install(cred, wc.transport.Rotate)
 			wc.logger.Info("worker enrolled", "worker_id", cred.WorkerID(), "serial", cred.Serial())
 			return true
 		case !errors.Is(err, cpclient.ErrUnreachable):
