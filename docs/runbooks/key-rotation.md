@@ -172,9 +172,15 @@ replacement (`--activate`).
 
 ### Rollout order, first time
 
-1. **`--bundles=offer`.** Start the control plane with `--bundles=offer`
-   (needs `--state-dir`, `--policy-store=versioned`, `keys.enabled`). Workers
-   without pins keep the unsigned wire; nothing changes for them.
+Since the Phase 2 release `--bundles` is `require` when it is left unset and its
+prerequisites are present, and workers require pins by default, so the order below
+is also the upgrade order (see
+[Upgrading to required signed bundles](../control-plane.md#upgrading-to-required-signed-bundles)).
+
+1. **`--bundles=offer`.** Start the control plane with `--bundles=offer`, written
+   out (needs `--state-dir`, `--policy-store=versioned`, `keys.enabled`). Workers
+   without pins keep the unsigned wire; nothing changes for them. Do not leave
+   the flag unset here: unset means `require`.
 2. **Pin every worker.** Export the public keys and put them on each worker as
    `controlPlane.bundleKeysFile` (or inline `bundleKeys`), then roll the workers:
 
@@ -190,8 +196,9 @@ replacement (`--activate`).
    and starts each worker pinned to it. Watch the fleet view: a pinned worker
    shows its bundle seq and `pinnedKids`, and the `bundle/v1` capability.
 3. **`--bundles=require`.** Once the fleet view shows no worker without
-   `bundle/v1`, restart the control plane with `--bundles=require`: a request
-   without the bundle `Accept` header now gets `406 signed_bundle_required`.
+   `bundle/v1`, restart the control plane with `--bundles=require` (or remove the
+   flag, which resolves to the same): a request without the bundle `Accept`
+   header now gets `406 signed_bundle_required`.
 
 ### Staged rotation (routine)
 

@@ -5,12 +5,16 @@
 #                  -f deploy/compose/docker-compose.bundles.yml up
 #
 # What it changes vs the base stack:
-#   - The control plane runs with --policy-store=versioned and --bundles=offer
+#   - The control plane runs with --policy-store=versioned and --bundles=require
 #     and keys.enabled (configs/config.control-plane.bundles.yaml), so it signs
-#     what it serves on GET /policy with its bundle key. `offer` serves the
-#     envelope to workers that ask for it and the unsigned policy to the rest,
-#     so nothing breaks while a fleet is being pinned. Move to `require` only
-#     once every worker pins (docs/runbooks/key-rotation.md, "Rollout order").
+#     what it serves on GET /policy with its bundle key and answers a request
+#     without the bundle Accept header 406. That is also what an unset --bundles
+#     resolves to with these prerequisites; it is written out here on purpose.
+#     Every worker below pins before it starts, so there is no unpinned worker
+#     to serve. To pin a fleet that already runs unsigned, go through `offer`
+#     first (docs/control-plane.md, "Upgrading to required signed bundles").
+#     This is the signed-bundles path of the stock recipe: the stock worker
+#     config opts out (requireSignedBundles: false) and logs a WARN.
 #   - cp-pins is a one-shot, run as the image's own warden user, that waits for
 #     the control plane's first start (which creates the keys), then exports the
 #     PUBLIC bundle JWKS (active + next, never private material) into the
@@ -39,7 +43,7 @@ services:
       - "--ca-key=/etc/warden/certs/proxy-ca.key"
       - "--tls-host=control-plane,localhost,127.0.0.1"
       - "--policy-store=versioned"
-      - "--bundles=offer"
+      - "--bundles=require"
 
   cp-pins:
     # The published image has no `control-plane keys` command: use the build the base file makes.

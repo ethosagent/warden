@@ -29,6 +29,12 @@ responseScan:
 # proxy CA this worker already uses.
 controlPlane:
   endpoint: https://control-plane:7070/policy
+  # Signed policy bundles are required by default. This stack's control plane
+  # serves the unsigned policy (file policy store, no bundle keys), so this worker
+  # opts out EXPLICITLY and logs a WARN at boot. Temporary: for a signed path use
+  # deploy/compose/docker-compose.bundles.yml (docs/control-plane.md, "Upgrading
+  # to required signed bundles").
+  requireSignedBundles: false
   tokenEnv: WARDEN_WORKER_TOKEN
   caCert: /etc/warden/certs/proxy-ca.crt
   longPollWait: 30s

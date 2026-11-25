@@ -85,6 +85,17 @@ git push origin v1.2.3
 
 Release notes are auto-generated from Conventional-Commit PR titles since the previous tag (`--generate-notes`) — that is the de-facto changelog; there is no `CHANGELOG.md`.
 
+### Breaking changes: carry them into the release notes
+
+Auto-generated notes list titles only, so a breaking change needs its own entry. Before tagging, edit the generated notes (`gh release edit vX.Y.Z --notes-file ...`, or add `--notes-file` to the release) to open with the entries below, and use a `!` title (`feat(bundles)!: ...`) on the PR that makes the change.
+
+**The release that closes Phase 2 (signed bundles required by default, #719).** Pin before you upgrade; the full steps, mixed-fleet order and rollback are in [docs/control-plane.md, "Upgrading to required signed bundles"](docs/control-plane.md#upgrading-to-required-signed-bundles).
+
+- `warden control-plane --bundles` now defaults to `require` when `--state-dir`, `--policy-store=versioned` and `keys.enabled` are all present (otherwise unsigned policy and one startup WARN). It was `off`. Opt out with `--bundles=off`; `--bundles=offer` serves unsigned policy to unpinned workers during a rollout. Both log a WARN.
+- Worker `controlPlane.requireSignedBundles` now defaults to `true`: a CP-managed worker with no `controlPlane.bundleKeys` or `bundleKeysFile` fails to start, naming the keys to pin. It was `false`. Opt out, temporarily, with `controlPlane.requireSignedBundles: false` (logs a WARN).
+- Before upgrading: run the control plane with `--bundles=offer`, export the keys (`warden control-plane keys export --purpose bundle`), pin every worker, upgrade the workers, then upgrade the control plane and drop the flag.
+- A worker never falls back to unsigned policy by itself: against a control plane that serves no signed envelope, a pinned worker keeps its last-known-good policy (deny-all at a cold boot with no cache).
+
 ## Verify a release
 
 **Binaries:**
