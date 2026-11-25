@@ -37,6 +37,9 @@ const (
 	enrollTimeout = 30 * time.Second
 )
 
+// maxRetiredPools bounds the retired pools cpTransport keeps for shutdown.
+const maxRetiredPools = 2
+
 // cpTransport is the one control-plane transport. A renewed certificate takes
 // effect through Rotate: TLS presents the certificate once per connection, and a
 // held long-poll (or an HTTP/2 connection that never goes idle) would keep the
@@ -83,7 +86,16 @@ func (t *cpTransport) Rotate() {
 	old.CloseIdleConnections()
 	t.mu.Lock()
 	t.retired = append(t.retired, old)
+	var dropped *http.Transport
+	if len(t.retired) > maxRetiredPools {
+		// A pool this many renewals old is long past its idle timeout and its
+		// held requests are done: close it and stop tracking it.
+		dropped, t.retired = t.retired[0], t.retired[1:]
+	}
 	t.mu.Unlock()
+	if dropped != nil {
+		dropped.CloseIdleConnections()
+	}
 }
 
 // workerCert is a worker's certificate machinery. nil when the worker

@@ -269,3 +269,37 @@ func TestCPTransportCloseIdleConnectionsReachesRetiredPools(t *testing.T) {
 	tr.CloseIdleConnections()
 	waitFor(t, "the retired pool's connection to close", func() bool { return open.Load() == 0 })
 }
+
+// TestCPTransportRetiredPoolsAreBounded: rotating many times keeps at most
+// maxRetiredPools pools, and each pool that fell off the list was closed.
+func TestCPTransportRetiredPoolsAreBounded(t *testing.T) {
+	var open atomic.Int64
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	srv.Config.ConnState = func(_ net.Conn, s http.ConnState) {
+		switch s {
+		case http.StateNew:
+			open.Add(1)
+		case http.StateClosed:
+			open.Add(-1)
+		}
+	}
+	srv.StartTLS()
+	defer srv.Close()
+	tr := newCPTransport(srv.Client().Transport.(*http.Transport).Clone())
+	c := &http.Client{Transport: tr}
+	for i := 0; i < 5; i++ {
+		resp, err := c.Get(srv.URL) // opens a connection on the current pool
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		tr.Rotate() // closes idle conns itself; retired pools are only tracked
+		tr.mu.Lock()
+		n := len(tr.retired)
+		tr.mu.Unlock()
+		if n > maxRetiredPools {
+			t.Fatalf("after %d rotations %d retired pools are tracked, want at most %d", i+1, n, maxRetiredPools)
+		}
+	}
+	waitFor(t, "every connection of the rotated pools to close", func() bool { return open.Load() == 0 })
+}
