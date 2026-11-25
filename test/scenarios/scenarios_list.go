@@ -377,6 +377,7 @@ var All = slices.Concat(
 		{Name: "token_session_routes_disabled", Opts: append(tokenServiceDisabledOpts(), harness.WithControlPlaneAdminToken()), Run: tokenSessionRoutesDisabled},
 		{Name: "token_exchange_signer_unavailable", Opts: tokenServiceOpts(harness.WithFlakyKeyStore()), Run: tokenExchangeSignerUnavailable},
 		{Name: "token_exchange_idp_unavailable", Opts: tokenServiceOpts(harness.WithOIDCIssuerDown()), Run: tokenExchangeIdPUnavailable},
+		{Name: "token_exchange_idp_outage_during_rotation", Opts: tokenServiceOpts(), Run: tokenExchangeIdPOutageDuringRotation},
 		{Name: "keys_cli_rotates_and_resets", Opts: keysRotationOpts(), Run: keysCLIRotatesAndResets},
 		{Name: "workerca_degraded_then_ready", Opts: workerCAOpts(), Run: workerCADegradedThenReady},
 		{Name: "workerca_enroll", Opts: workerCAEnrollOpts(), Run: workerCAEnroll},
