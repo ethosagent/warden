@@ -133,7 +133,6 @@ func (s *Stack) hostile(tb testing.TB, victim string) (crypto.Signer, string) {
 // first case so no case's audit window holds the admin's own writes.
 type enrollFixtures struct {
 	sans, rsa, badCSR, reused, expired, revoked, prefix, rate string
-	reusedKey                                                 crypto.Signer
 	// bad is the first 401 reply any bad_token case saw: the rest must equal
 	// it byte for byte.
 	bad *Reply

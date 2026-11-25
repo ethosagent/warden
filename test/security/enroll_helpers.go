@@ -19,7 +19,6 @@ import (
 	"net/url"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/ethosagent/warden/internal/controlplane"
@@ -110,21 +109,15 @@ func (s *Stack) NewCSR(tb testing.TB, o CSROptions) (crypto.Signer, string) {
 	return key, csr
 }
 
-var (
-	rsaOnce sync.Once
-	rsaKeyV *rsa.PrivateKey
-	rsaErr  error
-)
-
 // RSACSR is a well-formed, correctly self-signed request for an RSA key: the
 // CA accepts only P-256 and Ed25519.
 func (s *Stack) RSACSR(tb testing.TB) string {
 	tb.Helper()
-	rsaOnce.Do(func() { rsaKeyV, rsaErr = rsa.GenerateKey(rand.Reader, 2048) })
-	if rsaErr != nil {
-		tb.Fatalf("security: generate an RSA key: %v", rsaErr)
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		tb.Fatalf("security: generate an RSA key: %v", err)
 	}
-	_, csr := s.NewCSR(tb, CSROptions{Key: rsaKeyV})
+	_, csr := s.NewCSR(tb, CSROptions{Key: key})
 	return csr
 }
 

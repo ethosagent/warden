@@ -246,10 +246,10 @@ func humanCase(fx *routeFixtures, cred string, r humanRoute) Case {
 
 		// No certificate, token, key, agent or secret was created, revoked or
 		// deleted, and only the denied key write is on the audit trail.
-		if after.State.Audit-before.State.Audit != wantAudit {
-			t.Errorf("audit rows moved by %d, want %d", after.State.Audit-before.State.Audit, wantAudit)
+		if after.Audit-before.Audit != wantAudit {
+			t.Errorf("audit rows moved by %d, want %d", after.Audit-before.Audit, wantAudit)
 		}
-		after.State.Audit, before.State.Audit = 0, 0
+		after.Audit, before.Audit = 0, 0
 		if after.State != before.State {
 			t.Errorf("CP state moved by the attack: %+v -> %+v", before.State, after.State)
 		}
