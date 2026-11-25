@@ -2,7 +2,11 @@ package worker
 
 import (
 	"context"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -223,4 +227,45 @@ central:
 	if cp.heartbeats[0]["_id"] != "worker-1" {
 		t.Errorf("heartbeat identity = %v", cp.heartbeats[0]["_id"])
 	}
+}
+
+// TestCPTransportCloseIdleConnectionsReachesRetiredPools: a request that was in
+// flight when the transport rotated finishes on the old pool; closing the idle
+// connections at shutdown closes that connection too instead of leaving it to
+// the idle timeout.
+func TestCPTransportCloseIdleConnectionsReachesRetiredPools(t *testing.T) {
+	var open atomic.Int64
+	entered, release := make(chan struct{}), make(chan struct{})
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(entered)
+		<-release
+	}))
+	srv.Config.ConnState = func(_ net.Conn, s http.ConnState) {
+		switch s {
+		case http.StateNew:
+			open.Add(1)
+		case http.StateClosed:
+			open.Add(-1)
+		}
+	}
+	srv.StartTLS()
+	defer srv.Close()
+	base := srv.Client().Transport.(*http.Transport).Clone()
+	tr := newCPTransport(base)
+	done := make(chan error, 1)
+	go func() {
+		resp, err := (&http.Client{Transport: tr}).Get(srv.URL)
+		if err == nil {
+			_ = resp.Body.Close()
+		}
+		done <- err
+	}()
+	<-entered
+	tr.Rotate()
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	tr.CloseIdleConnections()
+	waitFor(t, "the retired pool's connection to close", func() bool { return open.Load() == 0 })
 }

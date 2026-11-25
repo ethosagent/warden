@@ -65,6 +65,11 @@ type certCP struct {
 	// pollHook, when set, runs inside GET /policy?wait=... after the client
 	// certificate was identified (serial) and before the answer: a held long-poll.
 	pollHook func(serial string)
+	// frozen, when set, is the time the fake verifies certificates at: a control
+	// plane whose clock the worker's does not drive.
+	frozen atomic.Pointer[time.Time]
+	// noCert counts requests that arrived without any client certificate.
+	noCert atomic.Int64
 }
 
 func newCertCP(t *testing.T, clk *clocktest.Fake) *certCP {
@@ -124,7 +129,7 @@ func (cp *certCP) presented(r *http.Request) (id, serial string) {
 		return "", ""
 	}
 	leaf := r.TLS.PeerCertificates[0]
-	if _, err := leaf.Verify(x509.VerifyOptions{Roots: cp.pool, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, CurrentTime: cp.clk.Now()}); err != nil {
+	if _, err := leaf.Verify(x509.VerifyOptions{Roots: cp.pool, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, CurrentTime: cp.verifyTime()}); err != nil {
 		return "", ""
 	}
 	id, err := workerca.WorkerIDFromCert(leaf, "warden.test")
@@ -134,10 +139,20 @@ func (cp *certCP) presented(r *http.Request) (id, serial string) {
 	return id, leaf.SerialNumber.Text(16)
 }
 
+func (cp *certCP) verifyTime() time.Time {
+	if f := cp.frozen.Load(); f != nil {
+		return *f
+	}
+	return cp.clk.Now()
+}
+
 func (cp *certCP) serve(w http.ResponseWriter, r *http.Request) {
 	cp.mu.Lock()
 	cp.bearers = append(cp.bearers, r.Header.Get("Authorization"))
 	cp.mu.Unlock()
+	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+		cp.noCert.Add(1)
+	}
 	if cp.rejectAuth.Load() && r.Header.Get("Authorization") != "" {
 		http.Error(w, "bearer not accepted", http.StatusBadRequest)
 		return
@@ -376,13 +391,22 @@ func TestCertClientExpiredCertIsNotPresentedAndPolicyKeepsLastKnownGood(t *testi
 	go wc.watchExpiry(ctx)
 	waitFor(t, "the expiry watcher to arm", func() bool { return clk.PendingTimers() == 1 })
 
+	// The control plane's clock does not move: it would still accept the expired
+	// certificate, so a pull can only fail because none was presented.
+	frozen := clk.Now()
+	cp.frozen.Store(&frozen)
+	noCertBefore := cp.noCert.Load()
 	clk.Advance(25 * time.Hour) // past NotAfter (24h)
 	got, err := wc.getClientCertificate(nil)
 	if err != nil || len(got.Certificate) != 0 {
 		t.Fatalf("GetClientCertificate after expiry = %+v, %v, want an empty certificate", got, err)
 	}
+	waitFor(t, "the expiry error", func() bool { return strings.Count(logs.String(), "worker cert expired") >= 1 })
 	if err := rp.Pull(); err == nil {
-		t.Fatal("the control plane accepted a pull with no certificate")
+		t.Fatal("the control plane accepted a pull after the certificate expired: a pooled connection still presented it")
+	}
+	if cp.noCert.Load() == noCertBefore {
+		t.Fatal("the control plane never saw a request without a certificate after expiry")
 	}
 	// The last-known-good policy still decides: allowed stays allowed, denied denied, unlisted default-denied.
 	for host, want := range map[string]policy.Decision{"api.allowed.example": policy.Allow, "evil.example": policy.Deny, "other.example": policy.NoMatch} {
@@ -393,7 +417,6 @@ func TestCertClientExpiredCertIsNotPresentedAndPolicyKeepsLastKnownGood(t *testi
 	if kept, err := rp.GetPolicy(); err != nil || len(kept.Allowlist) != 1 {
 		t.Errorf("the provider dropped its last-known-good policy: %v, %v", kept, err)
 	}
-	waitFor(t, "the expiry error", func() bool { return strings.Count(logs.String(), "worker cert expired") >= 1 })
 	for i := 0; i < 30; i++ {
 		clk.Advance(time.Minute)
 		waitFor(t, "a check", func() bool { return clk.PendingTimers() == 1 })

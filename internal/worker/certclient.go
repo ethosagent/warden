@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -45,6 +46,10 @@ const (
 type cpTransport struct {
 	base *http.Transport // template only: never used for a request
 	cur  atomic.Pointer[http.Transport]
+	mu   sync.Mutex
+	// retired are the pools Rotate replaced: requests in flight on them finish,
+	// and CloseIdleConnections (shutdown) closes them too.
+	retired []*http.Transport
 }
 
 func newCPTransport(base *http.Transport) *cpTransport {
@@ -60,11 +65,25 @@ func (t *cpTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 // CloseIdleConnections drops the pooled idle connections (http.Client uses it).
-func (t *cpTransport) CloseIdleConnections() { t.cur.Load().CloseIdleConnections() }
+// It covers the retired pools as well, so a connection that outlived a Rotate
+// does not outlive the worker.
+func (t *cpTransport) CloseIdleConnections() {
+	t.mu.Lock()
+	old := append([]*http.Transport(nil), t.retired...)
+	t.mu.Unlock()
+	for _, r := range old {
+		r.CloseIdleConnections()
+	}
+	t.cur.Load().CloseIdleConnections()
+}
 
 // Rotate starts a new connection pool and closes the idle connections of the old one.
 func (t *cpTransport) Rotate() {
-	t.cur.Swap(t.base.Clone()).CloseIdleConnections()
+	old := t.cur.Swap(t.base.Clone())
+	old.CloseIdleConnections()
+	t.mu.Lock()
+	t.retired = append(t.retired, old)
+	t.mu.Unlock()
 }
 
 // workerCert is a worker's certificate machinery. nil when the worker
@@ -171,7 +190,9 @@ func (wc *workerCert) checkProxyID(c *cpclient.Credential, source string) error 
 
 // getClientCertificate is the tls.Config hook: the certificate in the source, or
 // an empty certificate (no client certificate sent) when there is none or it has
-// expired, so an expired credential is never offered.
+// expired. A handshake never offers an expired credential; watchExpiry rotates
+// the transport when the credential expires so no pooled connection keeps
+// presenting it either.
 func (wc *workerCert) getClientCertificate(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
 	c := wc.source.Current()
 	if c == nil || c.Expired(wc.clk.Now()) {
@@ -273,6 +294,7 @@ func (wc *workerCert) enrollUntilDone(ctx context.Context) bool {
 // certificate); only its control-plane calls fail.
 func (wc *workerCert) watchExpiry(ctx context.Context) {
 	var logged time.Time
+	var rotatedFor *cpclient.Credential // the expired credential the pools were dropped for
 	t := wc.clk.NewTimer(certExpiryCheck)
 	defer t.Stop()
 	for {
@@ -286,6 +308,12 @@ func (wc *workerCert) watchExpiry(ctx context.Context) {
 		now := wc.clk.Now()
 		if c == nil || !c.Expired(now) {
 			continue
+		}
+		if c != rotatedFor {
+			// Connections already open keep the certificate they handshook with:
+			// drop them so the next request presents none.
+			rotatedFor = c
+			wc.transport.Rotate()
 		}
 		if due := logged.IsZero() || now.Sub(logged) >= certExpiredLogEvery; due {
 			logged = now
