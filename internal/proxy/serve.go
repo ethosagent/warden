@@ -104,6 +104,9 @@ func (p *Proxy) Serve(ctx context.Context) error {
 		}
 	}
 
+	// The require-mode session expiry loop lives as long as Serve (expiry.go).
+	go p.runSessionExpiry(ctx)
+
 	// ctx done closes every listener — injected and self-bound alike.
 	done := make(chan struct{})
 	go func() {
@@ -501,6 +504,7 @@ func (p *Proxy) tunnel(client net.Conn, br *bufio.Reader, domain string, port in
 	if p.trackSession(ci) {
 		sess = p.sessions.newSession("tcp", domain, port, true, client)
 		cut := sess.bind(ci)
+		cut = p.armExpiry(sess, ci, !cut) || cut
 		defer sess.release()
 		if p.refusedAtCreate(sess, ci, domain, port, "tcp") || cut {
 			return

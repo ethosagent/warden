@@ -2645,6 +2645,37 @@ Recommended alerts:
   outage (tokens cannot be renewed); check `warden_controlplane_clock_skew_seconds`
   before blaming the outage.
 
+### Require mode: session closing and degraded modes
+
+In `require` mode (W-P2-WBND-09) the worker registers each session that holds a
+verified Warden token in the block list's session registry and closes it at the
+token's `exp` (raw tunnels and WebSockets at `exp` plus `identity.clockSkewSeconds`;
+see [the identity contract](identity-contract.md#closing-sessions-at-token-expiry-w-p2-wbnd-09)).
+It also re-checks them after each applied bundle, so a removed key, a disabled
+agent or a rotated-out signing key ends open tunnels at the apply instead of at
+token expiry. Each cut is one deny event (`identity_expired`, or `identity_required`
+with the verifier reason in the decision log) and one `warden.blocked.total` count.
+
+Degraded modes:
+
+- **Control plane down:** a require-mode agent keeps working until its current
+  token expires (at most 15 minutes, one token TTL), then its sessions are closed
+  and new CONNECTs get the 407, so it fails closed one TTL later. Tokens cannot be
+  renewed while the control plane (and its token service) is unreachable.
+- **Dex down:** only new exchanges fail (`login_required` once the cached ID token
+  ends). Existing Warden tokens and sessions are unaffected until their `exp`.
+- **Restart with the control plane down:** the worker reloads its bundle only from
+  the opt-in [last-known-good cache](#last-known-good-bundle-cache-opt-in) (`controlPlane.stateDir` with pinned keys); without it the
+  worker has no token keys and stays fail-closed (`jwks_unavailable`).
+
+Runbook: after a scheduled signing-key rotation the control plane refuses to mint
+with a new key until the bundle that publishes it is signed. If the bundle
+publisher is degraded at that moment (`/healthz` answers `200 degraded: bundle
+signing failed`), minting stops (`503 signer_unavailable`) until the next
+successful bundle sign, while tokens already minted keep working until `exp`.
+Fix the publisher (signer key, bundle store) and the next sign lifts the guard; do
+not disable bundles to get around it.
+
 ### Block list enforcement
 
 A worker denies every request from a user on the block list (`policy.blockedUsers`,

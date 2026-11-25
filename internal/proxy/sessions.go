@@ -52,6 +52,11 @@ type sessionRegistry struct {
 	// registry-only tests.
 	blocked func(identity.Claims) bool
 	onCut   func([]closedSession)
+
+	// expiry is the min-heap of require-mode sessions by next due time and wake
+	// tells the expiry loop it changed (expiry.go).
+	expiry expiryHeap
+	wake   chan struct{}
 }
 
 func newSessionRegistry() *sessionRegistry {
@@ -59,6 +64,7 @@ func newSessionRegistry() *sessionRegistry {
 		bySub:   make(map[string]map[*session]struct{}),
 		byEmail: make(map[string]map[*session]struct{}),
 		all:     make(map[*session]struct{}),
+		wake:    make(chan struct{}, 1),
 	}
 }
 
@@ -82,12 +88,24 @@ type session struct {
 	closed        bool // the closers have run
 	released      bool
 	refused       bool // created while the registry refused sessions: already closed
+
+	// Require-mode expiry (expiry.go). heapIdx is -1 while the session is not in
+	// the registry's expiry heap. tracked is the CONNECT identity it was armed
+	// with (its exp and kid), re-checked after each bundle apply. graceful sends
+	// GOAWAY on an h2 connection; goaway records that it did.
+	exp      time.Time
+	skew     time.Duration
+	due      time.Time
+	heapIdx  int
+	tracked  connIdentity
+	graceful func()
+	goaway   bool
 }
 
 // newSession builds an unregistered session; it joins the registry when bind
 // sees the first identity.
 func (r *sessionRegistry) newSession(proto, domain string, port int, interruptible bool, c io.Closer) *session {
-	s := &session{reg: r, proto: proto, domain: domain, port: port, interruptible: interruptible, closers: []io.Closer{c}}
+	s := &session{reg: r, proto: proto, domain: domain, port: port, interruptible: interruptible, closers: []io.Closer{c}, heapIdx: -1}
 	r.mu.Lock()
 	r.all[s] = struct{}{}
 	refused := r.refuse
@@ -195,6 +213,7 @@ func (s *session) release() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	s.released = true
+	r.untrackLocked(s)
 	delete(r.all, s)
 	for _, k := range s.subs {
 		remove(r.bySub, k, s)
@@ -235,6 +254,7 @@ func (s *session) upgrade(proto string, c io.Closer) bool {
 	}
 	s.proto, s.interruptible = proto, true
 	s.closers = append(s.closers, c)
+	s.reg.refreshDueLocked(s) // a WebSocket is cut at exp+skew, not at exp
 	return true
 }
 
@@ -268,6 +288,9 @@ type closedSession struct {
 	domain  string
 	port    int
 	closers []io.Closer
+	// silent marks a step whose deny event was already written (the hard close
+	// after an h2 GOAWAY).
+	silent bool
 }
 
 // takeBlocked marks and returns the sessions whose registered sub or email the
@@ -313,7 +336,7 @@ func (r *sessionRegistry) markLocked(hit map[*session]struct{}, force bool, pick
 			if i == 0 {
 				cs.ci = id
 			}
-			if pick(id) {
+			if pick != nil && pick(id) {
 				cs.ci = id
 				break
 			}

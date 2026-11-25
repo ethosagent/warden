@@ -464,6 +464,7 @@ var All = slices.Concat(
 		{Name: "identity_require_connect", Opts: identityBootOpts(), Run: identityRequireConnect},
 		{Name: "identity_require_header_conflict", Opts: identityBootOpts(), Run: identityRequireHeaderConflict},
 		{Name: "identity_require_boot", Opts: identityBootOpts(), Run: identityRequireBoot},
+		{Name: "identity_require_session_expiry", Opts: identityBootOpts(), Run: identityRequireSessionExpiry},
 		// Bundle state in the fleet view and the worker's metrics (W-P2-SBND-05):
 		// a pinned worker shows its bundle seq and pins and is not behind; a
 		// tampered bundle shows as a rejection reason with the seq unchanged.

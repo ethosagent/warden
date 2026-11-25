@@ -13,15 +13,11 @@ import (
 // at 15 minutes (and at the subject token's own expiry), and a token past exp
 // plus the verifier's skew is refused on a new CONNECT.
 //
-// Not covered here: the expiry of a token mid-tunnel (challenge mode answers the
-// next request of a tunnel whose token passed exp plus skew with 403
-// identity_expired). The proxy reads the wall clock for that re-check
-// (Proxy.clock, internal/proxy/tls.go) and worker.Overrides.Clock does not reach
-// it, so the suite's fake clock cannot move a held tunnel past exp, and the
-// control plane's fake clock runs minutes ahead of real time after the token key
-// publishes. test/scenarios/identity_challenge.go and the proxy's own tests
-// cover that behaviour; a clock seam from the worker to the proxy would let this
-// suite as well.
+// Mid-tunnel expiry (W-P2-WBND-09): a MITM-terminated tunnel opened with a token
+// that then passes exp plus skew must refuse its next request. The workers share
+// the stack's fake clock through worker.Overrides.Clock, which reaches the
+// proxy's identity checks and its session expiry loop (leaf-cert minting stays
+// on the wall clock).
 
 const (
 	keyExp1 = "issued.token"
@@ -56,6 +52,32 @@ var expiredTokenCases = []Case{{
 }}
 
 func TestIssuedTokenLifetime(t *testing.T) {
+	t.Run("mid_tunnel_expiry", func(t *testing.T) {
+		s := StartStack(t, StackOptions{})
+		a := agentSetup(t, s, "agent-a")
+		s.Put(keyExp1, s.MintWardenToken(t, a, "user-1", "eng"))
+		w := s.Worker("agent-a")
+		tun := s.OpenTunnel(t, w, TransportConnect, scratchToken(s, keyExp1))
+		if tun.Open.Status != http.StatusOK {
+			t.Fatalf("the tunnel did not open: %d %s", tun.Open.Status, tun.Open.Body)
+		}
+		if r := tun.MustGet(t); r.Status != http.StatusOK {
+			t.Fatalf("a request before exp = %d, want 200", r.Status)
+		}
+		hits := s.Upstream.Hits()
+		exp := time.Unix(decodeClaims(t, scratchToken(s, keyExp1)).Exp, 0)
+		s.Clock.Advance(exp.Add(verifierSkew + time.Second).Sub(s.Clock.Now()))
+		// Refused whichever of the two gets there first: the session expiry
+		// loop closes the connection, or the per-request recheck answers 403.
+		if r, err := tun.Get(t); err == nil && r.Status == http.StatusOK {
+			t.Errorf("a request on the tunnel past exp plus skew = %d, want it refused", r.Status)
+		}
+		if got := s.Upstream.Hits() - hits; got != 0 {
+			t.Errorf("%d upstream hits past exp plus skew, want 0", got)
+		}
+		s.AssertNoLeak(t, LeakCheck{AllowSwapUpTo: s.Upstream.Hits()})
+	})
+
 	t.Run("cap", func(t *testing.T) {
 		s := StartStack(t, StackOptions{})
 		a := agentSetup(t, s, "agent-a")

@@ -515,9 +515,37 @@ Connection: close
   MCP clients; MCP refusals are this plain JSON, with no JSON-RPC body.
 - The block list and the default-deny policy, including identity-scoped entries
   evaluated with the Warden subject, still run after identity passes.
-- Limit: a raw tunnel (no CA) and an upgraded WebSocket are bound at CONNECT or
-  upgrade only. Closing them at token expiry and on a bundle change is
-  W-P2-WBND-09.
+- Binding is **agent match plus key liveness**: the token's `act.sub` is the
+  worker's agent, the agent is active and `cnf.jkt` is a registered key. It is
+  **not** proof of possession; a token is a bearer credential.
+- Dex (IdP) tokens are accepted only in `attribute` and `challenge` mode, never
+  in `require`.
+
+#### Closing sessions at token expiry (W-P2-WBND-09)
+
+A Warden token lasts at most 15 minutes, but a raw tunnel (no CA), an upgraded
+WebSocket, an h2 connection or an idle keep-alive is admitted once and no
+per-request check sees it again. In `require` mode the worker therefore
+registers every such session that carries a verified Warden token in the block
+list's session registry with the token's `exp` and `kid`, and closes it:
+
+| Session | Closed |
+|---|---|
+| Idle HTTP/1 keep-alive | at `exp` (one that is mid-request finishes that request first) |
+| h2 connection | `GOAWAY` at `exp`: in-flight streams finish, new ones are refused; the connection is closed at `exp` plus skew at the latest |
+| Raw tunnel, WebSocket | at `exp` plus `identity.clockSkewSeconds` |
+
+Each closure writes one deny event with reason `identity_expired` and counts
+`warden.blocked.total{reason="identity_expired"}`. The client's next CONNECT
+carries the newest token, so a forwarder that refreshes at rotation never sees
+the cut. After each applied bundle the worker also re-checks every registered
+session against the bundle now in force and closes those whose binding no longer
+holds: the signing key left the token JWKS (`unknown_kid`), the agent was
+disabled (`agent_disabled`) or its key removed (`cnf_mismatch`). That closure is
+one `identity_required` deny event whose decision-log `detail` is the reason.
+Attribute-mode and anonymous sessions are never registered, so they see no
+change. No v1 header, claim or status changes; this section only adds to
+Contract v1.
 
 ## Agent binding of Warden tokens
 
