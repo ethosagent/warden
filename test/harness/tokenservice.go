@@ -189,6 +189,40 @@ func (h *H) awaitRegisteredAgent(id string) {
 	})
 }
 
+// RegisterTokenAgentKey registers agent id with the public JWK of a key the
+// scenario holds (the kid is the JWK's own), the way an operator registers the
+// key `warden identity enroll` printed. It returns once the control plane sees
+// the agent. Needs WithTokenService.
+func (h *H) RegisterTokenAgentKey(id string, jwk keys.JWK, groups, scopes []string) {
+	h.tb.Helper()
+	raw, err := json.Marshal(jwk)
+	if err != nil {
+		h.tb.Fatalf("harness: encode an agent key: %v", err)
+	}
+	store, closeDB := h.agentStore()
+	defer closeDB()
+	_, err = store.Create(context.Background(), agentreg.Agent{
+		ID: id, DisplayName: id, Keys: []agentreg.Key{{KID: jwk.Kid, JWK: raw}},
+		AllowedGroups: groups, AllowedScopes: scopes,
+	}, "harness")
+	if err != nil {
+		h.tb.Fatalf("harness: register agent %s: %v", id, err)
+	}
+	h.awaitRegisteredAgent(id)
+}
+
+// TokenEndpointURL is the URL a client reaches POST /oauth2/token at. The
+// assertion audience is TokenServiceIssuer + TokenEndpointPath, which is not
+// this URL: the harness issuer is a loopback origin.
+func (c *CPClient) TokenEndpointURL() string { return "https://" + c.addr + TokenEndpointPath }
+
+// TokenAudience is the audience a client assertion names in the harness.
+func TokenAudience() string { return TokenServiceIssuer + TokenEndpointPath }
+
+// HTTPClient is the client the harness reaches the control plane with: it
+// trusts the control plane's CA.
+func (c *CPClient) HTTPClient() *http.Client { return c.cl }
+
 // DisableTokenAgent switches agent id off in the registry. The control plane
 // notices on its next registry watch tick, so a scenario advances the clock
 // until the refusal shows.
