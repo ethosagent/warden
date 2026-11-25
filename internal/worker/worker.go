@@ -328,6 +328,13 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	}
 	localOnly := localOnlyFlag || pol.ControlPlane.LocalOnly
 	managed := pol.ControlPlane.Endpoint != "" && !localOnly
+	// A worker with no control plane has no signed bundle to verify Warden
+	// tokens with, so its local config can never enter require mode.
+	if !managed {
+		if err := config.ValidateStandaloneIdentity(pol); err != nil {
+			return err
+		}
+	}
 	logBundleVerification(logger, pol.ControlPlane, managed, localOnly)
 
 	// The agent id this worker is bound to: --agent-id, then central.agentID,

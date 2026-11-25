@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -44,6 +45,9 @@ type identityWiring struct {
 	// live is the identity config the proxy is serving: the verifier (nil when
 	// off), the inputs it was built from, and the mode.
 	live liveIdentity
+	// loggedMode and loggedSource are the resolved mode and its source last
+	// logged, so a change (not every apply) is logged once.
+	loggedMode, loggedSource string
 
 	// now is the worker's clock (Run sets clk.Now); nil means time.Now.
 	now func() time.Time
@@ -69,6 +73,9 @@ type liveIdentity struct {
 	v    identity.Verifier
 	key  verifierKey
 	mode proxy.IdentityMode
+	// refusing is true while v is the fail-closed stand-in installed because a
+	// require-mode verifier could not be built; the next apply rebuilds.
+	refusing bool
 	// starter and signInKey are the challenge-mode sign-in starter and the
 	// settings it was built from (nil/"" until challenge was applied).
 	starter   proxy.SignInStarter
@@ -106,13 +113,20 @@ type verifierKey struct {
 	acceptIdP                                                 bool
 }
 
-func keyOf(s config.IdentitySettings) verifierKey {
+// acceptIdP is whether this worker's verifier takes IdP tokens at all: never in
+// require mode, where an IdP token is refused as unbound_token without being
+// verified (no IdP verifier is built, no key fetch, no issuer audience needed).
+func acceptIdP(s config.IdentitySettings, mode proxy.IdentityMode) bool {
+	return mode != proxy.IdentityModeRequire && s.AcceptIdPTokens()
+}
+
+func keyOf(s config.IdentitySettings, mode proxy.IdentityMode) verifierKey {
 	return verifierKey{
 		issuer: s.Issuer, internalIssuerURL: s.InternalIssuerURL, audience: s.Audience,
 		jwksURL: s.JWKSURL, groupsClaim: s.GroupsClaim,
 		allowedAZP:  fmt.Sprintf("%q", s.AllowedAZP),
 		skewSeconds: s.ClockSkewSeconds, ttlSeconds: s.MaxTokenTTLSeconds,
-		acceptIdP: s.AcceptIdPTokens(),
+		acceptIdP: acceptIdP(s, mode),
 	}
 }
 
@@ -141,27 +155,18 @@ func signInKey(s config.IdentitySettings) string {
 	return fmt.Sprintf("%s|%s|%q|%q|%d|%d", s.Issuer, s.InternalIssuerURL, si.ClientID, si.Scopes, si.MaxPending, si.StartsPerMinute)
 }
 
-// resolveIdentityMode picks this agent's mode: its own Agents entry, then the
-// block's DefaultMode, then off. An empty string at either level falls through.
-func resolveIdentityMode(s config.IdentitySettings, agents []config.AgentPolicy, agentID string) string {
-	for _, a := range agents {
-		if a.ID == agentID && a.Identity != "" {
-			return a.Identity
-		}
-	}
-	if s.DefaultMode != "" {
-		return s.DefaultMode
-	}
-	return config.IdentityModeOff
-}
-
 // apply moves the proxy to the identity config described by s and agents. A
 // rebuild failure or a mode this build does not know (a newer control plane)
 // keeps the previous config and logs one warning with no token data.
 func (w *identityWiring) apply(s config.IdentitySettings, agents []config.AgentPolicy) {
 	w.issuer = s.Issuer
 	w.warnConfig(s, agents)
-	switch mode := resolveIdentityMode(s, agents, w.agentID); mode {
+	mode, source := config.EffectiveIdentityMode(w.agentID, agents, s)
+	if mode != w.loggedMode || source != w.loggedSource {
+		w.loggedMode, w.loggedSource = mode, source
+		w.logger.Info("identity mode resolved", "agent", w.agentID, "mode", mode, "source", source)
+	}
+	switch mode {
 	case config.IdentityModeOff:
 		if w.live.mode != "" && w.live.mode != proxy.IdentityModeOff {
 			w.logger.Info("identity verification disabled by settings")
@@ -184,6 +189,9 @@ func (w *identityWiring) apply(s config.IdentitySettings, agents []config.AgentP
 			return
 		}
 		w.applyVerified(s, proxy.IdentityModeChallenge)
+	case config.IdentityModeRequire:
+		w.warned = 0
+		w.applyVerified(s, proxy.IdentityModeRequire)
 	default:
 		w.logger.Warn("identity settings ignored; keeping previous identity config",
 			"reason", "unknown identity mode", "mode", mode)
@@ -233,11 +241,25 @@ func countScoped(p config.Policy) int {
 // built from s, reusing the live verifier (and sign-in starter) while their
 // inputs did not change. A failed rebuild keeps the previous config.
 func (w *identityWiring) applyVerified(s config.IdentitySettings, mode proxy.IdentityMode) {
-	key := keyOf(s)
+	key := keyOf(s, mode)
 	v := w.live.v
-	if v == nil || key != w.live.key {
-		nv, err := w.buildDispatcher(s)
+	if v == nil || w.live.refusing || key != w.live.key {
+		nv, err := w.buildDispatcher(s, mode)
 		if err != nil {
+			if mode == proxy.IdentityModeRequire {
+				if w.live.mode == proxy.IdentityModeRequire && !w.live.refusing {
+					// A working require verifier is the strictest thing to keep.
+					w.logger.Warn("identity verifier rebuild failed; keeping the previous require-mode verifier", "error", err)
+					return
+				}
+				// Keeping the previous config could be off or attribute, which
+				// admits what require must refuse: refuse everything until a
+				// rebuild succeeds.
+				w.logger.Error("identity verifier rebuild failed; require mode refuses every CONNECT until it succeeds", "error", err)
+				w.p.SetIdentity(refusingVerifier{}, proxy.IdentityModeRequire)
+				w.live = liveIdentity{v: refusingVerifier{}, mode: mode, refusing: true}
+				return
+			}
 			// Only the cause class is logged: the error text names config, never a token.
 			w.logger.Warn("identity verifier rebuild failed; keeping previous identity config", "error", err)
 			return
@@ -265,6 +287,14 @@ func (w *identityWiring) applyVerified(s config.IdentitySettings, mode proxy.Ide
 		w.logger.Info("identity verification enabled", "mode", string(mode))
 	}
 	w.live = liveIdentity{v: v, key: key, mode: mode, starter: starter, signInKey: signKey}
+}
+
+// refusingVerifier is the fail-closed stand-in for require mode when the real
+// verifier cannot be built: it verifies nothing, so every token is unverified.
+type refusingVerifier struct{}
+
+func (refusingVerifier) Verify(context.Context, string, ...identity.VerifyOption) (identity.Claims, identity.Status, identity.Reason) {
+	return identity.Claims{}, identity.StatusUnverified, identity.ReasonJWKSUnavailable
 }
 
 // verifierConfig maps the settings onto the OIDC verifier's config.
@@ -299,14 +329,15 @@ func (w *identityWiring) wardenVerifier() (*identity.WardenVerifier, error) {
 // when IdP tokens are accepted, which needs identity.issuer) behind the
 // dispatcher that routes by issuer, around the one Warden verifier. A Warden
 // token reaches no IdP code, and an IdP token reaches no Warden key.
-func (w *identityWiring) buildDispatcher(s config.IdentitySettings) (identity.Verifier, error) {
+func (w *identityWiring) buildDispatcher(s config.IdentitySettings, mode proxy.IdentityMode) (identity.Verifier, error) {
 	wv, err := w.wardenVerifier()
 	if err != nil {
 		return nil, err
 	}
 	skew := time.Duration(s.ClockSkewSeconds) * time.Second
 	var idp identity.Verifier
-	if s.AcceptIdPTokens() {
+	accept := acceptIdP(s, mode)
+	if accept {
 		idp, err = w.build(verifierConfig(s))
 		if err != nil {
 			return nil, err
@@ -317,7 +348,7 @@ func (w *identityWiring) buildDispatcher(s config.IdentitySettings) (identity.Ve
 		return nil, err
 	}
 	return identity.NewMultiVerifier(identity.MultiConfig{
-		Warden: wv, IdP: idp, IdPIssuer: s.Issuer, AcceptIdP: s.AcceptIdPTokens(),
+		Warden: wv, IdP: idp, IdPIssuer: s.Issuer, AcceptIdP: accept,
 		Logger: w.logger, Now: w.now,
 	}), nil
 }

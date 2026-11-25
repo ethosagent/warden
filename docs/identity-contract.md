@@ -252,8 +252,15 @@ The mode is set per worker in `identity.defaultMode` and per agent in
 | `off` | Default. No token is read or verified. Events, logs and metrics are byte-identical to a worker without identity. |
 | `attribute` | A presented token is verified and the result recorded on every event. Nothing is ever blocked. Needs `identity.issuer` and `identity.audience`. |
 | `challenge` | Like `attribute`, but a CONNECT without a valid token is refused with a `407` that carries a sign-in URL (see [Challenge mode](#challenge-mode-407-with-a-sign-in-url)). Needs `identity.issuer` and `identity.audience`; `identity.signIn.clientID` must be in `identity.allowedAZP` when that list is set. |
+| `require` | Phase 2. A CONNECT needs a valid Warden token bound to the worker's agent, or it is refused with a `407` that has no sign-in (see [Require mode](#require-mode)). An IdP token never satisfies it. |
 
-`require` is rejected at config load until Phase 2.
+`require` is served by a control plane (`agents[].identity` or
+`identity.defaultMode` in the settings it distributes) and enforced by a
+control-plane-managed worker. A standalone worker (no `controlPlane.endpoint`, or
+`--local-only`) has no signed bundle to verify Warden tokens with, so it refuses
+to start with `require` in its local YAML. A worker that does not advertise the
+`identity/require-v1` heartbeat capability ignores the mode and keeps its
+previous identity config.
 
 ### Statuses
 
@@ -458,7 +465,59 @@ dropped, with no poll), and then splices the tunnel, where the agent reads the
 forwarder, receives the whole body including `device_code`, and may implement
 the same poll; any process that can read that `407` can also claim the login.
 The ID token is a bearer token, not bound to the agent: whoever holds it can use
-it until `exp` (at most 1 h). Phase 2's `require` mode closes this.
+it until `exp` (at most 1 h). Phase 2's `require` mode closes this: it admits
+only a Warden token minted for the agent.
+
+### Require mode
+
+In `require` mode the worker admits only a Warden token that verified against the
+current signed bundle **and** bound to the worker's agent (see
+[Agent binding](#agent-binding-of-warden-tokens)). The order on a CONNECT is: the
+`agent_disabled` check (`403`), then identity, then the block list and the policy.
+A CONNECT without such a token is answered with the challenge `407`, **before**
+the block list, the policy and any dial, with no sign-in offer:
+
+```http
+HTTP/1.1 407 Proxy Authentication Required
+Proxy-Authenticate: Basic realm="warden"
+Content-Type: application/json
+Cache-Control: no-store
+Connection: close
+
+{"error": "identity_required", "reason": "unbound_token"}
+```
+
+- `reason` is the verifier's reason (`unbound_token`, `agent_unregistered`,
+  `agent_disabled`, `agent_mismatch`, `cnf_mismatch`, `bad_signature`,
+  `jwks_unavailable`, ...) or, with none, the status: `none`, `expired`,
+  `invalid` or `unverified`. It is never token text or a library error.
+- An IdP (Dex) token is `invalid` with reason `unbound_token` whatever
+  `identity.acceptDexTokens` says: a require-mode worker builds no IdP verifier,
+  so the token is refused by its issuer without being verified or any key being
+  fetched. (A tunnel opened under another mode with an IdP token is refused the
+  same way on its next request once the agent moves to `require`.)
+- It fails closed. Before the first verified bundle, with an empty key set, or
+  with an unregistered agent, no token verifies, so every CONNECT gets the `407`
+  with reason `jwks_unavailable` or `agent_unregistered`. A bundle loaded from the
+  opt-in bundle cache lifts this at restart without the control plane.
+- One deny event with reason `identity_required` is stored per refusal, and
+  `warden.blocked.total{reason}` and `warden.requests.total{decision="deny"}` count it.
+- Terminated traffic (an h1 request, an h2 stream, a WebSocket upgrade, MCP over
+  HTTP) is checked on every request against the current bundle. A request whose
+  identity is not valid gets a JSON `403`: `{"error":"identity_expired"}` past the
+  CONNECT token's `exp` plus skew; `{"error":"identity_conflict"}` when
+  `X-Warden-Identity` names a different `sub` or `act` than the CONNECT identity;
+  `{"error":"identity_required"}` for anything else (a key removed from the
+  bundle, the agent disabled, a request with no CONNECT identity). `Connection:
+  close` is set on h1, and an h2 stream gets the `403` on the stream. A `401` and
+  `WWW-Authenticate` are never written, because after TLS termination a `401`
+  looks like an upstream challenge and starts credential or OAuth discovery in
+  MCP clients; MCP refusals are this plain JSON, with no JSON-RPC body.
+- The block list and the default-deny policy, including identity-scoped entries
+  evaluated with the Warden subject, still run after identity passes.
+- Limit: a raw tunnel (no CA) and an upgraded WebSocket are bound at CONNECT or
+  upgrade only. Closing them at token expiry and on a bundle change is
+  W-P2-WBND-09.
 
 ## Agent binding of Warden tokens
 
@@ -721,8 +780,8 @@ Phase 2 adds agent-bound tokens, mTLS workers and the `require` mode. It adds to
 Contract v1 and changes none of it: the `Proxy-Authorization` and
 `X-Warden-Identity` headers, the `session` user name, the claims above and the
 status and reason values keep their v1 meaning. `require` reuses the `407` body
-and the three `identity_*` deny reasons of `challenge` mode. v1 Dex tokens must stay accepted
-for workers that already set `identity.issuer`, so a harness that follows this
-page keeps attributing after the upgrade. The planned `require` mode turns
-`conflict` and the non-valid statuses into a 403, and only for agents an
-operator moves to that mode.
+(without `sign_in`) and the three `identity_*` deny reasons of `challenge` mode.
+v1 Dex tokens must stay accepted for workers that already set `identity.issuer`,
+so a harness that follows this page keeps attributing after the upgrade. `require`
+turns `conflict` and the non-valid statuses into a 403 on terminated traffic, and
+only for agents an operator moves to that mode.

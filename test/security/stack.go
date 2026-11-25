@@ -82,9 +82,8 @@ type StackOptions struct {
 	// central.agentID, one worker each. Default: agent-a, agent-b.
 	Agents []string
 	// IdentityMode is identity.defaultMode the CP distributes. Default
-	// "challenge": config validation still refuses "require" (WBND-03), so a
-	// worker refuses a CONNECT without a valid token with a 407 today. Switch
-	// the default to "require" in the PR that lifts that refusal.
+	// "require": a worker refuses a CONNECT without a valid bound Warden token
+	// with a 407, and terminated traffic with a 403.
 	IdentityMode string
 	// LongPollWait is controlPlane.longPollWait on the workers. Default 2s.
 	LongPollWait time.Duration
@@ -271,7 +270,7 @@ func StartStackNoWait(tb testing.TB, opts StackOptions) *Stack {
 		opts.Agents = []string{"agent-a", "agent-b"}
 	}
 	if opts.IdentityMode == "" {
-		opts.IdentityMode = "challenge"
+		opts.IdentityMode = "require"
 	}
 	if opts.LongPollWait == 0 {
 		opts.LongPollWait = 2 * time.Second

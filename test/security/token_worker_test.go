@@ -12,15 +12,12 @@ import (
 )
 
 // The worker matrix of W-P2-SECT-02: forged, malformed, expired and confused
-// tokens presented to agent-a's worker. The stack runs in challenge mode:
-// config validation still refuses identity mode "require" (W-P2-WBND-03), so a
-// credential the worker will not accept is answered 407 with the Basic
-// challenge instead of the 403 identity_required of a require-mode terminated
-// or MCP request. The transport column is therefore the same for every case;
-// the three transports are exercised for the two attacks the ticket names
-// (alg none and unknown kid), and the control proves all three accept a good
-// token. When require lands, switch StackOptions.IdentityMode (stack.go) and
-// pin the 403 shapes here.
+// tokens presented to agent-a's worker. The stack runs in require mode (the
+// default): a credential the worker will not accept is answered 407 with the
+// Basic challenge at CONNECT, whatever the transport; the 403 shapes of
+// terminated and MCP requests are pinned by requireInTunnel below. The three
+// transports are exercised for the two attacks the ticket names (alg none and
+// unknown kid), and the control proves all three accept a good token.
 
 // workerRefusal is one refused credential: 407 with the Basic challenge, one
 // count under the pinned result and reason and token type, a deny event, and no
@@ -201,11 +198,12 @@ func userToken(opts ...fakes.MintOption) func(t testing.TB, s *Stack) string {
 
 // idpCases are the cross-type cases on a worker that accepts IdP tokens.
 var idpCases = []Case{
-	workerAccept("raw IdP token is accepted where IdP tokens are accepted", "idp", TransportConnect, userToken()),
-	workerRefusal("IdP token with the wrong azp", "invalid", "wrong_azp", "idp", TransportConnect, userToken(fakes.WrongAZP())),
-	workerRefusal("a console audience token", "invalid", "wrong_aud", "idp", TransportConnect,
-		userToken(fakes.WithAud(ConsoleClientID), fakes.WithAZP(ConsoleClientID))),
-	workerRefusal("an expired IdP token", "expired", "", "idp", TransportConnect, userToken(fakes.Expired())),
+	// In require mode a verified raw IdP token is still refused: it is not bound.
+	workerRefusal("raw IdP token is refused in require mode even where IdP tokens verify", "invalid", "unbound_token", "idp", TransportConnect, userToken()),
+	// A require-mode worker builds no IdP verifier: every token of the IdP's
+	// issuer is unbound_token, whatever else is wrong with it.
+	workerRefusal("IdP token with the wrong azp is unbound, not verified", "invalid", "unbound_token", "idp", TransportConnect, userToken(fakes.WrongAZP())),
+	workerRefusal("an expired IdP token is unbound, not verified", "invalid", "unbound_token", "idp", TransportConnect, userToken(fakes.Expired())),
 	workerRefusal("an IdP token from another issuer", "invalid", "wrong_iss", "none", TransportConnect, userToken(fakes.WithIss("https://attacker.example"))),
 	// An IdP token presented as a Warden token: the wt+jwt type or the Warden
 	// issuer routes it to the Warden verifier, which refuses its RS256.
@@ -213,9 +211,7 @@ var idpCases = []Case{
 		userToken(fakes.WithHeader("typ", identity.WardenTokenTyp))),
 	workerRefusal("an IdP token claiming the Warden issuer", "invalid", "alg_not_allowed", "warden", TransportConnect,
 		userToken(fakes.WithIss(TokenIssuer))),
-	// A Warden token presented as an IdP token: routed by its iss to the IdP
-	// verifier, which holds no key for it.
-	workerRefusal("a Warden token claiming the IdP issuer", "invalid", "alg_not_allowed", "idp", TransportConnect,
+	workerRefusal("a Warden token claiming the IdP issuer is unbound", "invalid", "unbound_token", "idp", TransportConnect,
 		func(t testing.TB, s *Stack) string {
 			return s.ForgeWarden(t, s.Agent("agent-a"), "user-1", Claim("iss", s.Issuer.Issuer()), WithoutHeader("typ"))
 		}),
@@ -236,6 +232,69 @@ var idpCases = []Case{
 	},
 }
 
+// idpVerifiedCases are the IdP verification refusals, which only a worker that
+// verifies IdP tokens (challenge mode) reaches: require refuses them unbound.
+var idpVerifiedCases = []Case{
+	workerRefusal("IdP token with the wrong azp", "invalid", "wrong_azp", "idp", TransportConnect, userToken(fakes.WrongAZP())),
+	workerRefusal("a console audience token", "invalid", "wrong_aud", "idp", TransportConnect,
+		userToken(fakes.WithAud(ConsoleClientID), fakes.WithAZP(ConsoleClientID))),
+	workerRefusal("an expired IdP token", "expired", "", "idp", TransportConnect, userToken(fakes.Expired())),
+	workerRefusal("a Warden token claiming the IdP issuer", "invalid", "alg_not_allowed", "idp", TransportConnect,
+		func(t testing.TB, s *Stack) string {
+			return s.ForgeWarden(t, s.Agent("agent-a"), "user-1", Claim("iss", s.Issuer.Issuer()), WithoutHeader("typ"))
+		}),
+}
+
+// requireInTunnel pins the 403 an established tunnel gets in require mode, on
+// the terminated and the MCP transport: the CONNECT carries agent-a's valid
+// token, then X-Warden-Identity is malformed (403 identity_required), names
+// another user (403 identity_conflict) or another agent's token for the same
+// user (agent_mismatch, 403 identity_conflict). Never a 401.
+func requireInTunnel() []Case {
+	var out []Case
+	for _, tr := range []Transport{TransportTerminated, TransportMCP} {
+		tr := tr
+		req := func(t testing.TB, s *Stack, hdr func() string) Observed {
+			a := s.Agent("agent-a")
+			return Seen(s.Do(t, s.Worker("agent-a"), Request{Transport: tr,
+				ConnectToken: Str(s.ForgeWarden(t, a, "user-1")), HeaderToken: Str(hdr())}))
+		}
+		out = append(out,
+			Case{
+				Name: "malformed X-Warden-Identity next to a valid CONNECT token over " + string(tr),
+				Path: PathWorker,
+				Attack: func(t testing.TB, s *Stack) Observed {
+					return req(t, s, func() string { return "two words" })
+				},
+				WantStatus: http.StatusForbidden, WantBody: `{"error":"identity_required"}`,
+				WantResult: "invalid", WantReason: "malformed", WantTokenType: "none",
+				WantDeny: "identity_required", WantUpstreamHits: 0,
+			},
+			Case{
+				Name: "another user in X-Warden-Identity over " + string(tr),
+				Path: PathWorker,
+				Attack: func(t testing.TB, s *Stack) Observed {
+					return req(t, s, func() string { return s.ForgeWarden(t, s.Agent("agent-a"), "user-2") })
+				},
+				WantStatus: http.StatusForbidden, WantBody: `{"error":"identity_conflict"}`,
+				WantDeny: "identity_conflict", WantUpstreamHits: 0,
+			},
+			Case{
+				Name:   "another agent's token for the same user in X-Warden-Identity over " + string(tr),
+				Path:   PathWorker,
+				Covers: []string{CoverIdentity("agent_mismatch")},
+				Attack: func(t testing.TB, s *Stack) Observed {
+					return req(t, s, func() string { return s.ForgeWarden(t, s.Agent("agent-b"), "user-1") })
+				},
+				WantStatus: http.StatusForbidden, WantBody: `{"error":"identity_conflict"}`,
+				WantResult: "invalid", WantReason: "agent_mismatch", WantTokenType: "warden",
+				WantDeny: "identity_conflict", WantUpstreamHits: 0,
+			},
+		)
+	}
+	return out
+}
+
 func TestTokenWorker(t *testing.T) {
 	t.Run("forgeries", func(t *testing.T) {
 		s := StartStack(t, StackOptions{})
@@ -247,6 +306,19 @@ func TestTokenWorker(t *testing.T) {
 		if n := s.Metric(t, s.Worker("agent-a"), "warden_identity_verify_total", map[string]string{"reason": "wrong_nonce"}); n != 0 {
 			t.Errorf("warden_identity_verify_total{reason=wrong_nonce} = %v, want 0", n)
 		}
+	})
+	t.Run("IdP verification refusals in challenge mode", func(t *testing.T) {
+		s := StartStack(t, StackOptions{IdentityMode: "challenge"})
+		agentSetup(t, s, "agent-a")
+		s.PositiveControl(t, "worker", workerControl(s))
+		Run(t, s, "worker", idpVerifiedCases)
+	})
+	t.Run("require in tunnel", func(t *testing.T) {
+		s := StartStack(t, StackOptions{})
+		agentSetup(t, s, "agent-a")
+		agentSetup(t, s, "agent-b")
+		s.PositiveControl(t, "worker", workerControl(s))
+		Run(t, s, "worker", requireInTunnel())
 	})
 	t.Run("clock skew bounds", func(t *testing.T) {
 		s := StartStack(t, StackOptions{ClockSkewSeconds: int(skewBounds / time.Second)})

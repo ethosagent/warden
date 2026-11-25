@@ -166,9 +166,7 @@ func TestBinding(t *testing.T) {
 	t.Run("agent_unregistered", func(t *testing.T) {
 		s, _, _ := bindingStack(t, StackOptions{UnboundWorker: true})
 		unbound := s.Worker("worker-unbound")
-		// A worker applies the distributed identity settings only after a policy
-		// change (fix/worker-boot-identity): registering the agents was one.
-		s.Eventually("the unbound worker to enforce identity mode challenge", func() bool {
+		s.Eventually("the unbound worker to enforce identity mode require", func() bool {
 			return s.probeConnect(unbound) == http.StatusProxyAuthRequired
 		})
 		s.PositiveControl(t, "worker", bindingWorkerControl(s))
@@ -184,14 +182,14 @@ func TestBinding(t *testing.T) {
 		}
 	})
 
-	// KNOWN LIMIT, pending W-P2-WBND-03 (#113) and W-P2-WBND-09 (#270): a raw
+	// KNOWN LIMIT, pending W-P2-WBND-09 (#270): a raw
 	// tunnel (a worker with no CA) is opaque, so the worker binds it at CONNECT
 	// only and it keeps running after the agent's key is rotated out, until the
 	// token's exp. Require mode's session closing must cut it; when that lands
 	// this test must flip to expect the tunnel closed. That needs #270
-	// (WBND-09) AND a require-mode stack: StackOptions cannot start one until
-	// config validation accepts identity.defaultMode require (#113). A new CONNECT with the
-	// same token is refused, which proves the cut reached the worker.
+	// (WBND-09): the stack is in require mode since #113, but raw tunnels are
+	// not yet closed. A new CONNECT with the same token is refused, which
+	// proves the cut reached the worker.
 	t.Run("raw_tunnel_known_gap", func(t *testing.T) {
 		s, a, _ := bindingStack(t, StackOptions{NoCA: true})
 		s.PositiveControl(t, "worker", func(t *testing.T) {

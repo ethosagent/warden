@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -246,10 +247,13 @@ func TestPolicyWireRegisteredAgents_JKTCapMatchesMaxKeys(t *testing.T) {
 }
 
 // TestWorkerCapsAcceptedByControlPlane: every capability a worker advertises,
-// and the require cap a later ticket adds, survives the control plane's
-// capability filter, so the console sees the literal the worker sent.
+// the require cap included, survives the control plane's capability filter, so
+// the console sees the literal the worker sent.
 func TestWorkerCapsAcceptedByControlPlane(t *testing.T) {
-	in := append(config.WorkerCaps(), config.CapIdentityRequireV1)
+	in := config.WorkerCaps()
+	if !slices.Contains(in, config.CapIdentityRequireV1) {
+		t.Fatalf("WorkerCaps() = %v lacks %s", in, config.CapIdentityRequireV1)
+	}
 	got := normalizeCaps(in)
 	if len(got) != len(in) {
 		t.Fatalf("normalizeCaps(%v) = %v, dropped a capability", in, got)
