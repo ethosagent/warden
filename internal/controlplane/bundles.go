@@ -193,10 +193,13 @@ func (s bundleState) cpID(ctx context.Context) (string, error) {
 	return id, nil
 }
 
-// bundleKeys is the slice of *keys.KeySet the publisher needs: the active
-// signer and the public JWKS of a purpose, and change notifications.
+// bundleKeys is the slice of *keys.KeySet the publisher needs: the signers
+// and the public JWKS of a purpose, and change notifications. Signers is the
+// active key first, then the staged next key during a staged bundle rotation:
+// every envelope carries a signature of each, so a worker that pins either
+// verifies it.
 type bundleKeys interface {
-	Active(purpose string) (keys.Signer, error)
+	Signers(purpose string) ([]keys.Signer, error)
 	JWKS(purpose string) keys.JWKS
 	Subscribe(fn func(purpose string)) (unsubscribe func())
 }
@@ -207,7 +210,7 @@ type signedBundle struct {
 	env       []byte
 	etag      string // 16 hex of the envelope bytes
 	seq       int64
-	kid       string
+	kids      []string // the signing kids: the active key, then any staged one
 	issuedAt  time.Time
 	expiresAt time.Time
 	// fp fingerprints the signed content (policy, credential, sections), so a
@@ -355,7 +358,7 @@ func (ps *policyServer) startBundles(ctx context.Context) error {
 	if ps.versions == nil {
 		return errors.New("control-plane: --bundles needs --policy-store=versioned")
 	}
-	if _, err := b.keys.Active(keys.PurposeBundle); err != nil {
+	if _, err := b.keys.Signers(keys.PurposeBundle); err != nil {
 		return fmt.Errorf("control-plane: --bundles=%s needs a loadable purpose=bundle signing key: %w", b.cfg.Mode, err)
 	}
 	id, err := b.state.cpID(ctx)
@@ -459,30 +462,35 @@ func (ps *policyServer) publishBundle(ctx context.Context, wire policyWire, etag
 	if b == nil || !b.active || head == 0 {
 		return
 	}
-	signer, err := b.keys.Active(keys.PurposeBundle)
+	signers, err := b.keys.Signers(keys.PurposeBundle)
 	if err != nil {
 		b.fail(ctx, 0, "", err)
 		return
 	}
+	kids := make([]string, len(signers))
+	for i, sg := range signers {
+		kids[i] = sg.KID()
+	}
+	kid := signers[0].KID() // the active key, for failure lines
 	jwks, jsha, tokenKIDs, err := tokenJWKSSection(b.keys)
 	if err != nil {
-		b.fail(ctx, 0, signer.KID(), err)
+		b.fail(ctx, 0, kid, err)
 		return
 	}
 	// The JWKS and the token issuer are signed content that moves no policy
 	// ETag, so a change takes a row of its own first; otherwise one seq would
 	// cover two contents.
 	if err := ps.cover(ctx, &b.jwks, jsha, head, etag); err != nil {
-		b.fail(ctx, 0, signer.KID(), err)
+		b.fail(ctx, 0, kid, err)
 		return
 	}
 	if err := ps.cover(ctx, &b.issuer, hashOf(b.tokenIssuer), head, etag); err != nil {
-		b.fail(ctx, 0, signer.KID(), err)
+		b.fail(ctx, 0, kid, err)
 		return
 	}
 	last, ok, err := ps.versions.LatestPublish(ctx)
 	if err != nil {
-		b.fail(ctx, 0, signer.KID(), err)
+		b.fail(ctx, 0, kid, err)
 		return
 	}
 	if !ok || last.Version != head || last.ETag != etag {
@@ -494,7 +502,7 @@ func (ps *policyServer) publishBundle(ctx context.Context, wire policyWire, etag
 	}
 	policy, creds, err := bundlePolicy(wire)
 	if err != nil {
-		b.fail(ctx, last.Seq, signer.KID(), err)
+		b.fail(ctx, last.Seq, kid, err)
 		return
 	}
 	fp := contentFingerprint(policy, creds, jwks, b.tokenIssuer)
@@ -533,32 +541,32 @@ func (ps *policyServer) publishBundle(ctx context.Context, wire policyWire, etag
 	if jwks != nil {
 		bd.Sections = map[string]json.RawMessage{sectionTokenJWKS: jwks}
 	}
-	env, err := bundle.Sign(ctx, bd, creds, signer)
+	env, err := bundle.Sign(ctx, bd, creds, signers...)
 	if err != nil {
 		if errors.Is(err, bundle.ErrTooLarge) {
 			b.logger.Error("bundle too large; not published", "seq", last.Seq, "limit", bundle.MaxEnvelopeBytes)
 			b.degraded.Store(true)
 			return
 		}
-		b.fail(ctx, last.Seq, signer.KID(), err)
+		b.fail(ctx, last.Seq, kid, err)
 		return
 	}
 	sum := sha256.Sum256(env)
 	sb := &signedBundle{
-		env: env, etag: hex.EncodeToString(sum[:8]), seq: last.Seq, kid: signer.KID(),
+		env: env, etag: hex.EncodeToString(sum[:8]), seq: last.Seq, kids: kids,
 		issuedAt: now, expiresAt: bd.ExpiresAt, fp: fp, tokenKIDs: tokenKIDs,
 	}
 	// Persist before publishing: an envelope nobody can prove was recorded is
 	// never served.
 	if err := b.state.put(ctx, stateSigned, strconv.FormatInt(sb.seq, 10)+":"+fp); err != nil {
-		b.fail(ctx, last.Seq, signer.KID(), err)
+		b.fail(ctx, last.Seq, kid, err)
 		return
 	}
 	b.signedSeq, b.signedFP = sb.seq, fp
 	b.cur = sb
 	b.degraded.Store(false)
 	ps.watch.setBundle(sb)
-	b.logger.Info("bundle signed", "seq", sb.seq, "kids", []string{sb.kid}, "digest", payloadDigest(env), "bytes", len(env))
+	b.logger.Info("bundle signed", "seq", sb.seq, "kids", sb.kids, "digest", payloadDigest(env), "bytes", len(env))
 }
 
 // fail records a signing failure: the last envelope keeps being served, the

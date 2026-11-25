@@ -37,6 +37,12 @@ func NewHTTPClient() *http.Client {
 // environment proxy, follows no redirects, caps the body at 64 KiB, times out
 // after 10s and trusts the PEM roots in caFile (the system roots when empty).
 func NewCPHTTPClient(caFile string) (*http.Client, error) {
+	return NewCPHTTPClientCapped(caFile, maxExchangeBody)
+}
+
+// NewCPHTTPClientCapped is NewCPHTTPClient with the response body cap named:
+// the keys CLI reads the fleet list (a few KiB per worker) through it.
+func NewCPHTTPClientCapped(caFile string, limit int64) (*http.Client, error) {
 	base := http.DefaultTransport.(*http.Transport).Clone()
 	base.Proxy = nil
 	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
@@ -54,7 +60,7 @@ func NewCPHTTPClient(caFile string) (*http.Client, error) {
 	base.TLSClientConfig = tlsCfg
 	return &http.Client{
 		Timeout:       httpTimeout,
-		Transport:     capBody{next: base, limit: maxExchangeBody},
+		Transport:     capBody{next: base, limit: limit},
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}, nil
 }

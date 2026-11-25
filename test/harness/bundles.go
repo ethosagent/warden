@@ -57,6 +57,7 @@ type bundlePinSet int
 const (
 	pinNone bundlePinSet = iota
 	pinControlPlane
+	pinControlPlaneActive
 	pinUnrelated
 )
 
@@ -64,6 +65,27 @@ const (
 // (controlPlane.bundleKeys), so a worker asks for the signed envelope and
 // applies nothing it cannot verify. Combine it with WithBundles. In-process only.
 func WithBundlePins() Option { return func(h *H) { h.bundlePins = pinControlPlane } }
+
+// WithActiveBundlePin pins every worker to the control plane's ACTIVE bundle key
+// only, as a fleet does before a staged rotation (the next key is published but
+// pinned nowhere). SetWorkerBundlePins then moves one worker's pins, effective
+// when that worker restarts. Combine it with WithBundles. In-process only.
+func WithActiveBundlePin() Option { return func(h *H) { h.bundlePins = pinControlPlaneActive } }
+
+// SetWorkerBundlePins sets the bundle keys worker i (0-based, as RestartWorker)
+// pins, by kid, from the control plane's signing_keys rows (any key it still
+// holds a public key for: active, next or retired). It takes effect when the
+// worker next starts, like an operator editing controlPlane.bundleKeysFile and
+// restarting it; call RestartWorker(i) after. In-process only.
+func (h *H) SetWorkerBundlePins(i int, kids ...string) {
+	h.tb.Helper()
+	h.pinsMu.Lock()
+	defer h.pinsMu.Unlock()
+	if h.workerPins == nil {
+		h.workerPins = map[int][]string{}
+	}
+	h.workerPins[i+1] = append([]string(nil), kids...)
+}
 
 // WithUnrelatedBundlePins pins every worker to a key the control plane never
 // signs with: every bundle it serves is rejected, and the worker must stay
@@ -76,14 +98,20 @@ func WithBundleExpiry(mode config.BundleExpiry) Option {
 	return func(h *H) { h.bundleExpiry = mode }
 }
 
-// applyBundlePins fills the signed-bundle fields of a worker's policy.
-func (h *H) applyBundlePins(p *config.Policy) {
+// applyBundlePins fills the signed-bundle fields of worker i's (1-based) policy.
+func (h *H) applyBundlePins(i int, p *config.Policy) {
 	var pins []keys.JWK
 	switch h.bundlePins {
 	case pinNone:
 		return
 	case pinControlPlane:
 		pins = h.KeyManager().KeySet().JWKS(keys.PurposeBundle).Keys
+	case pinControlPlaneActive:
+		for _, r := range h.KeyManager().KeySet().Records(keys.PurposeBundle) {
+			if r.State == keys.StateActive {
+				pins = append(pins, r.PublicJWK)
+			}
+		}
 	case pinUnrelated:
 		sg, err := signer.GenerateLocal(keys.AlgEdDSA)
 		if err != nil {
@@ -94,6 +122,23 @@ func (h *H) applyBundlePins(p *config.Policy) {
 			h.tb.Fatalf("harness: unrelated bundle key JWK: %v", err)
 		}
 		pins = []keys.JWK{j}
+	}
+	h.pinsMu.Lock()
+	kids, moved := h.workerPins[i]
+	h.pinsMu.Unlock()
+	if moved {
+		pins = pins[:0:0]
+		for _, kid := range kids {
+			found := false
+			for _, r := range h.KeyManager().KeySet().Records(keys.PurposeBundle) {
+				if r.KID == kid {
+					pins, found = append(pins, r.PublicJWK), true
+				}
+			}
+			if !found {
+				h.tb.Fatalf("harness: worker %d is to pin bundle key %s, which the control plane has no row for", i, kid)
+			}
+		}
 	}
 	p.ControlPlane.BundleKeys = pins
 	p.ControlPlane.BundleClockSkew = 5 * time.Minute
