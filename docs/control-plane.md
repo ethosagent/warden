@@ -2324,6 +2324,10 @@ absent or disabled both answer 404, no `tokensvc` table is created and `/policy`
 byte-identical; the block is the only switch (no flag) and never reaches a worker. See the
 commented block in `configs/config.example.yaml` for every key and default.
 
+The operator and harness-author guide (the flow, request and error examples, the reason enum, rate
+limits, records and degraded modes) is [token-service.md](token-service.md); this section is the
+route-level reference.
+
 - **Startup checks.** Enabling needs `--state-dir`, a served `identity:` block with an issuer
   and audience (subject tokens are verified against the same IdP as workers, narrowed to
   `tokenService.allowedAZP`), `keys.enabled: true`, and `keys.token.overlap` of at least

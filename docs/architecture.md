@@ -151,6 +151,14 @@ sequenceDiagram
   Note over W,CP: secrets cross ONLY as references (sha256 · last-4 · length) — never values
 ```
 
+**Token endpoint (harness to control plane).** Besides the three worker interactions
+above, a harness (not a worker) talks to the control plane when `tokenService.enabled` is
+set: `POST /oauth2/token` (RFC 8693) exchanges a user's IdP ID token and the agent's
+signed assertion for a short-lived Warden token, and `GET /.well-known/oauth-authorization-server`
+(RFC 8414) advertises it. Both answer 404 while the service is off. Workers never call
+them; they verify the token offline against keys and the issuer from the signed bundle.
+See the [token service guide](token-service.md).
+
 **Config plane hot-apply.** Distributed `settings` carry only non-secret config and
 **env-name** references (e.g. `judge.apiKeyEnv`), never secret values — the wire type has
 no value field, so this is structural. The worker applies each block on the poll:
