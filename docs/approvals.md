@@ -267,9 +267,33 @@ file; see the production-readiness checklist.
 
 ## The Changes tab
 
-The console Changes tab (the draft list, the structural diff, the reasons and the
-replay view) ships with W-P2-APPR-05 (#105). Until it is available, drive the same
-flow with the draft API under `/dashboard/api/changes`.
+The console shows a **Changes** page only when approvals are enabled (the setup
+response says `approvalsEnabled`). The server stays the only enforcement point: buttons
+a role cannot use are hidden, but every refusal is shown with the code the server gave.
+
+- **List and filters.** Drafts are listed by state (default `pending`; also `draft`,
+  `needs rebase`, `applied, unreviewed`, `applied`, `rejected`, `withdrawn`, `expired`
+  or all) and by target (all, policy, blocked users, agents). Rows key on the draft's
+  target.
+- **Diff by target.** A policy draft shows the structural diff (allow, deny, settings)
+  and the reasons it is held. Block-list and agent drafts show the `{current, proposed}`
+  diff field by field. Credentials show only as fingerprints and an agent's key
+  material is never rendered. Everything from the server or a person is inserted as
+  text, never as markup.
+- **Replay status.** A pending replay is polled every 2 seconds, up to the replay
+  timeout. A done replay shows the changed destinations; a failed or unavailable one,
+  or a target with no replay, says so.
+- **Approve.** Sends the revision, the digest and the done replay the reviewer saw.
+  With no usable replay the **acknowledge** box must be ticked and
+  `acknowledgeNoReplay` is sent. The author never sees Approve, and a break-glass
+  session never does.
+- **Other actions.** Reject (editor), Withdraw, and Rebase onto the head for a policy
+  draft that needs it (non-policy drafts are withdrawn and redone). **Emergency apply**
+  appears only for a break-glass session with admin rights, and **Mark reviewed**
+  closes an `applied_unreviewed` draft for an admin who is not break-glass.
+- **Deep link.** `#changes/<id>` opens a draft directly.
+- **Held saves.** When a policy, settings or provider save is held, the console shows a
+  notice with an "Open draft" link to `#changes/<id>`.
 
 ## Known limits
 
