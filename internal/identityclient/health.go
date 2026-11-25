@@ -20,8 +20,11 @@ type healthBody struct {
 // is held (valid or expiring) and 503 otherwise, so a container health check
 // can use the status alone.
 func HealthHandler(state func() State, now func() time.Time) http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/healthz" {
+			http.NotFound(w, r)
+			return
+		}
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			w.Header().Set("Allow", "GET, HEAD")
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -43,7 +46,6 @@ func HealthHandler(state func() State, now func() time.Time) http.Handler {
 			_ = json.NewEncoder(w).Encode(body)
 		}
 	})
-	return mux
 }
 
 // ClientState adapts the P1 login (a *Client) to the forwarder's health: Token

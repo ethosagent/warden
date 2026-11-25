@@ -246,7 +246,7 @@ func identityForwarder(t *testing.T, h *harness.H) {
 	})
 	client := forwarderClient{t: t, addr: ln.Addr().String()}
 	healthz := func() (int, string) {
-		resp, err := http.Get("http://" + hl.Addr().String() + "/healthz")
+		resp, err := (&http.Client{Timeout: 10 * time.Second}).Get("http://" + hl.Addr().String() + "/healthz")
 		if err != nil {
 			t.Fatalf("healthz: %v", err)
 		}
