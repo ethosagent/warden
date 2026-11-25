@@ -15,6 +15,7 @@ import (
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/controlplane"
 	"github.com/ethosagent/warden/internal/cpstate"
+	"github.com/ethosagent/warden/test/harness"
 )
 
 // The observation helpers read what the components recorded, through the same
@@ -40,7 +41,7 @@ func (s *Stack) Scrape(tb testing.TB, w *Worker) []Sample {
 }
 
 func (s *Stack) scrapeText(w *Worker) (string, error) {
-	cl := &http.Client{Timeout: 5 * time.Second}
+	cl := harness.NewLoopbackClient(nil, harness.ClientOptions{Timeout: 5 * time.Second})
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://"+w.AdminAddr+"/metrics", nil)
 	if err != nil {
 		return "", err

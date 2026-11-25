@@ -37,13 +37,11 @@ func (r *recordingTB) Fatalf(format string, args ...any) { r.Errorf(format, args
 func (r *recordingTB) Failed() bool                      { return len(r.msgs) > 0 }
 func (r *recordingTB) text() string                      { return strings.Join(r.msgs, "\n") }
 
-// workerVerifiesWardenTokens says what credential a worker accepts today. Until
-// the worker verifies Warden tokens (W-P2-WBND-01, #111) its identity block
-// accepts the user's OIDC ID token, so the positive controls present that and
-// separately prove the exchange mints a correct Warden token. Flip this in the
-// PR that lands #111: every control then presents the Warden token and the
-// matrix cases of SECT-02/03 attack it.
-var workerVerifiesWardenTokens = false
+// workerVerifiesWardenTokens says what credential the controls present: the
+// exchanged Warden token, which a bundle-pinned worker verifies since
+// W-P2-WBND-01 (#111). Set it false to present the user's OIDC ID token
+// instead (attribution only).
+var workerVerifiesWardenTokens = true
 
 // agentSetup registers agent id with a fresh key and the group eng.
 func agentSetup(t *testing.T, s *Stack, id string) *Agent {

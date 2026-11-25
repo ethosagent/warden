@@ -20,6 +20,7 @@ import (
 
 	"github.com/ethosagent/warden/internal/controlplane"
 	"github.com/ethosagent/warden/test/fakes"
+	"github.com/ethosagent/warden/test/harness"
 )
 
 // The actors of a case: the admin who registers agents and mints enrollment
@@ -77,10 +78,7 @@ func (s *Stack) Login(tb testing.TB, login fakes.MintOption) *Session {
 	}
 	tr := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: s.CPCA.Pool(), MinVersion: tls.VersionTLS12}}
 	tb.Cleanup(tr.CloseIdleConnections)
-	cl := &http.Client{
-		Transport: tr, Jar: jar, Timeout: 30 * time.Second,
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	}
+	cl := harness.NewLoopbackClient(tr, harness.ClientOptions{Jar: jar, Timeout: 30 * time.Second})
 	get := func(target string) *http.Response {
 		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, target, nil)
 		if err != nil {
@@ -509,7 +507,7 @@ func (s *Stack) CPClient(tb testing.TB, cert *tls.Certificate) *http.Client {
 	}
 	tr := &http.Transport{TLSClientConfig: cfg}
 	tb.Cleanup(tr.CloseIdleConnections)
-	return &http.Client{Transport: tr, Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	return harness.NewLoopbackClient(tr, harness.ClientOptions{Timeout: 30 * time.Second})
 }
 
 // Send sends one request to the control plane through cl with the given
@@ -562,5 +560,5 @@ func (s *Stack) UpstreamClient(tb testing.TB) *http.Client {
 	tb.Helper()
 	tr := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: s.UpstreamCA.Pool(), ServerName: UpstreamHost, MinVersion: tls.VersionTLS12}}
 	tb.Cleanup(tr.CloseIdleConnections)
-	return &http.Client{Transport: tr, Timeout: 10 * time.Second}
+	return harness.NewLoopbackClient(tr, harness.ClientOptions{Timeout: 10 * time.Second, FollowRedirects: true})
 }

@@ -54,6 +54,8 @@ var pending = joinPending(
 		// wrong_nonce is a console-login reason: the case proves a proxied
 		// token can never produce it.
 		CoverIdentity("wrong_nonce"),
+		// missing_claim: a Warden token without sub, act.sub or cnf.
+		CoverIdentity("missing_claim"),
 		CoverToken("malformed"), CoverToken("too_large"), CoverToken("alg_not_allowed"),
 		CoverToken("unknown_kid"), CoverToken("bad_signature"), CoverToken("wrong_iss"),
 		CoverToken("wrong_aud"), CoverToken("expired"), CoverToken("lifetime_too_long"),
@@ -65,6 +67,7 @@ var pending = joinPending(
 	),
 	// W-P2-SECT-03: binding, cross-agent, issued-token lifetime.
 	pend(TicketBinding,
+		CoverIdentity("unbound_token"),
 		CoverToken("agent_disabled"), CoverToken("user_blocked"), CoverToken("group_not_allowed"),
 		CoverToken("scope_not_allowed"), CoverToken("session_revoked"),
 	),

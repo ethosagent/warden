@@ -26,6 +26,7 @@ import (
 	"github.com/ethosagent/warden/internal/workerca"
 	wcasigner "github.com/ethosagent/warden/internal/workerca/adapters/signer"
 	"github.com/ethosagent/warden/test/fakes"
+	"github.com/ethosagent/warden/test/harness"
 )
 
 // Fixed names of the stack. Cases refer to them instead of hard-coding strings.
@@ -116,7 +117,7 @@ type Stack struct {
 	// CPCA signs the control plane's TLS certificate; the workers and every
 	// client pin it. ProxyCA is the workers' MITM CA, UpstreamCA signs the
 	// upstream's certificate.
-	CPCA, ProxyCA, UpstreamCA *fakes.TestCA
+	CPCA, ProxyCA, UpstreamCA *harness.TestCA
 
 	// CP is the control plane under test.
 	CP *CP
@@ -197,11 +198,11 @@ func StartStackNoWait(tb testing.TB, opts StackOptions) *Stack {
 	tb.Cleanup(s.stop)
 
 	s.Issuer = fakes.NewOIDCIssuer(tb, fakes.WithIssuerClock(s.Clock.Now))
-	s.CPCA = fakes.NewTestCA(tb, "warden-security-cp-ca")
-	s.ProxyCA = fakes.NewTestCA(tb, "warden-security-proxy-ca")
-	s.UpstreamCA = fakes.NewTestCA(tb, "warden-security-upstream-ca")
-	s.Upstream = fakes.NewUpstream(tb, s.UpstreamCA, UpstreamHost)
-	for _, ca := range []*fakes.TestCA{s.CPCA, s.ProxyCA, s.UpstreamCA} {
+	s.CPCA = harness.NewTestCA(tb, "warden-security-cp-ca")
+	s.ProxyCA = harness.NewTestCA(tb, "warden-security-proxy-ca")
+	s.UpstreamCA = harness.NewTestCA(tb, "warden-security-upstream-ca")
+	s.Upstream = fakes.NewUpstream(tb, s.UpstreamCA.ServerCert(UpstreamHost))
+	for _, ca := range []*harness.TestCA{s.CPCA, s.ProxyCA, s.UpstreamCA} {
 		s.tracker.add("key PEM", string(ca.KeyPEM()))
 	}
 	s.tracker.add("swapped secret", SwappedSecret)
@@ -348,7 +349,7 @@ func (s *Stack) startCP() {
 	s.tb.Cleanup(tr.CloseIdleConnections)
 	s.CP = &CP{
 		Addr: addr, URL: "https://" + addr, StateDir: stateDir, CertFile: certFile,
-		HTTP:   &http.Client{Transport: tr, Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
+		HTTP:   harness.NewLoopbackClient(tr, harness.ClientOptions{Timeout: 30 * time.Second}),
 		cancel: cancel, errCh: errCh,
 	}
 }

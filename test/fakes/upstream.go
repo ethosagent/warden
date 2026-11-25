@@ -36,14 +36,15 @@ type Upstream struct {
 	next http.Handler
 }
 
-// NewUpstream starts a TLS upstream serving host's certificate, issued by ca.
+// NewUpstream starts a TLS upstream serving cert (a certificate for the host
+// the worker dials, issued by a CA the worker's upstream pool trusts).
 // It answers 200 with a small JSON body (a JSON-RPC result when the body is a
 // JSON-RPC request) until SetHandler says otherwise, and stops at cleanup.
-func NewUpstream(tb testing.TB, ca *TestCA, host string) *Upstream {
+func NewUpstream(tb testing.TB, cert tls.Certificate) *Upstream {
 	tb.Helper()
 	u := &Upstream{}
 	u.srv = httptest.NewUnstartedServer(http.HandlerFunc(u.serve))
-	u.srv.TLS = &tls.Config{Certificates: []tls.Certificate{ca.ServerCert(host)}, MinVersion: tls.VersionTLS12}
+	u.srv.TLS = &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
 	u.srv.StartTLS()
 	tb.Cleanup(u.srv.Close)
 	return u
