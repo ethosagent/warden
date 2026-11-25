@@ -35,7 +35,8 @@ import (
 // contents. seq is the newest policy_publish_log row; every input of the
 // signed content either moves the served policy ETag (policy, block list,
 // credential, ... each append a row) or is tracked here and appends a row of
-// its own first (the token JWKS, reason token_jwks). The publisher signs only
+// its own first (the token JWKS, reason token_jwks; the token issuer, reason
+// token_issuer). The publisher signs only
 // when the newest row is the one that describes the content it is about to
 // sign, and it refuses to re-sign a seq with different content.
 
@@ -63,8 +64,9 @@ const (
 	// bundleRetryAfter is the Retry-After of a 503 for a missing envelope.
 	bundleRetryAfter = 5
 	// stateCPID and stateJWKSSHA are the bundle_state names.
-	stateCPID    = "cp_id"
-	stateJWKSSHA = "jwks_sha256"
+	stateCPID      = "cp_id"
+	stateJWKSSHA   = "jwks_sha256"
+	stateIssuerSHA = "token_issuer_sha256"
 	// stateSigned is "<seq>:<content fingerprint>" of the newest envelope
 	// signed. It outlives a restart, so a seq can never be signed twice with
 	// different content, whatever changed while the control plane was down.
@@ -222,10 +224,15 @@ type bundlePublisher struct {
 	now    func() time.Time
 	logger *slog.Logger
 
-	active    bool
-	cpID      string
-	jwksSHA   string // hash of the token JWKS the publish log last covered
-	jwksKnown bool
+	active bool
+	cpID   string
+	// jwks and issuer are the signed inputs that move no policy ETag, each
+	// tracked so a change appends a row of its own before signing.
+	jwks   trackedInput
+	issuer trackedInput
+	// tokenIssuer is tokenService.issuer, signed as the payload's tokenIssuer
+	// ("" = the control plane mints no tokens). Guarded by refreshMu.
+	tokenIssuer string
 	// signedSeq and signedFP are the persisted newest signed (seq, content
 	// fingerprint); signedSeq 0 = nothing signed yet.
 	signedSeq int64
@@ -239,7 +246,87 @@ type bundlePublisher struct {
 }
 
 func newBundlePublisher(cfg BundlesConfig, k bundleKeys, db *sql.DB, now func() time.Time, logger *slog.Logger) *bundlePublisher {
-	return &bundlePublisher{cfg: cfg, keys: k, state: bundleState{db: db}, now: now, logger: logger}
+	return &bundlePublisher{
+		cfg: cfg, keys: k, state: bundleState{db: db}, now: now, logger: logger,
+		jwks:   trackedInput{stateKey: stateJWKSSHA, reason: publishReasonTokenJWKS},
+		issuer: trackedInput{stateKey: stateIssuerSHA, reason: publishReasonTokenIssuer, zeroBaseline: true},
+	}
+}
+
+// trackedInput is one signed input that moves no policy ETag: the hash the
+// publish log last covered, persisted so a restart notices a change made while
+// the control plane was down.
+type trackedInput struct {
+	stateKey, reason string
+	// sha is the covered hash; known is false until one was stored.
+	sha   string
+	known bool
+	// zeroBaseline treats a never-stored hash as the hash of "nothing": the
+	// first sight of a non-empty value then counts as a change. It is how a
+	// control plane upgraded to a build that signs this input gets the row
+	// that keeps one seq from covering two contents.
+	zeroBaseline bool
+}
+
+// load reads the stored hash.
+func (in *trackedInput) load(ctx context.Context, st bundleState) error {
+	sha, ok, err := st.get(ctx, in.stateKey)
+	if err != nil {
+		return err
+	}
+	if ok {
+		in.sha, in.known = sha, true
+	}
+	return nil
+}
+
+// hashOf is the covered form of a plain string value ("" stays "").
+func hashOf(v string) string {
+	if v == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(v))
+	return hex.EncodeToString(sum[:])
+}
+
+// cover makes sure the publish log describes the current value cur: a change
+// appends a marker row at head (reason in.reason), then the hash is stored. Row
+// first, then the stored hash: a crash in between costs one extra row at the
+// next start, never an uncovered change. A failed put is a sign failure:
+// signing on would let a restart forget the change this row covered. The
+// caller holds refreshMu.
+func (ps *policyServer) cover(ctx context.Context, in *trackedInput, cur string, head int64, etag string) error {
+	b := ps.bundles
+	if (in.known || in.zeroBaseline) && cur != in.sha {
+		if _, err := ps.versions.AppendMarker(ctx, head, etag, in.reason, publishActorBundle); err != nil {
+			return fmt.Errorf("append %s row: %w", in.reason, err)
+		}
+		b.logger.Info("policy publish logged", "version", head, "etag", etag, "reason", in.reason)
+	}
+	if !in.known || cur != in.sha {
+		if err := b.state.put(ctx, in.stateKey, cur); err != nil {
+			return err
+		}
+		in.sha, in.known = cur, true
+	}
+	return nil
+}
+
+// setTokenIssuer installs tokenService.issuer as the payload's tokenIssuer and
+// signs again when the publisher is already running. The issuer is a public
+// URL; it is the only token-service value that enters a bundle.
+func (ps *policyServer) setTokenIssuer(iss string) {
+	if ps.bundles == nil {
+		return
+	}
+	ps.refreshMu.Lock()
+	changed := ps.bundles.tokenIssuer != iss
+	ps.bundles.tokenIssuer = iss
+	active := ps.bundles.active
+	ps.refreshMu.Unlock()
+	if changed && active {
+		ps.refresh(false)
+	}
 }
 
 // BundlesOn reports whether this server serves signed bundles.
@@ -273,10 +360,10 @@ func (ps *policyServer) startBundles(ctx context.Context) error {
 		return fmt.Errorf("control-plane: %w", err)
 	}
 	b.cpID = id
-	if sha, ok, err := b.state.get(ctx, stateJWKSSHA); err != nil {
-		return fmt.Errorf("control-plane: %w", err)
-	} else if ok {
-		b.jwksSHA, b.jwksKnown = sha, true
+	for _, in := range []*trackedInput{&b.jwks, &b.issuer} {
+		if err := in.load(ctx, b.state); err != nil {
+			return fmt.Errorf("control-plane: %w", err)
+		}
 	}
 	if v, ok, err := b.state.get(ctx, stateSigned); err != nil {
 		return fmt.Errorf("control-plane: %w", err)
@@ -379,25 +466,16 @@ func (ps *policyServer) publishBundle(ctx context.Context, wire policyWire, etag
 		b.fail(ctx, 0, signer.KID(), err)
 		return
 	}
-	// The JWKS is signed content that moves no policy ETag, so a change takes
-	// a row of its own first; otherwise one seq would cover two JWKS.
-	if b.jwksKnown && jsha != b.jwksSHA {
-		if _, err := ps.versions.AppendMarker(ctx, head, etag, publishReasonTokenJWKS, publishActorBundle); err != nil {
-			b.fail(ctx, 0, signer.KID(), fmt.Errorf("append token_jwks row: %w", err))
-			return
-		}
-		b.logger.Info("policy publish logged", "version", head, "etag", etag, "reason", publishReasonTokenJWKS)
+	// The JWKS and the token issuer are signed content that moves no policy
+	// ETag, so a change takes a row of its own first; otherwise one seq would
+	// cover two contents.
+	if err := ps.cover(ctx, &b.jwks, jsha, head, etag); err != nil {
+		b.fail(ctx, 0, signer.KID(), err)
+		return
 	}
-	if !b.jwksKnown || jsha != b.jwksSHA {
-		// Row first, then the stored hash: a crash in between costs one extra
-		// row at the next start, never an uncovered change.
-		// A failed put is a sign failure: signing on would let a restart
-		// forget the change this row covered.
-		if err := b.state.put(ctx, stateJWKSSHA, jsha); err != nil {
-			b.fail(ctx, 0, signer.KID(), err)
-			return
-		}
-		b.jwksSHA, b.jwksKnown = jsha, true
+	if err := ps.cover(ctx, &b.issuer, hashOf(b.tokenIssuer), head, etag); err != nil {
+		b.fail(ctx, 0, signer.KID(), err)
+		return
 	}
 	last, ok, err := ps.versions.LatestPublish(ctx)
 	if err != nil {
@@ -416,7 +494,7 @@ func (ps *policyServer) publishBundle(ctx context.Context, wire policyWire, etag
 		b.fail(ctx, last.Seq, signer.KID(), err)
 		return
 	}
-	fp := contentFingerprint(policy, creds, jwks)
+	fp := contentFingerprint(policy, creds, jwks, b.tokenIssuer)
 	cur := b.cur
 	switch {
 	case b.signedSeq > last.Seq:
@@ -444,6 +522,7 @@ func (ps *policyServer) publishBundle(ctx context.Context, wire policyWire, etag
 		ExpiresAt:     now.Add(b.cfg.maxAge()),
 		CPID:          b.cpID,
 		Policy:        policy,
+		TokenIssuer:   b.tokenIssuer,
 	}
 	// One section today. The ticket that adds a second one (for example the
 	// registry section, W-P4-MREG-05) should turn jwks into a section list, so
@@ -527,7 +606,7 @@ func bundlePolicy(wire policyWire) (json.RawMessage, *bundle.Credentials, error)
 // contentFingerprint is a hash over everything a seq's signed content is made
 // of. The credential goes in by its own hash, so the fingerprint is safe to
 // keep in memory.
-func contentFingerprint(policy json.RawMessage, creds *bundle.Credentials, jwks json.RawMessage) string {
+func contentFingerprint(policy json.RawMessage, creds *bundle.Credentials, jwks json.RawMessage, tokenIssuer string) string {
 	h := sha256.New()
 	for _, part := range [][]byte{policy, jwks} {
 		var n [8]byte
@@ -538,6 +617,11 @@ func contentFingerprint(policy json.RawMessage, creds *bundle.Credentials, jwks 
 	if creds != nil {
 		cs := sha256.Sum256([]byte(creds.AccessKeyID + "\x00" + creds.SecretAccessKey))
 		_, _ = h.Write(cs[:])
+	}
+	if tokenIssuer != "" {
+		// Only when set, so a control plane without a token service keeps the
+		// fingerprint it persisted before the issuer was signed.
+		_, _ = h.Write([]byte("tokenIssuer\x00" + tokenIssuer))
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }

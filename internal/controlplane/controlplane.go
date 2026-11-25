@@ -1233,6 +1233,9 @@ func (s *Server) writeSettingsChecked(ctx context.Context, in config.SettingsWir
 	if s.versions != nil {
 		return s.publishSettings(ctx, in, meta, check)
 	}
+	if err := s.checkIssuerCollision(in.Identity); err != nil {
+		return err
+	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	if check != nil {

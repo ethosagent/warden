@@ -3,6 +3,7 @@ package controlplane
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"os"
@@ -414,4 +415,43 @@ func TestSecretStoreBackend(t *testing.T) {
 	if err != nil || len(refs) != 1 || refs[0] != "token/kid" {
 		t.Fatalf("List = %v, %v; want [token/kid]", refs, err)
 	}
+}
+
+// TestRun_KeyStoreSeamWarnsTestHooksActive: setting the Go-only KeyStore seam
+// logs one "test hooks active" WARN naming only the hook; a control plane
+// without it stays silent.
+func TestRun_KeyStoreSeamWarnsTestHooksActive(t *testing.T) {
+	cfg := writeKeysPolicy(t, keysEnabledYAML)
+	t.Run("KeyStore", func(t *testing.T) {
+		_, logs := runCP(t, Params{ConfigPath: cfg, StateDir: filepath.Join(t.TempDir(), "state"),
+			KeyStore: fakes.NewFakeKeyStore()})
+		var lines []string
+		for _, l := range strings.Split(logs, "\n") {
+			if strings.Contains(l, "test hooks active") {
+				lines = append(lines, l)
+			}
+		}
+		if len(lines) != 1 {
+			t.Fatalf("want exactly one test-hooks WARN, got %d in:\n%s", len(lines), logs)
+		}
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(lines[0]), &rec); err != nil {
+			t.Fatalf("WARN is not a JSON log line: %v: %s", err, lines[0])
+		}
+		if len(rec) != 4 || rec["level"] != "WARN" || rec["hooks"] != "KeyStore" {
+			t.Fatalf("WARN must carry exactly time, level, msg and hooks=KeyStore; got %v", rec)
+		}
+	})
+	t.Run("both", func(t *testing.T) {
+		got := activeTestHooks(Params{KeyStore: fakes.NewFakeKeyStore(), KeysAWSClient: fakes.NewFakeAWSSecretsClient()})
+		if strings.Join(got, ",") != "KeyStore,KeysAWSClient" {
+			t.Fatalf("activeTestHooks = %v", got)
+		}
+	})
+	t.Run("production default is silent", func(t *testing.T) {
+		_, logs := runCP(t, Params{ConfigPath: writeKeysPolicy(t, ""), StateDir: filepath.Join(t.TempDir(), "state")})
+		if strings.Contains(logs, "test hooks active") {
+			t.Fatalf("no seams set, yet logged the hooks WARN:\n%s", logs)
+		}
+	})
 }

@@ -541,6 +541,7 @@ func TestBundleFieldCoverage(t *testing.T) {
 	in := base(5)
 	in.Policy = json.RawMessage(`{"a":1}`)
 	in.Sections = map[string]json.RawMessage{"tokenJWKS": json.RawMessage(`{"keys":[]}`), "other": json.RawMessage(`[1]`)}
+	in.TokenIssuer = "https://warden.example.com"
 	creds := &bundle.Credentials{AccessKeyID: "AKIAEXAMPLE", SecretAccessKey: secretValue}
 	v, err := bundle.Verify(mustSign(t, in, creds, s), []keys.JWK{pin}, bundle.State{}, opts())
 	if err != nil {
@@ -609,5 +610,75 @@ func TestSignRejectsInvalidUTF8(t *testing.T) {
 	b.Sections = map[string]json.RawMessage{"bad\xff": json.RawMessage(`1`)}
 	if _, err := bundle.Sign(context.Background(), b, nil, s); err == nil {
 		t.Error("section name with invalid UTF-8 must be rejected")
+	}
+}
+
+// TestBundleTokenIssuerSigned: the token issuer rides in the signed payload and
+// the content hash. Editing it without re-signing is a bad signature; editing it
+// and re-signing with the right key still fails, because contentSha256 no
+// longer matches. Two bundles that differ only in issuer have different hashes.
+func TestBundleTokenIssuerSigned(t *testing.T) {
+	s, pin := newKey(t, keys.AlgEdDSA)
+	in := base(5)
+	in.TokenIssuer = "https://warden.example.com"
+	raw := mustSign(t, in, nil, s)
+	v, err := bundle.Verify(raw, []keys.JWK{pin}, bundle.State{}, opts())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Bundle.TokenIssuer != in.TokenIssuer {
+		t.Fatalf("tokenIssuer %q, want %q", v.Bundle.TokenIssuer, in.TokenIssuer)
+	}
+
+	swap := func(p []byte) []byte {
+		out := bytes.Replace(p, []byte("warden.example.com"), []byte("evil.example.com"), 1)
+		if bytes.Equal(out, p) {
+			t.Fatal("issuer not found in the payload")
+		}
+		return out
+	}
+	var env bundle.Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := base64.RawURLEncoding.DecodeString(env.Payload)
+	tampered := mutateEnv(t, raw, func(e *bundle.Envelope) { e.Payload = base64.RawURLEncoding.EncodeToString(swap(payload)) })
+	if _, err := bundle.Verify(tampered, []keys.JWK{pin}, bundle.State{}, opts()); !errors.Is(err, bundle.ErrBadSignature) {
+		t.Fatalf("unsigned edit: got %v, want bad signature", err)
+	}
+	if _, err := bundle.Verify(resign(t, raw, s, swap), []keys.JWK{pin}, bundle.State{}, opts()); !errors.Is(err, bundle.ErrMalformed) {
+		t.Fatalf("re-signed edit: got %v, want malformed (content hash)", err)
+	}
+
+	other := in
+	other.TokenIssuer = "https://other.example.com"
+	ov, err := bundle.Verify(mustSign(t, other, nil, s), []keys.JWK{pin}, bundle.State{}, opts())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ov.ContentSHA256 == v.ContentSHA256 {
+		t.Error("the token issuer must change contentSha256")
+	}
+
+	// Without an issuer the member is omitted and the bundle verifies.
+	none := base(5)
+	nv, err := bundle.Verify(mustSign(t, none, nil, s), []keys.JWK{pin}, bundle.State{}, opts())
+	if err != nil || nv.Bundle.TokenIssuer != "" {
+		t.Fatalf("bundle without issuer: %+v %v", nv.Bundle.TokenIssuer, err)
+	}
+	var env2 bundle.Envelope
+	_ = json.Unmarshal(mustSign(t, none, nil, s), &env2)
+	p2, _ := base64.RawURLEncoding.DecodeString(env2.Payload)
+	if bytes.Contains(p2, []byte("tokenIssuer")) {
+		t.Error("an empty tokenIssuer must be omitted from the payload")
+	}
+}
+
+func TestSignRejectsInvalidUTF8TokenIssuer(t *testing.T) {
+	s, _ := newKey(t, keys.AlgEdDSA)
+	b := base(1)
+	b.TokenIssuer = "https://x\xff"
+	if _, err := bundle.Sign(context.Background(), b, nil, s); err == nil {
+		t.Error("tokenIssuer with invalid UTF-8 must be rejected")
 	}
 }

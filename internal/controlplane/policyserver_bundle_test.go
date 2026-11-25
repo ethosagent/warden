@@ -163,6 +163,14 @@ var btStart = time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
 // like Run does.
 func newBundleHarness(t *testing.T, mode, policyPath string, db *cpstate.DB, fk *fakeBundleKeys, clk *clocktest.Fake, mod func(*BundlesConfig)) *btHarness {
 	t.Helper()
+	return newBundleHarnessIssuer(t, mode, policyPath, db, fk, clk, mod, "")
+}
+
+// newBundleHarnessIssuer is newBundleHarness with tokenService.issuer set to
+// iss before the publisher starts, the order Run uses (EnableTokens, then
+// startBundles).
+func newBundleHarnessIssuer(t *testing.T, mode, policyPath string, db *cpstate.DB, fk *fakeBundleKeys, clk *clocktest.Fake, mod func(*BundlesConfig), iss string) *btHarness {
+	t.Helper()
 	if db == nil {
 		db = openPolicyState(t)
 	}
@@ -190,6 +198,7 @@ func newBundleHarness(t *testing.T, mode, policyPath string, db *cpstate.DB, fk 
 		t.Fatal(err)
 	}
 	h := &btHarness{s: s, ps: s.policy, fk: fk, clk: clk, logs: logs, db: db}
+	s.policy.setTokenIssuer(iss)
 	if err := s.policy.startBundles(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -215,6 +224,8 @@ func (h *btHarness) get(t *testing.T, accept, inm string) btResp {
 	h.ps.ServePolicy(rec, req)
 	return btResp{code: rec.Code, hdr: rec.Header(), body: rec.Body.Bytes()}
 }
+
+func (h *btHarness) degraded() bool { return h.ps.bundleDegraded() }
 
 func (h *btHarness) bundleResp(t *testing.T) btResp {
 	t.Helper()
