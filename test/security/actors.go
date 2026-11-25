@@ -226,11 +226,8 @@ func (s *Stack) RegisterAgent(tb testing.TB, id string, key *fakes.AgentKey, gro
 		tb.Fatalf("security: POST %s for agent %s = %d %s", agentsPath, id, r.Status, r.Body)
 	}
 	a := &Agent{ID: id, Key: key}
-	// TODO(fix/worker-boot-identity): a worker does not apply the distributed
-	// identity settings at boot (a production bug, fixed on that branch); it
-	// starts enforcing only after a later policy change, and registering the
-	// agent causes one. Until that fix lands, wait for enforcement here,
-	// probing without a request upstream. Remove this wait with the fix.
+	// Registering an agent publishes a new bundle; wait until the worker
+	// enforces its mode again, probing without a request upstream.
 	for _, w := range s.Workers {
 		if w.AgentID == id {
 			w := w
@@ -238,8 +235,8 @@ func (s *Stack) RegisterAgent(tb testing.TB, id string, key *fakes.AgentKey, gro
 			if m := s.opts.AgentModes[id]; m != "" {
 				mode = m
 			}
-			if mode != "challenge" {
-				// Only challenge refuses a credential-less CONNECT: in
+			if mode != "challenge" && mode != "require" {
+				// Only challenge and require refuse a credential-less CONNECT: in
 				// attribute mode the worker is enforcing once it has counted a
 				// verification.
 				s.Eventually(w.Name+" to verify tokens in identity mode "+mode+" for registered agent "+id, func() bool {

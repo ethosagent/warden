@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -218,6 +219,8 @@ func (s *Stack) events(tb testing.TB, w *Worker, f analytics.EventFilter) []anal
 	if err != nil {
 		tb.Fatalf("security: read %s events: %v", w.Name, err)
 	}
+	// The store returns newest first; callers slice "new events" off the end.
+	slices.Reverse(evs)
 	return evs
 }
 
