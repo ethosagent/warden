@@ -445,6 +445,7 @@ var All = slices.Concat(
 		// refused (also on a tunnel already open), and a disabled agent is refused
 		// on the next request of an open tunnel. In-process only.
 		{Name: "warden_agent_binding", Opts: wardenAgentBindingOpts(), Run: wardenAgentBinding},
+		{Name: "warden_agent_binding_challenge", Opts: wardenAgentBindingChallengeOpts(), Run: wardenAgentBindingChallenge},
 		{Name: "warden_agent_binding_disabled", Opts: wardenAgentBindingOpts(), Run: wardenAgentBindingDisabled},
 		// Bundle state in the fleet view and the worker's metrics (W-P2-SBND-05):
 		// a pinned worker shows its bundle seq and pins and is not behind; a

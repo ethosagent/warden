@@ -237,6 +237,27 @@ func (p *Proxy) verifyToken(h *identityHolder, tok string) idResult {
 	return res
 }
 
+// rebind re-checks a live CONNECT identity against the current snapshot on each
+// later request: the signing key must still be in the bundle's token JWKS
+// (unknown_kid, e.g. an emergency key removal), the issuer must still match
+// (wrong_iss), and the token must still bind to the agent and key. Allocation
+// free. A non-Warden identity passes.
+func (p *Proxy) rebind(h *identityHolder, r idResult) idResult {
+	if r.status != identity.StatusValid || r.claims.TokenType != identity.TokenWarden {
+		return r
+	}
+	if h.snapshot != nil {
+		snap := h.snapshot()
+		switch {
+		case !snap.HasKey(r.claims.KID):
+			return idResult{claims: r.claims, status: identity.StatusInvalid, reason: identity.ReasonUnknownKID}
+		case snap.Issuer() != r.claims.Issuer:
+			return idResult{claims: r.claims, status: identity.StatusInvalid, reason: identity.ReasonWrongIss}
+		}
+	}
+	return p.bind(h, r)
+}
+
 // bind applies agent binding (W-P2-WBND-02) to a verified result. Only a valid
 // Warden token is bound; every other result passes through. A token that fails
 // binding becomes invalid with the binding reason and no Subject, but keeps its
@@ -389,8 +410,9 @@ func (p *Proxy) identityStage(s *requestScope) (endSession bool) {
 		// the snapshot current now, so a removed key or a disabled agent ends
 		// the identity on this request, not at token expiry. Before the Subject
 		// is built below, which stamps the worker's agent.
-		if br := p.bind(h, r); br.status != identity.StatusValid {
+		if br := p.rebind(h, r); br.status != identity.StatusValid {
 			r = br
+			s.idRebound = true
 			p.recordIdentity(br.status, br.reason, tokenTypeOf(br.claims))
 		}
 		if n > 0 && r.status == identity.StatusValid {

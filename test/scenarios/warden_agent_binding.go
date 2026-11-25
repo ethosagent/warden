@@ -3,6 +3,7 @@ package scenarios
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -156,6 +157,55 @@ func wardenAgentBindingDisabled(t *testing.T, h *harness.H) {
 	for _, ev := range h.Events() {
 		if strings.HasSuffix(ev.URL, "/tunnel-2") && ev.Decision == "allow" {
 			t.Errorf("the request on the open tunnel was allowed for a disabled agent: %+v", ev)
+		}
+	}
+	requireNoCredentialsInLogs(t, h, tok)
+}
+
+func wardenAgentBindingChallengeOpts() []harness.Option {
+	return append(wardenAgentBindingOpts(), harness.WithIdentity("challenge"))
+}
+
+// wardenAgentBindingChallenge: in challenge mode a tunnel opened with a good
+// token does not drop to anonymous when its key is rotated away: the next request
+// on it is answered 403 identity_required, and a new CONNECT with the same token
+// is challenged (407).
+func wardenAgentBindingChallenge(t *testing.T, h *harness.H) {
+	h.Upstream(identityHost)
+	own := h.RegisterTokenAgent(bindingAgent, []string{"eng"}, []string{"read"})
+	waitTokenKeyPublished(h)
+	tok := bindingToken(t, h, own, "user-1")
+	auth := basicAuth("session", tok)
+	h.Eventually("the worker binds the token at CONNECT", func() bool {
+		status, _ := h.ConnectReplyAt(0, identityHost+":443", auth)
+		return status == http.StatusOK
+	})
+	tun := openTLSSession(t, h, 0, identityHost, auth, "/tunnel-1")
+	if got := tun.status(t); got != http.StatusOK {
+		t.Fatalf("tunnel request = %d, want 200", got)
+	}
+
+	h.RotateTokenAgentKey(bindingAgent)
+	h.Eventually("a new CONNECT with the rotated-away key's token is challenged", func() bool {
+		h.Clock().Advance(3 * time.Second)
+		status, _ := h.ConnectReplyAt(0, identityHost+":443", auth)
+		return status == http.StatusProxyAuthRequired
+	})
+
+	tun.send(t, "/tunnel-2")
+	resp, err := http.ReadResponse(tun.r.(*bufio.Reader), nil)
+	if err != nil {
+		t.Fatalf("read the answer on the open tunnel: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body := new(strings.Builder)
+	_, _ = io.Copy(body, resp.Body)
+	if resp.StatusCode != http.StatusForbidden || !strings.Contains(body.String(), "identity_required") || !resp.Close {
+		t.Errorf("open tunnel after the rotation: %d %q close=%v, want 403 identity_required with Connection: close", resp.StatusCode, body.String(), resp.Close)
+	}
+	for _, ev := range h.Events() {
+		if strings.HasSuffix(ev.URL, "/tunnel-2") && ev.Decision == "allow" {
+			t.Errorf("the request after the rotation was allowed: %+v", ev)
 		}
 	}
 	requireNoCredentialsInLogs(t, h, tok)

@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"github.com/ethosagent/warden/internal/identity"
+	"github.com/ethosagent/warden/internal/keys"
+	"github.com/ethosagent/warden/internal/keys/adapters/signer"
 )
 
 func bindSnap(t *testing.T, agents map[string]identity.WardenAgent) *identity.WardenSnapshot {
@@ -69,4 +71,32 @@ func TestBindingCheckNoAllocs(t *testing.T) {
 	if n := testing.AllocsPerRun(100, func() { identity.BindingCheck(snap, "a", c) }); n != 0 {
 		t.Fatalf("allocs = %v", n)
 	}
+}
+
+func TestHasKey(t *testing.T) {
+	sg := newSnapKey(t)
+	snap, err := identity.NewWardenSnapshot(identity.WardenBundle{Generation: 1, TokenIssuer: "https://cp.example", JWKS: []keys.JWK{sg}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snap.HasKey(sg.Kid) || snap.HasKey("other") || (*identity.WardenSnapshot)(nil).HasKey(sg.Kid) {
+		t.Fatal("HasKey wrong")
+	}
+	if n := testing.AllocsPerRun(100, func() { snap.HasKey(sg.Kid) }); n != 0 {
+		t.Fatalf("allocs = %v", n)
+	}
+}
+
+func newSnapKey(t *testing.T) keys.JWK {
+	t.Helper()
+	sg, err := signer.GenerateLocal(keys.AlgEdDSA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j, err := keys.PublicJWK(sg.Public(), keys.AlgEdDSA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j.Kid = "k1"
+	return j
 }

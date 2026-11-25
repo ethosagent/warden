@@ -9,6 +9,8 @@ import (
 
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/identity"
+	"github.com/ethosagent/warden/internal/keys"
+	"github.com/ethosagent/warden/internal/keys/adapters/signer"
 )
 
 // These tests cover W-P2-WBND-02: a Warden token is bound to the worker's agent
@@ -29,7 +31,31 @@ func (b *bindVerifier) Snapshot() *identity.WardenSnapshot { return b.snap.Load(
 
 func (b *bindVerifier) set(t testing.TB, gen int64, agents map[string]identity.WardenAgent) {
 	t.Helper()
-	s, err := identity.NewWardenSnapshot(identity.WardenBundle{Generation: gen, Agents: agents})
+	b.setKeys(t, gen, []string{"k1"}, agents)
+}
+
+// setKeys installs a snapshot holding one fresh signing key per kid and the
+// issuer (default https://cp.example).
+func (b *bindVerifier) setKeys(t testing.TB, gen int64, kids []string, agents map[string]identity.WardenAgent, issuer ...string) {
+	t.Helper()
+	iss := "https://cp.example"
+	if len(issuer) > 0 {
+		iss = issuer[0]
+	}
+	var jwks []keys.JWK
+	for _, kid := range kids {
+		sg, err := signer.GenerateLocal(keys.AlgEdDSA)
+		if err != nil {
+			t.Fatal(err)
+		}
+		j, err := keys.PublicJWK(sg.Public(), keys.AlgEdDSA)
+		if err != nil {
+			t.Fatal(err)
+		}
+		j.Kid = kid
+		jwks = append(jwks, j)
+	}
+	s, err := identity.NewWardenSnapshot(identity.WardenBundle{Generation: gen, TokenIssuer: iss, JWKS: jwks, Agents: agents})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +72,7 @@ func jktSet(v ...string) map[string]struct{} {
 
 func wardenClaims(act, jkt string) identity.Claims {
 	return identity.Claims{
-		Sub: "user-1", Email: "u@example.com", SID: "wts_1", Act: act, CnfJKT: jkt,
+		Sub: "user-1", Email: "u@example.com", SID: "wts_1", Act: act, CnfJKT: jkt, KID: "k1", Issuer: "https://cp.example",
 		TokenType: identity.TokenWarden, Expiry: time.Now().Add(time.Hour),
 	}
 }
@@ -183,7 +209,7 @@ func BenchmarkBindingCheck(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if p.bind(h, r).status != identity.StatusValid {
+		if p.rebind(h, r).status != identity.StatusValid {
 			b.Fatal("binding failed")
 		}
 	}

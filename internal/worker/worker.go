@@ -859,6 +859,8 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	idWiring.now = clk.Now
 	idWiring.scoped = func() int { return countScoped(evaluator.CurrentPolicy()) }
 	idWiring.apply(pol.Identity, pol.Agents)
+	logger.Info("worker bound to agent", "agent", agentID, "source", agentIDSource(p.AgentID, pol.Central.AgentID),
+		"identityMode", pxy.IdentityModeName())
 	// Warden token keys from the bundle verified at boot (nothing to install
 	// without pins or a first verified bundle). Boot is single-goroutine: the
 	// apply loops start below.

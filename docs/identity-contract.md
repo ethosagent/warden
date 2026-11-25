@@ -481,6 +481,17 @@ connection, against the snapshot applied by the latest long-poll, so removing a
 key or disabling the agent ends the identity of an open CONNECT tunnel on its
 next request, within one long-poll cycle.
 
+The per-request re-check applies to terminated tunnels, on each HTTP/1 or h2
+request. It also requires the signing key to still be in the bundle's token key
+set (`unknown_kid`, for an emergency key removal) and the issuer to still match
+(`wrong_iss`). In `challenge` mode a request that fails the re-check is answered
+`403` `identity_required` with `Connection: close`, not served anonymously.
+
+**Limit.** A raw tunnel (a worker without a CA) and an upgraded WebSocket are
+bound at CONNECT or upgrade only and run until the token's `exp`. Closing those
+sessions when binding stops holding belongs to `require` mode session closing
+(W-P2-WBND-03 and W-P2-WBND-09).
+
 **What this proves.** The token was minted for this worker's agent, and the key
 it was minted for is still registered. It is **not** proof of possession: the
 token is a bearer credential and the worker cannot tell who presents it. Binding
