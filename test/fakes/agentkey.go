@@ -22,11 +22,11 @@ import (
 // It deliberately has no dependency on the control plane or the agent registry,
 // so a case can register it through the real admin API and attack with it.
 type AgentKey struct {
-	tb   testing.TB
-	kid  string
-	alg  string // EdDSA or ES256
-	ed   ed25519.PrivateKey
-	ec   *ecdsa.PrivateKey
+	tb  testing.TB
+	kid string
+	alg string // EdDSA or ES256
+	ed  ed25519.PrivateKey
+	ec  *ecdsa.PrivateKey
 }
 
 // NewAgentKey generates an Ed25519 key with key id kid.
