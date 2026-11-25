@@ -46,30 +46,14 @@ func joinPending(parts ...[]Pending) []Pending {
 
 // pending is the list. Keep each ticket's block together.
 var pending = joinPending(
-	// W-P2-SECT-02: forged, malformed, confused and replayed tokens.
-	pend(TicketForgery,
-		CoverIdentity("bad_signature"), CoverIdentity("wrong_iss"), CoverIdentity("wrong_aud"),
-		CoverIdentity("wrong_azp"), CoverIdentity("unknown_kid"), CoverIdentity("alg_not_allowed"),
-		CoverIdentity("malformed"), CoverIdentity("too_large"), CoverIdentity("ttl_too_long"),
-		// wrong_nonce is a console-login reason: the case proves a proxied
-		// token can never produce it.
-		CoverIdentity("wrong_nonce"),
-		// missing_claim: a Warden token without sub, act.sub or cnf.
-		CoverIdentity("missing_claim"),
-		CoverToken("malformed"), CoverToken("too_large"), CoverToken("alg_not_allowed"),
-		CoverToken("unknown_kid"), CoverToken("bad_signature"), CoverToken("wrong_iss"),
-		CoverToken("wrong_aud"), CoverToken("expired"), CoverToken("lifetime_too_long"),
-		CoverToken("replay"), CoverToken("agent_unknown"), CoverToken("not_yet_valid"),
-		CoverToken("unsupported_token_type"), CoverToken("invalid_target"),
-		CoverToken("subject_invalid"), CoverToken("subject_expired"), CoverToken("token_too_large"),
-		CoverToken("rate_limited"), CoverToken("signer_unavailable"),
-		CoverIdentity("unbound_token"),
-		CoverRoute("/oauth2/token"),
-	),
 	// W-P2-SECT-03: binding, cross-agent, issued-token lifetime.
 	pend(TicketBinding,
 		CoverToken("agent_disabled"), CoverToken("user_blocked"), CoverToken("group_not_allowed"),
 		CoverToken("scope_not_allowed"), CoverToken("session_revoked"),
+		// The four binding reasons of W-P2-WBND-02 (#112) landed with no case
+		// and no pending entry; the binding suite owns them.
+		CoverIdentity("agent_unregistered"), CoverIdentity("agent_disabled"),
+		CoverIdentity("agent_mismatch"), CoverIdentity("cnf_mismatch"),
 	),
 	// W-P2-SECT-04: worker certificates and signed bundles.
 	pend(TicketCerts,
