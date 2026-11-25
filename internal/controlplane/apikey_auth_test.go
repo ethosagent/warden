@@ -24,6 +24,7 @@ import (
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/cpstate"
 	"github.com/ethosagent/warden/internal/secrets"
+	tokensvcsqlite "github.com/ethosagent/warden/internal/tokensvc/adapters/sqlite"
 )
 
 const keyOwnerIss = "https://idp.example"
@@ -58,7 +59,7 @@ type keyEnvOpts struct {
 func openKeysDB(t *testing.T) *cpstate.DB {
 	t.Helper()
 	db, err := cpstate.Open(context.Background(), filepath.Join(t.TempDir(), "warden-cp.db"),
-		cpstate.Enable(StateMigrations(), sqlitestore.MigrationID))
+		cpstate.Enable(StateMigrations(), sqlitestore.MigrationID, tokensvcsqlite.SessionsMigrationID))
 	if err != nil {
 		t.Fatalf("cpstate.Open: %v", err)
 	}
@@ -118,6 +119,9 @@ func newKeyEnv(t *testing.T, o keyEnvOpts) *keyEnv {
 	if !o.noAudit {
 		srv.enableAdminAudit(rec, rec.probe, fakeMAC)
 	}
+	// The token service mounts the token session routes, so the ScopeNone
+	// sweep covers them too.
+	srv.EnableTokens(&fakeExchanger{}, testTokenIssuer, TokenEdge{Sessions: tokensvcsqlite.NewSessions(o.db)})
 	return &keyEnv{t: t, srv: srv, h: srv.Handler(), clk: clk, store: store, ix: ix, rec: rec, logs: logs,
 		policy: o.policy, db: o.db, reg: reg}
 }
