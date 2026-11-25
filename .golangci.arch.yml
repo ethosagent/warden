@@ -38,6 +38,7 @@ linters:
             - ${base-path}/internal/policyeval/**
             - ${base-path}/internal/keys/**
             - ${base-path}/internal/agentreg/**
+            - ${base-path}/internal/tokensvc/**
             - ${base-path}/internal/approvals/**
             - ${base-path}/internal/bundle/**
             - ${base-path}/internal/workerca/**
@@ -113,6 +114,7 @@ linters:
             - ${base-path}/internal/policyeval/**
             - ${base-path}/internal/keys/**
             - ${base-path}/internal/agentreg/**
+            - ${base-path}/internal/tokensvc/**
             - ${base-path}/internal/approvals/**
             - ${base-path}/internal/bundle/**
             - ${base-path}/internal/workerca/**
@@ -218,6 +220,7 @@ linters:
             - '!${base-path}/internal/policyeval/**'
             - '!${base-path}/internal/keys/**'
             - '!${base-path}/internal/agentreg/**'
+            - '!${base-path}/internal/tokensvc/**'
             - '!${base-path}/internal/approvals/**'
             - '!${base-path}/internal/bundle/**'
             - '!${base-path}/internal/workerca/**'
