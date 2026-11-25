@@ -159,6 +159,11 @@ func identityMatrix(tr idTransport) func(*testing.T, *harness.H) {
 			{"invalid", "wrong_azp"}: 1,
 			{"none", "none"}:         1,
 		})
+		assertVerifyTokenTypes(t, h, map[[2]string]string{
+			{"valid", "none"}: "idp", {"expired", "none"}: "idp",
+			{"invalid", "wrong_aud"}: "idp", {"invalid", "wrong_azp"}: "idp",
+			{"none", "none"}: "none",
+		})
 		assertUpstreamClean(t, up, len(cases))
 		assertNoTokenLeak(t, h, cases, up)
 	}
@@ -273,9 +278,44 @@ func verifyCounts(h *harness.H) map[[2]string]float64 {
 			name, val, _ := strings.Cut(kv, "=")
 			labels[name] = val
 		}
-		out[[2]string{labels["result"], labels["reason"]}] = v
+		out[[2]string{labels["result"], labels["reason"]}] += v
 	}
 	return out
+}
+
+// assertVerifyTokenTypes checks the token_type label of every verify series.
+// want maps a {result, reason} pair to the one token_type its series must carry;
+// each pair must exist, and every series must have exactly the labels result,
+// reason and token_type.
+func assertVerifyTokenTypes(t *testing.T, h *harness.H, want map[[2]string]string) {
+	t.Helper()
+	if !h.MetricsAvailable() {
+		return
+	}
+	seen := map[[2]string]bool{}
+	for k := range h.Metrics() {
+		if !strings.HasPrefix(k, verifyMetric+"{") {
+			continue
+		}
+		labels := map[string]string{}
+		for _, kv := range strings.Split(strings.TrimSuffix(strings.TrimPrefix(k, verifyMetric+"{"), "}"), ",") {
+			name, val, _ := strings.Cut(kv, "=")
+			labels[name] = val
+		}
+		if len(labels) != 3 {
+			t.Errorf("%s series %q: want exactly result, reason, token_type labels", verifyMetric, k)
+		}
+		key := [2]string{labels["result"], labels["reason"]}
+		seen[key] = true
+		if w, ok := want[key]; ok && labels["token_type"] != w {
+			t.Errorf("%s series %q: token_type %q, want %q", verifyMetric, k, labels["token_type"], w)
+		}
+	}
+	for key := range want {
+		if !seen[key] {
+			t.Errorf("no %s series for result=%s reason=%s", verifyMetric, key[0], key[1])
+		}
+	}
 }
 
 // assertVerifyCounts compares the whole verify counter to want: every series
@@ -554,6 +594,9 @@ func identityConflict(t *testing.T, h *harness.H) {
 		{"conflict", "none"}:     1,
 		{"invalid", "malformed"}: 1,
 	})
+	assertVerifyTokenTypes(t, h, map[[2]string]string{
+		{"valid", "none"}: "idp", {"conflict", "none"}: "idp", {"invalid", "malformed"}: "none",
+	})
 	assertUpstreamClean(t, up, 4)
 	assertNoLeakOf(t, h, []string{alice, bob}, up)
 }
@@ -641,6 +684,10 @@ func identityDenyAttributed(t *testing.T, h *harness.H) {
 		{"expired", "none"}:      1,
 		{"invalid", "wrong_aud"}: 1,
 		{"invalid", "malformed"}: 3,
+	})
+	assertVerifyTokenTypes(t, h, map[[2]string]string{
+		{"valid", "none"}: "idp", {"expired", "none"}: "idp",
+		{"invalid", "wrong_aud"}: "idp", {"invalid", "malformed"}: "none",
 	})
 	assertNoLeakOf(t, h, tokens)
 }

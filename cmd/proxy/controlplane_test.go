@@ -30,7 +30,7 @@ func TestControlPlaneAuthFlags(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if p.LegacyTokenEnv != "" || p.TokenEnv != "" || p.RequireWorkerTokens || p.AllowInsecureWorkerAuth {
+		if p.LegacyTokenEnv != "" || p.TokenEnv != "" || p.RequireWorkerTokens || p.RequireWorkerCerts || p.AllowInsecureWorkerAuth {
 			t.Errorf("defaults changed behaviour: %+v", p)
 		}
 	})
@@ -41,6 +41,16 @@ func TestControlPlaneAuthFlags(t *testing.T) {
 		}
 		p, _ := controlPlaneParams(cp)
 		if p.LegacyTokenEnv != "L" || p.TokenEnv != "T" || !p.RequireWorkerTokens || !p.AllowInsecureWorkerAuth {
+			t.Errorf("params = %+v", p)
+		}
+	})
+	t.Run("require-worker-certs", func(t *testing.T) {
+		cp, err := parseCPFlags(t, "--require-worker-certs")
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, _ := controlPlaneParams(cp)
+		if !p.RequireWorkerCerts || p.RequireWorkerTokens {
 			t.Errorf("params = %+v", p)
 		}
 	})
@@ -65,6 +75,12 @@ func TestControlPlaneAuthFlags(t *testing.T) {
 		"strict with legacy": {[]string{"--require-worker-tokens", "--state-dir", state, "--legacy-token-env", "L", "--allow-insecure-worker-auth"}, "--legacy-token-env"},
 		"strict with alias":  {[]string{"--require-worker-tokens", "--state-dir", state, "--token-env", "L", "--allow-insecure-worker-auth"}, "--token-env"},
 		"strict no tls":      {[]string{"--require-worker-tokens", "--state-dir", state}, "--allow-insecure-worker-auth"},
+		"certs no state":     {[]string{"--require-worker-certs", "--ca-cert", "c", "--ca-key", "k"}, "--state-dir"},
+		"certs with tokens":  {[]string{"--require-worker-certs", "--require-worker-tokens", "--state-dir", state, "--ca-cert", "c", "--ca-key", "k"}, "--require-worker-tokens"},
+		"certs with legacy":  {[]string{"--require-worker-certs", "--legacy-token-env", "L", "--state-dir", state, "--ca-cert", "c", "--ca-key", "k"}, "--legacy-token-env"},
+		"certs no tls":       {[]string{"--require-worker-certs", "--state-dir", state}, "--ca-cert"},
+		"certs no workerCA":  {[]string{"--require-worker-certs", "--state-dir", state, "--ca-cert", "c", "--ca-key", "k"}, "workerCA.enabled"},
+		"certs insecure":     {[]string{"--require-worker-certs", "--allow-insecure-worker-auth", "--state-dir", state}, "--ca-cert"},
 	}
 	for name, c := range fail {
 		t.Run(name, func(t *testing.T) {
@@ -85,4 +101,40 @@ func TestControlPlaneAuthFlags(t *testing.T) {
 			t.Fatalf("strict start: %v", err)
 		}
 	})
+}
+
+// TestAPIKeysRequireOIDC: console.apiKeys.enabled stops the control-plane
+// command, with an error naming the setting, unless console.auth is oidc and
+// --state-dir is set. The same block with apiKeys off, or fully configured,
+// starts.
+func TestAPIKeysRequireOIDC(t *testing.T) {
+	const oidc = "console:\n  auth: oidc\n  oidc:\n    issuer: https://127.0.0.1:1/dex\n    clientSecretEnv: WARDEN_APIKEY_TEST_SECRET\n" +
+		"    redirectURL: https://warden.example.com/auth/callback\n  roles:\n    admin: [admins]\n"
+	t.Setenv("WARDEN_APIKEY_TEST_SECRET", "client-secret")
+	state := func() string { return filepath.Join(t.TempDir(), "state") }
+	run := func(cfg string, extra ...string) error {
+		args := append([]string{"control-plane", "--config", writeTempConfig(t, minimalConfig+cfg),
+			"--listen", "127.0.0.1:0", "--analytics-provider", "memory"}, extra...)
+		return executeRoot(t, args...)
+	}
+	for name, tc := range map[string]struct {
+		cfg   string
+		extra []string
+	}{
+		"auth none":      {"console:\n  apiKeys:\n    enabled: true\n", []string{"--state-dir", state()}},
+		"auth none, set": {"console:\n  auth: none\n  apiKeys:\n    enabled: true\n", []string{"--state-dir", state()}},
+		"no state dir":   {oidc + "  apiKeys:\n    enabled: true\n", nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := run(tc.cfg, tc.extra...); err == nil || !strings.Contains(err.Error(), "console.apiKeys.enabled") {
+				t.Fatalf("control-plane = %v, want an error naming console.apiKeys.enabled", err)
+			}
+		})
+	}
+	if err := run(oidc+"  apiKeys:\n    enabled: true\n", "--state-dir", state()); err != nil {
+		t.Fatalf("control-plane with oidc, a state dir and apiKeys on = %v, want a clean start", err)
+	}
+	if err := run(oidc+"  apiKeys:\n    enabled: false\n", "--state-dir", state()); err != nil {
+		t.Fatalf("control-plane with apiKeys off = %v", err)
+	}
 }

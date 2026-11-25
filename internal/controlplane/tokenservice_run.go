@@ -172,10 +172,10 @@ type tokenService struct {
 	Sessions *tokensvcsqlite.Sessions
 	// Agents is the one agent registry Store of the process. Its reads come
 	// from a snapshot that its own writes invalidate directly and that Watch
-	// refreshes for other processes' writes.
-	// TODO: when #72 lands, Server.initAgentStore must reuse this Store (one
-	// Store, one Watch): a second Store on the single cpstate connection would
-	// never see this one's writes, and a disabled agent would keep minting.
+	// refreshes for other processes' writes. Run hands the same Store to the
+	// dashboard agent API (Config.AgentStore) and starts its one Watch: a second
+	// Store on the single cpstate connection would never see this one's writes,
+	// and a disabled agent would keep minting.
 	Agents *agentregsqlite.Store
 }
 
