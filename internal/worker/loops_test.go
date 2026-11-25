@@ -66,6 +66,9 @@ type noBundle struct{}
 
 func (noBundle) Bundle() (config.VerifiedBundle, bool) { return config.VerifiedBundle{}, false }
 func (noBundle) BundleStatus() config.BundleStatus     { return config.BundleStatus{} }
+func (noBundle) BindingInputs() (config.BindingInputs, bool) {
+	return config.BindingInputs{}, false
+}
 
 func (f *fakeControlPlaneClient) Heartbeat(context.Context) error {
 	f.mu.Lock()
