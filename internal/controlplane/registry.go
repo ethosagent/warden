@@ -185,11 +185,12 @@ func (r *WorkerRegistry) WorkersWithoutCap(cap string) []string {
 func FlagBundleState(views []dashboard.WorkerView, headSeq int64) {
 	for i := range views {
 		v := &views[i]
-		if !slices.Contains(v.Caps, config.CapBundleV1) {
+		// No cap, or no signed head to compare with: keep the caller's ETag result.
+		if headSeq == 0 || !slices.Contains(v.Caps, config.CapBundleV1) {
 			continue
 		}
-		v.Behind = headSeq > 0 && v.BundleSeq < headSeq
-		v.BundleSeqAhead = headSeq > 0 && v.BundleSeq > headSeq
+		v.Behind = v.BundleSeq < headSeq
+		v.BundleSeqAhead = v.BundleSeq > headSeq
 	}
 }
 

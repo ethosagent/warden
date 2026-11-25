@@ -142,7 +142,8 @@ A pinned worker reports its bundle state three ways.
   seq is below the control plane's newest signed seq. A worker that reports a seq
   above it is flagged `bundleSeqAhead` and logged once as an ERROR: the control
   plane was probably restored to older state. The control plane logs
-  `worker bundle rejected` (proxy id, seq, reason) once per change of reason.
+  `worker bundle rejected` (proxy id, `applied_seq` — the bundle the worker
+  still enforces, not the rejected one — and reason) once per change of reason.
 
 ## Run it
 

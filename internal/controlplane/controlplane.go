@@ -996,7 +996,8 @@ func (s *Server) noteWorkerBundle(proxyID string, caps []string, wb WorkerBundle
 	ahead := slices.Contains(caps, config.CapBundleV1) && head > 0 && wb.Seq > head
 	rejected, aheadNew := s.registry.NoteBundleSignals(proxyID, wb.RejectReason, ahead)
 	if rejected {
-		s.cfg.Logger.Warn("worker bundle rejected", "proxy_id", proxyID, "seq", wb.Seq, "reason", wb.RejectReason)
+		// applied_seq is the bundle the worker still enforces, not the one it rejected.
+		s.cfg.Logger.Warn("worker bundle rejected", "proxy_id", proxyID, "applied_seq", wb.Seq, "reason", wb.RejectReason)
 	}
 	if aheadNew {
 		s.cfg.Logger.Error("worker reports a bundle seq above the control plane head", "proxy_id", proxyID, "seq", wb.Seq, "head", head)
