@@ -22,7 +22,10 @@ import (
 // the unit tests beside it pin each rule on its own.
 
 // fakeWorker is a worker pulling /policy with the CP token.
-type fakeWorker struct{ h http.Handler }
+type fakeWorker struct {
+	h     http.Handler
+	token string
+}
 
 // pollResult is one /policy response.
 type pollResult struct {
@@ -36,7 +39,7 @@ type pollResult struct {
 func (w fakeWorker) poll(etag string, wait time.Duration) pollResult {
 	start := time.Now()
 	req := httptest.NewRequest(http.MethodGet, "/policy?wait="+wait.String(), nil)
-	req.Header.Set("Authorization", "Bearer "+dashTestToken)
+	req.Header.Set("Authorization", "Bearer "+w.token)
 	if etag != "" {
 		req.Header.Set("If-None-Match", `"`+etag+`"`)
 	}
@@ -52,11 +55,32 @@ func (w fakeWorker) pollAsync(etag string, wait time.Duration) <-chan pollResult
 	return ch
 }
 
+// parked waits until n long polls of the worker's token are parked in the
+// control plane, so a wake-up is proven rather than raced.
+func (e *draftEnv) parked(t *testing.T, n int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		a := e.srv.workerAuth
+		a.cancelMu.Lock()
+		got := 0
+		if c := a.cancels[e.workerTokenID]; c != nil {
+			got = c.waiters
+		}
+		a.cancelMu.Unlock()
+		if got == n {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("%d long polls never parked", n)
+}
+
 func TestApprovalsEndToEnd(t *testing.T) {
 	e := newDraftEnvOpts(t, func(a *config.ConsoleApprovals) { a.AllowEmergencyApply = true }, nil, false, true)
 	ctx := context.Background()
 	seedEvent(t, e)
-	worker := fakeWorker{h: e.h}
+	worker := fakeWorker{h: e.h, token: e.workerToken}
 	const wait = time.Second // the shortest long-poll the control plane honours
 
 	etag1 := e.srv.policy.currentETag()
@@ -85,6 +109,7 @@ func TestApprovalsEndToEnd(t *testing.T) {
 	// 3. The approval applies in its own request and wakes the long-polling
 	// worker, which sees exactly one new ETag.
 	parked := worker.pollAsync(etag1, 20*time.Second)
+	e.parked(t, 1)
 	if rec := e.do("u2", http.MethodPost, draftsPath+"/"+h.DraftID+"/approve", approveBody(d.ChangeDraftView, rp.ID, "reviewed the replay")); rec.Code != http.StatusOK {
 		t.Fatalf("approve = %d %s", rec.Code, rec.Body.String())
 	}
@@ -115,6 +140,7 @@ func TestApprovalsEndToEnd(t *testing.T) {
 	}
 	e.wantErr(t, e.do("breakglass", http.MethodPost, draftsPath+"/"+em.ID+"/approve", approveBody(em.ChangeDraftView, "", "")), http.StatusForbidden, "breakglass_cannot_approve")
 	parked = worker.pollAsync(etag2, 20*time.Second)
+	e.parked(t, 1)
 	rec = e.do("breakglass", http.MethodPost, draftsPath+"/"+em.ID+"/emergency-apply", emergencyBody(emergencyReason))
 	if rec.Code != http.StatusOK || decodeBody[dashboard.ChangeResult](t, rec).State != "applied_unreviewed" {
 		t.Fatalf("emergency apply = %d %s", rec.Code, rec.Body.String())
@@ -183,12 +209,30 @@ func TestApprovalsEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	var okSteps, denied []string
+	held := 0
 	for i := len(items) - 1; i >= 0; i-- { // oldest first
 		it := items[i]
 		if !strings.HasPrefix(it.Action, "change.draft.") && !strings.HasSuffix(it.Action, ".write") {
 			continue
 		}
 		step := it.Action + "/" + it.Actor.Sub
+		if it.Outcome == adminaudit.OutcomeOK && strings.HasSuffix(it.Action, ".write") {
+			switch it.Details[adminaudit.DetailOp] {
+			case "held":
+				held++
+				if !strings.HasPrefix(it.TargetRef, "draft:") {
+					t.Errorf("held row %s target_ref = %q, want draft:<id>@r1", it.Action, it.TargetRef)
+				}
+			default:
+				if it.Details[adminaudit.DetailSource] == "approval" {
+					break
+				}
+				if it.Details[adminaudit.DetailOp] == "" && it.Actor.Sub == "u1" {
+					break // the direct narrowing save
+				}
+				t.Errorf("apply row %s/%s has source %q op %q, want source approval", it.Action, it.Actor.Sub, it.Details[adminaudit.DetailSource], it.Details[adminaudit.DetailOp])
+			}
+		}
 		if it.Outcome == adminaudit.OutcomeOK {
 			okSteps = append(okSteps, step)
 		} else {
@@ -212,6 +256,9 @@ func TestApprovalsEndToEnd(t *testing.T) {
 	}
 	if !slices.Equal(okSteps, want) {
 		t.Errorf("admin audit (ok rows, oldest first):\n got %q\nwant %q", okSteps, want)
+	}
+	if held != 2 {
+		t.Errorf("held rows = %d, want 2 (the policy and llmProviders saves)", held)
 	}
 	for _, refusal := range []string{"change.draft.approve/u1", "change.draft.approve/breakglass:ops", "change.draft.approve/u2"} {
 		if !slices.Contains(denied, refusal) {

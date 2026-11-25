@@ -44,6 +44,8 @@ type draftEnv struct {
 	// the env was built with realAudit (nil otherwise).
 	stateDir string
 	audit    *adminaudit.Store
+	// workerToken and workerTokenID are a worker token made with realAudit.
+	workerToken, workerTokenID string
 }
 
 func newDraftEnv(t *testing.T, mutate func(*config.ConsoleApprovals)) *draftEnv {
@@ -98,6 +100,19 @@ func newDraftEnvOpts(t *testing.T, mutate func(*config.ConsoleApprovals), clk *c
 			t.Fatal(err)
 		}
 	}
+	var workerToken, workerTokenID string
+	if realAudit {
+		// A per-token worker, so a parked long poll is countable (lpParked).
+		ts, err := NewWorkerTokenStore(db, StoreOptions{Logger: logger})
+		if err != nil {
+			t.Fatal(err)
+		}
+		pt, tok, err := ts.Create(context.Background(), CreateOpts{Name: "w1", ProxyID: "proxy-a", Actor: "admin"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg.WorkerTokens, workerToken, workerTokenID = ts, pt, tok.ID
+	}
 	var keyStore *sqlitestore.SQLiteStore
 	if withKeys {
 		reg := newAPIKeyRegistry()
@@ -126,7 +141,7 @@ func newDraftEnvOpts(t *testing.T, mutate func(*config.ConsoleApprovals), clk *c
 	}
 	srv.sessions = NewSessionStore(db.SQL(), time.Hour, 12*time.Hour, newFakeClock().Now)
 	srv.sessionReader = srv.sessions
-	e := &draftEnv{srv: srv, rec: &fakeRecorder{}, pub: &recFindings{}, raw: map[string]string{}, keys: keyStore, logs: logs, stateDir: stateDir, audit: cfg.AdminAudit}
+	e := &draftEnv{srv: srv, rec: &fakeRecorder{}, pub: &recFindings{}, raw: map[string]string{}, keys: keyStore, logs: logs, stateDir: stateDir, audit: cfg.AdminAudit, workerToken: workerToken, workerTokenID: workerTokenID}
 	srv.findings = e.pub
 	if !realAudit {
 		srv.enableAdminAudit(e.rec, e.rec.probe, fakeMAC)

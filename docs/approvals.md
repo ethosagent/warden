@@ -66,10 +66,14 @@ draft; head and the `/policy` ETag do not move.
 | Settings save: `POST`/`PUT /dashboard/api/settings` | Any field outside the small neutral or narrowing set. Admin approver needed for admin-only fields | `logging.*`, `cacheTTLSeconds`, and switching `dlp`, `compliance` or `advisory` on |
 | `llmProviders` save: `POST`/`PUT /dashboard/api/llmproviders` | Always, and it needs an admin approver | Never |
 | Rollback: `POST /dashboard/api/policy/versions/{v}/rollback` | The target version widens relative to head | A rollback that only narrows |
-| `warden policy import` | The file widens: it becomes a pending draft authored `cli:<os user>` | A narrowing file |
+| `warden policy import` | Always (any file that differs from head), authored `cli:<os user>` | Never (a file equal to head is a no-op) |
 | Block-list removal: `DELETE /dashboard/api/blocked-users/{id}`, `warden control-plane block remove` | Always (target `blocked_users`) | Adding a block (the incident kill switch) |
 | Agent registry: register, add a key, add a group or scope, re-enable (`/dashboard/api/agents`) | Anything that widens the agent (target `agents`) | Disabling an agent; edits that only narrow |
-| Integrations, detection, secret store, worker tokens, signing keys, sessions, backups | Never held | Always direct |
+| Integrations, detection, secret store and `/central/secrets`, worker tokens, signing keys, sessions, token sessions, worker cert revoke, enrollment tokens, API keys (`/dashboard/api/api-keys`), backups | Never held | Always direct |
+
+The direct stores are not versioned policy. Note that creating an API key grants
+admin-API access with no second person; see the not-gated list in
+[control-plane.md](control-plane.md#which-writes-are-gated).
 
 A held change keeps the `If-Match` rules: a stale `If-Match` is `409 policy_conflict`
 and a missing one `428`, as before. Field-level role checks run at save time, so an
@@ -77,8 +81,12 @@ editor who saves an admin-only settings field is refused at once, not held.
 
 Credential rotation. A settings save that carries a new raw secret (for example a cloud
 `secretAccessKey`) is refused outright rather than held, because a draft holds only a
-fingerprint, never the secret. Change the credential in the served config first. A
-rollback across a credential change is refused for the same reason.
+fingerprint, never the secret. Change the credential in the served config first.
+
+A rollback keeps the credential the control plane serves now; it never brings back an
+older one. The one exception: a rollback to a version with no secret store block, while
+a credential is set, is refused. At apply time a pending draft whose credential
+fingerprint differs from head's is refused with `422` and stays pending.
 
 ## The two-person rule
 
@@ -111,7 +119,9 @@ A held save is answered `202` with a `Location` header naming the draft:
 ```
 
 Nothing is published and workers see no change. The held save is one admin audit row
-(`policy.write`, `op=held`, target ref `draft:<id>@r1`); a draft made through
+(the route's own action: `policy.write`, `settings.write`, `llmproviders.write` or
+`policy.rollback`; `policy.import` on target `change_draft` for the CLI import; each
+with `op=held` and target ref `draft:<id>@r1`); a draft made through
 `POST /dashboard/api/changes` writes `change.draft.create` and `change.draft.submit`
 rows instead. Submitting a widening draft raises an info Finding,
 `policy_approval_requested`.
@@ -151,8 +161,8 @@ Approve needs evidence. The request carries `revision`, `doc_sha256` and either:
   `failed` or was `unavailable` (timeout, restart, an empty window, a failed queue).
 
 Otherwise the answer is `409 replay_required`. A revision with no replay row at all
-(for example one the offline CLI created, before the sweeper queues it within a minute)
-must be re-run with `POST /dashboard/api/changes/{id}/replay`. A replay that outlives
+(for example one the offline CLI created) needs the sweep, which queues missing replays
+within a minute, or `POST /dashboard/api/changes/{id}/replay`. A replay that outlives
 `replayTimeout` is recorded `failed` with `error_code: timeout`; a replay interrupted
 by a restart is failed as `interrupted`. Raise `replayTimeout` (up to `1h`) or lower
 `replayWindow` or `replayMaxEvents` if timeouts are common. Approving with a changed
@@ -179,6 +189,7 @@ results carry no `version`.
 - **Withdraw and redo, not rebase.** A non-policy draft cannot be rebased. If the entity
   changed after the draft was made, withdraw the draft and make a new one from the
   current state.
+- **A blocked person cannot approve their own unblock** (`403 self_unblock_forbidden`).
 - **Redaction.** The block list is admin-only. A non-admin (a viewer, or an API key whose
   owner is not an admin) reading a block draft sees only `{id, has_sub, has_email}`,
   never who would be unblocked. An admin sees the entry.
@@ -186,14 +197,16 @@ results carry no `version`.
 ## Emergency apply and post-hoc review
 
 When the IdP is down and nobody can approve, `console.approvals.allowEmergencyApply:
-true` lets a **break-glass session, and only one**, publish a pending or `needs_rebase`
-draft with a stated reason:
+true` lets **only a break-glass session** publish a pending draft with a stated reason. A
+`needs_rebase` draft always gets `409 rebase_required`, so in practice only a pending or
+freshly rebased draft can be emergency-applied:
 
 ```sh
-# The break-glass session cookie and CSRF token come from the sign-in page; shown
-# here as variables you already hold.
-curl --cacert ca.pem -X POST \
-  -H "Cookie: $SESSION_COOKIE" -H "X-Warden-CSRF: $CSRF_TOKEN" \
+# bg-cookies.txt is the cookie jar from the break-glass sign-in (see
+# runbooks/break-glass.md), so the session cookie never lands in argv. The CSRF
+# token is the one that sign-in returned.
+curl --cacert ca.pem -X POST -b bg-cookies.txt \
+  -H "X-Warden-CSRF: $CSRF_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"reason": "Identity provider is down and the payments vendor is blocked"}' \
   https://cp.example.internal:7070/dashboard/api/changes/DRAFT_ID/emergency-apply
