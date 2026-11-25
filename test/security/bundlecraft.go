@@ -68,16 +68,6 @@ func (s *Stack) BundleSigner(tb testing.TB) keys.Signer {
 	return s.signerFor(tb, keys.PurposeBundle)
 }
 
-// signerFor loads the CP's active signer of purpose.
-func (s *Stack) signerFor(tb testing.TB, purpose string) keys.Signer {
-	tb.Helper()
-	sg, err := s.Keys().Signer(context.Background(), purpose)
-	if err != nil {
-		tb.Fatalf("security: load the %s signer: %v", purpose, err)
-	}
-	return sg
-}
-
 // UnpinnedSigner is a fresh key no worker pins.
 func UnpinnedSigner(tb testing.TB) keys.Signer {
 	tb.Helper()
