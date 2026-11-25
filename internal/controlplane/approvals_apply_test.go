@@ -438,13 +438,13 @@ func TestApprovalsStartupChecks(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := checkApprovalsStartup(tc.cc, tc.store, tc.dir)
+			err := checkApprovalsStartup(tc.cc, tc.store, tc.dir, false)
 			if err == nil || !strings.Contains(err.Error(), tc.wantContain) {
 				t.Fatalf("error = %v, want one containing %q", err, tc.wantContain)
 			}
 		})
 	}
-	if err := checkApprovalsStartup(config.ConsoleConfig{Approvals: config.DefaultConsoleApprovals()}, PolicyStoreFile, ""); err != nil {
+	if err := checkApprovalsStartup(config.ConsoleConfig{Approvals: config.DefaultConsoleApprovals()}, PolicyStoreFile, "", false); err != nil {
 		t.Errorf("disabled approvals = %v, want nil", err)
 	}
 }

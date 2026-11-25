@@ -743,6 +743,12 @@ func (s *Server) Handler() http.Handler {
 		// answer 404.
 		dash.SetPolicyHistory(s.policyHistoryAPI())
 	}
+	// Change drafts and the two-person rule (W-P2-APPR-04): 404 unless
+	// console.approvals is enabled; the hasher is a no-op without admin audit.
+	if s.approvals != nil {
+		dash.SetChangeDrafts(s.changeDraftsAPI())
+		s.RegisterStateHasher(auditTargetChangeDraft, s.changeDraftHash)
+	}
 	// Per-worker MCP view (inventory + observed schema), selected by ?proxy=.
 	dash.SetMCPFleet(s.mcp.For)
 	// Connected-workers list for the fleet view, with a "behind" flag for any

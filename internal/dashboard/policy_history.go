@@ -306,6 +306,13 @@ func RoutePath(p string) string {
 	if _, ok := blockedUserID(p); ok {
 		return blockedUsersPath + "/{id}"
 	}
+	if _, action, ok := splitChangePath(p); ok {
+		t := changesPath + "/{id}"
+		if action != "" {
+			t += "/" + action
+		}
+		return t
+	}
 	if seg, ok := strings.CutPrefix(p, APIKeysPath+"/"); ok && seg != "" && seg != "self" && !strings.Contains(seg, "/") {
 		return APIKeysPath + "/{id}"
 	}

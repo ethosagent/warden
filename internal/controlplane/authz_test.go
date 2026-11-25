@@ -707,6 +707,17 @@ func TestAuthzScopeClassification(t *testing.T) {
 		"GET /dashboard/api/admin-audit/pubkey":       "adminaudit:read",
 		"GET /dashboard/api/api-keys/self":            apikeys.ScopeSelf,
 		"POST /dashboard/api/workers/{id}/revoke":     "workers:admin",
+		// Change drafts (W-P2-APPR-04): approve and reject stay none, so no
+		// API key can be the second person.
+		"GET /dashboard/api/changes":                "policy:read",
+		"GET /dashboard/api/changes/{id}":           "policy:read",
+		"GET /dashboard/api/changes/{id}/diff":      "policy:read",
+		"POST /dashboard/api/changes":               "policy:draft",
+		"PUT /dashboard/api/changes/{id}":           "policy:write",
+		"POST /dashboard/api/changes/{id}/submit":   "policy:write",
+		"POST /dashboard/api/changes/{id}/withdraw": "policy:write",
+		"POST /dashboard/api/changes/{id}/rebase":   "policy:write",
+		"POST /dashboard/api/changes/{id}/replay":   "policy:write",
 	}
 	for k, row := range authzTable() {
 		name := k.Method + " " + k.Path

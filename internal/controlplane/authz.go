@@ -62,8 +62,10 @@ type authzRow struct {
 // The P2 scopes the table names. They must be registered in
 // apikeys.NewP2Registry (TestAuthzScopesRegistered).
 const (
-	scopePolicyRead     apikeys.Scope = "policy:read"
-	scopePolicyWrite    apikeys.Scope = "policy:write"
+	scopePolicyRead  apikeys.Scope = "policy:read"
+	scopePolicyWrite apikeys.Scope = "policy:write"
+	// scopePolicyDraft creates a change draft (W-P2-APPR-04).
+	scopePolicyDraft    apikeys.Scope = "policy:draft"
 	scopeSettingsRead   apikeys.Scope = "settings:read"
 	scopeTrafficRead    apikeys.Scope = "traffic:read"
 	scopeAuditRead      apikeys.Scope = "audit:read"
@@ -73,9 +75,9 @@ const (
 	// TODO(W-P2-AREG-02, #72): GET agents rows take agents:read, writes take
 	// agents:write. TODO(W-P2-WCA-08): worker-enrollments take workers:admin
 	// (POST enrollments stays none).
-	// TODO(W-P2-APPR-04): changes rows (policy:draft, policy:write, none for
-	// approve/reject/emergency-apply/review). Each ticket adds its constants and
-	// rows here; the coverage test fails until every row is classified.
+	// The later approvals routes (emergency-apply, review) take none. Each
+	// ticket adds its constants and rows here; the coverage test fails until
+	// every row is classified.
 )
 
 // Row constructors keep the tables readable. The scope is the last argument so
@@ -154,6 +156,23 @@ func authzTable() map[routeKey]authzRow {
 		{post, "/dashboard/api/admin-audit/verify", readRow(admin, "adminaudit.verify", scopeAdminAuditRead)},
 		{get, "/dashboard/api/admin-audit/pubkey", readRow(viewer, "adminaudit.pubkey", scopeAdminAuditRead)},
 		{get, "/dashboard/api/setup", readRow(viewer, "setup.read", none)},
+		// Change drafts and the two-person rule (W-P2-APPR-04); 404 unless
+		// console.approvals.enabled. Requests are matched on their template
+		// ({id} is any draft id; dashboard.RoutePath). The author-only routes
+		// (PUT, submit, withdraw, rebase) and the approver's role (the draft's
+		// RequiredRole) are checked by the handler, not by this table. No API
+		// key may approve or reject: the second person is always a human session.
+		{get, "/dashboard/api/changes", readRow(viewer, "change.draft.list", scopePolicyRead)},
+		{post, "/dashboard/api/changes", auditedRow(editor, "change.draft.create", auditTargetChangeDraft, scopePolicyDraft)},
+		{get, "/dashboard/api/changes/{id}", readRow(viewer, "change.draft.read", scopePolicyRead)},
+		{put, "/dashboard/api/changes/{id}", auditedRow(editor, "change.draft.update", auditTargetChangeDraft, scopePolicyWrite)},
+		{get, "/dashboard/api/changes/{id}/diff", readRow(viewer, "change.draft.diff", scopePolicyRead)},
+		{post, "/dashboard/api/changes/{id}/submit", auditedRow(editor, "change.draft.submit", auditTargetChangeDraft, scopePolicyWrite)},
+		{post, "/dashboard/api/changes/{id}/withdraw", auditedRow(editor, "change.draft.withdraw", auditTargetChangeDraft, scopePolicyWrite)},
+		{post, "/dashboard/api/changes/{id}/rebase", auditedRow(editor, "change.draft.rebase", auditTargetChangeDraft, scopePolicyWrite)},
+		{post, "/dashboard/api/changes/{id}/approve", auditedRow(editor, "change.draft.approve", auditTargetChangeDraft, none)},
+		{post, "/dashboard/api/changes/{id}/reject", auditedRow(editor, "change.draft.reject", auditTargetChangeDraft, none)},
+		{post, "/dashboard/api/changes/{id}/replay", auditedRow(editor, "change.draft.replay", auditTargetChangeDraft, scopePolicyWrite)},
 		// Policy history (W-P1-PVER-03). Requests are matched on their template
 		// ({v} is any version segment; dashboard.RoutePath).
 		{get, "/dashboard/api/policy/versions", readRow(viewer, "policy.versions.read", scopePolicyRead)},

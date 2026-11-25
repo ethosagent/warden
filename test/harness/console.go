@@ -95,6 +95,7 @@ func (h *H) consoleYAML() string {
 	if h.wantAdminAudit {
 		audit += "  adminAudit:\n    enabled: true\n"
 	}
+	audit += h.approvalsYAML()
 	if h.wantAPIKeys && h.wantConsole {
 		audit += "  apiKeys:\n    enabled: true\n"
 	}
@@ -116,7 +117,8 @@ console:
   roles:
     admin: [%[5]s]
     viewer: [%[6]s]
-`, h.issuer.Issuer(), ConsoleClientID, consoleSecretEnv, h.ConsoleURL()+"/auth/callback", ConsoleAdminGroup, ConsoleViewerGroup)
+    editor: [%[7]s]
+`, h.issuer.Issuer(), ConsoleClientID, consoleSecretEnv, h.ConsoleURL()+"/auth/callback", ConsoleAdminGroup, ConsoleViewerGroup, ConsoleEditorGroup)
 }
 
 // ConsoleURL is the control plane's https origin, the one the IdP redirects to.

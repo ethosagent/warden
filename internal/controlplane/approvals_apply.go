@@ -43,7 +43,7 @@ func stateMigrationsWithApprovals(migs []cpstate.Migration, ac config.ConsoleApp
 // checkApprovalsStartup validates what console.approvals.enabled needs, naming
 // the first missing item, then applies the temporary enforcement guard. A
 // disabled block always passes.
-func checkApprovalsStartup(cc config.ConsoleConfig, policyStore, stateDir string) error {
+func checkApprovalsStartup(cc config.ConsoleConfig, policyStore, stateDir string, enforcementShipped bool) error {
 	if !cc.Approvals.Enabled {
 		return nil
 	}
@@ -57,7 +57,10 @@ func checkApprovalsStartup(cc config.ConsoleConfig, policyStore, stateDir string
 	case !cc.AdminAudit.Enabled:
 		return errors.New("control-plane: console.approvals.enabled needs console.adminAudit.enabled: true (every transition is an audited change)")
 	}
-	return errApprovalsEnforcementUnavailable
+	if !enforcementShipped {
+		return errApprovalsEnforcementUnavailable
+	}
+	return nil
 }
 
 // policyApplier publishes an approved policy draft through Server.publish's
@@ -180,6 +183,21 @@ func (s *Server) initApprovals() {
 		DraftTTL:      ac.DraftTTL,
 		MaxOpenDrafts: ac.MaxOpenDrafts,
 		Logger:        s.cfg.Logger,
+
+		MinApprovals:              ac.MinApprovals,
+		AllowSelfApproveNarrowing: ac.AllowSelfApproveNarrowing,
+		ReplayMaxAge:              ac.ReplayMaxAge,
+		BaseDoc: func(ctx context.Context, version int64) (approvals.Doc, error) {
+			v, err := s.versions.Get(ctx, version)
+			if err != nil {
+				return approvals.Doc{}, err
+			}
+			return draftDoc(RedactCredentials(v.Doc)), nil
+		},
+		Head: func(ctx context.Context) (int64, approvals.Doc, error) {
+			head, doc, err := s.headDoc(ctx)
+			return head, draftDoc(RedactCredentials(doc)), err
+		},
 	})
 	if err != nil {
 		s.approvalsErr = fmt.Errorf("control-plane: approvals service: %w", err)

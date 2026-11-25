@@ -411,7 +411,18 @@ func (st *Store) step(ctx context.Context, conn *sql.Conn, id string, revision i
 		args = append(args, e.val)
 	}
 	args = append(args, id, string(cur.State), cur.Revision)
-	res, err := conn.ExecContext(ctx, "UPDATE change_drafts SET "+strings.Join(cols, ", ")+" WHERE id = ? AND state = ? AND revision = ?", args...)
+	where := " WHERE id = ? AND state = ? AND revision = ?"
+	// Expiry is part of the compare-and-swap: an expired draft can neither be
+	// approved nor claimed for publishing, whatever the caller read earlier.
+	if ev == approvals.EventApprove || ev == approvals.EventBeginApply {
+		now := ms(st.now())
+		if ms(cur.ExpiresAt) <= now {
+			return approvals.Draft{}, transitionLog{}, approvals.ErrDraftExpired
+		}
+		where += " AND expires_at > ?"
+		args = append(args, now)
+	}
+	res, err := conn.ExecContext(ctx, "UPDATE change_drafts SET "+strings.Join(cols, ", ")+where, args...)
 	if err != nil {
 		return approvals.Draft{}, transitionLog{}, fmt.Errorf("approvals store: %s draft %s: %w", ev, id, err)
 	}
@@ -650,6 +661,47 @@ func (st *Store) Approvals(ctx context.Context, id string) ([]approvals.Approval
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("approvals store: list approvals: %w", err)
+	}
+	return out, nil
+}
+
+// ApprovalCounts implements approvals.Store: one grouped query counts the
+// distinct approvers of every given draft's current revision and doc.
+func (st *Store) ApprovalCounts(ctx context.Context, ds []approvals.Draft) (map[string]int, error) {
+	out := make(map[string]int, len(ds))
+	if len(ds) == 0 {
+		return out, nil
+	}
+	cur := make(map[string]approvals.Draft, len(ds))
+	marks := make([]string, 0, len(ds))
+	args := make([]any, 0, len(ds))
+	for _, d := range ds {
+		cur[d.ID] = d
+		marks = append(marks, "?")
+		args = append(args, d.ID)
+	}
+	rows, err := st.db.QueryContext(ctx,
+		`SELECT draft_id, revision, doc_sha256, count(DISTINCT approver_iss || char(0) || approver_sub)
+		 FROM change_approvals WHERE decision = 'approve' AND draft_id IN (`+strings.Join(marks, ",")+`)
+		 GROUP BY draft_id, revision, doc_sha256`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("approvals store: count approvals: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var (
+			id, sha string
+			rev, n  int
+		)
+		if err := rows.Scan(&id, &rev, &sha, &n); err != nil {
+			return nil, fmt.Errorf("approvals store: count approvals: %w", err)
+		}
+		if d, ok := cur[id]; ok && d.Revision == rev && d.DocSHA256 == sha {
+			out[id] = n
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("approvals store: count approvals: %w", err)
 	}
 	return out, nil
 }

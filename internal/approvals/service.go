@@ -46,7 +46,20 @@ type ServiceConfig struct {
 	// maxOpenDrafts.
 	DraftTTL      time.Duration
 	MaxOpenDrafts int
-	Logger        *slog.Logger
+	// MinApprovals, AllowSelfApproveNarrowing and ReplayMaxAge are
+	// console.approvals.minApprovals, allowSelfApproveNarrowing and
+	// replayMaxAge. Zero values mean 1, false and the default max age.
+	MinApprovals              int
+	AllowSelfApproveNarrowing bool
+	ReplayMaxAge              time.Duration
+	// BaseDoc returns the redacted doc of a policy version, and Head the head
+	// version and its doc. Both feed Classify (a draft is classified against
+	// its base at every revision and again against the live head when the last
+	// approval arrives). Without them a draft stays unclassified and so can
+	// never be approved or applied by the paths in review.go.
+	BaseDoc func(ctx context.Context, version int64) (Doc, error)
+	Head    func(ctx context.Context) (int64, Doc, error)
+	Logger  *slog.Logger
 }
 
 // Service creates drafts and applies approved ones. Later tickets add the
@@ -88,13 +101,26 @@ func (s *Service) Replayer() *Replayer { return s.replayer }
 
 // queueReplay queues a replay of d's current revision. A failure to queue never
 // fails the caller (Submit never waits on a replay): the draft then has no
-// replay, which the approve path reports as replay_required.
+// replay, which the approve path reports as replay_required. Nothing is queued
+// for a target the replay runner does not support, nor for a draft that applies
+// at submit with no second person: either would only spend the one replay slot.
 func (s *Service) queueReplay(ctx context.Context, d Draft) {
-	if s.replayer == nil {
+	if s.replayer == nil || d.Target != TargetPolicy || (d.State == StateDraft && s.selfApplies(d)) {
 		return
 	}
-	if _, err := s.replayer.Queue(context.WithoutCancel(ctx), d); err != nil {
+	ctx = context.WithoutCancel(ctx)
+	if _, err := s.replayer.Queue(ctx, d); err != nil {
 		s.cfg.Logger.Warn("approvals: cannot queue a replay", "draft_id", d.ID, "revision", d.Revision, "error", err)
+		// Record the failure as an unavailable replay, so "no evidence" is an
+		// explicit state the approver can acknowledge, never an absent row.
+		const code = "queue_failed"
+		now := s.cfg.Now()
+		if _, ierr := s.replayer.cfg.Store.Insert(ctx, Replay{
+			DraftID: d.ID, Revision: d.Revision, BaseVersion: d.BaseVersion,
+			Status: ReplayUnavailable, ErrorCode: code, StartedAt: now, FinishedAt: now,
+		}); ierr != nil {
+			s.cfg.Logger.Warn("approvals: cannot record the unavailable replay", "draft_id", d.ID, "error", ierr)
+		}
 	}
 }
 
@@ -184,10 +210,14 @@ func (s *Service) CreateDraft(ctx context.Context, target Target, doc Doc, autho
 	if err != nil {
 		return Draft{}, err
 	}
+	class, role, err := s.classifyAgainstBase(ctx, baseVersion, raw)
+	if err != nil {
+		return Draft{}, err
+	}
 	return s.cfg.Store.Create(ctx, NewDraft{
 		Target: target, BaseVersion: baseVersion, Author: author,
 		Source: prov.Source, Provenance: prov, Message: capMessage(prov.Message),
-		DocJSON: raw, DocSHA256: sha,
+		DocJSON: raw, DocSHA256: sha, Classification: class, RequiredRole: role,
 		ExpiresAt: s.cfg.Now().Add(s.cfg.DraftTTL),
 	}, s.cfg.MaxOpenDrafts)
 }
@@ -199,7 +229,15 @@ func (s *Service) UpdateDraft(ctx context.Context, id string, expectedRevision i
 	if err != nil {
 		return Draft{}, err
 	}
-	d, err := s.cfg.Store.Update(ctx, id, UpdateInput{ExpectedRevision: expectedRevision, Message: capMessage(message), DocJSON: raw, DocSHA256: sha}, actorSub)
+	cur, err := s.cfg.Store.Get(ctx, id)
+	if err != nil {
+		return Draft{}, err
+	}
+	class, role, err := s.classifyAgainstBase(ctx, cur.BaseVersion, raw)
+	if err != nil {
+		return Draft{}, err
+	}
+	d, err := s.cfg.Store.Update(ctx, id, UpdateInput{ExpectedRevision: expectedRevision, Message: capMessage(message), DocJSON: raw, DocSHA256: sha, Classification: class, RequiredRole: role}, actorSub)
 	if err != nil {
 		return Draft{}, err
 	}
@@ -218,7 +256,11 @@ func (s *Service) RebaseDraft(ctx context.Context, id string, expectedRevision i
 	if err != nil {
 		return Draft{}, err
 	}
-	d, err := s.cfg.Store.Rebase(ctx, id, UpdateInput{ExpectedRevision: expectedRevision, BaseVersion: newBase, Message: capMessage(message), DocJSON: raw, DocSHA256: sha}, actorSub)
+	class, role, err := s.classifyAgainstBase(ctx, newBase, raw)
+	if err != nil {
+		return Draft{}, err
+	}
+	d, err := s.cfg.Store.Rebase(ctx, id, UpdateInput{ExpectedRevision: expectedRevision, BaseVersion: newBase, Message: capMessage(message), DocJSON: raw, DocSHA256: sha, Classification: class, RequiredRole: role}, actorSub)
 	if err != nil {
 		return Draft{}, err
 	}
@@ -254,6 +296,11 @@ func (s *Service) Apply(ctx context.Context, id string, revision int, actorSub s
 	}
 	if _, err := Transition(d.State, EventBeginApply); err != nil {
 		return Draft{}, err
+	}
+	// An open draft past its expiry is retired by the sweeper; until then it
+	// must not publish.
+	if s.expired(d) {
+		return Draft{}, ErrDraftExpired
 	}
 	ap, ok := s.cfg.Appliers[d.Target]
 	if !ok {

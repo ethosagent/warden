@@ -249,8 +249,11 @@ func (s *Server) adminAuditMiddleware(classify func(*http.Request) (authzRow, bo
 		}
 		defer release()
 
-		before, beforeErr := a.stateHash(ctx, row.Target)
 		actx, ann := adminaudit.WithAnnotation(ctx)
+		// The scope lets a per-object state hasher (change_draft) find the
+		// object the request names, before and after the handler runs.
+		actx = withAuditScope(actx, r.URL.Path)
+		before, beforeErr := a.stateHash(actx, row.Target)
 		sw := wrapStatus(w)
 		next.ServeHTTP(sw.writer(), r.WithContext(actx))
 		status := sw.code()
@@ -258,11 +261,15 @@ func (s *Server) adminAuditMiddleware(classify func(*http.Request) (authzRow, bo
 		// A handler's NoChange is a claim, not a command: it is honoured only when the
 		// middleware can verify that nothing changed (the target has a state
 		// hasher, both hashes were computed, and they are equal). Otherwise the
-		// row is written as usual and says the claim was refused.
+		// row is written as usual and says the claim was refused. The after hash
+		// uses the audit-scoped actx like the before one: a per-object hasher
+		// (change_draft) answers "" without the scope, which would make any
+		// change look like a no-op. A request that queued follow-up rows did
+		// something worth recording, and returning here would drop them.
 		skipRefused := false
 		if ann.NoChangeClaimed() {
-			if outcome == adminaudit.OutcomeOK && beforeErr == nil && a.hasHasher(row.Target) {
-				if after, afterErr := a.stateHash(ctx, row.Target); afterErr == nil && after == before {
+			if outcome == adminaudit.OutcomeOK && beforeErr == nil && a.hasHasher(row.Target) && len(auditFollowUps(actx)) == 0 {
+				if after, afterErr := a.stateHash(actx, row.Target); afterErr == nil && after == before {
 					return // an idempotent repeat that changed nothing: no row
 				}
 			}
@@ -279,7 +286,7 @@ func (s *Server) adminAuditMiddleware(classify func(*http.Request) (authzRow, bo
 		// error may have partly applied), so the state is hashed again.
 		after, afterErr := before, beforeErr
 		if outcome != adminaudit.OutcomeDenied {
-			after, afterErr = a.stateHash(ctx, row.Target)
+			after, afterErr = a.stateHash(actx, row.Target)
 		}
 		ref, details := ann.Snapshot()
 		if details == nil {
@@ -313,6 +320,7 @@ func (s *Server) adminAuditMiddleware(classify func(*http.Request) (authzRow, bo
 			return
 		}
 		a.degraded.Store(false)
+		s.recordFollowUps(ctx, in, auditFollowUps(actx))
 	})
 }
 
@@ -600,4 +608,36 @@ func (s *statusWriter) writer() http.ResponseWriter {
 		return hijackStatusWriter{s}
 	}
 	return s
+}
+
+// recordFollowUps records the extra rows a handler asked for after the
+// request's own row (a change draft that applied also records the policy change
+// it made). A handler supplies only what happened; who did it, from where and
+// the status come from the primary row, the outcome is always ok, nothing is
+// recorded when the primary outcome is not ok, details pass the closed set and
+// at most maxAuditFollowUps rows are written.
+func (s *Server) recordFollowUps(ctx context.Context, primary adminaudit.Input, follows []auditFollowUp) {
+	if primary.Outcome != adminaudit.OutcomeOK || len(follows) == 0 {
+		return
+	}
+	if len(follows) > maxAuditFollowUps {
+		s.cfg.Logger.Warn("admin_audit_followups_dropped", "action", primary.Action, "dropped", len(follows)-maxAuditFollowUps)
+		follows = follows[:maxAuditFollowUps]
+	}
+	for _, f := range follows {
+		next := adminaudit.Input{
+			Actor: primary.Actor, ActorRole: primary.ActorRole, AuthMethod: primary.AuthMethod,
+			Action: f.Action, Target: f.Target, TargetRef: f.TargetRef,
+			Details: adminaudit.FilterDetails(f.Details),
+			Outcome: adminaudit.OutcomeOK, HTTPStatus: primary.HTTPStatus,
+			BeforeHash: f.BeforeHash, AfterHash: f.AfterHash,
+			ClientIP: primary.ClientIP, RequestID: primary.RequestID,
+		}
+		if _, err := s.audit.rec.Record(context.WithoutCancel(ctx), next); err != nil {
+			s.audit.degraded.Store(true)
+			s.logPersistFailed(next, err)
+			s.publishAuditDegraded("append_failed")
+			return
+		}
+	}
 }

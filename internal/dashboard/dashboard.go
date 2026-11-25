@@ -66,6 +66,9 @@ type Server struct {
 	// policyHistory serves the policy history routes; nil = they answer 404
 	// (a worker, or a control plane in file mode).
 	policyHistory PolicyHistory
+	// changeDrafts serves the change draft routes; nil = they answer 404
+	// (W-P2-APPR-04).
+	changeDrafts ChangeDrafts
 	// liveSettings returns the behavioral settings currently in force (nil = none);
 	// settingsWriter applies an edited settings document. Both are control-plane-
 	// only: a worker leaves settingsWriter nil so its settings panel is read-only.
@@ -692,6 +695,17 @@ func Routes() []Route {
 		{del, "/dashboard/api/blocked-users/{id}", "blocked_users.remove"},
 		{get, "/dashboard/api/keys", "keys.read"},
 		{post, "/dashboard/api/keys/rotate", "keys.rotate_requested"},
+		{get, "/dashboard/api/changes", "change.draft.list"},
+		{post, "/dashboard/api/changes", "change.draft.create"},
+		{get, "/dashboard/api/changes/{id}", "change.draft.read"},
+		{put, "/dashboard/api/changes/{id}", "change.draft.update"},
+		{get, "/dashboard/api/changes/{id}/diff", "change.draft.diff"},
+		{post, "/dashboard/api/changes/{id}/submit", "change.draft.submit"},
+		{post, "/dashboard/api/changes/{id}/withdraw", "change.draft.withdraw"},
+		{post, "/dashboard/api/changes/{id}/rebase", "change.draft.rebase"},
+		{post, "/dashboard/api/changes/{id}/approve", "change.draft.approve"},
+		{post, "/dashboard/api/changes/{id}/reject", "change.draft.reject"},
+		{post, "/dashboard/api/changes/{id}/replay", "change.draft.replay"},
 	}
 }
 

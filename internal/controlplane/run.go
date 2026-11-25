@@ -45,6 +45,12 @@ type Params struct {
 	// KeysReady, when set, is called with the key manager once Init has run, for
 	// tests and the harness (keys.enabled only).
 	KeysReady func(*keys.Manager)
+	// ApprovalsEnforcementShipped lifts the startup refusal of
+	// console.approvals.enabled. Until W-P2-APPR-06 gates every versioned write
+	// path through one clearance check, an enabled gate would still let a direct
+	// write skip it, so only the harness (which exercises the draft API) sets it;
+	// cmd/proxy never does.
+	ApprovalsEnforcementShipped bool
 	// APIKeysReady, when set, is called once the server is built with the
 	// reader of warden_cp_apikey_auth_total by outcome, for tests and the
 	// harness (console.apiKeys.enabled only).
@@ -293,7 +299,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	if err := checkAdminAuditFlags(consoleCfg, stateDir, p); err != nil {
 		return fail(err)
 	}
-	if err := checkApprovalsStartup(consoleCfg, policyStore, stateDir); err != nil {
+	if err := checkApprovalsStartup(consoleCfg, policyStore, stateDir, p.ApprovalsEnforcementShipped); err != nil {
 		return fail(err)
 	}
 	// The keys block, like console:, comes from --config only. Disabled (the

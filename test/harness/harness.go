@@ -195,6 +195,10 @@ type H struct {
 	// wantAdminAudit (WithAdminAudit) boots the control plane with
 	// console.adminAudit.enabled and a state dir.
 	wantAdminAudit bool
+	// wantApprovals (WithApprovals) boots the control plane with
+	// console.approvals.enabled (implies the console, admin audit and the
+	// versioned policy store).
+	wantApprovals bool
 	// wantAPIKeys (WithAPIKeys) enables console.apiKeys on the oidc console.
 	wantAPIKeys  bool
 	apiKeyMu     sync.Mutex
@@ -829,6 +833,7 @@ func (h *H) buildInprocessTarget() *inprocess {
 	}
 	h.applyConsole(&ip.cp.params, &ip.cp.addr)
 	h.applyPolicyStore(&ip.cp.params)
+	h.applyApprovals(&ip.cp.params)
 	h.applyCPAdmin(&ip.cp.params)
 	h.applyBackup(&ip.cp.params)
 	h.applyKeys(&ip.cp.params)

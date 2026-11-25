@@ -101,6 +101,10 @@ type Doc struct {
 	Settings  *config.SettingsWire    `json:"settings,omitempty"`
 }
 
+// AuthorKindBreakglass is the Kind of a break-glass session: it can author a
+// draft but never approve one.
+const AuthorKindBreakglass = "breakglass"
+
 // Author is who created a draft. Kind is the admin-audit auth_method (oidc,
 // breakglass, cli, bearer, none, system); the Applier passes it through to the
 // policy version it creates.
