@@ -21,6 +21,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/ethosagent/warden/internal/agentid"
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/integration"
@@ -920,11 +921,16 @@ func userParam(q url.Values) (user string, ok bool) {
 	return user, true
 }
 
-// actParam reads the optional ?act= filter (an agent id): trimmed and bounded
-// like ?user=. ok is false when the value is too long; the caller answers 400.
+// actParam reads the optional ?act= filter (an agent id): trimmed, then
+// rejected (ok false, the caller answers 400) when non-empty and not a valid
+// agent id (agentid.ValidID, at most 64 characters). A NUL byte, the analytics
+// cache-key separator, is rejected the same way. Empty means no filter.
 func actParam(q url.Values) (act string, ok bool) {
 	act = strings.TrimSpace(q.Get("act"))
-	if utf8.RuneCountInString(act) > maxUserParamLen || strings.ContainsRune(act, 0) {
+	if act == "" {
+		return "", true
+	}
+	if strings.ContainsRune(act, 0) || agentid.ValidID(act) != nil {
 		return "", false
 	}
 	return act, true

@@ -10,7 +10,7 @@ import (
 	"github.com/ethosagent/warden/test/harness"
 )
 
-// userFilterAPI proves W-P1-VRFY-04 end to end: events carrying identity fields
+// userFilterAPI proves W-P1-VRFY-04 (and, for ?act=, W-P2-WBND-08) end to end: events carrying identity fields
 // (seeded directly; the proxy stamps them with W-P1-VRFY-09) are filtered by
 // ?user= on the worker dashboard and, on the control-plane
 // dashboard (fed through its real ingest endpoint), for both the traffic and analytics APIs. An email in any case, or
@@ -99,8 +99,12 @@ func userFilterAPI(t *testing.T, h *harness.H) {
 		if len(byAct) != 1 || byAct[0].Domain != "alice-1.example.com" || byAct[0].UserAct != "agent-a" || byAct[0].IdentityTokenType != "warden" {
 			t.Errorf("%s traffic ?act=agent-a = %+v, want alice-1 with its agent and token type", v.name, byAct)
 		}
-		if got := userDomains(v, ""); len(got) != 3 {
-			t.Errorf("%s traffic with no filter = %v, want all 3", v.name, got)
+		var emptyAct []analytics.Event
+		if err := json.Unmarshal(v.get("/dashboard/api/traffic?act="), &emptyAct); err != nil {
+			t.Fatalf("%s: decode empty-act traffic: %v", v.name, err)
+		}
+		if len(emptyAct) != 3 {
+			t.Errorf("%s traffic ?act= returned %d events, want all 3", v.name, len(emptyAct))
 		}
 		if got := userDomains(v, "x' OR '1'='1"); len(got) != 0 {
 			t.Errorf("%s traffic with an injection value = %v, want none", v.name, got)

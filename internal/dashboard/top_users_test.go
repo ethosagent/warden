@@ -278,4 +278,12 @@ func TestTrafficFilterByAct(t *testing.T) {
 	if rr := doGet(t, h, "/dashboard/api/traffic?act="+strings.Repeat("a", 321)); rr.Code != http.StatusBadRequest {
 		t.Errorf("321-char act: status %d, want 400", rr.Code)
 	}
+	for _, bad := range []string{strings.Repeat("a", 65), "bad%20id", "a%00b"} {
+		if rr := doGet(t, h, "/dashboard/api/traffic?act="+bad); rr.Code != http.StatusBadRequest {
+			t.Errorf("act=%q: status %d, want 400", bad, rr.Code)
+		}
+	}
+	if got := domains("/dashboard/api/traffic?act=" + strings.Repeat("a", 64)); len(got) != 0 {
+		t.Errorf("valid 64-char act matched %v, want none", got)
+	}
 }
