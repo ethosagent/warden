@@ -3,7 +3,6 @@ package security
 import (
 	"net/http"
 	"strings"
-	"sync"
 	"testing"
 )
 
@@ -82,28 +81,6 @@ type Case struct {
 	// WantUpstreamHits is how many requests may reach the upstream during the
 	// case: 0 for an attack, 1 for an allowed control.
 	WantUpstreamHits int
-}
-
-var (
-	registryMu sync.Mutex
-	registry   []Case
-)
-
-// Register adds cases to the package registry the enum-completeness test reads
-// and returns them for Run. Later tickets declare their cases with it at
-// package level and remove the pending.go entries they cover.
-func Register(cases ...Case) []Case {
-	registryMu.Lock()
-	defer registryMu.Unlock()
-	registry = append(registry, cases...)
-	return cases
-}
-
-// Registered returns every registered case.
-func Registered() []Case {
-	registryMu.Lock()
-	defer registryMu.Unlock()
-	return append([]Case(nil), registry...)
 }
 
 // Covers constructors: the strings a Case.Covers and a pending.go entry share.

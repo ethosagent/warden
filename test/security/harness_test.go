@@ -217,7 +217,7 @@ func TestHarness_Matrix(t *testing.T) {
 	Run(t, s, "cp-route", smokeRoute)
 }
 
-var smokeWorker = Register(Case{
+var smokeWorker = []Case{{
 	Name: "no credential on CONNECT is challenged",
 	Path: PathWorker,
 	Attack: func(t testing.TB, s *Stack) Observed {
@@ -228,7 +228,7 @@ var smokeWorker = Register(Case{
 	WantBody:         "identity_required",
 	WantDeny:         "identity_required",
 	WantUpstreamHits: 0,
-}, Case{
+}, {
 	Name: "a CONNECT token that is not a JWT is challenged and counted as invalid",
 	Path: PathWorker,
 	Attack: func(t testing.TB, s *Stack) Observed {
@@ -240,9 +240,9 @@ var smokeWorker = Register(Case{
 	WantReason:       "malformed",
 	WantDeny:         "identity_required",
 	WantUpstreamHits: 0,
-})
+}}
 
-var smokeToken = Register(Case{
+var smokeToken = []Case{{
 	Name: "a subject token signed with alg none is refused and recorded",
 	Path: PathToken,
 	Attack: func(t testing.TB, s *Stack) Observed {
@@ -252,16 +252,16 @@ var smokeToken = Register(Case{
 	WantBody:   "invalid_grant",
 	WantResult: "denied",
 	WantReason: "subject_invalid",
-})
+}}
 
-var smokeRoute = Register(Case{
+var smokeRoute = []Case{{
 	Name: "no client certificate on /policy is refused",
 	Path: PathCPRoute,
 	Attack: func(t testing.TB, s *Stack) Observed {
 		return SeenReply(s.Send(t, s.CPClient(t, nil), http.MethodGet, "/policy", nil, nil))
 	},
 	WantStatus: http.StatusUnauthorized,
-})
+}}
 
 // TestHarness_RunnerIsNotVacuous proves the runner fails on what it must: a
 // wrong status, an unexpected upstream hit, a missing assertion source and a
@@ -482,7 +482,7 @@ func TestEnumCompleteness(t *testing.T) {
 		exists[it] = true
 	}
 	covered := map[string]bool{}
-	for _, c := range Registered() {
+	for _, c := range allCases() {
 		for _, it := range c.Covers {
 			if !exists[it] {
 				t.Errorf("case %q covers %q, which is not an enum value or worker-facing route", c.Name, it)

@@ -7,9 +7,11 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/asn1"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"math/big"
 	"testing"
 	"time"
 )
@@ -178,13 +180,18 @@ func (k *AgentKey) sign(in, headerAlg string) []byte {
 	}
 	if k.ec != nil {
 		sum := sha256.Sum256([]byte(in))
-		r, s, err := ecdsa.Sign(rand.Reader, k.ec, sum[:])
+		der, err := k.ec.Sign(rand.Reader, sum[:], crypto.SHA256)
 		if err != nil {
 			k.tb.Fatalf("agent key: sign: %v", err)
 		}
+		// crypto.Signer returns ES256 as ASN.1 DER; JWS wants fixed-width r||s.
+		var rs struct{ R, S *big.Int }
+		if _, err := asn1.Unmarshal(der, &rs); err != nil {
+			k.tb.Fatalf("agent key: decode signature: %v", err)
+		}
 		out := make([]byte, 64)
-		r.FillBytes(out[:32])
-		s.FillBytes(out[32:])
+		rs.R.FillBytes(out[:32])
+		rs.S.FillBytes(out[32:])
 		return out
 	}
 	sig, err := k.ed.Sign(rand.Reader, []byte(in), crypto.Hash(0))

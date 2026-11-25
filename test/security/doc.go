@@ -33,8 +33,9 @@
 //
 // A ticket adds cases and nothing else:
 //
-//  1. Declare them at package level with Register, naming what each one
-//     covers (CoverIdentity, CoverBundle, CoverToken, CoverRoute).
+//  1. Declare them as a package-level []Case, naming what each one covers
+//     (CoverIdentity, CoverBundle, CoverToken, CoverRoute), and append the
+//     slice to allCases in cases.go.
 //  2. In a test, start a stack, run the category's positive control with
 //     Stack.PositiveControl, then Run the cases.
 //  3. Delete the covered lines from pending.go. TestEnumCompleteness fails
