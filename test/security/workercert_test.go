@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"net/http"
+	"net/http/httptrace"
 	"strings"
 	"testing"
 	"time"
@@ -79,7 +80,7 @@ func certCase(name, wantLog string, status int, creds func(t testing.TB, s *Stac
 			return hitRoutes(t, s, s.CPClient(t, cert), hdr, status)
 		},
 		WantStatus: status,
-		WantLog:    wantLog,
+		WantLog:    `"reason":"` + wantLog + `"`,
 	}
 }
 
@@ -249,6 +250,25 @@ var revokedCase = Case{
 			t.Fatalf("security: the held long-poll was not cut within 10s of the revoke")
 		}
 		// The next requests on the same keep-alive client are refused.
+		// The first request after the revoke must ride a reused keep-alive
+		// connection of the same client, or the test proves nothing about it.
+		reused := false
+		traceCtx := httptrace.WithClientTrace(context.Background(), &httptrace.ClientTrace{
+			GotConn: func(i httptrace.GotConnInfo) { reused = i.Reused },
+		})
+		tr, err := http.NewRequestWithContext(traceCtx, http.MethodGet, s.CP.URL+"/policy", nil)
+		if err != nil {
+			t.Fatalf("security: build a request: %v", err)
+		}
+		tr.Header.Set("Accept", controlplane.BundleMediaType)
+		tresp, err := cl.Do(tr)
+		if err != nil {
+			t.Fatalf("security: GET /policy after the revoke: %v", err)
+		}
+		_ = tresp.Body.Close()
+		if tresp.StatusCode != http.StatusUnauthorized || !reused {
+			t.Errorf("GET /policy on the same client after the revoke = %d (connection reused: %t), want 401 on a reused connection", tresp.StatusCode, reused)
+		}
 		obs := hitRoutes(t, s, cl, nil, http.StatusUnauthorized)
 		s.EventuallyAdvance("the fleet view to show "+w.Name+" revoked", time.Second, func() bool {
 			v, ok := s.FleetWorker(t, w)
@@ -305,8 +325,8 @@ var serverCertCase = Case{
 		if tp.Served() != 0 {
 			t.Errorf("the stub control plane delivered %d bundles to a worker that must not trust it", tp.Served())
 		}
-		tp.RestoreServerCert()
 		tp.Disarm()
+		tp.RestoreServerCert()
 		// Back on the real control plane the worker still holds its policy.
 		if got := s.WorkerSeq(t, w); got != seq {
 			t.Errorf("warden_bundle_seq = %v after the refused connection, want %v", got, seq)

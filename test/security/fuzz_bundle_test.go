@@ -14,13 +14,15 @@ import (
 // any input that verifies without carrying, byte for byte, the payload a
 // pinned key signed in a seed, and yielding exactly that seed's verified
 // content. The unmodified seeds verify; so do a few benign re-encodings of the
-// outer JSON (extra whitespace, a duplicate member whose last value is the
-// signed one, an unknown member, a member name in another case), because
-// Verify parses the envelope with encoding/json semantics and the signature
-// covers the payload bytes, not the envelope's spelling (see parseEnvelope).
-// What must never verify is anything else: trailing data, a byte-order mark,
-// a duplicate that leaves a different payload last, a flipped byte, an
-// envelope signed by an unpinned key, a swapped credential sidecar. The seeds run
+// outer JSON (extra whitespace, an unknown member, an extra bad signature next
+// to a good one). A case variant or a duplicate of a canonical member
+// (payload, signatures, credentials) is NOT benign: the unsigned credentials
+// sidecar is read from the envelope and reaches the bundle cache file, so a
+// "Credentials" spelling or a second "credentials" member must be refused. The
+// canonicalViolations seeds below must not verify; they fail until
+// parseEnvelope refuses them (fix/bundle-envelope-canonical). Also never
+// verifying: trailing data, a byte-order mark, a flipped byte, an envelope
+// signed by an unpinned key, a swapped credential sidecar. The seeds run
 // in a plain go test; a longer fuzz run is manual:
 //
 //	go test ./test/security -run '^$' -fuzz FuzzBundleVerify -fuzztime 60s
@@ -83,14 +85,7 @@ func FuzzBundleVerify(f *testing.F) {
 		// A byte-order mark and a leading space.
 		append([]byte("\xef\xbb\xbf"), valid...),
 		append([]byte(" "), valid...),
-		// Duplicate members: the second payload or signatures list must not
-		// win over, or hide behind, the signed one.
-		bytes.Replace(valid, []byte(`{"payload":`), []byte(`{"payload":"AA","payload":`), 1),
-		bytes.Replace(valid, []byte(`"signatures":`), []byte(`"signatures":[],"signatures":`), 1),
 		bytes.Replace(valid, []byte(`"signatures":[`), []byte(`"signatures":[{"kid":"x","sig":"AA"},`), 1),
-		// A member name in another case.
-		bytes.Replace(valid, []byte(`"payload"`), []byte(`"Payload"`), 1),
-		bytes.Replace(valid, []byte(`"signatures"`), []byte(`"SIGNATURES"`), 1),
 		// Truncation, a flipped byte, an unknown member.
 		valid[:len(valid)-1], valid[:len(valid)/2],
 		flipByte(valid, len(valid)/2), flipByte(valid, 20),
@@ -100,12 +95,33 @@ func FuzzBundleVerify(f *testing.F) {
 		[]byte(`{"signatures":[{"kid":"` + env.Signatures[0].KID + `","sig":"` + env.Signatures[0].Sig + `"}]}`),
 		bytes.Replace(withCreds, []byte("fuzz-secret-value-000001"), []byte("fuzz-secret-value-000002"), 1),
 	}
+	// Case variants and duplicates of the canonical members: none may verify.
+	canonicalViolations := [][]byte{
+		bytes.Replace(valid, []byte(`{"payload":`), []byte(`{"payload":"AA","payload":`), 1),
+		bytes.Replace(valid, []byte(`"signatures":`), []byte(`"signatures":[],"signatures":`), 1),
+		bytes.Replace(valid, []byte(`"payload"`), []byte(`"Payload"`), 1),
+		bytes.Replace(valid, []byte(`"signatures"`), []byte(`"SIGNATURES"`), 1),
+		bytes.Replace(withCreds, []byte(`"credentials"`), []byte(`"Credentials"`), 1),
+		bytes.Replace(withCreds, []byte(`"credentials":`), []byte(`"credentials":null,"credentials":`), 1),
+	}
+	forbidden := map[string]bool{}
+	for _, raw := range canonicalViolations {
+		if len(raw) == 0 {
+			f.Fatal("a canonical-violation seed was not built")
+		}
+		forbidden[string(raw)] = true
+		f.Add(raw)
+	}
 	for _, s := range seeds {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, raw []byte) {
 		v, err := bundle.Verify(raw, pins, bundle.State{}, bundle.Options{Now: now, Skew: 5 * time.Minute})
 		if err != nil {
+			return
+		}
+		if forbidden[string(raw)] {
+			t.Errorf("a case variant or duplicate of a canonical envelope member verified (%d bytes, digest %s)", len(raw), digestOf(raw))
 			return
 		}
 		var creds bundle.Credentials

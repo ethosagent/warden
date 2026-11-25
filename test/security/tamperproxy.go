@@ -86,7 +86,10 @@ func NewTamperProxy(s *Stack, w *Worker) *TamperProxy {
 	if err != nil {
 		s.tb.Fatalf("security: parse the CP url: %v", err)
 	}
-	tr := &http.Transport{TLSClientConfig: &tls.Config{
+	// No keep-alive: the transport picks the client certificate once per
+	// connection, so a connection opened before the worker enrolled (with no
+	// certificate) would be reused for /policy and answered 401 forever.
+	tr := &http.Transport{DisableKeepAlives: true, TLSClientConfig: &tls.Config{
 		RootCAs: s.CPCA.Pool(), MinVersion: tls.VersionTLS12,
 		GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
 			if c, err := p.workerCredential(); err == nil {
@@ -157,6 +160,14 @@ func (p *TamperProxy) isBundleRequest(r *http.Request) bool {
 }
 
 func (p *TamperProxy) handle(w http.ResponseWriter, r *http.Request) {
+	// Only enrollment may reach the CP without the worker's certificate: the
+	// CP requires certs, and a cert-less relay would be a false 401.
+	if r.URL.Path != "/control/enroll" {
+		if _, err := p.workerCredential(); err != nil {
+			http.Error(w, "tamper proxy: worker has no certificate yet", http.StatusBadGateway)
+			return
+		}
+	}
 	if !p.isBundleRequest(r) {
 		p.rp.ServeHTTP(w, r)
 		return

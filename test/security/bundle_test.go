@@ -44,6 +44,13 @@ func bundleAttack(t testing.TB, s *Stack, reason string, arm armFn, extra func(t
 		return v
 	}
 	before := rejected()
+	// The heartbeat must report a rejection newer than any earlier one, so a
+	// repeated reason cannot pass on a stale value.
+	s.Clock.Advance(time.Second)
+	var rejectedBefore time.Time
+	if v, ok := s.FleetWorker(t, w); ok && v.LastRejectAt != "" {
+		rejectedBefore, _ = time.Parse(time.RFC3339, v.LastRejectAt)
+	}
 
 	arm(t, s, tp, base)
 	s.EventuallyAdvance("the worker to reject the "+reason+" bundle", time.Second, func() bool {
@@ -56,7 +63,11 @@ func bundleAttack(t testing.TB, s *Stack, reason string, arm armFn, extra func(t
 	// The next heartbeat carries the reason to the control plane.
 	s.EventuallyAdvance("the heartbeat to report lastRejectReason "+reason, time.Second, func() bool {
 		v, ok := s.FleetWorker(t, w)
-		return ok && v.LastRejectReason == reason
+		if !ok || v.LastRejectReason != reason {
+			return false
+		}
+		at, err := time.Parse(time.RFC3339, v.LastRejectAt)
+		return err == nil && at.After(rejectedBefore)
 	})
 	tok := s.FreshToken(t, "agent-a")
 	if got := s.ConnectStatus(t, w, UpstreamHost, tok); got != http.StatusOK {
@@ -147,8 +158,15 @@ var preBlockRollback = Case{
 			tp.Replace(Plan{Body: pre.([]byte)})
 		}, func(t testing.TB, s *Stack, w *Worker) {
 			victim, _ := s.KV("victim")
-			if got := s.ConnectStatus(t, w, UpstreamHost, victim.(string)); got == http.StatusOK {
-				t.Errorf("the blocked user got %d after the pre-block envelope was replayed, want a denial", got)
+			if got := s.ConnectStatus(t, w, UpstreamHost, victim.(string)); got != http.StatusForbidden {
+				t.Errorf("the blocked user got %d after the pre-block envelope was replayed, want 403", got)
+			}
+			found := false
+			for _, e := range s.DenyEvents(t, w) {
+				found = found || e.Reason == "user_blocked"
+			}
+			if !found {
+				t.Errorf("no deny event with reason user_blocked after the pre-block envelope was replayed")
 			}
 		})
 	},
@@ -213,16 +231,15 @@ func bundleCases() []Case {
 			})
 		}),
 		bundleCase("issuer mismatch", "issuer_mismatch", signedBy(func(b *bundle.Bundle, _ *Stack) { b.CPID = "cp_00000000000000000000000000000000" })),
-		bundleCase("credential mismatch", "credential_mismatch", func(t testing.TB, s *Stack, tp *TamperProxy, _ bundle.Bundle) {
+		bundleCase("credential mismatch", "credential_mismatch", replacing(func(t testing.TB, s *Stack, base bundle.Bundle) Plan {
 			s.Track("planted credential", "planted-secret-access-key-0001")
-			tp.Mutate(func(raw []byte) []byte {
-				// The signed payload commits to no credential; a sidecar riding
-				// along must not be accepted.
-				return mutateEnvelope(raw, func(m map[string]json.RawMessage) {
-					m["credentials"] = json.RawMessage(`{"accessKeyId":"AKIAPLANTED000000001","secretAccessKey":"planted-secret-access-key-0001"}`)
-				})
-			})
-		}),
+			// A bundle validly signed with no credential, with a sidecar
+			// riding along: a real secret injection the worker must refuse.
+			raw := Sign(t, s.hostile(t, base), nil, s.BundleSigner(t))
+			return Plan{Body: mutateEnvelope(raw, func(m map[string]json.RawMessage) {
+				m["credentials"] = json.RawMessage(`{"accessKeyId":"AKIAPLANTED000000001","secretAccessKey":"planted-secret-access-key-0001"}`)
+			})}
+		})),
 		bundleCase("rollback", "rollback", func(t testing.TB, _ *Stack, tp *TamperProxy, base bundle.Bundle) {
 			seen := tp.Relayed()
 			if len(seen) == 0 || seen[0].Seq >= base.Seq {
@@ -278,7 +295,11 @@ func TestMaliciousBundle(t *testing.T) {
 
 	// The block-list story for the pre-block rollback: the user's token exists
 	// before the block, the envelope is kept, then the block is published.
-	s.SetKV("victim", s.MintWardenToken(t, a, "victim", "eng"))
+	victim := s.MintWardenToken(t, a, "victim", "eng")
+	s.SetKV("victim", victim)
+	if got := s.ConnectStatus(t, w, UpstreamHost, victim); got != http.StatusOK {
+		t.Fatalf("the user's token before the block = %d, want 200", got)
+	}
 	s.SetKV("preblock", append([]byte(nil), w.Tamper.Latest()...))
 	seq := s.WorkerSeq(t, w)
 	if r := s.AdminSession(t).Do(t, http.MethodPost, "/dashboard/api/blocked-users", map[string]any{"sub": "victim", "reason": "incident"}); r.Status != http.StatusCreated {
