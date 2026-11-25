@@ -920,6 +920,16 @@ func userParam(q url.Values) (user string, ok bool) {
 	return user, true
 }
 
+// actParam reads the optional ?act= filter (an agent id): trimmed and bounded
+// like ?user=. ok is false when the value is too long; the caller answers 400.
+func actParam(q url.Values) (act string, ok bool) {
+	act = strings.TrimSpace(q.Get("act"))
+	if utf8.RuneCountInString(act) > maxUserParamLen || strings.ContainsRune(act, 0) {
+		return "", false
+	}
+	return act, true
+}
+
 // handleTraffic serves GET /dashboard/api/traffic.
 func (s *Server) handleTraffic(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -933,10 +943,16 @@ func (s *Server) handleTraffic(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid user parameter")
 		return
 	}
+	act, ok := actParam(q)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid act parameter")
+		return
+	}
 	filter := analytics.EventFilter{
 		Domain:   q.Get("domain"),
 		Decision: q.Get("decision"),
 		User:     user,
+		Act:      act,
 	}
 	if v := q.Get("since"); v != "" {
 		t, err := time.Parse(time.RFC3339, v)

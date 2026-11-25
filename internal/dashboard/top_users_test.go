@@ -250,3 +250,32 @@ func TestIndexRendersClaimsAsText(t *testing.T) {
 		t.Errorf("textContent assignment flagged: %v", v)
 	}
 }
+
+// ?act= narrows the traffic view to one agent's events; empty changes nothing.
+func TestTrafficFilterByAct(t *testing.T) {
+	now := time.Now().UTC()
+	ds := &fakeDataSource{events: []analytics.Event{
+		{Timestamp: now, Domain: "one.example", Decision: "allow", UserAct: "a1", IdentityTokenType: "warden"},
+		{Timestamp: now, Domain: "two.example", Decision: "allow", UserAct: "a2", IdentityTokenType: "warden"},
+		{Timestamp: now, Domain: "none.example", Decision: "allow"},
+	}}
+	h := newTestServer(ds, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
+	domains := func(path string) []string {
+		var evs []analytics.Event
+		doGetJSON(t, h, path, &evs)
+		var out []string
+		for _, e := range evs {
+			out = append(out, e.Domain)
+		}
+		return out
+	}
+	if got := domains("/dashboard/api/traffic?act=a2"); len(got) != 1 || got[0] != "two.example" {
+		t.Errorf("act=a2 = %v", got)
+	}
+	if got := domains("/dashboard/api/traffic"); len(got) != 3 {
+		t.Errorf("no act = %v, want all 3", got)
+	}
+	if rr := doGet(t, h, "/dashboard/api/traffic?act="+strings.Repeat("a", 321)); rr.Code != http.StatusBadRequest {
+		t.Errorf("321-char act: status %d, want 400", rr.Code)
+	}
+}

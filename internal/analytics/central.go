@@ -120,6 +120,9 @@ func (c *CentralStore) GetAggregatedEvents(filter AggregatedFilter) ([]Aggregate
 		if !filter.MatchesUser(e.Event) {
 			continue
 		}
+		if !filter.MatchesAct(e.Event) {
+			continue
+		}
 		if filter.ProxyID != "" && e.ProxyID != filter.ProxyID {
 			continue
 		}
