@@ -365,7 +365,7 @@ func (p *Proxy) handleConn(conn net.Conn) {
 			p.denyConnect(conn, ci, domain, port, denyreason.IdentityRequired)
 			return
 		}
-		d := ci.Expiry.Sub(p.clock())
+		d := ci.Expiry.Sub(p.validityClock())
 		if d <= 0 {
 			p.denyConnect(conn, ci, domain, port, denyreason.IdentityRequired)
 			return

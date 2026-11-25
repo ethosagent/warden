@@ -411,7 +411,16 @@ func cacheSize(m *sync.Map) int {
 	return n
 }
 
-// clock returns the proxy's time source, defaulting to time.Now when the
+// validityClock is the time source for identity and session validity decisions:
+// the injected Config.IdentityClock when set, else clock().
+func (p *Proxy) validityClock() time.Time {
+	if p.idNow != nil {
+		return p.idNow()
+	}
+	return p.clock()
+}
+
+// clock returns the leaf-cert time source, defaulting to time.Now when the
 // injectable now field is unset (production). Tests set p.now to a controllable
 // clock to exercise leaf expiry deterministically.
 func (p *Proxy) clock() time.Time {
