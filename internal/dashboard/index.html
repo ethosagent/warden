@@ -1737,6 +1737,7 @@ function currentTab(){
   return active?active.dataset.page:'overview';
 }
 function loadTab(page){
+  if(page!=='changes'&&typeof chStopPoll==='function') chStopPoll();
   switch(page){
     case 'overview':    loadOverview(); break;
     case 'activity':    loadActivity(); break;
@@ -4208,7 +4209,7 @@ async function saveLLMProviders(){
     renderLLMProviders();
     // (the judge selector re-reads the registry when Guardrails next loads)
     llmpMsg('saved ✓',true); setTimeout(()=>{ const m=document.getElementById('llmp-msg'); if(m) m.style.display='none'; },2500);
-  }catch(err){ llmpMsg(heldText(err),!!err.held); }
+  }catch(err){ llmpMsg(heldText(err),false); }
 }
 function llmProviderNames(){ return ((gr.llmp&&gr.llmp.providers)||[]).map(p=>p.name).filter(Boolean); }
 
@@ -5013,6 +5014,12 @@ async function rollbackTo(v){
     loadPolicyHistory(true);
     return;
   }
+  if(r.status===202){
+    // A widening rollback is held as a draft: nothing rolled back, so show the notice, not a success.
+    const id=noteHeld(b);
+    st.textContent='Rollback submitted for review: v'+v+' is not live until it is approved.'+(id?' Draft '+id+'.':'');
+    return;
+  }
   if(r.status===422){ st.textContent='✕ v'+v+' no longer passes validation'+(b&&b.detail?(': '+b.detail):''); return; }
   if(!r.ok){ st.textContent='✕ rollback failed: '+((b&&b.error)||('status '+r.status)); return; }
   notePolicyHead(r);
@@ -5161,6 +5168,7 @@ function chMaybePoll(){
   const tick=async()=>{
     ch.pollTimer=0;
     if(seq!==ch.pollSeq||ch.open!==id) return;
+    if(currentTab()!=='changes'){ chStopPoll(); return; }
     let nd=null;
     try{ const r=await api('GET',CH_BASE+'/'+encodeURIComponent(id)); if(r.ok) nd=await r.json(); }catch(e){ nd=null; }
     if(seq!==ch.pollSeq||ch.open!==id) return;
@@ -5179,9 +5187,9 @@ function chFact(label,value){
   return row;
 }
 /* chShape renders one {current|proposed} entity: the closed set of fields a block or agent entry has. */
-function chShape(obj){
+function chShape(obj,emptyText){
   const wrap=chEl('div','', 'ch-shape');
-  if(obj==null){ wrap.appendChild(chEl('div','none (a new entry)','note')); return wrap; }
+  if(obj==null){ wrap.appendChild(chEl('div',emptyText,'note')); return wrap; }
   ['id','display_name','status','sub','email','has_sub','has_email'].forEach(k=>{
     if(Object.prototype.hasOwnProperty.call(obj,k)) wrap.appendChild(chFact(k,typeof obj[k]==='boolean'?String(obj[k]):obj[k]));
   });
@@ -5209,8 +5217,8 @@ function chDiffBox(d,df){
   }
   const cols=chEl('div','', 'ch-cols');
   const cur=chEl('div'), pro=chEl('div');
-  cur.appendChild(chEl('h5','Current')); cur.appendChild(chShape(df.diff.current));
-  pro.appendChild(chEl('h5','Proposed')); pro.appendChild(chShape(df.diff.proposed));
+  cur.appendChild(chEl('h5','Current')); cur.appendChild(chShape(df.diff.current,'none (a new entry)'));
+  pro.appendChild(chEl('h5','Proposed')); pro.appendChild(chShape(df.diff.proposed,d.target==='blocked_users'?'removes this entry':'none'));
   cols.append(cur,pro);
   sec.appendChild(cols);
   return sec;
@@ -5256,7 +5264,7 @@ function chReplayBox(d){
   sec.appendChild(chEl('div','The replay compares allow and deny decisions only. Rate limits, time windows, the judge, DLP and the block list are not replayed.','note'));
   const rp=d.latest_replay;
   if(d.target!=='policy'){ sec.appendChild(chEl('div','This target has no replay: approving it needs the acknowledgement below.','note')); return sec; }
-  if(!rp){ sec.appendChild(chEl('div','No replay has run for this revision.','note')); return sec; }
+  if(!rp){ sec.appendChild(chEl('div','No replay has run for this revision. Run it before approving.','note')); return sec; }
   const line=chEl('div','', 'ch-fact'); line.appendChild(chEl('span',rp.status,'pill '+(rp.status==='done'?'p-allow':rp.status==='failed'||rp.status==='unavailable'?'p-deny':'p-med')));
   line.appendChild(chEl('span',' base v'+rp.base_version+', '+rp.events_scanned+' events, '+(rp.window_from?String(rp.window_from):'')+' to '+(rp.window_to?String(rp.window_to):''),'mono muted'));
   sec.appendChild(line);
@@ -5298,14 +5306,17 @@ function chBtn(label,cls,minRole,fn){
 function chActionsBox(d){
   const sec=chSection('Actions');
   const rp=d.latest_replay;
-  const needAck=d.target!=='policy'||!rp||rp.status==='failed'||rp.status==='unavailable';
+  const needReplay=d.target==='policy'&&!rp;   // the server answers replay_required for a policy draft with no replay
+  const needAck=d.target!=='policy'||(!!rp&&(rp.status==='failed'||rp.status==='unavailable'));
   const acts=chEl('div','', 'ch-actions');
   const comment=chEl('input'); comment.type='text'; comment.maxLength=1024; comment.id='ch-comment'; comment.placeholder='Comment (optional)';
   comment.value=ch.ui.comment; comment.addEventListener('input',()=>{ ch.ui.comment=comment.value; });
   let ack=null;
   const st=d.state;
   if(st==='pending'||st==='applied_unreviewed') sec.appendChild(comment);
-  if(st==='pending'&&chCanApprove(d)&&needAck){
+  if(st==='pending'&&chCanApprove(d)&&needReplay){
+    sec.appendChild(chEl('div','Run replay first: a policy change is approved against a replay of recent traffic.','note ch-warn'));
+  }else if(st==='pending'&&chCanApprove(d)&&needAck){
     const lab=chEl('label','', 'ch-ack');
     ack=chEl('input'); ack.type='checkbox'; ack.id='ch-ack'; ack.checked=ch.ui.ack;
     ack.addEventListener('change',()=>{ ch.ui.ack=ack.checked; });
@@ -5317,7 +5328,7 @@ function chActionsBox(d){
     acts.appendChild(chBtn('Withdraw','','editor',()=>chTransition(d,'withdraw')));
   }else if(st==='pending'){
     if(chCanApprove(d)){
-      acts.appendChild(chBtn('Approve','primary','editor',()=>chApprove(d,ack)));
+      if(!needReplay) acts.appendChild(chBtn('Approve','primary','editor',()=>chApprove(d,ack)));
       acts.appendChild(chBtn('Reject','','editor',()=>chReject(d)));
     }else if(chIsAuthor(d)){
       acts.appendChild(chEl('span','You wrote this draft: a second person must approve it.','pill p-low'));
@@ -5393,6 +5404,7 @@ async function chApprove(d,ack){
   const rp=d.latest_replay;
   const usable=d.target==='policy'&&!!rp&&rp.status==='done';
   if(chReplayPending(d)&&!ch.timedOut){ chMsg('Wait for the replay to finish.'); return; }
+  if(d.target==='policy'&&!rp){ chMsg('Run replay first.'); return; }
   if(!usable&&!(ack&&ack.checked)){ chMsg('Tick the acknowledgement to approve without a usable replay.'); return; }
   const body={revision:d.revision,doc_sha256:d.doc_sha256,replay_id:usable?rp.id:'',acknowledgeNoReplay:!usable,comment:ch.ui.comment};
   let r=null;
@@ -5422,6 +5434,10 @@ async function chReview(d){
    change as saved. The id is checked against CH_ID before it becomes part of a link. */
 async function noteHeldResponse(r){
   let b=null; try{ b=await r.json(); }catch(e){ b=null; }
+  return noteHeld(b);
+}
+/* noteHeld(b): the same notice from an already parsed 202 body (a caller that read the body once). */
+function noteHeld(b){
   const id=b&&typeof b.draft_id==='string'&&CH_ID.test(b.draft_id)?b.draft_id:'';
   const el=document.getElementById('held-notice'); if(!el) return id;
   const parts=[chEl('span','Submitted for review: the change is not saved until a second person approves it. ')];
@@ -5449,7 +5465,7 @@ function applyChangesHash(){
   if(g('ch-target')) g('ch-target').addEventListener('change',loadChanges);
   if(g('ch-refresh')) g('ch-refresh').addEventListener('click',loadChanges);
   if(g('ch-more')) g('ch-more').addEventListener('click',()=>chLoadPage(false));
-  window.addEventListener('hashchange',applyChangesHash);
+  window.addEventListener('hashchange',()=>{ if(setupData&&setupData.approvalsEnabled===true) applyChangesHash(); });
   document.addEventListener('click',ev=>{
     const a=ev.target.closest&&ev.target.closest('#held-notice a[href^="#changes/"]'); if(!a) return;
     ev.preventDefault();

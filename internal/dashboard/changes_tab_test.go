@@ -203,8 +203,14 @@ func TestChangesTabTextContent(t *testing.T) {
 	if !strings.Contains(js, `if(d.target==='policy'){`) || !strings.Contains(js, `chEl('b',x.target)`) {
 		t.Error("the detail and the list must key on the draft's target")
 	}
-	if !strings.Contains(js, `if(obj==null){ wrap.appendChild(chEl('div','none (a new entry)','note')); return wrap; }`) {
-		t.Error("a null current (a new entity) must render as a new entry")
+	for _, want := range []string{
+		`if(obj==null){ wrap.appendChild(chEl('div',emptyText,'note')); return wrap; }`,
+		`cur.appendChild(chShape(df.diff.current,'none (a new entry)'))`,
+		`d.target==='blocked_users'?'removes this entry':'none'`,
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("changes script lacks %q (a null current is a new entry, a null proposed block is a removal)", want)
+		}
 	}
 	// Nothing else in the page assigns held-save text as markup either.
 	for _, line := range strings.Split(html, "\n") {
@@ -241,7 +247,7 @@ func TestPolicySaveDraft(t *testing.T) {
 		`'Open draft '+id`,
 		`a.setAttribute('href','#changes/'+id)`,
 		`function heldText(err){ return err&&err.held?err.message:'✕ '+(err&&err.message); }`,
-		`window.addEventListener('hashchange',applyChangesHash)`,
+		`window.addEventListener('hashchange',()=>{ if(setupData&&setupData.approvalsEnabled===true) applyChangesHash(); })`,
 		`if(h.indexOf('#changes/')!==0) return;`,
 	} {
 		if !strings.Contains(js, want) {
@@ -258,7 +264,7 @@ func TestPolicySaveDraft(t *testing.T) {
 		`msg.textContent=heldText(err);`,
 		`if(!err.held) window.alert('MCP save failed: '+err.message);`,
 		`if(!err.held) window.alert('Judge save failed: '+err.message);`,
-		`llmpMsg(heldText(err),!!err.held);`,
+		`llmpMsg(heldText(err),false);`,
 		`st.textContent=heldText(err);`,
 		// agents and the block list
 		`if(r&&r.status===202){ agHideForm(); await noteHeldResponse(r);`,
@@ -269,9 +275,57 @@ func TestPolicySaveDraft(t *testing.T) {
 			t.Errorf("index.html lacks %q", want)
 		}
 	}
+	// A widening rollback is held too: the 202 is handled before the ok check and
+	// shows the notice with the draft link, never "rolled back".
+	i = strings.Index(html, "async function rollbackTo(")
+	if i < 0 {
+		t.Fatal("no rollbackTo")
+	}
+	rb := html[i : i+strings.Index(html[i:], "\n}\n")]
+	held = strings.Index(rb, "if(r.status===202){")
+	ok = strings.Index(rb, "if(!r.ok){")
+	if held < 0 || ok < 0 || held > ok || strings.Index(rb, "rolled back: head is now") < held {
+		t.Errorf("rollbackTo must handle 202 before the ok check and the rolled back text:\n%s", rb)
+	}
+	for _, want := range []string{"const id=noteHeld(b);", "Rollback submitted for review: v'+v+' is not live until it is approved."} {
+		if !strings.Contains(rb, want) {
+			t.Errorf("rollbackTo lacks %q", want)
+		}
+	}
+	if !strings.Contains(html, "function noteHeld(b){") || !strings.Contains(html, "return noteHeld(b);") {
+		t.Error("noteHeldResponse must share noteHeld with callers that already read the body")
+	}
 	// A held save is never followed by a saved message on the same path: the
 	// 202 branches above return before 'Saved'/'saved'.
 	if strings.Contains(pw, "saved") || strings.Contains(pw, "Saved") {
 		t.Error("policyWrite must not report a save itself")
+	}
+}
+
+// TestChangesTabReviewFixes pins the review fixes: a policy draft with no replay
+// asks for the replay (the server answers replay_required) instead of offering
+// the acknowledgement, the replay poll stops off the tab, and the hash handler
+// only runs when approvals are enabled.
+func TestChangesTabReviewFixes(t *testing.T) {
+	html := servedIndex(t)
+	js := changesBlock(t, html)
+	for _, want := range []string{
+		`const needReplay=d.target==='policy'&&!rp;`,
+		`const needAck=d.target!=='policy'||(!!rp&&(rp.status==='failed'||rp.status==='unavailable'));`,
+		`Run replay first: a policy change is approved against a replay of recent traffic.`,
+		`if(!needReplay) acts.appendChild(chBtn('Approve'`,
+		`if(d.target==='policy'&&!rp){ chMsg('Run replay first.'); return; }`,
+		`if(currentTab()!=='changes'){ chStopPoll(); return; }`,
+		`if(setupData&&setupData.approvalsEnabled===true) applyChangesHash();`,
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("changes script lacks %q", want)
+		}
+	}
+	if !strings.Contains(html, "function loadTab(page){\n  if(page!=='changes'&&typeof chStopPoll==='function') chStopPoll();") {
+		t.Error("loadTab must stop the replay poll when another page loads")
+	}
+	if !strings.Contains(html, "llmpMsg(heldText(err),false);") {
+		t.Error("a held llmProviders save must show in the warning style, not the success style")
 	}
 }
