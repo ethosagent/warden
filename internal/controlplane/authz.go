@@ -68,9 +68,11 @@ const (
 	scopeTrafficRead    apikeys.Scope = "traffic:read"
 	scopeAuditRead      apikeys.Scope = "audit:read"
 	scopeAdminAuditRead apikeys.Scope = "adminaudit:read"
+	// scopeWorkersAdmin guards workers/{id}/revoke (W-P2-WCA-05).
+	scopeWorkersAdmin apikeys.Scope = "workers:admin"
 	// TODO(W-P2-AREG-02, #72): GET agents rows take agents:read, writes take
-	// agents:write. TODO(W-P2-WCA-08, W-P2-WCA-05): worker-enrollments and
-	// workers/{id}/revoke take workers:admin (POST enrollments stays none).
+	// agents:write. TODO(W-P2-WCA-08): worker-enrollments take workers:admin
+	// (POST enrollments stays none).
 	// TODO(W-P2-APPR-04): changes rows (policy:draft, policy:write, none for
 	// approve/reject/emergency-apply/review). Each ticket adds its constants and
 	// rows here; the coverage test fails until every row is classified.
@@ -162,6 +164,9 @@ func authzTable() map[routeKey]authzRow {
 		{post, "/dashboard/api/backup", auditedRow(admin, "backup.run", "backup", none)},
 		// Worker tokens (W-P1-WTOK-03): viewers may list; minting and revoking are
 		// admin only, and the handler also refuses them outside console.auth oidc.
+		// Worker certificate revoke (W-P2-WCA-05): admin only; 404 unless
+		// workerCA is enabled, and refused outside console.auth oidc (use_cli).
+		{post, "/dashboard/api/workers/{id}/revoke", auditedRow(admin, actionWorkerRevoked, auditTargetWorkerCerts, scopeWorkersAdmin)},
 		{get, "/dashboard/api/worker-tokens", readRow(viewer, "worker_token.read", none)},
 		{post, "/dashboard/api/worker-tokens", auditedRow(admin, "worker_token.create", "worker_tokens", none)},
 		{del, "/dashboard/api/worker-tokens/{id}", auditedRow(admin, "worker_token.revoke", "worker_tokens", none)},

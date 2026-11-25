@@ -15,6 +15,13 @@ const (
 	// holds ("true" or "false"), never the identifiers themselves.
 	DetailHasSub   = "has_sub"
 	DetailHasEmail = "has_email"
+	// DetailWorkerID and DetailCount describe a worker certificate revocation:
+	// the worker id and how many certificates it revoked.
+	DetailWorkerID = "worker_id"
+	DetailCount    = "count"
+	// DetailEnrollTokens is how many unused id-bound enrollment tokens the
+	// revocation revoked with the certificates.
+	DetailEnrollTokens = "enroll_tokens_revoked"
 	// DetailAPIKeyID is the id (never the secret or its hash) of the API key a
 	// request authenticated with (W-P2-APIK-02).
 	DetailAPIKeyID = "api_key_id"
@@ -27,7 +34,7 @@ const (
 	DetailAPIKeysRevoked = "api_keys_revoked"
 )
 
-var annotationKeys = map[string]bool{DetailOp: true, DetailEtag: true, DetailHasSub: true, DetailHasEmail: true, DetailAPIKeyID: true, DetailScopes: true, DetailExpiresAt: true, DetailAPIKeysRevoked: true}
+var annotationKeys = map[string]bool{DetailOp: true, DetailEtag: true, DetailHasSub: true, DetailHasEmail: true, DetailAPIKeyID: true, DetailScopes: true, DetailExpiresAt: true, DetailAPIKeysRevoked: true, DetailWorkerID: true, DetailCount: true, DetailEnrollTokens: true}
 
 // Annotation is the per-request carrier the admin audit middleware puts in
 // the request context. Handlers fill it through Annotate; the middleware reads
@@ -51,7 +58,7 @@ func WithAnnotation(ctx context.Context) (context.Context, *Annotation) {
 // policy@<etag>) and details to the audit entry of the request ctx belongs
 // to. It is a no-op when the request is not audited. A later call replaces
 // the target_ref when it is non-empty and merges details. Only the closed
-// detail keys (DetailOp, DetailEtag, DetailHasSub, DetailHasEmail, DetailAPIKeyID) are kept, and a target_ref or value that
+// detail keys (the Detail* constants above) are kept, and a target_ref or value that
 // would fail entry validation is dropped rather than failing the row.
 func Annotate(ctx context.Context, targetRef string, details map[string]string) {
 	a, ok := ctx.Value(annotationKey{}).(*Annotation)

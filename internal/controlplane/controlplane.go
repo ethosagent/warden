@@ -292,6 +292,10 @@ type Server struct {
 	// certIdx is the revoked worker certificate index behind certificate
 	// authentication; nil without a certificate store.
 	certIdx *certIndex
+	// certsRevoked counts the certificates revoked in this process, by the
+	// console and by a lineage conflict (warden_cp_worker_cert_revoked_total); a
+	// CLI revoke is another process.
+	certsRevoked atomic.Int64
 	// auth is the console OIDC login (/auth/login, /auth/callback); set only when
 	// sessions are.
 	auth *authService
@@ -724,6 +728,8 @@ func (s *Server) Handler() http.Handler {
 	})
 	// Worker token admin routes and their audit hasher (W-P1-WTOK-03).
 	s.wireWorkerTokens(dash)
+	// Worker certificate revoke route and its audit hasher (W-P2-WCA-05).
+	s.wireWorkerCerts(dash)
 	// Signing key admin routes and their audit hasher (W-P2-KEYS-04).
 	s.wireKeys(dash)
 	// Dashboard-V3 read tabs. Each source EXISTS on the control plane:

@@ -322,6 +322,12 @@ var All = slices.Concat(
 		{Name: "workerca_cert_auth", Opts: workerCACertAuthOpts(), Run: workerCACertAuth},
 		{Name: "workerca_renew", Opts: workerCACertAuthOpts(), Run: workerCARenew},
 		{Name: "workerca_strict_certs", Opts: workerCAStrictCertsOpts(), Run: workerCAStrictCerts},
+		// Worker certificate revocation (W-P2-WCA-05): the console route and the
+		// offline CLI cut a worker off (401 on every worker route and renew, held
+		// long-poll ended), and the pruner keeps rows still needed. In-process only.
+		{Name: "workerca_revoke_api", Opts: workerCARevokeOpts(), Run: workerCARevokeAPI},
+		{Name: "workerca_revoke_cli", Opts: workerCARevokeOpts(), Run: workerCARevokeCLI},
+		{Name: "workerca_prune", Opts: workerCARevokeOpts(), Run: workerCAPrune},
 		{Name: "keys_disabled_creates_nothing", Opts: []harness.Option{harness.WithBackup()}, Run: keysDisabledCreatesNothing},
 		// Key rotation (W-P2-KEYS-06): rotate-key is refused while the control
 		// plane runs, rotates offline once it is stopped (signed handover, new

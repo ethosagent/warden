@@ -122,6 +122,6 @@ func newControlPlaneCmd() *cobra.Command {
 	// takes the state-dir lock and writes only under --backup-dir; restore takes it
 	// and replaces the state dir's files; hash-password touches no state; keys
 	// list/export are read-only, rotate writes without the lock and reset takes it).
-	cmd.AddCommand(newAdminAuditCmd(), newHashPasswordCmd(), newBackupCmd(), newRestoreCmd(), newControlPlaneTokenCmd(), newControlPlaneEnrollTokenCmd(), newControlPlaneBlockCmd(), newControlPlaneKeysCmd(), newControlPlaneCACmd())
+	cmd.AddCommand(newAdminAuditCmd(), newHashPasswordCmd(), newBackupCmd(), newRestoreCmd(), newControlPlaneTokenCmd(), newControlPlaneEnrollTokenCmd(), newControlPlaneWorkerCmd(), newControlPlaneBlockCmd(), newControlPlaneKeysCmd(), newControlPlaneCACmd())
 	return cmd
 }

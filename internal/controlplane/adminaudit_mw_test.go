@@ -226,6 +226,8 @@ var auditedRequests = map[routeKey]auditedRequest{
 	// The revoke targets the token the create just minted ({tokid}).
 	{http.MethodPost, "/dashboard/api/worker-tokens"}:        {"/dashboard/api/worker-tokens", `{"name":"audit-tok","proxyID":"audit-worker"}`},
 	{http.MethodDelete, "/dashboard/api/worker-tokens/{id}"}: {"/dashboard/api/worker-tokens/{tokid}", ""},
+	// Served by the stub certificate admin TestAdminAuditAllAuditedRoutes installs.
+	{http.MethodPost, "/dashboard/api/workers/{id}/revoke"}: {"/dashboard/api/workers/worker-1/revoke", ""},
 	// API keys (W-P2-APIK-03): the create mints the key the {id} revoke removes;
 	// the owner revoke targets nobody so it leaves the revoke below a live key.
 	{http.MethodPost, apiKeysPath}:             {apiKeysPath, `{"name":"audit-key","scopes":["policy:read"]}`},
@@ -272,6 +274,7 @@ func TestAdminAuditAllAuditedRoutes(t *testing.T) {
 	e.srv.dash.SetPolicyHistory(stubHistory{})
 	e.srv.dash.SetBackup(func() error { return nil })
 	e.srv.dash.SetKeysSource(stubKeys{})
+	e.srv.dash.SetWorkerCertAdmin(stubWorkerCerts{})
 	admin := e.session(t, groupAdmin)
 	hashed := map[string]bool{"policy": true, "settings": true, "integrations": true, "detection": true, "llmproviders": true, "worker_tokens": true, "blocked_users": true, "api_keys": true}
 	routes := allAuditedRoutes()

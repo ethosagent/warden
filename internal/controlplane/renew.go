@@ -350,6 +350,7 @@ func (s *Server) lineageConflict(ctx context.Context, p WorkerPrincipal, addr st
 		s.cfg.Logger.Error("worker cert lineage conflict: revoking the worker failed", "worker_id", p.ProxyID, "serial", p.CertSerial, "error", err.Error())
 	}
 	s.syncCertIndex(ctx)
+	s.certsRevoked.Add(int64(len(serials)))
 	if err == nil && len(serials) == 0 {
 		// Already revoked by an earlier conflict: count, but do not repeat the
 		// ERROR line and audit row for every further use of a dead key.

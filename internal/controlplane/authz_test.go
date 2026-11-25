@@ -706,6 +706,7 @@ func TestAuthzScopeClassification(t *testing.T) {
 		"POST /dashboard/api/admin-audit/verify":      "adminaudit:read",
 		"GET /dashboard/api/admin-audit/pubkey":       "adminaudit:read",
 		"GET /dashboard/api/api-keys/self":            apikeys.ScopeSelf,
+		"POST /dashboard/api/workers/{id}/revoke":     "workers:admin",
 	}
 	for k, row := range authzTable() {
 		name := k.Method + " " + k.Path
