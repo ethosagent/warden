@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
+	"strings"
 	"testing"
 
+	"github.com/ethosagent/warden/internal/bundle"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/dashboard"
 	"github.com/ethosagent/warden/test/harness"
@@ -141,4 +144,29 @@ func identityBootDistributedAgent(t *testing.T, h *harness.H) {
 		s.Agents = append(s.Agents, config.AgentSettings{ID: bootAgentID, Identity: config.IdentityModeChallenge})
 	})
 	assertBootChallenge(t, h, good)
+}
+
+func identityBootCacheOpts() []harness.Option {
+	return append(identityBootOpts(), harness.WithBundleCache())
+}
+
+// identityBootFromCache: the same restart with the control plane DOWN, so the
+// worker boots from its last-known-good bundle cache (W-P2-SBND-06). The
+// cached bundle's settings put challenge mode in force on the first request,
+// and its token keys verify the agent's Warden token.
+func identityBootFromCache(t *testing.T, h *harness.H) {
+	good := bootSetup(t, h)
+	enterChallenge(t, h, func(s *config.SettingsWire) { s.Identity.DefaultMode = config.IdentityModeChallenge })
+	h.Eventually("the worker caches the bundle that carries challenge mode", func() bool {
+		raw, err := os.ReadFile(h.BundleCacheFile(0))
+		if err != nil {
+			return false
+		}
+		return strings.Contains(string(h.VerifyBundle(raw, bundle.State{}).Bundle.Policy), `"defaultMode":"challenge"`)
+	})
+	h.CP().Stop()
+	assertBootChallenge(t, h, good)
+	if !strings.Contains(h.Logs(), "enforcing the cached last-known-good signed bundle") {
+		t.Error("the worker did not boot from the cache")
+	}
 }

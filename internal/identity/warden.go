@@ -127,6 +127,16 @@ func (s *WardenSnapshot) Agent(id string) (WardenAgent, bool) {
 	return a, ok
 }
 
+// HasKey reports whether the snapshot still holds the token signing key kid. It
+// reads the snapshot only and never allocates.
+func (s *WardenSnapshot) HasKey(kid string) bool {
+	if s == nil {
+		return false
+	}
+	_, ok := s.keys[kid]
+	return ok
+}
+
 // WardenConfig configures NewWardenVerifier.
 type WardenConfig struct {
 	// ClockSkew is the exp/nbf tolerance; 0 means DefaultClockSkew.

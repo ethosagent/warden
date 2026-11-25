@@ -156,6 +156,13 @@ type Event struct {
 	// IdentityReason is the bounded reason behind a non-valid status. Never
 	// token content.
 	IdentityReason string `json:"identity_reason,omitempty"`
+	// UserAct is the agent a Warden token was minted for (act.sub). Stamped only
+	// for a valid identity (W-P2-WBND-02); "" otherwise.
+	UserAct string `json:"user_act,omitempty"`
+	// IdentityTokenType is the kind of token behind a valid identity ("warden"
+	// or "idp"). Stamped only for a valid identity; bounded enum, never token
+	// content.
+	IdentityTokenType string `json:"identity_token_type,omitempty"`
 }
 
 // EncodeGroups serialises a group list as a JSON array for a single column or
@@ -458,6 +465,8 @@ CREATE TABLE IF NOT EXISTS events (
 		{"user_sid", `ALTER TABLE events ADD COLUMN user_sid TEXT NOT NULL DEFAULT ''`},
 		{"identity_status", `ALTER TABLE events ADD COLUMN identity_status TEXT NOT NULL DEFAULT ''`},
 		{"identity_reason", `ALTER TABLE events ADD COLUMN identity_reason TEXT NOT NULL DEFAULT ''`},
+		{"user_act", `ALTER TABLE events ADD COLUMN user_act TEXT NOT NULL DEFAULT ''`},
+		{"identity_token_type", `ALTER TABLE events ADD COLUMN identity_token_type TEXT NOT NULL DEFAULT ''`},
 	} {
 		if err := s.addColumnIfAbsent(c.name, c.ddl); err != nil {
 			return err
@@ -625,7 +634,7 @@ func (s *SQLiteStore) StoreEvent(e Event) error {
 		e.LatencyMs, encodeSwappedRefs(e.SwappedRefs), encodeEvidence(e.Evidence),
 		e.AddrClass,
 		e.UserSub, e.UserEmail, EncodeGroups(e.UserGroups), boolToInt(e.UserGroupsTruncated),
-		e.UserSID, e.IdentityStatus, e.IdentityReason)
+		e.UserSID, e.IdentityStatus, e.IdentityReason, e.UserAct, e.IdentityTokenType)
 	if err != nil {
 		return fmt.Errorf("analytics: insert event: %w", err)
 	}
@@ -635,8 +644,8 @@ func (s *SQLiteStore) StoreEvent(e Event) error {
 // insertColumns is the shared column list + placeholder tuple for an events
 // INSERT, used by both StoreEvent and StoreEventsBatch so the two paths can
 // never drift.
-const insertColumns = `(ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason, tool, reason, cost_usd, provider, compliance, data_classes, dlp_action, dlp_rule, dlp_partial, dlp_encoded, latency_ms, swapped_refs, evidence, addr_class, user_sub, user_email, user_groups, user_groups_truncated, user_sid, identity_status, identity_reason)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+const insertColumns = `(ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason, tool, reason, cost_usd, provider, compliance, data_classes, dlp_action, dlp_rule, dlp_partial, dlp_encoded, latency_ms, swapped_refs, evidence, addr_class, user_sub, user_email, user_groups, user_groups_truncated, user_sid, identity_status, identity_reason, user_act, identity_token_type)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 // StoreEventsBatch inserts every event in a single transaction — one fsync for
 // the whole batch instead of one per event — setting any zero timestamp to now,
@@ -675,7 +684,7 @@ func (s *SQLiteStore) StoreEventsBatch(evs []Event) error {
 			e.LatencyMs, encodeSwappedRefs(e.SwappedRefs), encodeEvidence(e.Evidence),
 			e.AddrClass,
 			e.UserSub, e.UserEmail, EncodeGroups(e.UserGroups), boolToInt(e.UserGroupsTruncated),
-			e.UserSID, e.IdentityStatus, e.IdentityReason); err != nil {
+			e.UserSID, e.IdentityStatus, e.IdentityReason, e.UserAct, e.IdentityTokenType); err != nil {
 			_ = tx.Rollback()
 			return fmt.Errorf("analytics: insert batch event: %w", err)
 		}
@@ -703,7 +712,7 @@ func (s *SQLiteStore) Prune() error {
 
 // GetEvents returns events matching filter, newest first.
 func (s *SQLiteStore) GetEvents(filter EventFilter) ([]Event, error) {
-	q := `SELECT ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason, tool, reason, cost_usd, provider, compliance, data_classes, dlp_action, dlp_rule, dlp_partial, dlp_encoded, latency_ms, swapped_refs, evidence, addr_class, user_sub, user_email, user_groups, user_groups_truncated, user_sid, identity_status, identity_reason
+	q := `SELECT ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason, tool, reason, cost_usd, provider, compliance, data_classes, dlp_action, dlp_rule, dlp_partial, dlp_encoded, latency_ms, swapped_refs, evidence, addr_class, user_sub, user_email, user_groups, user_groups_truncated, user_sid, identity_status, identity_reason, user_act, identity_token_type
           FROM events WHERE 1=1`
 	var args []any
 	if filter.Domain != "" {
@@ -761,7 +770,7 @@ func (s *SQLiteStore) GetEvents(filter EventFilter) ([]Event, error) {
 			&e.CostUSD, &e.Provider, &compliance,
 			&dataClasses, &e.DLPAction, &e.DLPRule, &dlpPartial, &dlpEncoded,
 			&e.LatencyMs, &swappedRefs, &evidence, &e.AddrClass,
-			&e.UserSub, &e.UserEmail, &userGroups, &groupsTrunc, &e.UserSID, &e.IdentityStatus, &e.IdentityReason); err != nil {
+			&e.UserSub, &e.UserEmail, &userGroups, &groupsTrunc, &e.UserSID, &e.IdentityStatus, &e.IdentityReason, &e.UserAct, &e.IdentityTokenType); err != nil {
 			return nil, fmt.Errorf("analytics: scan: %w", err)
 		}
 		e.Compliance = decodeCompliance(compliance)
@@ -792,7 +801,7 @@ func (s *SQLiteStore) count() (int, error) {
 
 // GetOldestEventIDs returns the IDs and events of the oldest N events.
 func (s *SQLiteStore) GetOldestEventIDs(limit int) ([]int64, []Event, error) {
-	const q = `SELECT id, ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason, tool, reason, cost_usd, provider, compliance, data_classes, dlp_action, dlp_rule, dlp_partial, dlp_encoded, latency_ms, swapped_refs, evidence, addr_class, user_sub, user_email, user_groups, user_groups_truncated, user_sid, identity_status, identity_reason
+	const q = `SELECT id, ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason, tool, reason, cost_usd, provider, compliance, data_classes, dlp_action, dlp_rule, dlp_partial, dlp_encoded, latency_ms, swapped_refs, evidence, addr_class, user_sub, user_email, user_groups, user_groups_truncated, user_sid, identity_status, identity_reason, user_act, identity_token_type
 	            FROM events ORDER BY id ASC LIMIT ?`
 	rows, err := s.db.Query(q, limit)
 	if err != nil {
@@ -821,7 +830,7 @@ func (s *SQLiteStore) GetOldestEventIDs(limit int) ([]int64, []Event, error) {
 			&e.CostUSD, &e.Provider, &compliance,
 			&dataClasses, &e.DLPAction, &e.DLPRule, &dlpPartial, &dlpEncoded,
 			&e.LatencyMs, &swappedRefs, &evidence, &e.AddrClass,
-			&e.UserSub, &e.UserEmail, &userGroups, &groupsTrunc, &e.UserSID, &e.IdentityStatus, &e.IdentityReason); err != nil {
+			&e.UserSub, &e.UserEmail, &userGroups, &groupsTrunc, &e.UserSID, &e.IdentityStatus, &e.IdentityReason, &e.UserAct, &e.IdentityTokenType); err != nil {
 			return nil, nil, fmt.Errorf("analytics: scan oldest IDs: %w", err)
 		}
 		e.Compliance = decodeCompliance(compliance)

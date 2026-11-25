@@ -31,7 +31,7 @@ import (
 // never printed.
 
 func wardenTokenVerifyOpts() []harness.Option {
-	return tokenServiceOpts(harness.WithBundles(controlplane.BundlesOffer), harness.WithBundlePins())
+	return tokenServiceOpts(harness.WithBundles(controlplane.BundlesOffer), harness.WithBundlePins(), harness.WithWorkerAgent("bound-agent"))
 }
 
 // wardenTokenLegacyOpts is the same stack with workers that do not pin bundle

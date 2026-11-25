@@ -69,7 +69,7 @@ func TestGroupsNormalize(t *testing.T) {
 
 func TestReasonsBounded(t *testing.T) {
 	rs := identity.Reasons()
-	if len(rs) != 13 {
+	if len(rs) != 17 {
 		t.Fatalf("len = %d", len(rs))
 	}
 	seen := map[identity.Reason]bool{}

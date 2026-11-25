@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -477,5 +478,61 @@ func TestStaticTokenAuthorizer(t *testing.T) {
 		if _, st := auth(mk(bad)); st != http.StatusUnauthorized {
 			t.Errorf("Authorization %q: status = %d, want 401", bad, st)
 		}
+	}
+}
+
+// TestHTTPRemoteStoreNoBearerWithCert (W-P2-WBND-05): a store built for the
+// certificate client (no token) sends no Authorization header from SendBatch or
+// SendMCP, also after the control plane answers 401; a store with a token still
+// sends its bearer (a separate aggregator).
+func TestHTTPRemoteStoreNoBearerWithCert(t *testing.T) {
+	var (
+		mu     sync.Mutex
+		auths  []string
+		status = http.StatusNoContent
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		auths = append(auths, r.Header.Get("Authorization"))
+		code := status
+		mu.Unlock()
+		w.WriteHeader(code)
+	}))
+	defer srv.Close()
+	send := func(s *HTTPRemoteStore) (error, error) {
+		return s.SendBatch([]Event{{Timestamp: time.Now(), Domain: "a.example", Port: 443, Decision: "allow"}}), s.SendMCP(MCPSnapshot{})
+	}
+
+	certStore, err := NewHTTPRemoteStore(srv.URL, "", "worker-1", srv.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e1, e2 := send(certStore); e1 != nil || e2 != nil {
+		t.Fatalf("send with a certificate: %v, %v", e1, e2)
+	}
+	mu.Lock()
+	status = http.StatusUnauthorized
+	mu.Unlock()
+	if e1, e2 := send(certStore); e1 == nil || e2 == nil {
+		t.Errorf("a 401 was not reported: %v, %v", e1, e2)
+	}
+	mu.Lock()
+	n := len(auths)
+	for i, a := range auths {
+		if a != "" {
+			t.Errorf("request %d carried Authorization %q without a token", i, a)
+		}
+	}
+	mu.Unlock()
+	if n != 4 {
+		t.Fatalf("saw %d requests, want 4", n)
+	}
+
+	bearerStore, _ := NewHTTPRemoteStore(srv.URL, "agg-token", "worker-1", srv.Client())
+	_, _ = send(bearerStore)
+	mu.Lock()
+	defer mu.Unlock()
+	if got := auths[n:]; len(got) != 2 || got[0] != "Bearer agg-token" || got[1] != "Bearer agg-token" {
+		t.Errorf("aggregator bearer = %v", got)
 	}
 }

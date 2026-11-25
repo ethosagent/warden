@@ -55,6 +55,10 @@ type SettingsApplier struct {
 	// Secret cache rebuild inputs (fetcher + placeholders are LOCAL).
 	secretFetcher secrets.Fetcher
 	placeholders  []string
+	// secretsUnavailable is set for a worker booted from the bundle cache with
+	// no AWS credentials: a TTL rebuild then builds another unhealthy cache, so
+	// secret resolution keeps failing closed until a restart.
+	secretsUnavailable bool
 
 	// pol is the worker's LOCAL boot policy (observability fallback + judge agents
 	// come from settings, but the pending-restart comparison uses local fallback).
@@ -236,7 +240,15 @@ func (a *SettingsApplier) applyRest(settings *config.SettingsWire, boot bool) {
 	if settings != nil && settings.CacheTTLSeconds != nil {
 		newTTL := time.Duration(*settings.CacheTTLSeconds) * time.Second
 		if newTTL != a.liveCacheTTL {
-			newCache, cErr := secrets.NewCache(a.secretFetcher, newTTL, a.placeholders)
+			var newCache *secrets.Cache
+			var cErr error
+			if a.secretsUnavailable {
+				// No credentials: stay unhealthy, never a prefetch that would
+				// look healthy over a fetcher that fails every lookup.
+				newCache = secrets.NewUnhealthyCache(a.secretFetcher, newTTL, a.placeholders)
+			} else {
+				newCache, cErr = secrets.NewCache(a.secretFetcher, newTTL, a.placeholders)
+			}
 			if cErr != nil {
 				// Fail-safe: a rebuild error (e.g. an env var transiently unset
 				// at prefetch) must NOT drop a working provider. Keep the current

@@ -352,6 +352,9 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		controlPlane *config.RemoteProvider
 		wcert        *workerCert    // nil unless controlPlane.enrollment or clientCert is set
 		remotePolicy *config.Policy // last-known-good remote allow/deny, applied to the evaluator below
+		// bootedFromCache is true when the policy came from the bundle cache
+		// (no credentials sidecar).
+		bootedFromCache bool
 	)
 	if managed {
 		token := os.Getenv(pol.ControlPlane.TokenEnv)
@@ -397,8 +400,44 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		// Shutdown hygiene: drop the pooled keep-alive conns when Run returns, so
 		// a hosted worker leaves no open connections to the control plane.
 		defer rp.CloseIdleConnections()
+		// Opt-in last-known-good cache (stateDir + pins + bundleCacheMaxAge):
+		// each verified bundle is persisted, and used below only when the first
+		// pull fails. A cache that cannot be set up is logged and skipped; the
+		// worker then behaves as without one.
+		cacheOn := pol.ControlPlane.BundleCacheEnabled()
+		if cacheOn {
+			if cErr := rp.SetBundleCache(pol.ControlPlane.StateDir, pol.ControlPlane.BundleCacheMaxAge); cErr != nil {
+				logger.Error("bundle cache disabled: cannot prepare the state directory", "error", cErr)
+				cacheOn = false
+			}
+		}
+		if cacheOn {
+			// A verifiable cache is the rollback floor of the boot pull too.
+			rp.SeedCacheFloor()
+		}
 		if pullErr := rp.Pull(); pullErr != nil {
-			logger.Warn("control plane unreachable at boot; starting FAIL-CLOSED (deny all) until policy arrives", "error", pullErr)
+			fromCache := false
+			cacheNote := "off"
+			if cacheOn {
+				// Boot only: nothing else touches the provider's snapshot yet.
+				switch _, lErr := rp.LoadCache(); {
+				case lErr == nil:
+					fromCache = true
+				case errors.Is(lErr, config.ErrNoBundleCache):
+					cacheNote = "empty"
+				default:
+					cacheNote = lErr.Error()
+				}
+			}
+			if fromCache {
+				bootedFromCache = true
+				logger.Warn("control plane unreachable or refused at boot; enforcing the cached last-known-good signed bundle (the credential sidecar is not cached: the aws secret backend uses worker env or IAM credentials)", "error", pullErr)
+				if remote, gErr := rp.GetPolicy(); gErr == nil {
+					remotePolicy = &remote
+				}
+			} else {
+				logger.Warn("control plane unreachable at boot; starting FAIL-CLOSED (deny all) until policy arrives", "error", pullErr, "bundleCache", cacheNote)
+			}
 		} else if remote, gErr := rp.GetPolicy(); gErr == nil {
 			remotePolicy = &remote
 			logger.Info("control plane policy applied", "endpoint", pol.ControlPlane.Endpoint)
@@ -446,7 +485,17 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// mutating the loaded policy.
 	effectivePol := pol
 	effectivePol.SecretStore = secretStoreCfg
+	secretsUnavailable := false
 	secretFetcher, secretStore, err := newSecretFetcher(effectivePol, mapping)
+	if err != nil && bootedFromCache && secretStoreCfg.ResolvedBackend() == config.SecretBackendAWS {
+		// The cached bundle has no credentials sidecar and the worker has no
+		// env or IAM credentials either. Crash-looping would not enforce the
+		// cached policy, so keep it: secrets stay unresolvable (every Fetch
+		// fails) until a restart with the control plane reachable.
+		logger.Error("running from the bundle cache without AWS credentials: secret resolution fails closed until a restart with the control plane reachable", "error", err)
+		secretFetcher, secretStore, err = noCredentialsFetcher{}, nil, nil
+		secretsUnavailable = true
+	}
 	if err != nil {
 		return err
 	}
@@ -454,8 +503,11 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// for echo/aws. Both feed the dashboard's read-only secretstore tab below.
 	secretStoreBackend := secretStoreCfg.ResolvedBackend()
 	liveCacheTTL := time.Duration(pol.CacheTTLSeconds) * time.Second
-	secretProvider, err := secrets.NewCache(secretFetcher, liveCacheTTL, placeholders)
-	if err != nil {
+	var secretProvider *secrets.Cache
+	if secretsUnavailable {
+		// No prefetch (it would fail startup): every secret lookup hard-fails.
+		secretProvider = secrets.NewUnhealthyCache(secretFetcher, liveCacheTTL, placeholders)
+	} else if secretProvider, err = secrets.NewCache(secretFetcher, liveCacheTTL, placeholders); err != nil {
 		return err
 	}
 	secretProvider.SetReservedKeyLog(secrets.NewReservedKeyLog(logger, nil))
@@ -866,6 +918,8 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	idWiring.now = clk.Now
 	idWiring.scoped = func() int { return countScoped(evaluator.CurrentPolicy()) }
 	idWiring.apply(pol.Identity, pol.Agents)
+	logger.Info("worker bound to agent", "agent", agentID, "source", agentIDSource(p.AgentID, pol.Central.AgentID),
+		"identityMode", pxy.IdentityModeName())
 	// Warden token keys from the bundle verified at boot (nothing to install
 	// without pins or a first verified bundle). Boot is single-goroutine: the
 	// apply loops start below.
@@ -1099,6 +1153,8 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 			mcpClosed:        &mcpClosed,
 			liveCompliance:   liveCompliance,
 			liveCacheTTL:     liveCacheTTL,
+			// Cache boot without AWS credentials: a TTL rebuild stays unhealthy.
+			secretsUnavailable: secretsUnavailable,
 		}
 		// The long-poll swaps the evaluator through gatedEvaluator, so the agent
 		// switch flips (and cuts sessions) BEFORE the new allow policy is live.
@@ -1113,8 +1169,10 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		// (the boot pull set the ETag), so a restarted worker served under its
 		// LOCAL identity, agents, judge, DLP, compliance, log level and cache
 		// TTL until some unrelated policy change: fail-open for challenge mode.
-		// No boot policy (CP down at boot) means no settings either; the first
-		// successful long-poll then reports a change and applies both.
+		// A cache boot (#257) set remotePolicy and the cached settings, so it is
+		// applied here the same way. No boot policy (CP down, no usable cache)
+		// means no settings either; the first successful long-poll then
+		// reports a change and applies both.
 		if remotePolicy != nil {
 			applier.ApplyBoot()
 		}
@@ -1176,6 +1234,14 @@ func resolveSecretStore(distributed *config.SettingsWire, local config.Policy) c
 		return config.SecretStoreConfigFromSettings(distributed.Secrets)
 	}
 	return local.SecretStore
+}
+
+// noCredentialsFetcher fails every fetch: the aws secret backend of a worker
+// running from the bundle cache that has no AWS credentials of its own.
+type noCredentialsFetcher struct{}
+
+func (noCredentialsFetcher) Fetch(string) (string, error) {
+	return "", errors.New("secrets: no AWS credentials while running from the bundle cache")
 }
 
 // newProxy is a test seam so tests can inspect the proxy.Config the worker

@@ -585,6 +585,7 @@ func New(cfg Config) (*Proxy, error) {
 		return nil, err
 	}
 	p := &Proxy{cfg: cfg, scopes: scopes, sessions: newSessionRegistry()}
+	p.sessions.blocked, p.sessions.onCut = p.claimsBlocked, p.finishBlockedCut
 	// Seed the swappable gateway from the configured one so an unmanaged worker's
 	// behavior is unchanged; a managed worker's long-poll apply loop replaces it.
 	// cfg.MCP may be an untyped-nil interface (MCP disabled) — wrapped in the

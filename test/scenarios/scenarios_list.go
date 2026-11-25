@@ -440,15 +440,28 @@ var All = slices.Concat(
 		// issuer are refused; a legacy-wire worker has no keys. In-process only.
 		{Name: "warden_token_verify", Opts: wardenTokenVerifyOpts(), Run: wardenTokenVerify},
 		{Name: "warden_token_legacy_wire", Opts: wardenTokenLegacyOpts(), Run: wardenTokenLegacyWire},
+		// Agent binding of Warden tokens (W-P2-WBND-02): a token for the worker's
+		// own agent is accepted, another agent's token and a rotated-away key are
+		// refused (also on a tunnel already open), and a disabled agent is refused
+		// on the next request of an open tunnel. In-process only.
+		{Name: "warden_agent_binding", Opts: wardenAgentBindingOpts(), Run: wardenAgentBinding},
+		{Name: "warden_agent_binding_challenge", Opts: wardenAgentBindingChallengeOpts(), Run: wardenAgentBindingChallenge},
+		{Name: "warden_agent_binding_disabled", Opts: wardenAgentBindingOpts(), Run: wardenAgentBindingDisabled},
 		// The boot pull's identity settings are in force from the first request
 		// after a restart (identity block and this agent's agents entry), with
 		// the boot bundle's token keys. In-process only (worker restart).
 		{Name: "identity_boot_distributed_mode", Opts: identityBootOpts(), Run: identityBootDistributedMode},
 		{Name: "identity_boot_distributed_agent", Opts: identityBootOpts(), Run: identityBootDistributedAgent},
+		{Name: "identity_boot_from_cache", Opts: identityBootCacheOpts(), Run: identityBootFromCache},
 		// Bundle state in the fleet view and the worker's metrics (W-P2-SBND-05):
 		// a pinned worker shows its bundle seq and pins and is not behind; a
 		// tampered bundle shows as a rejection reason with the seq unchanged.
 		{Name: "bundles_pinned_worker_fleet_state", Opts: tamperedOpts(), Run: pinnedWorkerFleetState},
+		// Last-known-good bundle cache (W-P2-SBND-06): a pinned worker restarted
+		// with the control plane down enforces its cached bundle; a tampered
+		// cache file leaves it fail-closed. In-process only.
+		{Name: "bundles_cache_boots_from_cache", Opts: bundleCacheOpts(), Run: bundleCacheBootsFromCache},
+		{Name: "bundles_cache_tampered_fails_closed", Opts: bundleCacheOpts(), Run: bundleCacheTamperedFailsClosed},
 		// Warden credentials in agent egress (W-P2-APIK-06): a wak_ key or wwt_
 		// token in a request body is flagged as credentials only with
 		// dlp.wardenTokens on, and blocked only in enforce mode with a rule.

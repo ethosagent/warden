@@ -116,6 +116,8 @@ One object per line. `ts` is the worker's wall clock at event time. "Required" m
 | `user.groups` | array | no | Group claims, capped at 64 entries; only when `status` is `valid`. |
 | `user.groups_truncated` | boolean | no | True when `groups` was capped here or by the verifier. |
 | `user.sid` | string | no | Session id claim; only when `status` is `valid`. |
+| `user.act` | string | no | Agent the Warden token was minted for (`act.sub`); only when `status` is `valid` and the token is a Warden token. |
+| `user.token_type` | string | no | Kind of token behind the identity, `warden` or `idp`; only when `status` is `valid`. Never the token. |
 | `truncated` | boolean | no | True when optional fields were dropped to keep the line under 16 KiB. |
 
 Example (an allow with a verified user, and a deny; `query: keys` is on):

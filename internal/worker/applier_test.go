@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"errors"
 	"io"
 	"log/slog"
 	"runtime"
@@ -360,4 +361,30 @@ func TestApplier_ApplyBoot(t *testing.T) {
 			}
 		}
 	})
+}
+
+// failingFetcher fails every fetch and counts them, like the no-credentials
+// fetcher of a cache boot.
+type failingFetcher struct{ calls int }
+
+func (f *failingFetcher) Fetch(string) (string, error) {
+	f.calls++
+	return "", errors.New("no credentials")
+}
+
+// TestApplier_CacheTTLSecretsUnavailable: on a worker booted from the bundle
+// cache with no AWS credentials, a distributed TTL change (the boot apply
+// included) builds another unhealthy cache: no prefetch, nothing resolved.
+func TestApplier_CacheTTLSecretsUnavailable(t *testing.T) {
+	a, fake, _ := newTestApplier(t)
+	f := &failingFetcher{}
+	a.secretFetcher, a.placeholders, a.secretsUnavailable = f, []string{"OPENAI_KEY"}, true
+	fake.settings = &config.SettingsWire{CacheTTLSeconds: intPtr(7200)}
+	a.ApplyBoot()
+	if a.liveCacheTTL != 7200*time.Second {
+		t.Errorf("liveCacheTTL = %v, want 7200s", a.liveCacheTTL)
+	}
+	if f.calls != 0 {
+		t.Errorf("%d fetches, want 0: the rebuilt cache must stay unhealthy, not prefetch", f.calls)
+	}
 }
