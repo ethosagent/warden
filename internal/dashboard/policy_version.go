@@ -243,6 +243,11 @@ func writeWriterError(w http.ResponseWriter, err error) {
 		writeJSONStatus(w, http.StatusForbidden, roleRequiredResponse{Error: "role_required", Need: re.Need, Fields: re.Fields})
 		return
 	}
+	var wl *WorkersLackCapabilityError
+	if errors.As(err, &wl) {
+		writeJSONStatus(w, http.StatusConflict, workersLackResponse{Error: "workers_lack_capability", Workers: append([]string{}, wl.Workers...)})
+		return
+	}
 	var ce *ConflictError
 	if errors.As(err, &ce) {
 		writeJSONStatus(w, http.StatusConflict, conflictResponse{Error: "policy_conflict", Head: ce.Head, Author: ce.Author})

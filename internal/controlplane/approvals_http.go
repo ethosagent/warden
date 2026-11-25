@@ -84,12 +84,15 @@ func (a changeDraftAPI) changeErr(ctx context.Context, err error) error {
 	var ce *dashboard.ChangeError
 	var rr *approvals.RoleRequiredError
 	var ip *dashboard.InvalidPolicyError
+	var wl *dashboard.WorkersLackCapabilityError
 	fail := func(status int, code string, f map[string]any) error {
 		return &dashboard.ChangeError{Status: status, Code: code, Fields: f, Err: err}
 	}
 	switch {
 	case errors.As(err, &ce):
 		return err
+	case errors.As(err, &wl):
+		return fail(http.StatusConflict, "workers_lack_capability", map[string]any{"workers": wl.Workers})
 	case errors.Is(err, approvals.ErrNotFound):
 		return fail(http.StatusNotFound, "not_found", nil)
 	case errors.Is(err, errNotAuthor):
