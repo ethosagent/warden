@@ -292,6 +292,9 @@ func TestHarness_RunnerIsNotVacuous(t *testing.T) {
 		{"claims a reason it does not check", Case{Name: "x", Path: PathWorker, Attack: deny, WantStatus: http.StatusProxyAuthRequired, Covers: []string{CoverIdentity("bad_signature")}}, "covers identity.reason:bad_signature but WantReason"},
 		{"claims a reason on the wrong path", Case{Name: "x", Path: PathCPRoute, Attack: deny, WantStatus: http.StatusProxyAuthRequired, WantReason: "bad_signature", Covers: []string{CoverIdentity("bad_signature")}}, "but Path is cp-route"},
 		{"no status pinned", Case{Name: "x", Path: PathWorker, Attack: deny}, "WantStatus is not set"},
+		{"unverified refusal without a log line", Case{Name: "x", Path: PathToken, Attack: func(tb testing.TB, s *Stack) Observed { return Observed{Status: 401} }, WantStatus: 401, Unverified: true, WantReason: "agent_disabled", WantLog: "token_exchange_denied"}, "no log line written during the case carries both"},
+		{"unverified refusal without a reason", Case{Name: "x", Path: PathToken, Attack: func(tb testing.TB, s *Stack) Observed { return Observed{Status: 401} }, WantStatus: 401, Unverified: true, WantLog: "token_exchange_denied"}, "Unverified needs Path token and a WantReason"},
+		{"unverified refusal on the wrong path", Case{Name: "x", Path: PathWorker, Attack: deny, WantStatus: http.StatusProxyAuthRequired, Unverified: true, WantReason: "agent_disabled", WantLog: "x"}, "Unverified needs Path token"},
 		{"token row missing", Case{Name: "x", Path: PathToken, Attack: func(tb testing.TB, s *Stack) Observed { return Observed{Status: 400} }, WantStatus: 400, WantResult: "denied", WantReason: "replay"}, "new token_events rows"},
 	} {
 		rec := &recordingTB{TB: t}

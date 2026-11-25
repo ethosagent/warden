@@ -53,12 +53,6 @@ type Case struct {
 	// case's Covers or in pending.go.
 	Covers []string
 
-	// Setup, when set, runs before the case's assertion sources are read: it
-	// builds the state the attack needs (a held tunnel, a prepared token) and
-	// keeps it with Stack.Put, so a case stays plain package-level data and the
-	// hits and events it makes do not count against the attack.
-	Setup func(t testing.TB, s *Stack)
-
 	// Attack performs the attack and returns what the attacker saw.
 	Attack func(t testing.TB, s *Stack) Observed
 
@@ -79,12 +73,19 @@ type Case struct {
 	// carry outcome WantResult and reason WantReason. On a bundle path,
 	// warden_bundle_rejected_total{reason=WantReason} must rise by one.
 	WantResult, WantReason string
-	// Unauthenticated marks a token-path refusal of a caller whose client
-	// assertion did not authenticate (a disabled agent is one): the service
-	// writes no token_events row for it, so the case asserts that none is
-	// written and reads WantReason from the rate-limited
-	// token_exchange_unauthenticated warning instead. WantResult stays empty.
-	Unauthenticated bool
+	// WantTokenType, when set, pins the token_type label of the worker's
+	// warden_identity_verify_total sample (idp, warden or none).
+	WantTokenType string
+	// Unverified marks a token-path case whose client assertion never
+	// verified: the CP writes no token_events row for it (only a verified agent
+	// is recorded), the case asserts that no row appears, and WantReason is the
+	// closed tokensvc reason the refusal carries, which the case pins through
+	// WantLog (the token_exchange_denied debug line the CP logs for it).
+	Unverified bool
+	// Setup runs before the case's before-snapshot: state the attack needs
+	// that must not count as the attack's own effect (the first, accepted use
+	// of an assertion a replay case then resends).
+	Setup func(t testing.TB, s *Stack)
 	// WantDeny, when set, is the Reason of a new deny event on the worker.
 	WantDeny string
 	// WantAudit, when set, is the action of exactly one new admin audit row.
@@ -201,22 +202,25 @@ func (s *Stack) runCase(t testing.TB, c Case) {
 			}
 		}
 	case PathToken:
-		if c.Unauthenticated {
-			if rows := after.tokenEvents[before.tokenEventCount:]; len(rows) != 0 {
-				t.Errorf("new token_events rows = %+v, want none for a caller that did not authenticate", rows)
-			}
-			found := false
-			for _, line := range strings.Split(after.logs[before.logLen:], "\n") {
-				if strings.Contains(line, "token_exchange_unauthenticated") && strings.Contains(line, `"reason":"`+c.WantReason+`"`) {
-					found = true
-				}
-			}
-			if !found {
-				t.Errorf("the logs written during the case carry no token_exchange_unauthenticated warning with reason %q", c.WantReason)
-			}
-		} else if c.WantResult != "" || c.WantReason != "" {
+		if c.WantResult != "" || c.WantReason != "" || c.Unverified {
 			rows := after.tokenEvents[before.tokenEventCount:]
-			if len(rows) != 1 || rows[0].Outcome != c.WantResult || rows[0].Reason != c.WantReason {
+			if c.Unverified {
+				if len(rows) != 0 {
+					t.Errorf("new token_events rows = %+v, want none (the client assertion did not verify)", rows)
+				}
+				if c.WantLog == "" {
+					t.Errorf("an Unverified case must pin its reason through WantLog")
+				}
+				found := false
+				for _, line := range strings.Split(after.logs[before.logLen:], "\n") {
+					if strings.Contains(line, c.WantLog) && strings.Contains(line, `"reason":"`+c.WantReason+`"`) {
+						found = true
+					}
+				}
+				if !found {
+					t.Errorf("no log line written during the case carries both %q and reason %q", c.WantLog, c.WantReason)
+				}
+			} else if len(rows) != 1 || rows[0].Outcome != c.WantResult || rows[0].Reason != c.WantReason {
 				t.Errorf("new token_events rows = %+v, want exactly one with outcome %q reason %q", rows, c.WantResult, c.WantReason)
 			}
 		}
@@ -289,12 +293,12 @@ func (s *Stack) snapshot(t testing.TB, w *Worker, c Case) snap {
 		return out
 	}
 	if c.Path == PathWorker && (c.WantResult != "" || c.WantReason != "") {
-		sn.identity = s.Metric(t, w, "warden_identity_verify_total", labels(map[string]string{"result": c.WantResult, "reason": c.WantReason}))
+		sn.identity = s.Metric(t, w, "warden_identity_verify_total", labels(map[string]string{"result": c.WantResult, "reason": c.WantReason, "token_type": c.WantTokenType}))
 	}
 	if c.Path == PathBundle && c.WantReason != "" {
 		sn.bundleRejected = s.Metric(t, w, "warden_bundle_rejected_total", labels(map[string]string{"reason": c.WantReason}))
 	}
-	if c.Path == PathToken && (c.WantResult != "" || c.WantReason != "") {
+	if c.Path == PathToken && (c.WantResult != "" || c.WantReason != "" || c.Unverified) {
 		sn.tokenEvents = s.TokenEvents(t)
 		sn.tokenEventCount = len(sn.tokenEvents)
 	}
@@ -332,14 +336,24 @@ func validateCase(c Case) []string {
 	if c.WantStatus == 0 {
 		bad = append(bad, "WantStatus is not set")
 	}
-	if c.Unauthenticated && (c.WantReason == "" || c.Path != PathToken) {
-		bad = append(bad, "Unauthenticated needs Path token and a WantReason to read from the warning")
+	if c.Unverified && (c.WantReason == "" || c.Path != PathToken) {
+		bad = append(bad, "Unverified needs Path token and a WantReason to read from the log line")
 	}
 	prefixes := map[string]Path{"identity.reason:": PathWorker, "token.reason:": PathToken, "bundle.reason:": PathBundle}
 	for _, cov := range c.Covers {
 		for prefix, path := range prefixes {
 			reason, ok := strings.CutPrefix(cov, prefix)
 			if !ok {
+				continue
+			}
+			// wrong_nonce is the one identity reason a worker can never see (a
+			// proxied token carries no nonce to check): it is covered by the
+			// console login, which is a CP route and pins the refusal in the
+			// logs.
+			if cov == CoverIdentity("wrong_nonce") && c.Path == PathCPRoute {
+				if c.WantReason != reason || c.WantLog == "" {
+					bad = append(bad, "covers "+cov+" on the console login but WantReason is "+strconv.Quote(c.WantReason)+" or WantLog is empty")
+				}
 				continue
 			}
 			if c.Path != path {

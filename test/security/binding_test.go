@@ -139,9 +139,9 @@ func bindingStack(t *testing.T, opts StackOptions) (*Stack, *Agent, *Agent) {
 	return s, a, b
 }
 
-// workerControl is the worker category's positive control: each agent's own
+// bindingWorkerControl is the worker category's positive control: each agent's own
 // token is accepted on its own worker over every transport.
-func workerControl(s *Stack) func(t *testing.T) {
+func bindingWorkerControl(s *Stack) func(t *testing.T) {
 	return func(t *testing.T) {
 		for _, p := range []struct{ agent, key string }{{"agent-a", keyTokA}, {"agent-b", keyTokB}} {
 			for _, tr := range Transports {
@@ -160,7 +160,7 @@ func workerControl(s *Stack) func(t *testing.T) {
 func TestBinding(t *testing.T) {
 	t.Run("agent_mismatch", func(t *testing.T) {
 		s, _, _ := bindingStack(t, StackOptions{})
-		s.PositiveControl(t, "worker", workerControl(s))
+		s.PositiveControl(t, "worker", bindingWorkerControl(s))
 		Run(t, s, "worker", crossAgentCases)
 	})
 	t.Run("agent_unregistered", func(t *testing.T) {
@@ -171,7 +171,7 @@ func TestBinding(t *testing.T) {
 		s.Eventually("the unbound worker to enforce identity mode challenge", func() bool {
 			return s.probeConnect(unbound) == http.StatusProxyAuthRequired
 		})
-		s.PositiveControl(t, "worker", workerControl(s))
+		s.PositiveControl(t, "worker", bindingWorkerControl(s))
 		Run(t, s, "worker", unboundWorkerCases)
 	})
 	t.Run("cnf_rotated", func(t *testing.T) {
@@ -179,7 +179,7 @@ func TestBinding(t *testing.T) {
 		for _, c := range rotatedKeyCases {
 			c := c
 			s, _, _ := bindingStack(t, StackOptions{})
-			s.PositiveControl(t, "worker", workerControl(s))
+			s.PositiveControl(t, "worker", bindingWorkerControl(s))
 			Run(t, s, "worker", []Case{c})
 		}
 	})
@@ -233,7 +233,7 @@ func TestBinding(t *testing.T) {
 // cnf) lands and the worker verifies it.
 func TestStolenTokenSamePort_KnownGap(t *testing.T) {
 	s, _, _ := bindingStack(t, StackOptions{})
-	s.PositiveControl(t, "worker", workerControl(s))
+	s.PositiveControl(t, "worker", bindingWorkerControl(s))
 	stolen := scratchToken(s, keyTokA)
 	hits := s.Upstream.Hits()
 	for i := 0; i < 2; i++ {

@@ -11,6 +11,8 @@ func allCases() []Case {
 		smokeWorker, smokeToken, smokeRoute,
 		crossAgentCases, unboundWorkerCases, rotatedKeyCases,
 		blockedUserCases, disabledAgentCases, revokedKeyCases, issuanceCases, expiredTokenCases,
+		wardenForgeries, wardenTimeBounds, idpCases, rawDexRefused,
+		exchangeCases, requestRefusals, {replayedJTI()}, forgedNonceCases, signerCases, rateCases,
 	} {
 		out = append(out, group...)
 	}

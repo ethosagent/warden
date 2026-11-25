@@ -88,20 +88,20 @@ var disabledAgentCases = func() []Case {
 		Covers: []string{CoverToken("agent_disabled")},
 		Setup: func(t testing.TB, s *Stack) {
 			// The token endpoint reads the registry on its own tick: wait until
-			// it refuses the agent. Its unauthenticated warning is limited to
-			// one a minute per reason, so move the clock past that window
-			// before the attack is the one asserted.
+			// it refuses the agent. The refusal is read from the CP's debug
+			// token_exchange_denied line (DebugCP), since an assertion that
+			// did not verify leaves no row.
 			s.EventuallyAdvance("the token endpoint to refuse the disabled agent", 100*time.Millisecond, func() bool {
 				a := agentOf(s, keyAgentA)
 				return s.PostToken(t, s.ExchangeForm(a, s.UserToken("probe", []string{"eng"}), nil)).Status != http.StatusOK
 			})
-			s.Clock.Advance(2 * time.Minute)
 		},
-		Attack:          userExchange("user-1", []string{"eng"}, nil),
-		WantStatus:      http.StatusUnauthorized,
-		WantBody:        "invalid_client",
-		WantReason:      "agent_disabled",
-		Unauthenticated: true,
+		Attack:     userExchange("user-1", []string{"eng"}, nil),
+		WantStatus: http.StatusUnauthorized,
+		WantBody:   "invalid_client",
+		WantReason: "agent_disabled",
+		Unverified: true,
+		WantLog:    "token_exchange_denied",
 	})
 }()
 
@@ -181,7 +181,7 @@ var issuanceCases = []Case{{
 // control.
 func lifetimeStack(t *testing.T) *Stack {
 	t.Helper()
-	s := StartStack(t, StackOptions{})
+	s := StartStack(t, StackOptions{DebugCP: true})
 	a := agentSetup(t, s, "agent-a")
 	b := agentSetup(t, s, "agent-b")
 	s.Put(keyAgentA, a)

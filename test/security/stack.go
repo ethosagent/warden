@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -101,6 +102,18 @@ type StackOptions struct {
 	// DefaultTokenRate keeps tokenService.rateLimit at the production defaults
 	// instead of the raised harness limit (the rate-limit case needs it).
 	DefaultTokenRate bool
+	// AcceptDexTokens is identity.acceptDexTokens the CP distributes; nil
+	// leaves it unset (true while identity.issuer is set).
+	AcceptDexTokens *bool
+	// ClockSkewSeconds is identity.clockSkewSeconds (0 = the default, 60).
+	ClockSkewSeconds int
+	// AgentModes maps an agent id to its own identity mode (the agents: block
+	// of the CP config), overriding IdentityMode for that agent.
+	AgentModes map[string]string
+	// DebugCP logs the control plane at debug level, which is where the token
+	// endpoint records the reason of a refusal whose client assertion did not
+	// verify (no token_events row exists for it).
+	DebugCP bool
 }
 
 // Stack is one running security stack: a control plane booted through
@@ -429,7 +442,11 @@ func (s *Stack) writeWorkerCA(dir string) (chain string) {
 func (s *Stack) cpConfig(addr, chain string) string {
 	rate := TokenRateDefault
 	var b strings.Builder
-	b.WriteString("logging:\n  level: info\n  format: json\n\npolicy:\n  allowlist:\n    - domain: " + UpstreamHost + "\n")
+	level := "info"
+	if s.opts.DebugCP {
+		level = "debug"
+	}
+	b.WriteString("logging:\n  level: " + level + "\n  format: json\n\npolicy:\n  allowlist:\n    - domain: " + UpstreamHost + "\n")
 	fmt.Fprintf(&b, `
 identity:
   defaultMode: %[1]s
@@ -437,7 +454,7 @@ identity:
   internalIssuerURL: %[2]s
   audience: %[3]s
   allowedAZP: [%[4]s, warden-cli]
-
+%[13]s
 console:
   auth: oidc
   oidc:
@@ -462,7 +479,18 @@ workerCA:
   keySource: file
   keyFile: %[12]s
 `, s.opts.IdentityMode, s.Issuer.Issuer(), IdentityAudience, IdentityAZP, ConsoleClientID, consoleSecretEnv,
-		addr, ConsoleAdminGroup, ConsoleViewerGroup, TrustDomain, chain, filepath.Join(s.root, "worker-ca.key"))
+		addr, ConsoleAdminGroup, ConsoleViewerGroup, TrustDomain, chain, filepath.Join(s.root, "worker-ca.key"), s.identityExtras())
+	if len(s.opts.AgentModes) > 0 {
+		b.WriteString("\nagents:\n")
+		ids := make([]string, 0, len(s.opts.AgentModes))
+		for id := range s.opts.AgentModes {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		for _, id := range ids {
+			fmt.Fprintf(&b, "  - id: %s\n    identity: %s\n", id, s.opts.AgentModes[id])
+		}
+	}
 	if s.opts.EchoSecretStore {
 		// The echo backend mounts /central/secrets (a route-boundary case
 		// proves a worker certificate never opens it) but it also makes every
@@ -472,6 +500,18 @@ workerCA:
 	b.WriteString("\ntokenService:\n  enabled: true\n  issuer: " + TokenIssuer + "\n")
 	if !s.opts.DefaultTokenRate {
 		b.WriteString("  rateLimit:\n    perIP: " + rate + "\n    perAgent: " + rate + "\n    perUser: " + rate + "\n")
+	}
+	return b.String()
+}
+
+// identityExtras renders the optional identity: keys of the options.
+func (s *Stack) identityExtras() string {
+	var b strings.Builder
+	if s.opts.AcceptDexTokens != nil {
+		fmt.Fprintf(&b, "  acceptDexTokens: %t\n", *s.opts.AcceptDexTokens)
+	}
+	if s.opts.ClockSkewSeconds > 0 {
+		fmt.Fprintf(&b, "  clockSkewSeconds: %d\n", s.opts.ClockSkewSeconds)
 	}
 	return b.String()
 }
@@ -658,14 +698,21 @@ func (s *Stack) awaitBundles() {
 // probeConnect sends a credential-less CONNECT and returns its status without
 // sending anything through the tunnel, so a worker that does not enforce
 // identity yet answers 200 and still never reaches the upstream.
-func (s *Stack) probeConnect(w *Worker) int {
+func (s *Stack) probeConnect(w *Worker) int { return s.probeConnectWith(w, "") }
+
+// probeConnectWith is probeConnect carrying a Proxy-Authorization value.
+func (s *Stack) probeConnectWith(w *Worker, proxyAuth string) int {
 	conn, err := net.DialTimeout("tcp", w.ProxyAddr, 5*time.Second)
 	if err != nil {
 		return 0
 	}
 	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
-	if _, err := io.WriteString(conn, "CONNECT "+UpstreamHost+":443 HTTP/1.1\r\nHost: "+UpstreamHost+":443\r\n\r\n"); err != nil {
+	req := "CONNECT " + UpstreamHost + ":443 HTTP/1.1\r\nHost: " + UpstreamHost + ":443\r\n"
+	if proxyAuth != "" {
+		req += "Proxy-Authorization: " + proxyAuth + "\r\n"
+	}
+	if _, err := io.WriteString(conn, req+"\r\n"); err != nil {
 		return 0
 	}
 	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodConnect})
