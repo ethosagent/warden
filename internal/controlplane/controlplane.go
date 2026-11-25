@@ -39,6 +39,7 @@ import (
 	"github.com/ethosagent/warden/internal/integration"
 	"github.com/ethosagent/warden/internal/keys"
 	"github.com/ethosagent/warden/internal/secrets"
+	"github.com/ethosagent/warden/internal/workerca"
 )
 
 // Config configures the control-plane server.
@@ -58,6 +59,18 @@ type Config struct {
 	// store). Nil unless keys.enabled, in which case no key code runs, no table,
 	// key file or goroutine exists, and the control plane behaves as before.
 	Keys *keys.Manager
+	// WorkerCA is the worker intermediate CA (workerCA.enabled). Nil with
+	// WorkerCAEnabled false is the disabled default; nil with WorkerCAEnabled
+	// true is the degraded state (the key backend was unreachable at start): the
+	// retry loop installs the CA with Server.SetWorkerCA once it loads.
+	WorkerCA *workerca.CA
+	// WorkerCAEnabled says workerCA.enabled is true, so a nil WorkerCA means
+	// degraded rather than off.
+	WorkerCAEnabled bool
+	// WorkerCAVerifier pins the worker intermediates for certificate
+	// authentication. It needs no key, so it is set whenever workerCA is
+	// enabled, even while WorkerCA is still degraded.
+	WorkerCAVerifier *workerca.Verifier
 	// AdminAudit is the signed admin audit chain on State. Nil means admin
 	// audit is disabled (console.adminAudit.enabled false, the default).
 	AdminAudit *adminaudit.Store
@@ -203,7 +216,9 @@ const (
 // ConfigEditor seam (writePolicy/writeSettings); the fleet is tracked by the
 // WorkerTracker seam; and central ingest lands in the IngestSink seam.
 type Server struct {
-	cfg      Config
+	cfg Config
+	// workerCA is the live worker CA; nil while disabled or degraded.
+	workerCA atomic.Pointer[workerca.CA]
 	central  analytics.FleetStore
 	registry *WorkerRegistry
 	mcp      *mcpStore
@@ -338,6 +353,7 @@ func New(cfg Config) *Server {
 		detectionConfig: cfg.DetectionConfig,
 		generateLimit:   newSessionLimiter(cfg.Clock, queryGenerateLimit, time.Minute),
 	}
+	s.workerCA.Store(cfg.WorkerCA)
 	// One authenticator for the three worker routes; the policy server was built
 	// with a default one, replaced here by the configured one.
 	s.workerAuth = NewWorkerAuthenticator(WorkerAuthConfig{
@@ -514,6 +530,12 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
+		if s.WorkerCADegraded() {
+			// Still 200: /policy and the rest serve, so liveness holds; the
+			// body tells an operator the worker CA is not issuing.
+			_, _ = w.Write([]byte("degraded: worker_ca key unavailable\n"))
+			return
+		}
 		_, _ = w.Write([]byte("ok\n"))
 	})
 	// Readiness always; the public token JWKS only with keys.enabled (else 404).

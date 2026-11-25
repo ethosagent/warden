@@ -375,6 +375,26 @@ keys:
     prepublish: 1h
     overlap: 48h
 
+# Worker CA (CONTROL PLANE ONLY, read from the operator's --config file, never served to
+# workers). OFF by default: when workerCA.enabled is false nothing is loaded and the control
+# plane behaves exactly as before. When enabled the control plane holds a worker INTERMEDIATE
+# CA that issues short-lived worker client certificates (spiffe://<trustDomain>/warden/worker/<id>).
+# It is a separate trust root from the proxy CA: startup fails if the intermediate has the same
+# key as, or chains to, --ca-cert. Create the root and intermediate with
+#   warden control-plane ca init --out-dir D --trust-domain warden.local --state-dir S
+# (or `ca csr` for an offline root), keep root.key offline, and point certFile at
+# intermediate-chain.pem. The intermediate key lives in the key manager (keys.enabled needed).
+workerCA:
+  enabled: false                  # master switch (default false)
+  trustDomain: ""                 # required when enabled, e.g. warden.local (lowercase DNS name)
+  certFile: ""                    # required when enabled: PEM chain, intermediate first
+  previousCertFile: ""            # previous intermediate chain, trusted while rotating
+  certTTL: 24h                    # issued certificate lifetime (1h to 7d)
+  enrollTokenTTL: 1h              # default enrollment token lifetime
+  enrollTokenMaxTTL: 24h          # longest enrollment token an operator may ask for (max 7d)
+  keySource: keys                 # keys (the key manager, purpose ca; default) | file (development only)
+  keyFile: ""                     # PKCS#8 PEM, mode 0600, outside --state-dir; only with keySource: file
+
 # Echo guard: stops an upstream that copies the request into its response (an echo
 # endpoint, an error quoting the request, a reflected header) from handing the agent
 # the real secret Warden swapped in. It checks every response of a request for the

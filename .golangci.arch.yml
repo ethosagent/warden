@@ -37,6 +37,7 @@ linters:
             - ${base-path}/internal/policybuilder/**
             - ${base-path}/internal/policyeval/**
             - ${base-path}/internal/keys/**
+            - ${base-path}/internal/workerca/**
             - ${base-path}/internal/apikeys/**
             - ${base-path}/internal/policy/**
             - ${base-path}/internal/scan/**
@@ -107,6 +108,7 @@ linters:
             - ${base-path}/internal/policybuilder/**
             - ${base-path}/internal/policyeval/**
             - ${base-path}/internal/keys/**
+            - ${base-path}/internal/workerca/**
             - ${base-path}/internal/apikeys/**
             - '!${base-path}/cmd/**'
             - '!${base-path}/internal/worker/**'
@@ -153,6 +155,7 @@ linters:
             - '!${base-path}/internal/config/**'
             - '!${base-path}/internal/denyreason/**'
             - '!${base-path}/internal/keys/**'
+            - '!${base-path}/internal/workerca/**'
             - '!${base-path}/internal/identity/**'
             - '!**/*_test.go'
           deny:
@@ -205,6 +208,7 @@ linters:
             - '!${base-path}/internal/policybuilder/**'
             - '!${base-path}/internal/policyeval/**'
             - '!${base-path}/internal/keys/**'
+            - '!${base-path}/internal/workerca/**'
             - '!${base-path}/internal/apikeys/**'
             - '!${base-path}/tools/**'
             - '!${base-path}/internal/archtest/**'
