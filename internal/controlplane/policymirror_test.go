@@ -41,7 +41,7 @@ func yamlWire(t *testing.T, path string) policyWire {
 
 func wireJSON(t *testing.T, w policyWire) string {
 	t.Helper()
-	b, err := canonicalBlocksJSON(w)
+	b, err := json.Marshal(w)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -681,5 +681,62 @@ func TestCanonicalBlocksJSON(t *testing.T) {
 	ba := policyWire{Allowlist: []config.AllowlistEntry{b, a}}
 	if enc(ab) == enc(ba) {
 		t.Error("list order does not count")
+	}
+
+	// Settings level: only a null or an empty list is an absence. A false, a
+	// 0, a "" and an empty block are values and stay distinct from absent.
+	zero := 0
+	withSettings := func(st config.SettingsWire) policyWire {
+		return policyWire{Allowlist: []config.AllowlistEntry{a}, Settings: &st}
+	}
+	identity := func(mode string) policyWire {
+		return withSettings(config.SettingsWire{Identity: &config.IdentitySettings{
+			DefaultMode: mode, Issuer: "https://idp.example", Audience: "warden",
+		}})
+	}
+	for name, w := range map[string]policyWire{
+		"empty settings block {}":   withSettings(config.SettingsWire{}),
+		"empty logging block {}":    withSettings(config.SettingsWire{Logging: &config.LoggingSettings{}}),
+		"advisory enabled false":    withSettings(config.SettingsWire{Advisory: &config.ToggleSetting{Enabled: false}}),
+		"cacheTTLSeconds pointer 0": withSettings(config.SettingsWire{CacheTTLSeconds: &zero}),
+		"agent with an empty id":    withSettings(config.SettingsWire{Agents: []config.AgentSettings{{ID: ""}}}),
+		"identity defaultMode off":  identity("off"),
+	} {
+		if enc(w) == enc(base) {
+			t.Errorf("%s: encodes like absent settings: %s", name, enc(w))
+		}
+	}
+	// A pointer to a zero value is not nil, at the same depth.
+	noSettings := enc(withSettings(config.SettingsWire{}))
+	if enc(withSettings(config.SettingsWire{CacheTTLSeconds: &zero})) == noSettings {
+		t.Error("cacheTTLSeconds: a pointer to 0 encodes like nil")
+	}
+	if enc(withSettings(config.SettingsWire{Advisory: &config.ToggleSetting{}})) == noSettings {
+		t.Error("advisory: a pointer to a false toggle encodes like nil")
+	}
+	if enc(identity("challenge")) == enc(identity("off")) {
+		t.Error("an identity defaultMode change does not count")
+	}
+	if enc(identity("challenge")) == enc(identity("")) {
+		t.Error("clearing identity defaultMode does not count")
+	}
+	// An empty settings list is an absence there too.
+	if enc(withSettings(config.SettingsWire{Agents: []config.AgentSettings{}})) != noSettings {
+		t.Error("settings: an empty and an absent agents list differ")
+	}
+
+	// dropEmpty on raw JSON: "", false, 0 and {} members survive.
+	for _, raw := range []string{`{"k":""}`, `{"k":false}`, `{"k":0}`, `{"k":{}}`} {
+		var v any
+		if err := json.Unmarshal([]byte(raw), &v); err != nil {
+			t.Fatal(err)
+		}
+		got, err := json.Marshal(dropEmpty(v))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != raw {
+			t.Errorf("dropEmpty(%s) = %s, want it unchanged", raw, got)
+		}
 	}
 }
