@@ -171,6 +171,12 @@ type Config struct {
 	// roots, byte-identical to before.
 	UpstreamRootCAs *x509.CertPool
 
+	// IdentityClock, when set, is the time source for every identity and session validity
+	// decision (token exp+skew, tunnel lifetime). It does NOT drive leaf-cert
+	// minting, which real TLS clients verify against the wall clock. Assembly-only
+	// (worker.Overrides.Clock): cmd/proxy never sets it; nil keeps time.Now.
+	IdentityClock func() time.Time
+
 	// Inflight, when set, receives one Start per request-scoped handler: from
 	// request-read until the scope's terminal bookkeeping (analytics event,
 	// metric, decision log) is recorded, on every protocol path. The L1
@@ -328,7 +334,9 @@ type Proxy struct {
 	// leafTTL is the injectable leaf validity window (0 = defaultLeafTTL). Both
 	// exist only so white-box tests can drive cert expiry deterministically;
 	// production leaves them zero-valued.
-	now     func() time.Time
+	now func() time.Time
+	// idNow is the validity clock (Config.IdentityClock); nil falls back to clock().
+	idNow   func() time.Time
 	leafTTL time.Duration
 	// preambleTimeout is the injectable CONNECT-preamble read deadline (0 =
 	// connectPreambleTimeout). Like now/leafTTL it exists only so white-box
@@ -663,6 +671,8 @@ func New(cfg Config) (*Proxy, error) {
 			return nil, fmt.Errorf("proxy: CA key does not match CA cert")
 		}
 	}
+
+	p.idNow = cfg.IdentityClock
 
 	// Upstream dialing. An injected Dialer (assembly-only harness seam) replaces
 	// the SSRF-safe dialer wholesale; otherwise production builds exactly what
