@@ -246,6 +246,16 @@ var All = slices.Concat(
 		// Held long-poll (W-P1-WTOK-09): a revoke out of process returns that
 		// token's held /policy with 401 while another token's stays parked.
 		{Name: "worker_token_longpoll_revoke", Opts: workerTokenOpts(), Run: workerTokenLongPollRevoke},
+		// Scoped API keys (W-P2-APIK-02): a key revoked out of process (the
+		// offline CLI path) is refused by the running control plane within one
+		// 2s poll of its Index, with no audit row; a key reaches only the routes
+		// whose scope it holds and never a worker route. In-process only.
+		{Name: "apikey_offline_revoke", Opts: apiKeyOpts(), Run: apiKeyOfflineRevoke},
+		{Name: "apikey_scopes", Opts: apiKeyOpts(), Run: apiKeyScopes},
+		// Scoped API keys (W-P2-APIK-03): a console admin creates a key (the
+		// plaintext once), the key reads, introspects and is refused a write,
+		// then the admin revokes it and its next request is a 401.
+		{Name: "apikey_management", Opts: apiKeyOpts(), Run: apiKeyManagement},
 
 		// Admin audit gate (W-P1-AAUD-05): enabled, the control plane writes the
 		// genesis entry and logs its key_id before serving. In-process only (it
@@ -309,6 +319,17 @@ var All = slices.Concat(
 		// key in place, old retired), and the control plane starts on the new
 		// key and signs with it. In-process only (CP state dir, dir lock).
 		{Name: "admin_audit_key_rotation", Opts: adminAuditOpts(), Run: adminAuditKeyRotation},
+		// Warden credentials in agent egress (W-P2-APIK-06): a wak_ key or wwt_
+		// token in a request body is flagged as credentials only with
+		// dlp.wardenTokens on, and blocked only in enforce mode with a rule.
+		// In-process only (DLP is wired through the harness's local policy).
+		{Name: "warden_token_egress_off", Opts: wardenTokenOpts(config.DLPConfig{Mode: config.DLPModeMonitor}), Run: wardenTokenOff},
+		{Name: "warden_token_egress_monitor", Opts: wardenTokenOpts(config.DLPConfig{Mode: config.DLPModeMonitor, WardenTokens: true}), Run: wardenTokenMonitor},
+		{Name: "warden_token_egress_enforce", Opts: wardenTokenOpts(config.DLPConfig{
+			Mode:         config.DLPModeEnforce,
+			WardenTokens: true,
+			Classes:      map[string]config.DLPClassDefault{"credentials": {Action: config.DLPActionBlock}},
+		}), Run: wardenTokenEnforce},
 	},
 	// Canary across protocols x allow/deny; see canary.go.
 	canaryScenarios(),
