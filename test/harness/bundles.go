@@ -192,14 +192,14 @@ func (h *H) workerCPAddr() string {
 		h.tb.Fatalf("harness: tampering proxy cert: %v", err)
 	}
 	target, _ := url.Parse("https://" + h.ControlPlaneAddr())
-	rp := httputil.NewSingleHostReverseProxy(target)
-	rp.Transport = &http.Transport{TLSClientConfig: &tls.Config{RootCAs: h.proxyCA.pool(), MinVersion: tls.VersionTLS12}}
-	dir := rp.Director
-	rp.Director = func(r *http.Request) {
-		dir(r)
-		if inm := r.Header.Get("If-None-Match"); strings.HasPrefix(inm, `"`+tamperedETagPrefix) {
-			r.Header.Set("If-None-Match", `"`+strings.TrimPrefix(inm, `"`+tamperedETagPrefix))
-		}
+	rp := &httputil.ReverseProxy{
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: h.proxyCA.pool(), MinVersion: tls.VersionTLS12}},
+		Rewrite: func(r *httputil.ProxyRequest) {
+			r.SetURL(target)
+			if inm := r.In.Header.Get("If-None-Match"); strings.HasPrefix(inm, `"`+tamperedETagPrefix) {
+				r.Out.Header.Set("If-None-Match", `"`+strings.TrimPrefix(inm, `"`+tamperedETagPrefix))
+			}
+		},
 	}
 	rp.ModifyResponse = func(resp *http.Response) error {
 		if !tp.on.Load() || resp.StatusCode != http.StatusOK || resp.Header.Get("Content-Type") != BundleMediaType {
