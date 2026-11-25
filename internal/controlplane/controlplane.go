@@ -238,6 +238,8 @@ type Server struct {
 	// secretStore backs the /central/secrets write path. Nil ⇒ the endpoints are
 	// not mounted (env/empty backend, or aws pre-Phase-5).
 	secretStore secrets.SecretStore
+	// reservedLog is the once-a-minute-per-route log of refused cp/ keys.
+	reservedLog *secrets.ReservedKeyLog
 	// detectionConfig is the live typed detection config the dashboard editor reads
 	// and WriteDetection updates. detectionMu guards it (a short read on GET, a write
 	// at the end of WriteDetection) independent of writeMu so a GET never blocks on a
@@ -331,6 +333,7 @@ func New(cfg Config) *Server {
 		policy: newPolicyServer(cfg.PolicyPath, cfg.Token, cfg.Logger, registry),
 		// Write-scoped secret store (nil ⇒ /central/secrets not mounted).
 		secretStore: cfg.SecretStore,
+		reservedLog: secrets.NewReservedKeyLog(cfg.Logger, nil),
 		// Live typed detection config for the dashboard editor + WriteDetection base.
 		detectionConfig: cfg.DetectionConfig,
 		generateLimit:   newSessionLimiter(cfg.Clock, queryGenerateLimit, time.Minute),

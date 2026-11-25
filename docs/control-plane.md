@@ -1577,6 +1577,59 @@ secrets with no row; deleting a key deletes its secret at once.
   }
   ```
 
+### Reserved `cp/` secret namespace
+
+The logical key `cp` and every key under `cp/` are reserved for control-plane
+material (the worker CA keeps its material there). The signing keys and the
+worker CA key live in the separate key store above, which no placeholder can
+reach; reserving `cp/` in the shared secret store is defense in depth, so
+nothing control-plane only can ever sit where a worker or a human route could
+reach it. The rule is unconditional and applies to every backend:
+
+- A worker refuses a `cp/` placeholder with `ErrReservedKey` before it calls the
+  backend, and the request is denied like any placeholder that cannot be
+  resolved.
+- Config validation rejects a `secrets[]` placeholder, or an `auth[]` credential
+  field, that names `cp/`. The error names the entry and the field, never the
+  value.
+- `GET /central/secrets` and `GET /dashboard/api/secretstore` leave `cp/` keys
+  out. `POST` and `DELETE` on a `cp/` key (on `/central/secrets` and on
+  `/dashboard/api/secretstore`) return `403` with `{"error":"reserved_key"}`
+  and never reach the store. The attempt is recorded as a denied admin-audit
+  row that does not name the key.
+- A refused attempt logs `reserved secret key refused` with the route (or
+  `worker-cache`) and the key prefix `cp/` only, at most once a minute per
+  source.
+
+The reserved names are `<secretStore.aws.namePrefix>cp/*` plus the bare key
+`<secretStore.aws.namePrefix>cp`; with the default prefix `warden/` that is
+`warden/cp/*` and `warden/cp-??????` (Secrets Manager appends a six-character
+suffix to a secret ARN). Add an explicit deny to every worker role, using your
+own prefix if you changed it, so it holds even if a later `warden/*` grant is
+widened:
+
+```json
+{
+  "Sid": "NeverTheReservedCpNamespace",
+  "Effect": "Deny",
+  "Action": [
+    "secretsmanager:GetSecretValue",
+    "secretsmanager:PutSecretValue",
+    "secretsmanager:CreateSecret",
+    "secretsmanager:DeleteSecret",
+    "secretsmanager:UpdateSecret"
+  ],
+  "Resource": [
+    "arn:aws:secretsmanager:*:ACCOUNT_ID:secret:warden/cp/*",
+    "arn:aws:secretsmanager:*:ACCOUNT_ID:secret:warden/cp-??????"
+  ]
+}
+```
+
+Upgrade note: rename any existing `cp` or `cp/...` placeholder, `auth[]`
+credential value or stored secret before upgrading. The control plane and the
+workers refuse to load a config that names the reserved namespace.
+
 ## Block list: offline CLI
 
 The user block list lives in `<state-dir>/warden-cp.db`, outside policy

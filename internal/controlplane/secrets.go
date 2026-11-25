@@ -157,6 +157,9 @@ func (s *Server) putSecret(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "key and value are required", http.StatusBadRequest)
 		return
 	}
+	if s.refuseReservedKey(w, r, key) {
+		return
+	}
 	// The audit row names the key, never the value.
 	adminaudit.Annotate(r.Context(), secretRef(key), map[string]string{adminaudit.DetailOp: "put"})
 	if err := s.secretStore.Put(r.Context(), key, body.Value); err != nil {
@@ -184,13 +187,31 @@ func (s *Server) listSecrets(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "secret store error", http.StatusInternalServerError)
 		return
 	}
-	if metas == nil {
-		metas = []secrets.SecretMeta{}
+	// The cp/ namespace is control-plane only: it is never listed.
+	visible := make([]secrets.SecretMeta, 0, len(metas))
+	for _, m := range metas {
+		if !secrets.IsReservedKey(m.Key) {
+			visible = append(visible, m)
+		}
 	}
+	metas = visible
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(metas); err != nil {
 		s.cfg.Logger.Error("control plane secret list encode failed", "error", err)
 	}
+}
+
+// refuseReservedKey answers 403 reserved_key for a key in the control-plane
+// only cp/ namespace and reports whether it did. It runs before the audit
+// annotation and before the store is touched; the refusal is logged by route and
+// key prefix only, at most once a minute per route.
+func (s *Server) refuseReservedKey(w http.ResponseWriter, r *http.Request, key string) bool {
+	if !secrets.IsReservedKey(key) {
+		return false
+	}
+	s.reservedLog.Refused("/central/secrets", key)
+	writeAuthzJSON(w, http.StatusForbidden, map[string]string{"error": "reserved_key"})
+	return true
 }
 
 // secretRef is the admin audit target_ref of a secret key.
@@ -213,6 +234,9 @@ func (s *Server) handleSecretByKey(w http.ResponseWriter, r *http.Request) {
 	key := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/central/secrets/"))
 	if key == "" {
 		http.Error(w, "key is required", http.StatusBadRequest)
+		return
+	}
+	if s.refuseReservedKey(w, r, key) {
 		return
 	}
 	adminaudit.Annotate(r.Context(), secretRef(key), map[string]string{adminaudit.DetailOp: "delete"})
