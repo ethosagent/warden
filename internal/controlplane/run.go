@@ -313,6 +313,9 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// The tokenService block, like keys:, comes from --config only. Disabled
 	// (the default) means no table, migration, route or goroutine below.
 	tokenCfg, err := resolveTokenService(logger, configPath, stateDir, pol.Identity, keysCfg)
+	if err != nil {
+		return fail(err)
+	}
 	bundlesCfg, err := resolveBundles(p, stateDir, policyStore, keysCfg)
 	if err != nil {
 		return fail(err)

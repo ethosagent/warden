@@ -920,3 +920,22 @@ func TestTokenEndpointSlowExchangeKeepsContext(t *testing.T) {
 		t.Fatalf("status %d, context cancelled %v; want 200 with a live context", resp.StatusCode, slow.cancelled)
 	}
 }
+
+// TestRunTokenServiceStartupCheck: Run stops on a tokenService block that
+// fails its startup checks (here: enabled without --state-dir) and names the
+// setting, rather than starting with the endpoint silently off.
+func TestRunTokenServiceStartupCheck(t *testing.T) {
+	cfg := filepath.Join(t.TempDir(), "config.yaml")
+	writeFileT(t, cfg, basePolicy+"tokenService:\n  enabled: true\n  issuer: https://warden.example.com\n")
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A deadline so a Run that starts instead of failing ends the test.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err = Run(ctx, &lockedBuffer{}, Params{ConfigPath: cfg, Listener: ln, AnalyticsProvider: "memory"})
+	if err == nil || !strings.Contains(err.Error(), "tokenService") {
+		t.Fatalf("Run = %v, want an error naming tokenService", err)
+	}
+}
