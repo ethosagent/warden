@@ -320,7 +320,8 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// process and cannot be safely hot-swapped on the long-poll). A best-effort
 	// initial pull narrows the fail-closed window; if it fails the worker stays
 	// fail-closed and the long-poll loop applies policy once the CP is reachable.
-	// Secrets/judge/audit-signing stay local.
+	// Secrets/judge/audit-signing stay local. clk (resolved above, before the
+	// first pull) drives bundle verification and the cert renewer.
 	var (
 		controlPlane *config.RemoteProvider
 		wcert        *workerCert    // nil unless controlPlane.enrollment or clientCert is set
@@ -356,6 +357,17 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		// Advertise the capabilities this binary implements so the control plane
 		// can flag workers that would silently ignore newer policy fields.
 		rp.SetCaps(config.WorkerCaps())
+		// Signed bundles: with pinned keys the provider asks for the signed
+		// envelope and applies nothing it cannot verify, never falling back to
+		// the unsigned wire. Set before the first pull.
+		if cp := pol.ControlPlane; cp.BundleVerification() {
+			if tErr := rp.SetBundleTrust(config.BundleTrust{
+				Pins: cp.BundlePins(), Skew: cp.BundleClockSkew, Issuer: cp.BundleIssuer,
+				Expiry: cp.BundleExpiry, Now: clk.Now, Logger: logger,
+			}); tErr != nil {
+				return tErr
+			}
+		}
 		// Shutdown hygiene: drop the pooled keep-alive conns when Run returns, so
 		// a hosted worker leaves no open connections to the control plane.
 		defer rp.CloseIdleConnections()
@@ -1050,8 +1062,15 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		}
 		// The long-poll swaps the evaluator through gatedEvaluator, so the agent
 		// switch flips (and cuts sessions) BEFORE the new allow policy is live.
-		go longPollControlPlane(ctx, clk, controlPlane, gatedEvaluator{PolicyEvaluator: evaluator, gate: gate}, pol.ControlPlane.LongPollWait, logger, onPolicyApplied(applier.Apply, pxy.CloseBlockedSessions))
+		// Every evaluator apply (long-poll, expiry deny, expiry restore) goes
+		// through one lock: the agent gate is single-goroutine, and a restore
+		// must never apply an older snapshot over a newer one.
+		applyEv := &serialEvaluator{PolicyEvaluator: gatedEvaluator{PolicyEvaluator: evaluator, gate: gate}, raw: evaluator}
+		go longPollControlPlane(ctx, clk, controlPlane, applyEv, pol.ControlPlane.LongPollWait, logger, onPolicyApplied(applier.Apply, pxy.CloseBlockedSessions))
 		go heartbeatControlPlane(ctx, clk, controlPlane, pol.ControlPlane.HeartbeatInterval, logger)
+		if pol.ControlPlane.BundleVerification() {
+			go enforceBundleExpiry(ctx, clk, controlPlane, applyEv, logger)
+		}
 	}
 	if syncWorker != nil {
 		syncWorker.Start(ctx)

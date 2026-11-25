@@ -252,6 +252,13 @@ type H struct {
 	// bundleMode (WithBundles) boots the control plane with --bundles set to
 	// it, on top of the versioned policy store and the signing keys.
 	bundleMode string
+	// bundlePins (WithBundlePins, WithUnrelatedBundlePins) are the bundle keys
+	// every worker pins; bundleExpiry (WithBundleExpiry) is its expiry mode.
+	bundlePins bundlePinSet
+	// bundleTamper (WithTamperingBundleProxy) is the proxy workers reach the
+	// control plane through; nil unless the option is set.
+	bundleTamper *tamperProxy
+	bundleExpiry config.BundleExpiry
 
 	// tokenClients are the AgentWithProxyToken / AgentH2WithProxyToken clients,
 	// kept so cleanup can close their idle tunnels.
@@ -925,7 +932,7 @@ func (h *H) workerParams(i int) worker.Params {
 		Secrets:         mappings,
 		Observability:   config.ObservabilityConfig{Enabled: true, ServiceName: "warden-harness"},
 		ControlPlane: config.ControlPlaneConfig{
-			Endpoint:          "https://" + h.ControlPlaneAddr() + "/policy",
+			Endpoint:          "https://" + h.workerCPAddr() + "/policy",
 			TokenEnv:          cpTokenEnv,
 			CACert:            h.proxyCACertDst,
 			PollInterval:      time.Second,
@@ -975,6 +982,7 @@ func (h *H) workerParams(i int) worker.Params {
 			},
 		}
 	}
+	h.applyBundlePins(&policy)
 	h.applyAuditLogs(i, &policy)
 	h.applyFakeJudge(&policy)
 	// The local allowlist mirrors the CP's. A managed worker ignores it (policy
