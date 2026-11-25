@@ -14,6 +14,7 @@ func allCases() []Case {
 		certCases(), {serverCertCase, revokedCase}, bundleCases(),
 		wardenForgeries, wardenTimeBounds, idpCases, rawDexRefused,
 		exchangeCases, requestRefusals, {replayedJTI()}, forgedNonceCases, signerCases, rateCases,
+		enrollCases(nil), renewCases(nil), routeCases(&routeFixtures{}, "", "", true),
 	} {
 		out = append(out, group...)
 	}
