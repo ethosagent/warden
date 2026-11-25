@@ -41,6 +41,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -100,6 +101,9 @@ const defaultQuiescenceDeadline = 10 * time.Second
 // upstream registry, the fake clock and the oracles. Create it with New; every
 // resource it starts is torn down by the t.Cleanup it registers.
 type H struct {
+	// cpSrv is the in-process control plane Server, set by its OnServer seam.
+	cpSrv atomic.Pointer[controlplane.Server]
+
 	tb   testing.TB
 	root string // t.TempDir(); CP config, proxy CA pair, worker DBs
 
@@ -122,6 +126,9 @@ type H struct {
 	mcpEnabled bool
 	// mcpConfig (WithMCPConfig) replaces the monitor-mode default.
 	mcpConfig *config.MCPConfig
+	// dlp (WithDLP) is the outbound request-body DLP config every worker boots
+	// with; nil leaves DLP off.
+	dlp *config.DLPConfig
 	// transparent (TransparentIntercept) boots the workers in interception mode
 	// `both` (#376): the CONNECT proxy keeps working AND the transparent
 	// listeners bind on loopback port 0 (addresses via TransparentAddrs).
@@ -192,6 +199,10 @@ type H struct {
 	// console.approvals.enabled (implies the console, admin audit and the
 	// versioned policy store).
 	wantApprovals bool
+	// wantAPIKeys (WithAPIKeys) enables console.apiKeys on the oidc console.
+	wantAPIKeys  bool
+	apiKeyMu     sync.Mutex
+	apiKeyCounts func() map[string]int64
 	// wantBreakGlass (WithBreakGlass) enables console.breakGlass with a hash
 	// file under the harness root; breakGlassHash is that file's path.
 	wantBreakGlass bool
@@ -217,11 +228,25 @@ type H struct {
 	// with the harness clock.
 	wantKeys  bool
 	keyTiming keyTiming
-	keyStore  *fakes.FakeKeyStore
+	// wantTokenSvc (WithTokenService) boots the control plane with
+	// tokenService.enabled over the WithKeys state.
+	wantTokenSvc bool
+	// tokenLimits are the token service's rate limit and retention overrides.
+	tokenLimits tokenLimits
+	// wantWorkerCA (WithWorkerCA) boots the control plane with workerCA
+	// enabled; workerCA is the fixture minted on first use.
+	wantWorkerCA bool
+	workerCA     *workerCAFixture
+	// wantStrictCerts (WithRequireWorkerCerts) adds --require-worker-certs.
+	wantStrictCerts bool
+	keyStore        *fakes.FakeKeyStore
 	// awsAccount is the fake AWS Secrets Manager account of WithAWSKeyStore;
 	// the control plane's injected role is scoped to keysAWSNamePrefix.
 	awsAccount *fakes.FakeAWSSecretsClient
 	keyState   keysState
+	// bundleMode (WithBundles) boots the control plane with --bundles set to
+	// it, on top of the versioned policy store and the signing keys.
+	bundleMode string
 
 	// tokenClients are the AgentWithProxyToken / AgentH2WithProxyToken clients,
 	// kept so cleanup can close their idle tunnels.
@@ -418,6 +443,14 @@ func WithMCPConfig(cfg config.MCPConfig) Option {
 		h.mcpEnabled = true
 		h.mcpConfig = &cfg
 	}
+}
+
+// WithDLP boots the workers with outbound request-body DLP configured as given
+// (mode, rules, class defaults, WardenTokens), for scenarios that assert what the
+// worker detects, records or blocks in an agent's request body. Left out, DLP is
+// off.
+func WithDLP(cfg config.DLPConfig) Option {
+	return func(h *H) { h.dlp = &cfg }
 }
 
 // WithOIDCIssuer starts the in-process OIDC issuer fake (fakes.OIDCIssuer) for
@@ -809,7 +842,11 @@ func (h *H) buildInprocessTarget() *inprocess {
 	h.applyCPAdmin(&ip.cp.params)
 	h.applyBackup(&ip.cp.params)
 	h.applyKeys(&ip.cp.params)
+	h.applyBundles(&ip.cp.params)
+	h.applyAPIKeys(&ip.cp.params)
 	h.applyStrict(&ip.cp.params)
+	h.applyStrictCerts(&ip.cp.params)
+	ip.cp.params.OnServer = func(s *controlplane.Server) { h.cpSrv.Store(s) }
 	return ip
 }
 
@@ -828,6 +865,8 @@ func (h *H) writeCPConfig() string {
 	b.WriteString(h.identityYAML())
 	b.WriteString(h.consoleYAML())
 	b.WriteString(h.keysYAML())
+	b.WriteString(h.tokenServiceYAML())
+	b.WriteString(h.workerCAYAML())
 	b.WriteString(h.fakeJudgeYAML())
 	b.WriteString(h.auditJSONLogYAML())
 	b.WriteString(h.strictYAML())
@@ -915,6 +954,9 @@ func (h *H) workerParams(i int) worker.Params {
 			policy.MCP = *h.mcpConfig
 			policy.MCP.Enabled = true
 		}
+	}
+	if h.dlp != nil {
+		policy.DLP = *h.dlp
 	}
 	if h.transparent {
 		// Interception mode `both` (#376): port-0 loopback listeners, so a

@@ -1,21 +1,6 @@
 package policy
 
-import (
-	"testing"
-	"time"
-)
-
-func TestParseRateLimit(t *testing.T) {
-	l, w, err := ParseRateLimit("10/minute")
-	if err != nil || l != 10 || w != time.Minute {
-		t.Fatalf("got %d %v %v", l, w, err)
-	}
-	for _, bad := range []string{"", "10", "0/minute", "x/hour", "5/day"} {
-		if _, _, err := ParseRateLimit(bad); err == nil {
-			t.Errorf("%q parsed", bad)
-		}
-	}
-}
+import "testing"
 
 func TestTimeWindowHours(t *testing.T) {
 	tests := []struct {

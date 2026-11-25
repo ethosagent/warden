@@ -95,7 +95,13 @@ func (h *H) consoleYAML() string {
 	if h.wantAdminAudit {
 		audit += "  adminAudit:\n    enabled: true\n"
 	}
+	if h.tokenLimits.trustLoopbackProxy {
+		audit += "  trustedProxies: [127.0.0.1/32]\n"
+	}
 	audit += h.approvalsYAML()
+	if h.wantAPIKeys && h.wantConsole {
+		audit += "  apiKeys:\n    enabled: true\n"
+	}
 	if !h.wantConsole {
 		if audit == "" {
 			return ""

@@ -56,6 +56,9 @@ const (
 	// Details the middleware itself sets (never a value from the request).
 	detailHashError = "hash_error"
 	detailReason    = "reason"
+	// detailSkipRefused marks a row whose handler asked for no row (Skip) but
+	// whose claim the middleware could not verify.
+	detailSkipRefused = "skip_refused"
 )
 
 var requestIDPattern = regexp.MustCompile(`^[A-Za-z0-9-]{1,64}$`)
@@ -112,12 +115,7 @@ func newAdminAuditor(rec adminaudit.Recorder, probe func(context.Context) error,
 		clock:          clk,
 		logger:         logger,
 	}
-	for _, c := range cc.TrustedProxies {
-		// Validated at config load; a bad entry here is skipped, never trusted.
-		if p, err := netip.ParsePrefix(c); err == nil {
-			a.trusted = append(a.trusted, p.Masked())
-		}
-	}
+	a.trusted = trustedPrefixes(cc.TrustedProxies)
 	return a
 }
 
@@ -164,6 +162,9 @@ type auditActor struct {
 	actor      adminaudit.Actor
 	role       string
 	authMethod string
+	// apiKeyID is the id of the API key that made the request ("" otherwise);
+	// it is recorded as details.api_key_id.
+	apiKeyID string
 }
 
 // resolveActor finds the authenticated actor: a session or break-glass
@@ -176,6 +177,17 @@ func (s *Server) resolveActor(r *http.Request) (auditActor, bool) {
 		method := adminaudit.AuthMethodOIDC
 		if p.Kind == PrincipalBreakglass {
 			method = adminaudit.AuthMethodBreakglass
+		}
+		if p.Kind == PrincipalAPIKey {
+			// The row is the owner's: actor_id is the HMAC of the owner's sub and the
+			// side row holds their sub and email; the role is the owner's current
+			// one. Only details.api_key_id says a key made the request.
+			return auditActor{
+				actor:      adminaudit.Actor{Sub: p.ActorSub(), Email: p.Email},
+				role:       role.String(),
+				authMethod: adminaudit.AuthMethodAPIKey,
+				apiKeyID:   p.KeyID,
+			}, true
 		}
 		return auditActor{actor: adminaudit.Actor{Sub: p.Sub, Email: p.Email}, role: role.String(), authMethod: method}, true
 	}
@@ -245,6 +257,23 @@ func (s *Server) adminAuditMiddleware(classify func(*http.Request) (authzRow, bo
 		next.ServeHTTP(sw.writer(), r.WithContext(actx))
 		status := sw.code()
 		outcome := outcomeFor(status)
+		// A handler's NoChange is a claim, not a command: it is honoured only when the
+		// middleware can verify that nothing changed (the target has a state
+		// hasher, both hashes were computed, and they are equal). Otherwise the
+		// row is written as usual and says the claim was refused. The after hash
+		// uses the audit-scoped actx like the before one: a per-object hasher
+		// (change_draft) answers "" without the scope, which would make any
+		// change look like a no-op. A request that queued follow-up rows did
+		// something worth recording, and returning here would drop them.
+		skipRefused := false
+		if ann.NoChangeClaimed() {
+			if outcome == adminaudit.OutcomeOK && beforeErr == nil && a.hasHasher(row.Target) && len(auditFollowUps(actx)) == 0 {
+				if after, afterErr := a.stateHash(actx, row.Target); afterErr == nil && after == before {
+					return // an idempotent repeat that changed nothing: no row
+				}
+			}
+			skipRefused = true
+		}
 		if !authed && outcome != adminaudit.OutcomeOK {
 			// Only an anonymous request that changed state needs a row; anything
 			// else is counted like other unauthenticated traffic, so open mode
@@ -266,8 +295,14 @@ func (s *Server) adminAuditMiddleware(classify func(*http.Request) (authzRow, bo
 			before, after = "", ""
 			details[detailHashError] = "true"
 		}
+		if skipRefused {
+			details[detailSkipRefused] = "true"
+		}
 		if csrfRefused(ctx) {
 			details[detailReason] = "csrf"
+		}
+		if who.apiKeyID != "" {
+			details[adminaudit.DetailAPIKeyID] = who.apiKeyID
 		}
 		in := adminaudit.Input{
 			Actor: who.actor, ActorRole: who.role, AuthMethod: who.authMethod,
@@ -405,6 +440,23 @@ func newRequestID() string {
 }
 
 // --- client ip ---
+
+// trustedPrefixes parses console.trustedProxies. Config validation already
+// refused a bad entry; one that still does not parse is skipped, never trusted.
+// The admin audit (clientIP below) and the token endpoint's rate limiter
+// (tokenClientKey) share this list but apply different client-IP rules on
+// purpose: the audit records the left-most X-Forwarded-For hop as the client's
+// claim, while the limiter walks from the right past trusted hops, because a
+// limit key must not be something the client can choose.
+func trustedPrefixes(cidrs []string) []netip.Prefix {
+	var out []netip.Prefix
+	for _, c := range cidrs {
+		if p, err := netip.ParsePrefix(c); err == nil {
+			out = append(out, p.Masked())
+		}
+	}
+	return out
+}
 
 // clientIP is the request's peer address, unless the peer is inside a
 // trusted proxy CIDR: then it is the left-most valid X-Forwarded-For address

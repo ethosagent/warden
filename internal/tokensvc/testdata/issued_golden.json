@@ -1,0 +1,33 @@
+{
+  "claims": {
+    "act": {
+      "sub": "agent-1"
+    },
+    "aud": "warden-worker",
+    "cnf": {
+      "jkt": "MEvZ2Aj17tpo3SBEHFFPvV72b3Qih3CH9nAKVNflovk"
+    },
+    "email": "Alice@Example.test",
+    "email_verified": true,
+    "exp": 1780316100,
+    "groups": [
+      "eng",
+      "ops"
+    ],
+    "iat": 1780315200,
+    "idp_iss": "https://idp.example.test",
+    "idp_sid": "idp-sid-1",
+    "iss": "https://cp.example.test",
+    "jti": "zSZiFU5tdrKyuS5wwMrDzA",
+    "nbf": 1780315200,
+    "scope": "read write",
+    "sid": "wts_r1Vw9aGBC3r3jK9LxwpmDw",
+    "sub": "user-1",
+    "ver": 1
+  },
+  "header": {
+    "alg": "EdDSA",
+    "kid": "XJGjqPpGXJ24ZmLj-qWIxDgDUQ_J4yasCce8hOhxkSA",
+    "typ": "wt+jwt"
+  }
+}

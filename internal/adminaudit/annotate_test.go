@@ -70,3 +70,11 @@ func TestFilterDetails(t *testing.T) {
 		t.Errorf("FilterDetails(nil) = %v, want an empty map", got)
 	}
 }
+
+func TestAnnotateKeepsAPIKeyID(t *testing.T) {
+	ctx, a := WithAnnotation(context.Background())
+	Annotate(ctx, "", map[string]string{DetailAPIKeyID: "k1234", "api_key": "wak_secret"})
+	if _, d := a.Snapshot(); d[DetailAPIKeyID] != "k1234" || len(d) != 1 {
+		t.Fatalf("details = %v, want only api_key_id", d)
+	}
+}

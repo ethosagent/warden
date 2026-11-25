@@ -1,18 +1,8 @@
 package policy
 
-import "time"
-
-// ParseRateLimit parses an allow entry's rateLimit ("N/second|minute|hour")
-// with the exact rules the evaluator enforces, so a caller that compares two
-// limits (the approvals widening classifier, W-P2-APPR-02) cannot disagree
-// with enforcement about what a value means.
-func ParseRateLimit(s string) (limit int, window time.Duration, err error) {
-	rl, err := parseRateLimit(s)
-	if err != nil {
-		return 0, 0, err
-	}
-	return rl.limit, rl.window, nil
-}
+// ParseRateLimit (policy.go) is the one rate-limit grammar: the approvals
+// widening classifier (W-P2-APPR-02) compares limits with it, so it cannot
+// disagree with enforcement about what a value means.
 
 // TimeWindowHours parses an allow entry's timeWindow ("HH-HH") with the
 // evaluator's rules and returns the set of hours of day it admits as a bitmask

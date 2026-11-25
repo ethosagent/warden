@@ -20,7 +20,9 @@ const (
 	// URL (docs/identity-contract.md).
 	IdentityModeChallenge = "challenge"
 
-	identityModeRequire = "require"
+	// IdentityModeRequire is a Phase 2 mode: config validation still refuses it,
+	// but the control plane recognises it in a worker heartbeat.
+	IdentityModeRequire = "require"
 
 	// MaxIdentityClockSkewSeconds bounds identity.clockSkewSeconds.
 	MaxIdentityClockSkewSeconds = 300
@@ -132,7 +134,7 @@ func validateIdentityMode(key, mode string) error {
 	switch mode {
 	case "", IdentityModeOff, IdentityModeAttribute, IdentityModeChallenge:
 		return nil
-	case identityModeRequire:
+	case IdentityModeRequire:
 		return fmt.Errorf("config: %s %q is not supported in Phase 1 (it arrives in Phase 2); use %q, %q or %q",
 			key, mode, IdentityModeOff, IdentityModeAttribute, IdentityModeChallenge)
 	default:

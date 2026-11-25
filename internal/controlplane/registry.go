@@ -31,13 +31,27 @@ type workerState struct {
 	eventsForwarded int64
 	policyETag      string   // the worker's current policy version (from heartbeat)
 	caps            []string // capabilities of the latest heartbeat (replaced, not merged)
+	agentID         string   // the agent the worker says it serves (latest heartbeat; valid or empty)
+	identityMode    string   // the identity mode the worker says it runs (latest heartbeat; enum or empty)
 
 	// How the worker last authenticated (recordAuth). tokenID/tokenName are set
 	// only for kind token; legacy and none ids are unverified headers.
 	authKind  WorkerKind
 	tokenID   string
 	tokenName string
+	// certSerial and certNotAfter describe the certificate of the latest cert
+	// authentication (kind cert only).
+	certSerial   string
+	certNotAfter time.Time
+	// seenSerials are the last few certificate serials the worker authenticated
+	// with, oldest first. Renewal's lineage rule asks whether a successor was
+	// ever used; the latest alone would be overwritten by the predecessor's own
+	// renewal request.
+	seenSerials []string
 }
+
+// maxSeenSerials bounds workerState.seenSerials.
+const maxSeenSerials = 8
 
 // NewWorkerRegistry returns an empty registry.
 func NewWorkerRegistry() *WorkerRegistry {
@@ -74,7 +88,11 @@ func (r *WorkerRegistry) SeenIngest(proxyID string, n int) {
 // SeenHeartbeat records a heartbeat and the worker's current policy ETag, so the
 // dashboard can flag workers that are a policy version behind. caps replaces the
 // stored set: a worker that stops advertising a capability loses it.
-func (r *WorkerRegistry) SeenHeartbeat(proxyID, policyETag string, caps []string) {
+//
+// agentID and identityMode (W-P2-AREG-03) replace the stored values too, under
+// the same lock, so a view never pairs new caps with an old agent binding. The
+// caller has already validated them (validAgentBinding); a worker is never trusted.
+func (r *WorkerRegistry) SeenHeartbeat(proxyID, policyETag string, caps []string, agentID, identityMode string) {
 	if proxyID == "" {
 		return
 	}
@@ -85,6 +103,8 @@ func (r *WorkerRegistry) SeenHeartbeat(proxyID, policyETag string, caps []string
 		w.policyETag = policyETag
 	}
 	w.caps = append([]string(nil), caps...)
+	w.agentID = agentID
+	w.identityMode = identityMode
 }
 
 // maxWorkersWithoutCap bounds the WorkersWithoutCap result.
@@ -146,6 +166,22 @@ func (r *WorkerRegistry) recordAuth(p WorkerPrincipal) {
 	defer r.mu.Unlock()
 	w := r.touch(p.ProxyID, r.now())
 	w.authKind, w.tokenID, w.tokenName = p.Kind, p.TokenID, p.TokenName
+	w.certSerial, w.certNotAfter = p.CertSerial, p.NotAfter
+	if p.Kind == KindCert && !slices.Contains(w.seenSerials, p.CertSerial) {
+		if len(w.seenSerials) >= maxSeenSerials {
+			w.seenSerials = w.seenSerials[1:]
+		}
+		w.seenSerials = append(w.seenSerials, p.CertSerial)
+	}
+}
+
+// certSeen reports whether the worker authenticated with the certificate of
+// this serial since the control plane started (among its last few).
+func (r *WorkerRegistry) certSeen(proxyID, serial string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	w, ok := r.workers[proxyID]
+	return ok && slices.Contains(w.seenSerials, serial)
 }
 
 // touch returns the worker's state, creating it on first contact. Caller holds mu.
@@ -174,9 +210,15 @@ func (r *WorkerRegistry) Views() []dashboard.WorkerView {
 			EventsForwarded: w.eventsForwarded,
 			PolicyETag:      w.policyETag,
 			Caps:            append([]string(nil), w.caps...),
+			AgentID:         w.agentID,
+			IdentityMode:    w.identityMode,
 			Online:          now.Sub(w.lastSeen) < staleAfter,
 			AuthKind:        string(w.authKind),
 			TokenName:       w.tokenName,
+		}
+		if w.authKind == KindCert {
+			v.CertSerial = w.certSerial
+			v.CertNotAfter = w.certNotAfter.UTC().Format(time.RFC3339)
 		}
 		if !w.lastPolicyPull.IsZero() {
 			v.LastPolicyPull = w.lastPolicyPull.UTC().Format(time.RFC3339)

@@ -111,53 +111,82 @@ INSERT INTO events (ts, domain, port, protocol, method, decision) SELECT ?+i, 'h
 	}
 }
 
-// While a 100k-event scan runs, ingest is never held up: the scan reads on the
-// read-only handle in pages, releasing it between them.
+// A 100k-event scan never holds up ingest. The proof is ordering, not latency:
+// the scan is parked (via replayScanRowHook) while its page's rows are still
+// open on the read-only handle, and the test ingests on the read/write handle.
+// Those ingests must all complete, with no SQLITE_BUSY, before the scan is
+// released. If an open read blocked writers, an ingest would error or hang here.
 func TestScanReplayEvents_DoesNotBlockIngest(t *testing.T) {
 	s, err := NewFleetSQLiteStore(filepath.Join(t.TempDir(), "fleet.db"), 0, 1_000_000)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
-	seedEvents(t, s, 100_000)
+	const total = 100_000
+	seedEvents(t, s, total)
 
-	started := make(chan struct{})
-	done := make(chan int, 1)
+	// Park on the first and third page (hook calls 1 and 3).
+	parked := make(chan struct{})
+	resume := make(chan struct{})
+	calls := 0
+	replayScanRowHook = func() {
+		calls++
+		if calls == 1 || calls == 3 {
+			parked <- struct{}{}
+			<-resume
+		}
+	}
+	t.Cleanup(func() { replayScanRowHook = nil })
+
+	done := make(chan error, 1)
+	delivered := 0
 	go func() {
-		n := 0
-		_ = s.ScanReplayEvents(context.Background(), time.Time{}, 100_000, func(Event) error {
-			if n == 0 {
-				close(started)
-			}
-			n++
+		done <- s.ScanReplayEvents(context.Background(), time.Time{}, total, func(Event) error {
+			delivered++
 			return nil
 		})
-		done <- n
 	}()
-	<-started
-	var worst time.Duration
-	scanning := true
-	for i := 0; scanning && i < 200; i++ {
+
+	for range 2 {
 		select {
-		case <-done:
-			scanning = false
-		default:
+		case <-parked:
+		case err := <-done:
+			t.Fatalf("scan ended before parking: %v", err)
+		case <-time.After(30 * time.Second):
+			t.Fatal("scan never reached its park point")
 		}
-		start := time.Now()
-		if err := s.StoreAggregatedEvent(aggEvent("p", "a", "ingest.example.com", "allow", time.Now())); err != nil {
-			t.Fatalf("ingest during scan: %v", err)
+		ingested := make(chan error, 1)
+		go func() {
+			for i := 0; i < 25; i++ {
+				if err := s.StoreAggregatedEvent(aggEvent("p", "a", "ingest.example.com", "allow", time.Now())); err != nil {
+					ingested <- err
+					return
+				}
+			}
+			ingested <- nil
+		}()
+		// The scan is parked with its read open: ingest must finish first.
+		select {
+		case err := <-ingested:
+			if err != nil {
+				t.Fatalf("ingest while the scan's read is open: %v", err)
+			}
+		case <-time.After(30 * time.Second):
+			t.Fatal("ingest blocked while the scan's read was open")
 		}
-		if d := time.Since(start); d > worst {
-			worst = d
-		}
+		resume <- struct{}{}
 	}
-	if worst >= 100*time.Millisecond {
-		t.Errorf("slowest ingest during the scan took %v, want < 100ms", worst)
-	}
-	if scanning {
-		if n := <-done; n < 100_000 {
-			t.Errorf("scan delivered %d events, want >= 100000", n)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("scan: %v", err)
 		}
+	case <-time.After(60 * time.Second):
+		t.Fatal("scan did not finish")
+	}
+	if delivered != total {
+		t.Errorf("scan delivered %d events, want %d", delivered, total)
 	}
 }
 

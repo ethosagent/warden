@@ -19,6 +19,17 @@ const (
 	StatusConflict   Status = "conflict"
 )
 
+// TokenType is the identity verify metric's token_type label value.
+type TokenType string
+
+// Token types for the identity verify metric's token_type label. A request
+// without a token (or with one that never reached a verifier) is TokenNone.
+const (
+	TokenIdP    TokenType = "idp"
+	TokenWarden TokenType = "warden"
+	TokenNone   TokenType = "none"
+)
+
 // Reason is the bounded explanation for a non-valid Status. Raw token text and
 // library error strings never become a Reason.
 type Reason string
