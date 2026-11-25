@@ -553,12 +553,19 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// *gateway.Gateway would make the proxy's mcpGateway() return a non-nil
 	// interface wrapping a nil pointer and panic on the hot path. mcpGW keeps the
 	// concrete handle for lifecycle (Close) and the dashboard MCP provider.
+	// A managed worker builds it from the boot pull's mcp block when the control
+	// plane distributes one (what the first changed long-poll would install),
+	// else from the local block: SettingsApplier.ApplyBoot leaves MCP to this.
 	var mcpGW *gateway.Gateway
 	var bootGW proxy.MCPGateway
-	if pol.MCP.Enabled {
-		mcpGW = gateway.New(pol.MCP, mcpScanner, logger, gateway.WithStore(mcpStore), gateway.WithAgentID(agentID))
+	mcpCfg := pol.MCP
+	if managed && distributed != nil && distributed.MCP != nil {
+		mcpCfg = config.MCPConfigFromSettings(distributed.MCP)
+	}
+	if mcpCfg.Enabled {
+		mcpGW = gateway.New(mcpCfg, mcpScanner, logger, gateway.WithStore(mcpStore), gateway.WithAgentID(agentID))
 		bootGW = mcpGW
-		logger.Info("MCP egress gateway enabled", "mode", pol.MCP.Mode)
+		logger.Info("MCP egress gateway enabled", "mode", mcpCfg.Mode)
 	}
 	// Close the gateway before the store: deferred LIFO runs this first, so the
 	// gateway's final flush completes while the store handle is still open. A
@@ -1100,6 +1107,17 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		// must never apply an older snapshot over a newer one.
 		applyEv := &serialEvaluator{PolicyEvaluator: gatedEvaluator{PolicyEvaluator: evaluator, gate: gate}, raw: evaluator}
 		applier.serial = applyEv
+		// The boot pull's settings are applied here, before the proxy serves and
+		// before any apply goroutine starts (the token snapshot under applyEv's
+		// lock, like every apply). Without it the first long-poll answers 304
+		// (the boot pull set the ETag), so a restarted worker served under its
+		// LOCAL identity, agents, judge, DLP, compliance, log level and cache
+		// TTL until some unrelated policy change: fail-open for challenge mode.
+		// No boot policy (CP down at boot) means no settings either; the first
+		// successful long-poll then reports a change and applies both.
+		if remotePolicy != nil {
+			applier.ApplyBoot()
+		}
 		go longPollControlPlane(ctx, clk, controlPlane, applyEv, pol.ControlPlane.LongPollWait, logger, onPolicyApplied(applier.Apply, pxy.CloseBlockedSessions))
 		go heartbeatControlPlane(ctx, clk, controlPlane, pol.ControlPlane.HeartbeatInterval, logger)
 		if pol.ControlPlane.BundleVerification() {

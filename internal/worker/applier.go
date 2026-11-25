@@ -78,8 +78,35 @@ type SettingsApplier struct {
 // Apply rebuilds + atomically swaps the proxy's MCP gateway AND its inline judge
 // (plus log level, compliance tagging, and secret cache TTL) from the
 // control-plane-distributed settings. It is the long-poll onApply callback.
-func (a *SettingsApplier) Apply() {
+func (a *SettingsApplier) Apply() { a.apply(false) }
+
+// ApplyBoot applies the settings of the boot pull before the proxy serves, so
+// a restarted worker never serves under its local config while the control
+// plane distributes another (the first long-poll answers 304: the boot pull
+// already set the ETag). It differs from Apply in one way: a block the control
+// plane does not distribute leaves the local boot config of that block in
+// place instead of turning it off, so boot is never less strict than the local
+// file; the first changed long-poll then applies the full Apply semantics. The
+// MCP gateway is skipped: Run builds the boot gateway from the distributed
+// block already, and rebuilding it here would orphan the handle the dashboard
+// and the MCP snapshot push hold.
+func (a *SettingsApplier) ApplyBoot() { a.apply(true) }
+
+func (a *SettingsApplier) apply(boot bool) {
 	settings := a.cp.Settings()
+	if boot && settings == nil {
+		// Nothing distributed: the local config stands. The token keys come
+		// from the bundle, not the settings, and were installed at boot.
+		return
+	}
+	if !boot {
+		a.applyMCP(settings)
+	}
+	a.applyRest(settings, boot)
+}
+
+// applyMCP rebuilds and swaps the MCP gateway from settings.
+func (a *SettingsApplier) applyMCP(settings *config.SettingsWire) {
 
 	// --- MCP gateway swap ---
 	// newGW is the concrete gateway (or nil) used for lifecycle (Close via
@@ -119,12 +146,19 @@ func (a *SettingsApplier) Apply() {
 	default:
 		a.logger.Debug("control-plane settings applied; MCP remains disabled")
 	}
+}
 
+// applyRest applies every block but the MCP gateway. With boot set, a block
+// absent from settings keeps the local boot config (see ApplyBoot).
+func (a *SettingsApplier) applyRest(settings *config.SettingsWire, boot bool) {
 	// --- Judge swap ---
 	// The API key is resolved LOCALLY inside buildJudgeFrom (the distributed
 	// settings carry only the env NAME). agentID is the worker's LOCAL
 	// identity and stays fixed across rebuilds.
-	if settings != nil && settings.Judge != nil && settings.Judge.Enabled {
+	switch {
+	case boot && settings.Judge == nil:
+		// Not distributed: the local judge stands until a changed long-poll.
+	case settings != nil && settings.Judge != nil && settings.Judge.Enabled:
 		// Reconstruct the named-provider registry from the wire-delivered settings
 		// (LLMProvidersFromSettings — the live consumer M1 deferred) and rebuild the
 		// client map from THIS worker's OWN env, so a managed worker resolves the
@@ -148,7 +182,7 @@ func (a *SettingsApplier) Apply() {
 			a.p.SetJudge(newJudge)
 			a.logger.Info("inline judge swapped from control-plane settings", "model", settings.Judge.Model)
 		}
-	} else {
+	default:
 		// No judge distributed (or explicitly disabled): disable it.
 		a.p.SetJudge(nil)
 		a.logger.Debug("control-plane settings applied; judge disabled")
@@ -164,17 +198,19 @@ func (a *SettingsApplier) Apply() {
 	// DLP disabled. phonePII is a LOCAL wiring knob and stays false here (never
 	// distributed); evidence=true captures the SAFE MASKED sample only ("••••<last4>
 	// (len N)", never the raw match), matching the boot wiring in Run.
-	var newDLP *proxy.DLPScanner
-	if settings != nil && settings.DLP != nil {
-		if dcfg := config.DLPConfigFromSettings(settings.DLP); dcfg.Active() {
-			newDLP = proxy.NewDLPScanner(dcfg, false, true)
+	if !boot || settings.DLP != nil {
+		var newDLP *proxy.DLPScanner
+		if settings != nil && settings.DLP != nil {
+			if dcfg := config.DLPConfigFromSettings(settings.DLP); dcfg.Active() {
+				newDLP = proxy.NewDLPScanner(dcfg, false, true)
+			}
 		}
-	}
-	a.p.SetDLP(newDLP)
-	if newDLP != nil {
-		a.logger.Info("DLP scanner swapped from control-plane settings", "mode", settings.DLP.Mode)
-	} else {
-		a.logger.Debug("control-plane settings applied; DLP remains disabled")
+		a.p.SetDLP(newDLP)
+		if newDLP != nil {
+			a.logger.Info("DLP scanner swapped from control-plane settings", "mode", settings.DLP.Mode)
+		} else {
+			a.logger.Debug("control-plane settings applied; DLP remains disabled")
+		}
 	}
 
 	// --- Logging level (live) + format (restart-only) ---
@@ -221,7 +257,12 @@ func (a *SettingsApplier) Apply() {
 	// ONLY the tagging layer around the shared signedStore and swapping the
 	// proxy's analytics pointer leaves those consumers untouched. Only swap
 	// when the desired state actually changes.
+	// The wire carries the block only when enabled, so at boot an absent block
+	// keeps the local toggle.
 	wantCompliance := settings != nil && settings.Compliance != nil && settings.Compliance.Enabled
+	if boot && settings.Compliance == nil {
+		wantCompliance = a.liveCompliance
+	}
 	if wantCompliance != a.liveCompliance {
 		if wantCompliance {
 			a.p.SetAnalytics(audit.NewTaggingStore(a.signedStore, a.complianceMapper))
@@ -237,7 +278,9 @@ func (a *SettingsApplier) Apply() {
 	// The wiring rebuilds the verifier only when an issuer, internalIssuerURL,
 	// audience, JWKS, azp, groupsClaim, skew or TTL input moved; a mode-only change swaps the mode. A rebuild
 	// failure or an unknown mode keeps the previous config.
-	if settings != nil && a.identity != nil {
+	// At boot an absent identity block keeps the local one (a missing block
+	// turns identity off on a changed long-poll, never at boot).
+	if settings != nil && a.identity != nil && (!boot || settings.Identity != nil) {
 		a.identity.apply(config.IdentityFromSettings(settings.Identity), config.AgentsFromSettings(settings.Agents))
 	}
 

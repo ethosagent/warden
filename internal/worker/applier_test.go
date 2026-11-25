@@ -309,3 +309,55 @@ func TestApplier_NoMCPSwapAfterShutdown(t *testing.T) {
 		t.Fatal("the gateway Apply built after shutdown was not closed: flushLoop leaked")
 	}
 }
+
+// TestApplier_ApplyBoot pins the boot apply: a distributed block is applied
+// exactly as a changed long-poll applies it, while a block the control plane
+// does not distribute keeps the local boot config (never less strict than the
+// local file), where Apply would turn it off. The MCP gateway is left to Run.
+func TestApplier_ApplyBoot(t *testing.T) {
+	t.Run("distributed blocks applied", func(t *testing.T) {
+		a, fake, _, _, _ := identityApplier(t)
+		fake.settings = &config.SettingsWire{
+			DLP:        &config.DLPSettings{Mode: config.DLPModeMonitor},
+			Compliance: &config.ToggleSetting{Enabled: true},
+			MCP:        &config.MCPSettings{Enabled: true, Mode: "monitor"},
+			Identity:   &config.IdentitySettings{DefaultMode: "attribute", Issuer: "http://idp.test", Audience: "warden", InternalIssuerURL: "http://idp.test"},
+		}
+		a.ApplyBoot()
+		if got := a.p.DLPMode(); got != config.DLPModeMonitor {
+			t.Errorf("DLP mode = %q, want monitor", got)
+		}
+		if !a.liveCompliance {
+			t.Error("compliance not enabled from the boot pull")
+		}
+		if a.identity.live.mode != proxy.IdentityModeAttribute {
+			t.Errorf("identity mode = %q, want attribute", a.identity.live.mode)
+		}
+		if *a.liveMCPGW != nil {
+			t.Error("ApplyBoot built an MCP gateway; Run builds the boot gateway")
+		}
+	})
+	t.Run("absent blocks keep the local config", func(t *testing.T) {
+		a, fake, _, _, _ := identityApplier(t)
+		// The local boot config: DLP enforce, compliance on, identity attribute.
+		fake.settings = &config.SettingsWire{
+			DLP:        &config.DLPSettings{Mode: config.DLPModeEnforce},
+			Compliance: &config.ToggleSetting{Enabled: true},
+			Identity:   &config.IdentitySettings{DefaultMode: "attribute", Issuer: "http://idp.test", Audience: "warden", InternalIssuerURL: "http://idp.test"},
+		}
+		a.Apply()
+		for _, s := range []*config.SettingsWire{nil, {}} {
+			fake.settings = s
+			a.ApplyBoot()
+			if got := a.p.DLPMode(); got != config.DLPModeEnforce {
+				t.Errorf("settings %+v: DLP mode = %q, want the local enforce", s, got)
+			}
+			if !a.liveCompliance {
+				t.Errorf("settings %+v: local compliance turned off", s)
+			}
+			if a.identity.live.mode != proxy.IdentityModeAttribute {
+				t.Errorf("settings %+v: identity mode = %q, want the local attribute", s, a.identity.live.mode)
+			}
+		}
+	})
+}

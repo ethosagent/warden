@@ -440,6 +440,11 @@ var All = slices.Concat(
 		// issuer are refused; a legacy-wire worker has no keys. In-process only.
 		{Name: "warden_token_verify", Opts: wardenTokenVerifyOpts(), Run: wardenTokenVerify},
 		{Name: "warden_token_legacy_wire", Opts: wardenTokenLegacyOpts(), Run: wardenTokenLegacyWire},
+		// The boot pull's identity settings are in force from the first request
+		// after a restart (identity block and this agent's agents entry), with
+		// the boot bundle's token keys. In-process only (worker restart).
+		{Name: "identity_boot_distributed_mode", Opts: identityBootOpts(), Run: identityBootDistributedMode},
+		{Name: "identity_boot_distributed_agent", Opts: identityBootOpts(), Run: identityBootDistributedAgent},
 		// Bundle state in the fleet view and the worker's metrics (W-P2-SBND-05):
 		// a pinned worker shows its bundle seq and pins and is not behind; a
 		// tampered bundle shows as a rejection reason with the seq unchanged.
