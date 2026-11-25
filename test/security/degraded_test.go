@@ -71,7 +71,7 @@ func enforcedCases(prefix string) []Case {
 			func(t testing.TB, s *Stack) string { return scratchToken(s, keyDegU1) }),
 		workerRefusal(prefix+"a forged token", "invalid", "bad_signature", "warden", TransportConnect,
 			func(t testing.TB, s *Stack) string { return scratchToken(s, keyDegForged) }),
-		Case{
+		{
 			Name: prefix + "a blocked user's still-valid token",
 			Path: PathWorker,
 			Attack: func(t testing.TB, s *Stack) Observed {
@@ -80,7 +80,7 @@ func enforcedCases(prefix string) []Case {
 			WantStatus: http.StatusForbidden, WantBody: `{"error":"user_blocked"}`,
 			WantResult: "valid", WantDeny: "user_blocked",
 		},
-		Case{
+		{
 			Name: prefix + "a disabled agent's still-valid token",
 			Path: PathWorker, Worker: "agent-b",
 			Attack: func(t testing.TB, s *Stack) Observed {
