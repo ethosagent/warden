@@ -144,7 +144,9 @@ Self-tests of the proof (each must exit non-zero): merge
 network) through `RECIPE_ISOLATION_COMPOSE_EXTRA` and the script fails at
 `direct-egress-blocked`; serve `identity: attribute` instead of `require` for the agent
 and it fails at `no-token-407`. `RECIPE_ISOLATION_KEEP=1` leaves the stack up for
-debugging.
+interactive debugging only: it keeps host ports 7070 and others bound after the lock is
+released, so never use it while other stacks run and tear it down yourself
+(`docker compose -p warden-recipe-<recipe> down -v`). The default always tears down.
 
 ## Manual local testing
 

@@ -25,7 +25,12 @@
 # Environment:
 #   RECIPE_ISOLATION_COMPOSE_EXTRA  space-separated extra compose files merged last
 #                                   (the negative self-tests use this)
-#   RECIPE_ISOLATION_KEEP=1         leave the stack running on exit (debugging only)
+#   RECIPE_ISOLATION_KEEP=1         INTERACTIVE DEBUGGING ONLY: leave the stack running on
+#                                   exit. The stack holds fixed host ports (7070 ...) after
+#                                   the lock is released, so it breaks every other run: never
+#                                   use it while other stacks run, and tear it down yourself
+#                                   (docker compose -p warden-recipe-<recipe> down -v).
+#                                   The default always runs `docker compose down -v`.
 #   RECIPE_ISOLATION_READY_TIMEOUT  seconds to wait for the first token exchange
 #                                   (default 420: a fresh control plane holds back
 #                                   its first token key for a few minutes)
