@@ -7,8 +7,10 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
+	"errors"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -161,6 +163,29 @@ func TestEnrollerRefusesAForgedResponse(t *testing.T) {
 		},
 		"response spiffe id differs from the certificate": func(cp *fakeCP, resp map[string]any, _ *x509.CertificateRequest) {
 			resp["spiffeId"] = "spiffe://warden.test/warden/worker/other"
+		},
+		"leaf is a CA": func(cp *fakeCP, resp map[string]any, csr *x509.CertificateRequest) {
+			leaf := cp.ca.issueWith(t, csr.PublicKey, testTrustDomain, "worker-1", t0.Add(-time.Minute), t0.Add(time.Hour),
+				func(c *x509.Certificate) {
+					c.IsCA, c.KeyUsage = true, x509.KeyUsageCertSign|x509.KeyUsageDigitalSignature
+				})
+			resp["certificate"] = string(workerca.EncodeCertsPEM(leaf))
+		},
+		"serverAuth only": func(cp *fakeCP, resp map[string]any, csr *x509.CertificateRequest) {
+			leaf := cp.ca.issueWith(t, csr.PublicKey, testTrustDomain, "worker-1", t0.Add(-time.Minute), t0.Add(time.Hour),
+				func(c *x509.Certificate) { c.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth} })
+			resp["certificate"] = string(workerca.EncodeCertsPEM(leaf))
+		},
+		"two URI SANs": func(cp *fakeCP, resp map[string]any, csr *x509.CertificateRequest) {
+			leaf := cp.ca.issueWith(t, csr.PublicKey, testTrustDomain, "worker-1", t0.Add(-time.Minute), t0.Add(time.Hour),
+				func(c *x509.Certificate) {
+					c.URIs = append(c.URIs, &url.URL{Scheme: "spiffe", Host: testTrustDomain, Path: "/warden/worker/other"})
+				})
+			resp["certificate"] = string(workerca.EncodeCertsPEM(leaf))
+		},
+		"not valid yet": func(cp *fakeCP, resp map[string]any, csr *x509.CertificateRequest) {
+			leaf := cp.ca.issue(t, csr.PublicKey, testTrustDomain, "worker-1", t0.Add(time.Hour), t0.Add(2*time.Hour))
+			resp["certificate"] = string(workerca.EncodeCertsPEM(leaf))
 		},
 		"already expired": func(cp *fakeCP, resp map[string]any, csr *x509.CertificateRequest) {
 			leaf := cp.ca.issue(t, csr.PublicKey, testTrustDomain, "worker-1", t0.Add(-2*time.Hour), t0.Add(-time.Hour))
@@ -327,4 +352,147 @@ func TestRenewerKeepsTheCertWhenTheResponseIsForged(t *testing.T) {
 	if src.Current().Serial() != cred.Serial() {
 		t.Error("installed a certificate for a different worker")
 	}
+}
+
+// TestEnrollerClassifiesFailures: only the control plane's availability is
+// ErrUnreachable; a refusal, a forged response and a local file error are not.
+func TestEnrollerClassifiesFailures(t *testing.T) {
+	cp := newFakeCP(t, fixedNow)
+	_, err := newEnroller(cp, t.TempDir(), "wet_bad", nil).LoadOrEnroll(context.Background())
+	if errors.Is(err, cpclient.ErrUnreachable) {
+		t.Errorf("a 401 is unreachable: %v", err)
+	}
+	// 503 is unreachable.
+	down := newFakeCP(t, fixedNow)
+	down.failEnroll.Store(1)
+	if _, err := newEnroller(down, t.TempDir(), "wet_good", nil).LoadOrEnroll(context.Background()); !errors.Is(err, cpclient.ErrUnreachable) {
+		t.Errorf("a 503 = %v, want ErrUnreachable", err)
+	}
+	// A closed server is.
+	gone := newFakeCP(t, fixedNow)
+	e := newEnroller(gone, t.TempDir(), "wet_good", nil)
+	gone.srv.Close()
+	if _, err := e.LoadOrEnroll(context.Background()); !errors.Is(err, cpclient.ErrUnreachable) {
+		t.Errorf("a dead server = %v, want ErrUnreachable", err)
+	}
+	// A forged response is not.
+	forged := newFakeCP(t, fixedNow)
+	forged.tamper = func(resp map[string]any, _ *x509.CertificateRequest) { resp["workerId"] = "x" }
+	if _, err := newEnroller(forged, t.TempDir(), "wet_good", nil).LoadOrEnroll(context.Background()); err == nil || errors.Is(err, cpclient.ErrUnreachable) {
+		t.Errorf("a forged response = %v, want a non-unreachable error", err)
+	}
+	// A state dir that cannot be created is not.
+	file := filepath.Join(t.TempDir(), "afile")
+	_ = os.WriteFile(file, nil, 0o600)
+	if _, err := newEnroller(cp, filepath.Join(file, "state"), "wet_good", nil).LoadOrEnroll(context.Background()); err == nil || errors.Is(err, cpclient.ErrUnreachable) {
+		t.Errorf("an uncreatable state dir = %v, want a non-unreachable error", err)
+	}
+}
+
+// TestRenewerRefusesATrustDomainChange: a renewal must stay in the trust domain.
+func TestRenewerRefusesATrustDomainChange(t *testing.T) {
+	clk := clocktest.NewFake(t0)
+	cp := newFakeCP(t, clk.Now)
+	dir := t.TempDir()
+	cred, _ := newEnroller(cp, dir, "wet_good", nil).LoadOrEnroll(context.Background())
+	cred.ReceivedAt = clk.Now()
+	src := cpclient.NewSource(cred)
+	cp.tamper = func(resp map[string]any, csr *x509.CertificateRequest) {
+		leaf := cp.ca.issue(t, csr.PublicKey, "evil.test", "worker-1", t0, t0.Add(time.Hour))
+		resp["certificate"], resp["spiffeId"] = string(workerca.EncodeCertsPEM(leaf)), leaf.URIs[0].String()
+	}
+	var outcome atomic.Value
+	r := &cpclient.Renewer{Endpoint: cp.url("/control/renew"), HTTP: http.DefaultClient, Source: src, StateDir: dir, Clock: clk,
+		Jitter: func() float64 { return 0 }, OnRenew: func(o string) { outcome.Store(o) }}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { r.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+	waitFor(t, "the timer", func() bool { return clk.PendingTimers() == 1 })
+	clk.Advance(12 * time.Hour)
+	waitFor(t, "the refusal", func() bool { return outcome.Load() == cpclient.OutcomeRejected })
+	if src.Current().Serial() != cred.Serial() {
+		t.Error("installed a certificate from another trust domain")
+	}
+}
+
+// TestRenewerNeverWaitsLessThanBackoffMin: a certificate that lives seconds does
+// not make the renewer spin.
+func TestRenewerNeverWaitsLessThanBackoffMin(t *testing.T) {
+	clk := clocktest.NewFake(t0)
+	cp := newFakeCP(t, clk.Now)
+	cp.ttl = 4 * time.Second
+	dir := t.TempDir()
+	cred, err := newEnroller(cp, dir, "wet_good", nil).LoadOrEnroll(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cred.ReceivedAt = clk.Now()
+	r := &cpclient.Renewer{Endpoint: cp.url("/control/renew"), HTTP: http.DefaultClient, Source: cpclient.NewSource(cred), StateDir: dir, Clock: clk,
+		Jitter: func() float64 { return 0 }}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { r.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+	waitFor(t, "the timer", func() bool { return clk.PendingTimers() == 1 })
+	clk.Advance(4 * time.Second) // half the lifetime has passed twice over
+	if cp.renews.Load() != 0 {
+		t.Fatal("renewed sooner than the 5s floor")
+	}
+	clk.Advance(time.Second)
+	waitFor(t, "the renewal at the floor", func() bool { return cp.renews.Load() >= 1 })
+}
+
+// TestRenewerRetriesAFailedPersist: the renewed certificate is installed even
+// when it cannot be written, and is written once the directory allows it.
+func TestRenewerRetriesAFailedPersist(t *testing.T) {
+	clk := clocktest.NewFake(t0)
+	cp := newFakeCP(t, clk.Now)
+	dir := t.TempDir()
+	cred, _ := newEnroller(cp, dir, "wet_good", nil).LoadOrEnroll(context.Background())
+	cred.ReceivedAt = clk.Now()
+	src := cpclient.NewSource(cred)
+	certDir := filepath.Join(dir, "cert")
+	if err := os.Chmod(certDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(certDir, 0o700) })
+	if f, err := os.Create(filepath.Join(certDir, "probe")); err == nil {
+		_ = f.Close()
+		t.Skip("the directory stays writable (running as root): cannot make a persist fail")
+	}
+	var logs bytes.Buffer
+	r := &cpclient.Renewer{Endpoint: cp.url("/control/renew"), HTTP: http.DefaultClient, Source: src, StateDir: dir, Clock: clk,
+		Jitter: func() float64 { return 0 }, Logger: slog.New(slog.NewTextHandler(&syncWriter{w: &logs}, nil))}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { r.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+	waitFor(t, "the timer", func() bool { return clk.PendingTimers() == 1 })
+	clk.Advance(12 * time.Hour)
+	waitFor(t, "the renewed certificate to be installed", func() bool { return src.Current().Serial() != cred.Serial() })
+	renewed := src.Current()
+	waitFor(t, "the persist retry timer", func() bool { return clk.PendingTimers() == 1 })
+	if err := os.Chmod(certDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the certificate to reach the disk", func() bool {
+		clk.Advance(5 * time.Second)
+		on, err := newEnroller(cp, dir, "", nil).LoadOrEnroll(context.Background())
+		return err == nil && on.Serial() == renewed.Serial()
+	})
+	if !strings.Contains(logs.String(), "lineage conflict") {
+		t.Errorf("the persist failure log does not explain the restart risk: %q", logs.String())
+	}
+}
+
+type syncWriter struct {
+	mu sync.Mutex
+	w  *bytes.Buffer
+}
+
+func (s *syncWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(p)
 }

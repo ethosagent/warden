@@ -10,7 +10,6 @@ import (
 	"net/url"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/ethosagent/warden/internal/clock"
@@ -48,6 +47,12 @@ type workerCert struct {
 	logger   *slog.Logger
 	// proxyID is central.proxyID after env expansion ("" when unset).
 	proxyID string
+	// centralShared is true when central.endpoint is on the control plane's
+	// origin, so the ingest forwarder presents the certificate too. A separate
+	// aggregator keeps its bearer client (and its own trust).
+	centralShared bool
+	// jitter feeds the renewer (nil: crypto/rand); a test sets it to 0.
+	jitter func() float64
 }
 
 // newWorkerCert loads or enrolls the worker certificate. It returns nil when
@@ -60,9 +65,16 @@ func newWorkerCert(ctx context.Context, cfg config.ControlPlaneConfig, central c
 	if !cfg.CertAuth() {
 		return nil, nil
 	}
-	wc := &workerCert{clk: clk, logger: logger, proxyID: expandEnv(central.ProxyID)}
+	wc := &workerCert{clk: clk, logger: logger, proxyID: expandEnv(central.ProxyID),
+		centralShared: central.Mode == "worker" && sameOrigin(cfg.Endpoint, central.Endpoint)}
+	// The shared pool trusts central.caCert only when the aggregator is the
+	// control plane's own origin: it must not widen trust for a separate one.
+	caPaths := []string{cfg.CACert}
+	if wc.centralShared {
+		caPaths = append(caPaths, central.CACert)
+	}
 	var err error
-	if wc.transport, err = newControlPlaneTransport(wc.getClientCertificate, cfg.CACert, central.CACert); err != nil {
+	if wc.transport, err = newControlPlaneTransport(wc.getClientCertificate, caPaths...); err != nil {
 		return nil, err
 	}
 	if cfg.ClientCert != "" {
@@ -105,7 +117,9 @@ func newWorkerCert(ctx context.Context, cfg config.ControlPlaneConfig, central c
 		wc.source.Set(cred)
 	case errors.Is(err, cpclient.ErrNoToken):
 		return nil, fmt.Errorf("worker has no usable certificate in %s and $%s is empty: set the enrollment token", cfg.StateDir, cfg.Enrollment.TokenEnv)
-	case cpclient.IsPermanent(err):
+	case !errors.Is(err, cpclient.ErrUnreachable):
+		// A refusal, a response that failed verification or a local file error:
+		// waiting will not fix it.
 		return nil, err
 	default:
 		logger.Warn("worker not enrolled yet: the control plane is unreachable; staying FAIL-CLOSED (deny all) and retrying", "error", err.Error())
@@ -181,7 +195,7 @@ func (wc *workerCert) start(ctx context.Context, m *observability.Metrics) {
 		}
 		(&cpclient.Renewer{
 			Endpoint: wc.renewURL, HTTP: wc.Client(enrollTimeout), Source: wc.source, StateDir: wc.enroller.StateDir,
-			Clock: wc.clk, CloseIdle: wc.transport.CloseIdleConnections, Logger: wc.logger,
+			Clock: wc.clk, Jitter: wc.jitter, CloseIdle: wc.transport.CloseIdleConnections, Logger: wc.logger,
 			OnRenew: m.RecordWorkerCertRenewal,
 		}).Run(ctx)
 	}()
@@ -209,8 +223,8 @@ func (wc *workerCert) enrollUntilDone(ctx context.Context) bool {
 			wc.transport.CloseIdleConnections()
 			wc.logger.Info("worker enrolled", "worker_id", cred.WorkerID(), "serial", cred.Serial())
 			return true
-		case cpclient.IsPermanent(err), errors.Is(err, cpclient.ErrNoToken):
-			wc.logger.Error("worker enrollment refused; staying FAIL-CLOSED", "error", err.Error())
+		case !errors.Is(err, cpclient.ErrUnreachable):
+			wc.logger.Error("worker enrollment failed for good; staying FAIL-CLOSED", "error", err.Error())
 			return false
 		}
 		wc.logger.Warn("worker enrollment failed; retrying", "retry_in", backoff.String(), "error", err.Error())
@@ -225,10 +239,7 @@ func (wc *workerCert) enrollUntilDone(ctx context.Context) bool {
 // last-known-good policy meanwhile (the policy engine does not depend on the
 // certificate); only its control-plane calls fail.
 func (wc *workerCert) watchExpiry(ctx context.Context) {
-	var (
-		mu     sync.Mutex
-		logged time.Time
-	)
+	var logged time.Time
 	t := wc.clk.NewTimer(certExpiryCheck)
 	defer t.Stop()
 	for {
@@ -243,17 +254,19 @@ func (wc *workerCert) watchExpiry(ctx context.Context) {
 		if c == nil || !c.Expired(now) {
 			continue
 		}
-		mu.Lock()
-		due := logged.IsZero() || now.Sub(logged) >= certExpiredLogEvery
-		if due {
+		if due := logged.IsZero() || now.Sub(logged) >= certExpiredLogEvery; due {
 			logged = now
-		}
-		mu.Unlock()
-		if due {
 			wc.logger.Error("worker cert expired", "worker_id", c.WorkerID(), "serial", c.Serial(),
 				"not_after", c.NotAfter().UTC().Format(time.RFC3339))
 		}
 	}
+}
+
+// sameOrigin reports whether two URLs share scheme and host (with port).
+func sameOrigin(a, b string) bool {
+	ua, errA := url.Parse(a)
+	ub, errB := url.Parse(b)
+	return errA == nil && errB == nil && ua.Host != "" && strings.EqualFold(ua.Scheme, ub.Scheme) && strings.EqualFold(ua.Host, ub.Host)
 }
 
 // controlURL is the control plane's path on the host of the policy endpoint.

@@ -61,6 +61,39 @@ type Renewer struct {
 	OnRenew func(outcome string)
 	// Logger may be nil.
 	Logger *slog.Logger
+
+	// unpersisted is a renewed certificate that is installed but not yet on
+	// disk. Only the Run goroutine touches it.
+	unpersisted *Credential
+}
+
+// flushPersist retries writing a renewed certificate that could not be written,
+// with the renewal backoff, until it lands or the next renewal is due (which
+// writes a newer one). It reports false when ctx ended.
+func (r *Renewer) flushPersist(ctx context.Context) bool {
+	pending := r.unpersisted
+	if pending == nil {
+		return true
+	}
+	next := pending.ReceivedAt.Add(pending.NotAfter().Sub(pending.ReceivedAt) / 2)
+	backoff := BackoffMin
+	for r.clk().Now().Before(next) {
+		if !r.sleep(ctx, backoff) {
+			return false
+		}
+		if err := persist(r.StateDir, pending); err == nil {
+			r.unpersisted = nil
+			if r.Logger != nil {
+				r.Logger.Info("worker certificate persisted", "serial", pending.Serial())
+			}
+			return true
+		}
+		if backoff *= 2; backoff > BackoffMax {
+			backoff = BackoffMax
+		}
+	}
+	r.unpersisted = nil
+	return true
 }
 
 func (r *Renewer) clk() clock.Clock {
@@ -97,7 +130,10 @@ func (r *Renewer) Run(ctx context.Context) {
 		if cur == nil {
 			return
 		}
-		if !r.sleep(ctx, cur.ReceivedAt.Add(r.renewAfter(cur)).Sub(r.clk().Now())) {
+		// Never sooner than BackoffMin: a certificate issued with a lifetime of
+		// seconds must not turn the renewer into a tight loop against the CP.
+		due := cur.ReceivedAt.Add(r.renewAfter(cur))
+		if !r.sleep(ctx, max(due.Sub(r.clk().Now()), BackoffMin)) {
 			return
 		}
 		backoff := BackoffMin
@@ -107,6 +143,9 @@ func (r *Renewer) Run(ctx context.Context) {
 				r.OnRenew(outcome)
 			}
 			if err == nil {
+				if !r.flushPersist(ctx) {
+					return
+				}
 				break
 			}
 			if r.Logger != nil && ctx.Err() == nil {
@@ -155,8 +194,12 @@ func (r *Renewer) renewOnce(ctx context.Context, cur *Credential) (string, error
 	// The control plane already counts the new certificate as the worker's
 	// lineage head, so it is installed even when it cannot be written: a retry
 	// from the superseded serial would look like a copied key.
-	if perr := persist(r.StateDir, got); perr != nil && r.Logger != nil {
-		r.Logger.Error("worker cert renewed but could not be persisted; a restart will reuse the previous certificate", "error", perr.Error())
+	if perr := persist(r.StateDir, got); perr != nil {
+		r.unpersisted = got
+		if r.Logger != nil {
+			r.Logger.Error("worker cert renewed but could not be persisted; retrying. A restart before it is written reloads the superseded certificate, whose renewal the control plane treats as a copied key (lineage conflict) and revokes the worker",
+				"serial", got.Serial(), "error", perr.Error())
+		}
 	}
 	r.Source.Set(got)
 	if r.CloseIdle != nil {

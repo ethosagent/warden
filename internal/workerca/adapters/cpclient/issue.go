@@ -57,6 +57,14 @@ func (e *ControlPlaneError) Permanent() bool {
 	return e.Status != http.StatusTooManyRequests && e.Status < 500
 }
 
+// ErrUnreachable marks a failure that is the control plane's availability, not
+// this worker's: no transport, a 5xx or a 429. Anything else (a refusal, a bad
+// response, a local file error) is not retried as "the control plane is down".
+var ErrUnreachable = errors.New("cpclient: control plane unreachable")
+
+// Is makes a retryable control plane answer (429, 5xx) an ErrUnreachable.
+func (e *ControlPlaneError) Is(target error) bool { return target == ErrUnreachable && !e.Permanent() }
+
 // IsPermanent reports whether err is a control plane refusal retrying cannot fix.
 func IsPermanent(err error) bool {
 	var cpe *ControlPlaneError
@@ -93,12 +101,12 @@ func post(ctx context.Context, client *http.Client, url string, body any) (*issu
 	resp, err := client.Do(req)
 	if err != nil {
 		// The URL and the transport error carry no secret (the body is not in them).
-		return nil, fmt.Errorf("cpclient: POST %s: %w", req.URL.Path, err)
+		return nil, fmt.Errorf("cpclient: POST %s: %w: %w", req.URL.Path, ErrUnreachable, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
-		return nil, fmt.Errorf("cpclient: read the response: %w", err)
+		return nil, fmt.Errorf("cpclient: read the response: %w: %w", ErrUnreachable, err)
 	}
 	if resp.StatusCode != http.StatusCreated {
 		cpe := &ControlPlaneError{Status: resp.StatusCode}
@@ -168,6 +176,8 @@ func verifyIssued(r *issuedResponse, key crypto.Signer, now time.Time, wantID, w
 		return nil, errors.New("cpclient: the certificate is in a different trust domain than the one renewing")
 	case !keyMatches(key, leaf):
 		return nil, errors.New("cpclient: the certificate does not carry the key this worker generated")
+	case now.Before(leaf.NotBefore):
+		return nil, errors.New("cpclient: the certificate is not valid yet")
 	case !now.Before(leaf.NotAfter):
 		return nil, errors.New("cpclient: the certificate is already expired")
 	}

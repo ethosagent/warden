@@ -723,11 +723,13 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		// the SafeDialer — SSRF protection is for agent-driven egress only.
 		centralClient, ccErr := newControlPlaneHTTPClient(10*time.Second, pol.Central.CACert)
 		centralToken, centralID := os.Getenv(pol.Central.TokenEnv), expandEnv(pol.Central.ProxyID)
-		if wcert != nil {
-			// The worker certificate is the credential: the shared client presents it
-			// and no Authorization header is sent.
+		certCentral := wcert != nil && wcert.centralShared
+		if certCentral {
+			// Same origin as the control plane: the worker certificate is the
+			// credential, the shared client presents it and no Authorization
+			// header is sent. A separate aggregator keeps its bearer client.
 			centralClient, ccErr = wcert.Client(10*time.Second), nil
-			centralToken, centralID = "", wcert.WorkerID()
+			centralToken = ""
 		}
 		if ccErr != nil {
 			return ccErr
@@ -740,6 +742,13 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		// Same shutdown hygiene as the policy client above.
 		defer remote.CloseIdleConnections()
 		syncWorker = analytics.NewSyncWorker(store, remote, centralID, pol.Central.BatchSize, pol.Central.BufferCap, pol.Central.Interval)
+		if certCentral {
+			// The id is the certificate's, which a worker that enrolled late gets
+			// after this point: read it per request and per batch.
+			remote.SetProxyIDFunc(wcert.WorkerID)
+			syncWorker.SetProxyIDFunc(wcert.WorkerID)
+			centralID = wcert.WorkerID()
+		}
 		logger.Info("central worker enabled", "endpoint", pol.Central.Endpoint, "proxyID", centralID)
 	}
 

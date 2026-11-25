@@ -54,6 +54,7 @@ type certCP struct {
 	enrolls    atomic.Int64
 	renews     atomic.Int64
 	down       atomic.Bool
+	forge      atomic.Bool // answer enrollments with a response that names another worker
 	mu         sync.Mutex
 	bearers    []string // Authorization header of every request
 	heartbeats []map[string]any
@@ -190,6 +191,9 @@ func (cp *certCP) issueTo(w http.ResponseWriter, csrPEM string) {
 		return
 	}
 	leaf := cp.issue(csr.PublicKey, cp.workerID, cp.clk.Now().Add(cp.ttl))
+	if cp.forge.Load() {
+		leaf = cp.issue(csr.PublicKey, "forged-id", cp.clk.Now().Add(cp.ttl))
+	}
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"workerId": cp.workerID, "spiffeId": leaf.URIs[0].String(), "certificate": string(workerca.EncodeCertsPEM(leaf)),
@@ -241,7 +245,7 @@ func certLogger() (*slog.Logger, *syncBuf) {
 
 func pollPolicy(t *testing.T, wc *workerCert, ep string) (*config.RemoteProvider, error) {
 	t.Helper()
-	rp, err := config.NewRemoteProvider(ep, "")
+	rp, err := config.NewRemoteProvider(ep, "shared-token")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -414,17 +418,25 @@ func TestCertClientUnsetConfigBuildsNothingAndStillSendsTheBearer(t *testing.T) 
 		_, _ = io.WriteString(w, `{"allowlist":[{"domain":"a.example"}]}`)
 	}))
 	defer srv.Close()
+	caPath := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(caPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// What the worker builds when nothing is enrolled: a provider with no cert client.
 	rp, err := config.NewRemoteProvider(srv.URL, "shared-token")
 	if err != nil {
 		t.Fatal(err)
 	}
-	rp.SetHTTPClient(srv.Client()) // for the TLS trust only: this is cert mode
-	_ = rp.Pull()
-	if seen.Load() != "" {
-		t.Errorf("cert mode sent Authorization %q", seen.Load())
+	if err := rp.SetCACert(caPath); err != nil {
+		t.Fatal(err)
 	}
-	rp2, _ := config.NewRemoteProvider(srv.URL, "shared-token")
-	rp2.CloseIdleConnections()
+	if err := rp.Pull(); err != nil {
+		t.Fatal(err)
+	}
+	if seen.Load() != "Bearer shared-token" {
+		t.Errorf("Authorization = %q, want the bearer", seen.Load())
+	}
+	rp.CloseIdleConnections()
 }
 
 func TestCertClientRejectedTokenStopsStartupUnreachableDoesNot(t *testing.T) {
@@ -485,10 +497,11 @@ func TestCertClientRenewsOnTheFakeClock(t *testing.T) {
 	before := wc.source.Current()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	wc.jitter = func() float64 { return 0 } // otherwise the renewal lands anywhere in 10.8h to 13.2h
 	wc.start(ctx, nil)
 	waitFor(t, "the renewer to arm", func() bool { return clk.PendingTimers() >= 2 })
 
-	clk.Advance(13 * time.Hour) // half of 24h, plus the most the jitter can add (10%)
+	clk.Advance(12 * time.Hour) // exactly half of the 24h lifetime
 	waitFor(t, "the renewed certificate", func() bool { return wc.source.Current().Serial() != before.Serial() })
 	if cp.renews.Load() < 1 {
 		t.Error("no /control/renew request was made")
@@ -546,5 +559,124 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 			t.Fatalf("timed out waiting for %s", what)
 		}
 		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestCertClientLocalAndVerificationFailuresStopStartup(t *testing.T) {
+	clk := clocktest.NewFake(certT0)
+	cp := newCertCP(t, clk)
+	logger, _ := certLogger()
+	t.Setenv("WARDEN_TEST_ENROLL_TOKEN", "wet_good")
+
+	// A state dir that cannot be created is not "the control plane is down".
+	file := filepath.Join(t.TempDir(), "afile")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if wc, err := newWorkerCert(context.Background(), cp.config(filepath.Join(file, "state")), config.CentralConfig{}, clk, logger); err == nil {
+		t.Fatalf("an uncreatable stateDir let the worker start: %v", wc)
+	}
+	// A response that fails verification neither.
+	cp.forge.Store(true)
+	if _, err := newWorkerCert(context.Background(), cp.config(t.TempDir()), config.CentralConfig{}, clk, logger); err == nil {
+		t.Fatal("a response for another worker id let the worker start")
+	}
+}
+
+func TestCertClientBackgroundEnrollmentRefusesAnotherWorkerID(t *testing.T) {
+	clk := clocktest.NewFake(certT0)
+	cp := newCertCP(t, clk)
+	logger, logs := certLogger()
+	t.Setenv("WARDEN_TEST_ENROLL_TOKEN", "wet_good")
+	cp.down.Store(true)
+	// central.proxyID names a worker the certificate will not be for.
+	wc, err := newWorkerCert(context.Background(), cp.config(t.TempDir()), config.CentralConfig{ProxyID: "expected-id"}, clk, logger)
+	if err != nil || wc.source.Current() != nil {
+		t.Fatalf("boot with the control plane down: %v", err)
+	}
+	cp.down.Store(false)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	wc.start(ctx, nil)
+	waitFor(t, "the enrollment retry timer", func() bool { return clk.PendingTimers() == 2 })
+	waitFor(t, "the refusal", func() bool {
+		clk.Advance(5 * time.Second)
+		return strings.Contains(logs.String(), "worker certificate refused")
+	})
+	if wc.source.Current() != nil {
+		t.Error("installed a certificate for another id than central.proxyID")
+	}
+}
+
+func TestCertClientCentralSameOriginGate(t *testing.T) {
+	clk := clocktest.NewFake(certT0)
+	cp := newCertCP(t, clk)
+	logger, _ := certLogger()
+	t.Setenv("WARDEN_TEST_ENROLL_TOKEN", "wet_good")
+	missing := filepath.Join(t.TempDir(), "nope.pem")
+
+	// Same origin: the ingest forwarder presents the certificate and central.caCert
+	// joins the shared pool (so an unreadable one is an error).
+	same := config.CentralConfig{Mode: "worker", Endpoint: cp.srv.URL + "/central/ingest", CACert: missing}
+	if _, err := newWorkerCert(context.Background(), cp.config(t.TempDir()), same, clk, logger); err == nil {
+		t.Error("central.caCert was not folded into the shared pool for the same origin")
+	}
+	same.CACert = cp.caPath
+	wc, err := newWorkerCert(context.Background(), cp.config(t.TempDir()), same, clk, logger)
+	if err != nil || !wc.centralShared {
+		t.Fatalf("same origin: %v, shared %v", err, wc != nil && wc.centralShared)
+	}
+
+	// A separate aggregator keeps its bearer client and its own trust.
+	other := config.CentralConfig{Mode: "worker", Endpoint: "https://aggregator.example:9443/central/ingest", CACert: missing}
+	wc, err = newWorkerCert(context.Background(), cp.config(t.TempDir()), other, clk, logger)
+	if err != nil {
+		t.Fatalf("a separate aggregator's CA leaked into the control plane trust pool: %v", err)
+	}
+	if wc.centralShared {
+		t.Error("a different origin shares the certificate client")
+	}
+	// Scheme and port are part of the origin.
+	for _, ep := range []string{"http://" + strings.TrimPrefix(cp.srv.URL, "https://") + "/x", strings.Replace(cp.srv.URL, "127.0.0.1:", "127.0.0.1:1", 1) + "/x"} {
+		if sameOrigin(cp.endpoint(), ep) {
+			t.Errorf("sameOrigin(%s) = true", ep)
+		}
+	}
+}
+
+func TestCertClientLateEnrollmentLabelsIngestWithTheCertificateID(t *testing.T) {
+	clk := clocktest.NewFake(certT0)
+	cp := newCertCP(t, clk)
+	logger, _ := certLogger()
+	t.Setenv("WARDEN_TEST_ENROLL_TOKEN", "wet_good")
+	cp.down.Store(true)
+	wc, err := newWorkerCert(context.Background(), cp.config(t.TempDir()), config.CentralConfig{}, clk, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote, err := analytics.NewHTTPRemoteStore(cp.srv.URL+"/central/ingest", "", wc.WorkerID(), wc.Client(cpClientTimeout))
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote.SetProxyIDFunc(wc.WorkerID)
+	if wc.WorkerID() != "" {
+		t.Fatalf("id before enrollment = %q", wc.WorkerID())
+	}
+	cp.down.Store(false)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	wc.start(ctx, nil)
+	waitFor(t, "the enrollment retry timer", func() bool { return clk.PendingTimers() == 2 })
+	waitFor(t, "late enrollment", func() bool {
+		clk.Advance(5 * time.Second)
+		return wc.source.Current() != nil
+	})
+	if err := remote.SendBatch([]analytics.Event{{Timestamp: certT0, Domain: "a.example", Port: 443, Decision: "allow"}}); err != nil {
+		t.Fatal(err)
+	}
+	cp.mu.Lock()
+	defer cp.mu.Unlock()
+	if len(cp.ingestIDs) != 1 || cp.ingestIDs[0] != "worker-1/worker-1" {
+		t.Errorf("ingest saw %v, want the late certificate's id in the header", cp.ingestIDs)
 	}
 }

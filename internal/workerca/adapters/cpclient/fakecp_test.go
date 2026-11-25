@@ -62,6 +62,12 @@ func newFakeCA(t *testing.T) *fakeCA {
 // issue signs a client certificate for pub with the worker SPIFFE id.
 func (ca *fakeCA) issue(t testing.TB, pub any, td, id string, notBefore, notAfter time.Time) *x509.Certificate {
 	t.Helper()
+	return ca.issueWith(t, pub, td, id, notBefore, notAfter, nil)
+}
+
+// issueWith is issue with a hook to bend the template.
+func (ca *fakeCA) issueWith(t testing.TB, pub any, td, id string, notBefore, notAfter time.Time, mut func(*x509.Certificate)) *x509.Certificate {
+	t.Helper()
 	ca.mu.Lock()
 	ca.next++
 	serial := ca.next
@@ -70,6 +76,9 @@ func (ca *fakeCA) issue(t testing.TB, pub any, td, id string, notBefore, notAfte
 		SerialNumber: big.NewInt(serial), NotBefore: notBefore, NotAfter: notAfter,
 		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, BasicConstraintsValid: true,
 		URIs: []*url.URL{{Scheme: "spiffe", Host: td, Path: "/warden/worker/" + id}},
+	}
+	if mut != nil {
+		mut(tmpl)
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.inter, pub, ca.interKey)
 	if err != nil {
@@ -103,6 +112,8 @@ type fakeCP struct {
 	enrolls, renews atomic.Int64
 	// failRenew is how many renewals answer 503 before one succeeds.
 	failRenew atomic.Int64
+	// failEnroll is how many enrollments answer 503 first.
+	failEnroll atomic.Int64
 	// tamper, when set, edits the response before it is sent.
 	tamper func(resp map[string]any, csr *x509.CertificateRequest)
 	// lastToken is the token the last enrollment carried.
@@ -132,6 +143,10 @@ func (cp *fakeCP) handle(enroll bool) http.HandlerFunc {
 		if enroll {
 			cp.enrolls.Add(1)
 			cp.lastToken.Store(req.Token)
+			if cp.failEnroll.Add(-1) >= 0 {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
 			if req.Token != "wet_good" {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return

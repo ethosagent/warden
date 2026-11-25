@@ -58,7 +58,9 @@ type HTTPRemoteStore struct {
 	endpoint string
 	token    string
 	proxyID  string
-	client   *http.Client
+	// proxyIDFn, when set, supplies the X-Warden-Proxy-ID value per request.
+	proxyIDFn func() string
+	client    *http.Client
 }
 
 var _ RemoteStore = (*HTTPRemoteStore)(nil)
@@ -78,6 +80,11 @@ func NewHTTPRemoteStore(endpoint, token, proxyID string, client *http.Client) (*
 	}
 	return &HTTPRemoteStore{endpoint: endpoint, token: token, proxyID: proxyID, client: client}, nil
 }
+
+// SetProxyIDFunc replaces the fixed proxy id with a function read on every
+// request (a worker whose id is the one in a certificate enrolled after boot).
+// An empty result omits the header. Call before the first send.
+func (h *HTTPRemoteStore) SetProxyIDFunc(fn func() string) { h.proxyIDFn = fn }
 
 // SendBatch posts events to the aggregator (in the ingest envelope). It returns
 // an error on transport failure or a non-2xx status so the SyncWorker preserves
@@ -121,8 +128,12 @@ func (h *HTTPRemoteStore) post(env ingestEnvelope) error {
 	if h.token != "" {
 		req.Header.Set("Authorization", "Bearer "+h.token)
 	}
-	if h.proxyID != "" {
-		req.Header.Set(ProxyIDHeader, h.proxyID)
+	id := h.proxyID
+	if h.proxyIDFn != nil {
+		id = h.proxyIDFn()
+	}
+	if id != "" {
+		req.Header.Set(ProxyIDHeader, id)
 	}
 	resp, err := h.client.Do(req)
 	if err != nil {
