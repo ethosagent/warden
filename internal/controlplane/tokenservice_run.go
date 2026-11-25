@@ -13,6 +13,7 @@ import (
 	"github.com/ethosagent/warden/internal/clock"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/cpstate"
+	"github.com/ethosagent/warden/internal/dashboard"
 	"github.com/ethosagent/warden/internal/identity"
 	"github.com/ethosagent/warden/internal/identity/adapters/oidc"
 	"github.com/ethosagent/warden/internal/keys"
@@ -62,6 +63,18 @@ func resolveTokenService(logger *slog.Logger, configPath, stateDir string, id co
 	return tc, nil
 }
 
+// checkIssuerCollision refuses identity settings whose issuer equals the issuer
+// this control plane mints Warden tokens with. resolveTokenService checks the
+// file at startup; this covers identity.issuer changing at runtime (settings
+// writes, versioned publishes, rollbacks, applied drafts). It is a no-op while
+// the token service is off.
+func (s *Server) checkIssuerCollision(id *config.IdentitySettings) error {
+	if id == nil || s.cfg.TokenIssuer == "" || !sameIssuer(s.cfg.TokenIssuer, id.Issuer) {
+		return nil
+	}
+	return &dashboard.InvalidPolicyError{Err: fmt.Errorf("identity.issuer %q must differ from tokenService.issuer %q (Warden tokens and IdP tokens are told apart by their issuer)", id.Issuer, s.cfg.TokenIssuer)}
+}
+
 // sameIssuer reports whether two issuer URLs name the same issuer, ignoring a
 // trailing slash and ASCII case (scheme and host are case-insensitive, and an
 // operator typing one with a slash must not slip past the collision check).
@@ -84,8 +97,8 @@ const tokenKeyPublishWindow = maxLongPollWait + time.Minute
 // window comes from the persisted key metadata, so a restart does not reset it.
 //
 // served is the second hook: the kid must also be in the JWKS this server
-// serves. TODO(#96): also require the kid to be in the policy server's
-// last-served bundle tokenJWKS.
+// serves. TODO(mint guard, before/with #111): also require the kid to be in
+// the policy server's last-served bundle tokenJWKS.
 type servedSigners struct {
 	inner   tokensvc.Signers
 	records func(purpose string) []keys.Record

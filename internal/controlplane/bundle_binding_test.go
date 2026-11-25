@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,6 +15,8 @@ import (
 	"github.com/ethosagent/warden/internal/agentreg"
 	"github.com/ethosagent/warden/internal/bundle"
 	"github.com/ethosagent/warden/internal/clock/clocktest"
+	"github.com/ethosagent/warden/internal/config"
+	"github.com/ethosagent/warden/internal/dashboard"
 	"github.com/ethosagent/warden/internal/identity"
 	"github.com/ethosagent/warden/internal/keys"
 	"github.com/ethosagent/warden/internal/keys/adapters/signer"
@@ -31,8 +34,8 @@ func bindingDecodeSegment(t *testing.T, seg string, v any) {
 
 // TestBundleThumbprintMatchesCnf: the thumbprint the policy wire (and so the
 // signed bundle) serves for an agent key is the cnf.jkt of the token minted for
-// that key; the token carries typ wt+jwt and the verified email; and a registry
-// change moves the served ETag, which wakes the long poll.
+// that key, and the token carries typ wt+jwt and the verified email. The signed
+// bundle's reaction to a registry change is TestBundleAgentKeyRemoval.
 func TestBundleThumbprintMatchesCnf(t *testing.T) {
 	e := newLimitsEnv(t, nil)
 	rec := e.post(e.form(e.subject("user-1", limitsGroup), e.assertion(t, e.agentID, e.kid)), "198.51.100.1:1", nil)
@@ -99,7 +102,7 @@ func TestBundleThumbprintMatchesCnf(t *testing.T) {
 	if _, err := e.srv.agents.Create(context.Background(), agentreg.Agent{ID: "agent-b", Keys: []agentreg.Key{{KID: "b-key", JWK: otherJWK}}, AllowedGroups: []string{"eng"}}, "test"); err != nil {
 		t.Fatal(err)
 	}
-	jkt, status, etag := served()
+	jkt, status, _ := served()
 	if got := jkt[e.agentID]; len(got) != 1 || got[0] != claims.Cnf.JKT || status != "active" {
 		t.Fatalf("served jkt %v (%s), minted cnf.jkt %q: they must be the same thumbprint", got, status, claims.Cnf.JKT)
 	}
@@ -111,8 +114,8 @@ func TestBundleThumbprintMatchesCnf(t *testing.T) {
 	if _, err := e.srv.agents.SetStatus(context.Background(), e.agentID, agentreg.StatusDisabled, a.Revision, "test"); err != nil {
 		t.Fatal(err)
 	}
-	if _, status, next := served(); status != "disabled" || next == etag {
-		t.Errorf("after the disable: status %q, ETag unchanged=%v; the served policy must move", status, next == etag)
+	if _, status, _ := served(); status != "disabled" {
+		t.Errorf("after the disable: status %q, want disabled", status)
 	}
 }
 
@@ -196,5 +199,129 @@ func TestBundleTokenIssuerUpgrade(t *testing.T) {
 	v2 := h2.verify(t, h2.bundleResp(t).body, btState(v1))
 	if v2.Seq <= v1.Seq || v2.Bundle.TokenIssuer != bundleTestIssuer || h2.degraded() {
 		t.Errorf("upgrade: seq %d -> %d issuer %q degraded=%v", v1.Seq, v2.Seq, v2.Bundle.TokenIssuer, h2.degraded())
+	}
+}
+
+// TestIdentityIssuerCollisionRefusedAtRuntime: while the token service is on, a
+// settings write that sets identity.issuer to the token issuer is refused in
+// file mode and in versioned mode (no version created), naming both keys; with
+// the service off, or a different issuer, the write goes through.
+func TestIdentityIssuerCollisionRefusedAtRuntime(t *testing.T) {
+	colliding := config.SettingsWire{Identity: testIdentity()}
+	colliding.Identity.Issuer = bundleTestIssuer
+	colliding.Identity.InternalIssuerURL = ""
+	ok := config.SettingsWire{Identity: testIdentity()}
+
+	check := func(t *testing.T, err error) {
+		t.Helper()
+		if err == nil || !strings.Contains(err.Error(), "identity.issuer") || !strings.Contains(err.Error(), "tokenService.issuer") {
+			t.Fatalf("err = %v, want a refusal naming identity.issuer and tokenService.issuer", err)
+		}
+		var ip *dashboard.InvalidPolicyError
+		if !errors.As(err, &ip) {
+			t.Errorf("err type %T, want a dashboard.InvalidPolicyError (a 4xx, not a 500)", err)
+		}
+	}
+
+	t.Run("file mode", func(t *testing.T) {
+		srv := New(Config{PolicyPath: writePolicyFile(t, "api.openai.com")})
+		if err := srv.writeSettings(colliding); err != nil {
+			t.Fatalf("token service off: %v", err)
+		}
+		srv.cfg.TokenIssuer = bundleTestIssuer
+		check(t, srv.writeSettings(colliding))
+		if err := srv.writeSettings(ok); err != nil {
+			t.Fatalf("a different issuer: %v", err)
+		}
+	})
+	t.Run("versioned mode", func(t *testing.T) {
+		srv, _ := newPublishServer(t, writePolicyFile(t, "api.openai.com"), config.ConsoleConfig{})
+		srv.cfg.TokenIssuer = bundleTestIssuer
+		before := mustHead(t, srv.versions)
+		check(t, srv.writeSettings(colliding))
+		if after := mustHead(t, srv.versions); after != before {
+			t.Errorf("head moved %d -> %d on a refused write", before, after)
+		}
+		if err := srv.writeSettings(ok); err != nil {
+			t.Fatalf("a different issuer: %v", err)
+		}
+	})
+}
+
+// TestBundleAgentKeyRemoval: removing one key of an enabled agent moves the
+// signed bundle (a new seq, an agent_registry row, a new ETag a held long poll
+// wakes on) and the removed thumbprint is gone from the signed registeredAgents.
+func TestBundleAgentKeyRemoval(t *testing.T) {
+	h := newBundleHarnessIssuer(t, BundlesOffer, writePolicyFile(t, "api.openai.com"), nil, nil, nil, nil, bundleTestIssuer)
+	mkKey := func(kid string) agentreg.Key {
+		s, err := signer.GenerateLocal(keys.AlgEdDSA)
+		if err != nil {
+			t.Fatal(err)
+		}
+		jwk, _ := json.Marshal(map[string]string{"kty": "OKP", "crv": "Ed25519", "kid": kid,
+			"x": base64.RawURLEncoding.EncodeToString(s.Public().(ed25519.PublicKey))})
+		return agentreg.Key{KID: kid, JWK: jwk}
+	}
+	ctx := context.Background()
+	created, err := h.s.agents.Create(ctx, agentreg.Agent{ID: "agent-a", Keys: []agentreg.Key{mkKey("k1"), mkKey("k2")}, AllowedGroups: []string{"eng"}}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.ps.Refresh()
+	signedJKT := func() (bundle.Verified, []string) {
+		r := h.bundleResp(t)
+		v := h.verify(t, r.body, bundle.State{})
+		var wire struct {
+			Agents []struct {
+				ID  string   `json:"id"`
+				JKT []string `json:"jkt"`
+			} `json:"registeredAgents"`
+		}
+		if err := json.Unmarshal(v.Bundle.Policy, &wire); err != nil {
+			t.Fatal(err)
+		}
+		for _, a := range wire.Agents {
+			if a.ID == "agent-a" {
+				return v, a.JKT
+			}
+		}
+		t.Fatal("agent-a is not in the signed bundle")
+		return v, nil
+	}
+	before, both := signedJKT()
+	if len(both) != 2 {
+		t.Fatalf("signed jkt = %v, want both keys", both)
+	}
+	etag := h.bundleResp(t).hdr.Get("ETag")
+	removed := agentreg.Thumbprints(agentreg.Agent{Keys: created.Keys[1:]})[0]
+
+	held := make(chan btResp, 1)
+	go func() {
+		req := httptest.NewRequest(http.MethodGet, "/policy?wait=30s", nil)
+		req.Header.Set("Accept", BundleMediaType)
+		req.Header.Set("If-None-Match", etag)
+		rec := httptest.NewRecorder()
+		h.ps.ServePolicy(rec, req)
+		held <- btResp{rec.Code, rec.Header(), rec.Body.Bytes()}
+	}()
+	created.Keys = created.Keys[:1]
+	if _, err := h.s.agents.Update(ctx, created, "test"); err != nil {
+		t.Fatal(err)
+	}
+	h.ps.Refresh()
+	select {
+	case r := <-held:
+		if r.code != http.StatusOK {
+			t.Fatalf("long poll = %d", r.code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the key removal did not wake the long poll")
+	}
+	after, left := signedJKT()
+	if after.Seq <= before.Seq || len(left) != 1 || left[0] == removed {
+		t.Errorf("seq %d -> %d, signed jkt %v, removed %s: the removed key must be gone and the seq must move", before.Seq, after.Seq, left, removed)
+	}
+	if rows := h.publishRows(t); rows[len(rows)-1].Reason != agentRegistryOverlayName {
+		t.Errorf("newest row = %q, want %q", rows[len(rows)-1].Reason, agentRegistryOverlayName)
 	}
 }

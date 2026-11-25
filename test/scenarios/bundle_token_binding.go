@@ -59,8 +59,30 @@ func bundleTokenBinding(t *testing.T, h *harness.H) {
 		t.Error("private key material in the bundle")
 	}
 
-	// The registry change moves the served bundle: the key stops binding.
+	// Replacing the key of the (still enabled) agent moves the signed bundle:
+	// the old thumbprint is gone from the signed registeredAgents and the new
+	// one is there, so a token bound to the old key no longer matches.
+	oldJKT := served[0]
 	etag := cp.FetchBundle("").Header.Get("ETag")
+	h.RotateTokenAgentKey("bound-agent")
+	var rotated bundle.Verified
+	h.Eventually("the served bundle moves after the agent key is replaced", func() bool {
+		h.Clock().Advance(3 * time.Second)
+		r := cp.FetchBundle(etag)
+		if r.Status != http.StatusOK {
+			return false
+		}
+		rotated = bundleSeqOf(t, h, r, bundleApplied(first))
+		return rotated.Seq > first.Seq
+	})
+	now := servedJKT(t, h, "bound-agent")
+	if len(now) != 1 || now[0] == oldJKT {
+		t.Fatalf("signed jkt after the key replacement = %v, the old thumbprint %s must be gone", now, oldJKT)
+	}
+	first = rotated
+
+	// A disable moves it again.
+	etag = cp.FetchBundle("").Header.Get("ETag")
 	h.DisableTokenAgent("bound-agent")
 	var after bundle.Verified
 	h.Eventually("the served bundle moves after the agent is disabled", func() bool {

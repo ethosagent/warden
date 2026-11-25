@@ -239,6 +239,39 @@ func (h *H) DisableTokenAgent(id string) {
 	}
 }
 
+// RotateTokenAgentKey replaces agent id's only key with a fresh one (the agent
+// stays enabled), straight on the state database like the offline CLI. The
+// control plane notices on its next registry watch tick, so a scenario advances
+// the clock until the change shows. The old key can no longer authenticate.
+func (h *H) RotateTokenAgentKey(id string) {
+	h.tb.Helper()
+	priv, err := signer.GenerateLocal(keys.AlgEdDSA)
+	if err != nil {
+		h.tb.Fatalf("harness: generate an agent key: %v", err)
+	}
+	pub, ok := priv.Public().(ed25519.PublicKey)
+	if !ok {
+		h.tb.Fatal("harness: the agent key is not Ed25519")
+	}
+	kid := id + "-key-2"
+	jwk, err := json.Marshal(map[string]string{
+		"kty": "OKP", "crv": "Ed25519", "kid": kid, "x": base64.RawURLEncoding.EncodeToString(pub),
+	})
+	if err != nil {
+		h.tb.Fatalf("harness: encode an agent key: %v", err)
+	}
+	store, closeDB := h.agentStore()
+	defer closeDB()
+	a, err := store.Get(context.Background(), id)
+	if err != nil {
+		h.tb.Fatalf("harness: read agent %s: %v", id, err)
+	}
+	a.Keys = []agentreg.Key{{KID: kid, JWK: jwk}}
+	if _, err := store.Update(context.Background(), a, "harness"); err != nil {
+		h.tb.Fatalf("harness: rotate the key of agent %s: %v", id, err)
+	}
+}
+
 // agentStore opens the control plane's agent registry on its state database.
 func (h *H) agentStore() (*agentregsqlite.Store, func()) {
 	h.tb.Helper()
