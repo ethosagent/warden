@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ethosagent/warden/internal/adminaudit"
+	"github.com/ethosagent/warden/internal/apikeys/adapters/sqlitestore"
 	"github.com/ethosagent/warden/internal/clock"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/cpstate"
@@ -48,10 +49,15 @@ func resolveKeys(configPath, stateDir string) (config.KeysConfig, error) {
 // stateMigrationsFor returns StateMigrations with the feature-gated ones the
 // config turns on: signing_keys/0001 is applied only with keys.enabled, so a
 // control plane without keys creates no table.
-func stateMigrationsFor(kc config.KeysConfig) []cpstate.Migration {
+func stateMigrationsFor(kc config.KeysConfig, cc config.ConsoleConfig) []cpstate.Migration {
 	migs := StateMigrations()
 	if kc.Enabled {
 		migs = cpstate.Enable(migs, metastore.MigrationID)
+	}
+	// api_keys/0001 likewise only with console.apiKeys.enabled: no table is
+	// created for a control plane without API keys.
+	if cc.APIKeys.Enabled {
+		migs = cpstate.Enable(migs, sqlitestore.MigrationID)
 	}
 	return migs
 }

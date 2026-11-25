@@ -3,6 +3,8 @@ package worker
 import (
 	"io"
 	"log/slog"
+	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -285,5 +287,25 @@ func TestApplier_ObservabilityPendingRestart(t *testing.T) {
 	// Observability is apply-on-restart: nothing about the live data plane changes.
 	if *a.liveMCPGW != nil || a.liveCompliance {
 		t.Error("observability change must not alter live gateway/compliance state")
+	}
+}
+
+// TestApplier_NoMCPSwapAfterShutdown pins the shutdown race: an Apply that is
+// still in flight after the shutdown defer took the final gateway must not
+// install a new one (nothing would Close it and its flusher goroutine would
+// leak), and must close the one it just built.
+func TestApplier_NoMCPSwapAfterShutdown(t *testing.T) {
+	a, fake, _ := newTestApplier(t)
+	closed := true
+	a.mcpClosed = &closed
+	fake.settings = &config.SettingsWire{MCP: &config.MCPSettings{Enabled: true, Mode: "monitor"}}
+	a.Apply()
+	if *a.liveMCPGW != nil {
+		t.Fatal("Apply installed an MCP gateway after shutdown took the live one")
+	}
+	buf := make([]byte, 1<<20)
+	n := runtime.Stack(buf, true)
+	if strings.Contains(string(buf[:n]), "(*Gateway).flushLoop") {
+		t.Fatal("the gateway Apply built after shutdown was not closed: flushLoop leaked")
 	}
 }
