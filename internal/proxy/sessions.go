@@ -107,12 +107,15 @@ type session struct {
 	hard     bool
 	reported bool
 	armed    atomic.Bool
+	// pending is set from newSession until the creator has bound the identity
+	// and called armExpiry; the recheck sweep leaves a pending session alone.
+	pending bool
 }
 
 // newSession builds an unregistered session; it joins the registry when bind
 // sees the first identity.
 func (r *sessionRegistry) newSession(proto, domain string, port int, interruptible bool, c io.Closer) *session {
-	s := &session{reg: r, proto: proto, domain: domain, port: port, interruptible: interruptible, closers: []io.Closer{c}, heapIdx: -1}
+	s := &session{reg: r, proto: proto, domain: domain, port: port, interruptible: interruptible, closers: []io.Closer{c}, heapIdx: -1, pending: true}
 	r.mu.Lock()
 	r.all[s] = struct{}{}
 	refused := r.refuse

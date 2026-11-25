@@ -292,13 +292,21 @@ func TestLifetime(t *testing.T) {
 		})
 		Run(t, s, "worker", revokedKeyCases)
 		s.Eventually("the tunnel opened with the revoked key's token to be closed by the post-apply re-check", tunnelOf(s, keyT1).Closed)
-		// The close is one identity_required deny event, one counted block and one
-		// invalid/unknown_kid verification of its own (the refused probes above add
-		// theirs), and nothing reached the upstream.
+		// The tunnel's close is its own deny event: the terminated tunnel's protocol
+		// is https, while the refused probe CONNECTs are tcp. Exactly one such
+		// identity_required event exists, and the unknown_kid verification count rose.
+		closes := 0
+		for _, ev := range s.DenyEvents(t, w) {
+			if ev.Reason == "identity_required" && ev.Protocol == "https" {
+				closes++
+			}
+		}
+		if closes != 1 {
+			t.Errorf("%d identity_required events for the closed tunnel (https), want exactly 1", closes)
+		}
 		after := s.snapshot(t, w, watch)
-		if after.denyCount <= before.denyCount || after.blocked <= before.blocked || after.identity <= before.identity {
-			t.Errorf("the tunnel's close left no identity_required event (%d -> %d), blocked count (%v -> %v) or unknown_kid verification (%v -> %v)",
-				before.denyCount, after.denyCount, before.blocked, after.blocked, before.identity, after.identity)
+		if after.identity <= before.identity {
+			t.Errorf("no unknown_kid verification counted (%v -> %v)", before.identity, after.identity)
 		}
 		if after.hits != before.hits {
 			t.Errorf("%d upstream hits during the revocation, want 0", after.hits-before.hits)

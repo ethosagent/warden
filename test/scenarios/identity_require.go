@@ -224,8 +224,8 @@ func identityRequireSessionExpiry(t *testing.T, h *harness.H) {
 	})
 	// One event per closed session: the setup probe's keep-alive (opened under
 	// attribute mode, armed by the flip's sweep) expires with the held one.
-	if n := expired(); n < 1 {
-		t.Errorf("%d identity_expired deny events, want at least 1", n)
+	if n := expired(); n < 1 || n > 2 {
+		t.Errorf("%d identity_expired deny events, want 1 or 2 (the held session, plus the setup probe's keep-alive)", n)
 	}
 	if h.MetricsAvailable() {
 		key := harness.MetricKey("warden.blocked.total", map[string]string{"reason": "identity_expired"})

@@ -144,7 +144,13 @@ func (s *session) setGraceful(f func()) {
 // the session was cut, and the caller must not dial for it. Callers that cannot
 // act on a cut (h1/h2 sessions, whose first request re-checks anyway) pass false.
 func (p *Proxy) armExpiry(s *session, ci connIdentity, enforce bool) (cut bool) {
-	if s == nil || ci.status() != identity.StatusValid || ci.Claims.TokenType != identity.TokenWarden || ci.Expiry.IsZero() {
+	if s == nil {
+		return false
+	}
+	s.reg.mu.Lock()
+	s.pending = false // the creator has bound the identity: the sweep may judge it
+	s.reg.mu.Unlock()
+	if ci.status() != identity.StatusValid || ci.Claims.TokenType != identity.TokenWarden || ci.Expiry.IsZero() {
 		return false
 	}
 	h := p.identity()
@@ -332,6 +338,9 @@ func (p *Proxy) RecheckIdentitySessions() {
 	r.mu.Lock()
 	for s := range r.all {
 		if s.closing || s.released {
+			continue
+		}
+		if s.pending {
 			continue
 		}
 		if s.heapIdx >= 0 {

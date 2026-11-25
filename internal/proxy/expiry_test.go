@@ -881,3 +881,23 @@ func TestRequireTransparentLeg(t *testing.T) {
 		}
 	})
 }
+
+// TestRecheckSkipsPendingSession: a session joins the registry before its creator
+// has bound an identity or armed it; a sweep landing in that window must not cut
+// it. Once armExpiry has run (the creator is done) the sweep judges it.
+func TestRecheckSkipsPendingSession(t *testing.T) {
+	e := newExpiryEnv(t, nil)
+	a, b := net.Pipe()
+	defer func() { _ = a.Close(); _ = b.Close() }()
+	sess := e.p.sessions.newSession("tcp", idHost, 443, true, a)
+	e.p.RecheckIdentitySessions()
+	if sess.isClosing() || len(e.denyEvents()) != 0 {
+		t.Fatal("the sweep cut a session that was still pending")
+	}
+	e.p.armExpiry(sess, connIdentity{}, false)
+	e.p.RecheckIdentitySessions()
+	if !sess.isClosing() {
+		t.Fatal("the sweep ignored a session that is no longer pending")
+	}
+	e.waitDeny(t, denyreason.IdentityRequired, 1)
+}
