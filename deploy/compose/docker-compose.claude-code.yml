@@ -82,9 +82,12 @@ services:
       control-plane:
         condition: service_started
     environment:
+      - AGENT_ID=claude-code
+      - AGENT_DISPLAY_NAME=Claude Code
+      - WORKER_TOKEN_ENV=WARDEN_CLAUDE_CODE_WORKER_TOKEN
       - WARDEN_CLAUDE_CODE_WORKER_TOKEN=${WARDEN_CLAUDE_CODE_WORKER_TOKEN:-wwt_devonlyclaudecodeworkertokennotarealsecretxxxxxxxxxx}
     volumes:
-      - ./claude-code/bootstrap.sh:/bootstrap.sh:ro
+      - ./recipe-bootstrap.sh:/bootstrap.sh:ro
       - ../../configs/config.cp-served.claude-code.yaml:/etc/warden/config.yaml:ro
       - cp-data:/cp-data
       - identity-claude-code:/data
@@ -190,6 +193,10 @@ services:
       dockerfile: Dockerfile
     image: warden-claude-code-agent:local
     init: true
+    # No Linux capability and no way to gain one: the agent needs neither, and a
+    # compromised process cannot escalate inside the container.
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
     depends_on:
       warden-identity:
         condition: service_started
