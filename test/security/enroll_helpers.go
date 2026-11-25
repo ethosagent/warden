@@ -11,6 +11,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/asn1"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
@@ -67,6 +68,8 @@ type CSROptions struct {
 	URIs       []*url.URL
 	// CA adds a BasicConstraints CA:true extension request.
 	CA bool
+	// Extensions are further extension requests, verbatim.
+	Extensions []pkix.Extension
 }
 
 var oidBasicConstraints = asn1.ObjectIdentifier{2, 5, 29, 19}
@@ -91,6 +94,7 @@ func (s *Stack) NewCSR(tb testing.TB, o CSROptions) (crypto.Signer, string) {
 		IPAddresses:    o.IPs,
 		URIs:           o.URIs,
 	}
+	tmpl.ExtraExtensions = append(tmpl.ExtraExtensions, o.Extensions...)
 	if o.CA {
 		val, err := asn1.Marshal(struct {
 			IsCA bool `asn1:"optional"`
@@ -98,7 +102,7 @@ func (s *Stack) NewCSR(tb testing.TB, o CSROptions) (crypto.Signer, string) {
 		if err != nil {
 			tb.Fatalf("security: encode basic constraints: %v", err)
 		}
-		tmpl.ExtraExtensions = []pkix.Extension{{Id: oidBasicConstraints, Critical: true, Value: val}}
+		tmpl.ExtraExtensions = append(tmpl.ExtraExtensions, pkix.Extension{Id: oidBasicConstraints, Critical: true, Value: val})
 	}
 	der, err := x509.CreateCertificateRequest(rand.Reader, tmpl, key)
 	if err != nil {
@@ -106,6 +110,10 @@ func (s *Stack) NewCSR(tb testing.TB, o CSROptions) (crypto.Signer, string) {
 	}
 	csr := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der}))
 	s.tracker.add("csr", csr)
+	// The bare base64 body (no armor, no newlines) is what a handler that logs
+	// the decoded request field would print; tracker.add already derives it
+	// from the multi-line PEM, and the explicit add pins that.
+	s.tracker.add("csr body", base64.StdEncoding.EncodeToString(der))
 	return key, csr
 }
 
@@ -127,6 +135,11 @@ func (s *Stack) TrackToken(token string) {
 	h := sha256.Sum256([]byte(token))
 	s.tracker.add("enrollment token", token)
 	s.tracker.add("enrollment token hash", hex.EncodeToString(h[:]))
+	for name, enc := range map[string]*base64.Encoding{
+		"std": base64.StdEncoding, "raw std": base64.RawStdEncoding, "url": base64.URLEncoding, "raw url": base64.RawURLEncoding,
+	} {
+		s.tracker.add("enrollment token hash (base64 "+name+")", enc.EncodeToString(h[:]))
+	}
 }
 
 // postJSON posts a JSON body through cl and returns the reply in full.
@@ -334,8 +347,11 @@ func (s *Stack) State(tb testing.TB) State {
 // driftAction is the admin audit row an idle control plane writes about three
 // seconds (real time) after it boots, from the policy-mirror drift check on its
 // real-time reload ticker. It is background noise to a case that counts audit
-// rows, and the counting helpers here leave it out. See the report of
-// W-P2-SECT-06: it is a production bug, not a feature.
+// rows, and the counting helpers here leave it out. It is a production bug
+// (a false config.external_change audit on an idle CP) tracked on branch
+// fix/policystore-false-external-change.
+//
+// TODO: remove this filter once fix/policystore-false-external-change lands.
 const driftAction = "config.external_change"
 
 func (s *Stack) auditExcludingDrift(tb testing.TB, since int64) []AuditRow {

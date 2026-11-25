@@ -179,6 +179,9 @@ func humanRoutes(fx *routeFixtures) []humanRoute {
 	return []humanRoute{
 		{http.MethodGet, "/central/secrets", "", `"error":"insufficient_scope","need":"none"`, nil},
 		{http.MethodPost, "/central/secrets", "secrets.write", `"error":"insufficient_scope","need":"none"`, func() any { return map[string]string{"key": "attacker-key", "value": "attacker-value-7c3d"} }},
+		{http.MethodGet, "/central/secrets/" + routeCanaryKey, "", `"error":"insufficient_scope","need":"none"`, nil},
+		{http.MethodPut, "/central/secrets", "", `"error":"insufficient_scope","need":"none"`, func() any { return map[string]string{"key": routeCanaryKey, "value": "attacker-value-7c3d"} }},
+		{http.MethodPatch, "/central/secrets", "", `"error":"insufficient_scope","need":"none"`, func() any { return map[string]string{"key": routeCanaryKey, "value": "attacker-value-7c3d"} }},
 		{http.MethodDelete, "/central/secrets/" + routeCanaryKey, "secrets.delete", `"error":"insufficient_scope","need":"none"`, nil},
 		{http.MethodGet, "/dashboard/api/worker-enrollments", "", `"error":"insufficient_scope","need":"workers:admin"`, nil},
 		{http.MethodPost, "/dashboard/api/worker-enrollments", "worker_enroll_token.create", `"error":"insufficient_scope","need":"none"`, func() any { return map[string]string{"name": "attacker", "workerId": "attacker"} }},
@@ -359,6 +362,39 @@ func tokenCase(fx *routeFixtures, cred string) Case {
 	return c
 }
 
+// tokenFormCase is the attack of a wwt_ token or wak_ key smuggled into the
+// form of POST /oauth2/token as the client secret or the client assertion, with
+// no Authorization header at all: it authenticates no agent.
+func tokenFormCase(fx *routeFixtures, cred, field string) Case {
+	return Case{
+		Name:       cred + " POST.oauth2.token form " + field,
+		Path:       PathCPRoute,
+		WantStatus: http.StatusUnauthorized,
+		WantBody:   `"error":"invalid_client"`,
+		WantLog:    `"reason":"client_authentication_failed"`,
+		Attack: func(t testing.TB, s *Stack) Observed {
+			fresh(s)
+			form := s.ExchangeForm(fx.agent, s.UserToken("route-user", []string{"eng"}), nil)
+			form.Del("client_assertion")
+			form.Del("client_assertion_type")
+			secret := fx.wwt
+			if cred == credWAK {
+				secret = fx.wak
+			}
+			form.Set(field, secret)
+			issuedBefore := issuedTokens(s.TokenEvents(t))
+			rep := s.PostToken(t, form)
+			if n := issuedTokens(s.TokenEvents(t)); n != issuedBefore {
+				t.Errorf("token_events holds %d issued rows after the attack, want %d", n, issuedBefore)
+			}
+			if strings.Contains(rep.Body, "access_token") {
+				t.Error("the refusal carries an access token")
+			}
+			return SeenReply(rep)
+		},
+	}
+}
+
 func issuedTokens(rows []TokenEvent) int {
 	n := 0
 	for _, r := range rows {
@@ -402,6 +438,11 @@ func routeCases(fx *routeFixtures, wwtReason, cookieReason string, humanToo bool
 	// The token endpoint is the agents' route.
 	for _, cred := range []string{credWWT, credWAK, credCookie, credCert} {
 		out = append(out, tokenCase(fx, cred))
+	}
+	for _, cred := range []string{credWWT, credWAK} {
+		for _, field := range []string{"client_secret", "client_assertion"} {
+			out = append(out, tokenFormCase(fx, cred, field))
+		}
 	}
 	return out
 }

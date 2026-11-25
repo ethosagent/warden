@@ -1,11 +1,15 @@
 package security
 
 import (
+	"bytes"
 	"crypto"
 	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/asn1"
 	"net"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -85,6 +89,7 @@ func assertIssuedCert(tb testing.TB, s *Stack, r issued, cert *x509.Certificate,
 	if cert.IsCA || cert.KeyUsage != x509.KeyUsageDigitalSignature {
 		tb.Errorf("IsCA = %t KeyUsage = %v, want a leaf with digitalSignature only", cert.IsCA, cert.KeyUsage)
 	}
+	assertIssuedExtensions(tb, cert)
 	if !samePublicKey(cert, key) {
 		tb.Error("the certificate does not carry the CSR's public key")
 	}
@@ -108,6 +113,57 @@ func assertIssuedCert(tb testing.TB, s *Stack, r issued, cert *x509.Certificate,
 	}
 }
 
+// The extension OIDs the CA may put in a worker certificate: key usage,
+// extended key usage, basic constraints, subject alternative name, and the key
+// identifiers the standard library derives.
+var (
+	oidKeyUsage    = asn1.ObjectIdentifier{2, 5, 29, 15}
+	oidSKI         = asn1.ObjectIdentifier{2, 5, 29, 14}
+	oidSAN         = asn1.ObjectIdentifier{2, 5, 29, 17}
+	oidNameConstr  = asn1.ObjectIdentifier{2, 5, 29, 30}
+	oidAKI         = asn1.ObjectIdentifier{2, 5, 29, 35}
+	oidEKU         = asn1.ObjectIdentifier{2, 5, 29, 37}
+	oidUnknownCrit = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 99999, 1}
+
+	allowedExtensions = []asn1.ObjectIdentifier{oidKeyUsage, oidEKU, oidBasicConstraints, oidSAN, oidSKI, oidAKI}
+	// csrOnlyExtensions are the extension requests of hostileCSR that have no
+	// business in a worker certificate at all.
+	csrOnlyExtensions = []asn1.ObjectIdentifier{oidNameConstr, oidUnknownCrit}
+	// hostileKeyID is the key identifier hostileCSR asks for in both SKI and AKI.
+	hostileKeyID = bytes.Repeat([]byte{0xA5}, 20)
+)
+
+// assertIssuedExtensions pins the extension set of an issued certificate: only
+// the CA's own, nothing the CSR asked for, no name constraints, no critical
+// extension the verifier does not know, and the CA's key identifiers.
+func assertIssuedExtensions(tb testing.TB, cert *x509.Certificate) {
+	tb.Helper()
+	for _, e := range cert.Extensions {
+		ok := false
+		for _, a := range allowedExtensions {
+			ok = ok || e.Id.Equal(a)
+		}
+		if !ok {
+			tb.Errorf("certificate carries extension %v (critical %t), want only KU, EKU, BasicConstraints, SAN, SKI, AKI", e.Id, e.Critical)
+		}
+		for _, bad := range csrOnlyExtensions {
+			if e.Id.Equal(bad) {
+				tb.Errorf("extension %v, requested only by the CSR, appears in the certificate", e.Id)
+			}
+		}
+	}
+	if len(cert.PermittedDNSDomains)+len(cert.ExcludedDNSDomains)+len(cert.PermittedIPRanges)+len(cert.ExcludedIPRanges)+
+		len(cert.PermittedEmailAddresses)+len(cert.ExcludedEmailAddresses)+len(cert.PermittedURIDomains)+len(cert.ExcludedURIDomains) != 0 {
+		tb.Error("certificate carries name constraints, want none")
+	}
+	if len(cert.UnhandledCriticalExtensions) != 0 {
+		tb.Errorf("certificate carries unhandled critical extensions %v, want none", cert.UnhandledCriticalExtensions)
+	}
+	if bytes.Equal(cert.SubjectKeyId, hostileKeyID) || bytes.Equal(cert.AuthorityKeyId, hostileKeyID) {
+		tb.Error("the CSR's key identifier override reached the certificate")
+	}
+}
+
 func samePublicKey(cert *x509.Certificate, key crypto.Signer) bool {
 	type equaler interface{ Equal(crypto.PublicKey) bool }
 	pub, ok := key.Public().(equaler)
@@ -115,7 +171,9 @@ func samePublicKey(cert *x509.Certificate, key crypto.Signer) bool {
 }
 
 // hostileCSR is the CSR of an attacker: it asks for another worker's identity, a
-// subject, DNS, e-mail and IP SANs, and a CA certificate.
+// subject, DNS, e-mail and IP SANs, a CA certificate, certificate signing and
+// server authentication usages, name constraints, key identifiers of its choice
+// and an unknown critical extension.
 func (s *Stack) hostileCSR(tb testing.TB, victim string) (crypto.Signer, string) {
 	tb.Helper()
 	spiffe, err := workerca.SPIFFEID(TrustDomain, victim)
@@ -125,8 +183,43 @@ func (s *Stack) hostileCSR(tb testing.TB, victim string) (crypto.Signer, string)
 	return s.NewCSR(tb, CSROptions{
 		CommonName: victim, DNSNames: []string{"warden.example", "*.example.com"},
 		Emails: []string{"admin@example.com"}, IPs: []net.IP{net.ParseIP("10.0.0.1")}, URIs: []*url.URL{spiffe, {Scheme: "https", Host: "evil.example"}},
-		CA: true,
+		CA: true, Extensions: hostileExtensions(tb),
 	})
+}
+
+func hostileExtensions(tb testing.TB) []pkix.Extension {
+	tb.Helper()
+	mustMarshal := func(v any) []byte {
+		b, err := asn1.Marshal(v)
+		if err != nil {
+			tb.Fatalf("security: encode an extension: %v", err)
+		}
+		return b
+	}
+	// keyCertSign (bit 5) and cRLSign (bit 6): 0000 0110, one unused bit.
+	ku := mustMarshal(asn1.BitString{Bytes: []byte{0x06}, BitLength: 7})
+	// serverAuth, anyExtendedKeyUsage.
+	eku := mustMarshal([]asn1.ObjectIdentifier{{1, 3, 6, 1, 5, 5, 7, 3, 1}, {2, 5, 29, 37, 0}})
+	// permittedSubtrees dNSName "example.com" ([0] { [2] "example.com" }).
+	nc := mustMarshal(asn1.RawValue{Tag: asn1.TagSequence, Class: asn1.ClassUniversal, IsCompound: true, Bytes: mustMarshal(asn1.RawValue{
+		Tag: 0, Class: asn1.ClassContextSpecific, IsCompound: true, Bytes: mustMarshal(asn1.RawValue{
+			Tag: asn1.TagSequence, Class: asn1.ClassUniversal, IsCompound: true, Bytes: mustMarshal(asn1.RawValue{
+				Tag: 2, Class: asn1.ClassContextSpecific, Bytes: []byte("example.com"),
+			}),
+		}),
+	})})
+	ski := mustMarshal(hostileKeyID)
+	aki := mustMarshal(struct {
+		ID []byte `asn1:"tag:0,optional"`
+	}{ID: hostileKeyID})
+	return []pkix.Extension{
+		{Id: oidKeyUsage, Critical: true, Value: ku},
+		{Id: oidEKU, Value: eku},
+		{Id: oidNameConstr, Critical: true, Value: nc},
+		{Id: oidSKI, Value: ski},
+		{Id: oidAKI, Value: aki},
+		{Id: oidUnknownCrit, Critical: true, Value: mustMarshal(true)},
+	}
 }
 
 // enrollFixtures are the tokens the enrollment cases spend, minted before the
@@ -160,7 +253,19 @@ func newEnrollFixtures(tb testing.TB, s *Stack) *enrollFixtures {
 	if r := adm.Do(tb, http.MethodDelete, enrollmentsPath+"/"+id, nil); r.Status != http.StatusNoContent && r.Status != http.StatusOK {
 		tb.Fatalf("security: revoke the enrollment token: %d %s", r.Status, r.Body)
 	}
+	if !s.EnrollRowByName(tb, "sec-revoked").Revoked {
+		tb.Fatal("security: the enrollment token sec-revoked is not revoked after the DELETE")
+	}
 	return fx
+}
+
+// stableHeader is h without the headers that legitimately differ between two
+// identical refusals (the clock and the length of a body already compared).
+func stableHeader(h http.Header) http.Header {
+	out := h.Clone()
+	out.Del("Date")
+	out.Del("Content-Length")
+	return out
 }
 
 // badToken is the case of a token the CP must refuse with the one 401.
@@ -182,8 +287,7 @@ func badToken(fx *enrollFixtures, name, reason string, token func(fx *enrollFixt
 			expectDelta(t, before, s.State(t), State{})
 			if fx.bad == nil {
 				fx.bad = &r
-			} else if r.Status != fx.bad.Status || r.Body != fx.bad.Body || r.Header.Get("Content-Type") != fx.bad.Header.Get("Content-Type") ||
-				r.Header.Get("Www-Authenticate") != fx.bad.Header.Get("Www-Authenticate") {
+			} else if r.Status != fx.bad.Status || r.Body != fx.bad.Body || !reflect.DeepEqual(stableHeader(r.Header), stableHeader(fx.bad.Header)) {
 				t.Errorf("the 401 differs between bad tokens: %d %q (%v) vs %d %q (%v)", r.Status, r.Body, r.Header, fx.bad.Status, fx.bad.Body, fx.bad.Header)
 			}
 			return SeenReply(r)
@@ -514,6 +618,48 @@ func renewCases(fx *renewFixtures) []Case {
 				audit := s.ExpectAudit(t, mark, "denied", "worker.cert_lineage_conflict")
 				if len(audit) == 1 && (audit[0].TargetRef != "worker:sec-ren-lin" || audit[0].HTTPStatus != http.StatusUnauthorized) {
 					t.Errorf("lineage conflict audit row = %+v, want target worker:sec-ren-lin and status 401", audit[0])
+				}
+				return SeenReply(r)
+			},
+			WantStatus: http.StatusUnauthorized,
+			WantBody:   unauthorizedBody,
+			WantHeader: map[string]string{"Www-Authenticate": "Bearer"},
+			WantLog:    `"reason":"lineage_conflict"`,
+		}, {
+			// The cloned-key case: the successor has been used (the worker
+			// presented it on /policy), so a renewal from its predecessor is no
+			// lost response, however soon it comes. The CP revokes the whole
+			// worker. No clock advance is needed: the window is not the reason.
+			Name:   "lineage_successor_seen",
+			Path:   PathEnroll,
+			Covers: []string{CoverRoute("/control/renew")},
+			Attack: func(t testing.TB, s *Stack) Observed {
+				old := s.NewLeaf(t, "sec-ren-seen")
+				head := renewOnce(t, s, old)
+				cert := head.TLS()
+				if got := s.Send(t, s.CPClient(t, &cert), http.MethodGet, "/policy", http.Header{"Accept": {controlplane.BundleMediaType}}, nil); got.Status != http.StatusOK {
+					t.Fatalf("GET /policy with the new head certificate = %d, want 200", got.Status)
+				}
+				fresh(s)
+				_, csr := s.NewCSR(t, CSROptions{})
+				before, mark, issued := s.State(t), s.AuditMark(t), len(s.CertRows(t, "sec-ren-seen"))
+				var r Reply
+				expectCount(t, "warden_cp_worker_renew_total{outcome=lineage_conflict}", func() int64 { return s.Server().RenewCount(controlplane.RenewOutcomeLineageConflict) }, 1, func() {
+					r = s.Renew(t, old, csr)
+				})
+				expectDelta(t, before, s.State(t), State{RevokedCerts: 2, Audit: 1})
+				rows := s.CertRows(t, "sec-ren-seen")
+				if len(rows) != issued {
+					t.Errorf("worker_certs rows of sec-ren-seen = %d, want %d (no certificate issued)", len(rows), issued)
+				}
+				for _, row := range rows {
+					if !row.Revoked {
+						t.Errorf("certificate %s of the conflicting worker is still live", row.Serial)
+					}
+				}
+				audit := s.ExpectAudit(t, mark, "denied", "worker.cert_lineage_conflict")
+				if len(audit) == 1 && (audit[0].TargetRef != "worker:sec-ren-seen" || audit[0].HTTPStatus != http.StatusUnauthorized) {
+					t.Errorf("lineage conflict audit row = %+v, want target worker:sec-ren-seen and status 401", audit[0])
 				}
 				return SeenReply(r)
 			},
