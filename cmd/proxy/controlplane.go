@@ -128,7 +128,9 @@ func newControlPlaneCmd() *cobra.Command {
 	// Offline subcommands (admin-audit is read-only over the CP state dir; backup
 	// takes the state-dir lock and writes only under --backup-dir; restore takes it
 	// and replaces the state dir's files; hash-password touches no state; keys
-	// list/export are read-only, rotate writes without the lock and reset takes it).
-	cmd.AddCommand(newAdminAuditCmd(), newHashPasswordCmd(), newBackupCmd(), newRestoreCmd(), newControlPlaneTokenCmd(), newControlPlaneEnrollTokenCmd(), newControlPlaneWorkerCmd(), newControlPlaneBlockCmd(), newControlPlaneKeysCmd(), newControlPlaneCACmd())
+	// list/export are read-only, rotate writes without the lock and reset takes it; agent list is read-only and
+	// agent register/update/disable/enable write without the lock, each in one
+	// BEGIN IMMEDIATE transaction).
+	cmd.AddCommand(newAdminAuditCmd(), newHashPasswordCmd(), newBackupCmd(), newRestoreCmd(), newControlPlaneTokenCmd(), newControlPlaneEnrollTokenCmd(), newControlPlaneWorkerCmd(), newControlPlaneBlockCmd(), newControlPlaneKeysCmd(), newControlPlaneCACmd(), newControlPlaneAgentCmd())
 	return cmd
 }
