@@ -47,6 +47,10 @@ var patternClasses = map[string][]DataClass{
 	"private_key":     {ClassCredentials, ClassSourceCode},
 	"generic_api_key": {ClassCredentials},
 
+	// Warden's own credentials (opt-in via WithWardenTokens).
+	"warden_api_key":      {ClassCredentials},
+	"warden_worker_token": {ClassCredentials},
+
 	// --- PII (existing) ---
 	"email": {ClassPIIContact},
 	"phone": {ClassPIIContact},

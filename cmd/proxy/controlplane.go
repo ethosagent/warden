@@ -16,6 +16,7 @@ func controlPlaneParams(cmd *cobra.Command) (controlplane.Params, error) {
 	tokenEnv, _ := cmd.Flags().GetString("token-env")
 	legacyTokenEnv, _ := cmd.Flags().GetString("legacy-token-env")
 	requireWorkerTokens, _ := cmd.Flags().GetBool("require-worker-tokens")
+	requireWorkerCerts, _ := cmd.Flags().GetBool("require-worker-certs")
 	allowInsecure, _ := cmd.Flags().GetBool("allow-insecure-worker-auth")
 	adminTokenEnv, _ := cmd.Flags().GetString("admin-token-env")
 	caCert, _ := cmd.Flags().GetString("ca-cert")
@@ -42,7 +43,7 @@ func controlPlaneParams(cmd *cobra.Command) (controlplane.Params, error) {
 		Backup: backup, Version: version,
 		ConfigPath: configPath, ListenAddr: listenAddr,
 		TokenEnv: tokenEnv, LegacyTokenEnv: legacyTokenEnv, AdminTokenEnv: adminTokenEnv,
-		RequireWorkerTokens: requireWorkerTokens, AllowInsecureWorkerAuth: allowInsecure,
+		RequireWorkerTokens: requireWorkerTokens, RequireWorkerCerts: requireWorkerCerts, AllowInsecureWorkerAuth: allowInsecure,
 		CACert: caCert, CAKey: caKey, TLSHost: tlsHost, StateDir: stateDir,
 		MaxEvents: maxEvents, AnalyticsProvider: aProvider, AnalyticsDB: aDB,
 		RetentionDays: aRetention, AlertsDB: alertsDB,
@@ -97,6 +98,7 @@ func newControlPlaneCmd() *cobra.Command {
 	cmd.Flags().String("token-env", "", "deprecated alias of --legacy-token-env")
 	_ = cmd.Flags().MarkDeprecated("token-env", "use --legacy-token-env")
 	cmd.Flags().Bool("require-worker-tokens", false, "strict worker auth: accept per-worker wwt_ tokens only and reject the shared token (needs --state-dir, TLS unless --allow-insecure-worker-auth, and no --legacy-token-env)")
+	cmd.Flags().Bool("require-worker-certs", false, "strict worker auth: accept worker certificates issued by the worker CA only (needs workerCA.enabled, --state-dir and TLS; cannot be combined with --require-worker-tokens or --legacy-token-env)")
 	cmd.Flags().Bool("allow-insecure-worker-auth", false, "let --require-worker-tokens run without TLS (development only: tokens travel in clear text)")
 	cmd.Flags().String("admin-token-env", "", "env var holding the control plane's own admin bearer for dashboard writes and /central/secrets (unset = they fall back to --legacy-token-env)")
 	cmd.Flags().String("ca-cert", "", "CA cert to mint the server TLS cert from (enables HTTPS)")
@@ -120,6 +122,6 @@ func newControlPlaneCmd() *cobra.Command {
 	// takes the state-dir lock and writes only under --backup-dir; restore takes it
 	// and replaces the state dir's files; hash-password touches no state; keys
 	// list/export are read-only, rotate writes without the lock and reset takes it).
-	cmd.AddCommand(newAdminAuditCmd(), newHashPasswordCmd(), newBackupCmd(), newRestoreCmd(), newControlPlaneTokenCmd(), newControlPlaneBlockCmd(), newControlPlaneKeysCmd())
+	cmd.AddCommand(newAdminAuditCmd(), newHashPasswordCmd(), newBackupCmd(), newRestoreCmd(), newControlPlaneTokenCmd(), newControlPlaneEnrollTokenCmd(), newControlPlaneWorkerCmd(), newControlPlaneBlockCmd(), newControlPlaneKeysCmd(), newControlPlaneCACmd())
 	return cmd
 }

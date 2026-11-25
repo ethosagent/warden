@@ -75,6 +75,8 @@ type Server struct {
 	// workerTokens serves the worker token admin routes; nil = they answer 404
 	// (a worker, or a control plane without a state dir).
 	workerTokens WorkerTokenAdmin
+	// workerCerts backs the worker certificate revoke route (nil: 404).
+	workerCerts WorkerCertAdmin
 	// keys serves the signing-key admin routes; nil = they answer 404 (a
 	// worker, or a control plane without keys.enabled).
 	keys KeysSource
@@ -108,6 +110,8 @@ type Server struct {
 	// secretBackend names the active backend (echo/aws/env) for display.
 	secretStore   secrets.SecretStore
 	secretBackend string
+	// reservedLog is the once-a-minute-per-route log of refused cp/ keys.
+	reservedLog *secrets.ReservedKeyLog
 	// authMode is the console sign-in mode reported by /dashboard/api/setup
 	// (SetAuthMode); empty on a worker.
 	authMode string
@@ -258,7 +262,8 @@ type WorkerView struct {
 	PolicyVersion int64 `json:"policyVersion,omitempty"`
 	Behind        bool  `json:"behind"`
 	Online        bool  `json:"online"`
-	// AuthKind is how the worker last authenticated: token (a per-worker
+	// AuthKind is how the worker last authenticated: cert (a worker CA
+	// certificate; ProxyID is the id in its SAN), token (a per-worker
 	// token; ProxyID is the token's bound id), legacy (the shared token; the
 	// id is the worker's unverified header) or none (open control plane).
 	// Empty until the worker has made an authenticated request.
@@ -268,6 +273,12 @@ type WorkerView struct {
 	// once a minute, so it can trail LastSeen.
 	TokenName     string `json:"tokenName,omitempty"`
 	TokenLastUsed string `json:"tokenLastUsed,omitempty"`
+	// CertSerial (lowercase hex) and CertNotAfter (RFC 3339) describe the worker
+	// certificate behind an authKind=cert worker. CertRevoked is true when that
+	// certificate is revoked: the worker is cut off until it re-enrolls.
+	CertSerial   string `json:"certSerial,omitempty"`
+	CertNotAfter string `json:"certNotAfter,omitempty"`
+	CertRevoked  bool   `json:"certRevoked,omitempty"`
 	// LegacyRequests counts the worker's requests authenticated with the shared
 	// token since the control plane started (in memory; a restart resets it).
 	LegacyRequests int64 `json:"legacyRequests"`
@@ -672,6 +683,7 @@ func Routes() []Route {
 		{get, "/dashboard/api/policy/versions/{v}/diff", "policy.diff"},
 		{post, "/dashboard/api/policy/versions/{v}/rollback", "policy.rollback"},
 		{post, "/dashboard/api/backup", "backup.run"},
+		{post, "/dashboard/api/workers/{id}/revoke", "worker.revoked"},
 		{get, "/dashboard/api/worker-tokens", "worker_token.read"},
 		{post, "/dashboard/api/worker-tokens", "worker_token.create"},
 		{del, "/dashboard/api/worker-tokens/{id}", "worker_token.revoke"},
@@ -1352,6 +1364,9 @@ type analyticsResponse struct {
 	// a single-node dashboard. SelectedProxy echoes the active ?proxy= filter.
 	Proxies       []proxyCount `json:"proxies"`
 	SelectedProxy string       `json:"selectedProxy"`
+	// Identity summarises the stored identity_status / identity_reason fields.
+	// Nil (omitted) when no event in the range carries either field.
+	Identity *identitySummary `json:"identity,omitempty"`
 }
 
 // proxyCount is one worker's contribution to the fleet, for the proxy selector.
@@ -1698,6 +1713,7 @@ func (s *Server) computeAnalytics(rangeParam, selectedProxy, user string, now ti
 		},
 		Proxies:       proxies,
 		SelectedProxy: selectedProxy,
+		Identity:      summarizeIdentity(events),
 	}
 	providerCosts := make(map[string]*providerCost)
 	complianceCounts := make(map[string]int)
