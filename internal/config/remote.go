@@ -46,6 +46,7 @@ type RemoteProvider struct {
 	applyMu       sync.Mutex
 	trust         *BundleTrust
 	bundle        *VerifiedBundle
+	cache         *bundleCache // nil unless SetBundleCache
 	lastReject    string
 	lastRejectAt  time.Time
 	rejects       map[string]int64
@@ -388,6 +389,12 @@ func (r *RemoteProvider) applyResponse(resp *http.Response) (bool, error) {
 // Not Modified (changed=false). On 200 the new policy + ETag are stored; on any
 // error the last known good policy is preserved and the error returned.
 func (r *RemoteProvider) PollLong(ctx context.Context, wait time.Duration) (changed bool, err error) {
+	// From the first long-poll on, the cache can no longer be loaded (boot only).
+	r.mu.Lock()
+	if r.cache != nil {
+		r.cache.started = true
+	}
+	r.mu.Unlock()
 	u, err := url.Parse(r.endpoint)
 	if err != nil {
 		return false, r.setErr(fmt.Errorf("config: remote: endpoint: %w", err))

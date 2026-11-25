@@ -220,3 +220,37 @@ func TestControlPlaneBundleOptions(t *testing.T) {
 		}
 	}
 }
+
+func TestControlPlaneBundleCacheConfig(t *testing.T) {
+	pin := freshEd(t)
+	keysYAML := fmt.Sprintf("  bundleKeys:\n    - {kty: OKP, crv: Ed25519, x: %s, kid: %s}\n", pin.X, pin.Kid)
+	load := func(extra string) ControlPlaneConfig {
+		t.Helper()
+		p, err := parse([]byte(cpHead + extra))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p.policy.ControlPlane
+	}
+	// Default 24h, but the cache is active only with stateDir and pins.
+	if cp := load(keysYAML); cp.BundleCacheMaxAge != 24*time.Hour || cp.BundleCacheEnabled() {
+		t.Fatalf("pins only: %+v", cp)
+	}
+	if cp := load("  stateDir: /var/lib/warden\n"); cp.BundleCacheEnabled() {
+		t.Fatal("cache active without pinned keys")
+	}
+	if cp := load(keysYAML + "  stateDir: /var/lib/warden\n"); !cp.BundleCacheEnabled() || cp.BundleCacheMaxAge != 24*time.Hour {
+		t.Fatalf("stateDir and pins: %+v", cp)
+	}
+	if cp := load(keysYAML + "  stateDir: /var/lib/warden\n  bundleCacheMaxAge: 0\n"); cp.BundleCacheEnabled() || cp.BundleCacheMaxAge != 0 {
+		t.Fatalf("bundleCacheMaxAge 0 must disable: %+v", cp)
+	}
+	if cp := load(keysYAML + "  stateDir: /var/lib/warden\n  bundleCacheMaxAge: 6h\n"); cp.BundleCacheMaxAge != 6*time.Hour {
+		t.Fatalf("explicit max age: %+v", cp)
+	}
+	for _, bad := range []string{"bundleCacheMaxAge: -1h", "bundleCacheMaxAge: soon", "stateDir: relative/dir"} {
+		if _, err := parse([]byte(cpHead + "  " + bad + "\n")); err == nil || !strings.Contains(err.Error(), "controlPlane.") {
+			t.Errorf("%s: err = %v", bad, err)
+		}
+	}
+}
