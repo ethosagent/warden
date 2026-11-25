@@ -155,6 +155,15 @@ var All = slices.Concat(
 		// saves create versions authored anonymous that workers enforce.
 		// In-process only (it reads the CP state dir).
 		{Name: "policy_store_dashboard_publish", Opts: policyStorePublishOpts(), Run: policyStoreDashboardPublish},
+		// Approvals default off (W-P2-APPR-01): no change_* table and no approvals
+		// migration without console.approvals.enabled. In-process only (it reads
+		// the CP state dir).
+		{Name: "approvals_off_by_default", Opts: approvalsOffOpts(), Run: approvalsOffByDefault},
+		// The two-person rule (W-P2-APPR-04): a widening draft is submitted by
+		// one editor, replayed against fleet traffic, refused for its author and
+		// applied by a second editor's approval; workers enforce the new
+		// version. In-process only (console, admin audit and state dir).
+		{Name: "approvals_two_person_rule", Opts: approvalsTwoPersonOpts(), Run: approvalsTwoPerson},
 		// Scoped policy (W-P1-GPOL-10): with identity off a scoped entry loads
 		// but allows nobody (identity_required); an unscoped entry still applies.
 		{Name: "scoped_policy_fail_closed", Run: scopedPolicyFailClosed},
@@ -250,9 +259,22 @@ var All = slices.Concat(
 		{Name: "strict_worker_auth", Opts: strictAuthOpts(), Run: strictWorkerAuth},
 		{Name: "strict_worker_auth_no_admin_token", Opts: strictNoAdminOpts(), Run: strictNoAdminTokenFailsClosed},
 		{Name: "legacy_worker_token_warning", Run: legacyWorkerWarning},
+		// cp/ secret namespace reserved (W-P2-WCA-07): hidden from the list,
+		// POST and DELETE refused with 403 reserved_key.
+		{Name: "reserved_secret_namespace", Opts: strictAuthOpts(), Run: reservedSecretNamespace},
 		// Held long-poll (W-P1-WTOK-09): a revoke out of process returns that
 		// token's held /policy with 401 while another token's stays parked.
 		{Name: "worker_token_longpoll_revoke", Opts: workerTokenOpts(), Run: workerTokenLongPollRevoke},
+		// Scoped API keys (W-P2-APIK-02): a key revoked out of process (the
+		// offline CLI path) is refused by the running control plane within one
+		// 2s poll of its Index, with no audit row; a key reaches only the routes
+		// whose scope it holds and never a worker route. In-process only.
+		{Name: "apikey_offline_revoke", Opts: apiKeyOpts(), Run: apiKeyOfflineRevoke},
+		{Name: "apikey_scopes", Opts: apiKeyOpts(), Run: apiKeyScopes},
+		// Scoped API keys (W-P2-APIK-03): a console admin creates a key (the
+		// plaintext once), the key reads, introspects and is refused a write,
+		// then the admin revokes it and its next request is a 401.
+		{Name: "apikey_management", Opts: apiKeyOpts(), Run: apiKeyManagement},
 
 		// Admin audit gate (W-P1-AAUD-05): enabled, the control plane writes the
 		// genesis entry and logs its key_id before serving. In-process only (it
@@ -308,7 +330,46 @@ var All = slices.Concat(
 		{Name: "keys_rotate_after_downtime", Opts: keysRotationOpts(), Run: keysRotateAfterDowntime},
 		{Name: "keys_jwks_served_and_rotates", Opts: keysRotationOpts(), Run: keysJWKSServedAndRotates},
 		{Name: "keys_jwks_unavailable_until_loaded", Opts: keysFlakyOpts(), Run: keysJWKSUnavailableUntilLoaded},
+		// Token endpoint (W-P2-TOKX-03): with tokenService.enabled an agent's
+		// private_key_jwt assertion plus a user's ID token exchange for a
+		// short-lived Warden token that verifies against the served JWKS; every
+		// refusal is an RFC 6749 error with a closed reason and no token; the
+		// endpoint is 404 unless the block enables it; a missing signing key or
+		// an unreachable IdP is a 503 with Retry-After. In-process only (fake
+		// clock, CP state dir, issuer fake).
+		{Name: "token_exchange_issues_token", Opts: tokenServiceOpts(), Run: tokenExchangeIssuesToken},
+		{Name: "token_exchange_refusals", Opts: tokenServiceOpts(), Run: tokenExchangeRefusals},
+		// Token endpoint limits, records and retention (W-P2-TOKX-04).
+		{Name: "token_exchange_rate_limited_per_agent", Opts: tokenLimitsOpts(harness.WithTokenRateLimit("", "5/minute", "")), Run: tokenExchangeRateLimitedPerAgent},
+		{Name: "token_exchange_forged_agent_no_dos", Opts: tokenLimitsOpts(harness.WithTokenRateLimit("20/minute", "5/minute", ""), harness.WithTokenTrustedLoopbackProxy()), Run: tokenExchangeForgedAgentNoDoS},
+		{Name: "token_exchange_events_recorded", Opts: tokenLimitsOpts(harness.WithAdminAudit()), Run: tokenExchangeEventsRecorded},
+		{Name: "token_retention_purges", Opts: tokenLimitsOpts(harness.WithTokenEventRetention("24h")), Run: tokenRetentionPurges},
+		{Name: "token_exchange_dashboard_disable", Opts: tokenServiceDashboardOpts(), Run: tokenExchangeDashboardDisable},
+		{Name: "token_service_disabled_by_default", Opts: tokenServiceDisabledOpts(), Run: tokenServiceDisabledByDefault},
+		// Admin revocation of token sessions (W-P2-TOKX-07).
+		{Name: "token_session_revoke_one", Opts: tokenLimitsOpts(harness.WithAdminAudit()), Run: tokenSessionRevokeOne},
+		{Name: "token_session_revoke_all", Opts: tokenLimitsOpts(harness.WithAdminAudit()), Run: tokenSessionRevokeAll},
+		{Name: "token_session_revoke_retained", Opts: tokenServiceOpts(), Run: tokenSessionRevokeRetained},
+		{Name: "token_session_routes_disabled", Opts: append(tokenServiceDisabledOpts(), harness.WithControlPlaneAdminToken()), Run: tokenSessionRoutesDisabled},
+		{Name: "token_exchange_signer_unavailable", Opts: tokenServiceOpts(harness.WithFlakyKeyStore()), Run: tokenExchangeSignerUnavailable},
+		{Name: "token_exchange_idp_unavailable", Opts: tokenServiceOpts(harness.WithOIDCIssuerDown()), Run: tokenExchangeIdPUnavailable},
 		{Name: "keys_cli_rotates_and_resets", Opts: keysRotationOpts(), Run: keysCLIRotatesAndResets},
+		{Name: "workerca_degraded_then_ready", Opts: workerCAOpts(), Run: workerCADegradedThenReady},
+		{Name: "workerca_enroll", Opts: workerCAEnrollOpts(), Run: workerCAEnroll},
+		{Name: "workerca_enroll_off", Run: workerCAEnrollOff},
+		// Worker certificate authentication and /control/renew (W-P2-WCA-04):
+		// per-request verification on the three worker routes, SAN-bound ids,
+		// hostile certificates refused with a 401, no cert on human routes, the
+		// renewal lineage rule, and --require-worker-certs. In-process only.
+		{Name: "workerca_cert_auth", Opts: workerCACertAuthOpts(), Run: workerCACertAuth},
+		{Name: "workerca_renew", Opts: workerCACertAuthOpts(), Run: workerCARenew},
+		{Name: "workerca_strict_certs", Opts: workerCAStrictCertsOpts(), Run: workerCAStrictCerts},
+		// Worker certificate revocation (W-P2-WCA-05): the console route and the
+		// offline CLI cut a worker off (401 on every worker route and renew, held
+		// long-poll ended), and the pruner keeps rows still needed. In-process only.
+		{Name: "workerca_revoke_api", Opts: workerCARevokeOpts(), Run: workerCARevokeAPI},
+		{Name: "workerca_revoke_cli", Opts: workerCARevokeOpts(), Run: workerCARevokeCLI},
+		{Name: "workerca_prune", Opts: workerCARevokeOpts(), Run: workerCAPrune},
 		{Name: "keys_disabled_creates_nothing", Opts: []harness.Option{harness.WithBackup()}, Run: keysDisabledCreatesNothing},
 		// Key rotation (W-P2-KEYS-06): rotate-key is refused while the control
 		// plane runs, rotates offline once it is stopped (signed handover, new
@@ -320,6 +381,25 @@ var All = slices.Concat(
 		// reload interval, each appends one cli audit row without key material,
 		// a stale revision changes nothing. In-process only (CP state dir).
 		{Name: "agent_registry_cli", Opts: agentRegistryCLIOpts(), Run: agentRegistryCLI},
+		// Signed bundles (W-P2-SBND-02): --bundles=off answers the envelope
+		// Accept header with the unchanged legacy policy; --bundles=offer signs
+		// the served policy with the bundle key, moves the seq forward on a save,
+		// a rollback and a token key rotation (which wakes a held long poll),
+		// keeps the id and seq across a restart, and leaves the workers on the
+		// legacy wire. In-process only (versioned store, keys, CP restart).
+		{Name: "bundles_off_legacy_wire", Opts: bundlesOffOpts(), Run: bundlesOffLegacyWire},
+		{Name: "bundles_offer_serves", Opts: bundlesOfferOpts(), Run: bundlesOfferServes},
+		// Warden credentials in agent egress (W-P2-APIK-06): a wak_ key or wwt_
+		// token in a request body is flagged as credentials only with
+		// dlp.wardenTokens on, and blocked only in enforce mode with a rule.
+		// In-process only (DLP is wired through the harness's local policy).
+		{Name: "warden_token_egress_off", Opts: wardenTokenOpts(config.DLPConfig{Mode: config.DLPModeMonitor}), Run: wardenTokenOff},
+		{Name: "warden_token_egress_monitor", Opts: wardenTokenOpts(config.DLPConfig{Mode: config.DLPModeMonitor, WardenTokens: true}), Run: wardenTokenMonitor},
+		{Name: "warden_token_egress_enforce", Opts: wardenTokenOpts(config.DLPConfig{
+			Mode:         config.DLPModeEnforce,
+			WardenTokens: true,
+			Classes:      map[string]config.DLPClassDefault{"credentials": {Action: config.DLPActionBlock}},
+		}), Run: wardenTokenEnforce},
 	},
 	// Canary across protocols x allow/deny; see canary.go.
 	canaryScenarios(),

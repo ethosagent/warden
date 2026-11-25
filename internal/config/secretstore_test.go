@@ -378,3 +378,46 @@ secretStore:
 		t.Fatalf("DeepCopy aliased aws: original mutated to %q", orig.SecretStore.AWS.Region)
 	}
 }
+
+func TestReservedKey_IsReservedSecretKey(t *testing.T) {
+	for key, want := range map[string]bool{
+		"cp": true, "cp/": true, "cp/keys/ca/k1": true, " cp/x ": true,
+		"cpx": false, "{{cp/x}}": false, "warden/cp/x": false, "": false,
+	} {
+		if got := IsReservedSecretKey(key); got != want {
+			t.Errorf("IsReservedSecretKey(%q) = %v, want %v", key, got, want)
+		}
+	}
+}
+
+func TestReservedKey_ValidationRejectsPlaceholder(t *testing.T) {
+	cases := map[string]struct{ yaml, wantErr string }{
+		"secrets placeholder": {baseAllow + `
+secrets:
+  - placeholder: cp/keys/ca/k1
+    envVar: X
+`, "secrets[0]"},
+		"auth value": {baseAllow + `
+auth:
+  - match: x.com
+    type: api_key
+    location: header
+    name: X-Key
+    value: cp/keys/ca/k1
+`, "auth[0]"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := NewLocalYAMLProvider(writeTemp(t, tc.yaml))
+			if err == nil {
+				t.Fatal("want a validation error")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) || !strings.Contains(err.Error(), "reserved") {
+				t.Fatalf("err = %v, want it to name %s and the reserved namespace", err, tc.wantErr)
+			}
+			if strings.Contains(err.Error(), "k1") {
+				t.Fatalf("err echoes the key: %v", err)
+			}
+		})
+	}
+}

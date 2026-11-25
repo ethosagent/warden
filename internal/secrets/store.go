@@ -2,6 +2,7 @@ package secrets
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
 
@@ -99,6 +100,9 @@ func NewStoreFetcher(store SecretStore) *storeFetcher {
 // placeholder is used directly as the store key; any error from the store is
 // surfaced to the caller (the Cache) unchanged.
 func (f *storeFetcher) Fetch(placeholder string) (string, error) {
+	if IsReservedKey(placeholder) {
+		return "", fmt.Errorf("%w: refused before any backend call", ErrReservedKey)
+	}
 	ctx := f.ctx
 	if ctx == nil {
 		ctx = context.Background()

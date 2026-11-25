@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -20,9 +21,11 @@ import (
 	_ "github.com/ethosagent/warden/internal/integration/webhook" // register the webhook sink
 
 	"github.com/ethosagent/warden/internal/adminaudit"
+	"github.com/ethosagent/warden/internal/agentreg"
 	agentregsqlite "github.com/ethosagent/warden/internal/agentreg/adapters/sqlite"
 	"github.com/ethosagent/warden/internal/alertpipeline"
 	"github.com/ethosagent/warden/internal/analytics"
+	"github.com/ethosagent/warden/internal/apikeys"
 	"github.com/ethosagent/warden/internal/auditlog"
 	"github.com/ethosagent/warden/internal/clock"
 	"github.com/ethosagent/warden/internal/config"
@@ -44,6 +47,16 @@ type Params struct {
 	// KeysReady, when set, is called with the key manager once Init has run, for
 	// tests and the harness (keys.enabled only).
 	KeysReady func(*keys.Manager)
+	// ApprovalsEnforcementShipped lifts the startup refusal of
+	// console.approvals.enabled. Until W-P2-APPR-06 gates every versioned write
+	// path through one clearance check, an enabled gate would still let a direct
+	// write skip it, so only the harness (which exercises the draft API) sets it;
+	// cmd/proxy never does.
+	ApprovalsEnforcementShipped bool
+	// APIKeysReady, when set, is called once the server is built with the
+	// reader of warden_cp_apikey_auth_total by outcome, for tests and the
+	// harness (console.apiKeys.enabled only).
+	APIKeysReady func(counts func() map[string]int64)
 
 	ConfigPath, ListenAddr string
 	// TokenEnv is the deprecated --token-env, an alias of LegacyTokenEnv.
@@ -62,6 +75,11 @@ type Params struct {
 	// wwt_ tokens only. It needs StateDir and no legacy token, and TLS unless
 	// AllowInsecureWorkerAuth is set; Run checks all three before listening.
 	RequireWorkerTokens bool
+	// RequireWorkerCerts (--require-worker-certs) is strict-certs worker auth:
+	// worker certificates only. It needs workerCA.enabled, StateDir and TLS (the
+	// insecure escape hatch does not apply), and no legacy token and no
+	// RequireWorkerTokens; Run checks all of them before listening.
+	RequireWorkerCerts bool
 	// AllowInsecureWorkerAuth (--allow-insecure-worker-auth) lets strict mode
 	// run without TLS (development; tokens then travel in clear text).
 	AllowInsecureWorkerAuth bool
@@ -81,6 +99,9 @@ type Params struct {
 	// listener's accept backlog and Serve drains them the moment it starts, so
 	// nothing is refused. Nil is allowed (production never sets it).
 	OnReady func(addr string)
+	// OnServer, when set, is called once with the built Server before it
+	// serves: a test seam (the in-process harness reads counters through it).
+	OnServer func(*Server)
 
 	// Clock is the CP's time port (nil = clock.Real()). The console
 	// query/generate rate limit ticks on it; the detection engine migrates in its
@@ -91,6 +112,22 @@ type Params struct {
 	// YAML; "versioned" serves the head of the versioned policy store and
 	// requires StateDir. Any other value is a startup error.
 	PolicyStore string
+
+	// Bundles is --bundles: "off" (or "", the default) leaves /policy exactly
+	// as it was; "offer" serves the signed bundle envelope to workers that ask
+	// for it with the bundle Accept header and the legacy policy to everyone
+	// else; "require" answers a request without that header with 406. Offer and
+	// require need StateDir, PolicyStore versioned and keys.enabled; Run
+	// refuses to start without them.
+	Bundles string
+	// BundleMaxAge is --bundle-max-age: how long a signed bundle is valid, and
+	// four times the re-sign interval (0 = DefaultBundleMaxAge, minimum
+	// MinBundleMaxAge).
+	BundleMaxAge time.Duration
+	// BundleSeqFloor is --bundle-seq-floor: with bundles on, a restore row is
+	// appended to the publish log at this seq at startup when the log is below
+	// it (0 = never).
+	BundleSeqFloor int64
 
 	// RequireConsoleAuth refuses to start when console.auth is none, so an
 	// operator can make an open console a startup error
@@ -264,9 +301,19 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	if err := checkAdminAuditFlags(consoleCfg, stateDir, p); err != nil {
 		return fail(err)
 	}
+	if err := checkApprovalsStartup(consoleCfg, policyStore, stateDir, p.ApprovalsEnforcementShipped); err != nil {
+		return fail(err)
+	}
 	// The keys block, like console:, comes from --config only. Disabled (the
 	// default) means nothing below creates a table, file, goroutine or route.
 	keysCfg, err := resolveKeys(configPath, stateDir)
+	if err != nil {
+		return fail(err)
+	}
+	// The tokenService block, like keys:, comes from --config only. Disabled
+	// (the default) means no table, migration, route or goroutine below.
+	tokenCfg, err := resolveTokenService(logger, configPath, stateDir, pol.Identity, keysCfg)
+	bundlesCfg, err := resolveBundles(p, stateDir, policyStore, keysCfg)
 	if err != nil {
 		return fail(err)
 	}
@@ -283,7 +330,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		logger.Warn("control-plane: --token-env is deprecated; use --legacy-token-env", "env", p.TokenEnv)
 	}
 	switch {
-	case p.RequireWorkerTokens:
+	case p.RequireWorkerTokens || p.RequireWorkerCerts:
 		// strict: validateWorkerAuth proved there is no shared token
 	case tokenEnv != "":
 		token = strings.TrimSpace(os.Getenv(tokenEnv))
@@ -307,7 +354,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		// --policy-store or console.adminAudit never trips the downgrade guard.
 		// The open is not cancellable: a shutdown signal must not abandon a
 		// migration half way through boot.
-		state, err = cpstate.Open(context.WithoutCancel(ctx), statePath, stateMigrationsFor(keysCfg))
+		state, err = cpstate.Open(context.WithoutCancel(ctx), statePath, stateMigrationsWithApprovals(stateMigrationsFor(keysCfg, consoleCfg, tokenCfg), consoleCfg.Approvals))
 		if err != nil {
 			return fail(fmt.Errorf("control-plane: state db: %w", err))
 		}
@@ -433,6 +480,20 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	if clk == nil {
 		clk = clock.Real()
 	}
+	// The workerCA block, like keys:, comes from --config only. Disabled (the
+	// default) means nothing below is loaded.
+	wcaPlan, err := resolveWorkerCA(configPath, stateDir, caCert, keysCfg, clk, logger)
+	if err != nil {
+		return fail(err)
+	}
+	// Enrollment tokens and certificates cross the wire, and a client certificate
+	// needs a TLS handshake: workerCA over plain HTTP is a startup error.
+	if wcaPlan != nil && (caCert == "" || caKey == "") {
+		return fail(errors.New("control-plane: workerCA.enabled requires --ca-cert and --ca-key (enrollment tokens and certificates must not travel over plain HTTP)"))
+	}
+	if p.RequireWorkerCerts && wcaPlan == nil {
+		return fail(errors.New("control-plane: --require-worker-certs requires workerCA.enabled in --config (worker certificates come from the worker CA)"))
+	}
 	// Per-worker tokens live in the state DB: without --state-dir no store is
 	// built and only the shared token (or none) authenticates workers. The loop
 	// polls for tokens other processes revoke and flushes last-used times; it
@@ -453,6 +514,48 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 			tokCancel()
 			<-tokDone
 		}()
+	}
+	// Enrollment tokens and the issued-cert table (W-P2-WCA-02) exist only with
+	// workerCA.enabled and a state dir; their index follows the same 2 s poll.
+	var enrollStore *EnrollmentStore
+	if state != nil && wcaPlan != nil {
+		enrollStore, err = NewEnrollmentStore(state, EnrollmentOptions{Clock: clk, Logger: logger,
+			DefaultTTL: wcaPlan.cfg.EnrollTokenTTL, MaxTTL: wcaPlan.cfg.EnrollTokenMaxTTL})
+		if err != nil {
+			return fail(fmt.Errorf("control-plane: enrollment tokens: %w", err))
+		}
+		enrollCtx, enrollCancel := context.WithCancel(ctx)
+		enrollDone := make(chan struct{})
+		go func() {
+			defer close(enrollDone)
+			enrollStore.Run(enrollCtx)
+		}()
+		defer func() {
+			enrollCancel()
+			<-enrollDone
+		}()
+	}
+	// API keys (console.apiKeys.enabled): the store and the in-memory Index are
+	// built on the state DB, and Index.Run starts here, before the HTTP server
+	// exists and so before the authenticator can serve its first request. It runs
+	// for the control plane's whole life: it picks up revocations other
+	// processes commit (the offline CLI) within one poll and flushes last-use
+	// values, and without it the Index refuses every key once its staleness
+	// ceiling passes. The deferred stop waits for Run (and its final flush)
+	// before the state DB closes. Disabled, nothing here runs.
+	var (
+		apiKeyIndex    *apikeys.Index
+		apiKeyStore    apikeys.Store
+		apiKeyRegistry *apikeys.Registry
+	)
+	if consoleCfg.APIKeys.Enabled {
+		apiKeyRegistry = newAPIKeyRegistry() // the one registry of this control plane
+		store, ix, stop, err := startAPIKeys(ctx, state, apiKeyRegistry, clk, logger)
+		if err != nil {
+			return fail(err)
+		}
+		apiKeyIndex, apiKeyStore = ix, store
+		defer stop()
 	}
 	// Signing keys (keys.enabled): the manager is built here and loads after
 	// the server exists, so a load failure can be published as a Finding.
@@ -477,16 +580,49 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		clientSecret = strings.TrimSpace(os.Getenv(consoleCfg.OIDC.ClientSecretEnv))
 	}
 
+	// Interfaces stay nil (not a typed nil) when the stores were not built.
+	var (
+		enrollTokens EnrollmentTokenStore
+		workerCerts  WorkerCertStore
+	)
+	if enrollStore != nil {
+		enrollTokens, workerCerts = enrollStore, enrollStore
+	}
+
+	// The process's one agent registry Store, shared by the dashboard agent API
+	// (Config.AgentStore) and the token service, with one Watch (below). Two
+	// Stores on the single cpstate connection would keep separate snapshots, so
+	// a dashboard disable would not reach the token endpoint until a restart.
+	var (
+		agents     *agentregsqlite.Store
+		agentStore agentreg.Store
+	)
+	if state != nil {
+		agents = agentregsqlite.New(state, agentregsqlite.WithClock(clk), agentregsqlite.WithLogger(logger))
+		agentStore = agents
+	}
+
 	srv := New(Config{
-		State:        state,
-		PolicyStore:  policyStore,
-		Keys:         keyMgr,
-		AdminAudit:   adminAudit,
-		PolicyPath:   servedPath,
-		Token:        token,
-		WorkerTokens: workerTokens,
+		AgentStore:  agentStore,
+		State:       state,
+		PolicyStore: policyStore,
+		Keys:        keyMgr,
+		Bundles:     bundlesCfg,
+		// The CA itself is installed after the key manager loaded (below).
+		WorkerCAEnabled:  wcaPlan != nil,
+		WorkerCAVerifier: wcaPlan.verifierOrNil(),
+		WorkerCertTTL:    wcaPlan.certTTL(),
+		Enrollment:       enrollTokens,
+		WorkerCerts:      workerCerts,
+		AdminAudit:       adminAudit,
+		PolicyPath:       servedPath,
+		Token:            token,
+		WorkerTokens:     workerTokens,
+		APIKeyIndex:      apiKeyIndex,
+		APIKeyStore:      apiKeyStore, APIKeyRegistry: apiKeyRegistry,
 
 		RequireWorkerTokens: p.RequireWorkerTokens,
+		RequireWorkerCerts:  p.RequireWorkerCerts,
 		TLS:                 caCert != "" && caKey != "",
 		MaxEvents:           maxEvents,
 		Store:               store,
@@ -517,8 +653,44 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		// The CP's time port (nil = clock.Real() inside New).
 		Clock: p.Clock,
 	})
+	// Fail closed: an enabled approvals gate that could not be built must not
+	// leave a control plane that serves writes ungated.
+	if err := srv.approvalsErr; err != nil {
+		return fail(err)
+	}
+	if p.OnServer != nil {
+		p.OnServer(srv)
+	}
 
+	// Running and waiting replays end as interrupted before the state and fleet
+	// stores close (defers run last-in first-out).
+	if svc := srv.Approvals(); svc != nil && svc.Replayer() != nil {
+		defer svc.Replayer().Close()
+	}
+
+	if apiKeyIndex != nil && p.APIKeysReady != nil {
+		p.APIKeysReady(srv.APIKeyAuthCounts)
+	}
 	srv.warnBreakGlassSetup(integrations)
+
+	// The token service (tokenService.enabled): built once the server exists,
+	// because the block checker reads the server's block store, and installed
+	// before Handler mounts the routes. A build failure stops startup; a token
+	// key that is not loaded yet does not (the service answers
+	// signer_unavailable and /readyz reports it, like every key consumer).
+	if tokenCfg.Enabled {
+		if agents == nil {
+			return fail(errors.New("control-plane: tokenService needs the state database"))
+		}
+		// The same Store the dashboard agent API writes through; its one Watch
+		// is the agent registry loop below.
+		ts, terr := newTokenService(tokenCfg, pol.Identity, state, agents, srv, keyMgr, clk, logger)
+		if terr != nil {
+			return fail(terr)
+		}
+		srv.EnableTokens(ts.Service, tokenCfg.Issuer, ts.Edge)
+		logTokenService(logger, tokenCfg)
+	}
 
 	if p.Findings != nil {
 		srv.findings = p.Findings
@@ -548,6 +720,35 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		}()
 	}
 
+	// The worker CA key: loaded once the key manager did. A key that does not
+	// match its intermediate stops startup; an unreachable key backend starts
+	// the control plane degraded (enroll and renew answer 503, /healthz says
+	// so) and a retry loop loads it every 30s.
+	if wcaPlan != nil {
+		// Bounded: a hung key backend must delay startup by seconds, not
+		// forever; a timeout is the degraded state.
+		loadCtx, loadCancel := context.WithTimeout(context.WithoutCancel(ctx), workerCALoadTimeout)
+		ca, werr := wcaPlan.Load(loadCtx, keyMgr)
+		loadCancel()
+		switch {
+		case werr == nil:
+			srv.SetWorkerCA(ca)
+		case errors.Is(werr, errWorkerCADegraded):
+			wcaCtx, wcaCancel := context.WithCancel(ctx)
+			wcaDone := make(chan struct{})
+			go func() {
+				defer close(wcaDone)
+				wcaPlan.Retry(wcaCtx, keyMgr, srv.SetWorkerCA)
+			}()
+			defer func() {
+				wcaCancel()
+				<-wcaDone
+			}()
+		default:
+			return fail(werr)
+		}
+	}
+
 	// Bounded chain check (newest rows + head signature) once the alert
 	// pipeline exists to carry its Finding. A failure is reported, never fatal.
 	srv.verifyAdminAuditAtStartup(context.WithoutCancel(ctx))
@@ -568,6 +769,17 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 			}
 			return fail(err)
 		}
+	}
+	// Signed bundles: the keys are loaded and the first head exists, so the
+	// publisher can sign. A mode it cannot honour stops the control plane.
+	if bundlesCfg.On() {
+		if err := srv.policy.startBundles(context.WithoutCancel(ctx)); err != nil {
+			if srv.integrationsStore != nil {
+				_ = srv.integrationsStore.Close() // Start never ran, so nothing else closes it
+			}
+			return fail(err)
+		}
+		logger.Info("control plane bundles mode", "mode", bundlesCfg.Mode)
 	}
 
 	httpSrv := &http.Server{
@@ -590,6 +802,14 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		if tErr != nil {
 			return fail(tErr)
 		}
+		if wcaPlan != nil {
+			// Ask for a client certificate and verify nothing in the handshake: the
+			// authenticator judges it per request (uniform 401, expiry seen on
+			// keep-alive connections, pool swappable). The handshake still proves
+			// the client holds the certificate's private key. A client that sends
+			// none (every human route, bearer workers) connects as before.
+			tlsCfg.ClientAuth = tls.RequestClientCert
+		}
 		httpSrv.TLSConfig = tlsCfg
 	} else {
 		logger.Warn("control-plane: serving plain HTTP; workers require HTTPS for the policy pull (provide --ca-cert/--ca-key)")
@@ -608,6 +828,22 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 
 	// Periodic re-read so external edits to the policy file propagate to workers.
 	srv.Start(ctx)
+
+	// Worker certificate revocations: pick up writes by the offline CLI within
+	// the 2 s data_version poll. Run waits for the loop before the state DB
+	// closes.
+	if srv.certIdx != nil {
+		cCtx, cCancel := context.WithCancel(ctx)
+		cDone := make(chan struct{})
+		go func() {
+			defer close(cDone)
+			srv.certIdx.Run(cCtx)
+		}()
+		defer func() {
+			cCancel()
+			<-cDone
+		}()
+	}
 
 	// Block list: pick up writes by the offline CLI (`control-plane block`)
 	// within BlockWatchInterval. Run waits for the loop before the state DB
@@ -766,6 +1002,19 @@ func validateWorkerAuth(p Params) (legacyEnv string, err error) {
 		}
 		legacyEnv = p.TokenEnv
 	}
+	if p.RequireWorkerCerts {
+		switch {
+		case p.RequireWorkerTokens:
+			return "", errors.New("control-plane: --require-worker-certs cannot be combined with --require-worker-tokens: strict-certs accepts certificates only")
+		case legacyEnv != "":
+			return "", errors.New("control-plane: --require-worker-certs cannot be combined with --legacy-token-env (or its alias --token-env): strict-certs retires the shared token")
+		case p.StateDir == "":
+			return "", errors.New("control-plane: --require-worker-certs requires --state-dir (issued certificates and their revocations live in its database)")
+		case p.CACert == "" || p.CAKey == "":
+			return "", errors.New("control-plane: --require-worker-certs requires TLS (--ca-cert and --ca-key): a client certificate needs a TLS handshake")
+		}
+		return "", nil
+	}
 	if !p.RequireWorkerTokens {
 		return legacyEnv, nil
 	}
@@ -817,6 +1066,11 @@ func resolveConsole(logger *slog.Logger, configPath, servedPath, stateDir string
 			logger.Warn("control-plane: the served config copy holds a different console block; ignoring it and using --config",
 				"served", servedPath, "config", configPath)
 		}
+	}
+	if cc.APIKeys.Enabled && stateDir == "" {
+		// Auth oidc is already proved by the config loader. API keys live in the
+		// state database, so without --state-dir there is nowhere to keep them.
+		return config.ConsoleConfig{}, errors.New("control-plane: console.apiKeys.enabled requires --state-dir (API keys are stored in its database)")
 	}
 	if cc.Auth != config.ConsoleAuthOIDC {
 		return cc, nil

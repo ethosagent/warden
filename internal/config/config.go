@@ -123,6 +123,14 @@ type Policy struct {
 	// --config only (LoadKeys) and json:"-" keeps it off the worker wire.
 	// Disabled by default.
 	Keys KeysConfig `json:"-"`
+	// TokenService is the control-plane-local RFC 8693 token endpoint
+	// (POST /oauth2/token). Read from --config only (LoadTokenService);
+	// json:"-" keeps it off the worker wire. Disabled by default.
+	TokenService TokenServiceConfig `json:"-"`
+	// WorkerCA is the control-plane-local worker intermediate CA (W-P2-WCA-01):
+	// trust domain, chain and key source. Read from --config only (LoadWorkerCA);
+	// json:"-" keeps it off the worker wire. Disabled by default.
+	WorkerCA WorkerCAConfig `json:"-"`
 	// LLMProviders is the shared, named LLM-provider registry (name + baseURL +
 	// model + apiKeyEnv NAME + optional timeout). It carries no secret VALUE, so
 	// it RIDES the secret-free settings wire (unlike the CP-local blocks above):
@@ -185,6 +193,7 @@ func (p Policy) DeepCopy() Policy {
 	}
 	cp.Agents = append([]AgentPolicy(nil), p.Agents...)
 	cp.Identity = *p.Identity.clone()
+	cp.TokenService = p.TokenService.clone()
 	if p.Observability.ResourceAttributes != nil {
 		ra := make(map[string]string, len(p.Observability.ResourceAttributes))
 		for k, v := range p.Observability.ResourceAttributes {
@@ -376,6 +385,8 @@ type rawConfig struct {
 	Detection     *rawDetection     `yaml:"detection"`
 	Console       *rawConsole       `yaml:"console"`
 	Keys          *rawKeys          `yaml:"keys"`
+	TokenService  *rawTokenService  `yaml:"tokenService"`
+	WorkerCA      *rawWorkerCA      `yaml:"workerCA"`
 	LLMProviders  []rawLLMProvider  `yaml:"llmProviders"`
 	Explore       *rawExplore       `yaml:"explore"`
 	DNS           *rawDNS           `yaml:"dns"`
@@ -502,7 +513,23 @@ func parse(data []byte) (*LocalYAMLProvider, error) {
 		return nil, err
 	}
 	policy.Keys = keysCfg
+	workerCA, err := parseWorkerCA(raw.WorkerCA)
+	if err != nil {
+		return nil, err
+	}
+	policy.WorkerCA = workerCA
+	if err := validateWorkerCA(policy.WorkerCA); err != nil {
+		return nil, err
+	}
 	if err := validateKeys(policy.Keys); err != nil {
+		return nil, err
+	}
+	tokenSvc, err := parseTokenService(raw.TokenService)
+	if err != nil {
+		return nil, err
+	}
+	policy.TokenService = tokenSvc
+	if err := validateTokenService(policy.TokenService); err != nil {
 		return nil, err
 	}
 	llmProviders, err := parseLLMProviders(raw.LLMProviders)
@@ -675,6 +702,12 @@ func validate(p Policy) error {
 	for i, s := range p.Secrets {
 		if s.Placeholder == "" {
 			return fmt.Errorf("config: secrets[%d]: placeholder is required", i)
+		}
+		// cp/ is reserved for control-plane material (W-P2-WCA-07): a placeholder
+		// naming it would have a worker inject that value upstream. The message
+		// names the entry only; it does not echo the placeholder.
+		if IsReservedSecretKey(s.Placeholder) {
+			return fmt.Errorf("config: secrets[%d]: placeholder names the reserved %q secret namespace", i, ReservedSecretNamespace+"/")
 		}
 		if envBackend && s.EnvVar == "" {
 			return fmt.Errorf("config: secrets[%d]: envVar is required for the env secret backend", i)
