@@ -33,7 +33,7 @@ services:
       - "--config=/etc/warden/config.yaml"
       - "--state-dir=/data"
       - "--listen=0.0.0.0:7070"
-      - "--require-worker-tokens"
+      - "--require-worker-certs"
       - "--admin-token-env=WARDEN_CP_ADMIN_TOKEN"
       - "--ca-cert=/etc/warden/certs/proxy-ca.crt"
       - "--ca-key=/etc/warden/certs/proxy-ca.key"
@@ -42,7 +42,11 @@ services:
       - "--bundles=offer"
 
   cp-pins:
-    image: ethosagent/warden:${WARDEN_VERSION:-0.3.0}
+    # The published image has no `control-plane keys` command: use the build the base file makes.
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: ${WARDEN_IMAGE:-warden-control-plane:local}
     restart: "no"
     network_mode: none
     depends_on:

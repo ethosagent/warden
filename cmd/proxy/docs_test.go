@@ -22,6 +22,7 @@ const (
 	runbookBackup      = "../../docs/runbooks/backup-restore.md"
 	runbookBreakGlass  = "../../docs/runbooks/break-glass.md"
 	runbookKeyRotation = "../../docs/runbooks/key-rotation.md"
+	runbookWorkerCerts = "../../docs/runbooks/worker-certs.md"
 	readinessDoc       = "../../docs/production-readiness.md"
 	controlPlaneDoc    = "../../docs/control-plane.md"
 	readmeFile         = "../../README.md"
@@ -131,7 +132,7 @@ func lintDocCommands(doc string) []string {
 }
 
 func TestRunbookCommandsMatchCLI(t *testing.T) {
-	for _, path := range []string{runbookBackup, runbookBreakGlass, runbookKeyRotation, readinessDoc} {
+	for _, path := range []string{runbookBackup, runbookBreakGlass, runbookKeyRotation, runbookWorkerCerts, readinessDoc} {
 		t.Run(filepath.Base(path), func(t *testing.T) {
 			doc := readDoc(t, path)
 			if len(docInvocations(doc)) == 0 {
@@ -142,6 +143,23 @@ func TestRunbookCommandsMatchCLI(t *testing.T) {
 			}
 		})
 	}
+
+	// The worker CA, enrollment and migration sections of the control-plane doc
+	// carry operator commands too (W-P2-WCA-06).
+	t.Run("control-plane.md worker CA sections", func(t *testing.T) {
+		doc := readDoc(t, controlPlaneDoc)
+		start, end := strings.Index(doc, "## Worker CA (`workerCA:`)"), strings.Index(doc, "## Signed bundles (`--bundles`)")
+		if start < 0 || end < start {
+			t.Fatalf("%s lost the Worker CA or Signed bundles heading", controlPlaneDoc)
+		}
+		doc = doc[start:end]
+		if len(docInvocations(doc)) < 8 {
+			t.Fatalf("%s worker CA sections show too few fenced `warden control-plane` commands", controlPlaneDoc)
+		}
+		for _, issue := range lintDocCommands(doc) {
+			t.Error(issue)
+		}
+	})
 
 	t.Run("lint catches a bad flag and a bad subcommand", func(t *testing.T) {
 		bad := "```sh\nwarden control-plane backup --state-dir /data --no-such-flag x\n```\n"
@@ -246,7 +264,7 @@ func TestProductionReadinessKeysExist(t *testing.T) {
 
 func TestRunbooksHaveNoRealSecrets(t *testing.T) {
 	jwt := regexp.MustCompile(`eyJ[A-Za-z0-9_-]{10,}`)
-	for _, path := range []string{runbookBackup, runbookBreakGlass, runbookKeyRotation, readinessDoc} {
+	for _, path := range []string{runbookBackup, runbookBreakGlass, runbookKeyRotation, runbookWorkerCerts, readinessDoc} {
 		for n, line := range strings.Split(readDoc(t, path), "\n") {
 			low := strings.ToLower(line)
 			if (strings.Contains(line, "--password") || strings.Contains(line, "$argon2id$")) && !strings.Contains(low, "placeholder") {
