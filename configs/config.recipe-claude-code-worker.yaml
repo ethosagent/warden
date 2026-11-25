@@ -1,0 +1,40 @@
+# Managed WORKER for the Claude Code recipe (deploy/compose/
+# docker-compose.claude-code.yml). Started with --agent-id claude-code.
+#
+# Allow/deny policy and the identity mode come ONLY from the control plane
+# (configs/config.cp-served.claude-code.yaml). The worker boots fail-closed until
+# its first signed bundle verifies. Secrets stay LOCAL to this worker.
+
+logging:
+  level: info
+  format: json
+
+# Claude Code holds the placeholder anthropic_secret_001 (ANTHROPIC_API_KEY in
+# its container); this worker swaps in the real key from ITS OWN environment,
+# on api.anthropic.com only. With ANTHROPIC_API_KEY unset the swap is
+# skipped and the upstream answers 401 (the documented placeholder-only result).
+secrets:
+  - placeholder: anthropic_secret_001
+    envVar: ANTHROPIC_API_KEY
+    matchHosts: ["api.anthropic.com"]
+
+controlPlane:
+  endpoint: https://control-plane:7070/policy
+  tokenEnv: WARDEN_WORKER_TOKEN
+  caCert: /etc/warden/certs/proxy-ca.crt
+  longPollWait: 30s
+  heartbeatInterval: 10s
+  localOnly: false
+  # Pin the control plane's bundle signing key: the JWKS that identity-bootstrap
+  # exported (warden control-plane keys export --purpose bundle) into a volume
+  # mounted read-only here. Warden tokens are verified only against keys that
+  # arrive in a bundle signed by this pin.
+  bundleKeysFile: /etc/warden/bundle/bundle-jwks.json
+  requireSignedBundles: true
+
+central:
+  mode: worker
+  endpoint: https://control-plane:7070/central/ingest
+  tokenEnv: WARDEN_WORKER_TOKEN
+  proxyID: ${WARDEN_PROXY_ID}
+  caCert: /etc/warden/certs/proxy-ca.crt
