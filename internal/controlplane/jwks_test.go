@@ -113,6 +113,7 @@ type keysEnvOpts struct {
 	disabled bool // keys.enabled false: no manager
 	down     bool // the key store is down at startup
 	noAudit  bool
+	tokens   bool // apply the tokensvc migrations
 }
 
 func newKeysEnv(t *testing.T, o keysEnvOpts) *keysEnv {
@@ -122,7 +123,7 @@ func newKeysEnv(t *testing.T, o keysEnvOpts) *keysEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
-	db, err := cpstate.Open(context.Background(), t.TempDir()+"/warden-cp.db", stateMigrationsFor(kc, config.ConsoleConfig{}))
+	db, err := cpstate.Open(context.Background(), t.TempDir()+"/warden-cp.db", stateMigrationsFor(kc, config.ConsoleConfig{}, config.TokenServiceConfig{Enabled: o.tokens}))
 	if err != nil {
 		t.Fatal(err)
 	}

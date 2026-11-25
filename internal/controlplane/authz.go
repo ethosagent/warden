@@ -29,6 +29,11 @@ const (
 	// classWorkerPlane routes serve workers (/policy, heartbeat, ingest,
 	// healthz). They are never wrapped in the audit chain.
 	classWorkerPlane routeClass = "worker-plane"
+	// classAssertionAuth routes authenticate the caller with a signed client
+	// assertion in the request body (POST /oauth2/token, W-P2-TOKX-03): no
+	// session, no CSRF, no bearer. They are never wrapped in the admin audit
+	// chain (machine issuance has its own records, W-P2-TOKX-04).
+	classAssertionAuth routeClass = "assertion-authenticated"
 	// classHandlerRecorded routes record their own entries (login, callback,
 	// logout: W-P1-AAUD-07). The middleware never wraps them.
 	classHandlerRecorded routeClass = "handler-recorded"
@@ -244,10 +249,11 @@ func cpRouteTable() map[routeKey]authzRow {
 		del  = http.MethodDelete
 	)
 	// None of these is reachable with an API key (WorkerAuthenticator refuses a
-	// wak_ bearer; the human routes answer a key 401 or 403), so every row is
-	// ScopeNone.
+	// wak_ bearer; the token endpoint authenticates with a client assertion;
+	// the human routes answer a key 401 or 403), so every row is ScopeNone.
 	const none = apikeys.ScopeNone
 	worker := authzRow{Class: classWorkerPlane, Scope: none}
+	assertion := authzRow{Action: "token.exchange", Class: classAssertionAuth, Scope: none}
 	handler := func(action string) authzRow {
 		return authzRow{Action: action, Class: classHandlerRecorded, Scope: none}
 	}
@@ -261,6 +267,11 @@ func cpRouteTable() map[routeKey]authzRow {
 		// only with keys.enabled.
 		{get, "/readyz", worker},
 		{get, jwksPath, worker},
+		// The RFC 8693 token endpoint authenticates with a client assertion
+		// in the body and is Audited:false; its RFC 8414 metadata is public
+		// like the JWKS. Both are mounted only with tokenService.enabled.
+		{post, tokenPath, assertion},
+		{get, asMetadataPath, worker},
 		{get, "/policy", worker},
 		{post, "/control/heartbeat", worker},
 		// Credential is the enrollment token; mounted only with workerCA enabled

@@ -330,6 +330,19 @@ var All = slices.Concat(
 		{Name: "keys_rotate_after_downtime", Opts: keysRotationOpts(), Run: keysRotateAfterDowntime},
 		{Name: "keys_jwks_served_and_rotates", Opts: keysRotationOpts(), Run: keysJWKSServedAndRotates},
 		{Name: "keys_jwks_unavailable_until_loaded", Opts: keysFlakyOpts(), Run: keysJWKSUnavailableUntilLoaded},
+		// Token endpoint (W-P2-TOKX-03): with tokenService.enabled an agent's
+		// private_key_jwt assertion plus a user's ID token exchange for a
+		// short-lived Warden token that verifies against the served JWKS; every
+		// refusal is an RFC 6749 error with a closed reason and no token; the
+		// endpoint is 404 unless the block enables it; a missing signing key or
+		// an unreachable IdP is a 503 with Retry-After. In-process only (fake
+		// clock, CP state dir, issuer fake).
+		{Name: "token_exchange_issues_token", Opts: tokenServiceOpts(), Run: tokenExchangeIssuesToken},
+		{Name: "token_exchange_refusals", Opts: tokenServiceOpts(), Run: tokenExchangeRefusals},
+		{Name: "token_exchange_dashboard_disable", Opts: tokenServiceDashboardOpts(), Run: tokenExchangeDashboardDisable},
+		{Name: "token_service_disabled_by_default", Opts: tokenServiceDisabledOpts(), Run: tokenServiceDisabledByDefault},
+		{Name: "token_exchange_signer_unavailable", Opts: tokenServiceOpts(harness.WithFlakyKeyStore()), Run: tokenExchangeSignerUnavailable},
+		{Name: "token_exchange_idp_unavailable", Opts: tokenServiceOpts(harness.WithOIDCIssuerDown()), Run: tokenExchangeIdPUnavailable},
 		{Name: "keys_cli_rotates_and_resets", Opts: keysRotationOpts(), Run: keysCLIRotatesAndResets},
 		{Name: "workerca_degraded_then_ready", Opts: workerCAOpts(), Run: workerCADegradedThenReady},
 		{Name: "workerca_enroll", Opts: workerCAEnrollOpts(), Run: workerCAEnroll},

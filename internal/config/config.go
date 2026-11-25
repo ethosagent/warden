@@ -123,6 +123,10 @@ type Policy struct {
 	// --config only (LoadKeys) and json:"-" keeps it off the worker wire.
 	// Disabled by default.
 	Keys KeysConfig `json:"-"`
+	// TokenService is the control-plane-local RFC 8693 token endpoint
+	// (POST /oauth2/token). Read from --config only (LoadTokenService);
+	// json:"-" keeps it off the worker wire. Disabled by default.
+	TokenService TokenServiceConfig `json:"-"`
 	// WorkerCA is the control-plane-local worker intermediate CA (W-P2-WCA-01):
 	// trust domain, chain and key source. Read from --config only (LoadWorkerCA);
 	// json:"-" keeps it off the worker wire. Disabled by default.
@@ -189,6 +193,7 @@ func (p Policy) DeepCopy() Policy {
 	}
 	cp.Agents = append([]AgentPolicy(nil), p.Agents...)
 	cp.Identity = *p.Identity.clone()
+	cp.TokenService = p.TokenService.clone()
 	if p.Observability.ResourceAttributes != nil {
 		ra := make(map[string]string, len(p.Observability.ResourceAttributes))
 		for k, v := range p.Observability.ResourceAttributes {
@@ -380,6 +385,7 @@ type rawConfig struct {
 	Detection     *rawDetection     `yaml:"detection"`
 	Console       *rawConsole       `yaml:"console"`
 	Keys          *rawKeys          `yaml:"keys"`
+	TokenService  *rawTokenService  `yaml:"tokenService"`
 	WorkerCA      *rawWorkerCA      `yaml:"workerCA"`
 	LLMProviders  []rawLLMProvider  `yaml:"llmProviders"`
 	Explore       *rawExplore       `yaml:"explore"`
@@ -516,6 +522,14 @@ func parse(data []byte) (*LocalYAMLProvider, error) {
 		return nil, err
 	}
 	if err := validateKeys(policy.Keys); err != nil {
+		return nil, err
+	}
+	tokenSvc, err := parseTokenService(raw.TokenService)
+	if err != nil {
+		return nil, err
+	}
+	policy.TokenService = tokenSvc
+	if err := validateTokenService(policy.TokenService); err != nil {
 		return nil, err
 	}
 	llmProviders, err := parseLLMProviders(raw.LLMProviders)

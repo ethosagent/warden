@@ -650,11 +650,11 @@ func TestStateMigrationsForAPIKeys(t *testing.T) {
 		}
 		return false, false
 	}
-	off := stateMigrationsFor(config.KeysConfig{}, config.ConsoleConfig{})
+	off := stateMigrationsFor(config.KeysConfig{}, config.ConsoleConfig{}, config.TokenServiceConfig{})
 	if p, opt := has(off, sqlitestore.MigrationID); !p || !opt {
 		t.Errorf("disabled: present=%v optional=%v, want the ID known and optional", p, opt)
 	}
-	on := stateMigrationsFor(config.KeysConfig{}, config.ConsoleConfig{APIKeys: config.ConsoleAPIKeys{Enabled: true}})
+	on := stateMigrationsFor(config.KeysConfig{}, config.ConsoleConfig{APIKeys: config.ConsoleAPIKeys{Enabled: true}}, config.TokenServiceConfig{})
 	if p, opt := has(on, sqlitestore.MigrationID); !p || opt {
 		t.Errorf("enabled: present=%v optional=%v, want it applied", p, opt)
 	}

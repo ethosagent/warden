@@ -21,6 +21,7 @@ import (
 	_ "github.com/ethosagent/warden/internal/integration/webhook" // register the webhook sink
 
 	"github.com/ethosagent/warden/internal/adminaudit"
+	"github.com/ethosagent/warden/internal/agentreg"
 	agentregsqlite "github.com/ethosagent/warden/internal/agentreg/adapters/sqlite"
 	"github.com/ethosagent/warden/internal/alertpipeline"
 	"github.com/ethosagent/warden/internal/analytics"
@@ -309,6 +310,9 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	if err != nil {
 		return fail(err)
 	}
+	// The tokenService block, like keys:, comes from --config only. Disabled
+	// (the default) means no table, migration, route or goroutine below.
+	tokenCfg, err := resolveTokenService(logger, configPath, stateDir, pol.Identity, keysCfg)
 	bundlesCfg, err := resolveBundles(p, stateDir, policyStore, keysCfg)
 	if err != nil {
 		return fail(err)
@@ -350,7 +354,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		// --policy-store or console.adminAudit never trips the downgrade guard.
 		// The open is not cancellable: a shutdown signal must not abandon a
 		// migration half way through boot.
-		state, err = cpstate.Open(context.WithoutCancel(ctx), statePath, stateMigrationsWithApprovals(stateMigrationsFor(keysCfg, consoleCfg), consoleCfg.Approvals))
+		state, err = cpstate.Open(context.WithoutCancel(ctx), statePath, stateMigrationsWithApprovals(stateMigrationsFor(keysCfg, consoleCfg, tokenCfg), consoleCfg.Approvals))
 		if err != nil {
 			return fail(fmt.Errorf("control-plane: state db: %w", err))
 		}
@@ -585,7 +589,21 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		enrollTokens, workerCerts = enrollStore, enrollStore
 	}
 
+	// The process's one agent registry Store, shared by the dashboard agent API
+	// (Config.AgentStore) and the token service, with one Watch (below). Two
+	// Stores on the single cpstate connection would keep separate snapshots, so
+	// a dashboard disable would not reach the token endpoint until a restart.
+	var (
+		agents     *agentregsqlite.Store
+		agentStore agentreg.Store
+	)
+	if state != nil {
+		agents = agentregsqlite.New(state, agentregsqlite.WithClock(clk), agentregsqlite.WithLogger(logger))
+		agentStore = agents
+	}
+
 	srv := New(Config{
+		AgentStore:  agentStore,
 		State:       state,
 		PolicyStore: policyStore,
 		Keys:        keyMgr,
@@ -654,6 +672,25 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		p.APIKeysReady(srv.APIKeyAuthCounts)
 	}
 	srv.warnBreakGlassSetup(integrations)
+
+	// The token service (tokenService.enabled): built once the server exists,
+	// because the block checker reads the server's block store, and installed
+	// before Handler mounts the routes. A build failure stops startup; a token
+	// key that is not loaded yet does not (the service answers
+	// signer_unavailable and /readyz reports it, like every key consumer).
+	if tokenCfg.Enabled {
+		if agents == nil {
+			return fail(errors.New("control-plane: tokenService needs the state database"))
+		}
+		// The same Store the dashboard agent API writes through; its one Watch
+		// is the agent registry loop below.
+		ts, terr := newTokenService(tokenCfg, pol.Identity, state, agents, srv, keyMgr, clk, logger)
+		if terr != nil {
+			return fail(terr)
+		}
+		srv.EnableTokens(ts.Service, tokenCfg.Issuer)
+		logTokenService(logger, tokenCfg)
+	}
 
 	if p.Findings != nil {
 		srv.findings = p.Findings

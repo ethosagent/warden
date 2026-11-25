@@ -228,6 +228,9 @@ type H struct {
 	// with the harness clock.
 	wantKeys  bool
 	keyTiming keyTiming
+	// wantTokenSvc (WithTokenService) boots the control plane with
+	// tokenService.enabled over the WithKeys state.
+	wantTokenSvc bool
 	// wantWorkerCA (WithWorkerCA) boots the control plane with workerCA
 	// enabled; workerCA is the fixture minted on first use.
 	wantWorkerCA bool
@@ -860,6 +863,7 @@ func (h *H) writeCPConfig() string {
 	b.WriteString(h.identityYAML())
 	b.WriteString(h.consoleYAML())
 	b.WriteString(h.keysYAML())
+	b.WriteString(h.tokenServiceYAML())
 	b.WriteString(h.workerCAYAML())
 	b.WriteString(h.fakeJudgeYAML())
 	b.WriteString(h.auditJSONLogYAML())
