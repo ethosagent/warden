@@ -65,6 +65,16 @@ func ecYAML(t *testing.T) string {
 	return fmt.Sprintf("    - {kty: EC, crv: P-256, x: %s, y: %s, kid: %s, alg: ES256}\n", j.X, j.Y, j.Kid)
 }
 
+// parseChecked parses yaml and then runs the managed-worker pin check the worker
+// runs at startup (ControlPlaneConfig.CheckBundlePins).
+func parseChecked(yaml []byte) (*LocalYAMLProvider, error) {
+	p, err := parse(yaml)
+	if err != nil {
+		return nil, err
+	}
+	return p, p.policy.ControlPlane.CheckBundlePins()
+}
+
 // cpHeadBare is a managed worker with no bundle settings at all: the defaults.
 const cpHeadBare = baseAllow + "controlPlane:\n  endpoint: https://cp.example.com/policy\n"
 
@@ -79,13 +89,13 @@ func TestControlPlaneRequireSignedBundles(t *testing.T) {
 		"default":  cpHeadBare,
 		"explicit": cpHeadBare + "  requireSignedBundles: true\n",
 	} {
-		_, err := parse([]byte(yaml))
+		_, err := parseChecked([]byte(yaml))
 		if err == nil || !strings.Contains(err.Error(), "controlPlane.bundleKeys") || !strings.Contains(err.Error(), "requireSignedBundles: false") {
 			t.Fatalf("%s: err = %v, want one naming controlPlane.bundleKeys and the opt-out", name, err)
 		}
 	}
 	// The explicit opt-out loads, unverified.
-	p, err := parse([]byte(cpHeadBare + "  requireSignedBundles: false\n"))
+	p, err := parseChecked([]byte(cpHeadBare + "  requireSignedBundles: false\n"))
 	if err != nil {
 		t.Fatalf("opt-out: %v", err)
 	}
@@ -93,12 +103,12 @@ func TestControlPlaneRequireSignedBundles(t *testing.T) {
 		t.Fatalf("opt-out = %+v, want no require and no pins", cp)
 	}
 	// With a pin the default is satisfied, and it stays required.
-	p, err = parse([]byte(cpHeadBare + "  bundleKeys:\n" + edYAML(t, "    ")))
+	p, err = parseChecked([]byte(cpHeadBare + "  bundleKeys:\n" + edYAML(t, "    ")))
 	if err != nil || !p.policy.ControlPlane.BundleVerification() || !p.policy.ControlPlane.RequireSignedBundles {
 		t.Fatalf("pinned: %v", err)
 	}
 	// local-only ignores the keys, so the default is not enforced.
-	if _, err := parse([]byte(cpHeadBare + "  localOnly: true\n")); err != nil {
+	if _, err := parseChecked([]byte(cpHeadBare + "  localOnly: true\n")); err != nil {
 		t.Fatalf("local-only: %v", err)
 	}
 }
@@ -296,7 +306,7 @@ func TestBundleGateDefaults(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			p, err := parse([]byte(tc.yaml))
+			p, err := parseChecked([]byte(tc.yaml))
 			if len(tc.wantErr) > 0 {
 				if err == nil {
 					t.Fatal("loaded, want a config error")
@@ -317,8 +327,17 @@ func TestBundleGateDefaults(t *testing.T) {
 			}
 		})
 	}
+	// Parsing alone never fails on missing pins: the check belongs to a worker
+	// that is managed, so `warden run --local-only` on this config still loads.
+	p, err := parse([]byte(cpHeadBare))
+	if err != nil {
+		t.Fatalf("parse without pins: %v", err)
+	}
+	if err := p.policy.ControlPlane.CheckBundlePins(); err == nil {
+		t.Error("CheckBundlePins passed for a managed config with no pins")
+	}
 	// A standalone worker (no controlPlane block) is untouched by the default.
-	if _, err := parse([]byte(baseAllow)); err != nil {
+	if _, err := parseChecked([]byte(baseAllow)); err != nil {
 		t.Fatalf("standalone worker: %v", err)
 	}
 }

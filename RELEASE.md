@@ -94,7 +94,7 @@ Auto-generated notes list titles only, so a breaking change needs its own entry.
 - `warden control-plane --bundles` now defaults to `require` when `--state-dir`, `--policy-store=versioned` and `keys.enabled` are all present (otherwise unsigned policy and one startup WARN). It was `off`. Opt out with `--bundles=off`; `--bundles=offer` serves unsigned policy to unpinned workers during a rollout. Both log a WARN.
 - Worker `controlPlane.requireSignedBundles` now defaults to `true`: a CP-managed worker with no `controlPlane.bundleKeys` or `bundleKeysFile` fails to start, naming the keys to pin. It was `false`. Opt out, temporarily, with `controlPlane.requireSignedBundles: false` (logs a WARN).
 - Before upgrading: run the control plane with `--bundles=offer`, export the keys (`warden control-plane keys export --purpose bundle`), pin every worker, upgrade the workers, then upgrade the control plane and drop the flag.
-- A worker never falls back to unsigned policy by itself: against a control plane that serves no signed envelope, a pinned worker keeps its last-known-good policy (deny-all at a cold boot with no cache).
+- A worker never falls back to unsigned policy by itself (a control plane with `--bundles` unset and a prerequisite missing does serve unsigned, with a WARN): against a control plane that serves no signed envelope, a pinned worker keeps its last-known-good policy (deny-all at a cold boot with no cache).
 
 ## Verify a release
 

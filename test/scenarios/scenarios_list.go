@@ -425,6 +425,7 @@ var All = slices.Concat(
 		// legacy wire. In-process only (versioned store, keys, CP restart).
 		{Name: "bundles_off_legacy_wire", Opts: bundlesOffOpts(), Run: bundlesOffLegacyWire},
 		{Name: "bundles_offer_serves", Opts: bundlesOfferOpts(), Run: bundlesOfferServes},
+		{Name: "bundles_default_requires", Opts: bundlesDefaultOpts(), Run: bundlesDefaultRequires},
 		// Agent binding, CP half (W-P2-WBND-06): the signed bundle names the token
 		// issuer (never cpID), the served jkt equals the minted token's cnf.jkt,
 		// and a registry change moves the bundle. In-process only.

@@ -115,7 +115,7 @@ the bundle keys.
 |---|---|---|
 | `controlPlane.bundleKeys` | none | List of public JWKs (OKP/Ed25519 or EC/P-256). |
 | `controlPlane.bundleKeysFile` | none | JWKS JSON file `{"keys":[...]}`, merged with `bundleKeys`. |
-| `controlPlane.requireSignedBundles` | `true` | Config load fails when no keys are pinned (checked whenever the endpoint is set and `controlPlane.localOnly` is not true in the file, so a worker started with the `--local-only` flag is checked too, deliberately fail-closed). `false` is the explicit, temporary opt-out: the worker takes unsigned policy and logs a WARN at boot. Pins always verify, whatever this says. |
+| `controlPlane.requireSignedBundles` | `true` | A CP-managed worker (endpoint set, neither `controlPlane.localOnly` nor `--local-only`) with no keys pinned fails at startup. `false` is the explicit, temporary opt-out: the worker takes unsigned policy and logs a WARN at boot. Pins always verify, whatever this says. |
 | `controlPlane.bundleIssuer` | none | When set, a bundle's `cpId` must equal it. |
 | `controlPlane.bundleClockSkew` | `5m` | Tolerance on `issuedAt` and `expiresAt`, at most `1h`. |
 | `controlPlane.bundleExpiry` | `keep` | `keep` enforces the last-known-good past expiry, `deny` blocks. |
@@ -137,9 +137,11 @@ and logs one INFO line.
 | Control plane `--bundles` | `off` | unset = `require` when `--state-dir`, `--policy-store=versioned` and `keys.enabled: true` are all present; otherwise the legacy unsigned policy and one startup WARN naming what is missing |
 | Worker `controlPlane.requireSignedBundles` | `false` | `true`: a CP-managed worker with no `bundleKeys` or `bundleKeysFile` fails to start |
 
-Neither side ever falls back to unsigned by itself. An upgrade that skips the pins
-stops the worker at config load with an error that names the keys to pin and the
-opt-out; it does not run unsigned.
+A worker never falls back to unsigned by itself: one that upgrades without pins
+stops at startup with an error that names the keys to pin and the opt-out. The
+control plane differs: with `--bundles` unset and a prerequisite missing it serves
+the unsigned policy and logs one WARN naming the gap. A pinned worker rejects that
+as `unsigned`, and an unpinned worker does not start without the opt-out.
 
 **Do these in order, before you upgrade any binary.**
 
@@ -168,15 +170,15 @@ opt-out; it does not run unsigned.
    (`docker-compose.bundles.yml` is this path in compose: it exports the pins and
    starts each worker pinned.)
 
-**Opting out, temporarily.** Both opt-outs are explicit and log a WARN, and a
-setting you did not write never turns one on:
+**Opting out, temporarily.** Both opt-outs are explicit and log a WARN (the
+control plane's unset-flag fallback above logs one too):
 
 - Control plane: `--bundles=off` serves the legacy unsigned policy and logs
   `--bundles=off serves the legacy unsigned policy; this is a temporary opt-out`
   (`--bundles=offer` also logs a WARN: it serves unsigned policy to unpinned workers).
 - Worker: `controlPlane.requireSignedBundles: false` (the WARN above). Pins, when
-  present, still verify. `--local-only` on the command line does not skip the
-  check; set `controlPlane.localOnly: true` in the file or the opt-out.
+  present, still verify. `warden run --local-only` ignores the control plane and
+  needs no pins; the check runs only for a worker that is CP-managed.
 
 **What a worker does when the control plane serves no signed envelope.** It fails
 closed, not open:

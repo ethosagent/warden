@@ -227,7 +227,16 @@ func validateControlPlane(c ControlPlaneConfig) error {
 	if c.PollInterval <= 0 {
 		return fmt.Errorf("config: controlPlane.pollInterval must be greater than 0")
 	}
-	if c.RequireSignedBundles && !c.LocalOnly && !c.BundleVerification() {
+	return nil
+}
+
+// CheckBundlePins is the fail-closed check of a CP-managed worker: signed
+// bundles are required (the default) and no keys are pinned. The worker runs it
+// once it knows it is managed, that is after the --local-only flag and
+// controlPlane.localOnly are both applied, so a standalone run of a managed
+// config still works. It never falls back to unsigned policy.
+func (c ControlPlaneConfig) CheckBundlePins() error {
+	if c.Endpoint != "" && !c.LocalOnly && c.RequireSignedBundles && !c.BundleVerification() {
 		return errors.New(errNoBundlePins)
 	}
 	return nil
