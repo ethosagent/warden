@@ -1,0 +1,17 @@
+# NEGATIVE TEST ONLY (W-P2-RCP-05). Never merge this into a real deployment.
+#
+# Makes the control plane serve `identity: attribute` instead of `require` for both
+# recipe agents (config.cp-attribute.yaml, mounted over the recipe's seed copy). A
+# worker then accepts a request that carries no Warden token, so the isolation proof
+# must fail at no-token-407; that is how the script's own self-test shows the check
+# can fail:
+#
+#   RECIPE_ISOLATION_COMPOSE_EXTRA=$PWD/deploy/compose/test/recipe-identity-attribute.yml \
+#     scripts/recipe-isolation.sh codex     # exits non-zero at no-token-407
+#
+# The control plane copies its seed config to its state dir on first start, and the
+# script always starts from a clean state (down -v), so the seed below is what is served.
+services:
+  control-plane:
+    volumes:
+      - ./test/config.cp-attribute.yaml:/etc/warden/config.yaml:ro

@@ -19,18 +19,20 @@
 # for any variable the caller has not set.
 #
 # The stack publishes fixed host ports (7070, 5556, 9091, 9092, 9094, 9095) and shares
-# them with `make e2e`: hold the shared lock around a run,
-#   flock /tmp/warden-e2e.lock scripts/recipe-isolation.sh codex
+# them with `make e2e`, so the script takes /tmp/warden-e2e.lock itself (it re-executes
+# under flock; WARDEN_E2E_LOCKED marks the re-execution). Do not wrap it in another flock.
 #
 # Environment:
 #   RECIPE_ISOLATION_COMPOSE_EXTRA  space-separated extra compose files merged last
 #                                   (the negative self-tests use this)
 #   RECIPE_ISOLATION_KEEP=1         INTERACTIVE DEBUGGING ONLY: leave the stack running on
-#                                   exit. The stack holds fixed host ports (7070 ...) after
-#                                   the lock is released, so it breaks every other run: never
-#                                   use it while other stacks run, and tear it down yourself
+#                                   exit (and the generated dev CA files). The stack holds
+#                                   fixed host ports (7070 ...) after the lock is released, so
+#                                   it breaks every other run: never use it while other stacks
+#                                   run, and tear it down yourself
 #                                   (docker compose -p warden-recipe-<recipe> down -v).
-#                                   The default always runs `docker compose down -v`.
+#                                   A warning on stderr says so at exit. The default always
+#                                   runs `docker compose down -v`.
 #   RECIPE_ISOLATION_READY_TIMEOUT  seconds to wait for the first token exchange
 #                                   (default 420: a fresh control plane holds back
 #                                   its first token key for a few minutes)
@@ -66,15 +68,19 @@ PROJECT="warden-recipe-$RECIPE"
 CA_PATH=/etc/warden/certs/proxy-ca.crt
 READY_TIMEOUT="${RECIPE_ISOLATION_READY_TIMEOUT:-420}"
 COMPOSE_DIR="$ROOT/deploy/compose"
+CERTS_DIR="$COMPOSE_DIR/certs"
 
 JWT_RE='eyJ[A-Za-z0-9_-]{20,}'
 
-for tool in docker jq curl openssl; do
+for tool in docker jq curl openssl flock; do
 	command -v "$tool" >/dev/null 2>&1 || {
 		echo "recipe-isolation: $tool is required" >&2
 		exit 2
 	}
 done
+
+# Take the shared e2e lock (the stack publishes fixed host ports), once.
+[ -n "${WARDEN_E2E_LOCKED:-}" ] || exec env WARDEN_E2E_LOCKED=1 flock /tmp/warden-e2e.lock "$ROOT/scripts/recipe-isolation.sh" "$@"
 
 # Dev placeholders for every Dex variable the caller has not set.
 while IFS='=' read -r k v; do
@@ -108,7 +114,8 @@ compose() {
 WORK="$(mktemp -d)"
 OUT="$WORK/output.log"
 : >"$OUT"
-CREATED_CERTS=0
+CREATED_CERTS=0     # this run generated proxy-ca.crt and proxy-ca.key
+CREATED_CERTS_DIR=0 # ... and the certs directory did not exist before
 STACK_UP=0
 
 say() {
@@ -126,11 +133,24 @@ worker_log() {
 cleanup() {
 	local rc=$?
 	trap - EXIT
-	if [ "$STACK_UP" = 1 ] && [ "${RECIPE_ISOLATION_KEEP:-0}" != 1 ]; then
-		compose down -v --remove-orphans >/dev/null 2>&1 || true
-	fi
-	if [ "$CREATED_CERTS" = 1 ] && [ "${RECIPE_ISOLATION_KEEP:-0}" != 1 ]; then
-		rm -rf "$COMPOSE_DIR/certs"
+	if [ "${RECIPE_ISOLATION_KEEP:-0}" = 1 ]; then
+		if [ "$STACK_UP" = 1 ]; then
+			echo "recipe-isolation: WARNING RECIPE_ISOLATION_KEEP=1: the stack $PROJECT is still running and holds host ports 7070, 5556, 9091, 9092, 9094, 9095; tear it down: docker compose -p $PROJECT down -v" >&2
+		fi
+		if [ "$CREATED_CERTS" = 1 ]; then
+			echo "recipe-isolation: WARNING RECIPE_ISOLATION_KEEP=1: the dev CA in $CERTS_DIR was kept" >&2
+		fi
+	else
+		if [ "$STACK_UP" = 1 ]; then
+			compose down -v --remove-orphans >/dev/null 2>&1 || true
+		fi
+		# Only what this run created: the two CA files, then the directory if it was ours.
+		if [ "$CREATED_CERTS" = 1 ]; then
+			rm -f "$CERTS_DIR/proxy-ca.crt" "$CERTS_DIR/proxy-ca.key"
+			if [ "$CREATED_CERTS_DIR" = 1 ]; then
+				rmdir "$CERTS_DIR" 2>/dev/null || true
+			fi
+		fi
 	fi
 	rm -rf "$WORK"
 	exit "$rc"
@@ -172,11 +192,16 @@ allow_lines() {
 # ---- setup ----------------------------------------------------------------------
 
 setup() {
-	if [ ! -f "$COMPOSE_DIR/certs/proxy-ca.crt" ]; then
-		OUT_DIR="$COMPOSE_DIR/certs" "$ROOT/scripts/gen-certs.sh" >/dev/null 2>&1
+	# Generate a throwaway dev CA only when neither half exists; never touch a
+	# CA the operator already has (a lone half is a broken state: refuse it).
+	if [ ! -e "$CERTS_DIR/proxy-ca.crt" ] && [ ! -e "$CERTS_DIR/proxy-ca.key" ]; then
+		[ -d "$CERTS_DIR" ] || CREATED_CERTS_DIR=1
+		CREATED_CERTS=1 # set before gen-certs so a half-written CA is still removed
+		OUT_DIR="$CERTS_DIR" "$ROOT/scripts/gen-certs.sh" >/dev/null 2>&1 || fail setup "gen-certs failed"
 		# Dev only, throwaway CA: the worker's user (uid 100) must read the key.
-		chmod 644 "$COMPOSE_DIR/certs/proxy-ca.key"
-		CREATED_CERTS=1
+		chmod 644 "$CERTS_DIR/proxy-ca.key"
+	elif [ ! -e "$CERTS_DIR/proxy-ca.crt" ] || [ ! -e "$CERTS_DIR/proxy-ca.key" ]; then
+		fail setup "$CERTS_DIR holds only one of proxy-ca.crt and proxy-ca.key"
 	fi
 
 	say "recipe-isolation: $RECIPE, clean state"
@@ -219,23 +244,59 @@ wait_ready() {
 }
 
 # through_forwarder <url>: HTTP status of GET url through the agent's own proxy
-# settings, or the CONNECT status when the tunnel is refused.
+# settings, or the CONNECT status when the tunnel is refused ("tls-fail" when the
+# tunnel was accepted (200) but the exchange inside it failed).
 through_forwarder() {
 	agent sh -c "curl -sS -m 30 --cacert $CA_PATH -o /dev/null -w '%{http_code} %{http_connect}' \"\$1\"" _ "$1" 2>/dev/null |
-		awk '{ if ($1 == "000") print $2; else print $1 }'
+		awk '{ if ($1 != "000") print $1; else if ($2 != "200") print $2; else print "tls-fail" }'
 }
 
 # ---- checks: from inside the agent -------------------------------------------------
 
+# The agent can open a TCP connection to the forwarder. The positive control that
+# keeps the "unreachable" checks from passing because the agent (or its bash, or
+# its network) is simply broken.
+forwarder_control() {
+	agent timeout 8 bash -c 'exec 3<>/dev/tcp/warden-identity/3128' >/dev/null 2>&1 || {
+		echo "positive control failed: the agent cannot open a TCP connection to warden-identity:3128"
+		return 1
+	}
+}
+
+# must_fail_curl <label> <curl args...>: curl, run in the agent, must fail with a
+# network error (6 no DNS, 7 no connection, 28 timeout), not succeed or fail some
+# other way.
+must_fail_curl() {
+	local label="$1" rc=0
+	shift
+	agent curl -k -sS -m 10 -o /dev/null "$@" >/dev/null 2>&1 || rc=$?
+	case "$rc" in
+	6 | 7 | 28) ;;
+	0)
+		echo "the agent reached the outside world ($label)"
+		return 1
+		;;
+	*)
+		echo "$label failed with curl exit $rc, want 6, 7 or 28 (a network failure)"
+		return 1
+		;;
+	esac
+}
+
 c_direct_egress_blocked() {
-	if agent curl --noproxy '*' -sS -m 10 -o /dev/null https://example.com >/dev/null 2>&1; then
-		echo "the agent reached https://example.com without the proxy"
+	forwarder_control || return 1
+	must_fail_curl "https://example.com without the proxy" --noproxy '*' https://example.com || return 1
+	must_fail_curl "https://1.1.1.1 without the proxy" --noproxy '*' https://1.1.1.1 || return 1
+	must_fail_curl "https://example.com over IPv6" -6 --noproxy '*' https://example.com || return 1
+	if agent getent ahosts example.com >/dev/null 2>&1; then
+		echo "the agent resolved example.com (external DNS is reachable)"
 		return 1
 	fi
 }
 
 c_idp_and_cp_unreachable() {
 	local target
+	forwarder_control || return 1
 	for target in dex/5556 control-plane/7070; do
 		if agent timeout 6 bash -c "exec 3<>/dev/tcp/${target}" >/dev/null 2>&1; then
 			echo "TCP to ${target%/*}:${target#*/} succeeded from the agent"
@@ -353,7 +414,12 @@ c_header_replaced() {
 c=${HTTPS_PROXY#http://wx:}; printf %s "${c%%@*}"
 EOS
 )"
-	if [ -n "$cred" ] && worker_log | grep -qF -- "$cred"; then
+	[ -n "$cred" ] || {
+		echo "could not read the forwarder credential from the agent's HTTPS_PROXY"
+		return 1
+	}
+	# The credential goes to grep through a pattern file (process substitution), not argv.
+	if worker_log | grep -qFf <(printf '%s\n' "$cred"); then
 		echo "the client's forwarder credential reached the worker"
 		return 1
 	fi
@@ -373,21 +439,34 @@ c_policy_deny() {
 }
 
 c_cp_attribution() {
-	local hdr="$WORK/cp-auth" started=$SECONDS deadline=$((SECONDS + 120)) body
+	local hdr="$WORK/cp-auth" started=$SECONDS deadline=$((SECONDS + 120)) body found=0
 	umask 077
 	printf 'Authorization: Bearer %s\n' "${WARDEN_CP_ADMIN_TOKEN:-dev-cp-admin-token}" >"$hdr"
 	while [ "$SECONDS" -lt "$deadline" ]; do
-		body="$(curl -ksS -m 10 -H "@$hdr" \
+		body="$(curl -sS -m 10 --cacert "$CERTS_DIR/proxy-ca.crt" -H "@$hdr" \
 			"https://localhost:7070/dashboard/api/traffic?user=$AGENT_EMAIL&act=$AGENT" 2>/dev/null || true)"
 		if printf '%s' "$body" | jq -e --arg d "$ALLOWED_HOST" --arg a "$AGENT" --arg e "$AGENT_EMAIL" \
 			'[.[] | select(.Domain == $d and .Decision == "allow" and .identity_status == "valid" and .user_act == $a and .user_email == $e)] | length > 0' >/dev/null 2>&1; then
 			echo "$((SECONDS - started))" >"$WORK/cp-delay"
-			return 0
+			found=1
+			break
 		fi
 		sleep 3
 	done
-	echo "the control plane's traffic API has no valid event for $AGENT_EMAIL / act=$AGENT after 120s"
-	return 1
+	[ "$found" = 1 ] || {
+		echo "the control plane's traffic API has no valid event for $AGENT_EMAIL / act=$AGENT after 120s"
+		return 1
+	}
+	# Negative: the same user filtered by another agent must not return this host's event.
+	body="$(curl -sS -m 10 --cacert "$CERTS_DIR/proxy-ca.crt" -H "@$hdr" \
+		"https://localhost:7070/dashboard/api/traffic?user=$AGENT_EMAIL&act=some-other-agent" 2>/dev/null)" || {
+		echo "the negative traffic query (act=some-other-agent) failed"
+		return 1
+	}
+	printf '%s' "$body" | jq -e --arg d "$ALLOWED_HOST" '[.[] | select(.Domain == $d)] | length == 0' >/dev/null 2>&1 || {
+		echo "act=some-other-agent returned an event for $ALLOWED_HOST: the act filter does not separate agents"
+		return 1
+	}
 }
 
 c_agent_disabled() {
@@ -403,14 +482,22 @@ c_agent_disabled() {
 		echo "warden control-plane agent disable failed"
 		return 1
 	}
+	# A disabled agent gets a 403 CONNECT from the forwarder, and the worker logs the
+	# refusal with reason agent_disabled (so it was the policy, not a network fault).
 	local deadline=$((SECONDS + 10)) code
 	while [ "$SECONDS" -lt "$deadline" ]; do
 		code="$(agent sh -c "curl -sS -m 8 -o /dev/null -w '%{http_connect}' https://$ALLOWED_HOST/ 2>/dev/null" || true)"
-		case "$code" in 403 | 407 | 502 | 503) return 0 ;; esac
+		[ "$code" = 403 ] && break
 		sleep 1
 	done
-	echo "a new CONNECT was still accepted 10s after the agent was disabled (last CONNECT status: ${code:-none})"
-	return 1
+	[ "$code" = 403 ] || {
+		echo "a new CONNECT was not refused with 403 within 10s of disabling the agent (last CONNECT status: ${code:-none})"
+		return 1
+	}
+	worker_log | jq -e -s 'any(.[]; .reason == "agent_disabled")' >/dev/null 2>&1 || {
+		echo "the CONNECT got 403 but the worker log has no line with reason agent_disabled"
+		return 1
+	}
 }
 
 c_no_token_in_logs() {
