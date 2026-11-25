@@ -173,6 +173,11 @@ func checkStructure(c *x509.Certificate) error {
 // TrustDomain returns the SPIFFE trust domain.
 func (v *Verifier) TrustDomain() string { return v.trustDomain }
 
+// Chain returns the signing intermediate first, then the certificates above
+// it, as given at construction (NewVerifier checked that Chain[1] signed
+// Chain[0]). The slice is a copy; the certificates are shared and read-only.
+func (v *Verifier) Chain() []*x509.Certificate { return append([]*x509.Certificate(nil), v.chain...) }
+
 // Intermediate returns the signing intermediate certificate.
 func (v *Verifier) Intermediate() *x509.Certificate { return v.chain[0] }
 
@@ -195,14 +200,8 @@ func (ca *CA) Issue(csr *x509.CertificateRequest, workerID string, ttl time.Dura
 	if ttl <= 0 {
 		return nil, ErrInvalidTTL
 	}
-	if csr == nil {
-		return nil, fmt.Errorf("%w: missing", ErrBadCSR)
-	}
-	if err := checkCSRKey(csr.PublicKey); err != nil {
+	if err := CheckCSR(csr); err != nil {
 		return nil, err
-	}
-	if err := csr.CheckSignature(); err != nil {
-		return nil, fmt.Errorf("%w: self-signature does not verify", ErrBadCSR)
 	}
 	id, err := SPIFFEID(ca.trustDomain, workerID)
 	if err != nil {
@@ -258,6 +257,22 @@ func (v *Verifier) Verify(cert *x509.Certificate) (string, error) {
 		return "", fmt.Errorf("workerca: certificate does not verify: %w", err)
 	}
 	return WorkerIDFromCert(cert, v.trustDomain)
+}
+
+// CheckCSR reports whether csr is one Issue would sign: present, an ECDSA P-256
+// or Ed25519 key and a valid self-signature. Callers use it to refuse a bad
+// request before they spend anything (an enrollment token) on it.
+func CheckCSR(csr *x509.CertificateRequest) error {
+	if csr == nil {
+		return fmt.Errorf("%w: missing", ErrBadCSR)
+	}
+	if err := checkCSRKey(csr.PublicKey); err != nil {
+		return err
+	}
+	if err := csr.CheckSignature(); err != nil {
+		return fmt.Errorf("%w: self-signature does not verify", ErrBadCSR)
+	}
+	return nil
 }
 
 // checkCSRKey accepts only ECDSA P-256 and Ed25519 public keys.
