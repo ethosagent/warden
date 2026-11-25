@@ -1,0 +1,40 @@
+# Managed WORKER for the Codex CLI recipe (deploy/compose/
+# docker-compose.codex.yml). Started with --agent-id codex.
+#
+# Allow/deny policy and the identity mode come ONLY from the control plane
+# (configs/config.cp-served.codex.yaml). The worker boots fail-closed until
+# its first signed bundle verifies. Secrets stay LOCAL to this worker.
+
+logging:
+  level: info
+  format: json
+
+# Codex CLI holds the placeholder openai_secret_001 (OPENAI_API_KEY in
+# its container); this worker swaps in the real key from ITS OWN environment,
+# on api.openai.com only. With OPENAI_API_KEY unset the swap is
+# skipped and the upstream answers 401 (the documented placeholder-only result).
+secrets:
+  - placeholder: openai_secret_001
+    envVar: OPENAI_API_KEY
+    matchHosts: ["api.openai.com"]
+
+controlPlane:
+  endpoint: https://control-plane:7070/policy
+  tokenEnv: WARDEN_WORKER_TOKEN
+  caCert: /etc/warden/certs/proxy-ca.crt
+  longPollWait: 30s
+  heartbeatInterval: 10s
+  localOnly: false
+  # Pin the control plane's bundle signing key: the JWKS that identity-bootstrap
+  # exported (warden control-plane keys export --purpose bundle) into a volume
+  # mounted read-only here. Warden tokens are verified only against keys that
+  # arrive in a bundle signed by this pin.
+  bundleKeysFile: /etc/warden/bundle/bundle-jwks.json
+  requireSignedBundles: true
+
+central:
+  mode: worker
+  endpoint: https://control-plane:7070/central/ingest
+  tokenEnv: WARDEN_WORKER_TOKEN
+  proxyID: ${WARDEN_PROXY_ID}
+  caCert: /etc/warden/certs/proxy-ca.crt
