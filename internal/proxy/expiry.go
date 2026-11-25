@@ -59,14 +59,23 @@ func (h *expiryHeap) Pop() any {
 }
 
 // dueLocked is when the session's next expiry step runs. r.mu must be held.
+// late marks an h1/h2 session armed after exp but inside the verifier's skew (the
+// CONNECT verified, so it must be served): its steps move out by one skew rather
+// than cutting a connection the verifier just admitted.
 func (s *session) dueLocked() time.Time {
+	base := s.exp
+	if s.late {
+		base = base.Add(s.skew)
+	}
 	switch {
 	case s.graceful != nil && !s.goaway:
-		return s.exp // GOAWAY at exp
+		return base // GOAWAY at exp
+	case s.graceful != nil:
+		return base.Add(s.skew) // h2 hard stop
 	case s.interruptible:
-		return s.exp.Add(s.skew) // tunnel, WebSocket, h2 hard stop
+		return s.exp.Add(s.skew) // tunnel, WebSocket
 	default:
-		return s.exp // idle HTTP/1 keep-alive
+		return base // idle HTTP/1 keep-alive
 	}
 }
 
@@ -91,13 +100,14 @@ func (r *sessionRegistry) wakeLoop() {
 
 // track arms the session's expiry from its CONNECT identity. It is a no-op for
 // a session already released or cut.
-func (r *sessionRegistry) track(s *session, ci connIdentity, skew time.Duration) {
+func (r *sessionRegistry) track(s *session, ci connIdentity, skew time.Duration, now time.Time) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if s.released || s.closing || s.heapIdx >= 0 {
 		return
 	}
 	s.exp, s.skew, s.tracked = ci.Expiry, skew, ci
+	s.late = !now.Before(ci.Expiry) && (s.graceful != nil || !s.interruptible)
 	s.due = s.dueLocked()
 	heap.Push(&r.expiry, s)
 	r.wakeLoop()
@@ -141,7 +151,7 @@ func (p *Proxy) armExpiry(s *session, ci connIdentity, enforce bool) (cut bool) 
 	if h == nil || h.mode != IdentityModeRequire {
 		return false
 	}
-	s.reg.track(s, ci, h.skew)
+	s.reg.track(s, ci, h.skew, p.validityClock())
 	if !enforce {
 		return false
 	}

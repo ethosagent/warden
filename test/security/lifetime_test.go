@@ -106,7 +106,9 @@ var disabledAgentCases = func() []Case {
 }()
 
 // revokedKeyCases: the token signing key is rotated in an emergency while a
-// user holds a token signed by it and a tunnel opened with it.
+// user holds a token signed by it and a tunnel opened with it. The open tunnel
+// is no longer answered with a per-request 403: the post-apply re-check
+// (W-P2-WBND-09) closes it, asserted in TestLifetime/token_key_revoked.
 var revokedKeyCases = []Case{{
 	Name: "a cached token signed by the revoked key, on a new CONNECT",
 	Path: PathWorker,
@@ -114,22 +116,6 @@ var revokedKeyCases = []Case{{
 		return Seen(s.Do(t, s.Worker("agent-a"), Via(TransportConnect, scratchToken(s, keyU1))))
 	},
 	WantStatus:       http.StatusProxyAuthRequired,
-	WantBody:         "identity_required",
-	WantResult:       "invalid",
-	WantReason:       "unknown_kid",
-	WantDeny:         "identity_required",
-	WantUpstreamHits: 0,
-}, {
-	Name: "the next request of a tunnel opened with a token of the revoked key",
-	Path: PathWorker,
-	Attack: func(t testing.TB, s *Stack) Observed {
-		r, err := tunnelOf(s, keyT1).Get(t)
-		if err != nil {
-			t.Fatalf("the open tunnel was closed instead of answered: %v", err)
-		}
-		return Seen(r)
-	},
-	WantStatus:       http.StatusForbidden,
 	WantBody:         "identity_required",
 	WantResult:       "invalid",
 	WantReason:       "unknown_kid",
@@ -272,6 +258,7 @@ func TestLifetime(t *testing.T) {
 			return s.Do(t, s.Worker("agent-a"), Via(TransportConnect, scratchToken(s, keyU1))).Status == http.StatusProxyAuthRequired
 		})
 		Run(t, s, "worker", revokedKeyCases)
+		s.Eventually("the tunnel opened with the revoked key's token to be closed by the post-apply re-check", tunnelOf(s, keyT1).Closed)
 
 		// A token signed by the new key works. The mint guard holds minting back
 		// until the bundle that serves the new key is signed, which the clock

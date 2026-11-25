@@ -202,6 +202,29 @@ func TestRequireSessionExpiry(t *testing.T) {
 		}
 	})
 
+	// A CONNECT the verifier admitted inside the skew window (past exp) must be
+	// served, not cut on arrival: its keep-alive is cut one skew later.
+	t.Run("keepalive_armed_inside_skew", func(t *testing.T) {
+		e := newExpiryEnv(t, nil)
+		e.fk.Advance(expTTL + 10*time.Second)
+		c := e.h1("Proxy-Authorization: " + basicAuth("tok-w-alice") + "\r\n")
+		if st := c.get(""); st != 200 {
+			t.Fatalf("request inside the skew: status %d, want 200", st)
+		}
+		e.waitArmed(t, 1)
+		if st := c.get(""); st != 200 {
+			t.Fatalf("second request inside the skew: status %d, want 200", st)
+		}
+		if n := e.expiredEvents(); n != 0 {
+			t.Fatalf("%d events inside the skew", n)
+		}
+		e.cutBy(t)
+		_ = c.tc.SetReadDeadline(time.Now().Add(5 * time.Second))
+		if _, err := c.br.ReadByte(); err == nil {
+			t.Error("keep-alive still open after exp+skew")
+		}
+	})
+
 	t.Run("h2_goaway", func(t *testing.T) {
 		e := newExpiryEnv(t, nil)
 		conn, br, status := e.connect("Proxy-Authorization: " + basicAuth("tok-w-alice") + "\r\n")

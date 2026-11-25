@@ -100,6 +100,7 @@ type session struct {
 	tracked  connIdentity
 	graceful func()
 	goaway   bool
+	late     bool
 }
 
 // newSession builds an unregistered session; it joins the registry when bind
