@@ -143,7 +143,8 @@ Warden tokens) or no keys, a Warden token is `unverified` with reason
 worker logs one error and verifies no Warden token until they differ. A token key
 removed from the bundle stops verifying for every new request and CONNECT. A CONNECT
 tunnel already established keeps the identity it verified until the token's `exp`
-plus skew (at most about 15 minutes) until per-request binding checks land.
+plus skew (at most about 15 minutes) for a raw tunnel; terminated traffic is re-checked on
+every request (see [agent binding](#agent-binding-of-warden-tokens)).
 
 A valid Warden token attributes the user (`sub`, `email`, `groups`) and, after the
 [agent binding](#agent-binding-of-warden-tokens) checks, the agent. The
@@ -596,8 +597,9 @@ Phase 2 non-goal; proof of possession (agent mTLS, `cnf` `x5t#S256`) is a later
 step. Real upstream credentials still never reach the agent. Binding is one agent
 per worker; a second agent needs its own worker. Limit the exposure with the short
 lifetime and by keeping the token out of the agent (the sidecar holds it), and cut
-a leaked token by blocking the user, disabling the agent or rotating the token
-key (see [revoking access](token-service.md#revoking-access)).
+a leaked token by blocking the user, disabling the agent or an **emergency** token-key
+rotation (`warden control-plane keys rotate --purpose token --emergency`; a normal rotation keeps the old key
+valid for the overlap) (see [revoking access](token-service.md#revoking-access)).
 
 ## Observability
 

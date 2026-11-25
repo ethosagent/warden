@@ -57,7 +57,8 @@ only by the control plane and never sent to a worker. While it is absent or
 `enabled: false`, `POST /oauth2/token` and `GET /.well-known/oauth-authorization-server`
 answer `404`, no token-service table is created and `/policy` is unchanged.
 
-Before you set `enabled: true`, have these in place; startup fails without them:
+Before you set `enabled: true`, have these in place. Items 1-4 are checked at startup, which
+fails without them; items 5-6 are not checked but the service is not useful without them:
 
 1. **`--state-dir`.** Replay protection, token sessions and issuance records live in
    `<state-dir>/warden-cp.db`.
@@ -67,8 +68,8 @@ Before you set `enabled: true`, have these in place; startup fails without them:
 3. **`keys.enabled: true`** and `keys.token.overlap` of at least `tokenService.ttl`
    plus 2 minutes, so a retired token key stays published long enough. See the
    [key rotation runbook](runbooks/key-rotation.md).
-4. **An `https` issuer.** `tokenService.issuer` is Warden's own issuer, not the
-   IdP's: an absolute `https` URL with no trailing slash, query or fragment. Plain
+4. **An `https` issuer different from `identity.issuer`.** `tokenService.issuer` is Warden's own issuer, not the
+   IdP's (startup refuses the same value, because workers tell Warden tokens and IdP tokens apart by issuer): an absolute `https` URL with no trailing slash, query or fragment. Plain
    `http` is accepted only for a loopback host and logs a warning. Use an issuer
    with no path, or clients that rely on discovery will not find the metadata.
 5. **At least one registered agent** with a public key and `allowed_groups`:
@@ -91,7 +92,7 @@ tokenService:
   issuer: https://warden.example.com   # required when enabled; iss of every issued token
   ttl: 15m                 # default 15m, range 1m-15m; never longer than the ID token
   assertionMaxAge: 5m      # default 5m, longest exp-iat of a client assertion (max 15m)
-  clockSkew: 60s           # default 60s, range 0-5m, leeway on assertion times
+  clockSkew: 60s           # default 60s, greater than 0 and at most 5m, leeway on assertion times
   allowedAZP: [agent-harness]   # default [agent-harness]; 1-16 unique OIDC client ids
   session:
     idle: 12h              # default 12h, a token session idle this long ends
@@ -187,8 +188,12 @@ no scope has no `scope` claim. Anything else is `400 invalid_scope`.
 ### Errors and which to retry
 
 Errors are RFC 6749 section 5.2 JSON, `{"error": "...", "error_description": "..."}`.
-`error_description` is one fixed word from a closed set (the **reason**); it never
-echoes a token, an assertion or a claim. The `error` code and HTTP status decide
+`error_description` is one fixed word, never an echo of a token, an assertion or a claim:
+either one of the 31 **reasons** below, or one of these handler words for a request that
+is refused before the exchange: `missing_parameter`, `duplicate_parameter`,
+`unsupported_parameter`, `unsupported_content_type`, `malformed_body`, `body_too_large`,
+`query_parameters_not_allowed`, `authorization_header_not_allowed`, `method_not_allowed`,
+`unsupported_grant_type` and `service_unavailable`. The `error` code and HTTP status decide
 what to do:
 
 | Status | `error` | Retry? | Typical reason |
@@ -261,10 +266,13 @@ Retry-After: 5
 
 #### The reason enum
 
-The reason is the `error_description` of every non-`invalid_client` error and the
-`reason` of every log line, record and metric. It is a closed set of 31 values.
-The first 16 can come from client authentication; after the assertion verifies
-the rest can follow.
+The reason is the `error_description` of every exchange error except `invalid_client`, and
+the `reason` of every record and metric. It is a closed set of 31 values. The handler
+words above appear raw only in the denied and unauthenticated log lines; the metric folds
+them into `malformed` (`body_too_large` into `too_large`). An unexpected internal error is
+counted as `verifier_misconfigured` while the wire says `service_unavailable`. The first 16
+reasons come from client authentication; the rest can follow once the assertion verifies,
+except `unsupported_token_type` and `invalid_target`, which are decided before it.
 
 | Group | Reasons |
 |---|---|
@@ -278,26 +286,28 @@ On the wire a client authentication failure only ever says
 ## The client assertion
 
 The agent authenticates with an RFC 7523 `private_key_jwt`: a compact JWS signed
-with the agent's private key. Warden checks, in this order, and rejects the
-assertion with `401 invalid_client` on the first failure:
+with the agent's private key. Warden checks it in this order and rejects it with `401 invalid_client` on the first failure:
 
 | Rule | Reason when it fails |
 |---|---|
-| At most 8 KiB, three base64url segments, parseable header and payload | `too_large`, `malformed` |
-| `alg` is `EdDSA` for an Ed25519 (`OKP`) key or `ES256` for a P-256 key. `none`, `HS*`, `RS*`, an `alg` that does not fit the key, and the `jwk`, `jku`, `x5u`, `x5c` and `crit` headers are refused before any key is used | `alg_not_allowed` |
+| At most 8 KiB; three base64url segments; parseable header and payload; `alg` is `EdDSA` or `ES256`; none of the `jwk`, `jku`, `x5u`, `x5c` or `crit` headers | `too_large`, `malformed`, `alg_not_allowed` (`none`, `HS*`, `RS*`), `malformed` (the forbidden headers) |
+| `iss` is a valid agent id and names a registered agent | `agent_unknown` |
 | `kid` header is present and equals a registered JWK's `kid` or its RFC 7638 thumbprint | `unknown_kid` |
+| `alg` fits that key's type (`EdDSA` for Ed25519, `ES256` for P-256) | `alg_not_allowed` |
 | The signature verifies against that registered key | `bad_signature` |
-| `iss` and `sub` are both the agent id; an optional form `client_id` equals it | `wrong_iss`, `agent_unknown` |
+| `iss` and `sub` are both the agent id; an optional form `client_id` equals it | `wrong_iss` |
+| `jti` is 1 to 128 printable characters | `malformed` |
 | `aud` is a single value equal to `tokenService.issuer` or `<issuer>/oauth2/token` | `wrong_aud` |
 | `exp` and `iat` are present and `exp - iat` is at most `assertionMaxAge` (5m) | `malformed`, `lifetime_too_long` |
 | not expired, and `iat` and `nbf` at most `clockSkew` (60s) in the future | `expired`, `not_yet_valid` |
-| `jti` is 1 to 128 printable characters and has not been used by this agent | `malformed`, `replay` |
 | The agent is active | `agent_disabled` |
+| The `jti` has not been used by this agent | `replay` |
 
 Mint a new assertion for every request, with a random `jti`. Replay protection is
 per agent and stored in the control plane database, so a restart does not reopen
-it. A `jti` is recorded only after the signature and time checks pass, and rows are
-purged a minute after the assertion expires.
+it. A `jti` is recorded only after every other check passes, so a rejected assertion never
+burns one. Rows are kept until `clockSkew` after the assertion expires and removed by the
+hourly retention purge.
 
 ## The issued token
 
@@ -331,12 +341,14 @@ the keys from the signed bundle instead.
 
 ## Authorization order
 
-After the assertion verifies, the exchange checks in this order and stops at the
-first refusal: the audience and token types, the per-agent limit, the ID token,
-the per-user limit, that the agent is still active and still has the signing key,
-the [block list](control-plane.md#block-list) (by `sub` exactly, or by lowercased
-email when verified), the agent's `allowed_groups`, the scope, then the session and
-the signature. An error in the block store is `503`, never an allow.
+Before the assertion is checked, the audience (`invalid_target`) and the token types
+(`unsupported_token_type`) are refused; these write no `token_events` row. After the
+assertion verifies, the exchange checks in this order and stops at the first refusal:
+the per-agent limit, the ID token, the per-user limit, that the agent is still active and
+still has the signing key, the [block list](control-plane.md#block-list) (by `sub`
+exactly, or by lowercased email when verified), the agent's `allowed_groups`, the scope,
+the expiry (`subject_expired`), the signer (`signer_unavailable`), the session, and
+finally the signature. An error in the block store is `503`, never an allow.
 
 ## Rate limits
 
@@ -377,8 +389,9 @@ which is for admin actions. Instead:
   issuer and `sub` under a per-control-plane salt kept in the same database. It
   correlates one user's rows and keeps the subject out of the log, but a reader of
   the database also holds the salt, and the salt never rotates. Rows older than
-  `eventRetention` are pruned. If a row cannot be written the exchange answers
-  `503 event_store_unavailable` and **no token is released**.
+  `eventRetention` are pruned. If the row for an issued token cannot be written, the exchange answers
+  `503 event_store_unavailable` and **no token is released**. If the row for a denial
+  cannot be written, the denial still stands and `token_event_record_failed` is logged.
 - **A log line per outcome.** `msg=token_exchange schema=warden.token.v1` with
   `outcome`, `reason`, `agent`, `sub` (the pseudonym), `sid`, `jti`, `kid` and
   `exp`, written only for a row that exists.
@@ -425,7 +438,7 @@ sign in again and exchange.
 | Failure | What happens | Operator action |
 |---|---|---|
 | No active token key (secret backend or KMS down, key not loaded) | `503 signer_unavailable`; `/readyz` reports it | restore the key store; no restart needed |
-| First token key just created, or an emergency promotion of a barely published key | `503 signer_unavailable` for about 2 minutes, plus the time for a worker to pick up the signed bundle | wait; harnesses retry. The first exchange of a new deployment hits this |
+| First token key just created, or an emergency promotion of a barely published key | `503 signer_unavailable` until the key has been published for about 2 minutes and, with signed bundles on, a signed bundle carries it. The control plane does not wait for workers; the window itself covers their pickup | wait; harnesses retry. The first exchange of a new deployment hits this |
 | Bundle publisher degraded after a scheduled rotation (`/healthz` answers `200 degraded: bundle signing failed`) | the mint guard refuses the new key and minting stops with `signer_unavailable` until the next successful bundle sign. Tokens already minted work until `exp` | fix the signer key or bundle store; do not disable bundles to get around it. See the [runbook](control-plane.md#require-mode-session-closing-and-degraded-modes) and [key rotation](runbooks/key-rotation.md) |
 | IdP unreachable | cached keys still verify known `kid`s. An unknown `kid`, or a cold cache, gives `503 idp_unavailable`; a harness retries and does not force a new login | restore the IdP; no action on Warden |
 | Block store, agent store, replay store, session store or event store error | `503 temporarily_unavailable` with that reason; never an allow | repair `<state-dir>/warden-cp.db` |
@@ -435,7 +448,8 @@ sign in again and exchange.
 serving an agent only while its Warden token is valid, then closes its sessions and
 answers CONNECT with `407`. A harness refreshes the token before it expires (the
 `warden identity forward` sidecar renews at two thirds of its life), so an outage
-that starts just before a refresh leaves about 5 minutes of the 15-minute lifetime;
+that starts just before a refresh leaves about a third of the token's life (5 minutes at
+the default `ttl`);
 one that outlasts that stops the agent's traffic until the control plane returns.
 This is accepted until the control plane is highly available (the Postgres HA
 feature). See [require mode](control-plane.md#require-mode-session-closing-and-degraded-modes)
