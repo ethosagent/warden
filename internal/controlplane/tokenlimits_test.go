@@ -45,6 +45,11 @@ type limitsEnv struct {
 	agent   *signer.LocalSigner
 	agentID string
 	kid     string
+	// agents, tokenCfg and idCfg let a test rebuild the service over the same
+	// state (a restart).
+	agents   *agentregsqlite.Store
+	tokenCfg config.TokenServiceConfig
+	idCfg    config.IdentitySettings
 }
 
 const (
@@ -69,7 +74,7 @@ func newLimitsEnv(t *testing.T, tune func(*config.TokenServiceConfig), proxies .
 	if err != nil {
 		t.Fatal(err)
 	}
-	e.ts = ts
+	e.ts, e.agents, e.tokenCfg, e.idCfg = ts, agents, tc, id
 	e.srv.cfg.Logger = logger
 	e.srv.cfg.Console.TrustedProxies = proxies
 	e.srv.EnableTokens(ts.Service, tc.Issuer, ts.Edge)

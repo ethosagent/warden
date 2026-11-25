@@ -91,3 +91,17 @@ identity:
   internalIssuerURL: http://dex:5556
   audience: warden
   allowedAZP: [agent-harness, warden-cli]
+
+# Token service (W-P2-TOKX-05, test/e2e/identity/token_exchange_test.go): alice's
+# real Dex ID token (client agent-harness, the tokenService.allowedAZP default)
+# plus a registered agent's private_key_jwt assertion exchange for a Warden token
+# at POST /oauth2/token. The issuer is the CP's own address, the base of the
+# assertion audience. Keys give the service its signing key (stored under
+# /data/keys on the CP's state volume); the identity block above is the verifier
+# of the user's token. No Dex client, user or trustedPeer is added for this.
+keys:
+  enabled: true
+
+tokenService:
+  enabled: true
+  issuer: https://localhost:7070
