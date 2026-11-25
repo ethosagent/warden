@@ -53,6 +53,22 @@ const (
 	// token on a worker that does not accept them (identity.acceptDexTokens
 	// false), and in require mode every IdP token.
 	ReasonUnboundToken Reason = "unbound_token"
+
+	// The four binding reasons (W-P2-WBND-02): a Warden token whose signature
+	// verified but that is not valid for this worker's agent. BindingCheck
+	// returns them in this precedence: unregistered, disabled, mismatch, then
+	// cnf_mismatch.
+
+	// ReasonAgentUnregistered: the worker's bound agent is not in the bundle's
+	// registered agents (also a port-derived id such as agent:8080).
+	ReasonAgentUnregistered Reason = "agent_unregistered"
+	// ReasonAgentDisabled: the bound agent's status in the bundle is not active.
+	ReasonAgentDisabled Reason = "agent_disabled"
+	// ReasonAgentMismatch: act.sub is not the worker's bound agent.
+	ReasonAgentMismatch Reason = "agent_mismatch"
+	// ReasonCnfMismatch: cnf.jkt is not one of the bound agent's registered key
+	// thumbprints (the key was rotated away or removed).
+	ReasonCnfMismatch Reason = "cnf_mismatch"
 )
 
 // Reasons returns the complete bounded Reason set.
@@ -62,6 +78,7 @@ func Reasons() []Reason {
 		ReasonUnknownKID, ReasonAlgNotAllowed, ReasonMalformed, ReasonTooLarge,
 		ReasonTTLTooLong, ReasonJWKSUnavailable, ReasonWrongNonce,
 		ReasonMissingClaim, ReasonUnboundToken,
+		ReasonAgentUnregistered, ReasonAgentDisabled, ReasonAgentMismatch, ReasonCnfMismatch,
 	}
 }
 

@@ -119,7 +119,9 @@
         "email": { "type": "string", "description": "Email claim; only when status is valid." },
         "groups": { "type": "array", "items": { "type": "string" }, "maxItems": 64, "description": "Group claims, capped at 64 entries; only when status is valid." },
         "groups_truncated": { "type": "boolean", "description": "True when groups was capped here or by the verifier." },
-        "sid": { "type": "string", "description": "Session id claim; only when status is valid." }
+        "sid": { "type": "string", "description": "Session id claim; only when status is valid." },
+        "act": { "type": "string", "description": "Agent the Warden token was minted for (act.sub); only when status is valid and the token is a Warden token." },
+        "token_type": { "type": "string", "description": "Kind of token behind the identity, warden or idp; only when status is valid. Open string. Never the token." }
       }
     },
     "truncated": { "type": "boolean", "description": "True when optional fields were dropped to keep the line under 16 KiB." }

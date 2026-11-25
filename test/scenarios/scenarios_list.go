@@ -440,6 +440,12 @@ var All = slices.Concat(
 		// issuer are refused; a legacy-wire worker has no keys. In-process only.
 		{Name: "warden_token_verify", Opts: wardenTokenVerifyOpts(), Run: wardenTokenVerify},
 		{Name: "warden_token_legacy_wire", Opts: wardenTokenLegacyOpts(), Run: wardenTokenLegacyWire},
+		// Agent binding of Warden tokens (W-P2-WBND-02): a token for the worker's
+		// own agent is accepted, another agent's token and a rotated-away key are
+		// refused (also on a tunnel already open), and a disabled agent is refused
+		// on the next request of an open tunnel. In-process only.
+		{Name: "warden_agent_binding", Opts: wardenAgentBindingOpts(), Run: wardenAgentBinding},
+		{Name: "warden_agent_binding_disabled", Opts: wardenAgentBindingOpts(), Run: wardenAgentBindingDisabled},
 		// Bundle state in the fleet view and the worker's metrics (W-P2-SBND-05):
 		// a pinned worker shows its bundle seq and pins and is not behind; a
 		// tampered bundle shows as a rejection reason with the seq unchanged.
