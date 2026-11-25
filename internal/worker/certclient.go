@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethosagent/warden/internal/clock"
@@ -35,11 +36,42 @@ const (
 	enrollTimeout = 30 * time.Second
 )
 
+// cpTransport is the one control-plane transport. A renewed certificate takes
+// effect through Rotate: TLS presents the certificate once per connection, and a
+// held long-poll (or an HTTP/2 connection that never goes idle) would keep the
+// old one for as long as it lives. Rotate sends every later request over a fresh
+// transport, so its handshake presents the current certificate, and lets the
+// requests in flight finish on the old one, which idles out by itself.
+type cpTransport struct {
+	base *http.Transport // template only: never used for a request
+	cur  atomic.Pointer[http.Transport]
+}
+
+func newCPTransport(base *http.Transport) *cpTransport {
+	base.IdleConnTimeout = 90 * time.Second
+	t := &cpTransport{base: base}
+	t.cur.Store(base.Clone())
+	return t
+}
+
+// RoundTrip implements http.RoundTripper.
+func (t *cpTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return t.cur.Load().RoundTrip(req)
+}
+
+// CloseIdleConnections drops the pooled idle connections (http.Client uses it).
+func (t *cpTransport) CloseIdleConnections() { t.cur.Load().CloseIdleConnections() }
+
+// Rotate starts a new connection pool and closes the idle connections of the old one.
+func (t *cpTransport) Rotate() {
+	t.cur.Swap(t.base.Clone()).CloseIdleConnections()
+}
+
 // workerCert is a worker's certificate machinery. nil when the worker
 // authenticates with the bearer token.
 type workerCert struct {
 	source    *cpclient.Source
-	transport *http.Transport
+	transport *cpTransport
 	// enroller is nil for a certificate issued outside Warden.
 	enroller *cpclient.Enroller
 	renewURL string
@@ -73,10 +105,11 @@ func newWorkerCert(ctx context.Context, cfg config.ControlPlaneConfig, central c
 	if wc.centralShared {
 		caPaths = append(caPaths, central.CACert)
 	}
-	var err error
-	if wc.transport, err = newControlPlaneTransport(wc.getClientCertificate, caPaths...); err != nil {
+	base, err := newControlPlaneTransport(wc.getClientCertificate, caPaths...)
+	if err != nil {
 		return nil, err
 	}
+	wc.transport = newCPTransport(base)
 	if cfg.ClientCert != "" {
 		cred, err := cpclient.LoadStatic(cfg.ClientCert, cfg.ClientKey, clk.Now())
 		if err != nil {
@@ -195,7 +228,7 @@ func (wc *workerCert) start(ctx context.Context, m *observability.Metrics) {
 		}
 		(&cpclient.Renewer{
 			Endpoint: wc.renewURL, HTTP: wc.Client(enrollTimeout), Source: wc.source, StateDir: wc.enroller.StateDir,
-			Clock: wc.clk, Jitter: wc.jitter, CloseIdle: wc.transport.CloseIdleConnections, Logger: wc.logger,
+			Clock: wc.clk, Jitter: wc.jitter, CloseIdle: wc.transport.Rotate, Logger: wc.logger,
 			OnRenew: m.RecordWorkerCertRenewal,
 		}).Run(ctx)
 	}()
@@ -220,7 +253,7 @@ func (wc *workerCert) enrollUntilDone(ctx context.Context) bool {
 				return false
 			}
 			wc.source.Set(cred)
-			wc.transport.CloseIdleConnections()
+			wc.transport.Rotate()
 			wc.logger.Info("worker enrolled", "worker_id", cred.WorkerID(), "serial", cred.Serial())
 			return true
 		case !errors.Is(err, cpclient.ErrUnreachable):

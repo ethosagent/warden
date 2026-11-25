@@ -59,6 +59,12 @@ type certCP struct {
 	bearers    []string // Authorization header of every request
 	heartbeats []map[string]any
 	ingestIDs  []string
+	// rejectAuth makes the fake answer 400 to any request carrying an
+	// Authorization header, the way a control plane in require mode must.
+	rejectAuth atomic.Bool
+	// pollHook, when set, runs inside GET /policy?wait=... after the client
+	// certificate was identified (serial) and before the answer: a held long-poll.
+	pollHook func(serial string)
 }
 
 func newCertCP(t *testing.T, clk *clocktest.Fake) *certCP {
@@ -66,15 +72,15 @@ func newCertCP(t *testing.T, clk *clocktest.Fake) *certCP {
 	cp := &certCP{t: t, clk: clk, workerID: "worker-1", ttl: 24 * time.Hour}
 	cp.rootKey, _ = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	cp.interKey, _ = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	rootT := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "root"}, NotBefore: certT0.Add(-time.Hour),
-		NotAfter: certT0.Add(1000 * time.Hour), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}
+	rootT := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "root"}, NotBefore: clk.Now().Add(-time.Hour),
+		NotAfter: clk.Now().Add(1000 * time.Hour), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}
 	der, err := x509.CreateCertificate(rand.Reader, rootT, rootT, &cp.rootKey.PublicKey, cp.rootKey)
 	if err != nil {
 		t.Fatal(err)
 	}
 	cp.root, _ = x509.ParseCertificate(der)
-	interT := &x509.Certificate{SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: "inter"}, NotBefore: certT0.Add(-time.Hour),
-		NotAfter: certT0.Add(900 * time.Hour), IsCA: true, BasicConstraintsValid: true, MaxPathLen: 0, MaxPathLenZero: true, KeyUsage: x509.KeyUsageCertSign}
+	interT := &x509.Certificate{SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: "inter"}, NotBefore: clk.Now().Add(-time.Hour),
+		NotAfter: clk.Now().Add(900 * time.Hour), IsCA: true, BasicConstraintsValid: true, MaxPathLen: 0, MaxPathLenZero: true, KeyUsage: x509.KeyUsageCertSign}
 	der, err = x509.CreateCertificate(rand.Reader, interT, cp.root, &cp.interKey.PublicKey, cp.rootKey)
 	if err != nil {
 		t.Fatal(err)
@@ -85,6 +91,7 @@ func newCertCP(t *testing.T, clk *clocktest.Fake) *certCP {
 
 	cp.srv = httptest.NewUnstartedServer(http.HandlerFunc(cp.serve))
 	cp.srv.TLS = &tls.Config{ClientAuth: tls.RequestClientCert, MinVersion: tls.VersionTLS12}
+	cp.srv.EnableHTTP2 = true // like production: one connection carries concurrent requests
 	cp.srv.StartTLS()
 	t.Cleanup(cp.srv.Close)
 	cp.caPath = filepath.Join(t.TempDir(), "cp-ca.pem")
@@ -131,6 +138,10 @@ func (cp *certCP) serve(w http.ResponseWriter, r *http.Request) {
 	cp.mu.Lock()
 	cp.bearers = append(cp.bearers, r.Header.Get("Authorization"))
 	cp.mu.Unlock()
+	if cp.rejectAuth.Load() && r.Header.Get("Authorization") != "" {
+		http.Error(w, "bearer not accepted", http.StatusBadRequest)
+		return
+	}
 	if cp.down.Load() {
 		http.Error(w, "down", http.StatusServiceUnavailable)
 		return
@@ -164,6 +175,9 @@ func (cp *certCP) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.URL.Path {
 	case "/policy":
+		if r.URL.Query().Get("wait") != "" && cp.pollHook != nil {
+			cp.pollHook(serial)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"allowlist":[{"domain":"api.allowed.example"}],"denylist":[{"domain":"evil.example"}]}`)
 	case "/control/heartbeat":

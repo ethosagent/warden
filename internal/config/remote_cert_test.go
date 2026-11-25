@@ -99,3 +99,62 @@ func TestRemoteProviderBearerUnlessCertClient(t *testing.T) {
 		t.Errorf("heartbeat body = %v, want certSerial and certNotAfter", hb.body)
 	}
 }
+
+// TestRemoteProviderNoBearerWithCert (W-P2-WBND-05): with a certificate client
+// installed, Pull, PollLong and Heartbeat never send an Authorization header
+// although a token was given, also after the control plane answers 401 (a
+// revoked or expired certificate) and on every retry.
+func TestRemoteProviderNoBearerWithCert(t *testing.T) {
+	var (
+		mu     sync.Mutex
+		auths  []string
+		status = http.StatusOK
+	)
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		auths = append(auths, r.Header.Get("Authorization"))
+		code := status
+		mu.Unlock()
+		if code != http.StatusOK {
+			http.Error(w, "no certificate", code)
+			return
+		}
+		if r.URL.Path == "/policy" {
+			_, _ = io.WriteString(w, `{"allowlist":[{"domain":"a.example"}]}`)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	rp, err := NewRemoteProvider(srv.URL+"/policy", "shared-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rp.SetHTTPClient(srv.Client())
+	calls := func() []error {
+		_, pollErr := rp.PollLong(context.Background(), time.Millisecond)
+		return []error{rp.Pull(), pollErr, rp.Heartbeat(context.Background())}
+	}
+	for i, e := range calls() {
+		if e != nil {
+			t.Fatalf("call %d with a certificate: %v", i, e)
+		}
+	}
+	mu.Lock()
+	status = http.StatusUnauthorized
+	mu.Unlock()
+	for i, e := range calls() {
+		if e == nil {
+			t.Errorf("call %d: a 401 was not reported", i)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(auths) != 6 {
+		t.Fatalf("saw %d requests, want 6", len(auths))
+	}
+	for i, a := range auths {
+		if a != "" {
+			t.Errorf("request %d carried Authorization %q in certificate mode", i, a)
+		}
+	}
+}
