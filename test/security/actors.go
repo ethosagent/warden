@@ -71,7 +71,43 @@ func (s *Stack) AdminSession(tb testing.TB) *Session {
 // (fakes.Valid(sub, email, groups...)): a new browser, a new session.
 func (s *Stack) Login(tb testing.TB, login fakes.MintOption) *Session {
 	tb.Helper()
-	s.Issuer.SetLogin(login)
+	cb, cl := s.loginAttempt(tb, login)
+	var sc *http.Cookie
+	for _, c := range cb.Cookies() {
+		if c.Name == consoleSessionCookie {
+			sc = c
+		}
+	}
+	_ = cb.Body.Close()
+	if cb.StatusCode != http.StatusFound || sc == nil {
+		tb.Fatalf("security: /auth/callback = %d with a session cookie %t, want 302 and a cookie", cb.StatusCode, sc != nil)
+	}
+	s.tracker.add("console session", sc.Value)
+	return &Session{s: s, cl: cl, csrf: controlplane.CSRFToken(sc.Value)}
+}
+
+// LoginAttempt is a console login whose callback may be refused: it returns
+// the callback reply (status, headers, body) as the browser saw it. The
+// issuer mints the ID token with login, so a wrong nonce or audience is an
+// option away.
+func (s *Stack) LoginAttempt(tb testing.TB, login ...fakes.MintOption) Reply {
+	tb.Helper()
+	cb, _ := s.loginAttempt(tb, login...)
+	body, _ := io.ReadAll(io.LimitReader(cb.Body, 64<<10))
+	_ = cb.Body.Close()
+	for _, c := range cb.Cookies() {
+		if c.Name == consoleSessionCookie {
+			s.tracker.add("console session", c.Value)
+		}
+	}
+	return Reply{Status: cb.StatusCode, Header: cb.Header, Body: string(body)}
+}
+
+// loginAttempt drives the OIDC login up to the callback and returns the
+// callback's response (its body unread) and the browser client.
+func (s *Stack) loginAttempt(tb testing.TB, login ...fakes.MintOption) (*http.Response, *http.Client) {
+	tb.Helper()
+	s.Issuer.SetLogin(login...)
 	jar, err := cookiejar.New(nil)
 	if err != nil {
 		tb.Fatalf("security: cookie jar: %v", err)
@@ -79,7 +115,7 @@ func (s *Stack) Login(tb testing.TB, login fakes.MintOption) *Session {
 	tr := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: s.CPCA.Pool(), MinVersion: tls.VersionTLS12}}
 	tb.Cleanup(tr.CloseIdleConnections)
 	cl := harness.NewLoopbackClient(tr, harness.ClientOptions{Jar: jar, Timeout: 30 * time.Second})
-	get := func(target string) *http.Response {
+	getRaw := func(target string) *http.Response {
 		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, target, nil)
 		if err != nil {
 			tb.Fatalf("security: build request: %v", err)
@@ -88,6 +124,10 @@ func (s *Stack) Login(tb testing.TB, login fakes.MintOption) *Session {
 		if err != nil {
 			tb.Fatalf("security: GET %s: %v", urlPath(target), err)
 		}
+		return resp
+	}
+	get := func(target string) *http.Response {
+		resp := getRaw(target)
 		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
 		return resp
@@ -104,18 +144,7 @@ func (s *Stack) Login(tb testing.TB, login fakes.MintOption) *Session {
 	if idp.StatusCode != http.StatusFound {
 		tb.Fatalf("security: the issuer's authorize endpoint = %d, want 302", idp.StatusCode)
 	}
-	cb := get(idp.Header.Get("Location"))
-	var sc *http.Cookie
-	for _, c := range cb.Cookies() {
-		if c.Name == consoleSessionCookie {
-			sc = c
-		}
-	}
-	if cb.StatusCode != http.StatusFound || sc == nil {
-		tb.Fatalf("security: /auth/callback = %d with a session cookie %t, want 302 and a cookie", cb.StatusCode, sc != nil)
-	}
-	s.tracker.add("console session", sc.Value)
-	return &Session{s: s, cl: cl, csrf: controlplane.CSRFToken(sc.Value)}
+	return getRaw(idp.Header.Get("Location")), cl
 }
 
 // Reply is an HTTP reply a helper read in full.
@@ -205,7 +234,22 @@ func (s *Stack) RegisterAgent(tb testing.TB, id string, key *fakes.AgentKey, gro
 	for _, w := range s.Workers {
 		if w.AgentID == id {
 			w := w
-			s.Eventually(w.Name+" to enforce identity mode "+s.opts.IdentityMode+" for registered agent "+id, func() bool {
+			mode := s.opts.IdentityMode
+			if m := s.opts.AgentModes[id]; m != "" {
+				mode = m
+			}
+			if mode != "challenge" {
+				// Only challenge refuses a credential-less CONNECT: in
+				// attribute mode the worker is enforcing once it has counted a
+				// verification.
+				s.Eventually(w.Name+" to verify tokens in identity mode "+mode+" for registered agent "+id, func() bool {
+					status := s.probeConnectWith(w, "Basic "+base64.StdEncoding.EncodeToString([]byte("session:not-a-jwt")))
+					v, ok := s.TryMetric(w, "warden_identity_verify_total", map[string]string{"result": "invalid"})
+					return status == http.StatusOK && ok && v > 0
+				})
+				continue
+			}
+			s.Eventually(w.Name+" to enforce identity mode "+mode+" for registered agent "+id, func() bool {
 				return s.probeConnect(w) == http.StatusProxyAuthRequired
 			})
 		}
@@ -562,4 +606,16 @@ func (s *Stack) UpstreamClient(tb testing.TB) *http.Client {
 	tr := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: s.UpstreamCA.Pool(), ServerName: UpstreamHost, MinVersion: tls.VersionTLS12}}
 	tb.Cleanup(tr.CloseIdleConnections)
 	return harness.NewLoopbackClient(tr, harness.ClientOptions{Timeout: 10 * time.Second, FollowRedirects: true})
+}
+
+// Agent returns the agent registered through RegisterAgent.
+func (s *Stack) Agent(id string) *Agent {
+	s.tb.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a := s.agents[id]
+	if a == nil {
+		s.tb.Fatalf("security: agent %q is not registered through RegisterAgent", id)
+	}
+	return a
 }
