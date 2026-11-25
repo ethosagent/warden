@@ -170,6 +170,11 @@ var All = slices.Concat(
 		// before and after, with a critical approval_bypassed Finding; an OIDC
 		// admin then reviews it. In-process only (console, break-glass, state dir).
 		{Name: "approvals_emergency_apply", Opts: approvalsEmergencyOpts(), Run: approvalsEmergencyApply},
+		// Block-list removals and widening agent edits are held for a second
+		// admin (W-P2-APPR-08); adds, disables and narrowing edits stay direct.
+		// In-process only (console, admin audit, state dir).
+		{Name: "approvals_hold_removals", Opts: approvalsTargetsOpts(), Run: approvalsHoldRemovals},
+		{Name: "approvals_block_enforcement", Opts: approvalsBlockEnforcementOpts(), Run: approvalsBlockEnforcement},
 		// Scoped policy (W-P1-GPOL-10): with identity off a scoped entry loads
 		// but allows nobody (identity_required); an unscoped entry still applies.
 		{Name: "scoped_policy_fail_closed", Run: scopedPolicyFailClosed},

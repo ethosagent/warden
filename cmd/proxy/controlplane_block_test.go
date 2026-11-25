@@ -361,3 +361,55 @@ func TestControlPlaneBlockList(t *testing.T) {
 		t.Error("add on a missing state dir succeeded")
 	}
 }
+
+// TestBlockCLIRemoveCreatesDraft: with approvals enabled on the state dir,
+// `block remove` exits 0, prints a draft id and leaves the user blocked; the
+// draft is a pending blocked_users draft authored cli:<user> (W-P2-APPR-08).
+// `block add` stays immediate.
+func TestBlockCLIRemoveCreatesDraft(t *testing.T) {
+	stateDir := seedStateDir(t, importBaseConfig+auditConfig)
+	enableApprovalsMeta(t, stateDir)
+	stdout, stderr, code := runBlock(t, "add", "--sub", "u-1", "--reason", "private reason", "--state-dir", stateDir)
+	if code != 0 {
+		t.Fatalf("add exit %d: %s", code, stderr)
+	}
+	id := strings.TrimSpace(stdout)
+
+	stdout, stderr, code = runBlock(t, "remove", "--id", id, "--state-dir", stateDir)
+	if code != 0 {
+		t.Fatalf("remove exit %d: %s", code, stderr)
+	}
+	draftID := strings.TrimSpace(stdout)
+	if !strings.HasPrefix(draftID, "cd_") || strings.Contains(stdout, "removed") {
+		t.Errorf("stdout = %q, want the draft id", stdout)
+	}
+	if rows := blockRows(t, stateDir); len(rows) != 1 || rows[0].ID != id {
+		t.Fatalf("entries = %+v, want %s still blocked", rows, id)
+	}
+
+	db, err := cpstate.OpenReadOnly(context.Background(), filepath.Join(stateDir, "warden-cp.db"), controlplane.StateMigrations())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	var target, ref, state, author, kind, source, doc, class string
+	if err := db.SQL().QueryRow("SELECT target, target_ref, state, author_sub, author_kind, source, doc_json, required_role FROM change_drafts WHERE id = ?", draftID).
+		Scan(&target, &ref, &state, &author, &kind, &source, &doc, &class); err != nil {
+		t.Fatal(err)
+	}
+	if target != "blocked_users" || ref != id || state != "pending" || author != cliUser(t) || kind != "cli" || source != "cli" || class != "admin" {
+		t.Errorf("draft = %s %s %s %s %s %s %s", target, ref, state, author, kind, source, class)
+	}
+	if strings.Contains(doc, "private reason") || strings.Contains(doc, "reason") || !strings.Contains(doc, `"sub":"u-1"`) {
+		t.Errorf("draft doc = %s, want the entry without its reason", doc)
+	}
+	// The audit row names the draft and is the only remove row; the user's
+	// own sub is nowhere in the chain.
+	if rm := blockAuditRefs(t, stateDir, "blocked_users.remove"); len(rm) != 0 {
+		t.Errorf("block-targeted remove rows = %v, want none (the row targets the draft)", rm)
+	}
+	if rows := readAudit(t, stateDir, "blocked_users.remove"); len(rows) != 1 || rows[0].target != "change_draft" || rows[0].actor != cliUser(t) || rows[0].outcome != "ok" {
+		t.Errorf("remove audit rows = %+v, want one change_draft row by %s", rows, cliUser(t))
+	}
+	verifyChain(t, stateDir)
+}

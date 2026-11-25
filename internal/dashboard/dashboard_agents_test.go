@@ -340,3 +340,24 @@ func TestAgents_IfMatch(t *testing.T) {
 		t.Errorf("stale PUT = %d, want 409", rec.Code)
 	}
 }
+
+// TestAgents_Held: a registry write held for approval (W-P2-APPR-08) answers
+// 202 with the draft; a gate refusal keeps its own status.
+func TestAgents_Held(t *testing.T) {
+	held := &HeldForApproval{DraftID: "cd_1", Revision: 1, State: "pending", Widening: true}
+	for _, c := range []struct{ method, path, body string }{
+		{http.MethodPost, "/dashboard/api/agents", agentBody},
+		{http.MethodPut, "/dashboard/api/agents/claude-code", agentBodyNoID},
+		{http.MethodPost, "/dashboard/api/agents/claude-code/enable", ""},
+	} {
+		h := agentsHandler(&fakeAgents{err: held}, "oidc")
+		rec := agentsDo(h, c.method, c.path, c.body, "If-Match", `"r1"`)
+		if rec.Code != http.StatusAccepted || rec.Header().Get("Location") != "/dashboard/api/changes/cd_1" || !strings.Contains(rec.Body.String(), `"draft_id":"cd_1"`) {
+			t.Errorf("%s %s = %d %s, want 202 naming the draft", c.method, c.path, rec.Code, rec.Body)
+		}
+	}
+	h := agentsHandler(&fakeAgents{err: &ChangeError{Status: http.StatusServiceUnavailable, Code: "approvals_unavailable"}}, "oidc")
+	if rec := agentsDo(h, http.MethodPost, "/dashboard/api/agents", agentBody); rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "approvals_unavailable") {
+		t.Errorf("gate refusal = %d %s", rec.Code, rec.Body)
+	}
+}

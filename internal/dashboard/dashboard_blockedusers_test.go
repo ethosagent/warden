@@ -287,3 +287,25 @@ func TestBlockedUsersPanelAdminOnly(t *testing.T) {
 		t.Error("traffic row block action is not admin-gated")
 	}
 }
+
+// TestBlockedUsers_Held: a removal held for approval (W-P2-APPR-08) answers 202
+// with the draft, and a ChangeError keeps its own status, instead of the fixed 500.
+func TestBlockedUsers_Held(t *testing.T) {
+	held := &HeldForApproval{DraftID: "cd_1", Revision: 1, State: "pending", Widening: true,
+		Reasons: []ChangeReason{{Code: "blocklist.removed", Path: "blocked_users:bu_1"}}}
+	rec := adminAuditDo(blockListHandler(&fakeBlockList{err: held}), http.MethodDelete, "/dashboard/api/blocked-users/bu_1", "")
+	var body struct {
+		DraftID  string `json:"draft_id"`
+		State    string `json:"state"`
+		Widening bool   `json:"widening"`
+	}
+	if rec.Code != http.StatusAccepted || json.Unmarshal(rec.Body.Bytes(), &body) != nil || body.DraftID != "cd_1" || body.State != "pending" || !body.Widening ||
+		rec.Header().Get("Location") != "/dashboard/api/changes/cd_1" {
+		t.Errorf("held removal = %d %s (Location %q)", rec.Code, rec.Body, rec.Header().Get("Location"))
+	}
+	rec = adminAuditDo(blockListHandler(&fakeBlockList{err: &ChangeError{Status: http.StatusServiceUnavailable, Code: "approvals_unavailable"}}),
+		http.MethodDelete, "/dashboard/api/blocked-users/bu_1", "")
+	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "approvals_unavailable") {
+		t.Errorf("gate refusal = %d %s, want 503 approvals_unavailable", rec.Code, rec.Body)
+	}
+}
