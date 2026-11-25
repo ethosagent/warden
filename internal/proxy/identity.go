@@ -257,13 +257,24 @@ func (p *Proxy) verifyToken(h *identityHolder, tok string) idResult {
 // later request: the signing key must still be in the bundle's token JWKS
 // (unknown_kid, e.g. an emergency key removal), the issuer must still match
 // (wrong_iss), and the token must still bind to the agent and key. Allocation
-// free. A non-Warden identity passes.
+// free. A non-Warden identity passes, except in require mode, where it fails
+// as unbound_token.
 func (p *Proxy) rebind(h *identityHolder, r idResult) idResult {
-	if r.status != identity.StatusValid || r.claims.TokenType != identity.TokenWarden {
+	if r.status != identity.StatusValid {
 		return r
 	}
+	warden := r.claims.TokenType == identity.TokenWarden
+	// An IdP identity opened under another mode is not bound there; in require
+	// mode it must not outlive the flip, so it goes through the binding check
+	// (unbound_token) like every other valid identity.
+	if !warden && h.mode != IdentityModeRequire {
+		return r
+	}
+	var snap *identity.WardenSnapshot
 	if h.snapshot != nil {
-		snap := h.snapshot()
+		snap = h.snapshot() // read once for the whole re-check
+	}
+	if warden && h.snapshot != nil {
 		switch {
 		case !snap.HasKey(r.claims.KID):
 			return idResult{claims: r.claims, status: identity.StatusInvalid, reason: identity.ReasonUnknownKID}
@@ -271,7 +282,7 @@ func (p *Proxy) rebind(h *identityHolder, r idResult) idResult {
 			return idResult{claims: r.claims, status: identity.StatusInvalid, reason: identity.ReasonWrongIss}
 		}
 	}
-	return p.bind(h, r)
+	return p.bindSnap(h, snap, r)
 }
 
 // bind applies agent binding (W-P2-WBND-02) to a verified result. Only a valid
@@ -283,6 +294,15 @@ func (p *Proxy) rebind(h *identityHolder, r idResult) idResult {
 // snapshot to bind against fails closed. In require mode a valid token of any
 // other type (an IdP token) fails as unbound_token.
 func (p *Proxy) bind(h *identityHolder, r idResult) idResult {
+	var snap *identity.WardenSnapshot
+	if h.snapshot != nil {
+		snap = h.snapshot()
+	}
+	return p.bindSnap(h, snap, r)
+}
+
+// bindSnap is bind against a snapshot the caller already read.
+func (p *Proxy) bindSnap(h *identityHolder, snap *identity.WardenSnapshot, r idResult) idResult {
 	if r.status != identity.StatusValid {
 		return r
 	}
@@ -290,10 +310,6 @@ func (p *Proxy) bind(h *identityHolder, r idResult) idResult {
 	// unbound_token (BindingCheck): it never satisfies the mode.
 	if r.claims.TokenType != identity.TokenWarden && h.mode != IdentityModeRequire {
 		return r
-	}
-	var snap *identity.WardenSnapshot
-	if h.snapshot != nil {
-		snap = h.snapshot()
 	}
 	if reason, ok := identity.BindingCheck(snap, p.cfg.AgentID, r.claims); !ok {
 		return idResult{claims: r.claims, status: identity.StatusInvalid, reason: reason}

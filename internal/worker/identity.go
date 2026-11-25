@@ -113,13 +113,20 @@ type verifierKey struct {
 	acceptIdP                                                 bool
 }
 
-func keyOf(s config.IdentitySettings) verifierKey {
+// acceptIdP is whether this worker's verifier takes IdP tokens at all: never in
+// require mode, where an IdP token is refused as unbound_token without being
+// verified (no IdP verifier is built, no key fetch, no issuer audience needed).
+func acceptIdP(s config.IdentitySettings, mode proxy.IdentityMode) bool {
+	return mode != proxy.IdentityModeRequire && s.AcceptIdPTokens()
+}
+
+func keyOf(s config.IdentitySettings, mode proxy.IdentityMode) verifierKey {
 	return verifierKey{
 		issuer: s.Issuer, internalIssuerURL: s.InternalIssuerURL, audience: s.Audience,
 		jwksURL: s.JWKSURL, groupsClaim: s.GroupsClaim,
 		allowedAZP:  fmt.Sprintf("%q", s.AllowedAZP),
 		skewSeconds: s.ClockSkewSeconds, ttlSeconds: s.MaxTokenTTLSeconds,
-		acceptIdP: s.AcceptIdPTokens(),
+		acceptIdP: acceptIdP(s, mode),
 	}
 }
 
@@ -234,12 +241,17 @@ func countScoped(p config.Policy) int {
 // built from s, reusing the live verifier (and sign-in starter) while their
 // inputs did not change. A failed rebuild keeps the previous config.
 func (w *identityWiring) applyVerified(s config.IdentitySettings, mode proxy.IdentityMode) {
-	key := keyOf(s)
+	key := keyOf(s, mode)
 	v := w.live.v
 	if v == nil || w.live.refusing || key != w.live.key {
-		nv, err := w.buildDispatcher(s)
+		nv, err := w.buildDispatcher(s, mode)
 		if err != nil {
 			if mode == proxy.IdentityModeRequire {
+				if w.live.mode == proxy.IdentityModeRequire && !w.live.refusing {
+					// A working require verifier is the strictest thing to keep.
+					w.logger.Warn("identity verifier rebuild failed; keeping the previous require-mode verifier", "error", err)
+					return
+				}
 				// Keeping the previous config could be off or attribute, which
 				// admits what require must refuse: refuse everything until a
 				// rebuild succeeds.
@@ -317,14 +329,15 @@ func (w *identityWiring) wardenVerifier() (*identity.WardenVerifier, error) {
 // when IdP tokens are accepted, which needs identity.issuer) behind the
 // dispatcher that routes by issuer, around the one Warden verifier. A Warden
 // token reaches no IdP code, and an IdP token reaches no Warden key.
-func (w *identityWiring) buildDispatcher(s config.IdentitySettings) (identity.Verifier, error) {
+func (w *identityWiring) buildDispatcher(s config.IdentitySettings, mode proxy.IdentityMode) (identity.Verifier, error) {
 	wv, err := w.wardenVerifier()
 	if err != nil {
 		return nil, err
 	}
 	skew := time.Duration(s.ClockSkewSeconds) * time.Second
 	var idp identity.Verifier
-	if s.AcceptIdPTokens() {
+	accept := acceptIdP(s, mode)
+	if accept {
 		idp, err = w.build(verifierConfig(s))
 		if err != nil {
 			return nil, err
@@ -335,7 +348,7 @@ func (w *identityWiring) buildDispatcher(s config.IdentitySettings) (identity.Ve
 		return nil, err
 	}
 	return identity.NewMultiVerifier(identity.MultiConfig{
-		Warden: wv, IdP: idp, IdPIssuer: s.Issuer, AcceptIdP: s.AcceptIdPTokens(),
+		Warden: wv, IdP: idp, IdPIssuer: s.Issuer, AcceptIdP: accept,
 		Logger: w.logger, Now: w.now,
 	}), nil
 }

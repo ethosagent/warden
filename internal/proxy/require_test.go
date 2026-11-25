@@ -305,6 +305,35 @@ func TestIdentityRequireMode(t *testing.T) {
 		}
 	})
 
+	// A tunnel opened under attribute or challenge mode with a valid IdP token
+	// must not survive the flip to require: it is refused as unbound.
+	t.Run("mode_flip_idp_tunnel", func(t *testing.T) {
+		for _, start := range []IdentityMode{IdentityModeAttribute, IdentityModeChallenge} {
+			t.Run(string(start), func(t *testing.T) {
+				e := newIDEnvCfg(t, start, nil)
+				idp := idClaims("alice", e.clk.now().Add(time.Hour))
+				idp.TokenType = identity.TokenIdP
+				e.v.Set("tok-idp", idp, identity.StatusValid, "")
+				c := e.h1("Proxy-Authorization: " + basicAuth("tok-idp") + "\r\n")
+				if st := c.get(""); st != 200 {
+					t.Fatalf("under %s: status %d, want 200", start, st)
+				}
+				hits := e.be.requests()
+				sv := &bindVerifier{}
+				sv.setKeys(t, 1, []string{"k1"}, reqActive("T1"))
+				e.p.SetIdentity(&reqVerifier{Verifier: e.v, snap: sv}, IdentityModeRequire)
+				resp, body := readH1(t, c, "")
+				if resp.StatusCode != 403 || body != `{"error":"identity_required"}` || !resp.Close {
+					t.Fatalf("after the flip: status %d body %q close %v, want 403 identity_required with Connection: close", resp.StatusCode, body, resp.Close)
+				}
+				assertNo401(t, resp)
+				if got := e.be.requests(); got != hits {
+					t.Errorf("%d upstream requests after the flip, want 0", got-hits)
+				}
+			})
+		}
+	})
+
 	t.Run("no_connect_identity", func(t *testing.T) {
 		// A request with no CONNECT identity (a transparent leg) and no header
 		// proves nothing: refused, not served anonymously.

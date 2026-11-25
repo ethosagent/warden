@@ -491,8 +491,11 @@ Connection: close
   `agent_disabled`, `agent_mismatch`, `cnf_mismatch`, `bad_signature`,
   `jwks_unavailable`, ...) or, with none, the status: `none`, `expired`,
   `invalid` or `unverified`. It is never token text or a library error.
-- An IdP (Dex) token is `invalid` with reason `unbound_token` even when
-  `identity.acceptDexTokens` is true: the token is verified, then refused.
+- An IdP (Dex) token is `invalid` with reason `unbound_token` whatever
+  `identity.acceptDexTokens` says: a require-mode worker builds no IdP verifier,
+  so the token is refused by its issuer without being verified or any key being
+  fetched. (A tunnel opened under another mode with an IdP token is refused the
+  same way on its next request once the agent moves to `require`.)
 - It fails closed. Before the first verified bundle, with an empty key set, or
   with an unregistered agent, no token verifies, so every CONNECT gets the `407`
   with reason `jwks_unavailable` or `agent_unregistered`. A bundle loaded from the

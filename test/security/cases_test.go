@@ -12,7 +12,7 @@ func allCases() []Case {
 		crossAgentCases, unboundWorkerCases, rotatedKeyCases,
 		blockedUserCases, disabledAgentCases, revokedKeyCases, issuanceCases, expiredTokenCases,
 		certCases(), {serverCertCase, revokedCase}, bundleCases(),
-		wardenForgeries, wardenTimeBounds, idpCases, rawDexRefused,
+		wardenForgeries, wardenTimeBounds, idpCases, idpVerifiedCases, requireInTunnel(), rawDexRefused,
 		exchangeCases, requestRefusals, {replayedJTI()}, forgedNonceCases, signerCases, rateCases,
 	} {
 		out = append(out, group...)

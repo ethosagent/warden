@@ -21,6 +21,8 @@ import (
 	"time"
 
 	"github.com/ethosagent/warden/internal/config"
+	"github.com/ethosagent/warden/internal/identity"
+	"github.com/ethosagent/warden/internal/proxy"
 )
 
 // countingDialer records every upstream dial a worker attempts and makes none.
@@ -203,5 +205,86 @@ identity:
 	err := runUntilCtxDone(t, runParams(t, writeConfig(t, cfg)))
 	if err == nil || !strings.Contains(err.Error(), "control-plane-managed") {
 		t.Fatalf("Run = %v, want a refusal naming the control-plane-managed requirement", err)
+	}
+}
+
+func requireWire(skew int) *config.SettingsWire {
+	return &config.SettingsWire{
+		Identity: &config.IdentitySettings{DefaultMode: "off", Issuer: "http://idp.test", ClockSkewSeconds: skew},
+		Agents:   []config.AgentSettings{{ID: "default", Identity: "require"}},
+	}
+}
+
+// TestRequireNeedsNoIdPVerifier: require with an issuer but no audience (valid
+// config: require alone needs neither) builds a verifier with no IdP leg, so it
+// does not lock the agent out, and an IdP-issued token is refused as
+// unbound_token without a key fetch.
+func TestRequireNeedsNoIdPVerifier(t *testing.T) {
+	a, fake, builds, _, _ := identityApplier(t)
+	fake.settings = requireWire(0)
+	a.Apply()
+	w := a.identity
+	if w.live.mode != proxy.IdentityModeRequire || w.live.refusing || *builds != 0 {
+		t.Fatalf("live = mode %q refusing %v, IdP builds %d; want a working require verifier with no IdP build", w.live.mode, w.live.refusing, *builds)
+	}
+	_, st, reason := w.live.v.Verify(context.Background(), jwtShaped("http://idp.test"))
+	if st != identity.StatusInvalid || reason != identity.ReasonUnboundToken {
+		t.Fatalf("an IdP-issued token = %s/%s, want invalid/unbound_token", st, reason)
+	}
+}
+
+// TestRequireRefusingVerifier: a require verifier that cannot be built refuses
+// everything (never keeps a laxer config), is rebuilt on the next apply, and a
+// later good build replaces it.
+func TestRequireRefusingVerifier(t *testing.T) {
+	a, fake, _, _, _ := identityApplier(t)
+	w := a.identity
+
+	fake.settings = requireWire(400) // skew over the 5m limit: the build fails
+	a.Apply()
+	if w.live.mode != proxy.IdentityModeRequire || !w.live.refusing {
+		t.Fatalf("live = mode %q refusing %v, want the refusing require verifier", w.live.mode, w.live.refusing)
+	}
+	if got := a.p.IdentityModeName(); got != "require" {
+		t.Fatalf("proxy mode = %q, want require", got)
+	}
+	if _, st, r := w.live.v.Verify(context.Background(), "x"); st != identity.StatusUnverified || r != identity.ReasonJWKSUnavailable {
+		t.Fatalf("refusing verifier = %s/%s", st, r)
+	}
+	a.Apply() // still failing: stays refusing, rebuilt (not skipped)
+	if !w.live.refusing {
+		t.Fatal("a failing rebuild must keep refusing")
+	}
+	fake.settings = requireWire(30)
+	a.Apply()
+	if w.live.refusing || w.live.mode != proxy.IdentityModeRequire {
+		t.Fatalf("after a good build: refusing %v mode %q, want a working require verifier", w.live.refusing, w.live.mode)
+	}
+}
+
+// TestRequireKeepsWorkingVerifier: a working require verifier survives a failed
+// rebuild; a laxer previous mode does not (it is replaced by refusing).
+func TestRequireKeepsWorkingVerifier(t *testing.T) {
+	a, fake, _, _, _ := identityApplier(t)
+	w := a.identity
+	fake.settings = requireWire(30)
+	a.Apply()
+	good := w.live
+	fake.settings = requireWire(400)
+	a.Apply()
+	if w.live.v != good.v || w.live.refusing {
+		t.Fatal("a failed rebuild replaced a working require verifier")
+	}
+
+	a2, fake2, _, _, _ := identityApplier(t)
+	fake2.settings = identityWire("http://idp.test") // attribute
+	a2.Apply()
+	if a2.identity.live.mode != proxy.IdentityModeAttribute {
+		t.Fatal("setup: not in attribute mode")
+	}
+	fake2.settings = requireWire(400)
+	a2.Apply()
+	if a2.identity.live.mode != proxy.IdentityModeRequire || !a2.identity.live.refusing {
+		t.Fatalf("attribute then a failing require: mode %q refusing %v, want refusing require", a2.identity.live.mode, a2.identity.live.refusing)
 	}
 }

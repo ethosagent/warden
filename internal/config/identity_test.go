@@ -25,6 +25,7 @@ func TestValidateIdentity(t *testing.T) {
 		{"internal url trailing slash", identityBlock("  issuer: https://i.example.com\n  internalIssuerURL: http://dex:5556/\n"), ""},
 		{"http issuer rejected even when off", identityBlock("  issuer: http://dex:5556\n"), "plain http"},
 		{"require parses", identityBlock("  defaultMode: require\n  issuer: https://i.example.com\n  audience: warden\n"), ""},
+		{"require with an issuer and no audience parses", identityBlock("  defaultMode: require\n  issuer: https://i.example.com\n"), ""},
 		{"require alone needs no issuer", identityBlock("  defaultMode: require\n"), ""},
 		{"require with acceptDexTokens true needs an issuer", identityBlock("  defaultMode: require\n  acceptDexTokens: true\n"), "acceptDexTokens true requires identity.issuer"},
 		{"require plus attribute agent still needs an issuer", baseAllow + "\nagents:\n  - id: a\n    identity: attribute\nidentity:\n  defaultMode: require\n", "identity.issuer is required"},
