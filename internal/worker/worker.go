@@ -292,6 +292,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// Otherwise the worker enforces its local policy (standalone).
 	localOnly := localOnlyFlag || pol.ControlPlane.LocalOnly
 	managed := pol.ControlPlane.Endpoint != "" && !localOnly
+	logBundleVerification(logger, pol.ControlPlane, managed, localOnly)
 
 	// Optional control plane (managed mode only): pull allow/deny policy AND the
 	// behavioral settings document from the remote endpoint. The first pull happens

@@ -77,6 +77,30 @@ the control plane and enforce the worker's **local** policy standalone — the
 escape hatch for offline/debug. A managed worker needs no local `allowlist`; a
 local-only/standalone worker still requires one.
 
+## Pinning bundle keys (worker config)
+
+A worker pins the public keys that may sign the policy bundles it accepts. The
+keys are read at startup and have no runtime effect until signed-bundle
+verification lands (W-P2-SBND-04); with none pinned a managed worker behaves as
+before and logs one WARN, `bundle verification disabled (no controlPlane.bundleKeys)`.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `controlPlane.bundleKeys` | none | List of public JWKs (OKP/Ed25519 or EC/P-256). |
+| `controlPlane.bundleKeysFile` | none | JWKS JSON file `{"keys":[...]}`, merged with `bundleKeys`. |
+| `controlPlane.requireSignedBundles` | `false` | `true` makes config load fail when no keys are pinned (checked whenever the endpoint is set and `controlPlane.localOnly` is not true, so a worker started with `--local-only` is checked too, deliberately fail-closed). |
+| `controlPlane.bundleIssuer` | none | When set, a bundle's `cpId` must equal it. |
+| `controlPlane.bundleClockSkew` | `5m` | Tolerance on `issuedAt` and `expiresAt`, at most `1h`. |
+| `controlPlane.bundleExpiry` | `keep` | `keep` enforces the last-known-good past expiry, `deny` blocks. |
+
+Inline and file keys together are at most 16. Every pin must have no private
+members and a `kid` equal to its RFC 7638 thumbprint (a kid mismatch error shows
+the expected thumbprint), and a repeated kid is an error. List both the old and
+the new key while the control plane rotates its bundle key. Errors name
+`controlPlane.bundleKeys[i]` or `controlPlane.bundleKeysFile[i]` and never
+include key material. `controlPlane.localOnly: true` ignores all of these keys
+and logs one INFO line.
+
 ## Run it
 
 ```sh

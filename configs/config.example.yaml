@@ -482,6 +482,19 @@ controlPlane:
   # comes only from the control plane and the worker boots fail-closed (deny all)
   # until its first pull. Secrets always stay local.
 
+  # Signed policy bundles (no runtime effect until W-P2-SBND-04). Absent = off:
+  # the worker takes policy unverified and logs one WARN at startup.
+  # bundleKeys:                   # public JWKs that may sign bundles (OKP/Ed25519 or EC/P-256)
+  #   - {kty: OKP, crv: Ed25519, x: "<base64url>", kid: "<RFC 7638 thumbprint>"}
+  # bundleKeysFile: ""            # JWKS JSON file {"keys":[...]}, merged with bundleKeys (max 16 total)
+  # requireSignedBundles: false   # true = no pins fails config load (checked when endpoint is set and localOnly is not true, so --local-only workers too; fail-closed)
+  # bundleIssuer: ""              # optional: required bundle cpId
+  # bundleClockSkew: 5m           # tolerance on issuedAt/expiresAt, max 1h
+  # bundleExpiry: keep            # keep = enforce last-known-good past expiry | deny
+  # kid must equal the key's RFC 7638 thumbprint; private members (d, ...) are rejected.
+  # Keep both the old and new key listed while the control plane rotates its bundle key.
+  # localOnly: true ignores all of these.
+
 # Fleet analytics aggregation.
 #   off        - single node (default).
 #   aggregator - host POST /central/ingest on the admin listener; the dashboard
