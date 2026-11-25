@@ -1210,6 +1210,7 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
       </div>
 
       <div id="fleet-block-banner" class="note" style="display:none; margin-bottom:12px; color:var(--amber)"></div>
+      <div id="fleet-bundle-banner" class="note" style="display:none; margin-bottom:12px; color:var(--amber)"></div>
       <div class="card">
         <table id="fleetTable"><thead><tr>
           <th>Worker</th><th>Auth</th><th>Status</th><th>Policy ETag</th><th>Pending</th><th>Last heartbeat</th><th>Last policy pull</th><th class="num">Events fwd</th><th>Caps</th>
@@ -2127,6 +2128,10 @@ async function loadFleet(){
   let ws;
   try{ ws=await jget('/dashboard/api/workers'); }catch(e){ ws=[]; }
   ws=Array.isArray(ws)?ws:[];
+  /* workersWithoutBundleCap: connected workers that apply the unsigned wire while the CP serves signed bundles. */
+  let noBundleCap=0;
+  try{ const su=await jget('/dashboard/api/setup'); noBundleCap=(su&&su.workersWithoutBundleCap)||0; }catch(e){ noBundleCap=0; }
+  showFleetBundleBanner(noBundleCap);
   const empty=!ws.length;
   const pg=document.getElementById('page-fleet'); if(pg) pg.classList.toggle('is-empty', empty);
   if(empty) return;
@@ -2156,15 +2161,18 @@ function renderFleet(ws){
       +fleetStat('Events forwarded', fmtNum(totalEv), 'total');
   }
   const body=document.getElementById('fleetBody'); if(!body) return;
-  body.innerHTML=ws.map(w=>{
+  body.innerHTML=ws.map((w,i)=>{
     const status=w.online
       ? '<span class="pill p-green"><span class="d" style="background:var(--green)"></span>online</span>'
       : '<span class="pill p-redact"><span class="d" style="background:var(--amber)"></span>stale</span>';
-    const etag=(w.policyVersion?'v'+w.policyVersion+' · ':'')+(w.policyETag||'—');
+    const etag=(w.bundleSeq?'bundle seq '+w.bundleSeq:((w.policyVersion?'v'+w.policyVersion+' · ':'')+(w.policyETag||'—')));
     const etagPill=w.behind?'<span class="pill p-redact">behind</span>':'<span class="pill p-allow">up-to-date</span>';
     let pending=w.behind?'<span class="pill p-high">policy behind</span>':'';
     if(w.noGroupPolicy) pending+=(pending?' ':'')+'<span class="pill p-high" title="Denies group-scoped rules until upgraded">no groupPolicy</span>';
     if(w.noIdentityChallenge) pending+=(pending?' ':'')+'<span class="pill p-high" title="This worker cannot apply identity challenge mode and keeps allowing callers it should challenge. Upgrade it.">identity: challenge not supported, still allowing</span>';
+    if(w.bundleSeqAhead) pending+=(pending?' ':'')+'<span class="pill p-high" title="The worker reports a bundle seq above the control plane head: the control plane may have been restored to an older state.">bundle seq ahead of control plane</span>';
+    if(w.lastRejectReason) pending+=(pending?' ':'')+'<span class="pill p-high bundle-rej" data-i="'+i+'"></span>'; // text set below with textContent
+    if(w.bundleStale) pending+=(pending?' ':'')+'<span class="pill p-high" title="The signed bundle this worker enforces is past its expiry.">bundle expired</span>';
     if(!pending) pending='<span class="muted">—</span>';
     const revokeBtn=(w.authKind==='cert'&&!w.certRevoked)?' <button data-min-role="admin" class="btn sm fleet-revoke" data-id="'+esc(w.proxyID)+'" style="color:#ff8098">Revoke</button>':'';
     return '<tr><td class="mono">'+esc(w.proxyID||'—')+revokeBtn+'</td><td>'+fleetAuthBadge(w)+'</td><td>'+status+'</td>'
@@ -2173,6 +2181,12 @@ function renderFleet(ws){
       +'<td class="muted">'+relTime(w.lastPolicyPull)+'</td><td class="num">'+fmtNum(w.eventsForwarded||0)+'</td>'
       +'<td class="mono" style="font-size:12px">'+esc((w.caps||[]).join(', ')||'none')+(w.online&&!hasBlockCap(w)?' <span class="pill p-high">no block list</span>':'')+'</td></tr>';
   }).join('');
+  /* The reason and kids come from the worker (validated by the CP); they reach the DOM through textContent only. */
+  body.querySelectorAll('.bundle-rej').forEach(el=>{
+    const w=ws[+el.dataset.i]||{};
+    el.textContent='bundle rejected: '+w.lastRejectReason;
+    el.title=(w.lastRejectAt?'at '+w.lastRejectAt+'. ':'')+(Array.isArray(w.pinnedKids)&&w.pinnedKids.length?'Pinned kids: '+w.pinnedKids.join(', '):'');
+  });
   body.querySelectorAll('.fleet-revoke').forEach(b=>b.addEventListener('click',()=>revokeWorkerCerts(b.dataset.id)));
   showFleetBlockBanner(ws.filter(w=>w.online&&!hasBlockCap(w)).length);
 }
@@ -2192,6 +2206,12 @@ async function revokeWorkerCerts(id){
 /* A worker enforces the block list only when its heartbeat advertised blocklist/v1. */
 function hasBlockCap(w){ return Array.isArray(w.caps)&&w.caps.indexOf('blocklist/v1')>=0; }
 function blockBannerText(n){ return n+' connected worker'+(n===1?'':'s')+' do not enforce the block list'; }
+function bundleBannerText(n){ return n+' connected worker'+(n===1?'':'s')+' do not verify signed bundles'; }
+function showFleetBundleBanner(n){
+  const el=document.getElementById('fleet-bundle-banner'); if(!el) return;
+  el.textContent=n>0?bundleBannerText(n):'';
+  el.style.display=n>0?'':'none';
+}
 function showFleetBlockBanner(n){
   const el=document.getElementById('fleet-block-banner'); if(!el) return;
   el.textContent=n>0?blockBannerText(n):'';

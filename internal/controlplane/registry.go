@@ -33,6 +33,12 @@ type workerState struct {
 	caps            []string // capabilities of the latest heartbeat (replaced, not merged)
 	agentID         string   // the agent the worker says it serves (latest heartbeat; valid or empty)
 	identityMode    string   // the identity mode the worker says it runs (latest heartbeat; enum or empty)
+	bundle          WorkerBundle
+	// loggedReject is the rejection reason last logged for the worker and
+	// aheadLogged whether the ahead-of-head ERROR was logged, so each is
+	// logged once per change, not once per heartbeat (NoteBundleSignals).
+	loggedReject string
+	aheadLogged  bool
 
 	// How the worker last authenticated (recordAuth). tokenID/tokenName are set
 	// only for kind token; legacy and none ids are unverified headers.
@@ -85,14 +91,29 @@ func (r *WorkerRegistry) SeenIngest(proxyID string, n int) {
 	}
 }
 
+// WorkerBundle is the signed-bundle state of a worker's latest heartbeat
+// (W-P2-SBND-05), already validated by the control plane (validWorkerBundle):
+// times are RFC 3339 UTC, kids are well-formed, and RejectReason is in the
+// closed set. The zero value is a worker that reports nothing.
+type WorkerBundle struct {
+	Seq          int64
+	KID          string
+	IssuedAt     string
+	PinnedKIDs   []string
+	Stale        bool
+	RejectReason string
+	RejectAt     string
+}
+
 // SeenHeartbeat records a heartbeat and the worker's current policy ETag, so the
 // dashboard can flag workers that are a policy version behind. caps replaces the
-// stored set: a worker that stops advertising a capability loses it.
+// stored set: a worker that stops advertising a capability loses it. bundle
+// replaces the stored bundle state the same way.
 //
 // agentID and identityMode (W-P2-AREG-03) replace the stored values too, under
 // the same lock, so a view never pairs new caps with an old agent binding. The
 // caller has already validated them (validAgentBinding); a worker is never trusted.
-func (r *WorkerRegistry) SeenHeartbeat(proxyID, policyETag string, caps []string, agentID, identityMode string) {
+func (r *WorkerRegistry) SeenHeartbeat(proxyID, policyETag string, caps []string, agentID, identityMode string, bundle WorkerBundle) {
 	if proxyID == "" {
 		return
 	}
@@ -105,6 +126,30 @@ func (r *WorkerRegistry) SeenHeartbeat(proxyID, policyETag string, caps []string
 	w.caps = append([]string(nil), caps...)
 	w.agentID = agentID
 	w.identityMode = identityMode
+	bundle.PinnedKIDs = append([]string(nil), bundle.PinnedKIDs...)
+	w.bundle = bundle
+}
+
+// NoteBundleSignals reports whether a heartbeat of proxyID is the first to show
+// a new rejection reason (rejectChanged) or the first to put the worker above
+// the control plane's head seq (aheadNew). Each is true once per change, so the
+// caller logs once per (worker, reason) and once per worker while ahead. A
+// worker that stops being rejected or ahead re-arms, so a later one logs again.
+func (r *WorkerRegistry) NoteBundleSignals(proxyID, reason string, ahead bool) (rejectChanged, aheadNew bool) {
+	if proxyID == "" {
+		return false, false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	w, ok := r.workers[proxyID]
+	if !ok {
+		return false, false
+	}
+	rejectChanged = reason != "" && reason != w.loggedReject
+	w.loggedReject = reason
+	aheadNew = ahead && !w.aheadLogged
+	w.aheadLogged = ahead
+	return rejectChanged, aheadNew
 }
 
 // maxWorkersWithoutCap bounds the WorkersWithoutCap result.
@@ -128,6 +173,24 @@ func (r *WorkerRegistry) WorkersWithoutCap(cap string) []string {
 		out = out[:maxWorkersWithoutCap]
 	}
 	return out
+}
+
+// FlagBundleState sets Behind and BundleSeqAhead on every view of a worker that
+// verifies signed bundles (advertises bundle/v1), from the seq it reports. Such
+// a worker's heartbeat ETag is the signed envelope's, which never equals the
+// legacy wire's ETag the control plane serves, so comparing ETags would show
+// every pinned worker as behind. headSeq is the control plane's newest signed
+// seq (0 = it serves no bundle: nothing to compare, so neither flag is set).
+// A worker without the cap keeps the ETag comparison done by the caller.
+func FlagBundleState(views []dashboard.WorkerView, headSeq int64) {
+	for i := range views {
+		v := &views[i]
+		if !slices.Contains(v.Caps, config.CapBundleV1) {
+			continue
+		}
+		v.Behind = headSeq > 0 && v.BundleSeq < headSeq
+		v.BundleSeqAhead = headSeq > 0 && v.BundleSeq > headSeq
+	}
 }
 
 // FlagNoGroupPolicy sets NoGroupPolicy on every view whose caps lack
@@ -215,6 +278,14 @@ func (r *WorkerRegistry) Views() []dashboard.WorkerView {
 			Online:          now.Sub(w.lastSeen) < staleAfter,
 			AuthKind:        string(w.authKind),
 			TokenName:       w.tokenName,
+
+			BundleSeq:        w.bundle.Seq,
+			BundleKID:        w.bundle.KID,
+			BundleIssuedAt:   w.bundle.IssuedAt,
+			PinnedKIDs:       append([]string(nil), w.bundle.PinnedKIDs...),
+			BundleStale:      w.bundle.Stale,
+			LastRejectReason: w.bundle.RejectReason,
+			LastRejectAt:     w.bundle.RejectAt,
 		}
 		if w.authKind == KindCert {
 			v.CertSerial = w.certSerial

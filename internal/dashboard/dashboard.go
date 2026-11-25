@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -75,6 +76,7 @@ type Server struct {
 	liveSettings   func() *config.SettingsWire
 	settingsWriter func(context.Context, config.SettingsWire, WriteMeta) error
 	workersFn      func() []WorkerView // nil = no fleet worker registry
+	bundlesServed  func() bool         // nil = the control plane serves no signed bundles
 	// workerTokens serves the worker token admin routes; nil = they answer 404
 	// (a worker, or a control plane without a state dir).
 	workerTokens WorkerTokenAdmin
@@ -304,6 +306,34 @@ type WorkerView struct {
 	// validated by the control plane and empty for a worker that reports none.
 	AgentID      string `json:"agentID,omitempty"`
 	IdentityMode string `json:"identityMode,omitempty"`
+	// The signed-bundle state the worker's latest heartbeat reported
+	// (W-P2-SBND-05), validated by the control plane. All empty for a worker
+	// that sends none (no pins, or an old worker). BundleSeq is the seq of the
+	// bundle it enforces; PinnedKIDs the key ids it trusts; LastRejectReason
+	// (a closed set) and LastRejectAt describe its newest rejection since its
+	// last apply. Behind then compares BundleSeq with the control plane's head
+	// seq, and BundleSeqAhead is set when the worker reports a seq above it
+	// (the control plane was restored to an older state).
+	BundleSeq        int64    `json:"bundleSeq,omitempty"`
+	BundleKID        string   `json:"bundleKid,omitempty"`
+	BundleIssuedAt   string   `json:"bundleIssuedAt,omitempty"`
+	PinnedKIDs       []string `json:"pinnedKids,omitempty"`
+	BundleStale      bool     `json:"bundleStale,omitempty"`
+	LastRejectReason string   `json:"lastRejectReason,omitempty"`
+	LastRejectAt     string   `json:"lastRejectAt,omitempty"`
+	BundleSeqAhead   bool     `json:"bundleSeqAhead,omitempty"`
+}
+
+// WorkersMissingBundleCap counts the online workers that do not advertise
+// config.CapBundleV1, so they apply the unsigned wire.
+func WorkersMissingBundleCap(ws []WorkerView) int {
+	n := 0
+	for _, w := range ws {
+		if w.Online && !slices.Contains(w.Caps, config.CapBundleV1) {
+			n++
+		}
+	}
+	return n
 }
 
 // NewServer constructs a dashboard Server. The policy argument is the static
@@ -407,6 +437,13 @@ type roleRequiredResponse struct {
 // and the UI hides the panel.
 func (s *Server) SetWorkers(fn func() []WorkerView) {
 	s.workersFn = fn
+}
+
+// SetBundlesServed tells the dashboard whether the control plane is serving
+// signed bundles. Only then does the setup status count connected workers that
+// do not verify them; without it the count is always 0.
+func (s *Server) SetBundlesServed(fn func() bool) {
+	s.bundlesServed = fn
 }
 
 // SetMCPFleet supplies a per-worker MCP source for the control-plane fleet view:
