@@ -452,14 +452,14 @@ func TestRenewerRetriesAFailedPersist(t *testing.T) {
 	cred, _ := newEnroller(cp, dir, "wet_good", nil).LoadOrEnroll(context.Background())
 	cred.ReceivedAt = clk.Now()
 	src := cpclient.NewSource(cred)
+	// Make every persist fail, even as root: the cert directory becomes a
+	// regular file, so writes under it fail with ENOTDIR.
 	certDir := filepath.Join(dir, "cert")
-	if err := os.Chmod(certDir, 0o500); err != nil {
+	if err := os.Rename(certDir, certDir+".enrolled"); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(certDir, 0o700) })
-	if f, err := os.Create(filepath.Join(certDir, "probe")); err == nil {
-		_ = f.Close()
-		t.Skip("the directory stays writable (running as root): cannot make a persist fail")
+	if err := os.WriteFile(certDir, nil, 0o600); err != nil {
+		t.Fatal(err)
 	}
 	var logs bytes.Buffer
 	r := &cpclient.Renewer{Endpoint: cp.url("/control/renew"), HTTP: http.DefaultClient, Source: src, StateDir: dir, Clock: clk,
@@ -473,7 +473,11 @@ func TestRenewerRetriesAFailedPersist(t *testing.T) {
 	waitFor(t, "the renewed certificate to be installed", func() bool { return src.Current().Serial() != cred.Serial() })
 	renewed := src.Current()
 	waitFor(t, "the persist retry timer", func() bool { return clk.PendingTimers() == 1 })
-	if err := os.Chmod(certDir, 0o700); err != nil {
+	// Heal the directory: the retried persist can now write the renewal.
+	if err := os.Remove(certDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(certDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, "the certificate to reach the disk", func() bool {
