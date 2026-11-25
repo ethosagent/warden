@@ -126,6 +126,15 @@ type StackOptions struct {
 	// endpoint records the reason of a refusal whose client assertion did not
 	// verify (no token_events row exists for it).
 	DebugCP bool
+	// APIKeys turns on console.apiKeys, so wak_ keys can be minted and are
+	// authenticated (and refused) on the admin API: the route-boundary cases.
+	APIKeys bool
+	// WorkerTokens boots the CP with --require-worker-tokens instead of
+	// --require-worker-certs: wwt_ tokens and worker certificates are both
+	// accepted on the worker routes, anything else is refused. The
+	// route-boundary cases need a stack where a wwt_ token has a route of its
+	// own to be refused everywhere else.
+	WorkerTokens bool
 }
 
 // Stack is one running security stack: a control plane booted through
@@ -385,21 +394,22 @@ func (s *Stack) startCP() {
 	ready := make(chan string, 1)
 	ctx, cancel := context.WithCancel(context.Background())
 	p := controlplane.Params{
-		ConfigPath:         cfgPath,
-		CACert:             certFile,
-		CAKey:              keyFile,
-		TLSHost:            "127.0.0.1",
-		StateDir:           stateDir,
-		MaxEvents:          10000,
-		AnalyticsProvider:  "memory",
-		AnalyticsDB:        filepath.Join(dir, "cp-fleet.db"),
-		AlertsDB:           filepath.Join(dir, "cp-alerts.db"),
-		PolicyStore:        "versioned",
-		Bundles:            controlplane.BundlesRequire,
-		RequireWorkerCerts: true,
-		Listener:           ln,
-		Clock:              s.Clock,
-		OnReady:            func(a string) { ready <- a },
+		ConfigPath:          cfgPath,
+		CACert:              certFile,
+		CAKey:               keyFile,
+		TLSHost:             "127.0.0.1",
+		StateDir:            stateDir,
+		MaxEvents:           10000,
+		AnalyticsProvider:   "memory",
+		AnalyticsDB:         filepath.Join(dir, "cp-fleet.db"),
+		AlertsDB:            filepath.Join(dir, "cp-alerts.db"),
+		PolicyStore:         "versioned",
+		Bundles:             controlplane.BundlesRequire,
+		RequireWorkerCerts:  !s.opts.WorkerTokens,
+		RequireWorkerTokens: s.opts.WorkerTokens,
+		Listener:            ln,
+		Clock:               s.Clock,
+		OnReady:             func(a string) { ready <- a },
 		OnServer: func(srv *controlplane.Server) {
 			s.mu.Lock()
 			s.cps = srv
@@ -470,6 +480,10 @@ func (s *Stack) writeWorkerCA(dir string) (chain string) {
 
 func (s *Stack) cpConfig(addr, chain string) string {
 	rate := TokenRateDefault
+	apiKeys := ""
+	if s.opts.APIKeys {
+		apiKeys = "  apiKeys:\n    enabled: true\n"
+	}
 	var b strings.Builder
 	level := "info"
 	if s.opts.DebugCP {
@@ -497,7 +511,7 @@ console:
     viewer: [%[9]s]
   adminAudit:
     enabled: true
-
+%[14]s
 keys:
   enabled: true
 
@@ -508,7 +522,7 @@ workerCA:
   keySource: file
   keyFile: %[12]s
 `, s.opts.IdentityMode, s.Issuer.Issuer(), IdentityAudience, IdentityAZP, ConsoleClientID, consoleSecretEnv,
-		addr, ConsoleAdminGroup, ConsoleViewerGroup, TrustDomain, chain, filepath.Join(s.root, "worker-ca.key"), s.identityExtras())
+		addr, ConsoleAdminGroup, ConsoleViewerGroup, TrustDomain, chain, filepath.Join(s.root, "worker-ca.key"), s.identityExtras(), apiKeys)
 	if len(s.opts.AgentModes) > 0 {
 		b.WriteString("\nagents:\n")
 		ids := make([]string, 0, len(s.opts.AgentModes))

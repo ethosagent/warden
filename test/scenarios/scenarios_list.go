@@ -365,6 +365,10 @@ var All = slices.Concat(
 		{Name: "token_exchange_dashboard_disable", Opts: tokenServiceDashboardOpts(), Run: tokenExchangeDashboardDisable},
 		// The identity client's agent mode (W-P2-RCP-01) against that endpoint.
 		{Name: "identity_agent_exchange", Opts: tokenServiceOpts(), Run: identityAgentExchange},
+		// The token-injecting forwarder (W-P2-RCP-02) in front of a CONNECT worker
+		// against that endpoint: token injected, 407 -> refresh -> retry, rotation
+		// drain, signer window and a disabled agent on /healthz.
+		{Name: "identity_forwarder", Opts: tokenServiceOpts(), Run: identityForwarder},
 		{Name: "token_service_disabled_by_default", Opts: tokenServiceDisabledOpts(), Run: tokenServiceDisabledByDefault},
 		// Admin revocation of token sessions (W-P2-TOKX-07).
 		{Name: "token_session_revoke_one", Opts: tokenLimitsOpts(harness.WithAdminAudit()), Run: tokenSessionRevokeOne},

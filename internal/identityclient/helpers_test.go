@@ -66,6 +66,7 @@ type fakeIdP struct {
 	issuerOverride string
 
 	refreshCalls atomic.Int64
+	downHits     atomic.Int64 // requests answered 503 while down
 	deviceCalls  atomic.Int64
 	tokenDelay   time.Duration
 	lastForm     map[string][]string
@@ -107,6 +108,7 @@ func (p *fakeIdP) isDown(w http.ResponseWriter) bool {
 	down := p.down
 	p.mu.Unlock()
 	if down {
+		p.downHits.Add(1)
 		http.Error(w, markerBody, http.StatusServiceUnavailable)
 	}
 	return down
