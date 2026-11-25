@@ -84,6 +84,7 @@ warden identity login --issuer https://dex.example.com/dex --scopes audience:ser
 warden identity status
 warden identity token
 warden identity logout
+warden identity enroll --agent-id agent-1
 ```
 
 `login` runs the RFC 8628 device-code grant and prints the verification URL and
@@ -93,12 +94,25 @@ thirds of its lifetime; it never prompts. Settings come from flags, the
 `WARDEN_IDENTITY_*` variables, or `identity.yaml` in the user config directory.
 The default client id is `warden-cli` and the default audience `warden`.
 
+**Agent mode.** `warden identity enroll --agent-id ID` writes an Ed25519 key
+(PKCS#8 PEM, `0600`, in a `0700` directory; default
+`<user config dir>/warden/agents/ID.key`) and prints only its public JWK, which
+an operator registers for the agent. With `--agent-id` (or
+`WARDEN_IDENTITY_AGENT_ID`), `token` and `status` exchange the user's ID token
+at the control plane's `POST /oauth2/token` (`--token-endpoint` or
+`WARDEN_IDENTITY_TOKEN_ENDPOINT`, required; `--cp-ca` or `WARDEN_IDENTITY_CP_CA`
+for its TLS CA; `--agent-key-file`; `--subject-token-file` for a `0600` file
+holding the ID token instead of the login cache) and print the Warden token, or
+for `status` its sub, act.sub, cnf.jkt, scope and exp. Without `--agent-id`
+nothing changes.
+
 | Exit code | Meaning |
 |---|---|
 | `0` | Success |
 | `1` | Any other error |
 | `2` | Login is required |
-| `3` | The issuer is unreachable and no valid cached token remains |
+| `3` | The issuer (or, in agent mode, the control plane) is unreachable and no valid token remains |
+| `4` | The control plane refused the agent's token exchange (`invalid_client`, `unauthorized_client`, `invalid_grant`, ...) |
 
 ## Transport
 
