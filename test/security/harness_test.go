@@ -273,7 +273,7 @@ func TestHarness_RunnerIsNotVacuous(t *testing.T) {
 		return Seen(s.Do(tb, s.Worker("agent-a"), Via(TransportConnect, "")))
 	}
 	reached := func(tb testing.TB, s *Stack) Observed {
-		cred := s.UserToken("user-1", []string{"eng"})
+		cred := s.ForgeWarden(tb, s.Agent("agent-a"), "user-1")
 		return Seen(s.Do(tb, s.Worker("agent-a"), Via(TransportConnect, cred)))
 	}
 	for _, c := range []struct {

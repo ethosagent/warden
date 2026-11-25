@@ -405,7 +405,7 @@ type Proxy struct {
 	identityP atomic.Pointer[identityHolder]
 	// warnNoCA / warnTransparentOnly make each startup warning fire once per
 	// process, however often SetIdentity runs.
-	warnNoCA, warnTransparentOnly, warnChallengeTransparent, warnChallengeNoCA sync.Once
+	warnNoCA, warnTransparentOnly, warnChallengeTransparent, warnChallengeNoCA, warnRequireTransparent, warnRequireNoCA sync.Once
 	// identityTimeout overrides identityVerifyTimeout (0 = the const). White-box,
 	// like preambleTimeout: tests shrink it to pin the bound.
 	identityTimeout time.Duration

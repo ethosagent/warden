@@ -161,13 +161,35 @@ func TestWriteSettingsIdentityRejectsInvalid(t *testing.T) {
 		t.Fatal(err)
 	}
 	err = srv.writeSettings(config.SettingsWire{Identity: &config.IdentitySettings{
-		DefaultMode: "require", Issuer: "https://idp.example.com", Audience: "warden",
+		DefaultMode: "enforce", Issuer: "https://idp.example.com", Audience: "warden",
 	}})
-	if err == nil || !strings.Contains(err.Error(), "Phase 2") {
-		t.Fatalf("want a Phase 2 rejection, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "invalid") {
+		t.Fatalf("want an invalid-mode rejection, got %v", err)
 	}
 	after, _ := os.ReadFile(path)
 	if string(after) != string(before) {
 		t.Fatal("a rejected write must leave the file unchanged")
+	}
+}
+
+// TestWriteSettingsIdentityAcceptsRequire: the control plane's write path takes
+// require (W-P2-WBND-03), for the default and for one agent, and the policy it
+// serves carries it to the worker.
+func TestWriteSettingsIdentityAcceptsRequire(t *testing.T) {
+	path := writePolicyFile(t, "api.openai.com")
+	srv := New(Config{PolicyPath: path})
+	err := srv.writeSettings(config.SettingsWire{
+		Identity: &config.IdentitySettings{DefaultMode: "require"},
+		Agents:   []config.AgentSettings{{ID: "agent-a", Identity: "require"}},
+	})
+	if err != nil {
+		t.Fatalf("require must be accepted by the settings write path: %v", err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+	raw, _ := fetchPolicyRaw(t, ts.URL)
+	settings := string(raw["settings"])
+	if !strings.Contains(settings, `"defaultMode":"require"`) || !strings.Contains(settings, `"identity":"require"`) {
+		t.Fatalf("served settings lack require: %s", settings)
 	}
 }

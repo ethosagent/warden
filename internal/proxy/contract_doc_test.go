@@ -169,26 +169,47 @@ func TestContractDocMatchesConstants(t *testing.T) {
 	})
 
 	t.Run("modes", func(t *testing.T) {
-		cfgModes := sortedStrings(config.IdentityModeOff, config.IdentityModeAttribute, config.IdentityModeChallenge)
-		if px := sortedStrings(IdentityModeOff, IdentityModeAttribute, IdentityModeChallenge); !slices.Equal(px, cfgModes) {
+		cfgModes := sortedStrings(config.IdentityModeOff, config.IdentityModeAttribute, config.IdentityModeChallenge, config.IdentityModeRequire)
+		if px := sortedStrings(IdentityModeOff, IdentityModeAttribute, IdentityModeChallenge, IdentityModeRequire); !slices.Equal(px, cfgModes) {
 			t.Fatalf("proxy modes %v differ from config modes %v", px, cfgModes)
 		}
 		got := docTableKeys(t, doc, "### Modes")
 		if !slices.Equal(got, cfgModes) {
 			t.Errorf("doc modes = %v, want exactly %v", got, cfgModes)
 		}
-		// Every documented mode must pass config validation, and require (the
-		// Phase 2 mode the doc says is rejected) must not.
+		// Every documented mode must pass config validation; require parses (a
+		// control plane writes it) but a standalone worker refuses it.
 		for _, m := range got {
 			if err := loadIdentityMode(t, m); err != nil {
 				t.Errorf("documented mode %q is rejected by config validation: %v", m, err)
 			}
 		}
-		if loadIdentityMode(t, "require") == nil {
-			t.Error("config accepts require; the doc says it is rejected until Phase 2")
+		if !strings.Contains(doc, "refuses\nto start with `require` in its local YAML") {
+			t.Error("doc no longer says a standalone worker refuses require in its local YAML")
 		}
-		if !strings.Contains(doc, "`require` is rejected") {
-			t.Error("doc no longer says `require` is rejected")
+	})
+
+	// The require 407 and 403s (W-P2-WBND-03): the section names the body keys,
+	// the headers and the three deny reasons the code writes.
+	t.Run("require", func(t *testing.T) {
+		section := doc[strings.Index(doc, "### Require mode"):]
+		section = section[:strings.Index(section, "\n## ")]
+		for _, w := range []string{
+			`"error"`, `"reason"`,
+			string(denyreason.IdentityRequired), string(denyreason.IdentityExpired), string(denyreason.IdentityConflict),
+			string(identity.ReasonUnboundToken), string(identity.ReasonAgentUnregistered), string(identity.ReasonJWKSUnavailable),
+			"Proxy-Authenticate: Basic realm=\"warden\"", "Connection: close", "WWW-Authenticate",
+			config.CapIdentityRequireV1,
+		} {
+			if !strings.Contains(section, w) && !strings.Contains(doc, w) {
+				t.Errorf("the require section does not mention %q", w)
+			}
+		}
+		if got := requireReason(connIdentity{Status: identity.StatusNone}); got != "none" {
+			t.Errorf("requireReason(none) = %q", got)
+		}
+		if got := requireReason(connIdentity{Status: identity.StatusInvalid, Reason: identity.ReasonUnboundToken}); got != string(identity.ReasonUnboundToken) {
+			t.Errorf("requireReason(unbound_token) = %q", got)
 		}
 	})
 

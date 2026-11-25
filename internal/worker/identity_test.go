@@ -129,8 +129,8 @@ func TestSettingsApplierIdentityUnknownMode(t *testing.T) {
 	// A newer control plane serves a mode this build does not know, per agent
 	// and as the default.
 	for name, mut := range map[string]func(*config.SettingsWire){
-		"agent":   func(s *config.SettingsWire) { s.Agents[0].Identity = "require" },
-		"default": func(s *config.SettingsWire) { s.Agents[0].Identity = ""; s.Identity.DefaultMode = "require" },
+		"agent":   func(s *config.SettingsWire) { s.Agents[0].Identity = "enforce" },
+		"default": func(s *config.SettingsWire) { s.Agents[0].Identity = ""; s.Identity.DefaultMode = "enforce" },
 	} {
 		w := identityWire("http://idp.test")
 		mut(w)
@@ -186,7 +186,7 @@ func TestResolveIdentityMode(t *testing.T) {
 		{"nothing configured is off", "", "b", "off"},
 	}
 	for _, tt := range tests {
-		got := resolveIdentityMode(config.IdentitySettings{DefaultMode: tt.def}, agents, tt.id)
+		got, _ := config.EffectiveIdentityMode(tt.id, agents, config.IdentitySettings{DefaultMode: tt.def})
 		if got != tt.want {
 			t.Errorf("%s: got %q, want %q", tt.name, got, tt.want)
 		}

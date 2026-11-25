@@ -313,6 +313,12 @@ func (p *Proxy) handleConn(conn net.Conn) {
 		return
 	}
 
+	// Require mode: no valid Warden token bound to this agent gets a 407 (no
+	// sign-in), before the block-list check, the policy and any dial.
+	if p.requireConnect(conn, ci, domain, port) {
+		return
+	}
+
 	// A blocked user is refused before the policy check, any dial and the 200,
 	// on both the TLS-terminating and the raw-tunnel path.
 	if p.connectBlocked(conn, ci, domain, port) {

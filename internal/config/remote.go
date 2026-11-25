@@ -93,7 +93,7 @@ const CapIdentityChallengeV1 = "identity/challenge-v1"
 // WorkerCaps returns the sorted capabilities this binary implements. Later
 // features append their own constant here.
 func WorkerCaps() []string {
-	caps := []string{CapAgentRegV1, CapBlocklistV1, CapGroupPolicyV1, CapIdentityChallengeV1}
+	caps := []string{CapAgentRegV1, CapBlocklistV1, CapGroupPolicyV1, CapIdentityChallengeV1, CapIdentityRequireV1}
 	sort.Strings(caps)
 	return caps
 }
@@ -108,8 +108,9 @@ func WorkerCaps() []string {
 const CapAgentRegV1 = "agentreg/v1"
 
 // CapIdentityRequireV1 is the capability a worker advertises when it enforces
-// identity require mode (W-P2-WBND-03). No worker advertises it yet; the
-// constant exists so the console and the control plane agree on the literal.
+// identity require mode (W-P2-WBND-03). An old worker ignores a mode it does
+// not know and keeps its previous config, so the control plane uses the cap to
+// tell which workers enforce require.
 const CapIdentityRequireV1 = "identity/require-v1"
 
 // heartbeatBody is the JSON a worker POSTs to /control/heartbeat. It carries no

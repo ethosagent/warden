@@ -457,6 +457,13 @@ var All = slices.Concat(
 		{Name: "identity_boot_distributed_mode", Opts: identityBootOpts(), Run: identityBootDistributedMode},
 		{Name: "identity_boot_distributed_agent", Opts: identityBootOpts(), Run: identityBootDistributedAgent},
 		{Name: "identity_boot_from_cache", Opts: identityBootCacheOpts(), Run: identityBootFromCache},
+		// Identity require mode (W-P2-WBND-03): only the agent's Warden token is
+		// admitted; no token and an IdP token get the 407, a header naming another
+		// subject or agent is a 403 identity_conflict, and a restarted worker
+		// enforces it from its first request.
+		{Name: "identity_require_connect", Opts: identityBootOpts(), Run: identityRequireConnect},
+		{Name: "identity_require_header_conflict", Opts: identityBootOpts(), Run: identityRequireHeaderConflict},
+		{Name: "identity_require_boot", Opts: identityBootOpts(), Run: identityRequireBoot},
 		// Bundle state in the fleet view and the worker's metrics (W-P2-SBND-05):
 		// a pinned worker shows its bundle seq and pins and is not behind; a
 		// tampered bundle shows as a rejection reason with the seq unchanged.
