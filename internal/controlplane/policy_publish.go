@@ -255,6 +255,11 @@ func (s *Server) writeVersioned(ctx context.Context, w versionedWrite) (int64, b
 	if err := s.validateDoc(doc); err != nil {
 		return 0, false, &dashboard.InvalidPolicyError{Err: err}
 	}
+	if doc.Settings != nil {
+		if err := s.checkIssuerCollision(doc.Settings.Identity); err != nil {
+			return 0, false, err
+		}
+	}
 	// A draft holds only the credential fingerprint, so a save that changes the
 	// credential can never be held; refuse it by name instead of turning it into
 	// a draft the Applier would later refuse, or publishing it unreviewed.

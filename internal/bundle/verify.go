@@ -58,7 +58,7 @@ func Verify(raw []byte, pins []keys.JWK, applied State, opt Options) (Verified, 
 		return Verified{}, f.wrap(ErrUnsupportedFormat)
 	}
 	if b.Seq < 1 || b.CPID == "" || len(b.Policy) == 0 || !b.ExpiresAt.After(b.IssuedAt) ||
-		contentSHA256(b.CPID, b.Policy, b.CredentialsSHA256, b.Sections) != b.ContentSHA256 {
+		contentSHA256(b.CPID, b.Policy, b.CredentialsSHA256, b.Sections, b.TokenIssuer) != b.ContentSHA256 {
 		return Verified{}, f.wrap(ErrMalformed)
 	}
 	if opt.Issuer != "" && b.CPID != opt.Issuer {

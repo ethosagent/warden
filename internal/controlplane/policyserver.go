@@ -90,7 +90,11 @@ const (
 	// changed while the served policy did not; publishReasonRestore marks the
 	// row --bundle-seq-floor appends.
 	publishReasonTokenJWKS = "token_jwks"
-	publishReasonRestore   = "restore"
+	// publishReasonTokenIssuer marks a row appended because the signed token
+	// issuer changed (tokenService.issuer edited, or the service switched on
+	// or off) while the served policy did not.
+	publishReasonTokenIssuer = "token_issuer"
+	publishReasonRestore     = "restore"
 )
 
 // wireOverlay merges serve-time data into the served wire: data that must reach
