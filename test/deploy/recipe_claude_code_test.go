@@ -88,7 +88,14 @@ func renderRecipe(t *testing.T, extraEnv ...string) ([]byte, recipeCompose) {
 		"-f", "docker-compose.claude-code.yml",
 		"config", "--format", "json")
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), loadEnvFile(t, filepath.Join(dir, "dex", ".env.example"))...)
+	// An explicit environment, not the process's: only what the docker CLI needs
+	// to run, so the render never depends on the caller's exported variables.
+	for _, k := range []string{"PATH", "HOME", "DOCKER_HOST", "DOCKER_CONFIG", "XDG_RUNTIME_DIR"} {
+		if v := os.Getenv(k); v != "" {
+			cmd.Env = append(cmd.Env, k+"="+v)
+		}
+	}
+	cmd.Env = append(cmd.Env, loadEnvFile(t, filepath.Join(dir, "dex", ".env.example"))...)
 	cmd.Env = append(cmd.Env, extraEnv...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
