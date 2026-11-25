@@ -412,7 +412,19 @@ func TestAPIKeyFailuresAreUniform(t *testing.T) {
 	if err := e.store.Revoke(context.Background(), rid, "test"); err != nil {
 		t.Fatal(err)
 	}
-	wrong := tok[:len(tok)-2] + "aa"
+	// Change the first secret character to a different base32 one: always a
+	// well-formed key with the right id and a wrong secret. (Overwriting the
+	// tail with "aa" was a no-op for the 1 in 64 keys that already end in "aa",
+	// since the last character is always 'a' or 'q'.)
+	sec := len("wak_") + 16 + 1
+	sub := byte('a')
+	if tok[sec] == 'a' {
+		sub = 'b'
+	}
+	wrong := tok[:sec] + string(sub) + tok[sec+1:]
+	if wrong == tok {
+		t.Fatal("the bad-secret key equals the real one")
+	}
 	unknown := "wak_" + strings.Repeat("f", 16) + tok[len("wak_")+16:]
 	cases := map[string]string{"malformed": "wak_nope", "unknown": unknown, "bad_secret": wrong, "revoked": revoked}
 	var first string

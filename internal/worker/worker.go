@@ -1104,6 +1104,9 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		go heartbeatControlPlane(ctx, clk, controlPlane, pol.ControlPlane.HeartbeatInterval, logger)
 		if pol.ControlPlane.BundleVerification() {
 			go enforceBundleExpiry(ctx, clk, controlPlane, applyEv, logger)
+			if metrics != nil {
+				go reportBundleMetrics(ctx, clk, controlPlane, metrics)
+			}
 		}
 	}
 	if syncWorker != nil {

@@ -349,6 +349,16 @@ func etagFor(wire policyWire) string {
 	return hex.EncodeToString(sum[:8]) // 16 hex chars
 }
 
+// bundleHeadSeq is the seq of the newest signed bundle the control plane
+// serves, 0 when it serves none (bundles off, or nothing signed yet).
+func (ps *policyServer) bundleHeadSeq() int64 {
+	b, _ := ps.watch.bundleSnapshot()
+	if b == nil {
+		return 0
+	}
+	return b.seq
+}
+
 // currentETag returns the ETag of the policy currently served (for the dashboard
 // "version behind" hint). Empty until the first successful load.
 func (ps *policyServer) currentETag() string {

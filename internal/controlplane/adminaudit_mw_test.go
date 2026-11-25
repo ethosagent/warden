@@ -108,6 +108,11 @@ func newAuditEnv(t *testing.T, o auditEnvOpts) *auditEnv {
 		t.Fatalf("NewWorkerTokenStore: %v", err)
 	}
 	cfg.WorkerTokens = tokens
+	enroll, err := NewEnrollmentStore(o.db, EnrollmentOptions{Clock: cfg.Clock, Logger: logger})
+	if err != nil {
+		t.Fatalf("NewEnrollmentStore: %v", err)
+	}
+	cfg.Enrollment = enroll
 	if o.apiKeys {
 		reg := newAPIKeyRegistry()
 		ks, err := sqlitestore.New(o.db, sqlitestore.Options{Registry: reg, Clock: cfg.Clock})
@@ -236,6 +241,9 @@ var auditedRequests = map[routeKey]auditedRequest{
 	// The revoke targets the token the create just minted ({tokid}).
 	{http.MethodPost, "/dashboard/api/worker-tokens"}:        {"/dashboard/api/worker-tokens", `{"name":"audit-tok","proxyID":"audit-worker"}`},
 	{http.MethodDelete, "/dashboard/api/worker-tokens/{id}"}: {"/dashboard/api/worker-tokens/{tokid}", ""},
+	// The revoke targets the enrollment token the create just minted ({enrollid}).
+	{http.MethodPost, "/dashboard/api/worker-enrollments"}:        {"/dashboard/api/worker-enrollments", `{"name":"audit-enroll","workerId":"audit-worker"}`},
+	{http.MethodDelete, "/dashboard/api/worker-enrollments/{id}"}: {"/dashboard/api/worker-enrollments/{enrollid}", ""},
 	// Served by the stub certificate admin TestAdminAuditAllAuditedRoutes installs.
 	{http.MethodPost, "/dashboard/api/workers/{id}/revoke"}: {"/dashboard/api/workers/worker-1/revoke", ""},
 	// API keys (W-P2-APIK-03): the create mints the key the {id} revoke removes;
@@ -308,9 +316,9 @@ func TestAdminAuditAllAuditedRoutes(t *testing.T) {
 	e.srv.dash.SetChangeDrafts(stubChanges{})
 	e.srv.dash.SetWorkerCertAdmin(stubWorkerCerts{})
 	admin := e.session(t, groupAdmin)
-	hashed := map[string]bool{"policy": true, "settings": true, "integrations": true, "detection": true, "llmproviders": true, "worker_tokens": true, "blocked_users": true, "agents": true, "api_keys": true, "token_sessions": true}
+	hashed := map[string]bool{"policy": true, "settings": true, "integrations": true, "detection": true, "llmproviders": true, "worker_tokens": true, "worker_enrollments": true, "blocked_users": true, "agents": true, "api_keys": true, "token_sessions": true}
 	routes := allAuditedRoutes()
-	var tokID, keyID string
+	var tokID, enrollID, keyID string
 	if len(routes) != len(auditedRequests) {
 		t.Fatalf("%d audited routes but %d test requests; add the new route to auditedRequests", len(routes), len(auditedRequests))
 	}
@@ -322,6 +330,7 @@ func TestAdminAuditAllAuditedRoutes(t *testing.T) {
 		row := auditRow(k)
 		before := len(e.rec.inputs())
 		req.target = strings.ReplaceAll(req.target, "{tokid}", tokID)
+		req.target = strings.ReplaceAll(req.target, "{enrollid}", enrollID)
 		if strings.Contains(req.target, "{sid}") {
 			sid, err := e.srv.cfg.TokenEdge.Sessions.Touch(context.Background(), tokensvc.SessionKey{IdPIss: "https://idp", Sub: "u9", AgentID: "audit-agent"},
 				e.srv.cfg.Clock.Now(), e.srv.cfg.Clock.Now(), tokensvc.SessionPolicy{Idle: time.Hour, Absolute: time.Hour}, "wts_audit")
@@ -356,6 +365,13 @@ func TestAdminAuditAllAuditedRoutes(t *testing.T) {
 				t.Fatalf("worker token create body has no id: %v", err)
 			}
 			tokID = made.ID
+		}
+		if k.Method == http.MethodPost && k.Path == "/dashboard/api/worker-enrollments" {
+			var made struct{ ID string }
+			if err := json.Unmarshal(rec.Body.Bytes(), &made); err != nil || made.ID == "" {
+				t.Fatalf("enrollment token create body has no id: %v", err)
+			}
+			enrollID = made.ID
 		}
 		rows := e.rec.inputs()
 		if len(rows) != before+1 {
