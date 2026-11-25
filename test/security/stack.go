@@ -93,6 +93,15 @@ type StackOptions struct {
 	// DefaultTokenRate keeps tokenService.rateLimit at the production defaults
 	// instead of the raised harness limit (the rate-limit case needs it).
 	DefaultTokenRate bool
+	// APIKeys turns on console.apiKeys, so wak_ keys can be minted and are
+	// authenticated (and refused) on the admin API: the route-boundary cases.
+	APIKeys bool
+	// WorkerTokens boots the CP with --require-worker-tokens instead of
+	// --require-worker-certs: wwt_ tokens and worker certificates are both
+	// accepted on the worker routes, anything else is refused. The
+	// route-boundary cases need a stack where a wwt_ token has a route of its
+	// own to be refused everywhere else.
+	WorkerTokens bool
 }
 
 // Stack is one running security stack: a control plane booted through
@@ -313,21 +322,22 @@ func (s *Stack) startCP() {
 	ready := make(chan string, 1)
 	ctx, cancel := context.WithCancel(context.Background())
 	p := controlplane.Params{
-		ConfigPath:         cfgPath,
-		CACert:             certFile,
-		CAKey:              keyFile,
-		TLSHost:            "127.0.0.1",
-		StateDir:           stateDir,
-		MaxEvents:          10000,
-		AnalyticsProvider:  "memory",
-		AnalyticsDB:        filepath.Join(dir, "cp-fleet.db"),
-		AlertsDB:           filepath.Join(dir, "cp-alerts.db"),
-		PolicyStore:        "versioned",
-		Bundles:            controlplane.BundlesRequire,
-		RequireWorkerCerts: true,
-		Listener:           ln,
-		Clock:              s.Clock,
-		OnReady:            func(a string) { ready <- a },
+		ConfigPath:          cfgPath,
+		CACert:              certFile,
+		CAKey:               keyFile,
+		TLSHost:             "127.0.0.1",
+		StateDir:            stateDir,
+		MaxEvents:           10000,
+		AnalyticsProvider:   "memory",
+		AnalyticsDB:         filepath.Join(dir, "cp-fleet.db"),
+		AlertsDB:            filepath.Join(dir, "cp-alerts.db"),
+		PolicyStore:         "versioned",
+		Bundles:             controlplane.BundlesRequire,
+		RequireWorkerCerts:  !s.opts.WorkerTokens,
+		RequireWorkerTokens: s.opts.WorkerTokens,
+		Listener:            ln,
+		Clock:               s.Clock,
+		OnReady:             func(a string) { ready <- a },
 		OnServer: func(srv *controlplane.Server) {
 			s.mu.Lock()
 			s.cps = srv
@@ -397,6 +407,10 @@ func (s *Stack) writeWorkerCA(dir string) (chain string) {
 
 func (s *Stack) cpConfig(addr, chain string) string {
 	rate := TokenRateDefault
+	apiKeys := ""
+	if s.opts.APIKeys {
+		apiKeys = "  apiKeys:\n    enabled: true\n"
+	}
 	var b strings.Builder
 	b.WriteString("logging:\n  level: info\n  format: json\n\npolicy:\n  allowlist:\n    - domain: " + UpstreamHost + "\n")
 	fmt.Fprintf(&b, `
@@ -420,7 +434,7 @@ console:
     viewer: [%[9]s]
   adminAudit:
     enabled: true
-
+%[13]s
 keys:
   enabled: true
 
@@ -431,7 +445,7 @@ workerCA:
   keySource: file
   keyFile: %[12]s
 `, s.opts.IdentityMode, s.Issuer.Issuer(), IdentityAudience, IdentityAZP, ConsoleClientID, consoleSecretEnv,
-		addr, ConsoleAdminGroup, ConsoleViewerGroup, TrustDomain, chain, filepath.Join(s.root, "worker-ca.key"))
+		addr, ConsoleAdminGroup, ConsoleViewerGroup, TrustDomain, chain, filepath.Join(s.root, "worker-ca.key"), apiKeys)
 	if s.opts.EchoSecretStore {
 		// The echo backend mounts /central/secrets (a route-boundary case
 		// proves a worker certificate never opens it) but it also makes every

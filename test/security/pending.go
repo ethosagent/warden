@@ -83,10 +83,6 @@ var pending = joinPending(
 		CoverBundle("invalid_policy"),
 		CoverRoute("/policy"), CoverRoute("/control/heartbeat"), CoverRoute("/central/ingest"),
 	),
-	// W-P2-SECT-06: CP route boundaries and enrollment.
-	pend(TicketRoutes,
-		CoverRoute("/control/enroll"), CoverRoute("/control/renew"),
-	),
 	// W-P2-SECT-07: degraded and restart modes.
 	pend(TicketDegrade,
 		CoverIdentity("jwks_unavailable"),
