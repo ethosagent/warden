@@ -1,0 +1,14 @@
+# Dev path of docs/recipes/claude-code.md: the sidecar reads the user's ID token
+# from a file on its own volume (written from scripts/dex-token.sh), instead of a
+# device-flow login cache. Merge it as a fourth -f file; it only changes the
+# sidecar's command.
+services:
+  warden-identity:
+    command: !override
+      - identity
+      - forward
+      - "--agent-id=claude-code"
+      - "--listen=0.0.0.0:3128"
+      - "--worker=warden:8080"
+      - "--client-credential-env=WARDEN_FORWARDER_CREDENTIAL"
+      - "--subject-token-file=/data/subject-token"

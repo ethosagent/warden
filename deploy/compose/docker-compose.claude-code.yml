@@ -1,0 +1,219 @@
+# Claude Code behind Warden with a proven user identity (W-P2-RCP-03).
+#
+# Merge it on top of the control-plane and identity recipes:
+#   set -a; . deploy/compose/dex/.env.example; set +a        # dev placeholders
+#   OUT_DIR=deploy/compose/certs ./scripts/gen-certs.sh      # once
+#   docker compose \
+#     -f deploy/compose/docker-compose.control-plane.yml \
+#     -f deploy/compose/docker-compose.identity.yml \
+#     -f deploy/compose/docker-compose.claude-code.yml up -d claude-code
+# The full walkthrough is docs/recipes/claude-code.md.
+#
+# Topology (the files it merges into also run worker-1/2 and agent-1/2; naming
+# the claude-code service in `up` starts only what it needs):
+#
+#   claude-code ──(claude-code-internal, no route out)──► warden-identity :3128
+#   warden-identity ──(cp-net)──► warden :8080 ──(egress)──► api.anthropic.com
+#
+# The agent is on ONE internal: true network, so its only way out is the
+# warden-identity forwarder, which holds the agent key and the user's identity
+# cache, and which only the worker (require mode) accepts tokens from. The worker
+# is NOT on the agent's network: the agent cannot reach it, the control plane,
+# Dex or LDAP directly, and nothing the agent can reach holds a real secret.
+#
+# Secrets: nothing real lives in this file. The worker token and forwarder
+# credential below default to public dev placeholders (like the worker tokens in
+# docker-compose.control-plane.yml); set real values in your shell or a
+# git-ignored deploy/compose/.env. The real Anthropic key is passed to the
+# WORKER only (ANTHROPIC_API_KEY); the agent gets the placeholder.
+#
+# Warden services build from the repo Dockerfile: the published
+# ethosagent/warden image predates the identity subcommands used here.
+
+x-warden-build: &warden-build
+  context: ../..
+  dockerfile: Dockerfile
+
+services:
+  # The base file registers its workers' tokens with the published image; use the
+  # same build as the control plane so the state dir is written by one version.
+  cp-bootstrap:
+    build: *warden-build
+    image: warden-claude-code:local
+
+  # The control plane of this recipe: a versioned policy store, signed bundles
+  # required by workers, signing keys and the token endpoint (configs/
+  # config.cp-served.claude-code.yaml). Worker auth stays the strict per-worker
+  # tokens of docker-compose.control-plane.yml; no shared token exists.
+  control-plane:
+    build: *warden-build
+    image: warden-claude-code:local
+    depends_on:
+      dex:
+        condition: service_healthy
+    environment:
+      - WARDEN_CP_ADMIN_TOKEN=${WARDEN_CP_ADMIN_TOKEN:-dev-cp-admin-token}
+    volumes:
+      - ../../configs/config.cp-served.claude-code.yaml:/etc/warden/config.yaml:ro
+    command:
+      - control-plane
+      - "--config=/etc/warden/config.yaml"
+      - "--state-dir=/data"
+      - "--policy-store=versioned"
+      - "--bundles=require"
+      - "--listen=0.0.0.0:7070"
+      - "--require-worker-tokens"
+      - "--admin-token-env=WARDEN_CP_ADMIN_TOKEN"
+      - "--ca-cert=/etc/warden/certs/proxy-ca.crt"
+      - "--ca-key=/etc/warden/certs/proxy-ca.key"
+      - "--tls-host=control-plane,localhost,127.0.0.1"
+
+  # One-shot: registers the worker token, enrolls the agent key when none
+  # exists, registers the agent, exports the bundle JWKS the worker pins. A
+  # second `up` re-runs it and changes nothing. No network at all.
+  identity-bootstrap:
+    build: *warden-build
+    image: warden-claude-code:local
+    restart: "no"
+    network_mode: none
+    depends_on:
+      cp-bootstrap:
+        condition: service_completed_successfully
+      control-plane:
+        condition: service_started
+    environment:
+      - WARDEN_CLAUDE_CODE_WORKER_TOKEN=${WARDEN_CLAUDE_CODE_WORKER_TOKEN:-wwt_devonlyclaudecodeworkertokennotarealsecretxxxxxxxxxx}
+    volumes:
+      - ./claude-code/bootstrap.sh:/bootstrap.sh:ro
+      - ../../configs/config.cp-served.claude-code.yaml:/etc/warden/config.yaml:ro
+      - cp-data:/cp-data
+      - identity-claude-code:/data
+      # /var/tmp is mode 1777 in the image, so a fresh volume here is writable by
+      # the image's warden user (a fresh volume elsewhere would be root-owned).
+      - claude-code-bundle-keys:/var/tmp
+    entrypoint: ["sh", "/bootstrap.sh"]
+
+  # The worker: require mode for agent claude-code (the CP serves identity:
+  # require for it), bound to that agent with --agent-id, bundle signing key
+  # pinned. It holds the real Anthropic key. It is on cp-net (the sidecar and
+  # the control plane) and egress, NOT on the agent's network.
+  warden:
+    build: *warden-build
+    image: warden-claude-code:local
+    depends_on:
+      control-plane:
+        condition: service_started
+      identity-bootstrap:
+        condition: service_completed_successfully
+    networks: [cp-net, egress]
+    ports:
+      - "127.0.0.1:9094:9090"
+    environment:
+      - WARDEN_WORKER_TOKEN=${WARDEN_CLAUDE_CODE_WORKER_TOKEN:-wwt_devonlyclaudecodeworkertokennotarealsecretxxxxxxxxxx}
+      - WARDEN_ADMIN_TOKEN=${WARDEN_ADMIN_TOKEN:-dev-admin-token}
+      - WARDEN_PROXY_ID=claude-code
+      # The real key lives here and nowhere else. Empty = placeholder only (the
+      # upstream answers 401).
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+    volumes:
+      - ../../configs/config.recipe-claude-code-worker.yaml:/etc/warden/config.yaml:ro
+      - ./certs:/etc/warden/certs:ro
+      - claude-code-bundle-keys:/etc/warden/bundle:ro
+      - claude-code-worker-data:/data
+    command:
+      - run
+      - "--config=/etc/warden/config.yaml"
+      - "--agent-id=claude-code"
+      - "--listen=0.0.0.0:8080"
+      - "--ca-cert=/etc/warden/certs/proxy-ca.crt"
+      - "--ca-key=/etc/warden/certs/proxy-ca.key"
+      - "--admin-listen=0.0.0.0:9090"
+      - "--admin-token-env=WARDEN_ADMIN_TOKEN"
+      - "--db=/data/warden.db"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  # The sidecar: holds the agent key and the user's identity cache (volume
+  # identity-claude-code, which the agent never mounts), exchanges them for a
+  # Warden token at the control plane and injects it into every CONNECT it
+  # forwards to the worker. It listens on both networks, so the listener demands
+  # a credential (--client-credential-env): an anonymous listener on cp-net would
+  # hand any container there (Dex, the other workers) the user's identity. The
+  # WARDEN_IDENTITY_* variables are also what `identity login` reads when run as
+  # `docker compose run --rm warden-identity identity login`.
+  warden-identity:
+    build: *warden-build
+    image: warden-claude-code:local
+    depends_on:
+      identity-bootstrap:
+        condition: service_completed_successfully
+      warden:
+        condition: service_healthy
+    networks: [claude-code-internal, cp-net]
+    environment:
+      - WARDEN_FORWARDER_CREDENTIAL=${WARDEN_FORWARDER_CREDENTIAL:-dev-only-forwarder-credential-change-me}
+      - WARDEN_IDENTITY_ISSUER=http://localhost:5556/dex
+      - WARDEN_IDENTITY_CLIENT_ID=warden-cli
+      - WARDEN_IDENTITY_AUDIENCE=warden
+      - WARDEN_IDENTITY_AGENT_ID=claude-code
+      - WARDEN_IDENTITY_AGENT_KEY_FILE=/data/claude-code.key
+      - WARDEN_IDENTITY_TOKEN_ENDPOINT=https://control-plane:7070/oauth2/token
+      - WARDEN_IDENTITY_CP_CA=/etc/warden/certs/proxy-ca.crt
+      - WARDEN_IDENTITY_CACHE_DIR=/data/cache
+    volumes:
+      # The CA certificate only: the sidecar must never see proxy-ca.key.
+      - ./certs/proxy-ca.crt:/etc/warden/certs/proxy-ca.crt:ro
+      - identity-claude-code:/data
+    command:
+      - identity
+      - forward
+      - "--agent-id=claude-code"
+      - "--listen=0.0.0.0:3128"
+      - "--worker=warden:8080"
+      - "--client-credential-env=WARDEN_FORWARDER_CREDENTIAL"
+
+  # The agent. ONE network, internal: true, so no route to the internet, the
+  # control plane, Dex or LDAP. It mounts no identity volume, no agent key and
+  # not the CA key (only the public CA certificate).
+  claude-code:
+    build:
+      context: ./claude-code
+      dockerfile: Dockerfile
+    image: warden-claude-code-agent:local
+    init: true
+    depends_on:
+      warden-identity:
+        condition: service_started
+    networks: [claude-code-internal]
+    environment:
+      # The forwarder credential gates the sidecar's listener; it is not an
+      # identity or a vendor key. Letters and digits only (it sits in a URL).
+      - HTTPS_PROXY=http://wx:${WARDEN_FORWARDER_CREDENTIAL:-dev-only-forwarder-credential-change-me}@warden-identity:3128
+      - NO_PROXY=localhost,127.0.0.1,::1
+      - NODE_EXTRA_CA_CERTS=/etc/warden/certs/proxy-ca.crt
+      - NODE_USE_ENV_PROXY=1
+      - CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+      - DISABLE_AUTOUPDATER=1
+      - ANTHROPIC_API_KEY=anthropic_secret_001
+    volumes:
+      - ./certs/proxy-ca.crt:/etc/warden/certs/proxy-ca.crt:ro
+      - claude-code-home:/home/agent
+      - claude-code-workspace:/workspace
+
+networks:
+  # The agent's only network: no default route, no host port.
+  claude-code-internal:
+    internal: true
+
+volumes:
+  # Sidecar state: agent key, public JWK, identity cache. Never mounted by the agent.
+  identity-claude-code:
+  # The exported bundle JWKS: written by identity-bootstrap, read-only in the worker.
+  claude-code-bundle-keys:
+  claude-code-worker-data:
+  claude-code-home:
+  claude-code-workspace:
