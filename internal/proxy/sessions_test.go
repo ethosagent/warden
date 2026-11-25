@@ -60,6 +60,10 @@ type rawTunnelEnv struct {
 	p     *Proxy
 	store *syncStore
 	m     *fakeMetrics
+	// dials counts upstream dials; onPath, when set, runs at each dispatch
+	// site's reach (the seam between the CONNECT checks and registration).
+	dials  atomic.Int64
+	onPath atomic.Pointer[func(Path)]
 }
 
 func newRawTunnelEnv(t *testing.T, serve func(net.Conn)) *rawTunnelEnv {
@@ -81,7 +85,13 @@ func newRawTunnelEnv(t *testing.T, serve func(net.Conn)) *rawTunnelEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
+	p.pathHook = func(path Path) {
+		if f := e.onPath.Load(); f != nil {
+			(*f)(path)
+		}
+	}
 	p.dialFunc = func(string, string) (net.Conn, error) {
+		e.dials.Add(1)
 		c, up := net.Pipe()
 		go func() {
 			defer func() { _ = up.Close() }()
@@ -398,6 +408,191 @@ func TestBlocklistMetrics(t *testing.T) {
 	e.m.mu.Unlock()
 	if closed != 2 || entries != 0 {
 		t.Errorf("after unblock: closed = %d entries = %d, want 2 and 0", closed, entries)
+	}
+}
+
+// A block that lands after the CONNECT-time check passed but before the tunnel
+// registers (the 200 is already out) must still cut it. The long-poll apply
+// (Replace, then CloseBlockedSessions) runs entirely inside that window here, so
+// CloseBlockedSessions finds nothing registered: the tunnel's own registration
+// must see the block. Before the fix the tunnel stayed open for good.
+func TestBlockList_BlockBetweenConnectCheckAndRegister(t *testing.T) {
+	e := newRawTunnelEnv(t, func(c net.Conn) { _, _ = io.Copy(io.Discard, c) })
+	var once sync.Once
+	hook := func(path Path) {
+		if path == PathTunnel {
+			once.Do(func() {
+				replaceBlocked(e.p, config.BlockedUser{Sub: "u1"})
+				e.p.CloseBlockedSessions()
+			})
+		}
+	}
+	e.onPath.Store(&hook)
+	conn, br := e.tunnel(t, "tok-u1")
+	assertConnCut(t, conn, br)
+	evs := waitBlockedEvents(t, e.store, 1)
+	if len(evs) != 1 || evs[0].UserSub != "u1" || evs[0].Protocol != "tcp" || evs[0].Domain != "tunnel.test" {
+		t.Fatalf("events = %+v", e.store.snapshot())
+	}
+	if n := e.dials.Load(); n != 0 {
+		t.Errorf("upstream dials = %d, want 0 for a session cut at registration", n)
+	}
+	e.m.mu.Lock()
+	closed := e.m.blocklistClosed
+	e.m.mu.Unlock()
+	if closed != 1 {
+		t.Errorf("sessions closed = %d, want 1", closed)
+	}
+}
+
+// blockAtPath makes the proxy apply a block (Replace, then
+// CloseBlockedSessions) the first time dispatch reaches path: after the
+// CONNECT-time checks and the 200, before the session registers.
+func blockAtPath(e *blockEnv, path Path, users ...config.BlockedUser) {
+	var once sync.Once
+	e.p.pathHook = func(got Path) {
+		if got == path {
+			once.Do(func() { e.applyBlock(users...) })
+		}
+	}
+}
+
+// waitSessionsReleased waits until every registry session is released: the
+// handler that owned it has returned, so its dials and events are final.
+func waitSessionsReleased(t *testing.T, p *Proxy) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		p.sessions.mu.Lock()
+		n := len(p.sessions.all)
+		p.sessions.mu.Unlock()
+		if n == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d sessions still open", n)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// assertNoAllowAfterBlocked fails when an allow event follows the user_blocked
+// one: a session cut at registration must never be dialed and audited.
+func assertNoAllowAfterBlocked(t *testing.T, st *syncStore) {
+	t.Helper()
+	seen := false
+	for _, ev := range st.snapshot() {
+		if ev.Reason == "user_blocked" {
+			seen = true
+		}
+		if seen && ev.Decision == "allow" {
+			t.Fatalf("allow event after user_blocked: %+v", st.snapshot())
+		}
+	}
+	if !seen {
+		t.Fatalf("no user_blocked event: %+v", st.snapshot())
+	}
+}
+
+// The window test for the opaque passthrough a CONNECT takes on a worker with
+// TLS termination when the first byte is not a TLS hello (tls.go handleTLS).
+func TestBlockList_PassthroughBlockBetweenConnectCheckAndRegister(t *testing.T) {
+	e := newBlockEnv(t, IdentityModeAttribute)
+	e.setRaw(func() (net.Conn, error) {
+		c, up := net.Pipe()
+		go func() {
+			defer func() { _ = up.Close() }()
+			_, _ = io.Copy(io.Discard, up)
+		}()
+		return c, nil
+	})
+	blockAtPath(e, PathTunnel, config.BlockedUser{Sub: "u1"})
+	conn, br, status := e.connect("Proxy-Authorization: " + basicAuth("tok-u1") + "\r\n")
+	if !strings.Contains(status, "200") {
+		t.Fatalf("CONNECT status = %q", status)
+	}
+	_, _ = io.WriteString(conn, "G") // not 0x16: passthrough
+	assertConnCut(t, conn, br)
+	evs := waitBlockedEvents(t, e.store, 1)
+	if len(evs) != 1 || evs[0].UserSub != "u1" || evs[0].Protocol != "tcp" || evs[0].Domain != idHost {
+		t.Fatalf("events = %+v", e.store.snapshot())
+	}
+	// The handler has returned: had it dialed, the dial and its allow are in.
+	waitSessionsReleased(t, e.p)
+	// blockEnv.dials counts the wrapped TLS dial; idEnv.dials the raw dial and
+	// the rawTLSUpstream dial.
+	if n := e.dials.Load() + e.idEnv.dials.Load(); n != 0 {
+		t.Errorf("upstream dials = %d, want 0", n)
+	}
+	assertNoAllowAfterBlocked(t, e.store)
+}
+
+// The window test for a raw TLS forward: non-HTTP bytes inside a terminated
+// CONNECT (tls.go, PathRawTLS).
+func TestBlockList_RawTLSBlockBetweenConnectCheckAndRegister(t *testing.T) {
+	e := newBlockEnv(t, IdentityModeAttribute)
+	rawTLSUpstream(e.idEnv)
+	blockAtPath(e, PathRawTLS, config.BlockedUser{Sub: "u1"})
+	conn, br, status := e.connect("Proxy-Authorization: " + basicAuth("tok-u1") + "\r\n")
+	if !strings.Contains(status, "200") {
+		t.Fatalf("CONNECT status = %q", status)
+	}
+	tc := e.tlsOver(conn, br)
+	_, _ = io.WriteString(tc, "\x01\x02\x03\x04 not http at all\n")
+	assertConnCut(t, tc.NetConn(), tc)
+	evs := waitBlockedEvents(t, e.store, 1)
+	if len(evs) != 1 || evs[0].UserSub != "u1" || evs[0].Protocol != "raw" || evs[0].Domain != idHost {
+		t.Fatalf("events = %+v", e.store.snapshot())
+	}
+	// The handler has returned: had it dialed, the dial and its allow are in.
+	waitSessionsReleased(t, e.p)
+	// blockEnv.dials counts the wrapped TLS dial; idEnv.dials the raw dial and
+	// the rawTLSUpstream dial.
+	if n := e.dials.Load() + e.idEnv.dials.Load(); n != 0 {
+		t.Errorf("upstream dials = %d, want 0", n)
+	}
+	assertNoAllowAfterBlocked(t, e.store)
+}
+
+// The same window for every other registration (h1, h2, raw TLS, a header
+// identity bound by blockStage): a bind that runs after the block's
+// CloseBlockedSessions cuts the session itself, with one deny event. A busy
+// HTTP/1 session's in-flight request still completes; its cut waits for
+// endRequest.
+func TestBlockList_BindAfterCloseBlockedSessionsCuts(t *testing.T) {
+	e := newRawTunnelEnv(t, func(net.Conn) {})
+	replaceBlocked(e.p, config.BlockedUser{Email: "u3@corp.com"})
+	e.p.CloseBlockedSessions()
+
+	var idleClosed, busyClosed atomic.Bool
+	idle := e.p.sessions.newSession("http2", "tunnel.test", 443, true, closerFunc(func() error { idleClosed.Store(true); return nil }))
+	defer idle.release()
+	if !idle.bind(connIdentity{Claims: identity.Claims{Sub: "u3", Email: "U3@Corp.com"}}) || !idleClosed.Load() {
+		t.Fatal("a session bound after the block applied was not cut")
+	}
+	busy := e.p.sessions.newSession("https", "tunnel.test", 443, false, closerFunc(func() error { busyClosed.Store(true); return nil }))
+	defer busy.release()
+	busy.beginRequest()
+	if !busy.bind(connIdentity{Claims: identity.Claims{Email: "u3@corp.com"}}) || busyClosed.Load() {
+		t.Fatal("busy HTTP/1 session: want marked for a cut at endRequest, not closed mid-request")
+	}
+	if !busy.endRequest() {
+		t.Error("endRequest did not report the pending cut")
+	}
+	// A user not on the list binds normally.
+	other := e.p.sessions.newSession("https", "tunnel.test", 443, false, closerFunc(func() error { return nil }))
+	defer other.release()
+	if other.bind(connIdentity{Claims: identity.Claims{Sub: "u2"}}) {
+		t.Error("an unblocked user's session was cut")
+	}
+	if n := len(waitBlockedEvents(t, e.store, 2)); n != 2 {
+		t.Errorf("user_blocked events = %d, want 2", n)
+	}
+	e.m.mu.Lock()
+	closed := e.m.blocklistClosed
+	e.m.mu.Unlock()
+	if closed != 2 {
+		t.Errorf("sessions closed = %d, want 2", closed)
 	}
 }
 
