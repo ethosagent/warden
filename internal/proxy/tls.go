@@ -94,9 +94,9 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 		var sess *session
 		if p.trackSession(ci) {
 			sess = p.sessions.newSession("tcp", domain, port, true, clientConn)
-			sess.bind(ci)
+			cut := sess.bind(ci)
 			defer sess.release()
-			if p.refusedAtCreate(sess, ci, domain, port, "tcp") {
+			if p.refusedAtCreate(sess, ci, domain, port, "tcp") || cut {
 				return
 			}
 		}
@@ -223,9 +223,9 @@ func (p *Proxy) terminateAndDispatch(clientConn net.Conn, firstBytes io.Reader, 
 	var sess *session
 	if p.trackSession(ci) {
 		sess = p.sessions.newSession(proto, domain, port, true, tlsConn)
-		sess.bind(ci)
+		cut := sess.bind(ci)
 		defer sess.release()
-		if p.refusedAtCreate(sess, ci, domain, port, proto) {
+		if p.refusedAtCreate(sess, ci, domain, port, proto) || cut {
 			return
 		}
 	}

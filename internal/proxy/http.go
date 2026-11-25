@@ -316,7 +316,7 @@ func (p *Proxy) handleHTTP(clientConn net.Conn, br *bufio.Reader, domain string,
 	var upstream net.Conn
 	var upstreamBR *bufio.Reader
 	sess := p.sessions.newSession(schemeProto(scheme), domain, port, false, clientConn)
-	sess.bind(ci)
+	sess.bindForRequests(ci)
 	defer sess.release()
 	defer func() {
 		if upstream != nil {
