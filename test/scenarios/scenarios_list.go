@@ -464,6 +464,7 @@ var All = slices.Concat(
 		{Name: "identity_require_connect", Opts: identityBootOpts(), Run: identityRequireConnect},
 		{Name: "identity_require_header_conflict", Opts: identityBootOpts(), Run: identityRequireHeaderConflict},
 		{Name: "identity_require_boot", Opts: identityBootOpts(), Run: identityRequireBoot},
+		{Name: "identity_require_session_expiry", Opts: identityBootOpts(), Run: identityRequireSessionExpiry},
 		// Rollout guard (W-P2-WBND-07): a connected worker bound to the agent that
 		// lacks identity/require-v1 makes the require save a 409 naming it; an
 		// admin force goes through and the capable worker enforces.

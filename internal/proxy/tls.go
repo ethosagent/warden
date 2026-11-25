@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/ethosagent/warden/internal/analytics"
+	"github.com/ethosagent/warden/internal/denyreason"
+	"github.com/ethosagent/warden/internal/identity"
 	"github.com/ethosagent/warden/internal/policy"
 	"github.com/ethosagent/warden/internal/protocol"
 )
@@ -95,6 +97,7 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 		if p.trackSession(ci) {
 			sess = p.sessions.newSession("tcp", domain, port, true, clientConn)
 			cut := sess.bind(ci)
+			cut = p.armExpiry(sess, ci, !cut) || cut
 			defer sess.release()
 			if p.refusedAtCreate(sess, ci, domain, port, "tcp") || cut {
 				return
@@ -212,6 +215,15 @@ func (p *Proxy) terminateAndDispatch(clientConn net.Conn, firstBytes io.Reader, 
 		return
 	}
 
+	// Require mode admits only a valid Warden token, and this leg has no request
+	// to carry one: a transparent connection (no CONNECT identity) is refused
+	// here, before any dial.
+	if h := p.identity(); h != nil && h.mode == IdentityModeRequire &&
+		(ci.status() != identity.StatusValid || ci.Claims.TokenType != identity.TokenWarden) {
+		p.storeDeny(ci, domain, port, "tcp", denyreason.IdentityRequired, "")
+		return
+	}
+
 	// Unrecognized protocol inside TLS: raw forwarding.
 	proto := detected.String()
 	if detected == protocol.Unknown {
@@ -224,6 +236,7 @@ func (p *Proxy) terminateAndDispatch(clientConn net.Conn, firstBytes io.Reader, 
 	if p.trackSession(ci) {
 		sess = p.sessions.newSession(proto, domain, port, true, tlsConn)
 		cut := sess.bind(ci)
+		cut = p.armExpiry(sess, ci, !cut) || cut
 		defer sess.release()
 		if p.refusedAtCreate(sess, ci, domain, port, proto) || cut {
 			return

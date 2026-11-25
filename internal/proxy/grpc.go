@@ -57,9 +57,21 @@ func (p *Proxy) handleGRPC(clientConn net.Conn, domain string, port int, d defer
 	sess.bindForRequests(ci)
 	defer sess.release()
 
+	// A per-connection http.Server exists only to deliver GOAWAY: its Shutdown
+	// runs the h2 server's graceful shutdown for this connection alone (ConfigureServer
+	// registers it), which sends GOAWAY, lets in-flight streams finish and then
+	// ends ServeConn. The expiry loop calls it at the token's exp (expiry.go).
+	h2srv := &http2.Server{}
+	shutdown := &http.Server{ReadHeaderTimeout: time.Minute}
+	if http2.ConfigureServer(shutdown, h2srv) == nil {
+		sess.setGraceful(func() { go func() { _ = shutdown.Shutdown(context.Background()) }() })
+	}
+	p.armExpiry(sess, ci, false)
+
 	// ServeConn blocks until the client connection closes and dispatches each
 	// HTTP/2 stream concurrently to the handler.
-	(&http2.Server{}).ServeConn(clientConn, &http2.ServeConnOpts{
+	h2srv.ServeConn(clientConn, &http2.ServeConnOpts{
+		BaseConfig: shutdown,
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			p.serveGRPCStream(w, r, rt, domain, port, d, ci, sess)
 		}),

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/test/fakes"
@@ -177,4 +178,64 @@ func identityRequireBoot(t *testing.T, h *harness.H) {
 	if status, _ := h.ConnectReplyAt(0, challengeTarget, basicAuth("session", good)); status != http.StatusOK {
 		t.Fatalf("first CONNECT with the agent's Warden token after restart = %d, want 200", status)
 	}
+}
+
+// identityRequireSessionExpiry (W-P2-WBND-09): in require mode a held
+// keep-alive session carrying the agent's Warden token is closed when the
+// token's exp passes, with one identity_expired deny event per closed session, and a new
+// request on the spent token is refused. The worker's session expiry loop runs
+// on the harness clock (worker.Overrides.Clock), so the test drives it by
+// condition: it advances the clock until the cut is observed, never by a fixed
+// amount.
+func identityRequireSessionExpiry(t *testing.T, h *harness.H) {
+	good := bootSetup(t, h)
+	enterRequire(t, h)
+	up := h.Upstream(identityHost)
+	client := h.AgentWithProxyTokenAt(0, good)
+	get := func(path string) (int, error) {
+		req, err := http.NewRequest(http.MethodGet, "https://"+identityHost+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return 0, err
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		return resp.StatusCode, nil
+	}
+	if st, err := get("/held"); err != nil || st != http.StatusOK {
+		t.Fatalf("GET with the agent's Warden token = %d %v, want 200", st, err)
+	}
+	served := len(up.Requests())
+	expired := func() int {
+		n := 0
+		for _, e := range h.Events() {
+			if e.Decision == "deny" && e.Reason == "identity_expired" {
+				n++
+			}
+		}
+		return n
+	}
+	h.Eventually("the held session to be closed at the token's exp", func() bool {
+		h.Clock().Advance(time.Minute)
+		return expired() > 0
+	})
+	// One event per closed session: the setup probe's keep-alive (opened under
+	// attribute mode, armed by the flip's sweep) expires with the held one.
+	if n := expired(); n < 1 || n > 2 {
+		t.Errorf("%d identity_expired deny events, want 1 or 2 (the held session, plus the setup probe's keep-alive)", n)
+	}
+	if h.MetricsAvailable() {
+		key := harness.MetricKey("warden.blocked.total", map[string]string{"reason": "identity_expired"})
+		h.Eventually("warden.blocked.total{identity_expired} to count the cut", func() bool { return h.Metrics()[key] >= 1 })
+	}
+	if st, err := get("/spent"); err == nil && st == http.StatusOK {
+		t.Errorf("a request with the spent token = %d, want it refused", st)
+	}
+	if n := len(up.Requests()); n != served {
+		t.Errorf("the upstream saw %d requests after the cut, want none", n-served)
+	}
+	requireNoCredentialsInLogs(t, h, good)
 }

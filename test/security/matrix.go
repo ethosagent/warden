@@ -58,6 +58,10 @@ type Case struct {
 
 	// WantStatus is the HTTP status the attacker must see (0 = not checked).
 	WantStatus int
+	// WantClosed marks a case whose attack is an open connection the worker
+	// closes (the post-apply re-check): there is no reply, so WantStatus stays 0
+	// and the case asserts only the event, metric and upstream sources.
+	WantClosed bool
 	// WantBody, when set, must be contained in the body.
 	WantBody string
 	// WantHeader, when set, must be present on the reply: name -> value (a
@@ -333,7 +337,7 @@ func contains(list []string, v string) bool {
 // a case on the matching path.
 func validateCase(c Case) []string {
 	var bad []string
-	if c.WantStatus == 0 {
+	if c.WantStatus == 0 && !c.WantClosed {
 		bad = append(bad, "WantStatus is not set")
 	}
 	if c.Unverified && (c.WantReason == "" || c.Path != PathToken) {

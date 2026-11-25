@@ -320,6 +320,7 @@ func (p *Proxy) handleHTTP(clientConn net.Conn, br *bufio.Reader, domain string,
 	var upstreamBR *bufio.Reader
 	sess := p.sessions.newSession(schemeProto(scheme), domain, port, false, clientConn)
 	sess.bindForRequests(ci)
+	p.armExpiry(sess, ci, false)
 	defer sess.release()
 	defer func() {
 		if upstream != nil {
@@ -1150,6 +1151,9 @@ func (p *Proxy) dialUpstream(s *requestScope) error {
 	}
 	s.upstream = upstream
 	s.upstreamBR = bufio.NewReader(upstream)
+	// A session cut mid-response (a block, an expired token) must stop the relay
+	// from its upstream side too, or a streaming response outlives the cut.
+	s.sess.addCloser(upstream)
 	return nil
 }
 

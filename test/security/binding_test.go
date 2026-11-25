@@ -78,8 +78,8 @@ var unboundWorkerCases = func() []Case {
 
 // rotatedKeyCases: after agent-a's registry key is replaced, a token minted
 // with the old key (whose verify result the worker had cached) is refused with
-// cnf_mismatch on a new CONNECT and on the next request of a tunnel that was
-// already open.
+// cnf_mismatch on a new CONNECT. A tunnel that was already open is closed
+// instead (TestBinding/cnf_rotated_open_tunnel).
 var rotatedKeyCases = func() []Case {
 	rotate := func(t testing.TB, s *Stack) {
 		w := s.Worker("agent-a")
@@ -95,35 +95,7 @@ var rotatedKeyCases = func() []Case {
 		return Seen(s.Do(t, s.Worker("agent-a"), Via(TransportConnect, scratchToken(s, keyTokA))))
 	}
 
-	openTunnel := Case{
-		Name: "the next request of a tunnel opened before the key was rotated out",
-		Path: PathWorker,
-		Setup: func(t testing.TB, s *Stack) {
-			tun := s.OpenTunnel(t, s.Worker("agent-a"), TransportTerminated, scratchToken(s, keyTokA))
-			if tun.Open.Status != http.StatusOK {
-				t.Fatalf("the tunnel did not open: %d %s", tun.Open.Status, tun.Open.Body)
-			}
-			if r := tun.MustGet(t); r.Status != http.StatusOK {
-				t.Fatalf("the warm-up request on the tunnel = %d, want 200", r.Status)
-			}
-			s.Put(keyTunA, tun)
-			rotate(t, s)
-		},
-		Attack: func(t testing.TB, s *Stack) Observed {
-			r, err := s.Get(keyTunA).(*Tunnel).Get(t)
-			if err != nil {
-				t.Fatalf("the open tunnel was closed instead of answered: %v", err)
-			}
-			return Seen(r)
-		},
-		WantStatus:       http.StatusForbidden,
-		WantBody:         "identity_required",
-		WantResult:       "invalid",
-		WantReason:       "cnf_mismatch",
-		WantDeny:         "identity_required",
-		WantUpstreamHits: 0,
-	}
-	return []Case{newConnect, openTunnel}
+	return []Case{newConnect}
 }()
 
 // bindingStack boots a stack with agent-a and agent-b registered and returns
@@ -182,15 +154,43 @@ func TestBinding(t *testing.T) {
 		}
 	})
 
-	// KNOWN LIMIT, pending W-P2-WBND-09 (#270): a raw
-	// tunnel (a worker with no CA) is opaque, so the worker binds it at CONNECT
-	// only and it keeps running after the agent's key is rotated out, until the
-	// token's exp. Require mode's session closing must cut it; when that lands
-	// this test must flip to expect the tunnel closed. That needs #270
-	// (WBND-09): the stack is in require mode since #113, but raw tunnels are
-	// not yet closed. A new CONNECT with the same token is refused, which
-	// proves the cut reached the worker.
-	t.Run("raw_tunnel_known_gap", func(t *testing.T) {
+	// A terminated tunnel opened before the key was rotated out is no longer
+	// answered with a per-request 403: the post-apply re-check (W-P2-WBND-09)
+	// closes it as soon as the rotated bundle lands, as one identity_required
+	// deny event and one invalid/cnf_mismatch verification.
+	t.Run("cnf_rotated_open_tunnel", func(t *testing.T) {
+		s, a, _ := bindingStack(t, StackOptions{})
+		s.PositiveControl(t, "worker", bindingWorkerControl(s))
+		w := s.Worker("agent-a")
+		tun := s.OpenTunnel(t, w, TransportTerminated, scratchToken(s, keyTokA))
+		if tun.Open.Status != http.StatusOK || tun.MustGet(t).Status != http.StatusOK {
+			t.Fatalf("the tunnel did not serve before the rotation: %d", tun.Open.Status)
+		}
+		Run(t, s, "worker", []Case{{
+			Name:   "a tunnel opened before the key was rotated out is closed by the bundle apply",
+			Path:   PathWorker,
+			Covers: []string{CoverIdentity("cnf_mismatch")},
+			Attack: func(t testing.TB, s *Stack) Observed {
+				seq := s.BundleSeq(t, w)
+				s.RotateAgentKey(t, a, fakes.NewAgentKey(t, "agent-a-key-2"), "eng")
+				s.AwaitBundle(t, w, seq)
+				s.Eventually("the open tunnel to be closed by the post-apply re-check", tun.Closed)
+				return Observed{}
+			},
+			WantClosed:       true,
+			WantResult:       "invalid",
+			WantReason:       "cnf_mismatch",
+			WantDeny:         "identity_required",
+			WantUpstreamHits: 0,
+		}})
+	})
+
+	// A raw tunnel (a worker with no CA) is opaque, so the worker binds it at
+	// CONNECT only. Require mode registers it in the session registry (W-P2-WBND-09,
+	// #270) and the post-apply re-check cuts it when the agent's key is rotated
+	// out, instead of leaving it to run until the token's exp. A new CONNECT with
+	// the same token is refused too, which proves the bundle reached the worker.
+	t.Run("raw_tunnel_cut_on_key_rotation", func(t *testing.T) {
 		s, a, _ := bindingStack(t, StackOptions{NoCA: true})
 		s.PositiveControl(t, "worker", func(t *testing.T) {
 			tun := s.OpenTunnel(t, s.Worker("agent-a"), TransportConnect, scratchToken(s, keyTokA))
@@ -212,10 +212,9 @@ func TestBinding(t *testing.T) {
 		s.Run1(t, challenged("cnf_mismatch"), "a new CONNECT with the rotated-out key's token on a worker without a CA", func(t testing.TB, s *Stack) Observed {
 			return Seen(s.Do(t, w, Via(TransportConnect, scratchToken(s, keyTokA))))
 		})
-		if tun.Closed() {
-			t.Error("the raw tunnel was closed after the key rotation: session closing landed: flip this test to expect the cut (needs #270 and a require-mode stack)")
-		} else if r, err := tun.Get(t); err != nil || r.Status != http.StatusOK {
-			t.Errorf("a request on the raw tunnel after the rotation = %v %v, want 200 until the tunnel is cut", r.Status, err)
+		s.Eventually("the open raw tunnel to be closed by the post-apply re-check", tun.Closed)
+		if r, err := tun.Get(t); err == nil && r.Status == http.StatusOK {
+			t.Errorf("a request on the raw tunnel after the key rotation = %d, want the tunnel cut", r.Status)
 		}
 		s.AssertNoLeak(t, LeakCheck{AllowSwapUpTo: s.Upstream.Hits()})
 	})

@@ -515,9 +515,46 @@ Connection: close
   MCP clients; MCP refusals are this plain JSON, with no JSON-RPC body.
 - The block list and the default-deny policy, including identity-scoped entries
   evaluated with the Warden subject, still run after identity passes.
-- Limit: a raw tunnel (no CA) and an upgraded WebSocket are bound at CONNECT or
-  upgrade only. Closing them at token expiry and on a bundle change is
-  W-P2-WBND-09.
+- Binding is **agent match plus key liveness**: the token's `act.sub` is the
+  worker's agent, the agent is active and `cnf.jkt` is a registered key. It is
+  **not** proof of possession; a token is a bearer credential.
+- Dex (IdP) tokens are accepted only in `attribute` and `challenge` mode, never
+  in `require`.
+
+#### Closing sessions at token expiry (W-P2-WBND-09)
+
+A Warden token lasts at most 15 minutes, but a raw tunnel (no CA), an upgraded
+WebSocket, an h2 connection or an idle keep-alive is admitted once and no
+per-request check sees it again. In `require` mode the worker therefore
+registers every such session that carries a verified Warden token in the block
+list's session registry with the token's `exp` and `kid`, and closes it:
+
+| Session | Closed |
+|---|---|
+| Idle HTTP/1 keep-alive | at `exp` (one that is mid-request finishes that request first) |
+| h2 connection | `GOAWAY` at `exp`: in-flight streams finish, new ones are refused; the connection is closed at `exp` plus skew at the latest |
+| Raw tunnel, WebSocket | at `exp` plus `identity.clockSkewSeconds` |
+
+Each closure writes one deny event with reason `identity_expired` and counts
+`warden.blocked.total{reason="identity_expired"}` (the stored event carries
+`identity_status=expired`). A connection is cut at its own CONNECT token's `exp`;
+the client's reconnect then uses the newest token. A session that carries its
+Warden token only in `X-Warden-Identity` (a transparent leg) is armed from the
+first request that resolves to one. An HTTP/1 request still streaming at `exp`
+finishes within the skew and is then force-closed.
+
+After each applied bundle the worker also re-checks every armed
+session against the bundle now in force and closes those whose binding no longer
+holds: the signing key left the token JWKS (`unknown_kid`), the agent was
+disabled (`agent_disabled`) or its key removed (`cnf_mismatch`). That closure is
+one `identity_required` deny event whose stored `identity_status` is `invalid`
+and `identity_reason` the check's reason, counted in
+`warden_identity_verify_total`. Sessions opened before the agent moved to
+`require` are swept at the next apply: one holding a Warden token that still
+binds is armed, any other open tunnel, WebSocket or h2 connection is closed.
+While an agent is in attribute mode nothing is armed, so those sessions see no
+change. No v1 header, claim or status changes; this section only adds to
+Contract v1.
 
 ## Agent binding of Warden tokens
 

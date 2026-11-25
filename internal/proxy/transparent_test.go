@@ -62,6 +62,8 @@ type transparentOpts struct {
 	handshakeTimeout time.Duration
 	// identity enables the identity verifier (W-P1-VRFY-02).
 	identity IdentityConfig
+	// cfgEdit edits the Config before New.
+	cfgEdit func(*Config)
 }
 
 // transparentEnv is one transparent-mode world.
@@ -116,6 +118,9 @@ func newTransparentEnv(t *testing.T, o transparentOpts) *transparentEnv {
 
 		TransparentHTTPSListen:    "127.0.0.1:0",
 		UpstreamAllowPrivateCIDRs: o.allowPrivateCIDRs,
+	}
+	if o.cfgEdit != nil {
+		o.cfgEdit(&cfg)
 	}
 	if o.plainHTTP {
 		cfg.TransparentHTTPListen = "127.0.0.1:0"

@@ -909,6 +909,8 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		cfg.Inflight = p.Overrides.Inflight
 		if p.Overrides.Clock != nil {
 			cfg.IdentityClock = p.Overrides.Clock.Now
+			idClk := p.Overrides.Clock
+			cfg.IdentityTimer = func(d time.Duration) proxy.IdentityTimer { return idClk.NewTimer(d) }
 		}
 		cfg.BeforeTerminal = p.Overrides.BeforeTerminal
 	}
@@ -1194,7 +1196,10 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 			applier.ApplyBoot()
 		}
 		logBound()
-		go longPollControlPlane(ctx, clk, controlPlane, applyEv, pol.ControlPlane.LongPollWait, logger, onPolicyApplied(applier.Apply, pxy.CloseBlockedSessions))
+		go longPollControlPlane(ctx, clk, controlPlane, applyEv, pol.ControlPlane.LongPollWait, logger, onPolicyApplied(applier.Apply, func() {
+			pxy.CloseBlockedSessions()
+			pxy.RecheckIdentitySessions()
+		}))
 		go heartbeatControlPlane(ctx, clk, controlPlane, pol.ControlPlane.HeartbeatInterval, logger)
 		if pol.ControlPlane.BundleVerification() {
 			go enforceBundleExpiry(ctx, clk, controlPlane, applyEv, logger)
