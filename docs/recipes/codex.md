@@ -53,7 +53,7 @@ tokens](../control-plane.md#migrating-from-per-worker-tokens): add the `workerCA
 `configs/config.cp-served.codex.yaml`, give the `warden` worker a state volume and
 `controlPlane.enrollment.tokenEnv` in its config, register its enrollment token in `identity-bootstrap`
 (`enroll-token create --worker-id codex`) instead of the token, and switch the control plane to
-`--require-worker-certs`. Operations: [worker certificates runbook](../runbooks/worker-certs.md).
+`--require-worker-certs`. Operations: [worker certificates runbook](../runbooks/worker-certs.md). Always name the `codex` service on `up`: a bare `up` also starts the base `worker-1` and `worker-2`, which are enrollment workers now and fail against this control plane.
 
 ## Prerequisites
 

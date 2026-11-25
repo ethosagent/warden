@@ -42,7 +42,11 @@ services:
       - "--bundles=offer"
 
   cp-pins:
-    image: ethosagent/warden:${WARDEN_VERSION:-0.3.0}
+    # The published image has no `control-plane keys` command: use the build the base file makes.
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: ${WARDEN_IMAGE:-warden-control-plane:local}
     restart: "no"
     network_mode: none
     depends_on:

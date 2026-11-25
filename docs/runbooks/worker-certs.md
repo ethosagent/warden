@@ -174,8 +174,12 @@ last certificate it signed.
 
    ```sh
    warden control-plane ca init --out-dir ./worker-ca --trust-domain warden.local \
-     --state-dir D --config F --force
+     --key-source file --state-dir D --config F --force
    ```
+
+   In the compose recipe the files live in the `cp-ca` volume: run it through
+   `docker compose exec` (or a one-off `run --rm` with `cp-ca` mounted read-write) with
+   `--out-dir /ca`, after copying the old chain aside inside that volume.
 
    (`--force` replaces the stored `ca` key, so stop the control plane first, and
    writes a new root: move `root.key` offline again.)
@@ -204,11 +208,14 @@ has under 30 days left; an expired `previousCertFile` is ignored with a WARN.
   deletes `root.key` right after `ca init`.
 - Nothing in `/policy`, logs or the audit log carries a key, a CSR or a token; the
   fleet API and the console never show an enrollment token or its hash.
-- **Worker roles get no access to the control plane's secrets.** The worker CA's
-  material sits under the reserved `cp/` namespace of the secret store. Give every
-  worker role an explicit IAM deny on `warden/cp/*` and `warden/cp-??????` (with your
-  `secretStore.aws.namePrefix` if you changed it); the policy is in
-  [Reserved `cp/` secret namespace](../control-plane.md#reserved-cp-secret-namespace).
+- **Worker roles get no access to the control plane's secrets.** With `keySource:
+  keys` on AWS the intermediate key is a secret at `<keys.store.aws.namePrefix>ca/<kid>`,
+  by default `warden-cp-keys/ca/...`: it is **not** under `warden/cp/`. Give every
+  worker role an explicit IAM deny on `warden-cp-keys/*` (your `keys.store.aws.namePrefix`
+  if you changed it), as in the worker-role policy under [Signing
+  keys](../control-plane.md#signing-keys-keys). As defense in depth also deny
+  `warden/cp/*` and `warden/cp-??????`, the reserved namespace of the shared secret store
+  ([Reserved `cp/` secret namespace](../control-plane.md#reserved-cp-secret-namespace)).
 - Back up the CA volume or key store with the control plane's state: a lost
   intermediate key means every worker re-enrolls under a new intermediate.
 

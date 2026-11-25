@@ -36,6 +36,13 @@
 # deploy/compose/.env.example); the defaults below are public dev placeholders: set
 # real values anywhere that is not a laptop. Generate one with:
 #   echo wet_$(head -c32 /dev/urandom | base32 | tr -d = | tr A-Z a-z | head -c52)
+# Recovery: a certificate lives 24h (renewed at ~12h), an enrollment token is good for
+# one use and one hour, the CA for one year. If workers cannot enroll any more (stack
+# stopped overnight, first `up` retried after an hour, expired CA), reset with
+#   docker compose -f deploy/compose/docker-compose.control-plane.yml down -v
+# or keep state: mint a new token with `exec control-plane warden control-plane
+# enroll-token create --name w1-2 --worker-id worker-1 --from-env ...` and clear
+# /data/cp/cert/* in that worker's volume (docs/control-plane.md, "Run it").
 # Moving an existing token-based deployment over: docs/control-plane.md,
 # "Migrating from per-worker tokens".
 #

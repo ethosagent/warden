@@ -256,13 +256,34 @@ control plane's state volume; skipped when the files exist, and `root.key` is de
 registers one enrollment token per worker with `warden control-plane enroll-token create --from-env`
 on the state volume (`cp-data`), before the control plane and the workers start. Each worker enrolls
 once with its token, keeps the 24h certificate renewed and persists it under `controlPlane.stateDir`
-(`/data/cp` on its own volume), so a restart or a second `up` neither re-enrolls nor creates a token
-row. The workers share `configs/config.worker.yaml`: `controlPlane.enrollment.tokenEnv` names
+(`/data/cp` on its own volume), so while that certificate is valid a restart or a second `up` neither
+re-enrolls nor creates a token row. The workers share `configs/config.worker.yaml`: `controlPlane.enrollment.tokenEnv` names
 `WARDEN_WORKER_ENROLL_TOKEN`, which each service fills from its own `WARDEN_WORKER_1_ENROLL` or
 `WARDEN_WORKER_2_ENROLL`, and there is no `tokenEnv` and no `WARDEN_CP_TOKEN`. The first run builds
 the image from the repo (the published image predates the worker CA commands). A `wwt_` bearer
 without a client certificate gets `401`. The e2e stack and the other recipes still run on per-worker
 `wwt_` tokens.
+
+**Recovery.** A certificate lives 24h and is renewed at about 12h, an enrollment token is good for one\
+use and one hour, and the CA for one year. A stack left stopped past a certificate's expiry, a first `up`\
+retried after the token's hour, or a CA past its year leaves workers unable to enroll, and `cp-bootstrap`\
+never revives a used or expired token or re-creates an existing CA. Two ways out:
+
+```sh
+# 1. Reset everything (dev data is disposable): new CA, new tokens, new certificates.
+docker compose -f deploy/compose/docker-compose.control-plane.yml down -v
+docker compose -f deploy/compose/docker-compose.control-plane.yml up -d
+
+# 2. Keep the state: mint a new token for the worker, then clear its old certificate.
+docker compose -f deploy/compose/docker-compose.control-plane.yml exec control-plane \
+  warden control-plane enroll-token create --name w1-2 --worker-id worker-1 \
+  --from-env WARDEN_WORKER_1_ENROLL --state-dir /data
+```
+
+For the second way, export a fresh `wet_` value as `WARDEN_WORKER_1_ENROLL` in your shell first (the
+`exec` runs in the container, so pass it with `exec -e WARDEN_WORKER_1_ENROLL`), then remove the worker's old
+pair, `/data/cp/cert/worker-cert.pem` and `worker-key.pem` in its `worker1-data` volume, and run
+`up -d` so the worker restarts with the new value. An expired CA needs way 1.
 
 To use your own values, generate one enrollment token per worker and export it (or put it in a
 git-ignored `deploy/compose/.env`) before `up`:
@@ -2340,6 +2361,9 @@ egress outage: workers keep enforcing the last policy they pulled and reconnect 
      certFile: /etc/warden/worker-ca/intermediate-chain.pem
      keySource: keys
    ```
+
+   Copy `intermediate-chain.pem` from step 1's `--out-dir` (`./worker-ca`) to that `certFile` path
+   on the control plane host.
 
    Keep `--require-worker-tokens` (or `--legacy-token-env`) as it is, and keep `--ca-cert` and
    `--ca-key` (the worker CA needs TLS). The startup line now also shows `worker_ca=enabled` and

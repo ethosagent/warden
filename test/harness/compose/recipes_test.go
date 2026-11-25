@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/ethosagent/warden/internal/config"
 )
 
 // The e2e stack and the single-worker recipes run on per-worker tokens
@@ -266,6 +268,19 @@ func TestControlPlaneRecipeUsesWorkerCerts(t *testing.T) {
 			t.Errorf("cp-bootstrap does not enroll-token create %s from %s", w, v)
 		}
 	}
+	if !strings.Contains(cmd, "rm -f /ca/root.key") {
+		t.Errorf("cp-bootstrap does not delete root.key after ca init: %s", cmd)
+	}
+	for name, svc := range f.Services {
+		if name == "cp-bootstrap" || name == "control-plane" {
+			continue
+		}
+		for _, v := range svc.Volumes {
+			if strings.HasPrefix(v, "cp-ca:") {
+				t.Errorf("%s mounts the worker CA volume: %s", name, v)
+			}
+		}
+	}
 	caVol := func(vols []string) string {
 		for _, v := range vols {
 			if strings.HasPrefix(v, "cp-ca:/ca") {
@@ -324,15 +339,48 @@ func TestWorkerConfigsEnroll(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		text := string(raw)
-		if strings.Contains(text, "WARDEN_CP_TOKEN") || strings.Contains(text, "WARDEN_WORKER_TOKEN") {
-			t.Errorf("%s still names a worker or shared token variable", name)
+		var doc struct {
+			ControlPlane struct {
+				TokenEnv   string `yaml:"tokenEnv"`
+				StateDir   string `yaml:"stateDir"`
+				Enrollment struct {
+					TokenEnv string `yaml:"tokenEnv"`
+				} `yaml:"enrollment"`
+			} `yaml:"controlPlane"`
+			Central struct {
+				TokenEnv string `yaml:"tokenEnv"`
+			} `yaml:"central"`
 		}
-		if n := strings.Count(text, "tokenEnv: WARDEN_WORKER_ENROLL_TOKEN"); n != 1 {
-			t.Errorf("%s: %d enrollment tokenEnv lines, want 1", name, n)
+		if err := yaml.Unmarshal(raw, &doc); err != nil {
+			t.Fatalf("%s: %v", name, err)
 		}
-		if !strings.Contains(text, "  stateDir: /data/cp\n") {
-			t.Errorf("%s: controlPlane.stateDir is not /data/cp", name)
+		if doc.ControlPlane.TokenEnv != "" || doc.Central.TokenEnv != "" {
+			t.Errorf("%s still names a bearer token variable (%q, %q)", name, doc.ControlPlane.TokenEnv, doc.Central.TokenEnv)
+		}
+		if doc.ControlPlane.Enrollment.TokenEnv != "WARDEN_WORKER_ENROLL_TOKEN" {
+			t.Errorf("%s: enrollment.tokenEnv = %q", name, doc.ControlPlane.Enrollment.TokenEnv)
+		}
+		if doc.ControlPlane.StateDir != "/data/cp" {
+			t.Errorf("%s: controlPlane.stateDir = %q, want /data/cp", name, doc.ControlPlane.StateDir)
+		}
+	}
+}
+
+// The control-plane configs the recipe mounts carry a workerCA block that loads
+// and keeps its chain and key in the cp-ca volume (/ca).
+func TestControlPlaneConfigsWorkerCA(t *testing.T) {
+	for _, name := range []string{"config.control-plane.yaml", "config.control-plane.bundles.yaml"} {
+		wc, err := config.LoadWorkerCA("../../../configs/" + name)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if !wc.Enabled || wc.KeySource != config.WorkerCAKeySourceFile {
+			t.Errorf("%s: workerCA = %+v, want enabled with keySource file", name, wc)
+		}
+		for _, f := range []string{wc.CertFile, wc.KeyFile} {
+			if !strings.HasPrefix(f, "/ca/") {
+				t.Errorf("%s: %q is not under /ca", name, f)
+			}
 		}
 	}
 }
