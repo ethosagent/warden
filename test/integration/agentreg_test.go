@@ -296,7 +296,7 @@ controlPlane:
 
 // connect sends one CONNECT through the worker and returns the status and the
 // response body (empty for a 200).
-func connect(addr string) (net.Conn, int, string, error) {
+func rawConnect(addr string) (net.Conn, int, string, error) {
 	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
 	if err != nil {
 		return nil, 0, "", err
@@ -335,7 +335,7 @@ func waitConnect(t *testing.T, addr string, want int, what string) string {
 	deadline := time.Now().Add(agentRegDeadline)
 	last := "no answer"
 	for time.Now().Before(deadline) {
-		conn, status, body, err := connect(addr)
+		conn, status, body, err := rawConnect(addr)
 		if err == nil {
 			_ = conn.Close()
 			if status == want {
@@ -353,7 +353,7 @@ func waitConnect(t *testing.T, addr string, want int, what string) string {
 
 func openTunnel(t *testing.T, addr string) net.Conn {
 	t.Helper()
-	conn, status, body, err := connect(addr)
+	conn, status, body, err := rawConnect(addr)
 	if err != nil || status != http.StatusOK {
 		t.Fatalf("open tunnel: status %d err %v body %q", status, err, body)
 	}
