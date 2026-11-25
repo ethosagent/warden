@@ -53,6 +53,34 @@ func checkApprovalsStartup(cc config.ConsoleConfig, policyStore, stateDir string
 	return nil
 }
 
+// targetAdapter is what the control plane implements for a target other than the
+// policy (W-P2-APPR-08): the Classifier and Applier the approvals Service
+// needs, the emergency apply, and the console's view of a draft's doc.
+type targetAdapter interface {
+	approvals.Classifier
+	approvals.Applier
+	approvals.EmergencyApplier
+	// View is the draft's doc as the console shows it: no key material, no
+	// free text an operator wrote.
+	View(d approvals.Draft) (any, error)
+	// Current is the entity the draft changes as it is now, in the same shape as
+	// View; nil when it does not exist.
+	Current(ctx context.Context, d approvals.Draft) (any, error)
+}
+
+// targetAdapters are the non-policy targets this control plane can hold: the
+// block list and the agent registry, each only when its store exists.
+func (s *Server) targetAdapters() map[approvals.Target]targetAdapter {
+	out := map[approvals.Target]targetAdapter{}
+	if s.blocks != nil {
+		out[approvals.TargetBlockedUsers] = blockTarget{s: s}
+	}
+	if s.agents != nil {
+		out[approvals.TargetAgents] = agentTarget{s: s}
+	}
+	return out
+}
+
 // policyApplier publishes an approved policy draft through Server.publish's
 // path (publish) with expectedHead=base_version, source `approval`
 // and the draft author as the version author. Validation, credential
@@ -198,9 +226,15 @@ func (s *Server) initApprovals() {
 		return
 	}
 	store := sqlstore.New(s.cfg.State.SQL(), s.cfg.Clock.Now, s.cfg.Logger)
+	appliers := map[approvals.Target]approvals.Applier{approvals.TargetPolicy: policyApplier{s: s}}
+	classifiers := map[approvals.Target]approvals.Classifier{}
+	for t, ad := range s.targetAdapters() {
+		appliers[t], classifiers[t] = ad, ad
+	}
 	svc, err := approvals.NewService(approvals.ServiceConfig{
 		Store:         store,
-		Appliers:      map[approvals.Target]approvals.Applier{approvals.TargetPolicy: policyApplier{s: s}},
+		Appliers:      appliers,
+		Classifiers:   classifiers,
 		Redact:        redactDraftDoc,
 		Now:           s.cfg.Clock.Now,
 		DraftTTL:      ac.DraftTTL,

@@ -30,6 +30,7 @@ const (
 	agentActionEnable  = "enable"
 
 	agentOutcomeOK       = "ok"
+	agentOutcomeHeld     = "held" // a widening write held as a draft (W-P2-APPR-08)
 	agentOutcomeInvalid  = "invalid"
 	agentOutcomeNotFound = "not_found"
 	agentOutcomeExists   = "exists"
@@ -127,6 +128,8 @@ type agentRegistryAPI struct {
 	logger  *slog.Logger
 	refresh func()
 	metrics *agentMetrics
+	// srv is the control plane, for the approvals gate (W-P2-APPR-08).
+	srv *Server
 }
 
 var _ dashboard.AgentRegistry = agentRegistryAPI{}
@@ -160,6 +163,17 @@ func (a agentRegistryAPI) Create(ctx context.Context, in dashboard.AgentInput) (
 	// never an authorization input.
 	if p, ok := PrincipalFrom(ctx); ok {
 		ag.OwnerIss, ag.OwnerSub, ag.OwnerEmail = p.Iss, p.Sub, p.Email
+	}
+	// A registration widens access (a new agent with groups and keys), so with
+	// approvals on it is held, unless the id is taken: that refusal needs no
+	// second person.
+	if a.srv != nil && a.srv.gate.Enabled() {
+		if _, err := a.store.Get(ctx, in.ID); err == nil {
+			return dashboard.AgentView{}, a.failed(agentActionCreate, in.ID, agentreg.ErrAlreadyExists)
+		}
+	}
+	if err := a.holdAgent(ctx, agentActionCreate, ag, 0); err != nil {
+		return dashboard.AgentView{}, err
 	}
 	out, err := a.store.Create(ctx, ag, blockActor(ctx))
 	if err != nil {
@@ -197,6 +211,11 @@ func (a agentRegistryAPI) Update(ctx context.Context, id string, revision int64,
 	ag.ID = id
 	ag.OwnerIss, ag.OwnerSub, ag.OwnerEmail = cur.OwnerIss, cur.OwnerSub, cur.OwnerEmail
 	ag.Revision = revision
+	proposed := ag
+	proposed.Status = cur.Status
+	if err := a.holdAgent(ctx, agentActionUpdate, proposed, revision); err != nil {
+		return dashboard.AgentView{}, err
+	}
 	out, err := a.store.Update(ctx, ag, blockActor(ctx))
 	if err != nil {
 		return dashboard.AgentView{}, a.failed(agentActionUpdate, id, err)
@@ -215,6 +234,11 @@ func (a agentRegistryAPI) SetEnabled(ctx context.Context, id string, enabled boo
 	adminaudit.Annotate(ctx, AgentAuditRef(id), map[string]string{adminaudit.DetailOp: action})
 	cur, err := a.current(ctx, action, id, revision)
 	if err != nil {
+		return dashboard.AgentView{}, err
+	}
+	proposed := cur
+	proposed.Status = to
+	if err := a.holdAgent(ctx, action, proposed, revision); err != nil {
 		return dashboard.AgentView{}, err
 	}
 	out, err := a.store.SetStatus(ctx, id, to, revision, blockActor(ctx))
@@ -313,7 +337,7 @@ func (s *Server) wireAgents(dash *dashboard.Server) {
 		dash.SetAgentRegistry(agentRegistryNoState{})
 		return
 	}
-	dash.SetAgentRegistry(agentRegistryAPI{store: s.agents, logger: s.cfg.Logger, refresh: s.refresh, metrics: &s.agentMetrics})
+	dash.SetAgentRegistry(agentRegistryAPI{store: s.agents, logger: s.cfg.Logger, refresh: s.refresh, metrics: &s.agentMetrics, srv: s})
 	s.RegisterStateHasher(AgentAuditTarget, s.agentsStateHash)
 }
 

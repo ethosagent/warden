@@ -5,11 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
+	"time"
 
 	"github.com/ethosagent/warden/internal/adminaudit"
+	"github.com/ethosagent/warden/internal/approvals"
+	"github.com/ethosagent/warden/internal/approvals/adapters/sqlstore"
 	"github.com/ethosagent/warden/internal/cpstate"
 )
 
@@ -62,35 +66,104 @@ func RunBlockAdd(ctx context.Context, stateDir, keyFile string, entry BlockEntry
 // RunBlockRemove deletes the entry id and appends one blocked_users.remove
 // admin audit row. An unknown id returns ErrNotFound and appends nothing. The
 // audit row is appended before the delete, so a failed append deletes nothing.
-func RunBlockRemove(ctx context.Context, stateDir, keyFile, id string, notice io.Writer) error {
+//
+// With approvals enabled on the state dir (W-P2-APPR-08) it removes nothing: a
+// removal widens access, so it creates a pending blocked_users draft authored
+// cli:<os user> and returns its id (draftID non-empty) for a second admin to
+// approve in the console. The entry stays blocked until then.
+func RunBlockRemove(ctx context.Context, stateDir, keyFile, id string, notice io.Writer) (draftID string, err error) {
 	if _, err := os.Stat(filepath.Join(stateDir, adminaudit.StateDBFileName)); err != nil {
-		return fmt.Errorf("blocklist: no control-plane state db in %s: %w", stateDir, err)
+		return "", fmt.Errorf("blocklist: no control-plane state db in %s: %w", stateDir, err)
 	}
 	rec, st, closeAll, err := openBlockCLI(ctx, stateDir, keyFile, notice)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer closeAll()
 	entries, err := st.List(ctx)
 	if err != nil {
-		return err
+		return "", err
 	}
-	found := false
-	for _, e := range entries {
-		if e.ID == id {
-			found = true
+	var entry *BlockEntry
+	for i := range entries {
+		if entries[i].ID == id {
+			entry = &entries[i]
 			break
 		}
 	}
-	if !found {
-		return ErrNotFound
+	if entry == nil {
+		return "", ErrNotFound
+	}
+	meta, found, err := sqlstore.ReadMeta(ctx, st.db.SQL())
+	if err != nil {
+		return "", fmt.Errorf("block remove: cannot tell whether approvals are enabled: %w", err)
+	}
+	if found && meta.Enabled {
+		return holdBlockRemoval(ctx, st, meta, *entry, rec)
 	}
 	if rec != nil {
 		if err := recordBlockAudit(ctx, rec, actionBlockedUsersRemove, id); err != nil {
-			return fmt.Errorf("admin audit: %w; nothing was removed", err)
+			return "", fmt.Errorf("admin audit: %w; nothing was removed", err)
 		}
 	}
-	return st.Remove(ctx, id, adminaudit.CLIActor())
+	return "", st.Remove(ctx, id, adminaudit.CLIActor())
+}
+
+// offlineBlockApplier refuses every apply: the offline CLI only creates drafts,
+// the running control plane applies them.
+type offlineBlockApplier struct{}
+
+func (offlineBlockApplier) Apply(context.Context, approvals.Draft) (int64, error) {
+	return 0, errors.New("blocklist: the offline CLI never applies a draft")
+}
+
+// holdBlockRemoval stores the removal of entry as a pending draft and records
+// its admin audit row. The entry is not touched.
+func holdBlockRemoval(ctx context.Context, st *BlockStore, m sqlstore.Meta, entry BlockEntry, rec adminaudit.Recorder) (string, error) {
+	svc, err := approvals.NewService(approvals.ServiceConfig{
+		Store:         sqlstore.New(st.db.SQL(), time.Now, slog.New(slog.DiscardHandler)),
+		Appliers:      map[approvals.Target]approvals.Applier{approvals.TargetBlockedUsers: offlineBlockApplier{}},
+		Classifiers:   map[approvals.Target]approvals.Classifier{approvals.TargetBlockedUsers: blockTarget{}},
+		Redact:        redactDraftDoc,
+		Now:           time.Now,
+		DraftTTL:      m.DraftTTL,
+		MaxOpenDrafts: m.MaxOpenDrafts,
+	})
+	if err != nil {
+		return "", err
+	}
+	author := approvals.Author{Sub: adminaudit.CLIActor(), Kind: AuthorKindCLI}
+	created, err := svc.CreateTargetDraft(ctx, approvals.TargetDraft{
+		Target: approvals.TargetBlockedUsers, Ref: entry.ID, Doc: blockDraftOf(entry).json(), Author: author,
+		Prov: approvals.Provenance{Source: approvals.SourceCLI, Message: "remove block list entry " + entry.ID},
+	})
+	if err != nil {
+		if errors.Is(err, approvals.ErrTooManyDrafts) {
+			return "", fmt.Errorf("block remove: too many open change drafts (console.approvals.maxOpenDrafts is %d); resolve some first: %w", m.MaxOpenDrafts, err)
+		}
+		return "", err
+	}
+	draft, err := svc.Submit(ctx, created.ID, created.Revision, author.Sub)
+	if err != nil {
+		// Leave nothing half-made: withdraw the draft, as Gate.Hold does.
+		if _, werr := svc.Store().Withdraw(ctx, created.ID, created.Revision, author.Sub); werr != nil {
+			return "", fmt.Errorf("block remove: draft %s could not be submitted (%v) nor withdrawn: %w", created.ID, err, werr)
+		}
+		return "", fmt.Errorf("block remove: could not submit the draft (it was withdrawn): %w", err)
+	}
+	if rec == nil {
+		return draft.ID, nil
+	}
+	if _, err := rec.Record(ctx, adminaudit.Input{
+		Action:    actionBlockedUsersRemove,
+		Target:    auditTargetChangeDraft,
+		TargetRef: "draft:" + draft.ID + "@r" + fmt.Sprint(draft.Revision),
+		Outcome:   adminaudit.OutcomeOK,
+		Details:   map[string]string{adminaudit.DetailOp: "held"},
+	}); err != nil {
+		return draft.ID, fmt.Errorf("draft %s was created but its admin audit row was not appended: %w", draft.ID, err)
+	}
+	return draft.ID, nil
 }
 
 // ListBlockedOffline returns the entries in the state dir, oldest first,
