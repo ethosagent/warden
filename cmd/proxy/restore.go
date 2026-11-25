@@ -25,7 +25,8 @@ func newRestoreCmd() *cobra.Command {
 			"console sessions are cleared and the restore is appended to the admin audit chain as " +
 			"cp.restore. Exits 1 with \"control plane is running\" when a control plane holds the " +
 			"state dir. Restoring an old set can bring back revoked access: re-apply later " +
-			"worker-token revocations, user blocks and policy versions from the shipped admin_audit log.",
+			"worker-token revocations, API-key revocations, user blocks and policy versions from the shipped " +
+			"admin_audit log, or pass --revoke-api-keys to revoke every API key in the restored database.",
 		Args: usageArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			from, _ := cmd.Flags().GetString("from")
@@ -38,9 +39,10 @@ func newRestoreCmd() *cobra.Command {
 			keyFile, _ := cmd.Flags().GetString("admin-audit-key-file")
 			force, _ := cmd.Flags().GetBool("force")
 			newKey, _ := cmd.Flags().GetBool("new-audit-key")
+			revokeKeys, _ := cmd.Flags().GetBool("revoke-api-keys")
 			res, err := controlplane.RunRestore(cmd.Context(), controlplane.RestoreParams{
 				From: from, StateDir: stateDir, AnalyticsDB: analyticsDB, AlertsDB: alertsDB,
-				AuditKeyFile: keyFile, Force: force, NewAuditKey: newKey,
+				AuditKeyFile: keyFile, Force: force, NewAuditKey: newKey, RevokeAPIKeys: revokeKeys,
 			})
 			if err != nil {
 				if errors.Is(err, controlplane.ErrRestoreUnaudited) {
@@ -62,6 +64,7 @@ func newRestoreCmd() *cobra.Command {
 	cmd.Flags().String("admin-audit-key-file", "", "admin audit signing key of the target (default <state-dir>/cp-audit.key)")
 	cmd.Flags().Bool("force", false, "replace existing files in the state dir (they are kept under pre-restore-<ts>/)")
 	cmd.Flags().Bool("new-audit-key", false, "accept a target audit key whose fingerprint differs from the backup's (recorded in the audit row)")
+	cmd.Flags().Bool("revoke-api-keys", false, "revoke every API key in the restored database (keys revoked after the backup came back with it), recording the count in the cp.restore audit row")
 	quiet(cmd)
 	return cmd
 }
@@ -82,8 +85,12 @@ func printRestoreSummary(cmd *cobra.Command, res controlplane.RestoreResult) {
 		}
 		_, _ = fmt.Fprintf(w, "the audit key fingerprint check was skipped (%s)\n", why)
 	}
-	_, _ = fmt.Fprintf(w, "WARNING: worker-token revocations, user blocks and policy versions made after %s "+
-		"are not in this backup; re-apply them from the admin_audit JSON log.\n", res.CreatedAt.UTC().Format(time.RFC3339))
+	_, _ = fmt.Fprintf(w, "WARNING: worker-token revocations, API-key revocations, user blocks and policy versions made after %s "+
+		"are not in this backup; re-apply them from the admin_audit JSON log. "+
+		"A revoked API key comes back active (revoke it again with `warden control-plane api-key revoke`).\n", res.CreatedAt.UTC().Format(time.RFC3339))
+	if res.RevokeAPIKeys {
+		_, _ = fmt.Fprintf(w, "revoked %d API key(s) in the restored database (--revoke-api-keys); owners must create new keys.\n", res.APIKeysRevoked)
+	}
 	if len(res.KeysMissingMaterial) > 0 {
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
 			"WARNING: the restored %s signing keys have no readable key material in %s (a backup set never contains the key store). "+
