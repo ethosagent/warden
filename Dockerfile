@@ -25,6 +25,9 @@ RUN addgroup -S warden && adduser -S warden -G warden
 # A fresh named volume mounted here inherits this ownership, so the non-root
 # warden user can create/open the SQLite file.
 RUN mkdir -p /data && chown warden:warden /data
+# Worker CA directory (the compose recipe's cp-ca volume): same inheritance, so
+# `warden control-plane ca init --out-dir /ca` can write it as the warden user.
+RUN mkdir -p /ca && chown warden:warden /ca
 COPY --from=builder /warden /usr/local/bin/warden
 USER warden
 ENTRYPOINT ["warden"]
