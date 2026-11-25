@@ -229,7 +229,7 @@ func RunRestore(ctx context.Context, p RestoreParams) (RestoreResult, error) {
 	apiKeysRevoked := 0
 	for _, t := range targets {
 		if t.name == restoreCPDB {
-			n, err := prepareRestoredState(ctx, t.stage, p.RevokeAPIKeys)
+			n, err := prepareRestoredState(ctx, t.stage, p.RevokeAPIKeys, p.Clock)
 			if err != nil {
 				return RestoreResult{}, err
 			}
@@ -658,7 +658,7 @@ const RestoreDetailAPIKeysRevoked = "api_keys_revoked"
 // (returning how many it revoked). It opens the file with the full migration
 // list, which also brings an older set's schema up to date, then checkpoints
 // so the file is self-contained before it is renamed into place.
-func prepareRestoredState(ctx context.Context, staged string, revokeKeys bool) (int, error) {
+func prepareRestoredState(ctx context.Context, staged string, revokeKeys bool, clk clock.Clock) (int, error) {
 	db, err := cpstate.Open(ctx, staged, StateMigrations())
 	if err != nil {
 		return 0, fmt.Errorf("prepare restored warden-cp.db: %w", err)
@@ -674,7 +674,7 @@ func prepareRestoredState(ctx context.Context, staged string, revokeKeys bool) (
 	}
 	revoked := 0
 	if revokeKeys {
-		if revoked, err = revokeAPIKeysInState(ctx, db, adminaudit.CLIActor()); err != nil {
+		if revoked, err = revokeAPIKeysInState(ctx, db, adminaudit.CLIActor(), clk); err != nil {
 			return 0, fmt.Errorf("revoke API keys in the restored warden-cp.db: %w", err)
 		}
 	}

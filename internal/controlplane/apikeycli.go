@@ -14,6 +14,7 @@ import (
 	"github.com/ethosagent/warden/internal/adminaudit"
 	"github.com/ethosagent/warden/internal/apikeys"
 	"github.com/ethosagent/warden/internal/apikeys/adapters/sqlitestore"
+	"github.com/ethosagent/warden/internal/clock"
 	"github.com/ethosagent/warden/internal/cpstate"
 )
 
@@ -120,6 +121,14 @@ func (h *apiKeyCLI) revokeID(ctx context.Context, id, actor string) (APIKeyRevok
 	if err := h.store.Revoke(ctx, id, actor); err != nil {
 		return APIKeyRevokeResult{}, err
 	}
+	// Revoke is idempotent and does not say whether it changed the row. If
+	// another process revoked the key between the Get and the Revoke, it holds
+	// that revoker's name: this call changed nothing, so it writes no audit row.
+	if now, err := h.store.Get(ctx, id); err != nil {
+		return APIKeyRevokeResult{}, err
+	} else if now.RevokedBy != actor {
+		return APIKeyRevokeResult{Already: true}, nil
+	}
 	res := APIKeyRevokeResult{Revoked: []string{id}, Audited: h.rec != nil}
 	return res, h.record(ctx, apiKeyAuditRevoke, apiKeyRef(id), map[string]string{
 		adminaudit.DetailOp:        apiKeyOpRevoke,
@@ -141,6 +150,9 @@ func (h *apiKeyCLI) revokeOwner(ctx context.Context, sub, actor string) (APIKeyR
 			issuers[k.OwnerIss] = true
 			ids = append(ids, k.ID)
 		}
+	}
+	if len(keys) == 0 {
+		return APIKeyRevokeResult{}, fmt.Errorf("no API keys for owner %s", sub)
 	}
 	if len(ids) == 0 {
 		return APIKeyRevokeResult{Already: true}, nil
@@ -179,7 +191,7 @@ func (h *apiKeyCLI) revokeOwner(ctx context.Context, sub, actor string) (APIKeyR
 // apiKeyCLI is the open handles of one revoke.
 type apiKeyCLI struct {
 	rec      adminaudit.Recorder
-	store    *sqlitestore.SQLiteStore
+	store    apikeys.Store
 	closeAll func()
 }
 
@@ -257,14 +269,20 @@ func openAPIKeyCLI(ctx context.Context, stateDir, keyFile string, notice io.Writ
 }
 
 // revokeAPIKeysInState revokes every unrevoked key of the database db through
-// the Store, as by, and returns how many it revoked. A database without the
+// the Store, as by on clk (nil: real time), and returns how many it revoked. A database without the
 // api_keys table has none. Restore uses it on the staged copy before the swap.
-func revokeAPIKeysInState(ctx context.Context, db *cpstate.DB, by string) (int, error) {
-	// Applied() lists only what this Open applied, so ask the schema itself.
-	if !tableExists(ctx, db.SQL(), "api_keys") {
+func revokeAPIKeysInState(ctx context.Context, db *cpstate.DB, by string, clk clock.Clock) (int, error) {
+	// Applied() lists only what this Open applied, so ask the schema itself; a
+	// failed query aborts (only "no table" means no keys).
+	var tables int
+	if err := db.SQL().QueryRowContext(ctx,
+		"SELECT count(*) FROM sqlite_master WHERE type='table' AND name='api_keys'").Scan(&tables); err != nil {
+		return 0, fmt.Errorf("look for the api_keys table: %w", err)
+	}
+	if tables == 0 {
 		return 0, nil
 	}
-	st, err := sqlitestore.New(db, sqlitestore.Options{Registry: newAPIKeyRegistry()})
+	st, err := sqlitestore.New(db, sqlitestore.Options{Registry: newAPIKeyRegistry(), Clock: clk})
 	if err != nil {
 		return 0, err
 	}

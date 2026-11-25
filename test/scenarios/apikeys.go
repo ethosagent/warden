@@ -14,6 +14,7 @@ import (
 	"github.com/ethosagent/warden/internal/apikeys/adapters/sqlitestore"
 	"github.com/ethosagent/warden/internal/controlplane"
 	"github.com/ethosagent/warden/internal/cpstate"
+	"github.com/ethosagent/warden/internal/integration"
 	"github.com/ethosagent/warden/test/fakes"
 	"github.com/ethosagent/warden/test/harness"
 )
@@ -53,10 +54,15 @@ func apiKeyOfflineStore(t *testing.T, h *harness.H) *sqlitestore.SQLiteStore {
 
 func mintAPIKey(t *testing.T, st *sqlitestore.SQLiteStore, name string, scopes ...apikeys.Scope) (token, id string) {
 	t.Helper()
+	return mintAPIKeyTTL(t, st, name, 24*time.Hour, scopes...)
+}
+
+func mintAPIKeyTTL(t *testing.T, st *sqlitestore.SQLiteStore, name string, ttl time.Duration, scopes ...apikeys.Scope) (token, id string) {
+	t.Helper()
 	tok, k, err := st.Create(context.Background(), apikeys.CreateParams{
 		Name: name, OwnerIss: "https://idp.scenario", OwnerSub: apiKeyScenarioOwner, OwnerEmail: "owner@example.com",
 		OwnerGroups: []string{harness.ConsoleAdminGroup}, Scopes: scopes,
-		TTL: 24 * time.Hour, MaxTTL: 8760 * time.Hour, MaxActive: 25,
+		TTL: ttl, MaxTTL: 8760 * time.Hour, MaxActive: 25,
 	})
 	if err != nil {
 		t.Fatalf("mint %s: %v", name, err)
@@ -214,6 +220,69 @@ func apiKeyCLIRevoke(t *testing.T, h *harness.H) {
 	}
 	if strings.Contains(h.Logs(), key) || strings.Contains(r.Details, key) {
 		t.Fatal("the API key is in the logs or the audit row")
+	}
+}
+
+// expiringAlerts returns the api_key_expiring alerts in the control plane's
+// alert store.
+func expiringAlerts(h *harness.H) (out []integration.Alert) {
+	for _, a := range h.Alerts() {
+		if strings.HasPrefix(a.DedupKey, "api_key_expiring:") {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// apiKeyExpiryWarning (W-P2-APIK-05): a key created behind the running control
+// plane's back that expires in 6 days becomes exactly one api_key_expiring alert
+// at the job's next hourly tick (proving Run starts the job on the control
+// plane's clock), later ticks do not re-deliver it, and the alert carries the
+// key id and owner but no key material.
+func apiKeyExpiryWarning(t *testing.T, h *harness.H) {
+	st := apiKeyOfflineStore(t, h)
+	tok, id := mintAPIKeyTTL(t, st, "ci", 6*24*time.Hour, "policy:read")
+
+	// The job's timer re-arms on its own goroutine: advance an hour at a time
+	// until the alert exists, never one big Advance.
+	h.Eventually("the hourly scan to raise the alert", func() bool {
+		if len(expiringAlerts(h)) > 0 {
+			return true
+		}
+		h.Clock().Advance(time.Hour)
+		return false
+	})
+	for i := 0; i < 5; i++ { // further ticks: nothing new
+		h.Clock().Advance(time.Hour)
+		time.Sleep(20 * time.Millisecond)
+	}
+	got := expiringAlerts(h)
+	if len(got) != 1 {
+		t.Fatalf("api_key_expiring alerts = %d, want exactly 1: %+v", len(got), got)
+	}
+	a := got[0]
+	if a.DedupKey != "api_key_expiring:"+id || a.Severity != integration.SevMedium || a.Count != 1 {
+		t.Fatalf("alert = %+v, want medium, count 1, dedup api_key_expiring:%s", a, id)
+	}
+	if !strings.Contains(string(a.Evidence), "key_id="+id) || !strings.Contains(string(a.Evidence), "owner@example.com") {
+		t.Errorf("evidence %q lacks the key id or owner email", a.Evidence)
+	}
+	if all := a.Summary + string(a.Evidence); strings.Contains(all, "wak_") || strings.Contains(all, tok) {
+		t.Fatalf("alert carries key material: %q", all)
+	}
+}
+
+// apiKeyExpiryOff: with console.apiKeys off the control plane runs no expiry
+// job, even when the database holds an expiring key.
+func apiKeyExpiryOff(t *testing.T, h *harness.H) {
+	st := apiKeyOfflineStore(t, h) // creates the table behind the control plane's back
+	mintAPIKeyTTL(t, st, "ci", 6*24*time.Hour, "policy:read")
+	for i := 0; i < 6; i++ {
+		h.Clock().Advance(time.Hour)
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := expiringAlerts(h); len(got) != 0 {
+		t.Fatalf("api_key_expiring alerts with api keys off = %+v, want none", got)
 	}
 }
 

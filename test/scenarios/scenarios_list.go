@@ -281,6 +281,8 @@ var All = slices.Concat(
 		// whose scope it holds and never a worker route. In-process only.
 		{Name: "apikey_offline_revoke", Opts: apiKeyOpts(), Run: apiKeyOfflineRevoke},
 		{Name: "apikey_cli_revoke", Opts: apiKeyOpts(), Run: apiKeyCLIRevoke},
+		{Name: "apikey_expiry_warning", Opts: apiKeyOpts(), Run: apiKeyExpiryWarning},
+		{Name: "apikey_expiry_off", Opts: []harness.Option{harness.WithConsoleOIDC(), harness.WithAdminAudit()}, Run: apiKeyExpiryOff},
 		{Name: "apikey_scopes", Opts: apiKeyOpts(), Run: apiKeyScopes},
 		// Scoped API keys (W-P2-APIK-03): a console admin creates a key (the
 		// plaintext once), the key reads, introspects and is refused a write,

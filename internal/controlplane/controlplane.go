@@ -360,6 +360,9 @@ type Server struct {
 	// apiKeyCounts is its outcome counter (nil-safe).
 	apiKeys      *apiKeyAuth
 	apiKeyCounts *apiKeyCounters
+	// apiKeyExpiry remembers which expiring keys the hourly job already warned
+	// about (apikeys_expiry.go).
+	apiKeyExpiry apiKeyExpiryState
 	// findings, when set, receives every Finding instead of the alert pipeline.
 	// Tests inject a fake here.
 	findings FindingPublisher

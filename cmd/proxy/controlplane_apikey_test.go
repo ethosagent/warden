@@ -192,6 +192,9 @@ func TestAPIKeyCLIRevokeOwnerAndRefusals(t *testing.T) {
 	if k, _ := st.Get(context.Background(), b1); !k.RevokedAt.IsZero() {
 		t.Error("bob's key was revoked by an alice revoke")
 	}
+	if _, stderr, code := runAPIKey(t, "revoke", "--owner-sub", "nobody", "--state-dir", cp.stateDir); code != 1 || !strings.Contains(stderr, "no API keys for owner nobody") {
+		t.Errorf("revoke of an unknown owner = %d %q, want 1", code, stderr)
+	}
 	stdout, _, code = runAPIKey(t, "revoke", "--owner-sub", "alice", "--state-dir", cp.stateDir)
 	if code != 0 || !strings.Contains(stdout, "no unrevoked keys") {
 		t.Errorf("repeat owner revoke = %d %q", code, stdout)

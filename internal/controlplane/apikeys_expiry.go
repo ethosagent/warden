@@ -3,6 +3,7 @@ package controlplane
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/ethosagent/warden/internal/apikeys"
@@ -24,10 +25,26 @@ const (
 	apiKeyExpiryWindow = 7 * 24 * time.Hour
 )
 
+// apiKeyExpiryState is the keys the job already warned about, by id, with the
+// expires_at they were reported at. Every publish is delivered to the sinks (the
+// alert manager folds repeats into one stored alert by DedupKey but still
+// notifies each time), so the job publishes a key once, and again only if its
+// expires_at changed. A restart forgets the map and warns once more.
+//
+// The alert itself is auto-resolved by the pipeline's sweep 15 minutes after the
+// publish (integration.DefaultResolveTTL), like every one-shot Finding (key
+// overdue, audit verify failed): the notification is the warning, and the key
+// list shows the expiry for as long as the key lives.
+type apiKeyExpiryState struct {
+	mu       sync.Mutex
+	reported map[string]time.Time
+}
+
 // scanExpiringAPIKeys publishes a Finding for every unrevoked key expiring
-// within the warning window that this process has not reported yet, and returns
-// how many it published. A key revoked or already expired is not listed by the
-// Store's ExpiresBefore filter.
+// within the warning window that was not reported yet (or whose expiry moved)
+// and returns how many it published. A key that left the window is forgotten.
+// A revoked or already expired key is not listed by the Store's ExpiresBefore
+// filter.
 func (s *Server) scanExpiringAPIKeys(ctx context.Context) (int, error) {
 	st := s.cfg.APIKeyStore
 	if st == nil {
@@ -38,10 +55,21 @@ func (s *Server) scanExpiringAPIKeys(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	var fresh []apikeys.Key
+	s.apiKeyExpiry.mu.Lock()
+	next := make(map[string]time.Time, len(keys))
 	for _, k := range keys {
+		next[k.ID] = k.ExpiresAt
+		if at, ok := s.apiKeyExpiry.reported[k.ID]; !ok || !at.Equal(k.ExpiresAt) {
+			fresh = append(fresh, k)
+		}
+	}
+	s.apiKeyExpiry.reported = next
+	s.apiKeyExpiry.mu.Unlock()
+	for _, k := range fresh {
 		s.publishFinding(apiKeyExpiringFinding(k, now))
 	}
-	return len(keys), nil
+	return len(fresh), nil
 }
 
 // apiKeyExpiringFinding is the medium Finding for one expiring key. The owner's
