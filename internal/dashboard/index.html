@@ -1201,6 +1201,28 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
         </div>
       </div>
 
+      <!-- Worker enrollment tokens (W-P2-WCA-08): next to the worker tokens. loadEnrollments hides the card when
+           the API answers 404 (workerCA is off, or this is a worker dashboard). Admin only, like the API. -->
+      <div class="card" id="enr-card" style="margin-bottom:16px; display:none">
+        <div class="card-head"><h3>Worker enrollment tokens</h3><span style="display:flex;align-items:center;gap:8px"><span class="sub" id="enr-status"></span><button data-min-role="admin" class="btn primary sm" id="enr-new" style="display:none" onclick="toggleEnrollForm()">+ New enrollment token</button></span></div>
+        <div class="card-pad">
+          <div class="note" style="margin-bottom:10px">A worker trades a one-time <span class="mono">wet_</span> enrollment token for its certificate. A token is bound to one worker id (single use) or to a worker id prefix (a replica pool, up to 100 uses). It is shown once when created and only its hash is stored.</div>
+          <div class="note" id="enr-cli" style="margin-bottom:10px; display:none">This console has no sign-in (console.auth: none), so enrollment tokens are listed here but created and revoked on the control plane host with <span class="mono">warden control-plane enroll-token create</span> (and <span class="mono">revoke</span>).</div>
+          <div id="enr-form" data-min-role="admin" style="display:none; margin-bottom:12px">
+            <div class="form-row">
+              <div class="field"><label for="enr-name">Name</label><input type="text" id="enr-name" maxlength="64" autocomplete="off" placeholder="e.g. enroll-eu-1" /></div>
+              <div class="field"><label for="enr-kind">Bound to</label><select id="enr-kind"><option value="workerId">one worker id</option><option value="workerIdPrefix">a worker id prefix</option></select></div>
+              <div class="field"><label for="enr-bind">Worker id or prefix</label><input type="text" id="enr-bind" maxlength="127" autocomplete="off" placeholder="e.g. worker-eu-1 or pool-eu-" /></div>
+              <div class="field"><label for="enr-uses">Max uses (prefix only)</label><input type="text" id="enr-uses" maxlength="3" autocomplete="off" placeholder="1" /></div>
+              <div class="field"><label for="enr-exp">Expires in (optional)</label><input type="text" id="enr-exp" maxlength="16" autocomplete="off" placeholder="e.g. 1h" /></div>
+              <div class="field" style="justify-content:flex-end"><button data-min-role="admin" class="btn primary sm" id="enr-create" onclick="createEnrollment()">Create token</button></div>
+            </div>
+          </div>
+          <div id="enr-list"></div>
+          <div id="enr-msg" class="note" style="margin-top:8px; display:none"></div>
+        </div>
+      </div>
+
       <div class="demo-only">
       <div class="kpi-row">
         <div class="card stat"><div class="k"><span class="health-dot" style="background:var(--green)"></span>Online</div><div class="v">—</div><div class="delta"></div></div>
@@ -1447,6 +1469,19 @@ LIMIT 8;</textarea>
     <code class="mono" id="wtok-value" style="display:block;margin:12px 0;padding:8px;word-break:break-all;user-select:all"></code>
     <div style="display:flex;justify-content:flex-end;gap:8px">
       <button type="button" class="btn sm" id="wtok-copy">Copy</button>
+      <button class="btn primary sm" value="close">Close</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- One-time enrollment token dialog (W-P2-WCA-08); showEnrollToken fills it with textContent and clearEnrollToken empties it on close. -->
+<dialog id="enrDialog">
+  <form method="dialog">
+    <h3 style="margin:0 0 6px">Enrollment token created</h3>
+    <div class="note" style="color:var(--amber)"><b>Copy this token now.</b> It is shown only once and cannot be shown again. Anyone holding it can enroll a worker until it is used up, expires or is revoked.</div>
+    <code class="mono" id="enr-value" style="display:block;margin:12px 0;padding:8px;word-break:break-all;user-select:all"></code>
+    <div style="display:flex;justify-content:flex-end;gap:8px">
+      <button type="button" class="btn sm" id="enr-copy">Copy</button>
       <button class="btn primary sm" value="close">Close</button>
     </div>
   </form>
@@ -2124,6 +2159,7 @@ document.querySelectorAll('#actSubtabs button').forEach(b=>{
    ============================================================ */
 async function loadFleet(){
   loadWorkerTokens();
+  loadEnrollments();
   let ws;
   try{ ws=await jget('/dashboard/api/workers'); }catch(e){ ws=[]; }
   ws=Array.isArray(ws)?ws:[];
@@ -2279,6 +2315,124 @@ function clearWorkerToken(){
   if(dlg) dlg.addEventListener('close',clearWorkerToken);
   if(cp) cp.addEventListener('click',async()=>{
     try{ await navigator.clipboard.writeText(document.getElementById('wtok-value').textContent); cp.textContent='Copied'; }
+    catch(e){ cp.textContent='Copy failed: select the token and copy it'; }
+  });
+})();
+
+/* ---------- Worker enrollment tokens (W-P2-WCA-08): GET / POST / DELETE /dashboard/api/worker-enrollments through api() ----------
+   Admin only: the list is rendered for an admin, create and revoke only for an oidc admin (the server enforces
+   it, and answers 403 use_cli in console.auth none). Every value from the server or the operator is put in with
+   textContent (enEl), never as markup. The plaintext token exists only in the 201 body of a create: it goes
+   straight to showEnrollToken, which sets it with textContent, and the dialog's close event empties it. It is
+   never put in storage, a URL, a log or innerHTML, and no later response carries it. */
+function enEl(tag,text,cls){
+  const e=document.createElement(tag);
+  if(text!=null) e.textContent=String(text);
+  if(cls) e.className=cls;
+  return e;
+}
+function enrollStatus(x){
+  if(x.revokedAt) return 'revoked';
+  if(x.expiresAt&&Date.parse(x.expiresAt)<=Date.now()) return 'expired';
+  if(x.uses>=x.maxUses) return 'used up';
+  return 'active';
+}
+function enrollMsg(text){
+  const m=document.getElementById('enr-msg'); m.style.display=text?'':'none'; m.textContent=text||'';
+}
+async function loadEnrollments(){
+  const card=document.getElementById('enr-card'); if(!card) return;
+  await authInit();
+  const list=document.getElementById('enr-list'), st=document.getElementById('enr-status');
+  // Admin only, like the API: any other role never sees the card (a 403 would show it empty).
+  if(authMode==='oidc'&&!roleAllows('admin')){ card.style.display='none'; return; }
+  let r=null, rows=null;
+  try{ r=await api('GET','/dashboard/api/worker-enrollments'); if(r.ok) rows=await r.json(); }catch(e){ rows=null; }
+  if(r&&(r.status===404||r.status===403)){ card.style.display='none'; return; }
+  card.style.display='';
+  const canWrite=authMode==='oidc'&&roleAllows('admin');
+  document.getElementById('enr-new').style.display=canWrite?'':'none';
+  document.getElementById('enr-cli').style.display=authMode==='oidc'?'none':'';
+  if(!canWrite) document.getElementById('enr-form').style.display='none';
+  list.textContent='';
+  if(!Array.isArray(rows)){ list.appendChild(enEl('div','Enrollment tokens unavailable.','note')); st.textContent=''; return; }
+  st.textContent=rows.filter(x=>enrollStatus(x)==='active').length+' active';
+  if(!rows.length){ list.appendChild(enEl('div','No enrollment tokens yet.','note')); return; }
+  const tbl=enEl('table'), head=enEl('tr');
+  ['Name','Bound to','Uses','Status','Created by','Created','Expires',''].forEach(h=>head.appendChild(enEl('th',h)));
+  tbl.appendChild(enEl('thead')).appendChild(head);
+  const body=tbl.appendChild(enEl('tbody'));
+  rows.forEach(x=>{
+    const tr=body.appendChild(enEl('tr'));
+    tr.appendChild(enEl('td')).appendChild(enEl('b',x.name));
+    tr.appendChild(enEl('td',x.workerId?x.workerId:(x.workerIdPrefix||'')+'*','mono'));
+    tr.appendChild(enEl('td',x.uses+'/'+x.maxUses));
+    tr.appendChild(enEl('td',enrollStatus(x)));
+    tr.appendChild(enEl('td',x.createdBy||'—'));
+    tr.appendChild(enEl('td',x.createdAt?relTime(x.createdAt):'—'));
+    tr.appendChild(enEl('td',x.expiresAt||'never'));
+    const act=tr.appendChild(enEl('td')); act.style.textAlign='right';
+    if(canWrite&&!x.revokedAt){
+      const b=enEl('button','Revoke','btn sm enr-revoke'); b.setAttribute('data-min-role','admin'); b.style.color='#ff8098';
+      b.addEventListener('click',()=>revokeEnrollment(x.id,x.name));
+      act.appendChild(b);
+    }
+  });
+  list.appendChild(tbl);
+}
+function toggleEnrollForm(){
+  const f=document.getElementById('enr-form'); f.style.display=f.style.display==='none'?'':'none';
+}
+async function createEnrollment(){
+  const name=document.getElementById('enr-name').value.trim();
+  const kind=document.getElementById('enr-kind').value==='workerIdPrefix'?'workerIdPrefix':'workerId';
+  const bind=document.getElementById('enr-bind').value.trim();
+  const uses=document.getElementById('enr-uses').value.trim();
+  const exp=document.getElementById('enr-exp').value.trim();
+  if(!name||!bind){ enrollMsg('Name and a worker id or prefix are required.'); return; }
+  const body={name:name}; body[kind]=bind;
+  if(uses){
+    if(!/^[0-9]{1,3}$/.test(uses)){ enrollMsg('Max uses must be a number.'); return; }
+    body.maxUses=parseInt(uses,10);
+  }
+  if(exp) body.expiresIn=exp;
+  const btn=document.getElementById('enr-create'); btn.disabled=true;
+  let r=null, d=null;
+  try{ r=await api('POST','/dashboard/api/worker-enrollments',body); if(r.status===201) d=await r.json(); }catch(e){ r=null; d=null; }
+  btn.disabled=false;
+  const tok=d&&d.token; d=null;
+  if(!tok){
+    let why=r?('status '+r.status):'network error';
+    if(r&&r.status!==201){ try{ const e=await r.json(); if(e&&e.error) why=e.error; }catch(x){} }
+    enrollMsg('Create failed: '+why+'.'); return;
+  }
+  enrollMsg('');
+  ['enr-name','enr-bind','enr-uses','enr-exp'].forEach(id=>{ document.getElementById(id).value=''; });
+  document.getElementById('enr-form').style.display='none';
+  showEnrollToken(tok);
+  loadEnrollments();
+}
+async function revokeEnrollment(id,name){
+  if(!window.confirm('Revoke enrollment token "'+name+'"? No worker can enroll with it afterwards; certificates it already issued are not affected.')) return;
+  let r=null;
+  try{ r=await api('DELETE','/dashboard/api/worker-enrollments/'+encodeURIComponent(id)); }catch(e){ r=null; }
+  enrollMsg(r&&r.status===204 ? 'Revoked "'+name+'".' : 'Revoke failed'+(r?(': status '+r.status):'')+'.');
+  loadEnrollments();
+}
+function showEnrollToken(tok){
+  document.getElementById('enr-value').textContent=tok;
+  const dlg=document.getElementById('enrDialog');
+  if(typeof dlg.showModal==='function') dlg.showModal(); else dlg.setAttribute('open','');
+}
+function clearEnrollToken(){
+  document.getElementById('enr-value').textContent='';
+  const b=document.getElementById('enr-copy'); if(b) b.textContent='Copy';
+}
+(function(){
+  const dlg=document.getElementById('enrDialog'), cp=document.getElementById('enr-copy');
+  if(dlg) dlg.addEventListener('close',clearEnrollToken);
+  if(cp) cp.addEventListener('click',async()=>{
+    try{ await navigator.clipboard.writeText(document.getElementById('enr-value').textContent); cp.textContent='Copied'; }
     catch(e){ cp.textContent='Copy failed: select the token and copy it'; }
   });
 })();

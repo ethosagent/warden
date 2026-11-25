@@ -440,6 +440,8 @@ var notVersionedWriteRoutes = map[routeKey]string{
 	{http.MethodPost, "/dashboard/api/token-sessions/revoke"}:       "token session store",
 	{http.MethodPost, "/dashboard/api/token-sessions/{sid}/revoke"}: "token session store",
 	{http.MethodPost, "/dashboard/api/workers/{id}/revoke"}:         "worker certificate store",
+	{http.MethodPost, "/dashboard/api/worker-enrollments"}:          "enrollment token store",
+	{http.MethodDelete, "/dashboard/api/worker-enrollments/{id}"}:   "enrollment token store",
 }
 
 // TestVersionedWritesAreGated walks the authz table: every audited mutating
@@ -516,7 +518,7 @@ func TestVersionedStoreCreateCallers(t *testing.T) {
 	// through Server.writeVersioned.
 	wantCreate := map[string]bool{"policy_publish.go": true, "policycli.go": true, "policystore.go": true}
 	otherCreate := map[string]bool{"auth.go": true, "breakglass.go": true, "workertokens_admin.go": true, "workertokens_cli.go": true,
-		"agents.go": true, "agentcli.go": true, "enrollment_cli.go": true}
+		"agents.go": true, "agentcli.go": true, "enrollment_cli.go": true, "enrollment_admin.go": true}
 	wantPublish := map[string]bool{"policy_publish.go": true, "approvals_apply.go": true}
 	files, err := filepath.Glob("*.go")
 	if err != nil {

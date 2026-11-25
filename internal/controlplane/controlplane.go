@@ -822,6 +822,8 @@ func (s *Server) Handler() http.Handler {
 	s.wireWorkerTokens(dash)
 	// Worker certificate revoke route and its audit hasher (W-P2-WCA-05).
 	s.wireWorkerCerts(dash)
+	// Enrollment token admin routes and their audit hasher (W-P2-WCA-08).
+	s.wireWorkerEnrollments(dash)
 	// Signing key admin routes and their audit hasher (W-P2-KEYS-04).
 	s.wireKeys(dash)
 	// Agent registry admin routes and their audit hasher (W-P2-AREG-02).

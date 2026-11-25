@@ -295,7 +295,8 @@ const APIKeysPath = "/dashboard/api/api-keys"
 // holds, a worker token path (/dashboard/api/worker-tokens/wt_x) becomes
 // /dashboard/api/worker-tokens/{id}, and a block list entry path becomes
 // /dashboard/api/blocked-users/{id}, a worker revoke path becomes
-// /dashboard/api/workers/{id}/revoke, a token session revoke path becomes
+// /dashboard/api/workers/{id}/revoke, an enrollment token path becomes
+// /dashboard/api/worker-enrollments/{id}, a token session revoke path becomes
 // /dashboard/api/token-sessions/{sid}/revoke, an agent path becomes
 // /dashboard/api/agents/{id}[/disable|/enable]; every other path is returned unchanged.
 // The control plane keys its authz table and audit classification on the
@@ -303,6 +304,9 @@ const APIKeysPath = "/dashboard/api/api-keys"
 func RoutePath(p string) string {
 	if _, ok := workerTokenID(p); ok {
 		return workerTokensPath + "/{id}"
+	}
+	if _, ok := workerEnrollmentID(p); ok {
+		return workerEnrollmentsPath + "/{id}"
 	}
 	if _, ok := workerRevokeID(p); ok {
 		return workersPath + "/{id}/revoke"
