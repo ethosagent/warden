@@ -575,7 +575,12 @@ Event fields (on `/dashboard/api/traffic` and in the fleet view):
 The unverified `sub` or `email` of an expired or invalid token is never stored.
 
 Filter by user with `/dashboard/api/traffic?user=<sub or email>` (an exact
-`sub` match or a case-insensitive email match).
+`sub` match or a case-insensitive email match). Filter by agent with
+`/dashboard/api/traffic?act=<agent id>` (an exact `user_act` match; events
+without a Warden token never match). The control plane's fleet store keeps
+`user_act` and `identity_token_type` in the same-named columns; an older fleet
+database gains them, empty, the first time it is opened, and events from older
+workers store empty values.
 
 The worker counts every verification in the metric
 `warden.identity.verify.total{result,reason,token_type}`, exported to Prometheus

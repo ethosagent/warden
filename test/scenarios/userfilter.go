@@ -10,7 +10,7 @@ import (
 	"github.com/ethosagent/warden/test/harness"
 )
 
-// userFilterAPI proves W-P1-VRFY-04 end to end: events carrying identity fields
+// userFilterAPI proves W-P1-VRFY-04 (and, for ?act=, W-P2-WBND-08) end to end: events carrying identity fields
 // (seeded directly; the proxy stamps them with W-P1-VRFY-09) are filtered by
 // ?user= on the worker dashboard and, on the control-plane
 // dashboard (fed through its real ingest endpoint), for both the traffic and analytics APIs. An email in any case, or
@@ -18,7 +18,7 @@ import (
 func userFilterAPI(t *testing.T, h *harness.H) {
 	now := time.Now().UTC()
 	seed := []analytics.Event{
-		{Timestamp: now, Domain: "alice-1.example.com", Port: 443, Protocol: "https", Method: "GET", URL: "https://alice-1.example.com/", Decision: "allow", UserSub: "sub-alice", UserEmail: "alice@corp.example", IdentityStatus: "valid"},
+		{Timestamp: now, Domain: "alice-1.example.com", Port: 443, Protocol: "https", Method: "GET", URL: "https://alice-1.example.com/", Decision: "allow", UserSub: "sub-alice", UserEmail: "alice@corp.example", IdentityStatus: "valid", UserAct: "agent-a", IdentityTokenType: "warden"},
 		{Timestamp: now.Add(time.Second), Domain: "alice-2.example.com", Port: 443, Protocol: "https", Method: "GET", URL: "https://alice-2.example.com/", Decision: "deny", UserSub: "sub-alice", UserEmail: "alice@corp.example", IdentityStatus: "valid"},
 		{Timestamp: now.Add(2 * time.Second), Domain: "bob-1.example.com", Port: 443, Protocol: "https", Method: "GET", URL: "https://bob-1.example.com/", Decision: "allow", UserSub: "sub-bob", UserEmail: "bob@corp.example", IdentityStatus: "valid"},
 	}
@@ -89,6 +89,22 @@ func userFilterAPI(t *testing.T, h *harness.H) {
 		// Same range, different user right after: the cache must not serve alice's figures.
 		if got := requests(v, "bob@corp.example"); got != 1 {
 			t.Errorf("%s analytics user=bob requests = %d, want 1 (cache key must include user)", v.name, got)
+		}
+		// W-P2-WBND-08: ?act= selects the events minted for one agent (the CP
+		// stores user_act through its real ingest); an empty act changes nothing.
+		var byAct []analytics.Event
+		if err := json.Unmarshal(v.get("/dashboard/api/traffic?act=agent-a"), &byAct); err != nil {
+			t.Fatalf("%s: decode act traffic: %v", v.name, err)
+		}
+		if len(byAct) != 1 || byAct[0].Domain != "alice-1.example.com" || byAct[0].UserAct != "agent-a" || byAct[0].IdentityTokenType != "warden" {
+			t.Errorf("%s traffic ?act=agent-a = %+v, want alice-1 with its agent and token type", v.name, byAct)
+		}
+		var emptyAct []analytics.Event
+		if err := json.Unmarshal(v.get("/dashboard/api/traffic?act="), &emptyAct); err != nil {
+			t.Fatalf("%s: decode empty-act traffic: %v", v.name, err)
+		}
+		if len(emptyAct) != 3 {
+			t.Errorf("%s traffic ?act= returned %d events, want all 3", v.name, len(emptyAct))
 		}
 		if got := userDomains(v, "x' OR '1'='1"); len(got) != 0 {
 			t.Errorf("%s traffic with an injection value = %v, want none", v.name, got)
