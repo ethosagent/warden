@@ -351,6 +351,13 @@ stack with a placeholder key:
 | `SSL_CERT_FILE` | `/etc/warden/certs/proxy-ca.crt` | same, for other tools in the container |
 | `OPENAI_API_KEY` | `openai_secret_001` | the placeholder the worker swaps |
 
+## Prove the isolation
+
+`scripts/recipe-isolation.sh codex` brings this stack up from a clean state and proves the
+claims below on the real containers (no route out, no secret in the agent, attribution,
+agent disable). It needs no real key. See
+[Recipe isolation proof](../testing-guide.md#recipe-isolation-proof-claude-code-codex).
+
 ## Threat model
 
 What the recipe stops:

@@ -307,6 +307,13 @@ Code itself.
 | `DISABLE_AUTOUPDATER` | `1` | the version is pinned by the image |
 | `ANTHROPIC_API_KEY` | `anthropic_secret_001` | the placeholder the worker swaps |
 
+## Prove the isolation
+
+`scripts/recipe-isolation.sh claude-code` brings this stack up from a clean state and proves the
+claims below on the real containers (no route out, no secret in the agent, attribution,
+agent disable). It needs no real key. See
+[Recipe isolation proof](../testing-guide.md#recipe-isolation-proof-claude-code-codex).
+
 ## Threat model
 
 What the recipe stops:

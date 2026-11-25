@@ -1,0 +1,20 @@
+# NEGATIVE TEST ONLY (W-P2-RCP-05). Never merge this into a real deployment.
+#
+# Also attaches the recipe's agent to the egress network, which has a route to the
+# internet, so the agent can reach the world without the forwarder. The isolation
+# proof must then fail at direct-egress-blocked; that is how the script's own
+# self-test shows the check can fail:
+#
+#   RECIPE_ISOLATION_COMPOSE_EXTRA=$PWD/deploy/compose/test/recipe-egress-leak.yml \
+#     scripts/recipe-isolation.sh claude-code     # exits non-zero at direct-egress-blocked
+#
+# The file names both agents so one file serves both recipes. The service a recipe
+# does not merge is a never-started stub (it is not named in `up`, and nothing
+# depends on it); it only exists so the merge is valid.
+services:
+  claude-code:
+    image: warden-claude-code-agent:local
+    networks: [egress]
+  codex:
+    image: warden-codex-agent:local
+    networks: [egress]

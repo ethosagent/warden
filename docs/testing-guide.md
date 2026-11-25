@@ -101,6 +101,51 @@ the oracles and the fleet scenarios: `docs/docker-end-to-end.md`. In CI the suit
 `e2e` job: required for `risk:critical` PRs, nightly on `main`, and a gate on every
 release image.
 
+### Recipe isolation proof (Claude Code, Codex)
+
+`scripts/recipe-isolation.sh <claude-code|codex>` proves, on the real containers of an
+identity recipe ([Claude Code](recipes/claude-code.md), [Codex](recipes/codex.md)), that
+the agent has no route out except the forwarder and the worker, holds no identity
+material or real vendor key, and is attributed to the logged-in user. It runs only on
+request and needs no real vendor key (the worker holds a sentinel; the upstream answers
+401):
+
+```sh
+flock /tmp/warden-e2e.lock scripts/recipe-isolation.sh claude-code   # one recipe
+scripts/check.sh --smoke-recipes                                      # both recipes
+```
+
+`scripts/check.sh` without `--smoke-recipes` starts no Docker container. The script
+needs Docker with Compose v2, network access, `jq` and `openssl`, and the free host ports
+of the recipe stack (7070, 5556, 9091, 9092, 9094, 9095); it shares them with `make e2e`,
+so hold the same lock. From a clean state it builds and starts the merged stack, puts
+alice's token (`scripts/dex-token.sh --raw alice`) on the sidecar's volume from stdin,
+and runs `docker compose down -v` in a trap. A first run waits a few minutes for the
+control plane's first token key (see the recipe). Every check prints `PASS <name>` or
+`FAIL <name>`; the first failure prints the worker's last 50 log lines with JWT-shaped
+strings redacted and exits non-zero.
+
+| Check | Where | Proves |
+|---|---|---|
+| `direct-egress-blocked` | agent | `curl --noproxy '*' https://example.com` fails |
+| `idp-and-cp-unreachable` | agent | no TCP to `dex:5556` or `control-plane:7070`; the identity volume path is absent |
+| `forwarder-405` | agent | a plain HTTP request (with the forwarder credential) to `warden-identity:3128` gets 405 |
+| `no-secrets-in-agent` | agent | env, `/proc/*/environ` and `$HOME` hold no JWT-shaped string, PEM private key or vendor key other than the placeholder; the agent has `CapEff` 0 and `NoNewPrivs` 1 |
+| `no-token-407` | probe on `cp-net` | the worker answers 407 `Proxy-Authenticate: Basic realm="warden"` to a request with no credentials |
+| `attributed-allow` | agent + worker log | a request to the allowed API host gets an upstream answer (401 with the placeholder); the worker's decision is `allow` with alice's `user_sub` and `act` equal to the agent id |
+| `header-replaced` | agent + worker log | the client's own `Proxy-Authorization` (the forwarder credential) is replaced, not forwarded: the worker attributes the request to alice and never sees the credential |
+| `policy-deny` | agent + worker log | a CONNECT to a non-allowed host is refused and logged as deny |
+| `cp-attribution` | control plane | `/dashboard/api/traffic?user=alice@example.org&act=<agent>` returns the event with `identity_status` valid (polled up to 120 s for the worker's push) |
+| `agent-disabled` | control plane CLI | after `warden control-plane agent disable` a new CONNECT is refused within 10 s |
+| `no-token-in-logs` | script output + logs | no JWT-shaped string in the script's output or in the logs of the worker, `warden-identity` and the control plane |
+
+Self-tests of the proof (each must exit non-zero): merge
+`deploy/compose/test/recipe-egress-leak.yml` (it also attaches the agent to the egress
+network) through `RECIPE_ISOLATION_COMPOSE_EXTRA` and the script fails at
+`direct-egress-blocked`; serve `identity: attribute` instead of `require` for the agent
+and it fails at `no-token-407`. `RECIPE_ISOLATION_KEEP=1` leaves the stack up for
+debugging.
+
 ## Manual local testing
 
 ### Setup
