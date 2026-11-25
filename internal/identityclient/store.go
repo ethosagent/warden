@@ -76,7 +76,7 @@ func (s *FileStore) Save(e Entry) error {
 	if err != nil {
 		return err
 	}
-	return writePrivateFile(s.Path(), b, true)
+	return writePrivateFile(s.Path(), b, true, false)
 }
 
 // Remove deletes the cache file and its lock file; absent files are fine.

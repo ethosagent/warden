@@ -133,7 +133,7 @@ func SaveAgentKey(path string, k AgentKey, force bool) error {
 		return errors.New("identityclient: encode the agent key")
 	}
 	data := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
-	return writePrivateFile(path, data, force)
+	return writePrivateFile(path, data, force, true)
 }
 
 // LoadAgentKey reads a key written by SaveAgentKey. A file readable by group or
@@ -220,16 +220,19 @@ func unwrapPathErr(err error) error {
 // directory that group or others can write to is refused. With force the temp
 // file is renamed over path; without it the temp file is hard-linked to path,
 // which fails with ErrKeyExists if anything is there, so refusing an existing
-// file is atomic. FileStore.Save uses it too.
-func writePrivateFile(path string, data []byte, force bool) error {
+// file is atomic. FileStore.Save uses it too, without strictDir (the login
+// cache directory keeps its earlier, looser contract).
+func writePrivateFile(path string, data []byte, force, strictDir bool) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("identityclient: create %s: %w", dir, unwrapPathErr(err))
 	}
-	if st, err := os.Stat(dir); err != nil {
-		return fmt.Errorf("identityclient: check %s: %w", dir, unwrapPathErr(err))
-	} else if st.Mode().Perm()&0o022 != 0 {
-		return fmt.Errorf("identityclient: the directory %s is writable by group or others (mode %04o); chmod 700 it", dir, st.Mode().Perm())
+	if strictDir {
+		if st, err := os.Stat(dir); err != nil {
+			return fmt.Errorf("identityclient: check %s: %w", dir, unwrapPathErr(err))
+		} else if st.Mode().Perm()&0o022 != 0 {
+			return fmt.Errorf("identityclient: the directory %s is writable by group or others (mode %04o); chmod 700 it", dir, st.Mode().Perm())
+		}
 	}
 	tmp, err := os.CreateTemp(dir, ".tmp-*")
 	if err != nil {
