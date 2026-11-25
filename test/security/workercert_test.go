@@ -232,6 +232,13 @@ var revokedCase = Case{
 			return s.Server().ParkedWorkerPolls(serial) > parked
 		})
 
+		// While the long-poll holds one connection, a second request leaves a
+		// second keep-alive connection idle in the client's pool, opened before
+		// the revoke.
+		if r := s.Send(t, cl, http.MethodGet, "/policy", http.Header{"Accept": {controlplane.BundleMediaType}}, nil); r.Status != http.StatusOK {
+			t.Fatalf("security: GET /policy beside the held poll = %d, want 200", r.Status)
+		}
+
 		start := time.Now()
 		if r := s.AdminSession(t).Do(t, http.MethodPost, "/dashboard/api/workers/"+w.Name+"/revoke", nil); r.Status != http.StatusOK {
 			t.Fatalf("security: revoke %s = %d %s", w.Name, r.Status, r.Body)
