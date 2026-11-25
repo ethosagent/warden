@@ -14,6 +14,7 @@ change. Start here, then jump to your runtime:
 | [Hermes Agent](hermes.md) | Node + OpenAI-compatible API | `http://localhost:8642` (dash `:9119`) | **Yes** (`NODE_USE_ENV_PROXY=1`) |
 | [Ethos](ethos.md) | Node agent (web UI + API) | `http://localhost:3000` (API `:3001`) | **Yes** (`NODE_USE_ENV_PROXY=1`) |
 | [Claude Code](claude-code.md) | Native CLI, **proven user identity** (require mode) | none (`claude -p` / `claude` via `exec`) | No (native binary; `NODE_USE_ENV_PROXY=1` for the Node tools it launches) |
+| [Codex CLI](codex.md) | Native CLI, **proven user identity** (require mode) | none (`codex exec` via `exec`) | No (native binary; honours `HTTPS_PROXY` and `CODEX_CA_CERTIFICATE`) |
 
 Warden's own dashboard is always at **http://localhost:9090/dashboard/** (+ `/metrics`).
 
