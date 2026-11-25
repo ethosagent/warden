@@ -802,6 +802,7 @@ func (s *Server) Handler() http.Handler {
 	// console.approvals is enabled; the hasher is a no-op without admin audit.
 	if s.approvals != nil {
 		dash.SetChangeDrafts(s.changeDraftsAPI())
+		dash.SetApprovalsReplayTimeout(s.cfg.Console.Approvals.ReplayTimeout)
 		s.RegisterStateHasher(auditTargetChangeDraft, s.changeDraftHash)
 	}
 	// Per-worker MCP view (inventory + observed schema), selected by ?proxy=.

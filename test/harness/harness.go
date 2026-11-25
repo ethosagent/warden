@@ -259,6 +259,8 @@ type H struct {
 	// control plane through; nil unless the option is set.
 	bundleTamper *tamperProxy
 	bundleExpiry config.BundleExpiry
+	// bundleCache (WithBundleCache) gives each pinned worker a state dir.
+	bundleCache bool
 
 	// tokenClients are the AgentWithProxyToken / AgentH2WithProxyToken clients,
 	// kept so cleanup can close their idle tunnels.
@@ -983,6 +985,7 @@ func (h *H) workerParams(i int) worker.Params {
 		}
 	}
 	h.applyBundlePins(&policy)
+	h.applyBundleCache(i, &policy)
 	h.applyAuditLogs(i, &policy)
 	h.applyFakeJudge(&policy)
 	// The local allowlist mirrors the CP's. A managed worker ignores it (policy

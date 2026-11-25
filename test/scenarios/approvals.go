@@ -36,6 +36,11 @@ func approvalsOffByDefault(t *testing.T, h *harness.H) {
 		t.Fatalf("/policy = %v, want an allowlist", served)
 	}
 
+	// The console learns from setup that approvals are off, so the Changes tab stays hidden (W-P2-APPR-05).
+	if code, resp, err := h.CP().Do(http.MethodGet, "/dashboard/api/setup", h.CP().Token(), nil); err != nil || code != http.StatusOK || !strings.Contains(resp, `"approvalsEnabled":false`) {
+		t.Errorf("setup = %d %q, %v; want approvalsEnabled=false", code, resp, err)
+	}
+
 	db, err := cpstate.Open(ctx, h.ControlPlaneStateDB(), controlplane.StateMigrations())
 	if err != nil {
 		t.Fatalf("open the state db: %v", err)
@@ -102,6 +107,14 @@ func approvalsTwoPerson(t *testing.T, h *harness.H) {
 	}
 	ana, anaCSRF := consoleLogin(t, h, fakes.Valid("ana", "ana@example.com", harness.ConsoleEditorGroup))
 	ben, benCSRF := consoleLogin(t, h, fakes.Valid("ben", "ben@example.com", harness.ConsoleEditorGroup))
+
+	// The console shows the Changes tab: setup says approvals are on and the page ships its container (W-P2-APPR-05).
+	if resp, body := consoleDo(t, ana, http.MethodGet, "/dashboard/api/setup", nil); resp.StatusCode != http.StatusOK || !strings.Contains(body, `"approvalsEnabled":true`) {
+		t.Fatalf("setup = %d %s, want approvalsEnabled=true", resp.StatusCode, body)
+	}
+	if resp, body := consoleDo(t, ana, http.MethodGet, "/dashboard/", nil); resp.StatusCode != http.StatusOK || !strings.Contains(body, `id="page-changes"`) || !strings.Contains(body, "/dashboard/api/changes") {
+		t.Fatalf("GET /dashboard/ = %d, want the Changes tab in the page", resp.StatusCode)
+	}
 
 	// ana drafts the current policy plus the new host.
 	var cur struct {

@@ -519,6 +519,8 @@ controlPlane:
   # bundleIssuer: ""              # optional: required bundle cpId
   # bundleClockSkew: 5m           # tolerance on issuedAt/expiresAt, max 1h
   # bundleExpiry: keep            # keep = enforce last-known-good past expiry | deny
+  # stateDir: /var/lib/warden     # absolute path, 0700; with pinned keys it turns on the last-known-good bundle cache (<stateDir>/bundle/). Must not be readable or writable by the agent.
+  # bundleCacheMaxAge: 24h        # a cached bundle is used at boot (CP down) only if issued within this; 0 disables the cache
   # kid must equal the key's RFC 7638 thumbprint; private members (d, ...) are rejected.
   # Keep both the old and new key listed while the control plane rotates its bundle key.
   # localOnly: true ignores all of these.

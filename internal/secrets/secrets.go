@@ -122,6 +122,22 @@ func NewCache(fetcher Fetcher, ttl time.Duration, placeholders []string) (*Cache
 	return c, nil
 }
 
+// NewUnhealthyCache builds a cache that has not prefetched anything and is
+// unhealthy from the start: every GetSecret hard-fails ("cache unhealthy")
+// until a manual RefreshSecrets succeeds. It is for a worker whose secret
+// backend is known to be unusable at boot (a cache boot without AWS
+// credentials), where the worker should still serve traffic that needs no
+// secret.
+func NewUnhealthyCache(fetcher Fetcher, ttl time.Duration, placeholders []string) *Cache {
+	return &Cache{
+		fetcher: fetcher,
+		ttl:     ttl,
+		keys:    append([]string(nil), placeholders...),
+		entries: make(map[string]entry),
+		now:     time.Now,
+	}
+}
+
 // SetReservedKeyLog attaches the rate-limited log of refused reserved-key
 // lookups. Call it before the cache is shared; nil leaves the refusals silent.
 func (c *Cache) SetReservedKeyLog(l *ReservedKeyLog) { c.reservedLog = l }

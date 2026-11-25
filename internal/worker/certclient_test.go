@@ -59,6 +59,17 @@ type certCP struct {
 	bearers    []string // Authorization header of every request
 	heartbeats []map[string]any
 	ingestIDs  []string
+	// rejectAuth makes the fake answer 400 to any request carrying an
+	// Authorization header, the way a control plane in require mode must.
+	rejectAuth atomic.Bool
+	// pollHook, when set, runs inside GET /policy?wait=... after the client
+	// certificate was identified (serial) and before the answer: a held long-poll.
+	pollHook func(serial string)
+	// frozen, when set, is the time the fake verifies certificates at: a control
+	// plane whose clock the worker's does not drive.
+	frozen atomic.Pointer[time.Time]
+	// noCert counts requests that arrived without any client certificate.
+	noCert atomic.Int64
 }
 
 func newCertCP(t *testing.T, clk *clocktest.Fake) *certCP {
@@ -66,15 +77,15 @@ func newCertCP(t *testing.T, clk *clocktest.Fake) *certCP {
 	cp := &certCP{t: t, clk: clk, workerID: "worker-1", ttl: 24 * time.Hour}
 	cp.rootKey, _ = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	cp.interKey, _ = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	rootT := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "root"}, NotBefore: certT0.Add(-time.Hour),
-		NotAfter: certT0.Add(1000 * time.Hour), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}
+	rootT := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "root"}, NotBefore: clk.Now().Add(-time.Hour),
+		NotAfter: clk.Now().Add(1000 * time.Hour), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}
 	der, err := x509.CreateCertificate(rand.Reader, rootT, rootT, &cp.rootKey.PublicKey, cp.rootKey)
 	if err != nil {
 		t.Fatal(err)
 	}
 	cp.root, _ = x509.ParseCertificate(der)
-	interT := &x509.Certificate{SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: "inter"}, NotBefore: certT0.Add(-time.Hour),
-		NotAfter: certT0.Add(900 * time.Hour), IsCA: true, BasicConstraintsValid: true, MaxPathLen: 0, MaxPathLenZero: true, KeyUsage: x509.KeyUsageCertSign}
+	interT := &x509.Certificate{SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: "inter"}, NotBefore: clk.Now().Add(-time.Hour),
+		NotAfter: clk.Now().Add(900 * time.Hour), IsCA: true, BasicConstraintsValid: true, MaxPathLen: 0, MaxPathLenZero: true, KeyUsage: x509.KeyUsageCertSign}
 	der, err = x509.CreateCertificate(rand.Reader, interT, cp.root, &cp.interKey.PublicKey, cp.rootKey)
 	if err != nil {
 		t.Fatal(err)
@@ -85,6 +96,7 @@ func newCertCP(t *testing.T, clk *clocktest.Fake) *certCP {
 
 	cp.srv = httptest.NewUnstartedServer(http.HandlerFunc(cp.serve))
 	cp.srv.TLS = &tls.Config{ClientAuth: tls.RequestClientCert, MinVersion: tls.VersionTLS12}
+	cp.srv.EnableHTTP2 = true // like production: one connection carries concurrent requests
 	cp.srv.StartTLS()
 	t.Cleanup(cp.srv.Close)
 	cp.caPath = filepath.Join(t.TempDir(), "cp-ca.pem")
@@ -117,7 +129,7 @@ func (cp *certCP) presented(r *http.Request) (id, serial string) {
 		return "", ""
 	}
 	leaf := r.TLS.PeerCertificates[0]
-	if _, err := leaf.Verify(x509.VerifyOptions{Roots: cp.pool, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, CurrentTime: cp.clk.Now()}); err != nil {
+	if _, err := leaf.Verify(x509.VerifyOptions{Roots: cp.pool, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, CurrentTime: cp.verifyTime()}); err != nil {
 		return "", ""
 	}
 	id, err := workerca.WorkerIDFromCert(leaf, "warden.test")
@@ -127,10 +139,24 @@ func (cp *certCP) presented(r *http.Request) (id, serial string) {
 	return id, leaf.SerialNumber.Text(16)
 }
 
+func (cp *certCP) verifyTime() time.Time {
+	if f := cp.frozen.Load(); f != nil {
+		return *f
+	}
+	return cp.clk.Now()
+}
+
 func (cp *certCP) serve(w http.ResponseWriter, r *http.Request) {
 	cp.mu.Lock()
 	cp.bearers = append(cp.bearers, r.Header.Get("Authorization"))
 	cp.mu.Unlock()
+	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+		cp.noCert.Add(1)
+	}
+	if cp.rejectAuth.Load() && r.Header.Get("Authorization") != "" {
+		http.Error(w, "bearer not accepted", http.StatusBadRequest)
+		return
+	}
 	if cp.down.Load() {
 		http.Error(w, "down", http.StatusServiceUnavailable)
 		return
@@ -164,6 +190,9 @@ func (cp *certCP) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.URL.Path {
 	case "/policy":
+		if r.URL.Query().Get("wait") != "" && cp.pollHook != nil {
+			cp.pollHook(serial)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"allowlist":[{"domain":"api.allowed.example"}],"denylist":[{"domain":"evil.example"}]}`)
 	case "/control/heartbeat":
@@ -362,13 +391,22 @@ func TestCertClientExpiredCertIsNotPresentedAndPolicyKeepsLastKnownGood(t *testi
 	go wc.watchExpiry(ctx)
 	waitFor(t, "the expiry watcher to arm", func() bool { return clk.PendingTimers() == 1 })
 
+	// The control plane's clock does not move: it would still accept the expired
+	// certificate, so a pull can only fail because none was presented.
+	frozen := clk.Now()
+	cp.frozen.Store(&frozen)
+	noCertBefore := cp.noCert.Load()
 	clk.Advance(25 * time.Hour) // past NotAfter (24h)
 	got, err := wc.getClientCertificate(nil)
 	if err != nil || len(got.Certificate) != 0 {
 		t.Fatalf("GetClientCertificate after expiry = %+v, %v, want an empty certificate", got, err)
 	}
+	waitFor(t, "the expiry error", func() bool { return strings.Count(logs.String(), "worker cert expired") >= 1 })
 	if err := rp.Pull(); err == nil {
-		t.Fatal("the control plane accepted a pull with no certificate")
+		t.Fatal("the control plane accepted a pull after the certificate expired: a pooled connection still presented it")
+	}
+	if cp.noCert.Load() == noCertBefore {
+		t.Fatal("the control plane never saw a request without a certificate after expiry")
 	}
 	// The last-known-good policy still decides: allowed stays allowed, denied denied, unlisted default-denied.
 	for host, want := range map[string]policy.Decision{"api.allowed.example": policy.Allow, "evil.example": policy.Deny, "other.example": policy.NoMatch} {
@@ -379,7 +417,6 @@ func TestCertClientExpiredCertIsNotPresentedAndPolicyKeepsLastKnownGood(t *testi
 	if kept, err := rp.GetPolicy(); err != nil || len(kept.Allowlist) != 1 {
 		t.Errorf("the provider dropped its last-known-good policy: %v, %v", kept, err)
 	}
-	waitFor(t, "the expiry error", func() bool { return strings.Count(logs.String(), "worker cert expired") >= 1 })
 	for i := 0; i < 30; i++ {
 		clk.Advance(time.Minute)
 		waitFor(t, "a check", func() bool { return clk.PendingTimers() == 1 })
