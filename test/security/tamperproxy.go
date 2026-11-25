@@ -2,8 +2,10 @@ package security
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -53,11 +55,59 @@ type TamperProxy struct {
 	plan *Plan
 	wake chan struct{}
 	seen []Relayed
+	reqs []ProxiedRequest
 
 	served    atomic.Int64
 	etagSeq   atomic.Int64
 	handshake atomic.Int64
 	relayed   atomic.Int64
+}
+
+// ProxiedRequest is what a worker sent the control plane through the proxy: no
+// header value, only whether an Authorization header was present, and the
+// SHA-256 (hex) of the client certificate the worker presented in its own
+// handshake with the proxy ("" when it presented none).
+type ProxiedRequest struct {
+	Method, Path  string
+	Authorization bool
+	ClientCert    string
+	// Status is what the proxy answered the worker (the control plane's own
+	// status for a relayed request; 0 when the request was abandoned).
+	Status int
+}
+
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	if w.status == 0 {
+		w.status = code
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *statusWriter) Write(b []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return w.ResponseWriter.Write(b)
+}
+
+// Flush keeps streaming replies (a held long-poll) flushable through the wrapper.
+func (w *statusWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Requests returns every request the worker sent through the proxy, oldest
+// first.
+func (p *TamperProxy) Requests() []ProxiedRequest {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]ProxiedRequest(nil), p.reqs...)
 }
 
 // Plan is one response the proxy serves in place of the CP's answer to a
@@ -111,7 +161,10 @@ func NewTamperProxy(s *Stack, w *Worker) *TamperProxy {
 		// uses that for a client that sends no SNI (an IP address), so the
 		// certificate is chosen per handshake through GetConfigForClient.
 		GetConfigForClient: func(*tls.ClientHelloInfo) (*tls.Config, error) {
-			return &tls.Config{Certificates: []tls.Certificate{*p.cert.Load()}, MinVersion: tls.VersionTLS12}, nil
+			// The worker's certificate is requested, not verified here (the CP
+			// verifies the one the proxy relays): it is how Requests can say
+			// which certificate the worker itself presented.
+			return &tls.Config{Certificates: []tls.Certificate{*p.cert.Load()}, MinVersion: tls.VersionTLS12, ClientAuth: tls.RequestClientCert}, nil
 		},
 	}
 	// A client that refuses the proxy's certificate shows up as a handshake
@@ -160,6 +213,19 @@ func (p *TamperProxy) isBundleRequest(r *http.Request) bool {
 }
 
 func (p *TamperProxy) handle(w http.ResponseWriter, r *http.Request) {
+	rec := &statusWriter{ResponseWriter: w}
+	pr := ProxiedRequest{Method: r.Method, Path: r.URL.Path, Authorization: len(r.Header.Values("Authorization")) > 0}
+	if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+		sum := sha256.Sum256(r.TLS.PeerCertificates[0].Raw)
+		pr.ClientCert = hex.EncodeToString(sum[:])
+	}
+	defer func() {
+		pr.Status = rec.status
+		p.mu.Lock()
+		p.reqs = append(p.reqs, pr)
+		p.mu.Unlock()
+	}()
+	w = rec
 	// Only enrollment may reach the CP without the worker's certificate: the
 	// CP requires certs, and a cert-less relay would be a false 401.
 	if r.URL.Path != "/control/enroll" {

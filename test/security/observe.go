@@ -3,9 +3,11 @@ package security
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -14,6 +16,7 @@ import (
 	"time"
 
 	"github.com/ethosagent/warden/internal/analytics"
+	"github.com/ethosagent/warden/internal/auditlog"
 	"github.com/ethosagent/warden/internal/controlplane"
 	"github.com/ethosagent/warden/internal/cpstate"
 	"github.com/ethosagent/warden/test/harness"
@@ -336,6 +339,9 @@ func (s *Stack) surfaces(tb testing.TB) map[string]string {
 			tb.Fatalf("security: encode %s events: %v", w.Name, err)
 		}
 		out[w.Name+" events"] = string(evs)
+		if text := s.decisionText(tb, w); text != "" {
+			out[w.Name+" decision log"] = text
+		}
 	}
 	audit, err := json.Marshal(s.AuditRows(tb, ""))
 	if err != nil {
@@ -347,5 +353,60 @@ func (s *Stack) surfaces(tb testing.TB) map[string]string {
 		tb.Fatalf("security: encode the token events: %v", err)
 	}
 	out["token_events rows"] = string(tev)
+	return out
+}
+
+// FleetEvents returns the events the control plane's fleet store holds for the
+// query (GET /dashboard/api/traffic?<query>), read as the admin console user:
+// the events the workers pushed through /central/ingest.
+func (s *Stack) FleetEvents(tb testing.TB, query string) []analytics.Event {
+	tb.Helper()
+	path := "/dashboard/api/traffic"
+	if query != "" {
+		path += "?" + query
+	}
+	r := s.AdminSession(tb).Do(tb, http.MethodGet, path, nil)
+	if r.Status != http.StatusOK {
+		tb.Fatalf("security: GET %s = %d %s", path, r.Status, tail(r.Body, 300))
+	}
+	var evs []analytics.Event
+	if err := json.Unmarshal([]byte(r.Body), &evs); err != nil {
+		tb.Fatalf("security: decode the fleet events: %v", err)
+	}
+	return evs
+}
+
+// decisionText is the content of w's decision log file ("" when the stack
+// runs without StackOptions.DecisionLog or nothing was written yet).
+func (s *Stack) decisionText(tb testing.TB, w *Worker) string {
+	tb.Helper()
+	if w.DecisionLogPath == "" {
+		return ""
+	}
+	b, err := os.ReadFile(w.DecisionLogPath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		tb.Fatalf("security: read %s's decision log: %v", w.Name, err)
+	}
+	return string(b)
+}
+
+// DecisionLines returns the warden.decision.v1 records every worker has written
+// to its decision log (StackOptions.DecisionLog), grouped by worker.
+func (s *Stack) DecisionLines(tb testing.TB) []auditlog.Record {
+	tb.Helper()
+	s.WaitIdle(tb)
+	var out []auditlog.Record
+	for _, w := range s.Workers {
+		for _, line := range strings.Split(s.decisionText(tb, w), "\n") {
+			if !strings.Contains(line, `"warden.decision.v1"`) {
+				continue
+			}
+			var rec auditlog.Record
+			if err := json.Unmarshal([]byte(line), &rec); err != nil {
+				tb.Fatalf("security: decode a decision line: %v", err)
+			}
+			out = append(out, rec)
+		}
+	}
 	return out
 }
