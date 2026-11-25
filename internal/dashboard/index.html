@@ -515,6 +515,10 @@
     <div class="nav-item" data-page="agents" id="agentsNav" style="display:none">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-7 8-7s8 3 8 7"/></svg>
       Agents</div>
+    <!-- API Keys (W-P2-APIK-04): hidden until /dashboard/api/setup carries an apiKeys object (a CP with console.apiKeys.enabled). -->
+    <div class="nav-item" data-page="apikeys" id="apiKeysNav" style="display:none">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M16 7l3 3M14 9l2 2"/></svg>
+      API Keys</div>
     <div class="nav-item" data-page="explore">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
       Explore</div>
@@ -1254,6 +1258,19 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
       <div id="ag-msg" class="note" style="margin-top:8px; display:none"></div>
     </section>
 
+    <!-- ============ API KEYS (W-P2-APIK-04) ============ -->
+    <section class="page" id="page-apikeys">
+      <div class="page-head">
+        <div><h1>API Keys</h1><div class="desc">Scoped, expiring keys for scripts and CI. A key acts for you, limited to its scopes and to your current role</div></div>
+        <span style="display:flex;align-items:center;gap:8px"><span class="sub" id="ak-status"></span><button class="btn primary sm" id="ak-new" style="display:none">+ New key</button></span>
+      </div>
+      <div class="note" id="ak-nosession" style="margin-bottom:10px; display:none">Keys are created from a signed-in console session only. This console has no sign-in, so keys can be listed and revoked here but not created.</div>
+      <div class="card">
+        <div id="ak-list"><div class="card-pad note">Loading…</div></div>
+      </div>
+      <div id="ak-msg" class="note" style="margin-top:8px; display:none"></div>
+    </section>
+
     <!-- ============ EXPLORE ============ -->
     <section class="page" id="page-explore">
       <div class="page-head">
@@ -1656,6 +1673,7 @@ function loadTab(page){
     case 'audit':       loadAudit(); break;
     case 'adminlog':    loadAdminLog(); break;
     case 'agents':      loadAgents(); break;
+    case 'apikeys':     loadAPIKeys(); break;
     case 'get-started': refreshOnboarding(); break;
   }
 }
@@ -1795,6 +1813,7 @@ function applySetup(){
   const nb=document.getElementById('authNoneBanner'); if(nb) nb.hidden=(s.authMode!=='none');
   applyBackupBadge(s.backup);
   const an=document.getElementById('agentsNav'); if(an) an.style.display=s.agentRegistry===true?'':'none';
+  const akn=document.getElementById('apiKeysNav'); if(akn) akn.style.display=(s.apiKeys&&typeof s.apiKeys==='object')?'':'none';
   renderStepper();
   // Overview: onboarding hero replaces stat blocks until a first event is seen.
   const ov=document.getElementById('page-overview');
@@ -2490,6 +2509,181 @@ async function agSetEnabled(a,enable){
   b('ag-new',()=>agShowForm(null)); b('ag-save',agSave); b('ag-cancel',agHideForm); b('ag-reload',agReload);
 })();
 /* agents:end */
+
+/* apikeys:begin */
+/* ============================================================
+   API Keys (W-P2-APIK-04): GET/POST /dashboard/api/api-keys, DELETE .../api-keys/{id} and DELETE .../api-keys?owner_sub=,
+   all through api() (CSRF header on every write). The nav item shows only when /dashboard/api/setup carries apiKeys,
+   which also holds the scope -> minimum role list and the TTL bounds the create dialog uses. The dialog offers only the
+   scopes the signed-in role may grant; the server re-checks. The plaintext key exists only inside the one-time dialog:
+   it is put in the DOM with textContent, never kept in page state or any browser storage, never logged, and the
+   whole dialog node is removed on close. Every value from the server or the user is put in with textContent (akEl).
+   ============================================================ */
+const AK_WARN_MS=7*24*3600*1000;
+const ak={rows:[], canCreate:false, admin:false};
+function akEl(tag,text,cls){
+  const e=document.createElement(tag);
+  if(text!=null) e.textContent=String(text);
+  if(cls) e.className=cls;
+  return e;
+}
+function akMsg(text){ const m=document.getElementById('ak-msg'); if(!m) return; m.style.display=text?'':'none'; m.textContent=text||''; }
+function akFmt(iso){ return iso?String(iso).slice(0,16).replace('T',' ')+'Z':'—'; }
+function akExpiringSoon(k){
+  if(k.status!=='active'||!k.expiresAt) return false;
+  const t=Date.parse(k.expiresAt); if(isNaN(t)) return false;
+  return t-Date.now()<=AK_WARN_MS;
+}
+async function loadAPIKeys(){
+  const list=document.getElementById('ak-list'); if(!list) return;
+  await authInit();
+  ak.admin=roleAllows('admin');
+  ak.canCreate=authMode==='oidc';
+  document.getElementById('ak-new').style.display=ak.canCreate?'':'none';
+  document.getElementById('ak-nosession').style.display=ak.canCreate?'none':'';
+  let r=null, d=null;
+  try{ r=await api('GET','/dashboard/api/api-keys'); if(r.ok) d=await r.json(); }catch(e){ d=null; }
+  if(!Array.isArray(d)){
+    ak.rows=[]; list.textContent='';
+    list.appendChild(akEl('div',(r&&r.status===404)?'API keys are not enabled on this server (console.apiKeys.enabled).':'API keys unavailable.','card-pad note'));
+    document.getElementById('ak-status').textContent=''; return;
+  }
+  ak.rows=d;
+  document.getElementById('ak-status').textContent=d.filter(k=>k.status==='active').length+' active · '+d.length+' total';
+  akRenderList();
+}
+function akRenderList(){
+  const list=document.getElementById('ak-list'); list.textContent='';
+  if(!ak.rows.length){ list.appendChild(akEl('div','No API keys yet.','card-pad note')); return; }
+  const table=akEl('table'), head=akEl('tr');
+  const cols=['Name','Scopes','Effective scopes'].concat(ak.admin?['Owner']:[]).concat(['Expires','Last used','Status','']);
+  cols.forEach(h=>head.appendChild(akEl('th',h)));
+  const thead=akEl('thead'); thead.appendChild(head); table.appendChild(thead);
+  const tb=akEl('tbody');
+  ak.rows.forEach(k=>{
+    const tr=akEl('tr');
+    const c0=akEl('td'); c0.appendChild(akEl('b',k.name)); c0.appendChild(akEl('div',k.id,'mono muted'));
+    if(k.description) c0.appendChild(akEl('div',k.description,'note'));
+    tr.appendChild(c0);
+    tr.appendChild(akEl('td',(k.scopes||[]).join(', ')||'—'));
+    tr.appendChild(akEl('td',(k.effectiveScopes||[]).join(', ')||'none'));
+    if(ak.admin) tr.appendChild(akEl('td',k.ownerEmail||k.ownerSub||'—'));
+    const ce=akEl('td',akFmt(k.expiresAt));
+    if(akExpiringSoon(k)){ ce.style.color='var(--amber)'; ce.style.fontWeight='600'; ce.title='Expires within 7 days'; ce.appendChild(akEl('div','expires soon','note')); }
+    tr.appendChild(ce);
+    tr.appendChild(akEl('td',akFmt(k.lastUsedAt)));
+    const cs=akEl('td'); cs.appendChild(akEl('span',k.status,'pill '+(k.status==='active'?'p-allow':'p-redact'))); tr.appendChild(cs);
+    const ca=akEl('td'); ca.style.textAlign='right';
+    if(k.status==='active'){
+      const rb=akEl('button','Revoke','btn sm'); rb.style.color='#ff8098';
+      rb.addEventListener('click',()=>akRevoke(k)); ca.appendChild(rb);
+    }
+    if(ak.admin&&k.ownerSub){
+      const ob=akEl('button','Revoke all for owner','btn sm'); ob.style.color='#ff8098';
+      ob.addEventListener('click',()=>akRevokeOwner(k)); ca.appendChild(ob);
+    }
+    tr.appendChild(ca); tb.appendChild(tr);
+  });
+  table.appendChild(tb); list.appendChild(table);
+}
+async function akRevoke(k){
+  if(!window.confirm('Revoke API key "'+k.name+'"? Requests using it fail immediately.')) return;
+  let r=null;
+  try{ r=await api('DELETE','/dashboard/api/api-keys/'+encodeURIComponent(k.id)); }catch(x){ r=null; }
+  if(r&&r.ok) akMsg('Revoked "'+k.name+'".');
+  else akMsg('Revoke failed: '+(r?('status '+r.status):'network error')+'.');
+  loadAPIKeys();
+}
+async function akRevokeOwner(k){
+  const who=k.ownerEmail||k.ownerSub;
+  if(!window.confirm('Revoke every API key owned by '+who+'?')) return;
+  let r=null, n=null;
+  try{ r=await api('DELETE','/dashboard/api/api-keys?owner_sub='+encodeURIComponent(k.ownerSub)); if(r.ok){ const b=await r.json(); n=b&&b.revoked; } }catch(x){ r=null; }
+  if(r&&r.ok) akMsg('Revoked '+(n==null?'the':n)+' key(s) of '+who+'.');
+  else akMsg('Revoke failed: '+(r?('status '+r.status):'network error')+'.');
+  loadAPIKeys();
+}
+/* Whole seconds -> the largest whole unit ("h" or "d") for the expiry field, e.g. 2160h. Hours keep the API's duration syntax. */
+function akHours(sec){ return Math.max(1,Math.floor(sec/3600)); }
+function akCloseDialog(){ const d=document.getElementById('ak-dialog'); if(d) d.remove(); }
+function akOverlay(title){
+  akCloseDialog();
+  const ov=akEl('div',null); ov.id='ak-dialog';
+  ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:1000;display:flex;align-items:center;justify-content:center';
+  const box=akEl('div',null,'card'); box.style.cssText='width:min(560px,92vw);max-height:90vh;overflow:auto';
+  const hd=akEl('div',null,'card-head'); hd.appendChild(akEl('h3',title)); box.appendChild(hd);
+  const pad=akEl('div',null,'card-pad'); box.appendChild(pad);
+  ov.appendChild(box); document.body.appendChild(ov);
+  return pad;
+}
+async function akShowCreate(){
+  await authInit();
+  let st=null;
+  try{ st=await jget('/dashboard/api/setup'); }catch(e){ st=null; }
+  const cfg=st&&st.apiKeys;
+  if(!cfg){ akMsg('API keys are not available.'); return; }
+  const scopes=(cfg.scopes||[]).filter(s=>roleAllows(s.minRole));
+  const pad=akOverlay('New API key');
+  const f=(label,node)=>{ const w=akEl('div',null,'field'); w.style.marginBottom='10px'; w.appendChild(akEl('label',label)); w.appendChild(node); pad.appendChild(w); return node; };
+  const name=akEl('input'); name.type='text'; name.maxLength=64; name.autocomplete='off'; f('Name',name);
+  const desc=akEl('input'); desc.type='text'; desc.maxLength=200; desc.autocomplete='off'; f('Description (optional)',desc);
+  const maxH=akHours(cfg.maxTTLSeconds||0), defH=Math.min(akHours(cfg.defaultTTLSeconds||0),maxH);
+  const exp=akEl('input'); exp.type='number'; exp.min=1; exp.max=maxH; exp.value=defH; f('Expires in (hours, up to '+maxH+')',exp);
+  const sw=akEl('div'); sw.appendChild(akEl('label','Scopes (only those your role may grant)'));
+  const boxes=[];
+  if(!scopes.length) sw.appendChild(akEl('div','Your role cannot grant any scope.','note'));
+  scopes.forEach(s=>{
+    const l=akEl('label',null); l.style.display='block';
+    const cb=document.createElement('input'); cb.type='checkbox'; cb.value=s.name; boxes.push(cb);
+    l.appendChild(cb); l.appendChild(akEl('span',' '+s.name,'mono')); l.appendChild(akEl('span',' ('+s.minRole+')','note'));
+    sw.appendChild(l);
+  });
+  pad.appendChild(sw);
+  const err=akEl('div',null,'note'); err.setAttribute('role','alert'); err.style.cssText='margin-top:8px;display:none;color:var(--red)'; pad.appendChild(err);
+  const row=akEl('div'); row.style.cssText='margin-top:10px;display:flex;gap:8px';
+  const save=akEl('button','Create key','btn primary sm'), cancel=akEl('button','Cancel','btn sm');
+  row.appendChild(save); row.appendChild(cancel); pad.appendChild(row);
+  cancel.addEventListener('click',akCloseDialog);
+  save.addEventListener('click',async()=>{
+    const picked=boxes.filter(b=>b.checked).map(b=>b.value);
+    const hours=parseInt(exp.value,10);
+    const fail=t=>{ err.textContent=t; err.style.display=''; };
+    if(!name.value.trim()) return fail('Name is required.');
+    if(!picked.length) return fail('Pick at least one scope.');
+    if(!(hours>=1&&hours<=maxH)) return fail('Expiry must be between 1 and '+maxH+' hours.');
+    save.disabled=true;
+    let r=null;
+    try{ r=await api('POST','/dashboard/api/api-keys',{name:name.value.trim(),description:desc.value.trim(),scopes:picked,expiresIn:hours+'h'}); }catch(x){ r=null; }
+    save.disabled=false;
+    if(r&&r.status===201){
+      let b=null; try{ b=await r.json(); }catch(x){ b=null; }
+      if(b&&typeof b.key==='string'){ akShowSecret(b.name,b.key); b=null; loadAPIKeys(); return; }
+    }
+    let code=''; if(r){ try{ const e=await r.json(); code=e&&e.error||''; if(e&&e.scopes) code+=' ('+e.scopes.join(', ')+')'; }catch(x){} }
+    fail('Create failed: '+(code||(r?('status '+r.status):'network error')));
+  });
+}
+/* The one place the plaintext is rendered. It is passed in, shown by textContent, and gone when the dialog node is removed. */
+function akShowSecret(keyName,secret){
+  const pad=akOverlay('API key created');
+  const warn=akEl('div','Copy this key now. It will not be shown again.','note'); warn.style.cssText='color:var(--amber);font-weight:600;margin-bottom:8px'; pad.appendChild(warn);
+  pad.appendChild(akEl('div','Name: '+keyName,'note'));
+  const val=akEl('div',secret,'mono'); val.id='ak-secret'; val.style.cssText='word-break:break-all;margin:8px 0;padding:8px;border:1px solid var(--line,#888);border-radius:6px;user-select:all';
+  pad.appendChild(val);
+  const row=akEl('div'); row.style.cssText='display:flex;gap:8px';
+  const cp=akEl('button','Copy','btn primary sm'), done=akEl('button','Done','btn sm');
+  row.appendChild(cp); row.appendChild(done); pad.appendChild(row);
+  cp.addEventListener('click',async()=>{
+    try{ await navigator.clipboard.writeText(secret); cp.textContent='Copied'; }
+    catch(e){ cp.textContent='Copy failed: select the key and copy it'; }
+  });
+  done.addEventListener('click',akCloseDialog);
+}
+(function(){
+  const b=(id,fn)=>{ const e=document.getElementById(id); if(e) e.addEventListener('click',fn); };
+  b('ak-new',akShowCreate);
+})();
+/* apikeys:end */
 
 /* ============================================================
    Explore (/dashboard/api/query + /query/schema)

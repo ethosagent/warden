@@ -549,6 +549,10 @@ type setupResponse struct {
 	// serve (a state dir is configured); the console hides the Agents tab
 	// otherwise, a worker's dashboard included. Always present.
 	AgentRegistry bool `json:"agentRegistry"`
+	// APIKeys is present only on a control plane with console.apiKeys.enabled
+	// (W-P2-APIK-04): the console shows the API Keys tab and builds its create
+	// dialog from the scope list. Absent elsewhere.
+	APIKeys *APIKeySettings `json:"apiKeys,omitempty"`
 }
 
 // BackupStatus is the value-free state of the control plane's scheduled backups.
@@ -570,6 +574,7 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 	}
 	resp := setupResponse{Mode: s.setupMode(), AuthMode: s.authMode}
 	resp.AgentRegistry = s.agents != nil && s.agents.Ready() == nil
+	resp.APIKeys = s.apiKeysSetup()
 	if s.backupFn != nil {
 		resp.Backup = s.backupFn(r)
 	}

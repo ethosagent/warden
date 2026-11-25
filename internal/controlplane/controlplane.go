@@ -826,6 +826,8 @@ func (s *Server) Handler() http.Handler {
 	s.wireKeys(dash)
 	// Agent registry admin routes and their audit hasher (W-P2-AREG-02).
 	s.wireAgents(dash)
+	// API Keys console tab (W-P2-APIK-04): only with the management routes on.
+	s.wireAPIKeysTab(dash)
 	// Dashboard-V3 read tabs. Each source EXISTS on the control plane:
 	//   - secretstore: the CP's WRITE store lists KEY metadata (never values). Nil
 	//     store (env/none backend) → the tab reports backend "none".

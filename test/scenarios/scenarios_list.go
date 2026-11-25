@@ -285,6 +285,10 @@ var All = slices.Concat(
 		// plaintext once), the key reads, introspects and is refused a write,
 		// then the admin revokes it and its next request is a 401.
 		{Name: "apikey_management", Opts: apiKeyOpts(), Run: apiKeyManagement},
+		// API Keys console tab (W-P2-APIK-04): the setup bootstrap carries the
+		// scope -> minimum role list only with keys on; off, no apiKeys and a 404.
+		{Name: "apikey_console_bootstrap", Opts: apiKeyOpts(), Run: apiKeyConsoleBootstrap},
+		{Name: "apikey_console_off", Opts: []harness.Option{harness.WithConsoleOIDC()}, Run: apiKeyConsoleOff},
 
 		// Admin audit gate (W-P1-AAUD-05): enabled, the control plane writes the
 		// genesis entry and logs its key_id before serving. In-process only (it
