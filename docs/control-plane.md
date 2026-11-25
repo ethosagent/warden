@@ -1744,6 +1744,45 @@ policy version. Do not rely on challenge mode until no worker carries that mark.
   the agent**: whoever holds a valid token can present it. P2 adds binding and
   bundle-distributed JWKS.
 
+### Identity metrics
+
+Every identity check increments one counter,
+`warden.identity.verify.total` (Prometheus `warden_identity_verify_total`), with
+three bounded labels. There is no separate failure or success counter.
+
+| Label | Values |
+|---|---|
+| `result` | `off`, `none`, `valid`, `invalid`, `expired`, `unverified`, `conflict` |
+| `reason` | `none` (no reason), `bad_signature`, `wrong_iss`, `wrong_aud`, `wrong_azp`, `unknown_kid`, `alg_not_allowed`, `malformed`, `too_large`, `ttl_too_long`, `jwks_unavailable`, `wrong_nonce`, and the binding reasons `agent_mismatch`, `cnf_mismatch`, `agent_disabled`, `agent_unregistered`, `unbound_token`, `missing_claim` |
+| `token_type` | `idp`, `warden`, `none` (no token, or one that never reached a verifier) |
+
+A value outside these sets is recorded as `other`, so a bug or hostile input can
+never create a new series. Labels never carry `sub`, email, `sid`, `jti`, `kid`,
+an agent id or token material.
+
+`warden.blocked.total{reason}` also takes `identity_required`, `identity_expired`
+and `identity_conflict` (declared in `internal/denyreason`).
+
+`warden.controlplane.clock_skew_seconds` (no labels) is the control plane's `Date`
+header minus the worker's clock, set on every long-poll response; positive means
+the control plane is ahead. The header has one-second resolution. Use it to
+diagnose mass `expired` or not-yet-valid failures.
+
+`GET /dashboard/api/analytics` gains an `identity` block built from stored events:
+`byStatus` (counts by `identity_status`) and `topReasons` (the five most frequent
+`identity_reason` values in the range). It is omitted when no event in the range
+carries identity fields.
+
+Recommended alerts:
+
+- The non-valid share per worker, for example
+  `sum by (instance) (rate(warden_identity_verify_total{result!="valid"}[15m])) / sum by (instance) (rate(warden_identity_verify_total[15m])) > 0.2`.
+- `warden_identity_verify_total{token_type="idp"}` for deprecation tracking: it
+  should fall to zero once every harness uses Warden tokens.
+- `warden_identity_verify_total{result="expired"}` rising during a control plane
+  outage (tokens cannot be renewed); check `warden_controlplane_clock_skew_seconds`
+  before blaming the outage.
+
 ### Block list enforcement
 
 A worker denies every request from a user on the block list (`policy.blockedUsers`,
