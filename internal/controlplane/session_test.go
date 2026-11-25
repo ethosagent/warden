@@ -15,6 +15,7 @@ import (
 
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/cpstate"
+	tokensvcsqlite "github.com/ethosagent/warden/internal/tokensvc/adapters/sqlite"
 )
 
 const testRedirectHTTPS = "https://cp.example/auth/callback"
@@ -41,7 +42,7 @@ func (c *fakeClock) Advance(d time.Duration) {
 
 func openSessionDB(t *testing.T) *cpstate.DB {
 	t.Helper()
-	db, err := cpstate.Open(context.Background(), filepath.Join(t.TempDir(), "warden-cp.db"), StateMigrations())
+	db, err := cpstate.Open(context.Background(), filepath.Join(t.TempDir(), "warden-cp.db"), cpstate.Enable(StateMigrations(), tokensvcsqlite.SessionsMigrationID))
 	if err != nil {
 		t.Fatalf("cpstate.Open: %v", err)
 	}

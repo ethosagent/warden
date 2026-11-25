@@ -346,6 +346,11 @@ var All = slices.Concat(
 		{Name: "token_retention_purges", Opts: tokenLimitsOpts(harness.WithTokenEventRetention("24h")), Run: tokenRetentionPurges},
 		{Name: "token_exchange_dashboard_disable", Opts: tokenServiceDashboardOpts(), Run: tokenExchangeDashboardDisable},
 		{Name: "token_service_disabled_by_default", Opts: tokenServiceDisabledOpts(), Run: tokenServiceDisabledByDefault},
+		// Admin revocation of token sessions (W-P2-TOKX-07).
+		{Name: "token_session_revoke_one", Opts: tokenLimitsOpts(harness.WithAdminAudit()), Run: tokenSessionRevokeOne},
+		{Name: "token_session_revoke_all", Opts: tokenLimitsOpts(harness.WithAdminAudit()), Run: tokenSessionRevokeAll},
+		{Name: "token_session_revoke_retained", Opts: tokenServiceOpts(), Run: tokenSessionRevokeRetained},
+		{Name: "token_session_routes_disabled", Opts: append(tokenServiceDisabledOpts(), harness.WithControlPlaneAdminToken()), Run: tokenSessionRoutesDisabled},
 		{Name: "token_exchange_signer_unavailable", Opts: tokenServiceOpts(harness.WithFlakyKeyStore()), Run: tokenExchangeSignerUnavailable},
 		{Name: "token_exchange_idp_unavailable", Opts: tokenServiceOpts(harness.WithOIDCIssuerDown()), Run: tokenExchangeIdPUnavailable},
 		{Name: "keys_cli_rotates_and_resets", Opts: keysRotationOpts(), Run: keysCLIRotatesAndResets},

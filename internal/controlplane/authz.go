@@ -219,6 +219,12 @@ func authzTable() map[routeKey]authzRow {
 		// Served by the control plane itself, ahead of dash.Handler (cpDashboardRoutes).
 		{get, "/dashboard/api/sessions", readRow(admin, "sessions.read", none)},
 		{del, "/dashboard/api/sessions", auditedRow(admin, "sessions.revoke", "sessions", none)},
+		// Token sessions (W-P2-TOKX-07): admin only; 404 unless tokenService.enabled.
+		// ScopeNone like the console session routes: no API key lists or revokes
+		// token sessions.
+		{get, tokenSessionsListPath, readRow(admin, "token_sessions.read", none)},
+		{post, tokenSessionsRevokeAllPath, auditedRow(admin, "token_sessions.revoke_all", auditTargetTokenSessions, none)},
+		{post, tokenSessionRevokePath, auditedRow(admin, "token_sessions.revoke", auditTargetTokenSessions, none)},
 		// API key management (W-P2-APIK-03), served by the control plane itself.
 		// Every row is ScopeNone but /self: no key lists, creates or revokes keys.
 		// The handlers apply the object-level rules (own keys unless admin; create

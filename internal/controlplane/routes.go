@@ -35,6 +35,7 @@ func (s *Server) mountDashboard(mux *http.ServeMux, dash *dashboard.Server) {
 		dash.SetWriteGuard(s.dashboardWriteGuard())
 		mux.Handle("/dashboard/", s.sessionAuditWrap(classify, dash.Handler()))
 		mux.Handle(sessionsAdminPath, http.NotFoundHandler())
+		s.mountTokenSessions(mux, classify, false)
 		mux.Handle(apiKeysPath, http.NotFoundHandler())
 		mux.Handle(apiKeysSubtree, http.NotFoundHandler())
 		return
@@ -48,6 +49,7 @@ func (s *Server) mountDashboard(mux *http.ServeMux, dash *dashboard.Server) {
 	// audited admin change.
 	// TODO(#39): a per-session rate limit arrives with the shared console limiter.
 	mux.Handle(sessionsAdminPath, s.apiKeyWrap(s.sessionAuditWrap(classify, requireRoleKeys(http.HandlerFunc(s.handleSessions), table, s.cfg.Console, s.cfg.Logger, s.apiKeyCounts, s.keyOwnerBlocked))))
+	s.mountTokenSessions(mux, classify, true)
 	s.mountAPIKeys(mux, classify, table)
 }
 
@@ -61,6 +63,9 @@ func cpDashboardRoutes() []dashboard.Route {
 	return []dashboard.Route{
 		{Method: http.MethodGet, Path: sessionsAdminPath, Action: "sessions.read"},
 		{Method: http.MethodDelete, Path: sessionsAdminPath, Action: "sessions.revoke"},
+		{Method: http.MethodGet, Path: tokenSessionsListPath, Action: "token_sessions.read"},
+		{Method: http.MethodPost, Path: tokenSessionsRevokeAllPath, Action: "token_sessions.revoke_all"},
+		{Method: http.MethodPost, Path: tokenSessionRevokePath, Action: "token_sessions.revoke"},
 		{Method: http.MethodGet, Path: apiKeysPath, Action: "api_key.list"},
 		{Method: http.MethodPost, Path: apiKeysPath, Action: "api_key.create"},
 		{Method: http.MethodDelete, Path: apiKeysPath, Action: "api_key.revoke_owner"},

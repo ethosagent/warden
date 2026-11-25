@@ -27,6 +27,8 @@ import (
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/cpstate"
 	"github.com/ethosagent/warden/internal/secrets"
+	"github.com/ethosagent/warden/internal/tokensvc"
+	tokensvcsqlite "github.com/ethosagent/warden/internal/tokensvc/adapters/sqlite"
 )
 
 // fakeRecorder is an in-memory adminaudit.Recorder. fail makes Record return
@@ -134,6 +136,7 @@ func newAuditEnv(t *testing.T, o auditEnvOpts) *auditEnv {
 		srv.sessions = NewSessionStore(o.db.SQL(), time.Hour, 12*time.Hour, newFakeClock().Now)
 		srv.sessionReader = srv.sessions
 	}
+	srv.EnableTokens(&fakeExchanger{}, testTokenIssuer, TokenEdge{Sessions: tokensvcsqlite.NewSessions(o.db)})
 	e := &auditEnv{srv: srv, log: buf}
 	if o.store == nil {
 		e.rec = &fakeRecorder{}
@@ -150,7 +153,7 @@ func newOIDCAuditEnv(t *testing.T) *auditEnv {
 
 func openAuditDB(t *testing.T) *cpstate.DB {
 	t.Helper()
-	db, err := cpstate.Open(context.Background(), filepath.Join(t.TempDir(), "warden-cp.db"), StateMigrations())
+	db, err := cpstate.Open(context.Background(), filepath.Join(t.TempDir(), "warden-cp.db"), cpstate.Enable(StateMigrations(), tokensvcsqlite.SessionsMigrationID))
 	if err != nil {
 		t.Fatalf("cpstate.Open: %v", err)
 	}
@@ -242,6 +245,9 @@ var auditedRequests = map[routeKey]auditedRequest{
 	{http.MethodDelete, apiKeysPath + "/{id}"}: {apiKeysPath + "/{keyid}", ""},
 	// Served by the stub key source TestAdminAuditAllAuditedRoutes installs.
 	{http.MethodPost, "/dashboard/api/keys/rotate"}: {"/dashboard/api/keys/rotate", `{"purpose":"token"}`},
+	// The single revoke targets a session the test creates ({sid}).
+	{http.MethodPost, "/dashboard/api/token-sessions/revoke"}:       {"/dashboard/api/token-sessions/revoke", `{"agent_id":"audit-agent"}`},
+	{http.MethodPost, "/dashboard/api/token-sessions/{sid}/revoke"}: {"/dashboard/api/token-sessions/{sid}/revoke", ""},
 	// {jwk} is a public Ed25519 key the test fills in.
 	{http.MethodPost, "/dashboard/api/agents"}:              {"/dashboard/api/agents", `{"id":"audit-agent","keys":[{jwk}],"allowedGroups":["g"]}`},
 	{http.MethodPut, "/dashboard/api/agents/{id}"}:          {"/dashboard/api/agents/audit-agent", `{"displayName":"Audit","keys":[{jwk}],"allowedGroups":["g","h"]}`},
@@ -298,7 +304,7 @@ func TestAdminAuditAllAuditedRoutes(t *testing.T) {
 	e.srv.dash.SetChangeDrafts(stubChanges{})
 	e.srv.dash.SetWorkerCertAdmin(stubWorkerCerts{})
 	admin := e.session(t, groupAdmin)
-	hashed := map[string]bool{"policy": true, "settings": true, "integrations": true, "detection": true, "llmproviders": true, "worker_tokens": true, "blocked_users": true, "agents": true, "api_keys": true}
+	hashed := map[string]bool{"policy": true, "settings": true, "integrations": true, "detection": true, "llmproviders": true, "worker_tokens": true, "blocked_users": true, "agents": true, "api_keys": true, "token_sessions": true}
 	routes := allAuditedRoutes()
 	var tokID, keyID string
 	if len(routes) != len(auditedRequests) {
@@ -312,6 +318,14 @@ func TestAdminAuditAllAuditedRoutes(t *testing.T) {
 		row := auditRow(k)
 		before := len(e.rec.inputs())
 		req.target = strings.ReplaceAll(req.target, "{tokid}", tokID)
+		if strings.Contains(req.target, "{sid}") {
+			sid, err := e.srv.cfg.TokenEdge.Sessions.Touch(context.Background(), tokensvc.SessionKey{IdPIss: "https://idp", Sub: "u9", AgentID: "audit-agent"},
+				e.srv.cfg.Clock.Now(), e.srv.cfg.Clock.Now(), tokensvc.SessionPolicy{Idle: time.Hour, Absolute: time.Hour}, "wts_audit")
+			if err != nil {
+				t.Fatalf("create a token session: %v", err)
+			}
+			req.target = strings.Replace(req.target, "{sid}", sid, 1)
+		}
 		req.body = strings.ReplaceAll(req.body, "{jwk}", string(agentregtest.Ed25519JWK(t, "audit-agent")))
 		req.target = strings.ReplaceAll(req.target, "{keyid}", keyID)
 		if strings.Contains(req.target, "{id}") {

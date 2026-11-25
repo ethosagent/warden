@@ -15,6 +15,8 @@ const (
 	// holds ("true" or "false"), never the identifiers themselves.
 	DetailHasSub   = "has_sub"
 	DetailHasEmail = "has_email"
+	// DetailHasIss says a token session revoke filter named an IdP issuer.
+	DetailHasIss = "has_iss"
 	// DetailWorkerID and DetailCount describe a worker certificate revocation:
 	// the worker id and how many certificates it revoked.
 	DetailWorkerID = "worker_id"
@@ -72,7 +74,7 @@ const DetailSource = "source"
 // annotationKeys is the closed set of keys Annotate keeps.
 var annotationKeys = func() map[string]bool {
 	m := map[string]bool{
-		DetailOp: true, DetailEtag: true, DetailHasSub: true, DetailHasEmail: true,
+		DetailOp: true, DetailEtag: true, DetailHasSub: true, DetailHasEmail: true, DetailHasIss: true,
 		DetailAPIKeyID: true, DetailScopes: true, DetailExpiresAt: true, DetailAPIKeysRevoked: true,
 		DetailWorkerID: true, DetailCount: true, DetailEnrollTokens: true,
 		DetailBaseVersion: true, DetailAppliedVersion: true, DetailWidening: true,
