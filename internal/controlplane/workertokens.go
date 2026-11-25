@@ -21,6 +21,11 @@ import (
 	"github.com/ethosagent/warden/internal/cpstate"
 )
 
+// WorkerTokenPattern is a regular expression (RE2) matching exactly the shape of
+// a worker token, for egress detection. internal/scan (data zone) may not import
+// this package, so it copies this literal; test/scenarios keeps the copy in step.
+const WorkerTokenPattern = `wwt_[a-z2-7]{52}`
+
 // Worker token format. A token is "wwt_" + 52 lowercase unpadded base32
 // characters (32 random bytes); sha256 of it is enough at rest because the
 // secret is 256 bits of entropy.

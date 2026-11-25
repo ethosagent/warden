@@ -120,6 +120,23 @@ func validateMatchPattern(ctx, pattern string) error {
 	return nil
 }
 
+// reservedAuthField returns the first credential field of e that names a key in
+// the reserved cp/ secret namespace (W-P2-WCA-07), so an auth entry cannot be
+// pointed at control-plane material. It returns only the field name, never the
+// value.
+func reservedAuthField(e AuthEntry) (string, bool) {
+	for _, f := range []struct{ name, val string }{
+		{"clientID", e.ClientID}, {"clientSecret", e.ClientSecret},
+		{"accessKeyID", e.AccessKeyID}, {"secretAccessKey", e.SecretAccessKey},
+		{"sessionToken", e.SessionToken}, {"secret", e.Secret}, {"value", e.Value},
+	} {
+		if IsReservedSecretKey(f.val) {
+			return f.name, true
+		}
+	}
+	return "", false
+}
+
 // validateAuth enforces structural requirements per transform type. Credential
 // values may be ${ENV} placeholders (resolved at build time), so presence — not
 // the resolved secret — is what is checked here.
@@ -128,6 +145,9 @@ func validateAuth(entries []AuthEntry) error {
 		ctx := fmt.Sprintf("auth[%d]", i)
 		if err := validateMatchPattern(ctx, e.Match); err != nil {
 			return err
+		}
+		if field, ok := reservedAuthField(e); ok {
+			return fmt.Errorf("config: %s: %s names the reserved %q secret namespace", ctx, field, ReservedSecretNamespace+"/")
 		}
 		switch e.Type {
 		case AuthOAuth2ClientCredentials:

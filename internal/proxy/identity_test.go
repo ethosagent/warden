@@ -693,6 +693,9 @@ func TestIdentityConnectExpiry(t *testing.T) {
 		if got := e2.m.identityCount("expired", "none"); got != 1 {
 			t.Errorf("expired count = %d, want 1; metrics: %s", got, e2.m.describe())
 		}
+		if got := e2.m.identityTypeCount("expired", "none", string(identity.TokenIdP)); got != 1 {
+			t.Errorf("mid-connection expiry token_type idp = %d, want 1; metrics: %s", got, e2.m.describe())
+		}
 		if got := e2.m.identityCount("valid", "none"); got != 1 {
 			t.Errorf("valid count = %d, want 1 (the CONNECT verification only)", got)
 		}
@@ -721,6 +724,9 @@ func TestIdentityDuplicateHeaders(t *testing.T) {
 		}
 		if got := e.m.identityCount("invalid", "malformed"); got != 1 {
 			t.Errorf("invalid/malformed = %d, want 1; metrics: %s", got, e.m.describe())
+		}
+		if got := e.m.identityTypeCount("invalid", "malformed", string(identity.TokenNone)); got != 1 {
+			t.Errorf("malformed token_type none = %d, want 1; metrics: %s", got, e.m.describe())
 		}
 		if e.v.Calls() != 0 {
 			t.Errorf("verifier calls = %d, a duplicate must not be verified", e.v.Calls())
@@ -1237,5 +1243,18 @@ func TestIdentityVerifyIsBounded(t *testing.T) {
 	}
 	if !bv.deadlineSet.Load() {
 		t.Error("Verify ran without a deadline")
+	}
+}
+
+// TestIdentityConflictTokenType: a header naming another subject next to a live
+// CONNECT identity is a conflict, counted with the IdP token type.
+func TestIdentityConflictTokenType(t *testing.T) {
+	e := newIDEnv(t, IdentityModeAttribute)
+	c := e.h1("Proxy-Authorization: " + basicAuth("tok-alice") + "\r\n")
+	if st := c.get("X-Warden-Identity: Bearer tok-bob\r\n"); st != 200 {
+		t.Fatalf("status = %d, want 200", st)
+	}
+	if got := e.m.identityTypeCount("conflict", "none", string(identity.TokenIdP)); got != 1 {
+		t.Errorf("conflict token_type idp = %d, want 1; metrics: %s", got, e.m.describe())
 	}
 }

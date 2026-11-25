@@ -39,7 +39,19 @@ type workerState struct {
 	authKind  WorkerKind
 	tokenID   string
 	tokenName string
+	// certSerial and certNotAfter describe the certificate of the latest cert
+	// authentication (kind cert only).
+	certSerial   string
+	certNotAfter time.Time
+	// seenSerials are the last few certificate serials the worker authenticated
+	// with, oldest first. Renewal's lineage rule asks whether a successor was
+	// ever used; the latest alone would be overwritten by the predecessor's own
+	// renewal request.
+	seenSerials []string
 }
+
+// maxSeenSerials bounds workerState.seenSerials.
+const maxSeenSerials = 8
 
 // NewWorkerRegistry returns an empty registry.
 func NewWorkerRegistry() *WorkerRegistry {
@@ -154,6 +166,22 @@ func (r *WorkerRegistry) recordAuth(p WorkerPrincipal) {
 	defer r.mu.Unlock()
 	w := r.touch(p.ProxyID, r.now())
 	w.authKind, w.tokenID, w.tokenName = p.Kind, p.TokenID, p.TokenName
+	w.certSerial, w.certNotAfter = p.CertSerial, p.NotAfter
+	if p.Kind == KindCert && !slices.Contains(w.seenSerials, p.CertSerial) {
+		if len(w.seenSerials) >= maxSeenSerials {
+			w.seenSerials = w.seenSerials[1:]
+		}
+		w.seenSerials = append(w.seenSerials, p.CertSerial)
+	}
+}
+
+// certSeen reports whether the worker authenticated with the certificate of
+// this serial since the control plane started (among its last few).
+func (r *WorkerRegistry) certSeen(proxyID, serial string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	w, ok := r.workers[proxyID]
+	return ok && slices.Contains(w.seenSerials, serial)
 }
 
 // touch returns the worker's state, creating it on first contact. Caller holds mu.
@@ -187,6 +215,10 @@ func (r *WorkerRegistry) Views() []dashboard.WorkerView {
 			Online:          now.Sub(w.lastSeen) < staleAfter,
 			AuthKind:        string(w.authKind),
 			TokenName:       w.tokenName,
+		}
+		if w.authKind == KindCert {
+			v.CertSerial = w.certSerial
+			v.CertNotAfter = w.certNotAfter.UTC().Format(time.RFC3339)
 		}
 		if !w.lastPolicyPull.IsZero() {
 			v.LastPolicyPull = w.lastPolicyPull.UTC().Format(time.RFC3339)

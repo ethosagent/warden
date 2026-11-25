@@ -3,7 +3,10 @@ package controlplane
 import (
 	"net/http"
 	"regexp"
+	"strconv"
 	"time"
+
+	"github.com/ethosagent/warden/internal/adminaudit"
 )
 
 // maxRevokeSubLen bounds the ?sub= of a revoke. An IdP subject is at most 255
@@ -124,6 +127,24 @@ func (s *Server) handleSessionsRevoke(w http.ResponseWriter, r *http.Request, p 
 			return
 		}
 		count = n
+		// Offboarding: the subject's API keys die with their sessions, so a key
+		// minted by a person who just lost access does not outlive them.
+		keys, err := s.RevokeAPIKeysForOwner(r.Context(), "", sub, p.Sub)
+		if err != nil {
+			s.revokeFailed(w, err)
+			return
+		}
+		// The sessions row hashes sessions only: say in its details that keys
+		// went too. With API keys off there is nothing to say.
+		if s.cfg.APIKeyStore != nil {
+			adminaudit.Annotate(r.Context(), "", map[string]string{
+				adminaudit.DetailOp:             "revoke_sub_and_api_keys",
+				adminaudit.DetailAPIKeysRevoked: strconv.Itoa(keys),
+			})
+		}
+		if keys > 0 {
+			s.cfg.Logger.Info("console_session_revoke_api_keys", "by_sub", p.Sub, "target_sub", sub, "api_keys", keys)
+		}
 	}
 	attrs := []any{"by_sub", p.Sub, "target_sub", target, "count", count}
 	if handle != "" {

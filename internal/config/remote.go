@@ -41,6 +41,9 @@ type RemoteProvider struct {
 	// identityMode returns the effective identity mode; both ride the heartbeat.
 	agentID      string
 	identityMode func() string
+	// onDate, when set, receives the CP's Date header from each long-poll
+	// response (see SetDateObserver).
+	onDate func(cpNow time.Time)
 }
 
 // CapBlocklistV1 is the capability a worker advertises when it enforces
@@ -111,6 +114,33 @@ func (r *RemoteProvider) SetCaps(caps []string) {
 	r.mu.Lock()
 	r.caps = append([]string(nil), caps...)
 	r.mu.Unlock()
+}
+
+// SetDateObserver registers a callback invoked on every PollLong response that
+// carries a parseable Date header, with that time. The worker subtracts its own
+// clock to get the clock skew (warden.controlplane.clock_skew_seconds), which
+// diagnoses mass expired or not-yet-valid token failures. The package reads no
+// clock itself. The header has one-second resolution. nil disables it.
+func (r *RemoteProvider) SetDateObserver(fn func(cpNow time.Time)) {
+	r.mu.Lock()
+	r.onDate = fn
+	r.mu.Unlock()
+}
+
+// observeDate reports the response's Date header (the CP stamps it when it
+// writes the response, after holding the poll).
+func (r *RemoteProvider) observeDate(resp *http.Response) {
+	r.mu.RLock()
+	fn := r.onDate
+	r.mu.RUnlock()
+	if fn == nil {
+		return
+	}
+	d, err := http.ParseTime(resp.Header.Get("Date"))
+	if err != nil {
+		return
+	}
+	fn(d)
 }
 
 // SetProxyID sets the worker identifier sent on each policy pull (header
@@ -248,6 +278,7 @@ func (r *RemoteProvider) PollLong(ctx context.Context, wait time.Duration) (chan
 		return false, r.setErr(fmt.Errorf("config: remote: long-poll: %w", err))
 	}
 	defer func() { _ = resp.Body.Close() }()
+	r.observeDate(resp)
 
 	switch resp.StatusCode {
 	case http.StatusNotModified:

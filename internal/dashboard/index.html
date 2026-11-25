@@ -2138,6 +2138,7 @@ function fleetStat(k,v,delta){ return '<div class="card stat"><div class="k">'+k
 function fleetAuthBadge(w){
   const k=w.authKind;
   if(k==='legacy'||k==='none') return '<span class="pill p-redact" title="the proxy id is self-reported, not verified">legacy / unverified</span>';
+  if(k==='cert') return (w.certRevoked?'<span class="pill p-high" title="the certificate is revoked; the worker is refused until it re-enrolls">cert revoked</span>':'<span class="pill p-allow">cert</span>');
   if(k==='token') return '<span class="pill p-allow">token</span> <span class="mono" style="font-size:12px">'+esc(w.tokenName||'')+'</span>';
   return '<span class="muted">—</span>';
 }
@@ -2165,13 +2166,28 @@ function renderFleet(ws){
     if(w.noGroupPolicy) pending+=(pending?' ':'')+'<span class="pill p-high" title="Denies group-scoped rules until upgraded">no groupPolicy</span>';
     if(w.noIdentityChallenge) pending+=(pending?' ':'')+'<span class="pill p-high" title="This worker cannot apply identity challenge mode and keeps allowing callers it should challenge. Upgrade it.">identity: challenge not supported, still allowing</span>';
     if(!pending) pending='<span class="muted">—</span>';
-    return '<tr><td class="mono">'+esc(w.proxyID||'—')+'</td><td>'+fleetAuthBadge(w)+'</td><td>'+status+'</td>'
+    const revokeBtn=(w.authKind==='cert'&&!w.certRevoked)?' <button data-min-role="admin" class="btn sm fleet-revoke" data-id="'+esc(w.proxyID)+'" style="color:#ff8098">Revoke</button>':'';
+    return '<tr><td class="mono">'+esc(w.proxyID||'—')+revokeBtn+'</td><td>'+fleetAuthBadge(w)+'</td><td>'+status+'</td>'
       +'<td class="mono" style="font-size:12px">'+esc(etag)+' '+etagPill+'</td>'
       +'<td>'+pending+'</td><td class="muted">'+relTime(w.lastSeen)+'</td>'
       +'<td class="muted">'+relTime(w.lastPolicyPull)+'</td><td class="num">'+fmtNum(w.eventsForwarded||0)+'</td>'
       +'<td class="mono" style="font-size:12px">'+esc((w.caps||[]).join(', ')||'none')+(w.online&&!hasBlockCap(w)?' <span class="pill p-high">no block list</span>':'')+'</td></tr>';
   }).join('');
+  body.querySelectorAll('.fleet-revoke').forEach(b=>b.addEventListener('click',()=>revokeWorkerCerts(b.dataset.id)));
   showFleetBlockBanner(ws.filter(w=>w.online&&!hasBlockCap(w)).length);
+}
+/* Revoke a worker's certificates (W-P2-WCA-05): POST /dashboard/api/workers/{id}/revoke. The worker is refused
+   at once and its held policy poll ends; it keeps its last-known-good policy and must re-enroll. */
+async function revokeWorkerCerts(id){
+  if(!window.confirm('Revoke the certificates of worker "'+id+'"? It is cut off at once and must re-enroll with a new token.')) return;
+  let r=null;
+  try{ r=await api('POST','/dashboard/api/workers/'+encodeURIComponent(id)+'/revoke',{}); }catch(e){ r=null; }
+  if(!(r&&r.ok)){
+    let why=r?('status '+r.status):'no response';
+    if(r){ try{ const d=await r.json(); if(d&&d.message) why=d.message; }catch(e){} }
+    window.alert('Revoke failed: '+why);
+  }
+  loadFleet();
 }
 /* A worker enforces the block list only when its heartbeat advertised blocklist/v1. */
 function hasBlockCap(w){ return Array.isArray(w.caps)&&w.caps.indexOf('blocklist/v1')>=0; }

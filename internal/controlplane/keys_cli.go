@@ -332,6 +332,12 @@ func (o *OfflineKeys) Reset(ctx context.Context, purpose string) (OfflineResetRe
 		return OfflineResetResult{}, err
 	}
 	defer func() { _ = release() }()
+	return o.resetLocked(ctx, purpose)
+}
+
+// resetLocked is Reset for a caller that already holds the state dir's
+// instance lock (the ca commands take it once for their whole sequence).
+func (o *OfflineKeys) resetLocked(ctx context.Context, purpose string) (OfflineResetResult, error) {
 	actor := keys.Actor{Subject: adminaudit.CLIActor(), AuthMethod: adminaudit.AuthMethodCLI}
 	res, err := o.mgr.Reset(ctx, purpose, actor)
 	if err != nil {
