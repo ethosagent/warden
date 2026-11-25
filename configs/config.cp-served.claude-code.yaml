@@ -1,0 +1,53 @@
+# Control-plane config for the Claude Code recipe (deploy/compose/
+# docker-compose.claude-code.yml). Seed copy: the control plane copies it to its
+# state dir on first start and serves the copy.
+#
+# Default-deny, one allowed destination, one registered agent in require mode.
+# Everything the worker needs rides the policy wire; the CP-local blocks (keys,
+# tokenService) are read only here and never reach a worker.
+#
+# Dev values: the issuer below is the dev Dex of docker-compose.identity.yml.
+# For another IdP change identity.issuer / internalIssuerURL together with the
+# sidecar's WARDEN_IDENTITY_ISSUER, and tokenService.issuer with the CP's own
+# https URL (it is also the audience of the agent's key assertion).
+
+policy:
+  allowlist:
+    - domain: api.anthropic.com
+      port: 443
+  # Nothing else is listed: an unlisted host is denied (default-deny).
+
+logging:
+  level: info
+  format: json
+
+# Require mode for the one agent: a request must carry a Warden token minted for
+# user + agent claude-code, or it is refused (407). There is no defaultMode, so
+# any other agent id stays off.
+agents:
+  - id: claude-code
+    identity: require
+
+# Verifies the user's ID token at the token endpoint and names the issuer the
+# worker's bundle carries. acceptDexTokens false: a raw Dex token presented to
+# the worker is refused (unbound_token); only Warden tokens are accepted.
+identity:
+  issuer: http://localhost:5556/dex
+  internalIssuerURL: http://dex:5556
+  audience: warden
+  allowedAZP: [agent-harness, warden-cli]
+  acceptDexTokens: false
+
+# CP-local: signing keys (token + bundle). Created on first start; --bundles=require
+# and the token service both need them. The key store is <state-dir>/keys on the
+# cp-data volume: back it up separately (docs/runbooks/key-rotation.md).
+keys:
+  enabled: true
+
+# CP-local: the RFC 8693 token endpoint the warden-identity sidecar calls.
+# issuer is this control plane's own https URL as the sidecar and workers see it
+# (compose service name, TLS cert minted for it by --tls-host).
+tokenService:
+  enabled: true
+  issuer: https://control-plane:7070
+  allowedAZP: [agent-harness, warden-cli]
