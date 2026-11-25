@@ -378,8 +378,8 @@ func tokenExchangeIdPUnavailable(t *testing.T, h *harness.H) {
 // tokenExchangeIdPOutageDuringRotation: the control plane has cached the
 // IdP's JWKS, then the IdP rotates its signing key and becomes unreachable. A
 // subject token signed with the new kid cannot be checked, so the endpoint
-// answers 503 temporarily_unavailable/idp_unavailable with Retry-After (the
-// harness retries) rather than 400 subject_invalid (which forces a re-login),
+// answers 503 temporarily_unavailable/idp_unavailable with Retry-After (a
+// client is expected to retry) rather than 400 subject_invalid (which forces a re-login),
 // both on the failing refetch and inside the 30 s refetch floor after it. A
 // token under the cached kid keeps working, and once the IdP is back the new
 // kid verifies.

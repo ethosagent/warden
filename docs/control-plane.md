@@ -2788,6 +2788,9 @@ expired, bad signature): a match can only deny. Gaps:
 
 - A request that carries **no token** is anonymous in attribute mode and is not
   matched (P2 require mode closes this).
+- A token whose key cannot be checked (`unverified`, `jwks_unavailable`: a cold
+  key cache, or a kid absent from the cache while the IdP is unreachable)
+  carries no claims and is not matched, the same as no token.
 - With `identity` mode off the worker parses no token, so there are no claims to
   match: the block list needs attribute mode.
 - In transparent mode there is no `CONNECT` and no `Proxy-Authorization`, so the
