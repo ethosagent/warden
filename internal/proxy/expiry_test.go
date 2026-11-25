@@ -226,7 +226,8 @@ func TestRequireSessionExpiry(t *testing.T) {
 	})
 
 	t.Run("h2_goaway", func(t *testing.T) {
-		e := newExpiryEnv(t, nil)
+		inf := NewInflight()
+		e := newExpiryEnv(t, func(c *Config) { c.Inflight = inf })
 		conn, br, status := e.connect("Proxy-Authorization: " + basicAuth("tok-w-alice") + "\r\n")
 		if !strings.Contains(status, "200") {
 			t.Fatalf("CONNECT status %q", status)
@@ -235,6 +236,13 @@ func TestRequireSessionExpiry(t *testing.T) {
 		fr := newRawH2(t, tc)
 		fr.openStream(1, "POST", false) // in flight: the body is still to come
 		e.waitArmed(t, 1)
+		// GOAWAY names the last stream the server saw, so the stream must be in
+		// flight server-side before the clock moves.
+		for deadline := time.Now().Add(5 * time.Second); len(inf.InFlight()) != 1; time.Sleep(time.Millisecond) {
+			if time.Now().After(deadline) {
+				t.Fatal("the stream never reached the proxy")
+			}
+		}
 
 		e.fk.Advance(expTTL - time.Second)
 		if fr.sawGoAway() {
@@ -441,6 +449,7 @@ type rawH2 struct {
 	enc *hpack.Encoder
 	buf *bufferedHPACK
 
+	wmu    sync.Mutex // serializes writes: the Framer is not safe for concurrent use
 	mu     sync.Mutex
 	goaway bool
 	status map[uint32]string
@@ -476,7 +485,9 @@ func (r *rawH2) readLoop() {
 		switch f := f.(type) {
 		case *http2.SettingsFrame:
 			if !f.IsAck() {
+				r.wmu.Lock()
 				_ = r.fr.WriteSettingsAck()
+				r.wmu.Unlock()
 			}
 		case *http2.GoAwayFrame:
 			r.mu.Lock()
@@ -500,12 +511,16 @@ func (r *rawH2) openStream(id uint32, method string, endStream bool) {
 	for _, kv := range [][2]string{{":method", method}, {":scheme", "https"}, {":authority", idHost}, {":path", "/x"}} {
 		_ = r.enc.WriteField(hpack.HeaderField{Name: kv[0], Value: kv[1]})
 	}
+	r.wmu.Lock()
+	defer r.wmu.Unlock()
 	if err := r.fr.WriteHeaders(http2.HeadersFrameParam{StreamID: id, BlockFragment: r.buf.b, EndHeaders: true, EndStream: endStream}); err != nil {
 		r.t.Fatal(err)
 	}
 }
 
 func (r *rawH2) endStream(id uint32) {
+	r.wmu.Lock()
+	defer r.wmu.Unlock()
 	if err := r.fr.WriteData(id, true, nil); err != nil {
 		r.t.Fatal(err)
 	}
