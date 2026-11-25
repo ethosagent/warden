@@ -1166,6 +1166,9 @@ YAML if the mirror is lost.
 
 ## Change drafts and the two-person rule (`console.approvals`)
 
+The operator guide, with the config keys, what is held, replay, the offline CLI and the
+known limits, is [approvals.md](approvals.md).
+
 With `console.approvals.enabled` (off by default; it needs `console.auth: oidc`, the
 versioned policy store and the admin audit log) the control plane serves the change
 draft API under `/dashboard/api/changes`. A draft is a proposed policy doc based on a
