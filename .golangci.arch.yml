@@ -162,6 +162,7 @@ linters:
             - '!${base-path}/test/**'
             - '!${base-path}/internal/agentreg/agentregtest/**'
             - '!${base-path}/internal/identity/adapters/oidc/**'
+            - '!${base-path}/internal/workerca/adapters/cpclient/**'
             - '!${base-path}/internal/config/**'
             - '!${base-path}/internal/denyreason/**'
             - '!${base-path}/internal/keys/**'

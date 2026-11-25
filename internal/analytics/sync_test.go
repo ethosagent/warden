@@ -230,3 +230,28 @@ func TestSyncOnce_EmptyStore_NoOp(t *testing.T) {
 		t.Errorf("batches = %d, want 0", len(mock.batches))
 	}
 }
+
+// TestSyncOnce_ProxyIDFunc_ReadPerBatch: a worker whose id arrives after boot
+// (an enrollment that finished late) stamps UIDs from the first batch that has
+// an id, and none before.
+func TestSyncOnce_ProxyIDFunc_ReadPerBatch(t *testing.T) {
+	s := newTestStore(t, 0)
+	storeN(t, s, 2)
+	remote := &recordingRemote{}
+	w := NewSyncWorker(s, remote, "", 1, 100, time.Hour)
+	id := ""
+	w.SetProxyIDFunc(func() string { return id })
+	if err := w.SyncOnce(); err != nil {
+		t.Fatal(err)
+	}
+	id = "late-worker"
+	if err := w.SyncOnce(); err != nil {
+		t.Fatal(err)
+	}
+	if remote.batches[0][0].UID != "" {
+		t.Errorf("a batch before the id existed carries UID %q", remote.batches[0][0].UID)
+	}
+	if remote.batches[1][0].UID == "" {
+		t.Error("a batch after the id arrived carries no UID")
+	}
+}

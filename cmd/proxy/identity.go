@@ -18,6 +18,8 @@ import (
 const (
 	exitLoginRequired     = 2
 	exitIssuerUnreachable = 3
+	// exitExchangeDenied: the control plane refused the agent's token exchange.
+	exitExchangeDenied = 4
 )
 
 // maxTokenInput caps a token read from stdin or a file; real ID tokens are a
@@ -73,6 +75,8 @@ type identityFlags struct {
 	issuer, clientID, audience, secretEnv, cacheDir string
 	scopes                                          []string
 	verbose                                         bool
+	// Agent mode (a Warden token from the control plane's token endpoint).
+	agentID, agentKeyFile, tokenEndpoint, cpCA, subjectTokenFile string
 }
 
 func newIdentityCmd() *cobra.Command { return newIdentityCmdWith(defaultIdentityDeps()) }
@@ -89,7 +93,7 @@ func newIdentityCmdWith(deps identityDeps) *cobra.Command {
 		Long: "Commands for an agent, script or harness to obtain an OIDC ID token from the " +
 			"configured issuer and route through the Warden worker. These commands do not read " +
 			"the worker --config. Exit codes: 2 login is required, 3 the issuer is unreachable " +
-			"and no valid cached token remains, 1 any other error.",
+			"and no valid cached token remains, 4 the control plane refused an agent token exchange, 1 any other error.",
 	}
 	pf := cmd.PersistentFlags()
 	pf.StringVar(&f.issuer, "issuer", "", "OIDC issuer URL (env WARDEN_IDENTITY_ISSUER); https, or http on loopback only")
@@ -100,8 +104,14 @@ func newIdentityCmdWith(deps identityDeps) *cobra.Command {
 	pf.StringVar(&f.cacheDir, "cache-dir", "", "token cache directory (env WARDEN_IDENTITY_CACHE_DIR)")
 	pf.BoolVar(&f.verbose, "verbose", false, "log issuer, client id, scopes, expiry and a token fingerprint to stderr (never a token)")
 
+	pf.StringVar(&f.agentID, "agent-id", "", "agent id: switches token and status to the Warden token (env "+identityclient.EnvAgentID+")")
+	pf.StringVar(&f.agentKeyFile, "agent-key-file", "", "the agent's Ed25519 key file (env "+identityclient.EnvAgentKeyFile+"; default <user config dir>/warden/agents/<id>.key)")
+	pf.StringVar(&f.tokenEndpoint, "token-endpoint", "", "control plane token endpoint URL, required with --agent-id (env "+identityclient.EnvTokenEndpoint+")")
+	pf.StringVar(&f.cpCA, "cp-ca", "", "PEM CA bundle that signs the control plane's TLS certificate (env "+identityclient.EnvCPCA+")")
+	pf.StringVar(&f.subjectTokenFile, "subject-token-file", "", "read the user's ID token from this 0600 `PATH` instead of the login cache (agent mode)")
+
 	r := &identityRunner{deps: deps, f: f}
-	cmd.AddCommand(r.loginCmd(), r.tokenCmd(), r.statusCmd(), r.envCmd(), r.logoutCmd(), r.execCmd())
+	cmd.AddCommand(r.loginCmd(), r.tokenCmd(), r.statusCmd(), r.envCmd(), r.logoutCmd(), r.execCmd(), r.enrollCmd())
 	return cmd
 }
 
@@ -130,19 +140,25 @@ func (r *identityRunner) client(cmd *cobra.Command) (*identityclient.Client, err
 	if err != nil {
 		return nil, err
 	}
-	level := slog.LevelError
-	if r.f.verbose {
-		level = slog.LevelDebug
-	}
 	c := &identityclient.Client{
 		Config: cfg,
 		Getenv: r.deps.getenv,
-		Log:    slog.New(slog.NewTextHandler(cmd.ErrOrStderr(), &slog.HandlerOptions{Level: level})),
+		Log:    r.logger(cmd),
 	}
 	if r.deps.tune != nil {
 		r.deps.tune(c)
 	}
 	return c, nil
+}
+
+// logger writes to stderr: errors only, or every outcome with --verbose. Log
+// lines never carry a token (identityclient logs a fingerprint).
+func (r *identityRunner) logger(cmd *cobra.Command) *slog.Logger {
+	level := slog.LevelError
+	if r.f.verbose {
+		level = slog.LevelDebug
+	}
+	return slog.New(slog.NewTextHandler(cmd.ErrOrStderr(), &slog.HandlerOptions{Level: level}))
 }
 
 // mapErr turns the library's sentinel errors into exit codes.
@@ -152,7 +168,16 @@ func mapErr(err error) error {
 		return nil
 	case errors.Is(err, identityclient.ErrLoginRequired):
 		return &exitError{exitLoginRequired, err}
-	case errors.Is(err, identityclient.ErrIssuerUnreachable):
+	case errors.Is(err, identityclient.ErrIssuerUnreachable), errors.Is(err, identityclient.ErrCPUnreachable):
+		return &exitError{exitIssuerUnreachable, err}
+	}
+	var denied identityclient.ErrExchangeDenied
+	var limited identityclient.ErrRateLimited
+	var unavailable identityclient.ErrUnavailable
+	switch {
+	case errors.As(err, &denied):
+		return &exitError{exitExchangeDenied, err}
+	case errors.As(err, &limited), errors.As(err, &unavailable):
 		return &exitError{exitIssuerUnreachable, err}
 	}
 	return err
@@ -189,12 +214,24 @@ func (r *identityRunner) loginCmd() *cobra.Command {
 }
 
 func (r *identityRunner) tokenCmd() *cobra.Command {
-	return leaf(&cobra.Command{
+	var scope string
+	cmd := leaf(&cobra.Command{
 		Use:   "token",
 		Short: "Print a valid ID token to stdout.",
 		Long: "Prints the ID token to stdout, refreshing it first when it is past two thirds of its " +
-			"lifetime. It never prompts: with no valid login it exits 2.",
+			"lifetime. It never prompts: with no valid login it exits 2.\n\n" +
+			"With --agent-id it prints a Warden token instead: the user's ID token is exchanged at the " +
+			"control plane's token endpoint with the agent's key. Exit 4: the control plane refused the " +
+			"exchange; exit 3: the control plane is unreachable.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if r.agentMode() {
+				tok, err := r.agentToken(cmd, scope)
+				if err != nil {
+					return mapErr(err)
+				}
+				fmt.Fprintln(cmd.OutOrStdout(), tok.AccessToken)
+				return nil
+			}
 			c, err := r.client(cmd)
 			if err != nil {
 				return err
@@ -208,13 +245,21 @@ func (r *identityRunner) tokenCmd() *cobra.Command {
 			return nil
 		},
 	})
+	cmd.Flags().StringVar(&scope, "scope", "", "scope to request with --agent-id (space-delimited)")
+	return cmd
 }
 
 func (r *identityRunner) statusCmd() *cobra.Command {
-	return leaf(&cobra.Command{
+	var scope string
+	cmd := leaf(&cobra.Command{
 		Use:   "status",
 		Short: "Show the cached login. Never prints the token.",
+		Long: "Shows the cached login. With --agent-id it exchanges for a Warden token and shows its " +
+			"sub, act.sub, cnf.jkt, scope and exp; the token itself is never printed.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if r.agentMode() {
+				return r.agentStatus(cmd, scope)
+			}
 			c, err := r.client(cmd)
 			if err != nil {
 				return err
@@ -233,6 +278,8 @@ func (r *identityRunner) statusCmd() *cobra.Command {
 			return nil
 		},
 	})
+	cmd.Flags().StringVar(&scope, "scope", "", "scope to request with --agent-id (space-delimited)")
+	return cmd
 }
 
 func (r *identityRunner) logoutCmd() *cobra.Command {

@@ -50,7 +50,36 @@ type ControlPlaneConfig struct {
 	// BundleExpiry is what an expired bundle means: keep the last-known-good
 	// policy enforced (default) or deny.
 	BundleExpiry BundleExpiry
+
+	// StateDir is the worker's own state directory (created 0700). The worker
+	// certificate lives in its cert/ subdirectory (W-P2-WCA-03).
+	StateDir string
+	// Enrollment, when set, makes the worker trade a wet_ enrollment token for a
+	// worker client certificate and keep it renewed. Exclusive with ClientCert.
+	Enrollment EnrollmentConfig
+	// ClientCert and ClientKey are the PEM paths of a client certificate issued
+	// outside Warden. Such a certificate is presented as is and never renewed.
+	ClientCert string
+	ClientKey  string
 }
+
+// EnrollmentConfig is the `controlPlane.enrollment` block (W-P2-WCA-03). Both
+// fields name environment variables; the token itself is never in the file.
+type EnrollmentConfig struct {
+	// TokenEnv names the env var holding the wet_ enrollment token. Set means
+	// enrollment is on.
+	TokenEnv string
+	// WorkerIDSuffixEnv names the env var holding the worker id suffix a
+	// prefix-bound token appends to its prefix. Empty or unset: the hostname.
+	WorkerIDSuffixEnv string
+}
+
+// Enabled reports whether the worker enrolls for its certificate.
+func (e EnrollmentConfig) Enabled() bool { return e.TokenEnv != "" }
+
+// CertAuth reports whether the worker authenticates to the control plane with a
+// client certificate (enrolled or supplied) instead of the bearer token.
+func (c ControlPlaneConfig) CertAuth() bool { return c.Enrollment.Enabled() || c.ClientCert != "" }
 
 // BundleExpiry selects the behaviour once the applied bundle has expired.
 type BundleExpiry string
@@ -92,6 +121,14 @@ type rawControlPlane struct {
 	BundleIssuer         string           `yaml:"bundleIssuer"`
 	BundleClockSkew      string           `yaml:"bundleClockSkew"`
 	BundleExpiry         string           `yaml:"bundleExpiry"`
+
+	StateDir   string `yaml:"stateDir"`
+	Enrollment *struct {
+		TokenEnv          string `yaml:"tokenEnv"`
+		WorkerIDSuffixEnv string `yaml:"workerIdSuffixEnv"`
+	} `yaml:"enrollment"`
+	ClientCert string `yaml:"clientCert"`
+	ClientKey  string `yaml:"clientKey"`
 }
 
 // control-plane defaults applied when the corresponding field is omitted.
@@ -114,6 +151,18 @@ func parseControlPlane(r *rawControlPlane) (ControlPlaneConfig, error) {
 	c.TokenEnv = r.TokenEnv
 	c.CACert = strings.TrimSpace(r.CACert)
 	c.LocalOnly = r.LocalOnly
+	c.StateDir = strings.TrimSpace(r.StateDir)
+	c.ClientCert = strings.TrimSpace(r.ClientCert)
+	c.ClientKey = strings.TrimSpace(r.ClientKey)
+	if r.Enrollment != nil {
+		c.Enrollment = EnrollmentConfig{
+			TokenEnv:          strings.TrimSpace(r.Enrollment.TokenEnv),
+			WorkerIDSuffixEnv: strings.TrimSpace(r.Enrollment.WorkerIDSuffixEnv),
+		}
+		if c.Enrollment.TokenEnv == "" {
+			return ControlPlaneConfig{}, fmt.Errorf("config: controlPlane.enrollment.tokenEnv is required when controlPlane.enrollment is set")
+		}
+	}
 	c.PollInterval = defaultControlPlanePollInterval
 	c.LongPollWait = defaultLongPollWait
 	c.HeartbeatInterval = defaultHeartbeatInterval
@@ -135,6 +184,15 @@ func parseControlPlane(r *rawControlPlane) (ControlPlaneConfig, error) {
 // validateControlPlane enforces the control-plane block's requirements only when
 // it is enabled (Endpoint set), so an absent/empty block is always valid.
 func validateControlPlane(c ControlPlaneConfig) error {
+	if c.Enrollment.Enabled() && c.ClientCert != "" {
+		return fmt.Errorf("config: controlPlane.enrollment and controlPlane.clientCert are mutually exclusive")
+	}
+	if (c.ClientCert == "") != (c.ClientKey == "") {
+		return fmt.Errorf("config: controlPlane.clientCert and controlPlane.clientKey must be set together")
+	}
+	if c.Enrollment.Enabled() && c.StateDir == "" {
+		return fmt.Errorf("config: controlPlane.stateDir is required when controlPlane.enrollment is set")
+	}
 	if c.Endpoint == "" {
 		return nil
 	}
