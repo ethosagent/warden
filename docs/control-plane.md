@@ -2622,6 +2622,18 @@ diagnose mass `expired` or not-yet-valid failures.
 `identity_reason` values in the range). It is omitted when no event in the range
 carries identity fields.
 
+Agent binding (W-P2-WBND-02): a worker serves exactly one agent, and every
+Warden token it verifies is checked on every request against the registered
+agents of the bundle currently applied: the token's `act.sub` must be that agent,
+the agent must be active, and `cnf.jkt` must be one of its registered key
+thumbprints (`agent_unregistered`, `agent_disabled`, `agent_mismatch`,
+`cnf_mismatch`, in that order). This is agent match plus key liveness within one
+long-poll cycle, **not** proof of possession: a token is a bearer credential. A
+port-derived worker id such as `agent:8080` never matches a registry id, so bind
+the worker with `--agent-id`. Events and decision lines of a valid Warden
+identity carry the agent (`user_act` on events, `user.act` on the decision line)
+and `identity_token_type`; no token or `cnf` value is ever logged.
+
 Recommended alerts:
 
 - The non-valid share per worker, for example

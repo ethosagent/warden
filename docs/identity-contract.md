@@ -289,7 +289,11 @@ strings never become a reason.
 | `jwks_unavailable` | The issuer's key set could not be fetched (status `unverified`) |
 | `wrong_nonce` | Console login only: the nonce does not match. Never seen on proxied traffic |
 | `missing_claim` | A Warden token without `sub`, `act.sub`, `sid`, `jti` or `cnf.jkt` |
-| `unbound_token` | An IdP token on a worker that does not accept them (`identity.acceptDexTokens` false) |
+| `unbound_token` | An IdP token on a worker that does not accept them (`identity.acceptDexTokens` false), and in `require` mode every IdP token |
+| `agent_unregistered` | Warden token, but the worker's bound agent is not in the bundle's registered agents (a port-derived id such as `agent:8080` never matches) |
+| `agent_disabled` | Warden token, but the bound agent is disabled in the current bundle |
+| `agent_mismatch` | Warden token whose `act.sub` is not the worker's bound agent |
+| `cnf_mismatch` | Warden token whose `cnf.jkt` is not one of the bound agent's registered key thumbprints |
 
 ### Challenge mode: 407 with a sign-in URL
 
@@ -456,6 +460,43 @@ the same poll; any process that can read that `407` can also claim the login.
 The ID token is a bearer token, not bound to the agent: whoever holds it can use
 it until `exp` (at most 1 h). Phase 2's `require` mode closes this.
 
+## Agent binding of Warden tokens
+
+A worker serves one agent (the id from `--agent-id`, then `central.agentID`, then
+`worker.defaultAgentID`). After a Warden token's signature verifies, the worker
+checks it against the registered agents of the **current** signed bundle, in this
+order, and the first failure is the reason:
+
+1. the worker's agent is not registered: `agent_unregistered`. A port-derived id
+   such as `agent:8080` never matches a registry id;
+2. the agent is disabled: `agent_disabled`;
+3. `act.sub` is another agent: `agent_mismatch`;
+4. `cnf.jkt` is not one of the agent's registered key thumbprints: `cnf_mismatch`.
+
+A failure gives status `invalid` and no subject. In `attribute` mode the request
+continues as anonymous under policy, so identity-scoped allow entries deny with
+`identity_required`; the block list still matches the parsed `sub` and `email`,
+because a match can only deny. The check runs on every request, not once per
+connection, against the snapshot applied by the latest long-poll, so removing a
+key or disabling the agent ends the identity of an open CONNECT tunnel on its
+next request, within one long-poll cycle.
+
+The per-request re-check applies to terminated tunnels, on each HTTP/1 or h2
+request. It also requires the signing key to still be in the bundle's token key
+set (`unknown_kid`, for an emergency key removal) and the issuer to still match
+(`wrong_iss`). In `challenge` mode a request that fails the re-check is answered
+`403` `identity_required` with `Connection: close`, not served anonymously.
+
+**Limit.** A raw tunnel (a worker without a CA) and an upgraded WebSocket are
+bound at CONNECT or upgrade only and run until the token's `exp`. Closing those
+sessions when binding stops holding belongs to `require` mode session closing
+(W-P2-WBND-03 and W-P2-WBND-09).
+
+**What this proves.** The token was minted for this worker's agent, and the key
+it was minted for is still registered. It is **not** proof of possession: the
+token is a bearer credential and the worker cannot tell who presents it. Binding
+is one agent per worker; a second agent needs its own worker.
+
 ## Observability
 
 Event fields (on `/dashboard/api/traffic` and in the fleet view):
@@ -469,6 +510,8 @@ Event fields (on `/dashboard/api/traffic` and in the fleet view):
 | `user_groups` | Status `valid` |
 | `user_groups_truncated` | Status `valid` and groups were dropped for count or size |
 | `user_sid` | Status `valid` and the token has `sid` |
+| `user_act` | Status `valid` and the token is a Warden token: the agent it was minted for (`act.sub`) |
+| `identity_token_type` | Status `valid` and the verifier says which kind: `warden` or `idp` |
 
 The unverified `sub` or `email` of an expired or invalid token is never stored.
 

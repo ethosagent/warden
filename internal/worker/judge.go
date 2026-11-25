@@ -259,6 +259,17 @@ func resolveAgentID(flag, central string, pol config.Policy, listenAddr string) 
 	return defaultAgentID(pol, listenAddr), nil
 }
 
+// agentIDSource names where resolveAgentID took the id from.
+func agentIDSource(flag, central string) string {
+	switch {
+	case flag != "":
+		return "--agent-id"
+	case central != "":
+		return "central.agentID"
+	}
+	return "derived"
+}
+
 // defaultAgentID derives the agent identity. When exactly one agent policy is
 // configured, its id is used directly so it matches the configured policy key;
 // otherwise the port-binding identifier labels the agent by listen port.

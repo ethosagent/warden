@@ -26,8 +26,9 @@ import (
 const (
 	SchemaDecisionV1 = "warden.decision.v1"
 	// SchemaRev 2 adds the user_blocked reason (W-P1-BLOCK-02); 3 adds
-	// agent_disabled (W-P2-AREG-05).
-	SchemaRev = 3
+	// agent_disabled (W-P2-AREG-05); 4 adds user.act and user.token_type
+	// (W-P2-WBND-02).
+	SchemaRev = 4
 )
 
 // QueryMode says what FromEvent may record of the request query.
@@ -77,6 +78,9 @@ type User struct {
 	Groups          []string `json:"groups,omitempty"`
 	GroupsTruncated bool     `json:"groups_truncated,omitempty"`
 	SID             string   `json:"sid,omitempty"`
+	// Act is act.sub of a Warden token; TokenType is warden or idp.
+	Act       string `json:"act,omitempty"`
+	TokenType string `json:"token_type,omitempty"`
 }
 
 // Record is one warden.decision.v1 line. Field order here is the key order on
@@ -180,6 +184,8 @@ func FromEvent(ev analytics.Event, m Meta, q QueryMode) Record {
 			u.Sub = cut(ev.UserSub, maxFieldBytes)
 			u.Email = cut(ev.UserEmail, maxFieldBytes)
 			u.SID = cut(ev.UserSID, maxFieldBytes)
+			u.Act = cut(ev.UserAct, maxFieldBytes)
+			u.TokenType = cut(ev.IdentityTokenType, maxFieldBytes)
 			u.Groups, u.GroupsTruncated = boundedGroups(ev.UserGroups, ev.UserGroupsTruncated)
 		}
 		r.User = u

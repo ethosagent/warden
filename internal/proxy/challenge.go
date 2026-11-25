@@ -43,6 +43,7 @@ const (
 // identity has expired, or that names a second subject, in challenge mode.
 var (
 	identityExpiredBody  = `{"error":"` + string(denyreason.IdentityExpired) + `"}`
+	identityRequiredBody = `{"error":"` + string(denyreason.IdentityRequired) + `"}`
 	identityConflictBody = `{"error":"` + string(denyreason.IdentityConflict) + `"}`
 )
 
@@ -184,6 +185,13 @@ func (p *Proxy) challengeTerminated(s *requestScope, h *identityHolder) bool {
 		reason, body = denyreason.IdentityExpired, identityExpiredBody
 	case identity.StatusConflict:
 		reason, body = denyreason.IdentityConflict, identityConflictBody
+	case identity.StatusInvalid:
+		// A live CONNECT identity that no longer binds (key removed, agent
+		// disabled, signing key gone) must not drop to anonymous.
+		if !s.idRebound {
+			return false
+		}
+		reason, body = denyreason.IdentityRequired, identityRequiredBody
 	default:
 		return false
 	}
