@@ -531,3 +531,21 @@ func TestNewIndexRequiresClock(t *testing.T) {
 		t.Fatal("NewIndex without a clock succeeded")
 	}
 }
+
+func TestIndexPendingUse(t *testing.T) {
+	m, _, ix := setup(t)
+	_, k, _ := m.Create(context.Background(), mkParams("alice", "ci"))
+	if _, ok := ix.PendingUse(k.ID); ok {
+		t.Fatal("a pending use before any request")
+	}
+	ix.MarkUsed(k.ID, t0, "1.1.1.1")
+	if u, ok := ix.PendingUse(k.ID); !ok || !u.At.Equal(t0) || u.IP != "1.1.1.1" {
+		t.Fatalf("PendingUse = %+v %v", u, ok)
+	}
+	if err := ix.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := ix.PendingUse(k.ID); ok {
+		t.Error("a flushed use is still pending")
+	}
+}

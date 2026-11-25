@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/ethosagent/warden/internal/adminaudit"
+	"github.com/ethosagent/warden/internal/apikeys"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/secrets"
 )
@@ -100,6 +101,14 @@ func (s *Server) secretsAuthOK(w http.ResponseWriter, r *http.Request) bool {
 	if !ok {
 		logDenied(s.cfg.Logger, row, 0, Principal{}, r)
 		writeAuthzJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthenticated"})
+		return false
+	}
+	if p.Kind == PrincipalAPIKey {
+		// Never keyable: a valid key is refused here, not treated as no
+		// credential (the secrets routes are ScopeNone in cpRouteTable).
+		s.apiKeyCounts.inc(APIKeyOutcomeInsufficientScope)
+		logDenied(s.cfg.Logger, row, principalRole(s.cfg.Console, p), p, r)
+		writeAuthzJSON(w, http.StatusForbidden, map[string]string{"error": "insufficient_scope", "need": string(apikeys.ScopeNone)})
 		return false
 	}
 	role := principalRole(s.cfg.Console, p)

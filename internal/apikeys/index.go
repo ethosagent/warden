@@ -253,6 +253,16 @@ func (ix *Index) MarkUsed(id string, at time.Time, ip string) {
 	ix.usedMu.Unlock()
 }
 
+// PendingUse returns the latest use of a key that has not been flushed yet.
+// Management views overlay it on the stored last_used_at, which only moves on
+// the 60s flush.
+func (ix *Index) PendingUse(id string) (Use, bool) {
+	ix.usedMu.Lock()
+	defer ix.usedMu.Unlock()
+	u, ok := ix.used[id]
+	return u, ok
+}
+
 // Flush writes every pending last-use value in one transaction. A failure keeps
 // the values for the next flush.
 func (ix *Index) Flush(ctx context.Context) error {
