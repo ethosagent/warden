@@ -1733,8 +1733,8 @@ stop the token working at once and give the worker a new one, with the worker ne
 
 P1 has no prefix binding: a token is bound to exactly one proxy id, compared exactly. Run each
 replica with its own token and its own stable `central.proxyID`. Autoscaled pools whose replicas
-cannot carry a stable id use a prefix-bound enrollment token instead: see [Replica
-pools](#replica-pools-prefix-tokens).
+cannot carry a stable id use a prefix-bound enrollment token with worker certificates
+(W-P2-WCA): see [Replica pools](#replica-pools-prefix-tokens).
 
 ### A revoked worker
 
