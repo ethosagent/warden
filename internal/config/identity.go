@@ -6,9 +6,10 @@ import (
 	"strings"
 )
 
-// Identity modes. Phase 1 supports off, attribute and challenge; "require" is a
-// Phase 2 mode and is rejected with an explicit message. The strings live here
-// (not in internal/identity) so config carries no dependency on the verifier.
+// Identity modes. "require" (Phase 2) is served by the control plane and
+// enforced by a managed worker; a standalone worker's local YAML rejects it
+// (ValidateStandaloneIdentity). The strings live here (not in internal/identity)
+// so config carries no dependency on the verifier.
 const (
 	// IdentityModeOff is the default: no token is read or verified.
 	IdentityModeOff = "off"
@@ -20,9 +21,16 @@ const (
 	// URL (docs/identity-contract.md).
 	IdentityModeChallenge = "challenge"
 
-	// IdentityModeRequire is a Phase 2 mode: config validation still refuses it,
-	// but the control plane recognises it in a worker heartbeat.
+	// IdentityModeRequire refuses a CONNECT without a valid Warden token bound
+	// to the worker's agent with a 407 (no sign-in), and a terminated request
+	// whose identity is not valid with a 403. Only a control-plane-managed
+	// worker enforces it: it needs the signed bundle's keys and agents.
 	IdentityModeRequire = "require"
+
+	// Where an effective identity mode came from (EffectiveIdentityMode).
+	IdentitySourceAgent   = "agents[].identity"
+	IdentitySourceDefault = "identity.defaultMode"
+	IdentitySourceUnset   = "unset"
 
 	// MaxIdentityClockSkewSeconds bounds identity.clockSkewSeconds.
 	MaxIdentityClockSkewSeconds = 300
@@ -48,7 +56,7 @@ var DefaultSignInScopes = []string{"openid", "email", "profile", "groups", "offl
 //
 // The zero value (no block) means identity is off, byte-identical to before.
 type IdentitySettings struct {
-	// DefaultMode is off|attribute; "" means off. An agent's own Identity field
+	// DefaultMode is off|attribute|challenge|require; "" means off. An agent's own Identity field
 	// overrides it.
 	DefaultMode string `json:"defaultMode,omitempty" yaml:"defaultMode"`
 	// Issuer is the expected token `iss`. Required when any mode is attribute.
@@ -130,32 +138,65 @@ func (s *SignInSettings) Effective() SignInSettings {
 	return out
 }
 
-// identityEnabled reports whether any mode other than off is configured, either
-// as the default or on an agent.
-func identityEnabled(s IdentitySettings, agents []AgentPolicy) bool {
-	if s.DefaultMode != "" && s.DefaultMode != IdentityModeOff {
+// EffectiveIdentityMode resolves the identity mode of the agent a worker is
+// bound to and says where it came from: the agent's own agents[].identity, then
+// identity.defaultMode, then off (source unset). An empty value at either level
+// falls through. It is the one resolver the worker applies and logs.
+func EffectiveIdentityMode(agentID string, agents []AgentPolicy, s IdentitySettings) (mode, source string) {
+	for _, a := range agents {
+		if a.ID == agentID && a.Identity != "" {
+			return a.Identity, IdentitySourceAgent
+		}
+	}
+	if s.DefaultMode != "" {
+		return s.DefaultMode, IdentitySourceDefault
+	}
+	return IdentityModeOff, IdentitySourceUnset
+}
+
+// ValidateStandaloneIdentity refuses require anywhere in the identity config of
+// a worker that has no control plane (no controlPlane.endpoint, or --local-only).
+// Such a worker has no signed bundle, so it has no Warden token keys or
+// registered agents to enforce require with; the mode is served by a control
+// plane only. Call it on the local policy of a worker that is not managed.
+func ValidateStandaloneIdentity(p Policy) error {
+	if p.Identity.DefaultMode == IdentityModeRequire {
+		return fmt.Errorf("config: identity.defaultMode %q needs a control-plane-managed worker (controlPlane.endpoint): a standalone worker has no signed bundle to verify Warden tokens with; use %q or %q",
+			IdentityModeRequire, IdentityModeAttribute, IdentityModeChallenge)
+	}
+	for i, a := range p.Agents {
+		if a.Identity == IdentityModeRequire {
+			return fmt.Errorf("config: agents[%d].identity %q needs a control-plane-managed worker (controlPlane.endpoint): a standalone worker has no signed bundle to verify Warden tokens with; use %q or %q",
+				i, IdentityModeRequire, IdentityModeAttribute, IdentityModeChallenge)
+		}
+	}
+	return nil
+}
+
+// idpModeEnabled reports whether any mode that verifies IdP tokens (attribute
+// or challenge) is configured, as the default or on an agent. require alone
+// does not: it accepts Warden tokens only unless acceptDexTokens is set.
+func idpModeEnabled(s IdentitySettings, agents []AgentPolicy) bool {
+	on := func(m string) bool { return m == IdentityModeAttribute || m == IdentityModeChallenge }
+	if on(s.DefaultMode) {
 		return true
 	}
 	for _, a := range agents {
-		if a.Identity != "" && a.Identity != IdentityModeOff {
+		if on(a.Identity) {
 			return true
 		}
 	}
 	return false
 }
 
-// validateIdentityMode accepts "", off, attribute and challenge. require is a
-// Phase 2 mode.
+// validateIdentityMode accepts "", off, attribute, challenge and require.
 func validateIdentityMode(key, mode string) error {
 	switch mode {
-	case "", IdentityModeOff, IdentityModeAttribute, IdentityModeChallenge:
+	case "", IdentityModeOff, IdentityModeAttribute, IdentityModeChallenge, IdentityModeRequire:
 		return nil
-	case IdentityModeRequire:
-		return fmt.Errorf("config: %s %q is not supported in Phase 1 (it arrives in Phase 2); use %q, %q or %q",
-			key, mode, IdentityModeOff, IdentityModeAttribute, IdentityModeChallenge)
 	default:
-		return fmt.Errorf("config: %s %q is invalid (want %q, %q or %q)",
-			key, mode, IdentityModeOff, IdentityModeAttribute, IdentityModeChallenge)
+		return fmt.Errorf("config: %s %q is invalid (want %q, %q, %q or %q)",
+			key, mode, IdentityModeOff, IdentityModeAttribute, IdentityModeChallenge, IdentityModeRequire)
 	}
 }
 
@@ -251,7 +292,7 @@ func validateIdentity(s IdentitySettings, agents []AgentPolicy) error {
 	// An explicit acceptDexTokens false means no IdP token is ever verified, so
 	// the IdP issuer and audience are not needed to turn attribute on. Challenge
 	// still signs users in at the IdP and needs both.
-	if identityEnabled(s, agents) && (s.AcceptDexTokens == nil || *s.AcceptDexTokens || challengeEnabled(s, agents)) {
+	if idpModeEnabled(s, agents) && (s.AcceptDexTokens == nil || *s.AcceptDexTokens || challengeEnabled(s, agents)) {
 		if strings.TrimSpace(s.Issuer) == "" {
 			return fmt.Errorf("config: identity.issuer is required when an identity mode is attribute or challenge")
 		}

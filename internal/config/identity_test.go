@@ -24,7 +24,10 @@ func TestValidateIdentity(t *testing.T) {
 		{"http issuer with internal url", identityBlock("  defaultMode: attribute\n  issuer: http://localhost:5556/dex\n  audience: warden\n  internalIssuerURL: http://dex:5556\n"), ""},
 		{"internal url trailing slash", identityBlock("  issuer: https://i.example.com\n  internalIssuerURL: http://dex:5556/\n"), ""},
 		{"http issuer rejected even when off", identityBlock("  issuer: http://dex:5556\n"), "plain http"},
-		{"require is Phase 2", identityBlock("  defaultMode: require\n  issuer: https://i.example.com\n  audience: warden\n"), "Phase 2"},
+		{"require parses", identityBlock("  defaultMode: require\n  issuer: https://i.example.com\n  audience: warden\n"), ""},
+		{"require alone needs no issuer", identityBlock("  defaultMode: require\n"), ""},
+		{"require with acceptDexTokens true needs an issuer", identityBlock("  defaultMode: require\n  acceptDexTokens: true\n"), "acceptDexTokens true requires identity.issuer"},
+		{"require plus attribute agent still needs an issuer", baseAllow + "\nagents:\n  - id: a\n    identity: attribute\nidentity:\n  defaultMode: require\n", "identity.issuer is required"},
 		{"unknown mode", identityBlock("  defaultMode: enforce\n  issuer: https://i.example.com\n  audience: warden\n"), "invalid"},
 		{"http issuer without internal url", identityBlock("  defaultMode: attribute\n  issuer: http://dex:5556\n  audience: warden\n"), "plain http"},
 		{"missing issuer", identityBlock("  defaultMode: attribute\n  audience: warden\n"), "identity.issuer is required"},
@@ -40,7 +43,7 @@ func TestValidateIdentity(t *testing.T) {
 		{"negative ttl", identityBlock("  maxTokenTTLSeconds: -5\n"), "maxTokenTTLSeconds"},
 		{"agent attribute needs issuer", baseAllow + "\nagents:\n  - id: a\n    identity: attribute\n", "identity.issuer is required"},
 		{"agent attribute with block", baseAllow + "\nagents:\n  - id: a\n    identity: attribute\nidentity:\n  issuer: https://i.example.com\n  audience: warden\n", ""},
-		{"agent require is Phase 2", baseAllow + "\nagents:\n  - id: a\n    identity: require\n", "Phase 2"},
+		{"agent require parses", baseAllow + "\nagents:\n  - id: a\n    identity: require\n", ""},
 		{"agent unknown mode", baseAllow + "\nagents:\n  - id: a\n    identity: bogus\n", "agents[0].identity"},
 		{"acceptDexTokens false needs no issuer", identityBlock("  defaultMode: attribute\n  acceptDexTokens: false\n"), ""},
 		{"acceptDexTokens false with challenge still needs issuer", identityBlock("  defaultMode: challenge\n  acceptDexTokens: false\n"), "identity.issuer is required"},
@@ -229,7 +232,6 @@ func TestIdentityChallengeMode(t *testing.T) {
 			{"negative maxPending", identityBlock(block + "  signIn:\n    maxPending: -1\n"), "maxPending"},
 			{"huge startsPerMinute", identityBlock(block + "  signIn:\n    startsPerMinute: 100000\n"), "startsPerMinute"},
 			{"scope with a space", identityBlock(block + "  signIn:\n    scopes: [\"a b\"]\n"), "scopes"},
-			{"require still rejected", identityBlock("  defaultMode: require\n  issuer: https://i.example.com\n  audience: warden\n"), "Phase 2"},
 			{"unknown signIn key", identityBlock(block + "  signIn:\n    clientSecret: x\n"), "clientSecret"},
 		}
 		for _, tc := range cases {
@@ -334,4 +336,74 @@ func TestIdentityAcceptDexTokensDefault(t *testing.T) {
 			t.Fatal("the flag was dropped from the projection")
 		}
 	})
+}
+
+func TestRequireRejectedInStandaloneYAML(t *testing.T) {
+	for name, y := range map[string]string{
+		"default": identityBlock("  defaultMode: require\n"),
+		"agent":   baseAllow + "\nagents:\n  - id: a\n    identity: require\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			lp, err := parse([]byte(y))
+			if err != nil {
+				t.Fatalf("the YAML grammar accepts require (the control plane writes it): %v", err)
+			}
+			p, _ := lp.GetPolicy()
+			err = ValidateStandaloneIdentity(p)
+			if err == nil || !strings.Contains(err.Error(), "control-plane-managed") {
+				t.Fatalf("a standalone worker must refuse require, got %v", err)
+			}
+		})
+	}
+	for _, mode := range []string{"off", "attribute", "challenge"} {
+		lp, err := parse([]byte(identityBlock("  defaultMode: " + mode + "\n  issuer: https://i.example.com\n  audience: warden\n")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, _ := lp.GetPolicy()
+		if err := ValidateStandaloneIdentity(p); err != nil {
+			t.Errorf("mode %s refused for a standalone worker: %v", mode, err)
+		}
+	}
+}
+
+func TestEffectiveIdentityMode(t *testing.T) {
+	agents := []AgentPolicy{{ID: "a", Identity: IdentityModeRequire}, {ID: "b"}, {ID: "c", Identity: IdentityModeAttribute}}
+	cases := []struct {
+		name       string
+		agent      string
+		agents     []AgentPolicy
+		def        string
+		wantMode   string
+		wantSource string
+	}{
+		{"agent entry wins over default", "a", agents, IdentityModeOff, IdentityModeRequire, IdentitySourceAgent},
+		{"agent entry without a mode falls to default", "b", agents, IdentityModeRequire, IdentityModeRequire, IdentitySourceDefault},
+		{"unlisted agent takes default", "z", agents, IdentityModeChallenge, IdentityModeChallenge, IdentitySourceDefault},
+		{"agent attribute beats default require", "c", agents, IdentityModeRequire, IdentityModeAttribute, IdentitySourceAgent},
+		{"nothing set is off", "z", nil, "", IdentityModeOff, IdentitySourceUnset},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, src := EffectiveIdentityMode(tc.agent, tc.agents, IdentitySettings{DefaultMode: tc.def})
+			if m != tc.wantMode || src != tc.wantSource {
+				t.Fatalf("got (%q, %q), want (%q, %q)", m, src, tc.wantMode, tc.wantSource)
+			}
+		})
+	}
+}
+
+func TestServedSettingsWireAppliesRequireToBoundAgent(t *testing.T) {
+	body := `{"allowlist":[{"domain":"api.openai.com"}],"settings":{"agents":[{"id":"agent-a","identity":"require"}]}}`
+	_, s, err := parseRemotePolicy([]byte(body))
+	if err != nil || s == nil {
+		t.Fatalf("a served require must apply: %v", err)
+	}
+	m, src := EffectiveIdentityMode("agent-a", AgentsFromSettings(s.Agents), IdentityFromSettings(s.Identity))
+	if m != IdentityModeRequire || src != IdentitySourceAgent {
+		t.Fatalf("bound agent resolved (%q, %q)", m, src)
+	}
+	if m, _ := EffectiveIdentityMode("agent-b", AgentsFromSettings(s.Agents), IdentityFromSettings(s.Identity)); m != IdentityModeOff {
+		t.Fatalf("an unlisted agent must stay off, got %q", m)
+	}
 }

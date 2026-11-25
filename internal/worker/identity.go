@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -44,6 +45,9 @@ type identityWiring struct {
 	// live is the identity config the proxy is serving: the verifier (nil when
 	// off), the inputs it was built from, and the mode.
 	live liveIdentity
+	// loggedMode and loggedSource are the resolved mode and its source last
+	// logged, so a change (not every apply) is logged once.
+	loggedMode, loggedSource string
 
 	// now is the worker's clock (Run sets clk.Now); nil means time.Now.
 	now func() time.Time
@@ -69,6 +73,9 @@ type liveIdentity struct {
 	v    identity.Verifier
 	key  verifierKey
 	mode proxy.IdentityMode
+	// refusing is true while v is the fail-closed stand-in installed because a
+	// require-mode verifier could not be built; the next apply rebuilds.
+	refusing bool
 	// starter and signInKey are the challenge-mode sign-in starter and the
 	// settings it was built from (nil/"" until challenge was applied).
 	starter   proxy.SignInStarter
@@ -141,27 +148,18 @@ func signInKey(s config.IdentitySettings) string {
 	return fmt.Sprintf("%s|%s|%q|%q|%d|%d", s.Issuer, s.InternalIssuerURL, si.ClientID, si.Scopes, si.MaxPending, si.StartsPerMinute)
 }
 
-// resolveIdentityMode picks this agent's mode: its own Agents entry, then the
-// block's DefaultMode, then off. An empty string at either level falls through.
-func resolveIdentityMode(s config.IdentitySettings, agents []config.AgentPolicy, agentID string) string {
-	for _, a := range agents {
-		if a.ID == agentID && a.Identity != "" {
-			return a.Identity
-		}
-	}
-	if s.DefaultMode != "" {
-		return s.DefaultMode
-	}
-	return config.IdentityModeOff
-}
-
 // apply moves the proxy to the identity config described by s and agents. A
 // rebuild failure or a mode this build does not know (a newer control plane)
 // keeps the previous config and logs one warning with no token data.
 func (w *identityWiring) apply(s config.IdentitySettings, agents []config.AgentPolicy) {
 	w.issuer = s.Issuer
 	w.warnConfig(s, agents)
-	switch mode := resolveIdentityMode(s, agents, w.agentID); mode {
+	mode, source := config.EffectiveIdentityMode(w.agentID, agents, s)
+	if mode != w.loggedMode || source != w.loggedSource {
+		w.loggedMode, w.loggedSource = mode, source
+		w.logger.Info("identity mode resolved", "agent", w.agentID, "mode", mode, "source", source)
+	}
+	switch mode {
 	case config.IdentityModeOff:
 		if w.live.mode != "" && w.live.mode != proxy.IdentityModeOff {
 			w.logger.Info("identity verification disabled by settings")
@@ -184,6 +182,9 @@ func (w *identityWiring) apply(s config.IdentitySettings, agents []config.AgentP
 			return
 		}
 		w.applyVerified(s, proxy.IdentityModeChallenge)
+	case config.IdentityModeRequire:
+		w.warned = 0
+		w.applyVerified(s, proxy.IdentityModeRequire)
 	default:
 		w.logger.Warn("identity settings ignored; keeping previous identity config",
 			"reason", "unknown identity mode", "mode", mode)
@@ -235,9 +236,18 @@ func countScoped(p config.Policy) int {
 func (w *identityWiring) applyVerified(s config.IdentitySettings, mode proxy.IdentityMode) {
 	key := keyOf(s)
 	v := w.live.v
-	if v == nil || key != w.live.key {
+	if v == nil || w.live.refusing || key != w.live.key {
 		nv, err := w.buildDispatcher(s)
 		if err != nil {
+			if mode == proxy.IdentityModeRequire {
+				// Keeping the previous config could be off or attribute, which
+				// admits what require must refuse: refuse everything until a
+				// rebuild succeeds.
+				w.logger.Error("identity verifier rebuild failed; require mode refuses every CONNECT until it succeeds", "error", err)
+				w.p.SetIdentity(refusingVerifier{}, proxy.IdentityModeRequire)
+				w.live = liveIdentity{v: refusingVerifier{}, mode: mode, refusing: true}
+				return
+			}
 			// Only the cause class is logged: the error text names config, never a token.
 			w.logger.Warn("identity verifier rebuild failed; keeping previous identity config", "error", err)
 			return
@@ -265,6 +275,14 @@ func (w *identityWiring) applyVerified(s config.IdentitySettings, mode proxy.Ide
 		w.logger.Info("identity verification enabled", "mode", string(mode))
 	}
 	w.live = liveIdentity{v: v, key: key, mode: mode, starter: starter, signInKey: signKey}
+}
+
+// refusingVerifier is the fail-closed stand-in for require mode when the real
+// verifier cannot be built: it verifies nothing, so every token is unverified.
+type refusingVerifier struct{}
+
+func (refusingVerifier) Verify(context.Context, string, ...identity.VerifyOption) (identity.Claims, identity.Status, identity.Reason) {
+	return identity.Claims{}, identity.StatusUnverified, identity.ReasonJWKSUnavailable
 }
 
 // verifierConfig maps the settings onto the OIDC verifier's config.
