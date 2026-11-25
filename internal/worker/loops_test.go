@@ -36,6 +36,7 @@ func await(t *testing.T, d time.Duration, what string, cond func() bool) {
 // ControlPlaneClient interface (transport is fully swappable): PollLong reports a
 // change once, then blocks on ctx so the loop applies exactly one reload.
 type fakeControlPlaneClient struct {
+	noBundle
 	mu        sync.Mutex
 	polls     int
 	policy    config.Policy
@@ -58,6 +59,13 @@ func (f *fakeControlPlaneClient) PollLong(ctx context.Context, _ time.Duration) 
 func (f *fakeControlPlaneClient) GetPolicy() (config.Policy, error) { return f.policy, nil }
 
 func (f *fakeControlPlaneClient) Settings() *config.SettingsWire { return f.settings }
+
+// noBundle is the signed-bundle half of ControlPlaneClient for fakes that run
+// without pins.
+type noBundle struct{}
+
+func (noBundle) Bundle() (config.VerifiedBundle, bool) { return config.VerifiedBundle{}, false }
+func (noBundle) BundleStatus() config.BundleStatus     { return config.BundleStatus{} }
 
 func (f *fakeControlPlaneClient) Heartbeat(context.Context) error {
 	f.mu.Lock()
@@ -278,6 +286,7 @@ func TestHeartbeatControlPlane_FakeClockOneBeatPerAdvance(t *testing.T) {
 // to answer. After the gate is closed the beat returns at once, so later beats
 // (if any) do not stall the loop.
 type gatedControlPlaneClient struct {
+	noBundle
 	gate chan struct{}
 
 	mu        sync.Mutex
@@ -408,6 +417,7 @@ func TestLongPollControlPlane_BackoffOnFakeClock(t *testing.T) {
 // failingControlPlaneClient always errors, driving the long-poll loop down its
 // backoff path without a live control plane.
 type failingControlPlaneClient struct {
+	noBundle
 	mu   sync.Mutex
 	poll int
 }
