@@ -126,9 +126,8 @@ type TokenAgent struct {
 
 // RegisterTokenAgent registers an agent with a fresh Ed25519 key, the given
 // allowed groups and allowed scopes, straight on the control plane's state
-// database the way the offline CLI does. The control plane sees it within one
-// registry watch interval, so register before the first exchange (or advance
-// the clock). Needs WithTokenService.
+// database the way the offline CLI does, and returns once the control plane
+// sees it. Needs WithTokenService.
 func (h *H) RegisterTokenAgent(id string, groups, scopes []string) *TokenAgent {
 	h.tb.Helper()
 	priv, err := signer.GenerateLocal(keys.AlgEdDSA)
@@ -155,7 +154,39 @@ func (h *H) RegisterTokenAgent(id string, groups, scopes []string) *TokenAgent {
 	if err != nil {
 		h.tb.Fatalf("harness: register agent %s: %v", id, err)
 	}
+	h.awaitRegisteredAgent(id)
 	return &TokenAgent{ID: id, KID: kid, h: h, priv: priv}
+}
+
+// awaitRegisteredAgent waits until GET /policy lists agent id. The control
+// plane reads the registry from a snapshot that a write on another connection
+// only drops at the next policy reload (Store.Sync, a real-time tick) or
+// registry watch tick; the token endpoint reads the same Store, so once the
+// wire lists the agent an exchange sees it too. It does not advance the fake
+// clock, so the token key publish window a scenario may be testing is
+// untouched.
+func (h *H) awaitRegisteredAgent(id string) {
+	h.tb.Helper()
+	h.Eventually("the control plane sees registered agent "+id, func() bool {
+		r, err := h.CP().Send(http.MethodGet, "/policy", nil, nil)
+		if err != nil || r.Status != http.StatusOK {
+			return false
+		}
+		var p struct {
+			RegisteredAgents []struct {
+				ID string `json:"id"`
+			} `json:"registeredAgents"`
+		}
+		if json.Unmarshal(r.Body, &p) != nil {
+			return false
+		}
+		for _, a := range p.RegisteredAgents {
+			if a.ID == id {
+				return true
+			}
+		}
+		return false
+	})
 }
 
 // DisableTokenAgent switches agent id off in the registry. The control plane
