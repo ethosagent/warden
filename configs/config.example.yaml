@@ -328,6 +328,19 @@ responseScan:
   pii:
     phone: false                  # email/card(Luhn)/SSN always on; phone opt-in (noisy)
 
+# Outbound request-body DLP. OFF by default: with no dlp block (or mode: off) the dlpScan
+# stage reads no body and behavior is byte-identical. mode is off | monitor | enforce;
+# monitor records findings and never blocks, enforce applies classes/rules.
+# wardenTokens (default false) additionally flags Warden's own credentials in a request
+# body - scoped API keys (wak_...) and per-worker tokens (wwt_...) - as class
+# `credentials`, so an admin key an agent can reach does not leave unnoticed. It adds
+# no blocking by itself: nothing is blocked unless mode is enforce and a rule says so.
+# dlp:
+#   mode: monitor
+#   wardenTokens: false
+#   classes:
+#     credentials: { action: block }   # only takes effect in enforce mode
+
 # Signing keys (CONTROL PLANE ONLY, read from the operator's --config file, never served to
 # workers). OFF by default: when keys.enabled is false no key file, table or goroutine is
 # created and the control plane behaves exactly as before. When enabled it needs --state-dir

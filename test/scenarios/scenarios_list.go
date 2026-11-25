@@ -315,6 +315,17 @@ var All = slices.Concat(
 		// key in place, old retired), and the control plane starts on the new
 		// key and signs with it. In-process only (CP state dir, dir lock).
 		{Name: "admin_audit_key_rotation", Opts: adminAuditOpts(), Run: adminAuditKeyRotation},
+		// Warden credentials in agent egress (W-P2-APIK-06): a wak_ key or wwt_
+		// token in a request body is flagged as credentials only with
+		// dlp.wardenTokens on, and blocked only in enforce mode with a rule.
+		// In-process only (DLP is wired through the harness's local policy).
+		{Name: "warden_token_egress_off", Opts: wardenTokenOpts(config.DLPConfig{Mode: config.DLPModeMonitor}), Run: wardenTokenOff},
+		{Name: "warden_token_egress_monitor", Opts: wardenTokenOpts(config.DLPConfig{Mode: config.DLPModeMonitor, WardenTokens: true}), Run: wardenTokenMonitor},
+		{Name: "warden_token_egress_enforce", Opts: wardenTokenOpts(config.DLPConfig{
+			Mode:         config.DLPModeEnforce,
+			WardenTokens: true,
+			Classes:      map[string]config.DLPClassDefault{"credentials": {Action: config.DLPActionBlock}},
+		}), Run: wardenTokenEnforce},
 	},
 	// Canary across protocols x allow/deny; see canary.go.
 	canaryScenarios(),

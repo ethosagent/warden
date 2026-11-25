@@ -51,6 +51,7 @@ func NewDLPScanner(cfg config.DLPConfig, phonePII, evidence bool) *DLPScanner {
 		scanner: scan.NewScanner(
 			scan.WithPhonePII(phonePII),
 			scan.WithEvidence(evidence),
+			scan.WithWardenTokens(cfg.WardenTokens),
 			scan.WithCustomClasses(custom),
 		),
 		mode: mode,

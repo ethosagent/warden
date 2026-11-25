@@ -122,6 +122,9 @@ type H struct {
 	mcpEnabled bool
 	// mcpConfig (WithMCPConfig) replaces the monitor-mode default.
 	mcpConfig *config.MCPConfig
+	// dlp (WithDLP) is the outbound request-body DLP config every worker boots
+	// with; nil leaves DLP off.
+	dlp *config.DLPConfig
 	// transparent (TransparentIntercept) boots the workers in interception mode
 	// `both` (#376): the CONNECT proxy keeps working AND the transparent
 	// listeners bind on loopback port 0 (addresses via TransparentAddrs).
@@ -418,6 +421,14 @@ func WithMCPConfig(cfg config.MCPConfig) Option {
 		h.mcpEnabled = true
 		h.mcpConfig = &cfg
 	}
+}
+
+// WithDLP boots the workers with outbound request-body DLP configured as given
+// (mode, rules, class defaults, WardenTokens), for scenarios that assert what the
+// worker detects, records or blocks in an agent's request body. Left out, DLP is
+// off.
+func WithDLP(cfg config.DLPConfig) Option {
+	return func(h *H) { h.dlp = &cfg }
 }
 
 // WithOIDCIssuer starts the in-process OIDC issuer fake (fakes.OIDCIssuer) for
@@ -915,6 +926,9 @@ func (h *H) workerParams(i int) worker.Params {
 			policy.MCP = *h.mcpConfig
 			policy.MCP.Enabled = true
 		}
+	}
+	if h.dlp != nil {
+		policy.DLP = *h.dlp
 	}
 	if h.transparent {
 		// Interception mode `both` (#376): port-0 loopback listeners, so a
