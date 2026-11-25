@@ -37,26 +37,33 @@ func (s *Server) writeSettingsAs(ctx context.Context, in config.SettingsWire, me
 		return s.WriteSettings(ctx, in, meta)
 	}
 	return s.writeSettingsChecked(ctx, in, meta, func(live *config.SettingsWire) error {
-		changed, err := settingsWireFieldsChanged(live, in)
-		if err != nil {
-			return fmt.Errorf("controlplane: compare settings: %w", err)
-		}
-		var need config.Role
-		var denied []string
-		for _, f := range changed {
-			if minRole := config.SettingsFieldMinRole(f); minRole > role {
-				denied = append(denied, f)
-				need = max(need, minRole)
-			}
-		}
-		if len(denied) == 0 {
-			return nil
-		}
-		// Field names only: never a value.
-		s.cfg.Logger.Warn("console_settings_field_denied", "role", role.String(), "need", need.String(),
-			"sub", p.Sub, "fields", denied)
-		return &dashboard.RoleRequiredError{Need: need.String(), Fields: denied}
+		return s.settingsRoleCheck(role, p.Sub, live, in)
 	})
+}
+
+// settingsRoleCheck refuses a change from live to in that touches a field the
+// role may not change (config.SettingsFieldMinRole) with a
+// *dashboard.RoleRequiredError naming the fields.
+func (s *Server) settingsRoleCheck(role config.Role, sub string, live *config.SettingsWire, in config.SettingsWire) error {
+	changed, err := settingsWireFieldsChanged(live, in)
+	if err != nil {
+		return fmt.Errorf("controlplane: compare settings: %w", err)
+	}
+	var need config.Role
+	var denied []string
+	for _, f := range changed {
+		if minRole := config.SettingsFieldMinRole(f); minRole > role {
+			denied = append(denied, f)
+			need = max(need, minRole)
+		}
+	}
+	if len(denied) == 0 {
+		return nil
+	}
+	// Field names only: never a value.
+	s.cfg.Logger.Warn("console_settings_field_denied", "role", role.String(), "need", need.String(),
+		"sub", sub, "fields", denied)
+	return &dashboard.RoleRequiredError{Need: need.String(), Fields: denied}
 }
 
 // settingsWireFieldsChanged reports the fields in differs from live in, after

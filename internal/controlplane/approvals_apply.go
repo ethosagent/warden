@@ -164,6 +164,14 @@ func (a policyApplier) publishDraft(ctx context.Context, d approvals.Draft, clr 
 		}
 		// The draft doc is the whole canonical doc; the block list is a serve-time
 		// overlay and stays as the head has it.
+		// Workers may have changed since the draft was held: a draft that newly
+		// sets require mode meets the same capability guard as a direct save
+		// (the approver's force=true overrides it).
+		if doc.Settings != nil {
+			if err := a.s.requireGuard(ctx, w.Settings, *doc.Settings); err != nil {
+				return err
+			}
+		}
 		w.Allowlist, w.Denylist, w.Settings = doc.Allowlist, doc.Denylist, doc.Settings
 		return nil
 	}

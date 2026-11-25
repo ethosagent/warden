@@ -817,6 +817,7 @@ func (s *Server) Handler() http.Handler {
 		views := tracker.Views()
 		FlagNoGroupPolicy(views, s.scopedEntries())
 		FlagNoIdentityChallenge(views, s.challengeServed())
+		FlagNoIdentityRequire(views, s.servedSettings())
 		for i := range views {
 			views[i].Behind = views[i].PolicyETag != "" && views[i].PolicyETag != cur
 		}
@@ -927,6 +928,7 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	s.noteWorkerBundle(principal.ProxyID, caps, wb)
 	s.noteGroupPolicy(principal.ProxyID, caps)
 	s.noteIdentityChallenge(principal.ProxyID, caps)
+	s.noteIdentityRequire(principal.ProxyID, agentID, caps)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -1337,16 +1339,25 @@ func (s *Server) writeSettingsChecked(ctx context.Context, in config.SettingsWir
 	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
+	// The on-disk settings, without serve-time overlays: overlays carry data no
+	// settings writer owns. An unreadable file refuses a checked write; an
+	// unchecked one starts from empty settings, as the write below does.
+	var live *config.SettingsWire
+	cur, err := s.policy.loadBase(context.Background())
+	switch {
+	case err == nil:
+		live = cur.Settings
+	case check != nil:
+		return fmt.Errorf("controlplane: read live settings: %w", err)
+	}
 	if check != nil {
-		// The on-disk settings, without serve-time overlays: overlays carry
-		// data no settings writer owns.
-		cur, err := s.policy.loadBase(context.Background())
-		if err != nil {
-			return fmt.Errorf("controlplane: read live settings: %w", err)
-		}
-		if err := check(cur.Settings); err != nil {
+		if err := check(live); err != nil {
 			return err
 		}
+	}
+	// The require-mode rollout guard (versioned writers run it in writeVersioned).
+	if err := s.requireGuard(ctx, live, in); err != nil {
+		return err
 	}
 
 	// Load the current file as a top-level YAML map so policy/logging/secrets and
