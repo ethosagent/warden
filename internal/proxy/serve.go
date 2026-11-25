@@ -494,9 +494,9 @@ func (p *Proxy) tunnel(client net.Conn, br *bufio.Reader, domain string, port in
 	var sess *session
 	if p.trackSession(ci) {
 		sess = p.sessions.newSession("tcp", domain, port, true, client)
-		sess.bind(ci)
+		cut := sess.bind(ci)
 		defer sess.release()
-		if p.refusedAtCreate(sess, ci, domain, port, "tcp") {
+		if p.refusedAtCreate(sess, ci, domain, port, "tcp") || cut {
 			return
 		}
 	}

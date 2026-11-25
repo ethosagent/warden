@@ -60,6 +60,10 @@ type rawTunnelEnv struct {
 	p     *Proxy
 	store *syncStore
 	m     *fakeMetrics
+	// dials counts upstream dials; onPath, when set, runs at each dispatch
+	// site's reach (the seam between the CONNECT checks and registration).
+	dials  atomic.Int64
+	onPath atomic.Pointer[func(Path)]
 }
 
 func newRawTunnelEnv(t *testing.T, serve func(net.Conn)) *rawTunnelEnv {
@@ -81,7 +85,13 @@ func newRawTunnelEnv(t *testing.T, serve func(net.Conn)) *rawTunnelEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
+	p.pathHook = func(path Path) {
+		if f := e.onPath.Load(); f != nil {
+			(*f)(path)
+		}
+	}
 	p.dialFunc = func(string, string) (net.Conn, error) {
+		e.dials.Add(1)
 		c, up := net.Pipe()
 		go func() {
 			defer func() { _ = up.Close() }()
@@ -398,6 +408,82 @@ func TestBlocklistMetrics(t *testing.T) {
 	e.m.mu.Unlock()
 	if closed != 2 || entries != 0 {
 		t.Errorf("after unblock: closed = %d entries = %d, want 2 and 0", closed, entries)
+	}
+}
+
+// A block that lands after the CONNECT-time check passed but before the tunnel
+// registers (the 200 is already out) must still cut it. The long-poll apply
+// (Replace, then CloseBlockedSessions) runs entirely inside that window here, so
+// CloseBlockedSessions finds nothing registered: the tunnel's own registration
+// must see the block. Before the fix the tunnel stayed open for good.
+func TestBlockList_BlockBetweenConnectCheckAndRegister(t *testing.T) {
+	e := newRawTunnelEnv(t, func(c net.Conn) { _, _ = io.Copy(io.Discard, c) })
+	var once sync.Once
+	hook := func(path Path) {
+		if path == PathTunnel {
+			once.Do(func() {
+				replaceBlocked(e.p, config.BlockedUser{Sub: "u1"})
+				e.p.CloseBlockedSessions()
+			})
+		}
+	}
+	e.onPath.Store(&hook)
+	conn, br := e.tunnel(t, "tok-u1")
+	assertConnCut(t, conn, br)
+	evs := waitBlockedEvents(t, e.store, 1)
+	if len(evs) != 1 || evs[0].UserSub != "u1" || evs[0].Protocol != "tcp" || evs[0].Domain != "tunnel.test" {
+		t.Fatalf("events = %+v", e.store.snapshot())
+	}
+	if n := e.dials.Load(); n != 0 {
+		t.Errorf("upstream dials = %d, want 0 for a session cut at registration", n)
+	}
+	e.m.mu.Lock()
+	closed := e.m.blocklistClosed
+	e.m.mu.Unlock()
+	if closed != 1 {
+		t.Errorf("sessions closed = %d, want 1", closed)
+	}
+}
+
+// The same window for every other registration (h1, h2, raw TLS, a header
+// identity bound by blockStage): a bind that runs after the block's
+// CloseBlockedSessions cuts the session itself, with one deny event. A busy
+// HTTP/1 session's in-flight request still completes; its cut waits for
+// endRequest.
+func TestBlockList_BindAfterCloseBlockedSessionsCuts(t *testing.T) {
+	e := newRawTunnelEnv(t, func(net.Conn) {})
+	replaceBlocked(e.p, config.BlockedUser{Email: "u3@corp.com"})
+	e.p.CloseBlockedSessions()
+
+	var idleClosed, busyClosed atomic.Bool
+	idle := e.p.sessions.newSession("http2", "tunnel.test", 443, true, closerFunc(func() error { idleClosed.Store(true); return nil }))
+	defer idle.release()
+	if !idle.bind(connIdentity{Claims: identity.Claims{Sub: "u3", Email: "U3@Corp.com"}}) || !idleClosed.Load() {
+		t.Fatal("a session bound after the block applied was not cut")
+	}
+	busy := e.p.sessions.newSession("https", "tunnel.test", 443, false, closerFunc(func() error { busyClosed.Store(true); return nil }))
+	defer busy.release()
+	busy.beginRequest()
+	if !busy.bind(connIdentity{Claims: identity.Claims{Email: "u3@corp.com"}}) || busyClosed.Load() {
+		t.Fatal("busy HTTP/1 session: want marked for a cut at endRequest, not closed mid-request")
+	}
+	if !busy.endRequest() {
+		t.Error("endRequest did not report the pending cut")
+	}
+	// A user not on the list binds normally.
+	other := e.p.sessions.newSession("https", "tunnel.test", 443, false, closerFunc(func() error { return nil }))
+	defer other.release()
+	if other.bind(connIdentity{Claims: identity.Claims{Sub: "u2"}}) {
+		t.Error("an unblocked user's session was cut")
+	}
+	if n := len(waitBlockedEvents(t, e.store, 2)); n != 2 {
+		t.Errorf("user_blocked events = %d, want 2", n)
+	}
+	e.m.mu.Lock()
+	closed := e.m.blocklistClosed
+	e.m.mu.Unlock()
+	if closed != 2 {
+		t.Errorf("sessions closed = %d, want 2", closed)
 	}
 }
 

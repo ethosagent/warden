@@ -54,7 +54,7 @@ func (p *Proxy) handleGRPC(clientConn net.Conn, domain string, port int, d defer
 	defer rt.CloseIdleConnections()
 
 	sess := p.sessions.newSession("http2", domain, port, true, clientConn)
-	sess.bind(ci)
+	sess.bindForRequests(ci)
 	defer sess.release()
 
 	// ServeConn blocks until the client connection closes and dispatches each
