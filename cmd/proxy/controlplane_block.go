@@ -75,14 +75,22 @@ func newBlockAddCmd() *cobra.Command {
 func newBlockRemoveCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "remove",
-		Short: "Unblock the entry with the given id.",
+		Short: "Unblock the entry with the given id (or, with approvals enabled, draft the removal).",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			stateDir, _ := cmd.Flags().GetString("state-dir")
 			keyFile, _ := cmd.Flags().GetString("admin-audit-key-file")
 			id, _ := cmd.Flags().GetString("id")
-			if err := controlplane.RunBlockRemove(cmd.Context(), stateDir, keyFile, id, cmd.ErrOrStderr()); err != nil {
+			draftID, err := controlplane.RunBlockRemove(cmd.Context(), stateDir, keyFile, id, cmd.ErrOrStderr())
+			if err != nil {
 				return blockErr(err)
+			}
+			if draftID != "" {
+				// Approvals are enabled: the entry stays blocked until a second
+				// admin approves the draft.
+				_, _ = fmt.Fprintln(cmd.OutOrStdout(), draftID)
+				_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "approvals are enabled: "+id+" is still blocked; a second admin must approve change draft "+draftID)
+				return nil
 			}
 			_, _ = fmt.Fprintln(cmd.OutOrStdout(), "removed "+id)
 			return nil

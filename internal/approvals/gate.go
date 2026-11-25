@@ -102,9 +102,16 @@ type Change struct {
 	Base    int64
 	BaseDoc Doc
 	Draft   Doc
-	Author  Author
-	Source  Source
-	Message string
+	// TargetRef and TargetDoc are the entity and the canonical JSON of the
+	// proposed state for a target other than the policy (BaseDoc and Draft are
+	// then unused): a block id, an agent id (W-P2-APPR-08). A change that does
+	// not widen needs no second person whatever allowSelfApproveNarrowing says:
+	// disabling an agent is an incident response, not a policy loosening.
+	TargetRef string
+	TargetDoc json.RawMessage
+	Author    Author
+	Source    Source
+	Message   string
 	// Ref and RollbackTo are the draft's provenance.
 	Ref        string
 	RollbackTo int64
@@ -138,10 +145,15 @@ func (g *Gate) Service() *Service {
 // are disabled, or ch narrows and allowSelfApproveNarrowing is on. Otherwise it
 // returns ErrApprovalRequired, and the caller holds the change with Hold. A nil
 // Gate, or an enabled one with no Service, returns ErrGateUnavailable.
-func (g *Gate) Clear(_ context.Context, ch Change) (Clearance, error) {
-	sha, err := DocSHA256(ch.Draft)
-	if err != nil {
-		return Clearance{}, err
+func (g *Gate) Clear(ctx context.Context, ch Change) (Clearance, error) {
+	var sha string
+	if ch.Target == TargetPolicy {
+		var err error
+		if sha, err = DocSHA256(ch.Draft); err != nil {
+			return Clearance{}, err
+		}
+	} else {
+		sha = DocSHA256Of(ch.TargetDoc)
 	}
 	switch {
 	case g == nil:
@@ -151,7 +163,14 @@ func (g *Gate) Clear(_ context.Context, ch Change) (Clearance, error) {
 	case g.svc == nil:
 		return Clearance{}, ErrGateUnavailable
 	case ch.Target != TargetPolicy:
-		return Clearance{}, fmt.Errorf("%w: %s", ErrUnsupportedTarget, ch.Target)
+		class, err := g.svc.classifyTarget(ctx, ch.Target, ch.TargetRef, ch.TargetDoc)
+		switch {
+		case err != nil:
+			return Clearance{}, err
+		case !class.Widening:
+			return Clearance{kind: clearNarrowing, docSHA: sha}, nil
+		}
+		return Clearance{}, ErrApprovalRequired
 	}
 	if !Classify(ch.BaseDoc, ch.Draft).Widening && g.svc.cfg.AllowSelfApproveNarrowing {
 		return Clearance{kind: clearNarrowing, docSHA: sha}, nil
@@ -241,7 +260,7 @@ func (g *Gate) EmergencyApply(ctx context.Context, in EmergencyInput) (Draft, er
 		return Draft{}, err
 	}
 	ap, ok := s.cfg.Appliers[d.Target].(EmergencyApplier)
-	if !ok || d.Target != TargetPolicy {
+	if !ok {
 		return Draft{}, fmt.Errorf("%w: %s", ErrUnsupportedTarget, d.Target)
 	}
 	if !s.takeEmergencySlot() {
@@ -340,9 +359,16 @@ func (g *Gate) Hold(ctx context.Context, ch Change) (Draft, error) {
 	if g == nil || !g.enabled || g.svc == nil {
 		return Draft{}, ErrGateUnavailable
 	}
-	d, err := g.svc.CreateDraft(ctx, ch.Target, ch.Draft, ch.Author, Provenance{
-		Source: ch.Source, Message: ch.Message, Ref: ch.Ref, RollbackTo: ch.RollbackTo,
-	}, ch.Base)
+	prov := Provenance{Source: ch.Source, Message: ch.Message, Ref: ch.Ref, RollbackTo: ch.RollbackTo}
+	var d Draft
+	var err error
+	if ch.Target == TargetPolicy {
+		d, err = g.svc.CreateDraft(ctx, ch.Target, ch.Draft, ch.Author, prov, ch.Base)
+	} else {
+		d, err = g.svc.CreateTargetDraft(ctx, TargetDraft{
+			Target: ch.Target, Ref: ch.TargetRef, Base: ch.Base, Doc: ch.TargetDoc, Author: ch.Author, Prov: prov,
+		})
+	}
 	if err != nil {
 		return Draft{}, err
 	}

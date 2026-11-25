@@ -170,6 +170,11 @@ var All = slices.Concat(
 		// before and after, with a critical approval_bypassed Finding; an OIDC
 		// admin then reviews it. In-process only (console, break-glass, state dir).
 		{Name: "approvals_emergency_apply", Opts: approvalsEmergencyOpts(), Run: approvalsEmergencyApply},
+		// Block-list removals and widening agent edits are held for a second
+		// admin (W-P2-APPR-08); adds, disables and narrowing edits stay direct.
+		// In-process only (console, admin audit, state dir).
+		{Name: "approvals_hold_removals", Opts: approvalsTargetsOpts(), Run: approvalsHoldRemovals},
+		{Name: "approvals_block_enforcement", Opts: approvalsBlockEnforcementOpts(), Run: approvalsBlockEnforcement},
 		// Scoped policy (W-P1-GPOL-10): with identity off a scoped entry loads
 		// but allows nobody (identity_required); an unscoped entry still applies.
 		{Name: "scoped_policy_fail_closed", Run: scopedPolicyFailClosed},
@@ -280,6 +285,9 @@ var All = slices.Concat(
 		// 2s poll of its Index, with no audit row; a key reaches only the routes
 		// whose scope it holds and never a worker route. In-process only.
 		{Name: "apikey_offline_revoke", Opts: apiKeyOpts(), Run: apiKeyOfflineRevoke},
+		{Name: "apikey_cli_revoke", Opts: apiKeyOpts(), Run: apiKeyCLIRevoke},
+		{Name: "apikey_expiry_warning", Opts: apiKeyOpts(), Run: apiKeyExpiryWarning},
+		{Name: "apikey_expiry_off", Opts: []harness.Option{harness.WithConsoleOIDC(), harness.WithAdminAudit()}, Run: apiKeyExpiryOff},
 		{Name: "apikey_scopes", Opts: apiKeyOpts(), Run: apiKeyScopes},
 		// Scoped API keys (W-P2-APIK-03): a console admin creates a key (the
 		// plaintext once), the key reads, introspects and is refused a write,

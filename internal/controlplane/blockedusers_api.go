@@ -33,6 +33,8 @@ type blockListAPI struct {
 	store    *BlockStore
 	registry *WorkerRegistry
 	logger   *slog.Logger
+	// srv is the control plane, for the approvals gate (W-P2-APPR-08).
+	srv *Server
 }
 
 var _ dashboard.BlockListStore = blockListAPI{}
@@ -154,6 +156,11 @@ func (a blockListAPI) Remove(ctx context.Context, id string) error {
 		if isSelf(ctx, e) {
 			return dashboard.ErrBlockSelfUnblock
 		}
+		// With approvals on a removal widens access, so it is held for a second
+		// admin (adding a block never is). An unavailable gate refuses it.
+		if err := a.holdRemoval(ctx, e); err != nil {
+			return err
+		}
 		return a.mapErr("remove", a.store.Remove(ctx, id, blockActor(ctx)))
 	}
 	return dashboard.ErrBlockNotFound
@@ -226,7 +233,7 @@ func (s *Server) blockListStore() dashboard.BlockListStore {
 	if s.blocks == nil {
 		return blockListNoState{}
 	}
-	return blockListAPI{store: s.blocks, registry: s.registry, logger: s.cfg.Logger}
+	return blockListAPI{store: s.blocks, registry: s.registry, logger: s.cfg.Logger, srv: s}
 }
 
 // blockedUsersHash is the keyed hash of the block list's canonical sub/email

@@ -131,6 +131,6 @@ func newControlPlaneCmd() *cobra.Command {
 	// list/export are read-only, rotate writes without the lock and reset takes it; agent list is read-only and
 	// agent register/update/disable/enable write without the lock, each in one
 	// BEGIN IMMEDIATE transaction).
-	cmd.AddCommand(newAdminAuditCmd(), newHashPasswordCmd(), newBackupCmd(), newRestoreCmd(), newControlPlaneTokenCmd(), newControlPlaneEnrollTokenCmd(), newControlPlaneWorkerCmd(), newControlPlaneBlockCmd(), newControlPlaneKeysCmd(), newControlPlaneCACmd(), newControlPlaneAgentCmd())
+	cmd.AddCommand(newAdminAuditCmd(), newHashPasswordCmd(), newBackupCmd(), newRestoreCmd(), newControlPlaneTokenCmd(), newControlPlaneEnrollTokenCmd(), newControlPlaneWorkerCmd(), newControlPlaneBlockCmd(), newControlPlaneKeysCmd(), newControlPlaneCACmd(), newControlPlaneAgentCmd(), newControlPlaneAPIKeyCmd())
 	return cmd
 }
