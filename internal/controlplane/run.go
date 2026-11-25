@@ -637,6 +637,12 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		p.OnServer(srv)
 	}
 
+	// Running and waiting replays end as interrupted before the state and fleet
+	// stores close (defers run last-in first-out).
+	if svc := srv.Approvals(); svc != nil && svc.Replayer() != nil {
+		defer svc.Replayer().Close()
+	}
+
 	if apiKeyIndex != nil && p.APIKeysReady != nil {
 		p.APIKeysReady(srv.APIKeyAuthCounts)
 	}

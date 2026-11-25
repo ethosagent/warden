@@ -24,8 +24,15 @@ import (
 	"github.com/ethosagent/warden/internal/cpstate"
 )
 
-// MigrationID is the id of the approvals migration.
-const MigrationID = "approvals/0001"
+// MigrationID is the id of the approvals migration; ReplayMigrationID adds the
+// draft_replays table (W-P2-APPR-03).
+const (
+	MigrationID       = "approvals/0001"
+	ReplayMigrationID = "approvals/0002"
+)
+
+// EnabledMigrationIDs lists every approvals migration, for cpstate.Enable.
+func EnabledMigrationIDs() []string { return []string{MigrationID, ReplayMigrationID} }
 
 // Migrations returns the approvals migration. It is Optional: the control plane
 // registers it always (so the downgrade guard knows it) and applies it only
@@ -87,6 +94,25 @@ CREATE TRIGGER change_approvals_no_update BEFORE UPDATE ON change_approvals
 BEGIN SELECT RAISE(ABORT, 'change_approvals is append-only'); END;
 CREATE TRIGGER change_approvals_no_delete BEFORE DELETE ON change_approvals
 BEGIN SELECT RAISE(ABORT, 'change_approvals is append-only'); END;`,
+	}, {
+		ID:       ReplayMigrationID,
+		Optional: true,
+		SQL: `CREATE TABLE draft_replays (
+  id             TEXT PRIMARY KEY,
+  draft_id       TEXT NOT NULL REFERENCES change_drafts (id),
+  revision       INTEGER NOT NULL,
+  base_version   INTEGER NOT NULL,
+  status         TEXT NOT NULL CHECK (status IN ('pending','running','done','failed','unavailable')),
+  window_from    INTEGER NOT NULL,
+  window_to      INTEGER NOT NULL,
+  events_scanned INTEGER NOT NULL,
+  truncated      INTEGER NOT NULL,
+  result_json    TEXT NOT NULL,
+  error_code     TEXT NOT NULL,
+  started_at     INTEGER NOT NULL,
+  finished_at    INTEGER NOT NULL
+);
+CREATE INDEX draft_replays_draft ON draft_replays (draft_id, revision);`,
 	}}
 }
 
