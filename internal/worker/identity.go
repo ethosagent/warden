@@ -1,13 +1,16 @@
 package worker
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/identity"
 	"github.com/ethosagent/warden/internal/identity/adapters/oidc"
+	"github.com/ethosagent/warden/internal/keys"
 	"github.com/ethosagent/warden/internal/proxy"
 )
 
@@ -17,6 +20,12 @@ import (
 //
 // It is touched from boot and from the single apply goroutine, never
 // concurrently, so it needs no lock; the proxy swap itself is atomic.
+//
+// It also owns the one WardenVerifier of the worker and feeds it, and only it,
+// from the verified bundle (applyBinding): the token keys, the token issuer
+// and the registered agents of one bundle form one snapshot. The verifier
+// outlives every rebuild of the dispatcher around it, so a settings change
+// never drops the keys.
 type identityWiring struct {
 	p       *proxy.Proxy
 	agentID string
@@ -36,6 +45,17 @@ type identityWiring struct {
 	// off), the inputs it was built from, and the mode.
 	live liveIdentity
 
+	// now is the worker's clock (Run sets clk.Now); nil means time.Now.
+	now func() time.Time
+	// warden verifies Warden tokens; built on first use. issuer is the
+	// identity.issuer of the last applied settings, which a token issuer must
+	// differ from. bound is the (bundle seq, identity.issuer) the verifier's
+	// snapshot was last built from; boundSet is false until one was.
+	warden   *identity.WardenVerifier
+	issuer   string
+	bound    bindKey
+	boundSet bool
+
 	// scoped returns how many live allow entries are identity-scoped (nil =
 	// unknown, no warning). warned is the count already warned about while the
 	// mode is off, so the WARN repeats only when that count changes.
@@ -53,6 +73,14 @@ type liveIdentity struct {
 	signInKey string
 }
 
+// bindKey identifies the inputs of the installed snapshot. The bundle seq says
+// which bundle, the identity issuer which settings the collision check ran
+// against.
+type bindKey struct {
+	seq    int64
+	issuer string
+}
+
 // verifierKey is every setting that changes what the verifier accepts. The
 // mode is deliberately absent: a mode change swaps the mode and reuses the
 // verifier. AllowedAZP is joined into a string so the key stays comparable.
@@ -60,6 +88,7 @@ type verifierKey struct {
 	issuer, internalIssuerURL, audience, jwksURL, groupsClaim string
 	allowedAZP                                                string
 	skewSeconds, ttlSeconds                                   int
+	acceptIdP                                                 bool
 }
 
 func keyOf(s config.IdentitySettings) verifierKey {
@@ -68,6 +97,7 @@ func keyOf(s config.IdentitySettings) verifierKey {
 		jwksURL: s.JWKSURL, groupsClaim: s.GroupsClaim,
 		allowedAZP:  fmt.Sprintf("%q", s.AllowedAZP),
 		skewSeconds: s.ClockSkewSeconds, ttlSeconds: s.MaxTokenTTLSeconds,
+		acceptIdP: s.AcceptIdPTokens(),
 	}
 }
 
@@ -114,6 +144,7 @@ func resolveIdentityMode(s config.IdentitySettings, agents []config.AgentPolicy,
 // rebuild failure or a mode this build does not know (a newer control plane)
 // keeps the previous config and logs one warning with no token data.
 func (w *identityWiring) apply(s config.IdentitySettings, agents []config.AgentPolicy) {
+	w.issuer = s.Issuer
 	switch mode := resolveIdentityMode(s, agents, w.agentID); mode {
 	case config.IdentityModeOff:
 		if w.live.mode != "" && w.live.mode != proxy.IdentityModeOff {
@@ -189,7 +220,7 @@ func (w *identityWiring) applyVerified(s config.IdentitySettings, mode proxy.Ide
 	key := keyOf(s)
 	v := w.live.v
 	if v == nil || key != w.live.key {
-		nv, err := w.build(verifierConfig(s))
+		nv, err := w.buildDispatcher(s)
 		if err != nil {
 			// Only the cause class is logged: the error text names config, never a token.
 			w.logger.Warn("identity verifier rebuild failed; keeping previous identity config", "error", err)
@@ -232,4 +263,166 @@ func verifierConfig(s config.IdentitySettings) oidc.Config {
 		ClockSkew:         time.Duration(s.ClockSkewSeconds) * time.Second,
 		MaxTokenTTL:       time.Duration(s.MaxTokenTTLSeconds) * time.Second,
 	}
+}
+
+// wardenVerifier returns the worker's one Warden verifier, building it on first
+// use.
+func (w *identityWiring) wardenVerifier() (*identity.WardenVerifier, error) {
+	if w.warden != nil {
+		return w.warden, nil
+	}
+	v, err := identity.NewWardenVerifier(identity.WardenConfig{Now: w.now, Logger: w.logger})
+	if err != nil {
+		return nil, err
+	}
+	w.warden = v
+	return v, nil
+}
+
+// buildDispatcher builds the verifier the proxy serves: the IdP verifier (only
+// when IdP tokens are accepted, which needs identity.issuer) behind the
+// dispatcher that routes by issuer, around the one Warden verifier. A Warden
+// token reaches no IdP code, and an IdP token reaches no Warden key.
+func (w *identityWiring) buildDispatcher(s config.IdentitySettings) (identity.Verifier, error) {
+	wv, err := w.wardenVerifier()
+	if err != nil {
+		return nil, err
+	}
+	if err := wv.SetClockSkew(time.Duration(s.ClockSkewSeconds) * time.Second); err != nil {
+		return nil, err
+	}
+	var idp identity.Verifier
+	if s.AcceptIdPTokens() {
+		idp, err = w.build(verifierConfig(s))
+		if err != nil {
+			return nil, err
+		}
+	}
+	return identity.NewMultiVerifier(identity.MultiConfig{
+		Warden: wv, IdP: idp, IdPIssuer: s.Issuer, AcceptIdP: s.AcceptIdPTokens(),
+		Logger: w.logger, Now: w.now,
+	}), nil
+}
+
+// bindingSource is the verified bundle's binding inputs: the signed token
+// issuer, token JWKS and registered agents of one bundle in one read.
+type bindingSource interface {
+	BindingInputs() (config.BindingInputs, bool)
+}
+
+// applyBinding installs the Warden verifier's snapshot from the verified
+// bundle. Keys, issuer and agents come only from src (the signed bundle): a
+// worker without pins, or before its first verified bundle, installs nothing
+// and every Warden token stays unverified (jwks_unavailable). The caller holds
+// the serial evaluator's lock and runs on the apply goroutine, so the snapshot
+// and the policy applied with it never interleave with another apply.
+//
+// The snapshot's generation is the bundle seq. Anything wrong fails closed to
+// an empty snapshot at that generation, which verifies nothing:
+//   - an empty tokenIssuer (the control plane mints no Warden tokens) is never
+//     filled in from the control plane id or from identity.issuer;
+//   - a tokenIssuer equal to identity.issuer, which would let one issuer's
+//     tokens pass for the other's;
+//   - a token JWKS the worker cannot parse.
+func (w *identityWiring) applyBinding(src bindingSource) {
+	in, ok := src.BindingInputs()
+	if !ok {
+		return
+	}
+	key := bindKey{seq: in.Seq, issuer: w.issuer}
+	if w.boundSet && key == w.bound {
+		return
+	}
+	wv, err := w.wardenVerifier()
+	if err != nil {
+		w.logger.Error("warden token verifier unavailable; Warden tokens stay unverified", "error", err)
+		return
+	}
+	b := identity.WardenBundle{Generation: in.Seq, TokenIssuer: in.TokenIssuer}
+	switch {
+	case in.TokenIssuer != "" && sameTokenIssuer(in.TokenIssuer, w.issuer):
+		w.logger.Error("tokenIssuer equals identity.issuer; Warden tokens are refused until they differ", "bundleSeq", in.Seq)
+		b.TokenIssuer = ""
+	default:
+		jwks, jerr := parseTokenJWKS(in.TokenJWKS)
+		if jerr != nil {
+			w.logger.Error("bundle token JWKS is not usable; Warden tokens stay unverified", "bundleSeq", in.Seq, "error", jerr)
+			b.TokenIssuer = ""
+			break
+		}
+		b.JWKS = jwks
+		b.Agents = wardenAgents(in.Agents)
+	}
+	snap, err := identity.NewWardenSnapshot(b)
+	if err != nil {
+		w.logger.Error("bundle token keys are not usable; Warden tokens stay unverified", "bundleSeq", in.Seq, "error", err)
+		snap, err = identity.NewWardenSnapshot(identity.WardenBundle{Generation: in.Seq})
+		if err != nil {
+			return
+		}
+	}
+	if err := wv.SetSnapshot(snap); err != nil {
+		w.logger.Warn("warden token snapshot not applied", "bundleSeq", in.Seq, "error", err)
+		return
+	}
+	w.bound, w.boundSet = key, true
+	w.logger.Info("warden token keys applied from the verified bundle",
+		"bundleSeq", in.Seq, "keys", len(b.JWKS), "agents", len(b.Agents), "tokenIssuerSet", b.TokenIssuer != "")
+}
+
+// sameTokenIssuer is the worker-side twin of the control plane's collision
+// check: it ignores case and trailing slashes, so it refuses more than the
+// byte-for-byte iss match the verifier applies.
+func sameTokenIssuer(a, b string) bool {
+	if strings.TrimSpace(b) == "" {
+		return false
+	}
+	return strings.EqualFold(strings.TrimRight(strings.TrimSpace(a), "/"), strings.TrimRight(strings.TrimSpace(b), "/"))
+}
+
+// parseTokenJWKS reads the tokenJWKS bundle section. An absent section is no
+// keys. Each key goes through keys.ParseJWK, which refuses a private member, a
+// duplicate member and an unsupported type; a missing kid becomes the RFC 7638
+// thumbprint. The error never carries key material.
+func parseTokenJWKS(raw json.RawMessage) ([]keys.JWK, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var doc struct {
+		Keys []json.RawMessage `json:"keys"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return nil, fmt.Errorf("token jwks is not a JWK set")
+	}
+	out := make([]keys.JWK, 0, len(doc.Keys))
+	for i, k := range doc.Keys {
+		j, err := keys.ParseJWK(k)
+		if err != nil {
+			return nil, fmt.Errorf("token jwks key %d: %w", i, err)
+		}
+		if j.Kid == "" {
+			if j.Kid, err = keys.Thumbprint(j); err != nil {
+				return nil, fmt.Errorf("token jwks key %d: %w", i, err)
+			}
+		}
+		out = append(out, j)
+	}
+	return out, nil
+}
+
+// wardenAgents maps the bundle's registered agents onto the verifier's
+// snapshot. Only status "active" is active; anything else is disabled.
+func wardenAgents(list []config.RegisteredAgent) map[string]identity.WardenAgent {
+	if len(list) == 0 {
+		return nil
+	}
+	out := make(map[string]identity.WardenAgent, len(list))
+	for _, a := range list {
+		jkt := make(map[string]struct{}, len(a.JKT))
+		for _, t := range a.JKT {
+			jkt[t] = struct{}{}
+		}
+		out[a.ID] = identity.WardenAgent{Active: a.Status == config.RegisteredAgentActive, JKT: jkt}
+	}
+	return out
 }

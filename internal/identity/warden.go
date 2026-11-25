@@ -146,7 +146,7 @@ type WardenConfig struct {
 // token is unverified (jwks_unavailable). It is safe for concurrent use.
 type WardenVerifier struct {
 	snap  atomic.Pointer[WardenSnapshot]
-	skew  time.Duration
+	skew  atomic.Int64 // nanoseconds
 	now   func() time.Time
 	cache *wardenCache
 	log   *slog.Logger
@@ -169,7 +169,26 @@ func NewWardenVerifier(cfg WardenConfig) (*WardenVerifier, error) {
 	if cfg.CacheSize <= 0 {
 		cfg.CacheSize = wardenCacheSize
 	}
-	return &WardenVerifier{skew: cfg.ClockSkew, now: cfg.Now, cache: newWardenCache(cfg.CacheSize), log: cfg.Logger}, nil
+	v := &WardenVerifier{now: cfg.Now, cache: newWardenCache(cfg.CacheSize), log: cfg.Logger}
+	v.skew.Store(int64(cfg.ClockSkew))
+	return v, nil
+}
+
+// SetClockSkew changes the exp/nbf tolerance (identity.clockSkewSeconds) with
+// the same bounds as the constructor, 0 meaning the default. Results cached
+// under the old tolerance are dropped. A change that is refused leaves the
+// tolerance as it was.
+func (v *WardenVerifier) SetClockSkew(d time.Duration) error {
+	switch {
+	case d < 0 || d > MaxClockSkew:
+		return errors.New("identity: warden verifier: clock skew must be between 0 and 5m")
+	case d == 0:
+		d = DefaultClockSkew
+	}
+	if time.Duration(v.skew.Swap(int64(d))) != d {
+		v.cache.reset()
+	}
+	return nil
 }
 
 // SetSnapshot installs s atomically. The generation must not go backwards
@@ -200,7 +219,7 @@ func (v *WardenVerifier) SetSnapshot(s *WardenSnapshot) error {
 func (v *WardenVerifier) Snapshot() *WardenSnapshot { return v.snap.Load() }
 
 // ClockSkew returns the effective exp/nbf tolerance.
-func (v *WardenVerifier) ClockSkew() time.Duration { return v.skew }
+func (v *WardenVerifier) ClockSkew() time.Duration { return time.Duration(v.skew.Load()) }
 
 // wardenPayload is the part of a Warden token's payload the verifier reads. It
 // mirrors WardenClaims, but aud may be a string or a list and numbers are
@@ -249,6 +268,7 @@ func (v *WardenVerifier) Verify(_ context.Context, raw string, opts ...VerifyOpt
 		return bare, StatusInvalid, ReasonWrongNonce
 	}
 	now := v.now()
+	skew := v.ClockSkew()
 	sum := sha256.Sum256([]byte(raw))
 	ck := wardenKey{gen: snap.generation, sum: sum}
 	if c, ok := v.cache.get(ck, now); ok {
@@ -305,12 +325,12 @@ func (v *WardenVerifier) Verify(_ context.Context, raw string, opts ...VerifyOpt
 		return fail(ReasonTTLTooLong)
 	}
 	exp := time.Unix(*p.Exp, 0)
-	if now.After(exp.Add(v.skew)) {
+	if now.After(exp.Add(skew)) {
 		v.debug("warden token expired", "", hdr.Kid, sum)
 		return uv, StatusExpired, ""
 	}
 	// The bounded Reason set has no not-yet-valid value; malformed is deliberate.
-	if p.Nbf != nil && now.Add(v.skew).Before(time.Unix(*p.Nbf, 0)) {
+	if p.Nbf != nil && now.Add(skew).Before(time.Unix(*p.Nbf, 0)) {
 		return fail(ReasonMalformed)
 	}
 	groups, trunc := NormalizeGroups(p.Groups)
@@ -320,7 +340,7 @@ func (v *WardenVerifier) Verify(_ context.Context, raw string, opts ...VerifyOpt
 		SID: p.SID, Issuer: p.Iss, IssuedAt: time.Unix(*p.Iat, 0), Expiry: exp,
 		Act: p.Act.Sub, CnfJKT: p.Cnf.JKT, Scope: p.Scope, KID: hdr.Kid, TokenType: TokenWarden,
 	}
-	v.cache.put(ck, c, exp.Add(v.skew))
+	v.cache.put(ck, c, exp.Add(skew))
 	return c, StatusValid, ""
 }
 
