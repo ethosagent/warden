@@ -15,6 +15,7 @@ func allCases() []Case {
 		wardenForgeries, wardenTimeBounds, idpCases, idpVerifiedCases, requireInTunnel(), rawDexRefused,
 		exchangeCases, requestRefusals, {replayedJTI()}, forgedNonceCases, signerCases, rateCases,
 		enrollCases(nil), renewCases(nil), routeCases(&routeFixtures{}, "", "", true),
+		storeOutageCases(), {idpUnavailable, jwksUnavailable},
 	} {
 		out = append(out, group...)
 	}
