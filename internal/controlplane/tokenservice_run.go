@@ -97,13 +97,18 @@ const tokenKeyPublishWindow = maxLongPollWait + time.Minute
 // window comes from the persisted key metadata, so a restart does not reset it.
 //
 // served is the second hook: the kid must also be in the JWKS this server
-// serves. TODO(mint guard, before/with #111): also require the kid to be in
-// the policy server's last-served bundle tokenJWKS.
+// serves. bundled is the third: with signed bundles on, the kid must also be
+// in the tokenJWKS of the bundle served now (the last one signed), because a
+// pinned worker takes its token keys only from there. It stays false while the
+// bundle publisher is degraded and has not signed the key in, so a key that is
+// in the JWKS but in no served bundle is never used. nil skips it; with bundles
+// off the server's hook answers true.
 type servedSigners struct {
 	inner   tokensvc.Signers
 	records func(purpose string) []keys.Record
 	now     func() time.Time
 	served  func(kid string) bool
+	bundled func(kid string) bool
 }
 
 // Active implements tokensvc.Signers.
@@ -116,6 +121,9 @@ func (g servedSigners) Active(purpose string) (keys.Signer, error) {
 		return sg, nil
 	}
 	if g.served != nil && !g.served(sg.KID()) {
+		return nil, keys.ErrNoActiveKey
+	}
+	if g.bundled != nil && !g.bundled(sg.KID()) {
 		return nil, keys.ErrNoActiveKey
 	}
 	for _, r := range g.records(purpose) {
@@ -135,6 +143,12 @@ func (g servedSigners) Active(purpose string) (keys.Signer, error) {
 func (s *Server) servesTokenKID(kid string) bool {
 	j := s.jwks.Load()
 	return j != nil && j.serves(kid)
+}
+
+// servesBundleTokenKID reports whether the signed bundle served now carries kid
+// in its token JWKS; true when bundles are off (see policyServer).
+func (s *Server) servesBundleTokenKID(kid string) bool {
+	return s.policy.servesBundleTokenKID(kid)
 }
 
 // EnableTokens installs the token service and its edge (the pre-authentication
@@ -314,7 +328,7 @@ func newTokenService(tc config.TokenServiceConfig, id config.IdentitySettings, s
 		Clients:         assertions,
 		Agents:          agents,
 		Blocks:          NewTokenBlockChecker(srv.blocks),
-		Signers:         servedSigners{inner: km.KeySet(), records: km.KeySet().Records, now: clk.Now, served: srv.servesTokenKID},
+		Signers:         servedSigners{inner: km.KeySet(), records: km.KeySet().Records, now: clk.Now, served: srv.servesTokenKID, bundled: srv.servesBundleTokenKID},
 		Sessions:        sessions,
 		AgentLimiter:    agentLim,
 		UserLimiter:     userLim,

@@ -2290,9 +2290,11 @@ commented block in `configs/config.example.yaml` for every key and default.
   published key, answer 503 `signer_unavailable` with `Retry-After` for about 2 minutes.
   Consumers of `/.well-known/jwks.json` must refetch on an unknown kid (rate-limited); Warden
   workers never use it (they take token keys from signed bundles). The key must also be in the
-  JWKS the control plane serves. Signed bundles have landed, but the second check is still
-  pending (a `TODO` in the code, owned by the worker token verification work, W-P2-WBND-01): the
-  kid must also be in the last-served bundle token JWKS before the service mints with it.
+  JWKS the control plane serves. With signed bundles on (`--bundles=offer|require`) it must also
+  be in the token JWKS of the bundle served now (the last one signed, which stays served while
+  the publisher is degraded), because a pinned worker holds token keys only from there; until
+  that bundle is signed the service answers `signer_unavailable`. This covers the first key and
+  an emergency rotation, and a degraded bundle publisher. With bundles off the check is skipped.
 - **Agent registry cache.** The control plane has one registry store; it serves reads from a
   snapshot that its own writes invalidate at once and that a 2 s watch refreshes for other
   processes, so an agent disabled with the offline CLI stops authenticating within about 2 s.
@@ -2453,7 +2455,16 @@ agents:
   `agent:<port>`), then `identity.defaultMode`, then off. `require` is a Phase 2
   mode: config validation rejects it, and a worker that is served it (a newer
   control plane) keeps its previous identity config and logs one warning.
-- `issuer` and `audience` are required once any mode is `attribute` or `challenge`. An `http`
+- `acceptDexTokens` (optional boolean) says whether the worker accepts a user token straight
+  from the IdP next to the Warden tokens the control plane mints: unset is true when `issuer` is
+  set and false otherwise; `false` refuses each IdP token as `unbound_token`, and then `attribute`
+  needs no `issuer` or `audience` (challenge still does). `true` needs an `issuer`. See
+  [identity-contract.md](identity-contract.md#warden-tokens-phase-2).
+- `acceptDexTokens: false` with `challenge` mode is valid but logs a warning: the device
+  sign-in hands out IdP tokens that the worker then refuses (`unbound_token`), so clients must
+  exchange them for Warden tokens at the token endpoint.
+- `issuer` and `audience` are required once any mode is `attribute` or `challenge`, unless
+  `acceptDexTokens` is `false` in `attribute` mode. An `http`
   issuer is rejected unless `internalIssuerURL` is set; use `internalIssuerURL`
   when workers reach the issuer on a container network (`http://dex:5556`) while
   tokens carry the public issuer.
@@ -2464,7 +2475,7 @@ agents:
   serves, and tokens it cannot verify are recorded as unverified and allowed.
 - A settings change hot-reloads with no restart. The verifier is rebuilt only when
   `issuer`, `internalIssuerURL`, `audience`, `jwksURL`, `allowedAZP`, `groupsClaim`,
-  `clockSkewSeconds` or `maxTokenTTLSeconds` change; a mode-only change swaps the
+  `clockSkewSeconds`, `maxTokenTTLSeconds` or `acceptDexTokens` change; a mode-only change swaps the
   mode and keeps the verifier. A failed rebuild keeps the previous config and logs
   one warning (no token data).
 

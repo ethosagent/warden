@@ -887,8 +887,15 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// block and this agent's mode. Construction does no network I/O, so a worker
 	// whose issuer is down still starts. Mode stays off unless configured.
 	idWiring := newIdentityWiring(pxy, agentID, logger)
+	idWiring.now = clk.Now
 	idWiring.scoped = func() int { return countScoped(evaluator.CurrentPolicy()) }
 	idWiring.apply(pol.Identity, pol.Agents)
+	// Warden token keys from the bundle verified at boot (nothing to install
+	// without pins or a first verified bundle). Boot is single-goroutine: the
+	// apply loops start below.
+	if controlPlane != nil {
+		idWiring.applyBinding(controlPlane)
+	}
 
 	// Agent kill switch (W-P2-AREG-05). A managed worker reports the agent and
 	// identity mode it enforces on every heartbeat, tracks every session so a
@@ -1123,6 +1130,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		// through one lock: the agent gate is single-goroutine, and a restore
 		// must never apply an older snapshot over a newer one.
 		applyEv := &serialEvaluator{PolicyEvaluator: gatedEvaluator{PolicyEvaluator: evaluator, gate: gate}, raw: evaluator}
+		applier.serial = applyEv
 		go longPollControlPlane(ctx, clk, controlPlane, applyEv, pol.ControlPlane.LongPollWait, logger, onPolicyApplied(applier.Apply, pxy.CloseBlockedSessions))
 		go heartbeatControlPlane(ctx, clk, controlPlane, pol.ControlPlane.HeartbeatInterval, logger)
 		if pol.ControlPlane.BundleVerification() {

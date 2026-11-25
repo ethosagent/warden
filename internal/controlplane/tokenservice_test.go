@@ -479,7 +479,7 @@ func TestTokenIssuerValidatorsAgree(t *testing.T) {
 }
 
 func newGuard(e *keysEnv) servedSigners {
-	return servedSigners{inner: e.mgr.KeySet(), records: e.mgr.KeySet().Records, now: e.clk.Now, served: e.srv.servesTokenKID}
+	return servedSigners{inner: e.mgr.KeySet(), records: e.mgr.KeySet().Records, now: e.clk.Now, served: e.srv.servesTokenKID, bundled: e.srv.servesBundleTokenKID}
 }
 
 // TestServedSigners: the active token key mints only once it has been
