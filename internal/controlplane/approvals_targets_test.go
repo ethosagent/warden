@@ -9,11 +9,13 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ethosagent/warden/internal/adminaudit"
 	"github.com/ethosagent/warden/internal/agentreg"
 	"github.com/ethosagent/warden/internal/agentreg/agentregtest"
 	"github.com/ethosagent/warden/internal/approvals"
+	"github.com/ethosagent/warden/internal/approvals/adapters/sqlstore"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/dashboard"
 	"github.com/ethosagent/warden/internal/integration"
@@ -87,10 +89,16 @@ func TestApprovalsBlockListRemoval(t *testing.T) {
 	if d.TargetRef != id || d.BaseVersion != 0 || d.Author.Sub != "admin" || d.Source != "console" {
 		t.Errorf("draft = %+v", d.ChangeDraftView)
 	}
-	// The doc is the entry without its reason.
+	// A viewer sees that an entry is named, never who. An admin sees the entry
+	// without its reason.
 	raw, _ := json.Marshal(d.Doc)
+	if strings.Contains(string(raw), "victim") || !strings.Contains(string(raw), `"has_sub":true`) {
+		t.Errorf("viewer draft doc = %s, want {id, has_sub, has_email}", raw)
+	}
+	adm := decodeBody[dashboard.ChangeDraftDetail](t, e.do("admin", http.MethodGet, draftsPath+"/"+d.ID, ""))
+	raw, _ = json.Marshal(adm.Doc)
 	if !strings.Contains(string(raw), `"sub":"victim"`) || strings.Contains(string(raw), "reason") || strings.Contains(string(raw), "exfil") {
-		t.Errorf("draft doc = %s, want the entry without its reason", raw)
+		t.Errorf("admin draft doc = %s, want the entry without its reason", raw)
 	}
 	if strings.Contains(e.logs.String(), "exfil") {
 		t.Error("the block reason reached the logs")
@@ -106,7 +114,7 @@ func TestApprovalsBlockListRemoval(t *testing.T) {
 	}
 
 	// The diff of a non-policy draft is current vs proposed.
-	rec = e.do("viewer", http.MethodGet, draftsPath+"/"+d.ID+"/diff", "")
+	rec = e.do("admin", http.MethodGet, draftsPath+"/"+d.ID+"/diff", "")
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"current":{"id":"`+id) || !strings.Contains(rec.Body.String(), `"proposed"`) {
 		t.Errorf("diff = %d %s", rec.Code, rec.Body.String())
 	}
@@ -134,7 +142,7 @@ func TestApprovalsBlockListRemoval(t *testing.T) {
 		t.Fatalf("approve = %d %s", rec.Code, rec.Body.String())
 	}
 	res := decodeBody[dashboard.ChangeResult](t, rec)
-	if res.State != "applied" || res.Target != "blocked_users" {
+	if res.State != "applied" || res.Target != "blocked_users" || res.Version != 0 || res.AppliedVersion != 0 {
 		t.Errorf("result = %+v", res.ChangeDraftView)
 	}
 	if e.srv.blocks.IsBlocked("victim", "") || servedBlocked(e, "victim") || !servedBlocked(e, "other") || e.srv.policy.currentETag() == etag {
@@ -473,5 +481,192 @@ func TestApprovalsAgentsApprovalsOff(t *testing.T) {
 	id := blockedEntry(t, e, "victim")
 	if rec := e.do("admin", http.MethodDelete, blockAPIPath+"/"+id, ""); rec.Code != http.StatusNoContent {
 		t.Fatalf("unblock with approvals off = %d", rec.Code)
+	}
+}
+
+// TestApprovalsBlockDraftHidesWho: the block list is admin-only, so a viewer
+// session and a policy:read API key see no sub or email in the draft list,
+// detail or diff of a blocked_users draft; an admin session and a key whose
+// owner is an admin do.
+func TestApprovalsBlockDraftHidesWho(t *testing.T) {
+	e := newDraftEnvKeys(t)
+	id, err := e.srv.blocks.Add(context.Background(), BlockEntry{Sub: "victim", Email: "victim@corp.example", Reason: blockedReason}, "seed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := e.heldBy(t, e.do("admin", http.MethodDelete, blockAPIPath+"/"+id, ""), "blocked_users", approvals.CodeBlockRemoved)
+	viewerKey := e.mintKey(t, "viewer", groupViewer, "policy:read")
+	adminKey := e.mintKey(t, "admin", groupAdmin, "policy:read")
+	paths := []string{draftsPath, draftsPath + "?target=blocked_users", draftsPath + "/" + d.ID, draftsPath + "/" + d.ID + "/diff"}
+	for _, p := range paths {
+		for who, rec := range map[string]*httptest.ResponseRecorder{
+			"viewer session": e.do("viewer", http.MethodGet, p, ""),
+			"viewer key":     e.doKey(viewerKey, http.MethodGet, p, ""),
+		} {
+			if rec.Code != http.StatusOK {
+				t.Fatalf("%s GET %s = %d %s", who, p, rec.Code, rec.Body)
+			}
+			if b := rec.Body.String(); strings.Contains(b, "victim") || strings.Contains(b, "corp.example") {
+				t.Errorf("%s GET %s names the blocked person: %s", who, p, b)
+			}
+		}
+	}
+	rec := e.do("viewer", http.MethodGet, draftsPath+"/"+d.ID+"/diff", "")
+	if !strings.Contains(rec.Body.String(), `"has_sub":true`) || !strings.Contains(rec.Body.String(), `"has_email":true`) {
+		t.Errorf("viewer diff = %s, want has_sub and has_email", rec.Body)
+	}
+	for who, rec := range map[string]*httptest.ResponseRecorder{
+		"admin session": e.do("admin", http.MethodGet, draftsPath+"/"+d.ID, ""),
+		"admin key":     e.doKey(adminKey, http.MethodGet, draftsPath+"/"+d.ID+"/diff", ""),
+	} {
+		if !strings.Contains(rec.Body.String(), `"sub":"victim"`) {
+			t.Errorf("%s = %s, want the entry", who, rec.Body)
+		}
+	}
+}
+
+// TestApprovalsDisableIsKillSwitch: disabling an agent never waits on the gate.
+func TestApprovalsDisableIsKillSwitch(t *testing.T) {
+	e := newDraftEnv(t, nil)
+	a := seedAgent(t, e, "bot", "devs")
+	e.srv.gate = approvals.NewGate(true, nil)
+	rec := e.do("admin", http.MethodPost, agentPathBase+"/bot/disable", "", agentRev(a.Revision)...)
+	if rec.Code != http.StatusOK || e.agent(t, "bot").Status != agentreg.StatusDisabled {
+		t.Fatalf("disable with the gate down = %d %s, want 200", rec.Code, rec.Body)
+	}
+}
+
+// crashApply claims d like an approval or emergency apply and runs the target's
+// Applier, then stops before the draft is marked: the state a crash leaves.
+func crashApply(t *testing.T, e *draftEnv, d dashboard.ChangeDraftView, emergency bool) {
+	t.Helper()
+	ctx := context.Background()
+	store := e.srv.Approvals().Store()
+	ad := e.srv.targetAdapters()[approvals.Target(d.Target)]
+	actor := approvals.Author{Iss: "https://idp.example", Sub: "admin2", Kind: AuthorKindOIDC}
+	in := approvals.DecisionInput{Revision: d.Revision, DocSHA256: d.DocSHA256, Approver: actor, ApproverRole: "admin"}
+	var claimed approvals.Draft
+	var err error
+	if emergency {
+		actor = approvals.Author{Iss: "warden-breakglass", Sub: "breakglass:ops", Kind: approvals.AuthorKindBreakglass}
+		in.Approver, in.Decision, in.Comment = actor, approvals.DecisionEmergency, emergencyReason
+		claimed, err = store.BeginEmergency(ctx, d.ID, in)
+	} else {
+		in.Decision, in.AcknowledgeNoReplay = approvals.DecisionApprove, true
+		if _, _, err = store.RecordDecision(ctx, d.ID, in); err == nil {
+			claimed, err = store.BeginApply(ctx, d.ID, d.Revision, actor.Sub)
+		}
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	pctx := WithPrincipal(ctx, Principal{Kind: PrincipalSession, Sub: actor.Sub, Iss: actor.Iss})
+	if emergency {
+		pctx = WithPrincipal(ctx, Principal{Kind: PrincipalBreakglass, Sub: actor.Sub})
+		_, err = ad.ApplyEmergency(pctx, claimed, approvals.Clearance{}, actor)
+	} else {
+		_, err = ad.Apply(pctx, claimed)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := e.view(t, d.ID); got.State != "applying" {
+		t.Fatalf("draft = %s, want applying (the crash window)", got.State)
+	}
+}
+
+// TestApprovalsReconcileTargets: a crash after the Applier wrote and before the
+// draft was marked is settled from the target's own state: an ordinary apply
+// becomes applied, an emergency one applied_unreviewed (and the bypass is
+// reported), never pending again.
+func TestApprovalsReconcileTargets(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		emergency bool
+		want      string
+	}{{"ordinary", false, "applied"}, {"emergency", true, "applied_unreviewed"}} {
+		for _, target := range []string{"blocked_users", "agents_create", "agents_update"} {
+			t.Run(tc.name+"/"+target, func(t *testing.T) {
+				e := emergencyEnv(t)
+				var rec *httptest.ResponseRecorder
+				switch target {
+				case "blocked_users":
+					rec = e.do("admin", http.MethodDelete, blockAPIPath+"/"+blockedEntry(t, e, "victim"), "")
+				case "agents_create":
+					rec = e.do("admin", http.MethodPost, agentPathBase, agentJSON(t, "bot", "bot-k1", "devs"))
+				default:
+					a := seedAgent(t, e, "bot", "devs")
+					rec = e.do("admin", http.MethodPut, agentPathBase+"/bot", `{"keys":[`+string(agentregtest.Ed25519JWK(t, "bot-k1"))+`],"allowedGroups":["devs","more"]}`, agentRev(a.Revision)...)
+				}
+				if rec.Code != http.StatusAccepted {
+					t.Fatalf("write = %d %s, want 202", rec.Code, rec.Body)
+				}
+				d := e.view(t, decodeBody[heldBody](t, rec).DraftID)
+				crashApply(t, e, d.ChangeDraftView, tc.emergency)
+
+				n, err := e.srv.Approvals().Reconcile(context.Background(), e.srv.versionFinder(e.srv.Approvals()))
+				if err != nil || n != 1 {
+					t.Fatalf("Reconcile = %d, %v; want 1", n, err)
+				}
+				if got := e.view(t, d.ID); got.State != tc.want {
+					t.Fatalf("draft after reconcile = %s, want %s", got.State, tc.want)
+				}
+				if tc.emergency && !strings.Contains(e.logs.String(), "approval_bypassed") {
+					t.Error("a repaired emergency apply was not reported")
+				}
+			})
+		}
+	}
+}
+
+// TestApprovalsReconcileTargetsNotApplied: a crash before the Applier wrote
+// returns the draft to pending.
+func TestApprovalsReconcileTargetsNotApplied(t *testing.T) {
+	e := newDraftEnv(t, nil)
+	id := blockedEntry(t, e, "victim")
+	rec := e.do("admin", http.MethodDelete, blockAPIPath+"/"+id, "")
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("remove = %d, want 202", rec.Code)
+	}
+	d := e.view(t, decodeBody[heldBody](t, rec).DraftID)
+	if _, _, err := e.srv.Approvals().Store().RecordDecision(context.Background(), d.ID, approvals.DecisionInput{
+		Revision: d.Revision, DocSHA256: d.DocSHA256, Decision: approvals.DecisionApprove, AcknowledgeNoReplay: true,
+		Approver: approvals.Author{Iss: "https://idp.example", Sub: "admin2", Kind: AuthorKindOIDC}, ApproverRole: "admin",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.srv.Approvals().Store().BeginApply(context.Background(), d.ID, d.Revision, "admin2"); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := e.srv.Approvals().Reconcile(context.Background(), e.srv.versionFinder(e.srv.Approvals())); err != nil || n != 1 {
+		t.Fatalf("Reconcile = %d, %v", n, err)
+	}
+	if got := e.view(t, d.ID); got.State != "pending" || !e.srv.blocks.IsBlocked("victim", "") {
+		t.Errorf("draft = %s, blocked = %v; want pending and still blocked", got.State, e.srv.blocks.IsBlocked("victim", ""))
+	}
+}
+
+type appendFailRecorder struct{}
+
+func (appendFailRecorder) Record(context.Context, adminaudit.Input) (adminaudit.Entry, error) {
+	return adminaudit.Entry{}, errors.New("append failed")
+}
+
+// TestBlockCLIHoldAuditFailure: when the audit row cannot be appended the
+// offline removal leaves no pending draft behind.
+func TestBlockCLIHoldAuditFailure(t *testing.T) {
+	e := newDraftEnv(t, nil)
+	id := blockedEntry(t, e, "victim")
+	entry, ok, err := blockTarget{s: e.srv}.entry(context.Background(), id)
+	if err != nil || !ok {
+		t.Fatal(err)
+	}
+	got, err := holdBlockRemoval(context.Background(), e.srv.blocks, sqlstore.Meta{Enabled: true, DraftTTL: time.Hour, MaxOpenDrafts: 5}, entry, appendFailRecorder{})
+	if err == nil || got != "" {
+		t.Fatalf("holdBlockRemoval = %q, %v; want an audit error and no draft id", got, err)
+	}
+	pending, _, lerr := e.srv.Approvals().Store().List(context.Background(), approvals.Filter{State: approvals.StatePending}, "", 10)
+	if lerr != nil || len(pending) != 0 {
+		t.Errorf("pending drafts = %d, %v; want none", len(pending), lerr)
 	}
 }

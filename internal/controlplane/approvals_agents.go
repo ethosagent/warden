@@ -296,7 +296,7 @@ func agentViewOf(d agentDraftDoc) any {
 	return d
 }
 
-func (agentTarget) View(d approvals.Draft) (any, error) {
+func (agentTarget) View(d approvals.Draft, _ bool) (any, error) {
 	doc, err := decodeAgentDraft(d.DocJSON)
 	if err != nil {
 		return nil, err
@@ -304,7 +304,7 @@ func (agentTarget) View(d approvals.Draft) (any, error) {
 	return agentViewOf(doc), nil
 }
 
-func (t agentTarget) Current(ctx context.Context, d approvals.Draft) (any, error) {
+func (t agentTarget) Current(ctx context.Context, d approvals.Draft, _ bool) (any, error) {
 	a, ok, err := t.current(ctx, d.TargetRef)
 	if err != nil || !ok {
 		return nil, err

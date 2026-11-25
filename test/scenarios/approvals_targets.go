@@ -194,3 +194,62 @@ func approvalsHoldRemovals(t *testing.T, h *harness.H) {
 		}
 	}
 }
+
+func approvalsBlockEnforcementOpts() []harness.Option {
+	return append(blockListFleetOpts(), harness.WithApprovals())
+}
+
+// approvalsBlockEnforcement: with approvals on, adding a block is immediate (the
+// worker denies the user at once, no second admin), a removal is held while a
+// long-poll parked on the served ETag stays parked, and the second admin's
+// approval wakes that long-poll and lets the user through again.
+func approvalsBlockEnforcement(t *testing.T, h *harness.H) {
+	h.Upstream(blockHost)
+	users := mintBlockUsers(h)
+	hostPort := blockHost + ":443"
+	ana, anaCSRF := consoleLogin(t, h, fakes.Valid("ana", "ana@example.com", harness.ConsoleAdminGroup))
+	ben, benCSRF := consoleLogin(t, h, fakes.Valid("ben", "ben@example.com", harness.ConsoleAdminGroup))
+	awaitAllowed(h, 0, hostPort, users.alice)
+
+	status, raw := draftCall(t, ana, anaCSRF, http.MethodPost, "/dashboard/api/blocked-users", "", map[string]any{"sub": "alice", "reason": "incident"})
+	var added struct {
+		ID string `json:"id"`
+	}
+	if status != http.StatusCreated || json.Unmarshal(raw, &added) != nil {
+		t.Fatalf("add block = %d %s, want 201", status, raw)
+	}
+	for i := 0; i < blockWorkers; i++ {
+		awaitBlocked(t, h, i, hostPort, users.alice)
+	}
+
+	// A long-poll parks on the served ETag; the held removal does not wake it.
+	etag := servedETag(t, h)
+	held := h.CP().HoldWorker(http.MethodGet, "/policy?wait=30s", h.CP().Token(), http.Header{"If-None-Match": {etag}})
+	status, raw = draftCall(t, ana, anaCSRF, http.MethodDelete, "/dashboard/api/blocked-users/"+added.ID, "", nil)
+	draft := held202(t, status, raw, "remove block")
+	select {
+	case r := <-held:
+		t.Fatalf("a held removal woke the long-poll: %d", r.Status)
+	default:
+	}
+	awaitBlocked(t, h, 0, hostPort, users.alice)
+
+	if status, raw = approveTargetDraft(t, h, ben, benCSRF, draft); status != http.StatusOK {
+		t.Fatalf("approve removal = %d %s", status, raw)
+	}
+	var got harness.RawResponse
+	h.Eventually("the approval to wake the parked long-poll", func() bool {
+		select {
+		case got = <-held:
+			return true
+		default:
+			return false
+		}
+	})
+	if got.Status != http.StatusOK || got.Header.Get("ETag") == etag {
+		t.Fatalf("woken long-poll = %d ETag %q (was %q), want 200 with a new ETag", got.Status, got.Header.Get("ETag"), etag)
+	}
+	for i := 0; i < blockWorkers; i++ {
+		awaitAllowed(h, i, hostPort, users.alice)
+	}
+}

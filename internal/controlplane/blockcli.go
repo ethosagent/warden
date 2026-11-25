@@ -161,7 +161,11 @@ func holdBlockRemoval(ctx context.Context, st *BlockStore, m sqlstore.Meta, entr
 		Outcome:   adminaudit.OutcomeOK,
 		Details:   map[string]string{adminaudit.DetailOp: "held"},
 	}); err != nil {
-		return draft.ID, fmt.Errorf("draft %s was created but its admin audit row was not appended: %w", draft.ID, err)
+		// Like the immediate path, nothing is left without its audit row.
+		if _, werr := svc.Store().Withdraw(context.WithoutCancel(ctx), draft.ID, draft.Revision, author.Sub); werr != nil {
+			return draft.ID, fmt.Errorf("admin audit: %w; draft %s could not be withdrawn: %v", err, draft.ID, werr)
+		}
+		return "", fmt.Errorf("admin audit: %w; the draft was withdrawn and nothing is pending", err)
 	}
 	return draft.ID, nil
 }

@@ -62,10 +62,12 @@ type targetAdapter interface {
 	approvals.EmergencyApplier
 	// View is the draft's doc as the console shows it: no key material, no
 	// free text an operator wrote.
-	View(d approvals.Draft) (any, error)
+	// full is true for an admin caller; the block list shows who is blocked
+	// only to them.
+	View(d approvals.Draft, full bool) (any, error)
 	// Current is the entity the draft changes as it is now, in the same shape as
 	// View; nil when it does not exist.
-	Current(ctx context.Context, d approvals.Draft) (any, error)
+	Current(ctx context.Context, d approvals.Draft, full bool) (any, error)
 }
 
 // targetAdapters are the non-policy targets this control plane can hold: the
@@ -194,6 +196,58 @@ func (s *Server) findDraftVersion(ctx context.Context, id string, revision int) 
 	return v, true, nil
 }
 
+// versionFinder is the approvals.VersionFinder for every target. A policy draft
+// is found by its version's message; a block-list or agent draft, which has no
+// version of its own, counts as applied when its effect is on the target: the
+// entry is gone, or the agent moved past the draft's base revision under the
+// actor of a decision on this revision.
+func (s *Server) versionFinder(svc *approvals.Service) approvals.VersionFinder {
+	return func(ctx context.Context, id string, revision int) (int64, bool, error) {
+		d, err := svc.Store().Get(ctx, id)
+		if err != nil {
+			return 0, false, err
+		}
+		switch d.Target {
+		case approvals.TargetBlockedUsers:
+			_, ok, err := blockTarget{s: s}.entry(ctx, d.TargetRef)
+			return 0, err == nil && !ok, err
+		case approvals.TargetAgents:
+			return s.findAgentApply(ctx, svc, d)
+		}
+		return s.findDraftVersion(ctx, id, revision)
+	}
+}
+
+// findAgentApply reports whether d's agent write happened: the agent is past
+// the base revision (or exists, for a registration) and its last writer is the
+// actor of an approve or emergency decision on d's current revision.
+func (s *Server) findAgentApply(ctx context.Context, svc *approvals.Service, d approvals.Draft) (int64, bool, error) {
+	cur, ok, err := agentTarget{s: s}.current(ctx, d.TargetRef)
+	if err != nil || !ok {
+		return 0, false, err
+	}
+	rows, err := svc.Store().Approvals(ctx, d.ID)
+	if err != nil {
+		return 0, false, err
+	}
+	actors := map[string]bool{}
+	for _, r := range rows {
+		if r.Revision != d.Revision || r.DocSHA256 != d.DocSHA256 {
+			continue
+		}
+		switch r.Decision {
+		case approvals.DecisionApprove:
+			actors["oidc:"+r.ApproverSub] = true
+		case approvals.DecisionEmergency:
+			actors[r.ApproverSub] = true
+		}
+	}
+	if d.BaseVersion == 0 {
+		return cur.Revision, actors[cur.CreatedBy], nil
+	}
+	return cur.Revision, cur.Revision > d.BaseVersion && actors[cur.UpdatedBy], nil
+}
+
 // draftDoc and policyWireDoc convert between the approvals doc and the policy
 // wire: the same three fields, in the same JSON shape.
 func draftDoc(w policyWire) approvals.Doc {
@@ -263,7 +317,7 @@ func (s *Server) initApprovals() {
 		return
 	}
 	// A crash mid-apply leaves a draft in applying: settle it from the versions.
-	if n, err := svc.Reconcile(context.WithoutCancel(context.Background()), s.findDraftVersion); err != nil {
+	if n, err := svc.Reconcile(context.WithoutCancel(context.Background()), s.versionFinder(svc)); err != nil {
 		s.approvalsErr = fmt.Errorf("control-plane: approvals reconcile: %w", err)
 		return
 	} else if n > 0 {

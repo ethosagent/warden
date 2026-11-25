@@ -162,7 +162,7 @@ func (a changeDraftAPI) view(d approvals.Draft, approved int) dashboard.ChangeDr
 		State: string(d.State), Author: dashboard.ChangeActor{Sub: d.Author.Sub, Email: d.Author.Email},
 		Source: string(d.Source), Message: d.Message, DocSHA256: d.DocSHA256,
 		Widening: true, Reasons: []dashboard.ChangeReason{}, RequiredRole: d.RequiredRole,
-		LastError: d.LastError, AppliedVersion: d.AppliedVersion,
+		LastError: d.LastError,
 		CreatedAt: d.CreatedAt.UTC(), UpdatedAt: d.UpdatedAt.UTC(), ExpiresAt: d.ExpiresAt.UTC(),
 		ApprovalsRequired: a.svc().MinApprovals(),
 	}
@@ -173,12 +173,25 @@ func (a changeDraftAPI) view(d approvals.Draft, approved int) dashboard.ChangeDr
 			v.Reasons = append(v.Reasons, dashboard.ChangeReason{Code: r.Code, Path: r.Path, Detail: r.Detail})
 		}
 	}
+	// Only a policy draft publishes a policy version; another target's number
+	// (an agent revision) is not one and must not be read as one.
+	if d.Target == approvals.TargetPolicy {
+		v.AppliedVersion = d.AppliedVersion
+	}
 	v.Approvals = approved
 	return v
 }
 
 // approvalCount is the distinct approvers of d's current revision (0 on a
 // store error: the count is informational, the apply path counts for itself).
+// seesEntities reports whether the caller may read the entities a non-policy
+// draft names (who is blocked): admins only, as for the block list routes. An
+// API key counts as the role its owner holds.
+func (a changeDraftAPI) seesEntities(ctx context.Context) bool {
+	p, ok := PrincipalFrom(ctx)
+	return ok && principalRole(a.s.cfg.Console, p) >= config.RoleAdmin
+}
+
 func (a changeDraftAPI) approvalCount(ctx context.Context, d approvals.Draft) int {
 	n, _ := a.svc().ApprovalCount(ctx, d)
 	return n
@@ -186,7 +199,7 @@ func (a changeDraftAPI) approvalCount(ctx context.Context, d approvals.Draft) in
 
 func (a changeDraftAPI) result(ctx context.Context, d approvals.Draft, applied bool) dashboard.ChangeResult {
 	res := dashboard.ChangeResult{ChangeDraftView: a.view(d, a.approvalCount(ctx, d))}
-	if applied {
+	if applied && d.Target == approvals.TargetPolicy {
 		res.Version = d.AppliedVersion
 	}
 	return res
@@ -224,7 +237,7 @@ func (a changeDraftAPI) detail(ctx context.Context, d approvals.Draft) (dashboar
 			return dashboard.ChangeDraftDetail{}, approvals.ErrUnsupportedTarget
 		}
 		var err error
-		if view, err = ad.View(d); err != nil {
+		if view, err = ad.View(d, a.seesEntities(ctx)); err != nil {
 			return dashboard.ChangeDraftDetail{}, err
 		}
 	}
@@ -738,11 +751,11 @@ func (a changeDraftAPI) targetDiff(ctx context.Context, d approvals.Draft) (dash
 	if !ok {
 		return dashboard.ChangeDiff{}, a.changeErr(ctx, approvals.ErrUnsupportedTarget)
 	}
-	proposed, err := ad.View(d)
+	proposed, err := ad.View(d, a.seesEntities(ctx))
 	if err != nil {
 		return dashboard.ChangeDiff{}, a.changeErr(ctx, err)
 	}
-	current, err := ad.Current(ctx, d)
+	current, err := ad.Current(ctx, d, a.seesEntities(ctx))
 	if err != nil {
 		return dashboard.ChangeDiff{}, a.changeErr(ctx, err)
 	}

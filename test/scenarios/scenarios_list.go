@@ -174,6 +174,7 @@ var All = slices.Concat(
 		// admin (W-P2-APPR-08); adds, disables and narrowing edits stay direct.
 		// In-process only (console, admin audit, state dir).
 		{Name: "approvals_hold_removals", Opts: approvalsTargetsOpts(), Run: approvalsHoldRemovals},
+		{Name: "approvals_block_enforcement", Opts: approvalsBlockEnforcementOpts(), Run: approvalsBlockEnforcement},
 		// Scoped policy (W-P1-GPOL-10): with identity off a scoped entry loads
 		// but allows nobody (identity_required); an unscoped entry still applies.
 		{Name: "scoped_policy_fail_closed", Run: scopedPolicyFailClosed},

@@ -137,17 +137,35 @@ func (b blockTarget) entry(ctx context.Context, id string) (BlockEntry, bool, er
 	return BlockEntry{}, false, nil
 }
 
-func (blockTarget) View(d approvals.Draft) (any, error) {
-	doc, err := decodeBlockDraft(d.DocJSON)
-	return doc, err
+// blockRestricted is the draft doc as a non-admin sees it: the block list is
+// admin-only, so who is blocked is not for viewers or policy:read keys.
+type blockRestricted struct {
+	ID       string `json:"id"`
+	HasSub   bool   `json:"has_sub"`
+	HasEmail bool   `json:"has_email"`
 }
 
-func (b blockTarget) Current(ctx context.Context, d approvals.Draft) (any, error) {
+func blockViewOf(d blockDraftDoc, full bool) any {
+	if full {
+		return d
+	}
+	return blockRestricted{ID: d.ID, HasSub: d.Sub != "", HasEmail: d.Email != ""}
+}
+
+func (blockTarget) View(d approvals.Draft, full bool) (any, error) {
+	doc, err := decodeBlockDraft(d.DocJSON)
+	if err != nil {
+		return nil, err
+	}
+	return blockViewOf(doc, full), nil
+}
+
+func (b blockTarget) Current(ctx context.Context, d approvals.Draft, full bool) (any, error) {
 	e, ok, err := b.entry(ctx, d.TargetRef)
 	if err != nil || !ok {
 		return nil, err
 	}
-	return blockDraftOf(e), nil
+	return blockViewOf(blockDraftOf(e), full), nil
 }
 
 // holdRemoval answers a block-list removal while approvals are enabled: it

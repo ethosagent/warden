@@ -236,10 +236,14 @@ func (a agentRegistryAPI) SetEnabled(ctx context.Context, id string, enabled boo
 	if err != nil {
 		return dashboard.AgentView{}, err
 	}
-	proposed := cur
-	proposed.Status = to
-	if err := a.holdAgent(ctx, action, proposed, revision); err != nil {
-		return dashboard.AgentView{}, err
+	// A disable is the kill switch and narrows access: it never waits on the
+	// approval gate, so a missing approvals Service cannot stop it.
+	if enabled {
+		proposed := cur
+		proposed.Status = to
+		if err := a.holdAgent(ctx, action, proposed, revision); err != nil {
+			return dashboard.AgentView{}, err
+		}
 	}
 	out, err := a.store.SetStatus(ctx, id, to, revision, blockActor(ctx))
 	if err != nil {

@@ -1162,6 +1162,12 @@ save time and the draft's required role is checked again at approve time.
 |---|---|
 | `POST`/`PUT /dashboard/api/policy`, `POST`/`PUT /dashboard/api/settings`, `POST`/`PUT /dashboard/api/llmproviders`, `POST /dashboard/api/policy/versions/{v}/rollback` (the draft's doc is version `v`, source `rollback`), and `warden policy import`. Also, as drafts of their own target (they create no policy version): `DELETE /dashboard/api/blocked-users/{id}` and `warden control-plane block remove` (target `blocked_users`); registering an agent, adding an allowed group or scope, adding or replacing a key, and re-enabling an agent through `POST`/`PUT /dashboard/api/agents` and `POST /dashboard/api/agents/{id}/enable` (target `agents`) | integrations, detection, the secret store (`/dashboard/api/secretstore`, `/central/secrets`; they write secret values, not a version), adding a block (the incident kill switch), disabling an agent and agent edits that only narrow (a removed group, a display name), worker tokens, signing keys, sessions, backups, the offline `agent` commands, and the offline commands below |
 
+A `blocked_users` or `agents` draft publishes no policy version, so its approve
+and emergency-apply results carry no `version` or `applied_version`; an agent's
+new revision is on the agent (`GET /dashboard/api/agents/{id}`). The block list
+is admin-only, so a non-admin (a viewer, or a `policy:read` key whose owner is not
+an admin) reading such a draft sees `{id, has_sub, has_email}`, never who is blocked.
+
 Not gated, stated plainly for production use:
 
 - With approvals enabled, `warden control-plane block remove` holds the removal as
