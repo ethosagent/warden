@@ -185,6 +185,9 @@ type DLPSettings struct {
 	// Custom declares operator data classes (name + regex + severity) — mirrors
 	// DLPConfig.Custom. The regex is behavioral config, not a secret.
 	Custom []DLPCustomClassSettings `json:"custom,omitempty"`
+	// WardenTokens mirrors DLPConfig.WardenTokens: detect Warden's own API keys and
+	// worker tokens in outbound bodies. A boolean switch, no credential value.
+	WardenTokens bool `json:"wardenTokens,omitempty"`
 }
 
 // DLPClassDefaultSettings mirrors DLPClassDefault (the dlp.classes map value).
@@ -458,7 +461,7 @@ func dlpSettingsFromPolicy(d DLPConfig) *DLPSettings {
 	if !d.Active() {
 		return nil
 	}
-	out := &DLPSettings{Mode: d.Mode}
+	out := &DLPSettings{Mode: d.Mode, WardenTokens: d.WardenTokens}
 	if len(d.Classes) > 0 {
 		out.Classes = make(map[string]DLPClassDefaultSettings, len(d.Classes))
 		for k, v := range d.Classes {
@@ -491,7 +494,7 @@ func DLPConfigFromSettings(s *DLPSettings) DLPConfig {
 	if s == nil {
 		return DLPConfig{}
 	}
-	out := DLPConfig{Mode: s.Mode}
+	out := DLPConfig{Mode: s.Mode, WardenTokens: s.WardenTokens}
 	if len(s.Classes) > 0 {
 		out.Classes = make(map[string]DLPClassDefault, len(s.Classes))
 		for k, v := range s.Classes {

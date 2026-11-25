@@ -11,3 +11,9 @@ FuzzSniffClientHello ./internal/proxy
 FuzzParseToken ./internal/identity/adapters/oidc
 FuzzParseJWK ./internal/keys
 FuzzValidate ./internal/agentreg
+FuzzVerify ./internal/bundle
+FuzzDecodePayload ./internal/bundle
+FuzzFastEnvelope ./internal/bundle
+FuzzParse ./internal/apikeys
+FuzzClassify ./internal/approvals
+FuzzClassifyNewKeyWidens ./internal/approvals

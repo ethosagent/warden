@@ -98,6 +98,10 @@ func (s *Server) writeAuthor(ctx context.Context) (PolicyAuthor, error) {
 		return PolicyAuthor{Sub: breakglassSubPrefix + strings.TrimPrefix(p.Sub, breakglassSubPrefix), Email: p.Email, Kind: AuthorKindBreakglass}, nil
 	case p.Kind == PrincipalSession:
 		return PolicyAuthor{Sub: p.Sub, Email: p.Email, Kind: AuthorKindOIDC}, nil
+	case p.Kind == PrincipalAPIKey:
+		// Recorded under the owner (the human who answers for the key); the
+		// kind says a key made the change.
+		return PolicyAuthor{Sub: p.ActorSub(), Email: p.Email, Kind: AuthorKindAPIKey}, nil
 	default:
 		return PolicyAuthor{}, fmt.Errorf("controlplane: versioned write by an unsupported principal kind %q", p.Kind)
 	}
@@ -147,6 +151,12 @@ func (s *Server) publishVersion(ctx context.Context, mutate func(*policyWire) er
 	if err != nil {
 		return 0, false, err
 	}
+	return s.publishVersionAs(ctx, author, mutate, meta, source)
+}
+
+// publishVersionAs is publishVersion with an explicit author: an approved
+// change draft publishes as its draft author, not as the request's approver.
+func (s *Server) publishVersionAs(ctx context.Context, author PolicyAuthor, mutate func(*policyWire) error, meta dashboard.WriteMeta, source string) (int64, bool, error) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 

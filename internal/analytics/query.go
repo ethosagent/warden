@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -37,14 +38,37 @@ func isMemoryDSN(path string) bool {
 // readOnlyDSN derives the mode=ro DSN for a store's path, which callers hand
 // us either as a plain filesystem path or as an existing "file:" URI (with or
 // without query parameters).
+//
+// busy_timeout and query_only are DSN pragmas so every pooled connection gets
+// them, not just the first.
 func readOnlyDSN(path string) string {
+	const params = "mode=ro&_pragma=busy_timeout(5000)&_pragma=query_only(1)"
 	if strings.HasPrefix(path, "file:") {
 		if strings.Contains(path, "?") {
-			return path + "&mode=ro"
+			return path + "&" + params
 		}
-		return path + "?mode=ro"
+		return path + "?" + params
 	}
-	return "file:" + path + "?mode=ro"
+	return "file:" + path + "?" + params
+}
+
+// fleetRWDSN derives the read-write DSN of a file-backed fleet store: WAL lets
+// the read-only handle read while ingest commits, and busy_timeout makes a rare
+// collision wait instead of failing. Both are DSN pragmas, so every pooled
+// connection gets them. In-memory paths are returned unchanged.
+func fleetRWDSN(path string) string {
+	if isMemoryDSN(path) {
+		return path
+	}
+	const params = "_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
+	if strings.HasPrefix(path, "file:") {
+		if strings.Contains(path, "?") {
+			return path + "&" + params
+		}
+		return path + "?" + params
+	}
+	u := url.URL{Scheme: "file", Opaque: (&url.URL{Path: path}).EscapedPath(), RawQuery: params}
+	return u.String()
 }
 
 // openReadOnlyDB opens the dedicated read-only query handle for the SQLite
@@ -63,10 +87,6 @@ func openReadOnlyDB(path string, rw *sql.DB) (ro *sql.DB, shared bool, err error
 		return nil, false, fmt.Errorf("analytics: open sqlite (ro): %w", err)
 	}
 	ro.SetMaxOpenConns(1)
-	if _, err := ro.Exec(`PRAGMA query_only = ON;`); err != nil {
-		_ = ro.Close()
-		return nil, false, fmt.Errorf("analytics: sqlite query_only: %w", err)
-	}
 	return ro, false, nil
 }
 

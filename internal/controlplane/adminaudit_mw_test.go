@@ -21,6 +21,8 @@ import (
 
 	"github.com/ethosagent/warden/internal/adminaudit"
 	"github.com/ethosagent/warden/internal/agentreg/agentregtest"
+	"github.com/ethosagent/warden/internal/apikeys"
+	"github.com/ethosagent/warden/internal/apikeys/adapters/sqlitestore"
 	"github.com/ethosagent/warden/internal/clock/clocktest"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/cpstate"
@@ -86,6 +88,7 @@ type auditEnvOpts struct {
 	adminToken string
 	db         *cpstate.DB
 	store      *adminaudit.Store // nil: a fakeRecorder
+	apiKeys    bool              // console.apiKeys on (db must carry the api_keys table)
 }
 
 func newAuditEnv(t *testing.T, o auditEnvOpts) *auditEnv {
@@ -103,6 +106,20 @@ func newAuditEnv(t *testing.T, o auditEnvOpts) *auditEnv {
 		t.Fatalf("NewWorkerTokenStore: %v", err)
 	}
 	cfg.WorkerTokens = tokens
+	if o.apiKeys {
+		reg := newAPIKeyRegistry()
+		ks, err := sqlitestore.New(o.db, sqlitestore.Options{Registry: reg, Clock: cfg.Clock})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ix, err := apikeys.NewIndex(context.Background(), ks, apikeys.IndexOptions{Now: cfg.Clock.Now, After: cfg.Clock.After, Logger: logger})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg.Console.APIKeys = config.ConsoleAPIKeys{Enabled: true, DefaultTTL: config.DefaultAPIKeyTTL, MaxTTL: config.DefaultAPIKeyMaxTTL,
+			MaxPerOwner: config.DefaultAPIKeysMaxPerOwner, RatePerKey: config.DefaultAPIKeysRatePerKey}
+		cfg.APIKeyIndex, cfg.APIKeyStore, cfg.APIKeyRegistry = ix, ks, reg
+	}
 	cfg.SecretStore, cfg.SecretStoreBackend = secrets.NewEchoStore(), "echo"
 	if o.store != nil {
 		cfg.AdminAudit = o.store
@@ -184,6 +201,8 @@ var auditedHeaders = map[routeKey][]string{
 	{http.MethodPut, "/dashboard/api/agents/{id}"}:          {"If-Match", `"r1"`},
 	{http.MethodPost, "/dashboard/api/agents/{id}/disable"}: {"If-Match", `"r2"`},
 	{http.MethodPost, "/dashboard/api/agents/{id}/enable"}:  {"If-Match", `"r3"`},
+	{http.MethodPost, "/dashboard/api/changes"}:             {"If-Match", `"v1"`},
+	{http.MethodPut, "/dashboard/api/changes/{id}"}:         {"If-Match", `"r1"`},
 }
 
 // auditedRequests maps every audited route to a request an admin can make
@@ -214,6 +233,13 @@ var auditedRequests = map[routeKey]auditedRequest{
 	// The revoke targets the token the create just minted ({tokid}).
 	{http.MethodPost, "/dashboard/api/worker-tokens"}:        {"/dashboard/api/worker-tokens", `{"name":"audit-tok","proxyID":"audit-worker"}`},
 	{http.MethodDelete, "/dashboard/api/worker-tokens/{id}"}: {"/dashboard/api/worker-tokens/{tokid}", ""},
+	// Served by the stub certificate admin TestAdminAuditAllAuditedRoutes installs.
+	{http.MethodPost, "/dashboard/api/workers/{id}/revoke"}: {"/dashboard/api/workers/worker-1/revoke", ""},
+	// API keys (W-P2-APIK-03): the create mints the key the {id} revoke removes;
+	// the owner revoke targets nobody so it leaves the revoke below a live key.
+	{http.MethodPost, apiKeysPath}:             {apiKeysPath, `{"name":"audit-key","scopes":["policy:read"]}`},
+	{http.MethodDelete, apiKeysPath}:           {apiKeysPath + "?owner_sub=nobody", ""},
+	{http.MethodDelete, apiKeysPath + "/{id}"}: {apiKeysPath + "/{keyid}", ""},
 	// Served by the stub key source TestAdminAuditAllAuditedRoutes installs.
 	{http.MethodPost, "/dashboard/api/keys/rotate"}: {"/dashboard/api/keys/rotate", `{"purpose":"token"}`},
 	// {jwk} is a public Ed25519 key the test fills in.
@@ -221,6 +247,15 @@ var auditedRequests = map[routeKey]auditedRequest{
 	{http.MethodPut, "/dashboard/api/agents/{id}"}:          {"/dashboard/api/agents/audit-agent", `{"displayName":"Audit","keys":[{jwk}],"allowedGroups":["g","h"]}`},
 	{http.MethodPost, "/dashboard/api/agents/{id}/disable"}: {"/dashboard/api/agents/audit-agent/disable", ""},
 	{http.MethodPost, "/dashboard/api/agents/{id}/enable"}:  {"/dashboard/api/agents/audit-agent/enable", ""},
+	// Served by the stub change drafts TestAdminAuditAllAuditedRoutes installs.
+	{http.MethodPost, "/dashboard/api/changes"}:               {"/dashboard/api/changes", `{"target":"policy","doc":{}}`},
+	{http.MethodPut, "/dashboard/api/changes/{id}"}:           {"/dashboard/api/changes/cd_1", `{"doc":{}}`},
+	{http.MethodPost, "/dashboard/api/changes/{id}/submit"}:   {"/dashboard/api/changes/cd_1/submit", ``},
+	{http.MethodPost, "/dashboard/api/changes/{id}/withdraw"}: {"/dashboard/api/changes/cd_1/withdraw", ``},
+	{http.MethodPost, "/dashboard/api/changes/{id}/rebase"}:   {"/dashboard/api/changes/cd_1/rebase", ``},
+	{http.MethodPost, "/dashboard/api/changes/{id}/approve"}:  {"/dashboard/api/changes/cd_1/approve", `{"revision":1,"doc_sha256":"x"}`},
+	{http.MethodPost, "/dashboard/api/changes/{id}/reject"}:   {"/dashboard/api/changes/cd_1/reject", `{"revision":1,"doc_sha256":"x"}`},
+	{http.MethodPost, "/dashboard/api/changes/{id}/replay"}:   {"/dashboard/api/changes/cd_1/replay", ``},
 }
 
 // allAuditedRoutes lists every audited row of both route tables in a stable
@@ -256,14 +291,16 @@ func auditRow(k routeKey) authzRow {
 }
 
 func TestAdminAuditAllAuditedRoutes(t *testing.T) {
-	e := newOIDCAuditEnv(t)
+	e := newAuditEnv(t, auditEnvOpts{console: authzConsole(defaultRoles()), token: dashTestToken, db: openKeysDB(t), apiKeys: true})
 	e.srv.dash.SetPolicyHistory(stubHistory{})
 	e.srv.dash.SetBackup(func() error { return nil })
 	e.srv.dash.SetKeysSource(stubKeys{})
+	e.srv.dash.SetChangeDrafts(stubChanges{})
+	e.srv.dash.SetWorkerCertAdmin(stubWorkerCerts{})
 	admin := e.session(t, groupAdmin)
-	hashed := map[string]bool{"policy": true, "settings": true, "integrations": true, "detection": true, "llmproviders": true, "worker_tokens": true, "blocked_users": true, "agents": true}
+	hashed := map[string]bool{"policy": true, "settings": true, "integrations": true, "detection": true, "llmproviders": true, "worker_tokens": true, "blocked_users": true, "agents": true, "api_keys": true}
 	routes := allAuditedRoutes()
-	var tokID string
+	var tokID, keyID string
 	if len(routes) != len(auditedRequests) {
 		t.Fatalf("%d audited routes but %d test requests; add the new route to auditedRequests", len(routes), len(auditedRequests))
 	}
@@ -276,6 +313,7 @@ func TestAdminAuditAllAuditedRoutes(t *testing.T) {
 		before := len(e.rec.inputs())
 		req.target = strings.ReplaceAll(req.target, "{tokid}", tokID)
 		req.body = strings.ReplaceAll(req.body, "{jwk}", string(agentregtest.Ed25519JWK(t, "audit-agent")))
+		req.target = strings.ReplaceAll(req.target, "{keyid}", keyID)
 		if strings.Contains(req.target, "{id}") {
 			entries, err := e.srv.blocks.List(context.Background())
 			if err != nil || len(entries) == 0 {
@@ -286,6 +324,13 @@ func TestAdminAuditAllAuditedRoutes(t *testing.T) {
 		rec := e.send(admin, "", k.Method, req.target, req.body, auditedHeaders[k]...)
 		if rec.Code/100 != 2 {
 			t.Fatalf("%s %s = %d %s, want 2xx", k.Method, req.target, rec.Code, rec.Body.String())
+		}
+		if k.Method == http.MethodPost && k.Path == apiKeysPath {
+			var made struct{ ID string }
+			if err := json.Unmarshal(rec.Body.Bytes(), &made); err != nil || made.ID == "" {
+				t.Fatalf("api key create body has no id: %v", err)
+			}
+			keyID = made.ID
 		}
 		if k.Path == "/dashboard/api/worker-tokens" {
 			var made struct{ ID string }

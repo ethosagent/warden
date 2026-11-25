@@ -1092,3 +1092,23 @@ func (ks *KeySet) Records(purpose string) []Record {
 	}
 	return append([]Record(nil), l.rows...)
 }
+
+// ErrNoCertSigner is a ca key whose backend does not hand out a crypto.Signer
+// for certificate signing; retrying cannot fix it.
+var ErrNoCertSigner = errors.New("keys: the keys backend does not expose the ca key for certificate signing")
+
+// CertSigner returns the active ca key as a crypto.Signer, for the worker CA's
+// X.509 signing (W-P2-WCA-01). It exists for PurposeCA only: token and bundle
+// keys are JWS keys and never leave their Signer. A backend that keeps keys
+// private yields ErrNoCertSigner.
+func (m *Manager) CertSigner(ctx context.Context) (crypto.Signer, error) {
+	sg, err := m.Signer(ctx, PurposeCA)
+	if err != nil {
+		return nil, err
+	}
+	x, ok := sg.(interface{ CryptoSigner() crypto.Signer })
+	if !ok || x.CryptoSigner() == nil {
+		return nil, ErrNoCertSigner
+	}
+	return x.CryptoSigner(), nil
+}
