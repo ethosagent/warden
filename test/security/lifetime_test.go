@@ -1,6 +1,10 @@
 package security
 
 import (
+	"bufio"
+	"encoding/base64"
+	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"testing"
@@ -106,7 +110,9 @@ var disabledAgentCases = func() []Case {
 }()
 
 // revokedKeyCases: the token signing key is rotated in an emergency while a
-// user holds a token signed by it and a tunnel opened with it.
+// user holds a token signed by it and a tunnel opened with it. The open tunnel
+// is no longer answered with a per-request 403: the post-apply re-check
+// (W-P2-WBND-09) closes it, asserted in TestLifetime/token_key_revoked.
 var revokedKeyCases = []Case{{
 	Name: "a cached token signed by the revoked key, on a new CONNECT",
 	Path: PathWorker,
@@ -114,22 +120,6 @@ var revokedKeyCases = []Case{{
 		return Seen(s.Do(t, s.Worker("agent-a"), Via(TransportConnect, scratchToken(s, keyU1))))
 	},
 	WantStatus:       http.StatusProxyAuthRequired,
-	WantBody:         "identity_required",
-	WantResult:       "invalid",
-	WantReason:       "unknown_kid",
-	WantDeny:         "identity_required",
-	WantUpstreamHits: 0,
-}, {
-	Name: "the next request of a tunnel opened with a token of the revoked key",
-	Path: PathWorker,
-	Attack: func(t testing.TB, s *Stack) Observed {
-		r, err := tunnelOf(s, keyT1).Get(t)
-		if err != nil {
-			t.Fatalf("the open tunnel was closed instead of answered: %v", err)
-		}
-		return Seen(r)
-	},
-	WantStatus:       http.StatusForbidden,
 	WantBody:         "identity_required",
 	WantResult:       "invalid",
 	WantReason:       "unknown_kid",
@@ -203,6 +193,29 @@ func lifetimeStack(t *testing.T) *Stack {
 // holdTunnel opens a terminated tunnel on agent's worker with the token kept
 // under tokKey, proves it serves (so the worker holds a verified identity for
 // it) and keeps it under key.
+// connectStatus sends one CONNECT with token and returns its status, reading no
+// reply through the tunnel.
+func connectStatus(t testing.TB, w *Worker, token string) int {
+	t.Helper()
+	conn, err := net.DialTimeout("tcp", w.ProxyAddr, 10*time.Second)
+	if err != nil {
+		t.Fatalf("security: dial %s: %v", w.Name, err)
+	}
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetDeadline(time.Now().Add(15 * time.Second))
+	req := "CONNECT " + UpstreamHost + ":443 HTTP/1.1\r\nHost: " + UpstreamHost + ":443\r\n" +
+		"Proxy-Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte("session:"+token)) + "\r\n\r\n"
+	if _, err := io.WriteString(conn, req); err != nil {
+		t.Fatalf("security: write CONNECT: %v", err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodConnect})
+	if err != nil {
+		t.Fatalf("security: read the CONNECT reply: %v", err)
+	}
+	_ = resp.Body.Close()
+	return resp.StatusCode
+}
+
 func holdTunnel(t testing.TB, s *Stack, agent, tokKey, key string) *Tunnel {
 	t.Helper()
 	tun := s.OpenTunnel(t, s.Worker(agent), TransportTerminated, scratchToken(s, tokKey))
@@ -267,11 +280,37 @@ func TestLifetime(t *testing.T) {
 		s := lifetimeStack(t)
 		holdTunnel(t, s, "agent-a", keyU1, keyT1)
 
-		cut := s.StartCut(t, s.Worker("agent-a"), func() { s.RotateTokenKey(t, true) })
+		w := s.Worker("agent-a")
+		watch := Case{Path: PathWorker, WantResult: "invalid", WantReason: "unknown_kid", WantDeny: "identity_required"}
+		before := s.snapshot(t, w, watch)
+		cut := s.StartCut(t, w, func() { s.RotateTokenKey(t, true) })
+		// Only the CONNECT status is read: a CONNECT admitted just before the new
+		// bundle lands is closed by the post-apply re-check, so a request through
+		// it may see the close instead of a reply.
 		cut.Within(t, cutBound, "refuse the revoked key's token", func() bool {
-			return s.Do(t, s.Worker("agent-a"), Via(TransportConnect, scratchToken(s, keyU1))).Status == http.StatusProxyAuthRequired
+			return connectStatus(t, w, scratchToken(s, keyU1)) == http.StatusProxyAuthRequired
 		})
 		Run(t, s, "worker", revokedKeyCases)
+		s.Eventually("the tunnel opened with the revoked key's token to be closed by the post-apply re-check", tunnelOf(s, keyT1).Closed)
+		// The tunnel's close is its own deny event: the terminated tunnel's protocol
+		// is https, while the refused probe CONNECTs are tcp. Exactly one such
+		// identity_required event exists, and the unknown_kid verification count rose.
+		closes := 0
+		for _, ev := range s.DenyEvents(t, w) {
+			if ev.Reason == "identity_required" && ev.Protocol == "https" {
+				closes++
+			}
+		}
+		if closes != 1 {
+			t.Errorf("%d identity_required events for the closed tunnel (https), want exactly 1", closes)
+		}
+		after := s.snapshot(t, w, watch)
+		if after.identity <= before.identity {
+			t.Errorf("no unknown_kid verification counted (%v -> %v)", before.identity, after.identity)
+		}
+		if after.hits != before.hits {
+			t.Errorf("%d upstream hits during the revocation, want 0", after.hits-before.hits)
+		}
 
 		// A token signed by the new key works. The mint guard holds minting back
 		// until the bundle that serves the new key is signed, which the clock

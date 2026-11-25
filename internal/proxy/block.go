@@ -48,6 +48,12 @@ func (p *Proxy) blockStage(s *requestScope) (endSession bool) {
 		// carried, so a later block can cut it (an anonymous request binds nothing).
 		s.sess.bind(s.ci)
 		s.sess.bind(connIdentity{Claims: s.idClaims, Status: s.idStatus})
+		// A Warden token that arrived only in X-Warden-Identity (a transparent leg)
+		// has no CONNECT to arm the session: arm it from the first request that
+		// resolves to one, before any WebSocket 101 or h2 stream body runs.
+		if s.idStatus == identity.StatusValid && s.idClaims.TokenType == identity.TokenWarden && s.sess != nil && !s.sess.armed.Load() {
+			p.armExpiry(s.sess, connIdentity{Claims: s.idClaims, Status: identity.StatusValid, Expiry: s.idClaims.Expiry}, false)
+		}
 		// idHeaderClaims is only ever set from a header that verified valid.
 		s.sess.bind(connIdentity{Claims: s.idHeaderClaims, Status: identity.StatusValid})
 		return false

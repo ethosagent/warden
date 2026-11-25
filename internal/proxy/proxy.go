@@ -173,11 +173,20 @@ type Config struct {
 
 	// IdentityClock, when set, is the time source for identity validity decisions:
 	// the token exp+skew recheck on each request, and the raw-tunnel lifetime
-	// decided at CONNECT (exp minus now). The cut of an open tunnel itself runs on
-	// wall time (time.AfterFunc). It does NOT drive leaf-cert minting, which real
+	// decided at CONNECT (exp minus now). The cut of an open scoped attribute-mode
+	// tunnel itself runs on wall time (time.AfterFunc); require-mode sessions are cut by the
+	// expiry loop, which follows this clock through IdentityTimer. It does NOT drive leaf-cert minting, which real
 	// TLS clients verify against the wall clock. Assembly-only
 	// (worker.Overrides.Clock): cmd/proxy never sets it; nil keeps time.Now.
 	IdentityClock func() time.Time
+
+	// IdentityTimer, when set, arms the one timer of the require-mode session
+	// expiry loop (expiry.go). It pairs with IdentityClock: the loop decides what
+	// is due by reading the validity clock and sleeps on this timer, so a fake
+	// clock drives both and an expiry cut is deterministic under test. Nil keeps
+	// the wall-clock time.NewTimer, which is what production runs (it is only
+	// ever set from worker.Overrides.Clock). Assembly-only.
+	IdentityTimer func(d time.Duration) IdentityTimer
 
 	// Inflight, when set, receives one Start per request-scoped handler: from
 	// request-read until the scope's terminal bookkeeping (analytics event,
@@ -338,7 +347,9 @@ type Proxy struct {
 	// production leaves them zero-valued.
 	now func() time.Time
 	// idNow is the validity clock (Config.IdentityClock); nil falls back to clock().
-	idNow   func() time.Time
+	idNow func() time.Time
+	// idTimer is the expiry loop's timer source (Config.IdentityTimer).
+	idTimer func(d time.Duration) IdentityTimer
 	leafTTL time.Duration
 	// preambleTimeout is the injectable CONNECT-preamble read deadline (0 =
 	// connectPreambleTimeout). Like now/leafTTL it exists only so white-box
@@ -679,6 +690,7 @@ func New(cfg Config) (*Proxy, error) {
 	}
 
 	p.idNow = cfg.IdentityClock
+	p.idTimer = cfg.IdentityTimer
 
 	// Upstream dialing. An injected Dialer (assembly-only harness seam) replaces
 	// the SSRF-safe dialer wholesale; otherwise production builds exactly what
