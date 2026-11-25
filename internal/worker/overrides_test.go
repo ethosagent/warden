@@ -652,15 +652,11 @@ func TestRun_EgressOverridesWarnTestHooksActive(t *testing.T) {
 
 	t.Run("dialer", func(t *testing.T) {
 		logged := run(t, &Overrides{Dialer: nopDialer{}}, "test hooks active")
-		if !strings.Contains(logged, "Dialer") || strings.Contains(logged, "UpstreamRootCAs") {
-			t.Fatalf("WARN must name exactly the Dialer hook; got:\n%s", logged)
-		}
+		requireHooksWarn(t, logged, "Dialer")
 	})
 	t.Run("root pool", func(t *testing.T) {
 		logged := run(t, &Overrides{UpstreamRootCAs: x509.NewCertPool()}, "test hooks active")
-		if !strings.Contains(logged, "UpstreamRootCAs") {
-			t.Fatalf("WARN must name the UpstreamRootCAs hook; got:\n%s", logged)
-		}
+		requireHooksWarn(t, logged, "UpstreamRootCAs")
 	})
 	t.Run("clock only is silent", func(t *testing.T) {
 		logged := run(t, &Overrides{Clock: clock.Real()}, "proxy listening")
@@ -674,4 +670,33 @@ func TestRun_EgressOverridesWarnTestHooksActive(t *testing.T) {
 			t.Fatalf("a worker with no overrides must not log the hook WARN; got:\n%s", logged)
 		}
 	})
+}
+
+// requireHooksWarn asserts the log holds exactly one "test hooks active" WARN
+// whose only attribute besides time, level and msg is hooks=<want>: no address,
+// port or PEM marker can ride on it.
+func requireHooksWarn(t *testing.T, logged, want string) {
+	t.Helper()
+	var lines []string
+	for _, l := range strings.Split(logged, "\n") {
+		if strings.Contains(l, "test hooks active") {
+			lines = append(lines, l)
+		}
+	}
+	if len(lines) != 1 {
+		t.Fatalf("want exactly one test-hooks WARN, got %d in:\n%s", len(lines), logged)
+	}
+	rest := lines[0]
+	i := strings.Index(rest, `msg="`)
+	if i < 0 {
+		t.Fatalf("WARN line has no msg attribute: %s", lines[0])
+	}
+	j := strings.Index(rest[i+5:], `"`)
+	rest = strings.TrimSpace(rest[i+5+j+1:])
+	if rest != "hooks="+want {
+		t.Fatalf("WARN attributes after msg = %q, want exactly %q; line: %s", rest, "hooks="+want, lines[0])
+	}
+	if !strings.Contains(lines[0], "level=WARN") {
+		t.Fatalf("test-hooks line is not a WARN: %s", lines[0])
+	}
 }

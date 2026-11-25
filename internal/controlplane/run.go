@@ -169,6 +169,18 @@ type Params struct {
 	Version string
 }
 
+// activeTestHooks names the key-store seams set on p.
+func activeTestHooks(p Params) []string {
+	var hooks []string
+	if p.KeyStore != nil {
+		hooks = append(hooks, "KeyStore")
+	}
+	if p.KeysAWSClient != nil {
+		hooks = append(hooks, "KeysAWSClient")
+	}
+	return hooks
+}
+
 // Run boots a control plane from Params and serves until ctx is cancelled. It
 // is the moved body of cmd/proxy's runControlPlane (rule C1 in #349): the same
 // config resolution, stores, and server wiring, now callable in-process — the
@@ -255,6 +267,13 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		}
 	}
 	logger, _ := observability.NewLogger(logOut, pol.LogLevel, pol.LogFormat)
+	// Go-only collaborator seams (KeyStore, KeysAWSClient) replace the
+	// configured key store. No flag or YAML key can set them, so this WARN only
+	// appears when Go code embeds the control plane; it names the hooks alone.
+	if hooks := activeTestHooks(p); len(hooks) > 0 {
+		logger.Warn("test hooks active: Go-only key-store seams replace the configured store",
+			"hooks", strings.Join(hooks, ","))
+	}
 	if jsonLogOnStdout(jsonLog) {
 		logger.Info("audit.jsonLog.output is stdout: operational logs moved to stderr so stdout carries only warden.admin.v1 lines")
 	}

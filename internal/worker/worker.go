@@ -297,10 +297,11 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 
 	// Test-only egress seams (Overrides.Dialer / UpstreamRootCAs) bypass the SSRF
 	// guard and the system trust store. No flag or YAML key can set them, so this
-	// line only ever appears when Go code embeds the worker; it names the hooks
+	// line only ever appears when Go code embeds the worker; it names only the
+	// hooks (Dialer replaces the SafeDialer, UpstreamRootCAs the system roots)
 	// and never any address, secret or key.
 	if hooks := p.Overrides.activeEgressHooks(); len(hooks) > 0 {
-		logger.Warn("test hooks active: upstream egress is not using the production SafeDialer or system roots — tests only, never in production",
+		logger.Warn("test hooks active: Go-only egress seams replace production defaults",
 			"hooks", strings.Join(hooks, ","))
 	}
 

@@ -568,6 +568,7 @@ func TestResolveAdminToken(t *testing.T) {
 // directly), and Run returns nil on shutdown.
 func TestRunOnReady(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 	ready := make(chan string, 1)
 	errCh := make(chan error, 1)
 	go func() {
@@ -591,7 +592,8 @@ func TestRunOnReady(t *testing.T) {
 	if err != nil || host != "127.0.0.1" || port == "" || port == "0" {
 		t.Fatalf("OnReady addr = %q, want the bound 127.0.0.1:<port>", addr)
 	}
-	resp, err := http.Get("http://" + addr + "/healthz")
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get("http://" + addr + "/healthz")
 	if err != nil {
 		cancel()
 		t.Fatalf("GET /healthz on the OnReady address: %v", err)

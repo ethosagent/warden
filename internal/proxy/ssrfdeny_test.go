@@ -921,17 +921,21 @@ func TestSafeDialerDefault(t *testing.T) {
 	// The tunnel's 200 is sent before the upstream dial; the refusal shows as
 	// the tunnel closing with no bytes from the loopback listener.
 	br := bufio.NewReader(conn)
-	if _, err := br.ReadString('\n'); err != nil {
+	status, err := br.ReadString('\n')
+	if err != nil {
 		t.Fatalf("read CONNECT status: %v", err)
+	}
+	if !strings.HasPrefix(status, "HTTP/1.1 200") {
+		t.Fatalf("CONNECT status = %q, want HTTP/1.1 200 (policy allowed it; only the dialer may refuse)", status)
 	}
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	if _, err := io.Copy(io.Discard, br); err != nil {
 		t.Fatalf("tunnel to the refused loopback target did not close cleanly: %v", err)
 	}
 	events := waitForEvents(t, store, 1)
-	if events[0].Decision != "deny" {
-		t.Fatalf("decision = %q, want deny", events[0].Decision)
-	}
+	// A policy deny would also close the tunnel; only the SSRF dialer yields a
+	// deny with the blocked reason and the loopback address class.
+	wantSSRFDeny(t, events[0], "127.0.0.1", "tcp", SSRFReasonBlocked, "loopback")
 	select {
 	case <-accepted:
 		t.Fatal("the loopback listener was reached through the proxy")
