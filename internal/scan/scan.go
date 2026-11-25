@@ -29,6 +29,19 @@ type Detection struct {
 
 const maxScanSize = 1 << 20 // 1 MB
 
+// Shapes of Warden's own credentials. This package is in the data zone and may
+// not import internal/apikeys or internal/controlplane (zone Z2), so the shapes
+// are copied here; test/scenarios pins each copy to its owner's definition
+// (apikeys.Pattern, controlplane.WorkerTokenPattern).
+const (
+	// WardenAPIKeyPattern matches a scoped API key: "wak_", a 16-hex id, "_", and
+	// 52 lowercase base32 characters.
+	WardenAPIKeyPattern = `wak_[0-9a-f]{16}_[a-z2-7]{52}`
+	// WardenWorkerTokenPattern matches a per-worker token: "wwt_" and 52
+	// lowercase base32 characters.
+	WardenWorkerTokenPattern = `wwt_[a-z2-7]{52}`
+)
+
 // Scanner is the content-scanning seam consumed by the MCP subsystem. The
 // concrete implementation is patternScanner (regex-based); consumers depend on
 // this interface so scanning can be faked/swapped in tests.
@@ -80,6 +93,7 @@ type options struct {
 	phonePII      bool
 	healthPII     bool
 	evidence      bool
+	wardenTokens  bool
 	customClasses []CustomClass
 }
 
@@ -105,6 +119,15 @@ func WithHealthPII(enabled bool) Option {
 // positive. Off by default.
 func WithEvidence(enabled bool) Option {
 	return func(o *options) { o.evidence = enabled }
+}
+
+// WithWardenTokens enables (or disables) the opt-in detectors for Warden's own
+// credentials: scoped API keys (wak_...) and per-worker tokens (wwt_...). OFF by
+// default so a scanner built without it behaves exactly as before; the DLP stage
+// turns it on from dlp.wardenTokens. A finding is an ordinary credential_leak /
+// credentials detection, so the DLP mode and rules decide whether it blocks.
+func WithWardenTokens(enabled bool) Option {
+	return func(o *options) { o.wardenTokens = enabled }
 }
 
 // WithCustomClasses registers operator-declared data classes. Each compiles its
@@ -200,6 +223,27 @@ func NewScanner(opts ...Option) Scanner {
 			severity: "low",
 			category: "credential_leak",
 		},
+	}
+
+	// Warden's own credentials, opt-in (WithWardenTokens). The patterns are
+	// deliberately UNANCHORED: a value that is too short, uses uppercase or leaves
+	// the lowercase base32 alphabet does not match, but a longer run (or one with
+	// a leading prefix such as "xwak_...") still flags on its valid prefix, so
+	// appending or prepending a character cannot be used to evade detection.
+	if cfg.wardenTokens {
+		s.credentialPatterns = append(s.credentialPatterns,
+			compiledPattern{
+				name:     "warden_api_key",
+				re:       regexp.MustCompile(WardenAPIKeyPattern),
+				severity: "high",
+				category: "credential_leak",
+			},
+			compiledPattern{
+				name:     "warden_worker_token",
+				re:       regexp.MustCompile(WardenWorkerTokenPattern),
+				severity: "high",
+				category: "credential_leak",
+			})
 	}
 
 	// PII patterns. Some carry a post-match validator because the regex alone

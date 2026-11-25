@@ -798,3 +798,29 @@ func TestFleetNoIdentityChallengeBadge(t *testing.T) {
 		}
 	}
 }
+
+func TestReservedKey_DashboardSecretStore(t *testing.T) {
+	store := newWritableSecretStore()
+	store.keys["cp/keys/ca/k1"] = secrets.SecretMeta{Key: "cp/keys/ca/k1", Version: "1"}
+	store.keys["plain"] = secrets.SecretMeta{Key: "plain", Version: "1"}
+	srv := NewServer(&fakeDataSource{}, config.Policy{}, emptyProvider())
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
+	srv.SetSecretStore(store, config.SecretBackendEcho)
+	h := srv.Handler()
+
+	got := doGet(t, h, "/dashboard/api/secretstore")
+	if strings.Contains(got.Body.String(), "cp/") || !strings.Contains(got.Body.String(), "plain") {
+		t.Fatalf("GET must hide cp/ keys and keep others: %s", got.Body.String())
+	}
+	rr := doPost(t, h, "/dashboard/api/secretstore", `{"key":"cp/keys/ca/k1","value":"evil"}`)
+	if rr.Code != http.StatusForbidden || !strings.Contains(rr.Body.String(), "reserved_key") {
+		t.Fatalf("POST = %d %s, want 403 reserved_key", rr.Code, rr.Body.String())
+	}
+	rr = doDelete(t, h, "/dashboard/api/secretstore?key=cp/keys/ca/k1")
+	if rr.Code != http.StatusForbidden || !strings.Contains(rr.Body.String(), "reserved_key") {
+		t.Fatalf("DELETE = %d %s, want 403 reserved_key", rr.Code, rr.Body.String())
+	}
+	if _, ok := store.keys["cp/keys/ca/k1"]; !ok {
+		t.Fatal("reserved key was removed from the store")
+	}
+}

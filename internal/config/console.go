@@ -111,6 +111,8 @@ type ConsoleConfig struct {
 	// BreakGlass is the emergency local admin login for when the IdP is down
 	// (default off). CP-local like the rest of this block.
 	BreakGlass ConsoleBreakGlass
+	// APIKeys gates scoped API keys on the admin API (default off, W-P2-APIK-02).
+	APIKeys ConsoleAPIKeys
 	// Approvals is the change-approval gate (default off). CP-local like the
 	// rest of this block: read only from --config, never on a wire, so a
 	// settings save can never turn the gate off.
@@ -175,6 +177,32 @@ func DefaultConsoleApprovals() ConsoleApprovals {
 		DraftTTL:                  DefaultApprovalsDraftTTL,
 		MaxOpenDrafts:             DefaultApprovalsMaxOpenDrafts,
 	}
+}
+
+// API key defaults and bounds. DefaultAPIKeyMaxTTL is both the default ceiling
+// and the hard one: a configured maxTTL above it is a startup error.
+const (
+	DefaultAPIKeyTTL          = 2160 * time.Hour
+	DefaultAPIKeyMaxTTL       = 8760 * time.Hour
+	DefaultAPIKeysMaxPerOwner = 25
+	DefaultAPIKeysRatePerKey  = 10
+	// MaxAPIKeysPerOwner and MaxAPIKeysRatePerKey bound the two counts so a
+	// typo cannot disable the cap or the rate limit.
+	MaxAPIKeysPerOwner   = 1000
+	MaxAPIKeysRatePerKey = 10000
+	// MinAPIKeyTTL mirrors the shortest lifetime the key store accepts.
+	MinAPIKeyTTL = time.Hour
+)
+
+// ConsoleAPIKeys is the `console.apiKeys` sub-block. Enabled (default false)
+// turns on `wak_` API key authentication on /dashboard/api/*; it needs
+// console.auth oidc and --state-dir. RatePerKey is requests per second per key.
+type ConsoleAPIKeys struct {
+	Enabled     bool
+	DefaultTTL  time.Duration
+	MaxTTL      time.Duration
+	MaxPerOwner int
+	RatePerKey  int
 }
 
 // Break-glass bounds. SessionTTL defaults to DefaultBreakGlassSessionTTL and
@@ -290,7 +318,14 @@ type rawConsole struct {
 		Enabled bool `yaml:"enabled"`
 	} `yaml:"adminAudit"`
 	TrustedProxies []string `yaml:"trustedProxies"`
-	BreakGlass     struct {
+	APIKeys        struct {
+		Enabled     bool   `yaml:"enabled"`
+		DefaultTTL  string `yaml:"defaultTTL"`
+		MaxTTL      string `yaml:"maxTTL"`
+		MaxPerOwner int    `yaml:"maxPerOwner"`
+		RatePerKey  int    `yaml:"ratePerKey"`
+	} `yaml:"apiKeys"`
+	BreakGlass struct {
 		Enabled                  bool   `yaml:"enabled"`
 		Username                 string `yaml:"username"`
 		PasswordHashEnv          string `yaml:"passwordHashEnv"`
@@ -323,7 +358,11 @@ func parseConsole(r *rawConsole) (ConsoleConfig, error) {
 			Idle: DefaultConsoleIdle, Absolute: DefaultConsoleAbsolute,
 		},
 		BreakGlass: ConsoleBreakGlass{SessionTTL: DefaultBreakGlassSessionTTL},
-		Approvals:  DefaultConsoleApprovals(),
+		APIKeys: ConsoleAPIKeys{
+			DefaultTTL: DefaultAPIKeyTTL, MaxTTL: DefaultAPIKeyMaxTTL,
+			MaxPerOwner: DefaultAPIKeysMaxPerOwner, RatePerKey: DefaultAPIKeysRatePerKey,
+		},
+		Approvals: DefaultConsoleApprovals(),
 	}
 	if r == nil {
 		return c, nil
@@ -360,6 +399,9 @@ func parseConsole(r *rawConsole) (ConsoleConfig, error) {
 	c.AdminAudit.Enabled = r.AdminAudit.Enabled
 	for _, p := range r.TrustedProxies {
 		c.TrustedProxies = append(c.TrustedProxies, strings.TrimSpace(p))
+	}
+	if err := parseAPIKeys(&c.APIKeys, r); err != nil {
+		return ConsoleConfig{}, err
 	}
 	bg := r.BreakGlass
 	c.BreakGlass.Enabled = bg.Enabled
@@ -455,6 +497,64 @@ func validateApprovals(a ConsoleApprovals) error {
 	return nil
 }
 
+// parseAPIKeys applies console.apiKeys over the defaults already in dst. An
+// unset duration or a zero count keeps the default.
+func parseAPIKeys(dst *ConsoleAPIKeys, r *rawConsole) error {
+	k := r.APIKeys
+	dst.Enabled = k.Enabled
+	for _, d := range []struct {
+		key  string
+		raw  string
+		into *time.Duration
+	}{
+		{"defaultTTL", k.DefaultTTL, &dst.DefaultTTL},
+		{"maxTTL", k.MaxTTL, &dst.MaxTTL},
+	} {
+		s := strings.TrimSpace(d.raw)
+		if s == "" {
+			continue
+		}
+		v, err := time.ParseDuration(s)
+		if err != nil {
+			return fmt.Errorf("config: console.apiKeys.%s %q is not a valid duration: %w", d.key, s, err)
+		}
+		*d.into = v
+	}
+	if k.MaxPerOwner != 0 {
+		dst.MaxPerOwner = k.MaxPerOwner
+	}
+	if k.RatePerKey != 0 {
+		dst.RatePerKey = k.RatePerKey
+	}
+	return nil
+}
+
+// validateAPIKeys checks console.apiKeys. Every error names the key. The
+// block is validated even when disabled, so a typo does not wait for the day
+// the feature is turned on; enabling it additionally needs console.auth oidc.
+func validateAPIKeys(c ConsoleConfig) error {
+	k := c.APIKeys
+	if k == (ConsoleAPIKeys{}) {
+		return nil // a Policy not built by parseConsole (a worker's remote copy) carries none
+	}
+	if k.MaxTTL < MinAPIKeyTTL || k.MaxTTL > DefaultAPIKeyMaxTTL {
+		return fmt.Errorf("config: console.apiKeys.maxTTL %s must be between %s and %s", k.MaxTTL, MinAPIKeyTTL, DefaultAPIKeyMaxTTL)
+	}
+	if k.DefaultTTL < MinAPIKeyTTL || k.DefaultTTL > k.MaxTTL {
+		return fmt.Errorf("config: console.apiKeys.defaultTTL %s must be between %s and console.apiKeys.maxTTL (%s)", k.DefaultTTL, MinAPIKeyTTL, k.MaxTTL)
+	}
+	if k.MaxPerOwner < 1 || k.MaxPerOwner > MaxAPIKeysPerOwner {
+		return fmt.Errorf("config: console.apiKeys.maxPerOwner %d must be between 1 and %d", k.MaxPerOwner, MaxAPIKeysPerOwner)
+	}
+	if k.RatePerKey < 1 || k.RatePerKey > MaxAPIKeysRatePerKey {
+		return fmt.Errorf("config: console.apiKeys.ratePerKey %d must be between 1 and %d", k.RatePerKey, MaxAPIKeysRatePerKey)
+	}
+	if k.Enabled && c.Auth != ConsoleAuthOIDC {
+		return fmt.Errorf("config: console.apiKeys.enabled requires console.auth %q", ConsoleAuthOIDC)
+	}
+	return nil
+}
+
 // validateBreakGlass checks console.breakGlass when it is enabled. Errors name
 // the key and never carry a hash or password; it does not read any secret.
 func validateBreakGlass(c ConsoleConfig) error {
@@ -487,6 +587,9 @@ func validateConsole(c ConsoleConfig) error {
 		return err
 	}
 	if err := validateBreakGlass(c); err != nil {
+		return err
+	}
+	if err := validateAPIKeys(c); err != nil {
 		return err
 	}
 	if err := validateApprovals(c.Approvals); err != nil {

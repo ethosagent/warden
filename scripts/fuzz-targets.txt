@@ -10,5 +10,9 @@ FuzzGRPCFrames     ./internal/proxy
 FuzzSniffClientHello ./internal/proxy
 FuzzParseToken ./internal/identity/adapters/oidc
 FuzzParseJWK ./internal/keys
+FuzzVerify ./internal/bundle
+FuzzDecodePayload ./internal/bundle
+FuzzFastEnvelope ./internal/bundle
+FuzzParse ./internal/apikeys
 FuzzClassify ./internal/approvals
 FuzzClassifyNewKeyWidens ./internal/approvals
