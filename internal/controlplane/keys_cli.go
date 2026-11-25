@@ -30,11 +30,11 @@ const (
 	actionKeysReset  = "keys.reset"
 )
 
-// StagedRotationError is a `keys rotate --purpose bundle` refusal: workers pin
-// bundle keys out of band, so a rotation is a staged operator flow — export the
-// next key, pin it on every worker, and only then activate (W-P2-SBND-07 adds
-// the --stage/--activate flow). NextKID is the key to pin; it is empty when the
-// purpose has no next key yet.
+// StagedRotationError is a `keys rotate --purpose bundle` refusal without a
+// step: workers pin bundle keys out of band, so a rotation is a staged operator
+// flow — export the next key, pin it on every worker, --stage, then --activate
+// (StageBundle, ActivateBundle). NextKID is the key to pin; it is empty when
+// the purpose has no next key yet.
 type StagedRotationError struct {
 	Purpose string
 	NextKID string
@@ -46,7 +46,7 @@ func (e *StagedRotationError) Error() string {
 			"start the control plane with keys.enabled to publish one, then pin it on every worker"
 	}
 	return "keys: " + e.Purpose + " rotation is staged: pin the next key " + e.NextKID +
-		" on every worker before activating (docs/runbooks/key-rotation.md)"
+		" on every worker, then run keys rotate --purpose " + e.Purpose + " --stage, and --activate once they report it (docs/runbooks/key-rotation.md)"
 }
 
 // KeysCLIOptions are the inputs the keys CLI commands share.
@@ -63,6 +63,10 @@ type KeysCLIOptions struct {
 	// AuditKeyFile is the admin audit signing key ("" =
 	// <state-dir>/cp-audit.key).
 	AuditKeyFile string
+	// Logger receives the staged bundle rotation's own lines (which kids a stage
+	// or an activation involved). nil discards them; the manager's lines are
+	// never shown, the audit rows carry them.
+	Logger *slog.Logger
 	// KeysAWSClient replaces the Secrets Manager client the aws backend would
 	// build from the control plane's environment (env → IMDS). A real CLI run
 	// leaves it nil — the operator runs it where the control plane's role is;
@@ -86,6 +90,8 @@ type OfflineKeys struct {
 	kc         config.KeysConfig
 	clk        clock.Clock
 	stateDir   string
+	// logger reports the staged bundle rotation steps (the kids involved).
+	logger *slog.Logger
 }
 
 // OpenKeysOffline opens the state dir read-write for rotate and reset. The
@@ -158,9 +164,13 @@ func openKeys(ctx context.Context, stateDir string, opt KeysCLIOptions, readOnly
 	if err != nil {
 		return nil, fail(err)
 	}
+	logger := opt.Logger
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
 	return &OfflineKeys{
 		db: db, meta: metastore.New(db), mgr: mgr, rec: rec, closeAudit: closeAudit,
-		kc: kc, clk: clk, stateDir: stateDir,
+		kc: kc, clk: clk, stateDir: stateDir, logger: logger,
 	}, nil
 }
 

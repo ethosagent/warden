@@ -32,6 +32,7 @@ import (
 type fakeBundleKeys struct {
 	mu       sync.Mutex
 	signer   keys.Signer
+	staged   keys.Signer // a staged next key that signs beside signer
 	token    keys.JWKS
 	asked    map[string]bool
 	subs     []func(string)
@@ -73,17 +74,23 @@ func (f *fakeBundleKeys) rotateToken(t *testing.T) {
 	f.mu.Unlock()
 }
 
-func (f *fakeBundleKeys) Active(purpose string) (keys.Signer, error) {
+func (f *fakeBundleKeys) Signers(purpose string) ([]keys.Signer, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.asked[purpose] = true
 	if purpose != keys.PurposeBundle || f.signer == nil {
 		return nil, keys.ErrNoActiveKey
 	}
+	var out []keys.Signer
 	if f.failSign {
-		return failingSigner{f.signer}, nil
+		out = []keys.Signer{failingSigner{f.signer}}
+	} else {
+		out = []keys.Signer{f.signer}
 	}
-	return f.signer, nil
+	if f.staged != nil {
+		out = append(out, f.staged)
+	}
+	return out, nil
 }
 
 func (f *fakeBundleKeys) JWKS(purpose string) keys.JWKS {
@@ -100,7 +107,13 @@ func (f *fakeBundleKeys) JWKS(purpose string) keys.JWKS {
 		if err != nil {
 			return keys.JWKS{}
 		}
-		return keys.JWKS{Keys: []keys.JWK{jwk}}
+		out := keys.JWKS{Keys: []keys.JWK{jwk}}
+		if f.staged != nil {
+			if sj, err := keys.PublicJWK(f.staged.Public(), f.staged.Alg()); err == nil {
+				out.Keys = append(out.Keys, sj)
+			}
+		}
+		return out
 	}
 	return keys.JWKS{}
 }

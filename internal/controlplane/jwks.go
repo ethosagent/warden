@@ -150,7 +150,8 @@ func etagMatches(header, etag string) bool {
 }
 
 // readyz serves GET /readyz: 200, or 503 {"keys":"no_active_key"} when keys
-// are enabled and a purpose has no loaded active key. It reads the KeySet
+// are enabled and a purpose has no loaded active key ("staged_key_unavailable"
+// when its staged next bundle key is the one that cannot load). It reads the KeySet
 // snapshot only.
 func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -160,7 +161,7 @@ func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	if s.cfg.Keys != nil && !s.cfg.Keys.Ready() {
-		writeAuthzJSON(w, http.StatusServiceUnavailable, map[string]string{"keys": "no_active_key"})
+		writeAuthzJSON(w, http.StatusServiceUnavailable, map[string]string{"keys": s.cfg.Keys.NotReadyReason()})
 		return
 	}
 	w.WriteHeader(http.StatusOK)
