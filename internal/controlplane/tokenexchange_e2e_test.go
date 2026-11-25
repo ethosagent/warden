@@ -3,16 +3,17 @@ package controlplane
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/ethosagent/warden/internal/agentreg"
+	agentregsqlite "github.com/ethosagent/warden/internal/agentreg/adapters/sqlite"
 	"github.com/ethosagent/warden/internal/identity"
 	"github.com/ethosagent/warden/internal/keys"
 	"github.com/ethosagent/warden/internal/tokensvc"
@@ -28,17 +29,18 @@ import (
 // path: exchange, verify against the served JWKS, the records and counters an
 // operator reads, revocation, a restart and an IdP outage.
 
-var jwtShaped = regexp.MustCompile(`eyJ[A-Za-z0-9_-]{8,}`)
-
-// restart replaces the control plane server with a new one over the same state
-// database and keys, as a process restart does: every in-memory structure (the
-// rate limiters, the IdP key cache, the agent snapshot) starts empty, the
-// replay and session tables stay.
+// restart replaces the control plane server, the agent registry store and the
+// token service with new ones over the same state database and keys. Every
+// in-memory structure (the rate limiters, the IdP key cache, the agent
+// snapshot) starts empty; the replay and session tables stay. The database
+// handle itself is not reopened: the key manager's metadata store is bound to
+// it.
 func (e *limitsEnv) restart(t *testing.T) {
 	t.Helper()
 	cfg := e.srv.cfg
 	srv := New(cfg)
 	tc := e.tokenCfg
+	e.agents = agentregsqlite.New(cfg.State, agentregsqlite.WithClock(e.clk))
 	ts, err := newTokenService(tc, e.idCfg, cfg.State, e.agents, srv, e.mgr, e.clk, cfg.Logger)
 	if err != nil {
 		t.Fatal(err)
@@ -99,13 +101,13 @@ func (e *limitsEnv) exchange(t *testing.T, subject string) *httptest.ResponseRec
 	return e.post(e.form(subject, e.assertion(t, e.agentID, e.kid)), "198.51.100.9:4000", nil)
 }
 
-func requireOAuthError(t *testing.T, name string, rec *httptest.ResponseRecorder, status int, code string) {
+func requireOAuthError(t *testing.T, name string, rec *httptest.ResponseRecorder, status int, code, wantDesc string) {
 	t.Helper()
 	if rec.Code != status {
 		t.Fatalf("%s = %d %s, want %d", name, rec.Code, rec.Body.String(), status)
 	}
-	if got := decodeErr(t, rec).Error; got != code {
-		t.Fatalf("%s: error = %q, want %q", name, got, code)
+	if got := decodeErr(t, rec); got.Error != code || got.Desc != wantDesc {
+		t.Fatalf("%s: error = %q (%q), want %q (%q)", name, got.Error, got.Desc, code, wantDesc)
 	}
 	if strings.Contains(rec.Body.String(), "access_token") {
 		t.Fatalf("%s: a refusal carries a token", name)
@@ -135,11 +137,12 @@ func TestTokenExchangeE2E(t *testing.T) {
 		h, c := e.verified(t, tok)
 
 		agentPub := e.agent.Public().(ed25519.PublicKey)
-		wantJKT, err := keys.Thumbprint(keys.JWK{Kty: "OKP", Crv: "Ed25519", X: base64.RawURLEncoding.EncodeToString(agentPub)})
-		if err != nil {
-			t.Fatal(err)
-		}
+		// RFC 7638: SHA-256 of the required members in lexicographic order.
+		canon := `{"crv":"Ed25519","kty":"OKP","x":"` + base64.RawURLEncoding.EncodeToString(agentPub) + `"}`
+		sum := sha256.Sum256([]byte(canon))
+		wantJKT := base64.RawURLEncoding.EncodeToString(sum[:])
 		subjectExp := e.clk.Now().Add(30 * time.Minute).Unix()
+		issuedAt := e.clk.Now().Unix()
 		switch {
 		case h.Typ != "wt+jwt" || h.Alg != keys.AlgEdDSA:
 			t.Errorf("header = %+v, want typ wt+jwt alg EdDSA", h)
@@ -153,76 +156,93 @@ func TestTokenExchangeE2E(t *testing.T) {
 			t.Errorf("cnf.jkt = %q, want the agent key's RFC 7638 thumbprint %q", c.Cnf.JKT, wantJKT)
 		case !strings.HasPrefix(c.SID, tokensvc.SessionPrefix) || c.JTI == "":
 			t.Errorf("sid %q jti %q", c.SID, c.JTI)
+		case c.Iat != issuedAt || c.Nbf != c.Iat:
+			t.Errorf("iat %d nbf %d, want both %d", c.Iat, c.Nbf, issuedAt)
 		case c.Exp-c.Iat > 900 || c.Exp > subjectExp:
 			t.Errorf("iat %d exp %d: want exp-iat <= 900 and exp <= the subject's %d", c.Iat, c.Exp, subjectExp)
+		}
+
+		// A subject proof shorter than the token lifetime caps exp.
+		short := e.iss.Mint(fakes.WithAud("warden"), fakes.WithAZP(limitsAZP), fakes.Valid("user-5", "user-5@example.com", limitsGroup),
+			fakes.WithIAT(e.clk.Now()), fakes.WithExp(e.clk.Now().Add(5*time.Minute)))
+		_, cs := e.verified(t, e.tokenAccess(t, e.exchange(t, short)))
+		if want := e.clk.Now().Add(5 * time.Minute).Unix(); cs.Exp != want {
+			t.Errorf("exp of a token for a subject expiring in 5 minutes = %d, want the subject's %d", cs.Exp, want)
+		}
+		if n := len(e.events(t)); n != 2 {
+			t.Fatalf("%d token_events rows after two exchanges, want 2", n)
 		}
 
 		// The operator's view: one ok issuance row (hashes, never the
 		// credentials), one warden.token.v1 line, and the counter.
 		rows := e.events(t)
-		if len(rows) != 1 || rows[0]["outcome"] != "issued" || rows[0]["agent"] != e.agentID ||
+		if len(rows) != 2 || rows[0]["outcome"] != "issued" || rows[0]["agent"] != e.agentID ||
 			rows[0]["sid"] != c.SID || rows[0]["jti"] != c.JTI || rows[0]["kid"] != h.Kid {
-			t.Errorf("token_events = %v, want one issued row for the exchange", rows)
+			t.Errorf("token_events = %v, want an issued row per exchange", rows)
 		}
-		if got := e.ts.Edge.Metrics.IssuedTotal(e.agentID); got != 1 {
-			t.Errorf("issued counter = %d, want 1", got)
+		if got := e.ts.Edge.Metrics.IssuedTotal(e.agentID); got != 2 {
+			t.Errorf("issued counter = %d, want 2", got)
 		}
-		if n := len(e.tokenLines(t)); n != 1 {
-			t.Errorf("%d token_exchange log lines, want 1", n)
+		if n := len(e.tokenLines(t)); n != 2 {
+			t.Errorf("%d token_exchange log lines, want 2", n)
 		}
 		for name, secret := range map[string]string{"access token": tok, "subject token": subject, "assertion": assertion} {
 			if strings.Contains(e.logs.String(), secret) {
 				t.Errorf("the control-plane log holds the %s", name)
 			}
 		}
-		if m := jwtShaped.FindString(e.logs.String()); m != "" {
-			t.Errorf("the control-plane log holds a JWT-shaped string (%d bytes)", len(m))
-		}
 	})
 
 	t.Run("denials", func(t *testing.T) {
 		e := newLimitsEnv(t, nil)
 		ctx := context.Background()
-		denied := func() int {
-			n := 0
-			for _, r := range e.events(t) {
-				if r["outcome"] == "denied" {
-					n++
+		const remote = "198.51.100.9:4000"
+		// step runs one refused exchange and checks the status, OAuth error,
+		// description, the exact token_events delta and the new row's reason.
+		step := func(name string, rec func() *httptest.ResponseRecorder, status int, code, desc string, rows int, reason string) {
+			t.Helper()
+			before := len(e.events(t))
+			requireOAuthError(t, name, rec(), status, code, desc)
+			got := e.events(t)
+			if len(got)-before != rows {
+				t.Fatalf("%s: %d new token_events rows, want %d", name, len(got)-before, rows)
+			}
+			for _, r := range got[before:] {
+				if r["outcome"] != "denied" || r["reason"] != reason || r["agent"] != e.agentID {
+					t.Fatalf("%s: row = %v, want a denied row for %s with reason %s", name, r, e.agentID, reason)
 				}
 			}
-			return n
 		}
 
-		// Replayed assertion: the second use is refused, and so is a third
-		// after the control plane restarts on the same state.
+		// Replay: the second use is refused, and so is a third after the
+		// control plane restarts on the same state.
 		assertion := e.assertion(t, e.agentID, e.kid)
-		e.tokenAccess(t, e.post(e.form(e.subject("user-1", limitsGroup), assertion), "198.51.100.9:4000", nil))
-		requireOAuthError(t, "replay", e.post(e.form(e.subject("user-1", limitsGroup), assertion), "198.51.100.9:4000", nil), 401, "invalid_client")
+		e.tokenAccess(t, e.post(e.form(e.subject("user-1", limitsGroup), assertion), remote, nil))
+		replay := func() *httptest.ResponseRecorder {
+			return e.post(e.form(e.subject("user-1", limitsGroup), assertion), remote, nil)
+		}
+		step("replay", replay, 401, "invalid_client", "client_authentication_failed", 0, "")
 		e.restart(t)
-		requireOAuthError(t, "replay after restart", e.post(e.form(e.subject("user-1", limitsGroup), assertion), "198.51.100.9:4000", nil), 401, "invalid_client")
+		step("replay after restart", replay, 401, "invalid_client", "client_authentication_failed", 0, "")
 		if got := e.ts.Edge.Metrics.DeniedTotal(tokensvc.ReasonReplay); got != 1 {
 			t.Errorf("replay counter after restart = %d, want 1", got)
 		}
 		// The restarted server still mints for a fresh assertion.
 		e.tokenAccess(t, e.exchange(t, e.subject("user-1", limitsGroup)))
 
-		// A verified agent's refusal is one denied row, with no token.
-		base := denied()
-
 		if _, err := e.srv.blocks.Add(ctx, BlockEntry{Sub: "blocked-user", Reason: "test"}, "admin"); err != nil {
 			t.Fatal(err)
 		}
-		requireOAuthError(t, "blocked user", e.exchange(t, e.subject("blocked-user", limitsGroup)), 400, "invalid_grant")
-		requireOAuthError(t, "user outside allowed_groups", e.exchange(t, e.subject("user-2", "grp-other")), 400, "unauthorized_client")
+		step("blocked user", func() *httptest.ResponseRecorder { return e.exchange(t, e.subject("blocked-user", limitsGroup)) },
+			400, "invalid_grant", "user_blocked", 1, "user_blocked")
+		step("user outside allowed_groups", func() *httptest.ResponseRecorder { return e.exchange(t, e.subject("user-2", "grp-other")) },
+			400, "unauthorized_client", "group_not_allowed", 1, "group_not_allowed")
 		expired := e.iss.Mint(fakes.WithAud("warden"), fakes.WithAZP(limitsAZP), fakes.Valid("user-3", "u3@example.com", limitsGroup),
 			fakes.WithIAT(e.clk.Now().Add(-2*time.Hour)), fakes.WithExp(e.clk.Now().Add(-time.Hour)))
-		requireOAuthError(t, "expired subject", e.exchange(t, expired), 400, "invalid_grant")
-		if d := denied() - base; d != 3 {
-			t.Errorf("%d new denied rows after the blocked, group and expired refusals, want 3 (one per verified agent's refusal)", d)
-		}
+		step("expired subject", func() *httptest.ResponseRecorder { return e.exchange(t, expired) },
+			400, "invalid_grant", "subject_expired", 1, "subject_expired")
 
-		// An assertion for another audience authenticates nothing: 401, no row.
-		before := len(e.events(t))
+		// An assertion for another audience authenticates nothing: no row.
 		now := e.clk.Now().Unix()
 		wrong, err := keys.SignCompact(ctx, e.agent, keys.Header{Alg: keys.AlgEdDSA, Kid: e.kid, Typ: "JWT"}, map[string]any{
 			"iss": e.agentID, "sub": e.agentID, "aud": "https://elsewhere.example.com/oauth2/token", "iat": now, "exp": now + 60, "jti": "wrong-aud-1",
@@ -230,12 +250,11 @@ func TestTokenExchangeE2E(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		requireOAuthError(t, "wrong assertion aud", e.post(e.form(e.subject("user-1", limitsGroup), wrong), "198.51.100.9:4000", nil), 401, "invalid_client")
-		if len(e.events(t)) != before {
-			t.Errorf("an unauthenticated assertion wrote a token_events row")
-		}
+		step("wrong assertion aud", func() *httptest.ResponseRecorder {
+			return e.post(e.form(e.subject("user-1", limitsGroup), wrong), remote, nil)
+		}, 401, "invalid_client", "client_authentication_failed", 0, "")
 
-		// A disabled agent is refused at once.
+		// A disabled agent is refused at once and records nothing.
 		cur, err := e.agents.Get(ctx, e.agentID)
 		if err != nil {
 			t.Fatal(err)
@@ -243,14 +262,8 @@ func TestTokenExchangeE2E(t *testing.T) {
 		if _, err := e.agents.SetStatus(ctx, e.agentID, agentreg.StatusDisabled, cur.Revision, "test"); err != nil {
 			t.Fatal(err)
 		}
-		before = len(e.events(t))
-		requireOAuthError(t, "disabled agent", e.exchange(t, e.subject("user-1", limitsGroup)), 401, "invalid_client")
-		if len(e.events(t)) != before {
-			t.Errorf("a disabled agent's refusal wrote a token_events row")
-		}
-		if m := jwtShaped.FindString(e.logs.String()); m != "" {
-			t.Errorf("the control-plane log holds a JWT-shaped string (%d bytes)", len(m))
-		}
+		step("disabled agent", func() *httptest.ResponseRecorder { return e.exchange(t, e.subject("user-1", limitsGroup)) },
+			401, "invalid_client", "client_authentication_failed", 0, "")
 	})
 
 	t.Run("revoked session", func(t *testing.T) {
@@ -265,7 +278,12 @@ func TestTokenExchangeE2E(t *testing.T) {
 		if rec.Code != http.StatusNoContent {
 			t.Fatalf("admin revoke = %d %s, want 204", rec.Code, rec.Body.String())
 		}
-		requireOAuthError(t, "revoked session", e.exchange(t, subject), 400, "invalid_grant")
+		before := len(e.events(t))
+		requireOAuthError(t, "revoked session", e.exchange(t, subject), 400, "invalid_grant", "session_revoked")
+		rows := e.events(t)
+		if len(rows)-before != 1 || rows[len(rows)-1]["outcome"] != "denied" || rows[len(rows)-1]["reason"] != "session_revoked" {
+			t.Errorf("revoked session: token_events delta %d, last row %v, want one denied session_revoked row", len(rows)-before, rows[len(rows)-1])
+		}
 		if got := e.ts.Edge.Metrics.DeniedTotal(tokensvc.ReasonSessionRevoked); got != 1 {
 			t.Errorf("session_revoked counter = %d, want 1", got)
 		}
@@ -301,8 +319,17 @@ func TestTokenExchangeE2E(t *testing.T) {
 		e := newLimitsEnv(t, nil)
 		subject := e.subject("user-1", limitsGroup)
 		e.iss.Stop()
+		before, issued := len(e.events(t)), e.ts.Edge.Metrics.IssuedTotal(e.agentID)
 		rec := e.exchange(t, subject)
-		requireOAuthError(t, "IdP down, cold cache", rec, 503, "temporarily_unavailable")
+		requireOAuthError(t, "IdP down, cold cache", rec, 503, "temporarily_unavailable", "idp_unavailable")
+		for _, r := range e.events(t)[before:] {
+			if r["outcome"] == "issued" {
+				t.Errorf("a token was recorded as issued while the IdP was down: %v", r)
+			}
+		}
+		if got := e.ts.Edge.Metrics.IssuedTotal(e.agentID); got != issued {
+			t.Errorf("issued counter moved from %d to %d while the IdP was down", issued, got)
+		}
 		if rec.Header().Get("Retry-After") == "" {
 			t.Error("503 without Retry-After")
 		}

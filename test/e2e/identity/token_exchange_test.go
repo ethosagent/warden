@@ -10,7 +10,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -94,15 +93,18 @@ func TestTokenExchangeDex(t *testing.T) {
 	}
 
 	// A new control plane has not published its first token key long enough for
-	// verifiers to hold it and answers 503 until it has.
+	// verifiers to hold it and answers 503 signer_unavailable until it has;
+	// any other answer ends the wait.
 	var r reply
-	deadline := time.Now().Add(2 * time.Minute)
-	for {
+	if err := compose.PollUntil(3*time.Minute, func() (bool, string) {
 		r = post()
-		if r.status != http.StatusServiceUnavailable || time.Now().After(deadline) {
-			break
+		var e struct {
+			Desc string `json:"error_description"`
 		}
-		time.Sleep(2 * time.Second)
+		_ = json.Unmarshal(r.body, &e)
+		return !(r.status == http.StatusServiceUnavailable && e.Desc == "signer_unavailable"), "status " + http.StatusText(r.status) + " " + e.Desc
+	}); err != nil {
+		t.Fatalf("the token key was never published: %v", err)
 	}
 	if r.status != http.StatusOK {
 		var e struct{ Error, ErrorDescription string }
@@ -169,7 +171,6 @@ func TestTokenExchangeDex(t *testing.T) {
 	}
 
 	// No token reaches the captured test output or the control plane's log.
-	jwtShaped := regexp.MustCompile(`eyJ[A-Za-z0-9_-]{8,}`)
 	logs, err := compose.LogsOf(compose.SvcCP)
 	if err != nil {
 		t.Fatalf("control-plane logs: %v", err)
@@ -179,7 +180,7 @@ func TestTokenExchangeDex(t *testing.T) {
 			t.Errorf("the control-plane log holds the %s", name)
 		}
 	}
-	if m := jwtShaped.FindString(logs); m != "" {
-		t.Errorf("the control-plane log holds a JWT-shaped string (%d bytes)", len(m))
+	if strings.Contains(logs, "eyJ") {
+		t.Errorf("the control-plane log holds a JWT-shaped string (eyJ)")
 	}
 }

@@ -105,6 +105,7 @@ type keysEnv struct {
 	fs    *fakes.FakeKeyStore
 	store *countingKeyStore
 	meta  *countingKeyMeta
+	klog  *syncBuf // the key manager's and the server's log
 }
 
 type keysEnvOpts struct {
@@ -118,7 +119,7 @@ type keysEnvOpts struct {
 
 func newKeysEnv(t *testing.T, o keysEnvOpts) *keysEnv {
 	t.Helper()
-	logger, _ := testLogger()
+	logger, klog := testLogger()
 	kc, err := config.KeysConfig{Enabled: true}.Resolve(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -136,7 +137,7 @@ func newKeysEnv(t *testing.T, o keysEnvOpts) *keysEnv {
 	if o.oidc {
 		cfg.Console = authzConsole(defaultRoles())
 	}
-	e := &keysEnv{clk: clk, rec: &fakeRecorder{}, fs: fakes.NewFakeKeyStore()}
+	e := &keysEnv{clk: clk, rec: &fakeRecorder{}, fs: fakes.NewFakeKeyStore(), klog: klog}
 	e.store = &countingKeyStore{PrivateKeyStore: e.fs}
 	e.meta = &countingKeyMeta{MetaStore: metastore.New(db)}
 	if !o.disabled {

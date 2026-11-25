@@ -16,6 +16,7 @@ import (
 	"net/netip"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -92,6 +93,20 @@ func newLimitsEnv(t *testing.T, tune func(*config.TokenServiceConfig), proxies .
 	}
 	e.clk.Advance(tokenKeyPublishWindow + time.Second)
 	e.h = e.srv.Handler()
+	// No JWT-shaped string (every JWS starts with eyJ) reaches a log or the
+	// admin audit trail, in any test on this environment.
+	t.Cleanup(func() {
+		sinks := map[string]string{"token service log": e.logs.String(), "key manager log": e.klog.String()}
+		for i, in := range e.rec.inputs() {
+			b, _ := json.Marshal(in)
+			sinks["admin audit row "+strconv.Itoa(i)] = string(b)
+		}
+		for name, text := range sinks {
+			if strings.Contains(text, "eyJ") {
+				t.Errorf("the %s holds a JWT-shaped string (eyJ)", name)
+			}
+		}
+	})
 	return e
 }
 
