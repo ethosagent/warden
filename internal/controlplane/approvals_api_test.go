@@ -3,6 +3,7 @@ package controlplane
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -11,6 +12,8 @@ import (
 	"time"
 
 	"github.com/ethosagent/warden/internal/adminaudit"
+	"github.com/ethosagent/warden/internal/apikeys"
+	"github.com/ethosagent/warden/internal/apikeys/adapters/sqlitestore"
 	"github.com/ethosagent/warden/internal/approvals"
 	"github.com/ethosagent/warden/internal/clock/clocktest"
 	"github.com/ethosagent/warden/internal/config"
@@ -35,6 +38,8 @@ type draftEnv struct {
 	logs *syncBuf
 	// sessions by name: u1, u2, u3 (editors), viewer, admin, breakglass.
 	raw map[string]string
+	// keys is the API key store, set by newDraftEnvKeys only.
+	keys *sqlitestore.SQLiteStore
 }
 
 func newDraftEnv(t *testing.T, mutate func(*config.ConsoleApprovals)) *draftEnv {
@@ -43,6 +48,16 @@ func newDraftEnv(t *testing.T, mutate func(*config.ConsoleApprovals)) *draftEnv 
 
 // newDraftEnvAt is newDraftEnv on the fake clock clk (nil = the real clock).
 func newDraftEnvAt(t *testing.T, mutate func(*config.ConsoleApprovals), clk *clocktest.Fake) *draftEnv {
+	return newDraftEnvOpts(t, mutate, clk, false)
+}
+
+// newDraftEnvKeys is newDraftEnv with console.apiKeys on too, so a test can
+// mint keys for the session users (mintKey) and call with them (doKey).
+func newDraftEnvKeys(t *testing.T) *draftEnv {
+	return newDraftEnvOpts(t, nil, nil, true)
+}
+
+func newDraftEnvOpts(t *testing.T, mutate func(*config.ConsoleApprovals), clk *clocktest.Fake, withKeys bool) *draftEnv {
 	t.Helper()
 	ac := config.DefaultConsoleApprovals()
 	ac.Enabled = true
@@ -52,7 +67,11 @@ func newDraftEnvAt(t *testing.T, mutate func(*config.ConsoleApprovals), clk *clo
 	}
 	console := authzConsole(defaultRoles())
 	console.Approvals = ac
-	db, err := cpstate.Open(context.Background(), t.TempDir()+"/warden-cp.db", stateMigrationsWithApprovals(StateMigrations(), ac))
+	migs := stateMigrationsWithApprovals(StateMigrations(), ac)
+	if withKeys {
+		migs = cpstate.Enable(migs, sqlitestore.MigrationID)
+	}
+	db, err := cpstate.Open(context.Background(), t.TempDir()+"/warden-cp.db", migs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,6 +84,23 @@ func newDraftEnvAt(t *testing.T, mutate func(*config.ConsoleApprovals), clk *clo
 	if clk != nil {
 		cfg.Clock = clk
 	}
+	var keyStore *sqlitestore.SQLiteStore
+	if withKeys {
+		reg := newAPIKeyRegistry()
+		keyStore, err = sqlitestore.New(db, sqlitestore.Options{Registry: reg})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ix, err := apikeys.NewIndex(context.Background(), keyStore, apikeys.IndexOptions{Now: time.Now, After: time.After, Logger: logger})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg.Console.APIKeys = config.ConsoleAPIKeys{
+			Enabled: true, DefaultTTL: config.DefaultAPIKeyTTL, MaxTTL: config.DefaultAPIKeyMaxTTL,
+			MaxPerOwner: config.DefaultAPIKeysMaxPerOwner, RatePerKey: 1000,
+		}
+		cfg.APIKeyIndex, cfg.APIKeyStore, cfg.APIKeyRegistry = ix, keyStore, reg
+	}
 	srv := New(cfg)
 	if srv.Approvals() == nil {
 		t.Fatal("approvals service not built")
@@ -76,7 +112,7 @@ func newDraftEnvAt(t *testing.T, mutate func(*config.ConsoleApprovals), clk *clo
 	}
 	srv.sessions = NewSessionStore(db.SQL(), time.Hour, 12*time.Hour, newFakeClock().Now)
 	srv.sessionReader = srv.sessions
-	e := &draftEnv{srv: srv, rec: &fakeRecorder{}, pub: &recFindings{}, raw: map[string]string{}, logs: logs}
+	e := &draftEnv{srv: srv, rec: &fakeRecorder{}, pub: &recFindings{}, raw: map[string]string{}, keys: keyStore, logs: logs}
 	srv.findings = e.pub
 	srv.enableAdminAudit(e.rec, e.rec.probe, fakeMAC)
 	e.h = srv.Handler()
@@ -113,6 +149,33 @@ func (e *draftEnv) do(who, method, path, body string, hdr ...string) *httptest.R
 			req.Header.Set(CSRFHeader, CSRFToken(raw))
 		}
 	}
+	for i := 0; i+1 < len(hdr); i += 2 {
+		req.Header.Set(hdr[i], hdr[i+1])
+	}
+	rec := httptest.NewRecorder()
+	e.h.ServeHTTP(rec, req)
+	return rec
+}
+
+// mintKey creates an API key owned by the session user sub (same issuer, so
+// the key and the session are the same person) in group with scopes.
+func (e *draftEnv) mintKey(t *testing.T, sub, group string, scopes ...apikeys.Scope) string {
+	t.Helper()
+	tok, _, err := e.keys.Create(context.Background(), apikeys.CreateParams{
+		Name: "key-" + sub + "-" + strconv.Itoa(len(scopes)), OwnerIss: testSessionInput().Iss, OwnerSub: sub,
+		OwnerEmail: sub + "@example.com", OwnerGroups: []string{group}, Scopes: scopes,
+		TTL: 24 * time.Hour, MaxTTL: config.DefaultAPIKeyMaxTTL, MaxActive: 25,
+	})
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	return tok
+}
+
+// doKey sends a request bearing the API key token. hdr is name, value pairs.
+func (e *draftEnv) doKey(token, method, path, body string, hdr ...string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
 	for i := 0; i+1 < len(hdr); i += 2 {
 		req.Header.Set(hdr[i], hdr[i+1])
 	}
@@ -488,6 +551,69 @@ func TestTwoPersonRule(t *testing.T) {
 	}
 	if got := e.view(t, d.ID); !got.ApprovalRows[0].AcknowledgeNoReplay {
 		t.Errorf("approval = %+v, want the acknowledgement recorded", got.ApprovalRows)
+	}
+}
+
+// TestTwoPersonRuleAPIKey: an API key acts as its owner. A draft u1's key
+// authors is u1's draft, so u1's own session cannot approve it, the author is
+// recorded under u1 with the API-key kind, and no key can approve or reject at
+// all (those rows are ScopeNone).
+func TestTwoPersonRuleAPIKey(t *testing.T) {
+	e := newDraftEnvKeys(t)
+	key := e.mintKey(t, "u1", groupEditor, "policy:read", "policy:draft", "policy:write")
+	rec := e.doKey(key, http.MethodPost, draftsPath, `{"target":"policy","message":"by key","doc":`+docWith(`{"domain":"new.example.com"}`)+`}`, "If-Match", `"v1"`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("key create = %d %s", rec.Code, rec.Body.String())
+	}
+	d := decodeBody[dashboard.ChangeDraftDetail](t, rec)
+	if d.Author.Sub != "u1" {
+		t.Fatalf("author = %+v, want the key's owner u1 (never apikey:<id>)", d.Author)
+	}
+	stored, err := e.srv.Approvals().Store().Get(context.Background(), d.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Author.Sub != "u1" || stored.Author.Kind != AuthorKindAPIKey {
+		t.Errorf("stored author = %+v, want sub u1 kind %q", stored.Author, AuthorKindAPIKey)
+	}
+	if rec := e.doKey(key, http.MethodPost, draftsPath+"/"+d.ID+"/submit", ""); rec.Code != http.StatusOK {
+		t.Fatalf("key submit = %d %s", rec.Code, rec.Body.String())
+	}
+	body := approveBody(d.ChangeDraftView, "", "")
+	path := draftsPath + "/" + d.ID
+
+	// u1's OIDC session is the same person as u1's key.
+	e.wantErr(t, e.do("u1", http.MethodPost, path+"/approve", body), http.StatusForbidden, "self_approval_forbidden")
+
+	// No key, not even another editor's holding every scope, can approve or
+	// reject: the second person is always a human session.
+	other := e.mintKey(t, "u2", groupEditor, newAPIKeyRegistry().Registered()...)
+	for _, tok := range []string{key, other} {
+		for _, action := range []string{"approve", "reject"} {
+			e.wantErr(t, e.doKey(tok, http.MethodPost, path+"/"+action, body), http.StatusForbidden, "insufficient_scope")
+		}
+	}
+	if e.head(t) != 1 {
+		t.Fatalf("a refused approval created version %d", e.head(t))
+	}
+	if got := e.view(t, d.ID); len(got.ApprovalRows) != 0 || got.State != "pending" {
+		t.Errorf("draft after refusals = %+v", got)
+	}
+	// A different person's session still can.
+	if ok := e.do("u2", http.MethodPost, path+"/approve", body); ok.Code != http.StatusOK {
+		t.Fatalf("u2 approve = %d %s", ok.Code, ok.Body.String())
+	}
+}
+
+// TestChangeDraftCallerKeyWithoutOwner: a key principal with no owner has no
+// person to attribute a draft to and is refused.
+func TestChangeDraftCallerKeyWithoutOwner(t *testing.T) {
+	e := newDraftEnv(t, nil)
+	ctx := WithPrincipal(context.Background(), Principal{Kind: PrincipalAPIKey, Iss: testSessionInput().Iss, Sub: "apikey:k1", KeyID: "k1", Groups: []string{groupEditor}, AuthMethod: PrincipalAPIKey})
+	_, _, err := changeDraftAPI{s: e.srv}.caller(ctx)
+	var ce *dashboard.ChangeError
+	if !errors.As(err, &ce) || ce.Status != http.StatusUnauthorized {
+		t.Fatalf("caller(key without owner) err = %v, want a 401 ChangeError", err)
 	}
 }
 

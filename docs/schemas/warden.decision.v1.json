@@ -26,6 +26,7 @@
       "anyOf": [
         {
           "enum": [
+          "agent_disabled",
           "dlp_block",
           "dlp_redact",
           "group_not_allowed",

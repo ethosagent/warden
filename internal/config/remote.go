@@ -37,6 +37,13 @@ type RemoteProvider struct {
 	lastErr    error
 	// caps are the capabilities advertised on every heartbeat (see WorkerCaps).
 	caps []string
+	// agentID is the registered agent id this worker is bound to, and
+	// identityMode returns the effective identity mode; both ride the heartbeat.
+	agentID      string
+	identityMode func() string
+	// onDate, when set, receives the CP's Date header from each long-poll
+	// response (see SetDateObserver).
+	onDate func(cpNow time.Time)
 }
 
 // CapBlocklistV1 is the capability a worker advertises when it enforces
@@ -61,16 +68,45 @@ const CapIdentityChallengeV1 = "identity/challenge-v1"
 // WorkerCaps returns the sorted capabilities this binary implements. Later
 // features append their own constant here.
 func WorkerCaps() []string {
-	caps := []string{CapBlocklistV1, CapGroupPolicyV1, CapIdentityChallengeV1}
+	caps := []string{CapAgentRegV1, CapBlocklistV1, CapGroupPolicyV1, CapIdentityChallengeV1}
 	sort.Strings(caps)
 	return caps
 }
+
+// CapAgentRegV1 is the capability a worker advertises when it enforces the
+// agent registry: it selects its own registeredAgents entry on every apply and
+// denies all traffic (agent_disabled) while that agent is disabled. An old
+// worker decodes the list and ignores it, so the control plane flags it. Any
+// widening of the registeredAgents wire (a third status, more than two keys)
+// must be gated on this cap, because a worker rejects the whole policy wire on
+// a list it cannot validate and would freeze on its last-known-good policy.
+const CapAgentRegV1 = "agentreg/v1"
+
+// CapIdentityRequireV1 is the capability a worker advertises when it enforces
+// identity require mode (W-P2-WBND-03). No worker advertises it yet; the
+// constant exists so the console and the control plane agree on the literal.
+const CapIdentityRequireV1 = "identity/require-v1"
 
 // heartbeatBody is the JSON a worker POSTs to /control/heartbeat. It carries no
 // secret, token or request data.
 type heartbeatBody struct {
 	PolicyETag string   `json:"policyETag"`
 	Caps       []string `json:"caps,omitempty"`
+	// AgentID and IdentityMode (W-P2-AREG-05) say which agent the worker is
+	// bound to and the identity mode it enforces now. Both are self-asserted,
+	// like caps, and omitted when unknown so an old control plane sees the old
+	// body.
+	AgentID      string `json:"agentID,omitempty"`
+	IdentityMode string `json:"identityMode,omitempty"`
+}
+
+// SetAgent sets the resolved agent id and the source of the effective identity
+// mode reported on each heartbeat. mode may be nil (no mode reported).
+func (r *RemoteProvider) SetAgent(agentID string, mode func() string) {
+	r.mu.Lock()
+	r.agentID = agentID
+	r.identityMode = mode
+	r.mu.Unlock()
 }
 
 // SetCaps sets the capabilities advertised on each heartbeat. Pass WorkerCaps().
@@ -78,6 +114,33 @@ func (r *RemoteProvider) SetCaps(caps []string) {
 	r.mu.Lock()
 	r.caps = append([]string(nil), caps...)
 	r.mu.Unlock()
+}
+
+// SetDateObserver registers a callback invoked on every PollLong response that
+// carries a parseable Date header, with that time. The worker subtracts its own
+// clock to get the clock skew (warden.controlplane.clock_skew_seconds), which
+// diagnoses mass expired or not-yet-valid token failures. The package reads no
+// clock itself. The header has one-second resolution. nil disables it.
+func (r *RemoteProvider) SetDateObserver(fn func(cpNow time.Time)) {
+	r.mu.Lock()
+	r.onDate = fn
+	r.mu.Unlock()
+}
+
+// observeDate reports the response's Date header (the CP stamps it when it
+// writes the response, after holding the poll).
+func (r *RemoteProvider) observeDate(resp *http.Response) {
+	r.mu.RLock()
+	fn := r.onDate
+	r.mu.RUnlock()
+	if fn == nil {
+		return
+	}
+	d, err := http.ParseTime(resp.Header.Get("Date"))
+	if err != nil {
+		return
+	}
+	fn(d)
 }
 
 // SetProxyID sets the worker identifier sent on each policy pull (header
@@ -215,6 +278,7 @@ func (r *RemoteProvider) PollLong(ctx context.Context, wait time.Duration) (chan
 		return false, r.setErr(fmt.Errorf("config: remote: long-poll: %w", err))
 	}
 	defer func() { _ = resp.Body.Close() }()
+	r.observeDate(resp)
 
 	switch resp.StatusCode {
 	case http.StatusNotModified:
@@ -255,9 +319,13 @@ func (r *RemoteProvider) Heartbeat(ctx context.Context) error {
 
 	r.mu.RLock()
 	etag := r.etag
-	caps := r.caps
+	hb := heartbeatBody{PolicyETag: etag, Caps: r.caps, AgentID: r.agentID}
+	modeFn := r.identityMode
 	r.mu.RUnlock()
-	body, _ := json.Marshal(heartbeatBody{PolicyETag: etag, Caps: caps})
+	if modeFn != nil {
+		hb.IdentityMode = modeFn()
+	}
+	body, _ := json.Marshal(hb)
 
 	reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
@@ -310,9 +378,12 @@ type remoteWire struct {
 	Policy
 	// BlockedUsers is decoded here, not through Policy (whose field is
 	// json:"-" for rule X2), then copied onto the policy in parseRemotePolicy.
-	BlockedUsers    []BlockedUser    `json:"blockedUsers,omitempty"`
-	Settings        *SettingsWire    `json:"settings,omitempty"`
-	ScopedAllowlist []AllowlistEntry `json:"scopedAllowlist,omitempty"`
+	BlockedUsers []BlockedUser `json:"blockedUsers,omitempty"`
+	// RegisteredAgents likewise (W-P2-AREG-04): decoded here, sorted and
+	// validated in parseRemotePolicy.
+	RegisteredAgents []RegisteredAgent `json:"registeredAgents,omitempty"`
+	Settings         *SettingsWire     `json:"settings,omitempty"`
+	ScopedAllowlist  []AllowlistEntry  `json:"scopedAllowlist,omitempty"`
 	// ScopedAllowPos[i] is the index ScopedAllowlist[i] had in the full
 	// allowlist, strictly ascending. Absent: the entries are appended.
 	ScopedAllowPos []int `json:"scopedAllowPos,omitempty"`
@@ -343,6 +414,14 @@ func parseRemotePolicy(body []byte) (*Policy, *SettingsWire, error) {
 		p.Denylist[i].Domain = strings.ToLower(p.Denylist[i].Domain)
 	}
 	p.BlockedUsers = normalizeBlockedUsers(w.BlockedUsers)
+	if len(w.RegisteredAgents) > 0 {
+		agents := append([]RegisteredAgent(nil), w.RegisteredAgents...)
+		SortRegisteredAgents(agents)
+		if err := ValidateRegisteredAgents(agents); err != nil {
+			return nil, nil, err
+		}
+		p.RegisteredAgents = agents
+	}
 	// The wire carries scoped entries only in scopedAllowlist: a plain entry
 	// with principals is what an older worker would read as global, so it is
 	// refused here even though validate (W-P1-GPOL-10) now accepts principals.

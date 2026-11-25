@@ -612,8 +612,17 @@ func TestReloadOnDataVersion(t *testing.T) {
 
 	// 9h: the other process rotates again while this one's key store is down.
 	// The failed reload keeps the last good set signing.
+	//
+	// The peer's clock reads 4h ahead of the shared fake clock instead of the
+	// shared clock jumping: a jump wakes the running manager's own scheduler
+	// pass, which heals an empty next slot, and the peer's rotation commits the
+	// promotion before it inserts the fresh next key as a separate write. A heal
+	// landing in that window while this process's store is down legitimately
+	// fails and raises key_rotation_failed — a race between two processes'
+	// schedulers, not the reload under test. With no timer firing, the running
+	// manager only learns of the peer's write through the data-version poll.
 	e.store.failGet.Store(true)
-	e.clk.Advance(4 * time.Hour)
+	m2 = e.managerAhead(e.anotherMeta(), peerStore, 4*time.Hour)
 	if err := m2.Schedule(ctx); err != nil {
 		t.Fatalf("the other process could not rotate again: %v", err)
 	}

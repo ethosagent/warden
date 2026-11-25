@@ -56,7 +56,12 @@ func runParams(cmd *cobra.Command) (worker.Params, error) {
 	if err != nil {
 		return worker.Params{}, err
 	}
+	agentID, err := cmd.Flags().GetString("agent-id")
+	if err != nil {
+		return worker.Params{}, err
+	}
 	return worker.Params{
+		AgentID:       agentID,
 		AdminTokenEnv: adminTokenEnv,
 		ConfigPath:    configPath,
 		ListenAddr:    listenAddr,
@@ -92,6 +97,7 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().String("ca-key", "", "path to proxy CA private key for TLS termination (overrides config tls.caKey)")
 	cmd.Flags().String("admin-listen", config.DefaultAdminListen, "admin + dashboard HTTP listen address (overrides config adminListen:)")
 	cmd.Flags().String("admin-token-env", "", "env var holding the bearer token dashboard writes on the admin listener need (overrides config admin.tokenEnv); unset = writes refused")
+	cmd.Flags().String("agent-id", "", "registered agent id this worker is bound to (overrides central.agentID); a disabled agent is denied agent_disabled")
 	cmd.Flags().Bool("local-only", false, "ignore the control plane and enforce local policy (standalone)")
 	cmd.Flags().String("alerts-db", "", "sqlite alert-store DB path for --local-only (default: sibling of --db, named warden-alerts.db); ignored in managed/fleet mode")
 

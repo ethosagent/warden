@@ -55,8 +55,11 @@ type Params struct {
 	// the bearer token dashboard writes on the admin listener need. Empty falls back
 	// to config `admin.tokenEnv`; with neither (or an empty value) writes are refused.
 	AdminTokenEnv string
-	Version       string
-	LocalOnly     bool
+	// AgentID is the --agent-id flag: the registered agent this worker is bound
+	// to. Empty falls back to central.agentID, then the derived id.
+	AgentID   string
+	Version   string
+	LocalOnly bool
 	// ErrOut, when set, receives the operational log while audit.jsonLog writes
 	// its decision stream to stdout (the logger moves off stdout so the streams
 	// never mix). nil means os.Stderr; cmd/proxy never sets it.
@@ -292,6 +295,16 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// Otherwise the worker enforces its local policy (standalone).
 	localOnly := localOnlyFlag || pol.ControlPlane.LocalOnly
 	managed := pol.ControlPlane.Endpoint != "" && !localOnly
+	logBundleVerification(logger, pol.ControlPlane, managed, localOnly)
+
+	// The agent id this worker is bound to: --agent-id, then central.agentID,
+	// then the id derived as before. It replaces the derived id everywhere
+	// (judge, identity mode lookup, registry lookup, heartbeat). A malformed
+	// explicit value stops startup.
+	boundAgentID, err := resolveAgentID(p.AgentID, pol.Central.AgentID, pol, listenAddr)
+	if err != nil {
+		return err
+	}
 
 	// Optional control plane (managed mode only): pull allow/deny policy AND the
 	// behavioral settings document from the remote endpoint. The first pull happens
@@ -388,6 +401,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	if err != nil {
 		return err
 	}
+	secretProvider.SetReservedKeyLog(secrets.NewReservedKeyLog(logger, nil))
 
 	// OTel metrics emitter (off by default). New returns a nil *Metrics + nil
 	// handler when disabled, and record calls are nil-safe no-ops. OTel providers
@@ -437,7 +451,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 
 	// Optional inline judge. When judge.enabled is false, judge is nil and the
 	// proxy behaves exactly as before (NoMatch default-denies).
-	judge, agentID, err := buildJudge(pol, listenAddr, logger)
+	judge, agentID, err := buildJudge(pol, boundAgentID, logger)
 	if err != nil {
 		return err
 	}
@@ -772,17 +786,33 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	idWiring.scoped = func() int { return countScoped(evaluator.CurrentPolicy()) }
 	idWiring.apply(pol.Identity, pol.Agents)
 
+	// Agent kill switch (W-P2-AREG-05). A managed worker reports the agent and
+	// identity mode it enforces on every heartbeat, tracks every session so a
+	// disabled agent can be cut, and applies the registry entry from the boot
+	// pull before it serves. A standalone worker has no registry: untouched.
+	var gate *agentGate
+	if controlPlane != nil {
+		controlPlane.SetAgent(agentID, pxy.IdentityModeName)
+		pxy.SetSessionTracking(true)
+		gate = newAgentGate(pxy, agentID, logger)
+		if remotePolicy != nil {
+			gate.apply(*remotePolicy)
+		}
+	}
+
 	// liveMCPGW tracks the gateway currently swapped into the proxy so shutdown
 	// (and each rebuild) closes the right one. It starts as the boot-time gateway
 	// (possibly nil); the managed apply loop below replaces it on each change.
 	// mcpMu guards it against the concurrent apply goroutine.
 	var mcpMu sync.Mutex
 	liveMCPGW := mcpGW
+	mcpClosed := false
 	// Close the gateway live at shutdown before the store: deferred LIFO runs this
 	// first, so the gateway's final flush completes while the store is still open.
 	defer func() {
 		mcpMu.Lock()
 		gw := liveMCPGW
+		mcpClosed = true // an in-flight applier must not install a gateway after this
 		mcpMu.Unlock()
 		if gw != nil {
 			_ = gw.Close()
@@ -954,6 +984,10 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		clk = p.Overrides.Clock
 	}
 	if controlPlane != nil {
+		// warden.controlplane.clock_skew_seconds: the CP's Date header from each
+		// long-poll minus this worker's clock. A nil *Metrics (observability off)
+		// makes the record a no-op.
+		controlPlane.SetDateObserver(clockSkewObserver(metrics, clk))
 		// applier rebuilds + atomically swaps the proxy's MCP gateway AND its
 		// inline judge from the control-plane-distributed settings. It runs only for
 		// MANAGED workers (this branch), so a local-only worker's seeded pol.MCP
@@ -976,10 +1010,13 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 			obsCfg:           obsCfg,
 			mcpMu:            &mcpMu,
 			liveMCPGW:        &liveMCPGW,
+			mcpClosed:        &mcpClosed,
 			liveCompliance:   liveCompliance,
 			liveCacheTTL:     liveCacheTTL,
 		}
-		go longPollControlPlane(ctx, clk, controlPlane, evaluator, pol.ControlPlane.LongPollWait, logger, onPolicyApplied(applier.Apply, pxy.CloseBlockedSessions))
+		// The long-poll swaps the evaluator through gatedEvaluator, so the agent
+		// switch flips (and cuts sessions) BEFORE the new allow policy is live.
+		go longPollControlPlane(ctx, clk, controlPlane, gatedEvaluator{PolicyEvaluator: evaluator, gate: gate}, pol.ControlPlane.LongPollWait, logger, onPolicyApplied(applier.Apply, pxy.CloseBlockedSessions))
 		go heartbeatControlPlane(ctx, clk, controlPlane, pol.ControlPlane.HeartbeatInterval, logger)
 	}
 	if syncWorker != nil {

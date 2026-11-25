@@ -443,6 +443,11 @@ const replayPageSize = 5000
 
 var _ ReplayScanner = (*FleetSQLiteStore)(nil)
 
+// replayScanRowHook is a test seam: when non-nil it runs after the first row of
+// each page is scanned, while that page's rows are still open on the read-only
+// handle. It is nil in production.
+var replayScanRowHook func()
+
 // ScanReplayEvents implements ReplayScanner on the read-only handle, in pages of
 // replayPageSize rows by descending id. MCP rows are left out in SQL, so limit
 // counts only events a policy replay evaluates. Only ts, domain, port,
@@ -487,6 +492,9 @@ func (s *FleetSQLiteStore) ScanReplayEvents(ctx context.Context, since time.Time
 			e.UserGroupsTruncated = groupsTrunc != 0
 			page = append(page, e)
 			last = id
+			if len(page) == 1 && replayScanRowHook != nil {
+				replayScanRowHook()
+			}
 		}
 		err = rows.Err()
 		_ = rows.Close()

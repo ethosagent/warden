@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/ethosagent/warden/internal/agentid"
 )
 
 // CentralConfig configures fleet analytics aggregation.
@@ -19,8 +21,11 @@ type CentralConfig struct {
 	MaxEvents int    // central store retention cap (0 = default)
 
 	// worker
-	Endpoint  string        // aggregator ingest URL
-	ProxyID   string        // label this worker's events with
+	Endpoint string // aggregator ingest URL
+	ProxyID  string // label this worker's events with
+	// AgentID pins this worker to a registered agent (W-P2-AREG-05). Empty means
+	// the worker derives its id as before. The --agent-id flag overrides it.
+	AgentID   string
 	BatchSize int           // events per forward batch (default 100)
 	BufferCap int           // local buffer cap before dropping oldest (default 10000)
 	Interval  time.Duration // forward interval (default 10s)
@@ -44,6 +49,7 @@ type rawCentral struct {
 	MaxEvents              int    `yaml:"maxEvents"`
 	Endpoint               string `yaml:"endpoint"`
 	ProxyID                string `yaml:"proxyID"`
+	AgentID                string `yaml:"agentID"`
 	BatchSize              int    `yaml:"batchSize"`
 	BufferCap              int    `yaml:"bufferCap"`
 	Interval               string `yaml:"interval"`
@@ -74,6 +80,12 @@ func parseCentral(r *rawCentral) (CentralConfig, error) {
 	c.MaxEvents = r.MaxEvents
 	c.Endpoint = strings.TrimSpace(r.Endpoint)
 	c.ProxyID = r.ProxyID
+	c.AgentID = strings.TrimSpace(r.AgentID)
+	if c.AgentID != "" {
+		if err := agentid.ValidID(c.AgentID); err != nil {
+			return CentralConfig{}, fmt.Errorf("config: central.agentID is not a valid agent id: %w", err)
+		}
+	}
 	c.CACert = strings.TrimSpace(r.CACert)
 	c.BatchSize = defaultCentralBatchSize
 	if r.BatchSize > 0 {

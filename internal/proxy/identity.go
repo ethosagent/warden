@@ -100,6 +100,16 @@ func (p *Proxy) SetIdentityWithSignIn(v identity.Verifier, mode IdentityMode, si
 	p.warnIdentityCoverage()
 }
 
+// IdentityModeName is the effective identity mode this proxy enforces now: off
+// when no verifier is installed, else attribute or challenge. The heartbeat
+// reports it, so the control plane sees what runs, not what was requested.
+func (p *Proxy) IdentityModeName() string {
+	if h := p.identity(); h != nil {
+		return string(h.mode)
+	}
+	return string(IdentityModeOff)
+}
+
 // SupportsChallenge reports whether this worker can answer a 407: it needs a
 // CONNECT listener, which a transparent-only worker does not have.
 func (p *Proxy) SupportsChallenge() bool { return p.cfg.Mode != config.ProxyModeTransparent }
@@ -194,7 +204,7 @@ func (p *Proxy) malformedConn() connIdentity {
 // malformed is the result for a token that is not in an accepted form: it is
 // never sent to the verifier.
 func (p *Proxy) malformed() idResult {
-	p.cfg.Metrics.RecordIdentityVerify(string(identity.StatusInvalid), string(identity.ReasonMalformed))
+	p.cfg.Metrics.RecordIdentityVerify(string(identity.StatusInvalid), string(identity.ReasonMalformed), string(identity.TokenNone))
 	return idResult{status: identity.StatusInvalid, reason: identity.ReasonMalformed}
 }
 
@@ -208,16 +218,16 @@ func (p *Proxy) verifyToken(h *identityHolder, tok string) idResult {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	c, st, r := h.v.Verify(ctx, tok)
 	cancel()
-	p.recordIdentity(st, r)
+	p.recordIdentity(st, r, string(identity.TokenIdP))
 	return idResult{claims: c, status: st, reason: r}
 }
 
-func (p *Proxy) recordIdentity(st identity.Status, r identity.Reason) {
+func (p *Proxy) recordIdentity(st identity.Status, r identity.Reason, tokenType string) {
 	reason := string(r)
 	if reason == "" {
 		reason = "none"
 	}
-	p.cfg.Metrics.RecordIdentityVerify(string(st), reason)
+	p.cfg.Metrics.RecordIdentityVerify(string(st), reason, tokenType)
 }
 
 // parseProxyAuthorization extracts the token from a CONNECT Proxy-Authorization
@@ -309,14 +319,14 @@ func (p *Proxy) identityStage(s *requestScope) (endSession bool) {
 		// Past exp plus skew (or no exp at all, which a valid token always has:
 		// fail closed). The connection's identity is spent.
 		connLive, cs = false, identity.StatusExpired
-		p.recordIdentity(identity.StatusExpired, "")
+		p.recordIdentity(identity.StatusExpired, "", string(identity.TokenIdP))
 	}
 	switch {
 	case cs == identity.StatusNone || cs == identity.StatusOff:
 		switch {
 		case n == 0:
 			r = idResult{status: identity.StatusNone}
-			p.recordIdentity(identity.StatusNone, "")
+			p.recordIdentity(identity.StatusNone, "", string(identity.TokenNone))
 		case n > 1:
 			r = p.malformed()
 		default:
@@ -339,7 +349,7 @@ func (p *Proxy) identityStage(s *requestScope) (endSession bool) {
 			case hr.status == identity.StatusValid && hr.claims.Sub != ci.Claims.Sub:
 				s.idHeaderClaims = hr.claims
 				r = idResult{status: identity.StatusConflict}
-				p.recordIdentity(identity.StatusConflict, "")
+				p.recordIdentity(identity.StatusConflict, "", string(identity.TokenIdP))
 			}
 		}
 	default:

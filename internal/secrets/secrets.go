@@ -98,6 +98,9 @@ type Cache struct {
 	healthy bool
 
 	now func() time.Time
+
+	// reservedLog, when set, records refused reserved-key lookups.
+	reservedLog *ReservedKeyLog
 }
 
 var _ SecretProvider = (*Cache)(nil)
@@ -119,10 +122,18 @@ func NewCache(fetcher Fetcher, ttl time.Duration, placeholders []string) (*Cache
 	return c, nil
 }
 
+// SetReservedKeyLog attaches the rate-limited log of refused reserved-key
+// lookups. Call it before the cache is shared; nil leaves the refusals silent.
+func (c *Cache) SetReservedKeyLog(l *ReservedKeyLog) { c.reservedLog = l }
+
 // GetSecret returns the real value for placeholder, refreshing silently if the
 // cached value has expired. On a silent-refresh failure the stale value is
 // returned. If the last manual refresh failed (cache unhealthy), it hard-fails.
 func (c *Cache) GetSecret(placeholder string) (string, error) {
+	if IsReservedKey(placeholder) {
+		c.reservedLog.Refused("worker-cache", placeholder)
+		return "", fmt.Errorf("%w: refused before any lookup", ErrReservedKey)
+	}
 	c.mu.RLock()
 	healthy := c.healthy
 	e, ok := c.entries[placeholder]
@@ -156,6 +167,14 @@ func (c *Cache) GetSecret(placeholder string) (string, error) {
 func (c *Cache) RefreshSecrets() error {
 	fresh := make(map[string]entry, len(c.keys))
 	for _, k := range c.keys {
+		if IsReservedKey(k) {
+			c.reservedLog.Refused("worker-cache", k)
+			c.mu.Lock()
+			c.entries = make(map[string]entry)
+			c.healthy = false
+			c.mu.Unlock()
+			return fmt.Errorf("secrets: manual refresh failed for a reserved key: %w", ErrReservedKey)
+		}
 		val, err := c.fetcher.Fetch(k)
 		if err != nil {
 			c.mu.Lock()

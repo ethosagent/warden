@@ -150,8 +150,8 @@ type Evaluator struct {
 
 	// Rate limiting (fixed-window).
 	mu         sync.Mutex
-	rateLimits map[int]parsedRateLimit // index into allowlist -> parsed limit
-	counters   map[string]*rateState   // key: "pattern:port" (scoped: "#<index>|pattern:port") -> state
+	rateLimits map[int]RateLimit     // index into allowlist -> parsed limit
+	counters   map[string]*rateState // key: "pattern:port" (scoped: "#<index>|pattern:port") -> state
 
 	// Time-window rules.
 	timeWindows map[int]parsedTimeWindow // index into allowlist -> parsed window
@@ -165,9 +165,11 @@ type Evaluator struct {
 	now func() time.Time
 }
 
-type parsedRateLimit struct {
-	limit  int
-	window time.Duration
+// RateLimit is a parsed "N/second|minute|hour" rate: at most Limit events per
+// Window. Policy allow entries and the token service's rate limits share it.
+type RateLimit struct {
+	Limit  int
+	Window time.Duration
 }
 
 type rateState struct {
@@ -242,7 +244,7 @@ func (e *Evaluator) load(p config.Policy) {
 	allowlist := cloneAllowlist(p.Allowlist)
 	denylist := append([]config.DenylistEntry(nil), p.Denylist...)
 	regexCache := make(map[string]*regexp.Regexp)
-	rateLimits := make(map[int]parsedRateLimit)
+	rateLimits := make(map[int]RateLimit)
 	timeWindows := make(map[int]parsedTimeWindow)
 	var principals []*identity.Principals
 	hasScoped := false
@@ -277,7 +279,7 @@ func (e *Evaluator) load(p config.Policy) {
 			hasScoped = true
 		}
 		if entry.RateLimit != "" {
-			if rl, err := parseRateLimit(entry.RateLimit); err == nil {
+			if rl, err := ParseRateLimit(entry.RateLimit); err == nil {
 				rateLimits[i] = rl
 			}
 		}
@@ -699,7 +701,7 @@ func MatchDomain(pattern, host string) bool {
 	return pattern == host
 }
 
-func (e *Evaluator) checkRateLimit(key string, rl parsedRateLimit) bool {
+func (e *Evaluator) checkRateLimit(key string, rl RateLimit) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -708,18 +710,18 @@ func (e *Evaluator) checkRateLimit(key string, rl parsedRateLimit) bool {
 	if !ok || now.After(state.windowEnd) {
 		e.counters[key] = &rateState{
 			count:     1,
-			windowEnd: now.Add(rl.window),
+			windowEnd: now.Add(rl.Window),
 		}
 		return true
 	}
 	state.count++
-	return state.count <= rl.limit
+	return state.count <= rl.Limit
 }
 
 // peekRateLimit reports whether the rate limit HAS room without consuming a
 // slot. It backs the CONNECT gate (evalConnect): tunnel admission must not
 // count a request — the per-request evaluation counts exactly once.
-func (e *Evaluator) peekRateLimit(key string, rl parsedRateLimit) bool {
+func (e *Evaluator) peekRateLimit(key string, rl RateLimit) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -728,17 +730,20 @@ func (e *Evaluator) peekRateLimit(key string, rl parsedRateLimit) bool {
 	if !ok || now.After(state.windowEnd) {
 		return true // a fresh window would start — room exists
 	}
-	return state.count < rl.limit
+	return state.count < rl.Limit
 }
 
-func parseRateLimit(s string) (parsedRateLimit, error) {
+// ParseRateLimit parses "N/second", "N/minute" or "N/hour" with N > 0. It is
+// the one grammar of every rate limit setting; config.validateTokenServiceRate
+// repeats it because config cannot import policy, and a test pins the two.
+func ParseRateLimit(s string) (RateLimit, error) {
 	parts := strings.SplitN(s, "/", 2)
 	if len(parts) != 2 {
-		return parsedRateLimit{}, fmt.Errorf("invalid rate limit format: %q", s)
+		return RateLimit{}, fmt.Errorf("invalid rate limit format: %q", s)
 	}
 	n, err := strconv.Atoi(parts[0])
 	if err != nil || n <= 0 {
-		return parsedRateLimit{}, fmt.Errorf("invalid rate limit count: %q", parts[0])
+		return RateLimit{}, fmt.Errorf("invalid rate limit count: %q", parts[0])
 	}
 	var d time.Duration
 	switch parts[1] {
@@ -749,9 +754,9 @@ func parseRateLimit(s string) (parsedRateLimit, error) {
 	case "hour":
 		d = time.Hour
 	default:
-		return parsedRateLimit{}, fmt.Errorf("invalid rate limit period: %q", parts[1])
+		return RateLimit{}, fmt.Errorf("invalid rate limit period: %q", parts[1])
 	}
-	return parsedRateLimit{limit: n, window: d}, nil
+	return RateLimit{Limit: n, Window: d}, nil
 }
 
 // parseTimeWindow parses "HH-HH" format. Hours are in server local time.

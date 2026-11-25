@@ -28,6 +28,7 @@ func TestRoutesMatchHandler(t *testing.T) {
 	srv.SetPolicyHistory(&fakeHistory{})
 	srv.SetBackup(func() error { return nil })
 	srv.SetWorkerTokens(&fakeWorkerTokens{})
+	srv.SetAgentRegistry(&fakeAgents{})
 	srv.SetAuthMode("oidc")
 	h := srv.Handler()
 

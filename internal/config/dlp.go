@@ -44,6 +44,12 @@ type DLPConfig struct {
 	// Custom declares operator data classes (compiled regexes) surfaced as
 	// custom.<name>. Operator config, never secrets.
 	Custom []DLPCustomClass
+	// WardenTokens turns on detection of Warden's own credentials (scoped API keys
+	// "wak_..." and per-worker tokens "wwt_...") in outbound bodies, as ordinary
+	// credential_leak findings of class credentials. Default false: nothing new is
+	// detected, so nothing new is blocked. Whether a finding blocks is still the
+	// DLP mode and rules' call (monitor records; enforce applies the rules).
+	WardenTokens bool
 }
 
 // DLPClassDefault is the default action for a class (the dlp.classes map value).
@@ -79,6 +85,8 @@ type rawDLP struct {
 	Classes map[string]rawDLPClassDefault `yaml:"classes"`
 	Rules   []rawDLPRule                  `yaml:"rules"`
 	Custom  []rawDLPCustomClass           `yaml:"custom"`
+	// WardenTokens is dlp.wardenTokens (default false).
+	WardenTokens bool `yaml:"wardenTokens"`
 }
 
 type rawDLPClassDefault struct {
@@ -128,6 +136,7 @@ func parseDLP(r *rawDLP) DLPConfig {
 			Action: normalizeAction(rr.Action),
 		})
 	}
+	d.WardenTokens = r.WardenTokens
 	for _, c := range r.Custom {
 		sev := strings.ToLower(strings.TrimSpace(c.Severity))
 		if sev == "" {

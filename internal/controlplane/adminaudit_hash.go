@@ -32,6 +32,13 @@ func (s *Server) RegisterStateHasher(target string, fn func(ctx context.Context)
 	s.audit.hashers[target] = fn
 }
 
+// hasHasher reports whether target has a registered state hasher.
+func (a *adminAuditor) hasHasher(target string) bool {
+	a.hashersMu.RLock()
+	defer a.hashersMu.RUnlock()
+	return a.hashers[target] != nil
+}
+
 // stateHash runs target's hasher. A target without one hashes to "".
 func (a *adminAuditor) stateHash(ctx context.Context, target string) (string, error) {
 	a.hashersMu.RLock()

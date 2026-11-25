@@ -39,6 +39,7 @@ import (
 func (s *Server) SetSecretStore(store secrets.SecretStore, backend string) {
 	s.secretStore = store
 	s.secretBackend = backend
+	s.reservedLog = secrets.NewReservedKeyLog(nil, nil)
 }
 
 // SetAuthMode records the console sign-in mode (none or oidc) that
@@ -140,6 +141,9 @@ func (s *Server) getSecretStore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, m := range metas {
+		if secrets.IsReservedKey(m.Key) {
+			continue // cp/ is control-plane only: never listed
+		}
 		e := secretStoreEntry{Key: m.Key, Version: m.Version}
 		if !m.UpdatedAt.IsZero() {
 			e.UpdatedAt = m.UpdatedAt.UTC().Format(time.RFC3339)
@@ -171,6 +175,9 @@ func (s *Server) putSecret(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "key and value are required")
 		return
 	}
+	if s.refuseReservedKey(w, r, key) {
+		return
+	}
 	// The control plane's admin audit row names the key, never the value.
 	adminaudit.Annotate(r.Context(), "secret:"+key, map[string]string{adminaudit.DetailOp: "put"})
 	if err := s.secretStore.Put(r.Context(), key, req.Value); err != nil {
@@ -180,6 +187,19 @@ func (s *Server) putSecret(w http.ResponseWriter, r *http.Request) {
 	// Log by reference only — the raw value must never reach a log line.
 	slog.Info("dashboard secret store put", "key", key, "ref", secrets.Ref(req.Value).String())
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// refuseReservedKey answers 403 reserved_key for a key in the control-plane
+// only cp/ namespace and reports whether it did. It runs before the audit
+// annotation and the store; the refusal is logged by route and key prefix only,
+// at most once a minute per route.
+func (s *Server) refuseReservedKey(w http.ResponseWriter, r *http.Request, key string) bool {
+	if !secrets.IsReservedKey(key) {
+		return false
+	}
+	s.reservedLog.Refused(r.URL.Path, key)
+	writeError(w, http.StatusForbidden, "reserved_key")
+	return true
 }
 
 // deleteSecret serves DELETE /dashboard/api/secretstore?key=<key>: remove a key
@@ -194,6 +214,9 @@ func (s *Server) deleteSecret(w http.ResponseWriter, r *http.Request) {
 	key := strings.TrimSpace(r.URL.Query().Get("key"))
 	if key == "" {
 		writeError(w, http.StatusBadRequest, "key is required")
+		return
+	}
+	if s.refuseReservedKey(w, r, key) {
 		return
 	}
 	adminaudit.Annotate(r.Context(), "secret:"+key, map[string]string{adminaudit.DetailOp: "delete"})
@@ -522,6 +545,10 @@ type setupResponse struct {
 	// Backup is the scheduled-backup status, present only when the control plane
 	// runs backups and the caller is an admin.
 	Backup *BackupStatus `json:"backup,omitempty"`
+	// AgentRegistry is true only on a control plane whose agent registry can
+	// serve (a state dir is configured); the console hides the Agents tab
+	// otherwise, a worker's dashboard included. Always present.
+	AgentRegistry bool `json:"agentRegistry"`
 }
 
 // BackupStatus is the value-free state of the control plane's scheduled backups.
@@ -542,6 +569,7 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := setupResponse{Mode: s.setupMode(), AuthMode: s.authMode}
+	resp.AgentRegistry = s.agents != nil && s.agents.Ready() == nil
 	if s.backupFn != nil {
 		resp.Backup = s.backupFn(r)
 	}

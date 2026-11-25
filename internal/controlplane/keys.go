@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ethosagent/warden/internal/adminaudit"
+	"github.com/ethosagent/warden/internal/apikeys/adapters/sqlitestore"
 	"github.com/ethosagent/warden/internal/clock"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/cpstate"
@@ -19,6 +20,7 @@ import (
 	"github.com/ethosagent/warden/internal/keys/adapters/metastore"
 	"github.com/ethosagent/warden/internal/keys/adapters/signer"
 	"github.com/ethosagent/warden/internal/secrets"
+	tokensvcsqlite "github.com/ethosagent/warden/internal/tokensvc/adapters/sqlite"
 )
 
 // keysEvidenceMax bounds the error text a signing_key_unavailable Finding
@@ -46,12 +48,21 @@ func resolveKeys(configPath, stateDir string) (config.KeysConfig, error) {
 }
 
 // stateMigrationsFor returns StateMigrations with the feature-gated ones the
-// config turns on: signing_keys/0001 is applied only with keys.enabled, so a
-// control plane without keys creates no table.
-func stateMigrationsFor(kc config.KeysConfig) []cpstate.Migration {
+// config turns on: signing_keys/0001 is applied only with keys.enabled and the
+// tokensvc tables only with tokenService.enabled, so a control plane without
+// them creates no table.
+func stateMigrationsFor(kc config.KeysConfig, cc config.ConsoleConfig, tc config.TokenServiceConfig) []cpstate.Migration {
 	migs := StateMigrations()
 	if kc.Enabled {
 		migs = cpstate.Enable(migs, metastore.MigrationID)
+	}
+	if tc.Enabled {
+		migs = cpstate.Enable(migs, tokensvcsqlite.MigrationID, tokensvcsqlite.SessionsMigrationID, tokensvcsqlite.EventsMigrationID)
+	}
+	// api_keys/0001 likewise only with console.apiKeys.enabled: no table is
+	// created for a control plane without API keys.
+	if cc.APIKeys.Enabled {
+		migs = cpstate.Enable(migs, sqlitestore.MigrationID)
 	}
 	return migs
 }

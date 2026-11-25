@@ -257,7 +257,7 @@ type MetricsRecorder interface {
 	RecordScanFinding(kind string)
 	RecordJudge(outcome string)
 	ObserveAddedLatency(stage string, d time.Duration)
-	RecordIdentityVerify(result, reason string)
+	RecordIdentityVerify(result, reason, tokenType string)
 	// RecordSignInStarted counts a challenge-mode sign-in request by outcome
 	// (started|reused|rate_limited|issuer_unreachable). No agent, user or code label.
 	RecordSignInStarted(outcome string)
@@ -282,17 +282,17 @@ type CostEstimator interface {
 // record is discarded, exactly as a nil-receiver *observability.Metrics would do.
 type nopMetrics struct{}
 
-func (nopMetrics) RecordRequest(decision, protocol string)           {}
-func (nopMetrics) RecordBlocked(reason string)                       {}
-func (nopMetrics) RecordSecretSwap(placeholderRef string)            {}
-func (nopMetrics) RecordScanFinding(kind string)                     {}
-func (nopMetrics) RecordJudge(outcome string)                        {}
-func (nopMetrics) ObserveAddedLatency(stage string, d time.Duration) {}
-func (nopMetrics) RecordIdentityVerify(result, reason string)        {}
-func (nopMetrics) RecordSignInStarted(outcome string)                {}
-func (nopMetrics) RecordBlocklistEntries(n int)                      {}
-func (nopMetrics) RecordBlocklistSessionsClosed(n int)               {}
-func (nopMetrics) RecordScoped(result string)                        {}
+func (nopMetrics) RecordRequest(decision, protocol string)               {}
+func (nopMetrics) RecordBlocked(reason string)                           {}
+func (nopMetrics) RecordSecretSwap(placeholderRef string)                {}
+func (nopMetrics) RecordScanFinding(kind string)                         {}
+func (nopMetrics) RecordJudge(outcome string)                            {}
+func (nopMetrics) ObserveAddedLatency(stage string, d time.Duration)     {}
+func (nopMetrics) RecordIdentityVerify(result, reason, tokenType string) {}
+func (nopMetrics) RecordSignInStarted(outcome string)                    {}
+func (nopMetrics) RecordBlocklistEntries(n int)                          {}
+func (nopMetrics) RecordBlocklistSessionsClosed(n int)                   {}
+func (nopMetrics) RecordScoped(result string)                            {}
 
 // Judge renders an allow/deny verdict for a request that matched no static
 // rule. It is defined here (consumer-side) so the proxy does not depend on the
@@ -426,6 +426,11 @@ type Proxy struct {
 
 	// sessions is the open-session registry CloseBlockedSessions cuts from.
 	sessions *sessionRegistry
+	// agentDisabled is the agent kill switch (agent.go): set while the bound
+	// agent is disabled in the control plane's registry. trackAll makes every
+	// session, anonymous ones included, register so the switch can cut them.
+	agentDisabled atomic.Bool
+	trackAll      atomic.Bool
 	// mcpModeUnknownOnce guards a single WARN when a scanning gateway does not
 	// report its mode and Warden holds its traffic (fail safe).
 	mcpModeUnknownOnce sync.Once

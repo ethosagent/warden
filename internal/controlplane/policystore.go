@@ -63,6 +63,7 @@ const (
 	AuthorKindBearer     = "bearer"
 	AuthorKindNone       = "none"
 	AuthorKindSystem     = "system"
+	AuthorKindAPIKey     = "apikey"
 )
 
 // maxPolicyMessage caps a version message, in characters.
@@ -94,7 +95,7 @@ var (
 
 var authorKinds = map[string]bool{
 	AuthorKindOIDC: true, AuthorKindBreakglass: true, AuthorKindCLI: true,
-	AuthorKindBearer: true, AuthorKindNone: true, AuthorKindSystem: true,
+	AuthorKindBearer: true, AuthorKindNone: true, AuthorKindSystem: true, AuthorKindAPIKey: true,
 }
 
 var versionSources = map[string]bool{
@@ -205,6 +206,21 @@ type PolicyVersionStore interface {
 	// VersionForETag returns the version of the newest publish-log row with
 	// etag; ok is false when no row has it (or the read fails).
 	VersionForETag(ctx context.Context, etag string) (version int64, ok bool)
+	// LatestPublish returns the newest publish-log row; ok is false when the
+	// log is empty. Its seq is the signed bundle's seq.
+	LatestPublish(ctx context.Context) (e PublishEntry, ok bool, err error)
+	// AppendMarker appends a row for content that changed without the served
+	// policy ETag moving (a token JWKS change, reason publishReasonTokenJWKS),
+	// which AppendPublish would drop as a duplicate. It needs version to still
+	// be the head and returns ErrConflict otherwise.
+	AppendMarker(ctx context.Context, version int64, etag, reason, actor string) (PublishEntry, error)
+	// AppendRestore appends one row at exactly seq floor, reason
+	// publishReasonRestore, when the newest seq is below floor (a restored
+	// backup moved the log backwards), so every later seq is above anything a
+	// worker may have applied. It appends nothing and returns false when the
+	// log is already at or past floor, and ErrConflict when version is no
+	// longer the head.
+	AppendRestore(ctx context.Context, floor, version int64, etag, actor string) (appended bool, err error)
 }
 
 // sqlitePolicyStore is the PolicyVersionStore on the cpstate SQLite DB.
@@ -249,9 +265,10 @@ func (st *sqlitePolicyStore) Create(ctx context.Context, doc policyWire, author 
 	}
 	msg = sanitizeMessage(msg)
 	red := RedactCredentials(doc)
-	// The block list is served by the blocked_users overlay, never versioned: a
-	// rollback must not restore (or drop) it.
+	// The block list and the agent registry are served by overlays, never
+	// versioned: a rollback must not restore (or drop) them.
 	red.BlockedUsers = nil
+	red.RegisteredAgents = nil
 	docJSON, err := json.Marshal(red)
 	if err != nil {
 		return 0, false, fmt.Errorf("policy store: encode doc: %w", err)
@@ -1075,4 +1092,87 @@ func servedBlocksHash(path string) (string, error) {
 		return "", err
 	}
 	return sha256Hex(string(b)), nil
+}
+
+// LatestPublish implements PolicyVersionStore.
+func (st *sqlitePolicyStore) LatestPublish(ctx context.Context) (PublishEntry, bool, error) {
+	var (
+		e  PublishEntry
+		at int64
+	)
+	err := st.db.QueryRowContext(ctx,
+		`SELECT seq, version, etag, reason, actor_sub, at FROM policy_publish_log ORDER BY seq DESC LIMIT 1`,
+	).Scan(&e.Seq, &e.Version, &e.ETag, &e.Reason, &e.ActorSub, &at)
+	if errors.Is(err, sql.ErrNoRows) {
+		return PublishEntry{}, false, nil
+	}
+	if err != nil {
+		return PublishEntry{}, false, fmt.Errorf("policy store: read newest publish row: %w", err)
+	}
+	e.At = time.UnixMilli(at)
+	return e, true, nil
+}
+
+// AppendMarker implements PolicyVersionStore.
+func (st *sqlitePolicyStore) AppendMarker(ctx context.Context, version int64, etag, reason, actor string) (PublishEntry, error) {
+	if etag == "" || reason == "" || strings.TrimSpace(actor) == "" {
+		return PublishEntry{}, errors.New("policy store: publish entry needs an etag, a reason and an actor")
+	}
+	e := PublishEntry{Version: version, ETag: etag, Reason: reason, ActorSub: actor}
+	err := st.immediateTx(ctx, func(conn *sql.Conn) error {
+		var head int64
+		if err := conn.QueryRowContext(ctx, "SELECT version FROM policy_head").Scan(&head); err != nil {
+			return fmt.Errorf("policy store: read head: %w", err)
+		}
+		if head != version {
+			return fmt.Errorf("%w: head is no longer v%d", ErrConflict, version)
+		}
+		e.At = st.now()
+		res, err := conn.ExecContext(ctx,
+			`INSERT INTO policy_publish_log (version, etag, reason, actor_sub, at) VALUES (?, ?, ?, ?, ?)`,
+			version, etag, reason, actor, e.At.UnixMilli())
+		if err != nil {
+			return fmt.Errorf("policy store: append publish log: %w", err)
+		}
+		if e.Seq, err = res.LastInsertId(); err != nil {
+			return fmt.Errorf("policy store: publish row id: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return PublishEntry{}, err
+	}
+	return e, nil
+}
+
+// AppendRestore implements PolicyVersionStore.
+func (st *sqlitePolicyStore) AppendRestore(ctx context.Context, floor, version int64, etag, actor string) (bool, error) {
+	if floor < 1 || strings.TrimSpace(actor) == "" {
+		return false, errors.New("policy store: restore row needs a positive floor and an actor")
+	}
+	err := st.immediateTx(ctx, func(conn *sql.Conn) error {
+		var head, newest int64
+		if err := conn.QueryRowContext(ctx, "SELECT version FROM policy_head").Scan(&head); err != nil {
+			return fmt.Errorf("policy store: read head: %w", err)
+		}
+		if head != version {
+			return fmt.Errorf("%w: head is no longer v%d", ErrConflict, version)
+		}
+		if err := conn.QueryRowContext(ctx, "SELECT COALESCE(MAX(seq), 0) FROM policy_publish_log").Scan(&newest); err != nil {
+			return fmt.Errorf("policy store: read newest seq: %w", err)
+		}
+		if newest >= floor {
+			return errNoChange
+		}
+		if _, err := conn.ExecContext(ctx,
+			`INSERT INTO policy_publish_log (seq, version, etag, reason, actor_sub, at) VALUES (?, ?, ?, ?, ?, ?)`,
+			floor, version, etag, publishReasonRestore, actor, st.now().UnixMilli()); err != nil {
+			return fmt.Errorf("policy store: append restore row: %w", err)
+		}
+		return nil
+	})
+	if errors.Is(err, errNoChange) {
+		return false, nil
+	}
+	return err == nil, err
 }

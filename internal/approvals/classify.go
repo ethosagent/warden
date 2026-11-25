@@ -319,20 +319,20 @@ func rateNoWider(a, r string) bool {
 	if a == "" {
 		return false
 	}
-	al, aw, err := policy.ParseRateLimit(a)
+	al, err := policy.ParseRateLimit(a)
 	if err != nil {
 		return false
 	}
 	if r == "" {
 		return true
 	}
-	rl, rw, err := policy.ParseRateLimit(r)
+	rl, err := policy.ParseRateLimit(r)
 	if err != nil {
 		return false
 	}
 	// No wider only when neither the count nor the burst grows: 2/minute to
 	// 120/hour has a lower average but admits a 120-request burst.
-	return al <= rl && aw >= rw
+	return al.Limit <= rl.Limit && al.Window >= rl.Window
 }
 
 // timeNoWider reports whether the hours admitted by a are a subset of those

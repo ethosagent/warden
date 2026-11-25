@@ -429,6 +429,17 @@ var notVersionedWriteRoutes = map[routeKey]string{
 	{http.MethodDelete, "/dashboard/api/blocked-users/{id}"}: "block list store, a serve-time overlay (W-P2-APPR-08 gates removals)",
 	{http.MethodPost, "/dashboard/api/keys/rotate"}:          "signing key store",
 	{http.MethodDelete, "/dashboard/api/sessions"}:           "session store",
+	// Landed alongside APPR-06: CP-local stores, not part of a policy version.
+	{http.MethodPost, "/dashboard/api/agents"}:                      "agent registry store, a serve-time overlay",
+	{http.MethodPut, "/dashboard/api/agents/{id}"}:                  "agent registry store, a serve-time overlay",
+	{http.MethodPost, "/dashboard/api/agents/{id}/disable"}:         "agent registry store, a serve-time overlay",
+	{http.MethodPost, "/dashboard/api/agents/{id}/enable"}:          "agent registry store, a serve-time overlay",
+	{http.MethodPost, "/dashboard/api/api-keys"}:                    "API key store",
+	{http.MethodDelete, "/dashboard/api/api-keys"}:                  "API key store",
+	{http.MethodDelete, "/dashboard/api/api-keys/{id}"}:             "API key store",
+	{http.MethodPost, "/dashboard/api/token-sessions/revoke"}:       "token session store",
+	{http.MethodPost, "/dashboard/api/token-sessions/{sid}/revoke"}: "token session store",
+	{http.MethodPost, "/dashboard/api/workers/{id}/revoke"}:         "worker certificate store",
 }
 
 // TestVersionedWritesAreGated walks the authz table: every audited mutating
@@ -504,7 +515,8 @@ func TestVersionedStoreCreateCallers(t *testing.T) {
 	// `.Create(ctx, ` call fails: classify it here after routing a version write
 	// through Server.writeVersioned.
 	wantCreate := map[string]bool{"policy_publish.go": true, "policycli.go": true, "policystore.go": true}
-	otherCreate := map[string]bool{"auth.go": true, "breakglass.go": true, "workertokens_admin.go": true, "workertokens_cli.go": true}
+	otherCreate := map[string]bool{"auth.go": true, "breakglass.go": true, "workertokens_admin.go": true, "workertokens_cli.go": true,
+		"agents.go": true, "agentcli.go": true, "enrollment_cli.go": true}
 	wantPublish := map[string]bool{"policy_publish.go": true, "approvals_apply.go": true}
 	files, err := filepath.Glob("*.go")
 	if err != nil {
