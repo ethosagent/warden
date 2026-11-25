@@ -131,8 +131,8 @@ func (s *Server) logBypass(actorSub string, d approvals.Draft, repaired bool) {
 func (s *Server) publishBypassFinding(actorSub string, d approvals.Draft) {
 	s.publishFinding(integration.Finding{
 		RuleID: findingApprovalBypassed, Category: "security", Severity: integration.SevCritical,
-		Summary: "a policy change was applied by a break-glass emergency apply without a second approver",
-		Evidence: integration.Evidence("draft=" + d.ID + " revision=" + strconv.Itoa(d.Revision) +
+		Summary: "a change was applied by a break-glass emergency apply without a second approver",
+		Evidence: integration.Evidence("draft=" + d.ID + " target=" + string(d.Target) + " revision=" + strconv.Itoa(d.Revision) +
 			" applied_version=" + strconv.FormatInt(d.AppliedVersion, 10) + " actor=" + actorSub),
 		DedupKey: findingApprovalBypassed + ":" + d.ID,
 		Ts:       s.cfg.Clock.Now(),
@@ -160,7 +160,7 @@ func (s *Server) alertUnreviewedBypasses(ctx context.Context) {
 	store := s.approvals.Store()
 	cursor := ""
 	for {
-		ds, next, err := store.List(ctx, approvals.Filter{Target: approvals.TargetPolicy, State: approvals.StateAppliedUnreviewed}, cursor, 100)
+		ds, next, err := store.List(ctx, approvals.Filter{State: approvals.StateAppliedUnreviewed}, cursor, 100)
 		if err != nil {
 			s.cfg.Logger.Warn("control plane: cannot list unreviewed emergency applies to alert on", "error", err)
 			return

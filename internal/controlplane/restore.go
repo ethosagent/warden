@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -80,8 +81,12 @@ type RestoreParams struct {
 	// Force allows replacing existing target files; NewAuditKey allows a
 	// target audit key whose fingerprint differs from the manifest's.
 	Force, NewAuditKey bool
-	Clock              clock.Clock
-	Ops                RestoreOps
+	// RevokeAPIKeys revokes every API key of the restored database (through the
+	// key Store, as cli:<os user>) before it is put in place, and records the
+	// count in the cp.restore audit row.
+	RevokeAPIKeys bool
+	Clock         clock.Clock
+	Ops           RestoreOps
 }
 
 // RestoreResult is what a completed restore did.
@@ -91,6 +96,11 @@ type RestoreResult struct {
 	Files         []string  // restored file names, in manifest order
 	PreRestoreDir string    // where replaced files went; "" when nothing was replaced
 	NewAuditKey   bool
+	// APIKeysRevoked is how many keys RevokeAPIKeys revoked (keys already
+	// revoked in the set are not counted); 0 without the flag.
+	APIKeysRevoked int
+	// RevokeAPIKeys echoes the request, so a summary can say 0 revoked.
+	RevokeAPIKeys bool
 	// KeyChecked is false when the audit key fingerprint was not compared: the
 	// manifest records none (an offline backup never opens the audit store) or
 	// NewAuditKey was set.
@@ -216,11 +226,14 @@ func RunRestore(ctx context.Context, p RestoreParams) (RestoreResult, error) {
 			}
 		}
 	}
+	apiKeysRevoked := 0
 	for _, t := range targets {
 		if t.name == restoreCPDB {
-			if err := clearConsoleSessions(ctx, t.stage); err != nil {
+			n, err := prepareRestoredState(ctx, t.stage, p.RevokeAPIKeys, p.Clock)
+			if err != nil {
 				return RestoreResult{}, err
 			}
+			apiKeysRevoked = n
 		}
 	}
 
@@ -229,7 +242,7 @@ func RunRestore(ctx context.Context, p RestoreParams) (RestoreResult, error) {
 		return RestoreResult{}, err
 	}
 
-	res := RestoreResult{CreatedAt: m.CreatedAt, WardenVersion: m.WardenVersion, PreRestoreDir: pre, NewAuditKey: p.NewAuditKey, KeyChecked: keyChecked}
+	res := RestoreResult{CreatedAt: m.CreatedAt, WardenVersion: m.WardenVersion, PreRestoreDir: pre, NewAuditKey: p.NewAuditKey, KeyChecked: keyChecked, APIKeysRevoked: apiKeysRevoked, RevokeAPIKeys: p.RevokeAPIKeys}
 	for _, t := range targets {
 		res.Files = append(res.Files, t.name)
 	}
@@ -246,7 +259,7 @@ func RunRestore(ctx context.Context, p RestoreParams) (RestoreResult, error) {
 	if !slices.Contains(res.Files, restoreCPDB) {
 		return res, nil
 	}
-	audited, err := recordRestore(ctx, p, keyFile, manifestSum, m)
+	audited, err := recordRestore(ctx, p, keyFile, manifestSum, m, apiKeysRevoked)
 	if err != nil {
 		return res, fmt.Errorf("%w: %v", ErrRestoreUnaudited, err)
 	}
@@ -635,15 +648,20 @@ func chainDeclaresKey(ctx context.Context, stateDir, keyID string) bool {
 	return false
 }
 
-// clearConsoleSessions empties sessions and oidc_pending in the staged
+// RestoreDetailAPIKeysRevoked is the cp.restore audit detail holding how many
+// API keys --revoke-api-keys revoked.
+const RestoreDetailAPIKeysRevoked = "api_keys_revoked"
+
+// prepareRestoredState empties sessions and oidc_pending in the staged
 // warden-cp.db (whichever exist), so cookies issued before the backup stop
-// working. It opens the file with the full migration list, which also brings
-// an older set's schema up to date, then checkpoints so the file is
-// self-contained before it is renamed into place.
-func clearConsoleSessions(ctx context.Context, staged string) error {
+// working, and with revokeKeys revokes every API key through the key Store
+// (returning how many it revoked). It opens the file with the full migration
+// list, which also brings an older set's schema up to date, then checkpoints
+// so the file is self-contained before it is renamed into place.
+func prepareRestoredState(ctx context.Context, staged string, revokeKeys bool, clk clock.Clock) (int, error) {
 	db, err := cpstate.Open(ctx, staged, StateMigrations())
 	if err != nil {
-		return fmt.Errorf("prepare restored warden-cp.db: %w", err)
+		return 0, fmt.Errorf("prepare restored warden-cp.db: %w", err)
 	}
 	defer func() { _ = db.Close() }()
 	for _, tbl := range []string{"sessions", "oidc_pending"} {
@@ -651,13 +669,19 @@ func clearConsoleSessions(ctx context.Context, staged string) error {
 			continue
 		}
 		if _, err := db.SQL().ExecContext(ctx, "DELETE FROM "+tbl); err != nil {
-			return fmt.Errorf("clear %s in the restored warden-cp.db: %w", tbl, err)
+			return 0, fmt.Errorf("clear %s in the restored warden-cp.db: %w", tbl, err)
+		}
+	}
+	revoked := 0
+	if revokeKeys {
+		if revoked, err = revokeAPIKeysInState(ctx, db, adminaudit.CLIActor(), clk); err != nil {
+			return 0, fmt.Errorf("revoke API keys in the restored warden-cp.db: %w", err)
 		}
 	}
 	if _, err := db.SQL().ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
-		return fmt.Errorf("checkpoint the restored warden-cp.db: %w", err)
+		return 0, fmt.Errorf("checkpoint the restored warden-cp.db: %w", err)
 	}
-	return nil
+	return revoked, nil
 }
 
 type movedFile struct{ from, to string }
@@ -753,7 +777,7 @@ func uniqueDirs(targets []*restoreTarget, extra string) []string {
 // recordRestore appends the cp.restore row through the admin audit store. It
 // reports false (and appends nothing) when the restored state has no admin
 // audit chain.
-func recordRestore(ctx context.Context, p RestoreParams, keyFile, manifestSum string, m BackupManifest) (bool, error) {
+func recordRestore(ctx context.Context, p RestoreParams, keyFile, manifestSum string, m BackupManifest, apiKeysRevoked int) (bool, error) {
 	rec, closeFn, err := adminaudit.OpenForCLI(ctx, p.StateDir, keyFile, StateMigrations())
 	if err != nil {
 		return false, err
@@ -762,14 +786,18 @@ func recordRestore(ctx context.Context, p RestoreParams, keyFile, manifestSum st
 		return false, nil
 	}
 	defer func() { _ = closeFn() }()
+	details := map[string]string{
+		"new_audit_key":  fmt.Sprintf("%t", p.NewAuditKey),
+		"set_created_at": m.CreatedAt.UTC().Format(time.RFC3339),
+	}
+	if p.RevokeAPIKeys {
+		details[RestoreDetailAPIKeysRevoked] = strconv.Itoa(apiKeysRevoked)
+	}
 	_, err = rec.Record(ctx, adminaudit.Input{
 		Action:  RestoreAuditAction,
 		Target:  manifestSum,
 		Outcome: adminaudit.OutcomeOK,
-		Details: map[string]string{
-			"new_audit_key":  fmt.Sprintf("%t", p.NewAuditKey),
-			"set_created_at": m.CreatedAt.UTC().Format(time.RFC3339),
-		},
+		Details: details,
 	})
 	return err == nil, err
 }

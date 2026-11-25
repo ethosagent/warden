@@ -1160,13 +1160,21 @@ save time and the draft's required role is checked again at approve time.
 
 | Gated | Not gated |
 |---|---|
-| `POST`/`PUT /dashboard/api/policy`, `POST`/`PUT /dashboard/api/settings`, `POST`/`PUT /dashboard/api/llmproviders`, `POST /dashboard/api/policy/versions/{v}/rollback` (the draft's doc is version `v`, source `rollback`), and `warden policy import` | integrations, detection, the secret store (`/dashboard/api/secretstore`, `/central/secrets`; they write secret values, not a version), the block list, worker tokens, signing keys, sessions, backups, and the offline commands below |
+| `POST`/`PUT /dashboard/api/policy`, `POST`/`PUT /dashboard/api/settings`, `POST`/`PUT /dashboard/api/llmproviders`, `POST /dashboard/api/policy/versions/{v}/rollback` (the draft's doc is version `v`, source `rollback`), and `warden policy import`. Also, as drafts of their own target (they create no policy version): `DELETE /dashboard/api/blocked-users/{id}` and `warden control-plane block remove` (target `blocked_users`); registering an agent, adding an allowed group or scope, adding or replacing a key, and re-enabling an agent through `POST`/`PUT /dashboard/api/agents` and `POST /dashboard/api/agents/{id}/enable` (target `agents`) | integrations, detection, the secret store (`/dashboard/api/secretstore`, `/central/secrets`; they write secret values, not a version), adding a block (the incident kill switch), disabling an agent and agent edits that only narrow (a removed group, a display name), worker tokens, signing keys, sessions, backups, the offline `agent` commands, and the offline commands below |
+
+A `blocked_users` or `agents` draft publishes no policy version, so its approve
+and emergency-apply results carry no `version` or `applied_version`; an agent's
+new revision is on the agent (`GET /dashboard/api/agents/{id}`). The block list
+is admin-only, so a non-admin (a viewer, or a `policy:read` key whose owner is not
+an admin) reading such a draft sees `{id, has_sub, has_email}`, never who is blocked.
 
 Not gated, stated plainly for production use:
 
-- The offline `warden control-plane block remove` removes a block entry with one
-  admin's host access and no second person. Holding block-list removals for approval
-  is W-P2-APPR-08; until it lands, treat unblocking as a single-admin action.
+- With approvals enabled, `warden control-plane block remove` holds the removal as
+  a pending `blocked_users` draft (author `cli:<os user>`), prints the draft id and
+  leaves the user blocked until a second admin approves it in the console. The
+  offline `warden control-plane agent register|update|enable` commands are not yet
+  held: with host access they still widen the agent registry without a second person.
 - The offline `warden control-plane restore` can move the policy head back without
   approval.
 - The first-start import of the served YAML as version 1 is not gated: it is proven
@@ -2238,7 +2246,10 @@ warden control-plane block list --state-dir D [--json]
   duplicate sub or email is refused, the reason is at most 512 bytes with no
   control characters, and the count and size limits apply. A validation error
   exits 1 with the API's message.
-- `remove` exits 2 for an id that is not on the list.
+- `remove` exits 2 for an id that is not on the list. With approvals enabled on
+  the state dir it exits 0, prints the id of a pending change draft and removes
+  nothing; the row it appends is a `blocked_users.remove` row targeting
+  `change_draft` (`draft:<id>@r1`, op `held`). `add` is always immediate.
 - `list` opens the database read-only.
 - `--admin-audit-key-file` (add and remove) defaults to `<state-dir>/cp-audit.key`.
 
