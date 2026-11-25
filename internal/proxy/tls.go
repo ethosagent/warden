@@ -94,9 +94,9 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 		var sess *session
 		if p.trackSession(ci) {
 			sess = p.sessions.newSession("tcp", domain, port, true, clientConn)
-			sess.bind(ci)
+			cut := sess.bind(ci)
 			defer sess.release()
-			if p.refusedAtCreate(sess, ci, domain, port, "tcp") {
+			if p.refusedAtCreate(sess, ci, domain, port, "tcp") || cut {
 				return
 			}
 		}
@@ -223,9 +223,9 @@ func (p *Proxy) terminateAndDispatch(clientConn net.Conn, firstBytes io.Reader, 
 	var sess *session
 	if p.trackSession(ci) {
 		sess = p.sessions.newSession(proto, domain, port, true, tlsConn)
-		sess.bind(ci)
+		cut := sess.bind(ci)
 		defer sess.release()
-		if p.refusedAtCreate(sess, ci, domain, port, proto) {
+		if p.refusedAtCreate(sess, ci, domain, port, proto) || cut {
 			return
 		}
 	}
@@ -411,7 +411,16 @@ func cacheSize(m *sync.Map) int {
 	return n
 }
 
-// clock returns the proxy's time source, defaulting to time.Now when the
+// validityClock is the time source for identity and session validity decisions:
+// the injected Config.IdentityClock when set, else clock().
+func (p *Proxy) validityClock() time.Time {
+	if p.idNow != nil {
+		return p.idNow()
+	}
+	return p.clock()
+}
+
+// clock returns the leaf-cert time source, defaulting to time.Now when the
 // injectable now field is unset (production). Tests set p.now to a controllable
 // clock to exercise leaf expiry deterministically.
 func (p *Proxy) clock() time.Time {

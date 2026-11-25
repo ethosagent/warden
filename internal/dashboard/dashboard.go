@@ -70,6 +70,8 @@ type Server struct {
 	// changeDrafts serves the change draft routes; nil = they answer 404
 	// (W-P2-APPR-04).
 	changeDrafts ChangeDrafts
+	// approvalsReplayTimeout is console.approvals.replayTimeout, for the setup response.
+	approvalsReplayTimeout time.Duration
 	// liveSettings returns the behavioral settings currently in force (nil = none);
 	// settingsWriter applies an edited settings document. Both are control-plane-
 	// only: a worker leaves settingsWriter nil so its settings panel is read-only.

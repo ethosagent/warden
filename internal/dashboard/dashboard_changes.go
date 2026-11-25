@@ -252,6 +252,11 @@ type ChangeDrafts interface {
 // with console.approvals.enabled; without it the routes answer 404.
 func (s *Server) SetChangeDrafts(c ChangeDrafts) { s.changeDrafts = c }
 
+// SetApprovalsReplayTimeout tells the console how long the server lets a replay
+// run (console.approvals.replayTimeout), so the Changes tab polls a pending
+// replay no longer than that. Zero (the default) leaves it to the page.
+func (s *Server) SetApprovalsReplayTimeout(d time.Duration) { s.approvalsReplayTimeout = d }
+
 type changeListResponse struct {
 	Drafts     []ChangeDraftView `json:"drafts"`
 	NextCursor string            `json:"next_cursor"`

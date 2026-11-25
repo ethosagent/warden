@@ -27,6 +27,7 @@ import (
 
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/clock"
+	"github.com/ethosagent/warden/internal/clock/clocktest"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/proxy"
 	"github.com/ethosagent/warden/test/fakes"
@@ -699,4 +700,48 @@ func requireHooksWarn(t *testing.T, logged, want string) {
 	if !strings.Contains(lines[0], "level=WARN") {
 		t.Fatalf("test-hooks line is not a WARN: %s", lines[0])
 	}
+}
+
+// TestRun_OverridesClockReachesProxy pins that Overrides.Clock is handed to the
+// proxy as its identity-validity clock (proxy.Config.IdentityClock), and that
+// without the override the proxy keeps the production default (nil = time.Now).
+func TestRun_OverridesClockReachesProxy(t *testing.T) {
+	const cfg = "policy:\n  allowlist:\n    - domain: api.example.test\nlogging:\n  level: error\n  format: text\n"
+	capture := func(t *testing.T, o *Overrides) proxy.Config {
+		t.Helper()
+		var got proxy.Config
+		orig := newProxy
+		newProxy = func(c proxy.Config) (*proxy.Proxy, error) {
+			got = c
+			return orig(c)
+		}
+		t.Cleanup(func() { newProxy = orig })
+		p := runParams(t, writeConfig(t, cfg))
+		p.Overrides = o
+		if err := runUntilCtxDone(t, p); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		return got
+	}
+
+	t.Run("override", func(t *testing.T) {
+		start := time.Date(2031, 1, 2, 3, 4, 5, 0, time.UTC)
+		fake := clocktest.NewFake(start)
+		got := capture(t, &Overrides{Clock: fake})
+		if got.IdentityClock == nil {
+			t.Fatal("proxy.Config.IdentityClock is nil: Overrides.Clock did not reach the proxy")
+		}
+		if !got.IdentityClock().Equal(start) {
+			t.Fatalf("IdentityClock() = %v, want the fake clock's %v", got.IdentityClock(), start)
+		}
+		fake.Advance(time.Hour)
+		if want := start.Add(time.Hour); !got.IdentityClock().Equal(want) {
+			t.Fatalf("after Advance IdentityClock() = %v, want %v", got.IdentityClock(), want)
+		}
+	})
+	t.Run("production default", func(t *testing.T) {
+		if got := capture(t, nil); got.IdentityClock != nil {
+			t.Fatal("IdentityClock is set without Overrides.Clock")
+		}
+	})
 }

@@ -23,7 +23,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"sync/atomic"
+	"sync"
 	"time"
 
 	"github.com/ethosagent/warden/internal/workerca"
@@ -99,23 +99,45 @@ func (c *Credential) describe() string {
 }
 
 // Source is the worker's single source of its current client certificate. The
-// renewer swaps the pointer after each renewal; every reader sees the new
-// certificate on its next handshake.
-type Source struct{ p atomic.Pointer[Credential] }
+// renewer swaps the certificate after each renewal; every reader sees the new
+// one on its next handshake.
+type Source struct {
+	mu sync.RWMutex
+	c  *Credential
+}
 
 // NewSource returns a Source holding c (nil: none yet, e.g. a worker that has
 // not enrolled).
-func NewSource(c *Credential) *Source {
-	s := &Source{}
-	s.p.Store(c)
-	return s
-}
+func NewSource(c *Credential) *Source { return &Source{c: c} }
 
 // Current returns the certificate in use, or nil before the first enrollment.
-func (s *Source) Current() *Credential { return s.p.Load() }
+// It waits for an Install in progress, so a caller never sees a new certificate
+// before the connections that hold the old one are dropped.
+func (s *Source) Current() *Credential {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.c
+}
 
 // Set replaces the certificate in use.
-func (s *Source) Set(c *Credential) { s.p.Store(c) }
+func (s *Source) Set(c *Credential) {
+	s.mu.Lock()
+	s.c = c
+	s.mu.Unlock()
+}
+
+// Install replaces the certificate in use and runs drop (the connection-pool
+// rotation; may be nil) before any Current call can return the new one. From a
+// caller's view the swap and the rotation are one step: once Current reports the
+// new certificate, the next request presents it, not a pooled connection's old one.
+func (s *Source) Install(c *Credential, drop func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.c = c
+	if drop != nil {
+		drop()
+	}
+}
 
 // certDir is <stateDir>/cert.
 func certDir(stateDir string) string { return filepath.Join(stateDir, certDirName) }

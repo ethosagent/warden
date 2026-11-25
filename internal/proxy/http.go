@@ -36,6 +36,9 @@ const maxBodySwapSize = 10 << 20 // 10 MB
 // replacing the old hand-rolled close triplets that each terminal branch
 // repeated. See cleanup for the exact per-path close semantics.
 type requestScope struct {
+	// idRebound is set when a live CONNECT identity failed its per-request
+	// re-check (binding, signing key or issuer); challenge mode ends the request.
+	idRebound bool
 	// Per-connection context (constant across the keep-alive session, copied in
 	// per request so stages read one value). clientConn is the client-facing
 	// conn — the terminated TLS conn on both CONNECT and transparent :443, or
@@ -316,7 +319,7 @@ func (p *Proxy) handleHTTP(clientConn net.Conn, br *bufio.Reader, domain string,
 	var upstream net.Conn
 	var upstreamBR *bufio.Reader
 	sess := p.sessions.newSession(schemeProto(scheme), domain, port, false, clientConn)
-	sess.bind(ci)
+	sess.bindForRequests(ci)
 	defer sess.release()
 	defer func() {
 		if upstream != nil {

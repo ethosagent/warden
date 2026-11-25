@@ -34,6 +34,15 @@ func (s *serialEvaluator) Replace(p config.Policy) {
 	s.PolicyEvaluator.Replace(p)
 }
 
+// locked runs fn under the apply lock. Anything that must not interleave with a
+// policy apply (installing the Warden token snapshot that goes with it) runs
+// here.
+func (s *serialEvaluator) locked(fn func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fn()
+}
+
 // denyIfExpired swaps in deny-all when the applied bundle is expired now.
 func (s *serialEvaluator) denyIfExpired(cp ControlPlaneClient) bool {
 	s.mu.Lock()

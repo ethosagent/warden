@@ -122,6 +122,87 @@ the new key while the control plane rotates its bundle key. Errors name
 include key material. `controlPlane.localOnly: true` ignores all of these keys
 and logs one INFO line.
 
+### Last-known-good bundle cache (opt-in)
+
+By default a CP-managed worker that boots while the control plane is down stays
+fail-closed (deny all) until its first successful pull. A pinned worker can
+instead keep its last verified bundle on disk and enforce it at boot.
+
+The cache is off unless `controlPlane.stateDir` is set **and** bundle keys are
+pinned. `stateDir` is the worker's one local state directory (an absolute path,
+created `0700`); each use gets a subdirectory: `cert/` for the worker
+certificate and `bundle/` for this cache. There is no separate cache directory
+key.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `controlPlane.stateDir` | none | Absolute path of the worker state directory. With pinned keys it turns the cache on. |
+| `controlPlane.bundleCacheMaxAge` | `24h` | A cached bundle is used only if it was issued at most this long ago. `0` disables the cache (nothing is written or read). |
+
+What is written. After every verified bundle, including a re-signed one with the
+same content (which moves `issuedAt`), the worker writes
+`<stateDir>/bundle/bundle.json`: the verified payload and signatures,
+re-marshalled in canonical form, with no `credentials` sidecar and no other
+envelope member. The write is atomic (temp file in the
+same directory, fsync, rename, directory fsync); the file is `0600` and the
+directory `0700`. A failed write logs one ERROR (until a write succeeds again)
+and never changes the policy being enforced. The file holds policy and
+signatures only: never `secretAccessKey` and never any other secret, and its
+content is never logged.
+
+When it is read. Only when the boot pull fails (control plane down, or serving a
+bundle the worker rejects). The cached envelope is verified again exactly like a
+live one: against the current pins, the issuer, `issuedAt` and `expiresAt` (with
+the skew), and additionally `issuedAt` must be within `bundleCacheMaxAge`. The
+only relaxation is that the missing credentials sidecar is allowed. A cache that
+is missing, corrupt, tampered with, signed by a key that is no longer pinned,
+expired or too old is refused: the worker logs one WARN, `starting FAIL-CLOSED`,
+with the reason in `bundleCache`, and denies all traffic as it does without a
+cache. A cache that passes seeds the applied bundle state, so a control plane
+that later serves an older seq is rejected as a rollback, and an equal seq with
+different content as equivocation. The worker logs one WARN that it is enforcing
+the cached bundle, and the long-poll then takes over as usual.
+
+Credentials. The sidecar (the AWS access key pair for the `aws` secret backend)
+is deliberately not cached. A worker running from the cache therefore has the
+`aws` selector (backend, region, name prefix) from the signed policy but no
+explicit key pair, so the secret backend resolves credentials from the worker's
+own environment (`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`) or the instance
+IAM role. If neither exists the worker still starts and enforces the cached
+allow/deny policy: it logs one ERROR, and every secret fetch fails (so requests
+that need a secret are not served) until a restart with the control plane
+reachable, when the credentials arrive again.
+
+Rollback floor. A control plane that is up at boot is not trusted blindly either:
+when the cache verifies (pins, issuer, not expired), its seq is the floor of the
+boot pull. A bundle with a lower seq is rejected as a rollback, and the same seq
+with different content as equivocation; the pull then fails and the worker
+enforces the cached bundle. The control plane serving the cached bundle itself is
+applied normally (credentials included). This goes beyond the "cache is read only
+when the boot pull fails" wording of the original ticket and is bounded: a control
+plane restored from an old backup that serves a lower seq is refused only until
+the cached bundle expires (about 24h by default; the bundle lifetime, not
+`bundleCacheMaxAge`), after which the cache stops being a floor and the worker
+accepts the control plane's bundles again. Use `--bundle-seq-floor` on the control
+plane to recover sooner.
+
+File safety. `stateDir` and `bundle/` must be real directories (a symlink is
+refused), owned by the worker user and not writable by group or others; a worse
+directory disables the cache with one ERROR. The cache file is opened without
+following symlinks and without blocking, must be a regular file, and must not be
+accessible by group or others (mode `0600`), otherwise it is refused and the
+worker boots fail-closed. The cache can only be loaded at boot, before the first
+long-poll. The parent of `stateDir` is not checked: put `stateDir` under a
+root-owned path such as `/var/lib/warden`. A `stateDir` that was pre-created
+under a group-writable umask (for example 002) is refused, which disables the
+cache with one ERROR.
+
+Operations. The state directory must not be readable or writable by the agent it
+guards: a writable cache cannot make the worker enforce a forged policy
+(signatures are checked), but it can be deleted or replaced by an older valid
+bundle within `bundleCacheMaxAge`, which is why the max age exists. Keep it short
+if a restart must not bring back an older block list.
+
 ### Bundle state in metrics and the fleet view
 
 A pinned worker reports its bundle state three ways.
@@ -2234,9 +2315,11 @@ commented block in `configs/config.example.yaml` for every key and default.
   published key, answer 503 `signer_unavailable` with `Retry-After` for about 2 minutes.
   Consumers of `/.well-known/jwks.json` must refetch on an unknown kid (rate-limited); Warden
   workers never use it (they take token keys from signed bundles). The key must also be in the
-  JWKS the control plane serves. Signed bundles have landed, but the second check is still
-  pending (a `TODO` in the code, owned by the worker token verification work, W-P2-WBND-01): the
-  kid must also be in the last-served bundle token JWKS before the service mints with it.
+  JWKS the control plane serves. With signed bundles on (`--bundles=offer|require`) it must also
+  be in the token JWKS of the bundle served now (the last one signed, which stays served while
+  the publisher is degraded), because a pinned worker holds token keys only from there; until
+  that bundle is signed the service answers `signer_unavailable`. This covers the first key and
+  an emergency rotation, and a degraded bundle publisher. With bundles off the check is skipped.
 - **Agent registry cache.** The control plane has one registry store; it serves reads from a
   snapshot that its own writes invalidate at once and that a 2 s watch refreshes for other
   processes, so an agent disabled with the offline CLI stops authenticating within about 2 s.
@@ -2397,7 +2480,16 @@ agents:
   `agent:<port>`), then `identity.defaultMode`, then off. `require` is a Phase 2
   mode: config validation rejects it, and a worker that is served it (a newer
   control plane) keeps its previous identity config and logs one warning.
-- `issuer` and `audience` are required once any mode is `attribute` or `challenge`. An `http`
+- `acceptDexTokens` (optional boolean) says whether the worker accepts a user token straight
+  from the IdP next to the Warden tokens the control plane mints: unset is true when `issuer` is
+  set and false otherwise; `false` refuses each IdP token as `unbound_token`, and then `attribute`
+  needs no `issuer` or `audience` (challenge still does). `true` needs an `issuer`. See
+  [identity-contract.md](identity-contract.md#warden-tokens-phase-2).
+- `acceptDexTokens: false` with `challenge` mode is valid but logs a warning: the device
+  sign-in hands out IdP tokens that the worker then refuses (`unbound_token`), so clients must
+  exchange them for Warden tokens at the token endpoint.
+- `issuer` and `audience` are required once any mode is `attribute` or `challenge`, unless
+  `acceptDexTokens` is `false` in `attribute` mode. An `http`
   issuer is rejected unless `internalIssuerURL` is set; use `internalIssuerURL`
   when workers reach the issuer on a container network (`http://dex:5556`) while
   tokens carry the public issuer.
@@ -2408,7 +2500,7 @@ agents:
   serves, and tokens it cannot verify are recorded as unverified and allowed.
 - A settings change hot-reloads with no restart. The verifier is rebuilt only when
   `issuer`, `internalIssuerURL`, `audience`, `jwksURL`, `allowedAZP`, `groupsClaim`,
-  `clockSkewSeconds` or `maxTokenTTLSeconds` change; a mode-only change swaps the
+  `clockSkewSeconds`, `maxTokenTTLSeconds` or `acceptDexTokens` change; a mode-only change swaps the
   mode and keeps the verifier. A failed rebuild keeps the previous config and logs
   one warning (no token data).
 
@@ -2530,6 +2622,18 @@ diagnose mass `expired` or not-yet-valid failures.
 `byStatus` (counts by `identity_status`) and `topReasons` (the five most frequent
 `identity_reason` values in the range). It is omitted when no event in the range
 carries identity fields.
+
+Agent binding (W-P2-WBND-02): a worker serves exactly one agent, and every
+Warden token it verifies is checked on every request against the registered
+agents of the bundle currently applied: the token's `act.sub` must be that agent,
+the agent must be active, and `cnf.jkt` must be one of its registered key
+thumbprints (`agent_unregistered`, `agent_disabled`, `agent_mismatch`,
+`cnf_mismatch`, in that order). This is agent match plus key liveness within one
+long-poll cycle, **not** proof of possession: a token is a bearer credential. A
+port-derived worker id such as `agent:8080` never matches a registry id, so bind
+the worker with `--agent-id`. Events and decision lines of a valid Warden
+identity carry the agent (`user_act` on events, `user.act` on the decision line)
+and `identity_token_type`; no token or `cnf` value is ever logged.
 
 Recommended alerts:
 

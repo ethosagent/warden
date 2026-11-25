@@ -114,6 +114,53 @@ nothing changes.
 | `3` | The issuer (or, in agent mode, the control plane) is unreachable and no valid token remains |
 | `4` | The control plane refused the agent's token exchange (`invalid_client`, `unauthorized_client`, `invalid_grant`, ...) |
 
+### Warden tokens (Phase 2)
+
+A worker that pins the control plane's bundle keys (`controlPlane.bundleKeys`)
+also verifies the **Warden tokens** the control plane's token service mints
+(`typ` `wt+jwt`, signed with EdDSA or ES256). It takes everything it checks
+them against from the last signed bundle it verified, and from nothing else: the
+key set (bundle section `tokenJWKS`), the issuer (the signed `tokenIssuer`) and
+the registered agents. It never fetches keys, and it never uses the control
+plane id as the issuer.
+
+| Rule | Reason when it fails |
+|---|---|
+| `typ` is `wt+jwt`; the header and payload parse | `malformed` |
+| `alg` is EdDSA or ES256 and fits the key type | `alg_not_allowed` |
+| `kid` is in the bundle key set | `unknown_kid` |
+| The signature verifies | `bad_signature` |
+| `iss` equals the bundle `tokenIssuer` byte for byte | `wrong_iss` |
+| `aud` contains `warden-worker` (not the IdP audience) | `wrong_aud` |
+| `sub`, `act.sub`, `sid`, `jti` and `cnf.jkt` are present | `missing_claim` |
+| `exp - iat` at most 15 minutes | `ttl_too_long` |
+| `exp` and `nbf` hold within `identity.clockSkewSeconds` | `expired`, or `malformed` for a future `nbf` |
+
+Until the worker has applied a verified bundle, with no pinned keys (the legacy
+wire), with a bundle that carries no `tokenIssuer` (the control plane mints no
+Warden tokens) or no keys, a Warden token is `unverified` with reason
+`jwks_unavailable`. A `tokenIssuer` that equals `identity.issuer` is refused: the
+worker logs one error and verifies no Warden token until they differ. A token key
+removed from the bundle stops verifying for every new request and CONNECT. A CONNECT
+tunnel already established keeps the identity it verified until the token's `exp`
+plus skew (at most about 15 minutes) until per-request binding checks land.
+
+A valid Warden token attributes the user (`sub`, `email`, `groups`). The worker
+verifies the token here but does not yet check that `act.sub` is its own agent
+or that `cnf.jkt` is one of that agent's current keys (agent binding comes
+next), so until then a valid Warden token is attribution, not proof of which
+agent sent it. The `token_type` label of the verify metric is `warden` for these tokens.
+
+**IdP tokens next to Warden tokens.** The worker routes by the token's `iss`:
+the bundle's `tokenIssuer` goes to the Warden verifier, `identity.issuer` to the
+IdP verifier, anything else is `invalid` with reason `wrong_iss`.
+`identity.acceptDexTokens` decides whether IdP tokens are accepted at all: unset
+means true when `identity.issuer` is set and false otherwise; `false` turns each
+IdP token away as `invalid` with reason `unbound_token` (and then `identity.issuer`
+and `identity.audience` are not needed for `attribute`). An accepted IdP token
+is recorded with `token_type` `idp` and logs at most one deprecation warning an
+hour.
+
 ## Transport
 
 The worker reads the token from one of two headers. Both are proxy-only: the
@@ -241,6 +288,12 @@ strings never become a reason.
 | `ttl_too_long` | `exp - iat` is over the maximum token lifetime |
 | `jwks_unavailable` | The issuer's key set could not be fetched (status `unverified`) |
 | `wrong_nonce` | Console login only: the nonce does not match. Never seen on proxied traffic |
+| `missing_claim` | A Warden token without `sub`, `act.sub`, `sid`, `jti` or `cnf.jkt` |
+| `unbound_token` | An IdP token on a worker that does not accept them (`identity.acceptDexTokens` false), and in `require` mode every IdP token |
+| `agent_unregistered` | Warden token, but the worker's bound agent is not in the bundle's registered agents (a port-derived id such as `agent:8080` never matches) |
+| `agent_disabled` | Warden token, but the bound agent is disabled in the current bundle |
+| `agent_mismatch` | Warden token whose `act.sub` is not the worker's bound agent |
+| `cnf_mismatch` | Warden token whose `cnf.jkt` is not one of the bound agent's registered key thumbprints |
 
 ### Challenge mode: 407 with a sign-in URL
 
@@ -407,6 +460,43 @@ the same poll; any process that can read that `407` can also claim the login.
 The ID token is a bearer token, not bound to the agent: whoever holds it can use
 it until `exp` (at most 1 h). Phase 2's `require` mode closes this.
 
+## Agent binding of Warden tokens
+
+A worker serves one agent (the id from `--agent-id`, then `central.agentID`, then
+`worker.defaultAgentID`). After a Warden token's signature verifies, the worker
+checks it against the registered agents of the **current** signed bundle, in this
+order, and the first failure is the reason:
+
+1. the worker's agent is not registered: `agent_unregistered`. A port-derived id
+   such as `agent:8080` never matches a registry id;
+2. the agent is disabled: `agent_disabled`;
+3. `act.sub` is another agent: `agent_mismatch`;
+4. `cnf.jkt` is not one of the agent's registered key thumbprints: `cnf_mismatch`.
+
+A failure gives status `invalid` and no subject. In `attribute` mode the request
+continues as anonymous under policy, so identity-scoped allow entries deny with
+`identity_required`; the block list still matches the parsed `sub` and `email`,
+because a match can only deny. The check runs on every request, not once per
+connection, against the snapshot applied by the latest long-poll, so removing a
+key or disabling the agent ends the identity of an open CONNECT tunnel on its
+next request, within one long-poll cycle.
+
+The per-request re-check applies to terminated tunnels, on each HTTP/1 or h2
+request. It also requires the signing key to still be in the bundle's token key
+set (`unknown_kid`, for an emergency key removal) and the issuer to still match
+(`wrong_iss`). In `challenge` mode a request that fails the re-check is answered
+`403` `identity_required` with `Connection: close`, not served anonymously.
+
+**Limit.** A raw tunnel (a worker without a CA) and an upgraded WebSocket are
+bound at CONNECT or upgrade only and run until the token's `exp`. Closing those
+sessions when binding stops holding belongs to `require` mode session closing
+(W-P2-WBND-03 and W-P2-WBND-09).
+
+**What this proves.** The token was minted for this worker's agent, and the key
+it was minted for is still registered. It is **not** proof of possession: the
+token is a bearer credential and the worker cannot tell who presents it. Binding
+is one agent per worker; a second agent needs its own worker.
+
 ## Observability
 
 Event fields (on `/dashboard/api/traffic` and in the fleet view):
@@ -420,6 +510,8 @@ Event fields (on `/dashboard/api/traffic` and in the fleet view):
 | `user_groups` | Status `valid` |
 | `user_groups_truncated` | Status `valid` and groups were dropped for count or size |
 | `user_sid` | Status `valid` and the token has `sid` |
+| `user_act` | Status `valid` and the token is a Warden token: the agent it was minted for (`act.sub`) |
+| `identity_token_type` | Status `valid` and the verifier says which kind: `warden` or `idp` |
 
 The unverified `sub` or `email` of an expired or invalid token is never stored.
 

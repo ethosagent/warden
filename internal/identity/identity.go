@@ -46,6 +46,29 @@ const (
 	ReasonTTLTooLong      Reason = "ttl_too_long"
 	ReasonJWKSUnavailable Reason = "jwks_unavailable"
 	ReasonWrongNonce      Reason = "wrong_nonce"
+	// ReasonMissingClaim is a Warden token without a required claim (sub,
+	// act.sub, sid, jti or cnf.jkt).
+	ReasonMissingClaim Reason = "missing_claim"
+	// ReasonUnboundToken is a token that cannot satisfy agent binding: an IdP
+	// token on a worker that does not accept them (identity.acceptDexTokens
+	// false), and in require mode every IdP token.
+	ReasonUnboundToken Reason = "unbound_token"
+
+	// The four binding reasons (W-P2-WBND-02): a Warden token whose signature
+	// verified but that is not valid for this worker's agent. BindingCheck
+	// returns them in this precedence: unregistered, disabled, mismatch, then
+	// cnf_mismatch.
+
+	// ReasonAgentUnregistered: the worker's bound agent is not in the bundle's
+	// registered agents (also a port-derived id such as agent:8080).
+	ReasonAgentUnregistered Reason = "agent_unregistered"
+	// ReasonAgentDisabled: the bound agent's status in the bundle is not active.
+	ReasonAgentDisabled Reason = "agent_disabled"
+	// ReasonAgentMismatch: act.sub is not the worker's bound agent.
+	ReasonAgentMismatch Reason = "agent_mismatch"
+	// ReasonCnfMismatch: cnf.jkt is not one of the bound agent's registered key
+	// thumbprints (the key was rotated away or removed).
+	ReasonCnfMismatch Reason = "cnf_mismatch"
 )
 
 // Reasons returns the complete bounded Reason set.
@@ -54,6 +77,8 @@ func Reasons() []Reason {
 		ReasonBadSignature, ReasonWrongIss, ReasonWrongAud, ReasonWrongAZP,
 		ReasonUnknownKID, ReasonAlgNotAllowed, ReasonMalformed, ReasonTooLarge,
 		ReasonTTLTooLong, ReasonJWKSUnavailable, ReasonWrongNonce,
+		ReasonMissingClaim, ReasonUnboundToken,
+		ReasonAgentUnregistered, ReasonAgentDisabled, ReasonAgentMismatch, ReasonCnfMismatch,
 	}
 }
 
@@ -84,6 +109,23 @@ type Claims struct {
 	Nonce           string
 	IssuedAt        time.Time
 	Expiry          time.Time
+
+	// The fields below are set for a Warden token (TokenType warden) only.
+
+	// Act is act.sub: the agent the token was minted for.
+	Act string
+	// CnfJKT is cnf.jkt: the RFC 7638 thumbprint of the agent key the token is
+	// bound to. It is a key-liveness check input, not proof of possession.
+	CnfJKT string
+	// Scope is the space-delimited scope claim; parsed, not enforced.
+	Scope string
+	// KID is the key id the token was signed with.
+	KID string
+	// TokenType says which verifier path produced the claims: idp (a user
+	// token from the configured IdP), warden (a CP-issued token) or none (the
+	// token reached no verifier). Empty means a verifier that does not set it,
+	// which callers count as idp.
+	TokenType TokenType
 }
 
 // Subject is the policy-facing identity of a caller. Only a valid token
@@ -98,7 +140,8 @@ type Subject struct {
 }
 
 // SubjectFrom returns the policy subject for c, or nil unless s is
-// StatusValid. The proxy fills AgentID.
+// StatusValid. AgentID is act.sub for a Warden token and empty for an IdP
+// token; the proxy fills it from the worker's own agent.
 func SubjectFrom(c Claims, s Status) *Subject {
 	if s != StatusValid {
 		return nil
@@ -113,6 +156,7 @@ func SubjectFrom(c Claims, s Status) *Subject {
 		EmailVerified:   c.EmailVerified,
 		Groups:          groups,
 		GroupsTruncated: c.GroupsTruncated,
+		AgentID:         c.Act,
 	}
 }
 

@@ -352,6 +352,9 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		controlPlane *config.RemoteProvider
 		wcert        *workerCert    // nil unless controlPlane.enrollment or clientCert is set
 		remotePolicy *config.Policy // last-known-good remote allow/deny, applied to the evaluator below
+		// bootedFromCache is true when the policy came from the bundle cache
+		// (no credentials sidecar).
+		bootedFromCache bool
 	)
 	if managed {
 		token := os.Getenv(pol.ControlPlane.TokenEnv)
@@ -397,8 +400,44 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		// Shutdown hygiene: drop the pooled keep-alive conns when Run returns, so
 		// a hosted worker leaves no open connections to the control plane.
 		defer rp.CloseIdleConnections()
+		// Opt-in last-known-good cache (stateDir + pins + bundleCacheMaxAge):
+		// each verified bundle is persisted, and used below only when the first
+		// pull fails. A cache that cannot be set up is logged and skipped; the
+		// worker then behaves as without one.
+		cacheOn := pol.ControlPlane.BundleCacheEnabled()
+		if cacheOn {
+			if cErr := rp.SetBundleCache(pol.ControlPlane.StateDir, pol.ControlPlane.BundleCacheMaxAge); cErr != nil {
+				logger.Error("bundle cache disabled: cannot prepare the state directory", "error", cErr)
+				cacheOn = false
+			}
+		}
+		if cacheOn {
+			// A verifiable cache is the rollback floor of the boot pull too.
+			rp.SeedCacheFloor()
+		}
 		if pullErr := rp.Pull(); pullErr != nil {
-			logger.Warn("control plane unreachable at boot; starting FAIL-CLOSED (deny all) until policy arrives", "error", pullErr)
+			fromCache := false
+			cacheNote := "off"
+			if cacheOn {
+				// Boot only: nothing else touches the provider's snapshot yet.
+				switch _, lErr := rp.LoadCache(); {
+				case lErr == nil:
+					fromCache = true
+				case errors.Is(lErr, config.ErrNoBundleCache):
+					cacheNote = "empty"
+				default:
+					cacheNote = lErr.Error()
+				}
+			}
+			if fromCache {
+				bootedFromCache = true
+				logger.Warn("control plane unreachable or refused at boot; enforcing the cached last-known-good signed bundle (the credential sidecar is not cached: the aws secret backend uses worker env or IAM credentials)", "error", pullErr)
+				if remote, gErr := rp.GetPolicy(); gErr == nil {
+					remotePolicy = &remote
+				}
+			} else {
+				logger.Warn("control plane unreachable at boot; starting FAIL-CLOSED (deny all) until policy arrives", "error", pullErr, "bundleCache", cacheNote)
+			}
 		} else if remote, gErr := rp.GetPolicy(); gErr == nil {
 			remotePolicy = &remote
 			logger.Info("control plane policy applied", "endpoint", pol.ControlPlane.Endpoint)
@@ -446,7 +485,17 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// mutating the loaded policy.
 	effectivePol := pol
 	effectivePol.SecretStore = secretStoreCfg
+	secretsUnavailable := false
 	secretFetcher, secretStore, err := newSecretFetcher(effectivePol, mapping)
+	if err != nil && bootedFromCache && secretStoreCfg.ResolvedBackend() == config.SecretBackendAWS {
+		// The cached bundle has no credentials sidecar and the worker has no
+		// env or IAM credentials either. Crash-looping would not enforce the
+		// cached policy, so keep it: secrets stay unresolvable (every Fetch
+		// fails) until a restart with the control plane reachable.
+		logger.Error("running from the bundle cache without AWS credentials: secret resolution fails closed until a restart with the control plane reachable", "error", err)
+		secretFetcher, secretStore, err = noCredentialsFetcher{}, nil, nil
+		secretsUnavailable = true
+	}
 	if err != nil {
 		return err
 	}
@@ -454,8 +503,11 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// for echo/aws. Both feed the dashboard's read-only secretstore tab below.
 	secretStoreBackend := secretStoreCfg.ResolvedBackend()
 	liveCacheTTL := time.Duration(pol.CacheTTLSeconds) * time.Second
-	secretProvider, err := secrets.NewCache(secretFetcher, liveCacheTTL, placeholders)
-	if err != nil {
+	var secretProvider *secrets.Cache
+	if secretsUnavailable {
+		// No prefetch (it would fail startup): every secret lookup hard-fails.
+		secretProvider = secrets.NewUnhealthyCache(secretFetcher, liveCacheTTL, placeholders)
+	} else if secretProvider, err = secrets.NewCache(secretFetcher, liveCacheTTL, placeholders); err != nil {
 		return err
 	}
 	secretProvider.SetReservedKeyLog(secrets.NewReservedKeyLog(logger, nil))
@@ -553,12 +605,19 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// *gateway.Gateway would make the proxy's mcpGateway() return a non-nil
 	// interface wrapping a nil pointer and panic on the hot path. mcpGW keeps the
 	// concrete handle for lifecycle (Close) and the dashboard MCP provider.
+	// A managed worker builds it from the boot pull's mcp block when the control
+	// plane distributes one (what the first changed long-poll would install),
+	// else from the local block: SettingsApplier.ApplyBoot leaves MCP to this.
 	var mcpGW *gateway.Gateway
 	var bootGW proxy.MCPGateway
-	if pol.MCP.Enabled {
-		mcpGW = gateway.New(pol.MCP, mcpScanner, logger, gateway.WithStore(mcpStore), gateway.WithAgentID(agentID))
+	mcpCfg := pol.MCP
+	if managed && distributed != nil && distributed.MCP != nil {
+		mcpCfg = config.MCPConfigFromSettings(distributed.MCP)
+	}
+	if mcpCfg.Enabled {
+		mcpGW = gateway.New(mcpCfg, mcpScanner, logger, gateway.WithStore(mcpStore), gateway.WithAgentID(agentID))
 		bootGW = mcpGW
-		logger.Info("MCP egress gateway enabled", "mode", pol.MCP.Mode)
+		logger.Info("MCP egress gateway enabled", "mode", mcpCfg.Mode)
 	}
 	// Close the gateway before the store: deferred LIFO runs this first, so the
 	// gateway's final flush completes while the store handle is still open. A
@@ -841,6 +900,9 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		cfg.Dialer = p.Overrides.Dialer
 		cfg.UpstreamRootCAs = p.Overrides.UpstreamRootCAs
 		cfg.Inflight = p.Overrides.Inflight
+		if p.Overrides.Clock != nil {
+			cfg.IdentityClock = p.Overrides.Clock.Now
+		}
 		cfg.BeforeTerminal = p.Overrides.BeforeTerminal
 	}
 
@@ -856,8 +918,24 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// block and this agent's mode. Construction does no network I/O, so a worker
 	// whose issuer is down still starts. Mode stays off unless configured.
 	idWiring := newIdentityWiring(pxy, agentID, logger)
+	idWiring.now = clk.Now
 	idWiring.scoped = func() int { return countScoped(evaluator.CurrentPolicy()) }
 	idWiring.apply(pol.Identity, pol.Agents)
+	// The mode logged is the one the worker serves with: a managed worker logs
+	// it after ApplyBoot (below), since the boot pull may change it.
+	logBound := func() {
+		logger.Info("worker bound to agent", "agent", agentID, "source", agentIDSource(p.AgentID, pol.Central.AgentID),
+			"identityMode", pxy.IdentityModeName())
+	}
+	if controlPlane == nil {
+		logBound()
+	}
+	// Warden token keys from the bundle verified at boot (nothing to install
+	// without pins or a first verified bundle). Boot is single-goroutine: the
+	// apply loops start below.
+	if controlPlane != nil {
+		idWiring.applyBinding(controlPlane)
+	}
 
 	// Agent kill switch (W-P2-AREG-05). A managed worker reports the agent and
 	// identity mode it enforces on every heartbeat, tracks every session so a
@@ -1085,6 +1163,8 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 			mcpClosed:        &mcpClosed,
 			liveCompliance:   liveCompliance,
 			liveCacheTTL:     liveCacheTTL,
+			// Cache boot without AWS credentials: a TTL rebuild stays unhealthy.
+			secretsUnavailable: secretsUnavailable,
 		}
 		// The long-poll swaps the evaluator through gatedEvaluator, so the agent
 		// switch flips (and cuts sessions) BEFORE the new allow policy is live.
@@ -1092,6 +1172,21 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		// through one lock: the agent gate is single-goroutine, and a restore
 		// must never apply an older snapshot over a newer one.
 		applyEv := &serialEvaluator{PolicyEvaluator: gatedEvaluator{PolicyEvaluator: evaluator, gate: gate}, raw: evaluator}
+		applier.serial = applyEv
+		// The boot pull's settings are applied here, before the proxy serves and
+		// before any apply goroutine starts (the token snapshot under applyEv's
+		// lock, like every apply). Without it the first long-poll answers 304
+		// (the boot pull set the ETag), so a restarted worker served under its
+		// LOCAL identity, agents, judge, DLP, compliance, log level and cache
+		// TTL until some unrelated policy change: fail-open for challenge mode.
+		// A cache boot (#257) set remotePolicy and the cached settings, so it is
+		// applied here the same way. No boot policy (CP down, no usable cache)
+		// means no settings either; the first successful long-poll then
+		// reports a change and applies both.
+		if remotePolicy != nil {
+			applier.ApplyBoot()
+		}
+		logBound()
 		go longPollControlPlane(ctx, clk, controlPlane, applyEv, pol.ControlPlane.LongPollWait, logger, onPolicyApplied(applier.Apply, pxy.CloseBlockedSessions))
 		go heartbeatControlPlane(ctx, clk, controlPlane, pol.ControlPlane.HeartbeatInterval, logger)
 		if pol.ControlPlane.BundleVerification() {
@@ -1150,6 +1245,14 @@ func resolveSecretStore(distributed *config.SettingsWire, local config.Policy) c
 		return config.SecretStoreConfigFromSettings(distributed.Secrets)
 	}
 	return local.SecretStore
+}
+
+// noCredentialsFetcher fails every fetch: the aws secret backend of a worker
+// running from the bundle cache that has no AWS credentials of its own.
+type noCredentialsFetcher struct{}
+
+func (noCredentialsFetcher) Fetch(string) (string, error) {
+	return "", errors.New("secrets: no AWS credentials while running from the bundle cache")
 }
 
 // newProxy is a test seam so tests can inspect the proxy.Config the worker

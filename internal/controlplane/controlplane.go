@@ -802,6 +802,7 @@ func (s *Server) Handler() http.Handler {
 	// console.approvals is enabled; the hasher is a no-op without admin audit.
 	if s.approvals != nil {
 		dash.SetChangeDrafts(s.changeDraftsAPI())
+		dash.SetApprovalsReplayTimeout(s.cfg.Console.Approvals.ReplayTimeout)
 		s.RegisterStateHasher(auditTargetChangeDraft, s.changeDraftHash)
 	}
 	// Per-worker MCP view (inventory + observed schema), selected by ?proxy=.
@@ -1826,6 +1827,7 @@ type identityYAML struct {
 	ClockSkewSeconds   int         `yaml:"clockSkewSeconds,omitempty"`
 	MaxTokenTTLSeconds int         `yaml:"maxTokenTTLSeconds,omitempty"`
 	InternalIssuerURL  string      `yaml:"internalIssuerURL,omitempty"`
+	AcceptDexTokens    *bool       `yaml:"acceptDexTokens,omitempty"`
 	SignIn             *signInYAML `yaml:"signIn,omitempty"`
 }
 
@@ -1843,7 +1845,7 @@ func newIdentityYAML(in config.IdentitySettings) identityYAML {
 		DefaultMode: in.DefaultMode, Issuer: in.Issuer, Audience: in.Audience,
 		AllowedAZP: in.AllowedAZP, JWKSURL: in.JWKSURL, GroupsClaim: in.GroupsClaim,
 		ClockSkewSeconds: in.ClockSkewSeconds, MaxTokenTTLSeconds: in.MaxTokenTTLSeconds,
-		InternalIssuerURL: in.InternalIssuerURL,
+		InternalIssuerURL: in.InternalIssuerURL, AcceptDexTokens: in.AcceptDexTokens,
 	}
 	if si := in.SignIn; si != nil {
 		out.SignIn = &signInYAML{ClientID: si.ClientID, Scopes: si.Scopes, MaxPending: si.MaxPending, StartsPerMinute: si.StartsPerMinute}

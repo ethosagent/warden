@@ -5,6 +5,8 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"slices"
 	"strings"
 
 	"github.com/ethosagent/warden/internal/keys"
@@ -75,7 +77,10 @@ func Verify(raw []byte, pins []keys.JWK, applied State, opt Options) (Verified, 
 		return Verified{}, f.wrap(ErrExpired)
 	}
 
-	v := Verified{Bundle: b, Seq: b.Seq, ContentSHA256: b.ContentSHA256, KID: kid, Credentials: creds}
+	v := Verified{
+		Bundle: b, Seq: b.Seq, ContentSHA256: b.ContentSHA256, KID: kid, Credentials: creds,
+		payload: env.payload, signatures: slices.Clone(env.Signatures),
+	}
 	switch {
 	case b.Seq < applied.Seq:
 		return Verified{}, f.wrap(ErrRollback)
@@ -165,8 +170,8 @@ func checkCredentials(sidecar *Credentials, want string, allowMissing bool) (*Cr
 }
 
 // isCaseVariant reports a member name that encoding/json would match to one of
-// names case-insensitively without being spelled exactly like it; the fast
-// path leaves those to the json.Unmarshal fallback, so both agree.
+// names case-insensitively without being spelled exactly like it. Both the
+// fast path and the strict member scan refuse those.
 func isCaseVariant(key string, names ...string) bool {
 	for _, n := range names {
 		if key != n && strings.EqualFold(key, n) {
@@ -176,23 +181,90 @@ func isCaseVariant(key string, names ...string) bool {
 	return false
 }
 
-// parseEnvelope decodes the envelope. The json.Unmarshal fallback matches
-// member names case-insensitively (encoding/json's rule), which is harmless:
-// the signature covers the payload bytes, not the envelope's member names. The payload member is megabytes of
-// base64url, which encoding/json would scan three times; base64url never
-// contains a backslash, so a plain string is cut out with a byte search and
-// only the small members go through the decoder. Anything the fast path is
-// not certain about (escapes, duplicate or odd members, any syntax doubt)
-// falls back to json.Unmarshal, which is the reference behaviour.
+// envelopeMembers are the envelope's member names, as Sign writes them.
+var envelopeMembers = []string{"payload", "signatures", "credentials"}
+
+var errEnvelope = errors.New("bundle: envelope is not a canonical bundle envelope")
+
+// parseEnvelope decodes the envelope. Member names are matched exactly, the
+// way Sign writes them: a name that only case-folds to payload, signatures or
+// credentials, and a repeated one of those, is malformed. encoding/json would
+// match such a name case-insensitively (and let the last duplicate win), and
+// any other reader that parses the envelope its own way (a map lookup, say)
+// would then disagree with Verify about which credentials sidecar the
+// envelope carries. Unknown extra members are ignored.
+//
+// The payload member is megabytes of base64url, which encoding/json would
+// scan three times; base64url never contains a backslash, so a plain string
+// is cut out with a byte search and only the small members go through the
+// decoder. Anything the fast path is not certain about (escapes, duplicate or
+// odd members, any syntax doubt) falls back to a strict scan of the top-level
+// member names followed by json.Unmarshal.
 func parseEnvelope(raw []byte) (rawEnvelope, error) {
 	if env, ok := fastEnvelope(raw); ok {
 		return env, nil
+	}
+	if err := checkEnvelopeMembers(raw); err != nil {
+		return rawEnvelope{}, err
 	}
 	var e Envelope
 	if err := json.Unmarshal(raw, &e); err != nil {
 		return rawEnvelope{}, err
 	}
 	return rawEnvelope{payload: []byte(e.Payload), Signatures: e.Signatures, Credentials: e.Credentials}, nil
+}
+
+// checkEnvelopeMembers requires raw to be one JSON object whose top-level
+// member names (after unescaping, as encoding/json sees them) contain no case
+// variant and no duplicate of an envelope member.
+func checkEnvelopeMembers(raw []byte) error {
+	if !json.Valid(raw) {
+		return errEnvelope
+	}
+	i := skipSpace(raw, 0)
+	if i >= len(raw) || raw[i] != '{' {
+		return errEnvelope
+	}
+	i++
+	seen := make(map[string]bool, len(envelopeMembers))
+	for {
+		i = skipSpace(raw, i)
+		if i >= len(raw) {
+			return errEnvelope
+		}
+		if raw[i] == '}' {
+			return nil
+		}
+		if raw[i] == ',' {
+			i = skipSpace(raw, i+1)
+		}
+		end, ok := skipValue(raw, i)
+		if !ok {
+			return errEnvelope
+		}
+		var key string
+		if err := json.Unmarshal(raw[i:end], &key); err != nil {
+			return errEnvelope
+		}
+		if isCaseVariant(key, envelopeMembers...) {
+			return errEnvelope
+		}
+		if slices.Contains(envelopeMembers, key) {
+			if seen[key] {
+				return errEnvelope
+			}
+			seen[key] = true
+		}
+		i = skipSpace(raw, end)
+		if i >= len(raw) || raw[i] != ':' {
+			return errEnvelope
+		}
+		end, ok = skipValue(raw, skipSpace(raw, i+1))
+		if !ok {
+			return errEnvelope
+		}
+		i = end
+	}
 }
 
 // rawEnvelope is an Envelope whose payload text is still a slice of the

@@ -201,10 +201,8 @@ func (r *Renewer) renewOnce(ctx context.Context, cur *Credential) (string, error
 				"serial", got.Serial(), "error", perr.Error())
 		}
 	}
-	r.Source.Set(got)
-	if r.CloseIdle != nil {
-		r.CloseIdle()
-	}
+	// The swap and the pool drop are one step to a reader of Source.Current.
+	r.Source.Install(got, r.CloseIdle)
 	if r.Logger != nil {
 		r.Logger.Info("worker certificate renewed", "serial", got.Serial(), "prev_serial", cur.Serial(),
 			"not_after", got.NotAfter().UTC().Format(time.RFC3339))

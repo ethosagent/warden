@@ -553,6 +553,15 @@ type setupResponse struct {
 	// serve (a state dir is configured); the console hides the Agents tab
 	// otherwise, a worker's dashboard included. Always present.
 	AgentRegistry bool `json:"agentRegistry"`
+	// ApprovalsEnabled is true only when the change draft routes are wired
+	// (console.approvals.enabled on a control plane): the console shows the
+	// Changes tab only then. Always present.
+	ApprovalsEnabled bool `json:"approvalsEnabled"`
+	// ApprovalsReplayTimeoutSec is console.approvals.replayTimeout in seconds,
+	// so the Changes tab stops polling a pending replay when the server gives
+	// up on it. Omitted when approvals are off or the control plane did not
+	// say.
+	ApprovalsReplayTimeoutSec int `json:"approvalsReplayTimeoutSec,omitempty"`
 }
 
 // BackupStatus is the value-free state of the control plane's scheduled backups.
@@ -574,6 +583,9 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 	}
 	resp := setupResponse{Mode: s.setupMode(), AuthMode: s.authMode}
 	resp.AgentRegistry = s.agents != nil && s.agents.Ready() == nil
+	if resp.ApprovalsEnabled = s.changeDrafts != nil; resp.ApprovalsEnabled {
+		resp.ApprovalsReplayTimeoutSec = int(s.approvalsReplayTimeout / time.Second)
+	}
 	if s.backupFn != nil {
 		resp.Backup = s.backupFn(r)
 	}

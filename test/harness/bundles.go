@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -98,6 +99,42 @@ func (h *H) applyBundlePins(p *config.Policy) {
 	p.ControlPlane.BundleClockSkew = 5 * time.Minute
 	p.ControlPlane.BundleExpiry = h.bundleExpiry
 }
+
+// WithBundleCache turns on the last-known-good bundle cache for pinned workers
+// (W-P2-SBND-06): each worker gets its own controlPlane.stateDir under the
+// harness root, with bundleCacheMaxAge 12h. Combine it with WithBundlePins.
+// In-process only.
+func WithBundleCache() Option { return func(h *H) { h.bundleCache = true } }
+
+// harnessBundleCacheMaxAge is the bundleCacheMaxAge of WithBundleCache.
+const harnessBundleCacheMaxAge = 12 * time.Hour
+
+// workerStateDir is the state dir of worker-n (1-based, as in its proxy id).
+func (h *H) workerStateDir(n int) string {
+	return filepath.Join(h.root, fmt.Sprintf("worker-%d-state", n))
+}
+
+// applyBundleCache gives worker i its state directory and cache max age.
+func (h *H) applyBundleCache(i int, p *config.Policy) {
+	if !h.bundleCache {
+		return
+	}
+	p.ControlPlane.StateDir = h.workerStateDir(i)
+	p.ControlPlane.BundleCacheMaxAge = harnessBundleCacheMaxAge
+}
+
+// BundleCacheFile is the path of worker i's (0-based) bundle cache file, which
+// exists once the worker has applied a bundle. It needs WithBundleCache.
+func (h *H) BundleCacheFile(i int) string {
+	h.tb.Helper()
+	if !h.bundleCache {
+		h.tb.Fatal("harness: BundleCacheFile needs WithBundleCache")
+	}
+	return config.BundleCachePath(h.workerStateDir(i + 1))
+}
+
+// BundleCacheMaxAge is the bundleCacheMaxAge WithBundleCache configures.
+func (h *H) BundleCacheMaxAge() time.Duration { return harnessBundleCacheMaxAge }
 
 // BundleMediaType is the Accept header value that asks for the envelope.
 const BundleMediaType = controlplane.BundleMediaType

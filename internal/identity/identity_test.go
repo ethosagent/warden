@@ -23,6 +23,10 @@ func TestSubjectFrom(t *testing.T) {
 	if s == nil || s.Sub != "u1" || s.Email != "u@x.io" || !s.EmailVerified || !s.GroupsTruncated || s.AgentID != "" {
 		t.Fatalf("subject = %+v", s)
 	}
+	c.Act = "agent-a"
+	if got := identity.SubjectFrom(c, identity.StatusValid); got.AgentID != "agent-a" {
+		t.Errorf("AgentID = %q, want act.sub", got.AgentID)
+	}
 	s.Groups[0] = "mutated"
 	if c.Groups[0] != "a" {
 		t.Error("subject groups alias the claims slice")
@@ -65,7 +69,7 @@ func TestGroupsNormalize(t *testing.T) {
 
 func TestReasonsBounded(t *testing.T) {
 	rs := identity.Reasons()
-	if len(rs) != 11 {
+	if len(rs) != 17 {
 		t.Fatalf("len = %d", len(rs))
 	}
 	seen := map[identity.Reason]bool{}

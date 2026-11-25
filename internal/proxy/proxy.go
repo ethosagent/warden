@@ -171,6 +171,14 @@ type Config struct {
 	// roots, byte-identical to before.
 	UpstreamRootCAs *x509.CertPool
 
+	// IdentityClock, when set, is the time source for identity validity decisions:
+	// the token exp+skew recheck on each request, and the raw-tunnel lifetime
+	// decided at CONNECT (exp minus now). The cut of an open tunnel itself runs on
+	// wall time (time.AfterFunc). It does NOT drive leaf-cert minting, which real
+	// TLS clients verify against the wall clock. Assembly-only
+	// (worker.Overrides.Clock): cmd/proxy never sets it; nil keeps time.Now.
+	IdentityClock func() time.Time
+
 	// Inflight, when set, receives one Start per request-scoped handler: from
 	// request-read until the scope's terminal bookkeeping (analytics event,
 	// metric, decision log) is recorded, on every protocol path. The L1
@@ -328,7 +336,9 @@ type Proxy struct {
 	// leafTTL is the injectable leaf validity window (0 = defaultLeafTTL). Both
 	// exist only so white-box tests can drive cert expiry deterministically;
 	// production leaves them zero-valued.
-	now     func() time.Time
+	now func() time.Time
+	// idNow is the validity clock (Config.IdentityClock); nil falls back to clock().
+	idNow   func() time.Time
 	leafTTL time.Duration
 	// preambleTimeout is the injectable CONNECT-preamble read deadline (0 =
 	// connectPreambleTimeout). Like now/leafTTL it exists only so white-box
@@ -521,6 +531,10 @@ func (p *Proxy) judge() Judge {
 	return nil
 }
 
+// JudgeEnabled reports whether an inline judge is live. Like DLPMode it reads
+// the hot path's atomic pointer, so apply tests can confirm a swap landed.
+func (p *Proxy) JudgeEnabled() bool { return p.judge() != nil }
+
 // SetJudge atomically swaps in a new inline judge (or nil to disable). It is
 // race-free against concurrent hot-path reads via the atomic pointer. The judge
 // is fail-safe advisory state, not a lifecycle-owning handle, so there is nothing
@@ -585,6 +599,7 @@ func New(cfg Config) (*Proxy, error) {
 		return nil, err
 	}
 	p := &Proxy{cfg: cfg, scopes: scopes, sessions: newSessionRegistry()}
+	p.sessions.blocked, p.sessions.onCut = p.claimsBlocked, p.finishBlockedCut
 	// Seed the swappable gateway from the configured one so an unmanaged worker's
 	// behavior is unchanged; a managed worker's long-poll apply loop replaces it.
 	// cfg.MCP may be an untyped-nil interface (MCP disabled) — wrapped in the
@@ -662,6 +677,8 @@ func New(cfg Config) (*Proxy, error) {
 			return nil, fmt.Errorf("proxy: CA key does not match CA cert")
 		}
 	}
+
+	p.idNow = cfg.IdentityClock
 
 	// Upstream dialing. An injected Dialer (assembly-only harness seam) replaces
 	// the SSRF-safe dialer wholesale; otherwise production builds exactly what
