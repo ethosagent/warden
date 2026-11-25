@@ -235,6 +235,9 @@ type H struct {
 	// the control plane's injected role is scoped to keysAWSNamePrefix.
 	awsAccount *fakes.FakeAWSSecretsClient
 	keyState   keysState
+	// bundleMode (WithBundles) boots the control plane with --bundles set to
+	// it, on top of the versioned policy store and the signing keys.
+	bundleMode string
 
 	// tokenClients are the AgentWithProxyToken / AgentH2WithProxyToken clients,
 	// kept so cleanup can close their idle tunnels.
@@ -829,6 +832,7 @@ func (h *H) buildInprocessTarget() *inprocess {
 	h.applyCPAdmin(&ip.cp.params)
 	h.applyBackup(&ip.cp.params)
 	h.applyKeys(&ip.cp.params)
+	h.applyBundles(&ip.cp.params)
 	h.applyAPIKeys(&ip.cp.params)
 	h.applyStrict(&ip.cp.params)
 	h.applyStrictCerts(&ip.cp.params)

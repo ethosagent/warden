@@ -41,8 +41,9 @@ func signingInput(payload []byte) []byte {
 // payload once, and has every signer sign SigningPrefix + 0x00 + payload, so
 // two signers during a key rotation both vouch for the same bytes. It
 // rejects zero signers, an unusable bundle and an envelope over
-// MaxEnvelopeBytes. Policy and the sections must be valid JSON; they are
-// compacted so the hashed bytes are the marshalled bytes.
+// MaxEnvelopeBytes (an error that matches ErrTooLarge). Policy and the
+// sections must be valid JSON; they are compacted so the hashed bytes are the
+// marshalled bytes.
 func Sign(ctx context.Context, b Bundle, creds *Credentials, signers ...keys.Signer) ([]byte, error) {
 	if len(signers) == 0 {
 		return nil, errors.New("bundle: sign needs at least one signer")
@@ -114,7 +115,7 @@ func Sign(ctx context.Context, b Bundle, creds *Credentials, signers ...keys.Sig
 		return nil, fmt.Errorf("bundle: marshal envelope: %w", err)
 	}
 	if len(raw) > MaxEnvelopeBytes {
-		return nil, fmt.Errorf("bundle: envelope is %d bytes, limit %d", len(raw), MaxEnvelopeBytes)
+		return nil, fmt.Errorf("%w: bundle: envelope is %d bytes, limit %d", ErrTooLarge, len(raw), MaxEnvelopeBytes)
 	}
 	return raw, nil
 }
