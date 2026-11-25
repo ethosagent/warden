@@ -64,12 +64,33 @@ type policyServer struct {
 	pubMu   sync.Mutex
 	pubVer  int64
 	pubETag string
+
+	// bundles is the signed-bundle publisher (--bundles=offer|require), nil
+	// when bundles are off: then none of the fields below is ever touched and
+	// /policy is the code it was before bundles existed. Set once at wiring
+	// time, before the first Refresh.
+	bundles *bundlePublisher
+	// now is the clock the envelope's expiry is checked against.
+	now func() time.Time
+	// refreshMu serializes Refresh end to end (load, publish-log append, sign,
+	// swap), so a seq is never built from two interleaved loads. It guards the
+	// last good load below and the publisher's state.
+	refreshMu sync.Mutex
+	loaded    bool
+	lastWire  policyWire
+	lastETag  string
+	lastHead  int64
 }
 
 // Publish-log values of an ETag change without a new version.
 const (
 	publishActorSystem    = "system"
 	publishReasonExternal = "external"
+	// publishReasonTokenJWKS marks a row appended because the token JWKS
+	// changed while the served policy did not; publishReasonRestore marks the
+	// row --bundle-seq-floor appends.
+	publishReasonTokenJWKS = "token_jwks"
+	publishReasonRestore   = "restore"
 )
 
 // wireOverlay merges serve-time data into the served wire: data that must reach
@@ -100,6 +121,7 @@ func newPolicyServer(policyPath, token string, logger *slog.Logger, registry *Wo
 		logger:     logger,
 		registry:   registry,
 		watch:      newPolicyWatch(),
+		now:        time.Now,
 	}
 }
 
@@ -153,6 +175,10 @@ type policyWatch struct {
 	fps  map[string]string // overlay fingerprints of the load that produced wire
 	ok   bool              // a good policy has been loaded at least once
 	ch   chan struct{}
+	// bundle is the newest signed envelope (nil until one is signed or with
+	// bundles off). It shares ch with the legacy wire: a change to either
+	// wakes every waiter, and each waiter re-checks its own format's ETag.
+	bundle *signedBundle
 }
 
 func newPolicyWatch() *policyWatch { return &policyWatch{ch: make(chan struct{})} }
@@ -170,6 +196,28 @@ func (w *policyWatch) set(wire policyWire, etag string, fps map[string]string) {
 	w.wire, w.etag, w.ok = wire, etag, true
 	close(w.ch)
 	w.ch = make(chan struct{})
+}
+
+// setBundle installs a newly signed envelope and wakes the waiters. An older
+// seq, or the same seq with an issuedAt that is not newer, is ignored, so a
+// slow build can never move the served envelope backwards.
+func (w *policyWatch) setBundle(b *signedBundle) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if cur := w.bundle; cur != nil && (b.seq < cur.seq || (b.seq == cur.seq && !b.issuedAt.After(cur.issuedAt))) {
+		return
+	}
+	w.bundle = b
+	close(w.ch)
+	w.ch = make(chan struct{})
+}
+
+// bundleSnapshot returns the current envelope (nil if none) and a channel
+// that closes when the policy or the envelope next changes.
+func (w *policyWatch) bundleSnapshot() (*signedBundle, <-chan struct{}) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.bundle, w.ch
 }
 
 // snapshot returns the current policy, ETag, whether one has loaded, and a
@@ -193,7 +241,15 @@ func (w *policyWatch) fingerprints() map[string]string {
 // breaks workers. In versioned mode it first records a served-ETag change
 // without a new version in the publish log, so a worker on the new ETag maps
 // to a version from the moment it can fetch it.
-func (ps *policyServer) Refresh() {
+func (ps *policyServer) Refresh() { ps.refresh(false) }
+
+// refresh is Refresh with the option to re-sign the bundle even when its
+// content is unchanged (the re-sign ticker and a bundle key change). Under
+// refreshMu, a forced re-sign whose reload fails still re-signs the last good
+// content, so a mid-edit policy file cannot let the envelope expire.
+func (ps *policyServer) refresh(resign bool) {
+	ps.refreshMu.Lock()
+	defer ps.refreshMu.Unlock()
 	ctx := context.Background()
 	wire, fps, head, err := ps.loadPolicy(ctx)
 	if err != nil {
@@ -201,14 +257,19 @@ func (ps *policyServer) Refresh() {
 		if errors.As(err, &oe) {
 			ps.logger.Warn("control plane: policy overlay failed; keeping last-known-good",
 				"overlay", oe.name, "error", boundedErr(oe.err))
-			return
+		} else {
+			ps.logger.Warn("control plane: policy reload failed; keeping last-known-good", "error", err)
 		}
-		ps.logger.Warn("control plane: policy reload failed; keeping last-known-good", "error", err)
+		if resign && ps.loaded {
+			ps.publishBundle(ctx, ps.lastWire, ps.lastETag, ps.lastHead, true)
+		}
 		return
 	}
 	etag := etagFor(wire)
 	ps.recordPublish(ctx, head, etag, fps)
 	ps.watch.set(wire, etag, fps)
+	ps.loaded, ps.lastWire, ps.lastETag, ps.lastHead = true, wire, etag, head
+	ps.publishBundle(ctx, wire, etag, head, resign)
 }
 
 // recordPublish appends a publish-log row when the served ETag of head (0 =
@@ -458,6 +519,68 @@ func (ps *policyServer) ServePolicy(w http.ResponseWriter, r *http.Request) {
 	inm := trimETag(r.Header.Get("If-None-Match"))
 	wait := parseWait(r.URL.Query().Get("wait"))
 
+	// Signed bundles (--bundles=offer|require). With bundles off ps.bundles is
+	// nil and this is skipped: the legacy path below is all there is.
+	if b := ps.bundles; b != nil {
+		if acceptsBundle(r) {
+			ps.longPoll(w, r, principal, inm, wait, ps.bundleView)
+			return
+		}
+		if b.cfg.Mode == BundlesRequire {
+			writeBundleError(w, http.StatusNotAcceptable, "signed_bundle_required")
+			return
+		}
+	}
+	ps.longPoll(w, r, principal, inm, wait, ps.legacyView)
+}
+
+// policyView is one format's current state for the long poll: its ETag, the
+// channel that closes when anything changes, whether it can be served at all
+// and how to write the 200 and the "unavailable" reply.
+type policyView struct {
+	etag        string
+	ch          <-chan struct{}
+	ok          bool
+	write       func(http.ResponseWriter)
+	unavailable func(http.ResponseWriter)
+}
+
+// legacyView is the unsigned policyWire view.
+func (ps *policyServer) legacyView() policyView {
+	wire, etag, ok, ch := ps.watch.snapshot()
+	return policyView{
+		etag: etag, ch: ch, ok: ok,
+		write: func(w http.ResponseWriter) {
+			w.Header().Set("Content-Type", "application/json")
+			// The watch holds the real rules (dashboard, audit and diff read
+			// them); the fail-closed projection happens here, on the way out.
+			_ = json.NewEncoder(w).Encode(projectScoped(wire))
+		},
+		// No good policy has ever loaded (e.g. unreadable file at startup).
+		unavailable: func(w http.ResponseWriter) { http.Error(w, "policy unavailable", http.StatusInternalServerError) },
+	}
+}
+
+// bundleView is the signed envelope view. An envelope past its expiresAt is
+// not served: a worker would only reject it as expired.
+func (ps *policyServer) bundleView() policyView {
+	sb, ch := ps.watch.bundleSnapshot()
+	if sb == nil || !ps.now().Before(sb.expiresAt) {
+		return policyView{ch: ch, unavailable: func(w http.ResponseWriter) {
+			writeBundleError(w, http.StatusServiceUnavailable, "signed_bundle_unavailable")
+		}}
+	}
+	return policyView{
+		etag: sb.etag, ch: ch, ok: true,
+		write: func(w http.ResponseWriter) {
+			w.Header().Set("Content-Type", BundleMediaType)
+			_, _ = w.Write(sb.env)
+		},
+	}
+}
+
+// longPoll serves one format of the policy with ETag long-poll semantics.
+func (ps *policyServer) longPoll(w http.ResponseWriter, r *http.Request, principal WorkerPrincipal, inm string, wait time.Duration, current func() policyView) {
 	// A token's held request registers lazily when it first parks and is
 	// released when the handler returns.
 	var revoked <-chan struct{}
@@ -465,27 +588,23 @@ func (ps *policyServer) ServePolicy(w http.ResponseWriter, r *http.Request) {
 	defer func() { release() }()
 
 	for {
-		wire, etag, ok, ch := ps.watch.snapshot()
-		if !ok {
-			// No good policy has ever loaded (e.g. unreadable file at startup).
-			http.Error(w, "policy unavailable", http.StatusInternalServerError)
+		v := current()
+		if !v.ok {
+			v.unavailable(w)
 			return
 		}
-		if etag != inm {
+		if v.etag != inm {
 			// Re-authenticate before any write: a token revoked while this
 			// request waited never receives the new policy.
 			if !ps.stillAuthorized(w, principal) {
 				return
 			}
-			w.Header().Set("ETag", `"`+etag+`"`)
-			w.Header().Set("Content-Type", "application/json")
-			// The watch holds the real rules (dashboard, audit and diff read
-			// them); the fail-closed projection happens here, on the way out.
-			_ = json.NewEncoder(w).Encode(projectScoped(wire))
+			w.Header().Set("ETag", `"`+v.etag+`"`)
+			v.write(w)
 			return
 		}
 		if wait <= 0 {
-			w.Header().Set("ETag", `"`+etag+`"`)
+			w.Header().Set("ETag", `"`+v.etag+`"`)
 			w.WriteHeader(http.StatusNotModified)
 			return
 		}
@@ -499,7 +618,7 @@ func (ps *policyServer) ServePolicy(w http.ResponseWriter, r *http.Request) {
 		}
 		timer := time.NewTimer(wait)
 		select {
-		case <-ch:
+		case <-v.ch:
 			timer.Stop() // policy changed — loop re-evaluates and serves it
 		case <-revoked:
 			timer.Stop()
@@ -509,7 +628,7 @@ func (ps *policyServer) ServePolicy(w http.ResponseWriter, r *http.Request) {
 			if !ps.stillAuthorized(w, principal) {
 				return
 			}
-			w.Header().Set("ETag", `"`+etag+`"`)
+			w.Header().Set("ETag", `"`+v.etag+`"`)
 			w.WriteHeader(http.StatusNotModified)
 			return
 		case <-r.Context().Done():
