@@ -28,6 +28,9 @@ const (
 	// defaultAttempts is how many requests a call with no valid token makes
 	// when the control plane answers 429 or 503.
 	defaultAttempts = 3
+	// refreshFloor is the shortest time between a successful receipt and a
+	// forced re-exchange, so a burst of 407s does not hammer the control plane.
+	refreshFloor = 2 * time.Second
 )
 
 // SubjectSource supplies the user's ID token for an exchange. It never
@@ -104,11 +107,110 @@ type WardenTokenSource struct {
 	failures    int
 	flight      *tokenFlight
 	rotate      []func()
+
+	// joinHook, set only by tests, runs once per caller that has joined a
+	// flight and is about to wait for it.
+	joinHook func()
 }
 
 type tokenFlight struct {
 	done chan struct{}
 	err  error
+	cbs  []func() // OnRotate callbacks to run once the flight is over
+}
+
+// StateReason is the coarse health of a WardenTokenSource.
+type StateReason string
+
+// The reasons State reports.
+const (
+	// ReasonValid: a token is held and no refresh is due or failing.
+	ReasonValid StateReason = "valid"
+	// ReasonExpiring: a token is held but its refresh is due or failing, or no
+	// token is held yet and no failure has been recorded (an exchange is due).
+	ReasonExpiring StateReason = "expiring"
+	// ReasonLoginRequired: no valid token and the user's login is unusable (or
+	// the issuer cannot be reached to refresh it).
+	ReasonLoginRequired StateReason = "login_required"
+	// ReasonCPUnreachable: no valid token; the control plane is unreachable,
+	// throttled, unavailable or answered nonsense.
+	ReasonCPUnreachable StateReason = "cp_unreachable"
+	// ReasonExchangeDenied: no valid token; the control plane refused.
+	ReasonExchangeDenied StateReason = "exchange_denied"
+)
+
+// State is a snapshot for a health endpoint. It holds no token material.
+type State struct {
+	Reason StateReason
+	// LastError is a short code for the last failed exchange (for example
+	// "exchange_denied:invalid_client" or "cp_unreachable"); empty when the
+	// last exchange succeeded. It may be set while Reason is valid or expiring.
+	LastError string
+	// Expiry is the exp of the held token; zero when none is held.
+	Expiry time.Time
+}
+
+// State reports the source's health without any I/O.
+func (s *WardenTokenSource) State() State {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+	st := State{}
+	if s.have {
+		st.Expiry = s.cur.Expiry
+	}
+	if s.lastErr != nil {
+		st.LastError = errorKind(s.lastErr)
+	}
+	if s.have && now.Before(s.cur.Expiry) {
+		st.Reason = ReasonValid
+		if s.lastErr != nil || !now.Before(s.refreshAt) {
+			st.Reason = ReasonExpiring
+		}
+		return st
+	}
+	st.Reason = ReasonExpiring
+	if s.lastErr != nil {
+		st.Reason = reasonFor(s.lastErr)
+	}
+	return st
+}
+
+func reasonFor(err error) StateReason {
+	var de ErrExchangeDenied
+	switch {
+	case errors.As(err, &de):
+		return ReasonExchangeDenied
+	case errors.Is(err, ErrLoginRequired), errors.Is(err, ErrIssuerUnreachable):
+		return ReasonLoginRequired
+	}
+	return ReasonCPUnreachable
+}
+
+// String, GoString and LogValue show the agent id, a token fingerprint and the
+// expiry, never the token, so formatting or logging the source cannot leak it.
+func (s *WardenTokenSource) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fp, exp := "", time.Time{}
+	if s.have {
+		fp, exp = Fingerprint(s.cur.AccessToken), s.cur.Expiry
+	}
+	return "identityclient.WardenTokenSource(agent=" + s.AgentID + " token_fp=" + fp + " exp=" + exp.Format(time.RFC3339) + ")"
+}
+
+// GoString implements fmt.GoStringer.
+func (s *WardenTokenSource) GoString() string { return s.String() }
+
+// LogValue implements slog.LogValuer.
+func (s *WardenTokenSource) LogValue() slog.Value {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fp, exp := "", time.Time{}
+	if s.have {
+		fp, exp = Fingerprint(s.cur.AccessToken), s.cur.Expiry
+	}
+	return slog.GroupValue(slog.String("agent_id", s.AgentID), slog.String("token_fp", fp), slog.Time("exp", exp))
 }
 
 // NewWardenTokenSource returns a source over ex and subject.
@@ -156,7 +258,9 @@ func (s *WardenTokenSource) sleep(ctx context.Context, d time.Duration) error {
 }
 
 // OnRotate registers fn to run after every successful exchange (the first one
-// included), outside the source's lock. The forwarder uses it to drain tunnels
+// included), once the exchange's flight has completed and with no lock held, so
+// fn may call Token or Refresh. Callers of Token may see the new token slightly
+// before fn has run. The forwarder uses it to drain tunnels
 // opened with the old token.
 func (s *WardenTokenSource) OnRotate(fn func()) {
 	s.mu.Lock()
@@ -185,9 +289,17 @@ func (s *WardenTokenSource) Token(ctx context.Context) (WardenToken, error) {
 	return s.token(ctx, false)
 }
 
-// Refresh exchanges now, whatever the schedule says (the forwarder's answer to
-// a 407). Concurrent callers share one request. On failure the held token is
-// returned when it is still valid.
+// Refresh exchanges now, ahead of the schedule (the forwarder's answer to a
+// 407). Concurrent callers share one request. It is still bound by two limits:
+// no exchange within 2s of the last successful receipt (the held token is
+// returned with a nil error), and none while the cooldown after a failure,
+// denial or 429 runs.
+//
+// Unlike Token, Refresh reports a failure even when it can still serve: the
+// error is non-nil whenever the exchange failed or was held back by a
+// cooldown, and the returned token is then the held one if it is still valid
+// (and the zero token otherwise). A caller must check the error first and may
+// use a non-zero token that comes with it.
 func (s *WardenTokenSource) Refresh(ctx context.Context) (WardenToken, error) {
 	return s.token(ctx, true)
 }
@@ -214,6 +326,21 @@ func (s *WardenTokenSource) token(ctx context.Context, force bool) (WardenToken,
 			s.mu.Unlock()
 			return WardenToken{}, err
 		}
+	} else {
+		if valid && s.lastErr == nil && now.Sub(s.cur.ReceivedAt) < refreshFloor {
+			tok := s.cur
+			s.mu.Unlock()
+			return tok, nil
+		}
+		if s.lastErr != nil && now.Before(s.nextAttempt) {
+			err := s.lastErr
+			var tok WardenToken
+			if valid {
+				tok = s.cur
+			}
+			s.mu.Unlock()
+			return tok, err
+		}
 	}
 	f := s.flight
 	if f == nil {
@@ -223,14 +350,22 @@ func (s *WardenTokenSource) token(ctx context.Context, force bool) (WardenToken,
 		bg, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
 		go func() {
 			defer cancel()
-			f.err = s.exchange(bg)
+			f.cbs, f.err = s.exchange(bg)
 			s.mu.Lock()
 			s.flight = nil
 			s.mu.Unlock()
 			close(f.done)
+			// OnRotate callbacks run after the flight is over and with no lock
+			// held, so one may call Token or Refresh.
+			for _, fn := range f.cbs {
+				fn()
+			}
 		}()
 	}
 	s.mu.Unlock()
+	if s.joinHook != nil {
+		s.joinHook()
+	}
 
 	select {
 	case <-f.done:
@@ -240,6 +375,9 @@ func (s *WardenTokenSource) token(ctx context.Context, force bool) (WardenToken,
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.have && s.now().Before(s.cur.Expiry) {
+		if force {
+			return s.cur, f.err
+		}
 		return s.cur, nil
 	}
 	if f.err != nil {
@@ -250,7 +388,7 @@ func (s *WardenTokenSource) token(ctx context.Context, force bool) (WardenToken,
 
 // exchange runs one scheduled exchange: subject, request, and for a call that
 // holds no valid token a few retries of 429 and 503.
-func (s *WardenTokenSource) exchange(ctx context.Context) error {
+func (s *WardenTokenSource) exchange(ctx context.Context) ([]func(), error) {
 	attempts := s.Attempts
 	if attempts <= 0 {
 		attempts = defaultAttempts
@@ -262,8 +400,7 @@ func (s *WardenTokenSource) exchange(ctx context.Context) error {
 			tok, err = s.Exchanger.Exchange(ctx, subject)
 		}
 		if err == nil {
-			s.store(tok)
-			return nil
+			return s.store(tok), nil
 		}
 		wait, retryable := retryDelay(err)
 		s.mu.Lock()
@@ -274,12 +411,12 @@ func (s *WardenTokenSource) exchange(ctx context.Context) error {
 				wait = s.backoff(n)
 			}
 			if serr := s.sleep(ctx, wait); serr != nil {
-				return serr
+				return nil, serr
 			}
 			continue
 		}
 		s.fail(err, wait)
-		return err
+		return nil, err
 	}
 }
 
@@ -306,7 +443,9 @@ func (s *WardenTokenSource) backoff(failures int) time.Duration {
 	return time.Duration(float64(d) * (1 - 0.5*s.jitter()))
 }
 
-func (s *WardenTokenSource) store(tok WardenToken) {
+// store keeps tok and returns the OnRotate callbacks the caller runs once it
+// holds no lock.
+func (s *WardenTokenSource) store(tok WardenToken) []func() {
 	life := tok.Expiry.Sub(tok.ReceivedAt)
 	at := tok.ReceivedAt.Add(time.Duration(float64(life*refreshNum/refreshDen) * (1 - refreshJitter*s.jitter())))
 	s.mu.Lock()
@@ -315,9 +454,7 @@ func (s *WardenTokenSource) store(tok WardenToken) {
 	cbs := append([]func(){}, s.rotate...)
 	s.mu.Unlock()
 	s.log().Debug("warden token stored", "agent_id", s.AgentID, "exp", tok.Expiry, "token_fp", Fingerprint(tok.AccessToken))
-	for _, fn := range cbs {
-		fn()
-	}
+	return cbs
 }
 
 func (s *WardenTokenSource) fail(err error, retryAfter time.Duration) {

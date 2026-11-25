@@ -10,8 +10,10 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -308,12 +310,20 @@ func TestExchangeRefreshAtTwoThirds(t *testing.T) {
 	a := newAgentRig(t)
 	src := identityclient.NewWardenTokenSource(a.ex, staticSubject{tok: "subject-secret"})
 	src.Now = a.clock.Now
-	rotated := 0
-	src.OnRotate(func() { rotated++ })
+	var rotated atomic.Int32
+	src.OnRotate(func() { rotated.Add(1) })
+	waitRotated := func(n int32) {
+		t.Helper()
+		dl := time.Now().Add(10 * time.Second)
+		for rotated.Load() < n && time.Now().Before(dl) {
+			runtime.Gosched()
+		}
+	}
 
 	first, err := src.Token(context.Background())
-	if err != nil || a.cp.calls() != 1 || rotated != 1 {
-		t.Fatalf("first token: %v calls=%d rotated=%d", err, a.cp.calls(), rotated)
+	waitRotated(1)
+	if err != nil || a.cp.calls() != 1 || rotated.Load() != 1 {
+		t.Fatalf("first token: %v calls=%d rotated=%d", err, a.cp.calls(), rotated.Load())
 	}
 	// Cached: no exchange until the refresh point, which is in [540s, 600s].
 	elapsed := time.Duration(0)
@@ -330,8 +340,9 @@ func TestExchangeRefreshAtTwoThirds(t *testing.T) {
 	if elapsed < 540*time.Second || elapsed > 601*time.Second {
 		t.Fatalf("second exchange after %v, want between 540s and 600s", elapsed)
 	}
-	if rotated != 2 {
-		t.Fatalf("OnRotate ran %d times, want 2", rotated)
+	waitRotated(2)
+	if rotated.Load() != 2 {
+		t.Fatalf("OnRotate ran %d times, want 2", rotated.Load())
 	}
 
 	// The jitter bounds are exact when pinned.
@@ -363,6 +374,8 @@ func TestExchangeSingleFlight(t *testing.T) {
 	a.cp.gate = make(chan struct{})
 	src := identityclient.NewWardenTokenSource(a.ex, staticSubject{tok: "subject-secret"})
 	src.Now = a.clock.Now
+	var joined atomic.Int32
+	src.SetJoinHook(func() { joined.Add(1) })
 
 	var wg sync.WaitGroup
 	got := make([]string, 8)
@@ -376,7 +389,10 @@ func TestExchangeSingleFlight(t *testing.T) {
 		}()
 	}
 	<-a.cp.hit // the one request is in flight
-	time.Sleep(50 * time.Millisecond)
+	// Release it only once every caller has joined the flight.
+	for joined.Load() < int32(len(got)) {
+		runtime.Gosched()
+	}
 	close(a.cp.gate)
 	wg.Wait()
 	for i := range got {
@@ -422,6 +438,7 @@ func TestExchangeRefreshForcesExchange(t *testing.T) {
 	src := identityclient.NewWardenTokenSource(a.ex, staticSubject{tok: "subject-secret"})
 	src.Now = a.clock.Now
 	first, _ := src.Token(context.Background())
+	a.clock.Advance(3 * time.Second) // past the 2s floor
 	again, err := src.Refresh(context.Background())
 	if err != nil || again.AccessToken == first.AccessToken || a.cp.calls() != 2 {
 		t.Fatalf("Refresh: %v calls=%d", err, a.cp.calls())

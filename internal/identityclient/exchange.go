@@ -211,6 +211,12 @@ func (e *Exchanger) Exchange(ctx context.Context, subject string) (WardenToken, 
 	return WardenToken{}, e.parseFailure(resp, body)
 }
 
+// Accepted range of expires_in.
+const (
+	minExpiresIn = 30 * time.Second
+	maxExpiresIn = 24 * time.Hour
+)
+
 func (e *Exchanger) parseSuccess(body []byte, received time.Time) (WardenToken, error) {
 	var r struct {
 		AccessToken string      `json:"access_token"`
@@ -222,7 +228,9 @@ func (e *Exchanger) parseSuccess(body []byte, received time.Time) (WardenToken, 
 		return WardenToken{}, ErrBadExchangeResponse
 	}
 	secs, err := r.ExpiresIn.Int64()
-	if err != nil || secs <= 0 {
+	// A tiny lifetime would make the source re-exchange in a hot loop; a huge
+	// one overflows time.Duration and lands the expiry in the past.
+	if err != nil || secs < int64(minExpiresIn/time.Second) || secs > int64(maxExpiresIn/time.Second) {
 		return WardenToken{}, ErrBadExchangeResponse
 	}
 	tok := WardenToken{

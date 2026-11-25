@@ -1,8 +1,10 @@
 package main
 
 import (
+	"crypto/ed25519"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -156,10 +158,31 @@ func TestIdentityEnrollAndTokenNoLeak(t *testing.T) {
 	if assertion == "" {
 		t.Fatal("the control plane saw no assertion")
 	}
-	for name, out := range map[string]string{"token stderr": tokErr, "status stdout": stOut, "status stderr": stErr, "enroll": stdout + stderr} {
-		for _, secret := range []string{a.subject, assertion, token, body, wardenSecretMarker} {
+	// The Ed25519 seed in every form it could surface: raw, the JWK "d" member
+	// (base64url), standard base64 and hex.
+	block, _ := pem.Decode(pemKey)
+	parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawSeed := parsed.(ed25519.PrivateKey).Seed()
+	secrets := map[string]string{
+		"subject": a.subject, "assertion": assertion, "token": token, "pem body": body, "marker": wardenSecretMarker,
+		"seed raw": string(rawSeed), "seed base64url": base64.RawURLEncoding.EncodeToString(rawSeed),
+		"seed base64": base64.StdEncoding.EncodeToString(rawSeed), "seed hex": hex.EncodeToString(rawSeed),
+	}
+	outputs := map[string]string{"token stderr": tokErr, "status stdout": stOut, "status stderr": stErr, "enroll": stdout + stderr}
+	for name, out := range outputs {
+		for what, secret := range secrets {
 			if secret != "" && strings.Contains(out, secret) {
-				t.Errorf("%s holds a secret (%d bytes of it)", name, len(secret))
+				t.Errorf("%s holds the whole %s (%d bytes of it)", name, what, len(secret))
+			}
+			// Sliding window: no 16-character piece of a secret may appear.
+			for _, w := range secretWindows(what, secret, 16) {
+				if strings.Contains(out, w) {
+					t.Errorf("%s holds a 16-character piece of the %s", name, what)
+					break
+				}
 			}
 		}
 	}
@@ -243,4 +266,25 @@ func TestIdentityExitCodesAgent(t *testing.T) {
 			t.Errorf("err %v calls %d", err, a.cp.calls.Load())
 		}
 	})
+}
+
+// secretWindows returns every n-character substring of secret. The constant
+// parts shared by every key or JWT (the PKCS#8 header, the JWT header) are
+// skipped, because they identify a format, not a secret.
+func secretWindows(what, secret string, n int) []string {
+	switch what {
+	case "pem body":
+		if len(secret) > 24 {
+			secret = secret[24:] // the fixed PKCS#8 prefix of an Ed25519 key
+		}
+	case "assertion", "token":
+		if i := strings.Index(secret, "."); i >= 0 {
+			secret = secret[i+1:] // the JWT header
+		}
+	}
+	var ws []string
+	for i := 0; i+n <= len(secret); i++ {
+		ws = append(ws, secret[i:i+n])
+	}
+	return ws
 }

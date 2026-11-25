@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"time"
 )
 
@@ -42,9 +41,9 @@ func NewCPHTTPClient(caFile string) (*http.Client, error) {
 	base.Proxy = nil
 	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
 	if caFile != "" {
-		pemBytes, err := os.ReadFile(caFile)
+		pemBytes, err := readRegularFile(caFile, "control-plane CA file", maxCAFileBytes, false)
 		if err != nil {
-			return nil, fmt.Errorf("identityclient: read the control-plane CA %s: %w", caFile, unwrapPathErr(err))
+			return nil, err
 		}
 		pool := x509.NewCertPool()
 		if !pool.AppendCertsFromPEM(pemBytes) {
@@ -59,6 +58,9 @@ func NewCPHTTPClient(caFile string) (*http.Client, error) {
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}, nil
 }
+
+// maxCAFileBytes caps the --cp-ca read.
+const maxCAFileBytes = 1 << 20
 
 type capBody struct {
 	next  http.RoundTripper

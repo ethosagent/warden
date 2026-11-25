@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"syscall"
 
 	"github.com/ethosagent/warden/internal/agentid"
 	"github.com/ethosagent/warden/internal/keys"
@@ -94,6 +95,10 @@ func (k AgentKey) Sign(ctx context.Context, signingInput []byte) ([]byte, error)
 	if len(k.priv) == 0 {
 		return nil, keys.ErrNoActiveKey
 	}
+	// This is the agent's own client-side credential on the user's host, not a
+	// Warden service key: it is the same operation as ed25519.Sign on a key the
+	// agent owns, which is why it sits outside the internal/keys signer paths
+	// that architecture rule X1 guards.
 	return k.priv.Sign(nil, signingInput, crypto.Hash(0))
 }
 
@@ -117,26 +122,18 @@ func DefaultAgentKeyPath(agentID string) (string, error) {
 	return filepath.Join(dir, configSubdir, "agents", agentID+".key"), nil
 }
 
-// SaveAgentKey writes k as a PKCS#8 PEM to path: a temp file in the same
-// directory (0600), fsync, rename, in a directory created 0700. It refuses an
-// existing file with ErrKeyExists unless force is set.
+// SaveAgentKey writes k as a PKCS#8 PEM to path (see writePrivateFile). It
+// refuses an existing file with ErrKeyExists, atomically, unless force is set.
 func SaveAgentKey(path string, k AgentKey, force bool) error {
 	if path == "" {
 		return errors.New("identityclient: no agent key file path")
-	}
-	if _, err := os.Lstat(path); err == nil {
-		if !force {
-			return fmt.Errorf("%w (%s)", ErrKeyExists, path)
-		}
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("identityclient: check %s: %w", path, err)
 	}
 	der, err := x509.MarshalPKCS8PrivateKey(k.priv)
 	if err != nil {
 		return errors.New("identityclient: encode the agent key")
 	}
 	data := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
-	return writePrivateFile(path, data)
+	return writePrivateFile(path, data, force)
 }
 
 // LoadAgentKey reads a key written by SaveAgentKey. A file readable by group or
@@ -167,10 +164,22 @@ func readPrivateFile(path, what string) ([]byte, error) {
 	return readCappedFile(path, what, maxKeyFileBytes)
 }
 
-// readCappedFile refuses a file accessible by group or others (naming the path)
-// and a file over limit bytes.
+// readCappedFile reads a secret file: regular, 0600 or tighter, at most limit
+// bytes.
 func readCappedFile(path, what string, limit int64) ([]byte, error) {
-	f, err := os.Open(path)
+	return readRegularFile(path, what, limit, true)
+}
+
+// readRegularFile reads a regular file of at most limit bytes. A FIFO, device
+// or directory is refused before any read, and the open is non-blocking, so a
+// FIFO swapped in after the check cannot hang the caller. When private is set a
+// file accessible by group or others is refused, naming the path.
+func readRegularFile(path, what string, limit int64, private bool) ([]byte, error) {
+	// Stat follows symlinks (a mounted secret is often one) and never blocks.
+	if st, err := os.Stat(path); err == nil && !st.Mode().IsRegular() {
+		return nil, fmt.Errorf("identityclient: the %s %s is not a regular file", what, path)
+	}
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, fmt.Errorf("identityclient: open the %s %s: %w", what, path, unwrapPathErr(err))
 	}
@@ -182,7 +191,7 @@ func readCappedFile(path, what string, limit int64) ([]byte, error) {
 	if !st.Mode().IsRegular() {
 		return nil, fmt.Errorf("identityclient: the %s %s is not a regular file", what, path)
 	}
-	if st.Mode().Perm()&0o077 != 0 {
+	if private && st.Mode().Perm()&0o077 != 0 {
 		return nil, fmt.Errorf("identityclient: the %s %s is accessible by group or others (mode %04o); chmod 600 it", what, path, st.Mode().Perm())
 	}
 	if st.Size() > limit {
@@ -206,12 +215,21 @@ func unwrapPathErr(err error) error {
 	return err
 }
 
-// writePrivateFile writes data atomically: temp file (0600), fsync, rename,
-// directory created 0700.
-func writePrivateFile(path string, data []byte) error {
+// writePrivateFile writes data to path atomically: a temp file (0600) in the
+// same directory, fsync, then publish. The directory is created 0700 and a
+// directory that group or others can write to is refused. With force the temp
+// file is renamed over path; without it the temp file is hard-linked to path,
+// which fails with ErrKeyExists if anything is there, so refusing an existing
+// file is atomic. FileStore.Save uses it too.
+func writePrivateFile(path string, data []byte, force bool) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("identityclient: create %s: %w", dir, unwrapPathErr(err))
+	}
+	if st, err := os.Stat(dir); err != nil {
+		return fmt.Errorf("identityclient: check %s: %w", dir, unwrapPathErr(err))
+	} else if st.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("identityclient: the directory %s is writable by group or others (mode %04o); chmod 700 it", dir, st.Mode().Perm())
 	}
 	tmp, err := os.CreateTemp(dir, ".tmp-*")
 	if err != nil {
@@ -236,7 +254,16 @@ func writePrivateFile(path string, data []byte) error {
 		_ = os.Remove(name)
 		return fmt.Errorf("identityclient: write %s: %w", path, unwrapPathErr(err))
 	}
-	if err := os.Rename(name, path); err != nil {
+	if force {
+		err = os.Rename(name, path)
+	} else {
+		err = os.Link(name, path)
+		_ = os.Remove(name)
+		if errors.Is(err, fs.ErrExist) {
+			return fmt.Errorf("%w (%s)", ErrKeyExists, path)
+		}
+	}
+	if err != nil {
 		_ = os.Remove(name)
 		return fmt.Errorf("identityclient: write %s: %w", path, unwrapPathErr(err))
 	}

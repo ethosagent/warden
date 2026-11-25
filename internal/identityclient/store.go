@@ -72,47 +72,11 @@ func (s *FileStore) Load() (Entry, error) {
 // Save writes the entry atomically: a temp file in the same directory (0600),
 // fsync, rename. The directory is created 0700.
 func (s *FileStore) Save(e Entry) error {
-	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
-		return fmt.Errorf("identityclient: create cache dir %s: %w", s.Dir, err)
-	}
 	b, err := json.Marshal(e)
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(s.Dir, ".tmp-*")
-	if err != nil {
-		return fmt.Errorf("identityclient: write cache in %s: %w", s.Dir, err)
-	}
-	name := tmp.Name()
-	cleanup := func() { _ = os.Remove(name) }
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		cleanup()
-		return err
-	}
-	if _, err := tmp.Write(b); err != nil {
-		_ = tmp.Close()
-		cleanup()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		cleanup()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		cleanup()
-		return err
-	}
-	if err := os.Rename(name, s.Path()); err != nil {
-		cleanup()
-		return fmt.Errorf("identityclient: write cache %s: %w", s.Path(), err)
-	}
-	if d, err := os.Open(s.Dir); err == nil {
-		_ = d.Sync()
-		_ = d.Close()
-	}
-	return nil
+	return writePrivateFile(s.Path(), b, true)
 }
 
 // Remove deletes the cache file and its lock file; absent files are fine.
