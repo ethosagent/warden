@@ -211,6 +211,9 @@ func (s *Stack) runCase(t testing.TB, c Case) {
 				if c.WantLog == "" {
 					t.Errorf("an Unverified case must pin its reason through WantLog")
 				}
+				if c.WantReason != "" && !strings.Contains(after.logs[before.logLen:], `"reason":"`+c.WantReason+`"`) {
+					t.Errorf("the logs written during the case do not carry reason %q", c.WantReason)
+				}
 			} else if len(rows) != 1 || rows[0].Outcome != c.WantResult || rows[0].Reason != c.WantReason {
 				t.Errorf("new token_events rows = %+v, want exactly one with outcome %q reason %q", rows, c.WantResult, c.WantReason)
 			}

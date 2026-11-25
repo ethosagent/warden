@@ -102,9 +102,9 @@ func badSubject(name string, sub func(s *Stack) string) exchangeCase {
 var exchangeCases = func() []Case {
 	rawJWK := func(s *Stack) []byte { return s.Issuer.PublicKeyPEM(s.Issuer.KIDs()[0]) }
 	now := func(s *Stack) time.Time { return s.Clock.Now() }
+	// agent-b is registered in TestTokenExchange: its own key, claiming agent-a.
 	wrongKeyAgent := func(s *Stack) *Agent {
-		// agent-b's key (unregistered for agent-a) claiming agent-a.
-		return &Agent{ID: "agent-a", Key: fakes.NewAgentKey(s.tb, "agent-b-key-1")}
+		return &Agent{ID: "agent-a", Key: s.Agent("agent-b").Key}
 	}
 	table := []exchangeCase{
 		// Client assertion forgeries.
@@ -304,10 +304,16 @@ func replayedJTI() Case {
 func TestTokenExchange(t *testing.T) {
 	s := StartStack(t, StackOptions{DebugCP: true})
 	a := agentSetup(t, s, "agent-a")
+	b := agentSetup(t, s, "agent-b")
 	s.PositiveControl(t, "token", func(t *testing.T) {
 		r, tok := s.Exchange(t, a, s.UserToken("user-1", []string{"eng"}), nil)
 		if tok == "" {
 			t.Fatalf("exchange = %d %s, want a token", r.Status, r.Body)
+		}
+		// agent-b's own key authenticates as agent-b, so the case that
+		// presents it as agent-a fails on agent-a's key list alone.
+		if r, tok := s.Exchange(t, b, s.UserToken("user-2", []string{"eng"}), nil); tok == "" {
+			t.Fatalf("agent-b's own exchange = %d %s, want a token", r.Status, r.Body)
 		}
 	})
 	Run(t, s, "token", exchangeCases)

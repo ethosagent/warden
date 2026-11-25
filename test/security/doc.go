@@ -65,6 +65,19 @@
 // only on a condition (Stack.EventuallyAdvance), never with a fixed Advance
 // followed by a read.
 //
+// # Deviations from the ticket text (carry forward to #113)
+//
+// Config validation still refuses identity mode require, so the worker matrix
+// runs in challenge mode. Consequently: raw Dex with acceptDexTokens true is
+// not tested as a refusal (challenge mode accepts it; require must reject it);
+// the require-mode 403 shapes for terminated and MCP requests are not pinned
+// (every refused credential is a 407 at CONNECT); the clock-skew lower bound is
+// tested at skew minus 2 minutes, on a skew-300 stack, because the proxy
+// re-checks tunnel expiry on the real clock. Token-endpoint refusals before
+// the client assertion verifies have no token_events row: they are pinned
+// through the CP's debug-level token_exchange_denied line (Case.Unverified),
+// and the TokenEdge.Metrics.Denied counter is not asserted.
+//
 // # The gate canary
 //
 // TestCanary fails when WARDEN_SECURITY_CANARY=1. Running

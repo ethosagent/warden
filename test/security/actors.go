@@ -243,9 +243,9 @@ func (s *Stack) RegisterAgent(tb testing.TB, id string, key *fakes.AgentKey, gro
 				// attribute mode the worker is enforcing once it has counted a
 				// verification.
 				s.Eventually(w.Name+" to verify tokens in identity mode "+mode+" for registered agent "+id, func() bool {
-					s.probeConnectWith(w, "Basic "+base64.StdEncoding.EncodeToString([]byte("session:not-a-jwt")))
+					status := s.probeConnectWith(w, "Basic "+base64.StdEncoding.EncodeToString([]byte("session:not-a-jwt")))
 					v, ok := s.TryMetric(w, "warden_identity_verify_total", map[string]string{"result": "invalid"})
-					return ok && v > 0
+					return status == http.StatusOK && ok && v > 0
 				})
 				continue
 			}
