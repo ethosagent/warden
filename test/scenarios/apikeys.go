@@ -148,6 +148,75 @@ func apiKeyOfflineRevoke(t *testing.T, h *harness.H) {
 	}
 }
 
+// apiKeyCLIRevoke (W-P2-APIK-05): `warden control-plane api-key revoke` run in a
+// second process, here controlplane.RunAPIKeyRevoke on the live state dir, is
+// refused by the running control plane within one 2s poll of its Index. The CLI
+// uses the Store only (no Index, no Run), appends exactly one admin_audit row
+// with auth_method cli, and list shows the key without its secret.
+func apiKeyCLIRevoke(t *testing.T, h *harness.H) {
+	ctx := context.Background()
+	st := apiKeyOfflineStore(t, h)
+	key, id := mintAPIKey(t, st, "ci", "policy:read")
+	other, otherID := mintAPIKey(t, st, "other", "policy:read")
+	stateDir := h.AdminAuditStateDir()
+
+	pollUntil(h, "the control plane to load the new keys", func() bool {
+		a, _ := keyStatus(t, h, key, http.MethodGet, "/dashboard/api/policy", "")
+		b, _ := keyStatus(t, h, other, http.MethodGet, "/dashboard/api/policy", "")
+		return a == http.StatusOK && b == http.StatusOK
+	})
+	listed, err := controlplane.ListAPIKeysOffline(ctx, stateDir)
+	if err != nil || len(listed) != 2 {
+		t.Fatalf("offline list = %v, %v; want the two keys", listed, err)
+	}
+	for _, k := range listed {
+		if all := k.String() + k.OwnerEmail; strings.Contains(all, key) || strings.Contains(all, "wak_") {
+			t.Fatalf("offline list shows key material: %s", all)
+		}
+	}
+
+	// Let Index.Run re-arm its poll timer before the revoke (see apiKeyOfflineRevoke).
+	prev := -1
+	h.Eventually("the control plane's timers to settle", func() bool {
+		n := h.Clock().PendingTimers()
+		settled := n == prev
+		prev = n
+		time.Sleep(20 * time.Millisecond)
+		return settled
+	})
+	rows := len(h.AdminAuditRows())
+	res, err := controlplane.RunAPIKeyRevoke(ctx, stateDir, "", controlplane.APIKeyRevokeTarget{ID: id}, nil)
+	if err != nil || len(res.Revoked) != 1 || res.Revoked[0] != id || !res.Audited {
+		t.Fatalf("RunAPIKeyRevoke = %+v, %v", res, err)
+	}
+	h.Clock().Advance(apiKeyPoll)
+	h.Eventually("the control plane to refuse the CLI-revoked key within one poll", func() bool {
+		status, _ := keyStatus(t, h, key, http.MethodGet, "/dashboard/api/policy", "")
+		return status == http.StatusUnauthorized
+	})
+	if status, _ := keyStatus(t, h, other, http.MethodGet, "/dashboard/api/policy", ""); status != http.StatusOK {
+		t.Fatalf("an untouched key = %d, want 200", status)
+	}
+
+	all := h.AdminAuditRows()
+	if len(all) != rows+1 {
+		t.Fatalf("admin_audit has %d rows, want one new row for the revoke", len(all))
+	}
+	r := all[len(all)-1]
+	if r.AuthMethod != adminaudit.AuthMethodCLI || r.Action != "api_key.revoke" || r.Target != "api_keys" || r.TargetRef != "api_key:"+id {
+		t.Fatalf("audit row = %+v, want a cli api_key.revoke row for %s", r, id)
+	}
+	if k, err := st.Get(ctx, id); err != nil || !strings.HasPrefix(k.RevokedBy, "cli:") {
+		t.Fatalf("revoked_by = %q, %v; want cli:<os user>", k.RevokedBy, err)
+	}
+	if k, _ := st.Get(ctx, otherID); !k.RevokedAt.IsZero() {
+		t.Fatal("the CLI revoked a key it was not asked to")
+	}
+	if strings.Contains(h.Logs(), key) || strings.Contains(r.Details, key) {
+		t.Fatal("the API key is in the logs or the audit row")
+	}
+}
+
 // apiKeyScopes: a policy:read key reads the policy and is refused a write with
 // insufficient_scope, the refusal is a chained denied row under the owner with
 // the key id, and a key holding every scope is still refused on the worker
