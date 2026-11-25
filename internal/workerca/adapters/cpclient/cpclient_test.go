@@ -461,9 +461,11 @@ func TestRenewerRetriesAFailedPersist(t *testing.T) {
 	if err := os.WriteFile(certDir, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	var logs bytes.Buffer
+	// logs is written by the Renewer's goroutine; read it only through
+	// logs.String (under the same mutex).
+	logs := &syncWriter{w: &bytes.Buffer{}}
 	r := &cpclient.Renewer{Endpoint: cp.url("/control/renew"), HTTP: http.DefaultClient, Source: src, StateDir: dir, Clock: clk,
-		Jitter: func() float64 { return 0 }, Logger: slog.New(slog.NewTextHandler(&syncWriter{w: &logs}, nil))}
+		Jitter: func() float64 { return 0 }, Logger: slog.New(slog.NewTextHandler(logs, nil))}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { r.Run(ctx); close(done) }()
@@ -499,4 +501,11 @@ func (s *syncWriter) Write(p []byte) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.w.Write(p)
+}
+
+// String reads the buffer under the writer's lock.
+func (s *syncWriter) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.String()
 }
