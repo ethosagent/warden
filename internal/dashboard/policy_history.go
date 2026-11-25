@@ -283,20 +283,38 @@ func splitVersionPath(p string) (seg, action string, ok bool) {
 	}
 }
 
+// APIKeysPath is the API key management route the control plane serves itself
+// (W-P2-APIK-03); RoutePath templates its per-key paths.
+const APIKeysPath = "/dashboard/api/api-keys"
+
 // RoutePath maps a request path to the Routes() path it is served under: a
 // concrete version path (/dashboard/api/policy/versions/3/diff) becomes its
 // template (/dashboard/api/policy/versions/{v}/diff), whatever the segment
 // holds, a worker token path (/dashboard/api/worker-tokens/wt_x) becomes
 // /dashboard/api/worker-tokens/{id}, and a block list entry path becomes
-// /dashboard/api/blocked-users/{id}; every other path is returned unchanged.
+// /dashboard/api/blocked-users/{id}, a worker revoke path becomes
+// /dashboard/api/workers/{id}/revoke; every other path is returned unchanged.
 // The control plane keys its authz table and audit classification on the
 // result.
 func RoutePath(p string) string {
 	if _, ok := workerTokenID(p); ok {
 		return workerTokensPath + "/{id}"
 	}
+	if _, ok := workerRevokeID(p); ok {
+		return workersPath + "/{id}/revoke"
+	}
 	if _, ok := blockedUserID(p); ok {
 		return blockedUsersPath + "/{id}"
+	}
+	if _, action, ok := splitChangePath(p); ok {
+		t := changesPath + "/{id}"
+		if action != "" {
+			t += "/" + action
+		}
+		return t
+	}
+	if seg, ok := strings.CutPrefix(p, APIKeysPath+"/"); ok && seg != "" && seg != "self" && !strings.Contains(seg, "/") {
+		return APIKeysPath + "/{id}"
 	}
 	if _, action, ok := splitVersionPath(p); ok {
 		t := policyVersionsPath + "/{v}"

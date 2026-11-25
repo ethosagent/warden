@@ -19,6 +19,8 @@ package dashboard
 //	POST   /dashboard/api/blocked-users                 admin, audited blocked_users.add
 //	DELETE /dashboard/api/blocked-users/{id}            admin, audited blocked_users.remove
 //
+//	POST /dashboard/api/workers/{id}/revoke             admin, audited worker.revoked (W-P2-WCA-05)
+//
 //	GET  /dashboard/api/worker-tokens                   viewer  (W-P1-WTOK-03)
 //	POST /dashboard/api/worker-tokens                   admin, audited worker_token.create
 //	DELETE /dashboard/api/worker-tokens/{id}            admin, audited worker_token.revoke
@@ -43,10 +45,13 @@ func (s *Server) registerRoutes(mux *routeMux) {
 	mux.HandleFunc("/dashboard/api/policy/versions", s.handlePolicyVersions)
 	mux.HandleFunc("/dashboard/api/policy/versions/", s.handlePolicyVersion)
 	mux.HandleFunc("/dashboard/api/backup", s.handleBackup)
+	mux.HandleFunc("/dashboard/api/workers/", s.handleWorkerRevoke)
 	mux.HandleFunc("/dashboard/api/worker-tokens", s.handleWorkerTokens)
 	mux.HandleFunc("/dashboard/api/worker-tokens/", s.handleWorkerTokenByID)
 	mux.HandleFunc("/dashboard/api/blocked-users", s.handleBlockedUsers)
 	mux.HandleFunc("/dashboard/api/blocked-users/", s.handleBlockedUser)
 	mux.HandleFunc("/dashboard/api/keys", s.handleKeys)
 	mux.HandleFunc("/dashboard/api/keys/rotate", s.handleKeysRotate)
+	mux.HandleFunc("/dashboard/api/changes", s.handleChanges)
+	mux.HandleFunc("/dashboard/api/changes/", s.handleChange)
 }

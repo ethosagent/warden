@@ -78,10 +78,17 @@ var Excluded = map[string]string{
 	"controlplane.PolicyVersionStore": "the control plane's own versioned policy store on the cpstate SQLite DB; the harness runs the real one (--policy-store=versioned), a fake would hide the compare-and-swap and transaction behaviour",
 	"dashboard.BlockListStore":        "the dashboard's view of the control plane's own block list on the cpstate SQLite DB (controlplane.BlockStore); the harness runs the real one, a fake would hide the limits and uniqueness the store enforces",
 	"worker.ControlPlaneClient":       "the worker's view of the control plane; the harness runs the real control plane (*config.RemoteProvider) rather than a fake",
+	"apikeys.Store":                   "the control plane's own api_keys table on the cpstate SQLite DB (sqlitestore.SQLiteStore in apikeys/adapters/sqlitestore); no external system behind it, the harness will run the real one once the CP wires API keys (W-P2-APIK-02), and a fake would hide the atomic cap check and the data_version reload",
 	"keys.MetaStore":                  "the control plane's own signing_keys table on the cpstate SQLite DB (keys/adapters/metastore); the harness runs the real one, a fake would hide the compare-and-swap and unique-index behaviour that keeps the key lifecycle from forking",
 	"agentreg.Store":                  "the control plane's own agent registry on the cpstate SQLite DB (agentreg.SQLiteStore); the harness runs the real one, a fake would hide the revision compare-and-swap, key-uniqueness and cap behaviour that agentregtest.Run pins for every implementation",
 	"tokensvc.ReplayStore":            "the control plane's own token_assertion_jti table on the cpstate SQLite DB (tokensvc/adapters/sqlite); the harness runs the real one, a fake would hide the INSERT ... ON CONFLICT DO NOTHING single-use semantics that stop a replayed assertion",
+	"approvals.Store":                 "the control plane's own change_drafts and change_approvals tables on the cpstate SQLite DB (approvals/adapters/sqlstore); the harness runs the real one, a fake would hide the compare-and-swap transitions and the unique and append-only constraints the approvals gate depends on",
+	"approvals.ReplayStore":           "the draft_replays table on the cpstate SQLite DB (approvals/adapters/sqlstore); the harness runs the real one, a fake would hide the settle-once compare-and-swap that discards a late replay result",
 	"keys.Signer":                     "local CPU-only signing over stdlib crypto (GenerateLocal/NewLocalSigner); no external system behind the port, and a fake would hide the JOSE wire encodings (r||s, RFC 7638 kids) the verifiers pin",
+
+	// Worker CA enrollment (W-P2-WCA-02), on the cpstate SQLite DB like the stores above.
+	"controlplane.EnrollmentTokenStore": "the control plane's own enrollment tokens; the harness runs the real one, a fake would hide the single-use transaction and the data_version reload",
+	"controlplane.WorkerCertStore":      "the control plane's own issued-cert table; the harness runs the real one, a fake would hide the uniqueness and revoke rules",
 }
 
 // --- keys.PrivateKeyStore ---

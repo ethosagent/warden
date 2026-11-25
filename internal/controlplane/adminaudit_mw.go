@@ -56,6 +56,9 @@ const (
 	// Details the middleware itself sets (never a value from the request).
 	detailHashError = "hash_error"
 	detailReason    = "reason"
+	// detailSkipRefused marks a row whose handler asked for no row (Skip) but
+	// whose claim the middleware could not verify.
+	detailSkipRefused = "skip_refused"
 )
 
 var requestIDPattern = regexp.MustCompile(`^[A-Za-z0-9-]{1,64}$`)
@@ -112,12 +115,8 @@ func newAdminAuditor(rec adminaudit.Recorder, probe func(context.Context) error,
 		clock:          clk,
 		logger:         logger,
 	}
-	for _, c := range cc.TrustedProxies {
-		// Validated at config load; a bad entry here is skipped, never trusted.
-		if p, err := netip.ParsePrefix(c); err == nil {
-			a.trusted = append(a.trusted, p.Masked())
-		}
-	}
+	// Validated at config load; a bad entry is skipped, never trusted.
+	a.trusted = parseTrustedProxies(cc.TrustedProxies)
 	return a
 }
 
@@ -164,6 +163,9 @@ type auditActor struct {
 	actor      adminaudit.Actor
 	role       string
 	authMethod string
+	// apiKeyID is the id of the API key that made the request ("" otherwise);
+	// it is recorded as details.api_key_id.
+	apiKeyID string
 }
 
 // resolveActor finds the authenticated actor: a session or break-glass
@@ -176,6 +178,17 @@ func (s *Server) resolveActor(r *http.Request) (auditActor, bool) {
 		method := adminaudit.AuthMethodOIDC
 		if p.Kind == PrincipalBreakglass {
 			method = adminaudit.AuthMethodBreakglass
+		}
+		if p.Kind == PrincipalAPIKey {
+			// The row is the owner's: actor_id is the HMAC of the owner's sub and the
+			// side row holds their sub and email; the role is the owner's current
+			// one. Only details.api_key_id says a key made the request.
+			return auditActor{
+				actor:      adminaudit.Actor{Sub: p.ActorSub(), Email: p.Email},
+				role:       role.String(),
+				authMethod: adminaudit.AuthMethodAPIKey,
+				apiKeyID:   p.KeyID,
+			}, true
 		}
 		return auditActor{actor: adminaudit.Actor{Sub: p.Sub, Email: p.Email}, role: role.String(), authMethod: method}, true
 	}
@@ -236,12 +249,32 @@ func (s *Server) adminAuditMiddleware(classify func(*http.Request) (authzRow, bo
 		}
 		defer release()
 
-		before, beforeErr := a.stateHash(ctx, row.Target)
 		actx, ann := adminaudit.WithAnnotation(ctx)
+		// The scope lets a per-object state hasher (change_draft) find the
+		// object the request names, before and after the handler runs.
+		actx = withAuditScope(actx, r.URL.Path)
+		before, beforeErr := a.stateHash(actx, row.Target)
 		sw := wrapStatus(w)
 		next.ServeHTTP(sw.writer(), r.WithContext(actx))
 		status := sw.code()
 		outcome := outcomeFor(status)
+		// A handler's NoChange is a claim, not a command: it is honoured only when the
+		// middleware can verify that nothing changed (the target has a state
+		// hasher, both hashes were computed, and they are equal). Otherwise the
+		// row is written as usual and says the claim was refused. The after hash
+		// uses the audit-scoped actx like the before one: a per-object hasher
+		// (change_draft) answers "" without the scope, which would make any
+		// change look like a no-op. A request that queued follow-up rows did
+		// something worth recording, and returning here would drop them.
+		skipRefused := false
+		if ann.NoChangeClaimed() {
+			if outcome == adminaudit.OutcomeOK && beforeErr == nil && a.hasHasher(row.Target) && len(auditFollowUps(actx)) == 0 {
+				if after, afterErr := a.stateHash(actx, row.Target); afterErr == nil && after == before {
+					return // an idempotent repeat that changed nothing: no row
+				}
+			}
+			skipRefused = true
+		}
 		if !authed && outcome != adminaudit.OutcomeOK {
 			// Only an anonymous request that changed state needs a row; anything
 			// else is counted like other unauthenticated traffic, so open mode
@@ -253,7 +286,7 @@ func (s *Server) adminAuditMiddleware(classify func(*http.Request) (authzRow, bo
 		// error may have partly applied), so the state is hashed again.
 		after, afterErr := before, beforeErr
 		if outcome != adminaudit.OutcomeDenied {
-			after, afterErr = a.stateHash(ctx, row.Target)
+			after, afterErr = a.stateHash(actx, row.Target)
 		}
 		ref, details := ann.Snapshot()
 		if details == nil {
@@ -263,8 +296,14 @@ func (s *Server) adminAuditMiddleware(classify func(*http.Request) (authzRow, bo
 			before, after = "", ""
 			details[detailHashError] = "true"
 		}
+		if skipRefused {
+			details[detailSkipRefused] = "true"
+		}
 		if csrfRefused(ctx) {
 			details[detailReason] = "csrf"
+		}
+		if who.apiKeyID != "" {
+			details[adminaudit.DetailAPIKeyID] = who.apiKeyID
 		}
 		in := adminaudit.Input{
 			Actor: who.actor, ActorRole: who.role, AuthMethod: who.authMethod,
@@ -281,6 +320,7 @@ func (s *Server) adminAuditMiddleware(classify func(*http.Request) (authzRow, bo
 			return
 		}
 		a.degraded.Store(false)
+		s.recordFollowUps(ctx, in, auditFollowUps(actx))
 	})
 }
 
@@ -568,4 +608,36 @@ func (s *statusWriter) writer() http.ResponseWriter {
 		return hijackStatusWriter{s}
 	}
 	return s
+}
+
+// recordFollowUps records the extra rows a handler asked for after the
+// request's own row (a change draft that applied also records the policy change
+// it made). A handler supplies only what happened; who did it, from where and
+// the status come from the primary row, the outcome is always ok, nothing is
+// recorded when the primary outcome is not ok, details pass the closed set and
+// at most maxAuditFollowUps rows are written.
+func (s *Server) recordFollowUps(ctx context.Context, primary adminaudit.Input, follows []auditFollowUp) {
+	if primary.Outcome != adminaudit.OutcomeOK || len(follows) == 0 {
+		return
+	}
+	if len(follows) > maxAuditFollowUps {
+		s.cfg.Logger.Warn("admin_audit_followups_dropped", "action", primary.Action, "dropped", len(follows)-maxAuditFollowUps)
+		follows = follows[:maxAuditFollowUps]
+	}
+	for _, f := range follows {
+		next := adminaudit.Input{
+			Actor: primary.Actor, ActorRole: primary.ActorRole, AuthMethod: primary.AuthMethod,
+			Action: f.Action, Target: f.Target, TargetRef: f.TargetRef,
+			Details: adminaudit.FilterDetails(f.Details),
+			Outcome: adminaudit.OutcomeOK, HTTPStatus: primary.HTTPStatus,
+			BeforeHash: f.BeforeHash, AfterHash: f.AfterHash,
+			ClientIP: primary.ClientIP, RequestID: primary.RequestID,
+		}
+		if _, err := s.audit.rec.Record(context.WithoutCancel(ctx), next); err != nil {
+			s.audit.degraded.Store(true)
+			s.logPersistFailed(next, err)
+			s.publishAuditDegraded("append_failed")
+			return
+		}
+	}
 }

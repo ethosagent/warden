@@ -428,3 +428,54 @@ func containsStr(ss []string, want string) bool {
 	}
 	return false
 }
+
+// wardenTokenBody carries shape-correct synthetic Warden credentials (not minted
+// ones): a wak_ API key and a wwt_ worker token.
+var wardenTokenBody = `{"k":"wak_0123456789abcdef_` + strings.Repeat("a", 52) + `","w":"wwt_` + strings.Repeat("b", 52) + `"}`
+
+// dlpWardenRun posts wardenTokenBody through a DLP proxy built from cfg and
+// returns the allow event plus whether the backend body arrived byte-identical.
+func dlpWardenRun(t *testing.T, cfg config.DLPConfig) (*analytics.Event, bool) {
+	t.Helper()
+	caCertPEM, caKeyPEM, caCert, caKey := generateTestCA(t)
+	backendLn, rb := startBackend(t, caCert, caKey)
+	p, ss := startTestProxyWithDLP(t, []string{"backend.test"}, caCertPEM, caKeyPEM, NewDLPScanner(cfg, false, false), map[string]string{}, nil, nil)
+	p.dialTLS = dialBackend(backendLn)
+	if status := doPostThroughProxy(t, p, caCertPEM, "application/json", wardenTokenBody); status != 200 {
+		t.Fatalf("monitor must forward; got %d", status)
+	}
+	identical := backendBody(rb) == wardenTokenBody
+	waitForEvents(t, ss, 1)
+	ev := findEvent(ss.snapshot(), "https", "allow")
+	if ev == nil {
+		t.Fatalf("expected https allow event, got %+v", ss.snapshot())
+	}
+	return ev, identical
+}
+
+// With dlp.wardenTokens unset a request carrying wak_/wwt_ values is forwarded
+// exactly as today: byte-identical body, no credential finding recorded.
+func TestDLPWardenTokensOffByDefault(t *testing.T) {
+	ev, identical := dlpWardenRun(t, config.DLPConfig{Mode: "monitor"})
+	if !identical {
+		t.Fatal("body was altered with wardenTokens off")
+	}
+	if containsStr(ev.DataClasses, "credentials") {
+		t.Fatalf("wardenTokens off must not flag credentials, got %v", ev.DataClasses)
+	}
+}
+
+// With dlp.wardenTokens on, monitor mode flags the credentials and still forwards
+// the body unchanged (nothing new is blocked unless enforce is also configured).
+func TestDLPWardenTokensMonitorFlags(t *testing.T) {
+	ev, identical := dlpWardenRun(t, config.DLPConfig{Mode: "monitor", WardenTokens: true})
+	if !identical {
+		t.Fatal("monitor must not mutate the body")
+	}
+	if !containsStr(ev.DataClasses, "credentials") || ev.DLPAction != "monitor" {
+		t.Fatalf("want credentials/monitor, got %v/%q", ev.DataClasses, ev.DLPAction)
+	}
+	if eventContains(t, *ev, strings.Repeat("a", 52)) || eventContains(t, *ev, strings.Repeat("b", 52)) {
+		t.Fatal("event carries a token value")
+	}
+}
