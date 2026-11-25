@@ -285,6 +285,9 @@ type EventFilter struct {
 	// User narrows to one person: an exact user_sub match, or a case-insensitive
 	// user_email match. Empty = no user filter. Always bound as a parameter.
 	User string
+	// Act narrows to events whose Warden token was minted for this agent
+	// (user_act, exact match). Empty = no act filter. Always bound as a parameter.
+	Act string
 	// ProxyID filters to events from one worker in a fleet view. Honored by the
 	// aggregating CentralStore; ignored by the local SQLite store (single node).
 	ProxyID string
@@ -295,6 +298,16 @@ type EventFilter struct {
 // userFilterSQL is the shared WHERE fragment for EventFilter.User; both SQLite
 // stores bind the same value twice (sub, then email).
 const userFilterSQL = " AND (user_sub = ? OR lower(user_email) = lower(?))"
+
+// actFilterSQL is the WHERE fragment for EventFilter.Act, shared by the SQLite
+// stores.
+const actFilterSQL = " AND user_act = ?"
+
+// MatchesAct is the in-memory twin of actFilterSQL (true when no act filter is
+// set), for stores and fakes that do not run SQL.
+func (f EventFilter) MatchesAct(e Event) bool {
+	return f.Act == "" || e.UserAct == f.Act
+}
 
 // MatchesUser reports whether e belongs to f.User (true when no user filter is
 // set). It is the in-memory twin of userFilterSQL, for stores and fakes that do
@@ -734,6 +747,10 @@ func (s *SQLiteStore) GetEvents(filter EventFilter) ([]Event, error) {
 	if filter.User != "" {
 		q += userFilterSQL
 		args = append(args, filter.User, filter.User)
+	}
+	if filter.Act != "" {
+		q += actFilterSQL
+		args = append(args, filter.Act)
 	}
 	if !filter.Since.IsZero() {
 		q += " AND ts >= ?"

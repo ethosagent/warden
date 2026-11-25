@@ -44,6 +44,9 @@ func (f *fakeDataSource) GetEvents(filter analytics.EventFilter) ([]analytics.Ev
 		if !filter.MatchesUser(e) {
 			continue
 		}
+		if !filter.MatchesAct(e) {
+			continue
+		}
 		if !filter.Since.IsZero() && e.Timestamp.Before(filter.Since) {
 			continue
 		}
