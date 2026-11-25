@@ -338,5 +338,5 @@ What it does not stop:
 - Real deployments replace Dex with the organisation's IdP, use real secrets from a
   secret manager, and register the agent through the console (**Agents** tab) instead
   of the bootstrap.
-- The file `deploy/compose/claude-code/bootstrap.sh` is the entire bootstrap; read it
+- The file `deploy/compose/recipe-bootstrap.sh` is the entire bootstrap (shared with the Codex recipe); read it
   before you adapt it.
