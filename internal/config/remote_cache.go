@@ -1,7 +1,6 @@
 package config
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -17,9 +16,10 @@ import (
 // controlPlane.stateDir set persists each verified bundle, so a restart while
 // the control plane is down can enforce it instead of staying fail-closed.
 //
-// What is on disk is the signed envelope as the control plane sent it, minus
-// the credentials sidecar: the file holds policy and signatures, never a
-// secret. Nothing is trusted because it is on disk. LoadCache runs the same
+// What is on disk is the verified envelope re-marshalled in canonical form
+// from what bundle.Verify parsed (payload and signatures, never the
+// credentials sidecar or any other member of the received bytes): the file
+// holds policy and signatures, never a secret. Nothing is trusted because it is on disk. LoadCache runs the same
 // bundle.Verify as a live pull (pins, issuer, expiry) and additionally refuses a
 // bundle older than the configured max age, so a restart cannot bring back a
 // very old block list. The cached bundle's seq becomes the applied State, so a
@@ -119,19 +119,22 @@ func ensureOwnDir(dir string) error {
 	return nil
 }
 
-// writeCache persists the verified envelope body without its credentials. The
+// writeCache persists the verified envelope without its credentials. The
 // caller holds applyMu and has already swapped the snapshot, so a failure here
 // is logged once and changes nothing that is enforced. It runs for a Refresh
 // too: the cached issuedAt moves with each re-signed bundle, or the max age
 // would be measured from a stale time.
-func (r *RemoteProvider) writeCache(t *BundleTrust, body []byte) {
+func (r *RemoteProvider) writeCache(t *BundleTrust, v bundle.Verified) {
 	r.mu.RLock()
 	c := r.cache
 	r.mu.RUnlock()
 	if c == nil {
 		return
 	}
-	err := writeCacheFile(c.path, body)
+	out, err := v.WithoutCredentials()
+	if err == nil {
+		err = writeCacheFile(c.path, out)
+	}
 	r.mu.Lock()
 	logFail := err != nil && !c.failed
 	c.failed = err != nil
@@ -142,18 +145,12 @@ func (r *RemoteProvider) writeCache(t *BundleTrust, body []byte) {
 	}
 }
 
-// writeCacheFile writes the envelope minus "credentials" to path atomically:
-// temp file in the same directory (0600), fsync, rename, fsync the directory.
-func writeCacheFile(path string, body []byte) error {
-	var env map[string]json.RawMessage
-	if err := json.Unmarshal(body, &env); err != nil {
-		return errors.New("envelope is not a JSON object")
-	}
-	delete(env, "credentials")
-	out, err := json.Marshal(env)
-	if err != nil {
-		return err
-	}
+// writeCacheFile writes out (a bundle.Verified.WithoutCredentials envelope)
+// to path atomically: temp file in the same directory (0600), fsync, rename,
+// fsync the directory. It never derives what it writes from received bytes:
+// re-parsing the envelope here (a map lookup of "credentials", say) could
+// disagree with bundle.Verify about which member is the sidecar.
+func writeCacheFile(path string, out []byte) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".bundle-*.tmp")
 	if err != nil {

@@ -900,6 +900,9 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		cfg.Dialer = p.Overrides.Dialer
 		cfg.UpstreamRootCAs = p.Overrides.UpstreamRootCAs
 		cfg.Inflight = p.Overrides.Inflight
+		if p.Overrides.Clock != nil {
+			cfg.IdentityClock = p.Overrides.Clock.Now
+		}
 		cfg.BeforeTerminal = p.Overrides.BeforeTerminal
 	}
 
