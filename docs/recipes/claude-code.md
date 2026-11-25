@@ -113,11 +113,12 @@ Claude Code, so allow a few minutes.
 
 Running `up -d` again re-runs the bootstrap and changes nothing.
 
-**Right after the first start, Warden-token exchange answers 503 for about two
-minutes.** The control plane creates its first token key and holds it back until
-every worker has had time to pick it up (`signer_unavailable`, `Retry-After`). The
-sidecar keeps retrying; a request in that window gets `503` from the sidecar and works
-on a retry. This happens once per fresh state volume.
+**Right after the first start, Warden-token exchange fails for a few minutes** (about
+three to four in a clean run). The control plane creates its first token key and holds
+it back until every worker could have picked it up (`signer_unavailable`,
+`Retry-After`). The sidecar keeps retrying; a request in that window gets `503` from
+the sidecar (reason `cp_unreachable` in its log) and works on a retry. This happens
+once per fresh state volume.
 
 ## 4. Sign in as a user
 
@@ -188,22 +189,25 @@ $COMPOSE exec claude-code claude -p 'say ok'
 
 ## 6. Read the attribution
 
-A worker decision line for the call carries the user and the agent:
+The worker's decision line for the call names the user:
 
 ```sh
-$COMPOSE logs warden | grep '"host":"api.anthropic.com"'
+$COMPOSE logs warden | grep '"domain":"api.anthropic.com"'
 ```
 
-Look for `"decision":"allow"`, `user.sub` / `user_sub` (alice's Dex `sub`) and `user.act`
-(`claude-code`). The control plane's traffic API joins the same events across workers:
+Look for `"decision":"allow"`, `"identity_status":"valid"` and `user_sub` (alice's Dex
+`sub`). The agent (`act`, here `claude-code`) is recorded on the stored event as
+`user_act`, so filter on it in the control plane's traffic API, which joins events
+across workers:
 
 ```sh
 curl -ks -H "Authorization: Bearer $WARDEN_CP_ADMIN_TOKEN" \
-  'https://localhost:7070/dashboard/api/traffic?user=alice@example.test'
+  'https://localhost:7070/dashboard/api/traffic?user=alice@example.test&act=claude-code'
 ```
 
-(The seeded users' emails are in `deploy/compose/dex/seed.ldif`.) Each event has
-`identity_status: valid`. No token, user token, agent key or request body is logged.
+(The seeded users' emails are in `deploy/compose/dex/seed.ldif`.) With only the
+placeholder the upstream `response_status` is 401. No token, user token, agent key or
+request body is logged.
 
 ## Degraded modes
 
