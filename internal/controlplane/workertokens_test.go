@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -469,5 +470,40 @@ func TestWorkerTokenStringAndLogValue(t *testing.T) {
 	}
 	if v := tok.LogValue(); v.Kind() != slog.KindGroup || len(v.Group()) != 3 {
 		t.Fatalf("LogValue = %v", v)
+	}
+}
+
+// WorkerTokenPattern is what egress DLP looks for. It must describe exactly what
+// generateWorkerToken emits and wellFormed accepts, or DLP goes blind to real
+// tokens after a format change.
+func TestWorkerTokenPatternMatchesGenerator(t *testing.T) {
+	re := regexp.MustCompile("^" + WorkerTokenPattern + "$")
+	for range 64 {
+		tok, err := generateWorkerToken()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !re.MatchString(tok) || !wellFormed(tok) {
+			t.Fatalf("generated token: pattern match=%v wellFormed=%v", re.MatchString(tok), wellFormed(tok))
+		}
+	}
+	tok, err := generateWorkerToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, v := range map[string]string{
+		"short":     tok[:len(tok)-1],
+		"long":      tok + "a",
+		"uppercase": strings.ToUpper(tok),
+		"prefix":    "wxt_" + tok[4:],
+		"digit 1":   tok[:4] + "1" + tok[5:],
+		"empty":     "",
+	} {
+		if re.MatchString(v) != wellFormed(v) {
+			t.Errorf("%s: anchored pattern (%v) and wellFormed (%v) disagree", name, re.MatchString(v), wellFormed(v))
+		}
+		if re.MatchString(v) {
+			t.Errorf("%s: near-miss matched the pattern", name)
+		}
 	}
 }

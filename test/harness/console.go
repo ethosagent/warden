@@ -96,6 +96,9 @@ func (h *H) consoleYAML() string {
 		audit += "  adminAudit:\n    enabled: true\n"
 	}
 	audit += h.approvalsYAML()
+	if h.wantAPIKeys && h.wantConsole {
+		audit += "  apiKeys:\n    enabled: true\n"
+	}
 	if !h.wantConsole {
 		if audit == "" {
 			return ""

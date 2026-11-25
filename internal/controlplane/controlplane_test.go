@@ -27,7 +27,7 @@ import (
 )
 
 // writePolicyFile writes a policy YAML (with a secrets block) and returns its path.
-func writePolicyFile(t *testing.T, allowDomain string) string {
+func writePolicyFile(t testing.TB, allowDomain string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "policy.yaml")
 	body := "policy:\n  allowlist:\n    - domain: " + allowDomain + "\n" +

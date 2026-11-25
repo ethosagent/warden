@@ -428,3 +428,87 @@ func TestConsoleApprovalsNotOnPolicyWire(t *testing.T) {
 		t.Errorf("policy JSON carries the approvals block: %s", raw)
 	}
 }
+
+func TestConsoleAPIKeys(t *testing.T) {
+	// Defaults: disabled, with the documented limits.
+	prov, err := parse(consoleYAML(validOIDC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, _ := prov.GetPolicy()
+	want := ConsoleAPIKeys{DefaultTTL: 2160 * time.Hour, MaxTTL: 8760 * time.Hour, MaxPerOwner: 25, RatePerKey: 10}
+	if p.Console.APIKeys != want {
+		t.Errorf("defaults = %+v, want %+v", p.Console.APIKeys, want)
+	}
+
+	// An absent console block keeps the defaults too.
+	prov, err = parse(consoleYAML(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, _ = prov.GetPolicy()
+	if p.Console.APIKeys != want {
+		t.Errorf("absent block = %+v, want %+v", p.Console.APIKeys, want)
+	}
+
+	tests := []struct {
+		name    string
+		extra   string
+		wantErr string // "" means valid
+		check   func(ConsoleAPIKeys) bool
+	}{
+		{"enabled with overrides", "  apiKeys:\n    enabled: true\n    defaultTTL: 24h\n    maxTTL: 720h\n    maxPerOwner: 3\n    ratePerKey: 50\n", "",
+			func(k ConsoleAPIKeys) bool {
+				return k.Enabled && k.DefaultTTL == 24*time.Hour && k.MaxTTL == 720*time.Hour && k.MaxPerOwner == 3 && k.RatePerKey == 50
+			}},
+		{"maxTTL above the hard ceiling", "  apiKeys:\n    maxTTL: 8761h\n", "console.apiKeys.maxTTL", nil},
+		{"maxTTL below the minimum", "  apiKeys:\n    maxTTL: 30m\n", "console.apiKeys.maxTTL", nil},
+		{"defaultTTL above maxTTL", "  apiKeys:\n    defaultTTL: 100h\n    maxTTL: 50h\n", "console.apiKeys.defaultTTL", nil},
+		{"defaultTTL below the minimum", "  apiKeys:\n    defaultTTL: 1m\n", "console.apiKeys.defaultTTL", nil},
+		{"bad duration", "  apiKeys:\n    defaultTTL: soon\n", "console.apiKeys.defaultTTL", nil},
+		{"negative maxPerOwner", "  apiKeys:\n    maxPerOwner: -1\n", "console.apiKeys.maxPerOwner", nil},
+		{"huge maxPerOwner", "  apiKeys:\n    maxPerOwner: 100000\n", "console.apiKeys.maxPerOwner", nil},
+		{"negative ratePerKey", "  apiKeys:\n    ratePerKey: -5\n", "console.apiKeys.ratePerKey", nil},
+		{"unknown key", "  apiKeys:\n    enable: true\n", "enable", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			prov, err := parse(consoleYAML(validOIDC + tt.extra))
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("err = %v, want it to name %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			p, _ := prov.GetPolicy()
+			if !tt.check(p.Console.APIKeys) {
+				t.Errorf("got %+v", p.Console.APIKeys)
+			}
+		})
+	}
+
+	// Enabled outside oidc is a startup error naming the setting.
+	for name, block := range map[string]string{
+		"absent console block": "console:\n  apiKeys:\n    enabled: true\n",
+		"auth none":            "console:\n  auth: none\n  apiKeys:\n    enabled: true\n",
+	} {
+		_, err := parse(consoleYAML(block))
+		if err == nil || !strings.Contains(err.Error(), "console.apiKeys.enabled") {
+			t.Errorf("%s: err = %v, want console.apiKeys.enabled", name, err)
+		}
+	}
+
+	// Never on the wire a worker reads.
+	prov, err = parse(consoleYAML(validOIDC + "  apiKeys:\n    enabled: true\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, _ = prov.GetPolicy()
+	b, _ := json.Marshal(p)
+	if strings.Contains(strings.ToLower(string(b)), "apikeys") {
+		t.Errorf("console.apiKeys leaked into the policy JSON: %s", b)
+	}
+}
