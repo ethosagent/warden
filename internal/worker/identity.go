@@ -55,6 +55,8 @@ type identityWiring struct {
 	issuer   string
 	bound    bindKey
 	boundSet bool
+	// warnedCfg holds the config warnings already logged.
+	warnedCfg map[string]bool
 
 	// scoped returns how many live allow entries are identity-scoped (nil =
 	// unknown, no warning). warned is the count already warned about while the
@@ -71,6 +73,19 @@ type liveIdentity struct {
 	// settings it was built from (nil/"" until challenge was applied).
 	starter   proxy.SignInStarter
 	signInKey string
+}
+
+// warnConfig logs each distinct identity config warning once.
+func (w *identityWiring) warnConfig(s config.IdentitySettings, agents []config.AgentPolicy) {
+	for _, msg := range config.IdentityWarnings(s, agents) {
+		if w.warnedCfg == nil {
+			w.warnedCfg = map[string]bool{}
+		}
+		if !w.warnedCfg[msg] {
+			w.warnedCfg[msg] = true
+			w.logger.Warn(msg)
+		}
+	}
 }
 
 // bindKey identifies the inputs of the installed snapshot. The bundle seq says
@@ -145,6 +160,7 @@ func resolveIdentityMode(s config.IdentitySettings, agents []config.AgentPolicy,
 // keeps the previous config and logs one warning with no token data.
 func (w *identityWiring) apply(s config.IdentitySettings, agents []config.AgentPolicy) {
 	w.issuer = s.Issuer
+	w.warnConfig(s, agents)
 	switch mode := resolveIdentityMode(s, agents, w.agentID); mode {
 	case config.IdentityModeOff:
 		if w.live.mode != "" && w.live.mode != proxy.IdentityModeOff {
@@ -288,15 +304,17 @@ func (w *identityWiring) buildDispatcher(s config.IdentitySettings) (identity.Ve
 	if err != nil {
 		return nil, err
 	}
-	if err := wv.SetClockSkew(time.Duration(s.ClockSkewSeconds) * time.Second); err != nil {
-		return nil, err
-	}
+	skew := time.Duration(s.ClockSkewSeconds) * time.Second
 	var idp identity.Verifier
 	if s.AcceptIdPTokens() {
 		idp, err = w.build(verifierConfig(s))
 		if err != nil {
 			return nil, err
 		}
+	}
+	// Last, so a failed rebuild leaves the live skew and verifier untouched.
+	if err := wv.SetClockSkew(skew); err != nil {
+		return nil, err
 	}
 	return identity.NewMultiVerifier(identity.MultiConfig{
 		Warden: wv, IdP: idp, IdPIssuer: s.Issuer, AcceptIdP: s.AcceptIdPTokens(),

@@ -2359,6 +2359,9 @@ agents:
   set and false otherwise; `false` refuses each IdP token as `unbound_token`, and then `attribute`
   needs no `issuer` or `audience` (challenge still does). `true` needs an `issuer`. See
   [identity-contract.md](identity-contract.md#warden-tokens-phase-2).
+- `acceptDexTokens: false` with `challenge` mode is valid but logs a warning: the device
+  sign-in hands out IdP tokens that the worker then refuses (`unbound_token`), so clients must
+  exchange them for Warden tokens at the token endpoint.
 - `issuer` and `audience` are required once any mode is `attribute` or `challenge`, unless
   `acceptDexTokens` is `false` in `attribute` mode. An `http`
   issuer is rejected unless `internalIssuerURL` is set; use `internalIssuerURL`

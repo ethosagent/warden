@@ -141,7 +141,9 @@ wire), with a bundle that carries no `tokenIssuer` (the control plane mints no
 Warden tokens) or no keys, a Warden token is `unverified` with reason
 `jwks_unavailable`. A `tokenIssuer` that equals `identity.issuer` is refused: the
 worker logs one error and verifies no Warden token until they differ. A token key
-removed from the bundle stops verifying on the next request.
+removed from the bundle stops verifying for every new request and CONNECT. A CONNECT
+tunnel already established keeps the identity it verified until the token's `exp`
+plus skew (at most about 15 minutes) until per-request binding checks land.
 
 A valid Warden token attributes the user (`sub`, `email`, `groups`). The worker
 verifies the token here but does not yet check that `act.sub` is its own agent

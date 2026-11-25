@@ -197,6 +197,16 @@ func validateChallengeAZP(s IdentitySettings) error {
 	return fmt.Errorf("config: identity.signIn.clientID %q is not in identity.allowedAZP; every token from the sign-in flow would fail with wrong_azp (add it to allowedAZP)", id)
 }
 
+// IdentityWarnings returns warnings about an identity block that is valid but
+// likely not what the operator wants. Callers log each once.
+func IdentityWarnings(s IdentitySettings, agents []AgentPolicy) []string {
+	var out []string
+	if s.AcceptDexTokens != nil && !*s.AcceptDexTokens && challengeEnabled(s, agents) {
+		out = append(out, "identity: challenge mode with acceptDexTokens false: the sign-in flow hands out IdP tokens that this worker refuses (unbound_token); clients must exchange them for Warden tokens at the control plane's token endpoint")
+	}
+	return out
+}
+
 // challengeEnabled reports whether any mode is challenge, as the default or on an agent.
 func challengeEnabled(s IdentitySettings, agents []AgentPolicy) bool {
 	if s.DefaultMode == IdentityModeChallenge {

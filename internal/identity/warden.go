@@ -145,7 +145,12 @@ type WardenConfig struct {
 // bundle; it never fetches keys. Until a usable snapshot is installed every
 // token is unverified (jwks_unavailable). It is safe for concurrent use.
 type WardenVerifier struct {
-	snap  atomic.Pointer[WardenSnapshot]
+	snap atomic.Pointer[WardenSnapshot]
+	// epoch counts snapshot and skew changes. A Verify captures it before it
+	// reads either, and its cache key carries it, so a result computed under
+	// an older snapshot or skew is never found by a later Verify, however late
+	// it is stored.
+	epoch atomic.Uint64
 	skew  atomic.Int64 // nanoseconds
 	now   func() time.Time
 	cache *wardenCache
@@ -186,6 +191,7 @@ func (v *WardenVerifier) SetClockSkew(d time.Duration) error {
 		d = DefaultClockSkew
 	}
 	if time.Duration(v.skew.Swap(int64(d))) != d {
+		v.epoch.Add(1) // after the store: see Verify
 		v.cache.reset()
 	}
 	return nil
@@ -211,6 +217,7 @@ func (v *WardenVerifier) SetSnapshot(s *WardenSnapshot) error {
 		}
 	}
 	v.snap.Store(s)
+	v.epoch.Add(1) // after the store: a Verify that sees the new epoch sees the new snapshot
 	return nil
 }
 
@@ -259,6 +266,7 @@ func (v *WardenVerifier) Verify(_ context.Context, raw string, opts ...VerifyOpt
 		return bare, StatusInvalid, ReasonMalformed
 	}
 	o := ApplyOptions(opts...)
+	epoch := v.epoch.Load() // before the snapshot and the skew
 	snap := v.snap.Load()
 	if !snap.Available() {
 		return bare, StatusUnverified, ReasonJWKSUnavailable
@@ -270,7 +278,7 @@ func (v *WardenVerifier) Verify(_ context.Context, raw string, opts ...VerifyOpt
 	now := v.now()
 	skew := v.ClockSkew()
 	sum := sha256.Sum256([]byte(raw))
-	ck := wardenKey{gen: snap.generation, sum: sum}
+	ck := wardenKey{gen: snap.generation, epoch: epoch, sum: sum}
 	if c, ok := v.cache.get(ck, now); ok {
 		return c, StatusValid, ""
 	}
@@ -317,12 +325,16 @@ func (v *WardenVerifier) Verify(_ context.Context, raw string, opts ...VerifyOpt
 		return fail(ReasonWrongIss)
 	case !audContains(p.Aud, WardenAudience):
 		return fail(ReasonWrongAud)
-	case p.Ver == nil || *p.Ver != WardenTokenVer, p.Exp == nil, p.Iat == nil, *p.Exp <= *p.Iat:
+	case p.Ver == nil || *p.Ver != WardenTokenVer, p.Exp == nil, p.Iat == nil, *p.Iat <= 0, *p.Exp <= *p.Iat:
 		return fail(ReasonMalformed)
 	case p.Sub == "", p.Act == nil, p.Act.Sub == "", p.SID == "", p.JTI == "", p.Cnf == nil, p.Cnf.JKT == "":
 		return fail(ReasonMissingClaim)
-	case time.Duration(*p.Exp-*p.Iat)*time.Second > MaxWardenTokenTTL:
+	// Compared in seconds: iat > 0 and exp > iat above, so the subtraction
+	// cannot wrap and no Duration is built from an attacker-sized number.
+	case *p.Exp-*p.Iat > int64(MaxWardenTokenTTL/time.Second):
 		return fail(ReasonTTLTooLong)
+	case *p.Iat > now.Add(skew).Unix():
+		return fail(ReasonMalformed) // issued in the future
 	}
 	exp := time.Unix(*p.Exp, 0)
 	if now.After(exp.Add(skew)) {
@@ -381,8 +393,9 @@ func audContains(raw json.RawMessage, want string) bool {
 // wardenKey is the result cache key: the snapshot generation and the SHA-256
 // of the token, so a swap makes every earlier entry unreachable.
 type wardenKey struct {
-	gen int64
-	sum [32]byte
+	gen   int64
+	epoch uint64
+	sum   [32]byte
 }
 
 // wardenCache is a bounded LRU of valid results.
