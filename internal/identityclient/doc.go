@@ -8,6 +8,16 @@
 // never prompts from Token: an unusable login is reported as ErrLoginRequired
 // and the caller decides what to do.
 //
+// Agent mode (W-P2-RCP-01) adds the Warden token: AgentKey is an agent's
+// Ed25519 key (GenerateAgentKey, SaveAgentKey, LoadAgentKey), Exchanger trades
+// a user's ID token for a Warden token at the control plane's POST /oauth2/token
+// with a fresh private_key_jwt assertion (SignClientAssertion), and
+// WardenTokenSource keeps that token in memory, re-exchanges at 2/3 of its
+// lifetime, and serves it until exp when a re-exchange fails. The subject is
+// any SubjectSource: *Client (the login cache) or FileSubject. Failures are
+// typed: ErrExchangeDenied (never retried), ErrRateLimited and ErrUnavailable
+// (Retry-After honoured), ErrCPUnreachable, ErrLoginRequired.
+//
 // ID token claims are parsed here without verifying the signature, only to
 // schedule refreshes and to show the user who they are. The worker verifies
 // every token it receives (internal/identity).

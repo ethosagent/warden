@@ -79,22 +79,42 @@ func newSafeHTTPClient(timeout time.Duration, caCertPath string, resolver proxy.
 // (e.g. a Docker/Kubernetes service), which the SafeDialer would block. caCertPath
 // (optional) adds a private CA to this client's pool only.
 func newControlPlaneHTTPClient(timeout time.Duration, caCertPath string) (*http.Client, error) {
-	tr := &http.Transport{ForceAttemptHTTP2: true}
-	if caCertPath != "" {
-		pool, pErr := x509.SystemCertPool()
-		if pErr != nil || pool == nil {
-			pool = x509.NewCertPool()
-		}
-		pem, rErr := os.ReadFile(caCertPath)
-		if rErr != nil {
-			return nil, fmt.Errorf("control-plane client: read ca cert %q: %w", caCertPath, rErr)
-		}
-		if !pool.AppendCertsFromPEM(pem) {
-			return nil, fmt.Errorf("control-plane client: no certificates found in %q", caCertPath)
-		}
-		tr.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+	tr, err := newControlPlaneTransport(nil, caCertPath)
+	if err != nil {
+		return nil, err
 	}
 	return &http.Client{Timeout: timeout, Transport: tr}, nil
+}
+
+// newControlPlaneTransport is the transport of the control-plane clients. Every
+// non-empty caCertPaths entry is added to its trust pool (with the system
+// roots). A non-nil getCert makes the TLS handshake present that client
+// certificate (the worker's mTLS identity, W-P2-WCA-03).
+func newControlPlaneTransport(getCert func(*tls.CertificateRequestInfo) (*tls.Certificate, error), caCertPaths ...string) (*http.Transport, error) {
+	tr := &http.Transport{ForceAttemptHTTP2: true}
+	var pool *x509.CertPool
+	for _, path := range caCertPaths {
+		if path == "" {
+			continue
+		}
+		if pool == nil {
+			var pErr error
+			if pool, pErr = x509.SystemCertPool(); pErr != nil || pool == nil {
+				pool = x509.NewCertPool()
+			}
+		}
+		pem, rErr := os.ReadFile(path)
+		if rErr != nil {
+			return nil, fmt.Errorf("control-plane client: read ca cert %q: %w", path, rErr)
+		}
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("control-plane client: no certificates found in %q", path)
+		}
+	}
+	if pool != nil || getCert != nil {
+		tr.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12, GetClientCertificate: getCert}
+	}
+	return tr, nil
 }
 
 // buildTransformers constructs the per-destination auth transformers from config.

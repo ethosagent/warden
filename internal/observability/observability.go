@@ -32,6 +32,8 @@
 //	RecordBlocked(reason) also takes identity_required, identity_expired, identity_conflict
 //	                              (declared in internal/denyreason)
 //	ControlPlaneClockSkew:        warden.controlplane.clock_skew_seconds gauge, no labels
+//	RecordWorkerCertRenewal:      warden.worker.cert_renewals.total{outcome}: ok, unauthorized, rate_limited, rejected, error
+//	RegisterWorkerCertExpiry:     warden.worker.cert_expiry_seconds gauge, no labels
 //	RecordSignInStarted(outcome): started, reused, rate_limited, issuer_unreachable
 //	RecordBlocklist*:             unlabelled (an entry count and a closed-session count)
 //
@@ -113,6 +115,7 @@ type Metrics struct {
 	blocklistSize  metric.Int64Gauge
 	blocklistCut   metric.Int64Counter
 	clockSkew      metric.Float64Gauge
+	certRenewals   metric.Int64Counter
 }
 
 // ShutdownFunc flushes and closes the meter provider. It is always non-nil; in
@@ -294,6 +297,12 @@ func newMetrics(provider *sdkmetric.MeterProvider, serviceVersion string) (*Metr
 		metric.WithDescription("Control plane Date header minus the worker clock, in seconds (positive: the control plane is ahead). Diagnoses mass expired or nbf failures."),
 	); err != nil {
 		return nil, fmt.Errorf("observability: clock skew gauge: %w", err)
+	}
+	if m.certRenewals, err = meter.Int64Counter(
+		"warden.worker.cert_renewals.total",
+		metric.WithDescription("Worker certificate renewal attempts by outcome (ok, unauthorized, rate_limited, rejected, error)."),
+	); err != nil {
+		return nil, fmt.Errorf("observability: worker cert renewals counter: %w", err)
 	}
 	if m.blocklistSize, err = meter.Int64Gauge(
 		"warden.blocklist.entries",
@@ -508,6 +517,48 @@ func (m *Metrics) RecordControlPlaneClockSkew(d time.Duration) {
 		return
 	}
 	m.clockSkew.Record(context.Background(), d.Seconds())
+}
+
+// certRenewalOutcomes is the allowlist of warden_worker_cert_renewals_total outcomes.
+var certRenewalOutcomes = map[string]struct{}{
+	"ok": {}, "unauthorized": {}, "rate_limited": {}, "rejected": {}, "error": {},
+}
+
+// RecordWorkerCertRenewal increments warden.worker.cert_renewals.total{outcome}
+// (warden_worker_cert_renewals_total). outcome is a bounded enum (ok,
+// unauthorized, rate_limited, rejected, error); anything else is "other".
+func (m *Metrics) RecordWorkerCertRenewal(outcome string) {
+	if m == nil {
+		return
+	}
+	m.certRenewals.Add(context.Background(), 1, metric.WithAttributes(
+		attribute.String("outcome", boundedLabel(certRenewalOutcomes, outcome)),
+	))
+}
+
+// RegisterWorkerCertExpiry wires an observable gauge
+// (warden.worker.cert_expiry_seconds, warden_worker_cert_expiry_seconds): the
+// seconds until the worker certificate expires, negative once it has. observe
+// returns ok=false while the worker holds no certificate, and nothing is
+// reported then. Nil-safe no-op when metrics are disabled; call once at assembly.
+func (m *Metrics) RegisterWorkerCertExpiry(observe func() (seconds float64, ok bool)) error {
+	if m == nil {
+		return nil
+	}
+	_, err := m.meter.Float64ObservableGauge(
+		"warden.worker.cert_expiry_seconds",
+		metric.WithDescription("Seconds until the worker client certificate expires (negative once expired)."),
+		metric.WithFloat64Callback(func(_ context.Context, o metric.Float64Observer) error {
+			if v, ok := observe(); ok {
+				o.Observe(v)
+			}
+			return nil
+		}),
+	)
+	if err != nil {
+		return fmt.Errorf("observability: worker cert expiry gauge: %w", err)
+	}
+	return nil
 }
 
 // RecordSignInStarted increments warden.identity.signin.started.total{outcome}.
