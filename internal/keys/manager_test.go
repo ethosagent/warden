@@ -206,11 +206,19 @@ func (e *env) managerOn(meta keys.MetaStore) *keys.Manager {
 // process holds its own handles on both.
 func (e *env) managerWith(meta keys.MetaStore, store keys.PrivateKeyStore) *keys.Manager {
 	e.t.Helper()
+	return e.managerAhead(meta, store, 0)
+}
+
+// managerAhead is managerWith for a peer whose wall clock reads ahead of the
+// shared fake clock. The peer's time moves without a single timer of the
+// running manager firing, so the running manager cannot wake mid-write.
+func (e *env) managerAhead(meta keys.MetaStore, store keys.PrivateKeyStore, ahead time.Duration) *keys.Manager {
+	e.t.Helper()
 	m, err := keys.NewManager(keys.ManagerConfig{
 		Store: store, Meta: meta, Codec: signer.Codec{}, Backend: "file",
 		Algs:    map[string]string{keys.PurposeToken: keys.AlgEdDSA, keys.PurposeBundle: keys.AlgEdDSA},
 		Timings: e.timings,
-		Now:     e.clk.Now, Wait: waitOn(e.clk), Logger: slog.New(slog.NewTextHandler(e.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		Now:     func() time.Time { return e.clk.Now().Add(ahead) }, Wait: waitOn(e.clk), Logger: slog.New(slog.NewTextHandler(e.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 		Audit: e.audit, Alerts: e.alerts,
 	})
 	if err != nil {
