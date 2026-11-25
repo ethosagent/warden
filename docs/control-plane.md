@@ -122,6 +122,86 @@ the new key while the control plane rotates its bundle key. Errors name
 include key material. `controlPlane.localOnly: true` ignores all of these keys
 and logs one INFO line.
 
+### Last-known-good bundle cache (opt-in)
+
+By default a CP-managed worker that boots while the control plane is down stays
+fail-closed (deny all) until its first successful pull. A pinned worker can
+instead keep its last verified bundle on disk and enforce it at boot.
+
+The cache is off unless `controlPlane.stateDir` is set **and** bundle keys are
+pinned. `stateDir` is the worker's one local state directory (an absolute path,
+created `0700`); each use gets a subdirectory: `cert/` for the worker
+certificate and `bundle/` for this cache. There is no separate cache directory
+key.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `controlPlane.stateDir` | none | Absolute path of the worker state directory. With pinned keys it turns the cache on. |
+| `controlPlane.bundleCacheMaxAge` | `24h` | A cached bundle is used only if it was issued at most this long ago. `0` disables the cache (nothing is written or read). |
+
+What is written. After every verified bundle, including a re-signed one with the
+same content (which moves `issuedAt`), the worker writes
+`<stateDir>/bundle/bundle.json`: the signed envelope exactly as the control plane
+sent it, minus the `credentials` sidecar. The write is atomic (temp file in the
+same directory, fsync, rename, directory fsync); the file is `0600` and the
+directory `0700`. A failed write logs one ERROR (until a write succeeds again)
+and never changes the policy being enforced. The file holds policy and
+signatures only: never `secretAccessKey` and never any other secret, and its
+content is never logged.
+
+When it is read. Only when the boot pull fails (control plane down, or serving a
+bundle the worker rejects). The cached envelope is verified again exactly like a
+live one: against the current pins, the issuer, `issuedAt` and `expiresAt` (with
+the skew), and additionally `issuedAt` must be within `bundleCacheMaxAge`. The
+only relaxation is that the missing credentials sidecar is allowed. A cache that
+is missing, corrupt, tampered with, signed by a key that is no longer pinned,
+expired or too old is refused: the worker logs one WARN, `starting FAIL-CLOSED`,
+with the reason in `bundleCache`, and denies all traffic as it does without a
+cache. A cache that passes seeds the applied bundle state, so a control plane
+that later serves an older seq is rejected as a rollback, and an equal seq with
+different content as equivocation. The worker logs one WARN that it is enforcing
+the cached bundle, and the long-poll then takes over as usual.
+
+Credentials. The sidecar (the AWS access key pair for the `aws` secret backend)
+is deliberately not cached. A worker running from the cache therefore has the
+`aws` selector (backend, region, name prefix) from the signed policy but no
+explicit key pair, so the secret backend resolves credentials from the worker's
+own environment (`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`) or the instance
+IAM role. If neither exists the worker still starts and enforces the cached
+allow/deny policy: it logs one ERROR, and every secret fetch fails (so requests
+that need a secret are not served) until a restart with the control plane
+reachable, when the credentials arrive again.
+
+Rollback floor. A control plane that is up at boot is not trusted blindly either:
+when the cache verifies (pins, issuer, not expired), its seq is the floor of the
+boot pull. A bundle with a lower seq is rejected as a rollback, and the same seq
+with different content as equivocation; the pull then fails and the worker
+enforces the cached bundle. The control plane serving the cached bundle itself is
+applied normally (credentials included). This goes beyond the "cache is read only
+when the boot pull fails" wording of the original ticket and is bounded: a control
+plane restored from an old backup that serves a lower seq is refused only until
+the cached bundle expires (about 24h by default; the bundle lifetime, not
+`bundleCacheMaxAge`), after which the cache stops being a floor and the worker
+accepts the control plane's bundles again. Use `--bundle-seq-floor` on the control
+plane to recover sooner.
+
+File safety. `stateDir` and `bundle/` must be real directories (a symlink is
+refused), owned by the worker user and not writable by group or others; a worse
+directory disables the cache with one ERROR. The cache file is opened without
+following symlinks and without blocking, must be a regular file, and must not be
+accessible by group or others (mode `0600`), otherwise it is refused and the
+worker boots fail-closed. The cache can only be loaded at boot, before the first
+long-poll. The parent of `stateDir` is not checked: put `stateDir` under a
+root-owned path such as `/var/lib/warden`. A `stateDir` that was pre-created
+under a group-writable umask (for example 002) is refused, which disables the
+cache with one ERROR.
+
+Operations. The state directory must not be readable or writable by the agent it
+guards: a writable cache cannot make the worker enforce a forged policy
+(signatures are checked), but it can be deleted or replaced by an older valid
+bundle within `bundleCacheMaxAge`, which is why the max age exists. Keep it short
+if a restart must not bring back an older block list.
+
 ### Bundle state in metrics and the fleet view
 
 A pinned worker reports its bundle state three ways.

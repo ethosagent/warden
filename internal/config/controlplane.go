@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -54,6 +55,12 @@ type ControlPlaneConfig struct {
 	// StateDir is the worker's own state directory (created 0700). The worker
 	// certificate lives in its cert/ subdirectory (W-P2-WCA-03).
 	StateDir string
+	// BundleCacheMaxAge enables the last-known-good bundle cache (W-P2-SBND-06):
+	// a pinned worker with StateDir set persists each verified bundle (never
+	// the credential sidecar) under <StateDir>/bundle/ and, when the first pull
+	// fails at boot, enforces it if its issuedAt is at most this old. Default
+	// 24h; 0 disables the cache. See BundleCacheEnabled.
+	BundleCacheMaxAge time.Duration
 	// Enrollment, when set, makes the worker trade a wet_ enrollment token for a
 	// worker client certificate and keep it renewed. Exclusive with ClientCert.
 	Enrollment EnrollmentConfig
@@ -94,6 +101,13 @@ const (
 // (at least one pin). A CP-managed worker without it behaves as before.
 func (c ControlPlaneConfig) BundleVerification() bool { return len(c.BundleKeys) > 0 }
 
+// BundleCacheEnabled reports whether the worker keeps the last-known-good
+// bundle on disk: it needs the state directory, pinned bundle keys and a
+// non-zero bundleCacheMaxAge. Otherwise nothing is written or read.
+func (c ControlPlaneConfig) BundleCacheEnabled() bool {
+	return c.StateDir != "" && c.BundleVerification() && c.BundleCacheMaxAge > 0
+}
+
 // BundlePins returns a copy of the pin set for verification.
 func (c ControlPlaneConfig) BundlePins() []keys.JWK {
 	return append([]keys.JWK(nil), c.BundleKeys...)
@@ -122,8 +136,9 @@ type rawControlPlane struct {
 	BundleClockSkew      string           `yaml:"bundleClockSkew"`
 	BundleExpiry         string           `yaml:"bundleExpiry"`
 
-	StateDir   string `yaml:"stateDir"`
-	Enrollment *struct {
+	StateDir          string `yaml:"stateDir"`
+	BundleCacheMaxAge string `yaml:"bundleCacheMaxAge"`
+	Enrollment        *struct {
 		TokenEnv          string `yaml:"tokenEnv"`
 		WorkerIDSuffixEnv string `yaml:"workerIdSuffixEnv"`
 	} `yaml:"enrollment"`
@@ -138,6 +153,7 @@ const (
 	defaultHeartbeatInterval        = 10 * time.Second
 	defaultBundleClockSkew          = 5 * time.Minute
 	maxBundleClockSkew              = time.Hour
+	defaultBundleCacheMaxAge        = 24 * time.Hour
 )
 
 // parseControlPlane converts the raw controlPlane block into typed config,
@@ -162,6 +178,10 @@ func parseControlPlane(r *rawControlPlane) (ControlPlaneConfig, error) {
 		if c.Enrollment.TokenEnv == "" {
 			return ControlPlaneConfig{}, fmt.Errorf("config: controlPlane.enrollment.tokenEnv is required when controlPlane.enrollment is set")
 		}
+	}
+	c.BundleCacheMaxAge = defaultBundleCacheMaxAge
+	if err := parseDurationField("controlPlane.bundleCacheMaxAge", r.BundleCacheMaxAge, &c.BundleCacheMaxAge); err != nil {
+		return ControlPlaneConfig{}, err
 	}
 	c.PollInterval = defaultControlPlanePollInterval
 	c.LongPollWait = defaultLongPollWait
@@ -189,6 +209,9 @@ func validateControlPlane(c ControlPlaneConfig) error {
 	}
 	if (c.ClientCert == "") != (c.ClientKey == "") {
 		return fmt.Errorf("config: controlPlane.clientCert and controlPlane.clientKey must be set together")
+	}
+	if c.StateDir != "" && !filepath.IsAbs(c.StateDir) {
+		return fmt.Errorf("config: controlPlane.stateDir must be an absolute path, got %q", c.StateDir)
 	}
 	if c.Enrollment.Enabled() && c.StateDir == "" {
 		return fmt.Errorf("config: controlPlane.stateDir is required when controlPlane.enrollment is set")
