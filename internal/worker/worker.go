@@ -778,11 +778,13 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// mcpMu guards it against the concurrent apply goroutine.
 	var mcpMu sync.Mutex
 	liveMCPGW := mcpGW
+	mcpClosed := false
 	// Close the gateway live at shutdown before the store: deferred LIFO runs this
 	// first, so the gateway's final flush completes while the store is still open.
 	defer func() {
 		mcpMu.Lock()
 		gw := liveMCPGW
+		mcpClosed = true // an in-flight applier must not install a gateway after this
 		mcpMu.Unlock()
 		if gw != nil {
 			_ = gw.Close()
@@ -980,6 +982,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 			obsCfg:           obsCfg,
 			mcpMu:            &mcpMu,
 			liveMCPGW:        &liveMCPGW,
+			mcpClosed:        &mcpClosed,
 			liveCompliance:   liveCompliance,
 			liveCacheTTL:     liveCacheTTL,
 		}

@@ -82,6 +82,19 @@ type Pump struct {
 	// receive. On a refused frame the pump tears the session down with
 	// Close(1008) to both peers, like a gateway deny.
 	Echo EchoGuard
+	// MaxMessage overrides the reassembled-message cap (maxReassembledMessage)
+	// when positive. Production leaves it zero; tests set a small value so the
+	// over-cap path is exercised without moving megabytes through the race
+	// detector, whose wall-clock cost under load made that test flaky.
+	MaxMessage int
+}
+
+// msgCap is the effective reassembled-message cap.
+func (p *Pump) msgCap() int {
+	if p.MaxMessage > 0 {
+		return p.MaxMessage
+	}
+	return maxReassembledMessage
 }
 
 // Run pumps frames in both directions between client and server, forwarding
@@ -243,6 +256,7 @@ func (p *Pump) pumpDir(
 		binary     bool    // Hold: the open message is a binary data message
 	)
 	hold := p.Hold && p.GW != nil
+	msgCap := p.msgCap()
 
 	for {
 		select {
@@ -280,7 +294,7 @@ func (p *Pump) pumpDir(
 				teardown()
 				return nil
 			}
-			if len(acc)+len(f.Payload) > maxReassembledMessage {
+			if len(acc)+len(f.Payload) > msgCap {
 				// Fail closed: never forward a message we cannot scan.
 				teardown()
 				return nil
@@ -341,7 +355,7 @@ func (p *Pump) pumpDir(
 			assembling = !f.Fin
 			overCap = false
 			acc = acc[:0]
-			if len(acc)+len(f.Payload) > maxReassembledMessage {
+			if len(acc)+len(f.Payload) > msgCap {
 				overCap = true
 			} else {
 				acc = append(acc, f.Payload...)
@@ -360,7 +374,7 @@ func (p *Pump) pumpDir(
 				continue
 			}
 			if !overCap {
-				if len(acc)+len(f.Payload) > maxReassembledMessage {
+				if len(acc)+len(f.Payload) > msgCap {
 					overCap = true
 				} else {
 					acc = append(acc, f.Payload...)
