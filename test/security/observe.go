@@ -219,7 +219,9 @@ func (s *Stack) events(tb testing.TB, w *Worker, f analytics.EventFilter) []anal
 	if err != nil {
 		tb.Fatalf("security: read %s events: %v", w.Name, err)
 	}
-	// The store returns newest first; callers slice "new events" off the end.
+	// The store lists newest first (insertion order, not timestamps, which can
+	// tie); every caller counts "new events" as a suffix of the list, so return
+	// them oldest first as documented.
 	slices.Reverse(evs)
 	return evs
 }

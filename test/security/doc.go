@@ -73,6 +73,14 @@
 // only in allowed upstream requests, and that Proxy-Authorization and
 // X-Warden-Identity never reach the upstream.
 //
+// A case that needs state built first (a tunnel held open across a cut, a
+// rotated key) sets Case.Setup, which runs before the assertion sources are
+// read and keeps what it built with Stack.Put; the Attack reads it back with
+// Stack.Get. Admin cuts (RotateAgentKey, SetAgentEnabled, BlockUser,
+// RotateTokenKey) go through the console API and are waited for with
+// Stack.AwaitBundle. A worker with no central.agentID is StackOptions.
+// UnboundWorker, and one without a CA (raw tunnels) is StackOptions.NoCA.
+//
 // Time is a fake clock shared by the CP, the workers and the issuer. Drive it
 // only on a condition (Stack.EventuallyAdvance), never with a fixed Advance
 // followed by a read.

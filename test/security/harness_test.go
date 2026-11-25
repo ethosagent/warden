@@ -73,7 +73,7 @@ type wardenClaims struct {
 	Iat int64 `json:"iat"`
 }
 
-func decodeClaims(t *testing.T, tok string) wardenClaims {
+func decodeClaims(t testing.TB, tok string) wardenClaims {
 	t.Helper()
 	parts := strings.Split(tok, ".")
 	if len(parts) != 3 {
@@ -292,6 +292,9 @@ func TestHarness_RunnerIsNotVacuous(t *testing.T) {
 		{"claims a reason it does not check", Case{Name: "x", Path: PathWorker, Attack: deny, WantStatus: http.StatusProxyAuthRequired, Covers: []string{CoverIdentity("bad_signature")}}, "covers identity.reason:bad_signature but WantReason"},
 		{"claims a reason on the wrong path", Case{Name: "x", Path: PathCPRoute, Attack: deny, WantStatus: http.StatusProxyAuthRequired, WantReason: "bad_signature", Covers: []string{CoverIdentity("bad_signature")}}, "but Path is cp-route"},
 		{"no status pinned", Case{Name: "x", Path: PathWorker, Attack: deny}, "WantStatus is not set"},
+		{"unverified refusal without a log line", Case{Name: "x", Path: PathToken, Attack: func(tb testing.TB, s *Stack) Observed { return Observed{Status: 401} }, WantStatus: 401, Unverified: true, WantReason: "agent_disabled", WantLog: "token_exchange_denied"}, "no log line written during the case carries both"},
+		{"unverified refusal without a reason", Case{Name: "x", Path: PathToken, Attack: func(tb testing.TB, s *Stack) Observed { return Observed{Status: 401} }, WantStatus: 401, Unverified: true, WantLog: "token_exchange_denied"}, "Unverified needs Path token and a WantReason"},
+		{"unverified refusal on the wrong path", Case{Name: "x", Path: PathWorker, Attack: deny, WantStatus: http.StatusProxyAuthRequired, Unverified: true, WantReason: "agent_disabled", WantLog: "x"}, "Unverified needs Path token"},
 		{"token row missing", Case{Name: "x", Path: PathToken, Attack: func(tb testing.TB, s *Stack) Observed { return Observed{Status: 400} }, WantStatus: 400, WantResult: "denied", WantReason: "replay"}, "new token_events rows"},
 	} {
 		rec := &recordingTB{TB: t}
@@ -299,6 +302,19 @@ func TestHarness_RunnerIsNotVacuous(t *testing.T) {
 		if !rec.Failed() || !strings.Contains(rec.text(), c.want) {
 			t.Errorf("%s: RunCase passed or failed for another reason; want a failure containing %q, got %q", c.name, c.want, rec.text())
 		}
+	}
+	// A deny event an earlier case left behind is not this case's: the next
+	// case makes no request, yet expects the same deny reason, and must fail.
+	left := &recordingTB{TB: t}
+	s.RunCase(left, smokeWorker[0])
+	if left.Failed() {
+		t.Fatalf("the case that leaves a deny event failed: %s", left.text())
+	}
+	stale := &recordingTB{TB: t}
+	s.RunCase(stale, Case{Name: "x", Path: PathWorker, WantStatus: http.StatusProxyAuthRequired, WantDeny: "identity_required",
+		Attack: func(testing.TB, *Stack) Observed { return Observed{Status: http.StatusProxyAuthRequired} }})
+	if !stale.Failed() || !strings.Contains(stale.text(), "new deny events carry") {
+		t.Errorf("a case that makes no request passed on an earlier case's identity_required deny: %q", stale.text())
 	}
 	// And the same attack with the right expectations passes cleanly.
 	rec := &recordingTB{TB: t}
@@ -520,9 +536,23 @@ func TestEnumCompleteness(t *testing.T) {
 		}
 		pend[p.Item] = p.Ticket
 	}
+	excluded := map[string]bool{}
+	for _, e := range exclusions {
+		switch {
+		case !exists[e.Item]:
+			t.Errorf("pending.go excludes %q, which does not exist (remove the entry)", e.Item)
+		case covered[e.Item] || pend[e.Item] != "":
+			t.Errorf("pending.go excludes %q, which a case covers or a pending entry lists (keep one)", e.Item)
+		case len(strings.TrimSpace(e.Reason)) < 40 || !strings.Contains(e.Reason, "_test.go"):
+			t.Errorf("the exclusion of %q needs a reason that names the unit tests covering it", e.Item)
+		case excluded[e.Item]:
+			t.Errorf("pending.go excludes %q twice", e.Item)
+		}
+		excluded[e.Item] = true
+	}
 	for _, it := range all {
-		if !covered[it] && pend[it] == "" {
-			t.Errorf("%s has no case and no pending.go entry: add a case that covers it, or a pending entry naming the ticket that will", it)
+		if !covered[it] && pend[it] == "" && !excluded[it] {
+			t.Errorf("%s has no case, no pending.go entry and no exclusion: add a case that covers it, or a pending entry naming the ticket that will", it)
 		}
 	}
 }
