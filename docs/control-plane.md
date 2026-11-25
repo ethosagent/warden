@@ -2342,7 +2342,10 @@ commented block in `configs/config.example.yaml` for every key and default.
   scope?}` with `expires_in` equal to `exp - iat`. Errors are RFC 6749 section 5.2 JSON
   `{error, error_description}`: 400 for `invalid_request`, `invalid_grant`,
   `unauthorized_client`, `invalid_scope`, `invalid_target` and `unsupported_grant_type`, 401
-  `invalid_client`, 503 `temporarily_unavailable` with `Retry-After`. `error_description` is a
+  `invalid_client`, 503 `temporarily_unavailable` with `Retry-After`. With the IdP unreachable,
+  a subject token under a cached kid still verifies, and a cold key cache or a kid missing from
+  the cache gives 503 `idp_unavailable` (retry), never `invalid_grant`/`subject_invalid`, so an
+  IdP outage during a key rotation does not force a new sign-in. `error_description` is a
   fixed word from a closed set and never echoes a token, assertion or claim; every
   `invalid_client` answers the same `client_authentication_failed`, so an unknown agent, an
   unknown key, a bad signature, a replay and a disabled agent cannot be told apart. Every reply

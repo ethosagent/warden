@@ -374,3 +374,32 @@ func tokenExchangeIdPUnavailable(t *testing.T, h *harness.H) {
 	agent := h.RegisterTokenAgent("harness-agent", []string{"eng"}, []string{"read"})
 	requireRefusal(t, "IdP down", exchangeForm(h, agent.Form(tokenUser(h, "user-1", "eng"), nil)), 503, "temporarily_unavailable", "idp_unavailable")
 }
+
+// tokenExchangeIdPOutageDuringRotation: the control plane has cached the
+// IdP's JWKS, then the IdP rotates its signing key and becomes unreachable. A
+// subject token signed with the new kid cannot be checked, so the endpoint
+// answers 503 temporarily_unavailable/idp_unavailable with Retry-After (the
+// harness retries) rather than 400 subject_invalid (which forces a re-login),
+// both on the failing refetch and inside the 30 s refetch floor after it. A
+// token under the cached kid keeps working, and once the IdP is back the new
+// kid verifies.
+func tokenExchangeIdPOutageDuringRotation(t *testing.T, h *harness.H) {
+	waitTokenKeyPublished(h)
+	agent := h.RegisterTokenAgent("harness-agent", []string{"eng"}, []string{"read"})
+	decodeToken(t, exchangeForm(h, agent.Form(tokenUser(h, "user-1", "eng"), nil))) // caches the JWKS
+
+	rotated := h.MintUserToken(fakes.Valid("user-2", "user-2@example.com", "eng"), fakes.RotateKey(),
+		fakes.WithIAT(h.Clock().Now()), fakes.WithExp(h.Clock().Now().Add(30*time.Minute)))
+	h.Issuer().Stop()
+	h.Clock().Advance(31 * time.Second) // past the refetch floor of the first fetch
+	requireRefusal(t, "new kid, IdP down (failed refetch)", exchangeForm(h, agent.Form(rotated, nil)), 503, "temporarily_unavailable", "idp_unavailable")
+	h.Clock().Advance(5 * time.Second) // inside the floor after the failed refetch
+	requireRefusal(t, "new kid, IdP down (inside the floor)", exchangeForm(h, agent.Form(rotated, nil)), 503, "temporarily_unavailable", "idp_unavailable")
+	decodeToken(t, exchangeForm(h, agent.Form(tokenUser(h, "user-3", "eng"), nil))) // cached kid still verifies
+
+	h.Issuer().Start()
+	h.Eventually("the new kid verifies once the IdP is back", func() bool {
+		h.Clock().Advance(31 * time.Second)
+		return exchangeForm(h, agent.Form(rotated, nil)).Status == http.StatusOK
+	})
+}
