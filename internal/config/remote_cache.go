@@ -55,6 +55,9 @@ type bundleCache struct {
 	// floor is the applied State the boot pull verifies against: the cached
 	// bundle's seq, content and issuedAt (SeedCacheFloor). Zero without one.
 	floor *bundle.State
+	// floorExpiresAt is the cached bundle's expiresAt: past it plus the skew
+	// the floor is ignored.
+	floorExpiresAt time.Time
 	// started is set when the long-poll begins; LoadCache is refused after.
 	started bool
 }
@@ -305,5 +308,6 @@ func (r *RemoteProvider) SeedCacheFloor() {
 	}
 	r.mu.Lock()
 	c.floor = &bundle.State{Seq: v.Seq, ContentSHA256: v.ContentSHA256, IssuedAt: v.Bundle.IssuedAt}
+	c.floorExpiresAt = v.Bundle.ExpiresAt
 	r.mu.Unlock()
 }

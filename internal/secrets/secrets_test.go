@@ -197,3 +197,13 @@ func TestRef_ShortSecret(t *testing.T) {
 		t.Errorf("string = %q", r.String())
 	}
 }
+
+func TestNewUnhealthyCacheHardFailsEverySecret(t *testing.T) {
+	c := NewUnhealthyCache(NewEnvFetcher(map[string]string{"p": "ENV_NOT_SET_FOR_UNHEALTHY"}), time.Minute, []string{"p"})
+	if _, err := c.GetSecret("p"); err == nil || !strings.Contains(err.Error(), "unhealthy") {
+		t.Fatalf("GetSecret = %v, want a hard failure (cache unhealthy)", err)
+	}
+	if err := c.RefreshSecrets(); err == nil {
+		t.Fatal("a refresh that cannot fetch must leave the cache unhealthy")
+	}
+}

@@ -191,7 +191,10 @@ directory disables the cache with one ERROR. The cache file is opened without
 following symlinks and without blocking, must be a regular file, and must not be
 accessible by group or others (mode `0600`), otherwise it is refused and the
 worker boots fail-closed. The cache can only be loaded at boot, before the first
-long-poll.
+long-poll. The parent of `stateDir` is not checked: put `stateDir` under a
+root-owned path such as `/var/lib/warden`. A `stateDir` that was pre-created
+under a group-writable umask (for example 002) is refused, which disables the
+cache with one ERROR.
 
 Operations. The state directory must not be readable or writable by the agent it
 guards: a writable cache cannot make the worker enforce a forged policy

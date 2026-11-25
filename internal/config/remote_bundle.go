@@ -267,9 +267,9 @@ func (r *RemoteProvider) applyBundleBody(t *BundleTrust, resp *http.Response) (b
 	usingFloor := false
 	if b := r.bundle; b != nil {
 		applied = bundle.State{Seq: b.Seq, ContentSHA256: b.ID, IssuedAt: b.IssuedAt}
-	} else if r.cache != nil && r.cache.floor != nil {
+	} else if c := r.cache; c != nil && c.floor != nil && !t.Now().After(c.floorExpiresAt.Add(t.Skew)) {
 		// Nothing applied yet: the cached bundle is the rollback floor.
-		applied, usingFloor = *r.cache.floor, true
+		applied, usingFloor = *c.floor, true
 	}
 	r.mu.RUnlock()
 

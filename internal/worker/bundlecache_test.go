@@ -402,8 +402,20 @@ func TestWorkerBootCacheIsRollbackFloorWhenCPUp(t *testing.T) {
 func TestWorkerBootFromBundleCacheWithoutAWSCredentials(t *testing.T) {
 	e := newCacheWorkerEnv(t, "")
 	e.servePolicy(5, `{"allowlist":[{"domain":"cached.test"}],"settings":{"secrets":{"backend":"aws","region":"us-east-1"}}}`)
-	// The priming run has a working aws client; the restarted one does not.
-	withFakeAWSClient(t, newFakeAWSClient(), nil)
+	// A secrets: mapping makes the cache prefetch at startup, which is what used
+	// to crash a cache boot without credentials.
+	raw, err := os.ReadFile(e.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.cfg = writeConfig(t, string(raw)+"\nsecrets:\n  - placeholder: aws_secret_001\n    envVar: WARDEN_UNUSED_CACHE_SECRET\n")
+	// The priming run has a working aws client holding the secret; the restarted
+	// one does not.
+	prime := newFakeAWSClient()
+	if _, err := prime.CreateSecret("warden/aws_secret_001", "real-secret-value"); err != nil {
+		t.Fatal(err)
+	}
+	withFakeAWSClient(t, prime, nil)
 	e.primeServed()
 	withFakeAWSClient(t, nil, errors.New("no credentials"))
 
@@ -417,5 +429,8 @@ func TestWorkerBootFromBundleCacheWithoutAWSCredentials(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "running from the bundle cache without AWS credentials") {
 		t.Errorf("no ERROR about the missing credentials:\n%s", logs)
+	}
+	if strings.Contains(logs.String(), "real-secret-value") {
+		t.Errorf("a secret resolved without credentials:\n%s", logs)
 	}
 }

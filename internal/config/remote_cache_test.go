@@ -500,3 +500,26 @@ func TestBundleCacheDirFsyncErrorIsAWriteFailure(t *testing.T) {
 		t.Fatal("writing into a missing directory succeeded")
 	}
 }
+
+// The floor is the cached bundle's seq only while that bundle could still be
+// valid: past expiresAt plus the skew it is ignored (a CP restored from an old
+// backup is accepted again).
+func TestBundleCacheFloorExpires(t *testing.T) {
+	e := newBundleEnv(t)
+	dir := e.withCache()
+	if err := e.pullSeq(5, bundlePolicyA, "e5"); err != nil {
+		t.Fatal(err)
+	}
+	rp, _ := e.restarted(dir, nil)
+	rp.SeedCacheFloor()
+	// The bundle expires at T0+24h (+5m skew). A newer-looking but lower seq
+	// bundle signed later is only acceptable once the floor has lapsed.
+	e.now = bundleT0.Add(24*time.Hour + 6*time.Minute)
+	nb := e.bundle(3, bundlePolicyB)
+	nb.IssuedAt = e.now.Add(-time.Minute)
+	nb.ExpiresAt = e.now.Add(time.Hour)
+	e.cp.serve(e.sign(nb, nil), "e3")
+	if err := rp.Pull(); err != nil {
+		t.Fatalf("seq 3 after the floor expired: %v, want it accepted", err)
+	}
+}

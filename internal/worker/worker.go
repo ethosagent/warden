@@ -485,6 +485,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// mutating the loaded policy.
 	effectivePol := pol
 	effectivePol.SecretStore = secretStoreCfg
+	secretsUnavailable := false
 	secretFetcher, secretStore, err := newSecretFetcher(effectivePol, mapping)
 	if err != nil && bootedFromCache && secretStoreCfg.ResolvedBackend() == config.SecretBackendAWS {
 		// The cached bundle has no credentials sidecar and the worker has no
@@ -493,6 +494,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		// fails) until a restart with the control plane reachable.
 		logger.Error("running from the bundle cache without AWS credentials: secret resolution fails closed until a restart with the control plane reachable", "error", err)
 		secretFetcher, secretStore, err = noCredentialsFetcher{}, nil, nil
+		secretsUnavailable = true
 	}
 	if err != nil {
 		return err
@@ -501,8 +503,11 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// for echo/aws. Both feed the dashboard's read-only secretstore tab below.
 	secretStoreBackend := secretStoreCfg.ResolvedBackend()
 	liveCacheTTL := time.Duration(pol.CacheTTLSeconds) * time.Second
-	secretProvider, err := secrets.NewCache(secretFetcher, liveCacheTTL, placeholders)
-	if err != nil {
+	var secretProvider *secrets.Cache
+	if secretsUnavailable {
+		// No prefetch (it would fail startup): every secret lookup hard-fails.
+		secretProvider = secrets.NewUnhealthyCache(secretFetcher, liveCacheTTL, placeholders)
+	} else if secretProvider, err = secrets.NewCache(secretFetcher, liveCacheTTL, placeholders); err != nil {
 		return err
 	}
 	secretProvider.SetReservedKeyLog(secrets.NewReservedKeyLog(logger, nil))
