@@ -42,6 +42,10 @@ func TestValidateIdentity(t *testing.T) {
 		{"agent attribute with block", baseAllow + "\nagents:\n  - id: a\n    identity: attribute\nidentity:\n  issuer: https://i.example.com\n  audience: warden\n", ""},
 		{"agent require is Phase 2", baseAllow + "\nagents:\n  - id: a\n    identity: require\n", "Phase 2"},
 		{"agent unknown mode", baseAllow + "\nagents:\n  - id: a\n    identity: bogus\n", "agents[0].identity"},
+		{"acceptDexTokens false needs no issuer", identityBlock("  defaultMode: attribute\n  acceptDexTokens: false\n"), ""},
+		{"acceptDexTokens false with challenge still needs issuer", identityBlock("  defaultMode: challenge\n  acceptDexTokens: false\n"), "identity.issuer is required"},
+		{"acceptDexTokens true needs an issuer", identityBlock("  acceptDexTokens: true\n"), "acceptDexTokens true requires identity.issuer"},
+		{"acceptDexTokens true with issuer", identityBlock("  defaultMode: attribute\n  issuer: https://i.example.com\n  audience: warden\n  acceptDexTokens: true\n"), ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -270,6 +274,64 @@ func TestIdentityChallengeMode(t *testing.T) {
 		}
 		if got := SettingsWireFromPolicy(Policy{Identity: IdentityFromSettings(w.Identity), Agents: AgentsFromSettings(w.Agents)}); !reflect.DeepEqual(got, w) {
 			t.Fatalf("SettingsWireFromPolicy = %+v", got)
+		}
+	})
+}
+
+// TestIdentityAcceptDexTokensDefault: unset resolves to true when
+// identity.issuer is set and false otherwise; an explicit value wins; the
+// field survives the wire round trip and a copy.
+func TestIdentityAcceptDexTokensDefault(t *testing.T) {
+	yes, no := true, false
+	cases := []struct {
+		name string
+		in   IdentitySettings
+		want bool
+	}{
+		{"unset, no issuer", IdentitySettings{}, false},
+		{"unset, issuer", IdentitySettings{Issuer: "https://i.example.com"}, true},
+		{"unset, blank issuer", IdentitySettings{Issuer: "  "}, false},
+		{"explicit false, issuer", IdentitySettings{Issuer: "https://i.example.com", AcceptDexTokens: &no}, false},
+		{"explicit true", IdentitySettings{Issuer: "https://i.example.com", AcceptDexTokens: &yes}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.in.AcceptIdPTokens(); got != tc.want {
+				t.Fatalf("AcceptIdPTokens = %v, want %v", got, tc.want)
+			}
+		})
+	}
+
+	t.Run("wire round trip and deep copy", func(t *testing.T) {
+		in := IdentitySettings{Issuer: "https://i.example.com", Audience: "warden", AcceptDexTokens: &no}
+		raw, err := json.Marshal(&SettingsWire{Identity: &in})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(raw), `"acceptDexTokens":false`) {
+			t.Fatalf("an explicit false is not on the wire: %s", raw)
+		}
+		var back SettingsWire
+		if err := json.Unmarshal(raw, &back); err != nil {
+			t.Fatal(err)
+		}
+		got := IdentityFromSettings(back.Identity)
+		if got.AcceptDexTokens == nil || *got.AcceptDexTokens {
+			t.Fatalf("round trip lost the explicit false: %+v", got.AcceptDexTokens)
+		}
+		cp := IdentityFromSettings(&in)
+		*cp.AcceptDexTokens = true
+		if *in.AcceptDexTokens {
+			t.Fatal("the copy aliases the original")
+		}
+		unset, _ := json.Marshal(&SettingsWire{Identity: &IdentitySettings{Issuer: "https://i.example.com"}})
+		if strings.Contains(string(unset), "acceptDexTokens") {
+			t.Fatalf("an unset value is on the wire: %s", unset)
+		}
+	})
+	t.Run("a block with only the flag is not zero", func(t *testing.T) {
+		if identitySettingsFromPolicy(IdentitySettings{AcceptDexTokens: &no}) == nil {
+			t.Fatal("the flag was dropped from the projection")
 		}
 	})
 }

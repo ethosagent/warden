@@ -218,8 +218,18 @@ func (p *Proxy) verifyToken(h *identityHolder, tok string) idResult {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	c, st, r := h.v.Verify(ctx, tok)
 	cancel()
-	p.recordIdentity(st, r, string(identity.TokenIdP))
+	p.recordIdentity(st, r, tokenTypeOf(c))
 	return idResult{claims: c, status: st, reason: r}
+}
+
+// tokenTypeOf is the token_type metric label for claims a verifier returned. A
+// dispatching verifier says which kind of token it held; one that does not
+// (the bare IdP verifier) means an IdP token.
+func tokenTypeOf(c identity.Claims) string {
+	if c.TokenType == "" {
+		return string(identity.TokenIdP)
+	}
+	return string(c.TokenType)
 }
 
 func (p *Proxy) recordIdentity(st identity.Status, r identity.Reason, tokenType string) {
@@ -319,7 +329,7 @@ func (p *Proxy) identityStage(s *requestScope) (endSession bool) {
 		// Past exp plus skew (or no exp at all, which a valid token always has:
 		// fail closed). The connection's identity is spent.
 		connLive, cs = false, identity.StatusExpired
-		p.recordIdentity(identity.StatusExpired, "", string(identity.TokenIdP))
+		p.recordIdentity(identity.StatusExpired, "", tokenTypeOf(ci.Claims))
 	}
 	switch {
 	case cs == identity.StatusNone || cs == identity.StatusOff:
@@ -349,7 +359,7 @@ func (p *Proxy) identityStage(s *requestScope) (endSession bool) {
 			case hr.status == identity.StatusValid && hr.claims.Sub != ci.Claims.Sub:
 				s.idHeaderClaims = hr.claims
 				r = idResult{status: identity.StatusConflict}
-				p.recordIdentity(identity.StatusConflict, "", string(identity.TokenIdP))
+				p.recordIdentity(identity.StatusConflict, "", tokenTypeOf(ci.Claims))
 			}
 		}
 	default:

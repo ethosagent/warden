@@ -42,6 +42,10 @@ type SettingsApplier struct {
 	// identity owns the user-token verifier and this agent's identity mode. Nil
 	// leaves identity untouched (tests that build an applier without one).
 	identity *identityWiring
+	// serial is the lock every evaluator apply goes through. The Warden token
+	// snapshot is installed under it; nil (tests that build an applier without
+	// one) installs without a lock.
+	serial *serialEvaluator
 
 	// Compliance tagging is rebuilt around this stable base signed store using the
 	// reusable mapper, so a toggle never disturbs the signing layer or base store.
@@ -237,6 +241,15 @@ func (a *SettingsApplier) Apply() {
 		a.identity.apply(config.IdentityFromSettings(settings.Identity), config.AgentsFromSettings(settings.Agents))
 	}
 
+	// --- Warden token keys (live) ---
+	// The verified bundle's token JWKS, issuer and registered agents become the
+	// Warden verifier's snapshot, read in one atomic call on this goroutine and
+	// installed under the apply lock with the policy that came with them. The
+	// keys come from nothing else.
+	if a.identity != nil {
+		a.bindTokens()
+	}
+
 	// --- Observability (apply-on-RESTART, NOT live) ---
 	// OTel meter/exporter providers init ONCE at boot and cannot be safely
 	// hot-swapped, so a distributed observability change is NOT applied live.
@@ -252,4 +265,14 @@ func (a *SettingsApplier) Apply() {
 				"runningOTLPEndpoint", a.obsCfg.OTLPEndpoint, "requestedOTLPEndpoint", wantObs.OTLPEndpoint)
 		}
 	}
+}
+
+// bindTokens installs the Warden verifier snapshot from the verified bundle
+// under the serial evaluator's lock.
+func (a *SettingsApplier) bindTokens() {
+	if a.serial == nil {
+		a.identity.applyBinding(a.cp)
+		return
+	}
+	a.serial.locked(func() { a.identity.applyBinding(a.cp) })
 }
