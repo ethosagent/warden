@@ -328,6 +328,19 @@ responseScan:
   pii:
     phone: false                  # email/card(Luhn)/SSN always on; phone opt-in (noisy)
 
+# Outbound request-body DLP. OFF by default: with no dlp block (or mode: off) the dlpScan
+# stage reads no body and behavior is byte-identical. mode is off | monitor | enforce;
+# monitor records findings and never blocks, enforce applies classes/rules.
+# wardenTokens (default false) additionally flags Warden's own credentials in a request
+# body - scoped API keys (wak_...) and per-worker tokens (wwt_...) - as class
+# `credentials`, so an admin key an agent can reach does not leave unnoticed. It adds
+# no blocking by itself: nothing is blocked unless mode is enforce and a rule says so.
+# dlp:
+#   mode: monitor
+#   wardenTokens: false
+#   classes:
+#     credentials: { action: block }   # only takes effect in enforce mode
+
 # Signing keys (CONTROL PLANE ONLY, read from the operator's --config file, never served to
 # workers). OFF by default: when keys.enabled is false no key file, table or goroutine is
 # created and the control plane behaves exactly as before. When enabled it needs --state-dir
@@ -361,6 +374,26 @@ keys:
     rotationInterval: 0           # must be 0: bundle keys rotate only by hand (workers pin them)
     prepublish: 1h
     overlap: 48h
+
+# Worker CA (CONTROL PLANE ONLY, read from the operator's --config file, never served to
+# workers). OFF by default: when workerCA.enabled is false nothing is loaded and the control
+# plane behaves exactly as before. When enabled the control plane holds a worker INTERMEDIATE
+# CA that issues short-lived worker client certificates (spiffe://<trustDomain>/warden/worker/<id>).
+# It is a separate trust root from the proxy CA: startup fails if the intermediate has the same
+# key as, or chains to, --ca-cert. Create the root and intermediate with
+#   warden control-plane ca init --out-dir D --trust-domain warden.local --state-dir S
+# (or `ca csr` for an offline root), keep root.key offline, and point certFile at
+# intermediate-chain.pem. The intermediate key lives in the key manager (keys.enabled needed).
+workerCA:
+  enabled: false                  # master switch (default false)
+  trustDomain: ""                 # required when enabled, e.g. warden.local (lowercase DNS name)
+  certFile: ""                    # required when enabled: PEM chain, intermediate first
+  previousCertFile: ""            # previous intermediate chain, trusted while rotating
+  certTTL: 24h                    # issued certificate lifetime (1h to 7d)
+  enrollTokenTTL: 1h              # default enrollment token lifetime
+  enrollTokenMaxTTL: 24h          # longest enrollment token an operator may ask for (max 7d)
+  keySource: keys                 # keys (the key manager, purpose ca; default) | file (development only)
+  keyFile: ""                     # PKCS#8 PEM, mode 0600, outside --state-dir; only with keySource: file
 
 # Echo guard: stops an upstream that copies the request into its response (an echo
 # endpoint, an error quoting the request, a reflected header) from handing the agent
@@ -448,6 +481,19 @@ controlPlane:
   # When endpoint is set and localOnly is false, the worker is CP-MANAGED: policy
   # comes only from the control plane and the worker boots fail-closed (deny all)
   # until its first pull. Secrets always stay local.
+
+  # Signed policy bundles (no runtime effect until W-P2-SBND-04). Absent = off:
+  # the worker takes policy unverified and logs one WARN at startup.
+  # bundleKeys:                   # public JWKs that may sign bundles (OKP/Ed25519 or EC/P-256)
+  #   - {kty: OKP, crv: Ed25519, x: "<base64url>", kid: "<RFC 7638 thumbprint>"}
+  # bundleKeysFile: ""            # JWKS JSON file {"keys":[...]}, merged with bundleKeys (max 16 total)
+  # requireSignedBundles: false   # true = no pins fails config load (checked when endpoint is set and localOnly is not true, so --local-only workers too; fail-closed)
+  # bundleIssuer: ""              # optional: required bundle cpId
+  # bundleClockSkew: 5m           # tolerance on issuedAt/expiresAt, max 1h
+  # bundleExpiry: keep            # keep = enforce last-known-good past expiry | deny
+  # kid must equal the key's RFC 7638 thumbprint; private members (d, ...) are rejected.
+  # Keep both the old and new key listed while the control plane rotates its bundle key.
+  # localOnly: true ignores all of these.
 
 # Fleet analytics aggregation.
 #   off        - single node (default).

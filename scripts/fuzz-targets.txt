@@ -13,3 +13,4 @@ FuzzParseJWK ./internal/keys
 FuzzVerify ./internal/bundle
 FuzzDecodePayload ./internal/bundle
 FuzzFastEnvelope ./internal/bundle
+FuzzParse ./internal/apikeys

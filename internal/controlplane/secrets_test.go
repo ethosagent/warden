@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -598,5 +599,60 @@ func TestSecretsAdminTokenGate(t *testing.T) {
 	open, _ := newSecretsTestServer(t, "")
 	if code, _ := do(t, http.MethodGet, open.URL+"/central/secrets", "", ""); code != http.StatusOK {
 		t.Errorf("no token configured: list = %d, want 200 (development-open)", code)
+	}
+}
+
+// TestCentralSecretsReserved proves the cp/ namespace is closed to the human
+// route: hidden from GET, refused (403 reserved_key) on POST and DELETE, and the
+// refusal logs the route and a key prefix only.
+func TestCentralSecretsReserved(t *testing.T) {
+	const token = "tok"
+	store := secrets.NewEchoStore()
+	ctx := context.Background()
+	if err := store.Put(ctx, "cp/keys/ca/k1", "ca-material"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put(ctx, "plain", "v"); err != nil {
+		t.Fatal(err)
+	}
+	buf := &bytes.Buffer{}
+	srv := New(Config{
+		PolicyPath:  writePolicyFile(t, "api.openai.com"),
+		Token:       token,
+		Logger:      slog.New(slog.NewJSONHandler(buf, nil)),
+		SecretStore: store,
+	})
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	code, body := do(t, http.MethodGet, ts.URL+"/central/secrets", token, "")
+	if code != http.StatusOK || strings.Contains(body, "cp/") || !strings.Contains(body, "plain") {
+		t.Fatalf("GET = %d %s, want only the non-cp key", code, body)
+	}
+	code, body = do(t, http.MethodPost, ts.URL+"/central/secrets", token, `{"key":"cp/keys/ca/k1","value":"evil"}`)
+	if code != http.StatusForbidden || !strings.Contains(body, "reserved_key") {
+		t.Fatalf("POST = %d %s, want 403 reserved_key", code, body)
+	}
+	code, _ = do(t, http.MethodPost, ts.URL+"/central/secrets", token, `{"key":" cp ","value":"evil"}`)
+	if code != http.StatusForbidden {
+		t.Fatalf("POST bare cp = %d, want 403", code)
+	}
+	code, body = do(t, http.MethodDelete, ts.URL+"/central/secrets/cp/keys/ca/k1", token, "")
+	if code != http.StatusForbidden || !strings.Contains(body, "reserved_key") {
+		t.Fatalf("DELETE = %d %s, want 403 reserved_key", code, body)
+	}
+	// The store was never touched: the key is still there, unchanged.
+	if v, err := store.Get(ctx, "cp/keys/ca/k1"); err != nil || v == "evil" {
+		t.Fatalf("reserved key mutated: %q %v", v, err)
+	}
+	if n := strings.Count(buf.String(), "reserved secret key refused"); n != 1 {
+		t.Fatalf("refusal log lines = %d, want 1 (rate limited per route): %s", n, buf.String())
+	}
+	if strings.Contains(buf.String(), "k1") || strings.Contains(buf.String(), "evil") {
+		t.Fatalf("log leaked the key tail or value: %s", buf.String())
+	}
+	// A normal key still works.
+	if code, _ = do(t, http.MethodPost, ts.URL+"/central/secrets", token, `{"key":"ok","value":"v"}`); code != http.StatusNoContent {
+		t.Fatalf("POST normal = %d, want 204", code)
 	}
 }

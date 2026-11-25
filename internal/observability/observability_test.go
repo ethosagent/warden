@@ -259,12 +259,12 @@ func TestAuditLogMetrics(t *testing.T) {
 
 func TestRecordIdentityVerify(t *testing.T) {
 	var nilm *Metrics
-	nilm.RecordIdentityVerify("valid", "none") // nil-safe
+	nilm.RecordIdentityVerify("valid", "none", "idp") // nil-safe
 
 	m, h, shutdown := newWithHandler(t)
 	defer func() { _ = shutdown(context.Background()) }()
-	m.RecordIdentityVerify("invalid", "bad_signature")
-	m.RecordIdentityVerify("invalid", "bad_signature")
+	m.RecordIdentityVerify("invalid", "bad_signature", "idp")
+	m.RecordIdentityVerify("invalid", "bad_signature", "idp")
 	m.ObserveAddedLatency("identity", time.Millisecond)
 
 	body := scrape(t, h)
