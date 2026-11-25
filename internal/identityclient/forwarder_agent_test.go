@@ -335,7 +335,7 @@ func TestForwarderRotationDrain(t *testing.T) {
 		_ = c.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
 		_, err := br.ReadByte()
 		var ne net.Error
-		return !(errors.As(err, &ne) && ne.Timeout())
+		return !errors.As(err, &ne) || !ne.Timeout()
 	}
 
 	// No rotation: an idle tunnel is left alone however long it idles.

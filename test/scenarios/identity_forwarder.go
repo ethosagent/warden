@@ -181,7 +181,7 @@ func tunnelClosed(c net.Conn, br *bufio.Reader) bool {
 		return false
 	}
 	ne, ok := err.(net.Error)
-	return !(ok && ne.Timeout())
+	return !ok || !ne.Timeout()
 }
 
 // identityForwarder is the scenario.
