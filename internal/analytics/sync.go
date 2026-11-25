@@ -18,6 +18,7 @@ type SyncWorker struct {
 	local     *SQLiteStore
 	remote    RemoteStore
 	proxyID   string
+	proxyIDFn func() string // when set, read on every batch instead of proxyID
 	batchSize int
 	bufferCap int
 	interval  time.Duration
@@ -36,6 +37,18 @@ func NewSyncWorker(local *SQLiteStore, remote RemoteStore, proxyID string, batch
 		bufferCap: bufferCap,
 		interval:  interval,
 	}
+}
+
+// SetProxyIDFunc replaces the fixed proxy id with a function read on every
+// batch, for a worker whose id is the one in a certificate it may enroll for
+// after startup. "" means no id yet: events go out without a UID.
+func (w *SyncWorker) SetProxyIDFunc(fn func() string) { w.proxyIDFn = fn }
+
+func (w *SyncWorker) id() string {
+	if w.proxyIDFn != nil {
+		return w.proxyIDFn()
+	}
+	return w.proxyID
 }
 
 // eventUID derives the stable dedup identifier for a local event: a truncated
@@ -85,9 +98,9 @@ func (w *SyncWorker) SyncOnce() error {
 	// duplicates. Skipped when no proxy id is configured: two anonymous workers
 	// would derive colliding UIDs from the same rowids and the CP would silently
 	// drop legitimate events — duplicates-on-retry is the safer failure mode.
-	if w.proxyID != "" {
+	if id := w.id(); id != "" {
 		for i := range events {
-			events[i].UID = eventUID(w.proxyID, ids[i])
+			events[i].UID = eventUID(id, ids[i])
 		}
 	}
 

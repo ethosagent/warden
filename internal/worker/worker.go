@@ -293,6 +293,13 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// --local-only is not set: the worker's allow/deny policy comes ONLY from the
 	// control plane and it boots fail-closed (deny all) until the first pull.
 	// Otherwise the worker enforces its local policy (standalone).
+	// clk is the worker's time port (Overrides.Clock, assembly-only; production is
+	// always clock.Real()). The control-plane loops and the worker certificate
+	// renewer run on it, so a test advances a fake clock instead of sleeping.
+	clk := clock.Real()
+	if p.Overrides != nil && p.Overrides.Clock != nil {
+		clk = p.Overrides.Clock
+	}
 	localOnly := localOnlyFlag || pol.ControlPlane.LocalOnly
 	managed := pol.ControlPlane.Endpoint != "" && !localOnly
 	logBundleVerification(logger, pol.ControlPlane, managed, localOnly)
@@ -313,9 +320,11 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// process and cannot be safely hot-swapped on the long-poll). A best-effort
 	// initial pull narrows the fail-closed window; if it fails the worker stays
 	// fail-closed and the long-poll loop applies policy once the CP is reachable.
-	// Secrets/judge/audit-signing stay local.
+	// Secrets/judge/audit-signing stay local. clk (resolved above, before the
+	// first pull) drives bundle verification and the cert renewer.
 	var (
 		controlPlane *config.RemoteProvider
+		wcert        *workerCert    // nil unless controlPlane.enrollment or clientCert is set
 		remotePolicy *config.Policy // last-known-good remote allow/deny, applied to the evaluator below
 	)
 	if managed {
@@ -324,9 +333,20 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		if cpErr != nil {
 			return cpErr
 		}
+		// Worker certificate (W-P2-WCA-03): enroll or load it BEFORE the first pull.
+		// With one, every control-plane call presents it and no bearer is sent.
+		var certErr error
+		if wcert, certErr = newWorkerCert(ctx, pol.ControlPlane, pol.Central, clk, logger); certErr != nil {
+			return certErr
+		}
 		// Trust a privately-signed control plane via a per-connection CA, without
 		// altering this worker's upstream TLS trust.
-		if pol.ControlPlane.CACert != "" {
+		switch {
+		case wcert != nil:
+			rp.SetHTTPClient(wcert.Client(cpClientTimeout))
+			rp.SetProxyIDFunc(wcert.WorkerID)
+			rp.SetCertInfo(wcert.certInfo)
+		case pol.ControlPlane.CACert != "":
 			if caErr := rp.SetCACert(pol.ControlPlane.CACert); caErr != nil {
 				return caErr
 			}
@@ -337,6 +357,17 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		// Advertise the capabilities this binary implements so the control plane
 		// can flag workers that would silently ignore newer policy fields.
 		rp.SetCaps(config.WorkerCaps())
+		// Signed bundles: with pinned keys the provider asks for the signed
+		// envelope and applies nothing it cannot verify, never falling back to
+		// the unsigned wire. Set before the first pull.
+		if cp := pol.ControlPlane; cp.BundleVerification() {
+			if tErr := rp.SetBundleTrust(config.BundleTrust{
+				Pins: cp.BundlePins(), Skew: cp.BundleClockSkew, Issuer: cp.BundleIssuer,
+				Expiry: cp.BundleExpiry, Now: clk.Now, Logger: logger,
+			}); tErr != nil {
+				return tErr
+			}
+		}
 		// Shutdown hygiene: drop the pooled keep-alive conns when Run returns, so
 		// a hosted worker leaves no open connections to the control plane.
 		defer rp.CloseIdleConnections()
@@ -703,18 +734,34 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		// endpoint (often on a private network), so forwarding does NOT go through
 		// the SafeDialer — SSRF protection is for agent-driven egress only.
 		centralClient, ccErr := newControlPlaneHTTPClient(10*time.Second, pol.Central.CACert)
+		centralToken, centralID := os.Getenv(pol.Central.TokenEnv), expandEnv(pol.Central.ProxyID)
+		certCentral := wcert != nil && wcert.centralShared
+		if certCentral {
+			// Same origin as the control plane: the worker certificate is the
+			// credential, the shared client presents it and no Authorization
+			// header is sent. A separate aggregator keeps its bearer client.
+			centralClient, ccErr = wcert.Client(10*time.Second), nil
+			centralToken = ""
+		}
 		if ccErr != nil {
 			return ccErr
 		}
-		remote, rErr := analytics.NewHTTPRemoteStore(pol.Central.Endpoint, os.Getenv(pol.Central.TokenEnv), expandEnv(pol.Central.ProxyID), centralClient)
+		remote, rErr := analytics.NewHTTPRemoteStore(pol.Central.Endpoint, centralToken, centralID, centralClient)
 		centralRemote = remote
 		if rErr != nil {
 			return rErr
 		}
 		// Same shutdown hygiene as the policy client above.
 		defer remote.CloseIdleConnections()
-		syncWorker = analytics.NewSyncWorker(store, remote, expandEnv(pol.Central.ProxyID), pol.Central.BatchSize, pol.Central.BufferCap, pol.Central.Interval)
-		logger.Info("central worker enabled", "endpoint", pol.Central.Endpoint, "proxyID", expandEnv(pol.Central.ProxyID))
+		syncWorker = analytics.NewSyncWorker(store, remote, centralID, pol.Central.BatchSize, pol.Central.BufferCap, pol.Central.Interval)
+		if certCentral {
+			// The id is the certificate's, which a worker that enrolled late gets
+			// after this point: read it per request and per batch.
+			remote.SetProxyIDFunc(wcert.WorkerID)
+			syncWorker.SetProxyIDFunc(wcert.WorkerID)
+			centralID = wcert.WorkerID()
+		}
+		logger.Info("central worker enabled", "endpoint", pol.Central.Endpoint, "proxyID", centralID)
 	}
 
 	// Transparent-only mode has NO CONNECT listener: an injected one is unused
@@ -979,9 +1026,8 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// clk is the worker's time port (Overrides.Clock, assembly-only; production
 	// is always clock.Real()). The loops below tick on it, so a test advances a
 	// fake clock instead of sleeping.
-	clk := clock.Real()
-	if p.Overrides != nil && p.Overrides.Clock != nil {
-		clk = p.Overrides.Clock
+	if wcert != nil {
+		wcert.start(ctx, metrics)
 	}
 	if controlPlane != nil {
 		// warden.controlplane.clock_skew_seconds: the CP's Date header from each
@@ -1016,8 +1062,15 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		}
 		// The long-poll swaps the evaluator through gatedEvaluator, so the agent
 		// switch flips (and cuts sessions) BEFORE the new allow policy is live.
-		go longPollControlPlane(ctx, clk, controlPlane, gatedEvaluator{PolicyEvaluator: evaluator, gate: gate}, pol.ControlPlane.LongPollWait, logger, onPolicyApplied(applier.Apply, pxy.CloseBlockedSessions))
+		// Every evaluator apply (long-poll, expiry deny, expiry restore) goes
+		// through one lock: the agent gate is single-goroutine, and a restore
+		// must never apply an older snapshot over a newer one.
+		applyEv := &serialEvaluator{PolicyEvaluator: gatedEvaluator{PolicyEvaluator: evaluator, gate: gate}, raw: evaluator}
+		go longPollControlPlane(ctx, clk, controlPlane, applyEv, pol.ControlPlane.LongPollWait, logger, onPolicyApplied(applier.Apply, pxy.CloseBlockedSessions))
 		go heartbeatControlPlane(ctx, clk, controlPlane, pol.ControlPlane.HeartbeatInterval, logger)
+		if pol.ControlPlane.BundleVerification() {
+			go enforceBundleExpiry(ctx, clk, controlPlane, applyEv, logger)
+		}
 	}
 	if syncWorker != nil {
 		syncWorker.Start(ctx)

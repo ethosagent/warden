@@ -84,10 +84,26 @@ local-only/standalone worker still requires one.
 
 ## Pinning bundle keys (worker config)
 
-A worker pins the public keys that may sign the policy bundles it accepts. The
-keys are read at startup and have no runtime effect until signed-bundle
-verification lands (W-P2-SBND-04); with none pinned a managed worker behaves as
-before and logs one WARN, `bundle verification disabled (no controlPlane.bundleKeys)`.
+A worker pins the public keys that may sign the policy bundles it accepts. With
+none pinned a managed worker behaves as before and logs one WARN,
+`bundle verification disabled (no controlPlane.bundleKeys)`.
+
+With pins the worker sends `Accept: application/vnd.warden.bundle.v1+json` on every
+policy pull and applies only a bundle that verifies (signature, seq, expiry,
+issuer, credential hash). It never applies the unsigned wire: a legacy 200 is
+rejected as `unsigned`. A rejected bundle changes nothing, so the worker keeps
+enforcing its last-known-good policy (and a disabled agent stays disabled); its
+ETag is sent as `If-None-Match` on the next long-poll so the bad bundle is not
+downloaded again (except `future` and `expired`, which depend on the clock and
+are fetched again). One WARN per distinct rejection names the reason, seq and
+kid, never payload or credential values. A bundle that is signed correctly but
+carries a policy the worker cannot enforce (for example an invalid
+`registeredAgents` list) is rejected whole as `invalid_policy`. `bundleExpiry`
+decides what happens when the held bundle passes `expiresAt` (plus skew) with no
+valid replacement: `keep` (default) keeps enforcing it and logs a WARN, `deny`
+denies all traffic until a valid bundle arrives. A control plane started with
+`--bundles=require` answers a worker without pins `406 signed_bundle_required`;
+the worker logs a hint to pin the bundle keys.
 
 | Key | Default | Meaning |
 |---|---|---|

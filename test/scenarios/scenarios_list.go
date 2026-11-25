@@ -375,6 +375,7 @@ var All = slices.Concat(
 		// renewal lineage rule, and --require-worker-certs. In-process only.
 		{Name: "workerca_cert_auth", Opts: workerCACertAuthOpts(), Run: workerCACertAuth},
 		{Name: "workerca_renew", Opts: workerCACertAuthOpts(), Run: workerCARenew},
+		{Name: "workerca_client", Opts: workerCACertAuthOpts(), Run: workerCAClient},
 		{Name: "workerca_strict_certs", Opts: workerCAStrictCertsOpts(), Run: workerCAStrictCerts},
 		// Worker certificate revocation (W-P2-WCA-05): the console route and the
 		// offline CLI cut a worker off (401 on every worker route and renew, held
@@ -407,6 +408,15 @@ var All = slices.Concat(
 		// legacy wire. In-process only (versioned store, keys, CP restart).
 		{Name: "bundles_off_legacy_wire", Opts: bundlesOffOpts(), Run: bundlesOffLegacyWire},
 		{Name: "bundles_offer_serves", Opts: bundlesOfferOpts(), Run: bundlesOfferServes},
+		// Signed bundles on the worker (W-P2-SBND-04): a pinned worker applies
+		// only verified bundles and keeps the last one when the control plane
+		// goes away; a pin that does not match the signer leaves it fail-closed
+		// (never the unsigned wire); bundleExpiry=deny stops traffic once the
+		// held bundle expires and a fresh bundle restores it. In-process only.
+		{Name: "bundles_pinned_worker_enforces", Opts: pinnedWorkerEnforcesOpts(), Run: pinnedWorkerEnforces},
+		{Name: "bundles_pinned_worker_unrelated_key_fails_closed", Opts: unrelatedPinsOpts(), Run: pinnedWorkerUnrelatedKeyFailsClosed},
+		{Name: "bundles_pinned_worker_expiry_deny", Opts: pinnedWorkerDenyOpts(), Run: pinnedWorkerExpiryDeny},
+		{Name: "bundles_pinned_worker_tampered_bundle", Opts: tamperedOpts(), Run: pinnedWorkerTamperedBundleKeepsLastKnownGood},
 		// Warden credentials in agent egress (W-P2-APIK-06): a wak_ key or wwt_
 		// token in a request body is flagged as credentials only with
 		// dlp.wardenTokens on, and blocked only in enforce mode with a rule.

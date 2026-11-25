@@ -175,6 +175,7 @@ zones:
     - internal/llmpolicy
     - internal/llm
     - internal/dnstest
+    - internal/workerca/adapters/cpclient  # the worker's enrollment/renewal client: HTTP and file I/O on the data plane (#90)
     - examples/**
   control:
     - cmd/**
@@ -197,7 +198,7 @@ zones:
     - internal/tokensvc/adapters/**   # SQLite ReplayStore (TOKX-01)
     - internal/approvals
     - internal/approvals/adapters/**   # the SQLite change-draft store (APPR-01)
-    - internal/workerca/adapters/**  # x509.CreateCertificate lives here: only the control plane issues worker certs (#88)
+    - internal/workerca/adapters/signer/**  # x509.CreateCertificate lives here: only the control plane issues worker certs (#88)
     - internal/apikeys/**   # CP-only API keys: domain and its SQLite adapter (APIK-01)
   shared:
     - internal/config

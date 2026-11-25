@@ -22,6 +22,11 @@ type ControlPlaneClient interface {
 	GetPolicy() (config.Policy, error)
 	Settings() *config.SettingsWire
 	Heartbeat(ctx context.Context) error
+	// Bundle is the verified signed bundle in force (ok=false without pins or
+	// before the first verified bundle); BundleStatus is the same state with
+	// the expiry and rejection facts.
+	Bundle() (config.VerifiedBundle, bool)
+	BundleStatus() config.BundleStatus
 }
 
 // Compile-time proof that the concrete control-plane provider satisfies the seam
@@ -55,7 +60,12 @@ func longPollControlPlane(ctx context.Context, clk clock.Clock, cp ControlPlaneC
 			if ctx.Err() != nil {
 				return
 			}
-			logger.Warn("control plane long-poll failed; keeping last-known policy", "error", err)
+			if config.IsBundleRejection(err) {
+				// The provider already warned once per distinct rejection.
+				logger.Debug("signed bundle rejected; keeping last-known policy", "error", err)
+			} else {
+				logger.Warn("control plane long-poll failed; keeping last-known policy", "error", err)
+			}
 			select {
 			case <-ctx.Done():
 				return
