@@ -4,12 +4,15 @@ import (
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/asn1"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"math/big"
 	"net"
@@ -312,6 +315,8 @@ type mintSpec struct {
 	header map[string]any
 	omit   map[string]bool
 	key    *issuerKey
+	// hmacKey, when set, signs the token with HMAC-SHA256 instead of key.
+	hmacKey []byte
 }
 
 // MintOption overrides one part of a token. Options apply in order; a later
@@ -359,7 +364,14 @@ func (i *OIDCIssuer) Mint(opts ...MintOption) string {
 	}
 	in := b64url(hb) + "." + b64url(cb)
 	alg, _ := s.header["alg"].(string)
-	sig, err := s.key.sign(in, alg)
+	var sig []byte
+	if s.hmacKey != nil {
+		mac := hmac.New(sha256.New, s.hmacKey)
+		mac.Write([]byte(in))
+		sig = mac.Sum(nil)
+	} else {
+		sig, err = s.key.sign(in, alg)
+	}
 	if err != nil {
 		i.tb.Fatalf("oidc issuer: sign token: %v", err)
 	}
@@ -458,6 +470,83 @@ func WithSigningKey(kid string) MintOption {
 		}
 		s.iss.tb.Fatalf("oidc issuer: WithSigningKey: no published key with kid %q", kid)
 	}
+}
+
+// WithHS256 signs the token with HMAC-SHA256 keyed with secret and sets the
+// header alg to HS256: the classic key-confusion forgery when secret is the
+// issuer's public key material (PublicKeyPEM, PublicJWKJSON). The kid header
+// stays the default signing key's, so a verifier that picks the algorithm from
+// the header and the key by kid is the one that would be fooled.
+func WithHS256(secret []byte) MintOption {
+	return func(s *mintSpec) {
+		s.hmacKey = append([]byte(nil), secret...)
+		s.header["alg"] = "HS256"
+	}
+}
+
+// WithClaims sets several claims at once (see WithClaim).
+func WithClaims(claims map[string]any) MintOption {
+	return func(s *mintSpec) {
+		for name, v := range claims {
+			s.claims[name] = v
+			delete(s.omit, name)
+		}
+	}
+}
+
+// WithForeignKey signs with a fresh, never published key of the same algorithm
+// as the default signing key and presents the given kid in the header: a real
+// kid with a foreign key behind it. It is WithUnpublishedKey plus WithKID.
+func WithForeignKey(kid string) MintOption {
+	return func(s *mintSpec) {
+		WithUnpublishedKey()(s)
+		s.header["kid"] = kid
+	}
+}
+
+// PublicKeyPEM is the PKIX public key (PEM) of the published key kid, the
+// material an HS256 key-confusion forgery uses as its HMAC secret. It fails the
+// test when no published key has that kid.
+func (i *OIDCIssuer) PublicKeyPEM(kid string) []byte {
+	i.tb.Helper()
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	for _, k := range i.keys {
+		if k.kid != kid {
+			continue
+		}
+		var pub any
+		if k.rsa != nil {
+			pub = &k.rsa.PublicKey
+		} else {
+			pub = &k.ec.PublicKey
+		}
+		der, err := x509.MarshalPKIXPublicKey(pub)
+		if err != nil {
+			i.tb.Fatalf("oidc issuer: marshal public key: %v", err)
+		}
+		return pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})
+	}
+	i.tb.Fatalf("oidc issuer: PublicKeyPEM: no published key with kid %q", kid)
+	return nil
+}
+
+// PublicJWKJSON is the JWK document the JWKS serves for the published key kid.
+func (i *OIDCIssuer) PublicJWKJSON(kid string) []byte {
+	i.tb.Helper()
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	for _, k := range i.keys {
+		if k.kid == kid {
+			b, err := json.Marshal(k.jwk())
+			if err != nil {
+				i.tb.Fatalf("oidc issuer: encode jwk: %v", err)
+			}
+			return b
+		}
+	}
+	i.tb.Fatalf("oidc issuer: PublicJWKJSON: no published key with kid %q", kid)
+	return nil
 }
 
 // WithES256 signs with the published ES256 key.
