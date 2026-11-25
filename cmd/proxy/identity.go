@@ -111,7 +111,7 @@ func newIdentityCmdWith(deps identityDeps) *cobra.Command {
 	pf.StringVar(&f.subjectTokenFile, "subject-token-file", "", "read the user's ID token from this 0600 `PATH` instead of the login cache (agent mode)")
 
 	r := &identityRunner{deps: deps, f: f}
-	cmd.AddCommand(r.loginCmd(), r.tokenCmd(), r.statusCmd(), r.envCmd(), r.logoutCmd(), r.execCmd(), r.enrollCmd())
+	cmd.AddCommand(r.loginCmd(), r.tokenCmd(), r.statusCmd(), r.envCmd(), r.logoutCmd(), r.execCmd(), r.enrollCmd(), r.forwardCmd())
 	return cmd
 }
 

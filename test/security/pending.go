@@ -46,10 +46,6 @@ func joinPending(parts ...[]Pending) []Pending {
 
 // pending is the list. Keep each ticket's block together.
 var pending = joinPending(
-	// W-P2-SECT-06: CP route boundaries and enrollment.
-	pend(TicketRoutes,
-		CoverRoute("/control/enroll"), CoverRoute("/control/renew"),
-	),
 	// W-P2-SECT-07: degraded and restart modes.
 	pend(TicketDegrade,
 		CoverIdentity("jwks_unavailable"),
