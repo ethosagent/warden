@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -41,7 +42,8 @@ type ControlPlaneConfig struct {
 	// Empty means verification is off.
 	BundleKeys []keys.JWK
 	// RequireSignedBundles makes an empty pin set a config error for a
-	// CP-managed worker.
+	// CP-managed worker. It defaults to true when controlPlane.
+	// requireSignedBundles is absent; false is the explicit, temporary opt-out.
 	RequireSignedBundles bool
 	// BundleIssuer, when set, must equal the signed bundle's cpId.
 	BundleIssuer string
@@ -131,7 +133,7 @@ type rawControlPlane struct {
 
 	BundleKeys           []map[string]any `yaml:"bundleKeys"`
 	BundleKeysFile       string           `yaml:"bundleKeysFile"`
-	RequireSignedBundles bool             `yaml:"requireSignedBundles"`
+	RequireSignedBundles *bool            `yaml:"requireSignedBundles"`
 	BundleIssuer         string           `yaml:"bundleIssuer"`
 	BundleClockSkew      string           `yaml:"bundleClockSkew"`
 	BundleExpiry         string           `yaml:"bundleExpiry"`
@@ -226,7 +228,7 @@ func validateControlPlane(c ControlPlaneConfig) error {
 		return fmt.Errorf("config: controlPlane.pollInterval must be greater than 0")
 	}
 	if c.RequireSignedBundles && !c.LocalOnly && !c.BundleVerification() {
-		return fmt.Errorf("config: controlPlane.requireSignedBundles is true but controlPlane.bundleKeys and controlPlane.bundleKeysFile pin no keys")
+		return errors.New(errNoBundlePins)
 	}
 	return nil
 }

@@ -1185,3 +1185,111 @@ func TestBundleConcurrentSeqsOneContent(t *testing.T) {
 		}
 	}
 }
+
+// TestBundleGateDefaults: the Phase 2 gate flip (#719). An unset --bundles is
+// require when --state-dir, --policy-store=versioned and keys.enabled are all
+// present; when one is missing it is the legacy wire plus one startup WARN that
+// names the missing piece, and never a startup error. --bundles=off is the
+// explicit opt-out and logs a WARN of its own; an explicit offer or require
+// still refuses to start without its prerequisites.
+func TestBundleGateDefaults(t *testing.T) {
+	enabled := config.KeysConfig{Enabled: true}
+	cases := []struct {
+		name      string
+		p         Params
+		stateDir  string
+		store     string
+		kc        config.KeysConfig
+		wantMode  string
+		wantMiss  []string
+		wantLevel string
+		wantLog   []string
+	}{
+		{name: "default with the prerequisites is require", stateDir: "/s", store: PolicyStoreVersioned, kc: enabled,
+			wantMode: BundlesRequire, wantLevel: "INFO", wantLog: []string{"required by default"}},
+		{name: "default without a state dir falls back", store: PolicyStoreVersioned, kc: enabled,
+			wantMode: BundlesOff, wantMiss: []string{"--state-dir"}, wantLevel: "WARN", wantLog: []string{"legacy unsigned policy", "--state-dir"}},
+		{name: "default on the file store falls back", stateDir: "/s", store: PolicyStoreFile, kc: enabled,
+			wantMode: BundlesOff, wantMiss: []string{"--policy-store=versioned"}, wantLevel: "WARN", wantLog: []string{"--policy-store=versioned"}},
+		{name: "default without keys falls back", stateDir: "/s", store: PolicyStoreVersioned,
+			wantMode: BundlesOff, wantMiss: []string{"keys.enabled"}, wantLevel: "WARN", wantLog: []string{"keys.enabled"}},
+		{name: "default with nothing names every piece",
+			wantMode: BundlesOff, wantMiss: []string{"--state-dir", "--policy-store=versioned", "keys.enabled"}, wantLevel: "WARN",
+			wantLog: []string{"--state-dir", "--policy-store=versioned", "keys.enabled"}},
+		{name: "explicit off is the opt-out", p: Params{Bundles: BundlesOff}, stateDir: "/s", store: PolicyStoreVersioned, kc: enabled,
+			wantMode: BundlesOff, wantLevel: "WARN", wantLog: []string{"--bundles=off", "temporary opt-out"}},
+		{name: "explicit offer warns", p: Params{Bundles: BundlesOffer}, stateDir: "/s", store: PolicyStoreVersioned, kc: enabled,
+			wantMode: BundlesOffer, wantLevel: "WARN", wantLog: []string{"--bundles=offer"}},
+		{name: "explicit require is quiet", p: Params{Bundles: BundlesRequire}, stateDir: "/s", store: PolicyStoreVersioned, kc: enabled,
+			wantMode: BundlesRequire},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := resolveBundles(tc.p, tc.stateDir, tc.store, tc.kc)
+			if err != nil {
+				t.Fatalf("resolveBundles: %v", err)
+			}
+			if cfg.Mode != tc.wantMode {
+				t.Errorf("mode = %q, want %q", cfg.Mode, tc.wantMode)
+			}
+			if cfg.Defaulted != (tc.p.Bundles == BundlesDefault) {
+				t.Errorf("Defaulted = %v for --bundles=%q", cfg.Defaulted, tc.p.Bundles)
+			}
+			if !hasPrefixes(cfg.DefaultMissing, tc.wantMiss) {
+				t.Errorf("DefaultMissing = %v, want %v", cfg.DefaultMissing, tc.wantMiss)
+			}
+			if cfg.On() != (tc.wantMode != BundlesOff) {
+				t.Errorf("On() = %v with mode %q", cfg.On(), cfg.Mode)
+			}
+			var buf bytes.Buffer
+			logBundlesMode(slog.New(slog.NewTextHandler(&buf, nil)), cfg)
+			out := buf.String()
+			if tc.wantLevel == "" {
+				if out != "" {
+					t.Errorf("log = %q, want none", out)
+				}
+				return
+			}
+			if n := strings.Count(out, "\n"); n != 1 || !strings.Contains(out, "level="+tc.wantLevel) {
+				t.Errorf("log = %q, want exactly one %s line", out, tc.wantLevel)
+			}
+			for _, w := range tc.wantLog {
+				if !strings.Contains(out, w) {
+					t.Errorf("log %q lacks %q", out, w)
+				}
+			}
+		})
+	}
+	// The default is not a loophole: an explicit mode still refuses to start.
+	if _, err := resolveBundles(Params{Bundles: BundlesRequire}, "", PolicyStoreFile, config.KeysConfig{}); err == nil {
+		t.Error("explicit --bundles=require started without its prerequisites")
+	}
+	// A resolved default-require control plane answers a worker that does not
+	// ask for the envelope 406, and never serves it the unsigned policy.
+	cfg, err := resolveBundles(Params{}, "/s", PolicyStoreVersioned, enabled)
+	if err != nil || cfg.Mode != BundlesRequire {
+		t.Fatalf("default = %+v, %v", cfg, err)
+	}
+	h := newBundleHarness(t, cfg.Mode, writePolicyFile(t, "api.openai.com"), nil, nil, nil, nil)
+	if r := h.get(t, "", ""); r.code != http.StatusNotAcceptable || !strings.Contains(string(r.body), "signed_bundle_required") {
+		t.Errorf("unsigned request under the default = %d %s, want 406 signed_bundle_required", r.code, r.body)
+	}
+	if r := h.get(t, BundleMediaType, ""); r.code != http.StatusOK {
+		t.Errorf("envelope request under the default = %d %s, want 200", r.code, r.body)
+	}
+}
+
+// hasPrefixes reports whether got matches want piece by piece, where a wanted
+// piece only has to be the start of the reported one (keys.enabled carries an
+// explanation after it).
+func hasPrefixes(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if !strings.HasPrefix(got[i], want[i]) {
+			return false
+		}
+	}
+	return true
+}

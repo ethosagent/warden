@@ -40,7 +40,7 @@ func TestBundlesOverlayStructure(t *testing.T) {
 		t.Fatal(err)
 	}
 	cp := strings.Join(o.Services["control-plane"].Command, " ")
-	for _, want := range []string{"--policy-store=versioned", "--bundles=offer", "--state-dir=/data"} {
+	for _, want := range []string{"--policy-store=versioned", "--bundles=require", "--state-dir=/data"} {
 		if !strings.Contains(cp, want) {
 			t.Errorf("control-plane command lacks %s", want)
 		}
@@ -121,7 +121,10 @@ func TestBundlesOverlayConfigsLoad(t *testing.T) {
 
 // TestBundlesWorkerConfigOnlyAddsThePin: configs/config.worker.bundles.yaml is
 // the stock worker config plus controlPlane.bundleKeysFile and nothing else, so
-// the two cannot drift apart. Comments are ignored; the parsed documents compare.
+// the two cannot drift apart, except that the stock config opts out of the
+// signed-bundle default explicitly (its control plane serves the unsigned
+// policy) and the bundles config keeps the default. Comments are ignored; the
+// parsed documents compare.
 func TestBundlesWorkerConfigOnlyAddsThePin(t *testing.T) {
 	root := repoRoot(t)
 	load := func(name string) map[string]any {
@@ -141,6 +144,14 @@ func TestBundlesWorkerConfigOnlyAddsThePin(t *testing.T) {
 		t.Fatal("the bundles worker config has no controlPlane.bundleKeysFile")
 	}
 	delete(cp, "bundleKeysFile")
+	if _, optedOut := cp["requireSignedBundles"]; optedOut {
+		t.Error("the bundles worker config must keep the require-signed-bundles default, not set requireSignedBundles")
+	}
+	stockCP, _ := stock["controlPlane"].(map[string]any)
+	if stockCP["requireSignedBundles"] != false {
+		t.Error("the stock worker config must opt out of signed bundles explicitly (controlPlane.requireSignedBundles: false)")
+	}
+	delete(stockCP, "requireSignedBundles")
 	if !reflect.DeepEqual(stock, bundles) {
 		t.Errorf("configs/config.worker.bundles.yaml differs from configs/config.worker.yaml beyond controlPlane.bundleKeysFile; stock=%v bundles=%v", stock, bundles)
 	}

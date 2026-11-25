@@ -324,6 +324,7 @@ logging:
   format: json
 controlPlane:
   endpoint: https://127.0.0.1:1/policy
+  requireSignedBundles: false   # not a bundle test: take the unsigned policy explicitly
   longPollWait: 50ms
   heartbeatInterval: 20ms
 central:
@@ -405,6 +406,7 @@ logging:
   format: json
 controlPlane:
   endpoint: https://` + strings.TrimPrefix(srv.URL, "https://") + `/policy
+  requireSignedBundles: false   # not a bundle test: take the unsigned policy explicitly
   tokenEnv: WARDEN_TEST_CP_TOKEN
   caCert: ` + caPath + `
   pollInterval: 20ms
@@ -958,6 +960,7 @@ func TestRun_Managed_KeepsLocalUpstreamExceptions(t *testing.T) {
 	cfg := `
 controlPlane:
   endpoint: ` + cp.URL + `/policy
+  requireSignedBundles: false   # not a bundle test: take the unsigned policy explicitly
   tokenEnv: WARDEN_CP_TOKEN
   caCert: ` + caPath + `
   longPollWait: 50ms

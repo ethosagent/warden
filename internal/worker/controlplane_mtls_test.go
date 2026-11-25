@@ -163,6 +163,7 @@ logging:
   format: json
 controlPlane:
   endpoint: ` + base + `/policy
+  requireSignedBundles: false   # not a bundle test: take the unsigned policy explicitly
   tokenEnv: WARDEN_TEST_CP_TOKEN
   caCert: ` + cp.caPath + `
   stateDir: ` + t.TempDir() + `

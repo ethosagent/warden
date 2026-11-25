@@ -252,6 +252,9 @@ type H struct {
 	// bundleMode (WithBundles) boots the control plane with --bundles set to
 	// it, on top of the versioned policy store and the signing keys.
 	bundleMode string
+	// bundleModeSet is true once WithBundles was applied (its mode may be the
+	// empty default); without it the harness control plane runs --bundles=off.
+	bundleModeSet bool
 	// bundlePins (WithBundlePins, WithUnrelatedBundlePins) are the bundle keys
 	// every worker pins; bundleExpiry (WithBundleExpiry) is its expiry mode.
 	bundlePins bundlePinSet

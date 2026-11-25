@@ -40,15 +40,23 @@ import (
 func WithBundles(mode string) Option {
 	return func(h *H) {
 		h.bundleMode = mode
+		h.bundleModeSet = true
 		h.versionedPolicy = true
 		h.wantKeys = true
 	}
 }
 
+// applyBundles sets --bundles for the harness control plane. An unset
+// controlplane.Params.Bundles now means require (the Phase 2 default), which
+// would answer the harness's unpinned workers 406, so a harness without
+// WithBundles opts out explicitly with off, as a test that is not about
+// bundles should. WithBundles(BundlesDefault) boots the real default.
 func (h *H) applyBundles(p *controlplane.Params) {
-	if h.bundleMode != "" {
-		p.Bundles = h.bundleMode
+	if !h.bundleModeSet {
+		p.Bundles = controlplane.BundlesOff
+		return
 	}
+	p.Bundles = h.bundleMode
 }
 
 // bundlePinSet says which keys the workers pin.

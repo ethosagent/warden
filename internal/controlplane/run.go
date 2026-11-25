@@ -107,10 +107,12 @@ type Params struct {
 	// requires StateDir. Any other value is a startup error.
 	PolicyStore string
 
-	// Bundles is --bundles: "off" (or "", the default) leaves /policy exactly
-	// as it was; "offer" serves the signed bundle envelope to workers that ask
-	// for it with the bundle Accept header and the legacy policy to everyone
-	// else; "require" answers a request without that header with 406. Offer and
+	// Bundles is --bundles: "" (BundlesDefault, the default) is "require" when
+	// StateDir, PolicyStore versioned and keys.enabled are all present and "off"
+	// with a startup WARN when one is missing; "off" is the explicit, temporary
+	// opt-out and leaves /policy exactly as it was; "offer" serves the signed
+	// bundle envelope to workers that ask for it with the bundle Accept header
+	// and the legacy policy to everyone else; "require" answers a request without that header with 406. Offer and
 	// require need StateDir, PolicyStore versioned and keys.enabled; Run
 	// refuses to start without them.
 	Bundles string
@@ -333,6 +335,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	if err != nil {
 		return fail(err)
 	}
+	logBundlesMode(logger, bundlesCfg)
 	bindAddr := listenAddr
 	if p.Listener != nil {
 		bindAddr = p.Listener.Addr().String()
