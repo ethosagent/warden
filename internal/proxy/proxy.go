@@ -171,9 +171,11 @@ type Config struct {
 	// roots, byte-identical to before.
 	UpstreamRootCAs *x509.CertPool
 
-	// IdentityClock, when set, is the time source for every identity and session validity
-	// decision (token exp+skew, tunnel lifetime). It does NOT drive leaf-cert
-	// minting, which real TLS clients verify against the wall clock. Assembly-only
+	// IdentityClock, when set, is the time source for identity validity decisions:
+	// the token exp+skew recheck on each request, and the raw-tunnel lifetime
+	// decided at CONNECT (exp minus now). The cut of an open tunnel itself runs on
+	// wall time (time.AfterFunc). It does NOT drive leaf-cert minting, which real
+	// TLS clients verify against the wall clock. Assembly-only
 	// (worker.Overrides.Clock): cmd/proxy never sets it; nil keeps time.Now.
 	IdentityClock func() time.Time
 

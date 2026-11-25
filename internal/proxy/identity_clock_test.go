@@ -1,10 +1,12 @@
 package proxy
 
 import (
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/ethosagent/warden/internal/config"
+	"github.com/ethosagent/warden/internal/denyreason"
 	"github.com/ethosagent/warden/internal/identity"
 	"github.com/ethosagent/warden/internal/policy"
 	"github.com/ethosagent/warden/test/fakes"
@@ -60,5 +62,30 @@ func TestIdentityClockSeamDrivesExpiry(t *testing.T) {
 
 	if d := time.Since(p.clock()); d < -time.Second || d > time.Second {
 		t.Errorf("leaf clock moved with the identity clock: off by %v", d)
+	}
+}
+
+// TestIdentityClockSeamDrivesDeferredConnect pins serve.go's deferIdentity
+// raw-tunnel gate (d := ci.Expiry.Sub(validityClock())) to Config.IdentityClock.
+// The env's own p.now stays frozen at real time, so only the injected identity
+// clock moving past exp can produce the denial; reverting that line to
+// p.clock() leaves d positive and the CONNECT is tunnelled (200) instead.
+func TestIdentityClockSeamDrivesDeferredConnect(t *testing.T) {
+	idc := &idClock{t: time.Now()}
+	e := newIDEnvCfg(t, IdentityModeAttribute, scopedEdit(func(c *Config) {
+		noCA(c)
+		c.IdentityClock = idc.now
+	}))
+	e.v.Set("tok-short", idClaims("carol", idc.now().Add(30*time.Second)), identity.StatusValid, "")
+
+	idc.advance(31 * time.Second)
+	dials := e.dials.Load()
+	_, _, status := e.connect("Proxy-Authorization: " + basicAuth("tok-short") + "\r\n")
+	if !strings.Contains(status, "403") {
+		t.Fatalf("CONNECT past exp on the identity clock: status %q, want 403", status)
+	}
+	e.waitDeny(t, denyreason.IdentityRequired, 1)
+	if e.dials.Load() != dials {
+		t.Error("expired-identity CONNECT dialed upstream")
 	}
 }
