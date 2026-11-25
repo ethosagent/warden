@@ -93,16 +93,29 @@ type runningForward struct {
 
 func startForward(t *testing.T, a *agentRigCmd, extra ...string) *runningForward {
 	t.Helper()
+	return startForwardOn(t, a.rig, append([]string{"--agent-key-file", a.keyFile, "--subject-token-file", a.subjectFile}, extra...)...)
+}
+
+// startForwardOn runs `identity forward` for r with --listen, --worker and
+// --health-listen set (extra may override --listen).
+func startForwardOn(t *testing.T, r *rig, extra ...string) *runningForward {
+	t.Helper()
 	worker := newRecordingWorker(t)
 	f := &runningForward{t: t, listen: freeAddr(t), health: freeAddr(t), stderr: &syncBuf{}, stop: make(chan os.Signal, 1), done: make(chan struct{})}
-	d := a.deps()
+	d := r.deps()
 	d.signals = func() (<-chan os.Signal, func()) { return f.stop, func() {} }
 	root := &cobra.Command{Use: "warden"}
 	root.AddCommand(newIdentityCmdWith(d))
 	root.SetOut(io.Discard)
 	root.SetErr(f.stderr)
 	args := []string{"identity", "forward", "--listen", f.listen, "--worker", worker.ln.Addr().String(),
-		"--health-listen", f.health, "--agent-key-file", a.keyFile, "--subject-token-file", a.subjectFile}
+		"--health-listen", f.health}
+	for i, a := range extra {
+		// A wildcard --listen override is reached over loopback.
+		if _, port, ok := strings.Cut(a, "0.0.0.0:"); ok && i > 0 && extra[i-1] == "--listen" {
+			f.listen = "127.0.0.1:" + port
+		}
+	}
 	root.SetArgs(append(args, extra...))
 	go func() { f.err = root.Execute(); close(f.done) }()
 	t.Cleanup(func() {
@@ -116,9 +129,15 @@ func startForward(t *testing.T, a *agentRigCmd, extra ...string) *runningForward
 			t.Error("identity forward did not stop")
 		}
 	})
-	// Wait for the listener.
+	// Wait for the listener (or for the command to fail).
 	deadline := time.Now().Add(5 * time.Second)
 	for {
+		select {
+		case <-f.done:
+			f.worker = worker
+			return f
+		default:
+		}
 		c, err := net.Dial("tcp", f.listen)
 		if err == nil {
 			_ = c.Close()
@@ -362,5 +381,61 @@ func TestIdentityForwardFlagErrors(t *testing.T) {
 		if _, _, err := a.run(append(append([]string{}, base...), args...)...); err == nil {
 			t.Errorf("%s: forward started", name)
 		}
+	}
+}
+
+// TestIdentityForwardP1Login is the P1 path: no --agent-id, a cached login, and
+// the user's ID token is what the worker is sent.
+func TestIdentityForwardP1Login(t *testing.T) {
+	p := newIdP(t)
+	r := newRig(t, p.srv.URL)
+	entry := r.loggedIn()
+	f := startForwardOn(t, r)
+	f.waitHealth("valid")
+	if code, state := f.healthz(); code != 200 || state != "valid" {
+		t.Fatalf("healthz = %d %q, want 200 valid", code, state)
+	}
+	c, head := f.connect("")
+	if !strings.HasPrefix(head, "HTTP/1.1 200") {
+		t.Fatalf("head %q", head)
+	}
+	_ = c.Close()
+	heads := f.worker.Heads()
+	if len(heads) != 1 {
+		t.Fatalf("worker saw %d CONNECTs", len(heads))
+	}
+	raw, err := base64.StdEncoding.DecodeString(headerOf(heads[0], "Proxy-Authorization")[len("Basic "):])
+	if err != nil || string(raw) != "session:"+entry.IDToken {
+		t.Fatalf("worker auth = %q (%v), want session:<the cached ID token>", raw, err)
+	}
+	if !strings.Contains(f.stderr.String(), "agent_mode=false") {
+		t.Errorf("stderr lacks agent_mode=false:\n%s", f.stderr)
+	}
+	if strings.Contains(f.stderr.String(), entry.IDToken) {
+		t.Error("the ID token reached the logs")
+	}
+}
+
+// TestIdentityForwardNonLoopbackWarning: listening beyond loopback logs one
+// warning, and says whether a client credential protects the listener.
+func TestIdentityForwardNonLoopbackWarning(t *testing.T) {
+	p := newIdP(t)
+	r := newRig(t, p.srv.URL)
+	r.loggedIn()
+	_, port, _ := net.SplitHostPort(freeAddr(t))
+	f := startForwardOn(t, r, "--listen", "0.0.0.0:"+port)
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(f.stderr.String(), "forwarder_start") {
+		if time.Now().After(deadline) {
+			t.Fatalf("forwarder never started; stderr:\n%s", f.stderr)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	logs := f.stderr.String()
+	if n := strings.Count(logs, "non-loopback"); n != 1 {
+		t.Fatalf("%d non-loopback warnings, want 1:\n%s", n, logs)
+	}
+	if !strings.Contains(logs, "level=WARN") || !strings.Contains(logs, "client_credential=false") {
+		t.Errorf("warning lacks level or client_credential=false:\n%s", logs)
 	}
 }

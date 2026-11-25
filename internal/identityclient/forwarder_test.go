@@ -714,3 +714,48 @@ func TestForwarderLimitsMatchWorker(t *testing.T) {
 		t.Errorf("worker preamble %ss != forwarder %s", m[1], identityclient.TestConnectPreamble)
 	}
 }
+
+// TestForwarderCapsPendingConnections: connections that have not finished their
+// preamble are capped at 2x MaxTunnels; the next one is closed unread, and a
+// slot is free again once a stalled connection goes away.
+func TestForwarderCapsPendingConnections(t *testing.T) {
+	r := startForwarderWith(t, ok200, nil, func(f *identityclient.Forwarder) { f.MaxTunnels = 1 })
+	var stalled []net.Conn
+	for range 2 {
+		c, err := net.Dial("tcp", r.addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = c.Close() })
+		_, _ = io.WriteString(c, "CONNECT a.example.com:443 HTTP/1.1\r\n") // never finishes
+		stalled = append(stalled, c)
+	}
+	over, err := net.Dial("tcp", r.addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = over.Close() })
+	_ = over.SetDeadline(time.Now().Add(5 * time.Second))
+	_, _ = io.WriteString(over, connectReq("b.example.com:443", goodAuth()))
+	got, _ := io.ReadAll(over)
+	if len(got) != 0 {
+		t.Fatalf("over-cap connection got %q, want it closed unread", got)
+	}
+	if n := r.worker.dials.Load(); n != 0 {
+		t.Fatalf("%d dials, want 0", n)
+	}
+	for _, c := range stalled {
+		_ = c.Close()
+	}
+	waitFor(t, "a free pre-preamble slot", func() bool {
+		c, err := net.DialTimeout("tcp", r.addr, 5*time.Second)
+		if err != nil {
+			return false
+		}
+		defer func() { _ = c.Close() }()
+		_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+		_, _ = io.WriteString(c, connectReq("c.example.com:443", goodAuth()))
+		line, _ := bufio.NewReader(c).ReadString('\n')
+		return strings.Contains(line, " 200 ")
+	})
+}

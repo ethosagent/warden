@@ -554,8 +554,10 @@ container.
 
 ```sh
 warden identity forward --listen 0.0.0.0:3128 --worker warden:8080 --health-listen 127.0.0.1:3129 --client-credential-env FORWARD_CREDENTIAL
-warden identity forward --agent-id claude-code --listen 0.0.0.0:3128 --worker warden:8080
+warden identity forward --agent-id claude-code --listen 0.0.0.0:3128 --worker warden:8080 --client-credential-env FORWARD_CREDENTIAL
 ```
+
+Both examples listen on a non-loopback address, so both set `--client-credential-env`: without it any peer that can reach the port can use the token, and with it the agent must present that secret as the proxy password (`HTTPS_PROXY=http://wx:$FORWARD_CREDENTIAL@sidecar:3128`).
 
 - It accepts CONNECT only (any other method gets 405) and dials only `--worker`,
   never the CONNECT target. A non-loopback `--listen` logs one startup warning.

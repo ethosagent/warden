@@ -77,11 +77,15 @@ const (
 // What the forwarder does and does not do:
 //
 //   - It serves CONNECT only; any other method gets 405.
-//   - The client must present Proxy-Authorization: Basic base64("wx:"+
-//     ClientCredential), checked in constant time and never sent on. A
-//     missing or wrong credential gets 407 and no dial. Every other client
-//     header is dropped: the CONNECT to the worker is built fresh from the
-//     request target, Host and the injected Proxy-Authorization.
+//   - Clients are authenticated by ClientCredential: they must present
+//     Proxy-Authorization: Basic base64("wx:"+ClientCredential), checked in
+//     constant time and never sent on; a missing or wrong credential gets 407
+//     and no dial. With AllowAnonymousClients and no credential (`identity
+//     forward` without --client-credential-env) anything that can reach the
+//     listener is served, so it is for loopback. Either way every other client
+//     header, any Proxy-Authorization included, is dropped: the CONNECT to the
+//     worker is built fresh from the request target, Host and the injected
+//     Proxy-Authorization.
 //   - It dials only WorkerAddr and never the CONNECT target, so it adds no
 //     egress route of its own. The worker's status line is relayed verbatim
 //     (a 403 stays a 403). On a 200 the two sides are spliced.
@@ -89,14 +93,21 @@ const (
 //     worker is not dialled. One failure does not poison the next CONNECT.
 //
 // The preamble is bounded exactly like the worker's: a request line over
-// 8 KiB gets 414, a header block over 64 KiB gets 431, and the whole preamble
-// must arrive within 10 s.
+// 8 KiB gets 414, a header block over 64 KiB or over 100 lines gets 431, and
+// the whole preamble must arrive within 10 s. Connections still sending their
+// preamble are capped at 2x MaxTunnels (the rest are closed unread), and
+// established tunnels at MaxTunnels (the rest get 503 tunnel_limit).
 //
-// Limitation: attribution is bound per tunnel at CONNECT time. A tunnel opened
-// before a token refresh keeps the token it was opened with, so clients are
-// expected to recycle connections. No refresh timer is needed: Token (for the
-// Client, Client.Token) refreshes on demand when 2/3 of the token lifetime has
-// passed, which gives every new tunnel a fresh token without a goroutine.
+// Attribution is bound per tunnel at CONNECT time, and what happens to a tunnel
+// whose token is replaced depends on the token supplier. With Source (an agent's
+// Warden token), a worker 407 forces one Refresh and a retry, and when the
+// token rotates a tunnel opened with the old one is closed once it has carried
+// no bytes for 2 s, and every tunnel is closed at its token's exp, so a client
+// that holds a connection open does not keep a stale identity. With Token (the
+// P1 ID token) there is no drain: a tunnel keeps the token it was opened with
+// until it ends, and Token (Client.Token) refreshes on demand when 2/3 of the
+// token lifetime has passed, which gives every new tunnel a fresh token without
+// a goroutine.
 //
 // A Forwarder is safe for concurrent use; fields must not change after Serve.
 type Forwarder struct {
@@ -214,6 +225,11 @@ func (f *Forwarder) Serve(ctx context.Context, ln net.Listener) error {
 		ctx, cancel = context.WithCancel(ctx)
 		defer cancel()
 	}
+	// pending caps the connections still sending their preamble (a goroutine and
+	// up to 64 KiB each, for up to 10s): 2x MaxTunnels. A slot is held from
+	// accept until the preamble is read and the connection is handed to the
+	// tunnel cap, or closed. Over the cap the connection is closed unread.
+	pending := make(chan struct{}, 2*int(f.tunnels.max))
 	var delay time.Duration
 	for {
 		conn, err := ln.Accept()
@@ -235,12 +251,22 @@ func (f *Forwarder) Serve(ctx context.Context, ln net.Listener) error {
 			return fmt.Errorf("identityclient: forwarder accept: %w", err)
 		}
 		delay = 0
+		select {
+		case pending <- struct{}{}:
+		default:
+			f.log().Warn("identity forwarder: too many connections awaiting a request, closing", "max_pending", cap(pending))
+			_ = conn.Close()
+			continue
+		}
+		var once sync.Once
+		release := func() { once.Do(func() { <-pending }) }
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer release()
 			closeConn := context.AfterFunc(ctx, func() { _ = conn.Close() })
 			defer closeConn()
-			f.handle(ctx, conn)
+			f.handle(ctx, conn, release)
 		}()
 	}
 }
@@ -286,7 +312,9 @@ func rejectAndClose(conn net.Conn, br *bufio.Reader, status, extra, body string)
 }
 
 // handle serves one client connection.
-func (f *Forwarder) handle(ctx context.Context, conn net.Conn) {
+// release gives back the connection's pre-preamble slot; handle calls it once
+// the preamble is read, and the caller calls it again on return.
+func (f *Forwarder) handle(ctx context.Context, conn net.Conn, release func()) {
 	defer func() { _ = conn.Close() }()
 	br := bufio.NewReader(conn)
 
@@ -346,6 +374,7 @@ func (f *Forwarder) handle(ctx context.Context, conn net.Conn) {
 	if err := conn.SetReadDeadline(time.Time{}); err != nil {
 		return
 	}
+	release()
 
 	if f.ClientCredential != "" && (authLines != 1 || !f.credentialOK(auth)) {
 		rejectAndClose(conn, br, "407 Proxy Authentication Required", "Proxy-Authenticate: Basic realm=\"warden-forwarder\"\r\n", "")

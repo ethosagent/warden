@@ -16,8 +16,9 @@ import (
 const (
 	// maintainTick is how often the run loop asks for a token, so a rotation
 	// does not wait for the next CONNECT and /healthz tracks the exchange.
-	// WardenTokenSource keeps its own backoff, so this never hammers the
-	// control plane.
+	// WardenTokenSource and ClientState each back off after a failure (1s
+	// growing to 60s), so a tick that fails does not reach the control plane or
+	// the issuer again until the cooldown has passed.
 	maintainTick = time.Second
 	// DefaultShutdownGrace is how long open tunnels may finish after SIGTERM.
 	DefaultShutdownGrace = 5 * time.Second

@@ -20,16 +20,7 @@ type healthBody struct {
 // is held (valid or expiring) and 503 otherwise, so a container health check
 // can use the status alone.
 func HealthHandler(state func() State, now func() time.Time) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/healthz" {
-			http.NotFound(w, r)
-			return
-		}
-		if r.Method != http.MethodGet && r.Method != http.MethodHead {
-			w.Header().Set("Allow", "GET, HEAD")
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
+	return healthMux(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		st := state()
 		body := healthBody{State: string(st.Reason)}
 		if !st.Expiry.IsZero() {
@@ -45,7 +36,7 @@ func HealthHandler(state func() State, now func() time.Time) http.Handler {
 		if r.Method == http.MethodGet {
 			_ = json.NewEncoder(w).Encode(body)
 		}
-	})
+	}))
 }
 
 // ClientState adapts the P1 login (a *Client) to the forwarder's health: Token
@@ -59,7 +50,17 @@ type ClientState struct {
 	mu  sync.Mutex
 	exp time.Time
 	err error
+	// failures counts consecutive refresh failures; until holds the earliest
+	// time the next attempt may reach the issuer.
+	failures int
+	until    time.Time
 }
+
+// Failure backoff of ClientState: 1s doubling to 60s, like WardenTokenSource.
+const (
+	clientBackoffMin = time.Second
+	clientBackoffMax = time.Minute
+)
 
 func (c *ClientState) now() time.Time {
 	if c.Now != nil {
@@ -69,14 +70,33 @@ func (c *ClientState) now() time.Time {
 }
 
 // Token returns the current ID token and records the outcome.
+//
+// After a failure other than ErrLoginRequired (which costs no request) it does
+// not call the client again until a cooldown has passed, 1s growing to 60s, and
+// returns the last error meanwhile, so a failing issuer sees at most one request
+// per cooldown however often Token is called.
 func (c *ClientState) Token(ctx context.Context) (string, error) {
+	c.mu.Lock()
+	if c.err != nil && c.now().Before(c.until) {
+		err := c.err
+		c.mu.Unlock()
+		return "", err
+	}
+	c.mu.Unlock()
 	res, err := c.Client.Token(ctx)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if err != nil {
 		c.err = err
+		if errors.Is(err, ErrLoginRequired) {
+			c.failures, c.until = 0, time.Time{}
+		} else {
+			c.failures++
+			c.until = c.now().Add(min(clientBackoffMin<<min(c.failures-1, 6), clientBackoffMax))
+		}
 		return "", err
 	}
+	c.failures, c.until = 0, time.Time{}
 	c.exp, c.err = res.Expiry, nil
 	return res.IDToken, nil
 }

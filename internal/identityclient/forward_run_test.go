@@ -338,3 +338,60 @@ func BenchmarkForwarderConnect(b *testing.B) {
 		_ = c.Close()
 	}
 }
+
+// TestClientStateBacksOff is the P1 path's maintain loop against a failing IdP:
+// Token is called every second, yet the issuer sees one attempt per cooldown
+// (1s, 2s, 4s ...), not one per call.
+func TestClientStateBacksOff(t *testing.T) {
+	rg := newRig(t)
+	rg.login(t)
+	cs := &identityclient.ClientState{Client: rg.cl, Now: rg.clock.Now}
+	ctx := context.Background()
+	rg.idp.setDown(true)
+	rg.clock.Advance(24 * time.Hour) // the cached token needs a refresh
+
+	hits := func() int64 { return rg.idp.downHits.Load() }
+	if _, err := cs.Token(ctx); err == nil {
+		t.Fatal("Token with the issuer down succeeded")
+	}
+	first := hits()
+	if first == 0 {
+		t.Fatal("the first call never reached the issuer")
+	}
+	for range 50 {
+		if _, err := cs.Token(ctx); err == nil {
+			t.Fatal("Token during the cooldown succeeded")
+		}
+	}
+	if n := hits(); n != first {
+		t.Fatalf("%d issuer requests during the cooldown, want none", n-first)
+	}
+	if st := cs.State(); st.Reason != identityclient.ReasonLoginRequired {
+		t.Errorf("state during the cooldown: %+v", st)
+	}
+	// Cooldowns double: 1s, then 2s, then 4s.
+	prev := first
+	for _, cooldown := range []time.Duration{time.Second, 2 * time.Second, 4 * time.Second} {
+		rg.clock.Advance(cooldown - time.Millisecond)
+		_, _ = cs.Token(ctx)
+		if n := hits(); n != prev {
+			t.Fatalf("attempt %s cooldown too early", cooldown)
+		}
+		rg.clock.Advance(time.Millisecond)
+		_, _ = cs.Token(ctx)
+		if n := hits(); n == prev {
+			t.Fatalf("no attempt once the %s cooldown passed", cooldown)
+		}
+		prev = hits()
+	}
+	// Recovery: after the next cooldown a healthy issuer yields a token and
+	// clears the backoff.
+	rg.idp.setDown(false)
+	rg.clock.Advance(time.Minute)
+	if _, err := cs.Token(ctx); err != nil {
+		t.Fatalf("Token after recovery: %v", err)
+	}
+	if _, err := cs.Token(ctx); err != nil {
+		t.Fatalf("Token right after recovery: %v", err)
+	}
+}
