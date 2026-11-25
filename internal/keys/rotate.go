@@ -63,6 +63,8 @@ const (
 	ActionActivated = "keys.activated"
 	// ActionStaged is a bundle next key marked to sign beside the active key.
 	ActionStaged = "keys.staged"
+	// ActionUnstaged is a staged bundle next key taken back out of signing.
+	ActionUnstaged = "keys.unstaged"
 	// ActionRetired is an active key that stopped signing but stays published
 	// for its overlap.
 	ActionRetired = "keys.retired"
@@ -96,6 +98,14 @@ var (
 	// keys for the prepublish window, a worker that pins only the next key
 	// would have nothing it can verify the moment the old key stops signing.
 	ErrNotStaged = errors.New("keys: the next bundle key is not staged; stage it so the control plane signs with both keys first")
+	// ErrStagedKeyUnavailable is a load that failed because the staged next
+	// bundle key's material cannot be read, although the active key's can. It is
+	// deliberately not ErrNoActiveKey: the active key is fine, and the way out is
+	// to unstage (UnstageBundle), not to restore the active key.
+	ErrStagedKeyUnavailable = errors.New("keys: the staged next bundle key is unavailable (keys rotate --purpose bundle --unstage clears the stage)")
+	// ErrNextKeyChanged is a rotation that expected one next key (the one whose
+	// pins were checked) and found another or none.
+	ErrNextKeyChanged = errors.New("keys: the next key is not the one the rotation was asked to promote")
 	// ErrNoNextKey is returned when there is no next key to promote. The
 	// scheduler publishes one; until then the current key keeps signing.
 	ErrNoNextKey = errors.New("keys: no next key to promote")
@@ -124,6 +134,11 @@ type RotateOpts struct {
 	// next key. Only the bundle purpose requires it (W-P2-SBND-07's --activate
 	// sets it after checking the heartbeat pins).
 	ConfirmPinned bool
+	// ExpectNextKID, when set, is the only next key the rotation may promote: an
+	// operator who checked the workers' pins for one kid must never promote
+	// another that replaced it meanwhile. A different or missing next key is
+	// ErrNextKeyChanged and nothing changes, emergency or not.
+	ExpectNextKID string
 	// Actor is who asked for the rotation. The zero value is the system.
 	Actor Actor
 }
@@ -154,7 +169,7 @@ func (m *Manager) Rotate(ctx context.Context, purpose string, opts RotateOpts) e
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if err := m.rotateLocked(ctx, purpose, actor, opts.Emergency); err != nil {
+	if err := m.rotateLocked(ctx, purpose, actor, opts.Emergency, opts.ExpectNextKID); err != nil {
 		// A request error or a lost race is not a system failure: the current
 		// key keeps signing and the caller learns what to fix. Everything else
 		// (store and database failures) is a Finding the operator must see.
@@ -252,24 +267,86 @@ func (m *Manager) StageBundle(ctx context.Context, actor Actor) (StageResult, er
 	return res, nil
 }
 
+// UnstageResult is the outcome of UnstageBundle.
+type UnstageResult struct {
+	// NextKID is the key that was staged; zero when nothing was.
+	NextKID string
+	// Dropped is set when the staged key's material could not be loaded, so its
+	// row was retired instead of merely unstaged: the scheduler (or the next
+	// stage) publishes a fresh next key.
+	Dropped bool
+	// Already is set when no next key was staged: nothing changed.
+	Already bool
+}
+
+// UnstageBundle undoes StageBundle: the control plane signs with the active key
+// alone again. It is the recovery for a staged key whose material is lost, so it
+// never needs the material: when the key loads it is only unstaged (a plain next
+// key again, pinnable and stageable later); when it does not, its row is
+// destroyed so a fresh next key can be published. Unstaging adds no risk to a
+// worker that pins the active key, but a worker that pinned ONLY the staged key
+// verifies nothing the control plane then signs: re-pin it first.
+func (m *Manager) UnstageBundle(ctx context.Context, actor Actor) (UnstageResult, error) {
+	if actor == (Actor{}) {
+		actor = SystemActor
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rows, err := m.rows(ctx, PurposeBundle)
+	if err != nil {
+		return UnstageResult{}, err
+	}
+	st, staged := StagedNext(rows)
+	if !staged {
+		return UnstageResult{Already: true}, nil
+	}
+	res := UnstageResult{NextKID: st.KID}
+	if _, lerr := m.loadSigner(ctx, st); lerr != nil {
+		changed, err := m.cfg.Meta.UpdateState(ctx, st.KID, StateNext, StateDestroyed, m.cfg.Now())
+		if err != nil {
+			return UnstageResult{}, err
+		}
+		if !changed {
+			return UnstageResult{}, fmt.Errorf("%w: the staged %s key moved before it was unstaged", ErrConflict, PurposeBundle)
+		}
+		res.Dropped = true
+		m.noteTransition(ctx, PurposeBundle, st.KID, StateDestroyed, actor, "unstaged_unavailable")
+	} else {
+		changed, err := m.cfg.Meta.Unstage(ctx, st.KID)
+		if err != nil {
+			return UnstageResult{}, err
+		}
+		if !changed {
+			return UnstageResult{}, fmt.Errorf("%w: the staged %s key moved before it was unstaged", ErrConflict, PurposeBundle)
+		}
+		m.log.Info("keys_unstaged", "purpose", PurposeBundle, "kid", st.KID)
+		m.audit(ctx, AuditEvent{Action: ActionUnstaged, Purpose: PurposeBundle, KID: st.KID, Actor: actor})
+	}
+	_ = m.adoptLocked(ctx, PurposeBundle)
+	return res, nil
+}
+
 // requestErr reports whether err is the caller's mistake or somebody else
 // winning the write, rather than a rotation that could not be applied.
 func requestErr(err error) bool {
 	return errors.Is(err, ErrNoNextKey) || errors.Is(err, ErrNotPrepublished) ||
-		errors.Is(err, ErrBundleNotPinned) || errors.Is(err, ErrNotStaged) || errors.Is(err, ErrConflict) ||
+		errors.Is(err, ErrBundleNotPinned) || errors.Is(err, ErrNotStaged) || errors.Is(err, ErrNextKeyChanged) || errors.Is(err, ErrConflict) ||
 		errors.Is(err, ErrInvalidPurpose)
 }
 
 // rotateLocked is Rotate's body plus the scheduler's rotation: the caller holds
 // mu and has already validated the purpose. emergency revokes the old key
 // instead of retiring it and skips the prepublish check.
-func (m *Manager) rotateLocked(ctx context.Context, purpose string, actor Actor, emergency bool) error {
+func (m *Manager) rotateLocked(ctx context.Context, purpose string, actor Actor, emergency bool, expectNext string) error {
 	rows, err := m.rows(ctx, purpose)
 	if err != nil {
 		return err
 	}
 	now := m.cfg.Now()
 	next, hasNext := nextRow(rows)
+	if expectNext != "" && (!hasNext || next.KID != expectNext) {
+		return fmt.Errorf("%w: expected %s", ErrNextKeyChanged, expectNext)
+	}
 	if !hasNext {
 		if emergency {
 			// Fail closed: with no next key to promote, the compromised key is

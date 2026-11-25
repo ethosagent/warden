@@ -67,6 +67,11 @@ type MetaStore interface {
 	// dual signing began, and activate_at, the staged marker, with at, and
 	// reports whether it changed the row.
 	Stage(ctx context.Context, kid string, at time.Time) (bool, error)
+	// Unstage clears the staged marker of the next row kid (activate_at), as a
+	// compare-and-swap on a next row that is staged, and reports whether it
+	// changed the row. It touches nothing else, so it works whatever state the
+	// key's material is in.
+	Unstage(ctx context.Context, kid string) (bool, error)
 	// Promote moves purpose's signing slot in ONE transaction: the active key
 	// oldKID to oldTo, then the next key nextKID to active, both stamped with
 	// at. A peer reading between the two writes sees either both changes or

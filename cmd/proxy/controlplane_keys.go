@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/url"
 	"os"
 	"strings"
 
@@ -180,9 +182,10 @@ func newKeysRotateCmd() *cobra.Command {
 			yes, _ := f.GetBool("yes")
 			keyFile, _ := f.GetString("admin-audit-key-file")
 			stage, _ := f.GetBool("stage")
+			unstage, _ := f.GetBool("unstage")
 			activate, _ := f.GetBool("activate")
 			force, _ := f.GetBool("force")
-			if err := checkRotateSteps(purpose, stage, activate, force, emergency); err != nil {
+			if err := checkRotateSteps(purpose, stage, unstage, activate, force, emergency); err != nil {
 				return usageErr(err)
 			}
 			if emergency && !yes {
@@ -216,6 +219,8 @@ func newKeysRotateCmd() *cobra.Command {
 			switch {
 			case stage:
 				return runBundleStage(cmd, o)
+			case unstage:
+				return runBundleUnstage(cmd, o)
 			case activate:
 				return runBundleActivate(cmd, o, controlplane.ActivateBundleOptions{Workers: workers, Force: force, Emergency: emergency})
 			}
@@ -254,6 +259,7 @@ func newKeysRotateCmd() *cobra.Command {
 	keysFlags(cmd)
 	cmd.Flags().String("purpose", "", "the purpose to rotate: token, or bundle with --stage or --activate (required)")
 	cmd.Flags().Bool("stage", false, "bundle: sign every envelope with both the active and the next key (creates the next key if missing)")
+	cmd.Flags().Bool("unstage", false, "bundle: stop signing with the staged next key (recovery when its material is lost; works without it)")
 	cmd.Flags().Bool("activate", false, "bundle: make the staged next key the only signer; needs every online worker to report it pinned")
 	cmd.Flags().Bool("force", false, "bundle --activate: go on although workers lack the next kid or their pins cannot be read (audited)")
 	cmd.Flags().String("admin-url", "", "bundle --activate: base URL of the running control plane, for the workers' heartbeat pins")
@@ -269,12 +275,14 @@ func newKeysRotateCmd() *cobra.Command {
 // checkRotateSteps validates the staged-rotation flags: --stage and --activate
 // are the bundle purpose's steps, exclusive of each other, and --force goes with
 // --activate only.
-func checkRotateSteps(purpose string, stage, activate, force, emergency bool) error {
+func checkRotateSteps(purpose string, stage, unstage, activate, force, emergency bool) error {
 	switch {
-	case stage && activate:
-		return errors.New("--stage and --activate are separate steps: stage, pin, then activate")
-	case (stage || activate) && purpose != keys.PurposeBundle:
-		return fmt.Errorf("--stage and --activate are for --purpose bundle; %s rotates in one step", purpose)
+	case stage && activate, unstage && (stage || activate):
+		return errors.New("--stage, --unstage and --activate are separate steps: stage, pin, then activate")
+	case (stage || unstage || activate) && purpose != keys.PurposeBundle:
+		return fmt.Errorf("--stage, --unstage and --activate are for --purpose bundle; %s rotates in one step", purpose)
+	case unstage && emergency:
+		return errors.New("--emergency goes with --activate; an unstage only takes a signature away")
 	case force && !activate:
 		return errors.New("--force overrides the pin check of --activate")
 	case stage && emergency:
@@ -286,14 +294,36 @@ func checkRotateSteps(purpose string, stage, activate, force, emergency bool) er
 // maxFleetBody caps the fleet list the activate gate reads (a few KiB a worker).
 const maxFleetBody = 8 << 20
 
+// checkAdminURL refuses an --admin-url that would send the API key in clear
+// text over a network: https always, http only to a loopback host.
+func checkAdminURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return errors.New("--admin-url is not a valid URL")
+	}
+	switch u.Scheme {
+	case "https":
+		return nil
+	case "http":
+		host := u.Hostname()
+		if ip := net.ParseIP(host); host == "localhost" || (ip != nil && ip.IsLoopback()) {
+			return nil
+		}
+	}
+	return errors.New("--admin-url must be https (http only for localhost or a loopback address): the API key is sent with every request")
+}
+
 // workersFromFlags builds the activate gate's view of the fleet from
 // --admin-url and the API key. Without --admin-url the source is nil, and the
 // gate refuses unless --force is given.
 func workersFromFlags(cmd *cobra.Command) (controlplane.WorkersSource, error) {
 	f := cmd.Flags()
-	url, _ := f.GetString("admin-url")
-	if url == "" {
+	adminURL, _ := f.GetString("admin-url")
+	if adminURL == "" {
 		return nil, nil
+	}
+	if err := checkAdminURL(adminURL); err != nil {
+		return nil, err
 	}
 	keyFile, _ := f.GetString("api-key-file")
 	ca, _ := f.GetString("ca-cert")
@@ -312,7 +342,7 @@ func workersFromFlags(cmd *cobra.Command) (controlplane.WorkersSource, error) {
 	if err != nil {
 		return nil, fmt.Errorf("--ca-cert: %w", err)
 	}
-	return controlplane.AdminAPIWorkers(client, url, key)
+	return controlplane.AdminAPIWorkers(client, adminURL, key)
 }
 
 // runBundleStage is `keys rotate --purpose bundle --stage`.
@@ -329,6 +359,26 @@ func runBundleStage(cmd *cobra.Command, o *controlplane.OfflineKeys) error {
 	_, _ = fmt.Fprintf(out, "staged: the control plane signs every bundle with %s (active) and %s (next) within about 2 seconds.\n"+
 		"Workers pinning either key verify them. Pin %s on every worker (keys export --purpose bundle), "+
 		"wait for them to report it, then run keys rotate --purpose bundle --activate.\n", res.ActiveKID, res.NextKID, res.NextKID)
+	return nil
+}
+
+// runBundleUnstage is `keys rotate --purpose bundle --unstage`.
+func runBundleUnstage(cmd *cobra.Command, o *controlplane.OfflineKeys) error {
+	res, err := o.UnstageBundle(cmd.Context())
+	if err != nil {
+		return err
+	}
+	out := cmd.OutOrStdout()
+	switch {
+	case res.Already:
+		_, _ = fmt.Fprintln(out, "nothing is staged; nothing changed")
+	case res.Dropped:
+		_, _ = fmt.Fprintf(out, "unstaged: the staged key %s could not be loaded, so it was dropped; the control plane signs with the active key alone and publishes a fresh next key. "+
+			"Workers pinned only to %s must be re-pinned to the active key.\n", res.NextKID, res.NextKID)
+	default:
+		_, _ = fmt.Fprintf(out, "unstaged: the control plane signs with the active key alone within about 2 seconds; %s is a plain next key again. "+
+			"Workers pinned only to %s must be re-pinned to the active key.\n", res.NextKID, res.NextKID)
+	}
 	return nil
 }
 

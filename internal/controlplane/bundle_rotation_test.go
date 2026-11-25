@@ -1,6 +1,7 @@
 package controlplane
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -159,5 +160,40 @@ func TestBundleStagedSignFailureKeepsLast(t *testing.T) {
 	btEventually(t, "the publisher reports degraded", h.degraded)
 	if got := h.bundleResp(t); string(got.body) != string(dual.body) {
 		t.Error("a failed staged signature replaced the last envelope")
+	}
+}
+
+// TestBundleForgedBesideValidSignature: a worker pinning both keys of a staged
+// rotation accepts an envelope with one valid signature (the forged one beside it
+// adds nothing and costs nothing), and rejects one whose signatures are all
+// forged.
+func TestBundleForgedBesideValidSignature(t *testing.T) {
+	h := newBundleHarness(t, BundlesOffer, writePolicyFile(t, "api.openai.com"), nil, nil, nil, nil)
+	oldS, _ := h.fk.Signers(keys.PurposeBundle)
+	oldPin := pinOf(t, oldS[0])
+	newPin := h.fk.stage(t)
+	pins := []keys.JWK{oldPin, newPin}
+	raw := h.bundleResp(t).body
+	for len(envelopeKIDs(t, raw)) != 2 {
+		raw = h.bundleResp(t).body
+	}
+	var env bundle.Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatal(err)
+	}
+	forge := func(kid string) bundle.Signature {
+		return bundle.Signature{KID: kid, Sig: base64.RawURLEncoding.EncodeToString(make([]byte, 64))}
+	}
+	one := env
+	one.Signatures = []bundle.Signature{forge(newPin.Kid), env.Signatures[0]}
+	rawOne, _ := json.Marshal(one)
+	if _, err := h.verifyAs(rawOne, pins, bundle.State{}); err != nil {
+		t.Fatalf("one valid signature beside a forged one = %v, want accepted", err)
+	}
+	none := env
+	none.Signatures = []bundle.Signature{forge(oldPin.Kid), forge(newPin.Kid)}
+	rawNone, _ := json.Marshal(none)
+	if _, err := h.verifyAs(rawNone, pins, bundle.State{}); !errors.Is(err, bundle.ErrBadSignature) {
+		t.Fatalf("all signatures forged = %v, want bad_signature", err)
 	}
 }

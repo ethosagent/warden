@@ -542,3 +542,25 @@ func TestStageCAS(t *testing.T) {
 		t.Fatalf("Stage(absent) = %v, %v, want no change", changed, err)
 	}
 }
+
+// TestUnstageCAS: Unstage clears the staged marker of a staged next row only.
+func TestUnstageCAS(t *testing.T) {
+	s := New(openDB(t, true))
+	ctx := context.Background()
+	active, next := insertPair(t, s, keys.PurposeBundle)
+	if changed, err := s.Unstage(ctx, next.KID); err != nil || changed {
+		t.Fatalf("Unstage of an unstaged row = %v, %v, want no change", changed, err)
+	}
+	if ok, err := s.Stage(ctx, next.KID, t0.Add(time.Hour)); err != nil || !ok {
+		t.Fatalf("Stage: %v %v", ok, err)
+	}
+	if changed, err := s.Unstage(ctx, active.KID); err != nil || changed {
+		t.Fatalf("Unstage(active) = %v, %v, want no change", changed, err)
+	}
+	if changed, err := s.Unstage(ctx, next.KID); err != nil || !changed {
+		t.Fatalf("Unstage = %v, %v, want a change", changed, err)
+	}
+	if got := rowOf(t, s, next.KID); !got.ActivateAt.IsZero() || got.State != keys.StateNext {
+		t.Fatalf("unstaged row = %+v", got)
+	}
+}

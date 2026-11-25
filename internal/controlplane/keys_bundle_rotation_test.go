@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/dashboard"
@@ -48,14 +49,15 @@ func TestCheckBundlePins(t *testing.T) {
 		{ProxyID: "ok", Online: true, Caps: cap, PinnedKIDs: []string{"a", "n"}},
 		{ProxyID: "b-missing", Online: true, Caps: cap, PinnedKIDs: []string{"a"}},
 		{ProxyID: "a-missing", Online: true, Caps: cap},
-		{ProxyID: "legacy", Online: true},
+		{ProxyID: "legacy", Online: true, Caps: []string{"grouppolicy/v1"}},
+		{ProxyID: "fresh", Online: true},
 		{ProxyID: "off-missing", Online: false, Caps: cap, PinnedKIDs: []string{"a"}},
 		{ProxyID: "off-ok", Online: false, Caps: cap, PinnedKIDs: []string{"n"}},
 		{ProxyID: "off-legacy", Online: false},
 	}
 	got := CheckBundlePins(ws, "n")
-	if strings.Join(got.Missing, ",") != "a-missing,b-missing" || got.Checked != 3 {
-		t.Errorf("missing = %v checked %d, want a-missing and b-missing of 3 checked", got.Missing, got.Checked)
+	if strings.Join(got.Missing, ",") != "a-missing,b-missing,fresh" || got.Checked != 4 {
+		t.Errorf("missing = %v checked %d, want a-missing, b-missing and fresh (no heartbeat) of 4 checked", got.Missing, got.Checked)
 	}
 	if strings.Join(got.Offline, ",") != "off-missing" || strings.Join(got.Unpinned, ",") != "legacy" {
 		t.Errorf("offline = %v unpinned = %v", got.Offline, got.Unpinned)
@@ -180,4 +182,64 @@ func TestAdminAPIWorkers(t *testing.T) {
 	if _, err := AdminAPIWorkers(srv.Client(), "", key); err == nil {
 		t.Error("an empty URL was accepted")
 	}
+}
+
+// TestActivateOnlyPromotesTheCheckedKey: the pins were checked for one next key;
+// if it is replaced while the gate reads the fleet, the activation (emergency
+// included, which would otherwise fall to the vacant-slot path) refuses and
+// changes nothing.
+func TestActivateOnlyPromotesTheCheckedKey(t *testing.T) {
+	ctx := context.Background()
+	o, err := OpenKeysOffline(ctx, openKeysStateDir(t), KeysCLIOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = o.Close() }()
+	old, next := bundleKIDs(t, o)
+	swap := func(context.Context) ([]dashboard.WorkerView, error) {
+		if ok, err := o.meta.UpdateState(ctx, next, keys.StateNext, keys.StateDestroyed, time.Now()); err != nil || !ok {
+			t.Errorf("remove the checked next key: %v %v", ok, err)
+		}
+		return []dashboard.WorkerView{{ProxyID: "w1", Online: true, Caps: []string{config.CapBundleV1}, PinnedKIDs: []string{next}}}, nil
+	}
+	_, err = o.ActivateBundle(ctx, ActivateBundleOptions{Emergency: true, Workers: swap})
+	if !errors.Is(err, keys.ErrNextKeyChanged) {
+		t.Fatalf("activation after the checked key vanished = %v, want ErrNextKeyChanged", err)
+	}
+	if a, _ := bundleKIDs(t, o); a != old {
+		t.Fatalf("the active key moved to %s", a)
+	}
+}
+
+// TestOfflineUnstageBundle: unstage works on the CLI handle, audits once and a
+// repeat is a no-op.
+func TestOfflineUnstageBundle(t *testing.T) {
+	ctx := context.Background()
+	o, err := OpenKeysOffline(ctx, openKeysStateDir(t), KeysCLIOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = o.Close() }()
+	if res, err := o.UnstageBundle(ctx); err != nil || !res.Already {
+		t.Fatalf("unstage of nothing = %+v, %v", res, err)
+	}
+	if _, err := o.StageBundle(ctx); err != nil {
+		t.Fatal(err)
+	}
+	res, err := o.UnstageBundle(ctx)
+	if err != nil || res.Already || res.Dropped {
+		t.Fatalf("unstage = %+v, %v", res, err)
+	}
+	if _, staged := keys.StagedNext(mustRows(t, o)); staged {
+		t.Error("the key is still staged")
+	}
+}
+
+func mustRows(t *testing.T, o *OfflineKeys) []keys.Record {
+	t.Helper()
+	rows, err := o.Rows(context.Background(), keys.PurposeBundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rows
 }

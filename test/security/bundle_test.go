@@ -231,6 +231,16 @@ func bundleCases() []Case {
 				m["signatures"], _ = json.Marshal(sigs)
 			})}
 		})),
+		// Only a forged signature under the pinned kid: nothing verifies, whatever
+		// the envelope claims (the valid-beside-forged mix of a staged rotation is
+		// a unit test: TestBundleForgedBesideValidSignature).
+		bundleCase("forged signature under the pinned kid only", "bad_signature", replacing(func(t testing.TB, s *Stack, base bundle.Bundle) Plan {
+			raw := Sign(t, s.hostile(t, base), nil, s.BundleSigner(t))
+			forged := base64.RawURLEncoding.EncodeToString(make([]byte, 64))
+			return Plan{Body: mutateEnvelope(raw, func(m map[string]json.RawMessage) {
+				m["signatures"], _ = json.Marshal([]bundle.Signature{{KID: s.BundleSigner(t).KID(), Sig: forged}})
+			})}
+		})),
 		bundleCase("bad signature", "bad_signature", func(t testing.TB, _ *Stack, tp *TamperProxy, _ bundle.Bundle) {
 			tp.Mutate(func(raw []byte) []byte {
 				return mutateEnvelope(raw, func(m map[string]json.RawMessage) {

@@ -3,6 +3,7 @@ package keys_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -303,5 +304,124 @@ func TestSchedulerNeverRotatesBundle(t *testing.T) {
 	}
 	if got := signerKIDs(t, m, keys.PurposeBundle); len(got) != 2 || got[0] != bundleActive {
 		t.Errorf("bundle signers = %v, want the staged pair untouched", got)
+	}
+}
+
+// TestUnstageBundle: unstaging takes the second signature away and leaves a
+// plain next key that can be staged again; unstaging nothing is a no-op.
+func TestUnstageBundle(t *testing.T) {
+	e := newEnv(t)
+	e.timings = manualTimings()
+	ctx := context.Background()
+	m := e.manager()
+	m.Init(ctx)
+	if res, err := m.UnstageBundle(ctx, opsActor); err != nil || !res.Already {
+		t.Fatalf("unstage of nothing = %+v, %v, want Already", res, err)
+	}
+	st, err := m.StageBundle(ctx, opsActor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := m.UnstageBundle(ctx, opsActor)
+	if err != nil || res.NextKID != st.NextKID || res.Dropped || res.Already {
+		t.Fatalf("unstage = %+v, %v", res, err)
+	}
+	if got := signerKIDs(t, m, keys.PurposeBundle); len(got) != 1 {
+		t.Fatalf("signers after the unstage = %v, want the active key alone", got)
+	}
+	if r := rowFor(t, e.rows(), st.NextKID); r.State != keys.StateNext || !r.ActivateAt.IsZero() {
+		t.Errorf("unstaged row = %+v, want a plain next key", r)
+	}
+	if got := actionsFor(e.audit.events(), keys.PurposeBundle); got[len(got)-1] != keys.ActionUnstaged {
+		t.Errorf("audit actions = %v, want the last to be %s", got, keys.ActionUnstaged)
+	}
+	if again, err := m.StageBundle(ctx, opsActor); err != nil || again.NextKID != st.NextKID || again.Already {
+		t.Fatalf("restage after the unstage = %+v, %v", again, err)
+	}
+}
+
+// TestStagedKeyLostRecoversByUnstage: a control plane that boots with the
+// staged key's material gone says so in its own words (not "no active key"),
+// raises its own Finding, and recovers once the stage is dropped — without the
+// lost material, which unstaging never reads.
+func TestStagedKeyLostRecoversByUnstage(t *testing.T) {
+	e := newEnv(t)
+	e.timings = manualTimings()
+	ctx := context.Background()
+	m := e.manager()
+	m.Init(ctx)
+	st, err := m.StageBundle(ctx, opsActor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.store.Delete(ctx, keys.PurposeBundle, st.NextKID); err != nil {
+		t.Fatal(err)
+	}
+
+	boot := e.manager()
+	boot.Init(ctx)
+	if boot.Ready() {
+		t.Fatal("a manager whose staged key is lost reports ready")
+	}
+	if got := boot.NotReadyReason(); got != "staged_key_unavailable" {
+		t.Errorf("NotReadyReason = %q, want staged_key_unavailable", got)
+	}
+	if msg := boot.LastError(keys.PurposeBundle); !strings.Contains(msg, "staged next bundle key is unavailable") || !strings.Contains(msg, "--unstage") {
+		t.Errorf("LastError = %q, want the distinct staged-key error naming the fix", msg)
+	}
+	if n := alertsByRule(e.alerts.alerts(), keys.AlertStagedKeyUnavailable); n != 1 {
+		t.Errorf("staged_key_unavailable findings = %d, want 1", n)
+	}
+	if n := alertsByRule(e.alerts.alerts(), keys.AlertSigningKeyUnavailable); n != 0 {
+		t.Errorf("a lost staged key raised signing_key_unavailable %d times", n)
+	}
+
+	// The CLI's manager never loads: it unstages without the material.
+	res, err := e.manager().UnstageBundle(ctx, opsActor)
+	if err != nil || !res.Dropped || res.NextKID != st.NextKID {
+		t.Fatalf("unstage = %+v, %v, want the lost key dropped", res, err)
+	}
+	if err := boot.LoadKeySet(ctx, keys.PurposeBundle); err != nil {
+		t.Fatalf("reload after the unstage: %v", err)
+	}
+	if !boot.Ready() || boot.LastError(keys.PurposeBundle) != "" {
+		t.Fatal("the manager did not recover after the unstage")
+	}
+	if got := signerKIDs(t, boot, keys.PurposeBundle); len(got) != 1 {
+		t.Errorf("signers after recovery = %v, want the active key alone", got)
+	}
+	// A fresh next key is staged from scratch.
+	again, err := boot.StageBundle(ctx, opsActor)
+	if err != nil || !again.Created || again.NextKID == st.NextKID {
+		t.Fatalf("stage after the recovery = %+v, %v, want a freshly created key", again, err)
+	}
+}
+
+// TestRotateExpectsTheCheckedNextKey: a rotation asked to promote one next key
+// refuses when another (or none) is there, emergency or not, and changes
+// nothing.
+func TestRotateExpectsTheCheckedNextKey(t *testing.T) {
+	e := newEnv(t)
+	e.timings = manualTimings()
+	ctx := context.Background()
+	m := e.manager()
+	m.Init(ctx)
+	if _, err := m.StageBundle(ctx, opsActor); err != nil {
+		t.Fatal(err)
+	}
+	e.clk.Advance(2 * time.Hour)
+	active := kidInState(t, e.rows(), keys.PurposeBundle, keys.StateActive)
+	next := kidInState(t, e.rows(), keys.PurposeBundle, keys.StateNext)
+	for _, emergency := range []bool{false, true} {
+		err := m.Rotate(ctx, keys.PurposeBundle, keys.RotateOpts{ConfirmPinned: true, Emergency: emergency, ExpectNextKID: "some-other-kid"})
+		if !errors.Is(err, keys.ErrNextKeyChanged) {
+			t.Fatalf("emergency=%v rotation of an unexpected next key = %v, want ErrNextKeyChanged", emergency, err)
+		}
+	}
+	if kidInState(t, e.rows(), keys.PurposeBundle, keys.StateActive) != active {
+		t.Fatal("a refused rotation moved the active key")
+	}
+	if err := m.Rotate(ctx, keys.PurposeBundle, keys.RotateOpts{ConfirmPinned: true, ExpectNextKID: next}); err != nil {
+		t.Fatalf("rotation of the expected next key: %v", err)
 	}
 }

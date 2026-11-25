@@ -32,6 +32,12 @@ const (
 // purpose has rows but its active key cannot be loaded.
 const AlertSigningKeyUnavailable = "signing_key_unavailable"
 
+// AlertStagedKeyUnavailable is the rule id of the Finding raised when a bundle
+// purpose's staged next key cannot be loaded: signing with both keys is
+// impossible, so the whole purpose stays on its last good snapshot (or, at boot,
+// does not load). `keys rotate --purpose bundle --unstage` recovers.
+const AlertStagedKeyUnavailable = "staged_key_unavailable"
+
 // Actor is who caused a key change, for created_by and the admin audit trail.
 type Actor struct {
 	// Subject is the principal: a user, "system" or "cli".
@@ -121,6 +127,9 @@ type Manager struct {
 	// degraded records why each purpose is currently unavailable (nil map
 	// entry when it is not), for LastError.
 	degraded map[string]string
+	// stagedDown records the purposes whose last load failed on the staged
+	// next key alone (NotReadyReason).
+	stagedDown map[string]bool
 	// episodes records the alerts already raised for a rule and purpose, so a
 	// Finding fires once per episode, not once per retry or per pass.
 	episodes map[string]string
@@ -157,7 +166,7 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 	}
 	m := &Manager{
 		cfg: cfg, log: cfg.Logger,
-		degraded: map[string]string{}, episodes: map[string]string{},
+		degraded: map[string]string{}, stagedDown: map[string]bool{}, episodes: map[string]string{},
 	}
 	if m.log == nil {
 		m.log = slog.Default()
@@ -195,6 +204,20 @@ func (m *Manager) Init(ctx context.Context) {
 	if v, err := m.cfg.Meta.DataVersion(ctx); err == nil {
 		m.dataVersion = v // a first poll that sees only our own writes reloads nothing
 	}
+}
+
+// NotReadyReason says why Ready is false: "staged_key_unavailable" when a
+// purpose cannot load because its staged next key's material is lost (the fix
+// is `keys rotate --purpose bundle --unstage`), "no_active_key" otherwise.
+func (m *Manager) NotReadyReason() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, p := range loadPurposes {
+		if m.stagedDown[p] {
+			return "staged_key_unavailable"
+		}
+	}
+	return "no_active_key"
 }
 
 // Ready reports whether every loadable purpose has an active key in the
@@ -379,7 +402,7 @@ func (m *Manager) loadLocked(ctx context.Context, purpose string) error {
 	var staged Signer
 	if st, ok := StagedNext(rows); ok {
 		if staged, err = m.loadSigner(ctx, st); err != nil {
-			return fmt.Errorf("%w: staged next key: %w", ErrNoActiveKey, err)
+			return fmt.Errorf("%w: %s next key %s: %w", ErrStagedKeyUnavailable, purpose, st.KID, err)
 		}
 	}
 	if m.set.install(purpose, sg, staged, rows, m.cfg.Timings[purpose].Overlap) {
@@ -417,11 +440,22 @@ func (m *Manager) adoptLocked(ctx context.Context, purpose string) error {
 func (m *Manager) noteLoad(ctx context.Context, purpose string, err error) {
 	if err == nil {
 		delete(m.degraded, purpose)
+		delete(m.stagedDown, purpose)
 		m.clearAlert(purpose, AlertSigningKeyUnavailable)
+		m.clearAlert(purpose, AlertStagedKeyUnavailable)
 		return
 	}
 	m.log.Error("keys_load_failed", "purpose", purpose, "error", err)
 	m.degraded[purpose] = err.Error()
+	delete(m.stagedDown, purpose)
+	if errors.Is(err, ErrStagedKeyUnavailable) {
+		m.stagedDown[purpose] = true
+		// The active key is fine; the staged next key's material is not. A
+		// distinct Finding tells the operator the fix is `keys rotate
+		// --purpose bundle --unstage`, not a key store outage.
+		m.alertOnce(ctx, purpose, AlertStagedKeyUnavailable, err.Error())
+		return
+	}
 	m.alertOnce(ctx, purpose, AlertSigningKeyUnavailable, err.Error())
 }
 
@@ -883,6 +917,9 @@ func (ks *KeySet) install(purpose string, active, staged Signer, rows []Record, 
 	}
 	if active != nil && ks.onSignErr != nil {
 		active = countingSigner{Signer: active, purpose: purpose, onErr: ks.onSignErr}
+	}
+	if staged != nil && ks.onSignErr != nil {
+		staged = countingSigner{Signer: staged, purpose: purpose, onErr: ks.onSignErr}
 	}
 	next[purpose] = &loaded{active: active, staged: staged, rows: append([]Record(nil), rows...), overlap: overlap}
 	ks.cur.Store(&next)

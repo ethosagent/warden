@@ -156,7 +156,8 @@ func TestKeysRotateBundleActivateGate(t *testing.T) {
 	url, _ := fleetServer(t, []dashboard.WorkerView{
 		pinnedWorker("w-both", true, old, next),
 		pinnedWorker("w-old-only", true, old),
-		{ProxyID: "w-legacy", Online: true}, // no pins: applies the legacy wire
+		{ProxyID: "w-legacy", Online: true, Caps: []string{"grouppolicy/v1"}}, // heartbeated, no bundle/v1: applies the legacy wire
+		{ProxyID: "w-fresh", Online: true},                                    // polled, no heartbeat yet: pins unknown
 		pinnedWorker("w-offline", false, old),
 	})
 	keyFile := apiKeyFile(t)
@@ -179,8 +180,8 @@ func TestKeysRotateBundleActivateGate(t *testing.T) {
 	if code == 0 {
 		t.Fatal("activate with a worker lacking the next kid succeeded")
 	}
-	if !strings.Contains(stderr, "w-old-only") {
-		t.Errorf("refusal %q does not name the worker lacking the kid", stderr)
+	if !strings.Contains(stderr, "w-old-only") || !strings.Contains(stderr, "w-fresh") || !strings.Contains(stderr, "no heartbeat yet") {
+		t.Errorf("refusal %q does not name the worker lacking the kid and the one with no heartbeat yet", stderr)
 	}
 	_, refusal, _ := strings.Cut(stderr, "keys: refusing")
 	for _, innocent := range []string{"w-both", "w-legacy", "w-offline"} {
@@ -216,7 +217,7 @@ func TestKeysRotateBundleActivateGate(t *testing.T) {
 	if len(rows) != 1 {
 		t.Fatalf("forced activate audit rows = %v, want exactly one", rows)
 	}
-	if r := rows[0]; r["forced"] != "true" || r["missing"] != "w-old-only" || r["kid"] != next || r["previous_kid"] != old ||
+	if r := rows[0]; r["forced"] != "true" || r["missing"] != "w-fresh,w-old-only" || r["kid"] != next || r["previous_kid"] != old ||
 		r["offline_missing"] != "w-offline" {
 		t.Errorf("forced activate row = %v, want forced, the missing proxy id, both kids and the offline worker", r)
 	}
@@ -308,6 +309,9 @@ func TestKeysRotateBundleStepFlags(t *testing.T) {
 		"stage on token":     {"--purpose", "token", "--stage"},
 		"force alone":        {"--purpose", "bundle", "--force"},
 		"stage emergency":    {"--purpose", "bundle", "--stage", "--emergency", "--yes"},
+		"unstage and stage":  {"--purpose", "bundle", "--unstage", "--stage"},
+		"unstage on token":   {"--purpose", "token", "--unstage"},
+		"plain http admin":   {"--purpose", "bundle", "--activate", "--admin-url", "http://cp.example.com:7070"},
 	} {
 		_, stderr, code := runWarden(t, append([]string{"control-plane", "keys", "rotate", "--state-dir", stateDir}, args...)...)
 		if code != exitAuditUsage {
@@ -353,5 +357,44 @@ func TestKeysExportBundleIsAPinSet(t *testing.T) {
 	}
 	if len(kids) != 2 || !sliceHas(kids, stateKid(bs, "active")) || !sliceHas(kids, stateKid(bs, "next")) {
 		t.Errorf("pinned kids = %v, want the active and next bundle key (%v)", kids, bs)
+	}
+}
+
+// TestCheckAdminURL: the API key travels with every request, so only https, or
+// http to a loopback host, is accepted.
+func TestCheckAdminURL(t *testing.T) {
+	for url, ok := range map[string]bool{
+		"https://cp.example.com:7070": true, "http://127.0.0.1:7070": true, "http://localhost:7070": true, "http://[::1]:7070": true,
+		"http://cp.example.com:7070": false, "http://10.0.0.5:7070": false, "ftp://localhost": false, "cp.example.com": false, "": false,
+	} {
+		if err := checkAdminURL(url); (err == nil) != ok {
+			t.Errorf("checkAdminURL(%q) = %v, want ok=%v", url, err, ok)
+		}
+	}
+}
+
+// TestKeysRotateBundleUnstage: --unstage takes the second signature away, audits
+// once, and a repeat is a no-op.
+func TestKeysRotateBundleUnstage(t *testing.T) {
+	stateDir := bundleStateDir(t)
+	rotate := func(flag string) (string, string, int) {
+		return runWarden(t, "control-plane", "keys", "rotate", "--purpose", "bundle", flag, "--state-dir", stateDir)
+	}
+	if _, stderr, code := rotate("--stage"); code != 0 {
+		t.Fatalf("stage: %q", stderr)
+	}
+	stdout, stderr, code := rotate("--unstage")
+	if code != 0 || !strings.Contains(stdout, "unstaged") {
+		t.Fatalf("unstage = %d %q %q", code, stdout, stderr)
+	}
+	if rows := auditRowsWithOp(t, stateDir, "unstage"); len(rows) != 1 {
+		t.Fatalf("unstage audit rows = %v, want one", rows)
+	}
+	if stdout, _, code := rotate("--unstage"); code != 0 || !strings.Contains(stdout, "nothing is staged") {
+		t.Errorf("second unstage = %d %q, want a no-op", code, stdout)
+	}
+	// The activate gate sees an unstaged key as unstaged.
+	if _, stderr, code := runWarden(t, "control-plane", "keys", "rotate", "--purpose", "bundle", "--activate", "--force", "--state-dir", stateDir); code == 0 || !strings.Contains(stderr, "not staged") {
+		t.Errorf("activate after the unstage = %d %q, want a not-staged refusal", code, stderr)
 	}
 }

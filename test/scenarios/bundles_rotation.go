@@ -268,7 +268,9 @@ func bundleKeyRotationStaged(t *testing.T, h *harness.H) {
 		t.Fatal("no bundle key published after the rotation")
 	}
 
-	// The whole cycle rejected nothing.
+	// The whole cycle rejected nothing. The log scan is the oracle for the whole
+	// cycle: RestartWorker starts a fresh metric reader, so the counter below only
+	// covers the workers' current runs.
 	if logs := h.Logs(); strings.Contains(logs, "bundle rejected") {
 		t.Fatalf("a bundle was rejected during the staged rotation:\n%s", logs)
 	}

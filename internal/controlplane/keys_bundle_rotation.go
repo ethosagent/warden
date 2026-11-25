@@ -44,13 +44,19 @@ var ErrBundleKeyMissing = errors.New("keys: the bundle purpose has no key in thi
 type PinGateError struct {
 	NextKID string
 	Missing []string
-	Cause   error
+	// NoHeartbeat is the subset of Missing that has not heartbeated yet.
+	NoHeartbeat []string
+	Cause       error
 }
 
 func (e *PinGateError) Error() string {
 	if len(e.Missing) > 0 {
+		hint := ""
+		if len(e.NoHeartbeat) > 0 {
+			hint = fmt.Sprintf("; no heartbeat yet from %s (just after a control plane restart) — retry in a few seconds", strings.Join(e.NoHeartbeat, ", "))
+		}
 		return fmt.Sprintf("keys: refusing to activate bundle key %s: %d online worker(s) do not report it in pinnedKids: %s "+
-			"(pin it on them, or --force to override and audit the override)", e.NextKID, len(e.Missing), strings.Join(e.Missing, ", "))
+			"(pin it on them, or --force to override and audit the override)%s", e.NextKID, len(e.Missing), strings.Join(e.Missing, ", "), hint)
 	}
 	return fmt.Sprintf("keys: refusing to activate bundle key %s: the workers' pins could not be read (%v); "+
 		"point --admin-url at the running control plane, or --force to override and audit the override", e.NextKID, e.Cause)
@@ -70,6 +76,10 @@ type PinReport struct {
 	// Unpinned are online workers that advertise no bundle verification
 	// (no pins): they apply the legacy wire and are not affected.
 	Unpinned []string
+	// NoHeartbeat are the online workers that advertise no capabilities at all:
+	// they have polled but not heartbeated yet (after a control plane restart),
+	// so what they pin is unknown. They are in Missing too.
+	NoHeartbeat []string
 	// Checked is how many online, bundle-verifying workers were examined.
 	Checked int
 }
@@ -78,7 +88,9 @@ type PinReport struct {
 // worker that verifies signed bundles (it advertises config.CapBundleV1, which
 // it does only with pins) must report kid in its pinnedKids. A worker reports at
 // most config.MaxHeartbeatPinnedKIDs kids, so an unlisted kid is read as
-// missing: the check fails closed.
+// missing: the check fails closed. An online worker with no capabilities has not
+// heartbeated since the control plane started, so its pins are unknown and it
+// counts as missing too, never as unpinned.
 func CheckBundlePins(workers []dashboard.WorkerView, kid string) PinReport {
 	var r PinReport
 	for _, w := range workers {
@@ -88,6 +100,12 @@ func CheckBundlePins(workers []dashboard.WorkerView, kid string) PinReport {
 		case !w.Online && verifies && !pinned:
 			r.Offline = append(r.Offline, w.ProxyID)
 		case !w.Online:
+		case len(w.Caps) == 0:
+			// No heartbeat yet: nothing says the worker does not verify
+			// bundles, so it is treated as one that might (fail closed).
+			r.Checked++
+			r.NoHeartbeat = append(r.NoHeartbeat, w.ProxyID)
+			r.Missing = append(r.Missing, w.ProxyID)
 		case !verifies:
 			r.Unpinned = append(r.Unpinned, w.ProxyID)
 		default:
@@ -100,6 +118,7 @@ func CheckBundlePins(workers []dashboard.WorkerView, kid string) PinReport {
 	slices.Sort(r.Missing)
 	slices.Sort(r.Offline)
 	slices.Sort(r.Unpinned)
+	slices.Sort(r.NoHeartbeat)
 	return r
 }
 
@@ -159,6 +178,7 @@ func errText(err error) string {
 // apart.
 const (
 	opBundleStage             = "stage"
+	opBundleUnstage           = "unstage"
 	opBundleActivate          = "activate"
 	opBundleEmergencyActivate = "emergency_activate"
 )
@@ -196,6 +216,44 @@ func (o *OfflineKeys) StageBundle(ctx context.Context) (OfflineStageResult, erro
 		adminaudit.DetailOp: opBundleStage, "purpose": keys.PurposeBundle, "kid": out.ActiveKID, "next_kid": out.NextKID,
 	}); err != nil {
 		return out, fmt.Errorf("keys: the bundle key %s is staged but the admin audit append failed: %w", out.NextKID, err)
+	}
+	return out, nil
+}
+
+// OfflineUnstageResult is the outcome of unstaging.
+type OfflineUnstageResult struct {
+	NextKID string
+	// Dropped is set when the staged key's material could not be loaded and its
+	// row was destroyed instead (a fresh next key is published later).
+	Dropped bool
+	// Already is set when nothing was staged.
+	Already bool
+}
+
+// UnstageBundle takes the staged next key back out of signing, so the control
+// plane signs with the active key alone again. It never needs the staged key's
+// material, so it is the recovery when that material is lost and the control
+// plane cannot load the purpose (the staged_key_unavailable Finding): the key is
+// unstaged when it loads and destroyed when it does not. One admin audit row
+// (op=unstage). A worker that pinned only the staged key verifies nothing after
+// it: re-pin it to the active key first.
+func (o *OfflineKeys) UnstageBundle(ctx context.Context) (OfflineUnstageResult, error) {
+	actor := keys.Actor{Subject: adminaudit.CLIActor(), AuthMethod: adminaudit.AuthMethodCLI}
+	res, err := o.mgr.UnstageBundle(ctx, actor)
+	if err != nil {
+		return OfflineUnstageResult{}, err
+	}
+	out := OfflineUnstageResult{NextKID: res.NextKID, Dropped: res.Dropped, Already: res.Already}
+	if res.Already {
+		return out, nil
+	}
+	o.logger.Info("bundle key unstaged", "kid", out.NextKID, "dropped", out.Dropped)
+	details := map[string]string{adminaudit.DetailOp: opBundleUnstage, "purpose": keys.PurposeBundle, "next_kid": out.NextKID}
+	if out.Dropped {
+		details["dropped"] = "true"
+	}
+	if err := o.record(ctx, actionKeysRotate, keys.PurposeBundle, details); err != nil {
+		return out, fmt.Errorf("keys: the bundle key %s is unstaged but the admin audit append failed: %w", out.NextKID, err)
 	}
 	return out, nil
 }
@@ -268,7 +326,7 @@ func (o *OfflineKeys) ActivateBundle(ctx context.Context, opt ActivateBundleOpti
 	res.Forced = gate.forced
 
 	actor := keys.Actor{Subject: adminaudit.CLIActor(), AuthMethod: adminaudit.AuthMethodCLI}
-	rotErr := o.mgr.Rotate(ctx, keys.PurposeBundle, keys.RotateOpts{Emergency: opt.Emergency, ConfirmPinned: true, Actor: actor})
+	rotErr := o.mgr.Rotate(ctx, keys.PurposeBundle, keys.RotateOpts{Emergency: opt.Emergency, ConfirmPinned: true, ExpectNextKID: next.KID, Actor: actor})
 	stood := errors.Is(rotErr, keys.ErrRotationStood)
 	if rotErr != nil && !stood {
 		return res, rotErr
@@ -338,9 +396,19 @@ func (o *OfflineKeys) pinGate(ctx context.Context, nextKID string, opt ActivateB
 	res.report = CheckBundlePins(workers, nextKID)
 	if len(res.report.Missing) > 0 {
 		if !opt.Force {
-			return res, &PinGateError{NextKID: nextKID, Missing: res.report.Missing}
+			return res, &PinGateError{NextKID: nextKID, Missing: res.report.Missing, NoHeartbeat: res.report.NoHeartbeat}
 		}
 		res.forced = true
 	}
 	return res, nil
+}
+
+// bundleKeyLoadError is why the key manager could not load the bundle purpose,
+// for a startup error that would otherwise only say there is no key to sign
+// with (a lost staged key reads differently from a lost active key).
+func bundleKeyLoadError(m *keys.Manager) string {
+	if m == nil {
+		return ""
+	}
+	return m.LastError(keys.PurposeBundle)
 }
