@@ -15,6 +15,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sort"
 	"time"
@@ -142,7 +143,18 @@ func (v Verified) WithoutCredentials() ([]byte, error) {
 	if len(v.payload) == 0 || len(v.signatures) == 0 {
 		return nil, errors.New("bundle: not a verified envelope")
 	}
-	return json.Marshal(Envelope{Payload: string(v.payload), Signatures: v.signatures})
+	// No HTML escaping, so <, > and & in the unsigned signature entries are not
+	// inflated sixfold; invalid UTF-8 still becomes an escaped U+FFFD. Either
+	// way the result is bounded like a received envelope, so an oversized one
+	// is a write failure the caller logs, not a cache LoadCache would refuse.
+	out, err := marshalNoEscape(Envelope{Payload: string(v.payload), Signatures: v.signatures})
+	if err != nil {
+		return nil, err
+	}
+	if len(out) > MaxEnvelopeBytes {
+		return nil, fmt.Errorf("%w: bundle: stripped envelope is %d bytes, limit %d", ErrTooLarge, len(out), MaxEnvelopeBytes)
+	}
+	return out, nil
 }
 
 // contentSHA256 hashes what makes two bundles the same content: cpID, policy,

@@ -141,8 +141,9 @@ key.
 
 What is written. After every verified bundle, including a re-signed one with the
 same content (which moves `issuedAt`), the worker writes
-`<stateDir>/bundle/bundle.json`: the signed envelope exactly as the control plane
-sent it, minus the `credentials` sidecar. The write is atomic (temp file in the
+`<stateDir>/bundle/bundle.json`: the verified payload and signatures,
+re-marshalled in canonical form, with no `credentials` sidecar and no other
+envelope member. The write is atomic (temp file in the
 same directory, fsync, rename, directory fsync); the file is `0600` and the
 directory `0700`. A failed write logs one ERROR (until a write succeeds again)
 and never changes the policy being enforced. The file holds policy and

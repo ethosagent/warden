@@ -819,3 +819,50 @@ func TestVerifiedWithoutCredentials(t *testing.T) {
 		t.Fatal("a zero Verified must not produce an envelope")
 	}
 }
+
+// TestWithoutCredentialsDoesNotHTMLEscape: the unsigned signature entries are
+// written byte for byte, so <, > and & are not inflated to six-byte escapes.
+func TestWithoutCredentialsDoesNotHTMLEscape(t *testing.T) {
+	s, pin := newKey(t, keys.AlgEdDSA)
+	good := string(mustSign(t, base(5), nil, s))
+	raw := strings.Replace(good, `"signatures":[`, `"signatures":[{"kid":"<a&b>","sig":"x"},`, 1)
+	if raw == good {
+		t.Fatal("no signatures member")
+	}
+	v, err := bundle.Verify([]byte(raw), []keys.JWK{pin}, bundle.State{}, opts())
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := v.WithoutCredentials()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), `"kid":"<a&b>"`) || bytes.HasSuffix(out, []byte("\n")) {
+		t.Fatalf("stripped envelope = %.200s, want the kid unescaped and no trailing newline", out)
+	}
+	if !bytes.HasPrefix([]byte(good), out[:len(`{"payload":`)]) {
+		t.Fatalf("unexpected prefix %.40s", out)
+	}
+}
+
+// TestWithoutCredentialsRefusesOversize: invalid UTF-8 in an unsigned kid is
+// re-encoded as U+FFFD (one byte becomes three), so an envelope just under
+// the limit can grow past it. That is an error (the cache write fails and
+// logs), never a file LoadCache would refuse.
+func TestWithoutCredentialsRefusesOversize(t *testing.T) {
+	s, pin := newKey(t, keys.AlgEdDSA)
+	good := string(mustSign(t, base(5), nil, s))
+	bad := strings.Repeat(string([]byte{0xff}), bundle.MaxEnvelopeBytes/2)
+	raw := strings.Replace(good, `"signatures":[`, `"signatures":[{"kid":"`+bad+`","sig":"x"},`, 1)
+	if len(raw) > bundle.MaxEnvelopeBytes {
+		t.Fatalf("test envelope is %d bytes, over the limit", len(raw))
+	}
+	v, err := bundle.Verify([]byte(raw), []keys.JWK{pin}, bundle.State{}, opts())
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := v.WithoutCredentials()
+	if !errors.Is(err, bundle.ErrTooLarge) || out != nil {
+		t.Fatalf("got %d bytes, %v; want ErrTooLarge", len(out), err)
+	}
+}
