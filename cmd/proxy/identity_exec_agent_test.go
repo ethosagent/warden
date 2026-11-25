@@ -60,12 +60,8 @@ func TestIdentityExecAgentToken(t *testing.T) {
 	// child's env or argv (the helper printed both), or stderr.
 	body := token[strings.Index(token, ".")+1:]
 	leaks := []string{token, a.subject, a.keyFile, a.subjectFile, wardenSecretMarker, "WARDEN_IDENTITY_", identityclient.EnvAgentID}
-	for _, win := range secretWindows("pem body", string(pemKey), 16) {
-		leaks = append(leaks, win)
-	}
-	for _, win := range secretWindows("token", token, 16) {
-		leaks = append(leaks, win)
-	}
+	leaks = append(leaks, secretWindows("pem body", string(pemKey), 16)...)
+	leaks = append(leaks, secretWindows("token", token, 16)...)
 	leaks = append(leaks, body)
 	for _, secret := range leaks {
 		if strings.Contains(res.stdout, secret) || strings.Contains(res.stderr, secret) {
