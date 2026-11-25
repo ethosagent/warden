@@ -54,15 +54,6 @@ var pending = joinPending(
 		CoverIdentity("agent_unregistered"), CoverIdentity("agent_disabled"),
 		CoverIdentity("agent_mismatch"), CoverIdentity("cnf_mismatch"),
 	),
-	// W-P2-SECT-04: worker certificates and signed bundles.
-	pend(TicketCerts,
-		CoverBundle("malformed"), CoverBundle("too_large"), CoverBundle("unsupported_format"),
-		CoverBundle("unsigned"), CoverBundle("unknown_kid"), CoverBundle("bad_signature"),
-		CoverBundle("issuer_mismatch"), CoverBundle("credential_mismatch"), CoverBundle("rollback"),
-		CoverBundle("equivocation"), CoverBundle("expired"), CoverBundle("future"),
-		CoverBundle("invalid_policy"),
-		CoverRoute("/policy"), CoverRoute("/control/heartbeat"), CoverRoute("/central/ingest"),
-	),
 	// W-P2-SECT-06: CP route boundaries and enrollment.
 	pend(TicketRoutes,
 		CoverRoute("/control/enroll"), CoverRoute("/control/renew"),

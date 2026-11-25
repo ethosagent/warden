@@ -3,8 +3,10 @@ package security
 import (
 	"bufio"
 	"context"
+	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -94,6 +96,17 @@ type StackOptions struct {
 	// DefaultTokenRate keeps tokenService.rateLimit at the production defaults
 	// instead of the raised harness limit (the rate-limit case needs it).
 	DefaultTokenRate bool
+	// CPEndpoint, when set, is called for every worker before its config is
+	// written and returns the host:port that worker dials as its control
+	// plane ("" keeps the real CP). It is how a case puts a TamperProxy
+	// between one worker and the CP: the func builds the proxy and returns
+	// its address. It lives here, in the test package, and adds no seam to
+	// production: the endpoint is an ordinary controlPlane.endpoint.
+	CPEndpoint func(s *Stack, w *Worker) string
+	// PinBundleIssuer sets controlPlane.bundleIssuer on every worker to the
+	// CP's id, so a bundle signed by a pinned key for another CP is rejected
+	// as issuer_mismatch. The id is read from the CP's state once it exists.
+	PinBundleIssuer bool
 	// AcceptDexTokens is identity.acceptDexTokens the CP distributes; nil
 	// leaves it unset (true while identity.issuer is set).
 	AcceptDexTokens *bool
@@ -143,6 +156,15 @@ type Stack struct {
 	// id makes the stack's environment variable names unique.
 	id string
 
+	// wcaInter and wcaKey are the worker CA intermediate the CP issues from:
+	// a case signs hostile worker certificates that still chain to it.
+	wcaInter *x509.Certificate
+	wcaKey   *ecdsa.PrivateKey
+	// bundleIssuer is the CP id workers pin when PinBundleIssuer is set.
+	bundleIssuer string
+	// kv is scratch state a case's Attack shares with its test.
+	kv sync.Map
+
 	mu       sync.Mutex
 	cps      *controlplane.Server
 	km       *keys.Manager
@@ -178,6 +200,10 @@ type Worker struct {
 	StateDir string
 	// DBPath is its analytics store.
 	DBPath string
+
+	// Tamper is the proxy between this worker and the CP, when StackOptions.
+	// CPEndpoint built one (see NewTamperProxy).
+	Tamper *TamperProxy
 
 	// inflight tracks the worker's request scopes until their terminal
 	// bookkeeping (event, decision log, metrics) is done.
@@ -229,6 +255,9 @@ func StartStackNoWait(tb testing.TB, opts StackOptions) *Stack {
 	s.tracker.add("swapped secret", SwappedSecret)
 
 	s.startCP()
+	if opts.PinBundleIssuer {
+		s.bundleIssuer = s.readCPID()
+	}
 	s.Issuer.RegisterClient(ConsoleClientID, consoleSecretValue)
 	for _, agent := range opts.Agents {
 		s.startWorker(agent)
@@ -393,6 +422,7 @@ func (s *Stack) writeWorkerCA(dir string) (chain string) {
 	if err != nil {
 		s.tb.Fatalf("security: worker CA intermediate: %v", err)
 	}
+	s.wcaInter, s.wcaKey = inter, key
 	chain = filepath.Join(dir, "worker-ca-chain.pem")
 	if err := os.WriteFile(chain, workerca.EncodeCertsPEM(inter, root), 0o600); err != nil {
 		s.tb.Fatalf("security: write the worker CA chain: %v", err)
@@ -566,6 +596,16 @@ func (s *Stack) workerConfig(w *Worker) string {
 	if err != nil {
 		s.tb.Fatalf("security: encode the bundle pins: %v", err)
 	}
+	endpoint := s.CP.Addr
+	if s.opts.CPEndpoint != nil {
+		if a := s.opts.CPEndpoint(s, w); a != "" {
+			endpoint = a
+		}
+	}
+	issuer := ""
+	if s.bundleIssuer != "" {
+		issuer = "  bundleIssuer: " + s.bundleIssuer + "\n"
+	}
 	return fmt.Sprintf(`logging:
   level: info
   format: json
@@ -578,7 +618,7 @@ controlPlane:
   heartbeatInterval: 1s
   requireSignedBundles: true
   bundleKeys: %[4]s
-  stateDir: %[5]s
+%[12]s  stateDir: %[5]s
   enrollment:
     tokenEnv: %[6]s
 
@@ -598,8 +638,8 @@ mcp:
 observability:
   enabled: true
   serviceName: warden-security
-`, s.CP.Addr, s.CP.CertFile, s.opts.LongPollWait, raw, w.StateDir, w.TokenEnv, w.AgentID, w.Name,
-		SwappedPlaceholder, swappedEnv, UpstreamHost)
+`, endpoint, s.CP.CertFile, s.opts.LongPollWait, raw, w.StateDir, w.TokenEnv, w.AgentID, w.Name,
+		SwappedPlaceholder, swappedEnv, UpstreamHost, issuer)
 }
 
 // bundlePins are the CP's bundle public keys, the controlPlane.bundleKeys every
