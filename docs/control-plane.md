@@ -2121,6 +2121,21 @@ today the workers keep pulling the unsigned policy.
   appends a row with reason `token_jwks` first, then signs. A bundle key change
   appends nothing: the same content is re-signed under the same seq, which a
   verifier treats as a refresh. The signed content for a seq never changes.
+- **Token issuer.** With `tokenService.enabled`, the payload carries a top-level
+  `tokenIssuer` (the value of `tokenService.issuer`) and `contentSha256` covers
+  it, so a worker verifies Warden tokens against an issuer the signer vouched
+  for and never against `cpID`. The member is omitted when the control plane
+  mints no tokens. A change of it (an edited issuer, the token service switched
+  on or off, also while the control plane was down) appends a row with reason
+  `token_issuer` first, like a JWKS change, so one seq never covers two issuers.
+  The agent key thumbprints a worker compares with a token's `cnf.jkt` are the
+  `registeredAgents[].jkt` already inside the signed policy; a registry change
+  appends an `agent_registry` row and moves the seq. `tokenService.issuer` must
+  differ from `identity.issuer` (startup fails naming both keys, and while the token
+  service is on a settings write or policy publish that sets `identity.issuer` to the token
+  issuer is refused the same way), because the
+  two token kinds are told apart by their issuer. Nothing but the issuer URL and
+  public thumbprints is added: no key material reaches the bundle, logs or audit.
 - **Credential.** `settings.secrets.accessKeyId` and `secretAccessKey` are not in
   the signed payload. They travel in the envelope's unsigned `credentials`
   sidecar and the payload carries their SHA-256. Nothing logs either.
@@ -2174,8 +2189,9 @@ commented block in `configs/config.example.yaml` for every key and default.
   published key, answer 503 `signer_unavailable` with `Retry-After` for about 2 minutes.
   Consumers of `/.well-known/jwks.json` must refetch on an unknown kid (rate-limited); Warden
   workers never use it (they take token keys from signed bundles). The key must also be in the
-  JWKS the control plane serves. Once signed bundles land (#96)
-  the kid must also be in the last-served bundle token JWKS.
+  JWKS the control plane serves. Signed bundles have landed, but the second check is still
+  pending (a `TODO` in the code, owned by the worker token verification work, W-P2-WBND-01): the
+  kid must also be in the last-served bundle token JWKS before the service mints with it.
 - **Agent registry cache.** The control plane has one registry store; it serves reads from a
   snapshot that its own writes invalidate at once and that a 2 s watch refreshes for other
   processes, so an agent disabled with the offline CLI stops authenticating within about 2 s.

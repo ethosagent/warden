@@ -413,6 +413,11 @@ var All = slices.Concat(
 		// legacy wire. In-process only (versioned store, keys, CP restart).
 		{Name: "bundles_off_legacy_wire", Opts: bundlesOffOpts(), Run: bundlesOffLegacyWire},
 		{Name: "bundles_offer_serves", Opts: bundlesOfferOpts(), Run: bundlesOfferServes},
+		// Agent binding, CP half (W-P2-WBND-06): the signed bundle names the token
+		// issuer (never cpID), the served jkt equals the minted token's cnf.jkt,
+		// and a registry change moves the bundle. In-process only.
+		{Name: "bundle_token_binding", Opts: bundleTokenBindingOpts(), Run: bundleTokenBinding},
+		{Name: "bundle_no_token_issuer_without_service", Opts: bundlesOfferOpts(), Run: bundleNoTokenIssuerWithoutService},
 		// Signed bundles on the worker (W-P2-SBND-04): a pinned worker applies
 		// only verified bundles and keeps the last one when the control plane
 		// goes away; a pin that does not match the signer leaves it fail-closed

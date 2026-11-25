@@ -493,3 +493,51 @@ func TestRemoteProviderUnpinnedWorkerGetsHintOn406(t *testing.T) {
 		t.Fatal("a 406 is not a bundle rejection")
 	}
 }
+
+// TestBundleWithoutTokenIssuer: a bundle from a control plane that mints no
+// tokens (or an older one) has no tokenIssuer; it verifies and applies, and the
+// worker sees an empty issuer, never the cpID.
+func TestBundleWithoutTokenIssuer(t *testing.T) {
+	e := newBundleEnv(t)
+	if err := e.pullSeq(1, bundlePolicyA, "e1"); err != nil {
+		t.Fatal(err)
+	}
+	b, ok := e.rp.Bundle()
+	if !ok || b.TokenIssuer != "" {
+		t.Fatalf("Bundle() = %+v, %v; want applied with an empty TokenIssuer", b, ok)
+	}
+	if in, ok := e.rp.BindingInputs(); !ok || in.TokenIssuer != "" {
+		t.Fatalf("BindingInputs() = %+v, %v", in, ok)
+	}
+}
+
+// TestVerifiedBundleTokenIssuerAndBindingInputs: the signed issuer reaches the
+// worker, distinct from cpID, together with the token JWKS and the registered
+// agents of the same bundle, and the accessor hands out copies.
+func TestVerifiedBundleTokenIssuerAndBindingInputs(t *testing.T) {
+	e := newBundleEnv(t)
+	if _, ok := e.rp.BindingInputs(); ok {
+		t.Fatal("BindingInputs ok with nothing verified")
+	}
+	policy := `{"allowlist":[{"domain":"a.example.com"}],"registeredAgents":[{"id":"agent-a","status":"active","jkt":["AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"]}]}`
+	b := e.bundle(3, policy)
+	b.TokenIssuer = "https://warden.example.com"
+	e.cp.serve(e.sign(b, nil), "e3")
+	if err := e.rp.Pull(); err != nil {
+		t.Fatal(err)
+	}
+	vb, ok := e.rp.Bundle()
+	if !ok || vb.TokenIssuer != "https://warden.example.com" || vb.TokenIssuer == vb.CPID {
+		t.Fatalf("Bundle() = %+v, %v", vb, ok)
+	}
+	in, ok := e.rp.BindingInputs()
+	if !ok || in.Seq != 3 || in.TokenIssuer != vb.TokenIssuer || string(in.TokenJWKS) != `{"keys":[]}` ||
+		len(in.Agents) != 1 || in.Agents[0].ID != "agent-a" || len(in.Agents[0].JKT) != 1 || in.Agents[0].JKT[0] != "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" {
+		t.Fatalf("BindingInputs() = %+v, %v", in, ok)
+	}
+	in.Agents[0].JKT[0] = "mutated"
+	in.TokenJWKS[0] = 'X'
+	if again, _ := e.rp.BindingInputs(); again.Agents[0].JKT[0] != "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" || string(again.TokenJWKS) != `{"keys":[]}` {
+		t.Fatal("BindingInputs exposed internal state")
+	}
+}

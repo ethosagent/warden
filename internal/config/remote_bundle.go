@@ -96,6 +96,11 @@ type VerifiedBundle struct {
 	CPID      string
 	IssuedAt  time.Time
 	ExpiresAt time.Time
+	// TokenIssuer is the signed iss of the Warden tokens this control plane
+	// mints (payload tokenIssuer); empty when it mints none or the bundle
+	// predates the field. Token verification (W-P2-WBND-01) must use this,
+	// never CPID.
+	TokenIssuer string
 	// Sections are the signed payload's extra sections, by name (a copy).
 	Sections map[string]json.RawMessage
 }
@@ -172,6 +177,44 @@ func (r *RemoteProvider) Bundle() (VerifiedBundle, bool) {
 		return VerifiedBundle{}, false
 	}
 	return r.bundle.clone(), true
+}
+
+// BindingInputs is what agent-bound token verification reads, taken from one
+// verified bundle in one atomic read: the signed token issuer and token JWKS
+// and the registered agents (id, status, key thumbprints) of the same policy.
+// Reading them separately could pair keys from one bundle with agents from
+// the next.
+type BindingInputs struct {
+	// Seq is the bundle's seq, so a caller can tell when the inputs changed.
+	Seq         int64
+	TokenIssuer string
+	TokenJWKS   json.RawMessage
+	Agents      []RegisteredAgent
+}
+
+// BindingInputs returns the token issuer, token JWKS and registered agents of
+// the verified bundle in force. ok is false when no pins are set or nothing
+// has been verified yet (legacy wire: there is nothing signed to verify
+// against). The result is a copy.
+func (r *RemoteProvider) BindingInputs() (BindingInputs, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.trust == nil || r.bundle == nil {
+		return BindingInputs{}, false
+	}
+	in := BindingInputs{
+		Seq:         r.bundle.Seq,
+		TokenIssuer: r.bundle.TokenIssuer,
+		TokenJWKS:   r.bundle.TokenJWKS(),
+	}
+	if r.policy != nil && len(r.policy.RegisteredAgents) > 0 {
+		in.Agents = make([]RegisteredAgent, len(r.policy.RegisteredAgents))
+		for i, a := range r.policy.RegisteredAgents {
+			in.Agents[i] = a
+			in.Agents[i].JKT = append([]string(nil), a.JKT...)
+		}
+	}
+	return in, true
 }
 
 // BundleStatus returns the signed-bundle state; the zero value (Enabled false)
@@ -264,7 +307,8 @@ func (r *RemoteProvider) applyBundleBody(t *BundleTrust, resp *http.Response) (b
 	vb := &VerifiedBundle{
 		Seq: v.Seq, ID: v.ContentSHA256, KID: v.KID, CPID: v.Bundle.CPID,
 		IssuedAt: v.Bundle.IssuedAt, ExpiresAt: v.Bundle.ExpiresAt,
-		Sections: v.Bundle.Sections,
+		TokenIssuer: v.Bundle.TokenIssuer,
+		Sections:    v.Bundle.Sections,
 	}
 	if v.Refresh {
 		// Same content, newer issuedAt: only the validity window moves.
