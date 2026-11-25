@@ -1,0 +1,128 @@
+# Warden control-plane policy.
+#
+# This is the policy every data-plane worker pulls and enforces. It is
+# ALLOW/DENY ONLY: the control plane never holds or serves secrets — those stay
+# on each worker. Edit this file and workers pick up the change on their next
+# poll (no restart). The control plane re-reads it on each request.
+
+policy:
+  allowlist:
+    - domain: api.github.com
+    - domain: "~.*\\.githubusercontent\\.com$"
+  denylist:
+    - domain: evil.example.com
+
+logging:
+  level: info
+  format: json
+
+# Identity verification (OFF when this block is absent: no token is read or
+# verified and behavior is byte-identical to before). Attribute mode verifies a
+# user token and records who made the request; it never blocks. The block holds
+# no secrets. Phase 1 modes: off | attribute ("require" arrives in Phase 2).
+# Per-agent override: `identity: off|attribute` on an agents[] entry.
+#identity:
+#  defaultMode: attribute                  # off | attribute (default off)
+#  issuer: http://localhost:5556/dex       # dev only: plain http needs internalIssuerURL
+#  internalIssuerURL: http://dex:5556      # dev-only split-horizon: origin containers use to reach the issuer
+#  audience: warden
+#  allowedAZP: [agent-harness, warden-cli] # empty = no azp check
+#  groupsClaim: groups
+#  clockSkewSeconds: 60                    # 0..300 (0 = default 60)
+#  maxTokenTTLSeconds: 3600                # >0 overrides the default 3600
+
+# Production form: an
+# https issuer and no internalIssuerURL. The block holds no secrets.
+#identity:
+#  defaultMode: attribute                  # off | attribute (default off)
+#  issuer: https://idp.example.com
+#  audience: warden
+#  allowedAZP: [agent-harness, warden-cli] # empty = no azp check
+#  groupsClaim: groups
+
+# Console sign-in (CP-LOCAL; read from this --config file only, never served to
+# workers, and edits to the --state-dir copy are ignored). Absent block means
+# `auth: none`: today's behaviour (open reads, dashboard writes gated by the admin
+# bearer), with a startup warning; --require-console-auth refuses to start in it.
+# `auth: oidc` needs --state-dir and the client-secret env var; every human route
+# (/dashboard/*, /central/secrets) then needs a session and the shared bearer
+# opens none of them. The block holds the env var NAME, never the secret.
+# Defaults: clientID warden-console, scopes [openid, email, profile, groups],
+# session idle 1h / absolute 12h (0 < idle <= absolute <= 168h). Group matching
+# is exact and case-sensitive; the highest matching role wins. Changing this
+# block needs a control-plane restart.
+#
+# Production form (https issuer):
+#console:
+#  auth: oidc                              # none | oidc (default none)
+#  oidc:
+#    issuer: https://idp.example.com
+#    clientID: warden-console
+#    clientSecretEnv: WARDEN_CONSOLE_CLIENT_SECRET
+#    redirectURL: https://warden.example.com/auth/callback  # must end in /auth/callback
+#  roles:
+#    admin: [warden-admins]                # at least one admin group
+#    editor: [warden-editors]
+#    viewer: [warden-viewers]
+#  session:
+#    idle: 1h
+#    absolute: 12h
+#  adminAudit:
+#    enabled: false                        # signed admin audit log (default false); needs --state-dir.
+#                                          # Key: --admin-audit-key-file (default <state-dir>/cp-audit.key).
+#  trustedProxies: []                      # CIDRs of reverse proxies whose X-Forwarded-For sets the
+#                                          # admin audit client_ip (default none: the peer address).
+#  breakGlass:                             # emergency local admin login for when the IdP is down;
+#                                          # off by default; needs auth: oidc. Make the hash with
+#                                          # `warden control-plane hash-password` (argon2id).
+#    enabled: false
+#    username: breakglass-admin            # placeholder; at most 128 bytes
+#    passwordHashEnv: WARDEN_BREAKGLASS_HASH  # env var NAME holding the hash; or passwordHashFile
+#                                          # (exactly one; a file is re-read so it can rotate)
+#    sessionTTL: 1h                        # default 1h, max 4h
+#    allowBehindTLSTerminator: false
+#  approvals:                             # change approvals (W-P2-APPR-01). NOT available yet: this
+#                                          # build refuses enabled: true at startup. Off by default.
+#    enabled: false                        # will need auth: oidc, --policy-store=versioned,
+#                                          # --state-dir and adminAudit.enabled: true
+#    minApprovals: 1                       # 1..3
+#    allowSelfApproveNarrowing: true
+#    allowEmergencyApply: false
+#    replayWindow: 168h                    # 1h..720h
+#    replayMaxEvents: 100000               # 1..100000
+#    replayTimeout: 60s
+#    replayMaxAge: 24h
+#    draftTTL: 168h
+#    maxOpenDrafts: 200
+#  apiKeys:                                # scoped wak_ API keys on /dashboard/api/*; off by default;
+#                                          # needs auth: oidc and --state-dir (docs/control-plane.md)
+#    enabled: false
+#    defaultTTL: 2160h                     # default key lifetime; at most maxTTL
+#    maxTTL: 8760h                         # also the hard ceiling
+#    maxPerOwner: 25                       # active keys per owner
+#    ratePerKey: 10                        # requests per second per key (burst 2x)
+#
+# Compose dev profile (Dex): the CP runs in a container where `localhost` is
+# itself, so the browser-facing issuer stays public and internalIssuerURL names
+# the origin the CP reaches the IdP on. Matches the warden-console Dex client.
+#console:
+#  auth: oidc
+#  oidc:
+#    issuer: http://localhost:5556/dex
+#    internalIssuerURL: http://dex:5556
+#    clientID: warden-console
+#    clientSecretEnv: WARDEN_CONSOLE_DEX_CLIENT_SECRET
+#    redirectURL: https://localhost:7070/auth/callback
+#  roles:
+#    admin: [warden-admins]
+
+# --- Signed policy bundles (docs/runbooks/key-rotation.md) ---------------------
+# This copy of config.control-plane.yaml is what deploy/compose/docker-compose.bundles.yml
+# mounts. keys.enabled creates the bundle signing key on first start; the compose
+# overlay exports its PUBLIC half into the cp-pins volume and every worker pins it
+# (controlPlane.bundleKeysFile). The bundle key never rotates on a schedule: workers pin
+# it, so a rotation is the staged rollout in the runbook (export, pin, --stage, --activate).
+keys:
+  enabled: true
+  bundle:
+    rotationInterval: 0     # must be 0: bundle keys rotate only by hand

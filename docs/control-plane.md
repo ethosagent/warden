@@ -186,6 +186,14 @@ the cached bundle expires (about 24h by default; the bundle lifetime, not
 accepts the control plane's bundles again. Use `--bundle-seq-floor` on the control
 plane to recover sooner.
 
+Key rotation. The cache is verified at boot under the pins the worker holds
+then, like any bundle, and it keeps every signature of the envelope it saved. A
+worker restarted mid-rotation therefore verifies a dual-signed cache under either
+the old or the new pin. A cache only the old key signed is refused once the old
+pin is dropped, which is why the runbook keeps the old pin until the overlap has
+passed and a new-key bundle has been applied everywhere; the worker then falls
+back to the control plane, and fails closed if that is down too.
+
 File safety. `stateDir` and `bundle/` must be real directories (a symlink is
 refused), owned by the worker user and not writable by group or others; a worse
 directory disables the cache with one ERROR. The cache file is opened without
@@ -1837,6 +1845,9 @@ account.
 warden control-plane keys list --state-dir /var/lib/warden-cp [--purpose token] [--jwks] [--json]
 warden control-plane keys rotate --purpose token --state-dir /var/lib/warden-cp [--config F] \
   [--emergency --yes]
+warden control-plane keys rotate --purpose bundle --stage --state-dir /var/lib/warden-cp
+warden control-plane keys rotate --purpose bundle --activate --state-dir /var/lib/warden-cp \
+  --admin-url https://cp.example.internal:7070 --api-key-file rotate.key [--force]
 warden control-plane keys export --purpose bundle --state-dir /var/lib/warden-cp [--state next]
 warden control-plane keys reset --purpose token --yes --state-dir /var/lib/warden-cp
 ```
@@ -1852,19 +1863,33 @@ warden control-plane keys reset --purpose token --yes --state-dir /var/lib/warde
   An emergency whose revocation committed but whose fresh `next` could not be
   written still stands: the command exits **3** and says the old key is
   revoked — the error names only the missing `next` — and its audit row has
-  outcome `error`. The `bundle` purpose refuses here: it rotates only through
-  the staged rollout of [the key rotation runbook](runbooks/key-rotation.md),
-  and the refusal names the `next` kid to pin.
+  outcome `error`. The `bundle` purpose rotates only in two steps, because workers
+  pin its keys: `--stage` makes the control plane sign every envelope with both
+  the active and the next key (a worker pinning either verifies it), and
+  `--activate` makes the next key the only signer, keeping the old one published
+  for `keys.bundle.overlap`. `--activate` is refused, naming the proxy ids,
+  unless every online worker reports the next kid in its heartbeat `pinnedKids`;
+  it reads them from the running control plane (`--admin-url` and an API key with
+  the `traffic:read` scope in `--api-key-file` or `$WARDEN_API_KEY`) and refuses
+  when it cannot. `--force` overrides the check and records the missing ids in
+  the one audit row it writes; `--activate --emergency --yes` promotes at once
+  and revokes the old key. Without a step the bundle purpose is refused and the
+  `next` kid to pin is named. The scheduler never rotates the bundle purpose
+  (`keys.bundle.rotationInterval` must be `0`). The whole flow, the emergency
+  drill and the restore step are in
+  [the key rotation runbook](runbooks/key-rotation.md#6-staged-bundle-rotation).
 - **export** prints one key's public JWK (`--state next` or `active`) or, by
-  default, the active + next JWKS — the exact document a worker pins in
-  `controlPlane.bundleKeysFile`.
+  default, the published JWKS (active, next, and a retired key inside its
+  overlap) — the exact document a worker pins in `controlPlane.bundleKeysFile`.
+  It never prints private material.
 - **reset** deletes every key of the purpose (rows and PEM files) and
   regenerates `token`/`bundle`; `--purpose ca` only clears, the CA key is
   imported, not generated. It needs `--yes`.
 
 When admin audit is on in the state dir, `rotate` and `reset` append one row
 (`keys.rotate_requested`, `keys.reset`; `auth_method` `cli`, actor
-`cli:<os user>`) and the transitions the request causes carry the same actor.
+`cli:<os user>`; a bundle `--stage` or `--activate` carries `op=stage` or
+`op=activate`, and a forced activation `forced=true` with the missing proxy ids) and the transitions the request causes carry the same actor.
 With no audit table a log line names the action instead; with rows present and
 the audit key missing or mismatched the command refuses and changes nothing.
 
@@ -1873,7 +1898,7 @@ Exit codes:
 | Code | Meaning |
 |---|---|
 | 0 | Applied. |
-| 1 | Nothing changed — a refusal: no or too-young `next` key, a staged bundle rotation, or `reset` under the running control plane's state-dir lock. A reset that partially applied also exits 1: its rows are gone and its audit row has outcome `error` with the removed count. |
+| 1 | Nothing changed — a refusal: no or too-young `next` key, a bundle rotation without `--stage` or `--activate`, an `--activate` the pin check refused, or `reset` under the running control plane's state-dir lock. A reset that partially applied also exits 1: its rows are gone and its audit row has outcome `error` with the removed count. |
 | 2 | Usage error: a bad flag, a missing or unopenable state dir or audit key, a missing `--yes` or a declined confirmation, or `rotate --purpose ca`. |
 | 3 | A stood rotation: the promotion committed, so the old key is out of the signing slot — revoked under `--emergency`, retired otherwise — and only the fresh `next` key is missing. |
 
@@ -2270,6 +2295,18 @@ today the workers keep pulling the unsigned policy.
   seq. `--bundle-seq-floor N` appends one `restore` row at seq N at startup when
   the publish log is below it: set it above the highest seq any worker reports
   after restoring a backup, or pinned workers reject new bundles as rollbacks.
+- **Key rotation.** Workers pin the bundle key, so it rotates only by command and
+  in steps (`keys rotate --purpose bundle --stage`, then `--activate`; see Keys
+  CLI). While a key is staged every envelope carries two signatures, one per key,
+  and a worker that pins either key verifies it; the log line `bundle signed`
+  lists both kids. A key change re-signs the same seq, so it is a refresh to a
+  worker. The activation checks the workers' reported `pinnedKids` first. Rollout
+  order (offer, pin every worker, require), emergency rotation and
+  `--bundle-seq-floor` after a restore are in the
+  [key rotation runbook](runbooks/key-rotation.md#6-staged-bundle-rotation); the
+  compose recipe
+  [`deploy/compose/docker-compose.bundles.yml`](../deploy/compose/docker-compose.bundles.yml)
+  exports the public JWKS and pins every worker to it.
 - **Failure.** If signing fails, the control plane keeps serving the last
   envelope until it expires, logs `bundle sign failed` with the seq and kid, and
   `/healthz` answers `200 degraded: bundle signing failed`. With no envelope,
