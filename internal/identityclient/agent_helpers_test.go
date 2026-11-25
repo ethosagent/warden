@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"path/filepath"
 	"strconv"
 	"sync"
 	"testing"
@@ -126,16 +125,6 @@ func newAgentRig(t *testing.T) *agentRig {
 	return &agentRig{cp: cp, key: key, clock: clk, ex: &identityclient.Exchanger{
 		Endpoint: cp.endpoint(), AgentID: "agent-1", Key: key, HTTP: cp.srv.Client(), Now: clk.Now,
 	}}
-}
-
-// keyPath writes the rig's key to a fresh 0600 file.
-func (a *agentRig) keyPath(t *testing.T) string {
-	t.Helper()
-	p := filepath.Join(t.TempDir(), "agents", "agent-1.key")
-	if err := identityclient.SaveAgentKey(p, a.key, false); err != nil {
-		t.Fatal(err)
-	}
-	return p
 }
 
 // staticSubject is a SubjectSource with a fixed answer.
