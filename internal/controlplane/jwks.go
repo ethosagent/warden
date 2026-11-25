@@ -44,6 +44,8 @@ type jwksDoc struct {
 	at   time.Time
 	body []byte
 	etag string
+	// kids are the key ids the rendering publishes.
+	kids map[string]struct{}
 }
 
 // jwksServer serves the token JWKS from a cached rendering. The rendering is
@@ -78,7 +80,20 @@ func (j *jwksServer) render() *jwksDoc {
 		return &jwksDoc{ver: ver, at: at}
 	}
 	sum := sha256.Sum256(body)
-	return &jwksDoc{ver: ver, at: at, body: body, etag: `"` + base64.RawURLEncoding.EncodeToString(sum[:]) + `"`}
+	kids := make(map[string]struct{}, len(set.Keys))
+	for _, k := range set.Keys {
+		kids[k.Kid] = struct{}{}
+	}
+	return &jwksDoc{ver: ver, at: at, body: body, kids: kids, etag: `"` + base64.RawURLEncoding.EncodeToString(sum[:]) + `"`}
+}
+
+// serves reports whether the document the control plane serves right now
+// publishes kid. It refreshes the rendering first when the KeySet moved, so a
+// key that just became active is checked against the document a verifier
+// would fetch next.
+func (j *jwksServer) serves(kid string) bool {
+	_, ok := j.doc().kids[kid]
+	return ok
 }
 
 // doc returns the current rendering, refreshing it first when stale.

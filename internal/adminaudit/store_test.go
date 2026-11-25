@@ -283,7 +283,7 @@ func TestEntryValidation(t *testing.T) {
 	ok.HTTPStatus = 599
 	ok.ClientIP = "2001:db8::1"
 	ok.Details = map[string]string{strings.Repeat("k", 32): strings.Repeat("v", 256)}
-	for _, m := range []string{AuthMethodBreakglass, AuthMethodCLI, AuthMethodBearer, AuthMethodNone, AuthMethodSystem} {
+	for _, m := range []string{AuthMethodBreakglass, AuthMethodCLI, AuthMethodBearer, AuthMethodNone, AuthMethodSystem, AuthMethodAPIKey} {
 		ok.AuthMethod = m
 		for _, o := range []string{OutcomeDenied, OutcomeRejected, OutcomeError} {
 			ok.Outcome = o

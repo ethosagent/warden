@@ -465,3 +465,29 @@ func TestEvaluate_MethodConstraintStillCouldMatch(t *testing.T) {
 		t.Errorf("Evaluate = %v, want Allow (constraints could-match)", d)
 	}
 }
+
+// TestParseRateLimit pins the grammar every rate limit setting shares (policy
+// allow entries and tokenService.rateLimit.*): N/second|minute|hour, N > 0.
+func TestParseRateLimit(t *testing.T) {
+	good := map[string]RateLimit{
+		"1/second":    {Limit: 1, Window: time.Second},
+		"120/minute":  {Limit: 120, Window: time.Minute},
+		"3600/hour":   {Limit: 3600, Window: time.Hour},
+		"+5/minute":   {Limit: 5, Window: time.Minute},
+		"0007/second": {Limit: 7, Window: time.Second},
+	}
+	for in, want := range good {
+		got, err := ParseRateLimit(in)
+		if err != nil || got != want {
+			t.Errorf("ParseRateLimit(%q) = %+v, %v; want %+v", in, got, err, want)
+		}
+	}
+	for _, in := range []string{
+		"", "5", "/minute", "0/minute", "-1/minute", "x/minute", "5/day", "5/Minute",
+		"5/minute/x", " 5/minute", "5 /minute", "5/minute ", "1.5/minute",
+	} {
+		if got, err := ParseRateLimit(in); err == nil {
+			t.Errorf("ParseRateLimit(%q) = %+v, want an error", in, got)
+		}
+	}
+}

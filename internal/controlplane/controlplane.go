@@ -31,6 +31,8 @@ import (
 	"github.com/ethosagent/warden/internal/agentreg"
 	"github.com/ethosagent/warden/internal/alertpipeline"
 	"github.com/ethosagent/warden/internal/analytics"
+	"github.com/ethosagent/warden/internal/apikeys"
+	"github.com/ethosagent/warden/internal/approvals"
 	"github.com/ethosagent/warden/internal/clock"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/cpstate"
@@ -39,6 +41,7 @@ import (
 	"github.com/ethosagent/warden/internal/integration"
 	"github.com/ethosagent/warden/internal/keys"
 	"github.com/ethosagent/warden/internal/secrets"
+	"github.com/ethosagent/warden/internal/workerca"
 )
 
 // Config configures the control-plane server.
@@ -62,6 +65,44 @@ type Config struct {
 	// store). Nil unless keys.enabled, in which case no key code runs, no table,
 	// key file or goroutine exists, and the control plane behaves as before.
 	Keys *keys.Manager
+	// Tokens is the RFC 8693 token service behind POST /oauth2/token. Nil
+	// (tokenService absent or disabled, the default) leaves both token routes
+	// unmounted: 404, and every other response is unchanged. Run builds it
+	// after New (it needs the block store) and installs it with EnableTokens.
+	Tokens TokenExchanger
+	// TokenIssuer is tokenService.issuer: the base of the discovery document's
+	// URLs. Set together with Tokens.
+	TokenIssuer string
+	// TokenEdge is the token endpoint's pre-authentication limits, metrics and
+	// the retention of the token tables. Set with Tokens by EnableTokens.
+	TokenEdge TokenEdge
+	// Bundles is the signed-bundle mode (--bundles). The zero value is off:
+	// no publisher is built and /policy is unchanged. Run validates the
+	// prerequisites; New builds the publisher only when they are present, and
+	// Run then starts it (policyServer.startBundles) once the keys are loaded.
+	Bundles BundlesConfig
+	// bundleKeys replaces Keys' KeySet as the publisher's key source (tests).
+	bundleKeys bundleKeys
+	// WorkerCA is the worker intermediate CA (workerCA.enabled). Nil with
+	// WorkerCAEnabled false is the disabled default; nil with WorkerCAEnabled
+	// true is the degraded state (the key backend was unreachable at start): the
+	// retry loop installs the CA with Server.SetWorkerCA once it loads.
+	WorkerCA *workerca.CA
+	// WorkerCAEnabled says workerCA.enabled is true, so a nil WorkerCA means
+	// degraded rather than off.
+	WorkerCAEnabled bool
+	// WorkerCAVerifier pins the worker intermediates for certificate
+	// authentication. It needs no key, so it is set whenever workerCA is
+	// enabled, even while WorkerCA is still degraded.
+	WorkerCAVerifier *workerca.Verifier
+	// WorkerCertTTL is the lifetime of an issued worker certificate
+	// (workerCA.certTTL).
+	WorkerCertTTL time.Duration
+	// Enrollment and WorkerCerts back POST /control/enroll (W-P2-WCA-02). The
+	// route is mounted only when workerCA is enabled and both are set (Run sets
+	// them when State is open).
+	Enrollment  EnrollmentTokenStore
+	WorkerCerts WorkerCertStore
 	// AdminAudit is the signed admin audit chain on State. Nil means admin
 	// audit is disabled (console.adminAudit.enabled false, the default).
 	AdminAudit *adminaudit.Store
@@ -85,6 +126,11 @@ type Config struct {
 	// wwt_ tokens only (strict mode). Run refuses it together with a shared
 	// token, without a state dir, or without TLS.
 	RequireWorkerTokens bool
+	// RequireWorkerCerts is --require-worker-certs: the worker routes accept
+	// worker certificates only (strict-certs mode). Run refuses it without
+	// workerCA, a state dir or TLS, and together with a shared token or
+	// --require-worker-tokens.
+	RequireWorkerCerts bool
 	// MaxEvents caps the central analytics store (0 = default).
 	MaxEvents int
 	// Store is the fleet analytics backend (persistent SQLite or in-memory). When
@@ -154,6 +200,16 @@ type Config struct {
 	// TLS reports that the control plane serves TLS; without it, token auth logs
 	// a clear-text warning at startup.
 	TLS bool
+	// APIKeyIndex authenticates `wak_` API keys (W-P2-APIK-02). It is set only
+	// with console.apiKeys.enabled, and the caller must run Index.Run for the
+	// control plane's whole life before serving: an Index without Run refuses
+	// every key once its staleness ceiling passes. Nil means API keys are off.
+	APIKeyIndex *apikeys.Index
+	// APIKeyStore and APIKeyRegistry are the store behind APIKeyIndex and the
+	// control plane's single scope registry; the key management API (W-P2-APIK-03)
+	// and later features that register scopes use these, never their own.
+	APIKeyStore    apikeys.Store
+	APIKeyRegistry *apikeys.Registry
 }
 
 // policyWire is the shape sent to workers: allow/deny policy plus the optional
@@ -201,7 +257,15 @@ const (
 // ConfigEditor seam (writePolicy/writeSettings); the fleet is tracked by the
 // WorkerTracker seam; and central ingest lands in the IngestSink seam.
 type Server struct {
-	cfg      Config
+	cfg Config
+	// jwks is the public token JWKS handler, set by Handler when keys are
+	// enabled; the token service mints only with a key it publishes.
+	jwks atomic.Pointer[jwksServer]
+	// tokenEdge is the token endpoint's runtime state (in-flight slots, trusted
+	// proxies, the unauthenticated-failure log limiter); set by Handler.
+	tokenEdge *tokenEdgeState
+	// workerCA is the live worker CA; nil while disabled or degraded.
+	workerCA atomic.Pointer[workerca.CA]
 	central  analytics.FleetStore
 	registry *WorkerRegistry
 	mcp      *mcpStore
@@ -211,6 +275,13 @@ type Server struct {
 	// versions is the versioned policy store; nil in file mode. Its Create
 	// refreshes the policy server, so long-poll waiters wake at once.
 	versions PolicyVersionStore
+
+	// approvals is the change-approval service; nil unless
+	// console.approvals.enabled (approvals_apply.go).
+	approvals *approvals.Service
+	// approvalsErr is why an enabled approvals gate was not built; Run refuses
+	// to start on it.
+	approvalsErr error
 
 	// blocks is the user block list store; nil without State (and then no
 	// blocked_users overlay is registered).
@@ -240,6 +311,8 @@ type Server struct {
 	// secretStore backs the /central/secrets write path. Nil ⇒ the endpoints are
 	// not mounted (env/empty backend, or aws pre-Phase-5).
 	secretStore secrets.SecretStore
+	// reservedLog is the once-a-minute-per-route log of refused cp/ keys.
+	reservedLog *secrets.ReservedKeyLog
 	// detectionConfig is the live typed detection config the dashboard editor reads
 	// and WriteDetection updates. detectionMu guards it (a short read on GET, a write
 	// at the end of WriteDetection) independent of writeMu so a GET never blocks on a
@@ -259,6 +332,15 @@ type Server struct {
 	// generateLimit is the per-session token bucket on POST
 	// /dashboard/api/query/generate in oidc mode (it spends LLM tokens).
 	generateLimit *sessionLimiter
+	// enroll is the /control/enroll state; nil when the route is not mounted.
+	enroll *enrollState
+	// certIdx is the revoked worker certificate index behind certificate
+	// authentication; nil without a certificate store.
+	certIdx *certIndex
+	// certsRevoked counts the certificates revoked in this process, by the
+	// console and by a lineage conflict (warden_cp_worker_cert_revoked_total); a
+	// CLI revoke is another process.
+	certsRevoked atomic.Int64
 	// auth is the console OIDC login (/auth/login, /auth/callback); set only when
 	// sessions are.
 	auth *authService
@@ -268,6 +350,11 @@ type Server struct {
 	// breakGlass is the break-glass login (POST /auth/breakglass); nil unless
 	// console.breakGlass.enabled (W-P1-OPS1-08).
 	breakGlass *breakGlass
+	// apiKeys is the API key authenticator (apikey_auth.go); nil when
+	// console.apiKeys is disabled, in which case no route is wrapped.
+	// apiKeyCounts is its outcome counter (nil-safe).
+	apiKeys      *apiKeyAuth
+	apiKeyCounts *apiKeyCounters
 	// findings, when set, receives every Finding instead of the alert pipeline.
 	// Tests inject a fake here.
 	findings FindingPublisher
@@ -328,28 +415,52 @@ func New(cfg Config) *Server {
 		policy: newPolicyServer(cfg.PolicyPath, cfg.Token, cfg.Logger, registry),
 		// Write-scoped secret store (nil ⇒ /central/secrets not mounted).
 		secretStore: cfg.SecretStore,
+		reservedLog: secrets.NewReservedKeyLog(cfg.Logger, nil),
 		// Live typed detection config for the dashboard editor + WriteDetection base.
 		detectionConfig: cfg.DetectionConfig,
 		generateLimit:   newSessionLimiter(cfg.Clock, queryGenerateLimit, time.Minute),
 	}
+	s.workerCA.Store(cfg.WorkerCA)
+	s.enroll = newEnrollState(cfg)
 	// One authenticator for the three worker routes; the policy server was built
 	// with a default one, replaced here by the configured one.
+	// Certificate authentication uses the startup verifier, which exists whenever
+	// workerCA is enabled and so keeps working while the CA key is degraded; it
+	// never goes through the late-installed issuing CA.
+	if cfg.WorkerCAVerifier != nil && cfg.WorkerCerts != nil {
+		s.certIdx = newCertIndex(cfg.WorkerCerts, cfg.Clock, cfg.Logger)
+		if err := s.certIdx.Rebuild(context.Background()); err != nil {
+			// Left unloaded: certificates are refused (revocation unknowable)
+			// until the poll loads it.
+			cfg.Logger.Error("worker certs: the revoked index could not be loaded; worker certificates are refused until it is", "error", err.Error())
+		}
+	}
 	s.workerAuth = NewWorkerAuthenticator(WorkerAuthConfig{
 		Legacy: cfg.Token, Tokens: cfg.WorkerTokens, Registry: registry,
 		Logger: cfg.Logger, Clock: cfg.Clock, TLS: cfg.TLS, Strict: cfg.RequireWorkerTokens,
+		StrictCerts: cfg.RequireWorkerCerts, Verifier: cfg.WorkerCAVerifier, Certs: s.certIdx,
 	})
+	s.workerAuth.onSuperseded = func(workerID, serial, remote string) {
+		if s.enroll != nil {
+			s.lineageConflict(context.Background(), WorkerPrincipal{ProxyID: workerID, CertSerial: serial}, remote)
+		}
+	}
 	s.policy.auth = s.workerAuth
+	s.policy.now = cfg.Clock.Now
 	s.workerAuth.LogMode()
 	// Register serve-time wire overlays (s.policy.addOverlay) here, before the
 	// initial load, so they apply to the first served wire. Versioned mode
 	// registers credential; W-P1-BLOCK-03 adds blocked_users.
 	s.initPolicyStore()
+	s.initBundles()
 	s.initBlockStore()
 	s.initAgentStore()
 	s.registerAgentOverlay()
+	s.initApprovals()
 	s.policy.Refresh() // initial load so /policy and the dashboard have policy immediately
 	s.initSessions()
 	s.initAuth()
+	s.initAPIKeys()
 	s.initBreakGlass()
 	s.warnAdminToken()
 	s.failClosedWithoutAdminToken()
@@ -410,6 +521,9 @@ func New(cfg Config) *Server {
 // policy file (editor edits refresh synchronously). It also starts the retention
 // prune loop when the store supports it. It returns when ctx is done.
 func (s *Server) Start(ctx context.Context) {
+	if s.approvals != nil {
+		go s.sweepApprovals(ctx)
+	}
 	if s.sessions != nil {
 		go s.sweepSessions(ctx)
 		if s.breakGlass != nil {
@@ -440,6 +554,12 @@ func (s *Server) Start(ctx context.Context) {
 				s.cfg.Logger.Warn("control plane: integrations store close error", "error", err)
 			}
 		}()
+	}
+
+	// Token table retention (tokenService.enabled), on the control plane's clock.
+	s.runTokenRetention(ctx)
+	if s.policy.bundlesOn() {
+		go s.policy.resignLoop(ctx, s.cfg.Clock)
 	}
 
 	go func() {
@@ -505,21 +625,57 @@ func (s *Server) writeSettings(in config.SettingsWire) error {
 //	GET  /healthz         — liveness
 //	GET  /readyz          — readiness (503 when keys are enabled and one has no active key)
 //	GET  /.well-known/jwks.json — public token JWKS, when keys are enabled (no credential)
+//	POST /oauth2/token    — RFC 8693 token exchange, when tokenService.enabled (client assertion only)
+//	GET  /.well-known/oauth-authorization-server — RFC 8414 metadata, when tokenService.enabled
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
+		// Degraded states are still 200, so a liveness probe does not kill a
+		// control plane a restart would not fix; the body names each one.
+		degraded := false
+		if s.policy.bundleDegraded() {
+			// Serving the last signed bundle; the newest content could not be signed.
+			_, _ = w.Write([]byte("degraded: bundle signing failed\n"))
+			degraded = true
+		}
+		if s.WorkerCADegraded() {
+			// /policy and the rest serve; the worker CA is not issuing.
+			_, _ = w.Write([]byte("degraded: worker_ca key unavailable\n"))
+			degraded = true
+		}
+		if degraded {
+			return
+		}
 		_, _ = w.Write([]byte("ok\n"))
 	})
 	// Readiness always; the public token JWKS only with keys.enabled (else 404).
 	mux.HandleFunc(readyzPath, s.readyz)
 	if s.cfg.Keys != nil {
-		mux.Handle(jwksPath, newJWKSServer(s.cfg.Keys.KeySet(), s.cfg.Clock.Now))
+		j := newJWKSServer(s.cfg.Keys.KeySet(), s.cfg.Clock.Now)
+		s.jwks.Store(j)
+		mux.Handle(jwksPath, j)
+	}
+	// The RFC 8693 token endpoint and its RFC 8414 metadata, only when the
+	// token service was built (tokenService.enabled); otherwise 404.
+	if s.cfg.Tokens != nil {
+		s.tokenEdge = s.newTokenEdgeState()
+		mux.HandleFunc(tokenPath, s.handleToken)
+		mux.HandleFunc(asMetadataPath, s.handleASMetadata)
 	}
 	// /policy is served by the composed PolicyServer seam (serve + ETag long-poll).
 	var policyServe PolicyServer = s.policy
 	mux.HandleFunc("/policy", policyServe.ServePolicy)
 	mux.HandleFunc("/control/heartbeat", s.handleHeartbeat)
+	if s.enroll != nil {
+		// Outside the session, CSRF and admin-audit middleware: the token is the
+		// credential and the handler records its own audit row.
+		mux.HandleFunc(enrollPath, s.handleEnroll)
+		// Authenticated by the worker certificate itself (per request, in the
+		// authenticator), so also outside the session, CSRF and audit middleware;
+		// the handler records its own audit rows.
+		mux.HandleFunc(renewPath, s.handleRenew)
+	}
 	ingest := analytics.NewIngestHandler(s.central, s.workerAuth.IngestAuthorizer())
 	// Central ingest lands in the IngestSink seam: tag worker activity in the
 	// registry and store each worker's MCP snapshot. Wiring the seam's methods (vs
@@ -550,8 +706,8 @@ func (s *Server) Handler() http.Handler {
 	// With admin audit on, POST and DELETE are recorded (sessionAuditWrap).
 	if s.secretStore != nil {
 		cpRoutes := cpRouteTable()
-		mux.Handle("/central/secrets", s.sessionAuditWrap(patternRoute(cpRoutes, "/central/secrets"), http.HandlerFunc(s.handleSecrets)))
-		mux.Handle("/central/secrets/", s.sessionAuditWrap(patternRoute(cpRoutes, "/central/secrets/"), http.HandlerFunc(s.handleSecretByKey)))
+		mux.Handle("/central/secrets", s.apiKeyWrap(s.sessionAuditWrap(patternRoute(cpRoutes, "/central/secrets"), http.HandlerFunc(s.handleSecrets))))
+		mux.Handle("/central/secrets/", s.apiKeyWrap(s.sessionAuditWrap(patternRoute(cpRoutes, "/central/secrets/"), http.HandlerFunc(s.handleSecretByKey))))
 	}
 
 	// The fleet dashboard reads the aggregated central store. The control plane
@@ -632,6 +788,12 @@ func (s *Server) Handler() http.Handler {
 		// answer 404.
 		dash.SetPolicyHistory(s.policyHistoryAPI())
 	}
+	// Change drafts and the two-person rule (W-P2-APPR-04): 404 unless
+	// console.approvals is enabled; the hasher is a no-op without admin audit.
+	if s.approvals != nil {
+		dash.SetChangeDrafts(s.changeDraftsAPI())
+		s.RegisterStateHasher(auditTargetChangeDraft, s.changeDraftHash)
+	}
 	// Per-worker MCP view (inventory + observed schema), selected by ?proxy=.
 	dash.SetMCPFleet(s.mcp.For)
 	// Connected-workers list for the fleet view, with a "behind" flag for any
@@ -652,6 +814,8 @@ func (s *Server) Handler() http.Handler {
 	})
 	// Worker token admin routes and their audit hasher (W-P1-WTOK-03).
 	s.wireWorkerTokens(dash)
+	// Worker certificate revoke route and its audit hasher (W-P2-WCA-05).
+	s.wireWorkerCerts(dash)
 	// Signing key admin routes and their audit hasher (W-P2-KEYS-04).
 	s.wireKeys(dash)
 	// Agent registry admin routes and their audit hasher (W-P2-AREG-02).

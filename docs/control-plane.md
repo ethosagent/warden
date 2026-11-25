@@ -77,6 +77,30 @@ the control plane and enforce the worker's **local** policy standalone — the
 escape hatch for offline/debug. A managed worker needs no local `allowlist`; a
 local-only/standalone worker still requires one.
 
+## Pinning bundle keys (worker config)
+
+A worker pins the public keys that may sign the policy bundles it accepts. The
+keys are read at startup and have no runtime effect until signed-bundle
+verification lands (W-P2-SBND-04); with none pinned a managed worker behaves as
+before and logs one WARN, `bundle verification disabled (no controlPlane.bundleKeys)`.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `controlPlane.bundleKeys` | none | List of public JWKs (OKP/Ed25519 or EC/P-256). |
+| `controlPlane.bundleKeysFile` | none | JWKS JSON file `{"keys":[...]}`, merged with `bundleKeys`. |
+| `controlPlane.requireSignedBundles` | `false` | `true` makes config load fail when no keys are pinned (checked whenever the endpoint is set and `controlPlane.localOnly` is not true, so a worker started with `--local-only` is checked too, deliberately fail-closed). |
+| `controlPlane.bundleIssuer` | none | When set, a bundle's `cpId` must equal it. |
+| `controlPlane.bundleClockSkew` | `5m` | Tolerance on `issuedAt` and `expiresAt`, at most `1h`. |
+| `controlPlane.bundleExpiry` | `keep` | `keep` enforces the last-known-good past expiry, `deny` blocks. |
+
+Inline and file keys together are at most 16. Every pin must have no private
+members and a `kid` equal to its RFC 7638 thumbprint (a kid mismatch error shows
+the expected thumbprint), and a repeated kid is an error. List both the old and
+the new key while the control plane rotates its bundle key. Errors name
+`controlPlane.bundleKeys[i]` or `controlPlane.bundleKeysFile[i]` and never
+include key material. `controlPlane.localOnly: true` ignores all of these keys
+and logs one INFO line.
+
 ## Run it
 
 ```sh
@@ -294,6 +318,16 @@ needs a restart. It holds the *name* of the client-secret env var, never the sec
 | `session.idle`, `session.absolute` | `1h`, `12h` | `0 < idle <= absolute <= 168h`. |
 | `adminAudit.enabled` | `false` | Turns on the signed admin audit log; needs `--state-dir`. See [Admin audit log](#admin-audit-log). |
 | `trustedProxies` | none | CIDRs of reverse proxies in front of the control plane. Only a peer inside one may set the client address the admin audit log records, through `X-Forwarded-For`. A bare address or anything that is not a CIDR is a startup error. |
+| `approvals.enabled` | `false` | Change approvals (W-P2-APPR-01). **Not available yet:** this build refuses `true` at startup (`approvals enforcement is not available in this build`) until every versioned write path is gated. Off, no table, migration or goroutine exists and `/policy` is unchanged. When on it will need `console.auth: oidc`, `--policy-store=versioned`, `--state-dir` and `adminAudit.enabled: true`; startup names the first one missing. Read from `--config` only and never sent to workers. |
+| `approvals.minApprovals` | `1` | Distinct approvers a held change needs, `1..3`. |
+| `approvals.allowSelfApproveNarrowing` | `true` | A narrowing change applies at submit with no second person. |
+| `approvals.allowEmergencyApply` | `false` | Allows the audited break-glass apply. |
+| `approvals.replayWindow` | `168h` | How far back a replay reads fleet events, `1h..720h`. |
+| `approvals.replayMaxEvents`, `approvals.replayTimeout`, `approvals.replayMaxAge` | `100000`, `60s`, `24h` | Replay event cap (`1..100000`), run timeout and the age a replay may have and still back an approval. |
+| `approvals.draftTTL`, `approvals.maxOpenDrafts` | `168h`, `200` | An open draft expires after the TTL; creating a draft past the cap is refused. Out-of-range values are startup errors even while disabled. |
+| `apiKeys.enabled` | `false` | Turns on scoped `wak_` API keys on `/dashboard/api/*`; needs `auth: oidc` and `--state-dir`. See [API keys](#api-keys-consoleapikeys). |
+| `apiKeys.defaultTTL`, `apiKeys.maxTTL` | `2160h`, `8760h` | Default and maximum key lifetime; `maxTTL` is also a hard ceiling and `defaultTTL <= maxTTL`. |
+| `apiKeys.maxPerOwner`, `apiKeys.ratePerKey` | `25`, `10` | Active keys one owner may hold; requests per second one key may make (burst 2x). |
 
 Running the identity provider itself (Dex clients, connectors, the split-horizon issuer, failure modes and the production checklist) is covered in [Running Dex as Warden's identity provider](identity-dex.md).
 
@@ -607,6 +641,59 @@ runs in the background with backoff, so an unreachable IdP never blocks startup 
 one `console_login` line (`result`, `reason`, `sub`, `duration_ms`), never a code, state,
 verifier, nonce or token.
 
+## API keys (`console.apiKeys`)
+
+Scripts and CI can call the admin API with a scoped, expiring `wak_` key instead of
+the shared `WARDEN_CP_TOKEN`. Each key acts for a human owner, holds only the scopes it
+was created with, and is limited to the owner's *current* console role: the role is
+recomputed on every request from the groups saved with the key and the live
+`console.roles`, so moving the owner's group to a lower role takes effect at the next
+restart. With `console.apiKeys.enabled: false` (the default) no table, middleware or
+goroutine exists and a `wak_` bearer is just an unrecognised bearer.
+
+Present a key as `Authorization: Bearer wak_...` on `/dashboard/api/*` only:
+
+- Any query parameter whose name or value starts with `wak_` is `400 api_key_in_query`
+  (a URL lands in logs); more than one `Authorization` header is `400
+  multiple_authorization`; a key together with the console
+  session cookie is `400 ambiguous_credentials`. A failed key (malformed, unknown,
+  wrong secret, expired, revoked) is the same `401 {"error":"unauthorized"}` with
+  `WWW-Authenticate: Bearer`, and never falls back to a session.
+- A key request with no cookie skips the CSRF header and Origin checks.
+- Each route's scope is the **API key scope** column of the [role matrix](#console-roles-and-the-role-matrix).
+  A route whose scope the key lacks, whose scope is `none`, or whose minimum role the
+  owner no longer holds answers `403 {"error":"insufficient_scope","need":"<scope>"}`.
+  A route with no table row is never reachable by a key, so a new route stays closed
+  until it is classified.
+- Never keyable: `/central/secrets*` (403), settings, integrations, llmproviders and
+  secretstore writes, sessions, setup, backup, `query/generate`, worker-token create and
+  every route classified `none`. `/policy`, `/control/heartbeat` and `/central/ingest`
+  refuse a `wak_` bearer with 401 whatever the worker auth mode, and `/dashboard/` and
+  `/auth/me` answer a key 401.
+- A key whose owner is on the [block list](#block-list) is refused at once with the same
+  403 (reads and writes), like the owner's sessions; lifting the block restores it.
+- A key may make `ratePerKey` requests per second (burst 2x); over that is `429` with
+  `Retry-After`. A throttled request writes no audit row.
+
+With admin audit on, a key-made change is one row with `auth_method` `apikey`: the
+actor is the key's owner (`actor_id` is the HMAC of the owner's sub, the side row holds
+their sub and email, `actor_role` is the owner's current role) and `details.api_key_id`
+names the key. A valid key that is refused is chained as `denied`. An invalid key writes
+no row: it is counted, and logged as `apikey_auth_rejected` (the parsed key id or
+`malformed`, the reason and `client_ip`, at most once a minute per address). Neither the
+token nor its hash is ever logged or recorded. The in-memory counter
+`warden_cp_apikey_auth_total{outcome}` (`ok`, `malformed`, `unknown`, `bad_secret`,
+`expired`, `revoked`, `insufficient_scope`, `rate_limited`, plus `index_stale`) has no
+per-key label.
+
+Keys live in `<state-dir>/warden-cp.db` (table `api_keys`, created only when the feature
+is on). The control plane authenticates from an in-memory index that it reloads within
+2 seconds of a change another process makes, so a key revoked with the offline CLI is
+refused by the running control plane at the next poll. If the index cannot confirm it is
+current for 30 seconds it refuses every key (fail closed) rather than risk accepting one
+revoked elsewhere. Last-use time and address are kept in memory and written every 60
+seconds and at shutdown.
+
 ## Console roles and the role matrix
 
 The console has two modes, chosen by `console.auth`:
@@ -696,64 +783,84 @@ fails when the two differ.
 <!-- Generated from authzTable() and internal/config/settings_roles.go; do not edit by hand.
      Regenerate: go test ./internal/controlplane -run TestAuthzMatrixDoc -update -->
 
-| Route | Method | Minimum role | Action |
-|---|---|---|---|
-| `/dashboard/` | GET | viewer | `ui.read` |
-| `/dashboard/api/admin-audit` | GET | admin | `adminaudit.read` |
-| `/dashboard/api/admin-audit/pubkey` | GET | viewer | `adminaudit.pubkey` |
-| `/dashboard/api/admin-audit/verify` | POST | admin | `adminaudit.verify` |
-| `/dashboard/api/agents` | GET | viewer | `agent.list` |
-| `/dashboard/api/agents` | POST | admin | `agent.create` |
-| `/dashboard/api/agents/{id}` | GET | viewer | `agent.read` |
-| `/dashboard/api/agents/{id}` | PUT | admin | `agent.update` |
-| `/dashboard/api/agents/{id}/disable` | POST | admin | `agent.disable` |
-| `/dashboard/api/agents/{id}/enable` | POST | admin | `agent.enable` |
-| `/dashboard/api/alerts` | GET | viewer | `alerts.read` |
-| `/dashboard/api/analytics` | GET | viewer | `analytics.read` |
-| `/dashboard/api/audit` | GET | viewer | `audit.read` |
-| `/dashboard/api/audit/verify` | POST | viewer | `audit.verify` |
-| `/dashboard/api/backup` | POST | admin | `backup.run` |
-| `/dashboard/api/blocked-users` | GET | admin | `blocked_users.read` |
-| `/dashboard/api/blocked-users` | POST | admin | `blocked_users.add` |
-| `/dashboard/api/blocked-users/{id}` | DELETE | admin | `blocked_users.remove` |
-| `/dashboard/api/detection` | GET | viewer | `detection.read` |
-| `/dashboard/api/detection` | POST | editor | `detection.write` |
-| `/dashboard/api/detection` | PUT | editor | `detection.write` |
-| `/dashboard/api/endpoints` | GET | viewer | `endpoints.read` |
-| `/dashboard/api/integrations` | GET | viewer | `integrations.read` |
-| `/dashboard/api/integrations` | POST | admin | `integrations.write` |
-| `/dashboard/api/integrations` | DELETE | admin | `integrations.delete` |
-| `/dashboard/api/keys` | GET | admin | `keys.read` |
-| `/dashboard/api/keys/rotate` | POST | admin | `keys.rotate_requested` |
-| `/dashboard/api/llmproviders` | GET | viewer | `llmproviders.read` |
-| `/dashboard/api/llmproviders` | POST | admin | `llmproviders.write` |
-| `/dashboard/api/llmproviders` | PUT | admin | `llmproviders.write` |
-| `/dashboard/api/mcp` | GET | viewer | `mcp.read` |
-| `/dashboard/api/policy` | GET | viewer | `policy.read` |
-| `/dashboard/api/policy` | POST | editor | `policy.write` |
-| `/dashboard/api/policy` | PUT | editor | `policy.write` |
-| `/dashboard/api/policy/versions` | GET | viewer | `policy.versions.read` |
-| `/dashboard/api/policy/versions/{v}` | GET | viewer | `policy.version.read` |
-| `/dashboard/api/policy/versions/{v}/diff` | GET | viewer | `policy.diff` |
-| `/dashboard/api/policy/versions/{v}/rollback` | POST | editor | `policy.rollback` |
-| `/dashboard/api/query` | POST | viewer | `query.run` |
-| `/dashboard/api/query/generate` | POST | editor | `query.generate` |
-| `/dashboard/api/query/schema` | GET | viewer | `query.schema` |
-| `/dashboard/api/secrets` | GET | viewer | `secrets.read` |
-| `/dashboard/api/secretstore` | GET | viewer | `secretstore.read` |
-| `/dashboard/api/secretstore` | POST | admin | `secretstore.write` |
-| `/dashboard/api/secretstore` | DELETE | admin | `secretstore.delete` |
-| `/dashboard/api/sessions` | GET | admin | `sessions.read` |
-| `/dashboard/api/sessions` | DELETE | admin | `sessions.revoke` |
-| `/dashboard/api/settings` | GET | viewer | `settings.read` |
-| `/dashboard/api/settings` | POST | editor | `settings.write` |
-| `/dashboard/api/settings` | PUT | editor | `settings.write` |
-| `/dashboard/api/setup` | GET | viewer | `setup.read` |
-| `/dashboard/api/traffic` | GET | viewer | `traffic.read` |
-| `/dashboard/api/worker-tokens` | GET | viewer | `worker_token.read` |
-| `/dashboard/api/worker-tokens` | POST | admin | `worker_token.create` |
-| `/dashboard/api/worker-tokens/{id}` | DELETE | admin | `worker_token.revoke` |
-| `/dashboard/api/workers` | GET | viewer | `workers.read` |
+| Route | Method | Minimum role | Action | API key scope |
+|---|---|---|---|---|
+| `/dashboard/` | GET | viewer | `ui.read` | `none` |
+| `/dashboard/api/admin-audit` | GET | admin | `adminaudit.read` | `adminaudit:read` |
+| `/dashboard/api/admin-audit/pubkey` | GET | viewer | `adminaudit.pubkey` | `adminaudit:read` |
+| `/dashboard/api/admin-audit/verify` | POST | admin | `adminaudit.verify` | `adminaudit:read` |
+| `/dashboard/api/agents` | GET | viewer | `agent.list` | `agents:read` |
+| `/dashboard/api/agents` | POST | admin | `agent.create` | `agents:write` |
+| `/dashboard/api/agents/{id}` | GET | viewer | `agent.read` | `agents:read` |
+| `/dashboard/api/agents/{id}` | PUT | admin | `agent.update` | `agents:write` |
+| `/dashboard/api/agents/{id}/disable` | POST | admin | `agent.disable` | `agents:write` |
+| `/dashboard/api/agents/{id}/enable` | POST | admin | `agent.enable` | `agents:write` |
+| `/dashboard/api/alerts` | GET | viewer | `alerts.read` | `traffic:read` |
+| `/dashboard/api/analytics` | GET | viewer | `analytics.read` | `traffic:read` |
+| `/dashboard/api/api-keys` | GET | viewer | `api_key.list` | `none` |
+| `/dashboard/api/api-keys` | POST | viewer | `api_key.create` | `none` |
+| `/dashboard/api/api-keys` | DELETE | admin | `api_key.revoke_owner` | `none` |
+| `/dashboard/api/api-keys/self` | GET | viewer | `api_key.self` | `self` |
+| `/dashboard/api/api-keys/{id}` | DELETE | viewer | `api_key.revoke` | `none` |
+| `/dashboard/api/audit` | GET | viewer | `audit.read` | `audit:read` |
+| `/dashboard/api/audit/verify` | POST | viewer | `audit.verify` | `audit:read` |
+| `/dashboard/api/backup` | POST | admin | `backup.run` | `none` |
+| `/dashboard/api/blocked-users` | GET | admin | `blocked_users.read` | `policy:read` |
+| `/dashboard/api/blocked-users` | POST | admin | `blocked_users.add` | `policy:write` |
+| `/dashboard/api/blocked-users/{id}` | DELETE | admin | `blocked_users.remove` | `policy:write` |
+| `/dashboard/api/changes` | GET | viewer | `change.draft.list` | `policy:read` |
+| `/dashboard/api/changes` | POST | editor | `change.draft.create` | `policy:draft` |
+| `/dashboard/api/changes/{id}` | GET | viewer | `change.draft.read` | `policy:read` |
+| `/dashboard/api/changes/{id}` | PUT | editor | `change.draft.update` | `policy:write` |
+| `/dashboard/api/changes/{id}/approve` | POST | editor | `change.draft.approve` | `none` |
+| `/dashboard/api/changes/{id}/diff` | GET | viewer | `change.draft.diff` | `policy:read` |
+| `/dashboard/api/changes/{id}/rebase` | POST | editor | `change.draft.rebase` | `policy:write` |
+| `/dashboard/api/changes/{id}/reject` | POST | editor | `change.draft.reject` | `none` |
+| `/dashboard/api/changes/{id}/replay` | POST | editor | `change.draft.replay` | `policy:write` |
+| `/dashboard/api/changes/{id}/submit` | POST | editor | `change.draft.submit` | `policy:write` |
+| `/dashboard/api/changes/{id}/withdraw` | POST | editor | `change.draft.withdraw` | `policy:write` |
+| `/dashboard/api/detection` | GET | viewer | `detection.read` | `policy:read` |
+| `/dashboard/api/detection` | POST | editor | `detection.write` | `policy:write` |
+| `/dashboard/api/detection` | PUT | editor | `detection.write` | `none` |
+| `/dashboard/api/endpoints` | GET | viewer | `endpoints.read` | `traffic:read` |
+| `/dashboard/api/integrations` | GET | viewer | `integrations.read` | `none` |
+| `/dashboard/api/integrations` | POST | admin | `integrations.write` | `none` |
+| `/dashboard/api/integrations` | DELETE | admin | `integrations.delete` | `none` |
+| `/dashboard/api/keys` | GET | admin | `keys.read` | `none` |
+| `/dashboard/api/keys/rotate` | POST | admin | `keys.rotate_requested` | `none` |
+| `/dashboard/api/llmproviders` | GET | viewer | `llmproviders.read` | `none` |
+| `/dashboard/api/llmproviders` | POST | admin | `llmproviders.write` | `none` |
+| `/dashboard/api/llmproviders` | PUT | admin | `llmproviders.write` | `none` |
+| `/dashboard/api/mcp` | GET | viewer | `mcp.read` | `traffic:read` |
+| `/dashboard/api/policy` | GET | viewer | `policy.read` | `policy:read` |
+| `/dashboard/api/policy` | POST | editor | `policy.write` | `policy:write` |
+| `/dashboard/api/policy` | PUT | editor | `policy.write` | `none` |
+| `/dashboard/api/policy/versions` | GET | viewer | `policy.versions.read` | `policy:read` |
+| `/dashboard/api/policy/versions/{v}` | GET | viewer | `policy.version.read` | `policy:read` |
+| `/dashboard/api/policy/versions/{v}/diff` | GET | viewer | `policy.diff` | `policy:read` |
+| `/dashboard/api/policy/versions/{v}/rollback` | POST | editor | `policy.rollback` | `none` |
+| `/dashboard/api/query` | POST | viewer | `query.run` | `traffic:read` |
+| `/dashboard/api/query/generate` | POST | editor | `query.generate` | `none` |
+| `/dashboard/api/query/schema` | GET | viewer | `query.schema` | `traffic:read` |
+| `/dashboard/api/secrets` | GET | viewer | `secrets.read` | `none` |
+| `/dashboard/api/secretstore` | GET | viewer | `secretstore.read` | `none` |
+| `/dashboard/api/secretstore` | POST | admin | `secretstore.write` | `none` |
+| `/dashboard/api/secretstore` | DELETE | admin | `secretstore.delete` | `none` |
+| `/dashboard/api/sessions` | GET | admin | `sessions.read` | `none` |
+| `/dashboard/api/sessions` | DELETE | admin | `sessions.revoke` | `none` |
+| `/dashboard/api/settings` | GET | viewer | `settings.read` | `settings:read` |
+| `/dashboard/api/settings` | POST | editor | `settings.write` | `none` |
+| `/dashboard/api/settings` | PUT | editor | `settings.write` | `none` |
+| `/dashboard/api/setup` | GET | viewer | `setup.read` | `none` |
+| `/dashboard/api/token-sessions` | GET | admin | `token_sessions.read` | `none` |
+| `/dashboard/api/token-sessions/revoke` | POST | admin | `token_sessions.revoke_all` | `none` |
+| `/dashboard/api/token-sessions/{sid}/revoke` | POST | admin | `token_sessions.revoke` | `none` |
+| `/dashboard/api/traffic` | GET | viewer | `traffic.read` | `traffic:read` |
+| `/dashboard/api/worker-tokens` | GET | viewer | `worker_token.read` | `none` |
+| `/dashboard/api/worker-tokens` | POST | admin | `worker_token.create` | `none` |
+| `/dashboard/api/worker-tokens/{id}` | DELETE | admin | `worker_token.revoke` | `none` |
+| `/dashboard/api/workers` | GET | viewer | `workers.read` | `traffic:read` |
+| `/dashboard/api/workers/{id}/revoke` | POST | admin | `worker.revoked` | `workers:admin` |
 
 A method and path with no row is refused (`403`) for every role, `GET` included.
 
@@ -1008,6 +1115,68 @@ YAML if the mirror is lost.
   removed, the served YAML is only the write-through mirror of head, and hand
   edits are never served (they come in through `warden policy import`).
 
+## Change drafts and the two-person rule (`console.approvals`)
+
+With `console.approvals.enabled` (off by default; it needs `console.auth: oidc`, the
+versioned policy store and the admin audit log) the control plane serves the change
+draft API under `/dashboard/api/changes`. A draft is a proposed policy doc based on a
+policy version. A change that widens what agents can reach, or where credentials go, is
+published only after a second person approves it. Workers never serve these routes
+(`404`). The startup refusal of `console.approvals.enabled` stays until
+W-P2-APPR-06 routes every existing write path through the same check.
+
+| Route | Who |
+|---|---|
+| `GET /dashboard/api/changes?target=&state=&cursor=&limit=` | viewer |
+| `GET /dashboard/api/changes/{id}`, `GET .../{id}/diff` | viewer |
+| `POST /dashboard/api/changes` (`If-Match: "v<base>"`) | editor |
+| `PUT .../{id}` (`If-Match: "r<rev>"`), `POST .../{id}/submit`, `withdraw`, `rebase` | the draft's author (editor) |
+| `POST .../{id}/approve`, `POST .../{id}/reject` | editor; approve also needs the draft's required role |
+| `POST .../{id}/replay` | editor |
+
+- **Revisions.** Every edit is a new revision (`ETag: "r<N>"`) and voids the earlier
+  revisions' approvals. A body is capped at 1 MiB and a comment at 1024 characters
+  (control characters are stripped).
+- **Approve** takes `{revision, doc_sha256, replay_id | acknowledgeNoReplay, comment}`.
+  `409 revision_changed` when the revision or digest differ from the draft;
+  `409 replay_required` unless `replay_id` names a done replay of this revision no older
+  than `replayMaxAge`, or `acknowledgeNoReplay` is true and the revision's latest replay
+  failed or was unavailable. A revision whose replay never ran (queueing it failed) gets
+  an `unavailable` replay row; one with no row at all is `replay_required` (re-run it
+  with `POST .../replay`).
+- **Reject.** Rejecting needs editor only, not the draft's required role: rejecting can
+  only stop a change, so editor suffices.
+- **Expiry.** An open draft past its expiry cannot be approved or applied
+  (`409 illegal_transition`, `reason: expired`) even before the sweeper retires it.
+- **Two-person rule.** The approver's subject must differ from the author's
+  (`403 self_approval_forbidden`); a break-glass session never approves
+  (`403 breakglass_cannot_approve`); the approver must hold the draft's required role now
+  (`403 role_required`, naming the settings fields that need admin). With
+  `minApprovals > 1` the approvers must be distinct.
+- **API keys.** A key reaches the draft routes with the scopes in the
+  [role matrix](#console-roles-and-the-role-matrix): `policy:read` to read,
+  `policy:draft` to create, `policy:write` to edit, submit, withdraw, rebase and
+  replay. No key can approve or reject (`403 insufficient_scope`): the second person is
+  always a signed-in human. A key acts as its owner, so a draft made with u1's key is
+  u1's draft (recorded with author kind `apikey`) and u1's own session cannot approve
+  it (`403 self_approval_forbidden`).
+- **Apply.** The approval that completes the set publishes the draft in the same
+  request: `200 {state: applied, version}`. A moved head is `409 rebase_required {head}`
+  (the draft becomes `needs_rebase`); a doc the loader refuses is `422` and the draft
+  stays pending. A narrowing draft with `allowSelfApproveNarrowing` applies at submit
+  with decision `self` (no replay is queued for it).
+- **Rebase** replays the draft's change (base version to doc) onto the live head as
+  revision n+1, or answers `409 rebase_conflict` naming the keys changed on both sides.
+- **Audit.** Every mutation is an admin audit row (`change.draft.<verb>`, target
+  `change_draft`, target_ref `draft:<id>@r<rev>`, details: base and applied version,
+  widening, reason codes, replay status), never doc content. Submitting a widening draft
+  publishes an info Finding `policy_approval_requested`. When an approval (or a
+  self-applied submit) publishes, a second row follows: `policy.write` on target `policy`
+  with `applied_version`, `source: approval` and the policy hashes before and after, the
+  actor being the approver.
+- **Validation.** A draft doc is dry-run through the config loader at create and edit
+  (`422 invalid_policy`), and again at apply.
+
 ## Scheduled backups (`--backup-dir`)
 
 Off by default. With `--backup-dir` (which needs `--state-dir` and must not be
@@ -1238,6 +1407,7 @@ startup and logged as `auth_mode=...`:
 | `open` | no shared token, not strict | any caller without a `wwt_` token (development; a warning is logged). A `wwt_` bearer is always validated |
 | `mixed` | `--legacy-token-env` set (or its deprecated alias `--token-env`) | a worker token or the shared token |
 | `strict` | `--require-worker-tokens` | a worker token only: the shared token and anonymous callers get `401` |
+| `strict-certs` | `--require-worker-certs` | a worker certificate only (workerCA): tokens, the shared token and anonymous callers get `401` |
 
 The startup line `control plane worker auth` also carries `legacy_token` (whether a shared token is
 configured, never its value), `tls` and `active_worker_tokens`. Worker tokens over plain HTTP log a
@@ -1252,6 +1422,7 @@ disables them. The shared token reaches the write guard only as the fallback whi
 |---|---|
 | `--legacy-token-env <ENV>` | env var holding the shared worker token. Unset (the default) means there is none. `--token-env` is a deprecated alias: it still works and logs a deprecation notice; naming two different variables with the two flags is a startup error. |
 | `--require-worker-tokens` | strict mode (default off). Needs `--state-dir` (tokens live in its database), TLS (`--ca-cert` and `--ca-key`) unless `--allow-insecure-worker-auth` is set, and no legacy token. |
+| `--require-worker-certs` | strict-certs mode (default off). Needs `workerCA.enabled`, `--state-dir` and TLS, and neither `--require-worker-tokens` nor a legacy token. See "Worker certificate authentication". |
 | `--allow-insecure-worker-auth` | lets `--require-worker-tokens` run without TLS (development only). |
 
 A violation exits non-zero before the control plane listens, with an error that names the flag
@@ -1608,6 +1779,337 @@ secrets with no row; deleting a key deletes its secret at once.
   }
   ```
 
+### Reserved `cp/` secret namespace
+
+The logical key `cp` and every key under `cp/` are reserved for control-plane
+material (the worker CA keeps its material there). The signing keys and the
+worker CA key live in the separate key store above, which no placeholder can
+reach; reserving `cp/` in the shared secret store is defense in depth, so
+nothing control-plane only can ever sit where a worker or a human route could
+reach it. The rule is unconditional and applies to every backend:
+
+- A worker refuses a `cp/` placeholder with `ErrReservedKey` before it calls the
+  backend, and the request is denied like any placeholder that cannot be
+  resolved.
+- Config validation rejects a `secrets[]` placeholder, or an `auth[]` credential
+  field, that names `cp/`. The error names the entry and the field, never the
+  value.
+- `GET /central/secrets` and `GET /dashboard/api/secretstore` leave `cp/` keys
+  out. `POST` and `DELETE` on a `cp/` key (on `/central/secrets` and on
+  `/dashboard/api/secretstore`) return `403` with `{"error":"reserved_key"}`
+  and never reach the store. The attempt is recorded as a denied admin-audit
+  row that does not name the key.
+- A refused attempt logs `reserved secret key refused` with the route (or
+  `worker-cache`) and the key prefix `cp/` only, at most once a minute per
+  source.
+
+The reserved names are `<secretStore.aws.namePrefix>cp/*` plus the bare key
+`<secretStore.aws.namePrefix>cp`; with the default prefix `warden/` that is
+`warden/cp/*` and `warden/cp-??????` (Secrets Manager appends a six-character
+suffix to a secret ARN). Add an explicit deny to every worker role, using your
+own prefix if you changed it, so it holds even if a later `warden/*` grant is
+widened:
+
+```json
+{
+  "Sid": "NeverTheReservedCpNamespace",
+  "Effect": "Deny",
+  "Action": [
+    "secretsmanager:GetSecretValue",
+    "secretsmanager:PutSecretValue",
+    "secretsmanager:CreateSecret",
+    "secretsmanager:DeleteSecret",
+    "secretsmanager:UpdateSecret"
+  ],
+  "Resource": [
+    "arn:aws:secretsmanager:*:ACCOUNT_ID:secret:warden/cp/*",
+    "arn:aws:secretsmanager:*:ACCOUNT_ID:secret:warden/cp-??????"
+  ]
+}
+```
+
+Upgrade note: rename any existing `cp` or `cp/...` placeholder, `auth[]`
+credential value or stored secret before upgrading. The control plane and the
+workers refuse to load a config that names the reserved namespace.
+
+## Worker CA (`workerCA:`)
+
+The worker CA is a CP-held intermediate that issues short-lived worker client
+certificates (W-P2-WCA-01; enrollment and renewal arrive in the follow-up
+tickets). It is a separate trust root from the proxy MITM CA: compose workers
+hold `proxy-ca.key`, so an intermediate under it would let any worker mint
+certificates for any other. The block is CP-local like `keys:` (read from
+`--config` only, never served to workers) and off by default; without it
+nothing is loaded. See `configs/config.example.yaml` for every key.
+
+Create the CA once:
+
+```sh
+warden control-plane ca init --out-dir ./worker-ca --trust-domain warden.local \
+  --state-dir /var/lib/warden-cp [--config F] [--key-source keys|file] [--force]
+warden control-plane ca csr --state-dir /var/lib/warden-cp   # intermediate key + CSR for an offline root
+```
+
+`ca init` writes a P-256 root (10 years) and an intermediate (1 year, path
+length 0, restricted to URI names in the trust domain) to `--out-dir`:
+`root.key` (0600, **move it offline and delete it from this host**),
+`root.crt` and `intermediate-chain.pem` (what `workerCA.certFile` points at).
+The intermediate key goes to the key manager (`--key-source keys`, purpose
+`ca`; needs the state dir to have run once with `keys.enabled`) or, for
+development, to `intermediate.key` in `--out-dir` (`--key-source file`, mode
+0600, point `workerCA.keyFile` at it from outside `--state-dir`). It never reads
+the proxy CA, and refuses to overwrite files or an existing `ca` key without
+`--force` (which needs the control plane stopped when it replaces a key, and
+checks that before it writes any file; files are staged and renamed into place
+only after the key is stored, the chain file last; leftover `.ca-*.tmp` files of an interrupted run are removed at the next start).
+
+For an offline root: stop the control plane, run `ca csr` (the key goes to the
+key source, the CSR to stdout), have the root sign it, install the chain at
+`workerCA.certFile`, start the control plane. Until then it runs degraded. An
+expired `workerCA.previousCertFile` is ignored with a WARN. The pinned
+intermediates are verified from startup, even while the key backend is down;
+only issuing waits for the key.
+
+At startup the control plane checks the intermediate (CA, path length 0,
+certSign, not expired, key matches) and that it neither equals nor chains to
+`--ca-cert`, and exits before listening otherwise. An intermediate under 30 days
+from expiry logs a WARN with `not_after`. If the key backend is unreachable the
+control plane starts degraded: `/healthz` reports `degraded: worker_ca key
+unavailable` (still 200), enrollment and renewal answer 503, and the load is
+retried every 30 seconds. One startup line carries `worker_ca=enabled`,
+`trust_domain`, `intermediate_subject`, `not_after` and `key_source`; keys, PEM
+blocks and CSRs never appear in logs.
+
+### Worker enrollment (`enroll-token`, `POST /control/enroll`)
+
+With `workerCA.enabled` and `--state-dir`, a worker trades a one-time `wet_`
+enrollment token and a CSR for a worker certificate at `POST /control/enroll`.
+The route needs no session or client certificate (the token is the credential)
+and does not exist (404) otherwise. Mint tokens offline, with the control plane
+running or stopped (a running one sees them within about 2 seconds):
+
+```sh
+warden control-plane enroll-token create --worker-id worker-1 --state-dir D          # printed once
+warden control-plane enroll-token create --worker-id-prefix pool-a- --max-uses 3 --out tok --state-dir D
+warden control-plane enroll-token create --worker-id worker-2 --from-env WARDEN_WORKER_2_ENROLL --state-dir D
+warden control-plane enroll-token list [--json] --state-dir D
+warden control-plane enroll-token revoke --id et_... --state-dir D
+```
+
+A token is bound to one worker id (single use) or to an id prefix (up to 100
+uses, for replica pools): the worker sends `workerIdSuffix` and its id is
+prefix+suffix, which must match `^[A-Za-z0-9._-]{1,128}$`. The lifetime defaults
+to `workerCA.enrollTokenTTL` and is capped by `enrollTokenMaxTTL` (pass
+`--config` so the CLI reads them). Only the sha256 of a token is stored. Create
+and revoke are admin-audited as `cli`; each enrollment appends a
+`worker.enrolled` row (actor `enroll:<token id>`). An unknown, used-up, expired
+or revoked token is the same `401 unauthorized`; a bad CSR or suffix is a 400
+that leaves the token unused; more than 10 requests a minute per address or per
+token is a 429; a degraded CA is a 503 before the token is touched.
+
+The per-address limit keys on the TCP peer address and never trusts
+`X-Forwarded-For`, so behind a load balancer or ingress the whole fleet shares
+one 10 per minute budget per address. TODO: key it on the client IP resolved
+through `console.trustedProxies` (the resolver in `adminaudit_mw.go`).
+Re-running `create` with the same name, value and binding is always a no-op,
+even after the token was used up, expired or revoked: it is never revived or
+extended, and the command prints its state.
+
+### Worker certificate authentication and `POST /control/renew`
+
+With `workerCA.enabled` and TLS (`--ca-cert`/`--ca-key`), the listener asks every
+client for a certificate but verifies nothing in the handshake. The worker
+authenticator judges a presented certificate on each request to `/policy`,
+`/control/heartbeat` and `/central/ingest`: it must chain to a pinned worker
+intermediate, carry clientAuth, have exactly one `spiffe://<trust domain>/warden/worker/<id>`
+URI SAN, be inside its validity window by the control plane clock and not be
+revoked. Anything else is a uniform `401 unauthorized` (never a handshake error),
+the request is **not** retried against a bearer in the same request, and the
+reason (`bad_chain`, `bad_eku`, `bad_san`, `expired`, `revoked`) goes only to the
+rate-limited `worker auth rejected` log line with the serial. The worker id is the
+SAN's: a missing `X-Warden-Proxy-ID` header resolves to it and a different one is
+a `403 proxy id mismatch`. The fleet view shows `authKind=cert`, `certSerial` and
+`certNotAfter`; `warden_cp_worker_auth_total{kind=cert,outcome}` counts the results.
+
+Verification uses the intermediates pinned at startup, so it keeps working while
+the CA key is degraded (only enrollment and renewal answer 503). The revoked-serial
+index is in memory (no database access per request), is reloaded on the 2 s
+`PRAGMA data_version` poll and keeps the last good set when a reload fails. Until
+the first load succeeds, and when there is no `--state-dir`, certificates are
+refused. `/central/secrets` and `/dashboard/*` never accept a worker certificate:
+a request that presents one and no bearer of its own gets 401 on `/central/secrets`
+in every method.
+
+Modes: with workerCA enabled, the open, mixed and `--require-worker-tokens` modes
+accept a certificate next to their tokens. `--require-worker-certs` (default off)
+accepts certificates only, logs `auth_mode=strict-certs`, and refuses to start
+without workerCA, `--state-dir` and TLS, or together with `--require-worker-tokens`
+or `--legacy-token-env`.
+
+`POST /control/renew {"csr": "<PEM>"}` is authenticated by the certificate alone (a
+bearer is a 401). It needs a P-256 or Ed25519 CSR for a new public key (400
+`same_key` otherwise) and a lineage head: the worker's latest certificate (rows
+revoked as `enroll_failed` or `renew_failed` do not count), or its predecessor
+within 10 minutes when this control plane has not seen the successor used (a lost
+response; up to 3 retries). A grace renewal revokes that unused successor
+(`revoke_reason=superseded`), so only one descendant of the predecessor stays valid;
+presenting a superseded serial later, or a renewal from any other serial, revokes the
+worker (all its certificates and its unused id-bound enrollment tokens), cuts off its
+held long-polls and appends `worker.cert_lineage_conflict`; the worker must re-enroll
+with a new token. "Seen" is kept in memory: a control plane restart clears it, which
+widens the grace (a successor that was in use looks unseen for the first 10 minutes).
+The new key must differ from the presented certificate's and the three before it.
+A successful renewal inserts `worker_certs` with `issued_via=renew` and `prev_serial`
+and returns 201 with the enrollment response shape plus `prevSerial`; it is logged
+and counted (`warden_cp_worker_renew_total{outcome}`), not admin-audited. At most
+one renewal per worker per 10 minutes (429 with `Retry-After`; only a committed
+renewal spends it), 30 requests a minute per remote address, 503 `ca_unavailable`
+while the CA is degraded.
+
+#### Revoking a worker
+
+An admin revokes a worker's certificates from the fleet view (Revoke button, with
+`console.auth: oidc`), by `POST /dashboard/api/workers/{id}/revoke` (optional body
+`{"serial": "<hex>"}` to revoke one certificate; 200 `{"revoked": n, "enrollTokensRevoked": m}`, 404 for an unknown
+worker or a serial that is not its own, 403 for a viewer), or offline:
+
+```sh
+warden control-plane worker revoke --id worker-1 [--serial S] --state-dir D
+```
+
+It sets `revoked_at`, `revoked_by` and `revoke_reason=admin_revoked` on every unexpired
+certificate of the worker and revokes its unused id-bound enrollment tokens, so a later
+renewal is refused and the worker must re-enroll with a new token. It is idempotent
+(`revoked: 0` the second time; `enrollTokensRevoked` counts the unused id-bound tokens it revoked, and the audit row records `enroll_tokens_revoked`). Revocation is enforced on the control plane only, through
+the in-memory index: the worker's next `/policy`, `/control/heartbeat`, `/central/ingest`
+or `/control/renew` is a 401 and its held `/policy` long-poll ends at once; it keeps its
+last-known-good policy. The console route refreshes the index synchronously; the CLI is
+picked up by a running control plane within its 2 s `data_version` poll. Each revoke writes
+one admin audit row (`worker.revoked`, target `worker_certs`, target_ref `worker:<id>`,
+details `worker_id` and `count`; auth_method `cli` for the CLI) and logs `worker certs
+revoked`. `warden_cp_worker_cert_revoked_total` counts certificates revoked by this process.
+
+Rows are pruned by the control plane: a revoked certificate stays in the index until its
+`not_after`, and its `worker_certs` row is deleted 30 days after `not_after` (a row that a
+surviving certificate names as `prev_serial` stays with it).
+
+`workerCA.enabled` requires `--ca-cert` and `--ca-key`: enrollment tokens and
+certificates never travel over plain HTTP, and the control plane exits before
+listening otherwise.
+
+## Signed bundles (`--bundles`)
+
+`warden control-plane --bundles=off|offer|require` (default `off`) lets the
+control plane sign what it serves on `GET /policy` with its `purpose=bundle`
+signing key (see Signing keys above). `off` keeps `/policy` byte-identical: same
+body, same ETag, no signing, no extra work. This section is the serving side;
+a worker that pins the key and verifies the envelope is a later ticket, so
+today the workers keep pulling the unsigned policy.
+
+- **Prerequisites.** `offer` and `require` need `--state-dir`,
+  `--policy-store=versioned` and `keys.enabled: true`; startup fails with an
+  error naming each missing piece, and also when no bundle key can be loaded.
+- **Negotiation.** A request with `Accept: application/vnd.warden.bundle.v1+json`
+  gets the envelope with that `Content-Type`. Other requests get the legacy
+  policy in `offer` and `406 {"error":"signed_bundle_required"}` in `require`.
+  Each format answers `If-None-Match` and the `?wait=` long poll against its own
+  ETag. The legacy ETag is unchanged; the envelope ETag is a 16-hex hash of the
+  envelope bytes, so a re-sign changes it.
+- **Sequence number.** `seq` is the newest `policy_publish_log` row, so a policy
+  save, a rollback, a block-list change and a credential change each move it
+  forward. A change to the token JWKS (a rotation or an emergency revocation)
+  appends a row with reason `token_jwks` first, then signs. A bundle key change
+  appends nothing: the same content is re-signed under the same seq, which a
+  verifier treats as a refresh. The signed content for a seq never changes.
+- **Credential.** `settings.secrets.accessKeyId` and `secretAccessKey` are not in
+  the signed payload. They travel in the envelope's unsigned `credentials`
+  sidecar and the payload carries their SHA-256. Nothing logs either.
+- **Freshness.** `--bundle-max-age` (default 24h, minimum 1h) sets `expiresAt`;
+  the control plane re-signs the current content every max-age/4 with the same
+  seq. `--bundle-seq-floor N` appends one `restore` row at seq N at startup when
+  the publish log is below it: set it above the highest seq any worker reports
+  after restoring a backup, or pinned workers reject new bundles as rollbacks.
+- **Failure.** If signing fails, the control plane keeps serving the last
+  envelope until it expires, logs `bundle sign failed` with the seq and kid, and
+  `/healthz` answers `200 degraded: bundle signing failed`. With no envelope,
+  a request for one gets `503 {"error":"signed_bundle_unavailable"}`. An
+  envelope over 4 MiB is not published and is logged at error. It never serves
+  unsigned data to a request that asked for the envelope.
+
+## Token endpoint (RFC 8693)
+
+`tokenService.enabled: true` mounts `POST /oauth2/token` and
+`GET /.well-known/oauth-authorization-server` (RFC 8414) on the control plane. With the block
+absent or disabled both answer 404, no `tokensvc` table is created and `/policy` is
+byte-identical; the block is the only switch (no flag) and never reaches a worker. See the
+commented block in `configs/config.example.yaml` for every key and default.
+
+- **Startup checks.** Enabling needs `--state-dir`, a served `identity:` block with an issuer
+  and audience (subject tokens are verified against the same IdP as workers, narrowed to
+  `tokenService.allowedAZP`), `keys.enabled: true`, and `keys.token.overlap` of at least
+  `ttl + 2m`. The issuer must be an absolute https URL without trailing slash, query or
+  fragment (http only for a loopback host, logged as a warning). One INFO line reports
+  enabled, issuer and ttl. A token key that has not loaded yet does not stop startup: the
+  endpoint answers 503 `signer_unavailable` and `/readyz` reports it.
+- **Request.** `application/x-www-form-urlencoded` only, body at most 32 KiB, no query string,
+  no duplicate parameters, no `Authorization` header of any scheme (a session cookie, a `wwt_`
+  worker token or a `wak_` API key is never client authentication), no `actor_token` or
+  `resource`. `grant_type` must be `urn:ietf:params:oauth:grant-type:token-exchange` and the
+  client authenticates with `client_assertion_type`
+  `urn:ietf:params:oauth:client-assertion-type:jwt-bearer` plus `client_assertion`; an optional
+  form `client_id` must equal the assertion's `iss`.
+- **Response.** 200 `{access_token, issued_token_type, token_type: "Bearer", expires_in,
+  scope?}` with `expires_in` equal to `exp - iat`. Errors are RFC 6749 section 5.2 JSON
+  `{error, error_description}`: 400 for `invalid_request`, `invalid_grant`,
+  `unauthorized_client`, `invalid_scope`, `invalid_target` and `unsupported_grant_type`, 401
+  `invalid_client`, 503 `temporarily_unavailable` with `Retry-After`. `error_description` is a
+  fixed word from a closed set and never echoes a token, assertion or claim; every
+  `invalid_client` answers the same `client_authentication_failed`, so an unknown agent, an
+  unknown key, a bad signature, a replay and a disabled agent cannot be told apart. Every reply
+  carries `Cache-Control: no-store` and `Pragma: no-cache`.
+- **Publish-window guard.** A token is minted only with a key that has been published for at
+  least one policy long-poll wait plus worker skew (2 minutes), judged from the key's persisted
+  `publish_at`, so a restart does not reset it. Normal rotations never wait (the prepublish
+  window covers it); the first key after creation, and an emergency promotion of a barely
+  published key, answer 503 `signer_unavailable` with `Retry-After` for about 2 minutes.
+  Consumers of `/.well-known/jwks.json` must refetch on an unknown kid (rate-limited); Warden
+  workers never use it (they take token keys from signed bundles). The key must also be in the
+  JWKS the control plane serves. Once signed bundles land (#96)
+  the kid must also be in the last-served bundle token JWKS.
+- **Agent registry cache.** The control plane has one registry store; it serves reads from a
+  snapshot that its own writes invalidate at once and that a 2 s watch refreshes for other
+  processes, so an agent disabled with the offline CLI stops authenticating within about 2 s.
+- **Discovery and the issuer path.** The metadata is served at the bare
+  `/.well-known/oauth-authorization-server` path only. RFC 8414 section 3 puts the path of an
+  issuer that has one after that segment, which is not mounted, so use an issuer with no path
+  component if clients rely on discovery (token exchange itself works with any path).
+- **Revoking token sessions (admin).** A token session is one user at one IdP using one agent;
+  its `wts_` sid is carried in every issued token and is an identifier, not a credential.
+  `GET /dashboard/api/token-sessions?agent_id=&sub=&limit=&cursor=` lists sessions (sid,
+  agent_id, idp_iss, sub, created_at, last_used_at, revoked_at; newest first, at most 200 per
+  page, `next` is the cursor of the following page). `POST /dashboard/api/token-sessions/{sid}/revoke`
+  answers 204 (also for a session that was already revoked) or 404 for an unknown sid, and
+  `POST /dashboard/api/token-sessions/revoke` with `{sub?, idp_iss?, agent_id?}` (at least one
+  field) answers `{"revoked": n}`, counting the live sessions it revoked. All three are
+  admin-only, are 404 without `tokenService.enabled`, and in `console.auth none` need the admin
+  bearer. The revokes are audited (`token_sessions.revoke` with target_ref `sid:<sid>`,
+  `token_sessions.revoke_all` with target_ref `filter:agent=<id>` (or `filter` without an agent) and
+  details `has_sub` and `has_iss`; like the block list, a subject or issuer is never recorded,
+  not even hashed).
+  A revoke sets `revoked_at` and keeps the row. The service reads the session table on every
+  exchange, so the **next exchange takes effect at once**: one whose subject token was issued at
+  or before `revoked_at` gets 400 `invalid_grant`/`session_revoked`, and the user must sign in
+  again (a subject token issued after the revoke starts a new session). A revoked row is kept
+  until the identity max token TTL plus clock skew has passed, so it is never pruned while a
+  subject token issued before it could still verify. **A revoke does not recall tokens already
+  minted**, and an exchange whose session check committed just before the revoke can still
+  return its token after the revoke answers; it is the same as any already-minted token. Workers verify a Warden token offline against signed JWKS and have no revocation
+  list, so a token issued before the revoke stays valid until its `exp` (at most
+  `tokenService.ttl`, default 15m, and never past the user's own proof). To stop traffic sooner,
+  also block the user (block list), disable the agent, or rotate the token key. A user-wide
+  revoke only touches sessions that exist: a user with no live session (never exchanged, or idle
+  past `session.idle`) has nothing to revoke, so block the user to also refuse a new one.
+
 ## Block list: offline CLI
 
 The user block list lives in `<state-dir>/warden-cp.db`, outside policy
@@ -1835,6 +2337,45 @@ policy version. Do not rely on challenge mode until no worker carries that mark.
 - A P1 identity is a **bearer assertion** signed by the IdP and **not yet bound to
   the agent**: whoever holds a valid token can present it. P2 adds binding and
   bundle-distributed JWKS.
+
+### Identity metrics
+
+Every identity check increments one counter,
+`warden.identity.verify.total` (Prometheus `warden_identity_verify_total`), with
+three bounded labels. There is no separate failure or success counter.
+
+| Label | Values |
+|---|---|
+| `result` | `off`, `none`, `valid`, `invalid`, `expired`, `unverified`, `conflict` |
+| `reason` | `none` (no reason), `bad_signature`, `wrong_iss`, `wrong_aud`, `wrong_azp`, `unknown_kid`, `alg_not_allowed`, `malformed`, `too_large`, `ttl_too_long`, `jwks_unavailable`, `wrong_nonce`, and the binding reasons `agent_mismatch`, `cnf_mismatch`, `agent_disabled`, `agent_unregistered`, `unbound_token`, `missing_claim` |
+| `token_type` | `idp`, `warden`, `none` (no token, or one that never reached a verifier) |
+
+A value outside these sets is recorded as `other`, so a bug or hostile input can
+never create a new series. Labels never carry `sub`, email, `sid`, `jti`, `kid`,
+an agent id or token material.
+
+`warden.blocked.total{reason}` also takes `identity_required`, `identity_expired`
+and `identity_conflict` (declared in `internal/denyreason`).
+
+`warden.controlplane.clock_skew_seconds` (no labels) is the control plane's `Date`
+header minus the worker's clock, set on every long-poll response; positive means
+the control plane is ahead. The header has one-second resolution. Use it to
+diagnose mass `expired` or not-yet-valid failures.
+
+`GET /dashboard/api/analytics` gains an `identity` block built from stored events:
+`byStatus` (counts by `identity_status`) and `topReasons` (the five most frequent
+`identity_reason` values in the range). It is omitted when no event in the range
+carries identity fields.
+
+Recommended alerts:
+
+- The non-valid share per worker, for example
+  `sum by (instance) (rate(warden_identity_verify_total{result!="valid"}[15m])) / sum by (instance) (rate(warden_identity_verify_total[15m])) > 0.2`.
+- `warden_identity_verify_total{token_type="idp"}` for deprecation tracking: it
+  should fall to zero once every harness uses Warden tokens.
+- `warden_identity_verify_total{result="expired"}` rising during a control plane
+  outage (tokens cannot be renewed); check `warden_controlplane_clock_skew_seconds`
+  before blaming the outage.
 
 ### Block list enforcement
 
