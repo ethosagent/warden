@@ -1619,7 +1619,17 @@ agent's whole key set with the `--jwk-file` values it is given:
 
 1. Update to both keys (old and new) and restart the agent with the new private key. Both
    thumbprints are accepted while the two are registered.
-2. When nothing signs with the old key any more, update to the new key alone.
+2. Wait at least one Warden token lifetime (`tokenService.ttl`, default 15 minutes) plus the
+   clock skew after the agent last minted a token with the old key, then update to the new key
+   alone.
+
+```sh
+warden control-plane agent update --state-dir /var/lib/warden-cp --id claude-code --revision 3 \
+  --jwk-file claude-code-old.jwk.json --jwk-file claude-code-new.jwk.json
+```
+
+With approvals on, adding the new key through the API is held as an `agents` change draft, while
+removing the old one applies at once (the offline CLI is never held).
 
 Removing a key is not only a registry edit. A Warden token carries the thumbprint of the key it
 was minted for (`cnf.jkt`); once a worker applies the policy that no longer lists it, that token
@@ -1638,8 +1648,10 @@ A worker serves exactly one agent. It takes the id from the first of these that 
    exactly one, else `agent:<port>` from the listen port.
 
 An explicit id (1 or 2) that is not a valid agent id stops the worker at startup. The derived id
-is never validated, and a port-derived id never matches a registry entry, so a worker that the
-registry should govern must be named with `--agent-id` or `central.agentID`. The worker reports
+is used as it is and is never validated; it matches a registry entry only when the two ids are
+identical (`agent:8080` is a valid id shape, so it could be registered, but nobody does by
+accident). Name the worker explicitly with `--agent-id` or `central.agentID` so the registry
+governs it by design rather than by coincidence. The worker reports
 the id and its identity mode on every heartbeat so the Agents tab can join them with the registry.
 
 ### The kill switch
@@ -1664,8 +1676,8 @@ cannot get a token: the token endpoint answers it `invalid_client`, the same as 
 | Event | Effect on a disabled agent |
 |---|---|
 | A policy rollback or any settings save | None. The registry is overlaid on the served policy and is never part of a policy version, so a rollback can neither re-enable an agent nor restore a removed key. |
-| The control plane is down | Workers keep enforcing the last-known-good policy, so a disabled agent stays disabled. A worker that restarts during the outage uses its cached bundle (when it has a `controlPlane.stateDir` cache) or denies all until its first pull. |
-| The registry cannot be read | The control plane logs `agentreg_load_failed` once and keeps serving the last-known-good list. |
+| The control plane is down | Workers keep enforcing the last-known-good policy, so a disabled agent stays disabled. A worker that restarts during the outage uses its cached bundle only with the opt-in [last-known-good cache](#last-known-good-bundle-cache-opt-in) (`controlPlane.stateDir` with pinned bundle keys, and a bundle issued within `controlPlane.bundleCacheMaxAge`); otherwise it denies all until its first pull. |
+| The registry cannot be read | The control plane logs `agentreg_load_failed` once per failure episode (it logs again after a successful read and a later failure) and keeps serving the last-known-good list. |
 | A bundle is rejected (bad signature, expired) | The worker keeps its last-known-good bundle, so the agent stays in the state that bundle had. |
 | An old worker without the `agentreg/v1` capability | It decodes the list and ignores it: **it does not enforce disable.** The Agents tab warns that the disabled agent is still served by workers without `agentreg/v1`. Upgrade it before relying on the switch. |
 
@@ -2849,7 +2861,7 @@ the agent must be active, and `cnf.jkt` must be one of its registered key
 thumbprints (`agent_unregistered`, `agent_disabled`, `agent_mismatch`,
 `cnf_mismatch`, in that order). This is agent match plus key liveness within one
 long-poll cycle, **not** proof of possession: a token is a bearer credential. A
-port-derived worker id such as `agent:8080` never matches a registry id, so bind
+derived worker id such as `agent:8080` matches a registry id only when identical, so bind
 the worker with `--agent-id`. Events and decision lines of a valid Warden
 identity carry the agent (`user_act` on events, `user.act` on the decision line)
 and `identity_token_type`; no token or `cnf` value is ever logged.

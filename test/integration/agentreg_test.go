@@ -10,6 +10,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -67,6 +68,9 @@ func TestAgentRegistryKillSwitch(t *testing.T) {
   allowlist:
     - domain: %s
 listen: %s
+console:
+  adminAudit:
+    enabled: true
 `, agentRegUpstream, cpAddr))
 	const tokenEnv = "WARDEN_AGENTREG_IT_TOKEN"
 	const token = "agentreg-integration-shared-token"
@@ -98,6 +102,10 @@ listen: %s
 		"--id", agentRegAgent, "--display-name", "Claude Code", "--groups", "warden-agents",
 		"--jwk-file", jwkFile))
 
+	// The registration must have reached the control plane's served policy
+	// (the CLI write is picked up on a poll) before the worker can see it.
+	waitServedAgent(t, cpAddr, ca.Pool(), token, agentRegAgent, "active")
+
 	// Traffic flows through the bound worker, and a tunnel stays open.
 	waitConnect(t, w.proxyAddr, http.StatusOK, "traffic flows for the registered agent")
 	open := openTunnel(t, w.proxyAddr)
@@ -105,14 +113,14 @@ listen: %s
 	echoOnce(t, open, "before")
 
 	// Disable. The worker refuses a new CONNECT with agent_disabled and cuts
-	// the open tunnel.
+	// the open tunnel within a few seconds of the first refusal.
 	cliOut.WriteString(runCLI(t, bin, "control-plane", "agent", "disable", "--state-dir", stateDir,
 		"--id", agentRegAgent, "--revision", "1"))
 	body := waitConnect(t, w.proxyAddr, http.StatusForbidden, "a new CONNECT is refused after the disable")
 	if !strings.Contains(body, `"agent_disabled"`) {
 		t.Errorf("disabled CONNECT body = %q, want error agent_disabled", body)
 	}
-	waitTunnelClosed(t, open)
+	waitTunnelClosed(t, open, 5*time.Second)
 
 	// Enable again: traffic recovers.
 	cliOut.WriteString(runCLI(t, bin, "control-plane", "agent", "enable", "--state-dir", stateDir,
@@ -122,13 +130,105 @@ listen: %s
 	defer func() { _ = again.Close() }()
 	echoOnce(t, again, "after")
 
-	// No JWK coordinate in any captured output.
-	all := logs.String() + cliOut.String()
-	for _, leak := range []string{`"x":`, x} {
+	// The CLI's listings carry key ids and thumbprint prefixes, so the leak
+	// scan below has something to find if a coordinate slipped in.
+	list := runCLI(t, bin, "control-plane", "agent", "list", "--state-dir", stateDir)
+	listJSON := runCLI(t, bin, "control-plane", "agent", "list", "--state-dir", stateDir, "--json")
+	var rows []struct {
+		Keys []struct {
+			KID       string `json:"kid"`
+			JKTPrefix string `json:"jktPrefix"`
+		} `json:"keys"`
+	}
+	if err := json.Unmarshal([]byte(listJSON), &rows); err != nil || len(rows) != 1 || len(rows[0].Keys) != 1 {
+		t.Fatalf("agent list --json = %q (%v), want one agent with one key", listJSON, err)
+	}
+	kid := rows[0].Keys[0].KID
+	if kid == "" || !strings.Contains(list, kid) || !strings.Contains(listJSON, kid) {
+		t.Errorf("agent list does not show the key id %q:\n%s", kid, list)
+	}
+	cliOut.WriteString(list + listJSON)
+
+	// A JWK with a private member is refused naming the field path, and the
+	// refusal prints neither member.
+	badFile := filepath.Join(root, "bad.jwk.json")
+	writeFile(t, badFile, fmt.Sprintf(`{"kty":"OKP","crv":"Ed25519","x":%q,"d":%q}`, x, "cHJpdmF0ZS1zZWVkLW5vdC1yZWFs"))
+	badOut, badCode := runCLIFail(t, bin, "control-plane", "agent", "register", "--state-dir", stateDir,
+		"--id", "bad-agent", "--groups", "warden-agents", "--jwk-file", badFile)
+	if badCode != 1 {
+		t.Errorf("register with a private member exited %d, want 1:\n%s", badCode, badOut)
+	}
+	if !strings.Contains(badOut, "keys[0].d") {
+		t.Errorf("refusal does not name keys[0].d:\n%s", badOut)
+	}
+	if strings.Contains(badOut, "cHJpdmF0ZS1zZWVkLW5vdC1yZWFs") || strings.Contains(badOut, x) {
+		t.Errorf("refusal echoes key material:\n%s", badOut)
+	}
+	cliOut.WriteString(badOut)
+
+	// No JWK coordinate in any captured output, and the scan is not vacuous:
+	// the worker's own lines about the kill switch are there.
+	out := logs.String()
+	for _, want := range []string{`"agent":"claude-code"`, `"reason":"agent_disabled"`, "bound agent is disabled in the registry"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("captured logs lack %s", want)
+		}
+	}
+	all := out + cliOut.String()
+	for _, leak := range []string{`"x":`, `"d":`, x} {
 		if strings.Contains(all, leak) {
 			t.Errorf("captured control-plane, worker or CLI output contains JWK material %q", leak)
 		}
 	}
+}
+
+// waitServedAgent polls the control plane's GET /policy, as a worker does,
+// until registeredAgents lists id with status.
+func waitServedAgent(t *testing.T, addr string, pool *x509.CertPool, token, id, status string) {
+	t.Helper()
+	client := &http.Client{
+		Timeout:   5 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}},
+	}
+	deadline := time.Now().Add(agentRegDeadline)
+	for time.Now().Before(deadline) {
+		req, err := http.NewRequest(http.MethodGet, "https://"+addr+"/policy", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		if resp, err := client.Do(req); err == nil {
+			var wire struct {
+				RegisteredAgents []struct {
+					ID     string `json:"id"`
+					Status string `json:"status"`
+				} `json:"registeredAgents"`
+			}
+			dec := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&wire)
+			_ = resp.Body.Close()
+			if dec == nil {
+				for _, a := range wire.RegisteredAgents {
+					if a.ID == id && a.Status == status {
+						return
+					}
+				}
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("the control plane never served %s as %s within %s", id, status, agentRegDeadline)
+}
+
+// runCLIFail runs the CLI expecting a non-zero exit and returns its combined
+// output and exit code.
+func runCLIFail(t *testing.T, bin string, args ...string) (string, int) {
+	t.Helper()
+	out, err := exec.Command(bin, args...).CombinedOutput()
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) {
+		t.Fatalf("%s %s: want a non-zero exit, got %v\n%s", bin, strings.Join(args, " "), err, out)
+	}
+	return string(out), ee.ExitCode()
 }
 
 // boundWorker is a running in-process worker.
@@ -274,9 +374,9 @@ func echoOnce(t *testing.T, c net.Conn, msg string) {
 }
 
 // waitTunnelClosed waits until the worker has cut the open tunnel.
-func waitTunnelClosed(t *testing.T, c net.Conn) {
+func waitTunnelClosed(t *testing.T, c net.Conn, within time.Duration) {
 	t.Helper()
-	deadline := time.Now().Add(agentRegDeadline)
+	deadline := time.Now().Add(within)
 	buf := make([]byte, 64)
 	for time.Now().Before(deadline) {
 		_ = c.SetReadDeadline(time.Now().Add(time.Second))
@@ -286,7 +386,7 @@ func waitTunnelClosed(t *testing.T, c net.Conn) {
 			return // EOF or reset: the worker closed it
 		}
 	}
-	t.Fatalf("the open tunnel was not closed within %s of the disable", agentRegDeadline)
+	t.Fatalf("the open tunnel was not closed within %s of the first refusal", within)
 }
 
 func startEchoUpstream(t *testing.T) string {
