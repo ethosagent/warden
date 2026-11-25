@@ -3,7 +3,9 @@ package security
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -125,6 +127,8 @@ type Stack struct {
 	Workers []*Worker
 
 	tracker *tracker
+	// id makes the stack's environment variable names unique.
+	id string
 
 	mu       sync.Mutex
 	cps      *controlplane.Server
@@ -162,6 +166,10 @@ type Worker struct {
 	// DBPath is its analytics store.
 	DBPath string
 
+	// inflight tracks the worker's request scopes until their terminal
+	// bookkeeping (event, decision log, metrics) is done.
+	inflight *proxy.Inflight
+
 	flushMu sync.Mutex
 	flush   func() error
 	cancel  context.CancelFunc
@@ -193,7 +201,7 @@ func StartStackNoWait(tb testing.TB, opts StackOptions) *Stack {
 	if opts.LongPollWait == 0 {
 		opts.LongPollWait = 2 * time.Second
 	}
-	s := &Stack{tb: tb, root: tb.TempDir(), logs: &logBuffer{}, opts: opts, tracker: newTracker()}
+	s := &Stack{tb: tb, root: tb.TempDir(), logs: &logBuffer{}, opts: opts, tracker: newTracker(), id: randHex(tb)}
 	s.Clock = clocktest.NewFake(time.Now())
 	tb.Cleanup(s.stop)
 
@@ -445,7 +453,8 @@ func (s *Stack) startWorker(agent string) {
 	suffix := strings.TrimPrefix(agent, "agent-")
 	w := &Worker{
 		Name: "worker-" + suffix, AgentID: agent,
-		TokenEnv: "WARDEN_SECURITY_ENROLL_" + strings.ToUpper(sanitizeEnv(suffix)),
+		TokenEnv: "WARDEN_SECURITY_ENROLL_" + s.id + "_" + strings.ToUpper(sanitizeEnv(suffix)),
+		inflight: proxy.NewInflight(),
 		StateDir: filepath.Join(s.root, "worker-"+suffix, "state"),
 		DBPath:   filepath.Join(s.root, "worker-"+suffix, "analytics.db"),
 	}
@@ -491,6 +500,7 @@ func (s *Stack) startWorker(agent string) {
 			Dialer:          &mapDialer{host: UpstreamHost, addr: s.Upstream.Addr()},
 			UpstreamRootCAs: s.UpstreamCA.Pool(),
 			Clock:           s.Clock,
+			Inflight:        w.inflight,
 			OnAnalyticsWriter: func(f worker.AnalyticsFlusher) {
 				w.flushMu.Lock()
 				w.flush = f.Flush
@@ -562,10 +572,37 @@ func (s *Stack) bundlePins() []keys.JWK {
 	return km.KeySet().JWKS(keys.PurposeBundle).Keys
 }
 
+// WaitIdle blocks until every worker's in-flight request scopes have finished
+// their terminal bookkeeping. The proxy writes an allowed or denied request's
+// event, decision log line and metrics after the response reaches the client,
+// so every oracle read waits here first (the quiescence seam
+// worker.Overrides.Inflight, as the L1 harness does).
+func (s *Stack) WaitIdle(tb testing.TB) {
+	tb.Helper()
+	for _, w := range s.Workers {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		err := w.inflight.WaitIdle(ctx)
+		cancel()
+		if err != nil {
+			tb.Fatalf("security: %s still had requests in flight after 10s: %v", w.Name, w.inflight.InFlight())
+		}
+	}
+}
+
+func randHex(tb testing.TB) string {
+	tb.Helper()
+	b := make([]byte, 4)
+	if _, err := rand.Read(b); err != nil {
+		tb.Fatalf("security: random id: %v", err)
+	}
+	return hex.EncodeToString(b)
+}
+
 // awaitBundles drives the stack to the state every case starts from: each
-// worker has applied a signed bundle (warden_bundle_seq above 0). A worker
-// bound to an agent that is not registered yet does not enforce identity (an
-// agent absent from the registry is allowed), so enforcement is awaited by
+// worker has applied a signed bundle (warden_bundle_seq above 0). A freshly
+// booted worker does not yet enforce the distributed identity settings: that
+// is a production bug in the worker's boot path (it does not apply them at
+// boot; fix on branch fix/worker-boot-identity), worked around in
 // RegisterAgent, not here.
 func (s *Stack) awaitBundles() {
 	s.tb.Helper()

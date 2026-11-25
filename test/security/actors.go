@@ -197,10 +197,11 @@ func (s *Stack) RegisterAgent(tb testing.TB, id string, key *fakes.AgentKey, gro
 		tb.Fatalf("security: POST %s for agent %s = %d %s", agentsPath, id, r.Status, r.Body)
 	}
 	a := &Agent{ID: id, Key: key}
-	// The worker bound to the agent enforces the identity mode only once it
-	// has pulled the registry entry: wait for that, probing without a request
-	// upstream. The policy reload that carries it is a real-time tick on the
-	// CP, so the wait is on the condition and advances no clock.
+	// TODO(fix/worker-boot-identity): a worker does not apply the distributed
+	// identity settings at boot (a production bug, fixed on that branch); it
+	// starts enforcing only after a later policy change, and registering the
+	// agent causes one. Until that fix lands, wait for enforcement here,
+	// probing without a request upstream. Remove this wait with the fix.
 	for _, w := range s.Workers {
 		if w.AgentID == id {
 			w := w

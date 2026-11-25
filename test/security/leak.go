@@ -33,6 +33,29 @@ func (t *tracker) add(kind, value string) {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.addLocked(kind, value)
+	if !strings.Contains(value, "\n") {
+		return
+	}
+	// A multi-line secret (a PEM key) reaches JSON logs, audit rows and events
+	// with its newlines escaped, so the whole string is never found. Track each
+	// long body line and the body with headers and newlines stripped too.
+	var body strings.Builder
+	for _, line := range strings.Split(value, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "-----") {
+			continue
+		}
+		body.WriteString(line)
+		t.addLocked(kind, line)
+	}
+	t.addLocked(kind, body.String())
+}
+
+func (t *tracker) addLocked(kind, value string) {
+	if len(value) < minTracked {
+		return
+	}
 	for _, it := range t.items {
 		if it.value == value {
 			return
@@ -75,6 +98,7 @@ var proxyOnlyHeaders = []string{"Proxy-Authorization", "X-Warden-Identity"}
 // in none of them.
 func (s *Stack) AssertNoLeak(tb testing.TB, lc LeakCheck) {
 	tb.Helper()
+	s.WaitIdle(tb)
 	items := s.tracker.all()
 	check := func(surface, text string, allowSwapped bool) {
 		for _, it := range items {

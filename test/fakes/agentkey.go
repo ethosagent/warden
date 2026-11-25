@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/asn1"
@@ -101,6 +102,8 @@ type AssertionSpec struct {
 	// Key, when set, signs instead of the receiver (a foreign key under this
 	// agent's kid).
 	Key *AgentKey
+	// HMAC, when set, signs with HMAC-SHA256 instead of any key.
+	HMAC []byte
 }
 
 // AssertionOption adjusts an assertion before it is signed.
@@ -125,6 +128,16 @@ func AssertionHeader(name string, v any) AssertionOption {
 			return
 		}
 		s.Header[name] = v
+	}
+}
+
+// AssertionHS256 sets the header alg to HS256 and signs with HMAC-SHA256 keyed
+// with secret: the key-confusion forgery when secret is the agent's public JWK
+// bytes.
+func AssertionHS256(secret []byte) AssertionOption {
+	return func(s *AssertionSpec) {
+		s.Header["alg"] = "HS256"
+		s.HMAC = append([]byte(nil), secret...)
 	}
 }
 
@@ -162,6 +175,11 @@ func (k *AgentKey) ClientAssertion(agentID, audience string, now time.Time, opts
 		k.tb.Fatalf("agent key: encode claims: %v", err)
 	}
 	in := b64(hb) + "." + b64(cb)
+	if s.HMAC != nil {
+		mac := hmac.New(sha256.New, s.HMAC)
+		mac.Write([]byte(in))
+		return in + "." + b64(mac.Sum(nil))
+	}
 	signer := k
 	if s.Key != nil {
 		signer = s.Key

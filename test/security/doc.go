@@ -29,13 +29,23 @@
 // tokens minted through the admin API, pin the CP's bundle keys and bind to
 // agent-a and agent-b through central.agentID.
 //
+// # Notes for reviewers
+//
+// The CA for the stack (fakes.TestCA in the first draft) lives in test/harness
+// as harness.TestCA, with harness.NewLoopbackClient for the clients: the
+// architecture baseline allows certificate minting and bare HTTP clients there
+// and nowhere else in test/. In ValidFlow warden_identity_verify_total{valid}
+// rises by 4, not 3, for the three transports: the terminated transport
+// carries the token on CONNECT (Proxy-Authorization) and again in
+// X-Warden-Identity, and the worker verifies each credential it reads.
+//
 // # Writing a case
 //
 // A ticket adds cases and nothing else:
 //
 //  1. Declare them as a package-level []Case, naming what each one covers
 //     (CoverIdentity, CoverBundle, CoverToken, CoverRoute), and append the
-//     slice to allCases in cases.go.
+//     slice to allCases in cases_test.go.
 //  2. In a test, start a stack, run the category's positive control with
 //     Stack.PositiveControl, then Run the cases.
 //  3. Delete the covered lines from pending.go. TestEnumCompleteness fails

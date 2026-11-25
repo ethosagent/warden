@@ -2,6 +2,7 @@ package security
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -146,6 +147,12 @@ func (s *Stack) runCase(t testing.TB, c Case) {
 	if c.Worker != "" {
 		w = s.Worker(c.Worker)
 	}
+	if bad := validateCase(c); len(bad) > 0 {
+		for _, b := range bad {
+			t.Errorf("case %q is malformed: %s", c.Name, b)
+		}
+		return
+	}
 	before := s.snapshot(t, w, c)
 	obs := c.Attack(t, s)
 	after := s.snapshot(t, w, c)
@@ -235,6 +242,7 @@ type denyEvent struct{ Reason string }
 // pay for it.
 func (s *Stack) snapshot(t testing.TB, w *Worker, c Case) snap {
 	t.Helper()
+	s.WaitIdle(t)
 	sn := snap{hits: s.Upstream.Hits(), logs: s.logs.String()}
 	sn.logLen = len(sn.logs)
 	labels := func(m map[string]string) map[string]string {
@@ -276,4 +284,30 @@ func contains(list []string, v string) bool {
 		}
 	}
 	return false
+}
+
+// validateCase checks that a case's Covers claims are backed by its assertions,
+// so a case cannot claim a reason it does not check: every case pins a status,
+// and each identity, token or bundle reason it covers must be the WantReason of
+// a case on the matching path.
+func validateCase(c Case) []string {
+	var bad []string
+	if c.WantStatus == 0 {
+		bad = append(bad, "WantStatus is not set")
+	}
+	prefixes := map[string]Path{"identity.reason:": PathWorker, "token.reason:": PathToken, "bundle.reason:": PathBundle}
+	for _, cov := range c.Covers {
+		for prefix, path := range prefixes {
+			reason, ok := strings.CutPrefix(cov, prefix)
+			if !ok {
+				continue
+			}
+			if c.Path != path {
+				bad = append(bad, "covers "+cov+" but Path is "+string(c.Path)+", want "+string(path))
+			} else if c.WantReason != reason {
+				bad = append(bad, "covers "+cov+" but WantReason is "+strconv.Quote(c.WantReason))
+			}
+		}
+	}
+	return bad
 }

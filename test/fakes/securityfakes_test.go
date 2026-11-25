@@ -127,6 +127,14 @@ func TestAgentKeyAssertions(t *testing.T) {
 	if ed25519.Verify(a.ed.Public().(ed25519.PublicKey), []byte(parts[0]+"."+parts[1]), sig) {
 		t.Error("AssertionSignedBy still verifies under the named key")
 	}
+	hs := a.ClientAssertion("agent-a", "aud", now, AssertionHS256(a.JWK()))
+	hp := strings.Split(hs, ".")
+	hsig, _ := base64.RawURLEncoding.DecodeString(hp[2])
+	mac := hmac.New(sha256.New, a.JWK())
+	mac.Write([]byte(hp[0] + "." + hp[1]))
+	if !bytes.Equal(hsig, mac.Sum(nil)) {
+		t.Error("AssertionHS256 is not an HMAC-SHA256 signature keyed with the secret")
+	}
 	if none := a.ClientAssertion("agent-a", "aud", now, AssertionHeader("alg", "none")); !strings.HasSuffix(none, ".") {
 		t.Error("alg none must be unsigned")
 	}

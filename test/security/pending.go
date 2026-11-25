@@ -62,12 +62,12 @@ var pending = joinPending(
 		CoverToken("replay"), CoverToken("agent_unknown"), CoverToken("not_yet_valid"),
 		CoverToken("unsupported_token_type"), CoverToken("invalid_target"),
 		CoverToken("subject_invalid"), CoverToken("subject_expired"), CoverToken("token_too_large"),
-		CoverToken("rate_limited"),
+		CoverToken("rate_limited"), CoverToken("signer_unavailable"),
+		CoverIdentity("unbound_token"),
 		CoverRoute("/oauth2/token"),
 	),
 	// W-P2-SECT-03: binding, cross-agent, issued-token lifetime.
 	pend(TicketBinding,
-		CoverIdentity("unbound_token"),
 		CoverToken("agent_disabled"), CoverToken("user_blocked"), CoverToken("group_not_allowed"),
 		CoverToken("scope_not_allowed"), CoverToken("session_revoked"),
 	),
@@ -89,7 +89,7 @@ var pending = joinPending(
 		CoverIdentity("jwks_unavailable"),
 		CoverToken("agent_store_unavailable"), CoverToken("replay_store_unavailable"),
 		CoverToken("verifier_misconfigured"), CoverToken("idp_unavailable"),
-		CoverToken("block_store_unavailable"), CoverToken("signer_unavailable"),
+		CoverToken("block_store_unavailable"),
 		CoverToken("session_store_unavailable"), CoverToken("event_store_unavailable"),
 	),
 )

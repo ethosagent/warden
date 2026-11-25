@@ -193,6 +193,19 @@ func parseLabels(s string, out map[string]string) {
 // the production analytics package.
 func (s *Stack) DenyEvents(tb testing.TB, w *Worker) []analytics.Event {
 	tb.Helper()
+	return s.events(tb, w, analytics.EventFilter{Decision: "deny"})
+}
+
+// AllEvents returns every event worker w persisted (allow and deny), oldest
+// first, after draining its writer.
+func (s *Stack) AllEvents(tb testing.TB, w *Worker) []analytics.Event {
+	tb.Helper()
+	return s.events(tb, w, analytics.EventFilter{})
+}
+
+func (s *Stack) events(tb testing.TB, w *Worker, f analytics.EventFilter) []analytics.Event {
+	tb.Helper()
+	s.WaitIdle(tb)
 	if err := w.flushAnalytics(); err != nil {
 		tb.Fatalf("security: drain %s analytics (a failed flush means the events were NOT persisted): %v", w.Name, err)
 	}
@@ -201,9 +214,9 @@ func (s *Stack) DenyEvents(tb testing.TB, w *Worker) []analytics.Event {
 		tb.Fatalf("security: open %s analytics store: %v", w.Name, err)
 	}
 	defer func() { _ = st.Close() }()
-	evs, err := st.GetEvents(analytics.EventFilter{Decision: "deny"})
+	evs, err := st.GetEvents(f)
 	if err != nil {
-		tb.Fatalf("security: read %s deny events: %v", w.Name, err)
+		tb.Fatalf("security: read %s events: %v", w.Name, err)
 	}
 	return evs
 }
@@ -313,11 +326,11 @@ func (s *Stack) surfaces(tb testing.TB) map[string]string {
 			tb.Fatalf("security: scrape %s /metrics for the leak check: %v", w.Name, err)
 		}
 		out[w.Name+" metrics"] = text
-		evs, err := json.Marshal(s.DenyEvents(tb, w))
+		evs, err := json.Marshal(s.AllEvents(tb, w))
 		if err != nil {
 			tb.Fatalf("security: encode %s events: %v", w.Name, err)
 		}
-		out[w.Name+" deny events"] = string(evs)
+		out[w.Name+" events"] = string(evs)
 	}
 	audit, err := json.Marshal(s.AuditRows(tb, ""))
 	if err != nil {

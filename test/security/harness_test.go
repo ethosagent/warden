@@ -282,14 +282,17 @@ func TestHarness_RunnerIsNotVacuous(t *testing.T) {
 		want string
 	}{
 		{"wrong status", Case{Name: "x", Path: PathWorker, Attack: deny, WantStatus: http.StatusOK}, "status = 407, want 200"},
-		{"wrong body", Case{Name: "x", Path: PathWorker, Attack: deny, WantBody: "nope"}, "body does not contain"},
-		{"missing header", Case{Name: "x", Path: PathWorker, Attack: deny, WantHeader: map[string]string{"X-Nope": "*"}}, "header X-Nope"},
+		{"wrong body", Case{Name: "x", Path: PathWorker, Attack: deny, WantStatus: http.StatusProxyAuthRequired, WantBody: "nope"}, "body does not contain"},
+		{"missing header", Case{Name: "x", Path: PathWorker, Attack: deny, WantStatus: http.StatusProxyAuthRequired, WantHeader: map[string]string{"X-Nope": "*"}}, "header X-Nope"},
 		{"upstream reached", Case{Name: "x", Path: PathWorker, Attack: reached, WantStatus: http.StatusOK}, "upstream hits = 1, want 0"},
-		{"metric did not move", Case{Name: "x", Path: PathWorker, Attack: deny, WantResult: "invalid", WantReason: "bad_signature"}, "rose by 0, want 1"},
-		{"deny event missing", Case{Name: "x", Path: PathWorker, Attack: deny, WantDeny: "policy_no_match"}, "new deny events carry"},
-		{"audit row missing", Case{Name: "x", Path: PathWorker, Attack: deny, WantAudit: "agent.create"}, "new admin audit rows"},
-		{"log missing", Case{Name: "x", Path: PathWorker, Attack: deny, WantLog: "no such log line"}, "do not contain"},
-		{"token row missing", Case{Name: "x", Path: PathToken, Attack: func(tb testing.TB, s *Stack) Observed { return Observed{Status: 400} }, WantResult: "denied", WantReason: "replay"}, "new token_events rows"},
+		{"metric did not move", Case{Name: "x", Path: PathWorker, Attack: deny, WantStatus: http.StatusProxyAuthRequired, WantResult: "invalid", WantReason: "bad_signature"}, "rose by 0, want 1"},
+		{"deny event missing", Case{Name: "x", Path: PathWorker, Attack: deny, WantStatus: http.StatusProxyAuthRequired, WantDeny: "policy_no_match"}, "new deny events carry"},
+		{"audit row missing", Case{Name: "x", Path: PathWorker, Attack: deny, WantStatus: http.StatusProxyAuthRequired, WantAudit: "agent.create"}, "new admin audit rows"},
+		{"log missing", Case{Name: "x", Path: PathWorker, Attack: deny, WantStatus: http.StatusProxyAuthRequired, WantLog: "no such log line"}, "do not contain"},
+		{"claims a reason it does not check", Case{Name: "x", Path: PathWorker, Attack: deny, WantStatus: http.StatusProxyAuthRequired, Covers: []string{CoverIdentity("bad_signature")}}, "covers identity.reason:bad_signature but WantReason"},
+		{"claims a reason on the wrong path", Case{Name: "x", Path: PathCPRoute, Attack: deny, WantStatus: http.StatusProxyAuthRequired, WantReason: "bad_signature", Covers: []string{CoverIdentity("bad_signature")}}, "but Path is cp-route"},
+		{"no status pinned", Case{Name: "x", Path: PathWorker, Attack: deny}, "WantStatus is not set"},
+		{"token row missing", Case{Name: "x", Path: PathToken, Attack: func(tb testing.TB, s *Stack) Observed { return Observed{Status: 400} }, WantStatus: 400, WantResult: "denied", WantReason: "replay"}, "new token_events rows"},
 	} {
 		rec := &recordingTB{TB: t}
 		s.RunCase(rec, c.c)
@@ -335,6 +338,21 @@ func TestNoLeakGuard(t *testing.T) {
 	}
 	check("agent response", "agent response", LeakCheck{Responses: []Response{{Status: 200, Body: "echo " + canary}}})
 	check("attacker reply", "attacker reply", LeakCheck{Replies: []Reply{{Status: 200, Header: http.Header{"X-Echo": {canary}}}}})
+
+	// A key PEM in a JSON log line: the newlines are escaped, so only the
+	// per-line and body tracking can find it.
+	pem := "-----BEGIN TEST KEY-----\nQUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIzNDU2Nzg5\nYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY3ODkw\n-----END TEST KEY-----\n"
+	s.Track("planted key PEM", pem)
+	line, err := json.Marshal(map[string]string{"msg": "oops", "key": pem})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fmt.Fprintf(s.logs, "%s\n", line)
+	rec2 := &recordingTB{TB: t}
+	s.AssertNoLeak(rec2, LeakCheck{})
+	if !strings.Contains(rec2.text(), "planted key PEM") || !strings.Contains(rec2.text(), "logs") {
+		t.Errorf("a key PEM in a JSON log line was not found: %q", rec2.text())
+	}
 
 	// A planted log line is the acceptance criterion's case.
 	fmt.Fprintf(s.logs, `{"level":"INFO","msg":"oops","token":%q}`+"\n", canary)
