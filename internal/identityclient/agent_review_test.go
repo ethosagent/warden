@@ -183,7 +183,7 @@ func TestSourceFormattingNeverShowsToken(t *testing.T) {
 	slog.New(slog.NewTextHandler(&buf, nil)).Info("source", slog.Any("src", src))
 	out := map[string]string{
 		"%v": fmt.Sprintf("%v", src), "%+v": fmt.Sprintf("%+v", src), "%#v": fmt.Sprintf("%#v", src),
-		"%s": fmt.Sprintf("%s", src), "slog": buf.String(),
+		"Sprint": fmt.Sprint(src), "slog": buf.String(),
 	}
 	for form, s := range out {
 		if strings.Contains(s, tok.AccessToken) || strings.Contains(s, "warden-token-secret") {
