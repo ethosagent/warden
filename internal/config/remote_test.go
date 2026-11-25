@@ -398,7 +398,7 @@ func TestHeartbeatCaps(t *testing.T) {
 	if strings.Contains(string(raw), "caps") {
 		t.Errorf("body without caps = %s, want no caps field", raw)
 	}
-	if got := WorkerCaps(); !slices.Equal(got, []string{CapBlocklistV1, CapGroupPolicyV1, CapIdentityChallengeV1}) {
+	if got := WorkerCaps(); !slices.Equal(got, []string{CapAgentRegV1, CapBlocklistV1, CapGroupPolicyV1, CapIdentityChallengeV1}) {
 		t.Fatalf("WorkerCaps() = %v", got)
 	}
 	rp.SetCaps(WorkerCaps())
@@ -412,8 +412,8 @@ func TestHeartbeatCaps(t *testing.T) {
 	if err := json.Unmarshal(raw, &b); err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(b.Caps, []string{"blocklist/v1", "grouppolicy/v1", "identity/challenge-v1"}) {
-		t.Errorf("caps = %v, want [blocklist/v1 grouppolicy/v1 identity/challenge-v1]; body %s", b.Caps, raw)
+	if !slices.Equal(b.Caps, []string{"agentreg/v1", "blocklist/v1", "grouppolicy/v1", "identity/challenge-v1"}) {
+		t.Errorf("caps = %v, want [agentreg/v1 blocklist/v1 grouppolicy/v1 identity/challenge-v1]; body %s", b.Caps, raw)
 	}
 }
 
@@ -457,5 +457,73 @@ func TestHeartbeat_AdvertisesGroupPolicy(t *testing.T) {
 	}
 	if CapGroupPolicyV1 != "grouppolicy/v1" {
 		t.Errorf("CapGroupPolicyV1 = %q", CapGroupPolicyV1)
+	}
+}
+
+// TestHeartbeatAgent: a worker bound to an agent sends agentID, its effective
+// identityMode and agentreg/v1 in caps, in a body under the CP's 4096-byte
+// limit even at the id and cap maxima; an unbound worker's body has neither
+// field, so an old control plane sees the body it always did.
+func TestHeartbeatAgent(t *testing.T) {
+	var raw []byte
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	caPath := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(caPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rp, err := NewRemoteProvider(srv.URL+"/policy", "tok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rp.SetCACert(caPath); err != nil {
+		t.Fatal(err)
+	}
+	rp.SetCaps(WorkerCaps())
+	if err := rp.Heartbeat(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "agentID") || strings.Contains(string(raw), "identityMode") {
+		t.Errorf("unbound heartbeat = %s, want neither agentID nor identityMode", raw)
+	}
+
+	mode := "attribute"
+	rp.SetAgent("claude-code", func() string { return mode })
+	if err := rp.Heartbeat(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var b struct {
+		AgentID      string   `json:"agentID"`
+		IdentityMode string   `json:"identityMode"`
+		Caps         []string `json:"caps"`
+	}
+	if err := json.Unmarshal(raw, &b); err != nil {
+		t.Fatalf("body %s: %v", raw, err)
+	}
+	if b.AgentID != "claude-code" || b.IdentityMode != "attribute" || !slices.Contains(b.Caps, "agentreg/v1") {
+		t.Errorf("heartbeat = %s, want agentID claude-code, identityMode attribute and agentreg/v1", raw)
+	}
+	// The mode is read live: a later mode change rides the next beat.
+	mode = "challenge"
+	if err := rp.Heartbeat(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &b); err != nil || b.IdentityMode != "challenge" {
+		t.Errorf("heartbeat after a mode change = %s (%v), want identityMode challenge", raw, err)
+	}
+
+	// Worst case: a 64-byte id and the full cap list stay under the limit.
+	rp.SetAgent(strings.Repeat("a", 64), func() string { return IdentityModeAttribute })
+	if err := rp.Heartbeat(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) >= 4096 {
+		t.Errorf("heartbeat body is %d bytes, want < 4096", len(raw))
+	}
+	if CapAgentRegV1 != "agentreg/v1" || CapIdentityRequireV1 != "identity/require-v1" {
+		t.Errorf("cap literals = %q, %q", CapAgentRegV1, CapIdentityRequireV1)
 	}
 }

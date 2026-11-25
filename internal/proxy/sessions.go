@@ -31,12 +31,20 @@ type sessionRegistry struct {
 	mu      sync.Mutex
 	bySub   map[string]map[*session]struct{}
 	byEmail map[string]map[*session]struct{}
+	// all holds every open session, identified or not, so a disabled agent can
+	// close the anonymous ones too (W-P2-AREG-05). refuse, set while the bound
+	// agent is disabled, closes a session the moment it is created, so one that
+	// passed the per-connection check just before the flag flipped cannot
+	// outlive the cut.
+	all    map[*session]struct{}
+	refuse bool
 }
 
 func newSessionRegistry() *sessionRegistry {
 	return &sessionRegistry{
 		bySub:   make(map[string]map[*session]struct{}),
 		byEmail: make(map[string]map[*session]struct{}),
+		all:     make(map[*session]struct{}),
 	}
 }
 
@@ -59,12 +67,24 @@ type session struct {
 	closing       bool // a block matched: the deny event is written, the cut is done or pending
 	closed        bool // the closers have run
 	released      bool
+	refused       bool // created while the registry refused sessions: already closed
 }
 
 // newSession builds an unregistered session; it joins the registry when bind
 // sees the first identity.
 func (r *sessionRegistry) newSession(proto, domain string, port int, interruptible bool, c io.Closer) *session {
-	return &session{reg: r, proto: proto, domain: domain, port: port, interruptible: interruptible, closers: []io.Closer{c}}
+	s := &session{reg: r, proto: proto, domain: domain, port: port, interruptible: interruptible, closers: []io.Closer{c}}
+	r.mu.Lock()
+	r.all[s] = struct{}{}
+	refused := r.refuse
+	if refused {
+		s.closing, s.closed, s.refused = true, true, true
+	}
+	r.mu.Unlock()
+	if refused {
+		_ = c.Close()
+	}
+	return s
 }
 
 // bind registers the session under the identity's sub and email. It is a no-op
@@ -133,6 +153,7 @@ func (s *session) release() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	s.released = true
+	delete(r.all, s)
 	for _, k := range s.subs {
 		remove(r.bySub, k, s)
 	}
@@ -230,6 +251,15 @@ func (r *sessionRegistry) takeBlocked(subBlocked, emailBlocked func(string) bool
 			}
 		}
 	}
+	return r.markLocked(hit, false, func(id connIdentity) bool { return claimsBlocked(id.Claims) })
+}
+
+// markLocked marks every not-yet-closing session in hit as closing and returns
+// what the caller needs to write its deny event and close it. pick chooses,
+// among a session's bound identities, the one the event names (the first when
+// none matches). With force a busy HTTP/1 session is cut at once too, so a
+// streaming upload or download stops with it. r.mu must be held.
+func (r *sessionRegistry) markLocked(hit map[*session]struct{}, force bool, pick func(connIdentity) bool) []closedSession {
 	var out []closedSession
 	for s := range hit {
 		if s.closing {
@@ -237,19 +267,47 @@ func (r *sessionRegistry) takeBlocked(subBlocked, emailBlocked func(string) bool
 		}
 		s.closing = true
 		cs := closedSession{proto: s.proto, domain: s.domain, port: s.port}
-		for _, id := range s.ids {
-			if claimsBlocked(id.Claims) {
+		for i, id := range s.ids {
+			if i == 0 {
+				cs.ci = id
+			}
+			if pick(id) {
 				cs.ci = id
 				break
 			}
 		}
-		if s.interruptible || !s.busy {
+		if force || s.interruptible || !s.busy {
 			s.closed = true
 			cs.closers = append(cs.closers, s.closers...)
 		}
 		out = append(out, cs)
 	}
 	return out
+}
+
+// takeAll marks and returns every open session, once each, and makes the
+// registry close any session created from now on until allow is called. It
+// serves the agent kill switch, which cuts anonymous sessions too.
+func (r *sessionRegistry) takeAll() []closedSession {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.refuse = true
+	return r.markLocked(r.all, true, func(connIdentity) bool { return false })
+}
+
+// refuseNew makes the registry close every session created from now on, until
+// allow. takeAll sets it too; this is for a caller that sets the flag first.
+func (r *sessionRegistry) refuseNew() {
+	r.mu.Lock()
+	r.refuse = true
+	r.mu.Unlock()
+}
+
+// allow lets new sessions open again (the bound agent was re-enabled).
+func (r *sessionRegistry) allow() {
+	r.mu.Lock()
+	r.refuse = false
+	r.mu.Unlock()
 }
 
 // CloseBlockedSessions closes every registered session whose user the live block
@@ -280,4 +338,18 @@ func (p *Proxy) CloseBlockedSessions() {
 	if len(cut) > 0 {
 		p.cfg.Metrics.RecordBlocklistSessionsClosed(len(cut))
 	}
+}
+
+// wasRefused reports whether the registry closed this session at creation
+// (the bound agent is disabled). The caller must not dial or forward.
+func (s *session) wasRefused() bool { return s != nil && s.refused }
+
+// isClosing reports whether a cut already matched this session.
+func (s *session) isClosing() bool {
+	if s == nil {
+		return false
+	}
+	s.reg.mu.Lock()
+	defer s.reg.mu.Unlock()
+	return s.closing
 }

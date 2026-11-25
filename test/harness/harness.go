@@ -216,6 +216,8 @@ type H struct {
 	// wantCentral (WithCentralForwarding) makes every worker forward its events
 	// to the control plane's /central/ingest.
 	wantCentral bool
+	// workerAgentID (WithWorkerAgent) is the --agent-id every worker boots with.
+	workerAgentID string
 	// wantBackup (WithBackup) boots the control plane with --backup-dir.
 	wantBackup bool
 	// backupUnwritable (WithBackupUnwritable) makes every backup run fail.
@@ -981,6 +983,7 @@ func (h *H) workerParams(i int) worker.Params {
 	}
 	return worker.Params{
 		Config:        &fakes.FakeConfigProvider{Policy: policy},
+		AgentID:       h.workerAgentID,
 		DBPath:        h.workerDBPath(i),
 		CACert:        caCert,
 		CAKey:         caKey,

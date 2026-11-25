@@ -391,6 +391,7 @@ var All = slices.Concat(
 		// with a new ETag each time, and the wire carries only id, status and
 		// thumbprints. In-process only (CP state dir).
 		{Name: "agent_registry_policy_wire", Opts: agentRegistryPolicyWireOpts(), Run: agentRegistryPolicyWire},
+		{Name: "agent_binding_kill_switch", Opts: agentBindingOpts(), Run: agentBindingKillSwitch},
 		// Signed bundles (W-P2-SBND-02): --bundles=off answers the envelope
 		// Accept header with the unchanged legacy policy; --bundles=offer signs
 		// the served policy with the bundle key, moves the seq forward on a save,
