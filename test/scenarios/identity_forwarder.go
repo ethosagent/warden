@@ -399,8 +399,7 @@ func identityForwarder(t *testing.T, h *harness.H) {
 		return requireConnect(t, h, "").status == http.StatusProxyAuthRequired
 	})
 	h.Eventually("the worker to admit the forwarder's token", func() bool {
-		conn, br, head := client.connect(forwarderTarget)
-		_ = br
+		conn, _, head := client.connect(forwarderTarget)
 		_ = conn.Close()
 		return headStatus(head) == http.StatusOK
 	})
@@ -474,13 +473,22 @@ func identityForwarder(t *testing.T, h *harness.H) {
 		return status == http.StatusProxyAuthRequired
 	})
 	advanceUntil("the worker to close the tunnel of the revoked token", 500*time.Millisecond, newTun.closed)
-	if requireDeny(h, "unknown_kid") == 0 {
-		t.Error("the worker recorded no unknown_kid refusal for the revoked token")
-	}
 	h.Clock().Advance(3 * time.Second) // past the forwarder's 2s floor between exchanges
 	user = writeSubject()
+	// The forwarder must still hold the revoked token, so the 407 below is the
+	// worker refusing it (not a proactive refresh that made the retry moot).
+	if cur, _ := src.Current(); cur.AccessToken != second {
+		t.Fatal("the forwarder refreshed before the CONNECT; the 407 path was not exercised")
+	}
+	deniesBefore := requireDeny(h, "unknown_kid")
 	before := len(relay.records())
 	retryTun, head := openTunnel(t, h, client)
+	h.Eventually("the worker to record the forwarder's unknown_kid refusal", func() bool {
+		return requireDeny(h, "unknown_kid") > deniesBefore
+	})
+	if got := requireDeny(h, "unknown_kid") - deniesBefore; got != 1 {
+		t.Errorf("unknown_kid refusals for the forwarder's CONNECT = %d, want 1", got)
+	}
 	if retryTun == nil {
 		t.Fatalf("CONNECT after the emergency rotation: %q, want 200 after the retry", head)
 	}
