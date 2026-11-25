@@ -66,10 +66,17 @@ var pending = joinPending(
 		CoverIdentity("unbound_token"),
 		CoverRoute("/oauth2/token"),
 	),
-	// W-P2-SECT-03: binding, cross-agent, issued-token lifetime.
+	// W-P2-SECT-03: binding, cross-agent, issued-token lifetime. What is left
+	// cannot be driven from outside the worker today: a disabled agent is
+	// refused by the kill switch (agent_disabled 403, before identity runs) in
+	// the same bundle apply that lets the binding see the disabled status, so the
+	// binding's own agent_disabled reason is a defence in depth that only a
+	// race between the two reaches (internal/worker/agentgate.go gatedEvaluator
+	// flips the switch first). A deterministic case needs a seam that holds the
+	// applier between the policy swap and the snapshot install; the proxy unit
+	// tests (internal/identity/binding_test.go) cover the reason itself.
 	pend(TicketBinding,
-		CoverToken("agent_disabled"), CoverToken("user_blocked"), CoverToken("group_not_allowed"),
-		CoverToken("scope_not_allowed"), CoverToken("session_revoked"),
+		CoverIdentity("agent_disabled"),
 	),
 	// W-P2-SECT-04: worker certificates and signed bundles.
 	pend(TicketCerts,

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -218,6 +219,9 @@ func (s *Stack) events(tb testing.TB, w *Worker, f analytics.EventFilter) []anal
 	if err != nil {
 		tb.Fatalf("security: read %s events: %v", w.Name, err)
 	}
+	// The store lists newest first; every caller counts "new events" as a
+	// suffix of the list, so return them oldest first as documented.
+	sort.SliceStable(evs, func(i, j int) bool { return evs[i].Timestamp.Before(evs[j].Timestamp) })
 	return evs
 }
 

@@ -53,6 +53,12 @@ type Case struct {
 	// case's Covers or in pending.go.
 	Covers []string
 
+	// Setup, when set, runs before the case's assertion sources are read: it
+	// builds the state the attack needs (a held tunnel, a prepared token) and
+	// keeps it with Stack.Put, so a case stays plain package-level data and the
+	// hits and events it makes do not count against the attack.
+	Setup func(t testing.TB, s *Stack)
+
 	// Attack performs the attack and returns what the attacker saw.
 	Attack func(t testing.TB, s *Stack) Observed
 
@@ -73,6 +79,12 @@ type Case struct {
 	// carry outcome WantResult and reason WantReason. On a bundle path,
 	// warden_bundle_rejected_total{reason=WantReason} must rise by one.
 	WantResult, WantReason string
+	// Unauthenticated marks a token-path refusal of a caller whose client
+	// assertion did not authenticate (a disabled agent is one): the service
+	// writes no token_events row for it, so the case asserts that none is
+	// written and reads WantReason from the rate-limited
+	// token_exchange_unauthenticated warning instead. WantResult stays empty.
+	Unauthenticated bool
 	// WantDeny, when set, is the Reason of a new deny event on the worker.
 	WantDeny string
 	// WantAudit, when set, is the action of exactly one new admin audit row.
@@ -153,6 +165,9 @@ func (s *Stack) runCase(t testing.TB, c Case) {
 		}
 		return
 	}
+	if c.Setup != nil {
+		c.Setup(t, s)
+	}
 	before := s.snapshot(t, w, c)
 	obs := c.Attack(t, s)
 	after := s.snapshot(t, w, c)
@@ -186,7 +201,15 @@ func (s *Stack) runCase(t testing.TB, c Case) {
 			}
 		}
 	case PathToken:
-		if c.WantResult != "" || c.WantReason != "" {
+		if c.Unauthenticated {
+			if rows := after.tokenEvents[before.tokenEventCount:]; len(rows) != 0 {
+				t.Errorf("new token_events rows = %+v, want none for a caller that did not authenticate", rows)
+			}
+			logs := after.logs[before.logLen:]
+			if !strings.Contains(logs, "token_exchange_unauthenticated") || !strings.Contains(logs, `"reason":"`+c.WantReason+`"`) {
+				t.Errorf("the logs written during the case carry no token_exchange_unauthenticated warning with reason %q", c.WantReason)
+			}
+		} else if c.WantResult != "" || c.WantReason != "" {
 			rows := after.tokenEvents[before.tokenEventCount:]
 			if len(rows) != 1 || rows[0].Outcome != c.WantResult || rows[0].Reason != c.WantReason {
 				t.Errorf("new token_events rows = %+v, want exactly one with outcome %q reason %q", rows, c.WantResult, c.WantReason)
@@ -310,4 +333,14 @@ func validateCase(c Case) []string {
 		}
 	}
 	return bad
+}
+
+// Run1 runs one case built inline: base carries the expectations, name and
+// attack complete it. It is for a test that mixes an inline assertion with a
+// case and needs the same checks and leak invariant, without a package-level
+// case that the enum-completeness test would also see.
+func (s *Stack) Run1(t *testing.T, base Case, name string, attack func(t testing.TB, s *Stack) Observed) {
+	t.Helper()
+	base.Name, base.Attack, base.Covers = name, attack, nil
+	t.Run(name, func(t *testing.T) { s.runCase(t, base) })
 }

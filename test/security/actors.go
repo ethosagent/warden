@@ -129,6 +129,12 @@ type Reply struct {
 // header. A non-nil body is sent as JSON.
 func (c *Session) Do(tb testing.TB, method, path string, body any) Reply {
 	tb.Helper()
+	return c.DoWith(tb, method, path, body, nil)
+}
+
+// DoWith is Do with extra request headers (If-Match on an agent write).
+func (c *Session) DoWith(tb testing.TB, method, path string, body any, hdr http.Header) Reply {
+	tb.Helper()
 	var rd io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -142,6 +148,9 @@ func (c *Session) Do(tb testing.TB, method, path string, body any) Reply {
 		tb.Fatalf("security: build %s %s: %v", method, path, err)
 	}
 	req.Header.Set(controlplane.CSRFHeader, c.csrf)
+	for k, v := range hdr {
+		req.Header[k] = v
+	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}

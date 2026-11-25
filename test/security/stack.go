@@ -90,6 +90,14 @@ type StackOptions struct {
 	// so the swapped-secret assertions do not hold: only the route-boundary
 	// cases that need the route set it.
 	EchoSecretStore bool
+	// UnboundWorker adds a third worker with no central.agentID, named
+	// worker-unbound: its agent id is the derived agent:<port>, which no
+	// registry lists. Reach it with Stack.Worker("worker-unbound").
+	UnboundWorker bool
+	// NoCA starts every worker without a MITM CA, so a tunnel is raw (opaque,
+	// bound at CONNECT only). The workers' clients then talk TLS to the
+	// upstream directly.
+	NoCA bool
 	// DefaultTokenRate keeps tokenService.rateLimit at the production defaults
 	// instead of the raised harness limit (the rate-limit case needs it).
 	DefaultTokenRate bool
@@ -136,6 +144,25 @@ type Stack struct {
 	admin    *Session
 	agents   map[string]*Agent
 	controls map[string]bool
+	scratch  map[string]any
+}
+
+// Put keeps v under key for the rest of the test: the state a Case.Setup
+// builds for its Attack.
+func (s *Stack) Put(key string, v any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.scratch == nil {
+		s.scratch = map[string]any{}
+	}
+	s.scratch[key] = v
+}
+
+// Get returns what Put kept under key (nil when nothing was).
+func (s *Stack) Get(key string) any {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.scratch[key]
 }
 
 // CP is the running control plane.
@@ -220,6 +247,9 @@ func StartStackNoWait(tb testing.TB, opts StackOptions) *Stack {
 	for _, agent := range opts.Agents {
 		s.startWorker(agent)
 	}
+	if opts.UnboundWorker {
+		s.startWorker("")
+	}
 	return s
 }
 
@@ -241,15 +271,16 @@ func (s *Stack) Keys() *keys.Manager {
 	return s.km
 }
 
-// Worker returns the worker bound to agentID.
+// Worker returns the worker bound to agentID, or the one named agentID (the
+// unbound worker has no agent id: its name is worker-unbound).
 func (s *Stack) Worker(agentID string) *Worker {
 	s.tb.Helper()
 	for _, w := range s.Workers {
-		if w.AgentID == agentID {
+		if w.AgentID == agentID && agentID != "" || w.Name == agentID {
 			return w
 		}
 	}
-	s.tb.Fatalf("security: no worker is bound to agent %q", agentID)
+	s.tb.Fatalf("security: no worker is bound to agent or named %q", agentID)
 	return nil
 }
 
@@ -451,6 +482,9 @@ workerCA:
 func (s *Stack) startWorker(agent string) {
 	s.tb.Helper()
 	suffix := strings.TrimPrefix(agent, "agent-")
+	if agent == "" {
+		suffix = "unbound"
+	}
 	w := &Worker{
 		Name: "worker-" + suffix, AgentID: agent,
 		TokenEnv: "WARDEN_SECURITY_ENROLL_" + s.id + "_" + strings.ToUpper(sanitizeEnv(suffix)),
@@ -472,6 +506,9 @@ func (s *Stack) startWorker(agent string) {
 		s.tb.Fatalf("security: write the %s config: %v", w.Name, err)
 	}
 	caCert, caKey := s.ProxyCA.WriteFiles(filepath.Join(s.root, "worker-"+suffix), "proxy-ca")
+	if s.opts.NoCA {
+		caCert, caKey = "", ""
+	}
 	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		s.tb.Fatalf("security: listen for %s: %v", w.Name, err)
@@ -526,6 +563,10 @@ func (s *Stack) workerConfig(w *Worker) string {
 	if err != nil {
 		s.tb.Fatalf("security: encode the bundle pins: %v", err)
 	}
+	agentLine := ""
+	if w.AgentID != "" {
+		agentLine = "  agentID: " + w.AgentID + "\n"
+	}
 	return fmt.Sprintf(`logging:
   level: info
   format: json
@@ -543,8 +584,7 @@ controlPlane:
     tokenEnv: %[6]s
 
 central:
-  agentID: %[7]s
-  proxyID: %[8]s
+%[7]s  proxyID: %[8]s
 
 secrets:
   - placeholder: %[9]s
@@ -558,7 +598,7 @@ mcp:
 observability:
   enabled: true
   serviceName: warden-security
-`, s.CP.Addr, s.CP.CertFile, s.opts.LongPollWait, raw, w.StateDir, w.TokenEnv, w.AgentID, w.Name,
+`, s.CP.Addr, s.CP.CertFile, s.opts.LongPollWait, raw, w.StateDir, w.TokenEnv, agentLine, w.Name,
 		SwappedPlaceholder, swappedEnv, UpstreamHost)
 }
 

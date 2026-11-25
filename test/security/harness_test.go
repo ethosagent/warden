@@ -73,7 +73,7 @@ type wardenClaims struct {
 	Iat int64 `json:"iat"`
 }
 
-func decodeClaims(t *testing.T, tok string) wardenClaims {
+func decodeClaims(t testing.TB, tok string) wardenClaims {
 	t.Helper()
 	parts := strings.Split(tok, ".")
 	if len(parts) != 3 {
