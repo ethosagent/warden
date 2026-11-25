@@ -50,8 +50,7 @@ var pending = joinPending(
 	pend(TicketBinding,
 		CoverToken("agent_disabled"), CoverToken("user_blocked"), CoverToken("group_not_allowed"),
 		CoverToken("scope_not_allowed"), CoverToken("session_revoked"),
-		// The four binding reasons of W-P2-WBND-02 (#112) landed with no case
-		// and no pending entry; the binding suite owns them.
+		// Identity reasons added by W-P2-WBND-02 (#112).
 		CoverIdentity("agent_unregistered"), CoverIdentity("agent_disabled"),
 		CoverIdentity("agent_mismatch"), CoverIdentity("cnf_mismatch"),
 	),
