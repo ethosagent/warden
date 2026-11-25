@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ethosagent/warden/internal/analytics"
+	"github.com/ethosagent/warden/internal/apikeys"
 	"github.com/ethosagent/warden/internal/clock"
 	"github.com/ethosagent/warden/internal/workerca"
 )
@@ -373,6 +374,12 @@ func (a *WorkerAuthenticator) resolve(r *http.Request) (p WorkerPrincipal, reaso
 		}
 	}
 	tok, has := bearer(r)
+	// An API key is a human credential for the admin API: refused here whatever
+	// the mode (open included) and before any comparison, so it can never match
+	// the shared token or pass as no credential.
+	if hasAPIKeyBearer(r) || (has && apikeys.LooksLikeKey(tok)) {
+		return WorkerPrincipal{Kind: KindNone}, "api_key_bearer", "", ErrUnauthorized
+	}
 	if a.mode == modeStrictCerts {
 		p.Kind = KindNone
 		if has {
