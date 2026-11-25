@@ -74,6 +74,22 @@ type IdentitySettings struct {
 	// SignIn tunes the device authorization a worker in challenge mode starts
 	// for a caller with no valid identity. It holds no secrets.
 	SignIn *SignInSettings `json:"signIn,omitempty" yaml:"signIn"`
+	// AcceptDexTokens says whether a worker accepts a user token straight from
+	// the IdP (the P1 flow) next to the Warden tokens the control plane mints.
+	// nil means unset: true when Issuer is set, false otherwise (see
+	// AcceptIdPTokens). false turns each IdP token away as unbound_token, which
+	// is what an agent in require mode needs; the key name keeps the first
+	// IdP the flow was built against.
+	AcceptDexTokens *bool `json:"acceptDexTokens,omitempty" yaml:"acceptDexTokens"`
+}
+
+// AcceptIdPTokens resolves identity.acceptDexTokens: the explicit value, else
+// true when identity.issuer is set and false otherwise.
+func (s IdentitySettings) AcceptIdPTokens() bool {
+	if s.AcceptDexTokens != nil {
+		return *s.AcceptDexTokens
+	}
+	return strings.TrimSpace(s.Issuer) != ""
 }
 
 // SignInSettings is the `identity.signIn` block (challenge mode only). Zero
@@ -219,7 +235,13 @@ func validateIdentity(s IdentitySettings, agents []AgentPolicy) error {
 	if err := validateSignIn(s); err != nil {
 		return err
 	}
-	if identityEnabled(s, agents) {
+	if s.AcceptDexTokens != nil && *s.AcceptDexTokens && strings.TrimSpace(s.Issuer) == "" {
+		return fmt.Errorf("config: identity.acceptDexTokens true requires identity.issuer")
+	}
+	// An explicit acceptDexTokens false means no IdP token is ever verified, so
+	// the IdP issuer and audience are not needed to turn attribute on. Challenge
+	// still signs users in at the IdP and needs both.
+	if identityEnabled(s, agents) && (s.AcceptDexTokens == nil || *s.AcceptDexTokens || challengeEnabled(s, agents)) {
 		if strings.TrimSpace(s.Issuer) == "" {
 			return fmt.Errorf("config: identity.issuer is required when an identity mode is attribute or challenge")
 		}
@@ -287,12 +309,16 @@ func IdentityFromSettings(s *IdentitySettings) IdentitySettings {
 func (s IdentitySettings) isZero() bool {
 	return s.DefaultMode == "" && s.Issuer == "" && s.Audience == "" && len(s.AllowedAZP) == 0 &&
 		s.JWKSURL == "" && s.GroupsClaim == "" && s.ClockSkewSeconds == 0 &&
-		s.MaxTokenTTLSeconds == 0 && s.InternalIssuerURL == "" && s.SignIn == nil
+		s.MaxTokenTTLSeconds == 0 && s.InternalIssuerURL == "" && s.SignIn == nil && s.AcceptDexTokens == nil
 }
 
 func (s IdentitySettings) clone() *IdentitySettings {
 	if s.AllowedAZP != nil {
 		s.AllowedAZP = append([]string(nil), s.AllowedAZP...)
+	}
+	if s.AcceptDexTokens != nil {
+		v := *s.AcceptDexTokens
+		s.AcceptDexTokens = &v
 	}
 	if s.SignIn != nil {
 		si := *s.SignIn

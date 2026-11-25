@@ -241,6 +241,8 @@ strings never become a reason.
 | `ttl_too_long` | `exp - iat` is over the maximum token lifetime |
 | `jwks_unavailable` | The issuer's key set could not be fetched (status `unverified`) |
 | `wrong_nonce` | Console login only: the nonce does not match. Never seen on proxied traffic |
+| `missing_claim` | A Warden token without `sub`, `act.sub`, `sid`, `jti` or `cnf.jkt` |
+| `unbound_token` | An IdP token on a worker that does not accept them (`identity.acceptDexTokens` false) |
 
 ### Challenge mode: 407 with a sign-in URL
 
