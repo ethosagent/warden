@@ -42,6 +42,7 @@ var probedEnv = []string{
 	"SSL_CERT_FILE", "ANTHROPIC_API_KEY", "EDITOR", "NOT_SET_HERE",
 	identityclient.EnvIssuer, identityclient.EnvClientID, identityclient.EnvAudience, identityclient.EnvScopes,
 	identityclient.EnvCacheDir, "WARDEN_IDENTITY_TOKEN",
+	identityclient.EnvAgentID, identityclient.EnvTokenEndpoint, identityclient.EnvCPCA, identityclient.EnvAgentKeyFile,
 }
 
 // execHelper plays the supervised child.
@@ -50,6 +51,7 @@ var probedEnv = []string{
 //	wait     print READY and block until killed
 //	connect  CONNECT through HTTPS_PROXY the way a client would and print the status line
 //	env-connect  env, then connect
+//	run-as   probe, env, then connect
 //	probe    print the child's uid, gid and groups, then try to open each path argument
 //	connect-retry  like connect, repeated every 200 ms until the status is 200 (at most 100 tries)
 func execHelper(mode string) int {
@@ -63,6 +65,10 @@ func execHelper(mode string) int {
 		for _, a := range os.Args {
 			fmt.Println("ARG " + a)
 		}
+	case "run-as":
+		_ = execHelper("probe")
+		_ = execHelper("env")
+		_ = execHelper("connect")
 	case "env-connect":
 		_ = execHelper("env")
 		_ = execHelper("connect")

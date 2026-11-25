@@ -126,9 +126,13 @@ token and key out of the agent's environment, argv and logs.
 Without `--run-as`, `exec` protects against leaks through the environment, argv
 and logs and against stale tokens, but **not against a hostile agent running as
 the same uid**: it can read the identity cache and the agent key. To stop that,
-run `exec` as root and add `--run-as UID:GID` (numeric, neither 0): the agent
+run `exec` as root and add `--run-as UID:GID` (numeric, neither 0, and a
+dedicated uid and gid that nothing else uses, not 65534 `nobody`): the agent
 then starts under that uid with no extra groups and cannot read the key or the
-cache, which stay owned by you with mode 0600. Linux only. The agent does not
+cache, which must be owned by another uid (for example root under `sudo`) with
+mode 0600; `exec` refuses to start otherwise. A terminal shared with the agent
+still allows `TIOCSTI` keystroke injection: use kernel 6.2 or later with
+`dev.tty.legacy_tiocsti=0`, or sudo's `use_pty`. Linux only. The agent does not
 inherit HOME, USER, LOGNAME or SHELL in that case; pass one with `--env NAME`.
 For containers, prefer the sidecar `warden identity forward` recipes, which keep
 the key out of the agent's container entirely.

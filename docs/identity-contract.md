@@ -643,7 +643,7 @@ another user.
 
 ```sh
 warden identity exec --agent-id claude-code --worker 127.0.0.1:8080 --ca certs/proxy-ca.crt -- my-agent
-sudo warden identity exec --agent-id claude-code --run-as 65534:65534 --worker 127.0.0.1:8080 -- my-agent
+sudo warden identity exec --agent-id claude-code --run-as 61001:61001 --worker 127.0.0.1:8080 -- my-agent
 ```
 
 For an agent behind a worker in `require` mode, `exec --agent-id ID` sends the
@@ -669,13 +669,22 @@ or files.
   or `--signin-notify`: those ask the user to sign in for their own token.
 - `--run-as UID:GID` (Linux only, `exec` must run as root) starts the command
   with exactly that numeric uid and gid and no supplementary groups, so a
-  command that is hostile cannot read the agent key or the login cache, which
-  stay owned by the user that runs `exec` and are readable by that user alone.
-  `exec` refuses `--run-as` when it is not root, on other platforms, and for a
-  uid or gid of 0; a failed credential change stops the command from starting.
-  Because HOME, USER, LOGNAME and SHELL describe the parent, a `--run-as`
-  command does not inherit them; pass one with `--env NAME` if the command
-  needs it.
+  hostile command cannot read the agent key or the login cache. Use a
+  dedicated uid and gid that nothing else runs as, not 65534 (`nobody`): other
+  processes under the same uid could read the command's `/proc/<pid>/environ`
+  and take the forwarder credential. The key, the subject token file and the
+  cache directory must be owned by a different uid than the one in `--run-as`
+  (for example root under `sudo`) and unreadable by that gid and by others;
+  `exec` checks this before it starts anything and refuses otherwise. It also
+  refuses `--run-as` when it is not root, on other platforms, and for a uid
+  or gid of 0; a failed credential change stops the command from starting, and
+  the command is killed if `exec` dies. Because HOME, USER, LOGNAME and SHELL
+  describe the parent, a `--run-as` command does not inherit them; pass one with
+  `--env NAME` if the command needs it.
+- **Shared terminal.** A command that shares your terminal can inject keystrokes
+  into it with the `TIOCSTI` ioctl, whatever its uid. Use Linux 6.2 or later
+  with `sysctl dev.tty.legacy_tiocsti=0`, or run `sudo` with `use_pty`, or run
+  `exec` without a terminal.
 
 ### warden identity forward
 

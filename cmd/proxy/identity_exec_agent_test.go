@@ -62,6 +62,7 @@ func TestIdentityExecAgentToken(t *testing.T) {
 	leaks := []string{token, a.subject, a.keyFile, a.subjectFile, wardenSecretMarker, "WARDEN_IDENTITY_", identityclient.EnvAgentID}
 	leaks = append(leaks, secretWindows("pem body", string(pemKey), 16)...)
 	leaks = append(leaks, secretWindows("token", token, 16)...)
+	leaks = append(leaks, secretWindows("token", a.subject, 16)...)
 	leaks = append(leaks, body)
 	for _, secret := range leaks {
 		if strings.Contains(res.stdout, secret) || strings.Contains(res.stderr, secret) {
@@ -143,10 +144,6 @@ func TestIdentityExecAgentRefusals(t *testing.T) {
 }
 
 func TestIdentityExecRunAsRefusals(t *testing.T) {
-	self, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
 	touch, err := exec.LookPath("touch")
 	if err != nil {
 		t.Fatal(err)
@@ -208,13 +205,20 @@ func TestIdentityExecRunAsRefusals(t *testing.T) {
 			t.Errorf("the child ran after a failed credential change: stat err = %v", err)
 		}
 	})
-	_ = self
 }
 
 // TestIdentityExecRunAs runs the real thing when the test itself runs as root:
-// the child has the requested uid and gid, no groups, and cannot open the
-// agent key or the login cache that exec reads as root.
+// the child has the requested uid and gid, no groups, cannot open the agent
+// key, the subject file or a 0600 file, still reaches the worker through the
+// forwarder with the Warden token, and does not inherit HOME, USER, LOGNAME or
+// SHELL. Without root it only logs; with WARDEN_TEST_REQUIRE_ROOT=1 it fails
+// instead, so a root run cannot pass by doing nothing:
+//
+//	go test -race -c -o /tmp/proxy.test ./cmd/proxy && sudo -n env WARDEN_TEST_REQUIRE_ROOT=1 /tmp/proxy.test -test.run '^TestIdentityExecRunAs$' -test.v
 func TestIdentityExecRunAs(t *testing.T) {
+	if v, _ := os.LookupEnv("WARDEN_TEST_REQUIRE_ROOT"); v == "1" && (os.Geteuid() != 0 || !identityclient.RunAsSupported) {
+		t.Fatal("WARDEN_TEST_REQUIRE_ROOT=1 but this test is not running as root on Linux")
+	}
 	if os.Geteuid() != 0 || !identityclient.RunAsSupported {
 		t.Log("not root on Linux: the privileged child is not started here; refusals are covered by TestIdentityExecRunAsRefusals")
 		return
@@ -276,10 +280,26 @@ func TestIdentityExecRunAs(t *testing.T) {
 		t.Fatal(err)
 	}
 	w := newRecordingWorker(t)
-	res := a.runExec("probe", nil, append(agentExecArgs(a, w.ln.Addr().String(), "--run-as", strconv.Itoa(uid)+":"+strconv.Itoa(gid)),
+	a.parent = map[string]string{"HOME": "/root", "USER": "root", "LOGNAME": "root", "SHELL": "/bin/sh"}
+	res := a.runExec("run-as", nil, append(agentExecArgs(a, w.ln.Addr().String(), "--run-as", strconv.Itoa(uid)+":"+strconv.Itoa(gid)),
 		"--", bin, "-test.run=NONE", a.keyFile, a.subjectFile, loginCache, control)...)
 	if res.err != nil {
 		t.Fatalf("exec: %v\n%s", res.err, res.stderr)
+	}
+	// The child still reaches the worker through the forwarder, which adds the
+	// Warden token; the account variables of the parent are gone.
+	if !strings.Contains(res.stdout, "STATUS HTTP/1.1 200") {
+		t.Errorf("the run-as child could not CONNECT through the forwarder:\n%s\n%s", res.stdout, res.stderr)
+	}
+	if heads := w.Heads(); len(heads) != 1 {
+		t.Errorf("worker saw %d CONNECTs, want 1", len(heads))
+	} else if raw, derr := base64.StdEncoding.DecodeString(strings.TrimPrefix(headerOf(heads[0], "Proxy-Authorization"), "Basic ")); derr != nil || !strings.HasPrefix(string(raw), "session:eyJ") {
+		t.Errorf("worker auth = %q (%v), want session:<Warden token>", raw, derr)
+	}
+	for _, gone := range []string{"ENV HOME=", "ENV USER=", "ENV LOGNAME=", "ENV SHELL="} {
+		if strings.Contains(res.stdout, gone) {
+			t.Errorf("the run-as child inherited %s", gone)
+		}
 	}
 	for _, want := range []string{
 		"IDS uid=65534 euid=65534 gid=65533 egid=65533 groups=[]",
@@ -333,5 +353,52 @@ func TestAgentKeyAndCacheAreOwnerOnly(t *testing.T) {
 		if st.Mode().Perm()&0o077 != 0 {
 			t.Errorf("cache file %s mode = %04o, want no group or other access", e.Name(), st.Mode().Perm())
 		}
+	}
+}
+
+// TestIdentityExecRunAsRefusesReachableSecrets: --run-as is refused, before any
+// exchange or child, when the run-as identity could read the key, the subject
+// file or the cache. The test user's own uid and gid are the target, so no root
+// is needed (the effective uid is injected).
+func TestIdentityExecRunAsRefusesReachableSecrets(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Log("running as root: uid 0 is not a valid --run-as target; TestCheckRunAsAccess covers the rule")
+		return
+	}
+	touch, err := exec.LookPath("touch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	uid, gid := strconv.Itoa(os.Getuid()), strconv.Itoa(os.Getgid())
+	for _, tc := range []struct {
+		name, spec, want string
+		prep             func(a *agentRigCmd)
+	}{
+		{"key owned by the run-as uid", uid + ":" + gid, "agent key file", nil},
+		{"key readable by everyone", "1:2", "readable by everyone", func(a *agentRigCmd) {
+			_ = os.Chmod(a.keyFile, 0o644)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := newAgentCmdRig(t)
+			if _, _, err := a.enroll(t); err != nil {
+				t.Fatal(err)
+			}
+			if tc.prep != nil {
+				tc.prep(a)
+			}
+			a.euid = func() int { return 0 }
+			marker := filepath.Join(t.TempDir(), "started")
+			res := a.runExec("env", nil, append(agentExecArgs(a, "127.0.0.1:9", "--run-as", tc.spec), "--", touch, marker)...)
+			if res.err == nil || !strings.Contains(res.err.Error(), tc.want) {
+				t.Fatalf("err = %v, want it to contain %q", res.err, tc.want)
+			}
+			if _, err := os.Stat(marker); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("the child ran: stat err = %v", err)
+			}
+			if a.cp.calls.Load() != 0 {
+				t.Error("an exchange happened before the refusal")
+			}
+		})
 	}
 }

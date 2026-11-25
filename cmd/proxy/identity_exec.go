@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -111,7 +112,7 @@ func (r *identityRunner) execCmd() *cobra.Command {
 			"A command running as the same user can read the agent key and the identity cache. --run-as UID:GID " +
 			"(Linux, exec run as root) starts the command under that numeric uid and gid with no supplementary " +
 			"groups, so it cannot read them; exec then also leaves HOME, USER, LOGNAME and SHELL out of the " +
-			"command's environment unless named with --env. The key and the cache must belong to the user running exec.",
+			"command's environment unless named with --env. The key, the subject token file and the cache directory must belong to another uid than UID and be unreadable by GID and by others; exec checks this first.",
 		SilenceUsage: true, SilenceErrors: true,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -179,6 +180,12 @@ func (r *identityRunner) runExec(cmd *cobra.Command, args []string, o execOpts) 
 			return err
 		}
 		runAs = &ra
+		if err := r.checkRunAsAccess(ra, agent); err != nil {
+			return err
+		}
+		// Pdeathsig follows the thread that starts the child: keep it.
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
 	}
 	ctx := cmd.Context()
 	if ctx == nil {
@@ -304,6 +311,30 @@ func (r *identityRunner) runExec(cmd *cobra.Command, args []string, o execOpts) 
 		return &exitError{code: code}
 	}
 	return nil
+}
+
+// checkRunAsAccess refuses --run-as when the child's new identity could read
+// the agent key, the subject token file or the login cache directory. It runs
+// before any exchange, login or child.
+func (r *identityRunner) checkRunAsAccess(ra identityclient.RunAs, agent bool) error {
+	var paths []identityclient.AccessPath
+	if agent {
+		cfg, err := identityclient.LoadAgentConfig(r.agentFlags(""), r.deps.getenv)
+		if err != nil {
+			return err
+		}
+		paths = append(paths,
+			identityclient.AccessPath{What: "agent key file", Path: cfg.KeyFile},
+			identityclient.AccessPath{What: "subject token file", Path: cfg.SubjectTokenFile})
+	}
+	// The cache is only used with an issuer; an agent that takes its subject
+	// from a file may have none configured.
+	if cfg, err := r.config(); err == nil {
+		paths = append(paths, identityclient.AccessPath{What: "login cache directory", Path: cfg.CacheDir})
+	} else if !agent {
+		return err
+	}
+	return identityclient.CheckRunAsAccess(ra, paths, nil)
 }
 
 // omitFor lists the variables a child under --run-as does not inherit.

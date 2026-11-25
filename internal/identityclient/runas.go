@@ -3,6 +3,7 @@ package identityclient
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"strconv"
 	"strings"
@@ -77,4 +78,48 @@ func ResolveRunAs(spec string, euid EffectiveUID) (RunAs, error) {
 		return RunAs{}, ErrRunAsNotRoot
 	}
 	return r, nil
+}
+
+// AccessPath names a file or directory the --run-as child must not reach.
+type AccessPath struct {
+	// What names it in an error ("agent key file", "login cache directory").
+	What string
+	Path string
+}
+
+// CheckRunAsAccess refuses --run-as when the child could read one of paths
+// through its new identity: the path belongs to the run-as uid, belongs to the
+// run-as gid and is group readable, or is readable by anyone. A path that does
+// not exist is skipped (nothing to protect yet); a path that cannot be examined
+// is refused. stat nil selects os.Stat.
+func CheckRunAsAccess(r RunAs, paths []AccessPath, stat func(string) (fs.FileInfo, error)) error {
+	if stat == nil {
+		stat = os.Stat
+	}
+	for _, p := range paths {
+		if p.Path == "" {
+			continue
+		}
+		fi, err := stat(p.Path)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("--run-as: cannot check the %s %s: %w", p.What, p.Path, err)
+		}
+		uid, gid, ok := fileOwner(fi)
+		if !ok {
+			return fmt.Errorf("--run-as: cannot determine the owner of the %s %s", p.What, p.Path)
+		}
+		perm := fi.Mode().Perm()
+		switch {
+		case uid == r.UID:
+			return fmt.Errorf("--run-as: the %s %s is owned by uid %d, the uid the command would run as, so it could read it; it must belong to another user (for example root)", p.What, p.Path, r.UID)
+		case gid == r.GID && perm&0o040 != 0:
+			return fmt.Errorf("--run-as: the %s %s is readable by gid %d (mode %04o), the gid the command would run as; chmod it to 0600 or 0700 or use another gid", p.What, p.Path, r.GID, perm)
+		case perm&0o004 != 0:
+			return fmt.Errorf("--run-as: the %s %s is readable by everyone (mode %04o), so the command could read it; chmod it to 0600 or 0700", p.What, p.Path, perm)
+		}
+	}
+	return nil
 }
