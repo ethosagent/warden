@@ -114,9 +114,9 @@ func samePublicKey(cert *x509.Certificate, key crypto.Signer) bool {
 	return ok && pub.Equal(cert.PublicKey)
 }
 
-// hostile is the CSR of an attacker: it asks for another worker's identity, a
+// hostileCSR is the CSR of an attacker: it asks for another worker's identity, a
 // subject, DNS, e-mail and IP SANs, and a CA certificate.
-func (s *Stack) hostile(tb testing.TB, victim string) (crypto.Signer, string) {
+func (s *Stack) hostileCSR(tb testing.TB, victim string) (crypto.Signer, string) {
 	tb.Helper()
 	spiffe, err := workerca.SPIFFEID(TrustDomain, victim)
 	if err != nil {
@@ -204,7 +204,7 @@ func enrollCases(fx *enrollFixtures) []Case {
 		Covers: []string{CoverRoute("/control/enroll")},
 		Attack: func(t testing.TB, s *Stack) Observed {
 			fresh(s)
-			key, csr := s.hostile(t, "agent-a")
+			key, csr := s.hostileCSR(t, "agent-a")
 			before, mark := s.State(t), s.AuditMark(t)
 			// The suffix is for prefix tokens: an id-bound token ignores it.
 			r := s.Enroll(t, fx.sans, csr, "agent-a")
@@ -312,7 +312,7 @@ func enrollCases(fx *enrollFixtures) []Case {
 			Path: PathEnroll,
 			Attack: func(t testing.TB, s *Stack) Observed {
 				fresh(s)
-				key, csr := s.hostile(t, "agent-b")
+				key, csr := s.hostileCSR(t, "agent-b")
 				r := s.Enroll(t, fx.prefix, csr, "agent-b")
 				leaf, body := s.ParseIssued(t, r, key)
 				assertIssuedCert(t, s, body, leaf.Cert, "pool-agent-b", key)
@@ -435,7 +435,7 @@ func renewCases(fx *renewFixtures) []Case {
 		Covers: []string{CoverRoute("/control/renew")},
 		Attack: func(t testing.TB, s *Stack) Observed {
 			fresh(s)
-			key, csr := s.hostile(t, "agent-b")
+			key, csr := s.hostileCSR(t, "agent-b")
 			before := s.State(t)
 			r := s.Renew(t, fx.sans, csr)
 			next, body := s.ParseIssued(t, r, key)

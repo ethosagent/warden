@@ -294,7 +294,7 @@ type workerRoute struct {
 	bundle       bool
 }
 
-var workerRoutes = []workerRoute{
+var boundaryWorkerRoutes = []workerRoute{
 	{http.MethodGet, "/policy", true},
 	{http.MethodPost, "/control/heartbeat", false},
 	{http.MethodPost, "/central/ingest", false},
@@ -386,7 +386,7 @@ func routeCases(fx *routeFixtures, wwtReason, cookieReason string, humanToo bool
 	// Worker routes: an API key and a console cookie are not worker
 	// credentials. (A wwt_ token and a certificate are, so the wwt_ token is
 	// refused only where a certificate is the only way in.)
-	for _, r := range workerRoutes {
+	for _, r := range boundaryWorkerRoutes {
 		reason := func(r workerRoute, want string) string {
 			if r.path == "/control/renew" {
 				return "cert_required"
