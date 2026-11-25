@@ -520,9 +520,23 @@ func TestEnumCompleteness(t *testing.T) {
 		}
 		pend[p.Item] = p.Ticket
 	}
+	excluded := map[string]bool{}
+	for _, e := range exclusions {
+		switch {
+		case !exists[e.Item]:
+			t.Errorf("pending.go excludes %q, which does not exist (remove the entry)", e.Item)
+		case covered[e.Item] || pend[e.Item] != "":
+			t.Errorf("pending.go excludes %q, which a case covers or a pending entry lists (keep one)", e.Item)
+		case len(strings.TrimSpace(e.Reason)) < 40 || !strings.Contains(e.Reason, "_test.go"):
+			t.Errorf("the exclusion of %q needs a reason that names the unit tests covering it", e.Item)
+		case excluded[e.Item]:
+			t.Errorf("pending.go excludes %q twice", e.Item)
+		}
+		excluded[e.Item] = true
+	}
 	for _, it := range all {
-		if !covered[it] && pend[it] == "" {
-			t.Errorf("%s has no case and no pending.go entry: add a case that covers it, or a pending entry naming the ticket that will", it)
+		if !covered[it] && pend[it] == "" && !excluded[it] {
+			t.Errorf("%s has no case, no pending.go entry and no exclusion: add a case that covers it, or a pending entry naming the ticket that will", it)
 		}
 	}
 }
