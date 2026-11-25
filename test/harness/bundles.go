@@ -5,20 +5,23 @@ import (
 	"time"
 
 	"github.com/ethosagent/warden/internal/bundle"
+	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/controlplane"
 	"github.com/ethosagent/warden/internal/keys"
+	"github.com/ethosagent/warden/internal/keys/adapters/signer"
 )
 
 // The signed-bundle gate (W-P2-SBND-02): the control plane boots with
 // --bundles=offer on the versioned policy store and the signing keys, signs
 // what it serves on GET /policy with its bundle key, and serves the envelope
-// to a request with the bundle Accept header. The workers do not ask for it
-// yet (worker pinning is W-P2-SBND-03/04), so they keep pulling the legacy
-// wire; a scenario plays the pinned worker through CP().Send.
+// to a request with the bundle Accept header. Workers keep pulling the legacy
+// wire unless WithBundlePins pins them (W-P2-SBND-04); a pinned worker applies
+// only verified bundles. A scenario can also play a pinned worker through
+// CP().Send.
 
 // WithBundles boots the control plane with --bundles=mode (controlplane.
-// BundlesOffer; require would refuse the harness's own workers, which do not
-// send the bundle Accept header yet), which needs the versioned policy store,
+// BundlesOffer; require would refuse the harness's own workers unless
+// WithBundlePins makes them send the bundle Accept header), which needs the versioned policy store,
 // a state dir and keys.enabled: the option turns those on. Combine it with
 // WithKeyRotation to drive token key rotations on the harness clock.
 // In-process only.
@@ -34,6 +37,55 @@ func (h *H) applyBundles(p *controlplane.Params) {
 	if h.bundleMode != "" {
 		p.Bundles = h.bundleMode
 	}
+}
+
+// bundlePinSet says which keys the workers pin.
+type bundlePinSet int
+
+const (
+	pinNone bundlePinSet = iota
+	pinControlPlane
+	pinUnrelated
+)
+
+// WithBundlePins pins every worker to the control plane's bundle public keys
+// (controlPlane.bundleKeys), so a worker asks for the signed envelope and
+// applies nothing it cannot verify. Combine it with WithBundles. In-process only.
+func WithBundlePins() Option { return func(h *H) { h.bundlePins = pinControlPlane } }
+
+// WithUnrelatedBundlePins pins every worker to a key the control plane never
+// signs with: every bundle it serves is rejected, and the worker must stay
+// fail-closed instead of falling back to the unsigned wire. In-process only.
+func WithUnrelatedBundlePins() Option { return func(h *H) { h.bundlePins = pinUnrelated } }
+
+// WithBundleExpiry sets controlPlane.bundleExpiry for pinned workers (keep or
+// deny; the default is keep).
+func WithBundleExpiry(mode config.BundleExpiry) Option {
+	return func(h *H) { h.bundleExpiry = mode }
+}
+
+// applyBundlePins fills the signed-bundle fields of a worker's policy.
+func (h *H) applyBundlePins(p *config.Policy) {
+	var pins []keys.JWK
+	switch h.bundlePins {
+	case pinNone:
+		return
+	case pinControlPlane:
+		pins = h.KeyManager().KeySet().JWKS(keys.PurposeBundle).Keys
+	case pinUnrelated:
+		sg, err := signer.GenerateLocal(keys.AlgEdDSA)
+		if err != nil {
+			h.tb.Fatalf("harness: generate an unrelated bundle key: %v", err)
+		}
+		j, err := keys.PublicJWK(sg.Public(), keys.AlgEdDSA)
+		if err != nil {
+			h.tb.Fatalf("harness: unrelated bundle key JWK: %v", err)
+		}
+		pins = []keys.JWK{j}
+	}
+	p.ControlPlane.BundleKeys = pins
+	p.ControlPlane.BundleClockSkew = 5 * time.Minute
+	p.ControlPlane.BundleExpiry = h.bundleExpiry
 }
 
 // BundleMediaType is the Accept header value that asks for the envelope.

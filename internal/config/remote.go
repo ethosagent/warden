@@ -33,8 +33,21 @@ type RemoteProvider struct {
 	mu         sync.RWMutex
 	policy     *Policy
 	settings   *SettingsWire // behavioral config from the CP (stored, not yet applied)
-	etag       string        // last ETag seen, sent as If-None-Match on the next long-poll
-	lastErr    error
+	etag       string        // ETag of the applied policy: what the heartbeat reports
+	// pollETag is sent as If-None-Match on the next long-poll. It equals etag
+	// except after a rejected bundle, when it is the rejected envelope's ETag
+	// so the same bad bundle is not downloaded again.
+	pollETag string
+	lastErr  error
+
+	// Signed bundles (remote_bundle.go); trust is nil until SetBundleTrust.
+	// applyMu serializes the verify-then-swap of one response.
+	applyMu       sync.Mutex
+	trust         *BundleTrust
+	bundle        *VerifiedBundle
+	lastReject    string
+	rejects       map[string]int64
+	loggedRejects map[string]bool
 	// caps are the capabilities advertised on every heartbeat (see WorkerCaps).
 	caps []string
 	// agentID is the registered agent id this worker is bound to, and
@@ -216,6 +229,7 @@ func (r *RemoteProvider) Pull() error {
 	if r.proxyID != "" {
 		req.Header.Set("X-Warden-Proxy-ID", r.proxyID)
 	}
+	r.setAccept(req)
 
 	resp, err := r.client.Do(req)
 	if err != nil {
@@ -225,21 +239,37 @@ func (r *RemoteProvider) Pull() error {
 	if resp.StatusCode != http.StatusOK {
 		return r.setErr(fmt.Errorf("config: remote: unexpected status %d", resp.StatusCode))
 	}
+	_, err = r.applyResponse(resp)
+	return err
+}
+
+// applyResponse applies one 200 policy response and reports whether the
+// enforced policy changed. With pins set the body must be a verified signed
+// bundle; without them it is the legacy wire, read and parsed as it always was.
+// Every failure keeps the last-known-good policy and is recorded as lastErr.
+func (r *RemoteProvider) applyResponse(resp *http.Response) (bool, error) {
+	r.mu.RLock()
+	t := r.trust
+	r.mu.RUnlock()
+	if t != nil {
+		return r.applyBundleBody(t, resp)
+	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxPolicyBytes))
 	if err != nil {
-		return r.setErr(fmt.Errorf("config: remote: read body: %w", err))
+		return false, r.setErr(fmt.Errorf("config: remote: read body: %w", err))
 	}
 	p, settings, err := parseRemotePolicy(body)
 	if err != nil {
-		return r.setErr(fmt.Errorf("config: remote: %w", err))
+		return false, r.setErr(fmt.Errorf("config: remote: %w", err))
 	}
+	etag := strings.Trim(resp.Header.Get("ETag"), `"`)
 	r.mu.Lock()
 	r.policy = p
 	r.settings = settings
-	r.etag = strings.Trim(resp.Header.Get("ETag"), `"`)
+	r.etag, r.pollETag = etag, etag
 	r.lastErr = nil
 	r.mu.Unlock()
-	return nil
+	return true, nil
 }
 
 // PollLong issues an ETag-conditional long-poll: the CP holds the request up to
@@ -266,8 +296,9 @@ func (r *RemoteProvider) PollLong(ctx context.Context, wait time.Duration) (chan
 	if r.proxyID != "" {
 		req.Header.Set("X-Warden-Proxy-ID", r.proxyID)
 	}
+	r.setAccept(req)
 	r.mu.RLock()
-	etag := r.etag
+	etag := r.pollETag
 	r.mu.RUnlock()
 	if etag != "" {
 		req.Header.Set("If-None-Match", `"`+etag+`"`)
@@ -285,21 +316,7 @@ func (r *RemoteProvider) PollLong(ctx context.Context, wait time.Duration) (chan
 		r.clearErr()
 		return false, nil
 	case http.StatusOK:
-		body, rerr := io.ReadAll(io.LimitReader(resp.Body, maxPolicyBytes))
-		if rerr != nil {
-			return false, r.setErr(fmt.Errorf("config: remote: read body: %w", rerr))
-		}
-		p, settings, perr := parseRemotePolicy(body)
-		if perr != nil {
-			return false, r.setErr(fmt.Errorf("config: remote: %w", perr))
-		}
-		r.mu.Lock()
-		r.policy = p
-		r.settings = settings
-		r.etag = strings.Trim(resp.Header.Get("ETag"), `"`)
-		r.lastErr = nil
-		r.mu.Unlock()
-		return true, nil
+		return r.applyResponse(resp)
 	default:
 		return false, r.setErr(fmt.Errorf("config: remote: unexpected status %d", resp.StatusCode))
 	}
@@ -348,6 +365,17 @@ func (r *RemoteProvider) Heartbeat(ctx context.Context) error {
 		return fmt.Errorf("config: remote: heartbeat status %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// setAccept asks for the signed envelope when pins are set. Without pins the
+// request carries no Accept header, as it never did.
+func (r *RemoteProvider) setAccept(req *http.Request) {
+	r.mu.RLock()
+	signed := r.trust != nil
+	r.mu.RUnlock()
+	if signed {
+		req.Header.Set("Accept", BundleMediaType)
+	}
 }
 
 // setErr records err as the last error (preserving last-known-good policy) and

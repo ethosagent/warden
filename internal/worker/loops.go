@@ -22,6 +22,11 @@ type ControlPlaneClient interface {
 	GetPolicy() (config.Policy, error)
 	Settings() *config.SettingsWire
 	Heartbeat(ctx context.Context) error
+	// Bundle is the verified signed bundle in force (ok=false without pins or
+	// before the first verified bundle); BundleStatus is the same state with
+	// the expiry and rejection facts.
+	Bundle() (config.VerifiedBundle, bool)
+	BundleStatus() config.BundleStatus
 }
 
 // Compile-time proof that the concrete control-plane provider satisfies the seam

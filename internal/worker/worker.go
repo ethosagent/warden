@@ -314,6 +314,13 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// initial pull narrows the fail-closed window; if it fails the worker stays
 	// fail-closed and the long-poll loop applies policy once the CP is reachable.
 	// Secrets/judge/audit-signing stay local.
+	// clk is the worker's time port (Overrides.Clock, assembly-only; production
+	// is always clock.Real()). It is resolved here, before the first pull,
+	// because bundle verification reads it.
+	clk := clock.Real()
+	if p.Overrides != nil && p.Overrides.Clock != nil {
+		clk = p.Overrides.Clock
+	}
 	var (
 		controlPlane *config.RemoteProvider
 		remotePolicy *config.Policy // last-known-good remote allow/deny, applied to the evaluator below
@@ -337,6 +344,17 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		// Advertise the capabilities this binary implements so the control plane
 		// can flag workers that would silently ignore newer policy fields.
 		rp.SetCaps(config.WorkerCaps())
+		// Signed bundles: with pinned keys the provider asks for the signed
+		// envelope and applies nothing it cannot verify, never falling back to
+		// the unsigned wire. Set before the first pull.
+		if cp := pol.ControlPlane; cp.BundleVerification() {
+			if tErr := rp.SetBundleTrust(config.BundleTrust{
+				Pins: cp.BundlePins(), Skew: cp.BundleClockSkew, Issuer: cp.BundleIssuer,
+				Expiry: cp.BundleExpiry, Now: clk.Now, Logger: logger,
+			}); tErr != nil {
+				return tErr
+			}
+		}
 		// Shutdown hygiene: drop the pooled keep-alive conns when Run returns, so
 		// a hosted worker leaves no open connections to the control plane.
 		defer rp.CloseIdleConnections()
@@ -979,10 +997,6 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// clk is the worker's time port (Overrides.Clock, assembly-only; production
 	// is always clock.Real()). The loops below tick on it, so a test advances a
 	// fake clock instead of sleeping.
-	clk := clock.Real()
-	if p.Overrides != nil && p.Overrides.Clock != nil {
-		clk = p.Overrides.Clock
-	}
 	if controlPlane != nil {
 		// warden.controlplane.clock_skew_seconds: the CP's Date header from each
 		// long-poll minus this worker's clock. A nil *Metrics (observability off)
@@ -1018,6 +1032,11 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		// switch flips (and cuts sessions) BEFORE the new allow policy is live.
 		go longPollControlPlane(ctx, clk, controlPlane, gatedEvaluator{PolicyEvaluator: evaluator, gate: gate}, pol.ControlPlane.LongPollWait, logger, onPolicyApplied(applier.Apply, pxy.CloseBlockedSessions))
 		go heartbeatControlPlane(ctx, clk, controlPlane, pol.ControlPlane.HeartbeatInterval, logger)
+		if pol.ControlPlane.BundleVerification() {
+			// The raw evaluator, not the gated one: deny-all must not run the
+			// agent gate with a policy that lacks the registry list.
+			go enforceBundleExpiry(ctx, clk, controlPlane, evaluator, gatedEvaluator{PolicyEvaluator: evaluator, gate: gate}, logger)
+		}
 	}
 	if syncWorker != nil {
 		syncWorker.Start(ctx)
