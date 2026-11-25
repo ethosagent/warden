@@ -9,6 +9,7 @@ func allCases() []Case {
 	var out []Case
 	for _, group := range [][]Case{
 		smokeWorker, smokeToken, smokeRoute,
+		certCases(), {serverCertCase, revokedCase}, bundleCases(),
 	} {
 		out = append(out, group...)
 	}

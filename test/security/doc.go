@@ -39,6 +39,18 @@
 // carries the token on CONNECT (Proxy-Authorization) and again in
 // X-Warden-Identity, and the worker verifies each credential it reads.
 //
+// # Tampering with the control plane
+//
+// StackOptions.CPEndpoint points one worker at a TamperProxy (tamperproxy.go)
+// instead of the CP. The proxy relays everything with the worker's own client
+// certificate and can serve one armed response on GET /policy: a replayed,
+// mutated or replaced signed bundle, a stub CP certificate. It is test code
+// only; the worker's controlPlane.endpoint is an ordinary config value, so no
+// production seam exists for it. StackOptions.PinBundleIssuer additionally pins
+// controlPlane.bundleIssuer. Cert cases mint hostile worker certificates with
+// harness.MintWorkerLeaf (signed by the stack's worker CA) and harness.TestCA
+// (a foreign CA).
+//
 // # Writing a case
 //
 // A ticket adds cases and nothing else:
