@@ -878,3 +878,63 @@ func TestDialRefusal_StaleRedialOneDenyEvent(t *testing.T) {
 	}
 	wantSSRFDeny(t, denies[0], "backend.test", "https", SSRFReasonBlocked, "loopback")
 }
+
+// TestSafeDialerDefault pins the production default of the upstream dial seam:
+// with no Dialer override (cmd/proxy never sets one), a CONNECT to an
+// allowlisted loopback address is still refused by the SSRF-safe dialer and
+// nothing ever reaches the listener behind it. The Go-only test seams
+// (Config.Dialer, Config.UpstreamRootCAs) change this only when a test sets
+// them explicitly.
+func TestSafeDialerDefault(t *testing.T) {
+	backend, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = backend.Close() })
+	accepted := make(chan struct{}, 1)
+	go func() {
+		c, err := backend.Accept()
+		if err != nil {
+			return
+		}
+		_ = c.Close()
+		accepted <- struct{}{}
+	}()
+	port := backend.Addr().(*net.TCPAddr).Port
+
+	store := &syncStore{}
+	p := startProxy(t, store, nil, nil, port, func(cfg *Config) {
+		cfg.Policy = policy.NewEvaluator(config.Policy{Allowlist: []config.AllowlistEntry{
+			{Domain: "127.0.0.1", Port: port},
+		}})
+	})
+	if p.safeDial == nil {
+		t.Fatal("proxy built without Config.Dialer must install the SafeDialer")
+	}
+
+	conn, err := net.Dial("tcp", p.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	_, _ = fmt.Fprintf(conn, "CONNECT 127.0.0.1:%d HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n\r\n", port, port)
+	// The tunnel's 200 is sent before the upstream dial; the refusal shows as
+	// the tunnel closing with no bytes from the loopback listener.
+	br := bufio.NewReader(conn)
+	if _, err := br.ReadString('\n'); err != nil {
+		t.Fatalf("read CONNECT status: %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.Copy(io.Discard, br); err != nil {
+		t.Fatalf("tunnel to the refused loopback target did not close cleanly: %v", err)
+	}
+	events := waitForEvents(t, store, 1)
+	if events[0].Decision != "deny" {
+		t.Fatalf("decision = %q, want deny", events[0].Decision)
+	}
+	select {
+	case <-accepted:
+		t.Fatal("the loopback listener was reached through the proxy")
+	case <-time.After(200 * time.Millisecond):
+	}
+}

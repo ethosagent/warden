@@ -154,6 +154,22 @@ type Overrides struct {
 	BeforeTerminal func()
 }
 
+// activeEgressHooks names the Overrides that weaken upstream egress (the dialer
+// replaces the SafeDialer, the root pool replaces the system roots). Nil-safe.
+func (o *Overrides) activeEgressHooks() []string {
+	if o == nil {
+		return nil
+	}
+	var hooks []string
+	if o.Dialer != nil {
+		hooks = append(hooks, "Dialer")
+	}
+	if o.UpstreamRootCAs != nil {
+		hooks = append(hooks, "UpstreamRootCAs")
+	}
+	return hooks
+}
+
 // AnalyticsFlusher is the drain capability of the async analytics writer: Flush
 // persists everything already queued and returns (analytics flush semantics —
 // no deadline, never a drop). A FAILED batch write is returned, not acked as
@@ -277,6 +293,15 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	if len(pol.Upstream.AllowPrivateCIDRs) > 0 {
 		logger.Warn("upstream.allowPrivateCIDRs is active: the listed CIDR ranges are exempt from SSRF private-IP blocking — lab and test networks only, never set this in production",
 			"exempt", strings.Join(pol.Upstream.AllowPrivateCIDRs, ","))
+	}
+
+	// Test-only egress seams (Overrides.Dialer / UpstreamRootCAs) bypass the SSRF
+	// guard and the system trust store. No flag or YAML key can set them, so this
+	// line only ever appears when Go code embeds the worker; it names the hooks
+	// and never any address, secret or key.
+	if hooks := p.Overrides.activeEgressHooks(); len(hooks) > 0 {
+		logger.Warn("test hooks active: upstream egress is not using the production SafeDialer or system roots — tests only, never in production",
+			"hooks", strings.Join(hooks, ","))
 	}
 
 	// Transparent interception sees TCP only (#376). An agent that falls back to

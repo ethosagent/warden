@@ -612,3 +612,66 @@ func writeTestCA(t *testing.T) (certPath, keyPath string) {
 	}
 	return certPath, keyPath
 }
+
+// nopDialer is an egress override that is never dialed: the WARN test only
+// needs the seam to be set.
+type nopDialer struct{}
+
+func (nopDialer) Dial(string, string) (net.Conn, error) { return nil, errors.New("nopDialer") }
+func (nopDialer) DialTLS(string, string, *tls.Config) (*tls.Conn, error) {
+	return nil, errors.New("nopDialer")
+}
+
+// TestRun_EgressOverridesWarnTestHooksActive: setting either egress override
+// (the dialer that replaces the SafeDialer, the root pool that replaces the
+// system roots) logs one "test hooks active" WARN naming the hook, so a worker
+// started with them outside a test is visible. A worker without them stays
+// silent, and the line carries no address or key material.
+func TestRun_EgressOverridesWarnTestHooksActive(t *testing.T) {
+	const cfg = "policy:\n  allowlist:\n    - domain: api.example.test\nlogging:\n  level: info\n  format: text\n"
+	run := func(t *testing.T, o *Overrides, want string) string {
+		t.Helper()
+		var out syncBuffer
+		p := runParams(t, writeConfig(t, cfg))
+		p.Overrides = o
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() { done <- Run(ctx, &out, p) }()
+		waitForLog(t, &out, want)
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("Run returned error on clean shutdown: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("Run did not return after ctx cancel")
+		}
+		return out.String()
+	}
+
+	t.Run("dialer", func(t *testing.T) {
+		logged := run(t, &Overrides{Dialer: nopDialer{}}, "test hooks active")
+		if !strings.Contains(logged, "Dialer") || strings.Contains(logged, "UpstreamRootCAs") {
+			t.Fatalf("WARN must name exactly the Dialer hook; got:\n%s", logged)
+		}
+	})
+	t.Run("root pool", func(t *testing.T) {
+		logged := run(t, &Overrides{UpstreamRootCAs: x509.NewCertPool()}, "test hooks active")
+		if !strings.Contains(logged, "UpstreamRootCAs") {
+			t.Fatalf("WARN must name the UpstreamRootCAs hook; got:\n%s", logged)
+		}
+	})
+	t.Run("clock only is silent", func(t *testing.T) {
+		logged := run(t, &Overrides{Clock: clock.Real()}, "proxy listening")
+		if strings.Contains(logged, "test hooks active") {
+			t.Fatalf("a non-egress override must not log the hook WARN; got:\n%s", logged)
+		}
+	})
+	t.Run("production default is silent", func(t *testing.T) {
+		logged := run(t, nil, "proxy listening")
+		if strings.Contains(logged, "test hooks active") {
+			t.Fatalf("a worker with no overrides must not log the hook WARN; got:\n%s", logged)
+		}
+	})
+}
