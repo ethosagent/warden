@@ -283,6 +283,10 @@ func splitVersionPath(p string) (seg, action string, ok bool) {
 	}
 }
 
+// APIKeysPath is the API key management route the control plane serves itself
+// (W-P2-APIK-03); RoutePath templates its per-key paths.
+const APIKeysPath = "/dashboard/api/api-keys"
+
 // RoutePath maps a request path to the Routes() path it is served under: a
 // concrete version path (/dashboard/api/policy/versions/3/diff) becomes its
 // template (/dashboard/api/policy/versions/{v}/diff), whatever the segment
@@ -297,6 +301,9 @@ func RoutePath(p string) string {
 	}
 	if _, ok := blockedUserID(p); ok {
 		return blockedUsersPath + "/{id}"
+	}
+	if seg, ok := strings.CutPrefix(p, APIKeysPath+"/"); ok && seg != "" && seg != "self" && !strings.Contains(seg, "/") {
+		return APIKeysPath + "/{id}"
 	}
 	if _, action, ok := splitVersionPath(p); ok {
 		t := policyVersionsPath + "/{v}"

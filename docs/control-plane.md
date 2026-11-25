@@ -760,6 +760,11 @@ fails when the two differ.
 | `/dashboard/api/admin-audit/verify` | POST | admin | `adminaudit.verify` | `adminaudit:read` |
 | `/dashboard/api/alerts` | GET | viewer | `alerts.read` | `traffic:read` |
 | `/dashboard/api/analytics` | GET | viewer | `analytics.read` | `traffic:read` |
+| `/dashboard/api/api-keys` | GET | viewer | `api_key.list` | `none` |
+| `/dashboard/api/api-keys` | POST | viewer | `api_key.create` | `none` |
+| `/dashboard/api/api-keys` | DELETE | admin | `api_key.revoke_owner` | `none` |
+| `/dashboard/api/api-keys/self` | GET | viewer | `api_key.self` | `self` |
+| `/dashboard/api/api-keys/{id}` | DELETE | viewer | `api_key.revoke` | `none` |
 | `/dashboard/api/audit` | GET | viewer | `audit.read` | `audit:read` |
 | `/dashboard/api/audit/verify` | POST | viewer | `audit.verify` | `audit:read` |
 | `/dashboard/api/backup` | POST | admin | `backup.run` | `none` |

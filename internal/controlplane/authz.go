@@ -53,6 +53,10 @@ type authzRow struct {
 	// the empty value is a classification gap and TestAuthzRouteCoverage fails
 	// on it, so a new route is unreachable by keys until someone classifies it.
 	Scope apikeys.Scope
+	// SessionOnly marks a route a key must never reach AND that answers a key
+	// 403 session_required instead of insufficient_scope: key creation, so no
+	// key can mint or extend a key (W-P2-APIK-03).
+	SessionOnly bool
 }
 
 // The P2 scopes the table names. They must be registered in
@@ -173,6 +177,15 @@ func authzTable() map[routeKey]authzRow {
 		// Served by the control plane itself, ahead of dash.Handler (cpDashboardRoutes).
 		{get, "/dashboard/api/sessions", readRow(admin, "sessions.read", none)},
 		{del, "/dashboard/api/sessions", auditedRow(admin, "sessions.revoke", "sessions", none)},
+		// API key management (W-P2-APIK-03), served by the control plane itself.
+		// Every row is ScopeNone but /self: no key lists, creates or revokes keys.
+		// The handlers apply the object-level rules (own keys unless admin; create
+		// only from an OIDC session, capped by the creator's role).
+		{get, apiKeysPath, readRow(viewer, "api_key.list", none)},
+		{post, apiKeysPath, authzRow{MinRole: viewer, Action: "api_key.create", Target: auditTargetAPIKeys, Audited: true, Class: classAudited, Scope: none, SessionOnly: true}},
+		{del, apiKeysPath, auditedRow(admin, "api_key.revoke_owner", auditTargetAPIKeys, none)},
+		{del, apiKeysPath + "/{id}", auditedRow(viewer, "api_key.revoke", auditTargetAPIKeys, none)},
+		{get, apiKeysPath + "/self", readRow(viewer, "api_key.self", apikeys.ScopeSelf)},
 	}
 	t := make(map[routeKey]authzRow, len(rows))
 	for _, r := range rows {
@@ -275,6 +288,12 @@ func requireRoleKeys(next http.Handler, table map[routeKey]authzRow, console con
 			return
 		}
 		if p.Kind == PrincipalAPIKey {
+			if row.SessionOnly {
+				counts.inc(APIKeyOutcomeInsufficientScope)
+				logDenied(logger, row, role, p, r)
+				writeAuthzJSON(w, http.StatusForbidden, map[string]string{"error": "session_required"})
+				return
+			}
 			if ok, need := keyAuthorized(p, row, role); !ok || (ownerBlocked != nil && ownerBlocked(p)) {
 				if ok {
 					need = apikeys.ScopeNone // refused for who the owner is, not for a scope

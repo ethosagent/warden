@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/ethosagent/warden/internal/apikeys"
+	"github.com/ethosagent/warden/internal/apikeys/adapters/sqlitestore"
 	"github.com/ethosagent/warden/internal/clock/clocktest"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/cpstate"
@@ -55,7 +56,26 @@ func newAuthzEnvOn(t *testing.T, db *cpstate.DB, policy string, roles config.Con
 	t.Helper()
 	logger, buf := testLogger()
 	clk := clocktest.NewFake(time.Unix(1_800_000_000, 0))
-	srv := New(Config{PolicyPath: policy, Token: dashTestToken, State: db, Console: authzConsole(roles), Logger: logger, Clock: clk})
+	cfg := Config{PolicyPath: policy, Token: dashTestToken, State: db, Console: authzConsole(roles), Logger: logger, Clock: clk}
+	// A state db that carries the api_keys table runs with API keys on, so the
+	// matrix walks the management routes; one without it runs with them off.
+	var haveKeys int
+	_ = db.SQL().QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name='api_keys'`).Scan(&haveKeys)
+	if haveKeys > 0 {
+		reg := newAPIKeyRegistry()
+		store, err := sqlitestore.New(db, sqlitestore.Options{Registry: reg, Clock: clk})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ix, err := apikeys.NewIndex(context.Background(), store, apikeys.IndexOptions{Now: clk.Now, After: clk.After, Logger: logger})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg.Console.APIKeys = config.ConsoleAPIKeys{Enabled: true, DefaultTTL: config.DefaultAPIKeyTTL, MaxTTL: config.DefaultAPIKeyMaxTTL,
+			MaxPerOwner: config.DefaultAPIKeysMaxPerOwner, RatePerKey: config.DefaultAPIKeysRatePerKey}
+		cfg.APIKeyIndex, cfg.APIKeyStore, cfg.APIKeyRegistry = ix, store, reg
+	}
+	srv := New(cfg)
 	if srv.sessions == nil {
 		t.Fatal("oidc mode with a state db must enable sessions")
 	}
@@ -66,7 +86,7 @@ func newAuthzEnvOn(t *testing.T, db *cpstate.DB, policy string, roles config.Con
 
 func newAuthzEnv(t *testing.T) *authzEnv {
 	t.Helper()
-	return newAuthzEnvOn(t, openSessionDB(t), writePolicyFile(t, "api.openai.com"), defaultRoles())
+	return newAuthzEnvOn(t, openKeysDB(t), writePolicyFile(t, "api.openai.com"), defaultRoles())
 }
 
 // session creates a session in group and returns its raw id.
@@ -570,7 +590,7 @@ func unclassifiedPatterns(t *testing.T, dash, cp map[routeKey]authzRow) []string
 			t.Fatalf("a mux registration uses a pattern the walk cannot resolve: %#v", arg)
 		}
 		seen++
-		if p != "/dashboard/" && !paths[p] {
+		if p != "/dashboard/" && p != apiKeysSubtree && !paths[p] {
 			out = append(out, p)
 		}
 	}
@@ -685,6 +705,7 @@ func TestAuthzScopeClassification(t *testing.T) {
 		"GET /dashboard/api/admin-audit":              "adminaudit:read",
 		"POST /dashboard/api/admin-audit/verify":      "adminaudit:read",
 		"GET /dashboard/api/admin-audit/pubkey":       "adminaudit:read",
+		"GET /dashboard/api/api-keys/self":            apikeys.ScopeSelf,
 	}
 	for k, row := range authzTable() {
 		name := k.Method + " " + k.Path

@@ -98,7 +98,7 @@ func newKeyEnv(t *testing.T, o keyEnvOpts) *keyEnv {
 	}
 	cfg := Config{
 		PolicyPath: o.policy, Token: dashTestToken, State: o.db, Console: cc, Logger: logger, Clock: clk,
-		APIKeyIndex: ix, SecretStore: secrets.NewEchoStore(),
+		APIKeyIndex: ix, APIKeyStore: store, APIKeyRegistry: reg, SecretStore: secrets.NewEchoStore(),
 	}
 	if o.versioned {
 		cfg.PolicyStore = PolicyStoreVersioned
@@ -277,6 +277,12 @@ func TestAPIKeyRejectedOutsideAdminAPI(t *testing.T) {
 		}
 		path := strings.NewReplacer("{v}", "1", "{id}", "x").Replace(k.Path)
 		rec := e.do(tok, k.Method, path, "{}")
+		if row.SessionOnly { // key creation answers a key session_required
+			if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), `"session_required"`) {
+				t.Errorf("%s %s = %d %s, want 403 session_required", k.Method, path, rec.Code, strings.TrimSpace(rec.Body.String()))
+			}
+			continue
+		}
 		if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), `"need":"none"`) {
 			t.Errorf("%s %s = %d %s, want 403 insufficient_scope need none", k.Method, path, rec.Code, strings.TrimSpace(rec.Body.String()))
 		}
@@ -613,7 +619,7 @@ func TestAPIKeyLastUsed(t *testing.T) {
 // is built, a wak_ bearer is just an unrecognised bearer on the human routes,
 // and the worker routes still refuse it.
 func TestAPIKeysDisabledChangesNothing(t *testing.T) {
-	e := newAuthzEnv(t)
+	e := newAuthzEnvOn(t, openSessionDB(t), writePolicyFile(t, "api.openai.com"), defaultRoles())
 	if e.srv.apiKeys != nil || e.srv.apiKeyCounts != nil || len(e.srv.APIKeyAuthCounts()) != 0 {
 		t.Fatal("API key state built with the feature off")
 	}
