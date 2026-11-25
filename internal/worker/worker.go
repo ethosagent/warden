@@ -397,8 +397,39 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		// Shutdown hygiene: drop the pooled keep-alive conns when Run returns, so
 		// a hosted worker leaves no open connections to the control plane.
 		defer rp.CloseIdleConnections()
+		// Opt-in last-known-good cache (stateDir + pins + bundleCacheMaxAge):
+		// each verified bundle is persisted, and used below only when the first
+		// pull fails. A cache that cannot be set up is logged and skipped; the
+		// worker then behaves as without one.
+		cacheOn := pol.ControlPlane.BundleCacheEnabled()
+		if cacheOn {
+			if cErr := rp.SetBundleCache(pol.ControlPlane.StateDir, pol.ControlPlane.BundleCacheMaxAge); cErr != nil {
+				logger.Error("bundle cache disabled: cannot prepare the state directory", "error", cErr)
+				cacheOn = false
+			}
+		}
 		if pullErr := rp.Pull(); pullErr != nil {
-			logger.Warn("control plane unreachable at boot; starting FAIL-CLOSED (deny all) until policy arrives", "error", pullErr)
+			fromCache := false
+			cacheNote := "off"
+			if cacheOn {
+				// Boot only: nothing else touches the provider's snapshot yet.
+				switch _, lErr := rp.LoadCache(); {
+				case lErr == nil:
+					fromCache = true
+				case errors.Is(lErr, config.ErrNoBundleCache):
+					cacheNote = "empty"
+				default:
+					cacheNote = lErr.Error()
+				}
+			}
+			if fromCache {
+				logger.Warn("control plane unreachable at boot; enforcing the cached last-known-good signed bundle (the credential sidecar is not cached: the aws secret backend uses worker env or IAM credentials)", "error", pullErr)
+				if remote, gErr := rp.GetPolicy(); gErr == nil {
+					remotePolicy = &remote
+				}
+			} else {
+				logger.Warn("control plane unreachable at boot; starting FAIL-CLOSED (deny all) until policy arrives", "error", pullErr, "bundleCache", cacheNote)
+			}
 		} else if remote, gErr := rp.GetPolicy(); gErr == nil {
 			remotePolicy = &remote
 			logger.Info("control plane policy applied", "endpoint", pol.ControlPlane.Endpoint)

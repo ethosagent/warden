@@ -283,7 +283,7 @@ func (r *RemoteProvider) applyBundleBody(t *BundleTrust, resp *http.Response) (b
 		return false, r.reject(t, err, bundle.Reason(err), seq, kid, digest, body, etag)
 	}
 
-	p, settings, perr := parseRemotePolicy(v.Bundle.Policy)
+	p, settings, vb, perr := bundleSnapshot(v)
 	if perr != nil {
 		// The signature is good but the wire is not one this worker can
 		// enforce (for example an invalid registeredAgents list): reject it
@@ -291,6 +291,39 @@ func (r *RemoteProvider) applyBundleBody(t *BundleTrust, resp *http.Response) (b
 		// The decode error is dropped on purpose: it can quote ids and domains
 		// from the payload, which belong in no log.
 		return false, r.reject(t, errors.New("policy is not enforceable by this worker"), BundleReasonInvalidPolicy, v.Seq, v.KID, "", body, etag)
+	}
+	if v.Refresh {
+		// Same content, newer issuedAt: only the validity window moves.
+		r.mu.Lock()
+		r.bundle = vb
+		r.etag, r.pollETag = etag, etag
+		r.lastErr, r.lastReject = nil, ""
+		r.mu.Unlock()
+		// The refreshed issuedAt must reach the cache too, or a restart would
+		// see a stale one and age the bundle out early.
+		r.writeCache(t, body)
+		return false, nil
+	}
+	r.mu.Lock()
+	r.policy, r.settings, r.bundle = p, settings, vb
+	r.etag, r.pollETag = etag, etag
+	r.lastErr, r.lastReject = nil, ""
+	r.mu.Unlock()
+	r.writeCache(t, body)
+	if t.Logger != nil {
+		t.Logger.Info("bundle applied", "seq", v.Seq, "kid", v.KID)
+	}
+	return true, nil
+}
+
+// bundleSnapshot turns a verified bundle into what the provider holds: the
+// parsed policy, the settings (with the credential sidecar merged in, in memory
+// only, when the bundle carries one) and the VerifiedBundle facts. It fails
+// when the signed policy bytes are not enforceable by this worker.
+func bundleSnapshot(v bundle.Verified) (*Policy, *SettingsWire, *VerifiedBundle, error) {
+	p, settings, err := parseRemotePolicy(v.Bundle.Policy)
+	if err != nil {
+		return nil, nil, nil, err
 	}
 	if c := v.Credentials; c != nil {
 		// In memory only: the sidecar never reaches disk or a log.
@@ -310,24 +343,7 @@ func (r *RemoteProvider) applyBundleBody(t *BundleTrust, resp *http.Response) (b
 		TokenIssuer: v.Bundle.TokenIssuer,
 		Sections:    v.Bundle.Sections,
 	}
-	if v.Refresh {
-		// Same content, newer issuedAt: only the validity window moves.
-		r.mu.Lock()
-		r.bundle = vb
-		r.etag, r.pollETag = etag, etag
-		r.lastErr, r.lastReject = nil, ""
-		r.mu.Unlock()
-		return false, nil
-	}
-	r.mu.Lock()
-	r.policy, r.settings, r.bundle = p, settings, vb
-	r.etag, r.pollETag = etag, etag
-	r.lastErr, r.lastReject = nil, ""
-	r.mu.Unlock()
-	if t.Logger != nil {
-		t.Logger.Info("bundle applied", "seq", v.Seq, "kid", v.KID)
-	}
-	return true, nil
+	return p, settings, vb, nil
 }
 
 // reject records a rejected response: nothing applied changes, the rejection

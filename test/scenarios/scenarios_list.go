@@ -438,6 +438,11 @@ var All = slices.Concat(
 		// a pinned worker shows its bundle seq and pins and is not behind; a
 		// tampered bundle shows as a rejection reason with the seq unchanged.
 		{Name: "bundles_pinned_worker_fleet_state", Opts: tamperedOpts(), Run: pinnedWorkerFleetState},
+		// Last-known-good bundle cache (W-P2-SBND-06): a pinned worker restarted
+		// with the control plane down enforces its cached bundle; a tampered
+		// cache file leaves it fail-closed. In-process only.
+		{Name: "bundles_cache_boots_from_cache", Opts: bundleCacheOpts(), Run: bundleCacheBootsFromCache},
+		{Name: "bundles_cache_tampered_fails_closed", Opts: bundleCacheOpts(), Run: bundleCacheTamperedFailsClosed},
 		// Warden credentials in agent egress (W-P2-APIK-06): a wak_ key or wwt_
 		// token in a request body is flagged as credentials only with
 		// dlp.wardenTokens on, and blocked only in enforce mode with a rule.

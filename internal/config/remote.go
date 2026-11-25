@@ -46,6 +46,7 @@ type RemoteProvider struct {
 	applyMu       sync.Mutex
 	trust         *BundleTrust
 	bundle        *VerifiedBundle
+	cache         *bundleCache // nil unless SetBundleCache
 	lastReject    string
 	lastRejectAt  time.Time
 	rejects       map[string]int64
