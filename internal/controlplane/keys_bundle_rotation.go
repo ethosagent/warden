@@ -2,18 +2,14 @@ package controlplane
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"slices"
 	"strings"
-	"time"
 
 	"github.com/ethosagent/warden/internal/adminaudit"
 	"github.com/ethosagent/warden/internal/config"
@@ -116,32 +112,16 @@ type WorkersSource func(ctx context.Context) ([]dashboard.WorkerView, error)
 const maxWorkersBody = 8 << 20
 
 // AdminAPIWorkers returns a WorkersSource reading GET /dashboard/api/workers of
-// the control plane at baseURL with an API key (scope traffic:read). caFile, if
-// not empty, adds a PEM certificate authority to the system roots. The key is
-// sent only in the Authorization header and never appears in an error.
-func AdminAPIWorkers(baseURL, apiKey, caFile string) (WorkersSource, error) {
-	if baseURL == "" || apiKey == "" {
+// the control plane at baseURL with an API key (scope traffic:read) through
+// client, which the caller builds from the shared constructor (no proxy, no
+// redirects, capped body). The key is sent only in the Authorization header and
+// never appears in an error.
+func AdminAPIWorkers(client *http.Client, baseURL, apiKey string) (WorkersSource, error) {
+	if baseURL == "" || apiKey == "" || client == nil {
 		return nil, errors.New("keys: an admin URL and an API key are both needed to read the workers' pins")
 	}
-	tr := &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}}
-	if caFile != "" {
-		pem, err := os.ReadFile(caFile)
-		if err != nil {
-			return nil, fmt.Errorf("keys: read --ca-cert: %w", err)
-		}
-		pool, err := x509.SystemCertPool()
-		if err != nil || pool == nil {
-			pool = x509.NewCertPool()
-		}
-		if !pool.AppendCertsFromPEM(pem) {
-			return nil, errors.New("keys: --ca-cert holds no PEM certificate")
-		}
-		tr.TLSClientConfig.RootCAs = pool
-	}
-	client := &http.Client{Transport: tr, Timeout: 15 * time.Second}
 	endpoint := strings.TrimRight(baseURL, "/") + "/dashboard/api/workers"
 	return func(ctx context.Context) ([]dashboard.WorkerView, error) {
-		defer tr.CloseIdleConnections()
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 		if err != nil {
 			return nil, errors.New("keys: the admin URL is not valid")

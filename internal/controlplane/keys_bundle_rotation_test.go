@@ -3,12 +3,9 @@ package controlplane
 import (
 	"context"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -159,12 +156,7 @@ func TestAdminAPIWorkers(t *testing.T) {
 		_ = json.NewEncoder(w).Encode([]dashboard.WorkerView{{ProxyID: "w1", Online: true}})
 	}))
 	defer srv.Close()
-	ca := filepath.Join(t.TempDir(), "ca.pem")
-	if err := os.WriteFile(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw}), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	src, err := AdminAPIWorkers(srv.URL+"/", key, ca)
+	src, err := AdminAPIWorkers(srv.Client(), srv.URL+"/", key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,24 +168,16 @@ func TestAdminAPIWorkers(t *testing.T) {
 		t.Errorf("request = %q %q", gotAuth, gotPath)
 	}
 
-	bad, _ := AdminAPIWorkers(srv.URL, "wak_wrong_key", ca)
+	bad, _ := AdminAPIWorkers(srv.Client(), srv.URL, "wak_wrong_key")
 	if _, err := bad(context.Background()); err == nil || !strings.Contains(err.Error(), "403") || strings.Contains(err.Error(), "wak_wrong_key") {
 		t.Errorf("a rejected key = %v, want a 403 error without the key", err)
 	}
-	// Without the CA the self-signed server is not trusted.
-	untrusted, _ := AdminAPIWorkers(srv.URL, key, "")
+	// A client that does not trust the self-signed server fails without the key.
+	untrusted, _ := AdminAPIWorkers(&http.Client{}, srv.URL, key)
 	if _, err := untrusted(context.Background()); err == nil || strings.Contains(err.Error(), key) {
 		t.Errorf("untrusted server = %v, want a TLS error without the key", err)
 	}
-	if _, err := AdminAPIWorkers("", key, ""); err == nil {
+	if _, err := AdminAPIWorkers(srv.Client(), "", key); err == nil {
 		t.Error("an empty URL was accepted")
-	}
-	if _, err := AdminAPIWorkers(srv.URL, key, filepath.Join(t.TempDir(), "missing")); err == nil {
-		t.Error("a missing CA file was accepted")
-	}
-	junk := filepath.Join(t.TempDir(), "junk.pem")
-	_ = os.WriteFile(junk, []byte("not pem"), 0o600)
-	if _, err := AdminAPIWorkers(srv.URL, key, junk); err == nil {
-		t.Error("a CA file without a certificate was accepted")
 	}
 }

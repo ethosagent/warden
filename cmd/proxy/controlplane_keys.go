@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/ethosagent/warden/internal/controlplane"
+	"github.com/ethosagent/warden/internal/identityclient"
 	"github.com/ethosagent/warden/internal/keys"
 )
 
@@ -282,6 +283,9 @@ func checkRotateSteps(purpose string, stage, activate, force, emergency bool) er
 	return nil
 }
 
+// maxFleetBody caps the fleet list the activate gate reads (a few KiB a worker).
+const maxFleetBody = 8 << 20
+
 // workersFromFlags builds the activate gate's view of the fleet from
 // --admin-url and the API key. Without --admin-url the source is nil, and the
 // gate refuses unless --force is given.
@@ -304,7 +308,11 @@ func workersFromFlags(cmd *cobra.Command) (controlplane.WorkersSource, error) {
 	if key == "" {
 		return nil, errors.New("--admin-url needs an API key with the traffic:read scope: --api-key-file or $WARDEN_API_KEY")
 	}
-	return controlplane.AdminAPIWorkers(url, key, ca)
+	client, err := identityclient.NewCPHTTPClientCapped(ca, maxFleetBody)
+	if err != nil {
+		return nil, fmt.Errorf("--ca-cert: %w", err)
+	}
+	return controlplane.AdminAPIWorkers(client, url, key)
 }
 
 // runBundleStage is `keys rotate --purpose bundle --stage`.
