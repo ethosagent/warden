@@ -356,6 +356,8 @@ var All = slices.Concat(
 		{Name: "token_exchange_events_recorded", Opts: tokenLimitsOpts(harness.WithAdminAudit()), Run: tokenExchangeEventsRecorded},
 		{Name: "token_retention_purges", Opts: tokenLimitsOpts(harness.WithTokenEventRetention("24h")), Run: tokenRetentionPurges},
 		{Name: "token_exchange_dashboard_disable", Opts: tokenServiceDashboardOpts(), Run: tokenExchangeDashboardDisable},
+		// The identity client's agent mode (W-P2-RCP-01) against that endpoint.
+		{Name: "identity_agent_exchange", Opts: tokenServiceOpts(), Run: identityAgentExchange},
 		{Name: "token_service_disabled_by_default", Opts: tokenServiceDisabledOpts(), Run: tokenServiceDisabledByDefault},
 		// Admin revocation of token sessions (W-P2-TOKX-07).
 		{Name: "token_session_revoke_one", Opts: tokenLimitsOpts(harness.WithAdminAudit()), Run: tokenSessionRevokeOne},
@@ -374,6 +376,7 @@ var All = slices.Concat(
 		// renewal lineage rule, and --require-worker-certs. In-process only.
 		{Name: "workerca_cert_auth", Opts: workerCACertAuthOpts(), Run: workerCACertAuth},
 		{Name: "workerca_renew", Opts: workerCACertAuthOpts(), Run: workerCARenew},
+		{Name: "workerca_client", Opts: workerCACertAuthOpts(), Run: workerCAClient},
 		{Name: "workerca_strict_certs", Opts: workerCAStrictCertsOpts(), Run: workerCAStrictCerts},
 		// Worker certificate revocation (W-P2-WCA-05): the console route and the
 		// offline CLI cut a worker off (401 on every worker route and renew, held

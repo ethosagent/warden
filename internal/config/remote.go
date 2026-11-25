@@ -58,6 +58,15 @@ type RemoteProvider struct {
 	// onDate, when set, receives the CP's Date header from each long-poll
 	// response (see SetDateObserver).
 	onDate func(cpNow time.Time)
+	// certAuth is true once SetHTTPClient installed a client that presents the
+	// worker certificate: no Authorization header is sent then.
+	certAuth bool
+	// proxyIDFn, when set, supplies the X-Warden-Proxy-ID value (the id of the
+	// worker certificate, which may arrive after construction).
+	proxyIDFn func() string
+	// certInfo reports the serial and expiry of the certificate in use, for the
+	// heartbeat; ok is false when the worker holds none.
+	certInfo func() (serial string, notAfter time.Time, ok bool)
 }
 
 // CapBlocklistV1 is the capability a worker advertises when it enforces
@@ -112,6 +121,10 @@ type heartbeatBody struct {
 	// body.
 	AgentID      string `json:"agentID,omitempty"`
 	IdentityMode string `json:"identityMode,omitempty"`
+	// CertSerial and CertNotAfter (W-P2-WCA-03) name the worker certificate in
+	// use (serial in lowercase hex, expiry RFC 3339); omitted without one.
+	CertSerial   string `json:"certSerial,omitempty"`
+	CertNotAfter string `json:"certNotAfter,omitempty"`
 }
 
 // SetAgent sets the resolved agent id and the source of the effective identity
@@ -162,6 +175,53 @@ func (r *RemoteProvider) observeDate(resp *http.Response) {
 // even before it forwards any analytics. Empty disables the header.
 func (r *RemoteProvider) SetProxyID(id string) {
 	r.proxyID = id
+}
+
+// SetProxyIDFunc replaces the fixed id of SetProxyID with a function read on
+// every request, for a worker whose id is the one in its certificate. An empty
+// result omits the header. nil restores the fixed id.
+func (r *RemoteProvider) SetProxyIDFunc(fn func() string) {
+	r.mu.Lock()
+	r.proxyIDFn = fn
+	r.mu.Unlock()
+}
+
+// SetCertInfo sets the source of the certificate serial and expiry the heartbeat
+// reports. fn must not block.
+func (r *RemoteProvider) SetCertInfo(fn func() (serial string, notAfter time.Time, ok bool)) {
+	r.mu.Lock()
+	r.certInfo = fn
+	r.mu.Unlock()
+}
+
+// SetHTTPClient makes the provider use the worker's shared control-plane client,
+// whose TLS handshake presents the worker certificate (W-P2-WCA-03). The
+// transport and its connection pool are shared; the provider keeps its own
+// timeouts (10s for a pull and a heartbeat, none for a long-poll, which its
+// context bounds). From then on no Authorization header is sent: the
+// certificate is the credential. It supersedes SetCACert (the client carries
+// its own trust).
+func (r *RemoteProvider) SetHTTPClient(c *http.Client) {
+	r.client = &http.Client{Timeout: 10 * time.Second, Transport: c.Transport}
+	r.longClient = &http.Client{Transport: c.Transport}
+	r.certAuth = true
+}
+
+// authorize sets the credential and worker id headers on a request.
+func (r *RemoteProvider) authorize(req *http.Request) {
+	if !r.certAuth {
+		req.Header.Set("Authorization", "Bearer "+r.token)
+	}
+	r.mu.RLock()
+	fn := r.proxyIDFn
+	r.mu.RUnlock()
+	id := r.proxyID
+	if fn != nil {
+		id = fn()
+	}
+	if id != "" {
+		req.Header.Set("X-Warden-Proxy-ID", id)
+	}
 }
 
 var _ ConfigProvider = (*RemoteProvider)(nil)
@@ -226,10 +286,7 @@ func (r *RemoteProvider) Pull() error {
 	if err != nil {
 		return r.setErr(fmt.Errorf("config: remote: build request: %w", err))
 	}
-	req.Header.Set("Authorization", "Bearer "+r.token)
-	if r.proxyID != "" {
-		req.Header.Set("X-Warden-Proxy-ID", r.proxyID)
-	}
+	r.authorize(req)
 	r.setAccept(req)
 
 	resp, err := r.client.Do(req)
@@ -293,10 +350,7 @@ func (r *RemoteProvider) PollLong(ctx context.Context, wait time.Duration) (chan
 	if err != nil {
 		return false, r.setErr(fmt.Errorf("config: remote: build request: %w", err))
 	}
-	req.Header.Set("Authorization", "Bearer "+r.token)
-	if r.proxyID != "" {
-		req.Header.Set("X-Warden-Proxy-ID", r.proxyID)
-	}
+	r.authorize(req)
 	r.setAccept(req)
 	r.mu.RLock()
 	etag := r.pollETag
@@ -339,7 +393,13 @@ func (r *RemoteProvider) Heartbeat(ctx context.Context) error {
 	etag := r.etag
 	hb := heartbeatBody{PolicyETag: etag, Caps: r.caps, AgentID: r.agentID}
 	modeFn := r.identityMode
+	certFn := r.certInfo
 	r.mu.RUnlock()
+	if certFn != nil {
+		if serial, notAfter, ok := certFn(); ok {
+			hb.CertSerial, hb.CertNotAfter = serial, notAfter.UTC().Format(time.RFC3339)
+		}
+	}
 	if modeFn != nil {
 		hb.IdentityMode = modeFn()
 	}
@@ -351,11 +411,8 @@ func (r *RemoteProvider) Heartbeat(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("config: remote: build heartbeat: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+r.token)
+	r.authorize(req)
 	req.Header.Set("Content-Type", "application/json")
-	if r.proxyID != "" {
-		req.Header.Set("X-Warden-Proxy-ID", r.proxyID)
-	}
 	resp, err := r.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("config: remote: heartbeat: %w", err)
