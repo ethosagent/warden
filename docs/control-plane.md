@@ -246,27 +246,35 @@ OUT_DIR=deploy/compose/certs ./scripts/gen-certs.sh
 docker compose -f deploy/compose/docker-compose.control-plane.yml up
 ```
 
-The recipe runs on [per-worker tokens](#worker-token-cli). A one-shot `cp-bootstrap` service
-registers each worker's token with `warden control-plane token create --from-env` on the control
-plane's state volume (`cp-data`) before the control plane and the workers start; running `up` again
-changes nothing. The control plane runs strict (`--require-worker-tokens`) with its own admin token
-(`--admin-token-env=WARDEN_CP_ADMIN_TOKEN`), TLS stays on, and no shared `WARDEN_CP_TOKEN` exists.
-Each worker container reads its own token (`WARDEN_WORKER_1_TOKEN`, `WARDEN_WORKER_2_TOKEN`)
-under the in-container name `WARDEN_WORKER_TOKEN`, which `configs/config.worker.yaml` names in both
-`controlPlane.tokenEnv` and `central.tokenEnv`, so the two workers share one config file and still
-hold different tokens.
+The recipe runs on [worker certificates](#worker-ca-workerca) and the control plane is strict
+(`--require-worker-certs`; its startup log shows `auth_mode=strict-certs` and `worker_ca=enabled
+key_source=file`, with the development-only warning). A one-shot `cp-bootstrap` service creates the
+worker CA with `warden control-plane ca init --key-source file` into its own `cp-ca` volume (never the
+control plane's state volume; skipped when the files exist, and `root.key` is deleted at once), and
+registers one enrollment token per worker with `warden control-plane enroll-token create --from-env`
+on the state volume (`cp-data`), before the control plane and the workers start. Each worker enrolls
+once with its token, keeps the 24h certificate renewed and persists it under `controlPlane.stateDir`
+(`/data/cp` on its own volume), so a restart or a second `up` neither re-enrolls nor creates a token
+row. The workers share `configs/config.worker.yaml`: `controlPlane.enrollment.tokenEnv` names
+`WARDEN_WORKER_ENROLL_TOKEN`, which each service fills from its own `WARDEN_WORKER_1_ENROLL` or
+`WARDEN_WORKER_2_ENROLL`, and there is no `tokenEnv` and no `WARDEN_CP_TOKEN`. The first run builds
+the image from the repo (the published image predates the worker CA commands). A `wwt_` bearer
+without a client certificate gets `401`. The e2e stack and the other recipes still run on per-worker
+`wwt_` tokens.
 
-To use your own values, generate a token per worker and export it (or put it in a git-ignored
-`deploy/compose/.env`) before `up`:
+To use your own values, generate one enrollment token per worker and export it (or put it in a
+git-ignored `deploy/compose/.env`) before `up`:
 
 ```sh
-echo wwt_$(head -c32 /dev/urandom | base32 | tr -d = | tr A-Z a-z | head -c52)   # one per worker
-export WARDEN_WORKER_1_TOKEN=wwt_...  WARDEN_WORKER_2_TOKEN=wwt_...  WARDEN_CP_ADMIN_TOKEN=...
+echo wet_$(head -c32 /dev/urandom | base32 | tr -d = | tr A-Z a-z | head -c52)   # one per worker
+export WARDEN_WORKER_1_ENROLL=wet_...  WARDEN_WORKER_2_ENROLL=wet_...  WARDEN_CP_ADMIN_TOKEN=...
 ```
 
 Never commit a real value. [`deploy/compose/.env.example`](../deploy/compose/.env.example) lists the
-variables with obviously fake dev placeholders. Dashboard writes (policy edits) need
-`Authorization: Bearer $WARDEN_CP_ADMIN_TOKEN`; a worker token never opens them.
+variables with obviously fake dev placeholders. An enrollment token is good for one enrollment and,
+by default, for one hour after `cp-bootstrap` registers it: a worker whose volume is lost later needs
+a new token ([re-enroll a worker](runbooks/worker-certs.md#re-enroll-a-worker)). Dashboard writes
+(policy edits) need `Authorization: Bearer $WARDEN_CP_ADMIN_TOKEN`; a worker credential never opens them.
 
 - Fleet dashboard: **https://localhost:7070/dashboard/** (cert signed by the
   proxy CA — trust it in your browser, or `curl --cacert deploy/compose/certs/proxy-ca.crt`).
@@ -1612,9 +1620,10 @@ repeat revoke) appends nothing.
 
 Until now every worker and the control plane shared one bearer token (`WARDEN_CP_TOKEN` in the
 compose recipes, named by `--token-env`). Per-worker tokens replace it: one revocable `wwt_...`
-token per worker, bound to one proxy id. The control-plane compose recipe and the e2e stack have
-already moved (see [Run it](#run-it)); the other recipes still use the shared token until they follow.
-The control plane has three auth modes, resolved once at
+token per worker, bound to one proxy id. The e2e stack and the compose recipes other than
+`docker-compose.control-plane.yml` run on them; the control-plane recipe has moved on to
+[worker certificates](#migrating-from-per-worker-tokens) (see [Run it](#run-it)).
+The control plane has four auth modes, resolved once at
 startup and logged as `auth_mode=...`:
 
 | `auth_mode` | When | Workers authenticate with |
@@ -1722,7 +1731,8 @@ stop the token working at once and give the worker a new one, with the worker ne
 
 P1 has no prefix binding: a token is bound to exactly one proxy id, compared exactly. Run each
 replica with its own token and its own stable `central.proxyID`. Autoscaled pools whose replicas
-cannot carry a stable id move to per-pod certificates with worker enrollment in P2 (W-P2-WCA).
+cannot carry a stable id use a prefix-bound enrollment token instead: see [Replica
+pools](#replica-pools-prefix-tokens).
 
 ### A revoked worker
 
@@ -2249,6 +2259,147 @@ surviving certificate names as `prev_serial` stays with it).
 `workerCA.enabled` requires `--ca-cert` and `--ca-key`: enrollment tokens and
 certificates never travel over plain HTTP, and the control plane exits before
 listening otherwise.
+
+## Migrating from per-worker tokens
+
+Per-worker `wwt_` tokens are long-lived bearers. [Worker certificates](#worker-ca-workerca) replace
+them with an mTLS client certificate that lives 24 hours, is renewed by the worker itself and can be
+revoked at once. Nothing changes by default: `workerCA.enabled` and `--require-worker-certs` stay off
+until you opt in, and a control plane with the worker CA enabled accepts a certificate next to the
+tokens it already holds, so workers can move one at a time. The operations runbook is
+[docs/runbooks/worker-certs.md](runbooks/worker-certs.md).
+
+The compose recipe `deploy/compose/docker-compose.control-plane.yml` (and its signed-bundles overlay) is
+already on certificates; the e2e stack, `docker-compose.yml`, the Claude Code and Codex recipes and the
+other `configs/config*-worker.yaml` files keep per-worker tokens and follow the steps below when you
+want them to move.
+
+### Certificate lifecycle
+
+- A certificate lives `workerCA.certTTL` (default 24h, 1h to 7d) and carries one SAN,
+  `spiffe://<trustDomain>/warden/worker/<id>`; the id is the worker's identity everywhere (a
+  different `X-Warden-Proxy-ID` is a `403`).
+- The worker renews at about 50% of the lifetime (plus or minus 10%, measured on its own monotonic
+  clock, so clock skew does not move it) with a fresh key, swaps the certificate in, rotates its
+  connections to the control plane (a held long-poll presents the new certificate too) and persists it under `controlPlane.stateDir`. A failed renewal retries from 5 seconds up
+  to 5 minutes. With the 24h default the worker tolerates a control plane outage of about 12 hours.
+- An expired certificate gets no grace: the worker keeps its last-known-good (default-deny) policy,
+  logs `worker cert expired` and must re-enroll. Watch `warden_worker_cert_expiry_seconds` and
+  `warden_worker_cert_renewals_total{outcome}` (see the runbook).
+- A restart reuses the persisted certificate: no new `worker.enrolled` audit row, no token read.
+
+### Replica pools (prefix tokens)
+
+A pool whose replicas cannot carry a stable id enrolls with one token bound to an id prefix:
+
+```sh
+warden control-plane enroll-token create --name pool-a --worker-id-prefix pool-a- --max-uses 20 \
+  --config F --state-dir D --out ./pool-a.enroll
+```
+
+Every replica gets the same token value and a persistent `controlPlane.stateDir` of its own. It sends
+a suffix (the host name, or the variable named by `controlPlane.enrollment.workerIdSuffixEnv`) and
+becomes `pool-a-<suffix>`, which must match `^[A-Za-z0-9._-]{1,128}$`. The token is single-use per
+replica up to `--max-uses` (at most 100) and expires after `workerCA.enrollTokenTTL`, so create it
+when the pool scales up. Leave `central.proxyID` unset (or equal to the final id). A replica without a
+persistent state directory enrolls again at every start and uses up a slot each time.
+
+### TLS passthrough
+
+The control plane reads the worker's certificate from the TLS handshake. A load balancer or ingress
+that terminates TLS in front of it breaks worker mTLS: it must pass TLS through (layer 4, with
+`--ca-cert` and `--ca-key` on the control plane itself). Forwarded client-certificate headers
+(`X-Forwarded-Client-Cert`, `X-SSL-Client-Cert` and the like) are never trusted. Only the worker routes need
+passthrough: give workers their own passed-through address if a terminating proxy fronts the console.
+
+### Migration steps (no downtime)
+
+Run them in order. Each step leaves every worker working, and a control plane restart is not an
+egress outage: workers keep enforcing the last policy they pulled and reconnect when it is back.
+`D` is the control plane's `--state-dir` and `F` its `--config` file.
+
+1. **Create the worker CA** (production: `--key-source keys`, which needs `keys.enabled: true` and a
+   state dir that has run once; development: `--key-source file`):
+
+   ```sh
+   warden control-plane ca init --out-dir ./worker-ca --trust-domain warden.example \
+     --key-source keys --config F --state-dir D
+   ```
+
+   Move `./worker-ca/root.key` to offline storage and delete it from this host. The control plane
+   only needs `intermediate-chain.pem`.
+2. **Enable `workerCA` and restart the control plane with the token mode it already has.** Add to
+   `F`:
+
+   ```yaml
+   workerCA:
+     enabled: true
+     trustDomain: warden.example
+     certFile: /etc/warden/worker-ca/intermediate-chain.pem
+     keySource: keys
+   ```
+
+   Keep `--require-worker-tokens` (or `--legacy-token-env`) as it is, and keep `--ca-cert` and
+   `--ca-key` (the worker CA needs TLS). The startup line now also shows `worker_ca=enabled` and
+   the tokens still work. Enrollment answers `503` until the key loads.
+3. **Mint one enrollment token per worker** (the id is the worker's proxy id; a pool uses a prefix
+   token, above):
+
+   ```sh
+   warden control-plane enroll-token create --name worker-1 --worker-id worker-1 \
+     --config F --state-dir D --out ./worker-1.enroll
+   ```
+
+   Hand each worker its token through your secret mechanism (an environment variable), never in
+   the config file. A token expires after `workerCA.enrollTokenTTL` (1h by default; the longest an
+   operator may ask for is `enrollTokenMaxTTL`), so mint them just before the rollout, or pass
+   `--expires-in`.
+4. **Enroll the workers one at a time, while their tokens still work.** In the worker's config
+   replace `controlPlane.tokenEnv` and `central.tokenEnv` with a persistent state directory and the
+   enrollment variable, then restart that worker:
+
+   ```yaml
+   controlPlane:
+     stateDir: /var/lib/warden-worker      # absolute path on a persistent volume
+     enrollment:
+       tokenEnv: WARDEN_WORKER_ENROLL_TOKEN
+   ```
+
+   Leave `central.proxyID` as it is (it must equal the worker id) and the endpoints unchanged. The
+   worker enrolls on start, then pulls policy and ingests with its certificate.
+5. **Confirm every worker is on a certificate.** `GET /dashboard/api/workers` (or the console's Fleet
+   page) must show `authKind: cert` for every worker, with a `certSerial` and a `certNotAfter`
+   about a day out. Wait for one renewal on one worker (`certSerial` changes after about 12
+   hours, or watch `warden_worker_cert_renewals_total{outcome="ok"}`). A worker still showing `token`
+   or `legacy` is not migrated yet: do not continue.
+6. **Restart the control plane with `--require-worker-certs`**, replacing `--require-worker-tokens`
+   (and without `--legacy-token-env`). The startup line says `auth_mode=strict-certs`. From now on
+   a `wwt_` bearer, the shared token or an anonymous caller gets `401` on `/policy`,
+   `/control/heartbeat` and `/central/ingest`. Only do this once step 5 is true for every worker,
+   including workers that are rarely restarted: a worker you missed loses its policy updates and
+   ingest and keeps only its last-known-good policy.
+7. **Revoke the `wwt_` tokens**, after a soak period (see Rollback) in which nothing needed them:
+
+   ```sh
+   warden control-plane token list --state-dir D
+   warden control-plane token revoke --id wt_... --state-dir D
+   ```
+
+   Then unset the old token variables everywhere they were distributed.
+
+### Rollback
+
+- **Before step 6** (tokens are still accepted): put `tokenEnv` back in the worker config, remove
+  `enrollment`, restart the worker. Nothing else changes; its certificate is simply not used.
+- **After step 6 but before step 7**: restart the control plane with `--require-worker-tokens`
+  instead of `--require-worker-certs`. Workers on certificates keep working (a certificate is
+  accepted next to the tokens) and workers can be switched back one at a time as above. This is why
+  step 7 comes after a soak: revoked tokens cannot be un-revoked, and a replacement needs `warden
+  control-plane token create`.
+- **After step 7**: mint new tokens with `warden control-plane token create`, switch the workers
+  back, and restart the control plane with `--require-worker-tokens`.
+- A worker whose certificate was revoked or expired re-enrolls with a new token
+  ([runbook](runbooks/worker-certs.md#re-enroll-a-worker)).
 
 ## Signed bundles (`--bundles`)
 

@@ -45,6 +45,16 @@ The worker runs in `require` mode for agent `codex`: a request without a Warden
 token that names a user, the agent `codex` and a registered key is refused with
 `407`. A raw Dex token is refused too (`unbound_token`).
 
+**Worker credential.** This recipe keeps a per-worker `wwt_` token (`WARDEN_CODEX_WORKER_TOKEN`) and its
+control plane runs `--require-worker-tokens`, although `docker-compose.control-plane.yml` it merges onto
+has moved to worker certificates (its `cp-bootstrap` also creates a worker CA and two enrollment tokens
+here that this control plane does not use). To move the recipe too, follow [Migrating from per-worker
+tokens](../control-plane.md#migrating-from-per-worker-tokens): add the `workerCA` block to
+`configs/config.cp-served.codex.yaml`, give the `warden` worker a state volume and
+`controlPlane.enrollment.tokenEnv` in its config, register its enrollment token in `identity-bootstrap`
+(`enroll-token create --worker-id codex`) instead of the token, and switch the control plane to
+`--require-worker-certs`. Operations: [worker certificates runbook](../runbooks/worker-certs.md).
+
 ## Prerequisites
 
 - Docker Engine 26 or later with Compose v2.24 or later. Older engines forward external
