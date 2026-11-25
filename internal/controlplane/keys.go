@@ -57,7 +57,7 @@ func stateMigrationsFor(kc config.KeysConfig, cc config.ConsoleConfig, tc config
 		migs = cpstate.Enable(migs, metastore.MigrationID)
 	}
 	if tc.Enabled {
-		migs = cpstate.Enable(migs, tokensvcsqlite.MigrationID, tokensvcsqlite.SessionsMigrationID)
+		migs = cpstate.Enable(migs, tokensvcsqlite.MigrationID, tokensvcsqlite.SessionsMigrationID, tokensvcsqlite.EventsMigrationID)
 	}
 	// api_keys/0001 likewise only with console.apiKeys.enabled: no table is
 	// created for a control plane without API keys.

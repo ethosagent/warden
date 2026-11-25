@@ -231,6 +231,8 @@ type H struct {
 	// wantTokenSvc (WithTokenService) boots the control plane with
 	// tokenService.enabled over the WithKeys state.
 	wantTokenSvc bool
+	// tokenLimits are the token service's rate limit and retention overrides.
+	tokenLimits tokenLimits
 	// wantWorkerCA (WithWorkerCA) boots the control plane with workerCA
 	// enabled; workerCA is the fixture minted on first use.
 	wantWorkerCA bool

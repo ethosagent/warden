@@ -74,7 +74,8 @@ type TokenServiceConfig struct {
 	AllowedAZP []string
 	// Session bounds a token session.
 	Session TokenServiceSession
-	// RateLimit holds the abuse limits (enforced by W-P2-TOKX-04).
+	// RateLimit holds the abuse limits the control plane enforces per client IP,
+	// per verified agent and per user (W-P2-TOKX-04).
 	RateLimit TokenServiceRateLimit
 	// EventRetention is how long issuance records are kept.
 	EventRetention time.Duration

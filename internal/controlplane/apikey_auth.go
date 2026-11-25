@@ -134,21 +134,8 @@ func newAPIKeyAuth(ix *apikeys.Index, cc config.ConsoleConfig, cookieName string
 			clk: clk, capacity: rate * apiKeyBurstFactor, perSec: rate, buckets: map[string]*bucket{},
 		},
 		rejectLog: newAddrLimiter(clk, apiKeyRejectLogEvery, apiKeyRejectLogAddrs),
-		trusted:   parseTrustedProxies(cc.TrustedProxies),
+		trusted:   trustedPrefixes(cc.TrustedProxies),
 	}
-}
-
-// parseTrustedProxies turns console.trustedProxies into prefixes. The config
-// loader already validated them; an entry that does not parse is skipped, never
-// trusted.
-func parseTrustedProxies(cidrs []string) []netip.Prefix {
-	var out []netip.Prefix
-	for _, c := range cidrs {
-		if p, err := netip.ParsePrefix(c); err == nil {
-			out = append(out, p.Masked())
-		}
-	}
-	return out
 }
 
 // apiKeyReachable reports whether a request path may be authenticated with a

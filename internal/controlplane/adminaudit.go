@@ -48,7 +48,7 @@ func StateMigrations() []cpstate.Migration {
 	migs = append(migs, EnrollmentMigrations()...)
 	// Feature-gated: known to the downgrade guard, applied only with
 	// keys.enabled or tokenService.enabled (stateMigrationsFor).
-	migs = append(migs, optionalMigrations(tokensvcsqlite.Migrations(), tokensvcsqlite.SessionMigrations())...)
+	migs = append(migs, optionalMigrations(tokensvcsqlite.Migrations(), tokensvcsqlite.SessionMigrations(), tokensvcsqlite.EventMigrations())...)
 	migs = append(migs, metastore.Migrations()...)
 	// Feature-gated: applied only with console.apiKeys.enabled.
 	migs = append(migs, sqlitestore.Migrations()...)

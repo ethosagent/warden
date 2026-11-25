@@ -73,6 +73,9 @@ type Config struct {
 	// TokenIssuer is tokenService.issuer: the base of the discovery document's
 	// URLs. Set together with Tokens.
 	TokenIssuer string
+	// TokenEdge is the token endpoint's pre-authentication limits, metrics and
+	// the retention of the token tables. Set with Tokens by EnableTokens.
+	TokenEdge TokenEdge
 	// Bundles is the signed-bundle mode (--bundles). The zero value is off:
 	// no publisher is built and /policy is unchanged. Run validates the
 	// prerequisites; New builds the publisher only when they are present, and
@@ -254,6 +257,9 @@ type Server struct {
 	// jwks is the public token JWKS handler, set by Handler when keys are
 	// enabled; the token service mints only with a key it publishes.
 	jwks atomic.Pointer[jwksServer]
+	// tokenEdge is the token endpoint's runtime state (in-flight slots, trusted
+	// proxies, the unauthenticated-failure log limiter); set by Handler.
+	tokenEdge *tokenEdgeState
 	// workerCA is the live worker CA; nil while disabled or degraded.
 	workerCA atomic.Pointer[workerca.CA]
 	central  analytics.FleetStore
@@ -545,6 +551,8 @@ func (s *Server) Start(ctx context.Context) {
 		}()
 	}
 
+	// Token table retention (tokenService.enabled), on the control plane's clock.
+	s.runTokenRetention(ctx)
 	if s.policy.bundlesOn() {
 		go s.policy.resignLoop(ctx, s.cfg.Clock)
 	}
@@ -646,6 +654,7 @@ func (s *Server) Handler() http.Handler {
 	// The RFC 8693 token endpoint and its RFC 8414 metadata, only when the
 	// token service was built (tokenService.enabled); otherwise 404.
 	if s.cfg.Tokens != nil {
+		s.tokenEdge = s.newTokenEdgeState()
 		mux.HandleFunc(tokenPath, s.handleToken)
 		mux.HandleFunc(asMetadataPath, s.handleASMetadata)
 	}

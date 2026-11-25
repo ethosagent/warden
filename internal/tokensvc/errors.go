@@ -1,6 +1,9 @@
 package tokensvc
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // OAuthCode is an RFC 6749 / RFC 8693 error code: the only part of a failure
 // that reaches the wire.
@@ -16,6 +19,8 @@ const (
 	CodeInvalidTarget          OAuthCode = "invalid_target"
 	CodeUnsupportedGrantType   OAuthCode = "unsupported_grant_type"
 	CodeTemporarilyUnavailable OAuthCode = "temporarily_unavailable"
+	// CodeRateLimited is answered with HTTP 429 and a Retry-After (RFC 6585).
+	CodeRateLimited OAuthCode = "rate_limited"
 )
 
 // Reason says why a request failed, for logs and metrics only. It is a closed
@@ -57,7 +62,35 @@ const (
 	ReasonSessionStoreUnavailable Reason = "session_store_unavailable"
 	ReasonTokenTooLarge           Reason = "token_too_large"
 	ReasonSignerUnavailable       Reason = "signer_unavailable"
+	ReasonEventStoreUnavailable   Reason = "event_store_unavailable"
+	ReasonRateLimited             Reason = "rate_limited"
 )
+
+// AllReasons is the closed Reason enum: the label set of
+// warden_cp_tokens_denied_total and the values of token_events.reason. A
+// reason that is not in it never reaches a label or a row.
+func AllReasons() []Reason {
+	return []Reason{
+		ReasonMalformed, ReasonTooLarge, ReasonAlgNotAllowed, ReasonUnknownKID, ReasonBadSignature,
+		ReasonWrongIss, ReasonWrongAud, ReasonExpired, ReasonLifetimeTooLong, ReasonReplay,
+		ReasonAgentUnknown, ReasonAgentDisabled, ReasonNotYetValid,
+		ReasonAgentStoreUnavailable, ReasonReplayStoreUnavailable, ReasonVerifierMisconfigured,
+		ReasonUnsupportedTokenType, ReasonInvalidTarget, ReasonSubjectInvalid, ReasonSubjectExpired,
+		ReasonIdPUnavailable, ReasonUserBlocked, ReasonBlockStoreUnavailable, ReasonGroupNotAllowed,
+		ReasonScopeNotAllowed, ReasonSessionRevoked, ReasonTokenTooLarge, ReasonSignerUnavailable,
+		ReasonSessionStoreUnavailable, ReasonEventStoreUnavailable, ReasonRateLimited,
+	}
+}
+
+// KnownReason reports whether r is in the closed enum.
+func KnownReason(r Reason) bool {
+	for _, k := range AllReasons() {
+		if k == r {
+			return true
+		}
+	}
+	return false
+}
 
 // Error is a token endpoint failure. Code is what the client sees; Reason,
 // AgentID and JTI are for logs and metrics.
@@ -70,6 +103,13 @@ type Error struct {
 	Reason  Reason
 	AgentID string
 	JTI     string
+	// Verified is set by Service.Exchange once the agent's assertion verified:
+	// only then is AgentID proven rather than claimed, and only then is the
+	// outcome recorded in token_events.
+	Verified bool
+	// RetryAfter is how long a rate_limited caller should wait (at least one
+	// second); zero on every other error.
+	RetryAfter time.Duration
 }
 
 // Error implements error with fixed words only.

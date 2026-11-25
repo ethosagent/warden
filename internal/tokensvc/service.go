@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -84,6 +85,22 @@ type Config struct {
 	Signers   Signers
 	Sessions  SessionStore
 	Resolvers map[string]SubjectResolver
+	// AgentLimiter limits exchanges per verified agent id, checked right after
+	// the assertion verifies; UserLimiter limits per user (IdP issuer and
+	// subject), checked right after the subject token verifies. nil allows
+	// everything. A refusal is a 429 rate_limited and is recorded like any
+	// other outcome after the assertion verified.
+	AgentLimiter, UserLimiter RateLimiter
+	// Recorder stores one Event per issued token and per denial after the
+	// assertion verified, before Exchange returns. When it fails the exchange
+	// answers event_store_unavailable and no token is released. nil records
+	// nothing (tests); the control plane always sets it.
+	Recorder Recorder
+	// Logger receives the warning for a denial whose record could not be
+	// written. nil logs nothing.
+	Logger *slog.Logger
+	// Metrics counts issued tokens, denials and durations. nil is a no-op.
+	Metrics *Metrics
 	// Now is the clock. Rand is the randomness source for jti and sid ids;
 	// production passes crypto/rand.Reader.
 	Now  func() time.Time
@@ -94,6 +111,9 @@ type Config struct {
 // It is safe for concurrent use.
 type Service struct {
 	cfg Config
+
+	warnMu   sync.Mutex
+	warnLast map[Reason]time.Time
 }
 
 // New validates cfg and returns the service.
@@ -230,6 +250,112 @@ func (i Issued) LogValue() slog.Value {
 // block list, groups, scope, session, mint. Any store or key failure fails
 // closed; no token is produced on an error.
 func (s *Service) Exchange(ctx context.Context, req ExchangeRequest) (*Issued, error) {
+	start := s.cfg.Now()
+	var st exchangeState
+	issued, err := s.exchange(ctx, req, &st)
+	if err == nil {
+		err = s.record(ctx, &st, Event{
+			Outcome: OutcomeIssued, AgentID: issued.Agent, IdPIss: st.idpIss, Sub: issued.Sub,
+			SID: issued.SID, JTI: issued.JTI, KID: issued.KID, Exp: issued.Exp, Scope: issued.Scope,
+		})
+		if err != nil {
+			issued = nil
+			err = &Error{Code: CodeTemporarilyUnavailable, Reason: ReasonEventStoreUnavailable, AgentID: st.client.AgentID, Verified: true}
+		}
+	} else {
+		var te *Error
+		if errors.As(err, &te) {
+			cp := *te
+			cp.Verified = st.verified
+			err = &cp
+			if st.verified {
+				// A failed write of a denial changes nothing for the caller,
+				// who gets the denial either way; the failure is logged here,
+				// without the store's error text, once per reason per minute.
+				if rerr := s.record(ctx, &st, Event{
+					Outcome: OutcomeDenied, Reason: te.Reason, AgentID: verifiedAgent(&st), IdPIss: st.idpIss, Sub: st.sub,
+				}); rerr != nil {
+					s.warnRecordFailed(te.Reason, rerr)
+				}
+			}
+		}
+	}
+	// Metrics last, so the counters match what the caller was told.
+	var te *Error
+	switch {
+	case err == nil:
+		s.cfg.Metrics.Issued(issued.Agent)
+	case errors.As(err, &te):
+		s.cfg.Metrics.Denied(te.Reason)
+	default:
+		s.cfg.Metrics.Denied(ReasonVerifierMisconfigured)
+	}
+	s.cfg.Metrics.Observe(s.cfg.Now().Sub(start))
+	return issued, err
+}
+
+// warnRecordFailed logs a failed denial record: the closed reason and the
+// error's type, never its text. At most once per reason per minute (the
+// reason set is closed, so the map is bounded).
+func (s *Service) warnRecordFailed(r Reason, err error) {
+	if s.cfg.Logger == nil {
+		return
+	}
+	now := s.cfg.Now()
+	s.warnMu.Lock()
+	if last, ok := s.warnLast[r]; ok && now.Sub(last) < time.Minute {
+		s.warnMu.Unlock()
+		return
+	}
+	if s.warnLast == nil {
+		s.warnLast = map[Reason]time.Time{}
+	}
+	s.warnLast[r] = now
+	s.warnMu.Unlock()
+	s.cfg.Logger.Warn("token_event_record_failed", "reason", string(r), "error_type", fmt.Sprintf("%T", err))
+}
+
+// exchangeState is what the exchange learns on the way, for recording.
+type exchangeState struct {
+	client   Client
+	verified bool
+	idpIss   string
+	sub      string
+}
+
+func verifiedAgent(st *exchangeState) string {
+	if st.verified {
+		return st.client.AgentID
+	}
+	return ""
+}
+
+// record stamps and stores ev when a Recorder is configured.
+func (s *Service) record(ctx context.Context, st *exchangeState, ev Event) error {
+	if s.cfg.Recorder == nil || !st.verified {
+		return nil
+	}
+	ev.TS = s.cfg.Now()
+	return s.cfg.Recorder.Record(ctx, ev)
+}
+
+// allow applies an optional limiter and returns the 429 error when it refuses.
+func (s *Service) allow(l RateLimiter, key, agent string) *Error {
+	if l == nil {
+		return nil
+	}
+	if ok, wait := l.Allow(key, s.cfg.Now()); !ok {
+		if wait < time.Second {
+			wait = time.Second
+		}
+		return &Error{Code: CodeRateLimited, Reason: ReasonRateLimited, AgentID: agent, RetryAfter: wait}
+	}
+	return nil
+}
+
+// exchange is the decision part of Exchange; Exchange adds recording and
+// metrics around it.
+func (s *Service) exchange(ctx context.Context, req ExchangeRequest, st *exchangeState) (*Issued, error) {
 	if req.Audience != "" && req.Audience != identity.WardenAudience {
 		return nil, &Error{Code: CodeInvalidTarget, Reason: ReasonInvalidTarget}
 	}
@@ -247,8 +373,15 @@ func (s *Service) Exchange(ctx context.Context, req ExchangeRequest) (*Issued, e
 	if err != nil {
 		return nil, err
 	}
+	st.client, st.verified = client, true
 	deny := func(code OAuthCode, r Reason) (*Issued, error) {
 		return nil, &Error{Code: code, Reason: r, AgentID: client.AgentID}
+	}
+	// Only now is the agent id proven, so only now does a per-agent budget
+	// exist: a forged assertion never reaches here and cannot spend a real
+	// agent's.
+	if e := s.allow(s.cfg.AgentLimiter, client.AgentID, client.AgentID); e != nil {
+		return nil, e
 	}
 
 	subj, err := resolver.Resolve(ctx, req.SubjectToken)
@@ -263,6 +396,10 @@ func (s *Service) Exchange(ctx context.Context, req ExchangeRequest) (*Issued, e
 		return deny(CodeInvalidGrant, ReasonSubjectInvalid)
 	}
 	user := subj.Subject
+	st.idpIss, st.sub = subj.IdPIss, user.Sub
+	if e := s.allow(s.cfg.UserLimiter, subj.IdPIss+"\x00"+user.Sub, client.AgentID); e != nil {
+		return nil, e
+	}
 
 	// The agent may have been disabled or re-keyed while the IdP answered.
 	agent, err := s.cfg.Agents.Get(ctx, client.AgentID)
