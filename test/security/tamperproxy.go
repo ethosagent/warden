@@ -102,8 +102,8 @@ func (w *statusWriter) Flush() {
 	}
 }
 
-// Requests returns every request the worker sent through the proxy, oldest
-// first.
+// Requests returns every request the worker sent through the proxy, in the
+// order they arrived.
 func (p *TamperProxy) Requests() []ProxiedRequest {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -219,10 +219,15 @@ func (p *TamperProxy) handle(w http.ResponseWriter, r *http.Request) {
 		sum := sha256.Sum256(r.TLS.PeerCertificates[0].Raw)
 		pr.ClientCert = hex.EncodeToString(sum[:])
 	}
+	// Recorded on arrival, so the list is in arrival order even when a held
+	// long-poll finishes after later requests; the status is filled in at the end.
+	p.mu.Lock()
+	idx := len(p.reqs)
+	p.reqs = append(p.reqs, pr)
+	p.mu.Unlock()
 	defer func() {
-		pr.Status = rec.status
 		p.mu.Lock()
-		p.reqs = append(p.reqs, pr)
+		p.reqs[idx].Status = rec.status
 		p.mu.Unlock()
 	}()
 	w = rec

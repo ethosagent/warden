@@ -131,6 +131,15 @@ func testRejects(t *testing.T) {
 		Worker: "agent-b",
 		Attack: func(t testing.TB, s *security.Stack) security.Observed {
 			dials := s.UpstreamDials()
+			wb := s.Worker("agent-b")
+			s.WaitIdle(t)
+			blocked := s.Metric(t, wb, "warden_blocked_total", map[string]string{"reason": "agent_disabled"})
+			defer func() {
+				s.WaitIdle(t)
+				if got := s.Metric(t, wb, "warden_blocked_total", map[string]string{"reason": "agent_disabled"}) - blocked; got != 1 {
+					t.Errorf(`warden_blocked_total{reason="agent_disabled"} rose by %v, want 1`, got)
+				}
+			}()
 			obs := security.Seen(connect(t, s, s.Worker("agent-b"), disabled))
 			if got := s.UpstreamDials() - dials; got != 0 {
 				t.Errorf("the worker dialed the upstream %d times for a disabled agent, want 0", got)
@@ -147,7 +156,7 @@ func testRejects(t *testing.T) {
 		refused("a Dex token", "invalid", "unbound_token", "idp", func(_ testing.TB, s *security.Stack) string {
 			return s.UserToken("user-1", []string{"eng"})
 		}),
-		refused("an expired token", "expired", "", "warden", func(t testing.TB, s *security.Stack) string {
+		refused("an expired token", "expired", "none", "warden", func(t testing.TB, s *security.Stack) string {
 			return s.ForgeWarden(t, s.Agent("agent-a"), "user-1",
 				security.Claim("iat", rel(-10*time.Minute)), security.Claim("exp", rel(-(skew+5*time.Second))))
 		}),
@@ -614,7 +623,6 @@ func testMTLS(t *testing.T) {
 
 	t.Run("worker routes carry a client certificate and no Authorization header", func(t *testing.T) {
 		for _, path := range workerRoutes {
-			path := path
 			s.EventuallyAdvance("the worker to call "+path, time.Second, func() bool {
 				return slices.ContainsFunc(seen(path, 0), accepted)
 			})
@@ -656,6 +664,35 @@ func testMTLS(t *testing.T) {
 				}
 			}
 		}
+		// A valid certificate wins: a bearer next to it is ignored, and the
+		// caller is the certificate's worker, never a token worker.
+		withCert := s.Credential(t, w)
+		hdr := http.Header{"Authorization": {"Bearer wwt_" + strings.Repeat("b", 43)}, "Accept": {controlplane.BundleMediaType}}
+		if r := s.Send(t, s.CPClient(t, &withCert), http.MethodGet, "/policy", hdr, nil); r.Status != http.StatusOK {
+			t.Errorf("GET /policy with the worker certificate and a bearer = %d, want 200 (the certificate wins)", r.Status)
+		}
+		views := s.AdminSession(t).Do(t, http.MethodGet, "/dashboard/api/workers", nil)
+		var workers []struct {
+			ProxyID  string `json:"proxyID"`
+			AuthKind string `json:"authKind"`
+		}
+		if err := json.Unmarshal([]byte(views.Body), &workers); err != nil || views.Status != http.StatusOK {
+			t.Fatalf("GET /dashboard/api/workers = %d %v", views.Status, err)
+		}
+		found := false
+		for _, v := range workers {
+			if v.ProxyID == w.Name {
+				found = true
+				if v.AuthKind != "cert" {
+					t.Errorf("%s authenticated as %q, want cert", v.ProxyID, v.AuthKind)
+				}
+			} else if v.AuthKind != "cert" {
+				t.Errorf("a worker %q authenticated as %q: the bearer created an identity", v.ProxyID, v.AuthKind)
+			}
+		}
+		if !found {
+			t.Errorf("no worker %q in the fleet list", w.Name)
+		}
 		// The positive control: the certificate alone is accepted.
 		cert := s.Credential(t, w)
 		if r := s.Send(t, s.CPClient(t, &cert), http.MethodGet, "/policy", http.Header{"Accept": {controlplane.BundleMediaType}}, nil); r.Status != http.StatusOK {
@@ -693,6 +730,8 @@ func testMTLS(t *testing.T) {
 			switch {
 			case r.Path == "/control/renew":
 				// The renewal request itself is made with the old certificate.
+			case r.ClientCert != before && r.ClientCert != after:
+				t.Errorf("%s %s presented certificate %.12q, want the worker's old or renewed one", r.Method, r.Path, r.ClientCert)
 			case r.ClientCert == after:
 				switched = true
 			case switched && r.ClientCert == before:
@@ -702,7 +741,7 @@ func testMTLS(t *testing.T) {
 				t.Errorf("%s %s = %d across the renewal, want the control plane to accept it", r.Method, r.Path, r.Status)
 			}
 		}
-		for _, path := range []string{"/control/heartbeat", "/central/ingest"} {
+		for _, path := range workerRoutes {
 			s.EventuallyAdvance("an accepted "+path+" request with the renewed certificate", time.Second, func() bool {
 				return slices.ContainsFunc(seen(path, from), func(r security.ProxiedRequest) bool { return r.ClientCert == after && accepted(r) })
 			})

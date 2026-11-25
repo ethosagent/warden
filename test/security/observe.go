@@ -343,6 +343,13 @@ func (s *Stack) surfaces(tb testing.TB) map[string]string {
 			out[w.Name+" decision log"] = text
 		}
 	}
+	if s.opts.CentralIngest && s.CP != nil && s.CP.cancel != nil {
+		fleet, err := json.Marshal(s.FleetEvents(tb, ""))
+		if err != nil {
+			tb.Fatalf("security: encode the fleet events: %v", err)
+		}
+		out["fleet events"] = string(fleet)
+	}
 	audit, err := json.Marshal(s.AuditRows(tb, ""))
 	if err != nil {
 		tb.Fatalf("security: encode the audit rows: %v", err)
