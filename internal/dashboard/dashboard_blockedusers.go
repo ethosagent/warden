@@ -197,6 +197,14 @@ func decodeBlockBody(w http.ResponseWriter, r *http.Request, v any) (int, string
 // writeBlockError maps a store error to a fixed response. An unknown error is a
 // 500 with a fixed message: the detail is the adapter's to log.
 func writeBlockError(w http.ResponseWriter, err error) {
+	if writeHeld(w, err) {
+		return
+	}
+	var cerr *ChangeError
+	if errors.As(err, &cerr) {
+		writeChangeError(w, err)
+		return
+	}
 	switch {
 	case errors.Is(err, ErrBlockStateRequired):
 		writeError(w, http.StatusServiceUnavailable, "state_dir_required")

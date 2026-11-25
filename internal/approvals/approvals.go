@@ -160,6 +160,9 @@ type Draft struct {
 
 // PolicyDoc decodes DocJSON into a Doc.
 func (d Draft) PolicyDoc() (Doc, error) {
+	if d.Target != TargetPolicy {
+		return Doc{}, fmt.Errorf("%w: %s drafts do not carry a policy doc", ErrUnsupportedTarget, d.Target)
+	}
 	var doc Doc
 	if err := json.Unmarshal(d.DocJSON, &doc); err != nil {
 		return Doc{}, err
