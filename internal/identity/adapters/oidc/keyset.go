@@ -32,6 +32,12 @@ const (
 // keySet serves signing keys lazily. Fetches are single-flight, at most one
 // attempt per floor interval, and run on their own context so one caller's
 // cancel cannot fail the others. The last good key list is kept on failure.
+//
+// A kid missing from the cache is "unknown" only when the newest fetch
+// attempt succeeded: while the issuer is unreachable (the refetch failed, or
+// is skipped inside the floor after a failure) a missing kid may be a rotated
+// key the cache has not seen, so it is keysUnavailable and callers can retry.
+// Known kids keep verifying from the cache throughout.
 type keySet struct {
 	client  *http.Client
 	issuer  string
@@ -42,6 +48,7 @@ type keySet struct {
 	mu          sync.Mutex
 	keys        []jose.JSONWebKey
 	loaded      bool
+	lastFailed  bool // the most recent completed fetch attempt failed
 	lastAttempt time.Time
 	inflight    *fetchCall
 }
@@ -62,12 +69,9 @@ func (k *keySet) lookup(ctx context.Context, kid, alg string) (jose.JSONWebKey, 
 	if call == nil {
 		now := k.now()
 		if !k.lastAttempt.IsZero() && now.Sub(k.lastAttempt) < k.floor {
-			loaded := k.loaded
+			res := k.missResult()
 			k.mu.Unlock()
-			if loaded {
-				return jose.JSONWebKey{}, keyUnknown
-			}
-			return jose.JSONWebKey{}, keysUnavailable
+			return jose.JSONWebKey{}, res
 		}
 		k.lastAttempt = now
 		call = &fetchCall{done: make(chan struct{})}
@@ -86,10 +90,17 @@ func (k *keySet) lookup(ctx context.Context, kid, alg string) (jose.JSONWebKey, 
 	if key, ok := k.find(kid, alg); ok {
 		return key, keyFound
 	}
-	if k.loaded {
-		return jose.JSONWebKey{}, keyUnknown
+	return jose.JSONWebKey{}, k.missResult()
+}
+
+// missResult classifies a kid absent from the cache. It is keyUnknown only
+// when keys have loaded and the latest fetch attempt succeeded; a cold cache
+// or a failing issuer gives keysUnavailable. The caller holds mu.
+func (k *keySet) missResult() lookupResult {
+	if k.loaded && !k.lastFailed {
+		return keyUnknown
 	}
-	return jose.JSONWebKey{}, keysUnavailable
+	return keysUnavailable
 }
 
 // find searches the current keys. An empty kid matches only when exactly one
@@ -135,6 +146,7 @@ func (k *keySet) fetch(call *fetchCall) {
 	if err == nil {
 		k.keys, k.loaded = keys, true
 	}
+	k.lastFailed = err != nil
 	k.inflight = nil
 	k.mu.Unlock()
 	close(call.done)
