@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/ethosagent/warden/internal/analytics"
+	"github.com/ethosagent/warden/internal/denyreason"
+	"github.com/ethosagent/warden/internal/identity"
 	"github.com/ethosagent/warden/internal/policy"
 	"github.com/ethosagent/warden/internal/protocol"
 )
@@ -210,6 +212,15 @@ func (p *Proxy) terminateAndDispatch(clientConn net.Conn, firstBytes io.Reader, 
 	// required.
 	if d != deferNone {
 		p.storeDeny(ci, domain, port, "tcp", failClosedReason(d), "")
+		return
+	}
+
+	// Require mode admits only a valid Warden token, and this leg has no request
+	// to carry one: a transparent connection (no CONNECT identity) is refused
+	// here, before any dial.
+	if h := p.identity(); h != nil && h.mode == IdentityModeRequire &&
+		!(ci.status() == identity.StatusValid && ci.Claims.TokenType == identity.TokenWarden) {
+		p.storeDeny(ci, domain, port, "tcp", denyreason.IdentityRequired, "")
 		return
 	}
 

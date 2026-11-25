@@ -3,9 +3,11 @@ package proxy
 import (
 	"bufio"
 	"crypto/tls"
+	"crypto/x509"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -18,6 +20,7 @@ import (
 	"github.com/ethosagent/warden/internal/denyreason"
 	"github.com/ethosagent/warden/internal/identity"
 	"github.com/ethosagent/warden/internal/mcp/ws"
+	"github.com/ethosagent/warden/test/fakes"
 )
 
 // These tests cover W-P2-WBND-09: require-mode sessions are cut at token expiry
@@ -31,9 +34,12 @@ const (
 
 type expEnv struct {
 	*idEnv
-	sv *bindVerifier
-	fk *clocktest.Fake
+	sv    *bindVerifier
+	fk    *clocktest.Fake
+	start time.Time // the fake clock when the env was built; tok-w-alice expires expTTL later
 }
+
+func (e *expEnv) exp() time.Time { return e.start.Add(expTTL) }
 
 // newExpiryEnv is newRequireEnv on a fake identity clock: tok-w-alice expires
 // expTTL after start, tok-w-long an hour after. edit runs on the Config.
@@ -58,11 +64,11 @@ func newExpiryEnv(t *testing.T, edit func(*Config)) *expEnv {
 	e.v.Set("tok-w-long", warden("alice", time.Hour), identity.StatusValid, "")
 	e.v.Set("tok-a-alice", idClaims("alice", fk.Now().Add(expTTL)), identity.StatusValid, "")
 	e.p.SetIdentity(&reqVerifier{Verifier: e.v, snap: sv}, IdentityModeRequire)
-	return &expEnv{idEnv: e, sv: sv, fk: fk}
+	return &expEnv{idEnv: e, sv: sv, fk: fk, start: fk.Now()}
 }
 
 // armed is how many sessions the expiry heap holds.
-func (e *expEnv) armed() int {
+func (e *idEnv) armed() int {
 	r := e.p.sessions
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -71,7 +77,7 @@ func (e *expEnv) armed() int {
 
 // waitArmed waits for n armed sessions: a CONNECT's 200 is written before the
 // tunnel registers.
-func (e *expEnv) waitArmed(t *testing.T, n int) {
+func (e *idEnv) waitArmed(t *testing.T, n int) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for e.armed() != n {
@@ -84,7 +90,9 @@ func (e *expEnv) waitArmed(t *testing.T, n int) {
 
 // pollAdvance advances the fake clock by step until cond holds. One Advance
 // alone is not enough: the expiry loop may compute its wait before the clock
-// moves and arm its timer after, so it must be driven by condition.
+// moves and arm its timer after, so it must be driven by condition. After each
+// step it gives the loop a short real moment to act, so a cut lands at the
+// boundary the clock just crossed and not a step later.
 func pollAdvance(t *testing.T, fk *clocktest.Fake, step time.Duration, desc string, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
@@ -93,7 +101,9 @@ func pollAdvance(t *testing.T, fk *clocktest.Fake, step time.Duration, desc stri
 			t.Fatalf("timed out waiting for %s", desc)
 		}
 		fk.Advance(step)
-		time.Sleep(time.Millisecond)
+		for settle := time.Now().Add(100 * time.Millisecond); !cond() && time.Now().Before(settle); {
+			time.Sleep(time.Millisecond)
+		}
 	}
 }
 
@@ -107,10 +117,30 @@ func (e *expEnv) expiredEvents() int {
 	return n
 }
 
-// cutBy advances the clock by condition until an identity_expired event exists.
-func (e *expEnv) cutBy(t *testing.T) {
+// cutBy advances the clock by condition until an identity_expired event exists
+// and returns the fake time at which it was first seen.
+func (e *expEnv) cutBy(t *testing.T) time.Time {
 	t.Helper()
+	return e.cutByNear(t, time.Time{})
+}
+
+// cutByNear is cutBy after moving the clock to 2s before near (zero: no move),
+// so the polling steps cover only the boundary, not the whole token lifetime.
+func (e *expEnv) cutByNear(t *testing.T, near time.Time) time.Time {
+	t.Helper()
+	if d := near.Add(-2 * time.Second).Sub(e.fk.Now()); !near.IsZero() && d > 0 {
+		e.fk.Advance(d)
+	}
 	pollAdvance(t, e.fk, time.Second, "the identity_expired cut", func() bool { return e.expiredEvents() > 0 })
+	return e.fk.Now()
+}
+
+// assertCutWithin fails when the cut was first seen later than limit+1s.
+func assertCutWithin(t *testing.T, what string, at, limit time.Time) {
+	t.Helper()
+	if at.After(limit.Add(time.Second)) {
+		t.Errorf("%s was cut %v after its limit, want within 1s", what, at.Sub(limit))
+	}
 }
 
 // rawPipe makes the upstream side of a raw tunnel: dials get one end of a pipe.
@@ -157,7 +187,7 @@ func TestRequireSessionExpiry(t *testing.T) {
 			t.Fatalf("%d identity_expired events before exp+skew", n)
 		}
 
-		e.cutBy(t)
+		assertCutWithin(t, "the raw tunnel", e.cutBy(t), e.exp().Add(expSkew))
 		if !readsEOF(conn) || !readsEOF(upstream) {
 			t.Error("both legs must be closed after the cut")
 		}
@@ -186,7 +216,7 @@ func TestRequireSessionExpiry(t *testing.T) {
 			t.Fatalf("%d events before exp", n)
 		}
 		// An idle keep-alive is cut at exp itself, with no skew grace.
-		e.cutBy(t)
+		assertCutWithin(t, "the idle keep-alive", e.cutBy(t), e.exp())
 		_ = c.tc.SetReadDeadline(time.Now().Add(5 * time.Second))
 		if _, err := c.br.ReadByte(); err == nil {
 			t.Error("idle keep-alive still open after exp")
@@ -218,7 +248,7 @@ func TestRequireSessionExpiry(t *testing.T) {
 		if n := e.expiredEvents(); n != 0 {
 			t.Fatalf("%d events inside the skew", n)
 		}
-		e.cutBy(t)
+		assertCutWithin(t, "the late keep-alive", e.cutByNear(t, e.exp().Add(expSkew)), e.exp().Add(expSkew))
 		_ = c.tc.SetReadDeadline(time.Now().Add(5 * time.Second))
 		if _, err := c.br.ReadByte(); err == nil {
 			t.Error("keep-alive still open after exp+skew")
@@ -253,6 +283,8 @@ func TestRequireSessionExpiry(t *testing.T) {
 			t.Errorf("%d identity_expired events, want 1", n)
 		}
 		// The in-flight stream still completes after GOAWAY.
+		// A new stream after GOAWAY is refused: the server never answers it.
+		fr.openStream(3, "GET", true)
 		fr.endStream(1)
 		if st := fr.waitStatus(t, 1); st != "200" {
 			t.Errorf("in-flight stream status %q, want 200", st)
@@ -260,8 +292,42 @@ func TestRequireSessionExpiry(t *testing.T) {
 		if !fr.waitClosed() {
 			t.Error("connection must end once the in-flight stream finished")
 		}
+		if st := fr.statusOf(3); st != "" {
+			t.Errorf("a stream opened after GOAWAY got status %q, want none", st)
+		}
 		if n := e.expiredEvents(); n != 1 {
 			t.Errorf("%d identity_expired events after close, want still 1", n)
+		}
+	})
+
+	// A stream that never finishes is stopped at exp+skew: GOAWAY at exp, then a
+	// forced close. One deny event, and a recheck after GOAWAY adds none.
+	t.Run("h2_hard_stop", func(t *testing.T) {
+		inf := NewInflight()
+		e := newExpiryEnv(t, func(c *Config) { c.Inflight = inf })
+		conn, br, status := e.connect("Proxy-Authorization: " + basicAuth("tok-w-alice") + "\r\n")
+		if !strings.Contains(status, "200") {
+			t.Fatalf("CONNECT status %q", status)
+		}
+		fr := newRawH2(t, e.tlsOver(conn, br, "h2"))
+		fr.openStream(1, "POST", false) // never ended
+		e.waitArmed(t, 1)
+		for deadline := time.Now().Add(5 * time.Second); len(inf.InFlight()) != 1; time.Sleep(time.Millisecond) {
+			if time.Now().After(deadline) {
+				t.Fatal("the stream never reached the proxy")
+			}
+		}
+		pollAdvance(t, e.fk, time.Second, "GOAWAY", fr.sawGoAway)
+		if fr.isClosed() {
+			t.Fatal("the connection closed at GOAWAY with a stream in flight")
+		}
+		e.sv.setKeys(t, 2, []string{"k2"}, reqActive("T1"))
+		e.p.RecheckIdentitySessions()
+		e.fk.Advance(e.exp().Add(expSkew - 2*time.Second).Sub(e.fk.Now()))
+		pollAdvance(t, e.fk, time.Second, "the hard stop", fr.isClosed)
+		assertCutWithin(t, "the stuck h2 stream", e.fk.Now(), e.exp().Add(expSkew))
+		if n := len(e.denyEvents()); n != 1 || e.expiredEvents() != 1 {
+			t.Errorf("deny events %+v, want exactly one identity_expired", e.denyEvents())
 		}
 	})
 
@@ -299,7 +365,7 @@ func TestRequireSessionExpiry(t *testing.T) {
 		if n := e.expiredEvents(); n != 0 {
 			t.Fatalf("%d events before exp+skew", n)
 		}
-		e.cutBy(t)
+		assertCutWithin(t, "the WebSocket", e.cutBy(t), e.exp().Add(expSkew))
 		_ = tc.SetReadDeadline(time.Now().Add(5 * time.Second))
 		if _, err := cbr.ReadByte(); err == nil {
 			t.Error("WebSocket still open after exp+skew")
@@ -548,6 +614,21 @@ func (r *rawH2) waitStatus(t *testing.T, id uint32) string {
 	return ""
 }
 
+func (r *rawH2) statusOf(id uint32) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.status[id]
+}
+
+func (r *rawH2) isClosed() bool {
+	select {
+	case <-r.closed:
+		return true
+	default:
+		return false
+	}
+}
+
 func (r *rawH2) waitClosed() bool {
 	select {
 	case <-r.closed:
@@ -555,4 +636,248 @@ func (r *rawH2) waitClosed() bool {
 	case <-time.After(5 * time.Second):
 		return false
 	}
+}
+
+// sseEnv is an expiry env whose upstream streams text/event-stream on demand: a
+// request that stays busy (mid-response) for as long as the test wants.
+func newSSEEnv(t *testing.T) (*expEnv, chan<- string) {
+	t.Helper()
+	ticks := make(chan string)
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		for {
+			select {
+			case m := <-ticks:
+				_, _ = io.WriteString(w, "data: "+m+"\n\n")
+				w.(http.Flusher).Flush()
+			case <-r.Context().Done():
+				return
+			}
+		}
+	}))
+	t.Cleanup(func() { srv.CloseClientConnections(); srv.Close() })
+	e := newExpiryEnv(t, nil)
+	e.p.dialTLS = func(_, _ string, c *tls.Config) (*tls.Conn, error) {
+		return tls.Dial("tcp", srv.Listener.Addr().String(), &tls.Config{InsecureSkipVerify: true, NextProtos: []string{"http/1.1"}})
+	}
+	return e, ticks
+}
+
+// openSSE starts a streaming response on a keep-alive and returns its reader.
+func openSSE(t *testing.T, e *expEnv, tok string) *bufio.Reader {
+	t.Helper()
+	c := e.h1("Proxy-Authorization: " + basicAuth(tok) + "\r\n")
+	_, _ = io.WriteString(c.tc, "GET /sse HTTP/1.1\r\nHost: "+idHost+"\r\nAccept: text/event-stream\r\n\r\n")
+	resp, err := http.ReadResponse(c.br, nil)
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("SSE open: %v %v", resp, err)
+	}
+	return bufio.NewReader(resp.Body)
+}
+
+func readEvent(r *bufio.Reader) (string, error) {
+	line, err := r.ReadString('\n')
+	if err != nil {
+		return "", err
+	}
+	_, _ = r.ReadString('\n')
+	return strings.TrimSpace(line), nil
+}
+
+// TestRequireBusySessionCut: an HTTP/1 session that is mid-response (an SSE
+// relay) when its token expires is reported at exp and force-closed at exp+skew,
+// so a stream cannot outlive the token; a revoked binding cuts it at once.
+func TestRequireBusySessionCut(t *testing.T) {
+	t.Run("expiry", func(t *testing.T) {
+		e, ticks := newSSEEnv(t)
+		body := openSSE(t, e, "tok-w-alice")
+		e.waitArmed(t, 1)
+		send := func(m string) {
+			t.Helper()
+			select {
+			case ticks <- m:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the upstream stream is gone")
+			}
+			if got, err := readEvent(body); err != nil || got != "data: "+m {
+				t.Fatalf("event %q: %q %v", m, got, err)
+			}
+		}
+		send("one")
+		// At exp the event is written, yet the stream keeps flowing until exp+skew.
+		e.cutBy(t)
+		send("two")
+		if n := e.expiredEvents(); n != 1 {
+			t.Fatalf("%d identity_expired events at exp, want 1", n)
+		}
+		e.fk.Advance(e.exp().Add(expSkew - 2*time.Second).Sub(e.fk.Now()))
+		send("three") // still flowing just before exp+skew
+		gone := make(chan struct{})
+		go func() {
+			defer close(gone)
+			_, _ = io.Copy(io.Discard, body)
+		}()
+		pollAdvance(t, e.fk, time.Second, "the forced close", func() bool {
+			select {
+			case <-gone:
+				return true
+			default:
+				return false
+			}
+		})
+		assertCutWithin(t, "the busy stream", e.fk.Now(), e.exp().Add(expSkew))
+		if n := e.expiredEvents(); n != 1 {
+			t.Errorf("%d identity_expired events after the forced close, want still 1", n)
+		}
+	})
+
+	t.Run("recheck", func(t *testing.T) {
+		e, ticks := newSSEEnv(t)
+		body := openSSE(t, e, "tok-w-long")
+		e.waitArmed(t, 1)
+		ticks <- "one"
+		if _, err := readEvent(body); err != nil {
+			t.Fatal(err)
+		}
+		e.sv.setKeys(t, 2, []string{"k2"}, reqActive("T1"))
+		e.p.RecheckIdentitySessions()
+		if _, err := readEvent(body); err == nil {
+			t.Error("a busy stream survived the removal of its key")
+		}
+		evs := e.waitDeny(t, denyreason.IdentityRequired, 1)
+		if evs[0].IdentityStatus != "invalid" || evs[0].IdentityReason != "unknown_kid" {
+			t.Errorf("event identity = %s/%s, want invalid/unknown_kid", evs[0].IdentityStatus, evs[0].IdentityReason)
+		}
+		if got := e.m.identityCount("invalid", "unknown_kid"); got < 1 {
+			t.Errorf("identity verify invalid/unknown_kid = %d, want the cut counted", got)
+		}
+	})
+}
+
+// TestRecheckSweepsUnarmedSessions: sessions opened before the agent moved to
+// require carry no expiry. The next recheck arms the one holding a Warden token
+// that still binds and cuts the others, so the flip leaves nothing behind.
+func TestRecheckSweepsUnarmedSessions(t *testing.T) {
+	e := newExpiryEnv(t, noCA)
+	e.p.SetIdentity(&reqVerifier{Verifier: e.v, snap: e.sv}, IdentityModeAttribute)
+	e.p.SetSessionTracking(true) // a managed worker tracks anonymous sessions too
+	up := e.rawPipe()
+	open := func(auth string) net.Conn {
+		extra := ""
+		if auth != "" {
+			extra = "Proxy-Authorization: " + basicAuth(auth) + "\r\n"
+		}
+		conn, _, status := e.connect(extra)
+		if !strings.Contains(status, "200") {
+			t.Fatalf("CONNECT status %q", status)
+		}
+		return conn
+	}
+	good, idp, anon := open("tok-w-long"), open("tok-a-alice"), open("")
+	for i := 0; i < 3; i++ {
+		<-up
+	}
+	e.p.SetIdentity(&reqVerifier{Verifier: e.v, snap: e.sv}, IdentityModeRequire)
+	e.p.RecheckIdentitySessions()
+	if !readsEOF(idp) || !readsEOF(anon) {
+		t.Fatal("an IdP-token or anonymous tunnel survived the flip to require")
+	}
+	e.waitArmed(t, 1) // the Warden-token tunnel is armed, not cut
+	go func() { _, _ = good.Write([]byte("x")) }()
+	evs := e.waitDeny(t, denyreason.IdentityRequired, 2)
+	if len(evs) != 2 {
+		t.Errorf("%d identity_required events, want 2 (idp, anonymous)", len(evs))
+	}
+	// Armed now: it is cut at exp+skew like any other.
+	e.fk.Advance(time.Hour - time.Second) // tok-w-long expires after an hour
+	pollAdvance(t, e.fk, time.Minute, "the swept tunnel's expiry", func() bool { return e.expiredEvents() > 0 })
+	if !readsEOF(good) {
+		t.Error("the swept Warden-token tunnel outlived its token")
+	}
+}
+
+// TestRequireTransparentLeg: a transparent connection has no CONNECT, so require
+// mode admits only a Warden token carried in X-Warden-Identity, arms the session
+// from it, and refuses any non-HTTP traffic inside TLS without dialing.
+func TestRequireTransparentLeg(t *testing.T) {
+	fk := clocktest.NewFake(time.Now())
+	sv := &bindVerifier{}
+	sv.setKeys(t, 1, []string{"k1"}, map[string]identity.WardenAgent{"default": {Active: true, JKT: jktSet("T1")}})
+	v := fakes.NewVerifier()
+	claims := wardenClaims("default", "T1")
+	claims.Expiry = fk.Now().Add(expTTL)
+	v.Set("tok-w", claims, identity.StatusValid, "")
+	_, _, caCert, caKey := generateTestCA(t)
+	b := &wsBackend{}
+	ln := startWSBackend(t, caCert, caKey, b)
+	e := newTransparentEnv(t, transparentOpts{
+		identity: IdentityConfig{Verifier: &reqVerifier{Verifier: v, snap: sv}, Mode: IdentityModeRequire},
+		cfgEdit: func(c *Config) {
+			c.IdentityClock = fk.Now
+			c.IdentityTimer = func(d time.Duration) IdentityTimer { return fk.NewTimer(d) }
+		},
+	})
+	e.p.dialTLS = dialBackend(ln)
+	tlsDial := func() *tls.Conn {
+		pool := x509.NewCertPool()
+		pool.AppendCertsFromPEM(e.caPEM)
+		tc, err := tls.Dial("tcp", e.tlsAddr(), &tls.Config{ServerName: invHost, RootCAs: pool})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = tc.Close() })
+		return tc
+	}
+	armed := func() int {
+		e.p.sessions.mu.Lock()
+		defer e.p.sessions.mu.Unlock()
+		return len(e.p.sessions.expiry)
+	}
+	denies := func(reason string) int {
+		n := 0
+		for _, ev := range e.store.snapshot() {
+			if ev.Decision == "deny" && ev.Reason == reason {
+				n++
+			}
+		}
+		return n
+	}
+
+	t.Run("websocket_armed_from_header", func(t *testing.T) {
+		tc := tlsDial()
+		_, _ = io.WriteString(tc, "GET /ws HTTP/1.1\r\nHost: "+invHost+"\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"+
+			IdentityHeader+": Bearer tok-w\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n")
+		cbr := bufio.NewReader(tc)
+		resp, err := http.ReadResponse(cbr, nil)
+		if err != nil || resp.StatusCode != http.StatusSwitchingProtocols {
+			t.Fatalf("upgrade: %v %v", resp, err)
+		}
+		for deadline := time.Now().Add(5 * time.Second); armed() != 1; time.Sleep(time.Millisecond) {
+			if time.Now().After(deadline) {
+				t.Fatal("the header-only WebSocket was never armed")
+			}
+		}
+		fk.Advance(expTTL + expSkew - 2*time.Second)
+		pollAdvance(t, fk, time.Second, "the WebSocket cut", func() bool { return denies("identity_expired") > 0 })
+		_ = tc.SetReadDeadline(time.Now().Add(5 * time.Second))
+		if _, err := cbr.ReadByte(); err == nil {
+			t.Error("a header-only WebSocket outlived its token")
+		}
+	})
+
+	t.Run("non_http_inside_tls_refused", func(t *testing.T) {
+		before := e.tlsUpstreams.Load()
+		tc := tlsDial()
+		_, _ = tc.Write([]byte("\x00\x01\x02\x03 not http"))
+		for deadline := time.Now().Add(5 * time.Second); denies("identity_required") < 1; time.Sleep(time.Millisecond) {
+			if time.Now().After(deadline) {
+				t.Fatalf("no identity_required deny; events %+v", e.store.snapshot())
+			}
+		}
+		if n := e.tlsUpstreams.Load() - before; n != 0 {
+			t.Errorf("%d upstream dials for refused non-HTTP traffic", n)
+		}
+	})
 }

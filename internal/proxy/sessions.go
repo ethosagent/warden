@@ -4,6 +4,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethosagent/warden/internal/analytics"
@@ -101,6 +102,11 @@ type session struct {
 	graceful func()
 	goaway   bool
 	late     bool
+	// hard marks a busy HTTP/1 session already reported: its next due time is the
+	// forced close. reported means its identity deny event is written.
+	hard     bool
+	reported bool
+	armed    atomic.Bool
 }
 
 // newSession builds an unregistered session; it joins the registry when bind
@@ -292,6 +298,10 @@ type closedSession struct {
 	// silent marks a step whose deny event was already written (the hard close
 	// after an h2 GOAWAY).
 	silent bool
+	// reason and detail are the identity deny reason of an expiry-loop or
+	// recheck cut (expiry.go); empty for a block-list cut.
+	reason denyreason.Reason
+	detail string
 }
 
 // takeBlocked marks and returns the sessions whose registered sub or email the
@@ -328,7 +338,7 @@ func (r *sessionRegistry) takeBlocked(subBlocked, emailBlocked func(string) bool
 func (r *sessionRegistry) markLocked(hit map[*session]struct{}, force bool, pick func(connIdentity) bool) []closedSession {
 	var out []closedSession
 	for s := range hit {
-		if s.closing {
+		if s.closing || s.released {
 			continue
 		}
 		s.closing = true

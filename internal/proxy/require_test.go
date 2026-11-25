@@ -205,6 +205,7 @@ func TestIdentityRequireMode(t *testing.T) {
 		if st := c.get(""); st != 200 {
 			t.Fatalf("before exp: %d", st)
 		}
+		e.waitArmed(t, 1)
 		e.clk.advance(30*time.Second + identity.DefaultClockSkew + time.Second)
 		resp, body := readH1(t, c, "")
 		if resp.StatusCode != 403 || body != `{"error":"identity_expired"}` || !resp.Close {
@@ -252,6 +253,12 @@ func TestIdentityRequireMode(t *testing.T) {
 	t.Run("ws_upgrade", func(t *testing.T) {
 		e, _ := newRequireEnv(t)
 		c := e.h1("Proxy-Authorization: " + basicAuth("tok-w-alice") + "\r\n")
+		// The session exists once the first request arrives (the protocol peek
+		// waits for it); a clock move before it is armed would cut it on arrival.
+		if st := c.get(""); st != 200 {
+			t.Fatalf("before exp: %d", st)
+		}
+		e.waitArmed(t, 1)
 		e.clk.advance(30*time.Second + identity.DefaultClockSkew + time.Second)
 		resp, body := readH1(t, c, "Connection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n")
 		if resp.StatusCode != 403 || body != `{"error":"identity_expired"}` {

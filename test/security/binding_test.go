@@ -156,7 +156,8 @@ func TestBinding(t *testing.T) {
 
 	// A terminated tunnel opened before the key was rotated out is no longer
 	// answered with a per-request 403: the post-apply re-check (W-P2-WBND-09)
-	// closes it as soon as the rotated bundle lands.
+	// closes it as soon as the rotated bundle lands, as one identity_required
+	// deny event and one invalid/cnf_mismatch verification.
 	t.Run("cnf_rotated_open_tunnel", func(t *testing.T) {
 		s, a, _ := bindingStack(t, StackOptions{})
 		s.PositiveControl(t, "worker", bindingWorkerControl(s))
@@ -165,15 +166,23 @@ func TestBinding(t *testing.T) {
 		if tun.Open.Status != http.StatusOK || tun.MustGet(t).Status != http.StatusOK {
 			t.Fatalf("the tunnel did not serve before the rotation: %d", tun.Open.Status)
 		}
-		hits := s.Upstream.Hits()
-		seq := s.BundleSeq(t, w)
-		s.RotateAgentKey(t, a, fakes.NewAgentKey(t, "agent-a-key-2"), "eng")
-		s.AwaitBundle(t, w, seq)
-		s.Eventually("the open tunnel to be closed by the post-apply re-check", tun.Closed)
-		if got := s.Upstream.Hits() - hits; got != 0 {
-			t.Errorf("%d upstream hits after the rotation, want 0", got)
-		}
-		s.AssertNoLeak(t, LeakCheck{AllowSwapUpTo: s.Upstream.Hits()})
+		Run(t, s, "worker", []Case{{
+			Name:   "a tunnel opened before the key was rotated out is closed by the bundle apply",
+			Path:   PathWorker,
+			Covers: []string{CoverIdentity("cnf_mismatch")},
+			Attack: func(t testing.TB, s *Stack) Observed {
+				seq := s.BundleSeq(t, w)
+				s.RotateAgentKey(t, a, fakes.NewAgentKey(t, "agent-a-key-2"), "eng")
+				s.AwaitBundle(t, w, seq)
+				s.Eventually("the open tunnel to be closed by the post-apply re-check", tun.Closed)
+				return Observed{}
+			},
+			WantClosed:       true,
+			WantResult:       "invalid",
+			WantReason:       "cnf_mismatch",
+			WantDeny:         "identity_required",
+			WantUpstreamHits: 0,
+		}})
 	})
 
 	// A raw tunnel (a worker with no CA) is opaque, so the worker binds it at

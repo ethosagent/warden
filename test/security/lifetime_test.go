@@ -253,12 +253,26 @@ func TestLifetime(t *testing.T) {
 		s := lifetimeStack(t)
 		holdTunnel(t, s, "agent-a", keyU1, keyT1)
 
-		cut := s.StartCut(t, s.Worker("agent-a"), func() { s.RotateTokenKey(t, true) })
+		w := s.Worker("agent-a")
+		watch := Case{Path: PathWorker, WantResult: "invalid", WantReason: "unknown_kid", WantDeny: "identity_required"}
+		before := s.snapshot(t, w, watch)
+		cut := s.StartCut(t, w, func() { s.RotateTokenKey(t, true) })
 		cut.Within(t, cutBound, "refuse the revoked key's token", func() bool {
 			return s.Do(t, s.Worker("agent-a"), Via(TransportConnect, scratchToken(s, keyU1))).Status == http.StatusProxyAuthRequired
 		})
 		Run(t, s, "worker", revokedKeyCases)
 		s.Eventually("the tunnel opened with the revoked key's token to be closed by the post-apply re-check", tunnelOf(s, keyT1).Closed)
+		// The close is one identity_required deny event, one counted block and one
+		// invalid/unknown_kid verification of its own (the refused probes above add
+		// theirs), and nothing reached the upstream.
+		after := s.snapshot(t, w, watch)
+		if after.denyCount <= before.denyCount || after.blocked <= before.blocked || after.identity <= before.identity {
+			t.Errorf("the tunnel's close left no identity_required event (%d -> %d), blocked count (%v -> %v) or unknown_kid verification (%v -> %v)",
+				before.denyCount, after.denyCount, before.blocked, after.blocked, before.identity, after.identity)
+		}
+		if after.hits != before.hits {
+			t.Errorf("%d upstream hits during the revocation, want 0", after.hits-before.hits)
+		}
 
 		// A token signed by the new key works. The mint guard holds minting back
 		// until the bundle that serves the new key is signed, which the clock

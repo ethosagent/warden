@@ -58,20 +58,26 @@ func (h *expiryHeap) Pop() any {
 	return s
 }
 
+// h2LateGrace bounds how long a session armed after exp (inside the skew window)
+// may outlive its GOAWAY or busy request: it is cut at exp+skew plus this.
+const h2LateGrace = 5 * time.Second
+
 // dueLocked is when the session's next expiry step runs. r.mu must be held.
 // late marks an h1/h2 session armed after exp but inside the verifier's skew (the
-// CONNECT verified, so it must be served): its steps move out by one skew rather
-// than cutting a connection the verifier just admitted.
+// CONNECT verified, so it must be served): its first step moves out to exp+skew
+// and its hard stop is that plus a short grace, not another skew.
 func (s *session) dueLocked() time.Time {
-	base := s.exp
+	base, hardAfter := s.exp, s.skew
 	if s.late {
-		base = base.Add(s.skew)
+		base, hardAfter = base.Add(s.skew), h2LateGrace
 	}
 	switch {
+	case s.hard:
+		return base.Add(hardAfter) // busy HTTP/1: forced close
 	case s.graceful != nil && !s.goaway:
 		return base // GOAWAY at exp
 	case s.graceful != nil:
-		return base.Add(s.skew) // h2 hard stop
+		return base.Add(hardAfter) // h2 hard stop
 	case s.interruptible:
 		return s.exp.Add(s.skew) // tunnel, WebSocket
 	default:
@@ -103,10 +109,11 @@ func (r *sessionRegistry) wakeLoop() {
 func (r *sessionRegistry) track(s *session, ci connIdentity, skew time.Duration, now time.Time) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if s.released || s.closing || s.heapIdx >= 0 {
+	if s.released || s.closing || s.heapIdx >= 0 || ci.Expiry.IsZero() {
 		return
 	}
 	s.exp, s.skew, s.tracked = ci.Expiry, skew, ci
+	s.armed.Store(true)
 	s.late = !now.Before(ci.Expiry) && (s.graceful != nil || !s.interruptible)
 	s.due = s.dueLocked()
 	heap.Push(&r.expiry, s)
@@ -130,13 +137,6 @@ func (s *session) setGraceful(f func()) {
 	s.reg.mu.Unlock()
 }
 
-// expiryReason says why a session was cut by the identity checks: the deny
-// reason of its event and a bounded detail (the verifier's reason).
-type expiryReason struct {
-	reason denyreason.Reason
-	detail string
-}
-
 // armExpiry registers a require-mode session for expiry: only a verified Warden
 // token with an exp, in require mode, is armed. enforce re-checks the binding
 // against the snapshot now and cuts the session when it already fails (a bundle
@@ -156,7 +156,7 @@ func (p *Proxy) armExpiry(s *session, ci connIdentity, enforce bool) (cut bool) 
 		return false
 	}
 	if br := p.rebind(h, idResult{claims: ci.Claims, status: identity.StatusValid}); br.status != identity.StatusValid {
-		p.cutSessions([]*session{s}, expiryReason{denyreason.IdentityRequired, string(br.reason)})
+		p.cutItems([]cutItem{{s: s, ci: connIdentity{Claims: ci.Claims, Status: br.status, Reason: br.reason}}}, true)
 		return true
 	}
 	return false
@@ -221,7 +221,7 @@ func (r *sessionRegistry) nextDue() (time.Time, bool) {
 	return r.expiry[0].due, true
 }
 
-// expireDue cuts every session whose due time has passed.
+// expireDue runs every expiry step whose due time has passed.
 func (p *Proxy) expireDue() {
 	now := p.validityClock()
 	var goaway []func()
@@ -230,29 +230,61 @@ func (p *Proxy) expireDue() {
 	r.mu.Lock()
 	for len(r.expiry) > 0 && !r.expiry[0].due.After(now) {
 		s := r.expiry[0]
-		if s.closing || s.released {
+		if s.released || (s.closing && !s.hard) {
 			heap.Pop(&r.expiry)
 			continue
 		}
-		if s.graceful != nil && !s.goaway {
+		switch {
+		case s.hard:
+			// A busy HTTP/1 request outlived exp by the skew (an SSE relay, a long
+			// download or upload): stop it now. The event was written at exp.
+			heap.Pop(&r.expiry)
+			if !s.closed {
+				s.closed = true
+				cut = append(cut, closedSession{ci: firstID(s), proto: s.proto, domain: s.domain, port: s.port,
+					closers: append([]io.Closer(nil), s.closers...), silent: true})
+			}
+		case s.graceful != nil && !s.goaway:
 			// GOAWAY first: the client finishes its in-flight streams and the
-			// connection ends when they do; the hard stop is exp+skew.
-			s.goaway = true
+			// connection ends when they do; the hard stop follows.
+			s.goaway, s.reported = true, true
 			s.due = s.dueLocked()
 			heap.Fix(&r.expiry, 0)
-			cut = append(cut, closedSession{ci: firstID(s), proto: s.proto, domain: s.domain, port: s.port})
+			cut = append(cut, closedSession{ci: firstID(s), proto: s.proto, domain: s.domain, port: s.port,
+				reason: denyreason.IdentityExpired})
 			goaway = append(goaway, s.graceful)
-			continue
-		}
-		heap.Pop(&r.expiry)
-		silent := s.goaway // the GOAWAY step already wrote the deny event
-		for _, cs := range r.markLocked(map[*session]struct{}{s: {}}, false, nil) {
-			cs.silent = silent
-			cut = append(cut, cs)
+		case s.graceful != nil:
+			heap.Pop(&r.expiry)
+			for _, cs := range r.markLocked(map[*session]struct{}{s: {}}, true, nil) {
+				cs.silent = true // the GOAWAY step already wrote the event
+				cut = append(cut, cs)
+			}
+		case !s.interruptible && s.busy:
+			// Mid-request: the request may finish, then the session ends
+			// (endRequest); a stream that outlives the skew is force-closed.
+			for _, cs := range r.markLocked(map[*session]struct{}{s: {}}, false, nil) {
+				cs.reason = denyreason.IdentityExpired
+				cut = append(cut, cs)
+			}
+			s.reported, s.hard = true, true
+			s.due = s.dueLocked()
+			heap.Fix(&r.expiry, 0)
+		default:
+			heap.Pop(&r.expiry)
+			for _, cs := range r.markLocked(map[*session]struct{}{s: {}}, false, nil) {
+				cs.reason = denyreason.IdentityExpired
+				cut = append(cut, cs)
+			}
+			s.reported = true
 		}
 	}
 	r.mu.Unlock()
-	p.finishIdentityCut(cut, expiryReason{denyreason.IdentityExpired, ""})
+	for i := range cut {
+		if cut[i].reason == denyreason.IdentityExpired {
+			cut[i].ci.Status, cut[i].ci.Reason = identity.StatusExpired, ""
+		}
+	}
+	p.finishIdentityCut(cut)
 	for _, f := range goaway {
 		f()
 	}
@@ -265,73 +297,126 @@ func firstID(s *session) connIdentity {
 	return s.tracked
 }
 
-// RecheckIdentitySessions re-runs the binding check of every armed require-mode
+// cutItem is one session an identity check found no longer valid, with the
+// identity (status and reason included) its deny event carries.
+type cutItem struct {
+	s  *session
+	ci connIdentity
+}
+
+// RecheckIdentitySessions re-runs the binding check of every require-mode
 // session against the snapshot current now and closes those that fail: the
 // signing key left the bundle's JWKS (unknown_kid), or the agent was disabled or
-// the key removed (agent_mismatch, key_revoked ...). Each cut writes one
-// identity_required deny event whose detail is the verifier reason. A worker
-// calls it after every applied bundle, right after CloseBlockedSessions. With
-// identity off or not in require mode it does nothing.
+// its key removed (agent_disabled, cnf_mismatch, ...). Each cut is one
+// identity_required deny event whose stored identity_status and identity_reason
+// are the failed check's, and it is counted as an identity verification. Open
+// sessions that were never armed (opened under attribute or challenge mode
+// before the agent moved to require) are swept too: one holding a Warden token
+// that still binds is armed now, one holding any other identity is cut, and an
+// interruptible one (tunnel, raw TLS, WebSocket, h2) with no identity is cut as
+// identity_required. A worker calls it after every applied bundle, right after
+// CloseBlockedSessions. With identity off or not in require mode it does
+// nothing.
 func (p *Proxy) RecheckIdentitySessions() {
 	h := p.identity()
 	if h == nil || h.mode != IdentityModeRequire {
 		return
 	}
 	r := p.sessions
-	r.mu.Lock()
-	type armed struct {
-		s  *session
-		ci connIdentity
+	type seen struct {
+		s             *session
+		ci            connIdentity
+		interruptible bool
 	}
-	list := make([]armed, 0, len(r.expiry))
-	for _, s := range r.expiry {
-		if !s.closing {
-			list = append(list, armed{s, s.tracked})
+	var armed, loose []seen
+	r.mu.Lock()
+	for s := range r.all {
+		if s.closing || s.released {
+			continue
 		}
+		if s.heapIdx >= 0 {
+			armed = append(armed, seen{s: s, ci: s.tracked})
+			continue
+		}
+		var ci connIdentity
+		for _, id := range s.ids {
+			if id.status() == identity.StatusValid {
+				ci = id
+				break
+			}
+		}
+		loose = append(loose, seen{s: s, ci: ci, interruptible: s.interruptible})
 	}
 	r.mu.Unlock()
-	byReason := make(map[identity.Reason][]*session)
-	for _, a := range list {
-		if br := p.rebind(h, idResult{claims: a.ci.Claims, status: identity.StatusValid}); br.status != identity.StatusValid {
-			byReason[br.reason] = append(byReason[br.reason], a.s)
+
+	var items []cutItem
+	now := p.validityClock()
+	check := func(a seen) (ok bool) {
+		br := p.rebind(h, idResult{claims: a.ci.Claims, status: identity.StatusValid})
+		if br.status == identity.StatusValid {
+			return true
+		}
+		items = append(items, cutItem{s: a.s, ci: connIdentity{Claims: a.ci.Claims, Status: br.status, Reason: br.reason}})
+		return false
+	}
+	for _, a := range armed {
+		check(a)
+	}
+	for _, a := range loose {
+		switch {
+		case a.ci.status() != identity.StatusValid:
+			if a.interruptible {
+				items = append(items, cutItem{s: a.s, ci: connIdentity{Status: identity.StatusNone}})
+			}
+		case check(a):
+			if a.ci.Claims.TokenType == identity.TokenWarden {
+				if a.ci.Expiry.IsZero() {
+					a.ci.Expiry = a.ci.Claims.Expiry
+				}
+				r.track(a.s, a.ci, h.skew, now)
+			}
 		}
 	}
-	for reason, ss := range byReason {
-		p.cutSessions(ss, expiryReason{denyreason.IdentityRequired, string(reason)})
-	}
+	p.cutItems(items, true)
 }
 
-// cutSessions closes the given sessions for the identity reason, once each.
-func (p *Proxy) cutSessions(ss []*session, why expiryReason) {
+// cutItems closes the sessions of items with an identity_required deny event
+// each (none for a session whose event was already written), and counts the
+// failed verification.
+func (p *Proxy) cutItems(items []cutItem, force bool) {
 	r := p.sessions
-	hit := make(map[*session]struct{}, len(ss))
-	for _, s := range ss {
-		hit[s] = struct{}{}
-	}
+	var cut []closedSession
 	r.mu.Lock()
-	for _, s := range ss {
-		r.untrackLocked(s)
+	for _, it := range items {
+		r.untrackLocked(it.s)
+		reported := it.s.reported
+		for _, cs := range r.markLocked(map[*session]struct{}{it.s: {}}, force, nil) {
+			cs.ci, cs.reason, cs.silent = it.ci, denyreason.IdentityRequired, reported
+			cs.detail = string(it.ci.Reason)
+			it.s.reported = true
+			cut = append(cut, cs)
+		}
 	}
-	cut := r.markLocked(hit, false, nil)
 	r.mu.Unlock()
-	p.finishIdentityCut(cut, why)
+	p.finishIdentityCut(cut)
 }
 
 // finishIdentityCut writes one deny event per cut session (counted through
-// RecordBlocked by the shared deny chokepoint), then runs the closers it may
-// run now, like finishBlockedCut.
-func (p *Proxy) finishIdentityCut(cut []closedSession, why expiryReason) {
+// RecordBlocked by the shared deny chokepoint) and records the identity result
+// it carries, then runs the closers it may run now, like finishBlockedCut.
+func (p *Proxy) finishIdentityCut(cut []closedSession) {
 	for _, cs := range cut {
 		if cs.silent {
 			continue
 		}
+		p.recordIdentity(cs.ci.status(), cs.ci.Reason, tokenTypeOf(cs.ci.Claims))
 		p.emitDenyEventDetail(cs.ci, analytics.Event{
 			Timestamp: time.Now(),
 			Domain:    cs.domain,
 			Port:      cs.port,
 			Protocol:  cs.proto,
-			Reason:    string(why.reason),
-		}, why.detail)
+			Reason:    string(cs.reason),
+		}, cs.detail)
 	}
 	for _, cs := range cut {
 		for _, c := range cs.closers {

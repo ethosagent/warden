@@ -536,14 +536,23 @@ list's session registry with the token's `exp` and `kid`, and closes it:
 | Raw tunnel, WebSocket | at `exp` plus `identity.clockSkewSeconds` |
 
 Each closure writes one deny event with reason `identity_expired` and counts
-`warden.blocked.total{reason="identity_expired"}`. The client's next CONNECT
-carries the newest token, so a forwarder that refreshes at rotation never sees
-the cut. After each applied bundle the worker also re-checks every registered
+`warden.blocked.total{reason="identity_expired"}` (the stored event carries
+`identity_status=expired`). A connection is cut at its own CONNECT token's `exp`;
+the client's reconnect then uses the newest token. A session that carries its
+Warden token only in `X-Warden-Identity` (a transparent leg) is armed from the
+first request that resolves to one. An HTTP/1 request still streaming at `exp`
+finishes within the skew and is then force-closed.
+
+After each applied bundle the worker also re-checks every armed
 session against the bundle now in force and closes those whose binding no longer
 holds: the signing key left the token JWKS (`unknown_kid`), the agent was
 disabled (`agent_disabled`) or its key removed (`cnf_mismatch`). That closure is
-one `identity_required` deny event whose decision-log `detail` is the reason.
-Attribute-mode and anonymous sessions are never registered, so they see no
+one `identity_required` deny event whose stored `identity_status` is `invalid`
+and `identity_reason` the check's reason, counted in
+`warden_identity_verify_total`. Sessions opened before the agent moved to
+`require` are swept at the next apply: one holding a Warden token that still
+binds is armed, any other open tunnel, WebSocket or h2 connection is closed.
+While an agent is in attribute mode nothing is armed, so those sessions see no
 change. No v1 header, claim or status changes; this section only adds to
 Contract v1.
 
