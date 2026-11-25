@@ -81,6 +81,16 @@ func (s *Stack) BlockUser(tb testing.TB, sub string) {
 	}
 }
 
+// BlockEmail adds email to the block list through POST
+// /dashboard/api/blocked-users (an entry by email only, no sub).
+func (s *Stack) BlockEmail(tb testing.TB, email string) {
+	tb.Helper()
+	r := s.AdminSession(tb).Do(tb, http.MethodPost, "/dashboard/api/blocked-users", map[string]any{"email": email, "reason": "security suite"})
+	if r.Status != http.StatusOK && r.Status != http.StatusCreated {
+		tb.Fatalf("security: POST blocked-users for an email = %d %s", r.Status, r.Body)
+	}
+}
+
 // RotateTokenKey runs POST /dashboard/api/keys/rotate for the token purpose.
 func (s *Stack) RotateTokenKey(tb testing.TB, emergency bool) {
 	tb.Helper()
